@@ -93,6 +93,22 @@ for (const file of required) {
   }
 }
 
+// Coordination files are shared through Git. Normalize line endings before
+// writing so Windows PowerShell does not turn every JSON/Markdown line into a
+// trailing-whitespace warning for other environments or future diffs.
+{
+  const coordinationSource = readFileSync("tools/ai-work-coordination.ps1", "utf8");
+  for (const contract of [
+    '$Content.Replace("`r`n", "`n").Replace("`r", "`n")',
+    "WriteAllText($Path, $normalizedContent"
+  ]) {
+    if (!coordinationSource.includes(contract)) {
+      console.error(`AI work coordination line-ending contract is missing: ${contract}`);
+      failed = true;
+    }
+  }
+}
+
 // Ameen Live must remain a browser-triggered, read-only inventory overlay.
 {
   const snapshotSource = readFileSync("src/business-snapshot.js", "utf8");
