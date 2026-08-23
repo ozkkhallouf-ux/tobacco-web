@@ -1,6 +1,6 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 const URL=Deno.env.get("SUPABASE_URL")??""; const KEY=Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")??"";
-const STAFF=["ozk.kh@outlook.com","khalelkhallouf1196@gmail.com"];
+const STAFF=["ozk.kh@outlook.com","khalelkhallouf1196@gmail.com","ozkkhalouf@gmail.com","ozkkhallouf@gmail.com"];
 const AGENTS=["ozkkhalouf@gmail.com"];
 const allowed=new Set(["health","stock","customers"]);
 function h(req:Request){const o=req.headers.get("origin")??"";const ok=["https://ozktobacco.com","https://www.ozktobacco.com"].includes(o)||o.startsWith("http://localhost");return {"Access-Control-Allow-Origin":ok?o:"https://ozktobacco.com","Access-Control-Allow-Headers":"authorization, apikey, content-type, x-client-info","Access-Control-Allow-Methods":"POST, OPTIONS","Content-Type":"application/json","Vary":"Origin"};}
