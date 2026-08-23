@@ -2,6 +2,13 @@
 
 يقرأه Claude وCodex قبل كل مهمة. أحدث سجل يكون في الأعلى. لا تحذف السجلات السابقة.
 
+## 2026-08-23 - Codex - Smart inventory counting with owner dashboard and counter isolation
+
+- Status: completed
+- Branch: task branch pending for: Smart inventory counting with owner dashboard and counter isolation
+- Files: src/app.js, src/styles.css, src/supabase-client.js, src/config.js, src/inventory-recon-calc.js, src/smart-inventory.js, scripts/check.mjs, index.html, public/service-worker.js, supabase/smart-inventory.sql, docs/ai/topics/inventory.md
+- Result: Implemented and pushed branch codex/smart-inventory-counting at cc5f01b. Checks and mobile counter isolation passed. No merge, deployment, Supabase apply, Ameen write, or scheduler change.
+- Handoff UTC: 2026-08-23T05:21:37Z
 ## 2026-08-23 - Codex - منع أخطاء تنسيق ملفات تنسيق عمل OZK
 
 - Status: completed
