@@ -1,6 +1,6 @@
 # Repository Instructions
 
-اقرأ أيضاً `AI_WORK_SYNC.md` قبل أي عمل؛ فهو مرجع التنسيق المشترك بين Codex وClaude.
+اقرأ أيضاً `AI_WORK_SYNC.md` و`docs/ai/README.md` قبل أي عمل؛ فهما مرجع التنسيق وخريطة المعرفة المشتركة بين Codex وClaude. بعد تحديد نطاق المهمة، اقرأ تقرير الموضوع المناسب تحت `docs/ai/topics/` قبل تعديل أي ملف.
 
 هذه التعليمات مخصصة لمنصة الويب وتقارير TOBACCO/Al-Ameen.
 

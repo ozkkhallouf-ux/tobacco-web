@@ -27,6 +27,19 @@ const required = [
   "AI_WORK_SYNC.md",
   "AI_HANDOFF.md",
   "AI_ACTIVE_TASK.json",
+  "docs/ai/README.md",
+  "docs/ai/project-map.md",
+  "docs/ai/impact-map.md",
+  "docs/ai/task-contract.md",
+  "docs/ai/topics/README.md",
+  "docs/ai/topics/sales.md",
+  "docs/ai/topics/price-bulletins.md",
+  "docs/ai/topics/inventory.md",
+  "docs/ai/topics/customer-balances.md",
+  "docs/ai/topics/purchases-suppliers.md",
+  "docs/ai/topics/ameen-sync.md",
+  "docs/ai/topics/printing.md",
+  "docs/ai/topics/notifications-deployment.md",
   "supabase/functions/financial-assistant/index.ts",
   "supabase/ameen-account-balance-reports.sql",
   "tools/push-ameen-account-balances.ps1",
@@ -39,6 +52,44 @@ for (const file of required) {
   if (!existsSync(file)) {
     console.error(`Missing: ${file}`);
     failed = true;
+  }
+}
+
+// The project knowledge index is a maintained contract, not optional prose.
+// Keeping it in the main check prevents future sessions from silently losing
+// the topic map or bypassing it when repository instructions are edited.
+{
+  const agents = readFileSync("AGENTS.md", "utf8");
+  const workSync = readFileSync("AI_WORK_SYNC.md", "utf8");
+  const knowledgeIndex = readFileSync("docs/ai/README.md", "utf8");
+  const topicIndex = readFileSync("docs/ai/topics/README.md", "utf8");
+  const topicFiles = [
+    "sales.md",
+    "price-bulletins.md",
+    "inventory.md",
+    "customer-balances.md",
+    "purchases-suppliers.md",
+    "ameen-sync.md",
+    "printing.md",
+    "notifications-deployment.md"
+  ];
+
+  if (!agents.includes("docs/ai/README.md") || !workSync.includes("docs/ai/README.md")) {
+    console.error("Repository instructions must require the shared project knowledge index.");
+    failed = true;
+  }
+  for (const file of topicFiles) {
+    if (!knowledgeIndex.includes(`topics/${file}`) || !topicIndex.includes(file)) {
+      console.error(`Project knowledge indexes are missing topic: ${file}`);
+      failed = true;
+    }
+    const source = readFileSync(`docs/ai/topics/${file}`, "utf8");
+    for (const heading of ["## الحالة الحالية", "## المصدر الموثوق", "## نطاق الملفات", "## قيود ثابتة", "## فحوص إلزامية", "## الخطوة التالية"]) {
+      if (!source.includes(heading)) {
+        console.error(`Topic report ${file} is missing required section: ${heading}`);
+        failed = true;
+      }
+    }
   }
 }
 
