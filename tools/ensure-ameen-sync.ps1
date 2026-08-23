@@ -7,7 +7,8 @@
 # تشغّله مهمة «TOBACCO Sync Watchdog» كل 5 دقائق (سجّلها عبر register-ameen-sync-watchdog.ps1).
 param(
   [string]$SqlHost = "OZK-TOBACCO",
-  [int]$SqlPort = 1433
+  [int]$SqlPort = 1433,
+  [string]$MainComputerName = "OZK-TOBACCO"
 )
 
 $ErrorActionPreference = "Continue"
@@ -28,7 +29,6 @@ $criticalTasks = @(
   @{ Name = "TOBACCO Ameen Sync";              MaxAgeMinutes = 10 },
   @{ Name = "TOBACCO Invoice Series Push";     MaxAgeMinutes = 20 },
   @{ Name = "TOBACCO Approved Prices Pull";    MaxAgeMinutes = 20 },
-  @{ Name = "TOBACCO Customer Invoices Push";  MaxAgeMinutes = 20 },
   @{ Name = "TOBACCO Customer Movements Push"; MaxAgeMinutes = 20 }
 )
 
@@ -69,7 +69,17 @@ if (-not $sqlReachable) {
 # ---------- 2) مهام المزامنة ----------
 $restarted = New-Object System.Collections.Generic.List[hashtable]
 
-foreach ($entry in $criticalTasks) {
+$isMainComputer = [string]::Equals(
+  [string]$env:COMPUTERNAME,
+  [string]$MainComputerName,
+  [StringComparison]::OrdinalIgnoreCase
+)
+
+if (-not $isMainComputer) {
+  Write-Log "INFO: secondary computer $($env:COMPUTERNAME) — remote SQL reachability only; local scheduled tasks belong to $MainComputerName and are not inspected here"
+}
+
+foreach ($entry in $(if ($isMainComputer) { $criticalTasks } else { @() })) {
   $name = $entry.Name
   $info = Get-ScheduledTaskInfo -TaskName $name -ErrorAction SilentlyContinue
   if (-not $info) {

@@ -590,6 +590,16 @@ function Sync-Once {
     Write-AgentLog ("Daily profit sync failed: {0}" -f $_.Exception.Message)
   }
 
+  # Customer invoice details are owned by this same permanent main-computer
+  # agent. The helper rate-limits successful uploads to once per hour, so the
+  # disabled legacy standalone task is no longer a health dependency.
+  try {
+    & "$PSScriptRoot\push-customer-invoices.ps1" -MinimumIntervalMinutes 60
+    if ($LASTEXITCODE -ne 0) { Write-AgentLog "Customer invoice sync returned a failure code." }
+  } catch {
+    Write-AgentLog ("Customer invoice sync failed: {0}" -f $_.Exception.Message)
+  }
+
   # Keep the Telegram daily-payment and cashbox snapshot fresh. The helper is
   # read-only on Al-Ameen and rate-limits its Supabase uploads to one per five
   # minutes, even though this main agent normally runs every minute.

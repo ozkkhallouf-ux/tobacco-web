@@ -18,6 +18,7 @@
 param(
     [int]$PeriodDays = 60,
     [int]$MaxInvoicesPerCustomer = 200,
+    [int]$MinimumIntervalMinutes = 60,
     [switch]$Discover,
     [string]$EnvFile = "$PSScriptRoot\.env",
     [string]$LogFile = "$PSScriptRoot\logs\customer-invoices-push.log"
@@ -44,6 +45,19 @@ function Write-Log($msg) {
     $dir = Split-Path $LogFile -Parent
     if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
     Add-Content -LiteralPath $LogFile -Value $line -Encoding UTF8
+}
+
+$stateFile = Join-Path $PSScriptRoot "logs\customer-invoices-last-success.txt"
+if (-not $Discover -and $MinimumIntervalMinutes -gt 0 -and (Test-Path -LiteralPath $stateFile)) {
+    $lastSuccess = [datetime]::MinValue
+    $stateText = (Get-Content -Raw -LiteralPath $stateFile -ErrorAction SilentlyContinue).Trim()
+    if ([datetime]::TryParse($stateText, [ref]$lastSuccess)) {
+        $ageMinutes = ((Get-Date).ToUniversalTime() - $lastSuccess.ToUniversalTime()).TotalMinutes
+        if ($ageMinutes -ge 0 -and $ageMinutes -lt $MinimumIntervalMinutes) {
+            Write-Log ("تخطي: آخر رفع ناجح منذ {0:N1} دقيقة؛ الموعد التالي بعد {1} دقيقة." -f $ageMinutes, $MinimumIntervalMinutes)
+            exit 0
+        }
+    }
 }
 
 $connStr = Get-Setting "AMEEN_SQL_WRITE_CONNECTION_STRING"
@@ -262,6 +276,9 @@ ORDER BY u.Date DESC, u.GUID
         -Headers $authHeaders -ContentType "application/json; charset=utf-8" `
         -Body ([System.Text.Encoding]::UTF8.GetBytes($json)) | Out-Null
 
+    $stateDirectory = Split-Path -Parent $stateFile
+    if (-not (Test-Path -LiteralPath $stateDirectory)) { New-Item -ItemType Directory -Force -Path $stateDirectory | Out-Null }
+    Set-Content -LiteralPath $stateFile -Value ((Get-Date).ToUniversalTime().ToString("o")) -Encoding ASCII
     Write-Log "تم رفع تقرير الفواتير بنجاح ✓"
 
     # --- حذف التقارير القديمة (أقدم من يومين) ---
