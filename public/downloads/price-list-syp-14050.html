@@ -140,8 +140,8 @@
 
       <div class="price-list-document-tools no-print">
         <button type="button" onclick="window.print()">طباعة مباشرة</button>
-        <a data-pdf-open href="price-list-syp-14050.pdf?v=4995e628468b">فتح PDF</a>
-        <a data-pdf-download href="price-list-syp-14050.pdf?v=4995e628468b" download>تنزيل PDF</a>
+        <a data-pdf-open href="price-list-syp-14050.pdf?v=39ae46e9c0ab">فتح PDF</a>
+        <a data-pdf-download href="price-list-syp-14050.pdf?v=39ae46e9c0ab" download>تنزيل PDF</a>
         <button class="theme-switch" type="button" onclick="toggleTheme()">فاتح / داكن</button>
       </div>
         <header class="price-list-header">
@@ -171,17 +171,17 @@
           <tr class="odd">
             <td class="name">ماستر سليم أزرق</td>
             <td class="unit">كروز</td>
-            <td class="price">75,980 ل.س</td>
+            <td class="price">75,194 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">ماستر سليم فضي</td>
             <td class="unit">كروز</td>
-            <td class="price">75,980 ل.س</td>
+            <td class="price">75,194 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">ماستر طويل ورق</td>
             <td class="unit">كروز</td>
-            <td class="price">94,320 ل.س</td>
+            <td class="price">93,010 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">ماستر قصير أزرق</td>
@@ -191,12 +191,12 @@
           <tr class="odd">
             <td class="name">ماستر قصير فضي</td>
             <td class="unit">كروز</td>
-            <td class="price">86,460 ل.س</td>
+            <td class="price">85,936 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">ماستر كوين أبيض</td>
             <td class="unit">كروز</td>
-            <td class="price">103,490 ل.س</td>
+            <td class="price">100,870 ل.س</td>
           </tr>
         </tbody></table>
       </div>
@@ -204,16 +204,26 @@
       <div class="price-list-group">
         <div class="price-list-group-header">
           <span>كابتن بلاك</span>
-          <span class="price-list-group-count">4</span>
+          <span class="price-list-group-count">6</span>
         </div>
         <table><tbody>
           <tr class="odd">
+            <td class="name">كابتن بلاك سليم ازرق سكاي</td>
+            <td class="unit">كروز</td>
+            <td class="price">62,094 ل.س</td>
+          </tr>
+          <tr class="even">
             <td class="name">كابتن بلاك سيلفر</td>
             <td class="unit">كروز</td>
             <td class="price">61,570 ل.س</td>
           </tr>
-          <tr class="even">
+          <tr class="odd">
             <td class="name">كابتن بلاك كور ازرق جديد</td>
+            <td class="unit">كروز</td>
+            <td class="price">82,792 ل.س</td>
+          </tr>
+          <tr class="even">
+            <td class="name">كابتن بلاك كور اسود جديد</td>
             <td class="unit">كروز</td>
             <td class="price">82,792 ل.س</td>
           </tr>
@@ -621,18 +631,18 @@
       <div class="price-list-group">
         <div class="price-list-group-header">
           <span>غلواز</span>
-          <span class="price-list-group-count">4</span>
+          <span class="price-list-group-count">5</span>
         </div>
         <table><tbody>
           <tr class="odd">
             <td class="name">غلواز قصير أحمر</td>
             <td class="unit">كروز</td>
-            <td class="price">106,110 ل.س</td>
+            <td class="price">105,586 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">غلواز قصير أصفر</td>
             <td class="unit">كروز</td>
-            <td class="price">106,110 ل.س</td>
+            <td class="price">105,586 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">غلواز كوين أحمر</td>
@@ -640,6 +650,11 @@
             <td class="price">106,110 ل.س</td>
           </tr>
           <tr class="even">
+            <td class="name">غلواز كوين أصفر</td>
+            <td class="unit">كروز</td>
+            <td class="price">106,110 ل.س</td>
+          </tr>
+          <tr class="odd">
             <td class="name">غلواز كوين اصفر اس سبعة.</td>
             <td class="unit">كروز</td>
             <td class="price">100,870 ل.س</td>
@@ -815,10 +830,15 @@
       <div class="price-list-group">
         <div class="price-list-group-header">
           <span>ولسون</span>
-          <span class="price-list-group-count">1</span>
+          <span class="price-list-group-count">2</span>
         </div>
         <table><tbody>
           <tr class="odd">
+            <td class="name">ولسون طويل أحمر</td>
+            <td class="unit">كروز</td>
+            <td class="price">64,190 ل.س</td>
+          </tr>
+          <tr class="even">
             <td class="name">ولسون طويل فضي</td>
             <td class="unit">كروز</td>
             <td class="price">64,190 ل.س</td>
@@ -1327,7 +1347,7 @@
   sheet.dataset.theme = savedTheme || 'dark';
   document.body.dataset.theme = sheet.dataset.theme;
   function selectedPdfFile() {
-    return sheet.dataset.theme === 'light' ? 'price-list-syp-14050-light.pdf?v=4995e628468b' : 'price-list-syp-14050.pdf?v=4995e628468b';
+    return sheet.dataset.theme === 'light' ? 'price-list-syp-14050-light.pdf?v=39ae46e9c0ab' : 'price-list-syp-14050.pdf?v=39ae46e9c0ab';
   }
   function syncPdfLinks() {
     const selected = selectedPdfFile();
