@@ -43,6 +43,9 @@ assert(!/localStorage\.setItem\([^\n]*(password|pin)/i.test(moduleSource + clien
 assert(edge.includes("Never return the synthetic Auth email") && !/return reply\([^\n]*authEmail/.test(edge), "Edge Function must not return internal Auth email.");
 assert(edge.includes("smart_inventory_auth_preflight") && edge.includes("smart_inventory_auth_record"), "Login rate limiting contract missing.");
 assert(edge.includes("smart_inventory_revoke_user_sessions"), "Reset/disable must revoke existing sessions.");
+assert(edge.includes("password.length >= 8") && !edge.includes("password.length >= 10"), "Inventory counter passwords must accept the approved 8-character minimum.");
+assert(edge.includes("liveError || live !== true"), "Owner operations must fail closed when live-session verification errors.");
+assert(app.includes('data-form="inventory-counter-login"') && app.includes('minlength="8" maxlength="128"'), "Counter login must accept the approved 8-character password.");
 assert(html.includes("src/smart-inventory.js?v=tobacco-165"), "Published smart inventory module/version missing.");
 assert(worker.includes('CACHE_NAME = "web-platform-tobacco-v564"') && worker.includes('"src/smart-inventory.js"'), "Service worker cache must include the smart inventory module and a new cache name.");
 

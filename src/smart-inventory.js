@@ -199,7 +199,7 @@
 
   function ownerAccounts() {
     return `<section class="panel wide"><div class="panel-title-row"><div><h2>حسابات موظفي الجرد</h2><p class="muted">المالك فقط ينشئ الحساب. لا بريد حقيقي ولا Google ولا OTP.</p></div></div>
-      <form class="smart-account-form" data-smart-account-create><label>اسم الموظف<input name="displayName" required maxlength="80"></label><label>اسم المستخدم<input name="username" required maxlength="48" autocomplete="off"></label><label>كلمة المرور<input name="password" type="password" minlength="10" maxlength="128" autocomplete="new-password" required></label><button class="button primary" ${state.accountBusy ? "disabled" : ""}>إنشاء حساب</button></form>
+      <form class="smart-account-form" data-smart-account-create><label>اسم الموظف<input name="displayName" required maxlength="80"></label><label>اسم المستخدم<input name="username" required maxlength="48" autocomplete="off"></label><label>كلمة المرور<input name="password" type="password" minlength="8" maxlength="128" autocomplete="new-password" required></label><button class="button primary" ${state.accountBusy ? "disabled" : ""}>إنشاء حساب</button></form>
       <div class="smart-account-list">${state.accounts.map((account) => `<article><div><strong>${esc(account.display_name)}</strong><small>@${esc(account.username_display)} · ${account.enabled ? "فعال" : "معطل"}${account.locked_until ? ` · مقفل حتى ${esc(fmtDate(account.locked_until))}` : ""}</small></div><div class="button-row"><button class="button secondary compact-button" data-smart-account-reset="${esc(account.user_id)}">تغيير كلمة المرور</button><button class="button ${account.enabled ? "warning" : "success"} compact-button" data-smart-account-toggle="${esc(account.user_id)}" data-enabled="${account.enabled}">${account.enabled ? "تعطيل" : "تفعيل"}</button></div></article>`).join("") || '<p class="muted">لا توجد حسابات جرد بعد.</p>'}</div></section>`;
   }
 
@@ -346,7 +346,7 @@
       catch (error) { callbacks.notice("error", error.message); } finally { state.accountBusy = false; callbacks.render(); }
     });
     root.querySelectorAll("[data-smart-account-reset]").forEach((button) => button.addEventListener("click", async () => {
-      const password = prompt("كلمة المرور الجديدة (10 أحرف على الأقل):"); if (!password) return;
+      const password = prompt("كلمة المرور الجديدة (8 أحرف على الأقل):"); if (!password) return;
       try { await store.updateInventoryCounterAccount("reset_password", { userId: button.dataset.smartAccountReset, password, reason: "إعادة تعيين بواسطة المالك" }); callbacks.notice("success", "تغيرت كلمة المرور وأُلغيت الجلسات القديمة."); } catch (error) { callbacks.notice("error", error.message); }
     }));
     root.querySelectorAll("[data-smart-account-toggle]").forEach((button) => button.addEventListener("click", async () => {

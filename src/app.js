@@ -3385,7 +3385,7 @@ function login() {
       ${live ? `<form class="form-card smart-login-card" data-form="inventory-counter-login">
         <h3>دخول موظف الجرد</h3>
         <label>اسم المستخدم<input name="username" autocomplete="username" maxlength="48" required></label>
-        <label>كلمة المرور<input name="password" type="password" autocomplete="current-password" minlength="10" maxlength="128" required></label>
+        <label>كلمة المرور<input name="password" type="password" autocomplete="current-password" minlength="8" maxlength="128" required></label>
         <button class="button primary" type="submit">دخول إلى الجرد فقط</button>
         <p class="muted">لا تحتاج Gmail أو بريداً شخصياً. الحساب ينشئه المالك.</p>
       </form><div class="smart-login-divider"><span>دخول الإدارة</span></div>` : ""}

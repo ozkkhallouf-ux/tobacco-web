@@ -34,7 +34,7 @@ function normalizeUsername(value: unknown) {
 
 function validPassword(value: unknown) {
   const password = String(value || "");
-  return password.length >= 10 && password.length <= 128;
+  return password.length >= 8 && password.length <= 128;
 }
 
 async function sha256(value: string) {
@@ -65,8 +65,8 @@ async function requireOwner(req: Request) {
   const claims = JSON.parse(atob(encoded.padEnd(Math.ceil(encoded.length / 4) * 4, "=")));
   const sessionId = String(claims.session_id || "");
   if (!sessionId) return null;
-  const { data: live } = await admin.rpc("smart_inventory_has_session_for_service", { p_session_id: sessionId, p_user_id: data.user.id });
-  if (live === false) return null;
+  const { data: live, error: liveError } = await admin.rpc("smart_inventory_has_session_for_service", { p_session_id: sessionId, p_user_id: data.user.id });
+  if (liveError || live !== true) return null;
   return data.user;
 }
 
