@@ -3,7 +3,7 @@
     "status":  "active",
     "owner":  "Codex",
     "task":  "إصلاح صلاحيات Ameen Live للمالك والتحقق الحي",
-    "branch":  "task branch pending for: إصلاح صلاحيات Ameen Live للمالك والتحقق الحي",
+    "branch":  "codex/ameen-live-owner-authorization",
     "files":  [
                   "supabase/functions/ameen-read-broker/index.ts",
                   "scripts/check-ameen-read-gateway.mjs",
