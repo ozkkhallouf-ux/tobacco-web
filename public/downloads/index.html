@@ -1,8 +1,10 @@
 <!DOCTYPE html>
-<html dir="rtl" lang="ar">
+<html dir="rtl" lang="ar" translate="no">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="google" content="notranslate">
+<meta http-equiv="Content-Language" content="ar">
 <title>نشرات الأسعار — OZK TOBACCO</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Almarai:wght@400;700;800&display=swap');
@@ -11,7 +13,7 @@
          min-height:100vh; display:flex; flex-direction:column; align-items:center; padding:40px 20px; }
   .logo-img { height:80px; margin-bottom:6px; }
   .sub  { color:#a08850; font-size:.88rem; margin-bottom:2px; font-weight:600; }
-  .date { color:#6b5535; font-size:.78rem; margin-bottom:44px; direction:ltr; }
+  .date { color:#6b5535; display:flex; direction:ltr; justify-content:center; gap:4px; font-size:.78rem; margin-bottom:44px; unicode-bidi:isolate; }
   h1 { font-size:1.2rem; color:#d7a83f; margin-bottom:24px; font-weight:700; }
   .cards { display:flex; gap:20px; flex-wrap:wrap; justify-content:center; max-width:640px; }
   .card { background:#1a1208; border:1px solid #3a2810; border-radius:12px;
@@ -31,7 +33,7 @@
 <body>
 <img src="../icons/ozk-logo.png" alt="OZK TOBACCO" class="logo-img">
 <div class="sub">نشرات الأسعار الرسمية</div>
-<div class="date">23 August 2026</div>
+<div class="date" dir="ltr"><span>23</span><span dir="rtl">آب</span><span>2026</span></div>
 <h1>اختر نشرة الأسعار</h1>
 <div class="cards">
   <a class="card" href="price-list-wazari-syp-14050.html" target="_blank">

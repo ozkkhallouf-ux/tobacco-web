@@ -2466,7 +2466,7 @@ function customerPricePdfMarkup(items, latest, useSyria = false, theme = state.b
   return template.render({
     groups: templateGroups,
     logoSrc: `${window.location.origin}/public/icons/ozk-logo.png`,
-    issueDate: new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "long", year: "numeric" }),
+    issueDate: template.formatArabicIssueDate(new Date()),
     badgeClass: useSyria ? "badge-syp" : "badge-usd",
     badgeLabelHtml: useSyria
       ? `${syriaFlag} ليرة — مفرق — صرف ${formatBulletinEnglishInteger(state.syriaExchangeRate)}`

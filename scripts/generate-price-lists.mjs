@@ -35,7 +35,11 @@ function formatBulletinEnglishInteger(value) {
 
 // ── تاريخ ─────────────────────────────────────────────────────────────────────
 const today     = new Date();
-const issueDate = today.toLocaleDateString("en-GB", { day:"2-digit", month:"long", year:"numeric" });
+const issueDate = globalThis.OZKPriceListTemplate.formatArabicIssueDate(today);
+const issueDateParts = issueDate.match(/^(\d{1,2})\s+(.+?)\s+(\d{4})$/);
+const issueDateMarkup = issueDateParts
+  ? `<span>${issueDateParts[1]}</span><span dir="rtl">${issueDateParts[2]}</span><span>${issueDateParts[3]}</span>`
+  : issueDate;
 const isoDate   = today.toISOString().slice(0, 10);
 
 // ── بيانات ────────────────────────────────────────────────────────────────────
@@ -616,11 +620,13 @@ const buildHtml = ({ pageItems, titleSuffix, badgeClass, badgeLabel, unitLabel, 
     theme: "dark"
   });
   return `<!DOCTYPE html>
-<html dir="rtl" lang="ar">
+<html dir="rtl" lang="ar" translate="no">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>نشرة الأسعار ${titleSuffix} — ${isoDate}</title>
+<meta name="google" content="notranslate">
+<meta http-equiv="Content-Language" content="ar">
+<title>نشرة الأسعار ${titleSuffix} — ${issueDate}</title>
 <style>html,body{margin:0;background:#0c0a07}body[data-theme="light"]{background:#fffdf8}</style>
 </head>
 <body>
@@ -720,10 +726,12 @@ console.log(`✓ price-list-wazari-syp-${SYP_FILE_TAG}.html — صرف ${SYP_RAT
 
 // ── index ─────────────────────────────────────────────────────────────────────
 const indexHtml = `<!DOCTYPE html>
-<html dir="rtl" lang="ar">
+<html dir="rtl" lang="ar" translate="no">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="google" content="notranslate">
+<meta http-equiv="Content-Language" content="ar">
 <title>نشرات الأسعار — OZK TOBACCO</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Almarai:wght@400;700;800&display=swap');
@@ -732,7 +740,7 @@ const indexHtml = `<!DOCTYPE html>
          min-height:100vh; display:flex; flex-direction:column; align-items:center; padding:40px 20px; }
   .logo-img { height:80px; margin-bottom:6px; }
   .sub  { color:#a08850; font-size:.88rem; margin-bottom:2px; font-weight:600; }
-  .date { color:#6b5535; font-size:.78rem; margin-bottom:44px; direction:ltr; }
+  .date { color:#6b5535; display:flex; direction:ltr; justify-content:center; gap:4px; font-size:.78rem; margin-bottom:44px; unicode-bidi:isolate; }
   h1 { font-size:1.2rem; color:#d7a83f; margin-bottom:24px; font-weight:700; }
   .cards { display:flex; gap:20px; flex-wrap:wrap; justify-content:center; max-width:640px; }
   .card { background:#1a1208; border:1px solid #3a2810; border-radius:12px;
@@ -752,7 +760,7 @@ const indexHtml = `<!DOCTYPE html>
 <body>
 <img src="../icons/ozk-logo.png" alt="OZK TOBACCO" class="logo-img">
 <div class="sub">نشرات الأسعار الرسمية</div>
-<div class="date">${issueDate}</div>
+<div class="date" dir="ltr">${issueDateMarkup}</div>
 <h1>اختر نشرة الأسعار</h1>
 <div class="cards">
   <a class="card" href="price-list-wazari-syp-${SYP_FILE_TAG}.html" target="_blank">

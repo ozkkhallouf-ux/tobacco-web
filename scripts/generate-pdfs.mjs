@@ -61,7 +61,8 @@ for (const { html, label } of files) {
 }
 
 console.log("جارٍ تشغيل المتصفح...");
-const browser = await chromium.launch();
+const localChromiumPath = String(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || "").trim();
+const browser = await chromium.launch(localChromiumPath ? { executablePath: localChromiumPath } : undefined);
 const page = await browser.newPage();
 
 const applyPdfTheme = async (selectedTheme) => {
