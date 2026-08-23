@@ -7,6 +7,7 @@ const required = [
   "src/price-list-template.js",
   "src/config.js",
   "src/supabase-client.js",
+  "src/smart-inventory.js",
   "src/number-normalizer.js",
   "src/styles.css",
   "public/manifest.webmanifest",
@@ -41,6 +42,10 @@ const required = [
   "docs/ai/topics/printing.md",
   "docs/ai/topics/notifications-deployment.md",
   "supabase/functions/financial-assistant/index.ts",
+  "supabase/functions/inventory-auth/index.ts",
+  "supabase/smart-inventory.sql",
+  "supabase/tests/smart-inventory-security.sql",
+  "scripts/check-smart-inventory.mjs",
   "supabase/ameen-account-balance-reports.sql",
   "tools/push-ameen-account-balances.ps1",
   "tools/register-account-balances-task.ps1"
