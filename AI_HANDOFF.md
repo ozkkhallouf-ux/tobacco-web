@@ -2,6 +2,13 @@
 
 يقرأه Claude وCodex قبل كل مهمة. أحدث سجل يكون في الأعلى. لا تحذف السجلات السابقة.
 
+## 2026-08-23 - Codex - إصلاح انعكاس النص العربي في PDF النشرة المصدرة من الموقع
+
+- Status: completed
+- Branch: codex/fix-bulletin-arabic-pdf-final
+- Files: src/app.js, src/price-list-template.js, scripts/check.mjs, scripts/check-smart-inventory.mjs, index.html, public/service-worker.js, docs/ai/topics/price-bulletins.md
+- Result: Merged PRs #103, #104 and #106. Live tobacco-168 and cache v570 verified. All 12 live PDF pages passed visual RTL, badge, light/dark and English-number checks.
+- Handoff UTC: 2026-08-23T10:52:38Z
 ## 2026-08-23 - Codex - دمج ونشر الجرد الذكي والتحقق الحي
 
 - Status: completed

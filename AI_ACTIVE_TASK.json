@@ -1,20 +1,12 @@
 {
-    "schemaVersion":  1,
-    "status":  "active",
-    "owner":  "Codex",
-    "task":  "إصلاح انعكاس النص العربي في PDF النشرة المصدرة من الموقع",
-    "branch":  "codex/fix-bulletin-arabic-pdf-final",
-    "files":  [
-                  "src/app.js",
-                  "src/price-list-template.js",
-                  "scripts/check.mjs",
-                  "scripts/check-smart-inventory.mjs",
-                  "index.html",
-                  "public/service-worker.js",
-                  "docs/ai/topics/price-bulletins.md"
-              ],
-    "startedAt":  "2026-08-23T09:43:05Z",
-    "updatedAt":  "2026-08-23T10:38:00Z",
-    "pr":  "#105 superseded after automatic main update; final PR pending",
-    "note":  "Arabic RTL fix is live. Final visually tested correction keeps the rate badge on one line with RTL-safe inner spacing; do not edit the reserved files."
+  "schemaVersion": 1,
+  "status": "idle",
+  "owner": null,
+  "task": null,
+  "branch": null,
+  "files": [],
+  "startedAt": null,
+  "updatedAt": "2026-08-23T10:52:38Z",
+  "pr": "#106",
+  "note": "No active task. Read AI_HANDOFF.md before starting work."
 }
