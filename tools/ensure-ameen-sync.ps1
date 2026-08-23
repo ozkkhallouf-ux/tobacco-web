@@ -156,7 +156,50 @@ if ($restarted.Count -gt 0) {
   }
 }
 
-# ---------- 3) التنبيه ----------
+# ---------- 3) كل مهام المشروع المسجّلة ----------
+# نراقب تلقائياً أي مهمة TOBACCO موجودة على الجهاز الرئيسي حتى لا تحتاج
+# إضافة اسمها يدوياً عند توسع المشروع. المهمة القديمة لفواتير الزبائن
+# متقاعدة عمداً لأن رفعها أصبح جزءاً من TOBACCO Ameen Sync.
+if ($isMainComputer) {
+  $retiredTasks = @("TOBACCO Customer Invoices Push")
+  $criticalNames = @($criticalTasks | ForEach-Object { [string]$_.Name })
+
+  $projectTasks = @(Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object {
+    $_.TaskName -like "TOBACCO *" -and
+    $_.TaskName -notin $retiredTasks -and
+    $_.TaskName -ne "TOBACCO Sync Watchdog"
+  })
+
+  foreach ($task in $projectTasks) {
+    $name = [string]$task.TaskName
+    if ($name -in $criticalNames) { continue }
+
+    if ([string]$task.State -eq "Disabled") {
+      $problems.Add("«$name» معطّلة في Windows Task Scheduler")
+      Write-Log "FAIL: discovered project task disabled — $name"
+      continue
+    }
+
+    $info = Get-ScheduledTaskInfo -TaskName $name -ErrorAction SilentlyContinue
+    if (-not $info) {
+      $problems.Add("«$name» مسجّلة لكن تعذّرت قراءة حالتها")
+      Write-Log "FAIL: discovered project task unreadable — $name"
+      continue
+    }
+
+    if ($info.LastTaskResult -ne $RESULT_SUCCESS -and
+        $info.LastTaskResult -ne $RESULT_RUNNING -and
+        $info.LastTaskResult -ne $RESULT_NEVER_RAN) {
+      $code = "0x{0:X8}" -f $info.LastTaskResult
+      $age = Get-TaskRunAge $info
+      $since = if ($null -eq $age) { "وقت غير معروف" } else { "منذ $age دقيقة" }
+      $problems.Add("«$name» فشلت — آخر نتيجة $code، آخر تشغيل $since")
+      Write-Log "FAIL: discovered project task failed — $name ($code, $since)"
+    }
+  }
+}
+
+# ---------- 4) التنبيه ----------
 if ($problems.Count -eq 0) {
   exit 0
 }
