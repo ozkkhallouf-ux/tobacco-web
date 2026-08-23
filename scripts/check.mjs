@@ -130,6 +130,7 @@ const pdfGenerator = readFileSync("scripts/generate-pdfs.mjs", "utf8");
 const priceListTemplateSource = readFileSync("src/price-list-template.js", "utf8");
 const usdBulletin = readFileSync("public/downloads/price-list-usd.html", "utf8");
 const sypBulletin = readFileSync("public/downloads/price-list-syp-14050.html", "utf8");
+const wazariSypBulletin = readFileSync("public/downloads/price-list-wazari-syp-14050.html", "utf8");
 const ameenSyncAgent = readFileSync("tools/ameen-sync-agent.ps1", "utf8");
 const ameenPriceApply = readFileSync("tools/apply-approved-prices-to-ameen.ps1", "utf8");
 const ameenPriceVerify = readFileSync("tools/verify-prices.ps1", "utf8");
@@ -164,6 +165,24 @@ for (const contract of [
 ]) {
   if (!app.includes(contract)) {
     console.error(`Bulletin light/dark preview contract is missing: ${contract}`);
+    failed = true;
+  }
+}
+for (const [label, source] of [
+  ["in-app SYP bulletin preview", app],
+  ["published SYP bulletin generator", priceGenerator]
+]) {
+  if (!source.includes("formatBulletinEnglishInteger") || source.includes('toLocaleString("ar-SY")')) {
+    console.error(`${label} must format SYP prices with explicit English digits.`);
+    failed = true;
+  }
+}
+for (const [label, bulletin] of [
+  ["general SYP bulletin", sypBulletin],
+  ["wazari SYP bulletin", wazariSypBulletin]
+]) {
+  if (/[٠-٩۰-۹]/.test(bulletin) || !/\d{1,3}(?:,\d{3})+\s+ل\.س/.test(bulletin)) {
+    console.error(`${label} must contain comma-separated English digits and no Arabic/Persian digits.`);
     failed = true;
   }
 }

@@ -2392,6 +2392,12 @@ function freshPublishedBulletinUrl(path) {
   return `${path}${separator}fresh=${Date.now()}`;
 }
 
+function formatBulletinEnglishInteger(value) {
+  const number = Number(value);
+  const rounded = Number.isFinite(number) ? Math.round(number) : 0;
+  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(rounded);
+}
+
 function customerPricePdfMarkup(items, latest, useSyria = false, theme = state.bulletinPdfTheme) {
   const groups = bulletinDisplayGroups(items, useSyria);
   const template = window.OZKPriceListTemplate;
@@ -2402,7 +2408,7 @@ function customerPricePdfMarkup(items, latest, useSyria = false, theme = state.b
       name: item.name || "",
       unit: item.unit2Name || item.unit1Name || "وحدة",
       price: useSyria
-        ? `${Math.round(Number(item.unit2Price || 0)).toLocaleString("ar-SY")} ل.س`
+        ? `${formatBulletinEnglishInteger(item.unit2Price)} ل.س`
         : `${Number(item.unit2Price || item.unit1Price || 0).toFixed(2)} $`
     }))
   }));
@@ -2413,7 +2419,7 @@ function customerPricePdfMarkup(items, latest, useSyria = false, theme = state.b
     issueDate: new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "long", year: "numeric" }),
     badgeClass: useSyria ? "badge-syp" : "badge-usd",
     badgeLabelHtml: useSyria
-      ? `${syriaFlag} ليرة — مفرق — صرف ${Number(state.syriaExchangeRate || 0).toLocaleString()}`
+      ? `${syriaFlag} ليرة — مفرق — صرف ${formatBulletinEnglishInteger(state.syriaExchangeRate)}`
       : "💵 دولار أمريكي — جملة",
     unitLabel: useSyria ? "سعر المفرق للوحدة" : "سعر الكرتونة (جملة)",
     theme: normalizedBulletinPdfTheme(theme)
