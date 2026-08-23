@@ -11,6 +11,7 @@ if(!worker.includes('/functions/v1/ameen-read-broker')) throw new Error('worker 
 if(!worker.includes('[System.Text.Encoding]::UTF8.GetBytes($json)')) throw new Error('worker broker body is not explicitly UTF-8 encoded');
 if(!worker.includes('-ContentType "application/json; charset=utf-8" -Body $utf8Body')) throw new Error('worker broker request is missing the UTF-8 JSON content type or byte body');
 if(!broker.includes('AGENTS')||!broker.includes('STAFF')) throw new Error('broker role separation missing');
+for(const ownerEmail of ['ozkkhalouf@gmail.com','ozkkhallouf@gmail.com']) if(!broker.includes(ownerEmail)) throw new Error(`owner missing from Ameen Live staff allow-list: ${ownerEmail}`);
 if(!client.includes('Authentication required')) throw new Error('browser auth guard missing');
 if(/AMEEN_SQL_CONNECTION_STRING/.test(client+broker)) throw new Error('SQL connection string leaked outside Windows gateway');
 console.log('Ameen Read Gateway security contract: OK');
