@@ -14,7 +14,7 @@
                   "docs/ai/topics/price-bulletins.md"
               ],
     "startedAt":  "2026-08-23T09:43:05Z",
-    "updatedAt":  "2026-08-23T10:18:00Z",
-    "pr":  "#103 merged; follow-up pending",
-    "note":  "Arabic RTL fix is live. Final follow-up keeps the SYP rate badge on one line; do not edit the reserved files."
+    "updatedAt":  "2026-08-23T10:38:00Z",
+    "pr":  "#103 and #104 merged; clipping correction pending",
+    "note":  "Arabic RTL fix is live. Final visually tested correction keeps the rate badge on one line with RTL-safe inner spacing; do not edit the reserved files."
 }

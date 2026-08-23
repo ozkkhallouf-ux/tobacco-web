@@ -551,8 +551,8 @@ for (const contract of [
     failed = true;
   }
 }
-if (!priceListTemplateSource.includes("white-space:nowrap")) {
-  console.error("The bulletin currency/rate badge must stay on one line in PDF exports.");
+if (!priceListTemplateSource.includes("white-space:nowrap") || !priceListTemplateSource.includes("padding-inline-end:32px")) {
+  console.error("The bulletin currency/rate badge must stay on one line without clipping RTL text in PDF exports.");
   failed = true;
 }
 if (!html.includes('src/price-list-template.js?v=') || html.indexOf("src/price-list-template.js") > html.indexOf("src/app.js")) {
