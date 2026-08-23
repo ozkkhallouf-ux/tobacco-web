@@ -1,12 +1,16 @@
 {
-  "schemaVersion": 1,
-  "status": "idle",
-  "owner": null,
-  "task": null,
-  "branch": null,
-  "files": [],
-  "startedAt": null,
-  "updatedAt": "2026-08-23T16:37:03Z",
-  "pr": "#106",
-  "note": "No active task. Read AI_HANDOFF.md before starting work."
+    "schemaVersion":  1,
+    "status":  "active",
+    "owner":  "Codex",
+    "task":  "إصلاح صلاحيات Ameen Live للمالك والتحقق الحي",
+    "branch":  "task branch pending for: إصلاح صلاحيات Ameen Live للمالك والتحقق الحي",
+    "files":  [
+                  "supabase/functions/ameen-read-broker/index.ts",
+                  "scripts/check-ameen-read-gateway.mjs",
+                  "docs/ai/topics/ameen-sync.md"
+              ],
+    "startedAt":  "2026-08-23T17:26:55Z",
+    "updatedAt":  "2026-08-23T17:26:55Z",
+    "pr":  "#106",
+    "note":  "Work in progress. Do not edit the reserved files."
 }
