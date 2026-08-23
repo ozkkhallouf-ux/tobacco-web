@@ -414,6 +414,9 @@ for (const contract of ["inputs:", "rate:", "SYP_RATE:", "scripts/exchange-rate.
 }
 for (const contract of [
   "cron: '*/15 * * * *'",
+  "group: generate-price-lists",
+  "cancel-in-progress: false",
+  "ref: main",
   "id: bulletin_changes",
   "steps.bulletin_changes.outputs.changed == 'true'",
   "لا تغييرات في الأسعار اليدوية أو المخزون"
