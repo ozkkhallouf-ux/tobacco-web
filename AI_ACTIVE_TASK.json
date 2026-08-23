@@ -5,7 +5,12 @@
     "task":  "منع فتح PDF نشرة قديم وإصلاح تصدير RTL الموحد",
     "branch":  "task branch pending for: منع فتح PDF نشرة قديم وإصلاح تصدير RTL الموحد",
     "files":  [
-                  "\u0027src/app.js\u0027,\u0027src/price-list-template.js\u0027,\u0027scripts/check.mjs\u0027,\u0027index.html\u0027,\u0027public/service-worker.js\u0027,\u0027docs/ai/topics/price-bulletins.md\u0027"
+                  "src/app.js",
+                  "src/price-list-template.js",
+                  "scripts/check.mjs",
+                  "index.html",
+                  "public/service-worker.js",
+                  "docs/ai/topics/price-bulletins.md"
               ],
     "startedAt":  "2026-08-23T13:27:22Z",
     "updatedAt":  "2026-08-23T13:27:22Z",
