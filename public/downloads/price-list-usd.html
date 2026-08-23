@@ -139,8 +139,8 @@
 
       <div class="price-list-document-tools no-print">
         <button type="button" onclick="window.print()">طباعة مباشرة</button>
-        <a data-pdf-open href="price-list-usd.pdf?v=fbc6264c1c84">فتح PDF</a>
-        <a data-pdf-download href="price-list-usd.pdf?v=fbc6264c1c84" download>تنزيل PDF</a>
+        <a data-pdf-open href="price-list-usd.pdf?v=366c51dbe219">فتح PDF</a>
+        <a data-pdf-download href="price-list-usd.pdf?v=366c51dbe219" download>تنزيل PDF</a>
         <button class="theme-switch" type="button" onclick="toggleTheme()">فاتح / داكن</button>
       </div>
         <header class="price-list-header">
@@ -821,15 +821,10 @@
       <div class="price-list-group">
         <div class="price-list-group-header">
           <span>مليونير</span>
-          <span class="price-list-group-count">2</span>
+          <span class="price-list-group-count">1</span>
         </div>
         <table><tbody>
           <tr class="odd">
-            <td class="name">مليونير طويل أزرق</td>
-            <td class="unit">كرتونة</td>
-            <td class="price">250.00 $</td>
-          </tr>
-          <tr class="even">
             <td class="name">مليونير طويل فضي</td>
             <td class="unit">كرتونة</td>
             <td class="price">250.00 $</td>
@@ -1076,7 +1071,7 @@
   sheet.dataset.theme = savedTheme || 'dark';
   document.body.dataset.theme = sheet.dataset.theme;
   function selectedPdfFile() {
-    return sheet.dataset.theme === 'light' ? 'price-list-usd-light.pdf?v=fbc6264c1c84' : 'price-list-usd.pdf?v=fbc6264c1c84';
+    return sheet.dataset.theme === 'light' ? 'price-list-usd-light.pdf?v=366c51dbe219' : 'price-list-usd.pdf?v=366c51dbe219';
   }
   function syncPdfLinks() {
     const selected = selectedPdfFile();
