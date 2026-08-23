@@ -1,19 +1,12 @@
 {
-    "schemaVersion":  1,
-    "status":  "active",
-    "owner":  "Codex",
-    "task":  "تحويل أرقام نشرة الليرة السورية إلى الإنجليزية",
-    "branch":  "task branch pending for: تحويل أرقام نشرة الليرة السورية إلى الإنجليزية",
-    "files":  [
-                  "src/app.js",
-                  "scripts/generate-price-lists.mjs",
-                  "scripts/check.mjs",
-                  "index.html",
-                  "public/service-worker.js",
-                  "public/downloads/*"
-              ],
-    "startedAt":  "2026-08-20T18:48:37Z",
-    "updatedAt":  "2026-08-20T18:48:37Z",
-    "pr":  null,
-    "note":  "Work in progress. Do not edit the reserved files."
+  "schemaVersion": 1,
+  "status": "idle",
+  "owner": null,
+  "task": null,
+  "branch": null,
+  "files": [],
+  "startedAt": null,
+  "updatedAt": "2026-08-23T00:28:33Z",
+  "pr": null,
+  "note": "No active task. Read AI_HANDOFF.md before starting work."
 }

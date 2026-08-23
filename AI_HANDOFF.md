@@ -2,6 +2,16 @@
 
 يقرأه Claude وCodex قبل كل مهمة. أحدث سجل يكون في الأعلى. لا تحذف السجلات السابقة.
 
+## 2026-08-23 - Codex - تحويل أرقام نشرة الليرة السورية إلى الإنجليزية
+
+- Status: completed
+- Branch: `codex/english-syp-digits`
+- PR: #100
+- Merge commit: `8a9c17d572f11ec9731c9d18419a63e4bbb09e77`
+- Files: src/app.js, scripts/generate-price-lists.mjs, scripts/check.mjs, index.html, public/service-worker.js, public/downloads/*
+- Result: تم الدمج في PR #100 والنشر الحي. فحوص المشروع وGitHub ناجحة؛ مطابقة الأسعار mismatches=0 missing=0؛ النشرات العامة والوزارية فاتح وداكن بأرقام إنجليزية فقط وسعر صرف 13,100.
+- Handoff UTC: 2026-08-23T00:28:33Z
+
 ## 2026-08-20 - Codex - إصلاح توليد PDF الفاتح ومنع رجوعه
 
 - Status: completed
