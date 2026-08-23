@@ -3,7 +3,7 @@
     "status":  "active",
     "owner":  "Codex",
     "task":  "إصلاح انعكاس النص العربي في PDF النشرة المصدرة من الموقع",
-    "branch":  "codex/fix-bulletin-arabic-pdf",
+    "branch":  "codex/fix-bulletin-arabic-pdf-final",
     "files":  [
                   "src/app.js",
                   "src/price-list-template.js",
@@ -14,7 +14,7 @@
                   "docs/ai/topics/price-bulletins.md"
               ],
     "startedAt":  "2026-08-23T09:43:05Z",
-    "updatedAt":  "2026-08-23T10:18:00Z",
-    "pr":  "#103 merged; follow-up pending",
-    "note":  "Arabic RTL fix is live. Final follow-up keeps the SYP rate badge on one line; do not edit the reserved files."
+    "updatedAt":  "2026-08-23T10:38:00Z",
+    "pr":  "#105 superseded after automatic main update; final PR pending",
+    "note":  "Arabic RTL fix is live. Final visually tested correction keeps the rate badge on one line with RTL-safe inner spacing; do not edit the reserved files."
 }
