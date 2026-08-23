@@ -551,6 +551,10 @@ for (const contract of [
     failed = true;
   }
 }
+if (!priceListTemplateSource.includes("white-space:nowrap")) {
+  console.error("The bulletin currency/rate badge must stay on one line in PDF exports.");
+  failed = true;
+}
 if (!html.includes('src/price-list-template.js?v=') || html.indexOf("src/price-list-template.js") > html.indexOf("src/app.js")) {
   console.error("The shared price-list template must load before app.js.");
   failed = true;

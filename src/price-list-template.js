@@ -38,7 +38,7 @@
     }
     .ozk-price-list .price-list-currency-badge {
       display:inline-block; padding:3px 12px; border-radius:20px; font-size:10.5px;
-      font-weight:700; margin-top:4px; letter-spacing:.3px;
+      font-weight:700; margin-top:4px; letter-spacing:.3px; white-space:nowrap;
     }
     .ozk-price-list .badge-usd { background:var(--gold); color:var(--button-text); }
     .ozk-price-list .badge-syp { background:#2d6a2d; color:#c8f0c8; }
