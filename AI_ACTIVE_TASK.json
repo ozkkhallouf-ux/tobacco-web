@@ -1,12 +1,24 @@
 {
   "schemaVersion": 1,
-  "status": "idle",
-  "owner": null,
-  "task": null,
-  "branch": null,
-  "files": [],
-  "startedAt": null,
-  "updatedAt": "2026-08-23T01:48:05Z",
+  "status": "active",
+  "owner": "Codex",
+  "task": "Smart inventory counting with owner dashboard and counter isolation",
+  "branch": "task branch pending for: Smart inventory counting with owner dashboard and counter isolation",
+  "files": [
+    "src/app.js",
+    "src/styles.css",
+    "src/supabase-client.js",
+    "src/config.js",
+    "src/inventory-recon-calc.js",
+    "src/smart-inventory.js",
+    "scripts/check.mjs",
+    "index.html",
+    "public/service-worker.js",
+    "supabase/smart-inventory.sql",
+    "docs/ai/topics/inventory.md"
+  ],
+  "startedAt": "2026-08-23T04:20:09Z",
+  "updatedAt": "2026-08-23T04:20:09Z",
   "pr": null,
-  "note": "No active task. Read AI_HANDOFF.md before starting work."
+  "note": "Implement smart inventory sessions, owner dashboard, blind inventory_counter access, RLS, audit, recount, cutoff movement tracking, exports, and tests. No Ameen writes, merge, or deploy."
 }
