@@ -2,6 +2,13 @@
 
 يقرأه Claude وCodex قبل كل مهمة. أحدث سجل يكون في الأعلى. لا تحذف السجلات السابقة.
 
+## 2026-08-23 - Codex - منع أخطاء تنسيق ملفات تنسيق عمل OZK
+
+- Status: completed
+- Branch: task branch pending for: منع أخطاء تنسيق ملفات تنسيق عمل OZK
+- Files: tools/ai-work-coordination.ps1, scripts/check.mjs, AI_ACTIVE_TASK.json, AI_HANDOFF.md
+- Result: دُمج الفرع codex/fix-ai-coordination-line-endings في main بالكوميت 59014b2. الأداة توحّد CRLF/CR إلى LF قبل الكتابة، وفحص المشروع وPowerShell 5.1 والتجربة المعزولة نجحت.
+- Handoff UTC: 2026-08-23T01:48:05Z
 ## 2026-08-23 - Codex - تنظيم معرفة مشروع OZK حسب المواضيع وخريطة التأثير
 
 - Status: completed
