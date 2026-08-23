@@ -6,13 +6,15 @@
 
 توجد مهام Windows منفصلة للأسعار والمخزون والأرصدة والفواتير والحركات والتكاليف. قاعدة التشغيل المعتمدة هي `AmnDb002`. لا يثبت هذا التقرير أن كل مهمة تعمل الآن؛ يلزم دليل حديث لكل مسار عند تشخيصه.
 
+في تحقق حي مضبوط بتاريخ 2026-08-23، أُضيف حسابا المالك إلى قائمة السماح في `ameen-read-broker` v4 مع إبقاء الموارد محصورة في `health` و`stock` و`customers`. نُفّذ طلب Live واحد من جلسة مالك مصادق عليها من دون إعادة تشغيل العامل: نجحت الموارد الثلاثة بصورة مستقلة، وعاد المخزون بـ424 صفاً صالحاً و`stockAsOf=2026-08-23T17:41:08.1281924Z`. بقيت توصيات الشراء موثوقة وحديثة: 8 بطاقات بكميات رقمية وبيانات حركة حديثة، بلا fallback أو review-only. لم تحدث كتابة إلى الأمين أو تعديل Scheduled Task أو تشغيل يدوي.
+
 ## المصدر الموثوق
 
 الأمين للبيانات المحاسبية، وSupabase للأسعار المعتمدة. اتجاه البيانات مفصل في `docs/ai/project-map.md` ولا يجوز عكسه عرضاً لإخفاء فشل مزامنة.
 
 ## نطاق الملفات
 
-`tools/ameen-sync-agent.ps1`, `tools/ameen-read-*.ps1`, `tools/pull-*.ps1`, `tools/push-*.ps1`, `tools/register-*.ps1`, `tools/verify-*.ps1`, `supabase/ameen-*.sql`.
+`tools/ameen-sync-agent.ps1`, `tools/ameen-read-*.ps1`, `tools/pull-*.ps1`, `tools/push-*.ps1`, `tools/register-*.ps1`, `tools/verify-*.ps1`, `supabase/ameen-*.sql`, `supabase/functions/ameen-read-broker/index.ts`, `scripts/check-ameen-read-gateway.mjs`.
 
 ## قيود ثابتة
 

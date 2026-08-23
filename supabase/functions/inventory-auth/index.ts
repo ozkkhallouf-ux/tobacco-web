@@ -55,11 +55,7 @@ const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
 async function requireOwner(req: Request) {
   const token = bearer(req);
   if (!token) return null;
-  const verifier = createClient(SUPABASE_URL, PUBLISHABLE_KEY, {
-    auth: { autoRefreshToken: false, persistSession: false, detectSessionInUrl: false },
-    global: { headers: { authorization: `Bearer ${token}` } }
-  });
-  const { data, error } = await verifier.auth.getUser(token);
+  const { data, error } = await admin.auth.getUser(token);
   if (error || !data.user || String(data.user.app_metadata?.role || "").toLowerCase() !== "owner") return null;
   const encoded = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
   const claims = JSON.parse(atob(encoded.padEnd(Math.ceil(encoded.length / 4) * 4, "=")));
