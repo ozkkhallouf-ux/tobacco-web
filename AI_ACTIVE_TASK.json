@@ -1,12 +1,17 @@
 {
   "schemaVersion": 1,
-  "status": "idle",
-  "owner": null,
-  "task": null,
-  "branch": null,
-  "files": [],
-  "startedAt": null,
-  "updatedAt": "2026-08-23T01:28:15Z",
+  "status": "active",
+  "owner": "Codex",
+  "task": "منع أخطاء تنسيق ملفات تنسيق عمل OZK",
+  "branch": "task branch pending for: منع أخطاء تنسيق ملفات تنسيق عمل OZK",
+  "files": [
+    "tools/ai-work-coordination.ps1",
+    "scripts/check.mjs",
+    "AI_ACTIVE_TASK.json",
+    "AI_HANDOFF.md"
+  ],
+  "startedAt": "2026-08-23T01:31:47Z",
+  "updatedAt": "2026-08-23T01:31:47Z",
   "pr": null,
-  "note": "No active task. Read AI_HANDOFF.md before starting work."
+  "note": "إصلاح دائم لنهايات الأسطر التي كشفها git diff --check عند إغلاق المهمة."
 }
