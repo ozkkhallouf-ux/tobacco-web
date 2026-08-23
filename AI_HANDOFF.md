@@ -2,6 +2,13 @@
 
 يقرأه Claude وCodex قبل كل مهمة. أحدث سجل يكون في الأعلى. لا تحذف السجلات السابقة.
 
+## 2026-08-23 - Codex - منع فتح PDF نشرة قديم وإصلاح تصدير RTL الموحد
+
+- Status: completed
+- Branch: task branch pending for: منع فتح PDF نشرة قديم وإصلاح تصدير RTL الموحد
+- Files: src/app.js, src/price-list-template.js, scripts/check.mjs, index.html, public/service-worker.js, docs/ai/topics/price-bulletins.md
+- Result: أُخلي القفل القديم بإذن المستخدم بعد التحقق من عدم وجود عملية مرتبطة به؛ لم يُعدّل كود الموقع.
+- Handoff UTC: 2026-08-23T16:37:03Z
 ## 2026-08-23 - Codex - إصلاح العربية واتجاه التاريخ في نشرات الدولار والليرة
 
 - Status: completed
