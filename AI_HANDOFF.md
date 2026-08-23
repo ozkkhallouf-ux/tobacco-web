@@ -2,6 +2,13 @@
 
 يقرأه Claude وCodex قبل كل مهمة. أحدث سجل يكون في الأعلى. لا تحذف السجلات السابقة.
 
+## 2026-08-23 - Codex - إصلاح العربية واتجاه التاريخ في نشرات الدولار والليرة
+
+- Status: completed
+- Branch: task branch pending for: إصلاح العربية واتجاه التاريخ في نشرات الدولار والليرة
+- Files: src/app.js, src/price-list-template.js, scripts/generate-price-lists.mjs, scripts/generate-pdfs.mjs, scripts/check.mjs, public/downloads/price-list-usd.html, public/downloads/price-list-usd.pdf, public/downloads/price-list-usd-light.pdf, public/downloads/price-list-syp-14050.html, public/downloads/price-list-syp-14050.pdf, public/downloads/price-list-syp-14050-light.pdf, public/downloads/price-list-wazari-usd.html, public/downloads/price-list-wazari-usd.pdf, public/downloads/price-list-wazari-usd-light.pdf, public/downloads/price-list-wazari-syp-14050.html, public/downloads/price-list-wazari-syp-14050.pdf, public/downloads/price-list-wazari-syp-14050-light.pdf, index.html, public/service-worker.js, docs/ai/topics/price-bulletins.md
+- Result: دُمج PR #107 للإصلاح وPR #108 لتحصين التوليد المتزامن. نُشر tobacco-169/cache v575، وتحقق حي من 4 HTML و8 PDF/16 صفحة بالعربية الصحيحة؛ سعر الصرف 13,100. تضارب مفتاح الفحم القديم موثق كمهمة بيانات منفصلة ولا يدخل النشرات الحالية.
+- Handoff UTC: 2026-08-23T13:12:48Z
 ## 2026-08-23 - Codex - إصلاح انعكاس النص العربي في PDF النشرة المصدرة من الموقع
 
 - Status: completed
