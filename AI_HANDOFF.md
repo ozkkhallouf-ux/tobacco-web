@@ -2,6 +2,13 @@
 
 يقرأه Claude وCodex قبل كل مهمة. أحدث سجل يكون في الأعلى. لا تحذف السجلات السابقة.
 
+## 2026-08-23 - Codex - تطبيق Backend الجرد الذكي وإنشاء حسابات موظفي الجرد
+
+- Status: completed
+- Branch: task branch pending for: تطبيق Backend الجرد الذكي وإنشاء حسابات موظفي الجرد
+- Files: supabase/smart-inventory.sql,supabase/functions/inventory-auth/index.ts,docs/ai/topics/inventory.md
+- Result: طُبق Backend الجرد الذكي وEdge Function على Supabase، وأُنشئت حسابات أمين المستودع وعثمان ومنذر وتحقق دخولها وعزل الفروقات. الفرع codex/smart-inventory-counting عند e5b8513 مدفوع؛ الموقع غير مدمج وغير منشور، ولا كتابة إلى الأمين. نجحت npm run check وgit diff --check وفحوص RLS/REST الحية.
+- Handoff UTC: 2026-08-23T06:45:22Z
 ## 2026-08-23 - Codex - Smart inventory counting with owner dashboard and counter isolation
 
 - Status: completed
