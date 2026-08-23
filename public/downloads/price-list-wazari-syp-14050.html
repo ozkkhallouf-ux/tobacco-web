@@ -39,6 +39,7 @@
     .ozk-price-list .price-list-currency-badge {
       display:inline-block; padding:3px 12px; border-radius:20px; font-size:10.5px;
       font-weight:700; margin-top:4px; letter-spacing:.3px; white-space:nowrap;
+      padding-inline-start:12px; padding-inline-end:32px;
     }
     .ozk-price-list .badge-usd { background:var(--gold); color:var(--button-text); }
     .ozk-price-list .badge-syp { background:#2d6a2d; color:#c8f0c8; }
@@ -139,8 +140,8 @@
 
       <div class="price-list-document-tools no-print">
         <button type="button" onclick="window.print()">طباعة مباشرة</button>
-        <a data-pdf-open href="price-list-wazari-syp-14050.pdf?v=c7c1d7c5e7f7">فتح PDF</a>
-        <a data-pdf-download href="price-list-wazari-syp-14050.pdf?v=c7c1d7c5e7f7" download>تنزيل PDF</a>
+        <a data-pdf-open href="price-list-wazari-syp-14050.pdf?v=726d8e766d01">فتح PDF</a>
+        <a data-pdf-download href="price-list-wazari-syp-14050.pdf?v=726d8e766d01" download>تنزيل PDF</a>
         <button class="theme-switch" type="button" onclick="toggleTheme()">فاتح / داكن</button>
       </div>
         <header class="price-list-header">
@@ -250,7 +251,7 @@
   sheet.dataset.theme = savedTheme || 'dark';
   document.body.dataset.theme = sheet.dataset.theme;
   function selectedPdfFile() {
-    return sheet.dataset.theme === 'light' ? 'price-list-wazari-syp-14050-light.pdf?v=c7c1d7c5e7f7' : 'price-list-wazari-syp-14050.pdf?v=c7c1d7c5e7f7';
+    return sheet.dataset.theme === 'light' ? 'price-list-wazari-syp-14050-light.pdf?v=726d8e766d01' : 'price-list-wazari-syp-14050.pdf?v=726d8e766d01';
   }
   function syncPdfLinks() {
     const selected = selectedPdfFile();

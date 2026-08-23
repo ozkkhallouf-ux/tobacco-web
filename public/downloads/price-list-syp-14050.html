@@ -39,6 +39,7 @@
     .ozk-price-list .price-list-currency-badge {
       display:inline-block; padding:3px 12px; border-radius:20px; font-size:10.5px;
       font-weight:700; margin-top:4px; letter-spacing:.3px; white-space:nowrap;
+      padding-inline-start:12px; padding-inline-end:32px;
     }
     .ozk-price-list .badge-usd { background:var(--gold); color:var(--button-text); }
     .ozk-price-list .badge-syp { background:#2d6a2d; color:#c8f0c8; }
@@ -139,8 +140,8 @@
 
       <div class="price-list-document-tools no-print">
         <button type="button" onclick="window.print()">طباعة مباشرة</button>
-        <a data-pdf-open href="price-list-syp-14050.pdf?v=8948b5cf2aaf">فتح PDF</a>
-        <a data-pdf-download href="price-list-syp-14050.pdf?v=8948b5cf2aaf" download>تنزيل PDF</a>
+        <a data-pdf-open href="price-list-syp-14050.pdf?v=4995e628468b">فتح PDF</a>
+        <a data-pdf-download href="price-list-syp-14050.pdf?v=4995e628468b" download>تنزيل PDF</a>
         <button class="theme-switch" type="button" onclick="toggleTheme()">فاتح / داكن</button>
       </div>
         <header class="price-list-header">
@@ -325,7 +326,7 @@
           <tr class="odd">
             <td class="name">1970 طويل أزرق</td>
             <td class="unit">كروز</td>
-            <td class="price">83,840 ل.س</td>
+            <td class="price">83,054 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">1970 طويل اورجينال</td>
@@ -335,17 +336,17 @@
           <tr class="odd">
             <td class="name">1970 طويل فضي</td>
             <td class="unit">كروز</td>
-            <td class="price">83,840 ل.س</td>
+            <td class="price">83,054 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">1970 كوين أبيض</td>
             <td class="unit">كروز</td>
-            <td class="price">73,360 ل.س</td>
+            <td class="price">72,836 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">1970 كوين أزرق</td>
             <td class="unit">كروز</td>
-            <td class="price">68,120 ل.س</td>
+            <td class="price">66,810 ل.س</td>
           </tr>
         </tbody></table>
       </div>
@@ -748,17 +749,17 @@
           <tr class="even">
             <td class="name">أوريس منغا</td>
             <td class="unit">كروز</td>
-            <td class="price">82,530 ل.س</td>
+            <td class="price">81,744 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">اوريس بلاس ازرق</td>
             <td class="unit">كروز</td>
-            <td class="price">82,530 ل.س</td>
+            <td class="price">81,744 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">اوريس توت سليم طقة</td>
             <td class="unit">كروز</td>
-            <td class="price">82,530 ل.س</td>
+            <td class="price">81,744 ل.س</td>
           </tr>
         </tbody></table>
       </div>
@@ -1326,7 +1327,7 @@
   sheet.dataset.theme = savedTheme || 'dark';
   document.body.dataset.theme = sheet.dataset.theme;
   function selectedPdfFile() {
-    return sheet.dataset.theme === 'light' ? 'price-list-syp-14050-light.pdf?v=8948b5cf2aaf' : 'price-list-syp-14050.pdf?v=8948b5cf2aaf';
+    return sheet.dataset.theme === 'light' ? 'price-list-syp-14050-light.pdf?v=4995e628468b' : 'price-list-syp-14050.pdf?v=4995e628468b';
   }
   function syncPdfLinks() {
     const selected = selectedPdfFile();
