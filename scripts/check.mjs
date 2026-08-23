@@ -755,6 +755,31 @@ for (const [name, pattern] of [
   }
 }
 
+// html2canvas التقليدي يقلب ترتيب العربية في النشرة المصورة. يجب أن يمرّر
+// تصدير النشرة على الهاتف وWindows الرسم إلى محرك المتصفح عبر foreignObject.
+const bulletinPdfExport = appJs.match(/async function exportBulletinPdf\([\s\S]*?\n\}/)?.[0] || "";
+const rtlBrowserRenderCount = (bulletinPdfExport.match(/foreignObjectRendering:\s*true/g) || []).length;
+if (rtlBrowserRenderCount < 2) {
+  console.error("Price bulletin PDF export must preserve Arabic RTL on both handheld and desktop paths.");
+  failed = true;
+}
+if (!appJs.includes("foreignObjectRendering: Boolean(options.foreignObjectRendering)")) {
+  console.error("Portable PDF rendering must forward the opt-in foreignObject RTL setting.");
+  failed = true;
+}
+for (const contract of [
+  "function stabilizeBulletinPdfRtlLayout(source)",
+  "stabilizeBulletinRtl: true",
+  'stabilizeBulletinPdfRtlLayout(container.querySelector(".ozk-price-list"))',
+  "if (options.stabilizeBulletinRtl) stabilizeBulletinPdfRtlLayout(source)",
+  'page.style.minHeight = "1123px"'
+]) {
+  if (!appJs.includes(contract)) {
+    console.error(`Price bulletin RTL layout stabilization is missing: ${contract}`);
+    failed = true;
+  }
+}
+
 // نموذج الفاتورة يجب أن يبقي التركيز أثناء كتابة اسم الزبون، وأن يستخدم
 // أرقاماً إنجليزية في حقول الكمية والسعر مهما كانت لغة عرض ويندوز.
 if (/state\.invCustomer = e\.currentTarget\.value;\s*render\(\);/.test(appJs)) {
