@@ -4,11 +4,13 @@
 
 ## الحالة الحالية
 
-أضيف على الفرع `codex/smart-inventory-counting` تنفيذ الجرد الذكي اليومي. طُبّق Backend الجرد على مشروع Supabase الحي في 2026-08-23 ونُشرت Edge Function `inventory-auth` (الإصدار 6)، لكن واجهة الموقع ما زالت غير مدمجة وغير منشورة. الواجهة تسمح لموظف `inventory_counter` باختيار أي مستودع فعلي وبدء/متابعة جلسة يومية مشتركة، مع قفل ذري قصير لكل صنف وأول حفظ يفوز. الموظف لا يستلم كمية الأمين أو الفرق، بينما يرى المالك لوحة كل المستودعات والتقرير المقارن والحركات بعد وقت القطع وإعادة العد/التصحيح وسجل التدقيق والتصدير.
+دُمج ونُشر تنفيذ الجرد الذكي اليومي على الموقع الحي في 2026-08-23. طُبّق Backend الجرد على مشروع Supabase الحي ونُشرت Edge Function `inventory-auth`. الواجهة تسمح لموظف `inventory_counter` باختيار أي مستودع فعلي وبدء/متابعة جلسة يومية مشتركة، مع قفل ذري قصير لكل صنف وأول حفظ يفوز. الموظف لا يستلم كمية الأمين أو الفرق، بينما يرى المالك لوحة كل المستودعات والتقرير المقارن والحركات بعد وقت القطع وإعادة العد/التصحيح وسجل التدقيق والتصدير.
 
 تسجيل موظف الجرد مستقل باسم مستخدم وكلمة مرور: المالك ينشئ الحساب من لوحة الجرد؛ الاسم يطبع ويجب أن يكون فريداً، والهوية الفعلية هي `auth.users.id`. كلمة المرور يحفظها Supabase Auth فقط. التحويل من اسم المستخدم إلى هوية Auth داخلية يتم داخل Edge Function ولا يرجع البريد الاصطناعي أو service role إلى الواجهة. تعطيل الحساب أو إعادة تعيين كلمة المرور يحذف جلسات Auth، وكل RPC حساس يتحقق أيضاً من وجود `session_id` في `auth.sessions` حتى لا تستمر جلسة قديمة برمز وصول لم تنته صلاحيته بعد.
 
 أُنشئت ثلاثة حسابات داخلية مفعلة بدور `inventory_counter`: أمين المستودع، عثمان، ومنذر. تم التحقق من دخول الحسابات الثلاثة ومن وصول حساب الموظف إلى قائمة المستودعات الفعلية فقط. تحقق الاختبار الحي من ظهور 5 مستودعات، ومن رفض الوصول المباشر إلى `smart_inventory_expectations` ولوحة المالك وجدول حسابات الموظفين بحالة HTTP 403. الحد الأدنى الحالي لكلمة مرور الموظف 8 محارف وفق الموافقة الصريحة، ويُنصح بتغيير كلمات المرور الأولية المتوقعة بعد أول دخول.
+
+يعزل ترحيل `smart_inventory_counter_isolation` حسابات الجرد عن دور قاعدة البيانات الإداري `authenticated`: تُصدر جلساتها بدور قاعدة البيانات `anon` وتُمنح فقط RPCs العد الأعمى التي تتحقق من `app_metadata` و`auth.uid()` والجلسة الحية. توجد أيضاً سياسة RLS تقييدية تمنع أي token قديم بدور `authenticated` ويحمل `inventory_counter` من قراءة أو تعديل جداول النظام. لا توجد منح جداول مباشرة للحساب الجديد.
 
 ## المصدر الموثوق
 
@@ -16,7 +18,7 @@
 
 ## نطاق الملفات
 
-`src/business-snapshot.js`, `src/inventory-recon-calc.js`, `src/smart-inventory.js`, `src/supabase-client.js`, `src/app.js`, `src/styles.css`, `tools/ameen-stock-query.sql`, `tools/ameen-sync-agent.ps1`, `tools/push-ameen-warehouse-stock.ps1`, `scripts/item-snapshot-*.mjs`, `scripts/check-smart-inventory.mjs`, `supabase/inventory-reconciliation-table.sql`, `supabase/smart-inventory.sql`, `supabase/functions/inventory-auth/index.ts`, `supabase/tests/smart-inventory-security.sql`.
+`src/business-snapshot.js`, `src/inventory-recon-calc.js`, `src/smart-inventory.js`, `src/supabase-client.js`, `src/app.js`, `src/styles.css`, `tools/ameen-stock-query.sql`, `tools/ameen-sync-agent.ps1`, `tools/push-ameen-warehouse-stock.ps1`, `scripts/item-snapshot-*.mjs`, `scripts/check-smart-inventory.mjs`, `supabase/inventory-reconciliation-table.sql`, `supabase/smart-inventory.sql`, `supabase/migrations/*smart_inventory_counter_isolation.sql`, `supabase/functions/inventory-auth/index.ts`, `supabase/tests/smart-inventory-security.sql`.
 
 ## قيود ثابتة
 
@@ -38,4 +40,4 @@
 
 ## الخطوة التالية
 
-مراجعة الفرع ونتائج الفحوص، ثم موافقة صريحة منفصلة قبل دمج الفرع أو نشر واجهة الموقع. بعد النشر نفّذ Pilot في مستودع واحد و20–30 صنفاً. لا دمج ولا نشر قبل الموافقة.
+نفّذ Pilot تشغيلياً في مستودع واحد و20–30 صنفاً بإدخال كميات حقيقية من موظف جرد؛ لا تنشئ كميات اختبارية وهمية في الإنتاج. بعد نجاح العينة يمكن توسيع الجرد لبقية المستودعات.
