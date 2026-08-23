@@ -18,7 +18,8 @@ function Read-Lock {
 }
 
 function Write-Utf8NoBom([string]$Path, [string]$Content) {
-    [System.IO.File]::WriteAllText($Path, $Content, [System.Text.UTF8Encoding]::new($false))
+    $normalizedContent = $Content.Replace("`r`n", "`n").Replace("`r", "`n")
+    [System.IO.File]::WriteAllText($Path, $normalizedContent, [System.Text.UTF8Encoding]::new($false))
 }
 
 function Save-Lock($Lock) {
