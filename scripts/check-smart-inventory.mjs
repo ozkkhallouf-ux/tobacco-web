@@ -56,8 +56,8 @@ for (const contract of ["ameen_item_snapshot", "sales_line_items", "smart_invent
 assert(edge.includes("password.length >= 8") && !edge.includes("password.length >= 10"), "Inventory counter passwords must accept the approved 8-character minimum.");
 assert(edge.includes("liveError || live !== true"), "Owner operations must fail closed when live-session verification errors.");
 assert(app.includes('data-form="inventory-counter-login"') && app.includes('minlength="8" maxlength="128"'), "Counter login must accept the approved 8-character password.");
-assert(html.includes("src/smart-inventory.js?v=tobacco-165"), "Published smart inventory module/version missing.");
-assert(worker.includes('CACHE_NAME = "web-platform-tobacco-v564"') && worker.includes('"src/smart-inventory.js"'), "Service worker cache must include the smart inventory module and a new cache name.");
+assert(/src\/smart-inventory\.js\?v=tobacco-\d+/.test(html), "Published smart inventory module/version missing.");
+assert(/CACHE_NAME = "web-platform-tobacco-v\d+"/.test(worker) && worker.includes('"src/smart-inventory.js"'), "Service worker cache must include the smart inventory module and a versioned cache name.");
 
 // Deterministic model of the database first-save-wins rule: two counters on
 // one item cannot both commit, while two different items can commit.

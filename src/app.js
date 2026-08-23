@@ -2725,6 +2725,33 @@ function closePricePreview() {
   render();
 }
 
+// foreignObject يحفظ تشكيل العربية الصحيح، لكنه قد يلف أسماء مجموعات قصيرة
+// أو يضغط سطور الاتصال عند نسخ القالب إلى SVG. نثبّت هذه العناصر في نسخة
+// التصدير فقط؛ المعاينة والقالب المنشور يبقيان بلا أي تغيير.
+function stabilizeBulletinPdfRtlLayout(source) {
+  if (!source?.classList?.contains("ozk-price-list")) return;
+  source.querySelectorAll(".price-list-group-header").forEach((header) => {
+    header.style.whiteSpace = "nowrap";
+    header.style.lineHeight = "1.35";
+  });
+  source.querySelectorAll(".price-list-secondary-page").forEach((page) => {
+    // عرض التصدير 794px؛ ارتفاع A4 المقابل 1123px. يملأ هذا خلفية آخر صفحة
+    // الداكنة حتى الحافة بدلاً من ترك الجزء السفلي أبيض بعد نهاية المحتوى.
+    page.style.minHeight = "1123px";
+  });
+  const phones = source.querySelector(".price-list-phones");
+  if (!phones) return;
+  phones.style.display = "grid";
+  phones.style.gridAutoRows = "min-content";
+  phones.style.alignItems = "start";
+  phones.style.justifyItems = "start";
+  phones.querySelectorAll("span").forEach((line) => {
+    line.style.display = "block";
+    line.style.whiteSpace = "nowrap";
+    line.style.lineHeight = "1.35";
+  });
+}
+
 // يولّد ويحفظ ملف PDF من عناصر جاهزة
 async function exportBulletinPdf(items, latest, useSyria = false, theme = state.bulletinPdfTheme) {
   if (!items || !items.length || !window.html2pdf) return;
@@ -2745,6 +2772,10 @@ async function exportBulletinPdf(items, latest, useSyria = false, theme = state.
         backgroundColor,
         image: { type: "jpeg", quality: 0.94 },
         allowTaint: true,
+        // html2canvas يعيد ترتيب الحروف العربية عند الرسم التقليدي على Canvas.
+        // مسار foreignObject يترك تشكيل RTL لمحرك المتصفح نفسه فيحفظ النص صحيحاً.
+        foreignObjectRendering: true,
+        stabilizeBulletinRtl: true,
         pagebreak: { mode: ["css"] }
       });
       presentPortablePdf(blob, filename, useSyria ? "نشرة المفرّق (ليرة)" : "نشرة الجملة (دولار)");
@@ -2760,6 +2791,7 @@ async function exportBulletinPdf(items, latest, useSyria = false, theme = state.
   container.style.backgroundColor = backgroundColor;
   container.innerHTML = markup;
   document.body.appendChild(container);
+  stabilizeBulletinPdfRtlLayout(container.querySelector(".ozk-price-list"));
 
   try {
     await window
@@ -2768,7 +2800,14 @@ async function exportBulletinPdf(items, latest, useSyria = false, theme = state.
         filename,
         margin: [0, 0, 0, 0],
         image: { type: "png", quality: 0.98 },
-        html2canvas: { scale: 2, useCORS: true, backgroundColor, allowTaint: true },
+        html2canvas: {
+          scale: 2,
+          useCORS: true,
+          backgroundColor,
+          allowTaint: true,
+          // يمنع قلب ترتيب العنوان والمجموعات وأسماء الأصناف العربية في PDF.
+          foreignObjectRendering: true
+        },
         jsPDF: { unit: "mm", format: "a4", orientation: "portrait" },
         pagebreak: { mode: ["css"] }
       })
@@ -4327,6 +4366,7 @@ async function createPortablePdfBlob(bodyHtml, filename, options = {}) {
   container.innerHTML = bodyHtml;
   document.body.appendChild(container);
   const source = [...container.children].find((element) => element.tagName !== "STYLE") || container;
+  if (options.stabilizeBulletinRtl) stabilizeBulletinPdfRtlLayout(source);
 
   // html2canvas قد يحذف المسافة العادية الملاصقة لكلمة عربية (مثل «رقم 1»
   // فتصير «رقم1»). نثبّت مسافات عقد النص العربية فقط قبل الرسم؛ لا نغيّر HTML
@@ -4351,6 +4391,7 @@ async function createPortablePdfBlob(bodyHtml, filename, options = {}) {
         useCORS: true,
         backgroundColor,
         allowTaint: Boolean(options.allowTaint),
+        foreignObjectRendering: Boolean(options.foreignObjectRendering),
         scrollX: 0,
         scrollY: 0
       },

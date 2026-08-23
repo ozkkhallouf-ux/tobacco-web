@@ -5,7 +5,12 @@
     "task":  "إصلاح انعكاس النص العربي في PDF النشرة المصدرة من الموقع",
     "branch":  "task branch pending for: إصلاح انعكاس النص العربي في PDF النشرة المصدرة من الموقع",
     "files":  [
-                  "src/app.js,scripts/check.mjs,index.html,public/service-worker.js,docs/ai/topics/price-bulletins.md"
+                  "src/app.js",
+                  "scripts/check.mjs",
+                  "scripts/check-smart-inventory.mjs",
+                  "index.html",
+                  "public/service-worker.js",
+                  "docs/ai/topics/price-bulletins.md"
               ],
     "startedAt":  "2026-08-23T09:43:05Z",
     "updatedAt":  "2026-08-23T09:43:05Z",
