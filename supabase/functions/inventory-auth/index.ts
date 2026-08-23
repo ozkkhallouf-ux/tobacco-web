@@ -154,6 +154,12 @@ async function createAccount(req: Request, body: Record<string, unknown>) {
     await admin.auth.admin.deleteUser(userId);
     return reply(insertError.code === "23505" ? 409 : 500, { error: insertError.code === "23505" ? "username_taken" : "account_create_failed" });
   }
+  const { error: roleError } = await admin.rpc("smart_inventory_set_counter_auth_role", { p_user_id: userId });
+  if (roleError) {
+    await admin.from("inventory_counter_accounts").delete().eq("user_id", userId);
+    await admin.auth.admin.deleteUser(userId);
+    return reply(500, { error: "account_create_failed" });
+  }
   await admin.from("smart_inventory_audit_log").insert({ action: "counter_account_created", actor_user_id: owner.id,
     actor_display_name: String(owner.app_metadata?.display_name || "المالك"), after_data: { userId, username, displayName } });
   return reply(201, { account: { userId, username: usernameDisplay, displayName, enabled: true } });
@@ -176,6 +182,8 @@ async function mutateAccount(req: Request, body: Record<string, unknown>, action
   } else if (action === "enable") {
     await admin.auth.admin.updateUserById(userId, { ban_duration: "none", app_metadata: { role: "inventory_counter", username: account.username_normalized, display_name: account.display_name, account_enabled: true } });
     await admin.from("inventory_counter_accounts").update({ enabled: true, failed_attempts: 0, locked_until: null, disabled_at: null, disabled_by: null, updated_at: new Date().toISOString() }).eq("user_id", userId);
+    const { error: roleError } = await admin.rpc("smart_inventory_set_counter_auth_role", { p_user_id: userId });
+    if (roleError) return reply(500, { error: "account_update_failed" });
   } else if (action === "register_device") {
     const deviceId = String(body.deviceId || "").slice(0, 160);
     if (!deviceId) return reply(400, { error: "device_required" });

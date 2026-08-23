@@ -9,10 +9,12 @@ function section(source, start, end) {
 }
 
 const sql = readFileSync("supabase/smart-inventory.sql", "utf8");
+const isolationSql = readFileSync("supabase/migrations/20260823084956_smart_inventory_counter_isolation.sql", "utf8");
 const app = readFileSync("src/app.js", "utf8");
 const client = readFileSync("src/supabase-client.js", "utf8");
 const moduleSource = readFileSync("src/smart-inventory.js", "utf8");
 const edge = readFileSync("supabase/functions/inventory-auth/index.ts", "utf8");
+const securitySql = readFileSync("supabase/tests/smart-inventory-security.sql", "utf8");
 const html = readFileSync("index.html", "utf8");
 const worker = readFileSync("public/service-worker.js", "utf8");
 
@@ -43,6 +45,14 @@ assert(!/localStorage\.setItem\([^\n]*(password|pin)/i.test(moduleSource + clien
 assert(edge.includes("Never return the synthetic Auth email") && !/return reply\([^\n]*authEmail/.test(edge), "Edge Function must not return internal Auth email.");
 assert(edge.includes("smart_inventory_auth_preflight") && edge.includes("smart_inventory_auth_record"), "Login rate limiting contract missing.");
 assert(edge.includes("smart_inventory_revoke_user_sessions"), "Reset/disable must revoke existing sessions.");
+assert(edge.includes("smart_inventory_set_counter_auth_role"), "New and re-enabled counter accounts must receive the least-privilege database role.");
+for (const contract of [
+  "set role = 'anon'", "deny_inventory_counter_access", "as restrictive", "to anon",
+  "smart_inventory_set_counter_auth_role", "delete from auth.sessions"
+]) assert(isolationSql.toLowerCase().includes(contract.toLowerCase()), `Counter database isolation contract missing: ${contract}`);
+assert(!/grant\s+(?:select|insert|update|delete|all)[\s\S]{0,120}\bto\s+anon/i.test(isolationSql), "Counter isolation migration must not grant anon direct table access.");
+for (const contract of ["ameen_item_snapshot", "sales_line_items", "smart_inventory_owner_dashboard", "u.role <> 'anon'"])
+  assert(securitySql.includes(contract), `Live counter REST isolation assertion missing: ${contract}`);
 assert(edge.includes("password.length >= 8") && !edge.includes("password.length >= 10"), "Inventory counter passwords must accept the approved 8-character minimum.");
 assert(edge.includes("liveError || live !== true"), "Owner operations must fail closed when live-session verification errors.");
 assert(app.includes('data-form="inventory-counter-login"') && app.includes('minlength="8" maxlength="128"'), "Counter login must accept the approved 8-character password.");
