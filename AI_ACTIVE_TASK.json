@@ -12,9 +12,13 @@
     "src/inventory-recon-calc.js",
     "src/smart-inventory.js",
     "scripts/check.mjs",
+    "package.json",
     "index.html",
     "public/service-worker.js",
     "supabase/smart-inventory.sql",
+    "supabase/functions/inventory-auth/index.ts",
+    "supabase/tests/smart-inventory-security.sql",
+    "scripts/check-smart-inventory.mjs",
     "docs/ai/topics/inventory.md"
   ],
   "startedAt": "2026-08-23T04:20:09Z",

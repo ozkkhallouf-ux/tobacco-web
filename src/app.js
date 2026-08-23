@@ -185,7 +185,7 @@ function syncFreshnessLabel(value) {
   return `قبل ${Math.round(minutes / 60)} ساعة`;
 }
 
-const allowedRoutes = new Set(["overview", "login", "requests", "ameen", "balances", "pricing", "remote", "monitoring", "payments", "purchases", "sales", "warehouses", "inventoryRecon", "staff", "search", "ai", "dashboard"]);
+const allowedRoutes = new Set(["overview", "login", "requests", "ameen", "balances", "pricing", "remote", "monitoring", "payments", "purchases", "sales", "warehouses", "inventoryRecon", "smartInventory", "staff", "search", "ai", "dashboard"]);
 
 const customerPriceContacts = [
   { label: "هاتف المبيعات", value: "0985000771" },
@@ -460,6 +460,15 @@ async function boot() {
       state.route = "login";
       return;
     }
+    // Counter accounts receive only the smart-inventory RPC payload. Do not
+    // start any legacy loader that could place Ameen stock, prices, balances,
+    // invoices or reconciliation differences in browser state.
+    if (isInventoryCounter()) {
+      state.route = "smartInventory";
+      window.__ozkSession = state.session;
+      await window.SmartInventory?.load(state.session);
+      return;
+    }
     await loadRequests();
     await loadInventoryReports();
     await loadCustomerBalanceReports();
@@ -509,7 +518,9 @@ async function loadPublishedExchangeRate() {
 async function refreshSession() {
   try {
     state.session = await dataStore.getSession();
-    if (!canAccessRoute(state.route)) state.route = "overview";
+    window.__ozkSession = state.session;
+    if (isInventoryCounter()) state.route = "smartInventory";
+    else if (!canAccessRoute(state.route)) state.route = "overview";
   } catch (error) {
     state.session = null;
     setNotice("error", safeErrorMessage(error));
@@ -702,12 +713,19 @@ async function loadDailyMovement(date) {
 // التكلفة للمدير فقط — تُجلب من جدول item_costs المحمي (RLS = is_owner)
 const OWNER_EMAILS = ["ozkkhallouf@gmail.com", "ozkkhalouf@gmail.com"];
 const OWNER_ONLY_ROUTES = new Set(["decision", "command"]);
+const SMART_INVENTORY_ROLES = new Set(["owner", "inventory_counter"]);
 function isOwner() {
   const email = String(state.session?.email || "").trim().toLowerCase();
   return state.session?.accessRole === "owner" || OWNER_EMAILS.includes(email);
 }
+function isInventoryCounter() {
+  return state.session?.accessRole === "inventory_counter";
+}
 function canAccessRoute(route) {
-  return !OWNER_ONLY_ROUTES.has(String(route || "")) || isOwner();
+  const requested = String(route || "");
+  if (isInventoryCounter()) return requested === "smartInventory";
+  if (requested === "smartInventory") return SMART_INVENTORY_ROLES.has(state.session?.accessRole);
+  return !OWNER_ONLY_ROUTES.has(requested) || isOwner();
 }
 window.ozkCanAccessRoute = canAccessRoute;
 
@@ -1152,9 +1170,10 @@ async function printOverdueReport() {
 
 function setRoute(route, clearNotice = true) {
   const requestedRoute = String(route || "overview");
-  state.route = canAccessRoute(requestedRoute) ? requestedRoute : "overview";
+  const safeFallback = isInventoryCounter() ? "smartInventory" : "overview";
+  state.route = canAccessRoute(requestedRoute) ? requestedRoute : safeFallback;
   if (state.route !== requestedRoute) {
-    setNotice("error", "هذه الصفحة متاحة لحساب المالك فقط.");
+    setNotice("error", isInventoryCounter() ? "حساب موظف الجرد مخصص للجرد فقط." : "ليست لديك صلاحية لهذه الصفحة.");
     clearNotice = false;
   }
   // أرشيف الفواتير شاشة عابرة داخل صفحة المبيعات: أي تنقّل يعيدك إلى النموذج
@@ -1162,6 +1181,7 @@ function setRoute(route, clearNotice = true) {
   state.salesHistoryOpen = false;
   cancelSalesHistorySearch();
   if (clearNotice) state.notice = null;
+  if (state.route === "smartInventory" && state.session) window.SmartInventory?.load(state.session);
   render();
 }
 
@@ -1186,6 +1206,7 @@ async function saveSession(form, action) {
 
     const result = action === "signup" ? await dataStore.signUp(input) : await dataStore.signIn(input);
     state.session = result.session || (await dataStore.getSession());
+    window.__ozkSession = state.session;
 
     if (result.needsEmailConfirmation) {
       setNotice("success", "تم إنشاء الحساب. إذا كان تأكيد البريد مفعلا في Supabase، افتح البريد ثم سجل الدخول.");
@@ -1193,6 +1214,13 @@ async function saveSession(form, action) {
       setNotice("success", dataStore.isConfigured() ? "تم تسجيل الدخول عبر Supabase." : "تم تسجيل الدخول التجريبي محليا.");
     }
 
+    if (isInventoryCounter()) {
+      state.route = "smartInventory";
+      await window.SmartInventory?.load(state.session, true);
+      setNotice("success", "تم تسجيل الدخول إلى الجرد الذكي.");
+      render();
+      return;
+    }
     await loadRequests();
     await loadInventoryReports();
     await loadCustomerBalanceReports();
@@ -1204,6 +1232,24 @@ async function saveSession(form, action) {
     setNotice("error", safeErrorMessage(error));
     render();
   }
+}
+
+async function saveInventoryCounterSession(form) {
+  try {
+    const result = await dataStore.signInInventoryCounter({
+      username: formValue(form, "username"),
+      password: formValue(form, "password"),
+      deviceId: window.SmartInventory?.deviceId?.() || ""
+    });
+    state.session = result.session || (await dataStore.getSession());
+    window.__ozkSession = state.session;
+    if (state.session?.accessRole !== "inventory_counter") throw new Error("هذا الحساب ليس حساب موظف جرد.");
+    state.route = "smartInventory";
+    window.history.replaceState({}, "", `${window.location.pathname}?route=smartInventory`);
+    await window.SmartInventory?.load(state.session, true);
+    setNotice("success", "تم الدخول. اختر المستودع وابدأ الجرد.");
+  } catch (error) { setNotice("error", safeErrorMessage(error)); }
+  render();
 }
 
 async function requestPasswordReset(form) {
@@ -1268,6 +1314,10 @@ async function logout() {
   try {
     await dataStore.signOut();
     state.session = null;
+    window.__ozkSession = null;
+    window.SmartInventory?.reset?.();
+    state.route = "login";
+    window.history.replaceState({}, "", `${window.location.pathname}?route=login`);
     state.inventoryReports = [];
     state.customerBalanceReports = [];
     state.customerMovementsReport = null;
@@ -3094,6 +3144,19 @@ function completionPercent() {
 }
 
 function shell(content) {
+  if (isInventoryCounter()) {
+    return `
+      <div class="app-shell route-smartInventory counter-shell">
+        <aside class="sidebar" aria-label="التنقل">
+          <div class="brand"><img src="public/icons/ozk-logo.png" alt=""><span>${escapeHtml(appConfig.name)}</span></div>
+          <nav>${navButton("smartInventory", "📋 الجرد الذكي")}</nav>
+        </aside>
+        <main class="main"><header class="topbar"><div><h1>الجرد الذكي</h1></div><div class="topbar-actions">
+          <button class="button secondary theme-toggle" data-action="toggle-theme">${state.darkMode ? "☀️" : "🌙"}</button>
+          <button class="button secondary" data-action="logout">تسجيل الخروج — ${escapeHtml(state.session.name)}</button>
+        </div></header>${connectionNotice()}${messagePanel()}${state.loading ? loadingPanel() : content}</main>
+      </div>`;
+  }
   return `
     <div class="app-shell route-${escapeHtml(state.route)}">
       <aside class="sidebar" aria-label="التنقل">
@@ -3112,6 +3175,7 @@ function shell(content) {
           ${state.session ? navButton("purchases", "🧾 فواتير مشتريات") : ""}
           ${state.session ? navButton("warehouses", "🏭 المستودعات والمناقلات") : ""}
           ${state.session ? navButton("inventoryRecon", "📋 الجرد الشهري") : ""}
+          ${isOwner() ? navButton("smartInventory", "✅ الجرد الذكي") : ""}
           ${state.session ? navButton("staff", "👥 الموظفون") : ""}
           ${state.session ? navButton("ai", "🤖 المساعد الذكي") : ""}
         </nav>
@@ -3179,6 +3243,7 @@ const NAV_HINTS = {
   purchases: "فواتير المشتريات والتزامات الموردين",
   warehouses: "مخزون المستودعات والمناقلات بينها",
   inventoryRecon: "مطابقة الجرد الشهري مع النظام",
+  smartInventory: "جرد يومي أعمى ومتابعة الفروقات للمالك",
   staff: "إدارة حسابات وصلاحيات الموظفين",
   ai: "مساعد ذكي للأسئلة والاستفسارات"
 };
@@ -3207,6 +3272,7 @@ function pageTitle() {
     purchases: "فواتير المشتريات",
     warehouses: "المستودعات والمناقلات",
     inventoryRecon: "الجرد الشهري",
+    smartInventory: "الجرد الذكي",
     dashboard: "التقارير",
     staff: "إدارة الموظفين",
     search: `نتائج: ${escapeHtml(state.globalSearch)}`
@@ -3308,7 +3374,7 @@ function login() {
     <section class="panel wide form-layout">
       <div>
         <h2>دخول الموظفين والإدارة</h2>
-        <p class="muted">${live ? "أدخل بريدك الإلكتروني وكلمة المرور للدخول، أو أنشئ حساباً جديداً." : "هذا دخول تجريبي محلي."}</p>
+        <p class="muted">${live ? "موظف الجرد يدخل باسم المستخدم وكلمة المرور. الإدارة تدخل بالبريد المعتاد." : "هذا دخول تجريبي محلي."}</p>
       </div>
       ${state.session ? `
         <div class="notice-panel success">
@@ -3316,6 +3382,13 @@ function login() {
           <span>${escapeHtml(state.session.name)} — ${escapeHtml(state.session.role)}</span>
         </div>
       ` : ""}
+      ${live ? `<form class="form-card smart-login-card" data-form="inventory-counter-login">
+        <h3>دخول موظف الجرد</h3>
+        <label>اسم المستخدم<input name="username" autocomplete="username" maxlength="48" required></label>
+        <label>كلمة المرور<input name="password" type="password" autocomplete="current-password" minlength="10" maxlength="128" required></label>
+        <button class="button primary" type="submit">دخول إلى الجرد فقط</button>
+        <p class="muted">لا تحتاج Gmail أو بريداً شخصياً. الحساب ينشئه المالك.</p>
+      </form><div class="smart-login-divider"><span>دخول الإدارة</span></div>` : ""}
       <form class="form-card" data-form="login">
         ${live ? "" : `
           <label>
@@ -3333,12 +3406,17 @@ function login() {
         </label>
         <div class="button-row">
           <button class="button primary" type="submit" data-auth-action="signin">دخول</button>
-          ${live ? '<button class="button secondary" type="submit" data-auth-action="signup">إنشاء حساب جديد</button>' : ""}
+          ${live ? "" : '<button class="button secondary" type="submit" data-auth-action="signup">إنشاء حساب تجريبي</button>'}
         </div>
         ${live ? '<button class="button secondary" type="button" data-action="forgot-password">نسيت كلمة المرور</button>' : ""}
       </form>
     </section>
   `);
+}
+
+function smartInventoryPage() {
+  if (!state.session || !SMART_INVENTORY_ROLES.has(state.session.accessRole)) return shell('<section class="notice-panel error">ليس لديك صلاحية الجرد الذكي.</section>');
+  return shell(window.SmartInventory?.render(state.session) || '<section class="panel wide"><p>جاري تحميل وحدة الجرد…</p></section>');
 }
 
 function requests() {
@@ -9635,6 +9713,7 @@ function render() {
     purchases,
     warehouses,
     inventoryRecon,
+    smartInventory: smartInventoryPage,
     dashboard: reportsPage,
     staff: staffPage,
     search: searchPage,
@@ -9642,6 +9721,13 @@ function render() {
   };
 
   app.innerHTML = pages[state.route]();
+
+  if (state.route === "smartInventory" && state.session) {
+    window.SmartInventory?.bind(app, state.session, {
+      render,
+      notice(type, text) { setNotice(type, text); render(); }
+    });
+  }
 
   app.querySelectorAll("[data-route]").forEach((button) => {
     button.addEventListener("click", (event) => {
@@ -10662,6 +10748,11 @@ function render() {
     addRequest(event.currentTarget);
   });
 
+  app.querySelector("[data-form='inventory-counter-login']")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    saveInventoryCounterSession(event.currentTarget);
+  });
+
   app.querySelector("[data-form='ameen-import']")?.addEventListener("submit", (event) => {
     event.preventDefault();
     importAmeenReport(event.currentTarget);
@@ -10680,6 +10771,7 @@ function render() {
 boot();
 
 setInterval(() => {
+  if (isInventoryCounter()) return;
   // لا نقاطع المستخدم أثناء الكتابة في نموذج
   const active = document.activeElement;
   if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.tagName === "SELECT")) return;
@@ -10692,6 +10784,7 @@ setInterval(() => {
 }, 60000);
 
 setInterval(async () => {
+  if (isInventoryCounter()) return;
   if (!state.session && dataStore.isConfigured()) return;
   try {
     const fresh = await dataStore.listRequests();

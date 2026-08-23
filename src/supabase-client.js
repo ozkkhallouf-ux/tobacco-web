@@ -132,18 +132,67 @@
     const email = (user.email || "").toLowerCase();
     const staffEntry = window.appConfig?.staffRoles?.[email];
     const metadataRole = String(user.app_metadata?.role || "").toLowerCase();
-    const accessRole = metadataRole === "owner" || metadataRole === "employee"
+    const accessRole = ["owner", "employee", "inventory_counter"].includes(metadataRole)
       ? metadataRole
       : staffEntry?.accessRole || "employee";
+    const trustedDisplayName = cleanText(user.app_metadata?.display_name, 80);
 
     return {
       provider: "supabase",
       id: user.id,
-      email: user.email || "",
-      name: staffEntry?.name || user.user_metadata?.display_name || user.email || "موظف OZK",
-      role: staffEntry?.role || (accessRole === "owner" ? "المالك" : "موظف"),
+      // Counter identities use a synthetic Auth email internally. Never copy it
+      // into application state or render it in the interface.
+      email: accessRole === "inventory_counter" ? "" : (user.email || ""),
+      name: accessRole === "inventory_counter"
+        ? (trustedDisplayName || "موظف جرد")
+        : (staffEntry?.name || trustedDisplayName || user.user_metadata?.display_name || user.email || "موظف OZK"),
+      role: accessRole === "inventory_counter" ? "موظف جرد" : (staffEntry?.role || (accessRole === "owner" ? "المالك" : "موظف")),
       accessRole
     };
+  }
+
+  async function inventoryRpc(name, params = {}) {
+    if (!client) throw new Error("الجرد الذكي يتطلب اتصالاً آمناً بـ Supabase.");
+    await requireUser();
+    const { data, error } = await client.rpc(name, params);
+    if (error) throw new Error(translateDbError(error.message));
+    return data;
+  }
+
+  async function inventoryAuthRequest(action, payload = {}, requireSession = true) {
+    if (!client) throw new Error("إدارة حسابات الجرد تتطلب اتصالاً آمناً بـ Supabase.");
+    let accessToken = "";
+    if (requireSession) {
+      const { data, error } = await client.auth.getSession();
+      if (error || !data?.session?.access_token) throw new Error(missingSessionMessage());
+      accessToken = data.session.access_token;
+    }
+    const response = await fetch(`${config.url.replace(/\/$/, "")}/functions/v1/inventory-auth`, {
+      method: "POST",
+      headers: {
+        apikey: config.publishableKey,
+        authorization: `Bearer ${accessToken || config.publishableKey}`,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ action, ...payload })
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const messages = {
+        credentials_required: "اكتب اسم المستخدم وكلمة المرور.",
+        invalid_or_locked: "بيانات الدخول غير صحيحة أو الحساب مقفل مؤقتاً. انتظر 15 دقيقة بعد المحاولات المتكررة.",
+        device_not_allowed: "هذا الحساب مقصور على جهاز آخر. اطلب من المالك تسجيل هذا الجهاز.",
+        owner_only: "هذه العملية متاحة للمالك فقط.",
+        username_taken: "اسم المستخدم مستخدم مسبقاً. اختر اسماً مميزاً.",
+        invalid_account_input: "أدخل اسماً واضحاً واسم مستخدم مميزاً وكلمة مرور من 10 أحرف على الأقل.",
+        invalid_password: "كلمة المرور يجب أن تكون من 10 أحرف على الأقل.",
+        weak_password: "كلمة المرور مرفوضة أمنياً. استخدم كلمة أقوى.",
+        account_not_found: "حساب موظف الجرد غير موجود.",
+        login_unavailable: "خدمة دخول الجرد غير متاحة الآن. حاول لاحقاً."
+      };
+      throw new Error(messages[result.error] || "تعذر تنفيذ العملية الآمنة.");
+    }
+    return result;
   }
 
   function normalizeDbRequest(row) {
@@ -483,6 +532,26 @@
 
       const session = normalizeSession(data.session);
       if (!session) throw new Error(missingSessionMessage());
+      return { session };
+    },
+
+    async signInInventoryCounter(input) {
+      if (!client) throw new Error("دخول موظف الجرد يتطلب اتصالاً بـ Supabase.");
+      const result = await inventoryAuthRequest("login", {
+        username: cleanText(input.username, 48),
+        password: String(input.password || ""),
+        deviceId: cleanText(input.deviceId, 160)
+      }, false);
+      const { data, error } = await client.auth.setSession({
+        access_token: result.accessToken,
+        refresh_token: result.refreshToken
+      });
+      if (error) throw new Error(translateAuthError(error.message));
+      const session = normalizeSession(data.session);
+      if (!session || session.accessRole !== "inventory_counter") {
+        await client.auth.signOut({ scope: "local" });
+        throw new Error("هذا الحساب ليس حساب موظف جرد.");
+      }
       return { session };
     },
 
@@ -1550,6 +1619,75 @@
         throw new Error(errors[payload.error] || "تعذر الحصول على إجابة من المساعد المالي.");
       }
       return payload;
+    },
+
+    // الجرد الذكي: كل payload للموظف يأتي من RPC لا تضم expected_qty أو الفرق.
+    async listSmartInventoryWarehouses(date = null) {
+      return inventoryRpc("smart_inventory_available_warehouses", { p_date: date || null });
+    },
+
+    async startOrJoinSmartInventory(warehouseKey) {
+      return inventoryRpc("smart_inventory_start_or_join", { p_warehouse_key: cleanText(warehouseKey, 120) });
+    },
+
+    async getSmartInventoryCounterSession(sessionId) {
+      return inventoryRpc("smart_inventory_counter_session", { p_session_id: sessionId });
+    },
+
+    async claimSmartInventoryItem(itemId) {
+      return inventoryRpc("smart_inventory_claim_item", { p_item_id: itemId });
+    },
+
+    async saveSmartInventoryItem(input) {
+      return inventoryRpc("smart_inventory_save_item", {
+        p_item_id: input.itemId,
+        p_request_id: input.requestId,
+        p_count_state: input.countState,
+        p_unit1_qty: input.unit1Qty ?? 0,
+        p_unit2_qty: input.unit2Qty ?? 0,
+        p_damaged_unit1_qty: input.damagedUnit1Qty ?? 0,
+        p_expected_version: input.expectedVersion ?? null
+      });
+    },
+
+    async completeSmartInventorySession(sessionId) {
+      return inventoryRpc("smart_inventory_complete_session", { p_session_id: sessionId });
+    },
+
+    async getSmartInventoryOwnerDashboard(date = null) {
+      return inventoryRpc("smart_inventory_owner_dashboard", { p_date: date || null });
+    },
+
+    async getSmartInventoryOwnerReport(sessionId) {
+      return inventoryRpc("smart_inventory_owner_report", { p_session_id: sessionId });
+    },
+
+    async openSmartInventoryRecount(itemId, reason) {
+      return inventoryRpc("smart_inventory_owner_open_recount", { p_item_id: itemId, p_reason: cleanText(reason, 500) });
+    },
+
+    async reopenSmartInventorySession(sessionId, reason) {
+      return inventoryRpc("smart_inventory_owner_reopen_session", { p_session_id: sessionId, p_reason: cleanText(reason, 500) });
+    },
+
+    async correctSmartInventoryItem(itemId, actualQtyUnit1, reason) {
+      return inventoryRpc("smart_inventory_owner_correct_item", {
+        p_item_id: itemId,
+        p_actual_qty_unit1: actualQtyUnit1,
+        p_reason: cleanText(reason, 500)
+      });
+    },
+
+    async listInventoryCounterAccounts() {
+      return inventoryAuthRequest("list_accounts");
+    },
+
+    async createInventoryCounterAccount(input) {
+      return inventoryAuthRequest("create_account", input);
+    },
+
+    async updateInventoryCounterAccount(action, input) {
+      return inventoryAuthRequest(action, input);
     }
   };
 
