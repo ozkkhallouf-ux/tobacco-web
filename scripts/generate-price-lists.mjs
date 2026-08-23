@@ -27,6 +27,11 @@ if (requestedRate !== null) {
 }
 const SYP_FILE_TAG = "14050"; // اسم رابط ثابت؛ السعر الفعلي داخل الملف يأتي من exchange-rate.json
 const VALIDITY = Number(get("--validity") ?? 30);
+function formatBulletinEnglishInteger(value) {
+  const number = Number(value);
+  const rounded = Number.isFinite(number) ? Math.round(number) : 0;
+  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(rounded);
+}
 
 // ── تاريخ ─────────────────────────────────────────────────────────────────────
 const today     = new Date();
@@ -670,13 +675,13 @@ writeFileSync(
     pageItems: sypItems,
     titleSuffix: "سوري",
     badgeClass: "badge-syp",
-    badgeLabel: `${newSyriaFlag} ليرة — مفرق — صرف ${SYP_RATE.toLocaleString()}`,
+    badgeLabel: `${newSyriaFlag} ليرة — مفرق — صرف ${formatBulletinEnglishInteger(SYP_RATE)}`,
     unitLabel: "سعر المفرق للوحدة",
     pdfFile: `price-list-syp-${SYP_FILE_TAG}.pdf`,
     priceFormatter: (item) => {
       const cartonUsd = item.retailCarton > 0 ? item.retailCarton : item.usd;
       const p = Math.round((cartonUsd * SYP_RATE) / (item.unitFactor ?? 10));
-      return `${p.toLocaleString("ar-SY")} ل.س`;
+      return `${formatBulletinEnglishInteger(p)} ل.س`;
     },
     unitFormatter: (item) => item.unit1 || (item.unit === 'كرتونة' ? 'علبة' : item.unit),
   })
@@ -707,7 +712,7 @@ writeFileSync(
     badgeLabel: `${newSyriaFlag} نشرة الوزاري — مفرق`,
     unitLabel: "سعر المفرق للوحدة",
     pdfFile: `price-list-wazari-syp-${SYP_FILE_TAG}.pdf`,
-    priceFormatter: (item) => `${Math.round((item.retailCarton * SYP_RATE) / item.unitFactor).toLocaleString("ar-SY")} ل.س`,
+    priceFormatter: (item) => `${formatBulletinEnglishInteger((item.retailCarton * SYP_RATE) / item.unitFactor)} ل.س`,
     unitFormatter: (item) => item.unit1 || (item.unit === "كرتونة" ? "علبة" : item.unit),
   })
 );
@@ -766,7 +771,7 @@ const indexHtml = `<!DOCTYPE html>
     <div class="card-icon">🇸🇾</div>
     <div class="card-title">نشرة السوري — مفرق</div>
     <div class="card-unit">سعر المفرق للوحدة الواحدة</div>
-    <div class="card-desc">بالليرة السورية<br>صرف ${SYP_RATE.toLocaleString()} ل.س/دولار</div>
+    <div class="card-desc">بالليرة السورية<br>صرف ${formatBulletinEnglishInteger(SYP_RATE)} ل.س/دولار</div>
     <div class="card-btn">عرض وطباعة</div>
   </a>
   <a class="card" href="price-list-usd.html" target="_blank">
