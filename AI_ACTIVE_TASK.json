@@ -1,12 +1,14 @@
 {
   "schemaVersion": 1,
-  "status": "idle",
-  "owner": null,
-  "task": null,
-  "branch": null,
-  "files": [],
-  "startedAt": null,
-  "updatedAt": "2026-08-23T05:21:37Z",
+  "status": "active",
+  "owner": "Codex",
+  "task": "تطبيق Backend الجرد الذكي وإنشاء حسابات موظفي الجرد",
+  "branch": "task branch pending for: تطبيق Backend الجرد الذكي وإنشاء حسابات موظفي الجرد",
+  "files": [
+    "supabase/smart-inventory.sql,supabase/functions/inventory-auth/index.ts,docs/ai/topics/inventory.md"
+  ],
+  "startedAt": "2026-08-23T05:36:20Z",
+  "updatedAt": "2026-08-23T05:36:20Z",
   "pr": null,
-  "note": "No active task. Read AI_HANDOFF.md before starting work."
+  "note": "Work in progress. Do not edit the reserved files."
 }
