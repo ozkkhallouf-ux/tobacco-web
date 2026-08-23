@@ -25,6 +25,7 @@ const required = [
   "public/downloads/price-list-wazari-syp-14050.html",
   "public/downloads/price-list-wazari-syp-14050.pdf",
   "public/downloads/price-list-wazari-syp-14050-light.pdf",
+  "public/downloads/index.html",
   "AI_WORK_SYNC.md",
   "AI_HANDOFF.md",
   "AI_ACTIVE_TASK.json",
@@ -202,7 +203,9 @@ const pdfGenerator = readFileSync("scripts/generate-pdfs.mjs", "utf8");
 const priceListTemplateSource = readFileSync("src/price-list-template.js", "utf8");
 const usdBulletin = readFileSync("public/downloads/price-list-usd.html", "utf8");
 const sypBulletin = readFileSync("public/downloads/price-list-syp-14050.html", "utf8");
+const wazariUsdBulletin = readFileSync("public/downloads/price-list-wazari-usd.html", "utf8");
 const wazariSypBulletin = readFileSync("public/downloads/price-list-wazari-syp-14050.html", "utf8");
+const bulletinsIndex = readFileSync("public/downloads/index.html", "utf8");
 const ameenSyncAgent = readFileSync("tools/ameen-sync-agent.ps1", "utf8");
 const ameenPriceApply = readFileSync("tools/apply-approved-prices-to-ameen.ps1", "utf8");
 const ameenPriceVerify = readFileSync("tools/verify-prices.ps1", "utf8");
@@ -257,6 +260,11 @@ for (const [label, bulletin] of [
     console.error(`${label} must contain comma-separated English digits and no Arabic/Persian digits.`);
     failed = true;
   }
+}
+
+if (!bulletinsIndex.includes('<html dir="rtl" lang="ar" translate="no">') || !bulletinsIndex.includes('<meta name="google" content="notranslate">') || !bulletinsIndex.includes('<div class="date" dir="ltr"><span>')) {
+  console.error("The bulletins index must remain Arabic, opt out of auto-translation, and isolate its date parts.");
+  failed = true;
 }
 for (const contract of [
   'createHash("sha256")',
@@ -572,16 +580,35 @@ if (!priceGenerator.includes('import "../src/price-list-template.js"') || !price
   templateContext.globalThis = templateContext;
   vm.runInContext(priceListTemplateSource, templateContext);
   const templateApi = templateContext.OZKPriceListTemplate;
+  const arabicIssueDate = templateApi?.formatArabicIssueDate?.(new Date(2026, 7, 23));
+  if (arabicIssueDate !== "23 آب 2026" || /[٠-٩۰-۹]/.test(arabicIssueDate || "")) {
+    console.error("The shared bulletin date formatter must use an Arabic month with English digits.");
+    failed = true;
+  }
   const sample = templateApi?.render?.({
     groups: [{ name: "ماستر", items: [{ name: "صنف تجريبي", unit: "كرتونة", price: "10.00 $" }] }],
     logoSrc: "logo.png",
-    issueDate: "20 August 2026",
+    issueDate: arabicIssueDate,
     badgeClass: "badge-usd",
     badgeLabelHtml: "دولار",
     unitLabel: "سعر الكرتونة (جملة)"
   }) || "";
-  if (!sample.includes('class="ozk-price-list"') || !sample.includes("صنف تجريبي") || sample.includes("price-pdf-book")) {
+  if (!sample.includes('class="ozk-price-list"') || !sample.includes('lang="ar" dir="rtl" translate="no"') || !sample.includes("صنف تجريبي") || sample.includes("price-pdf-book")) {
     console.error("The shared template did not render the new bulletin markup correctly.");
+    failed = true;
+  }
+  if (!sample.includes('class="price-list-header-date" dir="ltr"') || !sample.includes('class="issue-date-month" dir="rtl">آب</span>')) {
+    console.error("The bulletin issue date must isolate its English digits from the Arabic month in RTL exports.");
+    failed = true;
+  }
+}
+
+for (const [label, source] of [
+  ["in-app bulletin preview", app],
+  ["published bulletin generator", priceGenerator]
+]) {
+  if (!source.includes("formatArabicIssueDate") || source.includes('toLocaleDateString("en-GB"')) {
+    console.error(`${label} must use the shared Arabic issue-date formatter.`);
     failed = true;
   }
 }
@@ -685,6 +712,26 @@ for (const newsletterPage of generatedNewsletterPages) {
   }
   if (page.includes("item-count-num") || page.includes("item-count-lbl")) {
     console.error(`Newsletter page must not show the item count: ${newsletterPage}`);
+    failed = true;
+  }
+  if (!page.includes('<html dir="rtl" lang="ar" translate="no">') || !page.includes('<meta name="google" content="notranslate">') || !page.includes('<meta http-equiv="Content-Language" content="ar">')) {
+    console.error(`Newsletter page must declare Arabic RTL and opt out of browser auto-translation: ${newsletterPage}`);
+    failed = true;
+  }
+  if (!/\b\d{2} (?:كانون الثاني|شباط|آذار|نيسان|أيار|حزيران|تموز|آب|أيلول|تشرين الأول|تشرين الثاني|كانون الأول) \d{4}\b/.test(page) || /\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\b/.test(page)) {
+    console.error(`Newsletter page must show an Arabic issue month with English digits: ${newsletterPage}`);
+    failed = true;
+  }
+}
+
+for (const [label, bulletin] of [
+  ["general USD bulletin", usdBulletin],
+  ["general SYP bulletin", sypBulletin],
+  ["wazari USD bulletin", wazariUsdBulletin],
+  ["wazari SYP bulletin", wazariSypBulletin]
+]) {
+  if (!bulletin.includes('lang="ar" dir="rtl" translate="no"')) {
+    console.error(`${label} content must remain explicitly Arabic and RTL.`);
     failed = true;
   }
 }

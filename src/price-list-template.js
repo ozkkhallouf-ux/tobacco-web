@@ -7,6 +7,25 @@
   const SPECIAL_RIGHT_GROUPS = ["فحم", "ورق", "فيبات", "قداحات", "سلفان"];
   const SPECIAL_LEFT_GROUPS = ["معسل"];
   const SPECIAL_GROUPS = new Set([...SPECIAL_RIGHT_GROUPS, ...SPECIAL_LEFT_GROUPS, "مزايا", "نخلة"]);
+  const ARABIC_MONTHS = [
+    "كانون الثاني", "شباط", "آذار", "نيسان", "أيار", "حزيران",
+    "تموز", "آب", "أيلول", "تشرين الأول", "تشرين الثاني", "كانون الأول"
+  ];
+
+  function formatArabicIssueDate(value = new Date()) {
+    const date = value instanceof Date ? value : new Date(value);
+    if (Number.isNaN(date.getTime())) return "";
+    const day = String(date.getDate()).padStart(2, "0");
+    const year = String(date.getFullYear());
+    return `${day} ${ARABIC_MONTHS[date.getMonth()]} ${year}`;
+  }
+
+  function renderIssueDate(value) {
+    const issueDate = String(value || "").trim();
+    const parts = issueDate.match(/^(\d{1,2})\s+(.+?)\s+(\d{4})$/);
+    if (!parts) return escapeHtml(issueDate);
+    return `<span class="issue-date-day">${escapeHtml(parts[1])}</span><span class="issue-date-month" dir="rtl">${escapeHtml(parts[2])}</span><span class="issue-date-year">${escapeHtml(parts[3])}</span>`;
+  }
 
   const CSS = `
     @import url('https://fonts.googleapis.com/css2?family=Almarai:wght@300;400;700;800&display=swap');
@@ -34,7 +53,8 @@
       font-size:20px; font-weight:900; color:var(--gold-strong); letter-spacing:1px;
     }
     .ozk-price-list .price-list-header-date {
-      font-size:10.5px; color:var(--muted); margin-top:2px; font-weight:600; direction:ltr;
+      display:flex; align-items:center; justify-content:center; gap:4px;
+      font-size:10.5px; color:var(--muted); margin-top:2px; font-weight:600; direction:ltr; unicode-bidi:isolate;
     }
     .ozk-price-list .price-list-currency-badge {
       display:inline-block; padding:3px 12px; border-radius:20px; font-size:10.5px;
@@ -209,13 +229,13 @@
       </div>` : "";
     return `
       <style data-ozk-price-list-style="${VERSION}">${CSS}</style>
-      <section class="ozk-price-list${tools ? " has-document-tools" : ""}" data-theme="${options.theme === "light" ? "light" : "dark"}" data-template-version="${VERSION}">
+      <section class="ozk-price-list${tools ? " has-document-tools" : ""}" lang="ar" dir="rtl" translate="no" data-theme="${options.theme === "light" ? "light" : "dark"}" data-template-version="${VERSION}">
         ${toolsMarkup}
         <header class="price-list-header">
           <img src="${escapeHtml(options.logoSrc)}" alt="OZK TOBACCO" class="price-list-header-logo">
           <div class="price-list-header-center">
             <div class="price-list-header-title">نشرة الأسعار</div>
-            <div class="price-list-header-date">${escapeHtml(options.issueDate)}</div>
+            <div class="price-list-header-date" dir="ltr">${renderIssueDate(options.issueDate)}</div>
             <span class="price-list-currency-badge ${escapeHtml(options.badgeClass)}">${options.badgeLabelHtml || ""}</span>
           </div>
           <div class="price-list-header-right" aria-hidden="true"></div>
@@ -235,5 +255,5 @@
       </section>`;
   }
 
-  root.OZKPriceListTemplate = Object.freeze({ VERSION, CSS, layoutGroups, pageCount, render });
+  root.OZKPriceListTemplate = Object.freeze({ VERSION, CSS, formatArabicIssueDate, layoutGroups, pageCount, render });
 })(globalThis);
