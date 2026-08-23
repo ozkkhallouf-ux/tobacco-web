@@ -1,23 +1,12 @@
 {
   "schemaVersion": 1,
-  "status": "active",
-  "owner": "Codex",
-  "task": "دمج ونشر الجرد الذكي والتحقق الحي",
-  "branch": "task branch pending for: دمج ونشر الجرد الذكي والتحقق الحي",
-  "files": [
-    "index.html",
-    "public/service-worker.js",
-    "src/app.js",
-    "src/styles.css",
-    "src/smart-inventory.js",
-    "src/supabase-client.js",
-    "supabase/smart-inventory.sql",
-    "supabase/functions/inventory-auth/index.ts",
-    "docs/ai/topics/inventory.md",
-    "scripts/check-smart-inventory.mjs"
-  ],
-  "startedAt": "2026-08-23T06:56:00Z",
-  "updatedAt": "2026-08-23T06:56:00Z",
+  "status": "idle",
+  "owner": null,
+  "task": null,
+  "branch": null,
+  "files": [],
+  "startedAt": null,
+  "updatedAt": "2026-08-23T09:03:00Z",
   "pr": null,
-  "note": "دمج الفرع codex/smart-inventory-counting ونشر الواجهة بعد موافقة المستخدم، مع فحوص حيّة ومنع أي كتابة إلى الأمين."
+  "note": "No active task. Read AI_HANDOFF.md before starting work."
 }

@@ -2,6 +2,13 @@
 
 يقرأه Claude وCodex قبل كل مهمة. أحدث سجل يكون في الأعلى. لا تحذف السجلات السابقة.
 
+## 2026-08-23 - Codex - دمج ونشر الجرد الذكي والتحقق الحي
+
+- Status: completed
+- Branch: task branch pending for: دمج ونشر الجرد الذكي والتحقق الحي
+- Files: index.html, public/service-worker.js, src/app.js, src/styles.css, src/smart-inventory.js, src/supabase-client.js, supabase/smart-inventory.sql, supabase/functions/inventory-auth/index.ts, docs/ai/topics/inventory.md, scripts/check-smart-inventory.mjs
+- Result: تم دمج ونشر الجرد الذكي وإصلاح عزل inventory_counter. Edge inventory-auth v7 ACTIVE، والهجرة مطبقة، والحسابات الثلاثة تعمل، والمستودعات الفعلية ظاهرة. اختبار حي: RPC الجرد مسموح، والوصول المباشر إلى snapshot/froقات/مبيعات/لوحة المالك مرفوض 401، وسياسات العزل 62/62، ولا توجد كتابة أو تسوية في الأمين. التشغيل التجريبي الفعلي التالي: عد 20-30 صنفاً حقيقياً في مستودع واحد.
+- Handoff UTC: 2026-08-23T09:03:00Z
 ## 2026-08-23 - Codex - تطبيق Backend الجرد الذكي وإنشاء حسابات موظفي الجرد
 
 - Status: completed
