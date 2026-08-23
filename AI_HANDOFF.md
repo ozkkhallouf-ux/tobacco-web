@@ -2,6 +2,13 @@
 
 يقرأه Claude وCodex قبل كل مهمة. أحدث سجل يكون في الأعلى. لا تحذف السجلات السابقة.
 
+## 2026-08-23 - Codex - تنظيم معرفة مشروع OZK حسب المواضيع وخريطة التأثير
+
+- Status: completed
+- Branch: task branch pending for: تنظيم معرفة مشروع OZK حسب المواضيع وخريطة التأثير
+- Files: AGENTS.md, AI_WORK_SYNC.md, scripts/check.mjs, docs/ai/**
+- Result: دُمج الفرع codex/project-knowledge-system في main بالكوميت 9fb0e39. أضيف مرجع موحد وخريطة تأثير وعقد مهمة وثمانية تقارير مواضيع وفحص يمنع فقدانها. نجح npm.cmd run check وgit diff --check، ولم تتغير وظائف الموقع أو البيانات أو النشر.
+- Handoff UTC: 2026-08-23T01:28:15Z
 ## 2026-08-23 - Codex - تحويل أرقام نشرة الليرة السورية إلى الإنجليزية
 
 - Status: completed

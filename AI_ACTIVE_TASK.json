@@ -1,17 +1,12 @@
 {
   "schemaVersion": 1,
-  "status": "active",
-  "owner": "Codex",
-  "task": "تنظيم معرفة مشروع OZK حسب المواضيع وخريطة التأثير",
-  "branch": "task branch pending for: تنظيم معرفة مشروع OZK حسب المواضيع وخريطة التأثير",
-  "files": [
-    "AGENTS.md",
-    "AI_WORK_SYNC.md",
-    "scripts/check.mjs",
-    "docs/ai/**"
-  ],
-  "startedAt": "2026-08-23T01:16:28Z",
-  "updatedAt": "2026-08-23T01:16:28Z",
+  "status": "idle",
+  "owner": null,
+  "task": null,
+  "branch": null,
+  "files": [],
+  "startedAt": null,
+  "updatedAt": "2026-08-23T01:28:15Z",
   "pr": null,
-  "note": "تنظيم وثائقي فقط؛ ممنوع لمس وظائف الموقع أو بيانات الأمين."
+  "note": "No active task. Read AI_HANDOFF.md before starting work."
 }
