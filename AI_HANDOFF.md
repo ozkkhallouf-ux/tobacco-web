@@ -2,6 +2,13 @@
 
 يقرأه Claude وCodex قبل كل مهمة. أحدث سجل يكون في الأعلى. لا تحذف السجلات السابقة.
 
+## 2026-08-24 - Claude - AUTO-REFRESH AMEEN LIVE STOCK FOR COMMAND CENTER
+
+- Status: completed
+- Branch: task branch pending for: AUTO-REFRESH AMEEN LIVE STOCK FOR COMMAND CENTER
+- Files: src/command-center.js, src/command-center-hotfix.js
+- Result: Task completed and handed off.
+- Handoff UTC: 2026-08-24T18:02:27Z
 ## 2026-08-24 - Codex - إصلاح صلاحيات Ameen Live للمالك والتحقق الحي
 
 - Status: completed

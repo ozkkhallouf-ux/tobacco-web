@@ -1,15 +1,14 @@
 {
-  "schemaVersion": 1,
-  "status": "active",
-  "owner": "Claude",
-  "task": "AUTO-REFRESH AMEEN LIVE STOCK FOR COMMAND CENTER",
-  "branch": "task branch pending for: AUTO-REFRESH AMEEN LIVE STOCK FOR COMMAND CENTER",
-  "files": [
-    "src/command-center.js",
-    "src/command-center-hotfix.js"
-  ],
-  "startedAt": "2026-08-24T17:45:59Z",
-  "updatedAt": "2026-08-24T17:45:59Z",
-  "pr": "#106",
-  "note": "Frontend-only: auto-trigger refreshFromAmeen() on Command Center init when live cache missing/stale, with in-flight dedupe. No backend/business-logic changes."
+    "schemaVersion":  1,
+    "status":  "idle",
+    "owner":  null,
+    "task":  null,
+    "branch":  null,
+    "files":  [
+
+              ],
+    "startedAt":  null,
+    "updatedAt":  "2026-08-24T18:02:27Z",
+    "pr":  "#106",
+    "note":  "No active task. Read AI_HANDOFF.md before starting work."
 }
