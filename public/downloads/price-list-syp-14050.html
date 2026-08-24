@@ -143,8 +143,8 @@
 
       <div class="price-list-document-tools no-print">
         <button type="button" onclick="window.print()">طباعة مباشرة</button>
-        <a data-pdf-open href="price-list-syp-14050.pdf?v=c4758c2c0392">فتح PDF</a>
-        <a data-pdf-download href="price-list-syp-14050.pdf?v=c4758c2c0392" download>تنزيل PDF</a>
+        <a data-pdf-open href="price-list-syp-14050.pdf?v=30d6cff1de29">فتح PDF</a>
+        <a data-pdf-download href="price-list-syp-14050.pdf?v=30d6cff1de29" download>تنزيل PDF</a>
         <button class="theme-switch" type="button" onclick="toggleTheme()">فاتح / داكن</button>
       </div>
         <header class="price-list-header">
@@ -168,7 +168,7 @@
       <div class="price-list-group">
         <div class="price-list-group-header">
           <span>ماستر</span>
-          <span class="price-list-group-count">6</span>
+          <span class="price-list-group-count">7</span>
         </div>
         <table><tbody>
           <tr class="odd">
@@ -189,7 +189,7 @@
           <tr class="even">
             <td class="name">ماستر قصير أزرق</td>
             <td class="unit">كروز</td>
-            <td class="price">87,770 ل.س</td>
+            <td class="price">86,460 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">ماستر قصير فضي</td>
@@ -200,6 +200,11 @@
             <td class="name">ماستر كوين أبيض</td>
             <td class="unit">كروز</td>
             <td class="price">100,870 ل.س</td>
+          </tr>
+          <tr class="odd">
+            <td class="name">ماستر كوين أزرق</td>
+            <td class="unit">كروز</td>
+            <td class="price">82,530 ل.س</td>
           </tr>
         </tbody></table>
       </div>
@@ -758,13 +763,18 @@
       <div class="price-list-group">
         <div class="price-list-group-header">
           <span>تي اس</span>
-          <span class="price-list-group-count">1</span>
+          <span class="price-list-group-count">2</span>
         </div>
         <table><tbody>
           <tr class="odd">
             <td class="name">تي اس سليم فضي</td>
             <td class="unit">كروز</td>
             <td class="price">43,230 ل.س</td>
+          </tr>
+          <tr class="even">
+            <td class="name">تي اس فضي</td>
+            <td class="unit">كروز</td>
+            <td class="price">66,810 ل.س</td>
           </tr>
         </tbody></table>
       </div>
@@ -1356,7 +1366,7 @@
   sheet.dataset.theme = savedTheme || 'dark';
   document.body.dataset.theme = sheet.dataset.theme;
   function selectedPdfFile() {
-    return sheet.dataset.theme === 'light' ? 'price-list-syp-14050-light.pdf?v=c4758c2c0392' : 'price-list-syp-14050.pdf?v=c4758c2c0392';
+    return sheet.dataset.theme === 'light' ? 'price-list-syp-14050-light.pdf?v=30d6cff1de29' : 'price-list-syp-14050.pdf?v=30d6cff1de29';
   }
   function syncPdfLinks() {
     const selected = selectedPdfFile();
