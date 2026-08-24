@@ -143,8 +143,8 @@
 
       <div class="price-list-document-tools no-print">
         <button type="button" onclick="window.print()">طباعة مباشرة</button>
-        <a data-pdf-open href="price-list-syp-14050.pdf?v=9bc861f5df5f">فتح PDF</a>
-        <a data-pdf-download href="price-list-syp-14050.pdf?v=9bc861f5df5f" download>تنزيل PDF</a>
+        <a data-pdf-open href="price-list-syp-14050.pdf?v=c4758c2c0392">فتح PDF</a>
+        <a data-pdf-download href="price-list-syp-14050.pdf?v=c4758c2c0392" download>تنزيل PDF</a>
         <button class="theme-switch" type="button" onclick="toggleTheme()">فاتح / داكن</button>
       </div>
         <header class="price-list-header">
@@ -927,20 +927,15 @@
       <div class="price-list-group">
         <div class="price-list-group-header">
           <span>برو</span>
-          <span class="price-list-group-count">3</span>
+          <span class="price-list-group-count">2</span>
         </div>
         <table><tbody>
           <tr class="odd">
-            <td class="name">برو سليم</td>
-            <td class="unit">كروز</td>
-            <td class="price">39,300 ل.س</td>
-          </tr>
-          <tr class="even">
             <td class="name">برو طويل ازرق</td>
             <td class="unit">كروز</td>
             <td class="price">55,020 ل.س</td>
           </tr>
-          <tr class="odd">
+          <tr class="even">
             <td class="name">برو طويل فضي</td>
             <td class="unit">كروز</td>
             <td class="price">65,500 ل.س</td>
@@ -1361,7 +1356,7 @@
   sheet.dataset.theme = savedTheme || 'dark';
   document.body.dataset.theme = sheet.dataset.theme;
   function selectedPdfFile() {
-    return sheet.dataset.theme === 'light' ? 'price-list-syp-14050-light.pdf?v=9bc861f5df5f' : 'price-list-syp-14050.pdf?v=9bc861f5df5f';
+    return sheet.dataset.theme === 'light' ? 'price-list-syp-14050-light.pdf?v=c4758c2c0392' : 'price-list-syp-14050.pdf?v=c4758c2c0392';
   }
   function syncPdfLinks() {
     const selected = selectedPdfFile();
