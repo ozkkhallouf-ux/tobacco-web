@@ -77,6 +77,71 @@
     return `<li class="command-purchase-item"><strong>${escape(rec.name)}</strong>${numberLine}<span style="display:block">المخزون الحالي: ${qty(rec.stock)} ${escape(unit1)}</span><span style="display:block">حالة المخزون: ${escape(stockState)}</span><span style="display:block">الوحدة الأولى: ${escape(unit1)}</span>${unit2Line}<span style="display:block">حركة المبيعات: ${escape(velocity)}</span><span style="display:block">حالة الحركة: ${escape(velocityState)}</span><span style="display:block">التغطية: ${escape(coverage)}</span><span style="display:block">الأولوية: ${escape(priority)}</span><span style="display:block">السبب: ${escape(rec.reason)}</span><span style="display:block">الكمية المقترحة: ${proposal}</span></li>`;
   }
 
+  // لائحة تحصيل تشغيلية زبون-زبون من snapshot.receivables — مستقلة عن عتبة executiveBrief/collectionsAdvice.
+  // القواعد: استبعاد الموردين (isSupplier)، ثم Tier1 (تجاوز حد معتمد) → Tier2 (قريب من حد معتمد) →
+  // Tier3 (بقية المدينين حسب الرصيد تنازلياً)، أعلى 10 إجمالاً. ممنوع أي وصف "متأخر/مستحق اليوم/وعد بالدفع"
+  // لأن هذه الحقول غير متوفرة بمصدر البيانات.
+  const COLLECTIONS_MAX = 10;
+  function buildCollectionShortlist(snap) {
+    const receivables = snap?.receivables || null;
+    const freshnessState = receivables?.meta?.freshness?.state || "unknown";
+    const source = Array.isArray(receivables?.debtors) ? receivables.debtors : (receivables?.topRisks || []);
+    const debtors = source.filter((row) => row && row.isSupplier !== true && number(row.balance) > 0);
+
+    if (!receivables || receivables.meta?.completeness === "missing") {
+      return { state: "no-data", trusted: false, tier1: [], tier2: [], tier3: [], rows: [] };
+    }
+    if (freshnessState !== "fresh") {
+      return { state: "stale", trusted: false, tier1: [], tier2: [], tier3: [], rows: [] };
+    }
+    if (!debtors.length) {
+      return { state: "empty", trusted: true, tier1: [], tier2: [], tier3: [], rows: [] };
+    }
+
+    const tier1 = debtors.filter((row) => row.creditLimitSource === "approved" && row.ratio !== null && row.ratio >= 1)
+      .sort((a, b) => (b.ratio ?? -1) - (a.ratio ?? -1) || b.balance - a.balance);
+    const tier2 = debtors.filter((row) => row.creditLimitSource === "approved" && row.ratio !== null && row.ratio >= 0.9 && row.ratio < 1)
+      .sort((a, b) => (b.ratio ?? -1) - (a.ratio ?? -1) || b.balance - a.balance);
+    const tier1Keys = new Set(tier1.map((row) => row.key));
+    const tier2Keys = new Set(tier2.map((row) => row.key));
+    const tier3 = debtors.filter((row) => !tier1Keys.has(row.key) && !tier2Keys.has(row.key))
+      .sort((a, b) => b.balance - a.balance);
+
+    const seen = new Set();
+    const rows = [];
+    const withTier = [
+      ...tier1.map((row) => ({ row, tier: 1, reason: "متجاوز حد الائتمان المعتمد" })),
+      ...tier2.map((row) => ({ row, tier: 2, reason: "قريب من حد الائتمان المعتمد" })),
+      ...tier3.map((row) => ({ row, tier: 3, reason: "من أعلى الأرصدة المدينة للمراجعة" }))
+    ];
+    for (const entry of withTier) {
+      if (rows.length >= COLLECTIONS_MAX) break;
+      if (seen.has(entry.row.key)) continue;
+      seen.add(entry.row.key);
+      rows.push(entry);
+    }
+    return { state: "ok", trusted: true, tier1, tier2, tier3, rows };
+  }
+
+  function collectionAccountHtml(entry, index) {
+    const row = entry.row;
+    const approved = row.creditLimitSource === "approved";
+    const limitLine = approved
+      ? `<span style="display:block">حد الائتمان: ${money(row.creditLimit, row.currency)}</span>`
+      : `<span style="display:block">حد الائتمان: بلا حد ائتمان معتمد</span>`;
+    const overageLine = (approved && row.ratio !== null && row.ratio >= 1)
+      ? `<span style="display:block">التجاوز: ${money(row.balance - row.creditLimit, row.currency)}</span>`
+      : "";
+    const ratioLine = (approved && row.ratio !== null)
+      ? `<span style="display:block">نسبة الاستخدام: ${Math.round(row.ratio * 100)}%</span>`
+      : "";
+    const hasLastPayment = row.lastPaymentDate || (row.lastPaymentAmount !== null && row.lastPaymentAmount !== undefined);
+    const lastPaymentLine = hasLastPayment
+      ? `<span style="display:block">آخر دفعة: ${row.lastPaymentDate ? escape(new Date(row.lastPaymentDate).toLocaleDateString("ar")) : "تاريخ غير متاح"}${(row.lastPaymentAmount !== null && row.lastPaymentAmount !== undefined) ? ` — ${money(row.lastPaymentAmount, row.currency)}` : ""}</span>`
+      : "";
+    return `<li class="command-purchase-item"><strong>${index + 1}. ${escape(row.name)}</strong><span style="display:block">الرصيد: ${money(row.balance, row.currency)}</span>${limitLine}${overageLine}${ratioLine}${lastPaymentLine}<span style="display:block">السبب: ${escape(entry.reason)}</span></li>`;
+  }
+
   function dedupeRecommendations(items) {
     const unique = new Map();
     for (const item of Array.isArray(items) ? items : []) {
@@ -96,7 +161,17 @@
     const items = executiveBrief.executiveOrder || [], q = String(question || "today");
     if (q === "today") return { title: "شو أعمل اليوم؟", body: executiveBrief.headline, items: items.slice(0, 3) };
     if (q === "risk") { const risky = items.filter((x) => x.severity >= 40).slice(0, 3); return { title: "وين أكبر خطر؟", body: risky.length ? `عندك ${risky.length} ملفات ضغط مرتفع تحتاج انتباه.` : "ما في ضغط مرتفع ظاهر حالياً.", items: risky }; }
-    if (q === "collections") { const rows = items.filter((x) => x.agent === "collections"); return { title: "مين لازم أراجع للتحصيل؟", body: rows.length ? rows[0].action : "ما في إشارة تحصيل مرتفعة حالياً من البيانات المتاحة.", items: rows.slice(0, 2) }; }
+    if (q === "collections") {
+      const shortlist = buildCollectionShortlist(snapshot);
+      const rows = shortlist.rows.map((entry) => ({ agent: "collections", collectionAccount: entry }));
+      let body;
+      if (shortlist.state === "no-data") body = "ما في تقرير أرصدة زبائن متاح حالياً لبناء لائحة تحصيل.";
+      else if (shortlist.state === "stale") body = "بيانات الأرصدة غير حديثة بما يكفي لإعطاء لائحة تحصيل موثوقة الآن.";
+      else if (shortlist.state === "empty") body = "ما في أرصدة مدينة تحتاج متابعة حالياً.";
+      else if (shortlist.tier1.length || shortlist.tier2.length) body = `عندك ${shortlist.tier1.length} زبون متجاوز الحد و${shortlist.tier2.length} قريب منه — راجعهم أولاً.`;
+      else body = "ما في تجاوز لحدود ائتمان معتمدة حالياً؛ هاي أعلى الأرصدة المدينة للمراجعة.";
+      return { title: "مين لازم أراجع للتحصيل؟", body, items: rows };
+    }
     if (q === "buy") {
       const recommendation = snapshot?.inventory?.purchaseRecommendations;
       const candidates = dedupeRecommendations(recommendation?.items).filter((item) => item.priority !== "normal" || number(item.proposal?.quantity) > 0);
@@ -111,7 +186,7 @@
 
   function quickAnswerHtml() {
     if (!answer) return '<p class="muted">اختر سؤالاً حتى يعطيك الفريق جواباً موحداً من البيانات الحالية.</p>';
-    const rows = (answer.items || []).map((row) => { if (row.purchaseRecommendation) return purchaseRecommendationHtml(row); const agent = executiveBrief?.agents?.[row.agent] || { icon: "🧠", name: "الفريق" }; return `<li><strong>${escape(agent.icon)} ${escape(agent.name)}:</strong> ${escape(row.action)}</li>`; }).join("");
+    const rows = (answer.items || []).map((row, index) => { if (row.purchaseRecommendation) return purchaseRecommendationHtml(row); if (row.collectionAccount) return collectionAccountHtml(row.collectionAccount, index); const agent = executiveBrief?.agents?.[row.agent] || { icon: "🧠", name: "الفريق" }; return `<li><strong>${escape(agent.icon)} ${escape(agent.name)}:</strong> ${escape(row.action)}</li>`; }).join("");
     return `<div class="command-answer"><h3>${escape(answer.title)}</h3><p>${escape(answer.body)}</p>${rows ? `<ol>${rows}</ol>` : ""}</div>`;
   }
 

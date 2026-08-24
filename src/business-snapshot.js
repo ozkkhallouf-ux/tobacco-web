@@ -105,7 +105,13 @@
       if (ratio !== null && ratio >= 1) level = "critical";
       else if (ratio !== null && ratio >= 0.9) level = "high";
       else if (balance > 0 && creditLimit === 0) level = "unbounded";
-      return { key, name, balance, creditLimit, creditLimitSource, ratio, level };
+      // حقول إضافية (قراءة فقط من بيانات الأمين الخام) لدعم شاشة "مين لازم أراجع للتحصيل؟"
+      // — لا تُستخدم في أي مجموع/إحصائية أعلاه، إضافة فقط.
+      const isSupplier = row?.isSupplier === true;
+      const lastPaymentDate = iso(row?.lastPaymentDate ?? row?.last_payment_date ?? null);
+      const lastPaymentAmount = numberOrNull(row?.lastPaymentAmount ?? row?.last_payment_amount ?? null);
+      const currency = text(row?.currency) || "USD";
+      return { key, name, balance, creditLimit, creditLimitSource, ratio, level, isSupplier, lastPaymentDate, lastPaymentAmount, currency };
     }).filter((row) => row.balance > 0).sort((a, b) => (b.ratio ?? -1) - (a.ratio ?? -1) || b.balance - a.balance);
 
     return {
@@ -114,6 +120,9 @@
       overLimitCount: debtors.filter((row) => row.ratio !== null && row.ratio >= 1).length,
       nearLimitCount: debtors.filter((row) => row.ratio !== null && row.ratio >= 0.9 && row.ratio < 1).length,
       topRisks: debtors.slice(0, 10),
+      // نسخة كاملة غير مقصوصة لبناء لائحة تحصيل تشغيلية (Tier1/2/3) بمعزل عن حد الـtopRisks القديم.
+      // إضافية بحتة — لا تُستهلك من أي كود أعلاه أو من executive-team.js/business-metrics.js.
+      debtors,
       meta: meta(
         report?.source || "ameen_customer_balances",
         report?.created_at || report?.createdAt || report?.report_date,
