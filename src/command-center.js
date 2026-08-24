@@ -123,7 +123,7 @@
     return { state: "ok", trusted: true, tier1, tier2, tier3, rows };
   }
 
-  function collectionAccountHtml(entry, index) {
+  function collectionAccountHtml(entry) {
     const row = entry.row;
     const approved = row.creditLimitSource === "approved";
     const limitLine = approved
@@ -139,7 +139,7 @@
     const lastPaymentLine = hasLastPayment
       ? `<span style="display:block">آخر دفعة: ${row.lastPaymentDate ? escape(new Date(row.lastPaymentDate).toLocaleDateString("ar")) : "تاريخ غير متاح"}${(row.lastPaymentAmount !== null && row.lastPaymentAmount !== undefined) ? ` — ${money(row.lastPaymentAmount, row.currency)}` : ""}</span>`
       : "";
-    return `<li class="command-purchase-item"><strong>${index + 1}. ${escape(row.name)}</strong><span style="display:block">الرصيد: ${money(row.balance, row.currency)}</span>${limitLine}${overageLine}${ratioLine}${lastPaymentLine}<span style="display:block">السبب: ${escape(entry.reason)}</span></li>`;
+    return `<li class="command-purchase-item"><strong>${escape(row.name)}</strong><span style="display:block">الرصيد: ${money(row.balance, row.currency)}</span>${limitLine}${overageLine}${ratioLine}${lastPaymentLine}<span style="display:block">السبب: ${escape(entry.reason)}</span></li>`;
   }
 
   function dedupeRecommendations(items) {
@@ -186,7 +186,7 @@
 
   function quickAnswerHtml() {
     if (!answer) return '<p class="muted">اختر سؤالاً حتى يعطيك الفريق جواباً موحداً من البيانات الحالية.</p>';
-    const rows = (answer.items || []).map((row, index) => { if (row.purchaseRecommendation) return purchaseRecommendationHtml(row); if (row.collectionAccount) return collectionAccountHtml(row.collectionAccount, index); const agent = executiveBrief?.agents?.[row.agent] || { icon: "🧠", name: "الفريق" }; return `<li><strong>${escape(agent.icon)} ${escape(agent.name)}:</strong> ${escape(row.action)}</li>`; }).join("");
+    const rows = (answer.items || []).map((row) => { if (row.purchaseRecommendation) return purchaseRecommendationHtml(row); if (row.collectionAccount) return collectionAccountHtml(row.collectionAccount); const agent = executiveBrief?.agents?.[row.agent] || { icon: "🧠", name: "الفريق" }; return `<li><strong>${escape(agent.icon)} ${escape(agent.name)}:</strong> ${escape(row.action)}</li>`; }).join("");
     return `<div class="command-answer"><h3>${escape(answer.title)}</h3><p>${escape(answer.body)}</p>${rows ? `<ol>${rows}</ol>` : ""}</div>`;
   }
 
@@ -267,6 +267,6 @@
   function bindCommandEvents() { app.querySelectorAll("[data-route]").forEach((button) => button.addEventListener("click", (event) => { event.preventDefault(); setRoute(button.dataset.route); })); app.querySelector("[data-action='command-refresh']")?.addEventListener("click", refreshCommandCenter); app.querySelector("[data-action='ameen-live-refresh']")?.addEventListener("click", refreshFromAmeen); app.querySelectorAll("[data-question]").forEach((button) => button.addEventListener("click", () => { answer = answerQuestion(button.dataset.question); render(); })); }
   function syncTimer() { if (refreshTimer) clearInterval(refreshTimer); refreshTimer = state?.route === ROUTE && state?.session && window.ozkCanAccessRoute?.(ROUTE) ? setInterval(refreshCommandCenter, REFRESH_MS) : null; }
 
-  try { allowedRoutes.add(ROUTE); if (new URLSearchParams(window.location.search).get("route") === ROUTE && window.ozkCanAccessRoute?.(ROUTE)) state.route = ROUTE; const baseRender = render; render = function commandAwareRender() { if (state.route === ROUTE && window.ozkCanAccessRoute?.(ROUTE)) { app.innerHTML = commandPage(); bindCommandEvents(); addCommandNav(); syncTimer(); ensureFreshAmeenLiveStock(); return; } baseRender(); addCommandNav(); syncTimer(); }; window.ozkCommandCenter = Object.freeze({ answerQuestion, dedupeRecommendations, refresh: refreshCommandCenter, refreshFromAmeen, ensureFreshAmeenLiveStock }); render(); if (state?.route === ROUTE && window.ozkCanAccessRoute?.(ROUTE)) setTimeout(refreshCommandCenter, 0); }
+  try { allowedRoutes.add(ROUTE); if (new URLSearchParams(window.location.search).get("route") === ROUTE && window.ozkCanAccessRoute?.(ROUTE)) state.route = ROUTE; const baseRender = render; render = function commandAwareRender() { if (state.route === ROUTE && window.ozkCanAccessRoute?.(ROUTE)) { app.innerHTML = commandPage(); bindCommandEvents(); addCommandNav(); syncTimer(); ensureFreshAmeenLiveStock(); return; } baseRender(); addCommandNav(); syncTimer(); }; window.ozkCommandCenter = Object.freeze({ answerQuestion, dedupeRecommendations, refresh: refreshCommandCenter, refreshFromAmeen, ensureFreshAmeenLiveStock, renderAnswerHtml: (question) => { answer = answerQuestion(question); return quickAnswerHtml(); } }); render(); if (state?.route === ROUTE && window.ozkCanAccessRoute?.(ROUTE)) setTimeout(refreshCommandCenter, 0); }
   catch (error) { console.error("[OZK Command Center Init]", error); }
 })();
