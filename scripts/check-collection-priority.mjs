@@ -190,4 +190,22 @@ async function runCollections(receivables, opts = {}) {
   if (entry.collectionAccount.reason !== "من أعلى الأرصدة المدينة للمراجعة") throw new Error("TEST M: customer without an approved credit limit must use the safe tier-3 wording");
 }
 
+// TEST N: rendered collections HTML has exactly one visible number per customer (no "1. 1." double numbering),
+// the <ol> browser-numbering wrapper is preserved, ordering stays intact, and customer names/data are unchanged.
+{
+  const tier1 = debtor({ key: "c1", name: "زبون أول", balance: 5000, creditLimit: 4000, creditLimitSource: "approved", ratio: 1.25 });
+  const tier3 = debtor({ key: "c2", name: "زبون ثاني", balance: 100, creditLimitSource: "missing" });
+  const { win, result } = await runCollections(receivablesFixture([tier3, tier1]));
+  const html = win.ozkCommandCenter.renderAnswerHtml("collections");
+  if (!/<ol>/.test(html) || !/<\/ol>/.test(html)) throw new Error("TEST N: rendered collections answer must still use a single <ol> numbering wrapper");
+  if (/\d+\.\s*\d+\./.test(html)) throw new Error("TEST N: rendered collections HTML must not contain double numbering (e.g. '1. 1.')");
+  if (html.includes(">1. ") || html.includes(">2. ")) throw new Error("TEST N: customer name must not be prefixed with an explicit index number inside the <li>");
+  if (!html.includes("زبون أول") || !html.includes("زبون ثاني")) throw new Error("TEST N: customer names must remain unchanged in the rendered output");
+  const keys = result.items.map((i) => i.collectionAccount.row.key);
+  if (keys[0] !== "c1" || keys[1] !== "c2") throw new Error(`TEST N: ordering must remain unchanged, got ${keys.join(",")}`);
+  const firstNameIndex = html.indexOf("زبون أول");
+  const secondNameIndex = html.indexOf("زبون ثاني");
+  if (firstNameIndex === -1 || secondNameIndex === -1 || firstNameIndex > secondNameIndex) throw new Error("TEST N: first customer must render before second customer in the HTML");
+}
+
 console.log("OZK Collection Priority contract: OK");
