@@ -2,6 +2,13 @@
 
 يقرأه Claude وCodex قبل كل مهمة. أحدث سجل يكون في الأعلى. لا تحذف السجلات السابقة.
 
+## 2026-08-24 - Claude - FIX PR #111 blocker: Ameen Live stock partial-failure freshness masking
+
+- Status: completed
+- Branch: task branch pending for: FIX PR #111 blocker: Ameen Live stock partial-failure freshness masking
+- Files: src/command-center.js
+- Result: Task completed and handed off.
+- Handoff UTC: 2026-08-24T18:48:07Z
 ## 2026-08-24 - Claude - AUTO-REFRESH AMEEN LIVE STOCK FOR COMMAND CENTER
 
 - Status: completed

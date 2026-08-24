@@ -1,14 +1,12 @@
 {
-    "schemaVersion":  1,
-    "status":  "active",
-    "owner":  "Claude",
-    "task":  "FIX PR #111 blocker: Ameen Live stock partial-failure freshness masking",
-    "branch":  "task branch pending for: FIX PR #111 blocker: Ameen Live stock partial-failure freshness masking",
-    "files":  [
-                  "src/command-center.js"
-              ],
-    "startedAt":  "2026-08-24T18:25:13Z",
-    "updatedAt":  "2026-08-24T18:25:13Z",
-    "pr":  "#106",
-    "note":  "Limited patch: stock:null must not be treated as fresh via cache.updatedAt; enforce 5m cooldown for stock-specific retry independent of health/customers freshness. No merge, no production, no Ameen/Broker live reads."
+  "schemaVersion": 1,
+  "status": "idle",
+  "owner": null,
+  "task": null,
+  "branch": null,
+  "files": [],
+  "startedAt": null,
+  "updatedAt": "2026-08-24T18:48:07Z",
+  "pr": "#106",
+  "note": "No active task. Read AI_HANDOFF.md before starting work."
 }
