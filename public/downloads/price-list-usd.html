@@ -143,8 +143,8 @@
 
       <div class="price-list-document-tools no-print">
         <button type="button" onclick="window.print()">طباعة مباشرة</button>
-        <a data-pdf-open href="price-list-usd.pdf?v=fe370ece3e5f">فتح PDF</a>
-        <a data-pdf-download href="price-list-usd.pdf?v=fe370ece3e5f" download>تنزيل PDF</a>
+        <a data-pdf-open href="price-list-usd.pdf?v=284243a7905c">فتح PDF</a>
+        <a data-pdf-download href="price-list-usd.pdf?v=284243a7905c" download>تنزيل PDF</a>
         <button class="theme-switch" type="button" onclick="toggleTheme()">فاتح / داكن</button>
       </div>
         <header class="price-list-header">
@@ -362,7 +362,7 @@
       <div class="price-list-group">
         <div class="price-list-group-header">
           <span>كينغ دوم</span>
-          <span class="price-list-group-count">4</span>
+          <span class="price-list-group-count">3</span>
         </div>
         <table><tbody>
           <tr class="odd">
@@ -376,11 +376,6 @@
             <td class="price">200.00 $</td>
           </tr>
           <tr class="odd">
-            <td class="name">كينغ دوم طويل فضي</td>
-            <td class="unit">كرتونة</td>
-            <td class="price">302.00 $</td>
-          </tr>
-          <tr class="even">
             <td class="name">كينغ دوم كوين أبيض</td>
             <td class="unit">كرتونة</td>
             <td class="price">267.00 $</td>
@@ -511,34 +506,19 @@
 
       <div class="price-list-group">
         <div class="price-list-group-header">
-          <span>ميلانو</span>
-          <span class="price-list-group-count">5</span>
+          <span>مليونير</span>
+          <span class="price-list-group-count">2</span>
         </div>
         <table><tbody>
           <tr class="odd">
-            <td class="name">ميلانو سليم ابيض</td>
+            <td class="name">مليونير طويل أزرق</td>
             <td class="unit">كرتونة</td>
-            <td class="price">195.00 $</td>
+            <td class="price">250.00 $</td>
           </tr>
           <tr class="even">
-            <td class="name">ميلانو سليم ازرق</td>
+            <td class="name">مليونير طويل فضي</td>
             <td class="unit">كرتونة</td>
-            <td class="price">195.00 $</td>
-          </tr>
-          <tr class="odd">
-            <td class="name">ميلانو سليم فضي</td>
-            <td class="unit">كرتونة</td>
-            <td class="price">195.00 $</td>
-          </tr>
-          <tr class="even">
-            <td class="name">ميلانو كوين ازرق</td>
-            <td class="unit">كرتونة</td>
-            <td class="price">195.00 $</td>
-          </tr>
-          <tr class="odd">
-            <td class="name">ميلانو كوين اسود</td>
-            <td class="unit">كرتونة</td>
-            <td class="price">195.00 $</td>
+            <td class="price">250.00 $</td>
           </tr>
         </tbody></table>
       </div></div>
@@ -888,19 +868,34 @@
 
       <div class="price-list-group">
         <div class="price-list-group-header">
-          <span>مليونير</span>
-          <span class="price-list-group-count">2</span>
+          <span>ميلانو</span>
+          <span class="price-list-group-count">5</span>
         </div>
         <table><tbody>
           <tr class="odd">
-            <td class="name">مليونير طويل أزرق</td>
+            <td class="name">ميلانو سليم ابيض</td>
             <td class="unit">كرتونة</td>
-            <td class="price">250.00 $</td>
+            <td class="price">195.00 $</td>
           </tr>
           <tr class="even">
-            <td class="name">مليونير طويل فضي</td>
+            <td class="name">ميلانو سليم ازرق</td>
             <td class="unit">كرتونة</td>
-            <td class="price">250.00 $</td>
+            <td class="price">195.00 $</td>
+          </tr>
+          <tr class="odd">
+            <td class="name">ميلانو سليم فضي</td>
+            <td class="unit">كرتونة</td>
+            <td class="price">195.00 $</td>
+          </tr>
+          <tr class="even">
+            <td class="name">ميلانو كوين ازرق</td>
+            <td class="unit">كرتونة</td>
+            <td class="price">195.00 $</td>
+          </tr>
+          <tr class="odd">
+            <td class="name">ميلانو كوين اسود</td>
+            <td class="unit">كرتونة</td>
+            <td class="price">195.00 $</td>
           </tr>
         </tbody></table>
       </div></div>
@@ -1144,7 +1139,7 @@
   sheet.dataset.theme = savedTheme || 'dark';
   document.body.dataset.theme = sheet.dataset.theme;
   function selectedPdfFile() {
-    return sheet.dataset.theme === 'light' ? 'price-list-usd-light.pdf?v=fe370ece3e5f' : 'price-list-usd.pdf?v=fe370ece3e5f';
+    return sheet.dataset.theme === 'light' ? 'price-list-usd-light.pdf?v=284243a7905c' : 'price-list-usd.pdf?v=284243a7905c';
   }
   function syncPdfLinks() {
     const selected = selectedPdfFile();
