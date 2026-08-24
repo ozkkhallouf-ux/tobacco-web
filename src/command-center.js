@@ -163,17 +163,22 @@
     finally { ameenLoading = false; if (state?.route === ROUTE) render(); }
   }
 
+  // ملاحظة حرجة: cache.updatedAt يتجدد إذا نجح أي مورد واحد فقط (health/stock/customers)، وليس
+  // بالضرورة stock تحديداً. لذا لا يكفي فحص عمر updatedAt وحده لاعتبار stock طازجة — يجب أن يكون
+  // cache.stock نفسها موجودة، وإلا فشل جزئي لـstock (مع نجاح health/customers) يُعتبر خطأً "طازجاً"
+  // لغاية 15 دقيقة بدل أن يخضع لفترة تهدئة الخمس دقائق الفعلية أدناه.
   function ameenLiveFresh() {
     const cache = liveCache();
-    if (!cache?.updatedAt) return false;
+    if (!cache?.updatedAt || !cache.stock) return false;
     const updated = new Date(cache.updatedAt);
     if (Number.isNaN(updated.getTime())) return false;
     return (Date.now() - updated.getTime()) <= AMEEN_LIVE_MAX_AGE_MINUTES * 60 * 1000;
   }
 
   // تحديث تلقائي واحد فقط عند غياب/انتهاء صلاحية مخزون الأمين الحي — بلا استقصاء كل 60 ثانية.
-  // يُستدعى مع كل Render لصفحة مركز القيادة؛ الحراسات الثلاث (ameenLoading، الحداثة، فترة التهدئة)
-  // تضمن ألا يخرج أكثر من طلب شبكة تلقائي واحد فعلي كل خمس دقائق كحد أقصى، ودون تعطيل زر "تحديث من الأمين".
+  // يُستدعى مع كل Render لصفحة مركز القيادة؛ الحراسات الثلاث (ameenLoading، حداثة stock تحديداً،
+  // وفترة التهدئة) تضمن ألا يخرج أكثر من طلب شبكة تلقائي واحد فعلي كل خمس دقائق كحد أقصى عند فشل
+  // stock (كلياً أو جزئياً مع نجاح health/customers)، ودون تعطيل زر "تحديث من الأمين".
   function ensureFreshAmeenLiveStock() {
     if (ameenLoading || !state?.session || !window.ozkCanAccessRoute?.(ROUTE)) return;
     if (ameenLiveFresh()) return;

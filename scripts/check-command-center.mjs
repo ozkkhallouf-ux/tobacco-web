@@ -150,4 +150,128 @@ async function settle(){ await new Promise((resolve)=>setTimeout(resolve,0)); aw
   if(stockCalls!==2)throw new Error(`TEST J: manual refresh must still issue an Ameen request even inside the automatic cooldown window, got ${stockCalls}`);
 }
 
+// --- Stock-specific freshness/cooldown contract (partial-failure retry cadence) ---
+// A cache stays "fresh" via updatedAt whenever ANY of health/stock/customers succeeded — including
+// when stock itself failed and is null. ameenLiveFresh() must not treat that as fresh stock; the
+// stock-specific 5-minute cooldown (not the 15-minute freshness window) must govern retry cadence.
+function freshVmClock(resources, cache, FakeDateClass) {
+  const evtApp={innerHTML:"",querySelectorAll:()=>[],querySelector:()=>null};
+  const evtDoc={querySelector:()=>null,querySelectorAll:()=>[],createElement:(tag)=>({tagName:String(tag).toUpperCase(),dataset:{},addEventListener:()=>{}})};
+  const routes=new Set();
+  const evtWin={location:{search:""},addEventListener:()=>{},ozkCanAccessRoute:()=>true,ozkAmeenLive:resources,ozkAmeenLiveCache:cache??null};
+  const evtCtx={console:testConsole,Date:FakeDateClass,Math,Number,String,Array,Object,Promise,URLSearchParams,setTimeout:()=>0,setInterval:()=>0,clearInterval:()=>{},window:evtWin,document:evtDoc,allowedRoutes:routes,state:{route:"command",session:{id:"clock-test"}},app:evtApp,shell:(x)=>x,render:()=>{},setRoute:()=>{}};
+  evtCtx.globalThis=evtCtx;vm.createContext(evtCtx);vm.runInContext(source,evtCtx,{filename:"command-center.js"});
+  return {win:evtWin,ctx:evtCtx};
+}
+function makeFakeDate(getNow){
+  return class FakeDate extends Date {
+    constructor(...args){ if(args.length===0){ super(getNow()); } else { super(...args); } }
+    static now(){ return getNow(); }
+  };
+}
+
+// TEST M: stock fails, health+customers succeed -> cache exists with stock=null; retry must wait for
+// the 5-minute cooldown, NOT be masked by the 15-minute freshness window on the partial cache.
+{
+  let fakeNow=Date.now();
+  const FakeDate=makeFakeDate(()=>fakeNow);
+  let stockCalls=0;
+  const resources={health:pass(health),stock:async()=>{stockCalls++;throw new Error("stock failed");},customers:pass(customers)};
+  const {win}=freshVmClock(resources,null,FakeDate);
+  await settle();
+  if(stockCalls!==1)throw new Error(`TEST M: expected exactly one initial stock attempt, got ${stockCalls}`);
+  if(win.ozkAmeenLiveCache===null||win.ozkAmeenLiveCache.stock!==null)throw new Error("TEST M: expected a partial cache with stock=null after stock-only failure");
+
+  fakeNow += 4*60*1000; // t=+4m: inside cooldown
+  win.ozkCommandCenter.ensureFreshAmeenLiveStock();
+  await settle();
+  if(stockCalls!==1)throw new Error(`TEST M: no automatic stock retry expected at +4m (inside 5-minute cooldown), got ${stockCalls} calls`);
+
+  fakeNow += 2*60*1000; // total t=+6m: past cooldown
+  win.ozkCommandCenter.ensureFreshAmeenLiveStock();
+  await settle();
+  if(stockCalls!==2)throw new Error(`TEST M: expected exactly one retry at +6m (past 5-minute cooldown), got ${stockCalls} calls`);
+}
+
+// TEST N: stock fails, health succeeds, customers fails -> same 5-minute cooldown behavior.
+{
+  let fakeNow=Date.now();
+  const FakeDate=makeFakeDate(()=>fakeNow);
+  let stockCalls=0;
+  const resources={health:pass(health),stock:async()=>{stockCalls++;throw new Error("stock failed");},customers:fail("customers")};
+  const {win}=freshVmClock(resources,null,FakeDate);
+  await settle();
+  if(stockCalls!==1)throw new Error(`TEST N: expected exactly one initial stock attempt, got ${stockCalls}`);
+  fakeNow += 4*60*1000;
+  win.ozkCommandCenter.ensureFreshAmeenLiveStock();
+  await settle();
+  if(stockCalls!==1)throw new Error(`TEST N: no retry expected at +4m, got ${stockCalls}`);
+  fakeNow += 2*60*1000;
+  win.ozkCommandCenter.ensureFreshAmeenLiveStock();
+  await settle();
+  if(stockCalls!==2)throw new Error(`TEST N: expected retry at +6m, got ${stockCalls}`);
+}
+
+// TEST O: stock fails, health fails, customers succeeds -> same 5-minute cooldown behavior.
+{
+  let fakeNow=Date.now();
+  const FakeDate=makeFakeDate(()=>fakeNow);
+  let stockCalls=0;
+  const resources={health:fail("health"),stock:async()=>{stockCalls++;throw new Error("stock failed");},customers:pass(customers)};
+  const {win}=freshVmClock(resources,null,FakeDate);
+  await settle();
+  if(stockCalls!==1)throw new Error(`TEST O: expected exactly one initial stock attempt, got ${stockCalls}`);
+  fakeNow += 4*60*1000;
+  win.ozkCommandCenter.ensureFreshAmeenLiveStock();
+  await settle();
+  if(stockCalls!==1)throw new Error(`TEST O: no retry expected at +4m, got ${stockCalls}`);
+  fakeNow += 2*60*1000;
+  win.ozkCommandCenter.ensureFreshAmeenLiveStock();
+  await settle();
+  if(stockCalls!==2)throw new Error(`TEST O: expected retry at +6m, got ${stockCalls}`);
+}
+
+// TEST P: after a successful stock retry, stock is retained, freshness returns to the normal 15-minute
+// window, and subsequent automatic triggers within that window do not re-request stock (no 60s polling).
+{
+  let fakeNow=Date.now();
+  const FakeDate=makeFakeDate(()=>fakeNow);
+  let stockCalls=0;
+  let shouldFail=true;
+  const resources={health:pass(health),stock:async()=>{stockCalls++;if(shouldFail)throw new Error("stock failed");return stock;},customers:pass(customers)};
+  const {win,ctx}=freshVmClock(resources,null,FakeDate);
+  await settle();
+  if(stockCalls!==1)throw new Error(`TEST P: expected one initial failing attempt, got ${stockCalls}`);
+
+  fakeNow += 6*60*1000; // past cooldown -> retry succeeds this time
+  shouldFail=false;
+  win.ozkCommandCenter.ensureFreshAmeenLiveStock();
+  await settle();
+  if(stockCalls!==2)throw new Error(`TEST P: expected the +6m retry to run, got ${stockCalls} calls`);
+  if(win.ozkAmeenLiveCache?.stock!==stock)throw new Error("TEST P: successful retry must populate stock in the cache");
+
+  // Simulate periodic 60-second render triggers for several minutes; freshness (15m) must suppress
+  // further automatic stock requests — no 60-second Ameen polling.
+  for (let i = 0; i < 10; i++) {
+    fakeNow += 60*1000; // +60s each tick, total +10m from the successful retry
+    ctx.render();
+    await settle();
+  }
+  if(stockCalls!==2)throw new Error(`TEST P: successful stock must stay fresh for 15 minutes with no extra automatic requests, got ${stockCalls} calls after periodic renders`);
+}
+
+// TEST Q: manual refresh inside the automatic cooldown window must still work immediately.
+{
+  let fakeNow=Date.now();
+  const FakeDate=makeFakeDate(()=>fakeNow);
+  let stockCalls=0;
+  const resources={health:pass(health),stock:async()=>{stockCalls++;throw new Error("stock failed");},customers:pass(customers)};
+  const {win}=freshVmClock(resources,null,FakeDate);
+  await settle();
+  if(stockCalls!==1)throw new Error(`TEST Q setup: expected one initial failing attempt, got ${stockCalls}`);
+  fakeNow += 60*1000; // well inside the 5-minute cooldown
+  await win.ozkCommandCenter.refreshFromAmeen();
+  if(stockCalls!==2)throw new Error(`TEST Q: manual refresh must bypass the automatic cooldown immediately, got ${stockCalls} calls`);
+}
+
 console.log("OZK Command Center contract: OK");
