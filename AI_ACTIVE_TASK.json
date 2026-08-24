@@ -1,14 +1,14 @@
 {
-  "schemaVersion": 1,
-  "status": "active",
-  "owner": "Claude",
-  "task": "Collection Priority user-facing fix (command-center.js)",
-  "branch": "task branch pending for: Collection Priority user-facing fix (command-center.js)",
-  "files": [
-    "src/command-center.js"
-  ],
-  "startedAt": "2026-08-24T20:24:55Z",
-  "updatedAt": "2026-08-24T20:24:55Z",
-  "pr": "#106",
-  "note": "Add customer-level collections shortlist from snapshot.receivables.topRisks; no change to collectionPressure/creditRisk/executive-team.js"
+    "schemaVersion":  1,
+    "status":  "idle",
+    "owner":  null,
+    "task":  null,
+    "branch":  null,
+    "files":  [
+
+              ],
+    "startedAt":  null,
+    "updatedAt":  "2026-08-24T20:54:31Z",
+    "pr":  "#106",
+    "note":  "No active task. Read AI_HANDOFF.md before starting work."
 }

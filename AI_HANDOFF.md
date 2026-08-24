@@ -2,6 +2,13 @@
 
 يقرأه Claude وCodex قبل كل مهمة. أحدث سجل يكون في الأعلى. لا تحذف السجلات السابقة.
 
+## 2026-08-24 - Claude - Collection Priority user-facing fix (command-center.js)
+
+- Status: completed
+- Branch: task branch pending for: Collection Priority user-facing fix (command-center.js)
+- Files: src/command-center.js
+- Result: Merged PR #112 (merge commit 9ae0684). Collection shortlist shipped in src/command-center.js + src/business-snapshot.js. SW v589. npm run check green post-merge.
+- Handoff UTC: 2026-08-24T20:54:31Z
 ## 2026-08-24 - Claude - FIX PR #111 blocker: Ameen Live stock partial-failure freshness masking
 
 - Status: completed
