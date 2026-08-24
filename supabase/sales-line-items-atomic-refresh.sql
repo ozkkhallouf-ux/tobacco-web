@@ -118,6 +118,7 @@ returns table(
 language plpgsql
 security invoker
 set search_path = ''
+set statement_timeout = '15s'
 as $$
 declare
   v_count integer;
