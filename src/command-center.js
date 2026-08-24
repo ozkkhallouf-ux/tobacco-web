@@ -13,6 +13,9 @@
   let answer = null;
   let lastError = null;
   let lastUpdatedAt = null;
+  let lastAmeenAttemptAt = 0;
+  const AMEEN_LIVE_MAX_AGE_MINUTES = 15;
+  const AMEEN_LIVE_RETRY_COOLDOWN_MS = 5 * 60 * 1000;
 
   const escape = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[char]));
   const number = (value) => Number.isFinite(Number(value)) ? Number(value) : 0;
@@ -160,10 +163,35 @@
     finally { ameenLoading = false; if (state?.route === ROUTE) render(); }
   }
 
+  // ملاحظة حرجة: cache.updatedAt يتجدد إذا نجح أي مورد واحد فقط (health/stock/customers)، وليس
+  // بالضرورة stock تحديداً. لذا لا يكفي فحص عمر updatedAt وحده لاعتبار stock طازجة — يجب أن يكون
+  // cache.stock نفسها موجودة، وإلا فشل جزئي لـstock (مع نجاح health/customers) يُعتبر خطأً "طازجاً"
+  // لغاية 15 دقيقة بدل أن يخضع لفترة تهدئة الخمس دقائق الفعلية أدناه.
+  function ameenLiveFresh() {
+    const cache = liveCache();
+    if (!cache?.updatedAt || !cache.stock) return false;
+    const updated = new Date(cache.updatedAt);
+    if (Number.isNaN(updated.getTime())) return false;
+    return (Date.now() - updated.getTime()) <= AMEEN_LIVE_MAX_AGE_MINUTES * 60 * 1000;
+  }
+
+  // تحديث تلقائي واحد فقط عند غياب/انتهاء صلاحية مخزون الأمين الحي — بلا استقصاء كل 60 ثانية.
+  // يُستدعى مع كل Render لصفحة مركز القيادة؛ الحراسات الثلاث (ameenLoading، حداثة stock تحديداً،
+  // وفترة التهدئة) تضمن ألا يخرج أكثر من طلب شبكة تلقائي واحد فعلي كل خمس دقائق كحد أقصى عند فشل
+  // stock (كلياً أو جزئياً مع نجاح health/customers)، ودون تعطيل زر "تحديث من الأمين".
+  function ensureFreshAmeenLiveStock() {
+    if (ameenLoading || !state?.session || !window.ozkCanAccessRoute?.(ROUTE)) return;
+    if (ameenLiveFresh()) return;
+    const now = Date.now();
+    if (now - lastAmeenAttemptAt < AMEEN_LIVE_RETRY_COOLDOWN_MS) return;
+    lastAmeenAttemptAt = now;
+    refreshFromAmeen();
+  }
+
   function addCommandNav() { if (!window.ozkCanAccessRoute?.(ROUTE)) { document.querySelectorAll('[data-route="command"]').forEach((node) => node.remove()); return; } if (document.querySelector('[data-route="command"]')) return; const nav = document.querySelector("aside .sidebar nav, aside nav, .sidebar nav"); if (!nav) return; const template = nav.querySelector("[data-route]"); const button = document.createElement(template?.tagName === "A" ? "a" : "button"); button.className = template?.className || "nav-link"; button.textContent = "🧠 مركز القيادة"; button.dataset.route = ROUTE; if (button.tagName === "A") button.href = "?route=command"; button.addEventListener("click", (event) => { event.preventDefault(); setRoute(ROUTE); }); nav.insertBefore(button, nav.firstChild); }
   function bindCommandEvents() { app.querySelectorAll("[data-route]").forEach((button) => button.addEventListener("click", (event) => { event.preventDefault(); setRoute(button.dataset.route); })); app.querySelector("[data-action='command-refresh']")?.addEventListener("click", refreshCommandCenter); app.querySelector("[data-action='ameen-live-refresh']")?.addEventListener("click", refreshFromAmeen); app.querySelectorAll("[data-question]").forEach((button) => button.addEventListener("click", () => { answer = answerQuestion(button.dataset.question); render(); })); }
   function syncTimer() { if (refreshTimer) clearInterval(refreshTimer); refreshTimer = state?.route === ROUTE && state?.session && window.ozkCanAccessRoute?.(ROUTE) ? setInterval(refreshCommandCenter, REFRESH_MS) : null; }
 
-  try { allowedRoutes.add(ROUTE); if (new URLSearchParams(window.location.search).get("route") === ROUTE && window.ozkCanAccessRoute?.(ROUTE)) state.route = ROUTE; const baseRender = render; render = function commandAwareRender() { if (state.route === ROUTE && window.ozkCanAccessRoute?.(ROUTE)) { app.innerHTML = commandPage(); bindCommandEvents(); addCommandNav(); syncTimer(); return; } baseRender(); addCommandNav(); syncTimer(); }; window.ozkCommandCenter = Object.freeze({ answerQuestion, dedupeRecommendations, refresh: refreshCommandCenter, refreshFromAmeen }); render(); if (state?.route === ROUTE && window.ozkCanAccessRoute?.(ROUTE)) setTimeout(refreshCommandCenter, 0); }
+  try { allowedRoutes.add(ROUTE); if (new URLSearchParams(window.location.search).get("route") === ROUTE && window.ozkCanAccessRoute?.(ROUTE)) state.route = ROUTE; const baseRender = render; render = function commandAwareRender() { if (state.route === ROUTE && window.ozkCanAccessRoute?.(ROUTE)) { app.innerHTML = commandPage(); bindCommandEvents(); addCommandNav(); syncTimer(); ensureFreshAmeenLiveStock(); return; } baseRender(); addCommandNav(); syncTimer(); }; window.ozkCommandCenter = Object.freeze({ answerQuestion, dedupeRecommendations, refresh: refreshCommandCenter, refreshFromAmeen, ensureFreshAmeenLiveStock }); render(); if (state?.route === ROUTE && window.ozkCanAccessRoute?.(ROUTE)) setTimeout(refreshCommandCenter, 0); }
   catch (error) { console.error("[OZK Command Center Init]", error); }
 })();
