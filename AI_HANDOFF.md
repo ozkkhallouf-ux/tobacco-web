@@ -2,6 +2,13 @@
 
 يقرأه Claude وCodex قبل كل مهمة. أحدث سجل يكون في الأعلى. لا تحذف السجلات السابقة.
 
+## 2026-08-24 - Codex - إصلاح صلاحيات Ameen Live للمالك والتحقق الحي
+
+- Status: completed
+- Branch: codex/ameen-live-owner-authorization
+- Files: supabase/functions/ameen-read-broker/index.ts, scripts/check-ameen-read-gateway.mjs, docs/ai/topics/ameen-sync.md
+- Result: اكتمل إصلاح تفويض المالك والتحقق الحي؛ الفرع codex/ameen-live-owner-authorization عند 69712ad7ca3c9f53fe728fe599dd530a0104cfd4 ومزامن مع origin، وجاهز لمراجعة مستقلة قبل الدمج.
+- Handoff UTC: 2026-08-23T22:41:03Z
 ## 2026-08-23 - Codex - منع فتح PDF نشرة قديم وإصلاح تصدير RTL الموحد
 
 - Status: completed

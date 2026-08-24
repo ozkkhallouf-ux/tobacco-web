@@ -1,16 +1,15 @@
 {
-    "schemaVersion":  1,
-    "status":  "active",
-    "owner":  "Codex",
-    "task":  "إصلاح صلاحيات Ameen Live للمالك والتحقق الحي",
-    "branch":  "codex/ameen-live-owner-authorization",
-    "files":  [
-                  "supabase/functions/ameen-read-broker/index.ts",
-                  "scripts/check-ameen-read-gateway.mjs",
-                  "docs/ai/topics/ameen-sync.md"
-              ],
-    "startedAt":  "2026-08-23T17:26:55Z",
-    "updatedAt":  "2026-08-23T17:26:55Z",
-    "pr":  "#106",
-    "note":  "Work in progress. Do not edit the reserved files."
+  "schemaVersion": 1,
+  "status": "active",
+  "owner": "Claude",
+  "task": "AUTO-REFRESH AMEEN LIVE STOCK FOR COMMAND CENTER",
+  "branch": "task branch pending for: AUTO-REFRESH AMEEN LIVE STOCK FOR COMMAND CENTER",
+  "files": [
+    "src/command-center.js",
+    "src/command-center-hotfix.js"
+  ],
+  "startedAt": "2026-08-24T17:45:59Z",
+  "updatedAt": "2026-08-24T17:45:59Z",
+  "pr": "#106",
+  "note": "Frontend-only: auto-trigger refreshFromAmeen() on Command Center init when live cache missing/stale, with in-flight dedupe. No backend/business-logic changes."
 }
