@@ -1,14 +1,14 @@
 {
     "schemaVersion":  1,
-    "status":  "idle",
-    "owner":  null,
-    "task":  null,
-    "branch":  null,
+    "status":  "active",
+    "owner":  "claude",
+    "task":  "reliability-hardening-phase1",
+    "branch":  "task branch pending for: reliability-hardening-phase1",
     "files":  [
-
+                  "tools/ameen-read-worker.ps1,tools/push-customer-movements.ps1,tools/ensure-ameen-sync.ps1"
               ],
-    "startedAt":  null,
-    "updatedAt":  "2026-08-24T20:54:31Z",
+    "startedAt":  "2026-08-24T23:42:03Z",
+    "updatedAt":  "2026-08-24T23:42:03Z",
     "pr":  "#106",
-    "note":  "No active task. Read AI_HANDOFF.md before starting work."
+    "note":  "Work in progress. Do not edit the reserved files."
 }
