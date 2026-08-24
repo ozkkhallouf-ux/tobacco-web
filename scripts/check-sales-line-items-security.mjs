@@ -65,6 +65,11 @@ const rpc = sql.match(
 assert.ok(rpc, 'replacement RPC must exist');
 assert.match(rpc, /security invoker/i);
 assert.doesNotMatch(rpc, /security definer/i);
+assert.match(rpc, /set search_path = ''/i);
+assert.match(rpc, /set statement_timeout = '15s'/i);
+assert.doesNotMatch(rpc, /\btruncate\b/i);
+assert.doesNotMatch(sql, /alter\s+role\s+(?:authenticated|authenticator)\b[^;]*\bstatement_timeout\b/i);
+assert.doesNotMatch(sql, /alter\s+database\b[^;]*\bstatement_timeout\b/i);
 assert.match(rpc, /if not \(select public\.sales_line_items_is_sync_writer\(\)\) then[\s\S]*sync writer required/i);
 assert.match(
   sql,

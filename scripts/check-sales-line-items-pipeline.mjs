@@ -40,6 +40,9 @@ const rpc = sql.match(
 assert.ok(rpc, 'atomic replacement RPC must exist');
 assert.match(rpc, /security invoker/i);
 assert.doesNotMatch(rpc, /security definer/i);
+assert.match(rpc, /set search_path = ''/i);
+assert.match(rpc, /set statement_timeout = '15s'/i);
+assert.doesNotMatch(rpc, /\btruncate\b/i);
 assert.match(rpc, /create temporary table staged_sales_line_items on commit drop as/i);
 assert.match(rpc, /pg_advisory_xact_lock/i);
 assert.match(rpc, /duplicate source_key in payload/i);
