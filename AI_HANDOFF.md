@@ -2,6 +2,13 @@
 
 يقرأه Claude وCodex قبل كل مهمة. أحدث سجل يكون في الأعلى. لا تحذف السجلات السابقة.
 
+## 2026-08-25 - Claude - reliability-hardening-phase1
+
+- Status: completed
+- Branch: task branch pending for: reliability-hardening-phase1
+- Files: tools/ameen-read-worker.ps1,tools/push-customer-movements.ps1,tools/ensure-ameen-sync.ps1
+- Result: PR #114 merged (merge commit b7ae578bbfc0c95de9b3933286464feb2f39941c). Reliability Hardening Phase 1 complete: Ameen Read Worker timeout+heartbeat, Customer Movements HTTP timeout, isolated watchdog recovery for the worker task only. Ameen remained READ ONLY throughout.
+- Handoff UTC: 2026-08-25T11:44:42Z
 ## 2026-08-24 - Claude - Collection Priority user-facing fix (command-center.js)
 
 - Status: completed
