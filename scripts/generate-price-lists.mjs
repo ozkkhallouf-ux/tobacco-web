@@ -388,10 +388,6 @@ const CSS = `
     .no-print { display: none !important; }
     .theme-switch { display: none !important; }
     .secondary-page {
-      break-before: page;
-      page-break-before: always;
-      break-inside: avoid-page;
-      page-break-inside: avoid;
       margin-top: 0;
     }
   }
@@ -488,7 +484,7 @@ const CSS = `
     border-radius: 2px;
   }
   .column-stack { min-width: 0; background: var(--page); position: relative; z-index: 1; }
-  .secondary-page { break-before: page; page-break-before: always; margin-top: 8px; }
+  .secondary-page { margin-top: 8px; }
 
   @media screen and (max-width: 720px) {
     .columns { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; padding: 0 4px 6px; }

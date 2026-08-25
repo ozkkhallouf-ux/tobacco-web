@@ -97,7 +97,7 @@
       min-width:0; background:var(--page); position:relative; z-index:1;
     }
     .ozk-price-list .price-list-secondary-page {
-      break-before:page; page-break-before:always; margin-top:8px;
+      margin-top:8px;
     }
     .ozk-price-list .price-list-group {
       break-inside:avoid; -webkit-column-break-inside:avoid; margin-bottom:5px;
@@ -106,18 +106,25 @@
     .ozk-price-list .price-list-group-header {
       background:var(--surface-strong); border-bottom:1px solid var(--line); padding:3.5px 9px;
       font-size:11px; font-weight:900; color:#f2c55c; display:flex; justify-content:space-between;
-      align-items:center; letter-spacing:.3px;
+      align-items:center; letter-spacing:.3px; gap:6px;
+    }
+    .ozk-price-list .price-list-group-name {
+      min-width:0; overflow-wrap:break-word; word-break:break-word;
     }
     .ozk-price-list .price-list-group-count {
-      font-size:8.5px; background:rgba(255,255,255,.12); color:#f4d184;
-      border-radius:8px; padding:1px 6px; font-weight:700;
+      flex:0 0 auto; font-size:8.5px; background:rgba(255,255,255,.12); color:#f4d184;
+      border-radius:8px; padding:1px 6px; font-weight:700; white-space:nowrap;
     }
-    .ozk-price-list table { width:100%; border-collapse:collapse; }
-    .ozk-price-list td { padding:2.5px 8px; border-bottom:1px solid var(--line); font-size:10px; }
+    .ozk-price-list table { width:100%; table-layout:fixed; border-collapse:collapse; }
+    .ozk-price-list td {
+      padding:2.5px 8px; border-bottom:1px solid var(--line); font-size:10px;
+      overflow-wrap:break-word; word-break:break-word;
+    }
     .ozk-price-list td.name { font-weight:700; color:var(--text); width:54%; }
     .ozk-price-list td.unit { color:var(--muted); text-align:center; width:16%; font-size:9px; }
     .ozk-price-list td.price {
       font-weight:900; text-align:left; direction:ltr; font-size:10.5px; color:var(--gold-strong); width:30%;
+      overflow-wrap:normal; word-break:normal; white-space:nowrap;
     }
     .ozk-price-list tr.odd { background:var(--surface); }
     .ozk-price-list tr.even { background:var(--surface-alt); }
@@ -152,7 +159,7 @@
       .ozk-price-list { -webkit-print-color-adjust:exact; print-color-adjust:exact; }
       .ozk-price-list .no-print { display:none !important; }
       .ozk-price-list .price-list-secondary-page {
-        break-before:page; page-break-before:always; break-inside:avoid-page; page-break-inside:avoid; margin-top:0;
+        margin-top:0;
       }
     }
   `;
@@ -176,11 +183,19 @@
     const remaining = safeGroups.filter((group) => !reserved.has(group.name) && !SPECIAL_GROUPS.has(group.name));
     const height = (stack) => stack.reduce((sum, group) => sum + (group.items?.length || 0) + 1, 0);
     remaining.forEach((group) => (height(right) <= height(left) ? right : left).push(group));
+    // توزيع مجموعات الصفحة الثانوية حسب الارتفاع الفعلي بدل تخصيص أسماء ثابتة —
+    // التخصيص الثابت (فحم/ورق/فيبات/قداحات/سلفان يميناً مقابل معسل يساراً فقط) يترك عموداً
+    // فارغاً وصفحة PDF شبه بيضاء عندما تغيب بعض هذه المواد من نشرة معيّنة.
+    const specialOrder = [...SPECIAL_LEFT_GROUPS, ...SPECIAL_RIGHT_GROUPS];
+    const specialAvailable = take(specialOrder);
+    const specialRight = [];
+    const specialLeft = [];
+    specialAvailable.forEach((group) => (height(specialRight) <= height(specialLeft) ? specialRight : specialLeft).push(group));
     return {
       right,
       left,
-      specialRight: take(SPECIAL_RIGHT_GROUPS),
-      specialLeft: take(SPECIAL_LEFT_GROUPS)
+      specialRight,
+      specialLeft
     };
   }
 
@@ -189,7 +204,7 @@
     return `
       <div class="price-list-group">
         <div class="price-list-group-header">
-          <span>${escapeHtml(group?.name)}</span>
+          <span class="price-list-group-name">${escapeHtml(group?.name)}</span>
           <span class="price-list-group-count">${items.length}</span>
         </div>
         <table><tbody>${items.map((item, index) => `
