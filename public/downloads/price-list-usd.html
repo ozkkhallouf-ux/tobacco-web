@@ -143,8 +143,8 @@
 
       <div class="price-list-document-tools no-print">
         <button type="button" onclick="window.print()">طباعة مباشرة</button>
-        <a data-pdf-open href="price-list-usd.pdf?v=cbde98104f78">فتح PDF</a>
-        <a data-pdf-download href="price-list-usd.pdf?v=cbde98104f78" download>تنزيل PDF</a>
+        <a data-pdf-open href="price-list-usd.pdf?v=ab72b3d95ce6">فتح PDF</a>
+        <a data-pdf-download href="price-list-usd.pdf?v=ab72b3d95ce6" download>تنزيل PDF</a>
         <button class="theme-switch" type="button" onclick="toggleTheme()">فاتح / داكن</button>
       </div>
         <header class="price-list-header">
@@ -184,7 +184,7 @@
           <tr class="odd">
             <td class="name">ماستر طويل ورق</td>
             <td class="unit">كرتونة</td>
-            <td class="price">352.00 $</td>
+            <td class="price">355.00 $</td>
           </tr>
           <tr class="even">
             <td class="name">ماستر قصير أزرق</td>
@@ -194,7 +194,7 @@
           <tr class="odd">
             <td class="name">ماستر قصير فضي</td>
             <td class="unit">كرتونة</td>
-            <td class="price">327.00 $</td>
+            <td class="price">328.00 $</td>
           </tr>
           <tr class="even">
             <td class="name">ماستر كوين أزرق</td>
@@ -272,7 +272,7 @@
           <tr class="odd">
             <td class="name">اوسكار كوين نانو شوكولا</td>
             <td class="unit">كرتونة</td>
-            <td class="price">220.00 $</td>
+            <td class="price">225.00 $</td>
           </tr>
         </tbody></table>
       </div>
@@ -669,7 +669,7 @@
           <tr class="even">
             <td class="name">تي اس فضي</td>
             <td class="unit">كرتونة</td>
-            <td class="price">251.00 $</td>
+            <td class="price">260.00 $</td>
           </tr>
         </tbody></table>
       </div>
@@ -1173,7 +1173,7 @@
   sheet.dataset.theme = savedTheme || 'dark';
   document.body.dataset.theme = sheet.dataset.theme;
   function selectedPdfFile() {
-    return sheet.dataset.theme === 'light' ? 'price-list-usd-light.pdf?v=cbde98104f78' : 'price-list-usd.pdf?v=cbde98104f78';
+    return sheet.dataset.theme === 'light' ? 'price-list-usd-light.pdf?v=ab72b3d95ce6' : 'price-list-usd.pdf?v=ab72b3d95ce6';
   }
   function syncPdfLinks() {
     const selected = selectedPdfFile();
