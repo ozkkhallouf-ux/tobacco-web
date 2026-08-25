@@ -156,6 +156,91 @@ if ($restarted.Count -gt 0) {
   }
 }
 
+# ---------- 2ب) TOBACCO Ameen Read Worker — فحص heartbeat (267009 وحدها لا تكفي) ----------
+# العامل حلقة while($true) طويلة العمر — Task Scheduler يريها "Running" دائماً حتى لو تجمّدت
+# فعلياً (تعليق شبكي بلا timeout قبل هذا الإصلاح). المقياس الموثوق الوحيد هو heartbeat محلي
+# يكتبه العامل نفسه بعد كل دورة poll/idle ناجحة (انظر ameen-read-worker.ps1).
+$ameenWorkerTaskName = "TOBACCO Ameen Read Worker"
+$ameenWorkerHeartbeatPath = Join-Path $PSScriptRoot "logs\ameen-read-worker.heartbeat.json"
+$ameenWorkerIncidentStatePath = Join-Path $logDirectory "ameen-read-worker-incident-state.json"
+# 5 دقائق: دورة العامل الطبيعية ثوانٍ معدودة (PollSeconds افتراضي 3، وسقف Timeout لكل نداء شبكة 30 ثانية
+# بحد أقصى)، فخمس دقائق تعطي هامشاً كبيراً (عشرات أضعاف الدورة الطبيعية) ضد أي تعثّر عابر، وبنفس الوقت
+# أقصر من أي فاصل تشغيل معقول لهذا الحارس فلا تفوت حادثة كاملة.
+$ameenWorkerStaleThresholdMinutes = 5
+
+if ($isMainComputer) {
+  $workerTask = Get-ScheduledTask -TaskName $ameenWorkerTaskName -ErrorAction SilentlyContinue
+  $workerInfo = Get-ScheduledTaskInfo -TaskName $ameenWorkerTaskName -ErrorAction SilentlyContinue
+
+  if (-not $workerTask -or -not $workerInfo) {
+    $problems.Add("المهمة «$ameenWorkerTaskName» غير مسجّلة")
+    Write-Log "FAIL: task not registered — $ameenWorkerTaskName"
+  } else {
+    $heartbeatAgeMinutes = $null
+    if (Test-Path -LiteralPath $ameenWorkerHeartbeatPath) {
+      try {
+        $hb = Get-Content -LiteralPath $ameenWorkerHeartbeatPath -Raw | ConvertFrom-Json
+        $hbTime = [datetime]::Parse([string]$hb.timestampUtc, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind)
+        $heartbeatAgeMinutes = [math]::Round(((Get-Date).ToUniversalTime() - $hbTime.ToUniversalTime()).TotalMinutes, 1)
+      } catch {
+        Write-Log "WARN: could not parse Ameen worker heartbeat — $($_.Exception.Message)"
+      }
+    }
+
+    # عالقة = المهمة تظهر Running لكن heartbeat غائب أو أقدم من الحد المسموح
+    $workerStuck = ([string]$workerTask.State -eq "Running") -and
+                   (($null -eq $heartbeatAgeMinutes) -or ($heartbeatAgeMinutes -gt $ameenWorkerStaleThresholdMinutes))
+
+    $prevIncidentActive = $false
+    if (Test-Path -LiteralPath $ameenWorkerIncidentStatePath) {
+      try { $prevIncidentActive = [bool]((Get-Content -LiteralPath $ameenWorkerIncidentStatePath -Raw | ConvertFrom-Json).stuck) } catch {}
+    }
+
+    if ($workerStuck) {
+      $ageText = if ($null -eq $heartbeatAgeMinutes) { "heartbeat غير موجود" } else { "آخر heartbeat منذ $heartbeatAgeMinutes دقيقة" }
+      Write-Log "STUCK: $ameenWorkerTaskName ($ageText)"
+
+      if (-not $prevIncidentActive) {
+        # حادثة جديدة فقط — تنبيه واحد، لا يتكرر كل تشغيل للحارس طالما الحادثة مستمرة
+        $stuckMsg = "🚨 توقف/تعليق Ameen Read Worker — $ageText."
+        $notifyPathWorker = Join-Path $PSScriptRoot "send-telegram-notification.ps1"
+        if (Test-Path -LiteralPath $notifyPathWorker) {
+          $stuckNotifyOutput = & $notifyPathWorker -Message $stuckMsg -EventType "windows" -DedupeKey "ameen-read-worker-stuck" -DedupeMinutes 1440 2>&1
+          Write-Log ("ALERT sent for Ameen worker stuck incident — " + (($stuckNotifyOutput | Out-String).Trim() -replace "\s+", " "))
+        }
+      }
+
+      # استعادة محددة لهذه المهمة فقط: لا kill عام لعمليات powershell، لا إعادة تشغيل لأي مهمة أخرى
+      try {
+        Stop-ScheduledTask -TaskName $ameenWorkerTaskName -ErrorAction Stop
+        $waitDeadline = (Get-Date).AddSeconds(30)
+        do {
+          Start-Sleep -Seconds 2
+          $stillRunning = ([string](Get-ScheduledTask -TaskName $ameenWorkerTaskName -ErrorAction SilentlyContinue).State) -eq "Running"
+        } while ($stillRunning -and (Get-Date) -lt $waitDeadline)
+
+        Start-ScheduledTask -TaskName $ameenWorkerTaskName -ErrorAction Stop
+        Write-Log "RECOVERY ATTEMPT: restarted $ameenWorkerTaskName"
+      } catch {
+        Write-Log "FAIL: could not restart $ameenWorkerTaskName — $($_.Exception.Message)"
+      }
+
+      @{ stuck = $true; since = (Get-Date).ToUniversalTime().ToString("o") } | ConvertTo-Json | Set-Content -LiteralPath $ameenWorkerIncidentStatePath -Encoding utf8
+    } else {
+      if ($prevIncidentActive) {
+        # عاد للعمل بعد حادثة — تنبيه واحد فقط عند لحظة العودة
+        $recoverMsg = "✅ عاد Ameen Read Worker للعمل."
+        $notifyPathWorker = Join-Path $PSScriptRoot "send-telegram-notification.ps1"
+        if (Test-Path -LiteralPath $notifyPathWorker) {
+          $recoverNotifyOutput = & $notifyPathWorker -Message $recoverMsg -EventType "windows" -DedupeKey "ameen-read-worker-recovered" -DedupeMinutes 60 2>&1
+          Write-Log ("RECOVERY CONFIRMED for Ameen worker — " + (($recoverNotifyOutput | Out-String).Trim() -replace "\s+", " "))
+        }
+      }
+      @{ stuck = $false } | ConvertTo-Json | Set-Content -LiteralPath $ameenWorkerIncidentStatePath -Encoding utf8
+    }
+  }
+}
+
 # ---------- 3) كل مهام المشروع المسجّلة ----------
 # نراقب تلقائياً أي مهمة TOBACCO موجودة على الجهاز الرئيسي حتى لا تحتاج
 # إضافة اسمها يدوياً عند توسع المشروع. المهمة القديمة لفواتير الزبائن
@@ -167,7 +252,8 @@ if ($isMainComputer) {
   $projectTasks = @(Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object {
     $_.TaskName -like "TOBACCO *" -and
     $_.TaskName -notin $retiredTasks -and
-    $_.TaskName -ne "TOBACCO Sync Watchdog"
+    $_.TaskName -ne "TOBACCO Sync Watchdog" -and
+    $_.TaskName -ne $ameenWorkerTaskName   # يُفحص بفحص heartbeat مخصص أدقّ بالقسم ٢ب أعلاه — LastTaskResult=267009 وحده لا يكفي لمهمة تعمل بحلقة while($true)
   })
 
   foreach ($task in $projectTasks) {

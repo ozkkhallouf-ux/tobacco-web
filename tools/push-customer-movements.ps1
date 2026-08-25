@@ -207,9 +207,10 @@ ORDER BY name, dt, isopen, iscredit, sortdt, cenum, num
 
     # (4) تسجيل الدخول إلى Supabase
     $loginBody = (@{ email = $syncEmail; password = $syncPassword } | ConvertTo-Json -Compress)
+    # -TimeoutSec 30: يمنع تعليق العملية للأبد عند تعثر شبكي (نفس القيمة المستخدمة بالنداءات الأخرى بهذا الملف)
     $session = Invoke-RestMethod -Method Post -Uri "$supabaseUrl/auth/v1/token?grant_type=password" `
         -Headers @{ apikey = $apiKey } -ContentType "application/json; charset=utf-8" `
-        -Body ([System.Text.Encoding]::UTF8.GetBytes($loginBody))
+        -Body ([System.Text.Encoding]::UTF8.GetBytes($loginBody)) -TimeoutSec 30
 
     # معرّف المستخدم: من user.id إن وُجد، وإلا من حقل sub داخل توكن JWT (موثوق لأن الدخول نجح).
     $createdBy = $null
@@ -245,7 +246,7 @@ ORDER BY name, dt, isopen, iscredit, sortdt, cenum, num
     Write-Log ("حجم البيانات: {0:N0} حرف" -f $json.Length)
     Invoke-RestMethod -Method Post -Uri "$supabaseUrl/rest/v1/inventory_reports" `
         -Headers $authHeaders -ContentType "application/json; charset=utf-8" `
-        -Body ([System.Text.Encoding]::UTF8.GetBytes($json)) | Out-Null
+        -Body ([System.Text.Encoding]::UTF8.GetBytes($json)) -TimeoutSec 30 | Out-Null
 
     Write-Log "تم رفع تقرير الحركات بنجاح ✓"
 
@@ -254,7 +255,7 @@ ORDER BY name, dt, isopen, iscredit, sortdt, cenum, num
     try {
         Invoke-RestMethod -Method Delete `
             -Uri "$supabaseUrl/rest/v1/inventory_reports?source=eq.ameen_customer_movements&created_at=lt.$cutoff" `
-            -Headers $authHeaders | Out-Null
+            -Headers $authHeaders -TimeoutSec 30 | Out-Null
     } catch { Write-Log "تنبيه: تعذّر حذف التقارير القديمة: $($_.Exception.Message)" }
 
     exit 0
