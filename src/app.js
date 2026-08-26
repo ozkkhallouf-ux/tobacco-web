@@ -2765,7 +2765,10 @@ async function exportBulletinPdf(items, latest, useSyria = false, theme = state.
   if (!items || !items.length || !window.html2pdf) return;
   const selectedTheme = normalizedBulletinPdfTheme(theme);
   const backgroundColor = selectedTheme === "light" ? "#fffdf8" : "#0c0a07";
-  const filename = `ozk-${useSyria ? "mufrak-syp" : "jumla-usd"}-${selectedTheme}-${todayIsoDate()}.pdf`;
+  // اسم الملف يتولد تلقائياً من تاريخ التصدير الفعلي وعملة النشرة — لا اسم ثابت
+  // ولا تدخل يدوي؛ نفس المتغير يُستخدم لمساري سطح المكتب (html2pdf().save())
+  // والجوال (createPortablePdfBlob/presentPortablePdf) فلا يوجد مصدر آخر لتحديثه.
+  const filename = `نشرة-الأسعار-${useSyria ? "SYP" : "USD"}-${todayIsoDate()}.pdf`;
   const markup = customerPricePdfMarkup(items, latest, useSyria, selectedTheme);
 
   // iOS داخل الـPWA لا ينفّذ تنزيل html2pdf().save() بشكل موثوق. نولّد Blob
