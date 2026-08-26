@@ -71,7 +71,7 @@ let feed = [];
 let feedError = "";
 try {
   const res = await fetch(
-    `${SUPABASE_URL}/rest/v1/available_price_sync_feed?select=item_key,item_name,unit1_name,unit2_name,unit2_factor,unit2_price,retail_carton_usd,stock_qty,stock_status,source_synced_at,updated_at&order=item_name.asc&limit=5000`,
+    `${SUPABASE_URL}/rest/v1/available_price_sync_feed?select=item_key,item_name,unit1_name,unit2_name,unit2_factor,unit2_price,retail_carton_usd,stock_qty,stock_status,source_synced_at,updated_at,bulletin_note&order=item_name.asc&limit=5000`,
     {
       headers: {
         apikey: SUPABASE_KEY,
@@ -142,6 +142,7 @@ if (feed.length) {
       usd: Number(r.unit2_price || 0),
       retailCarton: Number(r.retail_carton_usd || 0),
       stockQty: Number(r.stock_qty || 0),
+      note: String(r.bulletin_note || "").trim(),
     };
   };
   // الجملة: سعر دولار صالح + كرتونة/طرد/شرحة كاملة واحدة على الأقل.
@@ -589,7 +590,7 @@ const buildHtml = ({ pageItems, titleSuffix, badgeClass, badgeLabel, unitLabel, 
   const groups = buildGroups(pageItems).map(([name, items]) => ({
     name,
     items: items.map((item) => ({
-      name: item.name,
+      name: item.note ? `${item.name} — ${item.note}` : item.name,
       unit: unitFormatter(item),
       price: priceFormatter(item)
     }))
