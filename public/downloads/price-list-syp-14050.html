@@ -146,8 +146,8 @@
 
       <div class="price-list-document-tools no-print">
         <button type="button" onclick="window.print()">طباعة مباشرة</button>
-        <a data-pdf-open href="price-list-syp-14050.pdf?v=fd1b9b6aa139">فتح PDF</a>
-        <a data-pdf-download href="price-list-syp-14050.pdf?v=fd1b9b6aa139" download>تنزيل PDF</a>
+        <a data-pdf-open href="price-list-syp-14050.pdf?v=12b57fb1a938">فتح PDF</a>
+        <a data-pdf-download href="price-list-syp-14050.pdf?v=12b57fb1a938" download>تنزيل PDF</a>
         <button class="theme-switch" type="button" onclick="toggleTheme()">فاتح / داكن</button>
       </div>
         <header class="price-list-header">
@@ -654,35 +654,30 @@
       <div class="price-list-group">
         <div class="price-list-group-header">
           <span>غلواز</span>
-          <span class="price-list-group-count">6</span>
+          <span class="price-list-group-count">5</span>
         </div>
         <table><tbody>
           <tr class="odd">
-            <td class="name">جيتان قصير</td>
-            <td class="unit">كروز</td>
-            <td class="price">119,210 ل.س</td>
-          </tr>
-          <tr class="even">
             <td class="name">غلواز قصير أحمر</td>
             <td class="unit">كروز</td>
             <td class="price">105,586 ل.س</td>
           </tr>
-          <tr class="odd">
+          <tr class="even">
             <td class="name">غلواز قصير أصفر</td>
             <td class="unit">كروز</td>
             <td class="price">105,586 ل.س</td>
           </tr>
-          <tr class="even">
+          <tr class="odd">
             <td class="name">غلواز كوين أحمر</td>
             <td class="unit">كروز</td>
             <td class="price">106,110 ل.س</td>
           </tr>
-          <tr class="odd">
+          <tr class="even">
             <td class="name">غلواز كوين أصفر</td>
             <td class="unit">كروز</td>
             <td class="price">106,110 ل.س</td>
           </tr>
-          <tr class="even">
+          <tr class="odd">
             <td class="name">غلواز كوين اصفر اس سبعة.</td>
             <td class="unit">كروز</td>
             <td class="price">100,870 ل.س</td>
@@ -1423,7 +1418,7 @@
   sheet.dataset.theme = savedTheme || 'dark';
   document.body.dataset.theme = sheet.dataset.theme;
   function selectedPdfFile() {
-    return sheet.dataset.theme === 'light' ? 'price-list-syp-14050-light.pdf?v=fd1b9b6aa139' : 'price-list-syp-14050.pdf?v=fd1b9b6aa139';
+    return sheet.dataset.theme === 'light' ? 'price-list-syp-14050-light.pdf?v=12b57fb1a938' : 'price-list-syp-14050.pdf?v=12b57fb1a938';
   }
   function syncPdfLinks() {
     const selected = selectedPdfFile();
