@@ -143,8 +143,8 @@
 
       <div class="price-list-document-tools no-print">
         <button type="button" onclick="window.print()">طباعة مباشرة</button>
-        <a data-pdf-open href="price-list-syp-14050.pdf?v=3a76d749eb33">فتح PDF</a>
-        <a data-pdf-download href="price-list-syp-14050.pdf?v=3a76d749eb33" download>تنزيل PDF</a>
+        <a data-pdf-open href="price-list-syp-14050.pdf?v=3a14afa419aa">فتح PDF</a>
+        <a data-pdf-download href="price-list-syp-14050.pdf?v=3a14afa419aa" download>تنزيل PDF</a>
         <button class="theme-switch" type="button" onclick="toggleTheme()">فاتح / داكن</button>
       </div>
         <header class="price-list-header">
@@ -226,12 +226,12 @@
             <td class="price">61,570 ل.س</td>
           </tr>
           <tr class="odd">
-            <td class="name">كابتن بلاك كور ازرق جديد</td>
+            <td class="name">كابتن بلاك كور ازرق جديد — مع قداحات</td>
             <td class="unit">كروز</td>
             <td class="price">82,530 ل.س</td>
           </tr>
           <tr class="even">
-            <td class="name">كابتن بلاك كور اسود جديد</td>
+            <td class="name">كابتن بلاك كور اسود جديد — مع قداحات</td>
             <td class="unit">كروز</td>
             <td class="price">82,530 ل.س</td>
           </tr>
@@ -1419,7 +1419,7 @@
   sheet.dataset.theme = savedTheme || 'dark';
   document.body.dataset.theme = sheet.dataset.theme;
   function selectedPdfFile() {
-    return sheet.dataset.theme === 'light' ? 'price-list-syp-14050-light.pdf?v=3a76d749eb33' : 'price-list-syp-14050.pdf?v=3a76d749eb33';
+    return sheet.dataset.theme === 'light' ? 'price-list-syp-14050-light.pdf?v=3a14afa419aa' : 'price-list-syp-14050.pdf?v=3a14afa419aa';
   }
   function syncPdfLinks() {
     const selected = selectedPdfFile();
