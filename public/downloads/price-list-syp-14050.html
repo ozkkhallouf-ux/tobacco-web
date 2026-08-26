@@ -146,8 +146,8 @@
 
       <div class="price-list-document-tools no-print">
         <button type="button" onclick="window.print()">طباعة مباشرة</button>
-        <a data-pdf-open href="price-list-syp-14050.pdf?v=3b9eef07ac36">فتح PDF</a>
-        <a data-pdf-download href="price-list-syp-14050.pdf?v=3b9eef07ac36" download>تنزيل PDF</a>
+        <a data-pdf-open href="price-list-syp-14050.pdf?v=fd1b9b6aa139">فتح PDF</a>
+        <a data-pdf-download href="price-list-syp-14050.pdf?v=fd1b9b6aa139" download>تنزيل PDF</a>
         <button class="theme-switch" type="button" onclick="toggleTheme()">فاتح / داكن</button>
       </div>
         <header class="price-list-header">
@@ -166,8 +166,9 @@
             <span class="location">دوما - ساحة الغنم</span>
           </div>
         </div>
-        <div class="price-list-columns">
-          <div class="price-list-column-stack">
+
+      <div class="price-list-columns">
+        <div class="price-list-column-stack">
       <div class="price-list-group">
         <div class="price-list-group-header">
           <span>ماستر</span>
@@ -649,7 +650,7 @@
           </tr>
         </tbody></table>
       </div></div>
-          <div class="price-list-column-stack">
+        <div class="price-list-column-stack">
       <div class="price-list-group">
         <div class="price-list-group-header">
           <span>غلواز</span>
@@ -1167,7 +1168,7 @@
           </tr>
         </tbody></table>
       </div></div>
-        </div>
+      </div>
 
       <div class="price-list-columns price-list-secondary-page">
         <div class="price-list-column-stack">
@@ -1422,7 +1423,7 @@
   sheet.dataset.theme = savedTheme || 'dark';
   document.body.dataset.theme = sheet.dataset.theme;
   function selectedPdfFile() {
-    return sheet.dataset.theme === 'light' ? 'price-list-syp-14050-light.pdf?v=3b9eef07ac36' : 'price-list-syp-14050.pdf?v=3b9eef07ac36';
+    return sheet.dataset.theme === 'light' ? 'price-list-syp-14050-light.pdf?v=fd1b9b6aa139' : 'price-list-syp-14050.pdf?v=fd1b9b6aa139';
   }
   function syncPdfLinks() {
     const selected = selectedPdfFile();

@@ -146,8 +146,8 @@
 
       <div class="price-list-document-tools no-print">
         <button type="button" onclick="window.print()">طباعة مباشرة</button>
-        <a data-pdf-open href="price-list-usd.pdf?v=6e1355081274">فتح PDF</a>
-        <a data-pdf-download href="price-list-usd.pdf?v=6e1355081274" download>تنزيل PDF</a>
+        <a data-pdf-open href="price-list-usd.pdf?v=d7f05fb6d11b">فتح PDF</a>
+        <a data-pdf-download href="price-list-usd.pdf?v=d7f05fb6d11b" download>تنزيل PDF</a>
         <button class="theme-switch" type="button" onclick="toggleTheme()">فاتح / داكن</button>
       </div>
         <header class="price-list-header">
@@ -166,8 +166,9 @@
             <span class="location">دوما - ساحة الغنم</span>
           </div>
         </div>
-        <div class="price-list-columns">
-          <div class="price-list-column-stack">
+
+      <div class="price-list-columns">
+        <div class="price-list-column-stack">
       <div class="price-list-group">
         <div class="price-list-group-header">
           <span>ماستر</span>
@@ -564,7 +565,7 @@
           </tr>
         </tbody></table>
       </div></div>
-          <div class="price-list-column-stack">
+        <div class="price-list-column-stack">
       <div class="price-list-group">
         <div class="price-list-group-header">
           <span>غلواز</span>
@@ -955,7 +956,7 @@
           </tr>
         </tbody></table>
       </div></div>
-        </div>
+      </div>
 
       <div class="price-list-columns price-list-secondary-page">
         <div class="price-list-column-stack">
@@ -1200,7 +1201,7 @@
   sheet.dataset.theme = savedTheme || 'dark';
   document.body.dataset.theme = sheet.dataset.theme;
   function selectedPdfFile() {
-    return sheet.dataset.theme === 'light' ? 'price-list-usd-light.pdf?v=6e1355081274' : 'price-list-usd.pdf?v=6e1355081274';
+    return sheet.dataset.theme === 'light' ? 'price-list-usd-light.pdf?v=d7f05fb6d11b' : 'price-list-usd.pdf?v=d7f05fb6d11b';
   }
   function syncPdfLinks() {
     const selected = selectedPdfFile();

@@ -146,8 +146,8 @@
 
       <div class="price-list-document-tools no-print">
         <button type="button" onclick="window.print()">طباعة مباشرة</button>
-        <a data-pdf-open href="price-list-wazari-syp-14050.pdf?v=b93f1be17c05">فتح PDF</a>
-        <a data-pdf-download href="price-list-wazari-syp-14050.pdf?v=b93f1be17c05" download>تنزيل PDF</a>
+        <a data-pdf-open href="price-list-wazari-syp-14050.pdf?v=9eacc829e111">فتح PDF</a>
+        <a data-pdf-download href="price-list-wazari-syp-14050.pdf?v=9eacc829e111" download>تنزيل PDF</a>
         <button class="theme-switch" type="button" onclick="toggleTheme()">فاتح / داكن</button>
       </div>
         <header class="price-list-header">
@@ -166,8 +166,9 @@
             <span class="location">دوما - ساحة الغنم</span>
           </div>
         </div>
-        <div class="price-list-columns">
-          <div class="price-list-column-stack">
+
+      <div class="price-list-columns">
+        <div class="price-list-column-stack">
       <div class="price-list-group">
         <div class="price-list-group-header">
           <span>كينت وزاري</span>
@@ -215,7 +216,7 @@
           </tr>
         </tbody></table>
       </div></div>
-          <div class="price-list-column-stack">
+        <div class="price-list-column-stack">
       <div class="price-list-group">
         <div class="price-list-group-header">
           <span>مالبورو وزاري</span>
@@ -248,7 +249,7 @@
           </tr>
         </tbody></table>
       </div></div>
-        </div>
+      </div>
 
       </section>
 <script>
@@ -257,7 +258,7 @@
   sheet.dataset.theme = savedTheme || 'dark';
   document.body.dataset.theme = sheet.dataset.theme;
   function selectedPdfFile() {
-    return sheet.dataset.theme === 'light' ? 'price-list-wazari-syp-14050-light.pdf?v=b93f1be17c05' : 'price-list-wazari-syp-14050.pdf?v=b93f1be17c05';
+    return sheet.dataset.theme === 'light' ? 'price-list-wazari-syp-14050-light.pdf?v=9eacc829e111' : 'price-list-wazari-syp-14050.pdf?v=9eacc829e111';
   }
   function syncPdfLinks() {
     const selected = selectedPdfFile();
