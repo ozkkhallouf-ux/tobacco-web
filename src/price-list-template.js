@@ -1,7 +1,7 @@
 (function initOzkPriceListTemplate(root) {
   "use strict";
 
-  const VERSION = "2026-08-20-new-bulletin";
+  const VERSION = "2026-08-26-fixed-table-layout";
   const RIGHT_GROUPS = ["ماستر", "كابتن بلاك", "اوسكار", "اختمار", "روز", "1970", "كينغ دوم", "مانشستر"];
   const LEFT_GROUPS = ["غلواز", "اليغانس", "تي اس", "أوريس", "حمرا", "يونايتد", "ولسون", "نابولي"];
   const SPECIAL_RIGHT_GROUPS = ["فحم", "ورق", "فيبات", "قداحات", "سلفان"];
@@ -112,9 +112,12 @@
       font-size:8.5px; background:rgba(255,255,255,.12); color:#f4d184;
       border-radius:8px; padding:1px 6px; font-weight:700;
     }
-    .ozk-price-list table { width:100%; border-collapse:collapse; }
+    .ozk-price-list table { width:100%; border-collapse:collapse; table-layout:fixed; }
     .ozk-price-list td { padding:2.5px 8px; border-bottom:1px solid var(--line); font-size:10px; }
-    .ozk-price-list td.name { font-weight:700; color:var(--text); width:54%; }
+    .ozk-price-list td.name {
+      font-weight:700; color:var(--text); width:54%; overflow-wrap:break-word; word-break:break-word;
+      white-space:normal; hyphens:auto;
+    }
     .ozk-price-list td.unit { color:var(--muted); text-align:center; width:16%; font-size:9px; }
     .ozk-price-list td.price {
       font-weight:900; text-align:left; direction:ltr; font-size:10.5px; color:var(--gold-strong); width:30%;
@@ -174,7 +177,16 @@
     const left = take(LEFT_GROUPS);
     const reserved = new Set([...right, ...left].map((group) => group.name));
     const remaining = safeGroups.filter((group) => !reserved.has(group.name) && !SPECIAL_GROUPS.has(group.name));
-    const height = (stack) => stack.reduce((sum, group) => sum + (group.items?.length || 0) + 1, 0);
+    // طول الاسم (يشمل "الاسم — الملاحظة" عند وجودها) يحدد عدد الأسطر داخل الخلية
+    // فعلياً بعد إضافة table-layout:fixed + word-break أعلاه؛ فسطر واحد لا يكفي
+    // لتقدير الارتفاع الحقيقي لصنف باسم/ملاحظة طويلين. تقدير تقريبي: ~26 حرفاً
+    // عربياً لكل سطر ضمن عرض 54% من عمود بحجم خط 10px.
+    const CHARS_PER_NAME_LINE = 26;
+    const itemLines = (item) => Math.max(1, Math.ceil(String(item?.name || "").length / CHARS_PER_NAME_LINE));
+    const height = (stack) => stack.reduce(
+      (sum, group) => sum + (group.items || []).reduce((rows, item) => rows + itemLines(item), 0) + 1,
+      0
+    );
     remaining.forEach((group) => (height(right) <= height(left) ? right : left).push(group));
     return {
       right,
