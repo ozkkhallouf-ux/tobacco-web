@@ -10,7 +10,7 @@
 </head>
 <body>
 
-      <style data-ozk-price-list-style="2026-08-20-new-bulletin">
+      <style data-ozk-price-list-style="2026-08-26-fixed-table-layout">
     @import url('https://fonts.googleapis.com/css2?family=Almarai:wght@300;400;700;800&display=swap');
     @page { size: A4 portrait; margin: 0; }
     .ozk-price-list, .ozk-price-list * { box-sizing: border-box; }
@@ -95,9 +95,12 @@
       font-size:8.5px; background:rgba(255,255,255,.12); color:#f4d184;
       border-radius:8px; padding:1px 6px; font-weight:700;
     }
-    .ozk-price-list table { width:100%; border-collapse:collapse; }
+    .ozk-price-list table { width:100%; border-collapse:collapse; table-layout:fixed; }
     .ozk-price-list td { padding:2.5px 8px; border-bottom:1px solid var(--line); font-size:10px; }
-    .ozk-price-list td.name { font-weight:700; color:var(--text); width:54%; }
+    .ozk-price-list td.name {
+      font-weight:700; color:var(--text); width:54%; overflow-wrap:break-word; word-break:break-word;
+      white-space:normal; hyphens:auto;
+    }
     .ozk-price-list td.unit { color:var(--muted); text-align:center; width:16%; font-size:9px; }
     .ozk-price-list td.price {
       font-weight:900; text-align:left; direction:ltr; font-size:10.5px; color:var(--gold-strong); width:30%;
@@ -139,12 +142,12 @@
       }
     }
   </style>
-      <section class="ozk-price-list has-document-tools" lang="ar" dir="rtl" translate="no" data-theme="dark" data-template-version="2026-08-20-new-bulletin">
+      <section class="ozk-price-list has-document-tools" lang="ar" dir="rtl" translate="no" data-theme="dark" data-template-version="2026-08-26-fixed-table-layout">
 
       <div class="price-list-document-tools no-print">
         <button type="button" onclick="window.print()">طباعة مباشرة</button>
-        <a data-pdf-open href="price-list-usd.pdf?v=e9fb43dc6b5f">فتح PDF</a>
-        <a data-pdf-download href="price-list-usd.pdf?v=e9fb43dc6b5f" download>تنزيل PDF</a>
+        <a data-pdf-open href="price-list-usd.pdf?v=b6df7cf7a71f">فتح PDF</a>
+        <a data-pdf-download href="price-list-usd.pdf?v=b6df7cf7a71f" download>تنزيل PDF</a>
         <button class="theme-switch" type="button" onclick="toggleTheme()">فاتح / داكن</button>
       </div>
         <header class="price-list-header">
@@ -226,12 +229,12 @@
             <td class="price">235.00 $</td>
           </tr>
           <tr class="odd">
-            <td class="name">كابتن بلاك كور ازرق جديد</td>
+            <td class="name">كابتن بلاك كور ازرق جديد — مع قداحات</td>
             <td class="unit">كرتونة</td>
             <td class="price">311.00 $</td>
           </tr>
           <tr class="even">
-            <td class="name">كابتن بلاك كور اسود جديد</td>
+            <td class="name">كابتن بلاك كور اسود جديد — مع قداحات</td>
             <td class="unit">كرتونة</td>
             <td class="price">311.00 $</td>
           </tr>
@@ -449,58 +452,57 @@
 
       <div class="price-list-group">
         <div class="price-list-group-header">
-          <span>بزنس</span>
-          <span class="price-list-group-count">7</span>
+          <span>بلاتينوم</span>
+          <span class="price-list-group-count">2</span>
         </div>
         <table><tbody>
           <tr class="odd">
-            <td class="name">بزنس رويال سليم فضي</td>
+            <td class="name">بلاتينوم طويل ازرق</td>
             <td class="unit">كرتونة</td>
-            <td class="price">170.00 $</td>
+            <td class="price">225.00 $</td>
           </tr>
           <tr class="even">
-            <td class="name">بزنس رويال سليم نعنع</td>
+            <td class="name">بلاتينوم طويل فضي</td>
             <td class="unit">كرتونة</td>
-            <td class="price">170.00 $</td>
-          </tr>
-          <tr class="odd">
-            <td class="name">بزنس رويال طويل ازرق</td>
-            <td class="unit">كرتونة</td>
-            <td class="price">195.00 $</td>
-          </tr>
-          <tr class="even">
-            <td class="name">بزنس رويال طويل فضي</td>
-            <td class="unit">كرتونة</td>
-            <td class="price">195.00 $</td>
-          </tr>
-          <tr class="odd">
-            <td class="name">بزنس رويال قصير احمر</td>
-            <td class="unit">كرتونة</td>
-            <td class="price">165.00 $</td>
-          </tr>
-          <tr class="even">
-            <td class="name">بزنس رويال قصير ازرق</td>
-            <td class="unit">كرتونة</td>
-            <td class="price">165.00 $</td>
-          </tr>
-          <tr class="odd">
-            <td class="name">بزنس رويال قصير فضي</td>
-            <td class="unit">كرتونة</td>
-            <td class="price">165.00 $</td>
+            <td class="price">225.00 $</td>
           </tr>
         </tbody></table>
       </div>
 
       <div class="price-list-group">
         <div class="price-list-group-header">
-          <span>سيدرز</span>
-          <span class="price-list-group-count">1</span>
+          <span>ام تي</span>
+          <span class="price-list-group-count">2</span>
         </div>
         <table><tbody>
           <tr class="odd">
-            <td class="name">سيدرز طويل فضي</td>
+            <td class="name">دخان ام تي كوين ابيض</td>
             <td class="unit">كرتونة</td>
-            <td class="price">400.00 $</td>
+            <td class="price">210.00 $</td>
+          </tr>
+          <tr class="even">
+            <td class="name">دخان ام تي كوين فضي</td>
+            <td class="unit">كرتونة</td>
+            <td class="price">210.00 $</td>
+          </tr>
+        </tbody></table>
+      </div>
+
+      <div class="price-list-group">
+        <div class="price-list-group-header">
+          <span>دفيدوف</span>
+          <span class="price-list-group-count">2</span>
+        </div>
+        <table><tbody>
+          <tr class="odd">
+            <td class="name">دفيدوف سليم غولد</td>
+            <td class="unit">كرتونة</td>
+            <td class="price">615.00 $</td>
+          </tr>
+          <tr class="even">
+            <td class="name">دفيدوف سليم وايت</td>
+            <td class="unit">كرتونة</td>
+            <td class="price">615.00 $</td>
           </tr>
         </tbody></table>
       </div>
@@ -874,57 +876,58 @@
 
       <div class="price-list-group">
         <div class="price-list-group-header">
-          <span>بلاتينوم</span>
-          <span class="price-list-group-count">2</span>
+          <span>بزنس</span>
+          <span class="price-list-group-count">7</span>
         </div>
         <table><tbody>
           <tr class="odd">
-            <td class="name">بلاتينوم طويل ازرق</td>
+            <td class="name">بزنس رويال سليم فضي</td>
             <td class="unit">كرتونة</td>
-            <td class="price">225.00 $</td>
+            <td class="price">170.00 $</td>
           </tr>
           <tr class="even">
-            <td class="name">بلاتينوم طويل فضي</td>
+            <td class="name">بزنس رويال سليم نعنع</td>
             <td class="unit">كرتونة</td>
-            <td class="price">225.00 $</td>
+            <td class="price">170.00 $</td>
+          </tr>
+          <tr class="odd">
+            <td class="name">بزنس رويال طويل ازرق</td>
+            <td class="unit">كرتونة</td>
+            <td class="price">195.00 $</td>
+          </tr>
+          <tr class="even">
+            <td class="name">بزنس رويال طويل فضي</td>
+            <td class="unit">كرتونة</td>
+            <td class="price">195.00 $</td>
+          </tr>
+          <tr class="odd">
+            <td class="name">بزنس رويال قصير احمر</td>
+            <td class="unit">كرتونة</td>
+            <td class="price">165.00 $</td>
+          </tr>
+          <tr class="even">
+            <td class="name">بزنس رويال قصير ازرق</td>
+            <td class="unit">كرتونة</td>
+            <td class="price">165.00 $</td>
+          </tr>
+          <tr class="odd">
+            <td class="name">بزنس رويال قصير فضي</td>
+            <td class="unit">كرتونة</td>
+            <td class="price">165.00 $</td>
           </tr>
         </tbody></table>
       </div>
 
       <div class="price-list-group">
         <div class="price-list-group-header">
-          <span>ام تي</span>
-          <span class="price-list-group-count">2</span>
+          <span>سيدرز</span>
+          <span class="price-list-group-count">1</span>
         </div>
         <table><tbody>
           <tr class="odd">
-            <td class="name">دخان ام تي كوين ابيض</td>
+            <td class="name">سيدرز طويل فضي</td>
             <td class="unit">كرتونة</td>
-            <td class="price">210.00 $</td>
-          </tr>
-          <tr class="even">
-            <td class="name">دخان ام تي كوين فضي</td>
-            <td class="unit">كرتونة</td>
-            <td class="price">210.00 $</td>
-          </tr>
-        </tbody></table>
-      </div>
-
-      <div class="price-list-group">
-        <div class="price-list-group-header">
-          <span>دفيدوف</span>
-          <span class="price-list-group-count">2</span>
-        </div>
-        <table><tbody>
-          <tr class="odd">
-            <td class="name">دفيدوف سليم غولد</td>
-            <td class="unit">كرتونة</td>
-            <td class="price">615.00 $</td>
-          </tr>
-          <tr class="even">
-            <td class="name">دفيدوف سليم وايت</td>
-            <td class="unit">كرتونة</td>
-            <td class="price">615.00 $</td>
+            <td class="price">400.00 $</td>
           </tr>
         </tbody></table>
       </div>
@@ -1221,7 +1224,7 @@
   sheet.dataset.theme = savedTheme || 'dark';
   document.body.dataset.theme = sheet.dataset.theme;
   function selectedPdfFile() {
-    return sheet.dataset.theme === 'light' ? 'price-list-usd-light.pdf?v=e9fb43dc6b5f' : 'price-list-usd.pdf?v=e9fb43dc6b5f';
+    return sheet.dataset.theme === 'light' ? 'price-list-usd-light.pdf?v=b6df7cf7a71f' : 'price-list-usd.pdf?v=b6df7cf7a71f';
   }
   function syncPdfLinks() {
     const selected = selectedPdfFile();

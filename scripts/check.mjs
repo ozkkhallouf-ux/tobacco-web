@@ -552,7 +552,7 @@ for (const contract of [
 // المعاينة والمولّد العام يجب أن يستخدما القالب الجديد نفسه؛ وجود قالبين منفصلين
 // أعاد التصميم القديم إلى زر «حفظ التعديلات ومعاينة PDF الآن».
 for (const contract of [
-  "2026-08-20-new-bulletin",
+  "2026-08-26-fixed-table-layout",
   "price-list-header-title",
   "price-list-columns",
   "price-list-group-header"
@@ -564,6 +564,14 @@ for (const contract of [
 }
 if (!priceListTemplateSource.includes("white-space:nowrap") || !priceListTemplateSource.includes("padding-inline-end:32px")) {
   console.error("The bulletin currency/rate badge must stay on one line without clipping RTL text in PDF exports.");
+  failed = true;
+}
+// جذر الانكسار المتكرر في النشرة: table-layout:auto الافتراضي يسمح لجدول
+// الأسعار بالتمدد أوسع من حاويته عند اسم/ملاحظة طويلين، وoverflow:hidden على
+// الجذر يقصّ الفائض بصمت بدل إظهاره. table-layout:fixed + word-break يمنعان
+// حدوث الفيضان أصلاً، بدل إخفائه — راجع docs/ai/topics/price-bulletins.md.
+if (!priceListTemplateSource.includes("table-layout:fixed") || !priceListTemplateSource.includes("word-break:break-word")) {
+  console.error("The bulletin table must use table-layout:fixed with word-break on the name cell so long names/notes wrap inside the cell instead of overflowing the page (silently hidden by overflow:hidden otherwise).");
   failed = true;
 }
 if (!html.includes('src/price-list-template.js?v=') || html.indexOf("src/price-list-template.js") > html.indexOf("src/app.js")) {
