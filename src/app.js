@@ -2448,6 +2448,14 @@ function formatBulletinEnglishInteger(value) {
   return new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(rounded);
 }
 
+// ملاحظة النشرة: نص اختياري لكل صنف (approvedPrice.notes) يُضاف بجانب الاسم في
+// النشرة والـPDF بصيغة «الاسم — الملاحظة»، ويُترك الاسم كما هو إن كانت فارغة.
+function bulletinItemDisplayName(item) {
+  const name = item.name || "";
+  const note = String((item.approvedPrice && item.approvedPrice.notes) || "").trim();
+  return note ? `${name} — ${note}` : name;
+}
+
 function customerPricePdfMarkup(items, latest, useSyria = false, theme = state.bulletinPdfTheme) {
   const groups = bulletinDisplayGroups(items, useSyria);
   const template = window.OZKPriceListTemplate;
@@ -2455,7 +2463,7 @@ function customerPricePdfMarkup(items, latest, useSyria = false, theme = state.b
   const templateGroups = groups.map((group) => ({
     name: group.name,
     items: group.items.map((item) => ({
-      name: item.name || "",
+      name: bulletinItemDisplayName(item),
       unit: item.unit2Name || item.unit1Name || "وحدة",
       price: useSyria
         ? `${formatBulletinEnglishInteger(item.unit2Price)} ل.س`
@@ -2967,6 +2975,9 @@ async function savePricingItem(form) {
     const retailProvided = retailText !== "";
     const enteredWholesale = toPositivePrice(wholesaleText);
     const enteredRetail = toPositivePrice(retailText);
+    // ملاحظة النشرة: نص اختياري يُطبَّق على كل أصناف السطر (كما تُطبَّق الأسعار
+    // على aliases الصنف نفسه)، ويحل محل القيمة السابقة كاملةً — تفريغ الخانة يمسحها.
+    const bulletinNoteText = formValue(form, "bulletinNote").trim().slice(0, 200);
     const stockQty = toNumber(form.dataset.stockQty);
     const stockStatus = form.dataset.stockStatus || "active";
 
@@ -3042,7 +3053,8 @@ async function savePricingItem(form) {
         stockStatus: (sourceItem ? sourceItem.status : sourceExisting?.stockStatus) || stockStatus,
         sourceReportId: uuidOrNull(latest.id),
         sourceSyncedAt: reportSyncedAt(latest),
-        pricePayload: sourcePayload
+        pricePayload: sourcePayload,
+        notes: bulletinNoteText
       };
     }).filter(Boolean);
     if (!records.length) throw new Error("لم يُعثر على الصنف في الجرد الحي ولا في الأسعار المحفوظة. حدّث الجرد ثم أعد المحاولة.");
@@ -4015,6 +4027,7 @@ function pricingRow(item) {
   const unit2Factor = itemUnit2Factor(item);
   const wholesale = itemUnit2Price(item);
   const retail = itemRetailPrice(item);
+  const bulletinNote = String((item.approvedPrice && item.approvedPrice.notes) || "");
   const unitLabel = unit2Name || "كرتونة";
   const priced = wholesale > 0 || retail > 0;
   const retailPerUnit1 = retail > 0 ? roundPrice(retail / unit2Factor) : 0;
@@ -4063,6 +4076,10 @@ function pricingRow(item) {
           <label>
             <span>سعر المفرق (${escapeHtml(unitLabel)} $)</span>
             <input name="retailPrice" type="text" inputmode="decimal" dir="ltr" value="${escapeHtml(retail > 0 ? retail : "")}" placeholder="0">
+          </label>
+          <label class="pricing-editor-note">
+            <span>ملاحظة النشرة (اختياري — تظهر بجانب الاسم)</span>
+            <input name="bulletinNote" type="text" maxlength="200" value="${escapeHtml(bulletinNote)}" placeholder="مثال: مع قداحات">
           </label>
         </div>
         <button class="button secondary mini-button" type="submit">حفظ السعر</button>
