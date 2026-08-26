@@ -486,8 +486,11 @@ begin
     completed_at=now(),updated_at=now() where id=p_session_id;
   insert into public.smart_inventory_audit_log(session_id,action,actor_user_id,actor_display_name)
   values(p_session_id,'session_completed',auth.uid(),v_actor);
-  if to_regprocedure('public.notify_telegram(text,text,text,integer,jsonb)') is not null then
-    perform public.notify_telegram('inventory_complete',
+  -- ملاحظة أمنية: يُستدعى هذا المسار مباشرة عبر RPC من مستخدم "counter" غير staff
+  -- (التفويض محسوم أعلاه بـis_counter()/is_owner())، لذا نتجاوز بوابة public.notify_telegram
+  -- (التي ترفض الآن المستخدم authenticated غير staff) وننادي الدالة الداخلية مباشرة.
+  if to_regprocedure('private.notify_telegram_dispatch(text,text,text,integer,jsonb)') is not null then
+    perform private.notify_telegram_dispatch('inventory_complete',
       '✅ اكتمل جرد مستودع '||v_session.warehouse_name||' بواسطة '||v_actor,
       'smart-inventory-complete:'||p_session_id::text,1440,null::jsonb);
   end if;
