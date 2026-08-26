@@ -16,6 +16,7 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
+      - run: npx playwright install --with-deps chromium
       - run: npm run check
       - run: node --check src/decision-engine.js
       - run: node --check src/decision-data-bridge.js
