@@ -1111,7 +1111,7 @@ async function printOverdueReport() {
     render();
     return;
   }
-  const now = new Date().toLocaleDateString("ar-SA", { year: "numeric", month: "long", day: "numeric" });
+  const now = new Date().toLocaleDateString("ar-SA-u-ca-gregory", { year: "numeric", month: "long", day: "numeric" });
   const rows = overdue.map((item, i) => `
     <tr style="background:${i % 2 === 0 ? "#fff" : "#fdf8ee"}">
       <td style="padding:8px 10px;border:1px solid #d8c890;text-align:center">${i + 1}</td>
@@ -2456,6 +2456,56 @@ function bulletinItemDisplayName(item) {
   return note ? `${name} — ${note}` : name;
 }
 
+// يقيس ارتفاع كل مجموعة فعلياً من DOM (رأس المجموعة + الجدول كاملاً + الحدود
+// + margin-bottom الذي لا يدخل ضمن getBoundingClientRect) داخل حاوية مخفية
+// بنفس عرض العمود الحقيقي، ثم يحسب توزيع المجموعات على الأعمدة/الصفحات عبر
+// layoutGroupsMeasured — بلا تقدير ثابت بعدد الأسطر وبلا قصّ لأي مجموعة.
+// يُستخدم من نفس الدالة (customerPricePdfMarkup) في المعاينة والتصدير معاً،
+// فتحصل الشاشتان على نفس نتيجة التوزيع تماماً.
+function buildMeasuredBulletinLayout(template, groups, renderOptions) {
+  if (typeof document === "undefined" || typeof template?.layoutGroupsMeasured !== "function") return null;
+  const probe = document.createElement("div");
+  probe.style.position = "fixed";
+  probe.style.left = "-10000px";
+  probe.style.top = "0";
+  probe.style.width = "794px";
+  probe.style.visibility = "hidden";
+  probe.style.pointerEvents = "none";
+  // تمريرة أولية بالتوزيع التقليدي فقط لالتقاط ارتفاع الرأس الحقيقي وعرض
+  // العمود الحقيقي (نفس CSS المستخدم فعلياً)، وليست هي التوزيع النهائي.
+  probe.innerHTML = template.render({ ...renderOptions, groups });
+  document.body.appendChild(probe);
+  try {
+    const header = probe.querySelector(".price-list-header");
+    const subheader = probe.querySelector(".price-list-subheader");
+    const stackEl = probe.querySelector(".price-list-column-stack");
+    const headerHeightPx = (header?.getBoundingClientRect().height || 0) + (subheader?.getBoundingClientRect().height || 0);
+    const columnWidthPx = stackEl?.getBoundingClientRect().width || 385;
+
+    const measureStack = document.createElement("div");
+    measureStack.className = "price-list-column-stack";
+    measureStack.style.width = `${columnWidthPx}px`;
+    probe.querySelector(".ozk-price-list")?.appendChild(measureStack);
+    const heights = new Map();
+    groups.forEach((group) => {
+      measureStack.innerHTML = template.renderGroup(group);
+      const el = measureStack.firstElementChild;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      const marginBottom = parseFloat(getComputedStyle(el).marginBottom) || 0;
+      heights.set(String(group.name || ""), rect.height + marginBottom);
+    });
+
+    return template.layoutGroupsMeasured(groups, heights, {
+      pageWidthPx: 794,
+      headerHeightPx,
+      safetyMarginPx: 6
+    });
+  } finally {
+    probe.remove();
+  }
+}
+
 function customerPricePdfMarkup(items, latest, useSyria = false, theme = state.bulletinPdfTheme) {
   const groups = bulletinDisplayGroups(items, useSyria);
   const template = window.OZKPriceListTemplate;
@@ -2471,8 +2521,7 @@ function customerPricePdfMarkup(items, latest, useSyria = false, theme = state.b
     }))
   }));
   const syriaFlag = '<span class="new-syria-flag" role="img" aria-label="علم سوريا الجديد"><span class="green"></span><span class="white">★★★</span><span class="black"></span></span>';
-  return template.render({
-    groups: templateGroups,
+  const renderOptions = {
     logoSrc: `${window.location.origin}/public/icons/ozk-logo.png`,
     issueDate: template.formatArabicIssueDate(new Date()),
     badgeClass: useSyria ? "badge-syp" : "badge-usd",
@@ -2481,7 +2530,12 @@ function customerPricePdfMarkup(items, latest, useSyria = false, theme = state.b
       : "💵 دولار أمريكي — جملة",
     unitLabel: useSyria ? "سعر المفرق للوحدة" : "سعر الكرتونة (جملة)",
     theme: normalizedBulletinPdfTheme(theme)
-  });
+  };
+  const layout = buildMeasuredBulletinLayout(template, templateGroups, renderOptions);
+  if (layout?.oversized?.length) {
+    console.warn("نشرة الأسعار: مجموعة أطول من عمود صفحة كاملة، لم تُقصّ ولم توضع:", layout.oversized);
+  }
+  return template.render({ ...renderOptions, groups: templateGroups, layout: layout || undefined });
 }
 
 function customerPriceTemplatePageCount(items, useSyria = false) {
@@ -7314,7 +7368,7 @@ async function saveSalesInvoicePdf() {
     invNo,
     customer: state.salesCustomer.trim() || "زبون نقدي",
     payLabel: state.salesPayMethod === "credit" ? "أجل" : "نقدي",
-    dateLabel: new Intl.DateTimeFormat("ar-SA-u-nu-latn", { dateStyle: "long" }).format(new Date()),
+    dateLabel: new Intl.DateTimeFormat("ar-SA-u-ca-gregory-nu-latn", { dateStyle: "long" }).format(new Date()),
     curLabel: mode === "mufrak"
       ? `ليرة سورية — صرف ${formatMoney(state.syriaExchangeRate)}`
       : "دولار أمريكي",
@@ -7597,7 +7651,7 @@ function printSalesInvoice() {
     return;
   }
   const totals = salesTotals();
-  const today = new Intl.DateTimeFormat("ar-SA-u-nu-latn", { dateStyle: "long" }).format(new Date());
+  const today = new Intl.DateTimeFormat("ar-SA-u-ca-gregory-nu-latn", { dateStyle: "long" }).format(new Date());
   const customer = state.salesCustomer.trim() || "زبون نقدي";
   const payLabel = state.salesPayMethod === "credit" ? "أجل" : "نقدي";
   const curLabel = mode === "mufrak"
@@ -9246,7 +9300,7 @@ function printPurchaseInvoice(id) {
   const po = state.purchaseInvoices.find((p) => p.id === id);
   if (!po) return;
   const sym = po.currency === "SYP" ? "ل.س" : "$";
-  const printDate = new Intl.DateTimeFormat("ar-SA-u-nu-latn", { dateStyle: "long" }).format(new Date());
+  const printDate = new Intl.DateTimeFormat("ar-SA-u-ca-gregory-nu-latn", { dateStyle: "long" }).format(new Date());
 
   const rowsHtml = po.items.map((item, i) => `
     <tr>
@@ -9374,7 +9428,7 @@ function printInvoice() {
   }
 
   const invNum = generateInvoiceNumber();
-  const today = new Intl.DateTimeFormat("ar-SA-u-nu-latn", { dateStyle: "long" }).format(new Date());
+  const today = new Intl.DateTimeFormat("ar-SA-u-ca-gregory-nu-latn", { dateStyle: "long" }).format(new Date());
   const grandTotal = rows.reduce((s, r) => s + toNumber(r.qty) * toNumber(r.price), 0);
 
   const rowsHtml = rows.map((r, i) => `

@@ -169,6 +169,157 @@
       .replaceAll("'", "&#039;");
   }
 
+  // هامش أمان بالبكسل ضد أخطاء التقريب عند تقطيع html2pdf/html2canvas للصفحات
+  // (راجع الفحص التشخيصي السابق لدرجات drawImage الفعلية) — لا نملأ العمود حتى آخر بكسل.
+  const DEFAULT_SAFETY_MARGIN_PX = 6;
+
+  // ارتفاع منطقة المحتوى الفعلية لصفحة A4 كاملة بنفس نسبة العرض المستخدمة فعلياً
+  // في التصدير (794px). النسبة الحقيقية لصفحة A4 هي 297/210 مم، لا رقم تقديري ثابت.
+  function computePageContentHeightPx(pageWidthPx = 794) {
+    return pageWidthPx * (297 / 210);
+  }
+
+  // نسبة التفاوت (من ميزانية العمود) التي تُعتبر "فراغاً كبيراً" يستحق محاولة
+  // نقل مجموعة كاملة من العمود الأطول للأقصر — قاعدة التوازن (Balance Rule).
+  const DEFAULT_BALANCE_THRESHOLD_RATIO = 0.12;
+
+  // بعد ملء عمودَي صفحة واحدة: إن كان التفاوت بين ارتفاعيهما كبيراً، جرّب نقل
+  // آخر مجموعة كاملة من العمود الأطول إلى العمود الأقصر — فقط إن اتّسعت هناك
+  // فعلاً (بلا فيضان) وحسّنت التوازن فعلياً. النقل يبقى ضمن نفس الصفحة فقط،
+  // وآخر مجموعة تُصبح آخر عنصر بالعمود الآخر — أي لا يتغيّر ترتيب القراءة
+  // الإجمالي للصفحة (تبقى آخر ما يُقرأ فيها)، تحقيقاً لشرط "عدم كسر الترتيب".
+  function balancePageColumns(page, limit, heights, thresholdPx) {
+    const diffBefore = Math.abs(page.rightHeight - page.leftHeight);
+    if (diffBefore <= thresholdPx) return;
+    const longerKey = page.rightHeight >= page.leftHeight ? "right" : "left";
+    const shorterKey = longerKey === "right" ? "left" : "right";
+    const longerList = page[longerKey];
+    if (!longerList.length) return;
+    const lastGroup = longerList[longerList.length - 1];
+    const h = heights instanceof Map ? heights.get(String(lastGroup?.name || "")) : undefined;
+    if (h == null || !Number.isFinite(h)) return;
+    const shorterHeightKey = `${shorterKey}Height`;
+    const longerHeightKey = `${longerKey}Height`;
+    const newShorterHeight = page[shorterHeightKey] + h;
+    if (newShorterHeight > limit + 1e-6) return; // النقل يسبب فيضاناً بالعمود الأقصر — ألغِه
+    const newLongerHeight = page[longerHeightKey] - h;
+    const diffAfter = Math.abs(newLongerHeight - newShorterHeight);
+    if (diffAfter >= diffBefore) return; // لا يحسّن التوازن فعلياً — ألغِه
+    longerList.pop();
+    page[shorterKey].push(lastGroup);
+    page[longerHeightKey] = newLongerHeight;
+    page[shorterHeightKey] = newShorterHeight;
+  }
+
+  // توزيع تسلسل واحد من المجموعات (بترتيبها كما هو، بدون أي إعادة ترتيب فعلية
+  // بين المجموعات نفسها) على صفحات، كل صفحة بعمودين ثابتَي العرض (يمين/يسار).
+  // الفرق الجوهري عن التصميم السابق: العمودان يسحبان من نفس الطابور المشترك،
+  // فإن كان عمود أطول إجمالاً من الآخر في مجموع محتواه، تمتصّ الصفحات اللاحقة
+  // الفارق تلقائياً بدل ترك عمود كامل فارغاً بينما الآخر يتكدّس (هذا كان سبب
+  // العطل: تعبئة مسارين مستقلّين بصفحات منفصلة تماماً). كل مجموعة تُنقل كاملة
+  // لعمود واحد فقط، ولا تُقسَّم أبداً. القياس عمودي بحت (remainingHeight)، لا
+  // علاقة له بعرض الصفحة أو عرض المجموعة (يبقى 100% من عرض عموده دائماً عبر CSS).
+  function packGroupsIntoBalancedPages(orderedGroups, heights, budgetOptions, safetyMarginPx = DEFAULT_SAFETY_MARGIN_PX) {
+    const reducedFirstPageBudget = Math.max(0, Number(budgetOptions?.reducedFirstPageBudget ?? budgetOptions?.fullBudget) || 0);
+    const fullBudget = Math.max(0, Number(budgetOptions?.fullBudget) || 0);
+    const balanceThresholdPx = Number.isFinite(budgetOptions?.balanceThresholdPx)
+      ? budgetOptions.balanceThresholdPx
+      : Math.max(40, fullBudget * DEFAULT_BALANCE_THRESHOLD_RATIO);
+    const maxPossibleLimit = Math.max(0, fullBudget - safetyMarginPx);
+
+    const queue = (Array.isArray(orderedGroups) ? orderedGroups : [])
+      .map((group) => {
+        const name = String(group?.name || "");
+        const h = heights instanceof Map ? heights.get(name) : undefined;
+        return { group, name, h };
+      })
+      .filter((entry) => entry.h != null && Number.isFinite(entry.h)); // ارتفاع غير معروف: تجاهل آمن
+
+    const pages = [];
+    const oversized = [];
+    let i = 0;
+
+    while (i < queue.length) {
+      const pageIndex = pages.length;
+      const budgetForThisPage = pageIndex === 0 ? reducedFirstPageBudget : fullBudget;
+      const limit = Math.max(0, budgetForThisPage - safetyMarginPx);
+      const entry = queue[i];
+
+      if (entry.h > maxPossibleLimit + 1e-6) {
+        // أطول من عمود صفحة كاملة حتى بميزانية غير مخفّضة — حالة استثنائية صريحة
+        oversized.push({ name: entry.name, height: entry.h, limit: maxPossibleLimit });
+        i += 1;
+        continue;
+      }
+
+      const page = { right: [], left: [], rightHeight: 0, leftHeight: 0 };
+      while (i < queue.length && page.rightHeight + queue[i].h <= limit + 1e-6) {
+        page.right.push(queue[i].group);
+        page.rightHeight += queue[i].h;
+        i += 1;
+      }
+      while (i < queue.length && page.leftHeight + queue[i].h <= limit + 1e-6) {
+        page.left.push(queue[i].group);
+        page.leftHeight += queue[i].h;
+        i += 1;
+      }
+
+      balancePageColumns(page, limit, heights, balanceThresholdPx);
+      pages.push(page);
+    }
+
+    return { pages, oversized };
+  }
+
+  // نُبقي على نفس تصنيف الهوية التجارية (يمين/يسار/خاص بالاسم) من layoutGroups()
+  // كترتيب أساسي، لكن الآن نُغذّي بها طابوراً موحّداً واحداً لكل من الأعمدة
+  // الرئيسية والخاصة بدل مسارين مستقلّين — هذا ما يضمن فعلياً توازن العمودين
+  // عبر الصفحات (راجع packGroupsIntoBalancedPages أعلاه لسبب العطل السابق).
+  // الارتفاعات مُقاسة فعلياً من DOM (وليست تقديرات ثابتة بعدد الأسطر).
+  // heights: Map(name -> px).
+  function layoutGroupsMeasured(groups, heights, options = {}) {
+    const base = layoutGroups(groups);
+    const pageWidthPx = options.pageWidthPx ?? 794;
+    const pageHeightPx = options.pageHeightPx ?? computePageContentHeightPx(pageWidthPx);
+    const headerHeightPx = Math.max(0, Number(options.headerHeightPx) || 0);
+    const safetyMarginPx = options.safetyMarginPx ?? DEFAULT_SAFETY_MARGIN_PX;
+
+    // صفحة1 من الأعمدة الرئيسية تبدأ تحت الرأس/الرأس الفرعي فتُخصم ميزانيتها؛ بقية الصفحات كاملة.
+    const mainQueue = [...base.right, ...base.left];
+    const mainPack = packGroupsIntoBalancedPages(mainQueue, heights, {
+      reducedFirstPageBudget: Math.max(0, pageHeightPx - headerHeightPx),
+      fullBudget: pageHeightPx
+    }, safetyMarginPx);
+    const mainPages = mainPack.pages.length ? mainPack.pages : [{ right: [], left: [] }];
+
+    // صفحة المجموعات الخاصة تبدأ دائماً بصفحة جديدة كاملة بلا رأس متكرر.
+    const specialQueue = [...base.specialRight, ...base.specialLeft];
+    const specialPack = packGroupsIntoBalancedPages(specialQueue, heights, {
+      reducedFirstPageBudget: pageHeightPx,
+      fullBudget: pageHeightPx
+    }, safetyMarginPx);
+    const specialPages = specialPack.pages;
+
+    return {
+      mainPages,
+      specialPages,
+      oversized: [...mainPack.oversized, ...specialPack.oversized]
+    };
+  }
+
+  // يحوّل ناتج layoutGroups() القديم (تقدير بعدد الأسطر) إلى نفس شكل
+  // {mainPages, specialPages, oversized} — يُستخدم افتراضياً حين لا تتوفر
+  // ارتفاعات حقيقية (مثال: توليد النشرات الثابتة عبر Node بدون DOM)، فيبقى
+  // سلوك هذه المسارات مطابقاً تماماً لما كان عليه قبل هذه الميزة (بلا كسر).
+  function layoutGroupsLegacyPages(groups) {
+    const layout = layoutGroups(groups);
+    const mainPages = [{ right: layout.right, left: layout.left }];
+    const specialPages = layout.specialRight.length || layout.specialLeft.length
+      ? [{ right: layout.specialRight, left: layout.specialLeft }]
+      : [];
+    return { mainPages, specialPages, oversized: [] };
+  }
+
   function layoutGroups(groups) {
     const safeGroups = Array.isArray(groups) ? groups : [];
     const byName = new Map(safeGroups.map((group) => [String(group?.name || ""), group]));
@@ -218,14 +369,38 @@
     return groups.map(renderGroup).join("\n");
   }
 
-  function pageCount(groups) {
-    const layout = layoutGroups(groups);
-    return 1 + (layout.specialRight.length || layout.specialLeft.length ? 1 : 0);
+  // يبني {mainPages, specialPages, oversized} من الخيارات: layout جاهز مُمرَّر
+  // صراحة (لضمان أن render() يستخدم بالضبط ما حسبته المعاينة/التصدير)، وإلا
+  // ارتفاعات مُقاسة إن توفرت، وإلا التوزيع التقليدي (Node بلا DOM).
+  function resolvePagesLayout(groups, options) {
+    if (options.layout && Array.isArray(options.layout.mainPages)) return options.layout;
+    if (options.measuredHeights instanceof Map) return layoutGroupsMeasured(groups, options.measuredHeights, options);
+    return layoutGroupsLegacyPages(groups);
+  }
+
+  function pageCount(groups, options = {}) {
+    const pagesLayout = resolvePagesLayout(Array.isArray(groups) ? groups : [], options || {});
+    return pagesLayout.mainPages.length + pagesLayout.specialPages.length;
+  }
+
+  // يرسم مجموعة صفحات (كل صفحة = {right:[groups], left:[groups]}) داخل شبكة
+  // عمودين لكل صفحة. أي صفحة غير الأولى على الإطلاق في المستند بأكمله تُجبر
+  // على بدء صفحة جديدة (secondary-page) — سواء كانت امتداداً لفيض الأعمدة
+  // الرئيسية أو بداية قسم المجموعات الخاصة.
+  function renderPagesBlock(pages, isDocumentFirstPage) {
+    return pages.map((page, index) => {
+      const forceBreak = !(isDocumentFirstPage && index === 0);
+      return `
+      <div class="price-list-columns${forceBreak ? " price-list-secondary-page" : ""}">
+        <div class="price-list-column-stack">${renderStack(page.right)}</div>
+        <div class="price-list-column-stack">${renderStack(page.left)}</div>
+      </div>`;
+    }).join("\n");
   }
 
   function render(options = {}) {
     const groups = Array.isArray(options.groups) ? options.groups : [];
-    const layout = layoutGroups(groups);
+    const pagesLayout = resolvePagesLayout(groups, options);
     const tools = options.tools || null;
     const toolsMarkup = tools ? `
       <div class="price-list-document-tools no-print">
@@ -234,11 +409,10 @@
         <a data-pdf-download href="${escapeHtml(tools.pdfFile)}" download>تنزيل PDF</a>
         <button class="theme-switch" type="button" onclick="toggleTheme()">فاتح / داكن</button>
       </div>` : "";
-    const specialMarkup = layout.specialRight.length || layout.specialLeft.length ? `
-      <div class="price-list-columns price-list-secondary-page">
-        <div class="price-list-column-stack">${renderStack(layout.specialRight)}</div>
-        <div class="price-list-column-stack">${renderStack(layout.specialLeft)}</div>
-      </div>` : "";
+    const mainMarkup = renderPagesBlock(pagesLayout.mainPages, true);
+    const specialMarkup = pagesLayout.specialPages.length
+      ? renderPagesBlock(pagesLayout.specialPages, false)
+      : "";
     return `
       <style data-ozk-price-list-style="${VERSION}">${CSS}</style>
       <section class="ozk-price-list${tools ? " has-document-tools" : ""}" lang="ar" dir="rtl" translate="no" data-theme="${options.theme === "light" ? "light" : "dark"}" data-template-version="${VERSION}">
@@ -259,13 +433,22 @@
             <span class="location">دوما - ساحة الغنم</span>
           </div>
         </div>
-        <div class="price-list-columns">
-          <div class="price-list-column-stack">${renderStack(layout.right)}</div>
-          <div class="price-list-column-stack">${renderStack(layout.left)}</div>
-        </div>
+        ${mainMarkup}
         ${specialMarkup}
       </section>`;
   }
 
-  root.OZKPriceListTemplate = Object.freeze({ VERSION, CSS, formatArabicIssueDate, layoutGroups, pageCount, render });
+  root.OZKPriceListTemplate = Object.freeze({
+    VERSION,
+    CSS,
+    formatArabicIssueDate,
+    layoutGroups,
+    pageCount,
+    render,
+    renderGroup,
+    computePageContentHeightPx,
+    packGroupsIntoBalancedPages,
+    layoutGroupsMeasured,
+    DEFAULT_SAFETY_MARGIN_PX
+  });
 })(globalThis);
