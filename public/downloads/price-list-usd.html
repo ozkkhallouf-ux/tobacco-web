@@ -143,8 +143,8 @@
 
       <div class="price-list-document-tools no-print">
         <button type="button" onclick="window.print()">طباعة مباشرة</button>
-        <a data-pdf-open href="price-list-usd.pdf?v=ed236b689895">فتح PDF</a>
-        <a data-pdf-download href="price-list-usd.pdf?v=ed236b689895" download>تنزيل PDF</a>
+        <a data-pdf-open href="price-list-usd.pdf?v=e9fb43dc6b5f">فتح PDF</a>
+        <a data-pdf-download href="price-list-usd.pdf?v=e9fb43dc6b5f" download>تنزيل PDF</a>
         <button class="theme-switch" type="button" onclick="toggleTheme()">فاتح / داكن</button>
       </div>
         <header class="price-list-header">
@@ -1123,13 +1123,13 @@
       <div class="price-list-group">
         <div class="price-list-group-header">
           <span>معسل</span>
-          <span class="price-list-group-count">16</span>
+          <span class="price-list-group-count">17</span>
         </div>
         <table><tbody>
           <tr class="odd">
             <td class="name">مزايا مشكل</td>
             <td class="unit">شرحة</td>
-            <td class="price">140.00 $</td>
+            <td class="price">141.00 $</td>
           </tr>
           <tr class="even">
             <td class="name">مزايا كف</td>
@@ -1169,7 +1169,7 @@
           <tr class="odd">
             <td class="name">معسل نخلة اخضر كروز.</td>
             <td class="unit">شرحة</td>
-            <td class="price">190.00 $</td>
+            <td class="price">200.00 $</td>
           </tr>
           <tr class="even">
             <td class="name">معسل نخلة صلاحية 12</td>
@@ -1192,19 +1192,24 @@
             <td class="price">300.00 $</td>
           </tr>
           <tr class="even">
-            <td class="name">نخلة صلاحية شهر 1</td>
-            <td class="unit">شرحة</td>
-            <td class="price">480.00 $</td>
+            <td class="name">نخلة صلاحية سطل 5كغ</td>
+            <td class="unit">سطل</td>
+            <td class="price">315.00 $</td>
           </tr>
           <tr class="odd">
+            <td class="name">نخلة صلاحية شهر 1</td>
+            <td class="unit">شرحة</td>
+            <td class="price">385.00 $</td>
+          </tr>
+          <tr class="even">
             <td class="name">نخلة صلاحية شهر 10</td>
             <td class="unit">شرحة</td>
             <td class="price">325.00 $</td>
           </tr>
-          <tr class="even">
+          <tr class="odd">
             <td class="name">نخلة صلاحية شهر 4</td>
             <td class="unit">شرحة</td>
-            <td class="price">450.00 $</td>
+            <td class="price">440.00 $</td>
           </tr>
         </tbody></table>
       </div></div>
@@ -1216,7 +1221,7 @@
   sheet.dataset.theme = savedTheme || 'dark';
   document.body.dataset.theme = sheet.dataset.theme;
   function selectedPdfFile() {
-    return sheet.dataset.theme === 'light' ? 'price-list-usd-light.pdf?v=ed236b689895' : 'price-list-usd.pdf?v=ed236b689895';
+    return sheet.dataset.theme === 'light' ? 'price-list-usd-light.pdf?v=e9fb43dc6b5f' : 'price-list-usd.pdf?v=e9fb43dc6b5f';
   }
   function syncPdfLinks() {
     const selected = selectedPdfFile();
