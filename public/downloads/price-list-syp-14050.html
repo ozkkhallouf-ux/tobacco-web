@@ -69,7 +69,21 @@
     }
     .ozk-price-list .price-list-phones .location { color:var(--gold-strong); direction:rtl; }
     .ozk-price-list .price-list-columns {
-      display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; align-items:start;
+      /*
+       * ملاحظة حرجة: كان هذا العنصر CSS Grid (display:grid +
+       * grid-template-columns:repeat(2,minmax(0,1fr))). html2canvas مع
+       * foreignObjectRendering:true (مطلوب لتفادي انعكاس ترتيب النص العربي —
+       * راجع html2canvas في exportBulletinPdf بـsrc/app.js) لا يحسب عرض أعمدة
+       * CSS Grid بشكل صحيح داخل SVG foreignObject: كان يرسم العمود الأول فقط
+       * بعرض ضيّق (min-content تقريباً) ويترك ~78% من عرض الصفحة فارغاً أسود/
+       * أبيض بلا محتوى — رغم أن عرض الـcanvas الملتقط نفسه كان صحيحاً 794px،
+       * وأن نفس العنصر يُعرض بشكل سليم تماماً بمعاينة Playwright/متصفح عادية.
+       * إيقاف foreignObjectRendering يُصلح العرض لكنه يكسر تشكيل الحروف
+       * العربية (تظهر منعكسة/مبعثرة الحروف). الحل: استبدال Grid بـFlexbox —
+       * html2canvas يحسب عرض flex-basis بشكل صحيح داخل foreignObject، فيبقى
+       * العمودان بعرض متساوٍ فعلي بلا هوامش فارغة، مع تشكيل عربي سليم.
+       */
+      display:flex; gap:8px; align-items:flex-start;
       padding:0 8px 8px; background:var(--page); position:relative;
     }
     .ozk-price-list .price-list-columns::before {
@@ -77,7 +91,7 @@
       transform:translateX(-50%); background:var(--gold); border-radius:2px;
     }
     .ozk-price-list .price-list-column-stack {
-      min-width:0; background:var(--page); position:relative; z-index:1;
+      flex:1 1 0; min-width:0; background:var(--page); position:relative; z-index:1;
     }
     .ozk-price-list .price-list-secondary-page {
       break-before:page; page-break-before:always; margin-top:8px;
@@ -121,7 +135,7 @@
       background:var(--surface); color:var(--text); border-color:var(--line);
     }
     @media screen and (max-width:720px) {
-      .ozk-price-list .price-list-columns { grid-template-columns:repeat(2,minmax(0,1fr)); gap:4px; padding:0 4px 6px; }
+      .ozk-price-list .price-list-columns { gap:4px; padding:0 4px 6px; }
       .ozk-price-list.has-document-tools .price-list-header { padding-top:102px; }
       .ozk-price-list .price-list-document-tools { right:10px; left:10px; justify-content:center; }
       .ozk-price-list .price-list-group { margin-bottom:3px; }
@@ -146,8 +160,8 @@
 
       <div class="price-list-document-tools no-print">
         <button type="button" onclick="window.print()">طباعة مباشرة</button>
-        <a data-pdf-open href="price-list-syp-14050.pdf?v=12b57fb1a938">فتح PDF</a>
-        <a data-pdf-download href="price-list-syp-14050.pdf?v=12b57fb1a938" download>تنزيل PDF</a>
+        <a data-pdf-open href="price-list-syp-14050.pdf?v=21201812ca4a">فتح PDF</a>
+        <a data-pdf-download href="price-list-syp-14050.pdf?v=21201812ca4a" download>تنزيل PDF</a>
         <button class="theme-switch" type="button" onclick="toggleTheme()">فاتح / داكن</button>
       </div>
         <header class="price-list-header">
@@ -155,7 +169,7 @@
           <div class="price-list-header-center">
             <div class="price-list-header-title">نشرة الأسعار</div>
             <div class="price-list-header-date" dir="ltr"><span class="issue-date-day">26</span><span class="issue-date-month" dir="rtl">آب</span><span class="issue-date-year">2026</span></div>
-            <span class="price-list-currency-badge badge-syp"><span class="new-syria-flag" role="img" aria-label="علم سوريا الجديد"><span class="green"></span><span class="white">★★★</span><span class="black"></span></span> ليرة — مفرق — صرف 13,100</span>
+            <span class="price-list-currency-badge badge-syp"><span class="new-syria-flag" role="img" aria-label="علم سوريا الجديد"><span class="green"></span><span class="white">★★★</span><span class="black"></span></span> ليرة — مفرق — صرف 14,050</span>
           </div>
           <div class="price-list-header-right" aria-hidden="true"></div>
         </header>
@@ -178,37 +192,37 @@
           <tr class="odd">
             <td class="name">ماستر سليم أزرق</td>
             <td class="unit">كروز</td>
-            <td class="price">75,194 ل.س</td>
+            <td class="price">80,647 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">ماستر سليم فضي</td>
             <td class="unit">كروز</td>
-            <td class="price">75,194 ل.س</td>
+            <td class="price">80,647 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">ماستر طويل ورق</td>
             <td class="unit">كروز</td>
-            <td class="price">93,010 ل.س</td>
+            <td class="price">99,755 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">ماستر قصير أزرق</td>
             <td class="unit">كروز</td>
-            <td class="price">86,460 ل.س</td>
+            <td class="price">92,730 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">ماستر قصير فضي</td>
             <td class="unit">كروز</td>
-            <td class="price">85,936 ل.س</td>
+            <td class="price">92,168 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">ماستر كوين أبيض</td>
             <td class="unit">كروز</td>
-            <td class="price">104,800 ل.س</td>
+            <td class="price">112,400 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">ماستر كوين أزرق</td>
             <td class="unit">كروز</td>
-            <td class="price">82,530 ل.س</td>
+            <td class="price">88,515 ل.س</td>
           </tr>
         </tbody></table>
       </div>
@@ -222,32 +236,32 @@
           <tr class="odd">
             <td class="name">كابتن بلاك سليم ازرق سكاي</td>
             <td class="unit">كروز</td>
-            <td class="price">62,094 ل.س</td>
+            <td class="price">66,597 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">كابتن بلاك سيلفر</td>
             <td class="unit">كروز</td>
-            <td class="price">61,570 ل.س</td>
+            <td class="price">66,035 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">كابتن بلاك كور ازرق جديد — مع قداحات</td>
             <td class="unit">كروز</td>
-            <td class="price">82,530 ل.س</td>
+            <td class="price">88,515 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">كابتن بلاك كور اسود جديد — مع قداحات</td>
             <td class="unit">كروز</td>
-            <td class="price">82,530 ل.س</td>
+            <td class="price">88,515 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">كابتن بلاك كوين ذهبي</td>
             <td class="unit">كروز</td>
-            <td class="price">78,600 ل.س</td>
+            <td class="price">84,300 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">كابتن تيب</td>
             <td class="unit">كروز</td>
-            <td class="price">189,950 ل.س</td>
+            <td class="price">203,725 ل.س</td>
           </tr>
         </tbody></table>
       </div>
@@ -261,27 +275,27 @@
           <tr class="odd">
             <td class="name">اوسكار سليم فضي</td>
             <td class="unit">كروز</td>
-            <td class="price">67,334 ل.س</td>
+            <td class="price">72,217 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">اوسكار طويل</td>
             <td class="unit">كروز</td>
-            <td class="price">82,530 ل.س</td>
+            <td class="price">88,515 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">اوسكار كوين فريش</td>
             <td class="unit">كروز</td>
-            <td class="price">66,810 ل.س</td>
+            <td class="price">71,655 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">اوسكار كوين نانو ابيض</td>
             <td class="unit">كروز</td>
-            <td class="price">68,120 ل.س</td>
+            <td class="price">73,060 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">اوسكار كوين نانو شوكولا</td>
             <td class="unit">كروز</td>
-            <td class="price">60,260 ل.س</td>
+            <td class="price">64,630 ل.س</td>
           </tr>
         </tbody></table>
       </div>
@@ -295,12 +309,12 @@
           <tr class="odd">
             <td class="name">اختمار سليم فضي</td>
             <td class="unit">كروز</td>
-            <td class="price">81,220 ل.س</td>
+            <td class="price">87,110 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">اختمار طويل ازرق</td>
             <td class="unit">كروز</td>
-            <td class="price">85,150 ل.س</td>
+            <td class="price">91,325 ل.س</td>
           </tr>
         </tbody></table>
       </div>
@@ -314,27 +328,27 @@
           <tr class="odd">
             <td class="name">روز سليم احمر</td>
             <td class="unit">كروز</td>
-            <td class="price">47,160 ل.س</td>
+            <td class="price">50,580 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">روز سليم فضي</td>
             <td class="unit">كروز</td>
-            <td class="price">47,160 ل.س</td>
+            <td class="price">50,580 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">روز سليم كومفورت كلاسيك</td>
             <td class="unit">كروز</td>
-            <td class="price">57,640 ل.س</td>
+            <td class="price">61,820 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">روز طويل ازرق</td>
             <td class="unit">كروز</td>
-            <td class="price">73,360 ل.س</td>
+            <td class="price">78,680 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">روز طويل فضي</td>
             <td class="unit">كروز</td>
-            <td class="price">79,910 ل.س</td>
+            <td class="price">85,705 ل.س</td>
           </tr>
         </tbody></table>
       </div>
@@ -348,47 +362,47 @@
           <tr class="odd">
             <td class="name">1970 سليم أزرق</td>
             <td class="unit">كروز</td>
-            <td class="price">48,470 ل.س</td>
+            <td class="price">51,985 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">1970 سليم فضي</td>
             <td class="unit">كروز</td>
-            <td class="price">66,810 ل.س</td>
+            <td class="price">71,655 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">1970 سليم نعنع</td>
             <td class="unit">كروز</td>
-            <td class="price">70,740 ل.س</td>
+            <td class="price">75,870 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">1970 طويل أزرق</td>
             <td class="unit">كروز</td>
-            <td class="price">83,054 ل.س</td>
+            <td class="price">89,077 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">1970 طويل اورجينال</td>
             <td class="unit">كروز</td>
-            <td class="price">58,950 ل.س</td>
+            <td class="price">63,225 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">1970 طويل فضي</td>
             <td class="unit">كروز</td>
-            <td class="price">83,054 ل.س</td>
+            <td class="price">89,077 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">1970 كوين أبيض</td>
             <td class="unit">كروز</td>
-            <td class="price">72,836 ل.س</td>
+            <td class="price">78,118 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">1970 كوين أزرق</td>
             <td class="unit">كروز</td>
-            <td class="price">66,810 ل.س</td>
+            <td class="price">71,655 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">1970 كوين اسود</td>
             <td class="unit">كروز</td>
-            <td class="price">67,334 ل.س</td>
+            <td class="price">72,217 ل.س</td>
           </tr>
         </tbody></table>
       </div>
@@ -402,32 +416,32 @@
           <tr class="odd">
             <td class="name">كينغ دوم بوكس ازرق امريكي</td>
             <td class="unit">كروز</td>
-            <td class="price">57,640 ل.س</td>
+            <td class="price">61,820 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">كينغ دوم بوكس فضي امريكي</td>
             <td class="unit">كروز</td>
-            <td class="price">58,950 ل.س</td>
+            <td class="price">63,225 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">كينغ دوم سليم</td>
             <td class="unit">كروز</td>
-            <td class="price">62,880 ل.س</td>
+            <td class="price">67,440 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">كينغ دوم سليم نعنع</td>
             <td class="unit">كروز</td>
-            <td class="price">56,854 ل.س</td>
+            <td class="price">60,977 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">كينغ دوم طويل فضي</td>
             <td class="unit">كروز</td>
-            <td class="price">79,910 ل.س</td>
+            <td class="price">85,705 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">كينغ دوم كوين أبيض</td>
             <td class="unit">كروز</td>
-            <td class="price">70,740 ل.س</td>
+            <td class="price">75,870 ل.س</td>
           </tr>
         </tbody></table>
       </div>
@@ -441,57 +455,57 @@
           <tr class="odd">
             <td class="name">مانشستر طقتين</td>
             <td class="unit">كروز</td>
-            <td class="price">86,460 ل.س</td>
+            <td class="price">92,730 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">مانشستر طويل احمر</td>
             <td class="unit">كروز</td>
-            <td class="price">56,592 ل.س</td>
+            <td class="price">60,696 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">مانشستر طويل ازرق</td>
             <td class="unit">كروز</td>
-            <td class="price">60,784 ل.س</td>
+            <td class="price">65,192 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">مانشستر طويل فضي</td>
             <td class="unit">كروز</td>
-            <td class="price">60,784 ل.س</td>
+            <td class="price">65,192 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">مانشستر قصير ازرق</td>
             <td class="unit">كروز</td>
-            <td class="price">74,670 ل.س</td>
+            <td class="price">80,085 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">مانشستر قصير فضي</td>
             <td class="unit">كروز</td>
-            <td class="price">48,994 ل.س</td>
+            <td class="price">52,547 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">مانشستر كوين ابيض</td>
             <td class="unit">كروز</td>
-            <td class="price">47,160 ل.س</td>
+            <td class="price">50,580 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">مانشستر كوين ازرق</td>
             <td class="unit">كروز</td>
-            <td class="price">62,880 ل.س</td>
+            <td class="price">67,440 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">مانشستر كوين تفاح</td>
             <td class="unit">كروز</td>
-            <td class="price">64,190 ل.س</td>
+            <td class="price">68,845 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">مانشستر كوين طقة توت</td>
             <td class="unit">كروز</td>
-            <td class="price">45,850 ل.س</td>
+            <td class="price">49,175 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">مانشستر كوين كريمي</td>
             <td class="unit">كروز</td>
-            <td class="price">58,950 ل.س</td>
+            <td class="price">63,225 ل.س</td>
           </tr>
         </tbody></table>
       </div>
@@ -505,42 +519,42 @@
           <tr class="odd">
             <td class="name">بزنس رويال سليم فضي</td>
             <td class="unit">كروز</td>
-            <td class="price">44,540 ل.س</td>
+            <td class="price">47,770 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">بزنس رويال سليم نعنع</td>
             <td class="unit">كروز</td>
-            <td class="price">44,540 ل.س</td>
+            <td class="price">47,770 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">بزنس رويال طويل احمر</td>
             <td class="unit">كروز</td>
-            <td class="price">52,400 ل.س</td>
+            <td class="price">56,200 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">بزنس رويال طويل ازرق</td>
             <td class="unit">كروز</td>
-            <td class="price">51,090 ل.س</td>
+            <td class="price">54,795 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">بزنس رويال طويل فضي</td>
             <td class="unit">كروز</td>
-            <td class="price">51,090 ل.س</td>
+            <td class="price">54,795 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">بزنس رويال قصير احمر</td>
             <td class="unit">كروز</td>
-            <td class="price">43,230 ل.س</td>
+            <td class="price">46,365 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">بزنس رويال قصير ازرق</td>
             <td class="unit">كروز</td>
-            <td class="price">43,230 ل.س</td>
+            <td class="price">46,365 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">بزنس رويال قصير فضي</td>
             <td class="unit">كروز</td>
-            <td class="price">43,230 ل.س</td>
+            <td class="price">46,365 ل.س</td>
           </tr>
         </tbody></table>
       </div>
@@ -554,17 +568,17 @@
           <tr class="odd">
             <td class="name">دفيدوف سليم غولد</td>
             <td class="unit">كروز</td>
-            <td class="price">272,917 ل.س</td>
+            <td class="price">292,708 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">دفيدوف سليم وايت</td>
             <td class="unit">كروز</td>
-            <td class="price">272,917 ل.س</td>
+            <td class="price">292,708 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">دفيدوف طويل ابيض</td>
             <td class="unit">كروز</td>
-            <td class="price">242,350 ل.س</td>
+            <td class="price">259,925 ل.س</td>
           </tr>
         </tbody></table>
       </div>
@@ -578,12 +592,12 @@
           <tr class="odd">
             <td class="name">كينت ازرق حرة</td>
             <td class="unit">كروز</td>
-            <td class="price">180,780 ل.س</td>
+            <td class="price">193,890 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">كينت فضي حرة</td>
             <td class="unit">كروز</td>
-            <td class="price">180,780 ل.س</td>
+            <td class="price">193,890 ل.س</td>
           </tr>
         </tbody></table>
       </div>
@@ -597,42 +611,42 @@
           <tr class="odd">
             <td class="name">مالبورو تنك</td>
             <td class="unit">كروز</td>
-            <td class="price">311,125 ل.س</td>
+            <td class="price">333,688 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">مالبورو غولد تاريخ</td>
             <td class="unit">كروز</td>
-            <td class="price">183,400 ل.س</td>
+            <td class="price">196,700 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">مالبورو غولد حرة</td>
             <td class="unit">كروز</td>
-            <td class="price">340,600 ل.س</td>
+            <td class="price">365,300 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">مالبورو غولد حرة لبنان</td>
             <td class="unit">كروز</td>
-            <td class="price">379,900 ل.س</td>
+            <td class="price">407,450 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">مالبورو غولد طابع</td>
             <td class="unit">كروز</td>
-            <td class="price">288,200 ل.س</td>
+            <td class="price">309,100 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">وينستون احمر حرة</td>
             <td class="unit">كروز</td>
-            <td class="price">176,850 ل.س</td>
+            <td class="price">189,675 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">وينستون ازرق حرة</td>
             <td class="unit">كروز</td>
-            <td class="price">180,780 ل.س</td>
+            <td class="price">193,890 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">وينستون فضي حرة</td>
             <td class="unit">كروز</td>
-            <td class="price">180,780 ل.س</td>
+            <td class="price">193,890 ل.س</td>
           </tr>
         </tbody></table>
       </div>
@@ -646,7 +660,7 @@
           <tr class="odd">
             <td class="name">وينشستر</td>
             <td class="unit">كروز</td>
-            <td class="price">55,020 ل.س</td>
+            <td class="price">59,010 ل.س</td>
           </tr>
         </tbody></table>
       </div></div>
@@ -660,27 +674,27 @@
           <tr class="odd">
             <td class="name">غلواز قصير أحمر</td>
             <td class="unit">كروز</td>
-            <td class="price">105,586 ل.س</td>
+            <td class="price">113,243 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">غلواز قصير أصفر</td>
             <td class="unit">كروز</td>
-            <td class="price">105,586 ل.س</td>
+            <td class="price">113,243 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">غلواز كوين أحمر</td>
             <td class="unit">كروز</td>
-            <td class="price">106,110 ل.س</td>
+            <td class="price">113,805 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">غلواز كوين أصفر</td>
             <td class="unit">كروز</td>
-            <td class="price">106,110 ل.س</td>
+            <td class="price">113,805 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">غلواز كوين اصفر اس سبعة.</td>
             <td class="unit">كروز</td>
-            <td class="price">100,870 ل.س</td>
+            <td class="price">108,185 ل.س</td>
           </tr>
         </tbody></table>
       </div>
@@ -694,87 +708,87 @@
           <tr class="odd">
             <td class="name">اليغانس سليم أزرق</td>
             <td class="unit">كروز</td>
-            <td class="price">100,870 ل.س</td>
+            <td class="price">108,185 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">اليغانس سليم ازرق بدن طبعة</td>
             <td class="unit">كروز</td>
-            <td class="price">77,290 ل.س</td>
+            <td class="price">82,895 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">اليغانس سليم ازرق جديد</td>
             <td class="unit">كروز</td>
-            <td class="price">65,500 ل.س</td>
+            <td class="price">70,250 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">اليغانس سليم فريز جديد</td>
             <td class="unit">كروز</td>
-            <td class="price">45,850 ل.س</td>
+            <td class="price">49,175 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">اليغانس سليم فضي</td>
             <td class="unit">كروز</td>
-            <td class="price">102,180 ل.س</td>
+            <td class="price">109,590 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">اليغانس سليم فضي بدون طبعة</td>
             <td class="unit">كروز</td>
-            <td class="price">78,600 ل.س</td>
+            <td class="price">84,300 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">اليغانس سليم فضي جديد</td>
             <td class="unit">كروز</td>
-            <td class="price">64,976 ل.س</td>
+            <td class="price">69,688 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">اليغانس سليم نعنع</td>
             <td class="unit">كروز</td>
-            <td class="price">49,780 ل.س</td>
+            <td class="price">53,390 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">اليغانس سليم نعنع جديد</td>
             <td class="unit">كروز</td>
-            <td class="price">47,160 ل.س</td>
+            <td class="price">50,580 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">اليغانس طويل أسود</td>
             <td class="unit">كروز</td>
-            <td class="price">77,290 ل.س</td>
+            <td class="price">82,895 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">اليغانس طويل فضي</td>
             <td class="unit">كروز</td>
-            <td class="price">86,460 ل.س</td>
+            <td class="price">92,730 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">اليغانس قصير أسود</td>
             <td class="unit">كروز</td>
-            <td class="price">72,050 ل.س</td>
+            <td class="price">77,275 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">اليغانس قصير ابيض لايت</td>
             <td class="unit">كروز</td>
-            <td class="price">47,160 ل.س</td>
+            <td class="price">50,580 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">اليغانس قصير فضي</td>
             <td class="unit">كروز</td>
-            <td class="price">83,840 ل.س</td>
+            <td class="price">89,920 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">اليغانس كوين أبيض</td>
             <td class="unit">كروز</td>
-            <td class="price">70,740 ل.س</td>
+            <td class="price">75,870 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">اليغانس كوين أزرق</td>
             <td class="unit">كروز</td>
-            <td class="price">70,740 ل.س</td>
+            <td class="price">75,870 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">اليغانس كوين اسود</td>
             <td class="unit">كروز</td>
-            <td class="price">52,400 ل.س</td>
+            <td class="price">56,200 ل.س</td>
           </tr>
         </tbody></table>
       </div>
@@ -788,12 +802,12 @@
           <tr class="odd">
             <td class="name">تي اس سليم فضي</td>
             <td class="unit">كروز</td>
-            <td class="price">43,230 ل.س</td>
+            <td class="price">46,365 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">تي اس فضي</td>
             <td class="unit">كروز</td>
-            <td class="price">69,430 ل.س</td>
+            <td class="price">74,465 ل.س</td>
           </tr>
         </tbody></table>
       </div>
@@ -807,22 +821,22 @@
           <tr class="odd">
             <td class="name">أوريس شوكولا</td>
             <td class="unit">كروز</td>
-            <td class="price">82,530 ل.س</td>
+            <td class="price">88,515 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">أوريس منغا</td>
             <td class="unit">كروز</td>
-            <td class="price">81,744 ل.س</td>
+            <td class="price">87,672 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">اوريس بلاس ازرق</td>
             <td class="unit">كروز</td>
-            <td class="price">81,744 ل.س</td>
+            <td class="price">87,672 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">اوريس توت سليم طقة</td>
             <td class="unit">كروز</td>
-            <td class="price">81,744 ل.س</td>
+            <td class="price">87,672 ل.س</td>
           </tr>
         </tbody></table>
       </div>
@@ -836,27 +850,27 @@
           <tr class="odd">
             <td class="name">حمرا طويلة جديدة</td>
             <td class="unit">كروز</td>
-            <td class="price">72,050 ل.س</td>
+            <td class="price">77,275 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">حمرا قصيرة زاوية</td>
             <td class="unit">كروز</td>
-            <td class="price">75,980 ل.س</td>
+            <td class="price">81,490 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">حمرة طويلة قديمة عراقية</td>
             <td class="unit">كروز</td>
-            <td class="price">65,500 ل.س</td>
+            <td class="price">70,250 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">ريد طويل احمر</td>
             <td class="unit">كروز</td>
-            <td class="price">69,430 ل.س</td>
+            <td class="price">74,465 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">شرق قصير</td>
             <td class="unit">كروز</td>
-            <td class="price">40,610 ل.س</td>
+            <td class="price">43,555 ل.س</td>
           </tr>
         </tbody></table>
       </div>
@@ -870,7 +884,7 @@
           <tr class="odd">
             <td class="name">يونايتد غير مخصص</td>
             <td class="unit">كروز</td>
-            <td class="price">87,770 ل.س</td>
+            <td class="price">94,135 ل.س</td>
           </tr>
         </tbody></table>
       </div>
@@ -884,12 +898,12 @@
           <tr class="odd">
             <td class="name">ولسون طويل أحمر</td>
             <td class="unit">كروز</td>
-            <td class="price">64,190 ل.س</td>
+            <td class="price">68,845 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">ولسون طويل فضي</td>
             <td class="unit">كروز</td>
-            <td class="price">64,190 ل.س</td>
+            <td class="price">68,845 ل.س</td>
           </tr>
         </tbody></table>
       </div>
@@ -903,22 +917,22 @@
           <tr class="odd">
             <td class="name">نابولي ابيض</td>
             <td class="unit">كروز</td>
-            <td class="price">66,810 ل.س</td>
+            <td class="price">71,655 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">نابولي احمر</td>
             <td class="unit">كروز</td>
-            <td class="price">66,810 ل.س</td>
+            <td class="price">71,655 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">نابولي سيلفر</td>
             <td class="unit">كروز</td>
-            <td class="price">66,810 ل.س</td>
+            <td class="price">71,655 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">نابولي غولد</td>
             <td class="unit">كروز</td>
-            <td class="price">66,810 ل.س</td>
+            <td class="price">71,655 ل.س</td>
           </tr>
         </tbody></table>
       </div>
@@ -932,12 +946,12 @@
           <tr class="odd">
             <td class="name">اردن طويل أزرق</td>
             <td class="unit">كروز</td>
-            <td class="price">45,850 ل.س</td>
+            <td class="price">49,175 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">اردن قصير ازرق</td>
             <td class="unit">كروز</td>
-            <td class="price">39,300 ل.س</td>
+            <td class="price">42,150 ل.س</td>
           </tr>
         </tbody></table>
       </div>
@@ -951,37 +965,37 @@
           <tr class="odd">
             <td class="name">بارسا</td>
             <td class="unit">كروز</td>
-            <td class="price">70,740 ل.س</td>
+            <td class="price">75,870 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">بارسا سليم توت</td>
             <td class="unit">كروز</td>
-            <td class="price">59,212 ل.س</td>
+            <td class="price">63,506 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">بارسا سليم شوكولا</td>
             <td class="unit">كروز</td>
-            <td class="price">59,212 ل.س</td>
+            <td class="price">63,506 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">بارسا سليم مانجو</td>
             <td class="unit">كروز</td>
-            <td class="price">59,212 ل.س</td>
+            <td class="price">63,506 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">بارسا سليم نعنع</td>
             <td class="unit">كروز</td>
-            <td class="price">59,212 ل.س</td>
+            <td class="price">63,506 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">بارسا طويل ازرق</td>
             <td class="unit">كروز</td>
-            <td class="price">51,352 ل.س</td>
+            <td class="price">55,076 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">بارسا طويل فضي</td>
             <td class="unit">كروز</td>
-            <td class="price">51,352 ل.س</td>
+            <td class="price">55,076 ل.س</td>
           </tr>
         </tbody></table>
       </div>
@@ -995,12 +1009,12 @@
           <tr class="odd">
             <td class="name">برو طويل ازرق</td>
             <td class="unit">كروز</td>
-            <td class="price">55,020 ل.س</td>
+            <td class="price">59,010 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">برو طويل فضي</td>
             <td class="unit">كروز</td>
-            <td class="price">65,500 ل.س</td>
+            <td class="price">70,250 ل.س</td>
           </tr>
         </tbody></table>
       </div>
@@ -1014,12 +1028,12 @@
           <tr class="odd">
             <td class="name">بلاتينوم طويل ازرق</td>
             <td class="unit">كروز</td>
-            <td class="price">59,474 ل.س</td>
+            <td class="price">63,787 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">بلاتينوم طويل فضي</td>
             <td class="unit">كروز</td>
-            <td class="price">59,474 ل.س</td>
+            <td class="price">63,787 ل.س</td>
           </tr>
         </tbody></table>
       </div>
@@ -1033,22 +1047,22 @@
           <tr class="odd">
             <td class="name">دخان ام تي سليم بلوبيري</td>
             <td class="unit">كروز</td>
-            <td class="price">74,670 ل.س</td>
+            <td class="price">80,085 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">دخان ام تي سليم نعنع متلج</td>
             <td class="unit">كروز</td>
-            <td class="price">74,670 ل.س</td>
+            <td class="price">80,085 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">دخان ام تي كوين ابيض</td>
             <td class="unit">كروز</td>
-            <td class="price">52,400 ل.س</td>
+            <td class="price">56,200 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">دخان ام تي كوين فضي</td>
             <td class="unit">كروز</td>
-            <td class="price">52,400 ل.س</td>
+            <td class="price">56,200 ل.س</td>
           </tr>
         </tbody></table>
       </div>
@@ -1062,7 +1076,7 @@
           <tr class="odd">
             <td class="name">سيدرز طويل فضي</td>
             <td class="unit">كروز</td>
-            <td class="price">108,730 ل.س</td>
+            <td class="price">116,615 ل.س</td>
           </tr>
         </tbody></table>
       </div>
@@ -1076,27 +1090,27 @@
           <tr class="odd">
             <td class="name">سيغار البنت</td>
             <td class="unit">علبة</td>
-            <td class="price">81,875 ل.س</td>
+            <td class="price">87,813 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">سيغار كريمي</td>
             <td class="unit">كروز</td>
-            <td class="price">327,500 ل.س</td>
+            <td class="price">351,250 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">سيناتور سيغارتين</td>
             <td class="unit">علبة</td>
-            <td class="price">65,500 ل.س</td>
+            <td class="price">70,250 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">كابتن بلاك سيغار</td>
             <td class="unit">علبة</td>
-            <td class="price">109,167 ل.س</td>
+            <td class="price">117,083 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">كلارو سيغار</td>
             <td class="unit">كروز</td>
-            <td class="price">196,500 ل.س</td>
+            <td class="price">210,750 ل.س</td>
           </tr>
         </tbody></table>
       </div>
@@ -1110,17 +1124,17 @@
           <tr class="odd">
             <td class="name">مليونير طويل أزرق</td>
             <td class="unit">كروز</td>
-            <td class="price">66,810 ل.س</td>
+            <td class="price">71,655 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">مليونير طويل فضي</td>
             <td class="unit">كروز</td>
-            <td class="price">66,810 ل.س</td>
+            <td class="price">71,655 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">مليونير كوين ازرق</td>
             <td class="unit">كروز</td>
-            <td class="price">37,429 ل.س</td>
+            <td class="price">40,143 ل.س</td>
           </tr>
         </tbody></table>
       </div>
@@ -1134,32 +1148,32 @@
           <tr class="odd">
             <td class="name">ميلانو سليم ابيض</td>
             <td class="unit">كروز</td>
-            <td class="price">51,352 ل.س</td>
+            <td class="price">55,076 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">ميلانو سليم ازرق</td>
             <td class="unit">كروز</td>
-            <td class="price">51,352 ل.س</td>
+            <td class="price">55,076 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">ميلانو سليم فضي</td>
             <td class="unit">كروز</td>
-            <td class="price">51,352 ل.س</td>
+            <td class="price">55,076 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">ميلانو كوين ازرق</td>
             <td class="unit">كروز</td>
-            <td class="price">51,352 ل.س</td>
+            <td class="price">55,076 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">ميلانو كوين اسود</td>
             <td class="unit">كروز</td>
-            <td class="price">51,352 ل.س</td>
+            <td class="price">55,076 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">ميلانو كوين فضي</td>
             <td class="unit">كروز</td>
-            <td class="price">51,352 ل.س</td>
+            <td class="price">55,076 ل.س</td>
           </tr>
         </tbody></table>
       </div></div>
@@ -1176,72 +1190,72 @@
           <tr class="odd">
             <td class="name">فحم 500 غ B12</td>
             <td class="unit">علبة</td>
-            <td class="price">18,340 ل.س</td>
+            <td class="price">19,670 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">فحم B12</td>
             <td class="unit">علبة</td>
-            <td class="price">36,680 ل.س</td>
+            <td class="price">39,340 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">فحم اغاتي</td>
             <td class="unit">علبة</td>
-            <td class="price">36,680 ل.س</td>
+            <td class="price">39,340 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">فحم الريس</td>
             <td class="unit">علبة</td>
-            <td class="price">39,300 ل.س</td>
+            <td class="price">42,150 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">فحم الريس 250غ</td>
             <td class="unit">علبة</td>
-            <td class="price">10,808 ل.س</td>
+            <td class="price">11,591 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">فحم الزعيم 1 كغ</td>
             <td class="unit">علبة</td>
-            <td class="price">45,850 ل.س</td>
+            <td class="price">49,175 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">فحم الزعيم 250غ</td>
             <td class="unit">علبة</td>
-            <td class="price">11,135 ل.س</td>
+            <td class="price">11,943 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">فحم العاصي</td>
             <td class="unit">علبة</td>
-            <td class="price">36,680 ل.س</td>
+            <td class="price">39,340 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">فحم المحمود</td>
             <td class="unit">علبة</td>
-            <td class="price">36,680 ل.س</td>
+            <td class="price">39,340 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">فحم المحمود 500 غ</td>
             <td class="unit">علبة</td>
-            <td class="price">18,340 ل.س</td>
+            <td class="price">19,670 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">فحم الهيبة</td>
             <td class="unit">علبة</td>
-            <td class="price">40,610 ل.س</td>
+            <td class="price">43,555 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">فحم اوركنيدنا</td>
             <td class="unit">علبة</td>
-            <td class="price">36,680 ل.س</td>
+            <td class="price">39,340 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">فحم ايكو نارة اخضر</td>
             <td class="unit">علبة</td>
-            <td class="price">28,656 ل.س</td>
+            <td class="price">30,734 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">فحم كوين شيشة</td>
             <td class="unit">علبة</td>
-            <td class="price">36,680 ل.س</td>
+            <td class="price">39,340 ل.س</td>
           </tr>
         </tbody></table>
       </div>
@@ -1255,12 +1269,12 @@
           <tr class="odd">
             <td class="name">ورق سموكينغ</td>
             <td class="unit">كروز</td>
-            <td class="price">131,000 ل.س</td>
+            <td class="price">140,500 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">ورق شام</td>
             <td class="unit">علبة</td>
-            <td class="price">49,780 ل.س</td>
+            <td class="price">53,390 ل.س</td>
           </tr>
         </tbody></table>
       </div>
@@ -1274,7 +1288,7 @@
           <tr class="odd">
             <td class="name">فيبات</td>
             <td class="unit">علبة</td>
-            <td class="price">117,900 ل.س</td>
+            <td class="price">126,450 ل.س</td>
           </tr>
         </tbody></table>
       </div>
@@ -1288,17 +1302,17 @@
           <tr class="odd">
             <td class="name">قداحات شينمو</td>
             <td class="unit">علبة</td>
-            <td class="price">170,300 ل.س</td>
+            <td class="price">182,650 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">قداحات ضو بايدا جديد</td>
             <td class="unit">دزينة</td>
-            <td class="price">53,710 ل.س</td>
+            <td class="price">57,605 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">قداحات فينيكس زرقا</td>
             <td class="unit">علبة</td>
-            <td class="price">55,675 ل.س</td>
+            <td class="price">59,713 ل.س</td>
           </tr>
         </tbody></table>
       </div>
@@ -1312,12 +1326,12 @@
           <tr class="odd">
             <td class="name">سلفان الاصيل</td>
             <td class="unit">قطعة</td>
-            <td class="price">4,640 ل.س</td>
+            <td class="price">4,976 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">سلفان الزعيم</td>
             <td class="unit">علبة</td>
-            <td class="price">4,367 ل.س</td>
+            <td class="price">4,683 ل.س</td>
           </tr>
         </tbody></table>
       </div></div>
@@ -1331,82 +1345,82 @@
           <tr class="odd">
             <td class="name">مزايا مشكل</td>
             <td class="unit">كروز</td>
-            <td class="price">155,017 ل.س</td>
+            <td class="price">166,258 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">مزايا كف</td>
             <td class="unit">كف</td>
-            <td class="price">75,325 ل.س</td>
+            <td class="price">80,788 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">أسطورة مشكل</td>
             <td class="unit">كروز</td>
-            <td class="price">104,800 ل.س</td>
+            <td class="price">112,400 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">صفوة جميع النكهات</td>
             <td class="unit">كروز</td>
-            <td class="price">103,708 ل.س</td>
+            <td class="price">111,229 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">معسل العراب عتب ونعنع</td>
             <td class="unit">كروز</td>
-            <td class="price">92,792 ل.س</td>
+            <td class="price">99,521 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">فاخر أحمر كروز</td>
             <td class="unit">كروز</td>
-            <td class="price">185,583 ل.س</td>
+            <td class="price">199,042 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">فاخر نكهات</td>
             <td class="unit">كروز</td>
-            <td class="price">174,667 ل.س</td>
+            <td class="price">187,333 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">روز مشكل</td>
             <td class="unit">كروز</td>
-            <td class="price">87,333 ل.س</td>
+            <td class="price">93,667 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">فاخر أسود كروز</td>
             <td class="unit">كروز</td>
-            <td class="price">182,308 ل.س</td>
+            <td class="price">195,529 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">معسل نخلة اخضر كروز.</td>
             <td class="unit">كروز</td>
-            <td class="price">218,333 ل.س</td>
+            <td class="price">234,167 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">معسل نخلة صلاحية 12</td>
             <td class="unit">كروز</td>
-            <td class="price">170,300 ل.س</td>
+            <td class="price">182,650 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">معسل نخلة صلاحية كف شهر 12</td>
             <td class="unit">كروز</td>
-            <td class="price">106,438 ل.س</td>
+            <td class="price">114,156 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">معسل نخلة كف صلاحية</td>
             <td class="unit">كف</td>
-            <td class="price">106,438 ل.س</td>
+            <td class="price">114,156 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">نخلة صلاحية شهر 1</td>
             <td class="unit">كروز</td>
-            <td class="price">170,300 ل.س</td>
+            <td class="price">182,650 ل.س</td>
           </tr>
           <tr class="odd">
             <td class="name">نخلة صلاحية شهر 10</td>
             <td class="unit">كروز</td>
-            <td class="price">170,300 ل.س</td>
+            <td class="price">182,650 ل.س</td>
           </tr>
           <tr class="even">
             <td class="name">نخلة صلاحية شهر 4</td>
             <td class="unit">كروز</td>
-            <td class="price">235,800 ل.س</td>
+            <td class="price">252,900 ل.س</td>
           </tr>
         </tbody></table>
       </div></div>
@@ -1418,7 +1432,7 @@
   sheet.dataset.theme = savedTheme || 'dark';
   document.body.dataset.theme = sheet.dataset.theme;
   function selectedPdfFile() {
-    return sheet.dataset.theme === 'light' ? 'price-list-syp-14050-light.pdf?v=12b57fb1a938' : 'price-list-syp-14050.pdf?v=12b57fb1a938';
+    return sheet.dataset.theme === 'light' ? 'price-list-syp-14050-light.pdf?v=21201812ca4a' : 'price-list-syp-14050.pdf?v=21201812ca4a';
   }
   function syncPdfLinks() {
     const selected = selectedPdfFile();

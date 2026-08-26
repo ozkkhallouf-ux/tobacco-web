@@ -86,7 +86,21 @@
     }
     .ozk-price-list .price-list-phones .location { color:var(--gold-strong); direction:rtl; }
     .ozk-price-list .price-list-columns {
-      display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; align-items:start;
+      /*
+       * ملاحظة حرجة: كان هذا العنصر CSS Grid (display:grid +
+       * grid-template-columns:repeat(2,minmax(0,1fr))). html2canvas مع
+       * foreignObjectRendering:true (مطلوب لتفادي انعكاس ترتيب النص العربي —
+       * راجع html2canvas في exportBulletinPdf بـsrc/app.js) لا يحسب عرض أعمدة
+       * CSS Grid بشكل صحيح داخل SVG foreignObject: كان يرسم العمود الأول فقط
+       * بعرض ضيّق (min-content تقريباً) ويترك ~78% من عرض الصفحة فارغاً أسود/
+       * أبيض بلا محتوى — رغم أن عرض الـcanvas الملتقط نفسه كان صحيحاً 794px،
+       * وأن نفس العنصر يُعرض بشكل سليم تماماً بمعاينة Playwright/متصفح عادية.
+       * إيقاف foreignObjectRendering يُصلح العرض لكنه يكسر تشكيل الحروف
+       * العربية (تظهر منعكسة/مبعثرة الحروف). الحل: استبدال Grid بـFlexbox —
+       * html2canvas يحسب عرض flex-basis بشكل صحيح داخل foreignObject، فيبقى
+       * العمودان بعرض متساوٍ فعلي بلا هوامش فارغة، مع تشكيل عربي سليم.
+       */
+      display:flex; gap:8px; align-items:flex-start;
       padding:0 8px 8px; background:var(--page); position:relative;
     }
     .ozk-price-list .price-list-columns::before {
@@ -94,7 +108,7 @@
       transform:translateX(-50%); background:var(--gold); border-radius:2px;
     }
     .ozk-price-list .price-list-column-stack {
-      min-width:0; background:var(--page); position:relative; z-index:1;
+      flex:1 1 0; min-width:0; background:var(--page); position:relative; z-index:1;
     }
     .ozk-price-list .price-list-secondary-page {
       break-before:page; page-break-before:always; margin-top:8px;
@@ -138,7 +152,7 @@
       background:var(--surface); color:var(--text); border-color:var(--line);
     }
     @media screen and (max-width:720px) {
-      .ozk-price-list .price-list-columns { grid-template-columns:repeat(2,minmax(0,1fr)); gap:4px; padding:0 4px 6px; }
+      .ozk-price-list .price-list-columns { gap:4px; padding:0 4px 6px; }
       .ozk-price-list.has-document-tools .price-list-header { padding-top:102px; }
       .ozk-price-list .price-list-document-tools { right:10px; left:10px; justify-content:center; }
       .ozk-price-list .price-list-group { margin-bottom:3px; }
@@ -219,7 +233,15 @@
   // العطل: تعبئة مسارين مستقلّين بصفحات منفصلة تماماً). كل مجموعة تُنقل كاملة
   // لعمود واحد فقط، ولا تُقسَّم أبداً. القياس عمودي بحت (remainingHeight)، لا
   // علاقة له بعرض الصفحة أو عرض المجموعة (يبقى 100% من عرض عموده دائماً عبر CSS).
-  function packGroupsIntoBalancedPages(orderedGroups, heights, budgetOptions, safetyMarginPx = DEFAULT_SAFETY_MARGIN_PX) {
+  // ملاحظة حرجة (إصلاح تثبيت "ماستر"/"غلواز" أول كل عمود): كانت هذه الدالة
+  // تستقبل طابوراً موحّداً واحداً (يمين ثم يسار مدمجَين) فتملأ عمود اليمين من
+  // أوله حتى ينفد، ثم تُكمل نفس الطابور داخل عمود اليسار — فإن كانت مجموعات
+  // اليمين (المثبَّتة + الإضافات) أطول من ميزانية عمود واحد، كانت تطفح فعلياً
+  // إلى عمود اليسار "المرئي" مزيحةً "غلواز" (أول مجموعات اليسار) لنهاية العمود
+  // بدل بدايته. الإصلاح: طابوران منفصلان (يمين/يسار) بأولوية كل طابور لعموده
+  // الخاص، مع سماح "فيضان" فقط بعد نفاد الطابور الآخر تماماً — هذا يحافظ على
+  // نفس إصلاح توازن الأعمدة عبر الصفحات (PR #122) دون كسر ترتيب التثبيت.
+  function packGroupsIntoBalancedPages(rightGroups, leftGroups, heights, budgetOptions, safetyMarginPx = DEFAULT_SAFETY_MARGIN_PX) {
     const reducedFirstPageBudget = Math.max(0, Number(budgetOptions?.reducedFirstPageBudget ?? budgetOptions?.fullBudget) || 0);
     const fullBudget = Math.max(0, Number(budgetOptions?.fullBudget) || 0);
     const balanceThresholdPx = Number.isFinite(budgetOptions?.balanceThresholdPx)
@@ -227,7 +249,7 @@
       : Math.max(40, fullBudget * DEFAULT_BALANCE_THRESHOLD_RATIO);
     const maxPossibleLimit = Math.max(0, fullBudget - safetyMarginPx);
 
-    const queue = (Array.isArray(orderedGroups) ? orderedGroups : [])
+    const toEntries = (groups) => (Array.isArray(groups) ? groups : [])
       .map((group) => {
         const name = String(group?.name || "");
         const h = heights instanceof Map ? heights.get(name) : undefined;
@@ -235,35 +257,64 @@
       })
       .filter((entry) => entry.h != null && Number.isFinite(entry.h)); // ارتفاع غير معروف: تجاهل آمن
 
-    const pages = [];
     const oversized = [];
-    let i = 0;
+    const stripOversized = (entries) => entries.filter((entry) => {
+      if (entry.h > maxPossibleLimit + 1e-6) {
+        oversized.push({ name: entry.name, height: entry.h, limit: maxPossibleLimit });
+        return false;
+      }
+      return true;
+    });
 
-    while (i < queue.length) {
+    const rq = stripOversized(toEntries(rightGroups));
+    const lq = stripOversized(toEntries(leftGroups));
+
+    const pages = [];
+    let ri = 0;
+    let li = 0;
+
+    while (ri < rq.length || li < lq.length) {
       const pageIndex = pages.length;
       const budgetForThisPage = pageIndex === 0 ? reducedFirstPageBudget : fullBudget;
       const limit = Math.max(0, budgetForThisPage - safetyMarginPx);
-      const entry = queue[i];
-
-      if (entry.h > maxPossibleLimit + 1e-6) {
-        // أطول من عمود صفحة كاملة حتى بميزانية غير مخفّضة — حالة استثنائية صريحة
-        oversized.push({ name: entry.name, height: entry.h, limit: maxPossibleLimit });
-        i += 1;
-        continue;
-      }
-
       const page = { right: [], left: [], rightHeight: 0, leftHeight: 0 };
-      while (i < queue.length && page.rightHeight + queue[i].h <= limit + 1e-6) {
-        page.right.push(queue[i].group);
-        page.rightHeight += queue[i].h;
-        i += 1;
-      }
-      while (i < queue.length && page.leftHeight + queue[i].h <= limit + 1e-6) {
-        page.left.push(queue[i].group);
-        page.leftHeight += queue[i].h;
-        i += 1;
+
+      // عمود اليمين: من طابور اليمين أولاً، ثم فيضان من طابور اليسار إن نفد الأول.
+      for (;;) {
+        if (ri < rq.length && page.rightHeight + rq[ri].h <= limit + 1e-6) {
+          page.right.push(rq[ri].group);
+          page.rightHeight += rq[ri].h;
+          ri += 1;
+        } else if (ri >= rq.length && li < lq.length && page.rightHeight + lq[li].h <= limit + 1e-6) {
+          page.right.push(lq[li].group);
+          page.rightHeight += lq[li].h;
+          li += 1;
+        } else {
+          break;
+        }
       }
 
+      // عمود اليسار: من طابور اليسار أولاً، ثم فيضان من طابور اليمين إن نفد الأول.
+      for (;;) {
+        if (li < lq.length && page.leftHeight + lq[li].h <= limit + 1e-6) {
+          page.left.push(lq[li].group);
+          page.leftHeight += lq[li].h;
+          li += 1;
+        } else if (li >= lq.length && ri < rq.length && page.leftHeight + rq[ri].h <= limit + 1e-6) {
+          page.left.push(rq[ri].group);
+          page.leftHeight += rq[ri].h;
+          ri += 1;
+        } else {
+          break;
+        }
+      }
+
+      // صفحة فارغة تماماً مع بقاء مجموعات بالطابور تحدث حين تكون ميزانية هذه
+      // الصفحة تحديداً مخفّضة لصفر تقريباً (مثال: صفحة أولى تحتها رأس بطول
+      // الصفحة كلها) — لا نتوقف هنا: ندفع الصفحة الفارغة وننتقل للصفحة التالية
+      // (ميزانية كاملة)، فتُقاس المجموعة هناك ولا تُفقد ولا تُقصّ فوق الرأس.
+      // التوقف الآمن الوحيد هو حين لا تتقدّم الفهارس إطلاقاً حتى بميزانية كاملة،
+      // وهذا مستحيل عملياً لأن oversized تُستبعد مسبقاً وفق fullBudget-safetyMarginPx.
       balancePageColumns(page, limit, heights, balanceThresholdPx);
       pages.push(page);
     }
@@ -285,16 +336,16 @@
     const safetyMarginPx = options.safetyMarginPx ?? DEFAULT_SAFETY_MARGIN_PX;
 
     // صفحة1 من الأعمدة الرئيسية تبدأ تحت الرأس/الرأس الفرعي فتُخصم ميزانيتها؛ بقية الصفحات كاملة.
-    const mainQueue = [...base.right, ...base.left];
-    const mainPack = packGroupsIntoBalancedPages(mainQueue, heights, {
+    // طابورا يمين/يسار منفصلان (لا دمج مسبق) — راجع تعليق packGroupsIntoBalancedPages
+    // لسبب هذا الفصل: يضمن "ماستر" و"غلواز" أول عمودَيهما دائماً.
+    const mainPack = packGroupsIntoBalancedPages(base.right, base.left, heights, {
       reducedFirstPageBudget: Math.max(0, pageHeightPx - headerHeightPx),
       fullBudget: pageHeightPx
     }, safetyMarginPx);
     const mainPages = mainPack.pages.length ? mainPack.pages : [{ right: [], left: [] }];
 
     // صفحة المجموعات الخاصة تبدأ دائماً بصفحة جديدة كاملة بلا رأس متكرر.
-    const specialQueue = [...base.specialRight, ...base.specialLeft];
-    const specialPack = packGroupsIntoBalancedPages(specialQueue, heights, {
+    const specialPack = packGroupsIntoBalancedPages(base.specialRight, base.specialLeft, heights, {
       reducedFirstPageBudget: pageHeightPx,
       fullBudget: pageHeightPx
     }, safetyMarginPx);

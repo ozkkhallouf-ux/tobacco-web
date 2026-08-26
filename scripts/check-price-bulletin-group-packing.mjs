@@ -28,7 +28,7 @@ function group(name) {
   // usable لكل عمود = 1000-6=994؛ أ(900) تملأ العمود الأول، ب(200) لا تتّسع معه (900+200>994)
   // فتذهب لعمود ثانٍ (يسار) بنفس الصفحة لأنه لا يزال فارغاً ويتّسع لها بمفردها.
   const heights = new Map([["أ", 900], ["ب", 200]]);
-  const { pages, oversized } = template.packGroupsIntoBalancedPages(groups, heights, { fullBudget: 1000 }, 6);
+  const { pages, oversized } = template.packGroupsIntoBalancedPages(groups, [], heights, { fullBudget: 1000 }, 6);
   check("فراغ لا يتّسع: العمود الأول يحوي المجموعة الأولى فقط", pages[0]?.right.length === 1 && pages[0].right[0].name === "أ");
   check("فراغ لا يتّسع: المجموعة الثانية انتقلت كاملة للعمود الآخر من نفس الصفحة", pages[0]?.left.length === 1 && pages[0].left[0].name === "ب");
   check("فراغ لا يتّسع: لا مجموعات مفقودة استثنائياً هنا", oversized.length === 0);
@@ -43,7 +43,7 @@ function group(name) {
   const safety = 6;
   const usable = budget - safety;
   const heights = new Map([["أ", usable - 50], ["ب", 50]]); // يملأ العمود الأول بالضبط حتى usable
-  const { pages } = template.packGroupsIntoBalancedPages(groups, heights, { fullBudget: budget }, safety);
+  const { pages } = template.packGroupsIntoBalancedPages(groups, [], heights, { fullBudget: budget }, safety);
   const placed = pages.flatMap((p) => [...p.right, ...p.left]).map((g) => g.name).sort();
   check("فراغ يتّسع بالضبط: كلتا المجموعتين وُضعتا بصفحة واحدة بلا فقدان", pages.length === 1 && placed.join(",") === "أ,ب");
   check("فراغ يتّسع بالضبط: لا فيضان بأي عمود", pages[0].rightHeight <= usable + 1e-6 && pages[0].leftHeight <= usable + 1e-6);
@@ -56,7 +56,7 @@ function group(name) {
   const groups = [group("كبيرة"), group("صغيرة1"), group("صغيرة2")];
   const budget = 500;
   const heights = new Map([["كبيرة", 400], ["صغيرة1", 80], ["صغيرة2", 80]]);
-  const { pages } = template.packGroupsIntoBalancedPages(groups, heights, { fullBudget: budget }, 6);
+  const { pages } = template.packGroupsIntoBalancedPages(groups, [], heights, { fullBudget: budget }, 6);
   // usable = 494؛ كبيرة(400) + صغيرة1(80) = 480 <= 494 تبقى بالعمود الأول ابتداءً؛
   // صغيرة2 (480+80=560>494 بالعمود الأول) تذهب للعمود الثاني من نفس الصفحة، ثم
   // قاعدة التوازن (الفارق 480 مقابل 80 يتجاوز العتبة) تنقل صغيرة1 للعمود الثاني
@@ -71,7 +71,7 @@ function group(name) {
 {
   const groups = [group("عملاقة")];
   const heights = new Map([["عملاقة", 5000]]);
-  const { pages, oversized } = template.packGroupsIntoBalancedPages(groups, heights, { fullBudget: 1000 }, 6);
+  const { pages, oversized } = template.packGroupsIntoBalancedPages(groups, [], heights, { fullBudget: 1000 }, 6);
   check("مجموعة أطول من صفحة كاملة: لم توضع في أي عمود", pages.every((p) => p.right.length === 0 && p.left.length === 0));
   check("مجموعة أطول من صفحة كاملة: رُصدت صراحة ضمن oversized", oversized.length === 1 && oversized[0].name === "عملاقة");
 }
@@ -80,7 +80,7 @@ function group(name) {
 {
   const groups = Array.from({ length: 12 }, (_, i) => group(`صنف${i}`));
   const heights = new Map(groups.map((g, i) => [g.name, 90 + (i % 5) * 30]));
-  const { pages } = template.packGroupsIntoBalancedPages(groups, heights, { fullBudget: 400 }, 6);
+  const { pages } = template.packGroupsIntoBalancedPages(groups, [], heights, { fullBudget: 400 }, 6);
   const seen = new Set();
   pages.forEach((page) => [...page.right, ...page.left].forEach((g) => {
     check(`لا كسر: ${g.name} ظهرت في عمود واحد فقط`, !seen.has(g.name));
@@ -121,6 +121,11 @@ function group(name) {
   const totalPlaced = layout.mainPages.reduce((n, p) => n + p.right.length + p.left.length, 0);
   check("قاعدة التوازن: كل المجموعات (12) وُزّعت بلا فقدان", totalPlaced === groups.length);
   check("قاعدة التوازن: لا مجموعات استثنائية", layout.oversized.length === 0);
+  // تثبيت صريح: "ماستر" يجب أن يبقى أول عنصر بالعمود اليمين و"غلواز" أول عنصر
+  // بالعمود اليسار بالصفحة الأولى — هذا بالضبط العطل الذي أصلحناه (فيضان اليمين
+  // كان يسبق وصول "غلواز" لبداية اليسار عبر طابور واحد مسطّح).
+  check("تثبيت المستر: أول عنصر بيمين الصفحة الأولى هو ماستر", layout.mainPages[0]?.right[0]?.name === "ماستر");
+  check("تثبيت الغلواز: أول عنصر بيسار الصفحة الأولى هو غلواز", layout.mainPages[0]?.left[0]?.name === "غلواز");
 }
 
 // --- سيناريو 8: قاعدة التوازن لا تنقل مجموعة إذا كان النقل سيسبب فيضاناً بالعمود الأقصر ---
@@ -129,7 +134,7 @@ function group(name) {
   const budget = 1000; // usable = 994
   // أ(994) تملأ العمود الأول بالكامل، ب(994) تملأ العمود الثاني بالكامل — متوازنان أصلاً، لا نقل ممكن أو لازم.
   const heights = new Map([["أ", 994], ["ب", 994]]);
-  const { pages } = template.packGroupsIntoBalancedPages(groups, heights, { fullBudget: budget }, 6);
+  const { pages } = template.packGroupsIntoBalancedPages(groups, [], heights, { fullBudget: budget }, 6);
   check("لا فيضان بعد التوازن: العمودان بقيا كما وُزّعا دون نقل غير آمن", pages[0]?.right.length === 1 && pages[0]?.left.length === 1);
 }
 

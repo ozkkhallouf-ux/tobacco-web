@@ -17,15 +17,30 @@ const pdfRendererSignature = createHash("sha256")
 
 const args = process.argv.slice(2);
 const get  = (f) => { const i = args.indexOf(f); return i !== -1 ? args[i+1] : null; };
-const rateFile = resolve(root, "scripts/exchange-rate.json");
-const storedRate = JSON.parse(readFileSync(rateFile, "utf8"));
-const requestedRate = get("--rate") ?? (String(process.env.SYP_RATE || "").trim() || null);
-const SYP_RATE = Number(requestedRate ?? storedRate.sypPerUsd ?? 14050);
-if (!Number.isFinite(SYP_RATE) || SYP_RATE <= 0) throw new Error("سعر الصرف غير صالح.");
-if (requestedRate !== null) {
-  writeFileSync(rateFile, `${JSON.stringify({ sypPerUsd: SYP_RATE, updatedAt: new Date().toISOString().slice(0, 10) }, null, 2)}\n`);
+
+// مصدر واحد لعنوان/مفتاح Supabase العام (نفس القيم في src/config.js) — يُستخدم
+// هنا لجلب سعر الصرف ولجلب لائحة الأسعار أدناه، بدون تكرار الثوابت.
+const SUPABASE_URL = "https://dyxbirfpxeocqffnfdeb.supabase.co";
+const SUPABASE_KEY = "sb_publishable_RkM_QDWxk8Yekqz9KBKXBw_Yl14zhSH";
+
+// مصدر الحقيقة الوحيد لسعر الصرف: جدول bulletin_exchange_rate في Supabase
+// (نفس الجدول الذي يقرأه/يكتبه الموقع عبر src/supabase-client.js).
+// لا ملف محلي، لا --rate، لا workflow_dispatch input بعد الآن.
+async function fetchExchangeRate() {
+  const resp = await fetch(
+    `${SUPABASE_URL}/rest/v1/bulletin_exchange_rate?id=eq.1&select=syp_per_usd`,
+    { headers: { apikey: SUPABASE_KEY, "Accept-Profile": "public" } }
+  );
+  if (!resp.ok) throw new Error(`تعذر قراءة سعر الصرف من Supabase (${resp.status}).`);
+  const rows = await resp.json();
+  const rate = Number(rows?.[0]?.syp_per_usd);
+  if (!Number.isFinite(rate) || rate <= 0) throw new Error("سعر الصرف المخزّن في Supabase غير صالح.");
+  return rate;
 }
-const SYP_FILE_TAG = "14050"; // اسم رابط ثابت؛ السعر الفعلي داخل الملف يأتي من exchange-rate.json
+const SYP_RATE = await fetchExchangeRate();
+// اسم رابط ثابت (لا يتغيّر مع كل تحديث سعر) كي لا تنكسر الروابط المحفوظة عند
+// الزبائن. السعر الفعلي المعروض داخل الصفحة يأتي من SYP_RATE أعلاه دائماً.
+const SYP_FILE_TAG = "14050";
 const VALIDITY = Number(get("--validity") ?? 30);
 function formatBulletinEnglishInteger(value) {
   const number = Number(value);
@@ -65,8 +80,6 @@ const BULLETIN_CONFLICT_OVERRIDES = new Map([
   ["1970 كوين أبيض", 275]
 ]);
 
-const SUPABASE_URL = "https://dyxbirfpxeocqffnfdeb.supabase.co";
-const SUPABASE_KEY = "sb_publishable_RkM_QDWxk8Yekqz9KBKXBw_Yl14zhSH";
 let feed = [];
 let feedError = "";
 try {

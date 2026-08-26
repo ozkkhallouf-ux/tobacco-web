@@ -121,7 +121,7 @@ try {
       const smallHeight = heights.get("صغيرة");
       // ميزانية عمود تتّسع بالضبط للاثنتين معاً (بهامش بسيط) لإثبات استغلال الفراغ الحقيقي.
       const budget = bigHeight + smallHeight + 6 + 2;
-      const packed = template.packGroupsIntoBalancedPages(groups, heights, { fullBudget: budget }, 6);
+      const packed = template.packGroupsIntoBalancedPages(groups, [], heights, { fullBudget: budget }, 6);
       const firstPage = packed.pages[0] || { right: [], left: [] };
       const placedNames = [...firstPage.right, ...firstPage.left].map((g) => g.name).sort();
 
