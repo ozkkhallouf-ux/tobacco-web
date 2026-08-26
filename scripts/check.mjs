@@ -12,7 +12,6 @@ const required = [
   "src/styles.css",
   "public/manifest.webmanifest",
   "public/service-worker.js",
-  "scripts/exchange-rate.json",
   "public/downloads/price-list-usd.html",
   "public/downloads/price-list-usd.pdf",
   "public/downloads/price-list-usd-light.pdf",
@@ -406,11 +405,26 @@ if (/git commit[^\n]*\[skip ci\]/i.test(priceGenerationWorkflow)) {
   console.error("Generated price-list commits must trigger Pages deployment; remove [skip ci] from the generator commit.");
   failed = true;
 }
-for (const contract of ["inputs:", "rate:", "SYP_RATE:", "scripts/exchange-rate.json"]) {
-  if (!priceGenerationWorkflow.includes(contract)) {
-    console.error(`Exchange-rate workflow contract is missing: ${contract}`);
+// مصدر الحقيقة الوحيد لسعر الصرف هو جدول Supabase bulletin_exchange_rate — يمنع رجوع
+// أي مصدر مستقل (ملف JSON محلي أو input يدوي بالـworkflow) بالخطأ.
+if (priceGenerationWorkflow.includes("scripts/exchange-rate.json")) {
+  console.error("Workflow must not reference scripts/exchange-rate.json — the single source of truth is Supabase bulletin_exchange_rate.");
+  failed = true;
+}
+if (/workflow_dispatch:\s*\n\s*inputs:\s*\n\s*rate:/.test(priceGenerationWorkflow)) {
+  console.error("Workflow must not expose a manual rate input — exchange rate must always come from Supabase.");
+  failed = true;
+}
+const generatorSource = readFileSync("scripts/generate-price-lists.mjs", "utf8");
+for (const contract of ["bulletin_exchange_rate", "SUPABASE_URL", "fetchExchangeRate"]) {
+  if (!generatorSource.includes(contract)) {
+    console.error(`Exchange-rate generator contract is missing: ${contract}`);
     failed = true;
   }
+}
+if (generatorSource.includes("exchange-rate.json")) {
+  console.error("generate-price-lists.mjs must not read/write scripts/exchange-rate.json anymore.");
+  failed = true;
 }
 for (const contract of [
   "cron: '*/5 * * * *'",
@@ -489,21 +503,32 @@ if (app.includes("سعّر الجملة أولاً")) {
   console.error("Retail-only pricing must not require a wholesale USD price first.");
   failed = true;
 }
+// مصدر الحقيقة الوحيد لسعر الصرف هو جدول Supabase bulletin_exchange_rate — عبر
+// dataStore.getSyriaExchangeRate/setSyriaExchangeRate. يمنع رجوع أي مصدر مستقل
+// (ملف JSON، نسخة "معلّقة" بـlocalStorage، أو rate ضمن GitHub dispatch).
 for (const contract of [
   "data-published-exchange-rate",
-  "inputs: { rate: String(rate) }",
   "loadPublishedExchangeRate",
-  "function storeSyriaExchangeRate",
-  "function capturePublishedExchangeRate",
-  "writeJson(\"syria-exchange-rate\", rate)",
-  "syria-exchange-rate-pending",
-  "pendingRate !== rate",
-  'localStorage.removeItem("syria-exchange-rate-pending")',
+  "function applySyriaExchangeRateLocally",
+  "async function commitSyriaExchangeRate",
+  "dataStore.getSyriaExchangeRate",
+  "dataStore.setSyriaExchangeRate",
   "scheduleBulletinPublish({ label:",
   'const REPO = "ozkkhallouf-ux/tobacco-web"'
 ]) {
   if (!app.includes(contract)) {
     console.error(`Daily exchange-rate contract is missing: ${contract}`);
+    failed = true;
+  }
+}
+for (const forbidden of [
+  "exchange-rate.json",
+  "syria-exchange-rate-pending",
+  "inputs: { rate:",
+  "function storeSyriaExchangeRate("
+]) {
+  if (app.includes(forbidden)) {
+    console.error(`Exchange-rate source of truth violation in app.js: found forbidden pattern "${forbidden}"`);
     failed = true;
   }
 }

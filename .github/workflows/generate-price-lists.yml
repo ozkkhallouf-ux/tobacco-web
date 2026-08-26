@@ -8,12 +8,7 @@ on:
       - 'scripts/bulletin-merge-names.json'
       - 'scripts/generate-price-lists.mjs'
       - 'scripts/generate-pdfs.mjs'
-  workflow_dispatch:
-    inputs:
-      rate:
-        description: 'سعر صرف الليرة السورية مقابل الدولار'
-        required: false
-        type: string
+  workflow_dispatch: {}
   schedule:
     - cron: '*/5 * * * *'
 
@@ -41,8 +36,6 @@ jobs:
           node-version: '20'
           cache: 'npm'
       - name: Generate price list HTML
-        env:
-          SYP_RATE: ${{ inputs.rate || '' }}
         run: node scripts/generate-price-lists.mjs
       - name: Detect bulletin changes
         id: bulletin_changes
@@ -50,7 +43,7 @@ jobs:
         run: |
           if [[ "${{ github.event_name }}" == "push" ]]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
-          elif git diff --quiet -- public/downloads/*.html scripts/exchange-rate.json; then
+          elif git diff --quiet -- public/downloads/*.html; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "لا تغييرات في الأسعار اليدوية أو المخزون"
           else
@@ -74,7 +67,7 @@ jobs:
         run: |
           git config user.name "price-bot"
           git config user.email "action@github.com"
-          git add public/downloads/ public/service-worker.js scripts/exchange-rate.json
+          git add public/downloads/ public/service-worker.js
           git diff --staged --quiet && exit 0
           STAMP=$(date -u '+%Y-%m-%d %H:%M UTC')
           git commit -m "Auto: تحديث نشرات الأسعار — ${STAMP}"

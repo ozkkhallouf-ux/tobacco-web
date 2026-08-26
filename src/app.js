@@ -493,22 +493,13 @@ async function boot() {
   }
 }
 
+// مصدر الحقيقة الوحيد لسعر الصرف: جدول Supabase bulletin_exchange_rate (عبر
+// dataStore.getSyriaExchangeRate). لا ملف JSON، ولا قيمة "معلّقة" منفصلة —
+// المعاينة وPDF يقرآن نفس هذه القيمة دائماً.
 async function loadPublishedExchangeRate() {
   try {
-    const response = await fetch(`scripts/exchange-rate.json?v=${Date.now()}`, { cache: "no-store" });
-    if (!response.ok) return;
-    const payload = await response.json();
-    const rate = Number(payload.sypPerUsd || 0);
-    if (rate > 0) {
-      const pendingRate = Number(readJson("syria-exchange-rate-pending", 0));
-      if (Number.isFinite(pendingRate) && pendingRate > 0 && pendingRate !== rate) {
-        state.syriaExchangeRate = pendingRate;
-        writeJson("syria-exchange-rate", pendingRate);
-        return;
-      }
-      if (pendingRate === rate) {
-        try { localStorage.removeItem("syria-exchange-rate-pending"); } catch {}
-      }
+    const rate = await dataStore.getSyriaExchangeRate();
+    if (Number.isFinite(rate) && rate > 0) {
       state.syriaExchangeRate = rate;
       writeJson("syria-exchange-rate", rate);
     }
@@ -2559,20 +2550,32 @@ function refreshBulletinStatusNotice() {
   element.textContent = state.bulletinStatus.msg || "";
 }
 
-function storeSyriaExchangeRate(value) {
+// تحديث محلي فوري فقط (أثناء الكتابة) — لا يكتب على Supabase. يبقى للمعاينة
+// اللحظية فقط؛ الحفظ الفعلي (مصدر الحقيقة) يمر حصراً عبر commitSyriaExchangeRate.
+function applySyriaExchangeRateLocally(value) {
   const rate = Number(value);
   if (!Number.isFinite(rate) || rate <= 0) return null;
   state.syriaExchangeRate = rate;
   writeJson("syria-exchange-rate", rate);
-  writeJson("syria-exchange-rate-pending", rate);
   return rate;
+}
+
+// الحفظ الفعلي لسعر الصرف: يكتب على جدول Supabase bulletin_exchange_rate —
+// المصدر الوحيد للحقيقة الذي تقرأ منه المعاينة وPDF والنشر الآلي جميعاً.
+async function commitSyriaExchangeRate(value) {
+  const rate = Number(value);
+  if (!Number.isFinite(rate) || rate <= 0) return null;
+  applySyriaExchangeRateLocally(rate);
+  const saved = await dataStore.setSyriaExchangeRate(rate);
+  applySyriaExchangeRateLocally(saved);
+  return saved;
 }
 
 // نلتقط قيمة الحقل المرئية قبل أي حفظ قد يعيد رسم صفحة التسعير.
 // بهذا تبقى المعاينة وPDF والنشر على نفس سعر الصرف الذي كتبه المستخدم الآن.
-function capturePublishedExchangeRate() {
+async function capturePublishedExchangeRate() {
   const rateInput = app.querySelector("[data-published-exchange-rate]");
-  return storeSyriaExchangeRate(rateInput?.value ?? state.syriaExchangeRate);
+  return commitSyriaExchangeRate(rateInput?.value ?? state.syriaExchangeRate);
 }
 
 function scheduleBulletinPublish(options = {}) {
@@ -2594,7 +2597,14 @@ async function publishBulletin(options = {}) {
   clearTimeout(bulletinPublishTimer);
   const REPO = "ozkkhallouf-ux/tobacco-web";
   const WORKFLOW = "generate-price-lists.yml";
-  const rate = capturePublishedExchangeRate();
+  let rate;
+  try {
+    rate = await capturePublishedExchangeRate();
+  } catch (error) {
+    setNotice("error", `تعذر حفظ سعر الصرف: ${safeErrorMessage(error)}`);
+    render();
+    return;
+  }
   if (rate === null) {
     setNotice("error", "أدخل سعر صرف صحيح قبل نشر النشرة.");
     render();
@@ -2622,7 +2632,9 @@ async function publishBulletin(options = {}) {
           "Content-Type": "application/json",
           Accept: "application/vnd.github+json",
         },
-        body: JSON.stringify({ ref: "main", inputs: { rate: String(rate) } }),
+        // لا حقل rate هنا عمداً — الـworkflow يقرأ سعر الصرف من Supabase
+        // (bulletin_exchange_rate) مباشرة، وهذا الحفظ أعلاه هو ما يحدّده.
+        body: JSON.stringify({ ref: "main" }),
       }
     );
 
@@ -2898,14 +2910,6 @@ async function exportPricePreview() {
 function setPricePreviewTheme(theme) {
   if (!state.pricePreview) return;
   state.pricePreview.theme = storeBulletinPdfTheme(theme);
-  render();
-}
-
-// تصدير مباشر بدون معاينة (للتوافق)
-async function downloadCustomerPricePdf(useSyria = false) {
-  const prepared = prepareBulletinItems(useSyria);
-  if (!prepared) return;
-  await exportBulletinPdf(prepared.items, prepared.latest, useSyria);
   render();
 }
 
@@ -4436,7 +4440,13 @@ async function createPortablePdfBlob(bodyHtml, filename, options = {}) {
 
   const container = document.createElement("div");
   const backgroundColor = options.backgroundColor || "#ffffff";
-  container.style.cssText = `position:fixed;left:-10000px;top:0;width:${Number(options.width) || 794}px;background:${backgroundColor};z-index:-1`;
+  // Safari/WebKit (كل متصفحات iOS فعلياً) لا يرسم foreignObject بشكل موثوق إذا كان
+  // العنصر المصدر خارج حدود الشاشة (إحداثيات سالبة كبيرة مثل left:-10000px) — يُخرج
+  // canvas فارغاً تماماً بلا أي خطأ (خرج PDF من عدة صفحات لكنها بيضاء بالكامل). لذا
+  // نُبقي العنصر ضمن حدود الشاشة الفعلية (top:0;left:0) ونُخفيه بصرياً عبر z-index
+  // سالب خلف محتوى الصفحة نفسه بدل إخراجه من نطاق الرؤية. هذا لا يؤثر على Chrome
+  // (سطح المكتب أو أندرويد) الذي يرسم foreignObject بشكل صحيح بالحالتين.
+  container.style.cssText = `position:fixed;left:0;top:0;width:${Number(options.width) || 794}px;background:${backgroundColor};z-index:-1;pointer-events:none`;
   container.innerHTML = bodyHtml;
   document.body.appendChild(container);
   const source = [...container.children].find((element) => element.tagName !== "STYLE") || container;
@@ -4484,7 +4494,16 @@ async function createPortablePdfBlob(bodyHtml, filename, options = {}) {
     if (renderSource) trimTrailingPortablePdfDecorations(renderSource, options.margin || [8, 8, 8, 8]);
     await worker.toCanvas();
     const canvas = (worker.prop && worker.prop.canvas) || worker.canvas;
-    if (!canvas || canvasInkRatio(canvas) <= 0.001) {
+    // معدّل الحبر على كامل الـcanvas يُخفي صفحة واحدة فارغة إن كانت بقية الصفحات
+    // ممتلئة (متوسط عام لا يهبط تحت الحد). لذا نفحص شرائح أفقية منفصلة أيضاً — أي
+    // شريحة فارغة تماماً (مثل صفحة كاملة سقطت بسبب علّة رسم WebKit) تُفشل التصدير
+    // بدل تسليم PDF يبدو ناجحاً لكنه أبيض جزئياً.
+    const bandCount = 8;
+    const bandHeight = canvas ? canvas.height / bandCount : 0;
+    const bandRatios = canvas
+      ? Array.from({ length: bandCount }, (_, i) => canvasInkRatio(canvas, i * bandHeight, (i + 1) * bandHeight))
+      : [];
+    if (!canvas || canvasInkRatio(canvas) <= 0.001 || bandRatios.some((ratio) => ratio <= 0.0005)) {
       throw new Error("خرجت صفحة PDF فارغة. أغلق التطبيق وافتحه ثم جرّب مجدداً.");
     }
     await worker.toPdf();
@@ -9765,7 +9784,14 @@ function render() {
       form.addEventListener("submit", async (e) => {
         e.preventDefault();
         const input = document.getElementById("exchange-input");
-        const rate = storeSyriaExchangeRate(input.value);
+        let rate;
+        try {
+          rate = await commitSyriaExchangeRate(input.value);
+        } catch (error) {
+          input.setCustomValidity(safeErrorMessage(error));
+          input.reportValidity();
+          return;
+        }
         if (rate === null) {
           input.setCustomValidity("أدخل سعر صرف صحيحاً أكبر من صفر.");
           input.reportValidity();
@@ -10499,10 +10525,18 @@ function render() {
   app.querySelector("[data-action='publish-bulletin']")?.addEventListener("click", publishBulletin);
   const publishedExchangeRateInput = app.querySelector("[data-published-exchange-rate]");
   publishedExchangeRateInput?.addEventListener("input", (event) => {
-    storeSyriaExchangeRate(event.currentTarget.value);
+    // كتابة محلية فورية فقط للمعاينة اللحظية — لا حفظ على Supabase قبل blur.
+    applySyriaExchangeRateLocally(event.currentTarget.value);
   });
-  publishedExchangeRateInput?.addEventListener("change", (event) => {
-    const rate = storeSyriaExchangeRate(event.currentTarget.value);
+  publishedExchangeRateInput?.addEventListener("change", async (event) => {
+    let rate;
+    try {
+      rate = await commitSyriaExchangeRate(event.currentTarget.value);
+    } catch (error) {
+      state.bulletinStatus = { type: "error", msg: `❌ تعذر حفظ سعر الصرف: ${safeErrorMessage(error)}` };
+      refreshBulletinStatusNotice();
+      return;
+    }
     if (rate === null) {
       state.bulletinStatus = { type: "error", msg: "أدخل سعر صرف صحيحاً أكبر من صفر." };
       refreshBulletinStatusNotice();

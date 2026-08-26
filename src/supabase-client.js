@@ -5,6 +5,9 @@
   const CUSTOMER_LIMITS_KEY = "tobacco-customer-credit-limits";
   const APPROVED_PRICES_KEY = "tobacco-approved-price-items";
   const PURCHASE_INVOICES_KEY = "tobacco-purchase-invoices";
+  // كاش غير رسمي فقط (offline) — المصدر الوحيد للحقيقة هو جدول Supabase bulletin_exchange_rate.
+  const SYRIA_EXCHANGE_RATE_CACHE_KEY = "tobacco-syria-exchange-rate-cache";
+  const DEFAULT_SYRIA_EXCHANGE_RATE = 14050;
 
   const defaultRequests = [
     {
@@ -90,6 +93,9 @@
   const itemSnapshotTable = config.itemSnapshotTable || "ameen_item_snapshot";
   const purchaseInvoiceReportsTable = config.purchaseInvoiceReportsTable || "ameen_purchase_invoice_reports";
   const reconSessionsTable = config.reconSessionsTable || "inventory_recon_sessions";
+  // مصدر الحقيقة الوحيد لسعر صرف الليرة السورية بنشرة الأسعار (يقرأه أيضاً
+  // GitHub Actions عبر مفتاح anon — سياسة SELECT على الجدول تسمح بذلك عمداً).
+  const exchangeRateTable = config.exchangeRateTable || "bulletin_exchange_rate";
   const client =
     hasConfig && hasLibrary
       ? window.supabase.createClient(config.url, config.publishableKey, {
@@ -908,6 +914,55 @@
 
       if (error) throw new Error(translateDbError(error.message));
       return data?.[0] ? normalizeDbCustomerLimit(data[0]) : normalizeDbCustomerLimit(payload);
+    },
+
+    // مصدر الحقيقة الوحيد لسعر صرف الليرة السورية. لا استخدام آخر لهذا السعر
+    // في كامل المشروع (لا localStorage مستقل، لا scripts/exchange-rate.json)
+    // سوى كقيمة افتراضية عند تعذّر الاتصال، ودائماً عبر readJson/writeJson هنا.
+    async getSyriaExchangeRate() {
+      if (!client) return readJson(SYRIA_EXCHANGE_RATE_CACHE_KEY, DEFAULT_SYRIA_EXCHANGE_RATE);
+
+      const { data, error } = await client
+        .from(exchangeRateTable)
+        .select("syp_per_usd, updated_at")
+        .eq("id", 1)
+        .limit(1);
+
+      if (error || !data?.[0]) {
+        return readJson(SYRIA_EXCHANGE_RATE_CACHE_KEY, DEFAULT_SYRIA_EXCHANGE_RATE);
+      }
+
+      const rate = Number(data[0].syp_per_usd);
+      if (!Number.isFinite(rate) || rate <= 0) {
+        return readJson(SYRIA_EXCHANGE_RATE_CACHE_KEY, DEFAULT_SYRIA_EXCHANGE_RATE);
+      }
+
+      writeJson(SYRIA_EXCHANGE_RATE_CACHE_KEY, rate);
+      return rate;
+    },
+
+    async setSyriaExchangeRate(rate) {
+      const value = Number(rate);
+      if (!Number.isFinite(value) || value <= 0) {
+        throw new Error("سعر الصرف يجب أن يكون رقماً موجباً.");
+      }
+
+      if (!client) {
+        writeJson(SYRIA_EXCHANGE_RATE_CACHE_KEY, value);
+        return value;
+      }
+
+      const user = await requireUser();
+      const { data, error } = await client
+        .from(exchangeRateTable)
+        .upsert({ id: 1, syp_per_usd: value, updated_by: user.id }, { onConflict: "id" })
+        .select("syp_per_usd")
+        .limit(1);
+
+      if (error) throw new Error(translateDbError(error.message));
+      const saved = Number(data?.[0]?.syp_per_usd ?? value);
+      writeJson(SYRIA_EXCHANGE_RATE_CACHE_KEY, saved);
+      return saved;
     },
 
     async listApprovedPriceItems() {

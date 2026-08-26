@@ -69,7 +69,21 @@
     }
     .ozk-price-list .price-list-phones .location { color:var(--gold-strong); direction:rtl; }
     .ozk-price-list .price-list-columns {
-      display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; align-items:start;
+      /*
+       * ملاحظة حرجة: كان هذا العنصر CSS Grid (display:grid +
+       * grid-template-columns:repeat(2,minmax(0,1fr))). html2canvas مع
+       * foreignObjectRendering:true (مطلوب لتفادي انعكاس ترتيب النص العربي —
+       * راجع html2canvas في exportBulletinPdf بـsrc/app.js) لا يحسب عرض أعمدة
+       * CSS Grid بشكل صحيح داخل SVG foreignObject: كان يرسم العمود الأول فقط
+       * بعرض ضيّق (min-content تقريباً) ويترك ~78% من عرض الصفحة فارغاً أسود/
+       * أبيض بلا محتوى — رغم أن عرض الـcanvas الملتقط نفسه كان صحيحاً 794px،
+       * وأن نفس العنصر يُعرض بشكل سليم تماماً بمعاينة Playwright/متصفح عادية.
+       * إيقاف foreignObjectRendering يُصلح العرض لكنه يكسر تشكيل الحروف
+       * العربية (تظهر منعكسة/مبعثرة الحروف). الحل: استبدال Grid بـFlexbox —
+       * html2canvas يحسب عرض flex-basis بشكل صحيح داخل foreignObject، فيبقى
+       * العمودان بعرض متساوٍ فعلي بلا هوامش فارغة، مع تشكيل عربي سليم.
+       */
+      display:flex; gap:8px; align-items:flex-start;
       padding:0 8px 8px; background:var(--page); position:relative;
     }
     .ozk-price-list .price-list-columns::before {
@@ -77,7 +91,7 @@
       transform:translateX(-50%); background:var(--gold); border-radius:2px;
     }
     .ozk-price-list .price-list-column-stack {
-      min-width:0; background:var(--page); position:relative; z-index:1;
+      flex:1 1 0; min-width:0; background:var(--page); position:relative; z-index:1;
     }
     .ozk-price-list .price-list-secondary-page {
       break-before:page; page-break-before:always; margin-top:8px;
@@ -121,7 +135,7 @@
       background:var(--surface); color:var(--text); border-color:var(--line);
     }
     @media screen and (max-width:720px) {
-      .ozk-price-list .price-list-columns { grid-template-columns:repeat(2,minmax(0,1fr)); gap:4px; padding:0 4px 6px; }
+      .ozk-price-list .price-list-columns { gap:4px; padding:0 4px 6px; }
       .ozk-price-list.has-document-tools .price-list-header { padding-top:102px; }
       .ozk-price-list .price-list-document-tools { right:10px; left:10px; justify-content:center; }
       .ozk-price-list .price-list-group { margin-bottom:3px; }
@@ -146,8 +160,8 @@
 
       <div class="price-list-document-tools no-print">
         <button type="button" onclick="window.print()">طباعة مباشرة</button>
-        <a data-pdf-open href="price-list-wazari-usd.pdf?v=9933122fb91b">فتح PDF</a>
-        <a data-pdf-download href="price-list-wazari-usd.pdf?v=9933122fb91b" download>تنزيل PDF</a>
+        <a data-pdf-open href="price-list-wazari-usd.pdf?v=8c9a65d6ae2e">فتح PDF</a>
+        <a data-pdf-download href="price-list-wazari-usd.pdf?v=8c9a65d6ae2e" download>تنزيل PDF</a>
         <button class="theme-switch" type="button" onclick="toggleTheme()">فاتح / داكن</button>
       </div>
         <header class="price-list-header">
@@ -225,7 +239,7 @@
   sheet.dataset.theme = savedTheme || 'dark';
   document.body.dataset.theme = sheet.dataset.theme;
   function selectedPdfFile() {
-    return sheet.dataset.theme === 'light' ? 'price-list-wazari-usd-light.pdf?v=9933122fb91b' : 'price-list-wazari-usd.pdf?v=9933122fb91b';
+    return sheet.dataset.theme === 'light' ? 'price-list-wazari-usd-light.pdf?v=8c9a65d6ae2e' : 'price-list-wazari-usd.pdf?v=8c9a65d6ae2e';
   }
   function syncPdfLinks() {
     const selected = selectedPdfFile();
