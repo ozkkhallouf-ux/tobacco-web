@@ -413,7 +413,7 @@ for (const contract of ["inputs:", "rate:", "SYP_RATE:", "scripts/exchange-rate.
   }
 }
 for (const contract of [
-  "cron: '*/15 * * * *'",
+  "cron: '*/5 * * * *'",
   "group: generate-price-lists",
   "cancel-in-progress: false",
   "ref: main",
