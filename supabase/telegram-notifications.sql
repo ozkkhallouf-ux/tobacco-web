@@ -126,6 +126,9 @@ begin
   return null;
 end;
 $$;
+revoke execute on function public.tg_notify_whatsapp_order() from public;
+revoke execute on function public.tg_notify_whatsapp_order() from anon;
+revoke execute on function public.tg_notify_whatsapp_order() from authenticated;
 drop trigger if exists trg_notify_whatsapp_order on public.whatsapp_orders;
 create trigger trg_notify_whatsapp_order
 after insert on public.whatsapp_orders
@@ -149,6 +152,9 @@ begin
   return null;
 end;
 $$;
+revoke execute on function public.tg_notify_customer_request() from public;
+revoke execute on function public.tg_notify_customer_request() from anon;
+revoke execute on function public.tg_notify_customer_request() from authenticated;
 drop trigger if exists trg_notify_customer_request on public.customer_requests;
 create trigger trg_notify_customer_request
 after insert on public.customer_requests
@@ -172,6 +178,9 @@ begin
   return null;
 end;
 $$;
+revoke execute on function public.tg_notify_payment() from public;
+revoke execute on function public.tg_notify_payment() from anon;
+revoke execute on function public.tg_notify_payment() from authenticated;
 drop trigger if exists trg_notify_payment on public.payment_records;
 create trigger trg_notify_payment
 after insert on public.payment_records
@@ -222,6 +231,9 @@ begin
   return null;
 end;
 $$;
+revoke execute on function public.tg_notify_price_changes() from public;
+revoke execute on function public.tg_notify_price_changes() from anon;
+revoke execute on function public.tg_notify_price_changes() from authenticated;
 drop trigger if exists trg_notify_price_changes on public.approved_price_items;
 create trigger trg_notify_price_changes
 after update on public.approved_price_items
@@ -253,6 +265,9 @@ begin
   return null;
 end;
 $$;
+revoke execute on function public.tg_notify_new_price_items() from public;
+revoke execute on function public.tg_notify_new_price_items() from anon;
+revoke execute on function public.tg_notify_new_price_items() from authenticated;
 drop trigger if exists trg_notify_new_price_items on public.approved_price_items;
 create trigger trg_notify_new_price_items
 after insert on public.approved_price_items
@@ -317,6 +332,9 @@ begin
   return null;
 end;
 $$;
+revoke execute on function public.tg_notify_stock_alerts() from public;
+revoke execute on function public.tg_notify_stock_alerts() from anon;
+revoke execute on function public.tg_notify_stock_alerts() from authenticated;
 drop trigger if exists trg_notify_stock_alerts on public.approved_price_items;
 create trigger trg_notify_stock_alerts
 after update on public.approved_price_items
@@ -345,6 +363,9 @@ begin
   return null;
 end;
 $$;
+revoke execute on function public.tg_notify_credit_limit() from public;
+revoke execute on function public.tg_notify_credit_limit() from anon;
+revoke execute on function public.tg_notify_credit_limit() from authenticated;
 drop trigger if exists trg_notify_credit_limit on public.customer_credit_limits;
 create trigger trg_notify_credit_limit
 after insert or update on public.customer_credit_limits
@@ -367,6 +388,9 @@ begin
   return null;
 end;
 $$;
+revoke execute on function public.tg_notify_daily_sales() from public;
+revoke execute on function public.tg_notify_daily_sales() from anon;
+revoke execute on function public.tg_notify_daily_sales() from authenticated;
 drop trigger if exists trg_notify_daily_sales on public.daily_sales_summary;
 create trigger trg_notify_daily_sales
 after insert on public.daily_sales_summary
@@ -464,6 +488,9 @@ begin
   return null;
 end;
 $$;
+revoke execute on function public.tg_notify_inventory_report() from public;
+revoke execute on function public.tg_notify_inventory_report() from anon;
+revoke execute on function public.tg_notify_inventory_report() from authenticated;
 drop trigger if exists trg_notify_inventory_report on public.inventory_reports;
 create trigger trg_notify_inventory_report
 after insert on public.inventory_reports
@@ -486,6 +513,9 @@ begin
   return null;
 end;
 $$;
+revoke execute on function public.tg_notify_shared_documents() from public;
+revoke execute on function public.tg_notify_shared_documents() from anon;
+revoke execute on function public.tg_notify_shared_documents() from authenticated;
 drop trigger if exists trg_notify_shared_documents on public.shared_documents;
 create trigger trg_notify_shared_documents
 after insert on public.shared_documents
@@ -503,6 +533,9 @@ begin
   return null;
 end;
 $$;
+revoke execute on function public.tg_notify_item_costs() from public;
+revoke execute on function public.tg_notify_item_costs() from anon;
+revoke execute on function public.tg_notify_item_costs() from authenticated;
 drop trigger if exists trg_notify_item_costs on public.item_costs;
 create trigger trg_notify_item_costs
 after insert or update on public.item_costs
@@ -591,6 +624,9 @@ exception when others then
   return null;
 end;
 $$;
+revoke execute on function public.tg_notify_credit_risk() from public;
+revoke execute on function public.tg_notify_credit_risk() from anon;
+revoke execute on function public.tg_notify_credit_risk() from authenticated;
 drop trigger if exists trg_notify_credit_risk on public.inventory_reports;
 create trigger trg_notify_credit_risk
 after insert on public.inventory_reports
@@ -605,7 +641,10 @@ alter table public.telegram_outbox add column if not exists reply_markup jsonb;
 -- ملاحظة: الإصدار القديم notify_telegram(text,text,text,int) بلا reply_markup
 -- حُذف صراحة بعد إضافة النسخة بخمسة معاملات (وإلا يصير تعارض استدعاء غامض):
 --   drop function if exists public.notify_telegram(text, text, text, int);
-create or replace function public.notify_telegram(
+-- الدالة الداخلية الفعلية (بلا تحقق تفويض) — بمخطط private فلا تُكشف عبر PostgREST.
+-- تُستدعى مباشرة فقط من كود داخلي موثوق سبق أن حسم صلاحية المستدعي بنفسه
+-- (مثال: smart_inventory_complete_session بعد التحقق من is_counter()/is_owner()).
+create or replace function private.notify_telegram_dispatch(
   p_event_type     text,
   p_message        text,
   p_dedupe_key     text default null,
@@ -625,6 +664,40 @@ begin
   end if;
   insert into public.telegram_outbox (event_type, message, dedupe_key, reply_markup)
   values (p_event_type, left(p_message, 3900), p_dedupe_key, p_reply_markup);
+end;
+$$;
+revoke all on function private.notify_telegram_dispatch(text, text, text, int, jsonb) from public, anon, authenticated;
+grant execute on function private.notify_telegram_dispatch(text, text, text, int, jsonb) to service_role;
+
+-- البوابة العامة: تحقق تفويض ثم تفويض للدالة الداخلية.
+-- ملاحظة: current_user داخل دالة SECURITY DEFINER يصير مالك الدالة (postgres) دائماً بغض النظر
+-- عن المستدعي الفعلي، لذلك current_user لا يصلح كمعيار تمييز هنا. الاعتماد بدلاً منه على:
+--  - JWT role claim (يعكس هوية المتصل الحقيقية عبر PostgREST، لا يتأثر بـ SECURITY DEFINER)
+--  - غياب سياق PostgREST أصلاً (اتصال مباشر: pg_cron/postgres/migrations) = وصول موثوق أصلاً
+--  - pg_trigger_depth() > 0 = استدعاء من داخل trigger شرعي على جدول أعمال
+--  - is_staff() = مستخدم موظف مخوّل صراحة
+create or replace function public.notify_telegram(
+  p_event_type     text,
+  p_message        text,
+  p_dedupe_key     text default null,
+  p_dedupe_minutes int  default 60,
+  p_reply_markup   jsonb default null
+) returns void
+language plpgsql security definer set search_path = public
+as $$
+declare
+  v_jwt_role text := nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'role';
+begin
+  if not (
+    v_jwt_role is null
+    or v_jwt_role = 'service_role'
+    or pg_trigger_depth() > 0
+    or public.is_staff()
+  ) then
+    raise exception 'notify_telegram: unauthorized direct call' using errcode = '42501';
+  end if;
+
+  perform private.notify_telegram_dispatch(p_event_type, p_message, p_dedupe_key, p_dedupe_minutes, p_reply_markup);
 end;
 $$;
 revoke execute on function public.notify_telegram(text, text, text, int, jsonb) from public;
@@ -695,6 +768,9 @@ begin
   return null;
 end;
 $$;
+revoke execute on function public.tg_notify_whatsapp_order() from public;
+revoke execute on function public.tg_notify_whatsapp_order() from anon;
+revoke execute on function public.tg_notify_whatsapp_order() from authenticated;
 
 -- ============================================================
 -- التقرير الصباحي — كل يوم 8:00 صباحاً (توقيت دمشق UTC+3 = 5:00 UTC)
@@ -887,6 +963,9 @@ begin
   return null;
 end;
 $$;
+revoke execute on function public.tg_notify_price_changes() from public;
+revoke execute on function public.tg_notify_price_changes() from anon;
+revoke execute on function public.tg_notify_price_changes() from authenticated;
 
 -- ============================================================
 -- التقرير المسائي — كل يوم 11:00 مساءً (توقيت دمشق UTC+3 = 20:00 UTC)
