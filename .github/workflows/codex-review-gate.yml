@@ -1,6 +1,5 @@
 name: Codex Review Gate
 
-# [اختبار تجريبي 2026-08-27: يثبت أن push جديد يعيد الفحص إلى FAIL تلقائياً حتى مراجعة جديدة]
 # الغرض: يفرض أن يكون كل Pull Request إلى main قد راجعه فعلياً
 # chatgpt-codex-connector[bot] على أحدث HEAD commit، قبل السماح بالدمج.
 #
@@ -22,9 +21,24 @@ name: Codex Review Gate
 #   منع الدمج مع ملاحظات مفتوحة يجب أن يعتمد على إعداد GitHub الرسمي
 #   "Require conversation resolution before merging" في Branch Protection، لأنه يفرض حلّ
 #   كل thread تعليق (بغض النظر عن درجته) عبر GraphQL isResolved الرسمي والموثوق.
+#
+# ⚠️ حماية من التلاعب (إصلاح ملاحظة Codex P1 بتاريخ 2026-08-27):
+#   استُخدم `pull_request_target` بدلاً من `pull_request` عمداً. الفرق الحاسم:
+#   - `pull_request` ينفّذ نسخة الـworkflow الموجودة في فرع الـPR نفسه — أي أن أي PR
+#     يستطيع تعديل هذا الملف واستبدال منطق الفحص بـno-op ناجح بنفس اسم الـcheck،
+#     فيتجاوز الـGate تماماً.
+#   - `pull_request_target` ينفّذ دائماً نسخة الـworkflow من الفرع الافتراضي (main)
+#     بغض النظر عمّا يحتويه فرع الـPR، فلا يمكن لأي PR (حتى لو عدّل هذا الملف نفسه)
+#     تغيير منطق الفحص أو تعطيله.
+#   قواعد صارمة لضمان الأمان مع `pull_request_target` (ملتزَم بها بالكامل هنا):
+#     - ممنوع أي `actions/checkout` لكود الـPR في هذا الملف.
+#     - ممنوع تشغيل أي script أو ملف قادم من فرع الـPR.
+#     - كل البيانات المستخدمة تأتي حصراً من GitHub API الرسمي (pulls/{n}, reviews,
+#       comments) — أرقام ومعرّفات ونصوص Metadata فقط، لا تنفيذ كود من الـPR إطلاقاً.
+#     - اسم الفحص يبقى ثابتاً: "Codex Review Gate".
 
 on:
-  pull_request:
+  pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
   pull_request_review:
     types: [submitted]
@@ -92,13 +106,20 @@ jobs:
           PR_NUMBER="${{ steps.pr.outputs.pr_number }}"
           HEAD_SHA="${{ steps.pr.outputs.head_sha }}"
 
-          REVIEWS_JSON=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --paginate)
+          # إصلاح ملاحظة Codex P1 (pagination بتاريخ 2026-08-27):
+          # `gh api --paginate` يطبع كل صفحة كقيمة JSON مستقلة على التوالي (وليس كمصفوفة
+          # واحدة)، فتطبيق jq مباشرة على `.[]` كان يُنتج سطر نتيجة منفصل لكل صفحة بدل رقم
+          # واحد. الحل: نجمع كل الصفحات بـ`jq -s` (slurp) إلى مصفوفة-من-مصفوفات، ثم
+          # `add` لدمجها في مصفوفة مسطّحة واحدة قبل أي عدّ أو تصفية.
+          REVIEWS_JSON=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --paginate \
+            | jq -s '(add // [])')
           REVIEWED_COUNT=$(echo "$REVIEWS_JSON" | jq --arg sha "$HEAD_SHA" --arg bot "$CODEX_BOT_LOGIN" \
             '[.[] | select(.user.login == $bot and .commit_id == $sha)] | length')
 
           # طبقة معلوماتية best-effort فقط: عدّ شارات P0/P1/P2/P3 في تعليقات Codex
           # المرتبطة بنفس الـHEAD. لا تُستخدم هذه القيمة لإسقاط الفحص.
-          COMMENTS_JSON=$(gh api "repos/$REPO/pulls/$PR_NUMBER/comments" --paginate)
+          COMMENTS_JSON=$(gh api "repos/$REPO/pulls/$PR_NUMBER/comments" --paginate \
+            | jq -s '(add // [])')
           BADGES=$(echo "$COMMENTS_JSON" | jq -r --arg sha "$HEAD_SHA" --arg bot "$CODEX_BOT_LOGIN" \
             '[.[] | select(.user.login == $bot and .commit_id == $sha) | .body] | join("\n")' \
             | grep -oE 'badge/P[0-3]-' | sort | uniq -c || true)
