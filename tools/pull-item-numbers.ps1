@@ -1,9 +1,11 @@
 ﻿# يملأ approved_price_items من أرقام صنف الأمين:
 #   item_code   ← mt000.Code    (الكود الذي يقرأه المالك على بطاقة الصنف: 0000، 1111، 24007)
 #   item_number ← mt000.Number  (الترقيم الداخلي التسلسلي 1..406 — يبقى للبحث بالرقم القديم)
-# سبب وجود الاثنين: الأمين يعرض Code وليس Number، وكان الموقع يعرض Number فتظهر
+#   item_guid   ← mt000.GUID    (المعرّف الحقيقي الثابت — يُستخدم لمطابقة "متوسط التكلفة"
+#                                 بالـID بدل الاسم فقط، فلا يضيع عند تغيّر تهجئة الاسم)
+# سبب وجود الأول والثاني: الأمين يعرض Code وليس Number، وكان الموقع يعرض Number فتظهر
 # أرقام لا تطابق ما على البطاقة (بلاغ المالك 2026-07-25).
-# قراءة فقط من الأمين؛ يحدّث هذين العمودين فقط — لا يمسّ الأسعار ولا المخزون.
+# قراءة فقط من الأمين؛ يحدّث هذه الأعمدة فقط — لا يمسّ الأسعار ولا المخزون.
 # التشغيل التجريبي (بلا تعديل):  .\tools\pull-item-numbers.ps1 -WhatIf
 # التشغيل الفعلي:               .\tools\pull-item-numbers.ps1
 param([switch]$WhatIf)
@@ -37,6 +39,7 @@ $cs = Get-EnvVar "AMEEN_SQL_CONNECTION_STRING"
 $cn = New-Object System.Data.SqlClient.SqlConnection $cs
 $byKey = @{}
 $codeByKey = @{}
+$guidByKey = @{}
 $namesByKey = @{}
 $collisions = @{}
 try {
@@ -47,12 +50,13 @@ try {
     $cn.Open()
   }
   $cmd = $cn.CreateCommand()
-  $cmd.CommandText = "select cast(Number as nvarchar(32)) as num, isnull(Code,'') as code, Name from dbo.mt000 where Name is not null and ltrim(rtrim(Name)) <> '' order by Number"
+  $cmd.CommandText = "select cast(Number as nvarchar(32)) as num, isnull(Code,'') as code, cast(GUID as nvarchar(36)) as guid, Name from dbo.mt000 where Name is not null and ltrim(rtrim(Name)) <> '' order by Number"
   $r = $cmd.ExecuteReader()
   while ($r.Read()) {
     $k = Normalize-ItemName $r["Name"]
     $num = ([string]$r["num"]).Trim()
     $code = ([string]$r["code"]).Trim()
+    $guid = ([string]$r["guid"]).Trim()
     $nm = ([string]$r["Name"]).Trim()
     if (-not $k -or -not $num) { continue }
     if ($byKey.ContainsKey($k)) {
@@ -60,14 +64,15 @@ try {
       if ($byKey[$k] -ne $num) {
         if (-not $collisions.ContainsKey($k)) {
           $collisions[$k] = New-Object System.Collections.ArrayList
-          [void]$collisions[$k].Add(@{ num = $byKey[$k]; name = $namesByKey[$k]; code = $codeByKey[$k] })
+          [void]$collisions[$k].Add(@{ num = $byKey[$k]; name = $namesByKey[$k]; code = $codeByKey[$k]; guid = $guidByKey[$k] })
         }
-        [void]$collisions[$k].Add(@{ num = $num; name = $nm; code = $code })
+        [void]$collisions[$k].Add(@{ num = $num; name = $nm; code = $code; guid = $guid })
       }
       continue
     }
     $byKey[$k] = $num
     $codeByKey[$k] = $code
+    $guidByKey[$k] = $guid
     $namesByKey[$k] = $nm
   }
   $r.Close()
@@ -89,11 +94,12 @@ foreach ($k in @($collisions.Keys)) {
   if ($override -and ($candidateNums -contains $override)) {
     $byKey[$k] = $override
     $winner = $collisions[$k] | Where-Object { $_.num -eq $override } | Select-Object -First 1
-    if ($winner) { $codeByKey[$k] = $winner.code }
+    if ($winner) { $codeByKey[$k] = $winner.code; $guidByKey[$k] = $winner.guid }
     Write-Output ("تصادم محسوم صراحة: [" + $k + "] => الرقم " + $override)
   } else {
     $byKey.Remove($k)
     $codeByKey.Remove($k)
+    $guidByKey.Remove($k)
     if ($override) {
       Write-Output ("تحذير: الحسم المسجّل [" + $override + "] لم يعد أحد بطاقات هذا التصادم — استُبعد من التحديث ويحتاج مراجعة: [" + $k + "]")
     } else {
@@ -110,7 +116,7 @@ $auth = Invoke-RestMethod -Method Post -Uri "$url/auth/v1/token?grant_type=passw
 $hdr = @{ apikey = $key; Authorization = ("Bearer " + $auth.access_token); "Accept-Profile" = "public"; "Content-Profile" = "public" }
 
 # 3) اجلب أصناف الموقع (المفتاح والاسم والقيم الحالية)
-$items = Invoke-RestMethod -Method Get -Uri "$url/rest/v1/approved_price_items?select=item_key,item_name,item_number,item_code&limit=5000" -Headers $hdr
+$items = Invoke-RestMethod -Method Get -Uri "$url/rest/v1/approved_price_items?select=item_key,item_name,item_number,item_code,item_guid&limit=5000" -Headers $hdr
 Write-Output ("أصناف الموقع: " + $items.Count)
 
 # 4) حدّث item_code وitem_number للمطابقات فقط (لا يلمس أي عمود آخر).
@@ -122,10 +128,11 @@ foreach ($it in $items) {
   $k = Normalize-ItemName ([string]$it.item_key)
   $num = $byKey[$k]
   $code = $codeByKey[$k]
+  $guid = $guidByKey[$k]
   if (-not $num) {
     $k2 = Normalize-ItemName ([string]$it.item_name)
     if ($k2 -and $k2 -ne $k -and $byKey.ContainsKey($k2)) {
-      $num = $byKey[$k2]; $code = $codeByKey[$k2]; $matchedByName++
+      $num = $byKey[$k2]; $code = $codeByKey[$k2]; $guid = $guidByKey[$k2]; $matchedByName++
     }
   }
   if ($num) {
@@ -133,6 +140,7 @@ foreach ($it in $items) {
     $patch = @{}
     if ([string]$it.item_number -ne [string]$num) { $patch["item_number"] = $num }
     if ($code -and ([string]$it.item_code -ne [string]$code)) { $patch["item_code"] = $code }
+    if ($guid -and ([string]$it.item_guid -ne [string]$guid)) { $patch["item_guid"] = $guid }
     if ($patch.Count -gt 0) {
       $toUpdate++
       if ($sample.Count -lt 8) { $sample += ("  " + $it.item_key + "  →  كود " + $code + " / رقم " + $num) }

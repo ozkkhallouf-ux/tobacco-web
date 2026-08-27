@@ -2934,6 +2934,7 @@ function pricingWorklistItems({ ignoreSearch = false } = {}) {
       return {
         ...item,
         key,
+        itemGuid: item.itemGuid || price?.itemGuid || "",
         approvedPrice: price,
         salePrice: Number(price?.salePrice || 0),
         unit1Name: item.unit1Name || price?.unit1Name || "",

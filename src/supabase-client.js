@@ -360,6 +360,7 @@
     return {
       id: row.id,
       itemKey: row.item_key,
+      itemGuid: row.item_guid || "",
       itemName: row.item_name || "",
       itemNumber: row.item_number == null ? "" : String(row.item_number),
       // كود الأمين (mt000.Code) هو ما يقرأه المستخدم على البطاقة؛ itemNumber ترقيم داخلي.
@@ -973,7 +974,7 @@
 
       const { data, error } = await client
         .from(approvedPricesTable)
-        .select("id, item_key, item_name, item_number, item_code, sale_price, stock_qty, stock_status, unit1_name, unit2_name, unit2_factor, unit2_price, unit1_price, source_report_id, source_synced_at, price_payload, notes, approved_at, updated_at")
+        .select("id, item_key, item_guid, item_name, item_number, item_code, sale_price, stock_qty, stock_status, unit1_name, unit2_name, unit2_factor, unit2_price, unit1_price, source_report_id, source_synced_at, price_payload, notes, approved_at, updated_at")
         .order("item_name", { ascending: true })
         .limit(5000);
 
@@ -1042,7 +1043,7 @@
         // item_number وitem_code إلزاميان في الراجع: المتصل يستبدل الصنف في الذاكرة
         // بالكائن الراجع (app.js: priceMap.set)، فغيابهما يُفرغ الرقمين حتى إعادة
         // تحميل الصفحة فيتوقف البحث بالكود وبالرقم الداخلي (مانع رصدته المراجعة).
-        .select("id, item_key, item_name, item_number, item_code, sale_price, stock_qty, stock_status, unit1_name, unit2_name, unit2_factor, unit2_price, unit1_price, source_report_id, source_synced_at, price_payload, notes, approved_at, updated_at");
+        .select("id, item_key, item_guid, item_name, item_number, item_code, sale_price, stock_qty, stock_status, unit1_name, unit2_name, unit2_factor, unit2_price, unit1_price, source_report_id, source_synced_at, price_payload, notes, approved_at, updated_at");
 
       if (error) throw new Error(translateDbError(error.message));
       return (data || []).map(normalizeDbApprovedPrice);
@@ -1118,7 +1119,7 @@
         .from(approvedPricesTable)
         .insert(withUser)
         // نفس سبب المسار الآخر: الرقمان إلزاميان في الراجع وإلا فُرّغا في الذاكرة.
-        .select("id, item_key, item_name, item_number, item_code, sale_price, stock_qty, stock_status, unit1_name, unit2_name, unit2_factor, unit2_price, unit1_price, source_report_id, source_synced_at, price_payload, notes, approved_at, updated_at");
+        .select("id, item_key, item_guid, item_name, item_number, item_code, sale_price, stock_qty, stock_status, unit1_name, unit2_name, unit2_factor, unit2_price, unit1_price, source_report_id, source_synced_at, price_payload, notes, approved_at, updated_at");
 
       if (error) throw new Error(translateDbError(error.message));
       return (data || []).map(normalizeDbApprovedPrice);
