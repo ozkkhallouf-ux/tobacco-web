@@ -160,8 +160,8 @@
 
       <div class="price-list-document-tools no-print">
         <button type="button" onclick="window.print()">طباعة مباشرة</button>
-        <a data-pdf-open href="price-list-usd.pdf?v=cbe407c1e093">فتح PDF</a>
-        <a data-pdf-download href="price-list-usd.pdf?v=cbe407c1e093" download>تنزيل PDF</a>
+        <a data-pdf-open href="price-list-usd.pdf?v=3c35f1f28708">فتح PDF</a>
+        <a data-pdf-download href="price-list-usd.pdf?v=3c35f1f28708" download>تنزيل PDF</a>
         <button class="theme-switch" type="button" onclick="toggleTheme()">فاتح / داكن</button>
       </div>
         <header class="price-list-header">
@@ -186,7 +186,7 @@
       <div class="price-list-group">
         <div class="price-list-group-header">
           <span>ماستر</span>
-          <span class="price-list-group-count">7</span>
+          <span class="price-list-group-count">6</span>
         </div>
         <table><tbody>
           <tr class="odd">
@@ -215,11 +215,6 @@
             <td class="price">327.00 $</td>
           </tr>
           <tr class="even">
-            <td class="name">ماستر كوين أبيض</td>
-            <td class="unit">كرتونة</td>
-            <td class="price">400.00 $</td>
-          </tr>
-          <tr class="odd">
             <td class="name">ماستر كوين أزرق</td>
             <td class="unit">كرتونة</td>
             <td class="price">310.00 $</td>
@@ -559,7 +554,7 @@
       <div class="price-list-group">
         <div class="price-list-group-header">
           <span>غلواز</span>
-          <span class="price-list-group-count">5</span>
+          <span class="price-list-group-count">4</span>
         </div>
         <table><tbody>
           <tr class="odd">
@@ -578,11 +573,6 @@
             <td class="price">403.00 $</td>
           </tr>
           <tr class="even">
-            <td class="name">غلواز كوين أصفر</td>
-            <td class="unit">كرتونة</td>
-            <td class="price">403.00 $</td>
-          </tr>
-          <tr class="odd">
             <td class="name">غلواز كوين اصفر اس سبعة.</td>
             <td class="unit">كرتونة</td>
             <td class="price">350.00 $</td>
@@ -1123,7 +1113,7 @@
           <tr class="even">
             <td class="name">مزايا كف</td>
             <td class="unit">شرحة</td>
-            <td class="price">133.00 $</td>
+            <td class="price">135.00 $</td>
           </tr>
           <tr class="odd">
             <td class="name">أسطورة مشكل</td>
@@ -1210,7 +1200,7 @@
   sheet.dataset.theme = savedTheme || 'dark';
   document.body.dataset.theme = sheet.dataset.theme;
   function selectedPdfFile() {
-    return sheet.dataset.theme === 'light' ? 'price-list-usd-light.pdf?v=cbe407c1e093' : 'price-list-usd.pdf?v=cbe407c1e093';
+    return sheet.dataset.theme === 'light' ? 'price-list-usd-light.pdf?v=3c35f1f28708' : 'price-list-usd.pdf?v=3c35f1f28708';
   }
   function syncPdfLinks() {
     const selected = selectedPdfFile();
