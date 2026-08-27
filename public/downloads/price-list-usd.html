@@ -160,8 +160,8 @@
 
       <div class="price-list-document-tools no-print">
         <button type="button" onclick="window.print()">طباعة مباشرة</button>
-        <a data-pdf-open href="price-list-usd.pdf?v=e55424a9eb03">فتح PDF</a>
-        <a data-pdf-download href="price-list-usd.pdf?v=e55424a9eb03" download>تنزيل PDF</a>
+        <a data-pdf-open href="price-list-usd.pdf?v=8e4e8cd24663">فتح PDF</a>
+        <a data-pdf-download href="price-list-usd.pdf?v=8e4e8cd24663" download>تنزيل PDF</a>
         <button class="theme-switch" type="button" onclick="toggleTheme()">فاتح / داكن</button>
       </div>
         <header class="price-list-header">
@@ -1213,7 +1213,7 @@
   sheet.dataset.theme = savedTheme || 'dark';
   document.body.dataset.theme = sheet.dataset.theme;
   function selectedPdfFile() {
-    return sheet.dataset.theme === 'light' ? 'price-list-usd-light.pdf?v=e55424a9eb03' : 'price-list-usd.pdf?v=e55424a9eb03';
+    return sheet.dataset.theme === 'light' ? 'price-list-usd-light.pdf?v=8e4e8cd24663' : 'price-list-usd.pdf?v=8e4e8cd24663';
   }
   function syncPdfLinks() {
     const selected = selectedPdfFile();

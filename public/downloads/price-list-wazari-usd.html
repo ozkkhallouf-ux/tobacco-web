@@ -160,8 +160,8 @@
 
       <div class="price-list-document-tools no-print">
         <button type="button" onclick="window.print()">طباعة مباشرة</button>
-        <a data-pdf-open href="price-list-wazari-usd.pdf?v=d3f5e71f0eae">فتح PDF</a>
-        <a data-pdf-download href="price-list-wazari-usd.pdf?v=d3f5e71f0eae" download>تنزيل PDF</a>
+        <a data-pdf-open href="price-list-wazari-usd.pdf?v=62ea2f780a74">فتح PDF</a>
+        <a data-pdf-download href="price-list-wazari-usd.pdf?v=62ea2f780a74" download>تنزيل PDF</a>
         <button class="theme-switch" type="button" onclick="toggleTheme()">فاتح / داكن</button>
       </div>
         <header class="price-list-header">
@@ -239,7 +239,7 @@
   sheet.dataset.theme = savedTheme || 'dark';
   document.body.dataset.theme = sheet.dataset.theme;
   function selectedPdfFile() {
-    return sheet.dataset.theme === 'light' ? 'price-list-wazari-usd-light.pdf?v=d3f5e71f0eae' : 'price-list-wazari-usd.pdf?v=d3f5e71f0eae';
+    return sheet.dataset.theme === 'light' ? 'price-list-wazari-usd-light.pdf?v=62ea2f780a74' : 'price-list-wazari-usd.pdf?v=62ea2f780a74';
   }
   function syncPdfLinks() {
     const selected = selectedPdfFile();
