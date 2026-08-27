@@ -1,5 +1,6 @@
 name: Codex Review Gate
 
+# [اختبار تجريبي 2026-08-27: يثبت أن push جديد يعيد الفحص إلى FAIL تلقائياً حتى مراجعة جديدة]
 # الغرض: يفرض أن يكون كل Pull Request إلى main قد راجعه فعلياً
 # chatgpt-codex-connector[bot] على أحدث HEAD commit، قبل السماح بالدمج.
 #
