@@ -101,12 +101,15 @@ WHERE LTRIM(RTRIM(COALESCE(m.$nameCol,''))) <> ''
         $name = ([string]$reader["item_name"]).Trim()
         $code = ([string]$reader["item_code"]).Trim()
         $cost = [double]$reader["avg_cost"]
+        # match_key = mfta7 mn3 tkrar 3nd al-raf3 (GUID aw code aw ism) - laysa lazman GUID 7aqiqi.
+        # item_guid = GUID al-Amin al-7aqiqi faqat aw NULL - hwa al-3mwd aldy yatbaq m3 approved_price_items.item_guid.
         $key = if ($guid) { $guid } elseif ($code) { $code } else { $name }
         if (-not $key) { continue }
         if ($seen.ContainsKey($key)) { continue }   # mfta7 farid wa7id likl mada
         $seen[$key] = $true
         $rows.Add(@{
-            item_guid  = $key
+            match_key  = $key
+            item_guid  = $guid
             item_name  = $name
             avg_cost   = [math]::Round($cost, 3)
             currency   = "$"
@@ -138,9 +141,9 @@ WHERE LTRIM(RTRIM(COALESCE(m.$nameCol,''))) <> ''
         "Content-Profile" = "public"
     }
 
-    # upsert in one batch on item_guid
+    # upsert in one batch on match_key (dedupe key - GUID or code or name fallback)
     $json = $rows.ToArray() | ConvertTo-Json -Depth 4 -Compress
-    Invoke-RestMethod -Method Post -Uri "$supabaseUrl/rest/v1/item_costs?on_conflict=item_guid" `
+    Invoke-RestMethod -Method Post -Uri "$supabaseUrl/rest/v1/item_costs?on_conflict=match_key" `
         -Headers $authHeaders -ContentType "application/json; charset=utf-8" -TimeoutSec 60 `
         -Body ([System.Text.Encoding]::UTF8.GetBytes($json)) | Out-Null
 
@@ -148,6 +151,7 @@ WHERE LTRIM(RTRIM(COALESCE(m.$nameCol,''))) <> ''
     exit 0
 } catch {
     Write-Log "khata (str $($_.InvocationInfo.ScriptLineNumber)): $($_.Exception.Message)"
-    if ($_.Exception.InnerException) { Write-Log ("tfsyl: " + $_.Exception.InnerException.Message) }
+    if ($_.ErrorDetails.Message) { Write-Log ("tfsyl: " + $_.ErrorDetails.Message) }
+    elseif ($_.Exception.InnerException) { Write-Log ("tfsyl: " + $_.Exception.InnerException.Message) }
     exit 1
 }
