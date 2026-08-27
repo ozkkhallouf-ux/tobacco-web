@@ -4465,13 +4465,41 @@ async function createPortablePdfBlob(bodyHtml, filename, options = {}) {
   }
 
   try {
-    if (document.fonts && document.fonts.ready) await document.fonts.ready;
+    if (document.fonts) {
+      // بعض إصدارات WebKit تُنهي document.fonts.ready قبل أن يُسجَّل خط
+      // مستورد عبر @import (كالخط العربي بنشرة الأسعار) — نطلب تحميله صراحة
+      // أولاً حتى لا يُلتقط الـcanvas بخط بديل أو بارتفاع سطر مختلف.
+      try {
+        await Promise.all([300, 400, 700, 800].map((weight) => document.fonts.load(`${weight} 16px Almarai`)));
+      } catch {
+        // تجاهل: بعض المتصفحات لا تدعم family غير مسجّلة بعد، لا نوقف التصدير بسببه.
+      }
+      if (document.fonts.ready) await document.fonts.ready;
+    }
+    // نمهل المتصفح إطارَي رسم لضمان استقرار التخطيط (ارتفاعات الأسطر بعد
+    // تحميل الخط) قبل قياس أبعاد المحتوى الفعلية أدناه.
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+
+    // حد أمان مساحة الـcanvas على iOS Safari/WebKit: يتجاوز هذا المتصفح حداً
+    // قريباً من 4096×4096 بكسل (~16.78 مليون بكسل) فيرسم canvas أبيض تماماً
+    // بصمت وبلا أي استثناء JS. نشرة الليرة (صفحات أكثر/أطول) عند scale ثابت=2
+    // تتجاوز هذا الحد بينما تبقى نشرة الدولار الأقصر تحته — وهذا هو السبب
+    // الجذري لخروج SYP فقط بصفحات بيضاء على iPhone. نحسب scale فعلياً من
+    // الارتفاع الحقيقي المقاس بدل رقم ثابت: يبقى USD كما هو (أصلاً ضمن الحد)
+    // وتُخفَّض SYP تلقائياً (وأي نشرة تكبر مستقبلاً) دون المساس بجودة الرسم.
+    const requestedScale = Number(options.scale) || 1.25;
+    const measuredWidth = Math.max(source.getBoundingClientRect().width || 0, Number(options.width) || 794);
+    const measuredHeight = Math.max(source.scrollHeight || 0, source.getBoundingClientRect().height || 0, 1);
+    const SAFE_CANVAS_AREA = 4096 * 4096 * 0.85;
+    const maxScaleForArea = Math.sqrt(SAFE_CANVAS_AREA / (measuredWidth * measuredHeight));
+    const effectiveScale = Math.max(1, Math.min(requestedScale, maxScaleForArea));
+
     const worker = window.html2pdf().set({
       margin: options.margin || [8, 8, 8, 8],
       filename,
       image: options.image || { type: "jpeg", quality: 0.96 },
       html2canvas: {
-        scale: Number(options.scale) || 1.25,
+        scale: effectiveScale,
         useCORS: true,
         backgroundColor,
         allowTaint: Boolean(options.allowTaint),
@@ -7339,8 +7367,11 @@ function canvasInkRatio(canvas, yStart, yEnd) {
     }
     return total > 0 ? ink / total : 0;
   } catch {
-    // تعذّر القياس (قيود أمنية مثلاً) — لا نمنع التصدير بسببه.
-    return 1;
+    // فشل getImageData يعني أننا لا نملك أي دليل على أن الصفحة رُسمت فعلاً
+    // (وقد يكون سببه بالضبط أن الـcanvas خرج فارغاً/تالفاً بسبب تجاوز حد
+    // WebKit لحجمه). نفشل بشكل مقفل (fail-closed) بدل افتراض أن المحتوى
+    // سليم — القاعدة: ممنوع حفظ PDF إذا تعذّر إثبات أن الصفحة فيها محتوى.
+    return -1;
   }
 }
 
