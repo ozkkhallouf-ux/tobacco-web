@@ -6,6 +6,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { createHash } from "node:crypto";
+import { chromium } from "playwright";
 import "../src/price-list-template.js";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
@@ -599,7 +600,77 @@ const renderGroup = ([name, its], priceFormatter, unitFormatter = (item) => item
 const priceListTemplate = globalThis.OZKPriceListTemplate;
 if (!priceListTemplate) throw new Error("تعذر تحميل قالب النشرة المشترك.");
 
-const buildHtml = ({ pageItems, titleSuffix, badgeClass, badgeLabel, unitLabel, pdfFile, priceFormatter, unitFormatter = (item) => item.unit }) => {
+// ── قياس حقيقي لارتفاعات المجموعات عبر متصفح مخفي (Playwright) ──────────────
+// بدون هذا، render() يسقط تلقائياً إلى layoutGroupsLegacyPages() التي تعتمد على
+// تقطيع CSS الطبيعي للطباعة فقط — ما يترك صفحات نصف فارغة قبل قسم "الخاصة"
+// المفروض له فاصل صفحة دائماً (المشكلة المُبلَّغ عنها: صفحات بيضاء بنشرة الليرة).
+// بنفس منطق buildMeasuredBulletinLayout في src/app.js تماماً، لكن هنا داخل صفحة
+// Playwright مخفية بدل DOM المتصفح الحي، كي تحصل النشرات الثابتة (CI/التنزيل)
+// على نفس التوزيع المتوازن المستخدم بالتصدير المباشر من التطبيق.
+const templateSource = readFileSync(resolve(root, "src/price-list-template.js"), "utf8");
+const localChromiumPath = String(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || "").trim();
+const measureBrowser = await chromium.launch(localChromiumPath ? { executablePath: localChromiumPath } : undefined);
+const measurePage = await measureBrowser.newPage({ viewport: { width: 794, height: 1200 } });
+await measurePage.setContent('<!doctype html><html><head><meta charset="utf-8"></head><body></body></html>');
+await measurePage.addScriptTag({ content: templateSource });
+// حاسم: يجب تحميل خط Almarai فعلياً قبل أي قياس ارتفاع. بدون هذا، القياس يتم
+// بخط النظام الاحتياطي (Tahoma) الأضيق، فيحسب packGroupsIntoBalancedPages مجموعات
+// أكثر مما يتّسع فعلياً بالخط الحقيقي عند توليد PDF — وهذا بالضبط ما كان يُنتج
+// الصفحات البيضاء (مجموعتان أخيرتان بصفحة 1 تفيضان فعلياً لصفحة جديدة فارغة إلا منهما).
+await measurePage.addStyleTag({
+  url: "https://fonts.googleapis.com/css2?family=Almarai:wght@300;400;700;800&display=swap"
+});
+await measurePage.evaluate(async () => {
+  await Promise.all(["300", "400", "700", "800"].map((w) => document.fonts.load(`${w} 16px Almarai`).catch(() => {})));
+  await document.fonts.ready;
+});
+
+async function measureBulletinLayout(groups, renderOptions) {
+  return measurePage.evaluate(({ groups, renderOptions }) => {
+    const template = window.OZKPriceListTemplate;
+    if (!template || typeof template.layoutGroupsMeasured !== "function") return null;
+    const probe = document.createElement("div");
+    probe.style.position = "fixed";
+    probe.style.left = "0";
+    probe.style.top = "0";
+    probe.style.width = "794px";
+    probe.style.visibility = "hidden";
+    probe.style.pointerEvents = "none";
+    probe.innerHTML = template.render({ ...renderOptions, groups });
+    document.body.appendChild(probe);
+    try {
+      const header = probe.querySelector(".price-list-header");
+      const subheader = probe.querySelector(".price-list-subheader");
+      const stackEl = probe.querySelector(".price-list-column-stack");
+      const headerHeightPx = (header?.getBoundingClientRect().height || 0) + (subheader?.getBoundingClientRect().height || 0);
+      const columnWidthPx = stackEl?.getBoundingClientRect().width || 385;
+
+      const measureStack = document.createElement("div");
+      measureStack.className = "price-list-column-stack";
+      measureStack.style.width = `${columnWidthPx}px`;
+      probe.querySelector(".ozk-price-list")?.appendChild(measureStack);
+      const heights = new Map();
+      groups.forEach((group) => {
+        measureStack.innerHTML = template.renderGroup(group);
+        const el = measureStack.firstElementChild;
+        if (!el) return;
+        const rect = el.getBoundingClientRect();
+        const marginBottom = parseFloat(getComputedStyle(el).marginBottom) || 0;
+        heights.set(String(group.name || ""), rect.height + marginBottom);
+      });
+
+      return template.layoutGroupsMeasured(groups, heights, {
+        pageWidthPx: 794,
+        headerHeightPx,
+        safetyMarginPx: 6
+      });
+    } finally {
+      probe.remove();
+    }
+  }, { groups, renderOptions });
+}
+
+const buildHtml = async ({ pageItems, titleSuffix, badgeClass, badgeLabel, unitLabel, pdfFile, priceFormatter, unitFormatter = (item) => item.unit }) => {
   const groups = buildGroups(pageItems).map(([name, items]) => ({
     name,
     items: items.map((item) => ({
@@ -623,8 +694,7 @@ const buildHtml = ({ pageItems, titleSuffix, badgeClass, badgeLabel, unitLabel, 
     .digest("hex")
     .slice(0, 12);
   const versionedPdfFile = `${pdfFile}?v=${pdfVersion}`;
-  const bulletinMarkup = priceListTemplate.render({
-    groups,
+  const renderOptions = {
     logoSrc,
     issueDate,
     badgeClass,
@@ -632,6 +702,20 @@ const buildHtml = ({ pageItems, titleSuffix, badgeClass, badgeLabel, unitLabel, 
     unitLabel,
     tools: { pdfFile: versionedPdfFile },
     theme: "dark"
+  };
+  const layout = await measureBulletinLayout(groups, renderOptions);
+  if (process.env.DEBUG_LAYOUT) {
+    console.log(`[DEBUG ${titleSuffix}] mainPages=${layout?.mainPages?.length} specialPages=${layout?.specialPages?.length}`);
+    layout?.mainPages?.forEach((p, i) => console.log(`  main page ${i+1}: right=${p.right.map(g=>g.name).join(",")} | left=${p.left.map(g=>g.name).join(",")}`));
+    layout?.specialPages?.forEach((p, i) => console.log(`  special page ${i+1}: right=${p.right.map(g=>g.name).join(",")} | left=${p.left.map(g=>g.name).join(",")}`));
+  }
+  if (layout?.oversized?.length) {
+    console.warn(`⚠ مجموعات أكبر من عمود صفحة كاملة بنشرة "${titleSuffix}": ${layout.oversized.map((g) => g.name).join("، ")}`);
+  }
+  const bulletinMarkup = priceListTemplate.render({
+    groups,
+    ...renderOptions,
+    layout: layout || undefined
   });
   return `<!DOCTYPE html>
 <html dir="rtl" lang="ar" translate="no">
@@ -676,7 +760,7 @@ const newSyriaFlag = '<span class="new-syria-flag" role="img" aria-label="علم
 // ── نشرة الدولار (جملة — سعر الكرتونة) ───────────────────────────────────────
 writeFileSync(
   resolve(root, "public/downloads/price-list-usd.html"),
-  buildHtml({
+  await buildHtml({
     pageItems: usdItems,
     titleSuffix: "دولار",
     badgeClass: "badge-usd",
@@ -691,7 +775,7 @@ console.log("✓ price-list-usd.html");
 // ── نشرة الليرة (مفرق — سعر المفرق اليدوي للكرتونة ÷ عدد الكروز × الصرف) ─────
 writeFileSync(
   resolve(root, `public/downloads/price-list-syp-${SYP_FILE_TAG}.html`),
-  buildHtml({
+  await buildHtml({
     pageItems: sypItems,
     titleSuffix: "سوري",
     badgeClass: "badge-syp",
@@ -711,7 +795,7 @@ console.log(`✓ price-list-syp-${SYP_FILE_TAG}.html — صرف ${SYP_RATE}`);
 // ── نشرات الوزاري المنفصلة ───────────────────────────────────────────────────
 writeFileSync(
   resolve(root, "public/downloads/price-list-wazari-usd.html"),
-  buildHtml({
+  await buildHtml({
     pageItems: usdWazariItems,
     titleSuffix: "الوزاري — دولار",
     badgeClass: "badge-usd",
@@ -725,7 +809,7 @@ console.log("✓ price-list-wazari-usd.html");
 
 writeFileSync(
   resolve(root, `public/downloads/price-list-wazari-syp-${SYP_FILE_TAG}.html`),
-  buildHtml({
+  await buildHtml({
     pageItems: sypWazariItems,
     titleSuffix: "الوزاري — سوري",
     badgeClass: "badge-syp",
@@ -737,6 +821,8 @@ writeFileSync(
   })
 );
 console.log(`✓ price-list-wazari-syp-${SYP_FILE_TAG}.html — صرف ${SYP_RATE}`);
+
+await measureBrowser.close();
 
 // ── index ─────────────────────────────────────────────────────────────────────
 const indexHtml = `<!DOCTYPE html>

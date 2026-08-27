@@ -279,13 +279,21 @@
       const limit = Math.max(0, budgetForThisPage - safetyMarginPx);
       const page = { right: [], left: [], rightHeight: 0, leftHeight: 0 };
 
-      // عمود اليمين: من طابور اليمين أولاً، ثم فيضان من طابور اليسار إن نفد الأول.
+      // عمود اليمين: من طابور اليمين أولاً. إن كان رأس الطابور لا يتّسع بميزانية
+      // هذه الصفحة تحديداً (سواء نفد الطابور أو كانت المجموعة التالية فيه أطول
+      // من المتبقي) نمتصّ الفراغ من طابور اليسار بدل ترك العمود فارغاً — العنصر
+      // المؤجَّل من طابور اليمين يبقى في مكانه (ri لا يتقدّم) فيظهر في مطلع
+      // الصفحة التالية بترتيبه الطبيعي؛ لا فقدان ولا تخطٍّ دائم، فقط امتصاص فراغ
+      // مؤقت لصفحة واحدة (نفس مبدأ balancePageColumns أدناه لكن أثناء البناء لا
+      // بعده). هذا يمنع أن تبقى صفحة كاملة بعمود فارغ فقط لأن أول عنصر متبقٍ
+      // بطابور اليمين أكبر من المساحة، بينما طابور اليسار يحمل مجموعات صغيرة
+      // كانت لتملأه بسهولة (كان هذا سبب "فراغ صفحة كامل" ملحوظ بصرياً في النشرة).
       for (;;) {
         if (ri < rq.length && page.rightHeight + rq[ri].h <= limit + 1e-6) {
           page.right.push(rq[ri].group);
           page.rightHeight += rq[ri].h;
           ri += 1;
-        } else if (ri >= rq.length && li < lq.length && page.rightHeight + lq[li].h <= limit + 1e-6) {
+        } else if (li < lq.length && page.rightHeight + lq[li].h <= limit + 1e-6) {
           page.right.push(lq[li].group);
           page.rightHeight += lq[li].h;
           li += 1;
@@ -294,13 +302,14 @@
         }
       }
 
-      // عمود اليسار: من طابور اليسار أولاً، ثم فيضان من طابور اليمين إن نفد الأول.
+      // عمود اليسار: نفس المبدأ بالاتجاه المعاكس — طابور اليسار أولاً، ثم امتصاص
+      // فراغ من طابور اليمين إن كان رأسه لا يتّسع (لا يشترط نفاد الطابور كاملاً).
       for (;;) {
         if (li < lq.length && page.leftHeight + lq[li].h <= limit + 1e-6) {
           page.left.push(lq[li].group);
           page.leftHeight += lq[li].h;
           li += 1;
-        } else if (li >= lq.length && ri < rq.length && page.leftHeight + rq[ri].h <= limit + 1e-6) {
+        } else if (ri < rq.length && page.leftHeight + rq[ri].h <= limit + 1e-6) {
           page.left.push(rq[ri].group);
           page.leftHeight += rq[ri].h;
           ri += 1;
