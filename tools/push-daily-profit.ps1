@@ -196,27 +196,23 @@ try {
         Prefer = "return=representation"
     }
     $payload = @{
-        source = "ameen_daily_profit"
-        report_date = $reportDate
-        created_by = $auth.user.id
-        summary = $summary
-        items = @()
+        p_report_date = $reportDate
+        p_summary = $summary
+        p_items = @()
+        p_created_by = $auth.user.id
     } | ConvertTo-Json -Depth 8 -Compress
 
-    $insertedRows = Invoke-RestMethod -Method Post -Uri "$supabaseUrl/rest/v1/inventory_reports" `
+    # upsert ذرّي بجملة SQL واحدة (RPC upsert_ameen_daily_profit) بدل إدراج
+    # ثم حذف الأقدم: النمط القديم يفتح نافذة تزامن حقيقية بين TOBACCO Ameen
+    # Sync وTOBACCO Sales Line Items Push (كلاهما يستدعي هذا السكربت) — قد
+    # يحذف كل تشغيل صفّ الآخر فيبقى اليوم بلا أي تقرير. فهرس فريد جزئي على
+    # (report_date) بشرط source='ameen_daily_profit' يجعل Postgres يحسم
+    # التعارض ذرّياً داخل الخادم بلا أي نافذة زمنية بين الإدراج والحذف.
+    Invoke-RestMethod -Method Post -Uri "$supabaseUrl/rest/v1/rpc/upsert_ameen_daily_profit" `
         -Headers $headers -ContentType "application/json; charset=utf-8" `
-        -Body ([Text.Encoding]::UTF8.GetBytes($payload)) -TimeoutSec 30
-    $insertedId = ($insertedRows | Select-Object -First 1).id
-    if (-not $insertedId) { throw "لم يُعِد Supabase معرّف الصف المرفوع — أُلغي حذف النسخ القديمة تفادياً لحذف التقرير الجديد." }
+        -Body ([Text.Encoding]::UTF8.GetBytes($payload)) -TimeoutSec 30 | Out-Null
 
-    # أبقِ أحدث نسخة فقط لليوم: نرفع أولاً ثم نحذف النسخ الأقدم، فلا توجد
-    # لحظة يصبح فيها الأمر بلا تقرير أثناء المزامنة.
-    # نحذف بالمُعرّف لا بالوقت: الحذف الزمني كان يمحو التقرير الجديد نفسه إن تجاوز الرفع ثانيتين.
-    Invoke-RestMethod -Method Delete `
-        -Uri "$supabaseUrl/rest/v1/inventory_reports?source=eq.ameen_daily_profit&report_date=eq.$reportDate&id=neq.$insertedId" `
-        -Headers $headers -TimeoutSec 30 | Out-Null
-
-    Write-Log "تم رفع تقرير الربح اليومي بنجاح."
+    Write-Log "تم رفع تقرير الربح اليومي بنجاح (upsert ذرّي)."
     exit 0
 } catch {
     Write-Log ("خطأ: " + $_.Exception.Message)

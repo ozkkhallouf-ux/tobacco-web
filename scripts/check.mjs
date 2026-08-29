@@ -456,6 +456,29 @@ if (/git\s+push\s+origin\s+HEAD:main/.test(priceGenerationWorkflow)) {
   console.error("generate-price-lists.yml must not push to main — branch protection rejects bot pushes (GH013).");
   failed = true;
 }
+// نشر الأسعار يجب أن يعمل بلا تدخل بشري حتى لو حُفظ السعر من متصفح بلا gh_publish_token:
+// زناد دوري (schedule) على generate-price-lists.yml يضمن نجاحه فيُشغّل pages.yml تلقائياً
+// عبر workflow_run. يجب أن يبقى بلا أي خطوة كتابة على main (الصلاحيات read فقط).
+if (!/schedule:\s*\n\s*-\s*cron:/.test(priceGenerationWorkflow)) {
+  console.error("generate-price-lists.yml must keep an unattended schedule trigger so price/rate changes saved without gh_publish_token still publish automatically.");
+  failed = true;
+}
+if (!/permissions:\s*\n\s*contents:\s*read/.test(priceGenerationWorkflow)) {
+  console.error("generate-price-lists.yml must keep permissions: contents: read — scheduling must never regain write/commit access to main (GH013).");
+  failed = true;
+}
+const dailyProfitScript = readFileSync("tools/push-daily-profit.ps1", "utf8");
+// إصلاح تزامن ameen_daily_profit: يمنع أن يحذف أحد الـproducers (TOBACCO Ameen Sync
+// أو TOBACCO Sales Line Items Push) صفّ الآخر عند التزامن. يجب استخدام upsert ذرّي
+// عبر RPC بدل النمط القديم insert-ثم-delete الذي يفتح نافذة سباق حقيقية.
+if (!dailyProfitScript.includes("rpc/upsert_ameen_daily_profit")) {
+  console.error("push-daily-profit.ps1 must upsert via rpc/upsert_ameen_daily_profit (atomic) instead of insert-then-delete, to avoid the cross-producer race condition.");
+  failed = true;
+}
+if (/Method\s+Delete[^\n]*inventory_reports/i.test(dailyProfitScript)) {
+  console.error("push-daily-profit.ps1 must not DELETE from inventory_reports directly — that reopens the race window between concurrent producers.");
+  failed = true;
+}
 const newsletterContracts = [
   'navButton("pricing", "نشرة الأسعار")',
   'pricing: "نشرة الأسعار"',

@@ -9,6 +9,12 @@ on:
       - 'scripts/generate-price-lists.mjs'
       - 'scripts/generate-pdfs.mjs'
   workflow_dispatch: {}
+  # زناد دوري بلا كتابة على main: يكتشف تغييرات الأسعار/سعر الصرف المحفوظة من
+  # المتصفح بلا gh_publish_token (توضّح scheduleBulletinPublish أنها ستُلتقط
+  # خلال 15 دقيقة)، ونجاحه يشغّل pages.yml تلقائياً عبر workflow_run أدناه —
+  # فتُعاد النشرات والـPDF من بيانات Supabase الحيّة دون أي تدخل بشري.
+  schedule:
+    - cron: '*/15 * * * *'
 
 permissions:
   contents: read
