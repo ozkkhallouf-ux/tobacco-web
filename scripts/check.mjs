@@ -427,7 +427,6 @@ if (generatorSource.includes("exchange-rate.json")) {
   failed = true;
 }
 for (const contract of [
-  "cron: '*/5 * * * *'",
   "group: generate-price-lists",
   "cancel-in-progress: false",
   "ref: main",
@@ -439,6 +438,23 @@ for (const contract of [
     console.error(`Automatic manual-price bulletin contract is missing: ${contract}`);
     failed = true;
   }
+}
+// النشرات تُولَّد الآن داخل مهمة النشر لا بـ commit إلى main، لأن حماية الفرع
+// ترفض دفع البوتات (GH013) ولا يمكن استثناؤها في مستودع شخصي.
+const deployWorkflow = readFileSync(".github/workflows/pages.yml", "utf8");
+for (const contract of [
+  "node scripts/generate-price-lists.mjs",
+  "node scripts/generate-pdfs.mjs",
+  "Bump service worker cache version"
+]) {
+  if (!deployWorkflow.includes(contract)) {
+    console.error(`Deploy-time bulletin generation contract is missing in pages.yml: ${contract}`);
+    failed = true;
+  }
+}
+if (/git\s+push\s+origin\s+HEAD:main/.test(priceGenerationWorkflow)) {
+  console.error("generate-price-lists.yml must not push to main — branch protection rejects bot pushes (GH013).");
+  failed = true;
 }
 const newsletterContracts = [
   'navButton("pricing", "نشرة الأسعار")',
