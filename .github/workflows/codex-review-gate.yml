@@ -169,29 +169,42 @@ jobs:
           CONCLUSION="${{ steps.check.outputs.conclusion }}"
           SUMMARY="${{ steps.check.outputs.summary }}"
 
-          # ⚠️ اسم مختلف عمداً عن اسم الـjob "Codex Review Gate" (وليس نفسه):
-          # هذا check-run معلوماتي إضافي فقط (يعرض شارات P0/P1) — الفحص الحاكم فعلياً
-          # للدمج هو الـcheck المدمج تلقائياً باسم الـjob نفسه. تسميتهما بنفس الاسم
-          # كانت تُنتج أكثر من check-run بنفس الاسم وتُربك مطابقة Required Status Check.
+          # ⚠️ إصلاح ملاحظة Codex P1 بتاريخ 2026-08-29 (workflow_dispatch لا يلتصق بـHEAD الصحيح):
+          #   في تشغيل عادي (pull_request_target/pull_request_review/pull_request_review_comment)
+          #   الـcheck المدمج تلقائياً باسم الـjob "Codex Review Gate" يلتصق أصلاً بـhead_sha
+          #   الصحيح للـPR، فتسمية هذا الـcheck-run الإضافي باسم مختلف ("— تفاصيل") لا تضر.
+          #   لكن GitHub يوثّق أن حدث workflow_dispatch (يُستخدم للتعافي من تشغيل فائت أو
+          #   ملغى) يجعل GITHUB_SHA = "آخر commit على الفرع الافتراضي" — أي أن الـcheck
+          #   المدمج تلقائياً بالـjob يلتصق بـHEAD الخاطئ (main) لا بـhead_sha الفعلي للـPR
+          #   المطلوب فحصه. في هذه الحالة فقط، هذا الـcheck-run المنشور يدوياً (الملتصق
+          #   صراحة بـ$HEAD_SHA الصحيح عبر API) هو الوحيد القادر على تحقيق شرط الـRequired
+          #   Status Check على ذلك الـPR — لذلك يجب أن يحمل الاسم الثابت "Codex Review Gate"
+          #   في مسار workflow_dispatch تحديداً، وإلا يبقى الدمج محجوباً حتى بعد تعافٍ ناجح.
+          NAME="Codex Review Gate — تفاصيل"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            NAME="Codex Review Gate"
+          fi
+
           PAYLOAD=$(jq -n \
+            --arg name "$NAME" \
             --arg sha "$HEAD_SHA" \
             --arg conclusion "$CONCLUSION" \
             --arg summary "$SUMMARY" \
             --arg badges "${{ steps.check.outputs.badges }}" \
             '{
-              name: "Codex Review Gate — تفاصيل",
+              name: $name,
               head_sha: $sha,
               status: "completed",
               conclusion: $conclusion,
               output: {
-                title: "Codex Review Gate — تفاصيل",
+                title: $name,
                 summary: $summary,
-                text: ("### درجات الخطورة (best-effort، معلوماتي فقط — غير حاكم للدمج)\n```\n" + $badges + "\n```\n\nمنع الدمج مع ملاحظات مفتوحة يُفرض عبر إعداد GitHub \"Require conversation resolution before merging\"، وليس عبر هذا الفحص.\n\nنتيجة الدمج الفعلية محكومة حصراً بنتيجة هذا الـjob نفسه (Codex Review Gate)، وليس بهذا الـcheck-run الإضافي.")
+                text: ("### درجات الخطورة (best-effort، معلوماتي فقط — غير حاكم للدمج)\n```\n" + $badges + "\n```\n\nمنع الدمج مع ملاحظات مفتوحة يُفرض عبر إعداد GitHub \"Require conversation resolution before merging\"، وليس عبر هذا الفحص.")
               }
             }')
 
           echo "$PAYLOAD" | gh api "repos/$REPO/check-runs" --input - >/dev/null
-          echo "نُشر check-run معلوماتي إضافي: Codex Review Gate — تفاصيل = $CONCLUSION على $HEAD_SHA"
+          echo "نُشر check-run: $NAME = $CONCLUSION على $HEAD_SHA"
 
       - name: النتيجة النهائية المعتمدة للـGate (مستقلة تماماً عن نجاح النشر أعلاه)
         if: steps.pr.outputs.base_ref == 'main'
