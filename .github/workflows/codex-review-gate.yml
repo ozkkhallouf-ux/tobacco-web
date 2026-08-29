@@ -59,6 +59,27 @@ name: Codex Review Gate
 #        head_sha الصحيح على الإطلاق — يبقى فقط الـcheck التلقائي للـjob (المحتمل التصاقه
 #        بـsha مختلف حسب دلالة GITHUB_SHA لكل حدث). هذا قيد فعلي في صلاحيات GITHUB_TOKEN
 #        لا يمكن تجاوزه إلا باستخدام App/PAT بصلاحية كتابة — خارج نطاق هذا الإصلاح.
+#
+# ⚠️ إصلاح جوهري بتاريخ 2026-08-29 (الـartifact الحقيقي الذي ينشره Codex ليس Formal Review):
+#   تحقق حي على PR #128 أثبت أن chatgpt-codex-connector[bot] لا ينشر نتيجته كـ
+#   Pull Request Review (لا يظهر إطلاقاً في GET /pulls/{n}/reviews) ولا كـReview Comment
+#   (GET /pulls/{n}/comments) — بل كـ**Issue Comment عادي** عبر
+#   POST /issues/{n}/comments، بنص يتضمن حرفياً السطر:
+#     **Reviewed commit:** `<short-sha>` (10 خانات hex عادةً، أحياناً أقل/أكثر)
+#   الحل: يُضاف مصدر ثالث للفحص (GET /issues/{n}/comments) بجانب المصدرين السابقين
+#   (يبقيان لضمان التوافق إذا غيّر Codex سلوكه مستقبلاً لمراجعة رسمية):
+#     - المؤلف يجب أن يكون بالضبط chatgpt-codex-connector[bot].
+#     - يُستخرج الـshort-sha من نص "Reviewed commit:" حصراً عبر regex صارم
+#       (Reviewed commit:\*\*\s*`[0-9a-fA-F]{7,40}`) — لا أي استدلال آخر من النص الحر.
+#     - المطابقة تكون بأن يبدأ head_sha الحالي (40 خانة) حرفياً بهذا الـshort-sha
+#       (مقارنة prefix، case-insensitive) — وليس بالتساوي التام لأن Codex ينشر short-sha
+#       لا الـsha الكامل. تصادم prefix بين commit مختلف وHEAD الحالي مستبعد عملياً لأي
+#       طول ≥ 7 خانات hex.
+#     - لا اعتماد إطلاقاً على created_at/timestamp لتحديد الحداثة — المطابقة فقط عبر
+#       محتوى commit المذكور صراحة داخل الجسم مقابل head_sha المجلوب حيّاً من API.
+#     - تعليق قديم يذكر sha لا يطابق head_sha الحالي (لأن push جديد غيّر الـsha) لا يُحتسب
+#       أبداً، فيبقى الفحص FAIL تلقائياً بعد أي push جديد حتى تصل مراجعة Codex على
+#       الـHEAD الجديد تحديداً — بلا أي استثناء.
 
 on:
   pull_request_target:
@@ -136,13 +157,38 @@ jobs:
           # `add` لدمجها في مصفوفة مسطّحة واحدة قبل أي عدّ أو تصفية.
           REVIEWS_JSON=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --paginate \
             | jq -s '(add // [])')
-          REVIEWED_COUNT=$(echo "$REVIEWS_JSON" | jq --arg sha "$HEAD_SHA" --arg bot "$CODEX_BOT_LOGIN" \
+          FORMAL_REVIEW_COUNT=$(echo "$REVIEWS_JSON" | jq --arg sha "$HEAD_SHA" --arg bot "$CODEX_BOT_LOGIN" \
             '[.[] | select(.user.login == $bot and .commit_id == $sha)] | length')
 
-          # طبقة معلوماتية best-effort فقط: عدّ شارات P0/P1/P2/P3 في تعليقات Codex
-          # المرتبطة بنفس الـHEAD. لا تُستخدم هذه القيمة لإسقاط الفحص.
           COMMENTS_JSON=$(gh api "repos/$REPO/pulls/$PR_NUMBER/comments" --paginate \
             | jq -s '(add // [])')
+          REVIEW_COMMENT_COUNT=$(echo "$COMMENTS_JSON" | jq --arg sha "$HEAD_SHA" --arg bot "$CODEX_BOT_LOGIN" \
+            '[.[] | select(.user.login == $bot and .commit_id == $sha)] | length')
+
+          # إصلاح 2026-08-29: الـartifact الحقيقي الذي ينشره Codex هو Issue Comment عادي
+          # (POST /issues/{n}/comments)، بنص يتضمن "**Reviewed commit:** `<short-sha>`".
+          # لا يظهر لا في pulls/reviews ولا في pulls/comments إطلاقاً. نستخرج الـshort-sha
+          # بـregex صارم من نص التعليق فقط (لا استدلال آخر)، ونطابقه كـprefix حرفي
+          # لـhead_sha الحالي — لا اعتماد على created_at إطلاقاً.
+          ISSUE_COMMENTS_JSON=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
+            | jq -s '(add // [])')
+          BOT_ISSUE_BODIES=$(echo "$ISSUE_COMMENTS_JSON" | jq -r --arg bot "$CODEX_BOT_LOGIN" \
+            '.[] | select(.user.login == $bot) | .body')
+
+          HEAD_SHA_LC=$(echo "$HEAD_SHA" | tr '[:upper:]' '[:lower:]')
+          ISSUE_COMMENT_MATCH=0
+          if [ -n "$BOT_ISSUE_BODIES" ]; then
+            while IFS= read -r SHORT_SHA; do
+              [ -z "$SHORT_SHA" ] && continue
+              SHORT_SHA_LC=$(echo "$SHORT_SHA" | tr '[:upper:]' '[:lower:]')
+              case "$HEAD_SHA_LC" in
+                "$SHORT_SHA_LC"*) ISSUE_COMMENT_MATCH=1 ;;
+              esac
+            done < <(echo "$BOT_ISSUE_BODIES" | grep -oP 'Reviewed commit:\*\*\s*`\K[0-9a-fA-F]{7,40}' || true)
+          fi
+
+          # طبقة معلوماتية best-effort فقط: عدّ شارات P0/P1/P2/P3 في تعليقات Codex
+          # المرتبطة بنفس الـHEAD (review comments). لا تُستخدم هذه القيمة لإسقاط الفحص.
           BADGES=$(echo "$COMMENTS_JSON" | jq -r --arg sha "$HEAD_SHA" --arg bot "$CODEX_BOT_LOGIN" \
             '[.[] | select(.user.login == $bot and .commit_id == $sha) | .body] | join("\n")' \
             | grep -oE 'badge/P[0-3]-' | sort | uniq -c || true)
@@ -151,14 +197,14 @@ jobs:
             BADGES="(لا توجد شارات درجة خطورة ملحوظة على هذا الـHEAD — أو Codex لم يستخدم هذا التنسيق)"
           fi
 
-          echo "reviewed_count=$REVIEWED_COUNT" >> "$GITHUB_OUTPUT"
+          echo "reviewed_count=$((FORMAL_REVIEW_COUNT + REVIEW_COMMENT_COUNT + ISSUE_COMMENT_MATCH))" >> "$GITHUB_OUTPUT"
           {
             echo "badges<<EOF"
             echo "$BADGES"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
-          if [ "$REVIEWED_COUNT" -gt 0 ]; then
+          if [ "$FORMAL_REVIEW_COUNT" -gt 0 ] || [ "$REVIEW_COMMENT_COUNT" -gt 0 ] || [ "$ISSUE_COMMENT_MATCH" -eq 1 ]; then
             echo "conclusion=success" >> "$GITHUB_OUTPUT"
             echo "summary=تمت مراجعة $CODEX_BOT_LOGIN لأحدث commit ($HEAD_SHA)." >> "$GITHUB_OUTPUT"
           else
