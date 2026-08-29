@@ -36,6 +36,22 @@ name: Codex Review Gate
 #     - كل البيانات المستخدمة تأتي حصراً من GitHub API الرسمي (pulls/{n}, reviews,
 #       comments) — أرقام ومعرّفات ونصوص Metadata فقط، لا تنفيذ كود من الـPR إطلاقاً.
 #     - اسم الفحص يبقى ثابتاً: "Codex Review Gate".
+#
+# ⚠️ إصلاح ملاحظة Codex P1 بتاريخ 2026-08-27 (fork/Dependabot PRs محجوبة دائماً):
+#   GitHub يخفّض GITHUB_TOKEN إلى read-only في PRs القادمة من forks (وDependabot تحديداً)
+#   بغض النظر عن `permissions: checks: write` المطلوبة هنا صراحة. سابقاً كانت نتيجة
+#   الـGate تعتمد على نجاح استدعاء POST /check-runs لنشر check-run إضافي بنفس الاسم —
+#   فإذا رجع هذا الاستدعاء 403 (حالة الـfork)، كان `set -e` يُفشل الـjob كاملاً حتى لو
+#   كانت المراجعة نفسها موجودة وناجحة (REVIEWED_COUNT > 0)، فيُحجب PR مراجَع فعلياً
+#   إلى الأبد. الإصلاح:
+#     1. النتيجة المعتمدة الوحيدة للـGate هي نتيجة الـjob نفسه (الفحص المدمج تلقائياً
+#        في تبويب Checks باسم الـjob "Codex Review Gate") — لا حاجة لأي check-run يُنشأ
+#        يدوياً عبر API لتحديد PASS/FAIL.
+#     2. نشر check-run إضافي (لعرض شارات P0/P1 كمعلومة فقط) أصبح خطوة best-effort
+#        صريحة: `continue-on-error: true`، ولا يوجد `exit 1` بداخلها إطلاقاً.
+#     3. خطوة أخيرة منفصلة هي من تقرر exit code النهائي للـjob، بالاعتماد حصراً على
+#        `steps.check.outputs.conclusion` (نتاج فحص مراجعة Codex)، بغض النظر تماماً عن
+#        نجاح أو فشل نشر الـcheck-run الإضافي (403 أو غيره).
 
 on:
   pull_request_target:
@@ -143,34 +159,53 @@ jobs:
             echo "summary=لا توجد مراجعة من $CODEX_BOT_LOGIN على أحدث commit ($HEAD_SHA) بعد. انتظر المراجعة التلقائية، أو علّق @codex review، ثم أعد المحاولة." >> "$GITHUB_OUTPUT"
           fi
 
-      - name: نشر Check Run باسم "Codex Review Gate"
+      - name: نشر Check Run معلوماتي إضافي (best-effort — لا يحدد نتيجة الـGate)
+        id: publish
         if: steps.pr.outputs.base_ref == 'main'
+        continue-on-error: true
         run: |
           set -euo pipefail
           HEAD_SHA="${{ steps.pr.outputs.head_sha }}"
           CONCLUSION="${{ steps.check.outputs.conclusion }}"
           SUMMARY="${{ steps.check.outputs.summary }}"
 
+          # ⚠️ اسم مختلف عمداً عن اسم الـjob "Codex Review Gate" (وليس نفسه):
+          # هذا check-run معلوماتي إضافي فقط (يعرض شارات P0/P1) — الفحص الحاكم فعلياً
+          # للدمج هو الـcheck المدمج تلقائياً باسم الـjob نفسه. تسميتهما بنفس الاسم
+          # كانت تُنتج أكثر من check-run بنفس الاسم وتُربك مطابقة Required Status Check.
           PAYLOAD=$(jq -n \
             --arg sha "$HEAD_SHA" \
             --arg conclusion "$CONCLUSION" \
             --arg summary "$SUMMARY" \
             --arg badges "${{ steps.check.outputs.badges }}" \
             '{
-              name: "Codex Review Gate",
+              name: "Codex Review Gate — تفاصيل",
               head_sha: $sha,
               status: "completed",
               conclusion: $conclusion,
               output: {
-                title: "Codex Review Gate",
+                title: "Codex Review Gate — تفاصيل",
                 summary: $summary,
-                text: ("### درجات الخطورة (best-effort، معلوماتي فقط — غير حاكم للدمج)\n```\n" + $badges + "\n```\n\nمنع الدمج مع ملاحظات مفتوحة يُفرض عبر إعداد GitHub \"Require conversation resolution before merging\"، وليس عبر هذا الفحص.")
+                text: ("### درجات الخطورة (best-effort، معلوماتي فقط — غير حاكم للدمج)\n```\n" + $badges + "\n```\n\nمنع الدمج مع ملاحظات مفتوحة يُفرض عبر إعداد GitHub \"Require conversation resolution before merging\"، وليس عبر هذا الفحص.\n\nنتيجة الدمج الفعلية محكومة حصراً بنتيجة هذا الـjob نفسه (Codex Review Gate)، وليس بهذا الـcheck-run الإضافي.")
               }
             }')
 
           echo "$PAYLOAD" | gh api "repos/$REPO/check-runs" --input - >/dev/null
-          echo "نُشر Check Run: Codex Review Gate = $CONCLUSION على $HEAD_SHA"
+          echo "نُشر check-run معلوماتي إضافي: Codex Review Gate — تفاصيل = $CONCLUSION على $HEAD_SHA"
+
+      - name: النتيجة النهائية المعتمدة للـGate (مستقلة تماماً عن نجاح النشر أعلاه)
+        if: steps.pr.outputs.base_ref == 'main'
+        run: |
+          set -euo pipefail
+          CONCLUSION="${{ steps.check.outputs.conclusion }}"
+
+          if [ "${{ steps.publish.outcome }}" != "success" ]; then
+            echo "تنبيه: نشر check-run المعلوماتي الإضافي فشل (مثلاً GITHUB_TOKEN للقراءة فقط في fork/Dependabot PR) — لا تأثير على نتيجة الـGate الأساسية." >&2
+          fi
 
           if [ "$CONCLUSION" = "failure" ]; then
+            echo "Codex Review Gate = FAIL: لا توجد مراجعة Codex على HEAD الحالي بعد."
             exit 1
           fi
+
+          echo "Codex Review Gate = PASS: تمت مراجعة Codex على HEAD الحالي."
