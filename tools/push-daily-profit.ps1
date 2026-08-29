@@ -193,7 +193,7 @@ try {
         Authorization = "Bearer $($auth.access_token)"
         "Accept-Profile" = "public"
         "Content-Profile" = "public"
-        Prefer = "return=minimal"
+        Prefer = "return=representation"
     }
     $payload = @{
         source = "ameen_daily_profit"
@@ -203,15 +203,17 @@ try {
         items = @()
     } | ConvertTo-Json -Depth 8 -Compress
 
-    Invoke-RestMethod -Method Post -Uri "$supabaseUrl/rest/v1/inventory_reports" `
+    $insertedRows = Invoke-RestMethod -Method Post -Uri "$supabaseUrl/rest/v1/inventory_reports" `
         -Headers $headers -ContentType "application/json; charset=utf-8" `
-        -Body ([Text.Encoding]::UTF8.GetBytes($payload)) -TimeoutSec 30 | Out-Null
+        -Body ([Text.Encoding]::UTF8.GetBytes($payload)) -TimeoutSec 30
+    $insertedId = ($insertedRows | Select-Object -First 1).id
+    if (-not $insertedId) { throw "لم يُعِد Supabase معرّف الصف المرفوع — أُلغي حذف النسخ القديمة تفادياً لحذف التقرير الجديد." }
 
     # أبقِ أحدث نسخة فقط لليوم: نرفع أولاً ثم نحذف النسخ الأقدم، فلا توجد
     # لحظة يصبح فيها الأمر بلا تقرير أثناء المزامنة.
-    $currentCreatedAt = (Get-Date).ToUniversalTime().AddSeconds(-2).ToString("yyyy-MM-ddTHH:mm:ssZ")
+    # نحذف بالمُعرّف لا بالوقت: الحذف الزمني كان يمحو التقرير الجديد نفسه إن تجاوز الرفع ثانيتين.
     Invoke-RestMethod -Method Delete `
-        -Uri "$supabaseUrl/rest/v1/inventory_reports?source=eq.ameen_daily_profit&report_date=eq.$reportDate&created_at=lt.$currentCreatedAt" `
+        -Uri "$supabaseUrl/rest/v1/inventory_reports?source=eq.ameen_daily_profit&report_date=eq.$reportDate&id=neq.$insertedId" `
         -Headers $headers -TimeoutSec 30 | Out-Null
 
     Write-Log "تم رفع تقرير الربح اليومي بنجاح."
