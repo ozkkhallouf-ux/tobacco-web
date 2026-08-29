@@ -19,12 +19,40 @@ create unique index if not exists inventory_reports_ameen_daily_profit_date_uidx
   on public.inventory_reports (report_date)
   where source = 'ameen_daily_profit';
 
--- ملاحظة أمنية (Codex P1، 2026-08-29): GRANT وحدها لا تكفي — Postgres يمنح
--- EXECUTE لـPUBLIC تلقائياً على أي دالة جديدة ما لم تُسحب صراحة. بما أن هذه
--- الدالة SECURITY DEFINER، فبقاء PUBLIC ممنوحاً كان يسمح لأي مستخدم مصادَق
--- (أو anon حسب صلاحيات الـschema) باستدعائها وتجاوز RLS على inventory_reports.
--- الإصلاح: REVOKE صريح من PUBLIC، وإسقاط معامل created_by المُرسَل من العميل
--- (كان قابلاً للتزوير بأي UUID) واشتقاقه من auth.uid() داخل الدالة نفسها.
+-- ملاحظة أمنية (Codex P1، 2026-08-29، جولة ١): GRANT وحدها لا تكفي — Postgres
+-- يمنح EXECUTE لـPUBLIC تلقائياً على أي دالة جديدة ما لم تُسحب صراحة. بما أن
+-- هذه الدالة SECURITY DEFINER، فبقاء PUBLIC ممنوحاً كان يسمح لأي مستخدم
+-- مصادَق (أو anon حسب صلاحيات الـschema) باستدعائها وتجاوز RLS على
+-- inventory_reports. الإصلاح: REVOKE صريح من PUBLIC، وإسقاط معامل created_by
+-- المُرسَل من العميل (كان قابلاً للتزوير بأي UUID) واشتقاقه من auth.uid()
+-- داخل الدالة نفسها.
+--
+-- ملاحظة أمنية إضافية (Codex P1، 2026-08-29، جولة ٢): GRANT لكل دور
+-- authenticated ما زال واسعاً جداً — أي جلسة مصادَقة عادية (مثل جلسة عدّاد
+-- الجرد) تستطيع استدعاء PostgREST مباشرة بأي بيانات ربح ملفّقة وتجاوز RLS
+-- عبر SECURITY DEFINER. اشتقاق created_by من auth.uid() يسجّل الفاعل فقط
+-- ولا يمنعه. الإصلاح: حارس هوية صريح داخل الدالة يقتصر على هوية المزامنة
+-- الرسمية الوحيدة المستعملة فعلياً بمهمتي TOBACCO Ameen Sync وTOBACCO Sales
+-- Line Items Push (وTOBACCO_SYNC_EMAIL/TOBACCO_SYNC_PASSWORD في بيئة
+-- Windows). هذا نفس النمط المعتمد سلفاً بالمشروع لدوال sync writer الأخرى
+-- (sales_line_items_is_sync_writer، ameen_item_snapshot_is_sync_writer،
+-- ameen_warehouse_stock_reports_is_sync_writer، ...) بنفس الـUUID الثابت
+-- الحي فعلياً — لا UUID جديد اخترعناه، وليس سراً (معرّف مستخدم لا كلمة مرور).
+create or replace function public.ameen_daily_profit_is_sync_writer()
+returns boolean
+language sql
+stable
+security invoker
+set search_path = ''
+as $$
+  select (select auth.uid()) = '9724dbe4-ecb0-49f7-a6b4-12f7f73c68f3'::uuid;
+$$;
+
+revoke all on function public.ameen_daily_profit_is_sync_writer()
+  from public, anon, service_role;
+grant execute on function public.ameen_daily_profit_is_sync_writer()
+  to authenticated;
+
 create or replace function public.upsert_ameen_daily_profit(
   p_report_date date,
   p_summary jsonb,
@@ -40,6 +68,9 @@ declare
 begin
   if v_uid is null then
     raise exception 'upsert_ameen_daily_profit requires an authenticated caller';
+  end if;
+  if not public.ameen_daily_profit_is_sync_writer() then
+    raise exception 'upsert_ameen_daily_profit is restricted to the trusted sync identity';
   end if;
 
   insert into public.inventory_reports (source, report_date, summary, items, created_by)

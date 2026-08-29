@@ -490,6 +490,18 @@ if (!/revoke\s+all\s+on\s+function\s+public\.upsert_ameen_daily_profit[^\n]*from
   console.error("ameen-daily-profit-atomic-upsert.sql must explicitly REVOKE ALL ... FROM PUBLIC — Postgres grants EXECUTE to PUBLIC by default on new functions, which would let any caller bypass RLS via this SECURITY DEFINER function.");
   failed = true;
 }
+// تقييد الهوية (Codex P1، 2026-08-29، جولة ٢): GRANT لكل authenticated غير كافٍ —
+// أي جلسة مصادَقة عادية تستطيع استدعاء SECURITY DEFINER وتزوير بيانات الربح. يجب
+// وجود حارس صريح يقتصر على هوية المزامنة الرسمية الثابتة (نفس نمط sync_writer
+// المعتمد بالمشروع)، لا الاعتماد على تسجيل created_by وحده.
+if (!/ameen_daily_profit_is_sync_writer/.test(dailyProfitSql)) {
+  console.error("ameen-daily-profit-atomic-upsert.sql must restrict upsert_ameen_daily_profit to the trusted sync identity (ameen_daily_profit_is_sync_writer) — logging created_by via auth.uid() records the caller but does not authorize them; any authenticated session could otherwise overwrite the report.");
+  failed = true;
+}
+if (!/9724dbe4-ecb0-49f7-a6b4-12f7f73c68f3/.test(dailyProfitSql)) {
+  console.error("ameen-daily-profit-atomic-upsert.sql must guard against the project's established live sync-account UUID, matching the pattern already used by sales_line_items_is_sync_writer / ameen_item_snapshot_is_sync_writer.");
+  failed = true;
+}
 const newsletterContracts = [
   'navButton("pricing", "نشرة الأسعار")',
   'pricing: "نشرة الأسعار"',
