@@ -232,7 +232,8 @@ if ($newJson.Trim() -eq $oldJson.Trim()) {
     exit 0
 }
 
-Set-Content $dataPath -Value $newJson -Encoding UTF8
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText($dataPath, $newJson, $utf8NoBom)
 Log "✓ price-data.json محدَّث ($($priceData.Count) مادة)" "Green"
 
 # ════════════════════════════════════════════════════════════════════════════
