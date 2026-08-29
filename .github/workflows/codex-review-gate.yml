@@ -47,11 +47,18 @@ name: Codex Review Gate
 #     1. النتيجة المعتمدة الوحيدة للـGate هي نتيجة الـjob نفسه (الفحص المدمج تلقائياً
 #        في تبويب Checks باسم الـjob "Codex Review Gate") — لا حاجة لأي check-run يُنشأ
 #        يدوياً عبر API لتحديد PASS/FAIL.
-#     2. نشر check-run إضافي (لعرض شارات P0/P1 كمعلومة فقط) أصبح خطوة best-effort
-#        صريحة: `continue-on-error: true`، ولا يوجد `exit 1` بداخلها إطلاقاً.
-#     3. خطوة أخيرة منفصلة هي من تقرر exit code النهائي للـjob، بالاعتماد حصراً على
-#        `steps.check.outputs.conclusion` (نتاج فحص مراجعة Codex)، بغض النظر تماماً عن
-#        نجاح أو فشل نشر الـcheck-run الإضافي (403 أو غيره).
+#     2. نشر check-run باسم "Codex Review Gate" (الملتصق صراحة بـhead_sha الفعلي للـPR،
+#        وهو الوحيد المضمون الالتصاق الصحيح لكل أنواع الأحداث — انظر تعليق الإصلاح
+#        الثاني أدناه) خطوة best-effort صريحة: `continue-on-error: true`، ولا يوجد
+#        `exit 1` بداخلها إطلاقاً — فشلها (403 مثلاً في fork/Dependabot) لا يُسقط الـjob.
+#     3. خطوة أخيرة منفصلة هي من تقرر exit code النهائي للـjob نفسه (المدمج تلقائياً في
+#        تبويب Checks)، بالاعتماد حصراً على `steps.check.outputs.conclusion` (نتاج فحص
+#        مراجعة Codex)، بغض النظر تماماً عن نجاح أو فشل نشر الـcheck-run أعلاه (403 أو غيره).
+#     ⚠️ ملاحظة صادقة: على fork/Dependabot PR حقيقي (GITHUB_TOKEN للقراءة فقط)، خطوة
+#        النشر (٢) قد تفشل بـ403 فلا يظهر أي check باسم "Codex Review Gate" ملتصق بـ
+#        head_sha الصحيح على الإطلاق — يبقى فقط الـcheck التلقائي للـjob (المحتمل التصاقه
+#        بـsha مختلف حسب دلالة GITHUB_SHA لكل حدث). هذا قيد فعلي في صلاحيات GITHUB_TOKEN
+#        لا يمكن تجاوزه إلا باستخدام App/PAT بصلاحية كتابة — خارج نطاق هذا الإصلاح.
 
 on:
   pull_request_target:
@@ -169,21 +176,22 @@ jobs:
           CONCLUSION="${{ steps.check.outputs.conclusion }}"
           SUMMARY="${{ steps.check.outputs.summary }}"
 
-          # ⚠️ إصلاح ملاحظة Codex P1 بتاريخ 2026-08-29 (workflow_dispatch لا يلتصق بـHEAD الصحيح):
-          #   في تشغيل عادي (pull_request_target/pull_request_review/pull_request_review_comment)
-          #   الـcheck المدمج تلقائياً باسم الـjob "Codex Review Gate" يلتصق أصلاً بـhead_sha
-          #   الصحيح للـPR، فتسمية هذا الـcheck-run الإضافي باسم مختلف ("— تفاصيل") لا تضر.
-          #   لكن GitHub يوثّق أن حدث workflow_dispatch (يُستخدم للتعافي من تشغيل فائت أو
-          #   ملغى) يجعل GITHUB_SHA = "آخر commit على الفرع الافتراضي" — أي أن الـcheck
-          #   المدمج تلقائياً بالـjob يلتصق بـHEAD الخاطئ (main) لا بـhead_sha الفعلي للـPR
-          #   المطلوب فحصه. في هذه الحالة فقط، هذا الـcheck-run المنشور يدوياً (الملتصق
-          #   صراحة بـ$HEAD_SHA الصحيح عبر API) هو الوحيد القادر على تحقيق شرط الـRequired
-          #   Status Check على ذلك الـPR — لذلك يجب أن يحمل الاسم الثابت "Codex Review Gate"
-          #   في مسار workflow_dispatch تحديداً، وإلا يبقى الدمج محجوباً حتى بعد تعافٍ ناجح.
-          NAME="Codex Review Gate — تفاصيل"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            NAME="Codex Review Gate"
-          fi
+          # ⚠️ إصلاح ملاحظة Codex P1 بتاريخ 2026-08-29 (المرة الثانية — تصحيح الافتراض الخاطئ):
+          #   الافتراض السابق كان أن الـcheck المدمج تلقائياً باسم الـjob "Codex Review Gate"
+          #   يلتصق بـhead_sha الصحيح للـPR في المسارات التلقائية (pull_request_target/
+          #   pull_request_review/pull_request_review_comment)، وأن مسار workflow_dispatch
+          #   وحده هو الاستثناء. هذا خاطئ: GitHub يوثّق GITHUB_SHA لـpull_request_target
+          #   بأنه "آخر commit على فرع الـbase" (main) لا head الـPR، ولـpull_request_review
+          #   بأنه "آخر merge commit على فرع GITHUB_REF" — أي أن الـcheck المدمج تلقائياً
+          #   بالـjob غير ملتصق بـhead_sha الفعلي للـPR في أي من المسارات التلقائية أصلاً،
+          #   تماماً كحال workflow_dispatch. الملتصق الوحيد بـhead_sha الصحيح دائماً (لأنه
+          #   مبني على steps.pr.outputs.head_sha المجلوب صراحة من GitHub API لحظة التشغيل،
+          #   بغض النظر عن دلالة GITHUB_SHA لكل حدث) هو هذا الـcheck-run المنشور يدوياً.
+          #   لذلك: الاسم الثابت "Codex Review Gate" يُستخدم دائماً هنا لكل أنواع الأحداث —
+          #   لا تمييز بعد الآن. لا تعارض عملي في التسمية المكرّرة مع الـcheck التلقائي
+          #   لأن الأخير غالباً ملتصق بـsha مختلف (base main)، فلا يتنافسان على نفس السطر
+          #   في تبويب Checks لنفس الـcommit المطلوب فحصه.
+          NAME="Codex Review Gate"
 
           PAYLOAD=$(jq -n \
             --arg name "$NAME" \
