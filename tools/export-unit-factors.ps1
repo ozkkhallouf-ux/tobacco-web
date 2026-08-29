@@ -146,7 +146,8 @@ foreach ($item in $priceData) {
     }
 }
 
-$priceData | ConvertTo-Json -Depth 5 | Set-Content $dataPath -Encoding UTF8
+$newJson = $priceData | ConvertTo-Json -Depth 5
+[System.IO.File]::WriteAllText($dataPath, $newJson, (New-Object System.Text.UTF8Encoding($false)))
 Write-Host "✓ تم تحديث $updated مادة في price-data.json" -ForegroundColor Green
 
 Write-Host ""
