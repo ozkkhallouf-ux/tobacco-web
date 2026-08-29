@@ -195,11 +195,13 @@ try {
         "Content-Profile" = "public"
         Prefer = "return=representation"
     }
+    # created_by يُشتق داخل الدالة من auth.uid() (هوية جلسة تسجيل الدخول أعلاه)
+    # لا يُرسَل كمعامل — تفادياً لانتحال created_by من أي مستدعٍ آخر لو تسرّبت
+    # الصلاحية مستقبلاً (ملاحظة Codex P1 على PR #132).
     $payload = @{
         p_report_date = $reportDate
         p_summary = $summary
         p_items = @()
-        p_created_by = $auth.user.id
     } | ConvertTo-Json -Depth 8 -Compress
 
     # upsert ذرّي بجملة SQL واحدة (RPC upsert_ameen_daily_profit) بدل إدراج

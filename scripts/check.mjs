@@ -479,6 +479,17 @@ if (/Method\s+Delete[^\n]*inventory_reports/i.test(dailyProfitScript)) {
   console.error("push-daily-profit.ps1 must not DELETE from inventory_reports directly — that reopens the race window between concurrent producers.");
   failed = true;
 }
+// أمن upsert_ameen_daily_profit (Codex P1، 2026-08-29): created_by يجب أن يُشتق من
+// auth.uid() داخل الدالة، لا أن يُرسَل من العميل — إرساله يفتح انتحالاً لهوية أي مستخدم.
+if (/p_created_by/.test(dailyProfitScript)) {
+  console.error("push-daily-profit.ps1 must not send p_created_by — the RPC derives created_by from auth.uid() server-side to prevent identity spoofing.");
+  failed = true;
+}
+const dailyProfitSql = readFileSync("supabase/ameen-daily-profit-atomic-upsert.sql", "utf8");
+if (!/revoke\s+all\s+on\s+function\s+public\.upsert_ameen_daily_profit[^\n]*from\s+public/i.test(dailyProfitSql)) {
+  console.error("ameen-daily-profit-atomic-upsert.sql must explicitly REVOKE ALL ... FROM PUBLIC — Postgres grants EXECUTE to PUBLIC by default on new functions, which would let any caller bypass RLS via this SECURITY DEFINER function.");
+  failed = true;
+}
 const newsletterContracts = [
   'navButton("pricing", "نشرة الأسعار")',
   'pricing: "نشرة الأسعار"',
