@@ -1,5 +1,19 @@
 name: توليد نشرات الأسعار
 
+# ⚠️ تعديل 2026-08-29: main محمي الآن بـRequired Pull Request + 3 Required Status
+# Checks (Codex Review Gate, check, validate) بلا أي استثناء ممكن لبوت — تحقّق حي:
+#   - GitHub Rulesets لا تدعم استثناء (bypass) تطبيق GitHub Actions إلا لمستودعات
+#     مملوكة لمنظمة (Organization)؛ هذا المستودع مملوك لحساب شخصي (User) فرفض GitHub
+#     الطلب صراحة: "Actor GitHub Actions integration must be part of the ruleset
+#     source or owner organization".
+#   - Codex (chatgpt-codex-connector[bot]) لا يراجع أي PR تلقائياً بمجرد فتحه؛ تحقّق
+#     حي على PR #131 أثبت أن كل مراجعة سبقها تعليق يدوي "@codex review" من مالك
+#     الحساب — أي بلا هذا التعليق، سيبقى "Codex Review Gate" عالقاً على FAIL للأبد.
+# الحل: البوت لا يدفع على main مباشرة بعد الآن. يدفع لفرع ثابت (bot/price-bulletins)،
+# يفتح/يحدّث PR، يعلّق "@codex review" تلقائياً بنفسه (Codex يستجيب لذكره بغض النظر عن
+# هوية صاحب التعليق)، ثم ينتظر نجاح الفحوصات الثلاثة ويدمج تلقائياً. لو تأخرت المراجعة/
+# الفحوصات، يبقى PR مفتوحاً ويكمل التشغيل التالي (كل 5 دقائق) المحاولة على نفس PR.
+
 on:
   push:
     branches: [main]
@@ -14,6 +28,8 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
+  issues: write
 
 concurrency:
   group: generate-price-lists
@@ -23,6 +39,8 @@ jobs:
   generate:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -62,15 +80,56 @@ jobs:
         if: steps.bulletin_changes.outputs.changed == 'true'
         run: |
           FILE="public/service-worker.js"; CURRENT=$(grep -o 'v[0-9]*"' "$FILE" | tr -d '"v'); NEW=$((CURRENT + 1)); sed -i "s/v${CURRENT}\"/v${NEW}\"/" "$FILE"
-      - name: Commit generated files
+      - name: Commit ودفع لفرع البوت (لا push مباشر على main)
+        id: commit
         if: steps.bulletin_changes.outputs.changed == 'true'
         run: |
+          set -euo pipefail
           git config user.name "price-bot"
           git config user.email "action@github.com"
           git add public/downloads/ public/service-worker.js
-          git diff --staged --quiet && exit 0
+          if git diff --staged --quiet; then
+            echo "no_changes=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "no_changes=false" >> "$GITHUB_OUTPUT"
           STAMP=$(date -u '+%Y-%m-%d %H:%M UTC')
+          git checkout -B bot/price-bulletins
           git commit -m "Auto: تحديث نشرات الأسعار — ${STAMP}"
-          # main قد يتحرك أثناء توليد PDF. أعد الدمج ثم ادفع بدل فشل non-fast-forward.
-          git pull --rebase origin main
-          git push origin HEAD:main
+          git push --force origin bot/price-bulletins
+      - name: افتح أو أعد استخدام Pull Request وعلّق @codex review
+        id: pr
+        if: steps.commit.outputs.no_changes == 'false'
+        run: |
+          set -euo pipefail
+          NUM=$(gh pr list --repo "$GITHUB_REPOSITORY" --head bot/price-bulletins --base main --state open --json number --jq '.[0].number // empty')
+          if [ -z "$NUM" ]; then
+            URL=$(gh pr create --repo "$GITHUB_REPOSITORY" --base main --head bot/price-bulletins \
+              --title "Auto: تحديث نشرات الأسعار" \
+              --body "تحديث تلقائي لنشرات الأسعار (PDF/HTML) من price-bot. يُدمج تلقائياً بعد نجاح Codex Review Gate وفحوصات check/validate.")
+            NUM=$(basename "$URL")
+          fi
+          echo "number=$NUM" >> "$GITHUB_OUTPUT"
+          gh pr comment "$NUM" --repo "$GITHUB_REPOSITORY" --body "@codex review"
+      - name: انتظار الفحوصات ودمج تلقائي عند الجاهزية
+        if: steps.commit.outputs.no_changes == 'false'
+        run: |
+          set -euo pipefail
+          NUM="${{ steps.pr.outputs.number }}"
+          DEADLINE=$((SECONDS + 330))
+          while [ "$SECONDS" -lt "$DEADLINE" ]; do
+            STATE=$(gh pr view "$NUM" --repo "$GITHUB_REPOSITORY" --json state --jq '.state')
+            if [ "$STATE" = "MERGED" ]; then
+              echo "PR #$NUM مدموج بالفعل."
+              exit 0
+            fi
+            MERGE_STATE=$(gh pr view "$NUM" --repo "$GITHUB_REPOSITORY" --json mergeStateStatus --jq '.mergeStateStatus')
+            echo "PR #$NUM — mergeStateStatus=$MERGE_STATE"
+            if [ "$MERGE_STATE" = "CLEAN" ]; then
+              gh pr merge "$NUM" --repo "$GITHUB_REPOSITORY" --squash --delete-branch
+              echo "تم دمج PR #$NUM ونشر النشرات على main."
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "لم تكتمل مراجعة Codex/الفحوصات خلال المهلة — PR #$NUM يبقى مفتوحاً وسيُستكمل بالتشغيل القادم (كل 5 دقائق)."
