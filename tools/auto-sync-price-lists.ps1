@@ -17,6 +17,18 @@ param(
 $ErrorActionPreference = "Stop"
 $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 
+# نفس تطبيع الاسم المستخدم في push-item-details.ps1 / ameen-sync-agent.ps1
+# (item_key في approved_price_items هو اسم المادة الخام، غير متسق همزات/تاء مربوطة)
+function Normalize-ItemName($Value) {
+    $text = if ($null -ne $Value) { [string]$Value } else { "" }
+    $text = $text.Trim()
+    $text = [regex]::Replace($text, '^\d{2,}\s*-\s*', "")
+    $text = $text.Replace("أ","ا").Replace("إ","ا").Replace("آ","ا").Replace("ى","ي").Replace("ة","ه")
+    $text = [regex]::Replace($text, "[^\p{L}\p{N}]+", " ")
+    $text = [regex]::Replace($text, "\s+", " ")
+    return $text.Trim().ToLowerInvariant()
+}
+
 function Log($msg, $color = "White") {
     $line = "[$timestamp] $msg"
     Write-Host $line -ForegroundColor $color
@@ -54,7 +66,7 @@ $discCmd = $conn.CreateCommand()
 $discCmd.CommandText = @"
 SELECT TABLE_NAME, COLUMN_NAME
 FROM INFORMATION_SCHEMA.COLUMNS
-WHERE TABLE_NAME LIKE 'Material%'
+WHERE TABLE_NAME LIKE '%Material%'
   AND (COLUMN_NAME LIKE '%unit%'   OR COLUMN_NAME LIKE '%Unit%'
     OR COLUMN_NAME LIKE '%factor%' OR COLUMN_NAME LIKE '%Factor%'
     OR COLUMN_NAME LIKE '%group%'  OR COLUMN_NAME LIKE '%Group%'
@@ -72,8 +84,11 @@ while ($dr.Read()) {
 }
 $dr.Close()
 
-$matCols = if ($colMap["MaterialCard000"]) { $colMap["MaterialCard000"] } else { @() }
-Log "أعمدة MaterialCard000: $($matCols -join ', ')" "Gray"
+# ملاحظة (2026-08-29): MaterialCard000 غير موجود في AmnDb002 (تدوير سنة الأمين) — المصدر
+# الحي الآن هو vwMaterials (نفس ما تستخدمه push-item-costs.ps1 وdiscover-order-limit.ps1).
+$materialSource = "vwMaterials"
+$matCols = if ($colMap[$materialSource]) { $colMap[$materialSource] } else { @() }
+Log "أعمدة $materialSource : $($matCols -join ', ')" "Gray"
 
 # ── اختيار أعمدة الوحدة والمجموعة ────────────────────────────────────────
 $pick = {
@@ -81,8 +96,8 @@ $pick = {
     $candidates | Where-Object { $list -contains $_ } | Select-Object -First 1
 }
 
-$factorCol = & $pick $matCols @("UnitFactor","ConversionFactor","PackSize","UnitsPerCarton","Qty2")
-$unit1Col  = & $pick $matCols @("SmallUnitName","Unit1Name","UnitSmallName","SmallUnit","Unit1","UnitName","Unit")
+$factorCol = & $pick $matCols @("UnitFactor","ConversionFactor","PackSize","UnitsPerCarton","Qty2","Unit2Fact")
+$unit1Col  = & $pick $matCols @("SmallUnitName","Unit1Name","UnitSmallName","SmallUnit","Unit1","UnitName","Unit","Unity")
 $unit2Col  = & $pick $matCols @("BigUnitName","Unit2Name","UnitBigName","BigUnit","Unit2","UnitName2")
 $groupCol  = & $pick $matCols @("GroupName","CategoryName","ClassName","Group","Category","Class")
 
@@ -105,8 +120,8 @@ SELECT
     $u1Expr              AS unit1_name,
     $u2Expr              AS unit2_name,
     $grExpr              AS item_group
-FROM MaterialCard000 m
-WHERE (m.IsActive = 1 OR m.Active = 1 OR m.Deleted = 0)
+FROM $materialSource m
+WHERE ISNULL(m.bHide, 0) = 0
   AND m.Code IS NOT NULL
   AND LEN(RTRIM(m.Name)) > 0
 ORDER BY m.Name
@@ -161,7 +176,11 @@ try {
         -Headers $headers -Method GET -ErrorAction Stop
     foreach ($r in $rows) {
         if ($r.unit2_price -and [double]$r.unit2_price -gt 0) {
-            $supaMap[$r.item_key] = [Math]::Round([double]$r.unit2_price, 2)
+            # item_key في Supabase هو اسم المادة الخام (وليس كود الأمين) — المطابقة بالاسم المطبّع
+            $nk = Normalize-ItemName $r.item_key
+            if ($nk -and -not $supaMap.ContainsKey($nk)) {
+                $supaMap[$nk] = [Math]::Round([double]$r.unit2_price, 2)
+            }
         }
     }
     Log "✓ Supabase: $($supaMap.Count) سعر معتمد" "Green"
@@ -176,7 +195,7 @@ $priceData = [System.Collections.Generic.List[object]]::new()
 $skipped   = 0
 
 foreach ($item in $ameenItems) {
-    $usd = $supaMap[$item.item_key]
+    $usd = $supaMap[(Normalize-ItemName $item.item_name)]
     if (-not $usd -or $usd -le 0) { $skipped++; continue }
 
     $u2 = if ($item.unit2_name -ne "") { $item.unit2_name } else { "كرتونة" }
@@ -213,7 +232,8 @@ if ($newJson.Trim() -eq $oldJson.Trim()) {
     exit 0
 }
 
-Set-Content $dataPath -Value $newJson -Encoding UTF8
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText($dataPath, $newJson, $utf8NoBom)
 Log "✓ price-data.json محدَّث ($($priceData.Count) مادة)" "Green"
 
 # ════════════════════════════════════════════════════════════════════════════
