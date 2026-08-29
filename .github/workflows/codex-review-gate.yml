@@ -80,6 +80,18 @@ name: Codex Review Gate
 #     - تعليق قديم يذكر sha لا يطابق head_sha الحالي (لأن push جديد غيّر الـsha) لا يُحتسب
 #       أبداً، فيبقى الفحص FAIL تلقائياً بعد أي push جديد حتى تصل مراجعة Codex على
 #       الـHEAD الجديد تحديداً — بلا أي استثناء.
+#
+# ⚠️ إصلاح جوهري ثانٍ بتاريخ 2026-08-29 (الفحص لا يُعاد تلقائياً عند وصول Issue Comment):
+#   بعد إضافة مصدر Issue Comment أعلاه، تحقق حي على PR #128 أظهر أن الـGate بقيت FAIL
+#   حتى بعد نشر Codex لمراجعة صالحة على الـHEAD الحالي، لأن أحداث تشغيل الـworkflow
+#   (`on:`) لم تكن تتضمن `issue_comment` إطلاقاً — فمجرد وصول تعليق Codex (وهو الـartifact
+#   الفعلي المُستخدَم غالباً) لا يُطلق أي تشغيل جديد للفحص، ويبقى الفحص عالقاً على آخر
+#   نتيجة من push سابق حتى push جديد أو تشغيل يدوي. الحل: إضافة `issue_comment: [created]`
+#   كحدث تشغيل، مع:
+#     - تجاهل صريح لأي تعليق ليس على Pull Request (لا يحمل `issue.pull_request`).
+#     - استخراج رقم الـPR من `github.event.issue.number` لهذا المسار تحديداً.
+#     - `base_ref` لهذا المسار يُجلب حصراً من GitHub API (`pulls/{n}.base.ref`) وليس من
+#       الـpayload، لأن حدث `issue_comment` لا يحمل معلومات الـbase أصلاً.
 
 on:
   pull_request_target:
@@ -87,6 +99,8 @@ on:
   pull_request_review:
     types: [submitted]
   pull_request_review_comment:
+    types: [created]
+  issue_comment:
     types: [created]
   workflow_dispatch:
     inputs:
@@ -100,7 +114,7 @@ permissions:
   checks: write
 
 concurrency:
-  group: codex-review-gate-${{ github.event.pull_request.number || github.event.inputs.pr_number }}
+  group: codex-review-gate-${{ github.event.pull_request.number || github.event.issue.number || github.event.inputs.pr_number }}
   cancel-in-progress: true
 
 jobs:
@@ -109,6 +123,7 @@ jobs:
     runs-on: ubuntu-latest
     if: >
       github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'issue_comment' && github.event.issue.pull_request != null ||
       github.event.pull_request.base.ref == 'main'
     env:
       GH_TOKEN: ${{ github.token }}
@@ -121,6 +136,8 @@ jobs:
           set -euo pipefail
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             PR_NUMBER="${{ github.event.inputs.pr_number }}"
+          elif [ "${{ github.event_name }}" = "issue_comment" ]; then
+            PR_NUMBER="${{ github.event.issue.number }}"
           else
             PR_NUMBER="${{ github.event.pull_request.number }}"
           fi
