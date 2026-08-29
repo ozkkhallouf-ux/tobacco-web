@@ -97,7 +97,10 @@ function checkLatestWorkflowRun(workflowName, key, severity) {
   }
   if (!runs.length) return [];
   const last = runs[0];
-  if (last.status === "completed" && last.conclusion && last.conclusion !== "success") {
+  // "skipped" غالباً سلوك مقصود (مثلاً pages.yml يتخطى deploy إن فشل سير عمل توليد
+  // النشرات الذي يشغّله — تلك مشكلته الخاصة، وليست عطلاً إضافياً بالنشر نفسه).
+  const FAILURE_CONCLUSIONS = new Set(["failure", "cancelled", "timed_out", "action_required"]);
+  if (last.status === "completed" && FAILURE_CONCLUSIONS.has(last.conclusion)) {
     return [{
       key,
       title: `آخر تشغيل لسير العمل "${workflowName}" فشل (${last.conclusion})`,
@@ -141,28 +144,14 @@ function dedupeByKey(problems) {
   return [...seen.values()];
 }
 
-function findOpenIssueForKey(key) {
-  const marker = `health:${key}`;
-  let issues;
-  try {
-    issues = ghJSON([
-      "issue", "list",
-      "--repo", REPO,
-      "--label", LABEL,
-      "--state", "open",
-      "--search", marker,
-      "--json", "number,title,body",
-      "--limit", "20",
-    ]);
-  } catch {
-    return null;
-  }
-  return issues.find((i) => i.body && i.body.includes(`<!-- ${marker} -->`)) || null;
-}
-
+// ملاحظة مهمة: `gh issue list --search` يعتمد على فهرسة بحث GitHub وقد يتأخر ثوانٍ عن Issue
+// أُنشئ للتو (لوحظ فعلياً أثناء الاختبار: 504 من واجهة GraphQL + Issue مكرر). لذلك الاعتماد
+// هنا على `--label` فقط (فلترة مباشرة غير مفهرسة) ثم مطابقة العلامة المخفية داخل الذاكرة.
+let _openHealthIssuesCache = null;
 function listAllOpenHealthIssues() {
+  if (_openHealthIssuesCache) return _openHealthIssuesCache;
   try {
-    return ghJSON([
+    _openHealthIssuesCache = ghJSON([
       "issue", "list",
       "--repo", REPO,
       "--label", LABEL,
@@ -171,8 +160,14 @@ function listAllOpenHealthIssues() {
       "--limit", "50",
     ]);
   } catch {
-    return [];
+    _openHealthIssuesCache = [];
   }
+  return _openHealthIssuesCache;
+}
+
+function findOpenIssueForKey(key) {
+  const marker = `<!-- health:${key} -->`;
+  return listAllOpenHealthIssues().find((i) => i.body && i.body.includes(marker)) || null;
 }
 
 function ensureLabel() {
@@ -257,6 +252,10 @@ async function reportProblem(problem) {
     return;
   }
   console.log(`✓ أُنشئ Issue جديد لمشكلة "${problem.key}": ${issueUrl}`);
+  // حدّث الكاش المحلي فوراً كي لا يُنشأ Issue مكرر لنفس المشكلة إن ظهرت مرتين بنفس التشغيل.
+  if (_openHealthIssuesCache) {
+    _openHealthIssuesCache.push({ number: 0, title: problem.title, body: `<!-- health:${problem.key} -->` });
+  }
   await notifyTelegram(problem, issueUrl);
 }
 
