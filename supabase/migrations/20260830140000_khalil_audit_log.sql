@@ -294,9 +294,45 @@ begin
     when query_canceled then
       raise warning 'khalil_audit: notify_telegram canceled/timed out for ameen_log_guid=%',
         new.ameen_log_guid;
+      -- ملاحظة أمنية/موثوقية إضافية (Codex P1، 2026-08-30، جولة ٣): سابقاً
+      -- التحذير فقط كان يعني ضياع الإشعار للأبد — صفّ الـAudit مُدرَج أصلاً
+      -- بـon conflict (ameen_log_guid) do nothing، فلا يُعاد إدراجه أبداً
+      -- لاحقاً، وهذا الـtrigger AFTER INSERT لن يُطلَق ثانيةً لنفس الحدث —
+      -- لا يوجد أي مسار retry. الإصلاح: محاولة إدراج احتياطي مباشر في
+      -- telegram_outbox (تجاوز notify_telegram نفسها) كي يلتقطه
+      -- dispatch_telegram_outbox() بالـcron العادي كأي رسالة أخرى، حتى لو
+      -- كان العطل داخل notify_telegram نفسها لا في الجدول. لو فشل هذا
+      -- الاحتياطي أيضاً (مثلاً الجدول نفسه معطوب)، نكتفي بتحذير إضافي دون
+      -- أي أثر آخر على صفّ الـAudit أو الـcursor.
+      begin
+        if not exists (
+          select 1 from public.telegram_outbox
+          where dedupe_key = new.ameen_log_guid::text
+            and created_at > now() - interval '1 minute'
+        ) then
+          insert into public.telegram_outbox (event_type, message, dedupe_key)
+          values ('khalil_audit_event', left(v_message, 3900), new.ameen_log_guid::text);
+        end if;
+      exception when others then
+        raise warning 'khalil_audit: fallback telegram_outbox insert also failed for ameen_log_guid=%: %',
+          new.ameen_log_guid, sqlerrm;
+      end;
     when others then
       raise warning 'khalil_audit: notify_telegram failed for ameen_log_guid=%: %',
         new.ameen_log_guid, sqlerrm;
+      begin
+        if not exists (
+          select 1 from public.telegram_outbox
+          where dedupe_key = new.ameen_log_guid::text
+            and created_at > now() - interval '1 minute'
+        ) then
+          insert into public.telegram_outbox (event_type, message, dedupe_key)
+          values ('khalil_audit_event', left(v_message, 3900), new.ameen_log_guid::text);
+        end if;
+      exception when others then
+        raise warning 'khalil_audit: fallback telegram_outbox insert also failed for ameen_log_guid=%: %',
+          new.ameen_log_guid, sqlerrm;
+      end;
   end;
 
   return new;

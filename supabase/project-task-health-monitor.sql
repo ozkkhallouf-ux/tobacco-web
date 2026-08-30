@@ -27,7 +27,12 @@ insert into private.project_task_monitors(task_key,task_label,report_source,max_
  ('daily-profit','الربح اليومي','ameen_daily_profit',15,true),
  ('price-sync','مزامنة الأسعار','ameen_price_sync_status',30,true),
  ('invoice-series','سلاسل الفواتير','ameen_invoice_series',30,true),
- ('item-details','تفاصيل المواد','ameen_item_details',480,true)
+ ('item-details','تفاصيل المواد','ameen_item_details',480,true),
+ -- Codex P1، 2026-08-30، جولة ٣: tools/push-khalil-audit-log.ps1 لم يكن له
+ -- أي heartbeat — لو توقفت مهمة "TOBACCO Khalil Audit Sync" (معطّلة/محذوفة/
+ -- الجهاز مطفأ) لا آلية سابقة كانت تكتشف ذلك. المهمة تعمل كل دقيقتين، هامش
+ -- 10 دقائق كافٍ لتفادي إنذار كاذب من تأخير عابر مع كشف التوقف الحقيقي بسرعة.
+ ('khalil-audit','مزامنة تدقيق خليل','khalil_audit_sync_heartbeat',10,true)
 on conflict(task_key) do update set task_label=excluded.task_label,report_source=excluded.report_source,
  max_age_minutes=excluded.max_age_minutes,enabled=excluded.enabled;
 

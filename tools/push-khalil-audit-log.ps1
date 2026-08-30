@@ -57,10 +57,15 @@ function Notify-Failure($Message) {
 # الفلترة على SQL Server هنا + الحارس المطابق داخل record_khalil_audit_event
 # في Supabase يمنعان معاً نسب أي حدث لمستخدم آخر لسجل خليل.
 $KHALIL_USER_GUID = "9A5FE33A-720C-493B-8A13-CE33EE5A008E"
-# إن كان الـcursor فارغاً (أول تشغيل)، لا نستورد كامل تاريخ log000 — نبدأ من
-# نافذة خلفية محدودة (بالساعات) قابلة للضبط عبر KHALIL_AUDIT_BACKFILL_HOURS.
+# ملاحظة موثوقية (Codex P1، 2026-08-30، جولة ٣): "نافذة خلفية بالساعات
+# نسبةً لوقت أول تشغيل فعلي للسكربت" كانت تعني أن أي تأخير بتسجيل Scheduled
+# Task عن لحظة تفعيل صلاحيات خليل (خطوة منفصلة يدوية) يُسقِط بصمت وللأبد كل
+# الأحداث بينهما بمجرد استقرار الـcursor من أول صف مُحتفَظ به. بما أن القراءة
+# مُصفّاة أصلاً على UserGUID خليل وحده (حجم متوقَّع صغير)، الافتراض الآن هو
+# "بلا حد زمني" (0 = كامل تاريخ log000 لخليل) — القيمة تبقى قابلة للضبط عبر
+# KHALIL_AUDIT_BACKFILL_HOURS لمن يريد عمداً تقييدها لسبب أدائي موثّق.
 $backfillHours = Get-Setting "KHALIL_AUDIT_BACKFILL_HOURS"
-if (-not $backfillHours) { $backfillHours = 24 }
+if (-not $backfillHours) { $backfillHours = 0 }
 
 $connStr = Get-Setting "AMEEN_SQL_CONNECTION_STRING"
 $supabaseUrl = Get-Setting "TOBACCO_SUPABASE_URL"
@@ -75,6 +80,36 @@ if (-not $connStr) { Write-Log "ERROR: AMEEN_SQL_CONNECTION_STRING missing."; ex
 if (-not $apiKey -or -not $syncEmail -or -not $syncPassword) {
     Write-Log "ERROR: Supabase sync credentials missing."
     exit 1
+}
+
+# ملاحظة موثوقية (Codex P1، 2026-08-30، جولة ٣): لا يوجد أي heartbeat/تقرير
+# صحة لهذه المهمة — لو توقفت المهمة المجدولة (عُطِّلت، حُذفت، الجهاز مطفأ،
+# أو لم تُسجَّل أصلاً) فلا آلية تنبيه تكتشف ذلك، ويبقى خط تدقيق خليل ميتاً
+# بصمت. الإصلاح: كتابة صفّ حالة دوري في inventory_reports (نفس نمط
+# publish-price-sync-status.ps1)، مسجَّل بمصدر khalil_audit_sync_heartbeat
+# ضمن private.project_task_monitors (راجع supabase/project-task-health-monitor.sql)
+# ليتحقق منه monitor_project_tasks() تلقائياً بنفس آلية بقية مهام المزامنة.
+function Send-Heartbeat($ProcessedCount, $FoundCount) {
+    try {
+        $body = @{
+            report_date = (Get-Date).ToString("yyyy-MM-dd")
+            source      = "khalil_audit_sync_heartbeat"
+            summary     = @{
+                status         = "ok"
+                found          = $FoundCount
+                processed      = $ProcessedCount
+                ran_at         = (Get-Date).ToString("o")
+                computer       = $env:COMPUTERNAME
+            }
+            items       = @()
+        } | ConvertTo-Json -Compress -Depth 5
+        Invoke-RestMethod -Method Post -Uri "$supabaseUrl/rest/v1/inventory_reports" -Headers $headers `
+            -ContentType "application/json; charset=utf-8" -Body ([Text.Encoding]::UTF8.GetBytes($body)) `
+            -TimeoutSec 20 | Out-Null
+    } catch {
+        # best-effort — فشل الـheartbeat وحده لا يجب أن يُسقط تشغيلاً ناجحاً فعلياً
+        Write-Log ("WARN: heartbeat write failed: " + $_.Exception.Message)
+    }
 }
 
 function Get-XmlTotal([string]$xml) {
@@ -143,7 +178,7 @@ WHERE UserGUID = @UserGuid
         OR LogTime > @CursorTime
         OR (LogTime = @CursorTime AND LOWER(CAST(GUID AS VARCHAR(36))) > @CursorGuid)
       )
-  AND (@CursorTime IS NOT NULL OR LogTime >= @BackfillFrom)
+  AND (@CursorTime IS NOT NULL OR @BackfillFrom IS NULL OR LogTime >= @BackfillFrom)
 ORDER BY LogTime ASC, LOWER(CAST(GUID AS VARCHAR(36))) ASC
 "@
     $cmd.Parameters.AddWithValue("@BatchSize", $BatchSize) | Out-Null
@@ -152,7 +187,11 @@ ORDER BY LogTime ASC, LOWER(CAST(GUID AS VARCHAR(36))) ASC
     else { $cmd.Parameters.AddWithValue("@CursorTime", [DBNull]::Value) | Out-Null }
     if ($cursorGuid) { $cmd.Parameters.AddWithValue("@CursorGuid", [string]$cursorGuid.ToLowerInvariant()) | Out-Null }
     else { $cmd.Parameters.AddWithValue("@CursorGuid", [DBNull]::Value) | Out-Null }
-    $cmd.Parameters.AddWithValue("@BackfillFrom", (Get-Date).AddHours(-1 * [double]$backfillHours)) | Out-Null
+    if ([double]$backfillHours -gt 0) {
+        $cmd.Parameters.AddWithValue("@BackfillFrom", (Get-Date).AddHours(-1 * [double]$backfillHours)) | Out-Null
+    } else {
+        $cmd.Parameters.AddWithValue("@BackfillFrom", [DBNull]::Value) | Out-Null
+    }
 
     $reader = $cmd.ExecuteReader()
     $rows = @()
@@ -173,7 +212,7 @@ ORDER BY LogTime ASC, LOWER(CAST(GUID AS VARCHAR(36))) ASC
     $reader.Close()
 
     Write-Log ("Found {0} new log000 row(s) for Khalil." -f $rows.Count)
-    if ($rows.Count -eq 0) { $conn.Close(); exit 0 }
+    if ($rows.Count -eq 0) { $conn.Close(); Send-Heartbeat 0 0; exit 0 }
 
     if ($DryRun) {
         $rows | Format-Table Guid, LogTime, Operation, RecNum -AutoSize
@@ -181,25 +220,47 @@ ORDER BY LogTime ASC, LOWER(CAST(GUID AS VARCHAR(36))) ASC
         exit 0
     }
 
+    # ملاحظة موثوقية (Codex P1، 2026-08-30، جولة ٣): المطابقة القديمة كانت
+    # RecNum + TypeGUID + LogTime < فقط، متجاهلةً RecGUID رغم توفره على نفس
+    # الصف. أرقام الفواتير (RecNum) في الأمين قابلة لإعادة الاستخدام لسجلّ
+    # مختلف كلياً تحت نفس TypeGUID (مثلاً بعد إلغاء/حذف وإعادة ترقيم)، فكانت
+    # هذه المطابقة قد تلتقط حالة "سابقة" لفاتورة أخرى غير ذات صلة إطلاقاً —
+    # يُفسِد before_snapshot وfinancial_delta بصمت. الإصلاح: عند توفّر
+    # RecGUID (المعرّف الفريد الحقيقي للسجل) نطابق عليه حصراً بدل RecNum؛
+    # وللتعادل بنفس اللحظة (LogTime) نستخدم نفس ترتيب (LogTime, GUID) الذي
+    # يعتمده الـcursor نفسه (نصّي lowercase) بدل الاكتفاء بـLogTime <، كي لا
+    # يُفلِت أو يُخطئ صفّ سابق مباشر يتشارك اللحظة تماماً.
     $beforeCmd = $conn.CreateCommand()
     $beforeCmd.CommandTimeout = 30
     $beforeCmd.CommandText = @"
 SELECT TOP 1 RecContent
 FROM log000
-WHERE RecNum = @RecNum AND TypeGUID = @TypeGuid AND LogTime < @LogTime
-ORDER BY LogTime DESC
+WHERE TypeGUID = @TypeGuid
+  AND (
+        (@RecGuid IS NOT NULL AND RecGUID = @RecGuid)
+        OR (@RecGuid IS NULL AND RecNum = @RecNum)
+      )
+  AND (
+        LogTime < @LogTime
+        OR (LogTime = @LogTime AND LOWER(CAST(GUID AS VARCHAR(36))) < @Guid)
+      )
+ORDER BY LogTime DESC, LOWER(CAST(GUID AS VARCHAR(36))) DESC
 "@
     $pRecNum = $beforeCmd.Parameters.Add("@RecNum", [Data.SqlDbType]::NVarChar, 100)
+    $pRecGuid = $beforeCmd.Parameters.Add("@RecGuid", [Data.SqlDbType]::UniqueIdentifier)
     $pTypeGuid = $beforeCmd.Parameters.Add("@TypeGuid", [Data.SqlDbType]::UniqueIdentifier)
     $pLogTime = $beforeCmd.Parameters.Add("@LogTime", [Data.SqlDbType]::DateTime)
+    $pGuid = $beforeCmd.Parameters.Add("@Guid", [Data.SqlDbType]::VarChar, 36)
 
     $processed = 0
     foreach ($row in $rows) {
         $beforeXml = $null
-        if ($row.RecNum -and $row.TypeGuid) {
-            $pRecNum.Value = $row.RecNum
+        if (($row.RecNum -or $row.RecGuid) -and $row.TypeGuid) {
+            if ($row.RecNum) { $pRecNum.Value = $row.RecNum } else { $pRecNum.Value = [DBNull]::Value }
+            if ($row.RecGuid) { $pRecGuid.Value = [guid]$row.RecGuid } else { $pRecGuid.Value = [DBNull]::Value }
             $pTypeGuid.Value = [guid]$row.TypeGuid
             $pLogTime.Value = $row.LogTime
+            $pGuid.Value = $row.Guid.ToLowerInvariant()
             $br = $beforeCmd.ExecuteReader()
             if ($br.Read() -and -not ($br["RecContent"] -is [DBNull])) { $beforeXml = [string]$br["RecContent"] }
             $br.Close()
@@ -250,6 +311,7 @@ ORDER BY LogTime DESC
 
     $conn.Close()
     Write-Log ("Pushed $processed / $($rows.Count) Khalil audit event(s) successfully.")
+    Send-Heartbeat $processed $rows.Count
     exit 0
 } catch {
     Write-Log ("ERROR: " + $_.Exception.Message)
