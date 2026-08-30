@@ -6388,9 +6388,14 @@ function salesSeqState(mode) {
 // الرقم المعروض: الأكبر بين «تالي الأمين» و«تالي العدّاد المحلي»، بلا أي حجز.
 // يرجع نصاً فارغاً إذا لم تصل المزامنة — ولا يخمّن رقماً أبداً، لأن رقماً مخترَعاً
 // قد يصطدم بفاتورة قائمة في الأمين.
-function peekSalesInvoiceNumber(mode) {
+//
+// allowPrintGrace: يوسّع الحد الزمني المقبول من SALES_SERIES_MAX_AGE_MS (حفظ)
+// إلى SALES_PRINT_GRACE_MAX_AGE_MS (طباعة/تصدير فقط) — راجع تعليق ذلك الثابت.
+// salesSaveInvoice لا يمرّر هذا الوسيط إطلاقاً (يبقى بحدّه الصارم دون تغيير).
+function peekSalesInvoiceNumber(mode, { allowPrintGrace = false } = {}) {
   const st = salesSeriesState(mode);
-  if (!st.usable) return "";
+  const usable = allowPrintGrace ? salesPrintSeriesState(mode).printUsable : st.usable;
+  if (!usable) return "";
   const ameenNext = Math.floor(Number(st.series?.nextNo) || 0);
   if (!(ameenNext > 0)) return "";
   const local = salesSeqState(st.mode).seq;
@@ -6406,19 +6411,33 @@ function salesReserveInvoiceNo(no, mode) {
   writeJson(current.key, Math.floor(seq));
 }
 
+// تُستخدم للعرض على الشاشة وكمصدر الرقم للطباعة/تصدير PDF (لا الحفظ — راجع
+// تعليق salesSaveInvoice: "الرقم من الحالة مباشرةً لا عبر ensureSalesInvoiceNo").
+// تسمح بالتسامح الأوسع (allowPrintGrace) لأنها لا تُستدعى أبداً من مسار الحفظ.
 function ensureSalesInvoiceNo() {
   const mode = salesCurrentMode();
   // تبديل الوضع يبدّل السلسلة، فالرقم المخبّأ لوضعٍ آخر لا يصلح.
   if (!state.salesInvoiceNo || state.salesInvoiceNoMode !== mode) {
-    state.salesInvoiceNo = peekSalesInvoiceNumber(mode);
+    state.salesInvoiceNo = peekSalesInvoiceNumber(mode, { allowPrintGrace: true });
     state.salesInvoiceNoMode = mode;
   }
   return state.salesInvoiceNo;
 }
 
-// عمر المزامنة المسموح به قبل منع إصدار رقم. المهمة المجدولة تعمل كل 5 دقائق،
-// فـ15 دقيقة تعني ثلاث دورات فائتة — أي أن المزامنة متوقفة فعلاً لا متأخرة.
+// عمر المزامنة المسموح به قبل منع إصدار رقم **للحفظ**. المهمة المجدولة تعمل
+// كل 5 دقائق، فـ15 دقيقة تعني ثلاث دورات فائتة — أي أن المزامنة متوقفة فعلاً
+// لا متأخرة. يبقى هذا الحد بلا أي تغيير — يحكم salesSaveInvoice حصراً.
 const SALES_SERIES_MAX_AGE_MS = 15 * 60000;
+
+// نافذة تسامح إضافية — للطباعة/تصدير PDF فقط، وليست للحفظ إطلاقاً. الطباعة
+// معاينة بلا التزام: لا تحجز رقماً ولا تكتب شيئاً بقاعدة البيانات (الحجز
+// الفعلي يحدث حصراً داخل salesSaveInvoice بعد نجاح الحفظ، عبر إعادة جلب
+// طازجة وإعادة فحص صارمة لم تتغيّر). لذلك يمكن تمديد نافذة الطباعة بأمان تام
+// دون أي خطر تكرار حقيقي — احتمال التكرار يُحسم دائماً لحظة الحفظ لا لحظة
+// الطباعة. تجاوز هذه النافذة الأوسع أيضاً يعني على الأرجح انقطاعاً مستمراً
+// حقيقياً (لا عطلاً عابراً كانقطاع Meshnet المؤقت الذي دفع هذا الإصلاح)،
+// فتبقى الطباعة محجوبة أيضاً حينها.
+const SALES_PRINT_GRACE_MAX_AGE_MS = 60 * 60000;
 
 // إعادة جلب تقرير السلاسل عند الطلب. لا يرمي أبداً: فشل الشبكة يترك القراءة
 // السابقة كما هي، ويتكفّل فحص العمر بعده بمنع الإصدار إن كانت قديمة.
@@ -6446,6 +6465,17 @@ function salesSeriesState(mode) {
   return { mode: m, target, series, ageMs: hasAge ? ageMs : NaN, stale, usable: !!series && !stale };
 }
 
+// حالة الطباعة/تصدير PDF تحديداً — أوسع تسامحاً من الحفظ عمداً (راجع تعليق
+// SALES_PRINT_GRACE_MAX_AGE_MS أعلاه). لا تُستخدم إطلاقاً من مسار الحفظ.
+// degraded=true تعني: مسموح بالطباعة لكن يجب تأكيد صريح من الموظف أولاً،
+// لأن الرقم المعروض تقديري (سيُعاد التحقق منه فعلياً لحظة الحفظ).
+function salesPrintSeriesState(mode) {
+  const st = salesSeriesState(mode);
+  if (st.usable) return { ...st, printUsable: true, degraded: false };
+  const withinGrace = !!st.series && Number.isFinite(st.ageMs) && st.ageMs <= SALES_PRINT_GRACE_MAX_AGE_MS;
+  return { ...st, printUsable: withinGrace, degraded: withinGrace };
+}
+
 function salesSeriesAgeText(ageMs) {
   if (!Number.isFinite(ageMs)) return "";
   const mins = Math.floor(ageMs / 60000);
@@ -6455,26 +6485,44 @@ function salesSeriesAgeText(ageMs) {
   return hours < 24 ? `قبل ${hours} ساعة` : `قبل ${Math.floor(hours / 24)} يوم`;
 }
 
-// رسالة المنع الموحّدة — تُستعمل عند الحفظ وعند الطباعة معاً.
+// رسالة المنع الموحّدة — تُستعمل عند الحفظ (حد صارم 15 دقيقة) وعند تجاوز
+// الطباعة نافذة التسامح الأوسع (60 دقيقة) أيضاً. صيغة مفهومة لموظف لا يعرف
+// أسماء مهام Windows المجدولة — بلا أي تفاصيل تقنية داخلية.
 function salesSeriesBlockReason(st) {
   if (!st.series) {
-    return `لم تصل مزامنة ترقيم الأمين بعد (سلسلة «${st.target.name}») — لا يمكن إصدار رقم فاتورة.`;
+    return "تعذّر إصدار رقم فاتورة — لم تصل بيانات ترقيم الفواتير من نظام المحاسبة بعد. تواصل مع الإدارة.";
   }
   if (st.stale) {
     const age = salesSeriesAgeText(st.ageMs);
-    return `مزامنة ترقيم الأمين متوقفة${age ? ` (آخر قراءة ${age})` : ""} — لا يمكن إصدار رقم قد يكون مستهلكاً. `
-      + `شغّل مهمة «TOBACCO Invoice Series Push» ثم أعد المحاولة.`;
+    return `تعذّر إصدار رقم فاتورة موثوق — انقطع الاتصال بجهاز المزامنة منذ ${age || "فترة"}. `
+      + `تواصل مع الإدارة، أو انتظر عودة الاتصال ثم أعد المحاولة.`;
   }
   return "";
+}
+
+// رسالة تحذير الطباعة أثناء التدهور المؤقت (تسامح موسَّع، رقم تقديري) —
+// مختلفة عمداً عن رسالة المنع الكاملة: توضح أن المتابعة ممكنة بموافقة الموظف.
+function salesPrintGraceWarning(printSt) {
+  const age = salesSeriesAgeText(printSt.ageMs);
+  return `⚠️ انقطع الاتصال بجهاز مزامنة الترقيم منذ ${age || "فترة"}.\n`
+    + `رقم الفاتورة الظاهر تقديري وسيُتأكَّد فعلياً عند الحفظ (الحفظ يبقى محجوباً حتى تعود المزامنة).\n\n`
+    + `هل تريد المتابعة بالطباعة الآن؟`;
 }
 
 // سطر توضيحي تحت رقم الفاتورة: أي سلسلة، وآخر رقم بالأمين، وعمر المزامنة —
 // كي يرى المستخدم بنفسه إن كان الرقم مبنياً على قراءة قديمة.
 function salesInvoiceNoHint() {
   const st = salesSeriesState();
-  if (!st.usable) return `⚠️ ${salesSeriesBlockReason(st)}`;
-  const age = salesSeriesAgeText(st.ageMs);
-  return `سلسلة «${st.series.typeName}» — آخر رقم بالأمين ${st.series.lastNo}${age ? ` (مزامنة ${age})` : ""}`;
+  if (st.usable) {
+    const age = salesSeriesAgeText(st.ageMs);
+    return `سلسلة «${st.series.typeName}» — آخر رقم بالأمين ${st.series.lastNo}${age ? ` (مزامنة ${age})` : ""}`;
+  }
+  const printSt = salesPrintSeriesState();
+  if (printSt.degraded) {
+    const age = salesSeriesAgeText(printSt.ageMs);
+    return `⚠️ رقم تقديري (مزامنة متأخرة منذ ${age}) — يمكن الطباعة بتأكيد، والحفظ محجوب حتى تعود المزامنة.`;
+  }
+  return `⚠️ ${salesSeriesBlockReason(st)}`;
 }
 
 function salesEnsureTrailingRow() {
@@ -7369,16 +7417,22 @@ async function saveSalesInvoicePdf() {
     render();
     return;
   }
-  // نفس حارس الطباعة: لا نصدر مستنداً برقم غير موثوق.
-  const series = salesSeriesState(mode);
-  if (!series.usable) {
+  // نفس حارس الطباعة: لا نصدر مستنداً برقم غير موثوق إطلاقاً — لكن بتسامح
+  // موسَّع (راجع SALES_PRINT_GRACE_MAX_AGE_MS) لأن التصدير معاينة بلا التزام،
+  // لا يحجز رقماً ولا يكتب شيئاً بقاعدة البيانات. الحفظ الفعلي (salesSaveInvoice)
+  // يبقى بحدّه الصارم الأصلي دون أي تغيير.
+  const series = salesPrintSeriesState(mode);
+  if (!series.printUsable) {
     setNotice("error", salesSeriesBlockReason(series));
     render();
     return;
   }
+  if (series.degraded && !confirm(salesPrintGraceWarning(series))) {
+    return;
+  }
   const invNo = ensureSalesInvoiceNo();
   if (!invNo) {
-    setNotice("error", salesSeriesBlockReason(salesSeriesState(mode)));
+    setNotice("error", salesSeriesBlockReason(salesPrintSeriesState(mode)));
     render();
     return;
   }
@@ -7654,19 +7708,26 @@ function printSalesInvoice() {
     return;
   }
   const mode = salesCurrentMode();
-  // لا تُطبع فاتورة برقم غير موثوق: الورقة المطبوعة مستند يُسلَّم للزبون، ورقم
-  // مبني على مزامنة متوقفة قد يكون مستهلكاً في الأمين. لا نعيد الجلب هنا (بخلاف
-  // الحفظ) كي تبقى الطباعة داخل إيماءة المستخدم مباشرةً على iOS؛ والفاتورة
-  // المحفوظة تكون قد جُلبت لها قراءة طازجة أصلاً لحظة الحفظ.
-  const printSeries = salesSeriesState(mode);
-  if (!printSeries.usable) {
+  // لا تُطبع فاتورة برقم غير موثوق تماماً: الورقة المطبوعة مستند يُسلَّم للزبون.
+  // لكن الطباعة نفسها معاينة بلا التزام — لا تحجز رقماً ولا تكتب شيئاً بقاعدة
+  // البيانات (الحجز الفعلي يحدث حصراً داخل salesSaveInvoice بعد نجاح الحفظ)،
+  // فيمكن تمديد نافذتها الزمنية بأمان تام دون خطر تكرار حقيقي (راجع تعليق
+  // SALES_PRINT_GRACE_MAX_AGE_MS) — طالما الموظف أكّد علمه أن الرقم تقديري.
+  // لا نعيد الجلب هنا (بخلاف الحفظ) كي تبقى الطباعة داخل إيماءة المستخدم
+  // مباشرةً على iOS؛ والفاتورة المحفوظة تكون قد جُلبت لها قراءة طازجة أصلاً
+  // لحظة الحفظ، بحدّه الصارم الأصلي دون أي تغيير.
+  const printSeries = salesPrintSeriesState(mode);
+  if (!printSeries.printUsable) {
     setNotice("error", salesSeriesBlockReason(printSeries));
     render();
     return;
   }
+  if (printSeries.degraded && !confirm(salesPrintGraceWarning(printSeries))) {
+    return;
+  }
   const invNo = ensureSalesInvoiceNo();
   if (!invNo) {
-    setNotice("error", salesSeriesBlockReason(salesSeriesState(mode)));
+    setNotice("error", salesSeriesBlockReason(salesPrintSeriesState(mode)));
     render();
     return;
   }
