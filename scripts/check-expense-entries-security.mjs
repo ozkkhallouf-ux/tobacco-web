@@ -91,9 +91,15 @@ for (const { name: policyName, re } of POLICY_SPECS) {
   }
 }
 
-// The canonical file must be safely re-runnable regardless of ordering
-// relative to the migration: it must drop both the historical open policy
-// names AND its own new owner policy names before (re)creating them.
+// Both files must be safely re-runnable regardless of ordering relative to
+// EACH OTHER: each must drop both the historical open policy names AND its
+// own new owner policy names before (re)creating them. The canonical file
+// needs this because it may run on a fresh database or a repair. The
+// migration needs this because the canonical file can legitimately run
+// first while provisioning/repairing a database (Codex P1, second finding
+// on PR #140: without dropping its own "expense_entries_owner_*" names
+// first, the migration's unconditional `create policy` aborts with
+// "already exists" if the canonical file already created them).
 for (const oldName of [
   'expense_entries_select_authenticated',
   'expense_entries_insert_authenticated',
@@ -105,12 +111,29 @@ for (const oldName of [
     `${CANONICAL_FILE}: must drop legacy open policy "${oldName}" for idempotent re-runs`,
   );
 }
-for (const { name: policyName } of POLICY_SPECS) {
-  assert.match(
-    canonicalSql,
-    new RegExp(`drop policy if exists "${policyName}" on public\\.expense_entries;`, 'i'),
-    `${CANONICAL_FILE}: must drop its own policy "${policyName}" before recreating it (idempotency)`,
-  );
+
+// For BOTH files: each owner policy name must have a `drop policy if
+// exists` for itself, and that drop must appear BEFORE the corresponding
+// `create policy` in the same file — not just present anywhere in the
+// text. A drop that came *after* the create would not prevent the
+// already-exists error at all.
+for (const { name: fileName, sql } of files) {
+  for (const { name: policyName } of POLICY_SPECS) {
+    const dropRe = new RegExp(`drop policy if exists "${policyName}" on public\\.expense_entries;`, 'i');
+    const createRe = new RegExp(`create policy "${policyName}" on public\\.expense_entries`, 'i');
+    const dropIndex = sql.search(dropRe);
+    const createIndex = sql.search(createRe);
+    assert.notEqual(
+      dropIndex,
+      -1,
+      `${fileName}: must drop its own policy "${policyName}" before recreating it (idempotency)`,
+    );
+    assert.notEqual(createIndex, -1, `${fileName}: policy "${policyName}" must be created`);
+    assert.ok(
+      dropIndex < createIndex,
+      `${fileName}: "drop policy if exists \\"${policyName}\\"" must appear BEFORE "create policy \\"${policyName}\\"", otherwise a rerun after the canonical file already created it aborts with already-exists`,
+    );
+  }
 }
 
 // Defense in depth: both files must revoke anon/public table privileges and

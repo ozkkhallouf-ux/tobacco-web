@@ -42,6 +42,17 @@ drop policy if exists "expense_entries_select_authenticated" on public.expense_e
 drop policy if exists "expense_entries_insert_authenticated" on public.expense_entries;
 drop policy if exists "expense_entries_delete_authenticated" on public.expense_entries;
 
+-- إسقاط الأسماء الجديدة نفسها أيضاً قبل إنشائها (ملاحظة Codex P1 ثانية على
+-- PR #140): لو طُبِّق supabase/expense-entries-table.sql (الملف المرجعي)
+-- قبل هذه الـmigration — كما يحدث عند تجهيز قاعدة جديدة أو إصلاحها — فهو
+-- ينشئ نفس أسماء سياسات is_owner() هذه بالفعل. بدون هذا الإسقاط، أول
+-- create policy أدناه يرمي "already exists" ويوقف الـmigration، رغم أن
+-- الملف المرجعي يدّعي أن أي ترتيب تنفيذ مدعوم. الآن كلا الملفين idempotent
+-- بصرف النظر عن ترتيب التطبيق.
+drop policy if exists "expense_entries_owner_select" on public.expense_entries;
+drop policy if exists "expense_entries_owner_insert" on public.expense_entries;
+drop policy if exists "expense_entries_owner_delete" on public.expense_entries;
+
 create policy "expense_entries_owner_select" on public.expense_entries
   for select to authenticated using (public.is_owner());
 
