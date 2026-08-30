@@ -29,7 +29,10 @@ $criticalTasks = @(
   @{ Name = "TOBACCO Ameen Sync";              MaxAgeMinutes = 10 },
   @{ Name = "TOBACCO Invoice Series Push";     MaxAgeMinutes = 20 },
   @{ Name = "TOBACCO Approved Prices Pull";    MaxAgeMinutes = 20 },
-  @{ Name = "TOBACCO Customer Movements Push"; MaxAgeMinutes = 20 }
+  @{ Name = "TOBACCO Customer Movements Push"; MaxAgeMinutes = 20 },
+  # Codex P1، 2026-08-30، جولة ٣: أُضيفت لسدّ ثغرة غياب أي مراقبة صحة لمهمة
+  # تدقيق خليل — تعمل كل دقيقتين، هامش 10 دقائق كافٍ.
+  @{ Name = "TOBACCO Khalil Audit Sync";       MaxAgeMinutes = 10 }
 )
 
 # رموز Task Scheduler التي نحتاج تمييزها — لا نعتبرها كلها نجاحاً:
