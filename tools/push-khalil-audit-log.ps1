@@ -454,11 +454,22 @@ ORDER BY LogTime ASC, LOWER(CAST(GUID AS VARCHAR(36))) ASC
     # عندما يوجد cursor فعلاً (أول تشغيل يغطيه استعلام الباك-فيل الرئيسي).
     # Codex P1، 2026-08-30، جولة ٩: $overlapFrom يُشتَق الآن من الحد الدائم
     # المحفوظ (overlap_floor_time) بدل Get-Date — انظر شرح المعامل
-    # $OverlapWindowMinutes أعلاه. لو لم يوجد حد محفوظ بعد (أول تشغيل منذ
-    # تفعيل هذا العمود)، نبدأ بنافذة إقلاع لمرة واحدة بعرض
-    # $OverlapWindowMinutes خلف الـcursor الحالي (وليس خلف "الآن")، تماماً
-    # كما كانت النافذة القديمة تعمل، لكن هذا الاحتساب النسبي لا يتكرر بعد
-    # ذلك أبداً — كل تشغيل لاحق يقرأ الحد المحفوظ فقط.
+    # $OverlapWindowMinutes أعلاه.
+    # Codex P1، 2026-08-31، جولة ١٥ ("Scan the full gap before bootstrapping
+    # the overlap floor"): لو لم يوجد حد محفوظ بعد (أول تشغيل يملك cursor
+    # لكن overlap_floor لم يُقدَّم بعد — عادة بعد أول دفعة)، نافذة إقلاع
+    # نسبية بعرض $OverlapWindowMinutes خلف الـcursor كانت غير كافية: أي
+    # معاملة كتبت LogTime أقدم من تلك النافذة وبقيت مفتوحة أثناء التشغيل
+    # الأول (فاختفت من DMV أيضاً بحلول لحظة commit-ها لاحقاً) تُستبعَد للأبد
+    # فور تقديم الحد بعدها — تماماً كما لو لم تكن نافذة overlap موجودة أصلاً.
+    # الإصلاح: الإقلاع يبدأ من $backfillBoundary — الحد الدائم الوحيد
+    # الموجود فعلاً (يُضبَط مرة واحدة عند أول حدث خليل يُسجَّل على الإطلاق،
+    # جولة ٧) بدل نافذة زمنية نسبية محدودة — يغطي كامل الفجوة منذ بداية
+    # المراقبة، لا آخر $OverlapWindowMinutes دقيقة منها فقط. لو لم يوجد حتى
+    # backfillBoundary (حالة نظرية لا تحدث عملياً طالما $cursorTime موجود،
+    # لأن الدالة تضبطه دوماً عند أول إدراج) نتراجع لثابت أقدم ما يقبله
+    # SQL Server (datetime.MinValue فعلياً 1753-01-01) بدل نافذة نسبية، فيبقى
+    # ضماناً "لا تُفلِت أي معاملة" ساري المفعول حتى بأسوأ الحالات.
     $overlapTruncated = $false
     $overlapMaxLogTime = $null
     $overlapMaxGuid = $null
@@ -466,8 +477,10 @@ ORDER BY LogTime ASC, LOWER(CAST(GUID AS VARCHAR(36))) ASC
     if ($cursorTime) {
         if ($overlapFloor) {
             $overlapFrom = $overlapFloor
+        } elseif ($backfillBoundary) {
+            $overlapFrom = $backfillBoundary
         } else {
-            $overlapFrom = $cursorTime.AddMinutes(-1 * $OverlapWindowMinutes)
+            $overlapFrom = [datetime]::MinValue
         }
         # Codex P1، 2026-08-31، جولة ١٠ ("Track GUID when advancing a
         # truncated overlap page"): LogTime >= @OverlapFrom وحده (شامل) كان
