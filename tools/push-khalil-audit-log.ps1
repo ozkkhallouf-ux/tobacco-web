@@ -317,6 +317,17 @@ ORDER BY LogTime ASC, LOWER(CAST(GUID AS VARCHAR(36))) ASC
     # وللتعادل بنفس اللحظة (LogTime) نستخدم نفس ترتيب (LogTime, GUID) الذي
     # يعتمده الـcursor نفسه (نصّي lowercase) بدل الاكتفاء بـLogTime <، كي لا
     # يُفلِت أو يُخطئ صفّ سابق مباشر يتشارك اللحظة تماماً.
+    # تشخيص مباشر على log000 الحقيقي (30/08/2026): OperationType هو المحدِّد
+    # الوحيد الموثوق لكون الصف يحمل محتوى (RecContent) في الأمين، بصرف النظر
+    # عن Operation. القياس الفعلي على كامل log000:
+    #   OperationType 2/3/100  → يحمل محتوى في الغالبية العظمى (>99%) من الصفوف
+    #   OperationType 1/9/12/126 → لا يحمل محتوى إطلاقاً (0 من آلاف الصفوف) —
+    #     هذه فتح/إغلاق/قفل سجل (Operation=1 OperationType=1 مثلاً = مجرد فتح
+    #     الفاتورة في الأمين بلا حفظ أي تعديل)، وليست تعديلاً/حذفاً حقيقياً.
+    # لذلك Snapshot متوقَّع فقط لأنواع العمليات الثلاثة أدناه؛ غيرها يُسجَّل
+    # بصراحة بلا snapshot مع سبب واضح في notes بدل NULL صامت.
+    $ContentBearingOperationTypes = @(2, 3, 100)
+
     $beforeCmd = $conn.CreateCommand()
     $beforeCmd.CommandTimeout = 30
     $beforeCmd.CommandText = @"
@@ -327,6 +338,8 @@ WHERE TypeGUID = @TypeGuid
         (@RecGuid IS NOT NULL AND RecGUID = @RecGuid)
         OR (@RecGuid IS NULL AND RecNum = @RecNum)
       )
+  AND OperationType IN (2, 3, 100)
+  AND DATALENGTH(RecContent) > 0
   AND (
         LogTime < @LogTime
         OR (LogTime = @LogTime AND LOWER(CAST(GUID AS VARCHAR(36))) < @Guid)
@@ -341,24 +354,59 @@ ORDER BY LogTime DESC, LOWER(CAST(GUID AS VARCHAR(36))) DESC
 
     $processed = 0
     foreach ($row in $rows) {
-        $beforeXml = $null
-        if (($row.RecNum -or $row.RecGuid) -and $row.TypeGuid) {
-            if ($row.RecNum) { $pRecNum.Value = $row.RecNum } else { $pRecNum.Value = [DBNull]::Value }
-            if ($row.RecGuid) { $pRecGuid.Value = [guid]$row.RecGuid } else { $pRecGuid.Value = [DBNull]::Value }
-            $pTypeGuid.Value = [guid]$row.TypeGuid
-            $pLogTime.Value = $row.LogTime
-            $pGuid.Value = $row.Guid.ToLowerInvariant()
-            $br = $beforeCmd.ExecuteReader()
-            if ($br.Read() -and -not ($br["RecContent"] -is [DBNull])) { $beforeXml = [string]$br["RecContent"] }
-            $br.Close()
-        }
+        $isContentBearingType = $ContentBearingOperationTypes -contains $row.OperationType
         $afterXml = $row.RecContent
+        $notes = $null
+        $beforeXml = $null
+
+        if (-not $isContentBearingType) {
+            # نوع عملية لا يحمل محتوى في الأمين أصلاً (فتح/إغلاق/عرض وغيرها) —
+            # NULL هنا متوقَّع وليس عطلاً؛ سجّل السبب صراحة بدل ترك NULL صامت.
+            $notes = "OperationType=$($row.OperationType) لا يحمل محتوى (RecContent) في الأمين — هذا فتح/عرض/إغلاق سجل وليس تعديلاً أو حذفاً فعلياً، فلا يوجد Snapshot متوقَّع لهذا الحدث."
+            $afterXml = $null
+        } elseif ([string]::IsNullOrEmpty($afterXml)) {
+            # GUARD: نوع العملية يُفترض أن يحمل محتوى (تعديل/حذف/مرتجع) لكن
+            # RecContent وصل فارغاً من الأمين — هذا غير متوقَّع. لا نعتبر
+            # الحدث معالَجاً: لا نرسله إلى Supabase ولا يتقدّم الـcursor
+            # فوقه، بل نتوقّف هنا فوراً كي تُعاد محاولته بالتشغيل القادم دون
+            # فقدان أي تفصيل. باقي صفوف هذه الدفعة (إن وُجدت) تبقى غير
+            # معالَجة أيضاً لأنها تالية لهذا الصف بالترتيب الزمني.
+            Write-Log ("GUARD: GUID $($row.Guid) (RecNum=$($row.RecNum)) OperationType=$($row.OperationType) يُفترض أن يحمل RecContent لكنه وصل فارغاً من الأمين — إيقاف الدفعة دون تحريك الـcursor فوق هذا الصف.")
+            $conn.Close()
+            Notify-Failure ("⚠️ حدث تدقيق خليل بلا محتوى متوقَّع (RecContent فارغ رغم أن OperationType=$($row.OperationType) يعني تعديل/حذف)`nGUID: $($row.Guid)`nRecNum: $($row.RecNum)")
+            exit 1
+        }
+
+        if ($isContentBearingType -and -not [string]::IsNullOrEmpty($afterXml)) {
+            if (($row.RecNum -or $row.RecGuid) -and $row.TypeGuid) {
+                if ($row.RecNum) { $pRecNum.Value = $row.RecNum } else { $pRecNum.Value = [DBNull]::Value }
+                if ($row.RecGuid) { $pRecGuid.Value = [guid]$row.RecGuid } else { $pRecGuid.Value = [DBNull]::Value }
+                $pTypeGuid.Value = [guid]$row.TypeGuid
+                $pLogTime.Value = $row.LogTime
+                $pGuid.Value = $row.Guid.ToLowerInvariant()
+                $br = $beforeCmd.ExecuteReader()
+                if ($br.Read() -and -not ($br["RecContent"] -is [DBNull]) -and -not [string]::IsNullOrEmpty([string]$br["RecContent"])) {
+                    $beforeXml = [string]$br["RecContent"]
+                }
+                $br.Close()
+            }
+            if ([string]::IsNullOrEmpty($beforeXml)) {
+                $notes = "لا يوجد Snapshot سابق (before) لهذا السجل — هذا أول حدث محتوى (OperationType=$($row.OperationType)) مسجَّل له في log000، فلا توجد حالة سابقة تُقارَن."
+            }
+        }
 
         $beforeTotal = Get-XmlTotal $beforeXml
         $afterTotal = Get-XmlTotal $afterXml
         $financialDelta = $null
-        if ($null -ne $beforeTotal -and $null -ne $afterTotal) {
-            $financialDelta = [math]::Round($afterTotal - $beforeTotal, 4)
+        if ($isContentBearingType -and -not [string]::IsNullOrEmpty($beforeXml) -and -not [string]::IsNullOrEmpty($afterXml)) {
+            if ($null -ne $beforeTotal -and $null -ne $afterTotal) {
+                $financialDelta = [math]::Round($afterTotal - $beforeTotal, 4)
+            } else {
+                $reason = "تعذّر استخراج القيمة المالية (وسم <Total> غير موجود أو غير قابل للتحويل) من "
+                $reason += if ($null -eq $beforeTotal -and $null -eq $afterTotal) { "before وafter معاً." }
+                           elseif ($null -eq $beforeTotal) { "before فقط." } else { "after فقط." }
+                $notes = if ($notes) { "$notes`n$reason" } else { $reason }
+            }
         }
 
         # Codex P1، 2026-08-30، جولة ٤ (finding c) + جولة ٦ (تصحيح) + جولة ٧
@@ -403,7 +451,7 @@ ORDER BY LogTime DESC, LOWER(CAST(GUID AS VARCHAR(36))) DESC
             p_before_snapshot    = if ($beforeXml) { @{ xml = $beforeXml } } else { $null }
             p_after_snapshot     = if ($afterXml) { @{ xml = $afterXml } } else { $null }
             p_financial_delta    = $financialDelta
-            p_notes              = $null
+            p_notes              = $notes
             p_is_backfill        = $isBackfill
         } | ConvertTo-Json -Depth 8 -Compress
 
