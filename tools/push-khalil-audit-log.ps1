@@ -181,9 +181,56 @@ function Send-Heartbeat($ProcessedCount, $FoundCount, $Status = "ok") {
 # (Get-Date).AddMinutes(-$OverlapWindowMinutes) — أي تبقى دوماً نافذة دنيا
 # متحركة خلف "الآن" الفعلي قابلة لإعادة المسح، فلا "تتقاعد" بالكامل مهما طال
 # التشغيل المتواصل بلا توقف.
+# Codex P1، 2026-08-31، جولة ١١ ("السقف الثابت نفسه لا يزال lossy"): سقف
+# جولة ١٠ (Get-Date - $OverlapWindowMinutes) افتراضي بحت — لو بقيت معاملة
+# مفتوحة على الأمين أطول من هذه الدقائق قبل أن تُلتزَم (commit)، يتجاوزها
+# الحد فوراً بمجرد مرور الوقت، ويُفقَد صفّها للأبد حين تُلتزم لاحقاً (LogTime
+# < الحد فلن يُعاد مسحه). الإصلاح الرياضي الصحيح: أي صفّ ستكتبه معاملة ما لا
+# يمكن أن يكون LogTime له أقدم من transaction_begin_time لتلك المعاملة —
+# فبإبقاء الحد دوماً قبل أقدم معاملة مفتوحة فعلياً على قاعدة الأمين (مصدرها
+# sys.dm_tran_active_transactions/sys.dm_tran_database_transactions)، يُضمَن
+# عدم "تقاعد" الحد أبداً فوق أي صفّ لم يظهر بعد، بغضّ النظر عن طول أي معاملة
+# مفتوحة. يتطلب هذا الاستعلام صلاحية VIEW SERVER STATE (أو VIEW SERVER
+# PERFORMANCE STATE) على حساب SQL المستخدَم — صلاحية قراءة meta-data فقط عن
+# المعاملات الجارية، لا تمنح أي وصول لبيانات الفواتير/العملاء نفسها.
+#
+# fallback آمن إذا تعذّر الاستعلام (الصلاحية غير ممنوحة بعد، أو أي خطأ اتصال
+# مؤقت): Get-DynamicOverlapCap تُعيد $null بصمت (مع تحذير بالسجل)، وSet-
+# OverlapFloor يرجع فوراً لسلوك جولة ١٠ الثابت وحده (Get-Date -
+# $OverlapWindowMinutes) — لا يُفشِل أي تشغيل، ولا يفقد أي حدث بأي حال؛ أسوأ
+# أثر لفشل هذا الاستعلام هو العودة للسقف الثابت الأقل دقة الذي كان يعمل أصلاً
+# قبل هذا التعديل. السقف النهائي المُستخدَم دوماً هو الأكثر تحفظاً (الأقدم
+# زمنياً) بين سقف DMV وسقف النافذة الثابتة، وليس سقف DMV وحده — طبقة حماية
+# إضافية لو انحرفت ساعة SQL Server المحلية عن الواقع بشكل غير متوقّع.
+function Get-DynamicOverlapCap($SqlConn) {
+    try {
+        $cmd = $SqlConn.CreateCommand()
+        $cmd.CommandTimeout = 10
+        $cmd.CommandText = @"
+SELECT MIN(at.transaction_begin_time) AS OldestActiveBegin
+FROM sys.dm_tran_active_transactions at
+JOIN sys.dm_tran_database_transactions dt ON at.transaction_id = dt.transaction_id
+WHERE dt.database_id = DB_ID()
+"@
+        $result = $cmd.ExecuteScalar()
+        if ($null -eq $result -or $result -is [DBNull]) {
+            # لا توجد أي معاملة مفتوحة حالياً — لا خطر تجاوز، فالسقف الآمن هو
+            # "الآن" نفسه (مع هامش ثانية واحدة احترازي بسيط لفارق دقة الساعة).
+            return (Get-Date).AddSeconds(-1)
+        }
+        return ([datetime]$result).AddSeconds(-1)
+    } catch {
+        Write-Log ("WARN: DMV oldest-open-transaction query failed (fallback to fixed window, safe, no event loss): " + $_.Exception.Message)
+        return $null
+    }
+}
+
 function Set-OverlapFloor([datetime]$FloorTime, [Nullable[guid]]$FloorGuid = $null) {
     try {
-        $cap = (Get-Date).AddMinutes(-1 * $OverlapWindowMinutes)
+        $fixedCap = (Get-Date).AddMinutes(-1 * $OverlapWindowMinutes)
+        $dmvCap = Get-DynamicOverlapCap $conn
+        # الأكثر تحفظاً (الأقدم زمنياً) بين السقفين — انظر شرح جولة ١١ أعلاه.
+        $cap = if ($dmvCap -and $dmvCap -lt $fixedCap) { $dmvCap } else { $fixedCap }
         $cappedTime = $FloorTime
         $cappedGuid = $FloorGuid
         if ($cappedTime -gt $cap) {
