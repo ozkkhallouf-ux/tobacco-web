@@ -299,6 +299,13 @@ begin
     attempts = public.khalil_audit_notify_failures.attempts + 1,
     resolved_at = null;
 exception
+  -- Codex P1، 2026-08-30، جولة ٦: QUERY_CANCELED مستثنى عمداً من OTHERS في
+  -- PL/pgSQL — لو هذا الإدراج انتظر على قفل حتى statement_timeout أو أُلغي،
+  -- بدون هذا الفرع الصريح كان الإلغاء سيتسرب من هذه الدالة نفسها ويُسقط
+  -- معاملة تسجيل حدث الـAudit والـcursor. best-effort مطابق لفرع OTHERS.
+  when query_canceled then
+    raise warning 'khalil_audit: notify-failure recorder canceled for ameen_log_guid=%',
+      p_ameen_log_guid;
   when others then
     raise warning 'khalil_audit: could not record notify failure for ameen_log_guid=%: %',
       p_ameen_log_guid, sqlerrm;
