@@ -101,6 +101,19 @@ create table if not exists public.khalil_audit_cursor (
   -- on conflict do update أدناه)، فتبقى صامدة عبر كل الدفعات اللاحقة مهما
   -- طال تفريغ التاريخ المتراكم.
   backfill_before timestamp,
+  -- Codex P1، 2026-08-30، جولة ٩: حد دائم (وليس زمنياً نسبياً لـ"الآن")
+  -- لبداية نافذة إعادة مسح log000 بحثاً عن صفوف خليل التزمت متأخراً. سابقاً
+  -- كان السكربت يحسب $overlapFrom = (Get-Date).AddMinutes(-$OverlapWindowMinutes)
+  -- في كل تشغيل — لو توقّف السكربت/المهمة المجدولة أطول من هذه النافذة
+  -- الثابتة (كما حصل فعلياً في عطل SQL Server مؤقت اليوم)، عند الاستئناف
+  -- كانت النافذة تُحتسَب من "الآن" الجديد فتقفز فوق أي صف التزم متأخراً
+  -- خلال الفجوة الأطول من النافذة، فيُفقَد للأبد بمجرد تقدّم الـcursor
+  -- فوقه. هذا العمود يمثّل بدلاً من ذلك "كل ما قبل هذه اللحظة تم مسحه
+  -- والتأكد أنه لا يحوي صفوفاً مفقودة فعلياً" — لا علاقة له بالساعة
+  -- الحالية إطلاقاً، فبعد أي توقف مهما طال يستأنف السكربت المسح من نفس
+  -- النقطة بالضبط. يتقدّم فقط عبر update_khalil_audit_overlap_floor أدناه،
+  -- أحادي الاتجاه (لا يتراجع أبداً).
+  overlap_floor_time timestamp,
   constraint khalil_audit_cursor_singleton check (id = 1)
 );
 
@@ -135,7 +148,12 @@ grant execute on function public.khalil_audit_is_sync_writer()
 -- 4) قراءة الـcursor (SECURITY DEFINER — لا منح مباشر على الجدول نفسه).
 -- ------------------------------------------------------------
 create or replace function public.get_khalil_audit_cursor()
-returns table (last_log_time timestamp, last_log_guid uuid, backfill_before timestamp)
+returns table (
+  last_log_time timestamp,
+  last_log_guid uuid,
+  backfill_before timestamp,
+  overlap_floor_time timestamp
+)
 language plpgsql
 security definer
 set search_path = public
@@ -149,7 +167,7 @@ begin
   end if;
 
   return query
-    select c.last_log_time, c.last_log_guid, c.backfill_before
+    select c.last_log_time, c.last_log_guid, c.backfill_before, c.overlap_floor_time
     from public.khalil_audit_cursor c
     where c.id = 1;
 end;
@@ -158,6 +176,46 @@ $$;
 revoke all on function public.get_khalil_audit_cursor() from public;
 grant execute on function public.get_khalil_audit_cursor() to authenticated, service_role;
 revoke all on function public.get_khalil_audit_cursor() from anon;
+
+-- ------------------------------------------------------------
+-- 4-أ) تقديم overlap_floor_time — الدالة الوحيدة القادرة على تعديل هذا
+--    العمود. أحادية الاتجاه بحتة (لا تتراجع أبداً)، ومقيَّدة بهوية
+--    المزامنة الموثوقة فقط، بنفس نمط بقية دوال هذا الملف (Codex P1،
+--    2026-08-30، جولة ٩).
+-- ------------------------------------------------------------
+create or replace function public.update_khalil_audit_overlap_floor(
+  p_floor timestamp
+) returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if auth.uid() is null then
+    raise exception 'update_khalil_audit_overlap_floor requires an authenticated caller';
+  end if;
+  if not public.khalil_audit_is_sync_writer() then
+    raise exception 'update_khalil_audit_overlap_floor is restricted to the trusted sync identity';
+  end if;
+  if p_floor is null then
+    return;
+  end if;
+
+  -- الصف (id=1) يجب أن يكون موجوداً أصلاً (ينشئه record_khalil_audit_event
+  -- عند أول حدث) — لو لم يوجد بعد فلا معنى لتقديم حد overlap قبل وجود أي
+  -- cursor أصلاً، فنكتفي بعدم الفعل بدل الفشل.
+  update public.khalil_audit_cursor
+     set overlap_floor_time = p_floor,
+         updated_at = now()
+   where id = 1
+     and (overlap_floor_time is null or p_floor > overlap_floor_time);
+end;
+$$;
+
+revoke all on function public.update_khalil_audit_overlap_floor(timestamp)
+  from public, anon, service_role;
+grant execute on function public.update_khalil_audit_overlap_floor(timestamp)
+  to authenticated;
 
 -- ------------------------------------------------------------
 -- 5) تسجيل حدث واحد + تقديم الـcursor بأمان — الدالة الوحيدة القادرة على

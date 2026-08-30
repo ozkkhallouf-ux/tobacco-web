@@ -32,12 +32,29 @@ param(
     # لو بقيت معاملة A مفتوحة أطول من هذه الثواني بعد كتابة LogTime أقدم،
     # يتقدّم الـcursor فوقها بمعاملة B لاحقة تُلتزَم أولاً، وتُستبعد A للأبد
     # حين تُلتزم لاحقاً لأن LogTime > @CursorTime لن يتحقق بعدها أبداً.
-    # الإصلاح: بالإضافة للنافذة الآمنة، كل تشغيل يعيد مسح نافذة زمنية محدودة
-    # خلف الوقت الحالي (وليس خلف الـcursor) بحثاً عن أي صف بقي دون تسجيله،
-    # بغض النظر عن أين وصل الـcursor. record_khalil_audit_event() نفسها لا
+    # الإصلاح: بالإضافة للنافذة الآمنة، كل تشغيل يعيد مسح نافذة خلف الـcursor
+    # بحثاً عن أي صف بقي دون تسجيله. record_khalil_audit_event() نفسها لا
     # تُرجِع الـcursor للخلف أبداً (شرط >= الصف الحالي)، وON CONFLICT DO
     # NOTHING على ameen_log_guid يجعل إعادة فحص نفس الصفوف كل تشغيل آمنة
-    # ورخيصة. هذا يلتقط أي تأخير commit مهما طال طالما حدث خلال هذه الدقائق.
+    # ورخيصة.
+    #
+    # Codex P1، 2026-08-30، جولة ٩: النافذة أعلاه كانت تُحتسَب من
+    # (Get-Date).AddMinutes(-$OverlapWindowMinutes) في كل تشغيل — زمن نسبي
+    # لـ"الآن"، وليس حالة محفوظة. لو توقّف السكربت/المهمة المجدولة أطول من
+    # هذه الدقائق (كما حصل فعلياً بعطل SQL Server مؤقت)، عند الاستئناف
+    # تُحتسَب النافذة من "الآن" الجديد فتقفز فوق كامل فجوة التوقف، ويُفقَد
+    # للأبد أي صف التزم متأخراً خلالها بمجرد تقدّم الـcursor فوقه. الإصلاح:
+    # عمود khalil_audit_cursor.overlap_floor_time المحفوظ في Supabase يمثّل
+    # الآن "كل ما قبل هذه اللحظة تم مسحه فعلاً وتأكيده" — لا علاقة له بساعة
+    # النظام، فبعد أي توقف مهما طال يستأنف المسح من نفس النقطة بالضبط بلا
+    # أي فجوة. السكربت يقرأ هذا الحد بدل حساب Get-Date().AddMinutes(...)،
+    # ويتقدّم به فقط بعد إثبات المعالجة الكاملة الناجحة لهذا التشغيل (انظر
+    # منطق تقديم overlap_floor_time أسفل معالجة الدفعة) — تقدّم أحادي
+    # الاتجاه فقط، ولا يتخطى أبداً ما لم يُثبَت مسحه فعلياً (يتجنّب livelock
+    # على تراكم كبير بعد توقف طويل بالتقدّم الجزئي عند تجاوز BatchSize).
+    # $OverlapWindowMinutes يبقى مستخدَماً فقط كعرض نافذة الإقلاع الأول
+    # (bootstrap) — أول تشغيل على الإطلاق بعد تفعيل هذا العمود، حين لا يوجد
+    # overlap_floor_time محفوظ بعد.
     [int]$OverlapWindowMinutes = 20,
     [string]$EnvFile = "$PSScriptRoot\.env",
     [string]$LogFile = "$PSScriptRoot\logs\khalil-audit-push.log"
@@ -143,6 +160,24 @@ function Send-Heartbeat($ProcessedCount, $FoundCount, $Status = "ok") {
     }
 }
 
+# Codex P1، 2026-08-30، جولة ٩: تقديم الحد الدائم overlap_floor_time بعد
+# إثبات أن نطاق [@OverlapFrom، @CursorTime] (أو جزء منه عند تراكم كبير) قد
+# عُولِج بالكامل هذا التشغيل بنجاح. best-effort تماماً مثل Send-Heartbeat —
+# فشل هذا التقديم وحده لا يجب أن يُسقط تشغيلاً معالجَته الفعلية نجحت؛ أسوأ
+# أثر لفشله هو إعادة مسح نفس النطاق بالتشغيل التالي (رخيص وآمن idempotent)،
+# وليس فقد أي حدث. الدالة بالطرف الآخر (update_khalil_audit_overlap_floor)
+# أحادية الاتجاه فعلياً فلا داعي لفحص التراجع هنا أيضاً.
+function Set-OverlapFloor([datetime]$FloorTime) {
+    try {
+        $body = @{ p_floor = $FloorTime.ToString("yyyy-MM-ddTHH:mm:ss.fffffff") } | ConvertTo-Json -Compress
+        Invoke-RestMethod -Method Post -Uri "$supabaseUrl/rest/v1/rpc/update_khalil_audit_overlap_floor" `
+            -Headers $headers -ContentType "application/json; charset=utf-8" `
+            -Body ([Text.Encoding]::UTF8.GetBytes($body)) -TimeoutSec 20 | Out-Null
+    } catch {
+        Write-Log ("WARN: overlap floor advance failed (will rescan same range next run, safe): " + $_.Exception.Message)
+    }
+}
+
 function Get-XmlTotal([string]$xml) {
     if (-not $xml) { return $null }
     # بحث فعلي مباشر (30/08/2026، إعادة اختبار حية فاتورة 1483): الأمين يكتب
@@ -185,10 +220,12 @@ try {
     $cursorTime = $null
     $cursorGuid = $null
     $backfillBoundary = $null
+    $overlapFloor = $null
     if ($cursorResp -and $cursorResp.Count -gt 0) {
         if ($cursorResp[0].last_log_time) { $cursorTime = [datetime]$cursorResp[0].last_log_time }
         if ($cursorResp[0].last_log_guid) { $cursorGuid = [string]$cursorResp[0].last_log_guid }
         if ($cursorResp[0].backfill_before) { $backfillBoundary = [datetime]$cursorResp[0].backfill_before }
+        if ($cursorResp[0].overlap_floor_time) { $overlapFloor = [datetime]$cursorResp[0].overlap_floor_time }
     }
 
     # ملاحظة أمنية/موثوقية (Codex P1، 2026-08-30): ترتيب SQL Server الأصلي
@@ -256,9 +293,22 @@ ORDER BY LogTime ASC, LOWER(CAST(GUID AS VARCHAR(36))) ASC
     # محدودة خلف الـcursor الحالي بحثاً عن أي صف Khalil التزم متأخراً ولم
     # يُقرأ سابقاً (رغم أن LogTime أقدم من الـcursor الآن). لا يُنفَّذ إلا
     # عندما يوجد cursor فعلاً (أول تشغيل يغطيه استعلام الباك-فيل الرئيسي).
+    # Codex P1، 2026-08-30، جولة ٩: $overlapFrom يُشتَق الآن من الحد الدائم
+    # المحفوظ (overlap_floor_time) بدل Get-Date — انظر شرح المعامل
+    # $OverlapWindowMinutes أعلاه. لو لم يوجد حد محفوظ بعد (أول تشغيل منذ
+    # تفعيل هذا العمود)، نبدأ بنافذة إقلاع لمرة واحدة بعرض
+    # $OverlapWindowMinutes خلف الـcursor الحالي (وليس خلف "الآن")، تماماً
+    # كما كانت النافذة القديمة تعمل، لكن هذا الاحتساب النسبي لا يتكرر بعد
+    # ذلك أبداً — كل تشغيل لاحق يقرأ الحد المحفوظ فقط.
+    $overlapTruncated = $false
+    $overlapMaxLogTime = $null
     $overlapRows = @()
     if ($cursorTime) {
-        $overlapFrom = (Get-Date).AddMinutes(-1 * $OverlapWindowMinutes)
+        if ($overlapFloor) {
+            $overlapFrom = $overlapFloor
+        } else {
+            $overlapFrom = $cursorTime.AddMinutes(-1 * $OverlapWindowMinutes)
+        }
         $overlapCmd = $conn.CreateCommand()
         $overlapCmd.CommandTimeout = 60
         $overlapCmd.CommandText = @"
@@ -293,7 +343,12 @@ ORDER BY LogTime ASC, LOWER(CAST(GUID AS VARCHAR(36))) ASC
         $overlapReader.Close()
         if ($overlapRows.Count -gt 0) {
             Write-Log ("Overlap rescan recovered {0} previously-missed row(s)." -f $overlapRows.Count)
+            $overlapMaxLogTime = ($overlapRows | Measure-Object -Property LogTime -Maximum).Maximum
         }
+        # وصلت الدفعة إلى BatchSize بالضبط → قد يوجد المزيد خلف هذا الحد لم
+        # يُقرأ بعد بهذا التشغيل؛ لا يجوز عندها اعتبار [@OverlapFrom،
+        # @CursorTime] كله "مسحه بالكامل" (Codex P1، جولة ٩).
+        $overlapTruncated = ($overlapRows.Count -eq $BatchSize)
     }
 
     # صفوف الـoverlap تُعالَج أولاً (id ثابت ameen_log_guid يجعل التكرار
@@ -304,6 +359,12 @@ ORDER BY LogTime ASC, LOWER(CAST(GUID AS VARCHAR(36))) ASC
     $rows = @($overlapRows) + @($rows)
 
     Write-Log ("Found {0} new log000 row(s) for Khalil (+{1} overlap rescan)." -f $mainRowCount, $overlapRows.Count)
+
+    # لا يوجد أي صف overlap على الإطلاق ⇐ نطاق [@OverlapFrom، @CursorTime]
+    # فارغ فعلاً ومُثبَت بالكامل — يمكن تقديم الحد إلى @CursorTime بأمان
+    # حتى لو لم توجد أي صفوف رئيسية جديدة أيضاً (Codex P1، جولة ٩).
+    if ($cursorTime -and $overlapRows.Count -eq 0) { Set-OverlapFloor $cursorTime }
+
     if ($rows.Count -eq 0) { $conn.Close(); Send-Heartbeat 0 0; exit 0 }
 
     if ($DryRun) {
@@ -479,9 +540,29 @@ ORDER BY LogTime DESC, LOWER(CAST(GUID AS VARCHAR(36))) DESC
 
     $conn.Close()
     Write-Log ("Pushed $processed / $($rows.Count) Khalil audit event(s) successfully.")
+
+    # كل صفوف الـoverlap (إن وُجدت) عولجت بنجاح بهذه النقطة (وإلا كان
+    # السكربت قد خرج بـexit 1 من داخل الحلقة قبل الوصول هنا) — قدِّم
+    # overlap_floor_time الآن (Codex P1، جولة ٩):
+    #   • لم يُقطَع المسح بحجم الدفعة (overlapTruncated=false) ⇐ النطاق كله
+    #     [@OverlapFrom، @CursorTime] مُثبَت بالكامل، فيُقدَّم الحد إلى
+    #     @CursorTime (قيمته وقت بداية هذا التشغيل، قبل تقدّم الـcursor
+    #     الرئيسي) بأمان تام.
+    #   • قُطِع بحجم الدفعة (تراكم كبير، مثلاً بعد توقف طويل) ⇐ تقدّم جزئي
+    #     فقط إلى أقصى LogTime عولِج فعلياً هذا التشغيل، لا إلى @CursorTime
+    #     كاملاً، لتفادي تخطي الجزء غير المقروء بعد من نفس النطاق (livelock
+    #     inverse: بدل عدم التقدّم إطلاقاً، تقدّم تدريجي آمن بلا أي فجوة).
+    if ($cursorTime -and $overlapRows.Count -gt 0) {
+        if ($overlapTruncated -and $overlapMaxLogTime) {
+            Set-OverlapFloor $overlapMaxLogTime
+        } elseif (-not $overlapTruncated) {
+            Set-OverlapFloor $cursorTime
+        }
+    }
+
     # دفعة كاملة (== BatchSize) تعني على الأرجح تراكماً متبقياً خلف الـcursor
     # لم يُعالَج بعد بهذا التشغيل — أبلِغ عنها بوضوح بدل "ok" الصامتة.
-    $heartbeatStatus = if ($mainRowCount -eq $BatchSize) { "backlog" } else { "ok" }
+    $heartbeatStatus = if ($mainRowCount -eq $BatchSize -or $overlapTruncated) { "backlog" } else { "ok" }
     Send-Heartbeat $processed $rows.Count $heartbeatStatus
     exit 0
 } catch {
