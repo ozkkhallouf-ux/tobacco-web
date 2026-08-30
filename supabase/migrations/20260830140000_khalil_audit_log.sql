@@ -245,6 +245,121 @@ revoke all on function public.record_khalil_audit_event(
 ) from anon;
 
 -- ------------------------------------------------------------
+-- 6-أ) شبكة أمان مستقلة تماماً عن telegram_outbox (Codex P1، 2026-08-30،
+--    جولة ٥): المحاولة الاحتياطية في الـtrigger أدناه كانت تكتب إلى
+--    telegram_outbox نفسها — لو كان العطل الأصلي في notify_telegram سببه
+--    telegram_outbox نفسه (قفل/جدول معطوب)، فالمحاولة الاحتياطية تفشل أيضاً
+--    بنفس السبب، ويُفقَد الإشعار للأبد فعلياً: صفّ الـAudit له GUID فريد
+--    (on conflict do nothing)، فلا يُعاد إدراجه أبداً ولن يُطلَق هذا الـ
+--    trigger AFTER INSERT ثانيةً لنفس الحدث. هذا الجدول المخصّص + دالة
+--    إعادة المحاولة أدناه (private.retry_khalil_audit_notify_failures،
+--    مجدولة بـpg_cron) يشكّلان مساراً مستقلاً كلياً عن telegram_outbox:
+--    حتى لو تعطّل telegram_outbox نفسه مؤقتاً، هذا الجدول يبقى نقطة حفظ
+--    موثوقة يُعاد منها محاولة الإدراج في telegram_outbox لاحقاً عند تعافيه.
+--    لا يخالف هذا ضمان "الـtrigger لا يكتب رجوعاً إلى khalil_audit_events"
+--    (البند 13 أعلى الملف) لأن هذا جدول منفصل تماماً، لا يُعدَّل
+--    khalil_audit_events نفسه إطلاقاً من أي مسار إشعار.
+-- ------------------------------------------------------------
+create schema if not exists private;
+
+create table if not exists public.khalil_audit_notify_failures (
+  id bigint generated always as identity primary key,
+  ameen_log_guid uuid not null unique,
+  message text not null,
+  first_failed_at timestamptz not null default now(),
+  last_attempt_at timestamptz not null default now(),
+  attempts integer not null default 1,
+  resolved_at timestamptz
+);
+
+comment on table public.khalil_audit_notify_failures is
+  'شبكة أمان مستقلة عن telegram_outbox لإشعارات تدقيق خليل التي فشلت '
+  'مرتين (notify_telegram + الإدراج الاحتياطي بـtelegram_outbox معاً) — '
+  'تُعاد محاولتها دورياً عبر private.retry_khalil_audit_notify_failures.';
+
+alter table public.khalil_audit_notify_failures enable row level security;
+revoke all on public.khalil_audit_notify_failures from public, anon, authenticated, service_role;
+
+-- دالة مساعدة SECURITY DEFINER تُستدعى من الـtrigger أدناه — best-effort
+-- بالكامل: أي فشل هنا (حتى لو نادر جداً) يُبتلع بتحذير فقط، فلا يمكن لهذا
+-- المسار الاحتياطي نفسه أن يُسقط معاملة تسجيل حدث الـAudit إطلاقاً.
+create or replace function private.record_khalil_audit_notify_failure(
+  p_ameen_log_guid uuid,
+  p_message text
+) returns void
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+begin
+  insert into public.khalil_audit_notify_failures (ameen_log_guid, message)
+  values (p_ameen_log_guid, p_message)
+  on conflict (ameen_log_guid) do update set
+    last_attempt_at = now(),
+    attempts = public.khalil_audit_notify_failures.attempts + 1,
+    resolved_at = null;
+exception
+  when others then
+    raise warning 'khalil_audit: could not record notify failure for ameen_log_guid=%: %',
+      p_ameen_log_guid, sqlerrm;
+end;
+$$;
+
+revoke all on function private.record_khalil_audit_notify_failure(uuid, text)
+  from public, anon, authenticated, service_role;
+
+-- دالة إعادة محاولة دورية (pg_cron) — مستقلة تماماً عن مسار الـtrigger،
+-- تعمل فقط حين يتعافى telegram_outbox. best-effort لكل صف على حدة: فشل
+-- صف واحد لا يوقف بقية الصفوف، ولا يُسقط أي شيء آخر بالنظام.
+create or replace function private.retry_khalil_audit_notify_failures()
+returns void
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare r record;
+begin
+  for r in
+    select * from public.khalil_audit_notify_failures
+    where resolved_at is null
+    order by first_failed_at
+    limit 100
+  loop
+    begin
+      if not exists (
+        select 1 from public.telegram_outbox
+        where dedupe_key = r.ameen_log_guid::text
+          and created_at > now() - interval '1 minute'
+      ) then
+        insert into public.telegram_outbox (event_type, message, dedupe_key)
+        values ('khalil_audit_event', r.message, r.ameen_log_guid::text);
+      end if;
+      update public.khalil_audit_notify_failures
+        set resolved_at = now()
+        where id = r.id;
+    exception
+      when others then
+        update public.khalil_audit_notify_failures
+          set last_attempt_at = now(), attempts = attempts + 1
+          where id = r.id;
+        raise warning 'khalil_audit: retry of notify failure id=% (ameen_log_guid=%) failed again: %',
+          r.id, r.ameen_log_guid, sqlerrm;
+    end;
+  end loop;
+end;
+$$;
+
+revoke all on function private.retry_khalil_audit_notify_failures()
+  from public, anon, authenticated, service_role;
+
+do $$ declare old_job bigint; begin
+  for old_job in select jobid from cron.job where jobname='retry-khalil-audit-notify-failures'
+  loop perform cron.unschedule(old_job); end loop;
+  perform cron.schedule('retry-khalil-audit-notify-failures', '*/5 * * * *',
+    'select private.retry_khalil_audit_notify_failures();');
+end $$;
+
+-- ------------------------------------------------------------
 -- 6) trigger الإشعار — يقرأ فقط NEW.*، ولا يكتب إلى khalil_audit_events
 --    (يبقى الجدول immutable من مسار الإشعارات). التسليم الفعلي والـretry
 --    عبر telegram_outbox القائمة أصلاً (dispatch_telegram_outbox / pg_cron)
@@ -337,13 +452,21 @@ begin
       -- (وليس أثناء notify_telegram)، exception when others وحدها كانت
       -- ستدع QUERY_CANCELED يتسرب من هنا فيُسقط نفس المعاملة رغم أن صف
       -- الـAudit مُدرَج أصلاً. معالجة صريحة تُبقي الأثر الوحيد تحذيراً.
+      -- Codex P1، 2026-08-30، جولة ٥: لو فشلت هذه المحاولة الاحتياطية أيضاً
+      -- (مثلاً لأن telegram_outbox نفسه هو سبب العطل الأصلي)، تحذير فقط كان
+      -- يعني ضياع الإشعار للأبد فعلياً (انظر البند 6-أ أعلاه). الآن نسجّل
+      -- الفشل في جدول khalil_audit_notify_failures المستقل تماماً عن
+      -- telegram_outbox، ليعيد private.retry_khalil_audit_notify_failures
+      -- محاولة التسليم لاحقاً عند تعافي outbox.
       exception
         when query_canceled then
           raise warning 'khalil_audit: fallback telegram_outbox insert canceled/timed out for ameen_log_guid=%',
             new.ameen_log_guid;
+          perform private.record_khalil_audit_notify_failure(new.ameen_log_guid, left(v_message, 3900));
         when others then
           raise warning 'khalil_audit: fallback telegram_outbox insert also failed for ameen_log_guid=%: %',
             new.ameen_log_guid, sqlerrm;
+          perform private.record_khalil_audit_notify_failure(new.ameen_log_guid, left(v_message, 3900));
       end;
     when others then
       raise warning 'khalil_audit: notify_telegram failed for ameen_log_guid=%: %',
@@ -361,9 +484,11 @@ begin
         when query_canceled then
           raise warning 'khalil_audit: fallback telegram_outbox insert canceled/timed out for ameen_log_guid=%',
             new.ameen_log_guid;
+          perform private.record_khalil_audit_notify_failure(new.ameen_log_guid, left(v_message, 3900));
         when others then
           raise warning 'khalil_audit: fallback telegram_outbox insert also failed for ameen_log_guid=%: %',
             new.ameen_log_guid, sqlerrm;
+          perform private.record_khalil_audit_notify_failure(new.ameen_log_guid, left(v_message, 3900));
       end;
   end;
 

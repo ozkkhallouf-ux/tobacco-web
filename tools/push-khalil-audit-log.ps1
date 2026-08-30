@@ -96,10 +96,18 @@ if (-not $apiKey -or -not $syncEmail -or -not $syncPassword) {
 # ويحجز dedupe_key الخاص به لمدة 1200 دقيقة، فيُسكِت إشعار الجرد الحقيقي (d).
 # الإصلاح: جدول مخصّص khalil_audit_sync_heartbeat بصلاحية INSERT محصورة
 # بهوية المزامنة الموثوقة فقط (نفس RLS المستخدَم لـkhalil_audit_events).
-function Send-Heartbeat($ProcessedCount, $FoundCount) {
+# Codex P1، 2026-08-30، جولة ٥: TOP(@BatchSize) بالضبط لا يميّز "انتهى
+# الطابور فعلاً" عن "توجد مئات صفوف أخرى بالخلف بالضبط لأن الحد وصل". كان
+# الـheartbeat يكتب status="ok" دوماً بلا فرق، فـmonitor_project_tasks()
+# (يقرأ فقط حداثة created_at، لا found_count) كان يعتبر الخط "سليماً" رغم
+# تراكم متزايد خلف الـcursor بلا أي تنبيه. الآن: إن كان عدد الصفوف المُعاد
+# مساوياً تماماً BatchSize، الحالة "backlog" بدل "ok" — monitor_project_tasks
+# (project-task-health-monitor.sql) يقرأ هذا الحقل صراحة الآن وينبّه عليه
+# حتى لو كان الـheartbeat حديثاً زمنياً.
+function Send-Heartbeat($ProcessedCount, $FoundCount, $Status = "ok") {
     try {
         $body = @{
-            status          = "ok"
+            status          = $Status
             found_count     = $FoundCount
             processed_count = $ProcessedCount
             ran_at          = (Get-Date).ToString("o")
@@ -323,7 +331,10 @@ ORDER BY LogTime DESC, LOWER(CAST(GUID AS VARCHAR(36))) DESC
 
     $conn.Close()
     Write-Log ("Pushed $processed / $($rows.Count) Khalil audit event(s) successfully.")
-    Send-Heartbeat $processed $rows.Count
+    # دفعة كاملة (== BatchSize) تعني على الأرجح تراكماً متبقياً خلف الـcursor
+    # لم يُعالَج بعد بهذا التشغيل — أبلِغ عنها بوضوح بدل "ok" الصامتة.
+    $heartbeatStatus = if ($rows.Count -eq $BatchSize) { "backlog" } else { "ok" }
+    Send-Heartbeat $processed $rows.Count $heartbeatStatus
     exit 0
 } catch {
     Write-Log ("ERROR: " + $_.Exception.Message)

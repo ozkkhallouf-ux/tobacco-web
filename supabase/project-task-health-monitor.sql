@@ -14,7 +14,17 @@ create table if not exists private.project_task_monitors (
   -- finding b/d). أضيف هذا العمود ليدعم المراقب قراءة آخر created_at من أي
   -- جدول مخصّص بلا فلترة source (الجدول نفسه مخصّص لمصدر واحد)، مع إبقاء
   -- السلوك الافتراضي (inventory_reports + فلترة source) لبقية الصفوف.
-  source_table text not null default 'inventory_reports'
+  source_table text not null default 'inventory_reports',
+  -- Codex P1، 2026-08-30، جولة ٥ (khalil-audit PR #139): heartbeat يمكن أن
+  -- يكون حديثاً زمنياً (created_at ضمن max_age_minutes) لكن يحمل status
+  -- غير "ok" — مثلاً "backlog" حين تُعيد push-khalil-audit-log.ps1 دفعة
+  -- كاملة (== BatchSize) فيرجَّح وجود صفوف أخرى خلف الـcursor لم تُعالَج
+  -- بعد. الاعتماد على حداثة created_at وحدها (كما كان سابقاً) كان يعتبر
+  -- هذه الحالة "سليمة" رغم تراكم متزايد بصمت. check_status=true يجعل
+  -- monitor_project_tasks() يقرأ آخر status من الجدول المخصّص وينبّه إن لم
+  -- يكن "ok"، حتى لو كان حديثاً. القيمة الافتراضية false تُبقي بقية الصفوف
+  -- (بلا عمود status أصلاً) بسلوكها القديم بلا أي تغيير.
+  check_status boolean not null default false
 );
 
 do $$ begin
@@ -23,6 +33,12 @@ do $$ begin
     where table_schema='private' and table_name='project_task_monitors' and column_name='source_table'
   ) then
     alter table private.project_task_monitors add column source_table text not null default 'inventory_reports';
+  end if;
+  if not exists (
+    select 1 from information_schema.columns
+    where table_schema='private' and table_name='project_task_monitors' and column_name='check_status'
+  ) then
+    alter table private.project_task_monitors add column check_status boolean not null default false;
   end if;
 end $$;
 
@@ -54,11 +70,17 @@ insert into private.project_task_monitors(task_key,task_label,report_source,max_
 on conflict(task_key) do update set task_label=excluded.task_label,report_source=excluded.report_source,
  max_age_minutes=excluded.max_age_minutes,enabled=excluded.enabled,source_table=excluded.source_table;
 
+-- جولة ٥: تفعيل فحص status لصف خليل تحديداً (انظر تعليق العمود أعلاه) —
+-- تحديث منفصل بدل إضافته لقائمة insert...on conflict فوق كي لا يُعاد ضبط
+-- بقية الصفوف check_status=false في كل إعادة تشغيل (وهي بالفعل القيمة
+-- الافتراضية الصحيحة لها، لكن الوضوح أفضل من الاعتماد الضمني).
+update private.project_task_monitors set check_status=true where task_key='khalil-audit';
+
 create or replace function private.monitor_project_tasks()
 returns void language plpgsql security definer
 set search_path=private,public,cron,pg_temp
 as $$
-declare cfg record; last_at timestamptz; age_minutes numeric;
+declare cfg record; last_at timestamptz; age_minutes numeric; last_status text; is_backlogged boolean;
  previous_healthy boolean; previous_alert_at timestamptz; detail_text text;
  job_record record; last_job_status text; last_job_at timestamptz;
 begin
@@ -67,18 +89,31 @@ begin
   -- القديم كما هو (فلترة بعمود source داخل الجدول المشترك). أي قيمة أخرى
   -- تعني جدولاً مخصّصاً بمصدر واحد فقط (مثل khalil_audit_sync_heartbeat)،
   -- فلا حاجة لفلترة source هناك أصلاً.
+  last_status:=null;
   if cfg.source_table = 'inventory_reports' then
    select max(created_at) into last_at from public.inventory_reports where source=cfg.report_source;
   else
    execute format('select max(created_at) from public.%I', cfg.source_table) into last_at;
+   -- جولة ٥: heartbeat حديث زمنياً لا يعني بالضرورة "سليم" — status آخر
+   -- صف قد يكون "backlog" (دفعة كاملة == BatchSize، انظر تعليق العمود
+   -- check_status أعلاه). فحص إضافي فقط للجداول المخصّصة التي طلبت ذلك.
+   if cfg.check_status then
+    execute format('select status from public.%I order by created_at desc limit 1', cfg.source_table) into last_status;
+   end if;
   end if;
   age_minutes:=case when last_at is null then null else round(extract(epoch from(now()-last_at))/60.0,1) end;
+  is_backlogged:=last_status is not null and last_status<>'ok';
   select is_healthy,last_alert_at into previous_healthy,previous_alert_at
     from private.project_task_health_state where task_key=cfg.task_key;
 
-  if last_at is null or last_at<now()-make_interval(mins=>cfg.max_age_minutes) then
-   detail_text:=case when last_at is null then 'لم يصل أي تقرير حتى الآن'
-    else format('آخر نجاح منذ %s دقيقة عند %s',age_minutes,to_char(last_at at time zone 'Asia/Riyadh','YYYY-MM-DD HH24:MI')) end;
+  if last_at is null or last_at<now()-make_interval(mins=>cfg.max_age_minutes) or is_backlogged then
+   detail_text:=case
+    when last_at is null then 'لم يصل أي تقرير حتى الآن'
+    when last_at<now()-make_interval(mins=>cfg.max_age_minutes) then
+     format('آخر نجاح منذ %s دقيقة عند %s',age_minutes,to_char(last_at at time zone 'Asia/Riyadh','YYYY-MM-DD HH24:MI'))
+    else
+     format('تراكم محتمل (status=%s) — آخر دفعة كاملة عند %s',last_status,to_char(last_at at time zone 'Asia/Riyadh','YYYY-MM-DD HH24:MI'))
+    end;
    if previous_healthy is distinct from false or previous_alert_at is null or previous_alert_at<now()-interval '60 minutes' then
     perform public.notify_telegram('project_task_failure',
      format('🚨 توقفت مهمة بالمشروع%1$s• المهمة: %2$s%1$s• المصدر: %3$s%1$s• الحالة: %4$s%1$s• الحد المسموح: %5$s دقيقة',
