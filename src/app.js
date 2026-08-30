@@ -758,7 +758,8 @@ function itemCostFor(item) {
 }
 
 // ===== واتساب: إرسال وصل/فاتورة رسمية للزبون =====
-const SITE_BASE = "https://fhwvtqdc2q-svg.github.io/tobacco-web";
+// (SITE_BASE أُزيل هنا — كان يشير لدومين GitHub Pages القديم fhwvtqdc2q-svg.github.io
+// المهجور منذ اعتماد ozktobacco.com، ولم يكن مستخدَماً في أي مكان بالملف أصلاً.)
 
 async function loadCustomerWhatsapp() {
   try {
