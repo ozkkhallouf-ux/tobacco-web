@@ -91,6 +91,16 @@ create table if not exists public.khalil_audit_cursor (
   last_log_time timestamp,
   last_log_guid uuid,
   updated_at timestamptz not null default now(),
+  -- Codex P1، 2026-08-30، جولة ٧: يُضبَط مرة واحدة فقط — لحظة إنشاء هذا
+  -- الصف لأول مرة على الإطلاق (أول حدث يُسجَّل بعد تفعيل صلاحيات خليل).
+  -- سكربت المزامنة يستخدمه كحدّ ثابت ودائم لتمييز "تاريخ سابق للمراقبة
+  -- الحيّة" عن "حدث حيّ حقيقي"، بدل الاعتماد على غياب الـcursor فقط —
+  -- الذي كان يصف أول دفعة فقط، فتُعامَل بقية سجل الباك-فيل (بعد BatchSize
+  -- صف) كأحداث حيّة في التشغيلات التالية وتُغرِق طابور تيليجرام (20
+  -- رسالة/دقيقة). القيمة لا تُعدَّل أبداً بعد الإدراج الأول (غير مذكورة في
+  -- on conflict do update أدناه)، فتبقى صامدة عبر كل الدفعات اللاحقة مهما
+  -- طال تفريغ التاريخ المتراكم.
+  backfill_before timestamp,
   constraint khalil_audit_cursor_singleton check (id = 1)
 );
 
@@ -125,7 +135,7 @@ grant execute on function public.khalil_audit_is_sync_writer()
 -- 4) قراءة الـcursor (SECURITY DEFINER — لا منح مباشر على الجدول نفسه).
 -- ------------------------------------------------------------
 create or replace function public.get_khalil_audit_cursor()
-returns table (last_log_time timestamp, last_log_guid uuid)
+returns table (last_log_time timestamp, last_log_guid uuid, backfill_before timestamp)
 language plpgsql
 security definer
 set search_path = public
@@ -139,7 +149,7 @@ begin
   end if;
 
   return query
-    select c.last_log_time, c.last_log_guid
+    select c.last_log_time, c.last_log_guid, c.backfill_before
     from public.khalil_audit_cursor c
     where c.id = 1;
 end;
@@ -217,8 +227,12 @@ begin
 
   -- تقديم الـcursor بمقارنة صف كاملة: لا يتراجع أبداً، ولا يتخطى أي حدث
   -- بنفس اللحظة (يحترم ORDER BY LogTime, GUID المستخدم في القراءة).
-  insert into public.khalil_audit_cursor (id, last_log_time, last_log_guid, updated_at)
-  values (1, p_ameen_log_time, p_ameen_log_guid, now())
+  -- backfill_before تُضبَط فقط عند إدراج الصف الوحيد لأول مرة (now()، أي
+  -- لحظة أول حدث يُسجَّل على الإطلاق) — عمداً غير مذكورة في do update set
+  -- كي لا تُلمَس بعد ذلك أبداً، فتبقى حدّاً ثابتاً عبر كل الدفعات اللاحقة
+  -- (Codex P1، جولة ٧).
+  insert into public.khalil_audit_cursor (id, last_log_time, last_log_guid, updated_at, backfill_before)
+  values (1, p_ameen_log_time, p_ameen_log_guid, now(), now())
   on conflict (id) do update set
     last_log_time = excluded.last_log_time,
     last_log_guid = excluded.last_log_guid,

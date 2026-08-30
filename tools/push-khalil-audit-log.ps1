@@ -18,6 +18,16 @@
 param(
     [switch]$DryRun,
     [int]$BatchSize = 200,
+    # Codex P1، 2026-08-30، جولة ٧: معاملتان قد تتداخلان في الأمين — A
+    # (LogTime أقدم) تبدأ قبل B (LogTime أحدث) لكنها تُنجَز/تُلتزَم (commit)
+    # بعدها. لو استقرأ السكربت الصف بين commit B وcommit A، يتقدّم الـcursor
+    # إلى LogTime الخاص بـB، فيصبح صف A (الأقدم زمنياً لكنه التزم لاحقاً)
+    # مستبعداً للأبد بمجرد commit لأنه أقدم من الـcursor. نافذة الأمان هذه
+    # تستبعد من القراءة كل صف أحدث من (الآن − هذه الثواني) كي يُمنَح أي
+    # commit متأخر لمعاملة أقدم فرصة كافية للظهور قبل أن يتقدّم الـcursor
+    # فوقه. مع idempotency عبر ameen_log_guid (on conflict do nothing) هذا
+    # التأخير آمن تماماً لإعادة المعالجة.
+    [int]$SafetyDelaySeconds = 30,
     [string]$EnvFile = "$PSScriptRoot\.env",
     [string]$LogFile = "$PSScriptRoot\logs\khalil-audit-push.log"
 )
@@ -158,9 +168,11 @@ try {
 
     $cursorTime = $null
     $cursorGuid = $null
+    $backfillBoundary = $null
     if ($cursorResp -and $cursorResp.Count -gt 0) {
         if ($cursorResp[0].last_log_time) { $cursorTime = [datetime]$cursorResp[0].last_log_time }
         if ($cursorResp[0].last_log_guid) { $cursorGuid = [string]$cursorResp[0].last_log_guid }
+        if ($cursorResp[0].backfill_before) { $backfillBoundary = [datetime]$cursorResp[0].backfill_before }
     }
 
     # ملاحظة أمنية/موثوقية (Codex P1، 2026-08-30): ترتيب SQL Server الأصلي
@@ -189,6 +201,7 @@ WHERE UserGUID = @UserGuid
         OR (LogTime = @CursorTime AND LOWER(CAST(GUID AS VARCHAR(36))) > @CursorGuid)
       )
   AND (@CursorTime IS NOT NULL OR @BackfillFrom IS NULL OR LogTime >= @BackfillFrom)
+  AND LogTime <= @SafeUntil
 ORDER BY LogTime ASC, LOWER(CAST(GUID AS VARCHAR(36))) ASC
 "@
     $cmd.Parameters.AddWithValue("@BatchSize", $BatchSize) | Out-Null
@@ -202,6 +215,7 @@ ORDER BY LogTime ASC, LOWER(CAST(GUID AS VARCHAR(36))) ASC
     } else {
         $cmd.Parameters.AddWithValue("@BackfillFrom", [DBNull]::Value) | Out-Null
     }
+    $cmd.Parameters.AddWithValue("@SafeUntil", (Get-Date).AddSeconds(-1 * $SafetyDelaySeconds)) | Out-Null
 
     $reader = $cmd.ExecuteReader()
     $rows = @()
@@ -284,19 +298,22 @@ ORDER BY LogTime DESC, LOWER(CAST(GUID AS VARCHAR(36))) DESC
             $financialDelta = [math]::Round($afterTotal - $beforeTotal, 4)
         }
 
-        # Codex P1، 2026-08-30، جولة ٤ (finding c) + جولة ٦ (تصحيح): backfill
-        # حقيقي = لا يوجد cursor محفوظ إطلاقاً بعد (أول تشغيل بعد التسجيل، أو
-        # قبل تفعيل صلاحيات خليل) — هذه الحالة فقط تُعتبر لحاقاً تاريخياً
-        # ضخماً يجب كتم إشعاره الفوري كي لا يُغرق طابور الإرسال (20 رسالة/
-        # دقيقة). أما لو كان الـcursor موجوداً أصلاً ($cursorTime لم يكن
-        # null) فهذا لحاق بعد توقف الجهاز/المهمة (outage recovery) — أحداث
-        # حساسة حقيقية حصلت أثناء التوقف ويجب أن تصل إشعاراتها كاملة رغم
-        # تأخرها، لا أن تُكتم بحجة عمرها فقط (Codex: "Preserve alerts while
-        # catching up after an outage"). عتبة الـ15 دقيقة تبقى تُطبَّق فقط
-        # ضمن حالة انعدام الـcursor لتمييز backfill الحقيقي عن أول دفعة حيّة
-        # طبيعية بعد التسجيل مباشرة. الحدث نفسه يبقى مسجَّلاً بكامل تفاصيله
-        # في الـAudit دوماً بغض النظر عن قيمة is_backfill.
-        $isBackfill = ($null -eq $cursorTime) -and ($row.LogTime -lt (Get-Date).AddMinutes(-15))
+        # Codex P1، 2026-08-30، جولة ٤ (finding c) + جولة ٦ (تصحيح) + جولة ٧
+        # (تصحيح نهائي): backfill حقيقي = LogTime الصف أقدم من backfill_before
+        # المحفوظ في khalil_audit_cursor — حدّ ثابت يُضبَط مرة واحدة فقط عند
+        # أول حدث يُسجَّل على الإطلاق (راجع الدالة record_khalil_audit_event
+        # في migration) ولا يتغيّر بعدها أبداً. هذا يحل مشكلتين معاً:
+        # 1) (جولة ٦) لا يُعاد تصنيف باقي التاريخ المتراكم كـ"حيّ" في التشغيلات
+        #    التالية لمجرد أن الـcursor أصبح غير null بعد أول دفعة — الحدّ
+        #    محفوظ في القاعدة نفسها، لا مُستنتَج من وجود الـcursor لحظياً،
+        #    فيبقى ثابتاً عبر كل الدفعات مهما طال تفريغ الباك-فيل الأولي
+        #    (Codex P1: "Keep initial backfill mode across every batch").
+        # 2) (جولة ٦) حدث حيّ حقيقي متأخر بعد توقف الجهاز/المهمة (LogTime
+        #    أحدث من backfill_before لكن أقدم من 15 دقيقة بسبب التوقف) يبقى
+        #    غير مصنَّف backfill فتصل إشعاراته كاملة رغم تأخرها. الحدث نفسه
+        #    يبقى مسجَّلاً بكامل تفاصيله في الـAudit دوماً بغض النظر عن قيمة
+        #    is_backfill.
+        $isBackfill = ($null -ne $backfillBoundary) -and ($row.LogTime -lt $backfillBoundary)
 
         $payload = @{
             p_ameen_log_guid     = $row.Guid
