@@ -758,7 +758,8 @@ function itemCostFor(item) {
 }
 
 // ===== واتساب: إرسال وصل/فاتورة رسمية للزبون =====
-const SITE_BASE = "https://fhwvtqdc2q-svg.github.io/tobacco-web";
+// (SITE_BASE أُزيل هنا — كان يشير لدومين GitHub Pages القديم fhwvtqdc2q-svg.github.io
+// المهجور منذ اعتماد ozktobacco.com، ولم يكن مستخدَماً في أي مكان بالملف أصلاً.)
 
 async function loadCustomerWhatsapp() {
   try {
@@ -6387,7 +6388,9 @@ function salesSeqState(mode) {
 
 // الرقم المعروض: الأكبر بين «تالي الأمين» و«تالي العدّاد المحلي»، بلا أي حجز.
 // يرجع نصاً فارغاً إذا لم تصل المزامنة — ولا يخمّن رقماً أبداً، لأن رقماً مخترَعاً
-// قد يصطدم بفاتورة قائمة في الأمين.
+// قد يصطدم بفاتورة قائمة في الأمين. بلا أي تغيير — تبقى صارمة دائماً (راجع
+// SALES_PRINT_GRACE_MAX_AGE_MS أدناه: التسامح لا يمنح رقماً تخمينياً إطلاقاً،
+// بل مسودة بلا رقم — فهذه الدالة لا تحتاج معرفة حالة التسامح أصلاً).
 function peekSalesInvoiceNumber(mode) {
   const st = salesSeriesState(mode);
   if (!st.usable) return "";
@@ -6416,9 +6419,24 @@ function ensureSalesInvoiceNo() {
   return state.salesInvoiceNo;
 }
 
-// عمر المزامنة المسموح به قبل منع إصدار رقم. المهمة المجدولة تعمل كل 5 دقائق،
-// فـ15 دقيقة تعني ثلاث دورات فائتة — أي أن المزامنة متوقفة فعلاً لا متأخرة.
+// عمر المزامنة المسموح به قبل منع إصدار رقم **للحفظ**. المهمة المجدولة تعمل
+// كل 5 دقائق، فـ15 دقيقة تعني ثلاث دورات فائتة — أي أن المزامنة متوقفة فعلاً
+// لا متأخرة. يبقى هذا الحد بلا أي تغيير — يحكم salesSaveInvoice حصراً.
 const SALES_SERIES_MAX_AGE_MS = 15 * 60000;
+
+// نافذة تسامح إضافية — للطباعة/تصدير PDF فقط، وليست للحفظ إطلاقاً، وليست
+// تسامحاً في **الرقم** بل في **إمكانية طباعة مسودة بلا رقم إطلاقاً** (ملاحظة
+// Codex P1 على PR #144: رقم "تقديري" مطبوع قد يتصادم فعلياً مع فاتورة أُدخلت
+// مباشرة بالأمين أو من جهاز آخر خلال هذه النافذة — العدّاد المحلي لا يكتشف
+// إصداراً خارجياً كهذا. الحل: صفر احتمال تصادم لأنه لا يُطبع أي رقم حقيقي
+// إطلاقاً أثناء التدهور، فقط مسودة SALES_DRAFT_INVOICE_NO الواضحة). الطباعة
+// معاينة بلا التزام: لا تحجز رقماً ولا تكتب شيئاً بقاعدة البيانات (الحجز
+// الفعلي يحدث حصراً داخل salesSaveInvoice بعد نجاح الحفظ، عبر إعادة جلب
+// طازجة وإعادة فحص صارمة لم تتغيّر). تجاوز هذه النافذة الأوسع أيضاً يعني على
+// الأرجح انقطاعاً مستمراً
+// حقيقياً (لا عطلاً عابراً كانقطاع Meshnet المؤقت الذي دفع هذا الإصلاح)،
+// فتبقى الطباعة محجوبة أيضاً حينها.
+const SALES_PRINT_GRACE_MAX_AGE_MS = 60 * 60000;
 
 // إعادة جلب تقرير السلاسل عند الطلب. لا يرمي أبداً: فشل الشبكة يترك القراءة
 // السابقة كما هي، ويتكفّل فحص العمر بعده بمنع الإصدار إن كانت قديمة.
@@ -6446,6 +6464,32 @@ function salesSeriesState(mode) {
   return { mode: m, target, series, ageMs: hasAge ? ageMs : NaN, stale, usable: !!series && !stale };
 }
 
+// عنوان/رقم المستند المطبوع أثناء التدهور — مسودة واضحة بلا أي رقم حقيقي أو
+// تخميني إطلاقاً (راجع تعليق SALES_PRINT_GRACE_MAX_AGE_MS للسبب).
+const SALES_DRAFT_INVOICE_NO = "مسودة — بلا رقم نهائي";
+
+// شارة تحذير مرئية تُدرَج داخل المستند المطبوع/المصدَّر نفسه أثناء التدهور —
+// لا تكفي رسالة التأكيد وحدها (قد يُطوى المستند أو يُصوَّر لاحقاً بمعزل عن
+// سياق الشاشة)، فالورقة نفسها يجب أن تُعلن بوضوح أنها مسودة غير رسمية.
+function salesDraftBannerHtml(invNo) {
+  if (invNo !== SALES_DRAFT_INVOICE_NO) return "";
+  return `<div style="background:#fff3cd;border:2px solid #b8860b;color:#5c3d00;font-weight:700;
+    text-align:center;padding:8px 12px;margin-bottom:16px;border-radius:6px">
+    ⚠️ مسودة غير رسمية — بلا رقم فاتورة نهائي. الرقم الحقيقي يُحدَّد فقط عند الحفظ.
+  </div>`;
+}
+
+// حالة الطباعة/تصدير PDF تحديداً — أوسع تسامحاً من الحفظ عمداً (راجع تعليق
+// SALES_PRINT_GRACE_MAX_AGE_MS أعلاه). لا تُستخدم إطلاقاً من مسار الحفظ.
+// degraded=true تعني: مسموح بطباعة مسودة (SALES_DRAFT_INVOICE_NO، بلا أي رقم
+// حقيقي) بعد تأكيد صريح من الموظف — الرقم الفعلي يُحسم حصراً لحظة الحفظ.
+function salesPrintSeriesState(mode) {
+  const st = salesSeriesState(mode);
+  if (st.usable) return { ...st, printUsable: true, degraded: false };
+  const withinGrace = !!st.series && Number.isFinite(st.ageMs) && st.ageMs <= SALES_PRINT_GRACE_MAX_AGE_MS;
+  return { ...st, printUsable: withinGrace, degraded: withinGrace };
+}
+
 function salesSeriesAgeText(ageMs) {
   if (!Number.isFinite(ageMs)) return "";
   const mins = Math.floor(ageMs / 60000);
@@ -6455,26 +6499,46 @@ function salesSeriesAgeText(ageMs) {
   return hours < 24 ? `قبل ${hours} ساعة` : `قبل ${Math.floor(hours / 24)} يوم`;
 }
 
-// رسالة المنع الموحّدة — تُستعمل عند الحفظ وعند الطباعة معاً.
+// رسالة المنع الموحّدة — تُستعمل عند الحفظ (حد صارم 15 دقيقة) وعند تجاوز
+// الطباعة نافذة التسامح الأوسع (60 دقيقة) أيضاً. صيغة مفهومة لموظف لا يعرف
+// أسماء مهام Windows المجدولة — بلا أي تفاصيل تقنية داخلية.
 function salesSeriesBlockReason(st) {
   if (!st.series) {
-    return `لم تصل مزامنة ترقيم الأمين بعد (سلسلة «${st.target.name}») — لا يمكن إصدار رقم فاتورة.`;
+    return "تعذّر إصدار رقم فاتورة — لم تصل بيانات ترقيم الفواتير من نظام المحاسبة بعد. تواصل مع الإدارة.";
   }
   if (st.stale) {
     const age = salesSeriesAgeText(st.ageMs);
-    return `مزامنة ترقيم الأمين متوقفة${age ? ` (آخر قراءة ${age})` : ""} — لا يمكن إصدار رقم قد يكون مستهلكاً. `
-      + `شغّل مهمة «TOBACCO Invoice Series Push» ثم أعد المحاولة.`;
+    return `تعذّر إصدار رقم فاتورة موثوق — انقطع الاتصال بجهاز المزامنة منذ ${age || "فترة"}. `
+      + `تواصل مع الإدارة، أو انتظر عودة الاتصال ثم أعد المحاولة.`;
   }
   return "";
+}
+
+// رسالة تحذير الطباعة أثناء التدهور المؤقت — مختلفة عمداً عن رسالة المنع
+// الكاملة: توضح أن المتابعة ممكنة بموافقة الموظف، لكن كـ"مسودة" بلا رقم
+// حقيقي إطلاقاً (لا "رقم تقديري" — راجع تعليق SALES_PRINT_GRACE_MAX_AGE_MS).
+function salesPrintGraceWarning(printSt) {
+  const age = salesSeriesAgeText(printSt.ageMs);
+  return `⚠️ انقطع الاتصال بجهاز مزامنة الترقيم منذ ${age || "فترة"}.\n`
+    + `ستُطبع نسخة "مسودة" بلا رقم فاتورة نهائي — الرقم الحقيقي يُحسم حصراً عند الحفظ `
+    + `(والحفظ يبقى محجوباً حتى تعود المزامنة).\n\n`
+    + `هل تريد المتابعة بطباعة المسودة الآن؟`;
 }
 
 // سطر توضيحي تحت رقم الفاتورة: أي سلسلة، وآخر رقم بالأمين، وعمر المزامنة —
 // كي يرى المستخدم بنفسه إن كان الرقم مبنياً على قراءة قديمة.
 function salesInvoiceNoHint() {
   const st = salesSeriesState();
-  if (!st.usable) return `⚠️ ${salesSeriesBlockReason(st)}`;
-  const age = salesSeriesAgeText(st.ageMs);
-  return `سلسلة «${st.series.typeName}» — آخر رقم بالأمين ${st.series.lastNo}${age ? ` (مزامنة ${age})` : ""}`;
+  if (st.usable) {
+    const age = salesSeriesAgeText(st.ageMs);
+    return `سلسلة «${st.series.typeName}» — آخر رقم بالأمين ${st.series.lastNo}${age ? ` (مزامنة ${age})` : ""}`;
+  }
+  const printSt = salesPrintSeriesState();
+  if (printSt.degraded) {
+    const age = salesSeriesAgeText(printSt.ageMs);
+    return `⚠️ مزامنة متأخرة منذ ${age} — يمكن طباعة مسودة بلا رقم بتأكيد، والحفظ محجوب حتى تعود المزامنة.`;
+  }
+  return `⚠️ ${salesSeriesBlockReason(st)}`;
 }
 
 function salesEnsureTrailingRow() {
@@ -7266,6 +7330,7 @@ function salesInvoicePdfMarkup(data) {
   return `
   <div dir="rtl" style="width:754px;padding:20px;background:#ffffff;color:#241f18;
        font-family:'Segoe UI',Tahoma,Arial,sans-serif">
+    ${salesDraftBannerHtml(data.invNo)}
     <div class="pdf-head" style="display:flex;justify-content:space-between;align-items:flex-start;
          border-bottom:2px solid #8a6d3b;padding-bottom:10px;margin-bottom:12px;${pdfRowStyle}">
       <div>
@@ -7369,18 +7434,29 @@ async function saveSalesInvoicePdf() {
     render();
     return;
   }
-  // نفس حارس الطباعة: لا نصدر مستنداً برقم غير موثوق.
-  const series = salesSeriesState(mode);
-  if (!series.usable) {
+  // نفس حارس الطباعة: لا نصدر مستنداً برقم غير موثوق إطلاقاً — لكن بتسامح
+  // موسَّع (راجع SALES_PRINT_GRACE_MAX_AGE_MS) لأن التصدير معاينة بلا التزام،
+  // لا يحجز رقماً ولا يكتب شيئاً بقاعدة البيانات. الحفظ الفعلي (salesSaveInvoice)
+  // يبقى بحدّه الصارم الأصلي دون أي تغيير. أثناء التدهور: مسودة بلا رقم
+  // إطلاقاً (SALES_DRAFT_INVOICE_NO) — لا رقم تخميني قد يتصادم مع فاتورة
+  // أُدخلت مباشرة بالأمين أو من جهاز آخر (ملاحظة Codex P1 على PR #144).
+  const series = salesPrintSeriesState(mode);
+  if (!series.printUsable) {
     setNotice("error", salesSeriesBlockReason(series));
     render();
     return;
   }
-  const invNo = ensureSalesInvoiceNo();
-  if (!invNo) {
-    setNotice("error", salesSeriesBlockReason(salesSeriesState(mode)));
-    render();
-    return;
+  let invNo;
+  if (series.degraded) {
+    if (!confirm(salesPrintGraceWarning(series))) return;
+    invNo = SALES_DRAFT_INVOICE_NO;
+  } else {
+    invNo = ensureSalesInvoiceNo();
+    if (!invNo) {
+      setNotice("error", salesSeriesBlockReason(salesSeriesState(mode)));
+      render();
+      return;
+    }
   }
 
   const totals = salesTotals();
@@ -7622,6 +7698,10 @@ function salesReceiptDocument(data) {
     <div class="brand">OZK TOBACCO</div>
     <div class="sub">مركز أبو زياد — لتجارة الدخان</div>
   </div>
+  ${data.invNo === SALES_DRAFT_INVOICE_NO ? `<div style="background:#fff3cd;border:1px dashed #b8860b;color:#5c3d00;
+    font-weight:700;text-align:center;padding:4px 6px;margin-bottom:6px;font-size:10px;line-height:1.4">
+    ⚠️ مسودة — بلا رقم فاتورة نهائي
+  </div>` : ""}
   <div class="meta">
     <div><span>فاتورة رقم</span><b class="nb" dir="ltr">${escapeHtml(data.invNo)}</b></div>
     <div><span>التاريخ</span><b class="nb">${escapeHtml(data.dateLabel)}</b></div>
@@ -7654,21 +7734,33 @@ function printSalesInvoice() {
     return;
   }
   const mode = salesCurrentMode();
-  // لا تُطبع فاتورة برقم غير موثوق: الورقة المطبوعة مستند يُسلَّم للزبون، ورقم
-  // مبني على مزامنة متوقفة قد يكون مستهلكاً في الأمين. لا نعيد الجلب هنا (بخلاف
-  // الحفظ) كي تبقى الطباعة داخل إيماءة المستخدم مباشرةً على iOS؛ والفاتورة
-  // المحفوظة تكون قد جُلبت لها قراءة طازجة أصلاً لحظة الحفظ.
-  const printSeries = salesSeriesState(mode);
-  if (!printSeries.usable) {
+  // لا تُطبع فاتورة برقم حقيقي أو تقديري غير موثوق: الورقة المطبوعة مستند
+  // يُسلَّم للزبون، والعداد المحلي (salesSeqState) يمنع فقط تكرار الرقم على
+  // نفس الجهاز — لا يحمي من إصدار مباشر في الأمين أو من جهاز آخر أثناء
+  // الانقطاع (ملاحظة Codex P1 على PR #144). لذلك في الحالة المتدهورة لا
+  // نطبع أي رقم مُخمَّن إطلاقاً — فقط "مسودة" صريحة بلا رقم نهائي، فيستحيل
+  // تكرارها بالتعريف بغضّ النظر عمّا يحدث في مكان آخر (راجع تعليق
+  // SALES_PRINT_GRACE_MAX_AGE_MS وSALES_DRAFT_INVOICE_NO).
+  // لا نعيد الجلب هنا (بخلاف الحفظ) كي تبقى الطباعة داخل إيماءة المستخدم
+  // مباشرةً على iOS؛ والفاتورة المحفوظة تكون قد جُلبت لها قراءة طازجة أصلاً
+  // لحظة الحفظ، بحدّه الصارم الأصلي دون أي تغيير.
+  const printSeries = salesPrintSeriesState(mode);
+  if (!printSeries.printUsable) {
     setNotice("error", salesSeriesBlockReason(printSeries));
     render();
     return;
   }
-  const invNo = ensureSalesInvoiceNo();
-  if (!invNo) {
-    setNotice("error", salesSeriesBlockReason(salesSeriesState(mode)));
-    render();
-    return;
+  let invNo;
+  if (printSeries.degraded) {
+    if (!confirm(salesPrintGraceWarning(printSeries))) return;
+    invNo = SALES_DRAFT_INVOICE_NO;
+  } else {
+    invNo = ensureSalesInvoiceNo();
+    if (!invNo) {
+      setNotice("error", salesSeriesBlockReason(salesSeriesState(mode)));
+      render();
+      return;
+    }
   }
   const totals = salesTotals();
   const today = new Intl.DateTimeFormat("ar-SA-u-ca-gregory-nu-latn", { dateStyle: "long" }).format(new Date());
@@ -7738,6 +7830,7 @@ function printSalesInvoice() {
 </style>
 </head>
 <body>
+${salesDraftBannerHtml(invNo)}
 <div class="inv-head">
   <div>
     <div class="inv-company">${escapeHtml(appConfig.name)}${appConfig.tagline ? `<small>${escapeHtml(appConfig.tagline)}</small>` : ""}</div>

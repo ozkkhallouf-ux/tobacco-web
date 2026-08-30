@@ -5,7 +5,7 @@
 الرابط العام الحالي:
 
 ```text
-https://fhwvtqdc2q-svg.github.io/
+https://ozktobacco.com/
 ```
 
 ## الحالة الحالية
@@ -36,7 +36,7 @@ http://localhost:5173
 افتح الرابط العام من Safari:
 
 ```text
-https://fhwvtqdc2q-svg.github.io/
+https://ozktobacco.com/
 ```
 
 ثم اختر Share ثم Add to Home Screen.
