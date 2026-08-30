@@ -194,14 +194,38 @@ function Send-Heartbeat($ProcessedCount, $FoundCount, $Status = "ok") {
 # PERFORMANCE STATE) على حساب SQL المستخدَم — صلاحية قراءة meta-data فقط عن
 # المعاملات الجارية، لا تمنح أي وصول لبيانات الفواتير/العملاء نفسها.
 #
-# fallback آمن إذا تعذّر الاستعلام (الصلاحية غير ممنوحة بعد، أو أي خطأ اتصال
-# مؤقت): Get-DynamicOverlapCap تُعيد $null بصمت (مع تحذير بالسجل)، وSet-
-# OverlapFloor يرجع فوراً لسلوك جولة ١٠ الثابت وحده (Get-Date -
-# $OverlapWindowMinutes) — لا يُفشِل أي تشغيل، ولا يفقد أي حدث بأي حال؛ أسوأ
-# أثر لفشل هذا الاستعلام هو العودة للسقف الثابت الأقل دقة الذي كان يعمل أصلاً
-# قبل هذا التعديل. السقف النهائي المُستخدَم دوماً هو الأكثر تحفظاً (الأقدم
-# زمنياً) بين سقف DMV وسقف النافذة الثابتة، وليس سقف DMV وحده — طبقة حماية
-# إضافية لو انحرفت ساعة SQL Server المحلية عن الواقع بشكل غير متوقّع.
+# Codex P1، 2026-08-31، جولة ١٢ ("Stop advancing the floor when the DMV
+# query fails" + "Capture the transaction cap before scanning the overlap"):
+# سلوك جولة ١١ (fallback صامت إلى السقف الثابت عند فشل استعلام DMV) كان
+# يحمل خطأين مجتمعَين:
+#  ١) خطأ ربط (thread #11): $conn كان يُغلَق (سطر ما كان ~669) قبل استدعاء
+#     Set-OverlapFloor الفعلي في مسار التشغيل الحقيقي (بعد معالجة الدفعة)،
+#     فكان Get-DynamicOverlapCap يُستدعى دوماً على اتصال مُغلَق فعلاً —
+#     يفشل الاستعلام دوماً بصمت في الإنتاج رغم نجاحه في الاختبار المعزول
+#     (حيث بقي الاتصال مفتوحاً طوال الاختبار). الإصلاح: $conn لم يعد يُغلَق
+#     إلا بعد كل استدعاءات Set-OverlapFloor لهذا التشغيل (انظر أسفل الحلقة).
+#  ٢) خطأ تصميم (thread #12): حتى لو أُصلِح الربط، الرجوع الصامت للسقف
+#     الثابت عند فشل عابر (مهلة، انقطاع اتصال) يُعيد بالضبط مخاطرة "المعاملة
+#     الطويلة المفقودة" التي صُمِّمت جولة ١١ أصلاً لسدّها — فشل عابر واحد في
+#     هذا التشغيل تحديداً قد يتزامن مع معاملة مفتوحة فعلاً تتجاوز
+#     $OverlapWindowMinutes. الإصلاح الصحيح (fail-closed): إن فشل استعلام
+#     DMV، لا يُقدَّم الحد إطلاقاً هذا التشغيل — لا خسارة أي حدث بأي حال
+#     (نفس النطاق يُعاد مسحه بالكامل بأمان idempotent بالتشغيل التالي)، وأسوأ
+#     أثر هو إعادة مسح أوسع قليلاً حتى ينجح الاستعلام مجدداً؛ وهذا أرخص بما
+#     لا يقاس من فقد حدث تدقيق فعلي. الآن VIEW SERVER STATE ممنوحة ومؤكَّدة
+#     تعمل حياً (30/08/2026)، فالفشل المتوقَّع لهذا الاستعلام نادر وعابر فقط.
+# Codex P1، 2026-08-31، جولة ١٣ ("Capture the transaction cap before
+# scanning the overlap"): استدعاء Get-DynamicOverlapCap من داخل
+# Set-OverlapFloor نفسها (بعد انتهاء مسح الـoverlap ومعالجة كل صفوف
+# الدفعة) كان يترك ثغرة توقيت: معاملة قديمة كانت مفتوحة (وبالتالي غير
+# مرئية) أثناء استعلام الـoverlap قد تُنجَز (commit) بعد ذلك الاستعلام لكن
+# قبل استدعاء Set-OverlapFloor لاحقاً — فتختفي من DMV بحلول تلك اللحظة،
+# ويسمح السقف (الآن "نظيف" ظاهرياً) بتقديم الحد فوق صفّها رغم أنه لم
+# يُمسَح فعلاً بهذا التشغيل. الإصلاح: يُلتقَط سقف DMV **مرة واحدة فقط لكل
+# تشغيل، قبل بدء مسح الـoverlap مباشرة** بينما الاتصال مفتوح ومضموناً أنه
+# يمثّل حالة قاعدة البيانات عند لحظة المسح نفسها، ثم يُمرَّر هذا السقف
+# نفسه (وليس استعلاماً جديداً) عبر كل استدعاءات Set-OverlapFloor لهذا
+# التشغيل بأكمله.
 function Get-DynamicOverlapCap($SqlConn) {
     try {
         $cmd = $SqlConn.CreateCommand()
@@ -225,12 +249,21 @@ WHERE dt.database_id = DB_ID()
     }
 }
 
-function Set-OverlapFloor([datetime]$FloorTime, [Nullable[guid]]$FloorGuid = $null) {
+function Set-OverlapFloor([datetime]$FloorTime, [Nullable[guid]]$FloorGuid = $null, [Nullable[datetime]]$DmvCap) {
     try {
+        # Codex P1، جولة ١٣: $DmvCap يُمرَّر من نقطة التقاطه الوحيدة قبل مسح
+        # الـoverlap (انظر شرح الدالة أعلى Get-DynamicOverlapCap) — لا استعلام
+        # جديد هنا، كي يبقى السقف مطابقاً تماماً لحالة القاعدة عند لحظة المسح.
+        $dmvCap = $DmvCap
+        if ($null -eq $dmvCap) {
+            # Codex P1، جولة ١٢: fail-closed — لا تقدّم الحد إطلاقاً هذا
+            # التشغيل عند فشل استعلام DMV (انظر الشرح الكامل أعلى الدالة).
+            Write-Log "WARN: DMV query failed — skipping overlap floor advance this run (fail-closed, safe: same range will be rescanned next run)."
+            return
+        }
         $fixedCap = (Get-Date).AddMinutes(-1 * $OverlapWindowMinutes)
-        $dmvCap = Get-DynamicOverlapCap $conn
         # الأكثر تحفظاً (الأقدم زمنياً) بين السقفين — انظر شرح جولة ١١ أعلاه.
-        $cap = if ($dmvCap -and $dmvCap -lt $fixedCap) { $dmvCap } else { $fixedCap }
+        $cap = if ($dmvCap -lt $fixedCap) { $dmvCap } else { $fixedCap }
         $cappedTime = $FloorTime
         $cappedGuid = $FloorGuid
         if ($cappedTime -gt $cap) {
@@ -310,6 +343,29 @@ try {
         if ($cursorResp[0].overlap_floor_guid) { $overlapFloorGuid = [string]$cursorResp[0].overlap_floor_guid }
     }
 
+    # Codex P1، 2026-08-31، جولة ١٤ ("Initialize backfill state before the
+    # first live event"): $cursorTime يبقى null ليس فقط بالتشغيل الأول على
+    # الإطلاق، بل بأي عدد من التشغيلات الناجحة اللاحقة التي لم تجد فيها صفوف
+    # Khalil جديدة إطلاقاً (لا يُنشَأ صفّ khalil_audit_cursor إلا عند تسجيل
+    # حدث فعلي — انظر record_khalil_audit_event). لو ظلّت المهمة تعمل بنجاح
+    # لأيام بلا أي حدث، ثم وصل أول حدث حيّ فعلي، كان $isFirstRunEver = true
+    # يصنّفه خطأً كـbackfill فيُسكِت إشعاره رغم أن المراقبة كانت فعّالة طوال
+    # الوقت. الإصلاح: نتحقق هل سبق أن كتب هذا السكربت أي heartbeat ناجح —
+    # إن وُجد، فهذا التشغيل ليس الأول على الإطلاق مهما كان $cursorTime، بغض
+    # النظر عن كونه أول حدث يُسجَّل فعلياً.
+    $hasPriorHeartbeat = $false
+    try {
+        $hbCheck = Invoke-RestMethod -Method Get `
+            -Uri "$supabaseUrl/rest/v1/khalil_audit_sync_heartbeat?select=id&limit=1" `
+            -Headers $headers -TimeoutSec 20
+        if ($hbCheck -and $hbCheck.Count -gt 0) { $hasPriorHeartbeat = $true }
+    } catch {
+        # best-effort — فشل هذا الفحص وحده لا يجب أن يُسقط التشغيل؛ أسوأ أثر
+        # هو معاملة تشغيل لاحق (نادر) وكأنه الأول فعلاً، وهو نفس السلوك
+        # القديم قبل هذا الإصلاح، وليس أسوأ منه.
+        Write-Log ("WARN: prior-heartbeat check failed: " + $_.Exception.Message)
+    }
+
     # ملاحظة أمنية/موثوقية (Codex P1، 2026-08-30): ترتيب SQL Server الأصلي
     # لنوع uniqueidentifier (مقارنة GUID > GUID أو ORDER BY GUID) لا يطابق
     # ترتيب Postgres لنوع uuid — SQL Server يقارن مجموعات بايتات بترتيب غير
@@ -369,6 +425,27 @@ ORDER BY LogTime ASC, LOWER(CAST(GUID AS VARCHAR(36))) ASC
         }
     }
     $reader.Close()
+
+    # Codex P1، جولة ١٣: يُلتقَط سقف DMV هنا بالضبط — قبل مسح الـoverlap
+    # أدناه مباشرة وبينما $conn ما زال مفتوحاً — ويُعاد استخدام نفس القيمة
+    # لكل استدعاءات Set-OverlapFloor في هذا التشغيل (انظر شرح الدالتين أعلاه).
+    $dmvCapForThisRun = Get-DynamicOverlapCap $conn
+
+    # Codex P1، 2026-08-31، جولة ١٤ ("Use the Ameen clock for the persisted
+    # backfill boundary"): ساعة SQL Server المحلية للأمين نفسها (وليس ساعة
+    # PowerShell على هذا الجهاز، ولا now() الخاصة بـPostgres) — تُلتقَط هنا
+    # بينما $conn مفتوح، وتُمرَّر لاحقاً كـp_ameen_scan_time عند أول حدث يُسجَّل
+    # فعلياً هذا التشغيل، ليضبط backfill_before بنفس النطاق الزمني المستخدَم
+    # لاحقاً في مقارنة $row.LogTime -lt $backfillBoundary (انظر أسفل).
+    $ameenScanTimeForThisRun = $null
+    try {
+        $cmdClock = $conn.CreateCommand()
+        $cmdClock.CommandTimeout = 10
+        $cmdClock.CommandText = "SELECT GETDATE()"
+        $ameenScanTimeForThisRun = [datetime]$cmdClock.ExecuteScalar()
+    } catch {
+        Write-Log ("WARN: could not read Ameen server clock for backfill boundary: " + $_.Exception.Message)
+    }
 
     # Codex P1، 2026-08-30، جولة ٨ ("Replace the bounded delay with an
     # overlap scan"): بالإضافة للاستعلام الرئيسي أعلاه، أعِد مسح نافذة
@@ -479,7 +556,7 @@ ORDER BY LogTime ASC, LOWER(CAST(GUID AS VARCHAR(36))) ASC
     # تفرض سقفها الخاص (نافذة $OverlapWindowMinutes خلف "الآن") فلا حاجة
     # لتكرار ذلك هنا.
     if ($cursorTime -and $overlapRows.Count -eq 0) {
-        Set-OverlapFloor $cursorTime ([Nullable[guid]](if ($cursorGuid) { [guid]$cursorGuid } else { $null }))
+        Set-OverlapFloor $cursorTime ([Nullable[guid]](if ($cursorGuid) { [guid]$cursorGuid } else { $null })) $dmvCapForThisRun
     }
 
     if ($rows.Count -eq 0) { $conn.Close(); Send-Heartbeat 0 0; exit 0 }
@@ -626,7 +703,9 @@ ORDER BY LogTime DESC, LOWER(CAST(GUID AS VARCHAR(36))) DESC
         # الذي سيُخزَّن = now() — فتصنيفها كـbackfill هنا مطابق تماماً لما
         # سيُخزَّن، بدل انتظار التشغيل التالي (الذي كان يترك أول صفحة كاملة
         # كأحداث حيّة فيغرق طابور تيليجرام).
-        $isFirstRunEver = ($null -eq $cursorTime)
+        # Codex P1، جولة ١٤: راجع تعليق $hasPriorHeartbeat أعلاه — أول تشغيل
+        # حقيقي فقط هو ما لا يوجد له cursor ولا أي heartbeat سابق معاً.
+        $isFirstRunEver = ($null -eq $cursorTime) -and (-not $hasPriorHeartbeat)
         $isBackfill = $isFirstRunEver -or (($null -ne $backfillBoundary) -and ($row.LogTime -lt $backfillBoundary))
 
         $payload = @{
@@ -647,6 +726,7 @@ ORDER BY LogTime DESC, LOWER(CAST(GUID AS VARCHAR(36))) DESC
             p_notes              = $notes
             p_is_backfill        = $isBackfill
             p_content_status     = $contentStatus
+            p_ameen_scan_time    = if ($ameenScanTimeForThisRun) { $ameenScanTimeForThisRun.ToString("yyyy-MM-ddTHH:mm:ss.fffffff") } else { $null }
         } | ConvertTo-Json -Depth 8 -Compress
 
         try {
@@ -666,7 +746,6 @@ ORDER BY LogTime DESC, LOWER(CAST(GUID AS VARCHAR(36))) DESC
         }
     }
 
-    $conn.Close()
     Write-Log ("Pushed $processed / $($rows.Count) Khalil audit event(s) successfully.")
 
     # كل صفوف الـoverlap (إن وُجدت) عولجت بنجاح بهذه النقطة (وإلا كان
@@ -685,11 +764,16 @@ ORDER BY LogTime DESC, LOWER(CAST(GUID AS VARCHAR(36))) DESC
             # Codex P1، جولة ١٠: نمرِّر GUID آخر صف عولِج فعلاً كي يبني
             # التشغيل القادم مقارنة ثنائية دقيقة بدلاً من إعادة جلب نفس
             # الصفحة المقطوعة للأبد عند تشارك صفوف كثيرة بنفس اللحظة.
-            Set-OverlapFloor $overlapMaxLogTime ([Nullable[guid]][guid]$overlapMaxGuid)
+            Set-OverlapFloor $overlapMaxLogTime ([Nullable[guid]][guid]$overlapMaxGuid) $dmvCapForThisRun
         } elseif (-not $overlapTruncated) {
-            Set-OverlapFloor $cursorTime ([Nullable[guid]](if ($cursorGuid) { [guid]$cursorGuid } else { $null }))
+            Set-OverlapFloor $cursorTime ([Nullable[guid]](if ($cursorGuid) { [guid]$cursorGuid } else { $null })) $dmvCapForThisRun
         }
     }
+
+    # Codex P1، جولة ١٢: $conn يبقى مفتوحاً حتى هذه النقطة تحديداً — بعد كل
+    # استدعاءات Set-OverlapFloor الممكنة لهذا التشغيل (تحتاج الاتصال حياً
+    # لاستعلام DMV)، وليس قبلها كما كان سابقاً (انظر شرح جولة ١٢ أعلاه).
+    $conn.Close()
 
     # دفعة كاملة (== BatchSize) تعني على الأرجح تراكماً متبقياً خلف الـcursor
     # لم يُعالَج بعد بهذا التشغيل — أبلِغ عنها بوضوح بدل "ok" الصامتة.

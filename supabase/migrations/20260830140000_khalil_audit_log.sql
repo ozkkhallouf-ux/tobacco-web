@@ -301,7 +301,18 @@ create or replace function public.record_khalil_audit_event(
   p_notes text,
   p_is_backfill boolean default false,
   -- Codex P1، 2026-08-31، جولة ١٠: انظر تعليق عمود content_status أعلاه.
-  p_content_status text default 'ok'
+  p_content_status text default 'ok',
+  -- Codex P1، 2026-08-31، جولة ١٤ ("Use the Ameen clock for the persisted
+  -- backfill boundary"): ساعة SQL Server المحلية للأمين (مصدر LogTime) قد
+  -- تنجرف عن ساعة Postgres UTC. سابقاً backfill_before كانت تُضبَط دوماً
+  -- بـ now() الخاصة بـPostgres عند أول صف يُسجَّل — فتُقارَن لاحقاً في
+  -- PowerShell مباشرة مع LogTime المحلي للأمين بلا أي تحويل، فأي انحراف
+  -- ساعة (حتى لو دقائق) يُصنِّف صفوفاً تاريخية فعلياً كـ"حيّة" فتُغرِق طابور
+  -- تيليجرام بمئات التنبيهات. الإصلاح: السكربت يمرّر ساعة الأمين نفسها
+  -- (SELECT GETDATE() من نفس اتصال SQL Server) كـp_ameen_scan_time، وتُستخدَم
+  -- هي حصراً لضبط backfill_before بدل now() — يبقى now() احتياطاً فقط لتوافق
+  -- استدعاءات قديمة لا تمرّر هذه القيمة.
+  p_ameen_scan_time timestamp default null
 ) returns public.khalil_audit_events
 language plpgsql
 security definer
@@ -352,7 +363,7 @@ begin
   -- كي لا تُلمَس بعد ذلك أبداً، فتبقى حدّاً ثابتاً عبر كل الدفعات اللاحقة
   -- (Codex P1، جولة ٧).
   insert into public.khalil_audit_cursor (id, last_log_time, last_log_guid, updated_at, backfill_before)
-  values (1, p_ameen_log_time, p_ameen_log_guid, now(), now())
+  values (1, p_ameen_log_time, p_ameen_log_guid, now(), coalesce(p_ameen_scan_time, now()))
   on conflict (id) do update set
     last_log_time = excluded.last_log_time,
     last_log_guid = excluded.last_log_guid,
@@ -367,15 +378,15 @@ $$;
 
 revoke all on function public.record_khalil_audit_event(
   uuid, timestamp, uuid, text, text, text, smallint, text, uuid, text, uuid,
-  jsonb, jsonb, numeric, text, boolean, text
+  jsonb, jsonb, numeric, text, boolean, text, timestamp
 ) from public;
 grant execute on function public.record_khalil_audit_event(
   uuid, timestamp, uuid, text, text, text, smallint, text, uuid, text, uuid,
-  jsonb, jsonb, numeric, text, boolean, text
+  jsonb, jsonb, numeric, text, boolean, text, timestamp
 ) to authenticated, service_role;
 revoke all on function public.record_khalil_audit_event(
   uuid, timestamp, uuid, text, text, text, smallint, text, uuid, text, uuid,
-  jsonb, jsonb, numeric, text, boolean, text
+  jsonb, jsonb, numeric, text, boolean, text, timestamp
 ) from anon;
 
 -- التوقيع القديم (١٦ معاملاً، بلا p_content_status، جولة ٧) لم يعد
@@ -384,6 +395,14 @@ revoke all on function public.record_khalil_audit_event(
 drop function if exists public.record_khalil_audit_event(
   uuid, timestamp, uuid, text, text, text, smallint, text, uuid, text, uuid,
   jsonb, jsonb, numeric, text, boolean
+);
+
+-- التوقيع الأقدم (١٧ معاملاً، بلا p_ameen_scan_time، جولة ١٠) لم يعد
+-- مستخدَماً — السكربت يستدعي التوقيع الجديد (١٨ معاملاً) حصراً الآن (جولة
+-- ١٤). يُحذَف صراحة لنفس سبب الحذف أعلاه.
+drop function if exists public.record_khalil_audit_event(
+  uuid, timestamp, uuid, text, text, text, smallint, text, uuid, text, uuid,
+  jsonb, jsonb, numeric, text, boolean, text
 );
 
 -- ------------------------------------------------------------
