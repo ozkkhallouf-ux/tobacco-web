@@ -267,12 +267,26 @@ begin
   -- dedupe_key = ameen_log_guid (فريد لكل حدث فعلياً) → إشعار واحد بالضبط
   -- لكل صف يُدرج فعلياً هنا (on conflict do nothing في الدالة أعلاه يمنع
   -- أي إعادة إدراج تُطلق هذا الـtrigger من جديد لنفس الحدث).
-  perform public.notify_telegram(
-    'khalil_audit_event',
-    v_message,
-    new.ameen_log_guid::text,
-    1
-  );
+  --
+  -- ملاحظة أمنية/موثوقية (Codex P1، 2026-08-30): هذا الـtrigger يعمل داخل
+  -- نفس معاملة record_khalil_audit_event. أي استثناء غير مُلتقَط من
+  -- notify_telegram (مثلاً عطل بجدول telegram_outbox أو دالة الإرسال) كان
+  -- سيُسقط الـtransaction كاملةً، فيُحذف صفّ الـAudit وتراجع الـcursor —
+  -- ما يخالف صراحةً "فشل Telegram لا يغير أو يحذف Audit Event". الحل: كتلة
+  -- exception محلية تلتقط أي خطأ من مسار الإشعار فقط (savepoint ضمني من
+  -- plpgsql) ولا تدع الفشل يتسرب خارج الـtrigger أبداً — صفّ الـAudit
+  -- وتقدّم الـcursor يبقيان مضمونين بغضّ النظر عن نتيجة notify_telegram.
+  begin
+    perform public.notify_telegram(
+      'khalil_audit_event',
+      v_message,
+      new.ameen_log_guid::text,
+      1
+    );
+  exception when others then
+    raise warning 'khalil_audit: notify_telegram failed for ameen_log_guid=%: %',
+      new.ameen_log_guid, sqlerrm;
+  end;
 
   return new;
 end;
