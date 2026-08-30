@@ -28,6 +28,17 @@ param(
     # فوقه. مع idempotency عبر ameen_log_guid (on conflict do nothing) هذا
     # التأخير آمن تماماً لإعادة المعالجة.
     [int]$SafetyDelaySeconds = 30,
+    # Codex P1، 2026-08-30، جولة ٨: SafetyDelaySeconds وحده حدّ زمني محدود —
+    # لو بقيت معاملة A مفتوحة أطول من هذه الثواني بعد كتابة LogTime أقدم،
+    # يتقدّم الـcursor فوقها بمعاملة B لاحقة تُلتزَم أولاً، وتُستبعد A للأبد
+    # حين تُلتزم لاحقاً لأن LogTime > @CursorTime لن يتحقق بعدها أبداً.
+    # الإصلاح: بالإضافة للنافذة الآمنة، كل تشغيل يعيد مسح نافذة زمنية محدودة
+    # خلف الوقت الحالي (وليس خلف الـcursor) بحثاً عن أي صف بقي دون تسجيله،
+    # بغض النظر عن أين وصل الـcursor. record_khalil_audit_event() نفسها لا
+    # تُرجِع الـcursor للخلف أبداً (شرط >= الصف الحالي)، وON CONFLICT DO
+    # NOTHING على ameen_log_guid يجعل إعادة فحص نفس الصفوف كل تشغيل آمنة
+    # ورخيصة. هذا يلتقط أي تأخير commit مهما طال طالما حدث خلال هذه الدقائق.
+    [int]$OverlapWindowMinutes = 20,
     [string]$EnvFile = "$PSScriptRoot\.env",
     [string]$LogFile = "$PSScriptRoot\logs\khalil-audit-push.log"
 )
@@ -235,7 +246,59 @@ ORDER BY LogTime ASC, LOWER(CAST(GUID AS VARCHAR(36))) ASC
     }
     $reader.Close()
 
-    Write-Log ("Found {0} new log000 row(s) for Khalil." -f $rows.Count)
+    # Codex P1، 2026-08-30، جولة ٨ ("Replace the bounded delay with an
+    # overlap scan"): بالإضافة للاستعلام الرئيسي أعلاه، أعِد مسح نافذة
+    # محدودة خلف الـcursor الحالي بحثاً عن أي صف Khalil التزم متأخراً ولم
+    # يُقرأ سابقاً (رغم أن LogTime أقدم من الـcursor الآن). لا يُنفَّذ إلا
+    # عندما يوجد cursor فعلاً (أول تشغيل يغطيه استعلام الباك-فيل الرئيسي).
+    $overlapRows = @()
+    if ($cursorTime) {
+        $overlapFrom = (Get-Date).AddMinutes(-1 * $OverlapWindowMinutes)
+        $overlapCmd = $conn.CreateCommand()
+        $overlapCmd.CommandTimeout = 60
+        $overlapCmd.CommandText = @"
+SELECT TOP (@BatchSize)
+    GUID, LogTime, UserGUID, Computer, Operation, OperationType,
+    RecGUID, RecNum, TypeGUID, RecContent
+FROM log000
+WHERE UserGUID = @UserGuid
+  AND LogTime >= @OverlapFrom
+  AND LogTime <= @CursorTime
+ORDER BY LogTime ASC, LOWER(CAST(GUID AS VARCHAR(36))) ASC
+"@
+        $overlapCmd.Parameters.AddWithValue("@BatchSize", $BatchSize) | Out-Null
+        $overlapCmd.Parameters.AddWithValue("@UserGuid", [guid]$KHALIL_USER_GUID) | Out-Null
+        $overlapCmd.Parameters.AddWithValue("@OverlapFrom", $overlapFrom) | Out-Null
+        $overlapCmd.Parameters.AddWithValue("@CursorTime", $cursorTime) | Out-Null
+        $overlapReader = $overlapCmd.ExecuteReader()
+        while ($overlapReader.Read()) {
+            $overlapRows += [PSCustomObject]@{
+                Guid          = [string]$overlapReader["GUID"]
+                LogTime       = [datetime]$overlapReader["LogTime"]
+                UserGuid      = [string]$overlapReader["UserGUID"]
+                Computer      = if ($overlapReader["Computer"] -is [DBNull]) { $null } else { [string]$overlapReader["Computer"] }
+                Operation     = if ($overlapReader["Operation"] -is [DBNull]) { $null } else { [string]$overlapReader["Operation"] }
+                OperationType = if ($overlapReader["OperationType"] -is [DBNull]) { $null } else { [int]$overlapReader["OperationType"] }
+                RecGuid       = if ($overlapReader["RecGUID"] -is [DBNull]) { $null } else { [string]$overlapReader["RecGUID"] }
+                RecNum        = if ($overlapReader["RecNum"] -is [DBNull]) { $null } else { [string]$overlapReader["RecNum"] }
+                TypeGuid      = if ($overlapReader["TypeGUID"] -is [DBNull]) { $null } else { [string]$overlapReader["TypeGUID"] }
+                RecContent    = if ($overlapReader["RecContent"] -is [DBNull]) { $null } else { [string]$overlapReader["RecContent"] }
+            }
+        }
+        $overlapReader.Close()
+        if ($overlapRows.Count -gt 0) {
+            Write-Log ("Overlap rescan recovered {0} previously-missed row(s)." -f $overlapRows.Count)
+        }
+    }
+
+    # صفوف الـoverlap تُعالَج أولاً (id ثابت ameen_log_guid يجعل التكرار
+    # آمناً عبر ON CONFLICT DO NOTHING)، ثم الصفحة الرئيسية بترتيبها الطبيعي.
+    # لا تُخصَّم صفوف الـoverlap من كشف "دفعة كاملة = تراكم" أدناه لأنها ليست
+    # جزءاً من الصفحة الرئيسية المحدودة بـBatchSize.
+    $mainRowCount = $rows.Count
+    $rows = @($overlapRows) + @($rows)
+
+    Write-Log ("Found {0} new log000 row(s) for Khalil (+{1} overlap rescan)." -f $mainRowCount, $overlapRows.Count)
     if ($rows.Count -eq 0) { $conn.Close(); Send-Heartbeat 0 0; exit 0 }
 
     if ($DryRun) {
@@ -313,7 +376,17 @@ ORDER BY LogTime DESC, LOWER(CAST(GUID AS VARCHAR(36))) DESC
         #    غير مصنَّف backfill فتصل إشعاراته كاملة رغم تأخرها. الحدث نفسه
         #    يبقى مسجَّلاً بكامل تفاصيله في الـAudit دوماً بغض النظر عن قيمة
         #    is_backfill.
-        $isBackfill = ($null -ne $backfillBoundary) -and ($row.LogTime -lt $backfillBoundary)
+        # Codex P1، 2026-08-30، جولة ٨ ("Mark the initial page as backfill"):
+        # بأول تشغيل على الإطلاق لا يوجد صف cursor بعد، فـget_khalil_audit_cursor()
+        # يُرجِع لا شيء ويبقى backfillBoundary = null طوال هذا التشغيل كاملاً —
+        # رغم أن أول استدعاء record_khalil_audit_event() سيضبط backfill_before
+        # = now() في القاعدة فوراً. بما أن كل صفوف هذه الصفحة الأولى LogTime لها
+        # <= SafeUntil (أقدم من الآن بلا شك)، فهي جميعها أقدم من backfill_before
+        # الذي سيُخزَّن = now() — فتصنيفها كـbackfill هنا مطابق تماماً لما
+        # سيُخزَّن، بدل انتظار التشغيل التالي (الذي كان يترك أول صفحة كاملة
+        # كأحداث حيّة فيغرق طابور تيليجرام).
+        $isFirstRunEver = ($null -eq $cursorTime)
+        $isBackfill = $isFirstRunEver -or (($null -ne $backfillBoundary) -and ($row.LogTime -lt $backfillBoundary))
 
         $payload = @{
             p_ameen_log_guid     = $row.Guid
@@ -355,7 +428,7 @@ ORDER BY LogTime DESC, LOWER(CAST(GUID AS VARCHAR(36))) DESC
     Write-Log ("Pushed $processed / $($rows.Count) Khalil audit event(s) successfully.")
     # دفعة كاملة (== BatchSize) تعني على الأرجح تراكماً متبقياً خلف الـcursor
     # لم يُعالَج بعد بهذا التشغيل — أبلِغ عنها بوضوح بدل "ok" الصامتة.
-    $heartbeatStatus = if ($rows.Count -eq $BatchSize) { "backlog" } else { "ok" }
+    $heartbeatStatus = if ($mainRowCount -eq $BatchSize) { "backlog" } else { "ok" }
     Send-Heartbeat $processed $rows.Count $heartbeatStatus
     exit 0
 } catch {
