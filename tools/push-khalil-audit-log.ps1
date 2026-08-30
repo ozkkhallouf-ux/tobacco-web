@@ -145,10 +145,15 @@ function Send-Heartbeat($ProcessedCount, $FoundCount, $Status = "ok") {
 
 function Get-XmlTotal([string]$xml) {
     if (-not $xml) { return $null }
-    $m = [regex]::Match($xml, '<Total>\s*(-?[0-9]+(\.[0-9]+)?)\s*</Total>')
+    # بحث فعلي مباشر (30/08/2026، إعادة اختبار حية فاتورة 1483): الأمين يكتب
+    # <Total> أحياناً بصيغة أسّية (Scientific notation)، مثلاً
+    # "6.958490566037736e+001" — النمط السابق لم يكن يقبل جزء الأسّ (eNN)
+    # فكان لا يطابق إطلاقاً في هذه الحالة، فيُرجِع financial_delta=NULL رغم
+    # وجود قيمة حقيقية وصحيحة. النمط الآن يقبل جزء الأسّ الاختياري.
+    $m = [regex]::Match($xml, '<Total>\s*(-?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?)\s*</Total>')
     if (-not $m.Success) { return $null }
     $v = 0.0
-    if ([double]::TryParse($m.Groups[1].Value, [ref]$v)) { return $v }
+    if ([double]::TryParse($m.Groups[1].Value, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$v)) { return $v }
     return $null
 }
 
