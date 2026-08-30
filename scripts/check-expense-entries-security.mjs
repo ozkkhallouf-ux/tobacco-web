@@ -75,6 +75,6 @@ assert.doesNotMatch(codeOnly, /force row level security/i);
 assert.match(sql, /from pg_policies\b/i);
 assert.match(sql, /has_table_privilege\('anon', 'public\.expense_entries'/i);
 assert.match(sql, /has_table_privilege\('authenticated', 'public\.expense_entries', 'UPDATE'\)/i);
-assert.doesNotMatch(sql, /has_policy\s*\(/i, 'has_policy() is not a real PostgreSQL/Supabase function');
+assert.doesNotMatch(codeOnly, /has_policy\s*\(/i, 'has_policy() is not a real PostgreSQL/Supabase function');
 
 console.log('Expense entries owner-only RLS migration contract checks passed.');
