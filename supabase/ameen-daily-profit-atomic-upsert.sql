@@ -88,3 +88,11 @@ $$;
 
 revoke all on function public.upsert_ameen_daily_profit(date, jsonb, jsonb) from public;
 grant execute on function public.upsert_ameen_daily_profit(date, jsonb, jsonb) to authenticated, service_role;
+
+-- ملاحظة أمنية إضافية (Claude، 2026-08-30): REVOKE FROM PUBLIC وحدها لم تكن
+-- كافية عملياً — تحقّق مباشر من information_schema.routine_privileges على
+-- القاعدة الحيّة أظهر أن anon ظل يملك EXECUTE صراحةً (على الأرجح من منحة
+-- سابقة أثناء migrations متتالية قبل استقرار هذا الملف). REVOKE من anon
+-- بشكل صريح إضافي تطبيقاً لمبدأ أقل صلاحية، رغم أن الدالة محمية أصلاً بفحص
+-- auth.uid() is null داخلها فلا تنفيذ فعلي كان ممكناً لـanon:
+revoke all on function public.upsert_ameen_daily_profit(date, jsonb, jsonb) from anon;
