@@ -167,9 +167,38 @@ function Send-Heartbeat($ProcessedCount, $FoundCount, $Status = "ok") {
 # أثر لفشله هو إعادة مسح نفس النطاق بالتشغيل التالي (رخيص وآمن idempotent)،
 # وليس فقد أي حدث. الدالة بالطرف الآخر (update_khalil_audit_overlap_floor)
 # أحادية الاتجاه فعلياً فلا داعي لفحص التراجع هنا أيضاً.
-function Set-OverlapFloor([datetime]$FloorTime) {
+#
+# Codex P1، 2026-08-31، جولة ١٠ ("Keep rescanning ranges that can receive
+# late commits"): حتى مع الحد الدائم، تقديمه إلى @CursorTime بالضبط (أو أي
+# لحظة قريبة جداً من "الآن") خطر — SQL Server Snapshot Isolation يجعل معاملة
+# مفتوحة غير مؤكَّدة (commit) بعد غير مرئية لاستعلام SELECT جارٍ رغم أن
+# LogTime المستقبلي لها قد يقع خلف هذا الحد؛ لو "تقاعد" الحد فوق هذه اللحظة
+# قبل أن تُلتزَم المعاملة، يُفقَد صفّها للأبد بمجرد التزامها لاحقاً. الإصلاح:
+# سقف صلب هنا على مستوى PowerShell (وليس داخل SQL على جانب Postgres —
+# تعمّدنا ذلك: ساعة SQL Server المحلية للأمين هي مصدر LogTime، وساعة Postgres
+# UTC قد تنجرف عنها؛ فرض السقف بـnow() داخل Postgres قد يخلق نفس نوع الفجوة
+# التي نحاول سدّها) يمنع الحد من التقدّم أبداً إلى ما بعد
+# (Get-Date).AddMinutes(-$OverlapWindowMinutes) — أي تبقى دوماً نافذة دنيا
+# متحركة خلف "الآن" الفعلي قابلة لإعادة المسح، فلا "تتقاعد" بالكامل مهما طال
+# التشغيل المتواصل بلا توقف.
+function Set-OverlapFloor([datetime]$FloorTime, [Nullable[guid]]$FloorGuid = $null) {
     try {
-        $body = @{ p_floor = $FloorTime.ToString("yyyy-MM-ddTHH:mm:ss.fffffff") } | ConvertTo-Json -Compress
+        $cap = (Get-Date).AddMinutes(-1 * $OverlapWindowMinutes)
+        $cappedTime = $FloorTime
+        $cappedGuid = $FloorGuid
+        if ($cappedTime -gt $cap) {
+            # قُصَّ الحد إلى السقف — لم نُثبِت أن كل شيء حتى $FloorTime مسحه
+            # فعلاً بمعزل عن معاملات لاحقة قد تلتزم متأخرة، فلا نُرسِل GUID
+            # صفّ بعينه مع زمن مقصوص لا يخصّه (قد يخلق سلسلة تفاضلية غير
+            # حقيقية)؛ نكتفي بالزمن المقصوص وGUID فارغ (= "قبل أي شيء بنفس
+            # اللحظة"، آمن ومحافِظ).
+            $cappedTime = $cap
+            $cappedGuid = $null
+        }
+        $body = @{
+            p_floor      = $cappedTime.ToString("yyyy-MM-ddTHH:mm:ss.fffffff")
+            p_floor_guid = if ($cappedGuid) { $cappedGuid.ToString() } else { $null }
+        } | ConvertTo-Json -Compress
         Invoke-RestMethod -Method Post -Uri "$supabaseUrl/rest/v1/rpc/update_khalil_audit_overlap_floor" `
             -Headers $headers -ContentType "application/json; charset=utf-8" `
             -Body ([Text.Encoding]::UTF8.GetBytes($body)) -TimeoutSec 20 | Out-Null
@@ -221,11 +250,17 @@ try {
     $cursorGuid = $null
     $backfillBoundary = $null
     $overlapFloor = $null
+    $overlapFloorGuid = $null
     if ($cursorResp -and $cursorResp.Count -gt 0) {
         if ($cursorResp[0].last_log_time) { $cursorTime = [datetime]$cursorResp[0].last_log_time }
         if ($cursorResp[0].last_log_guid) { $cursorGuid = [string]$cursorResp[0].last_log_guid }
         if ($cursorResp[0].backfill_before) { $backfillBoundary = [datetime]$cursorResp[0].backfill_before }
         if ($cursorResp[0].overlap_floor_time) { $overlapFloor = [datetime]$cursorResp[0].overlap_floor_time }
+        # Codex P1، 2026-08-31، جولة ١٠ ("Track GUID when advancing a
+        # truncated overlap page"): GUID مرافق للحد الدائم — يقرأه السكربت
+        # كي يبني مقارنة ثنائية (LogTime, GUID) بدل LogTime وحده عند إعادة
+        # المسح، فلا livelock على صفحة مقطوعة بصفوف متعددة بنفس اللحظة.
+        if ($cursorResp[0].overlap_floor_guid) { $overlapFloorGuid = [string]$cursorResp[0].overlap_floor_guid }
     }
 
     # ملاحظة أمنية/موثوقية (Codex P1، 2026-08-30): ترتيب SQL Server الأصلي
@@ -302,6 +337,7 @@ ORDER BY LogTime ASC, LOWER(CAST(GUID AS VARCHAR(36))) ASC
     # ذلك أبداً — كل تشغيل لاحق يقرأ الحد المحفوظ فقط.
     $overlapTruncated = $false
     $overlapMaxLogTime = $null
+    $overlapMaxGuid = $null
     $overlapRows = @()
     if ($cursorTime) {
         if ($overlapFloor) {
@@ -309,6 +345,16 @@ ORDER BY LogTime ASC, LOWER(CAST(GUID AS VARCHAR(36))) ASC
         } else {
             $overlapFrom = $cursorTime.AddMinutes(-1 * $OverlapWindowMinutes)
         }
+        # Codex P1، 2026-08-31، جولة ١٠ ("Track GUID when advancing a
+        # truncated overlap page"): LogTime >= @OverlapFrom وحده (شامل) كان
+        # يُعيد جلب نفس الصفوف للأبد لو تشاركت صفوف كثيرة عند @OverlapFrom
+        # بالضبط نفس اللحظة وتجاوز عددها BatchSize — الحد كان يتقدّم فقط إلى
+        # تلك اللحظة المشتركة (livelock: كل تشغيل يقرأ نفس الصفحة). الإصلاح:
+        # مقارنة ثنائية (LogTime, GUID) مطابقة تماماً لنمط الاستعلام الرئيسي
+        # أعلاه — عند معرفة GUID الحد نستبعد ما هو <= له بدقة صفّ بصفّ؛ عند
+        # عدم معرفته (Null، حالة إقلاع أو حد مقصوص بلا GUID مرافق) نتراجع
+        # لمقارنة شاملة على LogTime وحده (محافِظ وآمن idempotent، قد يعيد
+        # مسح صفوف سبق تسجيلها لكن لن يُسقِط أي صف أبداً).
         $overlapCmd = $conn.CreateCommand()
         $overlapCmd.CommandTimeout = 60
         $overlapCmd.CommandText = @"
@@ -317,13 +363,26 @@ SELECT TOP (@BatchSize)
     RecGUID, RecNum, TypeGUID, RecContent
 FROM log000
 WHERE UserGUID = @UserGuid
-  AND LogTime >= @OverlapFrom
+  AND (
+        @OverlapFromGuid IS NULL
+        AND LogTime >= @OverlapFrom
+        OR @OverlapFromGuid IS NOT NULL
+        AND (
+              LogTime > @OverlapFrom
+              OR (LogTime = @OverlapFrom AND LOWER(CAST(GUID AS VARCHAR(36))) > @OverlapFromGuid)
+            )
+      )
   AND LogTime <= @CursorTime
 ORDER BY LogTime ASC, LOWER(CAST(GUID AS VARCHAR(36))) ASC
 "@
         $overlapCmd.Parameters.AddWithValue("@BatchSize", $BatchSize) | Out-Null
         $overlapCmd.Parameters.AddWithValue("@UserGuid", [guid]$KHALIL_USER_GUID) | Out-Null
         $overlapCmd.Parameters.AddWithValue("@OverlapFrom", $overlapFrom) | Out-Null
+        if ($overlapFloor -and $overlapFloorGuid) {
+            $overlapCmd.Parameters.AddWithValue("@OverlapFromGuid", $overlapFloorGuid.ToLowerInvariant()) | Out-Null
+        } else {
+            $overlapCmd.Parameters.AddWithValue("@OverlapFromGuid", [DBNull]::Value) | Out-Null
+        }
         $overlapCmd.Parameters.AddWithValue("@CursorTime", $cursorTime) | Out-Null
         $overlapReader = $overlapCmd.ExecuteReader()
         while ($overlapReader.Read()) {
@@ -343,7 +402,12 @@ ORDER BY LogTime ASC, LOWER(CAST(GUID AS VARCHAR(36))) ASC
         $overlapReader.Close()
         if ($overlapRows.Count -gt 0) {
             Write-Log ("Overlap rescan recovered {0} previously-missed row(s)." -f $overlapRows.Count)
-            $overlapMaxLogTime = ($overlapRows | Measure-Object -Property LogTime -Maximum).Maximum
+            # Measure-Object -Maximum لا يحتفظ بالـGUID المرافق للصف الأقصى —
+            # الصفوف مرتَّبة أصلاً (LogTime ASC, GUID ASC) من الاستعلام، فآخر
+            # صفّ بالمصفوفة هو أقصى (LogTime, GUID) تمّت معالجته فعلياً.
+            $lastOverlapRow = $overlapRows[$overlapRows.Count - 1]
+            $overlapMaxLogTime = $lastOverlapRow.LogTime
+            $overlapMaxGuid = $lastOverlapRow.Guid
         }
         # وصلت الدفعة إلى BatchSize بالضبط → قد يوجد المزيد خلف هذا الحد لم
         # يُقرأ بعد بهذا التشغيل؛ لا يجوز عندها اعتبار [@OverlapFrom،
@@ -362,8 +426,14 @@ ORDER BY LogTime ASC, LOWER(CAST(GUID AS VARCHAR(36))) ASC
 
     # لا يوجد أي صف overlap على الإطلاق ⇐ نطاق [@OverlapFrom، @CursorTime]
     # فارغ فعلاً ومُثبَت بالكامل — يمكن تقديم الحد إلى @CursorTime بأمان
-    # حتى لو لم توجد أي صفوف رئيسية جديدة أيضاً (Codex P1، جولة ٩).
-    if ($cursorTime -and $overlapRows.Count -eq 0) { Set-OverlapFloor $cursorTime }
+    # حتى لو لم توجد أي صفوف رئيسية جديدة أيضاً (Codex P1، جولة ٩). الحد
+    # يقترن بـ$cursorGuid لأن (cursorTime, cursorGuid) هو نفس الحد الذي أثبت
+    # الـcursor الرئيسي أمانه فعلاً (Codex P1، جولة ١٠). Set-OverlapFloor
+    # تفرض سقفها الخاص (نافذة $OverlapWindowMinutes خلف "الآن") فلا حاجة
+    # لتكرار ذلك هنا.
+    if ($cursorTime -and $overlapRows.Count -eq 0) {
+        Set-OverlapFloor $cursorTime ([Nullable[guid]](if ($cursorGuid) { [guid]$cursorGuid } else { $null }))
+    }
 
     if ($rows.Count -eq 0) { $conn.Close(); Send-Heartbeat 0 0; exit 0 }
 
@@ -424,23 +494,33 @@ ORDER BY LogTime DESC, LOWER(CAST(GUID AS VARCHAR(36))) DESC
         $afterXml = $row.RecContent
         $notes = $null
         $beforeXml = $null
+        $contentStatus = "ok"
 
         if (-not $isContentBearingType) {
             # نوع عملية لا يحمل محتوى في الأمين أصلاً (فتح/إغلاق/عرض وغيرها) —
             # NULL هنا متوقَّع وليس عطلاً؛ سجّل السبب صراحة بدل ترك NULL صامت.
             $notes = "OperationType=$($row.OperationType) لا يحمل محتوى (RecContent) في الأمين — هذا فتح/عرض/إغلاق سجل وليس تعديلاً أو حذفاً فعلياً، فلا يوجد Snapshot متوقَّع لهذا الحدث."
             $afterXml = $null
+            $contentStatus = "no_content_expected"
         } elseif ([string]::IsNullOrEmpty($afterXml)) {
-            # GUARD: نوع العملية يُفترض أن يحمل محتوى (تعديل/حذف/مرتجع) لكن
-            # RecContent وصل فارغاً من الأمين — هذا غير متوقَّع. لا نعتبر
-            # الحدث معالَجاً: لا نرسله إلى Supabase ولا يتقدّم الـcursor
-            # فوقه، بل نتوقّف هنا فوراً كي تُعاد محاولته بالتشغيل القادم دون
-            # فقدان أي تفصيل. باقي صفوف هذه الدفعة (إن وُجدت) تبقى غير
-            # معالَجة أيضاً لأنها تالية لهذا الصف بالترتيب الزمني.
-            Write-Log ("GUARD: GUID $($row.Guid) (RecNum=$($row.RecNum)) OperationType=$($row.OperationType) يُفترض أن يحمل RecContent لكنه وصل فارغاً من الأمين — إيقاف الدفعة دون تحريك الـcursor فوق هذا الصف.")
-            $conn.Close()
-            Notify-Failure ("⚠️ حدث تدقيق خليل بلا محتوى متوقَّع (RecContent فارغ رغم أن OperationType=$($row.OperationType) يعني تعديل/حذف)`nGUID: $($row.Guid)`nRecNum: $($row.RecNum)")
-            exit 1
+            # Codex P1، 2026-08-31، جولة ١٠ ("Quarantine empty-content events
+            # instead of blocking the cursor"): سابقاً كان هذا GUARD يوقف
+            # كامل الـpipeline للأبد (exit 1 دون تقدّم الـcursor) عند أول صف
+            # يُفترض أن يحمل محتوى لكنه وصل فارغاً. لكن تعليق التشخيص أعلاه
+            # (سطر ~389) يوثّق بوضوح أن نسبة الصفوف التي تحمل محتوى فعلياً
+            # لأنواع 2/3/100 هي ">99%" فقط، وليست 100% — أي أن صفاً فارغاً
+            # نادراً هو حالة حقيقية متوقَّعة أحياناً في بيانات الأمين
+            # الفعلية، وليست بالضرورة عطلاً عابراً سيصلح نفسه بإعادة المحاولة.
+            # حجب كامل خط تدقيق خليل للأبد بسبب صف واحد كهذا أخطر بكثير من
+            # تسجيله بلا snapshot: الإصلاح هو حجر (quarantine) هذا الصف
+            # تحديداً — يُسجَّل في Supabase بحالة content_status واضحة وبلا
+            # before/after (بدل NULL صامت)، مع تنبيه غير حاجز، ويستمر
+            # الـcursor بالتقدّم فوقه طبيعياً فلا يعلق أي صف لاحق.
+            Write-Log ("QUARANTINE: GUID $($row.Guid) (RecNum=$($row.RecNum)) OperationType=$($row.OperationType) يُفترض أن يحمل RecContent لكنه وصل فارغاً من الأمين — يُسجَّل محجوراً بلا snapshot، والمعالجة تستمر.")
+            Notify-Failure ("⚠️ حدث تدقيق خليل مُحجَر (RecContent فارغ رغم أن OperationType=$($row.OperationType) يعني تعديل/حذف)`nGUID: $($row.Guid)`nRecNum: $($row.RecNum)")
+            $notes = "مُحجَر (quarantined): OperationType=$($row.OperationType) يُفترض أن يحمل محتوى لكن RecContent وصل فارغاً فعلياً من الأمين — حالة نادرة موثَّقة (<1% من صفوف هذا النوع)، سُجِّل الحدث بلا Snapshot بدل حجب المعالجة."
+            $afterXml = $null
+            $contentStatus = "quarantined_empty_content"
         }
 
         if ($isContentBearingType -and -not [string]::IsNullOrEmpty($afterXml)) {
@@ -519,6 +599,7 @@ ORDER BY LogTime DESC, LOWER(CAST(GUID AS VARCHAR(36))) DESC
             p_financial_delta    = $financialDelta
             p_notes              = $notes
             p_is_backfill        = $isBackfill
+            p_content_status     = $contentStatus
         } | ConvertTo-Json -Depth 8 -Compress
 
         try {
@@ -554,9 +635,12 @@ ORDER BY LogTime DESC, LOWER(CAST(GUID AS VARCHAR(36))) DESC
     #     inverse: بدل عدم التقدّم إطلاقاً، تقدّم تدريجي آمن بلا أي فجوة).
     if ($cursorTime -and $overlapRows.Count -gt 0) {
         if ($overlapTruncated -and $overlapMaxLogTime) {
-            Set-OverlapFloor $overlapMaxLogTime
+            # Codex P1، جولة ١٠: نمرِّر GUID آخر صف عولِج فعلاً كي يبني
+            # التشغيل القادم مقارنة ثنائية دقيقة بدلاً من إعادة جلب نفس
+            # الصفحة المقطوعة للأبد عند تشارك صفوف كثيرة بنفس اللحظة.
+            Set-OverlapFloor $overlapMaxLogTime ([Nullable[guid]][guid]$overlapMaxGuid)
         } elseif (-not $overlapTruncated) {
-            Set-OverlapFloor $cursorTime
+            Set-OverlapFloor $cursorTime ([Nullable[guid]](if ($cursorGuid) { [guid]$cursorGuid } else { $null }))
         }
     }
 

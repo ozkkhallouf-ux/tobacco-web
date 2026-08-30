@@ -20,6 +20,18 @@
 --     في ameen_daily_profit_is_sync_writer وبقية دوال sync writer بالمشروع)
 --     + حارس صريح أن ameen_user_guid = خليل بالضبط، فلا يمكن لأي مستخدم
 --     آخر أن يُنسب سجله لخليل حتى لو استدعى الدالة بهوية المزامنة نفسها.
+--  4. (جولة ١٠) نافذة إعادة المسح (overlap) لا "تتقاعد" أبداً بالكامل — تبقى
+--     دوماً نافذة دنيا متحركة خلف "الآن" (وليس خلف الـcursor فقط) قابلة
+--     لإعادة المسح، كي لا يُفقَد أي صف Khalil التزم متأخراً بسبب Snapshot
+--     Isolation في SQL Server (معاملة مفتوحة غير مرئية للمسح تُلتزَم بعد أن
+--     "تقاعد" الحد فوقها).
+--  5. (جولة ١٠) تقدُّم overlap_floor مقاوم أيضاً لتساوي LogTime عبر GUID
+--     مرافق (overlap_floor_guid)، بنفس منطق cursor الرئيسي — فلا livelock
+--     على صفحة مقطوعة بصفوف متعددة بنفس اللحظة.
+--  6. (جولة ١٠) صف بلا محتوى متوقَّع (OperationType محتوى لكن RecContent
+--     فارغ فعلياً) يُحجَر (quarantined) بدل حجب كامل الـpipeline للأبد —
+--     يُسجَّل بحالة content_status واضحة مع تنبيه منفصل غير حاجز، ويستمر
+--     الـcursor بالتقدّم طبيعياً.
 -- ============================================================
 
 -- ------------------------------------------------------------
@@ -51,6 +63,19 @@ create table if not exists public.khalil_audit_events (
   -- الـtrigger أدناه ليتجاوز notify_telegram لهذا الصف فقط — الصف نفسه يبقى
   -- محفوظاً بكامل تفاصيله في سجل الـAudit، فقط بلا إشعار فوري له.
   is_backfill boolean not null default false,
+  -- Codex P1، 2026-08-31، جولة ١٠ ("Quarantine empty-content events instead
+  -- of blocking the cursor"): كان GUARD السكربت يوقف الـpipeline بالكامل
+  -- للأبد عند أول صف OperationType محتوى (2/3/100) يصل RecContent فارغاً منه
+  -- — رغم أن تعليق السكربت نفسه يوثّق أن هذا يحدث فعلاً (>99% وليس 100% من
+  -- هذه الصفوف تحمل محتوى)، أي صف طبيعي واحد كهذا كان يُجمِّد كل أحداث خليل
+  -- اللاحقة إلى الأبد. الحل: عمود حالة صريح بدل الحجب — 'ok' = محتوى طبيعي
+  -- ومُعالَج، 'no_content_expected' = OperationType لا يحمل محتوى أصلاً
+  -- (فتح/عرض/إغلاق)، 'quarantined_empty_content' = كان يُفترض أن يحمل محتوى
+  -- لكنه وصل فارغاً — يُسجَّل الحدث بلا snapshot بدل حجب الجميع، مع تنبيه
+  -- منفصل غير حاجز عبر Notify-Failure.
+  content_status text not null default 'ok'
+    constraint khalil_audit_events_content_status_check
+    check (content_status in ('ok', 'no_content_expected', 'quarantined_empty_content')),
   recorded_at timestamptz not null default now()
 );
 
@@ -114,6 +139,17 @@ create table if not exists public.khalil_audit_cursor (
   -- النقطة بالضبط. يتقدّم فقط عبر update_khalil_audit_overlap_floor أدناه،
   -- أحادي الاتجاه (لا يتراجع أبداً).
   overlap_floor_time timestamp,
+  -- Codex P1، 2026-08-31، جولة ١٠ ("Track GUID when advancing a truncated
+  -- overlap page"): overlap_floor_time وحده (بدون GUID) كان يكفي فقط حين لا
+  -- يوجد أكثر من BatchSize صف بنفس LogTime بالضبط. لو تراكمت صفوف Khalil
+  -- بنفس اللحظة تفوق BatchSize (مثلاً بعد توقف طويل)، كانت الصفحة تُقطَع عند
+  -- BatchSize والحد يتقدّم فقط إلى ذلك LogTime المشترك — فيعيد التشغيل
+  -- التالي `LogTime >= @OverlapFrom` نفس أول BatchSize صف للأبد (livelock)،
+  -- ولا تصل الصفوف اللاحقة بنفس اللحظة ولا أي صف أحدث أبداً. هذا العمود
+  -- يخزّن GUID آخر صف عولِج فعلاً ضمن نفس overlap_floor_time، فيستأنف
+  -- الاستعلام بمقارنة صف (LogTime, GUID) تماماً كما يفعل last_log_guid
+  -- للـcursor الرئيسي — بلا أي احتمال livelock أو تخطٍّ.
+  overlap_floor_guid uuid,
   constraint khalil_audit_cursor_singleton check (id = 1)
 );
 
@@ -152,7 +188,8 @@ returns table (
   last_log_time timestamp,
   last_log_guid uuid,
   backfill_before timestamp,
-  overlap_floor_time timestamp
+  overlap_floor_time timestamp,
+  overlap_floor_guid uuid
 )
 language plpgsql
 security definer
@@ -167,7 +204,7 @@ begin
   end if;
 
   return query
-    select c.last_log_time, c.last_log_guid, c.backfill_before, c.overlap_floor_time
+    select c.last_log_time, c.last_log_guid, c.backfill_before, c.overlap_floor_time, c.overlap_floor_guid
     from public.khalil_audit_cursor c
     where c.id = 1;
 end;
@@ -178,18 +215,30 @@ grant execute on function public.get_khalil_audit_cursor() to authenticated, ser
 revoke all on function public.get_khalil_audit_cursor() from anon;
 
 -- ------------------------------------------------------------
--- 4-أ) تقديم overlap_floor_time — الدالة الوحيدة القادرة على تعديل هذا
---    العمود. أحادية الاتجاه بحتة (لا تتراجع أبداً)، ومقيَّدة بهوية
---    المزامنة الموثوقة فقط، بنفس نمط بقية دوال هذا الملف (Codex P1،
---    2026-08-30، جولة ٩).
+-- 4-أ) تقديم (overlap_floor_time, overlap_floor_guid) — الدالة الوحيدة
+--    القادرة على تعديل هذين العمودين. أحادية الاتجاه بحتة (لا تتراجع أبداً،
+--    بمقارنة صف كاملة مثل last_log_time/last_log_guid)، ومقيَّدة بهوية
+--    المزامنة الموثوقة فقط (Codex P1، 2026-08-30، جولة ٩؛ ممدَّدة بـGUID
+--    جولة ١٠). التقييد بألا يتجاوز الحد نافذة زمنية دنيا خلف "الآن" (Codex
+--    P1، جولة ١٠، "Keep rescanning ranges that can receive late commits")
+--    مسؤولية السكربت المستدعي حصراً — عمداً وليس هنا: عزل SQL Server (حيث
+--    تحدث الالتزامات المتأخرة فعلياً) عن ساعة Postgres يتجنّب أي خطأ فروق
+--    توقيت بين الخادمين لو نُفِّذ الفحص هنا بدلاً من ذلك.
 -- ------------------------------------------------------------
 create or replace function public.update_khalil_audit_overlap_floor(
-  p_floor timestamp
+  p_floor timestamp,
+  p_floor_guid uuid default null
 ) returns void
 language plpgsql
 security definer
 set search_path = public
 as $$
+declare
+  -- قيمة حارسة تمثّل "الأدنى الممكن" حين يكون GUID الحد غير معروف بالضبط
+  -- (مثلاً حد مُقيَّد زمنياً وليس مأخوذاً من صف حقيقي) — تجعل المقارنة أدناه
+  -- تعامله دوماً كأنه *قبل* أي GUID حقيقي بنفس اللحظة، فلا يُفلِت أي صف عبر
+  -- الخطأ (يُعاد فحصه بأمان idempotent بدل تخطيه).
+  v_min_guid constant uuid := '00000000-0000-0000-0000-000000000000'::uuid;
 begin
   if auth.uid() is null then
     raise exception 'update_khalil_audit_overlap_floor requires an authenticated caller';
@@ -206,16 +255,26 @@ begin
   -- cursor أصلاً، فنكتفي بعدم الفعل بدل الفشل.
   update public.khalil_audit_cursor
      set overlap_floor_time = p_floor,
+         overlap_floor_guid = p_floor_guid,
          updated_at = now()
    where id = 1
-     and (overlap_floor_time is null or p_floor > overlap_floor_time);
+     and (
+       overlap_floor_time is null
+       or (p_floor, coalesce(p_floor_guid, v_min_guid))
+          > (overlap_floor_time, coalesce(overlap_floor_guid, v_min_guid))
+     );
 end;
 $$;
 
-revoke all on function public.update_khalil_audit_overlap_floor(timestamp)
+revoke all on function public.update_khalil_audit_overlap_floor(timestamp, uuid)
   from public, anon, service_role;
-grant execute on function public.update_khalil_audit_overlap_floor(timestamp)
+grant execute on function public.update_khalil_audit_overlap_floor(timestamp, uuid)
   to authenticated;
+
+-- الدالة القديمة أحادية المعامل (جولة ٩) لم تعد مستخدَمة — السكربت يستدعي
+-- النسخة ثنائية المعامل حصراً الآن. تُحذَف صراحة (وليس ترك overload معلَّق)
+-- كي لا يبقى مسار قديم يتجاوز حراسة الـGUID الجديدة بالخطأ.
+drop function if exists public.update_khalil_audit_overlap_floor(timestamp);
 
 -- ------------------------------------------------------------
 -- 5) تسجيل حدث واحد + تقديم الـcursor بأمان — الدالة الوحيدة القادرة على
@@ -240,7 +299,9 @@ create or replace function public.record_khalil_audit_event(
   p_after_snapshot jsonb,
   p_financial_delta numeric,
   p_notes text,
-  p_is_backfill boolean default false
+  p_is_backfill boolean default false,
+  -- Codex P1، 2026-08-31، جولة ١٠: انظر تعليق عمود content_status أعلاه.
+  p_content_status text default 'ok'
 ) returns public.khalil_audit_events
 language plpgsql
 security definer
@@ -267,12 +328,13 @@ begin
     ameen_log_guid, ameen_log_time, ameen_user_guid, ameen_user_login,
     device, operation, operation_type, rec_num, type_guid,
     invoice_number, invoice_guid, before_snapshot, after_snapshot,
-    financial_delta, notes, is_backfill
+    financial_delta, notes, is_backfill, content_status
   ) values (
     p_ameen_log_guid, p_ameen_log_time, p_ameen_user_guid, p_ameen_user_login,
     p_device, p_operation, p_operation_type, p_rec_num, p_type_guid,
     p_invoice_number, p_invoice_guid, p_before_snapshot, p_after_snapshot,
-    p_financial_delta, p_notes, coalesce(p_is_backfill, false)
+    p_financial_delta, p_notes, coalesce(p_is_backfill, false),
+    coalesce(p_content_status, 'ok')
   )
   on conflict (ameen_log_guid) do nothing
   returning * into v_row;
@@ -305,16 +367,24 @@ $$;
 
 revoke all on function public.record_khalil_audit_event(
   uuid, timestamp, uuid, text, text, text, smallint, text, uuid, text, uuid,
-  jsonb, jsonb, numeric, text, boolean
+  jsonb, jsonb, numeric, text, boolean, text
 ) from public;
 grant execute on function public.record_khalil_audit_event(
   uuid, timestamp, uuid, text, text, text, smallint, text, uuid, text, uuid,
-  jsonb, jsonb, numeric, text, boolean
+  jsonb, jsonb, numeric, text, boolean, text
 ) to authenticated, service_role;
 revoke all on function public.record_khalil_audit_event(
   uuid, timestamp, uuid, text, text, text, smallint, text, uuid, text, uuid,
-  jsonb, jsonb, numeric, text, boolean
+  jsonb, jsonb, numeric, text, boolean, text
 ) from anon;
+
+-- التوقيع القديم (١٦ معاملاً، بلا p_content_status، جولة ٧) لم يعد
+-- مستخدَماً — السكربت يستدعي التوقيع الجديد (١٧ معاملاً) حصراً الآن. يُحذَف
+-- صراحة كي لا يبقى overload قديم يتجاوز تصنيف content_status الجديد.
+drop function if exists public.record_khalil_audit_event(
+  uuid, timestamp, uuid, text, text, text, smallint, text, uuid, text, uuid,
+  jsonb, jsonb, numeric, text, boolean
+);
 
 -- ------------------------------------------------------------
 -- 6-أ) شبكة أمان مستقلة تماماً عن telegram_outbox (Codex P1، 2026-08-30،
