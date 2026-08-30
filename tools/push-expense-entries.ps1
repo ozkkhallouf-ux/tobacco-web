@@ -146,14 +146,19 @@ try {
 
     Write-Log "t2ra2 $($rows.Count) satr masareef."
 
-    if ($rows.Count -eq 0) {
-        Write-Log "ma fi satr — khoroj bidoon rafe3."
-        exit 0
-    }
-
     if ($DryRun) {
-        Write-Host "=== DRY RUN — أول 10 سطور ===" -ForegroundColor Yellow
-        $rows | Select-Object -First 10 | Format-Table -AutoSize
+        # ملاحظة Codex P1 على PR #141: يجب أن يعمل فحص Supabase بصرف النظر
+        # عن عدد الصفوف — لو نُقل بعد فحص "$rows.Count -eq 0" (كما كان)،
+        # فنافذة أيام بلا أي مصاريف (مثلاً -Days 0) كانت ستخرج بـexit 0
+        # قبل الوصول لفحص المصادقة إطلاقاً، فتُخفي بيانات اعتماد خاطئة
+        # وتُظهر "نجاحاً" كاذباً. لذلك هذه الكتلة كاملة (العرض + الفحص)
+        # تسبق فحص "لا صفوف" الآن، وتُنفَّذ دائماً عند تمرير -DryRun.
+        if ($rows.Count -gt 0) {
+            Write-Host "=== DRY RUN — أول 10 سطور ===" -ForegroundColor Yellow
+            $rows | Select-Object -First 10 | Format-Table -AutoSize
+        } else {
+            Write-Log "DryRun: لا صفوف مصاريف بهذه النافذة (Days=$Days) — الفحص التالي يعمل رغم ذلك."
+        }
 
         # فحص Supabase قراءة فقط: مصادقة حقيقية ثم GET وحيد بحد صف واحد.
         # لا INSERT ولا UPDATE ولا DELETE في هذا الفرع إطلاقاً — أي فشل هنا
@@ -175,6 +180,11 @@ try {
         }
 
         Write-Log "DryRun: ma tem raf3 shi (test faqat)."
+        exit 0
+    }
+
+    if ($rows.Count -eq 0) {
+        Write-Log "ma fi satr — khoroj bidoon rafe3."
         exit 0
     }
 

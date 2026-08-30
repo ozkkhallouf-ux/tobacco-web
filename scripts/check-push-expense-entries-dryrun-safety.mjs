@@ -85,6 +85,22 @@ const probeFailureBlock = dryRunBlock.slice(dryRunBlock.indexOf('} catch {'));
 assert.match(probeFailureBlock, /Notify-Failure/, 'a failed DryRun Supabase probe must call Notify-Failure');
 assert.match(probeFailureBlock, /exit 1/, 'a failed DryRun Supabase probe must exit 1');
 
+// 6b) Codex P1 regression guard (PR #141, second round): the `if
+// ($DryRun) { ... }` block — and therefore the Supabase probe inside it —
+// must appear in the source BEFORE the `if ($rows.Count -eq 0)`
+// early-exit. Originally the empty-result check ran first, so a DryRun
+// invocation against a window with zero expense rows (e.g. -Days 0)
+// exited 0 without ever reaching the probe — invalid credentials would
+// silently report success in exactly that case.
+const dryRunIfIndex = ps1.indexOf('if ($DryRun) {');
+const emptyRowsCheckIndex = ps1.indexOf('if ($rows.Count -eq 0) {');
+assert.notEqual(dryRunIfIndex, -1, 'must find "if ($DryRun) {"');
+assert.notEqual(emptyRowsCheckIndex, -1, 'must find "if ($rows.Count -eq 0) {"');
+assert.ok(
+  dryRunIfIndex < emptyRowsCheckIndex,
+  'the DryRun block (and its Supabase probe) must run BEFORE the empty-result early-exit, otherwise a zero-row DryRun window never reaches the probe',
+);
+
 // 7) DryRun must still exit before ever reaching the real write path: the
 // unconditional real-upload auth call and the POST/DELETE upload calls
 // must appear strictly AFTER the entire `if ($DryRun) { ... }` block ends
