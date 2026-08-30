@@ -13,6 +13,13 @@ name: تنبيه فشل الأتمتة
 # الاستخدام في Edge Functions، ويُستدعى به notify_telegram الذي يقبل صراحة
 # جلسات service_role. أضِفه عبر: gh secret set SUPABASE_SERVICE_ROLE_KEY
 # (لصق القيمة مباشرة في الطرفية، لا يُشارك مع أي جلسة AI).
+#
+# ⚠️ Content-Profile لا Accept-Profile: اكتُشف عبر اختبار E2E حقيقي (فرع
+# test/alert-e2e-verification، 2026-08-30) أن notify_telegram كـPOST/RPC
+# يحتاج ترويسة Content-Profile: public تحديداً — Accept-Profile تخص طلبات
+# GET فقط. استخدامها الخاطئ هنا كان يُرجع 404 صامتاً (بحث PostgREST داخل
+# مخطط "api" الافتراضي بدل "public")، فيفشل التنبيه نفسه دون أن يصل أي
+# شيء — بالضبط نوع الفشل الصامت الذي بُني هذا الـworkflow لمنعه أصلاً.
 
 on:
   workflow_run:
@@ -70,7 +77,7 @@ jobs:
             -H "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" \
             -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
             -H "Content-Type: application/json" \
-            -H "Accept-Profile: public" \
+            -H "Content-Profile: public" \
             -d "$PAYLOAD")
 
           echo "notify_telegram HTTP $HTTP_CODE"

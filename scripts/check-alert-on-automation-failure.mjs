@@ -73,6 +73,15 @@ assert.match(yml, /"\$CONCLUSION"/, 'the alert message must interpolate the actu
 assert.match(yml, /\/rest\/v1\/rpc\/notify_telegram/, 'must call the notify_telegram RPC, not the Telegram API directly');
 assert.match(yml, /p_dedupe_key/, 'must pass a dedupe key so repeated failures of the same workflow do not spam');
 
+// Real E2E test on 2026-08-30 (branch test/alert-e2e-verification) caught
+// this live: notify_telegram is a POST/RPC call, which PostgREST resolves
+// against "Content-Profile", not "Accept-Profile" (that header is GET-only).
+// Using the wrong one silently 404s (PostgREST searches the "api" schema
+// instead of "public") — exactly the kind of silent alert-delivery failure
+// this workflow exists to prevent, so both directions are asserted.
+assert.match(yml, /-H "Content-Profile: public"/, 'must send Content-Profile (not Accept-Profile) for this POST/RPC call — verified live to 404 otherwise');
+assert.doesNotMatch(codeOnly, /-H "Accept-Profile: public"/, 'must not use Accept-Profile — that header only applies to GET requests, not this POST/RPC call');
+
 // Must check the RPC call's own HTTP status and fail the job on error —
 // a curl call with no status check would silently swallow delivery
 // failures (e.g. an expired/revoked service_role key). Checked as
