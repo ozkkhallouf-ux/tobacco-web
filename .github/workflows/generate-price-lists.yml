@@ -9,11 +9,15 @@ on:
       - 'scripts/generate-price-lists.mjs'
       - 'scripts/generate-pdfs.mjs'
   workflow_dispatch: {}
+  # زناد دوري بلا كتابة على main: يكتشف تغييرات الأسعار/سعر الصرف المحفوظة من
+  # المتصفح بلا gh_publish_token (توضّح scheduleBulletinPublish أنها ستُلتقط
+  # خلال 15 دقيقة)، ونجاحه يشغّل pages.yml تلقائياً عبر workflow_run أدناه —
+  # فتُعاد النشرات والـPDF من بيانات Supabase الحيّة دون أي تدخل بشري.
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '*/15 * * * *'
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: generate-price-lists
@@ -58,19 +62,3 @@ jobs:
       - name: Generate PDFs
         if: steps.bulletin_changes.outputs.changed == 'true'
         run: node scripts/generate-pdfs.mjs
-      - name: Bump service worker cache version
-        if: steps.bulletin_changes.outputs.changed == 'true'
-        run: |
-          FILE="public/service-worker.js"; CURRENT=$(grep -o 'v[0-9]*"' "$FILE" | tr -d '"v'); NEW=$((CURRENT + 1)); sed -i "s/v${CURRENT}\"/v${NEW}\"/" "$FILE"
-      - name: Commit generated files
-        if: steps.bulletin_changes.outputs.changed == 'true'
-        run: |
-          git config user.name "price-bot"
-          git config user.email "action@github.com"
-          git add public/downloads/ public/service-worker.js
-          git diff --staged --quiet && exit 0
-          STAMP=$(date -u '+%Y-%m-%d %H:%M UTC')
-          git commit -m "Auto: تحديث نشرات الأسعار — ${STAMP}"
-          # main قد يتحرك أثناء توليد PDF. أعد الدمج ثم ادفع بدل فشل non-fast-forward.
-          git pull --rebase origin main
-          git push origin HEAD:main

@@ -52,6 +52,33 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # النشرات تُولَّد هنا وقت النشر بدل رفعها بـ commit إلى main،
+      # لأن حماية الفرع تمنع البوتات من الدفع المباشر (GH013).
+      - name: Generate price list HTML
+        run: node scripts/generate-price-lists.mjs
+
+      - name: Install Playwright Chromium browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Generate PDFs
+        run: node scripts/generate-pdfs.mjs
+
+      # رقم النسخة يزداد مع رقم التشغيل كي يبقى تصاعدياً بلا commit
+      - name: Bump service worker cache version
+        run: |
+          FILE="public/service-worker.js"
+          CURRENT=$(grep -o 'v[0-9]*"' "$FILE" | tr -d '"v')
+          NEW=$((CURRENT + ${{ github.run_number }}))
+          sed -i "s/v${CURRENT}\"/v${NEW}\"/" "$FILE"
       - name: Configure Pages
         uses: actions/configure-pages@v5
 
