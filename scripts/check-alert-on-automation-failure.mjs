@@ -23,13 +23,19 @@ const codeOnly = yml
   .filter((line) => !line.trim().startsWith('#'))
   .join('\n');
 
-// Must only fire on actual failures, never on success/cancelled — a noisy
-// "everything is fine" ping defeats the purpose and trains people to ignore
-// the channel.
-assert.match(
+// Must fire on every unsuccessful conclusion, not just 'failure' — Codex P1
+// on PR #142: GitHub reports 'timed_out' when a run exceeds its
+// timeout-minutes (the price-list generator has one), and 'startup_failure'/
+// 'cancelled'/'action_required' for other non-'failure' problems (this
+// repo's own history includes a real 'startup_failure' run). Gating on
+// 'failure' alone would silently miss those. Must still explicitly exclude
+// 'success' and 'skipped' (a conditionally-skipped run is not an outage).
+assert.match(yml, /conclusion != 'success'/, "must exclude only 'success', not gate narrowly on '== failure'");
+assert.match(yml, /conclusion != 'skipped'/, "must also exclude 'skipped' (not an outage)");
+assert.doesNotMatch(
   yml,
-  /if:\s*github\.event\.workflow_run\.conclusion == 'failure'/,
-  'the notify job must be gated to conclusion == failure only',
+  /if:\s*github\.event\.workflow_run\.conclusion == 'failure'\s*$/m,
+  "must not narrowly gate on conclusion == 'failure' — misses timed_out/startup_failure/cancelled",
 );
 
 // Must NOT watch the Codex Review Gate — failing is its expected default
@@ -54,6 +60,12 @@ assert.match(
   /if \[ -z "\$SUPABASE_SERVICE_ROLE_KEY" \][\s\S]{0,200}exit 1/,
   'must exit non-zero with a clear error if SUPABASE_SERVICE_ROLE_KEY is unset',
 );
+
+// The alert message must reflect the actual conclusion (failure/timed_out/
+// cancelled/...), not hardcode "فشل" (failure) — misleading once the gate
+// covers more than plain failures.
+assert.match(yml, /CONCLUSION:\s*\$\{\{\s*github\.event\.workflow_run\.conclusion\s*\}\}/, 'must expose the actual conclusion as an env var');
+assert.match(yml, /"\$CONCLUSION"/, 'the alert message must interpolate the actual conclusion, not assume failure');
 
 // Must route through the project's single canonical notification RPC
 // (notify_telegram) rather than calling the Telegram Bot API directly —
