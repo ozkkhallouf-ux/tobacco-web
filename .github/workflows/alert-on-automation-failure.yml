@@ -1,0 +1,82 @@
+name: تنبيه فشل الأتمتة
+
+# الغرض: إرسال تنبيه فوري لتيليغرام (نفس بوت المشروع، نفس آلية notify_telegram
+# المستخدمة بكل مكان آخر بالمشروع) عند فشل أي workflow تشغيلي مهم — بدل اكتشاف
+# العطل بعد ساعات (مثال حقيقي: توقّف توليد نشرات الأسعار 21 ساعة بصمت في
+# 2026-08-29/30 بسبب تعارض مع حماية الفرع، دون أي تنبيه لأحد).
+#
+# لا يراقب "Codex Review Gate": فشلها هو الحالة الافتراضية المتوقعة قبل وصول
+# مراجعة Codex، وليست عطلاً تشغيلياً.
+#
+# يعتمد على سرّ GitHub Actions اسمه SUPABASE_SERVICE_ROLE_KEY (مفتاح
+# service_role من Supabase → Settings → API) — يتجاوز RLS تماماً مثل
+# الاستخدام في Edge Functions، ويُستدعى به notify_telegram الذي يقبل صراحة
+# جلسات service_role. أضِفه عبر: gh secret set SUPABASE_SERVICE_ROLE_KEY
+# (لصق القيمة مباشرة في الطرفية، لا يُشارك مع أي جلسة AI).
+
+on:
+  workflow_run:
+    workflows:
+      - "Deploy TOBACCO Web"
+      - "توليد نشرات الأسعار"
+      - "فحص المشروع"
+      - "Decision Engine Check"
+      - "OZK Business OS Foundation"
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    # ملاحظة Codex P1 على PR #142: الشرط لا يقتصر على 'failure' وحدها — GitHub
+    # يُرجع 'timed_out' لو تجاوزت التشغيلة مهلتها المحدَّدة (توليد نشرات
+    # الأسعار نفسه له timeout-minutes: 10)، و'startup_failure'/'cancelled'/
+    # 'action_required' لأعطال أخرى — رأينا 'startup_failure' فعلياً بتاريخ
+    # هذا المستودع. الاستثناء الوحيد المقصود: 'success' و'skipped' (تشغيلة
+    # شرطية لم تكن بحاجة للعمل أصلاً — ليست عطلاً).
+    if: |
+      github.event.workflow_run.conclusion != 'success' &&
+      github.event.workflow_run.conclusion != 'skipped'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Telegram alert via notify_telegram RPC
+        env:
+          SUPABASE_URL: "https://dyxbirfpxeocqffnfdeb.supabase.co"
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          WF_NAME: ${{ github.event.workflow_run.name }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          BRANCH: ${{ github.event.workflow_run.head_branch }}
+          RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+        run: |
+          if [ -z "$SUPABASE_SERVICE_ROLE_KEY" ]; then
+            echo "::error::السرّ SUPABASE_SERVICE_ROLE_KEY غير مُعرَّف — لا يمكن إرسال تنبيه تيليغرام. أضِفه عبر: gh secret set SUPABASE_SERVICE_ROLE_KEY"
+            exit 1
+          fi
+
+          MESSAGE=$(printf '🚨 عطل GitHub Actions (%s): %s\nالفرع: %s\nالمحاولة: %s\nالرابط: %s' \
+            "$CONCLUSION" "$WF_NAME" "$BRANCH" "$RUN_ATTEMPT" "$RUN_URL")
+
+          PAYLOAD=$(jq -n \
+            --arg event_type "github_actions_failure" \
+            --arg message "$MESSAGE" \
+            --arg dedupe_key "gha-fail:${WF_NAME}" \
+            --argjson dedupe_minutes 60 \
+            '{p_event_type: $event_type, p_message: $message, p_dedupe_key: $dedupe_key, p_dedupe_minutes: $dedupe_minutes}')
+
+          HTTP_CODE=$(curl -sS -o /tmp/notify_response.json -w "%{http_code}" \
+            -X POST "${SUPABASE_URL}/rest/v1/rpc/notify_telegram" \
+            -H "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" \
+            -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
+            -H "Content-Type: application/json" \
+            -H "Accept-Profile: public" \
+            -d "$PAYLOAD")
+
+          echo "notify_telegram HTTP $HTTP_CODE"
+          cat /tmp/notify_response.json || true
+
+          if [ "$HTTP_CODE" -ge 300 ]; then
+            echo "::error::فشل استدعاء notify_telegram (HTTP $HTTP_CODE) — راجع الاستجابة أعلاه."
+            exit 1
+          fi
