@@ -1,4 +1,4 @@
-# ============================================================
+﻿# ============================================================
 # push-expense-entries.ps1
 # يقرأ حركة مصاريف الصرف (قيود en000 على حسابات المصاريف بشجرة
 # الحسابات ac000) من الأمين آخر N يوم، ويرفعها لجدول expense_entries
@@ -15,6 +15,14 @@
 # تجربة بدون رفع:  .\tools\push-expense-entries.ps1 -DryRun
 # تشغيل فعلي:      .\tools\push-expense-entries.ps1
 # نافذة أطول:      .\tools\push-expense-entries.ps1 -Days 14
+#
+# ⚠️ -DryRun (2026-08-31): بعد قراءة الأمين وطباعة أول 10 صفوف، يُجري
+# فحص Supabase قراءة فقط (مصادقة حقيقية بنفس TOBACCO_SYNC_EMAIL/PASSWORD
+# ثم GET واحد بحد صف واحد) للتأكد أن الرابط والمفتاح والمصادقة صحيحة —
+# بلا أي INSERT/UPDATE/DELETE إطلاقاً. يفشل بوضوح (exit 1 + إشعار
+# تيليغرام) لو فشلت المصادقة أو الاتصال، فلا تُخفى مشاكل الإعداد خلف
+# "نجاح" DryRun ظاهري. اكتُشفت الحاجة لهذا أثناء تحقق حي عبر SSH: كان
+# -DryRun يخرج قبل الوصول لسطر مصادقة Supabase إطلاقاً فلا يختبرها مطلقاً.
 # ============================================================
 param(
     [switch]$DryRun,
@@ -24,6 +32,12 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+# ترميز الإخراج UTF-8 صراحةً — بدونه، النص العربي (Write-Host/Format-Table)
+# يظهر كعلامات استفهام في بعض جلسات PowerShell غير التفاعلية (مثل SSH بدون
+# محطة UTF-8 افتراضية). ملفوف بـtry لأن تعيين Console.OutputEncoding قد يرمي
+# استثناءً حين لا توجد محطة فعلية (إخراج مُعاد توجيهه بالكامل لملف مثلاً).
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 
 if (Test-Path $EnvFile) {
     Get-Content $EnvFile | Where-Object { $_ -match '^\s*[^#].+=.+' } | ForEach-Object {
@@ -52,6 +66,26 @@ function Notify-Failure($Message) {
             -Message $Message -EventType "sync_failure" -DedupeKey "winfail:push-expense-entries" -DedupeMinutes 60 `
             -EnvFile $EnvFile
     } catch { }
+}
+
+# مصادقة Supabase بنفس بيانات حساب المزامنة — يرمي استثناء واضحاً لو فشلت
+# المصادقة أو لم يُرجَع access_token صالح، بدل الفشل الصامت أو المتابعة
+# بتوكن فارغ. مستخدَمة في مسار -DryRun (فحص قراءة فقط) وفي الرفع الفعلي.
+function Get-SupabaseAuthToken {
+    param(
+        [Parameter(Mandatory)] [string]$SupabaseUrl,
+        [Parameter(Mandatory)] [string]$ApiKey,
+        [Parameter(Mandatory)] [string]$Email,
+        [Parameter(Mandatory)] [string]$Password
+    )
+    $authBody = @{ email = $Email; password = $Password } | ConvertTo-Json
+    $auth = Invoke-RestMethod -Method Post -Uri "$SupabaseUrl/auth/v1/token?grant_type=password" `
+        -Headers @{ apikey = $ApiKey; Accept = "application/json" } `
+        -ContentType "application/json; charset=utf-8" -Body $authBody
+    if (-not $auth.access_token) {
+        throw "Supabase Auth لم يُرجع access_token صالحاً — تحقق من TOBACCO_SYNC_EMAIL/TOBACCO_SYNC_PASSWORD."
+    }
+    return $auth.access_token
 }
 
 $connStr = Get-Setting "AMEEN_SQL_CONNECTION_STRING"
@@ -112,23 +146,49 @@ try {
 
     Write-Log "t2ra2 $($rows.Count) satr masareef."
 
+    if ($DryRun) {
+        # ملاحظة Codex P1 على PR #141: يجب أن يعمل فحص Supabase بصرف النظر
+        # عن عدد الصفوف — لو نُقل بعد فحص "$rows.Count -eq 0" (كما كان)،
+        # فنافذة أيام بلا أي مصاريف (مثلاً -Days 0) كانت ستخرج بـexit 0
+        # قبل الوصول لفحص المصادقة إطلاقاً، فتُخفي بيانات اعتماد خاطئة
+        # وتُظهر "نجاحاً" كاذباً. لذلك هذه الكتلة كاملة (العرض + الفحص)
+        # تسبق فحص "لا صفوف" الآن، وتُنفَّذ دائماً عند تمرير -DryRun.
+        if ($rows.Count -gt 0) {
+            Write-Host "=== DRY RUN — أول 10 سطور ===" -ForegroundColor Yellow
+            $rows | Select-Object -First 10 | Format-Table -AutoSize
+        } else {
+            Write-Log "DryRun: لا صفوف مصاريف بهذه النافذة (Days=$Days) — الفحص التالي يعمل رغم ذلك."
+        }
+
+        # فحص Supabase قراءة فقط: مصادقة حقيقية ثم GET وحيد بحد صف واحد.
+        # لا INSERT ولا UPDATE ولا DELETE في هذا الفرع إطلاقاً — أي فشل هنا
+        # (رابط/مفتاح/مصادقة خاطئة) يوقف السكريبت بـexit 1 وإشعار تيليغرام،
+        # لا يُكتم أبداً.
+        Write-Log "DryRun: فحص مصادقة واتصال Supabase (قراءة فقط)..."
+        try {
+            $probeToken = Get-SupabaseAuthToken -SupabaseUrl $supabaseUrl -ApiKey $apiKey -Email $syncEmail -Password $syncPassword
+            $probeHdr = @{ apikey = $apiKey; Authorization = "Bearer $probeToken"; "Accept-Profile" = "public" }
+            Invoke-RestMethod -Method Get `
+                -Uri "$supabaseUrl/rest/v1/expense_entries?select=id&limit=1" `
+                -Headers $probeHdr | Out-Null
+            Write-Log "DryRun: فحص Supabase ناجح — المصادقة والقراءة (owner) تعملان."
+        } catch {
+            $probeErrMsg = "DryRun: فشل فحص مصادقة/اتصال Supabase — $($_.Exception.Message)"
+            Write-Log $probeErrMsg
+            Notify-Failure "🚨 فشل فحص DryRun لمصادقة Supabase (push-expense-entries)`n$($_.Exception.Message)"
+            exit 1
+        }
+
+        Write-Log "DryRun: ma tem raf3 shi (test faqat)."
+        exit 0
+    }
+
     if ($rows.Count -eq 0) {
         Write-Log "ma fi satr — khoroj bidoon rafe3."
         exit 0
     }
 
-    if ($DryRun) {
-        Write-Host "=== DRY RUN — awal 10 sotoor ===" -ForegroundColor Yellow
-        $rows | Select-Object -First 10 | Format-Table -AutoSize
-        Write-Log "DryRun: ma tem raf3 shi (test faqat)."
-        exit 0
-    }
-
-    $authBody = @{ email = $syncEmail; password = $syncPassword } | ConvertTo-Json
-    $auth = Invoke-RestMethod -Method Post -Uri "$supabaseUrl/auth/v1/token?grant_type=password" `
-        -Headers @{ apikey = $apiKey; Accept = "application/json" } `
-        -ContentType "application/json; charset=utf-8" -Body $authBody
-    $token = $auth.access_token
+    $token = Get-SupabaseAuthToken -SupabaseUrl $supabaseUrl -ApiKey $apiKey -Email $syncEmail -Password $syncPassword
     $hdr = @{ apikey = $apiKey; Authorization = "Bearer $token"; "Accept-Profile" = "public"; "Content-Profile" = "public" }
 
     $cutoff = (Get-Date).AddDays(-$Days).ToString("yyyy-MM-dd")
