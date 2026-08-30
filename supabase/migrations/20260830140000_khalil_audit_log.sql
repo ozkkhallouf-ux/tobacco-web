@@ -283,9 +283,20 @@ begin
       new.ameen_log_guid::text,
       1
     );
-  exception when others then
-    raise warning 'khalil_audit: notify_telegram failed for ameen_log_guid=%: %',
-      new.ameen_log_guid, sqlerrm;
+  exception
+    -- ملاحظة أمنية/موثوقية إضافية (Codex P1، 2026-08-30، جولة ٢): exception
+    -- when others لا يلتقط QUERY_CANCELED (Postgres يستثنيها عمداً من فئة
+    -- OTHERS لأنها إشارة إدارية). لو انتهت مهلة statement_timeout أثناء
+    -- notify_telegram تحديداً (لا أثناء بقية الدالة)، كانت ستتسرب خارج هذه
+    -- الكتلة وتُسقط نفس المعاملة رغم أن صف الـAudit نفسه أُدرج بنجاح سلفاً —
+    -- نفس الخرق الذي عولج أعلاه لكن عبر مسار استثناء مختلف. معالجة صريحة هنا
+    -- تُبقي إسقاط الإشعار فقط دون أي أثر على صف الـAudit أو الـcursor.
+    when query_canceled then
+      raise warning 'khalil_audit: notify_telegram canceled/timed out for ameen_log_guid=%',
+        new.ameen_log_guid;
+    when others then
+      raise warning 'khalil_audit: notify_telegram failed for ameen_log_guid=%: %',
+        new.ameen_log_guid, sqlerrm;
   end;
 
   return new;

@@ -118,6 +118,18 @@ try {
         if ($cursorResp[0].last_log_guid) { $cursorGuid = [string]$cursorResp[0].last_log_guid }
     }
 
+    # ملاحظة أمنية/موثوقية (Codex P1، 2026-08-30): ترتيب SQL Server الأصلي
+    # لنوع uniqueidentifier (مقارنة GUID > GUID أو ORDER BY GUID) لا يطابق
+    # ترتيب Postgres لنوع uuid — SQL Server يقارن مجموعات بايتات بترتيب غير
+    # نصّي مختلف تماماً عن الشكل القانوني للنص، بينما Postgres يقارن uuid
+    # بنفس ترتيب تمثيله النصي القانوني. لو تجاوز عدد الأحداث المتساوية
+    # LogTime حجم الدفعة (BatchSize)، كان الـcursor المخزَّن في Postgres
+    # (بترتيب uuid) يمكن أن يتوافق مع GUID مختلف عمّا يعتبره SQL Server
+    # "الأحدث" بترتيبه الخاص — فيُستبعد صفوف لم تُعالَج فعلياً إلى الأبد، أو
+    # يُعاد جلب نفس الدفعة بلا تقدّم. الإصلاح: تحويل GUID إلى نص قانوني
+    # (lowercase) على جانب SQL Server قبل الترتيب/المقارنة، ليطابق تماماً
+    # ترتيب Postgres النصي لعمود last_log_guid — بلا أي حاجة لتغيير منطق
+    # الـcursor في الدالة نفسها.
     $cmd = $conn.CreateCommand()
     $cmd.CommandTimeout = 60
     $cmd.CommandText = @"
@@ -129,16 +141,16 @@ WHERE UserGUID = @UserGuid
   AND (
         @CursorTime IS NULL
         OR LogTime > @CursorTime
-        OR (LogTime = @CursorTime AND GUID > @CursorGuid)
+        OR (LogTime = @CursorTime AND LOWER(CAST(GUID AS VARCHAR(36))) > @CursorGuid)
       )
   AND (@CursorTime IS NOT NULL OR LogTime >= @BackfillFrom)
-ORDER BY LogTime ASC, GUID ASC
+ORDER BY LogTime ASC, LOWER(CAST(GUID AS VARCHAR(36))) ASC
 "@
     $cmd.Parameters.AddWithValue("@BatchSize", $BatchSize) | Out-Null
     $cmd.Parameters.AddWithValue("@UserGuid", [guid]$KHALIL_USER_GUID) | Out-Null
     if ($cursorTime) { $cmd.Parameters.AddWithValue("@CursorTime", $cursorTime) | Out-Null }
     else { $cmd.Parameters.AddWithValue("@CursorTime", [DBNull]::Value) | Out-Null }
-    if ($cursorGuid) { $cmd.Parameters.AddWithValue("@CursorGuid", [guid]$cursorGuid) | Out-Null }
+    if ($cursorGuid) { $cmd.Parameters.AddWithValue("@CursorGuid", [string]$cursorGuid.ToLowerInvariant()) | Out-Null }
     else { $cmd.Parameters.AddWithValue("@CursorGuid", [DBNull]::Value) | Out-Null }
     $cmd.Parameters.AddWithValue("@BackfillFrom", (Get-Date).AddHours(-1 * [double]$backfillHours)) | Out-Null
 
