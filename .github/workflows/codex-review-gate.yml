@@ -81,6 +81,22 @@ name: Codex Review Gate
 #       أبداً، فيبقى الفحص FAIL تلقائياً بعد أي push جديد حتى تصل مراجعة Codex على
 #       الـHEAD الجديد تحديداً — بلا أي استثناء.
 #
+# ⚠️ إصلاح جوهري ثالث بتاريخ 2026-08-31 (ثغرة إعادة ربط commit_id تلقائياً بعد rebase):
+#   PR #139 دُمج بالاعتماد على REVIEW_COMMENT_COUNT>0، لكن التحقق اللاحق أظهر أن التطابق
+#   لم يكن على مراجعة فعلية لـHEAD الدمج، بل لأن GitHub يعيد ربط حقل commit_id في
+#   pulls/{n}/comments تلقائياً بأي commit لاحق ما زال يحتوي نفس سطر الكود دون تغيير —
+#   أي أن rebase أو merge لا يمسّان تلك الأسطر يجعل تعليق مراجعة قديم "يبدو" وكأنه على
+#   الـHEAD الجديد رغم أن Codex لم يرَ هذا الـHEAD إطلاقاً. الحقل الثابت أبداً بعد الإنشاء
+#   هو original_commit_id (لا يُعاد ربطه مهما تحرك تاريخ الفرع لاحقاً) — هو من يُستخدم
+#   الآن حصراً لمطابقة pulls/{n}/comments، بدلاً من commit_id القابل لإعادة الربط.
+#   مراجعات pulls/{n}/reviews (Formal Review) بقيت تُطابَق عبر commit_id لأن حقلها يُثبَّت
+#   وقت الإرسال ولا يرتبط بسطر كود متحرك، فلا ثغرة إعادة ربط هناك أصلاً. مطابقة
+#   issues/{n}/comments (نص "Reviewed commit:") لم تتغيّر لنفس السبب — محتوى ثابت كتبه
+#   Codex فعلياً. المنطق موثَّق ومختبَر بشكل قابل للتكرار الآلي في
+#   scripts/codex-review-gate-logic.mjs + scripts/check-codex-review-gate-logic.mjs
+#   (سيناريوهان: مراجعة قديمة + rebase بدون تغيير السطر ⇒ FAIL؛ مراجعة جديدة فعلية على
+#   الـHEAD الحالي ⇒ PASS) — جزء من npm run check.
+#
 # ⚠️ إصلاح جوهري ثانٍ بتاريخ 2026-08-29 (الفحص لا يُعاد تلقائياً عند وصول Issue Comment):
 #   بعد إضافة مصدر Issue Comment أعلاه، تحقق حي على PR #128 أظهر أن الـGate بقيت FAIL
 #   حتى بعد نشر Codex لمراجعة صالحة على الـHEAD الحالي، لأن أحداث تشغيل الـworkflow
@@ -179,8 +195,10 @@ jobs:
 
           COMMENTS_JSON=$(gh api "repos/$REPO/pulls/$PR_NUMBER/comments" --paginate \
             | jq -s '(add // [])')
+          # إصلاح 2026-08-31: original_commit_id فقط (وليس commit_id) — انظر تعليق
+          # "إصلاح جوهري ثالث" أعلى الملف لتفصيل ثغرة إعادة الربط التلقائي بعد rebase.
           REVIEW_COMMENT_COUNT=$(echo "$COMMENTS_JSON" | jq --arg sha "$HEAD_SHA" --arg bot "$CODEX_BOT_LOGIN" \
-            '[.[] | select(.user.login == $bot and .commit_id == $sha)] | length')
+            '[.[] | select(.user.login == $bot and .original_commit_id == $sha)] | length')
 
           # إصلاح 2026-08-29: الـartifact الحقيقي الذي ينشره Codex هو Issue Comment عادي
           # (POST /issues/{n}/comments)، بنص يتضمن "**Reviewed commit:** `<short-sha>`".
@@ -207,7 +225,7 @@ jobs:
           # طبقة معلوماتية best-effort فقط: عدّ شارات P0/P1/P2/P3 في تعليقات Codex
           # المرتبطة بنفس الـHEAD (review comments). لا تُستخدم هذه القيمة لإسقاط الفحص.
           BADGES=$(echo "$COMMENTS_JSON" | jq -r --arg sha "$HEAD_SHA" --arg bot "$CODEX_BOT_LOGIN" \
-            '[.[] | select(.user.login == $bot and .commit_id == $sha) | .body] | join("\n")' \
+            '[.[] | select(.user.login == $bot and .original_commit_id == $sha) | .body] | join("\n")' \
             | grep -oE 'badge/P[0-3]-' | sort | uniq -c || true)
 
           if [ -z "$BADGES" ]; then
