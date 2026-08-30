@@ -85,25 +85,27 @@ if (-not $apiKey -or -not $syncEmail -or -not $syncPassword) {
 # ملاحظة موثوقية (Codex P1، 2026-08-30، جولة ٣): لا يوجد أي heartbeat/تقرير
 # صحة لهذه المهمة — لو توقفت المهمة المجدولة (عُطِّلت، حُذفت، الجهاز مطفأ،
 # أو لم تُسجَّل أصلاً) فلا آلية تنبيه تكتشف ذلك، ويبقى خط تدقيق خليل ميتاً
-# بصمت. الإصلاح: كتابة صفّ حالة دوري في inventory_reports (نفس نمط
-# publish-price-sync-status.ps1)، مسجَّل بمصدر khalil_audit_sync_heartbeat
-# ضمن private.project_task_monitors (راجع supabase/project-task-health-monitor.sql)
-# ليتحقق منه monitor_project_tasks() تلقائياً بنفس آلية بقية مهام المزامنة.
+# بصمت. الإصلاح: كتابة صفّ حالة دوري ضمن private.project_task_monitors
+# (راجع supabase/project-task-health-monitor.sql) ليتحقق منه
+# monitor_project_tasks() تلقائياً بنفس آلية بقية مهام المزامنة.
+#
+# Codex P1، 2026-08-30، جولة ٤ (findings b + d): سابقاً كانت الكتابة على
+# public.inventory_reports المشترك — أي موظف مصادَق قادر على إرسال
+# source='khalil_audit_sync_heartbeat' منتحلاً صفة هذا السكربت (b)، وأول
+# إدراج يومي هناك يُشغِّل أيضاً trigger إشعار الجرد اليومي غير المشروط
+# ويحجز dedupe_key الخاص به لمدة 1200 دقيقة، فيُسكِت إشعار الجرد الحقيقي (d).
+# الإصلاح: جدول مخصّص khalil_audit_sync_heartbeat بصلاحية INSERT محصورة
+# بهوية المزامنة الموثوقة فقط (نفس RLS المستخدَم لـkhalil_audit_events).
 function Send-Heartbeat($ProcessedCount, $FoundCount) {
     try {
         $body = @{
-            report_date = (Get-Date).ToString("yyyy-MM-dd")
-            source      = "khalil_audit_sync_heartbeat"
-            summary     = @{
-                status         = "ok"
-                found          = $FoundCount
-                processed      = $ProcessedCount
-                ran_at         = (Get-Date).ToString("o")
-                computer       = $env:COMPUTERNAME
-            }
-            items       = @()
+            status          = "ok"
+            found_count     = $FoundCount
+            processed_count = $ProcessedCount
+            ran_at          = (Get-Date).ToString("o")
+            computer        = $env:COMPUTERNAME
         } | ConvertTo-Json -Compress -Depth 5
-        Invoke-RestMethod -Method Post -Uri "$supabaseUrl/rest/v1/inventory_reports" -Headers $headers `
+        Invoke-RestMethod -Method Post -Uri "$supabaseUrl/rest/v1/khalil_audit_sync_heartbeat" -Headers $headers `
             -ContentType "application/json; charset=utf-8" -Body ([Text.Encoding]::UTF8.GetBytes($body)) `
             -TimeoutSec 20 | Out-Null
     } catch {
@@ -274,6 +276,15 @@ ORDER BY LogTime DESC, LOWER(CAST(GUID AS VARCHAR(36))) DESC
             $financialDelta = [math]::Round($afterTotal - $beforeTotal, 4)
         }
 
+        # Codex P1، 2026-08-30، جولة ٤ (finding c): أي حدث عمره أكثر من 15
+        # دقيقة (هامش أوسع بكثير من دورة التشغيل كل دقيقتين) يُعتبر backfill/
+        # لحاق تاريخي — إما أول تشغيل بعد التسجيل، أو لحاق بعد توقف الجهاز/
+        # المهمة فترة طويلة. الـtrigger بالخادم (is_backfill، انظر migration)
+        # يتجاوز إشعار تيليجرام الفوري لهذه الصفوف فقط، فلا تُغرِق طابور
+        # الإرسال (20 رسالة/دقيقة) بمئات الأحداث القديمة على حساب التنبيهات
+        # الحيّة — الحدث نفسه يبقى مسجَّلاً بكامل تفاصيله في الـAudit دوماً.
+        $isBackfill = ($row.LogTime -lt (Get-Date).AddMinutes(-15))
+
         $payload = @{
             p_ameen_log_guid     = $row.Guid
             p_ameen_log_time     = $row.LogTime.ToString("yyyy-MM-ddTHH:mm:ss.fffffff")
@@ -290,6 +301,7 @@ ORDER BY LogTime DESC, LOWER(CAST(GUID AS VARCHAR(36))) DESC
             p_after_snapshot     = if ($afterXml) { @{ xml = $afterXml } } else { $null }
             p_financial_delta    = $financialDelta
             p_notes              = $null
+            p_is_backfill        = $isBackfill
         } | ConvertTo-Json -Depth 8 -Compress
 
         try {

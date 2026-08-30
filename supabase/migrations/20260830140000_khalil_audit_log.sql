@@ -42,6 +42,15 @@ create table if not exists public.khalil_audit_events (
   after_snapshot jsonb,
   financial_delta numeric,
   notes text,
+  -- Codex P1، 2026-08-30، جولة ٤: أول تشغيل بعد تسجيل المهمة (أو أي تشغيل
+  -- يلحق تاريخاً كبيراً بعد توقّف طويل) قد يعالج حتى BatchSize=200 حدث
+  -- تاريخي دفعة واحدة، وكل حدث كان يُطلق إشعار تيليجرام فورياً رغم أن موزّع
+  -- outbox يرسل 20 رسالة/دقيقة فقط — فيُحجب إشعارات العمل الحقيقية (دفعات،
+  -- طلبات، إلخ) خلف مئات إشعارات "خليل" القديمة. is_backfill يُسجَّل بالسكربت
+  -- حين يكون عمر الحدث (LogTime) أقدم من نافذة قصيرة (15 دقيقة)، ويقرأه
+  -- الـtrigger أدناه ليتجاوز notify_telegram لهذا الصف فقط — الصف نفسه يبقى
+  -- محفوظاً بكامل تفاصيله في سجل الـAudit، فقط بلا إشعار فوري له.
+  is_backfill boolean not null default false,
   recorded_at timestamptz not null default now()
 );
 
@@ -162,7 +171,8 @@ create or replace function public.record_khalil_audit_event(
   p_before_snapshot jsonb,
   p_after_snapshot jsonb,
   p_financial_delta numeric,
-  p_notes text
+  p_notes text,
+  p_is_backfill boolean default false
 ) returns public.khalil_audit_events
 language plpgsql
 security definer
@@ -189,12 +199,12 @@ begin
     ameen_log_guid, ameen_log_time, ameen_user_guid, ameen_user_login,
     device, operation, operation_type, rec_num, type_guid,
     invoice_number, invoice_guid, before_snapshot, after_snapshot,
-    financial_delta, notes
+    financial_delta, notes, is_backfill
   ) values (
     p_ameen_log_guid, p_ameen_log_time, p_ameen_user_guid, p_ameen_user_login,
     p_device, p_operation, p_operation_type, p_rec_num, p_type_guid,
     p_invoice_number, p_invoice_guid, p_before_snapshot, p_after_snapshot,
-    p_financial_delta, p_notes
+    p_financial_delta, p_notes, coalesce(p_is_backfill, false)
   )
   on conflict (ameen_log_guid) do nothing
   returning * into v_row;
@@ -223,15 +233,15 @@ $$;
 
 revoke all on function public.record_khalil_audit_event(
   uuid, timestamp, uuid, text, text, text, smallint, text, uuid, text, uuid,
-  jsonb, jsonb, numeric, text
+  jsonb, jsonb, numeric, text, boolean
 ) from public;
 grant execute on function public.record_khalil_audit_event(
   uuid, timestamp, uuid, text, text, text, smallint, text, uuid, text, uuid,
-  jsonb, jsonb, numeric, text
+  jsonb, jsonb, numeric, text, boolean
 ) to authenticated, service_role;
 revoke all on function public.record_khalil_audit_event(
   uuid, timestamp, uuid, text, text, text, smallint, text, uuid, text, uuid,
-  jsonb, jsonb, numeric, text
+  jsonb, jsonb, numeric, text, boolean
 ) from anon;
 
 -- ------------------------------------------------------------
@@ -252,6 +262,14 @@ as $$
 declare
   v_message text;
 begin
+  -- Codex P1، 2026-08-30، جولة ٤: صفوف backfill (is_backfill=true، انظر
+  -- تعليق العمود أعلاه) تبقى محفوظة بكامل تفاصيلها في khalil_audit_events —
+  -- فقط لا تُطلِق إشعار تيليجرام فورياً هنا، لتفادي إغراق طابور الإرسال
+  -- (20 رسالة/دقيقة) بمئات الأحداث التاريخية على حساب التنبيهات الحيّة.
+  if new.is_backfill then
+    return new;
+  end if;
+
   v_message := format(
     E'🕵️ حدث خليل\nالعملية: %s\nالفاتورة: %s\nالوقت: %s\nالجهاز: %s%s',
     coalesce(new.operation, 'غير محدد'),
@@ -313,9 +331,19 @@ begin
           insert into public.telegram_outbox (event_type, message, dedupe_key)
           values ('khalil_audit_event', left(v_message, 3900), new.ameen_log_guid::text);
         end if;
-      exception when others then
-        raise warning 'khalil_audit: fallback telegram_outbox insert also failed for ameen_log_guid=%: %',
-          new.ameen_log_guid, sqlerrm;
+      -- Codex P1، 2026-08-30، جولة ٤ (finding a): نفس ثغرة QUERY_CANCELED
+      -- المذكورة أعلاه، لكن هنا داخل محاولة الإدراج الاحتياطي بالـoutbox
+      -- نفسها — لو انتهت مهلة statement_timeout أثناء هذا الإدراج تحديداً
+      -- (وليس أثناء notify_telegram)، exception when others وحدها كانت
+      -- ستدع QUERY_CANCELED يتسرب من هنا فيُسقط نفس المعاملة رغم أن صف
+      -- الـAudit مُدرَج أصلاً. معالجة صريحة تُبقي الأثر الوحيد تحذيراً.
+      exception
+        when query_canceled then
+          raise warning 'khalil_audit: fallback telegram_outbox insert canceled/timed out for ameen_log_guid=%',
+            new.ameen_log_guid;
+        when others then
+          raise warning 'khalil_audit: fallback telegram_outbox insert also failed for ameen_log_guid=%: %',
+            new.ameen_log_guid, sqlerrm;
       end;
     when others then
       raise warning 'khalil_audit: notify_telegram failed for ameen_log_guid=%: %',
@@ -329,9 +357,13 @@ begin
           insert into public.telegram_outbox (event_type, message, dedupe_key)
           values ('khalil_audit_event', left(v_message, 3900), new.ameen_log_guid::text);
         end if;
-      exception when others then
-        raise warning 'khalil_audit: fallback telegram_outbox insert also failed for ameen_log_guid=%: %',
-          new.ameen_log_guid, sqlerrm;
+      exception
+        when query_canceled then
+          raise warning 'khalil_audit: fallback telegram_outbox insert canceled/timed out for ameen_log_guid=%',
+            new.ameen_log_guid;
+        when others then
+          raise warning 'khalil_audit: fallback telegram_outbox insert also failed for ameen_log_guid=%: %',
+            new.ameen_log_guid, sqlerrm;
       end;
   end;
 
@@ -350,3 +382,52 @@ create trigger khalil_audit_events_notify
 -- /rest/v1/rpc/tg_notify_khalil_audit_event (رصدته get_advisors).
 revoke all on function public.tg_notify_khalil_audit_event()
   from public, anon, authenticated, service_role;
+
+-- ------------------------------------------------------------
+-- 7) heartbeat مزامنة خليل — جدول مخصّص، وليس public.inventory_reports
+--    (Codex P1، 2026-08-30، جولة ٤، findings b + d):
+--    b) أي موظف مصادَق (authenticated) كان قادراً على الكتابة مباشرة على
+--       inventory_reports عبر REST بـsource='khalil_audit_sync_heartbeat'
+--       منتحلاً صفة سكربت المزامنة — نفس ثغرة inventory_reports العامة
+--       الموثّقة سلفاً في supabase/ameen-warehouse-stock-reports.sql (وُجدت
+--       أول مرة عبر Codex على PR #40 الجولة ٢). الإصلاح هنا هو نفس النمط:
+--       جدول مخصّص بصلاحية INSERT محصورة بهوية المزامنة الموثوقة فقط.
+--    d) inventory_reports له trigger غير مشروط (tg_notify_inventory_report
+--       في telegram-notifications.sql) يُطلِق إشعار "📦 وصل تقرير الجرد
+--       اليومي" ويحجز dedupe_key = 'inventory:<date>' لمدة 1200 دقيقة عند
+--       أول إدراج بأي تاريخ — أي heartbeat كتب هناك أولاً كان يُسكِت إشعار
+--       الجرد الحقيقي طوال ذلك اليوم. جدول منفصل تماماً يزيل هذا التداخل.
+-- ------------------------------------------------------------
+create table if not exists public.khalil_audit_sync_heartbeat (
+  id bigint generated by default as identity primary key,
+  status text not null default 'ok',
+  found_count integer not null default 0,
+  processed_count integer not null default 0,
+  ran_at timestamptz not null,
+  computer text,
+  created_by uuid not null default auth.uid() references auth.users(id),
+  created_at timestamptz not null default now()
+);
+
+alter table public.khalil_audit_sync_heartbeat enable row level security;
+
+revoke all on public.khalil_audit_sync_heartbeat from public, anon, authenticated, service_role;
+grant select, insert on public.khalil_audit_sync_heartbeat to authenticated;
+
+create policy "owners can read khalil audit heartbeat"
+  on public.khalil_audit_sync_heartbeat for select
+  to authenticated
+  using (public.is_staff());
+
+-- يعيد استخدام نفس دالة هوية المزامنة الموثوقة (UUID ثابت
+-- 9724dbe4-ecb0-49f7-a6b4-12f7f73c68f3) المعرّفة أعلاه لـ
+-- khalil_audit_events نفسه — نفس الهوية التي تكتب أحداث التدقيق تكتب
+-- الـheartbeat أيضاً، فلا حاجة لدالة sync-writer منفصلة.
+create policy "only sync writer can insert khalil audit heartbeat"
+  on public.khalil_audit_sync_heartbeat for insert
+  to authenticated
+  with check (public.khalil_audit_is_sync_writer() and created_by = auth.uid());
+
+-- لا سياسة UPDATE أو DELETE: الـheartbeat سجل تاريخي يُقرأ فقط لغرض
+-- المراقبة (private.monitor_project_tasks يقرأ آخر created_at)، ولا حاجة
+-- لتعديله أو حذفه من أي دور تطبيقي.

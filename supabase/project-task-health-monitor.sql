@@ -7,8 +7,24 @@ create table if not exists private.project_task_monitors (
   task_label text not null,
   report_source text not null unique,
   max_age_minutes integer not null check (max_age_minutes between 5 and 10080),
-  enabled boolean not null default true
+  enabled boolean not null default true,
+  -- Codex P1، 2026-08-30، جولة ٤ (khalil-audit PR #139): heartbeat خليل
+  -- انتقل إلى جدول مخصّص public.khalil_audit_sync_heartbeat بدل
+  -- inventory_reports (انظر migrations/20260830140000_khalil_audit_log.sql
+  -- finding b/d). أضيف هذا العمود ليدعم المراقب قراءة آخر created_at من أي
+  -- جدول مخصّص بلا فلترة source (الجدول نفسه مخصّص لمصدر واحد)، مع إبقاء
+  -- السلوك الافتراضي (inventory_reports + فلترة source) لبقية الصفوف.
+  source_table text not null default 'inventory_reports'
 );
+
+do $$ begin
+  if not exists (
+    select 1 from information_schema.columns
+    where table_schema='private' and table_name='project_task_monitors' and column_name='source_table'
+  ) then
+    alter table private.project_task_monitors add column source_table text not null default 'inventory_reports';
+  end if;
+end $$;
 
 create table if not exists private.project_task_health_state (
   task_key text primary key,
@@ -19,22 +35,24 @@ create table if not exists private.project_task_health_state (
   last_detail text
 );
 
-insert into private.project_task_monitors(task_key,task_label,report_source,max_age_minutes,enabled) values
- ('ameen-main','مزامنة أمين الرئيسية','ameen_sql_agent',10,true),
- ('customer-balances','أرصدة الزبائن','ameen_customer_balances',10,true),
- ('customer-movements','حركات الزبائن','ameen_customer_movements',30,true),
- ('customer-invoices','فواتير الزبائن','ameen_customer_invoices',90,true),
- ('daily-profit','الربح اليومي','ameen_daily_profit',15,true),
- ('price-sync','مزامنة الأسعار','ameen_price_sync_status',30,true),
- ('invoice-series','سلاسل الفواتير','ameen_invoice_series',30,true),
- ('item-details','تفاصيل المواد','ameen_item_details',480,true),
+insert into private.project_task_monitors(task_key,task_label,report_source,max_age_minutes,enabled,source_table) values
+ ('ameen-main','مزامنة أمين الرئيسية','ameen_sql_agent',10,true,'inventory_reports'),
+ ('customer-balances','أرصدة الزبائن','ameen_customer_balances',10,true,'inventory_reports'),
+ ('customer-movements','حركات الزبائن','ameen_customer_movements',30,true,'inventory_reports'),
+ ('customer-invoices','فواتير الزبائن','ameen_customer_invoices',90,true,'inventory_reports'),
+ ('daily-profit','الربح اليومي','ameen_daily_profit',15,true,'inventory_reports'),
+ ('price-sync','مزامنة الأسعار','ameen_price_sync_status',30,true,'inventory_reports'),
+ ('invoice-series','سلاسل الفواتير','ameen_invoice_series',30,true,'inventory_reports'),
+ ('item-details','تفاصيل المواد','ameen_item_details',480,true,'inventory_reports'),
  -- Codex P1، 2026-08-30، جولة ٣: tools/push-khalil-audit-log.ps1 لم يكن له
  -- أي heartbeat — لو توقفت مهمة "TOBACCO Khalil Audit Sync" (معطّلة/محذوفة/
  -- الجهاز مطفأ) لا آلية سابقة كانت تكتشف ذلك. المهمة تعمل كل دقيقتين، هامش
  -- 10 دقائق كافٍ لتفادي إنذار كاذب من تأخير عابر مع كشف التوقف الحقيقي بسرعة.
- ('khalil-audit','مزامنة تدقيق خليل','khalil_audit_sync_heartbeat',10,true)
+ -- جولة ٤: الـheartbeat انتقل لجدول مخصّص khalil_audit_sync_heartbeat
+ -- (source_table)، فلم يعد report_source يُستخدم للفلترة هنا، فقط كتسمية.
+ ('khalil-audit','مزامنة تدقيق خليل','khalil_audit_sync_heartbeat',10,true,'khalil_audit_sync_heartbeat')
 on conflict(task_key) do update set task_label=excluded.task_label,report_source=excluded.report_source,
- max_age_minutes=excluded.max_age_minutes,enabled=excluded.enabled;
+ max_age_minutes=excluded.max_age_minutes,enabled=excluded.enabled,source_table=excluded.source_table;
 
 create or replace function private.monitor_project_tasks()
 returns void language plpgsql security definer
@@ -45,7 +63,15 @@ declare cfg record; last_at timestamptz; age_minutes numeric;
  job_record record; last_job_status text; last_job_at timestamptz;
 begin
  for cfg in select * from private.project_task_monitors where enabled order by task_key loop
-  select max(created_at) into last_at from public.inventory_reports where source=cfg.report_source;
+  -- جولة ٤: source_table='inventory_reports' (الافتراضي) يبقي السلوك
+  -- القديم كما هو (فلترة بعمود source داخل الجدول المشترك). أي قيمة أخرى
+  -- تعني جدولاً مخصّصاً بمصدر واحد فقط (مثل khalil_audit_sync_heartbeat)،
+  -- فلا حاجة لفلترة source هناك أصلاً.
+  if cfg.source_table = 'inventory_reports' then
+   select max(created_at) into last_at from public.inventory_reports where source=cfg.report_source;
+  else
+   execute format('select max(created_at) from public.%I', cfg.source_table) into last_at;
+  end if;
   age_minutes:=case when last_at is null then null else round(extract(epoch from(now()-last_at))/60.0,1) end;
   select is_healthy,last_alert_at into previous_healthy,previous_alert_at
     from private.project_task_health_state where task_key=cfg.task_key;
