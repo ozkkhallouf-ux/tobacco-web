@@ -631,22 +631,64 @@ begin
     'registeredDeviceHash',v_account.registered_device_hash);
 end; $$;
 
+-- Lock decision as a pure, side-effect-free function so every branch can be
+-- asserted case by case (supabase/tests/inventory-auth-lockout-truth-table.sql).
+-- An active lock is never extended: attempts made while locked verify no
+-- credential, so counting them would turn the announced 15 minutes into an
+-- unbounded lockout. An expired lock resets the counter, so waiting really does
+-- restore a full attempt budget instead of re-locking on the next single typo.
+do $$
+begin
+  if to_regtype('public.inventory_auth_lock_state') is null then
+    create type public.inventory_auth_lock_state as (
+      failed_attempts integer,
+      locked_until timestamptz
+    );
+  end if;
+end $$;
+
+create or replace function public.smart_inventory_auth_lock_state(
+  p_failed_attempts integer, p_locked_until timestamptz, p_now timestamptz)
+returns public.inventory_auth_lock_state
+language sql immutable parallel safe set search_path = '' as $$
+  select row(
+    case
+      when p_locked_until is not null and p_locked_until >  p_now then coalesce(p_failed_attempts, 0)
+      when p_locked_until is not null and p_locked_until <= p_now then 1
+      else coalesce(p_failed_attempts, 0) + 1
+    end,
+    case
+      when p_locked_until is not null and p_locked_until >  p_now then p_locked_until
+      when p_locked_until is not null and p_locked_until <= p_now then null
+      when coalesce(p_failed_attempts, 0) + 1 >= 5 then p_now + interval '15 minutes'
+      else null
+    end
+  )::public.inventory_auth_lock_state;
+$$;
+
 create or replace function public.smart_inventory_auth_record(p_key_hash text,p_username text,p_success boolean)
 returns void language plpgsql security definer set search_path = '' as $$
-declare v_fail integer;
+declare v_now timestamptz := now(); v_state public.inventory_auth_lock_state;
 begin
   if current_user not in ('service_role','postgres','supabase_admin') then raise exception 'service_role_only' using errcode='42501'; end if;
   if p_success then
-    update public.inventory_auth_rate_limits set failed_attempts=0,locked_until=null,last_attempt_at=now() where key_hash=p_key_hash;
-    update public.inventory_counter_accounts set failed_attempts=0,locked_until=null,updated_at=now() where username_normalized=p_username;
-  else
-    update public.inventory_auth_rate_limits set failed_attempts=failed_attempts+1,last_attempt_at=now(),
-      locked_until=case when failed_attempts+1>=5 then now()+interval '15 minutes' else locked_until end where key_hash=p_key_hash returning failed_attempts into v_fail;
-    update public.inventory_counter_accounts set failed_attempts=failed_attempts+1,
-      locked_until=case when failed_attempts+1>=5 then now()+interval '15 minutes' else locked_until end,updated_at=now() where username_normalized=p_username;
+    update public.inventory_auth_rate_limits set failed_attempts=0,locked_until=null,last_attempt_at=v_now where key_hash=p_key_hash;
+    update public.inventory_counter_accounts set failed_attempts=0,locked_until=null,updated_at=v_now where username_normalized=p_username;
+    return;
+  end if;
+  select public.smart_inventory_auth_lock_state(r.failed_attempts,r.locked_until,v_now) into v_state
+    from public.inventory_auth_rate_limits r where r.key_hash=p_key_hash for update;
+  if found then
+    update public.inventory_auth_rate_limits set failed_attempts=v_state.failed_attempts,
+      locked_until=v_state.locked_until,last_attempt_at=v_now where key_hash=p_key_hash;
+  end if;
+  select public.smart_inventory_auth_lock_state(a.failed_attempts,a.locked_until,v_now) into v_state
+    from public.inventory_counter_accounts a where a.username_normalized=p_username for update;
+  if found then
+    update public.inventory_counter_accounts set failed_attempts=v_state.failed_attempts,
+      locked_until=v_state.locked_until,updated_at=v_now where username_normalized=p_username;
   end if;
 end; $$;
-
 create or replace function public.smart_inventory_revoke_user_sessions(p_user_id uuid)
 returns void language plpgsql security definer set search_path = '' as $$
 begin
@@ -684,9 +726,11 @@ begin
 end; $$;
 
 revoke all on function public.smart_inventory_auth_preflight(text,text), public.smart_inventory_auth_record(text,text,boolean),
+  public.smart_inventory_auth_lock_state(integer,timestamptz,timestamptz),
   public.smart_inventory_revoke_user_sessions(uuid),public.smart_inventory_has_session_for_service(uuid,uuid),
   public.smart_inventory_enqueue_daily_summary() from public,anon,authenticated;
 grant execute on function public.smart_inventory_auth_preflight(text,text), public.smart_inventory_auth_record(text,text,boolean),
+  public.smart_inventory_auth_lock_state(integer,timestamptz,timestamptz),
   public.smart_inventory_revoke_user_sessions(uuid),public.smart_inventory_has_session_for_service(uuid,uuid),
   public.smart_inventory_enqueue_daily_summary() to service_role;
 
