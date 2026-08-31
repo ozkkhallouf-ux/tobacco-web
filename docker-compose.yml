@@ -1,0 +1,23 @@
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: tobacco-web:dev
+    ports:
+      - "5173:5173"
+    restart: unless-stopped
+    # No secrets/env values are baked into the image or committed here.
+    # If local overrides are ever needed, use an uncommitted
+    # docker-compose.override.yml or an untracked .env file (see .gitignore).
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # serve.mjs only reads and streams files — no writes anywhere. tmpfs is
+    # a fallback for anything Node itself wants to touch (e.g. os.tmpdir()),
+    # kept in-memory only, never a host mount.
+    tmpfs:
+      - /tmp
