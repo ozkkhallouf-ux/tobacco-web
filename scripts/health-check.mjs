@@ -94,6 +94,16 @@ async function checkSiteReachability() {
 export const NON_INCIDENT_CONCLUSIONS = new Set(["success", "skipped"]);
 export const isIncidentConclusion = (conclusion) => !NON_INCIDENT_CONCLUSIONS.has(conclusion);
 
+// ⚠️ "ليست حادثة" ≠ "دليل تعافٍ" — وهذا هو جوهر ملاحظة Codex الأخيرة.
+// pages.yml ("Deploy TOBACCO Web") فيه `check` مشروط بـ
+// github.event.workflow_run.conclusion == 'success'، و`deploy` عليه needs: check.
+// فإذا شُغِّل عبر workflow_run بعد فشل توليد النشرات، تُتخطّى الوظيفتان وينتهي
+// التشغيل بنتيجة skipped **بلا أي نشر فعلي**. لذلك skipped سببٌ وجيه لعدم إطلاق
+// إنذار، لكنه ليس إطلاقاً دليلاً على أن النشر تعافى. الدليل الوحيد هو success:
+// في pages.yml لا توجد على deploy أي شرط عدا needs: check، فنتيجة success على
+// مستوى التشغيل تعني أن deploy نُفِّذ ونجح فعلاً.
+export const isRecoveryConclusion = (conclusion) => conclusion === "success";
+
 // دالة نقية (قابلة للاختبار بلا شبكة): تصنّف قائمة تشغيلات إلى واحدة من ثلاث حالات.
 //
 // ⚠️ إصلاح ملاحظة Codex P1 الثانية على PR #135: القراءة السابقة كانت تأخذ أحدث
@@ -118,8 +128,10 @@ export function classifyLatestRun(runs, { workflowName, key, severity }) {
       unknown: false,
     };
   }
-  // نجاح مؤكَّد (أو skipped المقصود): هذا هو الدليل الإيجابي الوحيد المقبول للإغلاق.
-  return { problems: [], healthy: [key], unknown: false };
+  // نجاح صريح فقط يُغلق حادثة. أما skipped فلا إنذار ولا إغلاق — حالة مجهولة،
+  // لأن تشغيلاً متخطّى لم يَنشر شيئاً ولا يُثبت زوال العطل.
+  if (isRecoveryConclusion(last.conclusion)) return { problems: [], healthy: [key], unknown: false };
+  return { problems: [], healthy: [], unknown: true };
 }
 
 function checkLatestWorkflowRun(workflowName, key, severity) {
@@ -398,7 +410,8 @@ function verifyWorkflowIncidentResolved(key) {
   }
   const lastCompleted = (runs || []).find((r) => r && r.status === "completed");
   if (!lastCompleted) return false;
-  return !isIncidentConclusion(lastCompleted.conclusion);
+  // نجاح صريح فقط — لا يكفي "ليست حادثة" (skipped لم يشغّل شيئاً).
+  return isRecoveryConclusion(lastCompleted.conclusion);
 }
 
 function closeResolvedIssues({ activeKeys, healthyKeys, scanOk }) {

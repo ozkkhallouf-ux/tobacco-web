@@ -21,7 +21,7 @@ const SCRIPT = path.join(repoRoot, 'scripts', 'health-check.mjs');
 const src = await readFile(SCRIPT, 'utf8');
 const {
   classifyLatestRun, selectRecentFailures, decideIssuesToClose,
-  parseWorkflowIncidentKey, isIncidentConclusion, NON_INCIDENT_CONCLUSIONS,
+  parseWorkflowIncidentKey, isIncidentConclusion, isRecoveryConclusion, NON_INCIDENT_CONCLUSIONS,
 } = await import(SCRIPT);
 
 const codeOnly = src.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
@@ -94,6 +94,29 @@ assert.equal(
     { workflowName: 'W', key: 'deploy-failed', severity: 'عالٍ' }).problems.length,
   1,
   'عودة الثغرة: startup_failure كان يُصنَّف سليماً ويغلق عطلاً قائماً.',
+);
+
+// ═══════════ "ليست حادثة" ≠ "دليل تعافٍ" ═══════════
+// pages.yml يتخطّى check وdeploy عند فشل توليد النشرات، فينتهي التشغيل بنتيجة
+// skipped بلا أي نشر — فلا يجوز إغلاق حادثة النشر بناءً عليه.
+assert.equal(isRecoveryConclusion('success'), true, 'النجاح الصريح هو دليل التعافي.');
+assert.equal(isRecoveryConclusion('skipped'), false, 'عودة الثغرة: skipped ليس دليل تعافٍ — لم يُنشر شيء.');
+for (const c of ['failure', 'cancelled', 'startup_failure', 'stale', null]) {
+  assert.equal(isRecoveryConclusion(c), false, `"${c}" ليس دليل تعافٍ.`);
+}
+// وسلوكياً على classifyLatestRun: skipped = لا إنذار ولا إغلاق (مجهول).
+const skipped = classifyLatestRun(
+  [{ status: 'completed', conclusion: 'skipped', url: 'u', createdAt: iso(2) }],
+  { workflowName: 'Deploy TOBACCO Web', key: 'deploy-failed', severity: 'عالٍ' },
+);
+assert.deepEqual(skipped.problems, [], 'skipped يجب ألا يُطلق إنذاراً.');
+assert.deepEqual(skipped.healthy, [], 'عودة الثغرة: skipped كان يُغلق deploy-failed بلا نشر فعلي.');
+assert.equal(skipped.unknown, true, 'skipped حالة مجهولة.');
+// والتحقق الفعلي لحوادث سير العمل يشترط النجاح الصريح أيضاً.
+assert.match(
+  codeOnly.slice(codeOnly.indexOf('function verifyWorkflowIncidentResolved'), codeOnly.indexOf('function closeResolvedIssues')),
+  /return isRecoveryConclusion\(lastCompleted\.conclusion\)/,
+  'التحقق من حادثة سير عمل يجب أن يشترط نجاحاً صريحاً لا مجرد "ليست حادثة".',
 );
 
 // ═══════════ مفتاح تعافي الموقع يطابق مفتاح العطل ═══════════
@@ -180,7 +203,7 @@ assert.equal(parseWorkflowIncidentKey('site-down'), null, 'مفتاح غير خ�
 // والتحقق الفعلي يجب أن يشترط أحدث تشغيل *مكتمل* ناجح
 const verifyBlock = codeOnly.slice(codeOnly.indexOf('function verifyWorkflowIncidentResolved'), codeOnly.indexOf('function closeResolvedIssues'));
 assert.match(verifyBlock, /find\(\(r\) => r && r\.status === "completed"\)/, 'التحقق يجب أن يبحث عن أحدث تشغيل مكتمل.');
-assert.match(verifyBlock, /return !isIncidentConclusion\(lastCompleted\.conclusion\)/, 'التحقق يجب أن يشترط نتيجة غير حادثة.');
+assert.match(verifyBlock, /return isRecoveryConclusion\(lastCompleted\.conclusion\)/, 'التحقق يجب أن يشترط نجاحاً صريحاً.');
 assert.match(verifyBlock, /"--workflow", parsed\.workflowName/, 'التحقق يجب أن يستعلم عن نفس سير العمل.');
 assert.match(verifyBlock, /"--branch", parsed\.branch/, 'التحقق يجب أن يستعلم عن نفس الفرع.');
 
@@ -204,4 +227,4 @@ assert.equal(
   'النموذج المرجعي للسلوك المعطوب يجب أن يُظهر إغلاق الحوادث الثلاث (وإلا فالاختبار لا يرصد شيئاً).',
 );
 
-console.log('check-health-check-logic: OK — مسح بلا قيد فرع وبقائمة سماح، مفاتيح متطابقة، ولا إغلاق حادثة بلا نجاح مرصود.');
+console.log('check-health-check-logic: OK — مسح بلا قيد فرع وبقائمة سماح، مفاتيح متطابقة، وتمييز "ليست حادثة" عن "دليل تعافٍ".');
