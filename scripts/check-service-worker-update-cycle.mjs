@@ -101,6 +101,14 @@ check("خط النشر ما زال يرفع CACHE_NAME أيضاً",
   /Bump service worker cache version/.test(PAGES_YML),
   "اختفت خطوة رفع CACHE_NAME");
 
+const activateHandler = (swCode.match(/self\.addEventListener\("activate"[\s\S]*?\n(?=self\.addEventListener|$)/) || [""])[0];
+check("activate لا يعيد تنقيل أي تبويب مفتوح",
+  !/\.navigate\s*\(/.test(activateHandler) && !/matchAll\s*\(/.test(activateHandler),
+  "عاد التنقيل القسري — سيُعاد تحميل تبويبات المستخدم عند تفعيل SW جديد");
+check("activate ما زال ينظّف الكاش القديم ويأخذ السيطرة",
+  /caches\.delete/.test(activateHandler) && /clients\.claim/.test(activateHandler),
+  "فقد activate تنظيف الكاش أو clients.claim");
+
 check("معالج fetch ما زال network-first مع ارتداد إلى الكاش (سلوك offline)",
   /fetch\(event\.request\)/.test(swCode) && /catch\(\(\)=>caches\.match\(event\.request\)/.test(swCode.replace(/\s+/g, "")),
   "تغيّر معالج fetch — أعد التحقق من سلوك offline");
@@ -207,7 +215,63 @@ async function deployThenReload(options) {
     `الطلبات: ${JSON.stringify(noReload.requested)}`);
 }
 
-// ===== ٤) offline لم ينكسر =====
+// ===== ٤) تبويبان: تفعيل SW جديد لا يمسّ تبويب المستخدم الآخر =====
+// قبل الإصلاح: activate كان ينقّل كل نافذة في النطاق، فإعادة تحميل التبويب A
+// كانت تعيد تحميل التبويب B أيضاً وتمحو إدخالاته غير المحفوظة (قِيس: تنقيل=1).
+{
+  const lab = makeLab({ updateViaCache: "none", precacheReload: true });
+  await new Promise((done) => lab.server.listen(0, "127.0.0.1", done));
+  const base = `http://127.0.0.1:${lab.server.address().port}`;
+  const context = await browser.newContext();
+
+  const A = await context.newPage();
+  A.goto(`${base}/index.html`).catch(() => {});
+  await sleep(5000);
+  const B = await context.newPage();
+  B.goto(`${base}/index.html`).catch(() => {});
+  await sleep(4000);
+
+  // حالة غير محفوظة في تبويب المستخدم B — تختفي لو أُعيد تحميله
+  await B.evaluate(() => {
+    window.__UNSAVED = "إدخال المستخدم غير المحفوظ";
+    document.body.insertAdjacentHTML("beforeend", '<input id="draft" value="مسودة">');
+    document.getElementById("draft").value = "نص كتبه المستخدم";
+  }).catch(() => {});
+
+  let bNavs = 0;
+  B.on("framenavigated", (frame) => { if (frame === B.mainFrame()) bNavs += 1; });
+
+  lab.publish();                       // نشر جديد
+  await sleep(500);
+  await A.reload({ timeout: 20000 }).catch(() => {});   // المستخدم يعيد تحميل A وحده
+  await sleep(8000);
+
+  check("تفعيل SW جديد لا يعيد تحميل التبويب الآخر",
+    bNavs === 0, `أُعيد تنقيل التبويب B ${bNavs} مرة`);
+
+  const survived = await B.evaluate(() => ({
+    unsaved: window.__UNSAVED ?? null,
+    draft: document.getElementById("draft")?.value ?? null
+  })).catch(() => ({ unsaved: null, draft: null }));
+  check("حالة DOM والإدخال غير المحفوظ في التبويب الآخر لم تضع",
+    survived.unsaved === "إدخال المستخدم غير المحفوظ" && survived.draft === "نص كتبه المستخدم",
+    `القيم بعد التفعيل: ${JSON.stringify(survived)}`);
+
+  // إعادة تحميل يدوية من المستخدم ⇒ يحصل على النسخة الجديدة
+  const mark = lab.hits.length;
+  await B.reload({ waitUntil: "load", timeout: 20000 }).catch(() => {});
+  await sleep(4000);
+  const afterManual = lab.hits.slice(mark);
+  const versionB = await readVersion(B);
+  check("بعد إعادة تحميل يدوية للتبويب الآخر يحصل على النسخة الجديدة",
+    versionB === "v2",
+    `النسخة بعد إعادة التحميل: ${versionB} — الطلبات: ${JSON.stringify(afterManual)}`);
+
+  await context.close();
+  lab.server.close();
+}
+
+// ===== ٥) offline لم ينكسر =====
 {
   const lab = makeLab({ updateViaCache: "none", precacheReload: true });
   await new Promise((done) => lab.server.listen(0, "127.0.0.1", done));
