@@ -126,8 +126,12 @@ const auditStart = migCode.indexOf('create or replace function public.telegram_d
 assert.ok(auditStart > 0, `${MIGRATION}: دالة الرصد مفقودة`);
 const auditBody = migCode.slice(auditStart);
 assert.match(
-  auditBody, /\nlanguage sql\nstable\n/,
+  auditBody, /\nlanguage plpgsql\nstable\n/,
   `${MIGRATION}: دالة الرصد يجب أن تبقى "stable" — هي الضمانة التي تمنع الكتابة`,
+);
+assert.doesNotMatch(
+  auditBody, /\nvolatile\n/,
+  `${MIGRATION}: دالة الرصد صارت volatile — ضمانة منع الكتابة سقطت`,
 );
 for (const write of [/\binsert\s+into\b/i, /\bupdate\s+public\./i, /\bdelete\s+from\b/i]) {
   assert.doesNotMatch(
@@ -174,6 +178,69 @@ assert.doesNotMatch(
   tests, /from public\.telegram_outbox|from net\._http_response/,
   `${TESTS}: الاختبار يقرأ بيانات إنتاج — يجب أن يبني حالاته في pg_temp`,
 );
+
+// ---------------------------------------------------------------------------
+// 9) الصلاحيات — ملاحظة Codex P1 (2026-08-31). الدالة security definer تتجاوز
+//    RLS، وdedupe_key يحمل بيانات زبائن حرفياً ('creditover:'||name و
+//    'collection:<uuid>:<date>'). المرحلة أ أداة خدمة داخلية بحتة.
+// ---------------------------------------------------------------------------
+for (const [name, code] of [[REFERENCE, refCode], [MIGRATION, migCode]]) {
+  assert.match(
+    code,
+    /revoke all on function public\.telegram_delivery_audit\(interval\) from public, anon, authenticated;/,
+    `${name}: التنفيذ يجب أن يُسحب من public وanon وauthenticated جميعاً`,
+  );
+  assert.match(
+    code,
+    /grant execute on function public\.telegram_delivery_audit\(interval\) to service_role;/,
+    `${name}: التنفيذ يُمنح لـservice_role وحده`,
+  );
+  assert.doesNotMatch(
+    code,
+    /grant execute on function public\.telegram_delivery_audit\(interval\) to [^;]*authenticated/,
+    `${name}: عاد منح التنفيذ لـauthenticated — هذه هي ثغرة Codex P1 بعينها`,
+  );
+  // الحماية لا تعتمد على GRANT وحده.
+  assert.match(
+    code,
+    /if v_jwt_role is not null and v_jwt_role <> 'service_role' then\n\s*raise exception 'telegram_delivery_audit: unauthorized' using errcode = '42501';/,
+    `${name}: الحارس الداخلي مفقود أو تغيّر — الحماية يجب ألا تعتمد على GRANT وحده`,
+  );
+  // pg_temp أخيراً: بدونها يختطف جدول مؤقت القراءة داخل security definer.
+  assert.match(
+    code,
+    /set search_path to 'public', 'net', 'pg_temp'/,
+    `${name}: search_path لدالة الرصد يجب أن يذكر pg_temp أخيراً (خطر object shadowing)`,
+  );
+  // is_owner() لا تصلح هنا: تقرأ JWT المستدعي، وservice_role/cron بلا JWT.
+  assert.doesNotMatch(
+    code,
+    /telegram_delivery_audit[\s\S]{0,1200}is_owner\(\)/,
+    `${name}: is_owner() تحجب service_role (لا JWT له) — ليست الحارس الصحيح هنا`,
+  );
+}
+
+// اختبارات الصلاحيات موجودة وتغطي السيناريوهات الأربعة + المالك
+for (const [needle, why] of [
+  ["أ1: بلا JWT", 'المسار المصرَّح له (cron/service tooling)'],
+  ["أ2: service_role", 'المستدعي المقصود'],
+  ["أ3: موظف مسجَّل عادي ⇒ مرفوض", 'جوهر ملاحظة P1'],
+  ["أ4: anon ⇒ مرفوض", 'anon'],
+  ["أ5: حتى المالك مرفوض", 'لا استثناء بشري في المرحلة أ'],
+  ["ش1: بلا ذكر pg_temp يقع الاختطاف", 'إثبات الـshadowing بالاتجاه السالب'],
+  ["ش2: بذكر pg_temp أخيراً يفوز المخطط الحقيقي", 'إثباته بالاتجاه الموجب'],
+]) {
+  assert.ok(tests.includes(needle), `${TESTS}: تغطية أمنية ناقصة — ${why}`);
+}
+
+// حارس الاختبار نسخة طبق الأصل من المشحون، وإلا اختبرنا غير ما يعمل
+const guardOf = (t) => {
+  const i = t.indexOf('v_jwt_role text :=');
+  const j = t.indexOf("errcode = '42501';", i);
+  assert.ok(i > 0 && j > i, 'الحارس غير موجود');
+  return t.slice(i, j).replace(/\s+/g, ' ').trim();
+};
+assert.equal(guardOf(codeOnly(tests)), guardOf(migCode), `${TESTS}: حارس الاختبار انحرف عن المشحون`);
 
 console.log(
   `Telegram delivery observability checks passed (تعريف مُرسِل واحد، المعرّف مُلتقَط، `

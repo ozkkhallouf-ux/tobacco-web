@@ -107,11 +107,39 @@ returns table (
   delivery_class  text,
   age             interval
 )
-language sql
+language plpgsql
 stable
 security definer
-set search_path to 'public', 'net'
+-- pg_temp مذكورة صراحةً وأخيراً. بدونها تُبحث أولاً ضمنياً، فيستطيع جدول
+-- مؤقت باسم telegram_outbox أن يختطف القراءة داخل security definer. مثبت
+-- بالقياس (2026-08-31): بلا ذكرها عاد المِجَسّ بـ"TEMP_SHADOWED_THE_REAL_TABLE"،
+-- ومع ذكرها أخيراً عاد بـ"PUBLIC_WON". نفس نمط is_owner()/is_staff() في المستودع.
+set search_path to 'public', 'net', 'pg_temp'
 as $$
+declare
+  v_jwt_role text := nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'role';
+begin
+  -- ملاحظة Codex P1 (2026-08-31): كانت الدالة ممنوحة لـauthenticated كاملاً.
+  -- وهي security definer تتجاوز RLS الخاص بـtelegram_outbox، فكان أي موظف
+  -- مسجَّل الدخول يقرأ تاريخ التسليم كله ومعه dedupe_key — وتلك المفاتيح تحمل
+  -- بيانات زبائن حرفياً: 'creditover:' || r.name و'creditnear:' || r.name في
+  -- هذا الملف نفسه، و'collection:<customer_uuid>:<date>' كما هي في الإنتاج.
+  --
+  -- المرحلة أ أداة خدمة داخلية بحتة: لا واجهة تستدعيها ولا مستخدم بشري
+  -- يحتاجها — فلا استثناء حتى للمالك. كلما ضاقت فتحة القراءة كان أفضل.
+  --
+  -- لماذا ليست is_owner(): تحققتُ من تعريفها — تقرأ JWT المستدعي
+  -- (auth.jwt() -> app_metadata ->> role). ومستدعي service_role أو cron أو
+  -- اتصال مباشر لا يحمل JWT إطلاقاً، فتُرجع false وتحجب المستدعي الوحيد
+  -- المقصود. الحارس هنا يتبع نمط notify_telegram نفسه في هذا الملف.
+  --
+  -- والحماية لا تعتمد على GRANT وحده: هذا الحارس يرفض حتى لو مُنح التنفيذ
+  -- بالخطأ لاحقاً.
+  if v_jwt_role is not null and v_jwt_role <> 'service_role' then
+    raise exception 'telegram_delivery_audit: unauthorized' using errcode = '42501';
+  end if;
+
+  return query
   select
     o.id,
     o.event_type,
@@ -142,7 +170,7 @@ as $$
   left join net._http_response r on r.id = o.net_request_id
   where o.created_at > now() - p_since
   order by o.created_at desc;
-$$;
+end $$;
 
-revoke all on function public.telegram_delivery_audit(interval) from public, anon;
-grant execute on function public.telegram_delivery_audit(interval) to authenticated, service_role;
+revoke all on function public.telegram_delivery_audit(interval) from public, anon, authenticated;
+grant execute on function public.telegram_delivery_audit(interval) to service_role;

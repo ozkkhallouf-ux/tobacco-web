@@ -111,3 +111,83 @@ end $$;
 --   'ok_false' مع HTTP 200 مصنَّف هنا احتياطاً، لكنه **غير مثبت** من Telegram
 --   Bot API — الشائع أن تيليغرام يعيد 4xx لأخطاء كهذه. يلزم مثال موثق أو
 --   اختبار آمن قبل اعتباره مساراً طبيعياً. القياس في المرحلة أ هو ما سيحسمه.
+
+-- ============================================================================
+-- اختبارات الصلاحيات — ملاحظة Codex P1 (2026-08-31).
+--
+-- كانت telegram_delivery_audit ممنوحة لـauthenticated كاملاً، وهي
+-- security definer تتجاوز RLS الخاص بـtelegram_outbox — فأي موظف مسجَّل كان
+-- يقرأ تاريخ التسليم كله ومعه dedupe_key. وتلك المفاتيح تحمل بيانات زبائن
+-- حرفياً: 'creditover:' || r.name و'creditnear:' || r.name في
+-- telegram-notifications.sql، و'collection:<customer_uuid>:<date>' كما هي في
+-- الإنتاج.
+--
+-- الحارس هنا نسخة طبق الأصل من المشحون. يفرض
+-- scripts/check-telegram-delivery-observability.mjs تطابقهما.
+-- ============================================================================
+create function pg_temp.guard_probe() returns text
+language plpgsql stable security definer
+set search_path to 'public', 'net', 'pg_temp'
+as $$
+declare
+  v_jwt_role text := nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'role';
+begin
+  if v_jwt_role is not null and v_jwt_role <> 'service_role' then
+    raise exception 'telegram_delivery_audit: unauthorized' using errcode = '42501';
+  end if;
+  return 'ALLOWED';
+end $$;
+
+create function pg_temp.try_as(p_claims text) returns text language plpgsql as $$
+begin
+  perform set_config('request.jwt.claims', p_claims, true);
+  begin
+    return pg_temp.guard_probe();
+  exception when insufficient_privilege then
+    return 'DENIED_42501';
+  end;
+end $$;
+
+do $$
+declare a int := 0;
+begin
+  assert pg_temp.try_as('') = 'ALLOWED',
+    'أ1: بلا JWT (cron / اتصال مباشر / أدوات الخدمة) ⇒ مسموح'; a:=a+1;
+  assert pg_temp.try_as('{"role":"service_role"}') = 'ALLOWED',
+    'أ2: service_role ⇒ مسموح — وهو المستدعي المقصود الوحيد'; a:=a+1;
+  assert pg_temp.try_as('{"role":"authenticated"}') = 'DENIED_42501',
+    'أ3: موظف مسجَّل عادي ⇒ مرفوض (جوهر ملاحظة Codex P1)'; a:=a+1;
+  assert pg_temp.try_as('{"role":"anon"}') = 'DENIED_42501',
+    'أ4: anon ⇒ مرفوض'; a:=a+1;
+  assert pg_temp.try_as('{"role":"authenticated","app_metadata":{"role":"owner"}}') = 'DENIED_42501',
+    'أ5: حتى المالك مرفوض — لا واجهة بشرية تستدعيها في المرحلة أ'; a:=a+1;
+  assert a = 5, format('تأكيدات الصلاحيات %s ≠ 5', a);
+  raise notice 'authorization guard: % تأكيداً — كلها نجحت', a;
+end $$;
+
+-- ---------------------------------------------------------------------------
+-- خطر object shadowing داخل security definer — مثبت بالقياس لا بالتوثيق.
+-- pg_temp تُبحث أولاً ضمنياً إن لم تُذكر، فيستطيع جدول مؤقت باسم جدول حقيقي
+-- أن يختطف القراءة. ذكرها *أخيراً* يعيد الأولوية للمخطط الحقيقي.
+-- ---------------------------------------------------------------------------
+create temporary table telegram_outbox (marker text);
+insert into telegram_outbox values ('TEMP_SHADOWED_THE_REAL_TABLE');
+
+create function pg_temp.sp_without() returns text
+language plpgsql stable security definer set search_path to 'public', 'net'
+as $$ begin return (select marker from telegram_outbox limit 1);
+      exception when undefined_column then return 'PUBLIC_WON'; end $$;
+
+create function pg_temp.sp_with_last() returns text
+language plpgsql stable security definer set search_path to 'public', 'net', 'pg_temp'
+as $$ begin return (select marker from telegram_outbox limit 1);
+      exception when undefined_column then return 'PUBLIC_WON'; end $$;
+
+do $$
+begin
+  assert pg_temp.sp_without() = 'TEMP_SHADOWED_THE_REAL_TABLE',
+    'ش1: بلا ذكر pg_temp يقع الاختطاف فعلاً — هذا سبب ذكرها أخيراً';
+  assert pg_temp.sp_with_last() = 'PUBLIC_WON',
+    'ش2: بذكر pg_temp أخيراً يفوز المخطط الحقيقي';
+  raise notice 'search_path shadowing: مثبت بالاتجاهين ✓';
+end $$;
