@@ -54,6 +54,39 @@ assert.equal(newItem.rows.find((row) => row.item_key === '3').average_cost, 4);
 assert.equal(new Set(newItem.rows.map((row) => row.item_key)).size, newItem.rows.length);
 assert.throws(() => build({ currentSnapshot: [baseRow('1'), baseRow('1')] }), /duplicate current snapshot/);
 
+// --- item_guid vs match_key: item_costs بلا GUID أمين حقيقي (push-item-costs.ps1 لا يفبرك GUID) ---
+
+// مادة تكلفة بلا item_guid وبلا بيع مطابق: match_key يُستخدم للتجميع فقط، ولا يُكتب أبداً في item_guid.
+const costOnlyNoGuid = build({
+  itemCosts: [{ match_key: 'CODE-99', item_guid: null, item_name: 'مادة بلا GUID', avg_cost: 7, currency: 'USD', updated_at: generatedAt }],
+});
+const costOnlyRow = costOnlyNoGuid.rows.find((row) => row.item_key === 'CODE-99');
+assert.ok(costOnlyRow, 'match_key يجب أن يُستخدم كمفتاح احتياطي عند غياب item_guid');
+assert.equal(costOnlyRow.item_guid, null, 'item_guid يجب أن يبقى null إن لم يوجد GUID أمين حقيقي — لا يُكتب match_key فيه');
+assert.equal(costOnlyRow.average_cost, 7);
+
+// مادة تكلفة بلا item_guid لكن يوجد بيع بنفس المفتاح: sale.item_key دائماً GUID حقيقي فتُقبل كـitem_guid.
+const costWithMatchingSale = build({
+  itemCosts: [{ match_key: 'GUID-FROM-SALE', item_guid: null, item_name: 'مادة ببيع مطابق', avg_cost: 3, currency: 'USD', updated_at: generatedAt }],
+  salesLineItems: [sale('GUID-FROM-SALE', '1')],
+});
+const withSaleRow = costWithMatchingSale.rows.find((row) => row.item_key === 'GUID-FROM-SALE');
+assert.equal(withSaleRow.item_guid, 'GUID-FROM-SALE', 'وجود بيع لنفس المفتاح يعني أنه GUID حقيقي (push-sales-line-items.ps1 يرسل MatGUID فقط)');
+
+// مادة تكلفة تحمل item_guid حقيقياً: يُكتب مباشرة بصرف النظر عن match_key.
+const costWithRealGuid = build({
+  itemCosts: [{ match_key: 'CODE-77', item_guid: 'real-guid-123', item_name: 'مادة بGUID حقيقي', avg_cost: 5, currency: 'USD', updated_at: generatedAt }],
+});
+const realGuidRow = costWithRealGuid.rows.find((row) => row.item_key === 'real-guid-123');
+assert.ok(realGuidRow, 'item_guid الحقيقي في item_costs يجب أن يُستخدم كمفتاح تجميع مباشرة');
+assert.equal(realGuidRow.item_guid, 'real-guid-123');
+
+// item_costs بلا match_key وبلا item_guid يجب أن يُسقط الـsnapshot بخطأ واضح (لا مفتاح صالح إطلاقاً).
+assert.throws(
+  () => build({ itemCosts: [{ item_guid: null, item_name: 'بلا أي مفتاح', avg_cost: 1, updated_at: generatedAt }] }),
+  /item_costs\.match_key is required/,
+);
+
 const [wrapper, producer, registration, sql] = await Promise.all([
   readFile(path.join(repoRoot, 'tools', 'push-purchase-item-snapshot.ps1'), 'utf8'),
   readFile(path.join(repoRoot, 'scripts', 'refresh-ameen-item-snapshot.mjs'), 'utf8'),
@@ -71,6 +104,9 @@ assert.match(producer, /'Accept-Profile': PUBLIC_PROFILE/);
 assert.match(producer, /'Content-Profile': PUBLIC_PROFILE/);
 assert.match(producer, /readAll\('ameen_item_snapshot'/);
 assert.match(producer, /readAll\('item_costs'/);
+// buildItemSnapshot يتطلب match_key كمفتاح احتياطي لمواد item_costs بلا GUID حقيقي — لو سقط من الـselect
+// هنا فسيسقط تحديث الـsnapshot بالكامل بخطأ "item_costs.match_key is required" عند أول مادة بلا GUID.
+assert.match(producer, /readAll\('item_costs',\s*'[^']*\bmatch_key\b[^']*'/);
 assert.match(producer, /readAll\('sales_line_items'/);
 assert.match(producer, /publicRestHeaders\(headers, \{ write: true \}\)/);
 assert.doesNotMatch(producer, /Accept-Profile['"]?\s*:\s*['"]api['"]/i);

@@ -46,6 +46,8 @@ const required = [
   "tools/mac-archive-bridge/server.mjs",
   "tools/mac-archive-bridge/install-launch-agent.sh",
   "scripts/check-mac-archive-bridge.mjs",
+  "scripts/check-local-site-server.mjs",
+  "scripts/check-invoice-document-integrity.mjs",
   "supabase/functions/financial-assistant/index.ts",
   "supabase/functions/inventory-auth/index.ts",
   "supabase/smart-inventory.sql",
@@ -53,7 +55,9 @@ const required = [
   "scripts/check-smart-inventory.mjs",
   "supabase/ameen-account-balance-reports.sql",
   "tools/push-ameen-account-balances.ps1",
-  "tools/register-account-balances-task.ps1"
+  "tools/register-account-balances-task.ps1",
+  "supabase/project-task-health-monitor.sql",
+  "scripts/check-project-task-monitors.mjs"
 ];
 
 let failed = false;
@@ -1012,22 +1016,24 @@ for (const contract of [
   }
 }
 
-// نموذج الفاتورة يجب أن يبقي التركيز أثناء كتابة اسم الزبون، وأن يستخدم
-// أرقاماً إنجليزية في حقول الكمية والسعر مهما كانت لغة عرض ويندوز.
-if (/state\.invCustomer = e\.currentTarget\.value;\s*render\(\);/.test(appJs)) {
-  console.error("Invoice customer input must not rerender and lose focus after every character.");
+// نموذج فاتورة المبيعات (route: sales) يجب أن يبقي التركيز أثناء كتابة اسم الزبون،
+// وأن يستخدم أرقاماً إنجليزية في حقول الكمية والسعر مهما كانت لغة عرض ويندوز.
+// (كان هذا العقد مربوطاً بصفحة invoice القديمة التي حُذفت في 27bfbe2؛ نُقل إلى
+//  الصفحة الحيّة التي ورثت نفس السلوك بدل أن تضيع التغطية.)
+if (/state\.salesCustomer = e\.currentTarget\.value;\s*render\(\);/.test(appJs)) {
+  console.error("Sales invoice customer input must not rerender and lose focus after every character.");
   failed = true;
 }
 for (const field of ["qty", "price"]) {
-  const invoiceInput = new RegExp(`data-inv-field="${field}"[^>]*type="text"[^>]*inputmode="decimal"[^>]*dir="ltr"`);
-  if (!invoiceInput.test(appJs)) {
-    console.error(`Invoice ${field} input must use English decimal text entry.`);
+  const salesInput = new RegExp(`data-sales-field="${field}"[^>]*data-sales-num[^>]*type="text"[^>]*inputmode="decimal"[^>]*dir="ltr"`);
+  if (!salesInput.test(appJs)) {
+    console.error(`Sales invoice ${field} input must use English decimal text entry.`);
     failed = true;
   }
 }
 const numberNormalizer = readFileSync("src/number-normalizer.js", "utf8");
-if (!numberNormalizer.includes("input[data-inv-field='qty']") || !numberNormalizer.includes("input[data-inv-field='price']")) {
-  console.error("Invoice numeric fields must be covered by the English-number normalizer.");
+if (!numberNormalizer.includes("input[data-sales-num]")) {
+  console.error("Sales invoice numeric fields must be covered by the English-number normalizer.");
   failed = true;
 }
 
@@ -1664,7 +1670,7 @@ for (const contract of [
 
 // عقد SQL — مراجعة الجولة الخامسة (موانع دمج): unit_cost/currency/settlement_value
 // محجوبة عن غير المالك عبر RLS owner-only + RPC مقنَّعة، مطابقة التكلفة بـitem_guid
-// لا بالاسم، رفض item_key فارغ، تحقق عدد السطور المُدرجة، وسباق idempotency عبر
+// الحقيقي ثم match_key لا بالاسم وحده، رفض item_key فارغ، تحقق عدد السطور المُدرجة، وسباق idempotency عبر
 // ON CONFLICT ذرّي بدل SELECT ثم INSERT منفصلين.
 {
   const invReconSql = readFileSync("supabase/inventory-reconciliation-table.sql", "utf8");
@@ -1687,8 +1693,12 @@ for (const contract of [
     console.error("inventory_recon_lines_select must no longer be using(true) — cost columns (unit_cost/currency/settlement_value) must be owner-only, masked for everyone else via inventory_recon_lines_for_session().");
     failed = true;
   }
-  if (!/where ic1\.item_guid = coalesce\(it ->> 'itemGuid', it ->> 'item_guid'\)/.test(invReconSql)) {
-    console.error("inventory_recon_create_session_with_lines must match item_costs by item_guid (matching push-item-costs.ps1's GUID/code/name priority), not by item_name alone with LIMIT 1.");
+  // بعد ترحيل 20260827110325 صار item_costs.item_guid يحمل GUID الأمين الحقيقي فقط،
+  // وانتقل مفتاح المطابقة العام (GUID/كود/اسم) إلى match_key. المسار المباشر يبقى هنا
+  // على item_guid؛ أما عقد مسارات الرجوع بالكود/الاسم على match_key وعدم انحراف
+  // الترحيل عن المخطط فيفرضهما scripts/check-inventory-recon-cost-fallbacks.mjs.
+  if (!/where ic1\.item_guid = nullif\(trim\(coalesce\(it ->> 'itemGuid', it ->> 'item_guid', ''\)\), ''\)/.test(invReconSql)) {
+    console.error("inventory_recon_create_session_with_lines must match item_costs by the true-GUID column item_guid first (then fall back to match_key), not by item_name alone with LIMIT 1.");
     failed = true;
   }
 

@@ -119,7 +119,7 @@ comment on constraint inventory_recon_lines_item_name_check on inventory_recon_l
 comment on constraint inventory_recon_lines_actual_qty_check on inventory_recon_lines is 'يمنع كمية فعلية سالبة — دفاع مستوى قاعدة بيانات مستقل عن أي تحقق في الواجهة';
 comment on constraint inventory_recon_lines_unit_cost_check on inventory_recon_lines is 'يمنع تكلفة وحدة سالبة لنفس السبب';
 comment on constraint inventory_recon_lines_currency_check on inventory_recon_lines is 'قائمة العملات المسموحة USD/SYP فقط أو NULL إن لم تُعرف تكلفة موثوقة للصنف بعد — لا افتراض ضمني لعملة بلا تكلفة فعلية';
-comment on column inventory_recon_lines.unit_cost is 'تكلفة الوحدة من item_costs عبر item_guid فقط (لا مطابقة اسم) — تبقى NULL إن لم توجد تكلفة موثوقة، ولا تُصفَّر أبداً كي لا يظهر settlement_value=0 مضلِّلاً';
+comment on column inventory_recon_lines.unit_cost is 'تكلفة الوحدة من item_costs عبر item_guid ثم match_key ثم item_name — تبقى NULL إن لم توجد تكلفة موثوقة، ولا تُصفَّر أبداً كي لا يظهر settlement_value=0 مضلِّلاً';
 comment on column inventory_recon_lines.settlement_value is 'قيمة تقديرية = (الفعلي - النظام) × التكلفة — تبقى NULL صراحة إن لم تُجرَد الكمية الفعلية بعد أو لم تُعرف تكلفة الصنف، بدل صفر مضلِّل';
 
 -- session_id/line_id بلا foreign key عمداً: سجل التدقيق يجب أن يبقى دائماً
@@ -825,11 +825,33 @@ begin
     return v_existing;
   end if;
 
-  -- مطابقة item_costs.item_guid تتبع نفس أولوية المفتاح المستعملة عند
-  -- كتابته في tools/push-item-costs.ps1 (GUID فالكود فالاسم أياً وُجد أولاً)،
-  -- لأن العمود item_guid هناك يخزّن فعلياً أياً من الثلاثة بحسب توفره —
-  -- مطابقة بالاسم وحده كما كانت سابقاً كانت تفوّت أي صنف كُتبت تكلفته بـGUID
-  -- أو كود مختلفَي الصياغة عن اسمه في تقرير المخزون.
+  -- مطابقة تكلفة item_costs تتبع نفس أولوية المفتاح المستعملة عند كتابته في
+  -- tools/push-item-costs.ps1، لكن بعد فصل العمودين في ترحيل
+  -- 20260827110325_fix_item_costs_true_guid.sql صار لكل عمود دلالة مختلفة:
+  --   * item_costs.item_guid  = GUID الأمين الحقيقي فقط، أو NULL.
+  --   * item_costs.match_key  = مفتاح منع التكرار (GUID أو كود أو اسم)، non-null دائماً.
+  --
+  -- ⚠️ إصلاح ملاحظة Codex P1 على PR #126: قبل هذا الإصلاح بقي الرجوعان بالكود
+  -- وبالاسم يستعلمان العمود item_guid، وهو عمود لا يحوي كوداً ولا اسماً إطلاقاً
+  -- بعد الترحيل — فكان كل صنف تعذّر على push-item-costs.ps1 إيجاد GUID أمين
+  -- حقيقي له (item_guid = NULL) يسقط من كل مسارات المطابقة بصمت، فيأخذ
+  -- unit_cost وcurrency فارغَين وتفسد قيمة التسوية دون أي خطأ ظاهر.
+  --
+  -- الترتيب الصحيح بعد الفصل:
+  --   1) item_guid = GUID الصنف            (المسار المباشر الدقيق)
+  --   2) match_key = GUID الصنف            (صفوف كُتبت قبل تشغيل push التالي،
+  --      فالـGUID فيها ما يزال في match_key وitem_guid لم يُملأ بعد)
+  --   3) match_key = رقم/كود الصنف         (رجوع بالكود)
+  --   4) item_name = اسم الصنف             (رجوع بالاسم على العمود المخصَّص،
+  --      غير حسّاس لحالة الأحرف والفراغات)
+  --
+  -- ⚠️ إصلاح ملاحظة Codex P1 الثانية على PR #126: الرجوع بالاسم يجب أن يكون على
+  -- العمود المخصَّص item_name لا على match_key. السبب أن match_key يحمل كود الأمين
+  -- حين يتوفّر كود بلا GUID، والكود يأتي من عمود Code/MaterialCode/ItemCode/Barcode
+  -- في view التكلفة، بينما تقرير المخزون يرسل itemNumber من عمود mt.Number المختلف
+  -- (tools/push-ameen-warehouse-stock.ps1) — فلا المسار (3) ولا رجوع بالاسم على
+  -- match_key يلتقط تلك الصفوف. أما item_name فيكتبه push-item-costs.ps1 لكل صف
+  -- ويضمن عدم فراغه (يُصفّي الأسماء الفارغة في مصدره)، فهو مفتاح الرجوع المتوافق.
   insert into public.inventory_recon_lines
     (session_id, item_key, item_number, item_name, unit_name, system_qty, actual_qty, unit_cost, currency, reason)
   select
@@ -855,27 +877,36 @@ begin
   left join lateral (
     select ic1.avg_cost, ic1.currency
     from public.item_costs ic1
-    where ic1.item_guid = coalesce(it ->> 'itemGuid', it ->> 'item_guid')
+    where ic1.item_guid = nullif(trim(coalesce(it ->> 'itemGuid', it ->> 'item_guid', '')), '')
     limit 1
   ) ic_by_guid on true
   left join lateral (
     select ic2.avg_cost, ic2.currency
     from public.item_costs ic2
     where ic_by_guid.avg_cost is null
-      and ic2.item_guid = coalesce(it ->> 'itemNumber', it ->> 'item_number')
+      and ic2.match_key = nullif(trim(coalesce(it ->> 'itemGuid', it ->> 'item_guid', '')), '')
     limit 1
-  ) ic_by_number on true
+  ) ic_by_legacy_guid on true
   left join lateral (
     select ic3.avg_cost, ic3.currency
     from public.item_costs ic3
     where ic_by_guid.avg_cost is null
+      and ic_by_legacy_guid.avg_cost is null
+      and ic3.match_key = nullif(trim(coalesce(it ->> 'itemNumber', it ->> 'item_number', '')), '')
+    limit 1
+  ) ic_by_number on true
+  left join lateral (
+    select ic4.avg_cost, ic4.currency
+    from public.item_costs ic4
+    where ic_by_guid.avg_cost is null
+      and ic_by_legacy_guid.avg_cost is null
       and ic_by_number.avg_cost is null
-      and lower(trim(ic3.item_guid)) = lower(trim(coalesce(it ->> 'itemName', it ->> 'item_name', '')))
+      and lower(trim(ic4.item_name)) = lower(nullif(trim(coalesce(it ->> 'itemName', it ->> 'item_name', '')), ''))
     limit 1
   ) ic_by_name on true
   left join lateral (
-    select coalesce(ic_by_guid.avg_cost, ic_by_number.avg_cost, ic_by_name.avg_cost) as avg_cost,
-           coalesce(ic_by_guid.currency, ic_by_number.currency, ic_by_name.currency) as currency
+    select coalesce(ic_by_guid.avg_cost, ic_by_legacy_guid.avg_cost, ic_by_number.avg_cost, ic_by_name.avg_cost) as avg_cost,
+           coalesce(ic_by_guid.currency, ic_by_legacy_guid.currency, ic_by_number.currency, ic_by_name.currency) as currency
   ) ic on true;
 
   -- تحقق ذرّي أن كل مفتاح صنف فريد طلبه العميل فعلاً أُدرج كسطر — الـjoin

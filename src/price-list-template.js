@@ -127,14 +127,21 @@
       break-inside:avoid; -webkit-column-break-inside:avoid; margin-bottom:5px;
       border:1px solid var(--line); border-radius:3px; overflow:hidden;
     }
+    /* اسم مجموعة طويل كان يزيح الشارة خارج الرأس أو يقصّها: الاسم يلتفّ داخل
+       مساحته (min-width:0 شرط ليعمل الالتفاف داخل flex) والشارة تبقى بعرضها.
+       منقول من PR #115 — قواعد التفاف الاسم وحدها، وهي مشكلة مستقلة عن فواصل
+       الصفحات التي عالجها هذا الفرع من جذرها. */
     .ozk-price-list .price-list-group-header {
       background:var(--surface-strong); border-bottom:1px solid var(--line); padding:3.5px 9px;
       font-size:11px; font-weight:900; color:#f2c55c; display:flex; justify-content:space-between;
-      align-items:center; letter-spacing:.3px;
+      align-items:center; letter-spacing:.3px; gap:6px;
+    }
+    .ozk-price-list .price-list-group-name {
+      min-width:0; overflow-wrap:break-word; word-break:break-word;
     }
     .ozk-price-list .price-list-group-count {
-      font-size:8.5px; background:rgba(255,255,255,.12); color:#f4d184;
-      border-radius:8px; padding:1px 6px; font-weight:700;
+      flex:0 0 auto; font-size:8.5px; background:rgba(255,255,255,.12); color:#f4d184;
+      border-radius:8px; padding:1px 6px; font-weight:700; white-space:nowrap;
     }
     .ozk-price-list table { width:100%; border-collapse:collapse; table-layout:fixed; }
     .ozk-price-list td { padding:2.5px 8px; border-bottom:1px solid var(--line); font-size:10px; }
@@ -435,7 +442,7 @@
     return `
       <div class="price-list-group">
         <div class="price-list-group-header">
-          <span>${escapeHtml(group?.name)}</span>
+          <span class="price-list-group-name">${escapeHtml(group?.name)}</span>
           <span class="price-list-group-count">${items.length}</span>
         </div>
         <table><tbody>${items.map((item, index) => `

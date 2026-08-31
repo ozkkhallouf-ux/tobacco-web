@@ -244,10 +244,7 @@ const state = {
   aiProvider: "claude",
   aiLoading: false,
   aiSettingsOpen: false,
-  invCustomer: "",
-  invNotes: "",
-  invRows: [{ name: "", qty: "1", price: "" }],
-  // ===== فاتورة مبيعات (route: sales) — نواة MVP مستقلة تماماً عن route invoice =====
+  // ===== فاتورة مبيعات (route: sales) — نواة MVP =====
   salesMode: readJson("sales-mode", "jumla"),        // "jumla" جملة/دولار | "mufrak" مفرق/سوري
   salesCustomer: "",                                    // فارغ = زبون نقدي
   salesPayMethod: "cash",                               // "cash" نقدي | "credit" أجل
@@ -404,11 +401,13 @@ function initKeyboardShortcuts() {
       return;
     }
     if (event.altKey && !event.ctrlKey && !event.metaKey) {
-      const routeMap = { "1": "overview", "2": "dashboard", "3": "requests", "4": "ameen", "5": "pricing", "6": "invoice", "7": "purchases", "8": "balances", "9": "sales" };
+      // كل قيمة هنا يجب أن تكون صفحة مسجّلة فعلاً في pages وفي allowedRoutes،
+      // وإلا رمى الرسم TypeError صامتاً. يحرسه scripts/check-keyboard-shortcut-routes.mjs.
+      const routeMap = { "1": "overview", "2": "dashboard", "3": "requests", "4": "ameen", "5": "pricing", "7": "purchases", "8": "balances", "9": "sales" };
       const target = routeMap[event.key];
       if (target) {
         event.preventDefault();
-        if ((target === "dashboard" || target === "invoice" || target === "purchases" || target === "sales") && !state.session) return;
+        if ((target === "dashboard" || target === "purchases" || target === "sales") && !state.session) return;
         setRoute(target);
         render();
         return;
@@ -879,20 +878,6 @@ async function sendReceiptWhatsapp(item, amount, date, notes) {
   setNotice("success", "تم حفظ الوصل بالنظام والأرشيف ✓");
 }
 
-async function sendInvoiceWhatsapp(customer, rows, notes, total, invNum) {
-  const w = findWhatsappByName(customer);
-  const items = (rows || []).map((r) => ({ name: r.name, qty: toNumber(r.qty), price: toNumber(r.price), total: toNumber(r.qty) * toNumber(r.price) }));
-  const doc = { t: "invoice", no: invNum || docNumber("INV"), date: todayIsoDate(), name: customer || "", phone: w ? w.phone_number : "", items: items, total: total, cur: "$", notes: notes || "" };
-  try {
-    await dataStore.createSharedDocument(doc);
-  } catch (e) {
-    setNotice("error", "تعذّر حفظ الفاتورة: " + (e.message || ""));
-    return;
-  }
-  // واتساب أُلغي — الفاتورة تُحفظ بالنظام/الأرشيف (أساس الرفع التلقائي إلى Google Drive لاحقاً)
-  setNotice("success", "تم حفظ الفاتورة بالنظام والأرشيف ✓");
-}
-
 // لوحة الإرسال الجماعي حسب التصنيف
 function whatsappBroadcastPanel() {
   // واتساب أُلغي بالكامل — لوحة الإرسال الجماعي معطّلة (التحويل إلى Google Drive)
@@ -993,6 +978,32 @@ function findReturnInvoiceForMovement(custName, movement) {
 // كمية سطر الفاتورة بشكل مقروء (نفضّل الوحدة الأكبر إن وُجدت).
 // لا نعرض سعر/إجمالي السطر لأن أرقام الأسطر المفردة بمصدر الأمين غير دقيقة
 // (مجموعها لا يطابق إجمالي الفاتورة)؛ الموثوق هو إجمالي الفاتورة فقط.
+// قيمة السطر الفعلية. مصدر الحقيقة هو `lineTotal` القادم من الأمين
+// (Qty × Price كما يسجّلهما) — لا يُعاد حسابه من السعر المعروض.
+// **العطل الذي يعالجه:** المستند كان يعرض «سعر الوحدة» وحده، وهو سعر الوحدة
+// الكبرى (سعر الكرتونة 403)، فيُقرأ على أنه قيمة السطر. نصف كرتونة قيمتها
+// 201.50 لا 403. السعر يبقى سعر وحدة، والقيمة تصير عموداً مستقلاً.
+//
+// حين يكون أساس أسعار الفاتورة الوحدة الكبرى (`unit2`) يكون `Qty × Price`
+// القادم من الأمين محسوباً على أساس مختلف، فنحسب القيمة من الكمية بالوحدة
+// الكبرى — نفس المنطق الذي يحسم به `invoicePriceBasis` أساس السعر.
+function invoiceLineTotalValue(line, inv) {
+  const price = Number(line?.price || 0);
+  const qty = Number(line?.qty || 0);
+  const qtyUnits = Number(line?.qtyUnits || 0);
+  const stored = Number(line?.lineTotal || 0);
+  if (inv && qtyUnits > 0 && invoicePriceBasis(inv) === "unit2") {
+    return roundPrice(price * qtyUnits);
+  }
+  if (stored > 0) return roundPrice(stored);
+  return roundPrice(price * qty);
+}
+
+function invoiceLineValueText(line, inv) {
+  const value = invoiceLineTotalValue(line, inv);
+  return value > 0 ? formatMoney(value) : "—";
+}
+
 function invoiceLineQty(line) {
   const u1 = String(line?.unit1 || "").trim();
   const u2 = String(line?.unit2 || "").trim();
@@ -4699,7 +4710,7 @@ function printHtmlDocument(html, options = {}) {
   }, { once: true });
 
   document.body.appendChild(frame);
-  frame.srcdoc = html;
+  frame.srcdoc = withDocumentTitle(html, options.title);
 }
 
 // أرشفة صامتة إلى iCloud Drive عبر الجسر المحلي على الماك (src/icloud-archive.js).
@@ -4725,13 +4736,93 @@ function archiveToICloud(docType, content, meta) {
   }
 }
 
+// ===== اسم الملف المقترح عند «حفظ بصيغة PDF» =====
+//
+// كروم يشتقّ اسم الملف المقترح من **عنوان المستند المطبوع** (`<title>`) لا من
+// أي شيء آخر. كانت العناوين تحمل الرقم وحده («فاتورة مبيعات 562») فيخرج الملف
+// بلا اسم الزبون. نبني العنوان الآن من **نفس** كائن البيانات الذي تُبنى منه
+// الأرشفة، فيستحيل أن يفترق اسم ملف كروم عن اسم النسخة في iCloud.
+
+const DOC_TYPE_LABELS = {
+  invoice: "فاتورة",
+  return_invoice: "فاتورة مرتجع",
+  receipt: "سند قبض",
+  payment: "سند دفع",
+  account_statement: "كشف حساب",
+  stock_report: "تقرير المخزون",
+  receivables_report: "تقرير الذمم",
+  price_list: "نشرة أسعار",
+  purchase_invoice: "فاتورة مشتريات",
+  other_report: "تقرير"
+};
+
+// ينقّي جزءاً من اسم الملف: يحذف ما تمنعه أنظمة الملفات ومحارف التحكّم
+// والاتجاه غير المرئية، ويُبقي الحروف العربية والفراغات العادية كما هي.
+function sanitizeDocumentTitle(value) {
+  return String(value == null ? "" : value)
+    .normalize("NFC")
+    .replace(/[\u0000-\u001F\u007F]/g, " ")
+    .replace(/[\u200B-\u200F\u061C\u2066-\u2069\u202A-\u202E\uFEFF]/g, "")
+    .replace(/[/\\:*?"<>|]/g, " ")
+    .replace(/\.{2,}/g, ".")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^[.\s-]+/, "")
+    .replace(/[.\s]+$/, "")
+    .slice(0, 80)
+    .trim();
+}
+
+// التاريخ في اسم الملف بصيغة يقرأها المالك (DD-MM-YYYY)، بينما يبقى اسم النسخة
+// المؤرشفة على YYYY-MM-DD حسب اصطلاح مجلدات iCloud المعتمد. المصدر واحد.
+function fileDateLabel(isoDate) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(isoDate || "").slice(0, 10));
+  return match ? `${match[3]}-${match[2]}-${match[1]}` : "";
+}
+
+/**
+ * عنوان المستند المطبوع = اسم الملف الذي يقترحه المتصفح.
+ * يُبنى من نفس `meta` التي تذهب إلى الأرشفة — لا لقطة أخرى ولا قيمة افتراضية.
+ */
+function archiveDocumentTitle(docType, meta) {
+  const info = meta || {};
+  const label = docType === "other_report"
+    ? (sanitizeDocumentTitle(info.title) || DOC_TYPE_LABELS.other_report)
+    : (DOC_TYPE_LABELS[docType] || "مستند");
+  const party = sanitizeDocumentTitle(info.party);
+  const number = sanitizeDocumentTitle(info.number);
+  const date = fileDateLabel(info.date);
+  let title = label;
+  if (party) title += ` - ${party}`;
+  if (number) title += ` - رقم ${number}`;
+  if (date) title += ` - ${date}`;
+  return title;
+}
+
+// يفرض العنوان داخل المستند المطبوع نفسه — هو وحده ما يقرأه كروم.
+function withDocumentTitle(html, title) {
+  const safe = escapeHtml(String(title || "").trim());
+  if (!safe) return html;
+  const source = String(html);
+  if (/<title>[\s\S]*?<\/title>/i.test(source)) {
+    return source.replace(/<title>[\s\S]*?<\/title>/i, `<title>${safe}</title>`);
+  }
+  if (/<head[^>]*>/i.test(source)) {
+    return source.replace(/<head[^>]*>/i, (open) => `${open}<title>${safe}</title>`);
+  }
+  return source;
+}
+
 // نستعمل طباعة المتصفح الأصلية (حفظ بصيغة PDF) بدل html2canvas —
 // المحرّك القديم صار يطلّع صفحات بيضا بعد تحديثات كروم. الطباعة الأصلية
 // ترسم التقرير مثل الشاشة تماماً (عربي وألوان مظبوطة) ومستحيل تطلع فاضية.
 //
-// `archive` اختياري: { docType, meta } — عند تمريره تُحفظ نسخة في iCloud أيضاً.
+// `archive` اختياري: { docType, meta } — عند تمريره تُحفظ نسخة في iCloud أيضاً،
+// ويُشتقّ منه عنوان المستند (اسم ملف كروم) فيتطابق الاسمان دائماً.
 async function exportReportPdf(bodyHtml, filename, archive) {
-  const title = String(filename || "تقرير").replace(/\.pdf$/i, "");
+  const title = archive && archive.docType
+    ? archiveDocumentTitle(archive.docType, archive.meta)
+    : String(filename || "تقرير").replace(/\.pdf$/i, "");
   if (archive && archive.docType) archiveToICloud(archive.docType, bodyHtml, archive.meta);
   if (isHandheldDevice()) {
     try {
@@ -5011,8 +5102,22 @@ function voucherPdfMarkup(v) {
     rows.push(`<tr><th>${isRet ? "قيمة هذا المرتجع" : "قيمة هذه الفاتورة"}</th><td>${escapeHtml(formatMoney(v.amount || 0))} ${escapeHtml(cur)}</td></tr>`);
     // إن سُجّلت الفاتورة على الحساب بمبلغ أقل/أكثر من قيمتها (حسم أو تسوية) نُظهر الفرق
     // ليبقى الحساب شفافاً: السابق + الفاتورة − الحسم = الجديد.
+    // الحسم ودفعة الزبون عمليتان محاسبيتان مستقلتان تماماً، ولكلٍّ سطره:
+    //   الرصيد الجديد = السابق + قيمة الفاتورة − الحسم − دفعة الزبون
+    // لا يجوز أن تُطبع دفعة داخل خانة الحسم ولا العكس. كلٌّ يظهر فقط إن وُجد.
+    if (Number(v.discount || 0) > 0.009) {
+      rows.push(`<tr><th>الحسم</th><td class="cred">− ${escapeHtml(formatMoney(v.discount))} ${escapeHtml(cur)}</td></tr>`);
+    }
+    if (Number(v.payment || 0) > 0.009) {
+      rows.push(`<tr><th>دفعة من الزبون</th><td class="cred">− ${escapeHtml(formatMoney(v.payment))} ${escapeHtml(cur)}</td></tr>`);
+    }
+    // `adjust` فرق **غير منسوب**: ما تبقّى من حركة الحساب بعد طرح الحسم والدفعة
+    // المعروفَين. لا يُسمّى حسماً: مصدر فواتير الأمين لا يفصل الحسم عن الدفعة
+    // (راجع tools/push-customer-invoices.ps1 — الفاتورة تصل بحقول
+    // number/date/guid/total/isReturn/lines فقط)، فتسميته حسماً تطبع دفعة زبون
+    // على أنها حسم في مستند يُسلَّم للزبون.
     if (Number(v.adjust || 0) > 0.009) {
-      rows.push(`<tr><th>حسم</th><td class="cred">− ${escapeHtml(formatMoney(v.adjust))} ${escapeHtml(cur)}</td></tr>`);
+      rows.push(`<tr><th>تسوية على الحساب</th><td class="cred">− ${escapeHtml(formatMoney(v.adjust))} ${escapeHtml(cur)}</td></tr>`);
     } else if (Number(v.adjust || 0) < -0.009) {
       rows.push(`<tr><th>إضافة / تسوية</th><td class="deb">+ ${escapeHtml(formatMoney(Math.abs(v.adjust)))} ${escapeHtml(cur)}</td></tr>`);
     }
@@ -5056,8 +5161,8 @@ function voucherPdfMarkup(v) {
     ${((isInv || isRet) && Array.isArray(v.lines) && v.lines.length) ? `
     <div class="sec">${isRet ? "أصناف المرتجع" : "أصناف الفاتورة"}</div>
     <table>
-      <thead><tr><th>المادة</th><th>الكمية</th><th>سعر الوحدة</th></tr></thead>
-      <tbody>${v.lines.map((l) => `<tr><td>${escapeHtml(l.material || "")}</td><td>${escapeHtml(invoiceLineQty(l))}</td><td>${escapeHtml(invoiceLinePrice(l, { total: v.amount, lines: v.lines }))}</td></tr>`).join("")}</tbody>
+      <thead><tr><th>المادة</th><th>الكمية</th><th>سعر الوحدة</th><th>قيمة السطر</th></tr></thead>
+      <tbody>${v.lines.map((l) => `<tr><td>${escapeHtml(l.material || "")}</td><td>${escapeHtml(invoiceLineQty(l))}</td><td>${escapeHtml(invoiceLinePrice(l, { total: v.amount, lines: v.lines }))}</td><td>${escapeHtml(invoiceLineValueText(l, { total: v.amount, lines: v.lines }))}</td></tr>`).join("")}</tbody>
     </table>` : ""}
     <table>${rows.join("")}</table>
     <p class="muted" style="margin:8px 0 0">${noteLine}</p>
@@ -6192,84 +6297,9 @@ function aiAssistant() {
   `);
 }
 
-function invoice() {
-  if (!state.session) {
-    return shell(`
-      <section class="panel">
-        <h2>الفواتير بالدولار</h2>
-        <p class="muted">سجّل الدخول أولاً للوصول إلى نظام الفواتير.</p>
-      </section>
-    `);
-  }
-
-  const rows = state.invRows;
-  const grandTotal = rows.reduce((sum, r) => {
-    const qty = toNumber(r.qty);
-    const price = toNumber(r.price);
-    return sum + qty * price;
-  }, 0);
-
-  const rowsHtml = rows.map((r, i) => `
-    <tr class="inv-row">
-      <td><input class="inv-input" data-inv-field="name" data-inv-index="${i}" value="${escapeHtml(r.name)}" placeholder="اسم المادة" dir="auto"></td>
-      <td><input class="inv-input inv-num" data-inv-field="qty" data-inv-index="${i}" value="${escapeHtml(r.qty)}" placeholder="0" type="text" inputmode="decimal" dir="ltr"></td>
-      <td><input class="inv-input inv-num" data-inv-field="price" data-inv-index="${i}" value="${escapeHtml(r.price)}" placeholder="0.00" type="text" inputmode="decimal" dir="ltr"></td>
-      <td class="inv-line-total">$${(toNumber(r.qty) * toNumber(r.price)).toFixed(2)}</td>
-      <td>${rows.length > 1 ? `<button class="inv-remove" data-inv-remove="${i}" title="حذف">✕</button>` : ""}</td>
-    </tr>
-  `).join("");
-
-  return shell(`
-    <section class="panel wide inv-panel">
-      <div class="inv-form-area">
-        <div class="inv-header-fields">
-          <label class="inv-label">
-            اسم العميل
-            <input class="inv-input-main" id="inv-customer" value="${escapeHtml(state.invCustomer)}" placeholder="اسم العميل أو الشركة" maxlength="120">
-          </label>
-          <label class="inv-label">
-            ملاحظة (اختياري)
-            <input class="inv-input-main" id="inv-notes" value="${escapeHtml(state.invNotes)}" placeholder="شروط الدفع، الاستحقاق، إلخ…" maxlength="300">
-          </label>
-        </div>
-
-        <div class="inv-table-wrap">
-          <table class="inv-table">
-            <thead>
-              <tr>
-                <th>المادة</th>
-                <th style="width:90px">الكمية</th>
-                <th style="width:110px">سعر الوحدة $</th>
-                <th style="width:100px">المجموع $</th>
-                <th style="width:36px"></th>
-              </tr>
-            </thead>
-            <tbody id="inv-body">${rowsHtml}</tbody>
-          </table>
-        </div>
-
-        <div class="inv-footer">
-          <button class="button secondary" data-action="inv-add-row">+ إضافة مادة</button>
-          <div class="inv-total-box">
-            <span>الإجمالي</span>
-            <strong class="inv-grand-total">$${grandTotal.toFixed(2)}</strong>
-          </div>
-        </div>
-
-        <div class="inv-actions">
-          <button class="button primary" data-action="inv-print" ${!state.invCustomer.trim() ? "disabled title='أدخل اسم العميل أولاً'" : ""}>
-            🖨 طباعة / حفظ PDF
-          </button>
-          <button class="button secondary" data-action="inv-reset">مسح</button>
-        </div>
-      </div>
-    </section>
-  `);
-}
-
 // ============================================================================
 // ===== فاتورة مبيعات (route: sales) — نواة MVP =====
-// وحدة مستقلة تماماً عن route/دالة invoice. تنشئ فاتورة جملة (دولار) أو مفرق
+// تنشئ فاتورة جملة (دولار) أو مفرق
 // (ليرة سورية)، تُحفظ عبر dataStore.createSharedDocument كمستند sales_invoice،
 // وتُطبع بإعادة استخدام قالب طباعة الفاتورة.
 // TODO (خارج النواة الحالية عمداً): خصم المخزون، تقييد الذمم، صلاحيات المدير/
@@ -7638,7 +7668,14 @@ async function saveSalesInvoicePdf() {
   container.innerHTML = markup;
   document.body.appendChild(container);
 
-  const fileName = `invoice-${String(invNo).replace(/[^\w-]+/g, "-")}-${todayIsoDate()}.pdf`;
+  // اسم الملف المنزَّل من نفس بيانات الفاتورة المطبوعة الآن — لا رقم بلا اسم
+  // زبون، ولا صيغة إنكليزية. هو نفسه مصدر اسم النسخة في iCloud.
+  const pdfArchiveMeta = {
+    party: state.salesCustomer.trim() || "زبون نقدي",
+    number: invNo,
+    date: todayIsoDate()
+  };
+  const fileName = `${archiveDocumentTitle("invoice", pdfArchiveMeta)}.pdf`;
   // نحفظ موضع التمرير: **السبب الجذري للملف الفارغ** أن html2canvas يلتقط منطقة
   // خاطئة حين تكون الصفحة مُمرَّرة للأسفل — وهي حالة الهاتف دائماً عند الضغط على
   // زر أسفل الشاشة. قياس فعلي: صفحة عند 1500px تعطي لوحة بصفر حبر وملف 3 ك.ب،
@@ -7708,11 +7745,7 @@ async function saveSalesInvoicePdf() {
     // الذي يُسلَّم للزبون. المسودة (بلا رقم أثناء تدهور المزامنة) لا تُؤرشف
     // إطلاقاً كي لا يدخل الأرشيف مستند بلا رقم فاتورة موثوق.
     if (invNo !== SALES_DRAFT_INVOICE_NO) {
-      archiveToICloud("invoice", blob, {
-        party: state.salesCustomer.trim() || "زبون نقدي",
-        number: invNo,
-        date: todayIsoDate()
-      });
+      archiveToICloud("invoice", blob, pdfArchiveMeta);
     }
 
     if (isHandheldDevice()) {
@@ -8064,12 +8097,14 @@ ${salesDraftBannerHtml(invNo)}
     })
     : html;
 
+  // العنوان والأرشفة من كائن واحد: اسم ملف كروم = اسم النسخة في iCloud.
+  const salesArchiveMeta = { party: customer, number: invNo, date: todayIsoDate() };
   printHtmlDocument(printable, {
-    title: mode === "mufrak" ? `فاتورة كاشير ${invNo}` : `فاتورة مبيعات ${invNo}`,
+    title: archiveDocumentTitle("invoice", salesArchiveMeta),
     // المسودة (بلا رقم موثوق أثناء تدهور المزامنة) لا تدخل الأرشيف إطلاقاً.
     archive: invNo === SALES_DRAFT_INVOICE_NO ? null : {
       docType: "invoice",
-      meta: { party: customer, number: invNo, date: todayIsoDate() }
+      meta: salesArchiveMeta
     },
     onError: () => {
       setNotice("error", "تعذّر فتح نافذة الطباعة. أغلق التطبيق وافتحه ثم جرّب مجدداً.");
@@ -9677,12 +9712,10 @@ ${po.notes ? `<div class="notes"><strong>ملاحظة:</strong> ${escapeHtml(po.
 
 </body></html>`;
 
+  const purchaseArchiveMeta = { party: po.supplierName, number: po.publicId, date: todayIsoDate() };
   printHtmlDocument(html, {
-    title: "فاتورة مشتريات",
-    archive: {
-      docType: "purchase_invoice",
-      meta: { party: po.supplierName, number: po.publicId, date: todayIsoDate() }
-    },
+    title: archiveDocumentTitle("purchase_invoice", purchaseArchiveMeta),
+    archive: { docType: "purchase_invoice", meta: purchaseArchiveMeta },
     onError: () => {
       setNotice("error", "تعذّر فتح نافذة طباعة فاتورة المشتريات. أغلق التطبيق وافتحه ثم جرّب مجدداً.");
       render();
@@ -9690,125 +9723,6 @@ ${po.notes ? `<div class="notes"><strong>ملاحظة:</strong> ${escapeHtml(po.
   });
 }
 
-function generateInvoiceNumber() {
-  const now = new Date();
-  const yy = String(now.getFullYear()).slice(-2);
-  const mm = String(now.getMonth() + 1).padStart(2, "0");
-  const rand = String(Math.floor(Math.random() * 900) + 100);
-  return `INV-${yy}${mm}-${rand}`;
-}
-
-function printInvoice() {
-  const customer = state.invCustomer.trim();
-  const notes = state.invNotes.trim();
-  const rows = state.invRows.filter((r) => r.name.trim() && toNumber(r.qty) > 0 && toNumber(r.price) > 0);
-  if (!customer || !rows.length) {
-    setNotice("error", "أدخل اسم العميل وصف واحد على الأقل بكمية وسعر.");
-    render();
-    return;
-  }
-
-  const invNum = generateInvoiceNumber();
-  const today = new Intl.DateTimeFormat("ar-SA-u-ca-gregory-nu-latn", { dateStyle: "long" }).format(new Date());
-  const grandTotal = rows.reduce((s, r) => s + toNumber(r.qty) * toNumber(r.price), 0);
-
-  const rowsHtml = rows.map((r, i) => `
-    <tr>
-      <td>${i + 1}</td>
-      <td>${escapeHtml(r.name)}</td>
-      <td>${toNumber(r.qty)}</td>
-      <td>$${toNumber(r.price).toFixed(2)}</td>
-      <td>$${(toNumber(r.qty) * toNumber(r.price)).toFixed(2)}</td>
-    </tr>
-  `).join("");
-
-  const html = `<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-<meta charset="UTF-8">
-<title>فاتورة ${invNum}</title>
-<style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: 'Segoe UI', Tahoma, Arial, sans-serif; font-size: 13px; color: #1a1a1a; background: #fff; padding: 40px; direction: rtl; }
-  .inv-head { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 36px; border-bottom: 3px solid #b8860b; padding-bottom: 20px; }
-  .inv-company { font-size: 22px; font-weight: 700; color: #5c3d00; letter-spacing: 1px; }
-  .inv-company small { display: block; font-size: 12px; font-weight: 400; color: #888; margin-top: 4px; }
-  .inv-meta { text-align: left; direction: ltr; }
-  .inv-meta p { margin: 3px 0; font-size: 12px; color: #555; }
-  .inv-meta strong { color: #1a1a1a; }
-  .inv-num { font-size: 16px; font-weight: 700; color: #b8860b; }
-  .inv-customer { background: #faf7f0; border: 1px solid #e8dfc8; border-radius: 6px; padding: 14px 18px; margin-bottom: 28px; }
-  .inv-customer p { font-size: 12px; color: #888; margin-bottom: 4px; }
-  .inv-customer strong { font-size: 15px; }
-  table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
-  th { background: #5c3d00; color: #fff; padding: 10px 12px; text-align: right; font-size: 12px; }
-  td { padding: 9px 12px; border-bottom: 1px solid #eee; font-size: 13px; }
-  tr:nth-child(even) td { background: #fdf9f3; }
-  .col-num { width: 36px; text-align: center; color: #aaa; }
-  .col-price, .col-total { text-align: left; direction: ltr; font-family: monospace; }
-  .total-row td { border-top: 2px solid #b8860b; font-weight: 700; font-size: 14px; background: #faf7f0; }
-  .notes { font-size: 12px; color: #666; margin-bottom: 28px; padding: 10px 14px; border-right: 3px solid #b8860b; background: #fdfaf5; }
-  .inv-foot { text-align: center; font-size: 11px; color: #aaa; margin-top: 40px; border-top: 1px solid #eee; padding-top: 16px; }
-  @media print { body { padding: 24px; } @page { margin: 1.5cm; } }
-</style>
-</head>
-<body>
-<div class="inv-head">
-  <div>
-    <div class="inv-company">${escapeHtml(appConfig.name)}${appConfig.tagline ? `<small>${escapeHtml(appConfig.tagline)}</small>` : ""}</div>
-  </div>
-  <div class="inv-meta">
-    <p class="inv-num">${invNum}</p>
-    <p><strong>التاريخ:</strong> ${today}</p>
-    <p><strong>العملة:</strong> دولار أمريكي (USD)</p>
-  </div>
-</div>
-
-<div class="inv-customer">
-  <p>فاتورة إلى</p>
-  <strong>${escapeHtml(customer)}</strong>
-</div>
-
-<table>
-  <thead>
-    <tr>
-      <th class="col-num">#</th>
-      <th>المادة</th>
-      <th style="width:70px">الكمية</th>
-      <th style="width:110px" class="col-price">سعر الوحدة</th>
-      <th style="width:110px" class="col-total">المجموع</th>
-    </tr>
-  </thead>
-  <tbody>${rowsHtml}</tbody>
-  <tfoot>
-    <tr class="total-row">
-      <td colspan="3"></td>
-      <td>الإجمالي</td>
-      <td class="col-total">$${grandTotal.toFixed(2)}</td>
-    </tr>
-  </tfoot>
-</table>
-
-${notes ? `<div class="notes"><strong>ملاحظة:</strong> ${escapeHtml(notes)}</div>` : ""}
-
-<div class="inv-foot">${escapeHtml(appConfig.name)} &mdash; ${escapeHtml(appConfig.supportEmail)}</div>
-
-</body></html>`;
-
-  printHtmlDocument(html, {
-    title: `فاتورة ${invNum}`,
-    archive: {
-      docType: "invoice",
-      meta: { party: customer, number: invNum, date: todayIsoDate() }
-    },
-    onError: () => {
-      setNotice("error", "تعذّر فتح نافذة الطباعة. أغلق التطبيق وافتحه ثم جرّب مجدداً.");
-      render();
-    }
-  });
-  // حفظ الفاتورة بالنظام (للأرشفة على اللابتوب) + إرسالها واتساب للزبون
-  sendInvoiceWhatsapp(customer, rows, notes, grandTotal, invNum);
-}
 
 function statusCard(item) {
   return `
@@ -10197,63 +10111,6 @@ function render() {
     });
   });
 
-  // Invoice handlers
-  app.querySelector("#inv-customer")?.addEventListener("input", (e) => {
-    state.invCustomer = e.currentTarget.value;
-    const printButton = app.querySelector("[data-action='inv-print']");
-    if (printButton) {
-      const customerMissing = !state.invCustomer.trim();
-      printButton.disabled = customerMissing;
-      if (customerMissing) printButton.title = "أدخل اسم العميل أولاً";
-      else printButton.removeAttribute("title");
-    }
-  });
-  app.querySelector("#inv-notes")?.addEventListener("input", (e) => {
-    state.invNotes = e.currentTarget.value;
-  });
-  app.querySelectorAll("[data-inv-field]").forEach((input) => {
-    input.addEventListener("input", (e) => {
-      const i = Number(e.currentTarget.dataset.invIndex);
-      const field = e.currentTarget.dataset.invField;
-      if (field === "qty" || field === "price") {
-        const normalized = normalizeNumericText(e.currentTarget.value, { allowNegative: false, allowDecimal: true });
-        if (normalized !== e.currentTarget.value) e.currentTarget.value = normalized;
-      }
-      state.invRows[i][field] = e.currentTarget.value;
-      const tbody = document.getElementById("inv-body");
-      if (tbody) {
-        const cells = tbody.querySelectorAll("tr")[i]?.querySelectorAll(".inv-line-total");
-        if (cells?.[0]) {
-          const qty = toNumber(state.invRows[i].qty);
-          const price = toNumber(state.invRows[i].price);
-          cells[0].textContent = `$${(qty * price).toFixed(2)}`;
-        }
-        const grandEl = document.querySelector(".inv-grand-total");
-        if (grandEl) {
-          const total = state.invRows.reduce((s, r) => s + toNumber(r.qty) * toNumber(r.price), 0);
-          grandEl.textContent = `$${total.toFixed(2)}`;
-        }
-      }
-    });
-  });
-  app.querySelectorAll("[data-inv-remove]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const i = Number(btn.dataset.invRemove);
-      state.invRows.splice(i, 1);
-      render();
-    });
-  });
-  app.querySelector("[data-action='inv-add-row']")?.addEventListener("click", () => {
-    state.invRows.push({ name: "", qty: "1", price: "" });
-    render();
-  });
-  app.querySelector("[data-action='inv-print']")?.addEventListener("click", printInvoice);
-  app.querySelector("[data-action='inv-reset']")?.addEventListener("click", () => {
-    state.invCustomer = "";
-    state.invNotes = "";
-    state.invRows = [{ name: "", qty: "1", price: "" }];
-    render();
-  });
   // Purchase invoices handlers (فواتير المشتريات — مزامنة الأمين قيد التطوير)
   app.querySelector("#po-supplier")?.addEventListener("input", (e) => {
     state.poSupplierQuery = e.currentTarget.value;
@@ -10902,8 +10759,18 @@ function render() {
             opts.newBalance = roundPrice(storedDocNew);
             const prev = (storedDocPrev !== null && Number.isFinite(storedDocPrev)) ? storedDocPrev : (storedDocNew - debit);
             opts.prevBalance = roundPrice(prev);
-            // (السابق + قيمة الفاتورة) − الجديد = حسم/تسوية بنفس سند الفاتورة (يشمل قيد الخصم المرافق).
-            const adjust = roundPrice(opts.prevBalance + total - opts.newBalance);
+            // الحسم ودفعة الزبون يُنسبان أولاً إن توفّرا من المصدر، ويبقى ما لا
+            // يُنسب «تسوية» صريحة. **فجوة بيانات معروفة:** مزامنة فواتير الأمين
+            // (tools/push-customer-invoices.ps1) لا تجلب حسم رأس الفاتورة ولا
+            // الدفعة المرافقة، فيبقى الفرق كله غير منسوب حتى تُجلبا — ولهذا لا
+            // يُسمّى حسماً، لأن تسميته حسماً تطبع دفعة الزبون على أنها حسم.
+            const knownDiscount = Math.max(0, roundPrice(Number(match.discount || 0)));
+            const knownPayment = Math.max(0, roundPrice(Number(match.payment || 0)));
+            if (knownDiscount > 0.009) opts.discount = knownDiscount;
+            if (knownPayment > 0.009) opts.payment = knownPayment;
+            const adjust = roundPrice(
+              opts.prevBalance + total - knownDiscount - knownPayment - opts.newBalance
+            );
             if (Math.abs(adjust) > 0.009) opts.adjust = adjust;
           } else {
             opts.balance = customerBalance(item);
@@ -10984,8 +10851,19 @@ function render() {
           if (db && Number.isFinite(db.newBalance) && Number.isFinite(db.prevBalance)) {
             opts.newBalance = roundPrice(db.newBalance);
             opts.prevBalance = roundPrice(db.prevBalance);
-            // (السابق + قيمة الفاتورة) − الجديد = حسم/تسوية مُسجَّل بنفس سند الفاتورة.
-            const adjust = roundPrice(opts.prevBalance + invoiceTotal - opts.newBalance);
+            // الحسم ودفعة الزبون يأتيان من الأمين على رأس الفاتورة (TotalDisc و
+            // FirstPay) ويُنسبان أولاً، ولا يبقى «تسوية» إلا ما لا يُفسَّر بهما.
+            // كان هذا المسار (التقارير ← فواتير الزبون) يضع الفرق كاملاً في
+            // adjust، فتُطبع دفعة الفاتورة 562 «تسوية على الحساب 2000» بينما
+            // يعرضها مسار زر الحركات «دفعة من الزبون» صحيحاً — مسارا تصدير
+            // لنفس المستند بنتيجتين مختلفتين.
+            const knownDiscount = Math.max(0, roundPrice(Number(inv.discount || 0)));
+            const knownPayment = Math.max(0, roundPrice(Number(inv.payment || 0)));
+            if (knownDiscount > 0.009) opts.discount = knownDiscount;
+            if (knownPayment > 0.009) opts.payment = knownPayment;
+            const adjust = roundPrice(
+              opts.prevBalance + invoiceTotal - knownDiscount - knownPayment - opts.newBalance
+            );
             if (Math.abs(adjust) > 0.009) opts.adjust = adjust;
           } else {
             opts.balance = custItem ? customerBalance(custItem) : null;

@@ -1072,18 +1072,22 @@
 
       const user = await requireUser();
 
-      // احفظ أرقام وأكواد الأصناف الحالية قبل الحذف كي لا تُمسح عند إعادة الإدخال.
-      // بيانات الموقع لا تحمل أرقام الأمين، فنُعيد ربطها من الصفوف الحالية عبر item_key.
-      let numberByKey = null; // null = تعذّر الجلب → لا نلمس item_number/item_code (نفس السلوك السابق)
+      // احفظ أرقام وأكواد وGUID الأصناف الحالية قبل الحذف كي لا تُمسح عند إعادة الإدخال.
+      // بيانات الموقع لا تحمل أرقام الأمين ولا الـGUID، فنُعيد ربطها من الصفوف الحالية عبر item_key.
+      // item_guid تحديداً هو مفتاح مطابقة متوسط التكلفة الحية (push-item-costs.ps1) —
+      // مسحه هنا يعطّل المطابقة حتى تُعيد مهمة الـsnapshot المجدولة تعبئته (تأخير حتى 6 ساعات).
+      let numberByKey = null; // null = تعذّر الجلب → لا نلمس item_number/item_code/item_guid (نفس السلوك السابق)
       let codeByKey = null;
+      let guidByKey = null;
       try {
         const { data: existingRows, error: fetchErr } = await client
           .from(approvedPricesTable)
-          .select("item_key, item_number, item_code")
+          .select("item_key, item_number, item_code, item_guid")
           .limit(5000);
         if (!fetchErr) {
           numberByKey = {};
           codeByKey = {};
+          guidByKey = {};
           for (const row of existingRows || []) {
             if (!row || !row.item_key) continue;
             if (row.item_number != null && String(row.item_number) !== "") {
@@ -1092,14 +1096,17 @@
             if (row.item_code != null && String(row.item_code) !== "") {
               codeByKey[row.item_key] = row.item_code;
             }
+            if (row.item_guid != null && String(row.item_guid) !== "") {
+              guidByKey[row.item_key] = row.item_guid;
+            }
           }
         }
-      } catch (_) { numberByKey = null; codeByKey = null; }
+      } catch (_) { numberByKey = null; codeByKey = null; guidByKey = null; }
 
       // أمان حاسم: هذا المسار يحذف كل الصفوف ثم يعيدها. إن فشل جلب الأرقام الحالية فسيمحو
-      // الحذفُ item_number وitem_code بلا رجعة — لذا نُوقف الحفظ بأمان بدل تنفيذ حذف أعمى.
+      // الحذفُ item_number وitem_code وitem_guid بلا رجعة — لذا نُوقف الحفظ بأمان بدل تنفيذ حذف أعمى.
       // الأسعار والأرقام القديمة تبقى سليمة، ويظهر تحذيرٌ للمستخدم ليعيد المحاولة.
-      if (!numberByKey || !codeByKey) {
+      if (!numberByKey || !codeByKey || !guidByKey) {
         throw new Error("تعذّر تحضير الحفظ الآمن (فشل قراءة أرقام الأصناف الحالية). لم يُحذف شيء — حاول مجدداً.");
       }
 
@@ -1109,7 +1116,8 @@
         .map((rec) => ({
           ...rec,
           item_number: numberByKey[rec.item_key] ?? null,
-          item_code: codeByKey[rec.item_key] ?? null
+          item_code: codeByKey[rec.item_key] ?? null,
+          item_guid: rec.item_guid ?? guidByKey[rec.item_key] ?? null
         }));
 
       const { error: deleteError } = await client.from(approvedPricesTable).delete().neq("item_key", "__never__");
