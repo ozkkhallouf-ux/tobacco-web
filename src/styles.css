@@ -3569,6 +3569,17 @@ details[open]>.acc-summary::after{transform:rotate(180deg)}
 .price-preview-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .price-preview-theme-label{font-weight:700;font-size:.85rem}
 .price-preview-actions .button{min-height:44px}
+/* شريط شرح «الحفظ/المشاركة تتمّ في نافذة النظام». يلتصق تحت شريط الأزرار كي
+   يبقى مرئياً على الهاتف بلا تمرير، فالمستخدم يعرف ماذا يتوقّع بعد الضغط. */
+.price-preview-hint{
+  position:sticky;top:0;z-index:1;flex:0 0 auto;
+  display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;
+  padding:8px 12px;font-size:.8rem;line-height:1.5;
+  background:var(--surface-alt,var(--surface));border-bottom:1px solid var(--line);
+}
+.price-preview-hint.is-open{border-inline-start:3px solid #2d9d5a}
+.price-preview-hint.is-blocked{border-inline-start:3px solid #d9534f;font-weight:700}
+.price-preview-hint .button{min-height:44px;flex:0 0 auto}
 .price-preview-scroll{
   flex:1 1 auto;min-height:0;overflow:auto;-webkit-overflow-scrolling:touch;
   background:#9a9a9a;padding:16px;display:flex;justify-content:center;
@@ -3583,6 +3594,8 @@ details[open]>.acc-summary::after{transform:rotate(180deg)}
   .price-preview-theme-label{display:none}
   .price-preview-actions .button{flex:1 1 auto;padding:10px 8px;font-size:.82rem}
   .price-preview-close{order:-1;flex:0 0 auto;min-width:96px}
+  .price-preview-hint{font-size:.76rem;padding:8px 10px}
+  .price-preview-hint .button{flex:1 1 100%}
   .price-preview-scroll{padding:8px;display:block}
   /* النشرة عرضها ثابت 794px (مقاس A4). على الهاتف نُصغّرها كي تُرى الصفحة
      كاملة بلا تمرير أفقي. `zoom` (لا `transform:scale`) لأنه يُصغّر المقاس

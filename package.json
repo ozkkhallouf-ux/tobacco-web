@@ -17,7 +17,7 @@
     "archive:install": "bash tools/mac-archive-bridge/install-launch-agent.sh",
     "archive:uninstall": "bash tools/mac-archive-bridge/install-launch-agent.sh --uninstall",
     "archive:start": "node tools/mac-archive-bridge/server.mjs",
-    "check:bulletin": "node scripts/check-price-bulletin-export-integrity.mjs"
+    "check:bulletin": "node scripts/check-price-bulletin-export-integrity.mjs && node scripts/check-price-bulletin-item-coverage.mjs && node scripts/check-price-bulletin-print-ux.mjs"
   },
   "devDependencies": {
     "playwright": "^1.60.0"
