@@ -5455,26 +5455,261 @@ const INVENTORY_REPORT_STYLE = `<style>
 @media print{html,body,.ozk-rpt.inventory-rpt,.ozk-rpt.inventory-rpt .inventory-page{background:#fffdf8!important;color:#221808!important}.ozk-rpt.inventory-rpt{padding:0!important}}
 </style>`;
 
-// تقسيم فعلي إلى صفحات وعمودين. كل مجموعة تبقى كتلة واحدة، وتذهب المجموعة التالية
-// إلى العمود الأقصر؛ لذلك تبدأ الغلواز يميناً والماستر يساراً وتختفي الفراغات الكبيرة.
-function inventoryTwoColumnPages(groups, columnCapacity = 48) {
-  const pages = [];
-  const newPage = () => ({ columns: [[], []], weights: [0, 0] });
-  let page = newPage();
-  pages.push(page);
-  for (const group of groups) {
-    const weight = group.items.length + 1;
-    let column = page.weights[0] <= page.weights[1] ? 0 : 1;
-    const other = column === 0 ? 1 : 0;
-    if (page.weights[column] + weight > columnCapacity && page.weights[other] + weight <= columnCapacity) column = other;
-    if (page.weights[column] + weight > columnCapacity) {
-      page = newPage();
-      pages.push(page);
-      column = 0;
-    }
-    page.columns[column].push(group);
-    page.weights[column] += weight;
+// ===== توزيع مجموعات تقرير المخزون على صفحات A4 =====
+//
+// العطل الذي عولج هنا: التوزيع السابق كان يقدّر «وزن» كل مجموعة بعدد أسطرها
+// (items.length + 1) ويقارنه بسعة ثابتة (48 سطراً). ثلاث علل مجتمعة كانت
+// تُفرّغ ربع الصفحة أو أكثر:
+//   1) السطر ليس وحدة قياس ثابتة: سطر رأس المجموعة أطول من سطر الصنف، والاسم
+//      الطويل يلتفّ سطرين داخل عمود بعرض ~356px، ولكل مجموعة margin-bottom.
+//   2) رأس الصفحة (.rhead) — وهو يتكرر بكل صفحة — وبطاقات الملخص (.cards) في
+//      الصفحة الأولى لم تُخصم من السعة إطلاقاً، فأي رقم ثابت يبقى خاطئاً لإحدى
+//      الحالتين حتماً.
+//   3) الأثقل أثراً: كان «يوازن ثم يفشل» — يضع كل مجموعة بالعمود الأقصر فيبقى
+//      العمودان متقاربَين، وحين لا تتّسع المجموعة التالية في أيٍّ منهما يفتح صفحة
+//      جديدة فيُهدر باقي **العمودين معاً** دفعة واحدة (حتى ~22 سطراً ≈ ربع صفحة).
+//      هذا بالضبط الشكل المُبلَّغ عنه: مجموعات قليلة بالأعلى ثم فراغ كبير.
+//
+// البديل: قياس الارتفاع الحقيقي لكل مجموعة من DOM بنفس CSS وبنفس عرض العمود
+// الفعلي، ثم تعبئة تسلسلية: العمود الأول حتى آخر مجموعة تدخل كاملة، ثم العمود
+// الثاني، ثم صفحة جديدة. لا تُقسَّم مجموعة بين عمودين أو صفحتين أبداً، ولا يتغيّر
+// ترتيب المجموعات. نفس المبدأ المعتمد أصلاً بنشرة الأسعار
+// (packGroupsIntoBalancedPages في src/price-list-template.js).
+
+// هامش أمان بالبكسل: لا نملأ العمود حتى آخر بكسل كي لا يدفع خطأ تقريب واحد
+// سطراً إلى صفحة إضافية شبه فارغة عند الطباعة.
+const INVENTORY_PACK_SAFETY_PX = 10;
+
+// هندسة صفحة A4 الفعلية لكل مسار تصدير، بنفس نظام الإحداثيات الذي يقيس به DOM:
+//  - print (اللابتوب): ورقة الطباعة الأصلية، @page{size:A4;margin:10mm} فتصير
+//    منطقة المحتوى 190mm × 277mm، وبـ96dpi تساوي 718.1 × 1046.9 بكسل CSS.
+//    حشوة .ozk-rpt صفر هنا (@media print داخل INVENTORY_REPORT_STYLE).
+//  - canvas (الهاتف عبر html2pdf): الحاوية 794px وهامش 8mm لكل جهة، أي أن عرض
+//    794px يُرسم داخل 194mm فيصير المقياس 794/194 بكسل لكل مم، والارتفاع المفيد
+//    281mm. حشوة .ozk-rpt (6px 10px) تبقى فعّالة لأن html2canvas يرسم ضمن
+//    media=screen لا print، فتُخصم من العرض والارتفاع معاً.
+function inventoryPageGeometry(mode) {
+  if (mode === "canvas") {
+    const containerWidthPx = 794;
+    const pxPerMm = containerWidthPx / (210 - 8 * 2);
+    return {
+      contentWidthPx: containerWidthPx - 10 * 2,
+      pageHeightPx: (297 - 8 * 2) * pxPerMm - 6 * 2
+    };
   }
+  const pxPerMm = 96 / 25.4;
+  return { contentWidthPx: 190 * pxPerMm, pageHeightPx: 277 * pxPerMm };
+}
+
+// المحرّك الوحيد للتعبئة: يضع كل مجموعة **كاملة** في العمود الحالي إن اتّسعت،
+// وإلا ينتقل للعمود الثاني من نفس الصفحة، وإلا لصفحة جديدة. لا تقسيم ولا إعادة
+// ترتيب إطلاقاً. `sizeOf` يجعله صالحاً للقياس بالبكسل الحقيقي أو بعدد الأسطر
+// (المسار الاحتياطي حين لا يتوفر DOM).
+function inventoryPackPages(entries, options = {}) {
+  const list = Array.isArray(entries) ? entries : [];
+  const sizeOf = typeof options.sizeOf === "function"
+    ? options.sizeOf
+    : (entry) => Number(entry && entry.height) || 0;
+  const fullBudget = Math.max(0, Number(options.fullBudget) || 0);
+  const firstPageBudget = Math.max(0, Number(options.firstPageBudget ?? fullBudget) || 0);
+  const safetyPx = Number.isFinite(options.safetyPx) ? Number(options.safetyPx) : 0;
+  const reserveIndex = Number.isInteger(options.reserveIndex) ? options.reserveIndex : -1;
+  const reservePx = Math.max(0, Number(options.reservePx) || 0);
+  const limitFor = (pageIndex) => Math.max(
+    0,
+    (pageIndex === 0 ? firstPageBudget : fullBudget)
+      - safetyPx
+      - (pageIndex === reserveIndex ? reservePx : 0)
+  );
+
+  const pages = [];
+  const pushPage = () => {
+    const page = { columns: [[], []], sizes: [0, 0] };
+    pages.push(page);
+    return page;
+  };
+  let page = pushPage();
+  let column = 0;
+  for (const entry of list) {
+    const size = sizeOf(entry);
+    for (;;) {
+      const limit = limitFor(pages.length - 1);
+      // العمود الفارغ يستقبل المجموعة مهما طالت: مجموعة أطول من عمود كامل حالة
+      // نادرة جداً، والتصرف الصحيح معها ترك المتصفح يمدّها — لا حذفها ولا قصّها
+      // ولا تركها تدور بلا نهاية بحثاً عن عمود يتّسع لها.
+      if (page.sizes[column] + size <= limit + 1e-6 || page.columns[column].length === 0) {
+        page.columns[column].push(entry);
+        page.sizes[column] += size;
+        break;
+      }
+      if (column === 0) column = 1;
+      else {
+        page = pushPage();
+        column = 0;
+      }
+    }
+  }
+  return pages;
+}
+
+// الصفحة الأخيرة وحدها غير ممتلئة بطبيعتها؛ بالتعبئة التسلسلية تخرج عموداً
+// طويلاً بجانب عمود فارغ تماماً — أي نصف صفحة بيضاء، وهو نفس العطل المطلوب
+// إزالته. نعيد قطعها بنقطة واحدة تحافظ على الترتيب حرفياً: أول k مجموعة بالعمود
+// الأول والباقي بالثاني، فيبقى تسلسل القراءة (العمود الأول ثم الثاني) كما هو
+// تماماً ولا تنتقل أي مجموعة أمام أخرى. لا يُطبَّق إلا إن حسّن التوازن فعلاً
+// وبقي العمودان ضمن الحد بلا فيضان.
+function inventoryBalanceLastPage(page, limit) {
+  if (!page) return;
+  const all = [...page.columns[0], ...page.columns[1]];
+  if (all.length < 2) return;
+  const sizes = all.map((entry) => Number(entry && entry.height) || 0);
+  const total = sizes.reduce((sum, value) => sum + value, 0);
+  const currentDiff = Math.abs(page.sizes[0] - page.sizes[1]);
+  let best = null;
+  let head = 0;
+  for (let k = 1; k < all.length; k += 1) {
+    head += sizes[k - 1];
+    const tail = total - head;
+    if (head > limit + 1e-6 || tail > limit + 1e-6) continue;
+    const diff = Math.abs(head - tail);
+    if (!best || diff < best.diff) best = { k, diff, head, tail };
+  }
+  if (!best || best.diff >= currentDiff) return;
+  page.columns = [all.slice(0, best.k), all.slice(best.k)];
+  page.sizes = [best.head, best.tail];
+}
+
+// المسار الاحتياطي (بلا DOM): نفس محرّك التعبئة التسلسلية لكن بوحدة «سطر» بدل
+// البكسل. يبقى موجوداً كي لا ينهار التقرير في أي بيئة بلا document، وهو أفضل
+// من التوزيع القديم لأنه لا يهدر العمودين معاً عند أول مجموعة لا تتّسع.
+function inventoryTwoColumnPages(entries, columnCapacity = 48) {
+  return inventoryPackPages(entries, {
+    fullBudget: columnCapacity,
+    firstPageBudget: columnCapacity,
+    sizeOf: (entry) => Number(entry && entry.rows) || 0
+  });
+}
+
+// يقيس الارتفاع الحقيقي لكل مجموعة (رأسها + كل صفوفها + الحدود + margin-bottom
+// الذي لا يدخل ضمن getBoundingClientRect) داخل حاوية مخفية بنفس CSS التقرير
+// وبنفس عرض العمود الفعلي. يقيس معها رأس الصفحة وبطاقات الملخص وسطر التذييل كي
+// تُخصم من ميزانية الصفحات التي تظهر فيها فعلاً. يرجع null بلا DOM.
+function measureInventoryReportBlocks(parts, geometry) {
+  if (typeof document === "undefined" || !document.body) return null;
+  const probe = document.createElement("div");
+  probe.setAttribute("aria-hidden", "true");
+  probe.style.cssText =
+    `position:fixed;left:-10000px;top:0;width:${geometry.contentWidthPx}px;visibility:hidden;pointer-events:none`;
+  // نفس بنية الصفحة الحقيقية بالضبط (بما فيها شبكة العمودين وفجوتها) كي يخرج
+  // عرض العمود المقيس مطابقاً لعرضه عند التصدير، فيطابق التفاف الأسماء الطويلة.
+  probe.innerHTML = `${REPORT_STYLE}${INVENTORY_REPORT_STYLE}
+    <div class="ozk-rpt inventory-rpt" style="padding:0">
+      <section class="inventory-page">
+        ${parts.headHtml}
+        ${parts.cardsHtml}
+        <div class="inventory-columns">
+          <div class="inventory-column" data-probe-groups>${parts.entries.map((entry) => entry.html).join("")}</div>
+          <div class="inventory-column"></div>
+        </div>
+        ${parts.footHtml}
+      </section>
+    </div>`;
+  document.body.appendChild(probe);
+  try {
+    // الهوامش الرأسية لا تدخل ضمن getBoundingClientRect ومع ذلك تستهلك من ارتفاع
+    // الصفحة فعلياً — إغفالها كان جزءاً من الخطأ التراكمي القديم.
+    const outerHeight = (element) => {
+      if (!element) return 0;
+      const style = getComputedStyle(element);
+      return element.getBoundingClientRect().height
+        + (parseFloat(style.marginTop) || 0)
+        + (parseFloat(style.marginBottom) || 0);
+    };
+    const column = probe.querySelector("[data-probe-groups]");
+    const heights = [...(column ? column.children : [])].map(outerHeight);
+    if (heights.length !== parts.entries.length) return null;
+    if (heights.some((height) => !Number.isFinite(height) || height <= 0)) return null;
+    return {
+      heights,
+      headPx: outerHeight(probe.querySelector(".rhead")),
+      cardsPx: outerHeight(probe.querySelector(".cards")),
+      footPx: outerHeight(probe.querySelector(".inventory-page > p.muted"))
+    };
+  } finally {
+    probe.remove();
+  }
+}
+
+// يبني صفحات التقرير النهائية: قياس حقيقي إن توفّر DOM، وإلا التقدير بعدد الأسطر.
+function inventoryReportPages(parts, mode) {
+  const geometry = inventoryPageGeometry(mode);
+  const measured = measureInventoryReportBlocks(parts, geometry);
+  if (!measured) return inventoryTwoColumnPages(parts.entries);
+
+  const entries = parts.entries.map((entry, index) => ({ ...entry, height: measured.heights[index] }));
+  const fullBudget = geometry.pageHeightPx - measured.headPx;      // الرأس يتكرر بكل صفحة
+  const firstPageBudget = fullBudget - measured.cardsPx;           // البطاقات بالصفحة الأولى وحدها
+  const base = { fullBudget, firstPageBudget, safetyPx: INVENTORY_PACK_SAFETY_PX };
+
+  // سطر التذييل يظهر بالصفحة الأخيرة وحدها، ولا نعرف رقمها قبل التوزيع. نبحث عن
+  // «نقطة ثبات»: توزيعٌ حُجز فيه ارتفاع التذييل على الصفحة التي صارت فعلاً أخيرته
+  // (pages.length - 1 === reserveIndex). بدون هذا الحجز كان سطر التذييل وحده يدفع
+  // مجموعة كاملة إلى صفحة إضافية شبه فارغة.
+  //
+  // ⚠️ إصلاح ملاحظة Codex P1 على PR #156: يُمنع الاكتفاء بعدد محاولات ثابت ثم
+  // الاحتفاظ بآخر ناتج. نقل الحجز إلى فهرس جديد يُعيد الصفحة السابقة إلى ميزانيتها
+  // الكاملة، فقد يهبط عدد الصفحات ثانيةً وتتناوب الحلقة بين N وN+1 بلا استقرار
+  // أبداً — فتخرج بتخطيط لم يُحجز فيه التذييل على صفحته الأخيرة، فيفيض المحتوى
+  // ويطبع الرأس رقم صفحات كاذباً. (قياس على 20000 حالة بالهندسة الحقيقية: 3.39%
+  // تتذبذب، وكلها كانت تُنتج فيضاناً.)
+  //
+  // لذلك نكتشف الدورة صراحةً عبر مجموعة الفهارس المُجرَّبة، ولا نخرج إلا بتخطيط
+  // «آمن للتذييل» فعلياً: أطول عمود في صفحته الأخيرة + التذييل يبقى ضمن حدّ تلك
+  // الصفحة. عند الدورة نضمن ذلك بتوزيع يحجز التذييل من **كل** الصفحات (فأياً كانت
+  // الأخيرة تحمل الحجز حتماً)، ونقبل مرشحاً أقل صفحاتٍ منه فقط إن كان آمناً بنفس
+  // المعيار. صفحة إضافية أهون من فيضان أو رقم صفحات كاذب.
+  const limitOfPage = (pageIndex) =>
+    Math.max(0, (pageIndex === 0 ? firstPageBudget : fullBudget) - INVENTORY_PACK_SAFETY_PX);
+  const footerFits = (layout) => {
+    const lastIndex = layout.length - 1;
+    const tallest = Math.max(layout[lastIndex].sizes[0], layout[lastIndex].sizes[1]);
+    return tallest + measured.footPx <= limitOfPage(lastIndex) + 1e-6;
+  };
+
+  let pages = null;
+  let candidate = inventoryPackPages(entries, base);
+  const candidates = [candidate];
+  const triedReserveIndexes = new Set();
+  for (;;) {
+    const reserveIndex = candidate.length - 1;
+    if (triedReserveIndexes.has(reserveIndex)) break; // دورة: هذا الفهرس جُرّب سابقاً
+    triedReserveIndexes.add(reserveIndex);
+    const next = inventoryPackPages(entries, { ...base, reserveIndex, reservePx: measured.footPx });
+    candidates.push(next);
+    if (next.length - 1 === reserveIndex && footerFits(next)) {
+      pages = next; // نقطة ثبات: الحجز مطبَّق على الصفحة الأخيرة الفعلية
+      break;
+    }
+    candidate = next;
+  }
+
+  if (!pages) {
+    const reserveEveryPage = inventoryPackPages(entries, {
+      fullBudget: fullBudget - measured.footPx,
+      firstPageBudget: firstPageBudget - measured.footPx,
+      safetyPx: INVENTORY_PACK_SAFETY_PX
+    });
+    pages = [reserveEveryPage, ...candidates]
+      .filter(footerFits)
+      .sort((a, b) => a.length - b.length)[0] || reserveEveryPage;
+  }
+
+  const lastIndex = pages.length - 1;
+  const lastLimit = Math.max(
+    0,
+    (lastIndex === 0 ? firstPageBudget : fullBudget) - INVENTORY_PACK_SAFETY_PX - measured.footPx
+  );
+  inventoryBalanceLastPage(pages[lastIndex], lastLimit);
   return pages;
 }
 
@@ -5520,20 +5755,31 @@ function inventoryReportPdfMarkup() {
     <tr class="inventory-group-row"><td colspan="3">${escapeHtml(pdfAr(group.label))}<span class="group-count">${escapeHtml(group.items.length)}</span></td></tr>
     ${group.items.map((it) => `<tr><td style="width:48%">${escapeHtml(pdfAr(it.name || ""))}</td><td style="width:29%">${escapeHtml(pdfAr(formatQtyCartons(it)))}</td><td style="width:23%">${badgeOf(it)}</td></tr>`).join("")}
   </tbody></table></div>`;
-  const pages = inventoryTwoColumnPages(grouped);
-  const pagesMarkup = pages.map((page, pageIndex) => `<section class="inventory-page">
-    <div class="rhead"><div class="brand">OZK TOBACCO<small>تقرير المخزون التشغيلي</small></div>
-      <div class="rtitle"><h2>المخزون — حسب ترتيب النشرة</h2><span>بتاريخ ${escapeHtml(todayIsoDate())} · صفحة ${escapeHtml(pageIndex + 1)} من ${escapeHtml(pages.length)}</span></div></div>
-    ${pageIndex === 0 ? `<div class="cards">
+  // كل مجموعة تُبنى مرة واحدة ثم تُقاس وتُرسم بنفس الـHTML حرفياً — فيستحيل أن
+  // يفترق ما قِيس عمّا طُبع. `rows` للمسار الاحتياطي بلا DOM فقط.
+  const entries = grouped.map((group) => ({ html: groupMarkup(group), rows: group.items.length + 1 }));
+  const headMarkup = (pageIndex, pageCount) => `<div class="rhead"><div class="brand">OZK TOBACCO<small>تقرير المخزون التشغيلي</small></div>
+      <div class="rtitle"><h2>المخزون — حسب ترتيب النشرة</h2><span>بتاريخ ${escapeHtml(todayIsoDate())} · صفحة ${escapeHtml(pageIndex + 1)} من ${escapeHtml(pageCount)}</span></div></div>`;
+  const cardsMarkup = `<div class="cards">
       <div class="rcard"><div class="v gold">${escapeHtml(classified.length)}</div><div class="l">أصناف فعلية ومتداولة</div></div>
       <div class="rcard"><div class="v red">${escapeHtml(low.length)}</div><div class="l">قريب من النفاد حسب حركة المبيع</div></div>
       <div class="rcard"><div class="v red">${escapeHtml(out.length)}</div><div class="l">نافد وله طلب حديث</div></div>
-    </div>` : ""}
+    </div>`;
+  const footMarkup = `<p class="muted" style="margin-top:6px">الحالة محسوبة على تغطية المبيع خلال ${escapeHtml(periodDays)} يوماً${hasSalesReport ? "" : " (لم تصل حركة المبيع؛ استُخدم تصنيف المزامنة مؤقتاً)"}. لا تُدمج أصناف المعسل.${review.length ? ` يوجد ${escapeHtml(review.length)} صنف يحتاج مراجعة جرد.` : ""}${excludedCount > 0 ? ` استُبعد ${escapeHtml(excludedCount)} صنفاً نافداً بلا مبيع حديث.` : ""}</p>`;
+  // هندسة الصفحة تختلف بين ورقة الطباعة الأصلية (اللابتوب) وrasterization الهاتف،
+  // فنقيس ونعبّئ بهندسة المسار الذي سيُصدَّر فعلاً — راجع inventoryPageGeometry.
+  const pages = inventoryReportPages(
+    { entries, headHtml: headMarkup(0, 1), cardsHtml: cardsMarkup, footHtml: footMarkup },
+    isHandheldDevice() ? "canvas" : "print"
+  );
+  const pagesMarkup = pages.map((page, pageIndex) => `<section class="inventory-page">
+    ${headMarkup(pageIndex, pages.length)}
+    ${pageIndex === 0 ? cardsMarkup : ""}
     <div class="inventory-columns">
-      <div class="inventory-column">${page.columns[0].map(groupMarkup).join("") || '<p class="muted">—</p>'}</div>
-      <div class="inventory-column">${page.columns[1].map(groupMarkup).join("") || '<p class="muted">—</p>'}</div>
+      <div class="inventory-column">${page.columns[0].map((entry) => entry.html).join("")}</div>
+      <div class="inventory-column">${page.columns[1].map((entry) => entry.html).join("")}</div>
     </div>
-    ${pageIndex === pages.length - 1 ? `<p class="muted" style="margin-top:6px">الحالة محسوبة على تغطية المبيع خلال ${escapeHtml(periodDays)} يوماً${hasSalesReport ? "" : " (لم تصل حركة المبيع؛ استُخدم تصنيف المزامنة مؤقتاً)"}. لا تُدمج أصناف المعسل.${review.length ? ` يوجد ${escapeHtml(review.length)} صنف يحتاج مراجعة جرد.` : ""}${excludedCount > 0 ? ` استُبعد ${escapeHtml(excludedCount)} صنفاً نافداً بلا مبيع حديث.` : ""}</p>` : ""}
+    ${pageIndex === pages.length - 1 ? footMarkup : ""}
   </section>`).join("");
   return `${REPORT_STYLE}${INVENTORY_REPORT_STYLE}<div class="ozk-rpt inventory-rpt">${pagesMarkup}</div>`;
 }
