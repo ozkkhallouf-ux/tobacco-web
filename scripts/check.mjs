@@ -50,7 +50,9 @@ const required = [
   "tools/push-ameen-account-balances.ps1",
   "tools/register-account-balances-task.ps1",
   "supabase/project-task-health-monitor.sql",
-  "scripts/check-project-task-monitors.mjs"
+  "scripts/check-project-task-monitors.mjs",
+  "supabase/tests/cron-job-health-truth-table.sql",
+  "scripts/check-cron-job-health-classifier.mjs"
 ];
 
 let failed = false;

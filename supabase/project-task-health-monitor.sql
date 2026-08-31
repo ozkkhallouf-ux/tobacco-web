@@ -105,6 +105,76 @@ on conflict(task_key) do update set task_label=excluded.task_label,report_source
 -- الافتراضية الصحيحة لها، لكن الوضوح أفضل من الاعتماد الضمني).
 update private.project_task_monitors set check_status=true where task_key='khalil-audit';
 
+-- ============================================================================
+-- مصنِّف حالة مهام pg_cron — دالة نقية، مستخرجة عمداً كي يصبح المنطق مختبَراً.
+--
+-- عطل إنتاجي حيّ (2026-08-31): كان الشرط `last_job_status<>'succeeded'` قائمة
+-- حظر — كل ما ليس "succeeded" فشل، بما فيه التشغيل الجاري. النتيجة عاصفة
+-- إنذارات كاذبة على prune-inventory-reports: المراقب (*/5) وprune (*/10)
+-- يبدآن في الثانية نفسها، وقياس ثلاث حوادث مستقلة أثبت أن حلقة cron تُنفَّذ
+-- خلال أقل من 400 ميلي‌ثانية من بدء معاملة المراقب — أي داخل نافذة تشغيل
+-- prune (0.3–0.4 ثانية) تماماً:
+--   المراقب now()=08:50:00.213408 · بدء prune=08:50:00.215132 · نهايته=08:50:00.599234
+-- فيقرأ الصف وهو فعلاً "running" فيعلنه فشلاً، ثم يعلن تعافياً بعد خمس دقائق
+-- — ست مرات في الساعة. فشل prune الحقيقي الوحيد في 11226 تشغيلة كان في
+-- 2026-08-20، فكل ما عداه كان ضجيجاً خالصاً.
+--
+-- pg_cron يكتب في cron.job_run_details.status ستّ قيم: أربع عابرة
+-- (starting/connecting/sending/running) واثنتان نهائيتان (succeeded/failed).
+-- العابرة تُحدَّث في مكانها فلا تبقى في التاريخ — تُرى باللقطة الآنية وحدها،
+-- وهو بالضبط ما يفعله المراقب. لذلك التصنيف هنا قائمة سماح صريحة: أي قيمة
+-- غير معروفة تُعامل معاملة العابرة (تحفُّظ: صمت داخل المهلة ثم إنذار بعدها)
+-- بدل أن تُعدّ فشلاً فورياً كما كان.
+--
+-- p_grace = 10 دقائق مشتقة من القياس لا من التقدير: أطول تشغيل مشروع في
+-- تاريخ هذه القاعدة كله هو 404.99 ثانية (dispatch-telegram-outbox) ≈ 6.75
+-- دقيقة. عشر دقائق تغطّيه بهامش دون أن تعمي عن جمود حقيقي.
+--
+-- حدّ المهلة محسوم صراحة ولا يُترك لالتباس < مقابل <=:
+--   العمر <  grace ⇒ inflight
+--   العمر >= grace ⇒ stuck      (أي أن عشر دقائق بالضبط = stuck)
+--
+-- p_now وسيط صريح بدل now() داخل الجسم كي يبقى اختبار الحدود حتمياً بالضبط
+-- بدل أن يعتمد على لحظة التنفيذ.
+--
+-- القيم المُعادة:
+--   'disabled'   المهمة نفسها معطّلة              ⇒ إنذار فوري
+--   'failed'     آخر تشغيل انتهى بالفشل            ⇒ إنذار فوري
+--   'stuck'      عابرة/مجهولة تجاوزت المهلة        ⇒ إنذار
+--   'inflight'   عابرة/مجهولة ضمن المهلة           ⇒ لا إنذار
+--   'never_run'  لا تاريخ تشغيل إطلاقاً             ⇒ لا إنذار
+--   'ok'         آخر تشغيل نجح                     ⇒ لا إنذار
+--
+-- جدول الحقيقة الكامل مختبَر في supabase/tests/cron-job-health-truth-table.sql
+-- ============================================================================
+create or replace function private.cron_job_health(
+  p_active boolean,
+  p_status text,
+  p_last_at timestamptz,
+  p_grace interval default interval '10 minutes',
+  p_now timestamptz default now()
+) returns text language sql immutable parallel safe as $fn$
+  select case
+    -- التعطيل يسبق كل شيء: هو العنوان مهما كانت آخر حالة تشغيل. و«ليس true»
+    -- تشمل NULL عمداً — حالة مجهولة النشاط تُعامل معاملة المعطّلة لا المُهمَلة.
+    when p_active is not true then 'disabled'
+    -- NULL = لم تُشغَّل قط. سلوك صريح ومقصود لا نتيجة عرضية لثلاثية SQL:
+    -- لا يحمل cron.job أي طابع إنشاء، فلا سبيل للتمييز بين مهمة أُنشئت للتوّ
+    -- وأخرى لا تُقلع أبداً — وإنذارٌ هنا كان سيصرخ على كل مهمة جديدة.
+    when p_status is null then 'never_run'
+    when p_status = 'succeeded' then 'ok'
+    when p_status = 'failed' then 'failed'
+    -- عابرة أو مجهولة بلا طابع زمني: لا يمكن إثبات حداثتها، فالموقف المحافظ
+    -- هو الإنذار لا الصمت.
+    when p_last_at is null then 'stuck'
+    when p_now - p_last_at < p_grace then 'inflight'
+    else 'stuck'
+  end;
+$fn$;
+
+revoke all on function private.cron_job_health(boolean,text,timestamptz,interval,timestamptz)
+  from public,anon,authenticated;
+
 create or replace function private.monitor_project_tasks()
 returns void language plpgsql security definer
 set search_path=private,public,cron,pg_temp
@@ -112,6 +182,7 @@ as $$
 declare cfg record; last_at timestamptz; age_minutes numeric; last_status text; is_backlogged boolean;
  previous_healthy boolean; previous_alert_at timestamptz; detail_text text;
  job_record record; last_job_status text; last_job_at timestamptz;
+ job_health text; cron_grace interval:=interval '10 minutes';
 begin
  for cfg in select * from private.project_task_monitors where enabled order by task_key loop
   -- جولة ٤: source_table='inventory_reports' (الافتراضي) يبقي السلوك
@@ -170,9 +241,17 @@ begin
  for job_record in select jobid,jobname,active from cron.job where jobname<>'monitor-project-tasks' loop
   select status,start_time into last_job_status,last_job_at from cron.job_run_details
    where jobid=job_record.jobid order by start_time desc limit 1;
-  if not job_record.active or(last_job_status is not null and last_job_status<>'succeeded') then
-   detail_text:=case when not job_record.active then 'المهمة معطلة'
-    else format('آخر تشغيل: %s عند %s',last_job_status,to_char(last_job_at at time zone 'Asia/Riyadh','YYYY-MM-DD HH24:MI')) end;
+  -- التصنيف كله في الدالة النقية أعلاه؛ هنا قرار الإنذار فقط.
+  -- 'ok' و'never_run' و'inflight' تمرّ إلى الفرع السليم بلا إنذار.
+  job_health:=private.cron_job_health(job_record.active,last_job_status,last_job_at,cron_grace);
+  if job_health in ('disabled','failed','stuck') then
+   detail_text:=case job_health
+    when 'disabled' then 'المهمة معطلة'
+    when 'failed' then format('فشل آخر تشغيل عند %s',
+     coalesce(to_char(last_job_at at time zone 'Asia/Riyadh','YYYY-MM-DD HH24:MI'),'وقت غير معروف'))
+    else format('عالقة في حالة %s منذ %s',coalesce(last_job_status,'غير معروفة'),
+     coalesce(round(extract(epoch from(now()-last_job_at))/60.0,1)::text||' دقيقة','مدة غير معروفة'))
+    end;
    select is_healthy,last_alert_at into previous_healthy,previous_alert_at
     from private.project_task_health_state where task_key='cron:'||job_record.jobname;
    if previous_healthy is distinct from false or previous_alert_at is null or previous_alert_at<now()-interval '60 minutes' then
