@@ -89,6 +89,32 @@ name: Codex Review Gate
 #   (selectCanonicalCheckRunId + buildCanonicalCheckRunPayload) +
 #   check-codex-review-gate-logic.mjs — جزء من npm run check.
 #
+# ⚠️ إصلاح جوهري سادس بتاريخ 2026-08-31 (تصادم اسم الـjob التلقائي مع الـcheck-run الكانوني):
+#   بعد نشر الإصلاح الخامس، تحقّق حي على PR #146 (commit 7dadfbf) أظهر أن rollup ما زال
+#   يحوي 3 سياقات منفصلة باسم "Codex Review Gate" على نفس head_sha رغم الـdedup، بل وconclusion
+#   حرفي failure. السبب الجذري الحقيقي (وليس الافتراض القديم أعلاه): GitHub Actions ينشئ
+#   check-run **تلقائياً** لكل تشغيل job، باسم `jobs.gate.name` — وكان مضبوطاً حرفياً
+#   "Codex Review Gate"، أي نفس اسم الـcheck-run الذي ننشره/نُحدّثه يدوياً عبر API. تبيّن أن
+#   هذا الـcheck التلقائي **يلتصق فعلاً بـhead_sha الحقيقي للـPR** لأحداث pull_request_review
+#   وpull_request_review_comment وpull_request_target — عكس الافتراض المدوَّن في تعليق
+#   "إصلاح ملاحظة Codex P1 بتاريخ 2026-08-27" أعلاه. النتيجة: كل تشغيل مستقل (وقد عمل Codex
+#   على نفس الـHEAD بأكثر من حدث دفعة واحدة: pull_request_review + pull_request_review_comment
+#   ×2 خلال ثوانٍ) يُنتج check-run تلقائياً **إضافياً** بنفس الاسم، مستقل تماماً عن منطق
+#   الـdedup اليدوي (الذي يُدير check-run واحداً فقط من صنعه هو، لا يستطيع التحكم بما ينشئه
+#   GitHub تلقائياً للـjob نفسه). فتراكمت 3 سياقات "Codex Review Gate" (اثنان تلقائيان + واحد
+#   يدوي)، والـruleset (الذي يطلب حرفياً context باسم "Codex Review Gate") يأخذها جميعاً.
+#   الحل: تغيير `jobs.gate.name` إلى اسم مختلف عمداً (أدناه) حتى لا يتصادم الـcheck التلقائي
+#   إطلاقاً مع اسم الـcheck-run الكانوني المُدار يدوياً — الأخير فقط يبقى مطابقاً حرفياً
+#   لاسم required status check "Codex Review Gate" في الـruleset (تحقَّق فعلياً عبر
+#   `gh api repos/.../rules/branches/main`)، فلا مصدر آخر يزاحمه في نفس الاسم بعد الآن.
+#
+#   إصلاح إضافي مكتشَف بنفس الفحص الحي: خطوة البحث كانت تستخدم
+#   `gh api ".../check-runs" -f check_name="Codex Review Gate" --paginate` — واتضح أن `gh api`
+#   يُرجع 404 خاطئاً تحديداً مع تركيبة `-f` وقيمة تحوي مسافة + `--paginate` معاً (مؤكَّد يدوياً:
+#   نفس الطلب بدون `-f check_name` أو عبر query string مباشرة يرجع 200 بنجاح). الحل: إزالة
+#   `-f check_name` نهائياً وتصفية النتائج بالاسم عبر jq بعد الجلب بدل الاعتماد على فلترة
+#   الخادم — يتجنب هذا الخلل في `gh api` تماماً، وأصبح غير ضروري أصلاً بعد إصلاح تصادم الاسم.
+#
 # ⚠️ إصلاح جوهري بتاريخ 2026-08-29 (الـartifact الحقيقي الذي ينشره Codex ليس Formal Review):
 #   تحقق حي على PR #128 أثبت أن chatgpt-codex-connector[bot] لا ينشر نتيجته كـ
 #   Pull Request Review (لا يظهر إطلاقاً في GET /pulls/{n}/reviews) ولا كـReview Comment
@@ -177,7 +203,12 @@ concurrency:
 
 jobs:
   gate:
-    name: Codex Review Gate
+    # ⚠️ إصلاح جوهري سادس (2026-08-31): يُمنع نهائياً أن يكون اسم الـjob هنا حرفياً
+    # "Codex Review Gate" — GitHub Actions ينشئ check-run تلقائياً بهذا الاسم بالضبط لكل
+    # تشغيل، فيتصادم مع الـcheck-run الكانوني المُدار يدوياً بنفس الاسم (المطلوب فعلياً في
+    # ruleset الفرع main). الاسم هنا معلوماتي/تشخيصي فقط في تبويب Actions — لا علاقة له
+    # بنتيجة الـGate الفعلية إطلاقاً.
+    name: Codex Review Gate (تشغيل داخلي — ليس Required Check)
     runs-on: ubuntu-latest
     if: >
       github.event_name == 'workflow_dispatch' ||
@@ -302,8 +333,11 @@ jobs:
           # يوجد بالفعل واحد بنفس الاسم على نفس head_sha بالضبط — يُحدَّث في مكانه (PATCH)
           # كي لا يتعايش قديم (FAIL شرعي وقته) مع جديد (PASS) على نفس الـsha، فلا يتلوّث
           # rollup الـruleset أبداً. انظر تعليق "إصلاح جوهري خامس" أعلى الملف.
-          EXISTING_RUNS_JSON=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs" \
-            -f check_name="$NAME" --paginate | jq -s '[.[].check_runs[]]')
+          # ملاحظة (إصلاح جوهري سادس 2026-08-31): لا نستخدم `-f check_name=...` هنا —
+          # ثبت أن `gh api` يُرجع 404 خاطئاً مع هذه التركيبة تحديداً (قيمة تحوي مسافة +
+          # --paginate). نجلب كل check-runs على هذا الـsha ونصفّي بالاسم عبر jq بعد الجلب.
+          EXISTING_RUNS_JSON=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs" --paginate \
+            | jq -s --arg name "$NAME" '[.[].check_runs[] | select(.name == $name)]')
           EXISTING_ID=$(echo "$EXISTING_RUNS_JSON" | jq -r 'sort_by(.id) | last | .id // empty')
 
           TEXT=$(jq -n --arg badges "${{ steps.check.outputs.badges }}" \

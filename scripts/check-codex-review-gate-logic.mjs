@@ -158,8 +158,18 @@ assert.equal(
 //    مسار conclusion=failure عند غياب المراجعة — pending (in_progress) فقط.
 assert.match(
   yml,
-  /repos\/\$REPO\/commits\/\$HEAD_SHA\/check-runs[\s\S]{0,80}check_name="\$NAME"/,
-  'يجب البحث عن check-run كانوني موجود على نفس head_sha قبل أي POST جديد',
+  /repos\/\$REPO\/commits\/\$HEAD_SHA\/check-runs[\s\S]{0,120}select\(\.name == \$name\)/,
+  'يجب البحث عن check-run كانوني موجود على نفس head_sha قبل أي POST جديد (تصفية بـjq لا بـ-f check_name، لتفادي خلل gh api 404 المكتشف حياً)',
+);
+assert.doesNotMatch(
+  yml,
+  /-f check_name="\$NAME"/,
+  'يُمنع استخدام `-f check_name` هنا — ثبت أنه يُنتج 404 خاطئاً من gh api مع --paginate وقيمة تحوي مسافة (مرصود حياً على PR #146)',
+);
+assert.doesNotMatch(
+  yml,
+  /name: Codex Review Gate\s*\n\s*runs-on:/,
+  'اسم الـjob يجب ألا يكون حرفياً "Codex Review Gate" — يتصادم مع الـcheck-run الكانوني والـrequired check في الـruleset (مرصود حياً)',
 );
 assert.match(
   yml,
