@@ -68,8 +68,13 @@ function copySnapshotRow(row) {
 function newSnapshotRow(key, cost, sale) {
   const name = String(cost?.item_name ?? sale?.item_name ?? '').trim();
   if (!name) throw new Error(`item_name is unavailable for new item ${key}`);
+  // item_guid يجب أن يبقى GUID الأمين الحقيقي فقط أو null — لا نكتب match_key هنا.
+  // sale.item_key دائماً GUID حقيقي (CONVERT(nvarchar(36), bi.MatGUID) في push-sales-line-items.ps1)
+  // فإن وُجد بيع لهذا المفتاح فـkey نفسه GUID حقيقي؛ خلاف ذلك نأخذ item_guid الحقيقي من التكلفة إن وُجد،
+  // وإلا نترك null (يعني أن key هنا ليس أكثر من match_key احتياطي من item_costs).
+  const guid = cost?.item_guid ? String(cost.item_guid).trim() : (sale ? key : null);
   return {
-    id: globalThis.crypto.randomUUID(), item_key: key, item_guid: key,
+    id: globalThis.crypto.randomUUID(), item_key: key, item_guid: guid || null,
     item_number: null, item_name: name, unit1_name: '',
     unit2_name: String(sale?.unit2_name ?? ''), unit2_factor: sale?.unit2_factor ?? 1,
     stock_unit1: null, stock_unit2: null, last_purchase_price: null,
@@ -90,7 +95,12 @@ export function buildItemSnapshot({ currentSnapshot, itemCosts = [], salesLineIt
 
   const costs = new Map();
   for (const cost of itemCosts) {
-    const key = requiredKey(cost.item_guid, 'item_costs.item_guid');
+    // بعض مواد item_costs بلا GUID أمين حقيقي (item_guid = null) — هذا وضع طبيعي متوقّع
+    // (push-item-costs.ps1 لا يفبرك GUID)، فلا يجوز أن يُسقط الـsnapshot كله بسببها.
+    // نستخدم match_key (مضمون غير فارغ من push-item-costs.ps1) كمفتاح تجميع احتياطي فقط؛
+    // لا يُكتب لاحقاً في item_guid إلا إذا كان GUID حقيقياً — انظر newSnapshotRow.
+    const guid = String(cost.item_guid ?? '').trim();
+    const key = guid || requiredKey(cost.match_key, 'item_costs.match_key');
     const previous = costs.get(key);
     if (!previous || String(cost.updated_at ?? '') >= String(previous.updated_at ?? '')) costs.set(key, cost);
   }
