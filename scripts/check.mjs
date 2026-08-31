@@ -935,10 +935,17 @@ for (const forbidden of ["html2pdf", "html2canvas", "foreignObjectRendering", "c
     failed = true;
   }
 }
+// جسم المستند المطبوع يجب أن يكون **نفس** رسم المعاينة، لا HTML بديلاً يُبنى
+// للتصدير وحده. كان العقد يثبّت `customerPricePdfMarkup(dataset)` حرفياً؛ صار
+// المصدر الآن `bulletinRenderPlan(dataset)` الذي يبني المجموعات وخيارات الرسم
+// و**الـlayout المقاس** مرة واحدة، ثم تشتقّ منه المعاينةُ والتصديرُ الرسمَ وعددَ
+// الصفحات معاً — وهو شرط أقوى: لا يضمن تطابق الرسم فحسب بل تطابق عدّاد الصفحات
+// (كانت الترويسة تقول «2 صفحة» والملف 3).
 for (const contract of [
   "printHtmlDocument(documentHtml",
   "template.printDocument({",
-  "bodyHtml: customerPricePdfMarkup(dataset)"
+  "const plan = bulletinRenderPlan(dataset)",
+  "bodyHtml: plan.markup"
 ]) {
   if (!bulletinPdfExport.includes(contract)) {
     console.error(`Price bulletin native-print export contract is missing: ${contract}`);
