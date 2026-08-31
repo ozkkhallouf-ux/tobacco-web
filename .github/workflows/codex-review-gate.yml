@@ -89,6 +89,37 @@ name: Codex Review Gate
 #   (selectCanonicalCheckRunId + buildCanonicalCheckRunPayload) +
 #   check-codex-review-gate-logic.mjs — جزء من npm run check.
 #
+# ⚠️ إصلاح جوهري سابع بتاريخ 2026-08-31 (حارس تشغيل قديم صريح — race condition حقيقي رصدها Codex كـP1):
+#   بعد الإصلاحين الخامس والسادس، رصد Codex نفسه P1 حياً على PR #146 (thread غير محلول
+#   وغير outdated): تقسيم concurrency حسب github.event_name (الإصلاح الرابع أدناه) يسمح
+#   بتشغيلات متزامنة فعلية لنفس (PR, HEAD) — مثلاً pull_request_target عند فتح الـPR
+#   وissue_comment عند "@codex review" يمكن أن يبدآ معاً. منطق الإصلاح الخامس (PATCH في
+#   مكانه بدل POST جديد) يمنع تعدد check-runs بنفس الاسم، لكنه **غير ذري**: بحث ثم كتابة
+#   (lookup-then-write) — إن بدأ تشغيل قديم (لا مراجعة بعد وقته) قبل تشغيل أحدث (وجد
+#   مراجعة) لكنه انتهى ونفّذ PATCH بعده، يكتب "in_progress" فوق "success" الأحدث — تراجُع
+#   فعلي (regression) في نتيجة الـGate رغم عدم وجود أي check-run مكرر.
+#
+#   الحل ثلاثي الطبقات (دفاع متعدد الطبقات، لا يعتمد على ترتيب وصول الأحداث وحده):
+#     1. توحيد concurrency: مفتاح المجموعة أصبح برقم الـPR فقط (بلا github.event_name) —
+#        كل تشغيلات نفس الـPR بمجموعة واحدة، فتُلغي (cancel-in-progress) أي تشغيل سابق ما
+#        زال قائماً عند وصول تشغيل جديد. هذا يقلّص التداخل الفعلي كثيراً لكنه ليس ضماناً
+#        تاماً (نافذة زمنية قصيرة ممكنة بين إشارة الإلغاء واكتمال استدعاء API الجاري فعلاً).
+#     2. إعادة قراءة head.sha الحيّ للـPR مباشرة قبل أي كتابة نهائية (وليس فقط في بداية
+#        التشغيل): إن تغيّر (push جديد وصل أثناء تنفيذ هذا التشغيل تحديداً) فهذا التشغيل لم
+#        يعد يخص أحدث HEAD إطلاقاً — يخرج بلا أي كتابة، مهما كانت نتيجته المحسوبة سابقاً.
+#     3. حارس تشغيل قديم صريح (stale-run guard) عبر حقل `external_id` الرسمي في check-run:
+#        كل تشغيل يحمل "generation" فريدة تصاعدية = `github.run_id`.`github.run_attempt`
+#        (GitHub يخصّص run_id تصاعدياً وقت إنشاء التشغيل نفسه — لا علاقة له بترتيب
+#        الاكتمال). قبل أي PATCH/POST نهائي، يُقرأ external_id للـcheck-run الكانوني
+#        الموجود حالياً (إن وُجد): إن كانت قيمته (generation تشغيل سابق) أحدث من أو تساوي
+#        generation هذا التشغيل ⇒ هذا التشغيل قديم/متأخر بالتعريف (بغض النظر عن ترتيب وصول
+#        الأحداث أو نتيجة السباق مع الإلغاء) ⇒ يخرج بلا كتابة. كل كتابة ناجحة تُثبّت
+#        generation نفسها في external_id، فتصبح الحماية تراكمية عبر كل التشغيلات اللاحقة.
+#   هذا يضمن monotonicity صريحة: لا يمكن لأي تشغيل ذي generation أقدم أن يكتب فوق نتيجة
+#   تشغيل ذي generation أحدث، بصرف النظر تماماً عن ترتيب الاكتمال الفعلي على الشبكة.
+#   منطق runGeneration/isStaleWrite/isStaleHead موثَّق ومختبَر آلياً في
+#   codex-review-gate-logic.mjs + check-codex-review-gate-logic.mjs (جزء من npm run check).
+#
 # ⚠️ إصلاح جوهري سادس بتاريخ 2026-08-31 (تصادم اسم الـjob التلقائي مع الـcheck-run الكانوني):
 #   بعد نشر الإصلاح الخامس، تحقّق حي على PR #146 (commit 7dadfbf) أظهر أن rollup ما زال
 #   يحوي 3 سياقات منفصلة باسم "Codex Review Gate" على نفس head_sha رغم الـdedup، بل وconclusion
@@ -185,20 +216,16 @@ permissions:
   checks: write
 
 concurrency:
-  # إصلاح جوهري رابع بتاريخ 2026-08-31 (فصل concurrency group حسب نوع الحدث):
+  # ⚠️ إصلاح جوهري رابع بتاريخ 2026-08-31 (فصل concurrency group حسب نوع الحدث) — مُلغى
+  #   ومُستبدَل بالإصلاح السابع أعلى الملف. تم إبقاء هذا الشرح لسجل القرار فقط:
   #   لوحظ حياً على PR #146 أن فتح الـPR (pull_request_target) وتعليق "@codex review"
-  #   (issue_comment) — الذي يصل بعده بثوانٍ عادةً لأن المستخدم يطلب المراجعة فوراً —
-  #   كانا يقعان في نفس مجموعة concurrency (المفتاح كان يعتمد فقط على رقم الـPR)، فيُلغي
-  #   الثاني الأول بواسطة cancel-in-progress: true. التشغيل الملغى ليس دليل فشل ولا يمسّ
-  #   دقة الـGate (التشغيل الذي ألغاه أكمل هو نفسه وأعطى نتيجة صحيحة)، لكنه إرباك غير
-  #   ضروري في تبويب Checks. الحل: أُضيف github.event_name إلى مفتاح المجموعة، فتصبح كل
-  #   فئة حدث (pull_request_target، pull_request_review، pull_request_review_comment،
-  #   issue_comment، workflow_dispatch) بمجموعتها الخاصة — لا يُلغي أحدها الآخر إطلاقاً.
-  #   cancel-in-progress: true بقي فعالاً *داخل* نفس فئة الحدث فقط: عدة "@codex review"
-  #   متتالية مثلاً لا تزال تُلغي التشغيل الأقدم منها لنفس الفئة، فلا تتراكم تشغيلات قديمة
-  #   بلا داعٍ. لا تغيير على شرط اعتماد الـGate نفسه (مراجعة Codex صريحة على أحدث HEAD) —
-  #   مُختبَر في scripts/check-codex-review-gate-logic.mjs (جزء من npm run check).
-  group: codex-review-gate-${{ github.event.pull_request.number || github.event.issue.number || github.event.inputs.pr_number }}-${{ github.event_name }}
+  #   (issue_comment) كانا يقعان في نفس مجموعة concurrency فيُلغي الثاني الأول. الحل وقتها
+  #   كان فصل المجموعة حسب github.event_name. لكن هذا الفصل بالذات هو ما فتح نافذة
+  #   التشغيلات المتزامنة الفعلية التي كشفها Codex كـP1 (race condition في الكتابة على
+  #   check-run الكانوني — انظر "إصلاح جوهري سابع" أعلى الملف). الإصلاح السابع يعيد توحيد
+  #   المجموعة عمداً، ويعتمد بدلاً من ذلك على حارس تشغيل قديم صريح (stale-run guard) لمنع
+  #   أي تراجع في النتيجة — وليس على فصل concurrency الذي أثبت أنه غير كافٍ وحده.
+  group: codex-review-gate-${{ github.event.pull_request.number || github.event.issue.number || github.event.inputs.pr_number }}
   cancel-in-progress: true
 
 jobs:
@@ -240,6 +267,11 @@ jobs:
           echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
           echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
           echo "base_ref=$BASE_REF" >> "$GITHUB_OUTPUT"
+          # ⚠️ إصلاح جوهري سابع بتاريخ 2026-08-31: "generation" تصاعدية فريدة لهذا التشغيل
+          # تحديداً (run_id يخصّصه GitHub تصاعدياً وقت إنشاء التشغيل نفسه — لا علاقة له
+          # بترتيب الاكتمال؛ run_attempt يميّز إعادة تشغيل يدوية لنفس run_id). تُستخدم
+          # لاحقاً كحارس تشغيل قديم صريح قبل أي كتابة نهائية على check-run الكانوني.
+          echo "generation=${{ github.run_id }}.${{ github.run_attempt }}" >> "$GITHUB_OUTPUT"
           echo "PR #$PR_NUMBER — head sha: $HEAD_SHA — base: $BASE_REF"
 
       - name: تخطّي إذا الـbase ليس main (حالة workflow_dispatch فقط)
@@ -318,13 +350,15 @@ jobs:
             echo "summary=لا توجد مراجعة من $CODEX_BOT_LOGIN على أحدث commit ($HEAD_SHA) بعد. انتظر المراجعة التلقائية، أو علّق @codex review، ثم أعد المحاولة." >> "$GITHUB_OUTPUT"
           fi
 
-      - name: تحديث Check Run الكانوني الوحيد لهذا الـHEAD (إنشاء إن لم يوجد، وإلا PATCH لنفس الـid)
+      - name: تحديث Check Run الكانوني الوحيد لهذا الـHEAD (إنشاء إن لم يوجد، وإلا PATCH لنفس الـid، بحارس تشغيل قديم صريح)
         id: publish
         if: steps.pr.outputs.base_ref == 'main'
         continue-on-error: true
         run: |
           set -euo pipefail
+          PR_NUMBER="${{ steps.pr.outputs.pr_number }}"
           HEAD_SHA="${{ steps.pr.outputs.head_sha }}"
+          GENERATION="${{ steps.pr.outputs.generation }}"
           REVIEWED_COUNT="${{ steps.check.outputs.reviewed_count }}"
           SUMMARY="${{ steps.check.outputs.summary }}"
           NAME="Codex Review Gate"
@@ -336,9 +370,43 @@ jobs:
           # ملاحظة (إصلاح جوهري سادس 2026-08-31): لا نستخدم `-f check_name=...` هنا —
           # ثبت أن `gh api` يُرجع 404 خاطئاً مع هذه التركيبة تحديداً (قيمة تحوي مسافة +
           # --paginate). نجلب كل check-runs على هذا الـsha ونصفّي بالاسم عبر jq بعد الجلب.
+
+          # ⚠️ إصلاح جوهري سابع بتاريخ 2026-08-31 — الحارس الأول: إعادة قراءة head.sha
+          # الحيّ للـPR مباشرة قبل أي كتابة نهائية. إن تغيّر (push جديد وصل أثناء تنفيذ هذا
+          # التشغيل تحديداً) فهذا التشغيل لم يعد يخص أحدث HEAD إطلاقاً — يخرج بلا أي كتابة،
+          # مهما كانت نتيجته المحسوبة سابقاً. انظر تعليق "إصلاح جوهري سابع" أعلى الملف.
+          LIVE_HEAD_SHA=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.head.sha')
+          if [ "$LIVE_HEAD_SHA" != "$HEAD_SHA" ]; then
+            echo "تخطٍّ بلا كتابة: HEAD تغيّر أثناء هذا التشغيل ($HEAD_SHA → $LIVE_HEAD_SHA) — هذا التشغيل لم يعد يخص أحدث HEAD."
+            exit 0
+          fi
+
           EXISTING_RUNS_JSON=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs" --paginate \
             | jq -s --arg name "$NAME" '[.[].check_runs[] | select(.name == $name)]')
           EXISTING_ID=$(echo "$EXISTING_RUNS_JSON" | jq -r 'sort_by(.id) | last | .id // empty')
+          EXISTING_GENERATION=$(echo "$EXISTING_RUNS_JSON" | jq -r 'sort_by(.id) | last | .external_id // empty')
+
+          # ⚠️ إصلاح جوهري سابع بتاريخ 2026-08-31 — الحارس الثاني (stale-run guard صريح):
+          # إن كان الـcheck-run الكانوني الموجود بالفعل يحمل generation أحدث من أو تساوي
+          # generation هذا التشغيل، فهذا التشغيل قديم/متأخر بالتعريف — بصرف النظر تماماً
+          # عن ترتيب وصول الأحداث أو اكتمالها الفعلي — يخرج بلا كتابة كي لا يكتب "نتيجة
+          # قديمة" (in_progress مثلاً) فوق "نتيجة أحدث" (success) بالخطأ.
+          if [ -n "$EXISTING_GENERATION" ]; then
+            EXISTING_RUN_ID="${EXISTING_GENERATION%%.*}"
+            EXISTING_ATTEMPT="${EXISTING_GENERATION##*.}"
+            CURRENT_RUN_ID="${GENERATION%%.*}"
+            CURRENT_ATTEMPT="${GENERATION##*.}"
+            IS_STALE=0
+            if [ "$EXISTING_RUN_ID" -gt "$CURRENT_RUN_ID" ] 2>/dev/null; then
+              IS_STALE=1
+            elif [ "$EXISTING_RUN_ID" -eq "$CURRENT_RUN_ID" ] 2>/dev/null && [ "$EXISTING_ATTEMPT" -ge "$CURRENT_ATTEMPT" ] 2>/dev/null; then
+              IS_STALE=1
+            fi
+            if [ "$IS_STALE" -eq 1 ]; then
+              echo "تخطٍّ بلا كتابة: check-run الكانوني يحمل بالفعل generation أحدث أو مساوية ($EXISTING_GENERATION >= $GENERATION) — هذا التشغيل قديم/متأخر، ممنوع من الكتابة فوق نتيجة أحدث."
+              exit 0
+            fi
+          fi
 
           TEXT=$(jq -n --arg badges "${{ steps.check.outputs.badges }}" \
             '"### درجات الخطورة (best-effort، معلوماتي فقط — غير حاكم للدمج)\n```\n" + $badges + "\n```\n\nمنع الدمج مع ملاحظات مفتوحة يُفرض عبر إعداد GitHub \"Require conversation resolution before merging\"، وليس عبر هذا الفحص."')
@@ -353,17 +421,17 @@ jobs:
           fi
 
           if [ -n "$EXISTING_ID" ]; then
-            PAYLOAD=$(jq -n --arg name "$NAME" --arg summary "$SUMMARY" --argjson text "$TEXT" \
+            PAYLOAD=$(jq -n --arg name "$NAME" --arg summary "$SUMMARY" --arg generation "$GENERATION" --argjson text "$TEXT" \
               --argjson status_fields "{$STATUS_FIELDS}" \
-              '{name: $name, output: {title: $name, summary: $summary, text: $text}} * $status_fields')
+              '{name: $name, external_id: $generation, output: {title: $name, summary: $summary, text: $text}} * $status_fields')
             echo "$PAYLOAD" | gh api "repos/$REPO/check-runs/$EXISTING_ID" --method PATCH --input - >/dev/null
-            echo "تحديث check-run كانوني موجود (id=$EXISTING_ID): $NAME على $HEAD_SHA — reviewed_count=$REVIEWED_COUNT"
+            echo "تحديث check-run كانوني موجود (id=$EXISTING_ID, generation=$GENERATION): $NAME على $HEAD_SHA — reviewed_count=$REVIEWED_COUNT"
           else
-            PAYLOAD=$(jq -n --arg name "$NAME" --arg sha "$HEAD_SHA" --arg summary "$SUMMARY" --argjson text "$TEXT" \
+            PAYLOAD=$(jq -n --arg name "$NAME" --arg sha "$HEAD_SHA" --arg summary "$SUMMARY" --arg generation "$GENERATION" --argjson text "$TEXT" \
               --argjson status_fields "{$STATUS_FIELDS}" \
-              '{name: $name, head_sha: $sha, output: {title: $name, summary: $summary, text: $text}} * $status_fields')
+              '{name: $name, head_sha: $sha, external_id: $generation, output: {title: $name, summary: $summary, text: $text}} * $status_fields')
             echo "$PAYLOAD" | gh api "repos/$REPO/check-runs" --method POST --input - >/dev/null
-            echo "إنشاء check-run كانوني جديد: $NAME على $HEAD_SHA — reviewed_count=$REVIEWED_COUNT"
+            echo "إنشاء check-run كانوني جديد (generation=$GENERATION): $NAME على $HEAD_SHA — reviewed_count=$REVIEWED_COUNT"
           fi
 
       - name: النتيجة الإعلامية للـjob (لا تحدد نتيجة الـGate — المصدر الوحيد هو الـcheck-run الكانوني أعلاه)

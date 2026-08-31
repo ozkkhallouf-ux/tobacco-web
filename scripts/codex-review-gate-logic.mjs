@@ -90,22 +90,78 @@ export function evaluateCodexReview({
   };
 }
 
-// ⚠️ إصلاح جوهري رابع بتاريخ 2026-08-31 (فصل concurrency group حسب نوع الحدث):
+// ⚠️ إصلاح جوهري رابع بتاريخ 2026-08-31 (فصل concurrency group حسب نوع الحدث) — مُلغى
+//   ومُستبدَل بالإصلاح السابع أدناه. تم إبقاء الشرح لسجل القرار فقط:
 //   لوحظ حياً على PR #146 أن pull_request_target (فتح الـPR) وissue_comment
 //   ("@codex review") كانا يقعان بنفس مجموعة concurrency (المفتاح يعتمد فقط على رقم
 //   الـPR)، فيُلغي الأحدث الأقدم عبر cancel-in-progress: true رغم أنهما فحصان مستقلان
-//   منطقياً. الحل: يُضاف github.event_name إلى مفتاح المجموعة — كل فئة حدث بمجموعتها
-//   الخاصة، بينما يبقى cancel-in-progress فعالاً *داخل* نفس فئة الحدث (تشغيلان متتاليان
-//   من نفس النوع لا يزال أحدثهما يُلغي أقدمهما، فلا تتراكم تشغيلات قديمة بلا داعٍ).
+//   منطقياً. الحل وقتها كان إضافة github.event_name إلى مفتاح المجموعة. لكن هذا الفصل
+//   بالذات هو ما فتح نافذة التشغيلات المتزامنة الفعلية التي كشفها Codex كـP1 (انظر
+//   "إصلاح جوهري سابع" أدناه) — فصل concurrency وحده غير كافٍ لضمان عدم التراجع.
 
 /**
- * يطابق تعبير `concurrency.group` في codex-review-gate.yml حرفياً.
- * @param {{ prNumber: string | number, eventName: string }} input
+ * يطابق تعبير `concurrency.group` في codex-review-gate.yml حرفياً (بعد الإصلاح السابع:
+ * مجموعة واحدة لكل PR بصرف النظر عن نوع الحدث — الحماية من التراجع تعتمد الآن على
+ * isStaleWrite/isStaleHead أدناه، وليس على فصل concurrency).
+ * @param {{ prNumber: string | number }} input
  */
-export function concurrencyGroup({ prNumber, eventName }) {
+export function concurrencyGroup({ prNumber }) {
   if (!prNumber) throw new Error('prNumber مطلوب');
-  if (!eventName) throw new Error('eventName مطلوب');
-  return `codex-review-gate-${prNumber}-${eventName}`;
+  return `codex-review-gate-${prNumber}`;
+}
+
+// ⚠️ إصلاح جوهري سابع بتاريخ 2026-08-31 (حارس تشغيل قديم صريح — race condition حقيقي
+//   رصدها Codex كـP1 حي على PR #146، thread غير محلول وغير outdated): توحيد concurrency
+//   وحده لا يضمن عدم التداخل (نافذة زمنية قصيرة بين إشارة الإلغاء واكتمال استدعاء API
+//   جارٍ فعلاً)، لذا يُضاف حارس صريح لا يعتمد على ترتيب وصول/اكتمال الأحداث إطلاقاً:
+//   كل تشغيل يحمل "generation" فريدة تصاعدية = run_id.run_attempt (GitHub يخصّص run_id
+//   تصاعدياً وقت *إنشاء* التشغيل، لا علاقة له بترتيب الاكتمال). قبل أي كتابة نهائية،
+//   يُقارَن مع الـgeneration المثبَّتة في external_id للـcheck-run الكانوني الموجود
+//   حالياً — إن كانت أحدث أو مساوية، هذا التشغيل قديم/متأخر ويُمنع من الكتابة.
+
+/**
+ * يبني قيمة generation نصية من run_id + run_attempt، تُخزَّن لاحقاً في external_id
+ * للـcheck-run الكانوني كحارس تشغيل قديم صريح.
+ * @param {{ runId: string | number, runAttempt?: string | number }} input
+ */
+export function runGeneration({ runId, runAttempt = 1 }) {
+  if (runId === undefined || runId === null || runId === '') throw new Error('runId مطلوب');
+  return `${runId}.${runAttempt}`;
+}
+
+/**
+ * مقارنة رقمية بين قيمتَي generation (كل منهما "runId.runAttempt") — موجب إن كانت a
+ * أحدث من b، صفر إن تساوتا، سالب إن كانت a أقدم من b.
+ * @param {string} a
+ * @param {string} b
+ */
+function compareGenerations(a, b) {
+  const [aRun, aAttempt] = String(a).split('.').map(Number);
+  const [bRun, bAttempt] = String(b).split('.').map(Number);
+  if (aRun !== bRun) return aRun - bRun;
+  return (aAttempt || 0) - (bAttempt || 0);
+}
+
+/**
+ * حارس تشغيل قديم صريح: هل يجب على تشغيل بـcandidateGeneration الامتناع عن الكتابة على
+ * check-run الكانوني، لأن الموجود فعلاً (existingGeneration) أحدث أو مساوٍ له؟
+ * بدون external_id مسجَّل بعد (أول كتابة على الإطلاق لهذا الـsha) ⇒ ليس قديماً.
+ * @param {{ existingGeneration?: string | null, candidateGeneration: string }} input
+ */
+export function isStaleWrite({ existingGeneration, candidateGeneration }) {
+  if (!candidateGeneration) throw new Error('candidateGeneration مطلوب');
+  if (!existingGeneration) return false;
+  return compareGenerations(existingGeneration, candidateGeneration) >= 0;
+}
+
+/**
+ * حارس HEAD حالي: هل يجب على هذا التشغيل الامتناع عن الكتابة لأن الـPR تحرّك (push جديد)
+ * أثناء تنفيذ هذا التشغيل تحديداً — أي أن capturedHeadSha لم يعد يطابق liveHeadSha؟
+ * @param {{ capturedHeadSha: string, liveHeadSha: string }} input
+ */
+export function isStaleHead({ capturedHeadSha, liveHeadSha }) {
+  if (!capturedHeadSha || !liveHeadSha) throw new Error('capturedHeadSha وliveHeadSha مطلوبان');
+  return capturedHeadSha !== liveHeadSha;
 }
 
 // ⚠️ إصلاح جوهري خامس بتاريخ 2026-08-31 (Canonical Check Run واحد لكل PR+HEAD SHA):
@@ -138,7 +194,7 @@ export function concurrencyGroup({ prNumber, eventName }) {
 //   مُختبَر بالكامل في scripts/check-codex-review-gate-logic.mjs (جزء من npm run check).
 
 /**
- * @typedef {{ id: number, name?: string, head_sha?: string }} GhCheckRun
+ * @typedef {{ id: number, name?: string, head_sha?: string, external_id?: string }} GhCheckRun
  */
 
 /**
@@ -159,10 +215,20 @@ export function selectCanonicalCheckRunId({ checkRuns = [], headSha, name = 'Cod
  * يبني حمولة create-or-update لـcheck-run "Codex Review Gate" الكانوني، بالاعتماد حصراً
  * على نتيجة evaluateCodexReview أعلاه. لا success ولا failure طالما لا توجد مراجعة —
  * الحالة عندها in_progress (pending)، لا failure أبداً.
- * @param {{ headSha: string, reviewedCount: number, summary: string, badgesText?: string, existingId?: number | null }} input
+ * generation (إصلاح جوهري سابع): تُثبَّت في external_id لتكون حارساً لأي تشغيل لاحق عبر
+ * isStaleWrite أعلاه — إلزامية هنا لضمان أن كل كتابة تحمل حارسها الخاص.
+ * @param {{ headSha: string, reviewedCount: number, summary: string, badgesText?: string, existingId?: number | null, generation: string }} input
  */
-export function buildCanonicalCheckRunPayload({ headSha, reviewedCount, summary, badgesText = '', existingId = null }) {
+export function buildCanonicalCheckRunPayload({
+  headSha,
+  reviewedCount,
+  summary,
+  badgesText = '',
+  existingId = null,
+  generation,
+}) {
   if (!headSha) throw new Error('headSha مطلوب');
+  if (!generation) throw new Error('generation مطلوب');
   const name = 'Codex Review Gate';
   const text =
     '### درجات الخطورة (best-effort، معلوماتي فقط — غير حاكم للدمج)\n```\n' +
@@ -174,6 +240,7 @@ export function buildCanonicalCheckRunPayload({ headSha, reviewedCount, summary,
     url: existingId ? `check-runs/${existingId}` : 'check-runs',
     payload: {
       name,
+      external_id: generation,
       output: { title: name, summary, text },
     },
   };

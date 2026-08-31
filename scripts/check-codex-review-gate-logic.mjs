@@ -7,6 +7,9 @@ import {
   concurrencyGroup,
   selectCanonicalCheckRunId,
   buildCanonicalCheckRunPayload,
+  runGeneration,
+  isStaleWrite,
+  isStaleHead,
 } from './codex-review-gate-logic.mjs';
 
 // Contract + regression checks for .github/workflows/codex-review-gate.yml —
@@ -112,46 +115,31 @@ const formalReviewResult = evaluateCodexReview({
 });
 assert.equal(formalReviewResult.conclusion, 'success', 'formal review بـcommit_id مطابق للـHEAD يجب أن يمر');
 
-// 3) فحص مفتاح concurrency — إصلاح 2026-08-31 (PR #146: pull_request_target وissue_comment
-//    كانا يلغيان بعضهما لأن المفتاح لم يفصل حسب نوع الحدث).
-assert.match(
+// 3) فحص مفتاح concurrency — إصلاح جوهري سابع بتاريخ 2026-08-31 (توحيد المجموعة: الفصل
+//    حسب github.event_name كان هو ما فتح نافذة التشغيلات المتزامنة الفعلية التي كشفها
+//    Codex كـP1 حي على PR #146 — الحماية من التراجع تعتمد الآن على الحارس الصريح فقط).
+assert.doesNotMatch(
   yml,
   /group:\s*codex-review-gate-\$\{\{[\s\S]{0,200}\}\}-\$\{\{\s*github\.event_name\s*\}\}/,
-  'مفتاح concurrency group يجب أن يتضمن github.event_name لفصل فئات الأحداث',
+  'مفتاح concurrency group يجب ألا يتضمن github.event_name بعد الآن — الفصل حسب نوع الحدث هو ما سمح بتشغيلات متزامنة فعلية (P1 المرصود على PR #146)',
 );
-assert.match(yml, /cancel-in-progress:\s*true/, 'cancel-in-progress يجب أن يبقى true (داخل نفس فئة الحدث)');
+assert.match(
+  yml,
+  /group:\s*codex-review-gate-\$\{\{[\s\S]{0,200}\}\}\s*\n\s*cancel-in-progress:\s*true/,
+  'مفتاح concurrency group يجب أن يعتمد على رقم الـPR فقط (مجموعة واحدة لكل PR بصرف النظر عن نوع الحدث)',
+);
+assert.match(yml, /cancel-in-progress:\s*true/, 'cancel-in-progress يجب أن يبقى true (يقلّص التداخل الفعلي، ولو أنه ليس الضامن الوحيد بعد الآن)');
 
-// سيناريو (ج): pull_request_target ثم pull_request_review مباشرة على نفس الـPR ⇒
-// يجب ألا يقع الاثنان بنفس مجموعة concurrency (فلا يُلغي أحدهما الآخر).
+// سيناريو (ج) بعد الإصلاح السابع: pull_request_target وpull_request_review وissue_comment
+// لنفس الـPR يجب أن يقعوا جميعاً بنفس مجموعة concurrency الآن (توحيد صريح — نقطة 1 من
+// طلب المستخدم)، والحماية الفعلية من التراجع تأتي من isStaleWrite/isStaleHead أدناه.
 const prNumber = 146;
-const groupOpened = concurrencyGroup({ prNumber, eventName: 'pull_request_target' });
-const groupReview = concurrencyGroup({ prNumber, eventName: 'pull_request_review' });
-const groupIssueComment = concurrencyGroup({ prNumber, eventName: 'issue_comment' });
-assert.notEqual(
-  groupOpened,
-  groupReview,
-  'pull_request_target وpull_request_review يجب ألا يشتركا بنفس مجموعة concurrency',
-);
-assert.notEqual(
-  groupOpened,
-  groupIssueComment,
-  'pull_request_target وissue_comment (السباق الحقيقي المرصود على PR #146) يجب ألا يشتركا بنفس مجموعة concurrency',
-);
-
-// سيناريو (د): تشغيلان متتاليان من نفس فئة الحدث لنفس الـPR ⇒ نفس مجموعة concurrency،
-// أي أن الأحدث لا يزال يُلغي الأقدم منها (cancel-in-progress: true يبقى فعالاً هنا).
-const groupSecondOpenedRun = concurrencyGroup({ prNumber, eventName: 'pull_request_target' });
-assert.equal(
-  groupOpened,
-  groupSecondOpenedRun,
-  'تشغيلان من نفس فئة الحدث لنفس الـPR يجب أن يشتركا بنفس مجموعة concurrency (يُلغي الأحدث الأقدم)',
-);
-const groupSecondIssueCommentRun = concurrencyGroup({ prNumber, eventName: 'issue_comment' });
-assert.equal(
-  groupIssueComment,
-  groupSecondIssueCommentRun,
-  'تشغيلان من issue_comment لنفس الـPR يجب أن يشتركا بنفس المجموعة (لا تراكم تشغيلات قديمة)',
-);
+const groupOpened = concurrencyGroup({ prNumber });
+const groupReview = concurrencyGroup({ prNumber });
+const groupIssueComment = concurrencyGroup({ prNumber });
+assert.equal(groupOpened, groupReview, 'كل triggers لنفس الـPR يجب أن تشترك بنفس مجموعة concurrency بعد التوحيد');
+assert.equal(groupOpened, groupIssueComment, 'issue_comment يجب أن يشترك بنفس مجموعة pull_request_target بعد التوحيد');
+assert.equal(concurrencyGroup({ prNumber: 999 }) === groupOpened, false, 'أرقام PR مختلفة يجب أن تبقى بمجموعات مختلفة');
 
 // 4) فحص العقد الثابت على نص الـworkflow لإصلاح Canonical Check Run (2026-08-31):
 //    يبحث كل تشغيل عن check-run موجود على نفس head_sha بالضبط قبل الإنشاء، ولا يوجد أي
@@ -192,6 +180,39 @@ assert.doesNotMatch(
   'يُمنع نهائياً نشر conclusion=failure على check-run الكانوني — هذا بالضبط ما يلوّث rollup إذا نشره تشغيل قديم بعد تشغيل أحدث ناجح',
 );
 
+// 4-ب) فحص العقد الثابت لإصلاح جوهري سابع (حارس تشغيل قديم صريح): إعادة قراءة HEAD الحيّ
+//    قبل الكتابة، ومقارنة generation المخزَّنة في external_id قبل أي PATCH/POST نهائي.
+assert.match(
+  yml,
+  /generation=\$\{\{\s*github\.run_id\s*\}\}\.\$\{\{\s*github\.run_attempt\s*\}\}/,
+  'يجب التقاط generation = github.run_id.github.run_attempt عند بداية التشغيل',
+);
+assert.match(
+  yml,
+  /LIVE_HEAD_SHA=\$\(gh api "repos\/\$REPO\/pulls\/\$PR_NUMBER" --jq '\.head\.sha'\)/,
+  'يجب إعادة قراءة head.sha الحيّ للـPR مباشرة قبل أي كتابة نهائية على check-run الكانوني',
+);
+assert.match(
+  yml,
+  /if \[ "\$LIVE_HEAD_SHA" != "\$HEAD_SHA" \][\s\S]{0,400}exit 0/,
+  'إن تغيّر HEAD أثناء هذا التشغيل تحديداً، يجب الخروج بلا أي كتابة (exit 0)، لا فشل ولا كتابة',
+);
+assert.match(
+  yml,
+  /EXISTING_GENERATION=\$\(echo "\$EXISTING_RUNS_JSON" \| jq -r 'sort_by\(\.id\) \| last \| \.external_id \/\/ empty'\)/,
+  'يجب قراءة external_id للـcheck-run الكانوني الموجود كـgeneration مُسجَّلة',
+);
+assert.match(
+  yml,
+  /IS_STALE=1[\s\S]{0,400}exit 0/,
+  'يجب وجود حارس تشغيل قديم صريح (IS_STALE) يخرج بلا كتابة (exit 0) دون الاعتماد على ترتيب وصول الأحداث',
+);
+assert.match(
+  yml,
+  /external_id:\s*\$generation/,
+  'كل PATCH/POST نهائي يجب أن يثبّت generation الحالية في external_id (تراكمية عبر التشغيلات اللاحقة)',
+);
+
 // 5) فحص منطق اختيار/بناء check-run الكانوني فعلياً — سيناريوهات (أ)-(ز) المطلوبة.
 const SHA_OLD = 'c'.repeat(40); // HEAD قديم راجعه Codex سابقاً
 const SHA_NEW = 'd'.repeat(40); // HEAD جديد بعد push لاحق — لم يُراجَع بعد
@@ -203,6 +224,7 @@ const openedPayload = buildCanonicalCheckRunPayload({
   headSha: SHA_NEW,
   reviewedCount: openedNoReview.reviewedCount,
   summary: openedNoReview.summary,
+  generation: runGeneration({ runId: 1000, runAttempt: 1 }),
 });
 assert.equal(openedPayload.payload.status, 'in_progress', 'فتح PR بلا مراجعة ⇒ check-run الكانوني in_progress (pending)، لا failure');
 assert.equal(openedPayload.payload.conclusion, undefined, 'in_progress يجب ألا يحمل حقل conclusion إطلاقاً');
@@ -221,6 +243,7 @@ const stalePayload = buildCanonicalCheckRunPayload({
   headSha: NEW_SHA,
   reviewedCount: staleReviewResult.reviewedCount,
   summary: staleReviewResult.summary,
+  generation: runGeneration({ runId: 1000, runAttempt: 1 }),
 });
 assert.equal(stalePayload.payload.status, 'in_progress', 'rebase بدون تغيير الأسطر + review قديم ⇒ in_progress (BLOCKED)، ليس success');
 
@@ -229,6 +252,7 @@ const freshPayload = buildCanonicalCheckRunPayload({
   headSha: NEW_SHA,
   reviewedCount: freshReviewResult.reviewedCount,
   summary: freshReviewResult.summary,
+  generation: runGeneration({ runId: 1001, runAttempt: 1 }),
 });
 assert.equal(freshPayload.payload.status, 'completed', 'مراجعة صريحة على HEAD الحالي ⇒ completed');
 assert.equal(freshPayload.payload.conclusion, 'success', 'مراجعة صريحة على HEAD الحالي ⇒ conclusion=success');
@@ -244,6 +268,7 @@ const secondPayload = buildCanonicalCheckRunPayload({
   reviewedCount: 1,
   summary: 'reviewed',
   existingId: idOnReviewArrival,
+  generation: runGeneration({ runId: 1002, runAttempt: 1 }),
 });
 assert.equal(secondPayload.method, 'PATCH', 'يجب PATCH لنفس id الموجود، لا POST جديد بنفس الاسم على نفس sha');
 assert.equal(secondPayload.url, 'check-runs/10', 'PATCH يجب أن يستهدف نفس id الموجود بالضبط');
@@ -265,9 +290,91 @@ assert.equal(
 // (ز) push جديد بعد PASS ⇒ HEAD الجديد يرجع BLOCKED (in_progress) حتى تُراجَع تحديداً،
 //     رغم أن الـsha السابق كان success — مغطى فعلياً بسيناريو (ب) أعلاه (idForNewSha).
 assert.equal(
-  buildCanonicalCheckRunPayload({ headSha: SHA_NEW, reviewedCount: 0, summary: 'pending' }).payload.status,
+  buildCanonicalCheckRunPayload({
+    headSha: SHA_NEW,
+    reviewedCount: 0,
+    summary: 'pending',
+    generation: runGeneration({ runId: 1003, runAttempt: 1 }),
+  }).payload.status,
   'in_progress',
   'push جديد بعد PASS سابق ⇒ الـsha الجديد يبدأ in_progress (BLOCKED) من جديد، لا يرث success القديم',
 );
+
+// 6) إصلاح جوهري سابع بتاريخ 2026-08-31 — الحارس الصريح: 4 سيناريوهات regression مطلوبة
+//    صراحة من المستخدم (race condition رصدها Codex كـP1 حي على PR #146).
+
+// (ح) pull_request_target وreview يصلان معاً على نفس HEAD ⇒ النتيجة النهائية الصحيحة لا
+//     تتراجع: تشغيل target يبدأ أولاً (generation أقدم، لا مراجعة بعد) وينشئ in_progress؛
+//     تشغيل review يصل بعده مباشرة (generation أحدث، وجد مراجعة) ويكتب success. النتيجة
+//     النهائية success — بصرف النظر عن كونهما "معاً" لأن الحارس يعتمد على generation لا
+//     على التوقيت.
+{
+  const genTarget = runGeneration({ runId: 2000, runAttempt: 1 });
+  const genReview = runGeneration({ runId: 2001, runAttempt: 1 });
+  // تشغيل target يكتب أولاً — لا يوجد generation مسجّلة بعد ⇒ ليس قديماً.
+  assert.equal(isStaleWrite({ existingGeneration: null, candidateGeneration: genTarget }), false, 'أول كتابة على الإطلاق ليست قديمة أبداً');
+  // تشغيل review يكتب بعده — target قد سجّل generation أقدم من review ⇒ ليس قديماً، يُسمح له بالكتابة.
+  assert.equal(
+    isStaleWrite({ existingGeneration: genTarget, candidateGeneration: genReview }),
+    false,
+    'تشغيل review (generation أحدث) يجب أن يُسمح له بالكتابة فوق target (generation أقدم)',
+  );
+}
+
+// (ط) run قديم يتأخر وينتهي بعد run أحدث ⇒ لا يستطيع الكتابة فوقه (المطالبة الأساسية
+//     لهذا الإصلاح، مطابقة تماماً لسيناريو السباق الذي رصده Codex كـP1 على PR #146).
+{
+  const genOld = runGeneration({ runId: 3000, runAttempt: 1 }); // بدأ أولاً، لكنه بطيء
+  const genNew = runGeneration({ runId: 3001, runAttempt: 1 }); // بدأ لاحقاً، لكنه أسرع فكتب أولاً
+  // الأحدث (genNew) يكتب أولاً ويسجّل generation ـه.
+  assert.equal(isStaleWrite({ existingGeneration: null, candidateGeneration: genNew }), false, 'التشغيل الأحدث يكتب أولاً بلا عائق');
+  // الأقدم (genOld) يصل متأخراً بعد ذلك، existingGeneration الآن genNew (أحدث من candidateGeneration=genOld).
+  assert.equal(
+    isStaleWrite({ existingGeneration: genNew, candidateGeneration: genOld }),
+    true,
+    'run قديم (generation أقدم) يتأخر وينتهي بعد run أحدث ⇒ يُمنع من الكتابة فوقه — هذا بالضبط الـP1 المُصلَح',
+  );
+}
+
+// (ي) push جديد يغيّر HEAD ⇒ أي run قديم للـHEAD السابق لا يلمس check الـHEAD الجديد.
+{
+  const capturedHeadSha = SHA_OLD;
+  const liveHeadSha = SHA_NEW; // push وصل أثناء تنفيذ التشغيل القديم فتغيّر HEAD الحيّ للـPR
+  assert.equal(
+    isStaleHead({ capturedHeadSha, liveHeadSha }),
+    true,
+    'HEAD تغيّر أثناء تنفيذ هذا التشغيل تحديداً ⇒ يجب اعتباره stale head، فيمتنع عن الكتابة',
+  );
+  assert.equal(
+    isStaleHead({ capturedHeadSha: SHA_NEW, liveHeadSha: SHA_NEW }),
+    false,
+    'HEAD لم يتغيّر ⇒ ليس stale head، يُسمح بالكتابة',
+  );
+}
+
+// (ك) عدة triggers لنفس HEAD ⇒ يبقى check-run واحد canonical والنتيجة monotonic: سلسلة من
+//     4 تشغيلات (target, review_comment ×2, issue_comment) تصل بترتيب اكتمال عشوائي (وليس
+//     ترتيب بدء)، ويجب أن تستقر النتيجة النهائية عند أحدث generation فقط دون أي تراجع
+//     مؤقت في المنتصف يُنشر فعلياً (كل كتابة تُحكَّم بـisStaleWrite قبلها).
+{
+  const generations = [
+    runGeneration({ runId: 4000, runAttempt: 1 }), // target — أقدم
+    runGeneration({ runId: 4003, runAttempt: 1 }), // issue_comment — الأحدث فعلياً
+    runGeneration({ runId: 4001, runAttempt: 1 }), // review_comment #1
+    runGeneration({ runId: 4002, runAttempt: 1 }), // review_comment #2
+  ];
+  // نحاكي وصول الكتابات بهذا الترتيب العشوائي بالضبط، ونطبّق الحارس قبل كل كتابة.
+  let currentGeneration = null; // generation آخر كتابة نجحت فعلياً
+  let writesApplied = 0;
+  for (const candidate of generations) {
+    if (isStaleWrite({ existingGeneration: currentGeneration, candidateGeneration: candidate })) continue;
+    currentGeneration = candidate;
+    writesApplied += 1;
+  }
+  // العشوائية في ترتيب الاكتمال تعني أن ليست كل كتابة تُطبَّق (2 و3 أقدم من max سبقهما 4003)،
+  // لكن النتيجة النهائية يجب أن تستقر عند أحدث generation دائماً — monotonic بامتياز.
+  assert.equal(currentGeneration, runGeneration({ runId: 4003, runAttempt: 1 }), 'عدة triggers لنفس HEAD ⇒ النتيجة النهائية يجب أن تستقر عند أحدث generation دائماً، بصرف النظر عن ترتيب الاكتمال');
+  assert.ok(writesApplied >= 1 && writesApplied <= generations.length, 'يجب أن يُطبَّق check-run كانوني واحد نهائي فقط يعكس أحدث generation');
+}
 
 console.log('codex-review-gate-logic.mjs contract + regression checks passed.');
