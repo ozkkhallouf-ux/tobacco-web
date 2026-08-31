@@ -84,6 +84,19 @@ check("خط النشر يرفع معامل نسخة الأصول تلقائيا�
   /Bump asset version marker/.test(PAGES_YML) && /v=tobacco-\$\{CURRENT\}/.test(PAGES_YML),
   "بلا هذه الخطوة يعتمد إبطال الكاش على رفع يدوي — وقد نُسي ثلاث مرات متتالية");
 
+// التحقق بعد sed لا بدّ أن يحمل حدّاً رقمياً. بلا حدّ يطابق البحثُ عن الرقم
+// القديم داخلَ الجديد حين يكون سابقةً له (177 داخل 1770)، فيفشل النشر رغم نجاح
+// الاستبدال — لعشر نشرات متتالية. أُعيد إنتاجه فعلياً قبل إضافة هذا الحارس.
+const bumpStep = PAGES_YML.slice(PAGES_YML.indexOf("Bump asset version marker"));
+const bumpBody = bumpStep.slice(0, bumpStep.indexOf("- name: Configure Pages"));
+check("تحقّق رفع المعامل يستعمل حدّاً رقمياً (لا مطابقة سابقة)",
+  (bumpBody.match(/\(\[\^0-9\]\|\$\)/g) || []).length >= 2,
+  "التحققان بلا حدّ رقمي — سيفشل النشر حين يصير الرقم القديم سابقةً للجديد");
+
+check("رفع المعامل يرفض معاملاً مفقوداً بدل الاستبدال الأعمى",
+  /test -n "\$CURRENT"/.test(bumpBody),
+  "CURRENT فارغ يجعل sed يطابق كل شيء");
+
 check("خط النشر ما زال يرفع CACHE_NAME أيضاً",
   /Bump service worker cache version/.test(PAGES_YML),
   "اختفت خطوة رفع CACHE_NAME");

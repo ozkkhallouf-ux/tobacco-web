@@ -91,10 +91,17 @@ jobs:
         run: |
           FILE="index.html"
           CURRENT=$(grep -o 'v=tobacco-[0-9]*' "$FILE" | head -1 | sed 's/v=tobacco-//')
+          # معامل مفقود يجعل CURRENT فارغاً فيتحوّل الاستبدال إلى مطابقة عمياء
+          test -n "$CURRENT"
           NEW=$((CURRENT + ${{ github.run_number }}))
           sed -i "s/v=tobacco-${CURRENT}/v=tobacco-${NEW}/g" "$FILE"
-          test "$(grep -c "v=tobacco-${NEW}" "$FILE")" -gt 0
-          test "$(grep -c "v=tobacco-${CURRENT}" "$FILE")" -eq 0
+          # الحدّ الرقمي `([^0-9]|$)` إلزامي في التحققين: بدونه يطابق البحث عن
+          # القديم داخلَ الجديد حين يكون سابقةً له. مثال حقيقي: CURRENT=177 مع
+          # run_number=1593 يعطي NEW=1770، فيجد `grep -c "v=tobacco-177"` ستة
+          # مواضع داخل `v=tobacco-1770` رغم نجاح الاستبدال تماماً — فيفشل النشر
+          # لعشر نشرات متتالية (run_number من 1593 إلى 1602). أُعيد إنتاجه فعلياً.
+          test "$(grep -cE "v=tobacco-${NEW}([^0-9]|$)" "$FILE")" -gt 0
+          test "$(grep -cE "v=tobacco-${CURRENT}([^0-9]|$)" "$FILE")" -eq 0
       - name: Configure Pages
         uses: actions/configure-pages@v5
 
