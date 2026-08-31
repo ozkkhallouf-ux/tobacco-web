@@ -424,15 +424,67 @@ jobs:
             PAYLOAD=$(jq -n --arg name "$NAME" --arg summary "$SUMMARY" --arg generation "$GENERATION" --argjson text "$TEXT" \
               --argjson status_fields "{$STATUS_FIELDS}" \
               '{name: $name, external_id: $generation, output: {title: $name, summary: $summary, text: $text}} * $status_fields')
-            echo "$PAYLOAD" | gh api "repos/$REPO/check-runs/$EXISTING_ID" --method PATCH --input - >/dev/null
+            RESPONSE_JSON=$(echo "$PAYLOAD" | gh api "repos/$REPO/check-runs/$EXISTING_ID" --method PATCH --input -)
+            CHECK_RUN_ID="$EXISTING_ID"
             echo "تحديث check-run كانوني موجود (id=$EXISTING_ID, generation=$GENERATION): $NAME على $HEAD_SHA — reviewed_count=$REVIEWED_COUNT"
           else
             PAYLOAD=$(jq -n --arg name "$NAME" --arg sha "$HEAD_SHA" --arg summary "$SUMMARY" --arg generation "$GENERATION" --argjson text "$TEXT" \
               --argjson status_fields "{$STATUS_FIELDS}" \
               '{name: $name, head_sha: $sha, external_id: $generation, output: {title: $name, summary: $summary, text: $text}} * $status_fields')
-            echo "$PAYLOAD" | gh api "repos/$REPO/check-runs" --method POST --input - >/dev/null
-            echo "إنشاء check-run كانوني جديد (generation=$GENERATION): $NAME على $HEAD_SHA — reviewed_count=$REVIEWED_COUNT"
+            RESPONSE_JSON=$(echo "$PAYLOAD" | gh api "repos/$REPO/check-runs" --method POST --input -)
+            CHECK_RUN_ID=$(echo "$RESPONSE_JSON" | jq -r '.id')
+            echo "إنشاء check-run كانوني جديد (id=$CHECK_RUN_ID, generation=$GENERATION): $NAME على $HEAD_SHA — reviewed_count=$REVIEWED_COUNT"
           fi
+
+          # ⚠️ إصلاح جوهري ثامن بتاريخ 2026-08-31 — مصالحة بعد الكتابة (P1 حي رصده Codex:
+          # "Make the stale-run guard atomic with publication"): الحارسان أعلاه (توحيد
+          # concurrency + مقارنة external_id) يعتمدان على lookup-then-write غير ذرّي — لا
+          # يوجد compare-and-swap حقيقي في Checks API. نافذة نظرية تبقى: تشغيلان يقرآن
+          # external_id قبل أن يكتب أيّ منهما (كلاهما يجتاز الحارس)، ثم يكتب الأقدم
+          # (generation أصغر) فعلياً بعد الأحدث على شبكة GitHub، فيطمس نتيجة أحدث بأخرى
+          # أقدم رغم اجتياز الحارس السابق للكتابة. الإصلاح: بعد كل كتابة (PATCH/POST)،
+          # يُعاد GET فوري للتحقق من أن external_id المكتوب فعلياً لا يزال generation هذا
+          # التشغيل (أو أحدث منه شرعاً). إن ظهرت generation أقدم من التي كتبها هذا التشغيل
+          # (دليل على أن كتابة متأخرة من تشغيل آخر أقدم اُنجزت بعد كتابتنا مباشرة) يُعاد
+          # تنفيذ نفس الكتابة لاستعادة النتيجة الصحيحة — دورة محدودة (٣ محاولات كحد أقصى)
+          # كي لا تتحول لحلقة لا نهائية عند تنافس فعلي مستمر. قبل كل محاولة مصالحة، يُعاد
+          # التحقق من head.sha الحيّ أيضاً — إن تغيّر، هذا التشغيل لم يعد يخصّ أحدث HEAD
+          # فيتوقف بلا أي مصالحة قسرية إضافية (الحارس الأول أعلاه يبقى الأصل).
+          # منطق needsWriteReconciliation موثَّق ومختبَر آلياً في codex-review-gate-logic.mjs
+          # + check-codex-review-gate-logic.mjs (جزء من npm run check).
+          # مُعاد حسابهما هنا صراحة (لا اعتماد على الحارس الثاني أعلاه) لأن CURRENT_RUN_ID/
+          # CURRENT_ATTEMPT هناك تُحسَب فقط داخل شرط "EXISTING_GENERATION موجودة" — قد لا
+          # تكون معرَّفة إطلاقاً عند أول كتابة على sha جديد، فيفشل `set -u` هنا لو اعتمدنا
+          # عليها بدل إعادة الحساب المباشر من GENERATION.
+          CURRENT_RUN_ID="${GENERATION%%.*}"
+          CURRENT_ATTEMPT="${GENERATION##*.}"
+          RECONCILE_ATTEMPT=0
+          while [ "$RECONCILE_ATTEMPT" -lt 3 ]; do
+            RECONCILE_ATTEMPT=$((RECONCILE_ATTEMPT + 1))
+            LIVE_HEAD_SHA=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.head.sha')
+            if [ "$LIVE_HEAD_SHA" != "$HEAD_SHA" ]; then
+              echo "مصالحة مُتوقَّفة: HEAD تغيّر أثناء المصالحة ($HEAD_SHA → $LIVE_HEAD_SHA) — هذا التشغيل لم يعد يخص أحدث HEAD."
+              break
+            fi
+            OBSERVED_GENERATION=$(gh api "repos/$REPO/check-runs/$CHECK_RUN_ID" --jq '.external_id // empty')
+            if [ -z "$OBSERVED_GENERATION" ] || [ "$OBSERVED_GENERATION" = "$GENERATION" ]; then
+              break
+            fi
+            OBSERVED_RUN_ID="${OBSERVED_GENERATION%%.*}"
+            OBSERVED_ATTEMPT="${OBSERVED_GENERATION##*.}"
+            OBS_IS_OLDER=0
+            if [ "$OBSERVED_RUN_ID" -lt "$CURRENT_RUN_ID" ] 2>/dev/null; then
+              OBS_IS_OLDER=1
+            elif [ "$OBSERVED_RUN_ID" -eq "$CURRENT_RUN_ID" ] 2>/dev/null && [ "$OBSERVED_ATTEMPT" -lt "$CURRENT_ATTEMPT" ] 2>/dev/null; then
+              OBS_IS_OLDER=1
+            fi
+            if [ "$OBS_IS_OLDER" -eq 0 ]; then
+              echo "مصالحة غير لازمة: external_id الحالي ($OBSERVED_GENERATION) ليس أقدم من كتابتنا ($GENERATION) — كتابة أحدث شرعية سبقتنا، لا تراجع."
+              break
+            fi
+            echo "مصالحة لازمة (محاولة $RECONCILE_ATTEMPT/3): كتابة أقدم ($OBSERVED_GENERATION) طمست نتيجتنا ($GENERATION) بعد كتابتنا — إعادة تثبيت النتيجة الصحيحة."
+            echo "$PAYLOAD" | gh api "repos/$REPO/check-runs/$CHECK_RUN_ID" --method PATCH --input - >/dev/null
+          done
 
       - name: النتيجة الإعلامية للـjob (لا تحدد نتيجة الـGate — المصدر الوحيد هو الـcheck-run الكانوني أعلاه)
         if: steps.pr.outputs.base_ref == 'main'

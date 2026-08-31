@@ -10,6 +10,7 @@ import {
   runGeneration,
   isStaleWrite,
   isStaleHead,
+  needsWriteReconciliation,
 } from './codex-review-gate-logic.mjs';
 
 // Contract + regression checks for .github/workflows/codex-review-gate.yml —
@@ -375,6 +376,56 @@ assert.equal(
   // لكن النتيجة النهائية يجب أن تستقر عند أحدث generation دائماً — monotonic بامتياز.
   assert.equal(currentGeneration, runGeneration({ runId: 4003, runAttempt: 1 }), 'عدة triggers لنفس HEAD ⇒ النتيجة النهائية يجب أن تستقر عند أحدث generation دائماً، بصرف النظر عن ترتيب الاكتمال');
   assert.ok(writesApplied >= 1 && writesApplied <= generations.length, 'يجب أن يُطبَّق check-run كانوني واحد نهائي فقط يعكس أحدث generation');
+}
+
+// 7) إصلاح جوهري ثامن بتاريخ 2026-08-31 — مصالحة بعد الكتابة (P1 حي رصده Codex على هذا
+//    الفرع نفسه: "Make the stale-run guard atomic with publication"). فحص العقد الثابت
+//    على نص الـworkflow: يجب وجود حلقة GET فورية بعد كل PATCH/POST نهائي، تعيد الكتابة
+//    إن استقر generation أقدم فعلياً على الـcheck-run (كتابة متأخرة من تشغيل أقدم).
+assert.match(
+  yml,
+  /RECONCILE_ATTEMPT=0[\s\S]{0,2000}OBSERVED_GENERATION=\$\(gh api "repos\/\$REPO\/check-runs\/\$CHECK_RUN_ID" --jq '\.external_id \/\/ empty'\)/,
+  'يجب وجود حلقة مصالحة بعد الكتابة تعيد قراءة external_id فوراً من نفس check-run الذي كُتب عليه للتو',
+);
+assert.match(
+  yml,
+  /if \[ "\$LIVE_HEAD_SHA" != "\$HEAD_SHA" \][\s\S]{0,200}مصالحة مُتوقَّفة/,
+  'حلقة المصالحة يجب أن تحترم حارس HEAD الحي أيضاً — لا تكتب فوق PR تحرّك أثناء المصالحة',
+);
+assert.match(
+  yml,
+  /OBS_IS_OLDER=1[\s\S]{0,600}--method PATCH --input -/,
+  'عند رصد كتابة أقدم مستقرة فعلياً بعد كتابتنا، يجب إعادة نفس PATCH لاستعادة النتيجة الصحيحة (self-heal)',
+);
+
+// سيناريو (ل): كتابة أحدث generation تلتها كتابة متأخرة من تشغيل أقدم (رصدتها المصالحة
+//    عبر GET فوري) ⇒ يجب أن تُطلب مصالحة (إعادة PATCH). العكس (لا كتابة أقدم استقرت، أو
+//    استقرت نفس الكتابة، أو حتى أحدث منها شرعياً) ⇒ لا حاجة لمصالحة.
+{
+  const genOlder = runGeneration({ runId: 5000, runAttempt: 1 });
+  const genWritten = runGeneration({ runId: 5001, runAttempt: 1 }); // ما كتبه هذا التشغيل تحديداً
+  const genEvenNewer = runGeneration({ runId: 5002, runAttempt: 1 });
+
+  assert.equal(
+    needsWriteReconciliation({ writtenGeneration: genWritten, observedGeneration: genOlder }),
+    true,
+    'كتابة متأخرة من تشغيل أقدم استقرت فعلياً بعد كتابتنا ⇒ يجب طلب مصالحة (إعادة كتابة النتيجة الصحيحة)',
+  );
+  assert.equal(
+    needsWriteReconciliation({ writtenGeneration: genWritten, observedGeneration: genWritten }),
+    false,
+    'ما استقر يطابق ما كتبناه بالضبط ⇒ لا حاجة لمصالحة',
+  );
+  assert.equal(
+    needsWriteReconciliation({ writtenGeneration: genWritten, observedGeneration: genEvenNewer }),
+    false,
+    'ما استقر أحدث شرعاً مما كتبناه (تشغيل آخر أحدث كتب بعدنا بحق) ⇒ لا مصالحة، هذا صحيح ومتوقَّع',
+  );
+  assert.equal(
+    needsWriteReconciliation({ writtenGeneration: genWritten, observedGeneration: null }),
+    false,
+    'فشل GET أو غياب قيمة ملحوظة ⇒ لا مصالحة قسرية بلا دليل واضح',
+  );
 }
 
 console.log('codex-review-gate-logic.mjs contract + regression checks passed.');

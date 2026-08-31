@@ -164,6 +164,31 @@ export function isStaleHead({ capturedHeadSha, liveHeadSha }) {
   return capturedHeadSha !== liveHeadSha;
 }
 
+// ⚠️ إصلاح جوهري ثامن بتاريخ 2026-08-31 (مصالحة بعد الكتابة — P1 حي رصده Codex على هذا
+//   الفرع نفسه: "Make the stale-run guard atomic with publication"): isStaleWrite أعلاه
+//   يمنع الكتابة *قبلها* بناءً على قراءة سابقة (lookup-then-write) — Checks API لا يوفّر
+//   compare-and-swap ذرّياً، فتبقى نافذة نظرية: تشغيلان يقرآن external_id قبل أن يكتب
+//   أيّهما (كلاهما يجتاز الحارس بنجاح)، ثم تصل كتابة الأقدم (generation أصغر) فعلياً على
+//   شبكة GitHub بعد كتابة الأحدث، فتطمس نتيجة صحيحة بأخرى قديمة رغم اجتياز الحارس السابق.
+//   الحل التكميلي: بعد كل كتابة، تحقّق فوري (GET) من أن ما استقر فعلياً على الـcheck-run
+//   لا يزال generation هذا التشغيل (أو أحدث). إن ظهر أقدم، أعد الكتابة لاستعادة النتيجة
+//   الصحيحة (self-heal) — بدل الاكتفاء بمنع الكتابة قبلها فقط.
+
+/**
+ * بعد كتابة generation (writtenGeneration) على check-run الكانوني، هل ما استقر فعلياً
+ * حالياً هناك (observedGeneration، من GET فوري) أقدم منها — أي وقعت كتابة متأخرة من
+ * تشغيل أقدم بعد كتابتنا مباشرة، فيجب إعادة الكتابة لاستعادة النتيجة الصحيحة؟
+ * observedGeneration فارغة (فشل GET أو لم تُقرأ بعد) ⇒ لا مصالحة قسرية بلا دليل واضح.
+ * observedGeneration مساوية أو أحدث من writtenGeneration ⇒ لا حاجة لمصالحة (كتابتنا
+ * سليمة، أو كتابة أحدث شرعية سبقتنا وهذا متوقَّع وصحيح).
+ * @param {{ writtenGeneration: string, observedGeneration?: string | null }} input
+ */
+export function needsWriteReconciliation({ writtenGeneration, observedGeneration }) {
+  if (!writtenGeneration) throw new Error('writtenGeneration مطلوب');
+  if (!observedGeneration) return false;
+  return compareGenerations(writtenGeneration, observedGeneration) > 0;
+}
+
 // ⚠️ إصلاح جوهري خامس بتاريخ 2026-08-31 (Canonical Check Run واحد لكل PR+HEAD SHA):
 //   الإصلاح الرابع (فصل concurrency group حسب نوع الحدث) أوقف الإلغاء الخاطئ، لكنه كشف
 //   عن ثغرة أعمق رصدها Codex نفسه كـP1 حي على PR #146: كل تشغيل (pull_request_target عند
