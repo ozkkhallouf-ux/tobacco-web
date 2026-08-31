@@ -61,6 +61,7 @@ export const CHECKS = [
   'check-sales-line-items-registration.mjs',
   'check-sales-line-items-security.mjs',
   'check-smart-inventory.mjs',
+  'check-telegram-delivery-observability.mjs',
 ];
 
 // ----------------------------------------------------------------------------
