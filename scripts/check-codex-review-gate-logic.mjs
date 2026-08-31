@@ -10,7 +10,9 @@ import {
   runGeneration,
   isStaleWrite,
   isStaleHead,
-  needsWriteReconciliation,
+  lockRefName,
+  isLockStale,
+  GATE_LOCK_EMPTY_TREE_SHA,
 } from './codex-review-gate-logic.mjs';
 
 // Contract + regression checks for .github/workflows/codex-review-gate.yml —
@@ -385,86 +387,171 @@ assert.equal(
   assert.ok(writesApplied >= 1 && writesApplied <= generations.length, 'يجب أن يُطبَّق check-run كانوني واحد نهائي فقط يعكس أحدث generation');
 }
 
-// 7) إصلاح جوهري ثامن بتاريخ 2026-08-31 — مصالحة بعد الكتابة (P1 حي رصده Codex على هذا
-//    الفرع نفسه: "Make the stale-run guard atomic with publication"). فحص العقد الثابت
-//    على نص الـworkflow: يجب وجود حلقة GET فورية بعد كل PATCH/POST نهائي، تعيد الكتابة
-//    إن استقر generation أقدم فعلياً على الـcheck-run (كتابة متأخرة من تشغيل أقدم).
-assert.match(
+// 7) إصلاح جوهري ثاني عشر بتاريخ 2026-08-31 — قفل ذرّي عبر git ref (يستبدل حلقة المصالحة
+//    ذات نافذة الـ45 ثانية من الإصلاحين الثامن/التاسع أعلاه؛ needsWriteReconciliation تبقى
+//    دالة مصدَّرة مختبَرة، لكن لم تعد مستخدَمة في نص الـworkflow). فحص العقد الثابت: مرجع
+//    القفل، الـempty tree، وأخذ القفل قبل النشر (POST/PATCH بـforce=false)، ثم تفرّع النشر
+//    (publish) على won=='true' فقط.
+assert.doesNotMatch(
   yml,
-  /RECONCILE_ATTEMPT=0[\s\S]{0,4000}OBSERVED_GENERATION=\$\(gh api "repos\/\$REPO\/check-runs\/\$CHECK_RUN_ID" --jq '\.external_id \/\/ empty'\)/,
-  'يجب وجود حلقة مصالحة بعد الكتابة تعيد قراءة external_id فوراً من نفس check-run الذي كُتب عليه للتو',
+  /RECONCILE_ATTEMPT=0/,
+  'حلقة المصالحة ذات نافذة الـ45 ثانية (الإصلاح الثامن/التاسع) يجب ألا تظهر بعد الآن — استُبدلت بالقفل الذرّي (الإصلاح الثاني عشر)، ولا يجوز الاعتماد على نافذة زمنية',
+);
+assert.doesNotMatch(
+  yml,
+  /RECONCILE_SLEEP_SECONDS=15/,
+  'لا يجوز الاعتماد على نافذة ٤٥ ثانية (٤ فحوصات كل ١٥ ثانية) بعد إدخال القفل الذرّي — طلب المستخدم صريح بعدم الاعتماد عليها',
 );
 assert.match(
   yml,
-  /if \[ "\$LIVE_HEAD_SHA" != "\$HEAD_SHA" \][\s\S]{0,200}مصالحة مُتوقَّفة/,
-  'حلقة المصالحة يجب أن تحترم حارس HEAD الحي أيضاً — لا تكتب فوق PR تحرّك أثناء المصالحة',
+  /LOCK_REF="gate-lock\/pr-\$PR_NUMBER"/,
+  'يجب وجود مرجع قفل مخصص لكل PR باسم gate-lock/pr-<PR_NUMBER>',
 );
 assert.match(
   yml,
-  /OBS_IS_OLDER=1[\s\S]{0,600}--method PATCH --input -/,
-  'عند رصد كتابة أقدم مستقرة فعلياً بعد كتابتنا، يجب إعادة نفس PATCH لاستعادة النتيجة الصحيحة (self-heal)',
+  /EMPTY_TREE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"/,
+  'commit القفل يجب أن يشير إلى الشجرة الفارغة الثابتة عالمياً في git (محتوى القفل غير مهم، فقط رسالته/سلسلة أسلافه)',
 );
-// تعديل بتاريخ 2026-08-31 (P1 حي ثانٍ رصده Codex: "Keep reconciling after a late stale
-//    write"): فحص فوري واحد بلا انتظار لا يرى كتابة متأخرة من تشغيل أُلغي لكن طلبه كان قد
-//    غادر العملية فعلياً قبل تسلّم إشارة الإلغاء. يجب أن تراقب الحلقة نافذة زمنية فعلية
-//    (عدة محاولات بفواصل sleep حقيقية) لا فحصاً لحظياً واحداً يتوقف عند أول تطابق.
 assert.match(
   yml,
-  /RECONCILE_MAX_ATTEMPTS=4[\s\S]{0,300}RECONCILE_SLEEP_SECONDS=15[\s\S]{0,400}sleep "\$RECONCILE_SLEEP_SECONDS"/,
-  'حلقة المصالحة يجب أن تراقب نافذة زمنية فعلية (عدة فحوصات بفواصل sleep) لا فحصاً لحظياً واحداً — كي ترصد كتابة متأخرة من تشغيل أُلغي بعد أن يكون طلبه قد غادر العملية فعلاً',
+  /gh api "repos\/\$REPO\/git\/refs" --method POST -f "ref=refs\/\$LOCK_REF" -f "sha=\$NEW_COMMIT_SHA"/,
+  'إنشاء أول لمرجع القفل يجب أن يكون عبر POST /git/refs (يفشل 422 إن أنشأه تشغيل آخر للتو)',
+);
+assert.match(
+  yml,
+  /gh api "repos\/\$REPO\/git\/refs\/\$LOCK_REF" --method PATCH -f "sha=\$NEW_COMMIT_SHA" -F "force=false"/,
+  'تحديث مرجع القفل اللاحق يجب أن يكون عبر PATCH .../git/refs/{ref} مع force=false — هذا هو compare-and-swap الذرّي الحقيقي (يرفضه GitHub خادمياً إن لم يكن fast-forward)',
+);
+assert.doesNotMatch(
+  yml,
+  /-F "force=true"/,
+  'يُمنع استخدام force=true عند تحديث مرجع القفل — يُبطل ضمان fast-forward الذرّي بالكامل',
+);
+assert.match(
+  yml,
+  /id: publish\s*\n\s*if: steps\.pr\.outputs\.base_ref == 'main' && steps\.acquire_lock\.outputs\.won == 'true'/,
+  'خطوة publish يجب أن تكون مشروطة بالفوز بالقفل الذرّي (steps.acquire_lock.outputs.won == \'true\') قبل أي محاولة كتابة',
+);
+assert.match(
+  yml,
+  /if \[ "\$LOCK_WON" != "true" \][\s\S]{0,600}exit 0/,
+  'الخطوة الإعلامية الأخيرة يجب أن تعتبر خسارة القفل (سواء stale أو تنافس عابر) نجاحاً معلوماتياً بلا فشل للـjob (exit 0)، لا فشلاً',
 );
 
-// 8) إصلاح جوهري تاسع بتاريخ 2026-08-31 — توحيد النسخ المكررة (P1 حي ثالث رصده Codex:
-//    "Reconcile concurrent first-time check creation"): تشغيلان يريان "لا check-run بعد"
-//    في اللحظة نفسها فينفّذ كلاهما POST مستقل، فينتج معرّفان مختلفان لنفس الاسم على نفس
-//    head_sha. حارس generation المرتبط بمعرّف واحد بذاته لا يكتشف هذا — يجب مسح كل
-//    check-runs الحاملة نفس الاسم على نفس head_sha كل دورة مصالحة، وتوحيدها جميعاً
-//    (PATCH) مع حالة الفائز (أعلى generation).
-assert.match(
-  yml,
-  /ALL_NAMED_RUNS_JSON=\$\(gh api "repos\/\$REPO\/commits\/\$HEAD_SHA\/check-runs" --paginate[\s\S]{0,200}select\(\.name == \$name\)/,
-  'حلقة المصالحة يجب أن تمسح كل check-runs الحاملة اسم "Codex Review Gate" على نفس head_sha (وليس معرّف check-run هذا التشغيل فقط) لاكتشاف أي نسخة مكررة',
-);
-assert.match(
-  yml,
-  /WINNER_JSON=\$\(echo "\$ALL_NAMED_RUNS_JSON" \| jq '[\s\S]{0,300}sort_by\(gen_key\(\.external_id\)\) \| last/,
-  'يجب تحديد الفائز (أعلى generation) بين كل النسخ الحاملة نفس الاسم على نفس head_sha',
-);
-assert.match(
-  yml,
-  /DUPLICATE_IDS=\$\(echo "\$ALL_NAMED_RUNS_JSON" \| jq -r[\s\S]{0,300}\(\.id\|tostring\) != \$winner and[\s\S]{0,800}--method PATCH --input -/,
-  'يجب توحيد (PATCH) كل نسخة مكررة (id مختلف وgeneration غير مطابقة للفائز) مع حالة الفائز الصحيحة',
-);
-
-// سيناريو (ل): كتابة أحدث generation تلتها كتابة متأخرة من تشغيل أقدم (رصدتها المصالحة
-//    عبر GET فوري) ⇒ يجب أن تُطلب مصالحة (إعادة PATCH). العكس (لا كتابة أقدم استقرت، أو
-//    استقرت نفس الكتابة، أو حتى أحدث منها شرعياً) ⇒ لا حاجة لمصالحة.
+// (ل) ثلاثة triggers متزامنة على نفس PR ⇒ عند التسوية (settlement) واحد فقط يملك القفل فعلياً.
+//     نحاكي محلياً حلقة إعادة المحاولة الحقيقية: كل الطلبات المعلَّقة "تقرأ" حالة الخادم دفعة
+//     واحدة (لحظة بدء الجولة)، ثم يُسمح لطلب واحد فقط بالكتابة الفعلية في تلك الجولة (لأن
+//     الخادم يُسلسل الكتابات الذرّية فعلياً — force=false CAS)، والباقي يُعيد المحاولة بقراءة
+//     جديدة في الجولة التالية حتى ينفد أو يصبح stale نهائياً (isLockStale).
 {
-  const genOlder = runGeneration({ runId: 5000, runAttempt: 1 });
-  const genWritten = runGeneration({ runId: 5001, runAttempt: 1 }); // ما كتبه هذا التشغيل تحديداً
-  const genEvenNewer = runGeneration({ runId: 5002, runAttempt: 1 });
+  const genA = runGeneration({ runId: 6000, runAttempt: 1 });
+  const genB = runGeneration({ runId: 6001, runAttempt: 1 });
+  const genC = runGeneration({ runId: 6002, runAttempt: 1 });
 
+  function raceForLock(arrivalOrder) {
+    let currentLockGeneration = null;
+    let pending = [...arrivalOrder];
+    let physicalAcquisitions = 0;
+    for (let round = 0; round < 10 && pending.length > 0; round += 1) {
+      const snapshot = currentLockGeneration; // كل المعلَّق يقرأ نفس الحالة في بداية الجولة
+      const eligible = pending.filter(
+        (g) => !isLockStale({ currentLockGeneration: snapshot, candidateGeneration: g }),
+      );
+      if (eligible.length === 0) break; // البقية stale نهائياً ولن تكتب أبداً
+      const winnerThisRound = eligible[0]; // ترتيب وصول فيزيائي عشوائي — أول من يصل هذه الجولة فقط ينجح بالـCAS
+      currentLockGeneration = winnerThisRound;
+      physicalAcquisitions += 1;
+      pending = pending.filter((g) => g !== winnerThisRound);
+    }
+    return { finalHolder: currentLockGeneration, physicalAcquisitions };
+  }
+
+  for (const arrivalOrder of [
+    [genB, genC, genA],
+    [genA, genB, genC],
+    [genC, genA, genB],
+  ]) {
+    const { finalHolder, physicalAcquisitions } = raceForLock(arrivalOrder);
+    assert.ok(
+      physicalAcquisitions >= 1 && physicalAcquisitions <= 3,
+      'كل جولة تسليم يجب أن تُنجز كتابة فيزيائية واحدة فقط، فتتراكم عبر الجولات ضمن الحد الأقصى (٣)',
+    );
+    assert.equal(
+      finalHolder,
+      genC,
+      'بعد التسوية الكاملة، أعلى generation (genC) هو الحائز الوحيد النهائي على القفل بصرف النظر عن ترتيب الوصول',
+    );
+    // لا أحد أدنى من الحائز النهائي قادر على الكتابة بعده — هذا هو ضمان "واحدة فقط تملك القفل".
+    assert.ok(
+      isLockStale({ currentLockGeneration: finalHolder, candidateGeneration: genA }),
+      'بعد استقرار القفل عند الحائز الأعلى، أي محاولة لاحقة بـgeneration أدنى تُعتبر stale ولا تُمنح الملكية',
+    );
+  }
+}
+
+// (م) run قديم يتأخر عن الفوز بالقفل ⇒ لا يكتب بعد أن يكون run أحدث قد فاز بالفعل.
+{
+  const genOld = runGeneration({ runId: 7000, runAttempt: 1 }); // بدأ أولاً، تأخر بالوصول لأخذ القفل
+  const genNew = runGeneration({ runId: 7001, runAttempt: 1 }); // بدأ لاحقاً، لكنه أخذ القفل أولاً
+  assert.equal(isLockStale({ currentLockGeneration: null, candidateGeneration: genNew }), false, 'أول أخذ للقفل على الإطلاق ليس قديماً');
   assert.equal(
-    needsWriteReconciliation({ writtenGeneration: genWritten, observedGeneration: genOlder }),
+    isLockStale({ currentLockGeneration: genNew, candidateGeneration: genOld }),
     true,
-    'كتابة متأخرة من تشغيل أقدم استقرت فعلياً بعد كتابتنا ⇒ يجب طلب مصالحة (إعادة كتابة النتيجة الصحيحة)',
-  );
-  assert.equal(
-    needsWriteReconciliation({ writtenGeneration: genWritten, observedGeneration: genWritten }),
-    false,
-    'ما استقر يطابق ما كتبناه بالضبط ⇒ لا حاجة لمصالحة',
-  );
-  assert.equal(
-    needsWriteReconciliation({ writtenGeneration: genWritten, observedGeneration: genEvenNewer }),
-    false,
-    'ما استقر أحدث شرعاً مما كتبناه (تشغيل آخر أحدث كتب بعدنا بحق) ⇒ لا مصالحة، هذا صحيح ومتوقَّع',
-  );
-  assert.equal(
-    needsWriteReconciliation({ writtenGeneration: genWritten, observedGeneration: null }),
-    false,
-    'فشل GET أو غياب قيمة ملحوظة ⇒ لا مصالحة قسرية بلا دليل واضح',
+    'run قديم يتأخر عن أخذ القفل بعد أن فاز به run أحدث بالفعل ⇒ يُمنع من محاولة الكتابة (stale)، لا يطمس نتيجة أحدث',
   );
 }
+
+// (ن) push يغيّر HEAD أثناء run ⇒ حتى لو فاز هذا الـrun بالقفل، حارس isStaleHead المستقل
+//     داخل خطوة publish (الحارس الأول، إصلاح سابع، لا يزال قائماً كطبقة دفاع إضافية) يمنعه
+//     من الكتابة فوق HEAD جديد لم يعد يخصه.
+{
+  const capturedHeadSha = 'e'.repeat(40);
+  const liveHeadSha = 'f'.repeat(40);
+  assert.equal(
+    isStaleHead({ capturedHeadSha, liveHeadSha }),
+    true,
+    'run فاز بالقفل لكن HEAD تغيّر أثناء تنفيذه ⇒ حارس isStaleHead المستقل يمنعه من الكتابة رغم فوزه بالقفل',
+  );
+}
+assert.match(
+  yml,
+  /LIVE_HEAD_SHA=\$\(gh api "repos\/\$REPO\/pulls\/\$PR_NUMBER" --jq '\.head\.sha'\)[\s\S]{0,300}exit 0/,
+  'خطوة publish يجب أن تحتفظ بحارس HEAD الحيّ المستقل حتى بعد الفوز بالقفل الذرّي — طبقة دفاع إضافية لا تُستبدَل بالقفل',
+);
+
+// (س) crash/timeout لا يترك deadlock دائماً: تشغيل يفوز بالقفل ثم يتعطل بلا تحرير صريح —
+//     القفل يبقى عند generation ـه القديمة فقط؛ أي تشغيل لاحق شرعي (generation أعلى، وهي
+//     دائماً أعلى لأن run_id تصاعدي من GitHub) يتخطى القفل العالق بنفس آلية isLockStale/CAS
+//     دون أي انتظار TTL أو تحرير صريح.
+{
+  const genCrashed = runGeneration({ runId: 8000, runAttempt: 1 }); // فاز بالقفل ثم تعطّل بلا تحرير
+  const genLaterLegit = runGeneration({ runId: 8500, runAttempt: 1 }); // تشغيل شرعي لاحق بكثير
+  assert.equal(
+    isLockStale({ currentLockGeneration: genCrashed, candidateGeneration: genLaterLegit }),
+    false,
+    'قفل عالق من تشغيل مُعطَّل (لم يُحرَّر صراحة) لا يمنع تشغيلاً لاحقاً شرعياً بـgeneration أعلى من الفوز به دائماً — لا deadlock دائم',
+  );
+}
+assert.doesNotMatch(
+  yml,
+  /release.?lock|unlock|delete.*LOCK_REF|--method DELETE.*refs\/\$LOCK_REF/i,
+  'يجب ألا توجد خطوة تحرير/حذف صريحة لمرجع القفل — التصميم مطالبة أحادية الاتجاه (monotonic claim) بلا TTL ولا حاجة لتحرير، تفادياً لأي deadlock عند فشل/timeout',
+);
+
+// (ع) canonical Codex Review Gate يبقى واحد فقط لكل head_sha — لا تغيّر عن العقد الثابت
+//     المُختبَر أعلاه (القسم 5-و: selectCanonicalCheckRunId يختار الأحدث id دائماً)؛ القفل
+//     الذرّي يضمن أن كتابة واحدة فقط تصل أصلاً لكل سباق آني، فلا تراكم check-runs جديد
+//     يمكن أن ينشأ عن سباقين متزامنين بعد الإصلاح الثاني عشر.
+assert.equal(
+  selectCanonicalCheckRunId({ checkRuns: multipleRunsSameSha, headSha: NEW_SHA }),
+  20,
+  'حتى مع القفل الذرّي، يبقى منطق اختيار الكانوني الوحيد (أحدث id) هو خط الدفاع الأخير ضد أي تراكم قديم متبقٍّ',
+);
+
+// دوال مساعدة صرفة: lockRefName وGATE_LOCK_EMPTY_TREE_SHA.
+assert.equal(lockRefName({ prNumber: 151 }), 'gate-lock/pr-151', 'lockRefName يجب أن تُعيد الصيغة المطابقة حرفياً لِـLOCK_REF في الـworkflow');
+assert.notEqual(lockRefName({ prNumber: 151 }), lockRefName({ prNumber: 152 }), 'أرقام PR مختلفة يجب أن تُعطي مراجع أقفال مختلفة (عزل كامل بين الـPRs)');
+assert.equal(GATE_LOCK_EMPTY_TREE_SHA, '4b825dc642cb6eb9a060e54bf8d69288fbee4904', 'يجب أن تطابق GATE_LOCK_EMPTY_TREE_SHA حرفياً SHA الشجرة الفارغة الثابتة في نص الـworkflow');
 
 // 9) إصلاح جوهري عاشر بتاريخ 2026-08-31 — إيقاف cancel-in-progress (P1 حي رابع رصدناه بعد
 //    اختبار post-merge حي على PR #150: تشغيل قديم أُلغي CANCELLED عند push جديد على نفس

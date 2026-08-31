@@ -281,3 +281,46 @@ export function buildCanonicalCheckRunPayload({
 
   return base;
 }
+
+// ⚠️ إصلاح جوهري ثاني عشر بتاريخ 2026-08-31 (قفل ذرّي عبر git ref — يستبدل حلقة المصالحة
+//   ذات نافذة الـ45 ثانية، الإصلاح الثامن/التاسع أعلاه): isStaleWrite/needsWriteReconciliation
+//   أعلاه يعتمدان على lookup-then-write وGET بعدي — تخفيف احتمالي بنافذة زمنية، وليس
+//   compare-and-swap ذرّياً حقيقياً (لا يوجد ذلك في Checks API إطلاقاً). الحل الجذري: مرجع
+//   git مخصص لكل PR (refs/gate-lock/pr-<PR_NUMBER>) يشير دائماً إلى commit شجرته فارغة
+//   (empty tree) ورسالته = generation حامل القفل الحالي. كل تشغيل يحاول تحديثه ذرّياً عبر
+//   POST /git/refs (إنشاء أول مرة، يفشل 422 إن وُجد مسبقاً) أو PATCH .../git/refs/{ref} مع
+//   force=false (يفشل 422 إلا إذا كان commit-نا امتداد fast-forward حرفي لما هو موجود فعلاً
+//   الآن على الخادم) — وهذا الفشل يُنفَّذ ويُتحقَّق منه من طرف GitHub نفسه ذرّياً، لا تخمين
+//   محلي. لا تحرير/TTL صريح: القفل مطالبة أحادية الاتجاه (monotonic) — تشغيل مُعطَّل/منتهي
+//   المهلة يترك القفل عند generation قديمة فقط؛ أي تشغيل لاحق شرعي يحمل generation أعلى
+//   دائماً (run_id تصاعدي من GitHub) فيتخطاه بنفس آلية fast-forward دون أي انتظار أو قفل
+//   عالق دائم. لا concurrency group يُعاد استخدامها — القفل يُطبَّق فقط على خطوة الكتابة
+//   الحسّاسة (publish)، لا على الـjob كله.
+
+/**
+ * اسم مرجع القفل الذرّي لهذا الـPR (بدون بادئة refs/) — يطابق LOCK_REF في codex-review-gate.yml.
+ * @param {{ prNumber: string | number }} input
+ */
+export function lockRefName({ prNumber }) {
+  if (!prNumber) throw new Error('prNumber مطلوب');
+  return `gate-lock/pr-${prNumber}`;
+}
+
+/**
+ * SHA الشجرة الفارغة الثابتة عالمياً في git — تُستخدم كـtree لكل commit قفل، لأن محتوى
+ * القفل بذاته غير مهم؛ المهم فقط رسالته (generation) وسلسلة أسلافه (parents) للفوز بالسباق
+ * عبر fast-forward حقيقي.
+ */
+export const GATE_LOCK_EMPTY_TREE_SHA = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
+
+/**
+ * حارس أخذ القفل: هل يجب على تشغيل بـcandidateGeneration الامتناع عن محاولة أخذ القفل، لأن
+ * القفل الحالي (currentLockGeneration، من رسالة commit مرجع القفل) يخصّ تشغيلاً أحدث أو
+ * مساوياً بالفعل؟ يطابق حرفياً منطق التخطي في خطوة acquire_lock (نفس دلالات isStaleWrite:
+ * >= تعني تخطٍّ). لا قفل موجود بعد (currentLockGeneration فارغة) ⇒ ليس قديماً، يمكن المحاولة.
+ * @param {{ currentLockGeneration?: string | null, candidateGeneration: string }} input
+ */
+export function isLockStale({ currentLockGeneration, candidateGeneration }) {
+  if (!candidateGeneration) throw new Error('candidateGeneration مطلوب');
+  return isStaleWrite({ existingGeneration: currentLockGeneration, candidateGeneration });
+}

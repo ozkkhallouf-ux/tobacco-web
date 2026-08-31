@@ -211,7 +211,12 @@ on:
         required: true
 
 permissions:
-  contents: read
+  # ⚠️ إصلاح جوهري ثاني عشر بتاريخ 2026-08-31: contents: write مطلوبة لدفع (push) commit
+  # القفل الذرّي إلى refs/gate-lock/pr-<PR_NUMBER> — انظر شرح الإصلاح الثاني عشر أدناه.
+  # على fork/Dependabot PR حقيقي، GitHub يخفّض GITHUB_TOKEN إلى قراءة فقط بصرف النظر عن
+  # هذا الإعداد (تحصين GitHub نفسه لـpull_request_target) — نفس القيد الموثَّق سابقاً
+  # لـcheck-run POST، والسلوك عند الفشل هنا best-effort مطابق تماماً (انظر أدناه).
+  contents: write
   pull-requests: read
   checks: write
 
@@ -269,6 +274,84 @@ permissions:
   #   الصريح للإصلاحين العاشر والحادي عشر معاً.
   #   لا تعديل على اسم أو منطق Required Check "Codex Review Gate" — القيد المحذوف هنا هو
   #   قيد orchestration داخلي بحت، غير مذكور في required_status_checks إطلاقاً.
+  #
+  # ⚠️ إصلاح جوهري ثاني عشر بتاريخ 2026-08-31 (قفل ذرّي حقيقي عبر git ref — يستبدل
+  #   الإصلاحين العاشر والحادي عشر بالكامل، ويردّ على P1 حيّين إضافيين رصدهما Codex على
+  #   PR #151 نفسه بعد الإصلاح الحادي عشر):
+  #
+  #   P1 الأول ("Prevent cancellation of queued gate runs"): حتى مع cancel-in-progress:
+  #   false (الإصلاح العاشر)، طابور concurrency يسمح بعضو "قيد انتظار" واحد فقط — فحدث
+  #   ثالث يُلغي عضو الانتظار قبل أن يبدأ تنفيذه إطلاقاً، فيظهر CANCELLED داخلي من جديد
+  #   بصرف النظر عن قيمة cancel-in-progress. هذا بالضبط ما دفع للإصلاح الحادي عشر (حذف
+  #   concurrency بالكامل).
+  #
+  #   P1 الثاني ("Keep gate runs serialized until publication is atomic"، رُصد على هذا
+  #   الفرع بعد حذف concurrency بالإصلاح الحادي عشر): بلا concurrency، تشغيلان قد يجتازان
+  #   حارس stale-generation (external_id) قبل أن يكتب أيّهما فعلياً — lookup-then-write
+  #   غير ذرّي بطبيعته في Checks API، ولا compare-and-swap حقيقياً فيها — ثم يكتب الأقدم
+  #   فعلياً بعد الأحدث على شبكة GitHub فيطمس نتيجة صحيحة. حلقة المصالحة الزمنية (٤٥ ثانية،
+  #   الإصلاحان الثامن والتاسع) كانت تخفيفاً عملياً محدوداً بنافذة زمنية، لا ضماناً ذرّياً —
+  #   تأخر runner queue فعلياً قد يتجاوزها بسهولة الآن بلا أي قيد concurrency يحدّ التوازي.
+  #
+  #   جذر الثغرتين واحد: لا compare-and-swap ذرّياً حقيقياً لا في طابور GitHub Actions
+  #   concurrency (عمق pending محدود بـ١ فقط، انظر الإصلاح الحادي عشر) ولا في Checks API
+  #   (PATCH/POST عاديان بلا "قيمة متوقَّعة" يُرفض التحديث إن تغيّرت — موثَّق صراحة في
+  #   تعليقات الإصلاحين الثامن والتاسع أعلاه). لا يمكن إغلاق كلا السباقين معاً بأي حارس
+  #   lookup-then-write إضافي فوق نفس الأساس غير الذرّي — هذه ثغرة بنيوية، لا خللاً يُصلَح
+  #   بمزيد من الترقيع الزمني.
+  #
+  #   الحل: git نفسه يوفّر compare-and-swap ذرّياً حقيقياً على مستوى بروتوكول تحديث المرجع
+  #   (ref)، ينفّذه خادم GitHub نفسه فحص طلب بطلب — لا حساب محلي عرضة للسباق:
+  #     • `POST /git/refs` (إنشاء ref جديد) يفشل صراحة (422) إن كان الـref موجوداً بالفعل.
+  #     • `PATCH /git/refs/{ref}` بـ`force=false` يفشل صراحة (422) إن لم يكن الـsha الجديد
+  #       امتداداً (fast-forward) حرفياً لِما هو موجود فعلياً على الخادم في تلك اللحظة
+  #       بالضبط — هذا هو الـ"compare" الذرّي: أبو commit-نا الجديد يجب أن يطابق ما رأيناه
+  #       نحن آخر مرة، وإلا يُرفض التحديث كاملاً.
+  #
+  #   الآلية: refs/gate-lock/pr-<PR_NUMBER> يشير دائماً إلى commit فارغ الشجرة (tree =
+  #   empty tree الثابتة "4b825dc642cb6eb9a060e54bf8d69288fbee4904"، موجودة حتماً في أي
+  #   مستودع git) تحمل رسالته generation آخر تشغيل "فاز" بحق الكتابة على check-run الكانوني.
+  #   كل تشغيل: يقرأ القفل الحالي → إن كانت generation المخزَّنة ≥ generation هذا التشغيل،
+  #   فهو قديم بالتعريف ويخرج فوراً بلا أي محاولة كتابة (لا حتى محاولة أخذ القفل، ولا أي
+  #   كتابة على check-run الكانوني إطلاقاً). وإلا يبني commit جديداً أبوه القفل الحالي
+  #   المُلاحَظ (فيكون fast-forward حصراً منه)، ويحاول تثبيته ذرّياً عبر PATCH/POST أعلاه.
+  #   نجاح تلك المحاولة الذرّية هو الدليل الوحيد المعتمَد على "امتلاك حق الكتابة" — عند
+  #   الفشل (خسر السباق)، يُعاد قراءة القفل من جديد ومقارنة generation-ـه بمقارنة
+  #   generation هذا التشغيل (retry محدود، بلا انتظار طويل ولا اعتماد على queue behavior
+  #   إطلاقاً)؛ إن ثبت أن القفل صار الآن يحمل generation أحدث أو مساوية، يخرج التشغيل
+  #   فوراً بلا كتابة (لم يعد يستحق المحاولة). الخاسر لا يكتب على check-run إطلاقاً — وليس
+  #   "يكتب ثم يُكتشف طمسه لاحقاً" كما في التصميم القديم — فلا حاجة لأي حارس lookup-then-
+  #   write منفصل بعد الفوز، ولا لأي حلقة مصالحة زمنية بعد الكتابة (الإصلاحان الثامن
+  #   والتاسع بكامل منطقهما أصبحا غير ضروريين هيكلياً وحُذفا من خطوة "publish" أدناه).
+  #
+  #   بعد الفوز بالقفل، يُعاد التحقق مباشرة (دون اعتماد على شيء افتُرض وقت المحاولة) من:
+  #   HEAD الحيّ للـPR (push جديد وصل أثناء محاولات القفل؟)، وgeneration هذا التشغيل مقابل
+  #   القفل الذي كتبناه للتو (دفاع إضافي)، وcheck-run الكانوني الحالي (existing_id/
+  #   external_id) قبل أي PATCH/POST نهائي — تماماً كما كان الحارسان السابع الأول/الثاني،
+  #   لكن الآن بلا حاجة فعلية لهما لضمان الصحة (القفل وحده يكفي) — يبقيان دفاعاً مزدوجاً
+  #   رخيص التكلفة، غير ضارّين.
+  #
+  #   لا deadlock عند crash/timeout، وبلا أي TTL/انتهاء صلاحية زمنية: لا يوجد "تحرير" صريح
+  #   للقفل مطلقاً — القفل هنا ليس mutex تقليدياً يُحتجز ثم يُحرَّر، بل مؤشر تصاعدي أحادي
+  #   الاتجاه (monotonic claim) لأعلى generation حاولت الكتابة. إن تعطّل تشغيل بعد أخذ
+  #   القفل ولم يُكمل نشر check-run (crash أو timeout)، يبقى القفل مشيراً إلى generation
+  #   ذلك التشغيل فقط — وأي تشغيل لاحق شرعي (بالتعريف يحمل generation أحدث دائماً، لأن
+  #   github.run_id تصاعدي زمنياً حتماً لكل تشغيل جديد) يبقى قادراً دوماً على تجاوزه عبر
+  #   نفس آلية CAS الطبيعية (أبو الـcommit الجديد = القفل "المُعطَّل"). التصاعد الطبيعي
+  #   لـrun_id يضمن بحكم البناء عدم وجود احتجاز دائم — لا حاجة لأي منطق انتهاء صلاحية.
+  #
+  #   لا حاجة لإعادة قيد concurrency: القفل يسري على كتابة check-run الكانوني تحديداً
+  #   (نقطة السباق الوحيدة الفعلية)، لا على تنفيذ الـjob كاملاً — فكل التشغيلات حرة تماماً
+  #   بالتوازي دون أي طابور GitHub Actions يُلغي أي منها (لا CANCELLED من هذا المصدر
+  #   إطلاقاً)، وحصراً محاولة الفوز بالقفل هي ما يُسلسِل الكتابة الفعلية على الـChecks API.
+  #
+  #   منطق مقارنة generation موثَّق ومختبَر آلياً (isStaleWrite، مُعاد استخدامه هنا حرفياً
+  #   لمقارنة generation القفل) في codex-review-gate-logic.mjs + check-codex-review-gate-
+  #   logic.mjs (جزء من npm run check) — بما يشمل 5 سيناريوهات regression مطلوبة صراحة:
+  #   (1) ثلاثة triggers متزامنة ⇒ واحدة فقط تفوز بالقفل، (2) run قديم يتأخر ⇒ لا يكتب
+  #   بعد run أحدث، (3) push يغيّر HEAD أثناء run ⇒ يخرج stale بلا كتابة، (4) crash/timeout
+  #   ⇒ لا deadlock دائم (تشغيل لاحق أحدث يتجاوز القفل بنجاح)، (5) check-run كانوني واحد
+  #   فقط لكل head_sha.
 
 jobs:
   gate:
@@ -392,9 +475,94 @@ jobs:
             echo "summary=لا توجد مراجعة من $CODEX_BOT_LOGIN على أحدث commit ($HEAD_SHA) بعد. انتظر المراجعة التلقائية، أو علّق @codex review، ثم أعد المحاولة." >> "$GITHUB_OUTPUT"
           fi
 
-      - name: تحديث Check Run الكانوني الوحيد لهذا الـHEAD (إنشاء إن لم يوجد، وإلا PATCH لنفس الـid، بحارس تشغيل قديم صريح)
-        id: publish
+      - name: أخذ قفل ذرّي عبر git ref (refs/gate-lock/pr-<PR_NUMBER>) قبل أي كتابة على check-run الكانوني
+        id: acquire_lock
         if: steps.pr.outputs.base_ref == 'main'
+        run: |
+          set -euo pipefail
+          PR_NUMBER="${{ steps.pr.outputs.pr_number }}"
+          GENERATION="${{ steps.pr.outputs.generation }}"
+          LOCK_REF="gate-lock/pr-$PR_NUMBER"
+          EMPTY_TREE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+          MAX_ATTEMPTS=6
+
+          # انظر شرح الإصلاح الجوهري الثاني عشر أعلى الملف لتفصيل التصميم الكامل. خلاصة
+          # الآلية هنا: CAS ذرّي حقيقي عبر بروتوكول git نفسه (لا اعتماد على أي نافذة زمنية
+          # ولا على queue behavior لطابور GitHub Actions).
+          ATTEMPT=0
+          WON="false"
+          SKIP_REASON=""
+          while [ "$ATTEMPT" -lt "$MAX_ATTEMPTS" ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+
+            CURRENT_LOCK_SHA=""
+            if REF_JSON=$(gh api "repos/$REPO/git/ref/$LOCK_REF" 2>/dev/null); then
+              CURRENT_LOCK_SHA=$(echo "$REF_JSON" | jq -r '.object.sha // empty')
+            fi
+
+            if [ -n "$CURRENT_LOCK_SHA" ]; then
+              LOCK_GENERATION=$(gh api "repos/$REPO/git/commits/$CURRENT_LOCK_SHA" --jq '.message' 2>/dev/null | head -n1 | tr -d '[:space:]')
+              LOCK_RUN_ID="${LOCK_GENERATION%%.*}"
+              LOCK_ATTEMPT_N="${LOCK_GENERATION##*.}"
+              CURRENT_RUN_ID="${GENERATION%%.*}"
+              CURRENT_ATTEMPT_N="${GENERATION##*.}"
+              IS_STALE=0
+              if [ -n "$LOCK_RUN_ID" ] && [ "$LOCK_RUN_ID" -gt "$CURRENT_RUN_ID" ] 2>/dev/null; then
+                IS_STALE=1
+              elif [ -n "$LOCK_RUN_ID" ] && [ "$LOCK_RUN_ID" -eq "$CURRENT_RUN_ID" ] 2>/dev/null && [ "$LOCK_ATTEMPT_N" -ge "$CURRENT_ATTEMPT_N" ] 2>/dev/null; then
+                IS_STALE=1
+              fi
+              if [ "$IS_STALE" -eq 1 ]; then
+                echo "تخطٍّ بلا كتابة: القفل يحمل بالفعل generation أحدث أو مساوية ($LOCK_GENERATION >= $GENERATION) — هذا التشغيل قديم/متأخر."
+                SKIP_REASON="stale"
+                break
+              fi
+              PARENTS_JSON=$(jq -n --arg p "$CURRENT_LOCK_SHA" '[$p]')
+            else
+              PARENTS_JSON="[]"
+            fi
+
+            NEW_COMMIT_SHA=$(jq -n --arg msg "$GENERATION" --arg tree "$EMPTY_TREE" --argjson parents "$PARENTS_JSON" \
+              '{message: $msg, tree: $tree, parents: $parents}' \
+              | gh api "repos/$REPO/git/commits" --method POST --input - --jq '.sha' 2>/dev/null || echo "")
+            if [ -z "$NEW_COMMIT_SHA" ]; then
+              echo "فشل إنشاء commit القفل (محاولة $ATTEMPT/$MAX_ATTEMPTS) — إعادة محاولة."
+              sleep 1
+              continue
+            fi
+
+            if [ -z "$CURRENT_LOCK_SHA" ]; then
+              # إنشاء أول لمرجع القفل — ذرّي: يفشل 422 إن أنشأه تشغيل آخر للتو قبلنا مباشرة.
+              if gh api "repos/$REPO/git/refs" --method POST -f "ref=refs/$LOCK_REF" -f "sha=$NEW_COMMIT_SHA" >/dev/null 2>&1; then
+                WON="true"; break
+              fi
+            else
+              # تحديث ذرّي: force=false يفشل 422 إن لم يعد commit-نا امتداداً (fast-forward)
+              # حرفياً لما هو موجود فعلياً على الخادم الآن — أي أن تشغيلاً آخر سبقنا للفوز
+              # بالقفل منذ آخر قراءة لنا. هذا هو الـcompare-and-swap الذرّي الحقيقي.
+              if gh api "repos/$REPO/git/refs/$LOCK_REF" --method PATCH -f "sha=$NEW_COMMIT_SHA" -F "force=false" >/dev/null 2>&1; then
+                WON="true"; break
+              fi
+            fi
+            echo "خسر هذا التشغيل سباق أخذ القفل (محاولة $ATTEMPT/$MAX_ATTEMPTS) — إعادة قراءة القفل والمحاولة من جديد."
+            sleep 1
+          done
+
+          if [ "$WON" = "true" ]; then
+            echo "won=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "won=false" >> "$GITHUB_OUTPUT"
+            if [ "$SKIP_REASON" = "stale" ]; then
+              echo "skip_reason=stale" >> "$GITHUB_OUTPUT"
+            else
+              echo "skip_reason=contention" >> "$GITHUB_OUTPUT"
+              echo "لم يفز هذا التشغيل بالقفل بعد $MAX_ATTEMPTS محاولات (تنافس عابر) — يخرج بلا كتابة؛ تشغيل لاحق (generation أحدث) سيتولى النشر." >&2
+            fi
+          fi
+
+      - name: تحديث Check Run الكانوني الوحيد لهذا الـHEAD (إنشاء إن لم يوجد، وإلا PATCH لنفس الـid) — بعد الفوز بالقفل الذرّي فقط
+        id: publish
+        if: steps.pr.outputs.base_ref == 'main' && steps.acquire_lock.outputs.won == 'true'
         continue-on-error: true
         run: |
           set -euo pipefail
@@ -478,111 +646,32 @@ jobs:
             echo "إنشاء check-run كانوني جديد (id=$CHECK_RUN_ID, generation=$GENERATION): $NAME على $HEAD_SHA — reviewed_count=$REVIEWED_COUNT"
           fi
 
-          # ⚠️ إصلاح جوهري ثامن بتاريخ 2026-08-31 — مصالحة بعد الكتابة (P1 حي رصده Codex:
-          # "Make the stale-run guard atomic with publication"): الحارسان أعلاه (توحيد
-          # concurrency + مقارنة external_id) يعتمدان على lookup-then-write غير ذرّي — لا
-          # يوجد compare-and-swap حقيقي في Checks API. نافذة نظرية تبقى: تشغيلان يقرآن
-          # external_id قبل أن يكتب أيّ منهما (كلاهما يجتاز الحارس)، ثم يكتب الأقدم
-          # (generation أصغر) فعلياً بعد الأحدث على شبكة GitHub، فيطمس نتيجة أحدث بأخرى
-          # أقدم رغم اجتياز الحارس السابق للكتابة. الإصلاح: بعد كل كتابة (PATCH/POST)،
-          # يُعاد GET فوري للتحقق من أن external_id المكتوب فعلياً لا يزال generation هذا
-          # التشغيل (أو أحدث منه شرعاً). إن ظهرت generation أقدم من التي كتبها هذا التشغيل
-          # (دليل على أن كتابة متأخرة من تشغيل آخر أقدم اُنجزت بعد كتابتنا مباشرة) يُعاد
-          # تنفيذ نفس الكتابة لاستعادة النتيجة الصحيحة. منطق needsWriteReconciliation موثَّق
-          # ومختبَر آلياً في codex-review-gate-logic.mjs + check-codex-review-gate-logic.mjs
-          # (جزء من npm run check).
-          #
-          # ⚠️ تعديل بتاريخ 2026-08-31 (P1 حي ثانٍ رصده Codex على هذا الفرع نفسه:
-          # "Keep reconciling after a late stale write"): النسخة الأولى من هذه الحلقة كانت
-          # تفحص فوراً بلا انتظار وتتوقف بمجرد أن ترى generation مطابقة لكتابتها — فإن كان
-          # هناك تشغيل أقدم أُلغي (cancel-in-progress) لكن طلب PATCH/POST الخاص به كان قد
-          # غادر العملية فعلياً قبل تسلّم إشارة الإلغاء (GitHub Actions لا يقتل العملية فوراً
-          # عند الإلغاء؛ هناك مهلة سماح فعلية قد تمتد لثوانٍ)، فإن ذلك الطلب المتأخر قد يصل
-          # ويطمس نتيجتنا **بعد** أن نكون قد فحصنا ووجدنا كل شيء سليماً وخرجنا من الحلقة —
-          # فلا يبقى أي طرف يراقب لاكتشاف الطمس المتأخر وإصلاحه. الحل: تحويل الحلقة من
-          # "افحص فوراً وتوقف عند أول تطابق" إلى "راقب نافذة زمنية كاملة محدودة (حتى ~٤٥
-          # ثانية عبر ٤ فحوصات كل ١٥ ثانية) دون توقف مبكر عند التطابق" — يمنح هذا وقتاً كافياً
-          # عملياً لأي طلب متأخر من تشغيل مُلغى لِيَصِل وتتم ملاحظته وإصلاحه ضمن نفس التشغيل،
-          # بدل الاكتفاء بفحص لحظي واحد لا يرى إلا ما استقر خلال أجزاء الثانية الأولى. هذا
-          # يبقى تخفيفاً عملياً محدوداً بنافذة زمنية (لا compare-and-swap ذرّياً حقيقياً في
-          # Checks API) — موثَّق صراحة، وليس ادّعاءً بضمان رياضي مطلق. التوقف المبكر الوحيد
-          # المتبقي هو عند تغيّر head.sha الحيّ (هذا التشغيل لم يعد يخص أحدث HEAD إطلاقاً).
-          CURRENT_RUN_ID="${GENERATION%%.*}"
-          CURRENT_ATTEMPT="${GENERATION##*.}"
-          RECONCILE_ATTEMPT=0
-          RECONCILE_MAX_ATTEMPTS=4
-          RECONCILE_SLEEP_SECONDS=15
-          while [ "$RECONCILE_ATTEMPT" -lt "$RECONCILE_MAX_ATTEMPTS" ]; do
-            RECONCILE_ATTEMPT=$((RECONCILE_ATTEMPT + 1))
-            if [ "$RECONCILE_ATTEMPT" -gt 1 ]; then
-              sleep "$RECONCILE_SLEEP_SECONDS"
-            fi
-            LIVE_HEAD_SHA=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.head.sha')
-            if [ "$LIVE_HEAD_SHA" != "$HEAD_SHA" ]; then
-              echo "مصالحة مُتوقَّفة: HEAD تغيّر أثناء المصالحة ($HEAD_SHA → $LIVE_HEAD_SHA) — هذا التشغيل لم يعد يخص أحدث HEAD."
-              break
-            fi
-
-            # ⚠️ إصلاح جوهري تاسع بتاريخ 2026-08-31 (P1 حي ثالث رصده Codex: "Reconcile
-            # concurrent first-time check creation"): إن بدأ تشغيلان (مثلاً pull_request_target
-            # وissue_comment للاستجابة نفسها) قبل وجود أي check-run كانوني بعد، فقد يرى كلاهما
-            # "لا يوجد check-run بعد" وينفّذ كلٌّ منهما POST مستقل — فينتج check-run كانوني مكرر
-            # بنفس الاسم "Codex Review Gate" على نفس head_sha، بمعرّفَين مختلفين. حارس generation
-            # أعلاه (external_id) لا يكتشف هذا لأنه يقارن فقط داخل معرّف check-run واحد بذاته —
-            # لا بين معرّفات متعددة لنفس الاسم. الإصلاح: كل دورة مصالحة تمسح كل check-runs
-            # الحاملة هذا الاسم على هذا head_sha، وتُوحّد أي نسخة أقدم (generation أصغر أو غائبة)
-            # مع حالة الأحدث (الفائز) عبر PATCH — بصرف النظر عن كون هذا التشغيل تحديداً هو
-            # الفائز أو لا، كي لا يبقى أي required-check context تائه بحالة قديمة تُعطّل rollup
-            # الدمج رغم وجود نتيجة صحيحة حديثة.
-            ALL_NAMED_RUNS_JSON=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs" --paginate \
-              | jq -s --arg name "$NAME" '[.[].check_runs[] | select(.name == $name)]')
-            WINNER_JSON=$(echo "$ALL_NAMED_RUNS_JSON" | jq '
-              def gen_key(g): (g // "0.0") | split(".") | map(tonumber? // 0);
-              sort_by(gen_key(.external_id)) | last')
-            WINNER_ID=$(echo "$WINNER_JSON" | jq -r '.id // empty')
-            if [ -n "$WINNER_ID" ]; then
-              WINNER_PAYLOAD=$(echo "$WINNER_JSON" | jq '{status, conclusion, external_id, output: {title: .output.title, summary: .output.summary, text: .output.text}} | with_entries(select(.value != null))')
-              WINNER_GENERATION=$(echo "$WINNER_JSON" | jq -r '.external_id // empty')
-              DUPLICATE_IDS=$(echo "$ALL_NAMED_RUNS_JSON" | jq -r --arg winner "$WINNER_ID" --arg wgen "$WINNER_GENERATION" \
-                '.[] | select((.id|tostring) != $winner and (.external_id // "") != $wgen) | .id')
-              if [ -n "$DUPLICATE_IDS" ]; then
-                while IFS= read -r DUP_ID; do
-                  [ -z "$DUP_ID" ] && continue
-                  echo "توحيد نسخة check-run مكرر (P1: Reconcile concurrent first-time check creation): id=$DUP_ID لنفس \"$NAME\" على $HEAD_SHA — يُطابَق مع الفائز (id=$WINNER_ID, generation=$WINNER_GENERATION)."
-                  echo "$WINNER_PAYLOAD" | gh api "repos/$REPO/check-runs/$DUP_ID" --method PATCH --input - >/dev/null || true
-                done <<< "$DUPLICATE_IDS"
-              fi
-            fi
-
-            OBSERVED_GENERATION=$(gh api "repos/$REPO/check-runs/$CHECK_RUN_ID" --jq '.external_id // empty')
-            if [ -z "$OBSERVED_GENERATION" ]; then
-              echo "فحص مصالحة ($RECONCILE_ATTEMPT/$RECONCILE_MAX_ATTEMPTS): لا external_id بعد — متابعة المراقبة."
-              continue
-            fi
-            OBSERVED_RUN_ID="${OBSERVED_GENERATION%%.*}"
-            OBSERVED_ATTEMPT="${OBSERVED_GENERATION##*.}"
-            OBS_IS_OLDER=0
-            if [ "$OBSERVED_RUN_ID" -lt "$CURRENT_RUN_ID" ] 2>/dev/null; then
-              OBS_IS_OLDER=1
-            elif [ "$OBSERVED_RUN_ID" -eq "$CURRENT_RUN_ID" ] 2>/dev/null && [ "$OBSERVED_ATTEMPT" -lt "$CURRENT_ATTEMPT" ] 2>/dev/null; then
-              OBS_IS_OLDER=1
-            fi
-            if [ "$OBS_IS_OLDER" -eq 0 ]; then
-              echo "فحص مصالحة ($RECONCILE_ATTEMPT/$RECONCILE_MAX_ATTEMPTS): external_id الحالي ($OBSERVED_GENERATION) ليس أقدم من كتابتنا ($GENERATION) — متابعة المراقبة حتى نهاية النافذة."
-              continue
-            fi
-            echo "مصالحة لازمة (محاولة $RECONCILE_ATTEMPT/$RECONCILE_MAX_ATTEMPTS): كتابة أقدم ($OBSERVED_GENERATION) طمست نتيجتنا ($GENERATION) بعد كتابتنا — إعادة تثبيت النتيجة الصحيحة."
-            echo "$PAYLOAD" | gh api "repos/$REPO/check-runs/$CHECK_RUN_ID" --method PATCH --input - >/dev/null
-          done
-
       - name: النتيجة الإعلامية للـjob (لا تحدد نتيجة الـGate — المصدر الوحيد هو الـcheck-run الكانوني أعلاه)
         if: steps.pr.outputs.base_ref == 'main'
         run: |
           set -euo pipefail
           REVIEWED_COUNT="${{ steps.check.outputs.reviewed_count }}"
+          LOCK_WON="${{ steps.acquire_lock.outputs.won }}"
+          SKIP_REASON="${{ steps.acquire_lock.outputs.skip_reason }}"
+
+          # ⚠️ إصلاح جوهري ثاني عشر بتاريخ 2026-08-31: مع القفل الذرّي (acquire_lock) صار
+          # publish شرطياً (won == 'true' فقط)، فإن outcome لخطوة skipped يساوي "skipped" لا
+          # "success" — التحقق القديم (outcome != success) كان سيُفشل الـjob خطأً في كل مرة
+          # يخسر فيها هذا التشغيل سباق القفل شرعاً (وهو سلوك متوقَّع وسليم، ليس عطلاً). الفارق
+          # الآن: خسارة القفل (stale أو تنافس عابر) = نجاح معلوماتي بلا كتابة؛ أما فوز القفل ثم
+          # فشل الكتابة الفعلية (خطأ API حقيقي، أو GITHUB_TOKEN قراءة فقط على fork/Dependabot)
+          # فيبقى يُفشل الـjob كما كان تماماً.
+          if [ "$LOCK_WON" != "true" ]; then
+            if [ "$SKIP_REASON" = "stale" ]; then
+              echo "لا كتابة: هذا التشغيل قديم (generation أقل من أو تساوي حامل القفل الحالي) — تشغيل أحدث سيتولى النشر."
+            else
+              echo "لا كتابة: لم يفز هذا التشغيل بقفل النشر بعد عدة محاولات (تنافس عابر) — تشغيل لاحق سيتولى النشر."
+            fi
+            exit 0
+          fi
 
           if [ "${{ steps.publish.outcome }}" != "success" ]; then
-            echo "خطأ: تحديث/إنشاء check-run الكانوني فشل (مثلاً GITHUB_TOKEN للقراءة فقط في fork/Dependabot PR) — الـGate يبقى معلّقاً (pending) حتى تشغيل لاحق ناجح." >&2
+            echo "خطأ: تحديث/إنشاء check-run الكانوني فشل رغم الفوز بالقفل (مثلاً GITHUB_TOKEN للقراءة فقط في fork/Dependabot PR) — الـGate يبقى معلّقاً (pending) حتى تشغيل لاحق ناجح." >&2
             exit 1
           fi
 
