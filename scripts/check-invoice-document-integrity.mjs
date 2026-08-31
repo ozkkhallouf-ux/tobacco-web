@@ -144,9 +144,12 @@ test("exported filename metadata === archive metadata", () => {
   assert.match(appJs, /title: archiveDocumentTitle\("purchase_invoice", purchaseArchiveMeta\)/);
   assert.match(appJs, /archive: \{ docType: "purchase_invoice", meta: purchaseArchiveMeta \}/);
 
-  assert.match(appJs, /const manualArchiveMeta = \{ party: customer, number: invNum, date: todayIsoDate\(\) \};/);
-  assert.match(appJs, /title: archiveDocumentTitle\("invoice", manualArchiveMeta\)/);
-  assert.match(appJs, /archive: \{ docType: "invoice", meta: manualArchiveMeta \}/);
+  // مسار الفاتورة اليدوية (printInvoice/manualArchiveMeta) حُذف من main في
+  // cb4fa65: كان route غير مسجَّل في خريطة pages فيكسر render() صامتاً، ومعه
+  // حارس check-keyboard-shortcut-routes.mjs يمنع عودته. أرشفته كانت على كود
+  // لا يُستدعى أبداً، فسقط التوقّع معه — ولا يجوز إعادته لمجرد إبقاء الفحص.
+  assert.ok(!/function printInvoice\(/.test(appJs), "عاد مسار الفاتورة الميت الذي حذفه main");
+  assert.ok(!/manualArchiveMeta/.test(appJs), "بقي أثر من مسار الفاتورة الميت");
 
   // ملف التنزيل المباشر لفاتورة المبيعات يستعمل نفس الكائن أيضاً.
   assert.match(appJs, /const fileName = `\$\{archiveDocumentTitle\("invoice", pdfArchiveMeta\)\}\.pdf`;/);
