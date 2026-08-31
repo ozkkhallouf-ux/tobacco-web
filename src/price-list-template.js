@@ -168,16 +168,21 @@
     .ozk-price-list .price-list-document-tools .theme-switch {
       background:var(--surface); color:var(--text); border-color:var(--line);
     }
+    /* قواعد عرض الهاتف — للعرض على الشاشة فقط. تُستثنى منها أي نسخة تحمل
+       [data-measure-print]: تلك هي نسخة القياس التي يبني عليها المُرقِّم توزيع
+       صفحات A4، ويجب أن تُقاس بطباعة الطباعة لا بطباعة الهاتف. بدون هذا
+       الاستثناء كان القياس على iPhone يجري بخطوط وحشوات أصغر ثم تُطبع النشرة
+       بأبعاد سطح المكتب، فتفيض الأعمدة عن الورقة وتظهر صفحات زائدة. */
     @media screen and (max-width:720px) {
-      .ozk-price-list .price-list-columns { gap:4px; padding:0 4px 6px; }
-      .ozk-price-list.has-document-tools .price-list-header { padding-top:102px; }
-      .ozk-price-list .price-list-document-tools { right:10px; left:10px; justify-content:center; }
-      .ozk-price-list .price-list-group { margin-bottom:3px; }
-      .ozk-price-list .price-list-group-header { padding:4px 5px; font-size:9px; }
-      .ozk-price-list td { padding:3px 4px; font-size:8px; }
-      .ozk-price-list td.name { width:55%; }
-      .ozk-price-list td.unit { width:15%; font-size:7px; }
-      .ozk-price-list td.price { width:30%; font-size:8px; }
+      .ozk-price-list:not([data-measure-print]) .price-list-columns { gap:4px; padding:0 4px 6px; }
+      .ozk-price-list.has-document-tools:not([data-measure-print]) .price-list-header { padding-top:102px; }
+      .ozk-price-list:not([data-measure-print]) .price-list-document-tools { right:10px; left:10px; justify-content:center; }
+      .ozk-price-list:not([data-measure-print]) .price-list-group { margin-bottom:3px; }
+      .ozk-price-list:not([data-measure-print]) .price-list-group-header { padding:4px 5px; font-size:9px; }
+      .ozk-price-list:not([data-measure-print]) td { padding:3px 4px; font-size:8px; }
+      .ozk-price-list:not([data-measure-print]) td.name { width:55%; }
+      .ozk-price-list:not([data-measure-print]) td.unit { width:15%; font-size:7px; }
+      .ozk-price-list:not([data-measure-print]) td.price { width:30%; font-size:8px; }
     }
     @media print {
       .ozk-price-list, .ozk-price-list .price-list-columns, .ozk-price-list .price-list-column-stack {

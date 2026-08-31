@@ -2474,18 +2474,34 @@ function bulletinItemDisplayName(item) {
 // layoutGroupsMeasured — بلا تقدير ثابت بعدد الأسطر وبلا قصّ لأي مجموعة.
 // يُستخدم من نفس الدالة (customerPricePdfMarkup) في المعاينة والتصدير معاً،
 // فتحصل الشاشتان على نفس نتيجة التوزيع تماماً.
+// مقاس صفحة A4 عند 96dpi — المصدر الواحد لهندسة النشرة. يستخدمه القياس
+// والطباعة وتوليد الـPDF معاً كي لا ينحرف أحدهما عن الآخر.
+const BULLETIN_PAGE_WIDTH_PX = 794;
+const BULLETIN_PAGE_HEIGHT_PX = 1123;
+
+// القياس يجب أن يجري بهندسة الطباعة، لا بهندسة الشاشة الحالية. قواعد
+// `@media screen and (max-width:720px)` في القالب تُقيَّم على **نافذة العرض**
+// لا على عرض العنصر: فعلى iPhone كانت تُصغّر الخطوط وحشوات الصفوف أثناء
+// القياس، بينما تُطبع النشرة لاحقاً بأبعاد A4 حيث لا تنطبق تلك القواعد —
+// فتخرج الأعمدة المحسوبة أطول من الورقة وتظهر فيوض وقصّ وصفحات زائدة.
+// المجس يحمل [data-measure-print] والقالب يستثني هذه النسخة من قواعد الهاتف،
+// فيُقاس دائماً بطباعة الطباعة. ويبقى القياس داخل المستند نفسه عمداً: خطوطه
+// وأوراق أنماطه محمّلة فعلاً، بينما مستند جديد يبدأ بخطوط غير جاهزة فيقيس
+// بأبعاد خط احتياطي وينحرف عن الطباعة الحقيقية.
 function buildMeasuredBulletinLayout(template, groups, renderOptions) {
   if (typeof document === "undefined" || typeof template?.layoutGroupsMeasured !== "function") return null;
   const probe = document.createElement("div");
   probe.style.position = "fixed";
   probe.style.left = "-10000px";
   probe.style.top = "0";
-  probe.style.width = "794px";
+  probe.style.width = `${BULLETIN_PAGE_WIDTH_PX}px`;
   probe.style.visibility = "hidden";
   probe.style.pointerEvents = "none";
   // تمريرة أولية بالتوزيع التقليدي فقط لالتقاط ارتفاع الرأس الحقيقي وعرض
   // العمود الحقيقي (نفس CSS المستخدم فعلياً)، وليست هي التوزيع النهائي.
   probe.innerHTML = template.render({ ...renderOptions, groups });
+  // الوسم الذي يستثني هذه النسخة من قواعد `max-width:720px` في القالب.
+  probe.querySelector(".ozk-price-list")?.setAttribute("data-measure-print", "");
   document.body.appendChild(probe);
   try {
     const header = probe.querySelector(".price-list-header");
@@ -2509,7 +2525,7 @@ function buildMeasuredBulletinLayout(template, groups, renderOptions) {
     });
 
     return template.layoutGroupsMeasured(groups, heights, {
-      pageWidthPx: 794,
+      pageWidthPx: BULLETIN_PAGE_WIDTH_PX,
       headerHeightPx,
       safetyMarginPx: 6
     });
@@ -2620,6 +2636,26 @@ let syriaExchangeRateWriteChain = Promise.resolve();
 // آخر قيمة حُفظت فعلاً على الخادم — إليها نعود إذا فشل الحفظ، كي لا تبقى
 // قيمة غير محفوظة معروضة وكأنها معتمدة.
 let lastPersistedSyriaExchangeRate = null;
+// نتيجة آخر عملية حفظ انتهت في الطابور: رقمها التسلسلي، ونجاحها، وقيمتها.
+// المتأخرون يقرأون هذه بدل state المحلية، لأن state قد تعرض قيمة أحدث ما زالت
+// مطوّبة في الطابور ولم تصل الخادم بعد.
+let syriaExchangeRateLastOutcome = { seq: 0, ok: false, value: null, error: null };
+
+// ينتظر استقرار طابور الكتابة كاملاً ثم يُرجع القيمة المعتمدة فعلاً على الخادم.
+// قد تُطوَّب عمليات جديدة أثناء الانتظار، فنكرر حتى لا يتبدّل الطابور. وإن كانت
+// آخر عملية قد فشلت فلا قيمة معتمدة إطلاقاً: نرمي خطأها كي لا ينطلق نشر على
+// سعر لم يُحفظ.
+async function settledSyriaExchangeRate() {
+  let awaited = null;
+  while (awaited !== syriaExchangeRateWriteChain) {
+    awaited = syriaExchangeRateWriteChain;
+    await awaited;
+  }
+  const outcome = syriaExchangeRateLastOutcome;
+  if (!outcome.ok) throw outcome.error || new Error("تعذر حفظ سعر الصرف");
+  applySyriaExchangeRateLocally(outcome.value);
+  return outcome.value;
+}
 
 // الحفظ الفعلي لسعر الصرف: يكتب على جدول Supabase bulletin_exchange_rate —
 // المصدر الوحيد للحقيقة الذي تقرأ منه المعاينة وPDF والنشر الآلي جميعاً.
@@ -2629,8 +2665,18 @@ async function commitSyriaExchangeRate(value) {
   const seq = ++syriaExchangeRateCommitSeq;
   applySyriaExchangeRateLocally(rate);
   const write = syriaExchangeRateWriteChain.then(() => dataStore.setSyriaExchangeRate(rate));
-  // فشل عملية لا يكسر الطابور: من بعدها ينتظر انتهاءها ثم ينطلق.
-  syriaExchangeRateWriteChain = write.then(() => {}, () => {});
+  // فشل عملية لا يكسر الطابور: من بعدها ينتظر انتهاءها ثم ينطلق. ويسجّل الطابور
+  // نتيجة كل عملية كي يعرف المتأخرون هل اعتُمدت آخر قيمة فعلاً أم فشلت.
+  syriaExchangeRateWriteChain = write.then(
+    (result) => {
+      const persisted = Number(result);
+      if (Number.isFinite(persisted) && persisted > 0) lastPersistedSyriaExchangeRate = persisted;
+      syriaExchangeRateLastOutcome = { seq, ok: true, value: persisted, error: null };
+    },
+    (error) => {
+      syriaExchangeRateLastOutcome = { seq, ok: false, value: null, error };
+    }
+  );
   let saved;
   try {
     saved = await write;
@@ -2642,10 +2688,11 @@ async function commitSyriaExchangeRate(value) {
     }
     throw error;
   }
-  const persisted = Number(saved);
-  if (Number.isFinite(persisted) && persisted > 0) lastPersistedSyriaExchangeRate = persisted;
-  // عملية أحدث سبقتنا: لا نلمس state إطلاقاً، ونُرجع ما هو معتمد الآن فعلاً.
-  if (seq !== syriaExchangeRateCommitSeq) return Number(state.syriaExchangeRate) || saved;
+  // عملية أحدث سبقتنا: قيمتها قد تكون ما زالت مطوّبة في الطابور ولم تصل الخادم.
+  // إرجاع state المحلية هنا كان يسمح لـpublishBulletin بإطلاق الـworkflow — وهو
+  // يقرأ السعر من Supabase — بينما الخادم ما زال على قيمتنا القديمة. لذلك ننتظر
+  // استقرار الطابور ونُرجع ما اعتُمد فعلاً، أو نرمي إن فشلت الأحدث.
+  if (seq !== syriaExchangeRateCommitSeq) return settledSyriaExchangeRate();
   applySyriaExchangeRateLocally(saved);
   return saved;
 }
@@ -4569,7 +4616,7 @@ async function createPortablePdfBlob(bodyHtml, filename, options = {}) {
   // نُبقي العنصر ضمن حدود الشاشة الفعلية (top:0;left:0) ونُخفيه بصرياً عبر z-index
   // سالب خلف محتوى الصفحة نفسه بدل إخراجه من نطاق الرؤية. هذا لا يؤثر على Chrome
   // (سطح المكتب أو أندرويد) الذي يرسم foreignObject بشكل صحيح بالحالتين.
-  container.style.cssText = `position:fixed;left:0;top:0;width:${Number(options.width) || 794}px;background:${backgroundColor};z-index:-1;pointer-events:none`;
+  container.style.cssText = `position:fixed;left:0;top:0;width:${Number(options.width) || BULLETIN_PAGE_WIDTH_PX}px;background:${backgroundColor};z-index:-1;pointer-events:none`;
   container.innerHTML = bodyHtml;
   document.body.appendChild(container);
   // ملاحظة: تمرير عنصر واحد من داخل الحاوية يترك وسم <style> المجاور خارج
@@ -4700,7 +4747,7 @@ function printHtmlDocument(html, options = {}) {
   // خارج الشاشة لا display:none — Safari لا يطبع الإطارات المخفية بـdisplay.
   // القياس بمقاس A4 عند 96dpi كي يخرج تنسيق الصفحة مطابقاً للمعاينة.
   frame.style.cssText =
-    "position:fixed;left:-10000px;top:0;width:794px;height:1123px;opacity:0;border:0;pointer-events:none;";
+    `position:fixed;left:-10000px;top:0;width:${BULLETIN_PAGE_WIDTH_PX}px;height:${BULLETIN_PAGE_HEIGHT_PX}px;opacity:0;border:0;pointer-events:none;`;
 
   let finished = false;
   const cleanup = () => {
@@ -4852,7 +4899,7 @@ async function exportReportPdf(bodyHtml, filename, archive) {
   if (archive && archive.docType) archiveToICloud(archive.docType, bodyHtml, archive.meta);
   if (isHandheldDevice()) {
     try {
-      const blob = await createPortablePdfBlob(bodyHtml, filename, { width: 794 });
+      const blob = await createPortablePdfBlob(bodyHtml, filename, { width: BULLETIN_PAGE_WIDTH_PX });
       presentPortablePdf(blob, filename, title);
       return true;
     } catch (error) {

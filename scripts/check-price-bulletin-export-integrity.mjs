@@ -548,6 +548,151 @@ for (const theme of ["dark", "light"]) {
   await context.close();
 }
 
+// ===== 6) نداء قديم لا يجوز أن يسبق كتابة أحدث قيمة مؤكَّدة =====
+// السيناريو الذي كشفته Codex: A تبدأ الكتابة، يؤكد المستخدم B أثناء انتظار A،
+// تنتهي A بينما B ما زالت مطوّبة في الطابور. كان النداء القديم يعود فوراً بقيمة
+// B المحلية فينطلق النشر — والـworkflow يقرأ السعر من Supabase حيث ما زالت A.
+{
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, bypassCSP: true, serviceWorkers: "block" });
+  const { page } = await bootPage(context, { items: ITEMS, prices: approved(300, 500), rate: 10000 });
+
+  const staleWaits = await page.evaluate(async () => {
+    let server = null;
+    // A سريعة، B بطيئة: بلا الإصلاح تعود A قبل أن تصل B إلى الخادم إطلاقاً.
+    window.tobaccoData.setSyriaExchangeRate = async (value) => {
+      const v = Number(value);
+      await new Promise((r) => setTimeout(r, v === 61000 ? 5 : 120));
+      server = v;
+      return v;
+    };
+    const a = window.commitSyriaExchangeRate(61000);
+    const b = window.commitSyriaExchangeRate(62000);
+    const aValue = await a;
+    const serverWhenAResolved = server;
+    await b;
+    return { aValue, serverWhenAResolved, server };
+  });
+
+  check("نداء قديم لا يعود قبل أن تصل أحدث قيمة إلى الخادم",
+    staleWaits.serverWhenAResolved === 62000,
+    `الخادم لحظة عودة النداء القديم = ${staleWaits.serverWhenAResolved} (المتوقع 62000)`);
+  check("النداء القديم يُرجع القيمة المحفوظة فعلاً لا المحلية",
+    staleWaits.aValue === 62000, `أرجع ${staleWaits.aValue}`);
+
+  // فشل أحدث كتابة: لا قيمة مؤكدة إطلاقاً، ولا نشر بقيمة لم تُحفظ.
+  const newestFails = await page.evaluate(async () => {
+    let server = null;
+    const dispatches = [];
+    window.tobaccoData.setSyriaExchangeRate = async (value) => {
+      const v = Number(value);
+      await new Promise((r) => setTimeout(r, v === 71000 ? 5 : 60));
+      if (v === 72000) throw new Error("network down");
+      server = v;
+      return v;
+    };
+    const realFetch = window.fetch;
+    window.fetch = async (url, init) => {
+      if (String(url).includes("/actions/workflows/")) {
+        // نلتقط لحظة الإطلاق: ما هو المحفوظ على الخادم وما هو المعروض؟
+        dispatches.push({ server, shown: (0, eval)("state").syriaExchangeRate });
+        return { status: 204 };
+      }
+      return realFetch(url, init);
+    };
+    localStorage.setItem("gh_publish_token", "test-token");
+    const a = window.commitSyriaExchangeRate(71000);
+    const b = window.commitSyriaExchangeRate(72000);
+    const aRejected = await a.then(() => false, () => true);
+    const bRejected = await b.then(() => false, () => true);
+    await window.publishBulletin({ storedTokenOnly: true });
+    window.fetch = realFetch;
+    localStorage.removeItem("gh_publish_token");
+    return {
+      aRejected, bRejected, server, dispatches,
+      state: (0, eval)("state").syriaExchangeRate
+    };
+  });
+
+  check("فشل أحدث كتابة: النداء القديم يرفض بدل ادّعاء النجاح",
+    newestFails.aRejected, "النداء القديم انتهى بنجاح رغم فشل أحدث كتابة");
+  check("فشل أحدث كتابة يُبلَّغ لصاحبه أيضاً", newestFails.bRejected,
+    "commitSyriaExchangeRate انتهت بنجاح رغم فشل الحفظ");
+  // الشرط ليس «لا إطلاق إطلاقاً» — بعد فشل B تعود القيمة المعتمدة إلى A وهي
+  // محفوظة فعلاً، فالنشر بها سليم. الشرط أن كل إطلاق يحمل قيمة موجودة على
+  // الخادم فعلاً: لا يجوز أن ينطلق النشر بقيمة معروضة لم تُحفظ.
+  check("كل إطلاق workflow يحمل قيمة محفوظة على الخادم فعلاً",
+    newestFails.dispatches.every((d) => d.server !== null && d.server === d.shown),
+    `الإطلاقات = ${JSON.stringify(newestFails.dispatches)}`);
+  check("القيمة المؤكدة تبقى آخر ما حُفظ فعلاً",
+    newestFails.server === 71000 && newestFails.state === 71000,
+    `server=${newestFails.server} state=${newestFails.state}`);
+
+  await context.close();
+}
+
+// ===== 7) ترقيم صفحات الطباعة لا يتأثر بقواعد شاشة الهاتف =====
+// القالب يحمل `@media screen and (max-width:720px)` تُصغّر الخطوط والحشوات.
+// الـmedia queries تُقيَّم على نافذة العرض لا على عرض العنصر، فكان القياس على
+// iPhone يجري بأبعاد الهاتف بينما تتم الطباعة داخل إطار 794px — فتتجاوز
+// الأعمدة المحسوبة حدود A4. القياس صار داخل إطار بعرض الطباعة، فالنتيجة
+// يجب أن تتطابق على الهاتف وسطح المكتب حرفياً.
+{
+  const pageSignature = () => {
+    const dataset = window.buildBulletinDataset(true, "dark").dataset;
+    const markup = window.customerPricePdfMarkup(dataset);
+    const doc = new DOMParser().parseFromString(`<body>${markup}</body>`, "text/html");
+    return Array.from(doc.querySelectorAll(".price-list-columns")).map((pageEl) =>
+      Array.from(pageEl.querySelectorAll(".price-list-column-stack")).map((stack) =>
+        Array.from(stack.querySelectorAll(".price-list-group-header"))
+          .map((h) => h.textContent.trim()).join("|")
+      ).join("//")
+    ).join(" ~ ");
+  };
+
+  const desktop = await browser.newContext({ viewport: { width: 1440, height: 900 }, bypassCSP: true, serviceWorkers: "block" });
+  const { page: deskPage } = await bootPage(desktop, { items: BULK, prices: BULK_PRICES, rate: 14050 });
+  const deskSignature = await deskPage.evaluate(pageSignature);
+  await desktop.close();
+
+  const phone = await browser.newContext({
+    bypassCSP: true, serviceWorkers: "block",
+    viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true
+  });
+  const { page: phonePage } = await bootPage(phone, { items: BULK, prices: BULK_PRICES, rate: 14050 });
+  const phoneResult = await phonePage.evaluate((sigFn) => {
+    const signature = new Function(`return (${sigFn})()`)();
+    // نرسم مخرج الهاتف داخل إطار بهندسة الطباعة نفسها ونقيس الفيض الحقيقي.
+    const dataset = window.buildBulletinDataset(true, "dark").dataset;
+    const markup = window.customerPricePdfMarkup(dataset);
+    const frame = document.createElement("iframe");
+    frame.style.cssText = "position:fixed;left:-10000px;top:0;width:794px;height:1123px;opacity:0;border:0";
+    document.body.appendChild(frame);
+    const doc = frame.contentDocument;
+    doc.open();
+    doc.write(`<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"></head><body style="margin:0">${markup}</body></html>`);
+    doc.close();
+    const usableHeight = 1123;
+    const overflowing = Array.from(doc.querySelectorAll(".price-list-columns")).map((el, i) => ({
+      page: i, height: el.getBoundingClientRect().height
+    })).filter((p) => p.height > usableHeight + 1);
+    const horizontalOverflow = doc.documentElement.scrollWidth > 794 + 1;
+    const result = { signature, overflowing, horizontalOverflow, scrollWidth: doc.documentElement.scrollWidth };
+    frame.remove();
+    return result;
+  }, pageSignature.toString());
+  await phone.close();
+
+  check("ترقيم الصفحات على iPhone مطابق لسطح المكتب حرفياً",
+    phoneResult.signature === deskSignature,
+    `iPhone و1440px أنتجا توزيعين مختلفين للمجموعات على الصفحات`);
+  check("لا مجموعة تتجاوز ارتفاع صفحة A4 في هندسة الطباعة",
+    phoneResult.overflowing.length === 0,
+    `صفحات فائضة = ${JSON.stringify(phoneResult.overflowing)}`);
+  check("لا فيض أفقي داخل هندسة الطباعة",
+    !phoneResult.horizontalOverflow,
+    `scrollWidth=${phoneResult.scrollWidth} (الحد 794)`);
+}
+
 await browser.close();
 server.close();
 

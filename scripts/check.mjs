@@ -879,8 +879,8 @@ if (!cacheMatch || !cacheMatch[1].trim()) {
   failed = true;
 }
 const cacheVersion = Number(cacheMatch?.[1]?.match(/v(\d+)$/)?.[1] || 0);
-if (cacheVersion < 272) {
-  console.error("service worker cache must be v272 or newer after the inventory report update.");
+if (cacheVersion < 628) {
+  console.error("service worker cache must be v628 or newer after the price-bulletin export rebuild (app.js/price-list-template.js/styles.css changed).");
   failed = true;
 }
 
