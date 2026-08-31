@@ -446,29 +446,44 @@ jobs:
           # يُعاد GET فوري للتحقق من أن external_id المكتوب فعلياً لا يزال generation هذا
           # التشغيل (أو أحدث منه شرعاً). إن ظهرت generation أقدم من التي كتبها هذا التشغيل
           # (دليل على أن كتابة متأخرة من تشغيل آخر أقدم اُنجزت بعد كتابتنا مباشرة) يُعاد
-          # تنفيذ نفس الكتابة لاستعادة النتيجة الصحيحة — دورة محدودة (٣ محاولات كحد أقصى)
-          # كي لا تتحول لحلقة لا نهائية عند تنافس فعلي مستمر. قبل كل محاولة مصالحة، يُعاد
-          # التحقق من head.sha الحيّ أيضاً — إن تغيّر، هذا التشغيل لم يعد يخصّ أحدث HEAD
-          # فيتوقف بلا أي مصالحة قسرية إضافية (الحارس الأول أعلاه يبقى الأصل).
-          # منطق needsWriteReconciliation موثَّق ومختبَر آلياً في codex-review-gate-logic.mjs
-          # + check-codex-review-gate-logic.mjs (جزء من npm run check).
-          # مُعاد حسابهما هنا صراحة (لا اعتماد على الحارس الثاني أعلاه) لأن CURRENT_RUN_ID/
-          # CURRENT_ATTEMPT هناك تُحسَب فقط داخل شرط "EXISTING_GENERATION موجودة" — قد لا
-          # تكون معرَّفة إطلاقاً عند أول كتابة على sha جديد، فيفشل `set -u` هنا لو اعتمدنا
-          # عليها بدل إعادة الحساب المباشر من GENERATION.
+          # تنفيذ نفس الكتابة لاستعادة النتيجة الصحيحة. منطق needsWriteReconciliation موثَّق
+          # ومختبَر آلياً في codex-review-gate-logic.mjs + check-codex-review-gate-logic.mjs
+          # (جزء من npm run check).
+          #
+          # ⚠️ تعديل بتاريخ 2026-08-31 (P1 حي ثانٍ رصده Codex على هذا الفرع نفسه:
+          # "Keep reconciling after a late stale write"): النسخة الأولى من هذه الحلقة كانت
+          # تفحص فوراً بلا انتظار وتتوقف بمجرد أن ترى generation مطابقة لكتابتها — فإن كان
+          # هناك تشغيل أقدم أُلغي (cancel-in-progress) لكن طلب PATCH/POST الخاص به كان قد
+          # غادر العملية فعلياً قبل تسلّم إشارة الإلغاء (GitHub Actions لا يقتل العملية فوراً
+          # عند الإلغاء؛ هناك مهلة سماح فعلية قد تمتد لثوانٍ)، فإن ذلك الطلب المتأخر قد يصل
+          # ويطمس نتيجتنا **بعد** أن نكون قد فحصنا ووجدنا كل شيء سليماً وخرجنا من الحلقة —
+          # فلا يبقى أي طرف يراقب لاكتشاف الطمس المتأخر وإصلاحه. الحل: تحويل الحلقة من
+          # "افحص فوراً وتوقف عند أول تطابق" إلى "راقب نافذة زمنية كاملة محدودة (حتى ~٤٥
+          # ثانية عبر ٤ فحوصات كل ١٥ ثانية) دون توقف مبكر عند التطابق" — يمنح هذا وقتاً كافياً
+          # عملياً لأي طلب متأخر من تشغيل مُلغى لِيَصِل وتتم ملاحظته وإصلاحه ضمن نفس التشغيل،
+          # بدل الاكتفاء بفحص لحظي واحد لا يرى إلا ما استقر خلال أجزاء الثانية الأولى. هذا
+          # يبقى تخفيفاً عملياً محدوداً بنافذة زمنية (لا compare-and-swap ذرّياً حقيقياً في
+          # Checks API) — موثَّق صراحة، وليس ادّعاءً بضمان رياضي مطلق. التوقف المبكر الوحيد
+          # المتبقي هو عند تغيّر head.sha الحيّ (هذا التشغيل لم يعد يخص أحدث HEAD إطلاقاً).
           CURRENT_RUN_ID="${GENERATION%%.*}"
           CURRENT_ATTEMPT="${GENERATION##*.}"
           RECONCILE_ATTEMPT=0
-          while [ "$RECONCILE_ATTEMPT" -lt 3 ]; do
+          RECONCILE_MAX_ATTEMPTS=4
+          RECONCILE_SLEEP_SECONDS=15
+          while [ "$RECONCILE_ATTEMPT" -lt "$RECONCILE_MAX_ATTEMPTS" ]; do
             RECONCILE_ATTEMPT=$((RECONCILE_ATTEMPT + 1))
+            if [ "$RECONCILE_ATTEMPT" -gt 1 ]; then
+              sleep "$RECONCILE_SLEEP_SECONDS"
+            fi
             LIVE_HEAD_SHA=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.head.sha')
             if [ "$LIVE_HEAD_SHA" != "$HEAD_SHA" ]; then
               echo "مصالحة مُتوقَّفة: HEAD تغيّر أثناء المصالحة ($HEAD_SHA → $LIVE_HEAD_SHA) — هذا التشغيل لم يعد يخص أحدث HEAD."
               break
             fi
             OBSERVED_GENERATION=$(gh api "repos/$REPO/check-runs/$CHECK_RUN_ID" --jq '.external_id // empty')
-            if [ -z "$OBSERVED_GENERATION" ] || [ "$OBSERVED_GENERATION" = "$GENERATION" ]; then
-              break
+            if [ -z "$OBSERVED_GENERATION" ]; then
+              echo "فحص مصالحة ($RECONCILE_ATTEMPT/$RECONCILE_MAX_ATTEMPTS): لا external_id بعد — متابعة المراقبة."
+              continue
             fi
             OBSERVED_RUN_ID="${OBSERVED_GENERATION%%.*}"
             OBSERVED_ATTEMPT="${OBSERVED_GENERATION##*.}"
@@ -479,10 +494,10 @@ jobs:
               OBS_IS_OLDER=1
             fi
             if [ "$OBS_IS_OLDER" -eq 0 ]; then
-              echo "مصالحة غير لازمة: external_id الحالي ($OBSERVED_GENERATION) ليس أقدم من كتابتنا ($GENERATION) — كتابة أحدث شرعية سبقتنا، لا تراجع."
-              break
+              echo "فحص مصالحة ($RECONCILE_ATTEMPT/$RECONCILE_MAX_ATTEMPTS): external_id الحالي ($OBSERVED_GENERATION) ليس أقدم من كتابتنا ($GENERATION) — متابعة المراقبة حتى نهاية النافذة."
+              continue
             fi
-            echo "مصالحة لازمة (محاولة $RECONCILE_ATTEMPT/3): كتابة أقدم ($OBSERVED_GENERATION) طمست نتيجتنا ($GENERATION) بعد كتابتنا — إعادة تثبيت النتيجة الصحيحة."
+            echo "مصالحة لازمة (محاولة $RECONCILE_ATTEMPT/$RECONCILE_MAX_ATTEMPTS): كتابة أقدم ($OBSERVED_GENERATION) طمست نتيجتنا ($GENERATION) بعد كتابتنا — إعادة تثبيت النتيجة الصحيحة."
             echo "$PAYLOAD" | gh api "repos/$REPO/check-runs/$CHECK_RUN_ID" --method PATCH --input - >/dev/null
           done
 
