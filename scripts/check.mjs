@@ -41,6 +41,13 @@ const required = [
   "docs/ai/topics/ameen-sync.md",
   "docs/ai/topics/printing.md",
   "docs/ai/topics/notifications-deployment.md",
+  "docs/ai/topics/icloud-archive.md",
+  "src/icloud-archive.js",
+  "tools/mac-archive-bridge/server.mjs",
+  "tools/mac-archive-bridge/install-launch-agent.sh",
+  "scripts/check-mac-archive-bridge.mjs",
+  "scripts/check-local-site-server.mjs",
+  "scripts/check-invoice-document-integrity.mjs",
   "supabase/functions/financial-assistant/index.ts",
   "supabase/functions/inventory-auth/index.ts",
   "supabase/smart-inventory.sql",
@@ -50,7 +57,9 @@ const required = [
   "tools/push-ameen-account-balances.ps1",
   "tools/register-account-balances-task.ps1",
   "supabase/project-task-health-monitor.sql",
-  "scripts/check-project-task-monitors.mjs"
+  "scripts/check-project-task-monitors.mjs",
+  "supabase/tests/cron-job-health-truth-table.sql",
+  "scripts/check-cron-job-health-classifier.mjs"
 ];
 
 let failed = false;
