@@ -153,6 +153,13 @@ SELECT CAST(u.GUID AS varchar(40)) AS bill_guid,
        u.Date AS bill_date,
        LTRIM(RTRIM(COALESCE(u.Cust_Name,''))) AS customer,
        CAST(COALESCE(u.Total,0) AS decimal(18,3)) AS bill_total,
+       -- الحسم والدفعة حقلان مستقلان على رأس الفاتورة، ولكلٍّ حسابه في الأمين
+       -- (ItemsDiscAccGUID مقابل FPayAccGUID). TotalDisc **قيمة نقدية** لا نسبة،
+       -- فلا تُضرب بالإجمالي. Total إجمالي قبل الحسم (مؤكَّد: Total = مجموع
+       -- الأسطر بالضبط رغم وجود TotalDisc). أثر الفاتورة على حساب الزبون =
+       -- Total − TotalDisc − FirstPay.
+       CAST(COALESCE(u.TotalDisc,0) AS decimal(18,3)) AS bill_discount,
+       CAST(COALESCE(u.FirstPay,0)  AS decimal(18,3)) AS bill_first_pay,
        bt.BillType AS bill_type,
        LTRIM(RTRIM(COALESCE(m.Name,''))) AS material,
        CAST(COALESCE(bi.Qty,0)  AS decimal(18,3)) AS qty,
@@ -186,6 +193,8 @@ ORDER BY u.Date DESC, u.GUID
                 date     = ([datetime]$r["bill_date"]).ToString("yyyy-MM-dd")
                 customer = [string]$r["customer"]
                 total    = [double]$r["bill_total"]
+                discount = [double]$r["bill_discount"]
+                payment  = [double]$r["bill_first_pay"]
                 # مرتجع مبيعات (BillType=3) — نميّزه عن فاتورة البيع العادية (BillType=1)
                 # ليعرضه الموقع كمستند «فاتورة مرتجع» منفصل بدل دمجه كدفعة عامة.
                 isReturn = ([int]$r["bill_type"] -eq 3)
@@ -217,6 +226,8 @@ ORDER BY u.Date DESC, u.GUID
             date     = $b.date
             guid     = $g.ToLower()   # معرّف الفاتورة في الأمين — لربطها بقيدها في دفتر الحسابات
             total    = [math]::Round($b.total, 3)
+            discount = [math]::Round($b.discount, 3)
+            payment  = [math]::Round($b.payment, 3)
             isReturn = $b.isReturn
             lines    = $b.lines.ToArray()
         })

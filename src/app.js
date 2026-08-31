@@ -986,6 +986,32 @@ function findReturnInvoiceForMovement(custName, movement) {
 // كمية سطر الفاتورة بشكل مقروء (نفضّل الوحدة الأكبر إن وُجدت).
 // لا نعرض سعر/إجمالي السطر لأن أرقام الأسطر المفردة بمصدر الأمين غير دقيقة
 // (مجموعها لا يطابق إجمالي الفاتورة)؛ الموثوق هو إجمالي الفاتورة فقط.
+// قيمة السطر الفعلية. مصدر الحقيقة هو `lineTotal` القادم من الأمين
+// (Qty × Price كما يسجّلهما) — لا يُعاد حسابه من السعر المعروض.
+// **العطل الذي يعالجه:** المستند كان يعرض «سعر الوحدة» وحده، وهو سعر الوحدة
+// الكبرى (سعر الكرتونة 403)، فيُقرأ على أنه قيمة السطر. نصف كرتونة قيمتها
+// 201.50 لا 403. السعر يبقى سعر وحدة، والقيمة تصير عموداً مستقلاً.
+//
+// حين يكون أساس أسعار الفاتورة الوحدة الكبرى (`unit2`) يكون `Qty × Price`
+// القادم من الأمين محسوباً على أساس مختلف، فنحسب القيمة من الكمية بالوحدة
+// الكبرى — نفس المنطق الذي يحسم به `invoicePriceBasis` أساس السعر.
+function invoiceLineTotalValue(line, inv) {
+  const price = Number(line?.price || 0);
+  const qty = Number(line?.qty || 0);
+  const qtyUnits = Number(line?.qtyUnits || 0);
+  const stored = Number(line?.lineTotal || 0);
+  if (inv && qtyUnits > 0 && invoicePriceBasis(inv) === "unit2") {
+    return roundPrice(price * qtyUnits);
+  }
+  if (stored > 0) return roundPrice(stored);
+  return roundPrice(price * qty);
+}
+
+function invoiceLineValueText(line, inv) {
+  const value = invoiceLineTotalValue(line, inv);
+  return value > 0 ? formatMoney(value) : "—";
+}
+
 function invoiceLineQty(line) {
   const u1 = String(line?.unit1 || "").trim();
   const u2 = String(line?.unit2 || "").trim();
@@ -5065,8 +5091,8 @@ function voucherPdfMarkup(v) {
     ${((isInv || isRet) && Array.isArray(v.lines) && v.lines.length) ? `
     <div class="sec">${isRet ? "أصناف المرتجع" : "أصناف الفاتورة"}</div>
     <table>
-      <thead><tr><th>المادة</th><th>الكمية</th><th>سعر الوحدة</th></tr></thead>
-      <tbody>${v.lines.map((l) => `<tr><td>${escapeHtml(l.material || "")}</td><td>${escapeHtml(invoiceLineQty(l))}</td><td>${escapeHtml(invoiceLinePrice(l, { total: v.amount, lines: v.lines }))}</td></tr>`).join("")}</tbody>
+      <thead><tr><th>المادة</th><th>الكمية</th><th>سعر الوحدة</th><th>قيمة السطر</th></tr></thead>
+      <tbody>${v.lines.map((l) => `<tr><td>${escapeHtml(l.material || "")}</td><td>${escapeHtml(invoiceLineQty(l))}</td><td>${escapeHtml(invoiceLinePrice(l, { total: v.amount, lines: v.lines }))}</td><td>${escapeHtml(invoiceLineValueText(l, { total: v.amount, lines: v.lines }))}</td></tr>`).join("")}</tbody>
     </table>` : ""}
     <table>${rows.join("")}</table>
     <p class="muted" style="margin:8px 0 0">${noteLine}</p>
