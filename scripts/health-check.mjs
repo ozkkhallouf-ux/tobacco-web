@@ -275,6 +275,24 @@ function ensureLabel() {
   }
 }
 
+// ⚠️ منع التكرار يجب أن يرتبط بهوية *الحادثة* لا بنوعها.
+// كان المفتاح health-${problem.key} ثابتاً مع p_dedupe_minutes=180، فإذا انقطع
+// الموقع ثم تعافى ثم انقطع مجدداً خلال ثلاث ساعات، أُنشئ Issue جديد لكن
+// private.notify_telegram_dispatch يجد المفتاح نفسه في telegram_outbox فيكتم
+// إشعار الانقطاع الجديد. رقم الـIssue هوية فريدة لكل حادثة، فيدخل في المفتاح.
+// وحين يتعذّر إنشاء Issue أصلاً لا هوية لدينا، فنستعمل حزمة زمنية بالساعة:
+// يبقى الإشعار يصل (وهو الأهم في هذا المسار) دون أن يتكرر كل 30 دقيقة.
+export function telegramDedupeKey(problemKey, issueNumber, nowMs = Date.now()) {
+  if (issueNumber) return `health-${problemKey}-issue-${issueNumber}`;
+  const hourBucket = Math.floor(nowMs / (60 * 60 * 1000));
+  return `health-${problemKey}-noissue-${hourBucket}`;
+}
+
+export function issueNumberFromUrl(issueUrl) {
+  const m = String(issueUrl || "").match(/\/issues\/(\d+)\s*$/);
+  return m ? Number(m[1]) : null;
+}
+
 async function notifyTelegram(problem, issueUrl) {
   const supabaseUrl = process.env.SUPABASE_URL;
   const serviceKey = process.env.SUPABASE_SERVICE_KEY;
@@ -282,7 +300,9 @@ async function notifyTelegram(problem, issueUrl) {
     console.log("⚠️ تخطي إشعار تيليغرام: SUPABASE_URL أو SUPABASE_SERVICE_KEY غير مضبوطين كسر GitHub Actions.");
     return;
   }
-  const message = `🩺 مشكلة اكتشفتها المراقبة الآلية\nالاسم: ${problem.title}\nالخطورة: ${problem.severity}\nرابط: ${issueUrl}`;
+  const issueNumber = issueNumberFromUrl(issueUrl);
+  const link = issueUrl || "(تعذّر إنشاء Issue — راجع سجل health-check.yml)";
+  const message = `🩺 مشكلة اكتشفتها المراقبة الآلية\nالاسم: ${problem.title}\nالخطورة: ${problem.severity}\nرابط: ${link}`;
   try {
     const res = await fetch(`${supabaseUrl}/rest/v1/rpc/notify_telegram`, {
       method: "POST",
@@ -296,7 +316,7 @@ async function notifyTelegram(problem, issueUrl) {
       body: JSON.stringify({
         p_event_type: "health_check",
         p_message: message,
-        p_dedupe_key: `health-${problem.key}`,
+        p_dedupe_key: telegramDedupeKey(problem.key, issueNumber),
         p_dedupe_minutes: 180,
       }),
     });
@@ -334,7 +354,12 @@ async function reportProblem(problem) {
       "--body", body,
     ]).trim();
   } catch (err) {
-    console.log(`✗ فشل إنشاء Issue لمشكلة "${problem.key}": ${err}`);
+    // ⚠️ لا نعود من هنا: تيليغرام قناة تنبيه مستقلة تماماً عن GitHub Issues.
+    // إن تعطّلت واجهة Issues أو تقلّصت الصلاحيات، كان العطل الإنتاجي يمرّ بلا أي
+    // تنبيه إطلاقاً (والسكربت يخرج بنجاح، وalert-on-automation-failure.yml لا
+    // يراقب سير عمل health-check نفسه) — فلا يبقى منه إلا سطر في السجل.
+    console.log(`✗ فشل إنشاء Issue لمشكلة "${problem.key}": ${err} — نُرسل تنبيه تيليغرام رغم ذلك.`);
+    await notifyTelegram(problem, null);
     return;
   }
   console.log(`✓ أُنشئ Issue جديد لمشكلة "${problem.key}": ${issueUrl}`);

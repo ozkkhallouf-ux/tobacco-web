@@ -22,6 +22,7 @@ const src = await readFile(SCRIPT, 'utf8');
 const {
   classifyLatestRun, selectRecentFailures, decideIssuesToClose,
   parseWorkflowIncidentKey, isIncidentConclusion, isRecoveryConclusion, NON_INCIDENT_CONCLUSIONS,
+  telegramDedupeKey, issueNumberFromUrl,
 } = await import(SCRIPT);
 
 const codeOnly = src.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
@@ -227,4 +228,38 @@ assert.equal(
   'النموذج المرجعي للسلوك المعطوب يجب أن يُظهر إغلاق الحوادث الثلاث (وإلا فالاختبار لا يرصد شيئاً).',
 );
 
-console.log('check-health-check-logic: OK — مسح بلا قيد فرع وبقائمة سماح، مفاتيح متطابقة، وتمييز "ليست حادثة" عن "دليل تعافٍ".');
+// ═══════════ منع التكرار مرتبط بهوية الحادثة ═══════════
+// انقطاع → تعافٍ → انقطاع جديد خلال نافذة p_dedupe_minutes (180 دقيقة) كان
+// يعيد المفتاح نفسه فيكتم إشعار الانقطاع الجديد رغم إنشاء Issue جديد.
+assert.equal(issueNumberFromUrl('https://github.com/o/r/issues/42'), 42, 'استخراج رقم الـIssue من الرابط.');
+assert.equal(issueNumberFromUrl(''), null, 'رابط فارغ يعطي null.');
+assert.equal(issueNumberFromUrl('https://github.com/o/r/pull/42'), null, 'رابط PR ليس Issue.');
+
+const k1 = telegramDedupeKey('site-down', 41);
+const k2 = telegramDedupeKey('site-down', 42);
+assert.notEqual(k1, k2, 'عودة الثغرة: حادثتان مختلفتان (Issue مختلف) يجب ألا تتشاركا مفتاح منع التكرار.');
+assert.equal(telegramDedupeKey('site-down', 42), k2, 'نفس الحادثة يجب أن تعطي المفتاح نفسه (منع التكرار يبقى فاعلاً).');
+assert.ok(k2.includes('42'), 'المفتاح يجب أن يتضمن هوية الحادثة.');
+
+// وبلا Issue: حزمة زمنية بالساعة — يصل التنبيه دون أن يتكرر كل 30 دقيقة.
+const H = 60 * 60 * 1000;
+const n1 = telegramDedupeKey('site-down', null, 5 * H + 60000);
+const n2 = telegramDedupeKey('site-down', null, 5 * H + 120000);
+const n3 = telegramDedupeKey('site-down', null, 6 * H + 60000);
+assert.equal(n1, n2, 'ضمن الساعة نفسها يبقى المفتاح واحداً.');
+assert.notEqual(n1, n3, 'ساعة جديدة تعطي مفتاحاً جديداً.');
+assert.notEqual(n1, k2, 'مسار "بلا Issue" لا يتصادم مع مسار الـIssue.');
+
+// ═══════════ فشل إنشاء Issue لا يُلغي قناة التنبيه المستقلة ═══════════
+const reportBlock = codeOnly.slice(codeOnly.indexOf('async function reportProblem'), codeOnly.indexOf('export function parseWorkflowIncidentKey'));
+assert.ok(reportBlock.length > 0, 'تعذّر عزل كتلة reportProblem.');
+const catchIdx = reportBlock.indexOf('فشل إنشاء Issue');
+assert.ok(catchIdx > 0, 'تعذّر إيجاد مسار فشل إنشاء الـIssue.');
+const afterCatch = reportBlock.slice(catchIdx, catchIdx + 400);
+assert.match(
+  afterCatch,
+  /await notifyTelegram\(problem, null\)/,
+  'عودة الثغرة: فشل إنشاء Issue كان يُرجع قبل notifyTelegram فيبقى العطل بلا أي تنبيه.',
+);
+
+console.log('check-health-check-logic: OK — مسح بلا قيد فرع وبقائمة سماح، مفاتيح متطابقة، تمييز التعافي، ومنع تكرار مرتبط بهوية الحادثة.');
