@@ -657,24 +657,26 @@ await test("app.js: الأرشفة لا تحجب التصدير ولا تُنت�
 
 await test("لم تسقط أي نقطة ربط للأرشفة من src/app.js", () => {
   // أُضيف هذا الحارس بعد حادثة فعلية (2026-08-31): إعادة هيكلة لنشرة الأسعار
-  // في جلسة أخرى حذفت `archiveToICloud("price_list", ...)` بصمت، فتوقّفت
-  // أرشفة النشرة بلا أي خطأ ظاهر. نقاط الربط تُفحص بالاسم من الآن فصاعداً.
+  // نقلت أرشفة `price_list` من استدعاء مباشر إلى خيار `archive` في
+  // `printHtmlDocument`، فلو فُحصت الصيغة وحدها لأنذر الحارس زوراً — ولو لم
+  // يوجد حارس أصلاً لمرّ حذفٌ فعلي بلا أثر ظاهر.
+  //
+  // لذلك نفحص **القدرة لا الصيغة**: يكفي أن يظهر نوع المستند في أيٍّ من
+  // الطريقين المعتمدين، ويفشل الفحص إذا اختفى النوع كلياً.
   const appJs = readFileSync(new URL("../src/app.js", import.meta.url), "utf8");
-  const directHooks = ["price_list", "other_report", "invoice"];
-  for (const kind of directHooks) {
-    assert.ok(
-      appJs.includes(`archiveToICloud("${kind}"`),
-      `نقطة ربط مفقودة: archiveToICloud("${kind}") — تصدير هذا المستند لن يُؤرشف`
-    );
+  const wired = (kind) =>
+    appJs.includes(`archiveToICloud("${kind}"`) || appJs.includes(`docType: "${kind}"`);
+
+  const required = [
+    "invoice", "price_list", "other_report",
+    "account_statement", "receivables_report", "stock_report", "purchase_invoice"
+  ];
+  for (const kind of required) {
+    assert.ok(wired(kind), `نقطة ربط مفقودة: "${kind}" — تصدير هذا المستند لن يُؤرشف`);
   }
-  // ملاحظة: `return_invoice` يُمرَّر عبر متغيّر لا حرفياً، ويحرسه فحص المرتجع أعلاه.
-  const viaOptions = ["account_statement", "receivables_report", "stock_report", "purchase_invoice"];
-  for (const kind of viaOptions) {
-    assert.ok(
-      appJs.includes(`docType: "${kind}"`),
-      `نقطة ربط مفقودة: docType "${kind}"`
-    );
-  }
+  // `return_invoice` يُمرَّر عبر متغيّر لا حرفياً، ويحرسه فحص المرتجع أعلاه.
+  assert.ok(/isRet \? "return_invoice"/.test(appJs), "نقطة ربط مفقودة: return_invoice");
+
   // الوسيطان اللذان يمرّ منهما باقي المستندات.
   assert.match(appJs, /async function exportReportPdf\(bodyHtml, filename, archive\)/);
   assert.match(appJs, /if \(options\.archive && options\.archive\.docType\)/);
