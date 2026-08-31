@@ -3539,3 +3539,55 @@ details[open]>.acc-summary::after{transform:rotate(180deg)}
 .smart-account-form{display:grid;grid-template-columns:repeat(3,minmax(160px,1fr)) auto;gap:10px;align-items:end}.smart-account-form label{display:grid;gap:5px}.smart-account-list{display:grid;gap:8px;margin-top:16px}.smart-account-list article{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px;border:1px solid var(--line);border-radius:10px}.smart-account-list small{display:block;color:var(--muted);margin-top:3px}
 .counter-shell .main{max-width:1200px}.counter-shell .sidebar nav{margin-top:20px}
 @media(max-width:760px){.smart-session-head,.smart-toolbar,.smart-account-list article{align-items:stretch;flex-direction:column}.smart-session-progress{min-width:0}.smart-toolbar>input{min-width:0;width:100%}.smart-summary{grid-template-columns:repeat(2,1fr)}.smart-account-form{grid-template-columns:1fr}.smart-items-grid{grid-template-columns:1fr}.counter-shell .topbar-actions{gap:6px}.counter-shell .topbar-actions .button{font-size:.75rem;padding:8px}.smart-count-grid{grid-template-columns:1fr 1fr}}
+
+/* ===== معاينة نشرة الأسعار (شاشة كاملة، آمنة على الهاتف) =====
+   قواعد حاكمة:
+   - `100dvh` لا `vh`: على iOS يساوي `vh` ارتفاع النافذة الكبير (بلا شريط
+     المتصفح)، فكان شريط الأزرار يقع خارج الشاشة فعلياً ولا يجد المستخدم زر
+     إغلاق ولا زر تصدير — وهذا هو «الحبس داخل المعاينة».
+   - `env(safe-area-inset-*)` كي لا تختفي الأزرار تحت النوتش أو شريط الـHome.
+   - شريط الإجراءات ملتصق (`sticky`) أعلى اللوحة: يبقى ظاهراً مهما طال التمرير.
+   - زر الرجوع أول عنصر في الشريط (يمين في RTL) ولا يُلَفّ إلى سطر مخفي. */
+.price-preview-shell{
+  position:fixed;inset:0;z-index:9000;background:rgba(12,10,7,.86);
+  height:100vh;height:100dvh;
+  display:flex;align-items:stretch;justify-content:center;
+  padding:calc(env(safe-area-inset-top,0px) + 8px) calc(env(safe-area-inset-right,0px) + 8px)
+          calc(env(safe-area-inset-bottom,0px) + 8px) calc(env(safe-area-inset-left,0px) + 8px);
+}
+.price-preview-panel{
+  width:min(960px,100%);max-height:100%;background:var(--surface);color:var(--ink);
+  border:1px solid var(--line);border-radius:14px;display:flex;flex-direction:column;overflow:hidden;
+}
+.price-preview-bar{
+  position:sticky;top:0;z-index:2;flex:0 0 auto;
+  display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;
+  padding:10px 12px;background:var(--surface);border-bottom:1px solid var(--line);
+}
+.price-preview-titles h2{margin:0;font-size:1.02rem}
+.price-preview-titles p{margin:3px 0 0;font-size:.78rem}
+.price-preview-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.price-preview-theme-label{font-weight:700;font-size:.85rem}
+.price-preview-actions .button{min-height:44px}
+.price-preview-scroll{
+  flex:1 1 auto;min-height:0;overflow:auto;-webkit-overflow-scrolling:touch;
+  background:#9a9a9a;padding:16px;display:flex;justify-content:center;
+}
+.price-preview-scroll .ozk-price-list{width:794px;max-width:none;flex:0 0 auto}
+@media(max-width:760px){
+  .price-preview-shell{padding:env(safe-area-inset-top,0px) env(safe-area-inset-right,0px) env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px)}
+  .price-preview-panel{border-radius:0;border:0;width:100%}
+  .price-preview-titles{flex:1 1 100%}
+  .price-preview-titles h2{font-size:.94rem}
+  .price-preview-actions{flex:1 1 100%;justify-content:space-between}
+  .price-preview-theme-label{display:none}
+  .price-preview-actions .button{flex:1 1 auto;padding:10px 8px;font-size:.82rem}
+  .price-preview-close{order:-1;flex:0 0 auto;min-width:96px}
+  .price-preview-scroll{padding:8px;display:block}
+  /* النشرة عرضها ثابت 794px (مقاس A4). على الهاتف نُصغّرها كي تُرى الصفحة
+     كاملة بلا تمرير أفقي. `zoom` (لا `transform:scale`) لأنه يُصغّر المقاس
+     المُستخدَم فعلاً فلا يترك فيضاناً أفقياً وراءه؛ ولو لم يدعمه متصفح ما،
+     يعود السلوك إلى التمرير الأفقي المعتاد بلا كسر. التخطيط لا يتغيّر —
+     الملف المطبوع يبقى بمقاس A4 حرفياً. */
+  .price-preview-scroll .ozk-price-list{zoom:.46}
+}

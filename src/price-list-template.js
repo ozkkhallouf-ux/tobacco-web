@@ -1,7 +1,17 @@
 (function initOzkPriceListTemplate(root) {
   "use strict";
 
-  const VERSION = "2026-08-26-fixed-table-layout";
+  const VERSION = "2026-08-31-native-print-pagination";
+
+  // لون خلفية الصفحة لكل ثيم — التعريف الوحيد بالمشروع. الـCSS يقرأه عبر
+  // --page، ويقرأه أيضاً `src/app.js` و`scripts/generate-pdfs.mjs` بدل تكرار
+  // القيمة الحرفية في ثلاثة أماكن (تكرارها هو ما سمح لخلفية تصدير الموقع أن
+  // تختلف عن خلفية النشرات المنشورة).
+  const THEME_PAGE_BACKGROUND = Object.freeze({ dark: "#0c0a07", light: "#fffdf8" });
+
+  function themePageBackground(theme) {
+    return THEME_PAGE_BACKGROUND[theme === "light" ? "light" : "dark"];
+  }
   const RIGHT_GROUPS = ["ماستر", "كابتن بلاك", "اوسكار", "اختمار", "روز", "1970", "كينغ دوم", "مانشستر"];
   const LEFT_GROUPS = ["غلواز", "اليغانس", "تي اس", "أوريس", "حمرا", "يونايتد", "ولسون", "نابولي"];
   const SPECIAL_RIGHT_GROUPS = ["فحم", "ورق", "فيبات", "قداحات", "سلفان"];
@@ -117,14 +127,21 @@
       break-inside:avoid; -webkit-column-break-inside:avoid; margin-bottom:5px;
       border:1px solid var(--line); border-radius:3px; overflow:hidden;
     }
+    /* اسم مجموعة طويل كان يزيح الشارة خارج الرأس أو يقصّها: الاسم يلتفّ داخل
+       مساحته (min-width:0 شرط ليعمل الالتفاف داخل flex) والشارة تبقى بعرضها.
+       منقول من PR #115 — قواعد التفاف الاسم وحدها، وهي مشكلة مستقلة عن فواصل
+       الصفحات التي عالجها هذا الفرع من جذرها. */
     .ozk-price-list .price-list-group-header {
       background:var(--surface-strong); border-bottom:1px solid var(--line); padding:3.5px 9px;
       font-size:11px; font-weight:900; color:#f2c55c; display:flex; justify-content:space-between;
-      align-items:center; letter-spacing:.3px;
+      align-items:center; letter-spacing:.3px; gap:6px;
+    }
+    .ozk-price-list .price-list-group-name {
+      min-width:0; overflow-wrap:break-word; word-break:break-word;
     }
     .ozk-price-list .price-list-group-count {
-      font-size:8.5px; background:rgba(255,255,255,.12); color:#f4d184;
-      border-radius:8px; padding:1px 6px; font-weight:700;
+      flex:0 0 auto; font-size:8.5px; background:rgba(255,255,255,.12); color:#f4d184;
+      border-radius:8px; padding:1px 6px; font-weight:700; white-space:nowrap;
     }
     .ozk-price-list table { width:100%; border-collapse:collapse; table-layout:fixed; }
     .ozk-price-list td { padding:2.5px 8px; border-bottom:1px solid var(--line); font-size:10px; }
@@ -151,16 +168,21 @@
     .ozk-price-list .price-list-document-tools .theme-switch {
       background:var(--surface); color:var(--text); border-color:var(--line);
     }
+    /* قواعد عرض الهاتف — للعرض على الشاشة فقط. تُستثنى منها أي نسخة تحمل
+       [data-measure-print]: تلك هي نسخة القياس التي يبني عليها المُرقِّم توزيع
+       صفحات A4، ويجب أن تُقاس بطباعة الطباعة لا بطباعة الهاتف. بدون هذا
+       الاستثناء كان القياس على iPhone يجري بخطوط وحشوات أصغر ثم تُطبع النشرة
+       بأبعاد سطح المكتب، فتفيض الأعمدة عن الورقة وتظهر صفحات زائدة. */
     @media screen and (max-width:720px) {
-      .ozk-price-list .price-list-columns { gap:4px; padding:0 4px 6px; }
-      .ozk-price-list.has-document-tools .price-list-header { padding-top:102px; }
-      .ozk-price-list .price-list-document-tools { right:10px; left:10px; justify-content:center; }
-      .ozk-price-list .price-list-group { margin-bottom:3px; }
-      .ozk-price-list .price-list-group-header { padding:4px 5px; font-size:9px; }
-      .ozk-price-list td { padding:3px 4px; font-size:8px; }
-      .ozk-price-list td.name { width:55%; }
-      .ozk-price-list td.unit { width:15%; font-size:7px; }
-      .ozk-price-list td.price { width:30%; font-size:8px; }
+      .ozk-price-list:not([data-measure-print]) .price-list-columns { gap:4px; padding:0 4px 6px; }
+      .ozk-price-list.has-document-tools:not([data-measure-print]) .price-list-header { padding-top:102px; }
+      .ozk-price-list:not([data-measure-print]) .price-list-document-tools { right:10px; left:10px; justify-content:center; }
+      .ozk-price-list:not([data-measure-print]) .price-list-group { margin-bottom:3px; }
+      .ozk-price-list:not([data-measure-print]) .price-list-group-header { padding:4px 5px; font-size:9px; }
+      .ozk-price-list:not([data-measure-print]) td { padding:3px 4px; font-size:8px; }
+      .ozk-price-list:not([data-measure-print]) td.name { width:55%; }
+      .ozk-price-list:not([data-measure-print]) td.unit { width:15%; font-size:7px; }
+      .ozk-price-list:not([data-measure-print]) td.price { width:30%; font-size:8px; }
     }
     @media print {
       .ozk-price-list, .ozk-price-list .price-list-columns, .ozk-price-list .price-list-column-stack {
@@ -173,6 +195,22 @@
       }
     }
   `;
+
+  // خلفية **المستند** (html/body)، لا خلفية القالب. هذه هي القاعدة التي كانت
+  // غائبة عن كل مسار تصدير داخل الموقع: في الطباعة الأصلية تُرسم خلفية الورقة
+  // من html/body لا من القسم، فكان ذيل الصفحة الأخيرة وأي فراغ حول القالب يخرج
+  // **أبيض** داخل نشرة داكنة — وهو بالضبط عطل «صفحة نصفها أسود ونصفها أبيض».
+  // `scripts/generate-pdfs.mjs` كان يحقن هذه القاعدة لنفسه فقط، ولذلك خرجت
+  // النشرات المنشورة سليمة بينما خرج تصدير الموقع مكسوراً.
+  function documentBackgroundCss(theme) {
+    const background = themePageBackground(theme);
+    return `
+    html, body { margin:0; padding:0; background:${background}; }
+    @media print {
+      html, body { background:${background} !important; }
+      html { -webkit-print-color-adjust:exact !important; print-color-adjust:exact !important; }
+    }`;
+  }
 
   function escapeHtml(value) {
     return String(value ?? "")
@@ -187,10 +225,16 @@
   // (راجع الفحص التشخيصي السابق لدرجات drawImage الفعلية) — لا نملأ العمود حتى آخر بكسل.
   const DEFAULT_SAFETY_MARGIN_PX = 6;
 
-  // ارتفاع منطقة المحتوى الفعلية لصفحة A4 كاملة بنفس نسبة العرض المستخدمة فعلياً
-  // في التصدير (794px). النسبة الحقيقية لصفحة A4 هي 297/210 مم، لا رقم تقديري ثابت.
+  // مقاس A4 الحقيقي بالبكسل عند 96dpi — وهو المقاس الذي يقطّع عليه محرك
+  // الطباعة الأصلي فعلاً (`@page { size:A4; margin:0 }`): 210مم = 793.70px،
+  // و297مم = 1122.52px. الحساب السابق `pageWidthPx * 297/210` لم يكن مشتقاً من
+  // مقاس الورقة الحقيقي، فبقيت ميزانية العمود أطول قليلاً من الورقة الفعلية.
+  const A4_WIDTH_PX = 210 / 25.4 * 96;
+  const A4_HEIGHT_PX = 297 / 25.4 * 96;
+
   function computePageContentHeightPx(pageWidthPx = 794) {
-    return pageWidthPx * (297 / 210);
+    const width = Number(pageWidthPx) > 0 ? Number(pageWidthPx) : A4_WIDTH_PX;
+    return A4_HEIGHT_PX * (width / A4_WIDTH_PX);
   }
 
   // نسبة التفاوت (من ميزانية العمود) التي تُعتبر "فراغاً كبيراً" يستحق محاولة
@@ -403,7 +447,7 @@
     return `
       <div class="price-list-group">
         <div class="price-list-group-header">
-          <span>${escapeHtml(group?.name)}</span>
+          <span class="price-list-group-name">${escapeHtml(group?.name)}</span>
           <span class="price-list-group-count">${items.length}</span>
         </div>
         <table><tbody>${items.map((item, index) => `
@@ -489,9 +533,36 @@
       </section>`;
   }
 
+  // مستند طباعة مستقل كامل يلفّ نفس ناتج render() حرفياً. الطباعة الأصلية
+  // للمتصفح («حفظ بصيغة PDF») هي محرك تصدير النشرة المعتمد: هي وحدها التي
+  // تُشكّل الحروف العربية صحيحاً، وتحترم break-before:page فلا تُنتج صفحات
+  // بيضاء، وترسم الخلفية الداكنة على كامل الورقة. لا يُبنى هنا أي HTML بديل —
+  // `bodyHtml` يجب أن يكون ناتج render() نفسه الذي تعرضه المعاينة، كي يستحيل
+  // أن يختلف الملف المصدَّر عن المعاينة.
+  function printDocument(options = {}) {
+    const theme = options.theme === "light" ? "light" : "dark";
+    const title = String(options.title || "نشرة الأسعار");
+    const bodyHtml = String(options.bodyHtml || "");
+    return `<!doctype html>
+<html lang="ar" dir="rtl" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=794">
+<meta name="google" content="notranslate">
+<title>${escapeHtml(title)}</title>
+<style>${documentBackgroundCss(theme)}</style>
+</head>
+<body data-theme="${theme}">${bodyHtml}</body>
+</html>`;
+  }
+
   root.OZKPriceListTemplate = Object.freeze({
     VERSION,
     CSS,
+    THEME_PAGE_BACKGROUND,
+    themePageBackground,
+    documentBackgroundCss,
+    printDocument,
     formatArabicIssueDate,
     layoutGroups,
     pageCount,
