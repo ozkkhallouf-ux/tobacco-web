@@ -79,3 +79,5 @@
 
 <!-- اختبار نهائي دورة كاملة تلقائية Codex Review Gate بعد دمج PR #130 -->
 <!-- push ثانٍ لاختبار رجوع الـGate إلى FAIL بعد push جديد -->
+
+<!-- test-marker: codex-review-gate-postmerge-verification (سيُحذف الفرع التجريبي، لا تعديل منطق -->
