@@ -32,7 +32,8 @@ const PATTERNS = {
   inventoryPageGeometry: /function inventoryPageGeometry\(mode\) \{[\s\S]*?\n\}\n/,
   inventoryPackPages: /function inventoryPackPages\(entries, options = \{\}\) \{[\s\S]*?\n\}\n/,
   inventoryBalanceLastPage: /function inventoryBalanceLastPage\(page, limit\) \{[\s\S]*?\n\}\n/,
-  inventoryTwoColumnPages: /function inventoryTwoColumnPages\(entries, columnCapacity = 48\) \{[\s\S]*?\n\}\n/
+  inventoryTwoColumnPages: /function inventoryTwoColumnPages\(entries, columnCapacity = 48\) \{[\s\S]*?\n\}\n/,
+  inventoryReportPages: /function inventoryReportPages\(parts, mode\) \{[\s\S]*?\n\}\n/
 };
 
 const chunks = [];
@@ -48,8 +49,23 @@ for (const [name, pattern] of Object.entries(PATTERNS)) {
 if (failed) process.exit(1);
 
 const context = vm.createContext({ console });
+// `inventoryReportPages` يلمس DOM عبر measureInventoryReportBlocks، ونحن بلا DOM هنا.
+// نحقن بديلاً يُرجع قياسات مُمرَّرة من الاختبار، فيُنفَّذ منطق حجز التذييل الحقيقي
+// (اكتشاف الدورة واختيار التخطيط الآمن) بلا أي متصفح.
 vm.runInContext(
-  `${chunks.join("\n")}\n;globalThis.__api = { INVENTORY_PACK_SAFETY_PX, inventoryPageGeometry, inventoryPackPages, inventoryBalanceLastPage, inventoryTwoColumnPages };`,
+  `let __measureStub = null;
+   function measureInventoryReportBlocks() { return __measureStub; }
+   function inventoryPageGeometryStub() {}
+   ${chunks.join("\n")}
+   ;globalThis.__api = { INVENTORY_PACK_SAFETY_PX, inventoryPageGeometry, inventoryPackPages, inventoryBalanceLastPage, inventoryTwoColumnPages,
+     runReportPages(measureStub, geometry, entriesCount) {
+       __measureStub = measureStub;
+       const parts = { entries: Array.from({ length: entriesCount }, (_, i) => ({ name: "م" + i, html: "", rows: 1 })) };
+       const realGeom = inventoryPageGeometry;
+       inventoryPageGeometry = () => geometry;
+       try { return inventoryReportPages(parts, "print"); }
+       finally { inventoryPageGeometry = realGeom; __measureStub = null; }
+     } };`,
   context
 );
 const api = context.__api;
@@ -310,6 +326,92 @@ const readingOrder = (pages) => pages.flatMap((page) => [...page.columns[0], ...
     appJs.includes(".inventory-group{margin:0 0 5px;break-inside:avoid;page-break-inside:avoid}"));
   check("التقرير يقيس بهندسة المسار الذي سيُصدَّر فعلاً",
     /isHandheldDevice\(\) \? "canvas" : "print"/.test(appJs));
+}
+
+// === 15) تذبذب حجز التذييل (ملاحظة Codex P1 على PR #156) ===
+// السيناريو: ثلاث مجموعات 350px وحدّ صفحة 790px وتذييل 100px. بلا حجز يسع
+// التخطيط صفحة واحدة [700,350]؛ لكن حجز التذييل على ص0 يُخرج صفحتين، وحجزه
+// على ص1 (التي صارت الأخيرة) يُعيد الصفحة الأولى إلى ميزانيتها الكاملة فيعود
+// التخطيط صفحة واحدة — فتتناوب الحلقة بين 1 و2 بلا استقرار أبداً.
+//
+// الكود القديم كان يكتفي بأربع محاولات ثم يحتفظ بآخر ناتج، فيخرج بتخطيط صفحة
+// واحدة عمودها 700px بينما الحدّ بعد خصم التذييل 690px — فيضان يدفع التذييل أو
+// مجموعة إلى ورقة إضافية، ويطبع الرأس «صفحة 1 من 1» والورق ورقتان.
+{
+  const PAGE = 800, HEAD = 0, CARDS = 0, FOOT = 100, SAFETY = api.INVENTORY_PACK_SAFETY_PX;
+  const heights = [350, 350, 350];
+  const geometry = { contentWidthPx: 700, pageHeightPx: PAGE };
+  const measure = { heights, headPx: HEAD, cardsPx: CARDS, footPx: FOOT };
+  const fullBudget = PAGE - HEAD;
+  const firstPageBudget = fullBudget - CARDS;
+  const base = { fullBudget, firstPageBudget, safetyPx: SAFETY };
+  const limitOfPage = (i) => Math.max(0, (i === 0 ? firstPageBudget : fullBudget) - SAFETY);
+  const entries = heights.map((height, i) => ({ name: `م${i}`, height }));
+
+  // (أ) بلا حجز: التخطيط ينجح بصفحة واحدة — هذا ما يجعل السيناريو تذبذبياً أصلاً.
+  const unreserved = api.inventoryPackPages(entries, base);
+  check("تذبذب: بلا حجز التذييل ينجح التخطيط بصفحة واحدة",
+    unreserved.length === 1 && unreserved.sizes === undefined && unreserved[0].sizes[0] === 700);
+
+  // (ب) التذبذب حقيقي: حجز على ص0 -> صفحتان، وحجز على ص1 -> صفحة واحدة.
+  const r0 = api.inventoryPackPages(entries, { ...base, reserveIndex: 0, reservePx: FOOT });
+  const r1 = api.inventoryPackPages(entries, { ...base, reserveIndex: 1, reservePx: FOOT });
+  check("تذبذب: الحجز على ص0 يُخرج صفحتين", r0.length === 2);
+  check("تذبذب: الحجز على ص1 يُعيده لصفحة واحدة (دورة مغلقة)", r1.length === 1);
+
+  // (ج) السلوك القديم (أربع محاولات ثم آخر ناتج) كان يُنتج فيضاناً فعلياً.
+  let legacy = api.inventoryPackPages(entries, base);
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const reserveIndex = legacy.length - 1;
+    const next = api.inventoryPackPages(entries, { ...base, reserveIndex, reservePx: FOOT });
+    legacy = next;
+    if (next.length === reserveIndex + 1) break;
+  }
+  const legacyLast = legacy.length - 1;
+  const legacyTallest = Math.max(legacy[legacyLast].sizes[0], legacy[legacyLast].sizes[1]);
+  const legacyOverflow = legacyTallest + FOOT - limitOfPage(legacyLast);
+  check(`مرجع: السلوك القديم كان يُنتج فيضاناً فعلياً (${legacyOverflow.toFixed(0)}px)`, legacyOverflow > 0);
+
+  // (د) بعد الإصلاح: لا فيضان، ولا انقسام، والعدد المعروض = الفعلي، والحجز على
+  //     الصفحة الأخيرة الفعلية.
+  const pages = api.runReportPages(measure, geometry, heights.length);
+  const lastIndex = pages.length - 1;
+  const tallest = Math.max(pages[lastIndex].sizes[0], pages[lastIndex].sizes[1]);
+
+  check("الإصلاح: لا فيضان بالصفحة الأخيرة بعد احتساب التذييل",
+    tallest + FOOT <= limitOfPage(lastIndex) + 1e-6);
+  check("الإصلاح: الحجز مطبَّق فعلياً على الصفحة الأخيرة (تتّسع لمحتواها + التذييل)",
+    pages[lastIndex].sizes.every((size) => size + FOOT <= limitOfPage(lastIndex) + 1e-6));
+  check("الإصلاح: لا فيضان بأي عمود في أي صفحة",
+    pages.every((page, i) => page.sizes.every((size) => size <= limitOfPage(i) + 1e-6)));
+
+  const placed = pages.flatMap((page) => [...page.columns[0], ...page.columns[1]]);
+  check("الإصلاح: لا مجموعة مقسّمة ولا مفقودة ولا مكرّرة",
+    placed.length === heights.length && new Set(placed.map((e) => e.name)).size === heights.length);
+  check("الإصلاح: الترتيب محفوظ",
+    JSON.stringify(placed.map((e) => e.name)) === JSON.stringify(entries.map((e) => e.name)));
+
+  // العدد المعروض بالرأس («صفحة i من pages.length») يطابق الورق الفعلي: كل صفحة
+  // منطقية يجب أن تسع ورقة واحدة بالضبط بعد احتساب الرأس والبطاقات والتذييل.
+  const actualSheets = pages.reduce((sum, page, i) => {
+    const content = Math.max(page.sizes[0], page.sizes[1])
+      + HEAD + (i === 0 ? CARDS : 0) + (i === lastIndex ? FOOT : 0);
+    return sum + Math.max(1, Math.ceil((content - 1e-6) / PAGE));
+  }, 0);
+  check(`الإصلاح: العدد المعروض (${pages.length}) = الورق الفعلي (${actualSheets})`,
+    actualSheets === pages.length);
+}
+
+// === 16) لا عودة إلى «عدد محاولات ثابت ثم آخر ناتج» ===
+{
+  check("اكتشاف الدورة صريح عبر مجموعة الفهارس المُجرَّبة",
+    appJs.includes("triedReserveIndexes") && /triedReserveIndexes\.has\(reserveIndex\)/.test(appJs));
+  check("شرط الخروج هو نقطة الثبات مع أمان التذييل معاً",
+    /next\.length - 1 === reserveIndex && footerFits\(next\)/.test(appJs));
+  check("عند الدورة يوجد بديل يحجز التذييل من كل الصفحات",
+    appJs.includes("reserveEveryPage"));
+  check("لا عودة لحلقة المحاولات الثابتة",
+    !/for \(let attempt = 0; attempt < 4; attempt \+= 1\)[\s\S]{0,200}reservePx: measured\.footPx/.test(appJs));
 }
 
 if (failed) {

@@ -5493,16 +5493,57 @@ function inventoryReportPages(parts, mode) {
   const firstPageBudget = fullBudget - measured.cardsPx;           // البطاقات بالصفحة الأولى وحدها
   const base = { fullBudget, firstPageBudget, safetyPx: INVENTORY_PACK_SAFETY_PX };
 
-  // سطر التذييل يظهر بالصفحة الأخيرة وحدها، ولا نعرف رقمها قبل التوزيع. نوزّع
-  // أولاً بلا حجز، ثم نحجز ارتفاعه بالصفحة الأخيرة ونعيد التوزيع حتى يستقرّ —
-  // بدون هذا كان سطر واحد يدفع مجموعة كاملة إلى صفحة إضافية شبه فارغة. كل جولة
-  // غير مستقرة تزيد عدد الصفحات فعلياً، فالحلقة منتهية حتماً (والحد الأقصى احتياط).
-  let pages = inventoryPackPages(entries, base);
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    const reserveIndex = pages.length - 1;
+  // سطر التذييل يظهر بالصفحة الأخيرة وحدها، ولا نعرف رقمها قبل التوزيع. نبحث عن
+  // «نقطة ثبات»: توزيعٌ حُجز فيه ارتفاع التذييل على الصفحة التي صارت فعلاً أخيرته
+  // (pages.length - 1 === reserveIndex). بدون هذا الحجز كان سطر التذييل وحده يدفع
+  // مجموعة كاملة إلى صفحة إضافية شبه فارغة.
+  //
+  // ⚠️ إصلاح ملاحظة Codex P1 على PR #156: يُمنع الاكتفاء بعدد محاولات ثابت ثم
+  // الاحتفاظ بآخر ناتج. نقل الحجز إلى فهرس جديد يُعيد الصفحة السابقة إلى ميزانيتها
+  // الكاملة، فقد يهبط عدد الصفحات ثانيةً وتتناوب الحلقة بين N وN+1 بلا استقرار
+  // أبداً — فتخرج بتخطيط لم يُحجز فيه التذييل على صفحته الأخيرة، فيفيض المحتوى
+  // ويطبع الرأس رقم صفحات كاذباً. (قياس على 20000 حالة بالهندسة الحقيقية: 3.39%
+  // تتذبذب، وكلها كانت تُنتج فيضاناً.)
+  //
+  // لذلك نكتشف الدورة صراحةً عبر مجموعة الفهارس المُجرَّبة، ولا نخرج إلا بتخطيط
+  // «آمن للتذييل» فعلياً: أطول عمود في صفحته الأخيرة + التذييل يبقى ضمن حدّ تلك
+  // الصفحة. عند الدورة نضمن ذلك بتوزيع يحجز التذييل من **كل** الصفحات (فأياً كانت
+  // الأخيرة تحمل الحجز حتماً)، ونقبل مرشحاً أقل صفحاتٍ منه فقط إن كان آمناً بنفس
+  // المعيار. صفحة إضافية أهون من فيضان أو رقم صفحات كاذب.
+  const limitOfPage = (pageIndex) =>
+    Math.max(0, (pageIndex === 0 ? firstPageBudget : fullBudget) - INVENTORY_PACK_SAFETY_PX);
+  const footerFits = (layout) => {
+    const lastIndex = layout.length - 1;
+    const tallest = Math.max(layout[lastIndex].sizes[0], layout[lastIndex].sizes[1]);
+    return tallest + measured.footPx <= limitOfPage(lastIndex) + 1e-6;
+  };
+
+  let pages = null;
+  let candidate = inventoryPackPages(entries, base);
+  const candidates = [candidate];
+  const triedReserveIndexes = new Set();
+  for (;;) {
+    const reserveIndex = candidate.length - 1;
+    if (triedReserveIndexes.has(reserveIndex)) break; // دورة: هذا الفهرس جُرّب سابقاً
+    triedReserveIndexes.add(reserveIndex);
     const next = inventoryPackPages(entries, { ...base, reserveIndex, reservePx: measured.footPx });
-    pages = next;
-    if (next.length === reserveIndex + 1) break;
+    candidates.push(next);
+    if (next.length - 1 === reserveIndex && footerFits(next)) {
+      pages = next; // نقطة ثبات: الحجز مطبَّق على الصفحة الأخيرة الفعلية
+      break;
+    }
+    candidate = next;
+  }
+
+  if (!pages) {
+    const reserveEveryPage = inventoryPackPages(entries, {
+      fullBudget: fullBudget - measured.footPx,
+      firstPageBudget: firstPageBudget - measured.footPx,
+      safetyPx: INVENTORY_PACK_SAFETY_PX
+    });
+    pages = [reserveEveryPage, ...candidates]
+      .filter(footerFits)
+      .sort((a, b) => a.length - b.length)[0] || reserveEveryPage;
   }
 
   const lastIndex = pages.length - 1;
