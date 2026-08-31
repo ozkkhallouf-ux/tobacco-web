@@ -2565,7 +2565,14 @@ function bulletinDatasetSignature(dataset) {
   });
 }
 
-function customerPricePdfMarkup(dataset) {
+// خطة رسم واحدة للنشرة: نفس المجموعات، ونفس خيارات الرسم، و**نفس كائن الـlayout
+// المقاس** يُبنى مرة واحدة ثم يُشتقّ منه الرسمُ وعددُ الصفحات معاً.
+//
+// قبل ذلك كان عدد الصفحات يُحسب بمسار ثانٍ مستقل (template.pageCount بلا ارتفاعات
+// مقاسة) فيسقط إلى التقدير القديم layoutGroupsLegacyPages: صفحة رئيسية واحدة +
+// صفحة خاصة واحدة = «2 صفحة» دائماً، بينما التصدير يبني layout مقاساً ويُخرج 3.
+// المعاينة كانت تكذب على المستخدم بعدد الصفحات. مصدرٌ واحد يُنهي الاختلاف بنيوياً.
+function bulletinRenderPlan(dataset) {
   const template = window.OZKPriceListTemplate;
   if (!template) throw new Error("تعذر تحميل تصميم النشرة الجديدة. حدّث الصفحة وجرّب مجدداً.");
   const { useSyria, theme, exchangeRate } = dataset;
@@ -2588,13 +2595,27 @@ function customerPricePdfMarkup(dataset) {
   if (layout?.oversized?.length) {
     console.warn("نشرة الأسعار: مجموعة أطول من عمود صفحة كاملة، لم تُقصّ ولم توضع:", layout.oversized);
   }
-  return template.render({ ...renderOptions, groups: templateGroups, layout: layout || undefined });
+  // مجموعة بلا وجهة = أصناف تختفي من نشرة الزبون. نُبلّغ صراحةً ونمنع التصدير.
+  const dropped = (layout || template.layoutGroups(templateGroups)).dropped || [];
+  if (dropped.length) {
+    console.error("نشرة الأسعار: مجموعات لم تدخل التوزيع وستختفي أصنافها:", dropped);
+  }
+  const markup = template.render({ ...renderOptions, groups: templateGroups, layout: layout || undefined });
+  // عدد الصفحات من نفس الـlayout المستخدَم للرسم — لا من مسار تقديري ثانٍ.
+  const pageCount = layout
+    ? layout.mainPages.length + layout.specialPages.length
+    : template.pageCount(templateGroups);
+  return { markup, pageCount, dropped, layout, groups: templateGroups };
+}
+
+// غلاف متوافق: يُبقي المستهلكين الحاليين (والفحوص) يطلبون الرسم وحده.
+function customerPricePdfMarkup(dataset) {
+  return bulletinRenderPlan(dataset).markup;
 }
 
 function customerPriceTemplatePageCount(dataset) {
-  const template = window.OZKPriceListTemplate;
-  if (!template) return 0;
-  return template.pageCount(bulletinTemplateGroups(dataset));
+  if (!window.OZKPriceListTemplate) return 0;
+  return bulletinRenderPlan(dataset).pageCount;
 }
 
 let bulletinPublishTimer = null;
@@ -2880,7 +2901,9 @@ function openPricePreview(useSyria = false, theme = state.bulletinPdfTheme) {
   } catch {
     // بعض بيئات العرض تمنع pushState — الإغلاق يبقى متاحاً بالزر وبـEscape.
   }
-  state.pricePreview = { open: true, useSyria, theme: storeBulletinPdfTheme(theme), historyEntry };
+  // printStatus: null قبل أي محاولة · "opened" بعد فتح ورقة نظام الطباعة ·
+  // "blocked" حين يرفض المتصفح فتحها (حجب نوافذ/طباعة) فيظهر زر إعادة المحاولة.
+  state.pricePreview = { open: true, useSyria, theme: storeBulletinPdfTheme(theme), historyEntry, printStatus: null };
   render();
 }
 
@@ -2962,10 +2985,18 @@ async function openFreshPricePreview(useSyria = false, theme = state.bulletinPdf
 
 // إغلاق المعاينة يُسقط أيضاً مدخل التاريخ الذي أضافه فتحها، فيرجع زر «رجوع»
 // في المتصفح/الهاتف إلى الشاشة السابقة لا إلى المعاينة من جديد.
+// إطار الطباعة المخفي يبقى في الصفحة حتى afterprint أو حتى المهلة الاحتياطية
+// (60 ثانية) — وعلى iOS كثيراً ما لا يصل afterprint. إغلاق المعاينة يعني أن
+// المستخدم انتهى، فنُسقط الإطار فوراً بدل تركه ومعه مستند النشرة كاملاً بالذاكرة.
+function removePrintFrame() {
+  document.querySelectorAll("iframe[data-print-frame]").forEach((frame) => frame.remove());
+}
+
 function closePricePreview() {
   if (!state.pricePreview) return;
   const cameFromHistory = state.pricePreview.historyEntry === true;
   state.pricePreview = null;
+  removePrintFrame();
   if (cameFromHistory && typeof history !== "undefined" && typeof history.back === "function") {
     history.back();
   }
@@ -2981,11 +3012,37 @@ function bindPricePreviewHistory() {
   window.addEventListener("popstate", () => {
     if (!state.pricePreview?.open) return;
     state.pricePreview = null;
+    // نفس تنظيف closePricePreview — هذا المسار لا يمرّ بها (مدخل التاريخ استُهلك).
+    removePrintFrame();
     render();
   });
 }
 
 // عنوان النشرة/الملف. يتولّد من نوع النشرة وتاريخ التصدير الفعلي — لا اسم ثابت.
+// شريط توضيحي داخل المعاينة. الحفظ والمشاركة يحدثان في **نافذة النظام** التي
+// تفتحها الطباعة الأصلية، وهذا ما لا يعرفه المستخدم على الهاتف: بلا هذا الشرح
+// تبدو النقرة وكأنها لم تفعل شيئاً. وعند الحجب نعرض السبب وزر إعادة محاولة بدل
+// ترك الشاشة صامتة.
+function bulletinPrintHintMarkup(printStatus) {
+  if (printStatus === "blocked") {
+    return `
+          <div class="price-preview-hint is-blocked" role="alert">
+            <span>\u26a0\ufe0f المتصفح منع فتح نافذة الطباعة. اسمح بالنوافذ المنبثقة لهذا الموقع ثم أعد المحاولة.</span>
+            <button class="button primary" type="button" data-action="retry-price-print">إعادة المحاولة</button>
+          </div>`;
+  }
+  if (printStatus === "opened") {
+    return `
+          <div class="price-preview-hint is-open" role="status">
+            <span>\u2705 فُتحت نافذة النظام. اختر منها «حفظ بصيغة PDF» للحفظ في الملفات، أو زر المشاركة لإرسالها. إن لم تظهر، اضغط «حفظ / مشاركة PDF» مجدداً.</span>
+          </div>`;
+  }
+  return `
+          <div class="price-preview-hint" role="note">
+            <span>\u2139\ufe0f زر «حفظ / مشاركة PDF» يفتح نافذة الطباعة في نظامك — ومنها تختار «حفظ بصيغة PDF» أو المشاركة. لا يجري التنزيل داخل الصفحة.</span>
+          </div>`;
+}
+
 function bulletinDocumentTitle(dataset) {
   return dataset.useSyria ? "نشرة المفرّق (ليرة)" : "نشرة الجملة (دولار)";
 }
@@ -3025,21 +3082,37 @@ function exportBulletinPdf(dataset) {
     return false;
   }
   const title = bulletinDocumentTitle(dataset);
+  const plan = bulletinRenderPlan(dataset);
+  // نشرة ناقصة أسوأ من نشرة متأخّرة: لو أفلتت مجموعة من التوزيع فأصنافها تختفي
+  // من الملف الذي يصل الزبون بلا أي أثر. نرفض التصدير ونسمّي المجموعة صراحةً.
+  if (plan.dropped.length) {
+    setNotice("error", `تعذّر التصدير: مجموعات لم تدخل التوزيع وستختفي أصنافها — ${plan.dropped.join("، ")}.`);
+    render();
+    return false;
+  }
   const documentHtml = template.printDocument({
     theme: dataset.theme,
     title: bulletinDocumentFilename(dataset),
-    // نفس ناتج customerPricePdfMarkup الذي تعرضه المعاينة حرفياً.
-    bodyHtml: customerPricePdfMarkup(dataset)
+    // نفس ناتج خطة الرسم التي تعرضها المعاينة حرفياً.
+    bodyHtml: plan.markup
   });
+  // الحفظ والمشاركة يجريان داخل **نافذة النظام** التي تفتحها الطباعة الأصلية،
+  // لا داخل الصفحة: لا نولّد Blob ولا نستعمل navigator.share({files}) ولا نقدّم
+  // تنزيلاً مباشراً. مسار الـBlob القديم (تحويل الـDOM إلى لوحة رسم) هو نفسه
+  // سبب عطل PDF على الهاتف، فلا يُعاد. الوصف الدقيق: «مشاركة/حفظ عبر نافذة النظام».
+  if (state.pricePreview) state.pricePreview.printStatus = "opened";
   printHtmlDocument(documentHtml, {
     title,
     archive: { docType: "price_list", meta: { date: todayIsoDate() } },
     onError: () => {
-      setNotice("error", "تعذّر فتح ورقة الطباعة. حدّث الصفحة وجرّب مجدداً.");
+      // حجب الطباعة/النوافذ: نُبقي المعاينة مفتوحة ونعرض سبباً واضحاً وزر إعادة
+      // محاولة، بدل إغلاق الشاشة وترك المستخدم بلا مخرج ولا تفسير.
+      if (state.pricePreview) state.pricePreview.printStatus = "blocked";
+      setNotice("error", "المتصفح منع فتح نافذة الطباعة. اضغط «إعادة المحاولة».");
       render();
     }
   });
-  setNotice("success", `${title}: ${dataset.items.length} صنف — اختر «حفظ بصيغة PDF» من ورقة الطباعة.`);
+  setNotice("success", `${title}: ${dataset.items.length} صنف — اختر «حفظ بصيغة PDF» أو «مشاركة» من نافذة النظام.`);
   return true;
 }
 
@@ -3056,9 +3129,11 @@ function exportPricePreview() {
     return;
   }
   if (!exportBulletinPdf(built.dataset)) return;
-  // نمرّ عبر closePricePreview كي يُسقط مدخل التاريخ أيضاً ولا يعود زر «رجوع»
-  // بالمستخدم إلى معاينة أُغلقت فعلاً.
-  closePricePreview();
+  // **لا نُغلق المعاينة هنا.** نافذة نظام الطباعة تفتح فوق الصفحة، وإغلاق
+  // المعاينة تحتها كان يترك المستخدم — بعد أن يُلغي أو يُنهي الحفظ — على شاشة
+  // أخرى بلا أي أثر لما جرى، ويجعل «إعادة المحاولة» بعد الحجب مستحيلة أصلاً.
+  // تبقى مفتوحة وتعرض حالتها، والخروج بزر «رجوع» أو Escape أو رجوع المتصفح.
+  render();
 }
 
 function setPricePreviewTheme(theme) {
@@ -4759,7 +4834,9 @@ function printHtmlDocument(html, options = {}) {
   frame.addEventListener("load", () => {
     const win = frame.contentWindow;
     if (!win) {
+      // إطار بلا نافذة = المتصفح منع المستند. صامتاً كان يبدو كأن الزر لا يعمل.
       cleanup();
+      if (typeof options.onError === "function") options.onError();
       return;
     }
     try {
@@ -5451,6 +5528,7 @@ const INVENTORY_REPORT_STYLE = `<style>
 .ozk-rpt.inventory-rpt tr:nth-child(even) td{background:#faf4e6!important}
 .ozk-rpt.inventory-rpt .inventory-group-row td{background:#6b4309!important;color:#f4ca62!important;border-color:#b8892a!important;font-weight:900;padding:4px 6px;font-size:10px}
 .ozk-rpt.inventory-rpt .inventory-group-row .group-count{float:left;background:#f4ca62;color:#4d2d04;border-radius:999px;padding:1px 7px;font-size:10px}
+.ozk-rpt.inventory-rpt .inventory-group-row .group-part{background:#b8892a;color:#fff5dd;border-radius:999px;padding:1px 6px;font-size:9px;font-weight:700}
 .ozk-rpt.inventory-rpt .status-low{color:#9a6100!important;font-weight:800}.ozk-rpt.inventory-rpt .status-active{color:#16794f!important;font-weight:800}
 @media print{html,body,.ozk-rpt.inventory-rpt,.ozk-rpt.inventory-rpt .inventory-page{background:#fffdf8!important;color:#221808!important}.ozk-rpt.inventory-rpt{padding:0!important}}
 </style>`;
@@ -5525,7 +5603,7 @@ function inventoryPackPages(entries, options = {}) {
   const pages = [];
   const pushPage = () => {
     const page = { columns: [[], []], sizes: [0, 0] };
-    pages.push(page);
+      pages.push(page);
     return page;
   };
   let page = pushPage();
@@ -5534,9 +5612,10 @@ function inventoryPackPages(entries, options = {}) {
     const size = sizeOf(entry);
     for (;;) {
       const limit = limitFor(pages.length - 1);
-      // العمود الفارغ يستقبل المجموعة مهما طالت: مجموعة أطول من عمود كامل حالة
-      // نادرة جداً، والتصرف الصحيح معها ترك المتصفح يمدّها — لا حذفها ولا قصّها
-      // ولا تركها تدور بلا نهاية بحثاً عن عمود يتّسع لها.
+      // العمود الفارغ يستقبل المجموعة مهما طالت — حارس أخير يمنع الدوران بلا
+      // نهاية فقط. لا يُعوَّل عليه للمجموعات الأطول من عمود كامل: هذه تُقسَّم
+      // مسبقاً في inventoryReportPages، لأن ترك المتصفح «يمدّها» مستحيل أصلاً
+      // (break-inside:avoid يمنعه) وكان يُخرج صفحات A4 بيضاء — راجع التعليق هناك.
       if (page.sizes[column] + size <= limit + 1e-6 || page.columns[column].length === 0) {
         page.columns[column].push(entry);
         page.sizes[column] += size;
@@ -5545,9 +5624,9 @@ function inventoryPackPages(entries, options = {}) {
       if (column === 0) column = 1;
       else {
         page = pushPage();
-        column = 0;
-      }
+      column = 0;
     }
+  }
   }
   return pages;
 }
@@ -5640,13 +5719,68 @@ function measureInventoryReportBlocks(parts, geometry) {
   }
 }
 
+// مجموعة أطول من عمود صفحة كاملة لا يمكن أن تُطبع كتلة واحدة مهما فعلنا. تقسيمها
+// إلى أجزاء يسع كلٌّ منها عموداً هو الحل الوحيد الذي يُبقي الطباعة صحيحة: كل جزء
+// يحمل رأس المجموعة ورقمه (2/3 مثلاً) ويبقى هو نفسه غير قابل للتقسيم، فلا تُكسر
+// قاعدة PR #156 لأي مجموعة تستطيع أن تسع صفحة أصلاً.
+function splitOversizedInventoryEntries(entries, heights, maxColumnPx, renderGroup) {
+  if (typeof renderGroup !== "function") return entries;
+  const out = [];
+  entries.forEach((entry, index) => {
+    const height = Number(heights[index]) || 0;
+    const items = entry && entry.group && Array.isArray(entry.group.items) ? entry.group.items : null;
+    if (height <= maxColumnPx + 1e-6 || !items || items.length < 2) {
+      out.push(entry);
+      return;
+    }
+    // كل جزء يُعيد طباعة سطر رأس المجموعة، فيرتفع مجموع الأجزاء عن ارتفاع الأصل —
+    // لذلك جزء إضافي فوق النسبة المجرّدة. القياس التالي يتحقق ويقسّم ثانيةً إن لزم.
+    const wanted = Math.min(items.length, Math.max(2, Math.ceil(height / maxColumnPx) + 1));
+    const perPart = Math.ceil(items.length / wanted);
+    const partCount = Math.ceil(items.length / perPart);
+    for (let part = 0; part < partCount; part += 1) {
+      const slice = items.slice(part * perPart, (part + 1) * perPart);
+      if (!slice.length) continue;
+      const group = { ...entry.group, items: slice };
+      out.push({
+        group,
+        part,
+        partCount,
+        html: renderGroup(group, part, partCount),
+        rows: slice.length + 1
+      });
+    }
+  });
+  return out;
+}
+
 // يبني صفحات التقرير النهائية: قياس حقيقي إن توفّر DOM، وإلا التقدير بعدد الأسطر.
 function inventoryReportPages(parts, mode) {
   const geometry = inventoryPageGeometry(mode);
-  const measured = measureInventoryReportBlocks(parts, geometry);
+  let measured = measureInventoryReportBlocks(parts, geometry);
   if (!measured) return inventoryTwoColumnPages(parts.entries);
 
-  const entries = parts.entries.map((entry, index) => ({ ...entry, height: measured.heights[index] }));
+  // ===== قبل أي تعبئة: لا يجوز أن تبقى مجموعة أطول من عمود صفحة كاملة =====
+  // العطل الذي عولج هنا: PR #156 كان يضع المجموعة الطويلة في عمود فارغ ويترك
+  // «المتصفح يمدّها». هذا الافتراض خاطئ: CSS الخاص بنا يضع break-inside:avoid على
+  // .inventory-group، فيرفض كروم تمديدها ويدفعها كاملة إلى الصفحة التالية — فتبقى
+  // الصفحة الحالية بالرأس (وبطاقات الملخص بالأولى) وحدها: **صفحة A4 بيضاء فعلياً**،
+  // ثم يضيف break-after:page صفحةً أخرى. القياس بطباعة PDF حقيقية: مجموعة بـ70
+  // صنفاً أخرجت 4 أوراق مقابل صفحتين معروضتين، أولاهما بـ128 عملية نص والثانية بـ64
+  // (رأس فقط)، ومع مجموعتين طويلتين ظهرت صفحة بيضاء بينهما أيضاً.
+  const maxColumnPx = geometry.pageHeightPx - measured.headPx - INVENTORY_PACK_SAFETY_PX;
+  let sourceEntries = parts.entries;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (!measured.heights.some((height) => height > maxColumnPx + 1e-6)) break;
+    const split = splitOversizedInventoryEntries(sourceEntries, measured.heights, maxColumnPx, parts.renderGroup);
+    if (split.length === sourceEntries.length) break; // تعذّر التقسيم (لا renderGroup أو صنف واحد)
+    sourceEntries = split;
+    const remeasured = measureInventoryReportBlocks({ ...parts, entries: sourceEntries }, geometry);
+    if (!remeasured) return inventoryTwoColumnPages(sourceEntries);
+    measured = remeasured;
+  }
+
+  const entries = sourceEntries.map((entry, index) => ({ ...entry, height: measured.heights[index] }));
   const fullBudget = geometry.pageHeightPx - measured.headPx;      // الرأس يتكرر بكل صفحة
   const firstPageBudget = fullBudget - measured.cardsPx;           // البطاقات بالصفحة الأولى وحدها
   const base = { fullBudget, firstPageBudget, safetyPx: INVENTORY_PACK_SAFETY_PX };
@@ -5704,6 +5838,12 @@ function inventoryReportPages(parts, mode) {
       .sort((a, b) => a.length - b.length)[0] || reserveEveryPage;
   }
 
+  // قاعدة صريحة: لا تُخرَج صفحة تقرير بلا مجموعة واحدة على الأقل. المعبِّئ لا
+  // ينشئ صفحة فارغة أصلاً (العمود الفارغ يستقبل دائماً)، لكن هذا الحارس يجعل
+  // القاعدة مفروضة في الكود لا مستنتَجة من الخوارزمية.
+  const filled = pages.filter((page) => page.columns[0].length > 0 || page.columns[1].length > 0);
+  pages = filled.length ? filled : pages.slice(0, 1);
+
   const lastIndex = pages.length - 1;
   const lastLimit = Math.max(
     0,
@@ -5751,13 +5891,17 @@ function inventoryReportPdfMarkup() {
   const badgeOf = (it) => it.reportStatus === "low"
     ? '<span class="status-low">قريب من النفاد</span>'
     : (it.reportStatus === "active" ? '<span class="status-active">متوفّر</span>' : (INV_STATUS_BADGE[it.reportStatus] || INV_STATUS_BADGE.active));
-  const groupMarkup = (group) => `<div class="inventory-group"><table><tbody>
-    <tr class="inventory-group-row"><td colspan="3">${escapeHtml(pdfAr(group.label))}<span class="group-count">${escapeHtml(group.items.length)}</span></td></tr>
+  // `part`/`partCount` تخصّان المجموعة الأطول من عمود كامل وحدها: تُقسَّم إلى أجزاء
+  // ويحمل كل جزء رأس المجموعة ورقمه (٢/٣) كي يبقى واضحاً أنه استكمال لا مجموعة
+  // جديدة، ويعرض عدد أصنافه هو لا عدد المجموعة كلها.
+  const groupMarkup = (group, part = 0, partCount = 1) => `<div class="inventory-group"><table><tbody>
+    <tr class="inventory-group-row"><td colspan="3">${escapeHtml(pdfAr(group.label))}${partCount > 1 ? ` <span class="group-part">${escapeHtml(pdfAr(`${part + 1}/${partCount}`))}</span>` : ""}<span class="group-count">${escapeHtml(group.items.length)}</span></td></tr>
     ${group.items.map((it) => `<tr><td style="width:48%">${escapeHtml(pdfAr(it.name || ""))}</td><td style="width:29%">${escapeHtml(pdfAr(formatQtyCartons(it)))}</td><td style="width:23%">${badgeOf(it)}</td></tr>`).join("")}
   </tbody></table></div>`;
   // كل مجموعة تُبنى مرة واحدة ثم تُقاس وتُرسم بنفس الـHTML حرفياً — فيستحيل أن
-  // يفترق ما قِيس عمّا طُبع. `rows` للمسار الاحتياطي بلا DOM فقط.
-  const entries = grouped.map((group) => ({ html: groupMarkup(group), rows: group.items.length + 1 }));
+  // يفترق ما قِيس عمّا طُبع. `rows` للمسار الاحتياطي بلا DOM فقط، و`group` يلزم
+  // لإعادة بناء الأجزاء إن كانت المجموعة أطول من عمود كامل.
+  const entries = grouped.map((group) => ({ group, html: groupMarkup(group), rows: group.items.length + 1 }));
   const headMarkup = (pageIndex, pageCount) => `<div class="rhead"><div class="brand">OZK TOBACCO<small>تقرير المخزون التشغيلي</small></div>
       <div class="rtitle"><h2>المخزون — حسب ترتيب النشرة</h2><span>بتاريخ ${escapeHtml(todayIsoDate())} · صفحة ${escapeHtml(pageIndex + 1)} من ${escapeHtml(pageCount)}</span></div></div>`;
   const cardsMarkup = `<div class="cards">
@@ -5769,7 +5913,7 @@ function inventoryReportPdfMarkup() {
   // هندسة الصفحة تختلف بين ورقة الطباعة الأصلية (اللابتوب) وrasterization الهاتف،
   // فنقيس ونعبّئ بهندسة المسار الذي سيُصدَّر فعلاً — راجع inventoryPageGeometry.
   const pages = inventoryReportPages(
-    { entries, headHtml: headMarkup(0, 1), cardsHtml: cardsMarkup, footHtml: footMarkup },
+    { entries, renderGroup: groupMarkup, headHtml: headMarkup(0, 1), cardsHtml: cardsMarkup, footHtml: footMarkup },
     isHandheldDevice() ? "canvas" : "print"
   );
   const pagesMarkup = pages.map((page, pageIndex) => `<section class="inventory-page">
@@ -10331,7 +10475,9 @@ function render() {
       return;
     }
     const dataset = built.dataset;
-    const pageCount = customerPriceTemplatePageCount(dataset);
+    // خطة واحدة للمعاينة: الرسم وعدد الصفحات من نفس الـlayout — يستحيل اختلافهما.
+    const plan = bulletinRenderPlan(dataset);
+    const pageCount = plan.pageCount;
     app.innerHTML = `
       <div class="price-preview-shell">
         <div class="price-preview-panel" role="dialog" aria-modal="true" aria-label="معاينة النشرة قبل التصدير">
@@ -10345,16 +10491,18 @@ function render() {
               <span class="price-preview-theme-label">لون PDF:</span>
               <button class="button ${previewTheme === "dark" ? "primary" : "secondary"}" type="button" data-action="price-preview-theme" data-theme="dark" aria-pressed="${previewTheme === "dark"}">داكن</button>
               <button class="button ${previewTheme === "light" ? "primary" : "secondary"}" type="button" data-action="price-preview-theme" data-theme="light" aria-pressed="${previewTheme === "light"}">فاتح</button>
-              <button class="button success price-preview-export" type="button" data-action="export-price-preview">⬇ تصدير PDF ${previewTheme === "light" ? "الفاتح" : "الداكن"}</button>
+              <button class="button success price-preview-export" type="button" data-action="export-price-preview">🖨 حفظ / مشاركة PDF</button>
             </div>
           </div>
+          ${bulletinPrintHintMarkup(state.pricePreview.printStatus)}
           <div class="price-preview-scroll">
-            ${customerPricePdfMarkup(dataset)}
+            ${plan.markup}
           </div>
         </div>
       </div>
     `;
     app.querySelector("[data-action='export-price-preview']")?.addEventListener("click", exportPricePreview);
+    app.querySelector("[data-action='retry-price-print']")?.addEventListener("click", exportPricePreview);
     app.querySelector("[data-action='close-price-preview']")?.addEventListener("click", closePricePreview);
     app.querySelectorAll("[data-action='price-preview-theme']").forEach((button) => {
       button.addEventListener("click", () => setPricePreviewTheme(button.dataset.theme));
