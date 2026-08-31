@@ -172,9 +172,14 @@ assert.match(
 // 7) هوية الفشل: فشل نهائي بدأ بعد آخر إنذار هو فشل جديد يستحق إشعاراً.
 //    الاعتماد على is_healthy وحدها يبتلع كل فشل جديد داخل نافذة الساعة.
 // ---------------------------------------------------------------------------
-assert.match(
-  failBranch, /or \(terminal_status='failed' and terminal_at>previous_alert_at\)/,
-  `${MONITOR_SQL}: حارس "فشل نهائي جديد منذ آخر إنذار" مفقود — فشل جديد سيُبتلع`,
+// ملاحظة Codex P1 الثالثة على PR #154: شرط "terminal_at > previous_alert_at"
+// جُرّب ثم أُسقط. مفتاح الإرسال ثابت بمهلة 60 دقيقة، وnotify_telegram دالة
+// RETURNS void فلا تُبلّغ عن الكتم، بينما previous_alert_at:=now() يعمل بلا
+// شرط — فكان الفشل الثاني يُسجَّل كأنه أُنذر عنه ولا يصل، وتُصفَّر معه ساعة
+// التذكير. تصنيف الحالة هنا؛ وسياسة الإرسال بند مستقل.
+assert.doesNotMatch(
+  failBranch, /terminal_at\s*>\s*previous_alert_at/,
+  `${MONITOR_SQL}: عاد شرط "فشل نهائي جديد منذ آخر إنذار" — يُقدّم last_alert_at على رسالة قد تكتمها سياسة الإرسال`,
 );
 assert.match(
   failBranch, /previous_healthy is distinct from false or previous_alert_at is null/,
@@ -229,8 +234,8 @@ for (const [needle, why] of [
 // ---------------------------------------------------------------------------
 const transitionAsserts = transitions.match(/\bassert /g) ?? [];
 assert.ok(
-  transitionAsserts.length >= 48,
-  `${TRANSITIONS}: عدد التأكيدات ${transitionAsserts.length} أقل من 48 — حُذف تأكيد`,
+  transitionAsserts.length >= 56,
+  `${TRANSITIONS}: عدد التأكيدات ${transitionAsserts.length} أقل من 56 — حُذف تأكيد`,
 );
 assert.match(
   transitions,
@@ -239,15 +244,17 @@ assert.match(
 );
 for (const [needle, why] of [
   ['5: محاولة جارية فوق فشل مكتمل', 'succeeded → failed → running'],
-  ['13: فشل نهائي جديد بعد آخر إنذار', 'failed → running → failed'],
-  ['18: التعافي خرج عند النجاح الفعلي', 'failed → running → succeeded'],
-  ['22: صفر إشعارات في تسلسل سليم بالكامل', 'healthy → running → succeeded'],
-  ['24: الفشل يظهر عند النتيجة النهائية', 'healthy → running → failed'],
-  ['26: حادثة 09:14', 'حادثة الإنتاج كـfixture'],
-  ['30: ثلاث دورات إضافية على نفس الفشل', 'لا إنذار مكرر لنفس الفشل'],
-  ['33: محاولة جارية منذ 15 دقيقة', 'transient بعد المهلة ⇒ stuck'],
-  ['37: is_healthy=null', 'never_run بلا حالة سابقة'],
-  ['42: المحايدة لم تدهس حكم الفشل القائم', 'المحايدة لا تدهس حكماً'],
+  ['15: last_alert_at لم يُقدَّم', 'فشل A ⇒ إنذار ثم فشل B: الساعة لا تتقدّم'],
+  ['20: التعافي خرج عند النجاح الفعلي', 'failed → running → succeeded'],
+  ['24: صفر إشعارات في تسلسل سليم بالكامل', 'healthy → running → succeeded'],
+  ['26: الفشل يظهر عند النتيجة النهائية', 'healthy → running → failed'],
+  ['28: حادثة 09:14', 'حادثة الإنتاج كـfixture'],
+  ['32: ثلاث دورات إضافية على نفس الفشل', 'لا إنذار مكرر لنفس الفشل'],
+  ['35: محاولة جارية منذ 15 دقيقة', 'transient بعد المهلة ⇒ stuck'],
+  ['39: is_healthy=null', 'never_run بلا حالة سابقة'],
+  ['44: المحايدة لم تدهس حكم الفشل القائم', 'المحايدة لا تدهس حكماً'],
+  ['51: الفشل B لم يُقدّم last_alert_at', 'انحدار Codex P1 الثالثة صراحةً'],
+  ['55: التذكير الدوري خرج في موعده الأصلي', 'التذكير الدوري ما زال يعمل'],
 ]) {
   assert.ok(transitions.includes(needle), `${TRANSITIONS}: تسلسل غير مغطّى — ${why}`);
 }

@@ -295,13 +295,23 @@ begin
     end;
    select is_healthy,last_alert_at into previous_healthy,previous_alert_at
     from private.project_task_health_state where task_key='cron:'||job_record.jobname;
-   -- الشرط الثالث جديد: فشل نهائي *بدأ بعد* آخر إنذار أرسلناه هو فشل لم
-   -- نتحدث عنه بعد. الاعتماد على is_healthy وحدها كان يعني أن مهمة عالقة على
-   -- unhealthy تبتلع كل فشل جديد داخل نافذة الساعة. وهوية الفشل تأتي من
-   -- start_time الموجود فعلاً في cron.job_run_details — لا عمود جديد ولا
-   -- حالة إضافية في المخطط.
+   -- حارس الإنذار لم يتغيّر عن سلوكه الأصلي، عمداً.
+   --
+   -- جُرّب هنا شرط رابع «فشل نهائي بدأ بعد آخر إنذار ⇒ فشل جديد» ثم أُسقط بعد
+   -- ملاحظة Codex P1 الثالثة على PR #154، وكانت محقّة: مفتاح الإرسال
+   -- project-cron-failure:<job> ثابت بمهلة 60 دقيقة، وnotify_telegram_dispatch
+   -- يعود بلا إدراج حين يجده حديثاً، وnotify_telegram دالة RETURNS void فلا
+   -- تُبلّغ عن الكتم إطلاقاً — بينما previous_alert_at:=now() أدناه يعمل بلا
+   -- شرط. فالنتيجة كانت أن الفشل الثاني داخل الساعة يُسجَّل كأنه أُنذر عنه ولا
+   -- يصل المشغّل، وتُصفَّر معه ساعة التذكير الدوري فيتأجّل إشعاره ستين دقيقة
+   -- أخرى — أي أسوأ من السلوك الذي أراد الشرط إصلاحه.
+   --
+   -- الفصل المقصود: هذا الملف مسؤول عن *صحة الحالة* (unhealthy، وسبب الفشل في
+   -- last_detail، ولا تعافٍ إلا بنجاح نهائي). أمّا «هل تصل الرسالة مرة أم
+   -- تُكتم» فهي سياسة الإرسال في طبقة telegram_outbox، وعلاجها الصحيح مفتاح
+   -- dedupe لكل تشغيل نهائي أو إشارة تأكيد من notify_telegram — بند مستقل
+   -- مسجَّل، لا يُخلط بتصنيف الحالة هنا.
    if previous_healthy is distinct from false or previous_alert_at is null
-      or (terminal_status='failed' and terminal_at>previous_alert_at)
       or previous_alert_at<now()-interval '60 minutes' then
     perform public.notify_telegram('project_task_failure',
      format('🚨 توقفت مهمة داخل الموقع%1$s• المهمة: %2$s%1$s• الحالة: %3$s',chr(10),job_record.jobname,detail_text),

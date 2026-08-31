@@ -77,7 +77,6 @@ begin
    select is_healthy,last_alert_at into previous_healthy,previous_alert_at
     from pg_temp.health_probe where task_key=p_key;
    if previous_healthy is distinct from false or previous_alert_at is null
-      or (terminal_status='failed' and terminal_at>previous_alert_at)
       or previous_alert_at<p_now-interval '60 minutes' then
     insert into notify_probe(event_type,task_key,detail) values('project_task_failure',p_key,detail_text);
     previous_alert_at:=p_now;
@@ -150,13 +149,20 @@ begin
   assert (select count(*) from notify_probe where task_key=k and event_type='project_task_recovered')=0,
     '11: لا تعافٍ كاذب'; n:=n+1;
 
+  select * into before_row from health_probe where task_key=k;
   insert into runs_probe values (j,'failed',t0-interval '15 minutes');
   v:=pg_temp.monitor_cycle(k,j,true,t0-interval '14 minutes');
+  select * into after_row from health_probe where task_key=k;
   assert v='failed', '12: الفشل الثاني'; n:=n+1;
-  assert (select count(*) from notify_probe where task_key=k and event_type='project_task_failure')=2,
-    '13: فشل نهائي جديد بعد آخر إنذار ⇒ إشعار جديد، لا يبتلعه is_healthy'; n:=n+1;
+  -- ما يخصّ هذا الـPR: الحالة والسبب. أمّا هل تصل رسالة ثانية خلال الساعة
+  -- فهي سياسة الإرسال (dedupe) — طبقة منفصلة وبند مستقل، لا تُختبر هنا.
+  assert after_row.is_healthy=false, '13: تبقى unhealthy عند الفشل الثاني'; n:=n+1;
+  assert after_row.last_detail is distinct from before_row.last_detail,
+    '14: last_detail انتقل إلى الفشل الأحدث'; n:=n+1;
+  assert after_row.last_alert_at is not distinct from before_row.last_alert_at,
+    '15: last_alert_at لم يُقدَّم بسبب فشل ثانٍ قد تكتمه سياسة الإرسال'; n:=n+1;
   assert (select count(*) from notify_probe where task_key=k and event_type='project_task_recovered')=0,
-    '14: لا تعافٍ إطلاقاً في هذا التسلسل'; n:=n+1;
+    '16: لا تعافٍ إطلاقاً في هذا التسلسل'; n:=n+1;
 
   -- =====================================================================
   -- ٣) failed → running → succeeded   ⇒ التعافي بعد succeeded فقط
@@ -167,17 +173,17 @@ begin
   insert into runs_probe values (j,'running',t0-interval '20 minutes');
   v:=pg_temp.monitor_cycle(k,j,true,t0-interval '19 minutes');
   assert (select count(*) from notify_probe where task_key=k and event_type='project_task_recovered')=0,
-    '15: لا تعافٍ أثناء المحاولة'; n:=n+1;
+    '17: لا تعافٍ أثناء المحاولة'; n:=n+1;
   assert (select is_healthy from health_probe where task_key=k)=false,
-    '16: تبقى unhealthy حتى نرى succeeded فعلياً'; n:=n+1;
+    '18: تبقى unhealthy حتى نرى succeeded فعلياً'; n:=n+1;
 
   insert into runs_probe values (j,'succeeded',t0-interval '15 minutes');
   v:=pg_temp.monitor_cycle(k,j,true,t0-interval '14 minutes');
-  assert v='ok', '17: نجاح نهائي ⇒ ok'; n:=n+1;
+  assert v='ok', '19: نجاح نهائي ⇒ ok'; n:=n+1;
   assert (select count(*) from notify_probe where task_key=k and event_type='project_task_recovered')=1,
-    '18: التعافي خرج عند النجاح الفعلي'; n:=n+1;
+    '20: التعافي خرج عند النجاح الفعلي'; n:=n+1;
   assert (select last_success_at from health_probe where task_key=k) = t0-interval '15 minutes',
-    '19: last_success_at = زمن التشغيل الناجح، لا زمن محاولة جارية'; n:=n+1;
+    '21: last_success_at = زمن التشغيل الناجح، لا زمن محاولة جارية'; n:=n+1;
 
   -- =====================================================================
   -- ٤) healthy → running → succeeded   ⇒ صفر رسائل (رفرفة prune بعينها)
@@ -187,12 +193,12 @@ begin
   v:=pg_temp.monitor_cycle(k,j,true,t0-interval '29 minutes');
   insert into runs_probe values (j,'running',t0-interval '20 minutes');
   v:=pg_temp.monitor_cycle(k,j,true,t0-interval '19 minutes' - interval '58 seconds');
-  assert v='ok', '20: محاولة جارية فوق نجاح ⇒ ok لا إنذار'; n:=n+1;
+  assert v='ok', '22: محاولة جارية فوق نجاح ⇒ ok لا إنذار'; n:=n+1;
   insert into runs_probe values (j,'succeeded',t0-interval '19 minutes');
   v:=pg_temp.monitor_cycle(k,j,true,t0-interval '18 minutes');
-  assert v='ok', '21: نجاح تالٍ'; n:=n+1;
+  assert v='ok', '23: نجاح تالٍ'; n:=n+1;
   assert (select count(*) from notify_probe where task_key=k)=0,
-    '22: صفر إشعارات في تسلسل سليم بالكامل'; n:=n+1;
+    '24: صفر إشعارات في تسلسل سليم بالكامل'; n:=n+1;
 
   -- =====================================================================
   -- ٥) healthy → running → failed   ⇒ الإنذار عند النتيجة النهائية
@@ -202,12 +208,12 @@ begin
   v:=pg_temp.monitor_cycle(k,j,true,t0-interval '29 minutes');
   insert into runs_probe values (j,'running',t0-interval '20 minutes');
   v:=pg_temp.monitor_cycle(k,j,true,t0-interval '19 minutes' - interval '58 seconds');
-  assert (select count(*) from notify_probe where task_key=k)=0, '23: لا إشعار أثناء المحاولة'; n:=n+1;
+  assert (select count(*) from notify_probe where task_key=k)=0, '25: لا إشعار أثناء المحاولة'; n:=n+1;
   insert into runs_probe values (j,'failed',t0-interval '19 minutes');
   v:=pg_temp.monitor_cycle(k,j,true,t0-interval '18 minutes');
-  assert v='failed', '24: الفشل يظهر عند النتيجة النهائية'; n:=n+1;
+  assert v='failed', '26: الفشل يظهر عند النتيجة النهائية'; n:=n+1;
   assert (select count(*) from notify_probe where task_key=k and event_type='project_task_failure')=1,
-    '25: إشعار الفشل خرج'; n:=n+1;
+    '27: إشعار الفشل خرج'; n:=n+1;
 
   -- =====================================================================
   -- ٦) حادثة الإنتاج 2026-08-30 09:14 — قيم مكتوبة صراحةً، لا استعلام إنتاج.
@@ -221,11 +227,11 @@ begin
   insert into runs_probe values (j,'running',  '2026-08-30 09:15:00.137140+00'::timestamptz);
   v:=pg_temp.monitor_cycle(k,j,true,'2026-08-30 09:15:00.200000+00'::timestamptz);
   assert v='failed',
-    '26: حادثة 09:14 — الفشل المكتمل يُكتشف رغم بدء المحاولة التالية فوقه'; n:=n+1;
+    '28: حادثة 09:14 — الفشل المكتمل يُكتشف رغم بدء المحاولة التالية فوقه'; n:=n+1;
   assert (select count(*) from notify_probe where task_key=k and event_type='project_task_failure')=1,
-    '27: حادثة 09:14 — الإنذار الذي لم يخرج آنذاك يخرج الآن'; n:=n+1;
+    '29: حادثة 09:14 — الإنذار الذي لم يخرج آنذاك يخرج الآن'; n:=n+1;
   assert (select is_healthy from health_probe where task_key=k)=false,
-    '28: حادثة 09:14 — الحالة unhealthy لا healthy'; n:=n+1;
+    '30: حادثة 09:14 — الحالة unhealthy لا healthy'; n:=n+1;
 
   -- =====================================================================
   -- ٧) نفس الفشل النهائي عبر عدة دورات ⇒ لا يُعامل كفشل جديد كل مرة
@@ -233,18 +239,18 @@ begin
   k:='cron:seq7'; j:=7;
   insert into runs_probe values (j,'failed',t0-interval '50 minutes');
   v:=pg_temp.monitor_cycle(k,j,true,t0-interval '49 minutes');
-  assert (select count(*) from notify_probe where task_key=k)=1, '29: إنذار أول'; n:=n+1;
+  assert (select count(*) from notify_probe where task_key=k)=1, '31: إنذار أول'; n:=n+1;
   v:=pg_temp.monitor_cycle(k,j,true,t0-interval '44 minutes');
   v:=pg_temp.monitor_cycle(k,j,true,t0-interval '39 minutes');
   v:=pg_temp.monitor_cycle(k,j,true,t0-interval '34 minutes');
   assert (select count(*) from notify_probe where task_key=k)=1,
-    '30: ثلاث دورات إضافية على نفس الفشل ⇒ لا إنذار مكرر'; n:=n+1;
-  assert (select is_healthy from health_probe where task_key=k)=false, '31: تبقى unhealthy'; n:=n+1;
+    '32: ثلاث دورات إضافية على نفس الفشل ⇒ لا إنذار مكرر'; n:=n+1;
+  assert (select is_healthy from health_probe where task_key=k)=false, '33: تبقى unhealthy'; n:=n+1;
 
-  insert into runs_probe values (j,'failed',t0-interval '30 minutes');
-  v:=pg_temp.monitor_cycle(k,j,true,t0-interval '29 minutes');
+  -- التذكير الدوري ما زال قادراً على العمل: بعد تجاوز الستين دقيقة يخرج إنذار.
+  v:=pg_temp.monitor_cycle(k,j,true,t0+interval '12 minutes');
   assert (select count(*) from notify_probe where task_key=k)=2,
-    '32: فشل نهائي جديد ⇒ إنذار جديد رغم أن الحالة كانت unhealthy أصلاً'; n:=n+1;
+    '34: التذكير الدوري بعد ستين دقيقة ما زال يعمل'; n:=n+1;
 
   -- =====================================================================
   -- ٨) محاولة جارية تتجاوز المهلة ⇒ stuck
@@ -253,25 +259,25 @@ begin
   insert into runs_probe values (j,'succeeded',t0-interval '40 minutes');
   insert into runs_probe values (j,'running',  t0-interval '15 minutes');
   v:=pg_temp.monitor_cycle(k,j,true,t0);
-  assert v='stuck', '33: محاولة جارية منذ 15 دقيقة ⇒ stuck'; n:=n+1;
+  assert v='stuck', '35: محاولة جارية منذ 15 دقيقة ⇒ stuck'; n:=n+1;
   assert (select count(*) from notify_probe where task_key=k and event_type='project_task_failure')=1,
-    '34: الجمود يُنذَر عنه'; n:=n+1;
-  assert (select last_detail from health_probe where task_key=k) like 'عالقة%', '35: نص الجمود'; n:=n+1;
+    '36: الجمود يُنذَر عنه'; n:=n+1;
+  assert (select last_detail from health_probe where task_key=k) like 'عالقة%', '37: نص الجمود'; n:=n+1;
 
   -- =====================================================================
   -- ٩) الحالات المحايدة: never_run بلا تاريخ، وinflight لأول محاولة
   -- =====================================================================
   k:='cron:seq9'; j:=9;
   v:=pg_temp.monitor_cycle(k,j,true,t0);
-  assert v='never_run', '36: لا تشغيل قط ⇒ never_run'; n:=n+1;
+  assert v='never_run', '38: لا تشغيل قط ⇒ never_run'; n:=n+1;
   assert (select is_healthy from health_probe where task_key=k) is null,
-    '37: is_healthy=null — لا شهادة نجاح بلا نجاح'; n:=n+1;
-  assert (select count(*) from notify_probe where task_key=k)=0, '38: لا إشعار'; n:=n+1;
+    '39: is_healthy=null — لا شهادة نجاح بلا نجاح'; n:=n+1;
+  assert (select count(*) from notify_probe where task_key=k)=0, '40: لا إشعار'; n:=n+1;
 
   insert into runs_probe values (j,'running',t0-interval '1 minute');
   v:=pg_temp.monitor_cycle(k,j,true,t0);
-  assert v='inflight', '39: محاولة أولى جارية بلا نتيجة مكتملة ⇒ inflight'; n:=n+1;
-  assert (select count(*) from notify_probe where task_key=k)=0, '40: inflight لا تُشعر'; n:=n+1;
+  assert v='inflight', '41: محاولة أولى جارية بلا نتيجة مكتملة ⇒ inflight'; n:=n+1;
+  assert (select count(*) from notify_probe where task_key=k)=0, '42: inflight لا تُشعر'; n:=n+1;
 
   k:='cron:seq10'; j:=10;
   insert into runs_probe values (j,'failed',t0-interval '20 minutes');
@@ -281,14 +287,14 @@ begin
   insert into runs_probe values (j,'running',t0-interval '1 minute');
   v:=pg_temp.monitor_cycle(k,j,true,t0);
   select * into after_row from health_probe where task_key=k;
-  assert v='inflight', '41: بلا نتيجة مكتملة ومحاولة جارية ⇒ inflight'; n:=n+1;
-  assert after_row.is_healthy=false, '42: المحايدة لم تدهس حكم الفشل القائم'; n:=n+1;
+  assert v='inflight', '43: بلا نتيجة مكتملة ومحاولة جارية ⇒ inflight'; n:=n+1;
+  assert after_row.is_healthy=false, '44: المحايدة لم تدهس حكم الفشل القائم'; n:=n+1;
   assert after_row.last_alert_at is not distinct from before_row.last_alert_at,
-    '43: المحايدة لم تمسّ last_alert_at'; n:=n+1;
+    '45: المحايدة لم تمسّ last_alert_at'; n:=n+1;
   assert after_row.last_detail is not distinct from before_row.last_detail,
-    '44: المحايدة لم تدهس last_detail'; n:=n+1;
+    '46: المحايدة لم تدهس last_detail'; n:=n+1;
   assert after_row.last_observed_at > before_row.last_observed_at,
-    '45: المحايدة أثبتت أن المراقب شاهد المهمة'; n:=n+1;
+    '47: المحايدة أثبتت أن المراقب شاهد المهمة'; n:=n+1;
 
   -- =====================================================================
   -- ١٠) المهمة المعطّلة
@@ -296,8 +302,38 @@ begin
   k:='cron:seq11'; j:=11;
   insert into runs_probe values (j,'succeeded',t0-interval '1 minute');
   v:=pg_temp.monitor_cycle(k,j,false,t0);
-  assert v='disabled', '46: active=false ⇒ disabled'; n:=n+1;
-  assert (select last_detail from health_probe where task_key=k)='المهمة معطلة', '47: نص التعطيل'; n:=n+1;
+  assert v='disabled', '48: active=false ⇒ disabled'; n:=n+1;
+  assert (select last_detail from health_probe where task_key=k)='المهمة معطلة', '49: نص التعطيل'; n:=n+1;
+
+  -- =====================================================================
+  -- انحدار صريح لملاحظة Codex P1 الثالثة على PR #154:
+  --   فشل A ⇒ إنذار، ثم فشل B خلال ستين دقيقة.
+  -- يجب ألا يتقدّم last_alert_at لمجرد وقوع B: رسالة B قد تكتمها سياسة
+  -- dedupe في طبقة الإرسال (مفتاح project-cron-failure:<job> بمهلة 60 دقيقة،
+  -- وnotify_telegram دالة RETURNS void فلا تُبلّغ عن الكتم). تقديم الساعة كان
+  -- يعني تسجيل B كأنه أُنذر عنه، وتأجيل التذكير الدوري ستين دقيقة أخرى.
+  -- =====================================================================
+  k:='cron:seq12-alert-clock'; j:=12;
+  insert into runs_probe values (j,'failed',t0-interval '50 minutes');
+  v:=pg_temp.monitor_cycle(k,j,true,t0-interval '49 minutes');
+  select * into before_row from health_probe where task_key=k;
+  assert before_row.last_alert_at = t0-interval '49 minutes',
+    '50: إنذار الفشل A ضبط ساعة الإنذار'; n:=n+1;
+
+  insert into runs_probe values (j,'failed',t0-interval '20 minutes');
+  v:=pg_temp.monitor_cycle(k,j,true,t0-interval '19 minutes');
+  select * into after_row from health_probe where task_key=k;
+  assert after_row.last_alert_at = before_row.last_alert_at,
+    '51: الفشل B لم يُقدّم last_alert_at — لا تُسجَّل رسالة قد تكون مكبوتة كأنها وصلت'; n:=n+1;
+  assert after_row.is_healthy = false, '52: الحالة تبقى unhealthy عند الفشل B'; n:=n+1;
+  assert after_row.last_detail like '%'||to_char((t0-interval '20 minutes') at time zone 'Asia/Riyadh','HH24:MI')||'%',
+    '53: last_detail يعكس الفشل الأحدث B'; n:=n+1;
+  assert (select count(*) from notify_probe where task_key=k)=1,
+    '54: لا رسالة ثانية داخل نافذة الساعة (سلوك الحارس الأصلي، غير مُبدَّل)'; n:=n+1;
+
+  v:=pg_temp.monitor_cycle(k,j,true,t0+interval '12 minutes');
+  assert (select count(*) from notify_probe where task_key=k)=2,
+    '55: التذكير الدوري خرج في موعده الأصلي — لم يتأجّل بسبب B'; n:=n+1;
 
   assert n >= 47, format('عدد التأكيدات المنفَّذة %s أقل من 47 — حُذف تأكيد؟', n);
   raise notice 'cron state transitions: % تأكيداً — كلها نجحت ✓', n;
