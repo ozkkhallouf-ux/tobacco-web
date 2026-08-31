@@ -298,7 +298,7 @@ async function notifyTelegram(problem, issueUrl) {
   const serviceKey = process.env.SUPABASE_SERVICE_KEY;
   if (!supabaseUrl || !serviceKey) {
     console.log("⚠️ تخطي إشعار تيليغرام: SUPABASE_URL أو SUPABASE_SERVICE_KEY غير مضبوطين كسر GitHub Actions.");
-    return;
+    return false;
   }
   const issueNumber = issueNumberFromUrl(issueUrl);
   const link = issueUrl || "(تعذّر إنشاء Issue — راجع سجل health-check.yml)";
@@ -322,17 +322,21 @@ async function notifyTelegram(problem, issueUrl) {
     });
     if (!res.ok) {
       console.log(`⚠️ فشل استدعاء notify_telegram: HTTP ${res.status} ${await res.text()}`);
+      return false;
     }
+    return true;
   } catch (err) {
     console.log(`⚠️ فشل استدعاء notify_telegram: ${err}`);
+    return false;
   }
 }
 
+// ترجع true إن وصلت الحادثة عبر أي قناة (Issue قائم أو جديد، أو تيليغرام).
 async function reportProblem(problem) {
   const existing = findOpenIssueForKey(problem.key);
   if (existing) {
     console.log(`= مشكلة "${problem.key}" مفتوحة أصلاً بالـIssue #${existing.number} — لا تكرار.`);
-    return;
+    return true;
   }
   const marker = `<!-- health:${problem.key} -->`;
   const body = [
@@ -359,8 +363,14 @@ async function reportProblem(problem) {
     // تنبيه إطلاقاً (والسكربت يخرج بنجاح، وalert-on-automation-failure.yml لا
     // يراقب سير عمل health-check نفسه) — فلا يبقى منه إلا سطر في السجل.
     console.log(`✗ فشل إنشاء Issue لمشكلة "${problem.key}": ${err} — نُرسل تنبيه تيليغرام رغم ذلك.`);
-    await notifyTelegram(problem, null);
-    return;
+    // ⚠️ إن فشلت القناتان معاً لم تصل الحادثة إلى أحد. نُبلّغ ذلك للأعلى كي
+    // يُفشل main() التشغيل — وسير عمل health-check صار مراقَباً في
+    // alert-on-automation-failure.yml، فيتحول الفشل الصامت إلى تنبيه فعلي.
+    const delivered = await notifyTelegram(problem, null);
+    if (!delivered) {
+      console.log(`✗✗ لم تصل مشكلة "${problem.key}" عبر أي قناة (لا Issue ولا تيليغرام).`);
+    }
+    return delivered;
   }
   console.log(`✓ أُنشئ Issue جديد لمشكلة "${problem.key}": ${issueUrl}`);
   // حدّث الكاش المحلي فوراً كي لا يُنشأ Issue مكرر لنفس المشكلة إن ظهرت مرتين بنفس التشغيل.
@@ -368,6 +378,8 @@ async function reportProblem(problem) {
     _openHealthIssuesCache.push({ number: 0, title: problem.title, body: `<!-- health:${problem.key} -->` });
   }
   await notifyTelegram(problem, issueUrl);
+  // الـIssue أُنشئ بنجاح، فالحادثة موثّقة حتى لو تعثّر تيليغرام.
+  return true;
 }
 
 // دالة نقية: تقرر أي Issues تُغلق فعلاً.
@@ -487,9 +499,17 @@ async function main() {
   console.log(`المشاكل المكتشفة: ${problems.length}`);
   for (const p of problems) console.log(`  - [${p.severity}] ${p.key}: ${p.title}`);
 
+  let undelivered = 0;
   for (const p of problems) {
     // eslint-disable-next-line no-await-in-loop
-    await reportProblem(p);
+    const delivered = await reportProblem(p);
+    if (!delivered) undelivered += 1;
+  }
+  if (undelivered > 0) {
+    // فشل تسليم كامل: لا Issue ولا تيليغرام. لا يجوز أن ينتهي التشغيل بنجاح
+    // وإلا بقي العطل الإنتاجي مرئياً في السجل وحده.
+    console.error(`✗✗ ${undelivered} مشكلة لم تصل عبر أي قناة تبليغ — يُفشَل التشغيل ليُلتقط بتنبيه الأتمتة.`);
+    process.exitCode = 1;
   }
 
   closeResolvedIssues({

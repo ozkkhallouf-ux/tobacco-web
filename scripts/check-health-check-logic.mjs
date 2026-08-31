@@ -285,4 +285,24 @@ assert.ok(
   `عودة الثغرة: سير عمل "${healthName}" يجب أن يكون مراقَباً في alert-on-automation-failure.yml وإلا مرّ انهياره بلا تنبيه.`,
 );
 
-console.log('check-health-check-logic: OK — مسح بلا قيد فرع وبقائمة سماح، مفاتيح متطابقة، تمييز التعافي، منع تكرار بهوية الحادثة، وانهيار المراقب مرئي ومُنبَّه عنه.');
+// ═══════════ فشل القناتين معاً يجب أن يُفشل التشغيل ═══════════
+// إن فشل إنشاء الـIssue وفشل استدعاء notify_telegram أيضاً، لم تصل الحادثة
+// إلى أحد. كان التشغيل ينتهي بنجاح فيبقى العطل الإنتاجي في السجل وحده،
+// وalert-on-automation-failure.yml لا يعمل إلا على تشغيل غير ناجح.
+const notifyBlock = codeOnly.slice(codeOnly.indexOf('async function notifyTelegram'), codeOnly.indexOf('async function reportProblem'));
+assert.match(notifyBlock, /return true;/, 'notifyTelegram يجب أن يُبلّغ عن نجاح التسليم.');
+assert.match(notifyBlock, /return false;/, 'notifyTelegram يجب أن يُبلّغ عن فشل التسليم.');
+
+const reportBlock2 = codeOnly.slice(codeOnly.indexOf('async function reportProblem'), codeOnly.indexOf('export function parseWorkflowIncidentKey'));
+assert.match(reportBlock2, /const delivered = await notifyTelegram\(problem, null\)/, 'reportProblem يجب أن يقرأ نتيجة التنبيه الاحتياطي.');
+assert.match(reportBlock2, /return delivered;/, 'reportProblem يجب أن يُمرّر فشل التسليم للأعلى.');
+
+const mainBlock = codeOnly.slice(codeOnly.indexOf('async function main'), codeOnly.indexOf('const isDirectRun'));
+assert.match(mainBlock, /if \(!delivered\) undelivered \+= 1;/, 'main يجب أن يحصي المشاكل غير المسلَّمة.');
+assert.match(
+  mainBlock,
+  /if \(undelivered > 0\)[\s\S]{0,400}process\.exitCode = 1;/,
+  'عودة الثغرة: فشل كل قنوات التبليغ يجب أن يُفشل التشغيل لا أن يمرّ بنجاح.',
+);
+
+console.log('check-health-check-logic: OK — مسح بلا قيد فرع وبقائمة سماح، مفاتيح متطابقة، تمييز التعافي، منع تكرار بهوية الحادثة، انهيار المراقب مرئي، وفشل كل قنوات التبليغ يُفشل التشغيل.');
