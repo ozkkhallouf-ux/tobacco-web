@@ -15,8 +15,15 @@
   const RIGHT_GROUPS = ["ماستر", "كابتن بلاك", "اوسكار", "اختمار", "روز", "1970", "كينغ دوم", "مانشستر"];
   const LEFT_GROUPS = ["غلواز", "اليغانس", "تي اس", "أوريس", "حمرا", "يونايتد", "ولسون", "نابولي"];
   const SPECIAL_RIGHT_GROUPS = ["فحم", "ورق", "فيبات", "قداحات", "سلفان"];
-  const SPECIAL_LEFT_GROUPS = ["معسل"];
-  const SPECIAL_GROUPS = new Set([...SPECIAL_RIGHT_GROUPS, ...SPECIAL_LEFT_GROUPS, "مزايا", "نخلة"]);
+  // «مزايا» و«نخلة» علامتا معسل، فوجهتهما عمود القسم الخاص الأيسر مع «معسل».
+  const SPECIAL_LEFT_GROUPS = ["معسل", "مزايا", "نخلة"];
+  // **مشتقّة من قائمتَي الوجهة، لا تُكتب يدوياً.** كانت تُكتب يدوياً وتضمّ
+  // «مزايا» و«نخلة» بلا وجود لهما في أي من القائمتين، فكان layoutGroups يستبعدهما
+  // من `remaining` (لأنهما ضمن SPECIAL_GROUPS) ولا يلتقطهما `take()` (لأنهما ليسا
+  // في أي قائمة وجهة) — فتسقط المجموعة بأكملها من النشرة بصمت: أربعة أصناف من
+  // «نخلة» لم تصل الزبون (224 صنفاً في البيانات مقابل 220 في الملف).
+  // الاشتقاق يجعل «اسم بلا وجهة» مستحيلاً بنيوياً.
+  const SPECIAL_GROUPS = new Set([...SPECIAL_RIGHT_GROUPS, ...SPECIAL_LEFT_GROUPS]);
   const ARABIC_MONTHS = [
     "كانون الثاني", "شباط", "آذار", "نيسان", "أيار", "حزيران",
     "تموز", "آب", "أيلول", "تشرين الأول", "تشرين الثاني", "كانون الأول"
@@ -366,6 +373,90 @@
     return { pages, oversized };
   }
 
+  // ملء الفراغ المتبقي في آخر صفحة رئيسية بمجموعات القسم الخاص (فحم، معسل،
+  // ورق، فيبات، قداحات، سلفان).
+  //
+  // قبل هذه الخطوة كان القسم الخاص يبدأ **دائماً** بصفحة جديدة، فتخرج آخر صفحة
+  // رئيسية نصف فارغة (هامش سفلي ~47%) وتُطبع بعدها صفحة كاملة للفحم والمعسل —
+  // ورق مهدور بلا سبب.
+  //
+  // القاعدة: تنزل المجموعة إلى الفراغ المتبقي **فقط إذا اتّسعت كاملةً** في
+  // عمودها. لا تُقسَّم مجموعة أبداً بين صفحتين ولا بين عمودين، ولا يتغيّر ترتيب
+  // القراءة: نستهلك بادئة كل طابور فقط (نتوقف عند أول مجموعة لا تتّسع) كي لا
+  // تسبق مجموعةٌ متأخرةٌ مجموعةً أسبق منها.
+  //
+  // مؤشرا الطابورين مشتركان بين العمودين، تماماً كما في
+  // packGroupsIntoBalancedPages: العمود يسحب من طابوره أولاً ثم يقبل فيضان
+  // الطابور الآخر **بعد نفاده هو**. بدون هذا الفيضان يبقى عمود اليسار شبه فارغ
+  // بينما تُدفع مجموعات صغيرة إلى صفحة مستقلة لا تحمل غير ~12% من الورقة — أي
+  // يبقى الهدر الذي جاءت هذه الميزة لإزالته.
+  //
+  // لا نُعيد موازنة الأعمدة بعد الملء (balancePageColumns) لأن الموازنة تنقل آخر
+  // مجموعة بين العمودين، فتكسر هوية القسم الخاص (يمين/يسار).
+  function fillTrailingSpaceWithSpecialGroups(pages, budgets, specialRight, specialLeft, heights, safetyMarginPx) {
+    const toEntries = (groups) => (Array.isArray(groups) ? groups : [])
+      .map((group) => {
+        const name = String(group?.name || "");
+        const h = heights instanceof Map ? heights.get(name) : undefined;
+        return { group, name, h };
+      });
+
+    const rq = toEntries(specialRight);
+    const lq = toEntries(specialLeft);
+    const remainder = (queue, from) => queue.slice(from).map((entry) => entry.group);
+
+    const lastIndex = pages.length - 1;
+    const page = lastIndex >= 0 ? pages[lastIndex] : null;
+    if (!page) return { right: remainder(rq, 0), left: remainder(lq, 0), carried: 0 };
+
+    // آخر صفحة رئيسية قد تكون الصفحة الأولى نفسها (نشرة قصيرة)، وميزانيتها
+    // حينها مخفوضة بارتفاع الرأس — نفس الميزانية التي حُزمت بها.
+    const budgetForPage = lastIndex === 0
+      ? Math.max(0, Number(budgets?.reducedFirstPageBudget) || 0)
+      : Math.max(0, Number(budgets?.fullBudget) || 0);
+    const limit = Math.max(0, budgetForPage - safetyMarginPx);
+
+    // صفحة احتياطية بلا ارتفاعات محسوبة (لا مجموعات رئيسية إطلاقاً): تبدأ من صفر.
+    if (!Number.isFinite(page.rightHeight)) page.rightHeight = 0;
+    if (!Number.isFinite(page.leftHeight)) page.leftHeight = 0;
+
+    let carried = 0;
+    let ri = 0;
+    let li = 0;
+    const tryTake = (entry, columnKey, heightKey) => {
+      if (!entry || entry.h == null || !Number.isFinite(entry.h)) return false;
+      if (page[heightKey] + entry.h > limit + 1e-6) return false; // لا تتّسع كاملةً
+      page[columnKey].push(entry.group);
+      page[heightKey] += entry.h;
+      carried += 1;
+      return true;
+    };
+
+    // عمود اليمين: طابور اليمين أولاً، ثم فيضان طابور اليسار إن نفد اليمين.
+    for (;;) {
+      if (ri < rq.length) {
+        if (!tryTake(rq[ri], "right", "rightHeight")) break;
+        ri += 1;
+      } else if (li < lq.length) {
+        if (!tryTake(lq[li], "right", "rightHeight")) break;
+        li += 1;
+      } else break;
+    }
+
+    // عمود اليسار: طابور اليسار أولاً، ثم فيضان طابور اليمين إن نفد اليسار.
+    for (;;) {
+      if (li < lq.length) {
+        if (!tryTake(lq[li], "left", "leftHeight")) break;
+        li += 1;
+      } else if (ri < rq.length) {
+        if (!tryTake(rq[ri], "left", "leftHeight")) break;
+        ri += 1;
+      } else break;
+    }
+
+    return { right: remainder(rq, ri), left: remainder(lq, li), carried };
+  }
+
   // نُبقي على نفس تصنيف الهوية التجارية (يمين/يسار/خاص بالاسم) من layoutGroups()
   // كترتيب أساسي، لكن الآن نُغذّي بها طابوراً موحّداً واحداً لكل من الأعمدة
   // الرئيسية والخاصة بدل مسارين مستقلّين — هذا ما يضمن فعلياً توازن العمودين
@@ -382,14 +473,23 @@
     // صفحة1 من الأعمدة الرئيسية تبدأ تحت الرأس/الرأس الفرعي فتُخصم ميزانيتها؛ بقية الصفحات كاملة.
     // طابورا يمين/يسار منفصلان (لا دمج مسبق) — راجع تعليق packGroupsIntoBalancedPages
     // لسبب هذا الفصل: يضمن "ماستر" و"غلواز" أول عمودَيهما دائماً.
-    const mainPack = packGroupsIntoBalancedPages(base.right, base.left, heights, {
+    const mainBudgets = {
       reducedFirstPageBudget: Math.max(0, pageHeightPx - headerHeightPx),
       fullBudget: pageHeightPx
-    }, safetyMarginPx);
-    const mainPages = mainPack.pages.length ? mainPack.pages : [{ right: [], left: [] }];
+    };
+    const mainPack = packGroupsIntoBalancedPages(base.right, base.left, heights, mainBudgets, safetyMarginPx);
+    const mainPages = mainPack.pages.length
+      ? mainPack.pages
+      : [{ right: [], left: [], rightHeight: 0, leftHeight: 0 }];
 
-    // صفحة المجموعات الخاصة تبدأ دائماً بصفحة جديدة كاملة بلا رأس متكرر.
-    const specialPack = packGroupsIntoBalancedPages(base.specialRight, base.specialLeft, heights, {
+    // ينزل من القسم الخاص إلى فراغ آخر صفحة رئيسية كل مجموعة تتّسع كاملةً.
+    const spill = fillTrailingSpaceWithSpecialGroups(
+      mainPages, mainBudgets, base.specialRight, base.specialLeft, heights, safetyMarginPx
+    );
+
+    // ما تبقّى من القسم الخاص يبدأ بصفحة جديدة كاملة بلا رأس متكرر. إن نزل
+    // القسم بأكمله في الفراغ أعلاه فلا تُنتَج هنا أي صفحة.
+    const specialPack = packGroupsIntoBalancedPages(spill.right, spill.left, heights, {
       reducedFirstPageBudget: pageHeightPx,
       fullBudget: pageHeightPx
     }, safetyMarginPx);
@@ -398,7 +498,9 @@
     return {
       mainPages,
       specialPages,
-      oversized: [...mainPack.oversized, ...specialPack.oversized]
+      carriedSpecialGroups: spill.carried,
+      oversized: [...mainPack.oversized, ...specialPack.oversized],
+      dropped: base.dropped
     };
   }
 
@@ -412,7 +514,7 @@
     const specialPages = layout.specialRight.length || layout.specialLeft.length
       ? [{ right: layout.specialRight, left: layout.specialLeft }]
       : [];
-    return { mainPages, specialPages, oversized: [] };
+    return { mainPages, specialPages, oversized: [], dropped: layout.dropped };
   }
 
   function layoutGroups(groups) {
@@ -434,12 +536,16 @@
       0
     );
     remaining.forEach((group) => (height(right) <= height(left) ? right : left).push(group));
-    return {
-      right,
-      left,
-      specialRight: take(SPECIAL_RIGHT_GROUPS),
-      specialLeft: take(SPECIAL_LEFT_GROUPS)
-    };
+    const specialRight = take(SPECIAL_RIGHT_GROUPS);
+    const specialLeft = take(SPECIAL_LEFT_GROUPS);
+
+    // حارس الاكتمال: التصنيف أعلاه يجب أن يكون **شاملاً** — كل مجموعة دخلت هنا
+    // تخرج في عمود. أي اسم يفلت (مثل «نخلة» سابقاً) يُبلَّغ عنه صراحةً بدل أن
+    // تختفي أصنافه من نشرة الزبون بلا أثر. التصدير يرفض عند امتلائه.
+    const placed = new Set([...right, ...left, ...specialRight, ...specialLeft].map((group) => group.name));
+    const dropped = safeGroups.map((group) => String(group?.name || "")).filter((name) => !placed.has(name));
+
+    return { right, left, specialRight, specialLeft, dropped };
   }
 
   function renderGroup(group) {
