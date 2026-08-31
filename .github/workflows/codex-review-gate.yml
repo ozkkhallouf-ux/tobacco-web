@@ -396,6 +396,31 @@ permissions:
   #   يبقى "pending" (آمن، لا يمنح نجاحاً زائفاً) حتى وصول أي تشغيل لاحق (push أو @codex
   #   review) — نفس الأثر الآمن الموصوف أعلاه لثغرة P1 الأولى، وليس فقداناً دائماً للنتيجة.
 
+  # ⚠️ إصلاح جوهري رابع عشر بتاريخ 2026-08-31 (إغلاق النافذتين المتبقيتين فعلياً — ردّاً على
+  #   P1 حيّين جديدين رصدهما Codex على commit `780adea691` نفسه، فوق الإصلاح الثالث عشر):
+  #
+  #   P1 الأول ("Make ownership atomic with check publication"): الإصلاح الثالث عشر أعاد
+  #   قراءة القفل قبل الكتابة، لكن النافذة بين تلك القراءة وطلب PATCH/POST الفعلي بقيت غير
+  #   محمية — تشغيل أحدث قد يفوز بالقفل ويكتب نجاحه بين تحقّقنا وكتابتنا فعلياً، فنُعقِّبه
+  #   بكتابة قديمة. الحل الجذري: التخلي تماماً عن استخدام مرجع القفل كإثبات ملكية لحظة
+  #   الكتابة (هو أداة تسلسل الوصول لخطوة acquire_lock فقط، لا أكثر)، والاعتماد حصراً على
+  #   المصدر الحقيقي للتنافس: حقل external_id على check-run الكانوني نفسه. الآن publish
+  #   يعمل بحلقة "اقرأ → إن كانت كتابتنا موجودة بالفعل فانتهِ → إن كانت stale فاخرج بلا كتابة
+  #   → اكتب → أعد القراءة فوراً للتأكد أن كتابتنا هي التي ظهرت فعلياً → إن لم تكن، أعد المحاولة
+  #   من الأول". هذا يُغلق الفجوة فعلياً: أي تشغيل بـgeneration أقل يكتشف نفسه stale في أول
+  #   قراءة تالية إن كُتب فوقه أحدث، وأي تشغيل بـgeneration أعلى يستمر بإعادة الكتابة حتى تُؤكَّد،
+  #   فتتقارب النتيجة النهائية دائماً لأعلى generation فعلياً كتب، بصرف النظر عن ترتيب التداخل.
+  #
+  #   P1 الثاني ("Retry rather than discard the final contender"): نفس المبدأ يُطبَّق على
+  #   acquire_lock — بدل عدّاد محاولات ثابت (MAX_ATTEMPTS=20) يُسقِط أحدث تقييم بعد استنفاده رغم
+  #   عدم staleness حقيقية، تُستبدل الحلقة بمهلة زمنية (3 دقائق) تُعاد فيها المحاولة باستمرار
+  #   حتى الفوز الفعلي بالقفل أو رصد generation أحدث صريحاً (staleness حقيقية) — لا استسلام
+  #   بسبب عدد محاولات تعسفي وحده. المهلة الزمنية (لا عدّاد صغير) هي الحارس الوحيد ضد استهلاك
+  #   وقت تشغيل لا نهائي؛ عند استنفادها فعلياً (سيناريو نادر جداً يتطلب تنافساً كثيفاً مستمراً
+  #   لثلاث دقائق كاملة)، يبقى الخروج بلا كتابة (exit 0، لا exit 1 — لنفس سبب تلويث
+  #   statusCheckRollup الموثّق أعلاه) مع تحذير `::warning::` مرئي، لا صامت. نفس المبدأ يُطبَّق
+  #   على حلقة publish الجديدة (مهلة 3 دقائق مستقلة لتأكيد النشر بعد كل كتابة).
+
 jobs:
   gate:
     # ⚠️ إصلاح جوهري سادس (2026-08-31): يُمنع نهائياً أن يكون اسم الـjob هنا حرفياً
@@ -527,19 +552,19 @@ jobs:
           GENERATION="${{ steps.pr.outputs.generation }}"
           LOCK_REF="gate-lock/pr-$PR_NUMBER"
           EMPTY_TREE="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-          # ⚠️ إصلاح جوهري ثالث عشر بتاريخ 2026-08-31: ٢٠ محاولة بدل ٦ + jitter عشوائي
-          # (1-3 ثوانٍ) بدل تأخير ثابت — يجعل استنفاد كل المحاولات بسبب تنافس عابر بحت
-          # (لا staleness حقيقية) نادراً عملياً جداً حتى تحت تدفق أحداث كثيف. انظر تعليق
-          # "إصلاح جوهري ثالث عشر" أعلى الملف.
-          MAX_ATTEMPTS=20
+          # ⚠️ إصلاح جوهري رابع عشر بتاريخ 2026-08-31: مهلة زمنية (3 دقائق) بدل عدّاد محاولات
+          # ثابت — لا نستسلم بسبب عدد محاولات تعسفي وحده طالما لم نُصبح stale فعلياً (لم يظهر
+          # generation أحدث صريحاً). انظر تعليق "إصلاح جوهري رابع عشر" أعلى الملف.
+          LOCK_DEADLINE=$(( $(date +%s) + 180 ))
 
           # انظر شرح الإصلاح الجوهري الثاني عشر أعلى الملف لتفصيل التصميم الكامل. خلاصة
           # الآلية هنا: CAS ذرّي حقيقي عبر بروتوكول git نفسه (لا اعتماد على أي نافذة زمنية
-          # ولا على queue behavior لطابور GitHub Actions).
+          # ولا على queue behavior لطابور GitHub Actions) — المهلة هنا فقط حارس ضد استهلاك
+          # وقت تشغيل لا نهائي، وليست شرط توقّف طبيعياً للتصميم.
           ATTEMPT=0
           WON="false"
           SKIP_REASON=""
-          while [ "$ATTEMPT" -lt "$MAX_ATTEMPTS" ]; do
+          while :; do
             ATTEMPT=$((ATTEMPT + 1))
 
             CURRENT_LOCK_SHA=""
@@ -573,7 +598,12 @@ jobs:
               '{message: $msg, tree: $tree, parents: $parents}' \
               | gh api "repos/$REPO/git/commits" --method POST --input - --jq '.sha' 2>/dev/null || echo "")
             if [ -z "$NEW_COMMIT_SHA" ]; then
-              echo "فشل إنشاء commit القفل (محاولة $ATTEMPT/$MAX_ATTEMPTS) — إعادة محاولة."
+              if [ "$(date +%s)" -ge "$LOCK_DEADLINE" ]; then
+                echo "استنفاد المهلة الزمنية (180 ثانية) أثناء محاولة إنشاء commit القفل (محاولة $ATTEMPT) — خروج بلا كتابة."
+                SKIP_REASON="contention"
+                break
+              fi
+              echo "فشل إنشاء commit القفل (محاولة $ATTEMPT) — إعادة محاولة."
               sleep 1
               continue
             fi
@@ -591,7 +621,12 @@ jobs:
                 WON="true"; break
               fi
             fi
-            echo "خسر هذا التشغيل سباق أخذ القفل (محاولة $ATTEMPT/$MAX_ATTEMPTS) — إعادة قراءة القفل والمحاولة من جديد."
+            if [ "$(date +%s)" -ge "$LOCK_DEADLINE" ]; then
+              echo "استنفاد المهلة الزمنية (180 ثانية) لأخذ القفل (محاولة $ATTEMPT) دون staleness حقيقية — خروج بلا كتابة."
+              SKIP_REASON="contention"
+              break
+            fi
+            echo "خسر هذا التشغيل سباق أخذ القفل (محاولة $ATTEMPT) — إعادة قراءة القفل والمحاولة من جديد."
             sleep "$(( (RANDOM % 3) + 1 ))"
           done
 
@@ -603,11 +638,11 @@ jobs:
               echo "skip_reason=stale" >> "$GITHUB_OUTPUT"
             else
               echo "skip_reason=contention" >> "$GITHUB_OUTPUT"
-              # ⚠️ إصلاح جوهري ثالث عشر: لا نُفشل الـjob هنا عمداً (يلوّث statusCheckRollup
+              # ⚠️ إصلاح جوهري رابع عشر: لا نُفشل الـjob هنا عمداً (يلوّث statusCheckRollup
               # عبر check-run تلقائي بـfailure — انظر تعليق "إصلاح جوهري ثالث عشر" أعلى
               # الملف) لكن نُصدر تحذيراً مرئياً صريحاً كي لا يبقى الاستنفاد صامتاً في السجلّ.
-              echo "::warning title=Codex Review Gate — استنفاد محاولات القفل::لم يفز هذا التشغيل ($GENERATION) بالقفل بعد $MAX_ATTEMPTS محاولات رغم عدم وجود generation أحدث معروفة (تنافس عابر بحت) — لن يكتب على check-run الكانوني؛ required check يبقى pending (آمن) حتى تشغيل لاحق (push أو تعليق @codex review)."
-              echo "لم يفز هذا التشغيل بالقفل بعد $MAX_ATTEMPTS محاولات (تنافس عابر) — يخرج بلا كتابة؛ تشغيل لاحق (generation أحدث) سيتولى النشر." >&2
+              echo "::warning title=Codex Review Gate — استنفاد مهلة القفل::لم يفز هذا التشغيل ($GENERATION) بالقفل خلال 180 ثانية رغم عدم وجود generation أحدث معروفة (تنافس عابر مستمر) — لن يكتب على check-run الكانوني؛ required check يبقى pending (آمن) حتى تشغيل لاحق (push أو تعليق @codex review)."
+              echo "لم يفز هذا التشغيل بالقفل خلال 180 ثانية (تنافس عابر) — يخرج بلا كتابة؛ تشغيل لاحق (generation أحدث) سيتولى النشر." >&2
             fi
           fi
 
@@ -642,52 +677,13 @@ jobs:
             exit 0
           fi
 
-          EXISTING_RUNS_JSON=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs" --paginate \
-            | jq -s --arg name "$NAME" '[.[].check_runs[] | select(.name == $name)]')
-          EXISTING_ID=$(echo "$EXISTING_RUNS_JSON" | jq -r 'sort_by(.id) | last | .id // empty')
-          EXISTING_GENERATION=$(echo "$EXISTING_RUNS_JSON" | jq -r 'sort_by(.id) | last | .external_id // empty')
-
-          # ⚠️ إصلاح جوهري سابع بتاريخ 2026-08-31 — الحارس الثاني (stale-run guard صريح):
-          # إن كان الـcheck-run الكانوني الموجود بالفعل يحمل generation أحدث من أو تساوي
-          # generation هذا التشغيل، فهذا التشغيل قديم/متأخر بالتعريف — بصرف النظر تماماً
-          # عن ترتيب وصول الأحداث أو اكتمالها الفعلي — يخرج بلا كتابة كي لا يكتب "نتيجة
-          # قديمة" (in_progress مثلاً) فوق "نتيجة أحدث" (success) بالخطأ.
-          if [ -n "$EXISTING_GENERATION" ]; then
-            EXISTING_RUN_ID="${EXISTING_GENERATION%%.*}"
-            EXISTING_ATTEMPT="${EXISTING_GENERATION##*.}"
-            CURRENT_RUN_ID="${GENERATION%%.*}"
-            CURRENT_ATTEMPT="${GENERATION##*.}"
-            IS_STALE=0
-            if [ "$EXISTING_RUN_ID" -gt "$CURRENT_RUN_ID" ] 2>/dev/null; then
-              IS_STALE=1
-            elif [ "$EXISTING_RUN_ID" -eq "$CURRENT_RUN_ID" ] 2>/dev/null && [ "$EXISTING_ATTEMPT" -ge "$CURRENT_ATTEMPT" ] 2>/dev/null; then
-              IS_STALE=1
-            fi
-            if [ "$IS_STALE" -eq 1 ]; then
-              echo "تخطٍّ بلا كتابة: check-run الكانوني يحمل بالفعل generation أحدث أو مساوية ($EXISTING_GENERATION >= $GENERATION) — هذا التشغيل قديم/متأخر، ممنوع من الكتابة فوق نتيجة أحدث."
-              exit 0
-            fi
-          fi
-
-          # ⚠️ إصلاح جوهري ثالث عشر بتاريخ 2026-08-31 — تثبيت الملكية حتى لحظة الكتابة
-          # الفعلية: الفوز بالقفل في acquire_lock حدث لحظي فقط؛ تشغيل بـgeneration أحدث قد
-          # يكون قد تجاوز (superseded) قفلنا منذ ذلك الفوز وحتى الآن (سلوك مقصود من تصميم
-          # الإصلاح الثاني عشر). نعيد قراءة القفل الآن مباشرة قبل أي PATCH/POST فعلي، ونقارنه
-          # بمطابقة تامة (لا "أحدث أو يساوي" فقط) — إن لم نعد الحائز الدقيق الحالي، نخرج بلا
-          # كتابة واثقين أن الحائز الجديد سينشر بنفس الآلية. انظر تعليق "إصلاح جوهري ثالث
-          # عشر" أعلى الملف لتفصيل النافذة الضيقة المتبقية ولماذا أثرها آمن دائماً.
-          LOCK_REF="gate-lock/pr-$PR_NUMBER"
-          CURRENT_LOCK_SHA=$(gh api "repos/$REPO/git/ref/$LOCK_REF" --jq '.object.sha // empty' 2>/dev/null || echo "")
-          if [ -n "$CURRENT_LOCK_SHA" ]; then
-            CURRENT_LOCK_GENERATION=$(gh api "repos/$REPO/git/commits/$CURRENT_LOCK_SHA" --jq '.message' 2>/dev/null | head -n1 | tr -d '[:space:]')
-          else
-            CURRENT_LOCK_GENERATION=""
-          fi
-          if [ "$CURRENT_LOCK_GENERATION" != "$GENERATION" ]; then
-            echo "تخطٍّ بلا كتابة: هذا التشغيل لم يعد الحائز الدقيق الحالي لقفل $LOCK_REF (حائزنا وقت الفوز: $GENERATION، الحائز الآن: ${CURRENT_LOCK_GENERATION:-<لا يوجد>}) — تجاوزه تشغيل آخر منذ الفوز الأولي؛ الحائز الجديد سيتولى النشر."
-            exit 0
-          fi
-
+          # ⚠️ إصلاح جوهري رابع عشر بتاريخ 2026-08-31: استبدال كل الفحوصات "اقرأ ثم قارن ثم
+          # اكتب" أحادية الطلقة (بما فيها فحص lock-ref القديم من الإصلاح الثالث عشر) بحلقة
+          # write-then-verify. السبب الجذري: GitHub Checks API لا يدعم compare-and-swap ولا
+          # ETag/If-Match إطلاقاً — أي تسلسل "تحقق ثم اكتب" مهما ضاقت نافذته الزمنية يبقى
+          # عرضة نظرياً لكتابة متزامنة تحدث بين التحقق والكتابة الفعلية. المصدر الحقيقي
+          # الوحيد للحقيقة هنا هو حقل external_id على check-run الكانوني نفسه، بعد كل كتابة
+          # فعلية — لا قبلها. انظر تعليق "إصلاح جوهري رابع عشر" أعلى الملف لتفصيل التصميم.
           TEXT=$(jq -n --arg badges "${{ steps.check.outputs.badges }}" \
             '"### درجات الخطورة (best-effort، معلوماتي فقط — غير حاكم للدمج)\n```\n" + $badges + "\n```\n\nمنع الدمج مع ملاحظات مفتوحة يُفرض عبر إعداد GitHub \"Require conversation resolution before merging\"، وليس عبر هذا الفحص."')
 
@@ -700,21 +696,81 @@ jobs:
             STATUS_FIELDS='"status":"in_progress"'
           fi
 
-          if [ -n "$EXISTING_ID" ]; then
-            PAYLOAD=$(jq -n --arg name "$NAME" --arg summary "$SUMMARY" --arg generation "$GENERATION" --argjson text "$TEXT" \
-              --argjson status_fields "{$STATUS_FIELDS}" \
-              '{name: $name, external_id: $generation, output: {title: $name, summary: $summary, text: $text}} * $status_fields')
-            RESPONSE_JSON=$(echo "$PAYLOAD" | gh api "repos/$REPO/check-runs/$EXISTING_ID" --method PATCH --input -)
-            CHECK_RUN_ID="$EXISTING_ID"
-            echo "تحديث check-run كانوني موجود (id=$EXISTING_ID, generation=$GENERATION): $NAME على $HEAD_SHA — reviewed_count=$REVIEWED_COUNT"
-          else
-            PAYLOAD=$(jq -n --arg name "$NAME" --arg sha "$HEAD_SHA" --arg summary "$SUMMARY" --arg generation "$GENERATION" --argjson text "$TEXT" \
-              --argjson status_fields "{$STATUS_FIELDS}" \
-              '{name: $name, head_sha: $sha, external_id: $generation, output: {title: $name, summary: $summary, text: $text}} * $status_fields')
-            RESPONSE_JSON=$(echo "$PAYLOAD" | gh api "repos/$REPO/check-runs" --method POST --input -)
-            CHECK_RUN_ID=$(echo "$RESPONSE_JSON" | jq -r '.id')
-            echo "إنشاء check-run كانوني جديد (id=$CHECK_RUN_ID, generation=$GENERATION): $NAME على $HEAD_SHA — reviewed_count=$REVIEWED_COUNT"
-          fi
+          PUBLISH_DEADLINE=$(( $(date +%s) + 180 ))
+          PUBLISH_ATTEMPT=0
+          PUBLISHED="false"
+          while :; do
+            PUBLISH_ATTEMPT=$((PUBLISH_ATTEMPT + 1))
+
+            EXISTING_RUNS_JSON=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs" --paginate \
+              | jq -s --arg name "$NAME" '[.[].check_runs[] | select(.name == $name)]')
+            EXISTING_ID=$(echo "$EXISTING_RUNS_JSON" | jq -r 'sort_by(.id) | last | .id // empty')
+            EXISTING_GENERATION=$(echo "$EXISTING_RUNS_JSON" | jq -r 'sort_by(.id) | last | .external_id // empty')
+
+            if [ "$EXISTING_GENERATION" = "$GENERATION" ]; then
+              # كتابتنا موجودة بالفعل — إما كتبناها في محاولة سابقة ولم نتأكد بعد، وإما
+              # كتبها تشغيل آخر بنفس الـgeneration بالضبط (لا يحدث عملياً؛ generation فريدة
+              # لكل تشغيل). إما حال، النتيجة الكانونية مطابقة لما نريد كتابته — انتهى.
+              PUBLISHED="true"
+              CHECK_RUN_ID="$EXISTING_ID"
+              break
+            fi
+
+            if [ -n "$EXISTING_GENERATION" ]; then
+              EXISTING_RUN_ID="${EXISTING_GENERATION%%.*}"
+              EXISTING_ATTEMPT="${EXISTING_GENERATION##*.}"
+              CURRENT_RUN_ID="${GENERATION%%.*}"
+              CURRENT_ATTEMPT="${GENERATION##*.}"
+              IS_STALE=0
+              if [ "$EXISTING_RUN_ID" -gt "$CURRENT_RUN_ID" ] 2>/dev/null; then
+                IS_STALE=1
+              elif [ "$EXISTING_RUN_ID" -eq "$CURRENT_RUN_ID" ] 2>/dev/null && [ "$EXISTING_ATTEMPT" -gt "$CURRENT_ATTEMPT" ] 2>/dev/null; then
+                IS_STALE=1
+              fi
+              if [ "$IS_STALE" -eq 1 ]; then
+                echo "تخطٍّ بلا كتابة: check-run الكانوني يحمل بالفعل generation أحدث ($EXISTING_GENERATION > $GENERATION) — هذا التشغيل قديم/متأخر فعلياً، ممنوع من الكتابة فوق نتيجة أحدث."
+                exit 0
+              fi
+            fi
+
+            if [ -n "$EXISTING_ID" ]; then
+              PAYLOAD=$(jq -n --arg name "$NAME" --arg summary "$SUMMARY" --arg generation "$GENERATION" --argjson text "$TEXT" \
+                --argjson status_fields "{$STATUS_FIELDS}" \
+                '{name: $name, external_id: $generation, output: {title: $name, summary: $summary, text: $text}} * $status_fields')
+              gh api "repos/$REPO/check-runs/$EXISTING_ID" --method PATCH --input - <<< "$PAYLOAD" >/dev/null 2>&1 || true
+              echo "محاولة تحديث check-run كانوني موجود (id=$EXISTING_ID, generation=$GENERATION، محاولة $PUBLISH_ATTEMPT): $NAME على $HEAD_SHA — reviewed_count=$REVIEWED_COUNT"
+            else
+              PAYLOAD=$(jq -n --arg name "$NAME" --arg sha "$HEAD_SHA" --arg summary "$SUMMARY" --arg generation "$GENERATION" --argjson text "$TEXT" \
+                --argjson status_fields "{$STATUS_FIELDS}" \
+                '{name: $name, head_sha: $sha, external_id: $generation, output: {title: $name, summary: $summary, text: $text}} * $status_fields')
+              gh api "repos/$REPO/check-runs" --method POST --input - <<< "$PAYLOAD" >/dev/null 2>&1 || true
+              echo "محاولة إنشاء check-run كانوني جديد (generation=$GENERATION، محاولة $PUBLISH_ATTEMPT): $NAME على $HEAD_SHA — reviewed_count=$REVIEWED_COUNT"
+            fi
+
+            # ⚠️ التأكيد الفوري (write-then-verify) — هذا هو جوهر الإصلاح الرابع عشر: لا
+            # نثق بأن الكتابة أعلاه هي التي استقرّت فعلياً حتى نعيد قراءة external_id على
+            # نفس الـsha ونتحقق أنه يطابق generation-نا بالضبط. إن كتب تشغيل آخر (generation
+            # أحدث) بين طلبنا وقراءتنا هذه، لن يطابق — فنعيد الحلقة من الأول فتكتشف نحن
+            # staleness-نا في المرة القادمة، أو نعيد الكتابة إن لم تكن الكتابة المنافسة قد
+            # استقرّت بعد (تقارب مضمون نحو أعلى generation فعلياً كتب).
+            CONFIRM_RUNS_JSON=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs" --paginate \
+              | jq -s --arg name "$NAME" '[.[].check_runs[] | select(.name == $name)]')
+            CONFIRM_ID=$(echo "$CONFIRM_RUNS_JSON" | jq -r 'sort_by(.id) | last | .id // empty')
+            CONFIRM_GENERATION=$(echo "$CONFIRM_RUNS_JSON" | jq -r 'sort_by(.id) | last | .external_id // empty')
+            if [ "$CONFIRM_GENERATION" = "$GENERATION" ]; then
+              PUBLISHED="true"
+              CHECK_RUN_ID="$CONFIRM_ID"
+              echo "تأكيد النشر: check-run (id=$CONFIRM_ID, generation=$GENERATION) هو الكانوني الفعلي الآن."
+              break
+            fi
+
+            if [ "$(date +%s)" -ge "$PUBLISH_DEADLINE" ]; then
+              echo "::warning title=Codex Review Gate — استنفاد مهلة النشر::لم تُؤكَّد كتابة هذا التشغيل ($GENERATION) خلال 180 ثانية رغم عدم رصد generation أحدث صريحة — تنافس كتابة مستمر على check-run. required check يبقى بحالته الحالية (آمن) حتى تشغيل لاحق (push أو تعليق @codex review)."
+              echo "لم تُؤكَّد كتابة هذا التشغيل خلال 180 ثانية (تنافس نشر مستمر) — خروج دون افتراض النجاح." >&2
+              exit 0
+            fi
+            sleep "$(( (RANDOM % 3) + 1 ))"
+          done
 
       - name: النتيجة الإعلامية للـjob (لا تحدد نتيجة الـGate — المصدر الوحيد هو الـcheck-run الكانوني أعلاه)
         if: steps.pr.outputs.base_ref == 'main'
