@@ -5528,6 +5528,7 @@ const INVENTORY_REPORT_STYLE = `<style>
 .ozk-rpt.inventory-rpt tr:nth-child(even) td{background:#faf4e6!important}
 .ozk-rpt.inventory-rpt .inventory-group-row td{background:#6b4309!important;color:#f4ca62!important;border-color:#b8892a!important;font-weight:900;padding:4px 6px;font-size:10px}
 .ozk-rpt.inventory-rpt .inventory-group-row .group-count{float:left;background:#f4ca62;color:#4d2d04;border-radius:999px;padding:1px 7px;font-size:10px}
+.ozk-rpt.inventory-rpt .inventory-group-row .group-part{background:#b8892a;color:#fff5dd;border-radius:999px;padding:1px 6px;font-size:9px;font-weight:700}
 .ozk-rpt.inventory-rpt .status-low{color:#9a6100!important;font-weight:800}.ozk-rpt.inventory-rpt .status-active{color:#16794f!important;font-weight:800}
 @media print{html,body,.ozk-rpt.inventory-rpt,.ozk-rpt.inventory-rpt .inventory-page{background:#fffdf8!important;color:#221808!important}.ozk-rpt.inventory-rpt{padding:0!important}}
 </style>`;
@@ -5611,9 +5612,10 @@ function inventoryPackPages(entries, options = {}) {
     const size = sizeOf(entry);
     for (;;) {
       const limit = limitFor(pages.length - 1);
-      // العمود الفارغ يستقبل المجموعة مهما طالت: مجموعة أطول من عمود كامل حالة
-      // نادرة جداً، والتصرف الصحيح معها ترك المتصفح يمدّها — لا حذفها ولا قصّها
-      // ولا تركها تدور بلا نهاية بحثاً عن عمود يتّسع لها.
+      // العمود الفارغ يستقبل المجموعة مهما طالت — حارس أخير يمنع الدوران بلا
+      // نهاية فقط. لا يُعوَّل عليه للمجموعات الأطول من عمود كامل: هذه تُقسَّم
+      // مسبقاً في inventoryReportPages، لأن ترك المتصفح «يمدّها» مستحيل أصلاً
+      // (break-inside:avoid يمنعه) وكان يُخرج صفحات A4 بيضاء — راجع التعليق هناك.
       if (page.sizes[column] + size <= limit + 1e-6 || page.columns[column].length === 0) {
         page.columns[column].push(entry);
         page.sizes[column] += size;
@@ -5717,13 +5719,68 @@ function measureInventoryReportBlocks(parts, geometry) {
   }
 }
 
+// مجموعة أطول من عمود صفحة كاملة لا يمكن أن تُطبع كتلة واحدة مهما فعلنا. تقسيمها
+// إلى أجزاء يسع كلٌّ منها عموداً هو الحل الوحيد الذي يُبقي الطباعة صحيحة: كل جزء
+// يحمل رأس المجموعة ورقمه (2/3 مثلاً) ويبقى هو نفسه غير قابل للتقسيم، فلا تُكسر
+// قاعدة PR #156 لأي مجموعة تستطيع أن تسع صفحة أصلاً.
+function splitOversizedInventoryEntries(entries, heights, maxColumnPx, renderGroup) {
+  if (typeof renderGroup !== "function") return entries;
+  const out = [];
+  entries.forEach((entry, index) => {
+    const height = Number(heights[index]) || 0;
+    const items = entry && entry.group && Array.isArray(entry.group.items) ? entry.group.items : null;
+    if (height <= maxColumnPx + 1e-6 || !items || items.length < 2) {
+      out.push(entry);
+      return;
+    }
+    // كل جزء يُعيد طباعة سطر رأس المجموعة، فيرتفع مجموع الأجزاء عن ارتفاع الأصل —
+    // لذلك جزء إضافي فوق النسبة المجرّدة. القياس التالي يتحقق ويقسّم ثانيةً إن لزم.
+    const wanted = Math.min(items.length, Math.max(2, Math.ceil(height / maxColumnPx) + 1));
+    const perPart = Math.ceil(items.length / wanted);
+    const partCount = Math.ceil(items.length / perPart);
+    for (let part = 0; part < partCount; part += 1) {
+      const slice = items.slice(part * perPart, (part + 1) * perPart);
+      if (!slice.length) continue;
+      const group = { ...entry.group, items: slice };
+      out.push({
+        group,
+        part,
+        partCount,
+        html: renderGroup(group, part, partCount),
+        rows: slice.length + 1
+      });
+    }
+  });
+  return out;
+}
+
 // يبني صفحات التقرير النهائية: قياس حقيقي إن توفّر DOM، وإلا التقدير بعدد الأسطر.
 function inventoryReportPages(parts, mode) {
   const geometry = inventoryPageGeometry(mode);
-  const measured = measureInventoryReportBlocks(parts, geometry);
+  let measured = measureInventoryReportBlocks(parts, geometry);
   if (!measured) return inventoryTwoColumnPages(parts.entries);
 
-  const entries = parts.entries.map((entry, index) => ({ ...entry, height: measured.heights[index] }));
+  // ===== قبل أي تعبئة: لا يجوز أن تبقى مجموعة أطول من عمود صفحة كاملة =====
+  // العطل الذي عولج هنا: PR #156 كان يضع المجموعة الطويلة في عمود فارغ ويترك
+  // «المتصفح يمدّها». هذا الافتراض خاطئ: CSS الخاص بنا يضع break-inside:avoid على
+  // .inventory-group، فيرفض كروم تمديدها ويدفعها كاملة إلى الصفحة التالية — فتبقى
+  // الصفحة الحالية بالرأس (وبطاقات الملخص بالأولى) وحدها: **صفحة A4 بيضاء فعلياً**،
+  // ثم يضيف break-after:page صفحةً أخرى. القياس بطباعة PDF حقيقية: مجموعة بـ70
+  // صنفاً أخرجت 4 أوراق مقابل صفحتين معروضتين، أولاهما بـ128 عملية نص والثانية بـ64
+  // (رأس فقط)، ومع مجموعتين طويلتين ظهرت صفحة بيضاء بينهما أيضاً.
+  const maxColumnPx = geometry.pageHeightPx - measured.headPx - INVENTORY_PACK_SAFETY_PX;
+  let sourceEntries = parts.entries;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (!measured.heights.some((height) => height > maxColumnPx + 1e-6)) break;
+    const split = splitOversizedInventoryEntries(sourceEntries, measured.heights, maxColumnPx, parts.renderGroup);
+    if (split.length === sourceEntries.length) break; // تعذّر التقسيم (لا renderGroup أو صنف واحد)
+    sourceEntries = split;
+    const remeasured = measureInventoryReportBlocks({ ...parts, entries: sourceEntries }, geometry);
+    if (!remeasured) return inventoryTwoColumnPages(sourceEntries);
+    measured = remeasured;
+  }
+
+  const entries = sourceEntries.map((entry, index) => ({ ...entry, height: measured.heights[index] }));
   const fullBudget = geometry.pageHeightPx - measured.headPx;      // الرأس يتكرر بكل صفحة
   const firstPageBudget = fullBudget - measured.cardsPx;           // البطاقات بالصفحة الأولى وحدها
   const base = { fullBudget, firstPageBudget, safetyPx: INVENTORY_PACK_SAFETY_PX };
@@ -5781,6 +5838,12 @@ function inventoryReportPages(parts, mode) {
       .sort((a, b) => a.length - b.length)[0] || reserveEveryPage;
   }
 
+  // قاعدة صريحة: لا تُخرَج صفحة تقرير بلا مجموعة واحدة على الأقل. المعبِّئ لا
+  // ينشئ صفحة فارغة أصلاً (العمود الفارغ يستقبل دائماً)، لكن هذا الحارس يجعل
+  // القاعدة مفروضة في الكود لا مستنتَجة من الخوارزمية.
+  const filled = pages.filter((page) => page.columns[0].length > 0 || page.columns[1].length > 0);
+  pages = filled.length ? filled : pages.slice(0, 1);
+
   const lastIndex = pages.length - 1;
   const lastLimit = Math.max(
     0,
@@ -5828,13 +5891,17 @@ function inventoryReportPdfMarkup() {
   const badgeOf = (it) => it.reportStatus === "low"
     ? '<span class="status-low">قريب من النفاد</span>'
     : (it.reportStatus === "active" ? '<span class="status-active">متوفّر</span>' : (INV_STATUS_BADGE[it.reportStatus] || INV_STATUS_BADGE.active));
-  const groupMarkup = (group) => `<div class="inventory-group"><table><tbody>
-    <tr class="inventory-group-row"><td colspan="3">${escapeHtml(pdfAr(group.label))}<span class="group-count">${escapeHtml(group.items.length)}</span></td></tr>
+  // `part`/`partCount` تخصّان المجموعة الأطول من عمود كامل وحدها: تُقسَّم إلى أجزاء
+  // ويحمل كل جزء رأس المجموعة ورقمه (٢/٣) كي يبقى واضحاً أنه استكمال لا مجموعة
+  // جديدة، ويعرض عدد أصنافه هو لا عدد المجموعة كلها.
+  const groupMarkup = (group, part = 0, partCount = 1) => `<div class="inventory-group"><table><tbody>
+    <tr class="inventory-group-row"><td colspan="3">${escapeHtml(pdfAr(group.label))}${partCount > 1 ? ` <span class="group-part">${escapeHtml(pdfAr(`${part + 1}/${partCount}`))}</span>` : ""}<span class="group-count">${escapeHtml(group.items.length)}</span></td></tr>
     ${group.items.map((it) => `<tr><td style="width:48%">${escapeHtml(pdfAr(it.name || ""))}</td><td style="width:29%">${escapeHtml(pdfAr(formatQtyCartons(it)))}</td><td style="width:23%">${badgeOf(it)}</td></tr>`).join("")}
   </tbody></table></div>`;
   // كل مجموعة تُبنى مرة واحدة ثم تُقاس وتُرسم بنفس الـHTML حرفياً — فيستحيل أن
-  // يفترق ما قِيس عمّا طُبع. `rows` للمسار الاحتياطي بلا DOM فقط.
-  const entries = grouped.map((group) => ({ html: groupMarkup(group), rows: group.items.length + 1 }));
+  // يفترق ما قِيس عمّا طُبع. `rows` للمسار الاحتياطي بلا DOM فقط، و`group` يلزم
+  // لإعادة بناء الأجزاء إن كانت المجموعة أطول من عمود كامل.
+  const entries = grouped.map((group) => ({ group, html: groupMarkup(group), rows: group.items.length + 1 }));
   const headMarkup = (pageIndex, pageCount) => `<div class="rhead"><div class="brand">OZK TOBACCO<small>تقرير المخزون التشغيلي</small></div>
       <div class="rtitle"><h2>المخزون — حسب ترتيب النشرة</h2><span>بتاريخ ${escapeHtml(todayIsoDate())} · صفحة ${escapeHtml(pageIndex + 1)} من ${escapeHtml(pageCount)}</span></div></div>`;
   const cardsMarkup = `<div class="cards">
@@ -5846,7 +5913,7 @@ function inventoryReportPdfMarkup() {
   // هندسة الصفحة تختلف بين ورقة الطباعة الأصلية (اللابتوب) وrasterization الهاتف،
   // فنقيس ونعبّئ بهندسة المسار الذي سيُصدَّر فعلاً — راجع inventoryPageGeometry.
   const pages = inventoryReportPages(
-    { entries, headHtml: headMarkup(0, 1), cardsHtml: cardsMarkup, footHtml: footMarkup },
+    { entries, renderGroup: groupMarkup, headHtml: headMarkup(0, 1), cardsHtml: cardsMarkup, footHtml: footMarkup },
     isHandheldDevice() ? "canvas" : "print"
   );
   const pagesMarkup = pages.map((page, pageIndex) => `<section class="inventory-page">
