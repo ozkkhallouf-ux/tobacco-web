@@ -126,7 +126,7 @@ language sql stable as $$
 $$;
 
 do $$
-declare n int := 0; a int := 0; old_died boolean;
+declare n int := 0; a int := 0; old_died boolean; old_classes text;
 begin
   -- ١) الاستدعاء لا يرمي، ويُرجع النافذة كاملة. لو رمى لما وُصل السطر التالي.
   select count(*) into n from pg_temp.audit_probe();
@@ -150,14 +150,25 @@ begin
     '15: العزل — صف النجاح ما زال مرئياً ووحيداً رغم الردود السيّئة'; a:=a+1;
 
   -- ٤) الشاهد السالب: التعبير القديم يسقط فعلاً على هذه المجموعة نفسها.
+  --
+  -- التقييم يجب أن يُفرض. الصيغة الأولى كانت perform count(*)، وهي لا تحتاج
+  -- قيم الأعمدة إطلاقاً فيُسقط المخطِّط تقييم تعبير CASE كله — فلا ينفجر
+  -- التحويل ولا يبرهن الشاهد شيئاً. قِيس ذلك على الإنتاج (2026-08-31،
+  -- PostgreSQL 17.6) بأربع صيغ على نفس المجموعة:
+  --   perform count(*)                        ⇒ لم يسقط
+  --   select … into على قيمة العمود           ⇒ سقط 22P02
+  --   التحويل وحده بلا CASE                    ⇒ سقط 22P02
+  -- ولهذا نجمع قيم delivery_class فعلياً: string_agg يفرض تقييم الصفوف كلها
+  -- لا صفاً واحداً، فيصير الشاهد أقوى من مجرد select من صف بعينه.
   begin
-    perform count(*) from pg_temp.audit_probe_unsafe();
+    select string_agg(u.delivery_class, ',') into old_classes
+      from pg_temp.audit_probe_unsafe() u;
     old_died := false;
   exception when invalid_text_representation then
     old_died := true;
   end;
   assert old_died,
-    '16: الشاهد السالب لم يسقط — الحالات الجديدة لا تُثير خلل P2 فالحراسة وهمية'; a:=a+1;
+    format('16: الشاهد السالب لم يسقط (أعاد %s) — إمّا أن الحالات لا تُثير خلل P2 أو أن التقييم لم يُفرض، وفي الحالتين الحراسة وهمية', coalesce(old_classes,'NULL')); a:=a+1;
 
   assert a >= 7, format('عدد تأكيدات P2 %s أقل من 7', a);
   raise notice 'telegram delivery P2 (non-JSON 2xx): % تأكيداً — كلها نجحت', a;

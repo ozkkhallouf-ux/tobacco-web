@@ -344,8 +344,78 @@ for (const [needle, why] of [
   assert.ok(tests.includes(needle), `${TESTS}: تغطية P2 ناقصة — ${why}`);
 }
 
+
+// ---------------------------------------------------------------------------
+// 11) الشاهد السالب يجب أن يفرض تقييم التعبير القديم فعلاً.
+//
+//     الصيغة الأولى كانت `perform count(*) from pg_temp.audit_probe_unsafe();`
+//     وهي لا تحتاج قيم الأعمدة، فيُسقط مخطِّط PostgreSQL تقييم تعبير CASE كله
+//     ولا ينفجر التحويل — فيمرّ التأكيد بلا أن يحرس شيئاً. اكتُشف ذلك حين فشل
+//     التأكيد 16 على الإنتاج (2026-08-31، PostgreSQL 17.6)، وقِيست الصيغ:
+//       perform count(*)              ⇒ لم يسقط
+//       select … into على قيمة العمود ⇒ سقط 22P02
+//       التحويل وحده بلا CASE          ⇒ سقط 22P02
+//
+//     الحارس هنا يفحص **موضع الاستدعاء** لا التعريف: التعريف يجب أن يحتفظ
+//     بالتحويل المباشر (فهو محاكاة الخلل)، والاستدعاء يجب أن يستهلك القيمة.
+// ---------------------------------------------------------------------------
+const negativeControlCall = (() => {
+  const defAt = tests.indexOf('create function pg_temp.audit_probe_unsafe()');
+  assert.ok(defAt > 0, `${TESTS}: تعريف الشاهد السالب مفقود`);
+  const defEnd = tests.indexOf('$$;', defAt);
+  const callAt = tests.indexOf('pg_temp.audit_probe_unsafe()', defEnd);
+  assert.ok(callAt > 0, `${TESTS}: الشاهد السالب معرَّف ولا يُستدعى — لا يحرس شيئاً`);
+  const blockStart = tests.lastIndexOf('begin', callAt);
+  const blockEnd = tests.indexOf('end;', callAt);
+  assert.ok(blockStart > 0 && blockEnd > callAt, `${TESTS}: كتلة الشاهد السالب غير مكتملة`);
+  return tests.slice(blockStart, blockEnd);
+})();
+
+// count(*) وأخواتها تسمح للمخطِّط بتجاهل الإسقاط ⇒ شاهد فارغ المعنى
+assert.doesNotMatch(
+  negativeControlCall, /count\s*\(/,
+  `${TESTS}: الشاهد السالب يستعمل count(...) — المخطِّط يُسقط تقييم التعبير فلا يبرهن شيئاً`,
+);
+assert.doesNotMatch(
+  negativeControlCall, /\bperform\b/,
+  `${TESTS}: الشاهد السالب يستعمل perform — النتيجة تُرمى، فقد لا يُقيَّم التعبير`,
+);
+assert.doesNotMatch(
+  negativeControlCall, /\bexists\s*\(|\blimit\s+0\b/,
+  `${TESTS}: الشاهد السالب يستعمل صيغة قد تتفادى تقييم الصفوف`,
+);
+// يجب أن تُستهلك القيمة المصنَّفة فعلاً
+assert.match(
+  negativeControlCall, /\binto\b/,
+  `${TESTS}: الشاهد السالب لا يُسند القيمة إلى متغيّر — التقييم غير مفروض`,
+);
+assert.match(
+  negativeControlCall, /delivery_class/,
+  `${TESTS}: الشاهد السالب لا يستهلك delivery_class — وهو العمود الذي يحمل التحويل`,
+);
+// ويجب أن يلتقط فئة الخطأ الصحيحة وحدها
+assert.match(
+  negativeControlCall, /exception when invalid_text_representation then/,
+  `${TESTS}: الشاهد السالب لا يلتقط invalid_text_representation تحديداً`,
+);
+assert.doesNotMatch(
+  negativeControlCall, /when others then/,
+  `${TESTS}: الشاهد السالب يلتقط others — قد يبتلع خطأً آخر ويدّعي أنه 22P02`,
+);
+
+// والتعريف نفسه يجب أن يبقى حاملاً للتحويل المباشر: هو محاكاة الخلل لا إصلاحه
+const negativeControlDef = (() => {
+  const i = tests.indexOf('create function pg_temp.audit_probe_unsafe()');
+  return tests.slice(i, tests.indexOf('$$;', i));
+})();
+assert.match(
+  negativeControlDef, /r\.content::jsonb/,
+  `${TESTS}: تعريف الشاهد السالب فقد التحويل المباشر — لم يعد يحاكي الخلل`,
+);
+
 console.log(
   `Telegram delivery observability checks passed (تعريف مُرسِل واحد، المعرّف مُلتقَط، `
   + `صفر حالات جديدة، صفر retry، dedupe سليم، عدسة stable، بلا cast غير محروس، `
+  + `شاهد سالب يفرض التقييم، `
   + `${testAsserts.length} تأكيداً).`,
 );
