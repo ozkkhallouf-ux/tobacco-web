@@ -1148,6 +1148,7 @@ async function printOverdueReport() {
     return;
   }
 
+  archiveToICloud("other_report", html, { title: "تقرير الزبائن المتأخرين", date: todayIsoDate() });
   const container = document.createElement("div");
   container.innerHTML = html;
   document.body.appendChild(container);
@@ -2837,6 +2838,7 @@ async function exportBulletinPdf(items, latest, useSyria = false, theme = state.
   // والجوال (createPortablePdfBlob/presentPortablePdf) فلا يوجد مصدر آخر لتحديثه.
   const filename = `نشرة-الأسعار-${useSyria ? "SYP" : "USD"}-${todayIsoDate()}.pdf`;
   const markup = customerPricePdfMarkup(items, latest, useSyria, selectedTheme);
+  archiveToICloud("price_list", markup, { date: todayIsoDate() });
 
   // iOS داخل الـPWA لا ينفّذ تنزيل html2pdf().save() بشكل موثوق. نولّد Blob
   // حقيقياً ثم نعرض زر مشاركة مستقل؛ النقر على الزر يمنح Safari إيماءة مستخدم
@@ -4561,6 +4563,11 @@ function trimTrailingPortablePdfDecorations(source, margin) {
 // فيفتح ورقة الطباعة الأصلية للنظام (وفيها «حفظ بصيغة PDF» وزر إلغاء)، ويعمل
 // على iOS وأندرويد وويندوز معاً بلا حاجة للسماح بالنوافذ المنبثقة.
 function printHtmlDocument(html, options = {}) {
+  // نسخة iCloud تُطلق قبل فتح ورقة الطباعة كي لا ينتظرها المستخدم إطلاقاً،
+  // ولا يؤثر نجاحها أو فشلها على الطباعة نفسها بأي شكل.
+  if (options.archive && options.archive.docType) {
+    archiveToICloud(options.archive.docType, html, options.archive.meta);
+  }
   const previous = document.querySelector("iframe[data-print-frame]");
   if (previous) previous.remove();
 
@@ -4610,11 +4617,37 @@ function printHtmlDocument(html, options = {}) {
   frame.srcdoc = html;
 }
 
+// أرشفة صامتة إلى iCloud Drive عبر الجسر المحلي على الماك (src/icloud-archive.js).
+//
+// قاعدة حاكمة: الأرشفة ميزة مساعدة منفصلة تماماً عن العملية التجارية. لا تُعيد
+// وعداً ينتظره أحد، ولا ترمي، ولا تُغيّر نتيجة التصدير أو الطباعة أو البيع.
+// إن كان الجسر مطفأ أو الجهاز ليس ماك، يتابع الموقع تنزيله المعتاد بلا أي فرق.
+// نتخطّى الهاتف صراحةً: لا جسر هناك، فلا داعي لطلب شبكي ولا لتنبيه محيّر.
+// `content` إما نص HTML (يحوّله الجسر بـChromium فيخرج عربي متجه) أو Blob PDF
+// جاهز — نفضّل الـBlob حين يكون موجوداً أصلاً كي تكون النسخة المؤرشفة مطابقة
+// حرفياً للملف الذي نزّله المالك أو أرسله للزبون.
+function archiveToICloud(docType, content, meta) {
+  try {
+    if (!docType || !content) return;
+    if (isHandheldDevice()) return;
+    if (!window.ozkArchive || typeof window.ozkArchive.archive !== "function") return;
+    const payload = { docType, meta: meta || {} };
+    if (typeof Blob !== "undefined" && content instanceof Blob) payload.pdfBlob = content;
+    else payload.html = String(content);
+    void window.ozkArchive.archive(payload);
+  } catch {
+    // لا شيء: فشل الأرشفة لا يجوز أن يظهر كخطأ في مسار الفاتورة.
+  }
+}
+
 // نستعمل طباعة المتصفح الأصلية (حفظ بصيغة PDF) بدل html2canvas —
 // المحرّك القديم صار يطلّع صفحات بيضا بعد تحديثات كروم. الطباعة الأصلية
 // ترسم التقرير مثل الشاشة تماماً (عربي وألوان مظبوطة) ومستحيل تطلع فاضية.
-async function exportReportPdf(bodyHtml, filename) {
+//
+// `archive` اختياري: { docType, meta } — عند تمريره تُحفظ نسخة في iCloud أيضاً.
+async function exportReportPdf(bodyHtml, filename, archive) {
   const title = String(filename || "تقرير").replace(/\.pdf$/i, "");
+  if (archive && archive.docType) archiveToICloud(archive.docType, bodyHtml, archive.meta);
   if (isHandheldDevice()) {
     try {
       const blob = await createPortablePdfBlob(bodyHtml, filename, { width: 794 });
@@ -4846,7 +4879,11 @@ async function exportCustomerStatementPdf() {
     return;
   }
   const safe = String(item.name || "customer").replace(/[^\p{L}\p{N}]+/gu, "_").slice(0, 40);
-  const exported = await exportReportPdf(customerStatementPdfMarkup(item), `كشف-حساب-${safe}-${todayIsoDate()}.pdf`);
+  const exported = await exportReportPdf(
+    customerStatementPdfMarkup(item),
+    `كشف-حساب-${safe}-${todayIsoDate()}.pdf`,
+    { docType: "account_statement", meta: { party: item.name, date: todayIsoDate() } }
+  );
   if (exported) setNotice("success", isHandheldDevice() ? "تم تجهيز كشف الحساب كملف PDF." : "تم تجهيز كشف الحساب PDF.");
   render();
 }
@@ -4950,7 +4987,19 @@ async function exportVoucherPdf(v) {
   const isRet = v.type === "return";
   const safe = String(v.name || (isInv ? "فاتورة" : (isRet ? "مرتجع" : (isPay ? "صرف" : "قبض")))).replace(/[^\p{L}\p{N}]+/gu, "_").slice(0, 40);
   const prefix = isInv ? "فاتورة" : (isRet ? "فاتورة-مرتجع" : (isPay ? "سند-صرف" : "سند-قبض"));
-  const exported = await exportReportPdf(voucherPdfMarkup(v), `${prefix}-${safe}-${todayIsoDate()}.pdf`);
+  // وجهة الأرشفة: الفاتورة إلى «فواتير الزبائن»، السندان إلى «سندات قبض ودفع».
+  // المرتجع لا اصطلاح تسمية معتمد له ضمن الفواتير، ووضعه هناك يجعله لا يُميَّز
+  // عن بيع حقيقي — لذا يذهب إلى «تقارير مختلفة» بعنوان صريح.
+  const archiveDocType = isInv ? "invoice" : (isRet ? "other_report" : (isPay ? "payment" : "receipt"));
+  const archiveDate = String(v.date || todayIsoDate()).slice(0, 10);
+  const archiveMeta = isRet
+    ? { title: `فاتورة مرتجع - ${v.name || "بلا اسم"} - رقم ${v.no || "—"}`, date: archiveDate }
+    : { party: v.name, number: v.no, date: archiveDate };
+  const exported = await exportReportPdf(
+    voucherPdfMarkup(v),
+    `${prefix}-${safe}-${todayIsoDate()}.pdf`,
+    { docType: archiveDocType, meta: archiveMeta }
+  );
   if (exported) setNotice("success", isInv ? "تم تجهيز الفاتورة PDF." : (isRet ? "تم تجهيز فاتورة المرتجع PDF." : (isPay ? "تم تجهيز سند الصرف PDF." : "تم تجهيز سند القبض PDF.")));
   render();
 }
@@ -5004,7 +5053,11 @@ async function exportReceivablesPdf() {
     render();
     return;
   }
-  const exported = await exportReportPdf(receivablesPdfMarkup(), `تقرير-الذمم-${todayIsoDate()}.pdf`);
+  const exported = await exportReportPdf(
+    receivablesPdfMarkup(),
+    `تقرير-الذمم-${todayIsoDate()}.pdf`,
+    { docType: "receivables_report", meta: { date: todayIsoDate() } }
+  );
   if (exported) setNotice("success", "تم تجهيز تقرير الذمم PDF.");
   render();
 }
@@ -5231,7 +5284,11 @@ async function exportInventoryReportPdf() {
     render();
     return;
   }
-  const exported = await exportReportPdf(inventoryReportPdfMarkup(), `تقرير-المخزون-${todayIsoDate()}.pdf`);
+  const exported = await exportReportPdf(
+    inventoryReportPdfMarkup(),
+    `تقرير-المخزون-${todayIsoDate()}.pdf`,
+    { docType: "stock_report", meta: { date: todayIsoDate() } }
+  );
   if (exported) setNotice("success", "تم تجهيز تقرير المخزون PDF.");
   render();
 }
@@ -5324,7 +5381,11 @@ async function exportStagnantMaterialsPdf() {
     render();
     return;
   }
-  const exported = await exportReportPdf(stagnantMaterialsPdfMarkup(), `المواد-الراكدة-${todayIsoDate()}.pdf`);
+  const exported = await exportReportPdf(
+    stagnantMaterialsPdfMarkup(),
+    `المواد-الراكدة-${todayIsoDate()}.pdf`,
+    { docType: "other_report", meta: { title: "تقرير المواد الراكدة", date: todayIsoDate() } }
+  );
   if (exported) setNotice("success", "تم تجهيز تقرير المواد الراكدة PDF.");
   render();
 }
@@ -7560,6 +7621,17 @@ async function saveSalesInvoicePdf() {
       return;
     }
 
+    // نؤرشف الـBlob نفسه لا الـHTML: النسخة في iCloud تصير مطابقة حرفياً للملف
+    // الذي يُسلَّم للزبون. المسودة (بلا رقم أثناء تدهور المزامنة) لا تُؤرشف
+    // إطلاقاً كي لا يدخل الأرشيف مستند بلا رقم فاتورة موثوق.
+    if (invNo !== SALES_DRAFT_INVOICE_NO) {
+      archiveToICloud("invoice", blob, {
+        party: state.salesCustomer.trim() || "زبون نقدي",
+        number: invNo,
+        date: todayIsoDate()
+      });
+    }
+
     if (isHandheldDevice()) {
       presentPortablePdf(blob, fileName, `فاتورة مبيعات ${invNo}`);
       setNotice("success", `تم تجهيز الفاتورة ${invNo} كملف PDF.`);
@@ -7911,6 +7983,11 @@ ${salesDraftBannerHtml(invNo)}
 
   printHtmlDocument(printable, {
     title: mode === "mufrak" ? `فاتورة كاشير ${invNo}` : `فاتورة مبيعات ${invNo}`,
+    // المسودة (بلا رقم موثوق أثناء تدهور المزامنة) لا تدخل الأرشيف إطلاقاً.
+    archive: invNo === SALES_DRAFT_INVOICE_NO ? null : {
+      docType: "invoice",
+      meta: { party: customer, number: invNo, date: todayIsoDate() }
+    },
     onError: () => {
       setNotice("error", "تعذّر فتح نافذة الطباعة. أغلق التطبيق وافتحه ثم جرّب مجدداً.");
       render();
@@ -8851,7 +8928,11 @@ async function saveReconSessionPdf(session) {
   const warehouseName = session.warehouse_name || session.warehouseName || "مستودع";
   const sessionDate = session.session_date || session.sessionDate || todayIsoDate();
   const safe = String(warehouseName).replace(/[^\p{L}\p{N}]+/gu, "_").slice(0, 40);
-  const exported = await exportReportPdf(reconSessionPdfMarkup(session), `جرد-${safe}-${sessionDate}.pdf`);
+  const exported = await exportReportPdf(
+    reconSessionPdfMarkup(session),
+    `جرد-${safe}-${sessionDate}.pdf`,
+    { docType: "other_report", meta: { title: `تقرير جرد - ${warehouseName}`, date: String(sessionDate).slice(0, 10) } }
+  );
   if (exported) setNotice("success", "تم تجهيز تقرير الجرد PDF.");
   render();
 }
@@ -9515,6 +9596,10 @@ ${po.notes ? `<div class="notes"><strong>ملاحظة:</strong> ${escapeHtml(po.
 
   printHtmlDocument(html, {
     title: "فاتورة مشتريات",
+    archive: {
+      docType: "purchase_invoice",
+      meta: { party: po.supplierName, number: po.publicId, date: todayIsoDate() }
+    },
     onError: () => {
       setNotice("error", "تعذّر فتح نافذة طباعة فاتورة المشتريات. أغلق التطبيق وافتحه ثم جرّب مجدداً.");
       render();
@@ -9629,6 +9714,10 @@ ${notes ? `<div class="notes"><strong>ملاحظة:</strong> ${escapeHtml(notes)
 
   printHtmlDocument(html, {
     title: `فاتورة ${invNum}`,
+    archive: {
+      docType: "invoice",
+      meta: { party: customer, number: invNum, date: todayIsoDate() }
+    },
     onError: () => {
       setNotice("error", "تعذّر فتح نافذة الطباعة. أغلق التطبيق وافتحه ثم جرّب مجدداً.");
       render();
