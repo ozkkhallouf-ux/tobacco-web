@@ -24,6 +24,7 @@
  */
 
 import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 const REPO = process.env.GITHUB_REPOSITORY || "ozkkhallouf-ux/tobacco-web";
 const SITE_URL = "https://ozktobacco.com/";
@@ -55,7 +56,9 @@ async function fetchStatus(url, timeoutMs = 15000) {
 
 async function checkSiteReachability() {
   const problems = [];
+  const healthy = [];
   const site = await fetchStatus(SITE_URL);
+  if (site.ok) healthy.push("site-unreachable");
   if (!site.ok) {
     problems.push({
       key: "site-down",
@@ -72,8 +75,42 @@ async function checkSiteReachability() {
       severity: "متوسط",
       details: `HTTP status=${bulletin.status}${bulletin.error ? ` error=${bulletin.error}` : ""}`,
     });
+  } else {
+    healthy.push("bulletin-unreachable");
   }
-  return problems;
+  return { problems, healthy };
+}
+
+// "skipped" غالباً سلوك مقصود (مثلاً pages.yml يتخطى deploy إن فشل سير عمل توليد
+// النشرات الذي يشغّله — تلك مشكلته الخاصة، وليست عطلاً إضافياً بالنشر نفسه).
+export const FAILURE_CONCLUSIONS = new Set(["failure", "cancelled", "timed_out", "action_required"]);
+
+// دالة نقية (قابلة للاختبار بلا شبكة): تصنّف قائمة تشغيلات إلى واحدة من ثلاث حالات.
+//
+// ⚠️ إصلاح ملاحظة Codex P1 الثانية على PR #135: القراءة السابقة كانت تأخذ أحدث
+// تشغيل مطلقاً (--limit 1) وتشترط status === "completed". فإن تلا تشغيلٌ فاشلٌ
+// تشغيلٌ جديد queued/in_progress، رجعت الدالة [] — فبدا العطل وكأنه زال، وأُغلق
+// الـIssue رغم أن آخر نتيجة مكتملة كانت فشلاً. الصواب: تجاهل التشغيلات غير
+// المكتملة والحكم بأحدث تشغيل *مكتمل*؛ وإن لم يوجد أي مكتمل فالحالة "مجهولة"
+// لا "سليمة" — فلا يُغلق شيء بناءً عليها.
+export function classifyLatestRun(runs, { workflowName, key, severity }) {
+  const completed = (runs || []).filter((r) => r && r.status === "completed");
+  if (!completed.length) return { problems: [], healthy: [], unknown: true };
+  const last = completed[0];
+  if (FAILURE_CONCLUSIONS.has(last.conclusion)) {
+    return {
+      problems: [{
+        key,
+        title: `آخر تشغيل مكتمل لسير العمل "${workflowName}" فشل (${last.conclusion})`,
+        severity,
+        details: `${last.url} — ${last.createdAt}`,
+      }],
+      healthy: [],
+      unknown: false,
+    };
+  }
+  // نجاح مؤكَّد (أو skipped المقصود): هذا هو الدليل الإيجابي الوحيد المقبول للإغلاق.
+  return { problems: [], healthy: [key], unknown: false };
 }
 
 function checkLatestWorkflowRun(workflowName, key, severity) {
@@ -84,58 +121,81 @@ function checkLatestWorkflowRun(workflowName, key, severity) {
       "--repo", REPO,
       "--workflow", workflowName,
       "--branch", "main",
-      "--limit", "1",
+      // نطلب عدة تشغيلات لا واحداً: أحدث تشغيل قد يكون queued/in_progress ويحجب
+      // آخر نتيجة مكتملة. نحتاج أحدث *مكتمل* لا أحدث مطلقاً.
+      "--limit", "10",
       "--json", "conclusion,status,url,createdAt",
     ]);
   } catch (err) {
-    return [{
-      key: `${key}-lookup-failed`,
-      title: `تعذّر فحص حالة سير العمل "${workflowName}"`,
-      severity: "منخفض",
-      details: String(err.message || err),
-    }];
+    // فشل الاستعلام مشكلة بذاته، ولا يجوز اعتباره دليل سلامة على `key`.
+    return {
+      problems: [{
+        key: `${key}-lookup-failed`,
+        title: `تعذّر فحص حالة سير العمل "${workflowName}"`,
+        severity: "منخفض",
+        details: String(err.message || err),
+      }],
+      healthy: [],
+      unknown: true,
+    };
   }
-  if (!runs.length) return [];
-  const last = runs[0];
-  // "skipped" غالباً سلوك مقصود (مثلاً pages.yml يتخطى deploy إن فشل سير عمل توليد
-  // النشرات الذي يشغّله — تلك مشكلته الخاصة، وليست عطلاً إضافياً بالنشر نفسه).
-  const FAILURE_CONCLUSIONS = new Set(["failure", "cancelled", "timed_out", "action_required"]);
-  if (last.status === "completed" && FAILURE_CONCLUSIONS.has(last.conclusion)) {
-    return [{
-      key,
-      title: `آخر تشغيل لسير العمل "${workflowName}" فشل (${last.conclusion})`,
-      severity,
-      details: `${last.url} — ${last.createdAt}`,
-    }];
-  }
-  return [];
+  const verdict = classifyLatestRun(runs, { workflowName, key, severity });
+  // نجاح الاستعلام نفسه يُثبت زوال مشكلة "تعذّر الفحص" السابقة.
+  return { ...verdict, healthy: [...verdict.healthy, `${key}-lookup-failed`] };
+}
+
+// دالة نقية: تصفية التشغيلات الفاشلة الحديثة وتحويلها إلى مشاكل.
+//
+// ⚠️ إصلاح ملاحظة Codex P1 الأولى على PR #135: كان المسح مقيَّداً بـ--branch main،
+// بينما check.yml وbusiness-os-foundation.yml وDecision Engine Check كلها من نوع
+// pull_request، فتُنسب تشغيلاتها إلى فرع الـPR لا إلى main — أي أن فشلها لم يكن
+// يظهر إطلاقاً رغم أن السكربت يَعِد برصد "أي تشغيل فاشل لأي سير عمل آخر".
+// (تحقق حي: بفلتر main تُرى "توليد نشرات الأسعار" فقط؛ وبدونه تظهر أيضاً
+//  "فحص المشروع" و"Decision Engine Check".) لذلك أُزيل قيد الفرع نهائياً،
+// وصار مفتاح المشكلة يشمل الفرع كي تُتابَع كل حادثة على حدة.
+export function selectRecentFailures(runs, sinceMs, excludedNames = EXCLUDED_WORKFLOW_NAMES) {
+  return (runs || [])
+    .filter((r) => r && !excludedNames.has(r.workflowName) && new Date(r.createdAt).getTime() >= sinceMs)
+    .map((r) => {
+      const branch = r.headBranch || "?";
+      return {
+        key: `workflow-failure-${r.workflowName}@${branch}`,
+        title: `تشغيل فاشل حديث لسير العمل "${r.workflowName}" على الفرع "${branch}"`,
+        severity: "متوسط",
+        details: `${r.displayTitle} — ${r.url} — ${r.createdAt}`,
+      };
+    });
 }
 
 function checkRecentWorkflowFailures() {
-  const since = new Date(Date.now() - LOOKBACK_MINUTES * 60 * 1000);
+  const since = Date.now() - LOOKBACK_MINUTES * 60 * 1000;
   let runs;
   try {
     runs = ghJSON([
       "run", "list",
       "--repo", REPO,
-      "--branch", "main",
+      // بلا --branch عمداً: الفحوص الأساسية تعمل على فروع الـPR لا على main.
       "--status", "failure",
-      "--limit", "30",
-      "--json", "workflowName,url,createdAt,displayTitle",
+      // الاستثناء وفلترة الزمن يجريان في الذاكرة بعد هذا الحد، فلو بقي الحد
+      // منخفضاً امتلأت الدفعة بتشغيلات Codex Review Gate المستثناة وأزاحت
+      // الإخفاقات الحقيقية خارج النافذة.
+      "--limit", "100",
+      "--json", "workflowName,headBranch,url,createdAt,displayTitle",
     ]);
-  } catch {
-    return [];
+  } catch (err) {
+    // ⚠️ فشل المسح ليس دليل سلامة. نرفعه كمشكلة ظاهرة، ونُعلم منطق الإغلاق
+    // أن مفاتيح workflow-failure-* غير مُتحقَّق منها هذه الجولة.
+    return {
+      problems: [{
+        key: "workflow-scan-failed",
+        title: "تعذّر مسح التشغيلات الفاشلة الحديثة",
+        severity: "منخفض",
+        details: String(err.message || err),
+      }],
+      scanOk: false,
+    };
   }
-  const recentFailures = runs.filter((r) => {
-    if (EXCLUDED_WORKFLOW_NAMES.has(r.workflowName)) return false;
-    return new Date(r.createdAt) >= since;
-  });
-  return recentFailures.map((r) => ({
-    key: `workflow-failure-${r.workflowName}`,
-    title: `تشغيل فاشل حديث لسير العمل "${r.workflowName}"`,
-    severity: "متوسط",
-    details: `${r.displayTitle} — ${r.url} — ${r.createdAt}`,
-  }));
+  return { problems: selectRecentFailures(runs, since), scanOk: true };
 }
 
 function dedupeByKey(problems) {
@@ -259,21 +319,45 @@ async function reportProblem(problem) {
   await notifyTelegram(problem, issueUrl);
 }
 
-function closeResolvedIssues(activeKeys) {
-  const openIssues = listAllOpenHealthIssues();
-  for (const issue of openIssues) {
+// دالة نقية: تقرر أي Issues تُغلق فعلاً.
+//
+// ⚠️ جوهر إصلاح ملاحظة Codex P1 الثانية: المنطق السابق كان "أغلق كل مفتاح ليس
+// ضمن المشاكل الحالية" — أي أنه يعامل *غياب الدليل* كدليل على التعافي. فأي
+// انقطاع في استعلام GitHub، أو تشغيل قيد التنفيذ يحجب آخر نتيجة مكتملة، كان
+// يُفرغ قائمة المشاكل فتُغلق كل الحوادث المفتوحة بتعليق "تم الحل" رغم استمرار
+// العطل. الآن الإغلاق يحتاج دليلاً إيجابياً صريحاً:
+//   * مفتاح ضمن healthyKeys  = نتيجة مكتملة ناجحة مرصودة فعلاً هذه الجولة، أو
+//   * مفتاح يطابق بادئة ضمن healthyPrefixes = مسح نجح فعلاً ولم يجد هذه الحادثة.
+// وما عدا ذلك يبقى مفتوحاً بحالة "مجهول"، وهو الخيار الآمن في المراقبة.
+export function decideIssuesToClose({ openIssues, activeKeys, healthyKeys, healthyPrefixes = [] }) {
+  const active = activeKeys instanceof Set ? activeKeys : new Set(activeKeys || []);
+  const healthy = healthyKeys instanceof Set ? healthyKeys : new Set(healthyKeys || []);
+  const out = [];
+  for (const issue of openIssues || []) {
     const match = issue.body && issue.body.match(/<!-- health:([^>]+) -->/);
     if (!match) continue;
     const key = match[1];
-    if (activeKeys.has(key)) continue;
+    if (active.has(key)) continue;                 // ما تزال قائمة
+    const verified = healthy.has(key) || healthyPrefixes.some((p) => key.startsWith(p));
+    if (!verified) continue;                       // مجهولة → تبقى مفتوحة
+    out.push({ number: issue.number, key });
+  }
+  return out;
+}
+
+function closeResolvedIssues({ activeKeys, healthyKeys, healthyPrefixes }) {
+  const openIssues = listAllOpenHealthIssues();
+  const toClose = decideIssuesToClose({ openIssues, activeKeys, healthyKeys, healthyPrefixes });
+  for (const { number: issueNumber, key } of toClose) {
+    const issue = { number: issueNumber };
     try {
       gh([
         "issue", "comment", String(issue.number),
         "--repo", REPO,
-        "--body", "✅ تم التحقق: المشكلة لم تعد مكتشَفة في آخر فحص آلي — يُغلق الـIssue تلقائياً.",
+        "--body", "✅ تم التحقق بنتيجة إيجابية صريحة (تشغيل مكتمل ناجح أو مسح ناجح لم يجد الحادثة) — يُغلق الـIssue تلقائياً.",
       ]);
       gh(["issue", "close", String(issue.number), "--repo", REPO]);
-      console.log(`✓ أُغلق Issue #${issue.number} (مشكلة "${key}" لم تعد قائمة).`);
+      console.log(`✓ أُغلق Issue #${issue.number} (مشكلة "${key}" تأكّد زوالها).`);
     } catch (err) {
       console.log(`✗ فشل إغلاق Issue #${issue.number}: ${err}`);
     }
@@ -283,12 +367,23 @@ function closeResolvedIssues(activeKeys) {
 async function main() {
   ensureLabel();
 
+  const site = await checkSiteReachability();
+  const priceGen = checkLatestWorkflowRun("توليد نشرات الأسعار", "price-generation-failed", "عالٍ");
+  const deploy = checkLatestWorkflowRun("Deploy TOBACCO Web", "deploy-failed", "عالٍ");
+  const recent = checkRecentWorkflowFailures();
+
   const problems = dedupeByKey([
-    ...(await checkSiteReachability()),
-    ...checkLatestWorkflowRun("توليد نشرات الأسعار", "price-generation-failed", "عالٍ"),
-    ...checkLatestWorkflowRun("Deploy TOBACCO Web", "deploy-failed", "عالٍ"),
-    ...checkRecentWorkflowFailures(),
+    ...site.problems,
+    ...priceGen.problems,
+    ...deploy.problems,
+    ...recent.problems,
   ]);
+
+  // الدليل الإيجابي وحده هو ما يسمح بإغلاق حادثة (انظر decideIssuesToClose).
+  const healthyKeys = new Set([...site.healthy, ...priceGen.healthy, ...deploy.healthy]);
+  // مسح ناجح للتشغيلات الفاشلة يُثبت زوال أي حادثة workflow-failure-* لم يجدها.
+  const healthyPrefixes = recent.scanOk ? ["workflow-failure-"] : [];
+  if (recent.scanOk) healthyKeys.add("workflow-scan-failed");
 
   console.log(`المشاكل المكتشفة: ${problems.length}`);
   for (const p of problems) console.log(`  - [${p.severity}] ${p.key}: ${p.title}`);
@@ -298,7 +393,11 @@ async function main() {
     await reportProblem(p);
   }
 
-  closeResolvedIssues(new Set(problems.map((p) => p.key)));
+  closeResolvedIssues({
+    activeKeys: new Set(problems.map((p) => p.key)),
+    healthyKeys,
+    healthyPrefixes,
+  });
 
   const summaryPath = process.env.GITHUB_STEP_SUMMARY;
   if (summaryPath) {
@@ -323,8 +422,14 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error("فشل سكريبت health-check:", err);
-  // لا نفشل التشغيل بكود خطأ كي لا يتحول فحص المراقبة نفسه إلى عائق تشغيلي (البند 5).
-  process.exitCode = 0;
-});
+// يُنفَّذ main() فقط عند التشغيل المباشر — كي يتمكّن
+// scripts/check-health-check-logic.mjs من استيراد الدوال النقية واختبارها
+// بلا أي استدعاء لـgh أو للشبكة.
+const isDirectRun = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
+if (isDirectRun) {
+  main().catch((err) => {
+    console.error("فشل سكريبت health-check:", err);
+    // لا نفشل التشغيل بكود خطأ كي لا يتحول فحص المراقبة نفسه إلى عائق تشغيلي (البند 5).
+    process.exitCode = 0;
+  });
+}
