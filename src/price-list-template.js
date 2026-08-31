@@ -1,7 +1,17 @@
 (function initOzkPriceListTemplate(root) {
   "use strict";
 
-  const VERSION = "2026-08-26-fixed-table-layout";
+  const VERSION = "2026-08-31-native-print-pagination";
+
+  // لون خلفية الصفحة لكل ثيم — التعريف الوحيد بالمشروع. الـCSS يقرأه عبر
+  // --page، ويقرأه أيضاً `src/app.js` و`scripts/generate-pdfs.mjs` بدل تكرار
+  // القيمة الحرفية في ثلاثة أماكن (تكرارها هو ما سمح لخلفية تصدير الموقع أن
+  // تختلف عن خلفية النشرات المنشورة).
+  const THEME_PAGE_BACKGROUND = Object.freeze({ dark: "#0c0a07", light: "#fffdf8" });
+
+  function themePageBackground(theme) {
+    return THEME_PAGE_BACKGROUND[theme === "light" ? "light" : "dark"];
+  }
   const RIGHT_GROUPS = ["ماستر", "كابتن بلاك", "اوسكار", "اختمار", "روز", "1970", "كينغ دوم", "مانشستر"];
   const LEFT_GROUPS = ["غلواز", "اليغانس", "تي اس", "أوريس", "حمرا", "يونايتد", "ولسون", "نابولي"];
   const SPECIAL_RIGHT_GROUPS = ["فحم", "ورق", "فيبات", "قداحات", "سلفان"];
@@ -174,6 +184,22 @@
     }
   `;
 
+  // خلفية **المستند** (html/body)، لا خلفية القالب. هذه هي القاعدة التي كانت
+  // غائبة عن كل مسار تصدير داخل الموقع: في الطباعة الأصلية تُرسم خلفية الورقة
+  // من html/body لا من القسم، فكان ذيل الصفحة الأخيرة وأي فراغ حول القالب يخرج
+  // **أبيض** داخل نشرة داكنة — وهو بالضبط عطل «صفحة نصفها أسود ونصفها أبيض».
+  // `scripts/generate-pdfs.mjs` كان يحقن هذه القاعدة لنفسه فقط، ولذلك خرجت
+  // النشرات المنشورة سليمة بينما خرج تصدير الموقع مكسوراً.
+  function documentBackgroundCss(theme) {
+    const background = themePageBackground(theme);
+    return `
+    html, body { margin:0; padding:0; background:${background}; }
+    @media print {
+      html, body { background:${background} !important; }
+      html { -webkit-print-color-adjust:exact !important; print-color-adjust:exact !important; }
+    }`;
+  }
+
   function escapeHtml(value) {
     return String(value ?? "")
       .replaceAll("&", "&amp;")
@@ -187,10 +213,16 @@
   // (راجع الفحص التشخيصي السابق لدرجات drawImage الفعلية) — لا نملأ العمود حتى آخر بكسل.
   const DEFAULT_SAFETY_MARGIN_PX = 6;
 
-  // ارتفاع منطقة المحتوى الفعلية لصفحة A4 كاملة بنفس نسبة العرض المستخدمة فعلياً
-  // في التصدير (794px). النسبة الحقيقية لصفحة A4 هي 297/210 مم، لا رقم تقديري ثابت.
+  // مقاس A4 الحقيقي بالبكسل عند 96dpi — وهو المقاس الذي يقطّع عليه محرك
+  // الطباعة الأصلي فعلاً (`@page { size:A4; margin:0 }`): 210مم = 793.70px،
+  // و297مم = 1122.52px. الحساب السابق `pageWidthPx * 297/210` لم يكن مشتقاً من
+  // مقاس الورقة الحقيقي، فبقيت ميزانية العمود أطول قليلاً من الورقة الفعلية.
+  const A4_WIDTH_PX = 210 / 25.4 * 96;
+  const A4_HEIGHT_PX = 297 / 25.4 * 96;
+
   function computePageContentHeightPx(pageWidthPx = 794) {
-    return pageWidthPx * (297 / 210);
+    const width = Number(pageWidthPx) > 0 ? Number(pageWidthPx) : A4_WIDTH_PX;
+    return A4_HEIGHT_PX * (width / A4_WIDTH_PX);
   }
 
   // نسبة التفاوت (من ميزانية العمود) التي تُعتبر "فراغاً كبيراً" يستحق محاولة
@@ -489,9 +521,36 @@
       </section>`;
   }
 
+  // مستند طباعة مستقل كامل يلفّ نفس ناتج render() حرفياً. الطباعة الأصلية
+  // للمتصفح («حفظ بصيغة PDF») هي محرك تصدير النشرة المعتمد: هي وحدها التي
+  // تُشكّل الحروف العربية صحيحاً، وتحترم break-before:page فلا تُنتج صفحات
+  // بيضاء، وترسم الخلفية الداكنة على كامل الورقة. لا يُبنى هنا أي HTML بديل —
+  // `bodyHtml` يجب أن يكون ناتج render() نفسه الذي تعرضه المعاينة، كي يستحيل
+  // أن يختلف الملف المصدَّر عن المعاينة.
+  function printDocument(options = {}) {
+    const theme = options.theme === "light" ? "light" : "dark";
+    const title = String(options.title || "نشرة الأسعار");
+    const bodyHtml = String(options.bodyHtml || "");
+    return `<!doctype html>
+<html lang="ar" dir="rtl" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=794">
+<meta name="google" content="notranslate">
+<title>${escapeHtml(title)}</title>
+<style>${documentBackgroundCss(theme)}</style>
+</head>
+<body data-theme="${theme}">${bodyHtml}</body>
+</html>`;
+  }
+
   root.OZKPriceListTemplate = Object.freeze({
     VERSION,
     CSS,
+    THEME_PAGE_BACKGROUND,
+    themePageBackground,
+    documentBackgroundCss,
+    printDocument,
     formatArabicIssueDate,
     layoutGroups,
     pageCount,
