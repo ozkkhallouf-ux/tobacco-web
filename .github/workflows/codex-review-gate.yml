@@ -480,6 +480,38 @@ jobs:
               echo "مصالحة مُتوقَّفة: HEAD تغيّر أثناء المصالحة ($HEAD_SHA → $LIVE_HEAD_SHA) — هذا التشغيل لم يعد يخص أحدث HEAD."
               break
             fi
+
+            # ⚠️ إصلاح جوهري تاسع بتاريخ 2026-08-31 (P1 حي ثالث رصده Codex: "Reconcile
+            # concurrent first-time check creation"): إن بدأ تشغيلان (مثلاً pull_request_target
+            # وissue_comment للاستجابة نفسها) قبل وجود أي check-run كانوني بعد، فقد يرى كلاهما
+            # "لا يوجد check-run بعد" وينفّذ كلٌّ منهما POST مستقل — فينتج check-run كانوني مكرر
+            # بنفس الاسم "Codex Review Gate" على نفس head_sha، بمعرّفَين مختلفين. حارس generation
+            # أعلاه (external_id) لا يكتشف هذا لأنه يقارن فقط داخل معرّف check-run واحد بذاته —
+            # لا بين معرّفات متعددة لنفس الاسم. الإصلاح: كل دورة مصالحة تمسح كل check-runs
+            # الحاملة هذا الاسم على هذا head_sha، وتُوحّد أي نسخة أقدم (generation أصغر أو غائبة)
+            # مع حالة الأحدث (الفائز) عبر PATCH — بصرف النظر عن كون هذا التشغيل تحديداً هو
+            # الفائز أو لا، كي لا يبقى أي required-check context تائه بحالة قديمة تُعطّل rollup
+            # الدمج رغم وجود نتيجة صحيحة حديثة.
+            ALL_NAMED_RUNS_JSON=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs" --paginate \
+              | jq -s --arg name "$NAME" '[.[].check_runs[] | select(.name == $name)]')
+            WINNER_JSON=$(echo "$ALL_NAMED_RUNS_JSON" | jq '
+              def gen_key(g): (g // "0.0") | split(".") | map(tonumber? // 0);
+              sort_by(gen_key(.external_id)) | last')
+            WINNER_ID=$(echo "$WINNER_JSON" | jq -r '.id // empty')
+            if [ -n "$WINNER_ID" ]; then
+              WINNER_PAYLOAD=$(echo "$WINNER_JSON" | jq '{status, conclusion, external_id, output: {title: .output.title, summary: .output.summary, text: .output.text}} | with_entries(select(.value != null))')
+              WINNER_GENERATION=$(echo "$WINNER_JSON" | jq -r '.external_id // empty')
+              DUPLICATE_IDS=$(echo "$ALL_NAMED_RUNS_JSON" | jq -r --arg winner "$WINNER_ID" --arg wgen "$WINNER_GENERATION" \
+                '.[] | select((.id|tostring) != $winner and (.external_id // "") != $wgen) | .id')
+              if [ -n "$DUPLICATE_IDS" ]; then
+                while IFS= read -r DUP_ID; do
+                  [ -z "$DUP_ID" ] && continue
+                  echo "توحيد نسخة check-run مكرر (P1: Reconcile concurrent first-time check creation): id=$DUP_ID لنفس \"$NAME\" على $HEAD_SHA — يُطابَق مع الفائز (id=$WINNER_ID, generation=$WINNER_GENERATION)."
+                  echo "$WINNER_PAYLOAD" | gh api "repos/$REPO/check-runs/$DUP_ID" --method PATCH --input - >/dev/null || true
+                done <<< "$DUPLICATE_IDS"
+              fi
+            fi
+
             OBSERVED_GENERATION=$(gh api "repos/$REPO/check-runs/$CHECK_RUN_ID" --jq '.external_id // empty')
             if [ -z "$OBSERVED_GENERATION" ]; then
               echo "فحص مصالحة ($RECONCILE_ATTEMPT/$RECONCILE_MAX_ATTEMPTS): لا external_id بعد — متابعة المراقبة."

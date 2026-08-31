@@ -384,7 +384,7 @@ assert.equal(
 //    إن استقر generation أقدم فعلياً على الـcheck-run (كتابة متأخرة من تشغيل أقدم).
 assert.match(
   yml,
-  /RECONCILE_ATTEMPT=0[\s\S]{0,2000}OBSERVED_GENERATION=\$\(gh api "repos\/\$REPO\/check-runs\/\$CHECK_RUN_ID" --jq '\.external_id \/\/ empty'\)/,
+  /RECONCILE_ATTEMPT=0[\s\S]{0,4000}OBSERVED_GENERATION=\$\(gh api "repos\/\$REPO\/check-runs\/\$CHECK_RUN_ID" --jq '\.external_id \/\/ empty'\)/,
   'يجب وجود حلقة مصالحة بعد الكتابة تعيد قراءة external_id فوراً من نفس check-run الذي كُتب عليه للتو',
 );
 assert.match(
@@ -405,6 +405,28 @@ assert.match(
   yml,
   /RECONCILE_MAX_ATTEMPTS=4[\s\S]{0,300}RECONCILE_SLEEP_SECONDS=15[\s\S]{0,400}sleep "\$RECONCILE_SLEEP_SECONDS"/,
   'حلقة المصالحة يجب أن تراقب نافذة زمنية فعلية (عدة فحوصات بفواصل sleep) لا فحصاً لحظياً واحداً — كي ترصد كتابة متأخرة من تشغيل أُلغي بعد أن يكون طلبه قد غادر العملية فعلاً',
+);
+
+// 8) إصلاح جوهري تاسع بتاريخ 2026-08-31 — توحيد النسخ المكررة (P1 حي ثالث رصده Codex:
+//    "Reconcile concurrent first-time check creation"): تشغيلان يريان "لا check-run بعد"
+//    في اللحظة نفسها فينفّذ كلاهما POST مستقل، فينتج معرّفان مختلفان لنفس الاسم على نفس
+//    head_sha. حارس generation المرتبط بمعرّف واحد بذاته لا يكتشف هذا — يجب مسح كل
+//    check-runs الحاملة نفس الاسم على نفس head_sha كل دورة مصالحة، وتوحيدها جميعاً
+//    (PATCH) مع حالة الفائز (أعلى generation).
+assert.match(
+  yml,
+  /ALL_NAMED_RUNS_JSON=\$\(gh api "repos\/\$REPO\/commits\/\$HEAD_SHA\/check-runs" --paginate[\s\S]{0,200}select\(\.name == \$name\)/,
+  'حلقة المصالحة يجب أن تمسح كل check-runs الحاملة اسم "Codex Review Gate" على نفس head_sha (وليس معرّف check-run هذا التشغيل فقط) لاكتشاف أي نسخة مكررة',
+);
+assert.match(
+  yml,
+  /WINNER_JSON=\$\(echo "\$ALL_NAMED_RUNS_JSON" \| jq '[\s\S]{0,300}sort_by\(gen_key\(\.external_id\)\) \| last/,
+  'يجب تحديد الفائز (أعلى generation) بين كل النسخ الحاملة نفس الاسم على نفس head_sha',
+);
+assert.match(
+  yml,
+  /DUPLICATE_IDS=\$\(echo "\$ALL_NAMED_RUNS_JSON" \| jq -r[\s\S]{0,300}\(\.id\|tostring\) != \$winner and[\s\S]{0,800}--method PATCH --input -/,
+  'يجب توحيد (PATCH) كل نسخة مكررة (id مختلف وgeneration غير مطابقة للفائز) مع حالة الفائز الصحيحة',
 );
 
 // سيناريو (ل): كتابة أحدث generation تلتها كتابة متأخرة من تشغيل أقدم (رصدتها المصالحة
