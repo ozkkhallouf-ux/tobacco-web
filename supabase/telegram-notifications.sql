@@ -95,11 +95,56 @@ grant  execute on function public.notify_telegram(text, text, text, int) to auth
 --   ok_false       رد 2xx لكن الجسم "ok":false — تيليغرام رفض منطقياً
 --   http_error     رمز حالة غير 2xx (مثبت: 405 من مِجَسّ example.com)
 --   network_error  status_code is null مع error_msg — timeout/DNS/TLS
---   unparsed       رد موجود بجسم لا يطابق أياً مما سبق
+--   unparsed       رد موجود بجسم لا يُحلَّل JSON أصلاً، أو يُحلَّل ولا
+--                  يطابق أياً مما سبق. لا يُسقط الاستدعاء (Codex P2)
 --
 -- قيد معروف: pg_net.ttl = 6 ساعات، فما هو أقدم من ذلك يظهر no_response بلا
 -- أن يعني فشلاً. لقياس أيام لا ساعات يلزم جدول telemetry مستقل — مُقترح
 -- ومعروض في وصف الـPR، وغير مُنفَّذ في هذه المرحلة عمداً.
+-- ============================================================================
+-- private.safe_jsonb — تحويل نص إلى jsonb بلا إسقاط الاستعلام.
+--
+-- ملاحظة Codex P2 (2026-08-31): كانت العدسة تكتب r.content::jsonb مباشرةً
+-- داخل فروع CASE. ردٌّ واحد بحالة 2xx وجسم ليس JSON — صفحة عطل من proxy أو
+-- WAF مثلاً — يرفع invalid_text_representation قبل أن يُبلَغ فرع 'unparsed'،
+-- فيسقط الاستدعاء كله وتختفي معه كل صفوف النافذة. أي أن العدسة تنطفئ في
+-- اللحظة التي تُفتح فيها للتشخيص بالذات. والأسوأ أن فرع 'unparsed' كُتب
+-- أصلاً لالتقاط الأجسام غير القابلة للتحليل، وكان عاجزاً عن التقاط واحد منها:
+-- التحويل ينفجر قبله، فلم يكن يلتقط إلا JSON صالحاً بلا ok=true/false.
+--
+-- قرارات الصلاحية، وكلها نحو الأضيق:
+--   • ليست SECURITY DEFINER — لا تلمس جدولاً ولا تحتاج صلاحية أحد، فتعمل
+--     بصلاحيات المستدعي ولا تفتح أي مسار تصعيد.
+--   • search_path مثبت على pg_catalog وpg_temp، والتحويل مؤهَّل صراحةً
+--     بـpg_catalog.jsonb — فلا يستطيع نوع أو دالة في مخطط سابق تغيير معناه.
+--   • immutable وparallel safe: التحويل دالة خالصة من النص إلى القيمة.
+--   • revoke من public وanon وauthenticated، على نمط private.cron_job_health.
+--     telegram_delivery_audit تستدعيها وهي security definer، فتنفَّذ بصلاحيات
+--     مالكها — ولا حاجة لمنح أي دور تطبيقي حق التنفيذ.
+--
+-- تُلتقط فئتا خطأ التحليل وحدهما، لا others: العودة بـNULL يجب أن تعني
+-- «هذا النص ليس JSON»، لا أن تبتلع خطأ بنية تحتية فتُقنّعه صفاً سليماً.
+--   22P02 invalid_text_representation  نص ليس JSON صالحاً (منه '' والـHTML)
+--   22P05 untranslatable_character     هروب يونيكود غير مدعوم داخل سلسلة JSON
+-- ============================================================================
+create schema if not exists private;
+
+create or replace function private.safe_jsonb(p_text text)
+returns jsonb
+language plpgsql
+immutable
+parallel safe
+set search_path to 'pg_catalog', 'pg_temp'
+as $safe$
+begin
+  return p_text::pg_catalog.jsonb;
+exception
+  when invalid_text_representation or untranslatable_character then
+    return null;
+end $safe$;
+
+revoke all on function private.safe_jsonb(text) from public, anon, authenticated;
+
 -- ============================================================================
 create or replace function public.telegram_delivery_audit(p_since interval default interval '6 hours')
 returns table (
@@ -165,18 +210,19 @@ begin
       when r.id is null then 'no_response'
       when r.status_code is null then 'network_error'
       when r.status_code between 200 and 299
-       and r.content is not null
-       and r.content::jsonb ->> 'ok' = 'true'
-       and jsonb_exists(r.content::jsonb -> 'result', 'message_id') then 'ok_true'
+       and b.body is not null
+       and b.body ->> 'ok' = 'true'
+       and jsonb_exists(b.body -> 'result', 'message_id') then 'ok_true'
       when r.status_code between 200 and 299
-       and r.content is not null
-       and r.content::jsonb ->> 'ok' = 'false' then 'ok_false'
+       and b.body is not null
+       and b.body ->> 'ok' = 'false' then 'ok_false'
       when r.status_code between 200 and 299 then 'unparsed'
       else 'http_error'
     end,
     now() - o.created_at
   from public.telegram_outbox o
   left join net._http_response r on r.id = o.net_request_id
+  left join lateral (select private.safe_jsonb(r.content) as body) b on true
   where o.created_at > now() - p_since
   order by o.created_at desc;
 end $$;

@@ -242,7 +242,110 @@ const guardOf = (t) => {
 };
 assert.equal(guardOf(codeOnly(tests)), guardOf(migCode), `${TESTS}: حارس الاختبار انحرف عن المشحون`);
 
+
+// ---------------------------------------------------------------------------
+// 10) ملاحظة Codex P2 (2026-08-31) — لا cast مباشر في مسار الرصد.
+//
+//     r.content::jsonb داخل فروع CASE يرفع 22P02 على أي رد 2xx بجسم ليس JSON،
+//     قبل أن يُبلَغ فرع 'unparsed'. والعدسة تُرجع مجموعة تعالج النافذة كلها،
+//     فصفٌّ واحد سيّئ كان يُسقط الاستدعاء ويخفي كل صف آخر — أي تنطفئ العدسة
+//     في لحظة التشخيص بالذات. البديل private.safe_jsonb: JSON صالح ⇒ jsonb،
+//     وغيره ⇒ NULL، بلا إسقاط.
+// ---------------------------------------------------------------------------
+const safeJsonbOf = (code) => {
+  const i = code.indexOf('create or replace function private.safe_jsonb(p_text text)');
+  const j = code.indexOf('revoke all on function private.safe_jsonb(text)', i);
+  assert.ok(i > 0 && j > i, 'دالة private.safe_jsonb غير موجودة');
+  return code.slice(i, j).replace(/\s+/g, ' ').trim();
+};
+
+for (const [name, code] of [[REFERENCE, refCode], [MIGRATION, migCode]]) {
+  // لا تحويل مباشر يستطيع إسقاط الاستعلام — هذه هي الثغرة بعينها
+  assert.doesNotMatch(
+    code, /r\.content::jsonb/,
+    `${name}: عاد التحويل المباشر r.content::jsonb — ثغرة Codex P2 بعينها`,
+  );
+  assert.match(
+    code, /left join lateral \(select private\.safe_jsonb\(r\.content\) as body\) b on true/,
+    `${name}: الربط الجانبي الذي يحلّل الجسم مرة واحدة مفقود`,
+  );
+  assert.match(
+    code, /revoke all on function private\.safe_jsonb\(text\) from public, anon, authenticated;/,
+    `${name}: صلاحيات safe_jsonb يجب أن تُسحب من public وanon وauthenticated`,
+  );
+
+  const helper = safeJsonbOf(code);
+  // أضيق صلاحية ممكنة: لا تلمس جدولاً فلا تحتاج تجاوز صلاحيات أحد
+  assert.doesNotMatch(
+    helper, /security definer/i,
+    `${name}: safe_jsonb صارت security definer بلا ضرورة — الأضيق هو الصحيح`,
+  );
+  assert.match(helper, /immutable/, `${name}: safe_jsonb يجب أن تبقى immutable`);
+  assert.match(
+    helper, /set search_path to 'pg_catalog', 'pg_temp'/,
+    `${name}: search_path لـsafe_jsonb غير مثبت — نوع في مخطط سابق يغيّر معنى التحويل`,
+  );
+  assert.match(
+    helper, /p_text::pg_catalog\.jsonb/,
+    `${name}: التحويل داخل safe_jsonb يجب أن يبقى مؤهَّلاً بـpg_catalog`,
+  );
+  // NULL يجب أن تعني «ليس JSON»، لا أن تبتلع خطأ بنية تحتية
+  assert.match(
+    helper, /when invalid_text_representation or untranslatable_character then/,
+    `${name}: safe_jsonb يجب أن تلتقط فئتَي خطأ التحليل صراحةً`,
+  );
+  assert.doesNotMatch(
+    helper, /when others then/,
+    `${name}: safe_jsonb تبتلع others — NULL عندها تُقنّع خطأ بنية تحتية صفاً سليماً`,
+  );
+}
+
+// نسخة واحدة لا نسختان: الترحيل والمرجع يجب ألا ينحرفا
+assert.equal(
+  safeJsonbOf(refCode), safeJsonbOf(migCode),
+  `${REFERENCE}: تعريف safe_jsonb انحرف عن الترحيل — drift جديد`,
+);
+
+// مِجَسّ الاختبار الحقيقي نسخة من المشحون: بلا تحويل مباشر فيه
+const realProbe = (() => {
+  const i = tests.indexOf('create function pg_temp.audit_probe()');
+  const j = tests.indexOf('$$;', i);
+  assert.ok(i > 0 && j > i, `${TESTS}: مِجَسّ التصنيف غير موجود`);
+  return tests.slice(i, j);
+})();
+assert.doesNotMatch(
+  realProbe, /r\.content::jsonb/,
+  `${TESTS}: مِجَسّ التصنيف يستعمل التحويل المباشر — يختبر غير ما يعمل`,
+);
+assert.match(
+  realProbe, /private\.safe_jsonb\(r\.content\)/,
+  `${TESTS}: مِجَسّ التصنيف لا يمرّ عبر safe_jsonb`,
+);
+
+// الشاهد السالب: بدونه قد تمرّ التأكيدات بلا أن تحرس شيئاً
+assert.match(
+  tests, /create function pg_temp\.audit_probe_unsafe\(\)/,
+  `${TESTS}: الشاهد السالب مفقود — لا برهان أن الحالات الجديدة تُثير الخلل`,
+);
+assert.match(
+  tests, /exception when invalid_text_representation then\s*\n\s*old_died := true;/,
+  `${TESTS}: الشاهد السالب لا يتحقق من أن التعبير القديم يسقط فعلاً`,
+);
+
+// التغطية: تصنيف صحيح + عزل. الأول وحده لا يثبت أن العدسة لم تنطفئ.
+for (const [needle, why] of [
+  ['(208, 200,', 'حالة 2xx بجسم HTML'],
+  ["(209, 200, ''", 'حالة 2xx بجسم فارغ'],
+  ['(210, 204, null', 'حالة 2xx بلا جسم'],
+  ['14: العزل', 'تصنيف الصفوف الأصلية لم يتغيّر بوجود ردود غير JSON'],
+  ['15: العزل', 'صف النجاح ما زال مرئياً رغم الردود السيّئة'],
+  ['16: الشاهد السالب', 'إثبات أن الحالات الجديدة تُثير خلل P2 فعلاً'],
+]) {
+  assert.ok(tests.includes(needle), `${TESTS}: تغطية P2 ناقصة — ${why}`);
+}
+
 console.log(
   `Telegram delivery observability checks passed (تعريف مُرسِل واحد، المعرّف مُلتقَط، `
-  + `صفر حالات جديدة، صفر retry، dedupe سليم، عدسة stable، ${testAsserts.length} تأكيداً).`,
+  + `صفر حالات جديدة، صفر retry، dedupe سليم، عدسة stable، بلا cast غير محروس، `
+  + `${testAsserts.length} تأكيداً).`,
 );

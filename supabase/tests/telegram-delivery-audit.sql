@@ -27,16 +27,18 @@ language sql stable as $$
       when r.id is null then 'no_response'
       when r.status_code is null then 'network_error'
       when r.status_code between 200 and 299
-       and r.content is not null
-       and r.content::jsonb ->> 'ok' = 'true'
-       and jsonb_exists(r.content::jsonb -> 'result', 'message_id') then 'ok_true'
+       and b.body is not null
+       and b.body ->> 'ok' = 'true'
+       and jsonb_exists(b.body -> 'result', 'message_id') then 'ok_true'
       when r.status_code between 200 and 299
-       and r.content is not null
-       and r.content::jsonb ->> 'ok' = 'false' then 'ok_false'
+       and b.body is not null
+       and b.body ->> 'ok' = 'false' then 'ok_false'
       when r.status_code between 200 and 299 then 'unparsed'
       else 'http_error'
     end
-  from ob_probe o left join resp_probe r on r.id = o.net_request_id order by o.id;
+  from ob_probe o left join resp_probe r on r.id = o.net_request_id
+  left join lateral (select private.safe_jsonb(r.content) as body) b on true
+  order by o.id;
 $$;
 
 insert into ob_probe values (1,null),(2,201),(3,202),(4,203),(5,204),(6,205),(7,206),(8,207);
@@ -82,6 +84,83 @@ begin
 
   assert a >= 9, format('عدد التأكيدات %s أقل من 9', a);
   raise notice 'telegram delivery classification: % تأكيداً — كلها نجحت', a;
+end $$;
+
+-- ============================================================================
+-- ملاحظة Codex P2 (2026-08-31) — رد 2xx بجسم ليس JSON.
+--
+-- التعبير القديم كان يكتب r.content::jsonb داخل فرعَي ok_true/ok_false. حين
+-- يكون رمز الحالة ضمن 2xx والجسم غير فارغ وغير JSON، يُقيَّم التحويل حتماً —
+-- أياً كان ترتيب تقييم AND الذي يختاره المخطِّط — فيرفع 22P02 قبل أن يُبلَغ
+-- فرع 'unparsed'. ولأن العدسة دالة تُرجع مجموعة تعالج النافذة كلها دفعة
+-- واحدة، فصفٌّ واحد سيّئ كان يُسقط الاستدعاء بأكمله ويخفي كل صف آخر.
+--
+-- لماذا لم تكشفه المجموعة السابقة: الصف الوحيد بجسم HTML فيها (206) رمزه
+-- 405 — خارج 2xx — فكان يسقط إلى else 'http_error' بلا أن يلمس التحويل.
+--
+-- الحالات الثلاث أدناه تُثير الخلل فعلياً، ولا يكفي أن تُصنَّف صحيحاً: يجب
+-- أن يبقى بقية صفوف النافذة ظاهراً معها. ذلك ما يثبته تأكيد العزل.
+-- ============================================================================
+insert into ob_probe values (9,208),(10,209),(11,210);
+insert into resp_probe values
+ -- صفحة عطل من وسيط: 200 مع HTML. هذه بالضبط الحالة التي كانت تُطفئ العدسة.
+ (208, 200, '<html><body>502 Bad Gateway</body></html>', false, null),
+ -- جسم فارغ برمز 200 — ''::jsonb يرفع 22P02 نفسه
+ (209, 200, '', false, null),
+ -- 2xx بلا جسم إطلاقاً (204 No Content)
+ (210, 204, null, false, null);
+
+-- شاهد سالب: نسخة مصغَّرة من التعبير القديم بتحويله المباشر. وجودها يمنع أن
+-- يكون الاختبار أعلاه فارغ المعنى — فلو لم تسقط هذه، لكانت الحالات الجديدة
+-- لا تُثير الخلل أصلاً وكان التأكيد يمرّ بلا أن يحرس شيئاً.
+create function pg_temp.audit_probe_unsafe() returns table(outbox_id bigint, delivery_class text)
+language sql stable as $$
+  select o.id,
+    case
+      when r.status_code between 200 and 299
+       and r.content is not null
+       and r.content::jsonb ->> 'ok' = 'true' then 'ok_true'
+      else 'other'
+    end
+  from ob_probe o left join resp_probe r on r.id = o.net_request_id order by o.id;
+$$;
+
+do $$
+declare n int := 0; a int := 0; old_died boolean;
+begin
+  -- ١) الاستدعاء لا يرمي، ويُرجع النافذة كاملة. لو رمى لما وُصل السطر التالي.
+  select count(*) into n from pg_temp.audit_probe();
+  assert n = 11, format('10: عدد الصفوف %s ≠ 11 — العدسة لم تُرجع النافذة كاملة', n); a:=a+1;
+
+  -- ٢) الصفوف الثلاثة السيّئة تُصنَّف unparsed بدل أن تُسقط الاستعلام
+  assert (select delivery_class from pg_temp.audit_probe() where outbox_id=9)='unparsed',
+    '11: 200 بجسم HTML ⇒ unparsed لا انفجار'; a:=a+1;
+  assert (select delivery_class from pg_temp.audit_probe() where outbox_id=10)='unparsed',
+    '12: 200 بجسم فارغ ⇒ unparsed'; a:=a+1;
+  assert (select delivery_class from pg_temp.audit_probe() where outbox_id=11)='unparsed',
+    '13: 204 بلا جسم ⇒ unparsed'; a:=a+1;
+
+  -- ٣) العزل — جوهر الملاحظة. لا يكفي أن يُصنَّف الصف السيّئ صحيحاً؛ يجب أن
+  --    يبقى تصنيف الصفوف الثمانية الأصلية كما هو تماماً وهي بجواره.
+  assert (select string_agg(delivery_class, ',' order by outbox_id)
+            from pg_temp.audit_probe() where outbox_id <= 8)
+         = 'no_request,no_response,network_error,ok_true,ok_false,unparsed,http_error,http_error',
+    '14: العزل — تصنيف الصفوف الثمانية الأصلية تغيّر بوجود ردود غير JSON'; a:=a+1;
+  assert (select count(*) from pg_temp.audit_probe() where delivery_class='ok_true')=1,
+    '15: العزل — صف النجاح ما زال مرئياً ووحيداً رغم الردود السيّئة'; a:=a+1;
+
+  -- ٤) الشاهد السالب: التعبير القديم يسقط فعلاً على هذه المجموعة نفسها.
+  begin
+    perform count(*) from pg_temp.audit_probe_unsafe();
+    old_died := false;
+  exception when invalid_text_representation then
+    old_died := true;
+  end;
+  assert old_died,
+    '16: الشاهد السالب لم يسقط — الحالات الجديدة لا تُثير خلل P2 فالحراسة وهمية'; a:=a+1;
+
+  assert a >= 7, format('عدد تأكيدات P2 %s أقل من 7', a);
+  raise notice 'telegram delivery P2 (non-JSON 2xx): % تأكيداً — كلها نجحت', a;
 end $$;
 
 -- ---------------------------------------------------------------------------
