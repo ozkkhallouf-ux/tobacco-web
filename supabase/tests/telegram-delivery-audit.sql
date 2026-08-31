@@ -1,0 +1,113 @@
+-- ============================================================================
+-- المرحلة أ — اختبارات تصنيف تسليم تيليغرام وضمانة القراءة فقط.
+--
+-- التشغيل (بعد تطبيق الترحيل):
+--   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f supabase/tests/telegram-delivery-audit.sql
+-- كل ما يُنشأ هنا مؤقت في pg_temp ويختفي بانتهاء الجلسة. لا يُقرأ ولا يُكتب
+-- أي صف من public.telegram_outbox ولا من net._http_response.
+--
+-- سبب وجوده: dispatch_telegram_outbox كان يكتب status='sent' بعد
+-- net.http_post مباشرة — والدالة غير متزامنة — فـ"sent" كانت تعني "سُلّم إلى
+-- pg_net" لا "تيليغرام استلمه". قياس على الإنتاج في نافذة ست ساعات: 241
+-- رسالة معلَّمة sent مقابل 230 رداً ناجحاً ⇒ 11 بلا رد نجاح.
+-- المرحلة أ لا تصلح هذا؛ هي عدسة تجعله مرئياً وقابلاً للقياس أولاً.
+-- ============================================================================
+
+create temporary table ob_probe   (id bigint, net_request_id bigint);
+create temporary table resp_probe (id bigint, status_code integer, content text,
+                                   timed_out boolean, error_msg text);
+
+-- نفس تعبير التصنيف الموجود في public.telegram_delivery_audit حرفياً.
+-- يفرض scripts/check-telegram-delivery-observability.mjs بقاءهما متطابقين.
+create function pg_temp.audit_probe() returns table(outbox_id bigint, delivery_class text)
+language sql stable as $$
+  select o.id,
+    case
+      when o.net_request_id is null then 'no_request'
+      when r.id is null then 'no_response'
+      when r.status_code is null then 'network_error'
+      when r.status_code between 200 and 299
+       and r.content is not null
+       and r.content::jsonb ->> 'ok' = 'true'
+       and jsonb_exists(r.content::jsonb -> 'result', 'message_id') then 'ok_true'
+      when r.status_code between 200 and 299
+       and r.content is not null
+       and r.content::jsonb ->> 'ok' = 'false' then 'ok_false'
+      when r.status_code between 200 and 299 then 'unparsed'
+      else 'http_error'
+    end
+  from ob_probe o left join resp_probe r on r.id = o.net_request_id order by o.id;
+$$;
+
+insert into ob_probe values (1,null),(2,201),(3,202),(4,203),(5,204),(6,205),(7,206),(8,207);
+insert into resp_probe values
+ -- خطأ شبكة: status_code = NULL مع error_msg. نص حقيقي مرصود في الإنتاج.
+ (202, null, null, true,  'Timeout of 5000 ms reached. Total time: 5000.944 ms (DNS 9.8 ms, TCP/SSL handshake 4991.1 ms)'),
+ -- نجاح تيليغرام الحقيقي: ok=true مع result.message_id
+ (203, 200, '{"ok":true,"result":{"message_id":123,"date":1}}', false, null),
+ -- رفض منطقي بجسم 200 — يبقى غير مثبت من API رسمياً (انظر الملاحظة أدناه)
+ (204, 200, '{"ok":false,"error_code":403,"description":"bot was blocked by the user"}', false, null),
+ -- شكل web-push: 200 وok=true لكن بلا result.message_id ⇒ ليس نجاح تيليغرام
+ (205, 200, '{"ok":true,"sent":0,"failed":0}', false, null),
+ -- رمز غير 2xx مرصود فعلياً من مِجَسّ example.com يوم 2026-08-31
+ (206, 405, '<html>405 Not Allowed</html>', false, null),
+ (207, 429, '{"ok":false,"error_code":429,"description":"Too Many Requests"}', false, null);
+
+do $$
+declare n int := 0; a int := 0;
+begin
+  select count(*) into n from pg_temp.audit_probe();
+  assert n = 8, format('عدد الصفوف %s ≠ 8', n); a:=a+1;
+
+  assert (select delivery_class from pg_temp.audit_probe() where outbox_id=1)='no_request',
+    '1: صف بلا net_request_id (أُرسل قبل المرحلة أ) ⇒ no_request'; a:=a+1;
+  assert (select delivery_class from pg_temp.audit_probe() where outbox_id=2)='no_response',
+    '2: معرّف بلا رد (لم يُعالَج بعد أو انقضى TTL) ⇒ no_response'; a:=a+1;
+  assert (select delivery_class from pg_temp.audit_probe() where outbox_id=3)='network_error',
+    '3: status_code=NULL مع error_msg ⇒ network_error'; a:=a+1;
+  assert (select delivery_class from pg_temp.audit_probe() where outbox_id=4)='ok_true',
+    '4: النجاح الوحيد المعتبَر — ok=true مع result.message_id'; a:=a+1;
+  assert (select delivery_class from pg_temp.audit_probe() where outbox_id=5)='ok_false',
+    '5: 200 بجسم ok=false ⇒ ok_false لا نجاح'; a:=a+1;
+  assert (select delivery_class from pg_temp.audit_probe() where outbox_id=6)='unparsed',
+    '6: شكل web-push (ok=true بلا message_id) لا يُحتسب نجاح تيليغرام'; a:=a+1;
+  assert (select delivery_class from pg_temp.audit_probe() where outbox_id=7)='http_error',
+    '7: 405 ⇒ http_error'; a:=a+1;
+  assert (select delivery_class from pg_temp.audit_probe() where outbox_id=8)='http_error',
+    '8: 429 ⇒ http_error (سياسة التعامل معه تُقرَّر في المرحلة ب لا هنا)'; a:=a+1;
+
+  -- لا صنف واحد يُحتسب نجاحاً إلا ok_true
+  assert (select count(*) from pg_temp.audit_probe() where delivery_class='ok_true')=1,
+    '9: صنف نجاح واحد فقط في مجموعة الاختبار'; a:=a+1;
+
+  assert a >= 9, format('عدد التأكيدات %s أقل من 9', a);
+  raise notice 'telegram delivery classification: % تأكيداً — كلها نجحت', a;
+end $$;
+
+-- ---------------------------------------------------------------------------
+-- ضمانة القراءة فقط مفروضة من المحرّك: دالة stable لا يمكنها الكتابة إطلاقاً.
+-- مثبت على الإنتاج 2026-08-31:
+--   ERROR: 0A000: UPDATE is not allowed in a non-volatile function
+-- ---------------------------------------------------------------------------
+create function pg_temp.stable_write_probe() returns void language sql stable as $$
+  update ob_probe set net_request_id = 999 where id = 1;
+$$;
+
+do $$
+begin
+  begin
+    perform pg_temp.stable_write_probe();
+    raise exception 'FAIL: دالة stable سمحت بالكتابة — الضمانة غير قائمة';
+  exception
+    when feature_not_supported then
+      raise notice 'stable guard enforced by engine: %', sqlerrm;
+  end;
+  assert (select net_request_id from ob_probe where id=1) is null,
+    'الصف تغيّر رغم فشل الاستدعاء';
+  raise notice 'read-only guarantee: مفروضة من PostgreSQL نفسه ✓';
+end $$;
+
+-- ملاحظة مسجَّلة للمرحلة ب (لا تُبنى عليها سياسة الآن):
+--   'ok_false' مع HTTP 200 مصنَّف هنا احتياطاً، لكنه **غير مثبت** من Telegram
+--   Bot API — الشائع أن تيليغرام يعيد 4xx لأخطاء كهذه. يلزم مثال موثق أو
+--   اختبار آمن قبل اعتباره مساراً طبيعياً. القياس في المرحلة أ هو ما سيحسمه.

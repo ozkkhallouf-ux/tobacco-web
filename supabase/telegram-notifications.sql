@@ -28,10 +28,19 @@ create table if not exists public.telegram_outbox (
   status      text not null default 'pending' check (status in ('pending','sent','failed')),
   attempts    int  not null default 0,
   created_at  timestamptz not null default now(),
-  sent_at     timestamptz
+  sent_at     timestamptz,
+  -- المرحلة أ (2026-08-31، رصد فقط): معرّف طلب pg_net المقابل لهذا الصف.
+  -- سببه أن status='sent' كانت تُكتب بعد net.http_post مباشرة وقبل معرفة أي
+  -- نتيجة — والدالة غير متزامنة، فـ"sent" كانت تعني "سُلّم إلى pg_net" لا
+  -- "تيليغرام استلمه". قياس على الإنتاج في نافذة 6 ساعات: 241 رسالة معلَّمة
+  -- sent مقابل 230 رداً ناجحاً من تيليغرام — 11 بلا رد نجاح.
+  -- هذا العمود وحده يجعل الربط ممكناً؛ ولا يغيّر أي سلوك.
+  net_request_id bigint
 );
+alter table public.telegram_outbox add column if not exists net_request_id bigint;
 create index if not exists telegram_outbox_pending_idx on public.telegram_outbox (status, created_at);
 create index if not exists telegram_outbox_dedupe_idx  on public.telegram_outbox (dedupe_key, created_at desc) where dedupe_key is not null;
+create index if not exists telegram_outbox_net_request_idx on public.telegram_outbox (net_request_id) where net_request_id is not null;
 alter table public.telegram_outbox enable row level security;
 comment on table public.telegram_outbox is 'قائمة انتظار إشعارات تيليغرام — يرسلها dispatch_telegram_outbox كل دقيقة';
 
@@ -62,43 +71,91 @@ revoke execute on function public.notify_telegram(text, text, text, int) from an
 grant  execute on function public.notify_telegram(text, text, text, int) to authenticated, service_role;
 
 -- 3) المُرسِل — نفس نمط dispatch_due_reminders (Vault + pg_net)
-create or replace function public.dispatch_telegram_outbox()
-returns void
-language plpgsql security definer
-set search_path to 'public', 'net', 'vault', 'extensions'
-as $$
-declare
-  r    record;
-  tok  text;
-  chat bigint;
-begin
-  select decrypted_secret into tok
-  from vault.decrypted_secrets where name = 'telegram_bot_token' limit 1;
-  if tok is null then return; end if;
-
-  select value::bigint into chat
-  from public.bot_config where key = 'owner_chat_id' limit 1;
-  if chat is null then return; end if;
-
-  for r in
-    select id, message from public.telegram_outbox
-    where status = 'pending'
-    order by created_at asc
-    limit 20  -- ضمن حدود تيليغرام
-  loop
-    perform net.http_post(
-      url     := 'https://api.telegram.org/bot' || tok || '/sendMessage',
-      headers := jsonb_build_object('Content-Type', 'application/json'),
-      body    := jsonb_build_object('chat_id', chat, 'text', r.message)
-    );
-    update public.telegram_outbox
-    set status = 'sent', sent_at = now(), attempts = attempts + 1
-    where id = r.id;
-  end loop;
-end;
-$$;
+-- 2026-08-31: كان هنا تعريف أقدم لـdispatch_telegram_outbox بلا reply_markup،
+-- يسبق التعريف الكانوني أدناه في الملف نفسه. حُذف عمداً: وجود تعريفين لدالة
+-- واحدة في مصدر واحد دَينٌ خطر — أي إعادة ترتيب أو اقتطاع جزئي للملف كانت
+-- تُعيد السلوك القديم بصمت. التعريف الوحيد الآن هو الكانوني أدناه، ويفرض
+-- scripts/check-telegram-delivery-observability.mjs بقاءه وحيداً.
+-- (الجدولة أدناه تخزّن نصّ أمر فقط، ولا تتطلب وجود الدالة وقت تنفيذها.)
 
 -- 4) الجدولة: إرسال كل دقيقة + تنظيف يومياً
+-- ============================================================================
+-- المرحلة أ — عدسة رصد للتسليم. READ ONLY بالكامل.
+--
+-- الدالة معلَّنة stable عمداً لا volatile: PostgreSQL نفسه يرفض أي كتابة داخل
+-- دالة stable وقت التنفيذ، فالقيد مفروض من المحرّك لا من التوثيق وحده.
+--
+-- ما تفعله: تربط كل صف outbox بردّ pg_net الحقيقي وتصنّفه. ما لا تفعله: لا
+-- تكتب صفاً، ولا تغيّر status، ولا تعيد إرسال شيء، ولا تلمس dedupe.
+--
+-- تصنيف الرد (مبني على ما رُصد فعلاً في الإنتاج، لا على افتراض):
+--   no_request     الصف بلا net_request_id (أُرسل قبل المرحلة أ)
+--   no_response    لا رد بعد — إمّا لم يُعالَج بعد، أو انقضى TTL ست الساعات
+--   ok_true        رد 2xx وجسمه يحمل "ok":true مع result.message_id
+--   ok_false       رد 2xx لكن الجسم "ok":false — تيليغرام رفض منطقياً
+--   http_error     رمز حالة غير 2xx (مثبت: 405 من مِجَسّ example.com)
+--   network_error  status_code is null مع error_msg — timeout/DNS/TLS
+--   unparsed       رد موجود بجسم لا يطابق أياً مما سبق
+--
+-- قيد معروف: pg_net.ttl = 6 ساعات، فما هو أقدم من ذلك يظهر no_response بلا
+-- أن يعني فشلاً. لقياس أيام لا ساعات يلزم جدول telemetry مستقل — مُقترح
+-- ومعروض في وصف الـPR، وغير مُنفَّذ في هذه المرحلة عمداً.
+-- ============================================================================
+create or replace function public.telegram_delivery_audit(p_since interval default interval '6 hours')
+returns table (
+  outbox_id       bigint,
+  event_type      text,
+  dedupe_key      text,
+  created_at      timestamptz,
+  sent_at         timestamptz,
+  net_request_id  bigint,
+  has_response    boolean,
+  status_code     integer,
+  timed_out       boolean,
+  error_msg       text,
+  delivery_class  text,
+  age             interval
+)
+language sql
+stable
+security definer
+set search_path to 'public', 'net'
+as $$
+  select
+    o.id,
+    o.event_type,
+    o.dedupe_key,
+    o.created_at,
+    o.sent_at,
+    o.net_request_id,
+    (r.id is not null),
+    r.status_code,
+    r.timed_out,
+    r.error_msg,
+    case
+      when o.net_request_id is null then 'no_request'
+      when r.id is null then 'no_response'
+      when r.status_code is null then 'network_error'
+      when r.status_code between 200 and 299
+       and r.content is not null
+       and r.content::jsonb ->> 'ok' = 'true'
+       and jsonb_exists(r.content::jsonb -> 'result', 'message_id') then 'ok_true'
+      when r.status_code between 200 and 299
+       and r.content is not null
+       and r.content::jsonb ->> 'ok' = 'false' then 'ok_false'
+      when r.status_code between 200 and 299 then 'unparsed'
+      else 'http_error'
+    end,
+    now() - o.created_at
+  from public.telegram_outbox o
+  left join net._http_response r on r.id = o.net_request_id
+  where o.created_at > now() - p_since
+  order by o.created_at desc;
+$$;
+
+revoke all on function public.telegram_delivery_audit(interval) from public, anon;
+grant execute on function public.telegram_delivery_audit(interval) to authenticated, service_role;
+
 select cron.schedule('dispatch-telegram-outbox', '* * * * *', 'select public.dispatch_telegram_outbox();');
 select cron.schedule('cleanup-telegram-outbox', '30 0 * * *',
   $cron$delete from public.telegram_outbox where status <> 'pending' and created_at < now() - interval '14 days'$cron$);
@@ -714,6 +771,7 @@ declare
   tok  text;
   chat bigint;
   body jsonb;
+  rid  bigint;
 begin
   select decrypted_secret into tok
   from vault.decrypted_secrets where name = 'telegram_bot_token' limit 1;
@@ -733,13 +791,16 @@ begin
     if r.reply_markup is not null then
       body := body || jsonb_build_object('reply_markup', r.reply_markup);
     end if;
-    perform net.http_post(
+    -- المرحلة أ (رصد فقط): نلتقط request_id بدل رميه بـperform. السلوك بعده
+    -- لم يتغيّر بحرف — status='sent' كما كان تماماً. الغرض الوحيد هو أن يصبح
+    -- كل صف قابلاً للربط بردّه الحقيقي في net._http_response.
+    rid := net.http_post(
       url     := 'https://api.telegram.org/bot' || tok || '/sendMessage',
       headers := jsonb_build_object('Content-Type', 'application/json'),
       body    := body
     );
     update public.telegram_outbox
-    set status = 'sent', sent_at = now(), attempts = attempts + 1
+    set status = 'sent', sent_at = now(), attempts = attempts + 1, net_request_id = rid
     where id = r.id;
   end loop;
 end;
