@@ -42,7 +42,7 @@ plant("reports/prices/canary.csv", "canary,must,not,leak\n");
 
 process.env.HOST = "127.0.0.1";
 process.env.PORT = "0";
-const { server, resolvePublicPath, isHostAllowed } = await import("./serve.mjs");
+const { server, resolvePublicPath, isHostAllowed, urlPathSegments } = await import("./serve.mjs");
 await new Promise((done) => server.listen(0, "127.0.0.1", done));
 const PORT = server.address().port;
 
@@ -141,6 +141,50 @@ await test("resolvePublicPath يرفض مباشرةً كل ما هو خارج ا
   assert.ok(resolvePublicPath("/public/icons/ozk-logo.png"), "أصل عام يجب أن يُقبل");
   // امتداد غير مسموح داخل جذر عام يبقى مرفوضاً.
   assert.equal(resolvePublicPath("/src/anything.ps1"), null);
+});
+
+// ===== 3ب) دلالات ويندوز: التجزئة مستقلة عن نظام التشغيل =====
+
+await test("تجزئة المسار لا تستعمل node:path فتتطابق على posix وwin32", async () => {
+  // العطل الذي كان: `path.normalize("/src/app.js")` يعيد على ويندوز
+  // `\\src\\app.js`، فيصير المسار كله مقطعاً واحداً ويُرفض — أي 404 لكل
+  // `src/**` و`public/**` عند `npm run dev` على ويندوز، فتسقط واجهة ويندوز
+  // والآيفون معاً. نثبت هنا التطابق دون الاعتماد على نظام المضيف.
+  const pathMod = (await import("node:path")).default;
+  const cases = [
+    ["/src/app.js", ["src", "app.js"]],
+    ["/src/styles.css", ["src", "styles.css"]],
+    ["/public/icons/ozk-logo.png", ["public", "icons", "ozk-logo.png"]],
+    ["/public/downloads/price-list-usd.pdf", ["public", "downloads", "price-list-usd.pdf"]],
+    ["/index.html", ["index.html"]],
+    ["/", ["index.html"]]
+  ];
+  for (const [url, expected] of cases) {
+    assert.deepEqual(urlPathSegments(url), expected, `تجزئة ${url}`);
+    // ونفس المقاطع تبني مساراً مكافئاً على كلا النظامين.
+    const win = pathMod.win32.resolve("C:\\repo", ...expected).replace(/\\/g, "/").replace("C:/repo", "");
+    const posix = pathMod.posix.resolve("/repo", ...expected).replace("/repo", "");
+    assert.equal(win, posix, `اختلاف posix/win32 على ${url}`);
+  }
+});
+
+await test("دلالات ويندوز: الرفض يبقى رفضاً على كلا النظامين", () => {
+  // ما يجب رفضه يُرفض في طبقة URL نفسها — قبل أي لمس لنظام الملفات،
+  // فالنتيجة واحدة على ويندوز وmacOS.
+  for (const bad of ["/../package.json", "/src/../../etc/passwd", "/.git/config",
+                     "/%2e%2e/package.json", "/%252e%252e/package.json",
+                     "/src/..%5cpackage.json", "/public/../tools/.env"]) {
+    assert.equal(urlPathSegments(bad), null, `${bad} لم يُرفض في طبقة URL`);
+  }
+  // والفاصل الخلفي يُوحَّد فلا يمرّ التفاف عبره.
+  assert.deepEqual(urlPathSegments("/src\\app.js"), ["src", "app.js"]);
+});
+
+await test("serve.mjs لا يطبّق path.normalize على مسار الطلب", () => {
+  const src = readFileSync(new URL("./serve.mjs", import.meta.url), "utf8")
+    .split("\n").filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join("\n");
+  assert.ok(!/normalize\(decoded\)/.test(src), "ما زال يطبّع مسار الطلب بـpath");
+  assert.match(src, /export function urlPathSegments/, "التجزئة يجب أن تكون بدلالة URL");
 });
 
 // ===== 4) حارس ترويسة Host =====

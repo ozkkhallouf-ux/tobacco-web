@@ -72,7 +72,20 @@ const TYPES = {
  * يرجع null لكل ما هو خارج الجذور العامة — لا يسقط إلى index.html أبداً،
  * فسقوط كهذا كان يُخفي الرفض ويجعل الفحص الأمني غير قابل للملاحظة.
  */
-export function resolvePublicPath(urlPath, base = root) {
+/**
+ * يجزّئ مسار URL إلى مقاطع بدلالة **URL خالصة** — بلا أي دالة من `node:path`.
+ *
+ * ⚠️ إصلاح 2026-08-31 (ملاحظة Codex P1 الثانية على PR #148):
+ * النسخة السابقة استعملت `path.normalize(decoded)` ثم `split("/")`. على ويندوز
+ * يعيد `normalize("/src/app.js")` القيمة `\src\app.js`، فيصير المسار كله مقطعاً
+ * واحداً ويُرفض كملف جذر غير مسموح — أي **كل طلب داخل `src/` و`public/` يعود 404
+ * عند `npm run dev` على ويندوز**، فتسقط الواجهة على ويندوز وعلى الآيفون الذي
+ * يستعمل خادمها على الشبكة. مسارات URL ليست مسارات نظام ملفات: نطبّعها بفاصل
+ * `/` ثابت هنا، ولا نلمس `node:path` إلا عند بناء المسار الفعلي بـ`resolve`.
+ *
+ * @returns {string[]|null} المقاطع، أو null لأي مسار مرفوض.
+ */
+export function urlPathSegments(urlPath) {
   let decoded;
   try {
     // فك ترميز مزدوج المرحلة: `%252e%252e` تفكّ إلى `%2e%2e` ثم `..`.
@@ -82,30 +95,41 @@ export function resolvePublicPath(urlPath, base = root) {
     return null; // ترميز تالف — يُرفض لا يُخمَّن
   }
   if (decoded.includes("\0")) return null;
-  // نوحّد الفواصل الخلفية أيضاً: ويندوز يعامل `\` كفاصل مسار.
+  // ويندوز يعامل `\` كفاصل مسار، فنوحّده قبل التجزئة كي لا يمرّ التفاف عبره.
   decoded = decoded.replace(/\\/g, "/");
-  if (decoded === "/" || decoded === "") decoded = "/index.html";
+  if (decoded === "" || decoded === "/") decoded = "/index.html";
   if (!decoded.startsWith("/")) return null;
 
-  const relative = normalize(decoded).replace(/^([/\\])+/, "");
-  if (!relative || relative === "." ) return null;
-  // أي بقية صعود بعد التطبيع = محاولة خروج.
-  if (relative.split(/[/\\]/).includes("..")) return null;
+  const segments = [];
+  for (const raw of decoded.split("/")) {
+    if (raw === "" || raw === ".") continue;
+    if (raw === "..") return null;        // لا صعود إطلاقاً — أصرم من التطبيع
+    if (raw.startsWith(".")) return null; // لا مخفي في أي مستوى (.git/.env/.github)
+    segments.push(raw);
+  }
+  return segments.length ? segments : null;
+}
 
-  const segments = relative.split("/").filter(Boolean);
-  if (!segments.length) return null;
-  // لا ملفات ولا مجلدات مخفية في أي مستوى (`.git`, `.env`, `.github`...).
-  if (segments.some((s) => s.startsWith("."))) return null;
+/**
+ * يحلّ مسار الطلب إلى ملف مسموح، أو null.
+ * لا يسقط إلى index.html أبداً — سقوط كهذا يُخفي الرفض ويجعله غير قابل للملاحظة.
+ */
+export function resolvePublicPath(urlPath, base = root) {
+  const segments = urlPathSegments(urlPath);
+  if (!segments) return null;
 
   const allowed = segments.length === 1
     ? PUBLIC_ROOT_FILES.has(segments[0])
     : PUBLIC_DIRS.includes(segments[0]);
   if (!allowed) return null;
 
-  const extension = extname(relative).toLowerCase();
+  // الامتداد من المقطع الأخير وحده — لا فواصل فيه، فالنتيجة واحدة على كل نظام.
+  const last = segments[segments.length - 1];
+  const dot = last.lastIndexOf(".");
+  const extension = dot > 0 ? last.slice(dot).toLowerCase() : "";
   if (!Object.prototype.hasOwnProperty.call(TYPES, extension)) return null;
 
-  const target = resolve(base, relative);
+  const target = resolve(base, ...segments);
   // حارس نهائي: المسار المُحلّ يجب أن يبقى داخل جذر عام فعلاً.
   const roots = segments.length === 1
     ? [resolve(base)]

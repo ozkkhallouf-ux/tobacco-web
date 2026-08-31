@@ -376,6 +376,72 @@ test("PDF/print uses same lineTotal as invoice data", () => {
   assert.ok(html.includes("0.5 كرتونة"), "الكمية غير مطبوعة بالوحدة الكبرى");
 });
 
+// ===== 5) كل مسارات تصدير الفاتورة تنسب الحسم والدفعة (لا مسار متخلّف) =====
+
+test("تدقيق: كل موضع يحسب adjust يطرح الحسم والدفعة أولاً", () => {
+  // العطل الذي كان: أُصلح مسار زر الحركات وحده، وبقي مسار «التقارير ← فواتير
+  // الزبون» يضع الفرق كاملاً في adjust — فتظهر دفعة الفاتورة 562 «تسوية على
+  // الحساب 2000». مسارا تصدير لنفس المستند بنتيجتين مختلفتين.
+  const sites = appJs.match(/opts\.prevBalance \+ (?:total|invoiceTotal|amount)[^;]*?opts\.newBalance/g) || [];
+  assert.ok(sites.length >= 2, `عدد مواضع حساب adjust = ${sites.length} (متوقع 2 على الأقل)`);
+  for (const site of sites) {
+    assert.ok(/knownDiscount/.test(site) && /knownPayment/.test(site),
+      "موضع يحسب adjust بلا طرح الحسم والدفعة: " + site.replace(/\s+/g, " "));
+  }
+  // وكل موضع يمرّر الحقلين إلى المستند.
+  assert.equal((appJs.match(/if \(knownDiscount > 0\.009\) opts\.discount = knownDiscount;/g) || []).length, sites.length);
+  assert.equal((appJs.match(/if \(knownPayment > 0\.009\) opts\.payment = knownPayment;/g) || []).length, sites.length);
+  // مسار التقارير يقرأ الحقلين من حمولة الأمين نفسها.
+  assert.match(appJs, /Number\(inv\.discount \|\| 0\)/);
+  assert.match(appJs, /Number\(inv\.payment \|\| 0\)/);
+  // ومسار زر الحركات يقرأهما من الفاتورة المطابَقة.
+  assert.match(appJs, /Number\(match\.discount \|\| 0\)/);
+  assert.match(appJs, /Number\(match\.payment \|\| 0\)/);
+});
+
+test("مسار التقارير: الفاتورة 562 تُظهر دفعة لا تسوية", () => {
+  // أرقام حقيقية من AmnDb002: total 2751.5، discount 0، payment 2000.
+  const prev = 0, total = 2751.5, discount = 0, payment = 2000;
+  const newBalance = prev + total - discount - payment;      // 751.5
+  const residual = prev + total - discount - payment - newBalance;
+  assert.equal(residual, 0, "لا يجوز بقاء أي فرق غير مفسر");
+  const html = voucherPdfMarkup({
+    type: "invoice", name: "زبون 562", no: "562", date: "2026-08-30", cur: "$",
+    amount: total, prevBalance: prev, payment, newBalance,
+    ...(residual > 0.009 ? { adjust: residual } : {})
+  });
+  assert.ok(html.includes("<th>دفعة من الزبون</th>"), "سطر الدفعة مفقود");
+  assert.ok(!html.includes("تسوية على الحساب"), "الدفعة ظهرت كتسوية");
+  assert.ok(!html.includes("<th>الحسم</th>"), "حسم صفر لا يجوز أن يظهر");
+});
+
+test("مسار التقارير: الفاتورة 561 تُظهر الحسم والدفعة سطرين لا adjust", () => {
+  const prev = 0, total = 17698.5, discount = 0.5, payment = 16626;
+  const newBalance = prev + total - discount - payment;      // 1072
+  const residual = prev + total - discount - payment - newBalance;
+  assert.equal(residual, 0);
+  const html = voucherPdfMarkup({
+    type: "invoice", name: "زبون 561", no: "561", date: "2026-08-30", cur: "$",
+    amount: total, prevBalance: prev, discount, payment, newBalance
+  });
+  assert.ok(html.includes("<th>الحسم</th>"), "سطر الحسم مفقود");
+  assert.ok(html.includes("<th>دفعة من الزبون</th>"), "سطر الدفعة مفقود");
+  assert.ok(!html.includes("تسوية على الحساب"), "دُمجا في تسوية");
+});
+
+test("التسوية تبقى فقط لفرق غير مفسر فعلاً", () => {
+  const prev = 0, total = 200, discount = 1, payment = 10, newBalance = 185;
+  const residual = prev + total - discount - payment - newBalance;   // 4
+  assert.equal(residual, 4);
+  const html = voucherPdfMarkup({
+    type: "invoice", name: "س", no: "9", date: "2026-08-31", cur: "$",
+    amount: total, prevBalance: prev, discount, payment, adjust: residual, newBalance
+  });
+  for (const row of ["<th>الحسم</th>", "<th>دفعة من الزبون</th>", "تسوية على الحساب"]) {
+    assert.ok(html.includes(row), `مفقود: ${row}`);
+  }
+});
+
 // ===== النتيجة =====
 
 console.log("فحص سلامة مستند الفاتورة (اسم الملف + الفصل المحاسبي):");

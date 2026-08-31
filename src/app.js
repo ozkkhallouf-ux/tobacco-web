@@ -10743,8 +10743,19 @@ function render() {
           if (db && Number.isFinite(db.newBalance) && Number.isFinite(db.prevBalance)) {
             opts.newBalance = roundPrice(db.newBalance);
             opts.prevBalance = roundPrice(db.prevBalance);
-            // (السابق + قيمة الفاتورة) − الجديد = حسم/تسوية مُسجَّل بنفس سند الفاتورة.
-            const adjust = roundPrice(opts.prevBalance + invoiceTotal - opts.newBalance);
+            // الحسم ودفعة الزبون يأتيان من الأمين على رأس الفاتورة (TotalDisc و
+            // FirstPay) ويُنسبان أولاً، ولا يبقى «تسوية» إلا ما لا يُفسَّر بهما.
+            // كان هذا المسار (التقارير ← فواتير الزبون) يضع الفرق كاملاً في
+            // adjust، فتُطبع دفعة الفاتورة 562 «تسوية على الحساب 2000» بينما
+            // يعرضها مسار زر الحركات «دفعة من الزبون» صحيحاً — مسارا تصدير
+            // لنفس المستند بنتيجتين مختلفتين.
+            const knownDiscount = Math.max(0, roundPrice(Number(inv.discount || 0)));
+            const knownPayment = Math.max(0, roundPrice(Number(inv.payment || 0)));
+            if (knownDiscount > 0.009) opts.discount = knownDiscount;
+            if (knownPayment > 0.009) opts.payment = knownPayment;
+            const adjust = roundPrice(
+              opts.prevBalance + invoiceTotal - knownDiscount - knownPayment - opts.newBalance
+            );
             if (Math.abs(adjust) > 0.009) opts.adjust = adjust;
           } else {
             opts.balance = custItem ? customerBalance(custItem) : null;
