@@ -81,3 +81,4 @@
 <!-- push ثانٍ لاختبار رجوع الـGate إلى FAIL بعد push جديد -->
 
 <!-- test-marker: codex-review-gate-postmerge-verification (سيُحذف الفرع التجريبي، لا تعديل منطق -->
+<!-- push ثانٍ لاختبار رجوع الـGate إلى FAIL بعد push جديد (تحقق ما بعد دمج #146) -->
