@@ -2567,8 +2567,21 @@ for (const contract of [
     console.error("Owner authorization functions must not be anonymously executable or SECURITY DEFINER.");
     failed = true;
   }
-  if (!serviceWorkerSource.includes('client.navigate(url)') || !serviceWorkerSource.includes('recovery=(?:1|code)') || !serviceWorkerSource.includes('type=recovery')) {
-    console.error("The PWA update must refresh stale open clients without interrupting link or OTP password recovery.");
+  // كان هذا العقد يفرض العكس: أن يستدعي activate الـ`client.navigate(url)` مع
+  // استثناء روابط الاسترداد. أُلغي التنقيل القسري بقرار صريح — كان يعيد تحميل
+  // أي تبويب مفتوح عند تفعيل service worker جديد، بما فيه تبويب لم يلمسه
+  // المستخدم، فتضيع إدخالاته غير المحفوظة (قِيس بتبويبين: تنقيل واحد للتبويب
+  // الذي لم يُلمس). وبزوال التنقيل يزول سبب استثناء روابط الاسترداد نفسه: لم
+  // يعد هناك ما يقاطعها. العقد الآن معكوس ويحرس بقاء الإزالة.
+  // الحصر بمعالج activate مقصود: التنقيل داخل notificationclick مشروع لأنه
+  // استجابة لنقرة المستخدم على إشعار، لا إعادة تحميل مفروضة عليه.
+  const activateHandler = (serviceWorkerSource.match(/self\.addEventListener\("activate"[\s\S]*?\n(?=self\.addEventListener|$)/) || [""])[0];
+  if (/\.navigate\s*\(/.test(activateHandler) || /matchAll\s*\(/.test(activateHandler)) {
+    console.error("The service worker activate cycle must not force-reload open clients (no navigate/matchAll over window clients).");
+    failed = true;
+  }
+  if (!serviceWorkerSource.includes("self.clients.claim()") || !serviceWorkerSource.includes("self.skipWaiting()")) {
+    console.error("The service worker must still take control promptly (skipWaiting + clients.claim) without reloading pages.");
     failed = true;
   }
 }
