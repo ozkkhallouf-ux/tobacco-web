@@ -352,6 +352,30 @@ jobs:
             done < <(echo "$BOT_ISSUE_BODIES" | grep -oP 'Reviewed commit:\*\*\s*`\K[0-9a-fA-F]{7,40}' || true)
           fi
 
+          # إصلاح 2026-09-01 (ancestor-merge-only fallback):
+          # الحالة الشائعة: Codex يراجع أول commit حقيقي في الـPR ثم تُضاف commits دمج من main
+          # فحسب، فيبقى الـgate in_progress رغم أن محتوى الـPR لم يتغير. إن لم تنجح مطابقة
+          # الـprefix المباشرة، نفحص عبر GitHub compare endpoint: هل الـsha المراجَع سلف للـHEAD
+          # الحالي وكل commits بينهما merge commits (2+ parents)؟ إذا نعم، المراجعة صالحة.
+          # الأمان: أي commit بـparent واحد (كود PR جديد) بعد المراجعة يُبطلها فوراً.
+          if [ "$ISSUE_COMMENT_MATCH" -eq 0 ] && [ -n "$BOT_ISSUE_BODIES" ]; then
+            while IFS= read -r SHORT_SHA; do
+              [ -z "$SHORT_SHA" ] && continue
+              SHORT_SHA_LC=$(echo "$SHORT_SHA" | tr '[:upper:]' '[:lower:]')
+              COMPARE_OUT=$(gh api "repos/$REPO/compare/${SHORT_SHA_LC}...${HEAD_SHA_LC}" \
+                --jq '{status: .status, non_merge: ([.commits[] | select((.parents | length) < 2)] | length)}' \
+                2>/dev/null || true)
+              [ -z "$COMPARE_OUT" ] && continue
+              CMP_STATUS=$(echo "$COMPARE_OUT" | jq -r '.status // empty')
+              NON_MERGE=$(echo "$COMPARE_OUT" | jq '.non_merge // 1')
+              if [ "$CMP_STATUS" = "ahead" ] && [ "$NON_MERGE" -eq 0 ]; then
+                ISSUE_COMMENT_MATCH=1
+                echo "مطابقة سلف: $SHORT_SHA_LC سلف للـHEAD الحالي بدون commits كود جديدة بينهما (merge-only ancestor)."
+                break
+              fi
+            done < <(echo "$BOT_ISSUE_BODIES" | grep -oP 'Reviewed commit:\*\*\s*`\K[0-9a-fA-F]{7,40}' || true)
+          fi
+
           # طبقة معلوماتية best-effort فقط: عدّ شارات P0/P1/P2/P3 في تعليقات Codex
           # المرتبطة بنفس الـHEAD (review comments). لا تُستخدم هذه القيمة لإسقاط الفحص.
           BADGES=$(echo "$COMMENTS_JSON" | jq -r --arg sha "$HEAD_SHA" --arg bot "$CODEX_BOT_LOGIN" \
