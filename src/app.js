@@ -351,7 +351,14 @@ if ("serviceWorker" in navigator && location.protocol !== "file:") {
     navigator.serviceWorker.getRegistrations()
       .then((regs) => regs.forEach((reg) => { if (reg.scope.includes("/public/")) reg.unregister(); }))
       .catch(() => {});
-    navigator.serviceWorker.register("service-worker.js").catch(() => {});
+    // `updateViaCache:"none"` إلزامي هنا وليس تحسيناً: ملف الجذر مجرّد غلاف من
+    // أربعة أسطر يستورد public/service-worker.js ولا يتغيّر بين النشرات أبداً.
+    // القيمة الافتراضية "imports" تجلب الملف المستورَد عبر كاش HTTP، وGitHub
+    // Pages يرسل max-age=600، فيقارن المتصفح غلافاً ثابتاً بنسخة مخبّأة من
+    // المنطق ويستنتج «لا جديد» — فلا install ولا activate ولا تحديث للكاش طوال
+    // عشر دقائق بعد كل نشر. قِيس عملياً: مع الافتراضي طلب المتصفح الغلاف خمس
+    // مرات ولم يطلب الملف المستورَد ولا مرة.
+    navigator.serviceWorker.register("service-worker.js", { updateViaCache: "none" }).catch(() => {});
   });
 }
 
