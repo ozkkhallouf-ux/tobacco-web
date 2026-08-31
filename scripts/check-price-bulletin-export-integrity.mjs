@@ -94,8 +94,17 @@ async function bootPage(context, { items, prices, rate }) {
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", (error) => errors.push(String(error.message)));
+  // `boot()` تنطلق مع تحميل الصفحة وتكتب نتائج مُحمّلاتها فوق أي حالة نزرعها،
+  // ثم تستدعي render() في finally. الزرع قبل انتهائها سباقٌ خاسر: تُمسح مواد
+  // الفحص وتنهار المعاينة إلى لوحة "لا توجد مواد" (زر إغلاق بلا زر تصدير).
+  // كان هذا السباق يُكسب محلياً بأجزاء من الثانية ويسقط في CI الأبطأ. الفحص
+  // يخصّ منطق الواجهة لا الشبكة، فنقطع Supabase وننتظر انتهاء boot فعلياً.
+  await page.route("**://*.supabase.co/**", (route) => route.abort());
   await page.goto(`${BASE}/index.html`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => typeof window.buildBulletinDataset === "function", null, { timeout: 20000 });
+  await page.waitForFunction(() => {
+    try { return (0, eval)("state").loading === false; } catch { return false; }
+  }, null, { timeout: 30000 });
   await page.evaluate(({ items, prices, rate }) => {
     // `state` معرَّف بـconst في سكربت كلاسيكي: يعيش في البيئة المعجمية العامة
     // فلا يظهر كخاصية على window، لكنه مرئي لـeval العام. لا نضيف أي منفذ
@@ -297,6 +306,109 @@ for (const theme of ["dark", "light"]) {
   }
 }
 
+// ===== 4ب) تسلسل الكتابة على سعر الصرف =====
+// الترقيم التسلسلي يحمي state وحده. لو انطلقت كتابتا A وB معاً فقد تصل B إلى
+// Supabase أولاً وA بعدها، فيستقرّ الخادم على A بينما تعرض الواجهة B — والنشر
+// الآلي يقرأ الخادم فيبني النشرة على سعر قديم. نفحص **ترتيب الوصول** لا الحالة
+// المحلية فقط، ونفحص ماذا تُعتبر «القيمة المؤكدة» حين يفشل حفظ.
+{
+  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, bypassCSP: true, serviceWorkers: "block" });
+  const { page } = await bootPage(context, { items: ITEMS, prices: approved(300, 500), rate: 10000 });
+
+  // A بطيئة وB سريعة: بلا تسلسل تنتهي B أولاً ثم تدهسها A فيبقى الخادم على A.
+  const ordered = await page.evaluate(async () => {
+    const finished = [];
+    let server = null;
+    window.tobaccoData.setSyriaExchangeRate = async (value) => {
+      const v = Number(value);
+      await new Promise((r) => setTimeout(r, v === 30000 ? 80 : 5));
+      server = v;
+      finished.push(v);
+      return v;
+    };
+    localStorage.removeItem("syria-exchange-rate");
+    await Promise.all([
+      window.commitSyriaExchangeRate(30000),
+      window.commitSyriaExchangeRate(40000)
+    ]);
+    // `capturePublishedExchangeRate` تحفظ القيمة المرئية مجدداً بالتصميم، لذا
+    // نلتقط ترتيب A/B قبل استدعائها كي نقيس ما نقصده بالضبط.
+    const order = finished.slice();
+    return {
+      finished: order,
+      server,
+      state: (0, eval)("state").syriaExchangeRate,
+      cache: JSON.parse(localStorage.getItem("syria-exchange-rate") || "null"),
+      published: await window.capturePublishedExchangeRate(),
+      dataset: window.buildBulletinDataset(true, "dark").dataset.exchangeRate
+    };
+  });
+
+  check("A ثم B: الكتابة تصل الخادم بنفس ترتيب التأكيد",
+    ordered.finished.join(">") === "30000>40000",
+    `ترتيب الوصول = ${ordered.finished.join(">")} (المتوقع 30000>40000)`);
+  check("A ثم B: القيمة المستقرة على الخادم هي B رغم أن A أبطأ",
+    ordered.server === 40000, `الخادم = ${ordered.server}`);
+  check("A ثم B: الحالة والذاكرة المحلية والنشر كلها على B",
+    ordered.state === 40000 && ordered.cache === 40000 && ordered.published === 40000 && ordered.dataset === 40000,
+    `state=${ordered.state} cache=${ordered.cache} publish=${ordered.published} dataset=${ordered.dataset}`);
+
+  // A تفشل ثم B تنجح: المؤكد هو B، وفشل A لا يوقف الطابور.
+  const aFails = await page.evaluate(async () => {
+    let server = null;
+    window.tobaccoData.setSyriaExchangeRate = async (value) => {
+      const v = Number(value);
+      await new Promise((r) => setTimeout(r, v === 11000 ? 60 : 5));
+      if (v === 11000) throw new Error("network down");
+      server = v;
+      return v;
+    };
+    const first = window.commitSyriaExchangeRate(11000);
+    const second = window.commitSyriaExchangeRate(12000);
+    const firstRejected = await first.then(() => false, () => true);
+    await second;
+    return {
+      firstRejected, server,
+      state: (0, eval)("state").syriaExchangeRate,
+      cache: JSON.parse(localStorage.getItem("syria-exchange-rate") || "null")
+    };
+  });
+
+  check("فشل A لا يبتلع الخطأ: الاستدعاء يرفض صراحةً", aFails.firstRejected,
+    "commitSyriaExchangeRate انتهت بنجاح رغم فشل الحفظ");
+  check("A تفشل ثم B تنجح: المؤكد هو B على الخادم وفي الواجهة",
+    aFails.server === 12000 && aFails.state === 12000 && aFails.cache === 12000,
+    `server=${aFails.server} state=${aFails.state} cache=${aFails.cache}`);
+
+  // A تنجح ثم B تفشل: الواجهة يجب ألا تدّعي أن B مؤكدة — المؤكد هو A.
+  const bFails = await page.evaluate(async () => {
+    let server = null;
+    window.tobaccoData.setSyriaExchangeRate = async (value) => {
+      const v = Number(value);
+      await new Promise((r) => setTimeout(r, 5));
+      if (v === 22000) throw new Error("network down");
+      server = v;
+      return v;
+    };
+    await window.commitSyriaExchangeRate(21000);
+    const rejected = await window.commitSyriaExchangeRate(22000).then(() => false, () => true);
+    return {
+      rejected, server,
+      state: (0, eval)("state").syriaExchangeRate,
+      cache: JSON.parse(localStorage.getItem("syria-exchange-rate") || "null"),
+      dataset: window.buildBulletinDataset(true, "dark").dataset.exchangeRate
+    };
+  });
+
+  check("فشل B يُبلَّغ للمستدعي بدل الصمت", bFails.rejected,
+    "commitSyriaExchangeRate انتهت بنجاح رغم فشل الحفظ");
+  check("A تنجح ثم B تفشل: القيمة المؤكدة تبقى A ولا تُعرض B كأنها محفوظة",
+    bFails.server === 21000 && bFails.state === 21000 && bFails.cache === 21000 && bFails.dataset === 21000,
+    `server=${bFails.server} state=${bFails.state} cache=${bFails.cache} dataset=${bFails.dataset}`);
+
+  await context.close();
+}
+
 // ===== 5) معاينة الهاتف: مخرج واضح، أزرار داخل الشاشة، ومنطقة آمنة =====
 {
   const context = await browser.newContext({
@@ -347,7 +459,7 @@ for (const theme of ["dark", "light"]) {
     try {
       await page.waitForFunction(() => {
         try { return !(0, eval)("state").pricePreview?.open; } catch { return false; }
-      }, { timeout: 3000 });
+      }, null, { timeout: 3000 });
       return true;
     } catch { return false; }
   };
@@ -355,7 +467,7 @@ for (const theme of ["dark", "light"]) {
     try {
       await page.waitForFunction(() => {
         try { return Boolean((0, eval)("state").pricePreview?.open); } catch { return false; }
-      }, { timeout: 3000 });
+      }, null, { timeout: 3000 });
       return true;
     } catch { return false; }
   };

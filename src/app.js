@@ -507,6 +507,7 @@ async function loadPublishedExchangeRate() {
     const rate = await dataStore.getSyriaExchangeRate();
     if (Number.isFinite(rate) && rate > 0) {
       state.syriaExchangeRate = rate;
+      lastPersistedSyriaExchangeRate = rate;
       writeJson("syria-exchange-rate", rate);
     }
   } catch {}
@@ -2610,6 +2611,16 @@ function applySyriaExchangeRateLocally(value) {
 // تجاوزتها عملية أحدث.
 let syriaExchangeRateCommitSeq = 0;
 
+// الترقيم وحده يحمي state فقط، لا ترتيب الكتابة على الخادم: لو انطلقت كتابتا
+// A وB معاً فقد تصل B أولاً وA بعدها، فيستقرّ Supabase على A بينما تعرض
+// الواجهة B — والنشر الآلي يقرأ Supabase فيبني النشرة على سعر قديم. لذلك
+// نُسلسل الكتابة: لا تبدأ عملية قبل انتهاء سابقتها، فيطابق ترتيب الخادم
+// ترتيب تأكيد المستخدم بالضبط.
+let syriaExchangeRateWriteChain = Promise.resolve();
+// آخر قيمة حُفظت فعلاً على الخادم — إليها نعود إذا فشل الحفظ، كي لا تبقى
+// قيمة غير محفوظة معروضة وكأنها معتمدة.
+let lastPersistedSyriaExchangeRate = null;
+
 // الحفظ الفعلي لسعر الصرف: يكتب على جدول Supabase bulletin_exchange_rate —
 // المصدر الوحيد للحقيقة الذي تقرأ منه المعاينة وPDF والنشر الآلي جميعاً.
 async function commitSyriaExchangeRate(value) {
@@ -2617,7 +2628,22 @@ async function commitSyriaExchangeRate(value) {
   if (!Number.isFinite(rate) || rate <= 0) return null;
   const seq = ++syriaExchangeRateCommitSeq;
   applySyriaExchangeRateLocally(rate);
-  const saved = await dataStore.setSyriaExchangeRate(rate);
+  const write = syriaExchangeRateWriteChain.then(() => dataStore.setSyriaExchangeRate(rate));
+  // فشل عملية لا يكسر الطابور: من بعدها ينتظر انتهاءها ثم ينطلق.
+  syriaExchangeRateWriteChain = write.then(() => {}, () => {});
+  let saved;
+  try {
+    saved = await write;
+  } catch (error) {
+    // لم يصل شيء إلى الخادم. إن كنا آخر ما أكّده المستخدم نعود إلى آخر قيمة
+    // محفوظة فعلاً؛ وإن سبقتنا عملية أحدث فهي صاحبة الكلمة ولا نلمس state.
+    if (seq === syriaExchangeRateCommitSeq && lastPersistedSyriaExchangeRate !== null) {
+      applySyriaExchangeRateLocally(lastPersistedSyriaExchangeRate);
+    }
+    throw error;
+  }
+  const persisted = Number(saved);
+  if (Number.isFinite(persisted) && persisted > 0) lastPersistedSyriaExchangeRate = persisted;
   // عملية أحدث سبقتنا: لا نلمس state إطلاقاً، ونُرجع ما هو معتمد الآن فعلاً.
   if (seq !== syriaExchangeRateCommitSeq) return Number(state.syriaExchangeRate) || saved;
   applySyriaExchangeRateLocally(saved);
