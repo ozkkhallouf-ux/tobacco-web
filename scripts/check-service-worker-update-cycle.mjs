@@ -27,6 +27,8 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SW_LOGIC = readFileSync(resolve(root, "public/service-worker.js"), "utf8");
 const SW_SHIM = readFileSync(resolve(root, "service-worker.js"), "utf8");
 const APP_JS = readFileSync(resolve(root, "src/app.js"), "utf8");
+const INDEX_HTML = readFileSync(resolve(root, "index.html"), "utf8");
+const PAGES_YML = readFileSync(resolve(root, ".github/workflows/pages.yml"), "utf8");
 
 let failed = 0;
 const ok = (name) => console.log(`  ✅ ${name}`);
@@ -57,6 +59,34 @@ check("التحميل المسبق يتجاوز كاش HTTP بـcache:\"reload\"
 check("ملف الجذر ما زال غلافاً يستورد منطق public/ (أساس هذا العطل)",
   /importScripts\(\s*["']public\/service-worker\.js["']\s*\)/.test(SW_SHIM),
   "تغيّرت البنية — راجع ما إذا كان updateViaCache ما زال ضرورياً");
+
+// ===== معامل نسخة الأصول: خط الدفاع الأول ضد كاش HTTP =====
+// أصول index.html تُحمَّل بـ`?v=tobacco-N`، ومفتاح كاش HTTP يشمل الاستعلام.
+// فما لم يتغيّر هذا الرقم مع النشر يبقى العنوان نفسه ويخدمه المتصفح من كاشه
+// حتى عشر دقائق (max-age=600 على GitHub Pages) — وهو ما وقع فعلاً: بقي الرقم
+// 177 عبر #159 و#160 و#161، فوصل المستخدمين كود ما قبل الإصلاح.
+// قِيس عملياً: بلا رفع الرقم لم يُطلب `src/app.js?v=...` بعد إعادة التحميل
+// إطلاقاً؛ ومع رفعه طُلب العنوان الجديد من الشبكة فوراً.
+const markers = [...INDEX_HTML.matchAll(/v=tobacco-(\d+)/g)].map((m) => m[1]);
+check("index.html يحمل معامل نسخة للأصول",
+  markers.length > 0, "لم يعد المعامل موجوداً — تغيّرت آلية إبطال الكاش");
+check("كل معاملات النسخة في index.html متطابقة (لا رفع جزئي)",
+  new Set(markers).size === 1,
+  `قيم مختلفة: ${[...new Set(markers)].join(", ")} — رفع جزئي يترك بعض الأصول قديمة`);
+
+const localAssets = [...INDEX_HTML.matchAll(/(?:src|href)="(src\/[^"]+)"/g)].map((m) => m[1]);
+const unversioned = localAssets.filter((href) => !/\?v=tobacco-\d+/.test(href));
+check("كل أصول src/ في index.html تحمل معامل النسخة",
+  unversioned.length === 0,
+  `بلا معامل: ${unversioned.join(", ")} — ستبقى مخبّأة بعد النشر`);
+
+check("خط النشر يرفع معامل نسخة الأصول تلقائياً",
+  /Bump asset version marker/.test(PAGES_YML) && /v=tobacco-\$\{CURRENT\}/.test(PAGES_YML),
+  "بلا هذه الخطوة يعتمد إبطال الكاش على رفع يدوي — وقد نُسي ثلاث مرات متتالية");
+
+check("خط النشر ما زال يرفع CACHE_NAME أيضاً",
+  /Bump service worker cache version/.test(PAGES_YML),
+  "اختفت خطوة رفع CACHE_NAME");
 
 check("معالج fetch ما زال network-first مع ارتداد إلى الكاش (سلوك offline)",
   /fetch\(event\.request\)/.test(swCode) && /catch\(\(\)=>caches\.match\(event\.request\)/.test(swCode.replace(/\s+/g, "")),

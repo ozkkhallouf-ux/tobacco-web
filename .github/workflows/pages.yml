@@ -79,6 +79,22 @@ jobs:
           CURRENT=$(grep -o 'v[0-9]*"' "$FILE" | tr -d '"v')
           NEW=$((CURRENT + ${{ github.run_number }}))
           sed -i "s/v${CURRENT}\"/v${NEW}\"/" "$FILE"
+
+      # نفس المنطق لمعامل نسخة الأصول في index.html. بدونه تبقى عناوين الأصول
+      # ثابتة بين النشرات (`src/app.js?v=tobacco-177`)، ومفتاح كاش HTTP يشمل
+      # الاستعلام، وGitHub Pages يرسل max-age=600 — فيخدم المتصفح ملفات قديمة
+      # حتى عشر دقائق بعد كل نشر. كان الرقم يُرفع يدوياً ونُسي في #159 و#160
+      # و#161 معاً، فوصل المستخدمين تصدير نشرة بكود ما قبل الإصلاح.
+      # الرفع هنا يجعل كل نشر يغيّر كل عنوان أصل: تحديث فوري بطلب واحد، بلا
+      # إعادة تحقق شرطية على كل ملف وبلا لمس معالج fetch.
+      - name: Bump asset version marker
+        run: |
+          FILE="index.html"
+          CURRENT=$(grep -o 'v=tobacco-[0-9]*' "$FILE" | head -1 | sed 's/v=tobacco-//')
+          NEW=$((CURRENT + ${{ github.run_number }}))
+          sed -i "s/v=tobacco-${CURRENT}/v=tobacco-${NEW}/g" "$FILE"
+          test "$(grep -c "v=tobacco-${NEW}" "$FILE")" -gt 0
+          test "$(grep -c "v=tobacco-${CURRENT}" "$FILE")" -eq 0
       - name: Configure Pages
         uses: actions/configure-pages@v5
 
