@@ -116,43 +116,38 @@ const formalReviewResult = evaluateCodexReview({
 });
 assert.equal(formalReviewResult.conclusion, 'success', 'formal review بـcommit_id مطابق للـHEAD يجب أن يمر');
 
-// 3) فحص مفتاح concurrency — إصلاح جوهري سابع بتاريخ 2026-08-31 (توحيد المجموعة: الفصل
-//    حسب github.event_name كان هو ما فتح نافذة التشغيلات المتزامنة الفعلية التي كشفها
-//    Codex كـP1 حي على PR #146 — الحماية من التراجع تعتمد الآن على الحارس الصريح فقط).
+// 3) فحص غياب concurrency نهائياً — إصلاح جوهري حادي عشر بتاريخ 2026-08-31 (ملاحظة Codex
+//    P1 حية على PR #151، thread غير محلول): حتى مع cancel-in-progress: false (الإصلاح
+//    العاشر)، تسمح دلالة GitHub الرسمية لأي concurrency group بعضو واحد فقط "قيد الانتظار"
+//    (pending) بجانب العضو "قيد التنفيذ" — حدث ثالث لنفس الـPR يُلغي عضو الانتظار قبل أن
+//    يبدأ تنفيذ أي خطوة، فحارس isStaleHead لا يُتاح له فرصة العمل ويظهر CANCELLED من جديد.
+//    الحل النهائي: حذف قيد concurrency بالكامل — لا مجموعة، لا طابور، لا إلغاء إطلاقاً.
 assert.doesNotMatch(
   yml,
-  /group:\s*codex-review-gate-\$\{\{[\s\S]{0,200}\}\}-\$\{\{\s*github\.event_name\s*\}\}/,
-  'مفتاح concurrency group يجب ألا يتضمن github.event_name بعد الآن — الفصل حسب نوع الحدث هو ما سمح بتشغيلات متزامنة فعلية (P1 المرصود على PR #146)',
+  /^concurrency:/m,
+  'مفتاح concurrency يجب ألا يكون موجوداً بعد الآن — وجوده يعيد فتح نافذة إلغاء "العضو المنتظر" (P1 المرصود حياً على PR #151) بصرف النظر عن قيمة cancel-in-progress',
 );
-assert.match(
-  yml,
-  /group:\s*codex-review-gate-\$\{\{[\s\S]{0,200}\}\}\s*\n\s*cancel-in-progress:\s*false/,
-  'مفتاح concurrency group يجب أن يعتمد على رقم الـPR فقط (مجموعة واحدة لكل PR بصرف النظر عن نوع الحدث)',
-);
-// إصلاح جوهري عاشر بتاريخ 2026-08-31: cancel-in-progress صار false عمداً — رُصد حياً على
-// PR #150 أن true يُلغي (CANCELLED) تشغيلاً قديماً كاملاً عند push جديد، وconclusion
-// CANCELLED هذا يلوّث statusCheckRollup الكلي للـPR حتى لو الاسم ليس required check
-// (mergeStateStatus يصير UNSTABLE بدل CLEAN). التشغيلات القديمة تُكمل الآن بدل أن تُقتل،
-// وتخرج SUCCESS دائماً بفضل حارس isStaleHead (exit 0 بلا كتابة) — لا سباق يعود لأن
-// isStaleWrite/needsWriteReconciliation يبقيان الضامنين لصحة النتيجة الكانونية بصرف النظر
-// عن ترتيب الاكتمال.
 assert.doesNotMatch(
   yml,
-  /cancel-in-progress:\s*true/,
-  'cancel-in-progress يجب ألا يكون true بعد الآن — هذا بالضبط ما يُنتج CANCELLED الملوِّث لـstatusCheckRollup (مرصود حياً على PR #150)',
+  /^\s*cancel-in-progress:\s*(true|false)\s*$/m,
+  'مفتاح YAML فعلي باسم cancel-in-progress يجب ألا يظهر بعد حذف concurrency — التعليقات التاريخية التي تذكر اللفظة نصياً (شرحاً لا كمفتاح) مسموحة',
 );
-assert.match(yml, /cancel-in-progress:\s*false/, 'cancel-in-progress يجب أن يكون false صراحةً — تشغيل قديم يُسمح له بالإكمال بدل أن يُقتل');
+assert.doesNotMatch(
+  yml,
+  /^\s*group:\s*codex-review-gate-/m,
+  'مفتاح group الخاص بـconcurrency يجب ألا يظهر بعد الآن — تم حذف قيد concurrency بالكامل بالإصلاح الحادي عشر',
+);
 
-// سيناريو (ج) بعد الإصلاح السابع: pull_request_target وpull_request_review وissue_comment
-// لنفس الـPR يجب أن يقعوا جميعاً بنفس مجموعة concurrency الآن (توحيد صريح — نقطة 1 من
-// طلب المستخدم)، والحماية الفعلية من التراجع تأتي من isStaleWrite/isStaleHead أدناه.
+// concurrencyGroup() في codex-review-gate-logic.mjs تبقى دالة منطقية صحيحة (unit-tested)
+// حتى بعد إزالتها من ملف الـworkflow نفسه بالإصلاح الحادي عشر — لم تُحذف الدالة لأنها ليست
+// جزءاً من منطق Required Check الكانوني، وقد تُستخدم لاحقاً لأغراض تشخيصية/تسجيل فقط.
 const prNumber = 146;
 const groupOpened = concurrencyGroup({ prNumber });
 const groupReview = concurrencyGroup({ prNumber });
 const groupIssueComment = concurrencyGroup({ prNumber });
-assert.equal(groupOpened, groupReview, 'كل triggers لنفس الـPR يجب أن تشترك بنفس مجموعة concurrency بعد التوحيد');
-assert.equal(groupOpened, groupIssueComment, 'issue_comment يجب أن يشترك بنفس مجموعة pull_request_target بعد التوحيد');
-assert.equal(concurrencyGroup({ prNumber: 999 }) === groupOpened, false, 'أرقام PR مختلفة يجب أن تبقى بمجموعات مختلفة');
+assert.equal(groupOpened, groupReview, 'concurrencyGroup يجب أن تُعيد نفس القيمة لنفس رقم الـPR (دالة صرفة)');
+assert.equal(groupOpened, groupIssueComment, 'concurrencyGroup لا تعتمد على نوع الحدث');
+assert.equal(concurrencyGroup({ prNumber: 999 }) === groupOpened, false, 'أرقام PR مختلفة يجب أن تُعطي قيماً مختلفة');
 
 // 4) فحص العقد الثابت على نص الـworkflow لإصلاح Canonical Check Run (2026-08-31):
 //    يبحث كل تشغيل عن check-run موجود على نفس head_sha بالضبط قبل الإنشاء، ولا يوجد أي
@@ -488,12 +483,13 @@ assert.match(
   assert.equal(oldRunIsStale, true, 'تشغيل قديم يكتشف أن HEAD تغيّر أثناء تنفيذه ⇒ isStaleHead=true');
   // isStaleHead=true يعني خطوة publish تخرج exit 0 بلا كتابة (مُثبَت بالعقد أعلاه على نص
   // الـworkflow: `if [ "$LIVE_HEAD_SHA" != "$HEAD_SHA" ]... exit 0`) ⇒ outcome=success دائماً
-  // لتشغيل قديم مسموح له بالإكمال، لا CANCELLED (كان يحدث سابقاً مع cancel-in-progress:true)
+  // لتشغيل قديم يُكمل بحرية (بعد حذف concurrency بالإصلاح الحادي عشر، لا يوجد طابور يُلغيه
+  // أصلاً — لا CANCELLED من قتل تشغيل قيد التنفيذ، ولا من إلغاء تشغيل قيد الانتظار).
   // ولا FAILURE (الخطوة الأخيرة تتحقق فقط من outcome!=success، وexit 0 يعني success).
   assert.match(
     yml,
     /if \[ "\$LIVE_HEAD_SHA" != "\$HEAD_SHA" \][\s\S]{0,400}exit 0/,
-    'حارس isStaleHead في نص الـworkflow يجب أن يُنهي خطوة publish بـexit 0 (لا كتابة، لا فشل) عند تغيّر HEAD — هذا ما يضمن SUCCESS لا CANCELLED للتشغيل القديم بعد إيقاف cancel-in-progress',
+    'حارس isStaleHead في نص الـworkflow يجب أن يُنهي خطوة publish بـexit 0 (لا كتابة، لا فشل) عند تغيّر HEAD — هذا ما يضمن SUCCESS لا CANCELLED للتشغيل القديم بعد حذف concurrency',
   );
   assert.match(
     yml,
@@ -501,6 +497,11 @@ assert.match(
     'الخطوة الأخيرة يجب أن تفشل الـjob فقط إن outcome!=success — exit 0 من isStaleHead يحقق success دائماً، فلا فشل ولا CANCELLED يظهر في rollup لتشغيل قديم أُكمل بسلام',
   );
 }
+
+// (خ) إصلاح حادي عشر: لا يوجد أي طابور concurrency يُلغي تشغيلاً "قيد الانتظار" قبل أن يبدأ
+//     (الثغرة التي أثبتها Codex حياً على PR #151 رغم إيقاف cancel-in-progress بالإصلاح
+//     العاشر — عضو الانتظار يُلغى بصرف النظر عن تلك القيمة). التحقق مباشرة على نص الملف.
+assert.doesNotMatch(yml, /^concurrency:/m, 'لا يجب أن يظهر مفتاح concurrency في الملف نهائياً — هذا هو إصلاح P1 المرصود على PR #151');
 
 // (ن) required canonical gate يبقى واحد فقط لكل HEAD — مغطى فعلياً أعلاه (سيناريو "و" +
 //     إصلاح تاسع: ALL_NAMED_RUNS_JSON + WINNER_JSON + DUPLICATE_IDS تُوحِّد أي نسخ مكررة
@@ -514,14 +515,14 @@ assert.doesNotMatch(
 assert.match(
   yml,
   /name: Codex Review Gate \(تشغيل داخلي — ليس Required Check\)/,
-  'اسم الـjob الداخلي التشخيصي يجب أن يبقى كما هو — الإصلاح العاشر لا يغيّر التسمية، فقط سلوك cancel-in-progress',
+  'اسم الـjob الداخلي التشخيصي يجب أن يبقى كما هو — إصلاحا عاشر وحادي عشر لا يغيّران التسمية، فقط سلوك concurrency',
 );
 
 // (س) بعد review صحيح على HEAD نهائي واحد ⇒ لا يوجد أي مصدر آخر لـconclusion=failure أو
 //     CANCELLED في نص الـworkflow يمكن أن يلوّث statusCheckRollup: تأكيد أن لا "conclusion":
 //     "failure" (مغطى أعلاه) ولا أي مسار يكتب "cancelled" صراحة على check-run الكانوني ذاته
 //     (الكانوني دائماً in_progress أو completed/success فقط — الـCANCELLED الوحيد كان تابعاً
-//     لـauto job check-run، والذي عولج بإيقاف cancel-in-progress أعلاه). الوصول الفعلي لـ
+//     لـauto job check-run، والذي عولج بحذف concurrency بالكامل أعلاه). الوصول الفعلي لـ
 //     statusCheckRollup.state=SUCCESS وmergeStateStatus=CLEAN حياً يتطلب تشغيلاً فعلياً على
 //     GitHub Actions (غير قابل للمحاكاة الكاملة بجافاسكريبت صرف) — هذا بالضبط ما يتحقق منه
 //     اختبار post-merge حي لاحق قبل دمج أي PR يعتمد على الـGate (الشرط رقم 9 من طلب المستخدم).
