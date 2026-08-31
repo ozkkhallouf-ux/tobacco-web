@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { evaluateCodexReview } from './codex-review-gate-logic.mjs';
+import { evaluateCodexReview, concurrencyGroup } from './codex-review-gate-logic.mjs';
 
 // Contract + regression checks for .github/workflows/codex-review-gate.yml —
 // إصلاح 2026-08-31 لثغرة إعادة ربط commit_id تلقائياً بعد rebase (اكتُشفت بعد دمج PR
@@ -106,5 +106,46 @@ const formalReviewResult = evaluateCodexReview({
   issueComments: [],
 });
 assert.equal(formalReviewResult.conclusion, 'success', 'formal review بـcommit_id مطابق للـHEAD يجب أن يمر');
+
+// 3) فحص مفتاح concurrency — إصلاح 2026-08-31 (PR #146: pull_request_target وissue_comment
+//    كانا يلغيان بعضهما لأن المفتاح لم يفصل حسب نوع الحدث).
+assert.match(
+  yml,
+  /group:\s*codex-review-gate-\$\{\{[\s\S]{0,200}\}\}-\$\{\{\s*github\.event_name\s*\}\}/,
+  'مفتاح concurrency group يجب أن يتضمن github.event_name لفصل فئات الأحداث',
+);
+assert.match(yml, /cancel-in-progress:\s*true/, 'cancel-in-progress يجب أن يبقى true (داخل نفس فئة الحدث)');
+
+// سيناريو (ج): pull_request_target ثم pull_request_review مباشرة على نفس الـPR ⇒
+// يجب ألا يقع الاثنان بنفس مجموعة concurrency (فلا يُلغي أحدهما الآخر).
+const prNumber = 146;
+const groupOpened = concurrencyGroup({ prNumber, eventName: 'pull_request_target' });
+const groupReview = concurrencyGroup({ prNumber, eventName: 'pull_request_review' });
+const groupIssueComment = concurrencyGroup({ prNumber, eventName: 'issue_comment' });
+assert.notEqual(
+  groupOpened,
+  groupReview,
+  'pull_request_target وpull_request_review يجب ألا يشتركا بنفس مجموعة concurrency',
+);
+assert.notEqual(
+  groupOpened,
+  groupIssueComment,
+  'pull_request_target وissue_comment (السباق الحقيقي المرصود على PR #146) يجب ألا يشتركا بنفس مجموعة concurrency',
+);
+
+// سيناريو (د): تشغيلان متتاليان من نفس فئة الحدث لنفس الـPR ⇒ نفس مجموعة concurrency،
+// أي أن الأحدث لا يزال يُلغي الأقدم منها (cancel-in-progress: true يبقى فعالاً هنا).
+const groupSecondOpenedRun = concurrencyGroup({ prNumber, eventName: 'pull_request_target' });
+assert.equal(
+  groupOpened,
+  groupSecondOpenedRun,
+  'تشغيلان من نفس فئة الحدث لنفس الـPR يجب أن يشتركا بنفس مجموعة concurrency (يُلغي الأحدث الأقدم)',
+);
+const groupSecondIssueCommentRun = concurrencyGroup({ prNumber, eventName: 'issue_comment' });
+assert.equal(
+  groupIssueComment,
+  groupSecondIssueCommentRun,
+  'تشغيلان من issue_comment لنفس الـPR يجب أن يشتركا بنفس المجموعة (لا تراكم تشغيلات قديمة)',
+);
 
 console.log('codex-review-gate-logic.mjs contract + regression checks passed.');

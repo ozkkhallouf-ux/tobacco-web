@@ -89,3 +89,21 @@ export function evaluateCodexReview({
     badgeCounts,
   };
 }
+
+// ⚠️ إصلاح جوهري رابع بتاريخ 2026-08-31 (فصل concurrency group حسب نوع الحدث):
+//   لوحظ حياً على PR #146 أن pull_request_target (فتح الـPR) وissue_comment
+//   ("@codex review") كانا يقعان بنفس مجموعة concurrency (المفتاح يعتمد فقط على رقم
+//   الـPR)، فيُلغي الأحدث الأقدم عبر cancel-in-progress: true رغم أنهما فحصان مستقلان
+//   منطقياً. الحل: يُضاف github.event_name إلى مفتاح المجموعة — كل فئة حدث بمجموعتها
+//   الخاصة، بينما يبقى cancel-in-progress فعالاً *داخل* نفس فئة الحدث (تشغيلان متتاليان
+//   من نفس النوع لا يزال أحدثهما يُلغي أقدمهما، فلا تتراكم تشغيلات قديمة بلا داعٍ).
+
+/**
+ * يطابق تعبير `concurrency.group` في codex-review-gate.yml حرفياً.
+ * @param {{ prNumber: string | number, eventName: string }} input
+ */
+export function concurrencyGroup({ prNumber, eventName }) {
+  if (!prNumber) throw new Error('prNumber مطلوب');
+  if (!eventName) throw new Error('eventName مطلوب');
+  return `codex-review-gate-${prNumber}-${eventName}`;
+}

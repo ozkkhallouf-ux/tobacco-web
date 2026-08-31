@@ -130,7 +130,20 @@ permissions:
   checks: write
 
 concurrency:
-  group: codex-review-gate-${{ github.event.pull_request.number || github.event.issue.number || github.event.inputs.pr_number }}
+  # إصلاح جوهري رابع بتاريخ 2026-08-31 (فصل concurrency group حسب نوع الحدث):
+  #   لوحظ حياً على PR #146 أن فتح الـPR (pull_request_target) وتعليق "@codex review"
+  #   (issue_comment) — الذي يصل بعده بثوانٍ عادةً لأن المستخدم يطلب المراجعة فوراً —
+  #   كانا يقعان في نفس مجموعة concurrency (المفتاح كان يعتمد فقط على رقم الـPR)، فيُلغي
+  #   الثاني الأول بواسطة cancel-in-progress: true. التشغيل الملغى ليس دليل فشل ولا يمسّ
+  #   دقة الـGate (التشغيل الذي ألغاه أكمل هو نفسه وأعطى نتيجة صحيحة)، لكنه إرباك غير
+  #   ضروري في تبويب Checks. الحل: أُضيف github.event_name إلى مفتاح المجموعة، فتصبح كل
+  #   فئة حدث (pull_request_target، pull_request_review، pull_request_review_comment،
+  #   issue_comment، workflow_dispatch) بمجموعتها الخاصة — لا يُلغي أحدها الآخر إطلاقاً.
+  #   cancel-in-progress: true بقي فعالاً *داخل* نفس فئة الحدث فقط: عدة "@codex review"
+  #   متتالية مثلاً لا تزال تُلغي التشغيل الأقدم منها لنفس الفئة، فلا تتراكم تشغيلات قديمة
+  #   بلا داعٍ. لا تغيير على شرط اعتماد الـGate نفسه (مراجعة Codex صريحة على أحدث HEAD) —
+  #   مُختبَر في scripts/check-codex-review-gate-logic.mjs (جزء من npm run check).
+  group: codex-review-gate-${{ github.event.pull_request.number || github.event.issue.number || github.event.inputs.pr_number }}-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:
