@@ -241,8 +241,16 @@ begin
  for job_record in select jobid,jobname,active from cron.job where jobname<>'monitor-project-tasks' loop
   select status,start_time into last_job_status,last_job_at from cron.job_run_details
    where jobid=job_record.jobid order by start_time desc limit 1;
-  -- التصنيف كله في الدالة النقية أعلاه؛ هنا قرار الإنذار فقط.
-  -- 'ok' و'never_run' و'inflight' تمرّ إلى الفرع السليم بلا إنذار.
+  -- التصنيف كله في الدالة النقية أعلاه؛ هنا قرار الحالة فقط، بثلاثة فروع
+  -- صريحة لا فرعين. الفرعان وحدهما كانا هما العطل (ملاحظة Codex P1 على
+  -- PR #154): كل ما ليس إنذاراً كان يسقط في مسار "سليم"، فمهمة فاشلة تُعيد
+  -- المحاولة تتصادف مع دورة المراقب فتُصنَّف inflight ⇒ تُرسَل رسالة تعافٍ
+  -- كاذبة، ويُمسح last_alert_at، ويُسجَّل بدء محاولة لم تنجح في
+  -- last_success_at. ثم إن فشلت المحاولة فعلاً، يكتم
+  -- notify_telegram_dispatch إشعارها لأن مفتاح project-cron-failure:<job>
+  -- ثابت بمهلة 60 دقيقة وقد استُهلك عند الفشل الأول — فتبقى "✅ عادت للعمل"
+  -- آخر ما يراه المشغّل والمهمة فاشلة. مراقب صامت ومطمئن كذباً أسوأ من
+  -- مراقب صاخب وصادق.
   job_health:=private.cron_job_health(job_record.active,last_job_status,last_job_at,cron_grace);
   if job_health in ('disabled','failed','stuck') then
    detail_text:=case job_health
@@ -263,7 +271,8 @@ begin
    insert into private.project_task_health_state(task_key,is_healthy,last_observed_at,last_alert_at,last_detail)
     values('cron:'||job_record.jobname,false,now(),previous_alert_at,detail_text)
     on conflict(task_key) do update set is_healthy=false,last_observed_at=now(),last_alert_at=excluded.last_alert_at,last_detail=excluded.last_detail;
-  else
+  elsif job_health = 'ok' then
+   -- 'ok' وحدها تمنح شهادة النجاح. لا محاولة قيد التنفيذ، ولا مهمة لم تُشغَّل.
    select is_healthy into previous_healthy from private.project_task_health_state where task_key='cron:'||job_record.jobname;
    if previous_healthy=false then
     perform public.notify_telegram('project_task_recovered',
@@ -273,6 +282,21 @@ begin
    insert into private.project_task_health_state(task_key,is_healthy,last_observed_at,last_success_at,last_alert_at,last_detail)
     values('cron:'||job_record.jobname,true,now(),last_job_at,null,'يعمل')
     on conflict(task_key) do update set is_healthy=true,last_observed_at=now(),last_success_at=excluded.last_success_at,last_alert_at=null,last_detail='يعمل';
+  else
+   -- 'inflight' / 'never_run': حالة محايدة. لا إنذار ولا تعافٍ، ولا تُمَس
+   -- is_healthy ولا last_alert_at ولا last_success_at ولا last_detail —
+   -- الحكم السابق يبقى كما هو حتى نرى نتيجة نهائية فعلية. كل ما تثبته هذه
+   -- الحالة أن المراقب شاهد المهمة، فتُحدَّث last_observed_at وحدها.
+   --
+   -- الصف الغائب (مهمة جديدة لم يُحكم عليها بعد): يُنشأ بـis_healthy=null —
+   -- العمود nullable في المخطط أصلاً، وهي القيمة الوحيدة الصادقة هنا. ولا
+   -- تُخترع true لمجرد إنشاء الصف. وnull آمنة في الفرعين الآخرين معاً:
+   --   الإنذار : null is distinct from false = true  ⇒ الإشعار يمرّ لاحقاً.
+   --   التعافي : null = false ⇒ NULL ⇒ لا تعافٍ كاذباً من حالة مجهولة.
+   insert into private.project_task_health_state(task_key,is_healthy,last_observed_at,last_detail)
+    values('cron:'||job_record.jobname,null,now(),
+     case when job_health='never_run' then 'لم تُشغَّل بعد' else 'قيد التنفيذ' end)
+    on conflict(task_key) do update set last_observed_at=now();
   end if;
  end loop;
 end $$;

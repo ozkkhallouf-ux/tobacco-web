@@ -13,10 +13,12 @@ import path from 'node:path';
 // المهلة (< مقابل <=) التي بلا تثبيت تصير غموضاً في أول مراجعة.
 const MONITOR_SQL = 'supabase/project-task-health-monitor.sql';
 const TRUTH_TABLE = 'supabase/tests/cron-job-health-truth-table.sql';
+const TRANSITIONS = 'supabase/tests/cron-job-health-transitions.sql';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const sql = await readFile(path.join(repoRoot, MONITOR_SQL), 'utf8');
 const truth = await readFile(path.join(repoRoot, TRUTH_TABLE), 'utf8');
+const transitions = await readFile(path.join(repoRoot, TRANSITIONS), 'utf8');
 
 const codeOnly = (text) =>
   text
@@ -156,7 +158,77 @@ assert.match(
 );
 
 // ---------------------------------------------------------------------------
-// 9) جدول الحقيقة موجود ويغطي فعلاً ما يدّعيه.
+// 9) الفروع الثلاثة الصريحة — قلب إصلاح ملاحظة Codex P1 على PR #154.
+//    فرعان فقط يعنيان أن كل ما ليس إنذاراً يسقط في مسار "سليم"، فمهمة فاشلة
+//    تُعيد المحاولة تُصنَّف inflight ⇒ تعافٍ كاذب + مسح last_alert_at + ختم
+//    last_success_at بمحاولة لم تنجح ⇒ ثم يُكتم إشعار الفشل التالي بمفتاح
+//    الـdedupe ذي الستين دقيقة. مراقب صامت ومطمئن كذباً.
+// ---------------------------------------------------------------------------
+const cronLoop = monitorCode.slice(monitorCode.indexOf('for job_record in select'));
+const iFail = cronLoop.indexOf("if job_health in ('disabled','failed','stuck') then");
+const iOk = cronLoop.indexOf("elsif job_health = 'ok' then");
+const iNeutral = cronLoop.indexOf('\n  else\n', iOk);
+const iEnd = cronLoop.indexOf('\n  end if;', iNeutral);
+assert.ok(
+  iFail >= 0 && iOk > iFail && iNeutral > iOk && iEnd > iNeutral,
+  `${MONITOR_SQL}: الفروع الثلاثة (failure / ok / neutral) غير موجودة بهذا الترتيب — لا تعُد إلى فرعين`,
+);
+const failBranch = cronLoop.slice(iFail, iOk);
+const okBranch = cronLoop.slice(iOk, iNeutral);
+const neutralBranch = cronLoop.slice(iNeutral, iEnd);
+
+// 'ok' وحدها تمنح التعافي؛ ولا إشعار من أي نوع في الفرع المحايد.
+assert.match(failBranch, /notify_telegram\('project_task_failure'/, `${MONITOR_SQL}: فرع الفشل لا يُشعر`);
+assert.match(okBranch, /notify_telegram\('project_task_recovered'/, `${MONITOR_SQL}: التعافي ليس في فرع 'ok'`);
+assert.doesNotMatch(
+  neutralBranch,
+  /notify_telegram/,
+  `${MONITOR_SQL}: الفرع المحايد يُصدر إشعاراً — inflight/never_run يجب أن يصمتا تماماً`,
+);
+assert.match(
+  okBranch,
+  /insert into private\.project_task_health_state\(task_key,is_healthy,last_observed_at,last_success_at,last_alert_at,last_detail\)/,
+  `${MONITOR_SQL}: فرع 'ok' فقد كتابة شهادة النجاح الكاملة`,
+);
+
+// الفرع المحايد لا يدّعي صحة ولا يدهس حكماً سابقاً: is_healthy=null عند
+// الإنشاء، وon conflict يحدّث last_observed_at وحدها لا غير.
+assert.match(
+  neutralBranch,
+  /values\('cron:'\|\|job_record\.jobname,null,now\(\),/,
+  `${MONITOR_SQL}: الفرع المحايد يجب أن يُنشئ الصف بـis_healthy=null — لا تُخترع true لمجرد إنشاء صف`,
+);
+const neutralUpsert = neutralBranch.slice(neutralBranch.indexOf('on conflict(task_key) do update set'));
+const neutralSet = neutralUpsert.slice(neutralUpsert.indexOf('set ') + 4, neutralUpsert.indexOf(';'));
+assert.equal(
+  neutralSet.trim(),
+  'last_observed_at=now()',
+  `${MONITOR_SQL}: on conflict في الفرع المحايد يجب أن يحدّث last_observed_at وحدها — وجدت: ${neutralSet.trim()}`,
+);
+
+// ---------------------------------------------------------------------------
+// 10) اختبارات انتقال الحالة موجودة وتغطي التسلسلات الحرجة فعلاً.
+//     المصنِّف لم يكن هو العطل في P1 — الانتقال بعده كان.
+// ---------------------------------------------------------------------------
+const transitionAsserts = transitions.match(/\bassert /g) ?? [];
+assert.ok(
+  transitionAsserts.length >= 30,
+  `${TRANSITIONS}: عدد التأكيدات ${transitionAsserts.length} أقل من 30 — حُذف تأكيد من تسلسلات الانتقال`,
+);
+for (const [needle, why] of [
+  ["perform pg_temp.step_failure(k,'فشل آخر تشغيل عند 2026-08-31 12:00')", 'تسلسل failed → inflight → failed'],
+  ['seq1: خرج تعافٍ كاذب', 'التأكيد الذي يمسك عطل P1 نفسه'],
+  ['seq2: التعافي لم يخرج عند النجاح الفعلي', 'التعافي عند succeeded وحده'],
+  ['seq3: خرج إشعار في تسلسل سليم بالكامل', 'healthy → inflight → succeeded بلا إشعار'],
+  ['seq4: is_healthy يجب أن تكون null لا true', 'never_run بلا حالة سابقة'],
+  ['seq5: never_run دهس حكم فشل قائم', 'never_run فوق حالة قائمة'],
+  ['seq6: تعافٍ خرج من حالة مجهولة', 'لا تعافٍ من is_healthy=null'],
+]) {
+  assert.ok(transitions.includes(needle), `${TRANSITIONS}: تغطية ناقصة — ${why}`);
+}
+
+// ---------------------------------------------------------------------------
+// 11) جدول الحقيقة موجود ويغطي فعلاً ما يدّعيه.
 // ---------------------------------------------------------------------------
 const asserts = truth.match(/assert private\.cron_job_health\(/g) ?? [];
 assert.ok(
@@ -189,5 +261,6 @@ for (const [needle, why] of [
 }
 
 console.log(
-  `pg_cron job health classifier checks passed (${VERDICTS.length} حالات، ${asserts.length} تأكيداً في جدول الحقيقة، المهلة 10 دقائق، الحدّ صارم <).`,
+  `pg_cron job health checks passed (${VERDICTS.length} حالات، ${asserts.length} تأكيداً في جدول الحقيقة، `
+  + `${transitionAsserts.length} في انتقال الحالة، ثلاثة فروع صريحة، المهلة 10 دقائق، الحدّ صارم <).`,
 );
