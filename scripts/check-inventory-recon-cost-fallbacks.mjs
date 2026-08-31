@@ -68,8 +68,15 @@ for (const [label, fnSql] of [[CANONICAL_FILE, codeOnly(fnCanonical)], [MIGRATIO
   );
   assert.match(
     fnSql,
-    /lower\(trim\(ic4\.match_key\)\) = lower\(nullif\(trim\(coalesce\(it ->> 'itemName', it ->> 'item_name', ''\)\), ''\)\)/,
-    `${label}: الرجوع بالاسم يجب أن يستعلم match_key (item_guid لا يحوي أسماء بعد ترحيل 20260827110325).`,
+    /lower\(trim\(ic4\.item_name\)\) = lower\(nullif\(trim\(coalesce\(it ->> 'itemName', it ->> 'item_name', ''\)\), ''\)\)/,
+    `${label}: الرجوع بالاسم يجب أن يستعلم العمود المخصَّص item_name — match_key يحمل كود الأمين للصفوف بلا GUID فلا يلتقط الاسم.`,
+  );
+  // ولا يجوز أن يعود الرجوع بالاسم إلى match_key: كود الأمين (Code) ورقم التقرير
+  // (mt.Number) حقلان مختلفان، فالصفوف المحفوظة بالكود تفلت من كل المسارات.
+  assert.doesNotMatch(
+    fnSql,
+    /lower\(trim\(ic\d\.match_key\)\)\s*=\s*lower/,
+    `${label}: عودة الثغرة — الرجوع بالاسم على match_key يفوّت كل صف كُتب بكود الأمين.`,
   );
   // بحث GUID احتياطي على match_key يغطي الصفوف السابقة لتشغيل push التالي.
   assert.match(
@@ -109,7 +116,7 @@ for (const [label, fnSql] of [[CANONICAL_FILE, codeOnly(fnCanonical)], [MIGRATIO
 const norm = (v) => (typeof v === 'string' ? v.trim() : '') || null;
 const lower = (v) => (v === null ? null : v.toLowerCase());
 
-function resolveCost(rows, item, { numberFallbackColumn = 'match_key', nameFallbackColumn = 'match_key' } = {}) {
+function resolveCost(rows, item, { numberFallbackColumn = 'match_key', nameFallbackColumn = 'item_name' } = {}) {
   const guid = norm(item.itemGuid);
   const number = norm(item.itemNumber);
   const name = norm(item.itemName);
@@ -130,6 +137,9 @@ const rows = [
   { match_key: 'GUID-AAA', item_guid: 'GUID-AAA', item_name: 'دخان أ', avg_cost: 10, currency: '$' },
   { match_key: 'CODE-777', item_guid: null,       item_name: 'دخان ب', avg_cost: 20, currency: '$' },
   { match_key: 'دخان ج',   item_guid: null,       item_name: 'دخان ج', avg_cost: 30, currency: '$' },
+  // الحالة التي رصدها Codex: view التكلفة أعطى Code بلا GUID فحُفظ في match_key،
+  // بينما تقرير المخزون يرسل mt.Number المختلف — لا GUID ولا رقم يطابق هذا الصف.
+  { match_key: 'CODE-ABC', item_guid: null,       item_name: 'دخان هـ', avg_cost: 50, currency: '$' },
   { match_key: 'GUID-LEG', item_guid: null,       item_name: 'دخان د', avg_cost: 40, currency: '$' },
 ];
 
@@ -171,6 +181,20 @@ assert.equal(
   'اسم صنف فارغ يجب ألا يطابق أي صف في item_costs.',
 );
 
+// الحالة التي رصدها Codex في مراجعته الثانية: صف محفوظ بكود الأمين ورقم تقرير
+// مختلف — يجب أن يُنقذه الرجوع بالاسم على العمود المخصَّص item_name.
+assert.equal(
+  resolveCost(rows, { itemGuid: null, itemNumber: 'NUM-999', itemName: 'دخان هـ' })?.avg_cost,
+  50,
+  'صف محفوظ بكود الأمين ورقم تقرير مختلف يجب أن يُطابَق بالاسم على item_name.',
+);
+// وبالسلوك السابق (الرجوع بالاسم على match_key) يفقد هذا الصف تكلفته تماماً.
+assert.equal(
+  resolveCost(rows, { itemGuid: null, itemNumber: 'NUM-999', itemName: 'دخان هـ' }, { nameFallbackColumn: 'match_key' }),
+  null,
+  'النموذج المرجعي: الرجوع بالاسم على match_key يفوّت الصفوف المحفوظة بكود الأمين.',
+);
+
 // إثبات أن هذا الفحص يرصد الانحدار فعلاً: بالسلوك المعطوب (الرجوع على item_guid)
 // يفقد الصنف بلا GUID حقيقي تكلفته تماماً — وهي الثغرة التي رصدها Codex.
 const broken = resolveCost(rows, { itemGuid: null, itemNumber: 'CODE-777', itemName: 'دخان ب' }, {
@@ -179,4 +203,4 @@ const broken = resolveCost(rows, { itemGuid: null, itemNumber: 'CODE-777', itemN
 });
 assert.equal(broken, null, 'النموذج المرجعي للسلوك المعطوب يجب أن يُظهر فقدان التكلفة (وإلا فالفحص لا يرصد شيئاً).');
 
-console.log('check-inventory-recon-cost-fallbacks: OK — رجوع الكود/الاسم على match_key، لا انحراف بين المخطط والترحيل، وأولوية المطابقة مثبتة سلوكياً.');
+console.log('check-inventory-recon-cost-fallbacks: OK — GUID على item_guid، الكود على match_key، الاسم على item_name، لا انحراف بين المخطط والترحيل، وأولوية المطابقة مثبتة سلوكياً.');

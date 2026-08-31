@@ -119,7 +119,7 @@ comment on constraint inventory_recon_lines_item_name_check on inventory_recon_l
 comment on constraint inventory_recon_lines_actual_qty_check on inventory_recon_lines is 'يمنع كمية فعلية سالبة — دفاع مستوى قاعدة بيانات مستقل عن أي تحقق في الواجهة';
 comment on constraint inventory_recon_lines_unit_cost_check on inventory_recon_lines is 'يمنع تكلفة وحدة سالبة لنفس السبب';
 comment on constraint inventory_recon_lines_currency_check on inventory_recon_lines is 'قائمة العملات المسموحة USD/SYP فقط أو NULL إن لم تُعرف تكلفة موثوقة للصنف بعد — لا افتراض ضمني لعملة بلا تكلفة فعلية';
-comment on column inventory_recon_lines.unit_cost is 'تكلفة الوحدة من item_costs عبر item_guid ثم match_key (كود/اسم) — تبقى NULL إن لم توجد تكلفة موثوقة، ولا تُصفَّر أبداً كي لا يظهر settlement_value=0 مضلِّلاً';
+comment on column inventory_recon_lines.unit_cost is 'تكلفة الوحدة من item_costs عبر item_guid ثم match_key ثم item_name — تبقى NULL إن لم توجد تكلفة موثوقة، ولا تُصفَّر أبداً كي لا يظهر settlement_value=0 مضلِّلاً';
 comment on column inventory_recon_lines.settlement_value is 'قيمة تقديرية = (الفعلي - النظام) × التكلفة — تبقى NULL صراحة إن لم تُجرَد الكمية الفعلية بعد أو لم تُعرف تكلفة الصنف، بدل صفر مضلِّل';
 
 -- session_id/line_id بلا foreign key عمداً: سجل التدقيق يجب أن يبقى دائماً
@@ -842,7 +842,16 @@ begin
   --   2) match_key = GUID الصنف            (صفوف كُتبت قبل تشغيل push التالي،
   --      فالـGUID فيها ما يزال في match_key وitem_guid لم يُملأ بعد)
   --   3) match_key = رقم/كود الصنف         (رجوع بالكود)
-  --   4) match_key = اسم الصنف             (رجوع بالاسم، غير حسّاس لحالة الأحرف)
+  --   4) item_name = اسم الصنف             (رجوع بالاسم على العمود المخصَّص،
+  --      غير حسّاس لحالة الأحرف والفراغات)
+  --
+  -- ⚠️ إصلاح ملاحظة Codex P1 الثانية على PR #126: الرجوع بالاسم يجب أن يكون على
+  -- العمود المخصَّص item_name لا على match_key. السبب أن match_key يحمل كود الأمين
+  -- حين يتوفّر كود بلا GUID، والكود يأتي من عمود Code/MaterialCode/ItemCode/Barcode
+  -- في view التكلفة، بينما تقرير المخزون يرسل itemNumber من عمود mt.Number المختلف
+  -- (tools/push-ameen-warehouse-stock.ps1) — فلا المسار (3) ولا رجوع بالاسم على
+  -- match_key يلتقط تلك الصفوف. أما item_name فيكتبه push-item-costs.ps1 لكل صف
+  -- ويضمن عدم فراغه (يُصفّي الأسماء الفارغة في مصدره)، فهو مفتاح الرجوع المتوافق.
   insert into public.inventory_recon_lines
     (session_id, item_key, item_number, item_name, unit_name, system_qty, actual_qty, unit_cost, currency, reason)
   select
@@ -892,7 +901,7 @@ begin
     where ic_by_guid.avg_cost is null
       and ic_by_legacy_guid.avg_cost is null
       and ic_by_number.avg_cost is null
-      and lower(trim(ic4.match_key)) = lower(nullif(trim(coalesce(it ->> 'itemName', it ->> 'item_name', '')), ''))
+      and lower(trim(ic4.item_name)) = lower(nullif(trim(coalesce(it ->> 'itemName', it ->> 'item_name', '')), ''))
     limit 1
   ) ic_by_name on true
   left join lateral (
