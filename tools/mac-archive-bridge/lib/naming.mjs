@@ -59,6 +59,7 @@ export function buildFileName(docType, meta = {}, today = new Date()) {
   let base;
   switch (docType) {
     case "invoice":
+    case "return_invoice":
     case "receipt":
     case "payment":
       base = `${spec.label} - ${party} - رقم ${number} - ${date}`;

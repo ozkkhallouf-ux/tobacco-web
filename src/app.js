@@ -4987,14 +4987,12 @@ async function exportVoucherPdf(v) {
   const isRet = v.type === "return";
   const safe = String(v.name || (isInv ? "فاتورة" : (isRet ? "مرتجع" : (isPay ? "صرف" : "قبض")))).replace(/[^\p{L}\p{N}]+/gu, "_").slice(0, 40);
   const prefix = isInv ? "فاتورة" : (isRet ? "فاتورة-مرتجع" : (isPay ? "سند-صرف" : "سند-قبض"));
-  // وجهة الأرشفة: الفاتورة إلى «فواتير الزبائن»، السندان إلى «سندات قبض ودفع».
-  // المرتجع لا اصطلاح تسمية معتمد له ضمن الفواتير، ووضعه هناك يجعله لا يُميَّز
-  // عن بيع حقيقي — لذا يذهب إلى «تقارير مختلفة» بعنوان صريح.
-  const archiveDocType = isInv ? "invoice" : (isRet ? "other_report" : (isPay ? "payment" : "receipt"));
+  // وجهة الأرشفة: الفاتورة والمرتجع إلى «فواتير الزبائن»، السندان إلى «سندات
+  // قبض ودفع». المرتجع نوع مستقل (`return_invoice`) لا يُخلط مع `invoice`
+  // داخلياً، واسمه يبدأ بـ«فاتورة مرتجع» فيتميّز في الأرشيف عن بيع حقيقي.
+  const archiveDocType = isInv ? "invoice" : (isRet ? "return_invoice" : (isPay ? "payment" : "receipt"));
   const archiveDate = String(v.date || todayIsoDate()).slice(0, 10);
-  const archiveMeta = isRet
-    ? { title: `فاتورة مرتجع - ${v.name || "بلا اسم"} - رقم ${v.no || "—"}`, date: archiveDate }
-    : { party: v.name, number: v.no, date: archiveDate };
+  const archiveMeta = { party: v.name, number: v.no, date: archiveDate };
   const exported = await exportReportPdf(
     voucherPdfMarkup(v),
     `${prefix}-${safe}-${todayIsoDate()}.pdf`,

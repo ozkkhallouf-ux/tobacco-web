@@ -144,6 +144,7 @@ await test("اصطلاحات بقية الأنواع", () => {
     ["price_list", { date: "2026-08-31" }, "نشرة أسعار - 2026-08-31.pdf", "نشرات أسعار"],
     ["purchase_invoice", { party: "مورد الشام", number: "31", date: "2026-08-31" }, "فاتورة مشتريات - مورد الشام - رقم 31 - 2026-08-31.pdf", "فواتير المشتريات"],
     ["purchase_invoice", { number: "31", date: "2026-08-31" }, "فاتورة مشتريات - رقم 31 - 2026-08-31.pdf", "فواتير المشتريات"],
+    ["return_invoice", { party: "حسن عباس", number: "44", date: "2026-08-31" }, "فاتورة مرتجع - حسن عباس - رقم 44 - 2026-08-31.pdf", "فواتير الزبائن"],
     ["other_report", { title: "تقرير المواد الراكدة", date: "2026-08-31" }, "تقرير المواد الراكدة - 2026-08-31.pdf", "تقارير مختلفة"]
   ];
   for (const [docType, meta, expectedName, expectedFolder] of cases) {
@@ -200,6 +201,30 @@ await test("سند قبض يذهب إلى مجلد السندات المشترك
   });
   assert.equal(res.status, 200);
   assert.ok(listFolder("سندات قبض ودفع").includes("سند قبض - سامر - رقم 7 - 2026-08-31.pdf"));
+});
+
+await test("فاتورة المرتجع نوع مستقل يسكن مع فواتير الزبائن بلا خلط مع البيع", async () => {
+  const meta = { party: "حسن عباس", number: "44", date: "2026-08-31" };
+  const ret = await call("/archive", { method: "POST", body: archiveBody("return_invoice", meta) });
+  assert.equal(ret.status, 200, JSON.stringify(ret.data));
+  assert.equal(ret.data.folder, "فواتير الزبائن");
+  assert.equal(ret.data.file, "فاتورة مرتجع - حسن عباس - رقم 44 - 2026-08-31.pdf");
+
+  // نفس الزبون ونفس الرقم كبيع حقيقي: يجب أن ينتج ملفاً منفصلاً باسم مختلف —
+  // خلط المرتجع مع البيع يجعل المستندين لا يُميَّزان في الأرشيف.
+  const sale = await call("/archive", { method: "POST", body: archiveBody("invoice", meta, samplePdf("S")) });
+  assert.equal(sale.status, 200);
+  assert.equal(sale.data.file, "فاتورة - حسن عباس - رقم 44 - 2026-08-31.pdf");
+  assert.notEqual(sale.data.file, ret.data.file);
+  const names = listFolder("فواتير الزبائن");
+  assert.ok(names.includes(ret.data.file) && names.includes(sale.data.file));
+});
+
+await test("فاتورة مرتجع بلا اسم أو رقم مرفوضة", async () => {
+  const noParty = await call("/archive", { method: "POST", body: archiveBody("return_invoice", { number: "44", date: "2026-08-31" }) });
+  assert.equal(noParty.status, 400);
+  const noNumber = await call("/archive", { method: "POST", body: archiveBody("return_invoice", { party: "حسن", date: "2026-08-31" }) });
+  assert.equal(noNumber.status, 400);
 });
 
 await test("فاتورة مشتريات تُكتب داخل المجلد ذي المحرف المخفي", async () => {
@@ -560,15 +585,25 @@ await test("app.js: الأرشفة لا تحجب التصدير ولا تُنت�
   // فاتورة المبيعات المسودة (بلا رقم موثوق) يجب ألا تدخل الأرشيف إطلاقاً.
   assert.ok(/invNo !== SALES_DRAFT_INVOICE_NO/.test(appJs), "حارس المسودة مفقود في تصدير PDF");
   assert.ok(/archive: invNo === SALES_DRAFT_INVOICE_NO \? null :/.test(appJs), "حارس المسودة مفقود في الطباعة");
+  // المرتجع نوع مستقل: لا يُرسل كـinvoice ولا كـother_report.
+  assert.ok(/isRet \? "return_invoice"/.test(appJs), "المرتجع يجب أن يُرسل بنوعه المستقل");
+  assert.ok(!/isRet \? "other_report"/.test(appJs), "بقي التصنيف القديم للمرتجع");
 });
 
-await test("index.html: CSP يسمح بالجسر المحلي فقط ويحمّل العميل", () => {
+await test("index.html: CSP يسمح بأصل واحد محلي فقط بلا wildcard ولا منافذ إضافية", () => {
   const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
   const csp = html.match(/content="default-src[^"]*"/);
   assert.ok(csp, "وسم CSP مفقود");
-  assert.ok(csp[0].includes("http://127.0.0.1:8787"), "الجسر المحلي غير مسموح في connect-src");
-  assert.ok(!/connect-src[^;]*http:\/\/\*/.test(csp[0]), "ممنوع أي wildcard على http في connect-src");
+  const connectSrc = csp[0].match(/connect-src([^;]*);/);
+  assert.ok(connectSrc, "connect-src مفقود");
+  const httpSources = connectSrc[1].trim().split(/\s+/).filter((s) => s.startsWith("http://"));
+  // قرار المالك 2026-08-31: أصل محلي واحد بالضبط، لا localhost ولا منفذ ثانٍ.
+  assert.deepEqual(httpSources, ["http://127.0.0.1:8787"], "connect-src: " + httpSources.join(" "));
+  assert.ok(!/\*/.test(connectSrc[1].replace("https://*.supabase.co", "")), "ممنوع أي wildcard غير Supabase");
   assert.ok(/src\/icloud-archive\.js/.test(html), "عميل الأرشفة غير محمّل");
+  // العميل يجب أن يخاطب العنوان نفسه المسموح به بالضبط.
+  const client = readFileSync(new URL("../src/icloud-archive.js", import.meta.url), "utf8");
+  assert.ok(/var BASE = "http:\/\/127\.0\.0\.1:8787"/.test(client), "عنوان العميل لا يطابق CSP");
 });
 
 await test("عميل الواجهة لا يحوي أي سر مكتوب", () => {
