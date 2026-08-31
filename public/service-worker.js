@@ -21,4 +21,24 @@ self.addEventListener("install",(event)=>{event.waitUntil(caches.open(CACHE_NAME
 self.addEventListener("activate",(event)=>{event.waitUntil((async()=>{await Promise.all((await caches.keys()).filter((key)=>key!==CACHE_NAME).map((key)=>caches.delete(key)));await self.clients.claim();})());});
 self.addEventListener("push",(event)=>{let payload={};try{payload=event.data?.json?.()||{};}catch{payload={notification:{body:event.data?.text?.()||""}};}const notification=payload.notification||payload;const title=String(notification.title||"OZK TOBACCO");const navigate=String(notification.navigate||"/?route=overview");event.waitUntil(self.registration.showNotification(title,{body:String(notification.body||""),icon:notification.icon||"public/icons/ozk-ios-full-notification-icon.png",badge:"public/icons/app-icon.png",tag:notification.tag||"ozk-alert",dir:"rtl",lang:"ar",data:{navigate}}));});
 self.addEventListener("notificationclick",(event)=>{event.notification.close();const target=new URL(event.notification?.data?.navigate||"/?route=overview",self.registration.scope).href;event.waitUntil(clients.matchAll({type:"window",includeUncontrolled:true}).then(async(list)=>{const existing=list.find((client)=>client.url.startsWith(self.registration.scope));if(existing){await existing.focus();if("navigate" in existing)await existing.navigate(target);return;}return clients.openWindow(target);}));});
-self.addEventListener("fetch",(event)=>{if(event.request.method!=="GET")return;event.respondWith(fetch(event.request).then((response)=>{const copy=response.clone();caches.open(CACHE_NAME).then((cache)=>cache.put(event.request,copy));return response;}).catch(()=>caches.match(event.request).then((cached)=>cached||caches.match("index.html"))));});
+// أصول التطبيق الثابتة تُطلب بمعامل نسخة (src/app.js?v=tobacco-N) بينما
+// التحميل المسبق يخزّن العنوان المجرّد، وCache.match يشمل الاستعلام افتراضياً.
+// فعند انقطاع الشبكة كانت المطابقة تخطئ ويرتدّ الطلب إلى index.html — أي يُعاد
+// **HTML مكان سكربت** فينهار التطبيق. قِيس: مع سند كاش HTTP خرجت v2 (نجاح
+// زائف مصدره كاش HTTP لا Cache Storage)، وبإزالة ذلك السند وحده صارت النتيجة
+// null: السكربت لم يُحمَّل إطلاقاً.
+// ignoreSearch محصور هنا في **ارتداد offline لأصول ثابتة same-origin فقط**:
+// لا يمسّ مسار الشبكة الطبيعي، ولا يُطبَّق على أي طلب ديناميكي أو API حيث
+// اختلاف المعامل يغيّر المعنى. المحاولة الدقيقة تسبقه دائماً، فلا يُستعمل إلا
+// حين تخفق المطابقة التامة.
+const STATIC_ASSET_PATH=/\/(?:src|public)\/.+\.(?:js|css|png|svg|webmanifest|woff2?)$/;
+function offlineFallback(request){
+  return caches.match(request).then((exact)=>{
+    if(exact)return exact;
+    let url;
+    try{url=new URL(request.url);}catch{return caches.match("index.html");}
+    if(url.origin!==self.location.origin||!STATIC_ASSET_PATH.test(url.pathname))return caches.match("index.html");
+    return caches.match(request,{ignoreSearch:true}).then((loose)=>loose||caches.match("index.html"));
+  });
+}
+self.addEventListener("fetch",(event)=>{if(event.request.method!=="GET")return;event.respondWith(fetch(event.request).then((response)=>{const copy=response.clone();caches.open(CACHE_NAME).then((cache)=>cache.put(event.request,copy));return response;}).catch(()=>offlineFallback(event.request)));});

@@ -109,15 +109,42 @@ check("activate ما زال ينظّف الكاش القديم ويأخذ الس
   /caches\.delete/.test(activateHandler) && /clients\.claim/.test(activateHandler),
   "فقد activate تنظيف الكاش أو clients.claim");
 
-check("معالج fetch ما زال network-first مع ارتداد إلى الكاش (سلوك offline)",
-  /fetch\(event\.request\)/.test(swCode) && /catch\(\(\)=>caches\.match\(event\.request\)/.test(swCode.replace(/\s+/g, "")),
-  "تغيّر معالج fetch — أعد التحقق من سلوك offline");
+const fetchHandler = (swCode.match(/self\.addEventListener\("fetch"[\s\S]*$/) || [""])[0];
+const fallbackFn = (swCode.match(/function offlineFallback\([\s\S]*?\n\}/) || [""])[0];
+
+check("مسار الشبكة ما زال network-first بلا تغيير",
+  /fetch\(event\.request\)/.test(fetchHandler) && !/ignoreSearch/.test(fetchHandler),
+  "تغيّر مسار الشبكة أو تسرّب ignoreSearch إليه");
+
+check("ارتداد offline يجرّب المطابقة التامة أولاً",
+  /caches\.match\(request\)\.then\(\(exact\)/.test(fallbackFn.replace(/\s+/g, "")) ||
+  /caches\.match\(request\)/.test(fallbackFn),
+  "لم تعد المطابقة التامة تسبق ignoreSearch");
+
+check("ignoreSearch محصور في ارتداد offline وحده",
+  (swCode.match(/ignoreSearch/g) || []).length === 1 && /ignoreSearch/.test(fallbackFn),
+  "ignoreSearch ظهر خارج ارتداد offline — قد يُخفي اختلاف معاملات الطلبات الديناميكية");
+
+check("ignoreSearch محصور بأصول ثابتة same-origin",
+  /origin!==self\.location\.origin/.test(fallbackFn.replace(/\s+/g, "")) &&
+  /STATIC_ASSET_PATH\.test/.test(fallbackFn),
+  "لم يعد الارتداد المتساهل محصوراً بأصول التطبيق الثابتة على نفس الأصل");
+
+check("الارتداد الأخير ما زال index.html (تشغيل offline للصفحة)",
+  /caches\.match\("index\.html"\)/.test(fallbackFn),
+  "فُقد ارتداد الصفحة");
 
 // ===== المختبر: خادم يحاكي GitHub Pages (max-age=600) ونشرتان =====
 const MAXAGE = 600;
 
-function makeLab({ updateViaCache, precacheReload }) {
-  let deploy = { cacheName: "swlab-v1", appJs: 'window.__APP_VERSION="v1";' };
+// المختبر يحاكي الإنتاج: index.html يطلب الأصول بمعامل نسخة
+// (`src/app.js?v=tobacco-N`) بينما ASSETS في الـservice worker عناوين مجرّدة —
+// وهذا التفاوت بالضبط هو ما يجعل ارتداد offline يخطئ المطابقة. صفحة تركيبية
+// بلا معامل كانت تُخفي العطل ولا تستطيع إعادة إنتاجه.
+// `assetCacheControl` يسمح بإسقاط سند كاش HTTP (`no-store`) لعزل مسار
+// Cache Storage وحده — وإلا نجح الاختبار زوراً بفضل كاش HTTP.
+function makeLab({ updateViaCache, precacheReload, assetCacheControl = "max-age=600" }) {
+  let deploy = { cacheName: "swlab-v1", appJs: 'window.__APP_VERSION="v1";', marker: "177" };
   const hits = [];
   const swBody = () => {
     let body = SW_LOGIC
@@ -130,27 +157,29 @@ function makeLab({ updateViaCache, precacheReload }) {
     return body;
   };
   const regOpts = updateViaCache ? `, {updateViaCache:"${updateViaCache}"}` : "";
-  const index = `<!doctype html><html><head><meta charset="utf-8"><title>swlab</title></head><body>
-<script src="src/app.js"></script>
+  const index = () => `<!doctype html><html><head><meta charset="utf-8"><title>swlab</title></head><body>
+<script src="src/app.js?v=tobacco-${deploy.marker}"></script>
 <script>if("serviceWorker" in navigator){window.addEventListener("load",()=>{
 navigator.serviceWorker.register("service-worker.js"${regOpts}).catch(()=>{});});}</script></body></html>`;
 
   const server = createServer((req, res) => {
-    const url = String(req.url || "/").split("?")[0];
-    hits.push(url);
-    const send = (body, type) => {
-      res.writeHead(200, { "content-type": type, "cache-control": `max-age=${MAXAGE}` });
+    const full = String(req.url || "/");
+    const url = full.split("?")[0];
+    // نسجّل العنوان **الكامل** كي نميّز طلب الصفحة (بمعامل) عن التحميل المسبق (مجرّد)
+    hits.push(full);
+    const send = (body, type, cacheControl = `max-age=${MAXAGE}`) => {
+      res.writeHead(200, { "content-type": type, "cache-control": cacheControl });
       res.end(body);
     };
-    if (url === "/" || url === "/index.html") return send(index, "text/html; charset=utf-8");
+    if (url === "/" || url === "/index.html") return send(index(), "text/html; charset=utf-8");
     if (url === "/service-worker.js") return send(SW_SHIM, "text/javascript");
     if (url === "/public/service-worker.js") return send(swBody(), "text/javascript");
-    if (url === "/src/app.js") return send(deploy.appJs, "text/javascript");
+    if (url === "/src/app.js") return send(deploy.appJs, "text/javascript", assetCacheControl);
     res.writeHead(404); res.end("nf");
   });
   return {
     server, hits,
-    publish: () => { deploy = { cacheName: "swlab-v2", appJs: 'window.__APP_VERSION="v2";' }; }
+    publish: () => { deploy = { cacheName: "swlab-v2", appJs: 'window.__APP_VERSION="v2";', marker: "178" }; }
   };
 }
 
@@ -196,9 +225,12 @@ async function deployThenReload(options) {
   check("بعد النشر: إعادة التحميل تجلب المنطق المستورَد من الشبكة",
     fixed.requested.includes("/public/service-worker.js"),
     `الطلبات: ${JSON.stringify(fixed.requested)}`);
-  check("بعد النشر: إعادة التحميل تجلب src/app.js الجديد فعلياً",
-    fixed.requested.includes("/src/app.js"),
+  check("بعد النشر: إعادة التحميل تجلب الأصل بمعامله الجديد من الشبكة",
+    fixed.requested.includes("/src/app.js?v=tobacco-178"),
     `الطلبات: ${JSON.stringify(fixed.requested)} — بقي التطبيق على النسخة القديمة`);
+  check("بعد النشر: التحميل المسبق يجلب الأصل المجرّد طازجاً (أثر cache:\"reload\")",
+    fixed.requested.includes("/src/app.js"),
+    `الطلبات: ${JSON.stringify(fixed.requested)}`);
 }
 
 // ===== ٣) اختبارات سلبية: كل شقّ من الإصلاح ضروري =====
@@ -210,7 +242,9 @@ async function deployThenReload(options) {
 }
 {
   const noReload = await deployThenReload({ updateViaCache: "none", precacheReload: false });
-  check("سلبي: بلا cache:\"reload\" يُكتشف الـSW لكن لا تصل ملفات جديدة",
+  // العنوان المُعنون يصل دائماً لأنه مفتاح كاش جديد؛ الفارق الذي يصنعه
+  // cache:"reload" هو في التحميل المسبق للعنوان **المجرّد**.
+  check("سلبي: بلا cache:\"reload\" يُملأ الكاش الجديد من كاش HTTP لا من الشبكة",
     noReload.requested.includes("/public/service-worker.js") && !noReload.requested.includes("/src/app.js"),
     `الطلبات: ${JSON.stringify(noReload.requested)}`);
 }
@@ -271,7 +305,60 @@ async function deployThenReload(options) {
   lab.server.close();
 }
 
-// ===== ٥) offline لم ينكسر =====
+// ===== ٥) offline بلا سند كاش HTTP: الأصل المُعنون يُخدَم من Cache Storage =====
+// هذا هو السيناريو الذي أثبت العطل: الصفحة تطلب `src/app.js?v=tobacco-178`
+// بينما الكاش يحمل `src/app.js` المجرّد. بترويسة no-store لا يستطيع كاش HTTP
+// إنقاذ الموقف، فتنكشف صحّة ارتداد offline وحده. قبل ignoreSearch كانت النتيجة
+// null — أي أن index.html عاد مكان السكربت فلم يُنفَّذ شيء.
+{
+  const lab = makeLab({ updateViaCache: "none", precacheReload: true, assetCacheControl: "no-store" });
+  await new Promise((done) => lab.server.listen(0, "127.0.0.1", done));
+  const base = `http://127.0.0.1:${lab.server.address().port}`;
+  const context = await browser.newContext();
+
+  const installer = await context.newPage();
+  installer.goto(`${base}/index.html`).catch(() => {});
+  await sleep(5000);
+  lab.publish();                                   // نشر يرفع المعامل إلى 178
+  await installer.reload({ timeout: 20000 }).catch(() => {});
+  await sleep(6000);
+
+  const online = await readVersion(installer);
+  check("online: الصفحة تحصل على النسخة الجديدة ذات المعامل الجديد",
+    online === "v2", `القيمة: ${online}`);
+  const cachedKeys = await installer.evaluate(async () => {
+    const names = await caches.keys();
+    const cache = await caches.open(names[0]);
+    return (await cache.keys()).map((request) => new URL(request.url).pathname + new URL(request.url).search);
+  }).catch(() => []);
+  await installer.close().catch(() => {});
+
+  await new Promise((done) => lab.server.close(done));   // «انقطع الإنترنت»
+
+  const offlinePage = await context.newPage();
+  await offlinePage.goto(`${base}/index.html`, { waitUntil: "load", timeout: 20000 }).catch(() => {});
+  const offlineVersion = await readVersion(offlinePage);
+  check("offline بلا كاش HTTP: الأصل المُعنون يُخدَم من Cache Storage",
+    offlineVersion === "v2",
+    `القيمة: ${offlineVersion} — مفاتيح الكاش: ${JSON.stringify(cachedKeys)}`);
+
+  // إثبات صريح أن السكربت نُفِّذ ولم يُعَد index.html مكانه
+  const servedHtmlInsteadOfJs = await offlinePage.evaluate(async () => {
+    try {
+      const response = await fetch("src/app.js?v=tobacco-178");
+      const type = response.headers.get("content-type") || "";
+      const body = await response.text();
+      return /text\/html/i.test(type) || /<!doctype|<html/i.test(body);
+    } catch { return "فشل الطلب"; }
+  }).catch(() => "تعذّر القياس");
+  check("offline: لا يُعاد index.html مكان الـJavaScript",
+    servedHtmlInsteadOfJs === false,
+    `النتيجة: ${servedHtmlInsteadOfJs}`);
+
+  await context.close();
+}
+
+// ===== ٦) offline لم ينكسر =====
 {
   const lab = makeLab({ updateViaCache: "none", precacheReload: true });
   await new Promise((done) => lab.server.listen(0, "127.0.0.1", done));
