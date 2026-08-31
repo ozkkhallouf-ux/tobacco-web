@@ -20,9 +20,15 @@ try {
     }
 
     $url = if ($env:SUPABASE_URL) { $env:SUPABASE_URL.TrimEnd('/') } else { "https://dyxbirfpxeocqffnfdeb.supabase.co" }
-    $apiKey = $env:SUPABASE_SERVICE_KEY
-    $token = $apiKey
+    # inventory_reports.created_by معرّف NOT NULL، ومفتاح الخدمة لا يحمل هوية مستخدم،
+    # فالرفع به كان يفشل بالخطأ 23502. نفضّل الدخول بحساب المزامنة مثل بقية سكربتات الرفع.
+    $apiKey = $null
+    $token = $null
     $createdBy = $null
+    if (-not ($env:TOBACCO_SUPABASE_PUBLIC_KEY -and $env:TOBACCO_SYNC_EMAIL -and $env:TOBACCO_SYNC_PASSWORD)) {
+        $apiKey = $env:SUPABASE_SERVICE_KEY
+        $token = $apiKey
+    }
     if (-not $apiKey) {
         $apiKey = $env:TOBACCO_SUPABASE_PUBLIC_KEY
         $email = $env:TOBACCO_SYNC_EMAIL

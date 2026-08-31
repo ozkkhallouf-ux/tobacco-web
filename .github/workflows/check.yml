@@ -27,3 +27,26 @@ jobs:
 
       - name: Run project check
         run: npm run check
+
+  # ------------------------------------------------------------
+  # عطل إنتاجي حيّ (2026-08-31): مهام Windows المجدولة تشغّل سكربتات
+  # tools/*.ps1 عبر powershell.exe أي Windows PowerShell 5.1، بينما
+  # التطوير يجري على PowerShell 7. صيغة صحيحة تماماً في 7 (استعمال if
+  # كتعبير داخل أقواس وسيط) تُحلَّل بلا خطأ في 5.1 ثم تسقط وقت التنفيذ
+  # بـCommandNotFoundException — فلا يلتقطها أي فحص ساكن ولا أي عدّاء
+  # ubuntu. هذه المهمة هي المكان الوحيد الذي يثبت التوافق فعلياً.
+  # ------------------------------------------------------------
+  ps51-compat:
+    name: توافق Windows PowerShell 5.1
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # shell: powershell على عدّاء GitHub هو Windows PowerShell 5.1
+      # تحديداً (بينما pwsh هو PowerShell 7). الفرق جوهري: الصيغة
+      # المعطوبة تمرّ بلا مشكلة على 7، فاختبارها هناك لا يثبت شيئاً —
+      # ولذلك يرفض السكربت نفسه العمل على غير 5.1 Desktop.
+      - name: Khalil audit sync - PowerShell 5.1 regression test
+        shell: powershell
+        run: .\tools\tests\Test-KhalilAuditPs51Compat.ps1

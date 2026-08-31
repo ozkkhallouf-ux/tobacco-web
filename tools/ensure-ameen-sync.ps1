@@ -29,7 +29,10 @@ $criticalTasks = @(
   @{ Name = "TOBACCO Ameen Sync";              MaxAgeMinutes = 10 },
   @{ Name = "TOBACCO Invoice Series Push";     MaxAgeMinutes = 20 },
   @{ Name = "TOBACCO Approved Prices Pull";    MaxAgeMinutes = 20 },
-  @{ Name = "TOBACCO Customer Movements Push"; MaxAgeMinutes = 20 }
+  @{ Name = "TOBACCO Customer Movements Push"; MaxAgeMinutes = 20 },
+  # Codex P1، 2026-08-30، جولة ٣: أُضيفت لسدّ ثغرة غياب أي مراقبة صحة لمهمة
+  # تدقيق خليل — تعمل كل دقيقتين، هامش 10 دقائق كافٍ.
+  @{ Name = "TOBACCO Khalil Audit Sync";       MaxAgeMinutes = 10 }
 )
 
 # رموز Task Scheduler التي نحتاج تمييزها — لا نعتبرها كلها نجاحاً:
@@ -74,6 +77,16 @@ $isMainComputer = [string]::Equals(
   [string]$MainComputerName,
   [StringComparison]::OrdinalIgnoreCase
 )
+# Fallback: the real sync host is the computer where the TOBACCO tasks are registered locally,
+# even if its name differs from $MainComputerName (old name). Without this the watchdog skips
+# task health checks on the machine that actually runs them.
+if (-not $isMainComputer) {
+  $hasLocalSyncTasks = [bool](Get-ScheduledTask -TaskName "TOBACCO Ameen Sync" -ErrorAction SilentlyContinue)
+  if ($hasLocalSyncTasks) {
+    $isMainComputer = $true
+    Write-Log "INFO: local TOBACCO tasks found on $($env:COMPUTERNAME) - treating this computer as the sync host"
+  }
+}
 
 if (-not $isMainComputer) {
   Write-Log "INFO: secondary computer $($env:COMPUTERNAME) — remote SQL reachability only; local scheduled tasks belong to $MainComputerName and are not inspected here"
@@ -170,11 +183,32 @@ $ameenWorkerStaleThresholdMinutes = 5
 
 if ($isMainComputer) {
   $workerTask = Get-ScheduledTask -TaskName $ameenWorkerTaskName -ErrorAction SilentlyContinue
-  $workerInfo = Get-ScheduledTaskInfo -TaskName $ameenWorkerTaskName -ErrorAction SilentlyContinue
+  if (-not $workerTask) {
+    # احتياط: البحث بالاسم المباشر يفشل أحياناً في جلسة المُجدوِل غير التفاعلية، فنمر على القائمة الكاملة.
+    $workerTask = Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.TaskName -eq $ameenWorkerTaskName } | Select-Object -First 1
+  }
+  $workerInfo = $null
+  if ($workerTask) {
+    $workerInfo = $workerTask | Get-ScheduledTaskInfo -ErrorAction SilentlyContinue
+    if (-not $workerInfo) { $workerInfo = Get-ScheduledTaskInfo -TaskName $ameenWorkerTaskName -ErrorAction SilentlyContinue }
+  }
 
-  if (-not $workerTask -or -not $workerInfo) {
-    $problems.Add("المهمة «$ameenWorkerTaskName» غير مسجّلة")
-    Write-Log "FAIL: task not registered — $ameenWorkerTaskName"
+  # جلسة المُجدوِل غير التفاعلية لا ترى أحياناً كل المهام المسجّلة، فلا نعتبر غياب كائن المهمة
+  # دليل عطل ما دام العامل يكتب نبضه. النبض هو المصدر الموثوق لصحة العامل.
+  $heartbeatFreshEarly = $false
+  if (Test-Path -LiteralPath $ameenWorkerHeartbeatPath) {
+    try {
+      $hbEarly = Get-Content -LiteralPath $ameenWorkerHeartbeatPath -Raw | ConvertFrom-Json
+      $hbEarlyTime = [datetime]::Parse([string]$hbEarly.timestampUtc, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind)
+      $hbEarlyAge = [math]::Round(((Get-Date).ToUniversalTime() - $hbEarlyTime.ToUniversalTime()).TotalMinutes, 1)
+      $heartbeatFreshEarly = ($hbEarlyAge -le $ameenWorkerStaleThresholdMinutes)
+      if ((-not $workerTask) -and $heartbeatFreshEarly) { Write-Log ("INFO: worker task not visible in this session but heartbeat is fresh (" + $hbEarlyAge + " min) - treated as healthy") }
+    } catch { }
+  }
+
+  if ((-not $workerTask) -and (-not $heartbeatFreshEarly)) {
+    $problems.Add("المهمة «$ameenWorkerTaskName» غير مسجّلة أو متوقفة (لا نبض)")
+    $diagAll = @(Get-ScheduledTask -ErrorAction SilentlyContinue); $diagNames = @($diagAll | Where-Object { $_.TaskName -like "TOBACCO *" } | ForEach-Object { $_.TaskName }); Write-Log ("FAIL: task not registered — [" + $ameenWorkerTaskName + "] | enumerated=" + $diagAll.Count + " | tobacco=" + ($diagNames -join ", "))
   } else {
     $heartbeatAgeMinutes = $null
     if (Test-Path -LiteralPath $ameenWorkerHeartbeatPath) {
@@ -188,7 +222,8 @@ if ($isMainComputer) {
     }
 
     # عالقة = المهمة تظهر Running لكن heartbeat غائب أو أقدم من الحد المسموح
-    $workerStuck = ([string]$workerTask.State -eq "Running") -and
+    $workerNotRunning = ($workerTask -and ([string]$workerTask.State -ne "Running"))
+    $workerStuck = $workerNotRunning -or
                    (($null -eq $heartbeatAgeMinutes) -or ($heartbeatAgeMinutes -gt $ameenWorkerStaleThresholdMinutes))
 
     $prevIncidentActive = $false
@@ -205,14 +240,14 @@ if ($isMainComputer) {
         $stuckMsg = "🚨 توقف/تعليق Ameen Read Worker — $ageText."
         $notifyPathWorker = Join-Path $PSScriptRoot "send-telegram-notification.ps1"
         if (Test-Path -LiteralPath $notifyPathWorker) {
-          $stuckNotifyOutput = & $notifyPathWorker -Message $stuckMsg -EventType "windows" -DedupeKey "ameen-read-worker-stuck" -DedupeMinutes 1440 2>&1
+          $stuckNotifyOutput = & $notifyPathWorker -Message $stuckMsg -EventType "windows" -DedupeKey "ameen-read-worker-stuck" -DedupeMinutes 1440 2>&1 6>&1
           Write-Log ("ALERT sent for Ameen worker stuck incident — " + (($stuckNotifyOutput | Out-String).Trim() -replace "\s+", " "))
         }
       }
 
       # استعادة محددة لهذه المهمة فقط: لا kill عام لعمليات powershell، لا إعادة تشغيل لأي مهمة أخرى
       try {
-        Stop-ScheduledTask -TaskName $ameenWorkerTaskName -ErrorAction Stop
+        if ([string](Get-ScheduledTask -TaskName $ameenWorkerTaskName -ErrorAction SilentlyContinue).State -eq "Running") { Stop-ScheduledTask -TaskName $ameenWorkerTaskName -ErrorAction Stop }
         $waitDeadline = (Get-Date).AddSeconds(30)
         do {
           Start-Sleep -Seconds 2
@@ -232,7 +267,7 @@ if ($isMainComputer) {
         $recoverMsg = "✅ عاد Ameen Read Worker للعمل."
         $notifyPathWorker = Join-Path $PSScriptRoot "send-telegram-notification.ps1"
         if (Test-Path -LiteralPath $notifyPathWorker) {
-          $recoverNotifyOutput = & $notifyPathWorker -Message $recoverMsg -EventType "windows" -DedupeKey "ameen-read-worker-recovered" -DedupeMinutes 60 2>&1
+          $recoverNotifyOutput = & $notifyPathWorker -Message $recoverMsg -EventType "windows" -DedupeKey "ameen-read-worker-recovered" -DedupeMinutes 60 2>&1 6>&1
           Write-Log ("RECOVERY CONFIRMED for Ameen worker — " + (($recoverNotifyOutput | Out-String).Trim() -replace "\s+", " "))
         }
       }
@@ -253,6 +288,7 @@ if ($isMainComputer) {
     $_.TaskName -like "TOBACCO *" -and
     $_.TaskName -notin $retiredTasks -and
     $_.TaskName -ne "TOBACCO Sync Watchdog" -and
+    $_.TaskName -ne "TOBACCO Local Web Server" -and   # مهمة خادم دائمة الحياة: تُفحص بالمنفذ لا بـ LastTaskResult
     $_.TaskName -ne $ameenWorkerTaskName   # يُفحص بفحص heartbeat مخصص أدقّ بالقسم ٢ب أعلاه — LastTaskResult=267009 وحده لا يكفي لمهمة تعمل بحلقة while($true)
   })
 
@@ -285,6 +321,17 @@ if ($isMainComputer) {
   }
 }
 
+# ---------- 3ب) سيرفر الموقع المحلي ----------
+# مهمة «TOBACCO Local Web Server» تُبقي عملية node حيّة، فكل تشغيل جديد كل 5 دقائق يُرفض
+# بالرمز 0x800710E0 لأن نسخة تعمل أصلاً — وهذه صحة لا عطل. المؤشر الحقيقي هو المنفذ.
+if ($isMainComputer) {
+  $localWebServerPort = 5173
+  $localServerListening = Get-NetTCPConnection -LocalPort $localWebServerPort -State Listen -ErrorAction SilentlyContinue
+  if (-not $localServerListening) {
+    $problems.Add("سيرفر الموقع المحلي لا يستمع على المنفذ $localWebServerPort")
+    Write-Log "FAIL: local web server not listening on port $localWebServerPort"
+  }
+}
 # ---------- 4) التنبيه ----------
 if ($problems.Count -eq 0) {
   exit 0
@@ -297,7 +344,7 @@ $message = "🚨 مزامنة الأمين متعثّرة على جهاز Window
 $notifySucceeded = $false
 $notifyPath = Join-Path $PSScriptRoot "send-telegram-notification.ps1"
 if (Test-Path -LiteralPath $notifyPath) {
-  $notifyOutput = & $notifyPath -Message $message -EventType "windows" -DedupeKey "ameen-sync-watchdog" -DedupeMinutes 60 2>&1
+  $notifyOutput = & $notifyPath -Message $message -EventType "windows" -DedupeKey "ameen-sync-watchdog" -DedupeMinutes 60 2>&1 6>&1
   $notifyText = ($notifyOutput | Out-String)
   if ($notifyText -match "TELEGRAM-NOTIFY OK") {
     $notifySucceeded = $true
