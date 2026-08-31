@@ -427,7 +427,7 @@ if (await renderAvailable()) {
 
 // ===== 6) سقوط الموقع إلى التنزيل العادي حين يتوقف الجسر =====
 
-function loadArchiveClient({ fetchImpl, storage = new Map() }) {
+function loadArchiveClient({ fetchImpl, storage = new Map(), protocol = "http:" }) {
   const timers = [];
   const created = [];
   const sandbox = {
@@ -450,7 +450,7 @@ function loadArchiveClient({ fetchImpl, storage = new Map() }) {
     }
   };
   sandbox.window = {
-    location: { origin: "https://ozktobacco.com" },
+    location: { origin: "https://ozktobacco.com", protocol },
     localStorage: {
       getItem: (k) => (storage.has(k) ? storage.get(k) : null),
       setItem: (k, v) => storage.set(k, v),
@@ -510,6 +510,31 @@ await test("مسار النجاح الكامل للعميل: فحص ثم ربط 
   assert.equal(result.status, "saved");
   assert.equal(storage.get("ozk.archive.token"), "T".repeat(64));
   assert.deepEqual(calls.map((c) => c.split("8787")[1]), ["/health", "/pair", "/archive"]);
+});
+
+await test("على https: رسالة الفشل تذكر إذن الشبكة المحلية لا عطلاً وهمياً", async () => {
+  // قياس فعلي (2026-08-31): من صفحة https يفشل الطلب بلا إذن الشبكة المحلية
+  // وينجح بـ200 فور منحه. رسالة «الجسر غير متاح» وحدها تُرسل المالك خلف عطل
+  // غير موجود.
+  const { api, created } = loadArchiveClient({
+    protocol: "https:",
+    fetchImpl: async () => { throw new Error("Failed to fetch"); }
+  });
+  const result = await api.archive({ docType: "stock_report", html: "<p>x</p>", meta: {} });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "unreachable");
+  assert.equal(created.length, 1, "يجب أن يظهر تنبيه واحد");
+  assert.match(created[0].textContent, /الشبكة المحلية/);
+});
+
+await test("على http محلي: رسالة الفشل تبقى مباشرة بلا حشو", async () => {
+  const { api, created } = loadArchiveClient({
+    protocol: "http:",
+    fetchImpl: async () => { throw new Error("ECONNREFUSED"); }
+  });
+  await api.archive({ docType: "stock_report", html: "<p>x</p>", meta: {} });
+  assert.equal(created.length, 1);
+  assert.match(created[0].textContent, /الجسر المحلي غير متاح/);
 });
 
 await test("إيقاف الميزة من المتصفح يمنع أي طلب شبكي", async () => {

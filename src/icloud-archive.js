@@ -135,7 +135,7 @@
     try {
       var health = await probe(false);
       if (!health.ok) {
-        notifyFailure("تعذّر حفظ نسخة في iCloud (الجسر المحلي غير متاح).", options.quiet);
+        notifyFailure(unreachableMessage(health.reason), options.quiet);
         return { ok: false, reason: health.reason || "unavailable" };
       }
       if (health.health && health.health.icloud && !health.health.icloud.ready) {
@@ -181,6 +181,19 @@
       notifyFailure("تعذّر حفظ نسخة في iCloud.", options.quiet);
       return { ok: false, reason: "exception" };
     }
+  }
+
+  // من صفحة https لا يكفي أن يعمل الجسر: المتصفحات الحديثة تحجب مخاطبة عناوين
+  // الشبكة المحلية خلف إذن صريح. قياس فعلي (2026-08-31): الطلب نفسه فشل بلا
+  // إذن ونجح بـ200 فور منحه. لذا لا نقول «الجسر غير متاح» ونحن لا نعرف — نذكر
+  // السببين معاً كي لا يطارد المالك عطلاً غير موجود.
+  function unreachableMessage(reason) {
+    var onHttps = false;
+    try { onHttps = window.location.protocol === "https:"; } catch (e) { onHttps = false; }
+    if (reason === "unreachable" && onHttps) {
+      return "تعذّر حفظ نسخة في iCloud. تأكد أن الجسر يعمل، واسمح للموقع بالوصول إلى الشبكة المحلية عند طلب المتصفح.";
+    }
+    return "تعذّر حفظ نسخة في iCloud (الجسر المحلي غير متاح).";
   }
 
   // تنبيه الفشل مكتوم ومحدود: الأرشفة ليست جزءاً من العملية التجارية، فلا يجوز
