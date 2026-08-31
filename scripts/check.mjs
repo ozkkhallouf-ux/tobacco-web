@@ -59,7 +59,9 @@ const required = [
   "supabase/project-task-health-monitor.sql",
   "scripts/check-project-task-monitors.mjs",
   "supabase/tests/cron-job-health-truth-table.sql",
-  "scripts/check-cron-job-health-classifier.mjs"
+  "scripts/check-cron-job-health-classifier.mjs",
+  "supabase/tests/telegram-delivery-audit.sql",
+  "scripts/check-telegram-delivery-observability.mjs"
 ];
 
 let failed = false;
