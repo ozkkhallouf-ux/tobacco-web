@@ -1,4 +1,4 @@
-const CACHE_NAME = "web-platform-tobacco-v625";
+const CACHE_NAME = "web-platform-tobacco-v626";
 const ASSETS = [
   "./","index.html","404.html","src/app.js","src/icloud-archive.js","src/price-list-template.js","src/config.js","src/supabase-client.js","src/smart-inventory.js","src/web-push.js","src/purchase-business-settings.js","src/purchase-recommendation.js","src/business-snapshot.js","src/business-metrics.js","src/executive-team.js","src/ameen-live-client.js","src/command-center.js","src/styles.css","src/decision-engine.js","src/decision-engine.css","src/command-center.css","src/decision-data-bridge.js","src/supplier-obligations-client.js","src/decision-supplier-overlay.js","src/purchase-invoice-calc.js","src/inventory-recon-calc.js","public/manifest.webmanifest","public/icons/app-icon.png","public/icons/ozk-ios-full-notification-icon.png","public/icons/ozk-logo.png","public/icons/workspace-pattern.svg","public/vendor/html2pdf.bundle.min.js","public/vendor/supabase.js","public/vendor/xlsx.full.min.js"
 ];

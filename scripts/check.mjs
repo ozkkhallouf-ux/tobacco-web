@@ -1589,7 +1589,7 @@ for (const contract of [
 
 // عقد SQL — مراجعة الجولة الخامسة (موانع دمج): unit_cost/currency/settlement_value
 // محجوبة عن غير المالك عبر RLS owner-only + RPC مقنَّعة، مطابقة التكلفة بـitem_guid
-// لا بالاسم، رفض item_key فارغ، تحقق عدد السطور المُدرجة، وسباق idempotency عبر
+// الحقيقي ثم match_key لا بالاسم وحده، رفض item_key فارغ، تحقق عدد السطور المُدرجة، وسباق idempotency عبر
 // ON CONFLICT ذرّي بدل SELECT ثم INSERT منفصلين.
 {
   const invReconSql = readFileSync("supabase/inventory-reconciliation-table.sql", "utf8");
@@ -1612,8 +1612,12 @@ for (const contract of [
     console.error("inventory_recon_lines_select must no longer be using(true) — cost columns (unit_cost/currency/settlement_value) must be owner-only, masked for everyone else via inventory_recon_lines_for_session().");
     failed = true;
   }
-  if (!/where ic1\.item_guid = coalesce\(it ->> 'itemGuid', it ->> 'item_guid'\)/.test(invReconSql)) {
-    console.error("inventory_recon_create_session_with_lines must match item_costs by item_guid (matching push-item-costs.ps1's GUID/code/name priority), not by item_name alone with LIMIT 1.");
+  // بعد ترحيل 20260827110325 صار item_costs.item_guid يحمل GUID الأمين الحقيقي فقط،
+  // وانتقل مفتاح المطابقة العام (GUID/كود/اسم) إلى match_key. المسار المباشر يبقى هنا
+  // على item_guid؛ أما عقد مسارات الرجوع بالكود/الاسم على match_key وعدم انحراف
+  // الترحيل عن المخطط فيفرضهما scripts/check-inventory-recon-cost-fallbacks.mjs.
+  if (!/where ic1\.item_guid = nullif\(trim\(coalesce\(it ->> 'itemGuid', it ->> 'item_guid', ''\)\), ''\)/.test(invReconSql)) {
+    console.error("inventory_recon_create_session_with_lines must match item_costs by the true-GUID column item_guid first (then fall back to match_key), not by item_name alone with LIMIT 1.");
     failed = true;
   }
 

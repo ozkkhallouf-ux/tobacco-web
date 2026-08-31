@@ -87,7 +87,7 @@ async function main() {
   validateSalesSyncMarker(markerBefore, window);
   const [currentSnapshot, itemCosts, salesLineItems] = await Promise.all([
     readAll('ameen_item_snapshot', SNAPSHOT_FIELDS.join(','), 'item_key.asc', headers),
-    readAll('item_costs', 'item_guid,item_name,avg_cost,currency,updated_at', 'item_guid.asc', headers),
+    readAll('item_costs', 'match_key,item_guid,item_name,avg_cost,currency,updated_at', 'match_key.asc', headers),
     readAll('sales_line_items', 'id,source_key,item_key,item_name,qty,sale_date,bill_type,unit2_name,unit2_factor',
       'id.asc', headers, [['sale_date', `gte.${window.start}`], ['sale_date', `lte.${window.end}`]]),
   ]);
