@@ -312,7 +312,7 @@ reports\prices\tobacco-approved-prices.csv
 
 ## Git
 
-- **Remote:** `fhwvtqdc2q-svg/tobacco-web`
+- **Remote:** `ozkkhallouf-ux/tobacco-web`
 - **Push:** `git push -u origin <branch-name>`
 
 ---

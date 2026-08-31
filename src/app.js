@@ -244,10 +244,7 @@ const state = {
   aiProvider: "claude",
   aiLoading: false,
   aiSettingsOpen: false,
-  invCustomer: "",
-  invNotes: "",
-  invRows: [{ name: "", qty: "1", price: "" }],
-  // ===== فاتورة مبيعات (route: sales) — نواة MVP مستقلة تماماً عن route invoice =====
+  // ===== فاتورة مبيعات (route: sales) — نواة MVP =====
   salesMode: readJson("sales-mode", "jumla"),        // "jumla" جملة/دولار | "mufrak" مفرق/سوري
   salesCustomer: "",                                    // فارغ = زبون نقدي
   salesPayMethod: "cash",                               // "cash" نقدي | "credit" أجل
@@ -397,11 +394,13 @@ function initKeyboardShortcuts() {
   document.addEventListener("keydown", (event) => {
     const typing = document.activeElement?.matches("input, textarea, select, [contenteditable]");
     if (event.altKey && !event.ctrlKey && !event.metaKey) {
-      const routeMap = { "1": "overview", "2": "dashboard", "3": "requests", "4": "ameen", "5": "pricing", "6": "invoice", "7": "purchases", "8": "balances", "9": "sales" };
+      // كل قيمة هنا يجب أن تكون صفحة مسجّلة فعلاً في pages وفي allowedRoutes،
+      // وإلا رمى الرسم TypeError صامتاً. يحرسه scripts/check-keyboard-shortcut-routes.mjs.
+      const routeMap = { "1": "overview", "2": "dashboard", "3": "requests", "4": "ameen", "5": "pricing", "7": "purchases", "8": "balances", "9": "sales" };
       const target = routeMap[event.key];
       if (target) {
         event.preventDefault();
-        if ((target === "dashboard" || target === "invoice" || target === "purchases" || target === "sales") && !state.session) return;
+        if ((target === "dashboard" || target === "purchases" || target === "sales") && !state.session) return;
         setRoute(target);
         render();
         return;
@@ -758,7 +757,8 @@ function itemCostFor(item) {
 }
 
 // ===== واتساب: إرسال وصل/فاتورة رسمية للزبون =====
-const SITE_BASE = "https://fhwvtqdc2q-svg.github.io/tobacco-web";
+// (SITE_BASE أُزيل هنا — كان يشير لدومين GitHub Pages القديم fhwvtqdc2q-svg.github.io
+// المهجور منذ اعتماد ozktobacco.com، ولم يكن مستخدَماً في أي مكان بالملف أصلاً.)
 
 async function loadCustomerWhatsapp() {
   try {
@@ -869,20 +869,6 @@ async function sendReceiptWhatsapp(item, amount, date, notes) {
   }
   // واتساب أُلغي — الوصل يُحفظ بالنظام/الأرشيف (أساس الرفع التلقائي إلى Google Drive لاحقاً)
   setNotice("success", "تم حفظ الوصل بالنظام والأرشيف ✓");
-}
-
-async function sendInvoiceWhatsapp(customer, rows, notes, total, invNum) {
-  const w = findWhatsappByName(customer);
-  const items = (rows || []).map((r) => ({ name: r.name, qty: toNumber(r.qty), price: toNumber(r.price), total: toNumber(r.qty) * toNumber(r.price) }));
-  const doc = { t: "invoice", no: invNum || docNumber("INV"), date: todayIsoDate(), name: customer || "", phone: w ? w.phone_number : "", items: items, total: total, cur: "$", notes: notes || "" };
-  try {
-    await dataStore.createSharedDocument(doc);
-  } catch (e) {
-    setNotice("error", "تعذّر حفظ الفاتورة: " + (e.message || ""));
-    return;
-  }
-  // واتساب أُلغي — الفاتورة تُحفظ بالنظام/الأرشيف (أساس الرفع التلقائي إلى Google Drive لاحقاً)
-  setNotice("success", "تم حفظ الفاتورة بالنظام والأرشيف ✓");
 }
 
 // لوحة الإرسال الجماعي حسب التصنيف
@@ -6047,84 +6033,9 @@ function aiAssistant() {
   `);
 }
 
-function invoice() {
-  if (!state.session) {
-    return shell(`
-      <section class="panel">
-        <h2>الفواتير بالدولار</h2>
-        <p class="muted">سجّل الدخول أولاً للوصول إلى نظام الفواتير.</p>
-      </section>
-    `);
-  }
-
-  const rows = state.invRows;
-  const grandTotal = rows.reduce((sum, r) => {
-    const qty = toNumber(r.qty);
-    const price = toNumber(r.price);
-    return sum + qty * price;
-  }, 0);
-
-  const rowsHtml = rows.map((r, i) => `
-    <tr class="inv-row">
-      <td><input class="inv-input" data-inv-field="name" data-inv-index="${i}" value="${escapeHtml(r.name)}" placeholder="اسم المادة" dir="auto"></td>
-      <td><input class="inv-input inv-num" data-inv-field="qty" data-inv-index="${i}" value="${escapeHtml(r.qty)}" placeholder="0" type="text" inputmode="decimal" dir="ltr"></td>
-      <td><input class="inv-input inv-num" data-inv-field="price" data-inv-index="${i}" value="${escapeHtml(r.price)}" placeholder="0.00" type="text" inputmode="decimal" dir="ltr"></td>
-      <td class="inv-line-total">$${(toNumber(r.qty) * toNumber(r.price)).toFixed(2)}</td>
-      <td>${rows.length > 1 ? `<button class="inv-remove" data-inv-remove="${i}" title="حذف">✕</button>` : ""}</td>
-    </tr>
-  `).join("");
-
-  return shell(`
-    <section class="panel wide inv-panel">
-      <div class="inv-form-area">
-        <div class="inv-header-fields">
-          <label class="inv-label">
-            اسم العميل
-            <input class="inv-input-main" id="inv-customer" value="${escapeHtml(state.invCustomer)}" placeholder="اسم العميل أو الشركة" maxlength="120">
-          </label>
-          <label class="inv-label">
-            ملاحظة (اختياري)
-            <input class="inv-input-main" id="inv-notes" value="${escapeHtml(state.invNotes)}" placeholder="شروط الدفع، الاستحقاق، إلخ…" maxlength="300">
-          </label>
-        </div>
-
-        <div class="inv-table-wrap">
-          <table class="inv-table">
-            <thead>
-              <tr>
-                <th>المادة</th>
-                <th style="width:90px">الكمية</th>
-                <th style="width:110px">سعر الوحدة $</th>
-                <th style="width:100px">المجموع $</th>
-                <th style="width:36px"></th>
-              </tr>
-            </thead>
-            <tbody id="inv-body">${rowsHtml}</tbody>
-          </table>
-        </div>
-
-        <div class="inv-footer">
-          <button class="button secondary" data-action="inv-add-row">+ إضافة مادة</button>
-          <div class="inv-total-box">
-            <span>الإجمالي</span>
-            <strong class="inv-grand-total">$${grandTotal.toFixed(2)}</strong>
-          </div>
-        </div>
-
-        <div class="inv-actions">
-          <button class="button primary" data-action="inv-print" ${!state.invCustomer.trim() ? "disabled title='أدخل اسم العميل أولاً'" : ""}>
-            🖨 طباعة / حفظ PDF
-          </button>
-          <button class="button secondary" data-action="inv-reset">مسح</button>
-        </div>
-      </div>
-    </section>
-  `);
-}
-
 // ============================================================================
 // ===== فاتورة مبيعات (route: sales) — نواة MVP =====
-// وحدة مستقلة تماماً عن route/دالة invoice. تنشئ فاتورة جملة (دولار) أو مفرق
+// تنشئ فاتورة جملة (دولار) أو مفرق
 // (ليرة سورية)، تُحفظ عبر dataStore.createSharedDocument كمستند sales_invoice،
 // وتُطبع بإعادة استخدام قالب طباعة الفاتورة.
 // TODO (خارج النواة الحالية عمداً): خصم المخزون، تقييد الذمم، صلاحيات المدير/
@@ -6387,7 +6298,9 @@ function salesSeqState(mode) {
 
 // الرقم المعروض: الأكبر بين «تالي الأمين» و«تالي العدّاد المحلي»، بلا أي حجز.
 // يرجع نصاً فارغاً إذا لم تصل المزامنة — ولا يخمّن رقماً أبداً، لأن رقماً مخترَعاً
-// قد يصطدم بفاتورة قائمة في الأمين.
+// قد يصطدم بفاتورة قائمة في الأمين. بلا أي تغيير — تبقى صارمة دائماً (راجع
+// SALES_PRINT_GRACE_MAX_AGE_MS أدناه: التسامح لا يمنح رقماً تخمينياً إطلاقاً،
+// بل مسودة بلا رقم — فهذه الدالة لا تحتاج معرفة حالة التسامح أصلاً).
 function peekSalesInvoiceNumber(mode) {
   const st = salesSeriesState(mode);
   if (!st.usable) return "";
@@ -6416,9 +6329,24 @@ function ensureSalesInvoiceNo() {
   return state.salesInvoiceNo;
 }
 
-// عمر المزامنة المسموح به قبل منع إصدار رقم. المهمة المجدولة تعمل كل 5 دقائق،
-// فـ15 دقيقة تعني ثلاث دورات فائتة — أي أن المزامنة متوقفة فعلاً لا متأخرة.
+// عمر المزامنة المسموح به قبل منع إصدار رقم **للحفظ**. المهمة المجدولة تعمل
+// كل 5 دقائق، فـ15 دقيقة تعني ثلاث دورات فائتة — أي أن المزامنة متوقفة فعلاً
+// لا متأخرة. يبقى هذا الحد بلا أي تغيير — يحكم salesSaveInvoice حصراً.
 const SALES_SERIES_MAX_AGE_MS = 15 * 60000;
+
+// نافذة تسامح إضافية — للطباعة/تصدير PDF فقط، وليست للحفظ إطلاقاً، وليست
+// تسامحاً في **الرقم** بل في **إمكانية طباعة مسودة بلا رقم إطلاقاً** (ملاحظة
+// Codex P1 على PR #144: رقم "تقديري" مطبوع قد يتصادم فعلياً مع فاتورة أُدخلت
+// مباشرة بالأمين أو من جهاز آخر خلال هذه النافذة — العدّاد المحلي لا يكتشف
+// إصداراً خارجياً كهذا. الحل: صفر احتمال تصادم لأنه لا يُطبع أي رقم حقيقي
+// إطلاقاً أثناء التدهور، فقط مسودة SALES_DRAFT_INVOICE_NO الواضحة). الطباعة
+// معاينة بلا التزام: لا تحجز رقماً ولا تكتب شيئاً بقاعدة البيانات (الحجز
+// الفعلي يحدث حصراً داخل salesSaveInvoice بعد نجاح الحفظ، عبر إعادة جلب
+// طازجة وإعادة فحص صارمة لم تتغيّر). تجاوز هذه النافذة الأوسع أيضاً يعني على
+// الأرجح انقطاعاً مستمراً
+// حقيقياً (لا عطلاً عابراً كانقطاع Meshnet المؤقت الذي دفع هذا الإصلاح)،
+// فتبقى الطباعة محجوبة أيضاً حينها.
+const SALES_PRINT_GRACE_MAX_AGE_MS = 60 * 60000;
 
 // إعادة جلب تقرير السلاسل عند الطلب. لا يرمي أبداً: فشل الشبكة يترك القراءة
 // السابقة كما هي، ويتكفّل فحص العمر بعده بمنع الإصدار إن كانت قديمة.
@@ -6446,6 +6374,32 @@ function salesSeriesState(mode) {
   return { mode: m, target, series, ageMs: hasAge ? ageMs : NaN, stale, usable: !!series && !stale };
 }
 
+// عنوان/رقم المستند المطبوع أثناء التدهور — مسودة واضحة بلا أي رقم حقيقي أو
+// تخميني إطلاقاً (راجع تعليق SALES_PRINT_GRACE_MAX_AGE_MS للسبب).
+const SALES_DRAFT_INVOICE_NO = "مسودة — بلا رقم نهائي";
+
+// شارة تحذير مرئية تُدرَج داخل المستند المطبوع/المصدَّر نفسه أثناء التدهور —
+// لا تكفي رسالة التأكيد وحدها (قد يُطوى المستند أو يُصوَّر لاحقاً بمعزل عن
+// سياق الشاشة)، فالورقة نفسها يجب أن تُعلن بوضوح أنها مسودة غير رسمية.
+function salesDraftBannerHtml(invNo) {
+  if (invNo !== SALES_DRAFT_INVOICE_NO) return "";
+  return `<div style="background:#fff3cd;border:2px solid #b8860b;color:#5c3d00;font-weight:700;
+    text-align:center;padding:8px 12px;margin-bottom:16px;border-radius:6px">
+    ⚠️ مسودة غير رسمية — بلا رقم فاتورة نهائي. الرقم الحقيقي يُحدَّد فقط عند الحفظ.
+  </div>`;
+}
+
+// حالة الطباعة/تصدير PDF تحديداً — أوسع تسامحاً من الحفظ عمداً (راجع تعليق
+// SALES_PRINT_GRACE_MAX_AGE_MS أعلاه). لا تُستخدم إطلاقاً من مسار الحفظ.
+// degraded=true تعني: مسموح بطباعة مسودة (SALES_DRAFT_INVOICE_NO، بلا أي رقم
+// حقيقي) بعد تأكيد صريح من الموظف — الرقم الفعلي يُحسم حصراً لحظة الحفظ.
+function salesPrintSeriesState(mode) {
+  const st = salesSeriesState(mode);
+  if (st.usable) return { ...st, printUsable: true, degraded: false };
+  const withinGrace = !!st.series && Number.isFinite(st.ageMs) && st.ageMs <= SALES_PRINT_GRACE_MAX_AGE_MS;
+  return { ...st, printUsable: withinGrace, degraded: withinGrace };
+}
+
 function salesSeriesAgeText(ageMs) {
   if (!Number.isFinite(ageMs)) return "";
   const mins = Math.floor(ageMs / 60000);
@@ -6455,26 +6409,46 @@ function salesSeriesAgeText(ageMs) {
   return hours < 24 ? `قبل ${hours} ساعة` : `قبل ${Math.floor(hours / 24)} يوم`;
 }
 
-// رسالة المنع الموحّدة — تُستعمل عند الحفظ وعند الطباعة معاً.
+// رسالة المنع الموحّدة — تُستعمل عند الحفظ (حد صارم 15 دقيقة) وعند تجاوز
+// الطباعة نافذة التسامح الأوسع (60 دقيقة) أيضاً. صيغة مفهومة لموظف لا يعرف
+// أسماء مهام Windows المجدولة — بلا أي تفاصيل تقنية داخلية.
 function salesSeriesBlockReason(st) {
   if (!st.series) {
-    return `لم تصل مزامنة ترقيم الأمين بعد (سلسلة «${st.target.name}») — لا يمكن إصدار رقم فاتورة.`;
+    return "تعذّر إصدار رقم فاتورة — لم تصل بيانات ترقيم الفواتير من نظام المحاسبة بعد. تواصل مع الإدارة.";
   }
   if (st.stale) {
     const age = salesSeriesAgeText(st.ageMs);
-    return `مزامنة ترقيم الأمين متوقفة${age ? ` (آخر قراءة ${age})` : ""} — لا يمكن إصدار رقم قد يكون مستهلكاً. `
-      + `شغّل مهمة «TOBACCO Invoice Series Push» ثم أعد المحاولة.`;
+    return `تعذّر إصدار رقم فاتورة موثوق — انقطع الاتصال بجهاز المزامنة منذ ${age || "فترة"}. `
+      + `تواصل مع الإدارة، أو انتظر عودة الاتصال ثم أعد المحاولة.`;
   }
   return "";
+}
+
+// رسالة تحذير الطباعة أثناء التدهور المؤقت — مختلفة عمداً عن رسالة المنع
+// الكاملة: توضح أن المتابعة ممكنة بموافقة الموظف، لكن كـ"مسودة" بلا رقم
+// حقيقي إطلاقاً (لا "رقم تقديري" — راجع تعليق SALES_PRINT_GRACE_MAX_AGE_MS).
+function salesPrintGraceWarning(printSt) {
+  const age = salesSeriesAgeText(printSt.ageMs);
+  return `⚠️ انقطع الاتصال بجهاز مزامنة الترقيم منذ ${age || "فترة"}.\n`
+    + `ستُطبع نسخة "مسودة" بلا رقم فاتورة نهائي — الرقم الحقيقي يُحسم حصراً عند الحفظ `
+    + `(والحفظ يبقى محجوباً حتى تعود المزامنة).\n\n`
+    + `هل تريد المتابعة بطباعة المسودة الآن؟`;
 }
 
 // سطر توضيحي تحت رقم الفاتورة: أي سلسلة، وآخر رقم بالأمين، وعمر المزامنة —
 // كي يرى المستخدم بنفسه إن كان الرقم مبنياً على قراءة قديمة.
 function salesInvoiceNoHint() {
   const st = salesSeriesState();
-  if (!st.usable) return `⚠️ ${salesSeriesBlockReason(st)}`;
-  const age = salesSeriesAgeText(st.ageMs);
-  return `سلسلة «${st.series.typeName}» — آخر رقم بالأمين ${st.series.lastNo}${age ? ` (مزامنة ${age})` : ""}`;
+  if (st.usable) {
+    const age = salesSeriesAgeText(st.ageMs);
+    return `سلسلة «${st.series.typeName}» — آخر رقم بالأمين ${st.series.lastNo}${age ? ` (مزامنة ${age})` : ""}`;
+  }
+  const printSt = salesPrintSeriesState();
+  if (printSt.degraded) {
+    const age = salesSeriesAgeText(printSt.ageMs);
+    return `⚠️ مزامنة متأخرة منذ ${age} — يمكن طباعة مسودة بلا رقم بتأكيد، والحفظ محجوب حتى تعود المزامنة.`;
+  }
+  return `⚠️ ${salesSeriesBlockReason(st)}`;
 }
 
 function salesEnsureTrailingRow() {
@@ -7266,6 +7240,7 @@ function salesInvoicePdfMarkup(data) {
   return `
   <div dir="rtl" style="width:754px;padding:20px;background:#ffffff;color:#241f18;
        font-family:'Segoe UI',Tahoma,Arial,sans-serif">
+    ${salesDraftBannerHtml(data.invNo)}
     <div class="pdf-head" style="display:flex;justify-content:space-between;align-items:flex-start;
          border-bottom:2px solid #8a6d3b;padding-bottom:10px;margin-bottom:12px;${pdfRowStyle}">
       <div>
@@ -7369,18 +7344,29 @@ async function saveSalesInvoicePdf() {
     render();
     return;
   }
-  // نفس حارس الطباعة: لا نصدر مستنداً برقم غير موثوق.
-  const series = salesSeriesState(mode);
-  if (!series.usable) {
+  // نفس حارس الطباعة: لا نصدر مستنداً برقم غير موثوق إطلاقاً — لكن بتسامح
+  // موسَّع (راجع SALES_PRINT_GRACE_MAX_AGE_MS) لأن التصدير معاينة بلا التزام،
+  // لا يحجز رقماً ولا يكتب شيئاً بقاعدة البيانات. الحفظ الفعلي (salesSaveInvoice)
+  // يبقى بحدّه الصارم الأصلي دون أي تغيير. أثناء التدهور: مسودة بلا رقم
+  // إطلاقاً (SALES_DRAFT_INVOICE_NO) — لا رقم تخميني قد يتصادم مع فاتورة
+  // أُدخلت مباشرة بالأمين أو من جهاز آخر (ملاحظة Codex P1 على PR #144).
+  const series = salesPrintSeriesState(mode);
+  if (!series.printUsable) {
     setNotice("error", salesSeriesBlockReason(series));
     render();
     return;
   }
-  const invNo = ensureSalesInvoiceNo();
-  if (!invNo) {
-    setNotice("error", salesSeriesBlockReason(salesSeriesState(mode)));
-    render();
-    return;
+  let invNo;
+  if (series.degraded) {
+    if (!confirm(salesPrintGraceWarning(series))) return;
+    invNo = SALES_DRAFT_INVOICE_NO;
+  } else {
+    invNo = ensureSalesInvoiceNo();
+    if (!invNo) {
+      setNotice("error", salesSeriesBlockReason(salesSeriesState(mode)));
+      render();
+      return;
+    }
   }
 
   const totals = salesTotals();
@@ -7622,6 +7608,10 @@ function salesReceiptDocument(data) {
     <div class="brand">OZK TOBACCO</div>
     <div class="sub">مركز أبو زياد — لتجارة الدخان</div>
   </div>
+  ${data.invNo === SALES_DRAFT_INVOICE_NO ? `<div style="background:#fff3cd;border:1px dashed #b8860b;color:#5c3d00;
+    font-weight:700;text-align:center;padding:4px 6px;margin-bottom:6px;font-size:10px;line-height:1.4">
+    ⚠️ مسودة — بلا رقم فاتورة نهائي
+  </div>` : ""}
   <div class="meta">
     <div><span>فاتورة رقم</span><b class="nb" dir="ltr">${escapeHtml(data.invNo)}</b></div>
     <div><span>التاريخ</span><b class="nb">${escapeHtml(data.dateLabel)}</b></div>
@@ -7654,21 +7644,33 @@ function printSalesInvoice() {
     return;
   }
   const mode = salesCurrentMode();
-  // لا تُطبع فاتورة برقم غير موثوق: الورقة المطبوعة مستند يُسلَّم للزبون، ورقم
-  // مبني على مزامنة متوقفة قد يكون مستهلكاً في الأمين. لا نعيد الجلب هنا (بخلاف
-  // الحفظ) كي تبقى الطباعة داخل إيماءة المستخدم مباشرةً على iOS؛ والفاتورة
-  // المحفوظة تكون قد جُلبت لها قراءة طازجة أصلاً لحظة الحفظ.
-  const printSeries = salesSeriesState(mode);
-  if (!printSeries.usable) {
+  // لا تُطبع فاتورة برقم حقيقي أو تقديري غير موثوق: الورقة المطبوعة مستند
+  // يُسلَّم للزبون، والعداد المحلي (salesSeqState) يمنع فقط تكرار الرقم على
+  // نفس الجهاز — لا يحمي من إصدار مباشر في الأمين أو من جهاز آخر أثناء
+  // الانقطاع (ملاحظة Codex P1 على PR #144). لذلك في الحالة المتدهورة لا
+  // نطبع أي رقم مُخمَّن إطلاقاً — فقط "مسودة" صريحة بلا رقم نهائي، فيستحيل
+  // تكرارها بالتعريف بغضّ النظر عمّا يحدث في مكان آخر (راجع تعليق
+  // SALES_PRINT_GRACE_MAX_AGE_MS وSALES_DRAFT_INVOICE_NO).
+  // لا نعيد الجلب هنا (بخلاف الحفظ) كي تبقى الطباعة داخل إيماءة المستخدم
+  // مباشرةً على iOS؛ والفاتورة المحفوظة تكون قد جُلبت لها قراءة طازجة أصلاً
+  // لحظة الحفظ، بحدّه الصارم الأصلي دون أي تغيير.
+  const printSeries = salesPrintSeriesState(mode);
+  if (!printSeries.printUsable) {
     setNotice("error", salesSeriesBlockReason(printSeries));
     render();
     return;
   }
-  const invNo = ensureSalesInvoiceNo();
-  if (!invNo) {
-    setNotice("error", salesSeriesBlockReason(salesSeriesState(mode)));
-    render();
-    return;
+  let invNo;
+  if (printSeries.degraded) {
+    if (!confirm(salesPrintGraceWarning(printSeries))) return;
+    invNo = SALES_DRAFT_INVOICE_NO;
+  } else {
+    invNo = ensureSalesInvoiceNo();
+    if (!invNo) {
+      setNotice("error", salesSeriesBlockReason(salesSeriesState(mode)));
+      render();
+      return;
+    }
   }
   const totals = salesTotals();
   const today = new Intl.DateTimeFormat("ar-SA-u-ca-gregory-nu-latn", { dateStyle: "long" }).format(new Date());
@@ -7738,6 +7740,7 @@ function printSalesInvoice() {
 </style>
 </head>
 <body>
+${salesDraftBannerHtml(invNo)}
 <div class="inv-head">
   <div>
     <div class="inv-company">${escapeHtml(appConfig.name)}${appConfig.tagline ? `<small>${escapeHtml(appConfig.tagline)}</small>` : ""}</div>
@@ -9429,121 +9432,6 @@ ${po.notes ? `<div class="notes"><strong>ملاحظة:</strong> ${escapeHtml(po.
   });
 }
 
-function generateInvoiceNumber() {
-  const now = new Date();
-  const yy = String(now.getFullYear()).slice(-2);
-  const mm = String(now.getMonth() + 1).padStart(2, "0");
-  const rand = String(Math.floor(Math.random() * 900) + 100);
-  return `INV-${yy}${mm}-${rand}`;
-}
-
-function printInvoice() {
-  const customer = state.invCustomer.trim();
-  const notes = state.invNotes.trim();
-  const rows = state.invRows.filter((r) => r.name.trim() && toNumber(r.qty) > 0 && toNumber(r.price) > 0);
-  if (!customer || !rows.length) {
-    setNotice("error", "أدخل اسم العميل وصف واحد على الأقل بكمية وسعر.");
-    render();
-    return;
-  }
-
-  const invNum = generateInvoiceNumber();
-  const today = new Intl.DateTimeFormat("ar-SA-u-ca-gregory-nu-latn", { dateStyle: "long" }).format(new Date());
-  const grandTotal = rows.reduce((s, r) => s + toNumber(r.qty) * toNumber(r.price), 0);
-
-  const rowsHtml = rows.map((r, i) => `
-    <tr>
-      <td>${i + 1}</td>
-      <td>${escapeHtml(r.name)}</td>
-      <td>${toNumber(r.qty)}</td>
-      <td>$${toNumber(r.price).toFixed(2)}</td>
-      <td>$${(toNumber(r.qty) * toNumber(r.price)).toFixed(2)}</td>
-    </tr>
-  `).join("");
-
-  const html = `<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-<meta charset="UTF-8">
-<title>فاتورة ${invNum}</title>
-<style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: 'Segoe UI', Tahoma, Arial, sans-serif; font-size: 13px; color: #1a1a1a; background: #fff; padding: 40px; direction: rtl; }
-  .inv-head { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 36px; border-bottom: 3px solid #b8860b; padding-bottom: 20px; }
-  .inv-company { font-size: 22px; font-weight: 700; color: #5c3d00; letter-spacing: 1px; }
-  .inv-company small { display: block; font-size: 12px; font-weight: 400; color: #888; margin-top: 4px; }
-  .inv-meta { text-align: left; direction: ltr; }
-  .inv-meta p { margin: 3px 0; font-size: 12px; color: #555; }
-  .inv-meta strong { color: #1a1a1a; }
-  .inv-num { font-size: 16px; font-weight: 700; color: #b8860b; }
-  .inv-customer { background: #faf7f0; border: 1px solid #e8dfc8; border-radius: 6px; padding: 14px 18px; margin-bottom: 28px; }
-  .inv-customer p { font-size: 12px; color: #888; margin-bottom: 4px; }
-  .inv-customer strong { font-size: 15px; }
-  table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
-  th { background: #5c3d00; color: #fff; padding: 10px 12px; text-align: right; font-size: 12px; }
-  td { padding: 9px 12px; border-bottom: 1px solid #eee; font-size: 13px; }
-  tr:nth-child(even) td { background: #fdf9f3; }
-  .col-num { width: 36px; text-align: center; color: #aaa; }
-  .col-price, .col-total { text-align: left; direction: ltr; font-family: monospace; }
-  .total-row td { border-top: 2px solid #b8860b; font-weight: 700; font-size: 14px; background: #faf7f0; }
-  .notes { font-size: 12px; color: #666; margin-bottom: 28px; padding: 10px 14px; border-right: 3px solid #b8860b; background: #fdfaf5; }
-  .inv-foot { text-align: center; font-size: 11px; color: #aaa; margin-top: 40px; border-top: 1px solid #eee; padding-top: 16px; }
-  @media print { body { padding: 24px; } @page { margin: 1.5cm; } }
-</style>
-</head>
-<body>
-<div class="inv-head">
-  <div>
-    <div class="inv-company">${escapeHtml(appConfig.name)}${appConfig.tagline ? `<small>${escapeHtml(appConfig.tagline)}</small>` : ""}</div>
-  </div>
-  <div class="inv-meta">
-    <p class="inv-num">${invNum}</p>
-    <p><strong>التاريخ:</strong> ${today}</p>
-    <p><strong>العملة:</strong> دولار أمريكي (USD)</p>
-  </div>
-</div>
-
-<div class="inv-customer">
-  <p>فاتورة إلى</p>
-  <strong>${escapeHtml(customer)}</strong>
-</div>
-
-<table>
-  <thead>
-    <tr>
-      <th class="col-num">#</th>
-      <th>المادة</th>
-      <th style="width:70px">الكمية</th>
-      <th style="width:110px" class="col-price">سعر الوحدة</th>
-      <th style="width:110px" class="col-total">المجموع</th>
-    </tr>
-  </thead>
-  <tbody>${rowsHtml}</tbody>
-  <tfoot>
-    <tr class="total-row">
-      <td colspan="3"></td>
-      <td>الإجمالي</td>
-      <td class="col-total">$${grandTotal.toFixed(2)}</td>
-    </tr>
-  </tfoot>
-</table>
-
-${notes ? `<div class="notes"><strong>ملاحظة:</strong> ${escapeHtml(notes)}</div>` : ""}
-
-<div class="inv-foot">${escapeHtml(appConfig.name)} &mdash; ${escapeHtml(appConfig.supportEmail)}</div>
-
-</body></html>`;
-
-  printHtmlDocument(html, {
-    title: `فاتورة ${invNum}`,
-    onError: () => {
-      setNotice("error", "تعذّر فتح نافذة الطباعة. أغلق التطبيق وافتحه ثم جرّب مجدداً.");
-      render();
-    }
-  });
-  // حفظ الفاتورة بالنظام (للأرشفة على اللابتوب) + إرسالها واتساب للزبون
-  sendInvoiceWhatsapp(customer, rows, notes, grandTotal, invNum);
-}
 
 function statusCard(item) {
   return `
@@ -9909,63 +9797,6 @@ function render() {
     });
   });
 
-  // Invoice handlers
-  app.querySelector("#inv-customer")?.addEventListener("input", (e) => {
-    state.invCustomer = e.currentTarget.value;
-    const printButton = app.querySelector("[data-action='inv-print']");
-    if (printButton) {
-      const customerMissing = !state.invCustomer.trim();
-      printButton.disabled = customerMissing;
-      if (customerMissing) printButton.title = "أدخل اسم العميل أولاً";
-      else printButton.removeAttribute("title");
-    }
-  });
-  app.querySelector("#inv-notes")?.addEventListener("input", (e) => {
-    state.invNotes = e.currentTarget.value;
-  });
-  app.querySelectorAll("[data-inv-field]").forEach((input) => {
-    input.addEventListener("input", (e) => {
-      const i = Number(e.currentTarget.dataset.invIndex);
-      const field = e.currentTarget.dataset.invField;
-      if (field === "qty" || field === "price") {
-        const normalized = normalizeNumericText(e.currentTarget.value, { allowNegative: false, allowDecimal: true });
-        if (normalized !== e.currentTarget.value) e.currentTarget.value = normalized;
-      }
-      state.invRows[i][field] = e.currentTarget.value;
-      const tbody = document.getElementById("inv-body");
-      if (tbody) {
-        const cells = tbody.querySelectorAll("tr")[i]?.querySelectorAll(".inv-line-total");
-        if (cells?.[0]) {
-          const qty = toNumber(state.invRows[i].qty);
-          const price = toNumber(state.invRows[i].price);
-          cells[0].textContent = `$${(qty * price).toFixed(2)}`;
-        }
-        const grandEl = document.querySelector(".inv-grand-total");
-        if (grandEl) {
-          const total = state.invRows.reduce((s, r) => s + toNumber(r.qty) * toNumber(r.price), 0);
-          grandEl.textContent = `$${total.toFixed(2)}`;
-        }
-      }
-    });
-  });
-  app.querySelectorAll("[data-inv-remove]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const i = Number(btn.dataset.invRemove);
-      state.invRows.splice(i, 1);
-      render();
-    });
-  });
-  app.querySelector("[data-action='inv-add-row']")?.addEventListener("click", () => {
-    state.invRows.push({ name: "", qty: "1", price: "" });
-    render();
-  });
-  app.querySelector("[data-action='inv-print']")?.addEventListener("click", printInvoice);
-  app.querySelector("[data-action='inv-reset']")?.addEventListener("click", () => {
-    state.invCustomer = "";
-    state.invNotes = "";
-    state.invRows = [{ name: "", qty: "1", price: "" }];
-    render();
-  });
   // Purchase invoices handlers (فواتير المشتريات — مزامنة الأمين قيد التطوير)
   app.querySelector("#po-supplier")?.addEventListener("input", (e) => {
     state.poSupplierQuery = e.currentTarget.value;

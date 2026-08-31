@@ -427,7 +427,6 @@ if (generatorSource.includes("exchange-rate.json")) {
   failed = true;
 }
 for (const contract of [
-  "cron: '*/5 * * * *'",
   "group: generate-price-lists",
   "cancel-in-progress: false",
   "ref: main",
@@ -439,6 +438,69 @@ for (const contract of [
     console.error(`Automatic manual-price bulletin contract is missing: ${contract}`);
     failed = true;
   }
+}
+// النشرات تُولَّد الآن داخل مهمة النشر لا بـ commit إلى main، لأن حماية الفرع
+// ترفض دفع البوتات (GH013) ولا يمكن استثناؤها في مستودع شخصي.
+const deployWorkflow = readFileSync(".github/workflows/pages.yml", "utf8");
+for (const contract of [
+  "node scripts/generate-price-lists.mjs",
+  "node scripts/generate-pdfs.mjs",
+  "Bump service worker cache version"
+]) {
+  if (!deployWorkflow.includes(contract)) {
+    console.error(`Deploy-time bulletin generation contract is missing in pages.yml: ${contract}`);
+    failed = true;
+  }
+}
+if (/git\s+push\s+origin\s+HEAD:main/.test(priceGenerationWorkflow)) {
+  console.error("generate-price-lists.yml must not push to main — branch protection rejects bot pushes (GH013).");
+  failed = true;
+}
+// نشر الأسعار يجب أن يعمل بلا تدخل بشري حتى لو حُفظ السعر من متصفح بلا gh_publish_token:
+// زناد دوري (schedule) على generate-price-lists.yml يضمن نجاحه فيُشغّل pages.yml تلقائياً
+// عبر workflow_run. يجب أن يبقى بلا أي خطوة كتابة على main (الصلاحيات read فقط).
+if (!/schedule:\s*\n\s*-\s*cron:/.test(priceGenerationWorkflow)) {
+  console.error("generate-price-lists.yml must keep an unattended schedule trigger so price/rate changes saved without gh_publish_token still publish automatically.");
+  failed = true;
+}
+if (!/permissions:\s*\n\s*contents:\s*read/.test(priceGenerationWorkflow)) {
+  console.error("generate-price-lists.yml must keep permissions: contents: read — scheduling must never regain write/commit access to main (GH013).");
+  failed = true;
+}
+const dailyProfitScript = readFileSync("tools/push-daily-profit.ps1", "utf8");
+// إصلاح تزامن ameen_daily_profit: يمنع أن يحذف أحد الـproducers (TOBACCO Ameen Sync
+// أو TOBACCO Sales Line Items Push) صفّ الآخر عند التزامن. يجب استخدام upsert ذرّي
+// عبر RPC بدل النمط القديم insert-ثم-delete الذي يفتح نافذة سباق حقيقية.
+if (!dailyProfitScript.includes("rpc/upsert_ameen_daily_profit")) {
+  console.error("push-daily-profit.ps1 must upsert via rpc/upsert_ameen_daily_profit (atomic) instead of insert-then-delete, to avoid the cross-producer race condition.");
+  failed = true;
+}
+if (/Method\s+Delete[^\n]*inventory_reports/i.test(dailyProfitScript)) {
+  console.error("push-daily-profit.ps1 must not DELETE from inventory_reports directly — that reopens the race window between concurrent producers.");
+  failed = true;
+}
+// أمن upsert_ameen_daily_profit (Codex P1، 2026-08-29): created_by يجب أن يُشتق من
+// auth.uid() داخل الدالة، لا أن يُرسَل من العميل — إرساله يفتح انتحالاً لهوية أي مستخدم.
+if (/p_created_by/.test(dailyProfitScript)) {
+  console.error("push-daily-profit.ps1 must not send p_created_by — the RPC derives created_by from auth.uid() server-side to prevent identity spoofing.");
+  failed = true;
+}
+const dailyProfitSql = readFileSync("supabase/ameen-daily-profit-atomic-upsert.sql", "utf8");
+if (!/revoke\s+all\s+on\s+function\s+public\.upsert_ameen_daily_profit[^\n]*from\s+public/i.test(dailyProfitSql)) {
+  console.error("ameen-daily-profit-atomic-upsert.sql must explicitly REVOKE ALL ... FROM PUBLIC — Postgres grants EXECUTE to PUBLIC by default on new functions, which would let any caller bypass RLS via this SECURITY DEFINER function.");
+  failed = true;
+}
+// تقييد الهوية (Codex P1، 2026-08-29، جولة ٢): GRANT لكل authenticated غير كافٍ —
+// أي جلسة مصادَقة عادية تستطيع استدعاء SECURITY DEFINER وتزوير بيانات الربح. يجب
+// وجود حارس صريح يقتصر على هوية المزامنة الرسمية الثابتة (نفس نمط sync_writer
+// المعتمد بالمشروع)، لا الاعتماد على تسجيل created_by وحده.
+if (!/ameen_daily_profit_is_sync_writer/.test(dailyProfitSql)) {
+  console.error("ameen-daily-profit-atomic-upsert.sql must restrict upsert_ameen_daily_profit to the trusted sync identity (ameen_daily_profit_is_sync_writer) — logging created_by via auth.uid() records the caller but does not authorize them; any authenticated session could otherwise overwrite the report.");
+  failed = true;
+}
+if (!/9724dbe4-ecb0-49f7-a6b4-12f7f73c68f3/.test(dailyProfitSql)) {
+  console.error("ameen-daily-profit-atomic-upsert.sql must guard against the project's established live sync-account UUID, matching the pattern already used by sales_line_items_is_sync_writer / ameen_item_snapshot_is_sync_writer.");
+  failed = true;
 }
 const newsletterContracts = [
   'navButton("pricing", "نشرة الأسعار")',
@@ -867,22 +929,24 @@ for (const contract of [
   }
 }
 
-// نموذج الفاتورة يجب أن يبقي التركيز أثناء كتابة اسم الزبون، وأن يستخدم
-// أرقاماً إنجليزية في حقول الكمية والسعر مهما كانت لغة عرض ويندوز.
-if (/state\.invCustomer = e\.currentTarget\.value;\s*render\(\);/.test(appJs)) {
-  console.error("Invoice customer input must not rerender and lose focus after every character.");
+// نموذج فاتورة المبيعات (route: sales) يجب أن يبقي التركيز أثناء كتابة اسم الزبون،
+// وأن يستخدم أرقاماً إنجليزية في حقول الكمية والسعر مهما كانت لغة عرض ويندوز.
+// (كان هذا العقد مربوطاً بصفحة invoice القديمة التي حُذفت في 27bfbe2؛ نُقل إلى
+//  الصفحة الحيّة التي ورثت نفس السلوك بدل أن تضيع التغطية.)
+if (/state\.salesCustomer = e\.currentTarget\.value;\s*render\(\);/.test(appJs)) {
+  console.error("Sales invoice customer input must not rerender and lose focus after every character.");
   failed = true;
 }
 for (const field of ["qty", "price"]) {
-  const invoiceInput = new RegExp(`data-inv-field="${field}"[^>]*type="text"[^>]*inputmode="decimal"[^>]*dir="ltr"`);
-  if (!invoiceInput.test(appJs)) {
-    console.error(`Invoice ${field} input must use English decimal text entry.`);
+  const salesInput = new RegExp(`data-sales-field="${field}"[^>]*data-sales-num[^>]*type="text"[^>]*inputmode="decimal"[^>]*dir="ltr"`);
+  if (!salesInput.test(appJs)) {
+    console.error(`Sales invoice ${field} input must use English decimal text entry.`);
     failed = true;
   }
 }
 const numberNormalizer = readFileSync("src/number-normalizer.js", "utf8");
-if (!numberNormalizer.includes("input[data-inv-field='qty']") || !numberNormalizer.includes("input[data-inv-field='price']")) {
-  console.error("Invoice numeric fields must be covered by the English-number normalizer.");
+if (!numberNormalizer.includes("input[data-sales-num]")) {
+  console.error("Sales invoice numeric fields must be covered by the English-number normalizer.");
   failed = true;
 }
 
@@ -1519,7 +1583,7 @@ for (const contract of [
 
 // عقد SQL — مراجعة الجولة الخامسة (موانع دمج): unit_cost/currency/settlement_value
 // محجوبة عن غير المالك عبر RLS owner-only + RPC مقنَّعة، مطابقة التكلفة بـitem_guid
-// لا بالاسم، رفض item_key فارغ، تحقق عدد السطور المُدرجة، وسباق idempotency عبر
+// الحقيقي ثم match_key لا بالاسم وحده، رفض item_key فارغ، تحقق عدد السطور المُدرجة، وسباق idempotency عبر
 // ON CONFLICT ذرّي بدل SELECT ثم INSERT منفصلين.
 {
   const invReconSql = readFileSync("supabase/inventory-reconciliation-table.sql", "utf8");
@@ -1542,8 +1606,12 @@ for (const contract of [
     console.error("inventory_recon_lines_select must no longer be using(true) — cost columns (unit_cost/currency/settlement_value) must be owner-only, masked for everyone else via inventory_recon_lines_for_session().");
     failed = true;
   }
-  if (!/where ic1\.item_guid = coalesce\(it ->> 'itemGuid', it ->> 'item_guid'\)/.test(invReconSql)) {
-    console.error("inventory_recon_create_session_with_lines must match item_costs by item_guid (matching push-item-costs.ps1's GUID/code/name priority), not by item_name alone with LIMIT 1.");
+  // بعد ترحيل 20260827110325 صار item_costs.item_guid يحمل GUID الأمين الحقيقي فقط،
+  // وانتقل مفتاح المطابقة العام (GUID/كود/اسم) إلى match_key. المسار المباشر يبقى هنا
+  // على item_guid؛ أما عقد مسارات الرجوع بالكود/الاسم على match_key وعدم انحراف
+  // الترحيل عن المخطط فيفرضهما scripts/check-inventory-recon-cost-fallbacks.mjs.
+  if (!/where ic1\.item_guid = nullif\(trim\(coalesce\(it ->> 'itemGuid', it ->> 'item_guid', ''\)\), ''\)/.test(invReconSql)) {
+    console.error("inventory_recon_create_session_with_lines must match item_costs by the true-GUID column item_guid first (then fall back to match_key), not by item_name alone with LIMIT 1.");
     failed = true;
   }
 
