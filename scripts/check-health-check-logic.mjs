@@ -19,7 +19,10 @@ import path from 'node:path';
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SCRIPT = path.join(repoRoot, 'scripts', 'health-check.mjs');
 const src = await readFile(SCRIPT, 'utf8');
-const { classifyLatestRun, selectRecentFailures, decideIssuesToClose } = await import(SCRIPT);
+const {
+  classifyLatestRun, selectRecentFailures, decideIssuesToClose,
+  parseWorkflowIncidentKey, isIncidentConclusion, NON_INCIDENT_CONCLUSIONS,
+} = await import(SCRIPT);
 
 const codeOnly = src.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
 
@@ -38,6 +41,13 @@ assert.doesNotMatch(
 );
 // ويجب أن يطلب headBranch كي تُنسب كل حادثة لفرعها.
 assert.match(scanBlock, /headBranch/, 'المسح يجب أن يجلب headBranch لتمييز الحوادث حسب الفرع.');
+// ولا يجوز تقييد المسح بـ--status failure: يفوّت startup_failure وstale وسواهما.
+assert.doesNotMatch(
+  scanBlock,
+  /"--status", "failure"/,
+  'عودة الثغرة: --status failure يفوّت النتائج النهائية غير الناجحة الأخرى (startup_failure/stale).',
+);
+assert.match(scanBlock, /"status,conclusion"|status,conclusion/, 'المسح يجب أن يجلب status وconclusion للتصنيف محلياً.');
 
 // أما فحص سير عمل بعينه (توليد النشرات/النشر) فيبقى مقيَّداً بـmain عن قصد،
 // لأن هذين يعملان على main فقط.
@@ -50,17 +60,50 @@ assert.match(
 // سلوكياً: فشل على فرع PR يجب أن يُرصد، والمفتاح يميّز الفرع.
 const now = Date.now();
 const iso = (minsAgo) => new Date(now - minsAgo * 60000).toISOString();
+const R = (o) => ({ status: 'completed', conclusion: 'failure', ...o });
 const runs = [
-  { workflowName: 'فحص المشروع', headBranch: 'feat/x', url: 'u1', createdAt: iso(5), displayTitle: 'PR #999' },
-  { workflowName: 'Decision Engine Check', headBranch: 'feat/y', url: 'u2', createdAt: iso(10), displayTitle: 'PR #998' },
-  { workflowName: 'Codex Review Gate', headBranch: 'feat/z', url: 'u3', createdAt: iso(2), displayTitle: 'مستثنى' },
-  { workflowName: 'فحص المشروع', headBranch: 'feat/old', url: 'u4', createdAt: iso(500), displayTitle: 'قديم' },
+  R({ workflowName: 'فحص المشروع', headBranch: 'feat/x', url: 'u1', createdAt: iso(5), displayTitle: 'PR #999' }),
+  R({ workflowName: 'Decision Engine Check', headBranch: 'feat/y', url: 'u2', createdAt: iso(10), displayTitle: 'PR #998' }),
+  R({ workflowName: 'Codex Review Gate', headBranch: 'feat/z', url: 'u3', createdAt: iso(2), displayTitle: 'مستثنى' }),
+  R({ workflowName: 'فحص المشروع', headBranch: 'feat/old', url: 'u4', createdAt: iso(500), displayTitle: 'قديم' }),
+  R({ workflowName: 'Deploy TOBACCO Web', headBranch: 'main', url: 'u5', createdAt: iso(6), displayTitle: 'بدء فاشل', conclusion: 'startup_failure' }),
+  R({ workflowName: 'نجاح', headBranch: 'main', url: 'u6', createdAt: iso(6), displayTitle: 'ناجح', conclusion: 'success' }),
+  R({ workflowName: 'متخطّى', headBranch: 'main', url: 'u7', createdAt: iso(6), displayTitle: 'متخطّى', conclusion: 'skipped' }),
+  R({ workflowName: 'جارٍ', headBranch: 'main', url: 'u8', createdAt: iso(6), displayTitle: 'جارٍ', status: 'in_progress', conclusion: null }),
 ];
 const found = selectRecentFailures(runs, now - 40 * 60000);
-assert.equal(found.length, 2, 'يجب رصد الفشلين الحديثين على فرعَي الـPR فقط.');
+assert.equal(found.length, 3, 'يجب رصد الفشلين على فرعَي الـPR + startup_failure، لا أكثر.');
+assert.ok(found.some((p) => p.details.includes('u5')), 'startup_failure يجب أن يُرصد كعطل.');
+assert.ok(!found.some((p) => p.details.includes('u6') || p.details.includes('u7')), 'success وskipped ليسا حادثة.');
+assert.ok(!found.some((p) => p.details.includes('u8')), 'التشغيل غير المكتمل ليس حادثة.');
 assert.ok(found.some((p) => p.key === 'workflow-failure-فحص المشروع@feat/x'), 'مفتاح الحادثة يجب أن يشمل الفرع.');
 assert.ok(!found.some((p) => p.workflowName === 'Codex Review Gate'), 'Codex Review Gate يجب أن يبقى مستثنى.');
 assert.ok(!found.some((p) => p.details.includes('قديم')), 'ما خرج عن نافذة المراقبة يجب أن يُستبعد.');
+
+// ═══════════ تصنيف النتائج: قائمة سماح لا قائمة منع ═══════════
+assert.deepEqual([...NON_INCIDENT_CONCLUSIONS].sort(), ['skipped', 'success'], 'غير الحادثة: success وskipped فقط (نفس قاعدة alert-on-automation-failure.yml).');
+for (const c of ['failure', 'cancelled', 'timed_out', 'action_required', 'startup_failure', 'stale', 'neutral', null]) {
+  assert.equal(isIncidentConclusion(c), true, `النتيجة "${c}" يجب أن تُعدّ عطلاً.`);
+}
+for (const c of ['success', 'skipped']) {
+  assert.equal(isIncidentConclusion(c), false, `النتيجة "${c}" يجب ألا تُعدّ عطلاً.`);
+}
+// سلوكياً على classifyLatestRun: startup_failure يجب ألا يُصنَّف سليماً.
+assert.equal(
+  classifyLatestRun([{ status: 'completed', conclusion: 'startup_failure', url: 'u', createdAt: iso(2) }],
+    { workflowName: 'W', key: 'deploy-failed', severity: 'عالٍ' }).problems.length,
+  1,
+  'عودة الثغرة: startup_failure كان يُصنَّف سليماً ويغلق عطلاً قائماً.',
+);
+
+// ═══════════ مفتاح تعافي الموقع يطابق مفتاح العطل ═══════════
+// لو اختلف المفتاحان لبقي Issue العطل مفتوحاً للأبد، ثم كتم reportProblem كل
+// انقطاع لاحق لأنه يجد Issue مفتوحاً بنفس المفتاح.
+const siteBlock = codeOnly.slice(codeOnly.indexOf('async function checkSiteReachability'), codeOnly.indexOf('export const NON_INCIDENT_CONCLUSIONS'));
+const siteFailKey = siteBlock.match(/key:\s*"(site-[a-z-]+)"/)?.[1];
+const siteHealthyKey = siteBlock.match(/healthy\.push\("(site-[a-z-]+)"\)/)?.[1];
+assert.ok(siteFailKey && siteHealthyKey, 'تعذّر استخراج مفتاحَي عطل/تعافي الموقع.');
+assert.equal(siteHealthyKey, siteFailKey, `عودة الثغرة: مفتاح تعافي الموقع (${siteHealthyKey}) يجب أن يطابق مفتاح العطل (${siteFailKey}).`);
 
 // ═══════════ P1-B: لا إغلاق بلا دليل إيجابي ═══════════
 
@@ -89,13 +132,13 @@ assert.deepEqual(ok.problems, [], 'نجاح مكتمل ليس مشكلة.');
 const openIssues = [
   { number: 11, body: '<!-- health:deploy-failed -->' },
   { number: 12, body: '<!-- health:workflow-failure-فحص المشروع@feat/x -->' },
-  { number: 13, body: '<!-- health:site-unreachable -->' },
+  { number: 13, body: '<!-- health:site-down -->' },
   { number: 14, body: 'بلا علامة' },
 ];
 
 // حالة الانقطاع: لا مشاكل مرصودة ولا أدلة سلامة (استعلام GitHub فشل).
 assert.deepEqual(
-  decideIssuesToClose({ openIssues, activeKeys: new Set(), healthyKeys: new Set(), healthyPrefixes: [] }),
+  decideIssuesToClose({ openIssues, activeKeys: new Set(), healthyKeys: new Set() }),
   [],
   'عودة الثغرة P1-B: لا يجوز إغلاق أي حادثة لمجرد أن الفحص لم يرصد شيئاً.',
 );
@@ -103,20 +146,43 @@ assert.deepEqual(
 // دليل إيجابي على واحدة فقط → تُغلق وحدها.
 assert.deepEqual(
   decideIssuesToClose({
-    openIssues, activeKeys: new Set(), healthyKeys: new Set(['site-unreachable']), healthyPrefixes: [],
+    openIssues, activeKeys: new Set(), healthyKeys: new Set(['site-down']),
   }),
-  [{ number: 13, key: 'site-unreachable' }],
+  [{ number: 13, key: 'site-down' }],
   'تُغلق الحادثة ذات الدليل الإيجابي وحدها.',
 );
 
-// مسح ناجح لم يجد الحادثة → دليل كافٍ لإغلاق workflow-failure-* فقط.
+// ⚠️ الملاحظة الثالثة من Codex: مجرد غياب الحادثة عن نافذة المراقبة ليس تعافياً.
+// لا يجوز إغلاق حادثة سير عمل إلا بتحقق فعلي يرصد نجاحاً مكتملاً.
+assert.deepEqual(
+  decideIssuesToClose({ openIssues, activeKeys: new Set(), healthyKeys: new Set(), verifyKey: () => false }),
+  [],
+  'عودة الثغرة: انقضاء نافذة LOOKBACK لا يعني تعافياً — بلا نجاح مرصود تبقى الحادثة مفتوحة.',
+);
+// وبتحقق ناجح تُغلق حادثة سير العمل وحدها.
 assert.deepEqual(
   decideIssuesToClose({
-    openIssues, activeKeys: new Set(), healthyKeys: new Set(), healthyPrefixes: ['workflow-failure-'],
+    openIssues, activeKeys: new Set(), healthyKeys: new Set(),
+    verifyKey: (k) => k === 'workflow-failure-فحص المشروع@feat/x',
   }),
   [{ number: 12, key: 'workflow-failure-فحص المشروع@feat/x' }],
-  'المسح الناجح يُغلق حوادث التشغيلات الفاشلة وحدها، لا حوادث النشر أو الموقع.',
+  'التحقق الفعلي يُغلق الحادثة المعنية وحدها.',
 );
+// ولا يجوز أن يُستدعى verifyKey أصلاً حين يفشل المسح العام (scanOk=false).
+const closeBlock = codeOnly.slice(codeOnly.indexOf('function closeResolvedIssues'), codeOnly.indexOf('async function main'));
+assert.match(closeBlock, /verifyKey:\s*scanOk \? verifyWorkflowIncidentResolved : undefined/, 'التحقق يجب أن يُعطَّل حين يفشل المسح العام.');
+
+// فكّ مفتاح الحادثة يجب أن يصمد لأسماء عربية وفروع فيها شرطات ونقاط
+assert.deepEqual(parseWorkflowIncidentKey('workflow-failure-فحص المشروع@feat/x'), { workflowName: 'فحص المشروع', branch: 'feat/x' });
+assert.deepEqual(parseWorkflowIncidentKey('workflow-failure-A@B@feat/y'), { workflowName: 'A@B', branch: 'feat/y' });
+assert.equal(parseWorkflowIncidentKey('site-down'), null, 'مفتاح غير خاص بسير عمل يجب أن يرجع null.');
+
+// والتحقق الفعلي يجب أن يشترط أحدث تشغيل *مكتمل* ناجح
+const verifyBlock = codeOnly.slice(codeOnly.indexOf('function verifyWorkflowIncidentResolved'), codeOnly.indexOf('function closeResolvedIssues'));
+assert.match(verifyBlock, /find\(\(r\) => r && r\.status === "completed"\)/, 'التحقق يجب أن يبحث عن أحدث تشغيل مكتمل.');
+assert.match(verifyBlock, /return !isIncidentConclusion\(lastCompleted\.conclusion\)/, 'التحقق يجب أن يشترط نتيجة غير حادثة.');
+assert.match(verifyBlock, /"--workflow", parsed\.workflowName/, 'التحقق يجب أن يستعلم عن نفس سير العمل.');
+assert.match(verifyBlock, /"--branch", parsed\.branch/, 'التحقق يجب أن يستعلم عن نفس الفرع.');
 
 // حادثة ما تزال نشطة لا تُغلق ولو ورد لها دليل سلامة متناقض.
 assert.deepEqual(
@@ -124,7 +190,6 @@ assert.deepEqual(
     openIssues,
     activeKeys: new Set(['deploy-failed']),
     healthyKeys: new Set(['deploy-failed']),
-    healthyPrefixes: [],
   }),
   [],
   'المشكلة النشطة تتقدّم على أي دليل سلامة.',
@@ -139,4 +204,4 @@ assert.equal(
   'النموذج المرجعي للسلوك المعطوب يجب أن يُظهر إغلاق الحوادث الثلاث (وإلا فالاختبار لا يرصد شيئاً).',
 );
 
-console.log('check-health-check-logic: OK — لا قيد فرع على المسح العام، ولا إغلاق حادثة بلا دليل إيجابي.');
+console.log('check-health-check-logic: OK — مسح بلا قيد فرع وبقائمة سماح، مفاتيح متطابقة، ولا إغلاق حادثة بلا نجاح مرصود.');

@@ -58,7 +58,10 @@ async function checkSiteReachability() {
   const problems = [];
   const healthy = [];
   const site = await fetchStatus(SITE_URL);
-  if (site.ok) healthy.push("site-unreachable");
+  // ⚠️ يجب أن يكون هذا هو نفس مفتاح العطل أدناه ("site-down") بالضبط. لو اختلفا،
+  // لا يُغلق Issue العطل أبداً، ثم يجد reportProblem ذلك الـIssue مفتوحاً في كل
+  // انقطاع لاحق فيتخطّى الإنشاء وإشعار تيليغرام — أي تُكتَم كل الأعطال التالية.
+  if (site.ok) healthy.push("site-down");
   if (!site.ok) {
     problems.push({
       key: "site-down",
@@ -83,7 +86,13 @@ async function checkSiteReachability() {
 
 // "skipped" غالباً سلوك مقصود (مثلاً pages.yml يتخطى deploy إن فشل سير عمل توليد
 // النشرات الذي يشغّله — تلك مشكلته الخاصة، وليست عطلاً إضافياً بالنشر نفسه).
-export const FAILURE_CONCLUSIONS = new Set(["failure", "cancelled", "timed_out", "action_required"]);
+//
+// ⚠️ قائمة سماح لا قائمة منع: أي نتيجة نهائية غير success/skipped تُعدّ عطلاً.
+// قائمة المنع السابقة كانت تُسقط startup_failure وstale وneutral فتصنّفها "سليمة"
+// وتغلق عطلاً قائماً. وهذه هي القاعدة نفسها المعتمدة في
+// .github/workflows/alert-on-automation-failure.yml.
+export const NON_INCIDENT_CONCLUSIONS = new Set(["success", "skipped"]);
+export const isIncidentConclusion = (conclusion) => !NON_INCIDENT_CONCLUSIONS.has(conclusion);
 
 // دالة نقية (قابلة للاختبار بلا شبكة): تصنّف قائمة تشغيلات إلى واحدة من ثلاث حالات.
 //
@@ -97,7 +106,7 @@ export function classifyLatestRun(runs, { workflowName, key, severity }) {
   const completed = (runs || []).filter((r) => r && r.status === "completed");
   if (!completed.length) return { problems: [], healthy: [], unknown: true };
   const last = completed[0];
-  if (FAILURE_CONCLUSIONS.has(last.conclusion)) {
+  if (isIncidentConclusion(last.conclusion)) {
     return {
       problems: [{
         key,
@@ -155,7 +164,12 @@ function checkLatestWorkflowRun(workflowName, key, severity) {
 // وصار مفتاح المشكلة يشمل الفرع كي تُتابَع كل حادثة على حدة.
 export function selectRecentFailures(runs, sinceMs, excludedNames = EXCLUDED_WORKFLOW_NAMES) {
   return (runs || [])
-    .filter((r) => r && !excludedNames.has(r.workflowName) && new Date(r.createdAt).getTime() >= sinceMs)
+    .filter((r) => r && !excludedNames.has(r.workflowName))
+    // ⚠️ لا نعتمد على --status failure في الاستعلام: فهو لا يشمل startup_failure
+    // ولا stale ولا غيرهما من النتائج النهائية غير الناجحة. نجلب المكتملة كلها
+    // ونصنّفها هنا بقائمة السماح نفسها المستعملة في classifyLatestRun.
+    .filter((r) => r.status === "completed" && isIncidentConclusion(r.conclusion))
+    .filter((r) => new Date(r.createdAt).getTime() >= sinceMs)
     .map((r) => {
       const branch = r.headBranch || "?";
       return {
@@ -175,12 +189,12 @@ function checkRecentWorkflowFailures() {
       "run", "list",
       "--repo", REPO,
       // بلا --branch عمداً: الفحوص الأساسية تعمل على فروع الـPR لا على main.
-      "--status", "failure",
-      // الاستثناء وفلترة الزمن يجريان في الذاكرة بعد هذا الحد، فلو بقي الحد
-      // منخفضاً امتلأت الدفعة بتشغيلات Codex Review Gate المستثناة وأزاحت
-      // الإخفاقات الحقيقية خارج النافذة.
+      // وبلا --status failure عمداً أيضاً: التصنيف يجري في الذاكرة بقائمة السماح
+      // كي تُرصد startup_failure وstale وسواهما.
+      // الاستثناء والتصنيف وفلترة الزمن تجري بعد هذا الحد، فلو بقي منخفضاً
+      // امتلأت الدفعة بتشغيلات Codex Review Gate المستثناة وأزاحت الحقيقية.
       "--limit", "100",
-      "--json", "workflowName,headBranch,url,createdAt,displayTitle",
+      "--json", "workflowName,headBranch,url,createdAt,displayTitle,status,conclusion",
     ]);
   } catch (err) {
     // ⚠️ فشل المسح ليس دليل سلامة. نرفعه كمشكلة ظاهرة، ونُعلم منطق الإغلاق
@@ -329,7 +343,19 @@ async function reportProblem(problem) {
 //   * مفتاح ضمن healthyKeys  = نتيجة مكتملة ناجحة مرصودة فعلاً هذه الجولة، أو
 //   * مفتاح يطابق بادئة ضمن healthyPrefixes = مسح نجح فعلاً ولم يجد هذه الحادثة.
 // وما عدا ذلك يبقى مفتوحاً بحالة "مجهول"، وهو الخيار الآمن في المراقبة.
-export function decideIssuesToClose({ openIssues, activeKeys, healthyKeys, healthyPrefixes = [] }) {
+// يفكّ مفتاح حادثة تشغيل فاشل إلى اسم سير العمل والفرع.
+// الصيغة: workflow-failure-<اسم سير العمل>@<الفرع>. نستعمل آخر '@' لأن أسماء
+// الفروع قد تحتوي '@' بينما البادئة ثابتة.
+export function parseWorkflowIncidentKey(key) {
+  const PREFIX = "workflow-failure-";
+  if (!key.startsWith(PREFIX)) return null;
+  const rest = key.slice(PREFIX.length);
+  const at = rest.lastIndexOf("@");
+  if (at <= 0) return null;
+  return { workflowName: rest.slice(0, at), branch: rest.slice(at + 1) };
+}
+
+export function decideIssuesToClose({ openIssues, activeKeys, healthyKeys, verifyKey }) {
   const active = activeKeys instanceof Set ? activeKeys : new Set(activeKeys || []);
   const healthy = healthyKeys instanceof Set ? healthyKeys : new Set(healthyKeys || []);
   const out = [];
@@ -338,16 +364,53 @@ export function decideIssuesToClose({ openIssues, activeKeys, healthyKeys, healt
     if (!match) continue;
     const key = match[1];
     if (active.has(key)) continue;                 // ما تزال قائمة
-    const verified = healthy.has(key) || healthyPrefixes.some((p) => key.startsWith(p));
+    // ⚠️ إصلاح ملاحظة Codex الثالثة: البادئة العمياء healthyPrefixes كانت تعتبر
+    // مجرد *خروج الحادثة من نافذة LOOKBACK_MINUTES* تعافياً، فتغلق فشل فحص على
+    // فرع PR لم يُعَد تشغيله أصلاً بعد 40 دقيقة. الآن كل حادثة سير عمل تُتحقَّق
+    // على حدة: نسأل عن أحدث تشغيل *مكتمل* لنفس سير العمل ونفس الفرع، ولا نغلق
+    // إلا إذا كانت نتيجته نجاحاً صريحاً.
+    let verified = healthy.has(key);
+    if (!verified && typeof verifyKey === "function") verified = verifyKey(key) === true;
     if (!verified) continue;                       // مجهولة → تبقى مفتوحة
     out.push({ number: issue.number, key });
   }
   return out;
 }
 
-function closeResolvedIssues({ activeKeys, healthyKeys, healthyPrefixes }) {
+// تحقق فعلي من تعافي حادثة سير عمل: أحدث تشغيل مكتمل لنفس سير العمل ونفس
+// الفرع يجب أن يكون ناجحاً صراحةً. أي شيء آخر (فشل، أو لا تشغيل مكتمل، أو فشل
+// الاستعلام) يعني "غير مُتحقَّق" فتبقى الحادثة مفتوحة.
+function verifyWorkflowIncidentResolved(key) {
+  const parsed = parseWorkflowIncidentKey(key);
+  if (!parsed) return false;
+  let runs;
+  try {
+    runs = ghJSON([
+      "run", "list",
+      "--repo", REPO,
+      "--workflow", parsed.workflowName,
+      "--branch", parsed.branch,
+      "--limit", "10",
+      "--json", "status,conclusion",
+    ]);
+  } catch {
+    return false;
+  }
+  const lastCompleted = (runs || []).find((r) => r && r.status === "completed");
+  if (!lastCompleted) return false;
+  return !isIncidentConclusion(lastCompleted.conclusion);
+}
+
+function closeResolvedIssues({ activeKeys, healthyKeys, scanOk }) {
   const openIssues = listAllOpenHealthIssues();
-  const toClose = decideIssuesToClose({ openIssues, activeKeys, healthyKeys, healthyPrefixes });
+  const toClose = decideIssuesToClose({
+    openIssues,
+    activeKeys,
+    healthyKeys,
+    // لا يُتحقَّق من حوادث سير العمل إلا إذا نجح المسح العام هذه الجولة؛
+    // وحتى حينها بنجاح مرصود فعلاً لا بمجرد غياب الحادثة عن النافذة.
+    verifyKey: scanOk ? verifyWorkflowIncidentResolved : undefined,
+  });
   for (const { number: issueNumber, key } of toClose) {
     const issue = { number: issueNumber };
     try {
@@ -381,8 +444,6 @@ async function main() {
 
   // الدليل الإيجابي وحده هو ما يسمح بإغلاق حادثة (انظر decideIssuesToClose).
   const healthyKeys = new Set([...site.healthy, ...priceGen.healthy, ...deploy.healthy]);
-  // مسح ناجح للتشغيلات الفاشلة يُثبت زوال أي حادثة workflow-failure-* لم يجدها.
-  const healthyPrefixes = recent.scanOk ? ["workflow-failure-"] : [];
   if (recent.scanOk) healthyKeys.add("workflow-scan-failed");
 
   console.log(`المشاكل المكتشفة: ${problems.length}`);
@@ -396,7 +457,7 @@ async function main() {
   closeResolvedIssues({
     activeKeys: new Set(problems.map((p) => p.key)),
     healthyKeys,
-    healthyPrefixes,
+    scanOk: recent.scanOk,
   });
 
   const summaryPath = process.env.GITHUB_STEP_SUMMARY;
