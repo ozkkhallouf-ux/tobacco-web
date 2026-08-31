@@ -262,4 +262,27 @@ assert.match(
   'عودة الثغرة: فشل إنشاء Issue كان يُرجع قبل notifyTelegram فيبقى العطل بلا أي تنبيه.',
 );
 
-console.log('check-health-check-logic: OK — مسح بلا قيد فرع وبقائمة سماح، مفاتيح متطابقة، تمييز التعافي، ومنع تكرار مرتبط بهوية الحادثة.');
+// ═══════════ انهيار المراقب نفسه يجب أن يكون مرئياً ═══════════
+// كان المعالِج يفرض exitCode = 0 فيُبلَّغ التشغيل كناجح رغم غياب أي مراقبة،
+// وalert-on-automation-failure.yml لم يكن يراقب هذا السير أصلاً.
+const tail = src.slice(src.indexOf('const isDirectRun'));
+assert.doesNotMatch(
+  tail.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n'),
+  /process\.exitCode = 0/,
+  'عودة الثغرة: انهيار المراقب يجب ألا يُبلَّغ كتشغيل ناجح.',
+);
+assert.match(tail, /process\.exitCode = 1/, 'انهيار المراقب يجب أن يُفشل التشغيل ليكون مرئياً.');
+assert.match(tail, /notifyTelegram\(/, 'انهيار المراقب يجب أن يُرسل تنبيهاً احتياطياً عبر القناة المستقلة قبل الخروج.');
+assert.match(tail, /health-check-crashed/, 'التنبيه الاحتياطي يجب أن يحمل مفتاحاً خاصاً بالانهيار.');
+
+// ومَن يراقب المراقب: يجب أن يكون سير عمل health-check ضمن قائمة التنبيه.
+const alertYml = await readFile(path.join(repoRoot, '.github', 'workflows', 'alert-on-automation-failure.yml'), 'utf8');
+const healthYml = await readFile(path.join(repoRoot, '.github', 'workflows', 'health-check.yml'), 'utf8');
+const healthName = healthYml.match(/^name:\s*(.+)$/m)?.[1].trim();
+assert.ok(healthName, 'تعذّر استخراج اسم سير عمل health-check.');
+assert.ok(
+  new RegExp(`^\\s*-\\s*"${healthName}"\\s*$`, 'm').test(alertYml),
+  `عودة الثغرة: سير عمل "${healthName}" يجب أن يكون مراقَباً في alert-on-automation-failure.yml وإلا مرّ انهياره بلا تنبيه.`,
+);
+
+console.log('check-health-check-logic: OK — مسح بلا قيد فرع وبقائمة سماح، مفاتيح متطابقة، تمييز التعافي، منع تكرار بهوية الحادثة، وانهيار المراقب مرئي ومُنبَّه عنه.');

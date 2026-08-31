@@ -526,9 +526,26 @@ async function main() {
 // بلا أي استدعاء لـgh أو للشبكة.
 const isDirectRun = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
 if (isDirectRun) {
-  main().catch((err) => {
+  main().catch(async (err) => {
+    // ⚠️ انهيار المراقب نفسه هو أخطر حالة: لا فحص ولا تبليغ. كان الكود يفرض
+    // exitCode = 0 فيُبلَّغ التشغيل كناجح، وalert-on-automation-failure.yml لم
+    // يكن يراقب سير عمل health-check أصلاً — فيختفي الانهيار تماماً.
+    // الآن: تنبيه احتياطي عبر القناة المستقلة، ثم إفشال التشغيل ليكون مرئياً.
+    // إفشاله آمن: health-check مجدول فقط (cron) ولا يحجب أي نشر أو PR،
+    // فالبند 5 ("لا يحجب أي عملية تشغيلية") يبقى محفوظاً.
     console.error("فشل سكريبت health-check:", err);
-    // لا نفشل التشغيل بكود خطأ كي لا يتحول فحص المراقبة نفسه إلى عائق تشغيلي (البند 5).
-    process.exitCode = 0;
+    try {
+      await notifyTelegram(
+        {
+          key: "health-check-crashed",
+          title: "انهار فحص صحة المشروع نفسه — لا مراقبة هذه الدورة",
+          severity: "عالٍ",
+        },
+        null,
+      );
+    } catch (notifyErr) {
+      console.error("وتعذّر أيضاً إرسال التنبيه الاحتياطي:", notifyErr);
+    }
+    process.exitCode = 1;
   });
 }
