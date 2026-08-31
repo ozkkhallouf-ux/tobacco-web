@@ -171,8 +171,8 @@ assert.doesNotMatch(
 );
 assert.match(
   yml,
-  /EXISTING_ID=\$\(echo "\$EXISTING_RUNS_JSON" \| jq -r 'sort_by\(\.id\) \| last \| \.id \/\/ empty'\)/,
-  'يجب اختيار أحدث check-run موجود (id الأكبر) لإعادة استخدامه عبر PATCH',
+  /IFS=\$'\\t' read -r EXISTING_ID EXISTING_GENERATION EXISTING_DUP_IDS <<< "\$\(pick_canonical "\$EXISTING_RUNS_JSON"\)"/,
+  'يجب اختيار check-run الكانوني الموجود عبر pick_canonical (مقارنة generation صريحة، لا ترتيب id) لإعادة استخدامه عبر PATCH — إصلاح جوهري خامس عشر',
 );
 assert.match(
   yml,
@@ -209,13 +209,13 @@ assert.match(
 );
 assert.match(
   yml,
-  /EXISTING_GENERATION=\$\(echo "\$EXISTING_RUNS_JSON" \| jq -r 'sort_by\(\.id\) \| last \| \.external_id \/\/ empty'\)/,
-  'يجب قراءة external_id للـcheck-run الكانوني الموجود كـgeneration مُسجَّلة',
+  /IS_STALE=1[\s\S]{0,200}if \[ "\$IS_STALE" -eq 1 \][\s\S]{0,200}SKIP_REASON="stale"[\s\S]{0,50}break/,
+  'يجب وجود حارس تشغيل قديم صريح (IS_STALE) يضبط SKIP_REASON=stale ويخرج من حلقة acquire_lock بلا كتابة، دون الاعتماد على ترتيب وصول الأحداث',
 );
 assert.match(
   yml,
-  /IS_STALE=1[\s\S]{0,400}exit 0/,
-  'يجب وجود حارس تشغيل قديم صريح (IS_STALE) يخرج بلا كتابة (exit 0) دون الاعتماد على ترتيب وصول الأحداث',
+  /if \[ "\$SKIP_REASON" = "stale" \][\s\S]{0,300}exit 0/,
+  'SKIP_REASON=stale القادم من acquire_lock يجب أن يؤدي لاحقاً لخروج بلا كتابة (exit 0) في خطوة النتيجة الإعلامية',
 );
 assert.match(
   yml,
@@ -457,8 +457,8 @@ assert.match(
 );
 assert.match(
   yml,
-  /CONFIRM_GENERATION=\$\(echo "\$CONFIRM_RUNS_JSON" \| jq -r 'sort_by\(\.id\) \| last \| \.external_id \/\/ empty'\)/,
-  'بعد كل محاولة كتابة (PATCH أو POST)، يجب إعادة قراءة external_id للـcheck-run الكانوني فوراً للتأكد أن كتابتنا نحن هي التي استقرّت فعلياً — لا افتراض نجاح الكتابة لمجرد نجاح طلب HTTP',
+  /IFS=\$'\\t' read -r CONFIRM_ID CONFIRM_GENERATION CONFIRM_DUP_IDS <<< "\$\(pick_canonical "\$CONFIRM_RUNS_JSON"\)"/,
+  'بعد كل محاولة كتابة (PATCH أو POST)، يجب إعادة قراءة كل check-runs بنفس الاسم على نفس sha واختيار الكانوني عبر pick_canonical (مقارنة generation صريحة، لا ترتيب id) للتأكد أن كتابتنا نحن هي التي استقرّت فعلياً — لا افتراض نجاح الكتابة لمجرد نجاح طلب HTTP',
 );
 assert.match(
   yml,
@@ -494,6 +494,54 @@ assert.doesNotMatch(
   yml,
   /skip_reason=contention"[\s\S]{0,200}exit 1/,
   'يُمنع إفشال الـjob (exit 1) عند استنفاد المحاولات بسبب تنافس عابر — يُنتج check-run تلقائياً بـfailure على هذا التشغيل الداخلي فيلوّث statusCheckRollup (بالضبط ما صمَّم الإصلاحان العاشر/الحادي عشر لمنعه)',
+);
+
+// 9) إصلاح جوهري خامس عشر بتاريخ 2026-08-31 — ردّاً على 2 P1 حيّين رصدهما Codex على
+//    commit 43c765d نفسه (الإصلاح الرابع عشر): (أ) "Do not treat an immediate read-back
+//    as final" — تشغيل أقدم اجتاز فحص staleness الخاص به *قبل* أن يفوز تشغيل أحدث بالقفل
+//    قد يكتب متأخراً بعد أن أكّد التشغيل الأحدث نجاحه وخرج (لا يعاود التشغيل الأحدث الحلقة
+//    بعد التأكيد). (ب) "Reconcile every concurrently created canonical check" — تشغيلان
+//    متزامنان بلا EXISTING_ID قد يُنشئان كل منهما check-run منفصل بنفس الاسم؛ اختيار
+//    "الأحدث بترتيب id" وحده لا يُصالح النسخة اليتيمة الأخرى.
+assert.match(
+  yml,
+  /LIVE_LOCK_GENERATION=\$\(gh api "repos\/\$REPO\/git\/commits\/\$LIVE_LOCK_SHA" --jq '\.message' 2>\/dev\/null \| head -n1 \| tr -d '\[:space:\]'\)/,
+  'خطوة publish يجب أن تعيد قراءة refs/gate-lock الحيّة (المصدر الوحيد الحقيقي للـCAS) طازجة قبل أي محاولة كتابة — لا الاعتماد فقط على حالة محلية (won=true) تحدَّدت في خطوة acquire_lock السابقة',
+);
+assert.match(
+  yml,
+  /if \[ "\$LIVE_LOCK_GENERATION" != "\$GENERATION" \] && is_generation_newer "\$LIVE_LOCK_GENERATION" "\$GENERATION"[\s\S]{0,400}exit 0/,
+  'إن تقدّم refs/gate-lock لصالح generation أحدث منّا — بصرف النظر هل كتب ذلك التشغيل الأحدث على check-run بعد أم لا — يجب أن يخرج هذا التشغيل فوراً بلا أي كتابة؛ هذا يغلق ثغرة "الكتابة بعد تأكيد تشغيل أحدث ثم الخروج"',
+);
+assert.match(
+  yml,
+  /is_generation_newer\(\) \{/,
+  'يجب وجود دالة مقارنة generation عددية صريحة (run_id\\.attempt) يُعاد استخدامها في كل فحوصات staleness بدلاً من مقارنات نصية/ترتيب id متناثرة',
+);
+assert.match(
+  yml,
+  /pick_canonical\(\) \{/,
+  'يجب وجود دالة pick_canonical تختار الكانوني الفعلي (أعلى generation موجودة فعلياً بين كل check-runs بنفس الاسم على نفس sha) بدل sort_by(.id) | last — فترتيب id ليس بالضرورة نفس ترتيب generation عند POST متزامن',
+);
+assert.match(
+  yml,
+  /reconcile_duplicates\(\) \{/,
+  'يجب وجود دالة تصالح كل check-run مكرّر (نُشئ بالتزامن من تشغيلين بلا EXISTING_ID في نفس اللحظة) بنفس محتوى النسخة الكانونية — لا تركها يتيمة بحالة مغايرة تُربك rollup الفحص المطلوب',
+);
+assert.match(
+  yml,
+  /reconcile_duplicates "\$EXISTING_DUP_IDS"/,
+  'عند اكتشاف أن كتابتنا كانت موجودة بالفعل (EXISTING_GENERATION = GENERATION)، يجب أيضاً تصالح أي نسخ مكرّرة أخرى قد تكون نشأت بالتزامن',
+);
+assert.match(
+  yml,
+  /reconcile_duplicates "\$CONFIRM_DUP_IDS"/,
+  'عند تأكيد نجاح النشر عبر القراءة الفورية بعد الكتابة، يجب أيضاً تصالح أي نسخ مكرّرة أخرى قد تكون نشأت بالتزامن معنا',
+);
+assert.doesNotMatch(
+  yml,
+  /EXISTING_ID=\$\(echo "\$EXISTING_RUNS_JSON" \| jq -r 'sort_by\(\.id\) \| last \| \.id \/\/ empty'\)/,
+  'يجب أن يكون اختيار الكانوني القديم بترتيب id وحده (sort_by(.id) | last) قد أُزيل بالكامل من فحص EXISTING — استُبدل بـpick_canonical المبني على مقارنة generation صريحة',
 );
 
 // (ل) ثلاثة triggers متزامنة على نفس PR ⇒ عند التسوية (settlement) واحد فقط يملك القفل فعلياً.

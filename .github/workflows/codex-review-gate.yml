@@ -696,16 +696,103 @@ jobs:
             STATUS_FIELDS='"status":"in_progress"'
           fi
 
+          # ⚠️ إصلاح جوهري خامس عشر بتاريخ 2026-08-31 — ردّاً على 2 P1 حيّين رصدهما Codex
+          # على commit 43c765d (الإصلاح الرابع عشر نفسه):
+          # (أ) "Do not treat an immediate read-back as final": التأكيد الفوري على
+          #     check-run وحده لا يمنع تشغيلاً أقدم — كان قد اجتاز فحص staleness الخاص به
+          #     *قبل* أن يفوز تشغيل أحدث بالقفل أصلاً — من إتمام كتابته المتأخرة بعد أن
+          #     أكّد التشغيل الأحدث نجاحه وخرج (لا يعاود التشغيل الأحدث الحلقة بعد التأكيد).
+          #     الإصلاح: قبل أي محاولة كتابة، نقرأ refs/gate-lock/pr-<N> نفسه طازجاً —
+          #     المصدر الوحيد الحقيقي لـCAS ذرّي — لا حالة محلية قديمة. أي تشغيل يفوز
+          #     بالقفل عبر CAS في acquire_lock يُحدِّث هذا الـref فوراً، بصرف النظر عن متى
+          #     يصل فعلياً لخطوة النشر. فتشغيل أقدم يكتشف تقدّم القفل هنا فوراً قبل الكتابة
+          #     — لا بعدها — فتضيق نافذة السباق من "طوال مدة التشغيل" إلى زمن استجابة نداء
+          #     API واحد فقط (أقل من ثانية عملياً)، لا نافذة زمنية ثابتة (لا 45 ثانية ولا
+          #     أي رقم تعسفي) ولا اعتماد على queue behavior.
+          # (ب) "Reconcile every concurrently created canonical check": عند إنشاء أول
+          #     check-run لهذا الـHEAD (لا EXISTING_ID)، تشغيلان متزامنان قد يُنشئان كل
+          #     منهما check-run منفصل بنفس الاسم. الإصلاح: نختار الكانوني بمقارنة generation
+          #     صريحة (لا بترتيب id) عبر كل النسخ الموجودة، ثم — إن كنّا الكانوني الفعلي —
+          #     نصالح (PATCH) كل نسخة أخرى مكرّرة بنفس المحتوى، فلا تبقى نسخة يتيمة بحالة
+          #     مغايرة تُربك rollup الفحص المطلوب.
+          # انظر تعليق "إصلاح جوهري خامس عشر" أعلى الملف لتفصيل التصميم الكامل.
+
+          LOCK_REF="gate-lock/pr-$PR_NUMBER"
+
+          # مقارنة generation عددية صريحة (run_id.attempt) — أدق من مقارنة نصية أو ترتيب id.
+          is_generation_newer() {
+            local cand="$1" base="$2"
+            [ -z "$cand" ] && return 1
+            [ -z "$base" ] && return 0
+            local cr="${cand%%.*}" ca="${cand##*.}" br="${base%%.*}" ba="${base##*.}"
+            if [ "$cr" -gt "$br" ] 2>/dev/null; then return 0; fi
+            if [ "$cr" -eq "$br" ] 2>/dev/null && [ "$ca" -gt "$ba" ] 2>/dev/null; then return 0; fi
+            return 1
+          }
+
+          # يختار الكانوني (أعلى generation فعلياً موجودة) من قائمة check-runs بنفس الاسم —
+          # لا بترتيب id (الحارس ب أعلاه) — ويطبع "id<TAB>generation" لأسطر البقية (المكرّرة).
+          pick_canonical() {
+            local runs_json="$1"
+            local cid="" cgen=""
+            local dup_ids=""
+            while IFS=$'\t' read -r rid rgen; do
+              [ -z "$rid" ] && continue
+              if [ -n "$cid" ]; then
+                dup_ids="$dup_ids$cid"$'\n'
+              fi
+              if [ -z "$cgen" ] || is_generation_newer "$rgen" "$cgen"; then
+                cid="$rid"; cgen="$rgen"
+              else
+                dup_ids="$dup_ids$rid"$'\n'
+              fi
+            done < <(echo "$runs_json" | jq -r '.[] | "\(.id)\t\(.external_id // "")"')
+            printf '%s\t%s\t%s' "$cid" "$cgen" "$(echo "$dup_ids" | grep -v "^$cid$" | sort -u | tr '\n' ',')"
+          }
+
+          reconcile_duplicates() {
+            # يُستدعى فقط عندما نكون نحن الكانوني الفعلي المؤكَّد. يصالح كل نسخة مكرّرة
+            # أخرى بنفس محتوى النسخة الكانونية (نفس status/conclusion/output/generation)
+            # كي لا تبقى نسخة يتيمة بحالة قديمة/مغايرة تُربك rollup الفحص المطلوب.
+            local dup_csv="$1"
+            [ -z "$dup_csv" ] && return 0
+            local dup_id
+            IFS=',' read -ra DUP_ARR <<< "$dup_csv"
+            for dup_id in "${DUP_ARR[@]}"; do
+              [ -z "$dup_id" ] && continue
+              PAYLOAD=$(jq -n --arg name "$NAME" --arg summary "$SUMMARY" --arg generation "$GENERATION" --argjson text "$TEXT" \
+                --argjson status_fields "{$STATUS_FIELDS}" \
+                '{name: $name, external_id: $generation, output: {title: $name, summary: $summary, text: $text}} * $status_fields')
+              gh api "repos/$REPO/check-runs/$dup_id" --method PATCH --input - <<< "$PAYLOAD" >/dev/null 2>&1 || true
+              echo "تصالح: check-run مكرّر (id=$dup_id) على نفس الـsha جُعل مطابقاً للكانوني (generation=$GENERATION)."
+            done
+          }
+
           PUBLISH_DEADLINE=$(( $(date +%s) + 180 ))
           PUBLISH_ATTEMPT=0
           PUBLISHED="false"
           while :; do
             PUBLISH_ATTEMPT=$((PUBLISH_ATTEMPT + 1))
 
+            # الحارس (أ): تحقّق طازج من refs/gate-lock — المصدر الوحيد الحقيقي للـCAS —
+            # قبل أي كتابة. إن تقدّم لصالح generation أحدث منّا، هذا التشغيل قديم فعلياً
+            # الآن (بصرف النظر هل كتب التشغيل الأحدث على check-run بعد أم لا) — خروج فوري
+            # بلا كتابة، مهما كانت حالتنا المحلية (won=true سابقاً لا يعني ملكية دائمة).
+            LIVE_LOCK_SHA=""
+            if LOCK_REF_JSON=$(gh api "repos/$REPO/git/ref/$LOCK_REF" 2>/dev/null); then
+              LIVE_LOCK_SHA=$(echo "$LOCK_REF_JSON" | jq -r '.object.sha // empty')
+            fi
+            if [ -n "$LIVE_LOCK_SHA" ]; then
+              LIVE_LOCK_GENERATION=$(gh api "repos/$REPO/git/commits/$LIVE_LOCK_SHA" --jq '.message' 2>/dev/null | head -n1 | tr -d '[:space:]')
+              if [ "$LIVE_LOCK_GENERATION" != "$GENERATION" ] && is_generation_newer "$LIVE_LOCK_GENERATION" "$GENERATION"; then
+                echo "تخطٍّ بلا كتابة: refs/$LOCK_REF تقدّم لصالح generation أحدث ($LIVE_LOCK_GENERATION) قبل أي كتابة من هذا التشغيل — تشغيل أحدث فاز بالقفل، سواء نشر على check-run بعد أم لا."
+                exit 0
+              fi
+            fi
+
             EXISTING_RUNS_JSON=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs" --paginate \
               | jq -s --arg name "$NAME" '[.[].check_runs[] | select(.name == $name)]')
-            EXISTING_ID=$(echo "$EXISTING_RUNS_JSON" | jq -r 'sort_by(.id) | last | .id // empty')
-            EXISTING_GENERATION=$(echo "$EXISTING_RUNS_JSON" | jq -r 'sort_by(.id) | last | .external_id // empty')
+            IFS=$'\t' read -r EXISTING_ID EXISTING_GENERATION EXISTING_DUP_IDS <<< "$(pick_canonical "$EXISTING_RUNS_JSON")"
 
             if [ "$EXISTING_GENERATION" = "$GENERATION" ]; then
               # كتابتنا موجودة بالفعل — إما كتبناها في محاولة سابقة ولم نتأكد بعد، وإما
@@ -713,24 +800,13 @@ jobs:
               # لكل تشغيل). إما حال، النتيجة الكانونية مطابقة لما نريد كتابته — انتهى.
               PUBLISHED="true"
               CHECK_RUN_ID="$EXISTING_ID"
+              reconcile_duplicates "$EXISTING_DUP_IDS"
               break
             fi
 
-            if [ -n "$EXISTING_GENERATION" ]; then
-              EXISTING_RUN_ID="${EXISTING_GENERATION%%.*}"
-              EXISTING_ATTEMPT="${EXISTING_GENERATION##*.}"
-              CURRENT_RUN_ID="${GENERATION%%.*}"
-              CURRENT_ATTEMPT="${GENERATION##*.}"
-              IS_STALE=0
-              if [ "$EXISTING_RUN_ID" -gt "$CURRENT_RUN_ID" ] 2>/dev/null; then
-                IS_STALE=1
-              elif [ "$EXISTING_RUN_ID" -eq "$CURRENT_RUN_ID" ] 2>/dev/null && [ "$EXISTING_ATTEMPT" -gt "$CURRENT_ATTEMPT" ] 2>/dev/null; then
-                IS_STALE=1
-              fi
-              if [ "$IS_STALE" -eq 1 ]; then
-                echo "تخطٍّ بلا كتابة: check-run الكانوني يحمل بالفعل generation أحدث ($EXISTING_GENERATION > $GENERATION) — هذا التشغيل قديم/متأخر فعلياً، ممنوع من الكتابة فوق نتيجة أحدث."
-                exit 0
-              fi
+            if [ -n "$EXISTING_GENERATION" ] && is_generation_newer "$EXISTING_GENERATION" "$GENERATION"; then
+              echo "تخطٍّ بلا كتابة: check-run الكانوني يحمل بالفعل generation أحدث ($EXISTING_GENERATION > $GENERATION) — هذا التشغيل قديم/متأخر فعلياً، ممنوع من الكتابة فوق نتيجة أحدث."
+              exit 0
             fi
 
             if [ -n "$EXISTING_ID" ]; then
@@ -747,20 +823,20 @@ jobs:
               echo "محاولة إنشاء check-run كانوني جديد (generation=$GENERATION، محاولة $PUBLISH_ATTEMPT): $NAME على $HEAD_SHA — reviewed_count=$REVIEWED_COUNT"
             fi
 
-            # ⚠️ التأكيد الفوري (write-then-verify) — هذا هو جوهر الإصلاح الرابع عشر: لا
-            # نثق بأن الكتابة أعلاه هي التي استقرّت فعلياً حتى نعيد قراءة external_id على
-            # نفس الـsha ونتحقق أنه يطابق generation-نا بالضبط. إن كتب تشغيل آخر (generation
-            # أحدث) بين طلبنا وقراءتنا هذه، لن يطابق — فنعيد الحلقة من الأول فتكتشف نحن
-            # staleness-نا في المرة القادمة، أو نعيد الكتابة إن لم تكن الكتابة المنافسة قد
-            # استقرّت بعد (تقارب مضمون نحو أعلى generation فعلياً كتب).
+            # ⚠️ التأكيد الفوري (write-then-verify) — جوهر الإصلاح الرابع عشر، مع الحارس
+            # (ب) للتصالح مع أي نسخة مكرّرة (الإصلاح الخامس عشر): نعيد قراءة كل check-runs
+            # بهذا الاسم على نفس الـsha ونختار الكانوني بمقارنة generation صريحة (لا بترتيب
+            # id). إن كتب تشغيل آخر (generation أحدث) بين طلبنا وقراءتنا هذه، لن نكون
+            # الكانوني — فنعيد الحلقة فتكتشف نحن staleness-نا (عبر الحارس أ أو ب أعلاه) في
+            # المرة القادمة، أو نعيد الكتابة إن لم تكن الكتابة المنافسة قد استقرّت بعد.
             CONFIRM_RUNS_JSON=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs" --paginate \
               | jq -s --arg name "$NAME" '[.[].check_runs[] | select(.name == $name)]')
-            CONFIRM_ID=$(echo "$CONFIRM_RUNS_JSON" | jq -r 'sort_by(.id) | last | .id // empty')
-            CONFIRM_GENERATION=$(echo "$CONFIRM_RUNS_JSON" | jq -r 'sort_by(.id) | last | .external_id // empty')
+            IFS=$'\t' read -r CONFIRM_ID CONFIRM_GENERATION CONFIRM_DUP_IDS <<< "$(pick_canonical "$CONFIRM_RUNS_JSON")"
             if [ "$CONFIRM_GENERATION" = "$GENERATION" ]; then
               PUBLISHED="true"
               CHECK_RUN_ID="$CONFIRM_ID"
               echo "تأكيد النشر: check-run (id=$CONFIRM_ID, generation=$GENERATION) هو الكانوني الفعلي الآن."
+              reconcile_duplicates "$CONFIRM_DUP_IDS"
               break
             fi
 
