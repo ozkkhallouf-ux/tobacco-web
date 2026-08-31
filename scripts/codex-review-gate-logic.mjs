@@ -99,16 +99,8 @@ export function evaluateCodexReview({
 //   بالذات هو ما فتح نافذة التشغيلات المتزامنة الفعلية التي كشفها Codex كـP1 (انظر
 //   "إصلاح جوهري سابع" أدناه) — فصل concurrency وحده غير كافٍ لضمان عدم التراجع.
 
-/**
- * يطابق تعبير `concurrency.group` في codex-review-gate.yml حرفياً (بعد الإصلاح السابع:
- * مجموعة واحدة لكل PR بصرف النظر عن نوع الحدث — الحماية من التراجع تعتمد الآن على
- * isStaleWrite/isStaleHead أدناه، وليس على فصل concurrency).
- * @param {{ prNumber: string | number }} input
- */
-export function concurrencyGroup({ prNumber }) {
-  if (!prNumber) throw new Error('prNumber مطلوب');
-  return `codex-review-gate-${prNumber}`;
-}
+// concurrencyGroup() حُذفت: لم يعد في الـworkflow كتلة concurrency إطلاقاً (انظر الشرح
+// المقيس في الملف نفسه). إبقاء دالة تصف ميزة أزلناها يدعو لإعادتها سهواً.
 
 // ⚠️ إصلاح جوهري سابع بتاريخ 2026-08-31 (حارس تشغيل قديم صريح — race condition حقيقي
 //   رصدها Codex كـP1 حي على PR #146، thread غير محلول وغير outdated): توحيد concurrency
