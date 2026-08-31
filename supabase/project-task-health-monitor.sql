@@ -66,7 +66,36 @@ insert into private.project_task_monitors(task_key,task_label,report_source,max_
  -- 10 دقائق كافٍ لتفادي إنذار كاذب من تأخير عابر مع كشف التوقف الحقيقي بسرعة.
  -- جولة ٤: الـheartbeat انتقل لجدول مخصّص khalil_audit_sync_heartbeat
  -- (source_table)، فلم يعد report_source يُستخدم للفلترة هنا، فقط كتسمية.
- ('khalil-audit','مزامنة تدقيق خليل','khalil_audit_sync_heartbeat',10,true,'khalil_audit_sync_heartbeat')
+ ('khalil-audit','مزامنة تدقيق خليل','khalil_audit_sync_heartbeat',10,true,'khalil_audit_sync_heartbeat'),
+ -- 2026-08-31: مهمة "TOBACCO Expense Entries Push" كانت غير مسجّلة إطلاقاً
+ -- على OZK2026 بين 12 و25 آب، فتوقف خط المصاريف ١٩ يوماً بلا إنذار واحد،
+ -- والتقرير المسائي يعلن "المصاريف اليوم: 0" كل ليلة بينما الحركات موجودة
+ -- فعلاً في الأمين. السبب أن لا شيء كان يراقب هذا الخط: مراقب Windows
+ -- (tools/ensure-ameen-sync.ps1) يكتشف المهام الموجودة فقط — فمهمة محذوفة
+ -- لا يراها أصلاً — ولم يكن هنا صف يراقب البيانات نفسها. هذا الصف يغلق
+ -- الثقب من جهة البيانات: أي انقطاع في الرفع يُكتشف بصرف النظر عن سبب
+ -- التوقف (حذف المهمة/تعطيلها/فشلها/إطفاء الجهاز).
+ -- source_table='expense_entries' أي النمط المخصّص (كما khalil-audit) لأن
+ -- tools/push-expense-entries.ps1 لا يكتب أي heartbeat في inventory_reports
+ -- إطلاقاً، فلا قيمة source يمكن الفلترة عليها هناك. وmax(created_at) على
+ -- الجدول نفسه هو بالضبط زمن آخر رفع ناجح: السكربت يحذف نافذة الأيام
+ -- السبعة ثم يعيد إدراجها كاملة في كل تشغيل، فكل صفوف النافذة تحمل طابع
+ -- التشغيلة الأخيرة (مثبت حياً: كل دورة PT30M تستبدل مجموعة المعرّفات
+ -- بالكامل). ولا حاجة لصلاحيات إضافية — monitor_project_tasks() هي
+ -- security definer ومالكها postgres، وهو نفسه مالك expense_entries بلا
+ -- force row level security، فقراءة max(created_at) لا تصطدم بسياسات RLS
+ -- "المالك فقط" على الجدول.
+ -- 90 دقيقة = ٣ أضعاف دورة المهمة (PT30M): تتحمّل تشغيلتين فائتتين قبل
+ -- الإنذار — وهو هامش ضروري على جهاز محمول يُطفأ ساعات — وهي نفس عتبة
+ -- customer-invoices المثبتة أصلاً في هذا التصميم.
+ -- check_status يبقى false (الافتراضي): expense_entries جدول بيانات بلا
+ -- عمود status، فلا شيء يُقرأ. لا تُضَف هنا.
+ -- قيد معروف ومقبول: لو مرّت نافذة الأيام السبعة كلها بلا أي حركة مصاريف
+ -- في الأمين، يخرج السكربت بـexit 0 بلا حذف ولا إدراج (سطر "ma fi satr")
+ -- فيتجمّد max(created_at) ويُطلق إنذاراً رغم سلامة المهمة. سبعة أيام
+ -- متتالية بلا مصروف واحد في محل يعمل يومياً حالة تستحق النظر بنفسها،
+ -- فالإنذار عندها صحيح لا كاذب، ولا يُعالَج بخفض الحساسية.
+ ('expense-entries','حركة المصاريف','expense_entries',90,true,'expense_entries')
 on conflict(task_key) do update set task_label=excluded.task_label,report_source=excluded.report_source,
  max_age_minutes=excluded.max_age_minutes,enabled=excluded.enabled,source_table=excluded.source_table;
 

@@ -48,7 +48,9 @@ const required = [
   "scripts/check-smart-inventory.mjs",
   "supabase/ameen-account-balance-reports.sql",
   "tools/push-ameen-account-balances.ps1",
-  "tools/register-account-balances-task.ps1"
+  "tools/register-account-balances-task.ps1",
+  "supabase/project-task-health-monitor.sql",
+  "scripts/check-project-task-monitors.mjs"
 ];
 
 let failed = false;
