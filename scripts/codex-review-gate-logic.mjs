@@ -107,3 +107,85 @@ export function concurrencyGroup({ prNumber, eventName }) {
   if (!eventName) throw new Error('eventName مطلوب');
   return `codex-review-gate-${prNumber}-${eventName}`;
 }
+
+// ⚠️ إصلاح جوهري خامس بتاريخ 2026-08-31 (Canonical Check Run واحد لكل PR+HEAD SHA):
+//   الإصلاح الرابع (فصل concurrency group حسب نوع الحدث) أوقف الإلغاء الخاطئ، لكنه كشف
+//   عن ثغرة أعمق رصدها Codex نفسه كـP1 حي على PR #146: كل تشغيل (pull_request_target عند
+//   فتح الـPR، ثم issue_comment عند "@codex review") كان يُنشئ check-run **منفصلاً** جديداً
+//   بنفس الاسم "Codex Review Gate" عبر POST /check-runs — فإذا اكتمل التشغيل الأول (الذي
+//   لا توجد مراجعة بعد وقته، FAIL شرعي حينها) بعد اكتمال الثاني (الذي وجد مراجعة، PASS)،
+//   يبقى كلا الـcheck-run موجودَين معاً على نفس head_sha، ويُقيّم rollup/ruleset الحالة
+//   الإجمالية FAILURE — رغم أن الأحدث والأصح PASS. المشكلة الجذرية: عدة check-runs بنفس
+//   الاسم لنفس sha، لا "آخرها يفوز".
+//
+//   الحل: مصدر الحقيقة الوحيد يصبح **check-run كانوني واحد** لكل زوج (PR, head_sha):
+//     1. كل تشغيل يبحث أولاً (GET /commits/{sha}/check-runs?check_name=Codex Review Gate)
+//        عن check-run موجود فعلاً على نفس head_sha بالضبط.
+//     2. إن وُجد ⇒ PATCH لنفس الـid (تحديث في مكانه) — لا يُنشأ أبداً check-run ثانٍ بنفس
+//        الاسم على نفس sha، فلا تراكم ولا تلوّث للـrollup مهما تعدّدت التشغيلات (فتح
+//        الـPR، تعليق مراجعة، push، إلخ) على نفس الـHEAD.
+//     3. إن لم يوجد (أول تشغيل لهذا الـsha تحديداً، أو sha جديد بعد push) ⇒ POST لإنشاء
+//        check-run جديد بحالة `in_progress` (لا success ولا failure).
+//     4. لا توجد مراجعة بعد ⇒ الحالة تبقى `in_progress` (pending) — **ليست** `failure`.
+//        هذا يمنع الدمج بنفس فعالية الفشل الصريح (required status check غير success)، لكن
+//        دون أي احتمال أن ينشر تشغيل قديم "فشلاً" ملوِّثاً لاحقاً — فما دام لا يوجد سوى
+//        check-run واحد قابل للتحديث في مكانه، لا يوجد "قديم" يتنافس مع "جديد" إطلاقاً.
+//     5. مراجعة صريحة على نفس الـHEAD ⇒ يُحدَّث نفس الـcheck-run الكانوني إلى
+//        `completed`/`success`.
+//     6. push جديد (HEAD SHA مختلف) ⇒ لا يوجد check-run بعد لهذا الـsha الجديد تحديداً
+//        (حتى لو كان الـsha السابق success) ⇒ ينشأ check-run كانوني جديد بحالة `in_progress`
+//        تلقائياً — لا حاجة لأي منطق خاص، لأن البحث دائماً يكون بـhead_sha الحالي حصراً.
+//   مُختبَر بالكامل في scripts/check-codex-review-gate-logic.mjs (جزء من npm run check).
+
+/**
+ * @typedef {{ id: number, name?: string, head_sha?: string }} GhCheckRun
+ */
+
+/**
+ * يبحث عن check-run كانوني موجود فعلاً على نفس head_sha بالضبط (وبنفس الاسم)، ليُعاد
+ * استخدام نفس id عبر PATCH بدلاً من إنشاء check-run ثانٍ (POST) بنفس الاسم على نفس sha.
+ * إن تعدّدت (حالة تراكم قديمة من إصلاحات سابقة)، يُختار الأحدث (أكبر id) دائماً.
+ * @param {{ checkRuns?: GhCheckRun[], headSha: string, name?: string }} input
+ * @returns {number | null} الـid القابل لإعادة الاستخدام، أو null إن وجب إنشاء واحد جديد.
+ */
+export function selectCanonicalCheckRunId({ checkRuns = [], headSha, name = 'Codex Review Gate' }) {
+  if (!headSha) throw new Error('headSha مطلوب');
+  const matching = checkRuns.filter((cr) => cr?.name === name && cr?.head_sha === headSha);
+  if (matching.length === 0) return null;
+  return matching.reduce((latest, cr) => (cr.id > latest.id ? cr : latest)).id;
+}
+
+/**
+ * يبني حمولة create-or-update لـcheck-run "Codex Review Gate" الكانوني، بالاعتماد حصراً
+ * على نتيجة evaluateCodexReview أعلاه. لا success ولا failure طالما لا توجد مراجعة —
+ * الحالة عندها in_progress (pending)، لا failure أبداً.
+ * @param {{ headSha: string, reviewedCount: number, summary: string, badgesText?: string, existingId?: number | null }} input
+ */
+export function buildCanonicalCheckRunPayload({ headSha, reviewedCount, summary, badgesText = '', existingId = null }) {
+  if (!headSha) throw new Error('headSha مطلوب');
+  const name = 'Codex Review Gate';
+  const text =
+    '### درجات الخطورة (best-effort، معلوماتي فقط — غير حاكم للدمج)\n```\n' +
+    (badgesText || '(لا توجد شارات درجة خطورة ملحوظة على هذا الـHEAD)') +
+    '\n```';
+
+  const base = {
+    method: existingId ? 'PATCH' : 'POST',
+    url: existingId ? `check-runs/${existingId}` : 'check-runs',
+    payload: {
+      name,
+      output: { title: name, summary, text },
+    },
+  };
+
+  if (!existingId) base.payload.head_sha = headSha; // POST يتطلب head_sha؛ PATCH لا يغيّره أبداً.
+
+  if (reviewedCount > 0) {
+    base.payload.status = 'completed';
+    base.payload.conclusion = 'success';
+  } else {
+    base.payload.status = 'in_progress'; // pending — بلا conclusion إطلاقاً، ليس failure.
+  }
+
+  return base;
+}

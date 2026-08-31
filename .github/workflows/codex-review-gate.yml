@@ -60,6 +60,35 @@ name: Codex Review Gate
 #        بـsha مختلف حسب دلالة GITHUB_SHA لكل حدث). هذا قيد فعلي في صلاحيات GITHUB_TOKEN
 #        لا يمكن تجاوزه إلا باستخدام App/PAT بصلاحية كتابة — خارج نطاق هذا الإصلاح.
 #
+# ⚠️ إصلاح جوهري خامس بتاريخ 2026-08-31 (Canonical Check Run واحد لكل PR+HEAD SHA):
+#   الإصلاح الرابع (فصل concurrency group حسب نوع الحدث، أدناه) أوقف الإلغاء الخاطئ بين
+#   pull_request_target وissue_comment، لكنه كشف عن ثغرة أعمق رصدها Codex نفسه كـP1 حي على
+#   PR #146: كل تشغيل مستقل كان يُنشئ check-run **منفصلاً** جديداً عبر POST /check-runs
+#   بنفس الاسم "Codex Review Gate" على نفس head_sha. فإذا اكتمل تشغيل قديم (لا مراجعة بعد
+#   وقته ⇒ FAIL شرعي حينها) بعد تشغيل أحدث (وجد مراجعة ⇒ PASS)، يتعايش الاثنان معاً على
+#   نفس الـsha، ويُقيّم rollup/ruleset الحالة الإجمالية FAILURE رغم أن الأصح والأحدث PASS.
+#   المشكلة الجذرية: عدة check-runs بنفس الاسم على نفس sha — الـruleset لا يأخذ "آخرها فقط".
+#
+#   الحل: check-run كانوني واحد فقط لكل زوج (PR, head_sha) — مصدر الحقيقة الوحيد:
+#     1. كل تشغيل يبحث أولاً عن check-run موجود فعلاً بنفس الاسم على نفس head_sha بالضبط
+#        (GET /commits/{sha}/check-runs?check_name=Codex Review Gate).
+#     2. وُجد ⇒ PATCH لنفس الـid (تحديث في مكانه) — لا يُنشأ أبداً check-run ثانٍ بنفس الاسم
+#        على نفس sha مهما تعدّدت التشغيلات (فتح PR، تعليق مراجعة، إلخ) على نفس الـHEAD.
+#     3. لم يوجد (أول تشغيل لهذا الـsha، أو sha جديد بعد push) ⇒ POST لإنشاء check-run جديد
+#        بحالة `in_progress`.
+#     4. لا توجد مراجعة بعد ⇒ الحالة تبقى `in_progress` (pending) — **ليست** `failure`.
+#        هذا يمنع الدمج بنفس فعالية الفشل الصريح (required status check غير success)، لكن
+#        دون احتمال أن ينشر تشغيل قديم "فشلاً" لاحقاً يلوّث الـrollup — فما دام لا يوجد سوى
+#        check-run واحد قابل للتحديث في مكانه، لا يوجد "قديم" يتنافس مع "جديد" إطلاقاً.
+#     5. مراجعة صريحة على نفس الـHEAD ⇒ يُحدَّث نفس الـcheck-run الكانوني إلى
+#        `completed`/`success`.
+#     6. push جديد (HEAD SHA مختلف، حتى لو كان الـsha السابق success) ⇒ لا يوجد check-run
+#        بعد لهذا الـsha الجديد تحديداً ⇒ ينشأ check-run كانوني جديد بحالة `in_progress`
+#        تلقائياً بلا أي منطق خاص، لأن البحث دائماً بـhead_sha الحالي حصراً.
+#   منطق البحث/البناء موثَّق ومختبَر آلياً في codex-review-gate-logic.mjs
+#   (selectCanonicalCheckRunId + buildCanonicalCheckRunPayload) +
+#   check-codex-review-gate-logic.mjs — جزء من npm run check.
+#
 # ⚠️ إصلاح جوهري بتاريخ 2026-08-29 (الـartifact الحقيقي الذي ينشره Codex ليس Formal Review):
 #   تحقق حي على PR #128 أثبت أن chatgpt-codex-connector[bot] لا ينشر نتيجته كـ
 #   Pull Request Review (لا يظهر إطلاقاً في GET /pulls/{n}/reviews) ولا كـReview Comment
@@ -253,74 +282,69 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
           if [ "$FORMAL_REVIEW_COUNT" -gt 0 ] || [ "$REVIEW_COMMENT_COUNT" -gt 0 ] || [ "$ISSUE_COMMENT_MATCH" -eq 1 ]; then
-            echo "conclusion=success" >> "$GITHUB_OUTPUT"
             echo "summary=تمت مراجعة $CODEX_BOT_LOGIN لأحدث commit ($HEAD_SHA)." >> "$GITHUB_OUTPUT"
           else
-            echo "conclusion=failure" >> "$GITHUB_OUTPUT"
             echo "summary=لا توجد مراجعة من $CODEX_BOT_LOGIN على أحدث commit ($HEAD_SHA) بعد. انتظر المراجعة التلقائية، أو علّق @codex review، ثم أعد المحاولة." >> "$GITHUB_OUTPUT"
           fi
 
-      - name: نشر Check Run معلوماتي إضافي (best-effort — لا يحدد نتيجة الـGate)
+      - name: تحديث Check Run الكانوني الوحيد لهذا الـHEAD (إنشاء إن لم يوجد، وإلا PATCH لنفس الـid)
         id: publish
         if: steps.pr.outputs.base_ref == 'main'
         continue-on-error: true
         run: |
           set -euo pipefail
           HEAD_SHA="${{ steps.pr.outputs.head_sha }}"
-          CONCLUSION="${{ steps.check.outputs.conclusion }}"
+          REVIEWED_COUNT="${{ steps.check.outputs.reviewed_count }}"
           SUMMARY="${{ steps.check.outputs.summary }}"
-
-          # ⚠️ إصلاح ملاحظة Codex P1 بتاريخ 2026-08-29 (المرة الثانية — تصحيح الافتراض الخاطئ):
-          #   الافتراض السابق كان أن الـcheck المدمج تلقائياً باسم الـjob "Codex Review Gate"
-          #   يلتصق بـhead_sha الصحيح للـPR في المسارات التلقائية (pull_request_target/
-          #   pull_request_review/pull_request_review_comment)، وأن مسار workflow_dispatch
-          #   وحده هو الاستثناء. هذا خاطئ: GitHub يوثّق GITHUB_SHA لـpull_request_target
-          #   بأنه "آخر commit على فرع الـbase" (main) لا head الـPR، ولـpull_request_review
-          #   بأنه "آخر merge commit على فرع GITHUB_REF" — أي أن الـcheck المدمج تلقائياً
-          #   بالـjob غير ملتصق بـhead_sha الفعلي للـPR في أي من المسارات التلقائية أصلاً،
-          #   تماماً كحال workflow_dispatch. الملتصق الوحيد بـhead_sha الصحيح دائماً (لأنه
-          #   مبني على steps.pr.outputs.head_sha المجلوب صراحة من GitHub API لحظة التشغيل،
-          #   بغض النظر عن دلالة GITHUB_SHA لكل حدث) هو هذا الـcheck-run المنشور يدوياً.
-          #   لذلك: الاسم الثابت "Codex Review Gate" يُستخدم دائماً هنا لكل أنواع الأحداث —
-          #   لا تمييز بعد الآن. لا تعارض عملي في التسمية المكرّرة مع الـcheck التلقائي
-          #   لأن الأخير غالباً ملتصق بـsha مختلف (base main)، فلا يتنافسان على نفس السطر
-          #   في تبويب Checks لنفس الـcommit المطلوب فحصه.
           NAME="Codex Review Gate"
 
-          PAYLOAD=$(jq -n \
-            --arg name "$NAME" \
-            --arg sha "$HEAD_SHA" \
-            --arg conclusion "$CONCLUSION" \
-            --arg summary "$SUMMARY" \
-            --arg badges "${{ steps.check.outputs.badges }}" \
-            '{
-              name: $name,
-              head_sha: $sha,
-              status: "completed",
-              conclusion: $conclusion,
-              output: {
-                title: $name,
-                summary: $summary,
-                text: ("### درجات الخطورة (best-effort، معلوماتي فقط — غير حاكم للدمج)\n```\n" + $badges + "\n```\n\nمنع الدمج مع ملاحظات مفتوحة يُفرض عبر إعداد GitHub \"Require conversation resolution before merging\"، وليس عبر هذا الفحص.")
-              }
-            }')
+          # ⚠️ إصلاح جوهري خامس بتاريخ 2026-08-31: لا يُنشأ check-run جديد أبداً إن كان
+          # يوجد بالفعل واحد بنفس الاسم على نفس head_sha بالضبط — يُحدَّث في مكانه (PATCH)
+          # كي لا يتعايش قديم (FAIL شرعي وقته) مع جديد (PASS) على نفس الـsha، فلا يتلوّث
+          # rollup الـruleset أبداً. انظر تعليق "إصلاح جوهري خامس" أعلى الملف.
+          EXISTING_RUNS_JSON=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs" \
+            -f check_name="$NAME" --paginate | jq -s '[.[].check_runs[]]')
+          EXISTING_ID=$(echo "$EXISTING_RUNS_JSON" | jq -r 'sort_by(.id) | last | .id // empty')
 
-          echo "$PAYLOAD" | gh api "repos/$REPO/check-runs" --input - >/dev/null
-          echo "نُشر check-run: $NAME = $CONCLUSION على $HEAD_SHA"
+          TEXT=$(jq -n --arg badges "${{ steps.check.outputs.badges }}" \
+            '"### درجات الخطورة (best-effort، معلوماتي فقط — غير حاكم للدمج)\n```\n" + $badges + "\n```\n\nمنع الدمج مع ملاحظات مفتوحة يُفرض عبر إعداد GitHub \"Require conversation resolution before merging\"، وليس عبر هذا الفحص."')
 
-      - name: النتيجة النهائية المعتمدة للـGate (مستقلة تماماً عن نجاح النشر أعلاه)
+          if [ "$REVIEWED_COUNT" -gt 0 ]; then
+            STATUS_FIELDS='"status":"completed","conclusion":"success"'
+          else
+            # ⚠️ لا success ولا failure طالما لا توجد مراجعة على هذا الـHEAD تحديداً —
+            # in_progress فقط (pending). required status check غير مكتمل بـsuccess يمنع
+            # الدمج بنفس الفعالية، دون أي احتمال لنشر failure قديم يلوّث check-run لاحقاً.
+            STATUS_FIELDS='"status":"in_progress"'
+          fi
+
+          if [ -n "$EXISTING_ID" ]; then
+            PAYLOAD=$(jq -n --arg name "$NAME" --arg summary "$SUMMARY" --argjson text "$TEXT" \
+              --argjson status_fields "{$STATUS_FIELDS}" \
+              '{name: $name, output: {title: $name, summary: $summary, text: $text}} * $status_fields')
+            echo "$PAYLOAD" | gh api "repos/$REPO/check-runs/$EXISTING_ID" --method PATCH --input - >/dev/null
+            echo "تحديث check-run كانوني موجود (id=$EXISTING_ID): $NAME على $HEAD_SHA — reviewed_count=$REVIEWED_COUNT"
+          else
+            PAYLOAD=$(jq -n --arg name "$NAME" --arg sha "$HEAD_SHA" --arg summary "$SUMMARY" --argjson text "$TEXT" \
+              --argjson status_fields "{$STATUS_FIELDS}" \
+              '{name: $name, head_sha: $sha, output: {title: $name, summary: $summary, text: $text}} * $status_fields')
+            echo "$PAYLOAD" | gh api "repos/$REPO/check-runs" --method POST --input - >/dev/null
+            echo "إنشاء check-run كانوني جديد: $NAME على $HEAD_SHA — reviewed_count=$REVIEWED_COUNT"
+          fi
+
+      - name: النتيجة الإعلامية للـjob (لا تحدد نتيجة الـGate — المصدر الوحيد هو الـcheck-run الكانوني أعلاه)
         if: steps.pr.outputs.base_ref == 'main'
         run: |
           set -euo pipefail
-          CONCLUSION="${{ steps.check.outputs.conclusion }}"
+          REVIEWED_COUNT="${{ steps.check.outputs.reviewed_count }}"
 
           if [ "${{ steps.publish.outcome }}" != "success" ]; then
-            echo "تنبيه: نشر check-run المعلوماتي الإضافي فشل (مثلاً GITHUB_TOKEN للقراءة فقط في fork/Dependabot PR) — لا تأثير على نتيجة الـGate الأساسية." >&2
-          fi
-
-          if [ "$CONCLUSION" = "failure" ]; then
-            echo "Codex Review Gate = FAIL: لا توجد مراجعة Codex على HEAD الحالي بعد."
+            echo "خطأ: تحديث/إنشاء check-run الكانوني فشل (مثلاً GITHUB_TOKEN للقراءة فقط في fork/Dependabot PR) — الـGate يبقى معلّقاً (pending) حتى تشغيل لاحق ناجح." >&2
             exit 1
           fi
 
-          echo "Codex Review Gate = PASS: تمت مراجعة Codex على HEAD الحالي."
+          if [ "$REVIEWED_COUNT" -gt 0 ]; then
+            echo "Codex Review Gate = PASS: تمت مراجعة Codex على HEAD الحالي."
+          else
+            echo "Codex Review Gate = PENDING: لا توجد مراجعة Codex على HEAD الحالي بعد (in_progress، ليست failure)."
+          fi

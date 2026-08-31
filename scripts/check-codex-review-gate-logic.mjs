@@ -2,7 +2,12 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { evaluateCodexReview, concurrencyGroup } from './codex-review-gate-logic.mjs';
+import {
+  evaluateCodexReview,
+  concurrencyGroup,
+  selectCanonicalCheckRunId,
+  buildCanonicalCheckRunPayload,
+} from './codex-review-gate-logic.mjs';
 
 // Contract + regression checks for .github/workflows/codex-review-gate.yml —
 // إصلاح 2026-08-31 لثغرة إعادة ربط commit_id تلقائياً بعد rebase (اكتُشفت بعد دمج PR
@@ -146,6 +151,113 @@ assert.equal(
   groupIssueComment,
   groupSecondIssueCommentRun,
   'تشغيلان من issue_comment لنفس الـPR يجب أن يشتركا بنفس المجموعة (لا تراكم تشغيلات قديمة)',
+);
+
+// 4) فحص العقد الثابت على نص الـworkflow لإصلاح Canonical Check Run (2026-08-31):
+//    يبحث كل تشغيل عن check-run موجود على نفس head_sha بالضبط قبل الإنشاء، ولا يوجد أي
+//    مسار conclusion=failure عند غياب المراجعة — pending (in_progress) فقط.
+assert.match(
+  yml,
+  /repos\/\$REPO\/commits\/\$HEAD_SHA\/check-runs[\s\S]{0,80}check_name="\$NAME"/,
+  'يجب البحث عن check-run كانوني موجود على نفس head_sha قبل أي POST جديد',
+);
+assert.match(
+  yml,
+  /EXISTING_ID=\$\(echo "\$EXISTING_RUNS_JSON" \| jq -r 'sort_by\(\.id\) \| last \| \.id \/\/ empty'\)/,
+  'يجب اختيار أحدث check-run موجود (id الأكبر) لإعادة استخدامه عبر PATCH',
+);
+assert.match(
+  yml,
+  /gh api "repos\/\$REPO\/check-runs\/\$EXISTING_ID" --method PATCH/,
+  'وجود check-run سابق على نفس head_sha يجب أن يُحدَّث عبر PATCH لا POST جديد',
+);
+assert.match(
+  yml,
+  /STATUS_FIELDS='"status":"in_progress"'/,
+  'غياب المراجعة يجب أن يُنتج status=in_progress فقط — بلا conclusion وبلا failure',
+);
+assert.doesNotMatch(
+  yml,
+  /"conclusion":"failure"/,
+  'يُمنع نهائياً نشر conclusion=failure على check-run الكانوني — هذا بالضبط ما يلوّث rollup إذا نشره تشغيل قديم بعد تشغيل أحدث ناجح',
+);
+
+// 5) فحص منطق اختيار/بناء check-run الكانوني فعلياً — سيناريوهات (أ)-(ز) المطلوبة.
+const SHA_OLD = 'c'.repeat(40); // HEAD قديم راجعه Codex سابقاً
+const SHA_NEW = 'd'.repeat(40); // HEAD جديد بعد push لاحق — لم يُراجَع بعد
+
+// (أ) فتح PR بلا مراجعة ⇒ BLOCKED / check in_progress (لا check-run موجود بعد لهذا الـsha).
+const openedNoReview = evaluateCodexReview({ headSha: SHA_NEW });
+assert.equal(openedNoReview.conclusion, 'failure', 'فتح PR بلا مراجعة: evaluateCodexReview لا يزال يُرجع failure منطقياً (تصنيف داخلي)');
+const openedPayload = buildCanonicalCheckRunPayload({
+  headSha: SHA_NEW,
+  reviewedCount: openedNoReview.reviewedCount,
+  summary: openedNoReview.summary,
+});
+assert.equal(openedPayload.payload.status, 'in_progress', 'فتح PR بلا مراجعة ⇒ check-run الكانوني in_progress (pending)، لا failure');
+assert.equal(openedPayload.payload.conclusion, undefined, 'in_progress يجب ألا يحمل حقل conclusion إطلاقاً');
+assert.equal(openedPayload.method, 'POST', 'أول تشغيل لهذا الـsha ⇒ إنشاء (POST) لا تحديث');
+
+// (ب) review قديم على HEAD سابق (SHA_OLD) ثم push جديد (SHA_NEW) ⇒ لا يُعاد استخدام
+//     check-run الـSHA_OLD الناجح؛ يُنشأ كانوني جديد بحالة in_progress للـsha الجديد.
+const runsAfterOldReview = [{ id: 1, name: 'Codex Review Gate', head_sha: SHA_OLD }];
+const idForNewSha = selectCanonicalCheckRunId({ checkRuns: runsAfterOldReview, headSha: SHA_NEW });
+assert.equal(idForNewSha, null, 'push جديد (sha مختلف) يجب ألا يجد أي check-run كانوني قابل لإعادة الاستخدام حتى لو كان القديم success');
+
+// (ج) rebase بدون تغيير الأسطر + review قديم (original_commit_id لا يطابق) ⇒ BLOCKED.
+//     مغطى فعلياً بسيناريو staleReviewResult أعلاه (conclusion=failure ⇒ reviewedCount=0
+//     ⇒ buildCanonicalCheckRunPayload يُنتج in_progress، ليس success).
+const stalePayload = buildCanonicalCheckRunPayload({
+  headSha: NEW_SHA,
+  reviewedCount: staleReviewResult.reviewedCount,
+  summary: staleReviewResult.summary,
+});
+assert.equal(stalePayload.payload.status, 'in_progress', 'rebase بدون تغيير الأسطر + review قديم ⇒ in_progress (BLOCKED)، ليس success');
+
+// (د) review صريح على HEAD الحالي ⇒ PASS (completed/success).
+const freshPayload = buildCanonicalCheckRunPayload({
+  headSha: NEW_SHA,
+  reviewedCount: freshReviewResult.reviewedCount,
+  summary: freshReviewResult.summary,
+});
+assert.equal(freshPayload.payload.status, 'completed', 'مراجعة صريحة على HEAD الحالي ⇒ completed');
+assert.equal(freshPayload.payload.conclusion, 'success', 'مراجعة صريحة على HEAD الحالي ⇒ conclusion=success');
+
+// (هـ) pull_request_target ثم review مباشرة على نفس HEAD ⇒ لا يوجد failure قديم يلوّث
+//      rollup: التشغيل الأول ينشئ check-run in_progress (id=10)؛ التشغيل الثاني (بعد وصول
+//      المراجعة) يجب أن يجد نفس الـid ويحدّثه (PATCH)، لا ينشئ ثانياً.
+const runsAfterFirstOpen = [{ id: 10, name: 'Codex Review Gate', head_sha: NEW_SHA }];
+const idOnReviewArrival = selectCanonicalCheckRunId({ checkRuns: runsAfterFirstOpen, headSha: NEW_SHA });
+assert.equal(idOnReviewArrival, 10, 'وصول المراجعة على نفس HEAD الذي فُتح عليه check-run in_progress سابقاً يجب أن يُعيد استخدام نفس الـid');
+const secondPayload = buildCanonicalCheckRunPayload({
+  headSha: NEW_SHA,
+  reviewedCount: 1,
+  summary: 'reviewed',
+  existingId: idOnReviewArrival,
+});
+assert.equal(secondPayload.method, 'PATCH', 'يجب PATCH لنفس id الموجود، لا POST جديد بنفس الاسم على نفس sha');
+assert.equal(secondPayload.url, 'check-runs/10', 'PATCH يجب أن يستهدف نفس id الموجود بالضبط');
+assert.equal(secondPayload.payload.head_sha, undefined, 'PATCH لا يعيد إرسال head_sha إطلاقاً — id وحده يحدد الهدف');
+
+// (و) عدة triggers لنفس HEAD (تراكم قديم افتراضي من قبل هذا الإصلاح) ⇒ يوجد canonical
+//     نهائي واحد فقط: يُختار الأحدث (أكبر id) دائماً من بين عدة check-runs على نفس sha.
+const multipleRunsSameSha = [
+  { id: 5, name: 'Codex Review Gate', head_sha: NEW_SHA },
+  { id: 20, name: 'Codex Review Gate', head_sha: NEW_SHA },
+  { id: 12, name: 'Codex Review Gate', head_sha: NEW_SHA },
+];
+assert.equal(
+  selectCanonicalCheckRunId({ checkRuns: multipleRunsSameSha, headSha: NEW_SHA }),
+  20,
+  'عدة check-runs على نفس sha (تراكم قديم) ⇒ يُختار الأحدث (id الأكبر) دائماً كالكانوني الوحيد',
+);
+
+// (ز) push جديد بعد PASS ⇒ HEAD الجديد يرجع BLOCKED (in_progress) حتى تُراجَع تحديداً،
+//     رغم أن الـsha السابق كان success — مغطى فعلياً بسيناريو (ب) أعلاه (idForNewSha).
+assert.equal(
+  buildCanonicalCheckRunPayload({ headSha: SHA_NEW, reviewedCount: 0, summary: 'pending' }).payload.status,
+  'in_progress',
+  'push جديد بعد PASS سابق ⇒ الـsha الجديد يبدأ in_progress (BLOCKED) من جديد، لا يرث success القديم',
 );
 
 console.log('codex-review-gate-logic.mjs contract + regression checks passed.');
