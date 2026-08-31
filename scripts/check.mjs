@@ -929,22 +929,24 @@ for (const contract of [
   }
 }
 
-// نموذج الفاتورة يجب أن يبقي التركيز أثناء كتابة اسم الزبون، وأن يستخدم
-// أرقاماً إنجليزية في حقول الكمية والسعر مهما كانت لغة عرض ويندوز.
-if (/state\.invCustomer = e\.currentTarget\.value;\s*render\(\);/.test(appJs)) {
-  console.error("Invoice customer input must not rerender and lose focus after every character.");
+// نموذج فاتورة المبيعات (route: sales) يجب أن يبقي التركيز أثناء كتابة اسم الزبون،
+// وأن يستخدم أرقاماً إنجليزية في حقول الكمية والسعر مهما كانت لغة عرض ويندوز.
+// (كان هذا العقد مربوطاً بصفحة invoice القديمة التي حُذفت في 27bfbe2؛ نُقل إلى
+//  الصفحة الحيّة التي ورثت نفس السلوك بدل أن تضيع التغطية.)
+if (/state\.salesCustomer = e\.currentTarget\.value;\s*render\(\);/.test(appJs)) {
+  console.error("Sales invoice customer input must not rerender and lose focus after every character.");
   failed = true;
 }
 for (const field of ["qty", "price"]) {
-  const invoiceInput = new RegExp(`data-inv-field="${field}"[^>]*type="text"[^>]*inputmode="decimal"[^>]*dir="ltr"`);
-  if (!invoiceInput.test(appJs)) {
-    console.error(`Invoice ${field} input must use English decimal text entry.`);
+  const salesInput = new RegExp(`data-sales-field="${field}"[^>]*data-sales-num[^>]*type="text"[^>]*inputmode="decimal"[^>]*dir="ltr"`);
+  if (!salesInput.test(appJs)) {
+    console.error(`Sales invoice ${field} input must use English decimal text entry.`);
     failed = true;
   }
 }
 const numberNormalizer = readFileSync("src/number-normalizer.js", "utf8");
-if (!numberNormalizer.includes("input[data-inv-field='qty']") || !numberNormalizer.includes("input[data-inv-field='price']")) {
-  console.error("Invoice numeric fields must be covered by the English-number normalizer.");
+if (!numberNormalizer.includes("input[data-sales-num]")) {
+  console.error("Sales invoice numeric fields must be covered by the English-number normalizer.");
   failed = true;
 }
 
