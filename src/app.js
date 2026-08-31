@@ -393,6 +393,13 @@ function initKeyboardShortcuts() {
   shortcutsInitialized = true;
   document.addEventListener("keydown", (event) => {
     const typing = document.activeElement?.matches("input, textarea, select, [contenteditable]");
+    // مخرج مضمون من معاينة النشرة: مهما حدث بالتخطيط أو بحجم الشاشة يبقى
+    // Escape قادراً على إغلاقها، فلا يُحبس المستخدم داخلها أبداً.
+    if (event.key === "Escape" && state.pricePreview?.open) {
+      event.preventDefault();
+      closePricePreview();
+      return;
+    }
     if (event.altKey && !event.ctrlKey && !event.metaKey) {
       // كل قيمة هنا يجب أن تكون صفحة مسجّلة فعلاً في pages وفي allowedRoutes،
       // وإلا رمى الرسم TypeError صامتاً. يحرسه scripts/check-keyboard-shortcut-routes.mjs.
@@ -2451,6 +2458,11 @@ function buildMeasuredBulletinLayout(template, groups, renderOptions) {
   // تمريرة أولية بالتوزيع التقليدي فقط لالتقاط ارتفاع الرأس الحقيقي وعرض
   // العمود الحقيقي (نفس CSS المستخدم فعلياً)، وليست هي التوزيع النهائي.
   probe.innerHTML = template.render({ ...renderOptions, groups });
+  // القياس يجري دائماً بشروط الطباعة (عرض 794px) مهما كان عرض النافذة: بدون
+  // هذه العلامة يطابق `@media screen and (max-width:720px)` المسبارَ أيضاً — لأن
+  // استعلام الوسائط يُقاس على النافذة لا على العنصر — فتخرج ارتفاعات المجموعات
+  // أصغر من الحقيقة، ويفيض المحتوى عن الورقة عند الطباعة فتظهر أوراق بيضاء.
+  probe.querySelector(".ozk-price-list")?.setAttribute("data-fixed-width", "");
   document.body.appendChild(probe);
   try {
     const header = probe.querySelector(".price-list-header");
@@ -2483,11 +2495,11 @@ function buildMeasuredBulletinLayout(template, groups, renderOptions) {
   }
 }
 
-function customerPricePdfMarkup(items, latest, useSyria = false, theme = state.bulletinPdfTheme) {
-  const groups = bulletinDisplayGroups(items, useSyria);
-  const template = window.OZKPriceListTemplate;
-  if (!template) throw new Error("تعذر تحميل تصميم النشرة الجديدة. حدّث الصفحة وجرّب مجدداً.");
-  const templateGroups = groups.map((group) => ({
+// صفوف النشرة كما تُرسم حرفياً (اسم/وحدة/سعر منسّق). كل ما يظهر في المعاينة
+// وفي ملف PDF يمرّ من هنا وحده، فأي مقارنة بينهما تقارن نفس البنية بالضبط.
+function bulletinTemplateGroups(dataset) {
+  const { items, useSyria } = dataset;
+  return bulletinDisplayGroups(items, useSyria).map((group) => ({
     name: group.name,
     items: group.items.map((item) => ({
       name: bulletinItemDisplayName(item),
@@ -2497,13 +2509,45 @@ function customerPricePdfMarkup(items, latest, useSyria = false, theme = state.b
         : `${Number(item.unit2Price || item.unit1Price || 0).toFixed(2)} $`
     }))
   }));
+}
+
+// بصمة البيانات المعروضة فعلاً. المعاينة والتصدير يبنيان كلاهما dataset جديداً
+// من نفس المصدر لحظة التنفيذ، وتساوي البصمتين هو ما تفحصه اختبارات الانحدار
+// (سعر مادة معدَّل، سعر صرف معدَّل، أو الاثنان معاً).
+function bulletinDatasetSignature(dataset) {
+  return JSON.stringify({
+    useSyria: dataset.useSyria,
+    theme: dataset.theme,
+    exchangeRate: dataset.exchangeRate,
+    groups: bulletinTemplateGroups(dataset).map((group) => [
+      group.name,
+      group.items.map((item) => [item.name, item.unit, item.price])
+    ])
+  });
+}
+
+// خطة رسم واحدة للنشرة: نفس المجموعات، ونفس خيارات الرسم، و**نفس كائن الـlayout
+// المقاس** يُبنى مرة واحدة ثم يُشتقّ منه الرسمُ وعددُ الصفحات معاً.
+//
+// قبل ذلك كان عدد الصفحات يُحسب بمسار ثانٍ مستقل (template.pageCount بلا ارتفاعات
+// مقاسة) فيسقط إلى التقدير القديم layoutGroupsLegacyPages: صفحة رئيسية واحدة +
+// صفحة خاصة واحدة = «2 صفحة» دائماً، بينما التصدير يبني layout مقاساً ويُخرج 3.
+// المعاينة كانت تكذب على المستخدم بعدد الصفحات. مصدرٌ واحد يُنهي الاختلاف بنيوياً.
+function bulletinRenderPlan(dataset) {
+  const template = window.OZKPriceListTemplate;
+  if (!template) throw new Error("تعذر تحميل تصميم النشرة الجديدة. حدّث الصفحة وجرّب مجدداً.");
+  const { useSyria, theme, exchangeRate } = dataset;
+  const templateGroups = bulletinTemplateGroups(dataset);
   const syriaFlag = '<span class="new-syria-flag" role="img" aria-label="علم سوريا الجديد"><span class="green"></span><span class="white">★★★</span><span class="black"></span></span>';
   const renderOptions = {
     logoSrc: `${window.location.origin}/public/icons/ozk-logo.png`,
     issueDate: template.formatArabicIssueDate(new Date()),
     badgeClass: useSyria ? "badge-syp" : "badge-usd",
+    // سعر الصرف في الشارة يُقرأ من الـdataset نفسه الذي حُسبت منه أسعار الأصناف،
+    // لا من state لحظة الرسم. قراءتهما من مصدرين مختلفين كانت تسمح بخروج نشرة
+    // تحمل شارة بسعر صرف جديد وأسعاراً محسوبة بسعر صرف قديم (أو العكس).
     badgeLabelHtml: useSyria
-      ? `${syriaFlag} ليرة — مفرق — صرف ${formatBulletinEnglishInteger(state.syriaExchangeRate)}`
+      ? `${syriaFlag} ليرة — مفرق — صرف ${formatBulletinEnglishInteger(exchangeRate)}`
       : "💵 دولار أمريكي — جملة",
     unitLabel: useSyria ? "سعر المفرق للوحدة" : "سعر الكرتونة (جملة)",
     theme: normalizedBulletinPdfTheme(theme)
@@ -2512,14 +2556,27 @@ function customerPricePdfMarkup(items, latest, useSyria = false, theme = state.b
   if (layout?.oversized?.length) {
     console.warn("نشرة الأسعار: مجموعة أطول من عمود صفحة كاملة، لم تُقصّ ولم توضع:", layout.oversized);
   }
-  return template.render({ ...renderOptions, groups: templateGroups, layout: layout || undefined });
+  // مجموعة بلا وجهة = أصناف تختفي من نشرة الزبون. نُبلّغ صراحةً ونمنع التصدير.
+  const dropped = (layout || template.layoutGroups(templateGroups)).dropped || [];
+  if (dropped.length) {
+    console.error("نشرة الأسعار: مجموعات لم تدخل التوزيع وستختفي أصنافها:", dropped);
+  }
+  const markup = template.render({ ...renderOptions, groups: templateGroups, layout: layout || undefined });
+  // عدد الصفحات من نفس الـlayout المستخدَم للرسم — لا من مسار تقديري ثانٍ.
+  const pageCount = layout
+    ? layout.mainPages.length + layout.specialPages.length
+    : template.pageCount(templateGroups);
+  return { markup, pageCount, dropped, layout, groups: templateGroups };
 }
 
-function customerPriceTemplatePageCount(items, useSyria = false) {
-  const template = window.OZKPriceListTemplate;
-  if (!template) return 0;
-  const groups = bulletinDisplayGroups(items, useSyria).map((group) => ({ name: group.name, items: group.items }));
-  return template.pageCount(groups);
+// غلاف متوافق: يُبقي المستهلكين الحاليين (والفحوص) يطلبون الرسم وحده.
+function customerPricePdfMarkup(dataset) {
+  return bulletinRenderPlan(dataset).markup;
+}
+
+function customerPriceTemplatePageCount(dataset) {
+  if (!window.OZKPriceListTemplate) return 0;
+  return bulletinRenderPlan(dataset).pageCount;
 }
 
 let bulletinPublishTimer = null;
@@ -2546,13 +2603,22 @@ function applySyriaExchangeRateLocally(value) {
   return rate;
 }
 
+// ترقيم تسلسلي لعمليات حفظ سعر الصرف. تغييران متتاليان سريعان (A ثم B) قد
+// يعود ردّاهما بترتيب معكوس، وكان رد A المتأخر يكتب A فوق B في state — فيخرج
+// PDF بسعر صرف سابق رغم أن آخر ما أكّده المستخدم هو B. نتجاهل رد أي عملية
+// تجاوزتها عملية أحدث.
+let syriaExchangeRateCommitSeq = 0;
+
 // الحفظ الفعلي لسعر الصرف: يكتب على جدول Supabase bulletin_exchange_rate —
 // المصدر الوحيد للحقيقة الذي تقرأ منه المعاينة وPDF والنشر الآلي جميعاً.
 async function commitSyriaExchangeRate(value) {
   const rate = Number(value);
   if (!Number.isFinite(rate) || rate <= 0) return null;
+  const seq = ++syriaExchangeRateCommitSeq;
   applySyriaExchangeRateLocally(rate);
   const saved = await dataStore.setSyriaExchangeRate(rate);
+  // عملية أحدث سبقتنا: لا نلمس state إطلاقاً، ونُرجع ما هو معتمد الآن فعلاً.
+  if (seq !== syriaExchangeRateCommitSeq) return Number(state.syriaExchangeRate) || saved;
   applySyriaExchangeRateLocally(saved);
   return saved;
 }
@@ -2641,8 +2707,12 @@ async function publishBulletin(options = {}) {
   render();
 }
 
-// يجهّز عناصر النشرة (مع التحقق وتحويل العملة) — يرجع null إذا تعذّر المتابعة
-function prepareBulletinItems(useSyria = false) {
+// يجهّز عناصر النشرة (مع التحقق وتحويل العملة). دالة **خالصة من أي أثر جانبي**:
+// لا setNotice ولا render — كانت تستدعي render() من داخلها، فأصبح استدعاؤها من
+// داخل render() (وهو ما تحتاجه المعاينة الحيّة) استدعاءً متكرراً بلا نهاية.
+// `exchangeRate` يُمرَّر صراحةً ولا يُقرأ من state هنا، كي تُحسب أسعار المفرق
+// وشارة سعر الصرف من رقم واحد بعينه لا من قراءتين منفصلتين قد تختلفان.
+function prepareBulletinItems(useSyria = false, exchangeRate = Number(state.syriaExchangeRate) || 0) {
   const latest = latestStockReport();
   // الوضع من نوع النشرة المصدَّرة لا من تبويب الصفحة: تصدير نشرة السوري
   // والصفحة على وضع الجملة كان يدمج بقرار الوضع الخاطئ.
@@ -2660,7 +2730,7 @@ function prepareBulletinItems(useSyria = false) {
 
   if (useSyria) {
     // نشرة المفرّق: سعر المفرق يُدخل بسعر الكرتونة بالدولار → يقسم على عدد الكروز ثم × سعر الصرف
-    const rate = Number(state.syriaExchangeRate) || 1;
+    const rate = Number(exchangeRate) || 1;
     items = items
       .map((item) => {
         const retail = itemRetailPrice(item);
@@ -2679,41 +2749,66 @@ function prepareBulletinItems(useSyria = false) {
       .filter((item) => item.unit2Price > 0);
   }
 
-  if (!latest || !items.length) {
-    setNotice("error", "لا توجد مواد متوفرة ومُسعّرة لإنشاء نشرة PDF.");
-    render();
-    return null;
-  }
-  if (!window.html2pdf) {
-    setNotice("error", "مكتبة PDF لم تتحمل. حدث الصفحة وجرب مرة أخرى.");
-    render();
-    return null;
-  }
-  if (!window.OZKPriceListTemplate) {
-    setNotice("error", "تصميم النشرة الجديدة لم يتحمّل. حدّث الصفحة وجرّب مرة أخرى.");
-    render();
-    return null;
-  }
-  return { items, latest };
+  if (!latest || !items.length) return { ok: false, message: "لا توجد مواد متوفرة ومُسعّرة لإنشاء نشرة PDF." };
+  if (!window.OZKPriceListTemplate) return { ok: false, message: "تصميم النشرة الجديدة لم يتحمّل. حدّث الصفحة وجرّب مرة أخرى." };
+  return { ok: true, items, latest };
 }
 
-// يفتح معاينة النشرة قبل التصدير
+// **مصدر الحقيقة الوحيد للنشرة.** يُعاد تنفيذها كاملةً في كل مرة تُرسم فيها
+// المعاينة وفي كل مرة يُصدَّر فيها PDF، فتُقرأ الأسعار المعتمدة وسعر الصرف من
+// state الحالي في تلك اللحظة وتُشتقّ منهما أسعار النشرة من جديد.
+//
+// العطل الذي تُغلقه: كانت المعاينة تُجمّد `items` داخل state.pricePreview عند
+// الفتح، ويُصدَّر PDF لاحقاً من تلك اللقطة — فأي تعديل لسعر مادة أو لسعر الصرف
+// بعد فتح المعاينة كان يظهر في الواجهة ولا يصل إلى الملف. لا لقطة بعد الآن:
+// لا يمكن للتصدير أن يستعمل بيانات أقدم من المعاينة لأنه يبنيها هو بنفسه.
+function buildBulletinDataset(useSyria = false, theme = state.bulletinPdfTheme) {
+  const exchangeRate = Number(state.syriaExchangeRate) || 0;
+  if (useSyria && !(exchangeRate > 0)) {
+    return { ok: false, message: "أدخل سعر صرف صحيحاً أكبر من صفر قبل معاينة النشرة السورية." };
+  }
+  const prepared = prepareBulletinItems(useSyria, exchangeRate);
+  if (!prepared.ok) return prepared;
+  return {
+    ok: true,
+    dataset: {
+      useSyria,
+      theme: normalizedBulletinPdfTheme(theme),
+      exchangeRate,
+      items: prepared.items,
+      latest: prepared.latest
+    }
+  };
+}
+
+// يفتح معاينة النشرة قبل التصدير. لا يخزّن أي بيانات نشرة في state — فقط
+// اختيار النوع والثيم؛ البيانات تُبنى عند كل رسم من buildBulletinDataset.
 function openPricePreview(useSyria = false, theme = state.bulletinPdfTheme) {
   if (useSyria && !state.syriaRateConfirmed) {
     state.showExchangeModal = true;
     render();
     return;
   }
-  const prepared = prepareBulletinItems(useSyria);
   state.syriaRateConfirmed = false;
-  if (!prepared) return;
-  state.pricePreview = {
-    open: true,
-    useSyria,
-    items: prepared.items,
-    latest: prepared.latest,
-    theme: storeBulletinPdfTheme(theme)
-  };
+  const built = buildBulletinDataset(useSyria, theme);
+  if (!built.ok) {
+    setNotice("error", built.message);
+    render();
+    return;
+  }
+  bindPricePreviewHistory();
+  let historyEntry = false;
+  try {
+    if (typeof history !== "undefined" && typeof history.pushState === "function") {
+      history.pushState({ ozkPricePreview: true }, "");
+      historyEntry = true;
+    }
+  } catch {
+    // بعض بيئات العرض تمنع pushState — الإغلاق يبقى متاحاً بالزر وبـEscape.
+  }
+  // printStatus: null قبل أي محاولة · "opened" بعد فتح ورقة نظام الطباعة ·
+  // "blocked" حين يرفض المتصفح فتحها (حجب نوافذ/طباعة) فيظهر زر إعادة المحاولة.
+  state.pricePreview = { open: true, useSyria, theme: storeBulletinPdfTheme(theme), historyEntry, printStatus: null };
   render();
 }
 
@@ -2764,8 +2859,21 @@ async function savePendingPricingEdits() {
 async function openFreshPricePreview(useSyria = false, theme = state.bulletinPdfTheme) {
   // يجب التقاط السعر قبل savePendingPricingEdits لأن حفظ صنف واحد قد يستدعي
   // render ويستبدل الحقل المرئي بنسخة state القديمة.
+  //
+  // `capturePublishedExchangeRate` دالة async: كانت تُستدعى بلا await ويُقارن
+  // ناتجها بـnull — والناتج Promise دائماً، فالشرط لا يتحقق أبداً (سعر صرف صفر
+  // أو فارغ كان يمرّ)، والأخطر أن كتابة السعر الجديدة كانت تنتهي **بعد** بناء
+  // النشرة أحياناً فتُبنى على السعر القديم. الآن ننتظر التثبيت فعلياً قبل أي
+  // بناء بيانات.
   if (useSyria && app.querySelector("[data-published-exchange-rate]")) {
-    const rate = capturePublishedExchangeRate();
+    let rate;
+    try {
+      rate = await capturePublishedExchangeRate();
+    } catch (error) {
+      setNotice("error", `تعذر حفظ سعر الصرف: ${safeErrorMessage(error)}`);
+      render();
+      return;
+    }
     if (rate === null) {
       setNotice("error", "أدخل سعر صرف صحيحاً أكبر من صفر قبل معاينة النشرة السورية.");
       render();
@@ -2780,116 +2888,159 @@ async function openFreshPricePreview(useSyria = false, theme = state.bulletinPdf
   openPricePreview(useSyria, theme);
 }
 
+// إغلاق المعاينة يُسقط أيضاً مدخل التاريخ الذي أضافه فتحها، فيرجع زر «رجوع»
+// في المتصفح/الهاتف إلى الشاشة السابقة لا إلى المعاينة من جديد.
+// إطار الطباعة المخفي يبقى في الصفحة حتى afterprint أو حتى المهلة الاحتياطية
+// (60 ثانية) — وعلى iOS كثيراً ما لا يصل afterprint. إغلاق المعاينة يعني أن
+// المستخدم انتهى، فنُسقط الإطار فوراً بدل تركه ومعه مستند النشرة كاملاً بالذاكرة.
+function removePrintFrame() {
+  document.querySelectorAll("iframe[data-print-frame]").forEach((frame) => frame.remove());
+}
+
 function closePricePreview() {
+  if (!state.pricePreview) return;
+  const cameFromHistory = state.pricePreview.historyEntry === true;
   state.pricePreview = null;
+  removePrintFrame();
+  if (cameFromHistory && typeof history !== "undefined" && typeof history.back === "function") {
+    history.back();
+  }
   render();
 }
 
-// foreignObject يحفظ تشكيل العربية الصحيح، لكنه قد يلف أسماء مجموعات قصيرة
-// أو يضغط سطور الاتصال عند نسخ القالب إلى SVG. نثبّت هذه العناصر في نسخة
-// التصدير فقط؛ المعاينة والقالب المنشور يبقيان بلا أي تغيير.
-function stabilizeBulletinPdfRtlLayout(source) {
-  if (!source?.classList?.contains("ozk-price-list")) return;
-  source.querySelectorAll(".price-list-group-header").forEach((header) => {
-    header.style.whiteSpace = "nowrap";
-    header.style.lineHeight = "1.35";
-  });
-  source.querySelectorAll(".price-list-secondary-page").forEach((page) => {
-    // عرض التصدير 794px؛ ارتفاع A4 المقابل 1123px. يملأ هذا خلفية آخر صفحة
-    // الداكنة حتى الحافة بدلاً من ترك الجزء السفلي أبيض بعد نهاية المحتوى.
-    page.style.minHeight = "1123px";
-  });
-  const phones = source.querySelector(".price-list-phones");
-  if (!phones) return;
-  phones.style.display = "grid";
-  phones.style.gridAutoRows = "min-content";
-  phones.style.alignItems = "start";
-  phones.style.justifyItems = "start";
-  phones.querySelectorAll("span").forEach((line) => {
-    line.style.display = "block";
-    line.style.whiteSpace = "nowrap";
-    line.style.lineHeight = "1.35";
+// زر «رجوع» في المتصفح وإيماءة الرجوع في الهاتف يجب أن يُغلقا المعاينة بدل
+// الخروج من التطبيق كله. فتح المعاينة يدفع مدخل تاريخ واحداً، والرجوع يلتقطه.
+let pricePreviewHistoryBound = false;
+function bindPricePreviewHistory() {
+  if (pricePreviewHistoryBound || typeof window === "undefined") return;
+  pricePreviewHistoryBound = true;
+  window.addEventListener("popstate", () => {
+    if (!state.pricePreview?.open) return;
+    state.pricePreview = null;
+    // نفس تنظيف closePricePreview — هذا المسار لا يمرّ بها (مدخل التاريخ استُهلك).
+    removePrintFrame();
+    render();
   });
 }
 
-// يولّد ويحفظ ملف PDF من عناصر جاهزة
-async function exportBulletinPdf(items, latest, useSyria = false, theme = state.bulletinPdfTheme) {
-  if (!items || !items.length || !window.html2pdf) return;
-  const selectedTheme = normalizedBulletinPdfTheme(theme);
-  const backgroundColor = selectedTheme === "light" ? "#fffdf8" : "#0c0a07";
-  // اسم الملف يتولد تلقائياً من تاريخ التصدير الفعلي وعملة النشرة — لا اسم ثابت
-  // ولا تدخل يدوي؛ نفس المتغير يُستخدم لمساري سطح المكتب (html2pdf().save())
-  // والجوال (createPortablePdfBlob/presentPortablePdf) فلا يوجد مصدر آخر لتحديثه.
-  const filename = `نشرة-الأسعار-${useSyria ? "SYP" : "USD"}-${todayIsoDate()}.pdf`;
-  const markup = customerPricePdfMarkup(items, latest, useSyria, selectedTheme);
+// شريط توضيحي داخل المعاينة. الحفظ والمشاركة يحدثان في **نافذة النظام** التي
+// تفتحها الطباعة الأصلية، وهذا ما لا يعرفه المستخدم على الهاتف: بلا هذا الشرح
+// تبدو النقرة وكأنها لم تفعل شيئاً. وعند الحجب نعرض السبب وزر إعادة محاولة بدل
+// ترك الشاشة صامتة.
+function bulletinPrintHintMarkup(printStatus) {
+  if (printStatus === "blocked") {
+    return `
+          <div class="price-preview-hint is-blocked" role="alert">
+            <span>⚠️ المتصفح منع فتح نافذة الطباعة. اسمح بالنوافذ المنبثقة لهذا الموقع ثم أعد المحاولة.</span>
+            <button class="button primary" type="button" data-action="retry-price-print">إعادة المحاولة</button>
+          </div>`;
+  }
+  if (printStatus === "opened") {
+    return `
+          <div class="price-preview-hint is-open" role="status">
+            <span>✅ فُتحت نافذة النظام. اختر منها «حفظ بصيغة PDF» للحفظ في الملفات، أو زر المشاركة لإرسالها. إن لم تظهر، اضغط «حفظ / مشاركة PDF» مجدداً.</span>
+          </div>`;
+  }
+  return `
+          <div class="price-preview-hint" role="note">
+            <span>ℹ️ زر «حفظ / مشاركة PDF» يفتح نافذة الطباعة في نظامك — ومنها تختار «حفظ بصيغة PDF» أو المشاركة. لا يجري التنزيل داخل الصفحة.</span>
+          </div>`;
+}
 
-  // iOS داخل الـPWA لا ينفّذ تنزيل html2pdf().save() بشكل موثوق. نولّد Blob
-  // حقيقياً ثم نعرض زر مشاركة مستقل؛ النقر على الزر يمنح Safari إيماءة مستخدم
-  // جديدة فيسمح بالحفظ في Files أو الإرسال عبر واتساب.
-  if (isHandheldDevice()) {
-    try {
-      const blob = await createPortablePdfBlob(markup, filename, {
-        margin: [0, 0, 0, 0],
-        width: 794,
-        scale: 2,
-        backgroundColor,
-        image: { type: "jpeg", quality: 0.94 },
-        allowTaint: true,
-        // html2canvas يعيد ترتيب الحروف العربية عند الرسم التقليدي على Canvas.
-        // مسار foreignObject يترك تشكيل RTL لمحرك المتصفح نفسه فيحفظ النص صحيحاً.
-        foreignObjectRendering: true,
-        stabilizeBulletinRtl: true,
-        pagebreak: { mode: ["css"] }
-      });
-      presentPortablePdf(blob, filename, useSyria ? "نشرة المفرّق (ليرة)" : "نشرة الجملة (دولار)");
-      setNotice("success", `تم تجهيز ${useSyria ? "نشرة المفرّق (ليرة)" : "نشرة الجملة (دولار)"} كملف PDF: ${items.length} صنف.`);
-    } catch (error) {
-      setNotice("error", safeErrorMessage(error) || "تعذر إنشاء ملف PDF.");
+// عنوان النشرة/الملف. يتولّد من نوع النشرة وتاريخ التصدير الفعلي — لا اسم ثابت.
+function bulletinDocumentTitle(dataset) {
+  return dataset.useSyria ? "نشرة المفرّق (ليرة)" : "نشرة الجملة (دولار)";
+}
+
+function bulletinDocumentFilename(dataset) {
+  return `نشرة-الأسعار-${dataset.useSyria ? "SYP" : "USD"}-${todayIsoDate()}`;
+}
+
+// تصدير النشرة إلى PDF عبر **طباعة المتصفح الأصلية** («حفظ بصيغة PDF»).
+//
+// لماذا لا html2canvas/html2pdf: المسار السابق كان يرسم النشرة على canvas ثم
+// يقصّها إلى صفحات، وثبت بالقياس الفعلي (Chromium وWebKit، فاتح وداكن، هاتف
+// وسطح مكتب) أنه يفشل بثلاث طرق متزامنة لا يمكن ترقيعها:
+//   1. `foreignObjectRendering:true` يُسلسل القالب إلى SVG يُحمَّل كصورة data:
+//      — وهو سياق معزول لا يُحمّل أي مورد خارجي ولا أي stylesheet خارج الشجرة
+//      المُسلسَلة. لذلك سقط الشعار وخط Almarai، وفي مسار الهاتف (الذي كان يمرّر
+//      <section> وحده دون وسم <style> المجاور) سقط الـCSS كله فخرجت صفحة
+//      **بيضاء بنص أسود مع شريط أسود** — عين عطل «نصف الصفحة أسود ونصفها أبيض».
+//   2. حساب المقاس في نفس المسار يعتمد `Math.max(windowWidth, width)`، فأي
+//      نافذة أعرض من 794px تُنتج SVG أعرض من الـcanvas ثم يُرسم مقصوصاً: عمود
+//      واحد ضيّق و~40% من الصفحة فارغ.
+//   3. إيقاف `foreignObjectRendering` يُصلح المقاس لكنه يكسر تشكيل الحروف
+//      العربية (تخرج مفكّكة معكوسة الترتيب).
+// أضف إلى ذلك أن `margin-top:8px` + `min-height:1123px` كانا يدفعان كل صفحة
+// ثانوية ~8.5px خلف حدّ الورقة، فيحشر html2pdf **ورقة فارغة كاملة** بعد كل
+// صفحة (قياس فعلي: 6 صفحات لمحتوى 4 صفحات، الثالثة والخامسة فارغتان).
+//
+// الطباعة الأصلية لا تعاني أياً من ذلك: التشكيل العربي من محرك المتصفح نفسه،
+// وفواصل الصفحات من `break-before:page` فلا تظهر صفحات بيضاء، والخلفية الداكنة
+// تُرسم من html/body عبر documentBackgroundCss. وهي نفس الطريقة التي يستعملها
+// `scripts/generate-pdfs.mjs` لتوليد النشرات المنشورة (وهي التي تخرج سليمة).
+function exportBulletinPdf(dataset) {
+  const template = window.OZKPriceListTemplate;
+  if (!template) {
+    setNotice("error", "تصميم النشرة الجديدة لم يتحمّل. حدّث الصفحة وجرّب مرة أخرى.");
+    render();
+    return false;
+  }
+  const title = bulletinDocumentTitle(dataset);
+  const plan = bulletinRenderPlan(dataset);
+  // نشرة ناقصة أسوأ من نشرة متأخّرة: لو أفلتت مجموعة من التوزيع فأصنافها تختفي
+  // من الملف الذي يصل الزبون بلا أي أثر. نرفض التصدير ونسمّي المجموعة صراحةً.
+  if (plan.dropped.length) {
+    setNotice("error", `تعذّر التصدير: مجموعات لم تدخل التوزيع وستختفي أصنافها — ${plan.dropped.join("، ")}.`);
+    render();
+    return false;
+  }
+  const documentHtml = template.printDocument({
+    theme: dataset.theme,
+    title: bulletinDocumentFilename(dataset),
+    // نفس ناتج خطة الرسم التي تعرضها المعاينة حرفياً.
+    bodyHtml: plan.markup
+  });
+  // الحفظ والمشاركة يجريان داخل **نافذة النظام** التي تفتحها الطباعة الأصلية،
+  // لا داخل الصفحة: لا نولّد Blob ولا نستعمل navigator.share({files}) ولا نقدّم
+  // تنزيلاً مباشراً. مسار الـBlob القديم (تحويل الـDOM إلى لوحة رسم) هو نفسه
+  // سبب عطل PDF على الهاتف، فلا يُعاد. الوصف الدقيق: «مشاركة/حفظ عبر نافذة النظام».
+  if (state.pricePreview) state.pricePreview.printStatus = "opened";
+  printHtmlDocument(documentHtml, {
+    title,
+    // النشرة تُؤرشَف على main اليوم عبر archiveToICloud("price_list", ...) داخل
+    // المسار القديم. إعادة الهيكلة تُبقي القدرة نفسها وتغيّر الصيغة فقط:
+    // printHtmlDocument يستدعي الجسر من هذا الخيار. حذفه = إسقاط قدرة قائمة.
+    archive: { docType: "price_list", meta: { date: todayIsoDate() } },
+    onError: () => {
+      // حجب الطباعة/النوافذ: نُبقي المعاينة مفتوحة ونعرض سبباً واضحاً وزر إعادة
+      // محاولة، بدل إغلاق الشاشة وترك المستخدم بلا مخرج ولا تفسير.
+      if (state.pricePreview) state.pricePreview.printStatus = "blocked";
+      setNotice("error", "المتصفح منع فتح نافذة الطباعة. اضغط «إعادة المحاولة».");
+      render();
     }
-    return;
-  }
-
-  const container = document.createElement("div");
-  container.style.width = "794px";
-  container.style.backgroundColor = backgroundColor;
-  container.innerHTML = markup;
-  document.body.appendChild(container);
-  stabilizeBulletinPdfRtlLayout(container.querySelector(".ozk-price-list"));
-
-  try {
-    await window
-      .html2pdf()
-      .set({
-        filename,
-        margin: [0, 0, 0, 0],
-        image: { type: "png", quality: 0.98 },
-        html2canvas: {
-          scale: 2,
-          useCORS: true,
-          backgroundColor,
-          allowTaint: true,
-          // يمنع قلب ترتيب العنوان والمجموعات وأسماء الأصناف العربية في PDF.
-          foreignObjectRendering: true
-        },
-        jsPDF: { unit: "mm", format: "a4", orientation: "portrait" },
-        pagebreak: { mode: ["css"] }
-      })
-      .from(container)
-      .save();
-    setNotice("success", `تم تجهيز ${useSyria ? "نشرة المفرّق (ليرة)" : "نشرة الجملة (دولار)"}: ${items.length} صنف.`);
-  } catch (error) {
-    setNotice("error", error.message || "تعذر إنشاء ملف PDF.");
-  } finally {
-    container.remove();
-  }
+  });
+  setNotice("success", `${title}: ${dataset.items.length} صنف — اختر «حفظ بصيغة PDF» أو «مشاركة» من نافذة النظام.`);
+  return true;
 }
 
-// تصدير من شاشة المعاينة
-async function exportPricePreview() {
+// تصدير من شاشة المعاينة. **يُعاد بناء البيانات هنا من جديد** بدل استعمال أي
+// لقطة محفوظة عند فتح المعاينة — هذا ما يضمن أن سعر مادة عُدِّل أو سعر صرف
+// تغيّر قبل الضغط مباشرةً يصل إلى الملف كما يصل إلى الشاشة.
+function exportPricePreview() {
   const preview = state.pricePreview;
   if (!preview) return;
-  await exportBulletinPdf(preview.items, preview.latest, preview.useSyria, preview.theme);
-  state.pricePreview = null;
+  const built = buildBulletinDataset(preview.useSyria, preview.theme);
+  if (!built.ok) {
+    setNotice("error", built.message);
+    render();
+    return;
+  }
+  if (!exportBulletinPdf(built.dataset)) return;
+  // **لا نُغلق المعاينة هنا.** نافذة نظام الطباعة تفتح فوق الصفحة، وإغلاق
+  // المعاينة تحتها كان يترك المستخدم — بعد أن يُلغي أو يُنهي الحفظ — على شاشة
+  // أخرى بلا أي أثر لما جرى، ويجعل «إعادة المحاولة» بعد الحجب مستحيلة أصلاً.
+  // تبقى مفتوحة وتعرض حالتها، والخروج بزر «رجوع» أو Escape أو رجوع المتصفح.
   render();
 }
 
@@ -4384,15 +4535,20 @@ function presentPortablePdf(blob, filename, title) {
   dialog.setAttribute("aria-modal", "true");
   dialog.setAttribute("aria-label", title || "ملف PDF جاهز");
   dialog.dir = "rtl";
-  dialog.style.cssText = "position:fixed;inset:0;z-index:100000;background:rgba(0,0,0,.82);display:grid;place-items:center;padding:12px";
+  // `100dvh` + safe-area: على iOS يساوي `vh`/`inset:0` ارتفاع النافذة الكبير
+  // (بلا شريط المتصفح)، فكان تذييل الأزرار (مشاركة/تنزيل/فتح) يقع تحت شريط
+  // Safari خارج الشاشة، وزر الإغلاق يلامس النوتش — فيبدو العارض بلا مخرج.
+  dialog.style.cssText = "position:fixed;inset:0;height:100vh;height:100dvh;z-index:100000;background:rgba(0,0,0,.82);display:grid;place-items:center;"
+    + "padding:calc(env(safe-area-inset-top,0px) + 8px) calc(env(safe-area-inset-right,0px) + 8px)"
+    + " calc(env(safe-area-inset-bottom,0px) + 8px) calc(env(safe-area-inset-left,0px) + 8px)";
   dialog.innerHTML = `
-    <section style="width:min(760px,100%);height:min(92vh,900px);background:#fff;color:#241f18;border-radius:14px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 18px 60px rgba(0,0,0,.45)">
-      <header style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 14px;border-bottom:1px solid #ded6c8">
+    <section style="width:min(760px,100%);height:100%;max-height:900px;background:#fff;color:#241f18;border-radius:14px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 18px 60px rgba(0,0,0,.45)">
+      <header style="flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 14px;border-bottom:1px solid #ded6c8">
         <div><strong style="display:block">${escapeHtml(title || "ملف PDF جاهز")}</strong><small style="color:#6b6154">اختر مشاركة لحفظه في «الملفات» أو إرساله للزبون</small></div>
-        <button type="button" data-pdf-close aria-label="إغلاق" style="border:0;background:#eee7dc;border-radius:999px;width:38px;height:38px;font-size:22px">×</button>
+        <button type="button" data-pdf-close aria-label="إغلاق" style="border:0;background:#eee7dc;border-radius:999px;min-width:44px;width:44px;height:44px;font-size:22px">×</button>
       </header>
-      <iframe src="${escapeHtml(url)}" title="معاينة ${escapeHtml(title || "PDF")}" style="flex:1;width:100%;border:0;background:#eee"></iframe>
-      <footer style="display:flex;flex-wrap:wrap;gap:8px;padding:12px 14px;border-top:1px solid #ded6c8">
+      <iframe src="${escapeHtml(url)}" title="معاينة ${escapeHtml(title || "PDF")}" style="flex:1 1 auto;min-height:0;width:100%;border:0;background:#eee"></iframe>
+      <footer style="flex:0 0 auto;display:flex;flex-wrap:wrap;gap:8px;padding:12px 14px;border-top:1px solid #ded6c8">
         <button type="button" data-pdf-share class="button primary" ${canShareFile ? "" : "hidden"}>مشاركة / حفظ في الملفات</button>
         <a class="button secondary" href="${escapeHtml(url)}" download="${escapeHtml(filename)}">تنزيل PDF</a>
         <a class="button secondary" href="${escapeHtml(url)}" target="_blank" rel="noopener">فتح PDF</a>
@@ -4407,6 +4563,16 @@ function presentPortablePdf(blob, filename, title) {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
   dialog.querySelector("[data-pdf-close]")?.addEventListener("click", dialog.closePortablePdf);
+  // مخرج ثانٍ مضمون: Escape، ونقرة على الخلفية خارج البطاقة.
+  dialog.addEventListener("click", (event) => {
+    if (event.target === dialog) dialog.closePortablePdf();
+  });
+  const onEscape = (event) => {
+    if (event.key !== "Escape") return;
+    document.removeEventListener("keydown", onEscape);
+    dialog.closePortablePdf();
+  };
+  document.addEventListener("keydown", onEscape);
   dialog.querySelector("[data-pdf-share]")?.addEventListener("click", async () => {
     try {
       // الاستدعاء يبدأ داخل معالج النقرة نفسه كي تبقى user activation فعالة على iOS.
@@ -4436,8 +4602,11 @@ async function createPortablePdfBlob(bodyHtml, filename, options = {}) {
   container.style.cssText = `position:fixed;left:0;top:0;width:${Number(options.width) || 794}px;background:${backgroundColor};z-index:-1;pointer-events:none`;
   container.innerHTML = bodyHtml;
   document.body.appendChild(container);
+  // ملاحظة: تمرير عنصر واحد من داخل الحاوية يترك وسم <style> المجاور خارج
+  // الشجرة المُسلسَلة، وسياق foreignObject لا يرى أي stylesheet خارجها — لذلك
+  // لم تعد نشرة الأسعار تمرّ من هنا إطلاقاً (تُطبع أصلياً عبر printHtmlDocument).
+  // هذا المسار يبقى لتقارير وفواتير الهاتف التي تحمل تنسيقها inline.
   const source = [...container.children].find((element) => element.tagName !== "STYLE") || container;
-  if (options.stabilizeBulletinRtl) stabilizeBulletinPdfRtlLayout(source);
 
   // html2canvas قد يحذف المسافة العادية الملاصقة لكلمة عربية (مثل «رقم 1»
   // فتصير «رقم1»). نثبّت مسافات عقد النص العربية فقط قبل الرسم؛ لا نغيّر HTML
@@ -4568,7 +4737,9 @@ function printHtmlDocument(html, options = {}) {
   frame.addEventListener("load", () => {
     const win = frame.contentWindow;
     if (!win) {
+      // إطار بلا نافذة = المتصفح منع المستند. صامتاً كان يبدو كأن الزر لا يعمل.
       cleanup();
+      if (typeof options.onError === "function") options.onError();
       return;
     }
     try {
@@ -9696,32 +9867,59 @@ function render() {
   }
 
   if (state.pricePreview?.open) {
-    const { items, latest, useSyria } = state.pricePreview;
+    const { useSyria } = state.pricePreview;
     const previewTheme = normalizedBulletinPdfTheme(state.pricePreview.theme);
-    const pageCount = customerPriceTemplatePageCount(items, useSyria);
+    // البيانات تُبنى هنا لحظة الرسم من مصدر الحقيقة الحالي — لا لقطة محفوظة.
+    // نفس الاستدعاء يتكرر حرفياً عند التصدير، فالمعاينة والملف متطابقان بالبناء.
+    const built = buildBulletinDataset(useSyria, previewTheme);
+    if (!built.ok) {
+      // لا نستدعي render() من داخل render(): نعرض الخطأ ومخرجاً واضحاً هنا.
     app.innerHTML = `
-      <div class="modal-overlay" onclick="if(event.target === this){ state.pricePreview = null; render(); }">
-        <div class="modal" style="max-width:920px;width:96vw;max-height:94vh;display:flex;flex-direction:column;gap:12px">
-          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
-            <div>
-              <h2 style="margin:0">👁 معاينة النشرة قبل التصدير</h2>
-              <p class="muted" style="margin:4px 0 0;font-size:0.8rem">${escapeHtml(items.length)} صنف — ${escapeHtml(pageCount)} صفحة${useSyria ? " — مفرّق بالليرة" : " — جملة بالدولار"}</p>
+        <div class="price-preview-shell">
+          <div class="price-preview-panel">
+            <div class="price-preview-bar">
+              <div class="price-preview-titles">
+                <h2>👁 معاينة النشرة</h2>
+                <p class="muted">${escapeHtml(built.message)}</p>
             </div>
-            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-              <span style="font-weight:700;font-size:0.85rem">لون PDF:</span>
-              <button class="button ${previewTheme === "dark" ? "primary" : "secondary"}" type="button" data-action="price-preview-theme" data-theme="dark" aria-pressed="${previewTheme === "dark"}">داكن</button>
-              <button class="button ${previewTheme === "light" ? "primary" : "secondary"}" type="button" data-action="price-preview-theme" data-theme="light" aria-pressed="${previewTheme === "light"}">فاتح</button>
-              <button class="button success" type="button" data-action="export-price-preview">⬇ تصدير PDF ${previewTheme === "light" ? "الفاتح" : "الداكن"}</button>
-              <button class="button secondary" type="button" data-action="close-price-preview">إغلاق</button>
+              <div class="price-preview-actions">
+                <button class="button secondary price-preview-close" type="button" data-action="close-price-preview">✕ رجوع</button>
+              </div>
             </div>
           </div>
-          <div class="price-preview-scroll" style="overflow:auto;background:#9a9a9a;padding:16px;border-radius:8px;flex:1;display:flex;justify-content:center">
-            ${customerPricePdfMarkup(items, latest, useSyria, previewTheme)}
+        </div>`;
+      app.querySelector("[data-action='close-price-preview']")?.addEventListener("click", closePricePreview);
+      return;
+    }
+    const dataset = built.dataset;
+    // خطة واحدة للمعاينة: الرسم وعدد الصفحات من نفس الـlayout — يستحيل اختلافهما.
+    const plan = bulletinRenderPlan(dataset);
+    const pageCount = plan.pageCount;
+    app.innerHTML = `
+      <div class="price-preview-shell">
+        <div class="price-preview-panel" role="dialog" aria-modal="true" aria-label="معاينة النشرة قبل التصدير">
+          <div class="price-preview-bar">
+            <div class="price-preview-titles">
+              <h2>👁 معاينة النشرة قبل التصدير</h2>
+              <p class="muted">${escapeHtml(dataset.items.length)} صنف — ${escapeHtml(pageCount)} صفحة${useSyria ? ` — مفرّق بالليرة — صرف ${escapeHtml(formatBulletinEnglishInteger(dataset.exchangeRate))}` : " — جملة بالدولار"}</p>
+            </div>
+            <div class="price-preview-actions">
+              <button class="button secondary price-preview-close" type="button" data-action="close-price-preview" aria-label="إغلاق المعاينة والرجوع">✕ رجوع</button>
+              <span class="price-preview-theme-label">لون PDF:</span>
+              <button class="button ${previewTheme === "dark" ? "primary" : "secondary"}" type="button" data-action="price-preview-theme" data-theme="dark" aria-pressed="${previewTheme === "dark"}">داكن</button>
+              <button class="button ${previewTheme === "light" ? "primary" : "secondary"}" type="button" data-action="price-preview-theme" data-theme="light" aria-pressed="${previewTheme === "light"}">فاتح</button>
+              <button class="button success price-preview-export" type="button" data-action="export-price-preview">🖨 حفظ / مشاركة PDF</button>
+            </div>
+          </div>
+          ${bulletinPrintHintMarkup(state.pricePreview.printStatus)}
+          <div class="price-preview-scroll">
+            ${plan.markup}
           </div>
         </div>
       </div>
     `;
     app.querySelector("[data-action='export-price-preview']")?.addEventListener("click", exportPricePreview);
+    app.querySelector("[data-action='retry-price-print']")?.addEventListener("click", exportPricePreview);
     app.querySelector("[data-action='close-price-preview']")?.addEventListener("click", closePricePreview);
     app.querySelectorAll("[data-action='price-preview-theme']").forEach((button) => {
       button.addEventListener("click", () => setPricePreviewTheme(button.dataset.theme));
