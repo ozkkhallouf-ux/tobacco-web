@@ -126,10 +126,22 @@ assert.doesNotMatch(
 );
 assert.match(
   yml,
-  /group:\s*codex-review-gate-\$\{\{[\s\S]{0,200}\}\}\s*\n\s*cancel-in-progress:\s*true/,
+  /group:\s*codex-review-gate-\$\{\{[\s\S]{0,200}\}\}\s*\n\s*cancel-in-progress:\s*false/,
   'مفتاح concurrency group يجب أن يعتمد على رقم الـPR فقط (مجموعة واحدة لكل PR بصرف النظر عن نوع الحدث)',
 );
-assert.match(yml, /cancel-in-progress:\s*true/, 'cancel-in-progress يجب أن يبقى true (يقلّص التداخل الفعلي، ولو أنه ليس الضامن الوحيد بعد الآن)');
+// إصلاح جوهري عاشر بتاريخ 2026-08-31: cancel-in-progress صار false عمداً — رُصد حياً على
+// PR #150 أن true يُلغي (CANCELLED) تشغيلاً قديماً كاملاً عند push جديد، وconclusion
+// CANCELLED هذا يلوّث statusCheckRollup الكلي للـPR حتى لو الاسم ليس required check
+// (mergeStateStatus يصير UNSTABLE بدل CLEAN). التشغيلات القديمة تُكمل الآن بدل أن تُقتل،
+// وتخرج SUCCESS دائماً بفضل حارس isStaleHead (exit 0 بلا كتابة) — لا سباق يعود لأن
+// isStaleWrite/needsWriteReconciliation يبقيان الضامنين لصحة النتيجة الكانونية بصرف النظر
+// عن ترتيب الاكتمال.
+assert.doesNotMatch(
+  yml,
+  /cancel-in-progress:\s*true/,
+  'cancel-in-progress يجب ألا يكون true بعد الآن — هذا بالضبط ما يُنتج CANCELLED الملوِّث لـstatusCheckRollup (مرصود حياً على PR #150)',
+);
+assert.match(yml, /cancel-in-progress:\s*false/, 'cancel-in-progress يجب أن يكون false صراحةً — تشغيل قديم يُسمح له بالإكمال بدل أن يُقتل');
 
 // سيناريو (ج) بعد الإصلاح السابع: pull_request_target وpull_request_review وissue_comment
 // لنفس الـPR يجب أن يقعوا جميعاً بنفس مجموعة concurrency الآن (توحيد صريح — نقطة 1 من
@@ -458,5 +470,65 @@ assert.match(
     'فشل GET أو غياب قيمة ملحوظة ⇒ لا مصالحة قسرية بلا دليل واضح',
   );
 }
+
+// 9) إصلاح جوهري عاشر بتاريخ 2026-08-31 — إيقاف cancel-in-progress (P1 حي رابع رصدناه بعد
+//    اختبار post-merge حي على PR #150: تشغيل قديم أُلغي CANCELLED عند push جديد على نفس
+//    الـPR، فلوّث statusCheckRollup الكلي رغم أن اسمه ليس required check). 3 سيناريوهات
+//    regression مطلوبة صراحةً من المستخدم.
+
+// (م) push جديد أثناء تشغيل داخلي قديم لا يجب أن يترك أي CANCELLED/FAILURE ظاهر بالـrollup:
+//     نتحقق أن التشغيل القديم — بعد إيقاف cancel-in-progress — يُسمح له بالإكمال (لا يُقتل)
+//     وأن خطوة "publish" الخاصة به تخرج exit 0 (outcome=success) بمجرد أن حارس isStaleHead
+//     يكتشف أن HEAD تغيّر، فينهي الـjob بنجاح (SUCCESS) لا بإلغاء ولا بفشل — يطابق تماماً
+//     ما تفحصه الخطوة الأخيرة "النتيجة الإعلامية للـjob" عبر steps.publish.outcome.
+{
+  const oldRunCapturedHead = SHA_OLD; // HEAD الذي بدأ عليه التشغيل القديم
+  const liveHeadAfterNewPush = SHA_NEW; // push جديد وصل أثناء تنفيذه
+  const oldRunIsStale = isStaleHead({ capturedHeadSha: oldRunCapturedHead, liveHeadSha: liveHeadAfterNewPush });
+  assert.equal(oldRunIsStale, true, 'تشغيل قديم يكتشف أن HEAD تغيّر أثناء تنفيذه ⇒ isStaleHead=true');
+  // isStaleHead=true يعني خطوة publish تخرج exit 0 بلا كتابة (مُثبَت بالعقد أعلاه على نص
+  // الـworkflow: `if [ "$LIVE_HEAD_SHA" != "$HEAD_SHA" ]... exit 0`) ⇒ outcome=success دائماً
+  // لتشغيل قديم مسموح له بالإكمال، لا CANCELLED (كان يحدث سابقاً مع cancel-in-progress:true)
+  // ولا FAILURE (الخطوة الأخيرة تتحقق فقط من outcome!=success، وexit 0 يعني success).
+  assert.match(
+    yml,
+    /if \[ "\$LIVE_HEAD_SHA" != "\$HEAD_SHA" \][\s\S]{0,400}exit 0/,
+    'حارس isStaleHead في نص الـworkflow يجب أن يُنهي خطوة publish بـexit 0 (لا كتابة، لا فشل) عند تغيّر HEAD — هذا ما يضمن SUCCESS لا CANCELLED للتشغيل القديم بعد إيقاف cancel-in-progress',
+  );
+  assert.match(
+    yml,
+    /if \[ "\$\{\{ steps\.publish\.outcome \}\}" != "success" \][\s\S]{0,400}exit 1/,
+    'الخطوة الأخيرة يجب أن تفشل الـjob فقط إن outcome!=success — exit 0 من isStaleHead يحقق success دائماً، فلا فشل ولا CANCELLED يظهر في rollup لتشغيل قديم أُكمل بسلام',
+  );
+}
+
+// (ن) required canonical gate يبقى واحد فقط لكل HEAD — مغطى فعلياً أعلاه (سيناريو "و" +
+//     إصلاح تاسع: ALL_NAMED_RUNS_JSON + WINNER_JSON + DUPLICATE_IDS تُوحِّد أي نسخ مكررة
+//     PATCH على حالة الفائز)، ونضيف هنا تأكيداً صريحاً أن اسم job الداخلي يبقى مختلفاً عن
+//     اسم الـcanonical حتى بعد إصلاح عاشر (لم يتغيّر بالإصلاح العاشر — شرط رقم 4 صريح).
+assert.doesNotMatch(
+  yml,
+  /name: Codex Review Gate\s*\n\s*runs-on:/,
+  'اسم الـjob الداخلي يجب أن يبقى مختلفاً حرفياً عن "Codex Review Gate" — لم يتغيّر بإصلاح عاشر (شرط صريح: عدم تغيير اسم/منطق الـRequired Check)',
+);
+assert.match(
+  yml,
+  /name: Codex Review Gate \(تشغيل داخلي — ليس Required Check\)/,
+  'اسم الـjob الداخلي التشخيصي يجب أن يبقى كما هو — الإصلاح العاشر لا يغيّر التسمية، فقط سلوك cancel-in-progress',
+);
+
+// (س) بعد review صحيح على HEAD نهائي واحد ⇒ لا يوجد أي مصدر آخر لـconclusion=failure أو
+//     CANCELLED في نص الـworkflow يمكن أن يلوّث statusCheckRollup: تأكيد أن لا "conclusion":
+//     "failure" (مغطى أعلاه) ولا أي مسار يكتب "cancelled" صراحة على check-run الكانوني ذاته
+//     (الكانوني دائماً in_progress أو completed/success فقط — الـCANCELLED الوحيد كان تابعاً
+//     لـauto job check-run، والذي عولج بإيقاف cancel-in-progress أعلاه). الوصول الفعلي لـ
+//     statusCheckRollup.state=SUCCESS وmergeStateStatus=CLEAN حياً يتطلب تشغيلاً فعلياً على
+//     GitHub Actions (غير قابل للمحاكاة الكاملة بجافاسكريبت صرف) — هذا بالضبط ما يتحقق منه
+//     اختبار post-merge حي لاحق قبل دمج أي PR يعتمد على الـGate (الشرط رقم 9 من طلب المستخدم).
+assert.doesNotMatch(
+  yml,
+  /"conclusion":\s*"cancelled"/,
+  'check-run الكانوني يجب ألا يحمل conclusion=cancelled أبداً — الحالتان المسموحتان فقط هما in_progress أو success',
+);
 
 console.log('codex-review-gate-logic.mjs contract + regression checks passed.');

@@ -225,8 +225,29 @@ concurrency:
   #   check-run الكانوني — انظر "إصلاح جوهري سابع" أعلى الملف). الإصلاح السابع يعيد توحيد
   #   المجموعة عمداً، ويعتمد بدلاً من ذلك على حارس تشغيل قديم صريح (stale-run guard) لمنع
   #   أي تراجع في النتيجة — وليس على فصل concurrency الذي أثبت أنه غير كافٍ وحده.
+  #
+  # ⚠️ إصلاح جوهري عاشر بتاريخ 2026-08-31 (إيقاف cancel-in-progress — يلوّث statusCheckRollup):
+  #   رُصد حياً على PR #150 بعد دمج #146: push ثانٍ على نفس الـPR يُلغي (CANCELLED) تشغيل
+  #   الـjob السابق كاملاً، بما فيه check-run الـjob التلقائي "Codex Review Gate (تشغيل
+  #   داخلي — ليس Required Check)"، فيصبح conclusion الخاص به CANCELLED. هذا الاسم ليس
+  #   ضمن required_status_checks (["Codex Review Gate","check","validate"]) ولا يمنع الدمج
+  #   (mergeable يبقى MERGEABLE)، لكنه يلوّث الحساب الكلي لـstatusCheckRollup/mergeStateStatus
+  #   على مستوى GitHub نفسه (كل check-runs على الـcommit تدخل بالحساب الكلي بصرف النظر عن
+  #   عضويتها بالـrequired list)، فيصير UNSTABLE بدل CLEAN رغم أن كل الفحوصات المطلوبة PASS.
+  #   لا يمكن فصل orchestration هذا الـjob عن رول-أب الـPR بالكامل: كل job في GitHub Actions
+  #   ينشئ check-run تلقائياً حتماً، ولا آلية لإخفائه؛ ونقله لworkflow منفصل يعيد بالضبط
+  #   سباق التشغيلات المتزامنة الذي أغلقه الإصلاح السابع عمداً بتوحيد concurrency group.
+  #   الحل هنا إذن هو الخيار الآمن المتاح: السماح للتشغيل الأقدم بأن *يُكمل* بدل أن يُقتل في
+  #   منتصف التنفيذ. حارس HEAD الحي (isStaleHead) في خطوة "publish" أدناه يُعيد قراءة
+  #   head.sha الحيّ قبل أي كتابة نهائية ويخرج exit 0 (بلا أي كتابة) إن لم يعد يطابق الـHEAD
+  #   الذي بدأ عليه التشغيل — أي أن تشغيلاً قديماً مسموحاً له بالإكمال يُنهي job بنجاح دائماً
+  #   (SUCCESS)، لا CANCELLED ولا FAILURE، بصرف النظر عن نتيجة الـGate الكانوني. وحارسا
+  #   isStaleWrite/needsWriteReconciliation (الإصلاحان السابع والثامن) يبقيان الضامنين
+  #   لصحة نتيجة check-run الكانوني نفسه بصرف النظر عن ترتيب اكتمال التشغيلات — فتعطيل
+  #   cancel-in-progress هنا لا يُعيد أي سباق قديم كان قد أُغلق، فقط يمنع القتل الذي يُنتج
+  #   CANCELLED الظاهر في الـrollup.
   group: codex-review-gate-${{ github.event.pull_request.number || github.event.issue.number || github.event.inputs.pr_number }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   gate:
