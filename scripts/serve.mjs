@@ -5,7 +5,13 @@ import { fileURLToPath } from "node:url";
 
 const root = normalize(join(dirname(fileURLToPath(import.meta.url)), ".."));
 const portArgIndex = process.argv.indexOf("--port");
-const requestedPort = portArgIndex >= 0 ? Number(process.argv[portArgIndex + 1]) : 5173;
+const requestedPort = portArgIndex >= 0
+  ? Number(process.argv[portArgIndex + 1])
+  : Number(process.env.PORT) || 5173;
+// الافتراضي 0.0.0.0 كما كان — ويندوز يخدم أجهزة الشبكة من هذا السيرفر ولا
+// يتغيّر سلوكه إطلاقاً. صار المضيف قابلاً للضبط كي يحصره مرافق الماك على
+// الاسترجاع وحده (HOST=127.0.0.1) فلا يُعرَض الموقع على الشبكة من الماك.
+const requestedHost = process.env.HOST || "0.0.0.0";
 
 const types = {
   ".html": "text/html; charset=utf-8",
@@ -37,8 +43,12 @@ function handler(req, res) {
 
 const server = createServer(handler);
 
-server.listen(requestedPort, "0.0.0.0", () => {
+server.listen(requestedPort, requestedHost, () => {
   console.log(`Web Platform is running:`);
-  console.log(`Local:   http://localhost:${requestedPort}`);
-  console.log(`Network: http://YOUR_WINDOWS_IP:${requestedPort}`);
+  console.log(`Local:   http://127.0.0.1:${requestedPort}`);
+  if (requestedHost === "0.0.0.0") {
+    console.log(`Network: http://YOUR_WINDOWS_IP:${requestedPort}`);
+  } else {
+    console.log(`Bound:   ${requestedHost} (محصور محلياً — غير معروض على الشبكة)`);
+  }
 });

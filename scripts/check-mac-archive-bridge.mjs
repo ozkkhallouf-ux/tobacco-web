@@ -452,26 +452,39 @@ if (await renderAvailable()) {
 
 // ===== 6) سقوط الموقع إلى التنزيل العادي حين يتوقف الجسر =====
 
-function loadArchiveClient({ fetchImpl, storage = new Map(), protocol = "http:" }) {
+function loadArchiveClient({ fetchImpl, storage = new Map(), protocol = "http:", platform = "MacIntel" }) {
   const timers = [];
   const created = [];
+  const makeNode = () => ({
+    style: {}, dir: "", textContent: "", attrs: {}, children: [], isConnected: true,
+    setAttribute(k, v) { this.attrs[k] = v; },
+    appendChild(child) { this.children.push(child); return child; },
+    remove() { this.isConnected = false; }
+  });
   const sandbox = {
     console,
     Blob: class Blob {},
     AbortController: class { constructor() { this.signal = {}; } abort() {} },
-    setTimeout: (fn, ms) => { timers.push(fn); return timers.length; },
+    setTimeout: (fn) => { timers.push(fn); return timers.length; },
     clearTimeout: () => {},
     fetch: fetchImpl,
     FileReader: class {
       readAsDataURL() { this.result = "data:application/pdf;base64,QUJD"; this.onload && this.onload(); }
     },
+    navigator: {
+      platform,
+      userAgent: /mac/i.test(platform)
+        ? "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"
+        : "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    },
     document: {
-      body: { appendChild: (node) => created.push(node) },
+      // «loading» + مستمع لا يُطلق: يمنع الفحص التلقائي عند الإقلاع كي تبقى
+      // تسلسلات الطلبات في الاختبارات محكومة بالكامل.
+      readyState: "loading",
+      addEventListener: () => {},
+      body: { appendChild: (node) => { created.push(node); return node; } },
       querySelector: () => null,
-      createElement: () => ({
-        style: {}, dir: "", textContent: "",
-        setAttribute() {}, remove() {}
-      })
+      createElement: makeNode
     }
   };
   sandbox.window = {
@@ -483,10 +496,18 @@ function loadArchiveClient({ fetchImpl, storage = new Map(), protocol = "http:" 
     }
   };
   sandbox.window.window = sandbox.window;
+  sandbox.navigator = sandbox.navigator;
   vm.createContext(sandbox);
   const source = readFileSync(new URL("../src/icloud-archive.js", import.meta.url), "utf8");
   vm.runInContext(source, sandbox);
-  return { api: sandbox.window.ozkArchive, created, storage };
+  const pick = (attr) => created.filter((n) => Object.prototype.hasOwnProperty.call(n.attrs || {}, attr));
+  return {
+    api: sandbox.window.ozkArchive,
+    created,
+    storage,
+    toasts: () => pick("data-ozk-archive-toast"),
+    chips: () => pick("data-ozk-archive-status")
+  };
 }
 
 await test("الجسر متوقف: العميل يرجع فشلاً هادئاً ولا يرمي أبداً", async () => {
@@ -541,25 +562,69 @@ await test("على https: رسالة الفشل تذكر إذن الشبكة ا�
   // قياس فعلي (2026-08-31): من صفحة https يفشل الطلب بلا إذن الشبكة المحلية
   // وينجح بـ200 فور منحه. رسالة «الجسر غير متاح» وحدها تُرسل المالك خلف عطل
   // غير موجود.
-  const { api, created } = loadArchiveClient({
+  const { api, toasts } = loadArchiveClient({
     protocol: "https:",
     fetchImpl: async () => { throw new Error("Failed to fetch"); }
   });
   const result = await api.archive({ docType: "stock_report", html: "<p>x</p>", meta: {} });
   assert.equal(result.ok, false);
   assert.equal(result.reason, "unreachable");
-  assert.equal(created.length, 1, "يجب أن يظهر تنبيه واحد");
-  assert.match(created[0].textContent, /الشبكة المحلية/);
+  assert.equal(toasts().length, 1, "يجب أن يظهر تنبيه واحد");
+  assert.match(toasts()[0].textContent, /الشبكة المحلية/);
 });
 
 await test("على http محلي: رسالة الفشل تبقى مباشرة بلا حشو", async () => {
-  const { api, created } = loadArchiveClient({
+  const { api, toasts } = loadArchiveClient({
     protocol: "http:",
     fetchImpl: async () => { throw new Error("ECONNREFUSED"); }
   });
   await api.archive({ docType: "stock_report", html: "<p>x</p>", meta: {} });
-  assert.equal(created.length, 1);
-  assert.match(created[0].textContent, /الجسر المحلي غير متاح/);
+  assert.equal(toasts().length, 1);
+  assert.match(toasts()[0].textContent, /الجسر المحلي غير متاح/);
+});
+
+await test("مؤشر الحالة يعكس الاتصال ويظهر بكلمتين بلا تفاصيل تقنية", async () => {
+  const down = loadArchiveClient({ fetchImpl: async () => { throw new Error("down"); } });
+  await down.api.probe(true);
+  assert.equal(down.chips().length, 1);
+  assert.equal(down.chips()[0].children[1].textContent, "أرشفة iCloud: غير متصلة");
+
+  const up = loadArchiveClient({
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ ok: true, icloud: { ready: true } }) })
+  });
+  await up.api.probe(true);
+  assert.equal(up.chips()[0].children[1].textContent, "أرشفة iCloud: متصلة");
+  // لا يجوز تسريب أي تفصيل تقني إلى الشارة.
+  assert.ok(!/127\.0\.0\.1|http|fetch/i.test(up.chips()[0].children[1].textContent));
+});
+
+await test("جهاز غير ماك: لا طلب شبكي ولا شارة ولا تنبيه", async () => {
+  let touched = false;
+  const { api, created } = loadArchiveClient({
+    platform: "Win32",
+    fetchImpl: async () => { touched = true; throw new Error("should not happen"); }
+  });
+  assert.equal(api.isSupportedPlatform(), false);
+  const result = await api.archive({ docType: "invoice", html: "<p>x</p>", meta: { party: "س", number: "1" } });
+  assert.equal(result.reason, "unsupported_platform");
+  assert.equal(touched, false, "ويندوز/الآيفون لا يرسلان أي طلب");
+  assert.equal(created.length, 0, "ولا يظهر لهما أي عنصر واجهة");
+});
+
+await test("diagnose يجيب عن كل أسئلة التشخيص بلا إزعاج المستخدم", async () => {
+  const { api, created } = loadArchiveClient({
+    fetchImpl: async (url) => (String(url).endsWith("/health")
+      ? { ok: true, status: 200, json: async () => ({ ok: true, service: "ozk-archive-bridge" }) }
+      : { ok: true, status: 200, json: async () => ({ ok: true, token: "T".repeat(64) }) })
+  });
+  const report = await api.diagnose();
+  assert.equal(report.platformSupported, true);
+  assert.equal(report.health.reached, true);
+  assert.equal(report.health.status, 200);
+  assert.equal(report.pair.reached, true);
+  assert.equal(report.pair.gotToken, true);
+  assert.equal(report.verdict, "الجسر متاح");
+  assert.equal(created.length, 0, "التشخيص لا يعرض شيئاً للمستخدم");
 });
 
 await test("إيقاف الميزة من المتصفح يمنع أي طلب شبكي", async () => {
@@ -590,6 +655,31 @@ await test("app.js: الأرشفة لا تحجب التصدير ولا تُنت�
   assert.ok(!/isRet \? "other_report"/.test(appJs), "بقي التصنيف القديم للمرتجع");
 });
 
+await test("لم تسقط أي نقطة ربط للأرشفة من src/app.js", () => {
+  // أُضيف هذا الحارس بعد حادثة فعلية (2026-08-31): إعادة هيكلة لنشرة الأسعار
+  // في جلسة أخرى حذفت `archiveToICloud("price_list", ...)` بصمت، فتوقّفت
+  // أرشفة النشرة بلا أي خطأ ظاهر. نقاط الربط تُفحص بالاسم من الآن فصاعداً.
+  const appJs = readFileSync(new URL("../src/app.js", import.meta.url), "utf8");
+  const directHooks = ["price_list", "other_report", "invoice"];
+  for (const kind of directHooks) {
+    assert.ok(
+      appJs.includes(`archiveToICloud("${kind}"`),
+      `نقطة ربط مفقودة: archiveToICloud("${kind}") — تصدير هذا المستند لن يُؤرشف`
+    );
+  }
+  // ملاحظة: `return_invoice` يُمرَّر عبر متغيّر لا حرفياً، ويحرسه فحص المرتجع أعلاه.
+  const viaOptions = ["account_statement", "receivables_report", "stock_report", "purchase_invoice"];
+  for (const kind of viaOptions) {
+    assert.ok(
+      appJs.includes(`docType: "${kind}"`),
+      `نقطة ربط مفقودة: docType "${kind}"`
+    );
+  }
+  // الوسيطان اللذان يمرّ منهما باقي المستندات.
+  assert.match(appJs, /async function exportReportPdf\(bodyHtml, filename, archive\)/);
+  assert.match(appJs, /if \(options\.archive && options\.archive\.docType\)/);
+});
+
 await test("index.html: CSP يسمح بأصل واحد محلي فقط بلا wildcard ولا منافذ إضافية", () => {
   const html = readFileSync(new URL("../index.html", import.meta.url), "utf8");
   const csp = html.match(/content="default-src[^"]*"/);
@@ -604,6 +694,35 @@ await test("index.html: CSP يسمح بأصل واحد محلي فقط بلا wi
   // العميل يجب أن يخاطب العنوان نفسه المسموح به بالضبط.
   const client = readFileSync(new URL("../src/icloud-archive.js", import.meta.url), "utf8");
   assert.ok(/var BASE = "http:\/\/127\.0\.0\.1:8787"/.test(client), "عنوان العميل لا يطابق CSP");
+});
+
+await test("serve.mjs: المضيف قابل للضبط والافتراضي لم يتغيّر (ويندوز سليم)", () => {
+  const serve = readFileSync(new URL("../scripts/serve.mjs", import.meta.url), "utf8");
+  // الافتراضي 0.0.0.0 شرط بقاء ويندوز يخدم أجهزة الشبكة كما كان.
+  assert.match(serve, /process\.env\.HOST \|\| "0\.0\.0\.0"/, "الافتراضي يجب أن يبقى 0.0.0.0");
+  assert.match(serve, /server\.listen\(requestedPort, requestedHost/, "المضيف يجب أن يُمرَّر فعلياً");
+  assert.ok(!/listen\([^,]*, "0\.0\.0\.0"/.test(serve), "لا يجوز تثبيت المضيف نصياً بعد الآن");
+});
+
+await test("مرافق الماك: خدمتان تعملان عند تسجيل الدخول والموقع محصور بالاسترجاع", () => {
+  const sh = readFileSync(new URL("../tools/mac-archive-bridge/install-launch-agent.sh", import.meta.url), "utf8");
+  assert.match(sh, /com\.ozk\.archive-bridge/);
+  assert.match(sh, /com\.ozk\.local-site/);
+  assert.match(sh, /<key>RunAtLoad<\/key>\s*\n\s*<true\/>/, "يجب أن تبدأ مع تسجيل الدخول");
+  assert.match(sh, /<key>KeepAlive<\/key>/, "يجب أن تعود بعد الانهيار");
+  // الموقع المحلي على الماك لا يُعرَض على الشبكة إطلاقاً.
+  assert.match(sh, /<key>HOST<\/key>\s*\n\s*<string>127\.0\.0\.1<\/string>/, "الموقع المحلي يجب أن يكون على الاسترجاع فقط");
+  // مجلد العمل خارج ~/Documents (وإلا تجمّد Node عند getcwd — قياس 2026-08-31).
+  assert.match(sh, /<key>WorkingDirectory<\/key>\s*\n\s*<string>\$DATA_DIR<\/string>/);
+  assert.ok(!/WorkingDirectory<\/key>\s*\n\s*<string>\$REPO_DIR/.test(sh), "مجلد العمل يجب ألا يكون داخل المستودع");
+});
+
+await test("أصل المرافق المحلي مسموح في قائمة الجسر", async () => {
+  const { DEFAULT_CONFIG } = await import("../tools/mac-archive-bridge/lib/config.mjs");
+  assert.ok(DEFAULT_CONFIG.allowedOrigins.includes("http://127.0.0.1:5173"));
+  assert.ok(DEFAULT_CONFIG.allowedOrigins.includes("http://localhost:5173"));
+  assert.ok(DEFAULT_CONFIG.allowedOrigins.every((o) => /^https:\/\/|^http:\/\/(127\.0\.0\.1|localhost):/.test(o)),
+    "لا يجوز أصل http غير محلي في القائمة");
 });
 
 await test("عميل الواجهة لا يحوي أي سر مكتوب", () => {

@@ -55,6 +55,37 @@ function rateLimited(key) {
   return bucket.length > max;
 }
 
+// سجل وصول فحوص /health — هو **الفاصل القاطع** في تشخيص أي عطل:
+// المتصفح لا يفرّق في رسالة JS بين «الجسر مطفأ» و«المتصفح حجب الطلب قبل
+// الشبكة». إن ظهر السطر هنا فالطلب خرج من المتصفح فعلاً؛ وإن غاب رغم أن
+// الجسر يعمل فقد حُجب محلياً (سياسة محتوى مختلط أو إذن شبكة محلية).
+// مخنوق لكل (أصل + متصفح) كي لا يتضخّم السجل من الفحص الدوري.
+const probeSeen = new Map();
+const PROBE_LOG_INTERVAL = 60000;
+
+function browserLabel(userAgent) {
+  const ua = String(userAgent || "");
+  if (/Edg\//.test(ua)) return "Edge";
+  if (/Chrome\//.test(ua)) return "Chrome";
+  if (/Version\/[\d.]+ Safari/.test(ua)) return "Safari";
+  if (/Safari/.test(ua)) return "WebKit";
+  if (/Firefox\//.test(ua)) return "Firefox";
+  return "غير معروف";
+}
+
+function logProbe(req, origin) {
+  const browser = browserLabel(req.headers["user-agent"]);
+  const key = `${origin || "-"}|${browser}`;
+  const now = Date.now();
+  const last = probeSeen.get(key) || 0;
+  if (now - last < PROBE_LOG_INTERVAL) return;
+  probeSeen.set(key, now);
+  if (probeSeen.size > 32) {
+    for (const [k, at] of probeSeen) if (now - at > PROBE_LOG_INTERVAL * 10) probeSeen.delete(k);
+  }
+  logEvent("info", "وصل فحص توفّر", { reason: `${browser} من ${origin || "بلا أصل"}` });
+}
+
 function applyCors(req, res, origin) {
   res.setHeader("Vary", "Origin");
   res.setHeader("Cache-Control", "no-store");
@@ -212,6 +243,7 @@ export const server = createServer(async (req, res) => {
   const url = new URL(req.url, "http://127.0.0.1");
   try {
     if (req.method === "GET" && url.pathname === "/health") {
+      logProbe(req, origin);
       return sendJson(res, 200, await healthPayload());
     }
     if (req.method === "GET" && url.pathname === "/pair") {
