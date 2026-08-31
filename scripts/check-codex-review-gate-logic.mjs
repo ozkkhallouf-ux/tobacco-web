@@ -4,7 +4,6 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import {
   evaluateCodexReview,
-  concurrencyGroup,
   selectCanonicalCheckRunId,
   buildCanonicalCheckRunPayload,
   runGeneration,
@@ -116,31 +115,63 @@ const formalReviewResult = evaluateCodexReview({
 });
 assert.equal(formalReviewResult.conclusion, 'success', 'formal review بـcommit_id مطابق للـHEAD يجب أن يمر');
 
-// 3) فحص مفتاح concurrency — إصلاح جوهري سابع بتاريخ 2026-08-31 (توحيد المجموعة: الفصل
-//    حسب github.event_name كان هو ما فتح نافذة التشغيلات المتزامنة الفعلية التي كشفها
-//    Codex كـP1 حي على PR #146 — الحماية من التراجع تعتمد الآن على الحارس الصريح فقط).
-assert.doesNotMatch(
-  yml,
-  /group:\s*codex-review-gate-\$\{\{[\s\S]{0,200}\}\}-\$\{\{\s*github\.event_name\s*\}\}/,
-  'مفتاح concurrency group يجب ألا يتضمن github.event_name بعد الآن — الفصل حسب نوع الحدث هو ما سمح بتشغيلات متزامنة فعلية (P1 المرصود على PR #146)',
-);
-assert.match(
-  yml,
-  /group:\s*codex-review-gate-\$\{\{[\s\S]{0,200}\}\}\s*\n\s*cancel-in-progress:\s*true/,
-  'مفتاح concurrency group يجب أن يعتمد على رقم الـPR فقط (مجموعة واحدة لكل PR بصرف النظر عن نوع الحدث)',
-);
-assert.match(yml, /cancel-in-progress:\s*true/, 'cancel-in-progress يجب أن يبقى true (يقلّص التداخل الفعلي، ولو أنه ليس الضامن الوحيد بعد الآن)');
+// 3) لا كتلة concurrency إطلاقاً — وهذا هو جوهر هذا الإصلاح.
+//
+//    الخلفية المقيسة (2026-08-31، آخر 100 تشغيل): 32٪ من التشغيلات كانت تُلغى، و90٪ من
+//    الإلغاءات المنسوبة كانت على *نفس* الـSHA (رشقة أحداث Codex). الـcheck-run التلقائي
+//    للـjob ينتهي عندها بـcancelled، وهو ليس required فلا يمنع الدمج — لكنه يُنزل
+//    mergeStateStatus إلى UNSTABLE لأن الحالة تُحسب من كل check-runs على الـcommit.
+//
+//    يُمنع هنا أي شكل من أشكال العودة: لا `concurrency:` ولا `cancel-in-progress` في
+//    الشيفرة الفعلية. تعليقات سجل القرار مسموحة (تُجرَّد قبل الفحص) — وإلا لمنعنا توثيق
+//    سبب القرار داخل الملف نفسه.
+const ymlCode = yml
+  .split('\n')
+  .filter((line) => !line.trimStart().startsWith('#'))
+  .join('\n');
 
-// سيناريو (ج) بعد الإصلاح السابع: pull_request_target وpull_request_review وissue_comment
-// لنفس الـPR يجب أن يقعوا جميعاً بنفس مجموعة concurrency الآن (توحيد صريح — نقطة 1 من
-// طلب المستخدم)، والحماية الفعلية من التراجع تأتي من isStaleWrite/isStaleHead أدناه.
-const prNumber = 146;
-const groupOpened = concurrencyGroup({ prNumber });
-const groupReview = concurrencyGroup({ prNumber });
-const groupIssueComment = concurrencyGroup({ prNumber });
-assert.equal(groupOpened, groupReview, 'كل triggers لنفس الـPR يجب أن تشترك بنفس مجموعة concurrency بعد التوحيد');
-assert.equal(groupOpened, groupIssueComment, 'issue_comment يجب أن يشترك بنفس مجموعة pull_request_target بعد التوحيد');
-assert.equal(concurrencyGroup({ prNumber: 999 }) === groupOpened, false, 'أرقام PR مختلفة يجب أن تبقى بمجموعات مختلفة');
+assert.doesNotMatch(
+  ymlCode,
+  /^\s*concurrency:/m,
+  'يجب ألا تعود كتلة concurrency: إلغاء التشغيلات هو ما كان يُنتج CANCELLED ويلوّث mergeStateStatus',
+);
+assert.doesNotMatch(
+  ymlCode,
+  /cancel-in-progress/,
+  'يجب ألا يعود cancel-in-progress بأي قيمة — حتى false لا يحمي التشغيل المطرود وهو في الطابور',
+);
+assert.doesNotMatch(
+  ymlCode,
+  /^\s*group:\s*codex-review-gate/m,
+  'يجب ألا يعود مفتاح concurrency group بأي صيغة، بما فيها المفتاح المرتبط بالـSHA (قِيس أنه يُصلح ~10٪ فقط)',
+);
+
+// 3-ب) الصلاحيات تبقى الدنيا. هذا سير عمل pull_request_target — ينفَّذ في سياق المستودع
+//      الأساسي بأسراره — فأي ترقية كتابة فيه ثمنها أمني حقيقي. تحديداً: لا contents: write
+//      لصناعة قفل يدوي عبر refs. الحماية من السباق منطقية (isStaleWrite/isStaleHead) لا
+//      قائمة على قفل.
+// المطابقة على الكتلة كاملة حتى السطر الفارغ، لا على بدايتها: تعبير ينتهي بـ$ تحت /m
+// يقف عند نهاية السطر، فكان سطر صلاحية مضاف بعده يمرّ بلا التقاط (طفرة مرصودة).
+const permissionsBlock = (() => {
+  const m = yml.match(/^permissions:\n(?:[ \t]+.*\n)+/m);
+  assert.ok(m, 'كتلة permissions مفقودة من الـworkflow');
+  return m[0].trimEnd();
+})();
+assert.equal(
+  permissionsBlock,
+  'permissions:\n  contents: read\n  pull-requests: read\n  checks: write',
+  `كتلة permissions تغيّرت — يجب أن تبقى الدنيا بالضبط بلا زيادة ولا نقصان. وُجد:\n${permissionsBlock}`,
+);
+assert.doesNotMatch(
+  ymlCode,
+  /contents:\s*write/,
+  'ممنوع contents: write على سير عمل pull_request_target — قرار صريح: لا قفل عبر refs ولا commits قفل آلية',
+);
+assert.doesNotMatch(
+  ymlCode,
+  /refs\/gate-lock|gate-lock/,
+  'ممنوع أي قفل يدوي عبر refs — الحماية من السباق رتيبة ومنطقية، لا قائمة على mutex مصنوع يدوياً',
+);
 
 // 4) فحص العقد الثابت على نص الـworkflow لإصلاح Canonical Check Run (2026-08-31):
 //    يبحث كل تشغيل عن check-run موجود على نفس head_sha بالضبط قبل الإنشاء، ولا يوجد أي
@@ -457,6 +488,64 @@ assert.match(
     false,
     'فشل GET أو غياب قيمة ملحوظة ⇒ لا مصالحة قسرية بلا دليل واضح',
   );
+}
+
+// ---------------------------------------------------------------------------
+// 9) جدول ترتيب صريح — بديل concurrency.
+//
+//    بعد إزالة concurrency صارت التشغيلات المتوازية ممكنة فعلاً: قِيس أن 17 من 79 زوجاً
+//    متتالياً لنفس الفرع (22٪) ستتداخل زمنياً (متوسط التشغيل 65 ثانية). الضامن الوحيد
+//    لعدم التراجع هو الحراس الرتيبة، فتُختبر هنا كجدول ترتيب لا كحالات متفرقة.
+//
+//    العمود الحاسم هو الأخير: هل يُسمح للكاتب بالكتابة؟ ولا يعتمد أيٌّ من ذلك على ترتيب
+//    الاكتمال — generation تُخصَّص وقت *إنشاء* التشغيل، فترتيبها ثابت مهما تأخر أحدهما.
+const ORDERING_TABLE = [
+  // A يبدأ → B يبدأ → B يكتب → A ينتهي  ⇒  A ممنوع (المطالبة الصريحة)
+  { name: 'A يبدأ · B يبدأ · B يكتب · A ينتهي ⇒ A لا يكتب',
+    existing: { runId: 5001, runAttempt: 1 }, candidate: { runId: 5000, runAttempt: 1 }, stale: true },
+  // نفس الترتيب بالعكس: B هو الكاتب الأحدث فوق نتيجة A الأقدم ⇒ مسموح
+  { name: 'A كتب أولاً · B أحدث يكتب فوقه ⇒ B يكتب',
+    existing: { runId: 5000, runAttempt: 1 }, candidate: { runId: 5001, runAttempt: 1 }, stale: false },
+  // أول كتابة على الإطلاق — لا شيء مسجَّل
+  { name: 'لا نتيجة مسجَّلة ⇒ الكاتب يكتب',
+    existing: null, candidate: { runId: 5000, runAttempt: 1 }, stale: false },
+  // نفس التشغيل يُعاد تشغيله (attempt أعلى) ⇒ الأحدث يكتب
+  { name: 'إعادة تشغيل نفس الـrun (attempt أعلى) ⇒ يكتب',
+    existing: { runId: 5000, runAttempt: 1 }, candidate: { runId: 5000, runAttempt: 2 }, stale: false },
+  // محاولة أقدم من نفس التشغيل تصل متأخرة ⇒ ممنوعة
+  { name: 'attempt أقدم من نفس الـrun يصل متأخراً ⇒ لا يكتب',
+    existing: { runId: 5000, runAttempt: 2 }, candidate: { runId: 5000, runAttempt: 1 }, stale: true },
+  // نفس الـgeneration بالضبط — كتابة مكرّرة من نفس التشغيل ⇒ تُمنع (لا فائدة، وتفتح نافذة دهس)
+  { name: 'نفس الـgeneration بالضبط ⇒ لا يكتب (كتابة مكرّرة)',
+    existing: { runId: 5000, runAttempt: 1 }, candidate: { runId: 5000, runAttempt: 1 }, stale: true },
+];
+
+for (const row of ORDERING_TABLE) {
+  const existingGeneration = row.existing ? runGeneration(row.existing) : null;
+  const candidateGeneration = runGeneration(row.candidate);
+  assert.equal(
+    isStaleWrite({ existingGeneration, candidateGeneration }),
+    row.stale,
+    `جدول الترتيب — ${row.name} (existing=${existingGeneration} candidate=${candidateGeneration})`,
+  );
+}
+assert.ok(ORDERING_TABLE.length >= 6, `جدول الترتيب ${ORDERING_TABLE.length} صفوف — حُذف صف؟`);
+
+// 9-ب) حارس HEAD مستقل تماماً عن الترتيب: تشغيل بدأ على HEAD قديم ممنوع من الكتابة على
+//      الـcommit الجديد مهما كانت generation ـه — حتى لو كان الأحدث.
+{
+  const OLD = 'a'.repeat(40);
+  const NEW = 'b'.repeat(40);
+  assert.equal(isStaleHead({ capturedHeadSha: OLD, liveHeadSha: NEW }), true,
+    'HEAD تغيّر أثناء التشغيل ⇒ ممنوع من الكتابة، بصرف النظر عن generation');
+  assert.equal(isStaleHead({ capturedHeadSha: NEW, liveHeadSha: NEW }), false,
+    'HEAD لم يتغيّر ⇒ مسموح');
+  // الحارسان مستقلان: generation أحدث لا تُلغي حارس HEAD
+  const genNewest = runGeneration({ runId: 9999, runAttempt: 9 });
+  assert.equal(isStaleWrite({ existingGeneration: null, candidateGeneration: genNewest }), false,
+    'generation أحدث تمرّ من حارس الكتابة…');
+  assert.equal(isStaleHead({ capturedHeadSha: OLD, liveHeadSha: NEW }), true,
+    '…لكن حارس HEAD يمنعها رغم ذلك — الحارسان تراكميان لا بديلان');
 }
 
 console.log('codex-review-gate-logic.mjs contract + regression checks passed.');
