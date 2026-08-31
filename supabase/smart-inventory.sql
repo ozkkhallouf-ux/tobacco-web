@@ -740,11 +740,25 @@ revoke all on function public.smart_inventory_available_warehouses(date),public.
  public.smart_inventory_owner_dashboard(date),public.smart_inventory_owner_report(uuid),
  public.smart_inventory_owner_open_recount(uuid,text),public.smart_inventory_owner_reopen_session(uuid,text),
  public.smart_inventory_owner_correct_item(uuid,numeric,text)
-from public,anon;
+from public;
+-- Counter sessions carry the least-privilege database role 'anon' (see migration
+-- 20260823084956), so the six counting RPCs MUST stay granted to anon. Revoking
+-- them from anon here once broke every counter on production while login itself
+-- kept succeeding: the Edge Function signs in with service_role, then the page
+-- dies on the first RPC. The identity guard is inside each function
+-- (smart_inventory_is_counter/_is_owner: app_metadata role + a live auth.sessions
+-- row + an enabled, unlocked account), never the grant — an anonymous visitor
+-- holding only the publishable key still gets 'forbidden'.
 grant execute on function public.smart_inventory_available_warehouses(date),public.smart_inventory_start_or_join(text),
  public.smart_inventory_counter_session(uuid),public.smart_inventory_claim_item(uuid),
- public.smart_inventory_save_item(uuid,uuid,text,numeric,numeric,numeric,bigint),public.smart_inventory_complete_session(uuid),
- public.smart_inventory_owner_dashboard(date),public.smart_inventory_owner_report(uuid),
+ public.smart_inventory_save_item(uuid,uuid,text,numeric,numeric,numeric,bigint),public.smart_inventory_complete_session(uuid)
+to anon,authenticated;
+-- Owner-only RPCs stay off the counter role entirely.
+revoke execute on function public.smart_inventory_owner_dashboard(date),public.smart_inventory_owner_report(uuid),
+ public.smart_inventory_owner_open_recount(uuid,text),public.smart_inventory_owner_reopen_session(uuid,text),
+ public.smart_inventory_owner_correct_item(uuid,numeric,text)
+from anon;
+grant execute on function public.smart_inventory_owner_dashboard(date),public.smart_inventory_owner_report(uuid),
  public.smart_inventory_owner_open_recount(uuid,text),public.smart_inventory_owner_reopen_session(uuid,text),
  public.smart_inventory_owner_correct_item(uuid,numeric,text)
 to authenticated;
