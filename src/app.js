@@ -4614,7 +4614,7 @@ function printHtmlDocument(html, options = {}) {
   }, { once: true });
 
   document.body.appendChild(frame);
-  frame.srcdoc = html;
+  frame.srcdoc = withDocumentTitle(html, options.title);
 }
 
 // أرشفة صامتة إلى iCloud Drive عبر الجسر المحلي على الماك (src/icloud-archive.js).
@@ -4640,13 +4640,93 @@ function archiveToICloud(docType, content, meta) {
   }
 }
 
+// ===== اسم الملف المقترح عند «حفظ بصيغة PDF» =====
+//
+// كروم يشتقّ اسم الملف المقترح من **عنوان المستند المطبوع** (`<title>`) لا من
+// أي شيء آخر. كانت العناوين تحمل الرقم وحده («فاتورة مبيعات 562») فيخرج الملف
+// بلا اسم الزبون. نبني العنوان الآن من **نفس** كائن البيانات الذي تُبنى منه
+// الأرشفة، فيستحيل أن يفترق اسم ملف كروم عن اسم النسخة في iCloud.
+
+const DOC_TYPE_LABELS = {
+  invoice: "فاتورة",
+  return_invoice: "فاتورة مرتجع",
+  receipt: "سند قبض",
+  payment: "سند دفع",
+  account_statement: "كشف حساب",
+  stock_report: "تقرير المخزون",
+  receivables_report: "تقرير الذمم",
+  price_list: "نشرة أسعار",
+  purchase_invoice: "فاتورة مشتريات",
+  other_report: "تقرير"
+};
+
+// ينقّي جزءاً من اسم الملف: يحذف ما تمنعه أنظمة الملفات ومحارف التحكّم
+// والاتجاه غير المرئية، ويُبقي الحروف العربية والفراغات العادية كما هي.
+function sanitizeDocumentTitle(value) {
+  return String(value == null ? "" : value)
+    .normalize("NFC")
+    .replace(/[\u0000-\u001F\u007F]/g, " ")
+    .replace(/[\u200B-\u200F\u061C\u2066-\u2069\u202A-\u202E\uFEFF]/g, "")
+    .replace(/[/\\:*?"<>|]/g, " ")
+    .replace(/\.{2,}/g, ".")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^[.\s-]+/, "")
+    .replace(/[.\s]+$/, "")
+    .slice(0, 80)
+    .trim();
+}
+
+// التاريخ في اسم الملف بصيغة يقرأها المالك (DD-MM-YYYY)، بينما يبقى اسم النسخة
+// المؤرشفة على YYYY-MM-DD حسب اصطلاح مجلدات iCloud المعتمد. المصدر واحد.
+function fileDateLabel(isoDate) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(isoDate || "").slice(0, 10));
+  return match ? `${match[3]}-${match[2]}-${match[1]}` : "";
+}
+
+/**
+ * عنوان المستند المطبوع = اسم الملف الذي يقترحه المتصفح.
+ * يُبنى من نفس `meta` التي تذهب إلى الأرشفة — لا لقطة أخرى ولا قيمة افتراضية.
+ */
+function archiveDocumentTitle(docType, meta) {
+  const info = meta || {};
+  const label = docType === "other_report"
+    ? (sanitizeDocumentTitle(info.title) || DOC_TYPE_LABELS.other_report)
+    : (DOC_TYPE_LABELS[docType] || "مستند");
+  const party = sanitizeDocumentTitle(info.party);
+  const number = sanitizeDocumentTitle(info.number);
+  const date = fileDateLabel(info.date);
+  let title = label;
+  if (party) title += ` - ${party}`;
+  if (number) title += ` - رقم ${number}`;
+  if (date) title += ` - ${date}`;
+  return title;
+}
+
+// يفرض العنوان داخل المستند المطبوع نفسه — هو وحده ما يقرأه كروم.
+function withDocumentTitle(html, title) {
+  const safe = escapeHtml(String(title || "").trim());
+  if (!safe) return html;
+  const source = String(html);
+  if (/<title>[\s\S]*?<\/title>/i.test(source)) {
+    return source.replace(/<title>[\s\S]*?<\/title>/i, `<title>${safe}</title>`);
+  }
+  if (/<head[^>]*>/i.test(source)) {
+    return source.replace(/<head[^>]*>/i, (open) => `${open}<title>${safe}</title>`);
+  }
+  return source;
+}
+
 // نستعمل طباعة المتصفح الأصلية (حفظ بصيغة PDF) بدل html2canvas —
 // المحرّك القديم صار يطلّع صفحات بيضا بعد تحديثات كروم. الطباعة الأصلية
 // ترسم التقرير مثل الشاشة تماماً (عربي وألوان مظبوطة) ومستحيل تطلع فاضية.
 //
-// `archive` اختياري: { docType, meta } — عند تمريره تُحفظ نسخة في iCloud أيضاً.
+// `archive` اختياري: { docType, meta } — عند تمريره تُحفظ نسخة في iCloud أيضاً،
+// ويُشتقّ منه عنوان المستند (اسم ملف كروم) فيتطابق الاسمان دائماً.
 async function exportReportPdf(bodyHtml, filename, archive) {
-  const title = String(filename || "تقرير").replace(/\.pdf$/i, "");
+  const title = archive && archive.docType
+    ? archiveDocumentTitle(archive.docType, archive.meta)
+    : String(filename || "تقرير").replace(/\.pdf$/i, "");
   if (archive && archive.docType) archiveToICloud(archive.docType, bodyHtml, archive.meta);
   if (isHandheldDevice()) {
     try {
@@ -4926,8 +5006,22 @@ function voucherPdfMarkup(v) {
     rows.push(`<tr><th>${isRet ? "قيمة هذا المرتجع" : "قيمة هذه الفاتورة"}</th><td>${escapeHtml(formatMoney(v.amount || 0))} ${escapeHtml(cur)}</td></tr>`);
     // إن سُجّلت الفاتورة على الحساب بمبلغ أقل/أكثر من قيمتها (حسم أو تسوية) نُظهر الفرق
     // ليبقى الحساب شفافاً: السابق + الفاتورة − الحسم = الجديد.
+    // الحسم ودفعة الزبون عمليتان محاسبيتان مستقلتان تماماً، ولكلٍّ سطره:
+    //   الرصيد الجديد = السابق + قيمة الفاتورة − الحسم − دفعة الزبون
+    // لا يجوز أن تُطبع دفعة داخل خانة الحسم ولا العكس. كلٌّ يظهر فقط إن وُجد.
+    if (Number(v.discount || 0) > 0.009) {
+      rows.push(`<tr><th>الحسم</th><td class="cred">− ${escapeHtml(formatMoney(v.discount))} ${escapeHtml(cur)}</td></tr>`);
+    }
+    if (Number(v.payment || 0) > 0.009) {
+      rows.push(`<tr><th>دفعة من الزبون</th><td class="cred">− ${escapeHtml(formatMoney(v.payment))} ${escapeHtml(cur)}</td></tr>`);
+    }
+    // `adjust` فرق **غير منسوب**: ما تبقّى من حركة الحساب بعد طرح الحسم والدفعة
+    // المعروفَين. لا يُسمّى حسماً: مصدر فواتير الأمين لا يفصل الحسم عن الدفعة
+    // (راجع tools/push-customer-invoices.ps1 — الفاتورة تصل بحقول
+    // number/date/guid/total/isReturn/lines فقط)، فتسميته حسماً تطبع دفعة زبون
+    // على أنها حسم في مستند يُسلَّم للزبون.
     if (Number(v.adjust || 0) > 0.009) {
-      rows.push(`<tr><th>حسم</th><td class="cred">− ${escapeHtml(formatMoney(v.adjust))} ${escapeHtml(cur)}</td></tr>`);
+      rows.push(`<tr><th>تسوية على الحساب</th><td class="cred">− ${escapeHtml(formatMoney(v.adjust))} ${escapeHtml(cur)}</td></tr>`);
     } else if (Number(v.adjust || 0) < -0.009) {
       rows.push(`<tr><th>إضافة / تسوية</th><td class="deb">+ ${escapeHtml(formatMoney(Math.abs(v.adjust)))} ${escapeHtml(cur)}</td></tr>`);
     }
@@ -7553,7 +7647,14 @@ async function saveSalesInvoicePdf() {
   container.innerHTML = markup;
   document.body.appendChild(container);
 
-  const fileName = `invoice-${String(invNo).replace(/[^\w-]+/g, "-")}-${todayIsoDate()}.pdf`;
+  // اسم الملف المنزَّل من نفس بيانات الفاتورة المطبوعة الآن — لا رقم بلا اسم
+  // زبون، ولا صيغة إنكليزية. هو نفسه مصدر اسم النسخة في iCloud.
+  const pdfArchiveMeta = {
+    party: state.salesCustomer.trim() || "زبون نقدي",
+    number: invNo,
+    date: todayIsoDate()
+  };
+  const fileName = `${archiveDocumentTitle("invoice", pdfArchiveMeta)}.pdf`;
   // نحفظ موضع التمرير: **السبب الجذري للملف الفارغ** أن html2canvas يلتقط منطقة
   // خاطئة حين تكون الصفحة مُمرَّرة للأسفل — وهي حالة الهاتف دائماً عند الضغط على
   // زر أسفل الشاشة. قياس فعلي: صفحة عند 1500px تعطي لوحة بصفر حبر وملف 3 ك.ب،
@@ -7623,11 +7724,7 @@ async function saveSalesInvoicePdf() {
     // الذي يُسلَّم للزبون. المسودة (بلا رقم أثناء تدهور المزامنة) لا تُؤرشف
     // إطلاقاً كي لا يدخل الأرشيف مستند بلا رقم فاتورة موثوق.
     if (invNo !== SALES_DRAFT_INVOICE_NO) {
-      archiveToICloud("invoice", blob, {
-        party: state.salesCustomer.trim() || "زبون نقدي",
-        number: invNo,
-        date: todayIsoDate()
-      });
+      archiveToICloud("invoice", blob, pdfArchiveMeta);
     }
 
     if (isHandheldDevice()) {
@@ -7979,12 +8076,14 @@ ${salesDraftBannerHtml(invNo)}
     })
     : html;
 
+  // العنوان والأرشفة من كائن واحد: اسم ملف كروم = اسم النسخة في iCloud.
+  const salesArchiveMeta = { party: customer, number: invNo, date: todayIsoDate() };
   printHtmlDocument(printable, {
-    title: mode === "mufrak" ? `فاتورة كاشير ${invNo}` : `فاتورة مبيعات ${invNo}`,
+    title: archiveDocumentTitle("invoice", salesArchiveMeta),
     // المسودة (بلا رقم موثوق أثناء تدهور المزامنة) لا تدخل الأرشيف إطلاقاً.
     archive: invNo === SALES_DRAFT_INVOICE_NO ? null : {
       docType: "invoice",
-      meta: { party: customer, number: invNo, date: todayIsoDate() }
+      meta: salesArchiveMeta
     },
     onError: () => {
       setNotice("error", "تعذّر فتح نافذة الطباعة. أغلق التطبيق وافتحه ثم جرّب مجدداً.");
@@ -9592,12 +9691,10 @@ ${po.notes ? `<div class="notes"><strong>ملاحظة:</strong> ${escapeHtml(po.
 
 </body></html>`;
 
+  const purchaseArchiveMeta = { party: po.supplierName, number: po.publicId, date: todayIsoDate() };
   printHtmlDocument(html, {
-    title: "فاتورة مشتريات",
-    archive: {
-      docType: "purchase_invoice",
-      meta: { party: po.supplierName, number: po.publicId, date: todayIsoDate() }
-    },
+    title: archiveDocumentTitle("purchase_invoice", purchaseArchiveMeta),
+    archive: { docType: "purchase_invoice", meta: purchaseArchiveMeta },
     onError: () => {
       setNotice("error", "تعذّر فتح نافذة طباعة فاتورة المشتريات. أغلق التطبيق وافتحه ثم جرّب مجدداً.");
       render();
@@ -9710,12 +9807,10 @@ ${notes ? `<div class="notes"><strong>ملاحظة:</strong> ${escapeHtml(notes)
 
 </body></html>`;
 
+  const manualArchiveMeta = { party: customer, number: invNum, date: todayIsoDate() };
   printHtmlDocument(html, {
-    title: `فاتورة ${invNum}`,
-    archive: {
-      docType: "invoice",
-      meta: { party: customer, number: invNum, date: todayIsoDate() }
-    },
+    title: archiveDocumentTitle("invoice", manualArchiveMeta),
+    archive: { docType: "invoice", meta: manualArchiveMeta },
     onError: () => {
       setNotice("error", "تعذّر فتح نافذة الطباعة. أغلق التطبيق وافتحه ثم جرّب مجدداً.");
       render();
@@ -10794,8 +10889,18 @@ function render() {
             opts.newBalance = roundPrice(storedDocNew);
             const prev = (storedDocPrev !== null && Number.isFinite(storedDocPrev)) ? storedDocPrev : (storedDocNew - debit);
             opts.prevBalance = roundPrice(prev);
-            // (السابق + قيمة الفاتورة) − الجديد = حسم/تسوية بنفس سند الفاتورة (يشمل قيد الخصم المرافق).
-            const adjust = roundPrice(opts.prevBalance + total - opts.newBalance);
+            // الحسم ودفعة الزبون يُنسبان أولاً إن توفّرا من المصدر، ويبقى ما لا
+            // يُنسب «تسوية» صريحة. **فجوة بيانات معروفة:** مزامنة فواتير الأمين
+            // (tools/push-customer-invoices.ps1) لا تجلب حسم رأس الفاتورة ولا
+            // الدفعة المرافقة، فيبقى الفرق كله غير منسوب حتى تُجلبا — ولهذا لا
+            // يُسمّى حسماً، لأن تسميته حسماً تطبع دفعة الزبون على أنها حسم.
+            const knownDiscount = Math.max(0, roundPrice(Number(match.discount || 0)));
+            const knownPayment = Math.max(0, roundPrice(Number(match.payment || 0)));
+            if (knownDiscount > 0.009) opts.discount = knownDiscount;
+            if (knownPayment > 0.009) opts.payment = knownPayment;
+            const adjust = roundPrice(
+              opts.prevBalance + total - knownDiscount - knownPayment - opts.newBalance
+            );
             if (Math.abs(adjust) > 0.009) opts.adjust = adjust;
           } else {
             opts.balance = customerBalance(item);

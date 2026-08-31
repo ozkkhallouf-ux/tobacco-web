@@ -46,6 +46,7 @@ const required = [
   "tools/mac-archive-bridge/server.mjs",
   "tools/mac-archive-bridge/install-launch-agent.sh",
   "scripts/check-mac-archive-bridge.mjs",
+  "scripts/check-invoice-document-integrity.mjs",
   "supabase/functions/financial-assistant/index.ts",
   "supabase/functions/inventory-auth/index.ts",
   "supabase/smart-inventory.sql",
