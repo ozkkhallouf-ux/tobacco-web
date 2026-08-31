@@ -569,7 +569,14 @@ ORDER BY LogTime ASC, LOWER(CAST(GUID AS VARCHAR(36))) ASC
     # تفرض سقفها الخاص (نافذة $OverlapWindowMinutes خلف "الآن") فلا حاجة
     # لتكرار ذلك هنا.
     if ($cursorTime -and $overlapRows.Count -eq 0) {
-        Set-OverlapFloor $cursorTime ([Nullable[guid]](if ($cursorGuid) { [guid]$cursorGuid } else { $null })) $dmvCapForThisRun
+        # توافق Windows PowerShell 5.1 (2026-08-31، عطل إنتاجي حيّ): 5.1 — وهو ما
+        # تشغّله مهمة "TOBACCO Khalil Audit Sync" عبر powershell.exe — لا يقبل `if`
+        # كتعبير داخل أقواس وسيط. الملف يُحلَّل بلا أي خطأ، ثم يُحَلّ `if` وقت
+        # التنفيذ كاسم أمر فيرمي CommandNotFoundException، فيسقط السكربت هنا قبل
+        # Send-Heartbeat ويبقى overlap floor بلا تقدّم. (`if` كتعبير أُضيف في
+        # PowerShell 7؛ الشكل أدناه — الإسناد إلى متغيّر — مدعوم في 5.1 و7 معاً.)
+        $cursorFloorGuid = if ($cursorGuid) { [guid]$cursorGuid } else { $null }
+        Set-OverlapFloor $cursorTime ([Nullable[guid]]$cursorFloorGuid) $dmvCapForThisRun
     }
 
     if ($rows.Count -eq 0) { $conn.Close(); Send-Heartbeat 0 0; exit 0 }
@@ -779,7 +786,10 @@ ORDER BY LogTime DESC, LOWER(CAST(GUID AS VARCHAR(36))) DESC
             # الصفحة المقطوعة للأبد عند تشارك صفوف كثيرة بنفس اللحظة.
             Set-OverlapFloor $overlapMaxLogTime ([Nullable[guid]][guid]$overlapMaxGuid) $dmvCapForThisRun
         } elseif (-not $overlapTruncated) {
-            Set-OverlapFloor $cursorTime ([Nullable[guid]](if ($cursorGuid) { [guid]$cursorGuid } else { $null })) $dmvCapForThisRun
+            # نفس قيد PowerShell 5.1 الموصوف عند موضع الاستدعاء الأول أعلاه —
+            # لا تُعِد `if` إلى داخل أقواس الوسيط.
+            $cursorFloorGuid = if ($cursorGuid) { [guid]$cursorGuid } else { $null }
+            Set-OverlapFloor $cursorTime ([Nullable[guid]]$cursorFloorGuid) $dmvCapForThisRun
         }
     }
 
