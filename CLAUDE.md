@@ -36,7 +36,7 @@ tobacco-web/
 │   ├── styles.css               # كل التصاميم
 │   └── supabase-client.js       # wrapper لـ Supabase REST
 ├── public/
-│   ├── service-worker.js        # PWA cache — يجب رفع CACHE_NAME عند كل نشر
+│   ├── service-worker.js        # PWA cache — pages.yml يرفع CACHE_NAME آلياً عند النشر
 │   ├── manifest.webmanifest
 │   ├── icons/
 │   └── downloads/               # نشرات الأسعار للزبائن
@@ -66,13 +66,33 @@ npm run dev
 
 ## قواعد مهمة لا تخترقها
 
-### 1. Service Worker Cache
-**بعد أي تعديل على CSS أو JS أو HTML، ارفع رقم النسخة:**
-```js
-// public/service-worker.js
-const CACHE_NAME = "web-platform-tobacco-v18"; // ← غيّر الرقم
-```
-بدون هذا، المستخدمون لن يرون التغييرات (الكاش القديم يعمل).
+### 1. إبطال الكاش — آلي بالكامل، لا ترفع أي رقم يدوياً
+
+`.github/workflows/pages.yml` يرفع رقمَي النسخة **تلقائياً في كل نشر**:
+
+| ما يُرفع | أين | المعادلة |
+|---|---|---|
+| `CACHE_NAME` | `public/service-worker.js` | `CURRENT + github.run_number` |
+| معامل نسخة الأصول `?v=tobacco-N` | `index.html` — **الوسوم الحاملة للمعامل أصلاً فقط** | نفس المعادلة |
+
+الرفع يجري **على أثر النشر فقط ولا يُلتزم في المستودع**، فقيم المستودع تبقى ثابتة
+بينما تتصاعد القيم المنشورة. مثال فعلي وقت كتابة هذا السطر: المستودع على
+`tobacco-v630` و`v=tobacco-177`، والموقع الحيّ على `tobacco-v2089` و`v=tobacco-1636`.
+و`github.run_number` تصاعدي دوماً، فكل نشر يحمل رقماً جديداً حتى لو لم يتغيّر رقم
+المستودع إطلاقاً.
+
+**لا ترفع أياً من الرقمين يدوياً — الرفع اليدوي زائد ولا يضيف شيئاً.**
+
+⚠️ **حدّ مهم:** خطوة معامل الأصول تستبدل المعامل الموجود فقط (`sed` على
+`v=tobacco-${CURRENT}`)؛ **لا تضيفه لعنوان لا يحمله**. فأي أصل جديد تضيفه إلى
+`index.html` بلا `?v=tobacco-N` يبقى بعنوان ثابت بين النشرات، ويخدمه المتصفح من
+كاش HTTP القديم. ثلاثة أصول قائمة بلا معامل حالياً — وهي نادرة التغيّر:
+`public/icons/ozk-logo.png` و`public/icons/ozk-ios-full-notification-icon.png`
+و`public/vendor/html2pdf.bundle.min.js`. **أضف المعامل يدوياً مرة واحدة عند
+إضافة أي أصل جديد**، وبعدها يتكفّل النشر برفعه.
+
+الـworkflow يعمل عند كل push إلى `main`، وعند `workflow_dispatch`، وبعد اكتمال
+workflow «توليد نشرات الأسعار».
 
 ### 2. Supabase REST API
 يجب إرسال هذا الـ header في كل طلب وإلا يعطي 404:
@@ -368,7 +388,7 @@ reports\prices\tobacco-approved-prices.csv
 |---|---|---|
 | Supabase 404 | ناقص `Accept-Profile: public` | أضف الـ header |
 | صفحات سوداء في PDF | CSS يستخدم خلفيات داكنة | أضف `background: #ffffff !important` لكلاسات `.price-pdf-*` |
-| الكاش القديم عند الزبائن | رقم CACHE_NAME لم يُرفع | عدّل `CACHE_NAME` في service-worker.js |
+| الكاش القديم عند الزبائن | تبويب مفتوح من قبل النشر يحمل الكود القديم في ذاكرته | إعادة تحميل الصفحة تكفي — الأرقام تُرفع آلياً عند النشر ولا تحتاج تدخلاً |
 | Applied=0 في مزامنة الأمين | `item_key` غير متطابق | تحقق من قيم `item_key` في Supabase مقابل الأمين |
 | PowerShell لا يشغّل `claude.exe` | Claude Code يحتاج WSL | شغّل `start-claude-code.ps1` أو استخدم WSL مباشرة |
 
@@ -382,4 +402,4 @@ reports\prices\tobacco-approved-prices.csv
 2. **بعد التعديل:** ادفع بـ `git push` عادي فقط. **ممنوع منعاً باتاً** `git push --force` / `-f` / `--force-with-lease` (الفرع محمي على GitHub ويرفض الدفع القسري).
 3. **عند تعارض:** ادمج مع `-Xignore-all-space` (فروقات CRLF شائعة)، ولا تحذف أو تتجاهل تغييرات لست أنت من كتبها.
 4. **لا تبدأ من نسخة قديمة محفوظة محلياً.** إن شككت أن نسختك محدّثة، اسحب أولاً.
-5. **عند كل نشر:** ارفع رقم `CACHE_NAME` في `public/service-worker.js`، وإلا يبقى المستخدمون على نسخة قديمة مخبّأة (PWA) وتظهر المشكلة وكأنها "رجعت".
+5. **لا ترفع أرقام النسخ يدوياً:** `pages.yml` يرفع `CACHE_NAME` ومعامل `?v=tobacco-N` في كل نشر (راجع القاعدة ١). وإن بدا أن إصلاحاً "رجع" عند مستخدم، فالسبب الأرجح تبويب مفتوح لم يُعَد تحميله — لا رقم نسخة ناقص.
