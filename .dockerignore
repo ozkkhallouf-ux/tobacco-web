@@ -1,0 +1,44 @@
+# Git / VCS
+.git/
+.gitattributes
+.github/
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Secrets & environment — never enter the build context
+.env
+.env.*
+!.env.example
+tools/.env
+
+# Windows-only automation (Ameen SQL, Task Scheduler) — irrelevant inside Docker
+tools/
+
+# Logs, temp, backups
+logs/
+tmp/
+tools/logs/
+tools/mcp-backups/
+*.bak
+*.bak[0-9]
+*.backup-*
+**/*.backup-*
+
+# Sensitive/generated reports
+reports/prices/*.csv
+reports/daily/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Misc dev tooling not needed at runtime
+.serena/
+.claude/
+.mcp.json
+docs/
+ios-sideload-lab/
