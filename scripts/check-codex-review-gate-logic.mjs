@@ -11,6 +11,10 @@ import {
   isStaleHead,
   needsWriteReconciliation,
   isAncestorWithMergesOnly,
+  isPrReconcilable,
+  deriveCanonicalTarget,
+  checkRunMatchesTarget,
+  planReconciliation,
 } from './codex-review-gate-logic.mjs';
 
 // Contract + regression checks for .github/workflows/codex-review-gate.yml —
@@ -21,6 +25,8 @@ import {
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const yamlPath = path.join(repoRoot, '.github', 'workflows', 'codex-review-gate.yml');
 const yml = await readFile(yamlPath, 'utf8');
+const reconcileYamlPath = path.join(repoRoot, '.github', 'workflows', 'codex-review-gate-reconcile.yml');
+const reconcileYml = await readFile(reconcileYamlPath, 'utf8');
 
 // 1) فحص العقد الثابت على نص الـworkflow نفسه: مطابقة pulls/comments يجب أن تعتمد على
 //    original_commit_id (الحقل الثابت أبداً)، ويُمنع تماماً استخدام commit_id القابل
@@ -672,5 +678,123 @@ assert.equal(
   undefined,
   'in_progress أحدث حتى بعد فوزه بالمصالحة يبقى بلا conclusion — لا يُعامَل أبداً كدليل نجاح مراجعة',
 );
+
+// 11) إصلاح جوهري حادي عشر — مصالحة دورية مضمونة (codex-review-gate-reconcile.yml).
+//     الشرط الرابع من المستخدم صريح: لا PATCH إلا على check-run موجود فعلاً، ولا POST
+//     إطلاقاً. الشرط الثاني: الحقيقة تُشتق من الحالة الحية فقط، لا من generation.
+
+// 11.0) فحوص العقد الثابت على نص ملف المصالحة الدورية نفسه.
+assert.match(reconcileYml, /schedule:\s*\n\s*- cron: '\*\/5 \* \* \* \*'/, 'يجب أن تعمل المصالحة كل 5 دقائق بالضبط');
+assert.match(reconcileYml, /workflow_dispatch: \{\}/, 'يجب دعم التشغيل اليدوي أيضاً');
+assert.match(
+  reconcileYml,
+  /permissions:\s*\n\s*contents: read\s*\n\s*pull-requests: read\s*\n\s*checks: write/,
+  'الصلاحيات يجب أن تبقى الحد الأدنى بالضبط: contents:read + pull-requests:read + checks:write',
+);
+assert.doesNotMatch(reconcileYml, /contents:\s*write/, 'يُمنع تماماً contents:write في ملف المصالحة الدورية');
+assert.doesNotMatch(reconcileYml, /\bsleep\b/, 'يُمنع أي sleep/استطلاع زمني داخل مهمة المصالحة الدورية');
+assert.doesNotMatch(reconcileYml, /concurrency:/, 'لا حاجة لأي ref-lock أو concurrency block في المصالحة الدورية');
+assert.doesNotMatch(
+  reconcileYml,
+  /--method POST[\s\S]{0,80}check-runs"/,
+  'يُمنع تماماً POST check-run جديد من المصالحة الدورية — PATCH فقط على الموجود فعلاً (الشرط الرابع)',
+);
+assert.match(
+  reconcileYml,
+  /RECHECK_HEAD_SHA=[\s\S]{0,400}"\$RECHECK_HEAD_SHA" != "\$LIVE_HEAD_SHA"/,
+  'يجب إعادة التحقق من head.sha الحيّ مباشرة قبل أي كتابة (الشرط الخامس)',
+);
+assert.match(
+  reconcileYml,
+  /"\$PR_STATE" != "open"[\s\S]{0,60}"\$PR_MERGED" = "true"/,
+  'يجب تخطي أي PR أُغلق أو دُمج بلا كتابة إطلاقاً (الشرط السادس)',
+);
+
+// 11.1) سيناريو (a): تصادم إنشاء نسختين مكررتين متزامنتين بلا أي حدث لاحق يصححهما —
+//     المصالحة الدورية تُصحِّح كلتا النسختين نحو نفس الحقيقة المُشتقة من الحالة الحية.
+const DUP_HEAD = 'e'.repeat(40);
+const dupRuns = [
+  { id: 101, name: 'Codex Review Gate', head_sha: DUP_HEAD, status: 'in_progress', conclusion: null },
+  { id: 102, name: 'Codex Review Gate', head_sha: DUP_HEAD, status: 'in_progress', conclusion: null },
+];
+const planDup = planReconciliation({ liveHeadSha: DUP_HEAD, hasValidReviewOnLiveHead: true, checkRuns: dupRuns });
+assert.deepEqual(planDup.target, { status: 'completed', conclusion: 'success' }, '(a) الهدف success لوجود مراجعة صالحة فعلياً');
+assert.deepEqual(
+  [...planDup.idsToPatch].sort((x, y) => x - y),
+  [101, 102],
+  '(a) نسختان مكررتان عالقتان in_progress بلا حدث لاحق ⇒ كلتاهما تُصحَّح دورياً — يحل P1 #1',
+);
+
+// 11.2) سيناريو (b): success أحدث طُمس بـPATCH متأخر من تشغيل أقدم — المصالحة تستعيد success
+//     لأنها تعيد الاشتقاق من الحالة الحية لا من generation أي تشغيل.
+const LATE_STALE_HEAD = 'f'.repeat(40);
+const lateStaleRuns = [{ id: 201, name: 'Codex Review Gate', head_sha: LATE_STALE_HEAD, status: 'in_progress', conclusion: null }];
+const planLateStale = planReconciliation({ liveHeadSha: LATE_STALE_HEAD, hasValidReviewOnLiveHead: true, checkRuns: lateStaleRuns });
+assert.deepEqual(planLateStale.idsToPatch, [201], '(b) PATCH متأخر طمس success ⇒ المصالحة الدورية تستعيده — يحل P1 #2');
+
+// 11.3) سيناريو (c): لا مراجعة صالحة على HEAD الحيّ ⇒ يُمنع success حتى لو كان منشوراً
+//     خطأً فعلاً — المصالحة تصححه إلى in_progress، لا يمكنها أبداً نشر success بلا مراجعة.
+const NO_REVIEW_HEAD = '1'.repeat(40);
+const noReviewRuns = [{ id: 301, name: 'Codex Review Gate', head_sha: NO_REVIEW_HEAD, status: 'completed', conclusion: 'success' }];
+const planNoReview = planReconciliation({ liveHeadSha: NO_REVIEW_HEAD, hasValidReviewOnLiveHead: false, checkRuns: noReviewRuns });
+assert.deepEqual(planNoReview.target, { status: 'in_progress', conclusion: null }, '(c) لا مراجعة صالحة ⇒ الهدف in_progress دوماً');
+assert.deepEqual(planNoReview.idsToPatch, [301], '(c) success بلا مراجعة فعلية يُصحَّح إلى in_progress — لا يمكن نشر success بدون مراجعة صالحة');
+
+// 11.4) سيناريو (d): HEAD تغيّر قبل الكتابة ⇒ لا كتابة إطلاقاً (يعيد استخدام حارس
+//     isStaleHead من الإصلاح السابع؛ الحارس الفعلي في الـworkflow نفسه محقَّق بند 11.0 أعلاه).
+assert.equal(
+  isStaleHead({ capturedHeadSha: 'aaa', liveHeadSha: 'bbb' }),
+  true,
+  '(d) HEAD تغيّر قبل الكتابة ⇒ حارس يمنع أي كتابة لهذه الدورة',
+);
+assert.equal(
+  isStaleHead({ capturedHeadSha: 'aaa', liveHeadSha: 'aaa' }),
+  false,
+  '(d) HEAD لم يتغيّر ⇒ لا مانع من الكتابة من ناحية هذا الحارس',
+);
+
+// 11.5) سيناريو (e): PR أُغلق أو دُمج قبل الكتابة ⇒ لا كتابة إطلاقاً.
+assert.equal(isPrReconcilable({ state: 'closed', merged: false }), false, '(e) PR مغلق ⇒ لا مصالحة');
+assert.equal(isPrReconcilable({ state: 'open', merged: true }), false, '(e) PR مدموج ⇒ لا مصالحة حتى لو state ما زال يُقرأ open');
+assert.equal(isPrReconcilable({ state: 'open', merged: false }), true, '(e) PR مفتوح فعلياً ⇒ يستحق المصالحة');
+
+// 11.6) سيناريو (f): حالة صحيحة بالفعل ⇒ صفر PATCH — idempotency صريحة.
+const CORRECT_HEAD = '2'.repeat(40);
+const correctRuns = [{ id: 601, name: 'Codex Review Gate', head_sha: CORRECT_HEAD, status: 'completed', conclusion: 'success' }];
+const planCorrect = planReconciliation({ liveHeadSha: CORRECT_HEAD, hasValidReviewOnLiveHead: true, checkRuns: correctRuns });
+assert.deepEqual(planCorrect.idsToPatch, [], '(f) حالة صحيحة أصلاً ⇒ صفر PATCH');
+
+// 11.7) سيناريو (g): نسختان مكررتان — واحدة صحيحة أصلاً وأخرى خاطئة — تتقاربان معاً نحو
+//     نفس حقيقة الهدف؛ الصحيحة لا تُلمس، الخاطئة فقط تُصحَّح.
+const MIXED_HEAD = '3'.repeat(40);
+const mixedRuns = [
+  { id: 701, name: 'Codex Review Gate', head_sha: MIXED_HEAD, status: 'completed', conclusion: 'success' }, // صحيح فعلاً
+  { id: 702, name: 'Codex Review Gate', head_sha: MIXED_HEAD, status: 'in_progress', conclusion: null }, // متأخر خاطئ
+];
+const planMixed = planReconciliation({ liveHeadSha: MIXED_HEAD, hasValidReviewOnLiveHead: true, checkRuns: mixedRuns });
+assert.deepEqual(planMixed.idsToPatch, [702], '(g) فقط النسخة غير المطابقة تُصحَّح؛ الصحيحة أصلاً بلا PATCH — كلتاهما تتقاربان لنفس الحقيقة');
+assert.equal(checkRunMatchesTarget(mixedRuns[0], planMixed.target), true, '(g) النسخة الصحيحة تطابق الهدف فعلاً قبل أي PATCH');
+
+// 11.8) سيناريو (h): تشغيل المصالحة مرتين متتاليتين على نفس الحالة الحية ⇒ الدورة الثانية
+//     صفر كتابات (idempotency عبر تشغيلتين متتاليتين، لا داخل تشغيلة واحدة فقط).
+const TWICE_HEAD = '4'.repeat(40);
+let twiceRuns = [{ id: 801, name: 'Codex Review Gate', head_sha: TWICE_HEAD, status: 'in_progress', conclusion: null }];
+const planTwiceFirst = planReconciliation({ liveHeadSha: TWICE_HEAD, hasValidReviewOnLiveHead: true, checkRuns: twiceRuns });
+assert.deepEqual(planTwiceFirst.idsToPatch, [801], '(h) الدورة الأولى: PATCH واحد مطلوب فعلاً');
+// نحاكي أثر تنفيذ الكتابة فعلياً: الحالة أصبحت الآن مطابقة تماماً للهدف المُشتق.
+twiceRuns = [{ id: 801, name: 'Codex Review Gate', head_sha: TWICE_HEAD, status: planTwiceFirst.target.status, conclusion: planTwiceFirst.target.conclusion }];
+const planTwiceSecond = planReconciliation({ liveHeadSha: TWICE_HEAD, hasValidReviewOnLiveHead: true, checkRuns: twiceRuns });
+assert.deepEqual(planTwiceSecond.idsToPatch, [], '(h) الدورة الثانية المتتالية على نفس الحالة الحية ⇒ صفر كتابات');
+
+// 11.9) لا POST أبداً: عدم وجود أي check-run بهذا الاسم على HEAD الحيّ ⇒ matchingIds
+//     وidsToPatch فارغتان كلتاهما، ولا مسار لإنشاء أي شيء (الشرط الرابع صراحة).
+const NO_RUN_AT_ALL_HEAD = '5'.repeat(40);
+const planNoRunAtAll = planReconciliation({ liveHeadSha: NO_RUN_AT_ALL_HEAD, hasValidReviewOnLiveHead: false, checkRuns: [] });
+assert.deepEqual(planNoRunAtAll.matchingIds, [], 'لا check-run موجود إطلاقاً على هذا الـHEAD');
+assert.deepEqual(planNoRunAtAll.idsToPatch, [], 'لا PATCH ولا POST من المصالحة الدورية عند غياب أي check-run — قرار متعمَّد');
+
+// 11.10) deriveCanonicalTarget مباشرة: منتِج الهدف الكانوني وحده، مستقل عن أي check-runs.
+assert.deepEqual(deriveCanonicalTarget({ hasValidReviewOnLiveHead: true }), { status: 'completed', conclusion: 'success' });
+assert.deepEqual(deriveCanonicalTarget({ hasValidReviewOnLiveHead: false }), { status: 'in_progress', conclusion: null });
 
 console.log('codex-review-gate-logic.mjs contract + regression checks passed.');

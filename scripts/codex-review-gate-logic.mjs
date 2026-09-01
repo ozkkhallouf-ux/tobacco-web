@@ -331,3 +331,82 @@ export function buildCanonicalCheckRunPayload({
 
   return base;
 }
+
+// ⚠️ إصلاح جوهري حادي عشر بتاريخ 2026-09-01 (مصالحة دورية مضمونة — Pattern A، بتكليف
+//   صريح من المستخدم بعد رفض P1 #1 وP1 #2 اللذين رصدهما Codex حياً على PR #170):
+//   الإصلاح العاشر أعلاه (event-driven بحت: توحيد نسخ مرة واحدة + self-heal فحص واحد)
+//   يبقى صحيحاً كتحسين أفضل-جهد سريع، لكنه لا يضمن تصحيحاً لاحقاً إن لم يصل أي حدث آخر
+//   إطلاقاً بعد لحظة السباق (لا push، لا تعليق، لا مراجعة) — بالضبط ما رصده Codex:
+//     P1 #1: تصادم إنشاء أول check-run لنفس sha (عدة POST متزامنة) قد يُبقي نسخة مكررة
+//       عالقة in_progress تحجب الدمج بلا أي ضمان تصحيح لاحق.
+//     P1 #2: PATCH متأخر من تشغيل أقدم يصل بعد أن نشر تشغيل أحدث success فعلاً؛ فحص
+//       self-heal يقرأ نتيجة نفس التشغيل الأحدث (الصحيحة أصلاً) فلا يكتشف شيئاً — لا
+//       تشغيل لاحق مضمون الوصول ليكتشف الكتابة المتأخرة ويصلحها.
+//   الحل: مصالحة دورية (schedule كل 5 دقائق، ملف منفصل codex-review-gate-reconcile.yml)
+//   مصدر حقيقتها الوحيد هو **الحالة الحية**: head.sha الحيّ للـPR + وجود مراجعة Codex
+//   صالحة عليه — لا generation ولا حالة check-run موجودة إطلاقاً تُستخدَم كمصدر حقيقة.
+//   كل دورة تُعيد الاشتقاق من الصفر، فتُصحِّح أي حالة خاطئة عالقة تلقائياً عند أول دورة
+//   لاحقة، بصرف النظر عن سبب الخطأ (سباق POST، PATCH متأخر، أو أي انحراف آخر) — لا تعتمد
+//   على "حدث لاحق" مطلقاً؛ ٥ دقائق كحدّ أقصى للانتظار، مضمونة رياضياً بـcron.
+//   قرار متعمَّد (شرط رابع صريح من المستخدم): لا تُنشئ المصالحة الدورية أي check-run جديد
+//   إطلاقاً — PATCH فقط على الموجود فعلاً. التبرير: pull_request_target يُطلَق ضمانياً
+//   عند كل فتح/تحديث PR (opened/synchronize/reopened)، فأول إنشاء لكل head_sha مضمون
+//   أصلاً بحدث فوري لا ينتظر 5 دقائق؛ لو فشل ذلك التشغيل تماماً قبل الوصول لخطوة publish
+//   (عطل شبكي/صلاحيات)، فهذا عطل تشغيلي منفصل يحتاج تشخيصه بذاته — لا حلاً بإنشاء
+//   check-run من مسار كود مختلف قد يخلق واحداً على PR لم يُقصد تغطيته أصلاً. نطاق هذه
+//   المصالحة محصور عمداً بتصحيح حالة check-runs *موجودة فعلاً*، لا ضمان إنشائها.
+
+/**
+ * هل يستحق هذا PR مصالحة الآن؟ PR أُغلق أو دُمج ⇒ لا، لا كتابة إطلاقاً (شرط سادس صريح).
+ * @param {{ state?: string, merged?: boolean }} input
+ */
+export function isPrReconcilable({ state, merged }) {
+  if (merged) return false;
+  return state === 'open';
+}
+
+/**
+ * الحالة الكانونية الصحيحة، مُشتقّة حصراً من وجود مراجعة Codex صالحة على الـHEAD الحيّ —
+ * لا علاقة لها بأي generation أو حالة check-run موجودة إطلاقاً (شرط ثانٍ صريح).
+ * @param {{ hasValidReviewOnLiveHead: boolean }} input
+ */
+export function deriveCanonicalTarget({ hasValidReviewOnLiveHead }) {
+  return hasValidReviewOnLiveHead
+    ? { status: 'completed', conclusion: 'success' }
+    : { status: 'in_progress', conclusion: null };
+}
+
+/**
+ * هل check-run موجود يطابق الحالة الكانونية المستهدفة بالفعل؟ تُستخدم لتفادي أي PATCH لا
+ * فائدة منه — شرط idempotency الصريح: لا كتابة إن كانت الحالة صحيحة أصلاً.
+ * @param {{ status?: string, conclusion?: string | null }} checkRun
+ * @param {{ status: string, conclusion: string | null }} target
+ */
+export function checkRunMatchesTarget(checkRun, target) {
+  const curStatus = checkRun?.status ?? null;
+  const curConclusion = checkRun?.conclusion ?? null;
+  return curStatus === target.status && curConclusion === (target.conclusion ?? null);
+}
+
+/**
+ * يبني خطة المصالحة الكاملة لزوج (PR, head_sha) واحد: الحالة المستهدفة، وأي check-runs
+ * كانونية موجودة فعلاً على نفس head_sha تحتاج PATCH لتطابقها (بلا PATCH لما يطابق أصلاً،
+ * وبلا POST جديد أبداً — matching فارغة ⇒ idsToPatch فارغة، راجع تعليق "إصلاح جوهري حادي
+ * عشر" أعلاه). توحّد كل النسخ المكررة نحو نفس الحقيقة المُشتقّة دفعة واحدة — لا "فائز"
+ * يُختار، فكلها تُصحَّح نحو نفس الهدف (يحل P1 #1)، وأي كتابة متأخرة سابقة على هذه الدورة
+ * تُكتشَف وتُصحَّح لأن الحقيقة تُعاد اشتقاقها من الصفر لا من generation (يحل P1 #2).
+ * @param {{ liveHeadSha: string, hasValidReviewOnLiveHead: boolean, checkRuns?: GhCheckRun[], name?: string }} input
+ * @returns {{ target: { status: string, conclusion: string | null }, matchingIds: number[], idsToPatch: number[] }}
+ */
+export function planReconciliation({
+  liveHeadSha,
+  hasValidReviewOnLiveHead,
+  checkRuns = [],
+  name = 'Codex Review Gate',
+}) {
+  if (!liveHeadSha) throw new Error('liveHeadSha مطلوب');
+  const target = deriveCanonicalTarget({ hasValidReviewOnLiveHead });
+  const matching = checkRuns.filter((cr) => cr?.name === name && cr?.head_sha === liveHeadSha);
+  const idsToPatch = matching.filter((cr) => !checkRunMatchesTarget(cr, target)).map((cr) => cr.id);
+  return { target, matchingIds: matching.map((cr) => cr.id), idsToPatch };
+}
