@@ -76,6 +76,15 @@ jobs:
               continue
             fi
 
+            # P1 base-filter fix: تجاهل PRs التي لا تستهدف main — المسار السريع لا ينشئ
+            # "Codex Review Gate" check-run إلا لـPRs targeting main. إن كان PR آخر يشارك
+            # نفس head SHA ويستهدف فرعاً مختلفاً، معالجته ستُعيد ضبط check-run الصحيح خطأً.
+            PR_BASE=$(echo "$PR_JSON" | jq -r '.base.ref // empty')
+            if [ "$PR_BASE" != "main" ]; then
+              echo "  متخطى: القاعدة=$PR_BASE — المصالحة تخص PRs targeting main فقط."
+              continue
+            fi
+
             LIVE_HEAD_SHA=$(echo "$PR_JSON" | jq -r '.head.sha // empty')
             if [ -z "$LIVE_HEAD_SHA" ]; then
               echo "  متخطى: تعذّرت قراءة head.sha الحيّ."

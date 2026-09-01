@@ -709,6 +709,12 @@ assert.match(
   /"\$PR_STATE" != "open"[\s\S]{0,60}"\$PR_MERGED" = "true"/,
   'يجب تخطي أي PR أُغلق أو دُمج بلا كتابة إطلاقاً (الشرط السادس)',
 );
+// P1 base-filter regression guard: يجب تجاهل PRs التي لا تستهدف main.
+assert.match(
+  reconcileYml,
+  /PR_BASE=[\s\S]{0,100}PR_BASE" != "main"/,
+  'P1 base-filter: يجب تصفية PRs لـmain فقط — PR يستهدف فرع آخر قد يُعيد ضبط check-run صحيح خطأً',
+);
 // P1 rotation regression guard: يجب خلط قائمة PRs عشوائياً لضمان دوران التغطية عند نفاد الرصيد.
 assert.match(
   reconcileYml,
