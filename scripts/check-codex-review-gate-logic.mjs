@@ -10,6 +10,7 @@ import {
   isStaleWrite,
   isStaleHead,
   needsWriteReconciliation,
+  isAncestorWithMergesOnly,
 } from './codex-review-gate-logic.mjs';
 
 // Contract + regression checks for .github/workflows/codex-review-gate.yml —
@@ -547,5 +548,44 @@ assert.ok(ORDERING_TABLE.length >= 6, `جدول الترتيب ${ORDERING_TABLE.
   assert.equal(isStaleHead({ capturedHeadSha: OLD, liveHeadSha: NEW }), true,
     '…لكن حارس HEAD يمنعها رغم ذلك — الحارسان تراكميان لا بديلان');
 }
+
+// فحص العقد الثابت على الـworkflow: يجب وجود الـancestor-merge-only fallback.
+assert.match(
+  yml,
+  /gh api "repos\/\$REPO\/compare\/\$\{SHORT_SHA_LC\}/,
+  'يجب وجود استدعاء compare endpoint لفحص سلفية الـsha المراجَع مقارنة بالـHEAD الحالي',
+);
+assert.match(
+  yml,
+  /select\(\(\.parents \| length\) < 2\)/,
+  'يجب حساب عدد commits غير الدمج (parents < 2) للتحقق من أن الفارق merge-only',
+);
+assert.match(
+  yml,
+  /CMP_STATUS.*=.*"ahead".*&&.*NON_MERGE.*-eq.*0|CMP_STATUS.*=.*ahead.*NON_MERGE.*-eq.*0/,
+  'يجب اشتراط status=ahead وNON_MERGE=0 معاً للقبول بالسلفية كمراجعة صالحة',
+);
+
+// اختبارات isAncestorWithMergesOnly — 4 سيناريوهات:
+assert.equal(
+  isAncestorWithMergesOnly({ compareStatus: 'ahead', nonMergeCount: 0 }),
+  true,
+  'سلف مع merge commits فحسب ⇒ المراجعة صالحة (النموذج: PR #168)',
+);
+assert.equal(
+  isAncestorWithMergesOnly({ compareStatus: 'ahead', nonMergeCount: 1 }),
+  false,
+  'وجود commit كود غير دمج بعد المراجعة ⇒ المراجعة غير صالحة',
+);
+assert.equal(
+  isAncestorWithMergesOnly({ compareStatus: 'diverged', nonMergeCount: 0 }),
+  false,
+  'مسارات متشعبة (diverged) ⇒ لا مطابقة بغض النظر عن nonMergeCount',
+);
+assert.equal(
+  isAncestorWithMergesOnly({ compareStatus: 'identical', nonMergeCount: 0 }),
+  false,
+  'identical ⇒ false (تُغطّى بالـprefix match السابق، ليس هذا الفحص)',
+);
 
 console.log('codex-review-gate-logic.mjs contract + regression checks passed.');

@@ -90,6 +90,26 @@ export function evaluateCodexReview({
   };
 }
 
+// ⚠️ إصلاح 2026-09-01 (ancestor-merge-only fallback لتعليقات Issue Comment):
+//   الحالة الشائعة: Codex يراجع أول commit حقيقي في الـPR ثم تُضاف commits دمج من main
+//   بعد ذلك. المطابقة المباشرة (startsWith) تفشل رغم أن محتوى الـPR لم يتغير فعلياً.
+//   isAncestorWithMergesOnly: إن كان الـsha المراجَع سلفاً للـHEAD وكل commits بينهما
+//   merge commits (2+ parents حصراً)، تُعتبر المراجعة صالحة.
+//   المدخلات تأتي من GitHub compare endpoint (repos/{owner}/{repo}/compare/{base}...{head}):
+//     compareStatus: قيمة .status ("ahead" يعني HEAD أحدث من الـsha المراجَع — هو سلفه)
+//     nonMergeCount: عدد commits في .commits ذات parent واحد فقط (commits كود جديدة)
+//   الأمان: أي nonMergeCount > 0 (commit كود حقيقي بعد المراجعة) يُبطل المطابقة فوراً.
+//   مُختبَر في check-codex-review-gate-logic.mjs.
+
+/**
+ * فحص "سلف مع دمج فقط": هل المراجعة صالحة رغم أن الـsha المراجَع ليس الـHEAD الحالي،
+ * لأن الفارق مجرد merge commits بلا كود PR جديد؟
+ * @param {{ compareStatus: string, nonMergeCount: number }} input
+ */
+export function isAncestorWithMergesOnly({ compareStatus, nonMergeCount }) {
+  return compareStatus === 'ahead' && nonMergeCount === 0;
+}
+
 // ⚠️ إصلاح جوهري رابع بتاريخ 2026-08-31 (فصل concurrency group حسب نوع الحدث) — مُلغى
 //   ومُستبدَل بالإصلاح السابع أدناه. تم إبقاء الشرح لسجل القرار فقط:
 //   لوحظ حياً على PR #146 أن pull_request_target (فتح الـPR) وissue_comment
