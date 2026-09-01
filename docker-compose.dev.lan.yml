@@ -1,0 +1,20 @@
+# overlay اختياري إضافي — يُضاف صراحة فوق docker-compose.dev.yml فقط لمن يريد
+# عمداً فتح المنفذ على شبكة LAN المحلية (مثلاً اختبار الموقع من iPhone عبر
+# Wi-Fi أثناء التطوير على Windows). هذا opt-in واعٍ فقط — لا يُحمَّل تلقائياً
+# أبداً، ويجب تمريره صراحةً بجانب الملفين الأساسيين:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml \
+#     -f docker-compose.dev.lan.yml up -d --build
+#
+# لا تستخدم هذا الملف على Mac: سياسة نطاق macOS في AGENTS.md تحصر أي مسار
+# شبكي جديد على macOS بـ loopback-only افتراضياً، ولا تُجيز فتحه على LAN إلا
+# بموافقة صريحة إضافية تتجاوز حتى هذا الـopt-in — استخدمه على Windows فقط عند
+# الحاجة الفعلية لاختبار من جهاز آخر على نفس الشبكة.
+#
+# !override يستبدل قائمة ports كاملة (لا يدمجها) — بلا host_ip فيربط كل
+# الواجهات (0.0.0.0)، وهذا بالضبط الفرق المقصود عن الافتراضي loopback-only في
+# docker-compose.dev.yml.
+services:
+  web:
+    ports: !override
+      - "${PORT:-5173}:5173"

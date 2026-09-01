@@ -61,7 +61,11 @@ const required = [
   "supabase/tests/cron-job-health-truth-table.sql",
   "scripts/check-cron-job-health-classifier.mjs",
   "supabase/tests/telegram-delivery-audit.sql",
-  "scripts/check-telegram-delivery-observability.mjs"
+  "scripts/check-telegram-delivery-observability.mjs",
+  "docker-compose.yml",
+  "docker-compose.dev.yml",
+  "docker-compose.dev.lan.yml",
+  "scripts/check-docker-dev-port-binding.mjs"
 ];
 
 let failed = false;

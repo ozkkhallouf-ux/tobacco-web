@@ -20,14 +20,29 @@
 # HOST=0.0.0.0 مضبوط صراحة هنا للتوثيق فقط: هذا ربط الاستماع *داخل* الحاوية،
 # مطلوب دائماً كي يعمل نشر منفذ Docker بصرف النظر عن نظام المضيف — وهو
 # الافتراضي الحالي أصلاً في serve.mjs فلا تغيير سلوك فعلي.
+#
+# الأمان — loopback فقط افتراضياً (P1-1): المنفذ المنشور مربوط صراحة بـ
+# 127.0.0.1، فلا يظهر على شبكة LAN مهما كان نظام المضيف (Mac أو Windows) —
+# هذا يحقق سياسة AGENTS.md بأن أي مسار شبكي جديد على macOS يجب أن يبقى
+# loopback-only افتراضياً. من يحتاج فتح المنفذ على LAN عمداً (مثلاً اختبار
+# من iPhone عبر Wi-Fi على Windows) يضيف صراحة overlay إضافياً:
+# docker-compose.dev.lan.yml — راجع docs/docker-dev.md. هذا opt-in واعٍ، وليس
+# سلوكاً افتراضياً أبداً.
+#
+# استبدال المنفذ لا إضافته (P1-2): وسم !override يجعل Compose يستبدل قائمة
+# ports كاملة بدل دمجها مع docker-compose.yml الأساسي. بدون !override، تغيير
+# PORT كان يُنتج مَنفذين منشورين معاً (5173 الموروث + المنفذ الجديد) بسبب
+# قواعد دمج Compose (unique بـ {ip, target, published, protocol} — تغيير
+# published فقط يُضيف عنصراً جديداً بدل استبدال القديم):
+# https://docs.docker.com/reference/compose-file/merge/#unique-resources
 services:
   web:
     image: tobacco-web:dev-local
     environment:
       - HOST=0.0.0.0
       - PORT=5173
-    ports:
-      - "${PORT:-5173}:5173"
+    ports: !override
+      - "127.0.0.1:${PORT:-5173}:5173"
     volumes:
       # ملفات الجذر العامة نفسها التي ينسخها Dockerfile — قراءة فقط.
       - ./index.html:/app/index.html:ro
