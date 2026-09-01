@@ -709,6 +709,12 @@ assert.match(
   /"\$PR_STATE" != "open"[\s\S]{0,60}"\$PR_MERGED" = "true"/,
   'يجب تخطي أي PR أُغلق أو دُمج بلا كتابة إطلاقاً (الشرط السادس)',
 );
+// P1 rotation regression guard: يجب خلط قائمة PRs عشوائياً لضمان دوران التغطية عند نفاد الرصيد.
+assert.match(
+  reconcileYml,
+  /--jq '\.\[\]\.number' \| shuf/,
+  'P1 rotation: يجب خلط قائمة PRs بـshuf لضمان أن كل PR محظوظ بالتغطية حتى مع نفاد رصيد rate-limit',
+);
 // P1 rate-limit regression guard: يجب التحقق من رصيد الـrate-limit قبل كل PR وكسر الحلقة عند الانخفاض.
 assert.match(
   reconcileYml,

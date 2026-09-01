@@ -46,7 +46,9 @@ jobs:
           set -euo pipefail
 
           # P1 #3 fix: استخدام query parameters بدلاً من -f لتجنب تحويلها POST.
-          PR_NUMBERS=$(gh api "repos/$REPO/pulls?state=open&per_page=100" --paginate --jq '.[].number')
+          # P1 rotation fix: shuf يخلط الترتيب عشوائياً في كل دورة — يضمن أن كل PR
+          # له فرصة متساوية عند نفاد الرصيد مبكراً، فلا يتأخر PR ما إلى الأبد.
+          PR_NUMBERS=$(gh api "repos/$REPO/pulls?state=open&per_page=100" --paginate --jq '.[].number' | shuf)
 
           if [ -z "$PR_NUMBERS" ]; then
             echo "لا توجد طلبات سحب مفتوحة — لا شيء للمصالحة."
