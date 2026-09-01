@@ -39,6 +39,26 @@ function Log($msg, $color = "White") {
 
 Log "═══ بناء نشرة الأسعار من الأمين + Supabase ═══" "Cyan"
 
+# ── حارس الفرع: يرفض الكتابة إلا إذا كان main هو الفرع الحالي ──────────────
+# حادثة 2026-08-31: هذا السكريبت كان يعمل commit/push مباشرة على أي فرع كان
+# مفتوحاً محلياً وقت التشغيل (بلا أي فحص)، فكتب فوق PR #164 (feat/docker-dev-setup)
+# بينما جلسة Claude Code كانت مفتوحة عليه وقت تشغيل المهمة المجدولة. الإصلاح:
+# أوقف فوراً إذا لم يكن الفرع الحالي main تحديداً، ونبّه عبر تيليغرام كي لا يمر
+# العطل صامتاً. لا تعبر هذا الفحص إلى أي عملية قراءة/كتابة ثقيلة قبله.
+$currentBranch = "$(& git -C $ProjectRoot rev-parse --abbrev-ref HEAD 2>&1)".Trim()
+if ($currentBranch -ne "main") {
+    Log "رُفض: الفرع الحالي '$currentBranch' وليس main — لن يُكتب أو يُرفع شيء" "Red"
+    $alertScript = Join-Path $PSScriptRoot "send-telegram-notification.ps1"
+    if (Test-Path $alertScript) {
+        try {
+            & $alertScript `
+                -Message "🚨 auto-sync-price-lists توقف: الفرع الحالي في مجلد المزامنة هو '$currentBranch' وليس main. لم يُكتب أي شيء. حوّل المجلد إلى main أو استخدم worktree مستقل للأتمتة." `
+                -EventType "windows" -DedupeKey "auto-sync-wrong-branch" -DedupeMinutes 60 2>&1 | Out-Null
+        } catch {}
+    }
+    exit 1
+}
+
 # ── قراءة .env ───────────────────────────────────────────────────────────────
 if (Test-Path $EnvFile) {
     Get-Content $EnvFile | Where-Object { $_ -match '^\s*[^#].+=.+' } | ForEach-Object {
