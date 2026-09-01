@@ -41,6 +41,13 @@ const required = [
   "docs/ai/topics/ameen-sync.md",
   "docs/ai/topics/printing.md",
   "docs/ai/topics/notifications-deployment.md",
+  "docs/ai/topics/icloud-archive.md",
+  "src/icloud-archive.js",
+  "tools/mac-archive-bridge/server.mjs",
+  "tools/mac-archive-bridge/install-launch-agent.sh",
+  "scripts/check-mac-archive-bridge.mjs",
+  "scripts/check-local-site-server.mjs",
+  "scripts/check-invoice-document-integrity.mjs",
   "supabase/functions/financial-assistant/index.ts",
   "supabase/functions/inventory-auth/index.ts",
   "supabase/smart-inventory.sql",
@@ -50,7 +57,11 @@ const required = [
   "tools/push-ameen-account-balances.ps1",
   "tools/register-account-balances-task.ps1",
   "supabase/project-task-health-monitor.sql",
-  "scripts/check-project-task-monitors.mjs"
+  "scripts/check-project-task-monitors.mjs",
+  "supabase/tests/cron-job-health-truth-table.sql",
+  "scripts/check-cron-job-health-classifier.mjs",
+  "supabase/tests/telegram-delivery-audit.sql",
+  "scripts/check-telegram-delivery-observability.mjs"
 ];
 
 let failed = false;
@@ -235,8 +246,12 @@ for (const contract of [
   "function setPricePreviewTheme",
   'data-action="select-bulletin-theme"',
   'data-action="price-preview-theme"',
-  "customerPricePdfMarkup(items, latest, useSyria, previewTheme)",
-  "backgroundColor = selectedTheme === \"light\" ? \"#fffdf8\" : \"#0c0a07\"",
+  // العقد الأقوى بعد إصلاح 2026-08-31: المعاينة والتصدير يبنيان الترميز من
+  // dataset يُشتقّ لحظياً (buildBulletinDataset)، لا من لقطة items/latest
+  // محفوظة في state.pricePreview — تلك اللقطة كانت سبب ظهور السعر القديم
+  // وسعر الصرف القديم داخل PDF بعد تعديلهما في الواجهة.
+  "customerPricePdfMarkup(dataset)",
+  "function buildBulletinDataset",
   "freshPublishedBulletinUrl"
 ]) {
   if (!app.includes(contract)) {
@@ -641,7 +656,7 @@ for (const contract of [
 // المعاينة والمولّد العام يجب أن يستخدما القالب الجديد نفسه؛ وجود قالبين منفصلين
 // أعاد التصميم القديم إلى زر «حفظ التعديلات ومعاينة PDF الآن».
 for (const contract of [
-  "2026-08-26-fixed-table-layout",
+  "2026-08-31-native-print-pagination",
   "price-list-header-title",
   "price-list-columns",
   "price-list-group-header"
@@ -866,8 +881,8 @@ if (!cacheMatch || !cacheMatch[1].trim()) {
   failed = true;
 }
 const cacheVersion = Number(cacheMatch?.[1]?.match(/v(\d+)$/)?.[1] || 0);
-if (cacheVersion < 272) {
-  console.error("service worker cache must be v272 or newer after the inventory report update.");
+if (cacheVersion < 628) {
+  console.error("service worker cache must be v628 or newer after the price-bulletin export rebuild (app.js/price-list-template.js/styles.css changed).");
   failed = true;
 }
 
@@ -896,7 +911,6 @@ for (const contract of [
 }
 for (const [name, pattern] of [
   ["shared reports", /async function exportReportPdf[\s\S]{0,900}isHandheldDevice\(\)[\s\S]{0,900}createPortablePdfBlob/],
-  ["price bulletins", /async function exportBulletinPdf[\s\S]{0,1200}isHandheldDevice\(\)[\s\S]{0,900}createPortablePdfBlob/],
   ["overdue report", /async function printOverdueReport[\s\S]{0,2600}isHandheldDevice\(\)[\s\S]{0,900}createPortablePdfBlob/],
   ["current sales invoice", /async function saveSalesInvoicePdf[\s\S]{0,9000}isHandheldDevice\(\)[\s\S]{0,500}presentPortablePdf/]
 ]) {
@@ -906,27 +920,109 @@ for (const [name, pattern] of [
   }
 }
 
-// html2canvas التقليدي يقلب ترتيب العربية في النشرة المصورة. يجب أن يمرّر
-// تصدير النشرة على الهاتف وWindows الرسم إلى محرك المتصفح عبر foreignObject.
-const bulletinPdfExport = appJs.match(/async function exportBulletinPdf\([\s\S]*?\n\}/)?.[0] || "";
-const rtlBrowserRenderCount = (bulletinPdfExport.match(/foreignObjectRendering:\s*true/g) || []).length;
-if (rtlBrowserRenderCount < 2) {
-  console.error("Price bulletin PDF export must preserve Arabic RTL on both handheld and desktop paths.");
+// نشرة الأسعار لا تمرّ بـhtml2canvas إطلاقاً بعد إصلاح 2026-08-31.
+//
+// السبب الجذري الموثّق في docs/ai/topics/price-bulletins.md: مسار
+// `foreignObjectRendering` يُسلسل القالب إلى صورة SVG معزولة لا تُحمِّل أي مورد
+// خارجي ولا أي stylesheet خارج الشجرة المُسلسَلة (سقط الشعار والخط، وسقط الـCSS
+// كله في مسار الهاتف فخرجت صفحة بيضاء بنص أسود داخل نشرة داكنة)، وحسابُ مقاسه
+// يعتمد `Math.max(windowWidth, width)` فيُقصّ الرسم على أي نافذة أوسع من 794px؛
+// وإيقافه يكسر تشكيل العربية. أما `min-height:1123px` + `margin-top:8px` فكانا
+// يدفعان كل صفحة ثانوية خلف حدّ الورقة فيُحشر بينهما ورقة بيضاء كاملة.
+// الطباعة الأصلية للمتصفح تحلّ الثلاثة معاً، وهي نفس محرك النشرات المنشورة.
+const bulletinPdfExport = appJs.match(/function exportBulletinPdf\([\s\S]*?\n\}/)?.[0] || "";
+for (const forbidden of ["html2pdf", "html2canvas", "foreignObjectRendering", "createPortablePdfBlob", "minHeight"]) {
+  if (bulletinPdfExport.includes(forbidden)) {
+    console.error(`Price bulletin export must not go through the canvas rasterizer again (found: ${forbidden}). Use native browser print via printHtmlDocument.`);
+    failed = true;
+  }
+}
+// جسم المستند المطبوع يجب أن يكون **نفس** رسم المعاينة، لا HTML بديلاً يُبنى
+// للتصدير وحده. كان العقد يثبّت `customerPricePdfMarkup(dataset)` حرفياً؛ صار
+// المصدر الآن `bulletinRenderPlan(dataset)` الذي يبني المجموعات وخيارات الرسم
+// و**الـlayout المقاس** مرة واحدة، ثم تشتقّ منه المعاينةُ والتصديرُ الرسمَ وعددَ
+// الصفحات معاً — وهو شرط أقوى: لا يضمن تطابق الرسم فحسب بل تطابق عدّاد الصفحات
+// (كانت الترويسة تقول «2 صفحة» والملف 3).
+for (const contract of [
+  "printHtmlDocument(documentHtml",
+  "template.printDocument({",
+  "const plan = bulletinRenderPlan(dataset)",
+  "bodyHtml: plan.markup"
+]) {
+  if (!bulletinPdfExport.includes(contract)) {
+    console.error(`Price bulletin native-print export contract is missing: ${contract}`);
+    failed = true;
+  }
+}
+if (appJs.includes("stabilizeBulletinPdfRtlLayout") || appJs.includes("stabilizeBulletinRtl")) {
+  console.error("The html2canvas-era bulletin DOM stabilization must stay removed; it forced min-height:1123px which created a blank A4 page after every bulletin page.");
   failed = true;
 }
 if (!appJs.includes("foreignObjectRendering: Boolean(options.foreignObjectRendering)")) {
   console.error("Portable PDF rendering must forward the opt-in foreignObject RTL setting.");
   failed = true;
 }
+
+// خلفية المستند (html/body) تأتي من القالب المشترك، والمولّد المنشور يقرأ نفس
+// التعريف — تكرار القيمة الحرفية في المولّد وحده هو ما أبقى النشرات المنشورة
+// سليمة بينما خرج تصدير الموقع أبيض/أسود مقطّعاً.
 for (const contract of [
-  "function stabilizeBulletinPdfRtlLayout(source)",
-  "stabilizeBulletinRtl: true",
-  'stabilizeBulletinPdfRtlLayout(container.querySelector(".ozk-price-list"))',
-  "if (options.stabilizeBulletinRtl) stabilizeBulletinPdfRtlLayout(source)",
-  'page.style.minHeight = "1123px"'
+  "function documentBackgroundCss(theme)",
+  "function printDocument(options = {})",
+  "const THEME_PAGE_BACKGROUND",
+  "print-color-adjust:exact !important"
+]) {
+  if (!priceListTemplateSource.includes(contract)) {
+    console.error(`Shared bulletin print-document contract is missing: ${contract}`);
+    failed = true;
+  }
+}
+if (!pdfGenerator.includes('priceListTemplate.documentBackgroundCss("dark")')
+  || !pdfGenerator.includes('priceListTemplate.documentBackgroundCss("light")')) {
+  console.error("generate-pdfs.mjs must take the print background from the shared template, not from a duplicated literal color.");
+  failed = true;
+}
+
+// المعاينة تبني بياناتها لحظة الرسم، ولا تُخزَّن أي أصناف في state.pricePreview.
+if (/state\.pricePreview\s*=\s*\{[^}]*\bitems\b/.test(appJs)) {
+  console.error("state.pricePreview must not snapshot bulletin items; preview and export must both derive them from buildBulletinDataset at call time.");
+  failed = true;
+}
+for (const contract of [
+  "const built = buildBulletinDataset(preview.useSyria, preview.theme);",
+  "const built = buildBulletinDataset(useSyria, previewTheme);",
+  "rate = await capturePublishedExchangeRate();",
+  "let syriaExchangeRateCommitSeq = 0;",
+  "if (seq !== syriaExchangeRateCommitSeq)"
 ]) {
   if (!appJs.includes(contract)) {
-    console.error(`Price bulletin RTL layout stabilization is missing: ${contract}`);
+    console.error(`Bulletin live-data contract is missing: ${contract}`);
+    failed = true;
+  }
+}
+
+// المعاينة يجب أن تبقى قابلة للخروج على الهاتف: زر رجوع ثابت، Escape، وزر
+// الرجوع في المتصفح — ومساحات آمنة كي لا تخرج الأزرار خارج شاشة iPhone.
+for (const contract of [
+  'data-action="close-price-preview"',
+  'if (event.key === "Escape" && state.pricePreview?.open)',
+  "function bindPricePreviewHistory()",
+  'history.pushState({ ozkPricePreview: true }, "")'
+]) {
+  if (!appJs.includes(contract)) {
+    console.error(`Bulletin preview exit contract is missing: ${contract}`);
+    failed = true;
+  }
+}
+const stylesCss = readFileSync("src/styles.css", "utf8");
+for (const contract of [
+  ".price-preview-shell",
+  "height:100dvh",
+  "env(safe-area-inset-bottom,0px)",
+  "position:sticky"
+]) {
+  if (!stylesCss.includes(contract)) {
+    console.error(`Bulletin preview mobile-safety CSS is missing: ${contract}`);
     failed = true;
   }
 }
@@ -2471,8 +2567,21 @@ for (const contract of [
     console.error("Owner authorization functions must not be anonymously executable or SECURITY DEFINER.");
     failed = true;
   }
-  if (!serviceWorkerSource.includes('client.navigate(url)') || !serviceWorkerSource.includes('recovery=(?:1|code)') || !serviceWorkerSource.includes('type=recovery')) {
-    console.error("The PWA update must refresh stale open clients without interrupting link or OTP password recovery.");
+  // كان هذا العقد يفرض العكس: أن يستدعي activate الـ`client.navigate(url)` مع
+  // استثناء روابط الاسترداد. أُلغي التنقيل القسري بقرار صريح — كان يعيد تحميل
+  // أي تبويب مفتوح عند تفعيل service worker جديد، بما فيه تبويب لم يلمسه
+  // المستخدم، فتضيع إدخالاته غير المحفوظة (قِيس بتبويبين: تنقيل واحد للتبويب
+  // الذي لم يُلمس). وبزوال التنقيل يزول سبب استثناء روابط الاسترداد نفسه: لم
+  // يعد هناك ما يقاطعها. العقد الآن معكوس ويحرس بقاء الإزالة.
+  // الحصر بمعالج activate مقصود: التنقيل داخل notificationclick مشروع لأنه
+  // استجابة لنقرة المستخدم على إشعار، لا إعادة تحميل مفروضة عليه.
+  const activateHandler = (serviceWorkerSource.match(/self\.addEventListener\("activate"[\s\S]*?\n(?=self\.addEventListener|$)/) || [""])[0];
+  if (/\.navigate\s*\(/.test(activateHandler) || /matchAll\s*\(/.test(activateHandler)) {
+    console.error("The service worker activate cycle must not force-reload open clients (no navigate/matchAll over window clients).");
+    failed = true;
+  }
+  if (!serviceWorkerSource.includes("self.clients.claim()") || !serviceWorkerSource.includes("self.skipWaiting()")) {
+    console.error("The service worker must still take control promptly (skipWaiting + clients.claim) without reloading pages.");
     failed = true;
   }
 }

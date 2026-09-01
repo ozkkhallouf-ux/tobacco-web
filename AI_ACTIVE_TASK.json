@@ -1,14 +1,17 @@
 {
-    "schemaVersion":  1,
-    "status":  "idle",
-    "owner":  null,
-    "task":  null,
-    "branch":  null,
-    "files":  [
-
-              ],
-    "startedAt":  null,
-    "updatedAt":  "2026-08-25T11:44:42Z",
-    "pr":  "#106",
-    "note":  "No active task. Read AI_HANDOFF.md before starting work."
+  "schemaVersion": 1,
+  "status": "active",
+  "owner": "Claude",
+  "task": "Fix Codex P1 (TOCTOU branch race) on PR #167 tools/auto-sync-price-lists.ps1",
+  "branch": "task branch pending for: Fix Codex P1 (TOCTOU branch race) on PR #167 tools/auto-sync-price-lists.ps1",
+  "files": [
+    "tools/auto-sync-price-lists.ps1",
+    "tools/lib/Assert-SyncBranch.ps1",
+    "tools/tests/Test-AutoSyncBranchGuardRace.ps1",
+    ".github/workflows/check.yml"
+  ],
+  "startedAt": "2026-08-31T23:08:18Z",
+  "updatedAt": "2026-08-31T23:08:18Z",
+  "pr": "#106",
+  "note": "PR167 fix/auto-sync-branch-guard: re-validate branch at write boundary + regression test"
 }

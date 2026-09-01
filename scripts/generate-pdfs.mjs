@@ -19,6 +19,16 @@ import { chromium } from "playwright";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { existsSync } from "node:fs";
+// نفس تعريف ألوان الثيم وقواعد خلفية المستند المستخدمة داخل الموقع، بدل قيم
+// حرفية مكررة هنا. تكرارها سابقاً هو ما سمح لتصدير الموقع أن يختلف عن النشرات
+// المنشورة (خلفية داكنة سليمة هنا، وأبيض/أسود مقطّع هناك).
+import "../src/price-list-template.js";
+
+const priceListTemplate = globalThis.OZKPriceListTemplate;
+if (!priceListTemplate) {
+  console.error("✗ تعذر تحميل القالب المشترك src/price-list-template.js");
+  process.exit(1);
+}
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root = resolve(__dir, "..");
@@ -81,12 +91,7 @@ for (const { html, pdf, lightPdf, label } of files) {
   process.stdout.write(`توليد ${label}... `);
   await page.goto(`file://${html}`, { waitUntil: "networkidle" });
   await applyPdfTheme("dark");
-  const darkBackground = await page.addStyleTag({ content: `
-    @media print {
-      html, body { background: #0c0a07 !important; }
-      html { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
-    }
-  ` });
+  const darkBackground = await page.addStyleTag({ content: priceListTemplate.documentBackgroundCss("dark") });
   await page.pdf({
     path: pdf,
     format: "A4",
@@ -96,12 +101,7 @@ for (const { html, pdf, lightPdf, label } of files) {
   });
   await darkBackground.evaluate((element) => element.remove());
   await applyPdfTheme("light");
-  const lightBackground = await page.addStyleTag({ content: `
-    @media print {
-      html, body { background: #fffdf8 !important; }
-      html { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
-    }
-  ` });
+  const lightBackground = await page.addStyleTag({ content: priceListTemplate.documentBackgroundCss("light") });
   await page.pdf({
     path: lightPdf,
     format: "A4",

@@ -105,6 +105,98 @@ on conflict(task_key) do update set task_label=excluded.task_label,report_source
 -- الافتراضية الصحيحة لها، لكن الوضوح أفضل من الاعتماد الضمني).
 update private.project_task_monitors set check_status=true where task_key='khalil-audit';
 
+-- ============================================================================
+-- مصنِّف حالة مهام pg_cron — دالة نقية، مستخرجة عمداً كي يصبح المنطق مختبَراً.
+--
+-- عطل إنتاجي حيّ (2026-08-31): كان الشرط `last_job_status<>'succeeded'` قائمة
+-- حظر — كل ما ليس "succeeded" فشل، بما فيه التشغيل الجاري. النتيجة عاصفة
+-- إنذارات كاذبة على prune-inventory-reports: المراقب (*/5) وprune (*/10)
+-- يبدآن في الثانية نفسها، وقياس ثلاث حوادث مستقلة أثبت أن حلقة cron تُنفَّذ
+-- خلال أقل من 400 ميلي‌ثانية من بدء معاملة المراقب — أي داخل نافذة تشغيل
+-- prune (0.3–0.4 ثانية) تماماً:
+--   المراقب now()=08:50:00.213408 · بدء prune=08:50:00.215132 · نهايته=08:50:00.599234
+-- فيقرأ الصف وهو فعلاً "running" فيعلنه فشلاً، ثم يعلن تعافياً بعد خمس دقائق
+-- — ست مرات في الساعة. فشل prune الحقيقي الوحيد في 11226 تشغيلة كان في
+-- 2026-08-20، فكل ما عداه كان ضجيجاً خالصاً.
+--
+-- pg_cron يكتب في cron.job_run_details.status ستّ قيم: أربع عابرة
+-- (starting/connecting/sending/running) واثنتان نهائيتان (succeeded/failed).
+-- العابرة تُحدَّث في مكانها فلا تبقى في التاريخ — تُرى باللقطة الآنية وحدها،
+-- وهو بالضبط ما يفعله المراقب. لذلك التصنيف هنا قائمة سماح صريحة: أي قيمة
+-- غير معروفة تُعامل معاملة العابرة (تحفُّظ: صمت داخل المهلة ثم إنذار بعدها)
+-- بدل أن تُعدّ فشلاً فورياً كما كان.
+--
+-- p_grace = 10 دقائق مشتقة من القياس لا من التقدير: أطول تشغيل مشروع في
+-- تاريخ هذه القاعدة كله هو 404.99 ثانية (dispatch-telegram-outbox) ≈ 6.75
+-- دقيقة. عشر دقائق تغطّيه بهامش دون أن تعمي عن جمود حقيقي.
+--
+-- حدّ المهلة محسوم صراحة ولا يُترك لالتباس < مقابل <=:
+--   العمر <  grace ⇒ inflight
+--   العمر >= grace ⇒ stuck      (أي أن عشر دقائق بالضبط = stuck)
+--
+-- p_now وسيط صريح بدل now() داخل الجسم كي يبقى اختبار الحدود حتمياً بالضبط
+-- بدل أن يعتمد على لحظة التنفيذ.
+--
+-- المصنِّف يقرأ مصدرين مستقلين عن بعضهما:
+--   p_latest_*   : أحدث تشغيل مطلقاً — يجيب: هل هناك محاولة جارية الآن؟
+--   p_terminal_* : أحدث تشغيل نهائي (succeeded/failed) — يحفظ آخر نتيجة
+--                  مكتملة، ولا يجوز أن تختفي لمجرد بدء محاولة جديدة فوقها.
+-- الاعتماد على الصف الأحدث وحده (كما كان) يعني أن فشلاً مكتملاً يختفي بمجرد
+-- أن يبدأ التشغيل التالي — وهو ما وقع فعلاً في الإنتاج يوم 2026-08-30 الساعة
+-- 09:14 حين فشلت dispatch-due-reminders وdispatch-telegram-outbox
+-- وdispatch-web-push-outbox في اللحظة نفسها، وبدأ تشغيلها التالي 09:15:00.13
+-- قبل دورة المراقب 09:15 — فلم يخرج إنذار واحد عن الإخفاقات الثلاثة.
+--
+-- القيم المُعادة:
+--   'disabled'   المهمة نفسها معطّلة              ⇒ إنذار فوري
+--   'failed'     آخر نتيجة مكتملة فشلت              ⇒ إنذار فوري
+--   'stuck'      محاولة جارية/مجهولة تجاوزت المهلة  ⇒ إنذار
+--   'inflight'   محاولة أولى جارية بلا نتيجة مكتملة ⇒ لا إنذار
+--   'never_run'  لا تاريخ تشغيل إطلاقاً             ⇒ لا إنذار
+--   'ok'         آخر نتيجة مكتملة نجحت              ⇒ لا إنذار
+--
+-- جدول الحقيقة مختبَر في supabase/tests/cron-job-health-truth-table.sql
+-- وانتقال الحالة في supabase/tests/cron-job-health-transitions.sql
+-- ============================================================================
+create or replace function private.cron_job_health(
+  p_active boolean,
+  p_latest_status text,
+  p_latest_at timestamptz,
+  p_terminal_status text,
+  p_terminal_at timestamptz,
+  p_grace interval default interval '10 minutes',
+  p_now timestamptz default now()
+) returns text language sql immutable parallel safe as $fn$
+  select case
+    -- التعطيل يسبق كل شيء: هو العنوان مهما كانت آخر حالة تشغيل. و«ليس true»
+    -- تشمل NULL عمداً — حالة مجهولة النشاط تُعامل معاملة المعطّلة لا المُهمَلة.
+    when p_active is not true then 'disabled'
+
+    -- الفشل النهائي حقيقة مكتملة، ولا تسقط لمجرد أن محاولة جديدة بدأت فوقها.
+    -- هذا هو جوهر إصلاح ملاحظة Codex P1 الثانية: النتيجة النهائية الأخيرة
+    -- تُقرأ مستقلة عن الصف الأحدث، فلا يبتلع retry جارٍ فشلاً مكتملاً.
+    when p_terminal_status = 'failed' then 'failed'
+
+    -- محاولة جارية تجاوزت المهلة (أو حالة مجهولة لا نستطيع إثبات حداثتها)
+    -- ⇒ جمود يستحق الإنذار. تأتي بعد 'failed' لأن الفشل حقيقة والجمود استنتاج.
+    when p_latest_status is not null
+     and p_latest_status not in ('succeeded','failed')
+     and (p_latest_at is null or p_now - p_latest_at >= p_grace) then 'stuck'
+
+    -- نجاح نهائي: شهادة السلامة الوحيدة. محاولة جارية فوقه لا تُلغيه ولا
+    -- تُرقّيه — الحكم يبقى على آخر نتيجة مكتملة.
+    when p_terminal_status = 'succeeded' then 'ok'
+
+    -- لا نتيجة مكتملة قط: إمّا محاولة أولى ما زالت تعمل، أو لم تُشغَّل بعد.
+    -- كلتاهما محايدة: لا إنذار ولا شهادة نجاح.
+    when p_latest_status is not null then 'inflight'
+    else 'never_run'
+  end;
+$fn$;
+
+revoke all on function private.cron_job_health(boolean,text,timestamptz,text,timestamptz,interval,timestamptz)
+  from public,anon,authenticated;
+
 create or replace function private.monitor_project_tasks()
 returns void language plpgsql security definer
 set search_path=private,public,cron,pg_temp
@@ -112,6 +204,8 @@ as $$
 declare cfg record; last_at timestamptz; age_minutes numeric; last_status text; is_backlogged boolean;
  previous_healthy boolean; previous_alert_at timestamptz; detail_text text;
  job_record record; last_job_status text; last_job_at timestamptz;
+ job_health text; cron_grace interval:=interval '10 minutes';
+ terminal_status text; terminal_at timestamptz; retry_running boolean;
 begin
  for cfg in select * from private.project_task_monitors where enabled order by task_key loop
   -- جولة ٤: source_table='inventory_reports' (الافتراضي) يبقي السلوك
@@ -168,14 +262,57 @@ begin
  end loop;
 
  for job_record in select jobid,jobname,active from cron.job where jobname<>'monitor-project-tasks' loop
+  -- مصدران مستقلان، لا مصدر واحد. الصف الأحدث وحده لا يكفي: بمجرد أن يبدأ
+  -- التشغيل التالي يختفي الفشل المكتمل من النظر (حادثة 2026-08-30 09:14).
+  --   (١) أحدث تشغيل مطلقاً — هل هناك محاولة جارية الآن؟
   select status,start_time into last_job_status,last_job_at from cron.job_run_details
    where jobid=job_record.jobid order by start_time desc limit 1;
-  if not job_record.active or(last_job_status is not null and last_job_status<>'succeeded') then
-   detail_text:=case when not job_record.active then 'المهمة معطلة'
-    else format('آخر تشغيل: %s عند %s',last_job_status,to_char(last_job_at at time zone 'Asia/Riyadh','YYYY-MM-DD HH24:MI')) end;
+  --   (٢) أحدث تشغيل نهائي — آخر نتيجة مكتملة، مهما علاها من محاولات.
+  select status,start_time into terminal_status,terminal_at from cron.job_run_details
+   where jobid=job_record.jobid and status in ('succeeded','failed')
+   order by start_time desc limit 1;
+  retry_running:=last_job_status is not null and last_job_status not in ('succeeded','failed');
+  -- التصنيف كله في الدالة النقية أعلاه؛ هنا قرار الحالة فقط، بثلاثة فروع
+  -- صريحة لا فرعين. الفرعان وحدهما كانا هما العطل (ملاحظة Codex P1 على
+  -- PR #154): كل ما ليس إنذاراً كان يسقط في مسار "سليم"، فمهمة فاشلة تُعيد
+  -- المحاولة تتصادف مع دورة المراقب فتُصنَّف inflight ⇒ تُرسَل رسالة تعافٍ
+  -- كاذبة، ويُمسح last_alert_at، ويُسجَّل بدء محاولة لم تنجح في
+  -- last_success_at. ثم إن فشلت المحاولة فعلاً، يكتم
+  -- notify_telegram_dispatch إشعارها لأن مفتاح project-cron-failure:<job>
+  -- ثابت بمهلة 60 دقيقة وقد استُهلك عند الفشل الأول — فتبقى "✅ عادت للعمل"
+  -- آخر ما يراه المشغّل والمهمة فاشلة. مراقب صامت ومطمئن كذباً أسوأ من
+  -- مراقب صاخب وصادق.
+  job_health:=private.cron_job_health(job_record.active,last_job_status,last_job_at,
+   terminal_status,terminal_at,cron_grace);
+  if job_health in ('disabled','failed','stuck') then
+   detail_text:=case job_health
+    when 'disabled' then 'المهمة معطلة'
+    when 'failed' then format('فشل آخر تشغيل مكتمل عند %s%s',
+     coalesce(to_char(terminal_at at time zone 'Asia/Riyadh','YYYY-MM-DD HH24:MI'),'وقت غير معروف'),
+     case when retry_running then ' (ومحاولة جارية الآن — لم تُحسم بعد)' else '' end)
+    else format('عالقة في حالة %s منذ %s',coalesce(last_job_status,'غير معروفة'),
+     coalesce(round(extract(epoch from(now()-last_job_at))/60.0,1)::text||' دقيقة','مدة غير معروفة'))
+    end;
    select is_healthy,last_alert_at into previous_healthy,previous_alert_at
     from private.project_task_health_state where task_key='cron:'||job_record.jobname;
-   if previous_healthy is distinct from false or previous_alert_at is null or previous_alert_at<now()-interval '60 minutes' then
+   -- حارس الإنذار لم يتغيّر عن سلوكه الأصلي، عمداً.
+   --
+   -- جُرّب هنا شرط رابع «فشل نهائي بدأ بعد آخر إنذار ⇒ فشل جديد» ثم أُسقط بعد
+   -- ملاحظة Codex P1 الثالثة على PR #154، وكانت محقّة: مفتاح الإرسال
+   -- project-cron-failure:<job> ثابت بمهلة 60 دقيقة، وnotify_telegram_dispatch
+   -- يعود بلا إدراج حين يجده حديثاً، وnotify_telegram دالة RETURNS void فلا
+   -- تُبلّغ عن الكتم إطلاقاً — بينما previous_alert_at:=now() أدناه يعمل بلا
+   -- شرط. فالنتيجة كانت أن الفشل الثاني داخل الساعة يُسجَّل كأنه أُنذر عنه ولا
+   -- يصل المشغّل، وتُصفَّر معه ساعة التذكير الدوري فيتأجّل إشعاره ستين دقيقة
+   -- أخرى — أي أسوأ من السلوك الذي أراد الشرط إصلاحه.
+   --
+   -- الفصل المقصود: هذا الملف مسؤول عن *صحة الحالة* (unhealthy، وسبب الفشل في
+   -- last_detail، ولا تعافٍ إلا بنجاح نهائي). أمّا «هل تصل الرسالة مرة أم
+   -- تُكتم» فهي سياسة الإرسال في طبقة telegram_outbox، وعلاجها الصحيح مفتاح
+   -- dedupe لكل تشغيل نهائي أو إشارة تأكيد من notify_telegram — بند مستقل
+   -- مسجَّل، لا يُخلط بتصنيف الحالة هنا.
+   if previous_healthy is distinct from false or previous_alert_at is null
+      or previous_alert_at<now()-interval '60 minutes' then
     perform public.notify_telegram('project_task_failure',
      format('🚨 توقفت مهمة داخل الموقع%1$s• المهمة: %2$s%1$s• الحالة: %3$s',chr(10),job_record.jobname,detail_text),
      'project-cron-failure:'||job_record.jobname,60);
@@ -184,7 +321,8 @@ begin
    insert into private.project_task_health_state(task_key,is_healthy,last_observed_at,last_alert_at,last_detail)
     values('cron:'||job_record.jobname,false,now(),previous_alert_at,detail_text)
     on conflict(task_key) do update set is_healthy=false,last_observed_at=now(),last_alert_at=excluded.last_alert_at,last_detail=excluded.last_detail;
-  else
+  elsif job_health = 'ok' then
+   -- 'ok' وحدها تمنح شهادة النجاح. لا محاولة قيد التنفيذ، ولا مهمة لم تُشغَّل.
    select is_healthy into previous_healthy from private.project_task_health_state where task_key='cron:'||job_record.jobname;
    if previous_healthy=false then
     perform public.notify_telegram('project_task_recovered',
@@ -192,8 +330,23 @@ begin
      'project-cron-recovered:'||job_record.jobname||':'||to_char(now(),'YYYYMMDDHH24MI'),1);
    end if;
    insert into private.project_task_health_state(task_key,is_healthy,last_observed_at,last_success_at,last_alert_at,last_detail)
-    values('cron:'||job_record.jobname,true,now(),last_job_at,null,'يعمل')
+    values('cron:'||job_record.jobname,true,now(),terminal_at,null,'يعمل')
     on conflict(task_key) do update set is_healthy=true,last_observed_at=now(),last_success_at=excluded.last_success_at,last_alert_at=null,last_detail='يعمل';
+  else
+   -- 'inflight' / 'never_run': حالة محايدة. لا إنذار ولا تعافٍ، ولا تُمَس
+   -- is_healthy ولا last_alert_at ولا last_success_at ولا last_detail —
+   -- الحكم السابق يبقى كما هو حتى نرى نتيجة نهائية فعلية. كل ما تثبته هذه
+   -- الحالة أن المراقب شاهد المهمة، فتُحدَّث last_observed_at وحدها.
+   --
+   -- الصف الغائب (مهمة جديدة لم يُحكم عليها بعد): يُنشأ بـis_healthy=null —
+   -- العمود nullable في المخطط أصلاً، وهي القيمة الوحيدة الصادقة هنا. ولا
+   -- تُخترع true لمجرد إنشاء الصف. وnull آمنة في الفرعين الآخرين معاً:
+   --   الإنذار : null is distinct from false = true  ⇒ الإشعار يمرّ لاحقاً.
+   --   التعافي : null = false ⇒ NULL ⇒ لا تعافٍ كاذباً من حالة مجهولة.
+   insert into private.project_task_health_state(task_key,is_healthy,last_observed_at,last_detail)
+    values('cron:'||job_record.jobname,null,now(),
+     case when job_health='never_run' then 'لم تُشغَّل بعد' else 'قيد التنفيذ' end)
+    on conflict(task_key) do update set last_observed_at=now();
   end if;
  end loop;
 end $$;
