@@ -2,6 +2,23 @@
 
 يقرأه Claude وCodex قبل كل مهمة. أحدث سجل يكون في الأعلى. لا تحذف السجلات السابقة.
 
+## 2026-09-01 - Claude - Docker dev environment (PR #174) + health-check ESM fix (PR #173)
+
+- Status: awaiting Codex review, not merged
+- Branch: feat/docker-dev-environment, fix/health-check-logic-esm-url
+- Files: docker-compose.dev.yml, docs/docker-dev.md, README_AR.md, scripts/check-health-check-logic.mjs
+- Result: نفّذت عمل متوازٍ مع القفل النشط في AI_ACTIVE_TASK.json (owner: Claude,
+  PR #167 TOCTOU على tools/auto-sync-price-lists.ps1) لأن الملفات/النطاق منفصلة
+  تماماً (Docker overlay + توثيق مقابل tools/ PowerShell). لم أستدعِ Claim (يفشل
+  أصلاً لأن status=active). فتحت PR #174 (بيئة Docker تطوير منفصلة، bind mount،
+  لا تغيير لسلوك Docker الإنتاجي الحالي) وPR #173 (إصلاح منفصل صغير: مسار Windows
+  خام مُمرَّر إلى import() بدل file:// URL — كان يُسقط npm run check بالكامل على
+  Windows، غير مرتبط بعمل Docker). لاحظت أيضاً check-price-bulletin-item-coverage.mjs
+  فشل موجود مسبقاً على main (فرق صفحات PDF)، لم أُعالجه — خارج النطاق.
+- ⚠️ ملاحظة: القفل في AI_ACTIVE_TASK.json (owner: Claude, PR #167) ما زال status=active
+  ولم يُغلق — لم أُغلقه لأنه ليس عملي، فقط أُبلغ هنا لتنبيه من يقرأ الدفتر.
+- Handoff UTC: 2026-09-01T00:00:00Z (تقريبي)
+
 ## 2026-08-25 - Claude - reliability-hardening-phase1
 
 - Status: completed

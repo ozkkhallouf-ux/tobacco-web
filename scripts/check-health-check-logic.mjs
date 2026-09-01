@@ -13,7 +13,7 @@
 
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import path from 'node:path';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -23,7 +23,7 @@ const {
   classifyLatestRun, selectRecentFailures, decideIssuesToClose,
   parseWorkflowIncidentKey, isIncidentConclusion, isRecoveryConclusion, NON_INCIDENT_CONCLUSIONS,
   telegramDedupeKey, issueNumberFromUrl,
-} = await import(SCRIPT);
+} = await import(pathToFileURL(SCRIPT).href);
 
 const codeOnly = src.split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
 
