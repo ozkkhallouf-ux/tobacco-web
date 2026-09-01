@@ -30,6 +30,7 @@ export const CHECKS = [
   'check-command-center.mjs',
   'check-cron-job-health-classifier.mjs',
   'check-expense-entries-security.mjs',
+  'check-health-check-logic.mjs',
   'check-inventory-recon-cost-fallbacks.mjs',
   'check-inventory-report-page-packing.mjs',
   'check-inventory-report-print-pages.mjs',

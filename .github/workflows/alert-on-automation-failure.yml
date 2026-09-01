@@ -29,6 +29,9 @@ on:
       - "فحص المشروع"
       - "Decision Engine Check"
       - "OZK Business OS Foundation"
+      # مَن يراقب المراقب: انهيار "فحص صحة المشروع" نفسه كان يمرّ بلا أثر،
+      # فلا Issue ولا تيليغرام ولا حتى تشغيل فاشل ظاهر (كان يفرض exit 0).
+      - "فحص صحة المشروع"
     types: [completed]
 
 permissions:

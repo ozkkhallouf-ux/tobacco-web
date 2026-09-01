@@ -1,0 +1,42 @@
+name: فحص صحة المشروع
+
+# مراقبة دورية لصحة الموقع والنشر والنشرات وسير العمل — انظر scripts/health-check.mjs للتفاصيل.
+# هذا الفحص لا يستدعي Codex إطلاقاً ولا يحجب أي عملية تشغيلية (نشر أسعار / deployment)؛
+# هو اكتشاف وتبليغ فقط (Issue + Telegram)، بلا أي إصلاح تلقائي في هذه المرحلة.
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  actions: read
+  issues: write
+
+concurrency:
+  group: health-check
+  cancel-in-progress: false
+
+jobs:
+  health-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run health checks
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          SUPABASE_URL: https://dyxbirfpxeocqffnfdeb.supabase.co
+          # سرّ اختياري — إن لم يُضبط، يُسجَّل تحذير ويُتخطى إشعار تيليغرام فقط (لا يوقف الفحص).
+          # يضبطه المستخدم بنفسه عبر: gh secret set SUPABASE_SERVICE_KEY
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: node scripts/health-check.mjs
