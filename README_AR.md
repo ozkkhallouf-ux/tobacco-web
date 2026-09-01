@@ -31,6 +31,11 @@ npm run dev
 http://localhost:5173
 ```
 
+## التشغيل عبر Docker (Mac أو Windows)
+
+بيئة تطوير موحدة بين النظامين مع تعديل حي بلا rebuild — التفاصيل في
+[`docs/docker-dev.md`](docs/docker-dev.md).
+
 ## الاستخدام على iPhone
 
 افتح الرابط العام من Safari:

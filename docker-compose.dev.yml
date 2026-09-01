@@ -1,0 +1,60 @@
+# overlay تطوير — لا يُحمَّل تلقائياً. لا يُغيّر شيئاً في سلوك
+# `docker compose up` الافتراضي (docker-compose.yml وحده)؛ يجب تمريره صراحةً:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+#
+# الهدف: تعديل الكود على المضيف (Mac أو Windows) يظهر داخل الحاوية فوراً بلا
+# rebuild — لأن الموقع بلا bundler أصلاً (serve.mjs يقرأ كل ملف من القرص عند
+# كل طلب)، فيكفي bind mount لمصادر الواجهة؛ تحديث المتصفح وحده كافٍ.
+#
+# ما لا يتغيّر عن docker-compose.yml الأساسي: نفس target: runtime، نفس
+# read_only (صحيح لأن flag القراءة-فقط يخص جذر نظام ملفات الحاوية فقط —
+# الـbind mounts أدناه مستقلة عنه وتُحدَّد قراءتها/كتابتها بنفسها)، نفس
+# cap_drop/no-new-privileges/tmpfs. لا أسرار ولا tools/ ولا Ameen SQL هنا —
+# هذه الحدود موروثة من .dockerignore ولم تُمسّ، وBuild context هنا كما هو.
+#
+# PORT: القيمة الوحيدة القابلة للتغيير هي منفذ المضيف المنشور، عبر متغير بيئة
+# PORT بنفس الاسم على Mac (`export PORT=5174`) وWindows PowerShell
+# (`$env:PORT=5174`) — الافتراضي 5173 إن لم يُحدَّد. منفذ الحاوية الداخلي يبقى
+# 5173 ثابتاً عمداً: HEALTHCHECK في Dockerfile مبني على 5173 تحديداً ولم يُعدَّل
+# (خارج نطاق هذه المرحلة)، فتغييره داخلياً يُفسد فحص healthy.
+# HOST=0.0.0.0 مضبوط صراحة هنا للتوثيق فقط: هذا ربط الاستماع *داخل* الحاوية،
+# مطلوب دائماً كي يعمل نشر منفذ Docker بصرف النظر عن نظام المضيف — وهو
+# الافتراضي الحالي أصلاً في serve.mjs فلا تغيير سلوك فعلي.
+#
+# الأمان — loopback فقط افتراضياً (P1-1): المنفذ المنشور مربوط صراحة بـ
+# 127.0.0.1، فلا يظهر على شبكة LAN مهما كان نظام المضيف (Mac أو Windows) —
+# هذا يحقق سياسة AGENTS.md بأن أي مسار شبكي جديد على macOS يجب أن يبقى
+# loopback-only افتراضياً. من يحتاج فتح المنفذ على LAN عمداً (مثلاً اختبار
+# من iPhone عبر Wi-Fi على Windows) يضيف صراحة overlay إضافياً:
+# docker-compose.dev.lan.yml — راجع docs/docker-dev.md. هذا opt-in واعٍ، وليس
+# سلوكاً افتراضياً أبداً.
+#
+# استبدال المنفذ لا إضافته (P1-2): وسم !override يجعل Compose يستبدل قائمة
+# ports كاملة بدل دمجها مع docker-compose.yml الأساسي. بدون !override، تغيير
+# PORT كان يُنتج مَنفذين منشورين معاً (5173 الموروث + المنفذ الجديد) بسبب
+# قواعد دمج Compose (unique بـ {ip, target, published, protocol} — تغيير
+# published فقط يُضيف عنصراً جديداً بدل استبدال القديم):
+# https://docs.docker.com/reference/compose-file/merge/#unique-resources
+services:
+  web:
+    image: tobacco-web:dev-local
+    environment:
+      - HOST=0.0.0.0
+      - PORT=5173
+    ports: !override
+      - "127.0.0.1:${PORT:-5173}:5173"
+    volumes:
+      # ملفات الجذر العامة نفسها التي ينسخها Dockerfile — قراءة فقط.
+      - ./index.html:/app/index.html:ro
+      - ./404.html:/app/404.html:ro
+      - ./privacy-policy.html:/app/privacy-policy.html:ro
+      - ./terms-of-use.html:/app/terms-of-use.html:ro
+      - ./receipt.html:/app/receipt.html:ro
+      - ./robots.txt:/app/robots.txt:ro
+      - ./sitemap.xml:/app/sitemap.xml:ro
+      - ./service-worker.js:/app/service-worker.js:ro
+      - ./src:/app/src:ro
+      - ./public:/app/public:ro
+      # منطق الخادم نفسه — تعديله يحتاج إعادة تشغيل الحاوية (لا rebuild) كي
+      # يُحمَّل من جديد: docker compose -f docker-compose.yml -f docker-compose.dev.yml restart
+      - ./scripts/serve.mjs:/app/scripts/serve.mjs:ro
