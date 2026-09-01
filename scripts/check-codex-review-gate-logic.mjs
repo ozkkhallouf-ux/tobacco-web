@@ -712,8 +712,8 @@ assert.match(
 // P1 shared-SHA regression guard: يجب تتبع SHA→نتيجة وعدم التخفيض (true→false أبداً).
 assert.match(
   reconcileYml,
-  /SHA_CONCLUSION[\s\S]{0,300}SHA_CONCLUSION\[\$LIVE_HEAD_SHA\].*=.*"true"/,
-  'P1 shared-SHA: يجب declare -A SHA_CONCLUSION وتحديث لا يُخفِّض (true→false) — يحول دون طمس success من PR مشترك لـHEAD SHA',
+  /HAS_VALID_REVIEW=[\s\S]{0,1100}SHA_CONCLUSION\[\$LIVE_HEAD_SHA\][\s\S]{0,50}=.*"true"[\s\S]{0,800}IDS_TO_PATCH/,
+  'P1 shared-SHA: يجب تسجيل SHA_CONCLUSION قبل IDS_TO_PATCH/continue — وضعه بعدها يُفقده عند skip الـcheck-run المطابق أصلاً',
 );
 // P1 base-filter regression guard: يجب تجاهل PRs التي لا تستهدف main.
 assert.match(

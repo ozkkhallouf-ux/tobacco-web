@@ -173,6 +173,17 @@ jobs:
             HAS_VALID_REVIEW=$([ "$REVIEWED_COUNT" -gt 0 ] && echo true || echo false)
             echo "  head_sha=$LIVE_HEAD_SHA reviewed_count=$REVIEWED_COUNT has_valid_review=$HAS_VALID_REVIEW"
 
+            # P1 shared-SHA fix: سجّل النتيجة هنا — قبل أي continue لاحق — لا تُخفِّض (true→false).
+            # الموضع الصحيح: بعد حساب HAS_VALID_REVIEW مباشرة، لا بعد حلقة PATCH. إن وُضع بعدها
+            # يتخطاه "continue" في حالة IDS_TO_PATCH الفارغة (check-run مطابق أصلاً)، فيُفقد
+            # الحارس في السيناريو الأكثر شيوعاً ويعود العطل الأصلي.
+            _PREV="${SHA_CONCLUSION[$LIVE_HEAD_SHA]:-false}"
+            if [ "$HAS_VALID_REVIEW" = "true" ] || [ "$_PREV" = "true" ]; then
+              SHA_CONCLUSION[$LIVE_HEAD_SHA]="true"
+            else
+              SHA_CONCLUSION[$LIVE_HEAD_SHA]="false"
+            fi
+
             # شرط رابع: لا POST إطلاقاً — نقرأ فقط check-runs الموجودة فعلاً بهذا الاسم على
             # نفس head_sha الحيّ. غياب أي واحد يعني idsToPatch فارغة، فلا كتابة إطلاقاً.
             # P1 #6 fix: filter=all يجلب كل النسخ بما فيها القديمة المكررة (الافتراضي latest يُخفيها).
@@ -215,13 +226,4 @@ jobs:
               echo "$PAYLOAD" | gh api "repos/$REPO/check-runs/$ID" --method PATCH --input - >/dev/null
             done
 
-            # P1 shared-SHA fix: سجّل نتيجة هذا SHA — لا تُخفِّض أبداً (true→false).
-            # إن كان هذا PR مراجَعاً أو كانت النتيجة السابقة true (من PR آخر عولج أولاً
-            # وكان مراجَعاً)، الحالة تبقى true. إن كان غير مراجَع ولا يوجد سابق، سجّل false.
-            PREV="${SHA_CONCLUSION[$LIVE_HEAD_SHA]:-false}"
-            if [ "$HAS_VALID_REVIEW" = "true" ] || [ "$PREV" = "true" ]; then
-              SHA_CONCLUSION[$LIVE_HEAD_SHA]="true"
-            else
-              SHA_CONCLUSION[$LIVE_HEAD_SHA]="false"
-            fi
           done
