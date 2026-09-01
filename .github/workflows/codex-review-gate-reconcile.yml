@@ -69,6 +69,12 @@ jobs:
             exit 0
           fi
 
+          # P1 shared-SHA fix: تتبع نتيجة كل SHA معالَج في هذه الدورة.
+          # إن شارك PR-ان targeting main نفس HEAD SHA، آخر من يُعالَج يكتب فوق الأول
+          # (لأن check-runs commit-scoped) — الإصلاح: لا تُخفِّض أبداً (true→false).
+          # قاعدة الدمج: SHA يُعدّ مراجَعاً إن راجع Codex أيّ PR يحمله، لا جميعها.
+          declare -A SHA_CONCLUSION
+
           for PR_NUMBER in $PR_NUMBERS; do
             echo "=== PR #$PR_NUMBER ==="
 
@@ -102,6 +108,13 @@ jobs:
             LIVE_HEAD_SHA=$(echo "$PR_JSON" | jq -r '.head.sha // empty')
             if [ -z "$LIVE_HEAD_SHA" ]; then
               echo "  متخطى: تعذّرت قراءة head.sha الحيّ."
+              continue
+            fi
+
+            # P1 shared-SHA fix: إن سبق معالجة هذا SHA وكانت النتيجة "مراجَع" — تخطّ فوراً
+            # (check-run مُعيَّن بـsuccess بالفعل، الكتابة فوقه تُفسده لا تُصلحه).
+            if [ "${SHA_CONCLUSION[$LIVE_HEAD_SHA]:-}" = "true" ]; then
+              echo "  متخطى: SHA=$LIVE_HEAD_SHA مراجَع في PR سابق بهذه الدورة — check-run success بالفعل."
               continue
             fi
 
@@ -201,4 +214,14 @@ jobs:
               echo "  PATCH check-run $ID → $TARGET_LABEL"
               echo "$PAYLOAD" | gh api "repos/$REPO/check-runs/$ID" --method PATCH --input - >/dev/null
             done
+
+            # P1 shared-SHA fix: سجّل نتيجة هذا SHA — لا تُخفِّض أبداً (true→false).
+            # إن كان هذا PR مراجَعاً أو كانت النتيجة السابقة true (من PR آخر عولج أولاً
+            # وكان مراجَعاً)، الحالة تبقى true. إن كان غير مراجَع ولا يوجد سابق، سجّل false.
+            PREV="${SHA_CONCLUSION[$LIVE_HEAD_SHA]:-false}"
+            if [ "$HAS_VALID_REVIEW" = "true" ] || [ "$PREV" = "true" ]; then
+              SHA_CONCLUSION[$LIVE_HEAD_SHA]="true"
+            else
+              SHA_CONCLUSION[$LIVE_HEAD_SHA]="false"
+            fi
           done

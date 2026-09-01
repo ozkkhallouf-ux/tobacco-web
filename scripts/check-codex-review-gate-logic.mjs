@@ -709,6 +709,12 @@ assert.match(
   /"\$PR_STATE" != "open"[\s\S]{0,60}"\$PR_MERGED" = "true"/,
   'يجب تخطي أي PR أُغلق أو دُمج بلا كتابة إطلاقاً (الشرط السادس)',
 );
+// P1 shared-SHA regression guard: يجب تتبع SHA→نتيجة وعدم التخفيض (true→false أبداً).
+assert.match(
+  reconcileYml,
+  /SHA_CONCLUSION[\s\S]{0,300}SHA_CONCLUSION\[\$LIVE_HEAD_SHA\].*=.*"true"/,
+  'P1 shared-SHA: يجب declare -A SHA_CONCLUSION وتحديث لا يُخفِّض (true→false) — يحول دون طمس success من PR مشترك لـHEAD SHA',
+);
 // P1 base-filter regression guard: يجب تجاهل PRs التي لا تستهدف main.
 assert.match(
   reconcileYml,
