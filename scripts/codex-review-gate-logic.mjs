@@ -230,22 +230,60 @@ export function needsWriteReconciliation({ writtenGeneration, observedGeneration
 //        تلقائياً — لا حاجة لأي منطق خاص، لأن البحث دائماً يكون بـhead_sha الحالي حصراً.
 //   مُختبَر بالكامل في scripts/check-codex-review-gate-logic.mjs (جزء من npm run check).
 
+// ⚠️ إصلاح جوهري عاشر بتاريخ 2026-09-01 (إعادة تصميم Event-Driven — إلغاء حلقة المصالحة
+//   الزمنية): الإصلاحان الثامن والتاسع أعلاه (مصالحة ما بعد الكتابة + توحيد النسخ المكررة)
+//   بقيا صحيحين منطقياً لكن نُفِّذا كحلقة تُراقب نافذة زمنية فعلية (حتى 4 محاولات × 15
+//   ثانية sleep، أي ~45 ثانية إضافية على كل تشغيل — عبء زمني حقيقي بلا أي ضمان رياضي أقوى
+//   من فحص واحد، لأن Checks API لا يوفّر compare-and-swap ذرّياً بأي حال؛ نافذة أطول تكشف
+//   فقط "نافذة زمنية أطول"، لا "ذرّية"). القرار (بتكليف صريح من المستخدم): استبدال الحلقة
+//   بتصميم event-driven بحت — لا sleep ولا polling ولا نافذة زمنية:
+//     1. اختيار هدف الكتابة (existing) وكشف النسخ المكررة يتمّان معاً بمسح واحد لكل
+//        check-runs الحاملة هذا الاسم على هذا head_sha، والفائز بينها يُختار بالـgeneration
+//        (external_id عبر compareGenerations) لا بالـid — راجع reconcileCanonicalCheckRuns
+//        أدناه. اختيار بالـid وحده (كما كان سابقاً) لا يضمن أنه الأحدث فعلياً إن تسابقت
+//        طلبات POST متعددة لحظة إنشاء أول check-run لهذا الـsha.
+//     2. توحيد النسخ المكررة يُنفَّذ **مرة واحدة فقط** مباشرة بعد كتابتنا نحن (لا حلقة)،
+//        وتُنسخ إليها حصراً نتيجتنا نحن (المحسوبة فعلياً من REVIEWED_COUNT هذا التشغيل) —
+//        لا نتيجة نسخة أخرى غير مؤكدة أو مُلغاة. نسخة مكررة تظهر لاحقاً (بعد هذه اللحظة
+//        بالضبط) لا تُلمس الآن؛ ستُوحَّد عند أول تشغيل لاحق غير قديم (event-driven بحت، لا
+//        ادّعاء بفورية — موثَّق صراحة، لا "حتماً فوراً").
+//     3. مصالحة ما بعد الكتابة تُنفَّذ **فحصاً واحداً فقط** (GET واحد على نفس check-run)،
+//        وعند رصد generation أقدم من كتابتنا، **PATCH واحد فقط** لاستعادة النتيجة الصحيحة —
+//        بلا حلقة وبلا sleep. كتابة متأخرة تصل بعد هذا الفحص الواحد ستُكتشَف وتُصحَّح عند
+//        أول تشغيل لاحق غير قديم (isStaleWrite يحمي كل كتابة لاحقة أياً كان مصدرها)، لا
+//        خلال هذا التشغيل نفسه.
+//   الحارسان الأساسيان (isStaleWrite قبل أي كتابة، isStaleHead للـHEAD الحيّ) لم يتغيّرا؛
+//   هما مصدر الأمان الرتيب الحقيقي، لا حلقة المراقبة الزمنية التي كانت تُخفّف فقط احتمال
+//   تأخّر شبكي عرضي بلا ضمان إضافي فعلي.
+
 /**
  * @typedef {{ id: number, name?: string, head_sha?: string, external_id?: string }} GhCheckRun
  */
 
 /**
- * يبحث عن check-run كانوني موجود فعلاً على نفس head_sha بالضبط (وبنفس الاسم)، ليُعاد
- * استخدام نفس id عبر PATCH بدلاً من إنشاء check-run ثانٍ (POST) بنفس الاسم على نفس sha.
- * إن تعدّدت (حالة تراكم قديمة من إصلاحات سابقة)، يُختار الأحدث (أكبر id) دائماً.
+ * يبحث عن كل check-runs موجودة فعلاً على نفس head_sha بالضبط (وبنفس الاسم)، ويحدّد معاً:
+ * (أ) هدف الكتابة (الفائز) — يُختار بالـgeneration (external_id) لا بالـid، لأن ترتيب id
+ *     لا يضمن أنه الأحدث فعلياً إن تسابقت طلبات POST عدة عند أول إنشاء لنفس head_sha
+ *     (سباق first-time concurrent creation)؛ عند تساوي generation (أو غيابها من الطرفين —
+ *     حالة تراكم قديمة قبل إضافة external_id) يُستخدم الـid الأكبر كترجيح ثابت فقط.
+ * (ب) كل النسخ الأخرى (duplicateIds) القابلة للتوحيد معه في نفس هذه الدورة — مرة واحدة،
+ *     بلا حلقة (انظر تعليق "إصلاح جوهري عاشر" أعلاه).
  * @param {{ checkRuns?: GhCheckRun[], headSha: string, name?: string }} input
- * @returns {number | null} الـid القابل لإعادة الاستخدام، أو null إن وجب إنشاء واحد جديد.
+ * @returns {{ winnerId: number | null, winnerGeneration: string | null, duplicateIds: number[] }}
  */
-export function selectCanonicalCheckRunId({ checkRuns = [], headSha, name = 'Codex Review Gate' }) {
+export function reconcileCanonicalCheckRuns({ checkRuns = [], headSha, name = 'Codex Review Gate' }) {
   if (!headSha) throw new Error('headSha مطلوب');
   const matching = checkRuns.filter((cr) => cr?.name === name && cr?.head_sha === headSha);
-  if (matching.length === 0) return null;
-  return matching.reduce((latest, cr) => (cr.id > latest.id ? cr : latest)).id;
+  if (matching.length === 0) {
+    return { winnerId: null, winnerGeneration: null, duplicateIds: [] };
+  }
+  let winner = matching[0];
+  for (const cr of matching.slice(1)) {
+    const cmp = compareGenerations(cr.external_id || '0.0', winner.external_id || '0.0');
+    if (cmp > 0 || (cmp === 0 && cr.id > winner.id)) winner = cr;
+  }
+  const duplicateIds = matching.filter((cr) => cr.id !== winner.id).map((cr) => cr.id);
+  return { winnerId: winner.id, winnerGeneration: winner.external_id || null, duplicateIds };
 }
 
 /**
@@ -292,4 +330,83 @@ export function buildCanonicalCheckRunPayload({
   }
 
   return base;
+}
+
+// ⚠️ إصلاح جوهري حادي عشر بتاريخ 2026-09-01 (مصالحة دورية مضمونة — Pattern A، بتكليف
+//   صريح من المستخدم بعد رفض P1 #1 وP1 #2 اللذين رصدهما Codex حياً على PR #170):
+//   الإصلاح العاشر أعلاه (event-driven بحت: توحيد نسخ مرة واحدة + self-heal فحص واحد)
+//   يبقى صحيحاً كتحسين أفضل-جهد سريع، لكنه لا يضمن تصحيحاً لاحقاً إن لم يصل أي حدث آخر
+//   إطلاقاً بعد لحظة السباق (لا push، لا تعليق، لا مراجعة) — بالضبط ما رصده Codex:
+//     P1 #1: تصادم إنشاء أول check-run لنفس sha (عدة POST متزامنة) قد يُبقي نسخة مكررة
+//       عالقة in_progress تحجب الدمج بلا أي ضمان تصحيح لاحق.
+//     P1 #2: PATCH متأخر من تشغيل أقدم يصل بعد أن نشر تشغيل أحدث success فعلاً؛ فحص
+//       self-heal يقرأ نتيجة نفس التشغيل الأحدث (الصحيحة أصلاً) فلا يكتشف شيئاً — لا
+//       تشغيل لاحق مضمون الوصول ليكتشف الكتابة المتأخرة ويصلحها.
+//   الحل: مصالحة دورية (schedule كل 5 دقائق، ملف منفصل codex-review-gate-reconcile.yml)
+//   مصدر حقيقتها الوحيد هو **الحالة الحية**: head.sha الحيّ للـPR + وجود مراجعة Codex
+//   صالحة عليه — لا generation ولا حالة check-run موجودة إطلاقاً تُستخدَم كمصدر حقيقة.
+//   كل دورة تُعيد الاشتقاق من الصفر، فتُصحِّح أي حالة خاطئة عالقة تلقائياً عند أول دورة
+//   لاحقة، بصرف النظر عن سبب الخطأ (سباق POST، PATCH متأخر، أو أي انحراف آخر) — لا تعتمد
+//   على "حدث لاحق" مطلقاً؛ ٥ دقائق كحدّ أقصى للانتظار، مضمونة رياضياً بـcron.
+//   قرار متعمَّد (شرط رابع صريح من المستخدم): لا تُنشئ المصالحة الدورية أي check-run جديد
+//   إطلاقاً — PATCH فقط على الموجود فعلاً. التبرير: pull_request_target يُطلَق ضمانياً
+//   عند كل فتح/تحديث PR (opened/synchronize/reopened)، فأول إنشاء لكل head_sha مضمون
+//   أصلاً بحدث فوري لا ينتظر 5 دقائق؛ لو فشل ذلك التشغيل تماماً قبل الوصول لخطوة publish
+//   (عطل شبكي/صلاحيات)، فهذا عطل تشغيلي منفصل يحتاج تشخيصه بذاته — لا حلاً بإنشاء
+//   check-run من مسار كود مختلف قد يخلق واحداً على PR لم يُقصد تغطيته أصلاً. نطاق هذه
+//   المصالحة محصور عمداً بتصحيح حالة check-runs *موجودة فعلاً*، لا ضمان إنشائها.
+
+/**
+ * هل يستحق هذا PR مصالحة الآن؟ PR أُغلق أو دُمج ⇒ لا، لا كتابة إطلاقاً (شرط سادس صريح).
+ * @param {{ state?: string, merged?: boolean }} input
+ */
+export function isPrReconcilable({ state, merged }) {
+  if (merged) return false;
+  return state === 'open';
+}
+
+/**
+ * الحالة الكانونية الصحيحة، مُشتقّة حصراً من وجود مراجعة Codex صالحة على الـHEAD الحيّ —
+ * لا علاقة لها بأي generation أو حالة check-run موجودة إطلاقاً (شرط ثانٍ صريح).
+ * @param {{ hasValidReviewOnLiveHead: boolean }} input
+ */
+export function deriveCanonicalTarget({ hasValidReviewOnLiveHead }) {
+  return hasValidReviewOnLiveHead
+    ? { status: 'completed', conclusion: 'success' }
+    : { status: 'in_progress', conclusion: null };
+}
+
+/**
+ * هل check-run موجود يطابق الحالة الكانونية المستهدفة بالفعل؟ تُستخدم لتفادي أي PATCH لا
+ * فائدة منه — شرط idempotency الصريح: لا كتابة إن كانت الحالة صحيحة أصلاً.
+ * @param {{ status?: string, conclusion?: string | null }} checkRun
+ * @param {{ status: string, conclusion: string | null }} target
+ */
+export function checkRunMatchesTarget(checkRun, target) {
+  const curStatus = checkRun?.status ?? null;
+  const curConclusion = checkRun?.conclusion ?? null;
+  return curStatus === target.status && curConclusion === (target.conclusion ?? null);
+}
+
+/**
+ * يبني خطة المصالحة الكاملة لزوج (PR, head_sha) واحد: الحالة المستهدفة، وأي check-runs
+ * كانونية موجودة فعلاً على نفس head_sha تحتاج PATCH لتطابقها (بلا PATCH لما يطابق أصلاً،
+ * وبلا POST جديد أبداً — matching فارغة ⇒ idsToPatch فارغة، راجع تعليق "إصلاح جوهري حادي
+ * عشر" أعلاه). توحّد كل النسخ المكررة نحو نفس الحقيقة المُشتقّة دفعة واحدة — لا "فائز"
+ * يُختار، فكلها تُصحَّح نحو نفس الهدف (يحل P1 #1)، وأي كتابة متأخرة سابقة على هذه الدورة
+ * تُكتشَف وتُصحَّح لأن الحقيقة تُعاد اشتقاقها من الصفر لا من generation (يحل P1 #2).
+ * @param {{ liveHeadSha: string, hasValidReviewOnLiveHead: boolean, checkRuns?: GhCheckRun[], name?: string }} input
+ * @returns {{ target: { status: string, conclusion: string | null }, matchingIds: number[], idsToPatch: number[] }}
+ */
+export function planReconciliation({
+  liveHeadSha,
+  hasValidReviewOnLiveHead,
+  checkRuns = [],
+  name = 'Codex Review Gate',
+}) {
+  if (!liveHeadSha) throw new Error('liveHeadSha مطلوب');
+  const target = deriveCanonicalTarget({ hasValidReviewOnLiveHead });
+  const matching = checkRuns.filter((cr) => cr?.name === name && cr?.head_sha === liveHeadSha);
+  const idsToPatch = matching.filter((cr) => !checkRunMatchesTarget(cr, target)).map((cr) => cr.id);
+  return { target, matchingIds: matching.map((cr) => cr.id), idsToPatch };
 }

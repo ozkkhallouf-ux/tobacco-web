@@ -1,0 +1,227 @@
+name: Codex Review Gate — مصالحة دورية مضمونة
+
+# ⚠️ إصلاح جوهري حادي عشر بتاريخ 2026-09-01 (Pattern A، بتكليف صريح من المستخدم بعد
+#   رفض P1 #1 وP1 #2 اللذين رصدهما Codex حياً على PR #170 — راجع تعليق "إصلاح جوهري حادي
+#   عشر" في scripts/codex-review-gate-logic.mjs للتفاصيل الكاملة).
+#
+#   الفرق الجوهري عن codex-review-gate.yml (المسار السريع المُطلَق بالأحداث): هذا الملف
+#   لا يعتمد على أي حدث لاحق إطلاقاً. يعمل كل ٥ دقائق بلا شرط، ويُعيد اشتقاق الحقيقة من
+#   الصفر في كل دورة من الحالة الحية فقط (head.sha الحيّ للـPR + مراجعة Codex عليه) — لا
+#   generation ولا حالة check-run موجودة تُستخدَم كمصدر حقيقة إطلاقاً. هذا يضمن أن أي
+#   حالة خاطئة عالقة (سباق إنشاء، PATCH متأخر، أو أي انحراف آخر) تُصحَّح خلال ٥ دقائق
+#   كحدّ أقصى.
+#
+#   P1 #1 & #2 fix (2026-09-01): إضافة workflow_run trigger على "Codex Review Gate" completed —
+#   يضمن اشتغال المصالح فوراً بعد كل تشغيل للمسار السريع (لا 5 دقائق انتظاراً). سباق
+#   إنشاء النسختين (P1 #1) وسباق PATCH الأقدم يطمس الأحدث (P1 #2) كلاهما يُصحَّحان
+#   بأول دورة مصالحة تلي التشغيل المُسبِّب للحالة الخاطئة — مضمونة event-driven.
+#
+#   قرار متعمَّد (شرط رابع صريح من المستخدم): لا PATCH إلا على check-run *موجود فعلاً* —
+#   لا POST من هذا الملف إطلاقاً. راجع التبرير الكامل في تعليق "إصلاح جوهري حادي عشر" في
+#   scripts/codex-review-gate-logic.mjs. بإيجاز: pull_request_target يضمن إنشاء أول
+#   check-run فور فتح/تحديث أي PR، فلا حاجة لمسار إنشاء بديل هنا، وإنشاء واحد من مسار كود
+#   مختلف قد يغطي PR لم يُقصد تغطيته أصلاً.
+#
+#   هذا الملف عمداً bash/jq خالص بلا أي actions/checkout لكود الفرع — نفس وضع التحصين
+#   الموثّق في codex-review-gate.yml (schedule يُطلِق دوماً نسخة الملف من الفرع الافتراضي،
+#   فحدود الثقة نفسها تنطبق: لا تنفيذ لأي كود يأتي من فرع PR).
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch: {}
+  # P1 #1 & #2 fix: guaranteed event-driven reconciliation trigger after every fast-path run.
+  # Codex flagged that codex-review-gate.yml race conditions leave stale in_progress runs with
+  # no guaranteed follow-up. This trigger fires the reconciler as soon as codex-review-gate.yml
+  # completes (any conclusion), so any stale state is repaired within seconds — not 5 minutes.
+  # Combined with the cron backstop above, this satisfies both P1 #1 (concurrent POST race) and
+  # P1 #2 (PATCH ordering race): whatever stale state either race leaves, this run corrects it.
+  workflow_run:
+    workflows: ["Codex Review Gate"]
+    types: [completed]
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: write
+
+jobs:
+  reconcile:
+    name: مصالحة كل PR مفتوح (كل ٥ دقائق)
+    runs-on: ubuntu-latest
+    steps:
+      - name: إعادة اشتقاق الحقيقة من الحالة الحية لكل PR مفتوح وتصحيح ما يلزم
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          CODEX_BOT_LOGIN: chatgpt-codex-connector[bot]
+          CHECK_NAME: Codex Review Gate
+        run: |
+          set -euo pipefail
+
+          # P1 #3 fix: استخدام query parameters بدلاً من -f لتجنب تحويلها POST.
+          # P1 rotation fix: shuf يخلط الترتيب عشوائياً في كل دورة — يضمن أن كل PR
+          # له فرصة متساوية عند نفاد الرصيد مبكراً، فلا يتأخر PR ما إلى الأبد.
+          PR_NUMBERS=$(gh api "repos/$REPO/pulls?state=open&per_page=100" --paginate --jq '.[].number' | shuf)
+
+          if [ -z "$PR_NUMBERS" ]; then
+            echo "لا توجد طلبات سحب مفتوحة — لا شيء للمصالحة."
+            exit 0
+          fi
+
+          # P1 shared-SHA fix: تتبع نتيجة كل SHA معالَج في هذه الدورة.
+          # إن شارك PR-ان targeting main نفس HEAD SHA، آخر من يُعالَج يكتب فوق الأول
+          # (لأن check-runs commit-scoped) — الإصلاح: لا تُخفِّض أبداً (true→false).
+          # قاعدة الدمج: SHA يُعدّ مراجَعاً إن راجع Codex أيّ PR يحمله، لا جميعها.
+          declare -A SHA_CONCLUSION
+
+          for PR_NUMBER in $PR_NUMBERS; do
+            echo "=== PR #$PR_NUMBER ==="
+
+            # P1 rate-limit fix: فحص معدل الطلبات المتبقي قبل كل PR — /rate_limit معفى من
+            # العدّ رسمياً (GitHub docs). إن انخفض الرصيد عن 100 نُنهي الدورة مبكراً؛
+            # الـPRs المتبقية تُعالَج تلقائياً في الدورة التالية (5 دقائق) بلا "أبدية".
+            RATE_REMAINING=$(gh api rate_limit --jq '.resources.core.remaining' 2>/dev/null || echo "0")
+            if [ "$RATE_REMAINING" -lt 100 ]; then
+              echo "  معدل الطلبات منخفض ($RATE_REMAINING متبقٍ) — إنهاء الدورة مبكراً؛ الـPRs المتبقية تُعالَج في الدورة التالية."
+              break
+            fi
+
+            # شرط سادس: تحقّق فوري أن الـPR ما زال مفتوحاً ولم يُدمج قبل أي عمل عليه.
+            PR_JSON=$(gh api "repos/$REPO/pulls/$PR_NUMBER")
+            PR_STATE=$(echo "$PR_JSON" | jq -r '.state // empty')
+            PR_MERGED=$(echo "$PR_JSON" | jq -r '.merged // false')
+            if [ "$PR_STATE" != "open" ] || [ "$PR_MERGED" = "true" ]; then
+              echo "  متخطى: الحالة=$PR_STATE مدموج=$PR_MERGED — لا كتابة."
+              continue
+            fi
+
+            # P1 base-filter fix: تجاهل PRs التي لا تستهدف main — المسار السريع لا ينشئ
+            # "Codex Review Gate" check-run إلا لـPRs targeting main. إن كان PR آخر يشارك
+            # نفس head SHA ويستهدف فرعاً مختلفاً، معالجته ستُعيد ضبط check-run الصحيح خطأً.
+            PR_BASE=$(echo "$PR_JSON" | jq -r '.base.ref // empty')
+            if [ "$PR_BASE" != "main" ]; then
+              echo "  متخطى: القاعدة=$PR_BASE — المصالحة تخص PRs targeting main فقط."
+              continue
+            fi
+
+            LIVE_HEAD_SHA=$(echo "$PR_JSON" | jq -r '.head.sha // empty')
+            if [ -z "$LIVE_HEAD_SHA" ]; then
+              echo "  متخطى: تعذّرت قراءة head.sha الحيّ."
+              continue
+            fi
+
+            # P1 shared-SHA fix: إن سبق معالجة هذا SHA وكانت النتيجة "مراجَع" — تخطّ فوراً
+            # (check-run مُعيَّن بـsuccess بالفعل، الكتابة فوقه تُفسده لا تُصلحه).
+            if [ "${SHA_CONCLUSION[$LIVE_HEAD_SHA]:-}" = "true" ]; then
+              echo "  متخطى: SHA=$LIVE_HEAD_SHA مراجَع في PR سابق بهذه الدورة — check-run success بالفعل."
+              continue
+            fi
+
+            # شرط ثانٍ: اشتقاق الحقيقة من الحالة الحية فقط — نفس المصادر الثلاثة التي
+            # تعتمدها evaluateCodexReview في codex-review-gate.yml (مراجعات رسمية، تعليقات
+            # مراجعة، تعليقات issue + fallback السلفية-بدمج-فقط)، مُعاد تطبيقها هنا حرفياً
+            # لأن هذا الملف عمداً bash/jq خالص بلا actions/checkout.
+            # P1 #5 fix: استخدام jq -s 'add // []' لدمج صفحات --paginate قبل الفلترة.
+            REVIEWS_JSON=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --paginate | jq -s 'add // []')
+            FORMAL_REVIEW_COUNT=$(echo "$REVIEWS_JSON" | jq --arg sha "$LIVE_HEAD_SHA" --arg bot "$CODEX_BOT_LOGIN" \
+              '[.[] | select(.user.login == $bot and .commit_id == $sha)] | length')
+
+            COMMENTS_JSON=$(gh api "repos/$REPO/pulls/$PR_NUMBER/comments" --paginate | jq -s 'add // []')
+            REVIEW_COMMENT_COUNT=$(echo "$COMMENTS_JSON" | jq --arg sha "$LIVE_HEAD_SHA" --arg bot "$CODEX_BOT_LOGIN" \
+              '[.[] | select(.user.login == $bot and .original_commit_id == $sha)] | length')
+
+            ISSUE_COMMENTS_JSON=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate | jq -s 'add // []')
+            HEAD_SHA_LC=$(echo "$LIVE_HEAD_SHA" | tr '[:upper:]' '[:lower:]')
+            ISSUE_COMMENT_MATCH=$(echo "$ISSUE_COMMENTS_JSON" | jq -r --arg bot "$CODEX_BOT_LOGIN" --arg headlc "$HEAD_SHA_LC" '
+              [.[] | select(.user.login == $bot) |
+                (.body | [scan("Reviewed commit:\\*\\*\\s*`([0-9a-fA-F]{7,40})`")] | map(.[0] | ascii_downcase)) as $shas |
+                select(($shas // []) | any(. as $s | $headlc | startswith($s)))
+              ] | length > 0')
+
+            # P1 #4 fix: merge-only ancestor fallback — نفس منطق codex-review-gate.yml:391-406.
+            # إن راجع Codex commit A ثم أُضيفت للـPR merge commits من main فحسب (لا كود جديد)،
+            # المطابقة المباشرة للـprefix تفشل لأن HEAD تغيّر، لكن A سلف لـHEAD بـmerge-only path.
+            # بدون هذا الـfallback تُعيد المصالحة الدورية ضبط check-run مراجَع على success إلى
+            # in_progress كل 5 دقائق — تعطيل دائم رغم مراجعة صالحة فعلية.
+            if [ "$ISSUE_COMMENT_MATCH" = "false" ]; then
+              BOT_ISSUE_BODIES=$(echo "$ISSUE_COMMENTS_JSON" | jq -r --arg bot "$CODEX_BOT_LOGIN" \
+                '.[] | select(.user.login == $bot) | .body')
+              if [ -n "$BOT_ISSUE_BODIES" ]; then
+                while IFS= read -r SHORT_SHA; do
+                  [ -z "$SHORT_SHA" ] && continue
+                  SHORT_SHA_LC=$(echo "$SHORT_SHA" | tr '[:upper:]' '[:lower:]')
+                  COMPARE_OUT=$(gh api "repos/$REPO/compare/${SHORT_SHA_LC}...${HEAD_SHA_LC}" \
+                    --jq '{status: .status, non_merge: ([.commits[] | select((.parents | length) < 2)] | length)}' \
+                    2>/dev/null || true)
+                  [ -z "$COMPARE_OUT" ] && continue
+                  CMP_STATUS=$(echo "$COMPARE_OUT" | jq -r '.status // empty')
+                  NON_MERGE=$(echo "$COMPARE_OUT" | jq '.non_merge // 1')
+                  if [ "$CMP_STATUS" = "ahead" ] && [ "$NON_MERGE" -eq 0 ]; then
+                    ISSUE_COMMENT_MATCH="true"
+                    echo "  مطابقة سلف (merge-only ancestor): $SHORT_SHA_LC سلف للـHEAD الحالي بلا commits كود جديدة."
+                    break
+                  fi
+                done < <(echo "$BOT_ISSUE_BODIES" | grep -oP 'Reviewed commit:\*\*\s*`\K[0-9a-fA-F]{7,40}' || true)
+              fi
+            fi
+
+            REVIEWED_COUNT=$((FORMAL_REVIEW_COUNT + REVIEW_COMMENT_COUNT))
+            if [ "$ISSUE_COMMENT_MATCH" = "true" ]; then
+              REVIEWED_COUNT=$((REVIEWED_COUNT + 1))
+            fi
+            HAS_VALID_REVIEW=$([ "$REVIEWED_COUNT" -gt 0 ] && echo true || echo false)
+            echo "  head_sha=$LIVE_HEAD_SHA reviewed_count=$REVIEWED_COUNT has_valid_review=$HAS_VALID_REVIEW"
+
+            # شرط رابع: لا POST إطلاقاً — نقرأ فقط check-runs الموجودة فعلاً بهذا الاسم على
+            # نفس head_sha الحيّ. غياب أي واحد يعني idsToPatch فارغة، فلا كتابة إطلاقاً.
+            # P1 #6 fix: filter=all يجلب كل النسخ بما فيها القديمة المكررة (الافتراضي latest يُخفيها).
+            ALL_NAMED_RUNS_JSON=$(gh api "repos/$REPO/commits/$LIVE_HEAD_SHA/check-runs?filter=all" --paginate --jq '.check_runs' | jq -s 'add // []' \
+              | jq --arg name "$CHECK_NAME" '[.[] | select(.name == $name)]')
+
+            IDS_TO_PATCH=$(echo "$ALL_NAMED_RUNS_JSON" | jq -r --argjson reviewed "$HAS_VALID_REVIEW" '
+              ($reviewed) as $r |
+              (if $r then "completed" else "in_progress" end) as $status |
+              (if $r then "success" else null end) as $conclusion |
+              [.[] | select(.status != $status or ((.conclusion // null) != $conclusion)) | .id] | .[]')
+
+            if [ -z "$IDS_TO_PATCH" ]; then
+              echo "  لا حاجة لأي PATCH — كل النسخ الموجودة (إن وُجدت) تطابق الحالة الصحيحة أصلاً."
+              continue
+            fi
+
+            # شرط خامس: تحقّق فوري ثانٍ (حالة + head.sha معاً) مباشرة قبل أي كتابة فعلية —
+            # إن تغيّر أي منهما منذ بداية هذه الدورة، لا كتابة إطلاقاً لهذا الـPR في هذه
+            # الدورة (تُعاد المحاولة تلقائياً بعد ٥ دقائق على الحالة الحية الجديدة).
+            RECHECK_JSON=$(gh api "repos/$REPO/pulls/$PR_NUMBER")
+            RECHECK_STATE=$(echo "$RECHECK_JSON" | jq -r '.state // empty')
+            RECHECK_MERGED=$(echo "$RECHECK_JSON" | jq -r '.merged // false')
+            RECHECK_HEAD_SHA=$(echo "$RECHECK_JSON" | jq -r '.head.sha // empty')
+            if [ "$RECHECK_STATE" != "open" ] || [ "$RECHECK_MERGED" = "true" ] || [ "$RECHECK_HEAD_SHA" != "$LIVE_HEAD_SHA" ]; then
+              echo "  الحالة أو الـHEAD تغيّرا قبل الكتابة (حالة=$RECHECK_STATE مدموج=$RECHECK_MERGED head=$RECHECK_HEAD_SHA) — لا كتابة إطلاقاً في هذه الدورة."
+              continue
+            fi
+
+            if [ "$HAS_VALID_REVIEW" = "true" ]; then
+              PAYLOAD=$(jq -n --arg name "$CHECK_NAME" '{name:$name, status:"completed", conclusion:"success", output:{title:$name, summary:"مصالحة دورية: مراجعة Codex صالحة موجودة على الـHEAD الحالي."}}')
+              TARGET_LABEL="success"
+            else
+              PAYLOAD=$(jq -n --arg name "$CHECK_NAME" '{name:$name, status:"in_progress", output:{title:$name, summary:"مصالحة دورية: لا توجد مراجعة Codex صالحة على الـHEAD الحالي بعد."}}')
+              TARGET_LABEL="in_progress"
+            fi
+
+            for ID in $IDS_TO_PATCH; do
+              echo "  PATCH check-run $ID → $TARGET_LABEL"
+              echo "$PAYLOAD" | gh api "repos/$REPO/check-runs/$ID" --method PATCH --input - >/dev/null
+            done
+
+            # P1 shared-SHA fix: سجّل نتيجة هذا SHA — لا تُخفِّض أبداً (true→false).
+            # إن كان هذا PR مراجَعاً أو كانت النتيجة السابقة true (من PR آخر عولج أولاً
+            # وكان مراجَعاً)، الحالة تبقى true. إن كان غير مراجَع ولا يوجد سابق، سجّل false.
+            PREV="${SHA_CONCLUSION[$LIVE_HEAD_SHA]:-false}"
+            if [ "$HAS_VALID_REVIEW" = "true" ] || [ "$PREV" = "true" ]; then
+              SHA_CONCLUSION[$LIVE_HEAD_SHA]="true"
+            else
+              SHA_CONCLUSION[$LIVE_HEAD_SHA]="false"
+            fi
+          done
