@@ -709,6 +709,24 @@ assert.match(
   /"\$PR_STATE" != "open"[\s\S]{0,60}"\$PR_MERGED" = "true"/,
   'يجب تخطي أي PR أُغلق أو دُمج بلا كتابة إطلاقاً (الشرط السادس)',
 );
+// P1 #3 regression guard: يُمنع استخدام -f مع جلب قائمة الـPRs (يحوّلها POST).
+assert.doesNotMatch(
+  reconcileYml,
+  /gh api "repos\/\$REPO\/pulls" -f state=/,
+  'P1 #3: يجب استخدام query parameters (?state=open) لا -f عند جلب قائمة الـPRs — -f يحوّل الطلب POST',
+);
+// P1 #5 regression guard: يجب دمج صفحات --paginate قبل الفلترة.
+assert.match(
+  reconcileYml,
+  /--paginate \| jq -s 'add \/\/ \[\]'/,
+  'P1 #5: يجب استخدام jq -s add لدمج صفحات --paginate في مصدر واحد قبل الفلترة/العدّ',
+);
+// P1 #4 regression guard: يجب تطبيق merge-only ancestor fallback.
+assert.match(
+  reconcileYml,
+  /ISSUE_COMMENT_MATCH="true"[\s\S]{0,200}merge-only ancestor/,
+  'P1 #4: يجب تطبيق fallback السلفية-بدمج-فقط في المصالحة الدورية — بدونه تُعيد ضبط PRs مراجَعة إلى in_progress كل 5 دقائق',
+);
 
 // 11.1) سيناريو (a): تصادم إنشاء نسختين مكررتين متزامنتين بلا أي حدث لاحق يصححهما —
 //     المصالحة الدورية تُصحِّح كلتا النسختين نحو نفس الحقيقة المُشتقة من الحالة الحية.

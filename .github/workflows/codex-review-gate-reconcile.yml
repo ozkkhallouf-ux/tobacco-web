@@ -45,7 +45,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          PR_NUMBERS=$(gh api "repos/$REPO/pulls" -f state=open -f per_page=100 --paginate --jq '.[].number')
+          # P1 #3 fix: استخدام query parameters بدلاً من -f لتجنب تحويلها POST.
+          PR_NUMBERS=$(gh api "repos/$REPO/pulls?state=open&per_page=100" --paginate --jq '.[].number')
 
           if [ -z "$PR_NUMBERS" ]; then
             echo "لا توجد طلبات سحب مفتوحة — لا شيء للمصالحة."
@@ -72,25 +73,51 @@ jobs:
 
             # شرط ثانٍ: اشتقاق الحقيقة من الحالة الحية فقط — نفس المصادر الثلاثة التي
             # تعتمدها evaluateCodexReview في codex-review-gate.yml (مراجعات رسمية، تعليقات
-            # مراجعة، تعليقات issue)، مُعاد تطبيقها هنا حرفياً لأن هذا الملف عمداً bash/jq
-            # خالص بلا actions/checkout. لا يُطبَّق fallback السلفية-بدمج-فقط هنا عمداً:
-            # أي merge commit يُضاف للـPR هو push فعلي، يُطلِق synchronize فوراً على المسار
-            # السريع — فلا فجوة ضمان تحتاج تغطية هنا لتلك الحالة تحديداً.
-            REVIEWS_JSON=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --paginate)
+            # مراجعة، تعليقات issue + fallback السلفية-بدمج-فقط)، مُعاد تطبيقها هنا حرفياً
+            # لأن هذا الملف عمداً bash/jq خالص بلا actions/checkout.
+            # P1 #5 fix: استخدام jq -s 'add // []' لدمج صفحات --paginate قبل الفلترة.
+            REVIEWS_JSON=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --paginate | jq -s 'add // []')
             FORMAL_REVIEW_COUNT=$(echo "$REVIEWS_JSON" | jq --arg sha "$LIVE_HEAD_SHA" --arg bot "$CODEX_BOT_LOGIN" \
               '[.[] | select(.user.login == $bot and .commit_id == $sha)] | length')
 
-            COMMENTS_JSON=$(gh api "repos/$REPO/pulls/$PR_NUMBER/comments" --paginate)
+            COMMENTS_JSON=$(gh api "repos/$REPO/pulls/$PR_NUMBER/comments" --paginate | jq -s 'add // []')
             REVIEW_COMMENT_COUNT=$(echo "$COMMENTS_JSON" | jq --arg sha "$LIVE_HEAD_SHA" --arg bot "$CODEX_BOT_LOGIN" \
               '[.[] | select(.user.login == $bot and .original_commit_id == $sha)] | length')
 
-            ISSUE_COMMENTS_JSON=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate)
+            ISSUE_COMMENTS_JSON=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate | jq -s 'add // []')
             HEAD_SHA_LC=$(echo "$LIVE_HEAD_SHA" | tr '[:upper:]' '[:lower:]')
             ISSUE_COMMENT_MATCH=$(echo "$ISSUE_COMMENTS_JSON" | jq -r --arg bot "$CODEX_BOT_LOGIN" --arg headlc "$HEAD_SHA_LC" '
               [.[] | select(.user.login == $bot) |
                 (.body | [scan("Reviewed commit:\\*\\*\\s*`([0-9a-fA-F]{7,40})`")] | map(.[0] | ascii_downcase)) as $shas |
                 select(($shas // []) | any(. as $s | $headlc | startswith($s)))
               ] | length > 0')
+
+            # P1 #4 fix: merge-only ancestor fallback — نفس منطق codex-review-gate.yml:391-406.
+            # إن راجع Codex commit A ثم أُضيفت للـPR merge commits من main فحسب (لا كود جديد)،
+            # المطابقة المباشرة للـprefix تفشل لأن HEAD تغيّر، لكن A سلف لـHEAD بـmerge-only path.
+            # بدون هذا الـfallback تُعيد المصالحة الدورية ضبط check-run مراجَع على success إلى
+            # in_progress كل 5 دقائق — تعطيل دائم رغم مراجعة صالحة فعلية.
+            if [ "$ISSUE_COMMENT_MATCH" = "false" ]; then
+              BOT_ISSUE_BODIES=$(echo "$ISSUE_COMMENTS_JSON" | jq -r --arg bot "$CODEX_BOT_LOGIN" \
+                '.[] | select(.user.login == $bot) | .body')
+              if [ -n "$BOT_ISSUE_BODIES" ]; then
+                while IFS= read -r SHORT_SHA; do
+                  [ -z "$SHORT_SHA" ] && continue
+                  SHORT_SHA_LC=$(echo "$SHORT_SHA" | tr '[:upper:]' '[:lower:]')
+                  COMPARE_OUT=$(gh api "repos/$REPO/compare/${SHORT_SHA_LC}...${HEAD_SHA_LC}" \
+                    --jq '{status: .status, non_merge: ([.commits[] | select((.parents | length) < 2)] | length)}' \
+                    2>/dev/null || true)
+                  [ -z "$COMPARE_OUT" ] && continue
+                  CMP_STATUS=$(echo "$COMPARE_OUT" | jq -r '.status // empty')
+                  NON_MERGE=$(echo "$COMPARE_OUT" | jq '.non_merge // 1')
+                  if [ "$CMP_STATUS" = "ahead" ] && [ "$NON_MERGE" -eq 0 ]; then
+                    ISSUE_COMMENT_MATCH="true"
+                    echo "  مطابقة سلف (merge-only ancestor): $SHORT_SHA_LC سلف للـHEAD الحالي بلا commits كود جديدة."
+                    break
+                  fi
+                done < <(echo "$BOT_ISSUE_BODIES" | grep -oP 'Reviewed commit:\*\*\s*`\K[0-9a-fA-F]{7,40}' || true)
+              fi
+            fi
 
             REVIEWED_COUNT=$((FORMAL_REVIEW_COUNT + REVIEW_COMMENT_COUNT))
             if [ "$ISSUE_COMMENT_MATCH" = "true" ]; then
