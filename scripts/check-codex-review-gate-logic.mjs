@@ -844,4 +844,12 @@ assert.deepEqual(planNoRunAtAll.idsToPatch, [], 'لا PATCH ولا POST من ا�
 assert.deepEqual(deriveCanonicalTarget({ hasValidReviewOnLiveHead: true }), { status: 'completed', conclusion: 'success' });
 assert.deepEqual(deriveCanonicalTarget({ hasValidReviewOnLiveHead: false }), { status: 'in_progress', conclusion: null });
 
+// P1 #1 & #2 fix: workflow_run trigger — المصالح يجب أن يشتغل مباشرة بعد كل تشغيل للمسار السريع.
+// Codex يطلب "guaranteed event-driven reconciliation trigger" — workflow_run: [completed] يُحققه.
+assert.match(
+  reconcileYml,
+  /workflow_run[\s\S]{0,200}Codex Review Gate[\s\S]{0,100}completed/,
+  'P1 #1 & #2: يجب إضافة workflow_run trigger على "Codex Review Gate" completed — يضمن تصحيح أي حالة خاطئة بعد كل تشغيل للمسار السريع فوراً',
+);
+
 console.log('codex-review-gate-logic.mjs contract + regression checks passed.');

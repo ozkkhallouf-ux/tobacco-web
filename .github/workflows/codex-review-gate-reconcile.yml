@@ -9,7 +9,12 @@ name: Codex Review Gate — مصالحة دورية مضمونة
 #   الصفر في كل دورة من الحالة الحية فقط (head.sha الحيّ للـPR + مراجعة Codex عليه) — لا
 #   generation ولا حالة check-run موجودة تُستخدَم كمصدر حقيقة إطلاقاً. هذا يضمن أن أي
 #   حالة خاطئة عالقة (سباق إنشاء، PATCH متأخر، أو أي انحراف آخر) تُصحَّح خلال ٥ دقائق
-#   كحدّ أقصى، بصرف النظر عن سبب الخطأ ودون انتظار أي push/تعليق/مراجعة لاحقة.
+#   كحدّ أقصى.
+#
+#   P1 #1 & #2 fix (2026-09-01): إضافة workflow_run trigger على "Codex Review Gate" completed —
+#   يضمن اشتغال المصالح فوراً بعد كل تشغيل للمسار السريع (لا 5 دقائق انتظاراً). سباق
+#   إنشاء النسختين (P1 #1) وسباق PATCH الأقدم يطمس الأحدث (P1 #2) كلاهما يُصحَّحان
+#   بأول دورة مصالحة تلي التشغيل المُسبِّب للحالة الخاطئة — مضمونة event-driven.
 #
 #   قرار متعمَّد (شرط رابع صريح من المستخدم): لا PATCH إلا على check-run *موجود فعلاً* —
 #   لا POST من هذا الملف إطلاقاً. راجع التبرير الكامل في تعليق "إصلاح جوهري حادي عشر" في
@@ -25,6 +30,15 @@ on:
   schedule:
     - cron: '*/5 * * * *'
   workflow_dispatch: {}
+  # P1 #1 & #2 fix: guaranteed event-driven reconciliation trigger after every fast-path run.
+  # Codex flagged that codex-review-gate.yml race conditions leave stale in_progress runs with
+  # no guaranteed follow-up. This trigger fires the reconciler as soon as codex-review-gate.yml
+  # completes (any conclusion), so any stale state is repaired within seconds — not 5 minutes.
+  # Combined with the cron backstop above, this satisfies both P1 #1 (concurrent POST race) and
+  # P1 #2 (PATCH ordering race): whatever stale state either race leaves, this run corrects it.
+  workflow_run:
+    workflows: ["Codex Review Gate"]
+    types: [completed]
 
 permissions:
   contents: read
