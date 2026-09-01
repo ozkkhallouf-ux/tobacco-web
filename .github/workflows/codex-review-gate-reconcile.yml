@@ -56,6 +56,15 @@ jobs:
           for PR_NUMBER in $PR_NUMBERS; do
             echo "=== PR #$PR_NUMBER ==="
 
+            # P1 rate-limit fix: فحص معدل الطلبات المتبقي قبل كل PR — /rate_limit معفى من
+            # العدّ رسمياً (GitHub docs). إن انخفض الرصيد عن 100 نُنهي الدورة مبكراً؛
+            # الـPRs المتبقية تُعالَج تلقائياً في الدورة التالية (5 دقائق) بلا "أبدية".
+            RATE_REMAINING=$(gh api rate_limit --jq '.resources.core.remaining' 2>/dev/null || echo "0")
+            if [ "$RATE_REMAINING" -lt 100 ]; then
+              echo "  معدل الطلبات منخفض ($RATE_REMAINING متبقٍ) — إنهاء الدورة مبكراً؛ الـPRs المتبقية تُعالَج في الدورة التالية."
+              break
+            fi
+
             # شرط سادس: تحقّق فوري أن الـPR ما زال مفتوحاً ولم يُدمج قبل أي عمل عليه.
             PR_JSON=$(gh api "repos/$REPO/pulls/$PR_NUMBER")
             PR_STATE=$(echo "$PR_JSON" | jq -r '.state // empty')

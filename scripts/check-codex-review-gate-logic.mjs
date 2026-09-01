@@ -709,6 +709,12 @@ assert.match(
   /"\$PR_STATE" != "open"[\s\S]{0,60}"\$PR_MERGED" = "true"/,
   'يجب تخطي أي PR أُغلق أو دُمج بلا كتابة إطلاقاً (الشرط السادس)',
 );
+// P1 rate-limit regression guard: يجب التحقق من رصيد الـrate-limit قبل كل PR وكسر الحلقة عند الانخفاض.
+assert.match(
+  reconcileYml,
+  /rate_limit[\s\S]{0,300}RATE_REMAINING[\s\S]{0,200}break/,
+  'P1 rate-limit: يجب فحص رصيد الطلبات قبل كل PR والخروج مبكراً عوضاً عن الإخفاق بـset -e',
+);
 // P1 #3 regression guard: يُمنع استخدام -f مع جلب قائمة الـPRs (يحوّلها POST).
 assert.doesNotMatch(
   reconcileYml,
