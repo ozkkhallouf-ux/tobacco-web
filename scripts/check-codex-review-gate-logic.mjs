@@ -471,7 +471,7 @@ assert.doesNotMatch(
 //    مكررة أخرى تُقرأ نتيجتها، فلا حالة غير مؤكدة تتحول success عبر هذه الآلية أبداً.
 assert.match(
   yml,
-  /ALL_NAMED_RUNS_JSON=\$\(gh api "repos\/\$REPO\/commits\/\$HEAD_SHA\/check-runs" --paginate[\s\S]{0,250}select\(\.name == \$name\)/,
+  /ALL_NAMED_RUNS_JSON=\$\(gh api "repos\/\$REPO\/commits\/\$HEAD_SHA\/check-runs\?filter=all" --paginate[\s\S]{0,250}select\(\.name == \$name\)/,
   'يجب مسح كل check-runs الحاملة اسم "Codex Review Gate" على نفس head_sha مرة واحدة قبل الكتابة لخدمة اختيار الفائز وكشف النسخ المكررة معاً',
 );
 assert.match(
@@ -720,6 +720,17 @@ assert.match(
   reconcileYml,
   /--paginate \| jq -s 'add \/\/ \[\]'/,
   'P1 #5: يجب استخدام jq -s add لدمج صفحات --paginate في مصدر واحد قبل الفلترة/العدّ',
+);
+// P1 #6 regression guard: يجب استخدام filter=all عند جلب check-runs لرؤية النسخ المكررة القديمة.
+assert.match(
+  reconcileYml,
+  /check-runs\?filter=all/,
+  'P1 #6: يجب إضافة filter=all عند جلب check-runs — الافتراضي latest يُخفي النسخ المكررة القديمة',
+);
+assert.match(
+  yml,
+  /check-runs\?filter=all/,
+  'P1 #6: codex-review-gate.yml أيضاً يجب أن يستخدم filter=all لنفس السبب',
 );
 // P1 #4 regression guard: يجب تطبيق merge-only ancestor fallback.
 assert.match(

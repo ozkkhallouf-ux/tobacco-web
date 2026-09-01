@@ -464,7 +464,8 @@ jobs:
           # مسح واحد لكل check-runs الحاملة هذا الاسم على هذا head_sha — يخدم معاً اختيار
           # هدف الكتابة (EXISTING_ID) وكشف أي نسخ مكررة (ALL_NAMED_RUNS_JSON يُعاد استخدامه
           # لاحقاً بعد كتابتنا، بلا استعلام ثانٍ). الفائز يُختار بالـgeneration لا بالـid.
-          ALL_NAMED_RUNS_JSON=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs" --paginate \
+          # filter=all: يجلب كل النسخ بما فيها المكررة القديمة (الافتراضي latest يُخفيها — P1 #6).
+          ALL_NAMED_RUNS_JSON=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs?filter=all" --paginate \
             | jq -s --arg name "$NAME" '[.[].check_runs[] | select(.name == $name)]')
           WINNER_JSON=$(echo "$ALL_NAMED_RUNS_JSON" | jq '
             def gen_key(g): (g // "0.0") | split(".") | map(tonumber? // 0);

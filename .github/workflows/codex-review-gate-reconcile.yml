@@ -128,7 +128,8 @@ jobs:
 
             # شرط رابع: لا POST إطلاقاً — نقرأ فقط check-runs الموجودة فعلاً بهذا الاسم على
             # نفس head_sha الحيّ. غياب أي واحد يعني idsToPatch فارغة، فلا كتابة إطلاقاً.
-            ALL_NAMED_RUNS_JSON=$(gh api "repos/$REPO/commits/$LIVE_HEAD_SHA/check-runs" --paginate --jq '.check_runs' | jq -s 'add // []' \
+            # P1 #6 fix: filter=all يجلب كل النسخ بما فيها القديمة المكررة (الافتراضي latest يُخفيها).
+            ALL_NAMED_RUNS_JSON=$(gh api "repos/$REPO/commits/$LIVE_HEAD_SHA/check-runs?filter=all" --paginate --jq '.check_runs' | jq -s 'add // []' \
               | jq --arg name "$CHECK_NAME" '[.[] | select(.name == $name)]')
 
             IDS_TO_PATCH=$(echo "$ALL_NAMED_RUNS_JSON" | jq -r --argjson reviewed "$HAS_VALID_REVIEW" '
