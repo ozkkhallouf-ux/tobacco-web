@@ -327,7 +327,7 @@
     while (ri < rq.length || li < lq.length) {
       const pageIndex = pages.length;
       const budgetForThisPage = pageIndex === 0 ? reducedFirstPageBudget : fullBudget;
-      const limit = Math.max(0, budgetForThisPage - safetyMarginPx);
+      let limit = Math.max(0, budgetForThisPage - safetyMarginPx);
       const page = { right: [], left: [], rightHeight: 0, leftHeight: 0 };
 
       // عمود اليمين: من طابور اليمين أولاً، ثم فيضان من طابور اليسار إن نفد الأول.
@@ -360,12 +360,28 @@
         }
       }
 
-      // صفحة فارغة تماماً مع بقاء مجموعات بالطابور تحدث حين تكون ميزانية هذه
-      // الصفحة تحديداً مخفّضة لصفر تقريباً (مثال: صفحة أولى تحتها رأس بطول
-      // الصفحة كلها) — لا نتوقف هنا: ندفع الصفحة الفارغة وننتقل للصفحة التالية
-      // (ميزانية كاملة)، فتُقاس المجموعة هناك ولا تُفقد ولا تُقصّ فوق الرأس.
-      // التوقف الآمن الوحيد هو حين لا تتقدّم الفهارس إطلاقاً حتى بميزانية كاملة،
-      // وهذا مستحيل عملياً لأن oversized تُستبعد مسبقاً وفق fullBudget-safetyMarginPx.
+      // إن كانت هذه الصفحة الأولى وستخرج فارغة تماماً رغم وجود مجموعات في الطابور،
+      // نُعيد ملءها بالميزانية الكاملة بدل دفع صفحة فارغة: الرأس في HTML منفصل
+      // فوق الأعمدة (وليس داخل عمود)، فلا يتعارض مع ملء العمود بالكامل — والمتصفح
+      // يدير الفيضان الطبيعي عند الطباعة دون كسر أي مجموعة (break-inside:avoid).
+      // قبل الإصلاح: الصفحة الفارغة كانت تُنتج break-before:page قبل أي محتوى.
+      if (pageIndex === 0 && page.right.length === 0 && page.left.length === 0 && (ri < rq.length || li < lq.length)) {
+        limit = Math.max(0, fullBudget - safetyMarginPx);
+        for (;;) {
+          if (ri < rq.length && page.rightHeight + rq[ri].h <= limit + 1e-6) {
+            page.right.push(rq[ri].group); page.rightHeight += rq[ri].h; ri += 1;
+          } else if (ri >= rq.length && li < lq.length && page.rightHeight + lq[li].h <= limit + 1e-6) {
+            page.right.push(lq[li].group); page.rightHeight += lq[li].h; li += 1;
+          } else { break; }
+        }
+        for (;;) {
+          if (li < lq.length && page.leftHeight + lq[li].h <= limit + 1e-6) {
+            page.left.push(lq[li].group); page.leftHeight += lq[li].h; li += 1;
+          } else if (li >= lq.length && ri < rq.length && page.leftHeight + rq[ri].h <= limit + 1e-6) {
+            page.left.push(rq[ri].group); page.leftHeight += rq[ri].h; ri += 1;
+          } else { break; }
+        }
+      }
       balancePageColumns(page, limit, heights, balanceThresholdPx);
       pages.push(page);
     }

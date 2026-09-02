@@ -2514,7 +2514,9 @@ function buildMeasuredBulletinLayout(template, groups, renderOptions) {
     const header = probe.querySelector(".price-list-header");
     const subheader = probe.querySelector(".price-list-subheader");
     const stackEl = probe.querySelector(".price-list-column-stack");
-    const headerHeightPx = (header?.getBoundingClientRect().height || 0) + (subheader?.getBoundingClientRect().height || 0);
+    const headerHeightPx = (header?.getBoundingClientRect().height || 0)
+      + (subheader?.getBoundingClientRect().height || 0)
+      + (subheader ? (parseFloat(getComputedStyle(subheader).marginBottom) || 0) : 0);
     const columnWidthPx = stackEl?.getBoundingClientRect().width || 385;
 
     const measureStack = document.createElement("div");
