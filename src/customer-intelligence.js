@@ -636,8 +636,9 @@
 
     for (const record of records.values()) {
       const rows = record.rows;
-      const currencies = new Set(rows.map((row) => row.currency).filter(Boolean));
-      // ممنوع جمع عملات مختلفة. غياب العملة يعني عملة الأساس (USD) الموثّقة.
+      // غياب العملة = عملة الأساس. نطبّع قبل Set لا نحذف: null بجانب SYP يجب
+      // أن يكشف التنوع (USD+SYP)، لا أن يختفي ويجعل SYP وحيدة فتُجمع مبالغ بعملتين.
+      const currencies = new Set(rows.map((row) => row.currency || CONFIG.baseCurrency));
       const currencyMixed = currencies.size > 1;
       const currency = currencies.size === 1 ? [...currencies][0] : CONFIG.baseCurrency;
 
@@ -975,8 +976,10 @@
       unknownCreditLimitCount: countFlag("credit_limit_unknown"),
       insufficientDataCount: active.filter((row) => row.primarySegment === "insufficient_data").length,
       ambiguousIdentityCount: countFlag("ambiguous_identity"),
-      netSales30d: round(active.reduce((sum, row) => sum + (row.netSales30d ?? 0), 0), 3),
-      netSalesPrevious30d: round(active.reduce((sum, row) => sum + (row.netSalesPrevious30d ?? 0), 0), 3),
+      // تجميع المبيعات بعملة الأساس فقط — ممنوع إضافة مبالغ SYP إلى إجمالي USD.
+      // الأرصدة (totalReceivables) دائماً بعملة الأساس (من الأمين المحاسبي).
+      netSales30d: round(active.filter((row) => row.currency === CONFIG.baseCurrency).reduce((sum, row) => sum + (row.netSales30d ?? 0), 0), 3),
+      netSalesPrevious30d: round(active.filter((row) => row.currency === CONFIG.baseCurrency).reduce((sum, row) => sum + (row.netSalesPrevious30d ?? 0), 0), 3),
       totalReceivables: round(active.reduce((sum, row) => sum + Math.max(0, row.currentBalance), 0), 3),
       currency: CONFIG.baseCurrency
     };

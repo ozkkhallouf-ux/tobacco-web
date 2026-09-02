@@ -32,7 +32,7 @@
 
   const escape = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[char]));
   const isNumber = (value) => typeof value === "number" && Number.isFinite(value);
-  const money = (value) => (isNumber(value) ? `${value.toLocaleString("en-US", { maximumFractionDigits: 0 })} $` : "—");
+  const money = (value, currency = "USD") => (isNumber(value) ? `${value.toLocaleString("en-US", { maximumFractionDigits: 0 })} ${currency}` : "—");
   const percent = (value) => (isNumber(value) ? `${value > 0 ? "+" : ""}${value.toFixed(1)}%` : "—");
   const count = (value) => (isNumber(value) ? value.toLocaleString("en-US") : "—");
   const day = (value) => (value ? escape(value) : "—");
@@ -261,8 +261,8 @@
       <tr class="ci-row ${view.selectedId === row.customerId ? "selected" : ""}" data-ci-customer="${escape(row.customerId)}" tabindex="0">
         <td class="ci-name">${escape(row.customerName)}</td>
         <td><span class="ci-segment ${escape(row.primarySegment)}">${escape(SEGMENT_LABELS[row.primarySegment] || row.primarySegment)}</span></td>
-        <td dir="ltr">${money(row.netSales30d)}</td>
-        <td dir="ltr">${money(row.netSalesPrevious30d)}</td>
+        <td dir="ltr">${money(row.netSales30d, row.currency)}</td>
+        <td dir="ltr">${money(row.netSalesPrevious30d, row.currency)}</td>
         <td dir="ltr" class="${trendClass}">${escape(trendText)}</td>
         <td dir="ltr">${day(row.lastPurchaseAt)}</td>
         <td dir="ltr">${count(row.daysSinceLastPurchase)}</td>
@@ -277,7 +277,7 @@
     if (!row) return `<section class="panel ci-detail"><h3>تفاصيل الزبون</h3><p class="muted">اختر زبوناً من الجدول لعرض تحليله.</p></section>`;
 
     const items = row.topItems.length
-      ? `<ol class="ci-items">${row.topItems.map((item) => `<li><span>${escape(item.itemName || "صنف")}</span><span dir="ltr">${money(item.netValue)} · ${item.netQty.toLocaleString("en-US", { maximumFractionDigits: 2 })}</span></li>`).join("")}</ol>`
+      ? `<ol class="ci-items">${row.topItems.map((item) => `<li><span>${escape(item.itemName || "صنف")}</span><span dir="ltr">${money(item.netValue, row.currency)} · ${item.netQty.toLocaleString("en-US", { maximumFractionDigits: 2 })}</span></li>`).join("")}</ol>`
       : `<p class="muted">لا أصناف ضمن النافذة المتاحة.</p>`;
 
     const identityNote = row.customerGuid
@@ -287,14 +287,14 @@
     const facts = [
       ["آخر شراء", `${day(row.lastPurchaseAt)}${isNumber(row.daysSinceLastPurchase) ? ` (منذ ${row.daysSinceLastPurchase} يوماً)` : ""}`],
       ["أول شراء مرصود", day(row.firstPurchaseAt)],
-      ["صافي مبيعات 30 يوم", money(row.netSales30d)],
-      ["صافي الفترة السابقة", money(row.netSalesPrevious30d)],
+      ["صافي مبيعات 30 يوم", money(row.netSales30d, row.currency)],
+      ["صافي الفترة السابقة", money(row.netSalesPrevious30d, row.currency)],
       ["التغير", isNumber(row.purchaseTrend.percent) ? percent(row.purchaseTrend.percent) : "—"],
-      ["مبيعات قبل المرتجعات", money(row.sales30d)],
-      ["المرتجعات (30 يوم)", money(row.returns30d)],
+      ["مبيعات قبل المرتجعات", money(row.sales30d, row.currency)],
+      ["المرتجعات (30 يوم)", money(row.returns30d, row.currency)],
       ["عدد الفواتير (30 يوم)", count(row.invoiceCount30d)],
       ["عدد الفواتير (السابقة)", count(row.invoiceCountPrevious30d)],
-      ["متوسط الفاتورة", money(row.averageInvoice30d)],
+      ["متوسط الفاتورة", money(row.averageInvoice30d, row.currency)],
       ["الرصيد الحالي", money(row.currentBalance)],
       ["حد الائتمان", row.creditLimit === null ? "غير محدد" : `${money(row.creditLimit)} (${escape(row.creditLimitSource === "approved" ? "معتمد داخلياً" : "من الأمين")})`],
       ["نسبة استخدام الائتمان", isNumber(row.creditUsagePercent) ? `${row.creditUsagePercent}%` : "—"],

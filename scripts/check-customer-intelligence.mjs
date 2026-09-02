@@ -618,4 +618,125 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   process.exit(0);
 }
 
-console.log(`ذكاء الزبائن: 25 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
+// ---------------------------------------------------------------------------
+// 26) Codex P1 regression — عملة null بجانب SYP تُكشَف كتنوع لا تختفي
+// (Fix #2: تطبيع العملة قبل Set بدلاً من filter(Boolean))
+// ---------------------------------------------------------------------------
+{
+  // بناء معزول بزبون واحد: فاتورة بلا حقل currency + فاتورة صريحة SYP.
+  // قبل الإصلاح: filter(Boolean) يحذف null، تبقى {"SYP"} وحيدة، currencyMixed=false
+  // وتُضاف مبالغ "USD" الوهمية إلى SYP خطأً.
+  // بعد الإصلاح: null → CONFIG.baseCurrency (USD)، الـSet = {"USD","SYP"}، currencyMixed=true.
+  function buildIsolated(invoiceList, name = "isolated") {
+    return engine.build({
+      invoicesReport: {
+        source: "ameen_customer_invoices",
+        created_at: REFERENCE_ISO,
+        summary: { periodDays: 60, fromDate: FROM_DATE, customers: 1, bills: 0, syncedAt: REFERENCE_ISO },
+        items: [{ name, invoices: invoiceList, truncated: false }]
+      },
+      balancesReport: {
+        source: "ameen_customer_balances",
+        created_at: REFERENCE_ISO,
+        summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: 1 },
+        items: [{ key: engine.normalizeName(name), name, balance: 0, creditLimit: 0, remainingLimit: 0, status: "clear", customerGuid: "0000-26", customerAccountGuid: "0000-26", isSupplier: false, recentPayments: [], recentMovements: [] }]
+      },
+      movementsReport: null,
+      creditLimits: [],
+      now: NOW
+    });
+  }
+
+  const nullPlusSyp = buildIsolated([
+    invoice("2026-08-10", 500, {}),                           // بلا currency → يُطبَّع USD
+    invoice("2026-08-20", 3000000, { currency: "SYP" })
+  ]);
+  const row26 = nullPlusSyp.customers.find((r) => !r.isSupplier);
+  assert.ok(row26, "test 26: يجب أن يُبنى سجل للزبون");
+  assert.equal(row26.currencyMixed, true,  "test 26: null+SYP يجب أن يُكشَف كتنوع عملة (currencyMixed=true)");
+  assert.equal(row26.netSales30d,   null,  "test 26: لا يجوز جمع مبالغ بعملتين مختلفتين");
+  assert.ok(row26.flags.includes("mixed_currency"), "test 26: flag mixed_currency يجب أن يُرفع");
+
+  // تأكيد عكسي: فاتورة بلا currency وحدها = عملة الأساس (USD)، لا تنوع.
+  const nullOnly = buildIsolated([invoice("2026-08-10", 500, {}), invoice("2026-08-20", 800, {})], "nullOnly");
+  const row26b = nullOnly.customers.find((r) => !r.isSupplier);
+  assert.equal(row26b.currencyMixed, false, "test 26b: فواتير بلا عملة وحدها = USD، لا تنوع");
+  assert.equal(row26b.currency,      "USD", "test 26b: العملة الافتراضية يجب أن تكون CONFIG.baseCurrency");
+}
+
+// ---------------------------------------------------------------------------
+// 27) Codex P1 regression — الإجمالي في summary لا يخلط عملات مختلفة
+// (Fix #3: تصفية active بعملة الأساس فقط لـnetSales30d/netSalesPrevious30d)
+// ---------------------------------------------------------------------------
+{
+  // زبون USD (100$) + زبون SYP (1,000,000 ل.س): الإجمالي يجب أن يعكس 100 فقط.
+  function buildTwoCurrencies() {
+    const mkCustomer = (name, guid, invoiceList) => ({
+      name,
+      guid,
+      balance: 0,
+      creditLimit: 0,
+      remainingLimit: 0,
+      status: "clear",
+      customerGuid: guid,
+      customerAccountGuid: guid,
+      isSupplier: false,
+      recentPayments: [],
+      recentMovements: []
+    });
+    return engine.build({
+      invoicesReport: {
+        source: "ameen_customer_invoices",
+        created_at: REFERENCE_ISO,
+        summary: { periodDays: 60, fromDate: FROM_DATE, customers: 2, bills: 0, syncedAt: REFERENCE_ISO },
+        items: [
+          { name: "زبون دولار",  invoices: [invoice("2026-08-10", 100, { currency: "USD" })],     truncated: false },
+          { name: "زبون ليرة",   invoices: [invoice("2026-08-10", 1000000, { currency: "SYP" })], truncated: false }
+        ]
+      },
+      balancesReport: {
+        source: "ameen_customer_balances",
+        created_at: REFERENCE_ISO,
+        summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: 2 },
+        items: [
+          mkCustomer("زبون دولار", "0000-27a"),
+          mkCustomer("زبون ليرة",  "0000-27b")
+        ]
+      },
+      movementsReport: null,
+      creditLimits: [],
+      now: NOW
+    });
+  }
+
+  const r27 = buildTwoCurrencies();
+  assert.equal(r27.summary.netSales30d, 100,
+    "test 27: الإجمالي يجب أن يعكس USD فقط (100)، لا مزجاً مع SYP (1,100,100 خطأ)");
+  assert.equal(r27.summary.currency, "USD", "test 27: عملة الإجمالي يجب أن تبقى USD");
+}
+
+// ---------------------------------------------------------------------------
+// 28) Codex P1 regression — money() في الواجهة يمرّر row.currency لا $ ثابت
+// (Fix #1: تحقق بنيوي أن الـformatter يستقبل معامل العملة ويُستخدم صح)
+// ---------------------------------------------------------------------------
+{
+  const viewSrc = readFileSync(new URL("../src/customer-intelligence-view.js", import.meta.url), "utf8");
+  assert.ok(
+    /const money = \(value, currency/.test(viewSrc),
+    "test 28: money() يجب أن يقبل معامل currency — لا عملة ثابتة مُلصَقة"
+  );
+  assert.ok(
+    /money\(row\.netSales30d, row\.currency\)/.test(viewSrc),
+    "test 28: مبيعات 30 يوم في الجدول يجب أن تمرّر row.currency إلى money()"
+  );
+  assert.ok(
+    /money\(row\.netSalesPrevious30d, row\.currency\)/.test(viewSrc),
+    "test 28: مبيعات الفترة السابقة في الجدول يجب أن تمرّر row.currency إلى money()"
+  );
+  assert.ok(
+    !/money\(row\.netSales30d\)/.test(viewSrc),
+    "test 28: لا يجوز استدعاء money(row.netSales30d) بدون تمرير العملة"
+  );
+}
+
+console.log(`ذكاء الزبائن: 28 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
