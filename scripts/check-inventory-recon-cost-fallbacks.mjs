@@ -24,7 +24,7 @@ const CANONICAL_FILE = 'inventory-reconciliation-table.sql';
 const MIGRATION_FILE = '20260831051500_fix_inventory_recon_match_key_fallbacks.sql';
 
 const canonical = await readFile(path.join(repoRoot, 'supabase', CANONICAL_FILE), 'utf8');
-const migration = await readFile(path.join(repoRoot, 'supabase', 'migrations', MIGRATION_FILE), 'utf8');
+const migration = await readFile(path.join(repoRoot, 'supabase', 'migrations', 'superseded', MIGRATION_FILE), 'utf8');
 
 // نُسقط تعليقات السطر الكامل قبل أي فحص على SQL حيّ، لأن رؤوس الملفات هنا
 // تقتبس الصيغة المعطوبة القديمة حرفياً للتوثيق (نفس عُرف check-expense-entries-security).

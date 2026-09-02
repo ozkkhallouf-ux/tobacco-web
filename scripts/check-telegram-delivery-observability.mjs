@@ -14,7 +14,7 @@ import path from 'node:path';
 // أي انزلاق نحو retry أو حالات جديدة أو مساس بـdedupe يجب أن يسقط هنا، لأن
 // المرحلة ب لم تُصمَّم بعد وبياناتها لم تُجمع.
 const REFERENCE = 'supabase/telegram-notifications.sql';
-const MIGRATION = 'supabase/migrations/20260831120000_telegram_delivery_observability.sql';
+const MIGRATION = 'supabase/migrations/superseded/20260831120000_telegram_delivery_observability.sql';
 const TESTS = 'supabase/tests/telegram-delivery-audit.sql';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');

@@ -16,7 +16,7 @@ const CANONICAL_FILE = 'expense-entries-table.sql';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const migrationSql = await readFile(
-  path.join(repoRoot, 'supabase', 'migrations', MIGRATION_FILE),
+  path.join(repoRoot, 'supabase', 'migrations', 'superseded', MIGRATION_FILE),
   'utf8',
 );
 const canonicalSql = await readFile(

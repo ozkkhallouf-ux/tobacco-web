@@ -35,3 +35,6 @@ ios-sideload-lab/__pycache__/
 tmp/
 *.bak
 *.bak[0-9]
+
+# Supabase CLI local state
+supabase/.temp/
