@@ -94,9 +94,10 @@ function group(name) {
   const groups = [{ name: "ماستر", items: [{ name: "أ", unit: "ك", price: "$1" }] }];
   const heights = new Map([["ماستر", 100]]);
   const layout = template.layoutGroupsMeasured(groups, heights, { pageWidthPx: 794, headerHeightPx: 1122, safetyMarginPx: 6 });
-  // ميزانية صفحة1 = ارتفاع الصفحة(~1122) - الرأس(1122) = ~0، فالمجموعة (100px) تفيض لصفحة ثانية
-  check("ميزانية الصفحة الأولى المخفّضة بالرأس: المجموعة انتقلت لصفحة تالية لا تُقصّ فوق الرأس",
-    layout.mainPages.length >= 2 && layout.mainPages[1].right.some((g) => g.name === "ماستر"));
+  // ميزانية صفحة1 = ارتفاع الصفحة(~1122) - الرأس(1122) = ~0، لكن آلية الإنقاذ
+  // تُعيد ملء الصفحة الأولى بالميزانية الكاملة — المجموعة تبقى في الصفحة الأولى لا تنتقل لثانية
+  check("ميزانية مخفّضة لصفر: آلية الإنقاذ تضع المجموعة في الصفحة الأولى لا الثانية",
+    layout.mainPages[0].right.some((g) => g.name === "ماستر") || layout.mainPages[0].left.some((g) => g.name === "ماستر"));
 }
 
 // --- سيناريو 7 (قاعدة التوازن — العطل الحقيقي المُبلَّغ من المستخدم): تصنيف علامة
@@ -136,6 +137,19 @@ function group(name) {
   const heights = new Map([["أ", 994], ["ب", 994]]);
   const { pages } = template.packGroupsIntoBalancedPages(groups, [], heights, { fullBudget: budget }, 6);
   check("لا فيضان بعد التوازن: العمودان بقيا كما وُزّعا دون نقل غير آمن", pages[0]?.right.length === 1 && pages[0]?.left.length === 1);
+}
+
+// --- سيناريو 9 (حارس الانحدار — الإصلاح الجديد): الصفحة الأولى لا تخرج فارغة
+// أبداً حين تتوفر مجموعات — حتى حين يكون الرأس بطول الصفحة كاملاً. ---
+{
+  const groups = [{ name: "ماستر", items: [{ name: "أ", unit: "ك", price: "$1" }] }];
+  const heights = new Map([["ماستر", 100]]);
+  const layout = template.layoutGroupsMeasured(groups, heights, { pageWidthPx: 794, headerHeightPx: 1122, safetyMarginPx: 6 });
+  const firstPage = layout.mainPages[0];
+  check("لا صفحة أولى فارغة: mainPages[0] يحمل مجموعات حين تتوفر بيانات",
+    firstPage && (firstPage.right.length + firstPage.left.length) > 0);
+  check("لا صفحة أولى فارغة: ماستر في الصفحة الأولى لا الثانية",
+    firstPage?.right.some((g) => g.name === "ماستر") || firstPage?.left.some((g) => g.name === "ماستر"));
 }
 
 if (failed) {
