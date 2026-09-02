@@ -295,6 +295,8 @@ assert.equal(result.dataAvailability.coverageDays, 61);
   assert.equal(row.lastPurchaseAt, null);
   assert.equal(row.daysSinceLastPurchase, null);
   assert.ok(row.flags.includes("no_purchases_in_window"));
+  assert.ok(!row.flags.includes("cadence_unknown"),
+    "من لا مشتريات له لا يحتاج تنبيهين يقولان الشيء نفسه");
   assert.equal(row.primarySegment, "insufficient_data", "غياب أي فاتورة لا يبرّر ادعاء تصنيف تجاري");
 }
 
