@@ -9,7 +9,7 @@ function section(source, start, end) {
 }
 
 const sql = readFileSync("supabase/smart-inventory.sql", "utf8");
-const isolationSql = readFileSync("supabase/migrations/20260823084956_smart_inventory_counter_isolation.sql", "utf8");
+const isolationSql = readFileSync("supabase/migrations/superseded/20260823084956_smart_inventory_counter_isolation.sql", "utf8");
 const app = readFileSync("src/app.js", "utf8");
 const client = readFileSync("src/supabase-client.js", "utf8");
 const moduleSource = readFileSync("src/smart-inventory.js", "utf8");
