@@ -1,0 +1,14 @@
+{
+  "name": "ameen-autoprint",
+  "version": "1.0.0",
+  "description": "طباعة فواتير برنامج الأمين تلقائياً — جملة على كانون A4 / مركز على XPrinter 80mm",
+  "main": "watcher.js",
+  "scripts": {
+    "start": "node watcher.js",
+    "list-printers": "node -e \"const { execSync } = require('child_process'); console.log(execSync('powershell -Command \"Get-Printer | Select-Object Name, PortName | Format-Table -AutoSize\"').toString());\""
+  },
+  "dependencies": {
+    "mssql": "^11.0.1",
+    "puppeteer": "^22.0.0"
+  }
+}

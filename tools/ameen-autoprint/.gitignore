@@ -1,0 +1,7 @@
+node_modules/
+last-printed.json
+logs/
+run-watcher.bat
+bin/SumatraPDF.exe
+*.pdf
+*.tmp
