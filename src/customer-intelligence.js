@@ -817,7 +817,10 @@
       if (isGrowing) flags.push("growing");
       if (noPurchasesInWindow) flags.push("no_purchases_in_window");
       if (!window.previousWindowCovered) flags.push("insufficient_history");
-      if (!draft.cadence.cadenceTrusted && draft.usableSales) flags.push("cadence_unknown");
+      // «النمط غير محسوب» يعني تعذّر قياسه رغم وجود مشتريات. من لا مشتريات له
+      // أصلاً يكفيه no_purchases_in_window — وإلا صار كل سجل خامل يحمل تنبيهين
+      // يقولان الشيء نفسه.
+      if (!draft.cadence.cadenceTrusted && draft.usableSales && draft.saleDays.length > 0) flags.push("cadence_unknown");
       if (draft.combined.returns > draft.combined.sales && draft.combined.billCount > 0) flags.push("returns_exceed_sales");
       if (draft.credit.creditStatus === "over_limit") flags.push("over_credit_limit");
       if (draft.credit.creditStatus === "near_limit") flags.push("near_credit_limit");
