@@ -363,13 +363,16 @@
         }
       }
 
-      // إن كانت هذه الصفحة الأولى فارغة أو شبه فارغة (أطول عمود < 50% من الميزانية
-      // المخفَّضة) رغم وجود مجموعات في الطابور، نُعيد التوزيع بالميزانية الكاملة:
-      // الرأس في HTML منفصل فوق الأعمدة (وليس داخلها)، فالمساحة الفعلية أكبر من
-      // الميزانية المخفَّضة — والمتصفح يدير الفيضان الطبيعي دون كسر أي مجموعة
-      // (break-inside:avoid). إعادة ضبط المؤشرات ضرورية لإعادة تعبئة الأعمدة من بدايتها.
+      // إن كانت هذه الصفحة الأولى فارغة تماماً (ميزانية = 0 أو الرأس يملأ الصفحة كلها)
+      // أو شبه فارغة (أطول عمود < 50% من الميزانية المخفَّضة) رغم وجود مجموعات في
+      // الطابور، نُعيد التوزيع بالميزانية الكاملة: الرأس في HTML منفصل فوق الأعمدة
+      // (وليس داخلها)، فالمساحة الفعلية أكبر من الميزانية المخفَّضة — والمتصفح يدير
+      // الفيضان الطبيعي دون كسر أي مجموعة (break-inside:avoid). الحالة الأولى
+      // (فارغة تماماً) تنطلق حتى حين reducedFirstPageBudget=0 لأن الشرط الثاني
+      // (< 0*0.5=0) لا يصح أبداً.
+      const firstPageIsEmpty = page.right.length === 0 && page.left.length === 0;
       const firstPageUnderutilized = pageIndex === 0
-        && Math.max(page.rightHeight, page.leftHeight) < reducedFirstPageBudget * 0.5
+        && (firstPageIsEmpty || Math.max(page.rightHeight, page.leftHeight) < reducedFirstPageBudget * 0.5)
         && (ri < rq.length || li < lq.length);
       if (firstPageUnderutilized) {
         ri = riStart;
@@ -501,9 +504,16 @@
     // صفحة1 من الأعمدة الرئيسية تبدأ تحت الرأس/الرأس الفرعي فتُخصم ميزانيتها؛ بقية الصفحات كاملة.
     // طابورا يمين/يسار منفصلان (لا دمج مسبق) — راجع تعليق packGroupsIntoBalancedPages
     // لسبب هذا الفصل: يضمن "ماستر" و"غلواز" أول عمودَيهما دائماً.
+    //
+    // .price-list-columns تحمل padding:0 8px 8px، أي 8px أسفلها لا تُملأ بمحتوى.
+    // بدون خصمها كانت حاوية الأعمدة تتجاوز حد الصفحة بـ2px (safetyMargin=6 - padding=8 = -2)،
+    // فيدفعها سفاري بالكامل إلى الصفحة التالية بدل تقسيمها — فتظهر الصفحة الأولى فارغة
+    // مع الرأس فقط. الخصم يضمن هامش 6px موجب على كل صفحة.
+    const COLUMNS_PADDING_BOTTOM_PX = 8;
+    const effectivePageHeight = Math.max(0, pageHeightPx - COLUMNS_PADDING_BOTTOM_PX);
     const mainBudgets = {
-      reducedFirstPageBudget: Math.max(0, pageHeightPx - headerHeightPx),
-      fullBudget: pageHeightPx
+      reducedFirstPageBudget: Math.max(0, effectivePageHeight - headerHeightPx),
+      fullBudget: effectivePageHeight
     };
     const mainPack = packGroupsIntoBalancedPages(base.right, base.left, heights, mainBudgets, safetyMarginPx);
     const mainPages = mainPack.pages.length
@@ -518,8 +528,8 @@
     // ما تبقّى من القسم الخاص يبدأ بصفحة جديدة كاملة بلا رأس متكرر. إن نزل
     // القسم بأكمله في الفراغ أعلاه فلا تُنتَج هنا أي صفحة.
     const specialPack = packGroupsIntoBalancedPages(spill.right, spill.left, heights, {
-      reducedFirstPageBudget: pageHeightPx,
-      fullBudget: pageHeightPx
+      reducedFirstPageBudget: effectivePageHeight,
+      fullBudget: effectivePageHeight
     }, safetyMarginPx);
     const specialPages = specialPack.pages;
 

@@ -20,6 +20,6 @@
     "check:bulletin": "node scripts/check-price-bulletin-export-integrity.mjs && node scripts/check-price-bulletin-item-coverage.mjs && node scripts/check-price-bulletin-print-ux.mjs"
   },
   "devDependencies": {
-    "playwright": "^1.60.0"
+    "playwright": "^1.62.1"
   }
 }
