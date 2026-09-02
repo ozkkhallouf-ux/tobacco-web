@@ -1,0 +1,220 @@
+/* ============================================================================
+   ذكاء الزبائن — تنسيق شاشة المالك.
+   يعتمد على متغيّرات ومكوّنات styles.css القائمة (panel/button/muted)، ويضيف
+   ما تحتاجه لوحة التحليل فقط. الأولوية للقراءة على شاشة iPhone الضيّقة: الجدول
+   يمرّر أفقياً داخل حاويته ولا يدفع الصفحة كلها للتمرير.
+   ========================================================================== */
+
+.customer-intel .ci-hero {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.customer-intel .ci-kicker {
+  display: block;
+  font-size: 0.7rem;
+  letter-spacing: 0.12em;
+  color: #b08c4f;
+  margin-bottom: 4px;
+}
+
+.customer-intel .ci-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin: 12px 0;
+  font-size: 0.82rem;
+}
+
+.customer-intel .ci-warning {
+  margin: 8px 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(198, 124, 34, 0.12);
+  border: 1px solid rgba(198, 124, 34, 0.4);
+  font-size: 0.85rem;
+  line-height: 1.7;
+}
+
+/* ── بطاقات الملخص ───────────────────────────────────────────────────────── */
+.customer-intel .ci-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.customer-intel .ci-card {
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(176, 140, 79, 0.28);
+  background: rgba(176, 140, 79, 0.07);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.customer-intel .ci-card small { font-size: 0.72rem; opacity: 0.75; }
+.customer-intel .ci-card strong { font-size: 1.5rem; line-height: 1.2; }
+.customer-intel .ci-card span { font-size: 0.72rem; opacity: 0.7; }
+
+/* ── أدوات التحكم ────────────────────────────────────────────────────────── */
+.customer-intel .ci-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.customer-intel .ci-search {
+  flex: 1 1 220px;
+  min-width: 180px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(176, 140, 79, 0.4);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.customer-intel .ci-filters { display: flex; flex-wrap: wrap; gap: 6px; }
+.customer-intel .ci-filters .button { padding: 5px 10px; font-size: 0.78rem; }
+.customer-intel .ci-filters .button.active {
+  background: rgba(176, 140, 79, 0.28);
+  border-color: rgba(176, 140, 79, 0.75);
+}
+
+.customer-intel .ci-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.78rem;
+  opacity: 0.85;
+}
+
+/* ── الجدول ──────────────────────────────────────────────────────────────── */
+.customer-intel .ci-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+.customer-intel .ci-table {
+  width: 100%;
+  min-width: 940px;
+  border-collapse: collapse;
+  font-size: 0.84rem;
+}
+
+.customer-intel .ci-table th,
+.customer-intel .ci-table td {
+  padding: 8px 10px;
+  text-align: right;
+  border-bottom: 1px solid rgba(176, 140, 79, 0.18);
+  white-space: nowrap;
+}
+
+.customer-intel .ci-table td.ci-name { white-space: normal; min-width: 160px; font-weight: 600; }
+.customer-intel .ci-table td.ci-flags { white-space: normal; min-width: 190px; }
+
+.customer-intel .ci-sort {
+  background: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+  padding: 0;
+}
+.customer-intel .ci-sort.active { color: #d9a94f; }
+
+.customer-intel .ci-row { cursor: pointer; }
+.customer-intel .ci-row:hover,
+.customer-intel .ci-row:focus-visible { background: rgba(176, 140, 79, 0.1); outline: none; }
+.customer-intel .ci-row.selected { background: rgba(176, 140, 79, 0.18); }
+
+.customer-intel .ci-table td.good { color: #4caf7d; }
+.customer-intel .ci-table td.bad { color: #e2725b; }
+
+/* ── الشارات ─────────────────────────────────────────────────────────────── */
+.ci-chip {
+  display: inline-block;
+  margin: 2px 2px 2px 0;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  line-height: 1.6;
+  border: 1px solid rgba(176, 140, 79, 0.4);
+  background: rgba(176, 140, 79, 0.1);
+}
+.ci-chip.good { border-color: rgba(76, 175, 125, 0.55); background: rgba(76, 175, 125, 0.14); }
+.ci-chip.warn { border-color: rgba(198, 124, 34, 0.55); background: rgba(198, 124, 34, 0.14); }
+.ci-chip.danger { border-color: rgba(226, 114, 91, 0.6); background: rgba(226, 114, 91, 0.16); }
+
+.ci-segment {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 0.74rem;
+  border: 1px solid rgba(176, 140, 79, 0.45);
+  background: rgba(176, 140, 79, 0.12);
+}
+.ci-segment.vip { border-color: rgba(217, 169, 79, 0.85); background: rgba(217, 169, 79, 0.2); font-weight: 700; }
+.ci-segment.declining,
+.ci-segment.at_risk_debt { border-color: rgba(198, 124, 34, 0.7); background: rgba(198, 124, 34, 0.16); }
+.ci-segment.inactive { border-color: rgba(226, 114, 91, 0.7); background: rgba(226, 114, 91, 0.16); }
+.ci-segment.new,
+.ci-segment.reactivated { border-color: rgba(76, 175, 125, 0.7); background: rgba(76, 175, 125, 0.16); }
+.ci-segment.insufficient_data { opacity: 0.72; }
+
+/* ── لوحة التفاصيل ───────────────────────────────────────────────────────── */
+.ci-detail .ci-detail-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.ci-detail .ci-detail-head h3 { margin: 0 0 2px; }
+.ci-detail code { font-size: 0.72rem; opacity: 0.8; }
+
+.ci-detail .ci-flag-row { margin: 8px 0; }
+
+.ci-detail .ci-why {
+  margin: 8px 0 14px;
+  padding-inline-start: 20px;
+  font-size: 0.86rem;
+  line-height: 1.9;
+}
+
+.ci-detail .ci-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 8px;
+  margin: 0 0 14px;
+}
+.ci-detail .ci-facts > div {
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(176, 140, 79, 0.07);
+  border: 1px solid rgba(176, 140, 79, 0.2);
+}
+.ci-detail .ci-facts dt { font-size: 0.72rem; opacity: 0.72; margin-bottom: 2px; }
+.ci-detail .ci-facts dd { margin: 0; font-size: 0.95rem; font-weight: 600; }
+
+.ci-detail .ci-items { margin: 0; padding-inline-start: 20px; font-size: 0.86rem; }
+.ci-detail .ci-items li {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 4px 0;
+  border-bottom: 1px dashed rgba(176, 140, 79, 0.2);
+}
+.ci-detail .ci-note { font-size: 0.74rem; margin-top: 10px; }
+
+@media (max-width: 640px) {
+  .customer-intel .ci-cards { grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); }
+  .customer-intel .ci-card strong { font-size: 1.25rem; }
+}

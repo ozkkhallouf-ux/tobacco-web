@@ -717,7 +717,7 @@ async function loadDailyMovement(date) {
 
 // التكلفة للمدير فقط — تُجلب من جدول item_costs المحمي (RLS = is_owner)
 const OWNER_EMAILS = ["ozkkhallouf@gmail.com", "ozkkhalouf@gmail.com"];
-const OWNER_ONLY_ROUTES = new Set(["decision", "command"]);
+const OWNER_ONLY_ROUTES = new Set(["decision", "command", "customerIntel"]);
 const SMART_INVENTORY_ROLES = new Set(["owner", "inventory_counter"]);
 function isOwner() {
   const email = String(state.session?.email || "").trim().toLowerCase();
@@ -3608,6 +3608,7 @@ function pageTitle() {
   return {
     overview: "لوحة OZK",
     decision: "قرار اليوم",
+    customerIntel: "ذكاء الزبائن",
     login: "تسجيل الدخول",
     requests: "طلبات العملاء",
     ameen: "تقارير الأمين",
