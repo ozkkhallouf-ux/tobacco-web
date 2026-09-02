@@ -194,10 +194,18 @@
   function flattenInvoices(report) {
     const items = Array.isArray(report?.items) ? report.items : [];
     const rows = [];
+    // مجموعات اقتُطعت (truncated=true) في push-customer-invoices.ps1 لأن فواتيرها
+    // تجاوزت MaxInvoicesPerCustomer — نتتبّع مفتاحها لنُعطّل usableSales لاحقاً.
+    const truncatedGuids = new Set();
+    const truncatedNameKeys = new Set();
 
     for (const group of items) {
       const groupName = text(group?.name);
       const groupGuid = normalizeGuid(group?.customerGuid ?? group?.customer_guid);
+      if (group?.truncated === true) {
+        if (groupGuid) truncatedGuids.add(groupGuid);
+        else truncatedNameKeys.add(normalizeName(groupName));
+      }
       const invoices = Array.isArray(group?.invoices) ? group.invoices : [];
 
       for (const invoice of invoices) {
@@ -240,7 +248,7 @@
       }
     }
 
-    return rows;
+    return { rows, truncatedGuids, truncatedNameKeys };
   }
 
   // --------------------------------------------------------------------------
@@ -498,7 +506,7 @@
     const creditLimits = Array.isArray(input.creditLimits) ? input.creditLimits : [];
 
     const balanceItems = Array.isArray(balancesReport?.items) ? balancesReport.items : [];
-    const invoiceRows = flattenInvoices(invoicesReport);
+    const { rows: invoiceRows, truncatedGuids, truncatedNameKeys } = flattenInvoices(invoicesReport);
     const identity = buildIdentityIndex(balanceItems);
     const window = resolveWindow(invoicesReport, invoiceRows, now);
 
@@ -657,15 +665,21 @@
 
       const cadence = purchaseCadence(saleDays);
       const credit = resolveCredit(record.balanceRow, approvedLimitByKey.get(record.nameKey) ?? null);
-      const items = topItems(windowRows);
+      // أصناف مختلطة العملة: لا نجمع lineTotals بعملات مختلفة — نُعيد صفر أصناف.
+      const items = currencyMixed ? { items: [], identity: "item_guid" } : topItems(windowRows);
 
       const ambiguousIdentity = ambiguousUnresolvedNames.has(record.nameKey);
-      const usableSales = invoicesAvailable && !currencyMixed && !ambiguousIdentity;
+      // اقتطاع: إذا كان المنتج قيّد السجل إلى آخر 200 فاتورة فقط، تُعدّ البيانات
+      // غير مكتملة وتُعطَّل مؤشرات المبيعات حتى لا يُقرأ الاتجاه قراءة خاطئة.
+      const truncated = (record.customerGuid ? truncatedGuids.has(record.customerGuid) : false)
+        || truncatedNameKeys.has(record.nameKey);
+      const usableSales = invoicesAvailable && !currencyMixed && !ambiguousIdentity && !truncated;
 
       drafts.push({
         record,
         currency,
         currencyMixed,
+        truncated,
         ambiguousIdentity,
         usableSales,
         current,
@@ -866,6 +880,7 @@
       if (!draft.usableSales) {
         if (draft.ambiguousIdentity) reasons.push("اسم الزبون يقابل أكثر من معرّف في الأمين، فلا تُنسب له مبيعات.");
         else if (draft.currencyMixed) reasons.push("فواتير هذا الزبون بأكثر من عملة، ولا يجوز جمعها.");
+        else if (draft.truncated) reasons.push("سجل هذا الزبون مقتطع (تجاوز الحد الأقصى للفواتير)، فلا تُحسب مؤشراته.");
         else if (!invoicesAvailable) reasons.push("لا يتوفّر تقرير فواتير لحساب مبيعات هذا الزبون.");
         else reasons.push("لا توجد فواتير لهذا الزبون ضمن النافذة المتاحة.");
       } else {
@@ -905,6 +920,7 @@
 
         currency: draft.currency,
         currencyMixed: draft.currencyMixed,
+        truncated: draft.truncated,
 
         firstPurchaseAt: dayNumberToKey(draft.firstPurchaseDay),
         lastPurchaseAt: dayNumberToKey(draft.lastPurchaseDay),

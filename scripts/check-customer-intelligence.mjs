@@ -739,4 +739,106 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   );
 }
 
-console.log(`ذكاء الزبائن: 28 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
+// ---------------------------------------------------------------------------
+// 29) Codex P1 regression — topItems لا يجمع lineTotals بعملات مختلفة
+// (Fix P1-B: currencyMixed → items: [], لا قيمة خيالية بعملتين مدمجتين)
+// ---------------------------------------------------------------------------
+{
+  function buildMixedForItems() {
+    const mkB = (name, guid, currentBalance = 0) => ({
+      name, key: name, customerGuid: guid, currentBalance, isSupplier: false,
+      recentPayments: [], recentMovements: []
+    });
+    return engine.build({
+      invoicesReport: {
+        source: "ameen_customer_invoices",
+        created_at: REFERENCE_ISO,
+        summary: { periodDays: 60, fromDate: FROM_DATE, customers: 1, bills: 0, syncedAt: REFERENCE_ISO },
+        items: [{
+          name: "زبون مختلط",
+          truncated: false,
+          invoices: [
+            { date: "2026-08-10", number: "1", guid: "g1", total: 100, discount: 0, payment: 0, isReturn: false,
+              currency: "USD", lines: [line("صنف أ", 1, 100)] },
+            { date: "2026-08-11", number: "2", guid: "g2", total: 1000000, discount: 0, payment: 0, isReturn: false,
+              currency: "SYP", lines: [line("صنف أ", 1, 1000000)] }
+          ]
+        }]
+      },
+      balancesReport: {
+        source: "ameen_customer_balances",
+        created_at: REFERENCE_ISO,
+        summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: 1 },
+        items: [mkB("زبون مختلط", "0000-29a")]
+      },
+      movementsReport: null, creditLimits: [], now: NOW
+    });
+  }
+  const r29 = buildMixedForItems();
+  const cust29 = r29.customers.find((c) => c.customerName === "زبون مختلط");
+  assert.ok(cust29, "test 29: الزبون المختلط يجب أن يوجد في النتيجة");
+  assert.equal(cust29.topItems.length, 0,
+    "test 29: topItems يجب أن يكون فارغاً للزبون المختلط (لا جمع USD+SYP)");
+  assert.equal(cust29.currencyMixed, true, "test 29: currencyMixed=true للزبون المختلط");
+  assert.equal(cust29.primarySegment, "insufficient_data", "test 29: مقطع insufficient_data للزبون المختلط");
+}
+
+// ---------------------------------------------------------------------------
+// 30) Codex P1 regression — truncated group تُعطّل usableSales
+// (Fix P1-C: group.truncated=true → usableSales=false + truncated=true في الصف)
+// ---------------------------------------------------------------------------
+{
+  function buildTruncated() {
+    const mkB = (name, guid, currentBalance = 0) => ({
+      name, key: name, customerGuid: guid, currentBalance, isSupplier: false,
+      recentPayments: [], recentMovements: []
+    });
+    return engine.build({
+      invoicesReport: {
+        source: "ameen_customer_invoices",
+        created_at: REFERENCE_ISO,
+        summary: { periodDays: 60, fromDate: FROM_DATE, customers: 1, bills: 0, syncedAt: REFERENCE_ISO },
+        items: [{
+          name: "زبون مقتطع",
+          truncated: true,
+          invoices: [invoice("2026-08-10", 500, { currency: "USD" })]
+        }]
+      },
+      balancesReport: {
+        source: "ameen_customer_balances",
+        created_at: REFERENCE_ISO,
+        summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: 1 },
+        items: [mkB("زبون مقتطع", "0000-30a")]
+      },
+      movementsReport: null, creditLimits: [], now: NOW
+    });
+  }
+  const r30 = buildTruncated();
+  const cust30 = r30.customers.find((c) => c.customerName === "زبون مقتطع");
+  assert.ok(cust30, "test 30: الزبون المقتطع يجب أن يوجد في النتيجة");
+  assert.equal(cust30.truncated, true, "test 30: truncated=true يجب أن يُنقَل إلى صف الزبون");
+  assert.equal(cust30.primarySegment, "insufficient_data", "test 30: primarySegment=insufficient_data للزبون المقتطع");
+  assert.equal(cust30.netSales30d, null, "test 30: مبيعات المقتطع يجب أن تكون null لا قيمة وهمية");
+}
+
+// ---------------------------------------------------------------------------
+// 31) Codex P1 regression — view clears intel on sign-out + accessors gated
+// (Fix P1-A: syncTimer clears intel when !session; snapshot/coworkPayload gate on canAccess)
+// ---------------------------------------------------------------------------
+{
+  const viewSrc = readFileSync(new URL("../src/customer-intelligence-view.js", import.meta.url), "utf8");
+  assert.ok(
+    /if \(!state\?\.session\) intel = null/.test(viewSrc),
+    "test 31: syncTimer يجب أن يمسح intel عند تسجيل الخروج (!state.session)"
+  );
+  assert.ok(
+    /snapshot.*ozkCanAccessRoute/.test(viewSrc),
+    "test 31: snapshot() يجب أن يتحقق من ozkCanAccessRoute قبل إرجاع البيانات"
+  );
+  assert.ok(
+    /coworkPayload.*ozkCanAccessRoute/.test(viewSrc),
+    "test 31: coworkPayload() يجب أن يتحقق من ozkCanAccessRoute قبل إرجاع البيانات"
+  );
+}
+
+console.log(`ذكاء الزبائن: 31 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);

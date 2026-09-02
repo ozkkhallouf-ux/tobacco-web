@@ -445,6 +445,8 @@
   }
 
   function syncTimer() {
+    // تسجيل الخروج: نمسح intel فوراً حتى لا تتسرّب بيانات الزبائن عبر snapshot().
+    if (!state?.session) intel = null;
     if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
     if (state?.route === ROUTE && state?.session && window.ozkCanAccessRoute?.(ROUTE)) {
       refreshTimer = setInterval(loadIntel, REFRESH_MS);
@@ -476,9 +478,11 @@
     window.ozkCustomerIntelligenceView = Object.freeze({
       ROUTE,
       refresh: loadIntel,
-      snapshot: () => intel,
-      coworkPayload: () => (intel ? window.ozkCustomerIntelligence.buildCoworkPayload(intel) : null),
-      alertDrafts: () => (intel ? window.ozkCustomerIntelligence.buildAlertDrafts(intel) : [])
+      // نتحقّق من الصلاحية عند كل استدعاء لا عند التحميل فقط — يمنع وصول حساب
+      // آخر أو جلسة منتهية إلى بيانات الزبائن عبر الـAPI البرمجي.
+      snapshot: () => (window.ozkCanAccessRoute?.(ROUTE) ? intel : null),
+      coworkPayload: () => (intel && window.ozkCanAccessRoute?.(ROUTE) ? window.ozkCustomerIntelligence.buildCoworkPayload(intel) : null),
+      alertDrafts: () => (intel && window.ozkCanAccessRoute?.(ROUTE) ? window.ozkCustomerIntelligence.buildAlertDrafts(intel) : [])
     });
 
     render();
