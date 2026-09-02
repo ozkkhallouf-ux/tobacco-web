@@ -29,6 +29,8 @@ export const CHECKS = [
   'check-collection-priority.mjs',
   'check-command-center.mjs',
   'check-cron-job-health-classifier.mjs',
+  'check-customer-intelligence-wiring.mjs',
+  'check-customer-intelligence.mjs',
   'check-docker-dev-port-binding.mjs',
   'check-expense-entries-security.mjs',
   'check-health-check-logic.mjs',

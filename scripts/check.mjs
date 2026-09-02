@@ -37,11 +37,17 @@ const required = [
   "docs/ai/topics/price-bulletins.md",
   "docs/ai/topics/inventory.md",
   "docs/ai/topics/customer-balances.md",
+  "docs/ai/topics/customer-intelligence.md",
   "docs/ai/topics/purchases-suppliers.md",
   "docs/ai/topics/ameen-sync.md",
   "docs/ai/topics/printing.md",
   "docs/ai/topics/notifications-deployment.md",
   "docs/ai/topics/icloud-archive.md",
+  "src/customer-intelligence.js",
+  "src/customer-intelligence-view.js",
+  "src/customer-intelligence.css",
+  "scripts/check-customer-intelligence.mjs",
+  "scripts/check-customer-intelligence-wiring.mjs",
   "src/icloud-archive.js",
   "tools/mac-archive-bridge/server.mjs",
   "tools/mac-archive-bridge/install-launch-agent.sh",
@@ -2519,6 +2525,7 @@ for (const contract of [
   const clientSource = readFileSync("src/supabase-client.js", "utf8");
   const decisionSource = readFileSync("src/decision-engine.js", "utf8");
   const commandSource = readFileSync("src/command-center.js", "utf8");
+  const customerIntelSource = readFileSync("src/customer-intelligence-view.js", "utf8");
   const serviceWorkerSource = readFileSync("public/service-worker.js", "utf8");
   const ownerSql = readFileSync("supabase/owner-role-access.sql", "utf8");
 
@@ -2531,7 +2538,7 @@ for (const contract of [
   for (const contract of [
     '"ozk.kh@outlook.com": { name: "موظف OZK", role: "موظف", accessRole: "employee" }',
     'user.app_metadata?.role',
-    'const OWNER_ONLY_ROUTES = new Set(["decision", "command"])',
+    'const OWNER_ONLY_ROUTES = new Set(["decision", "command", "customerIntel"])',
     'window.ozkCanAccessRoute = canAccessRoute',
     'requestPasswordReset(emailInput)',
     'verifyPasswordRecoveryOtp(emailInput, tokenInput)',
@@ -2559,7 +2566,9 @@ for (const contract of [
     console.error("The employee Outlook account must not remain in OWNER_EMAILS.");
     failed = true;
   }
-  if (!decisionSource.includes("window.ozkCanAccessRoute?.(ROUTE)") || !commandSource.includes("window.ozkCanAccessRoute?.(ROUTE)")) {
+  if (!decisionSource.includes("window.ozkCanAccessRoute?.(ROUTE)")
+    || !commandSource.includes("window.ozkCanAccessRoute?.(ROUTE)")
+    || !customerIntelSource.includes("window.ozkCanAccessRoute?.(ROUTE)")) {
     console.error("Executive modules must guard both navigation and direct route rendering.");
     failed = true;
   }
