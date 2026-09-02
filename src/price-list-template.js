@@ -329,6 +329,9 @@
       const budgetForThisPage = pageIndex === 0 ? reducedFirstPageBudget : fullBudget;
       let limit = Math.max(0, budgetForThisPage - safetyMarginPx);
       const page = { right: [], left: [], rightHeight: 0, leftHeight: 0 };
+      // نحفظ موضع الطابورَين عند بداية هذه الصفحة لإتاحة إعادة التوزيع إن لزم.
+      const riStart = ri;
+      const liStart = li;
 
       // عمود اليمين: من طابور اليمين أولاً، ثم فيضان من طابور اليسار إن نفد الأول.
       for (;;) {
@@ -360,12 +363,21 @@
         }
       }
 
-      // إن كانت هذه الصفحة الأولى وستخرج فارغة تماماً رغم وجود مجموعات في الطابور،
-      // نُعيد ملءها بالميزانية الكاملة بدل دفع صفحة فارغة: الرأس في HTML منفصل
-      // فوق الأعمدة (وليس داخل عمود)، فلا يتعارض مع ملء العمود بالكامل — والمتصفح
-      // يدير الفيضان الطبيعي عند الطباعة دون كسر أي مجموعة (break-inside:avoid).
-      // قبل الإصلاح: الصفحة الفارغة كانت تُنتج break-before:page قبل أي محتوى.
-      if (pageIndex === 0 && page.right.length === 0 && page.left.length === 0 && (ri < rq.length || li < lq.length)) {
+      // إن كانت هذه الصفحة الأولى فارغة أو شبه فارغة (أطول عمود < 50% من الميزانية
+      // المخفَّضة) رغم وجود مجموعات في الطابور، نُعيد التوزيع بالميزانية الكاملة:
+      // الرأس في HTML منفصل فوق الأعمدة (وليس داخلها)، فالمساحة الفعلية أكبر من
+      // الميزانية المخفَّضة — والمتصفح يدير الفيضان الطبيعي دون كسر أي مجموعة
+      // (break-inside:avoid). إعادة ضبط المؤشرات ضرورية لإعادة تعبئة الأعمدة من بدايتها.
+      const firstPageUnderutilized = pageIndex === 0
+        && Math.max(page.rightHeight, page.leftHeight) < reducedFirstPageBudget * 0.5
+        && (ri < rq.length || li < lq.length);
+      if (firstPageUnderutilized) {
+        ri = riStart;
+        li = liStart;
+        page.right = [];
+        page.left = [];
+        page.rightHeight = 0;
+        page.leftHeight = 0;
         limit = Math.max(0, fullBudget - safetyMarginPx);
         for (;;) {
           if (ri < rq.length && page.rightHeight + rq[ri].h <= limit + 1e-6) {
