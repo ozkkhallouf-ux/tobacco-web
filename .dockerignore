@@ -1,4 +1,35 @@
-# Git / VCS
+يا خليلالتكبيرات على الأزرار ولكن لم تعملMicrosoft Windows [Version 10.0.26200.9168]
+(c) Microsoft Corporation. All rights reserved.
+
+loq@OZK2026 C:\Users\LOQ>type C:\Users\LOQ\npm-log.txt
+npm warn deprecated puppeteer@22.15.0: < 24.15.0 is no longer supported
+^C
+loq@OZK2026 C:\Users\LOQ>
+
+
+Microsoft Windows [Version 10.0.26200.9168]
+(c) Microsoft Corporation. All rights reserved.
+
+loq@OZK2026 C:\Users\LOQ>type C:\Users\LOQ\npm-log.txt
+npm error code ENOENT
+npm error syscall open
+npm error path C:\Users\LOQ\package.json
+npm error errno -4058
+npm error enoent Could not read package.json: Error: ENOENT: no such file or directory, open 'C:\Users\LOQ\package.json'
+npm error enoent This is related to npm not being able to find a file.
+npm error enoent
+npm error A complete log of this run can be found in: C:\Users\LOQ\AppData\Local\npm-cache\_logs\2026-09-02T18_53_14_911Z-debug-0.log
+
+loq@OZK2026 C:\Users\LOQ>
+loq@OZK2026 C:\Users\LOQ>type C:\Users\LOQ\npm-log.txt
+'puppeteer' is not recognized as an internal or external command,
+operable program or batch file.
+
+loq@OZK2026 C:\Users\LOQ>loq@OZK2026 C:\Users\LOQ>type C:\Users\LOQ\npm-log.txt
+'puppeteer' is not recognized as an internal or external command,
+operable program or batch file.
+
+loq@OZK2026 C:\Users\LOQ># Git / VCS
 .git/
 .gitattributes
 .github/
