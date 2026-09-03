@@ -50,18 +50,14 @@ $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries
 
-$principal = New-ScheduledTaskPrincipal `
-    -UserId    $RequiredUserId `
-    -LogonType Password `
-    -RunLevel  Highest
-
 Register-ScheduledTask `
     -TaskName  $taskName `
     -Action    $action `
     -Trigger   $trigger `
     -Settings  $settings `
-    -Principal $principal `
+    -User      $RequiredUserId `
     -Password  $plainPassword `
+    -RunLevel  Highest `
     -Force | Out-Null
 
 # تنظيف كلمة المرور من الذاكرة فوراً
