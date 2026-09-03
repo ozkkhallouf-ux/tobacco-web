@@ -5,14 +5,24 @@
 #   سطح المكتب\فواتير الزبائن
 #   سطح المكتب\وصولات الاستلام
 # اسم الملف: اسم الزبون - التاريخ.pdf
+# ويطبع تلقائياً كل مستند على الطابعة المناسبة:
+#   وصولات الاستلام  → XPRINTER XP-T80Q 80MM  (الكاشير)
+#   فواتير الزبائن   → Canon                   (A4)
 # ============================================================
-# تشغيل مرة:      .\tools\archive-documents.ps1
-# جدولة كل 5 دقائق: .\tools\register-archive-documents-task.ps1
+# تشغيل مرة:               .\tools\archive-documents.ps1
+# بدون طباعة تلقائية:      .\tools\archive-documents.ps1 -NoPrint
+# جدولة كل 5 دقائق:        .\tools\register-archive-documents-task.ps1
 # ============================================================
 param(
     [string]$EnvFile = "$PSScriptRoot\.env",
     [string]$StateFile = "$PSScriptRoot\logs\archived-docs.txt",
-    [string]$LogFile = "$PSScriptRoot\logs\archive-documents.log"
+    [string]$LogFile = "$PSScriptRoot\logs\archive-documents.log",
+    # اسم الطابعة الحرارية للوصولات — اتركه فارغاً لتعطيل الطباعة التلقائية لهذا النوع
+    [string]$ReceiptPrinterName = "XPRINTER XP-T80Q 80MM",
+    # اسم طابعة A4 للفواتير — اتركه فارغاً لتعطيل الطباعة التلقائية لهذا النوع
+    [string]$InvoicePrinterName = "Canon",
+    # تعطيل الطباعة التلقائية كلياً (يحفظ فقط)
+    [switch]$NoPrint
 )
 $ErrorActionPreference = "Stop"
 
@@ -82,6 +92,42 @@ function Clean-Name($s) {
     return ($s -replace '\s+', ' ').Trim()
 }
 
+# تطبع ملف PDF على طابعة محددة بالاسم.
+# تجرّب SumatraPDF أولاً (دقيق + يدعم الحرارية)، ثم تعود لـ PrintTo من Windows.
+function Invoke-PrintDocument([string]$filePath, [string]$printerName) {
+    if (-not $printerName) { return }
+    if (-not (Test-Path -LiteralPath $filePath)) {
+        Write-Log "tiba3a: al-malaf ghyr mwjwd — takhatti."
+        return
+    }
+    $sumatra = @(
+        "$env:LOCALAPPDATA\SumatraPDF\SumatraPDF.exe",
+        "$env:ProgramFiles\SumatraPDF\SumatraPDF.exe",
+        "${env:ProgramFiles(x86)}\SumatraPDF\SumatraPDF.exe"
+    ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+
+    if ($sumatra) {
+        Write-Log "tiba3a via SumatraPDF: '$printerName'"
+        & $sumatra -print-to "$printerName" -silent "$filePath"
+        return
+    }
+
+    # احتياط: PrintTo من Windows Shell (لا يحتاج أي برنامج إضافي)
+    Write-Log "tiba3a via Windows Shell PrintTo: '$printerName'"
+    try {
+        $si = New-Object System.Diagnostics.ProcessStartInfo
+        $si.FileName = $filePath
+        $si.Verb = "PrintTo"
+        $si.Arguments = "`"$printerName`""
+        $si.UseShellExecute = $true
+        $si.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+        $p = [System.Diagnostics.Process]::Start($si)
+        if ($p) { [void]$p.WaitForExit(30000) }
+    } catch {
+        Write-Log "fashal tiba3a '$printerName': $($_.Exception.Message)"
+    }
+}
+
 $new = 0
 foreach ($d in $docs) {
     if ($done[$d.id]) { continue }
@@ -99,18 +145,38 @@ foreach ($d in $docs) {
     if (-not $token) { Write-Log "takhatti: $($d.id) bila public_token"; continue }
     $url = $SITE + $token            # id يبقى للتتبّع المحلي فقط، لا للرابط
     $prof = Join-Path $env:TEMP ("ozk-prof-" + $d.id)
-    $cargs = @("--headless", "--disable-gpu", "--no-sandbox", "--user-data-dir=`"$prof`"",
-        "--no-margins", "--virtual-time-budget=15000", "--print-to-pdf=`"$out`"", "--print-to-pdf-no-header", "`"$url`"")
+    # ملاحظة: أُزيل --virtual-time-budget لأنه يتدخل في تحميل الصفحات الحقيقية (fetch)
+    # وأُضيف --run-all-compositor-stages-before-draw لضمان اكتمال الرسم قبل التصدير.
+    $cargs = @(
+        "--headless", "--disable-gpu", "--no-sandbox",
+        "--user-data-dir=`"$prof`"",
+        "--no-margins",
+        "--run-all-compositor-stages-before-draw",
+        "--print-to-pdf=`"$out`"",
+        "--print-to-pdf-no-header",
+        "`"$url`""
+    )
     Start-Process -FilePath $chrome -ArgumentList $cargs -NoNewWindow -PassThru -Wait | Out-Null
-    Start-Sleep -Milliseconds 400
+    # فترة انتظار كافية لاكتمال كتابة الملف على القرص
+    Start-Sleep -Milliseconds 1200
     try { Remove-Item -Recurse -Force $prof -ErrorAction SilentlyContinue } catch {}
-    if (Test-Path $out) {
+    # تحقق أن الملف وُجد وحجمه معقول (أكثر من 1KB — PDF فارغ يكون أصغر)
+    $pdfOk = (Test-Path $out) -and ((Get-Item $out).Length -gt 1024)
+    if ($pdfOk) {
         Add-Content -LiteralPath $StateFile -Value $d.id -Encoding UTF8
         $done[$d.id] = $true
         $new++
         Write-Log "hifz: [$type] $base"
+        # طباعة تلقائية على الطابعة المناسبة لكل نوع
+        if (-not $NoPrint) {
+            if ($type -eq "receipt" -and $ReceiptPrinterName) {
+                Invoke-PrintDocument $out $ReceiptPrinterName
+            } elseif ($type -eq "invoice" -and $InvoicePrinterName) {
+                Invoke-PrintDocument $out $InvoicePrinterName
+            }
+        }
     } else {
-        Write-Log "fashal hifz: $($d.id)"
+        Write-Log "fashal hifz: $($d.id) — al-PDF ghyr mwjwd aw sagher"
     }
 }
 Write-Log "thm hifz $new mustanad jadid. al-mojmal al-saabiq: $($done.Count - $new)."
