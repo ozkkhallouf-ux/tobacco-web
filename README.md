@@ -1,0 +1,2 @@
+# tobacco-web
+[![Codacy Badge](https://api.codacy.com/project/badge/Grade/a4cc20f562f44dde8f645f6f6011856a)](https://app.codacy.com/gh/ozkkhallouf-ux/tobacco-web?utm_source=github.com&utm_medium=referral&utm_content=ozkkhallouf-ux/tobacco-web&utm_campaign=Badge_Grade)
