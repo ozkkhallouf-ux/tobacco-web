@@ -184,12 +184,12 @@ function localFinancialAnswer(question: string, context: FinancialContext) {
 
   if (/مبيعات|مبيع/.test(q)) {
     if (!context?.daily_sales) return "لا يوجد ملخص مبيعات يومي متاح حاليًا.";
-    return `**ملخص المبيعات المتاح**\n\`${JSON.stringify(context?.daily_sales)}\``;
+    return `**ملخص المبيعات المتاح**\n\`${JSON.stringify(context.daily_sales)}\``;
   }
 
   if (/ربح|ارباح|تكلفه/.test(q)) {
     if (!context?.daily_profit) return "لا يوجد تقرير ربح متاح حاليًا.";
-    return `**تقرير الربح المتاح — ${context?.daily_profit?.report_date || date}**\n\`${JSON.stringify({ summary: context?.daily_profit?.summary, items: context?.daily_profit?.items })}\``;
+    return `**تقرير الربح المتاح — ${context.daily_profit.report_date || date}**\n\`${JSON.stringify({ summary: context.daily_profit.summary, items: context.daily_profit.items })}\``;
   }
 
   const accounts = context?.account_balances?.accounts;
