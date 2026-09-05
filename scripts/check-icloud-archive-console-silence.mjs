@@ -57,7 +57,7 @@ const LOCAL_ORIGIN = `http://127.0.0.1:${server.address().port}`;
 
 const browser = await chromium.launch();
 
-async function load({ origin, storage = [] }) {
+async function load({ origin, storage = [], act = null }) {
   const context = await browser.newContext({ serviceWorkers: "block" });
 
   // هوية ماك مفروضة صراحةً: الميزة محصورة بالماك في الكود، فبلا هذا يمرّ
@@ -99,11 +99,7 @@ async function load({ origin, storage = [] }) {
     });
   }
 
-  await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
-  await page.waitForFunction(() => Boolean(window.ozkArchive), null, { timeout: 15000 });
-  await page.waitForTimeout(2500); // مهلة الفحص 1500ms — نتجاوزها كي تستقرّ النتيجة
-
-  const facts = await page.evaluate(() => ({
+  const readFacts = () => page.evaluate(() => ({
     supported: window.ozkArchive.isSupportedPlatform(),
     // قراءة متسامحة عمداً: لو غابت الدالة لوجب أن تُفشِل الحارسَ **الحقائقُ
     // السلوكية** (نداءات الجسر وأخطاء وحدة التحكّم) لا استثناءُ برمجة. حارسٌ
@@ -112,10 +108,20 @@ async function load({ origin, storage = [] }) {
       ? window.ozkArchive.mayReachBridge() : null,
     origin: window.location.origin,
     bridgeCalls: window.__bridgeCalls.slice(),
+    storedFlag: (() => { try { return localStorage.getItem("ozk.archive.enabled"); } catch (e) { return null; } })(),
     badge: (document.querySelector("[data-ozk-archive-status]") || {}).textContent || "",
   }));
+
+  await page.goto(`${origin}/`, { waitUntil: "domcontentloaded" });
+  await page.waitForFunction(() => Boolean(window.ozkArchive), null, { timeout: 15000 });
+  await page.waitForTimeout(2500); // مهلة الفحص 1500ms — نتجاوزها كي تستقرّ النتيجة
+
+  // لقطة ما قبل الفعل: بلا إثبات أن الحالة بدأت خاملة، لا يُثبت الفعلُ شيئاً.
+  const before = await readFacts();
+  if (act) { await act(page); await page.waitForTimeout(2500); }
+  const facts = await readFacts();
   await context.close();
-  return { consoleErrors, ...facts };
+  return { consoleErrors, before, ...facts };
 }
 
 // ===== ١) العطل نفسه: أصل عام بلا تفعيل =====
@@ -142,10 +148,28 @@ await test("أصل محلي (مرافق الماك): الجسر يُخاطَب �
   assert.equal(r.mayReach, true, "الأصل المحلي هو المسار المعتمد — يجب ألا تُغلق بوابته");
 });
 
-await test("أصل عام + تفعيل صريح: الجسر يُخاطَب (مخرج المالك يعمل)", async () => {
+// ملاحظة Codex P1 على هذا الـPR، وهي صحيحة: كان الاختبار يزرع
+// `ozk.archive.enabled=1` قبل التحميل بدل استدعاء `enable()` نفسها — فيبقى
+// أخضر ولو صارت `enable()` دالةً فارغة. وهي **مخرج المالك الوحيد** لتشغيل
+// الجسر من أصل https عام، أي أن الحارس كان يسمح بتعطيل المسار الذي وُجد
+// ليحميه. الآن يُستدعى الـAPI فعلياً من حالة خاملة مُثبَتة.
+await test("أصل عام: enable() نفسها تفتح البوابة وتُطلق /health وتُثبِّت العلامة", async () => {
+  const r = await load({
+    origin: PUBLIC_ORIGIN,
+    act: (page) => page.evaluate(() => window.ozkArchive.enable()),
+  });
+  assert.deepEqual(r.before.bridgeCalls, [],
+    "الحالة لم تبدأ خاملة، فاستدعاء enable() لا يُثبت شيئاً: " + r.before.bridgeCalls.join(","));
+  assert.ok(r.bridgeCalls.some((u) => u.endsWith("/health")),
+    "enable() لم تُطلق فحصاً — مخرج المالك الوحيد على https معطّل: " + r.bridgeCalls.join(","));
+  assert.equal(r.storedFlag, "1", "enable() يجب أن تحفظ العلامة وإلا ضاع التفعيل بعد إعادة التحميل");
+  assert.equal(r.mayReach, true);
+});
+
+await test("علامة تفعيل محفوظة من جلسة سابقة: تبقى فعّالة بعد إعادة التحميل", async () => {
   const r = await load({ origin: PUBLIC_ORIGIN, storage: [["ozk.archive.enabled", "1"]] });
   assert.ok(r.bridgeCalls.some((u) => u.endsWith("/health")),
-    "ozkArchive.enable() لا يفتح البوابة — " + r.bridgeCalls.join(","));
+    "متصفّح فُعِّل سابقاً فقد تفعيله — " + r.bridgeCalls.join(","));
   assert.equal(r.mayReach, true);
 });
 
