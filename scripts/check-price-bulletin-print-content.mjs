@@ -180,28 +180,29 @@ function linesFromBlocks(blocks) {
     }
     current.items.push(block);
   }
-  return grouped.map((line) => ({
-    xs: [...new Set(line.items.map((b) => Math.round(b.x)))],
-    text: line.items.sort((a, b) => a.x - b.x).map((b) => b.text).reverse().join(RUN_SEPARATOR)
-  }));
+  // كل سطر = **مصفوفة مقاطع رسم** لا نصاً واحداً. ترتيب الحروف داخل المقطع
+  // مصونٌ كما رُسم؛ أما ترتيب المقاطع بين الخلايا فيختلف عن الـDOM (خلية السعر
+  // تُرسم LTR داخل نشرة RTL). لذلك نُبقي حدود المقاطع ونسمح بإعادة ترتيبها
+  // **بينها فقط** عند المطابقة — لا داخلها.
+  return grouped.map((line) => line.items
+    .sort((a, b) => a.x - b.x)
+    .map((b) => normalizeArabic(b.text))
+    .reverse()
+    .filter(Boolean));
 }
 
 // أسطر الصفحة **مرتّبة بالعمود**: النشرة عمودان متجاوران، فصفّان متقابلان
 // يتشاركان نفس المدى الرأسي تقريباً. لو بُنيت الأسطر للصفحة كاملة لاختلط
 // سطرُ العمود الآخر بسطور العمود الأول، فينكسر ضمّ الالتفاف ويسقط اسم مطبوع
 // فعلاً. سطر فاصل فارغ بين العمودين يمنع أي مطابقة من العبور بينهما.
-const COLUMN_SEPARATOR_LINE = "";
+const COLUMN_SEPARATOR_LINE = [];
 function pageLinesByColumn(blocks) {
   if (!blocks.length) return [];
   const xs = blocks.map((b) => b.x);
   const midX = (Math.min(...xs) + Math.max(...xs)) / 2;
   const right = blocks.filter((b) => b.x >= midX);
   const left = blocks.filter((b) => b.x < midX);
-  return [
-    ...linesFromBlocks(right).map((line) => line.text),
-    COLUMN_SEPARATOR_LINE,
-    ...linesFromBlocks(left).map((line) => line.text)
-  ];
+  return [...linesFromBlocks(right), COLUMN_SEPARATOR_LINE, ...linesFromBlocks(left)];
 }
 
 function pdfPageLines(pdf) {
@@ -224,7 +225,7 @@ function pdfPageLines(pdf) {
       const origin = blockOrigin(bt[1]) || { x: 0, y: blocks.length };
       blocks.push({ ...origin, text });
     }
-    pages.push(pageLinesByColumn(blocks).map(normalizeArabic));
+    pages.push(pageLinesByColumn(blocks));
   }
   return pages;
 }
@@ -264,43 +265,57 @@ function normalizeArabic(value) {
 // (وقبلها، ملاحظة P1 الأولى على d0c229f6: تقسيم الاسم إلى مقاطع تُبحث كلٌّ على
 // حدة في كامل نص الصفحة كان يسمح لصنف ضائع بأن تُشبَع مقاطعُه من صفوف أخرى
 // تشاركه كلماته الشائعة. لا تقسيم بعد الآن إطلاقاً.)
-// بصمة محتوى: مجموعة الحروف مرتّبةً. تُقارَن **بالتساوي التام**، فطولها
-// ومحتواها معاً يجب أن يطابقا الصفّ المتوقَّع — لا احتواء ولا مقاطع.
-function contentFingerprint(value) {
-  return [...normalizeArabic(value)].sort().join("");
+// نص السطر كاملاً (للعروض التشخيصية وللقواعد القديمة في الشاهد السالب).
+function lineText(line) {
+  return line.join("");
 }
 
-function rowCells(row) {
-  return `${row.name}${row.unit}${row.price}`;
+// هل تُبلّط مقاطع هذا السطر النصَّ المطلوب **بالكامل وبلا بقايا**؟
+//
+// القاعدة: ترتيب الحروف **داخل** كل مقطع مصون، وإعادة الترتيب مسموحة **بين**
+// المقاطع فقط — وهو بالضبط ما يفعله المتصفح حين يرسم خلية سعر LTR داخل نشرة
+// RTL. هذا يغلق ملاحظة Codex P1 الثالثة (على 14ef895e): بصمةُ الحروف مرتّبةً
+// كانت تُسوّي بين «12,345» و«12,354» وبين عدّاد «12» و«21»، فيمرّ الحارس رغم
+// تشوّه رقم يراه الزبون. التبليط يرفضهما لأن مقطع «12,354» ليس بادئةً لأي
+// موضع في النص المطلوب.
+//
+// التبليط تامّ: كل مقاطع السطر تُستهلك وكل النص يُغطّى — فلا محتوى زائد على
+// السطر ولا ناقص منه، ولا احتواء جزئي.
+const MAX_TILING_BLOCKS = 24;
+function tilesExactly(target, blocks) {
+  if (!target || !blocks.length || blocks.length > MAX_TILING_BLOCKS) return false;
+  if (blocks.reduce((n, b) => n + b.length, 0) !== target.length) return false;
+  const used = new Array(blocks.length).fill(false);
+  const seen = new Set();
+  const walk = (position) => {
+    if (position === target.length) return used.every(Boolean);
+    const key = `${position}|${used.map((u) => (u ? 1 : 0)).join("")}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    for (let i = 0; i < blocks.length; i += 1) {
+      if (used[i] || !target.startsWith(blocks[i], position)) continue;
+      used[i] = true;
+      if (walk(position + blocks[i].length)) return true;
+      used[i] = false;
+    }
+    return false;
+  };
+  return walk(0);
 }
 
-// هل هذا الصفّ مطبوع كاملاً في إحدى أوراق الملف؟
-//
-// الصفّ المطبوع سطرٌ واحد يحمل خلاياه الثلاث: الاسم ثم الوحدة ثم السعر.
-// الشرطان معاً:
-//   1. السطر يبدأ بالاسم — يثبّت حدّ الخلية اليمنى فلا يُقبل اسم مقطوع.
-//   2. بصمة السطر تساوي بصمة الخلايا الثلاث — تساوٍ تام في الطول والمحتوى.
-// الشرط الثاني هو ما يغلق ملاحظة Codex P1 الثانية (على 6ac9fae7): التطبيع
-// يحذف الفراغات، فاسمٌ أقصر قد يكون مقطعاً داخل اسم أطول («اليغانس سليم فضي»
-// داخل «اليغانس سليم فضي بدون طبعة»)؛ ومع الاحتواء كان حذف الصفّ الأقصر يمرّ
-// بلا رصد. بالتساوي التام يختلف الطول والمحتوى فيُرصد الغياب فوراً.
-//
-// نقارن بالبصمة لا بالنص المتسلسل لأن خلية السعر تُرسم باتجاه LTR داخل نشرة
-// RTL، فترتيب مقاطعها داخل السطر المُعاد بناؤه يخالف ترتيبها في الـDOM —
-// وهو اختلاف عرضٍ بحت لا علاقة له بوجود المحتوى أو غيابه.
+// الصفّ المطبوع سطرٌ واحد يحمل خلاياه الثلاث: الاسم والوحدة والسعر — لا أكثر.
+// (ملاحظة Codex P1 الثانية على 6ac9fae7: الاحتواء النصّي كان يسمح لاسم أقصر
+// بأن يُشبَع من سطر اسم أطور يحويه — «اليغانس سليم فضي» داخل «اليغانس سليم
+// فضي بدون طبعة». التبليط التام يمنع ذلك: الأطوال لا تتساوى أصلاً.)
 function printedRow(pageLines, row) {
-  const name = normalizeArabic(row.name);
-  const wanted = contentFingerprint(rowCells(row));
-  if (!name || !wanted) return false;
-  return pageLines.some((line) => line.startsWith(name) && contentFingerprint(line) === wanted);
+  const target = normalizeArabic(row.name) + normalizeArabic(row.unit) + normalizeArabic(row.price);
+  return pageLines.some((line) => tilesExactly(target, line));
 }
 
-// رأس المجموعة سطرٌ يحمل اسمها ثم عدّاد أصنافها — بنفس الشرطين.
+// رأس المجموعة سطرٌ يحمل اسمها ثم عدّاد أصنافها — بنفس القاعدة.
 function printedGroup(pageLines, group) {
-  const name = normalizeArabic(group.name);
-  const wanted = contentFingerprint(`${group.name}${group.count}`);
-  if (!name || !wanted) return false;
-  return pageLines.some((line) => line.startsWith(name) && contentFingerprint(line) === wanted);
+  const target = normalizeArabic(group.name) + normalizeArabic(String(group.count));
+  return pageLines.some((line) => tilesExactly(target, line));
 }
 
 // شرط صحة قراءة الملف: قارئ نص PDF يقرأ **سطوراً**، فالاسم الذي يُرسم بسطر
@@ -620,11 +635,12 @@ for (const sc of [
 
   // القاعدتان القديمتان، لإظهار أن الشاهد يغطّي ثغرة حقيقية لا مفترضة.
   const oldFragmentRule = (lines, name) => {
-    const page = lines.join("");
+    const page = lines.map(lineText).join("");
     return String(name).trim().split(/\s+/).map(normalizeArabic).filter(Boolean)
       .every((w) => page.includes(w));
   };
-  const oldSubstringRule = (lines, name) => lines.some((line) => line.includes(normalizeArabic(name)));
+  const oldSubstringRule = (lines, name) =>
+    lines.some((line) => lineText(line).includes(normalizeArabic(name)));
 
   check("الشاهد السالب: وُجدت ضحيّتان تغطّيان الثغرتين",
     built.victims.length === 2, `الضحايا = ${JSON.stringify(built.victims.map((v) => v.name))}`);
@@ -646,6 +662,92 @@ for (const sc of [
   check("الشاهد السالب: لا ضحايا جانبية — المفقود هو المحذوف وحده",
     missing.length === built.victims.length && missing.every((row) => victimNames.has(row.name)),
     `المفقود = ${JSON.stringify(missing.map((r) => r.name).slice(0, 8))} · المحذوف = ${JSON.stringify([...victimNames])}`);
+}
+
+// ===== 2ب-٢) شاهد سالب: تشوّه رقمي (ترتيب الأرقام) يُرصد =====
+// ملاحظة Codex P1 الثالثة (على 14ef895e): بصمة الحروف مرتّبةً كانت تُسوّي بين
+// «12,345» و«12,354»، وبين عدّاد مجموعة «12» و«21» — فيمرّ الحارس رغم تشوّه
+// رقم يراه الزبون. هنا نُبدّل رقمين داخل سعر وداخل عدّاد مجموعة، ونطالب برصد
+// الاثنين. (المطابقة الآن تُبلّط مقاطع الرسم: ترتيب الحروف داخل المقطع مصون.)
+{
+  const { context, page } = await bootApp(1440, 900);
+  const built = await page.evaluate(() => {
+    const state = (0, eval)("state");
+    state.syriaRateConfirmed = true;
+    const ds = window.buildBulletinDataset(true, "dark").dataset;
+    const plan = window.bulletinRenderPlan(ds);
+    const doc = new DOMParser().parseFromString(plan.markup, "text/html");
+
+    // يبدّل أول رقمين مختلفين متجاورين — نفس الحروف بترتيب مختلف.
+    const swapDigits = (value) => {
+      const chars = [...value];
+      for (let i = 0; i < chars.length - 1; i += 1) {
+        if (/\d/.test(chars[i]) && /\d/.test(chars[i + 1]) && chars[i] !== chars[i + 1]) {
+          [chars[i], chars[i + 1]] = [chars[i + 1], chars[i]];
+          return chars.join("");
+        }
+      }
+      return null;
+    };
+
+    const rowEl = [...doc.querySelectorAll("tbody tr")]
+      .find((tr) => swapDigits(tr.querySelector("td.price").textContent.trim()));
+    const priceRow = {
+      name: rowEl.querySelector("td.name").textContent.trim(),
+      unit: rowEl.querySelector("td.unit").textContent.trim(),
+      price: rowEl.querySelector("td.price").textContent.trim()
+    };
+    rowEl.querySelector("td.price").textContent = swapDigits(priceRow.price);
+
+    const groupEl = [...doc.querySelectorAll(".price-list-group")]
+      .find((g) => swapDigits(g.querySelector(".price-list-group-count").textContent.trim()));
+    const group = groupEl && {
+      name: groupEl.querySelector(".price-list-group-name").textContent.trim(),
+      count: groupEl.querySelector(".price-list-group-count").textContent.trim()
+    };
+    if (groupEl) groupEl.querySelector(".price-list-group-count").textContent = swapDigits(group.count);
+
+    const styleTag = plan.markup.slice(0, plan.markup.indexOf("</style>") + "</style>".length);
+    return {
+      priceRow, group,
+      corruptedPrice: swapDigits(priceRow.price),
+      corruptedCount: group ? swapDigits(group.count) : null,
+      documentHtml: window.OZKPriceListTemplate.printDocument({
+        theme: "dark", title: "digit-corruption",
+        bodyHtml: styleTag + doc.querySelector(".ozk-price-list").outerHTML
+      })
+    };
+  });
+  await context.close();
+
+  const printed = await printDocument(built.documentHtml);
+  const text = printed.pages;
+
+  // البصمة القديمة: حروف مرتّبةً — تُسوّي بين «12,345» و«12,354».
+  const oldFingerprintRule = (lines, row) => {
+    const wanted = [...normalizeArabic(`${row.name}${row.unit}${row.price}`)].sort().join("");
+    const name = normalizeArabic(row.name);
+    return lines.some((line) => {
+      const flat = lineText(line);
+      return flat.startsWith(name) && [...flat].sort().join("") === wanted;
+    });
+  };
+
+  check(`تشوّه رقمي: السعر «${built.priceRow.price}» شُوّه إلى «${built.corruptedPrice}» بنفس الحروف`,
+    built.corruptedPrice && built.corruptedPrice !== built.priceRow.price,
+    `${built.priceRow.price} → ${built.corruptedPrice}`);
+  check("تشوّه رقمي: البصمة القديمة (حروف مرتّبةً) كانت تمرّ زوراً على السعر المشوّه",
+    text.some((lines) => oldFingerprintRule(lines, built.priceRow)),
+    "الشاهد فقد معناه — لم تعد البصمة القديمة تمرّ أصلاً");
+  check("تشوّه رقمي: الحارس الحالي يرصد السعر المشوّه",
+    !text.some((lines) => printedRow(lines, built.priceRow)),
+    `«${built.priceRow.name}» بسعر مشوّه ومع ذلك اعتبره الحارس مطبوعاً سليماً`);
+  check(`تشوّه رقمي: عدّاد المجموعة «${built.group?.count}» شُوّه إلى «${built.corruptedCount}»`,
+    Boolean(built.group) && built.corruptedCount !== built.group.count,
+    "لم تُوجد مجموعة بعدّاد قابل للتبديل");
+  check("تشوّه رقمي: الحارس الحالي يرصد عدّاد المجموعة المشوّه",
+    Boolean(built.group) && !text.some((lines) => printedGroup(lines, built.group)),
+    `عدّاد «${built.group?.name}» مشوّه ومع ذلك اعتبره الحارس مطبوعاً سليماً`);
 }
 
 // ===== 2ج) كاشف الالتفاف نفسه يعمل (وإلا كان الشرط أعلاه بلا معنى) =====
