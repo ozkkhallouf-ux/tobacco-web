@@ -158,8 +158,6 @@ async function pollUntil(page, predicate, { timeout = 30000, interval = 150, mes
 const RESOURCE_FAILURE = /Failed to load resource|net::ERR_/i;
 
 // إنذارات متصفح عن قرارات موثَّقة، لا أعطال — ولا تحمل عنوان مورد فاشل:
-//   • `frame-ancestors` عبر meta: المعيار يستثنيها، والحماية الحقيقية تحتاج
-//     ترويسة HTTP من CDN (موثَّق في CLAUDE.md).
 //   • خط Almarai: قالب النشرة يستورده من fonts.googleapis.com وCSP
 //     (`style-src 'self' 'unsafe-inline'`) يحجبه. الأثر محصور في **معاينة
 //     النشرة داخل التطبيق**: خط بديل بدل Almarai. ملفات النشرة المنشورة تحت
@@ -167,8 +165,11 @@ const RESOURCE_FAILURE = /Failed to load resource|net::ERR_/i;
 //     وملفات PDF تُولَّد منها لا من التطبيق. أُبلغ عنها ولم تُعالَج هنا:
 //     علاجها تغييرٌ إنتاجي خارج نطاق هذه المهمة.
 // النمطان محدّدان بدقة كي تبقى أي مخالفة CSP جديدة فشلاً.
+// حُذف استثناء `frame-ancestors`: التوجيه نفسه أُزيل من `index.html` لأنه لا
+// أثر له إطلاقاً عبر `<meta>` (المعيار يستثنيه صراحةً — وهو سبب الرسالة). فلو
+// بقي الاستثناء لعادت الرسالة يوماً بلا أن ينتبه أحد. إزالة السبب أوثق من
+// إخفاء أثره.
 const ADVISORY_CONSOLE = [
-  /frame-ancestors' is ignored when delivered via a <meta> element/i,
   /fonts\.googleapis\.com[\s\S]*violates the following Content Security Policy/i,
 ];
 
