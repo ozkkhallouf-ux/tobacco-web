@@ -12,7 +12,7 @@
 
 ## نطاق الملفات
 
-`src/app.js`, `src/supabase-client.js`, `src/business-snapshot.js`, `src/decision-engine.js`, `tools/ameen-customer-balances-query.sql`, `tools/push-ameen-account-balances.ps1`, `tools/push-customer-movements.ps1`, `tools/push-customer-invoices.ps1`, `tools/verify-balances-all.ps1`, `supabase/ameen-account-balance-reports.sql`, `supabase/migrations/20260905131500_credit_limits_customer_guid.sql`.
+`src/app.js`, `src/supabase-client.js`, `src/business-snapshot.js`, `src/decision-engine.js`, `tools/ameen-customer-balances-query.sql`, `tools/push-ameen-account-balances.ps1`, `tools/push-customer-movements.ps1`, `tools/push-customer-invoices.ps1`, `tools/verify-balances-all.ps1`, `supabase/ameen-account-balance-reports.sql`, `supabase/migrations/20260905170644_credit_limits_customer_guid.sql`.
 
 ## هوية الزبون بين التقارير الثلاثة (مثبت 2026-09-05)
 
@@ -77,7 +77,7 @@
 حدّ حساب آخر خطأ محاسبي صامت. وعند الحفظ يُتبنّى سجل قديم بلا معرّف فيُثبَّت
 معرّفه، ولا يُتبنّى أبداً سجل يحمل معرّفاً مختلفاً.
 
-الهجرة `supabase/migrations/20260905131500_credit_limits_customer_guid.sql` تردم
+الهجرة `supabase/migrations/20260905170644_credit_limits_customer_guid.sql` تردم
 المعرّفات مرة واحدة من أحدث تقرير أرصدة بمطابقة حرفية للمفتاح، وبثلاثة حرّاس:
 مرشّح واحد لا أكثر، معرّف غير صفري، ومعرّف لم يُنسب لسجل آخر. قيس قبل التطبيق
 (2026-09-05): 25 سجل حد، 302 زبوناً في التقرير، 25/25 تطابقاً بمرشّح واحد، صفر

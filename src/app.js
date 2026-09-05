@@ -6480,7 +6480,7 @@ function customerBalanceSection(report) {
       </div>
       ${
         state.customerLimitError
-          ? `<div class="inline-warning">تعذر تحميل أو حفظ الحدود الداخلية، والمعروض هنا آخر نسخة نجحت (قد تكون قديمة). إن كان الخطأ عن عمود <code>customer_guid</code> فالهجرة <code>supabase/migrations/20260905131500_credit_limits_customer_guid.sql</code> لم تُطبَّق بعد على Supabase. الخطأ: ${escapeHtml(state.customerLimitError)}</div>`
+          ? `<div class="inline-warning">تعذر تحميل أو حفظ الحدود الداخلية، والمعروض هنا آخر نسخة نجحت (قد تكون قديمة). إن كان الخطأ عن عمود <code>customer_guid</code> فالهجرة <code>supabase/migrations/20260905170644_credit_limits_customer_guid.sql</code> لم تُطبَّق بعد على Supabase. الخطأ: ${escapeHtml(state.customerLimitError)}</div>`
           : ""
       }
       <div class="inventory-controls">

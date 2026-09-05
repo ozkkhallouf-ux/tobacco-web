@@ -286,7 +286,7 @@ test("لوحة القيادة: سجل قديم بلا معرّف يبقى يعم
 // ===== 4) المخطط والهجرة =====
 
 const migration = readFileSync(
-  new URL("../supabase/migrations/20260905131500_credit_limits_customer_guid.sql", import.meta.url),
+  new URL("../supabase/migrations/20260905170644_credit_limits_customer_guid.sql", import.meta.url),
   "utf8"
 );
 
@@ -333,7 +333,7 @@ test("فشل تحميل الحدود لا يمسح آخر نسخة ناجحة", 
 
 test("لافتة الخطأ تشير إلى الهجرة الصحيحة", () => {
   const app = readFileSync(new URL("../src/app.js", import.meta.url), "utf8");
-  assert.ok(app.includes("20260905131500_credit_limits_customer_guid.sql"),
+  assert.ok(app.includes("20260905170644_credit_limits_customer_guid.sql"),
     "رسالة الخطأ لا تدلّ على الهجرة، فيبقى سبب 400 مجهولاً على الشاشة");
   assert.ok(!app.includes("supabase/customer-credit-limits.sql"),
     "الرسالة ما زالت تحيل إلى ملف غير موجود في المستودع");
