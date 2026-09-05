@@ -107,7 +107,15 @@ async function printExportDocument(documentHtml) {
   const page = await context.newPage();
   await page.route(`${BASE}/__firstpage`, (route) =>
     route.fulfill({ contentType: "text/html; charset=utf-8", body: documentHtml }));
-  await page.goto(`${BASE}/__firstpage`, { waitUntil: "networkidle" });
+  // `networkidle` غير موثوق هنا: اتصال خطوط Google قد يبقى مفتوحاً فتنتهي المهلة
+  // ويسقط الفحص لسبب شبكي لا علاقة له بالمقيس. ننتظر تحميل المستند ثم **جهوزية
+  // الخطوط تحديداً** — وهي وحدها ما يؤثر في الهندسة — بمهلة محدودة لا تُسقِط
+  // الفحص: خطٌّ لا يصل يعني رسماً بالاحتياطي، وهو حالة مشروعة نقيسها كما هي.
+  await page.goto(`${BASE}/__firstpage`, { waitUntil: "load" });
+  await page.evaluate(() => Promise.race([
+    document.fonts.ready.catch(() => {}),
+    new Promise((resolve) => setTimeout(resolve, 10000))
+  ]));
   await page.emulateMedia({ media: "print" });
   const geometry = await page.evaluate(() => {
     const section = document.querySelector(".ozk-price-list");
@@ -133,6 +141,40 @@ async function printExportDocument(documentHtml) {
   });
   await context.close();
   return { sheets: pdfPageLines(pdf), geometry };
+}
+
+// نفس كشف الخط الذي يعتمده التطبيق حرفياً (كل وزن × كل مجموعة محارف).
+// `document.fonts.check` لا يصلح: يُرجع true أيضاً بعد فشل التحميل.
+const FONT_USABLE_PROBE = `() => {
+  const T = window.OZKPriceListTemplate;
+  const probe = document.createElement("div");
+  probe.style.cssText = "position:fixed;left:-10000px;top:0;visibility:hidden;pointer-events:none;white-space:pre;font-size:40px;line-height:1";
+  document.body.appendChild(probe);
+  try {
+    const widthOf = (family, weight, text) => {
+      probe.style.fontFamily = family;
+      probe.style.fontWeight = String(weight);
+      probe.textContent = text;
+      return probe.getBoundingClientRect().width;
+    };
+    return T.BULLETIN_FONT_WEIGHTS.every((weight) => T.BULLETIN_FONT_SAMPLES.every((sample) => {
+      const control = widthOf("monospace", weight, sample);
+      const candidate = widthOf('"' + T.BULLETIN_FONT_FAMILY + '",monospace', weight, sample);
+      return Math.abs(candidate - control) > 0.5;
+    }));
+  } finally { probe.remove(); }
+}`;
+
+// السيناريوهات التي تُطابق نصّ الصفوف حرفياً تحتاج خط النشرة نفسه: السلسلة
+// الاحتياطية تختلف بين الأنظمة وقد لا تُشكّل العربية أصلاً على لينكس، فتفشل
+// المطابقة لسببٍ يخصّ النظام لا الكود. ننتظره كما ينتظره أي مستخدم حقيقي.
+async function waitForBulletinFont(page) {
+  try {
+    await page.waitForFunction(`(${FONT_USABLE_PROBE})()`, null, { timeout: 20000 });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // هل هذه الورقة تحمل الرأس؟ عنوان النشرة سطرٌ مستقلّ في الملف.
@@ -178,6 +220,7 @@ for (const sc of [
     window.openPricePreview(sc.useSyria, sc.theme);
   }, sc);
   await page.waitForSelector("[data-action='export-price-preview']", { timeout: 10000 });
+  const fontReady = await waitForBulletinFont(page);
 
   // ما خطّطت له الخطة للصفحة الأولى تحديداً — هوية ما يجب أن يقع على الورقة الأولى.
   const planned = await page.evaluate(() => {
@@ -203,6 +246,9 @@ for (const sc of [
   const documentHtml = await page.evaluate(() =>
     document.querySelector("iframe[data-print-frame]").getAttribute("srcdoc"));
   await context.close();
+
+  check(`${sc.label}: خط النشرة جاهز قبل التصدير (شرط مطابقة النصّ العربي)`,
+    fontReady, "لم يجهز خط النشرة خلال 20 ثانية — المطابقة النصّية تقيس النظام لا الكود");
 
   check(`${sc.label}: لا اسم يلتفّ في هندسة الطباعة (شرط قراءة الملف سطراً سطراً)`,
     wrapped.length === 0, `أسماء ملتفّة: ${JSON.stringify(wrapped.slice(0, 5))}`);
@@ -349,6 +395,7 @@ for (const sc of [
     window.openPricePreview(true, "dark");
   });
   await page.waitForSelector("[data-action='export-price-preview']", { timeout: 10000 });
+  const witnessFontReady = await waitForBulletinFont(page);
   const planned = await page.evaluate(() => {
     const plan = window.bulletinRenderPlan(window.buildBulletinDataset(true, "dark").dataset);
     const first = plan.layout.mainPages[0];
@@ -362,6 +409,9 @@ for (const sc of [
   const healthy = await page.evaluate(() =>
     document.querySelector("iframe[data-print-frame]").getAttribute("srcdoc"));
   await context.close();
+
+  check("شاهد سالب: خط النشرة جاهز (شرط مطابقة النصّ العربي)", witnessFontReady,
+    "لم يجهز خط النشرة — الشاهد يقيس النظام لا الكود");
 
   const healthyPrint = await printExportDocument(healthy);
   check("شاهد سالب: المستند السليم يضع أصنافاً على الورقة الأولى",
@@ -454,27 +504,15 @@ const CHROME_WHOLE_BLOCK_PUSH_BAND_PX = 8;
     window.openPricePreview(true, "dark");
   });
   await page.waitForSelector("[data-action='export-price-preview']", { timeout: 15000 });
-  const planned = await page.evaluate(() => {
+  const planned = await page.evaluate((probeSrc) => {
     const plan = window.bulletinRenderPlan(window.buildBulletinDataset(true, "dark").dataset);
     const first = plan.layout.mainPages[0];
     return {
-      // نفس القياس الذي يعتمده التطبيق: `document.fonts.check` يُرجع true حتى
-      // بعد فشل التحميل، فلا يصلح شاهداً على أن الخط طُبِّق فعلاً.
-      fontUsable: (() => {
-        const T = window.OZKPriceListTemplate;
-        const context = document.createElement("canvas").getContext("2d");
-        const SAMPLE = "نشرة الأسعار ABC 12345";
-        return T.BULLETIN_FONT_WEIGHTS.every((weight) => {
-          context.font = `${weight} 40px monospace`;
-          const control = context.measureText(SAMPLE).width;
-          context.font = `${weight} 40px "${T.BULLETIN_FONT_FAMILY}",monospace`;
-          return Math.abs(context.measureText(SAMPLE).width - control) > 0.5;
-        });
-      })(),
+      fontUsable: new Function(`return ${probeSrc}`)()(),
       rows: [...first.right, ...first.left].flatMap((g) =>
         g.items.map((it) => ({ name: it.name, unit: it.unit, price: it.price })))
     };
-  });
+  }, FONT_USABLE_PROBE);
   await page.click("[data-action='export-price-preview']");
   await page.waitForFunction(() => Boolean(document.querySelector("iframe[data-print-frame]")), null, { timeout: 15000 });
   const documentHtml = await page.evaluate(() =>
@@ -494,7 +532,11 @@ const CHROME_WHOLE_BLOCK_PUSH_BAND_PX = 8;
     const ctx2 = await browser.newContext({ viewport: { width: 794, height: 1123 }, bypassCSP: true, serviceWorkers: "block" });
     const p2 = await ctx2.newPage();
     await p2.route(`${BASE}/__fontcheck`, (r) => r.fulfill({ contentType: "text/html; charset=utf-8", body: documentHtml }));
-    await p2.goto(`${BASE}/__fontcheck`, { waitUntil: "networkidle" });
+    await p2.goto(`${BASE}/__fontcheck`, { waitUntil: "load" });
+    await p2.evaluate(() => Promise.race([
+      document.fonts.ready.catch(() => {}),
+      new Promise((resolve) => setTimeout(resolve, 10000))
+    ]));
     const v = await p2.evaluate(() =>
       getComputedStyle(document.querySelector(".price-list-header-title")).fontFamily);
     await ctx2.close();

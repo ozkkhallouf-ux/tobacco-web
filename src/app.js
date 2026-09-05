@@ -2718,33 +2718,50 @@ const BULLETIN_PAGE_HEIGHT_PX = 1123;
 // لذلك يُمرَّر هذا القرار إلى `printDocument({ fallbackFontOnly })` فيرث المستندُ
 // المطبوع خطَّ القياس نفسه — وهو الضمان الوحيد للاتفاق (ملاحظة Codex P1 على 6508dd7).
 const BULLETIN_FONT_WAIT_CEILING_MS = 3000;
-// **هل يرسم المتصفح بخط النشرة فعلاً؟** `document.fonts.check()` لا يُجيب عن
-// هذا: هو يُرجع true أيضاً حين يكون التحميل قد **فشل** (لا شيء «معلّق» بعدها)،
-// فيبدو الخط متاحاً وهو ليس كذلك — أُثبت عملياً بحجب Google Fonts عن المستند.
-// الإجابة الوحيدة الصادقة قياسٌ فعلي: نرسم نصاً بخط النشرة وبخطّ ضابط، فإن
-// تساوى العرضان فالخط لم يُطبَّق وسقط الرسم إلى الضابط.
-// **وكلّ وزنٍ يطلبه القالب، لا وزناً واحداً.** الأوزان تصل مستقلّةً عن بعضها،
-// فقد يجهز 700 قبل 400 و800؛ والاكتفاء بوزنٍ واحد يُعيد الخلل نفسه من باب آخر:
-// عمودٌ مقيس بمقاييس مختلطة بينما تُنهي الطباعة كل الأوزان (ملاحظة Codex P1
-// على dd324da). القائمة مُصدَّرة من القالب كي لا تنحرف عمّا يطلبه الـCSS فعلاً.
+// **هل يرسم المتصفح بخط النشرة فعلاً؟** سؤالٌ لا تُجيب عنه واجهةٌ واحدة:
+//   · `document.fonts.check()` يُرجع true أيضاً حين يكون التحميل قد **فشل**
+//     (لا شيء «معلّق» بعدها)، فيبدو الخط متاحاً وهو ليس كذلك — أُثبت بحجب
+//     Google Fonts عن المستند.
+//   · قياس `canvas.measureText` مسارُ مطابقةٍ **منفصل** عن مسار الرسم في DOM،
+//     وقد يتأخّر عنه؛ قياسٌ متكرر أعطى نتائج متضاربة بين تشغيلٍ وآخر على نفس
+//     الصفحة، فلا يصلح بوابةً.
+// الإجابة الصادقة الوحيدة من **نفس المسار الذي يرسم به المتصفح النشرة**: نرسم
+// نصّاً في DOM بخط النشرة وبخطّ ضابط ونقارن العرضين. تساويهما يعني أن الخط لم
+// يُطبَّق فسقط الرسم إلى الضابط.
+//
+// والفحص يشمل **كل وزن × كل مجموعة محارف** يطلبها القالب: الأوزان تصل مستقلّةً
+// عن بعضها، ومجموعات Google Fonts الفرعية (لاتينية/عربية) تصل مستقلّةً كذلك.
+// وصولُ بعضها دون بعض يعني عموداً مقيساً بمقاييس مختلطة، وهو نفس الخلل من باب
+// آخر (ملاحظتا Codex P1 على dd324da وadf3f51).
 function bulletinFontUsable() {
   const template = window.OZKPriceListTemplate;
   const family = template?.BULLETIN_FONT_FAMILY;
   const weights = template?.BULLETIN_FONT_WEIGHTS;
-  if (!family || !Array.isArray(weights) || !weights.length || typeof document === "undefined") return false;
+  const samples = template?.BULLETIN_FONT_SAMPLES;
+  if (!family || !Array.isArray(weights) || !weights.length
+    || !Array.isArray(samples) || !samples.length || typeof document === "undefined") return false;
+  const CONTROL = "monospace";
+  const probe = document.createElement("div");
+  probe.setAttribute("aria-hidden", "true");
+  probe.style.cssText = "position:fixed;left:-10000px;top:0;visibility:hidden;pointer-events:none;"
+    + "white-space:pre;font-size:40px;line-height:1";
+  document.body.appendChild(probe);
   try {
-    const context = document.createElement("canvas").getContext("2d");
-    if (!context) return false;
-    const CONTROL = "monospace";
-    const SAMPLE = "نشرة الأسعار ABC 12345";
-    return weights.every((weight) => {
-      context.font = `${weight} 40px ${CONTROL}`;
-      const control = context.measureText(SAMPLE).width;
-      context.font = `${weight} 40px "${family}",${CONTROL}`;
-      return Math.abs(context.measureText(SAMPLE).width - control) > 0.5;
-    });
+    const widthOf = (fontFamily, weight, text) => {
+      probe.style.fontFamily = fontFamily;
+      probe.style.fontWeight = String(weight);
+      probe.textContent = text;
+      return probe.getBoundingClientRect().width;
+    };
+    return weights.every((weight) => samples.every((sample) => {
+      const control = widthOf(CONTROL, weight, sample);
+      const candidate = widthOf(`"${family}",${CONTROL}`, weight, sample);
+      return Math.abs(candidate - control) > 0.5;
+    }));
   } catch {
-    return false; // بلا canvas لا نستطيع التأكد: نُثبّت الاحتياطي ولا نخمّن.
+    return false; // تعذّر القياس: نُثبّت الاحتياطي ولا نخمّن.
+  } finally {
+    probe.remove();
   }
 }
 
