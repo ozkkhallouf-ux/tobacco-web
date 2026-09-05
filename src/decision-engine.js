@@ -26,12 +26,25 @@
   const customerName = (row) => String(row?.name || row?.customerName || row?.customer_name || "زبون");
   const customerBalance = (row) => num(row?.balance ?? row?.debit ?? row?.amount ?? row?.remaining ?? 0);
 
+  // المعرّف الصفري الذي يكتبه الأمين بدل NULL ليس معرّفاً.
+  const ZERO_GUID = "00000000-0000-0000-0000-000000000000";
+  const rowGuid = (row) => {
+    const guid = String(row?.customerGuid || row?.customer_guid || "").trim().toLowerCase();
+    return !guid || guid === ZERO_GUID ? "" : guid;
+  };
+
   function creditLimitFor(row) {
     const key = customerKey(row);
     const name = customerName(row).trim().toLowerCase();
+    const guid = rowGuid(row);
     const limits = Array.isArray(state?.customerCreditLimits) ? state.customerCreditLimits : [];
-    const match = limits.find((x) => String(x.customerKey || x.customer_key || "") === key)
-      || limits.find((x) => String(x.customerName || x.customer_name || "").trim().toLowerCase() === name);
+    // المعرّف أولاً — لا يتغيّر بإعادة تسمية الحساب في الأمين. والاحتياط بالاسم
+    // مقصور على حدود بلا معرّف حين يحمل الزبون معرّفاً، كي لا يرث حسابٌ حدَّ
+    // حسابٍ آخر يطابقه اسماً.
+    const nameFallbackOk = (x) => !guid || !rowGuid(x);
+    const match = (guid ? limits.find((x) => rowGuid(x) === guid) : null)
+      || limits.find((x) => nameFallbackOk(x) && String(x.customerKey || x.customer_key || "") === key)
+      || limits.find((x) => nameFallbackOk(x) && String(x.customerName || x.customer_name || "").trim().toLowerCase() === name);
     const approvedLimit = num(match?.creditLimit ?? match?.credit_limit ?? 0);
     if (approvedLimit > 0) {
       return { amount: approvedLimit, source: "approved", updatedAt: match?.updatedAt || match?.updated_at || null };
