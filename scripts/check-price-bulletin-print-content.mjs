@@ -104,6 +104,27 @@ async function bootApp(width, height) {
     state.syriaExchangeRate = 14050;
     state.syriaRateConfirmed = true;
   }, { items: ITEMS, prices: PRICES });
+  // **كل سيناريو يبني ترميزه من `bulletinRenderPlan`، وهو يختم قرار الخط على
+  // الترميز.** فإن لم يجهز الخط هنا وُسم الترميز بالسلسلة الاحتياطية، وهي تختلف
+  // بين الأنظمة وقد لا تُشكّل العربية على لينكس — فتفشل مطابقة النصّ لسببٍ يخصّ
+  // النظام لا الكود. المستخدم الحقيقي ينتظره، فينتظره الحارس.
+  // **شرط تشغيل الحارس كلّه، لا تفصيل سيناريو.** الترميز يُبنى من
+  // `bulletinRenderPlan` وهو يختم قرار الخط عليه؛ فبلا خط النشرة يُوسم بالسلسلة
+  // الاحتياطية، وهي تختلف بين الأنظمة وقد لا تُشكّل العربية على لينكس — فتصير
+  // المطابقة النصّية قياساً للنظام لا للكود. نُفشِل صراحةً بدل أن نمرّ زوراً.
+  //
+  // وخط النشرة لا يبدأ تحميله إلا حين تدخل قواعد القالب (وفيها `@import`) إلى
+  // المستند، فنُدخلها هنا قبل الانتظار — والمِسبار نفسه يستعمل الخط في DOM
+  // فيُطلق تحميله.
+  await page.evaluate(() => {
+    const style = document.createElement("style");
+    style.textContent = window.OZKPriceListTemplate.CSS;
+    document.head.appendChild(style);
+  });
+  if (!(await waitForBulletinFont(page))) {
+    await context.close();
+    throw new Error("خط النشرة لم يجهز خلال 20 ثانية — تعذّر تشغيل الحارس بمطابقة نصّية موثوقة");
+  }
   return { context, page };
 }
 
@@ -156,8 +177,6 @@ for (const sc of [
   // التصدير يختم قرار الخط على الترميز، والسلسلة الاحتياطية قد لا تُشكّل العربية
   // على بعض الأنظمة — فننتظر خط النشرة كما ينتظره المستخدم الحقيقي، ونُصرّح به
   // شرطاً بدل أن تفشل المطابقة لسببٍ يخصّ النظام لا الكود.
-  const fontReady = await waitForBulletinFont(page);
-
   // هويات ما يراه المستخدم على الشاشة قبل الضغط.
   const expected = await page.evaluate(() => ({
     rows: [...document.querySelectorAll(".price-preview-scroll .ozk-price-list tbody tr")].map((tr) => ({
@@ -182,9 +201,6 @@ for (const sc of [
   const documentHtml = await page.evaluate(() =>
     document.querySelector("iframe[data-print-frame]").getAttribute("srcdoc"));
   await context.close();
-
-  check(`${sc.label}: خط النشرة جاهز قبل التصدير (شرط مطابقة النصّ العربي)`,
-    fontReady, "لم يجهز خط النشرة خلال 20 ثانية — المطابقة النصّية تقيس النظام لا الكود");
 
   check(`${sc.label}: لا اسم يلتفّ في هندسة الطباعة (شرط قراءة الملف سطراً سطراً)`,
     wrapped.length === 0,

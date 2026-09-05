@@ -99,6 +99,16 @@ async function bootApp(width, height, { blockWebfont = false } = {}) {
     state.syriaExchangeRate = 14050;
     state.syriaRateConfirmed = true;
   }, { items: ITEMS, prices: PRICES });
+  // خط النشرة لا يبدأ تحميله إلا حين تدخل قواعد القالب (وفيها `@import`) إلى
+  // المستند. نُدخلها هنا كي يتمكّن `waitForBulletinFont` من الانتظار فعلاً —
+  // إلا في سيناريو حجب الخط عمداً، فانتظاره هناك بلا معنى.
+  if (!blockWebfont) {
+    await page.evaluate(() => {
+      const style = document.createElement("style");
+      style.textContent = window.OZKPriceListTemplate.CSS;
+      document.head.appendChild(style);
+    });
+  }
   return { context, page };
 }
 
