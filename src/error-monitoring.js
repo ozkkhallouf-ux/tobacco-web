@@ -99,6 +99,33 @@
     return text.length;                        // غير مُغلَق حتى النهاية: يُحجب كله
   }
 
+  // هل هذه القيمة العارية (بلا اسم ترويسة) اعتمادية حقيقية أم كلمة إنجليزية؟
+  //
+  // ⚠️ إصلاح ملاحظة Codex P1 الرابعة عشرة على PR #188: كانت القاعدة تشترط
+  // رقماً أو رمزاً داخل القيمة، فمرّ `Bearer abcdefghijklmnop` و
+  // `Basic dXNlcjpwYXNz` (ترميز صالح لـ`user:pass`) بلا مساس. وذلك الشرط
+  // وُضع عمداً كي لا يُحجب `Bearer token is missing` — نصّ خطأ عادي.
+  //
+  // فالتمييز هنا بثلاث علامات، تكفي واحدة منها، وكلها بعد حدّ أدنى ثمانية
+  // محارف يُسقط `token` و`is` و`missing` قبل أي فحص:
+  //   1) رقم أو رمز من طقم الاعتماديات — أقوى إشارة وأكثرها شيوعاً.
+  //   2) طول ≥ 16 — أطول من أطول كلمة إنجليزية شائعة عملياً
+  //      (`characteristics` خمسة عشر)، فـ`authentication` تنجو و
+  //      `abcdefghijklmnop` يُحجب.
+  //   3) حرف كبير **داخلي** — بصمة base64 (`dXNlcjpwYXNz`). الكلمة البشرية
+  //      إمّا صغيرة أو مُصدَّرة بحرف كبير واحد، لا مخلوطة في وسطها. و
+  //      ALLCAPS مستثنى صراحةً لأنه أسلوب كتابة بشري لا ترميز.
+  //
+  // هذا تمييز احتمالي لا قاطع: رمزٌ حروفي خالص أقصر من ستة عشر محرفاً بلا
+  // حرف كبير داخلي يبقى غير قابل للتمييز عن كلمة إنجليزية بلا معرفة
+  // سياقية. تُقال هذه الحدود صراحةً بدل ادّعاء إحكام لا يملكه أي نمط نصّي.
+  function looksLikeBareCredential(value) {
+    if (/[0-9._~+\/=-]/.test(value)) return true;   // 1) رقم أو رمز
+    if (value.length >= 16) return true;             // 2) أطول من الكلام
+    if (/^[A-Z]+$/.test(value)) return false;        // ALLCAPS: كتابة بشرية
+    return /[A-Z]/.test(value.slice(1));             // 3) حرف كبير داخلي
+  }
+
   var SECRET_RULES = [
     // 1) ترويسة ترخيص — تُحجب القيمة كاملةً حتى نهاية السطر، بلا استثناء.
     //
@@ -191,8 +218,10 @@
     //    رمزاً واحداً بل قائمة معاملات، فكانت هذه القاعدة تحجب `username=`
     //    منها وتترك `response=` — تشويهٌ للنصّ بلا أي مكسب أمني.
     {
-      re: /\b(bearer|basic)(\s+)(?=[A-Za-z0-9._~+\/=-]{8,})[A-Za-z0-9._~+\/=-]*[0-9._~+\/=-][A-Za-z0-9._~+\/=-]*/gi,
-      to: function (match, scheme, gap) { return scheme + gap + REDACTED; }
+      re: /\b(bearer|basic)(\s+)([A-Za-z0-9._~+\/=-]{8,})/gi,
+      to: function (match, scheme, gap, value) {
+        return looksLikeBareCredential(value) ? scheme + gap + REDACTED : match;
+      }
     },
     // 5) مفاتيح Supabase وJWT
     { re: /\b(?:sb|sbp|eyJ)[A-Za-z0-9_\-.]{16,}/g, to: function () { return REDACTED; } },

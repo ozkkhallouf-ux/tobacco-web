@@ -236,6 +236,35 @@ console.log("\n— تنقية الأسرار —");
     "ابتلع الحجبُ بقية أثر المكدّس — `.` يجب ألّا تطابق السطر الجديد");
 
   // -------------------------------------------------------------------
+  // انحدار ملاحظة Codex P1 الرابعة عشرة — تمييز الاعتمادية العارية عن الكلام.
+  //
+  // القاعدة كانت تشترط رقماً أو رمزاً، فمرّ `Bearer abcdefghijklmnop` و
+  // `Basic dXNlcjpwYXNz` (ترميز صالح لـ`user:pass`). وذلك الشرط وُضع عمداً
+  // كي لا يُحجب `Bearer token is missing`. فالشاهدان المتقابلان أدناه هما
+  // العقد: لا تسريب اعتمادية، ولا إتلاف نصّ خطأ بشري.
+  // -------------------------------------------------------------------
+  for (const [label, input] of [
+    ["رمز حروفي خالص (طول ≥ 16)", "Bearer abcdefghijklmnop"],
+    ["اعتمادية Basic حروفية (base64)", "Basic dXNlcjpwYXNz"],
+    ["اعتمادية Basic بعلامات ترقيم", "Basic dXNlcjpwYXNzd29yZA=="],
+    ["رمز بعلامات ترقيم وأرقام", "Bearer sk-live-CUSTOMER-SESSION-9911"],
+    ["رمز JWT عارٍ", "Bearer eyJhbGciOiJIUzI1NiJ9abcdefgh"],
+  ]) {
+    check(`تُحجب اعتمادية عارية: ${label}`, scrub(input).includes("[سرّ محذوف]"),
+      `مرّ «${input}» بلا حجب — اعتمادية حقيقية تصل إلى طرف ثالث`);
+  }
+  for (const intact of [
+    "Bearer token is missing",
+    "basic authentication failed",
+    "Bearer authorization required",
+    "Basic AUTHENTICATION",
+    "Bearer credentials not provided",
+  ]) {
+    check(`نصّ بشري بعد مخطط لا يُحجب: «${intact}»`, scrub(intact) === intact,
+      `أُفسد نصّ خطأ بشري — صار: ${scrub(intact)}`);
+  }
+
+  // -------------------------------------------------------------------
   // انحدار ملاحظات Codex P1 العاشرة والحادية عشرة والثانية عشرة على PR #188.
   // الحالات هي التي ذكرها Codex حرفياً، لا أكثر.
   // -------------------------------------------------------------------
