@@ -1,11 +1,13 @@
 # ============================================================
 # register-customer-invoices-task.ps1
-# يسجّل مهمة مجدولة ترفع فواتير الزبائن كل ساعة إلى Supabase
+# يسجّل مهمة مجدولة ترفع فواتير الزبائن كل ربع ساعة إلى Supabase
 # (نفس آلية حركات الزبائن — ليظهر "عرض فواتير الزبون" في الموقع)
 # شغّله كمسؤول Administrator على اللابتوب الذي يحوي ملف tools\.env وقاعدة الأمين
 # ============================================================
 param(
-    [int]$IntervalMinutes = 60
+    # كان 60. تفاصيل الفواتير كانت تتأخّر ساعةً كاملة خلف دفتر الحساب (يُرفع كل
+    # دقيقة)، فتظهر الفاتورة الجديدة كحركة بلا تفاصيل ويفشل تصديرها PDF.
+    [int]$IntervalMinutes = 15
 )
 
 $taskName = "TOBACCO Customer Invoices Push"
@@ -17,10 +19,14 @@ $action = New-ScheduledTaskAction `
 
 $trigger = New-ScheduledTaskTrigger -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes) -Once -At (Get-Date)
 
+# -StartWhenAvailable: بدونه لا يعوّض Windows أي تشغيل فات (الجهاز نائم أو مطفأ)،
+# فيبقى التقرير على آخر نسخة قبل الإطفاء حتى الموعد التالي. قياس 2026-09-05 على
+# بيانات الإنتاج: 7 رفعات فقط خلال 24 ساعة بمتوسط فجوة 235 دقيقة رغم جدولة الساعة.
 $settings = New-ScheduledTaskSettingsSet `
-    -ExecutionTimeLimit (New-TimeSpan -Minutes 15) `
+    -ExecutionTimeLimit (New-TimeSpan -Minutes 10) `
     -RestartCount 2 `
-    -RestartInterval (New-TimeSpan -Minutes 3)
+    -RestartInterval (New-TimeSpan -Minutes 3) `
+    -StartWhenAvailable
 
 Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
 
