@@ -251,14 +251,56 @@ function normalizeArabic(value) {
 // لأن أسماء النشرة تُعيد استعمال كلمات شائعة («ماستر»، «سليم»، «فضي»، «أزرق»)
 // فتُشبع مقاطعُه من صفوف أخرى لا علاقة لها به — أي حارس يمرّ زوراً بينما محتوى
 // يراه الزبون ضائع. سيناريو «الشاهد السالب» أدناه يُثبت أن هذا لم يعد ممكناً.
-// الاسم مطبوع إذا ظهر **متّصلاً داخل سطر واحد** من أسطر الورقة (وقد ضُمّت
-// أسطر الالتفاف إلى خلاياها قبل ذلك). لا تقسيم إلى مقاطع تُبحث كلٌّ على حدة:
-// ذلك التسامح هو ما رصدته Codex كـP1، لأنه يسمح لصنف ضائع بأن يُحتسب مطبوعاً
-// من كلمات صفوف أخرى. سيناريو «الشاهد السالب» يثبت أن الثغرة أُغلقت.
-function printedContains(pageLines, name) {
-  const flat = normalizeArabic(name);
-  if (!flat) return true;
-  return pageLines.some((line) => line.includes(flat));
+// **مطابقة صفّ كامل، لا احتواء نصّي.** الصفّ المطبوع سطرٌ واحد في الملف يحمل
+// خلاياه الثلاث بالترتيب المنطقي: الاسم ثم الوحدة ثم السعر. فنقارن السطر
+// **بالتساوي التام** مع تسلسل الخلايا الثلاث كما تعرضها المعاينة.
+//
+// لماذا التساوي لا الاحتواء (ملاحظة Codex P1 الثانية، على 6ac9fae7): التطبيع
+// يحذف الفراغات، فاسمُ صنفٍ أقصر قد يكون **مقطعاً داخل** اسم أطول — مثل
+// «اليغانس سليم فضي» داخل «اليغانس سليم فضي بدون طبعة» في price-data.json.
+// مع الاحتواء كان حذف الصفّ الأقصر يمرّ بلا رصد لأن سطر الأطول يُشبعه.
+// وبمقارنة الصفّ كاملاً يُرصد أي غياب — وتُفحص الأسعار والوحدات معه لا بمعزل.
+//
+// (وقبلها، ملاحظة P1 الأولى على d0c229f6: تقسيم الاسم إلى مقاطع تُبحث كلٌّ على
+// حدة في كامل نص الصفحة كان يسمح لصنف ضائع بأن تُشبَع مقاطعُه من صفوف أخرى
+// تشاركه كلماته الشائعة. لا تقسيم بعد الآن إطلاقاً.)
+// بصمة محتوى: مجموعة الحروف مرتّبةً. تُقارَن **بالتساوي التام**، فطولها
+// ومحتواها معاً يجب أن يطابقا الصفّ المتوقَّع — لا احتواء ولا مقاطع.
+function contentFingerprint(value) {
+  return [...normalizeArabic(value)].sort().join("");
+}
+
+function rowCells(row) {
+  return `${row.name}${row.unit}${row.price}`;
+}
+
+// هل هذا الصفّ مطبوع كاملاً في إحدى أوراق الملف؟
+//
+// الصفّ المطبوع سطرٌ واحد يحمل خلاياه الثلاث: الاسم ثم الوحدة ثم السعر.
+// الشرطان معاً:
+//   1. السطر يبدأ بالاسم — يثبّت حدّ الخلية اليمنى فلا يُقبل اسم مقطوع.
+//   2. بصمة السطر تساوي بصمة الخلايا الثلاث — تساوٍ تام في الطول والمحتوى.
+// الشرط الثاني هو ما يغلق ملاحظة Codex P1 الثانية (على 6ac9fae7): التطبيع
+// يحذف الفراغات، فاسمٌ أقصر قد يكون مقطعاً داخل اسم أطول («اليغانس سليم فضي»
+// داخل «اليغانس سليم فضي بدون طبعة»)؛ ومع الاحتواء كان حذف الصفّ الأقصر يمرّ
+// بلا رصد. بالتساوي التام يختلف الطول والمحتوى فيُرصد الغياب فوراً.
+//
+// نقارن بالبصمة لا بالنص المتسلسل لأن خلية السعر تُرسم باتجاه LTR داخل نشرة
+// RTL، فترتيب مقاطعها داخل السطر المُعاد بناؤه يخالف ترتيبها في الـDOM —
+// وهو اختلاف عرضٍ بحت لا علاقة له بوجود المحتوى أو غيابه.
+function printedRow(pageLines, row) {
+  const name = normalizeArabic(row.name);
+  const wanted = contentFingerprint(rowCells(row));
+  if (!name || !wanted) return false;
+  return pageLines.some((line) => line.startsWith(name) && contentFingerprint(line) === wanted);
+}
+
+// رأس المجموعة سطرٌ يحمل اسمها ثم عدّاد أصنافها — بنفس الشرطين.
+function printedGroup(pageLines, group) {
+  const name = normalizeArabic(group.name);
+  const wanted = contentFingerprint(`${group.name}${group.count}`);
+  if (!name || !wanted) return false;
+  return pageLines.some((line) => line.startsWith(name) && contentFingerprint(line) === wanted);
 }
 
 // شرط صحة قراءة الملف: قارئ نص PDF يقرأ **سطوراً**، فالاسم الذي يُرسم بسطر
@@ -374,10 +416,15 @@ for (const sc of [
 
   // هويات ما يراه المستخدم على الشاشة قبل الضغط.
   const expected = await page.evaluate(() => ({
-    itemNames: [...document.querySelectorAll(".price-preview-scroll .ozk-price-list tbody tr td.name")]
-      .map((td) => td.textContent.trim()),
-    groupNames: [...document.querySelectorAll(".price-preview-scroll .ozk-price-list .price-list-group-name")]
-      .map((el) => el.textContent.trim()),
+    rows: [...document.querySelectorAll(".price-preview-scroll .ozk-price-list tbody tr")].map((tr) => ({
+      name: tr.querySelector("td.name").textContent.trim(),
+      unit: tr.querySelector("td.unit").textContent.trim(),
+      price: tr.querySelector("td.price").textContent.trim()
+    })),
+    groups: [...document.querySelectorAll(".price-preview-scroll .ozk-price-list .price-list-group")].map((g) => ({
+      name: g.querySelector(".price-list-group-name").textContent.trim(),
+      count: g.querySelector(".price-list-group-count").textContent.trim()
+    })),
     pageCount: Number((document.querySelector(".price-preview-titles p")?.textContent.match(/(\d+)\s*صفحة/) || [])[1] || 0)
   }));
 
@@ -408,17 +455,16 @@ for (const sc of [
     `المعاينة ${expected.pageCount} · الملف ${printed.pages.length}`);
 
   // --- جوهر الحارس: أسماء المجموعات والأصناف داخل الورق نفسه ---
-  const missingGroups = expected.groupNames.filter((name) => !text.some((pageText) => printedContains(pageText, name)));
-  check(`${sc.label}: كل أسماء المجموعات (${expected.groupNames.length}) مطبوعة داخل الملف`,
+  const missingGroups = expected.groups.filter((g) => !text.some((lines) => printedGroup(lines, g)));
+  check(`${sc.label}: كل رؤوس المجموعات (${expected.groups.length}) مطبوعة كاملةً داخل الملف`,
     missingGroups.length === 0, `مفقودة: ${JSON.stringify(missingGroups.slice(0, 8))}`);
 
-  const missingItems = expected.itemNames.filter((name) => !text.some((pageText) => printedContains(pageText, name)));
-  check(`${sc.label}: كل أسماء الأصناف (${expected.itemNames.length}) مطبوعة داخل الملف`,
-    missingItems.length === 0, `مفقودة: ${JSON.stringify(missingItems.slice(0, 8))}`);
+  const missingItems = expected.rows.filter((row) => !text.some((lines) => printedRow(lines, row)));
+  check(`${sc.label}: كل صفوف الأصناف (${expected.rows.length}) مطبوعة كاملةً (اسم+وحدة+سعر)`,
+    missingItems.length === 0, `مفقودة: ${JSON.stringify(missingItems.slice(0, 6))}`);
 
   // --- «الرأس فقط»: كل ورقة يجب أن تحمل أصنافاً، لا ترويسة وحدها ---
-  const itemsPerPage = text.map((pageText) =>
-    expected.itemNames.filter((name) => printedContains(pageText, name)).length);
+  const itemsPerPage = text.map((lines) => expected.rows.filter((row) => printedRow(lines, row)).length);
   check(`${sc.label}: لا ورقة تحمل الرأس وحده — كل ورقة فيها أصناف`,
     itemsPerPage.every((count) => count > 0),
     `أصناف كل ورقة = [${itemsPerPage.join(", ")}]`);
@@ -492,8 +538,8 @@ for (const sc of [
     return {
       headerHeightPx,
       pageCount: layout.mainPages.length + layout.specialPages.length,
-      itemNames: groups.flatMap((g) => g.items.map((i) => i.name)),
-      groupNames: groups.map((g) => g.name),
+      rows: groups.flatMap((g) => g.items),
+      groups: groups.map((g) => ({ name: g.name, count: String(g.items.length) })),
       documentHtml: T.printDocument({ theme: "dark", title: "rescue-shape", bodyHtml: markup })
     };
   });
@@ -509,24 +555,25 @@ for (const sc of [
   check("شكل الإنقاذ: عدد أوراق الملف = عدد الصفحات المخطَّطة",
     printed.pages.length === built.pageCount,
     `مخطَّط ${built.pageCount} · مطبوع ${printed.pages.length}`);
-  const missing = built.itemNames.filter((n) => !text.some((pageText) => printedContains(pageText, n)));
-  check("شكل الإنقاذ: كل الأصناف مطبوعة داخل الملف",
-    missing.length === 0, `مفقودة: ${JSON.stringify(missing.slice(0, 8))}`);
-  const missingGroups = built.groupNames.filter((n) => !text.some((pageText) => printedContains(pageText, n)));
-  check("شكل الإنقاذ: كل المجموعات مطبوعة داخل الملف",
+  const missing = built.rows.filter((row) => !text.some((lines) => printedRow(lines, row)));
+  check("شكل الإنقاذ: كل صفوف الأصناف مطبوعة كاملةً داخل الملف",
+    missing.length === 0, `مفقودة: ${JSON.stringify(missing.slice(0, 6))}`);
+  const missingGroups = built.groups.filter((g) => !text.some((lines) => printedGroup(lines, g)));
+  check("شكل الإنقاذ: كل رؤوس المجموعات مطبوعة كاملةً داخل الملف",
     missingGroups.length === 0, `مفقودة: ${JSON.stringify(missingGroups)}`);
-  const perPage = text.map((t) => built.itemNames.filter((n) => printedContains(t, n)).length);
+  const perPage = text.map((lines) => built.rows.filter((row) => printedRow(lines, row)).length);
   check("شكل الإنقاذ: لا ورقة بالرأس وحده", perPage.every((n) => n > 0), `[${perPage.join(", ")}]`);
 }
 
 // ===== 2ب) شاهد سالب: الحارس يرصد فقدان صنف فعلاً (لا يمرّ زوراً) =====
-// ملاحظة Codex P1 على d0c229f6: المطابقة السابقة كانت تبحث عن كل مقطع من الاسم
-// مستقلاً في **كامل نص الصفحة**، فصنفٌ ضائع فعلاً كان يُحتسب مطبوعاً لأن أسماء
-// النشرة تُعيد استعمال كلمات شائعة تُشبع مقاطعه من صفوف أخرى.
-//
-// هنا نُثبت السلوك لا الصياغة: نحذف صفّ صنف **مختار خصّيصاً بحيث تكون كل كلماته
-// موجودة في أسماء أصناف أخرى**، نطبع الملف، ثم نطالب بأن يرصده الحارس مفقوداً —
-// ونُظهر صراحةً أن القاعدة القديمة (بحث الصفحة كاملة) كانت ستمرّه.
+// يغطّي **كلتا** ثغرتَي المرور الزائف اللتين رصدتهما Codex:
+//   أ) على d0c229f6: تقسيم الاسم إلى مقاطع تُبحث كلٌّ على حدة في كامل نص
+//      الصفحة — فتُشبَع مقاطع صنف ضائع من صفوف أخرى تشاركه كلماته الشائعة.
+//   ب) على 6ac9fae7: الاحتواء النصّي — التطبيع يحذف الفراغات، فاسم أقصر قد
+//      يكون مقطعاً داخل اسم أطول («اليغانس سليم فضي» داخل «اليغانس سليم فضي
+//      بدون طبعة»)، فيُشبعه سطر الأطول.
+// نحذف ضحيّة من كل نوع، ونطالب برصد الاثنتين — ونُظهر صراحةً أن القاعدتين
+// القديمتين كانتا ستمرّان.
 {
   const { context, page } = await bootApp(1440, 900);
   const built = await page.evaluate(() => {
@@ -534,26 +581,35 @@ for (const sc of [
     state.syriaRateConfirmed = true;
     const ds = window.buildBulletinDataset(true, "dark").dataset;
     const plan = window.bulletinRenderPlan(ds);
-    const names = window.bulletinTemplateGroups(ds).flatMap((g) => g.items.map((i) => i.name));
-
-    // ضحيّة كل كلماتها مشتركة مع أسماء أخرى: أقسى حالة على المطابقة.
+    const rows = window.bulletinTemplateGroups(ds).flatMap((g) => g.items);
+    const flat = (v) => String(v).normalize("NFKC").replace(/\s+/g, "");
     const words = (n) => n.trim().split(/\s+/).filter(Boolean);
-    const victim = names.find((name) => {
-      const parts = words(name);
-      return parts.length >= 2 && parts.every((w) => names.some((other) => other !== name && words(other).includes(w)));
-    }) || names[names.length - 1];
+
+    // (أ) كل كلماتها مشتركة مع أصناف أخرى.
+    const shared = rows.find((row) => {
+      const parts = words(row.name);
+      return parts.length >= 2
+        && parts.every((w) => rows.some((other) => other.name !== row.name && words(other.name).includes(w)));
+    });
+    // (ب) اسمها مقطع صارم داخل اسم صنف آخر أطول.
+    const nested = rows.find((row) =>
+      rows.some((other) => other.name !== row.name && flat(other.name).includes(flat(row.name))));
+
+    const victims = [shared, nested].filter(Boolean)
+      .filter((row, i, list) => list.findIndex((r) => r.name === row.name) === i);
 
     const doc = new DOMParser().parseFromString(plan.markup, "text/html");
-    const row = [...doc.querySelectorAll("tbody tr")]
-      .find((tr) => tr.querySelector("td.name")?.textContent.trim() === victim);
-    row.remove();
-    const mutated = doc.querySelector(".ozk-price-list").outerHTML;
+    victims.forEach((victim) => {
+      [...doc.querySelectorAll("tbody tr")]
+        .find((tr) => tr.querySelector("td.name")?.textContent.trim() === victim.name)
+        ?.remove();
+    });
     const styleTag = plan.markup.slice(0, plan.markup.indexOf("</style>") + "</style>".length);
     return {
-      victim,
-      names,
+      victims, rows,
       documentHtml: window.OZKPriceListTemplate.printDocument({
-        theme: "dark", title: "negative-witness", bodyHtml: styleTag + mutated
+        theme: "dark", title: "negative-witness",
+        bodyHtml: styleTag + doc.querySelector(".ozk-price-list").outerHTML
       })
     };
   });
@@ -562,26 +618,34 @@ for (const sc of [
   const printed = await printDocument(built.documentHtml);
   const text = printed.pages;
 
-  // القاعدة القديمة: كل مقطع يُبحث عنه مستقلاً في كامل نص الصفحة، بلا ترتيب ولا جوار.
-  const pageWideFragmentMatch = (pageText, name) => {
-    const words = String(name).trim().split(/\s+/).map(normalizeArabic).filter(Boolean);
-    return words.every((w) => pageText.includes(w));
+  // القاعدتان القديمتان، لإظهار أن الشاهد يغطّي ثغرة حقيقية لا مفترضة.
+  const oldFragmentRule = (lines, name) => {
+    const page = lines.join("");
+    return String(name).trim().split(/\s+/).map(normalizeArabic).filter(Boolean)
+      .every((w) => page.includes(w));
   };
-  const wholePageText = text.map((lines) => lines.join(""));
+  const oldSubstringRule = (lines, name) => lines.some((line) => line.includes(normalizeArabic(name)));
 
-  check("الشاهد السالب: الضحيّة اسم كل كلماته مشتركة مع أصناف أخرى",
-    built.victim.trim().split(/\s+/).length >= 2, `الضحيّة = ${built.victim}`);
-  check("الشاهد السالب: القاعدة القديمة (بحث الصفحة كاملة) كانت تمرّ زوراً",
-    wholePageText.some((t) => pageWideFragmentMatch(t, built.victim)),
-    `القاعدة القديمة لم تكن ستمرّ على «${built.victim}» — الشاهد فقد معناه، اختر ضحيّة أقسى`);
-  check("الشاهد السالب: الحارس الحالي يرصد الصنف المحذوف مفقوداً",
-    !text.some((lines) => printedContains(lines, built.victim)),
-    `«${built.victim}» حُذف من المستند ومع ذلك اعتبره الحارس مطبوعاً`);
+  check("الشاهد السالب: وُجدت ضحيّتان تغطّيان الثغرتين",
+    built.victims.length === 2, `الضحايا = ${JSON.stringify(built.victims.map((v) => v.name))}`);
 
-  const missing = built.names.filter((n) => !text.some((lines) => printedContains(lines, n)));
+  built.victims.forEach((victim, index) => {
+    const kind = index === 0 ? "كلمات مشتركة" : "اسم داخل اسم أطول";
+    const oldWouldPass = index === 0
+      ? text.some((lines) => oldFragmentRule(lines, victim.name))
+      : text.some((lines) => oldSubstringRule(lines, victim.name));
+    check(`الشاهد السالب (${kind}): القاعدة القديمة كانت تمرّ زوراً على «${victim.name}»`,
+      oldWouldPass, "الشاهد فقد معناه — اختر ضحيّة أقسى");
+    check(`الشاهد السالب (${kind}): الحارس الحالي يرصد «${victim.name}» مفقوداً`,
+      !text.some((lines) => printedRow(lines, victim)),
+      "الصفّ حُذف من المستند ومع ذلك اعتبره الحارس مطبوعاً");
+  });
+
+  const missing = built.rows.filter((row) => !text.some((lines) => printedRow(lines, row)));
+  const victimNames = new Set(built.victims.map((v) => v.name));
   check("الشاهد السالب: لا ضحايا جانبية — المفقود هو المحذوف وحده",
-    missing.length === 1 && missing[0] === built.victim,
-    `المفقود = ${JSON.stringify(missing.slice(0, 8))} · المحذوف = ${built.victim}`);
+    missing.length === built.victims.length && missing.every((row) => victimNames.has(row.name)),
+    `المفقود = ${JSON.stringify(missing.map((r) => r.name).slice(0, 8))} · المحذوف = ${JSON.stringify([...victimNames])}`);
 }
 
 // ===== 2ج) كاشف الالتفاف نفسه يعمل (وإلا كان الشرط أعلاه بلا معنى) =====
