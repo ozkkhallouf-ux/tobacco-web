@@ -292,16 +292,31 @@ function Invoke-SyncGit {
 function Stop-WithGitFailure([string]$Step, $Result) {
     Log "فشل $Step (رمز $($Result.Code)): $($Result.Text)" "Red"
     $alertScript = Join-Path $PSScriptRoot "send-telegram-notification.ps1"
-    if (Test-Path $alertScript) {
-        try {
-            & $alertScript `
-                -Message "🚨 auto-sync-price-lists: فشل $Step عند رفع نشرة الأسعار (رمز $($Result.Code)). $($Result.Text)" `
-                -EventType "windows" -DedupeKey "auto-sync-git-$Step" -DedupeMinutes 60 2>&1 | Out-Null
-        } catch {
-            # التنبيه best-effort ولا يجوز أن يكسر المزامنة، لكن فشله لا يُبتلع
-            # صامتاً أيضاً — تنبيه ميت بصمت هو عين العطل الذي يعالجه هذا الملف.
-            Log "تعذّر إرسال تنبيه تيليغرام: $($_.Exception.Message)" "DarkYellow"
-        }
+    if (-not (Test-Path $alertScript)) {
+        Log "لم يصل تنبيه تيليغرام: $alertScript غير موجود" "DarkYellow"
+        exit 1
+    }
+
+    # `send-telegram-notification.ps1` best-effort بتصميمه: يلتقط كل استثناءاته
+    # ويطبع «TELEGRAM-NOTIFY FAILED» أو «SKIPPED» ثم **يخرج بصفر دائماً**. فلا
+    # try/catch خارجي يراه، ولا رمز الخروج يدلّ عليه — وإرسال خرجه إلى Out-Null
+    # يمحو إشارته الوحيدة. النتيجة: فشل git يُسجَّل، والتنبيه لا يصل، ولا أحد
+    # يعلم. لذلك نلتقط خرجه ونطالبه بعلامة النجاح صراحةً.
+    $alertOutput = ""
+    $previousErrorAction = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $alertOutput = (& $alertScript `
+            -Message "🚨 auto-sync-price-lists: فشل $Step عند رفع نشرة الأسعار (رمز $($Result.Code)). $($Result.Text)" `
+            -EventType "windows" -DedupeKey "auto-sync-git-$Step" -DedupeMinutes 60 2>&1 |
+            ForEach-Object { "$_" }) -join " | "
+    } catch {
+        $alertOutput = "استثناء: $($_.Exception.Message)"
+    } finally { $ErrorActionPreference = $previousErrorAction }
+
+    if ($alertOutput -notmatch 'TELEGRAM-NOTIFY OK') {
+        # التنبيه يبقى best-effort فلا يكسر المزامنة، لكن عدم وصوله يُسجَّل.
+        Log "لم يصل تنبيه تيليغرام: $alertOutput" "DarkYellow"
     }
     exit 1
 }
