@@ -2,7 +2,9 @@
 # ============================================================
 # Test-DailyGitPullStaleLock.ps1
 #
-# اختبار انحدار سلوكي لعطل إنتاجي حقيقي (جهاز Windows، 2026-09-05):
+# اختبارات انحدار سلوكية لمنظومة السحب اليومي (جهاز Windows، 2026-09-05).
+#
+# (1-4) عطل إنتاجي حقيقي:
 # قفل تنسيق حُجز في 2026-08-31 بقي status=active بعد انتهاء مهمته، فمنع
 # tools/daily-git-pull.ps1 من السحب ثلاثة أيام متتالية (09-02 و09-03
 # و09-04، ثلاثة أسطر «SKIP: active AI task lock» في tools/logs).
@@ -179,6 +181,44 @@ try {
     elseif ($after -ne $before) { Add-Failure "حرّك الفرع وشجرة العمل متسخة" }
     else { Add-Pass "الشجرة المتسخة ما زالت تمنع السحب" }
 } finally { Remove-Item -Recurse -Force $fx.Root -ErrorAction SilentlyContinue }
+
+# ------------------------------------------------------------
+# 5) فحص وجود المهمة في register-daily-git-pull-task.ps1 يجب ألا يرمي على
+#    جهاز نظيف. غياب المهمة نتيجة متوقَّعة: schtasks يكتبها على stderr ويخرج
+#    بغير صفر، ومع $ErrorActionPreference = "Stop" يحوّلها 5.1 إلى
+#    NativeCommandError منهٍ — فيموت السكربت قبل /Create ويستحيل التسجيل لأول
+#    مرة. تُنفَّذ هنا **أسطر الفحص الحقيقية المستخرَجة من السكربت الإنتاجي**،
+#    باسم مهمة غير موجود قطعاً (/Query قراءة فقط، لا تُنشئ ولا تعدّل شيئاً).
+# ------------------------------------------------------------
+Write-Host "5) register script's task probe must not throw when the task is absent"
+$registerPath = Join-Path $repoRoot 'tools\register-daily-git-pull-task.ps1'
+if (-not (Test-Path -LiteralPath $registerPath)) {
+    Add-Failure "لم أجد $registerPath"
+} else {
+    $src = Get-Content -LiteralPath $registerPath -Raw -Encoding UTF8
+    $m = [regex]::Match($src, '(?s)\$taskExists = \$false.*?\n\}\r?\n')
+    if (-not $m.Success) {
+        Add-Failure "تعذّر استخراج كتلة فحص وجود المهمة — تغيّرت بنيتها فسقط الحارس"
+    } else {
+        $probe = $m.Value
+        if ($probe -notmatch "ErrorActionPreference") {
+            Add-Failure "كتلة الفحص لا تخفض ErrorActionPreference — ستموت على جهاز نظيف"
+        }
+        $sb = [scriptblock]::Create(
+            '$ErrorActionPreference = "Stop"' + "`n" +
+            '$TaskName = "TOBACCO NoSuchTask ZZZ 9f3a1c"' + "`n" +
+            $probe + "`n" +
+            '$taskExists'
+        )
+        try {
+            $result = & $sb
+            if ($result -eq $false) { Add-Pass "الفحص لم يرمِ وأعاد False — التنفيذ يكمل إلى التسجيل" }
+            else { Add-Failure "الفحص أعاد $result لمهمة غير موجودة" }
+        } catch {
+            Add-Failure ("الفحص رمى استثناءً على مهمة غائبة (" + $_.FullyQualifiedErrorId + ") — التسجيل لأول مرة مستحيل")
+        }
+    }
+}
 
 Write-Host ""
 if ($failures.Count -gt 0) {

@@ -51,8 +51,22 @@ $taskCommand = "wscript.exe `"$hiddenLauncherPath`""
 # تعمل هذه المهمة بحساب OZKSync بـLogonType=Password، فإعادة التسجيل تُسقطه
 # إلى المستخدم الحالي وتوقف المهمة بصمت. تحديث الغلاف وحده كافٍ لنشر أي إصلاح،
 # لأن الغلاف shim رفيع يستدعي سكربت المستودع.
-& schtasks.exe /Query /TN $TaskName 2>&1 | Out-Null
-if ($LASTEXITCODE -eq 0) {
+# فحص وجود المهمة. غياب المهمة نتيجة **متوقَّعة** لا خطأ: schtasks يكتبها على
+# stderr ويخرج بغير صفر، ومع $ErrorActionPreference = "Stop" أعلى الملف يحوّلها
+# PowerShell 5.1 إلى NativeCommandError منهٍ — فيموت السكربت هنا قبل أن يبلغ
+# /Create، ويستحيل التسجيل لأول مرة على جهاز نظيف. نخفض التفضيل لهذا الفحص
+# وحده ونحكم برمز الخروج، ثم نعيده كما كان.
+$taskExists = $false
+$previousErrorAction = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try {
+  & schtasks.exe /Query /TN $TaskName 2>&1 | Out-Null
+  $taskExists = ($LASTEXITCODE -eq 0)
+} finally {
+  $ErrorActionPreference = $previousErrorAction
+}
+
+if ($taskExists) {
   Write-Host "المهمة '$TaskName' مسجَّلة مسبقاً — حُدِّث الغلاف فقط ولم تُمسّ المهمة."
   Write-Host "  الغلاف: $launcherPath"
   Write-Host "  (إعادة التسجيل تُفقد حساب التشغيل وكلمة مروره المخزّنة. لتغيير"
@@ -60,7 +74,9 @@ if ($LASTEXITCODE -eq 0) {
   Write-Host "   يدوياً ثم أعد تشغيل هذا السكربت عن قصد.)"
 
   # حارس انحراف: إن كانت المهمة تشير إلى غلاف آخر، فتحديثنا لا يصلها.
-  $registered = (& schtasks.exe /Query /TN $TaskName /V /FO LIST 2>&1) -join "`n"
+  $ErrorActionPreference = 'Continue'
+  try { $registered = (& schtasks.exe /Query /TN $TaskName /V /FO LIST 2>&1) -join "`n" }
+  finally { $ErrorActionPreference = $previousErrorAction }
   if ($registered -notmatch [regex]::Escape($hiddenLauncherPath)) {
     Write-Warning "المهمة لا تشير إلى $hiddenLauncherPath — تحديث الغلاف قد لا يصل الإنتاج. راجع إجراء المهمة يدوياً."
   }
