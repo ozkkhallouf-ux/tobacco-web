@@ -2723,19 +2723,26 @@ const BULLETIN_FONT_WAIT_CEILING_MS = 3000;
 // فيبدو الخط متاحاً وهو ليس كذلك — أُثبت عملياً بحجب Google Fonts عن المستند.
 // الإجابة الوحيدة الصادقة قياسٌ فعلي: نرسم نصاً بخط النشرة وبخطّ ضابط، فإن
 // تساوى العرضان فالخط لم يُطبَّق وسقط الرسم إلى الضابط.
+// **وكلّ وزنٍ يطلبه القالب، لا وزناً واحداً.** الأوزان تصل مستقلّةً عن بعضها،
+// فقد يجهز 700 قبل 400 و800؛ والاكتفاء بوزنٍ واحد يُعيد الخلل نفسه من باب آخر:
+// عمودٌ مقيس بمقاييس مختلطة بينما تُنهي الطباعة كل الأوزان (ملاحظة Codex P1
+// على dd324da). القائمة مُصدَّرة من القالب كي لا تنحرف عمّا يطلبه الـCSS فعلاً.
 function bulletinFontUsable() {
-  const family = window.OZKPriceListTemplate?.BULLETIN_FONT_FAMILY;
-  if (!family || typeof document === "undefined") return false;
+  const template = window.OZKPriceListTemplate;
+  const family = template?.BULLETIN_FONT_FAMILY;
+  const weights = template?.BULLETIN_FONT_WEIGHTS;
+  if (!family || !Array.isArray(weights) || !weights.length || typeof document === "undefined") return false;
   try {
     const context = document.createElement("canvas").getContext("2d");
     if (!context) return false;
     const CONTROL = "monospace";
     const SAMPLE = "نشرة الأسعار ABC 12345";
-    context.font = `700 40px ${CONTROL}`;
-    const control = context.measureText(SAMPLE).width;
-    context.font = `700 40px "${family}",${CONTROL}`;
-    const candidate = context.measureText(SAMPLE).width;
-    return Math.abs(candidate - control) > 0.5;
+    return weights.every((weight) => {
+      context.font = `${weight} 40px ${CONTROL}`;
+      const control = context.measureText(SAMPLE).width;
+      context.font = `${weight} 40px "${family}",${CONTROL}`;
+      return Math.abs(context.measureText(SAMPLE).width - control) > 0.5;
+    });
   } catch {
     return false; // بلا canvas لا نستطيع التأكد: نُثبّت الاحتياطي ولا نخمّن.
   }

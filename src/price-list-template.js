@@ -14,6 +14,11 @@
   // الأسماء حرفياً في مكانين، تكرارٌ يجعل تغيير الخط يكسر الانتظار بصمت.
   const BULLETIN_FONT_FAMILY = "Almarai";
   const BULLETIN_FALLBACK_FONT_STACK = "Tahoma,Arial,sans-serif";
+  // أوزان الخط التي يطلبها الـCSS أدناه فعلاً (400 افتراضي الجدول، و600/900
+  // تُستوفى من 700/800 المحمَّلين). القياس لا يكون سليماً حتى يجهز **كلّها**:
+  // وصولُ وزنٍ دون آخر يعني عموداً مقيساً بمقاييس مختلطة. مُصدَّرة كي ينتظرها
+  // `src/app.js` بلا تكرار القائمة في مكانين (ملاحظة Codex P1 على dd324da).
+  const BULLETIN_FONT_WEIGHTS = Object.freeze([400, 700, 800]);
 
   // يفرض السلسلة الاحتياطية وحدها على مستند الطباعة.
   //
@@ -782,6 +787,7 @@
     THEME_PAGE_BACKGROUND,
     BULLETIN_FONT_FAMILY,
     BULLETIN_FALLBACK_FONT_STACK,
+    BULLETIN_FONT_WEIGHTS,
     themePageBackground,
     documentBackgroundCss,
     printDocument,

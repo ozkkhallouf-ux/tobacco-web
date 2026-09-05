@@ -461,12 +461,15 @@ const CHROME_WHOLE_BLOCK_PUSH_BAND_PX = 8;
       // نفس القياس الذي يعتمده التطبيق: `document.fonts.check` يُرجع true حتى
       // بعد فشل التحميل، فلا يصلح شاهداً على أن الخط طُبِّق فعلاً.
       fontUsable: (() => {
+        const T = window.OZKPriceListTemplate;
         const context = document.createElement("canvas").getContext("2d");
         const SAMPLE = "نشرة الأسعار ABC 12345";
-        context.font = "700 40px monospace";
-        const control = context.measureText(SAMPLE).width;
-        context.font = '700 40px "Almarai",monospace';
-        return Math.abs(context.measureText(SAMPLE).width - control) > 0.5;
+        return T.BULLETIN_FONT_WEIGHTS.every((weight) => {
+          context.font = `${weight} 40px monospace`;
+          const control = context.measureText(SAMPLE).width;
+          context.font = `${weight} 40px "${T.BULLETIN_FONT_FAMILY}",monospace`;
+          return Math.abs(context.measureText(SAMPLE).width - control) > 0.5;
+        });
       })(),
       rows: [...first.right, ...first.left].flatMap((g) =>
         g.items.map((it) => ({ name: it.name, unit: it.unit, price: it.price })))
@@ -500,10 +503,18 @@ const CHROME_WHOLE_BLOCK_PUSH_BAND_PX = 8;
   check("اتفاق الخط: المستند يُرسم بالاحتياطي حتى حين يكون الخط متاحاً للطباعة",
     !/Almarai/.test(usedFont), `font-family المطبوع = ${usedFont}`);
 
+  // **قياس كمّي لا نصّي هنا عمداً.** مطابقة الصفوف حرفياً تتطلّب خطاً يُشكّل
+  // العربية، والسلسلة الاحتياطية تختلف بين الأنظمة (Tahoma على ماك، وخطٌّ آخر
+  // على لينكس CI قد لا يُشكّل العربية أصلاً) — فالمطابقة النصّية هناك تقيس
+  // النظام لا الكود. مطابقة الصفوف الصارمة مفروضة في سيناريو ١ بالخط الحقيقي؛
+  // وما يهمّ هنا أن **كمّ المحتوى المرسوم على الورقة الأولى** يوازي ما خُطِّط
+  // لها، أي أنها لم تُهجَر إلى ورقة عنوان.
   const firstSheet = printed.sheets[0] || [];
-  check("اتفاق الخط: الورقة الأولى ما زالت تحمل كل صفوفها المخطَّطة",
-    rowsOnSheet(firstSheet, planned.rows) === planned.rows.length,
-    `مطبوع ${rowsOnSheet(firstSheet, planned.rows)} من ${planned.rows.length}`);
+  const laterSheets = printed.sheets.slice(1).reduce((n, sheet) => n + sheet.length, 0);
+  check("اتفاق الخط: الورقة الأولى تحمل كمّ محتوى يوازي ما خُطِّط لها",
+    firstSheet.length >= planned.rows.length * 0.8,
+    `أسطر الورقة الأولى ${firstSheet.length} مقابل ${planned.rows.length} صفاً مخطَّطاً`
+    + ` (أسطر بقية الأوراق ${laterSheets})`);
 
   const firstBlock = printed.geometry.blocks[0];
   check("اتفاق الخط: كتلة الأعمدة الأولى داخل ورقتها",
