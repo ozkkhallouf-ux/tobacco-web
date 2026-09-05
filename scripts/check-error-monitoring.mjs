@@ -216,6 +216,47 @@ console.log("\n— تنقية الأسرار —");
       `بقي «${secret}» بعد التنقية — الاعتمادية ستصل إلى طرف ثالث`);
   }
 
+  // -------------------------------------------------------------------
+  // انحدار ملاحظتَي Codex P1 الثانية والثالثة على PR #188.
+  //
+  // (2) Digest: القاعدة السابقة كانت تنهي القيمة عند أول فراغ، وقيمة Digest
+  //     قائمة معاملات مفصولة بفواصل — فحُجب `username="ozk",` وحده ومرّ
+  //     `response` (توقيع المصادقة نفسه) و`nonce` سليمَين.
+  // (3) الكوكيز: لم تكن أي قاعدة تعرفها. `session` ليست باسم حقل حسّاس،
+  //     و`session-token` لا يطابق `\btoken\s*[=:]` لأن الفاصل لا يليه —
+  //     فمرّت جرّة الكوكيز كاملةً.
+  // -------------------------------------------------------------------
+  const DIGEST_HEADER =
+    'Authorization: Digest username="ozk", realm="ozktobacco", ' +
+    'nonce="dcd98b7102dd2f0e", response="6629fae49393a05397450978507c4ef1"';
+  for (const part of ["username", "realm", "nonce", "response", "dcd98b7102dd2f0e",
+                      "6629fae49393a05397450978507c4ef1"]) {
+    check(`Digest: لا يبقى «${part}»`, !scrub(DIGEST_HEADER).includes(part),
+      `بقي «${part}» — قيمة Digest تُحجب حتى نهاية السطر لا حتى أول فراغ`);
+  }
+  check("Digest: اسم المخطط يبقى للتشخيص", scrub(DIGEST_HEADER).includes("Digest"),
+    "حُذف اسم المخطط أيضاً — خسارة تشخيصية بلا مقابل");
+
+  const cookieCases = [
+    ["Cookie: session=", "Cookie: session=opaque-session-token-9911", "opaque-session-token-9911"],
+    ["Set-Cookie: sid=", "Set-Cookie: sid=abc123def456; HttpOnly; Secure", "abc123def456"],
+    ["set-cookie حالة صغيرة", "set-cookie: sb-access=zzzz9999; Path=/", "sb-access=zzzz9999"],
+    ["كوكيز وسط أثر مكدّس", "request failed\nCookie: a=secretvalue1; b=secretvalue2\nat foo.js:3:4", "secretvalue2"],
+  ];
+  for (const [label, input, secret] of cookieCases) {
+    check(`تُحجب جرّة الكوكيز: ${label}`, !scrub(input).includes(secret),
+      `بقي «${secret}» — قيمة الكوكيز كلها مادة اعتماد، لا ذيل آمن فيها`);
+  }
+  check("الكوكيز: الحجب يقف عند نهاية السطر",
+    scrub("request failed\nCookie: a=secretvalue1\nat foo.js:3:4").includes("at foo.js:3:4"),
+    "ابتلع الحجبُ بقية أثر المكدّس — `.` يجب ألّا تطابق السطر الجديد");
+
+  // `document.cookie` نصّ برمجي يظهر في آثار المكدّس ورسائل الأخطاء. الفاصل
+  // في قاعدة الكوكيز `:` وحده — لا `=` — تحديداً كي لا يُتلَف هذا النصّ.
+  const COOKIE_CODE = 'at Object.set [as cookie] (document.cookie = "theme=dark")';
+  check("document.cookie كنصّ برمجي لا يُمَسّ", scrub(COOKIE_CODE) === COOKIE_CODE,
+    `أُتلف نصّ برمجي — صار: ${scrub(COOKIE_CODE)}`);
+
   // اسم المخطط يبقى ظاهراً عمداً: «فشل مصادقة من نوع Bearer» معلومة تشخيصية
   // بلا سرّ، وحذفها يجعل البلاغ أعمى بلا مكسب أمني.
   check("اسم المخطط يبقى للتشخيص",
@@ -232,6 +273,8 @@ console.log("\n— تنقية الأسرار —");
     "basic authentication failed",
     "Bearer token is missing",
     "digest algorithm not supported",
+    "cookie consent banner failed to load",
+    "TypeError: Cannot set property cookie of #<Document>",
     "Authorization failed: user lacks role",
     "TypeError: cannot read property x of undefined",
   ]) {
