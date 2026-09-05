@@ -62,24 +62,60 @@
   // يُخفي نمطُ السرّ العنوانَ كلّه)، ثم أنماط الأسرار، ثم القصّ.
   // ---------------------------------------------------------------------------
   var URL_WITH_QUERY = /(https?:\/\/[^\s"')]+?)[?#][^\s"')]*/g;
-  var SECRET_PATTERNS = [
-    /\b(?:sb|sbp|eyJ)[A-Za-z0-9_\-.]{16,}/g,                     // مفاتيح Supabase وJWT
-    /\bgh[pousr]_[A-Za-z0-9]{16,}/g,                              // رموز GitHub
-    // بلا \b قبل الأرقام عمداً: الرمز يظهر عملياً ملتصقاً بسابقة حرفية
-    // (`bot123456789:AAH…` في عناوين واجهة تيليغرام)، و\b بين حرف ورقم لا
-    // يقع أصلاً فكان النمط يمرّ فوق الرمز كاملاً. أمسكه حارس هذا الملف.
-    /\d{6,}:[A-Za-z0-9_-]{30,}/g,                                 // رموز بوتات تيليغرام
-    /((?:token|key|secret|password|passwd|pwd|authorization|bearer|apikey|api_key)\s*[=:]\s*)(\S+)/gi
+  var REDACTED = "[سرّ محذوف]";
+
+  // قواعد التنقية: نمط وبديله. الترتيب مقصود — الأخصّ أولاً، كي تبتلع قاعدةُ
+  // الترخيص القيمةَ كاملةً قبل أن تلتقط قاعدةٌ أعمّ جزءاً منها فتترك الباقي.
+  //
+  // ⚠️ إصلاح ملاحظة Codex P1 على PR #188: كانت `authorization` و`bearer`
+  // مجرّد بديلين داخل قائمة «اسم حقل حسّاس متبوع بـ= أو :»، والبديل يلتقط
+  // `\S+` واحدة بعد الفاصل. فعلى `Authorization: Bearer <رمز>` كان الملتقَط
+  // كلمةَ `Bearer` نفسها ويبقى الرمز الفعلي سليماً فيُرسَل إلى Rollbar.
+  // وأوسع من ذلك (وجدته عند التحقق، ولم تذكره الملاحظة):
+  //   • `Bearer <رمز>` بلا اسم ترويسة لم يكن يُطابَق إطلاقاً — لأن `bearer`
+  //     كانت تشترط `=` أو `:` بعدها، والمخطط العاري لا يحمل أيّاً منهما.
+  //   • `Authorization: Basic <base64>` كان يسرّب اسم المستخدم وكلمة السرّ.
+  // سبب فوات ذلك أصلاً: حالة الاختبار كانت `Authorization: eyJhbGci…` بلا
+  // كلمة مخطط، فالتقطها نمط JWT وأعطت ثقة كاذبة بأن الترويسة محروسة.
+  var SECRET_RULES = [
+    // 1) ترويسة ترخيص: تُحجب القيمة كاملةً مهما كان شكلها. اسم المخطط يبقى
+    //    ظاهراً عمداً — «فشل مصادقة من نوع Bearer» معلومة تشخيصية بلا سرّ.
+    //    الحدّ `\s*[=:]` يمنع مطابقة نصّ عادي مثل «Authorization failed:»،
+    //    إذ لا فاصل مباشرةً بعد الكلمة هناك.
+    {
+      re: /((?:proxy-)?authorization\s*[=:]\s*)(?:(bearer|basic|digest|negotiate)\s+)?\S+/gi,
+      to: function (match, prefix, scheme) { return prefix + (scheme ? scheme + " " : "") + REDACTED; }
+    },
+    // 2) مخطط مصادقة عارٍ بلا ترويسة. شرطان يمنعان إفساد النصّ العادي:
+    //    ثمانية محارف على الأقل من طقم الرموز، **و**رقم أو رمز واحد بينها.
+    //    فـ«basic authentication failed» و«Bearer token is missing» يمرّان
+    //    سليمَين (كلمات حروف خالصة)، بينما `Bearer sk-live-…9911` يُحجب.
+    {
+      re: /\b(bearer|basic|digest)(\s+)(?=[A-Za-z0-9._~+\/=-]{8,})[A-Za-z0-9._~+\/=-]*[0-9._~+\/=-][A-Za-z0-9._~+\/=-]*/gi,
+      to: function (match, scheme, gap) { return scheme + gap + REDACTED; }
+    },
+    // 3) مفاتيح Supabase وJWT
+    { re: /\b(?:sb|sbp|eyJ)[A-Za-z0-9_\-.]{16,}/g, to: function () { return REDACTED; } },
+    // 4) رموز GitHub
+    { re: /\bgh[pousr]_[A-Za-z0-9]{16,}/g, to: function () { return REDACTED; } },
+    // 5) رموز بوتات تيليغرام. بلا \b قبل الأرقام عمداً: الرمز يظهر عملياً
+    //    ملتصقاً بسابقة حرفية (`bot123456789:AAH…`)، و\b بين حرف ورقم لا يقع
+    //    أصلاً فكان النمط يمرّ فوق الرمز كاملاً. أمسكه حارس هذا الملف.
+    { re: /\d{6,}:[A-Za-z0-9_-]{30,}/g, to: function () { return REDACTED; } },
+    // 6) إسناد صريح باسم حقل حسّاس. `authorization` و`bearer` خرجتا من هنا
+    //    لأن القاعدتين 1 و2 تعالجانهما معالجةً صحيحة. و`\b` البادئة تمنع
+    //    مطابقة `key` داخل كلمة مثل «monkey:» فتُفسد نصّاً عادياً.
+    {
+      re: /\b((?:token|key|secret|password|passwd|pwd|apikey|api_key|access_token|refresh_token)\s*[=:]\s*)\S+/gi,
+      to: function (match, prefix) { return prefix + REDACTED; }
+    }
   ];
 
   function scrub(text) {
     if (typeof text !== "string" || text.length === 0) return "";
     var out = text.replace(URL_WITH_QUERY, "$1?[محذوف]");
-    for (var i = 0; i < SECRET_PATTERNS.length; i += 1) {
-      var pattern = SECRET_PATTERNS[i];
-      out = out.replace(pattern, function (match, prefix) {
-        return prefix === undefined ? "[سرّ محذوف]" : prefix + "[سرّ محذوف]";
-      });
+    for (var i = 0; i < SECRET_RULES.length; i += 1) {
+      out = out.replace(SECRET_RULES[i].re, SECRET_RULES[i].to);
     }
     return out;
   }

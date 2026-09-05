@@ -190,6 +190,55 @@ console.log("\n— تنقية الأسرار —");
   for (const [label, input, secret] of cases) {
     check(`تُحذف: ${label}`, !scrub(input).includes(secret), `بقي «${secret}» بعد التنقية`);
   }
+
+  // ---------------------------------------------------------------------
+  // انحدار ملاحظة Codex P1 على PR #188 — مخططات المصادقة.
+  //
+  // العطل الأصلي: `authorization` و`bearer` كانتا بديلين في نمط «اسم حقل
+  // متبوع بفاصل» يلتقط `\S+` واحدة، فعلى `Authorization: Bearer <رمز>`
+  // كان الملتقَط كلمةَ `Bearer` ويبقى الرمز سليماً فيُرسَل إلى Rollbar.
+  // الحالتان الثالثة والرابعة أوسع من الملاحظة، وظهرتا عند التحقق منها:
+  // مخطط عارٍ بلا ترويسة لم يكن يُطابَق إطلاقاً، وBasic كان يسرّب
+  // اسم المستخدم وكلمة السرّ مُرمَّزَين.
+  // ---------------------------------------------------------------------
+  const authCases = [
+    ["Authorization: Bearer", "Authorization: Bearer opaque-session-token-abc123", "opaque-session-token-abc123"],
+    ["authorization: bearer (حالة صغيرة)", "authorization: bearer 9f8e7d6c5b4a", "9f8e7d6c5b4a"],
+    ["Bearer عارٍ بلا ترويسة", "Bearer sk-live-CUSTOMER-SESSION-9911", "sk-live-CUSTOMER-SESSION-9911"],
+    ["Authorization: Basic", "Authorization: Basic dXNlcjpwYXNzd29yZA==", "dXNlcjpwYXNzd29yZA=="],
+    ["Basic عارٍ بلا ترويسة", "Basic dXNlcjpwYXNzd29yZA==", "dXNlcjpwYXNzd29yZA=="],
+    ["ترخيص بلا مخطط", "Authorization: rawopaquetokenvalue123", "rawopaquetokenvalue123"],
+    ["proxy-authorization", "proxy-authorization: Bearer proxy-secret-99887766", "proxy-secret-99887766"],
+    ["ترخيص وسط جملة", "request failed Authorization: Bearer leak-me-1234 status=401", "leak-me-1234"],
+  ];
+  for (const [label, input, secret] of authCases) {
+    check(`تُحذف الاعتمادية: ${label}`, !scrub(input).includes(secret),
+      `بقي «${secret}» بعد التنقية — الاعتمادية ستصل إلى طرف ثالث`);
+  }
+
+  // اسم المخطط يبقى ظاهراً عمداً: «فشل مصادقة من نوع Bearer» معلومة تشخيصية
+  // بلا سرّ، وحذفها يجعل البلاغ أعمى بلا مكسب أمني.
+  check("اسم المخطط يبقى للتشخيص",
+    scrub("Authorization: Bearer opaque-session-token-abc123").includes("Bearer"),
+    "حُذف اسم المخطط أيضاً — خسارة تشخيصية بلا مقابل");
+  // ما بعد الاعتمادية لا يُبتلع: الحجب محدود لا شامل.
+  check("النصّ التالي للاعتمادية لا يُبتلع",
+    scrub("request failed Authorization: Bearer leak-me-1234 status=401").includes("status="),
+    "ابتلع الحجبُ بقية الرسالة — توسّع يفسد التشخيص");
+
+  // شواهد سالبة: نصّ إنجليزي عادي يحمل هذه الكلمات ولا يحمل اعتمادية.
+  // بلا هذه الشواهد يمرّ نمط جشع يحجب «basic authentication failed» كلها.
+  for (const intact of [
+    "basic authentication failed",
+    "Bearer token is missing",
+    "digest algorithm not supported",
+    "Authorization failed: user lacks role",
+    "TypeError: cannot read property x of undefined",
+  ]) {
+    check(`نصّ عادي يبقى كما هو: «${intact}»`, scrub(intact) === intact,
+      `أُفسد نصّ عادي — صار: ${scrub(intact)}`);
+  }
+
   check("النصّ المفيد يبقى", scrub("TypeError: cannot read x").includes("cannot read x"),
     "التنقية أتلفت رسالة الخطأ نفسها فصارت البلاغات بلا قيمة");
 }
