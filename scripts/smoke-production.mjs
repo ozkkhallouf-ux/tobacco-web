@@ -17,6 +17,9 @@
 //     أخطاء اصطناعية في بيانات الإنتاج.
 //   • لا مصادقة ولا جلسة ولا حساب: كل ما يُفحص هو ما يراه زائر مجهول.
 //
+// وقائمة الأصول تُشتقّ من `index.html` المخدوم نفسه لا من قائمة مكتوبة يدوياً:
+// القائمة اليدوية تنحرف بصمت (كان `src/command-center.js` غائباً عنها فعلاً).
+//
 // عند الفشل: لا rollback ولا إصلاح تلقائي — إنذار فقط. يخرج برمز غير صفري،
 // فتلتقطه `alert-on-automation-failure.yml` (تيليغرام بمفتاح تكرار لكل سير عمل)
 // و`health-check.mjs` (Issue واحد لكل حادثة، يُغلق تلقائياً عند التعافي).
@@ -76,18 +79,44 @@ check("الصفحة الرئيسية ترجع صفحة التطبيق لا صف�
   home.body.includes('id="app"') && home.body.includes("OZK TOBACCO"),
   `طول الجسم ${home.body.length} حرفاً`);
 
-const REQUIRED_ASSETS = [
-  "/src/app.js", "/src/styles.css", "/src/config.js", "/src/supabase-client.js",
-  "/src/error-monitoring.js", "/public/manifest.webmanifest", "/service-worker.js",
-  "/public/service-worker.js", "/public/icons/ozk-logo.png",
+// ⚠️ ملاحظة Codex P1 الثالثة على PR #199، وهي صحيحة: القائمة كانت مكتوبة يدوياً،
+// و`src/command-center.js` **غائب عنها فعلاً** — فلو عاد 404 على الإنتاج لمرّ
+// الفحص بنجاح بينما التطبيق ناقص. وهذا صنف العطل نفسه الذي أُغلق في طبقة
+// المسارات الحرجة، تُرك مفتوحاً هنا حيث الوجهة إنتاجية.
+//
+// العلاج ليس إضافة السطر الناقص — بل إزالة القائمة اليدوية أصلاً: تُشتقّ الآن
+// من `index.html` المخدوم نفسه، فأي أصل يُضاف إلى الصفحة يدخل الفحص تلقائياً
+// ولا شيء يُنسى مرة أخرى.
+function localAssetsFromHtml(html) {
+  const found = new Set();
+  for (const match of html.matchAll(/(?:src|href)="([^"]+)"/g)) {
+    const raw = match[1].trim();
+    if (!raw || /^(?:https?:|data:|mailto:|blob:|#)/i.test(raw)) continue;
+    found.add(raw.startsWith("/") ? raw : `/${raw}`);
+  }
+  return [...found];
+}
+
+// أصول لا يشير إليها `index.html` لكنها جزء من العقد العام (الصفحات القانونية
+// تُفتح من داخل التطبيق، والـSW من نطاق الجذر).
+const EXTRA_ASSETS = [
+  "/service-worker.js", "/public/service-worker.js",
   "/privacy-policy.html", "/terms-of-use.html", "/robots.txt",
 ];
+
+const derivedAssets = localAssetsFromHtml(home.body);
+// حارس على الحارس: تحليل فاشل يجعل القائمة فارغة فيمرّ الفحص بلا أن يفحص شيئاً.
+check("اشتقاق قائمة الأصول من index.html نجح",
+  derivedAssets.length >= 15,
+  `اشتُقّ ${derivedAssets.length} أصلاً فقط — تغيّرت بنية index.html أو فشل التحليل`);
+
 const missingAssets = [];
-for (const path of REQUIRED_ASSETS) {
+for (const path of [...new Set([...derivedAssets, ...EXTRA_ASSETS])]) {
   const result = await fetchOnce(`${BASE}${path}`);
   if (!result.ok) missingAssets.push(`${path} → ${result.status}`);
 }
-check("كل الأصول الأساسية تُحمَّل", missingAssets.length === 0, missingAssets.join(" | "));
+check(`كل أصول الصفحة تُحمَّل (${derivedAssets.length} مشتقّاً + ${EXTRA_ASSETS.length} إضافياً)`,
+  missingAssets.length === 0, missingAssets.join(" | "));
 
 const BULLETINS = [
   "/public/downloads/index.html",
@@ -139,7 +168,22 @@ const page = await context.newPage();
 
 const pageErrors = [];
 const blockedWrites = [];
+const assetFailures = [];
 page.on("pageerror", (error) => pageErrors.push(String(error?.message || error)));
+// الاستثناء الذي رصده Codex: مورد ناقص يبلّغه المتصفح كفشل تحميل لا كاستثناء
+// JavaScript، فـ`pageerror` وحده يراه سليماً. نرصد الاستجابات والإخفاقات من
+// الأصل نفسه مباشرةً — وهو ما يمسك النقص أثناء التشغيل الحقيقي لا في قائمة.
+const sameOrigin = (url) => { try { return new URL(url).origin === new URL(BASE).origin; } catch { return false; } };
+page.on("response", (response) => {
+  if (sameOrigin(response.url()) && response.status() >= 400) {
+    assetFailures.push(`HTTP ${response.status()} ← ${response.url()}`);
+  }
+});
+page.on("requestfailed", (request) => {
+  if (sameOrigin(request.url())) {
+    assetFailures.push(`${request.failure()?.errorText || "request failed"} ← ${request.url()}`);
+  }
+});
 
 await page.route("**", (route) => {
   const request = route.request();
@@ -176,6 +220,8 @@ try {
 check("التطبيق يُكمل إقلاعه في المتصفح", boot.reached, "بقي state.loading = true بعد 40 ثانية");
 check("قشرة التطبيق تُرسم", boot.shell, `route=${boot.route || "؟"}`);
 check("لا استثناء JavaScript غير ملتقَط عند التحميل", pageErrors.length === 0, pageErrors.join(" | "));
+check("لا مورد من الأصل نفسه يخفق أثناء التحميل الفعلي",
+  assetFailures.length === 0, assetFailures.join(" | "));
 check("لم تُحاول الصفحة أي كتابة (الفحص قراءة فقط بالبنية)",
   blockedWrites.length === 0,
   `طلبات كتابة أُجهضت: ${blockedWrites.join(" | ")}`);
@@ -184,6 +230,16 @@ check("لم تُحاول الصفحة أي كتابة (الفحص قراءة ف�
 const bulletinPage = await context.newPage();
 const bulletinErrors = [];
 bulletinPage.on("pageerror", (error) => bulletinErrors.push(String(error?.message || error)));
+bulletinPage.on("response", (response) => {
+  if (sameOrigin(response.url()) && response.status() >= 400) {
+    bulletinErrors.push(`HTTP ${response.status()} ← ${response.url()}`);
+  }
+});
+bulletinPage.on("requestfailed", (request) => {
+  if (sameOrigin(request.url())) {
+    bulletinErrors.push(`${request.failure()?.errorText || "request failed"} ← ${request.url()}`);
+  }
+});
 let bulletinRows = 0;
 try {
   await bulletinPage.goto(`${BASE}/public/downloads/price-list-usd.html`, { waitUntil: "domcontentloaded", timeout: 45000 });
@@ -192,7 +248,7 @@ try {
   bulletinErrors.push(String(error?.message || error));
 }
 check("نشرة الدولار تُعرض بصفوف أصناف فعلية", bulletinRows > 5, `عدد الصفوف ${bulletinRows}`);
-check("نشرة الدولار بلا أخطاء JavaScript", bulletinErrors.length === 0, bulletinErrors.join(" | "));
+check("نشرة الدولار بلا أخطاء JavaScript ولا موارد مخفقة", bulletinErrors.length === 0, bulletinErrors.join(" | "));
 
 await browser.close();
 
