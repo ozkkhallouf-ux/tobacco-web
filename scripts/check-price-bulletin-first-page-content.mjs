@@ -62,16 +62,29 @@ const check = (name, condition, detail) => {
   else { failed += 1; console.error(`  ❌ ${name}\n     ${detail}`); }
 };
 
-// تأكيدٌ يعتمد على شكل الحروف العربية داخل الملف، فيلزمه خط النشرة. بلا الخط
-// لا يُفحص ولا يُدّعى نجاحه: يُعلَن معلَّقاً بسببه صراحةً. وربطُ بوابةٍ إلزامية
-// بالوصول إلى Google Fonts يستبدل بعطلٍ بيئي عطلاً شبكياً (ملاحظة Codex P1
-// على 1aa1a6f)، والتأكيدات الهندسية تبقى مفروضة في الحالتين.
-const SKIP_NOTE = "خط النشرة غير متاح (شبكة) — التأكيد النصّي معلَّق لا ناجح";
+// تأكيدٌ يعتمد على **شكل الحروف** داخل الملف، فيلزمه خط النشرة: بلا الخط تُرسم
+// السلسلة الاحتياطية، وهي تختلف بين الأنظمة وقد لا تحمل محارف عربية أصلاً —
+// فتفشل المطابقة لسببٍ يخصّ النظام لا الكود. وربطُ بوابةٍ إلزامية بالوصول إلى
+// Google Fonts يستبدل بعطلٍ بيئي عطلاً شبكياً (ملاحظة Codex P1 على 1aa1a6f).
+//
+// **لكن التعليق وحده يفتح ثغرة**: تشغيلٌ بلا شبكة كان سيمرّ حتى لو أُخفي كل نصّ
+// الأصناف من الورق (ملاحظة Codex P1 على 3333ecf). لذلك لا يُعلَّق شيء إلا وله
+// بديلٌ **مستقلّ عن شكل الحروف** يبقى مفروضاً دائماً، ويُعلَن في كل سيناريو:
+//   · كل صفٍّ متوقَّع موجود نصّاً في مستند الطباعة (يرصد الحذف والتشويه)؛
+//   · وكمّ النصّ المرسوم على كل ورقة يوازي ما خُطِّط لها (يرصد ما لم يصل الورق).
+const SKIP_NOTE = "خط النشرة غير متاح (شبكة) — المطابقة الحرفية معلَّقة، والبديل المستقلّ عن الخط مفروض";
 let skipped = 0;
 const checkWithFont = (fontReady, name, condition, detail) => {
   if (!fontReady) { skipped += 1; console.log(`  ⏭️  ${name} — ${SKIP_NOTE}`); return; }
   check(name, condition, detail);
 };
+
+// نصّ مستند الطباعة كما هو في الترميز (مستقلّ عن الخط تماماً).
+const flattenForMarkup = (value) => String(value).normalize("NFKC").replace(/\s+/g, "");
+function rowsMissingFromMarkup(documentHtml, rows) {
+  const flat = flattenForMarkup(documentHtml.replace(/<[^>]*>/g, "\u0001"));
+  return rows.filter((row) => !flat.includes(flattenForMarkup(row.name)));
+}
 
 const A4_HEIGHT_PX = 297 / 25.4 * 96;
 
@@ -241,6 +254,16 @@ for (const sc of [
 
   // **جوهر الحارس.** لا «موجود في مكان ما بالملف»: كل صفّ خطّطت له الخطة
   // للصفحة الأولى يجب أن يُطبع على الورقة الأولى **نفسها**.
+  // **بديلٌ مستقلّ عن الخط، مفروض دائماً.** يرصد إخفاء نصّ الأصناف أو تشويهه
+  // حتى حين تتعذّر المطابقة الحرفية لغياب خط النشرة.
+  const missingFromMarkup = rowsMissingFromMarkup(documentHtml, planned.firstPageRows);
+  check(`${sc.label}: صفوف الصفحة الأولى موجودة نصّاً في مستند الطباعة (مستقلّ عن الخط)`,
+    missingFromMarkup.length === 0, `مفقودة من الترميز: ${JSON.stringify(missingFromMarkup.slice(0, 5))}`);
+
+  check(`${sc.label}: كمّ النصّ المرسوم على الورقة الأولى يوازي ما خُطِّط لها (مستقلّ عن الخط)`,
+    firstSheet.length >= planned.firstPageRows.length * 0.8,
+    `أسطر الورقة الأولى ${firstSheet.length} مقابل ${planned.firstPageRows.length} صفاً مخطَّطاً`);
+
   const onFirst = rowsOnSheet(firstSheet, planned.firstPageRows);
   checkWithFont(fontReady, `${sc.label}: الورقة الأولى تحمل أصنافاً فعلاً (لا ورقة عنوان)`, onFirst > 0,
     `صفر صنف على الورقة الأولى من ${planned.firstPageRows.length} صنفاً مخطَّطاً لها`
@@ -358,6 +381,26 @@ for (const sc of [
     .filter((r) => r.over > 0.5);
   check("ورقة العنوان: لا كتلة تتجاوز ورقتها (لا شيء يُقصّ)",
     overflowing.length === 0, `تجاوز: ${JSON.stringify(overflowing)}`);
+}
+
+// ===== ٢ب) شاهد سالب للبديل المستقلّ عن الخط =====
+// البديل يبقى مفروضاً حين يتعذّر الخط، فلا يجوز أن يكون شكلياً. نُثبت أنه يرصد
+// حذف صفٍّ من مستند الطباعة — وهو بالضبط ما كان التعليقُ وحده سيُمرّره.
+{
+  const rows = [
+    { name: "ماستر سليم أزرق", unit: "كروز", price: "80,928 ل.س" },
+    { name: "غلواز قصير أحمر", unit: "كروز", price: "99,000 ل.س" }
+  ];
+  const healthy = `<section class="ozk-price-list"><table><tr><td>${rows[0].name}</td></tr>`
+    + `<tr><td>${rows[1].name}</td></tr></table></section>`;
+  const stripped = healthy.replace(`<tr><td>${rows[1].name}</td></tr>`, "");
+
+  check("شاهد سالب (بديل مستقلّ عن الخط): المستند السليم بلا نقص",
+    rowsMissingFromMarkup(healthy, rows).length === 0,
+    "المرجع السليم نفسه يبدو ناقصاً — الشاهد بلا قيمة");
+  check("شاهد سالب (بديل مستقلّ عن الخط): يرصد الصفّ المحذوف من الترميز",
+    rowsMissingFromMarkup(stripped, rows).map((r) => r.name).join("") === rows[1].name,
+    `المرصود: ${JSON.stringify(rowsMissingFromMarkup(stripped, rows).map((r) => r.name))}`);
 }
 
 // ===== ٣) شاهد سالب: الحارس يرصد الرأس المهجور فعلاً =====

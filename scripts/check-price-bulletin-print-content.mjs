@@ -43,14 +43,29 @@ const check = (name, condition, detail) => {
   else { failed += 1; console.error(`  ❌ ${name}\n     ${detail}`); }
 };
 
-// تأكيدٌ يعتمد على شكل الحروف العربية، فيلزمه خط النشرة. بلا الخط لا يُفحص
-// ولا يُدّعى نجاحه: يُعلَن معلَّقاً بسببه صراحةً (راجع prepareBulletinFont).
-const SKIP_NOTE = "خط النشرة غير متاح (شبكة) — التأكيد النصّي معلَّق لا ناجح";
+// تأكيدٌ يعتمد على **شكل الحروف** داخل الملف، فيلزمه خط النشرة: بلا الخط تُرسم
+// السلسلة الاحتياطية، وهي تختلف بين الأنظمة وقد لا تحمل محارف عربية أصلاً —
+// فتفشل المطابقة لسببٍ يخصّ النظام لا الكود. وربطُ بوابةٍ إلزامية بالوصول إلى
+// Google Fonts يستبدل بعطلٍ بيئي عطلاً شبكياً (ملاحظة Codex P1 على 1aa1a6f).
+//
+// **لكن التعليق وحده يفتح ثغرة**: تشغيلٌ بلا شبكة كان سيمرّ حتى لو أُخفي كل نصّ
+// الأصناف من الورق (ملاحظة Codex P1 على 3333ecf). لذلك لا يُعلَّق شيء إلا وله
+// بديلٌ **مستقلّ عن شكل الحروف** يبقى مفروضاً دائماً، ويُعلَن في كل سيناريو:
+//   · كل صفٍّ متوقَّع موجود نصّاً في مستند الطباعة (يرصد الحذف والتشويه)؛
+//   · وكمّ النصّ المرسوم على كل ورقة يوازي ما خُطِّط لها (يرصد ما لم يصل الورق).
+const SKIP_NOTE = "خط النشرة غير متاح (شبكة) — المطابقة الحرفية معلَّقة، والبديل المستقلّ عن الخط مفروض";
 let skipped = 0;
 const checkWithFont = (fontReady, name, condition, detail) => {
   if (!fontReady) { skipped += 1; console.log(`  ⏭️  ${name} — ${SKIP_NOTE}`); return; }
   check(name, condition, detail);
 };
+
+// نصّ مستند الطباعة كما هو في الترميز (مستقلّ عن الخط تماماً).
+const flattenForMarkup = (value) => String(value).normalize("NFKC").replace(/\s+/g, "");
+function rowsMissingFromMarkup(documentHtml, rows) {
+  const flat = flattenForMarkup(documentHtml.replace(/<[^>]*>/g, "\u0001"));
+  return rows.filter((row) => !flat.includes(flattenForMarkup(row.name)));
+}
 
 // ===== قراءة نص PDF =====
 // القارئ نفسه يعيش في وحدة مشتركة كي يستعمله حارس توزيع الصفحة الأولى بنفس
@@ -231,6 +246,17 @@ for (const sc of [
     `أصناف كل ورقة = [${itemsPerPage.join(", ")}]`);
 
   // الورقة الأولى تحديداً هي التي كانت تخرج بالرأس وحده.
+  // **بديلٌ مستقلّ عن الخط، مفروض دائماً.** يرصد إخفاء نصّ الأصناف أو تشويهه
+  // حتى حين تتعذّر المطابقة الحرفية لغياب خط النشرة.
+  const missingFromMarkup = rowsMissingFromMarkup(documentHtml, expected.rows);
+  check(`${sc.label}: كل صفوف الأصناف موجودة نصّاً في مستند الطباعة (مستقلّ عن الخط)`,
+    missingFromMarkup.length === 0, `مفقودة من الترميز: ${JSON.stringify(missingFromMarkup.slice(0, 5))}`);
+
+  const drawnRuns = printed.pages.reduce((n, lines) => n + lines.length, 0);
+  check(`${sc.label}: كمّ النصّ المرسوم على الورق يوازي عدد الصفوف (مستقلّ عن الخط)`,
+    drawnRuns >= expected.rows.length * 0.8,
+    `أسطر مرسومة ${drawnRuns} مقابل ${expected.rows.length} صفاً`);
+
   checkWithFont(fontReady, `${sc.label}: الورقة الأولى تحمل أصنافاً`, (itemsPerPage[0] || 0) > 0,
     `الورقة الأولى فيها ${itemsPerPage[0]} صنف`);
 
