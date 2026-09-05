@@ -48,7 +48,7 @@ mkdirSync(ICLOUD, { recursive: true });
 
 // أسماء المجلدات كما تظهر فعلياً على جهاز المالك: بعضها NFD (الهمزة محرف
 // مركّب منفصل) وواحد يبدأ بـU+200F غير مرئي. الجسر يجب أن يجدها كلها.
-const RLM = "‏";
+const RLM = "\u200F";
 const FOLDER_SPECS = [
   { logical: "فواتير الزبائن", onDisk: "فواتير الزبائن".normalize("NFD") },
   { logical: "سندات قبض ودفع", onDisk: "سندات قبض ودفع" },

@@ -867,7 +867,7 @@
       if (error) throw new Error(translateDbError(error.message));
       // public_token هو رمز المشاركة المعتمد (UUID كامل). id يبقى مفتاحاً داخلياً
       // ولا يصلح رمزاً للمشاركة: 10 خانات hex أي 40 بت فقط. أي رابط وصل يُبنى
-      // مستقبلاً يستعمل ‎receipt.html?t=<public_token>‎ لا ‎?id=‎.
+      // مستقبلاً يستعمل `receipt.html?t=<public_token>` لا `?id=`.
       return { id: data.id, token: data.public_token, publicUrl: `receipt.html?t=${data.public_token}` };
     },
 

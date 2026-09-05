@@ -223,8 +223,13 @@ assert.doesNotMatch(
 //    قبل الكتابة، ومقارنة generation المخزَّنة في external_id قبل أي PATCH/POST نهائي.
 assert.match(
   yml,
-  /generation=\$\{\{\s*github\.run_id\s*\}\}\.\$\{\{\s*github\.run_attempt\s*\}\}/,
-  'يجب التقاط generation = github.run_id.github.run_attempt عند بداية التشغيل',
+  /RUN_GENERATION:\s*\$\{\{\s*github\.run_id\s*\}\}\.\$\{\{\s*github\.run_attempt\s*\}\}/,
+  'يجب التقاط generation = github.run_id.github.run_attempt عند بداية التشغيل (عبر env، لا حقن نصي)',
+);
+assert.match(
+  yml,
+  /echo "generation=\$RUN_GENERATION" >> "\$GITHUB_OUTPUT"/,
+  'generation المُلتقَطة يجب أن تُكتب إلى GITHUB_OUTPUT من متغيّر البيئة لا من تعبير ${{ }}',
 );
 assert.match(
   yml,
@@ -857,5 +862,42 @@ assert.match(
   /workflow_run[\s\S]{0,200}Codex Review Gate[\s\S]{0,100}completed/,
   'P1 #1 & #2: يجب إضافة workflow_run trigger على "Codex Review Gate" completed — يضمن تصحيح أي حالة خاطئة بعد كل تشغيل للمسار السريع فوراً',
 );
+
+// 12) أمان: يُمنع حقن أي تعبير ${{ ... }} داخل كتلة `run:` في الـworkflowين.
+//     GitHub يستبدل التعبير نصياً قبل تسليم الـscript للـshell، فأي قيمة يتحكم بها
+//     مُشغِّل أو مُعلِّق (خصوصاً inputs.pr_number من workflow_dispatch، وbadges/summary
+//     المبنيّة من نص تعليقات المراجعة) تُنفَّذ كشيفرة على الـrunner. المسار الآمن الوحيد:
+//     تمرير القيمة عبر `env:` ثم قراءتها كمتغيّر shell مُقتبَس. مصدر النمط:
+//     Codacy — "Using variable interpolation ${{...}} with github context data in a run: step".
+for (const [label, source] of [['codex-review-gate.yml', yml], ['codex-review-gate-reconcile.yml', reconcileYml]]) {
+  const lines = source.split('\n');
+  const offenders = [];
+  // موضع الكلمة `run:` نفسها (لا موضع شرطة القائمة) هو محاذاة الكتلة المرجعية.
+  const runAt = (line) => line.search(/(?<![^\s-])run:/);
+  let runIndent = null;
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (runIndent !== null) {
+      const indent = line.length - line.trimStart().length;
+      // السطر الفارغ لا ينهي الكتلة؛ أي سطر بمحاذاة أقل أو تساوي `run:` ينهيها.
+      if (line.trim() !== '' && indent <= runIndent) runIndent = null;
+      else if (line.includes('${{')) offenders.push(`${label}:${i + 1}: ${line.trim()}`);
+    }
+    const at = runAt(line);
+    if (at === -1) continue;
+    const rest = line.slice(at + 'run:'.length).trim();
+    if (runIndent === null && rest.startsWith('|')) {
+      runIndent = at; // بداية كتلة `run: |`
+    } else if (rest !== '' && !rest.startsWith('|') && line.includes('${{')) {
+      // صيغة السطر الواحد `run: <command>` — نفس الخطر، وليس لها كتلة تُتتبَّع.
+      offenders.push(`${label}:${i + 1}: ${line.trim()}`);
+    }
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    `يُمنع تعبير \${{ }} داخل run: — مرّر القيمة عبر env: بدلاً منه (حقن أوامر على الـrunner):\n${offenders.join('\n')}`,
+  );
+}
 
 console.log('codex-review-gate-logic.mjs contract + regression checks passed.');
