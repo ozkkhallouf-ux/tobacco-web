@@ -111,7 +111,8 @@ check("اشتقاق قائمة الأصول من index.html نجح",
   `اشتُقّ ${derivedAssets.length} أصلاً فقط — تغيّرت بنية index.html أو فشل التحليل`);
 
 const missingAssets = [];
-for (const path of [...new Set([...derivedAssets, ...EXTRA_ASSETS])]) {
+// Set قابلة للتكرار مباشرةً؛ نشرها في مصفوفة جديدة نسخٌ بلا فائدة.
+for (const path of new Set([...derivedAssets, ...EXTRA_ASSETS])) {
   const result = await fetchOnce(`${BASE}${path}`);
   if (!result.ok) missingAssets.push(`${path} → ${result.status}`);
 }
