@@ -45,6 +45,28 @@ WScript.Quit exitCode
 Set-Content -LiteralPath $hiddenLauncherPath -Value $hiddenLauncherContent -Encoding ASCII
 
 $taskCommand = "wscript.exe `"$hiddenLauncherPath`""
+
+# المهمة القائمة لا تُعاد كتابتها أبداً. `schtasks /Create /F` يكتب المهمة من
+# الصفر فيفقد حساب التشغيل المخصّص وكلمة مروره المخزّنة — وعلى جهاز الإنتاج
+# تعمل هذه المهمة بحساب OZKSync بـLogonType=Password، فإعادة التسجيل تُسقطه
+# إلى المستخدم الحالي وتوقف المهمة بصمت. تحديث الغلاف وحده كافٍ لنشر أي إصلاح،
+# لأن الغلاف shim رفيع يستدعي سكربت المستودع.
+& schtasks.exe /Query /TN $TaskName 2>&1 | Out-Null
+if ($LASTEXITCODE -eq 0) {
+  Write-Host "المهمة '$TaskName' مسجَّلة مسبقاً — حُدِّث الغلاف فقط ولم تُمسّ المهمة."
+  Write-Host "  الغلاف: $launcherPath"
+  Write-Host "  (إعادة التسجيل تُفقد حساب التشغيل وكلمة مروره المخزّنة. لتغيير"
+  Write-Host "   الجدولة استعمل Task Scheduler أو schtasks /Change، أو احذف المهمة"
+  Write-Host "   يدوياً ثم أعد تشغيل هذا السكربت عن قصد.)"
+
+  # حارس انحراف: إن كانت المهمة تشير إلى غلاف آخر، فتحديثنا لا يصلها.
+  $registered = (& schtasks.exe /Query /TN $TaskName /V /FO LIST 2>&1) -join "`n"
+  if ($registered -notmatch [regex]::Escape($hiddenLauncherPath)) {
+    Write-Warning "المهمة لا تشير إلى $hiddenLauncherPath — تحديث الغلاف قد لا يصل الإنتاج. راجع إجراء المهمة يدوياً."
+  }
+  exit 0
+}
+
 $result = & schtasks.exe /Create /TN $TaskName /SC DAILY /ST $StartTime /TR $taskCommand /F 2>&1
 if ($LASTEXITCODE -ne 0) {
   throw "Failed to register scheduled task. schtasks.exe output: $result"
