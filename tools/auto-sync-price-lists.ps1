@@ -297,7 +297,11 @@ function Stop-WithGitFailure([string]$Step, $Result) {
             & $alertScript `
                 -Message "🚨 auto-sync-price-lists: فشل $Step عند رفع نشرة الأسعار (رمز $($Result.Code)). $($Result.Text)" `
                 -EventType "windows" -DedupeKey "auto-sync-git-$Step" -DedupeMinutes 60 2>&1 | Out-Null
-        } catch {}
+        } catch {
+            # التنبيه best-effort ولا يجوز أن يكسر المزامنة، لكن فشله لا يُبتلع
+            # صامتاً أيضاً — تنبيه ميت بصمت هو عين العطل الذي يعالجه هذا الملف.
+            Log "تعذّر إرسال تنبيه تيليغرام: $($_.Exception.Message)" "DarkYellow"
+        }
     }
     exit 1
 }
