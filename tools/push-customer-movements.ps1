@@ -75,6 +75,27 @@ GROUP BY LTRIM(RTRIM(cu.CustomerName))
     while ($r.Read()) { $openings[[string]$r.GetValue(0)] = [double]$r.GetValue(1) }
     $r.Close()
 
+    # (1b) معرّف حساب كل زبون — هوية ثابتة لا تتغيّر بإعادة التسمية.
+    # التجميع هنا يبقى بالاسم (كما كان)، والمعرّف يُرفَق ليتمكّن الموقع من الربط
+    # بالهوية لا بالنص. الاسم المتكرر بين حسابين يترك المعرّف فارغاً عمداً: معرّف
+    # مبهم أسوأ من لا معرّف، لأنه يُقرأ على أنه قطعي.
+    $guidByName = @{}
+    $dupNames = @{}
+    $cmd = $conn.CreateCommand()
+    $cmd.CommandText = @"
+SELECT LTRIM(RTRIM(cu.CustomerName)) AS name, LOWER(CAST(cu.GUID AS varchar(40))) AS cust_guid
+FROM dbo.cu000 cu
+WHERE cu.CustomerName IS NOT NULL AND LTRIM(RTRIM(cu.CustomerName)) <> ''
+  AND (cu.bHide IS NULL OR cu.bHide = 0)
+"@
+    $r = $cmd.ExecuteReader()
+    while ($r.Read()) {
+        $n = [string]$r.GetValue(0)
+        if ($guidByName.ContainsKey($n)) { $dupNames[$n] = $true } else { $guidByName[$n] = [string]$r.GetValue(1) }
+    }
+    $r.Close()
+    foreach ($n in @($dupNames.Keys)) { $guidByName.Remove($n) }
+
     # (2) حركات الفترة لكل زبون
     $movements = @{}
     $cmd = $conn.CreateCommand()
@@ -194,8 +215,13 @@ ORDER BY name, dt, isopen, iscredit, sortdt, cenum, num
             if ($list[-1].ContainsKey('balance')) { $closing = [double]$list[-1].balance }
         }
 
+        # يُحسب قبل الحرفية لا داخلها — أوضح، ولا يعتمد على قبول `if` كتعبير قيمة.
+        $custGuid = ""
+        if ($guidByName.ContainsKey($name)) { $custGuid = $guidByName[$name] }
+
         $items.Add(@{
             name           = $name
+            customerGuid   = $custGuid
             openingBalance = [math]::Round($opening, 3)
             closingBalance = [math]::Round($closing, 3)
             movements      = $list

@@ -366,6 +366,19 @@ function setNotice(type, text) {
   state.notice = { type, text };
 }
 
+// رسالة يجب أن **تُرى**. لوحة الرسائل تُرسم أعلى `<main>` مباشرةً، والأزرار التي
+// قد تفشل (تصدير فاتورة من بطاقة زبون أو من أرشيف الفواتير) تقع بعد مئات
+// البكسلات من التمرير — فكان الخطأ يُضبط ويُرسم ولا يراه أحد، وتُقرأ النتيجة
+// «الزر لا يفعل شيئاً ولا يظهر خطأ». هنا نرسم ثم نُظهر اللوحة فعلياً.
+function showNoticeNow(type, text) {
+  setNotice(type, text);
+  render();
+  const panel = document.querySelector(".message-panel");
+  if (panel && typeof panel.scrollIntoView === "function") {
+    panel.scrollIntoView({ block: "center", behavior: "smooth" });
+  }
+}
+
 function notifSupported() {
   return "Notification" in window;
 }
@@ -962,20 +975,201 @@ async function loadCustomerBalanceReports() {
   await loadCustomerWhatsapp();
 }
 
-// فواتير زبون محدّد مع محتوياتها (من تقرير ameen_customer_invoices، بمطابقة ذكية للاسم)
-function customerInvoicesFor(name) {
+// ===== هوية الزبون والفاتورة: المعرّف أولاً، الاسم احتياطاً =====
+//
+// **العطل المُثبت (2026-09-05):** أُعيدت تسمية الحساب `500d8ef6-3563-…` في
+// الأمين من «لؤي زهية الضاحية» إلى «لؤي خلوف المحترم / الضاحية» الساعة 10:26.
+// تقريرا الأرصدة والحركات (مزامنة كل دقيقة و30 دقيقة) حملا الاسم الجديد فوراً،
+// بينما بقي تقرير الفواتير (مزامنة كل ساعة) على الاسم القديم حتى 10:53. وفي
+// تلك النافذة كانت الفواتير مربوطة بالاسم وحده، فانقطع الربط تماماً: ظهرت
+// «لا توجد فواتير لهذا الزبون» في كشف الحساب، وفشل زر «فاتورة PDF».
+//
+// الاسم في الأمين نصٌّ قابل للتعديل في كل لحظة، وهو في تقرير الفواتير مأخوذ من
+// حقل مختلف أصلاً (`bu000.Cust_Name` لقطةً على رأس الفاتورة) عن مصدر الأرصدة
+// (`cu000.CustomerName` اسم الحساب). فاتّخاذه هوية خطأ بنيوي لا حادث عابر.
+// الهوية هنا `customerGuid`، والاسم لا يبقى إلا احتياطاً للتقارير القديمة.
+
+const ZERO_GUID = "00000000-0000-0000-0000-000000000000";
+
+// معرّف مطبَّع؛ فارغ إن غاب أو كان صفرياً. الأمين يكتب GUID صفرياً بدل NULL
+// (كل قيود `ameen_customer_movements` بلا استثناء تحمل الصفري اليوم)، فمعاملة
+// الصفري كمعرّف صالح تُنتج «مطابقة قطعية» على قيمة لا تعني شيئاً.
+function normGuid(value) {
+  const g = String(value ?? "").trim().toLowerCase();
+  return !g || g === ZERO_GUID ? "" : g;
+}
+
+// يوحّد مدخل الهوية: عنصر تقرير الأرصدة (يحمل customerGuid) أو اسم نصّي.
+// الاسم وحده يُرفع إلى معرّف عبر تقرير الأرصدة متى أمكن، فيصير كل المسارات
+// على هوية واحدة حتى حين يُمرَّر إليها نص.
+function customerIdentity(nameOrItem) {
+  if (nameOrItem && typeof nameOrItem === "object") {
+    return {
+      item: nameOrItem,
+      guid: normGuid(nameOrItem.customerGuid),
+      name: String(nameOrItem.name || "").trim()
+    };
+  }
+  const name = String(nameOrItem || "").trim();
+  const item = name ? smartNameMatch(latestCustomerBalanceItems(), (it) => it.name, name) : null;
+  return { item, guid: normGuid(item?.customerGuid), name };
+}
+
+// كل مجموعات الفواتير في التقرير (مجموعة لكل زبون).
+function customerInvoiceEntries() {
   const report = state.customerInvoicesReport;
-  const items = report && Array.isArray(report.items) ? report.items : [];
-  const match = smartNameMatch(items, (it) => it.name, name);
-  return match && Array.isArray(match.invoices) ? match.invoices : [];
+  return report && Array.isArray(report.items) ? report.items : [];
+}
+
+// مجموعات الفواتير «اليتيمة»: اسمها لا يطابق أي زبون في تقرير الأرصدة، أي لا
+// حساب قائماً بهذا الاسم. تنشأ لأن `bu000.Cust_Name` **لقطة نصّية على رأس كل
+// فاتورة**، فإعادة تسمية حساب في الأمين تُحدِّث نصّ بعض الفواتير دون بعض،
+// فتنشطر فواتير الزبون الواحد على اسمين. الحالة المقيسة 2026-09-05: فواتير
+// الحساب 500d8ef6 موزّعة على «لؤي خلوف المحترم / الضاحية» و«لؤي زهية الضاحية».
+//
+// **لا تُنسب هذه المجموعات لأحد هنا، ولا تُخمَّن ملكيتها.** جُرّبت نسبتها بمطابقة
+// دفتر الحساب (تاريخ + مبلغ + جهة) ورُفضت بعد قياس على بيانات الإنتاج: 12 من 864
+// زوج (تاريخ، مبلغ مدين) يتشاركه أكثر من زبون — 1.4%. ومجموعة بفاتورة واحدة
+// تُطابَق بزوج واحد فقط، فيكفي أن يغيب دفتر المالك الحقيقي عن اللقطة (تأخّر
+// مزامنة الحركات ~25 دقيقة، أو اقتطاع `MaxMovementsPerCustomer`) ليصير زبون
+// آخر «المرشّح الوحيد» فتُنسب إليه فاتورة ليست له — بأصنافها وأسعارها، وتُصدَّر
+// PDF باسمه. خطأ محاسبي في ورقة تُسلَّم للزبون أسوأ من فاتورة غائبة تُشرح صراحةً.
+//
+// الحلّ الجذري في المصدر لا في الواجهة: `push-customer-invoices.ps1` صار يجمّع
+// بـ`customerGuid`، فتعود المجموعة واحدة بلا أي استدلال. وحتى تصل تلك المزامنة،
+// نُظهر تحذيراً **لا ينسب شيئاً لأحد** بدل التخمين الصامت.
+
+// ذاكرة مؤقتة مربوطة **بهويّة كائنات التقارير نفسها**: كشف اليتامى يقارن كل
+// مجموعة فواتير بكل زبون (77 × 300 مطابقة اسم على بيانات الإنتاج)، ويُستدعى داخل
+// الرسم مرات كثيرة. المفتاح هو هوية الكائن لا نسخة منه: أي تحميل جديد للتقارير
+// يُبطل الذاكرة تلقائياً، فلا يمكن أن تُعرض نتيجة محسوبة على تقرير قديم.
+let _invoiceIdentityCache = null;
+function invoiceIdentityCache() {
+  const invoicesReport = state.customerInvoicesReport;
+  const balancesReport = (state.customerBalanceReports && state.customerBalanceReports[0]) || null;
+  const movementsReport = state.customerMovementsReport;
+  const cached = _invoiceIdentityCache;
+  if (cached
+    && cached.invoicesReport === invoicesReport
+    && cached.balancesReport === balancesReport
+    && cached.movementsReport === movementsReport) return cached;
+  _invoiceIdentityCache = { invoicesReport, balancesReport, movementsReport, orphans: null };
+  return _invoiceIdentityCache;
+}
+
+function orphanInvoiceEntries() {
+  const cache = invoiceIdentityCache();
+  if (cache.orphans) return cache.orphans;
+  const balances = latestCustomerBalanceItems();
+  cache.orphans = customerInvoiceEntries().filter((entry) => !smartNameMatch(balances, (b) => b.name, entry?.name));
+  return cache.orphans;
+}
+
+// تحذير عام عن انشطار محتمل — بلا نسبة أي فاتورة لأي زبون. يظهر فقط حين يعجز
+// التقرير عن الربط بالهوية (بلا `customerGuid`) وفيه مجموعة باسم لا حساب له.
+function invoiceIdentityWarning() {
+  const entries = customerInvoiceEntries();
+  if (!entries.length) return "";
+  if (entries.some((entry) => normGuid(entry?.customerGuid))) return "";
+  const orphans = orphanInvoiceEntries();
+  if (!orphans.length) return "";
+  const names = orphans.map((entry) => String(entry?.name || "").trim()).filter(Boolean);
+  return `تقرير الفواتير لا يحمل معرّف الحساب، وفيه ${orphans.length} مجموعة باسم لا حساب له اليوم${
+    names.length ? ` (${names.join("، ")})` : ""
+  } — غالباً حساب أُعيدت تسميته في الأمين. فواتير تلك المجموعات لا تُنسب لأحد هنا عمداً؛ شغّل مزامنة الفواتير المحدَّثة على Windows ليعود الربط بالمعرّف.`;
+}
+
+// مجموعة فواتير زبون محدّد بهويته: بالمعرّف أولاً ثم بالاسم.
+function customerInvoiceEntryFor(nameOrItem) {
+  const entries = customerInvoiceEntries();
+  if (!entries.length) return null;
+  const { guid, name } = customerIdentity(nameOrItem);
+
+  // المعرّف — الهوية الوحيدة التي لا تتغيّر بإعادة تسمية الحساب. متاح فقط في
+  // التقارير التي رفعتها نسخة `push-customer-invoices.ps1` بعد إضافته.
+  if (guid) {
+    const byGuid = entries.find((entry) => normGuid(entry?.customerGuid) === guid);
+    if (byGuid) return byGuid;
+  }
+  // الاسم — التقارير القديمة (وفواتير بلا حساب زبون).
+  return (name ? smartNameMatch(entries, (entry) => entry.name, name) : null) || null;
+}
+
+// فواتير زبون محدّد مع محتوياتها (من تقرير ameen_customer_invoices) — مجموعته
+// بهويته فقط، بلا أي استدلال. يقبل عنصر الأرصدة (مفضَّل، يحمل المعرّف) أو الاسم
+// نصّاً (توافقاً مع المسارات القديمة).
+function customerInvoicesFor(nameOrItem) {
+  const entry = customerInvoiceEntryFor(nameOrItem);
+  return entry && Array.isArray(entry.invoices) ? entry.invoices : [];
+}
+
+// فاتورة بمعرّفها في كامل التقرير — لا داخل مجموعة زبون واحد. معرّف الفاتورة
+// (`bu000.GUID`) فريد على مستوى الأمين كله، فالبحث به لا يحتاج معرفة الزبون
+// أصلاً؛ وهذا ما يجعل زر «فاتورة PDF» يصمد حين يكون اسم الزبون في تقرير
+// الفواتير قديماً. يعيد { invoice, entry } أو null.
+function invoiceByGuid(guid) {
+  const g = normGuid(guid);
+  if (!g) return null;
+  for (const entry of customerInvoiceEntries()) {
+    const invoices = Array.isArray(entry?.invoices) ? entry.invoices : [];
+    const invoice = invoices.find((inv) => normGuid(inv?.guid) === g);
+    if (invoice) return { invoice, entry };
+  }
+  return null;
+}
+
+// تأخّر مزامنة الفواتير خلف مزامنة الأرصدة بالدقائق (أو null إن تعذّر الحساب).
+// تقرير الأرصدة يُرفع كل دقيقة وتقرير الفواتير كل ربع ساعة على أحسن تقدير، فكل
+// فاتورة أُدخلت داخل هذا الفارق موجودة في الدفتر وغائبة عن تفاصيل الفواتير.
+// هذا رقم يُعرض للمستخدم، فلا يُختلق: null تعني «لا أعرف» ولا تُطبع صفراً.
+function invoiceSyncLagMinutes() {
+  const invoicesAt = reportSyncedAt(state.customerInvoicesReport);
+  const balancesAt = reportSyncedAt(state.customerBalanceReports?.[0]);
+  if (!invoicesAt || !balancesAt) return null;
+  const invoicesMs = new Date(invoicesAt).getTime();
+  const balancesMs = new Date(balancesAt).getTime();
+  if (!Number.isFinite(invoicesMs) || !Number.isFinite(balancesMs)) return null;
+  const lag = Math.round((balancesMs - invoicesMs) / 60000);
+  return lag > 0 ? lag : 0;
+}
+
+// سبب غياب فواتير زبون — بصيغة تُعرض للمستخدم بدل رسالة واحدة تخلط الأسباب.
+//   no_report      : لم تصل مزامنة الفواتير إطلاقاً.
+//   stale          : وصلت لكنها أقدم من دفتر الحساب، فالفاتورة الجديدة لم تدخلها بعد.
+//   none_in_window : مزامنة حديثة ولا فواتير لهذا الزبون خلال نافذة التقرير.
+function customerInvoicesStatus(nameOrItem) {
+  const invoices = customerInvoicesFor(nameOrItem);
+  const lag = invoiceSyncLagMinutes();
+  if (!state.customerInvoicesReport) return { status: "no_report", invoices, lag };
+  if (invoices.length) return { status: "ok", invoices, lag };
+  return { status: lag !== null && lag >= 2 ? "stale" : "none_in_window", invoices, lag };
+}
+
+// نص جاهز لغياب الفواتير — مصدر واحد لكل الشاشات كي لا تتناقض الرسائل.
+function customerInvoicesEmptyText(nameOrItem) {
+  const { status, lag } = customerInvoicesStatus(nameOrItem);
+  const windowDays = Math.max(1, Number(state.customerInvoicesReport?.summary?.periodDays || 60));
+  if (status === "no_report") return "لم تصل مزامنة تفاصيل الفواتير من الأمين بعد.";
+  // حالة «ok»: للزبون فواتير في التقرير لكن ليس المطلوبة — تُستدعى من مسار فشل
+  // التصدير، فلا يجوز أن تقول «لا توجد فواتير» وهي موجودة.
+  if (status === "ok") {
+    return lag !== null && lag >= 2
+      ? `آخر مزامنة لتفاصيل الفواتير أقدم من دفتر الحساب بـ${lag} دقيقة، وهذه الفاتورة ليست فيها.`
+      : "هذه الفاتورة غير موجودة في آخر مزامنة لتفاصيل الفواتير.";
+  }
+  if (status === "stale") {
+    return `مزامنة تفاصيل الفواتير أقدم من دفتر الحساب بـ${lag} دقيقة — أي فاتورة أُدخلت بعدها تظهر في الحركات ولا تظهر هنا حتى المزامنة التالية.`;
+  }
+  return `لا توجد فواتير لهذا الزبون خلال آخر ${windowDays} يوماً.`;
 }
 
 // مطابقة قيد دائن (دفعة محتملة) بفاتورة مرتجع فعلية بالتاريخ والمبلغ — قيود المرتجع في الأمين
 // لا تحمل معرّف الفاتورة (BiGUID) كالفواتير العادية، فلا مطابقة قطعية ممكنة هنا.
-function findReturnInvoiceForMovement(custName, movement) {
+// يقبل عنصر الأرصدة (مفضَّل) أو الاسم نصّاً، كسائر مسارات الفواتير.
+function findReturnInvoiceForMovement(customer, movement) {
   const credit = Number(movement?.credit || 0);
   if (!(credit > 0)) return null;
-  const invs = customerInvoicesFor(custName).filter((x) => x.isReturn);
+  const invs = customerInvoicesFor(customer).filter((x) => x.isReturn);
   if (!invs.length) return null;
   const dOnly = String(movement?.date || "").slice(0, 10);
   const amtMatch = (x) => Math.abs(Number(x.total || 0) - credit) < 1;
@@ -5016,10 +5210,18 @@ async function exportReportPdf(bodyHtml, filename, archive) {
   return true;
 }
 
-// يجلب حركات الزبون الكاملة (من تقرير ameen_customer_movements) بمطابقة الاسم
+// يجلب حركات الزبون الكاملة (من تقرير ameen_customer_movements): بالمعرّف أولاً
+// ثم بتطابق الاسم حرفياً. المطابقة تبقى **قطعية** في الحالتين — لا مطابقة ذكية
+// هنا: هذا مصدر كشف الحساب الرسمي، ونسبة دفتر زبون لزبون آخر خطأ محاسبي لا
+// يجوز أن ينتج عن تقارب أسماء.
 function customerFullMovements(item) {
   const report = state.customerMovementsReport;
   const items = Array.isArray(report?.items) ? report.items : [];
+  const guid = normGuid(item?.customerGuid);
+  if (guid) {
+    const byGuid = items.find((x) => normGuid(x?.customerGuid) === guid);
+    if (byGuid) return byGuid;
+  }
   const name = String(item?.name || "").trim();
   if (!name) return null;
   return items.find((x) => String(x.name || "").trim() === name) || null;
@@ -5029,7 +5231,9 @@ function customerFullMovements(item) {
 // بالتاريخ/المبلغ، فتصحّ حتى مع الحسومات وتعدد فواتير اليوم الواحد. null إن لم تصل
 // بيانات المزامنة المحدّثة بعد (فيرجع المستدعي للعرض الآمن: الرصيد الحالي فقط).
 function movementForBill(custName, billGuid) {
-  const g = String(billGuid || "").trim().toLowerCase();
+  // المعرّف الصفري ليس معرّفاً: البحث به كان يعيد أول قيد للزبون أياً كان، لأن
+  // كل القيود تحمل الصفري في بيانات الإنتاج اليوم.
+  const g = normGuid(billGuid);
   if (!g) return null;
   const report = state.customerMovementsReport;
   const items = report && Array.isArray(report.items) ? report.items : [];
@@ -5043,17 +5247,17 @@ function movementForBill(custName, billGuid) {
 
 // حركة الفاتورة في تقرير الحركات: نطابق بمعرّف القيد (GUID) إن وُجد وغير صفري، وإلا بالتاريخ
 // والمبلغ على جهة المدين. سبب الاحتياط: قيود السنة الجديدة (AmnDb002 بعد التدوير) تأتي أحياناً
-// بمعرّف صفري (00000000-...) فيفشل الربط بالمعرّف وحده.
+// بمعرّف صفري (00000000-...) فيفشل الربط بالمعرّف وحده — وقياس 2026-09-05 على بيانات
+// الإنتاج: **كل** الـ1830 قيداً في التقرير تحمل الصفري، فالربط بالمعرّف لا يعمل عملياً اليوم.
 function invoiceMovement(custName, inv) {
   const report = state.customerMovementsReport;
   const items = report && Array.isArray(report.items) ? report.items : [];
   const match = smartNameMatch(items, (it) => it.name, custName);
   const movements = match && Array.isArray(match.movements) ? match.movements : [];
   if (!movements.length) return null;
-  const g = String(inv?.guid || "").trim().toLowerCase();
-  const ZERO_GUID = "00000000-0000-0000-0000-000000000000";
-  if (g && g !== ZERO_GUID) {
-    const byGuid = movements.find((m) => String(m?.billGuid || "").trim().toLowerCase() === g);
+  const g = normGuid(inv?.guid);
+  if (g) {
+    const byGuid = movements.find((m) => normGuid(m?.billGuid) === g);
     if (byGuid) return byGuid;
   }
   const d = String(inv?.date || "").slice(0, 10);
@@ -6394,18 +6598,23 @@ function reportsPage() {
     .sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "ar"))
     .map((it) => `<option value="${escapeHtml(it.name || "")}"></option>`)
     .join("");
-  const selectedCustomerName = (() => {
-    const m = balItems.find((it) => customerKey(it) === state.selectedCustomerKey);
-    return m ? (m.name || "") : "";
-  })();
-
-  const selInvoices = selectedCustomerName ? customerInvoicesFor(selectedCustomerName) : [];
+  // الزبون يُمرَّر **كعنصر** لا كاسم: العنصر يحمل customerGuid، والاسم لا يحمل هوية.
+  const selectedCustomerItem = balItems.find((it) => customerKey(it) === state.selectedCustomerKey) || null;
+  const selectedCustomerName = selectedCustomerItem ? (selectedCustomerItem.name || "") : "";
+  const selInvoices = selectedCustomerItem ? customerInvoicesFor(selectedCustomerItem) : [];
+  // تحذير الانشطار يُعرض مع القائمة وبدونها: فاتورة ناقصة من كشف غير فارغ أخطر
+  // من كشف فارغ، لأن الكشف يبدو مكتملاً.
+  const identityWarn = invoiceIdentityWarning();
+  const identityWarnMarkup = identityWarn
+    ? `<p class="muted" style="margin-top:10px">⚠ ${escapeHtml(identityWarn)}</p>`
+    : "";
   const invoicesMarkup = !selectedCustomerName
     ? '<p class="muted" style="margin-top:10px">اختر زبوناً (أو اكتب اسمه) لعرض فواتيره ومحتوياتها.</p>'
     : !selInvoices.length
-      ? `<p class="muted" style="margin-top:10px">لا توجد فواتير لهذا الزبون${state.customerInvoicesReport ? " خلال آخر فترة مزامنة" : " — لم تصل مزامنة الفواتير بعد"}.</p>`
+      ? `<p class="muted" style="margin-top:10px">${escapeHtml(customerInvoicesEmptyText(selectedCustomerItem))}</p>${identityWarnMarkup}`
       : `<div style="margin-top:12px">
           <div class="sec">📋 فواتير «${escapeHtml(selectedCustomerName)}» (${selInvoices.length}) — اضغط فاتورة لرؤية محتوياتها</div>
+          ${identityWarnMarkup}
           ${selInvoices.map((inv) => `
             <details class="acc-group" style="margin:6px 0">
               <summary class="acc-summary"><span class="acc-title">${inv.isReturn ? "🔁 مرتجع" : "🧾 فاتورة"} ${escapeHtml(inv.number || "")} — ${escapeHtml(inv.date || "")}</span><span class="acc-count" style="${inv.isReturn ? "color:#16794f" : ""}">${escapeHtml(formatMoney(inv.total || 0))} $</span></summary>
@@ -6417,7 +6626,7 @@ function reportsPage() {
                   </tbody>
                 </table>
                 <p class="muted" style="margin:6px 2px 0">${inv.isReturn ? "إجمالي المرتجع" : "إجمالي الفاتورة"}: <b>${escapeHtml(formatMoney(inv.total || 0))} $</b></p>
-                <button class="button secondary mini-button" type="button" data-action="gen-invoice-doc" data-inv-number="${escapeHtml(String(inv.number || ""))}" data-inv-date="${escapeHtml(String(inv.date || ""))}" data-customer="${escapeHtml(selectedCustomerName)}" style="margin-top:8px">📄 ${inv.isReturn ? "تصدير فاتورة المرتجع PDF" : "تصدير الفاتورة PDF (مع الأصناف)"}</button>
+                <button class="button secondary mini-button" type="button" data-action="gen-invoice-doc" data-inv-guid="${escapeHtml(String(inv.guid || ""))}" data-inv-number="${escapeHtml(String(inv.number || ""))}" data-inv-date="${escapeHtml(String(inv.date || ""))}" data-customer="${escapeHtml(selectedCustomerName)}" style="margin-top:8px">📄 ${inv.isReturn ? "تصدير فاتورة المرتجع PDF" : "تصدير الفاتورة PDF (مع الأصناف)"}</button>
               </div>
             </details>`).join("")}
         </div>`;
@@ -7462,6 +7671,9 @@ function salesHistoryInvoices() {
     invoices.forEach((inv) => {
       out.push({
         customer,
+        // معرّف الفاتورة يُحمل معها إلى الزر: هو الهوية الوحيدة التي لا تلتبس
+        // برقم متكرر بين السلاسل ولا تتغيّر بتصحيح اسم الزبون.
+        guid: String(inv?.guid || ""),
         number: String(inv?.number ?? ""),
         date: String(inv?.date || "").slice(0, 10),
         total: Number(inv?.total || 0),
@@ -7515,10 +7727,27 @@ function salesHistoryPanel() {
           ${linesHtml}
         </details>
         <button class="button secondary mini-button" type="button" data-action="gen-invoice-doc"
+          data-inv-guid="${escapeHtml(inv.guid)}"
           data-inv-number="${escapeHtml(inv.number)}" data-inv-date="${escapeHtml(inv.date)}"
           data-customer="${escapeHtml(inv.customer)}" style="margin-top:8px">📄 ${inv.isReturn ? "تصدير فاتورة المرتجع PDF" : "تصدير الفاتورة PDF"}</button>
       </div>`;
   }).join("");
+
+  // حداثة المزامنة تُعرض دائماً على هذه الشاشة: «فاتورة أدخلتها للتو وغير ظاهرة»
+  // سؤال متكرر جوابه الوحيد هو وقت آخر مزامنة، فإخفاؤه يترك المستخدم يظنّ عطلاً.
+  const syncedAt = reportSyncedAt(state.customerInvoicesReport);
+  const lagMinutes = invoiceSyncLagMinutes();
+  const syncNote = syncedAt
+    ? `<p class="muted" style="margin-top:-6px">آخر مزامنة للتفاصيل: <b dir="ltr">${escapeHtml(formatDateTime(syncedAt))}</b>${
+        lagMinutes !== null && lagMinutes >= 2
+          ? ` — أقدم من دفتر الحسابات بـ${escapeHtml(lagMinutes)} دقيقة، فأي فاتورة أُدخلت بعدها لن تظهر هنا بعد.`
+          : ""
+      }</p>`
+    : "";
+  const identityWarn = invoiceIdentityWarning();
+  const identityNote = identityWarn
+    ? `<p class="muted" style="margin-top:-6px">⚠ ${escapeHtml(identityWarn)}</p>`
+    : "";
 
   const body = !state.customerInvoicesReport
     ? '<p class="muted">لم تصل مزامنة الفواتير من الأمين بعد. جرّب بعد دقائق.</p>'
@@ -7536,6 +7765,7 @@ function salesHistoryPanel() {
       </div>
       <h2>📄 الفواتير السابقة</h2>
       <p class="muted">فواتير المبيعات والمرتجعات المسجّلة في الأمين خلال آخر ${escapeHtml(periodDays)} يوماً — بما فيها ما أُصدر من برنامج الأمين مباشرةً.</p>
+      ${syncNote}${identityNote}
       <label class="inv-label" style="max-width:340px">بحث
         <input class="inv-input-main" id="sales-history-q" value="${escapeHtml(state.salesHistoryQuery)}" placeholder="اسم الزبون أو رقم الفاتورة" dir="auto" autocomplete="off">
       </label>
@@ -11196,7 +11426,7 @@ function render() {
       voucherExportBusy = true;
       setTimeout(() => { voucherExportBusy = false; }, 1500);
       const item = selectedCustomer(latestCustomerBalanceItems());
-      if (!item) { setNotice("error", "اختر زبونًا أولاً."); render(); return; }
+      if (!item) { showNoticeNow("error", "اختر زبونًا أولاً."); return; }
       const debit = Number(el.dataset.debit || 0);
       const credit = Number(el.dataset.credit || 0);
       const key = customerKey(item);
@@ -11220,13 +11450,18 @@ function render() {
       const storedDocPrev = el.dataset.docPrev !== undefined && el.dataset.docPrev !== ""
         ? Number(el.dataset.docPrev) : null;
       if (debit > 0 && credit <= 0) {
-        const invs = customerInvoicesFor(item.name || "").filter((x) => !x.isReturn);
-        // نطابق الفاتورة التفصيلية بمعرّف القيد (قطعي) أولاً، ثم بالتاريخ/المبلغ كاحتياط.
-        const bg = String(el.dataset.billGuid || "").trim().toLowerCase();
+        // الزبون يُمرَّر كعنصر (يحمل customerGuid) لا كاسم — الاسم في تقرير الفواتير
+        // مصدره حقل نصّي آخر في الأمين وقد يتخلّف عن اسم الحساب بعد أي تعديل.
+        const invs = customerInvoicesFor(item).filter((x) => !x.isReturn);
+        // نطابق الفاتورة التفصيلية بمعرّف القيد (قطعي) أولاً — وعلى كامل التقرير،
+        // لا داخل مجموعة الزبون: معرّف الفاتورة فريد فلا يحتاج معرفة الزبون.
+        // ثم بالتاريخ/المبلغ داخل مجموعة الزبون كاحتياط.
+        const bg = normGuid(el.dataset.billGuid);
         const dOnly = String(el.dataset.date || "").slice(0, 10);
         const amtMatch = (x) => Math.abs(Number(x.total || 0) - debit) < 1;
         const dateMatch = (x) => String(x.date || "").slice(0, 10) === dOnly;
-        const match = (bg ? invs.find((x) => String(x.guid || "").trim().toLowerCase() === bg) : null)
+        const byGuid = bg ? invoiceByGuid(bg) : null;
+        const match = (byGuid && !byGuid.invoice.isReturn ? byGuid.invoice : null)
           || invs.find((x) => dateMatch(x) && amtMatch(x)) || invs.find((x) => amtMatch(x)) || invs.find((x) => dateMatch(x));
         if (match) {
           const total = match.total || debit;
@@ -11235,11 +11470,12 @@ function render() {
             opts.newBalance = roundPrice(storedDocNew);
             const prev = (storedDocPrev !== null && Number.isFinite(storedDocPrev)) ? storedDocPrev : (storedDocNew - debit);
             opts.prevBalance = roundPrice(prev);
-            // الحسم ودفعة الزبون يُنسبان أولاً إن توفّرا من المصدر، ويبقى ما لا
-            // يُنسب «تسوية» صريحة. **فجوة بيانات معروفة:** مزامنة فواتير الأمين
-            // (tools/push-customer-invoices.ps1) لا تجلب حسم رأس الفاتورة ولا
-            // الدفعة المرافقة، فيبقى الفرق كله غير منسوب حتى تُجلبا — ولهذا لا
-            // يُسمّى حسماً، لأن تسميته حسماً تطبع دفعة الزبون على أنها حسم.
+            // الحسم ودفعة الزبون يُنسبان أولاً، ويبقى ما لا يُنسب «تسوية» صريحة.
+            // (تصحيح 2026-09-05: التعليق السابق هنا كان يقول إن المزامنة لا تجلب
+            // الحقلين. هذا لم يعد صحيحاً — `push-customer-invoices.ps1` يجلب
+            // `TotalDisc` و`FirstPay` على رأس الفاتورة، وفي تقرير الإنتاج الحالي
+            // 67 فاتورة بحسم و58 بدفعة مرافقة من أصل 635.) ما يتبقّى بعد نسبتهما
+            // لا يُسمّى حسماً أبداً، لأن تسميته حسماً تطبع دفعة الزبون على أنها حسم.
             const knownDiscount = Math.max(0, roundPrice(Number(match.discount || 0)));
             const knownPayment = Math.max(0, roundPrice(Number(match.payment || 0)));
             if (knownDiscount > 0.009) opts.discount = knownDiscount;
@@ -11253,13 +11489,17 @@ function render() {
           }
           exportVoucherPdf(opts);
         } else {
-          setNotice("error", "لم أطابق فاتورة تفصيلية لهذه الحركة. افتح «التقارير» ← فواتير الزبون واضغط «📄 تصدير الفاتورة PDF (مع الأصناف)».");
-          render();
+          // لا فشل صامت: نقول أي مصدر ينقصه ماذا. أشيع سبب مُثبت هو تأخّر مزامنة
+          // تفاصيل الفواتير خلف دفتر الحساب — القيد وصل والفاتورة لم تصل بعد.
+          showNoticeNow(
+            "error",
+            `لم أجد تفاصيل فاتورة بقيمة ${formatMoney(debit)}$ بتاريخ ${dOnly || "—"} للزبون «${item.name || ""}». ${customerInvoicesEmptyText(item)}`
+          );
         }
       } else if (credit > 0) {
         // مرتجع المبيعات يُقيَّد دائناً كالدفعة تماماً — نطابقه أولاً بفاتورة مرتجع فعلية
         // (بالتاريخ والمبلغ، إذ لا معرّف قيد لقيود المرتجع) لنصدّره كفاتورة مرتجع مع أصنافها.
-        const retMatch = findReturnInvoiceForMovement(item.name || "", { date: el.dataset.date, credit });
+        const retMatch = findReturnInvoiceForMovement(item, { date: el.dataset.date, credit });
         if (retMatch) {
           const opts = { ...base, cur: "$", type: "return", amount: retMatch.total || credit, no: retMatch.number ? String(retMatch.number) : docNumber("RET"), lines: retMatch.lines || [] };
           if (storedDocNew !== null && Number.isFinite(storedDocNew)) {
@@ -11293,7 +11533,7 @@ function render() {
           exportVoucherPdf(opts);
         }
       } else {
-        setNotice("error", "لا يمكن تصدير هذا القيد."); render();
+        showNoticeNow("error", "لا يمكن تصدير هذا القيد.");
       }
     });
   });
@@ -11301,15 +11541,30 @@ function render() {
     el.addEventListener("click", () => {
       try {
         const cust = el.dataset.customer || "";
-        const invs = customerInvoicesFor(cust);
-        const inv = invs.find((x) => String(x.number || "") === el.dataset.invNumber && String(x.date || "") === el.dataset.invDate)
+        // **المعرّف أولاً وعلى كامل التقرير.** الرقم وحده لا يكفي: سلاسل الترقيم
+        // في الأمين تتكرر بين الأنواع، وتقييد البحث بمجموعة الزبون كان يُفشل
+        // التصدير كلما اختلف اسم الزبون في تقرير الفواتير عن اسم حسابه.
+        const byGuid = invoiceByGuid(el.dataset.invGuid);
+        const invs = byGuid ? [] : customerInvoicesFor(cust);
+        const inv = (byGuid && byGuid.invoice)
+          || invs.find((x) => String(x.number || "") === el.dataset.invNumber && String(x.date || "") === el.dataset.invDate)
           || invs.find((x) => String(x.number || "") === el.dataset.invNumber);
-        if (!inv) { setNotice("error", "تعذّر إيجاد الفاتورة."); render(); return; }
+        if (!inv) {
+          showNoticeNow("error", `تعذّر إيجاد الفاتورة ${el.dataset.invNumber || ""} في تفاصيل الفواتير. ${customerInvoicesEmptyText(cust)}`);
+          return;
+        }
         const invoiceTotal = inv.total || 0;
+        // حساب الزبون: بالاسم المعروض، فإن كان اسماً قديماً لا حساب له فبإثبات
+        // الدفتر لمجموعته. المستند يحمل بعدها **اسم الحساب الحالي** لا النصّ
+        // القديم على رأس الفاتورة — الورقة تذهب للزبون، فاسمه فيها يجب أن يكون
+        // اسمه اليوم، ورصيدا «قبل/بعد» يجب أن يُقرآ من دفتره هو.
         const custItem = smartNameMatch(latestCustomerBalanceItems(), (it) => it.name, cust);
+        // اسم المستند من الحساب متى وُجد، وإلا فنصّ الفاتورة كما سجّله الأمين.
+        // لا نستنتج حساباً لاسم لا حساب له — الاستنتاج هنا ينسب فاتورة لزبون بالتخمين.
+        const custName = (custItem && custItem.name) || cust;
         const opts = {
           type: inv.isReturn ? "return" : "invoice",
-          name: cust,
+          name: custName,
           amount: invoiceTotal,
           cur: "$",
           date: inv.date || todayIsoDate(),
@@ -11322,7 +11577,7 @@ function render() {
         // قيود المرتجع لا تحمل معرّف قيد، فتُستثنى وتعرض الرصيد الحالي فقط.
         // عند أي خطأ في حساب الرصيد نتجاهله ونعرض الرصيد الحالي فقط — دون منع تصدير الفاتورة.
         try {
-          const mv = inv.isReturn ? null : invoiceMovement(cust, inv);
+          const mv = inv.isReturn ? null : invoiceMovement(custName, inv);
           const db = mv ? movementDocBalances(mv) : null;
           if (db && Number.isFinite(db.newBalance) && Number.isFinite(db.prevBalance)) {
             opts.newBalance = roundPrice(db.newBalance);
@@ -11350,8 +11605,7 @@ function render() {
         }
         exportVoucherPdf(opts);
       } catch (error) {
-        setNotice("error", "تعذّر تصدير الفاتورة: " + (error && error.message ? error.message : String(error)));
-        render();
+        showNoticeNow("error", "تعذّر تصدير الفاتورة: " + (error && error.message ? error.message : String(error)));
       }
     });
   });
