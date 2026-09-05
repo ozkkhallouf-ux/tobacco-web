@@ -38,7 +38,7 @@ import { createReadStream, existsSync, readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, extname, join, normalize, resolve } from "node:path";
 import { pdfPageLines, normalizeArabic, printedRow, printedGroup } from "./lib/price-bulletin-pdf-text.mjs";
-import { FONT_USABLE_PROBE, waitForBulletinFont } from "./lib/bulletin-font-ready.mjs";
+import { FONT_USABLE_PROBE, prepareBulletinFont } from "./lib/bulletin-font-ready.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const TYPES = {
@@ -60,6 +60,17 @@ let failed = 0;
 const check = (name, condition, detail) => {
   if (condition) console.log(`  ✅ ${name}`);
   else { failed += 1; console.error(`  ❌ ${name}\n     ${detail}`); }
+};
+
+// تأكيدٌ يعتمد على شكل الحروف العربية داخل الملف، فيلزمه خط النشرة. بلا الخط
+// لا يُفحص ولا يُدّعى نجاحه: يُعلَن معلَّقاً بسببه صراحةً. وربطُ بوابةٍ إلزامية
+// بالوصول إلى Google Fonts يستبدل بعطلٍ بيئي عطلاً شبكياً (ملاحظة Codex P1
+// على 1aa1a6f)، والتأكيدات الهندسية تبقى مفروضة في الحالتين.
+const SKIP_NOTE = "خط النشرة غير متاح (شبكة) — التأكيد النصّي معلَّق لا ناجح";
+let skipped = 0;
+const checkWithFont = (fontReady, name, condition, detail) => {
+  if (!fontReady) { skipped += 1; console.log(`  ⏭️  ${name} — ${SKIP_NOTE}`); return; }
+  check(name, condition, detail);
 };
 
 const A4_HEIGHT_PX = 297 / 25.4 * 96;
@@ -100,16 +111,9 @@ async function bootApp(width, height, { blockWebfont = false } = {}) {
     state.syriaRateConfirmed = true;
   }, { items: ITEMS, prices: PRICES });
   // خط النشرة لا يبدأ تحميله إلا حين تدخل قواعد القالب (وفيها `@import`) إلى
-  // المستند. نُدخلها هنا كي يتمكّن `waitForBulletinFont` من الانتظار فعلاً —
-  // إلا في سيناريو حجب الخط عمداً، فانتظاره هناك بلا معنى.
-  if (!blockWebfont) {
-    await page.evaluate(() => {
-      const style = document.createElement("style");
-      style.textContent = window.OZKPriceListTemplate.CSS;
-      document.head.appendChild(style);
-    });
-  }
-  return { context, page };
+  // المستند — إلا في سيناريو حجب الخط عمداً، فانتظاره هناك بلا معنى.
+  const fontReady = blockWebfont ? false : await prepareBulletinFont(page);
+  return { context, page, fontReady };
 }
 
 // يطبع مستند تصدير جاهزاً ويُرجع نصّ كل ورقة + هندسة كتل الأعمدة.
@@ -191,14 +195,12 @@ for (const sc of [
   { label: "نشرة الدولار (جملة) — داكن", useSyria: false, theme: "dark", vw: 1440, vh: 900 },
   { label: "نشرة الليرة على هاتف 390px", useSyria: true, theme: "dark", vw: 390, vh: 844 }
 ]) {
-  const { context, page } = await bootApp(sc.vw, sc.vh);
+  const { context, page, fontReady } = await bootApp(sc.vw, sc.vh);
   await page.evaluate((sc) => {
     (0, eval)("state").syriaRateConfirmed = true;
     window.openPricePreview(sc.useSyria, sc.theme);
   }, sc);
   await page.waitForSelector("[data-action='export-price-preview']", { timeout: 10000 });
-  const fontReady = await waitForBulletinFont(page);
-
   // ما خطّطت له الخطة للصفحة الأولى تحديداً — هوية ما يجب أن يقع على الورقة الأولى.
   const planned = await page.evaluate(() => {
     const state = (0, eval)("state");
@@ -224,9 +226,6 @@ for (const sc of [
     document.querySelector("iframe[data-print-frame]").getAttribute("srcdoc"));
   await context.close();
 
-  check(`${sc.label}: خط النشرة جاهز قبل التصدير (شرط مطابقة النصّ العربي)`,
-    fontReady, "لم يجهز خط النشرة خلال 20 ثانية — المطابقة النصّية تقيس النظام لا الكود");
-
   check(`${sc.label}: لا اسم يلتفّ في هندسة الطباعة (شرط قراءة الملف سطراً سطراً)`,
     wrapped.length === 0, `أسماء ملتفّة: ${JSON.stringify(wrapped.slice(0, 5))}`);
 
@@ -237,22 +236,22 @@ for (const sc of [
   const printed = await printExportDocument(documentHtml);
   const firstSheet = printed.sheets[0] || [];
 
-  check(`${sc.label}: الورقة الأولى تحمل رأس النشرة`, sheetCarriesHeader(firstSheet),
+  checkWithFont(fontReady, `${sc.label}: الورقة الأولى تحمل رأس النشرة`, sheetCarriesHeader(firstSheet),
     "عنوان «نشرة الأسعار» غير مطبوع على الورقة الأولى");
 
   // **جوهر الحارس.** لا «موجود في مكان ما بالملف»: كل صفّ خطّطت له الخطة
   // للصفحة الأولى يجب أن يُطبع على الورقة الأولى **نفسها**.
   const onFirst = rowsOnSheet(firstSheet, planned.firstPageRows);
-  check(`${sc.label}: الورقة الأولى تحمل أصنافاً فعلاً (لا ورقة عنوان)`, onFirst > 0,
+  checkWithFont(fontReady, `${sc.label}: الورقة الأولى تحمل أصنافاً فعلاً (لا ورقة عنوان)`, onFirst > 0,
     `صفر صنف على الورقة الأولى من ${planned.firstPageRows.length} صنفاً مخطَّطاً لها`
     + ` — أوراق الملف = ${printed.sheets.length}`);
 
-  check(`${sc.label}: كل صفوف الصفحة الأولى المخطَّطة (${planned.firstPageRows.length}) مطبوعة على الورقة الأولى`,
+  checkWithFont(fontReady, `${sc.label}: كل صفوف الصفحة الأولى المخطَّطة (${planned.firstPageRows.length}) مطبوعة على الورقة الأولى`,
     onFirst === planned.firstPageRows.length,
     `مطبوع على الورقة الأولى ${onFirst} من ${planned.firstPageRows.length}`);
 
   const missingFirstGroups = planned.firstPageGroups.filter((g) => !printedGroup(firstSheet, g));
-  check(`${sc.label}: كل رؤوس مجموعات الصفحة الأولى (${planned.firstPageGroups.length}) على الورقة الأولى`,
+  checkWithFont(fontReady, `${sc.label}: كل رؤوس مجموعات الصفحة الأولى (${planned.firstPageGroups.length}) على الورقة الأولى`,
     missingFirstGroups.length === 0, `مفقودة عن الورقة الأولى: ${JSON.stringify(missingFirstGroups.slice(0, 6))}`);
 
   // الفاصل القسري ملك أول كتلة **مرسومة**: لو حمله أولُ بلوك لهُجر الرأس وحده.
@@ -278,7 +277,7 @@ for (const sc of [
 // يُبنى من نفس دالتَي التصدير (`render` + `printDocument`) اللتين يستدعيهما
 // زرّ «حفظ / مشاركة PDF» في `exportBulletinPdf`.
 {
-  const { context, page } = await bootApp(1440, 900);
+  const { context, page, fontReady: emptyFirstFontReady } = await bootApp(1440, 900);
   const built = await page.evaluate(() => {
     const T = window.OZKPriceListTemplate;
     const mk = (name, count) => ({
@@ -336,7 +335,7 @@ for (const sc of [
   const firstSheet = printed.sheets[0] || [];
   const onFirst = rowsOnSheet(firstSheet, built.rows);
 
-  check("ورقة العنوان: الورقة الأولى تحمل الرأس",
+  checkWithFont(emptyFirstFontReady, "ورقة العنوان: الورقة الأولى تحمل الرأس",
     sheetCarriesHeader(firstSheet), "الرأس نفسه غاب عن الورقة الأولى");
 
   // القرار الصريح: الكتلة التالية (المعبّأة لورقة كاملة) لا تُوضع تحت الرأس،
@@ -345,13 +344,13 @@ for (const sc of [
     printed.geometry.blocks[0]?.forcedBreak === true,
     "كتلة بميزانية ورقة كاملة وُضعت تحت الرأس — تتجاوز ورقتها ويقصّها سفاري");
 
-  check("ورقة العنوان: الورقة الأولى بلا أصناف — وهذا هو السلوك المقصود هنا وحده",
+  checkWithFont(emptyFirstFontReady, "ورقة العنوان: الورقة الأولى بلا أصناف — وهذا هو السلوك المقصود هنا وحده",
     onFirst === 0,
     `الورقة الأولى تحمل ${onFirst} صنفاً رغم أن الصفحة المخطَّطة فارغة`);
 
   // الثمن المقبول ورقٌ مهدور، لا صنفٌ ضائع أو مقصوص.
   const anywhere = built.rows.filter((row) => printed.sheets.some((sheet) => printedRow(sheet, row))).length;
-  check("ورقة العنوان: لا صنف يضيع من الملف",
+  checkWithFont(emptyFirstFontReady, "ورقة العنوان: لا صنف يضيع من الملف",
     anywhere === built.rows.length, `مطبوع ${anywhere} من ${built.rows.length}`);
 
   const overflowing = printed.geometry.blocks
@@ -366,13 +365,12 @@ for (const sc of [
 // ونفرض على كتلته الأولى فاصلاً قسرياً — أي نُعيد إنتاج العطل حرفياً — ونطالب
 // أن يرصده مِسبار الورقة الأولى نفسه المستعمل أعلاه.
 {
-  const { context, page } = await bootApp(1440, 900);
+  const { context, page, fontReady: witnessFontReady } = await bootApp(1440, 900);
   await page.evaluate(() => {
     (0, eval)("state").syriaRateConfirmed = true;
     window.openPricePreview(true, "dark");
   });
   await page.waitForSelector("[data-action='export-price-preview']", { timeout: 10000 });
-  const witnessFontReady = await waitForBulletinFont(page);
   const planned = await page.evaluate(() => {
     const plan = window.bulletinRenderPlan(window.buildBulletinDataset(true, "dark").dataset);
     const first = plan.layout.mainPages[0];
@@ -387,11 +385,8 @@ for (const sc of [
     document.querySelector("iframe[data-print-frame]").getAttribute("srcdoc"));
   await context.close();
 
-  check("شاهد سالب: خط النشرة جاهز (شرط مطابقة النصّ العربي)", witnessFontReady,
-    "لم يجهز خط النشرة — الشاهد يقيس النظام لا الكود");
-
   const healthyPrint = await printExportDocument(healthy);
-  check("شاهد سالب: المستند السليم يضع أصنافاً على الورقة الأولى",
+  checkWithFont(witnessFontReady, "شاهد سالب: المستند السليم يضع أصنافاً على الورقة الأولى",
     rowsOnSheet(healthyPrint.sheets[0] || [], planned.rows) > 0,
     "المرجع السليم نفسه بلا أصناف على الورقة الأولى — الشاهد بلا قيمة");
 
@@ -403,10 +398,10 @@ for (const sc of [
 
   const strandedPrint = await printExportDocument(stranded);
   const strandedFirst = strandedPrint.sheets[0] || [];
-  check("شاهد سالب: الحارس يرصد الرأس المهجور (صفر صنف على الورقة الأولى)",
+  checkWithFont(witnessFontReady, "شاهد سالب: الحارس يرصد الرأس المهجور (صفر صنف على الورقة الأولى)",
     rowsOnSheet(strandedFirst, planned.rows) === 0,
     "الورقة الأولى المهجورة ما زالت تُحسب حاملةً أصنافاً — المِسبار لا يرصد العطل");
-  check("شاهد سالب: الورقة المهجورة تحمل الرأس وحده (وهو ما رآه المالك)",
+  checkWithFont(witnessFontReady, "شاهد سالب: الورقة المهجورة تحمل الرأس وحده (وهو ما رآه المالك)",
     sheetCarriesHeader(strandedFirst),
     "الورقة الأولى المهجورة لا تحمل حتى الرأس — الشاهد لا يُطابق البلاغ");
 }
@@ -551,6 +546,10 @@ const CHROME_WHOLE_BLOCK_PUSH_BAND_PX = 8;
 
 await browser.close();
 server.close();
+
+if (skipped) {
+  console.log(`\nℹ️  ${skipped} تأكيداً نصّياً معلَّقاً: ${SKIP_NOTE}.`);
+}
 
 if (failed) {
   console.error(`\n✗ فشل ${failed} فحصاً في توزيع الورقة الأولى للنشرة.`);

@@ -43,6 +43,15 @@ const check = (name, condition, detail) => {
   else { failed += 1; console.error(`  ❌ ${name}\n     ${detail}`); }
 };
 
+// تأكيدٌ يعتمد على شكل الحروف العربية، فيلزمه خط النشرة. بلا الخط لا يُفحص
+// ولا يُدّعى نجاحه: يُعلَن معلَّقاً بسببه صراحةً (راجع prepareBulletinFont).
+const SKIP_NOTE = "خط النشرة غير متاح (شبكة) — التأكيد النصّي معلَّق لا ناجح";
+let skipped = 0;
+const checkWithFont = (fontReady, name, condition, detail) => {
+  if (!fontReady) { skipped += 1; console.log(`  ⏭️  ${name} — ${SKIP_NOTE}`); return; }
+  check(name, condition, detail);
+};
+
 // ===== قراءة نص PDF =====
 // القارئ نفسه يعيش في وحدة مشتركة كي يستعمله حارس توزيع الصفحة الأولى بنفس
 // الصرامة حرفياً — راجع scripts/lib/price-bulletin-pdf-text.mjs لشرح آلية
@@ -50,7 +59,7 @@ const check = (name, condition, detail) => {
 import {
   pdfPageLines, normalizeArabic, lineText, printedRow, printedGroup
 } from "./lib/price-bulletin-pdf-text.mjs";
-import { waitForBulletinFont } from "./lib/bulletin-font-ready.mjs";
+import { prepareBulletinFont } from "./lib/bulletin-font-ready.mjs";
 
 // الفحص برسالة صريحة تطلب توسيع القارئ إلى إعادة بناء الخلايا قبل اعتماده.
 const WRAP_PROBE = `(markup) => {
@@ -108,24 +117,13 @@ async function bootApp(width, height) {
   // الترميز.** فإن لم يجهز الخط هنا وُسم الترميز بالسلسلة الاحتياطية، وهي تختلف
   // بين الأنظمة وقد لا تُشكّل العربية على لينكس — فتفشل مطابقة النصّ لسببٍ يخصّ
   // النظام لا الكود. المستخدم الحقيقي ينتظره، فينتظره الحارس.
-  // **شرط تشغيل الحارس كلّه، لا تفصيل سيناريو.** الترميز يُبنى من
-  // `bulletinRenderPlan` وهو يختم قرار الخط عليه؛ فبلا خط النشرة يُوسم بالسلسلة
-  // الاحتياطية، وهي تختلف بين الأنظمة وقد لا تُشكّل العربية على لينكس — فتصير
-  // المطابقة النصّية قياساً للنظام لا للكود. نُفشِل صراحةً بدل أن نمرّ زوراً.
-  //
-  // وخط النشرة لا يبدأ تحميله إلا حين تدخل قواعد القالب (وفيها `@import`) إلى
-  // المستند، فنُدخلها هنا قبل الانتظار — والمِسبار نفسه يستعمل الخط في DOM
-  // فيُطلق تحميله.
-  await page.evaluate(() => {
-    const style = document.createElement("style");
-    style.textContent = window.OZKPriceListTemplate.CSS;
-    document.head.appendChild(style);
-  });
-  if (!(await waitForBulletinFont(page))) {
-    await context.close();
-    throw new Error("خط النشرة لم يجهز خلال 20 ثانية — تعذّر تشغيل الحارس بمطابقة نصّية موثوقة");
-  }
-  return { context, page };
+  // خط النشرة يقرّر شكل المطابقة: الترميز يُبنى من `bulletinRenderPlan` وهو
+  // يختم قرار الخط عليه، فبلا الخط يُوسم بالسلسلة الاحتياطية — وهي تختلف بين
+  // الأنظمة وقد لا تُشكّل العربية على لينكس، فتصير المطابقة النصّية قياساً
+  // للنظام لا للكود. ننتظره كما ينتظره المستخدم، ونُرجع النتيجة بدل أن نرمي:
+  // بوابةٌ إلزامية لا يجوز أن تسقط لانقطاع شبكة (راجع prepareBulletinFont).
+  const fontReady = await prepareBulletinFont(page);
+  return { context, page, fontReady };
 }
 
 // يطبع مستند تصدير جاهزاً ويُرجع نصّ كل ورقة + هندسة كتل الصفحات.
@@ -168,7 +166,7 @@ for (const sc of [
   { label: "نشرة الدولار (جملة) — داكن", useSyria: false, theme: "dark", vw: 1440, vh: 900 },
   { label: "نشرة الليرة على هاتف 390px", useSyria: true, theme: "dark", vw: 390, vh: 844 }
 ]) {
-  const { context, page } = await bootApp(sc.vw, sc.vh);
+  const { context, page, fontReady } = await bootApp(sc.vw, sc.vh);
   await page.evaluate((sc) => {
     (0, eval)("state").syriaRateConfirmed = true;
     window.openPricePreview(sc.useSyria, sc.theme);
@@ -219,21 +217,21 @@ for (const sc of [
 
   // --- جوهر الحارس: أسماء المجموعات والأصناف داخل الورق نفسه ---
   const missingGroups = expected.groups.filter((g) => !text.some((lines) => printedGroup(lines, g)));
-  check(`${sc.label}: كل رؤوس المجموعات (${expected.groups.length}) مطبوعة كاملةً داخل الملف`,
+  checkWithFont(fontReady, `${sc.label}: كل رؤوس المجموعات (${expected.groups.length}) مطبوعة كاملةً داخل الملف`,
     missingGroups.length === 0, `مفقودة: ${JSON.stringify(missingGroups.slice(0, 8))}`);
 
   const missingItems = expected.rows.filter((row) => !text.some((lines) => printedRow(lines, row)));
-  check(`${sc.label}: كل صفوف الأصناف (${expected.rows.length}) مطبوعة كاملةً (اسم+وحدة+سعر)`,
+  checkWithFont(fontReady, `${sc.label}: كل صفوف الأصناف (${expected.rows.length}) مطبوعة كاملةً (اسم+وحدة+سعر)`,
     missingItems.length === 0, `مفقودة: ${JSON.stringify(missingItems.slice(0, 6))}`);
 
   // --- «الرأس فقط»: كل ورقة يجب أن تحمل أصنافاً، لا ترويسة وحدها ---
   const itemsPerPage = text.map((lines) => expected.rows.filter((row) => printedRow(lines, row)).length);
-  check(`${sc.label}: لا ورقة تحمل الرأس وحده — كل ورقة فيها أصناف`,
+  checkWithFont(fontReady, `${sc.label}: لا ورقة تحمل الرأس وحده — كل ورقة فيها أصناف`,
     itemsPerPage.every((count) => count > 0),
     `أصناف كل ورقة = [${itemsPerPage.join(", ")}]`);
 
   // الورقة الأولى تحديداً هي التي كانت تخرج بالرأس وحده.
-  check(`${sc.label}: الورقة الأولى تحمل أصنافاً`, (itemsPerPage[0] || 0) > 0,
+  checkWithFont(fontReady, `${sc.label}: الورقة الأولى تحمل أصنافاً`, (itemsPerPage[0] || 0) > 0,
     `الورقة الأولى فيها ${itemsPerPage[0]} صنف`);
 
   // --- السبب الجذري: لا كتلة أعمدة تتجاوز ورقتها ---
@@ -248,7 +246,7 @@ for (const sc of [
 // يجعل الصفحة الأولى مستغلّة أقل من نصف ميزانيتها فتُعاد تعبئتها بميزانية
 // الورقة الكاملة وتفيض. نبنيه بارتفاعات مقاسة حقيقية من نفس القالب.
 {
-  const { context, page } = await bootApp(1440, 900);
+  const { context, page, fontReady } = await bootApp(1440, 900);
   const built = await page.evaluate(() => {
     const T = window.OZKPriceListTemplate;
     const RIGHT = ["ماستر", "كابتن بلاك", "اوسكار", "اختمار"];
@@ -319,13 +317,13 @@ for (const sc of [
     printed.pages.length === built.pageCount,
     `مخطَّط ${built.pageCount} · مطبوع ${printed.pages.length}`);
   const missing = built.rows.filter((row) => !text.some((lines) => printedRow(lines, row)));
-  check("شكل الإنقاذ: كل صفوف الأصناف مطبوعة كاملةً داخل الملف",
+  checkWithFont(fontReady, "شكل الإنقاذ: كل صفوف الأصناف مطبوعة كاملةً داخل الملف",
     missing.length === 0, `مفقودة: ${JSON.stringify(missing.slice(0, 6))}`);
   const missingGroups = built.groups.filter((g) => !text.some((lines) => printedGroup(lines, g)));
-  check("شكل الإنقاذ: كل رؤوس المجموعات مطبوعة كاملةً داخل الملف",
+  checkWithFont(fontReady, "شكل الإنقاذ: كل رؤوس المجموعات مطبوعة كاملةً داخل الملف",
     missingGroups.length === 0, `مفقودة: ${JSON.stringify(missingGroups)}`);
   const perPage = text.map((lines) => built.rows.filter((row) => printedRow(lines, row)).length);
-  check("شكل الإنقاذ: لا ورقة بالرأس وحده", perPage.every((n) => n > 0), `[${perPage.join(", ")}]`);
+  checkWithFont(fontReady, "شكل الإنقاذ: لا ورقة بالرأس وحده", perPage.every((n) => n > 0), `[${perPage.join(", ")}]`);
 }
 
 // ===== 2ب) شاهد سالب: الحارس يرصد فقدان صنف فعلاً (لا يمرّ زوراً) =====
@@ -338,7 +336,7 @@ for (const sc of [
 // نحذف ضحيّة من كل نوع، ونطالب برصد الاثنتين — ونُظهر صراحةً أن القاعدتين
 // القديمتين كانتا ستمرّان.
 {
-  const { context, page } = await bootApp(1440, 900);
+  const { context, page, fontReady } = await bootApp(1440, 900);
   const built = await page.evaluate(() => {
     const state = (0, eval)("state");
     state.syriaRateConfirmed = true;
@@ -407,7 +405,7 @@ for (const sc of [
 
   const missing = built.rows.filter((row) => !text.some((lines) => printedRow(lines, row)));
   const victimNames = new Set(built.victims.map((v) => v.name));
-  check("الشاهد السالب: لا ضحايا جانبية — المفقود هو المحذوف وحده",
+  checkWithFont(fontReady, "الشاهد السالب: لا ضحايا جانبية — المفقود هو المحذوف وحده",
     missing.length === built.victims.length && missing.every((row) => victimNames.has(row.name)),
     `المفقود = ${JSON.stringify(missing.map((r) => r.name).slice(0, 8))} · المحذوف = ${JSON.stringify([...victimNames])}`);
 }
@@ -418,7 +416,7 @@ for (const sc of [
 // رقم يراه الزبون. هنا نُبدّل رقمين داخل سعر وداخل عدّاد مجموعة، ونطالب برصد
 // الاثنين. (المطابقة الآن تُبلّط مقاطع الرسم: ترتيب الحروف داخل المقطع مصون.)
 {
-  const { context, page } = await bootApp(1440, 900);
+  const { context, page, fontReady } = await bootApp(1440, 900);
   const built = await page.evaluate(() => {
     const state = (0, eval)("state");
     state.syriaRateConfirmed = true;
@@ -484,16 +482,16 @@ for (const sc of [
   check(`تشوّه رقمي: السعر «${built.priceRow.price}» شُوّه إلى «${built.corruptedPrice}» بنفس الحروف`,
     built.corruptedPrice && built.corruptedPrice !== built.priceRow.price,
     `${built.priceRow.price} → ${built.corruptedPrice}`);
-  check("تشوّه رقمي: البصمة القديمة (حروف مرتّبةً) كانت تمرّ زوراً على السعر المشوّه",
+  checkWithFont(fontReady, "تشوّه رقمي: البصمة القديمة (حروف مرتّبةً) كانت تمرّ زوراً على السعر المشوّه",
     text.some((lines) => oldFingerprintRule(lines, built.priceRow)),
     "الشاهد فقد معناه — لم تعد البصمة القديمة تمرّ أصلاً");
-  check("تشوّه رقمي: الحارس الحالي يرصد السعر المشوّه",
+  checkWithFont(fontReady, "تشوّه رقمي: الحارس الحالي يرصد السعر المشوّه",
     !text.some((lines) => printedRow(lines, built.priceRow)),
     `«${built.priceRow.name}» بسعر مشوّه ومع ذلك اعتبره الحارس مطبوعاً سليماً`);
   check(`تشوّه رقمي: عدّاد المجموعة «${built.group?.count}» شُوّه إلى «${built.corruptedCount}»`,
     Boolean(built.group) && built.corruptedCount !== built.group.count,
     "لم تُوجد مجموعة بعدّاد قابل للتبديل");
-  check("تشوّه رقمي: الحارس الحالي يرصد عدّاد المجموعة المشوّه",
+  checkWithFont(fontReady, "تشوّه رقمي: الحارس الحالي يرصد عدّاد المجموعة المشوّه",
     Boolean(built.group) && !text.some((lines) => printedGroup(lines, built.group)),
     `عدّاد «${built.group?.name}» مشوّه ومع ذلك اعتبره الحارس مطبوعاً سليماً`);
 }
@@ -504,7 +502,7 @@ for (const sc of [
 // «ماستر سليم أزرق» — تشوّه عربي يراه الزبون. الآن كتل المقطع الواحد تُضمّ
 // بأصلها الأفقي في مقطع ذرّي ترتيبه مصون، فيُرصد التبديل.
 {
-  const { context, page } = await bootApp(1440, 900);
+  const { context, page, fontReady } = await bootApp(1440, 900);
   const built = await page.evaluate(() => {
     const state = (0, eval)("state");
     state.syriaRateConfirmed = true;
@@ -556,10 +554,10 @@ for (const sc of [
   check(`تبديل الكلمات: «${built.original.name}» شُوّه إلى «${built.scrambled}»`,
     Boolean(built.scrambled) && built.scrambled !== built.original.name,
     `${built.original.name} → ${built.scrambled}`);
-  check("تبديل الكلمات: القاعدة القديمة (تبليط كل كتلة على حدة) كانت تمرّ زوراً",
+  checkWithFont(fontReady, "تبديل الكلمات: القاعدة القديمة (تبليط كل كتلة على حدة) كانت تمرّ زوراً",
     text.some((lines) => oldPerBlockTiling(lines, built.original)),
     "الشاهد فقد معناه — لم تعد القاعدة القديمة تمرّ أصلاً");
-  check("تبديل الكلمات: الحارس الحالي يرصد الاسم المبدَّل",
+  checkWithFont(fontReady, "تبديل الكلمات: الحارس الحالي يرصد الاسم المبدَّل",
     !text.some((lines) => printedRow(lines, built.original)),
     `«${built.original.name}» بُدّلت كلماته ومع ذلك اعتبره الحارس مطبوعاً سليماً`);
 }
@@ -567,7 +565,7 @@ for (const sc of [
 // ===== 2ج) كاشف الالتفاف نفسه يعمل (وإلا كان الشرط أعلاه بلا معنى) =====
 // شاهد موجب على الكاشف: اسم أطول من خليته يجب أن يُرصد ملتفّاً، واسم عادي لا.
 {
-  const { context, page } = await bootApp(1440, 900);
+  const { context, page, fontReady } = await bootApp(1440, 900);
   const LONG = "ماستر طويل أزرق سليم نعنع مثلج بعلبة مزدوجة طويلة الاسم جداً للاختبار";
   const probe = await page.evaluate(([LONG, wrapProbe]) => {
     const T = window.OZKPriceListTemplate;
@@ -627,6 +625,10 @@ for (const sc of [
 
 await browser.close();
 server.close();
+
+if (skipped) {
+  console.log(`\nℹ️  ${skipped} تأكيداً نصّياً معلَّقاً: ${SKIP_NOTE}.`);
+}
 
 if (failed > 0) {
   console.error(`\n✗ فشل ${failed} فحصاً في محتوى نسخة الطباعة لنشرة الأسعار.`);

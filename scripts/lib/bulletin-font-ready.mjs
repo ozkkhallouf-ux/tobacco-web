@@ -41,3 +41,22 @@ export async function waitForBulletinFont(page, timeout = 20000) {
     return false;
   }
 }
+
+// يُدخل قواعد القالب (وفيها `@import` الخط) ثم ينتظر جهوزية الخط.
+// خط النشرة لا يبدأ تحميله إلا حين تدخل القواعد المستند، والمِسبار نفسه يستعمل
+// الخط في DOM فيُطلق تحميله.
+//
+// **ولا يرمي ولا يُفشِل.** الحرّاس التي تستدعيه جزءٌ من بوابة `npm run check`
+// الإلزامية، وربطُها بالوصول إلى `fonts.googleapis.com` يستبدل بعطلٍ بيئي عطلاً
+// شبكياً: عدّاءُ CI خلف مرشِّح خروج، أو انقطاعٌ عابر عند Google، يُسقِط البوابة
+// كلّها بينما التطبيق يدعم السلسلة الاحتياطية ويُصدّر بها عمداً
+// (ملاحظة Codex P1 على 1aa1a6f). فالنتيجة تُرجَع للمستدعي ليقرّر: ما لا يعتمد
+// على شكل الحروف يُفحص دائماً، وما يعتمد عليه يُعلَّق بإعلانٍ صريح.
+export async function prepareBulletinFont(page, timeout = 20000) {
+  await page.evaluate(() => {
+    const style = document.createElement("style");
+    style.textContent = window.OZKPriceListTemplate.CSS;
+    document.head.appendChild(style);
+  });
+  return waitForBulletinFont(page, timeout);
+}
