@@ -426,7 +426,7 @@ console.log("\n— تنقية الأسرار —");
   // -------------------------------------------------------------------
   const GITHUB_TOKENS = [
     ["github_pat_ (دقيق الصلاحية)",
-     "github_pat_11AABBCCDD0aBcDeFgHiJk_LmNoPqRsTuVwXyZ0123456789abcdefghij"],
+     "github_pat_11FAKE0000TESTONLY_NOTAREALTOKEN0000000000000000000000"],
     ["ghp_ (كلاسيكي)", "ghp_0123456789abcdefghijABCDEFGHIJ012345"],
     ["gho_ (OAuth)", "gho_0123456789abcdefghijABCDEFGHIJ012345"],
     ["ghu_ (مستخدم-إلى-خادم)", "ghu_0123456789abcdefghijABCDEFGHIJ012345"],
