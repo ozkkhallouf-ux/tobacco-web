@@ -452,7 +452,12 @@ if (await renderAvailable()) {
 
 // ===== 6) سقوط الموقع إلى التنزيل العادي حين يتوقف الجسر =====
 
-function loadArchiveClient({ fetchImpl, storage = new Map(), protocol = "http:", platform = "MacIntel" }) {
+// الأصل مصدرٌ واحد للبروتوكول والمضيف معاً. كان مثبَّتاً `https://ozktobacco.com`
+// بينما البروتوكول الافتراضي `http:` — تناقضٌ لم يكن يظهر قبل أن يصير الأصل
+// نفسه جزءاً من السلوك. الافتراضي الآن **أصل المرافق المحلي على الماك**، وهو
+// المسار المعتمد فعلياً (`com.ozk.local-site`) الذي يعمل عليه الجسر بلا إذن
+// شبكة محلية؛ فحالات «الجسر متوقف» تبقى تختبر ما وُجدت لتختبره بالضبط.
+function loadArchiveClient({ fetchImpl, storage = new Map(), origin = "http://127.0.0.1:5173", platform = "MacIntel" }) {
   const timers = [];
   const created = [];
   const makeNode = () => ({
@@ -487,8 +492,9 @@ function loadArchiveClient({ fetchImpl, storage = new Map(), protocol = "http:",
       createElement: makeNode
     }
   };
+  const loc = new URL(origin);
   sandbox.window = {
-    location: { origin: "https://ozktobacco.com", protocol },
+    location: { origin: loc.origin, protocol: loc.protocol, hostname: loc.hostname },
     localStorage: {
       getItem: (k) => (storage.has(k) ? storage.get(k) : null),
       setItem: (k, v) => storage.set(k, v),
@@ -563,7 +569,10 @@ await test("على https: رسالة الفشل تذكر إذن الشبكة ا�
   // وينجح بـ200 فور منحه. رسالة «الجسر غير متاح» وحدها تُرسل المالك خلف عطل
   // غير موجود.
   const { api, toasts } = loadArchiveClient({
-    protocol: "https:",
+    origin: "https://ozktobacco.com",
+    // التفعيل الصريح شرط خروج الطلب من أصل عام (بوابة PNA). المقيس هنا نصّ
+    // الرسالة حين **يفشل طلبٌ خرج فعلاً**، لا حالة الخمول.
+    storage: new Map([["ozk.archive.enabled", "1"]]),
     fetchImpl: async () => { throw new Error("Failed to fetch"); }
   });
   const result = await api.archive({ docType: "stock_report", html: "<p>x</p>", meta: {} });
@@ -575,7 +584,7 @@ await test("على https: رسالة الفشل تذكر إذن الشبكة ا�
 
 await test("على http محلي: رسالة الفشل تبقى مباشرة بلا حشو", async () => {
   const { api, toasts } = loadArchiveClient({
-    protocol: "http:",
+    origin: "http://127.0.0.1:5173",
     fetchImpl: async () => { throw new Error("ECONNREFUSED"); }
   });
   await api.archive({ docType: "stock_report", html: "<p>x</p>", meta: {} });
@@ -625,6 +634,31 @@ await test("diagnose يجيب عن كل أسئلة التشخيص بلا إزع�
   assert.equal(report.pair.gotToken, true);
   assert.equal(report.verdict, "الجسر متاح");
   assert.equal(created.length, 0, "التشخيص لا يعرض شيئاً للمستخدم");
+});
+
+await test("أصل عام بلا تفعيل: لا طلب شبكي إطلاقاً (منع ضجيج وحدة التحكّم)", async () => {
+  // قياس فعلي على الإنتاج (2026-09-06): كل محاولة من أصل عام تُخرج خطأين في
+  // وحدة التحكّم لأن كروم يحجب مجال العناوين المحلي قبل الشبكة. لا طلب ⇒ لا خطأ.
+  let touched = false;
+  const { api } = loadArchiveClient({
+    origin: "https://ozktobacco.com",
+    fetchImpl: async () => { touched = true; throw new Error("should not happen"); }
+  });
+  const result = await api.archive({ docType: "invoice", html: "<p>x</p>", meta: { party: "س", number: "1" } });
+  assert.equal(result.reason, "needs_opt_in");
+  assert.equal(touched, false, "أصل عام بلا تفعيل لا يجوز أن يُطلق طلباً");
+});
+
+await test("أصل عام برمز ربط محفوظ: الجسر يبقى مُخاطَباً (لا تعطيل صامت)", async () => {
+  // الخطر المقابل للضجيج: إسكاته بتعطيل الميزة. إعدادٌ ناجح سابقاً يجب ألا ينكسر.
+  let reached = false;
+  const { api } = loadArchiveClient({
+    origin: "https://ozktobacco.com",
+    storage: new Map([["ozk.archive.token", "T".repeat(64)]]),
+    fetchImpl: async () => { reached = true; throw new Error("down"); }
+  });
+  await api.archive({ docType: "stock_report", html: "<p>x</p>", meta: {} });
+  assert.equal(reached, true, "رمز محفوظ = دليل ربط ناجح سابق، فالبوابة تُفتح");
 });
 
 await test("إيقاف الميزة من المتصفح يمنع أي طلب شبكي", async () => {
