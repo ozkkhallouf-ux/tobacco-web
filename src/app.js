@@ -5089,8 +5089,14 @@ function printHtmlDocument(html, options = {}) {
     } catch {
       // بعض المتصفحات تمنع الاستماع داخل الإطار — تكفي المهلة الاحتياطية أدناه.
     }
-    // مهلة قصيرة كي تكتمل الخطوط والرسم قبل فتح ورقة الطباعة.
-    setTimeout(() => {
+    // **لا تُطبع قبل أن تجهز الخطوط.** مهلة 250ms العمياء كانت سباقاً: النشرة
+    // تُرقَّم بارتفاعات قِيست في مستند التطبيق (حيث الخط جاهز)، ثم تُرسم هنا في
+    // مستند جديد قد يبدأ بخط احتياطي. اختلاف مقاييس الخط بين المستندين يغيّر لفّ
+    // الأسماء فيطول العمود، وتجاوز كتلة الأعمدة الأولى لورقتها — ولو ببضعة
+    // بكسلات — يجعل كروم ينقلها **كاملةً** إلى الورقة التالية فتخرج الورقة الأولى
+    // بالرأس وحده. `document.fonts.ready` يجعل المطبوع هو المقيس نفسه.
+    // المهلة تبقى سقفاً احتياطياً: خط لا يصل أبداً يجب ألا يمنع الطباعة إطلاقاً.
+    const printWhenReady = () => {
       try {
         win.focus();
         win.print();
@@ -5101,7 +5107,27 @@ function printHtmlDocument(html, options = {}) {
       }
       // احتياط: إن لم يصل afterprint (شائع على iOS) نحذف الإطار بعد مهلة.
       setTimeout(cleanup, 60000);
-    }, 250);
+    };
+
+    // أول المُطلقَين يفوز، ولا يُطلق أيٌّ منهما مرتين: جهوزية الخطوط إن وصلت،
+    // وإلا السقف الاحتياطي. الـ250ms الأصلية تبقى حدّاً أدنى كي يكتمل الرسم.
+    let printed = false;
+    const printOnce = () => {
+      if (printed) return;
+      printed = true;
+      printWhenReady();
+    };
+    const MIN_SETTLE_MS = 250;
+    const FONT_WAIT_CEILING_MS = 3000;
+    setTimeout(() => {
+      const fonts = win.document && win.document.fonts;
+      if (!fonts || typeof fonts.ready?.then !== "function") {
+        printOnce();
+        return;
+      }
+      fonts.ready.then(printOnce, printOnce);
+    }, MIN_SETTLE_MS);
+    setTimeout(printOnce, FONT_WAIT_CEILING_MS);
   }, { once: true });
 
   document.body.appendChild(frame);
