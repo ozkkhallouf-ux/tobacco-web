@@ -236,6 +236,57 @@ console.log("\n— تنقية الأسرار —");
     "ابتلع الحجبُ بقية أثر المكدّس — `.` يجب ألّا تطابق السطر الجديد");
 
   // -------------------------------------------------------------------
+  // انحدار ملاحظتَي Codex P1 الخامسة والسادسة على PR #188.
+  //
+  // (5) رموز GitHub: النمط كان يعرف البادئات الكلاسيكية وحدها، والصيغة
+  //     الحديثة `github_pat_` تمرّ. والأثر ليس نظرياً — التطبيق يخزّن رمز
+  //     النشر في localStorage تحت `gh_publish_token` (src/app.js:2740).
+  // (6) القيم المقتبَسة: `\S+` تقف عند أول فراغ، فعلى
+  //     `password="correct horse battery staple"` كان المحجوب `"correct`
+  //     ويمرّ الباقي. والفراغ في كلمة السرّ وارد: supabase-client.js يشترط
+  //     طولاً أدنى فقط ولا يمنع الفراغات.
+  // -------------------------------------------------------------------
+  const GITHUB_TOKENS = [
+    ["github_pat_ (دقيق الصلاحية)",
+     "github_pat_11AABBCCDD0aBcDeFgHiJk_LmNoPqRsTuVwXyZ0123456789abcdefghij"],
+    ["ghp_ (كلاسيكي)", "ghp_0123456789abcdefghijABCDEFGHIJ012345"],
+    ["gho_ (OAuth)", "gho_0123456789abcdefghijABCDEFGHIJ012345"],
+    ["ghu_ (مستخدم-إلى-خادم)", "ghu_0123456789abcdefghijABCDEFGHIJ012345"],
+    ["ghs_ (خادم-إلى-خادم)", "ghs_0123456789abcdefghijABCDEFGHIJ012345"],
+    ["ghr_ (تحديث)", "ghr_0123456789abcdefghijABCDEFGHIJ012345"],
+  ];
+  for (const [label, token] of GITHUB_TOKENS) {
+    check(`يُحذف رمز GitHub: ${label}`,
+      !scrub(`publish failed with ${token} at app.js`).includes(token.slice(0, 20)),
+      `بقي الرمز — التطبيق يخزّن gh_publish_token فعلاً، فتسريبه تسريب حقيقي`);
+  }
+
+  const QUOTED_VALUES = [
+    ["password بفراغات بين اقتباسين مزدوجين", 'password="correct horse battery staple"', "horse battery staple"],
+    ["token بفراغات بين اقتباسين مفردين", "token='secret value with spaces'", "value with spaces"],
+    ["api_key بين اقتباسين مزدوجين", 'api_key="abc def ghi"', "def ghi"],
+    ["secret بين اقتباسين مفردين", "secret: 'my secret phrase'", "secret phrase"],
+    ["token بلا اقتباس", "token=abc123def456", "abc123def456"],
+    ["اقتباس غير مُغلَق", 'password="unterminated secret here', "unterminated secret here"],
+  ];
+  for (const [label, input, secret] of QUOTED_VALUES) {
+    check(`تُحجب القيمة كاملةً: ${label}`, !scrub(input).includes(secret),
+      `بقي «${secret}» — الحجب يقف عند علامة الإغلاق لا عند أول فراغ`);
+  }
+
+  // شواهد سالبة على نصوص **طويلة** تحديداً: الحجب مبني على سياق سرّ معروف،
+  // لا على طول السلسلة ولا على عشوائيتها. بلا هذه الشواهد قد تتسلّل قاعدة
+  // عامة تحجب أي نصّ طويل فتُفرغ البلاغات من محتواها.
+  for (const long of [
+    "Failed to load resource: the server responded with a status of 500 (Internal Server Error)",
+    "TypeError: Cannot read properties of undefined (reading 'approved_price_items') at renderInventoryReport",
+    "The quick brown fox jumps over the lazy dog repeatedly for a very long time indeed",
+  ]) {
+    check(`نصّ طويل بلا سياق سرّ لا يُحجب: «${long.slice(0, 40)}…»`, scrub(long) === long,
+      `أُفسد نصّ تشخيصي طويل — صار: ${scrub(long)}`);
+  }
+
+  // -------------------------------------------------------------------
   // انحدار ملاحظتَي Codex P1 الثانية والثالثة على PR #188.
   //
   // (2) Digest: القاعدة السابقة كانت تنهي القيمة عند أول فراغ، وقيمة Digest
