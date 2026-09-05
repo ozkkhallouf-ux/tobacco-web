@@ -219,10 +219,27 @@
     return status === "مغلق" || status === "closed" ? "closed" : "open";
   }
 
+  // حدود الائتمان — الهوية `customer_guid` والاسم احتياط.
+  // المفتاح النصّي `customer_key` مشتقّ من اسم الزبون، فإعادة تسمية حساب في
+  // الأمين كانت تفصل الحد عن صاحبه صامتاً. المعرّف لا يتغيّر بإعادة التسمية.
+  const CUSTOMER_LIMIT_COLUMNS = "id, customer_key, customer_guid, customer_name, credit_limit, notes, created_at, updated_at";
+  const ZERO_GUID_TEXT = "00000000-0000-0000-0000-000000000000";
+  const GUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+  // المعرّف الصفري ليس معرّفاً: الأمين يكتبه بدل NULL، فقبوله يُنتج «مطابقة
+  // قطعية» على قيمة لا تعني شيئاً. وأي نصّ لا يطابق شكل GUID يُعامل كغياب كي لا
+  // يصل إلى العمود ما يخالف قيد الشكل في قاعدة البيانات.
+  function normalizeGuid(value) {
+    const guid = String(value ?? "").trim().toLowerCase();
+    if (!guid || guid === ZERO_GUID_TEXT || !GUID_SHAPE.test(guid)) return null;
+    return guid;
+  }
+
   function normalizeDbCustomerLimit(row) {
     return {
       id: row.id,
       customerKey: row.customer_key,
+      customerGuid: row.customer_guid || "",
       customerName: row.customer_name || "",
       creditLimit: parseNumber(row.credit_limit || 0),
       notes: row.notes || "",
@@ -234,12 +251,42 @@
     const creditLimit = parseNumber(input.creditLimit || 0);
     return {
       customer_key: cleanText(input.customerKey, 240),
+      customer_guid: normalizeGuid(input.customerGuid),
       customer_name: cleanText(input.customerName, 240),
       credit_limit: Number.isFinite(creditLimit) ? Math.max(0, creditLimit) : 0,
       notes: cleanText(input.notes, 500),
       updated_at: new Date().toISOString(),
       ...(userId ? { updated_by: userId } : {})
     };
+  }
+
+  // أي سجل حدٍّ قائم يخصّ هذا الزبون؟ القرار كله هنا، دالة صافية قابلة للفحص
+  // بلا شبكة:
+  //   • المعرّف أولاً — الهوية الوحيدة التي لا تتغيّر بإعادة تسمية الحساب.
+  //   • ثم **تبنّي** سجل قديم بلا معرّف يحمل المفتاح النصّي نفسه: هو حدُّ هذا
+  //     الزبون فعلاً، حُفظ قبل وجود عمود المعرّف، فنُثبّت هويته عند أول حفظ.
+  //   • لا يُتبنّى أبداً سجل يحمل معرّفاً **مختلفاً**، ولو تطابق المفتاح النصّي:
+  //     تطابق الاسم بين حسابين لا يجعلهما حساباً واحداً، ووراثة حدّ حساب آخر
+  //     خطأ محاسبي صامت.
+  //   • بلا معرّف في المدخل (تقارير أرصدة قديمة): المطابقة بالمفتاح النصّي وحده،
+  //     وهو السلوك السابق حرفياً.
+  function resolveCustomerLimitTarget(rows, payload) {
+    const list = Array.isArray(rows) ? rows.filter(Boolean) : [];
+    const guid = normalizeGuid(payload && payload.customer_guid);
+    const key = String((payload && payload.customer_key) || "");
+
+    if (guid) {
+      const byGuid = list.find((row) => normalizeGuid(row.customer_guid) === guid);
+      if (byGuid) return { mode: "update", row: byGuid, adopt: false };
+      const legacy = key
+        ? list.find((row) => !normalizeGuid(row.customer_guid) && String(row.customer_key || "") === key)
+        : null;
+      if (legacy) return { mode: "update", row: legacy, adopt: true };
+      return { mode: "insert", row: null, adopt: false };
+    }
+
+    const byKey = key ? list.find((row) => String(row.customer_key || "") === key) : null;
+    return byKey ? { mode: "update", row: byKey, adopt: false } : { mode: "insert", row: null, adopt: false };
   }
 
   // فواتير المشتريات — تسجيل + مزامنة أمين مستقبلية (لم تُفعَّل بعد، انظر AI_WORK_SYNC.md)
@@ -879,7 +926,7 @@
 
       const { data, error } = await client
         .from(creditLimitsTable)
-        .select("id, customer_key, customer_name, credit_limit, notes, created_at, updated_at")
+        .select(CUSTOMER_LIMIT_COLUMNS)
         .order("updated_at", { ascending: false })
         .limit(1000);
 
@@ -893,25 +940,63 @@
 
       if (!client) {
         const current = readJson(CUSTOMER_LIMITS_KEY, []);
+        const rows = current.map((item) => ({
+          id: item.id,
+          customer_key: item.customerKey,
+          customer_guid: item.customerGuid || null,
+          customer_name: item.customerName,
+          credit_limit: item.creditLimit,
+          notes: item.notes,
+          updated_at: item.updatedAt
+        }));
+        const target = resolveCustomerLimitTarget(rows, payload);
         const limit = {
-          id: payload.customer_key,
+          id: (target.row && target.row.id) || payload.customer_guid || payload.customer_key,
           customerKey: payload.customer_key,
+          customerGuid: payload.customer_guid || "",
           customerName: payload.customer_name,
           creditLimit: payload.credit_limit,
           notes: payload.notes,
           updatedAt: payload.updated_at
         };
-        const next = [limit, ...current.filter((item) => item.customerKey !== payload.customer_key)];
+        const next = [limit, ...current.filter((item) => item.id !== limit.id)];
         writeJson(CUSTOMER_LIMITS_KEY, next);
         return limit;
       }
 
       const user = await requireUser();
-      const { data, error } = await client
-        .from(creditLimitsTable)
-        .upsert(normalizeCustomerLimitInput(input, user.id), { onConflict: "customer_key" })
-        .select("id, customer_key, customer_name, credit_limit, notes, created_at, updated_at")
-        .limit(1);
+      const body = normalizeCustomerLimitInput(input, user.id);
+
+      // بحث ثم كتابة بدل upsert على `customer_key`: المفتاح النصّي لم يعد وحده
+      // هوية السجل، ولا يمكن لـPostgREST أن يستنتج فهرساً جزئياً في ON CONFLICT.
+      // السباق الذي يفتحه هذا الشقّ محروس في قاعدة البيانات نفسها: فهرسان
+      // فريدان (على المعرّف، وعلى المفتاح حين يغيب المعرّف) يرفضان أي تكرار.
+      // استعلامان بـ`eq` لا فلتر `or` مركّب نصّاً: اسم الزبون يدخل في المفتاح،
+      // وبناء سلسلة فلترة منه يدوياً يفتح حقن فلاتر PostgREST عند أول اسم يحمل
+      // فاصلة أو قوساً. `eq` تُرمَّز في المكتبة نفسها.
+      const [byGuidRes, byKeyRes] = await Promise.all([
+        payload.customer_guid
+          ? client.from(creditLimitsTable).select(CUSTOMER_LIMIT_COLUMNS).eq("customer_guid", payload.customer_guid).limit(5)
+          : Promise.resolve({ data: [], error: null }),
+        client.from(creditLimitsTable).select(CUSTOMER_LIMIT_COLUMNS).eq("customer_key", payload.customer_key).limit(5)
+      ]);
+
+      const readError = byGuidRes.error || byKeyRes.error;
+      if (readError) throw new Error(translateDbError(readError.message));
+
+      const seen = new Set();
+      const existing = [...(byGuidRes.data || []), ...(byKeyRes.data || [])].filter((row) => {
+        if (!row || seen.has(row.id)) return false;
+        seen.add(row.id);
+        return true;
+      });
+
+      const target = resolveCustomerLimitTarget(existing, body);
+      const query = target.mode === "update"
+        ? client.from(creditLimitsTable).update(body).eq("id", target.row.id)
+        : client.from(creditLimitsTable).insert(body);
+
+      const { data, error } = await query.select(CUSTOMER_LIMIT_COLUMNS).limit(1);
 
       if (error) throw new Error(translateDbError(error.message));
       return data?.[0] ? normalizeDbCustomerLimit(data[0]) : normalizeDbCustomerLimit(payload);
