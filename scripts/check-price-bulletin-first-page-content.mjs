@@ -390,14 +390,13 @@ const CHROME_WHOLE_BLOCK_PUSH_BAND_PX = 8;
     const groups = [{ name: "ماستر", items: [{ name: "أ", unit: "ك", price: "$1" }] }];
     const heights = new Map([["ماستر", 40]]);
     const layout = T.layoutGroupsMeasured(groups, heights, { pageWidthPx: 794, headerHeightPx, safetyMarginPx: 6 });
-    const COLUMNS_PADDING_BOTTOM_PX = 8;
-    // أطول عمود مسموح على الصفحة الأولى، ثم أسفل الكتلة كما سيُطبع.
-    const maxColumn = pageHeight - COLUMNS_PADDING_BOTTOM_PX - headerHeightPx
-      - T.FIRST_PAGE_DRIFT_RESERVE_PX - T.DEFAULT_SAFETY_MARGIN_PX;
+    // أطول عمود مسموح على الصفحة الأولى.
+    const maxColumn = pageHeight - T.COLUMNS_PADDING_BOTTOM_PX - headerHeightPx - T.DEFAULT_SAFETY_MARGIN_PX;
+    // والكتلة الأولى تُرسم بلا حاشية سفلية، فأسفلها = الرأس + العمود وحده.
     return {
       pageHeight,
-      reserve: T.FIRST_PAGE_DRIFT_RESERVE_PX,
-      worstBottom: headerHeightPx + maxColumn + COLUMNS_PADDING_BOTTOM_PX,
+      padding: T.COLUMNS_PADDING_BOTTOM_PX,
+      worstBottom: headerHeightPx + maxColumn,
       firstPageHoldsGroups: layout.mainPages[0].right.length + layout.mainPages[0].left.length > 0
     };
   });
@@ -407,16 +406,13 @@ const CHROME_WHOLE_BLOCK_PUSH_BAND_PX = 8;
     budget.pageHeight <= A4_HEIGHT_PX + 1e-6,
     `المحسوب ${budget.pageHeight} مقابل A4 ${A4_HEIGHT_PX.toFixed(2)}`);
 
-  // الاحتياطي قيمة معلنة في القالب. غيابه يعني أن الصفحة الأولى بلا خلوص
-  // أصلاً، فنقولها صراحةً بدل أن تتسرّب NaN إلى المقارنة التالية.
-  check("الميزانية: القالب يُعلن احتياطي انحراف للصفحة الأولى",
-    Number.isFinite(budget.reserve) && budget.reserve > 0,
-    `FIRST_PAGE_DRIFT_RESERVE_PX = ${budget.reserve} — الصفحة الأولى تُملأ حتى هامش الأمان وحده`);
+  // الخلوص يُبنى على إسقاط حاشية الكتلة الأولى، وهي قيمة معلنة في القالب.
+  // غيابها يعني حساباً بلا أساس، فنقولها صراحةً بدل أن تتسرّب NaN للمقارنة.
+  check("الميزانية: القالب يُعلن حاشية كتلة الأعمدة",
+    Number.isFinite(budget.padding) && budget.padding > 0,
+    `COLUMNS_PADDING_BOTTOM_PX = ${budget.padding}`);
 
   const clearance = +(A4_HEIGHT_PX - budget.worstBottom).toFixed(2);
-  check(`الميزانية: أسوأ صفحة أولى مسموحة تترك خلوصاً ≥ الاحتياطي المعلن (${budget.reserve}px)`,
-    Number.isFinite(clearance) && Number.isFinite(budget.reserve) && clearance >= budget.reserve - 1e-6,
-    `الخلوص ${clearance}px فقط`);
 
   // الشرط الذي يهمّ فعلاً: الخلوص يتجاوز نطاق «النقل الكامل» المقيس، فلا يقع
   // أسوأ حالٍ مسموح داخل النطاق الذي يُنتج ورقة العنوان.
@@ -425,9 +421,9 @@ const CHROME_WHOLE_BLOCK_PUSH_BAND_PX = 8;
     `الخلوص ${clearance}px داخل النطاق الخطر — كتلة الأعمدة الأولى على بُعد خطأ تقريب`
     + ` من الانتقال كاملةً للورقة الثانية وترك الرأس وحده`);
 
-  check("الميزانية: الاحتياطي لا يُفرغ الصفحة الأولى من المجموعات",
+  check("الميزانية: الصفحة الأولى ما زالت تحمل مجموعات تحت الرأس",
     budget.firstPageHoldsGroups,
-    "بعد خصم الاحتياطي لم تعد أي مجموعة تتّسع تحت الرأس — الاحتياطي أكبر من اللازم");
+    "لم تعد أي مجموعة تتّسع تحت الرأس");
 }
 
 await browser.close();
