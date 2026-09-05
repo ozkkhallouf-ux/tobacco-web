@@ -2697,6 +2697,37 @@ const BULLETIN_PAGE_HEIGHT_PX = 1123;
 // فيُقاس دائماً بطباعة الطباعة. ويبقى القياس داخل المستند نفسه عمداً: خطوطه
 // وأوراق أنماطه محمّلة فعلاً، بينما مستند جديد يبدأ بخطوط غير جاهزة فيقيس
 // بأبعاد خط احتياطي وينحرف عن الطباعة الحقيقية.
+// **القياس والطباعة يجب أن يستعملا نفس الخط.** ترقيم النشرة يُحسب من ارتفاعات
+// تُقاس هنا في مستند التطبيق، ثم تُطبع في إطار طباعة مستقلّ. وخط النشرة يصل
+// عبر `@import` من Google Fonts، فقبل وصوله يقيس المجسّ بالخط الاحتياطي
+// (Tahoma) وبعده بـAlmarai — والفارق ليس تجميلياً: قياسٌ فعلي على نفس البيانات
+// أعطى رأساً 156.375px وعموداً 949px بالاحتياطي مقابل 152.375px و902px بـAlmarai.
+//
+// إن قِيست الصفحة بخطٍّ ثم طُبعت بآخر، اختلّ الترقيم: لفّ اسمٍ واحد يطيل العمود،
+// وتجاوزُ كتلة الأعمدة الأولى لورقتها — ولو ببضعة بكسلات — ينقلها كروم كاملةً
+// ويقصّها سفاري (`overflow:hidden`) فتضيع أسعار من نشرة الزبون.
+// (ملاحظة Codex P1 على cfcef74.)
+//
+// فننتظر جهوزية الخط **قبل القياس**، تماماً كما ينتظرها إطار الطباعة قبل
+// `print()` في printHtmlDocument. والانتظار محدود بسقف: خطٌّ لا يصل (شبكة
+// مقطوعة) يجب ألا يمنع فتح المعاينة ولا التصدير — وعندها يقيس الطرفان
+// بالاحتياطي معاً، وهو ما يبقيهما متطابقين أيضاً.
+const BULLETIN_FONT_WAIT_CEILING_MS = 3000;
+async function awaitBulletinFontReady() {
+  const fonts = typeof document !== "undefined" ? document.fonts : null;
+  if (!fonts || typeof fonts.ready?.then !== "function") return;
+  const family = window.OZKPriceListTemplate?.BULLETIN_FONT_FAMILY;
+  try {
+    if (family && typeof fonts.check === "function" && fonts.check(`700 10px ${family}`)) return;
+  } catch {
+    // متصفح يرفض الاستعلام: نكتفي بالانتظار المحدود أدناه.
+  }
+  await Promise.race([
+    fonts.ready.catch(() => {}),
+    new Promise((resolve) => setTimeout(resolve, BULLETIN_FONT_WAIT_CEILING_MS))
+  ]);
+}
+
 function buildMeasuredBulletinLayout(template, groups, renderOptions) {
   if (typeof document === "undefined" || typeof template?.layoutGroupsMeasured !== "function") return null;
   const probe = document.createElement("div");
@@ -3089,13 +3120,15 @@ function buildBulletinDataset(useSyria = false, theme = state.bulletinPdfTheme) 
 
 // يفتح معاينة النشرة قبل التصدير. لا يخزّن أي بيانات نشرة في state — فقط
 // اختيار النوع والثيم؛ البيانات تُبنى عند كل رسم من buildBulletinDataset.
-function openPricePreview(useSyria = false, theme = state.bulletinPdfTheme) {
+async function openPricePreview(useSyria = false, theme = state.bulletinPdfTheme) {
   if (useSyria && !state.syriaRateConfirmed) {
     state.showExchangeModal = true;
     render();
     return;
   }
   state.syriaRateConfirmed = false;
+  // الترقيم يُقاس عند كل رسم للمعاينة، فلا نرسمها قبل أن يجهز الخط.
+  await awaitBulletinFontReady();
   const built = buildBulletinDataset(useSyria, theme);
   if (!built.ok) {
     setNotice("error", built.message);
@@ -3191,7 +3224,7 @@ async function openFreshPricePreview(useSyria = false, theme = state.bulletinPdf
     if (useSyria) state.syriaRateConfirmed = false;
     return;
   }
-  openPricePreview(useSyria, theme);
+  await openPricePreview(useSyria, theme);
 }
 
 // إغلاق المعاينة يُسقط أيضاً مدخل التاريخ الذي أضافه فتحها، فيرجع زر «رجوع»
@@ -3330,9 +3363,11 @@ function exportBulletinPdf(dataset) {
 // تصدير من شاشة المعاينة. **يُعاد بناء البيانات هنا من جديد** بدل استعمال أي
 // لقطة محفوظة عند فتح المعاينة — هذا ما يضمن أن سعر مادة عُدِّل أو سعر صرف
 // تغيّر قبل الضغط مباشرةً يصل إلى الملف كما يصل إلى الشاشة.
-function exportPricePreview() {
+async function exportPricePreview() {
   const preview = state.pricePreview;
   if (!preview) return;
+  // الخطة تُبنى هنا من جديد، فتُقاس من جديد — بنفس شرط الخط الذي تنتظره الطباعة.
+  await awaitBulletinFontReady();
   const built = buildBulletinDataset(preview.useSyria, preview.theme);
   if (!built.ok) {
     setNotice("error", built.message);

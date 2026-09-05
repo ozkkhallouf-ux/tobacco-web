@@ -9,6 +9,10 @@
   // تختلف عن خلفية النشرات المنشورة).
   const THEME_PAGE_BACKGROUND = Object.freeze({ dark: "#0c0a07", light: "#fffdf8" });
 
+  // خط النشرة كما يطلبه الـCSS أدناه. مُصدَّر كي ينتظره `src/app.js` قبل القياس
+  // بدل تكرار الاسم حرفياً في مكانين — تكرارٌ يجعل تغيير الخط يكسر الانتظار بصمت.
+  const BULLETIN_FONT_FAMILY = "Almarai";
+
   function themePageBackground(theme) {
     return THEME_PAGE_BACKGROUND[theme === "light" ? "light" : "dark"];
   }
@@ -757,6 +761,7 @@
     VERSION,
     CSS,
     THEME_PAGE_BACKGROUND,
+    BULLETIN_FONT_FAMILY,
     themePageBackground,
     documentBackgroundCss,
     printDocument,
