@@ -119,7 +119,7 @@ test("invalid filename characters sanitized", () => {
   assert.equal(sanitizeDocumentTitle("../../etc/passwd"), "etc passwd");
   assert.equal(sanitizeDocumentTitle("...بادئة"), "بادئة");
   // محارف الاتجاه غير المرئية تُحذف ولا تُبقي فراغات مزدوجة.
-  assert.equal(sanitizeDocumentTitle("حسن‏  عباس"), "حسن عباس");
+  assert.equal(sanitizeDocumentTitle("حسن\u200F  عباس"), "حسن عباس");
 });
 
 test("عنوان المستند يُفرض فعلياً داخل HTML المطبوع (وهو ما يقرأه كروم)", () => {

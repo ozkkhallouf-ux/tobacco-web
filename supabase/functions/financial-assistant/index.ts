@@ -5,6 +5,39 @@ const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 const PROFILE = "public";
 const DEFAULT_STAFF = ["ozk.kh@outlook.com", "khalelkhalouf1196@gmail.com"];
 
+// ============================================================
+// أنواع سياق التقارير المالية (بدل any)
+// البيانات جاية من Supabase REST كـ JSON، فالحقول اختيارية ونسمح بأن يكون
+// السياق كله فارغاً — وهيك بنحافظ على نفس السلوك الدفاعي بدون any.
+// ============================================================
+type CashBox = {
+  name?: string;
+  currency?: string;
+  opening?: unknown;
+  incoming?: unknown;
+  outgoing?: unknown;
+  closing?: unknown;
+};
+type BalanceRow = { name?: string; customerName?: string; balance?: unknown };
+type ExpenseRow = { entry_date?: string; account_name?: string; amount?: unknown };
+type AccountRow = {
+  accountCode?: string;
+  accountName?: string;
+  parentName?: string;
+  balance?: unknown;
+  debit?: unknown;
+  credit?: unknown;
+};
+
+type FinancialContext = {
+  account_balances?: { report_date?: string; accounts?: AccountRow[] } | null;
+  customer_balances?: { report_date?: string; highest_balances?: Array<BalanceRow | null> } | null;
+  daily_movement?: { report_date?: string; payload?: { cashboxes?: CashBox[] } | null } | null;
+  recent_expenses?: ExpenseRow[] | null;
+  daily_sales?: unknown;
+  daily_profit?: { report_date?: string; summary?: unknown; items?: unknown } | null;
+} | null;
+
 function allowedOrigin(request: Request) {
   const origin = request.headers.get("origin") ?? "";
   const configured = (Deno.env.get("AI_ALLOWED_ORIGINS") ?? "")
@@ -123,52 +156,52 @@ function normalized(value: unknown) {
     .replace(/[^\p{L}\p{N}\s]/gu, " ").replace(/\s+/g, " ").trim();
 }
 
-function localFinancialAnswer(question: string, context: any) {
+function localFinancialAnswer(question: string, context: FinancialContext) {
   const q = normalized(question);
   const date = context?.account_balances?.report_date || context?.daily_movement?.report_date || "غير متوفر";
 
   if (/صندوق|صناديق|سيوله|شام كاش|حركه الصندوق/.test(q)) {
     const boxes = context?.daily_movement?.payload?.cashboxes;
     if (!Array.isArray(boxes) || !boxes.length) return "لا يوجد تقرير صناديق متاح حاليًا من الأمين.";
-    const lines = boxes.map((box: any) => `- **${box.name || "صندوق"}**: افتتاحي ${amount(box.opening, box.currency)}، وارد ${amount(box.incoming, box.currency)}، صادر ${amount(box.outgoing, box.currency)}، إغلاق ${amount(box.closing, box.currency)}`);
-    return `**أرصدة وحركة الصناديق — ${context.daily_movement.report_date}**\n${lines.join("\n")}`;
+    const lines = boxes.map((box) => `- **${box.name || "صندوق"}**: افتتاحي ${amount(box.opening, box.currency)}، وارد ${amount(box.incoming, box.currency)}، صادر ${amount(box.outgoing, box.currency)}، إغلاق ${amount(box.closing, box.currency)}`);
+    return `**أرصدة وحركة الصناديق — ${context?.daily_movement?.report_date}**\n${lines.join("\n")}`;
   }
 
   if (/دين|ديون|ذمم|مدين|ارصده الزبائن/.test(q)) {
     const rows = context?.customer_balances?.highest_balances;
     if (!Array.isArray(rows) || !rows.length) return "لا يوجد تقرير أرصدة زبائن متاح حاليًا.";
-    const debtors = rows.filter((row: any) => Number(row?.balance ?? 0) > 0).slice(0, 10);
-    const total = debtors.reduce((sum: number, row: any) => sum + Number(row.balance || 0), 0);
-    return `**أعلى الذمم المدينة — ${context.customer_balances.report_date}**\n${debtors.map((row: any) => `- ${row.name || row.customerName || "بدون اسم"}: ${amount(row.balance)}`).join("\n")}\n\nإجمالي المعروض: **${amount(total)}**`;
+    const debtors = rows.filter((row): row is BalanceRow => Number(row?.balance ?? 0) > 0).slice(0, 10);
+    const total = debtors.reduce((sum, row) => sum + Number(row.balance || 0), 0);
+    return `**أعلى الذمم المدينة — ${context?.customer_balances?.report_date}**\n${debtors.map((row) => `- ${row.name || row.customerName || "بدون اسم"}: ${amount(row.balance)}`).join("\n")}\n\nإجمالي المعروض: **${amount(total)}**`;
   }
 
   if (/مصروف|مصاريف|صرف/.test(q)) {
     const rows = context?.recent_expenses;
     if (!Array.isArray(rows) || !rows.length) return "لا توجد حركات مصروفات حديثة متاحة.";
-    const total = rows.reduce((sum: number, row: any) => sum + Number(row.amount || 0), 0);
-    return `**آخر المصروفات المسجلة**\n${rows.slice(0, 12).map((row: any) => `- ${row.entry_date} — ${row.account_name}: ${amount(row.amount)}`).join("\n")}\n\nإجمالي السطور المعروضة: **${amount(total)}**`;
+    const total = rows.reduce((sum, row) => sum + Number(row.amount || 0), 0);
+    return `**آخر المصروفات المسجلة**\n${rows.slice(0, 12).map((row) => `- ${row.entry_date} — ${row.account_name}: ${amount(row.amount)}`).join("\n")}\n\nإجمالي السطور المعروضة: **${amount(total)}**`;
   }
 
   if (/مبيعات|مبيع/.test(q)) {
     if (!context?.daily_sales) return "لا يوجد ملخص مبيعات يومي متاح حاليًا.";
-    return `**ملخص المبيعات المتاح**\n\`${JSON.stringify(context.daily_sales)}\``;
+    return `**ملخص المبيعات المتاح**\n\`${JSON.stringify(context?.daily_sales)}\``;
   }
 
   if (/ربح|ارباح|تكلفه/.test(q)) {
     if (!context?.daily_profit) return "لا يوجد تقرير ربح متاح حاليًا.";
-    return `**تقرير الربح المتاح — ${context.daily_profit.report_date || date}**\n\`${JSON.stringify({ summary: context.daily_profit.summary, items: context.daily_profit.items })}\``;
+    return `**تقرير الربح المتاح — ${context?.daily_profit?.report_date || date}**\n\`${JSON.stringify({ summary: context?.daily_profit?.summary, items: context?.daily_profit?.items })}\``;
   }
 
   const accounts = context?.account_balances?.accounts;
   if (Array.isArray(accounts) && accounts.length) {
     const stop = new Set(["رصيد", "حساب", "الحساب", "كم", "ما", "هو", "اعطني", "عرض", "اريد"]);
     const terms = q.split(" ").filter((term) => term.length > 1 && !stop.has(term));
-    const matches = accounts.filter((account: any) => {
+    const matches = accounts.filter((account) => {
       const haystack = normalized(`${account.accountCode || ""} ${account.accountName || ""} ${account.parentName || ""}`);
       return terms.length > 0 && terms.every((term) => haystack.includes(term));
     }).slice(0, 12);
     if (matches.length) {
-      return `**نتائج حسابات الأمين — ${context.account_balances.report_date}**\n${matches.map((account: any) => `- ${account.accountCode ? `${account.accountCode} — ` : ""}${account.accountName}: **${amount(account.balance)}** (مدين ${amount(account.debit)} / دائن ${amount(account.credit)})`).join("\n")}`;
+      return `**نتائج حسابات الأمين — ${context?.account_balances?.report_date}**\n${matches.map((account) => `- ${account.accountCode ? `${account.accountCode} — ` : ""}${account.accountName}: **${amount(account.balance)}** (مدين ${amount(account.debit)} / دائن ${amount(account.credit)})`).join("\n")}`;
     }
   }
 
@@ -187,7 +220,7 @@ Deno.serve(async (request) => {
     const reply = localFinancialAnswer(messages[messages.length - 1].content, context);
     return json(request, 200, { reply, provider: "internal", readOnly: true, externalDataShared: false, contextGeneratedAt: context.generated_at });
   } catch (error) {
-    const code = String(error?.message ?? "internal_error");
+    const code = String((error as { message?: unknown } | undefined)?.message ?? "internal_error");
     const status = code === "unauthorized" ? 401 : code === "forbidden" ? 403 : 500;
     return json(request, status, { error: code });
   }

@@ -303,19 +303,33 @@ jobs:
     steps:
       - name: تحديد رقم الـPR والـHEAD SHA الحالي
         id: pr
+        # ⚠️ أمان: كل قيم سياق github تمرّ عبر env ولا تُحقَن نصياً داخل الـscript.
+        # الحقن النصي بـ${{ }} داخل `run:` يجعل قيمة يتحكم بها المُشغِّل (خصوصاً
+        # inputs.pr_number من workflow_dispatch) تُنفَّذ كشيفرة shell على الـrunner.
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_PR_NUMBER: ${{ github.event.inputs.pr_number }}
+          EVENT_ISSUE_NUMBER: ${{ github.event.issue.number }}
+          EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_GENERATION: ${{ github.run_id }}.${{ github.run_attempt }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            PR_NUMBER="${{ github.event.inputs.pr_number }}"
-          elif [ "${{ github.event_name }}" = "issue_comment" ]; then
-            PR_NUMBER="${{ github.event.issue.number }}"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            PR_NUMBER="$INPUT_PR_NUMBER"
+          elif [ "$EVENT_NAME" = "issue_comment" ]; then
+            PR_NUMBER="$EVENT_ISSUE_NUMBER"
           else
-            PR_NUMBER="${{ github.event.pull_request.number }}"
+            PR_NUMBER="$EVENT_PR_NUMBER"
           fi
           if [ -z "$PR_NUMBER" ]; then
             echo "لا يوجد رقم PR في الحدث — تجاوز." >&2
             exit 1
           fi
+          # رقم الـPR يصل من مدخل نصي حرّ في حالة workflow_dispatch — نرفض أي شيء
+          # غير أرقام قبل استعماله في مسار gh api.
+          case "$PR_NUMBER" in
+            *[!0-9]*) echo "رقم PR غير صالح: $PR_NUMBER" >&2; exit 1 ;;
+          esac
           # نعيد جلب حالة الـPR وقت التشغيل نفسه لتفادي أي سباق مع push سريع متتالي.
           HEAD_SHA=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.head.sha')
           BASE_REF=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.base.ref')
@@ -326,7 +340,7 @@ jobs:
           # تحديداً (run_id يخصّصه GitHub تصاعدياً وقت إنشاء التشغيل نفسه — لا علاقة له
           # بترتيب الاكتمال؛ run_attempt يميّز إعادة تشغيل يدوية لنفس run_id). تُستخدم
           # لاحقاً كحارس تشغيل قديم صريح قبل أي كتابة نهائية على check-run الكانوني.
-          echo "generation=${{ github.run_id }}.${{ github.run_attempt }}" >> "$GITHUB_OUTPUT"
+          echo "generation=$RUN_GENERATION" >> "$GITHUB_OUTPUT"
           echo "PR #$PR_NUMBER — head sha: $HEAD_SHA — base: $BASE_REF"
 
       - name: تخطّي إذا الـbase ليس main (حالة workflow_dispatch فقط)
@@ -338,10 +352,11 @@ jobs:
       - name: فحص مراجعة Codex على الـHEAD الحالي (commit_id فقط، لا timestamps)
         id: check
         if: steps.pr.outputs.base_ref == 'main'
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
         run: |
           set -euo pipefail
-          PR_NUMBER="${{ steps.pr.outputs.pr_number }}"
-          HEAD_SHA="${{ steps.pr.outputs.head_sha }}"
 
           # إصلاح ملاحظة Codex P1 (pagination بتاريخ 2026-08-27):
           # `gh api --paginate` يطبع كل صفحة كقيمة JSON مستقلة على التوالي (وليس كمصفوفة
@@ -433,13 +448,17 @@ jobs:
         id: publish
         if: steps.pr.outputs.base_ref == 'main'
         continue-on-error: true
+        # ⚠️ أمان: badges/summary مبنيّان من محتوى تعليقات المراجعة (مصدر غير موثوق
+        # ومتعدّد الأسطر) — يمرّان عبر env لا عبر حقن نصي داخل الـscript.
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          GENERATION: ${{ steps.pr.outputs.generation }}
+          REVIEWED_COUNT: ${{ steps.check.outputs.reviewed_count }}
+          SUMMARY: ${{ steps.check.outputs.summary }}
+          BADGES: ${{ steps.check.outputs.badges }}
         run: |
           set -euo pipefail
-          PR_NUMBER="${{ steps.pr.outputs.pr_number }}"
-          HEAD_SHA="${{ steps.pr.outputs.head_sha }}"
-          GENERATION="${{ steps.pr.outputs.generation }}"
-          REVIEWED_COUNT="${{ steps.check.outputs.reviewed_count }}"
-          SUMMARY="${{ steps.check.outputs.summary }}"
           NAME="Codex Review Gate"
 
           # ⚠️ إصلاح جوهري خامس بتاريخ 2026-08-31: لا يُنشأ check-run جديد أبداً إن كان
@@ -495,7 +514,7 @@ jobs:
             fi
           fi
 
-          TEXT=$(jq -n --arg badges "${{ steps.check.outputs.badges }}" \
+          TEXT=$(jq -n --arg badges "$BADGES" \
             '"### درجات الخطورة (best-effort، معلوماتي فقط — غير حاكم للدمج)\n```\n" + $badges + "\n```\n\nمنع الدمج مع ملاحظات مفتوحة يُفرض عبر إعداد GitHub \"Require conversation resolution before merging\"، وليس عبر هذا الفحص."')
 
           if [ "$REVIEWED_COUNT" -gt 0 ]; then
@@ -569,11 +588,13 @@ jobs:
 
       - name: النتيجة الإعلامية للـjob (لا تحدد نتيجة الـGate — المصدر الوحيد هو الـcheck-run الكانوني أعلاه)
         if: steps.pr.outputs.base_ref == 'main'
+        env:
+          REVIEWED_COUNT: ${{ steps.check.outputs.reviewed_count }}
+          PUBLISH_OUTCOME: ${{ steps.publish.outcome }}
         run: |
           set -euo pipefail
-          REVIEWED_COUNT="${{ steps.check.outputs.reviewed_count }}"
 
-          if [ "${{ steps.publish.outcome }}" != "success" ]; then
+          if [ "$PUBLISH_OUTCOME" != "success" ]; then
             echo "خطأ: تحديث/إنشاء check-run الكانوني فشل (مثلاً GITHUB_TOKEN للقراءة فقط في fork/Dependabot PR) — الـGate يبقى معلّقاً (pending) حتى تشغيل لاحق ناجح." >&2
             exit 1
           fi

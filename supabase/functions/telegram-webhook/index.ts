@@ -5,6 +5,61 @@ const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 const TZ_OFFSET_HOURS = 3; // Asia/Damascus (UTC+3)
 const PROFILE = "public"; // PostgREST default schema here is "api"; our tables live in public
 
+// ============================================================
+// أنواع صفوف JSON (بدل any)
+// صفوف Supabase REST بتتغيّر أعمدتها حسب `select` بكل استعلام، فالحقول
+// كلها اختيارية والفهرس المفتوح بيستوعب أي عمود إضافي بدون فقدان الأمان
+// النوعي على الأعمدة المعروفة.
+// ============================================================
+type Row = {
+  item_name?: string;
+  item_key?: string;
+  sale_price?: number;
+  unit1_name?: string;
+  unit1_price?: number;
+  unit2_name?: string;
+  unit2_price?: number;
+  unit2_factor?: number;
+  stock_qty?: number;
+  _priceVariants?: number[];
+  created_at?: string;
+  sale_date?: string;
+  source?: string;
+  bill_type?: string;
+  qty?: number;
+  unit_price?: number;
+  line_total?: number;
+  total_sales?: number;
+  [column: string]: unknown;
+};
+
+// ملخّص تقرير فحص مزامنة الأسعار القادم من جهاز Windows (عمود summary)
+type PriceSyncSummary = {
+  checked_at?: string;
+  status?: string;
+  wholesale_matched?: number;
+  retail_matched?: number;
+  mismatch_count?: number;
+  missing_count?: number;
+};
+
+// الحدّ الأدنى من بنية تحديث تيليغرام يلي بيستعملها هالبوت فعلياً
+type TgUser = { id?: number };
+type TgChat = { id: number };
+type TgMessage = {
+  message_id?: number;
+  chat?: TgChat;
+  from?: TgUser;
+  text?: string;
+  voice?: { file_id?: string };
+};
+type TgCallbackQuery = { id?: string; data?: string; from?: TgUser; message?: TgMessage };
+type TelegramUpdate = {
+  callback_query?: TgCallbackQuery;
+  message?: TgMessage;
+  edited_message?: TgMessage;
+};
+
 const WELCOME = `أهلاً 👋 أنا مساعدك الشخصي.
 
 💳 أرصدة الزبائن:
@@ -62,7 +117,7 @@ async function getSecrets() {
   const res = await fetch(`${SUPA_URL}/rest/v1/app_secrets?select=name,value`, {
     headers: { apikey: SERVICE_KEY, Authorization: `Bearer ${SERVICE_KEY}`, "Accept-Profile": PROFILE },
   });
-  const rows = await res.json().catch(() => null) as any;
+  const rows = await res.json().catch(() => null) as Array<{ name: string; value: string }> | null;
   const map: Record<string, string> = {};
   if (Array.isArray(rows)) for (const r of rows) map[r.name] = r.value;
   lastDiag = { status: res.status, rows: Array.isArray(rows) ? rows.length : typeof rows };
@@ -436,7 +491,7 @@ async function handleSales(chatId: number) {
 }
 
 // يحوّل كمية المخزون (بالوحدة الأولى) إلى نص بالوحدة الثانية (الكرتونة) إن أمكن
-function stockInCartons(r: any): string {
+function stockInCartons(r: Row): string {
   const qty = Number(r.stock_qty ?? 0);
   const factor = Number(r.unit2_factor ?? 0);
   const unit2 = r.unit2_name || "كرتونة";
@@ -452,21 +507,22 @@ function stockInCartons(r: any): string {
 // بعض المواد مسجّلة بصفّين بـapproved_price_items لنفس الاسم فعلياً، بفرق
 // همزة بس («أحمر» مقابل «احمر») — ناتج إدخال مكرّر بالأمين. نجمعهم تلقائياً
 // (بالمخزون والسعر) تحت نتيجة وحدة بدل ما نعرضهم كأنهم مادتين مختلفتين.
-function mergeDuplicateStockRows(rows: any[]): any[] {
-  const groups = new Map<string, any[]>();
+function mergeDuplicateStockRows(rows: Row[]): Row[] {
+  const groups = new Map<string, Row[]>();
   for (const r of rows) {
     const key = normalizeArabic(r.item_name ?? r.item_key ?? "");
     if (!key) continue;
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key)!.push(r);
+    let group = groups.get(key);
+    if (!group) { group = []; groups.set(key, group); }
+    group.push(r);
   }
-  const merged: any[] = [];
+  const merged: Row[] = [];
   for (const group of groups.values()) {
     if (group.length === 1) { merged.push(group[0]); continue; }
     const base = group[0];
     const stock_qty = group.reduce((sum, r) => sum + Number(r.stock_qty ?? 0), 0);
-    const salePrices = [...new Set(group.map((r) => r.sale_price).filter((p) => p != null))];
-    const unit2Prices = [...new Set(group.map((r) => r.unit2_price).filter((p) => p != null))];
+    const salePrices = [...new Set(group.map((r) => r.sale_price).filter((p): p is number => p != null))];
+    const unit2Prices = [...new Set(group.map((r) => r.unit2_price).filter((p): p is number => p != null))];
     merged.push({
       ...base,
       stock_qty,
@@ -486,8 +542,8 @@ async function handleLowStock(chatId: number) {
     await tg("sendMessage", { chat_id: chatId, text: `✅ ولا مادة تحت حد التنبيه (${thr}) — المخزون تمام.` });
     return;
   }
-  const out = rows.filter((r: any) => Number(r.stock_qty ?? 0) <= 0);
-  const low = rows.filter((r: any) => Number(r.stock_qty ?? 0) > 0);
+  const out = rows.filter((r: Row) => Number(r.stock_qty ?? 0) <= 0);
+  const low = rows.filter((r: Row) => Number(r.stock_qty ?? 0) > 0);
 
   await tg("sendMessage", {
     chat_id: chatId,
@@ -496,7 +552,7 @@ async function handleLowStock(chatId: number) {
 
   // نرسل القائمة كاملة، مقسّمة على عدة رسائل لتفادي حد طول رسالة تيليغرام
   const CHUNK = 25;
-  const sendChunked = async (label: string, items: any[], lineFn: (r: any) => string) => {
+  const sendChunked = async (label: string, items: Row[], lineFn: (r: Row) => string) => {
     for (let i = 0; i < items.length; i += CHUNK) {
       const part = items.slice(i, i + CHUNK);
       const header = i === 0 ? `${label} (${items.length}):` : `${label} — تابع (${i + 1}-${Math.min(i + CHUNK, items.length)}):`;
@@ -600,7 +656,7 @@ async function handlePriceQuery(chatId: number, name: string) {
   const rows = mergeDuplicateStockRows(rawRows);
   const q = normalizeArabic(name);
   const qTokens = q.split(" ").filter(Boolean);
-  const scored: { score: number; r: any }[] = [];
+  const scored: { score: number; r: Row }[] = [];
   for (const r of rows) {
     const score = fuzzyScore(q, qTokens, r.item_name ?? "", r.item_key ?? "");
     if (score > 0) scored.push({ score, r });
@@ -636,7 +692,7 @@ async function handlePriceSyncStatus(chatId: number) {
     await tg("sendMessage", { chat_id: chatId, text: "ما وصل فحص مزامنة الأسعار من جهاز الأمين بعد." });
     return;
   }
-  const status: any = rows[0].summary ?? {};
+  const status = (rows[0].summary ?? {}) as PriceSyncSummary;
   const checked = status.checked_at ? fmtDate(status.checked_at) : "غير معروف";
   if (status.status === "ok") {
     await tg("sendMessage", {
@@ -682,7 +738,7 @@ async function handleSystemStatus(chatId: number) {
   ]);
   const reports = [inventoryRaw, balancesRaw, priceSyncRaw, movementsRaw, invoicesRaw]
     .flatMap((rows) => Array.isArray(rows) ? rows.slice(0, 1) : []);
-  const latestBySource = new Map<string, any>();
+  const latestBySource = new Map<string, Row>();
   for (const row of reports) if (!latestBySource.has(String(row.source))) latestBySource.set(String(row.source), row);
   const lines: string[] = [];
   let warnings = 0;
@@ -700,7 +756,7 @@ async function handleSystemStatus(chatId: number) {
   addFreshness("حركات الحسابات", "ameen_customer_movements", 15);
 
   const priceRow = latestBySource.get("ameen_price_sync_status");
-  const priceStatus = priceRow?.summary ?? {};
+  const priceStatus = (priceRow?.summary ?? {}) as PriceSyncSummary;
   const priceAge = ageMinutes(priceRow?.created_at);
   const priceOk = priceStatus.status === "ok" && Number(priceStatus.mismatch_count ?? 0) === 0 && Number(priceStatus.missing_count ?? 0) === 0 && priceAge <= 10;
   if (!priceOk) warnings++;
@@ -738,7 +794,7 @@ async function handleItemMovement(chatId: number, name: string) {
   }
   const q = normalizeArabic(name);
   const qTokens = q.split(" ").filter(Boolean);
-  const scored: { score: number; r: any }[] = [];
+  const scored: { score: number; r: Row }[] = [];
   for (const r of rows) {
     const score = fuzzyScore(q, qTokens, r.item_name ?? "", "");
     if (score > 0) scored.push({ score, r });
@@ -870,10 +926,10 @@ async function handleSalesChart(chatId: number): Promise<void> {
     await tg("sendMessage", { chat_id: chatId, text: "ما في بيانات مبيعات كفاية لعرض رسم بياني 😕\nلسه ما وصل ولا ملخص مبيعات من الأمين." });
     return;
   }
-  const values = rows.map((r: any) => Number(r.total_sales ?? 0));
+  const values = rows.map((r: Row) => Number(r.total_sales ?? 0));
   const spark = buildSparkline(values);
   let msg = `📊 اتجاه المبيعات (آخر ${rows.length} تحديث)\n\n${spark}\n\n`;
-  rows.slice(-10).forEach((r: any) => { msg += `${fmtDate(r.created_at)}: ${fmtUSD(r.total_sales)}\n`; });
+  rows.slice(-10).forEach((r: Row) => { msg += `${fmtDate(r.created_at)}: ${fmtUSD(r.total_sales)}\n`; });
   if (rows.length < 5) msg += `\n⚠️ البيانات لسه قليلة (${rows.length} فقط) — الرسم رح يصير أدق مع تراكم مزامنة أيام أكتر.`;
   await tg("sendMessage", { chat_id: chatId, text: msg.trim() });
 }
@@ -906,11 +962,11 @@ function tokensSimilar(a: string, b: string): boolean {
 // يدوّر داخل سؤال حر (نص أو مفرّغ من صوت) عن أسماء مواد مذكورة فيه، ويرجع
 // أقرب المطابقات — لحتى الذكاء الاصطناعي يقدر يجاوب عن كمية/سعر مادة محدّدة
 // بدل ما يقول "ما عندي بيانات تفصيلية" (كانت هاي المشكلة قبل هالإضافة).
-function findMentionedItems(question: string, items: any[]): any[] {
+function findMentionedItems(question: string, items: Row[]): Row[] {
   const q = normalizeArabic(question);
   const qTokens = q.split(" ").filter((t) => t.length >= 3);
   if (!qTokens.length) return [];
-  const scored: { score: number; r: any }[] = [];
+  const scored: { score: number; r: Row }[] = [];
   for (const r of items) {
     const name = normalizeArabic(r.item_name ?? r.item_key ?? "");
     if (!name) continue;
@@ -999,17 +1055,17 @@ async function buildBusinessContext(question: string): Promise<string> {
     }
   } catch { lines.push("تعذّر جلب تقرير دفعات وصناديق اليوم."); }
 
-  let priceItems: any[] = [];
+  let priceItems: Row[] = [];
   try {
     const thr = await getThreshold();
-    priceItems = await restGet(`approved_price_items?select=item_name,item_key,stock_qty,unit1_name,unit2_name,unit2_factor,sale_price&limit=2000`) as any[];
+    priceItems = await restGet(`approved_price_items?select=item_name,item_key,stock_qty,unit1_name,unit2_name,unit2_factor,sale_price&limit=2000`) as Row[];
     if (Array.isArray(priceItems)) {
       priceItems = mergeDuplicateStockRows(priceItems);
-      const out = priceItems.filter((r: any) => Number(r.stock_qty ?? 0) <= 0);
-      const low = priceItems.filter((r: any) => Number(r.stock_qty ?? 0) > 0 && Number(r.stock_qty ?? 0) <= thr);
+      const out = priceItems.filter((r: Row) => Number(r.stock_qty ?? 0) <= 0);
+      const low = priceItems.filter((r: Row) => Number(r.stock_qty ?? 0) > 0 && Number(r.stock_qty ?? 0) <= thr);
       lines.push(`المخزون: ${out.length} مادة نافدة، ${low.length} مادة تحت حد التنبيه (${thr}).`);
-      if (out.length) lines.push("نافد: " + out.slice(0, 10).map((r: any) => r.item_name ?? r.item_key).join("، "));
-      if (low.length) lines.push("تحت الحد: " + low.slice(0, 10).map((r: any) => r.item_name ?? r.item_key).join("، "));
+      if (out.length) lines.push("نافد: " + out.slice(0, 10).map((r: Row) => r.item_name ?? r.item_key).join("، "));
+      if (low.length) lines.push("تحت الحد: " + low.slice(0, 10).map((r: Row) => r.item_name ?? r.item_key).join("، "));
     } else {
       priceItems = [];
     }
@@ -1086,7 +1142,7 @@ async function transcribeVoice(fileId: string): Promise<string> {
 
   const { token } = await getSecrets();
   const fileInfoRes = await fetch(`https://api.telegram.org/bot${token}/getFile?file_id=${fileId}`);
-  const fileInfo = await fileInfoRes.json().catch(() => null) as any;
+  const fileInfo = await fileInfoRes.json().catch(() => null) as { result?: { file_path?: string } } | null;
   const filePath = fileInfo?.result?.file_path;
   if (!filePath) throw new Error("تعذّر جلب الملف الصوتي من تيليغرام");
 
@@ -1228,7 +1284,7 @@ function parseClock(text: string): { hour: number; minute: number } | null {
   if (hour > 23) return null;
   return { hour, minute };
 }
-function parseReminder(raw: string): { ok: boolean; body?: string; remindUtc?: Date; local?: Date } {
+function parseReminder(raw: string): { ok: true; body: string; remindUtc: Date; local: Date } | { ok: false } {
   const text = normalizeDigits(raw).trim();
   const lnow = localNow();
   let body = text.replace(/^(?:ذكّرني|ذكرني|ذكرنى|فكّرني|فكرني|تذكير)\s*/u, "").replace(/^(?:بالساعة|عالساعة)\s*/u, "").trim();
@@ -1287,7 +1343,7 @@ Deno.serve(async (req) => {
     return new Response(JSON.stringify({ ok: true, diag: lastDiag }), { headers: { "Content-Type": "application/json" } });
   }
 
-  let update: any;
+  let update: TelegramUpdate;
   try { update = await req.json(); } catch { return new Response("ok"); }
 
   // ضغطات الأزرار التفاعلية (callback queries)
@@ -1315,8 +1371,9 @@ Deno.serve(async (req) => {
         const parts = data.split("|"); // order|accept|<id> أو order|reject|<id>
         const action = parts[1] === "accept" ? "accept" : parts[1] === "reject" ? "reject" : null;
         const orderId = parts[2];
-        if (action && orderId && cq.message?.message_id) {
-          await handleOrderAction(cqChatId, cq.message.message_id, String(cq.message.text ?? ""), action, orderId);
+        const messageId = cq.message?.message_id;
+        if (action && orderId && messageId) {
+          await handleOrderAction(cqChatId, messageId, String(cq.message?.text ?? ""), action, orderId);
         }
       }
     } catch (e) {
@@ -1336,11 +1393,11 @@ Deno.serve(async (req) => {
   if (chatId !== owner) { await tg("sendMessage", { chat_id: chatId, text: "🔒 هذا بوت خاص." }); return new Response("ok"); }
 
   // رسالة صوتية (voice) أو ملاحظة فيديو دائرية بصوت (video_note بلا صوت مو مدعومة) — نفرّغها لنص أولاً
-  const voice = msg.voice;
-  if (voice?.file_id && !text) {
+  const voiceFileId = msg.voice?.file_id;
+  if (voiceFileId && !text) {
     try {
       await tg("sendMessage", { chat_id: chatId, text: "🎙️ عم افهم الرسالة الصوتية..." });
-      text = await transcribeVoice(voice.file_id);
+      text = await transcribeVoice(voiceFileId);
       await tg("sendMessage", { chat_id: chatId, text: `📝 سمعتك تقول: "${text}"` });
     } catch (e) {
       await tg("sendMessage", { chat_id: chatId, text: `صار خطأ وأنا عم افهم الصوت 😕\n(${String(e).slice(0, 150)})` });
@@ -1385,8 +1442,8 @@ Deno.serve(async (req) => {
     return new Response("ok");
   }
 
-  await restPost("reminders", { chat_id: chatId, body: parsed.body, remind_at: parsed.remindUtc!.toISOString(), raw_message: text });
-  const when = formatWhen(parsed.local!, localNow());
+  await restPost("reminders", { chat_id: chatId, body: parsed.body, remind_at: parsed.remindUtc.toISOString(), raw_message: text });
+  const when = formatWhen(parsed.local, localNow());
   await tg("sendMessage", { chat_id: chatId, text: `تمام ✅ رح ذكّرك ${when}:\n${parsed.body}` });
   return new Response("ok");
 });
