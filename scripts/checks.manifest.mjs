@@ -53,6 +53,7 @@ export const CHECKS = [
   'check-master-item-coverage-dedup.mjs',
   'check-owner-authorization-behavior.mjs',
   'check-price-bulletin-export-integrity.mjs',
+  'check-price-bulletin-first-page-content.mjs',
   'check-price-bulletin-group-packing.mjs',
   'check-price-bulletin-group-placement.mjs',
   'check-price-bulletin-item-coverage.mjs',

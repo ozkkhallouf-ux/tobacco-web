@@ -2697,6 +2697,68 @@ const BULLETIN_PAGE_HEIGHT_PX = 1123;
 // فيُقاس دائماً بطباعة الطباعة. ويبقى القياس داخل المستند نفسه عمداً: خطوطه
 // وأوراق أنماطه محمّلة فعلاً، بينما مستند جديد يبدأ بخطوط غير جاهزة فيقيس
 // بأبعاد خط احتياطي وينحرف عن الطباعة الحقيقية.
+// **القياس والطباعة يجب أن يستعملا نفس الخط.** ترقيم النشرة يُحسب من ارتفاعات
+// تُقاس هنا في مستند التطبيق، ثم تُطبع في إطار طباعة مستقلّ. وخط النشرة يصل
+// عبر `@import` من Google Fonts، فقبل وصوله يقيس المجسّ بالخط الاحتياطي
+// (Tahoma) وبعده بـAlmarai — والفارق ليس تجميلياً: قياسٌ فعلي على نفس البيانات
+// أعطى رأساً 156.375px وعموداً 949px بالاحتياطي مقابل 152.375px و902px بـAlmarai.
+//
+// إن قِيست الصفحة بخطٍّ ثم طُبعت بآخر، اختلّ الترقيم: لفّ اسمٍ واحد يطيل العمود،
+// وتجاوزُ كتلة الأعمدة الأولى لورقتها — ولو ببضعة بكسلات — ينقلها كروم كاملةً
+// ويقصّها سفاري (`overflow:hidden`) فتضيع أسعار من نشرة الزبون.
+// (ملاحظة Codex P1 على cfcef74.)
+//
+// فننتظر جهوزية الخط **قبل القياس**، تماماً كما ينتظرها إطار الطباعة قبل
+// `print()` في printHtmlDocument. والانتظار محدود بسقف: خطٌّ لا يصل (شبكة
+// مقطوعة) يجب ألا يمنع فتح المعاينة ولا التصدير — وعندها يقيس الطرفان
+// بالاحتياطي معاً، وهو ما يبقيهما متطابقين أيضاً.
+// **وتُرجع القرار الذي وقع فعلاً**، لا مجرّد «انتهى الانتظار». مهلتان مستقلّتان
+// (واحدة هنا وأخرى في إطار الطباعة) لا تضمنان اتفاقاً: قد ينتهي انتظار القياس
+// بالخط الاحتياطي بينما يصل الخط أثناء انتظار الإطار، فيُقاس بخطٍّ ويُطبع بآخر.
+// لذلك يُمرَّر هذا القرار إلى `printDocument({ fallbackFontOnly })` فيرث المستندُ
+// المطبوع خطَّ القياس نفسه — وهو الضمان الوحيد للاتفاق (ملاحظة Codex P1 على 6508dd7).
+const BULLETIN_FONT_WAIT_CEILING_MS = 3000;
+// **هل يرسم المتصفح بخط النشرة فعلاً؟** `document.fonts.check()` لا يُجيب عن
+// هذا: هو يُرجع true أيضاً حين يكون التحميل قد **فشل** (لا شيء «معلّق» بعدها)،
+// فيبدو الخط متاحاً وهو ليس كذلك — أُثبت عملياً بحجب Google Fonts عن المستند.
+// الإجابة الوحيدة الصادقة قياسٌ فعلي: نرسم نصاً بخط النشرة وبخطّ ضابط، فإن
+// تساوى العرضان فالخط لم يُطبَّق وسقط الرسم إلى الضابط.
+// **وكلّ وزنٍ يطلبه القالب، لا وزناً واحداً.** الأوزان تصل مستقلّةً عن بعضها،
+// فقد يجهز 700 قبل 400 و800؛ والاكتفاء بوزنٍ واحد يُعيد الخلل نفسه من باب آخر:
+// عمودٌ مقيس بمقاييس مختلطة بينما تُنهي الطباعة كل الأوزان (ملاحظة Codex P1
+// على dd324da). القائمة مُصدَّرة من القالب كي لا تنحرف عمّا يطلبه الـCSS فعلاً.
+function bulletinFontUsable() {
+  const template = window.OZKPriceListTemplate;
+  const family = template?.BULLETIN_FONT_FAMILY;
+  const weights = template?.BULLETIN_FONT_WEIGHTS;
+  if (!family || !Array.isArray(weights) || !weights.length || typeof document === "undefined") return false;
+  try {
+    const context = document.createElement("canvas").getContext("2d");
+    if (!context) return false;
+    const CONTROL = "monospace";
+    const SAMPLE = "نشرة الأسعار ABC 12345";
+    return weights.every((weight) => {
+      context.font = `${weight} 40px ${CONTROL}`;
+      const control = context.measureText(SAMPLE).width;
+      context.font = `${weight} 40px "${family}",${CONTROL}`;
+      return Math.abs(context.measureText(SAMPLE).width - control) > 0.5;
+    });
+  } catch {
+    return false; // بلا canvas لا نستطيع التأكد: نُثبّت الاحتياطي ولا نخمّن.
+  }
+}
+
+async function awaitBulletinFontReady() {
+  const fonts = typeof document !== "undefined" ? document.fonts : null;
+  if (!fonts || typeof fonts.ready?.then !== "function") return bulletinFontUsable();
+  if (bulletinFontUsable()) return true;
+  await Promise.race([
+    fonts.ready.catch(() => {}),
+    new Promise((resolve) => setTimeout(resolve, BULLETIN_FONT_WAIT_CEILING_MS))
+  ]);
+  return bulletinFontUsable();
+}
+
 function buildMeasuredBulletinLayout(template, groups, renderOptions) {
   if (typeof document === "undefined" || typeof template?.layoutGroupsMeasured !== "function") return null;
   const probe = document.createElement("div");
@@ -3089,13 +3151,15 @@ function buildBulletinDataset(useSyria = false, theme = state.bulletinPdfTheme) 
 
 // يفتح معاينة النشرة قبل التصدير. لا يخزّن أي بيانات نشرة في state — فقط
 // اختيار النوع والثيم؛ البيانات تُبنى عند كل رسم من buildBulletinDataset.
-function openPricePreview(useSyria = false, theme = state.bulletinPdfTheme) {
+async function openPricePreview(useSyria = false, theme = state.bulletinPdfTheme) {
   if (useSyria && !state.syriaRateConfirmed) {
     state.showExchangeModal = true;
     render();
     return;
   }
   state.syriaRateConfirmed = false;
+  // الترقيم يُقاس عند كل رسم للمعاينة، فلا نرسمها قبل أن يجهز الخط.
+  await awaitBulletinFontReady();
   const built = buildBulletinDataset(useSyria, theme);
   if (!built.ok) {
     setNotice("error", built.message);
@@ -3191,7 +3255,7 @@ async function openFreshPricePreview(useSyria = false, theme = state.bulletinPdf
     if (useSyria) state.syriaRateConfirmed = false;
     return;
   }
-  openPricePreview(useSyria, theme);
+  await openPricePreview(useSyria, theme);
 }
 
 // إغلاق المعاينة يُسقط أيضاً مدخل التاريخ الذي أضافه فتحها، فيرجع زر «رجوع»
@@ -3285,7 +3349,9 @@ function bulletinDocumentFilename(dataset) {
 // وفواصل الصفحات من `break-before:page` فلا تظهر صفحات بيضاء، والخلفية الداكنة
 // تُرسم من html/body عبر documentBackgroundCss. وهي نفس الطريقة التي يستعملها
 // `scripts/generate-pdfs.mjs` لتوليد النشرات المنشورة (وهي التي تخرج سليمة).
-function exportBulletinPdf(dataset) {
+// `options.fontReady`: هل قِيست الخطة بخط النشرة فعلاً؟ يُمرَّر إلى مستند
+// الطباعة كي يُرسَم بنفس الخط الذي قِيس به — راجع awaitBulletinFontReady أعلاه.
+function exportBulletinPdf(dataset, options = {}) {
   const template = window.OZKPriceListTemplate;
   if (!template) {
     setNotice("error", "تصميم النشرة الجديدة لم يتحمّل. حدّث الصفحة وجرّب مرة أخرى.");
@@ -3305,7 +3371,9 @@ function exportBulletinPdf(dataset) {
     theme: dataset.theme,
     title: bulletinDocumentFilename(dataset),
     // نفس ناتج خطة الرسم التي تعرضها المعاينة حرفياً.
-    bodyHtml: plan.markup
+    bodyHtml: plan.markup,
+    // قِيس بالاحتياطي ⇒ يُطبع بالاحتياطي. لا يُقاس بخطٍّ ويُطبع بآخر.
+    fallbackFontOnly: options.fontReady === false
   });
   // الحفظ والمشاركة يجريان داخل **نافذة النظام** التي تفتحها الطباعة الأصلية،
   // لا داخل الصفحة: لا نولّد Blob ولا نستعمل navigator.share({files}) ولا نقدّم
@@ -3333,13 +3401,23 @@ function exportBulletinPdf(dataset) {
 function exportPricePreview() {
   const preview = state.pricePreview;
   if (!preview) return;
+  // **لا انتظار هنا — قراءةُ حالةٍ فقط.** فتحُ المعاينة انتظر جهوزية الخط قبل
+  // أول قياس، فحين يصل المستخدم إلى هذا الزر تكون الحالة مستقرّة أصلاً. وإعادة
+  // انتظارها عند كل ضغطة تُضيف حتى ثلاث ثوانٍ صامتة بين الضغط وفتح ورقة
+  // الطباعة — ضررٌ حقيقي على هاتف بطيء، بلا أي مكسب.
+  //
+  // والاتفاق بين القياس والطباعة لا يأتي من الانتظار بل من **نقل القرار**:
+  // نلتقط هنا الخط الذي ستُقاس به الخطة فعلاً، ونفرضه على مستند الطباعة أدناه.
+  // فإن وصل الخط بعد انتهاء انتظار المعاينة قِيس وطُبع به معاً، وإن لم يصل
+  // قِيس وطُبع بالاحتياطي معاً — وفي الحالتين لا فرق بين المقيس والمطبوع.
+  const fontReady = bulletinFontUsable();
   const built = buildBulletinDataset(preview.useSyria, preview.theme);
   if (!built.ok) {
     setNotice("error", built.message);
     render();
     return;
   }
-  if (!exportBulletinPdf(built.dataset)) return;
+  if (!exportBulletinPdf(built.dataset, { fontReady })) return;
   // **لا نُغلق المعاينة هنا.** نافذة نظام الطباعة تفتح فوق الصفحة، وإغلاق
   // المعاينة تحتها كان يترك المستخدم — بعد أن يُلغي أو يُنهي الحفظ — على شاشة
   // أخرى بلا أي أثر لما جرى، ويجعل «إعادة المحاولة» بعد الحجب مستحيلة أصلاً.
@@ -5089,8 +5167,14 @@ function printHtmlDocument(html, options = {}) {
     } catch {
       // بعض المتصفحات تمنع الاستماع داخل الإطار — تكفي المهلة الاحتياطية أدناه.
     }
-    // مهلة قصيرة كي تكتمل الخطوط والرسم قبل فتح ورقة الطباعة.
-    setTimeout(() => {
+    // **لا تُطبع قبل أن تجهز الخطوط.** مهلة 250ms العمياء كانت سباقاً: النشرة
+    // تُرقَّم بارتفاعات قِيست في مستند التطبيق (حيث الخط جاهز)، ثم تُرسم هنا في
+    // مستند جديد قد يبدأ بخط احتياطي. اختلاف مقاييس الخط بين المستندين يغيّر لفّ
+    // الأسماء فيطول العمود، وتجاوز كتلة الأعمدة الأولى لورقتها — ولو ببضعة
+    // بكسلات — يجعل كروم ينقلها **كاملةً** إلى الورقة التالية فتخرج الورقة الأولى
+    // بالرأس وحده. `document.fonts.ready` يجعل المطبوع هو المقيس نفسه.
+    // المهلة تبقى سقفاً احتياطياً: خط لا يصل أبداً يجب ألا يمنع الطباعة إطلاقاً.
+    const printWhenReady = () => {
       try {
         win.focus();
         win.print();
@@ -5101,7 +5185,27 @@ function printHtmlDocument(html, options = {}) {
       }
       // احتياط: إن لم يصل afterprint (شائع على iOS) نحذف الإطار بعد مهلة.
       setTimeout(cleanup, 60000);
-    }, 250);
+    };
+
+    // أول المُطلقَين يفوز، ولا يُطلق أيٌّ منهما مرتين: جهوزية الخطوط إن وصلت،
+    // وإلا السقف الاحتياطي. الـ250ms الأصلية تبقى حدّاً أدنى كي يكتمل الرسم.
+    let printed = false;
+    const printOnce = () => {
+      if (printed) return;
+      printed = true;
+      printWhenReady();
+    };
+    const MIN_SETTLE_MS = 250;
+    const FONT_WAIT_CEILING_MS = 3000;
+    setTimeout(() => {
+      const fonts = win.document && win.document.fonts;
+      if (!fonts || typeof fonts.ready?.then !== "function") {
+        printOnce();
+        return;
+      }
+      fonts.ready.then(printOnce, printOnce);
+    }, MIN_SETTLE_MS);
+    setTimeout(printOnce, FONT_WAIT_CEILING_MS);
   }, { once: true });
 
   document.body.appendChild(frame);
