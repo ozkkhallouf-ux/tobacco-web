@@ -30,17 +30,43 @@ if ($dirty) {
   exit 0
 }
 
-$activeTaskPath = Join-Path $projectRoot "AI_ACTIVE_TASK.json"
-if (Test-Path -LiteralPath $activeTaskPath) {
+# الجلب أولاً وبلا شرط. `git fetch` لا يمسّ شجرة العمل ولا أي فرع محلي، فهو آمن
+# سواء وُجد قفل أم لا: القفل لا يحرس الجلب، بل يحرس **تحريك الفرع** بالـrebase.
+#
+# العطل الذي يعالجه هذا الترتيب (مقيس على جهاز Windows في 2026-09-05): كان القفل
+# يُقرأ من نسخة العمل المحلية قبل أي جلب، فقيمته هي حتماً قيمة آخر سحب ناجح. فمتى
+# دخل قفل `active` ثم أُفلت على main، استحال على الجهاز رؤية الإفلات — الشيء الوحيد
+# القادر على إحضاره هو السحب الذي تمنعه القيمة القديمة نفسها. قفلٌ حُجز في
+# 2026-08-31 أوقف السحب اليومي ثلاثة أيام متتالية (09-02 و09-03 و09-04) وسجّل
+# «SKIP: active AI task lock» في كل مرة، ولم يُفكّ الشلل إلا بسحب يدوي.
+$fetchLines = & git fetch origin main 2>&1 | ForEach-Object { "$_" }
+if ($LASTEXITCODE -ne 0) {
+  $fetchText = ($fetchLines | Select-Object -Last 3) -join " | "
+  Add-Content -LiteralPath $logPath -Value "$stamp FAIL: fetch - $fetchText"
+  Send-FailureAlert "git fetch failed: $fetchText"
+  exit 1
+}
+
+# القفل يُقرأ من النسخة **المنشورة على origin/main**، لا من نسخة العمل المحلية.
+# وهي المرجع الصحيح أصلاً: AI_WORK_SYNC يوجب نشر الحجز فوراً بـcommit وpush على
+# main «كي تراه الجلسات والأجهزة الأخرى» — فالقفل المنشور هو إشارة التنسيق بين
+# الأجهزة، والنسخة المحلية مجرد لقطة قديمة منه. قراءته بعد الجلب تجعل القيمة حيّة
+# في الاتجاهين: لا قفل مُفلَت يبقى حاجزاً، ولا قفل حيّ يمرّ غير مرئي.
+$publishedLock = & git show origin/main:AI_ACTIVE_TASK.json 2>$null
+if ($LASTEXITCODE -eq 0 -and $publishedLock) {
   try {
-    $activeTask = Get-Content -LiteralPath $activeTaskPath -Raw | ConvertFrom-Json
+    $activeTask = ($publishedLock -join "`n") | ConvertFrom-Json
     if ($activeTask.status -eq "active") {
       Add-Content -LiteralPath $logPath -Value "$stamp SKIP: active AI task lock"
       exit 0
     }
   } catch {
+    # تعذّر التحليل يمضي كما كان دائماً — لا يُقرأ الغموض قفلاً.
     Add-Content -LiteralPath $logPath -Value "$stamp WARN: could not parse AI_ACTIVE_TASK.json"
   }
+} else {
+  # غياب الملف عن main يمضي أيضاً، تماماً كما كان غيابه محلياً يمضي سابقاً.
+  Add-Content -LiteralPath $logPath -Value "$stamp WARN: could not read AI_ACTIVE_TASK.json from origin/main"
 }
 
 # ملاحظة PowerShell 5.1: git يكتب رسائل عادية على stderr، ومع 2>&1 تصير كائنات خطأ —
