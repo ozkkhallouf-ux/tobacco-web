@@ -167,9 +167,20 @@
     // `(^|[^.\w])` تمنع مطابقة `document.cookie:` داخل تفريغ كائن، وتُكتب
     // هكذا لا بـlookbehind لأن Safari قبل 16.4 يرمي SyntaxError على
     // lookbehind وقت التحليل — فيسقط الملف كله على أجهزة زبائن حقيقيين.
+    //
+    // ⚠️ إصلاح ملاحظة Codex P1 العاشرة على PR #188: أُضيف دعم المفتاح
+    // المقتبَس لقاعدة الترخيص وتُركت هذه بلا مثله، فمرّ
+    // `{"Cookie":"session=…"}` كاملاً. البنية الآن مطابقة لقاعدة الترخيص:
+    // مفتاح غير مقتبَس = سطر ترويسة → حجب حتى نهاية السطر؛ مفتاح مقتبَس =
+    // جسم JSON → حجب القيمة المقتبَسة وحدها.
     {
-      re: /(^|[^.\w])((?:set-)?cookie\s*:\s*).*/gim,
-      to: function (match, before, prefix) { return before + prefix + REDACTED; }
+      re: /(^|[^.\w])(["'`]?)((?:set-)?cookie)\2(\s*:\s*)(.*)/gim,
+      to: function (match, before, quote, key, separator, value) {
+        var head = before + quote + key + quote + separator;
+        if (!quote) return head + REDACTED;
+        var length = quotedValueLength(value);
+        return head + REDACTED + (length >= 0 ? value.slice(length) : "");
+      }
     },
     // 4) مخطط مصادقة عارٍ بلا ترويسة. شرطان يمنعان إفساد النصّ العادي:
     //    ثمانية محارف على الأقل من طقم الرموز، **و**رقم أو رمز واحد بينها.
@@ -235,13 +246,25 @@
     // كل رسالة خطأ تخصّ الأصناف تقريباً، فكان الحجب سيُفرغ تلك البلاغات من
     // معناها. `_` محرف كلمة، فلا حدّ بينه وبين `k`، فلا مطابقة (مُختبَر).
     {
-      re: /(["'`]?\b(?:token|key|secret|password|passwd|pwd|apikey|api_key|access_token|refresh_token)\b["'`]?\s*[=:]\s*)(.*)/gi,
+      // ⚠️ إصلاح ملاحظة Codex P1 الحادية عشرة: الأسماء المركّبة
+      // (`client_secret`، `session_token`، `public_token`) لم تكن تُطابَق —
+      // `_` محرف كلمة فيمنع حدّ `\b` المطلوب قبل `secret` أو `token`. وهو
+      // الحدّ نفسه الذي يحمي `item_key` من الحجب، فلا يجوز إرخاؤه. الحلّ
+      // إدراج الأسماء المركّبة صراحةً — لا حدود «واعية بالفواصل» تعيد
+      // `item_key` إلى الحجب. وهي مُقدَّمة على مكوّناتها في البدائل كي
+      // تُطابَق كاملةً.
+      re: /(["'`]?\b(?:client_secret|session_token|public_token|access_token|refresh_token|api_key|apikey|token|key|secret|password|passwd|pwd)\b["'`]?\s*[=:]\s*)(.*)/gi,
       to: function (match, prefix, value) {
         var length = quotedValueLength(value);
         // مقتبَسة: تُبتلع حتى الإغلاق الحقيقي (مع احترام الهروب) ويبقى ما بعدها.
         if (length >= 0) return prefix + REDACTED + value.slice(length);
-        // غير مقتبَسة: السلوك الآمن نفسه — أوّل كلمة بلا فراغات.
-        return prefix + value.replace(/^\S+/, REDACTED);
+        // ⚠️ إصلاح ملاحظة Codex P1 الثانية عشرة: كان الاستبدال `^\S+` فيقف
+        // عند أوّل فراغ، فعلى `password: correct horse battery staple` يُحجب
+        // `correct` ويمرّ الباقي. وكلمات سرّ التطبيق قد تحمل فراغات
+        // (supabase-client.js يشترط طولاً أدنى فقط). فصار الحجب يمتدّ حتى
+        // أوّل فاصل بنيوي (`,` `;` `}` `]`) أو نهاية السطر — أيّهما أسبق،
+        // فتبقى الحقول التالية في تفريغ كائن سليمةً.
+        return prefix + value.replace(/^[^,;}\]\n]+/, REDACTED);
       }
     }
   ];

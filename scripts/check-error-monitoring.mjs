@@ -236,6 +236,27 @@ console.log("\n— تنقية الأسرار —");
     "ابتلع الحجبُ بقية أثر المكدّس — `.` يجب ألّا تطابق السطر الجديد");
 
   // -------------------------------------------------------------------
+  // انحدار ملاحظات Codex P1 العاشرة والحادية عشرة والثانية عشرة على PR #188.
+  // الحالات هي التي ذكرها Codex حرفياً، لا أكثر.
+  // -------------------------------------------------------------------
+  const CODEX_ROUND_10 = [
+    ["كوكيز خلف مفتاح JSON", '{"Cookie":"session=opaque-session-token-9911"}', "opaque-session-token-9911"],
+    ["Set-Cookie خلف مفتاح JSON", '{"Set-Cookie":"sid=abc123def456"}', "abc123def456"],
+    ["client_secret مركّب", '{"client_secret":"opaque-client-secret-9911"}', "opaque-client-secret-9911"],
+    ["session_token مركّب", '{"session_token":"opaque-session-9911"}', "opaque-session-9911"],
+    ["public_token مركّب", '{"public_token":"opaque-public-9911"}', "opaque-public-9911"],
+    ["كلمة سرّ غير مقتبَسة بفراغات", "password: correct horse battery staple", "horse battery staple"],
+  ];
+  for (const [label, input, secret] of CODEX_ROUND_10) {
+    check(`تُحجب: ${label}`, !scrub(input).includes(secret),
+      `بقي «${secret}» بعد التنقية`);
+  }
+  // الحجب غير المقتبَس يقف عند فاصل بنيوي، فلا يبتلع بقية تفريغ الكائن.
+  check("الحجب غير المقتبَس يقف عند الفاصل البنيوي",
+    scrub("{ token: abc def, other: 1 }").includes("other: 1"),
+    "ابتلع الحجبُ الحقول التالية — يجب أن يقف عند `,` أو `}` أو نهاية السطر");
+
+  // -------------------------------------------------------------------
   // انحدار ملاحظتَي Codex P1 الثامنة والتاسعة على PR #188.
   //
   // (8) قاعدة الترخيص قبلت مفتاحاً غير مقتبَس وحده، فترويسات مُسلسلة
