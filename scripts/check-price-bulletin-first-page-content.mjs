@@ -509,6 +509,7 @@ const CHROME_WHOLE_BLOCK_PUSH_BAND_PX = 8;
     const first = plan.layout.mainPages[0];
     return {
       fontUsable: new Function(`return ${probeSrc}`)()(),
+      markupHasFallbackAttr: /<section class="ozk-price-list[^"]*"[^>]*\sdata-fallback-font/.test(plan.markup),
       rows: [...first.right, ...first.left].flatMap((g) =>
         g.items.map((it) => ({ name: it.name, unit: it.unit, price: it.price })))
     };
@@ -522,9 +523,16 @@ const CHROME_WHOLE_BLOCK_PUSH_BAND_PX = 8;
   check("اتفاق الخط: القياس جرى فعلاً بالخط الاحتياطي (الحالة بُنيت)",
     planned.fontUsable === false, "خط النشرة كان متاحاً رغم حجبه — السيناريو لم يُبنَ");
 
-  check("اتفاق الخط: مستند الطباعة يرث قرار القياس (يفرض السلسلة الاحتياطية)",
-    /font-family:Tahoma,Arial,sans-serif !important/.test(documentHtml),
-    "المستند لا يفرض خط القياس — قد يُطبع بخطٍّ غير الذي قِيس به");
+  // **نفس نسخة الترميز تُقاس وتُطبع.** الوسم على ترميز الخطة المقيسة يعني أن
+  // المجسّ قاس بالاحتياطي أيضاً، لا بمقاييس مختلطة.
+  check("اتفاق الخط: ترميز الخطة المقيسة موسوم بالاحتياطي كذلك",
+    planned.markupHasFallbackAttr,
+    "الترميز الذي قِيس غير موسوم — القياس جرى بمقاييس مختلطة والطباعة بالاحتياطي");
+
+  check("اتفاق الخط: الترميز المطبوع موسومٌ بقرار القياس (data-fallback-font)",
+    /<section class="ozk-price-list[^"]*"[^>]*\sdata-fallback-font/.test(documentHtml)
+    && /font-family:Tahoma,Arial,sans-serif !important/.test(documentHtml),
+    "الترميز لا يحمل قرار الخط — قد يُقاس بخطٍّ ويُطبع بآخر");
 
   // يُطبع في سياق الخط فيه متاح: لولا الوراثة لرُسم بـAlmarai وخالف المقيس.
   const printed = await printExportDocument(documentHtml);

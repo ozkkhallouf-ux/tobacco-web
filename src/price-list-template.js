@@ -27,18 +27,18 @@
   // النشرة تحمل الاثنتين: أسماء عربية وأرقام أسعار لاتينية، فتُفحصان منفصلتين.
   const BULLETIN_FONT_SAMPLES = Object.freeze(["نشرة الأسعار", "0123456789"]);
 
-  // يفرض السلسلة الاحتياطية وحدها على مستند الطباعة.
+  // **قرار الخط يسافر مع الترميز نفسه، لا مع المستند الذي يلفّه.**
   //
-  // لماذا يلزم أصلاً (ملاحظة Codex P1 على 6508dd7): القياس والطباعة يجريان في
-  // مستندين، ولكلٍّ انتظارُه المحدود لجهوزية الخط. فقد ينتهي انتظار القياس
-  // بالخط الاحتياطي بينما يصل Almarai أثناء انتظار إطار الطباعة — فيُقاس
-  // بخطٍّ ويُطبع بآخر، والفارق ~5% من ارتفاع العمود يكفي لدفع كتلة الأعمدة
-  // الأولى خارج ورقتها فتُنقل كاملةً أو تُقصّ. مهلتان مستقلّتان لا تضمنان
-  // اتفاقاً؛ الضمان الوحيد أن **يرث المستندُ المطبوع قرارَ القياس نفسه**.
-  function fallbackFontCss() {
-    return `
-    .ozk-price-list, .ozk-price-list * { font-family:${BULLETIN_FALLBACK_FONT_STACK} !important; }`;
-  }
+  // كان مستند الطباعة يتلقّى قاعدةً تفرض السلسلة الاحتياطية، بينما يُقاس الترميز
+  // في مستند التطبيق بلا تلك القاعدة. فحين يجهز بعضُ أوجه الخط دون بعض تكون
+  // النتيجة: قياسٌ بمقاييس **مختلطة** (ما جهز بـAlmarai والباقي بالاحتياطي)
+  // مقابل طباعةٍ بالاحتياطي **كاملةً** — أي اختلافٌ من باب آخر
+  // (ملاحظة Codex P1 على 20d0c44).
+  //
+  // الحلّ أن تُختم السمة `data-fallback-font` على `.ozk-price-list` داخل
+  // `render()`، فتحملها **نفس نسخة الترميز** التي يقيسها المجسّ والتي تُطبع.
+  // القاعدة نفسها مضمّنة في CSS المرافق للترميز، فتسري في المستندين معاً بلا
+  // أي حقنٍ منفصل — ويستحيل بنيوياً أن يُقاس بخطٍّ ويُطبع بآخر.
 
   function themePageBackground(theme) {
     return THEME_PAGE_BACKGROUND[theme === "light" ? "light" : "dark"];
@@ -55,6 +55,7 @@
   // «نخلة» لم تصل الزبون (224 صنفاً في البيانات مقابل 220 في الملف).
   // الاشتقاق يجعل «اسم بلا وجهة» مستحيلاً بنيوياً.
   const SPECIAL_GROUPS = new Set([...SPECIAL_RIGHT_GROUPS, ...SPECIAL_LEFT_GROUPS]);
+
   const ARABIC_MONTHS = [
     "كانون الثاني", "شباط", "آذار", "نيسان", "أيار", "حزيران",
     "تموز", "آب", "أيلول", "تشرين الأول", "تشرين الثاني", "كانون الأول"
@@ -158,6 +159,11 @@
     .ozk-price-list .price-list-column-stack {
       flex:1 1 0; min-width:0; background:var(--page); position:relative; z-index:1;
     }
+    /* السلسلة الاحتياطية مفروضةً. تُوسَم بها **نفس نسخة الترميز** التي تُقاس
+       والتي تُطبع، فيستحيل أن يُقاس بخطٍّ ويُطبع بآخر — راجع الشرح أعلى الملف
+       وbulletinFontUsable في src/app.js. */
+    .ozk-price-list[data-fallback-font],
+    .ozk-price-list[data-fallback-font] * { font-family:${BULLETIN_FALLBACK_FONT_STACK} !important; }
     .ozk-price-list .price-list-secondary-page {
       break-before:page; page-break-before:always; margin-top:8px;
     }
@@ -738,7 +744,7 @@
       : "";
     return `
       <style data-ozk-price-list-style="${VERSION}">${CSS}</style>
-      <section class="ozk-price-list${tools ? " has-document-tools" : ""}" lang="ar" dir="rtl" translate="no" data-theme="${options.theme === "light" ? "light" : "dark"}" data-template-version="${VERSION}">
+      <section class="ozk-price-list${tools ? " has-document-tools" : ""}" lang="ar" dir="rtl" translate="no"${options.fallbackFontOnly ? " data-fallback-font" : ""} data-theme="${options.theme === "light" ? "light" : "dark"}" data-template-version="${VERSION}">
         ${toolsMarkup}
         <header class="price-list-header">
           <img src="${escapeHtml(options.logoSrc)}" alt="OZK TOBACCO" class="price-list-header-logo">
@@ -767,14 +773,12 @@
   // بيضاء، وترسم الخلفية الداكنة على كامل الورقة. لا يُبنى هنا أي HTML بديل —
   // `bodyHtml` يجب أن يكون ناتج render() نفسه الذي تعرضه المعاينة، كي يستحيل
   // أن يختلف الملف المصدَّر عن المعاينة.
-  // `fallbackFontOnly`: مرّرها true حين جرى القياس بالسلسلة الاحتياطية، فيُطبع
-  // المستند بها أيضاً. الملف عندئذٍ مطابق لما رآه المالك في المعاينة، ولا فرق
-  // بين ما قِيس وما طُبع — راجع fallbackFontCss أعلاه.
+  // لا خيار خطٍّ هنا: قرار الخط مختوم على الترميز نفسه (`data-fallback-font`)
+  // فيصل مع `bodyHtml` كما قِيس بالضبط.
   function printDocument(options = {}) {
     const theme = options.theme === "light" ? "light" : "dark";
     const title = String(options.title || "نشرة الأسعار");
     const bodyHtml = String(options.bodyHtml || "");
-    const fontCss = options.fallbackFontOnly ? fallbackFontCss() : "";
     return `<!doctype html>
 <html lang="ar" dir="rtl" translate="no">
 <head>
@@ -782,7 +786,7 @@
 <meta name="viewport" content="width=794">
 <meta name="google" content="notranslate">
 <title>${escapeHtml(title)}</title>
-<style>${documentBackgroundCss(theme)}${fontCss}</style>
+<style>${documentBackgroundCss(theme)}</style>
 </head>
 <body data-theme="${theme}">${bodyHtml}</body>
 </html>`;

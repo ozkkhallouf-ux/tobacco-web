@@ -2715,8 +2715,9 @@ const BULLETIN_PAGE_HEIGHT_PX = 1123;
 // **وتُرجع القرار الذي وقع فعلاً**، لا مجرّد «انتهى الانتظار». مهلتان مستقلّتان
 // (واحدة هنا وأخرى في إطار الطباعة) لا تضمنان اتفاقاً: قد ينتهي انتظار القياس
 // بالخط الاحتياطي بينما يصل الخط أثناء انتظار الإطار، فيُقاس بخطٍّ ويُطبع بآخر.
-// لذلك يُمرَّر هذا القرار إلى `printDocument({ fallbackFontOnly })` فيرث المستندُ
-// المطبوع خطَّ القياس نفسه — وهو الضمان الوحيد للاتفاق (ملاحظة Codex P1 على 6508dd7).
+// لذلك يُختم القرار على الترميز نفسه في `bulletinRenderPlan` (السمة
+// `data-fallback-font`)، فتحمله نسخةُ الترميز التي تُقاس والتي تُطبع معاً — وهو
+// الضمان الوحيد للاتفاق (ملاحظتا Codex P1 على 6508dd7 و20d0c44).
 const BULLETIN_FONT_WAIT_CEILING_MS = 3000;
 // **هل يرسم المتصفح بخط النشرة فعلاً؟** سؤالٌ لا تُجيب عنه واجهةٌ واحدة:
 //   · `document.fonts.check()` يُرجع true أيضاً حين يكون التحميل قد **فشل**
@@ -2881,6 +2882,12 @@ function bulletinRenderPlan(dataset) {
     unitLabel: useSyria ? "سعر المفرق للوحدة" : "سعر الكرتونة (جملة)",
     theme: normalizedBulletinPdfTheme(theme)
   };
+  // **قرار الخط يُتَّخذ مرة واحدة هنا، ويسافر مع الترميز.** إن لم يكن خط النشرة
+  // جاهزاً بكل أوجهه، تُوسَم نسخة الترميز بالسلسلة الاحتياطية — فيقيسها المجسّ
+  // بها وتُطبع بها. بلا ذلك يقيس المجسّ بمقاييس مختلطة (ما جهز من الأوجه
+  // بـAlmarai والباقي بالاحتياطي) بينما يُطبع المستند بالاحتياطي كاملاً
+  // (ملاحظة Codex P1 على 20d0c44).
+  renderOptions.fallbackFontOnly = !bulletinFontUsable();
   const layout = buildMeasuredBulletinLayout(template, templateGroups, renderOptions);
   if (layout?.oversized?.length) {
     console.warn("نشرة الأسعار: مجموعة أطول من عمود صفحة كاملة، لم تُقصّ ولم توضع:", layout.oversized);
@@ -3366,9 +3373,7 @@ function bulletinDocumentFilename(dataset) {
 // وفواصل الصفحات من `break-before:page` فلا تظهر صفحات بيضاء، والخلفية الداكنة
 // تُرسم من html/body عبر documentBackgroundCss. وهي نفس الطريقة التي يستعملها
 // `scripts/generate-pdfs.mjs` لتوليد النشرات المنشورة (وهي التي تخرج سليمة).
-// `options.fontReady`: هل قِيست الخطة بخط النشرة فعلاً؟ يُمرَّر إلى مستند
-// الطباعة كي يُرسَم بنفس الخط الذي قِيس به — راجع awaitBulletinFontReady أعلاه.
-function exportBulletinPdf(dataset, options = {}) {
+function exportBulletinPdf(dataset) {
   const template = window.OZKPriceListTemplate;
   if (!template) {
     setNotice("error", "تصميم النشرة الجديدة لم يتحمّل. حدّث الصفحة وجرّب مرة أخرى.");
@@ -3388,9 +3393,9 @@ function exportBulletinPdf(dataset, options = {}) {
     theme: dataset.theme,
     title: bulletinDocumentFilename(dataset),
     // نفس ناتج خطة الرسم التي تعرضها المعاينة حرفياً.
-    bodyHtml: plan.markup,
-    // قِيس بالاحتياطي ⇒ يُطبع بالاحتياطي. لا يُقاس بخطٍّ ويُطبع بآخر.
-    fallbackFontOnly: options.fontReady === false
+    // قرار الخط مختوم داخل الترميز نفسه (`data-fallback-font`)، فما يُطبع هو
+    // ما قِيس بالضبط بلا وسيطٍ إضافي هنا.
+    bodyHtml: plan.markup
   });
   // الحفظ والمشاركة يجريان داخل **نافذة النظام** التي تفتحها الطباعة الأصلية،
   // لا داخل الصفحة: لا نولّد Blob ولا نستعمل navigator.share({files}) ولا نقدّم
@@ -3418,23 +3423,18 @@ function exportBulletinPdf(dataset, options = {}) {
 function exportPricePreview() {
   const preview = state.pricePreview;
   if (!preview) return;
-  // **لا انتظار هنا — قراءةُ حالةٍ فقط.** فتحُ المعاينة انتظر جهوزية الخط قبل
-  // أول قياس، فحين يصل المستخدم إلى هذا الزر تكون الحالة مستقرّة أصلاً. وإعادة
-  // انتظارها عند كل ضغطة تُضيف حتى ثلاث ثوانٍ صامتة بين الضغط وفتح ورقة
-  // الطباعة — ضررٌ حقيقي على هاتف بطيء، بلا أي مكسب.
-  //
-  // والاتفاق بين القياس والطباعة لا يأتي من الانتظار بل من **نقل القرار**:
-  // نلتقط هنا الخط الذي ستُقاس به الخطة فعلاً، ونفرضه على مستند الطباعة أدناه.
-  // فإن وصل الخط بعد انتهاء انتظار المعاينة قِيس وطُبع به معاً، وإن لم يصل
-  // قِيس وطُبع بالاحتياطي معاً — وفي الحالتين لا فرق بين المقيس والمطبوع.
-  const fontReady = bulletinFontUsable();
+  // **لا انتظار هنا.** فتحُ المعاينة انتظر جهوزية الخط قبل أول قياس، فحين يصل
+  // المستخدم إلى هذا الزر تكون الحالة مستقرّة؛ وإعادة انتظارها عند كل ضغطة
+  // تُضيف حتى ثلاث ثوانٍ صامتة بين الضغط وفتح ورقة الطباعة — ضررٌ حقيقي على
+  // هاتف بطيء بلا مكسب. والاتفاق بين القياس والطباعة يأتي من `bulletinRenderPlan`
+  // الذي يختم قرار الخط على الترميز، فيُقاس ويُطبع بنفسه.
   const built = buildBulletinDataset(preview.useSyria, preview.theme);
   if (!built.ok) {
     setNotice("error", built.message);
     render();
     return;
   }
-  if (!exportBulletinPdf(built.dataset, { fontReady })) return;
+  if (!exportBulletinPdf(built.dataset)) return;
   // **لا نُغلق المعاينة هنا.** نافذة نظام الطباعة تفتح فوق الصفحة، وإغلاق
   // المعاينة تحتها كان يترك المستخدم — بعد أن يُلغي أو يُنهي الحفظ — على شاشة
   // أخرى بلا أي أثر لما جرى، ويجعل «إعادة المحاولة» بعد الحجب مستحيلة أصلاً.
