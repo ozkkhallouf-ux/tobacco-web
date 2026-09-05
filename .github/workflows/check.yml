@@ -50,3 +50,12 @@ jobs:
       - name: Khalil audit sync - PowerShell 5.1 regression test
         shell: powershell
         run: .\tools\tests\Test-KhalilAuditPs51Compat.ps1
+
+      # عطل إنتاجي حيّ (2026-09-05): قفل تنسيق عالق منع السحب اليومي ثلاثة
+      # أيام، لأن القفل كان يُقرأ من نسخة العمل المحلية قبل الجلب فتعذّر على
+      # الجهاز رؤية إفلاته. العطل في ترتيب عمليتَي git لا في صيغة سطر، فلا
+      # يلتقطه فحص ساكن — الاختبار يبني مستودعَي git مؤقتَين ويشغّل السكربت
+      # الإنتاجي عليهما فعلياً.
+      - name: Daily git pull - stale lock deadlock regression test
+        shell: powershell
+        run: .\tools\tests\Test-DailyGitPullStaleLock.ps1
