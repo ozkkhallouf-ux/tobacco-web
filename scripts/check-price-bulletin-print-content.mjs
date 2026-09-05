@@ -92,55 +92,73 @@ function parseToUnicode(cmap) {
   return map;
 }
 
+// حروف رسم واحد: `ActualText` إن وُجد (يصف الحرف المنطقي ويفكّ روابط مثل «لأ»)،
+// وإلا فكّ رموز الخط عبر خريطة /ToUnicode.
+function decodeShowOperator(payload, unicodeMap) {
+  let decoded = "";
+  for (const hex of payload.matchAll(/<([0-9A-Fa-f]*)>/g)) {
+    const h = hex[1];
+    for (let k = 0; k + 4 <= h.length; k += 4) decoded += unicodeMap.get(parseInt(h.slice(k, k + 4), 16)) ?? "";
+  }
+  return decoded;
+}
+
+// نص كتلة `BT … ET` واحدة بترتيبها المنطقي.
+function readTextBlock(blockBody, fonts, unicodeFor) {
+  const reversed = /\/ReversedChars\s+BMC/.test(blockBody);
+  const ops = /\/([A-Za-z0-9]+)\s+[\d.]+\s+Tf|\/ActualText\s*<([0-9A-Fa-f]*)>|\[([\s\S]*?)\]\s*TJ|<([0-9A-Fa-f]*)>\s*Tj/g;
+  const glyphs = [];
+  let font = null;
+  let actualText = null;
+  let op;
+  while ((op = ops.exec(blockBody))) {
+    if (op[1] !== undefined) { font = fonts.get(op[1]) ?? null; continue; }
+    if (op[2] !== undefined) { actualText = utf16beFromHex(op[2]); continue; }
+    const payload = op[3] !== undefined ? op[3] : `<${op[4]}>`;
+    glyphs.push(actualText != null ? actualText : decodeShowOperator(payload, font != null ? unicodeFor(font) : new Map()));
+    actualText = null;
+  }
+  if (!glyphs.length) return "";
+  return (reversed ? glyphs.reverse() : glyphs).join("");
+}
+
+// خرائط /ToUnicode لكل خط، محسوبة مرة واحدة لكل ملف.
+function unicodeResolver(objects) {
+  const cache = new Map();
+  return (fontId) => {
+    if (cache.has(fontId)) return cache.get(fontId);
+    const ref = (String(objects.get(fontId) || "").match(/\/ToUnicode\s+(\d+)\s+0\s+R/) || [])[1];
+    const stream = ref ? inflateStream(objects.get(+ref) || "") : null;
+    const map = stream ? parseToUnicode(stream) : new Map();
+    cache.set(fontId, map);
+    return map;
+  };
+}
+
+function pageFontMap(pageBody) {
+  const fontBlock = (pageBody.match(/\/Font\s*<<([\s\S]*?)>>/) || [])[1] || "";
+  const fonts = new Map();
+  for (const f of fontBlock.matchAll(/\/([A-Za-z0-9]+)\s+(\d+)\s+0\s+R/g)) fonts.set(f[1], +f[2]);
+  return fonts;
+}
+
 function pdfPageTexts(pdf) {
   const raw = pdf.toString("latin1");
   const objects = new Map();
   for (const m of raw.matchAll(/(\d+)\s+0\s+obj([\s\S]*?)endobj/g)) objects.set(+m[1], m[2]);
-  const unicodeCache = new Map();
-  const unicodeFor = (fontId) => {
-    if (unicodeCache.has(fontId)) return unicodeCache.get(fontId);
-    const ref = (String(objects.get(fontId) || "").match(/\/ToUnicode\s+(\d+)\s+0\s+R/) || [])[1];
-    const stream = ref ? inflateStream(objects.get(+ref) || "") : null;
-    const map = stream ? parseToUnicode(stream) : new Map();
-    unicodeCache.set(fontId, map);
-    return map;
-  };
+  const unicodeFor = unicodeResolver(objects);
 
   const texts = [];
   for (const [, body] of objects) {
     if (!/\/Type\s*\/Page[^s]/.test(body)) continue;
     const contentsId = (body.match(/\/Contents\s+(\d+)\s+0\s+R/) || [])[1];
-    const fontBlock = (body.match(/\/Font\s*<<([\s\S]*?)>>/) || [])[1] || "";
-    const fonts = new Map();
-    for (const f of fontBlock.matchAll(/\/([A-Za-z0-9]+)\s+(\d+)\s+0\s+R/g)) fonts.set(f[1], +f[2]);
     const content = contentsId ? inflateStream(objects.get(+contentsId) || "") : null;
     if (!content) { texts.push(""); continue; }
-
+    const fonts = pageFontMap(body);
     const blocks = [];
     for (const bt of content.matchAll(/\bBT\b([\s\S]*?)\bET\b/g)) {
-      const body2 = bt[1];
-      const reversed = /\/ReversedChars\s+BMC/.test(body2);
-      let font = null;
-      let actualText = null;
-      const glyphs = [];
-      const ops = /\/([A-Za-z0-9]+)\s+[\d.]+\s+Tf|\/ActualText\s*<([0-9A-Fa-f]*)>|\[([\s\S]*?)\]\s*TJ|<([0-9A-Fa-f]*)>\s*Tj/g;
-      let op;
-      while ((op = ops.exec(body2))) {
-        if (op[1] !== undefined) { font = fonts.get(op[1]) ?? null; continue; }
-        if (op[2] !== undefined) { actualText = utf16beFromHex(op[2]); continue; }
-        const map = font != null ? unicodeFor(font) : new Map();
-        const payload = op[3] !== undefined ? op[3] : `<${op[4]}>`;
-        let decoded = "";
-        for (const hex of payload.matchAll(/<([0-9A-Fa-f]*)>/g)) {
-          const h = hex[1];
-          for (let k = 0; k + 4 <= h.length; k += 4) decoded += map.get(parseInt(h.slice(k, k + 4), 16)) ?? "";
-        }
-        // ActualText يصف الحرف المنطقي لهذا الرسم (يفكّ رابطة «لأ» مثلاً).
-        glyphs.push(actualText != null ? actualText : decoded);
-        actualText = null;
-      }
-      if (!glyphs.length) continue;
-      blocks.push((reversed ? glyphs.reverse() : glyphs).join(""));
+      const text = readTextBlock(bt[1], fonts, unicodeFor);
+      if (text) blocks.push(text);
     }
     // الكتل تُرسم يساراً⇦يميناً؛ عكس ترتيبها يعيد النص إلى ترتيبه المنطقي.
     texts.push(blocks.reverse().join(RUN_SEPARATOR));
