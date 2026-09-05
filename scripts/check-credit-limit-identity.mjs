@@ -317,6 +317,28 @@ test("لم يبقَ upsert على customer_key في جدول حدود الائت
   assert.ok(/resolveCustomerLimitTarget\(/.test(block), "الحفظ لا يمرّ عبر قرار الهوية");
 });
 
+// فشل تحميل الحدود (مثلاً هجرة لم تُطبَّق بعد، أو انقطاع شبكة) كان يمسح
+// `customerCreditLimits` فيظهر كل زبون «بلا حد» — غياب لا يميّزه الناظر عن
+// «لا حدود مضبوطة أصلاً»، فتختفي تنبيهات التجاوز صامتةً.
+test("فشل تحميل الحدود لا يمسح آخر نسخة ناجحة", () => {
+  const app = readFileSync(new URL("../src/app.js", import.meta.url), "utf8");
+  const start = app.indexOf("async function loadCustomerCreditLimits()");
+  assert.ok(start > 0, "لم أجد loadCustomerCreditLimits في src/app.js");
+  const block = app.slice(start, app.indexOf("\n}", start));
+  const [, failurePath = ""] = block.split("} catch (error) {");
+  assert.ok(!/state\.customerCreditLimits\s*=\s*\[\]/.test(failurePath),
+    "مسار الفشل ما زال يمسح الحدود، فتختفي تنبيهات التجاوز بلا أثر");
+  assert.match(failurePath, /state\.customerLimitError\s*=/, "الفشل يجب أن يبقى معلناً لا صامتاً");
+});
+
+test("لافتة الخطأ تشير إلى الهجرة الصحيحة", () => {
+  const app = readFileSync(new URL("../src/app.js", import.meta.url), "utf8");
+  assert.ok(app.includes("20260905131500_credit_limits_customer_guid.sql"),
+    "رسالة الخطأ لا تدلّ على الهجرة، فيبقى سبب 400 مجهولاً على الشاشة");
+  assert.ok(!app.includes("supabase/customer-credit-limits.sql"),
+    "الرسالة ما زالت تحيل إلى ملف غير موجود في المستودع");
+});
+
 test("نموذج الحد في الواجهة يحمل المعرّف", () => {
   const app = readFileSync(new URL("../src/app.js", import.meta.url), "utf8");
   assert.match(app, /data-form="customer-limit"[^>]*data-customer-guid=/, "النموذج لا يمرّر المعرّف، فالحفظ سيبقى بالاسم");

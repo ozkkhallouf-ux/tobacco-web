@@ -1271,7 +1271,11 @@ async function loadCustomerCreditLimits() {
       ? await dataStore.listCustomerCreditLimits()
       : [];
   } catch (error) {
-    state.customerCreditLimits = [];
+    // **لا نمسح الحدود المحمَّلة عند فشل التحديث.** مسحها يجعل كل زبون يظهر
+    // «بلا حد»، فتختفي تنبيهات التجاوز والاقتراب من شاشة الزبائن ومن لوحة
+    // القيادة معاً — وهو غياب لا يميّزه الناظر عن «لا حدود مضبوطة أصلاً».
+    // الاحتفاظ بآخر نسخة ناجحة يُبقي التنبيه قائماً، ولافتة الخطأ أعلى الشاشة
+    // تقول صراحةً إن الأرقام قد تكون قديمة.
     state.customerLimitError = safeErrorMessage(error);
   }
 }
@@ -6476,7 +6480,7 @@ function customerBalanceSection(report) {
       </div>
       ${
         state.customerLimitError
-          ? `<div class="inline-warning">تعذر تحميل أو حفظ الحدود الداخلية. شغل ملف <code>supabase/customer-credit-limits.sql</code> في Supabase SQL Editor ثم حدث الصفحة. الخطأ: ${escapeHtml(state.customerLimitError)}</div>`
+          ? `<div class="inline-warning">تعذر تحميل أو حفظ الحدود الداخلية، والمعروض هنا آخر نسخة نجحت (قد تكون قديمة). إن كان الخطأ عن عمود <code>customer_guid</code> فالهجرة <code>supabase/migrations/20260905131500_credit_limits_customer_guid.sql</code> لم تُطبَّق بعد على Supabase. الخطأ: ${escapeHtml(state.customerLimitError)}</div>`
           : ""
       }
       <div class="inventory-controls">
