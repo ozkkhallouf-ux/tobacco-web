@@ -261,13 +261,59 @@ Log "✓ price-data.json محدَّث ($($priceData.Count) مادة)" "Green"
 # ════════════════════════════════════════════════════════════════════════════
 Log "رفع التغييرات لـ GitHub..." "Cyan"
 
-& git -C $ProjectRoot add "scripts/price-data.json" 2>&1 | Out-Null
-& git -C $ProjectRoot diff --staged --quiet 2>&1 | Out-Null
-if ($LASTEXITCODE -eq 0) { Log "لا تغييرات للرفع" "Yellow"; exit 0 }
+# git يكتب نتيجة الرفع على **stderr حتى عند النجاح** («To https://…»، «main -> main»).
+# ومع `$ErrorActionPreference = "Stop"` أعلى هذا الملف، يحوّل Windows PowerShell 5.1
+# تلك الأسطر إلى NativeCommandError **منهٍ** — فيموت السكربت عند الرفع في كل مرة
+# يكون فيها ما يُرفع: بلا سطر نجاح، وبلا سطر فشل، وبلا تنبيه، والكوميت قد صار
+# محلياً فيتراكم بلا رفع.
+#
+# قياس على سجل الإنتاج (2026-08-29 → 2026-09-05): «رفع التغييرات لـ GitHub...»
+# ظهر 11 مرة، بينما «✓ تم الرفع» و«═══ اكتمل ═══» لم يظهرا **ولا مرة واحدة**.
+# أي أن مسار الرفع لم يكتمل قطّ، وبقي عطلاً غير مرئي لأن لا أحد كان يفحص رمز
+# الخروج ولا يقرأ خرج git.
+#
+# الغلاف يخفض التفضيل لنداءات git وحدها ويحكم برمز الخروج — وهو المعيار الوحيد
+# الموثوق لنجاح أمر native — ثم يعيد التفضيل كما كان.
+function Invoke-SyncGit {
+    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$GitArgs)
+    $previousErrorAction = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $lines = & git -C $ProjectRoot @GitArgs 2>&1 | ForEach-Object { "$_" }
+        return [pscustomobject]@{
+            Code = $LASTEXITCODE
+            Text = (($lines | Select-Object -Last 3) -join " | ")
+        }
+    } finally { $ErrorActionPreference = $previousErrorAction }
+}
+
+# فشل أي خطوة يُسجَّل بخرج git الحقيقي ويُنبَّه عنه ويُنهي التشغيل برمز غير صفري —
+# بدل «نجاح» يُطبع بلا شرط.
+function Stop-WithGitFailure([string]$Step, $Result) {
+    Log "فشل $Step (رمز $($Result.Code)): $($Result.Text)" "Red"
+    $alertScript = Join-Path $PSScriptRoot "send-telegram-notification.ps1"
+    if (Test-Path $alertScript) {
+        try {
+            & $alertScript `
+                -Message "🚨 auto-sync-price-lists: فشل $Step عند رفع نشرة الأسعار (رمز $($Result.Code)). $($Result.Text)" `
+                -EventType "windows" -DedupeKey "auto-sync-git-$Step" -DedupeMinutes 60 2>&1 | Out-Null
+        } catch {}
+    }
+    exit 1
+}
+
+$addResult = Invoke-SyncGit add "scripts/price-data.json"
+if ($addResult.Code -ne 0) { Stop-WithGitFailure "add" $addResult }
+
+$stagedResult = Invoke-SyncGit diff --staged --quiet
+if ($stagedResult.Code -eq 0) { Log "لا تغييرات للرفع" "Yellow"; exit 0 }
 
 $msg = "Auto: $($priceData.Count) items from Ameen+Supabase — $timestamp"
-& git -C $ProjectRoot commit -m $msg 2>&1 | Out-Null
-& git -C $ProjectRoot push 2>&1 | Out-Null
+$commitResult = Invoke-SyncGit commit -m $msg
+if ($commitResult.Code -ne 0) { Stop-WithGitFailure "commit" $commitResult }
+
+$pushResult = Invoke-SyncGit push
+if ($pushResult.Code -ne 0) { Stop-WithGitFailure "push" $pushResult }
 
 Log "✓ تم الرفع — GitHub Actions يولّد النشرات" "Green"
 Log "═══ اكتمل ═══" "Cyan"
