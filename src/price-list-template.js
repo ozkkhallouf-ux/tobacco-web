@@ -9,9 +9,24 @@
   // تختلف عن خلفية النشرات المنشورة).
   const THEME_PAGE_BACKGROUND = Object.freeze({ dark: "#0c0a07", light: "#fffdf8" });
 
-  // خط النشرة كما يطلبه الـCSS أدناه. مُصدَّر كي ينتظره `src/app.js` قبل القياس
-  // بدل تكرار الاسم حرفياً في مكانين — تكرارٌ يجعل تغيير الخط يكسر الانتظار بصمت.
+  // خط النشرة وسلسلته الاحتياطية. مُصدَّران كي ينتظرهما `src/app.js` قبل القياس
+  // وكي يفرض السلسلة الاحتياطية على مستند الطباعة حين يقيس بها — بدل تكرار
+  // الأسماء حرفياً في مكانين، تكرارٌ يجعل تغيير الخط يكسر الانتظار بصمت.
   const BULLETIN_FONT_FAMILY = "Almarai";
+  const BULLETIN_FALLBACK_FONT_STACK = "Tahoma,Arial,sans-serif";
+
+  // يفرض السلسلة الاحتياطية وحدها على مستند الطباعة.
+  //
+  // لماذا يلزم أصلاً (ملاحظة Codex P1 على 6508dd7): القياس والطباعة يجريان في
+  // مستندين، ولكلٍّ انتظارُه المحدود لجهوزية الخط. فقد ينتهي انتظار القياس
+  // بالخط الاحتياطي بينما يصل Almarai أثناء انتظار إطار الطباعة — فيُقاس
+  // بخطٍّ ويُطبع بآخر، والفارق ~5% من ارتفاع العمود يكفي لدفع كتلة الأعمدة
+  // الأولى خارج ورقتها فتُنقل كاملةً أو تُقصّ. مهلتان مستقلّتان لا تضمنان
+  // اتفاقاً؛ الضمان الوحيد أن **يرث المستندُ المطبوع قرارَ القياس نفسه**.
+  function fallbackFontCss() {
+    return `
+    .ozk-price-list, .ozk-price-list * { font-family:${BULLETIN_FALLBACK_FONT_STACK} !important; }`;
+  }
 
   function themePageBackground(theme) {
     return THEME_PAGE_BACKGROUND[theme === "light" ? "light" : "dark"];
@@ -57,7 +72,7 @@
       --text:#f3ead2; --muted:#a88d61; --line:#33240d; --gold:#d7a83f;
       --gold-strong:#efc45d; --button-text:#0c0a07;
       width:100%; margin:0; padding:0; overflow:hidden; background:var(--page); color:var(--text);
-      direction:rtl; font-family:'Almarai',Tahoma,Arial,sans-serif; transition:background .2s ease,color .2s ease;
+      direction:rtl; font-family:'${BULLETIN_FONT_FAMILY}',${BULLETIN_FALLBACK_FONT_STACK}; transition:background .2s ease,color .2s ease;
     }
     .ozk-price-list[data-theme="light"] {
       --page:#fffdf8; --surface:#ffffff; --surface-alt:#f8f3e8; --surface-strong:#5b3a09;
@@ -740,10 +755,14 @@
   // بيضاء، وترسم الخلفية الداكنة على كامل الورقة. لا يُبنى هنا أي HTML بديل —
   // `bodyHtml` يجب أن يكون ناتج render() نفسه الذي تعرضه المعاينة، كي يستحيل
   // أن يختلف الملف المصدَّر عن المعاينة.
+  // `fallbackFontOnly`: مرّرها true حين جرى القياس بالسلسلة الاحتياطية، فيُطبع
+  // المستند بها أيضاً. الملف عندئذٍ مطابق لما رآه المالك في المعاينة، ولا فرق
+  // بين ما قِيس وما طُبع — راجع fallbackFontCss أعلاه.
   function printDocument(options = {}) {
     const theme = options.theme === "light" ? "light" : "dark";
     const title = String(options.title || "نشرة الأسعار");
     const bodyHtml = String(options.bodyHtml || "");
+    const fontCss = options.fallbackFontOnly ? fallbackFontCss() : "";
     return `<!doctype html>
 <html lang="ar" dir="rtl" translate="no">
 <head>
@@ -751,7 +770,7 @@
 <meta name="viewport" content="width=794">
 <meta name="google" content="notranslate">
 <title>${escapeHtml(title)}</title>
-<style>${documentBackgroundCss(theme)}</style>
+<style>${documentBackgroundCss(theme)}${fontCss}</style>
 </head>
 <body data-theme="${theme}">${bodyHtml}</body>
 </html>`;
@@ -762,6 +781,7 @@
     CSS,
     THEME_PAGE_BACKGROUND,
     BULLETIN_FONT_FAMILY,
+    BULLETIN_FALLBACK_FONT_STACK,
     themePageBackground,
     documentBackgroundCss,
     printDocument,

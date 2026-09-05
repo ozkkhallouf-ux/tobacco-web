@@ -78,10 +78,11 @@ const PRICES = raw.map((r) => ({
 
 const browser = await chromium.launch();
 
-async function bootApp(width, height) {
+async function bootApp(width, height, { blockWebfont = false } = {}) {
   const context = await browser.newContext({ viewport: { width, height }, bypassCSP: true, serviceWorkers: "block" });
   const page = await context.newPage();
   await page.route("**://*.supabase.co/**", (route) => route.abort());
+  if (blockWebfont) await page.route(/fonts\.(googleapis|gstatic)\.com/, (route) => route.abort());
   await page.goto(`${BASE}/index.html`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => typeof window.buildBulletinDataset === "function", null, { timeout: 20000 });
   await page.evaluate(({ items, prices }) => {
@@ -435,6 +436,79 @@ const CHROME_WHOLE_BLOCK_PUSH_BAND_PX = 8;
   check("الميزانية: الصفحة الأولى ما زالت تحمل مجموعات تحت الرأس",
     budget.firstPageHoldsGroups,
     "لم تعد أي مجموعة تتّسع تحت الرأس");
+}
+
+// ===== ٥) القياس والطباعة لا يفترقان في الخط =====
+// القياس والطباعة يجريان في مستندين، ولكلٍّ انتظارُه المحدود لجهوزية الخط.
+// فقد ينتهي انتظار القياس بالخط الاحتياطي بينما يصل الخط أثناء انتظار إطار
+// الطباعة — فيُقاس بخطٍّ ويُطبع بآخر، والفارق المقيس (~5% من ارتفاع العمود:
+// 949px بالاحتياطي مقابل 902px بالخط) يكفي لدفع كتلة الأعمدة الأولى خارج
+// ورقتها فتُنقل كاملةً أو تُقصّ. (ملاحظة Codex P1 على 6508dd7.)
+// نُعيد إنتاج الحالة حرفياً: نحجب الخط عن **التطبيق** (فيقيس بالاحتياطي)،
+// ثم نطبع المستند في سياق **الخط فيه متاح** — ونطالب بأن يبقى المطبوع مطابقاً
+// للمقيس، وبأن تبقى الورقة الأولى حاملة أصنافها.
+{
+  const { context, page } = await bootApp(1440, 900, { blockWebfont: true });
+  await page.evaluate(() => {
+    (0, eval)("state").syriaRateConfirmed = true;
+    window.openPricePreview(true, "dark");
+  });
+  await page.waitForSelector("[data-action='export-price-preview']", { timeout: 15000 });
+  const planned = await page.evaluate(() => {
+    const plan = window.bulletinRenderPlan(window.buildBulletinDataset(true, "dark").dataset);
+    const first = plan.layout.mainPages[0];
+    return {
+      // نفس القياس الذي يعتمده التطبيق: `document.fonts.check` يُرجع true حتى
+      // بعد فشل التحميل، فلا يصلح شاهداً على أن الخط طُبِّق فعلاً.
+      fontUsable: (() => {
+        const context = document.createElement("canvas").getContext("2d");
+        const SAMPLE = "نشرة الأسعار ABC 12345";
+        context.font = "700 40px monospace";
+        const control = context.measureText(SAMPLE).width;
+        context.font = '700 40px "Almarai",monospace';
+        return Math.abs(context.measureText(SAMPLE).width - control) > 0.5;
+      })(),
+      rows: [...first.right, ...first.left].flatMap((g) =>
+        g.items.map((it) => ({ name: it.name, unit: it.unit, price: it.price })))
+    };
+  });
+  await page.click("[data-action='export-price-preview']");
+  await page.waitForFunction(() => Boolean(document.querySelector("iframe[data-print-frame]")), null, { timeout: 15000 });
+  const documentHtml = await page.evaluate(() =>
+    document.querySelector("iframe[data-print-frame]").getAttribute("srcdoc"));
+  await context.close();
+
+  check("اتفاق الخط: القياس جرى فعلاً بالخط الاحتياطي (الحالة بُنيت)",
+    planned.fontUsable === false, "خط النشرة كان متاحاً رغم حجبه — السيناريو لم يُبنَ");
+
+  check("اتفاق الخط: مستند الطباعة يرث قرار القياس (يفرض السلسلة الاحتياطية)",
+    /font-family:Tahoma,Arial,sans-serif !important/.test(documentHtml),
+    "المستند لا يفرض خط القياس — قد يُطبع بخطٍّ غير الذي قِيس به");
+
+  // يُطبع في سياق الخط فيه متاح: لولا الوراثة لرُسم بـAlmarai وخالف المقيس.
+  const printed = await printExportDocument(documentHtml);
+  const usedFont = await (async () => {
+    const ctx2 = await browser.newContext({ viewport: { width: 794, height: 1123 }, bypassCSP: true, serviceWorkers: "block" });
+    const p2 = await ctx2.newPage();
+    await p2.route(`${BASE}/__fontcheck`, (r) => r.fulfill({ contentType: "text/html; charset=utf-8", body: documentHtml }));
+    await p2.goto(`${BASE}/__fontcheck`, { waitUntil: "networkidle" });
+    const v = await p2.evaluate(() =>
+      getComputedStyle(document.querySelector(".price-list-header-title")).fontFamily);
+    await ctx2.close();
+    return v;
+  })();
+  check("اتفاق الخط: المستند يُرسم بالاحتياطي حتى حين يكون الخط متاحاً للطباعة",
+    !/Almarai/.test(usedFont), `font-family المطبوع = ${usedFont}`);
+
+  const firstSheet = printed.sheets[0] || [];
+  check("اتفاق الخط: الورقة الأولى ما زالت تحمل كل صفوفها المخطَّطة",
+    rowsOnSheet(firstSheet, planned.rows) === planned.rows.length,
+    `مطبوع ${rowsOnSheet(firstSheet, planned.rows)} من ${planned.rows.length}`);
+
+  const firstBlock = printed.geometry.blocks[0];
+  check("اتفاق الخط: كتلة الأعمدة الأولى داخل ورقتها",
+    firstBlock != null && firstBlock.bottom <= A4_HEIGHT_PX + 0.5,
+    `أسفل الكتلة ${firstBlock?.bottom} مقابل ${A4_HEIGHT_PX.toFixed(2)}`);
 }
 
 await browser.close();
