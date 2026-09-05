@@ -236,6 +236,44 @@ console.log("\n— تنقية الأسرار —");
     "ابتلع الحجبُ بقية أثر المكدّس — `.` يجب ألّا تطابق السطر الجديد");
 
   // -------------------------------------------------------------------
+  // انحدار ملاحظة Codex P1 السابعة على PR #188 — مفاتيح JSON المقتبَسة.
+  //
+  // النمط كان يشترط `:` أو `=` مباشرةً بعد اسم الحقل، وفي JSON يأتي اقتباس
+  // إغلاق المفتاح أولاً — فمرّت الأجسام المُسلسلة كاملةً. وهو سياق واقعي
+  // هنا: أخطاء Supabase وواجهات REST ترمي JSON في نصّ الخطأ.
+  // -------------------------------------------------------------------
+  const JSON_SECRETS = [
+    ["password في JSON", '{"password":"correct horse battery staple"}', "horse battery staple"],
+    ["access_token في JSON", '{"access_token":"opaque-session-value-9911"}', "opaque-session-value-9911"],
+    ["api_key في JSON", '{"api_key":"secret-value-12345678"}', "secret-value-12345678"],
+    ["token في JSON", '{"token":"abc def ghi"}', "abc def ghi"],
+    ["فراغ بعد النقطتين", '{"password": "spaced value here"}', "spaced value here"],
+    ["مفتاح وقيمة بين اقتباسين مفردين", "'api_key': 'secret-value-12345678'", "secret-value-12345678"],
+    ["refresh_token وسط جسم أكبر", '{"refresh_token":"opaque-token-9911","user":"x"}', "opaque-token-9911"],
+  ];
+  for (const [label, input, secret] of JSON_SECRETS) {
+    check(`تُحجب قيمة مفتاح مقتبَس: ${label}`, !scrub(input).includes(secret),
+      `بقي «${secret}» — اقتباس إغلاق المفتاح يسبق النقطتين في JSON`);
+  }
+  check("الحجب في JSON محدود بقيمة المفتاح السرّي وحده",
+    scrub('{"refresh_token":"opaque-token-9911","user":"x"}').includes('"user":"x"'),
+    "ابتلع الحجبُ بقية الجسم — الحقول غير السرّية يجب أن تبقى للتشخيص");
+
+  // شواهد سالبة على JSON عادي. أهمّها `item_key`: هو مفتاح المطابقة المركزي
+  // بين Supabase والأمين ويظهر في كل رسالة خطأ تخصّ الأصناف تقريباً — لولا
+  // حدّا `\b` حول اسم الحقل لطابَق `key` داخله ولأُفرغت تلك البلاغات من معناها.
+  for (const intact of [
+    '{"item_key":"TOB-001","name":"غلواز قصير أحمر","price":403}',
+    '{"monkey":"banana"}',
+    '{"keyboard":"qwerty","donkey":"kong"}',
+    '{"status":500,"message":"Internal Server Error","hint":null}',
+    "TypeError: Cannot read properties of undefined (reading 'approved_price_items')",
+  ]) {
+    check(`JSON عادي لا يُحجب: «${intact.slice(0, 42)}…»`, scrub(intact) === intact,
+      `أُفسد جسم JSON تشخيصي — صار: ${scrub(intact)}`);
+  }
+
+  // -------------------------------------------------------------------
   // انحدار ملاحظتَي Codex P1 الخامسة والسادسة على PR #188.
   //
   // (5) رموز GitHub: النمط كان يعرف البادئات الكلاسيكية وحدها، والصيغة
