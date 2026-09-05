@@ -201,20 +201,39 @@ console.log("\n— تنقية الأسرار —");
   // مخطط عارٍ بلا ترويسة لم يكن يُطابَق إطلاقاً، وBasic كان يسرّب
   // اسم المستخدم وكلمة السرّ مُرمَّزَين.
   // ---------------------------------------------------------------------
+  // العقد بعد ملاحظة Codex P1 الرابعة: قيمة ترويسة الترخيص تُحجب **كاملةً**
+  // حتى نهاية السطر، بلا قراءة اسم المخطط إطلاقاً. جولتان سابقتان حاولتا
+  // الإبقاء على جزء منها لأجل التشخيص وكلتاهما سرّبت — الأولى تركت الرمز بعد
+  // كلمة `Bearer`، والثانية تركته بعد أي مخطط خارج قائمة المعروفين أو مُقتبَس.
   const authCases = [
-    ["Authorization: Bearer", "Authorization: Bearer opaque-session-token-abc123", "opaque-session-token-abc123"],
-    ["authorization: bearer (حالة صغيرة)", "authorization: bearer 9f8e7d6c5b4a", "9f8e7d6c5b4a"],
-    ["Bearer عارٍ بلا ترويسة", "Bearer sk-live-CUSTOMER-SESSION-9911", "sk-live-CUSTOMER-SESSION-9911"],
-    ["Authorization: Basic", "Authorization: Basic dXNlcjpwYXNzd29yZA==", "dXNlcjpwYXNzd29yZA=="],
-    ["Basic عارٍ بلا ترويسة", "Basic dXNlcjpwYXNzd29yZA==", "dXNlcjpwYXNzd29yZA=="],
-    ["ترخيص بلا مخطط", "Authorization: rawopaquetokenvalue123", "rawopaquetokenvalue123"],
-    ["proxy-authorization", "proxy-authorization: Bearer proxy-secret-99887766", "proxy-secret-99887766"],
+    ["Bearer", "Authorization: Bearer opaque-session-token-9911", "opaque-session-token-9911"],
+    ["bearer حالة صغيرة", "authorization: bearer 9f8e7d6c5b4a", "9f8e7d6c5b4a"],
+    ["Basic", "Authorization: Basic dXNlcjpwYXNzd29yZA==", "dXNlcjpwYXNzd29yZA=="],
+    ["Token (مخطط خارج أي قائمة)", "Authorization: Token opaque-session-token-9911", "opaque-session-token-9911"],
+    ["ApiKey (مخطط خارج أي قائمة)", "Authorization: ApiKey secret-value-12345678", "secret-value-12345678"],
+    ["قيمة بين علامتَي اقتباس", 'Authorization: "Bearer opaque-session-token-9911"', "opaque-session-token-9911"],
+    ["بلا مخطط إطلاقاً", "Authorization: rawopaquetokenvalue123", "rawopaquetokenvalue123"],
+    ["Proxy-Authorization", "Proxy-Authorization: Bearer proxy-secret-99887766", "proxy-secret-99887766"],
+    ["X-Proxy-Authorization", "X-Proxy-Authorization: Token opaque-session-token-9911", "opaque-session-token-9911"],
     ["ترخيص وسط جملة", "request failed Authorization: Bearer leak-me-1234 status=401", "leak-me-1234"],
+    ["Bearer عارٍ بلا ترويسة", "Bearer sk-live-CUSTOMER-SESSION-9911", "sk-live-CUSTOMER-SESSION-9911"],
+    ["Basic عارٍ بلا ترويسة", "Basic dXNlcjpwYXNzd29yZA==", "dXNlcjpwYXNzd29yZA=="],
   ];
   for (const [label, input, secret] of authCases) {
     check(`تُحذف الاعتمادية: ${label}`, !scrub(input).includes(secret),
       `بقي «${secret}» بعد التنقية — الاعتمادية ستصل إلى طرف ثالث`);
   }
+
+  // اسم الترويسة يبقى — وهو كل ما يبقى. لا اسم مخطط ولا ذيل.
+  check("اسم الترويسة يبقى للتشخيص",
+    scrub("Authorization: Bearer opaque-session-token-9911").startsWith("Authorization: "),
+    "حُذف اسم الترويسة أيضاً — يصير البلاغ أعمى بلا مقابل");
+  check("لا يبقى اسم المخطط (الحجب شامل لا انتقائي)",
+    !scrub("Authorization: Bearer opaque-session-token-9911").includes("Bearer"),
+    "بقي اسم المخطط — أي إبقاء انتقائي يفترض شكلاً للقيمة، وكل افتراض شكلٍ كُسِر");
+  check("الحجب يقف عند نهاية السطر",
+    scrub("err\nAuthorization: Bearer opaque-session-token-9911\nat foo.js:3:4").includes("at foo.js:3:4"),
+    "ابتلع الحجبُ بقية أثر المكدّس — `.` يجب ألّا تطابق السطر الجديد");
 
   // -------------------------------------------------------------------
   // انحدار ملاحظتَي Codex P1 الثانية والثالثة على PR #188.
@@ -234,8 +253,6 @@ console.log("\n— تنقية الأسرار —");
     check(`Digest: لا يبقى «${part}»`, !scrub(DIGEST_HEADER).includes(part),
       `بقي «${part}» — قيمة Digest تُحجب حتى نهاية السطر لا حتى أول فراغ`);
   }
-  check("Digest: اسم المخطط يبقى للتشخيص", scrub(DIGEST_HEADER).includes("Digest"),
-    "حُذف اسم المخطط أيضاً — خسارة تشخيصية بلا مقابل");
 
   const cookieCases = [
     ["Cookie: session=", "Cookie: session=opaque-session-token-9911", "opaque-session-token-9911"],
@@ -257,15 +274,6 @@ console.log("\n— تنقية الأسرار —");
   check("document.cookie كنصّ برمجي لا يُمَسّ", scrub(COOKIE_CODE) === COOKIE_CODE,
     `أُتلف نصّ برمجي — صار: ${scrub(COOKIE_CODE)}`);
 
-  // اسم المخطط يبقى ظاهراً عمداً: «فشل مصادقة من نوع Bearer» معلومة تشخيصية
-  // بلا سرّ، وحذفها يجعل البلاغ أعمى بلا مكسب أمني.
-  check("اسم المخطط يبقى للتشخيص",
-    scrub("Authorization: Bearer opaque-session-token-abc123").includes("Bearer"),
-    "حُذف اسم المخطط أيضاً — خسارة تشخيصية بلا مقابل");
-  // ما بعد الاعتمادية لا يُبتلع: الحجب محدود لا شامل.
-  check("النصّ التالي للاعتمادية لا يُبتلع",
-    scrub("request failed Authorization: Bearer leak-me-1234 status=401").includes("status="),
-    "ابتلع الحجبُ بقية الرسالة — توسّع يفسد التشخيص");
 
   // شواهد سالبة: نصّ إنجليزي عادي يحمل هذه الكلمات ولا يحمل اعتمادية.
   // بلا هذه الشواهد يمرّ نمط جشع يحجب «basic authentication failed» كلها.
@@ -274,6 +282,8 @@ console.log("\n— تنقية الأسرار —");
     "Bearer token is missing",
     "digest algorithm not supported",
     "cookie consent banner failed to load",
+    "at checkAuthorization (auth.js:12:3)",
+    "unauthorization: not a header",
     "TypeError: Cannot set property cookie of #<Document>",
     "Authorization failed: user lacks role",
     "TypeError: cannot read property x of undefined",
