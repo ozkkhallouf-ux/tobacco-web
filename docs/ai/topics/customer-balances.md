@@ -12,7 +12,7 @@
 
 ## نطاق الملفات
 
-`src/app.js`, `src/supabase-client.js`, `src/business-snapshot.js`, `src/decision-engine.js`, `tools/ameen-customer-balances-query.sql`, `tools/push-ameen-account-balances.ps1`, `tools/push-customer-movements.ps1`, `tools/push-customer-invoices.ps1`, `tools/verify-balances-all.ps1`, `supabase/ameen-account-balance-reports.sql`, `supabase/migrations/20260905170644_credit_limits_customer_guid.sql`.
+`src/app.js`, `src/supabase-client.js`, `src/business-snapshot.js`, `src/decision-engine.js`, `tools/ameen-daily-summary.ps1`, `tools/ameen-customer-balances-query.sql`, `tools/push-ameen-account-balances.ps1`, `tools/push-customer-movements.ps1`, `tools/push-customer-invoices.ps1`, `tools/verify-balances-all.ps1`, `supabase/ameen-account-balance-reports.sql`, `supabase/migrations/20260905170644_credit_limits_customer_guid.sql`.
 
 ## هوية الزبون بين التقارير الثلاثة (مثبت 2026-09-05)
 
@@ -63,8 +63,12 @@
 المعرّف. ولأن PostgREST لا يستنتج فهرساً جزئياً في ON CONFLICT، صار الحفظ
 «بحثاً ثم كتابة» في `src/supabase-client.js` بدل `upsert`.
 
-المطابقة في القراءة (`customerLimitFor` في `src/app.js`، و`buildReceivables` في
-`src/business-snapshot.js`، و`creditLimitFor` في `src/decision-engine.js`):
+المستهلكون **أربعة** لا ثلاثة، وكلهم على القاعدة نفسها: `customerLimitFor` في
+`src/app.js`، و`buildReceivables` في `src/business-snapshot.js`، و`creditLimitFor`
+في `src/decision-engine.js`، و`Get-InternalCreditLimit` في
+`tools/ameen-daily-summary.ps1` (أُغفل في النسخة الأولى وكشفته مراجعة Codex —
+كان تقرير اليوم سيُسقط حدّ الزبون المُعاد تسميته من عدّادَي التجاوز والاقتراب
+ومن الجدول المُرسَل رغم إصلاح الواجهة). المطابقة:
 
 | حال الزبون | حال الحد المحفوظ | النتيجة |
 |---|---|---|
@@ -95,7 +99,7 @@
 يميّزه الناظر عن «لا حدود مضبوطة أصلاً». صار يحتفظ بآخر نسخة ناجحة ويُعلن الخطأ
 بلافتة تسمّي الهجرة.
 
-الفحص: `scripts/check-credit-limit-identity.mjs` (29 اختباراً؛ يفشل على السلوك
+الفحص: `scripts/check-credit-limit-identity.mjs` (35 اختباراً؛ يفشل على السلوك
 القديم — أُثبت بتعطيل مطابقة المعرّف فسقطت 4 اختبارات).
 
 ## قيود ثابتة

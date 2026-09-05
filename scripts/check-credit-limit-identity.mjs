@@ -345,6 +345,60 @@ test("نموذج الحد في الواجهة يحمل المعرّف", () => {
   assert.match(app, /customerGuid: customerGuidValue/, "الحفظ لا يرسل المعرّف");
 });
 
+// ===== 5) التقرير اليومي على Windows (tools/ameen-daily-summary.ps1) =====
+//
+// رابع مستهلك للحدود، وأُغفل في النسخة الأولى من هذا الإصلاح (ملاحظة P1 من
+// Codex على PR #194). كان يطابق بالمفتاح النصّي وحده، فإعادة تسمية حساب تُسقط
+// حدَّ صاحبه من عدّادَي «تجاوز الحد» و«قريب من الحد» ومن الجدول المُرسَل —
+// أي أن العطل نفسه كان سيبقى حيّاً في التقرير رغم إصلاح الواجهة.
+// لا يوجد PowerShell على بيئة التطوير هنا، فالتحقق على المصدر لا بالتشغيل.
+const dailySummary = readFileSync(new URL("../tools/ameen-daily-summary.ps1", import.meta.url), "utf8");
+
+test("التقرير اليومي يسحب customer_guid من Supabase", () => {
+  assert.match(dailySummary, /customer_credit_limits\?select=[^"]*customer_guid/,
+    "الاستعلام لا يجلب المعرّف، فلا سبيل للمطابقة به مهما كان المنطق");
+});
+
+test("التقرير اليومي يطابق بالمعرّف أولاً", () => {
+  assert.match(dailySummary, /function Get-InternalCreditLimit/, "لم أجد دالة اختيار الحد الداخلي");
+  const start = dailySummary.indexOf("function Get-InternalCreditLimit");
+  const body = dailySummary.slice(start, dailySummary.indexOf("\nfunction ", start + 10));
+  const guidAt = body.indexOf("ByGuid");
+  const keyAt = body.indexOf("ByKey");
+  assert.ok(guidAt > 0, "لا مطابقة بالمعرّف إطلاقاً");
+  assert.ok(guidAt < keyAt, "المطابقة بالاسم تسبق المطابقة بالمعرّف");
+});
+
+test("التقرير اليومي لا يورّث حدّاً بالاسم لزبون يحمل معرّفاً", () => {
+  const start = dailySummary.indexOf("function Get-InternalCreditLimit");
+  const body = dailySummary.slice(start, dailySummary.indexOf("\nfunction ", start + 10));
+  assert.match(body, /ByKeyLegacy/, "لا خريطة احتياط مقصورة على الحدود بلا معرّف");
+  // الفرع الذي يحمل فيه الزبون معرّفاً يجب أن ينتهي بصفر لا أن يسقط إلى ByKeyAny
+  const guardedBranch = body.slice(body.indexOf("if ($guid) {"));
+  assert.ok(!guardedBranch.slice(0, guardedBranch.indexOf("return 0")).includes("ByKeyAny"),
+    "زبون بمعرّف يمكن أن يرث حدّ حساب آخر يطابقه اسماً");
+});
+
+test("التقرير اليومي يعامل المعرّف الصفري كغياب", () => {
+  assert.match(dailySummary, /function Get-NormalizedGuid/, "لا تطبيع للمعرّف");
+  assert.ok(dailySummary.includes('$guid -eq "00000000-0000-0000-0000-000000000000"'),
+    "المعرّف الصفري يُقبل كمعرّف صالح");
+});
+
+test("التقرير اليومي ما زال يحمل BOM (شرط PowerShell 5.1)", () => {
+  const bytes = readFileSync(new URL("../tools/ameen-daily-summary.ps1", import.meta.url));
+  assert.ok(bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf,
+    "ضاع BOM فستُقرأ النصوص العربية بترميز ANSI على Windows");
+});
+
+test("التقرير اليومي بلا صيغ تكسر PowerShell 5.1", () => {
+  const start = dailySummary.indexOf("function Get-NormalizedGuid");
+  const end = dailySummary.indexOf("function Build-TableRows");
+  const block = dailySummary.slice(start, end);
+  assert.ok(!block.includes("??"), "المعامل ?? غير مدعوم في PowerShell 5.1");
+  assert.ok(!/\?\s*[^\s]+\s*:\s/.test(block.replace(/#.*$/gm, "")), "المعامل الثلاثي غير مدعوم في PowerShell 5.1");
+});
+
 console.log("فحص هوية حدود الائتمان (customerGuid)");
 console.log(results.join("\n"));
 if (failed) {
