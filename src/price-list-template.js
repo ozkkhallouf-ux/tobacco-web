@@ -327,11 +327,8 @@
     while (ri < rq.length || li < lq.length) {
       const pageIndex = pages.length;
       const budgetForThisPage = pageIndex === 0 ? reducedFirstPageBudget : fullBudget;
-      let limit = Math.max(0, budgetForThisPage - safetyMarginPx);
+      const limit = Math.max(0, budgetForThisPage - safetyMarginPx);
       const page = { right: [], left: [], rightHeight: 0, leftHeight: 0 };
-      // نحفظ موضع الطابورَين عند بداية هذه الصفحة لإتاحة إعادة التوزيع إن لزم.
-      const riStart = ri;
-      const liStart = li;
 
       // عمود اليمين: من طابور اليمين أولاً، ثم فيضان من طابور اليسار إن نفد الأول.
       for (;;) {
@@ -363,40 +360,23 @@
         }
       }
 
-      // إن كانت هذه الصفحة الأولى فارغة تماماً (ميزانية = 0 أو الرأس يملأ الصفحة كلها)
-      // أو شبه فارغة (أطول عمود < 50% من الميزانية المخفَّضة) رغم وجود مجموعات في
-      // الطابور، نُعيد التوزيع بالميزانية الكاملة: الرأس في HTML منفصل فوق الأعمدة
-      // (وليس داخلها)، فالمساحة الفعلية أكبر من الميزانية المخفَّضة — والمتصفح يدير
-      // الفيضان الطبيعي دون كسر أي مجموعة (break-inside:avoid). الحالة الأولى
-      // (فارغة تماماً) تنطلق حتى حين reducedFirstPageBudget=0 لأن الشرط الثاني
-      // (< 0*0.5=0) لا يصح أبداً.
-      const firstPageIsEmpty = page.right.length === 0 && page.left.length === 0;
-      const firstPageUnderutilized = pageIndex === 0
-        && (firstPageIsEmpty || Math.max(page.rightHeight, page.leftHeight) < reducedFirstPageBudget * 0.5)
-        && (ri < rq.length || li < lq.length);
-      if (firstPageUnderutilized) {
-        ri = riStart;
-        li = liStart;
-        page.right = [];
-        page.left = [];
-        page.rightHeight = 0;
-        page.leftHeight = 0;
-        limit = Math.max(0, fullBudget - safetyMarginPx);
-        for (;;) {
-          if (ri < rq.length && page.rightHeight + rq[ri].h <= limit + 1e-6) {
-            page.right.push(rq[ri].group); page.rightHeight += rq[ri].h; ri += 1;
-          } else if (ri >= rq.length && li < lq.length && page.rightHeight + lq[li].h <= limit + 1e-6) {
-            page.right.push(lq[li].group); page.rightHeight += lq[li].h; li += 1;
-          } else { break; }
-        }
-        for (;;) {
-          if (li < lq.length && page.leftHeight + lq[li].h <= limit + 1e-6) {
-            page.left.push(lq[li].group); page.leftHeight += lq[li].h; li += 1;
-          } else if (li >= lq.length && ri < rq.length && page.leftHeight + rq[ri].h <= limit + 1e-6) {
-            page.left.push(rq[ri].group); page.leftHeight += rq[ri].h; ri += 1;
-          } else { break; }
-        }
-      }
+      // **لا تُملأ صفحةٌ بأكثر من ميزانيتها هي.** كانت هنا «كتلة إنقاذ» تُعيد
+      // تعبئة الصفحة الأولى بالميزانية الكاملة (ارتفاع الورقة كلها) متى خرجت
+      // فارغة أو مستغلّة أقل من نصف ميزانيتها المخفَّضة، بحجّة أن «الرأس فوق
+      // الأعمدة لا داخلها فالمساحة الفعلية أكبر». الحجّة مقلوبة: الرأس يجلس
+      // على **نفس الورقة** فوق الأعمدة، فمساحة الصفحة الأولى أقلّ من غيرها
+      // بمقدار ارتفاعه لا أكثر منها. فكانت كتلة الأعمدة الأولى تُبنى بارتفاع
+      // ورقة كاملة ثم يُركَّب فوقها الرأس (~156px) — أي كتلة أطول من الورقة
+      // بالضبط بمقدار الرأس. النتيجة المقاسة:
+      //   · كروم يُجزّئ الكتلة: ورقة زائدة ومحتوى الصفحة الأولى مشطور.
+      //   · سفاري يدفع الكتلة **كاملةً** إلى الورقة التالية (نفس سلوك الدفع
+      //     الموصوف في خصم حاشية الأعمدة أدناه)، و`.ozk-price-list` تحمل
+      //     `overflow:hidden` فيُقصّ ما خرج — فتصل الزبون نشرةٌ فيها **الرأس
+      //     وحده بلا أي صنف**، وهو بالضبط العطل الإنتاجي في نشرة الليرة.
+      // ميزانية الصفحة الأولى = ارتفاع الورقة - الرأس، ولا شيء يزيدها. وإن لم
+      // تتّسع أي مجموعة تحت الرأس فالصفحة الأولى تبقى بلا أعمدة (يتكفّل
+      // renderPagesBlock بعدم رسم كتلة فارغة) وتبدأ المجموعات من الورقة
+      // التالية بميزانيتها الكاملة — ورقة أهدر خيرٌ من أصناف تختفي.
       balancePageColumns(page, limit, heights, balanceThresholdPx);
       pages.push(page);
     }
@@ -629,6 +609,12 @@
   function renderPagesBlock(pages, isDocumentFirstPage) {
     return pages.map((page, index) => {
       const forceBreak = !(isDocumentFirstPage && index === 0);
+      // صفحة بلا أي مجموعة في عمودَيها تحدث فقط حين لا تتّسع أي مجموعة تحت
+      // الرأس في الصفحة الأولى. نُبقي مكانها في المصفوفة كي تحتفظ الصفحات
+      // التالية بفاصلها القسري (فتبدأ من الورقة الثانية كما هو مخطَّط)، لكن
+      // لا نرسم كتلة أعمدة فارغة: كانت تطبع حاشية وفاصلاً ذهبياً تحت رأس
+      // وحيد فتبدو الورقة معطوبة.
+      if (!page.right.length && !page.left.length) return "";
       return `
       <div class="price-list-columns${forceBreak ? " price-list-secondary-page" : ""}">
         <div class="price-list-column-stack">${renderStack(page.right)}</div>
