@@ -236,6 +236,41 @@ console.log("\n— تنقية الأسرار —");
     "ابتلع الحجبُ بقية أثر المكدّس — `.` يجب ألّا تطابق السطر الجديد");
 
   // -------------------------------------------------------------------
+  // انحدار ملاحظتَي Codex P1 الثامنة والتاسعة على PR #188.
+  //
+  // (8) قاعدة الترخيص قبلت مفتاحاً غير مقتبَس وحده، فترويسات مُسلسلة
+  //     كـ`{"Authorization":"Token abc…"}` مرّت كاملةً — اقتباس إغلاق
+  //     المفتاح يسبق النقطتين فلا يصل النمط إليهما.
+  // (9) ابتلاع القيمة المقتبَسة استعمل `[^"\n]*` فاعتبر أوّل اقتباس نهايةً
+  //     حتى لو كان مهروباً: `password="foo\"bar baz secret"` حُجب منه
+  //     `"foo\"` ومرّ الباقي.
+  // -------------------------------------------------------------------
+  const JSON_AUTH = [
+    ["مفتاح Authorization مقتبَس", '{"Authorization":"Token abcdefghijklmnop"}', "abcdefghijklmnop"],
+    ["قيمة بلا مخطط", '{"Authorization":"rawopaquetokenvalue"}', "rawopaquetokenvalue"],
+    ["حالة صغيرة", '{"authorization":"Bearer opaque-session-9911"}', "opaque-session-9911"],
+    ["Proxy-Authorization مقتبَس", '{"Proxy-Authorization":"Digest response=\\"abc123\\""}', "abc123"],
+  ];
+  for (const [label, input, secret] of JSON_AUTH) {
+    check(`تُحجب قيمة مفتاح ترخيص مقتبَس: ${label}`, !scrub(input).includes(secret),
+      `بقي «${secret}» — اقتباس إغلاق المفتاح يسبق الفاصل في JSON`);
+  }
+  // الشكل المقتبَس جسمُ JSON لا سطرَ ترويسة، فالحجب يقتصر على قيمته وحدها.
+  check("ترخيص في JSON: بقية الحقول تبقى للتشخيص",
+    scrub('{"Authorization":"Token abc","user":"ozk"}').includes('"user":"ozk"'),
+    "ابتلع الحجبُ الجسم كله — الحجب حتى نهاية السطر للترويسة لا لـJSON");
+
+  const ESCAPED_QUOTES = [
+    ["اقتباس مهروب داخل password", 'password="foo\\"bar baz secret"', "bar baz secret"],
+    ["اقتباس مهروب داخل token في JSON", '{"token":"a\\"b more-secret-here"}', "more-secret-here"],
+    ["اقتباس مفرد مهروب داخل secret", "secret='it\\'s a secret phrase'", "s a secret phrase"],
+  ];
+  for (const [label, input, secret] of ESCAPED_QUOTES) {
+    check(`الهروب لا يُنهي القيمة: ${label}`, !scrub(input).includes(secret),
+      `بقي «${secret}» — الاقتباس المهروب ليس نهاية القيمة`);
+  }
+
+  // -------------------------------------------------------------------
   // انحدار ملاحظة Codex P1 السابعة على PR #188 — مفاتيح JSON المقتبَسة.
   //
   // النمط كان يشترط `:` أو `=` مباشرةً بعد اسم الحقل، وفي JSON يأتي اقتباس

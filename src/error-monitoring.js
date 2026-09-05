@@ -77,6 +77,28 @@
   //   • `Authorization: Basic <base64>` كان يسرّب اسم المستخدم وكلمة السرّ.
   // سبب فوات ذلك أصلاً: حالة الاختبار كانت `Authorization: eyJhbGci…` بلا
   // كلمة مخطط، فالتقطها نمط JWT وأعطت ثقة كاذبة بأن الترويسة محروسة.
+  // طول القيمة المقتبَسة ابتداءً من أوّل محرف، أو -1 إن لم تبدأ باقتباس.
+  //
+  // ⚠️ إصلاح ملاحظة Codex P1 التاسعة على PR #188: البدائل السابقة استعملت
+  // `[^"\n]*` فكانت تعتبر أوّل اقتباس نهايةَ القيمة — حتى لو كان مهروباً.
+  // فعلى `password="foo\"bar baz secret"` كان المحجوب `"foo\"` ويمرّ
+  // `bar baz secret"` إلى Rollbar. المسح هنا يتخطّى المحرف التالي لأي
+  // شرطة خلفية، فلا يُخدَع باقتباس مهروب.
+  //
+  // مُساعد واحد لكل القواعد عمداً: تكرار منطق الابتلاع في نمطين مختلفين هو
+  // ما أنتج الاختلاف الذي التقطته الملاحظة أصلاً.
+  function quotedValueLength(text) {
+    var quote = text.charAt(0);
+    if (quote !== '"' && quote !== "'" && quote !== "`") return -1;
+    for (var i = 1; i < text.length; i += 1) {
+      var ch = text.charAt(i);
+      if (ch === "\\") { i += 1; continue; }  // محرف مهروب: يُتخطّى هو وتاليه
+      if (ch === "\n") return i;               // اقتباس غير مُغلَق: يقف عند السطر
+      if (ch === quote) return i + 1;
+    }
+    return text.length;                        // غير مُغلَق حتى النهاية: يُحجب كله
+  }
+
   var SECRET_RULES = [
     // 1) ترويسة ترخيص — تُحجب القيمة كاملةً حتى نهاية السطر، بلا استثناء.
     //
@@ -110,9 +132,27 @@
     //   • `(^|[^\w])` قبلها — فكلمة تنتهي بـ«authorization» مثل
     //     `unauthorization:` لا تُطابَق. وهي تسمح بالشرطة عمداً كي يبقى
     //     `X-Proxy-Authorization:` مشمولاً.
+    //
+    // ⚠️ إصلاح ملاحظة Codex P1 الثامنة على PR #188: النمط قبل مفتاحاً غير
+    // مقتبَس وحده، فترويسات مُسلسلة كـ`{"Authorization":"Token abc…"}` مرّت
+    // كاملةً — اقتباس إغلاق المفتاح يسبق النقطتين فلا يصل النمط إليهما.
+    // فصار الاقتباس اختيارياً، والمرجع الخلفي `\2` يفرض تطابق الفتح والإغلاق
+    // (فلا يُطابَق `"authorization'`).
+    //
+    // والحجب يفرّق بين الشكلين عمداً:
+    //   • مفتاح غير مقتبَس = سطر ترويسة → حجب حتى نهاية السطر، لأن قيمة
+    //     الترويسة كلها سرّ ولا ذيل آمن فيها (خلاصة الجولات الثلاث السابقة).
+    //   • مفتاح مقتبَس = جسم JSON → حجب القيمة المقتبَسة وحدها، فتبقى بقية
+    //     الحقول (`"user":"x"`) للتشخيص. الحجب حتى نهاية السطر هنا كان
+    //     سيبتلع الجسم كله بلا داعٍ.
     {
-      re: /(^|[^\w])((?:proxy-)?authorization\s*[=:]\s*).*/gim,
-      to: function (match, before, prefix) { return before + prefix + REDACTED; }
+      re: /(^|[^\w])(["'`]?)((?:proxy-)?authorization)\2(\s*[=:]\s*)(.*)/gim,
+      to: function (match, before, quote, key, separator, value) {
+        var head = before + quote + key + quote + separator;
+        if (!quote) return head + REDACTED;
+        var length = quotedValueLength(value);
+        return head + REDACTED + (length >= 0 ? value.slice(length) : "");
+      }
     },
     // 3) ترويسة كوكيز — تُحجب قيمتها كاملةً حتى نهاية السطر.
     //
@@ -195,8 +235,14 @@
     // كل رسالة خطأ تخصّ الأصناف تقريباً، فكان الحجب سيُفرغ تلك البلاغات من
     // معناها. `_` محرف كلمة، فلا حدّ بينه وبين `k`، فلا مطابقة (مُختبَر).
     {
-      re: /(["'`]?\b(?:token|key|secret|password|passwd|pwd|apikey|api_key|access_token|refresh_token)\b["'`]?\s*[=:]\s*)("[^"\n]*"?|'[^'\n]*'?|`[^`\n]*`?|\S+)/gi,
-      to: function (match, prefix) { return prefix + REDACTED; }
+      re: /(["'`]?\b(?:token|key|secret|password|passwd|pwd|apikey|api_key|access_token|refresh_token)\b["'`]?\s*[=:]\s*)(.*)/gi,
+      to: function (match, prefix, value) {
+        var length = quotedValueLength(value);
+        // مقتبَسة: تُبتلع حتى الإغلاق الحقيقي (مع احترام الهروب) ويبقى ما بعدها.
+        if (length >= 0) return prefix + REDACTED + value.slice(length);
+        // غير مقتبَسة: السلوك الآمن نفسه — أوّل كلمة بلا فراغات.
+        return prefix + value.replace(/^\S+/, REDACTED);
+      }
     }
   ];
 
