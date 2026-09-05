@@ -33,7 +33,7 @@ export const FONT_USABLE_PROBE = `() => {
   } finally { probe.remove(); }
 }`;
 
-export async function waitForBulletinFont(page, timeout = 20000) {
+async function waitForBulletinFont(page, timeout = 20000) {
   try {
     await page.waitForFunction(`(${FONT_USABLE_PROBE})()`, null, { timeout });
     return true;

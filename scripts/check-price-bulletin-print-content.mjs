@@ -591,7 +591,7 @@ for (const sc of [
 // ===== 2ج) كاشف الالتفاف نفسه يعمل (وإلا كان الشرط أعلاه بلا معنى) =====
 // شاهد موجب على الكاشف: اسم أطول من خليته يجب أن يُرصد ملتفّاً، واسم عادي لا.
 {
-  const { context, page, fontReady } = await bootApp(1440, 900);
+  const { context, page } = await bootApp(1440, 900);
   const LONG = "ماستر طويل أزرق سليم نعنع مثلج بعلبة مزدوجة طويلة الاسم جداً للاختبار";
   const probe = await page.evaluate(([LONG, wrapProbe]) => {
     const T = window.OZKPriceListTemplate;
