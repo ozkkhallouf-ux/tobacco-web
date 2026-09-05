@@ -166,9 +166,8 @@ function blockOrigin(blockBody) {
 
 const LINE_TOLERANCE_PX = 3;
 
-// أسطر مجموعة كتل واحدة. كل سطر يحتفظ بمواضع كتله الأفقية لأننا نحتاجها
-// للتمييز بين سطر صفّ جديد وسطر «تكملة التفاف» داخل الخلية نفسها.
-// الكتل تُرسم يساراً⇦يميناً، فعكس ترتيبها داخل السطر يعيده لترتيبه المنطقي.
+// أسطر مجموعة كتل واحدة. الكتل تُرسم يساراً⇦يميناً، فعكس ترتيبها داخل السطر
+// يعيده لترتيبه المنطقي.
 function linesFromBlocks(blocks) {
   const sorted = [...blocks].sort((a, b) => a.y - b.y || a.x - b.x);
   const grouped = [];
@@ -180,15 +179,33 @@ function linesFromBlocks(blocks) {
     }
     current.items.push(block);
   }
-  // كل سطر = **مصفوفة مقاطع رسم** لا نصاً واحداً. ترتيب الحروف داخل المقطع
-  // مصونٌ كما رُسم؛ أما ترتيب المقاطع بين الخلايا فيختلف عن الـDOM (خلية السعر
-  // تُرسم LTR داخل نشرة RTL). لذلك نُبقي حدود المقاطع ونسمح بإعادة ترتيبها
-  // **بينها فقط** عند المطابقة — لا داخلها.
-  return grouped.map((line) => line.items
-    .sort((a, b) => a.x - b.x)
-    .map((b) => normalizeArabic(b.text))
-    .reverse()
-    .filter(Boolean));
+  // كل سطر = **مصفوفة «مقاطع منطقية»**، لا مصفوفة كتل رسم.
+  //
+  // كروم يرسم كل كلمة من خلية الاسم في كتلة `BT…ET` مستقلة، لكن كتل المقطع
+  // الواحد تتشارك **نفس أصل النص** (`Tm`) لأنها مقطع ثنائي الاتجاه واحد. لذلك
+  // نضمّ الكتل المتتالية ذات الأصل الأفقي نفسه في مقطع واحد **ذرّي** ترتيبه
+  // الداخلي مصون.
+  //
+  // هذا يغلق ملاحظة Codex P1 الرابعة (على c34a75e8): بلا هذا الضمّ كانت
+  // المطابقة تُبلّط كل كلمة على حدة، فتقبل «سليم ماستر أزرق» مكان
+  // «ماستر سليم أزرق» — تشوّه عربي يراه الزبون ويمرّ من الحارس.
+  //
+  // ويبقى التسامح المشروع بين المقاطع: خلية السعر تحمل مقطعين بأصلين مختلفين
+  // (الرقم و«ل.س») لأنها تُرسم `direction:ltr` داخل نشرة `rtl`.
+  return grouped.map((line) => {
+    const ordered = line.items.sort((a, b) => a.x - b.x).reverse();
+    const runs = [];
+    let current = null;
+    for (const block of ordered) {
+      const origin = Math.round(block.x);
+      if (!current || current.origin !== origin) {
+        current = { origin, parts: [] };
+        runs.push(current);
+      }
+      current.parts.push(block.text);
+    }
+    return runs.map((run) => normalizeArabic(run.parts.join(""))).filter(Boolean);
+  });
 }
 
 // أسطر الصفحة **مرتّبة بالعمود**: النشرة عمودان متجاوران، فصفّان متقابلان
@@ -748,6 +765,72 @@ for (const sc of [
   check("تشوّه رقمي: الحارس الحالي يرصد عدّاد المجموعة المشوّه",
     Boolean(built.group) && !text.some((lines) => printedGroup(lines, built.group)),
     `عدّاد «${built.group?.name}» مشوّه ومع ذلك اعتبره الحارس مطبوعاً سليماً`);
+}
+
+// ===== 2ب-٣) شاهد سالب: تبديل ترتيب كلمات الاسم يُرصد =====
+// ملاحظة Codex P1 الرابعة (على c34a75e8): كروم يرسم كل كلمة من خلية الاسم في
+// كتلة مستقلة، فتبليطٌ يقبل أي ترتيب للكتل كان يقبل «سليم ماستر أزرق» مكان
+// «ماستر سليم أزرق» — تشوّه عربي يراه الزبون. الآن كتل المقطع الواحد تُضمّ
+// بأصلها الأفقي في مقطع ذرّي ترتيبه مصون، فيُرصد التبديل.
+{
+  const { context, page } = await bootApp(1440, 900);
+  const built = await page.evaluate(() => {
+    const state = (0, eval)("state");
+    state.syriaRateConfirmed = true;
+    const ds = window.buildBulletinDataset(true, "dark").dataset;
+    const plan = window.bulletinRenderPlan(ds);
+    const doc = new DOMParser().parseFromString(plan.markup, "text/html");
+
+    // نبدّل أول كلمتين مختلفتين في اسم صنف — نفس الكلمات بترتيب مختلف.
+    const swapWords = (name) => {
+      const parts = name.trim().split(/\s+/);
+      if (parts.length < 2 || parts[0] === parts[1]) return null;
+      return [parts[1], parts[0], ...parts.slice(2)].join(" ");
+    };
+    const cell = [...doc.querySelectorAll("tbody tr td.name")]
+      .find((td) => swapWords(td.textContent.trim()));
+    const rowEl = cell.closest("tr");
+    const original = {
+      name: cell.textContent.trim(),
+      unit: rowEl.querySelector("td.unit").textContent.trim(),
+      price: rowEl.querySelector("td.price").textContent.trim()
+    };
+    cell.textContent = swapWords(original.name);
+
+    const styleTag = plan.markup.slice(0, plan.markup.indexOf("</style>") + "</style>".length);
+    return {
+      original, scrambled: swapWords(original.name),
+      documentHtml: window.OZKPriceListTemplate.printDocument({
+        theme: "dark", title: "word-order",
+        bodyHtml: styleTag + doc.querySelector(".ozk-price-list").outerHTML
+      })
+    };
+  });
+  await context.close();
+
+  const printed = await printDocument(built.documentHtml);
+  const text = printed.pages;
+
+  // القاعدة القديمة: كل كلمة كتلةٌ مستقلة تُبلَّط بأي ترتيب — أي «تساوي محتوى
+  // بلا ترتيب». نُمثّلها بتساوي مجموعة الحروف والطول معاً.
+  const oldPerBlockTiling = (lines, row) => {
+    const target = normalizeArabic(row.name) + normalizeArabic(row.unit) + normalizeArabic(row.price);
+    const wanted = [...target].sort().join("");
+    return lines.some((line) => {
+      const flat = line.join("");
+      return flat.length === target.length && [...flat].sort().join("") === wanted;
+    });
+  };
+
+  check(`تبديل الكلمات: «${built.original.name}» شُوّه إلى «${built.scrambled}»`,
+    Boolean(built.scrambled) && built.scrambled !== built.original.name,
+    `${built.original.name} → ${built.scrambled}`);
+  check("تبديل الكلمات: القاعدة القديمة (تبليط كل كتلة على حدة) كانت تمرّ زوراً",
+    text.some((lines) => oldPerBlockTiling(lines, built.original)),
+    "الشاهد فقد معناه — لم تعد القاعدة القديمة تمرّ أصلاً");
+  check("تبديل الكلمات: الحارس الحالي يرصد الاسم المبدَّل",
+    !text.some((lines) => printedRow(lines, built.original)),
+    `«${built.original.name}» بُدّلت كلماته ومع ذلك اعتبره الحارس مطبوعاً سليماً`);
 }
 
 // ===== 2ج) كاشف الالتفاف نفسه يعمل (وإلا كان الشرط أعلاه بلا معنى) =====
