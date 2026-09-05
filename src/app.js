@@ -1021,42 +1021,28 @@ function customerInvoiceEntries() {
   return report && Array.isArray(report.items) ? report.items : [];
 }
 
-// هل تعود مجموعة الفواتير هذه لهذا الزبون؟ الإثبات من دفتر حسابه: كل فاتورة في
-// المجموعة يقابلها قيد بنفس التاريخ والقيمة وعلى الجهة الصحيحة (مدين للبيع،
-// دائن للمرتجع). الدفتر مرجع محاسبي لا ترجيح لغوي، ولذلك تصلح هذه المطابقة
-// حيث لا يصلح الاسم. أثر الفاتورة على الحساب قد يكون الإجمالي أو الإجمالي بعد
-// حسم رأس الفاتورة ودفعتها المرافقة، فنقبل أياً منهما.
-function invoiceEntryMatchesLedger(entry, movements) {
-  const invoices = Array.isArray(entry?.invoices) ? entry.invoices : [];
-  const ledger = Array.isArray(movements) ? movements : [];
-  if (!invoices.length || !ledger.length) return false;
-  return invoices.every((inv) => {
-    const date = String(inv?.date || "").slice(0, 10);
-    const total = Number(inv?.total || 0);
-    if (!date || !(total > 0)) return false;
-    const net = total - Number(inv?.discount || 0) - Number(inv?.payment || 0);
-    return ledger.some((m) => {
-      if (String(m?.date || "").slice(0, 10) !== date) return false;
-      const side = Number((inv?.isReturn ? m?.credit : m?.debit) || 0);
-      return Math.abs(side - total) <= 0.5 || Math.abs(side - net) <= 0.5;
-    });
-  });
-}
-
 // مجموعات الفواتير «اليتيمة»: اسمها لا يطابق أي زبون في تقرير الأرصدة، أي لا
 // حساب قائماً بهذا الاسم. تنشأ لأن `bu000.Cust_Name` **لقطة نصّية على رأس كل
-// فاتورة**، فإعادة تسمية الحساب تُحدِّث نصّ بعض الفواتير دون بعض، فتنشطر فواتير
-// الزبون الواحد على مجموعتين باسمين مختلفين.
+// فاتورة**، فإعادة تسمية حساب في الأمين تُحدِّث نصّ بعض الفواتير دون بعض،
+// فتنشطر فواتير الزبون الواحد على اسمين. الحالة المقيسة 2026-09-05: فواتير
+// الحساب 500d8ef6 موزّعة على «لؤي خلوف المحترم / الضاحية» و«لؤي زهية الضاحية».
 //
-// هذا ليس افتراضاً: في تقرير 2026-09-05 الساعة 10:53 كانت فواتير الحساب
-// 500d8ef6 موزّعة فعلاً على «لؤي خلوف المحترم / الضاحية» (فاتورتان) و«لؤي زهية
-// الضاحية» (فاتورة 584 بقيمة 1020$) — والثانية غائبة عن كشف حسابه.
+// **لا تُنسب هذه المجموعات لأحد هنا، ولا تُخمَّن ملكيتها.** جُرّبت نسبتها بمطابقة
+// دفتر الحساب (تاريخ + مبلغ + جهة) ورُفضت بعد قياس على بيانات الإنتاج: 12 من 864
+// زوج (تاريخ، مبلغ مدين) يتشاركه أكثر من زبون — 1.4%. ومجموعة بفاتورة واحدة
+// تُطابَق بزوج واحد فقط، فيكفي أن يغيب دفتر المالك الحقيقي عن اللقطة (تأخّر
+// مزامنة الحركات ~25 دقيقة، أو اقتطاع `MaxMovementsPerCustomer`) ليصير زبون
+// آخر «المرشّح الوحيد» فتُنسب إليه فاتورة ليست له — بأصنافها وأسعارها، وتُصدَّر
+// PDF باسمه. خطأ محاسبي في ورقة تُسلَّم للزبون أسوأ من فاتورة غائبة تُشرح صراحةً.
 //
+// الحلّ الجذري في المصدر لا في الواجهة: `push-customer-invoices.ps1` صار يجمّع
+// بـ`customerGuid`، فتعود المجموعة واحدة بلا أي استدلال. وحتى تصل تلك المزامنة،
+// نُظهر تحذيراً **لا ينسب شيئاً لأحد** بدل التخمين الصامت.
+
 // ذاكرة مؤقتة مربوطة **بهويّة كائنات التقارير نفسها**: كشف اليتامى يقارن كل
-// مجموعة فواتير بكل زبون (77 × 300 مطابقة اسم على بيانات الإنتاج ≈ 14 مللي
-// ثانية للنداء الواحد)، و`customerInvoicesFor` تُستدعى داخل الرسم مرات كثيرة.
-// المفتاح هو هوية الكائن لا نسخة منه: أي تحميل جديد للتقارير يُبطل الذاكرة
-// تلقائياً، فلا يمكن أن تُعرض نتيجة محسوبة على تقرير قديم.
+// مجموعة فواتير بكل زبون (77 × 300 مطابقة اسم على بيانات الإنتاج)، ويُستدعى داخل
+// الرسم مرات كثيرة. المفتاح هو هوية الكائن لا نسخة منه: أي تحميل جديد للتقارير
+// يُبطل الذاكرة تلقائياً، فلا يمكن أن تُعرض نتيجة محسوبة على تقرير قديم.
 let _invoiceIdentityCache = null;
 function invoiceIdentityCache() {
   const invoicesReport = state.customerInvoicesReport;
@@ -1067,11 +1053,7 @@ function invoiceIdentityCache() {
     && cached.invoicesReport === invoicesReport
     && cached.balancesReport === balancesReport
     && cached.movementsReport === movementsReport) return cached;
-  _invoiceIdentityCache = {
-    invoicesReport, balancesReport, movementsReport,
-    orphans: null,
-    adopted: new Map()
-  };
+  _invoiceIdentityCache = { invoicesReport, balancesReport, movementsReport, orphans: null };
   return _invoiceIdentityCache;
 }
 
@@ -1083,41 +1065,18 @@ function orphanInvoiceEntries() {
   return cache.orphans;
 }
 
-// الزبون الوحيد الذي يثبت دفتره ملكية هذه المجموعة اليتيمة — أو null عند صفر
-// مرشّح أو أكثر من واحد. الالتباس لا يُخمَّن: نسبة فاتورة لزبون خطأً أسوأ من
-// عدم عرضها، ورسالة الواجهة تشرح الغياب بدل أن تصمت.
-function soleLedgerClaimantFor(entry) {
-  const claimants = latestCustomerBalanceItems().filter((candidate) => {
-    const ledger = customerFullMovements(candidate);
-    return invoiceEntryMatchesLedger(entry, ledger && ledger.movements);
-  });
-  return claimants.length === 1 ? claimants[0] : null;
-}
-
-// المجموعات اليتيمة التي يملكها هذا الزبون وحده.
-function adoptedInvoiceEntriesFor(item) {
-  const cache = invoiceIdentityCache();
-  const cacheKey = normGuid(item?.customerGuid) || `n:${String(item?.name || "").trim()}`;
-  if (item && cache.adopted.has(cacheKey)) return cache.adopted.get(cacheKey);
-  const result = computeAdoptedInvoiceEntriesFor(item);
-  if (item) cache.adopted.set(cacheKey, result);
-  return result;
-}
-
-function computeAdoptedInvoiceEntriesFor(item) {
-  const ledger = item ? customerFullMovements(item) : null;
-  const movements = ledger && Array.isArray(ledger.movements) ? ledger.movements : [];
-  if (!movements.length) return [];
-  const myGuid = normGuid(item?.customerGuid);
-  const myName = String(item?.name || "").trim();
-  return orphanInvoiceEntries().filter((entry) => {
-    if (!invoiceEntryMatchesLedger(entry, movements)) return false;
-    const claimant = soleLedgerClaimantFor(entry);
-    if (!claimant) return false;
-    return myGuid
-      ? normGuid(claimant.customerGuid) === myGuid
-      : String(claimant.name || "").trim() === myName;
-  });
+// تحذير عام عن انشطار محتمل — بلا نسبة أي فاتورة لأي زبون. يظهر فقط حين يعجز
+// التقرير عن الربط بالهوية (بلا `customerGuid`) وفيه مجموعة باسم لا حساب له.
+function invoiceIdentityWarning() {
+  const entries = customerInvoiceEntries();
+  if (!entries.length) return "";
+  if (entries.some((entry) => normGuid(entry?.customerGuid))) return "";
+  const orphans = orphanInvoiceEntries();
+  if (!orphans.length) return "";
+  const names = orphans.map((entry) => String(entry?.name || "").trim()).filter(Boolean);
+  return `تقرير الفواتير لا يحمل معرّف الحساب، وفيه ${orphans.length} مجموعة باسم لا حساب له اليوم${
+    names.length ? ` (${names.join("، ")})` : ""
+  } — غالباً حساب أُعيدت تسميته في الأمين. فواتير تلك المجموعات لا تُنسب لأحد هنا عمداً؛ شغّل مزامنة الفواتير المحدَّثة على Windows ليعود الربط بالمعرّف.`;
 }
 
 // مجموعة فواتير زبون محدّد بهويته: بالمعرّف أولاً ثم بالاسم.
@@ -1136,37 +1095,12 @@ function customerInvoiceEntryFor(nameOrItem) {
   return (name ? smartNameMatch(entries, (entry) => entry.name, name) : null) || null;
 }
 
-// فواتير زبون محدّد مع محتوياتها (من تقرير ameen_customer_invoices):
-// مجموعته بهويته **زائد** أي مجموعة يتيمة يثبت دفتره ملكيتها. الاتحاد لا الاختيار:
-// حين تنشطر فواتير الزبون على اسمين، اختيار أحدهما يُخفي الآخر بصمت.
-// يقبل عنصر الأرصدة (مفضَّل، يحمل المعرّف) أو الاسم نصّاً (توافقاً).
+// فواتير زبون محدّد مع محتوياتها (من تقرير ameen_customer_invoices) — مجموعته
+// بهويته فقط، بلا أي استدلال. يقبل عنصر الأرصدة (مفضَّل، يحمل المعرّف) أو الاسم
+// نصّاً (توافقاً مع المسارات القديمة).
 function customerInvoicesFor(nameOrItem) {
-  const { item } = customerIdentity(nameOrItem);
-  const own = customerInvoiceEntryFor(nameOrItem);
-  const groups = [];
-  if (own) groups.push(own);
-  for (const adopted of adoptedInvoiceEntriesFor(item)) {
-    if (adopted !== own) groups.push(adopted);
-  }
-  if (!groups.length) return [];
-  if (groups.length === 1) return Array.isArray(groups[0].invoices) ? groups[0].invoices : [];
-
-  // إزالة التكرار بمعرّف الفاتورة (فريد في الأمين)، ثم الأحدث أولاً كما يعرضها
-  // مصدر واحد — كي لا يختلف ترتيب الكشف عن ترتيب قائمة الفواتير.
-  const seen = new Set();
-  const merged = [];
-  for (const group of groups) {
-    for (const inv of (Array.isArray(group.invoices) ? group.invoices : [])) {
-      const key = normGuid(inv?.guid) || `${inv?.number || ""}@${inv?.date || ""}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      merged.push(inv);
-    }
-  }
-  return merged.sort((a, b) =>
-    String(b?.date || "").localeCompare(String(a?.date || ""))
-    || (Number(b?.number) || 0) - (Number(a?.number) || 0)
-  );
+  const entry = customerInvoiceEntryFor(nameOrItem);
+  return entry && Array.isArray(entry.invoices) ? entry.invoices : [];
 }
 
 // فاتورة بمعرّفها في كامل التقرير — لا داخل مجموعة زبون واحد. معرّف الفاتورة
@@ -6668,12 +6602,19 @@ function reportsPage() {
   const selectedCustomerItem = balItems.find((it) => customerKey(it) === state.selectedCustomerKey) || null;
   const selectedCustomerName = selectedCustomerItem ? (selectedCustomerItem.name || "") : "";
   const selInvoices = selectedCustomerItem ? customerInvoicesFor(selectedCustomerItem) : [];
+  // تحذير الانشطار يُعرض مع القائمة وبدونها: فاتورة ناقصة من كشف غير فارغ أخطر
+  // من كشف فارغ، لأن الكشف يبدو مكتملاً.
+  const identityWarn = invoiceIdentityWarning();
+  const identityWarnMarkup = identityWarn
+    ? `<p class="muted" style="margin-top:10px">⚠ ${escapeHtml(identityWarn)}</p>`
+    : "";
   const invoicesMarkup = !selectedCustomerName
     ? '<p class="muted" style="margin-top:10px">اختر زبوناً (أو اكتب اسمه) لعرض فواتيره ومحتوياتها.</p>'
     : !selInvoices.length
-      ? `<p class="muted" style="margin-top:10px">${escapeHtml(customerInvoicesEmptyText(selectedCustomerItem))}</p>`
+      ? `<p class="muted" style="margin-top:10px">${escapeHtml(customerInvoicesEmptyText(selectedCustomerItem))}</p>${identityWarnMarkup}`
       : `<div style="margin-top:12px">
           <div class="sec">📋 فواتير «${escapeHtml(selectedCustomerName)}» (${selInvoices.length}) — اضغط فاتورة لرؤية محتوياتها</div>
+          ${identityWarnMarkup}
           ${selInvoices.map((inv) => `
             <details class="acc-group" style="margin:6px 0">
               <summary class="acc-summary"><span class="acc-title">${inv.isReturn ? "🔁 مرتجع" : "🧾 فاتورة"} ${escapeHtml(inv.number || "")} — ${escapeHtml(inv.date || "")}</span><span class="acc-count" style="${inv.isReturn ? "color:#16794f" : ""}">${escapeHtml(formatMoney(inv.total || 0))} $</span></summary>
@@ -7803,6 +7744,10 @@ function salesHistoryPanel() {
           : ""
       }</p>`
     : "";
+  const identityWarn = invoiceIdentityWarning();
+  const identityNote = identityWarn
+    ? `<p class="muted" style="margin-top:-6px">⚠ ${escapeHtml(identityWarn)}</p>`
+    : "";
 
   const body = !state.customerInvoicesReport
     ? '<p class="muted">لم تصل مزامنة الفواتير من الأمين بعد. جرّب بعد دقائق.</p>'
@@ -7820,7 +7765,7 @@ function salesHistoryPanel() {
       </div>
       <h2>📄 الفواتير السابقة</h2>
       <p class="muted">فواتير المبيعات والمرتجعات المسجّلة في الأمين خلال آخر ${escapeHtml(periodDays)} يوماً — بما فيها ما أُصدر من برنامج الأمين مباشرةً.</p>
-      ${syncNote}
+      ${syncNote}${identityNote}
       <label class="inv-label" style="max-width:340px">بحث
         <input class="inv-input-main" id="sales-history-q" value="${escapeHtml(state.salesHistoryQuery)}" placeholder="اسم الزبون أو رقم الفاتورة" dir="auto" autocomplete="off">
       </label>
@@ -11613,8 +11558,9 @@ function render() {
         // الدفتر لمجموعته. المستند يحمل بعدها **اسم الحساب الحالي** لا النصّ
         // القديم على رأس الفاتورة — الورقة تذهب للزبون، فاسمه فيها يجب أن يكون
         // اسمه اليوم، ورصيدا «قبل/بعد» يجب أن يُقرآ من دفتره هو.
-        const custItem = smartNameMatch(latestCustomerBalanceItems(), (it) => it.name, cust)
-          || (byGuid ? soleLedgerClaimantFor(byGuid.entry) : null);
+        const custItem = smartNameMatch(latestCustomerBalanceItems(), (it) => it.name, cust);
+        // اسم المستند من الحساب متى وُجد، وإلا فنصّ الفاتورة كما سجّله الأمين.
+        // لا نستنتج حساباً لاسم لا حساب له — الاستنتاج هنا ينسب فاتورة لزبون بالتخمين.
         const custName = (custItem && custItem.name) || cust;
         const opts = {
           type: inv.isReturn ? "return" : "invoice",

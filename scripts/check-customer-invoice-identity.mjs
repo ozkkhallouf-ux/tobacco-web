@@ -34,13 +34,10 @@ const PATTERNS = {
   normGuid: /function normGuid\(value\) \{[\s\S]*?\n\}\n/,
   customerIdentity: /function customerIdentity\(nameOrItem\) \{[\s\S]*?\n\}\n/,
   customerInvoiceEntries: /function customerInvoiceEntries\(\) \{[\s\S]*?\n\}\n/,
-  invoiceEntryMatchesLedger: /function invoiceEntryMatchesLedger\(entry, movements\) \{[\s\S]*?\n\}\n/,
   invoiceIdentityCacheVar: /let _invoiceIdentityCache = null;/,
   invoiceIdentityCache: /function invoiceIdentityCache\(\) \{[\s\S]*?\n\}\n/,
   orphanInvoiceEntries: /function orphanInvoiceEntries\(\) \{[\s\S]*?\n\}\n/,
-  computeAdoptedInvoiceEntriesFor: /function computeAdoptedInvoiceEntriesFor\(item\) \{[\s\S]*?\n\}\n/,
-  soleLedgerClaimantFor: /function soleLedgerClaimantFor\(entry\) \{[\s\S]*?\n\}\n/,
-  adoptedInvoiceEntriesFor: /function adoptedInvoiceEntriesFor\(item\) \{[\s\S]*?\n\}\n/,
+  invoiceIdentityWarning: /function invoiceIdentityWarning\(\) \{[\s\S]*?\n\}\n/,
   customerInvoiceEntryFor: /function customerInvoiceEntryFor\(nameOrItem\) \{[\s\S]*?\n\}\n/,
   customerInvoicesFor: /function customerInvoicesFor\(nameOrItem\) \{[\s\S]*?\n\}\n/,
   invoiceByGuid: /function invoiceByGuid\(guid\) \{[\s\S]*?\n\}\n/,
@@ -79,7 +76,7 @@ vm.createContext(sandbox);
 vm.runInContext(source.join("\n"), sandbox);
 const {
   customerInvoicesFor, customerInvoicesStatus, customerInvoicesEmptyText,
-  invoiceByGuid, salesHistoryInvoices, invoiceSyncLagMinutes
+  invoiceByGuid, salesHistoryInvoices, invoiceSyncLagMinutes, invoiceIdentityWarning
 } = sandbox;
 
 // ===== البيانات: نسخة مصغّرة أمينة لشكل تقارير الإنتاج وقت العطل =====
@@ -179,14 +176,17 @@ test("قائمة الفواتير تعرض الفاتورة 4670 أثناء نا
   assert.equal(listed.total, 4670);
 });
 
-test("كشف الحساب يعرض نفس الفاتورة رغم اختلاف الاسم (العطل الأصلي)", () => {
+// أثناء النافذة وبلا معرّف، لا سبيل **صحيحاً** لربط الفاتورة بالزبون. المطلوب
+// إذن ليس إظهارها بالتخمين بل ألّا تغيب صامتةً: رسالة تشرح، وتحذير يسمّي
+// المجموعة اليتيمة. الحلّ الحقيقي في المصدر (تجميع المزامنة بالمعرّف).
+test("نافذة إعادة التسمية: لا تخمين، ولا صمت", () => {
   enterRenameWindow();
   const invoices = customerInvoicesFor(selected());
-  assert.ok(
-    invoices.some((inv) => inv.guid === INV_GUID),
-    "فاتورة موجودة في القائمة ومفقودة من كشف الحساب — هذا هو العطل بعينه"
-  );
-  assert.equal(invoices.length, 2, "يجب أن تظهر فاتورتا الزبون كلتاهما");
+  assert.equal(invoices.length, 0, "نُسبت فواتير بالتخمين");
+  const warn = invoiceIdentityWarning();
+  assert.ok(warn && warn.includes(OLD_NAME), `الغياب مرّ بلا تفسير: ${warn}`);
+  const text = customerInvoicesEmptyText(selected());
+  assert.ok(text && text.length > 0, "رسالة الغياب فارغة");
 });
 
 test("زر PDF يجد الفاتورة بمعرّفها بغضّ النظر عن اسم الزبون", () => {
@@ -206,11 +206,23 @@ test("لا تُسحب فواتير زبون آخر إلى هذا الزبون", 
   );
 });
 
-// ===== 1b) الانشطار الحيّ: فواتير زبون واحد على اسمين في التقرير نفسه =====
+test("زر PDF يظل يجد الفاتورة بمعرّفها حتى داخل مجموعة يتيمة", () => {
+  splitReportState();
+  const found = invoiceByGuid(invoice1020.guid);
+  assert.ok(found, "البحث بمعرّف الفاتورة فشل داخل مجموعة يتيمة");
+  assert.equal(found.invoice.total, 1020);
+  assert.equal(found.entry.name, OLD_NAME, "المجموعة المُعادة ليست اليتيمة");
+});
 
-// هذه هي حالة الإنتاج القائمة وقت كتابة الفحص، لا نافذة عابرة: نصّ الاسم على
-// رأس الفاتورة يُحدَّث لبعض الفواتير دون بعض، فتبقى فاتورة قديمة تحت الاسم القديم.
-test("فواتير موزّعة على اسمين تُعرض كاملةً في كشف الحساب", () => {
+// ===== 1b) الانشطار على اسمين: لا تخمين، ولا صمت =====
+//
+// حالة الإنتاج القائمة: نصّ الاسم على رأس الفاتورة يُحدَّث لبعض الفواتير دون بعض،
+// فتبقى فاتورة قديمة تحت الاسم القديم. **لا تُنسب** لأحد بلا معرّف — نسبتها
+// بمطابقة الدفتر (تاريخ+مبلغ) كانت ملاحظة P1 من Codex، وثبتت صحتها بالقياس على
+// الإنتاج: 12 من 864 زوج (تاريخ، مبلغ مدين) يتشاركه أكثر من زبون. والبديل عن
+// التخمين ليس الصمت، بل تحذير صريح لا ينسب شيئاً لأحد.
+
+function splitReportState() {
   state.customerBalanceReports = [balancesReport(NEW_NAME, "2026-09-05T11:00:00.000Z")];
   state.customerMovementsReport = movementsReport(NEW_NAME);
   state.customerInvoicesReport = {
@@ -221,58 +233,70 @@ test("فواتير موزّعة على اسمين تُعرض كاملةً في �
       { name: "مركز زينو كفر بطنا", invoices: [decoyInvoice], truncated: false }
     ]
   };
+}
+
+test("فاتورة تحت اسم قديم لا تُنسب لأي زبون بلا معرّف (P1)", () => {
+  splitReportState();
   const invoices = customerInvoicesFor(selected());
-  assert.equal(invoices.length, 3, "فاتورة الاسم القديم سقطت من الكشف");
-  assert.ok(invoices.some((inv) => inv.guid === invoice1020.guid), "الفاتورة 584 مفقودة");
-  assert.ok(invoices.some((inv) => inv.guid === INV_GUID), "الفاتورة 4670 مفقودة");
-  // النشر [...] مقصود: المصفوفات تُنشأ داخل realm الـvm، و deepEqual الصارمة
-  // تقارن الـprototype أيضاً فتفشل عبر الـrealms لسبب لا علاقة له بالمنطق.
-  assert.deepEqual(
-    [...invoices].map((inv) => inv.number),
-    ["634", "614", "584"],
-    "الاتحاد يجب أن يبقى مرتّباً من الأحدث"
+  assert.ok(
+    !invoices.some((inv) => inv.guid === invoice1020.guid),
+    "نُسبت فاتورة إلى زبون بالتخمين — هذا ما منعته ملاحظة P1"
   );
-  assert.ok(!invoices.some((inv) => inv.guid === decoyInvoice.guid), "فاتورة زبون آخر تسرّبت");
+  assert.equal(invoices.length, 2, "مجموعة الهوية وحدها لا غير");
 });
 
-test("لا تكرار حين تحمل مجموعتان الفاتورة نفسها", () => {
+test("الانشطار لا يمرّ صامتاً: تحذير صريح بلا نسبة لأحد", () => {
+  splitReportState();
+  const warn = invoiceIdentityWarning();
+  assert.ok(warn, "لا تحذير رغم وجود مجموعة يتيمة — هذا فشل صامت");
+  assert.ok(warn.includes(OLD_NAME), `التحذير لا يسمّي المجموعة اليتيمة: ${warn}`);
+  assert.ok(
+    !warn.includes(NEW_NAME),
+    `التحذير ينسب المجموعة إلى زبون بعينه — ممنوع: ${warn}`
+  );
+});
+
+test("لا تحذير حين يحمل التقرير معرّف الحساب (الحلّ الجذري وصل)", () => {
   state.customerBalanceReports = [balancesReport(NEW_NAME, "2026-09-05T11:00:00.000Z")];
   state.customerMovementsReport = movementsReport(NEW_NAME);
-  state.customerInvoicesReport = {
-    summary: { periodDays: 60, syncedAt: "2026-09-05T10:53:00.000Z" },
-    items: [
-      { name: NEW_NAME, invoices: [invoice4670, invoice13460], truncated: false },
-      { name: OLD_NAME, invoices: [invoice4670], truncated: false }
-    ]
-  };
-  const invoices = customerInvoicesFor(selected());
-  assert.equal(invoices.filter((inv) => inv.guid === INV_GUID).length, 1);
+  state.customerInvoicesReport = invoicesReportByGuid(NEW_NAME, "2026-09-05T10:59:00.000Z");
+  assert.equal(invoiceIdentityWarning(), "");
 });
 
-test("مجموعة يتيمة يطابقها دفترا زبونين لا تُنسب لأيّهما", () => {
-  const twinLedger = [
-    { date: "2026-09-01", debit: 1020, credit: 0, balance: 1020, balanceChrono: 1020 }
-  ];
+test("لا تحذير حين لا توجد مجموعات يتيمة", () => {
+  state.customerBalanceReports = [balancesReport(NEW_NAME, "2026-09-05T11:00:00.000Z")];
+  state.customerMovementsReport = movementsReport(NEW_NAME);
+  state.customerInvoicesReport = invoicesReportByName(NEW_NAME, "2026-09-05T10:59:00.000Z");
+  assert.equal(invoiceIdentityWarning(), "");
+});
+
+test("دفتر زبون آخر يطابق صدفةً لا يجرّ إليه الفاتورة", () => {
+  // الحالة التي وصفتها P1 بالضبط: دفتر المالك الحقيقي غائب عن اللقطة (تأخّر
+  // مزامنة الحركات أو اقتطاعها)، وزبون آخر يحمل قيداً بنفس التاريخ والمبلغ.
   state.customerBalanceReports = [{
     summary: { syncedAt: "2026-09-05T11:00:00.000Z" },
     items: [
       { name: NEW_NAME, key: "a", customerGuid: CUST_GUID, balance: 1020 },
-      { name: "زبون توأم", key: "b", customerGuid: "bbbbbbbb-0000-0000-0000-000000000003", balance: 1020 }
+      { name: "زبون مصادفة", key: "b", customerGuid: "bbbbbbbb-0000-0000-0000-000000000003", balance: 1020 }
     ]
   }];
   state.customerMovementsReport = {
     summary: { syncedAt: "2026-09-05T10:56:00.000Z" },
     items: [
-      { name: NEW_NAME, customerGuid: CUST_GUID, movements: twinLedger },
-      { name: "زبون توأم", customerGuid: "bbbbbbbb-0000-0000-0000-000000000003", movements: twinLedger }
+      // المالك الحقيقي غائب عمداً
+      { name: "زبون مصادفة", customerGuid: "bbbbbbbb-0000-0000-0000-000000000003",
+        movements: [{ date: "2026-09-01", debit: 1020, credit: 0, balance: 1020, balanceChrono: 1020 }] }
     ]
   };
   state.customerInvoicesReport = {
     summary: { periodDays: 60, syncedAt: "2026-09-05T10:53:00.000Z" },
     items: [{ name: OLD_NAME, invoices: [invoice1020], truncated: false }]
   };
-  assert.equal(customerInvoicesFor(state.customerBalanceReports[0].items[0]).length, 0,
-    "التباس الملكية يجب ألا يُحسم بالتخمين");
+  const victim = state.customerBalanceReports[0].items[1];
+  assert.equal(
+    customerInvoicesFor(victim).length, 0,
+    "فاتورة زبون آخر ظهرت في كشف زبون المصادفة — وهذا عين ما حذّرت منه P1"
+  );
 });
 
 // ===== 2) بعد وصول مزامنة تحمل المعرّف: الربط بالمعرّف لا بالاسم =====
@@ -297,8 +321,9 @@ test("الاسم وحده يكفي حين يتطابق الاسمان (تقار�
 test("تمرير الاسم نصّاً يبقى مدعوماً (توافق مع المسارات القديمة)", () => {
   state.customerBalanceReports = [balancesReport(NEW_NAME, "2026-09-05T11:00:00.000Z")];
   state.customerMovementsReport = movementsReport(NEW_NAME);
-  state.customerInvoicesReport = invoicesReportByName(OLD_NAME, "2026-09-05T09:53:00.000Z");
+  state.customerInvoicesReport = invoicesReportByName(NEW_NAME, "2026-09-05T10:59:00.000Z");
   const invoices = customerInvoicesFor(NEW_NAME);
+  assert.equal(invoices.length, 2, "المطابقة بالاسم النصّي انكسرت");
   assert.ok(invoices.some((inv) => inv.guid === INV_GUID));
 });
 
