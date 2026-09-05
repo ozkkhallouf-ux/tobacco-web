@@ -92,31 +92,45 @@ function parseToUnicode(cmap) {
   return map;
 }
 
-// حروف رسم واحد: `ActualText` إن وُجد (يصف الحرف المنطقي ويفكّ روابط مثل «لأ»)،
-// وإلا فكّ رموز الخط عبر خريطة /ToUnicode.
+// حروف عملية إظهار واحدة، **حرفاً حرفاً**. عملية `Tj` واحدة قد تحمل أكثر من
+// رمز خط (مثل `<001A002B> Tj`)، فلو عوملت العملية ككتلة واحدة لبقي ترتيب
+// حروفها الداخلي بصرياً بعد عكس الكتلة — فتخرج «كروز» بصيغة «كرزو» و«دفيدوف»
+// بصيغة «دفيدفو»، ويسقط اسم مطبوع فعلاً من المطابقة. العكس يجب أن يجري على
+// مستوى الحرف لا على مستوى العملية.
 function decodeShowOperator(payload, unicodeMap) {
-  let decoded = "";
+  const glyphs = [];
   for (const hex of payload.matchAll(/<([0-9A-Fa-f]*)>/g)) {
     const h = hex[1];
-    for (let k = 0; k + 4 <= h.length; k += 4) decoded += unicodeMap.get(parseInt(h.slice(k, k + 4), 16)) ?? "";
+    for (let k = 0; k + 4 <= h.length; k += 4) {
+      const glyph = unicodeMap.get(parseInt(h.slice(k, k + 4), 16));
+      if (glyph) glyphs.push(glyph);
+    }
   }
-  return decoded;
+  return glyphs;
 }
 
 // نص كتلة `BT … ET` واحدة بترتيبها المنطقي.
+// `/Span<</ActualText …>>` يصف النص المنطقي لمجموعة رسوم (يفكّ روابط مثل «لأ»)،
+// فيُؤخذ كوحدة واحدة لا تُعكس داخلياً، ويبقى سارياً حتى `EMC` كي لا تُحتسب رسوم
+// المجموعة نفسها مرتين.
 function readTextBlock(blockBody, fonts, unicodeFor) {
   const reversed = /\/ReversedChars\s+BMC/.test(blockBody);
-  const ops = /\/([A-Za-z0-9]+)\s+[\d.]+\s+Tf|\/ActualText\s*<([0-9A-Fa-f]*)>|\[([\s\S]*?)\]\s*TJ|<([0-9A-Fa-f]*)>\s*Tj/g;
+  const ops = /\/([A-Za-z0-9]+)\s+[\d.]+\s+Tf|\/ActualText\s*<([0-9A-Fa-f]*)>|\[([\s\S]*?)\]\s*TJ|<([0-9A-Fa-f]*)>\s*Tj|\bEMC\b/g;
   const glyphs = [];
   let font = null;
-  let actualText = null;
+  let spanText = null;
+  let spanEmitted = false;
   let op;
   while ((op = ops.exec(blockBody))) {
     if (op[1] !== undefined) { font = fonts.get(op[1]) ?? null; continue; }
-    if (op[2] !== undefined) { actualText = utf16beFromHex(op[2]); continue; }
+    if (op[2] !== undefined) { spanText = utf16beFromHex(op[2]); spanEmitted = false; continue; }
+    if (op[3] === undefined && op[4] === undefined) { spanText = null; continue; } // EMC
+    if (spanText != null) {
+      if (!spanEmitted) { glyphs.push(spanText); spanEmitted = true; }
+      continue;
+    }
     const payload = op[3] !== undefined ? op[3] : `<${op[4]}>`;
-    glyphs.push(actualText != null ? actualText : decodeShowOperator(payload, font != null ? unicodeFor(font) : new Map()));
-    actualText = null;
+    glyphs.push(...decodeShowOperator(payload, font != null ? unicodeFor(font) : new Map()));
   }
   if (!glyphs.length) return "";
   return (reversed ? glyphs.reverse() : glyphs).join("");
@@ -142,28 +156,77 @@ function pageFontMap(pageBody) {
   return fonts;
 }
 
-function pdfPageTexts(pdf) {
+// إحداثيات كتلة النص: `a b c d e f Tm` — e أفقي، f رأسي. تُستعمل لتجميع
+// الكتل في **أسطر** حقيقية، وهو ما يربط مقاطع الاسم الملتفّ بسطره لا بالصفحة كلها.
+function blockOrigin(blockBody) {
+  const tm = blockBody.match(/(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+Tm/);
+  if (!tm) return null;
+  return { x: parseFloat(tm[5]), y: parseFloat(tm[6]) };
+}
+
+const LINE_TOLERANCE_PX = 3;
+
+// أسطر مجموعة كتل واحدة. كل سطر يحتفظ بمواضع كتله الأفقية لأننا نحتاجها
+// للتمييز بين سطر صفّ جديد وسطر «تكملة التفاف» داخل الخلية نفسها.
+// الكتل تُرسم يساراً⇦يميناً، فعكس ترتيبها داخل السطر يعيده لترتيبه المنطقي.
+function linesFromBlocks(blocks) {
+  const sorted = [...blocks].sort((a, b) => a.y - b.y || a.x - b.x);
+  const grouped = [];
+  let current = null;
+  for (const block of sorted) {
+    if (!current || Math.abs(block.y - current.y) > LINE_TOLERANCE_PX) {
+      current = { y: block.y, items: [] };
+      grouped.push(current);
+    }
+    current.items.push(block);
+  }
+  return grouped.map((line) => ({
+    xs: [...new Set(line.items.map((b) => Math.round(b.x)))],
+    text: line.items.sort((a, b) => a.x - b.x).map((b) => b.text).reverse().join(RUN_SEPARATOR)
+  }));
+}
+
+// أسطر الصفحة **مرتّبة بالعمود**: النشرة عمودان متجاوران، فصفّان متقابلان
+// يتشاركان نفس المدى الرأسي تقريباً. لو بُنيت الأسطر للصفحة كاملة لاختلط
+// سطرُ العمود الآخر بسطور العمود الأول، فينكسر ضمّ الالتفاف ويسقط اسم مطبوع
+// فعلاً. سطر فاصل فارغ بين العمودين يمنع أي مطابقة من العبور بينهما.
+const COLUMN_SEPARATOR_LINE = "";
+function pageLinesByColumn(blocks) {
+  if (!blocks.length) return [];
+  const xs = blocks.map((b) => b.x);
+  const midX = (Math.min(...xs) + Math.max(...xs)) / 2;
+  const right = blocks.filter((b) => b.x >= midX);
+  const left = blocks.filter((b) => b.x < midX);
+  return [
+    ...linesFromBlocks(right).map((line) => line.text),
+    COLUMN_SEPARATOR_LINE,
+    ...linesFromBlocks(left).map((line) => line.text)
+  ];
+}
+
+function pdfPageLines(pdf) {
   const raw = pdf.toString("latin1");
   const objects = new Map();
   for (const m of raw.matchAll(/(\d+)\s+0\s+obj([\s\S]*?)endobj/g)) objects.set(+m[1], m[2]);
   const unicodeFor = unicodeResolver(objects);
 
-  const texts = [];
+  const pages = [];
   for (const [, body] of objects) {
     if (!/\/Type\s*\/Page[^s]/.test(body)) continue;
     const contentsId = (body.match(/\/Contents\s+(\d+)\s+0\s+R/) || [])[1];
     const content = contentsId ? inflateStream(objects.get(+contentsId) || "") : null;
-    if (!content) { texts.push(""); continue; }
+    if (!content) { pages.push([]); continue; }
     const fonts = pageFontMap(body);
     const blocks = [];
     for (const bt of content.matchAll(/\bBT\b([\s\S]*?)\bET\b/g)) {
       const text = readTextBlock(bt[1], fonts, unicodeFor);
-      if (text) blocks.push(text);
+      if (!text) continue;
+      const origin = blockOrigin(bt[1]) || { x: 0, y: blocks.length };
+      blocks.push({ ...origin, text });
     }
-    // الكتل تُرسم يساراً⇦يميناً؛ عكس ترتيبها يعيد النص إلى ترتيبه المنطقي.
-    texts.push(blocks.reverse().join(RUN_SEPARATOR));
+    pages.push(pageLinesByColumn(blocks).map(normalizeArabic));
   }
-  return texts;
+  return pages;
 }
 
 // نص قابل للمقارنة: بلا فواصل تحليل ولا تشكيل ولا علامات اتجاه ولا فراغات،
@@ -176,28 +239,53 @@ function normalizeArabic(value) {
     .replace(/\s+/g, "");
 }
 
-// هل الاسم مطبوع داخل نص هذه الورقة؟
+// هل الاسم مطبوع داخل هذه الورقة؟
 //
-// المطابقة المباشرة تكفي للأسماء التي تُرسم بسطر واحد. أما الاسم الذي يلتفّ
-// داخل خليته (والالتفاف لا يقع إلا عند فراغ) فتتوزّع أجزاؤه على سطرين أو
-// ثلاثة، ويتخلّلها في نص الورقة محتوى خليتَي الوحدة والسعر — فيصير غير متّصل.
-// لذلك نقبل أيضاً تقسيماً عند حدود الكلمات إلى مقاطع متتالية (٢ أو ٣)، وكلّها
-// يجب أن تكون حاضرة في **نفس الورقة**. أي غياب لأي مقطع = الاسم غير مطبوع.
-function printedContains(pageText, name) {
+// **مربوط بالسطر، لا بالصفحة.** الاسم الذي يُرسم بسطر واحد يجب أن يظهر متّصلاً
+// داخل نصّ ذلك السطر. والاسم الذي يلتفّ داخل خليته (والالتفاف لا يقع إلا عند
+// فراغ) تتوزّع مقاطعه على أسطر **متتالية** بالترتيب، فنقبله فقط إن وُجدت مقاطعه
+// كذلك: مقطع في السطر k، وتاليه في k+1، وهكذا.
+//
+// لماذا هذا القيد ضروري (ملاحظة Codex P1 على d0c229f6): البحث عن كل مقطع
+// مستقلاً في **كامل نص الصفحة** كان يسمح لصنف مفقود فعلاً بأن يُحتسب مطبوعاً،
+// لأن أسماء النشرة تُعيد استعمال كلمات شائعة («ماستر»، «سليم»، «فضي»، «أزرق»)
+// فتُشبع مقاطعُه من صفوف أخرى لا علاقة لها به — أي حارس يمرّ زوراً بينما محتوى
+// يراه الزبون ضائع. سيناريو «الشاهد السالب» أدناه يُثبت أن هذا لم يعد ممكناً.
+// الاسم مطبوع إذا ظهر **متّصلاً داخل سطر واحد** من أسطر الورقة (وقد ضُمّت
+// أسطر الالتفاف إلى خلاياها قبل ذلك). لا تقسيم إلى مقاطع تُبحث كلٌّ على حدة:
+// ذلك التسامح هو ما رصدته Codex كـP1، لأنه يسمح لصنف ضائع بأن يُحتسب مطبوعاً
+// من كلمات صفوف أخرى. سيناريو «الشاهد السالب» يثبت أن الثغرة أُغلقت.
+function printedContains(pageLines, name) {
   const flat = normalizeArabic(name);
   if (!flat) return true;
-  if (pageText.includes(flat)) return true;
-  const words = String(name).trim().split(/\s+/).map(normalizeArabic).filter(Boolean);
-  if (words.length < 2) return false;
-  const joinRange = (from, to) => words.slice(from, to).join("");
-  for (let a = 1; a < words.length; a += 1) {
-    if (pageText.includes(joinRange(0, a)) && pageText.includes(joinRange(a, words.length))) return true;
-    for (let b = a + 1; b < words.length; b += 1) {
-      if (pageText.includes(joinRange(0, a)) && pageText.includes(joinRange(a, b)) && pageText.includes(joinRange(b, words.length))) return true;
-    }
-  }
-  return false;
+  return pageLines.some((line) => line.includes(flat));
 }
+
+// شرط صحة قراءة الملف: قارئ نص PDF يقرأ **سطوراً**، فالاسم الذي يُرسم بسطر
+// واحد يُقارَن متّصلاً بلا أي تسامح — وهو ما يغلق ثغرة المرور الزائف (ملاحظة
+// Codex P1 على d0c229f6). أما الاسم الذي يلتفّ داخل خليته فتتوزّع حروفه على
+// مقطعَي رسم يفصل بينهما في الملف محتوى خليتَي الوحدة والسعر (بمحاور رأسية
+// مختلفة، لأن الخليتين تتوسّطان صفاً أطول) — ولا سبيل لإعادة تجميعه إلا
+// بإعادة بناء الخلايا هندسياً.
+//
+// بدل التسامح (الذي يُعيد فتح الثغرة) أو التخمين الهندسي (الهشّ)، **نفرض
+// الشرط صراحةً**: لا اسم يلتفّ في هندسة الطباعة. أي اسم جديد يلتفّ يُفشل هذا
+// الفحص برسالة صريحة تطلب توسيع القارئ إلى إعادة بناء الخلايا قبل اعتماده.
+const WRAP_PROBE = `(markup) => {
+  const probe = document.createElement("div");
+  probe.style.cssText = "position:fixed;left:-10000px;top:0;width:794px;visibility:hidden;pointer-events:none";
+  probe.innerHTML = markup;
+  probe.querySelector(".ozk-price-list").setAttribute("data-measure-print", "");
+  document.body.appendChild(probe);
+  try {
+    return [...probe.querySelectorAll("td.name, .price-list-group-name")]
+      .filter((cell) => {
+        const lineHeight = parseFloat(getComputedStyle(cell).lineHeight) || 14;
+        return cell.getBoundingClientRect().height > lineHeight * 1.4;
+      })
+      .map((cell) => cell.textContent.trim());
+  } finally { probe.remove(); }
+}`;
 
 // ===== بيانات بشكل بيانات الإنتاج =====
 const raw = JSON.parse(readFileSync(resolve(root, "scripts/price-data.json"), "utf8"));
@@ -258,7 +346,7 @@ async function printDocument(documentHtml) {
     margin: { top: "0", bottom: "0", left: "0", right: "0" }
   });
   await context.close();
-  return { pages: pdfPageTexts(pdf), geometry, bytes: pdf.length };
+  return { pages: pdfPageLines(pdf), geometry, bytes: pdf.length };
 }
 
 // أول كتلة أعمدة تعيش تحت الرأس على **نفس الورقة**، فحدّها هو حدّ الورقة
@@ -293,18 +381,27 @@ for (const sc of [
     pageCount: Number((document.querySelector(".price-preview-titles p")?.textContent.match(/(\d+)\s*صفحة/) || [])[1] || 0)
   }));
 
+  const wrapped = await page.evaluate(
+    ([markup, probe]) => new Function(`return ${probe}`)()(markup),
+    [await page.evaluate(() => window.bulletinRenderPlan(window.buildBulletinDataset(
+      (0, eval)("state").pricePreview.useSyria, (0, eval)("state").pricePreview.theme).dataset).markup), WRAP_PROBE]);
+
   await page.click("[data-action='export-price-preview']");
   await page.waitForFunction(() => Boolean(document.querySelector("iframe[data-print-frame]")), null, { timeout: 10000 });
   const documentHtml = await page.evaluate(() =>
     document.querySelector("iframe[data-print-frame]").getAttribute("srcdoc"));
   await context.close();
 
+  check(`${sc.label}: لا اسم يلتفّ في هندسة الطباعة (شرط قراءة الملف سطراً سطراً)`,
+    wrapped.length === 0,
+    `أسماء ملتفّة: ${JSON.stringify(wrapped.slice(0, 5))} — وسّع قارئ الملف إلى إعادة بناء الخلايا قبل اعتماد هذه الأسماء`);
+
   check(`${sc.label}: زر التصدير ينتج مستند طباعة فعلياً`,
     typeof documentHtml === "string" && documentHtml.includes("ozk-price-list"),
     `طول المستند = ${documentHtml ? documentHtml.length : "لا شيء"}`);
 
   const printed = await printDocument(documentHtml);
-  const text = printed.pages.map(normalizeArabic);
+  const text = printed.pages;
 
   check(`${sc.label}: عدد أوراق الملف = عدد صفحات المعاينة (${expected.pageCount})`,
     printed.pages.length === expected.pageCount,
@@ -403,7 +500,7 @@ for (const sc of [
   await context.close();
 
   const printed = await printDocument(built.documentHtml);
-  const text = printed.pages.map(normalizeArabic);
+  const text = printed.pages;
 
   const overflowing = blocksOverflowingTheirPage(printed.geometry);
   check("شكل الإنقاذ: لا كتلة أعمدة تتجاوز ورقتها (الصفحة الأولى + الرأس)",
@@ -420,6 +517,97 @@ for (const sc of [
     missingGroups.length === 0, `مفقودة: ${JSON.stringify(missingGroups)}`);
   const perPage = text.map((t) => built.itemNames.filter((n) => printedContains(t, n)).length);
   check("شكل الإنقاذ: لا ورقة بالرأس وحده", perPage.every((n) => n > 0), `[${perPage.join(", ")}]`);
+}
+
+// ===== 2ب) شاهد سالب: الحارس يرصد فقدان صنف فعلاً (لا يمرّ زوراً) =====
+// ملاحظة Codex P1 على d0c229f6: المطابقة السابقة كانت تبحث عن كل مقطع من الاسم
+// مستقلاً في **كامل نص الصفحة**، فصنفٌ ضائع فعلاً كان يُحتسب مطبوعاً لأن أسماء
+// النشرة تُعيد استعمال كلمات شائعة تُشبع مقاطعه من صفوف أخرى.
+//
+// هنا نُثبت السلوك لا الصياغة: نحذف صفّ صنف **مختار خصّيصاً بحيث تكون كل كلماته
+// موجودة في أسماء أصناف أخرى**، نطبع الملف، ثم نطالب بأن يرصده الحارس مفقوداً —
+// ونُظهر صراحةً أن القاعدة القديمة (بحث الصفحة كاملة) كانت ستمرّه.
+{
+  const { context, page } = await bootApp(1440, 900);
+  const built = await page.evaluate(() => {
+    const state = (0, eval)("state");
+    state.syriaRateConfirmed = true;
+    const ds = window.buildBulletinDataset(true, "dark").dataset;
+    const plan = window.bulletinRenderPlan(ds);
+    const names = window.bulletinTemplateGroups(ds).flatMap((g) => g.items.map((i) => i.name));
+
+    // ضحيّة كل كلماتها مشتركة مع أسماء أخرى: أقسى حالة على المطابقة.
+    const words = (n) => n.trim().split(/\s+/).filter(Boolean);
+    const victim = names.find((name) => {
+      const parts = words(name);
+      return parts.length >= 2 && parts.every((w) => names.some((other) => other !== name && words(other).includes(w)));
+    }) || names[names.length - 1];
+
+    const doc = new DOMParser().parseFromString(plan.markup, "text/html");
+    const row = [...doc.querySelectorAll("tbody tr")]
+      .find((tr) => tr.querySelector("td.name")?.textContent.trim() === victim);
+    row.remove();
+    const mutated = doc.querySelector(".ozk-price-list").outerHTML;
+    const styleTag = plan.markup.slice(0, plan.markup.indexOf("</style>") + "</style>".length);
+    return {
+      victim,
+      names,
+      documentHtml: window.OZKPriceListTemplate.printDocument({
+        theme: "dark", title: "negative-witness", bodyHtml: styleTag + mutated
+      })
+    };
+  });
+  await context.close();
+
+  const printed = await printDocument(built.documentHtml);
+  const text = printed.pages;
+
+  // القاعدة القديمة: كل مقطع يُبحث عنه مستقلاً في كامل نص الصفحة، بلا ترتيب ولا جوار.
+  const pageWideFragmentMatch = (pageText, name) => {
+    const words = String(name).trim().split(/\s+/).map(normalizeArabic).filter(Boolean);
+    return words.every((w) => pageText.includes(w));
+  };
+  const wholePageText = text.map((lines) => lines.join(""));
+
+  check("الشاهد السالب: الضحيّة اسم كل كلماته مشتركة مع أصناف أخرى",
+    built.victim.trim().split(/\s+/).length >= 2, `الضحيّة = ${built.victim}`);
+  check("الشاهد السالب: القاعدة القديمة (بحث الصفحة كاملة) كانت تمرّ زوراً",
+    wholePageText.some((t) => pageWideFragmentMatch(t, built.victim)),
+    `القاعدة القديمة لم تكن ستمرّ على «${built.victim}» — الشاهد فقد معناه، اختر ضحيّة أقسى`);
+  check("الشاهد السالب: الحارس الحالي يرصد الصنف المحذوف مفقوداً",
+    !text.some((lines) => printedContains(lines, built.victim)),
+    `«${built.victim}» حُذف من المستند ومع ذلك اعتبره الحارس مطبوعاً`);
+
+  const missing = built.names.filter((n) => !text.some((lines) => printedContains(lines, n)));
+  check("الشاهد السالب: لا ضحايا جانبية — المفقود هو المحذوف وحده",
+    missing.length === 1 && missing[0] === built.victim,
+    `المفقود = ${JSON.stringify(missing.slice(0, 8))} · المحذوف = ${built.victim}`);
+}
+
+// ===== 2ج) كاشف الالتفاف نفسه يعمل (وإلا كان الشرط أعلاه بلا معنى) =====
+// شاهد موجب على الكاشف: اسم أطول من خليته يجب أن يُرصد ملتفّاً، واسم عادي لا.
+{
+  const { context, page } = await bootApp(1440, 900);
+  const LONG = "ماستر طويل أزرق سليم نعنع مثلج بعلبة مزدوجة طويلة الاسم جداً للاختبار";
+  const probe = await page.evaluate(([LONG, wrapProbe]) => {
+    const T = window.OZKPriceListTemplate;
+    const options = {
+      logoSrc: `${location.origin}/public/icons/ozk-logo.png`, issueDate: T.formatArabicIssueDate(new Date()),
+      badgeClass: "badge-syp", badgeLabelHtml: "ليرة", unitLabel: "سعر", theme: "dark"
+    };
+    const row = (name) => ({ name, unit: "كرتونة", price: "1,000 ل.س" });
+    const detect = new Function(`return ${wrapProbe}`)();
+    return {
+      withLong: detect(T.render({ ...options, groups: [{ name: "ماستر", items: [row(LONG), row("ماستر صنف قصير")] }] })),
+      withoutLong: detect(T.render({ ...options, groups: [{ name: "ماستر", items: [row("ماستر صنف قصير")] }] }))
+    };
+  }, [LONG, WRAP_PROBE]);
+  await context.close();
+
+  check("كاشف الالتفاف: يرصد الاسم الأطول من خليته", probe.withLong.includes(LONG),
+    `رصد: ${JSON.stringify(probe.withLong)}`);
+  check("كاشف الالتفاف: لا ينذر على الأسماء العادية", probe.withoutLong.length === 0,
+    JSON.stringify(probe.withoutLong));
 }
 
 // ===== 3) حارس بنيوي: الصفحة الأولى لا تُعبَّأ بميزانية أكبر من ميزانيتها =====
