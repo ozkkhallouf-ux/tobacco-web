@@ -38,6 +38,7 @@ import { createReadStream, existsSync, readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, extname, join, normalize, resolve } from "node:path";
 import { pdfPageLines, normalizeArabic, printedRow, printedGroup } from "./lib/price-bulletin-pdf-text.mjs";
+import { FONT_USABLE_PROBE, waitForBulletinFont } from "./lib/bulletin-font-ready.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const TYPES = {
@@ -141,40 +142,6 @@ async function printExportDocument(documentHtml) {
   });
   await context.close();
   return { sheets: pdfPageLines(pdf), geometry };
-}
-
-// نفس كشف الخط الذي يعتمده التطبيق حرفياً (كل وزن × كل مجموعة محارف).
-// `document.fonts.check` لا يصلح: يُرجع true أيضاً بعد فشل التحميل.
-const FONT_USABLE_PROBE = `() => {
-  const T = window.OZKPriceListTemplate;
-  const probe = document.createElement("div");
-  probe.style.cssText = "position:fixed;left:-10000px;top:0;visibility:hidden;pointer-events:none;white-space:pre;font-size:40px;line-height:1";
-  document.body.appendChild(probe);
-  try {
-    const widthOf = (family, weight, text) => {
-      probe.style.fontFamily = family;
-      probe.style.fontWeight = String(weight);
-      probe.textContent = text;
-      return probe.getBoundingClientRect().width;
-    };
-    return T.BULLETIN_FONT_WEIGHTS.every((weight) => T.BULLETIN_FONT_SAMPLES.every((sample) => {
-      const control = widthOf("monospace", weight, sample);
-      const candidate = widthOf('"' + T.BULLETIN_FONT_FAMILY + '",monospace', weight, sample);
-      return Math.abs(candidate - control) > 0.5;
-    }));
-  } finally { probe.remove(); }
-}`;
-
-// السيناريوهات التي تُطابق نصّ الصفوف حرفياً تحتاج خط النشرة نفسه: السلسلة
-// الاحتياطية تختلف بين الأنظمة وقد لا تُشكّل العربية أصلاً على لينكس، فتفشل
-// المطابقة لسببٍ يخصّ النظام لا الكود. ننتظره كما ينتظره أي مستخدم حقيقي.
-async function waitForBulletinFont(page) {
-  try {
-    await page.waitForFunction(`(${FONT_USABLE_PROBE})()`, null, { timeout: 20000 });
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 // هل هذه الورقة تحمل الرأس؟ عنوان النشرة سطرٌ مستقلّ في الملف.

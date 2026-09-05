@@ -50,6 +50,7 @@ const check = (name, condition, detail) => {
 import {
   pdfPageLines, normalizeArabic, lineText, printedRow, printedGroup
 } from "./lib/price-bulletin-pdf-text.mjs";
+import { waitForBulletinFont } from "./lib/bulletin-font-ready.mjs";
 
 // الفحص برسالة صريحة تطلب توسيع القارئ إلى إعادة بناء الخلايا قبل اعتماده.
 const WRAP_PROBE = `(markup) => {
@@ -152,6 +153,10 @@ for (const sc of [
     window.openPricePreview(sc.useSyria, sc.theme);
   }, sc);
   await page.waitForSelector("[data-action='export-price-preview']", { timeout: 10000 });
+  // التصدير يختم قرار الخط على الترميز، والسلسلة الاحتياطية قد لا تُشكّل العربية
+  // على بعض الأنظمة — فننتظر خط النشرة كما ينتظره المستخدم الحقيقي، ونُصرّح به
+  // شرطاً بدل أن تفشل المطابقة لسببٍ يخصّ النظام لا الكود.
+  const fontReady = await waitForBulletinFont(page);
 
   // هويات ما يراه المستخدم على الشاشة قبل الضغط.
   const expected = await page.evaluate(() => ({
@@ -177,6 +182,9 @@ for (const sc of [
   const documentHtml = await page.evaluate(() =>
     document.querySelector("iframe[data-print-frame]").getAttribute("srcdoc"));
   await context.close();
+
+  check(`${sc.label}: خط النشرة جاهز قبل التصدير (شرط مطابقة النصّ العربي)`,
+    fontReady, "لم يجهز خط النشرة خلال 20 ثانية — المطابقة النصّية تقيس النظام لا الكود");
 
   check(`${sc.label}: لا اسم يلتفّ في هندسة الطباعة (شرط قراءة الملف سطراً سطراً)`,
     wrapped.length === 0,
