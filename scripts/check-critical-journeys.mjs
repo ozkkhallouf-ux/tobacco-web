@@ -31,6 +31,7 @@
 // (مُتجاهَل في .gitignore أصلاً) لترفعهما وظيفة CI كـartifact.
 // ============================================================================
 import { chromium } from "playwright";
+import { createServer } from "node:http";
 import { mkdirSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -47,6 +48,44 @@ process.env.PORT = "0";
 const { server } = await import("./serve.mjs");
 await new Promise((done) => server.listen(0, "127.0.0.1", done));
 const BASE = `http://127.0.0.1:${server.address().port}`;
+
+// ---------------------------------------------------------------------------
+// حدّ العزل الشبكي — طبقة الوكيل، خارج توجيه الصفحة تماماً.
+//
+// ⚠️ ملاحظة Codex P1 على PR #199، وهي صحيحة: `page.route` **لا يعترض طلبات
+// الـService Worker** (قيد معروف في Playwright). و`public/service-worker.js`
+// يعترض كل طلب GET بلا تمييز أصل ثم ينفّذ `fetch(event.request)`. فبعد
+// activate و`clients.claim()` في المسار الأخير، كان يمكن لطلب مثل
+// `loadPublishedExchangeRate()` أن يصل Supabase الحيّ فعلاً بدل 503 المصطنع —
+// أي أن ادّعاء «صفر اتصال بأي خدمة حيّة» كان يسقط في آخر مسار بالضبط.
+//
+// الحلّ حدٌّ عند مستوى المتصفح لا الصفحة: كل حركة غير الاسترجاع تُوجَّه إلى
+// وكيل محلي في هذه العملية نفسها. وهو ليس مجرّد سدّ — بل **شاهد**: يسجّل كل
+// محاولة خروج، فنُحوّل الضمان من وعدٍ إلى تأكيدٍ يفشل إن اختُرق.
+const escapeAttempts = [];
+// المضيف يُستخرَج بمحلّل عناوين لا بمطابقة نصّية: اسم مضيف يُقارَن بلاحقة
+// صريحة لا يُخدَع بسطر مصاغ صياغة أخرى.
+function hostOf(target, viaConnect) {
+  try {
+    return viaConnect
+      ? String(target).split(":")[0].toLowerCase()
+      : new URL(target).hostname.toLowerCase();
+  } catch {
+    return String(target).toLowerCase();
+  }
+}
+const proxySink = createServer((request, response) => {
+  escapeAttempts.push({ kind: `HTTP ${request.method}`, host: hostOf(request.url, false), target: request.url });
+  response.writeHead(503, { "Content-Type": "text/plain" });
+  response.end("blocked by critical-journeys sink");
+});
+// HTTPS يمرّ عبر CONNECT: نسجّل المضيف ثم نقطع، فلا يُبنى نفق إلى أي خدمة.
+proxySink.on("connect", (request, socket) => {
+  escapeAttempts.push({ kind: "CONNECT", host: hostOf(request.url, true), target: request.url });
+  socket.destroy();
+});
+await new Promise((done) => proxySink.listen(0, "127.0.0.1", done));
+const PROXY = `http://127.0.0.1:${proxySink.address().port}`;
 
 // ---------------------------------------------------------------------------
 // عدّاء المسارات
@@ -106,25 +145,30 @@ async function pollUntil(page, predicate, { timeout = 30000, interval = 150, mes
 // فتح التطبيق: عزل شبكي تام + انتظار انتهاء boot() فعلياً.
 // ---------------------------------------------------------------------------
 
-// أخطاء وحدة التحكم الناتجة عن قطع الشبكة نفسه ليست عطلاً في التطبيق — القطع
-// مقصود هنا. أما أي خطأ آخر فيُحتسب. القائمة ضيقة عمداً: توسيعها يعمي الحارس.
-// و«frame-ancestors عبر meta» إنذارُ متصفحٍ عن قرار موثَّق في CLAUDE.md (المعيار
-// يستثني هذه التوجيهة من meta؛ الحماية الحقيقية تحتاج ترويسة HTTP من CDN)، لا
-// عطلاً في التطبيق — لكنه يصل كـconsole.error فيجب استثناؤه صراحةً بلا توسيع.
-const BENIGN_CONSOLE = [
-  /Failed to load resource/i,
-  /net::ERR_/i,
-  /favicon/i,
+// ⚠️ ملاحظة Codex P1 الثانية على PR #199، وهي صحيحة: كانت القائمة تحمل
+// `/Failed to load resource/` و`/net::ERR_/` مطلقتين، فتبتلع **إخفاق أي مورد
+// من الأصل نفسه** أيضاً. مثال ملموس: لو ضاع `src/command-center.js` أو
+// `src/decision-engine.js` بـ404، لبقي `state` و`.app-shell` وأكثرُ التنقّل
+// عاملاً فتمرّ عدة مسارات — بينما الدليل الوحيد الذي يبلّغه المتصفح مُلقىً في
+// سلة المهملات. أي أن بوابة الانحدار الأساسية كانت تقبل تطبيقاً ناقصاً بصمت.
+//
+// الآن الاستثناء **مقيَّد بالمصدر لا بالنصّ**: رسالة فشل تحميل مورد تُتجاهَل
+// فقط إذا كان عنوانها خارج المضيف المحلي — أي أحد الطلبات المقطوعة عمداً.
+// وأي إخفاق من الأصل نفسه يُحتسب خطأً.
+const RESOURCE_FAILURE = /Failed to load resource|net::ERR_/i;
+
+// إنذارات متصفح عن قرارات موثَّقة، لا أعطال — ولا تحمل عنوان مورد فاشل:
+//   • `frame-ancestors` عبر meta: المعيار يستثنيها، والحماية الحقيقية تحتاج
+//     ترويسة HTTP من CDN (موثَّق في CLAUDE.md).
+//   • خط Almarai: قالب النشرة يستورده من fonts.googleapis.com وCSP
+//     (`style-src 'self' 'unsafe-inline'`) يحجبه. الأثر محصور في **معاينة
+//     النشرة داخل التطبيق**: خط بديل بدل Almarai. ملفات النشرة المنشورة تحت
+//     public/downloads/ صفحات مستقلة بلا هذه الـmeta فتُحمّل الخط طبيعياً،
+//     وملفات PDF تُولَّد منها لا من التطبيق. أُبلغ عنها ولم تُعالَج هنا:
+//     علاجها تغييرٌ إنتاجي خارج نطاق هذه المهمة.
+// النمطان محدّدان بدقة كي تبقى أي مخالفة CSP جديدة فشلاً.
+const ADVISORY_CONSOLE = [
   /frame-ancestors' is ignored when delivered via a <meta> element/i,
-  // حالة قائمة قبل هذا الحارس ولم يُغيَّر شيء من أجلها: قالب النشرة يحمل
-  // `@import url('https://fonts.googleapis.com/…Almarai…')` داخل <style>، وCSP
-  // في index.html هي `style-src 'self' 'unsafe-inline'` فتحجبه. الأثر محصور في
-  // **معاينة النشرة داخل التطبيق**: تُرسم بخط بديل (Tahoma/Arial) بدل Almarai.
-  // ملفات النشرة المنشورة تحت public/downloads/ صفحات مستقلة بلا هذه الـmeta،
-  // فتُحمّل الخط طبيعياً، وملفات PDF تُولَّد منها لا من التطبيق. أُبلغ عنها
-  // كملاحظة ولم تُعالَج هنا: علاجها تغييرٌ إنتاجي (CSP أو استضافة الخط محلياً)
-  // خارج نطاق هذه المهمة.
-  // النمط ضيّق عمداً — عنوان الخط تحديداً — كي تبقى أي مخالفة CSP جديدة فشلاً.
   /fonts\.googleapis\.com[\s\S]*violates the following Content Security Policy/i,
 ];
 
@@ -140,20 +184,37 @@ async function openApp(page, { search = "", waitForBoot = true } = {}) {
   const pageErrors = [];
   const consoleErrors = [];
   const writeRequests = [];
-  const externalRequests = [];
+  const assetFailures = [];
 
   page.on("pageerror", (error) => pageErrors.push(String(error?.message || error)));
   page.on("console", (msg) => {
     if (msg.type() !== "error") return;
     const text = msg.text();
-    if (BENIGN_CONSOLE.some((pattern) => pattern.test(text))) return;
-    consoleErrors.push(text);
+    if (ADVISORY_CONSOLE.some((pattern) => pattern.test(text))) return;
+    const source = (typeof msg.location === "function" ? msg.location()?.url : "") || "";
+    // فشل تحميل مورد يُغتفَر **فقط** إذا كان المورد خارجياً (وهو المقطوع عمداً).
+    // فشل مورد من الأصل نفسه عطلٌ حقيقي مهما كان نصّ الرسالة.
+    if (RESOURCE_FAILURE.test(text) && source && !source.startsWith(BASE)) return;
+    consoleErrors.push(source ? `${text} [${source}]` : text);
   });
   page.on("request", (request) => {
-    const url = request.url();
-    if (!url.startsWith(BASE)) externalRequests.push(`${request.method()} ${url}`);
     if (["POST", "PUT", "PATCH", "DELETE"].includes(request.method())) {
-      writeRequests.push(`${request.method()} ${url}`);
+      writeRequests.push(`${request.method()} ${request.url()}`);
+    }
+  });
+  // حارس إيجابي مستقل عن نصوص وحدة التحكم: كل مورد من الأصل نفسه يجب أن يصل
+  // بحالة < 400. هذا ما يمسك «تطبيق ناقص يبدو سليماً» حتى لو تغيّرت صياغة
+  // رسائل المتصفح أو صمتت تماماً.
+  page.on("response", (response) => {
+    const url = response.url();
+    if (url.startsWith(BASE) && response.status() >= 400) {
+      assetFailures.push(`HTTP ${response.status()} ← ${url}`);
+    }
+  });
+  page.on("requestfailed", (request) => {
+    const url = request.url();
+    if (url.startsWith(BASE)) {
+      assetFailures.push(`${request.failure()?.errorText || "request failed"} ← ${url}`);
     }
   });
 
@@ -182,7 +243,7 @@ async function openApp(page, { search = "", waitForBoot = true } = {}) {
     }, { timeout: 30000, message: "لم ينتهِ إقلاع التطبيق (state.loading بقي true)" });
   }
 
-  return { pageErrors, consoleErrors, writeRequests, externalRequests };
+  return { pageErrors, consoleErrors, writeRequests, assetFailures };
 }
 
 async function seedSession(page, extra = {}) {
@@ -201,9 +262,11 @@ const gotoRoute = (page, route) => page.evaluate((target) => {
 
 const currentRoute = (page) => page.evaluate(() => (0, eval)("state").route);
 
-function assertClean(name, { pageErrors, consoleErrors }) {
+function assertClean(name, { pageErrors, consoleErrors, assetFailures }) {
   assert(pageErrors.length === 0, `${name}: أخطاء JavaScript غير ملتقَطة — ${pageErrors.join(" | ")}`);
   assert(consoleErrors.length === 0, `${name}: console.error — ${consoleErrors.join(" | ")}`);
+  assert(!assetFailures || assetFailures.length === 0,
+    `${name}: أصول من الأصل نفسه أخفقت — ${(assetFailures || []).join(" | ")}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -250,7 +313,12 @@ const PUBLIC_DEEP_LINK_ROUTES = [
 ];
 
 console.log("فحص المسارات الحرجة (Critical Journeys):");
-const chromiumBrowser = await chromium.launch();
+// `bypass` يُبقي الاسترجاع مباشراً فيعمل خادمنا المحلي، وكل ما عداه يمرّ
+// بالوكيل — بما فيه ما يصدر عن Service Worker، لأن الإعداد عند طبقة الشبكة
+// لا عند طبقة التوجيه.
+const chromiumBrowser = await chromium.launch({
+  proxy: { server: PROXY, bypass: "127.0.0.1,localhost" },
+});
 
 // ===== ١) الإقلاع =====
 await journey("boot", "الموقع يفتح ويُرسم بلا أي خطأ JavaScript عند التحميل", async (page) => {
@@ -322,6 +390,7 @@ await journey("deep-links", "كل مسار عام يفتح عبر ?route= ويص
       if (!heading) problems.push(`${route}: عنوان الصفحة فارغ (مسار غير مسجّل في pageTitle؟)`);
       if (collected.pageErrors.length) problems.push(`${route}: ${collected.pageErrors.join(" | ")}`);
       if (collected.consoleErrors.length) problems.push(`${route}: console.error — ${collected.consoleErrors.join(" | ")}`);
+      if (collected.assetFailures.length) problems.push(`${route}: أصول أخفقت — ${collected.assetFailures.join(" | ")}`);
     } finally {
       await routePage.close();
     }
@@ -524,9 +593,39 @@ await journey("service-worker", "الـService Worker يُسجَّل ويسيط�
   assertClean("Service Worker", collected);
 }, { serviceWorkers: "allow" });
 
+// ===== شهادة العزل الشبكي =====
+// كل ما تجاوز توجيه الصفحة انتهى عند الوكيل المحلي في هذه العملية. نطبع ما
+// حاول الخروج (دليلٌ لا ادّعاء)، ونُفشل الفحص إن قصد وجهةً غير متوقَّعة —
+// فتسريبٌ جديد لا يمرّ لمجرد أنه صامت.
+// مضيفات يقصدها التطبيق فعلاً وهي مقطوعة عمداً. المقارنة بلاحقة اسم المضيف
+// المستخرَج، لا بمطابقة السطر — فلا تمرّ وجهة جديدة بحيلة صياغة.
+const EXPECTED_ESCAPE_HOSTS = ["supabase.co", "rollbar.com", "fonts.googleapis.com", "fonts.gstatic.com"];
+const isExpectedHost = (host) => EXPECTED_ESCAPE_HOSTS.some((allowed) => host === allowed || host.endsWith(`.${allowed}`));
+const unexpectedEscapes = escapeAttempts.filter((entry) => !isExpectedHost(entry.host));
+
+if (escapeAttempts.length) {
+  const counts = new Map();
+  for (const entry of escapeAttempts) {
+    const label = `${entry.kind} ${entry.target}`;
+    counts.set(label, (counts.get(label) || 0) + 1);
+  }
+  console.log("\nطلبات تجاوزت توجيه الصفحة وانتهت عند الوكيل المحلي (لم تغادر الجهاز):");
+  for (const [label, count] of counts) console.log(`   • ${label}${count > 1 ? ` ×${count}` : ""}`);
+  console.log("   (هذه هي ثغرة Service Worker التي رصدها Codex — الوكيل هو ما يوقفها فعلياً.)");
+}
+if (unexpectedEscapes.length) {
+  const detail = unexpectedEscapes.map((entry) => `${entry.kind} ${entry.target}`).join(" | ");
+  failures.push({ id: "network-isolation", name: "العزل الشبكي: لا وجهة خارجية غير متوقَّعة", message: detail });
+  console.error(`  ❌ العزل الشبكي: وجهات غير متوقَّعة — ${detail}`);
+} else {
+  passed += 1;
+  console.log(`  ✅ العزل الشبكي: ${escapeAttempts.length} محاولة خروج، كلها انتهت عند الوكيل المحلي ولا وجهة غير متوقَّعة`);
+}
+
 // ===== النتيجة =====
 await chromiumBrowser.close();
 server.close();
+proxySink.close();
 
 if (failures.length) {
   console.error(`\n✗ فشل ${failures.length} من المسارات الحرجة:`);
