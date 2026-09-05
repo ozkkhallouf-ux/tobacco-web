@@ -26,7 +26,9 @@ param()
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference    = 'SilentlyContinue'
-try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
+# ترميز الكونسول تجميلي فقط؛ فشله لا يبطل الاختبار — لكن لا يُبتلع صامتاً.
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 }
+catch { Write-Verbose ("تعذّر ضبط ترميز الكونسول: " + $_.Exception.Message) }
 
 $repoRoot   = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $scriptPath = Join-Path $repoRoot 'tools\daily-git-pull.ps1'
