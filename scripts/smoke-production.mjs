@@ -167,10 +167,37 @@ const context = await browser.newContext({
 });
 const page = await context.newPage();
 
+// ---------------------------------------------------------------------------
+// بوابة `console.error` — الفجوة التي كانت مفتوحة هنا.
+//
+// `pageerror` لا يرى إلا الاستثناءات غير الملتقَطة. وصنفٌ كامل من الأعطال
+// يبلّغه المتصفح في وحدة التحكّم وحدها: مخالفة CSP، طلب حجبه المتصفح قبل
+// الشبكة، خطأ يلتقطه الكود ثم يسجّله بـ`console.error`. فموقعٌ يُقلع ويرسم
+// قشرته بينما وحدة تحكّمه مليئة بالأخطاء كان يمرّ عند هذا الفحص «سليماً».
+// قياس فعلي على الإنتاج (2026-09-06) أخرج ثلاثة أخطاء عند التحميل لم يرَ
+// الفحص منها شيئاً.
+//
+// ⚠️ لا قائمة استثناءات نصية هنا **إطلاقاً**: كل قائمة كهذه تكبر مع الوقت
+// حتى تبتلع العطل الذي وُجدت البوابة لأجله. الاستثناء الوحيد مشتقٌّ وقت
+// التشغيل لا مكتوب: الطلبات التي **أجهضها هذا الفحص بنفسه** (Rollbar وأي
+// طلب كتابة). تلك تشويشُ أداة القياس على المقيس، ولو حُسبت لأفشلت الفحص
+// بسبب ضمانات الفحص نفسها. أي خطأ آخر — بلا استثناء — فشلٌ حقيقي.
+const abortedByHarness = new Set();
+const watchConsole = (target, sink) => {
+  target.on("console", (msg) => {
+    if (msg.type() !== "error") return;
+    const from = (typeof msg.location === "function" ? msg.location()?.url : "") || "";
+    if (from && abortedByHarness.has(from)) return;
+    sink.push(`console.error: ${msg.text()}${from ? ` ← ${from}` : ""}`);
+  });
+};
+
 const pageErrors = [];
+const consoleErrors = [];
 const blockedWrites = [];
 const assetFailures = [];
 page.on("pageerror", (error) => pageErrors.push(String(error?.message || error)));
+watchConsole(page, consoleErrors);
 // الاستثناء الذي رصده Codex: مورد ناقص يبلّغه المتصفح كفشل تحميل لا كاستثناء
 // JavaScript، فـ`pageerror` وحده يراه سليماً. نرصد الاستجابات والإخفاقات من
 // الأصل نفسه مباشرةً — وهو ما يمسك النقص أثناء التشغيل الحقيقي لا في قائمة.
@@ -190,10 +217,11 @@ await page.route("**", (route) => {
   const request = route.request();
   const url = request.url();
   // بلاغات الأخطاء: محجوبة تماماً. تشغيلة آلية لا تُلوّث بيانات مراقبة الإنتاج.
-  if (/(^|\.)rollbar\.com/i.test(new URL(url).hostname)) return route.abort();
+  if (/(^|\.)rollbar\.com/i.test(new URL(url).hostname)) { abortedByHarness.add(url); return route.abort(); }
   // ضمان «صفر كتابة» بالبنية لا بالنية.
   if (!["GET", "HEAD"].includes(request.method())) {
     blockedWrites.push(`${request.method()} ${url}`);
+    abortedByHarness.add(url);
     return route.abort();
   }
   return route.continue();
@@ -223,6 +251,8 @@ check("قشرة التطبيق تُرسم", boot.shell, `route=${boot.route || "
 check("لا استثناء JavaScript غير ملتقَط عند التحميل", pageErrors.length === 0, pageErrors.join(" | "));
 check("لا مورد من الأصل نفسه يخفق أثناء التحميل الفعلي",
   assetFailures.length === 0, assetFailures.join(" | "));
+check("لا خطأ في وحدة التحكّم أثناء تحميل التطبيق",
+  consoleErrors.length === 0, consoleErrors.join(" | "));
 check("لم تُحاول الصفحة أي كتابة (الفحص قراءة فقط بالبنية)",
   blockedWrites.length === 0,
   `طلبات كتابة أُجهضت: ${blockedWrites.join(" | ")}`);
@@ -231,6 +261,7 @@ check("لم تُحاول الصفحة أي كتابة (الفحص قراءة ف�
 const bulletinPage = await context.newPage();
 const bulletinErrors = [];
 bulletinPage.on("pageerror", (error) => bulletinErrors.push(String(error?.message || error)));
+watchConsole(bulletinPage, bulletinErrors);
 bulletinPage.on("response", (response) => {
   if (sameOrigin(response.url()) && response.status() >= 400) {
     bulletinErrors.push(`HTTP ${response.status()} ← ${response.url()}`);
@@ -249,7 +280,8 @@ try {
   bulletinErrors.push(String(error?.message || error));
 }
 check("نشرة الدولار تُعرض بصفوف أصناف فعلية", bulletinRows > 5, `عدد الصفوف ${bulletinRows}`);
-check("نشرة الدولار بلا أخطاء JavaScript ولا موارد مخفقة", bulletinErrors.length === 0, bulletinErrors.join(" | "));
+check("نشرة الدولار بلا أخطاء JavaScript ولا موارد مخفقة ولا خطأ في وحدة التحكّم",
+  bulletinErrors.length === 0, bulletinErrors.join(" | "));
 
 await browser.close();
 
