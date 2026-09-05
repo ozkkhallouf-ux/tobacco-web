@@ -236,6 +236,47 @@ console.log("\n— تنقية الأسرار —");
     "ابتلع الحجبُ بقية أثر المكدّس — `.` يجب ألّا تطابق السطر الجديد");
 
   // -------------------------------------------------------------------
+  // انحدار ملاحظة Codex P1 الخامسة عشرة — رموز الاستعادة لمرة واحدة.
+  //
+  // `recoveryCode` ليس حقلاً افتراضياً: `src/app.js` يجمعه من نموذج استعادة
+  // كلمة المرور، و`src/supabase-client.js` يمرّره إلى `auth.verifyOtp` بنوع
+  // `"recovery"`. فبلوغه Rollbar مقروناً بالبريد = رمز إعادة تعيين صالح.
+  // -------------------------------------------------------------------
+  const RECOVERY_CASES = [
+    ["JSON: بريد ورمز استعادة", '{"email":"owner@example.com","recoveryCode":"123456"}', "123456"],
+    ["سجلّ نصّي", "password recovery failed email=owner@example.com recoveryCode=123456", "123456"],
+    ["recovery_code بصيغة snake_case", '{"recovery_code":"8675309"}', "8675309"],
+    ["otp", '{"otp":"445566"}', "445566"],
+    ["نقطتان بدل مساواة", "verifyOtp rejected: recoveryCode: 987654", "987654"],
+  ];
+  for (const [label, input, secret] of RECOVERY_CASES) {
+    check(`يُحجب رمز الاستعادة: ${label}`, !scrub(input).includes(secret),
+      `بقي «${secret}» — رمز استعادة صالح يصل إلى طرف ثالث`);
+  }
+
+  // الحجب يزيل الرمز ويُبقي الرسالة مفهومة: البريد ليس اعتمادية بذاته،
+  // وحذفه يُفقد البلاغ سياقه بلا مكسب أمني — الرمز وحده هو ما يُستعمل.
+  {
+    const scrubbed = scrub('{"email":"owner@example.com","recoveryCode":"123456"}');
+    check("رمز الاستعادة في JSON: يُحجب الرمز ويبقى البريد للسياق",
+      !scrubbed.includes("123456") && scrubbed.includes("owner@example.com"),
+      `الحجب أفقد الرسالة معناها أو أبقى الرمز — صار: ${scrubbed}`);
+    const line = scrub("password recovery failed email=owner@example.com recoveryCode=123456");
+    check("رمز الاستعادة في سجلّ: يُحجب الرمز ويبقى وصف العطل",
+      !line.includes("123456") && line.includes("password recovery failed"),
+      `ضاع وصف العطل — صار: ${line}`);
+  }
+
+  // شواهد سالبة: كلمة recovery وحدها ليست اسم حقل سرّي.
+  for (const intact of [
+    '{"email":"owner@example.com","status":"recovery"}',
+    "password recovery email sent successfully",
+  ]) {
+    check(`نصّ استعادة عادي لا يُحجب: «${intact.slice(0, 42)}…»`, scrub(intact) === intact,
+      `أُفسد نصّ عادي — صار: ${scrub(intact)}`);
+  }
+
+  // -------------------------------------------------------------------
   // انحدار ملاحظة Codex P1 الرابعة عشرة — تمييز الاعتمادية العارية عن الكلام.
   //
   // القاعدة كانت تشترط رقماً أو رمزاً، فمرّ `Bearer abcdefghijklmnop` و

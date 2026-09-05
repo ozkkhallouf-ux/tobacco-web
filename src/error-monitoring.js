@@ -275,6 +275,19 @@
     // كل رسالة خطأ تخصّ الأصناف تقريباً، فكان الحجب سيُفرغ تلك البلاغات من
     // معناها. `_` محرف كلمة، فلا حدّ بينه وبين `k`، فلا مطابقة (مُختبَر).
     {
+      // ⚠️ إصلاح ملاحظة Codex P1 الخامسة عشرة: `recoveryCode` رمز استعادة
+      // نشط لا حقل عابر — `src/app.js` يجمعه من نموذج الاستعادة
+      // (`pattern="[0-9]{6,10}"`, `autocomplete="one-time-code"`)، و
+      // `src/supabase-client.js` يمرّره إلى `auth.verifyOtp` بنوع
+      // `"recovery"`. فبلوغه Rollbar مقروناً بالبريد يعني رمز إعادة تعيين
+      // صالحاً للاستعمال. أُضيف معه `recovery_code` (صيغة snake_case السائدة
+      // في هذا المستودع) و`otp` (وهي في اسم الدالة نفسها
+      // `verifyPasswordRecoveryOtp`). والحمولة المُرسَلة فعلاً
+      // (`{ email, token, type }`) كانت محجوبة أصلاً عبر `token`.
+      //
+      // ولم تُضَف أسماء 2FA/MFA/TOTP: لا وجود لأيّها في التطبيق — فُحص —
+      // وإضافتها توسيع بلا أساس.
+      //
       // ⚠️ إصلاح ملاحظة Codex P1 الحادية عشرة: الأسماء المركّبة
       // (`client_secret`، `session_token`، `public_token`) لم تكن تُطابَق —
       // `_` محرف كلمة فيمنع حدّ `\b` المطلوب قبل `secret` أو `token`. وهو
@@ -282,7 +295,7 @@
       // إدراج الأسماء المركّبة صراحةً — لا حدود «واعية بالفواصل» تعيد
       // `item_key` إلى الحجب. وهي مُقدَّمة على مكوّناتها في البدائل كي
       // تُطابَق كاملةً.
-      re: /(["'`]?\b(?:client_secret|session_token|public_token|access_token|refresh_token|api_key|apikey|token|key|secret|password|passwd|pwd)\b["'`]?\s*[=:]\s*)(.*)/gi,
+      re: /(["'`]?\b(?:recoveryCode|recovery_code|otp|client_secret|session_token|public_token|access_token|refresh_token|api_key|apikey|token|key|secret|password|passwd|pwd)\b["'`]?\s*[=:]\s*)(.*)/gi,
       to: function (match, prefix, value) {
         var length = quotedValueLength(value);
         // مقتبَسة: تُبتلع حتى الإغلاق الحقيقي (مع احترام الهروب) ويبقى ما بعدها.
