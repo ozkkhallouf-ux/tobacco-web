@@ -8,6 +8,8 @@
     "dev": "node scripts/serve.mjs",
     "start": "node scripts/serve.mjs",
     "check": "node scripts/run-checks.mjs",
+    "check:critical": "node scripts/check-critical-journeys.mjs",
+    "smoke:production": "node scripts/smoke-production.mjs",
     "check:sales-line-items": "node scripts/check-sales-line-items-pipeline.mjs && node scripts/check-sales-line-items-security.mjs && node scripts/check-sales-line-items-registration.mjs",
     "generate": "node scripts/generate-price-lists.mjs && node scripts/generate-pdfs.mjs",
     "generate:lists": "node scripts/generate-price-lists.mjs",

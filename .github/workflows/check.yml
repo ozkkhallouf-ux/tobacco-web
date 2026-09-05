@@ -29,6 +29,58 @@ jobs:
         run: npm run check
 
   # ------------------------------------------------------------
+  # المسارات الحرجة: الطبقة الوحيدة التي تفتح التطبيق وتتنقّل فيه كما يفعل
+  # المستخدم. بقية الحرّاس تفحص وحداتٍ ومساراتٍ بعينها، فصنفٌ كامل من الأعطال
+  # كان يمرّ بلا إنذار — استثناء غير ملتقَط أثناء الرسم، مسارٌ مسجَّل في
+  # allowedRoutes وغائب عن pages، انكسار ربط الأحداث بعد تعديل render.
+  #
+  # وظيفة مستقلة لا خطوة داخل `check`: البوابة تعمل ثلاث مرات على كل PR
+  # (هنا، وفي Decision Engine Check، وفي pages.yml قبل النشر)، فوضعها داخلها
+  # يعني تشغيل متصفحٍ ثلاث مرات بلا فائدة. وهي تعمل بالتوازي مع `check`
+  # فلا تُطيل انتظار الـPR.
+  #
+  # ⚠️ الوظيفة بلا `name:` عمداً، فيصير سياق الفحص هو معرّفها `critical-journeys`
+  # — نفس نمط `check` و`validate` المسجَّلين في ruleset الفرع (سياق لاتيني قصير
+  # يسهل إضافته). فالحجب الفعلي للدمج خطوةُ إعدادٍ واحدة على GitHub:
+  #   gh api -X PUT repos/ozkkhallouf-ux/tobacco-web/rulesets/21808376 …
+  # أو من واجهة Rules → main-protection-with-admin-bypass → Required status
+  # checks → إضافة `critical-journeys`.
+  # قبل ذلك يظهر الفشل على الـPR بوضوح لكنه لا يمنع الدمج تقنياً.
+  # ------------------------------------------------------------
+  critical-journeys:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright Chromium browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Run critical journeys
+        run: npm run check:critical
+
+      # الأثر واللقطة لكل مسار فاشل وحده. `if: failure()` يمنع تراكم آثارٍ
+      # لا يقرأها أحد عند النجاح.
+      - name: Upload Playwright traces and screenshots
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: critical-journeys-failures
+          path: .playwright/critical-journeys/
+          retention-days: 7
+          if-no-files-found: warn
+
+  # ------------------------------------------------------------
   # عطل إنتاجي حيّ (2026-08-31): مهام Windows المجدولة تشغّل سكربتات
   # tools/*.ps1 عبر powershell.exe أي Windows PowerShell 5.1، بينما
   # التطوير يجري على PowerShell 7. صيغة صحيحة تماماً في 7 (استعمال if
