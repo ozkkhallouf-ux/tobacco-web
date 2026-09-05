@@ -594,6 +594,163 @@ await journey("service-worker", "الـService Worker يُسجَّل ويسيط�
   assertClean("Service Worker", collected);
 }, { serviceWorkers: "allow" });
 
+// ===== ١٢) التفويض: المسارات المحصورة بالمالك =====
+// الفجوة التي يغلقها: كل ما سبق يعمل بجلسة **مالك** واحدة، والمسارات المحصورة
+// (`decision`/`command`) كانت مستثناة من قائمة الروابط العميقة «لأنها تُردّ
+// عمداً» — أي أن المنع كان مُفترَضاً لا مُثبَتاً. فانهيارٌ في `canAccessRoute`
+// أو في `isOwner` يفتح «قرار اليوم» و«مركز القيادة» لكل موظف بلا أي إنذار:
+// لا فحص ساكن يراه، ولا مسار من الأحد عشر يمرّ بدور غير المالك أصلاً.
+//
+// **جدول لا سلسلة تأكيدات:** المسارات المحصورة تُقرأ من التطبيق وقت التشغيل
+// (`OWNER_ONLY_ROUTES` نفسها) لا تُكتب هنا يدوياً — فأي مسار محصور يُضاف
+// مستقبلاً يدخل التغطية تلقائياً بدل أن يبقى بلا اختبار حتى ينتبه أحد.
+//
+// حدود مقصودة: الجلسات مصطنعة محلياً (لا مصادقة حقيقية ولا حساب إنتاج)، وهذه
+// طبقةُ واجهةٍ لا طبقةَ أمان — الحارس الحقيقي هو RLS وEdge Functions، ويغطّيه
+// `check-owner-authorization-behavior.mjs` بتنفيذ فعلي لدوالّ الحافة.
+const AUTHZ_PUBLIC_SAMPLE = ["overview", "balances", "pricing"];
+
+// البُرُد كلها على `.invalid` (نطاق محجوز بـRFC 2606) وخارج `OWNER_EMAILS`
+// عمداً: `isOwner()` يمنح الصلاحية بالبريد أيضاً لا بالدور وحده، فبريدٌ سهوٌ
+// من قائمة المالكين كان سيجعل «الموظف» مالكاً ويُخضّر الاختبار كذباً.
+const AUTHZ_ROLES = [
+  {
+    id: "owner",
+    label: "المالك",
+    session: { id: "authz-owner", name: "مالك اختبار", role: "المالك",
+               email: "owner@example.invalid", accessRole: "owner" },
+    ownerOnlyAllowed: true,
+    publicAllowed: true,
+    fallback: "overview",
+  },
+  {
+    id: "employee",
+    label: "موظف",
+    // الدور الافتراضي لكل حساب مصادَق غير مالك (src/supabase-client.js).
+    session: { id: "authz-employee", name: "موظف اختبار", role: "موظف",
+               email: "employee@example.invalid", accessRole: "employee" },
+    ownerOnlyAllowed: false,
+    publicAllowed: true,
+    fallback: "overview",
+  },
+  {
+    id: "inventory_counter",
+    label: "موظف جرد",
+    // الأضيق: لا يصل إلا `smartInventory`، وملاذه الآمن هو هي لا الرئيسية.
+    session: { id: "authz-counter", name: "موظف جرد اختبار", role: "موظف جرد",
+               email: "", accessRole: "inventory_counter" },
+    ownerOnlyAllowed: false,
+    publicAllowed: false,
+    fallback: "smartInventory",
+  },
+];
+
+await journey("authorization", "التفويض: المسارات المحصورة بالمالك مرفوضة فعلياً لغير المالك (ثلاثة أدوار)", async (page) => {
+  const collected = await openApp(page);
+
+  // مصدر الحقيقة هو التطبيق نفسه، لا نسخة في ملف الاختبار تتقادم بصمت.
+  const ownerOnlyRoutes = await page.evaluate(() => {
+    try { return Array.from((0, eval)("OWNER_ONLY_ROUTES")); } catch { return []; }
+  });
+  assert(ownerOnlyRoutes.length > 0,
+    "تعذّر قراءة OWNER_ONLY_ROUTES من التطبيق — هل تغيّر اسم الثابت أو نطاقه؟");
+
+  const problems = [];
+
+  for (const role of AUTHZ_ROLES) {
+    // جلسة محلية بحتة: نفس أسلوب seedSession، بلا أي نداء مصادقة.
+    await page.evaluate((session) => {
+      const state = (0, eval)("state");
+      state.session = session;
+      window.__ozkSession = session;
+      (0, eval)("render")();
+    }, role.session);
+
+    // ── أ) العقد المنطقي: canAccessRoute الحقيقي، لا مطابقة نصّية ──────────
+    for (const route of ownerOnlyRoutes) {
+      const granted = await page.evaluate((r) => window.ozkCanAccessRoute?.(r), route);
+      if (granted !== role.ownerOnlyAllowed) {
+        problems.push(`${role.id}: canAccessRoute("${route}") أعطى ${granted} والمتوقَّع ${role.ownerOnlyAllowed}`);
+      }
+    }
+    for (const route of AUTHZ_PUBLIC_SAMPLE) {
+      const granted = await page.evaluate((r) => window.ozkCanAccessRoute?.(r), route);
+      if (granted !== role.publicAllowed) {
+        problems.push(`${role.id}: canAccessRoute("${route}") العام أعطى ${granted} والمتوقَّع ${role.publicAllowed}`);
+      }
+    }
+
+    // ── ب) العقد السلوكي: setRoute يردّ فعلاً إلى الملاذ الآمن ─────────────
+    for (const route of ownerOnlyRoutes) {
+      await gotoRoute(page, route);
+      const landed = await currentRoute(page);
+      const expected = role.ownerOnlyAllowed ? route : role.fallback;
+      if (landed !== expected) {
+        problems.push(`${role.id}: setRoute("${route}") أنزل على "${landed}" والمتوقَّع "${expected}"`);
+      }
+      if (!role.ownerOnlyAllowed) {
+        // الرفض الصامت أسوأ من الرفض: المستخدم يظن أن الزر لم يعمل.
+        const notice = await page.evaluate(() => (0, eval)("state").notice);
+        if (!notice || notice.type !== "error" || !String(notice.text || "").trim()) {
+          problems.push(`${role.id}: رفض "${route}" بلا إشعار خطأ — رفض صامت`);
+        }
+      }
+      // الرفض لا يجوز أن يترك الشاشة فارغة أو مكسورة.
+      if (await page.locator(".app-shell").count() === 0) {
+        problems.push(`${role.id}: القشرة غير مرسومة بعد محاولة "${route}"`);
+      }
+    }
+
+    // ── ج) العقد البصري: الزر غائب من المستند كله لا من الشريط وحده ───────
+    // `addDecisionNav`/`addCommandNav` تحذفان العقد فعلياً عند انعدام الصلاحية،
+    // فالفحص على `document` لا على `aside nav` يمسك زراً تسرّب إلى أي مكان آخر.
+    await gotoRoute(page, role.fallback);
+    for (const route of ownerOnlyRoutes) {
+      const count = await page.locator(`[data-route='${route}']`).count();
+      if (role.ownerOnlyAllowed && count === 0) {
+        problems.push(`${role.id}: زر "${route}" غائب رغم الصلاحية`);
+      }
+      if (!role.ownerOnlyAllowed && count > 0) {
+        problems.push(`${role.id}: زر "${route}" ظاهر (${count}) رغم انعدام الصلاحية`);
+      }
+    }
+  }
+
+  assert(problems.length === 0, problems.join("\n     "));
+  assert(collected.writeRequests.length === 0,
+    `سيناريو التفويض أطلق طلبات كتابة: ${collected.writeRequests.join(" | ")}`);
+  assertClean("التفويض", collected);
+});
+
+// ===== ١٣) الرابط العميق لا يمنح صلاحية =====
+// مسار منفصل عمداً: هذا يفحص الإقلاع نفسه بعنوان يحمل مساراً محصوراً، وهو ما
+// لا يمكن فحصه داخل الرحلة السابقة لأن الجلسة تُزرع بعد الإقلاع.
+await journey("owner-only-deep-link", "الرابط العميق إلى مسار محصور لا يُنزل عليه أحداً ولا يكسر الإقلاع", async (page, context) => {
+  const ownerOnlyRoutes = ["decision", "command"];
+  const problems = [];
+  for (const route of ownerOnlyRoutes) {
+    const routePage = await context.newPage();
+    try {
+      const collected = await openApp(routePage, { search: `?route=${route}` });
+      const landed = await routePage.evaluate(() => (0, eval)("state").route);
+      // `initialRoute()` تُقيَّم أثناء تنفيذ app.js، قبل أن تُضيف الوحدتان
+      // مسارَيهما إلى allowedRoutes — فالعنوان وحده لا يفتح مساراً محصوراً.
+      if (ownerOnlyRoutes.includes(landed)) {
+        problems.push(`?route=${route}: الإقلاع أنزل على "${landed}" — العنوان وحده منح مساراً محصوراً`);
+      }
+      if (await routePage.locator(".app-shell").count() === 0) {
+        problems.push(`?route=${route}: لم تُرسم القشرة`);
+      }
+      if (collected.pageErrors.length) problems.push(`?route=${route}: ${collected.pageErrors.join(" | ")}`);
+      if (collected.consoleErrors.length) problems.push(`?route=${route}: console.error — ${collected.consoleErrors.join(" | ")}`);
+      if (collected.writeRequests.length) problems.push(`?route=${route}: طلبات كتابة — ${collected.writeRequests.join(" | ")}`);
+    } finally {
+      await routePage.close();
+    }
+  }
+  assert(problems.length === 0, problems.join("\n     "));
+});
+
 // ===== شهادة العزل الشبكي =====
 // كل ما تجاوز توجيه الصفحة انتهى عند الوكيل المحلي في هذه العملية. نطبع ما
 // حاول الخروج (دليلٌ لا ادّعاء)، ونُفشل الفحص إن قصد وجهةً غير متوقَّعة —
