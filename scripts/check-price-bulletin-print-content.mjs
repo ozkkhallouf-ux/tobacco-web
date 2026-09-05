@@ -287,52 +287,42 @@ function lineText(line) {
   return line.join("");
 }
 
-// هل تُبلّط مقاطع هذا السطر النصَّ المطلوب **بالكامل وبلا بقايا**؟
+// **مطابقة صفّ كامل، بترتيب مصون بالكامل.**
 //
-// القاعدة: ترتيب الحروف **داخل** كل مقطع مصون، وإعادة الترتيب مسموحة **بين**
-// المقاطع فقط — وهو بالضبط ما يفعله المتصفح حين يرسم خلية سعر LTR داخل نشرة
-// RTL. هذا يغلق ملاحظة Codex P1 الثالثة (على 14ef895e): بصمةُ الحروف مرتّبةً
-// كانت تُسوّي بين «12,345» و«12,354» وبين عدّاد «12» و«21»، فيمرّ الحارس رغم
-// تشوّه رقم يراه الزبون. التبليط يرفضهما لأن مقطع «12,354» ليس بادئةً لأي
-// موضع في النص المطلوب.
+// السطر المُعاد بناؤه = مقاطع منطقية متسلسلة. الصفّ المطبوع يجب أن يساوي
+// نصَّ خلاياه الثلاث **حرفياً**: الاسم ثم الوحدة ثم السعر — بلا احتواء جزئي،
+// وبلا أي إعادة ترتيب حرّة.
 //
-// التبليط تامّ: كل مقاطع السطر تُستهلك وكل النص يُغطّى — فلا محتوى زائد على
-// السطر ولا ناقص منه، ولا احتواء جزئي.
-const MAX_TILING_BLOCKS = 24;
-function tilesExactly(target, blocks) {
-  if (!target || !blocks.length || blocks.length > MAX_TILING_BLOCKS) return false;
-  if (blocks.reduce((n, b) => n + b.length, 0) !== target.length) return false;
-  const used = new Array(blocks.length).fill(false);
-  const seen = new Set();
-  const walk = (position) => {
-    if (position === target.length) return used.every(Boolean);
-    const key = `${position}|${used.map((u) => (u ? 1 : 0)).join("")}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    for (let i = 0; i < blocks.length; i += 1) {
-      if (used[i] || !target.startsWith(blocks[i], position)) continue;
-      used[i] = true;
-      if (walk(position + blocks[i].length)) return true;
-      used[i] = false;
-    }
-    return false;
-  };
-  return walk(0);
+// الاستثناء الوحيد المسموح، وهو معروف السبب ومحصور بموضعه: خلية السعر تُرسم
+// `direction:ltr` داخل نشرة `rtl`، فيخرج جزء العملة قبل الرقم في نصف الحالات.
+// لذلك نقبل صيغتين اثنتين فقط للسعر: «رقم+عملة» و«عملة+رقم». لا شيء غير ذلك.
+//
+// هذا يغلق سلسلة ملاحظات Codex على هذا الحارس، كلٌّ منها كانت تسمح بمرور
+// زائف على تشوّه يراه الزبون:
+//   · d0c229f6 — مقاطع الاسم تُبحث كلٌّ على حدة في كامل الصفحة.
+//   · 6ac9fae7 — الاحتواء النصّي: اسم أقصر يُشبَع من سطر اسم أطول يحويه.
+//   · 14ef895e — بصمة الحروف مرتّبةً: «12,345» = «12,354»، وعدّاد «12» = «21».
+//   · c34a75e8 — تبليط كل كلمة على حدة: «سليم ماستر أزرق» = «ماستر سليم أزرق».
+// الشواهد السالبة الأربعة أدناه تُثبت أن كلاً منها صار يُرصد.
+function priceOrderings(price) {
+  const normalized = normalizeArabic(price);
+  const split = /^([\d.,]+)(.+)$/.exec(normalized);
+  return split ? [normalized, `${split[2]}${split[1]}`] : [normalized];
 }
 
-// الصفّ المطبوع سطرٌ واحد يحمل خلاياه الثلاث: الاسم والوحدة والسعر — لا أكثر.
-// (ملاحظة Codex P1 الثانية على 6ac9fae7: الاحتواء النصّي كان يسمح لاسم أقصر
-// بأن يُشبَع من سطر اسم أطور يحويه — «اليغانس سليم فضي» داخل «اليغانس سليم
-// فضي بدون طبعة». التبليط التام يمنع ذلك: الأطوال لا تتساوى أصلاً.)
 function printedRow(pageLines, row) {
-  const target = normalizeArabic(row.name) + normalizeArabic(row.unit) + normalizeArabic(row.price);
-  return pageLines.some((line) => tilesExactly(target, line));
+  const prefix = normalizeArabic(row.name) + normalizeArabic(row.unit);
+  const wanted = new Set(priceOrderings(row.price).map((price) => prefix + price));
+  return pageLines.some((line) => wanted.has(line.join("")));
 }
 
-// رأس المجموعة سطرٌ يحمل اسمها ثم عدّاد أصنافها — بنفس القاعدة.
+// رأس المجموعة سطرٌ يحمل اسمها وعدّاد أصنافها — بنفس الصرامة، وبالترتيبين
+// الممكنين وحدهما (العدّاد شارة تُرسم على يسار الاسم).
 function printedGroup(pageLines, group) {
-  const target = normalizeArabic(group.name) + normalizeArabic(String(group.count));
-  return pageLines.some((line) => tilesExactly(target, line));
+  const name = normalizeArabic(group.name);
+  const count = normalizeArabic(String(group.count));
+  const wanted = new Set([`${name}${count}`, `${count}${name}`]);
+  return pageLines.some((line) => wanted.has(line.join("")));
 }
 
 // شرط صحة قراءة الملف: قارئ نص PDF يقرأ **سطوراً**، فالاسم الذي يُرسم بسطر
