@@ -10845,7 +10845,13 @@ function render() {
         input.setCustomValidity("");
         state.syriaRateConfirmed = true;
         state.showExchangeModal = false;
-        openPricePreview(true);
+        // `openPricePreview` صارت async (تنتظر جهوزية خط النشرة قبل أول قياس).
+        // معالج النقرة لا ينتظرها، لكن رفضاً صامتاً يترك المستخدم أمام نافذة
+        // أُغلقت بلا معاينة ولا سبب — فنُمسك الفشل ونسمّيه.
+        openPricePreview(true).catch(() => {
+          setNotice("error", "تعذّر فتح معاينة النشرة. حدّث الصفحة وجرّب مجدداً.");
+          render();
+        });
       });
     }
     return;
