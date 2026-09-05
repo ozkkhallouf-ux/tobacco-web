@@ -390,6 +390,7 @@ reports\prices\tobacco-approved-prices.csv
 | صفحات سوداء في PDF | CSS يستخدم خلفيات داكنة | أضف `background: #ffffff !important` لكلاسات `.price-pdf-*` |
 | الكاش القديم عند الزبائن | تبويب مفتوح من قبل النشر يحمل الكود القديم في ذاكرته | إعادة تحميل الصفحة تكفي — الأرقام تُرفع آلياً عند النشر ولا تحتاج تدخلاً |
 | Applied=0 في مزامنة الأمين | `item_key` غير متطابق | تحقق من قيم `item_key` في Supabase مقابل الأمين |
+| فاتورة ظاهرة بالقائمة ومفقودة من كشف الحساب أو من زر PDF | هوية الزبون كانت بالاسم: تقرير الفواتير يجمّع بـ`bu000.Cust_Name` (لقطة على رأس الفاتورة) بينما الأرصدة بـ`cu000.CustomerName` — فإعادة تسمية حساب تشطر فواتيره على اسمين | الربط بـ`customerGuid` أولاً (`src/app.js`: `customerInvoicesFor`) والتجميع بالمعرّف في `push-customer-invoices.ps1`. المجموعة «اليتيمة» لا تُنسب لأحد بالتخمين — تحذير صريح فقط؛ راجع `docs/ai/topics/customer-balances.md` |
 | PowerShell لا يشغّل `claude.exe` | Claude Code يحتاج WSL | شغّل `start-claude-code.ps1` أو استخدم WSL مباشرة |
 
 ---
