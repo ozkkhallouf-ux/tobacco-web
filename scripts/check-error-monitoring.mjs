@@ -236,6 +236,38 @@ console.log("\n— تنقية الأسرار —");
     "ابتلع الحجبُ بقية أثر المكدّس — `.` يجب ألّا تطابق السطر الجديد");
 
   // -------------------------------------------------------------------
+  // انحدار ملاحظة Codex P1 السابعة عشرة — حقل تأكيد كلمة المرور.
+  //
+  // `passwordConfirmation` لم يُطابَق لأن `C` بعد `password` يمنع حدّ `\b`
+  // اللاحق. وهو حقل حقيقي في أربعة مواضع من `src/app.js`، وقيمته كلمة
+  // المرور الجديدة نفسها.
+  //
+  // ⚠️ وهذا الشاهد كشف عطلاً أعمّ وأخطر: كان التقاط القيمة `(.*)` يبتلع
+  // السطر كله ثم يُقتطع في الدالة، فيقفز `lastIndex` للنمط العام إلى نهاية
+  // السطر بعد أوّل مطابقة — فينجو كل حقل سرّي تالٍ على السطر نفسه. لذلك
+  // تُفحص هنا أزواج متعدّدة في سطر واحد، لا الحقل الجديد وحده.
+  // -------------------------------------------------------------------
+  {
+    const resetForm = '{"email":"owner@example.com","password":"OldPass123","passwordConfirmation":"OldPass123"}';
+    const scrubbed = scrub(resetForm);
+    check("نموذج إعادة التعيين: password وpasswordConfirmation كلاهما يُحجب",
+      !scrubbed.includes("OldPass123"),
+      `بقيت كلمة المرور — صار: ${scrubbed}`);
+    check("نموذج إعادة التعيين: بقية الرسالة تبقى مفهومة",
+      scrubbed.includes("owner@example.com") && scrubbed.includes("passwordConfirmation"),
+      `ضاع سياق البلاغ — صار: ${scrubbed}`);
+  }
+  for (const [label, input, secrets] of [
+    ["passwordConfirmation في سجلّ", "reset failed passwordConfirmation=MySecretPass123", ["MySecretPass123"]],
+    ["حقلان سرّيان مختلفان في سطر", '{"token":"AAA","password":"BBB"}', ["AAA", "BBB"]],
+    ["حقلان سرّيان آخران في سطر", '{"api_key":"AAA","secret":"BBB"}', ["AAA", "BBB"]],
+  ]) {
+    check(`تُحجب كل الحقول السرّية: ${label}`,
+      secrets.every((x) => !scrub(input).includes(x)),
+      `نجا حقل سرّي على السطر نفسه — صار: ${scrub(input)}`);
+  }
+
+  // -------------------------------------------------------------------
   // انحدار ملاحظة Codex P1 الخامسة عشرة — رموز الاستعادة لمرة واحدة.
   //
   // `recoveryCode` ليس حقلاً افتراضياً: `src/app.js` يجمعه من نموذج استعادة
