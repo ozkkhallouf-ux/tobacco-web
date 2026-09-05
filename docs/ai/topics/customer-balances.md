@@ -12,7 +12,7 @@
 
 ## نطاق الملفات
 
-`src/app.js`, `tools/ameen-customer-balances-query.sql`, `tools/push-ameen-account-balances.ps1`, `tools/push-customer-movements.ps1`, `tools/push-customer-invoices.ps1`, `tools/verify-balances-all.ps1`, `supabase/ameen-account-balance-reports.sql`.
+`src/app.js`, `src/supabase-client.js`, `src/business-snapshot.js`, `src/decision-engine.js`, `tools/ameen-customer-balances-query.sql`, `tools/push-ameen-account-balances.ps1`, `tools/push-customer-movements.ps1`, `tools/push-customer-invoices.ps1`, `tools/verify-balances-all.ps1`, `supabase/ameen-account-balance-reports.sql`, `supabase/migrations/20260905131500_credit_limits_customer_guid.sql`.
 
 ## هوية الزبون بين التقارير الثلاثة (مثبت 2026-09-05)
 
@@ -48,6 +48,48 @@
 المعتمد فعلياً هو التاريخ والمبلغ، ومعرّف الفاتورة نفسه (`bu000.GUID`) الذي يبقى
 صالحاً ويُستعمل للبحث على كامل التقرير.
 
+## حدود الائتمان الداخلية تتبع المعرّف أيضاً (2026-09-05)
+
+`customer_credit_limits` كان مفتاحه `customer_key` وحده، وهو مشتقّ من اسم الزبون
+(`normalizeItemName`). فالعطل نفسه الذي أصاب الفواتير كان قائماً هنا بصمت أعمق:
+إعادة تسمية حساب واحدة تُغيّر المفتاح، فينفصل الحد عن صاحبه فيظهر «بلا حد»
+ويسقط عنه تصنيفا «تجاوز الحد» و«قريب من الحد» — فتُصرف بضاعة فوق الحد بلا تنبيه.
+الفارق عن الفواتير أن لا شيء يظهر على الشاشة يدلّ على الانفصال: الحقل يبدو فارغاً
+كأن أحداً لم يضع حداً قط.
+
+أُضيف عمود `customer_guid` (نصّ، بقيد شكل يرفض المعرّف الصفري) وفهرسان: فريد على
+المعرّف، وفريد على `customer_key` **فقط حين يغيب المعرّف**. سقط
+`unique(customer_key)` الكامل لأن حسابين مختلفين قد يحملان الاسم نفسه تحت نموذج
+المعرّف. ولأن PostgREST لا يستنتج فهرساً جزئياً في ON CONFLICT، صار الحفظ
+«بحثاً ثم كتابة» في `src/supabase-client.js` بدل `upsert`.
+
+المطابقة في القراءة (`customerLimitFor` في `src/app.js`، و`buildReceivables` في
+`src/business-snapshot.js`، و`creditLimitFor` في `src/decision-engine.js`):
+
+| حال الزبون | حال الحد المحفوظ | النتيجة |
+|---|---|---|
+| له معرّف | معرّف مطابق | ربط قطعي |
+| له معرّف | بلا معرّف (سجل قديم) | ربط بالاسم — توافق |
+| له معرّف | معرّف **مختلف** | **لا ربط إطلاقاً** ولو تطابق الاسم |
+| بلا معرّف (تقرير قديم) | أي حد | ربط بالاسم — السلوك السابق حرفياً |
+
+الصف الثالث هو الحارس: تطابق الاسم بين حسابين لا يجعلهما حساباً واحداً، ووراثة
+حدّ حساب آخر خطأ محاسبي صامت. وعند الحفظ يُتبنّى سجل قديم بلا معرّف فيُثبَّت
+معرّفه، ولا يُتبنّى أبداً سجل يحمل معرّفاً مختلفاً.
+
+الهجرة `supabase/migrations/20260905131500_credit_limits_customer_guid.sql` تردم
+المعرّفات مرة واحدة من أحدث تقرير أرصدة بمطابقة حرفية للمفتاح، وبثلاثة حرّاس:
+مرشّح واحد لا أكثر، معرّف غير صفري، ومعرّف لم يُنسب لسجل آخر. قيس قبل التطبيق
+(2026-09-05): 25 سجل حد، 302 زبوناً في التقرير، 25/25 تطابقاً بمرشّح واحد، صفر
+مفاتيح بمعرّفات متعددة، 25 معرّفاً متمايزاً.
+
+**ترتيب النشر إلزامي: الهجرة أولاً ثم دمج الواجهة.** القراءة تطلب عمود
+`customer_guid` صراحةً، فنشر الواجهة قبل الهجرة يُعيد 400 من PostgREST ويُعطّل
+شاشة الحدود بالكامل.
+
+الفحص: `scripts/check-credit-limit-identity.mjs` (27 اختباراً؛ يفشل على السلوك
+القديم — أُثبت بتعطيل مطابقة المعرّف فسقطت 4 اختبارات).
+
 ## قيود ثابتة
 
 - لا يؤخذ الرصيد من `cu000` ولا يُحوّل مرة ثانية وفق عملة الوصل.
@@ -58,7 +100,7 @@
 
 ## فحوص إلزامية
 
-`npm.cmd run check` (يشمل `check-customer-invoice-identity.mjs`)، مقارنة رصيد عينة
+`npm.cmd run check` (يشمل `check-customer-invoice-identity.mjs` و`check-credit-limit-identity.mjs`)، مقارنة رصيد عينة
 وحركاتها مع الأمين، وفحص RLS وصلاحية العرض عند تغيير Supabase أو الواجهة.
 عند تعديل `push-customer-invoices.ps1` شغّل `-Discover` أولاً وتأكد بالعين أن سطر
 «هوية الحساب» يشير إلى الزبون نفسه الوارد في نصّ الفاتورة.

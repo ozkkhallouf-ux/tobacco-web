@@ -79,24 +79,47 @@
     return numberOrZero(row?.balance ?? row?.debit ?? row?.amount ?? row?.remaining ?? 0);
   }
 
+  // المعرّف الصفري الذي يكتبه الأمين بدل NULL ليس معرّفاً.
+  const ZERO_GUID = "00000000-0000-0000-0000-000000000000";
+  function limitGuid(row) {
+    const guid = text(row?.customerGuid || row?.customer_guid).toLowerCase();
+    return !guid || guid === ZERO_GUID ? "" : guid;
+  }
+
   function buildReceivables(balanceReports, creditLimits) {
     const report = Array.isArray(balanceReports) ? balanceReports[0] : null;
     const rows = Array.isArray(report?.items) ? report.items : [];
+    const limitByGuid = new Map();
     const limitByKey = new Map();
     const limitByName = new Map();
+    // خرائط الاحتياط «القديمة» تحمل الحدود **بلا معرّف** فقط: زبونٌ يحمل معرّفاً
+    // لا يجوز أن يرث حدّ حسابٍ آخر يصادف أن يطابقه اسماً.
+    const legacyByKey = new Map();
+    const legacyByName = new Map();
 
     for (const limit of creditLimits || []) {
+      const guid = limitGuid(limit);
       const key = text(limit.customerKey || limit.customer_key);
       const name = customerName(limit).toLowerCase();
-      if (key) limitByKey.set(key, numberOrZero(limit.creditLimit || limit.credit_limit));
-      if (name) limitByName.set(name, numberOrZero(limit.creditLimit || limit.credit_limit));
+      const amount = numberOrZero(limit.creditLimit || limit.credit_limit);
+      // المعرّف أولاً: إعادة تسمية حساب في الأمين تُغيّر المفتاح والاسم معاً،
+      // فالمطابقة بهما وحدهما كانت تُسقط الحد عن صاحبه صامتاً.
+      if (guid) limitByGuid.set(guid, amount);
+      if (key) limitByKey.set(key, amount);
+      if (name) limitByName.set(name, amount);
+      if (!guid && key) legacyByKey.set(key, amount);
+      if (!guid && name) legacyByName.set(name, amount);
     }
 
     const debtors = rows.map((row) => {
       const balance = Math.max(0, customerBalance(row));
       const key = customerKey(row);
       const name = customerName(row);
-      const approvedLimit = limitByKey.get(key) ?? limitByName.get(name.toLowerCase()) ?? 0;
+      const guid = limitGuid(row);
+      const fallbackByKey = guid ? legacyByKey : limitByKey;
+      const fallbackByName = guid ? legacyByName : limitByName;
+      const approvedLimit = (guid ? limitByGuid.get(guid) : undefined)
+        ?? fallbackByKey.get(key) ?? fallbackByName.get(name.toLowerCase()) ?? 0;
       const ameenLimit = numberOrZero(row?.creditLimit ?? row?.credit_limit ?? 0);
       const creditLimit = approvedLimit > 0 ? approvedLimit : ameenLimit;
       const creditLimitSource = approvedLimit > 0 ? "approved" : ameenLimit > 0 ? "ameen" : "missing";

@@ -131,7 +131,7 @@ reports/prices/*.csv          ← بيانات أسعار حساسة
 | جدول الأسعار | `approved_price_items` |
 | جدول الطلبات | `customer_requests` |
 | جدول الجرد | `inventory_reports` |
-| جدول حدود الائتمان | `customer_credit_limits` |
+| جدول حدود الائتمان | `customer_credit_limits` (الهوية `customer_guid`) |
 
 ### اختبار الاتصال بـ Supabase (من cloud):
 ```bash
@@ -391,6 +391,7 @@ reports\prices\tobacco-approved-prices.csv
 | الكاش القديم عند الزبائن | تبويب مفتوح من قبل النشر يحمل الكود القديم في ذاكرته | إعادة تحميل الصفحة تكفي — الأرقام تُرفع آلياً عند النشر ولا تحتاج تدخلاً |
 | Applied=0 في مزامنة الأمين | `item_key` غير متطابق | تحقق من قيم `item_key` في Supabase مقابل الأمين |
 | فاتورة ظاهرة بالقائمة ومفقودة من كشف الحساب أو من زر PDF | هوية الزبون كانت بالاسم: تقرير الفواتير يجمّع بـ`bu000.Cust_Name` (لقطة على رأس الفاتورة) بينما الأرصدة بـ`cu000.CustomerName` — فإعادة تسمية حساب تشطر فواتيره على اسمين | الربط بـ`customerGuid` أولاً (`src/app.js`: `customerInvoicesFor`) والتجميع بالمعرّف في `push-customer-invoices.ps1`. المجموعة «اليتيمة» لا تُنسب لأحد بالتخمين — تحذير صريح فقط؛ راجع `docs/ai/topics/customer-balances.md` |
+| زبون له حد ائتمان محفوظ يظهر فجأة «بلا حد» ولا يُنبَّه على تجاوزه | `customer_credit_limits` كان مفتاحه `customer_key` المشتقّ من الاسم؛ إعادة تسمية الحساب في الأمين تُغيّر المفتاح فينفصل الحد عن صاحبه صامتاً | الربط بـ`customer_guid` أولاً (`customerLimitFor` في `src/app.js`)، والاسم احتياط للسجلات القديمة وحدها. لا يرث حسابٌ حدَّ حسابٍ آخر بتطابق الاسم؛ راجع `docs/ai/topics/customer-balances.md` |
 | PowerShell لا يشغّل `claude.exe` | Claude Code يحتاج WSL | شغّل `start-claude-code.ps1` أو استخدم WSL مباشرة |
 
 ---

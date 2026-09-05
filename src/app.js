@@ -1905,12 +1905,16 @@ async function saveCustomerLimit(form) {
     // نطبّع دائماً — حتى مفتاح dataset — كي لا يتكرّر خلل عدم الارتباط
     // الذي جعل حد «مركز شريفة» لا يُطبَّق (ة مقابل ه).
     const customerKeyValue = normalizeItemName(form.dataset.customerKey || customerName);
+    // المعرّف هو الهوية. يبقى المفتاح النصّي محفوظاً معه لا بديلاً عنه: تقارير
+    // أرصدة قديمة قد تصل بلا معرّف، وعندها لا يبقى إلا الاسم.
+    const customerGuidValue = normGuid(form.dataset.customerGuid);
     const creditLimit = Math.max(0, toNumber(formValue(form, "creditLimit")));
 
     if (!customerKeyValue) throw new Error("لم أستطع تحديد الزبون لحفظ الحد.");
 
     await dataStore.upsertCustomerCreditLimit({
       customerKey: customerKeyValue,
+      customerGuid: customerGuidValue,
       customerName,
       creditLimit,
       notes: formValue(form, "notes")
@@ -4215,19 +4219,52 @@ function customerLimitSourceLabel(source) {
   }[source] || "بلا حد";
 }
 
-// التطبيع على الطرفين إلزامي: مفاتيح الحدود المحفوظة سابقاً غير مطبّعة أحياناً
+// هوية صاحب الحد هي `customerGuid`، لا اسمه. الاسم في الأمين نصّ قابل للتعديل
+// في أي لحظة، ومفتاح الحد المحفوظ سابقاً مشتقّ منه (`normalizeItemName`)، فإعادة
+// تسمية حساب واحدة كانت تُغيّر المفتاح فينفصل الحد عن صاحبه صامتاً: يظهر الزبون
+// «بلا حد» ويسقط عنه تصنيف «تجاوز الحد» و«قريب من الحد» كلياً. هذا نفس العطل
+// البنيوي الذي أصاب ربط الفواتير بالاسم (راجع `customerInvoiceEntryFor`).
+//
+// ثلاث خرائط لا واحدة، لأن الاحتياط بالاسم ليس واحداً في كل الحالات:
+//   • byGuid — الهوية القطعية.
+//   • byNameLegacy — حدود **بلا معرّف** فقط (سجلات قديمة لم تُنسب بعد). هي وحدها
+//     ما يجوز مطابقته بالاسم لزبون يحمل معرّفاً؛ ولو سمحنا بغيرها لأمكن أن يرث
+//     حسابٌ حدَّ حساب آخر يصادف أن يحمل الاسم نفسه.
+//   • byNameAny — لتقارير أرصدة قديمة لا تحمل معرّفاً أصلاً؛ سلوكها هو السلوك
+//     السابق حرفياً، فلا ينكسر شيء قبل وصول مزامنة تحمل المعرّف.
+//
+// التطبيع على طرفَي الاسم يبقى إلزامياً: مفاتيح محفوظة سابقاً غير مطبّعة أحياناً
 // (مثال حقيقي: «مركز شريفة اسعد شريفة» بالتاء المربوطة) بينما مزامنة الأرصدة
 // تطبّع (ة←ه)، فكان الحد لا يرتبط بصاحبه أبداً ويظهر «بلا حد محدّد».
-// التطبيع هنا يُصلح السجلات القديمة بلا ترحيل بيانات.
-function customerLimitMap() {
-  const map = new Map();
+function customerLimitMaps() {
+  const byGuid = new Map();
+  const byNameLegacy = new Map();
+  const byNameAny = new Map();
   (state.customerCreditLimits || []).forEach((limit) => {
-    const raw = limit && (limit.customerKey || limit.customerName);
-    if (!raw) return;
-    const key = normalizeItemName(String(raw));
-    if (key && !map.has(key)) map.set(key, limit);
+    if (!limit) return;
+    const guid = normGuid(limit.customerGuid);
+    if (guid && !byGuid.has(guid)) byGuid.set(guid, limit);
+    const raw = limit.customerKey || limit.customerName;
+    const key = raw ? normalizeItemName(String(raw)) : "";
+    if (!key) return;
+    if (!byNameAny.has(key)) byNameAny.set(key, limit);
+    if (!guid && !byNameLegacy.has(key)) byNameLegacy.set(key, limit);
   });
-  return map;
+  return { byGuid, byNameLegacy, byNameAny };
+}
+
+// يعيد { limit, matchedBy } — و`matchedBy` جزء من الناتج عمداً كي تستطيع الواجهة
+// والفحوص التمييز بين ربط قطعي بالمعرّف وربط احتياطي بالاسم.
+function customerLimitFor(item, maps) {
+  const guid = normGuid(item?.customerGuid);
+  if (guid) {
+    const byGuid = maps.byGuid.get(guid);
+    if (byGuid) return { limit: byGuid, matchedBy: "guid" };
+  }
+  const key = normalizeItemName(customerKey(item));
+  if (!key) return { limit: null, matchedBy: "none" };
+  const byName = guid ? maps.byNameLegacy.get(key) : maps.byNameAny.get(key);
+  return byName ? { limit: byName, matchedBy: "name" } : { limit: null, matchedBy: "none" };
 }
 
 function deriveCustomerStatus(balance, limit) {
@@ -4239,10 +4276,10 @@ function deriveCustomerStatus(balance, limit) {
 }
 
 function applyCustomerLimits(items) {
-  const limits = customerLimitMap();
+  const maps = customerLimitMaps();
   return items.map((item) => {
     const key = customerKey(item);
-    const savedLimit = limits.get(normalizeItemName(key)); // الطرف الآخر مطبّع أيضاً
+    const { limit: savedLimit, matchedBy } = customerLimitFor(item, maps);
     const ameenLimit = Number(item?.creditLimit || 0);
     const internalLimit = Number(savedLimit?.creditLimit || 0);
     const effectiveLimit = internalLimit > 0 ? internalLimit : ameenLimit;
@@ -4255,6 +4292,7 @@ function applyCustomerLimits(items) {
       internalCreditLimit: internalLimit,
       creditLimit: effectiveLimit,
       creditLimitNotes: savedLimit?.notes || "",
+      internalLimitMatchedBy: internalLimit > 0 ? matchedBy : "none",
       limitSource: internalLimit > 0 ? "internal" : ameenLimit > 0 ? "ameen" : "none",
       remainingLimit: effectiveLimit > 0 ? effectiveLimit - Math.max(0, balance) : 0,
       lastPaymentAmount: Number(item?.lastPaymentAmount || 0),
@@ -4737,7 +4775,7 @@ function customerBalanceRow(item) {
       <span>الرصيد: ${escapeHtml(formatMoney(customerBalance(item)))} / الحد: ${escapeHtml(limit > 0 ? formatMoney(limit) : "غير محدد")}</span>
       <span>المتبقي من الحد: ${escapeHtml(limit > 0 ? formatMoney(remaining) : "غير محدد")} / الحالة: ${escapeHtml(customerStatusLabel(item.status))} / المصدر: ${escapeHtml(customerLimitSourceLabel(item.limitSource))}</span>
       <span>آخر دفعة: ${escapeHtml(customerLastPaymentAmount(item) > 0 ? formatMoney(customerLastPaymentAmount(item)) : "غير متوفر")} / التاريخ: ${escapeHtml(customerLastPaymentDate(item) ? formatDate(customerLastPaymentDate(item)) : "غير متوفر")}</span>
-      <form class="customer-limit-editor" data-form="customer-limit" data-customer-key="${escapeHtml(key)}" data-customer-name="${escapeHtml(item.name || "")}">
+      <form class="customer-limit-editor" data-form="customer-limit" data-customer-key="${escapeHtml(key)}" data-customer-guid="${escapeHtml(normGuid(item.customerGuid))}" data-customer-name="${escapeHtml(item.name || "")}">
         <label>
           الحد الداخلي
           <input name="creditLimit" type="text" inputmode="decimal" dir="ltr" value="${escapeHtml(item.internalCreditLimit > 0 ? item.internalCreditLimit : "")}" placeholder="${escapeHtml(limit > 0 ? formatMoney(limit) : "0")}">
