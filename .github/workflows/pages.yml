@@ -72,6 +72,60 @@ jobs:
       - name: Generate PDFs
         run: node scripts/generate-pdfs.mjs
 
+      # ------------------------------------------------------------
+      # حقن إعدادات مراقبة الأخطاء وقت النشر — لا رمز في المستودع إطلاقاً.
+      #
+      # index.html يحمل نوّاباً حرفيين (`__ROLLBAR_CLIENT_TOKEN__` وأخواه)،
+      # وsrc/error-monitoring.js يعتبر أي قيمة تبدأ بـ`__` غيرَ مُهيّأة فيبقى
+      # خاملاً. فالمستودع والنسخ المحلية بلا مراقبة، والموقع المنشور وحده
+      # يحملها. رمز Rollbar من نوع post_client_item — صلاحيته الكتابة فقط
+      # (إنشاء بلاغ)، ولا يقرأ شيئاً؛ وهو بحكم عمله ظاهر في HTML المنشور،
+      # ولذلك تحديداً لا يجوز أن يكون رمزاً بصلاحية أوسع.
+      #
+      # بلا السرّ لا تفشل الخطوة: النائب يبقى مكانه فتبقى المراقبة معطّلة —
+      # فالنشر لا يتوقف على تهيئة أداة رصد.
+      #
+      # كل قيمة من سياق GitHub تمرّ عبر env لا عبر ${{ }} داخل `run:` — نفس
+      # التحصين المعتمَد على codex-review-gate.yml في 9637505: الحقن النصي
+      # يجعل القيمة جزءاً من نصّ الصدفة قبل تنفيذه، فتُقرأ أمراً لا بياناً.
+      # github.sha ليس مُتحكَّماً به هنا، لكن القاعدة تبقى واحدة في الملف كله.
+      - name: Inject error monitoring configuration
+        env:
+          ROLLBAR_CLIENT_TOKEN: ${{ secrets.ROLLBAR_POST_CLIENT_ITEM_TOKEN }}
+          DEPLOY_COMMIT: ${{ github.sha }}
+        run: |
+          FILE="index.html"
+          if [ -z "$ROLLBAR_CLIENT_TOKEN" ]; then
+            echo "::notice::ROLLBAR_POST_CLIENT_ITEM_TOKEN غير مُعرَّف — مراقبة الأخطاء تبقى معطّلة في هذه النشرة."
+            exit 0
+          fi
+          # النوّاب يجب أن تكون موجودة فعلاً؛ غيابها يعني أن index.html تغيّر
+          # وأن الحقن صار صامتاً بلا أثر — وهو أسوأ من فشل صريح.
+          grep -q '__ROLLBAR_CLIENT_TOKEN__' "$FILE"
+          grep -q '__DEPLOY_ENVIRONMENT__' "$FILE"
+          grep -q '__DEPLOY_COMMIT__' "$FILE"
+          # الاستبدال بـpython لا بـsed: الرمز قيمة عشوائية قد تحمل / أو & أو
+          # \1، وكلها ذات معنى خاص في sed فتفسد الناتج بصمت. python يستبدل نصاً
+          # حرفياً. والرمز يصل عبر البيئة لا عبر سطر الأوامر ولا عبر ملف مؤقّت:
+          # لا يظهر في قائمة العمليات ولا يُكتب على قرص العدّاء إطلاقاً.
+          python3 - "$FILE" "$DEPLOY_COMMIT" <<'PYEOF'
+          import html, os, pathlib, sys
+          html_path, commit = sys.argv[1], sys.argv[2]
+          token = os.environ["ROLLBAR_CLIENT_TOKEN"]
+          # الرمز يُكتب داخل سمة HTML بين علامتَي اقتباس: الهروب إلزامي كي لا
+          # تُنهي قيمةٌ فيها " أو < السمةَ فتُنتج صفحة مشوّهة. getAttribute في
+          # المتصفح يفكّ الهروب تلقائياً، فالقيمة تصل إلى الشيفرة كما هي.
+          p = pathlib.Path(html_path)
+          s = p.read_text(encoding="utf-8")
+          s = s.replace("__ROLLBAR_CLIENT_TOKEN__", html.escape(token, quote=True))
+          s = s.replace("__DEPLOY_ENVIRONMENT__", "production")
+          s = s.replace("__DEPLOY_COMMIT__", html.escape(commit, quote=True))
+          p.write_text(s, encoding="utf-8")
+          PYEOF
+          # تحقّق بعدي: لم يبقَ نائب واحد، والرمز نفسه لا يُطبع أبداً.
+          ! grep -q '__ROLLBAR_CLIENT_TOKEN__\|__DEPLOY_ENVIRONMENT__\|__DEPLOY_COMMIT__' "$FILE"
+          echo "تمّ حقن إعدادات مراقبة الأخطاء (release=$DEPLOY_COMMIT)."
+
       # رقم النسخة يزداد مع رقم التشغيل كي يبقى تصاعدياً بلا commit
       - name: Bump service worker cache version
         run: |

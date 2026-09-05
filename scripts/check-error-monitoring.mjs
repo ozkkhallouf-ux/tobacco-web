@@ -1,0 +1,284 @@
+// ============================================================================
+// حارس مراقبة أخطاء الإنتاج (src/error-monitoring.js).
+//
+// هذا الملف الوحيد من الإضافة الجديدة الذي **يُشحَن إلى متصفح الزبون**، وهو
+// يقرأ أخطاء تطبيق تعرض شاشاته أسماء زبائن وأرصدتهم وأسعارهم ثم يرسل إلى طرف
+// ثالث. فالعقد المطلوب حراسته عقدان لا واحد:
+//
+//   أ) **لا يعمل إلا في الإنتاج.** بلا رمز مُحقَن، أو على http، أو على مضيف
+//      محلي — يبقى خاملاً تماماً: لا مستمعات ولا طلبات. بلا هذا الحارس يكفي
+//      خطأ في شرط واحد كي ترسل نسخة المطوّر بلاغات إلى بيانات الإنتاج.
+//   ب) **لا يسرّب.** ما يُرسَل محصور في نصّ الخطأ وأثر مكدّسه ومسار الصفحة —
+//      بلا استعلام، بلا شظية، بلا كوكيز، بلا تخزين محلي، بلا محتوى DOM، ومع
+//      حذف كل ما يشبه السرّ. هذه فحوص سلوكية على الحمولة المرسَلة فعلاً، لا
+//      قراءةً للنصّ: التأكيد على الحمولة يمسك تسريباً تضيفه صياغة جديدة،
+//      بينما مطابقة النصّ تمسك صياغةً بعينها وحدها.
+//
+// كل الفحوص أدناه تُشغّل الملف فعلاً داخل node:vm بسياق متصفح مُصطنَع، وتُطلق
+// أحداثاً حقيقية، وتفحص ما وصل إلى fetch. لا تأكيد واحد على وجود سلسلة نصية.
+// ============================================================================
+import { readFileSync } from "node:fs";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import vm from "node:vm";
+
+const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const SOURCE = readFileSync(resolve(root, "src/error-monitoring.js"), "utf8");
+
+let failed = 0;
+const check = (name, condition, detail) => {
+  if (condition) console.log(`  ✅ ${name}`);
+  else { failed += 1; console.error(`  ❌ ${name}\n     ${detail}`); }
+};
+
+// ---------------------------------------------------------------------------
+// سياق متصفح مُصطنَع. `meta` = null يعني «لا وسم في الصفحة».
+// ---------------------------------------------------------------------------
+function boot({ meta, protocol = "https:", hostname = "ozktobacco.com", fetchImpl } = {}) {
+  const calls = [];
+  const listeners = new Map();
+  const metaElement = meta
+    ? { getAttribute: (name) => (name in meta ? meta[name] : null) }
+    : null;
+
+  const context = {
+    console,
+    Date,
+    Math,
+    JSON,
+    String,
+    Number,
+    Object,
+    Array,
+    document: {
+      querySelector: (selector) => (selector === 'meta[name="ozk-monitoring"]' ? metaElement : null),
+      // فخّ: أي محاولة لقراءة محتوى الصفحة أو الكوكيز تُسقِط الفحص فوراً.
+      get body() { throw new Error("مُنِع: قراءة DOM"); },
+      get cookie() { throw new Error("مُنِع: قراءة الكوكيز"); },
+    },
+    get localStorage() { throw new Error("مُنِع: قراءة localStorage"); },
+    get sessionStorage() { throw new Error("مُنِع: قراءة sessionStorage"); },
+    location: {
+      protocol,
+      hostname,
+      origin: `${protocol}//${hostname}`,
+      pathname: "/",
+      search: "?token=SECRET-IN-QUERY&customer=%D8%B2%D8%A8%D9%88%D9%86",
+      hash: "#hash-secret",
+    },
+    navigator: { userAgent: "Mozilla/5.0 (Test)" },
+    fetch: fetchImpl || ((url, init) => {
+      calls.push({ url, init, body: JSON.parse(init.body) });
+      return { catch: () => {} };
+    }),
+  };
+  context.window = context;
+  context.globalThis = context;
+  context.window.addEventListener = (type, handler) => {
+    if (!listeners.has(type)) listeners.set(type, []);
+    listeners.get(type).push(handler);
+  };
+
+  vm.createContext(context);
+  vm.runInContext(SOURCE, context, { filename: "error-monitoring.js" });
+
+  return {
+    calls,
+    listeners,
+    context,
+    emit(type, event) {
+      for (const handler of listeners.get(type) || []) handler(event);
+    },
+  };
+}
+
+const LIVE_META = {
+  "data-token": "0123456789abcdef0123456789abcdef",
+  "data-environment": "production",
+  "data-release": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+};
+
+// ===== 1) بوابة الإنتاج =====
+console.log("\n— بوابة الإنتاج —");
+{
+  const noMeta = boot({ meta: null });
+  check("بلا وسم إعداد: خامل تماماً",
+    noMeta.listeners.size === 0 && noMeta.context.ozkErrorMonitoring === undefined,
+    "سُجِّلت مستمعات رغم غياب الوسم");
+
+  const placeholder = boot({ meta: { ...LIVE_META, "data-token": "__ROLLBAR_CLIENT_TOKEN__" } });
+  check("النائب غير المُستبدَل يُعامَل كغير مُهيَّأ",
+    placeholder.listeners.size === 0,
+    "النائب `__ROLLBAR_CLIENT_TOKEN__` فُهم رمزاً صالحاً — سيرسل المستودع نفسه بلاغات");
+
+  const emptyToken = boot({ meta: { ...LIVE_META, "data-token": "" } });
+  check("رمز فارغ: خامل", emptyToken.listeners.size === 0, "رمز فارغ فعّل المراقبة");
+
+  const placeholderEnv = boot({ meta: { ...LIVE_META, "data-environment": "__DEPLOY_ENVIRONMENT__" } });
+  check("بيئة غير مُستبدَلة: خامل", placeholderEnv.listeners.size === 0, "بيئة نائبة فعّلت المراقبة");
+
+  const insecure = boot({ meta: LIVE_META, protocol: "http:" });
+  check("http: خامل", insecure.listeners.size === 0, "عملت المراقبة على اتصال غير مشفّر");
+
+  for (const host of ["localhost", "127.0.0.1", "0.0.0.0", "[::1]", "dev.local"]) {
+    const local = boot({ meta: LIVE_META, hostname: host });
+    check(`مضيف محلي (${host}): خامل`, local.listeners.size === 0,
+      `نسخة محلية سترسل بلاغات إلى بيانات الإنتاج (${host})`);
+  }
+
+  const live = boot({ meta: LIVE_META });
+  check("إنتاج فعلي: تُسجَّل مستمعات error وunhandledrejection",
+    live.listeners.has("error") && live.listeners.has("unhandledrejection"),
+    "لم تُسجَّل المستمعات رغم اكتمال الشروط — المراقبة معطّلة في الإنتاج");
+}
+
+// ===== 2) الحمولة المرسَلة =====
+console.log("\n— الحمولة —");
+{
+  const live = boot({ meta: LIVE_META });
+  live.emit("error", {
+    message: "boom",
+    filename: "https://ozktobacco.com/src/app.js?v=tobacco-179",
+    lineno: 12,
+    colno: 3,
+    error: Object.assign(new Error("boom"), { name: "TypeError", stack: "TypeError: boom\n  at https://ozktobacco.com/src/app.js?v=tobacco-179:12:3" }),
+  });
+
+  check("أُرسل بلاغ واحد", live.calls.length === 1, `عدد الطلبات: ${live.calls.length}`);
+  const call = live.calls[0];
+  check("العنوان هو نقطة استقبال Rollbar",
+    call?.url === "https://api.rollbar.com/api/1/item/", `العنوان: ${call?.url}`);
+  check("الرمز يُرسَل في الجسم لا في العنوان",
+    call?.body?.access_token === LIVE_META["data-token"] && !String(call?.url).includes(LIVE_META["data-token"]),
+    "الرمز في العنوان يظهر في سجلات الوسطاء");
+  check("البيئة والمستوى ومعرّف النشرة مُرفَقة",
+    call?.body?.data?.environment === "production" &&
+    call?.body?.data?.level === "error" &&
+    call?.body?.data?.code_version === LIVE_META["data-release"],
+    `environment/level/code_version ناقصة: ${JSON.stringify(call?.body?.data?.code_version)}`);
+  check("الاعتماديات لا تُرسَل (credentials: omit)",
+    call?.init?.credentials === "omit", "قد تُرسَل كوكيز النطاق مع البلاغ");
+
+  const url = call?.body?.data?.request?.url || "";
+  check("عنوان الصفحة بلا استعلام ولا شظية",
+    url === "https://ozktobacco.com/" && !url.includes("?") && !url.includes("#"),
+    `تسرّب الاستعلام أو الشظية: ${url}`);
+
+  const serialized = JSON.stringify(call?.body || {});
+  for (const leak of ["SECRET-IN-QUERY", "hash-secret", "%D8%B2%D8%A8%D9%88%D9%86"]) {
+    check(`لا تسريب لـ"${leak}" من استعلام الصفحة`, !serialized.includes(leak),
+      `وُجد ${leak} في الحمولة`);
+  }
+  check("معامل النسخة يُقصّ من اسم الملف (وإلا تشتّت التجميع كل نشرة)",
+    !String(call?.body?.data?.custom?.filename || "").includes("?v=tobacco-"),
+    `filename ما زال يحمل المعامل: ${call?.body?.data?.custom?.filename}`);
+}
+
+// ===== 3) تنقية الأسرار =====
+console.log("\n— تنقية الأسرار —");
+{
+  const live = boot({ meta: LIVE_META });
+  const scrub = live.context.ozkErrorMonitoring.scrub;
+  const cases = [
+    ["مفتاح Supabase", "failed with sb_publishable_FAKEKEY0000TESTONLY0000000000", "sb_publishable_FAKEKEY"],
+    ["رمز JWT", "Authorization: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9abcdef", "eyJhbGciOiJIUzI1NiI"],
+    ["رمز GitHub", "token ghp_0123456789abcdefghijABCDEFGHIJ012345", "ghp_0123456789abcdef"],
+    ["رمز بوت تيليغرام", "bot123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw", "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw"],
+    ["password= صريحة", "login failed password=Hunter2Hunter2", "Hunter2Hunter2"],
+    ["استعلام داخل عنوان", "GET https://x.example/api?apikey=abcdef123456 failed", "apikey=abcdef123456"],
+  ];
+  for (const [label, input, secret] of cases) {
+    check(`تُحذف: ${label}`, !scrub(input).includes(secret), `بقي «${secret}» بعد التنقية`);
+  }
+  check("النصّ المفيد يبقى", scrub("TypeError: cannot read x").includes("cannot read x"),
+    "التنقية أتلفت رسالة الخطأ نفسها فصارت البلاغات بلا قيمة");
+}
+
+// ===== 4) الحدّ والتكرار والمتانة =====
+console.log("\n— الحدّ والمتانة —");
+{
+  const live = boot({ meta: LIVE_META });
+  const sameError = () => live.emit("error", {
+    message: "same", filename: "https://ozktobacco.com/src/app.js", lineno: 1, colno: 1,
+    error: Object.assign(new Error("same"), { name: "Error", stack: "Error: same" }),
+  });
+  sameError(); sameError(); sameError();
+  check("الخطأ المتكرّر يُرسَل مرة واحدة", live.calls.length === 1,
+    `أُرسل ${live.calls.length} مرات — حلقة خطأ ستغرق الخدمة`);
+
+  for (let i = 0; i < 50; i += 1) {
+    live.emit("error", {
+      message: `distinct-${i}`, filename: "https://ozktobacco.com/src/app.js", lineno: i + 100, colno: 1,
+      error: Object.assign(new Error(`distinct-${i}`), { name: "Error", stack: `Error: distinct-${i}` }),
+    });
+  }
+  check("سقف الجلسة عشرة بلاغات", live.calls.length === 10,
+    `أُرسل ${live.calls.length} — لا سقف فعّال`);
+}
+{
+  const live = boot({ meta: LIVE_META });
+  live.emit("unhandledrejection", { reason: Object.assign(new Error("rejected"), { name: "RangeError", stack: "RangeError: rejected" }) });
+  check("الوعود المرفوضة تُلتقَط", live.calls.length === 1, "لم يُلتقَط unhandledrejection");
+  check("رسالة الرفض تصل كاملة",
+    String(live.calls[0]?.body?.data?.body?.message?.body || "").includes("rejected"),
+    "ضاعت رسالة الرفض");
+}
+{
+  // fetch يرمي مباشرةً (حاجب إعلانات، CSP، شبكة مقطوعة): يجب ألّا يصعد الاستثناء
+  // إلى معالج الخطأ العام فيتحوّل عطلُ رصدٍ إلى عطل تطبيق.
+  const live = boot({ meta: LIVE_META, fetchImpl: () => { throw new Error("network down"); } });
+  let threw = false;
+  try {
+    live.emit("error", { message: "x", filename: "a.js", lineno: 1, colno: 1, error: new Error("x") });
+  } catch { threw = true; }
+  check("فشل الإرسال لا يُسقِط التطبيق", !threw, "استثناء المُرسِل تسرّب إلى معالج الخطأ العام");
+}
+
+// ===== 5) التوصيل في المستودع =====
+console.log("\n— التوصيل —");
+{
+  const html = readFileSync(resolve(root, "index.html"), "utf8");
+  const sw = readFileSync(resolve(root, "public/service-worker.js"), "utf8");
+
+  check("index.html يحمل النوّاب الثلاثة (لا رمز في Git)",
+    html.includes("__ROLLBAR_CLIENT_TOKEN__") &&
+    html.includes("__DEPLOY_ENVIRONMENT__") &&
+    html.includes("__DEPLOY_COMMIT__"),
+    "اختفى نائب — إمّا الحقن صار صامتاً وإمّا الرمز الحقيقي التُزم في المستودع");
+
+  const tokenAttr = html.match(/data-token="([^"]*)"/)?.[1] || "";
+  check("قيمة data-token في المستودع نائب لا رمز حقيقي",
+    tokenAttr.startsWith("__"),
+    `data-token يحمل قيمة غير نائبة — سرّ في المستودع: ${tokenAttr.slice(0, 8)}…`);
+
+  check("CSP تسمح بنقطة استقبال Rollbar على connect-src وحدها",
+    /connect-src[^;]*https:\/\/api\.rollbar\.com/.test(html) &&
+    !/script-src[^;]*rollbar/.test(html),
+    "إمّا connect-src تمنع الإرسال، وإمّا رُخِّيت script-src لطرف ثالث");
+
+  check("السكربت مُحمَّل مع معامل النسخة",
+    /src\/error-monitoring\.js\?v=tobacco-\d+/.test(html),
+    "بلا معامل النسخة يبقى الملف مخبّأً في متصفح الزبون بعد كل نشر");
+
+  check("الملف مُحمَّل قبل src/app.js (وإلا فاتته أخطاء الإقلاع)",
+    html.indexOf("src/error-monitoring.js") < html.indexOf("src/app.js"),
+    "تحميل المراقبة بعد التطبيق يُضيّع أخطاء أول ثانية");
+
+  check("service worker يُخبّئ الملف مسبقاً",
+    sw.includes('"src/error-monitoring.js"'),
+    "بلا تخبئة مسبقة يفشل تحميله عند انقطاع الشبكة");
+
+  const pages = readFileSync(resolve(root, ".github/workflows/pages.yml"), "utf8");
+  check("خط النشر يحقن الإعداد من سرّ GitHub",
+    pages.includes("ROLLBAR_POST_CLIENT_ITEM_TOKEN") && pages.includes("Inject error monitoring configuration"),
+    "اختفت خطوة الحقن — ستُنشَر المراقبة معطّلة بلا إنذار");
+  check("الحقن يسبق رفع معامل النسخة",
+    pages.indexOf("Inject error monitoring configuration") < pages.indexOf("Bump asset version marker"),
+    "ترتيب معكوس يخاطر بتداخل الاستبدالين على index.html");
+}
+
+if (failed > 0) {
+  console.error(`\n✗ فشل ${failed} تأكيداً في حارس مراقبة الأخطاء.`);
+  process.exit(1);
+}
+console.log("\n✓ حارس مراقبة الأخطاء: البوابة الإنتاجية والتنقية والحدّ والتوصيل كلها سليمة.");
