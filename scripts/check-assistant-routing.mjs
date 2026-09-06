@@ -286,7 +286,8 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   assert.ok(!/8,186,250|8186250/.test(reply), "عرض الإجمالي المضخَّم رغم التعارض");
   assert.ok(/pull-purchase-invoices-from-ameen/.test(reply), "لم يوجّه إلى موضع الخلل الحقيقي");
   // والأعداد السليمة تبقى معروضة — الامتناع عن القيمة لا يعني إخفاء كل شيء
-  assert.ok(/عدد الفواتير: \*\*2\*\*/.test(reply), "أخفى عدد الفواتير وهو رقم سليم");
+  // الوسم صار «عدد فواتير الشراء» عمداً بعد فصل المرتجعات — العدد نفسه لم يتغيّر.
+  assert.ok(/عدد فواتير الشراء: \*\*2\*\*/.test(reply), "أخفى عدد الفواتير وهو رقم سليم");
   assert.ok(/هادي الغميان/.test(reply), "أخفى اسم المورّد وهو معلومة سليمة");
   ok("قيمة المشتريات المتعارضة الوحدات: امتناع صريح عن الإجمالي مع إبقاء الأعداد السليمة");
 }
@@ -1057,7 +1058,7 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   assert.ok(/مورّد قديم/.test(lastMonth), `لم يعرض مورّد الشهر الماضي:\n${lastMonth}`);
   assert.ok(!/مورّد حالي/.test(lastMonth), `أدخل مورّد هذا الشهر في جواب الشهر الماضي:\n${lastMonth}`);
   assert.ok(!/\*\*99\*\*/.test(lastMonth), `عرض عدد فواتير اللقطة كلها (99) بدل عدد الفترة:\n${lastMonth}`);
-  assert.ok(/عدد الفواتير: \*\*1\*\*/.test(lastMonth), `لم يشتقّ العدد من المجموعة المُرشَّحة:\n${lastMonth}`);
+  assert.ok(/عدد فواتير الشراء: \*\*1\*\*/.test(lastMonth), `لم يشتقّ العدد من المجموعة المُرشَّحة:\n${lastMonth}`);
 
   // وبلا فترة صريحة تبقى اللقطة كاملةً كما كانت
   const b = await loadAssistant({ fixtures });
@@ -1168,6 +1169,64 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   assert.ok(/لا توجد فواتير لهذا الزبون ضمن/.test(custClean),
     `امتنع عن النفي رغم اكتمال التغطية:\n${custClean}`);
   ok("لقطة المشتريات وفواتير الزبائن: الفترة خارج نافذتها أو لقطةٌ مقصوصة تُعلَن، والنفي القاطع يُحجب");
+}
+
+// ── ظ) المرتجع ليس شراءً — في فواتير الزبون وفي المشتريات ──────────────────
+{
+  // ملاحظة Codex على PR #205 بعد ece2495: المنتِجان يرفعان `isReturn`
+  // (BillType=3 للمبيعات، ونوع مرتجع الشراء للمشتريات)، والواجهة تميّزه منذ
+  // زمن (src/app.js) — والمساعد وحده كان يعرضه تحت «المشتريات» بأصنافه
+  // ومبلغه. فزبونٌ **أعاد** بضاعة يظهر وكأنه اشتراها: عكس الحقيقة، لا نقصٌ
+  // فيها.
+  const day = (n) => new Date(Date.now() + 180 * 60_000 - n * 86_400_000).toISOString().slice(0, 10);
+
+  // زبون له مرتجع واحد فقط ⇒ لا يُقال إنه اشترى
+  const onlyReturn = defaultFixtures();
+  onlyReturn["inventory_reports:ameen_customer_invoices"] = [{
+    report_date: day(0), created_at: new Date().toISOString(),
+    summary: { fromDate: day(60) },
+    items: [{ customerGuid: "aaa11111", name: "جهاد التلي", truncated: false,
+      invoices: [{ date: day(3), isReturn: true, lines: [{ material: "بضاعة مُعادة", qty: 2, unit1: "علبة", price: 300, lineTotal: 600 }] }] }]
+  }];
+  const a = await loadAssistant({ fixtures: onlyReturn });
+  const retText = String((await a.ask(TOKENS.owner, "ماذا اشترى الزبون جهاد التلي؟")).body.reply);
+  assert.ok(/مرتجع/.test(retText), `لم يذكر المرتجع إطلاقاً:\n${retText}`);
+  assert.ok(/لا فاتورة \*\*شراء\*\* له/.test(retText),
+    `عرض المرتجع كأنه شراء:\n${retText}`);
+  assert.ok(!/\*\*1\*\* فاتورة شراء/.test(retText), "عدّ المرتجع فاتورة شراء");
+
+  // وزبون له شراء ومرتجع ⇒ يُفصلان ولا يُخلطان في العدد
+  const mixed = defaultFixtures();
+  mixed["inventory_reports:ameen_customer_invoices"] = [{
+    report_date: day(0), created_at: new Date().toISOString(),
+    summary: { fromDate: day(60) },
+    items: [{ customerGuid: "aaa11111", name: "جهاد التلي", truncated: false, invoices: [
+      { date: day(2), lines: [{ material: "صنف مُشترى", qty: 1, unit1: "علبة", price: 900, lineTotal: 900 }] },
+      { date: day(3), isReturn: true, lines: [{ material: "بضاعة مُعادة", qty: 2, unit1: "علبة", price: 300, lineTotal: 600 }] }
+    ] }]
+  }];
+  const b = await loadAssistant({ fixtures: mixed });
+  const mixText = String((await b.ask(TOKENS.owner, "ماذا اشترى الزبون جهاد التلي؟")).body.reply);
+  assert.ok(/\(1 فاتورة شراء ضمن/.test(mixText), `لم يفصل عدد الشراء عن المرتجع:\n${mixText}`);
+  assert.ok(/1 مرتجع/.test(mixText), `لم يذكر المرتجع مفصولاً:\n${mixText}`);
+  assert.ok(/صنف مُشترى/.test(mixText), "أسقط فاتورة الشراء");
+  assert.ok(/بضاعة مُعادة/.test(mixText), "أسقط المرتجع كلياً بدل فصله");
+
+  // والمشتريات: مرتجع الشراء لا يُعدّ فاتورة شراء
+  const purch = defaultFixtures();
+  purch.ameen_purchase_invoice_reports = [{
+    report_date: day(0), created_at: new Date().toISOString(),
+    summary: { bills: 2, suppliers: 1, fromDate: day(60) },
+    items: [{ name: "مورّد", truncated: false, invoices: [
+      { date: day(2), items: [{ itemName: "س", qty: 1, lineTotal: 10, avgPrice: 10 }] },
+      { date: day(3), isReturn: true, items: [{ itemName: "س", qty: 1, lineTotal: 10, avgPrice: 10 }] }
+    ] }]
+  }];
+  const c = await loadAssistant({ fixtures: purch });
+  const purchText = String((await c.ask(TOKENS.owner, "ما المشتريات؟")).body.reply);
+  assert.ok(/عدد فواتير الشراء: \*\*1\*\*/.test(purchText), `عدّ مرتجع الشراء فاتورة شراء:\n${purchText}`);
+  assert.ok(/\*\*1\*\* مرتجع شراء/.test(purchText), `لم يُعلن مرتجع الشراء مفصولاً:\n${purchText}`);
+  ok("المرتجع يُفصل عن الشراء ويُعنون — في فواتير الزبون وفي المشتريات");
 }
 
 console.log(`\nتوجيه المساعد الذكي: ${passed}/${passed} تحقق ناجح`);

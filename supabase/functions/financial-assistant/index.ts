@@ -1220,9 +1220,21 @@ const TOOLS: Tool[] = [
             if (identity === "name") {
               text += `\n\n> ℹ️ سجل الفواتير أدناه مطابَق بالاسم لأن حساب الزبون بلا معرّف في تقرير الأرصدة.`;
             }
-            const shown = invoices.slice(0, 3);
-            text += `\n\n**آخر الفواتير** (${invoices.length} فاتورة ضمن ${periodLabel})`
+            // المرتجع (BillType=3، يرفعه المنتِج بـ`isReturn`) ليس شراءً.
+            // عرضُه تحت «المشتريات» بأصنافه ومبلغه يجعل زبوناً **أعاد** بضاعة
+            // يظهر وكأنه اشتراها — وهو عكس الحقيقة تماماً، لا نقصٌ فيها.
+            // الواجهة تميّزه منذ زمن (src/app.js)، والمساعد وحده كان يخلطه.
+            // (رصدها Codex على PR #205 بعد ece2495.)
+            const purchases = invoices.filter((inv: Record<string, unknown>) => !inv.isReturn);
+            const returns = invoices.filter((inv: Record<string, unknown>) => inv.isReturn);
+            const shown = purchases.slice(0, 3);
+            text += `\n\n**آخر الفواتير** (${purchases.length} فاتورة شراء ضمن ${periodLabel}`
+              + (returns.length ? `، و${returns.length} مرتجع` : "")
+              + `)`
               + (invCoverage.covered ? "" : " — العدد حدٌّ أدنى، انظر التنبيه أدناه");
+            if (!purchases.length) {
+              text += `\n\nلا فاتورة **شراء** له في هذه الفترة — ما وُجد مرتجعات فقط.`;
+            }
             for (const inv of shown) {
               const lines = Array.isArray(inv.lines) ? inv.lines : [];
               const total = lines.reduce((sum: number, l: Record<string, unknown>) => sum + num(l.lineTotal), 0);
@@ -1233,6 +1245,21 @@ const TOOLS: Tool[] = [
                     `- ${String(l.material ?? "")}: ${qty(l.qty)} ${String(l.unit1 ?? "")} × ${money(l.price)} = ${money(l.lineTotal)}`)
                   .join("\n")
                 + (lines.length > 10 ? `\n- _و${lines.length - 10} سطر آخر._` : "");
+            }
+            // المرتجعات تُعرض مفصولةً ومعنونةً، لا مطويّةً ولا مخلوطة.
+            if (returns.length) {
+              text += `\n\n**🔁 مرتجعات ${periodLabel}** (${returns.length})\n`
+                + returns
+                  .slice(0, 5)
+                  .map((inv: Record<string, unknown>) => {
+                    const lines = Array.isArray(inv.lines) ? inv.lines : [];
+                    const total = lines.reduce((sum: number, l: Record<string, unknown>) => sum + num(l.lineTotal), 0);
+                    return `- ${String(inv.date ?? "")}: ${money(total)}`
+                      + (lines.length ? ` (${lines.slice(0, 3).map((l: Record<string, unknown>) => String(l.material ?? "")).join("، ")}${lines.length > 3 ? "…" : ""})` : "");
+                  })
+                  .join("\n")
+                + (returns.length > 5 ? `\n- _و${returns.length - 5} مرتجع آخر._` : "")
+                + `\n\nالمرتجع بضاعة **أعادها** الزبون، فلا يُحسب شراءً ولم يدخل في العدد أعلاه.`;
             }
           }
           text += invCoverage.note;
@@ -1621,7 +1648,12 @@ const TOOLS: Tool[] = [
       const bySupplier = items
         .map((row: Record<string, unknown>) => {
           if (row.truncated) truncatedSuppliers += 1;
-          const invoices = (Array.isArray(row.invoices) ? row.invoices : []).filter(inPeriod);
+          // مرتجع الشراء يرفعه المنتِج بـ`isReturn` كذلك (السطر 350 من
+          // pull-purchase-invoices-from-ameen.ps1). عدُّه شراءً يضخّم عدد
+          // الفواتير ويقلب معنى الرقم عند مورّد كثير الإرجاع.
+          const all = (Array.isArray(row.invoices) ? row.invoices : []).filter(inPeriod);
+          const invoices = all.filter((invoice: Record<string, unknown>) => !invoice.isReturn);
+          const returnCount = all.length - invoices.length;
           let lineCount = 0;
           for (const invoice of invoices) {
             for (const line of (Array.isArray(invoice.items) ? invoice.items : []) as Array<Record<string, unknown>>) {
@@ -1633,13 +1665,14 @@ const TOOLS: Tool[] = [
             }
           }
           const dates = invoices.map((invoice: Record<string, unknown>) => String(invoice.date ?? "")).filter(Boolean).sort();
-          return { name: String(row.name ?? ""), count: invoices.length, lineCount, last: dates[dates.length - 1] ?? "" };
+          return { name: String(row.name ?? ""), count: invoices.length, lineCount, returnCount, last: dates[dates.length - 1] ?? "" };
         })
-        .filter((row) => row.count > 0)
+        .filter((row) => row.count > 0 || row.returnCount > 0)
         .sort((a, b) => b.count - a.count);
 
       const unreliable = lines > 0 && conflicting / lines > 0.2;
       const bills = bySupplier.reduce((sum, row) => sum + row.count, 0);
+      const returnsTotal = bySupplier.reduce((sum, row) => sum + row.returnCount, 0);
       const scope = ctx.period.explicit
         ? `${ctx.period.label} (${ctx.period.from} → ${ctx.period.to})`
         : `نافذة ${String(s.fromDate ?? "?")} → ${report.report_date}`;
@@ -1670,7 +1703,8 @@ const TOOLS: Tool[] = [
       }
 
       let text = `**المشتريات — ${scope}**\n`
-        + `- عدد الفواتير: **${bills}** من **${bySupplier.length}** مورّد، بمجموع ${lines} سطر\n`
+        + `- عدد فواتير الشراء: **${bills}** من **${bySupplier.length}** مورّد، بمجموع ${lines} سطر\n`
+        + (returnsTotal ? `- ومعها **${returnsTotal}** مرتجع شراء، غير داخلة في العدد أعلاه.\n` : "")
         + (ctx.period.explicit
           ? `- محسوبة على ${coverage.covered ? "الفترة المطلوبة وحدها" : "الجزء المغطّى منها"}،`
             + ` من نافذة تقرير ${coverage.from} → ${coverage.to}.\n`
@@ -1680,7 +1714,8 @@ const TOOLS: Tool[] = [
         + bySupplier
           .slice(0, 12)
           .map((row, index) =>
-            `${index + 1}. ${row.name}: **${row.count}** فاتورة (${row.lineCount} سطر)`
+            `${index + 1}. ${row.name}: **${row.count}** فاتورة شراء (${row.lineCount} سطر)`
+            + (row.returnCount ? ` و${row.returnCount} مرتجع` : "")
             + (row.last ? ` — آخرها ${row.last}` : ""))
           .join("\n");
 
