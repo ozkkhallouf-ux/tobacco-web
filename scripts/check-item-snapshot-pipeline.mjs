@@ -112,7 +112,12 @@ assert.match(producer, /publicRestHeaders\(headers, \{ write: true \}\)/);
 assert.doesNotMatch(producer, /Accept-Profile['"]?\s*:\s*['"]api['"]/i);
 assert.doesNotMatch(producer, /Content-Profile['"]?\s*:\s*['"]api['"]/i);
 assert.match(registration, /New-ScheduledTaskTrigger -Daily/);
-assert.match(registration, /05:05/);
+// 2026-09-06: كان المشغّل يومياً واحداً عند 05:05، فأي رفض من بوابة حداثة
+// المبيعات (نافذتها 75 دقيقة) كان يجمّد اللقطة 24 ساعة كاملة — وهو ما جمّدها
+// ستة أيام فعلياً. التكرار الساعي شرط عقدي الآن، لا تفصيلاً تشغيلياً.
+assert.match(registration, /RepetitionInterval/);
+assert.match(registration, /\$IntervalHours/);
+assert.doesNotMatch(registration, /\$DailyAt/);
 assert.match(registration, /MultipleInstances IgnoreNew/);
 assert.doesNotMatch(registration, /Start-ScheduledTask/);
 assert.match(sql, /security invoker/i);

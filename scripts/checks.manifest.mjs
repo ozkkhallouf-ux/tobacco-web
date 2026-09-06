@@ -31,6 +31,8 @@ export const CHECKS = [
   'check-credit-limit-identity.mjs',
   'check-cron-job-health-classifier.mjs',
   'check-customer-invoice-identity.mjs',
+  'check-decision-pipeline-safety.mjs',
+  'check-decision-scoring.mjs',
   'check-docker-dev-port-binding.mjs',
   'check-error-monitoring.mjs',
   'check-expense-entries-security.mjs',
