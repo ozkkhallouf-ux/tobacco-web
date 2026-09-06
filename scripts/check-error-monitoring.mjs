@@ -34,15 +34,20 @@ const check = (name, condition, detail) => {
 // ---------------------------------------------------------------------------
 // سياق متصفح مُصطنَع. `meta` = null يعني «لا وسم في الصفحة».
 // ---------------------------------------------------------------------------
-function boot({ meta, protocol = "https:", hostname = "ozktobacco.com", fetchImpl } = {}) {
+function boot({ meta, protocol = "https:", hostname = "ozktobacco.com", fetchImpl, respondWith } = {}) {
   const calls = [];
+  const consoleErrors = [];
   const listeners = new Map();
   const metaElement = meta
     ? { getAttribute: (name) => (name in meta ? meta[name] : null) }
     : null;
 
   const context = {
-    console,
+    // مرصد: أي `console.error` من المُرسِل يُلتقَط. «دخان ما بعد النشر» يعتبره
+    // فشلاً، فأداة الرصد لا يجوز أن تكون هي مصدره.
+    console: Object.assign(Object.create(Object.getPrototypeOf(console)), console, {
+      error: (...args) => { consoleErrors.push(args); },
+    }),
     Date,
     Math,
     JSON,
@@ -67,9 +72,11 @@ function boot({ meta, protocol = "https:", hostname = "ozktobacco.com", fetchImp
       hash: "#hash-secret",
     },
     navigator: { userAgent: "Mozilla/5.0 (Test)" },
+    // وعد حقيقي: `fetch` لا يرفض على 4xx/5xx، فالمحاكي يعكس ذلك بدقّة كي
+    // يُمارَس مسار `response.ok` فعلاً بدل أن يُفترَض.
     fetch: fetchImpl || ((url, init) => {
       calls.push({ url, init, body: JSON.parse(init.body) });
-      return { catch: () => {} };
+      return Promise.resolve(respondWith || { ok: true, status: 200 });
     }),
   };
   context.window = context;
@@ -84,6 +91,7 @@ function boot({ meta, protocol = "https:", hostname = "ozktobacco.com", fetchImp
 
   return {
     calls,
+    consoleErrors,
     listeners,
     context,
     emit(type, event) {
@@ -597,7 +605,201 @@ console.log("\n— الحدّ والمتانة —");
   check("فشل الإرسال لا يُسقِط التطبيق", !threw, "استثناء المُرسِل تسرّب إلى معالج الخطأ العام");
 }
 
-// ===== 5) التوصيل في المستودع =====
+// ===== 5) حجب بيانات العمل والأشخاص (P1-1) =====
+//
+// ⚠️ كل البيانات أدناه **صناعية بالكامل**: أسماء وأرقام وهواتف وبُرد مُختلَقة
+// لهذا الفحص وحده. لا بيانات زبون حقيقي في هذا الملف، ولا حمولة تغادر إلى أي
+// خدمة أثناء الفحص — `fetch` محاكاة محلية تُجمّع الطلبات في مصفوفة.
+//
+// العقد: `scrub` تحجب الأسرار، وهذه الطبقة تحجب **بيانات العمل والأشخاص**.
+// أثبت التدقيق أن الثانية كانت غائبة تماماً: مرّت ست حالات حرفيةً بلا تغيير.
+console.log("\n— حجب بيانات العمل والأشخاص —");
+{
+  const live = boot({ meta: LIVE_META });
+  const redact = live.context.ozkErrorMonitoring.redactBusinessData;
+  const redactStack = live.context.ozkErrorMonitoring.redactStack;
+
+  const BUSINESS = [
+    ["اسم زبون ورصيده", 'فشل حفظ رصيد الزبون "محمد العلي" = 1,250,000 ل.س', ["محمد", "العلي", "1,250,000"]],
+    ["JSON رصيد وحدّ ائتمان", '{"customer_name":"أبو زياد","balance":1250000,"credit_limit":500000}', ["أبو", "زياد", "1250000", "500000"]],
+    ["رقم فاتورة وقيمتها", "فاتورة INV-2291 بمبلغ 3,400,000", ["2291", "3,400,000"]],
+    ["هاتف دولي", "تعذر إرسال رسالة إلى +963991234567", ["963991234567"]],
+    ["هاتف محلي", "phone 0991234567 unreachable", ["0991234567"]],
+    ["بريد إلكتروني", "notify failed for owner@example.com", ["owner@example.com"]],
+    ["اسم موظف من تعارض جرد", "تم جرد هذا الصنف بواسطة سامر الحلبي", ["سامر", "الحلبي"]],
+    ["اسم صنف تجاري", '{"item_key":"TOB-001","name":"غلواز قصير أحمر"}', ["غلواز", "قصير", "أحمر"]],
+    ["اسم عربي داخل نصّ إنجليزي", 'saveCustomer failed for زبون تجريبي', ["زبون", "تجريبي"]],
+  ];
+  for (const [label, input, leaks] of BUSINESS) {
+    const out = redact(input);
+    check(`تُحجب: ${label}`, leaks.every((x) => !out.includes(x)),
+      `بقي شيء من ${JSON.stringify(leaks)} — صار: ${out}`);
+  }
+
+  // الاسم الثنائي يُجمَع في علامة واحدة: علامتان متجاورتان تكشفان عدد الكلمات.
+  check("الاسم الثنائي علامة واحدة لا علامتان",
+    (redact("الزبون محمد العلي").match(/\[نص عربي محذوف\]/g) || []).length === 1,
+    `عدد العلامات يكشف بنية الاسم — صار: ${redact("الزبون محمد العلي")}`);
+
+  // الجانب المقابل: ما يجب أن **يبقى** كي تظل المراقبة مفيدة.
+  for (const [label, input, kept] of [
+    ["اسم صنف الخطأ", "TypeError: Cannot read properties of undefined", "TypeError"],
+    ["اسم الخاصية المعطوبة", "Cannot read properties of undefined (reading 'approved_price_items')", "approved_price_items"],
+    ["رمز حالة HTTP", "Failed to load resource: the server responded with a status of 500", "500"],
+    ["نصّ تشخيصي إنجليزي", "Cannot read properties of undefined", "Cannot read properties"],
+    ["اسم دالة", "at renderInventoryReport", "renderInventoryReport"],
+  ]) {
+    check(`يبقى للتشخيص: ${label}`, redact(input).includes(kept),
+      `ضاع «${kept}» — صارت البلاغات بلا قيمة: ${redact(input)}`);
+  }
+
+  // ترتيب القواعد ليس تجميلياً: الفاصلة العربية (\u060C) والأرقام الهندية
+  // (\u0660-\u0669) تقعان **داخل** نطاق الحروف العربية. فلو سبقت قاعدةُ
+  // العربية قواعدَ الأرقام لالتقطت الفواصل وحدها وحوّلت `1،250،000` إلى
+  // ثلاث مجموعات من ثلاث خانات لا يطابقها حدّ الأربع خانات — فيتسرّب الرصيد.
+  for (const [label, input, leak] of [
+    ["رصيد بفاصلة عربية", "رصيد 1،250،000 ل.س", "250"],
+    ["رصيد بأرقام هندية", "رصيد \u0661\u0662\u0665\u0660\u0660\u0660\u0660 ل.س", "\u0661\u0662\u0665"],
+    ["رصيد بأرقام هندية وفاصلة", "\u0661\u060C\u0662\u0665\u0660\u060C\u0660\u0660\u0660", "\u0662\u0665\u0660"],
+  ]) {
+    check(`ترتيب القواعد يحمي: ${label}`, !redact(input).includes(leak),
+      `تسرّب «${leak}» — قاعدة الأرقام يجب أن تسبق قاعدة العربية: ${redact(input)}`);
+  }
+
+  // تركيب الطبقتين: علامة السرّ عربيةُ النصّ، فلو لم تُحمَ لالتهمتها قاعدةُ
+  // العربية وتحوّل «سرّ محذوف» إلى «نص عربي محذوف» — فيضيع تمييز نوع الحجب.
+  // ولو عُكس الترتيب لحُجبت أرقامُ رمزٍ سرّي قبل أن تتعرّف عليه قواعد الأسرار.
+  for (const [label, input, gone] of [
+    ["كلمة سرّ + اسم + رصيد", 'فشل تسجيل الزبون محمد password="Hunter2Hunter2" رصيد 1,250,000',
+     ["Hunter2Hunter2", "محمد", "1,250,000"]],
+    ["ترويسة ترخيص + اسم زبون", "Authorization: Bearer opaque-session-9911 للزبون أبو زياد",
+     ["opaque-session-9911", "زياد"]],
+  ]) {
+    const out = redact(live.context.ozkErrorMonitoring.scrub(input));
+    check(`الطبقتان معاً: ${label}`,
+      gone.every((x) => !out.includes(x)) && out.includes("[سرّ محذوف]"),
+      `إمّا تسرّب شيء وإمّا ضاع تمييز علامة السرّ — صار: ${out}`);
+  }
+
+  // --- أثر المكدّس: قائمة سماح، لا قائمة منع ---
+  const STACK = 'Error: فشل حفظ رصيد الزبون "محمد العلي" = 1,250,000\n'
+    + "  at saveBalance (https://ozktobacco.com/src/app.js:11830:25)\n"
+    + "  at HTMLButtonElement.onclick (https://ozktobacco.com/src/app.js:9002:11)";
+  const rs = redactStack(STACK);
+  check("الأثر: سطر الرسالة (غير الإطار) يسقط كاملاً",
+    !rs.includes("محمد") && !rs.includes("1,250,000"),
+    `تسرّبت بيانات من سطر رسالة الأثر — صار: ${rs}`);
+  check("الأثر: الإطارات تبقى كاملة بأرقام سطورها وأعمدتها",
+    rs.includes("src/app.js:11830:25") && rs.includes("src/app.js:9002:11") && rs.includes("saveBalance"),
+    `ضاعت أطر المكدّس — لا يبقى ما يُشخَّص به: ${rs}`);
+  check("الأثر: صيغة Firefox/Safari مقبولة كإطار",
+    redactStack("saveBalance@https://ozktobacco.com/src/app.js:11830:25").includes("11830:25"),
+    "أُسقطت أطر متصفحات غير V8 — تصير بلاغات Safari بلا أثر");
+  check("الأثر: نصّ حرّ مدسوس بين الأطر يسقط",
+    !redactStack("Error: x\nزبون سرّي هنا\n  at f (a.js:1:2)").includes("زبون"),
+    "نصّ غير إطار وجد طريقه إلى الخارج");
+  check("الأثر: أسطر السقوط المتتالية تُدمَج",
+    (redactStack("Error: a\nb\nc\n  at f (a.js:1:2)").match(/سطر غير إطار/g) || []).length === 1,
+    "امتلأ الأثر بعلامات السقوط");
+
+  // --- الفحص الأقوى: الحمولة المرسَلة فعلاً، من طرف إلى طرف ---
+  const e2e = boot({ meta: LIVE_META });
+  e2e.emit("error", {
+    message: "m",
+    filename: "https://ozktobacco.com/src/app.js?v=tobacco-179",
+    lineno: 11830,
+    colno: 25,
+    error: Object.assign(
+      new Error('فشل حفظ رصيد الزبون "محمد العلي" = 1,250,000 ل.س فاتورة INV-2291 هاتف +963991234567 بريد owner@example.com'),
+      { name: "Error",
+        stack: 'Error: فشل حفظ رصيد الزبون "محمد العلي"\n  at saveBalance (https://ozktobacco.com/src/app.js:11830:25)' }),
+  });
+  const wire = JSON.stringify(e2e.calls[0] || {});
+  for (const leak of ["محمد", "العلي", "1,250,000", "2291", "963991234567", "owner@example.com", "زبون"]) {
+    check(`لا يغادر الحمولةَ: «${leak}»`, !wire.includes(leak),
+      `وصل «${leak}» إلى طرف ثالث في الحمولة المرسَلة فعلاً`);
+  }
+  check("الحمولة تبقى مفيدة: الموقع كامل رغم الحجب",
+    e2e.calls[0]?.body?.data?.custom?.lineno === 11830 &&
+    e2e.calls[0]?.body?.data?.custom?.colno === 25 &&
+    String(e2e.calls[0]?.body?.data?.body?.message?.stack || "").includes("app.js:11830:25"),
+    "ضاع الموقع مع البيانات — الحجب أفرغ البلاغ بدل أن يؤمّنه");
+}
+
+// ===== 6) رصد فشل التسليم (P1-2) =====
+//
+// `fetch` لا يرفض على 4xx/5xx، و`.catch` الفارغة كانت تبتلع كل شيء — فرمز
+// مرفوض أو حصة مستنفدة كانت تمرّ بصمت تامّ ويبقى «مفعّل» ادّعاءً بلا سند.
+console.log("\n— رصد فشل التسليم —");
+{
+  const boom = (i = 0) => ({
+    message: `e${i}`, filename: "https://ozktobacco.com/src/app.js", lineno: 100 + i, colno: 1,
+    error: Object.assign(new Error(`e${i}`), { name: "Error", stack: `Error: e${i}\n  at f (app.js:${100 + i}:1)` }),
+  });
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  for (const status of [401, 403, 429, 500, 503]) {
+    const live = boot({ meta: LIVE_META, respondWith: { ok: false, status } });
+    live.emit("error", boom());
+    await tick();
+    const d = live.context.ozkErrorMonitoring.delivery();
+    check(`${status} لا يُعامَل إرسالاً ناجحاً`,
+      d.delivered === 0 && d.failures === 1 && d.lastFailureStatus === status,
+      `حالة ${status} حُسبت نجاحاً أو ضاعت — ${JSON.stringify(d)}`);
+    check(`${status} لا يُنتج console.error`, live.consoleErrors.length === 0,
+      `أداة الرصد صارت مصدر ضجيج يكسر دخان ما بعد النشر`);
+  }
+
+  {
+    const live = boot({ meta: LIVE_META });
+    live.emit("error", boom());
+    await tick();
+    const d = live.context.ozkErrorMonitoring.delivery();
+    check("200 يُحصى نجاحاً", d.delivered === 1 && d.failures === 0, JSON.stringify(d));
+  }
+
+  {
+    const live = boot({ meta: LIVE_META, fetchImpl: () => Promise.reject(new Error("network down")) });
+    live.emit("error", boom());
+    await tick();
+    const d = live.context.ozkErrorMonitoring.delivery();
+    check("رفض الشبكة يُسجَّل فشلاً بلا حالة HTTP",
+      d.failures === 1 && d.lastFailureStatus === 0, JSON.stringify(d));
+    check("رفض الشبكة لا يكسر التطبيق ولا يُنتج ضجيجاً",
+      live.consoleErrors.length === 0, "ظهر console.error عند انقطاع الشبكة");
+  }
+
+  {
+    const live = boot({ meta: LIVE_META, respondWith: { ok: false, status: 401 } });
+    for (let i = 0; i < 6; i += 1) { live.emit("error", boom(i)); await tick(); }
+    check("قاطع الدارة: يتوقف الإرسال بعد ثلاثة إخفاقات متتالية",
+      live.calls.length === 3, `أُرسل ${live.calls.length} — رمز مرفوض يغرق شبكة الزبون بلا مقابل`);
+    check("قاطع الدارة: الحالة تُبلّغ عن التوقف",
+      live.context.ozkErrorMonitoring.delivery().stopped === true, "لا سبيل لاكتشاف أن الإرسال توقف");
+  }
+
+  {
+    const live = boot({ meta: LIVE_META, respondWith: { ok: false, status: 401 } });
+    live.emit("error", boom());
+    await tick();
+    const d = live.context.ozkErrorMonitoring.delivery();
+    check("حالة التسليم لا تكشف الرمز ولا الحمولة",
+      !JSON.stringify(d).includes(LIVE_META["data-token"]) && !("payload" in d) && !("token" in d),
+      `تسرّب الرمز أو الحمولة عبر واجهة التشخيص: ${JSON.stringify(d)}`);
+    check("فشل التسليم لا يولّد بلاغاً جديداً (لا ارتداد)",
+      live.calls.length === 1, `أنتج الفشلُ إرسالاً إضافياً — حلقة ارتداد: ${live.calls.length}`);
+  }
+
+  {
+    // غياب Rollbar كلياً: لا وسم ⇒ لا مستمعات ⇒ التطبيق يعمل كأن الملف غير موجود.
+    const absent = boot({ meta: null });
+    check("غياب الإعداد لا يكسر شيئاً ولا يكشف واجهة",
+      absent.listeners.size === 0 && absent.context.ozkErrorMonitoring === undefined && absent.calls.length === 0,
+      "الملف ترك أثراً رغم غياب الإعداد");
+  }
+}
+
+// ===== 7) التوصيل في المستودع =====
 console.log("\n— التوصيل —");
 {
   const html = readFileSync(resolve(root, "index.html"), "utf8");

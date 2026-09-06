@@ -18,8 +18,13 @@
 //   • نصّ الخطأ ونوعه وأثر المكدّس، بعد تنقية.
 //   • مسار الصفحة (pathname) بلا استعلام ولا شظية.
 //   • البيئة، ومعرّف النشرة (commit)، وسلسلة المتصفح.
-// ما لا يُرسَل أبداً: أي محتوى DOM، أي قيمة حقل، localStorage، الكوكيز،
-// عناوين تحمل استعلامات، أي شيء من بيانات الزبائن.
+// ما لا يُقرأ أبداً: أي محتوى DOM، أي قيمة حقل، localStorage، sessionStorage،
+// الكوكيز، عناوين تحمل استعلامات.
+//
+// وبيانات الزبائن: نصّ الخطأ نفسه قد يحملها (رسالة مُركّبة من قيم وقت
+// التشغيل)، فلا يكفي ألّا يقرأها الملف. لذلك تمرّ الرسالة والأثر بطبقة ثانية
+// تحجب العربية كلها والبُرد والهواتف والأرقام الطويلة، ويُصفّى الأثر بقائمة
+// سماح لا تُبقي إلا أطر المكدّس. التفصيل والحدود المعلَنة عند `redactBusinessData`.
 //
 // الإنتاج وحده: بلا رمز مُحقَن (وهو لا يُحقَن إلا في خطوة النشر) يبقى الملف
 // خاملاً تماماً. وحتى مع رمز، يشترط https ومضيفاً غير محلي — فنسخة مطوّر أو
@@ -343,8 +348,122 @@
     return out;
   }
 
-  function clamp(text, max) {
-    var value = scrub(text);
+  // ---------------------------------------------------------------------------
+  // الطبقة الثانية: حجب بيانات العمل والأشخاص (P1-1).
+  //
+  // التدقيق أثبت عملياً أن `scrub` تحجب الأسرار وحدها: مرّت ستّ حالات بيانات
+  // عمل حرفيةً بلا أي تغيير — اسم زبون ورصيده، و`customer_name`/`balance`/
+  // `credit_limit` في JSON، ورقم فاتورة وقيمتها، وهاتف وبريد. فوعد الرأس
+  // القديم بأن بيانات الزبائن «لا تُرسَل أبداً» كان يصف ما **لا يقرأه** الملف
+  // (DOM، تخزين، كوكيز، استعلام) لا ما قد يحمله **نصّ الخطأ** نفسه.
+  //
+  // الحدّ المعرفي الذي يفرض هذا التصميم: **اسم الزبون ونصّ الخطأ العربي
+  // متطابقان شكلاً.** «محمد العلي» و«تعذر الاتصال بالخادم» كلاهما حروف عربية،
+  // ولا قاعدة نصّية تفرّق بينهما بلا قائمة أسماء حقيقية — وهي ممنوعة صراحةً.
+  // فمحاولة تمييز «النوع» تعطي حمايةً احتمالية تنكسر عند أوّل اسم لم يخطر
+  // ببال كاتب النمط. الضمان البنيوي الوحيد هو حجب **كل** نصّ عربي.
+  //
+  // الثمن مدروس، والمقابل أن التشخيص هنا يقوم على **الموقع لا النثر**:
+  //   • `custom.filename` و`lineno` و`colno` تبقى كاملة.
+  //   • أطر المكدّس تبقى كاملة (الملف، الدالة، السطر، العمود).
+  //   • اسم صنف الخطأ (TypeError، RangeError…) يبقى — وهو إنجليزي.
+  //   • والأخطاء غير الملتقَطة أغلبها مولّدة من محرّك JS وهي إنجليزية أصلاً.
+  //
+  // ما يبقى خارج الضمان صراحةً — يُقال ولا يُدَّعى خلافه: اسمٌ **لاتيني**
+  // (`Ahmad Ali`) لا يُميَّز عن معرّف برمجي، فلا يُحجب. القاعدة تغطّي العربية
+  // وهي لغة بيانات هذا التطبيق كلها.
+  // ---------------------------------------------------------------------------
+
+  // نوّاب من محارف تحكّم أثناء المعالجة: العلامات النهائية عربية، فلو كُتبت
+  // مباشرةً لالتهمتها قاعدةُ العربية نفسها في الخطوة التالية. تُستبدَل دفعةً
+  // واحدة في `finishMarks` بعد انتهاء كل القواعد. ومحرف التحكّم لا يَرِد في
+  // نصّ خطأ حقيقي فلا يصطدم بمحتوى المستخدم.
+  var P_SECRET = "\u0001S\u0001";
+  var P_MAIL   = "\u0001M\u0001";
+  var P_PHONE  = "\u0001P\u0001";
+  var P_NUMBER = "\u0001N\u0001";
+  var P_ARABIC = "\u0001A\u0001";
+
+  var ARABIC_CLASS = "\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF";
+  // كلمات عربية متتالية تُجمَع في علامة واحدة كي لا يتحوّل الاسم الثنائي إلى
+  // علامتين تكشفان عدد كلماته. الواصلات المسموحة فراغات وترقيم شائع فقط.
+  var ARABIC_RUN = new RegExp(
+    "[" + ARABIC_CLASS + "]+(?:[\\s\\u060C\\u061B\\u061F.,:;!\\-\\u2013\\u2014\"'\\u00AB\\u00BB]*[" + ARABIC_CLASS + "]+)*",
+    "g"
+  );
+  var EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+  var INTL_PHONE_RE = /\+\d[\d\s\-().]{6,}\d/g;
+  // أرقام بفواصل آلاف (`1,250,000`) — شكل الأرصدة وقيم الفواتير.
+  var GROUPED_NUMBER_RE = /\d{1,3}(?:[,،]\d{3})+(?:\.\d+)?/g;
+  // أربع خانات فأكثر: يبتلع الهواتف المحلية وأرقام الفواتير والمبالغ، ويُبقي
+  // رموز الحالة (500) والكمّيات الصغيرة (403) وهي ما يفيد التشخيص فعلاً.
+  var LONG_NUMBER_RE = /\d{4,}/g;
+
+  function finishMarks(text) {
+    return text
+      .split(P_SECRET).join(REDACTED)
+      .split(P_MAIL).join("[بريد محذوف]")
+      .split(P_PHONE).join("[هاتف محذوف]")
+      .split(P_NUMBER).join("[رقم محذوف]")
+      .split(P_ARABIC).join("[نص عربي محذوف]");
+  }
+
+  // القواعد المشتركة بين الرسالة وإطار المكدّس. قاعدة الأرقام ليست منها عمداً:
+  // إطار المكدّس يحمل رقم السطر والعمود، وحجبهما يُفرغ الإطار من فائدته كلها.
+  function redactShared(text) {
+    return text
+      .split(REDACTED).join(P_SECRET)
+      .replace(EMAIL_RE, P_MAIL)
+      .replace(INTL_PHONE_RE, P_PHONE)
+      .replace(ARABIC_RUN, P_ARABIC);
+  }
+
+  function redactBusinessData(text) {
+    if (typeof text !== "string" || text.length === 0) return "";
+    var out = text
+      .split(REDACTED).join(P_SECRET)
+      .replace(EMAIL_RE, P_MAIL)
+      .replace(INTL_PHONE_RE, P_PHONE)
+      .replace(GROUPED_NUMBER_RE, P_NUMBER)
+      .replace(LONG_NUMBER_RE, P_NUMBER)
+      .replace(ARABIC_RUN, P_ARABIC);
+    return finishMarks(out);
+  }
+
+  // أثر المكدّس: قائمة سماح لا قائمة منع. السطر الذي يطابق شكل إطارٍ معروف
+  // يبقى (بعد تنقيته)، وكل ما عداه يسقط — وأوّلها سطر الرسالة نفسه، وهو
+  // مُرسَل في `message` أصلاً فلا يضيع شيء. فأي نصّ حرّ يحقنه المحرّك أو
+  // الشيفرة داخل الأثر لا يجد طريقاً إلى الخارج.
+  var FRAME_V8 = /^\s*at\s+\S/;                            // Chrome/Edge/Node
+  var FRAME_SPIDERMONKEY = /^\s*[^\s@]*@\S+:\d+:\d+\s*$/;  // Firefox/Safari
+  var DROPPED_LINE = "[سطر غير إطار — محذوف]";
+
+  function redactStack(stack) {
+    if (typeof stack !== "string" || stack.length === 0) return "";
+    var lines = scrub(stack).split("\n");
+    var out = [];
+    var lastDropped = false;
+    for (var i = 0; i < lines.length; i += 1) {
+      var line = lines[i];
+      if (FRAME_V8.test(line) || FRAME_SPIDERMONKEY.test(line)) {
+        out.push(finishMarks(redactShared(line)));
+        lastDropped = false;
+      } else if (!lastDropped) {
+        // أسطر السقوط المتتالية تُدمَج في واحد كي لا يمتلئ الأثر بالعلامات.
+        out.push(DROPPED_LINE);
+        lastDropped = true;
+      }
+    }
+    return out.join("\n");
+  }
+
+  function clampMessage(text, max) {
+    var value = redactBusinessData(scrub(text));
+    return value.length > max ? value.slice(0, max) + "…[مقتطع]" : value;
+  }
+
+  function clampStack(text, max) {
+    var value = redactStack(text);
     return value.length > max ? value.slice(0, max) + "…[مقتطع]" : value;
   }
 
@@ -356,8 +475,49 @@
   var seen = Object.create(null);
   var reporting = false;
 
+  // ---------------------------------------------------------------------------
+  // رصد فشل التسليم (P1-2).
+  //
+  // العطل: `.catch` فارغ **و**`fetch` لا يرفض على 4xx/5xx إطلاقاً — الاستجابة
+  // غير الناجحة تُحلّ كأي استجابة. فرمز مرفوض (401) أو ممنوع (403) أو حصة
+  // مستنفدة (429) أو عطل خدمة (5xx) كان يمرّ بصمت تامّ لا أثر له، ويبقى
+  // «المراقبة مفعّلة» ادّعاءً لا يسنده شيء.
+  //
+  // الحلّ محكوم بأربعة قيود صريحة:
+  //   • **لا ارتداد:** المعالِج لا يرمي ولا يستدعي `send`. و`.catch` في نهاية
+  //     السلسلة يبتلع أي استثناء داخل `.then` نفسه، فلا يتحوّل إلى رفض غير
+  //     مُعالَج يوقظ مستمعنا فيُنتج حلقة.
+  //   • **لا ضجيج:** لا `console.error` ولا `console.warn` — «دخان ما بعد
+  //     النشر» يعتبر `console.error` فشلاً، وضجيج أداة رصد لا يجوز أن يكسره.
+  //   • **لا كشف:** تُحفَظ حالة HTTP وعدّاد فقط. لا الرمز ولا الحمولة ولا نصّ
+  //     الاستجابة يُخزَّن أو يُعرَض.
+  //   • **قابل للاكتشاف:** الحالة مقروءة عبر `ozkErrorMonitoring.delivery()`،
+  //     فيمكن لاختبار أو لفحص ما بعد النشر أن يؤكّد الوصول فعلاً.
+  //
+  // وقاطع الدارة: بعد ثلاثة إخفاقات متتالية يتوقف الإرسال. رمز خاطئ يعني أن
+  // كل بلاغ تالٍ سيفشل أيضاً، فالاستمرار إغراقٌ لشبكة الزبون بلا أي مقابل.
+  // ---------------------------------------------------------------------------
+  var MAX_CONSECUTIVE_FAILURES = 3;
+  var delivered = 0;
+  var failures = 0;
+  var consecutiveFailures = 0;
+  var lastFailureStatus = 0;
+
+  function noteDelivery(ok, status) {
+    if (ok) {
+      delivered += 1;
+      consecutiveFailures = 0;
+      return;
+    }
+    failures += 1;
+    consecutiveFailures += 1;
+    // رقم الحالة وحده — لا جسم الاستجابة، فقد يردّد ما أرسلناه.
+    lastFailureStatus = typeof status === "number" ? status : 0;
+  }
+
   function send(level, title, stack, context) {
     if (reporting || sent >= MAX_ITEMS_PER_PAGE) return;
+    if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) return;
     var fingerprint = level + "|" + title + "|" + (context.filename || "") + ":" + (context.lineno || 0);
     if (seen[fingerprint]) return;
     seen[fingerprint] = true;
@@ -397,16 +557,24 @@
       };
 
       // keepalive: يُكمِل الإرسال حتى لو أُغلقت الصفحة فوراً بعد الخطأ.
-      // .catch فارغ متعمّد: فشل الشبكة إلى خدمة الرصد ليس حدثاً يستحق ضجيجاً
-      // في وحدة تحكّم المستخدم، ولا يجوز أن يتحوّل إلى رفض غير مُعالَج.
-      fetch(ENDPOINT, {
+      // النتيجة تُسجَّل ولا تُطبَع: الفشل صار مرصوداً بلا ضجيج ولا ارتداد،
+      // و`.catch` الأخيرة تشمل أخطاء `.then` نفسها فلا يفلت رفض غير مُعالَج.
+      var response = fetch(ENDPOINT, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
         keepalive: true,
         mode: "cors",
         credentials: "omit"
-      }).catch(function () {});
+      });
+      if (response && typeof response.then === "function") {
+        response.then(function (result) {
+          noteDelivery(Boolean(result && result.ok), result && result.status);
+        }).catch(function () {
+          // انقطاع شبكة أو حجب من إضافة متصفح: لا حالة HTTP أصلاً.
+          noteDelivery(false, 0);
+        });
+      }
     } catch (ignored) {
       // المُرسِل لا يُسقِط التطبيق تحت أي ظرف.
     } finally {
@@ -418,7 +586,7 @@
     var error = event && event.error;
     var name = (error && error.name) || "Error";
     var message = (error && error.message) || (event && event.message) || "خطأ غير معروف";
-    send("error", clamp(name + ": " + message, MAX_MESSAGE_CHARS), clamp(error && error.stack, MAX_STACK_CHARS), {
+    send("error", clampMessage(name + ": " + message, MAX_MESSAGE_CHARS), clampStack(error && error.stack, MAX_STACK_CHARS), {
       // اسم الملف بلا استعلام: معامل ?v=tobacco-N يتغيّر كل نشرة فيمنع التجميع.
       filename: scrub(String((event && event.filename) || "").split("?")[0]),
       lineno: event && event.lineno,
@@ -430,14 +598,27 @@
     var reason = event && event.reason;
     var name = (reason && reason.name) || "UnhandledRejection";
     var message = (reason && reason.message) || String(reason === undefined ? "" : reason);
-    send("error", clamp(name + ": " + message, MAX_MESSAGE_CHARS), clamp(reason && reason.stack, MAX_STACK_CHARS), {});
+    send("error", clampMessage(name + ": " + message, MAX_MESSAGE_CHARS), clampStack(reason && reason.stack, MAX_STACK_CHARS), {});
   });
 
-  // كشف محدود للاختبار والتشخيص — لا يرسل شيئاً بذاته.
+  // كشف محدود للاختبار والتشخيص — لا يرسل شيئاً بذاته، ولا يكشف الرمز ولا
+  // الحمولة. `delivery()` تعيد عدّادات وحالة HTTP الأخيرة فقط، وهي ما يجعل
+  // فشل التسليم قابلاً للاكتشاف بدل أن يبقى صامتاً.
   window.ozkErrorMonitoring = {
     environment: environment,
     release: injected(release) ? release : null,
     scrub: scrub,
-    sentCount: function () { return sent; }
+    redactBusinessData: redactBusinessData,
+    redactStack: redactStack,
+    sentCount: function () { return sent; },
+    delivery: function () {
+      return {
+        delivered: delivered,
+        failures: failures,
+        consecutiveFailures: consecutiveFailures,
+        lastFailureStatus: lastFailureStatus,
+        stopped: consecutiveFailures >= MAX_CONSECUTIVE_FAILURES
+      };
+    }
   };
 })();
