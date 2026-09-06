@@ -132,6 +132,34 @@ async function readRest(path: string) {
   return response.json();
 }
 
+// قراءة مُصفَّحة حتى الاستنفاد.
+//
+// لماذا لا يكفي `limit=N` ثم مقارنة عدد الصفوف بـN: PostgREST يقصّ الاستجابة
+// عند `db-max-rows` المضبوط على الخادم (غالباً 1000 على Supabase) **مهما طلبتَ**.
+// فطلبُ 25000 يعود بـ1000 صف، والمقارنة `length >= 25000` تبقى false، فيُعرض
+// إجمالي مبتور **على أنه كامل** — وهو بالضبط الرقم المالي الكاذب الذي بُني هذا
+// المساعد كله لمنعه. (رصدها Codex على PR #205.)
+//
+// المنهج: حجم الصفحة الفعلي يُشتقّ من الصفحة الأولى لا من المطلوب، ثم نتابع ما
+// دامت كل صفحة ممتلئة. فيصحّ السلوك أياً كان سقف الخادم. وسقف أمان يمنع حلقة
+// لا تنتهي، وبلوغه يُعلَن `partial` صراحةً بدل تمريره كإجمالي.
+const PAGE_SIZE = 1000;
+const HARD_ROW_CAP = 60_000;
+
+async function readPaged(path: (range: string) => string) {
+  const rows: Array<Record<string, unknown>> = [];
+  let pageSize = 0;
+  for (let offset = 0; offset < HARD_ROW_CAP; offset += pageSize || PAGE_SIZE) {
+    const page = await readRest(path(`&offset=${offset}&limit=${PAGE_SIZE}`));
+    const list: Array<Record<string, unknown>> = Array.isArray(page) ? page : [];
+    rows.push(...list);
+    // حجم الصفحة الحقيقي = ما أعاده الخادم أول مرة (قد يكون أقل من المطلوب)
+    if (!pageSize) pageSize = list.length;
+    if (!list.length || list.length < pageSize) return { rows, partial: false };
+  }
+  return { rows, partial: true };
+}
+
 // أحدث صف من جدول تقارير بمفتاح summary/items
 async function latestReport(table: string, source?: string) {
   const filter = source ? `&source=eq.${encodeURIComponent(source)}` : "";
@@ -299,10 +327,6 @@ function previousPeriod(period: Period): Period {
 }
 
 // ── قراءة سطور المبيعات ──────────────────────────────────────────────────────
-// السقف يمنع ردّاً مبتوراً يبدو كاملاً: إن بلغنا السقف نعلن أن الرقم جزئي بدل
-// تقديمه كإجمالي. شهر كامل ≈ 9 آلاف سطر، فالسقف 25 ألفاً يغطي شهرين بأمان.
-const SALES_ROW_LIMIT = 25_000;
-
 type SalesRow = {
   sale_date?: string;
   bill_no?: string;
@@ -327,13 +351,14 @@ async function readSales(period: Period, role: Role): Promise<{ rows: SalesRow[]
   const columns = role === "owner"
     ? "sale_date,bill_no,bill_type,item_name,qty,line_total,unit_cost,customer_name"
     : "sale_date,bill_no,bill_type,item_name,qty,line_total,customer_name";
-  const rows = await readRest(
+  // ترتيب ثابت وقاطع (id ثانوياً) شرطٌ لصحة التصفيح: بلا مفتاح فارق قد يتكرر
+  // صفٌّ أو يسقط آخر بين الصفحات.
+  const { rows, partial } = await readPaged((range) =>
     `sales_line_items?select=${columns}`
     + `&sale_date=gte.${safeDate(period.from)}&sale_date=lte.${safeDate(period.to)}`
-    + `&order=sale_date.desc&limit=${SALES_ROW_LIMIT}`
+    + `&order=sale_date.desc,id.asc${range}`
   );
-  const list: SalesRow[] = Array.isArray(rows) ? rows : [];
-  return { rows: list, partial: list.length >= SALES_ROW_LIMIT };
+  return { rows: rows as SalesRow[], partial };
 }
 
 function summarizeSales(rows: SalesRow[]) {
@@ -530,12 +555,14 @@ const TOOLS: Tool[] = [
       { re: /كم دفع/, w: 4 }
     ],
     async run(ctx) {
-      const rows = await readRest(
-        `expense_entries?select=entry_date,account_name,amount,notes`
+      // مُصفَّح: الحدّ الثابت 200 كان يعيد أحدث 200 حركة فقط ثم يعرض مجموعها
+      // على أنه إجمالي الفترة كلها — فسؤال «آخر 365 يوم» كان يبخس المصاريف
+      // بصمت. (رصدها Codex على PR #205.)
+      const { rows: list, partial } = await readPaged((range) =>
+        `expense_entries?select=id,entry_date,account_name,amount,notes`
         + `&entry_date=gte.${safeDate(ctx.period.from)}&entry_date=lte.${safeDate(ctx.period.to)}`
-        + `&order=entry_date.desc&limit=200`
+        + `&order=entry_date.desc,id.asc${range}`
       );
-      const list: Array<Record<string, unknown>> = Array.isArray(rows) ? rows : [];
       if (!list.length) {
         // فرّق بين «لا مصاريف بهذه الفترة» و«لا بيانات مصاريف إطلاقاً»
         const any = await readRest("expense_entries?select=entry_date&order=entry_date.desc&limit=1");
@@ -552,9 +579,15 @@ const TOOLS: Tool[] = [
         .map((row) => `- ${String(row.entry_date)} — ${String(row.account_name ?? "بند")}: **${money(row.amount)}**`);
       return {
         ok: true,
-        text: `**مصاريف ${ctx.period.label} (${ctx.period.from} → ${ctx.period.to})** — إجمالي **${money(total)}** على ${list.length} حركة\n${lines.join("\n")}`
-          + (list.length > 20 ? `\n\n_معروض 20 من ${list.length}._` : ""),
-        sources: ["expense_entries"]
+        text: `**مصاريف ${ctx.period.label} (${ctx.period.from} → ${ctx.period.to})** — `
+          + (partial ? `مجموع جزئي **${money(total)}**` : `إجمالي **${money(total)}**`)
+          + ` على ${list.length} حركة\n${lines.join("\n")}`
+          + (list.length > 20 ? `\n\n_معروض 20 من ${list.length}._` : "")
+          + (partial
+            ? `\n\n> ⚠️ بلغت القراءة سقف الأمان ${HARD_ROW_CAP} حركة، فالمجموع أعلاه **جزئي وليس إجمالي الفترة**. ضيّق الفترة.`
+            : ""),
+        sources: ["expense_entries"],
+        partial
       };
     }
   },
@@ -610,7 +643,7 @@ const TOOLS: Tool[] = [
       }
 
       if (current.partial) {
-        text += `\n\n> ⚠️ بلغت القراءة سقف ${SALES_ROW_LIMIT} سطر، فالإجمالي أعلاه **جزئي وليس نهائياً**. ضيّق الفترة للحصول على رقم كامل.`;
+        text += `\n\n> ⚠️ بلغت القراءة سقف الأمان ${HARD_ROW_CAP} سطر، فالإجمالي أعلاه **جزئي وليس نهائياً**. ضيّق الفترة للحصول على رقم كامل.`;
       }
       return { ok: true, text, sources: ["sales_line_items"], partial: current.partial };
     }
@@ -753,16 +786,45 @@ const TOOLS: Tool[] = [
         try {
           const invoiceReport = await latestReport("inventory_reports", "ameen_customer_invoices");
           const invRows = Array.isArray(invoiceReport?.items) ? invoiceReport.items : [];
-          const byGuid = invRows.find(
-            (row: Record<string, unknown>) => guid && String(row.customerGuid ?? "") === guid
-          );
-          const entry = byGuid
-            ?? matchByName(invRows as Array<Record<string, unknown>>, (row) => String(row.name ?? ""), name, 1)[0]?.row;
           sources.push("inventory_reports:ameen_customer_invoices");
-          const invoices = Array.isArray(entry?.invoices) ? entry.invoices : [];
-          if (!invoices.length) {
-            text += `\n\n**المشتريات**\nلا توجد فواتير لهذا الزبون ضمن نافذة تقرير الفواتير (${(invoiceReport?.summary as Record<string, unknown>)?.fromDate ?? "?"} → ${invoiceReport?.report_date ?? "?"}).`;
+          const window = `${(invoiceReport?.summary as Record<string, unknown>)?.fromDate ?? "?"} → ${invoiceReport?.report_date ?? "?"}`;
+
+          // هوية الزبون بالـGUID أولاً وأخيراً متى توفّر.
+          //
+          // كان هنا ارتداد إلى مطابقة الاسم عند فشل مطابقة الـGUID، وهو خطأ
+          // خطير: إن كان تقرير الفواتير قديماً أو ناقص الربط، فأقرب اسم مشابه
+          // يفوز فتُعرض **فواتير زبون آخر** — بأصنافه وكمياته وأسعاره — تحت اسم
+          // الزبون المطلوب. وهذا ينقض قاعدة موثّقة في CLAUDE.md: الربط
+          // بـcustomerGuid أولاً، والمجموعة اليتيمة لا تُنسب لأحد بالتخمين بل
+          // يُكتفى بتحذير صريح.
+          //
+          // فحين يحمل حساب الزبون GUID موثوقاً: إمّا مطابقة GUID أو لا فواتير.
+          // ومطابقة الاسم لا تُستعمل إلا للسجلات القديمة التي بلا GUID أصلاً،
+          // وحتى حينها بحارس الالتباس لا بأخذ أقرب مرشح.
+          let entry: Record<string, unknown> | undefined;
+          let identity: "guid" | "name" | "none" = "none";
+          if (guid) {
+            entry = invRows.find((row: Record<string, unknown>) => String(row.customerGuid ?? "") === guid);
+            if (entry) identity = "guid";
           } else {
+            const named = matchByName(invRows as Array<Record<string, unknown>>, (row) => String(row.name ?? ""), name, 5);
+            if (named.length && !isAmbiguous(named)) {
+              entry = named[0].row;
+              identity = "name";
+            }
+          }
+
+          const invoices = Array.isArray(entry?.invoices) ? entry.invoices : [];
+          if (guid && !entry) {
+            text += `\n\n**المشتريات**\nلم أجد في تقرير الفواتير (${window}) أي سجل مربوط بمعرّف هذا الزبون.`
+              + `\n\nلن أنسب له فواتير بتشابه الاسم — لو فعلت لعرضتُ عليك مشتريات زبون آخر بأصنافه وأسعاره.`
+              + ` إن كنت تتوقع وجود فواتير، فالأرجح أن تقرير الفواتير لم يُزامَن بعد أو أن سجلّه بلا معرّف.`;
+          } else if (!invoices.length) {
+            text += `\n\n**المشتريات**\nلا توجد فواتير لهذا الزبون ضمن نافذة تقرير الفواتير (${window}).`;
+          } else {
+            if (identity === "name") {
+              text += `\n\n> ℹ️ سجل الفواتير أدناه مطابَق بالاسم لأن حساب الزبون بلا معرّف في تقرير الأرصدة.`;
+            }
             const shown = invoices.slice(0, 3);
             text += `\n\n**آخر الفواتير** (${invoices.length} فاتورة في نافذة التقرير)`;
             for (const inv of shown) {
@@ -961,10 +1023,12 @@ const TOOLS: Tool[] = [
       if (!ctx.entityText.trim()) {
         return { ok: false, text: "حدّد اسم الصنف، مثلاً: `ما حركة ماستر طويل ورق؟` أو `سعر كينغ دوم سليم`.", sources: [] };
       }
-      const prices = await readRest(
-        "approved_price_items?select=item_name,item_key,unit1_name,unit1_price,unit2_name,unit2_factor,unit2_price,sale_price,stock_qty,stock_status&limit=2000"
+      // مُصفَّح كذلك: سقف الخادم قد يقصّ اللائحة، فيصير «لم أجد صنفاً» جواباً
+      // كاذباً عن صنف موجود فعلاً خارج الصفحة الأولى.
+      const { rows: priceRows } = await readPaged((range) =>
+        "approved_price_items?select=item_name,item_key,unit1_name,unit1_price,unit2_name,"
+        + `unit2_factor,unit2_price,sale_price,stock_qty,stock_status&order=item_name.asc${range}`
       );
-      const priceRows: Array<Record<string, unknown>> = Array.isArray(prices) ? prices : [];
       const matches = matchByName(priceRows, (row) => String(row.item_name ?? row.item_key ?? ""), ctx.entityText, 5);
       if (!matches.length) {
         return {

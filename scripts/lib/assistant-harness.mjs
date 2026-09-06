@@ -255,8 +255,16 @@ export async function loadAssistant(options = {}) {
           return direction === "desc" ? (a2 < b2 ? 1 : a2 > b2 ? -1 : 0) : (a2 > b2 ? 1 : a2 < b2 ? -1 : 0);
         });
       }
+      // offset + limit + سقف صفوف الخادم — كما يفعل PostgREST بالضبط.
+      // `maxRows` يحاكي إعداد db-max-rows: الخادم يقصّ الاستجابة عنده مهما طلب
+      // العميل. بدون محاكاته لا يستطيع أي حارس رؤية عطل «إجمالي مبتور يُعرض
+      // كاملاً» الذي رصده Codex على PR #205.
+      const offset = query.match(/offset=(\d+)/);
+      if (offset) rows = rows.slice(Number(offset[1]));
       const limit = query.match(/limit=(\d+)/);
-      if (limit) rows = rows.slice(0, Number(limit[1]));
+      const requested = limit ? Number(limit[1]) : rows.length;
+      const cap = options.maxRows ?? Infinity;
+      rows = rows.slice(0, Math.min(requested, cap));
 
       // احترام قائمة الأعمدة — هكذا يُثبَت حجب أعمدة التكلفة عن الموظف
       const select = query.match(/select=([^&]+)/);

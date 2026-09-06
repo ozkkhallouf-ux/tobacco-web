@@ -291,4 +291,122 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   ok("قيمة المشتريات المتعارضة الوحدات: امتناع صريح عن الإجمالي مع إبقاء الأعداد السليمة");
 }
 
+// ── م) سقف صفوف الخادم لا ينتج إجمالياً مبتوراً يبدو كاملاً ─────────────────
+{
+  // ملاحظة Codex على PR #205: PostgREST يقصّ الاستجابة عند db-max-rows مهما
+  // طلب العميل، فمقارنة عدد الصفوف بالحد المطلوب لا تكشف البتر إطلاقاً —
+  // ويُعرض إجمالي ناقص على أنه نهائي. هنا نحاكي السقف صراحةً.
+  const today = new Date(Date.now() + 180 * 60_000).toISOString().slice(0, 10);
+  const fixtures = defaultFixtures();
+  fixtures.sales_line_items = Array.from({ length: 250 }, (_, i) => ({
+    id: i + 1,
+    sale_date: today,
+    bill_no: String(i + 1),
+    bill_type: "wholesale",
+    item_name: "أ",
+    qty: 1,
+    line_total: 10,
+    unit_cost: 9,
+    customer_name: "س"
+  }));
+
+  // سقف خادم 40 صفاً: بلا تصفيح صحيح سيظهر 400 بدل 2,500
+  const a = await loadAssistant({ fixtures, maxRows: 40 });
+  const result = await a.ask(TOKENS.owner, "كم مبيعات اليوم؟");
+  const reply = String(result.body.reply);
+  assert.ok(reply.includes("2,500 USD"), `الإجمالي مبتور رغم التصفيح:\n${reply}`);
+  assert.ok(/عدد الفواتير: \*\*250\*\*/.test(reply), "عدد الفواتير مبتور");
+  assert.equal(result.body.partial, false, "أُعلن جزئياً رغم اكتمال القراءة");
+  assert.ok(!reply.includes("400 USD"), "عرض إجمالي الصفحة الأولى فقط");
+  // ويجب أن يكون قد صفّح فعلاً (أكثر من طلب واحد لسطور المبيعات)
+  const salesReads = a.metrics.reads.filter((q) => q.startsWith("sales_line_items"));
+  assert.ok(salesReads.length > 1, `لم يجرِ تصفيح: ${salesReads.length} طلب فقط`);
+  assert.ok(salesReads.some((q) => q.includes("offset=")), "لا يوجد offset في طلبات المبيعات");
+  ok("سقف صفوف الخادم لا يبتر إجمالي المبيعات — التصفيح يقرأ الفترة كاملة");
+}
+
+{
+  // نفس العطل في المصاريف: الحد الثابت 200 كان يعرض مجموع أحدث 200 حركة
+  // على أنه إجمالي الفترة كلها بلا أي تحذير.
+  const fixtures = defaultFixtures();
+  fixtures.expense_entries = Array.from({ length: 300 }, (_, i) => ({
+    id: i + 1,
+    entry_date: "2026-09-06",
+    account_name: `بند ${i + 1}`,
+    amount: 10,
+    notes: ""
+  }));
+  const a = await loadAssistant({ fixtures, maxRows: 50 });
+  const result = await a.ask(TOKENS.owner, "ما المصاريف؟");
+  const reply = String(result.body.reply);
+  assert.equal(result.body.tool, "expenses");
+  assert.ok(reply.includes("3,000 USD"), `إجمالي المصاريف مبتور:\n${reply}`);
+  assert.ok(/على 300 حركة/.test(reply), "عدد الحركات مبتور");
+  assert.ok(!reply.includes("2,000 USD"), "عرض مجموع أول 200 حركة كإجمالي");
+  ok("سقف صفوف الخادم لا يبتر إجمالي المصاريف");
+}
+
+{
+  // ولائحة الأسعار: صنف خارج الصفحة الأولى يجب أن يُعثر عليه لا أن يُنفى وجوده
+  const fixtures = defaultFixtures();
+  fixtures.approved_price_items = [
+    ...Array.from({ length: 120 }, (_, i) => ({
+      item_name: `حشو ${i + 1}`, item_key: `filler-${i + 1}`, unit1_name: "كروز",
+      unit1_price: 1, unit2_name: "كرتونة", unit2_factor: 50, unit2_price: 50,
+      sale_price: 1, stock_qty: 5, stock_status: "available"
+    })),
+    { item_name: "ماستر طويل ورق", item_key: "ماستر طويل ورق", unit1_name: "كروز",
+      unit1_price: 7.08, unit2_name: "كرتونة", unit2_factor: 50, unit2_price: 354,
+      sale_price: 7.08, stock_qty: 2000, stock_status: "active" }
+  ];
+  const a = await loadAssistant({ fixtures, maxRows: 25 });
+  const result = await a.ask(TOKENS.owner, "سعر ماستر طويل ورق");
+  const reply = String(result.body.reply);
+  assert.ok(!/لم أجد صنفاً/.test(reply), "نفى وجود صنف موجود خارج الصفحة الأولى");
+  assert.ok(reply.includes("ماستر طويل ورق"), "لم يعثر على الصنف");
+  ok("سقف صفوف الخادم لا يجعل المساعد ينفي وجود صنف موجود");
+}
+
+// ── ن) فواتير الزبون: لا نسبة بالاسم متى وُجد معرّف موثوق ──────────────────
+{
+  // ملاحظة Codex على PR #205: عند فشل مطابقة الـGUID كان الكود يرتد لمطابقة
+  // الاسم، فيعرض فواتير **زبون آخر** بأصنافه وأسعاره تحت اسم المطلوب. وهذا
+  // ينقض قاعدة موثّقة في CLAUDE.md (الربط بـcustomerGuid أولاً، ولا نسبة
+  // بالتخمين). الحالة: الزبون له GUID، وتقرير الفواتير يحوي اسماً مشابهاً
+  // جداً بمعرّف مختلف.
+  const fixtures = defaultFixtures();
+  fixtures["inventory_reports:ameen_customer_invoices"] = [{
+    report_date: "2026-09-06",
+    created_at: new Date().toISOString(),
+    summary: { bills: 1, customers: 1, fromDate: "2026-07-08" },
+    items: [{
+      name: "جهاد التلي",
+      customerGuid: "GUID-مختلف-تماماً",
+      invoices: [{ date: "2026-08-29", lines: [
+        { material: "بضاعة زبون آخر", qty: 99, price: 1234, unit1: "كروز", lineTotal: 122166 }
+      ] }]
+    }]
+  }];
+  const a = await loadAssistant({ fixtures });
+  const result = await a.ask(TOKENS.owner, "ماذا اشترى الزبون جهاد التلي؟");
+  const reply = String(result.body.reply);
+  // الرصيد من تقرير الأرصدة يبقى صحيحاً
+  assert.ok(reply.includes("12,000 USD"), "ضاع رصيد الزبون الصحيح");
+  // ولا تُنسب له فواتير غيره
+  assert.ok(!reply.includes("بضاعة زبون آخر"), "نسب فواتير زبون آخر بتشابه الاسم");
+  assert.ok(!reply.includes("122,166"), "عرض قيمة فواتير زبون آخر");
+  assert.ok(/لم أجد في تقرير الفواتير/.test(reply), "لم يُعلن عدم وجود سجل مربوط بالمعرّف");
+  ok("فواتير الزبون لا تُنسب بتشابه الاسم متى وُجد معرّف موثوق");
+}
+
+{
+  // وحين يتطابق المعرّف فعلاً، تُعرض الفواتير طبيعياً
+  const a = await loadAssistant();
+  const result = await a.ask(TOKENS.owner, "ماذا اشترى الزبون جهاد التلي؟");
+  const reply = String(result.body.reply);
+  assert.ok(/آخر الفواتير/.test(reply), "لم تُعرض الفواتير رغم تطابق المعرّف");
+  assert.ok(reply.includes("ماستر طويل ورق"), "لم تُعرض بنود الفاتورة");
+  ok("تطابق المعرّف يعرض الفواتير طبيعياً — التشديد لا يكسر الحالة السليمة");
+}
+
 console.log(`\nتوجيه المساعد الذكي: ${passed}/${passed} تحقق ناجح`);
