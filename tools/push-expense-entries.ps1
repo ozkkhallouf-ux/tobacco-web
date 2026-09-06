@@ -119,12 +119,18 @@ JOIN ac000 a ON a.GUID = en.AccountGUID
 WHERE a.ParentGUID = '$EXPENSE_PARENT_GUID'
   AND en.Debit > 0
   AND en.Date >= DATEADD(day, -$Days, CAST(GETDATE() AS date))
-  AND en.Date <= CAST(GETDATE() AS date)
+  AND en.Date < DATEADD(day, 1, CAST(GETDATE() AS date))
 ORDER BY en.Date DESC
 "@
 
 # حدّا النافذة المُستبدَلة — هما نفسهما حدّا الاستعلام أعلاه، فعلامة الاكتمال
 # تصف ما رُفع فعلاً لا ما نُوي رفعه.
+#
+# الحدّ الأعلى **نصف مفتوح** عمداً (< غدٍ) لا `<= اليوم`: `en.Date` يحمل مكوّن
+# وقت، فـ`<= CAST(GETDATE() AS date)` يقارن بمنتصف ليل اليوم فيُسقط كل قيد
+# سُجّل اليوم تقريباً — ثم تختم الـRPC النافذة حتى اليوم، فيُقدَّم مجموع منقوص
+# على أنه متحقَّق. وهي نفس صيغة push-sales-line-items.ps1.
+# (رصدها Codex على PR #205 بعد aca9bb2.)
 $windowStart = (Get-Date).AddDays(-$Days).ToString("yyyy-MM-dd")
 $windowEnd   = (Get-Date).ToString("yyyy-MM-dd")
 

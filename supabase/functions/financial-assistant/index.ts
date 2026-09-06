@@ -1166,18 +1166,21 @@ const TOOLS: Tool[] = [
       const stagnant = items
         .filter((row: Record<string, unknown>) => num(row.stockQty) > 0 && !sold.has(normalize(row.name ?? row.key)))
         .sort((a: Record<string, unknown>, b: Record<string, unknown>) => num(b.stockQty) - num(a.stockQty));
+      // الحكم الموجب أخطر من السالب هنا: قراءةٌ ناقصة تُصغّر مجموعة المُباع،
+      // فتنتقل أصنافٌ تُباع فعلاً إلى قائمة «الراكد». والقائمة تُغري بتصفية
+      // مخزون رائج. فكلا الفرعين يُحجب حكمه عند النقص. (رصدها Codex بعد aca9bb2.)
+      const stagnantState = await salesCompleteness(period, sales.partial);
       if (!stagnant.length) {
         // نفس منطق توصية الشراء: «لا يوجد صنف راكد» نفيٌ قاطع مبنيّ على أن
         // قائمة المبيعات شاملة. وقراءة ناقصة تعني أصنافاً بيعت ولم تُقرأ —
         // فيبقى الحكم غير قابل للبتّ، لا صحيحاً بتحذير.
-        const state = await salesCompleteness(period, sales.partial);
-        if (!state.complete) {
+        if (!stagnantState.complete) {
           return {
             ok: false,
             text: `**الأصناف الراكدة — غير محسومة**\n`
               + `لم يظهر صنف بمخزون بلا مبيعات خلال ${period.label}، لكن قراءة المبيعات المقارَن بها **غير مكتملة**.`
               + `\n\nفلن أقول «لا يوجد صنف راكد» — الحكم يفترض قائمة مبيعات شاملة، وهي ليست كذلك هنا.`
-              + state.note,
+              + stagnantState.note,
             sources: ["inventory_reports:ameen_sql_agent", "sales_line_items", "sales_line_items_sync_state"],
             partial: sales.partial
           };
@@ -1187,6 +1190,25 @@ const TOOLS: Tool[] = [
           text: `**الأصناف الراكدة (${period.label})**\nكل مادة عليها مخزون سُجّلت لها مبيعات خلال ${period.label}. لا يوجد صنف راكد بهذا التعريف.`,
           sources: ["inventory_reports:ameen_sql_agent", "sales_line_items", "sales_line_items_sync_state"],
           partial: sales.partial
+        };
+      }
+      if (!stagnantState.complete) {
+        return {
+          ok: false,
+          text: `**الأصناف الراكدة — غير محسومة**\n`
+            + `ظهر ${stagnant.length} صنف بمخزون بلا مبيعات في القراءة، لكن القراءة **غير مكتملة**`
+            + ` — والبيعة الغائبة قد تخصّ أيّاً منها، فيُوصف صنف رائج بالركود ويُصفّى مخزونه.`
+            + `\n\nهؤلاء **مرشّحون غير مؤكَّدين**، لا قائمة أصناف راكدة:\n`
+            + stagnant
+              .slice(0, 25)
+              .map((row: Record<string, unknown>) =>
+                `- ${String(row.name ?? row.key)}: ${qty(row.stockQty)} ${String(row.unit1Name ?? "")}`)
+              .join("\n")
+            + (stagnant.length > 25 ? `\n- _و${stagnant.length - 25} صنف آخر._` : "")
+            + stagnantState.note,
+          sources: ["inventory_reports:ameen_sql_agent", "sales_line_items", "sales_line_items_sync_state"],
+          partial: sales.partial,
+          asOf: report.created_at
         };
       }
       return {
@@ -1199,7 +1221,7 @@ const TOOLS: Tool[] = [
             .join("\n")
           + (stagnant.length > 25 ? `\n- _و${stagnant.length - 25} صنف آخر._` : "")
           + `\n\nالمقارنة بين مخزون ${report.report_date} وسطور المبيعات ${period.from} → ${period.to}.`
-          + (await salesCompleteness(period, sales.partial)).note,
+          + stagnantState.note,
         sources: ["inventory_reports:ameen_sql_agent", "sales_line_items", "sales_line_items_sync_state"],
         partial: sales.partial,
         asOf: report.created_at
@@ -1352,8 +1374,14 @@ const TOOLS: Tool[] = [
       const period = { from: damascusDate(-59), to: damascusDate(), label: "آخر 60 يوم", explicit: true };
       const sales = await readSales(period, ctx.role);
       const mine = sales.rows.filter((row) => normalize(row.item_name) === normalize(name));
+      const itemState = await salesCompleteness(period, sales.partial);
       if (!mine.length) {
-        text += `\n\n**الحركة (${period.label})**\nلا توجد أي مبيعات مسجّلة لهذا الصنف في ${period.label}.`;
+        // نفس الصنف: نفيٌ قاطع مبنيّ على قراءة قد تكون ناقصة. لا يُلغى الجواب
+        // (فيه سعر الصنف ومخزونه)، لكن النفي يُخفَّف إلى «لم أجد» مع سببه.
+        text += `\n\n**الحركة (${period.label})**\n`
+          + (itemState.complete
+            ? `لا توجد أي مبيعات مسجّلة لهذا الصنف في ${period.label}.`
+            : `لم أجد مبيعات لهذا الصنف في ${period.label}، لكن قراءة المبيعات **غير مكتملة** — فلا أجزم بغيابها.`);
       } else {
         const totalQty = mine.reduce((sum, row) => sum + num(row.qty), 0);
         const totalValue = mine.reduce((sum, row) => sum + num(row.line_total), 0);
@@ -1376,7 +1404,7 @@ const TOOLS: Tool[] = [
           }
         }
       }
-      text += (await salesCompleteness(period, sales.partial)).note;
+      text += itemState.note;
       return {
         ok: true,
         text,

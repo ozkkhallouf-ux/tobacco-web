@@ -794,7 +794,37 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   const f = await loadAssistant({ fixtures: truncated, hardRowCap: 40 });
   const cappedStagnant = await f.ask(TOKENS.owner, "ما الأصناف الراكدة؟");
   assert.equal(cappedStagnant.body.answered, false, "ادّعى حسم الأصناف الراكدة عن قراءة مبتورة");
-  ok("أحكام «لا شيء مطلوب» تُحجب عند نقص المعطيات — بغياب النافذة أو ببلوغ سقف الصفوف — وتُحسم عند اكتمالها");
+  // والحكم **الموجب** في الراكد أخطر من السالب: القراءة الناقصة تُصغّر مجموعة
+  // المُباع فتنقل صنفاً رائجاً إلى «الراكد»، والقائمة تُغري بتصفية مخزونه.
+  // (رصدها Codex بعد aca9bb2.)
+  const stock = {
+    ...covered,
+    "inventory_reports:ameen_sql_agent": [{
+      report_date: today,
+      created_at: new Date().toISOString(),
+      summary: { totalStockItems: 2, lowStockItems: 0, outOfStockItems: 0 },
+      items: [
+        { key: "k1", name: "ماستر طويل ورق", stockQty: 500, unit1Name: "علبة" },
+        { key: "k2", name: "صنف بلا حركة", stockQty: 300, unit1Name: "علبة" }
+      ]
+    }],
+    sales_line_items: many
+  };
+  const g = await loadAssistant({ fixtures: stock, hardRowCap: 40 });
+  const positive = await g.ask(TOKENS.owner, "ما الأصناف الراكدة؟");
+  const positiveText = String(positive.body.reply);
+  assert.ok(/صنف بلا حركة/.test(positiveText), `لم يدخل الفرع الموجب:\n${positiveText}`);
+  assert.equal(positive.body.answered, false, "أصدر حكم ركود موجباً عن قراءة مبتورة");
+  assert.ok(/مرشّحون غير مؤكَّدين/.test(positiveText), `قدّم المرشّحين كحكم راكد مؤكَّد:\n${positiveText}`);
+  assert.ok(!/مخزون موجود بلا أي بيع خلال/.test(positiveText), "أبقى صيغة الحكم القاطع رغم النقص");
+
+  // وباكتمال التغطية يُحسم الحكم الموجب طبيعياً
+  const h = await loadAssistant({ fixtures: { ...stock, sales_line_items: [many[0]] } });
+  const settledPositive = await h.ask(TOKENS.owner, "ما الأصناف الراكدة؟");
+  assert.ok(/مخزون موجود بلا أي بيع خلال/.test(String(settledPositive.body.reply)),
+    "لم يحسم الحكم الموجب رغم اكتمال التغطية");
+  assert.equal(settledPositive.body.answered, true, "امتنع عن الحكم الموجب رغم اكتمال التغطية");
+  ok("أحكام الراكد والشراء تُحجب عند نقص المعطيات — سالبةً وموجبةً — وتُحسم عند اكتمالها");
 }
 
 // ── م) كل مستهلك لسطور المبيعات يمرّ بذيل الاكتمال — لا استثناء ─────────────

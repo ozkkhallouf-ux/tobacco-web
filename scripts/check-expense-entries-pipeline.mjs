@@ -32,8 +32,14 @@ assert.doesNotMatch(
 
 // حدّا الاستعلام هما حدّا النافذة المُختمة. بلا الحدّ الأعلى يمكن أن يُرفع قيد
 // بتاريخ مستقبلي خارج [windowStart, windowEnd] فترفضه الـRPC ويسقط الخط كله.
+//
+// والحدّ الأعلى **نصف مفتوح** إلزاماً: `en.Date` يحمل مكوّن وقت، فـ`<= اليوم`
+// يقارن بمنتصف الليل ويُسقط قيود اليوم كلها تقريباً، ثم تُختم النافذة حتى
+// اليوم فيُقدَّم مجموع منقوص على أنه متحقَّق — وهو أسوأ من غياب الحدّ أصلاً.
 assert.match(ameenSql, /en\.Date >= DATEADD\(day, -\$Days, CAST\(GETDATE\(\) AS date\)\)/i);
-assert.match(ameenSql, /en\.Date <= CAST\(GETDATE\(\) AS date\)/i);
+assert.match(ameenSql, /en\.Date < DATEADD\(day, 1, CAST\(GETDATE\(\) AS date\)\)/i);
+assert.doesNotMatch(ameenSql, /en\.Date <= CAST\(GETDATE\(\) AS date\)/i,
+  'الحدّ المغلق يُسقط قيود اليوم لأن en.Date يحمل وقتاً');
 assert.match(producer, /\[ValidateRange\(1, 31\)\]\[int\]\$Days = 7/);
 assert.match(producer, /\$windowStart = \(Get-Date\)\.AddDays\(-\$Days\)\.ToString\("yyyy-MM-dd"\)/);
 assert.match(producer, /\$windowEnd\s*= \(Get-Date\)\.ToString\("yyyy-MM-dd"\)/);
