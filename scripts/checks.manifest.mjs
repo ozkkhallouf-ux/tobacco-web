@@ -35,6 +35,7 @@ export const CHECKS = [
   'check-error-monitoring.mjs',
   'check-expense-entries-security.mjs',
   'check-health-check-logic.mjs',
+  'check-icloud-archive-console-silence.mjs',
   'check-inventory-recon-cost-fallbacks.mjs',
   'check-inventory-report-page-packing.mjs',
   'check-inventory-report-print-pages.mjs',
@@ -52,6 +53,7 @@ export const CHECKS = [
   'check-mac-archive-bridge.mjs',
   'check-master-item-coverage-dedup.mjs',
   'check-owner-authorization-behavior.mjs',
+  'check-post-deploy-smoke-console-gate.mjs',
   'check-price-bulletin-export-integrity.mjs',
   'check-price-bulletin-first-page-content.mjs',
   'check-price-bulletin-group-packing.mjs',
@@ -80,5 +82,10 @@ export const CHECKS = [
 export const EXCLUDED = {
   'check-business-metrics.mjs':  'يعمل في .github/workflows/business-os-foundation.yml',
   'check-business-snapshot.mjs': 'يعمل في .github/workflows/business-os-foundation.yml',
+  // طبقة المسارات الحرجة تشغّل متصفحاً عبر عشرات الصفحات؛ والبوابة تعمل ثلاث
+  // مرات على كل PR (check.yml وdecision-engine-check.yml وpages.yml). لها
+  // وظيفة مستقلة `critical-journeys` في check.yml، فتُشغَّل مرة واحدة وتُرفع
+  // آثارها عند الفشل. تشغيلها يدوياً: npm run check:critical
+  'check-critical-journeys.mjs': 'يعمل في وظيفة critical-journeys داخل .github/workflows/check.yml',
   'check-executive-team.mjs':    'يعمل في .github/workflows/business-os-foundation.yml',
 };
