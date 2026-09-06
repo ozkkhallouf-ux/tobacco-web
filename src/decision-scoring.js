@@ -621,17 +621,25 @@
     const list = Array.isArray(row?.recentPayments) ? row.recentPayments : [];
     let total = 0;
     let count = 0;
+    let oldestAge = null;
     for (const payment of list) {
       const at = toTime(payment?.date);
       if (at === null) continue;
       const age = daysBetween(nowMs, at);
-      if (age === null || age > windowDays) continue;
+      if (age === null) continue;
+      if (oldestAge === null || age > oldestAge) oldestAge = age;
+      if (age > windowDays) continue;
       const amount = num(payment?.amount);
       if (amount === null || amount <= 0) continue;
       total += amount;
       count += 1;
     }
-    return { total, count };
+    // المصدر يعيد أحدث N دفعة فقط (top-N في استعلام الأمين). فإن كانت أقدم دفعة
+    // وصلتنا ما تزال **داخل** النافذة، فقد تكون هناك دفعات أقدم منها في النافذة
+    // لم تصل — والمجموع عندها حدّ أدنى لا قيمة نهائية، فيبدو السداد أسوأ مما هو.
+    // الاختبار لا يعرف سقف المصدر ولا يحتاج معرفته.
+    const truncated = list.length > 0 && oldestAge !== null && oldestAge <= windowDays;
+    return { total, count, truncated };
   }
 
   function scoreCustomers(input) {
@@ -773,6 +781,8 @@
         lastPaymentAmount: entry.lastPaymentAmount,
         payments90d: entry.payments.total,
         paymentCount90d: entry.payments.count,
+        // مجموع الدفعات مقتطع من المصدر: الزخم أدناه حدّ أعلى للخطر لا قيمة نهائية.
+        paymentsTruncated: entry.payments.truncated,
         exposure, paymentDelay, utilization, momentum, behaviouralRisk, expectedLoss,
         score,
         // بُعدان مستقلان عمداً:
@@ -814,6 +824,7 @@
     if (entry.payments.total > 0 && entry.balance > 0 && entry.payments.total / entry.balance < 0.05) {
       parts.push("دفعات رمزية مقارنة بالرصيد");
     }
+    if (entry.payments.truncated) parts.push("سجل الدفعات مقتطع — الخطر قد يكون أقل");
     return parts.length ? parts.join(" + ") : "ضمن المتابعة الاعتيادية";
   }
 

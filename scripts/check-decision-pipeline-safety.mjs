@@ -90,6 +90,22 @@ check("مهمة التزامات الموردين مسجّلة الآن (كان�
     "سكريبت تسجيل مهمة الموردين ما زال غير موجود");
 });
 
+check("مصدر الأرصدة يجلب دفعات تكفي نافذة الزخم", () => {
+  const sql = read("tools/ameen-customer-balances-query.sql");
+  const match = /select\s+top\s+(\d+)\s+cast\(en\.Credit/i.exec(sql);
+  assert.ok(match, "تعذّر العثور على سقف الدفعات في استعلام الأرصدة");
+  assert.ok(Number(match[1]) >= 40,
+    `سقف الدفعات ${match[1]} لا يغطي نافذة 90 يوماً — الزخم يُحسب على سجل مقتطع`);
+});
+
+check("الترحيلة المقترحة تسمح بتفريغ مأذون ولا ترفضه مطلقاً", () => {
+  const sql = read("supabase/proposed/03-supplier-obligations-unique-key.sql");
+  assert.match(sql, /p_allow_empty/,
+    "لا إذن صريح بالاستبدال الفارغ — مورد سدّد آخر دَين يبقى ظاهراً");
+  assert.match(sql, /delete from public\.supplier_obligations t?\s*\n?\s*where t?\.?source = p_source\s*\n?\s*and not exists/,
+    "لا حذف لما ليس في الجيل الحالي — upsert وحده يُبقي دَيناً على من سدّد");
+});
+
 // ------------------------------------------------- الأمين للقراءة فقط
 check("سكريبتات هذا الإصلاح لا تكتب على قاعدة الأمين", () => {
   for (const file of ["tools/push-supplier-obligations.ps1", "tools/push-purchase-item-snapshot.ps1"]) {

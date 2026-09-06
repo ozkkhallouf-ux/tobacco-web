@@ -30,7 +30,11 @@ create unique index if not exists supplier_obligations_source_supplier_key
 -- (2) استبدال ذرّي: جيل كامل في معاملة واحدة، بلا نافذة فراغ.
 create or replace function public.replace_supplier_obligations(
   p_source text,
-  p_rows jsonb
+  p_rows jsonb,
+  -- يقابل حارس -AllowEmpty في المنتج على Windows: حين يسدّد آخر مورد دائن تكون
+  -- الحمولة الفارغة **حقيقة محاسبية** لا عطلاً، والرفض المطلق كان سيُبقي دَيناً
+  -- على من سدّد. التفريغ يبقى قراراً صريحاً لا أثراً جانبياً.
+  p_allow_empty boolean default false
 ) returns table (row_count integer, generated_at timestamptz)
 language plpgsql
 security invoker
@@ -47,10 +51,16 @@ begin
     raise exception 'rows payload must be a JSON array';
   end if;
 
-  -- حمولة فارغة لا تمسح جيلاً قائماً. التفريغ قرار صريح لا أثر جانبي، تماماً
-  -- كما يمنعه حارس -AllowEmpty في المنتج على Windows.
+  -- حمولة فارغة بلا إذن صريح لا تمسح جيلاً قائماً.
+  if jsonb_array_length(p_rows) = 0 and not coalesce(p_allow_empty, false) then
+    raise exception 'refusing to replace % with an empty payload; pass p_allow_empty to authorize', p_source;
+  end if;
+
+  -- التفريغ المأذون: احذف الجيل كاملاً وارجع بلا مرور على التحقّقات التالية.
   if jsonb_array_length(p_rows) = 0 then
-    raise exception 'refusing to replace % with an empty payload', p_source;
+    delete from public.supplier_obligations where source = p_source;
+    return query select 0, v_now;
+    return;
   end if;
 
   create temporary table staged_supplier_obligations on commit drop as
@@ -104,9 +114,9 @@ begin
 end;
 $$;
 
-revoke all on function public.replace_supplier_obligations(text, jsonb)
+revoke all on function public.replace_supplier_obligations(text, jsonb, boolean)
   from public, anon, service_role;
-grant execute on function public.replace_supplier_obligations(text, jsonb)
+grant execute on function public.replace_supplier_obligations(text, jsonb, boolean)
   to authenticated;
 
 commit;
@@ -115,3 +125,4 @@ commit;
 -- باستدعاء واحد:
 --   POST /rest/v1/rpc/replace_supplier_obligations
 --   { "p_source": "ameen_ac000_credit_minus_debit", "p_rows": [...] }
+-- ويُمرَّر p_allow_empty فقط حين يمرَّر -AllowEmpty للمنتج — لا افتراضياً أبداً.

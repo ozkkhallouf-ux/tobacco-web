@@ -480,6 +480,42 @@ check("زبون كبير متأخر لا يُدفن تحت تصنيف «مراق
     "المدين الكبير المتأخر ما زال مدفوناً تحت مدين صغير متجاوز");
 });
 
+check("اقتطاع سجل الدفعات يُكتشف ويُعلَن ولا يُحسب سداداً سيئاً بصمت", () => {
+  // مصدر الأرصدة يعيد أحدث N دفعة فقط. إن كانت أقدم دفعة وصلتنا ما تزال داخل
+  // النافذة فقد تكون هناك أقدم منها لم تصل — 35 من 121 زبوناً في الإنتاج.
+  const truncated = S.scoreCustomers({
+    balances: [{
+      name: "مقتطع", customerGuid: guid(700), balance: 20000,
+      lastPaymentDate: daysAgo(1),
+      recentPayments: [1, 5, 9, 14, 20, 26].map((d) => ({ date: daysAgo(d), amount: 500 }))
+    }],
+    creditLimits: [],
+    now: customerNow
+  }).customers[0];
+  assert.equal(truncated.paymentsTruncated, true, "لم يُكتشف الاقتطاع");
+  assert.match(truncated.reason, /مقتطع/, "الاقتطاع غير معلَن في السبب");
+
+  // أقدم دفعة خارج النافذة ⟵ السجل كامل داخلها، فلا اقتطاع.
+  const complete = S.scoreCustomers({
+    balances: [{
+      name: "كامل", customerGuid: guid(701), balance: 20000,
+      lastPaymentDate: daysAgo(1),
+      recentPayments: [{ date: daysAgo(1), amount: 500 }, { date: daysAgo(120), amount: 500 }]
+    }],
+    creditLimits: [],
+    now: customerNow
+  }).customers[0];
+  assert.equal(complete.paymentsTruncated, false, "أُبلغ عن اقتطاع وهمي");
+  assert.doesNotMatch(complete.reason, /مقتطع/);
+
+  // بلا دفعات إطلاقاً: لا اقتطاع يُدَّعى.
+  const none = S.scoreCustomers({
+    balances: [{ name: "بلا", customerGuid: guid(702), balance: 5000 }],
+    creditLimits: [], now: customerNow
+  }).customers[0];
+  assert.equal(none.paymentsTruncated, false);
+});
+
 check("الأولوية تقيس المال والتصنيف يقيس الاحتمال — بُعدان منفصلان", () => {
   const result = S.scoreCustomers({
     balances: [
