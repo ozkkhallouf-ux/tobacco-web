@@ -85,32 +85,55 @@ const probeFailureBlock = dryRunBlock.slice(dryRunBlock.indexOf('} catch {'));
 assert.match(probeFailureBlock, /Notify-Failure/, 'a failed DryRun Supabase probe must call Notify-Failure');
 assert.match(probeFailureBlock, /exit 1/, 'a failed DryRun Supabase probe must exit 1');
 
-// 6b) Codex P1 regression guard (PR #141, second round): the `if
-// ($DryRun) { ... }` block — and therefore the Supabase probe inside it —
-// must appear in the source BEFORE the `if ($rows.Count -eq 0)`
-// early-exit. Originally the empty-result check ran first, so a DryRun
-// invocation against a window with zero expense rows (e.g. -Days 0)
-// exited 0 without ever reaching the probe — invalid credentials would
-// silently report success in exactly that case.
+// 6b) Codex P1 regression guard (PR #141, second round): the DryRun
+// Supabase probe must be reachable on every invocation — no early exit
+// may stand between the Ameen read and the `if ($DryRun) { ... }` block.
+// Originally an `if ($rows.Count -eq 0)` early-exit ran first, so a
+// DryRun against a window with zero expense rows (e.g. -Days 0) exited 0
+// without ever reaching the probe: invalid credentials silently reported
+// success in exactly that case.
+//
+// That early-exit is now gone entirely (PR #205): it also left the
+// previous window's rows in Supabase, unrefreshed and unmarked, whenever
+// Ameen returned nothing — so an emptied week kept showing stale
+// expenses. An empty window is now replaced and sealed like any other.
+// The ordering hazard is therefore guarded at its root: nothing between
+// the read and the probe may exit at all.
+assert.doesNotMatch(
+  ps1,
+  /if \(\$rows\.Count -eq 0\) \{/,
+  'the zero-row early-exit must stay removed — it left an emptied window stale and unmarked',
+);
 const dryRunIfIndex = ps1.indexOf('if ($DryRun) {');
-const emptyRowsCheckIndex = ps1.indexOf('if ($rows.Count -eq 0) {');
 assert.notEqual(dryRunIfIndex, -1, 'must find "if ($DryRun) {"');
-assert.notEqual(emptyRowsCheckIndex, -1, 'must find "if ($rows.Count -eq 0) {"');
-assert.ok(
-  dryRunIfIndex < emptyRowsCheckIndex,
-  'the DryRun block (and its Supabase probe) must run BEFORE the empty-result early-exit, otherwise a zero-row DryRun window never reaches the probe',
+const readEndIndex = ps1.indexOf('$reader.Close()');
+assert.notEqual(readEndIndex, -1, 'must find the end of the Ameen read');
+assert.ok(readEndIndex < dryRunIfIndex, 'the Ameen read must precede the DryRun block');
+assert.doesNotMatch(
+  ps1.slice(readEndIndex, dryRunIfIndex),
+  /\bexit\b/,
+  'no early exit may stand between the Ameen read and the DryRun probe',
 );
 
 // 7) DryRun must still exit before ever reaching the real write path: the
-// unconditional real-upload auth call and the POST/DELETE upload calls
-// must appear strictly AFTER the entire `if ($DryRun) { ... }` block ends
-// in the source, so a DryRun invocation can never fall through into them.
+// unconditional real-upload auth call and the atomic replacement RPC must
+// appear strictly AFTER the entire `if ($DryRun) { ... }` block ends in
+// the source, so a DryRun invocation can never fall through into them.
+//
+// The write path is now a single RPC call. The former DELETE + batched
+// POST pair is gone (PR #205): it left a window that was briefly empty
+// and recorded no verified boundary, so no later reader could tell what
+// had actually been refreshed.
 const dryRunBlockEnd = ps1.indexOf('if ($DryRun) {') + ps1.slice(ps1.indexOf('if ($DryRun) {')).indexOf(dryRunBlock) + dryRunBlock.length;
 const realUploadAuthIndex = ps1.indexOf('$token = Get-SupabaseAuthToken');
-const realDeleteIndex = ps1.indexOf('-Method Delete -Uri "$supabaseUrl/rest/v1/expense_entries');
-const realPostIndex = ps1.indexOf('-Method Post -Uri "$supabaseUrl/rest/v1/expense_entries"');
+const realRpcIndex = ps1.indexOf('rest/v1/rpc/replace_expense_entries_window');
 assert.ok(realUploadAuthIndex > dryRunBlockEnd, 'real-upload auth call must be located after the DryRun block, never reachable from it');
-assert.ok(realDeleteIndex > dryRunBlockEnd, 'real DELETE upload call must be located after the DryRun block');
-assert.ok(realPostIndex > dryRunBlockEnd, 'real POST upload call must be located after the DryRun block');
+assert.notEqual(realRpcIndex, -1, 'must find the atomic replacement RPC call');
+assert.ok(realRpcIndex > dryRunBlockEnd, 'the atomic replacement RPC call must be located after the DryRun block');
+assert.doesNotMatch(
+  ps1,
+  /-Method\s+(Delete|Put|Patch)\s+-Uri "\$supabaseUrl\/rest\/v1\/expense_entries/i,
+  'direct writes against the expense_entries table must stay replaced by the atomic RPC',
+);
 
 console.log('push-expense-entries.ps1 DryRun safety contract checks passed.');

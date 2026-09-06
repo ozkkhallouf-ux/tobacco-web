@@ -507,4 +507,128 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   ok("الفترة خارج نافذة المزامنة المتحقَّقة تُعلَن صراحةً — في فرع الأرقام وفرع الصفر وعند غياب السجل");
 }
 
+// ── غ) المدى المطلوب يُجمع، ولا يُختزل في يوم واحد ──────────────────────────
+{
+  // ملاحظة Codex الثانية على PR #205 (بعد df4b3df): ترشيح report_date وحده لا
+  // يكفي — بقي `limit=1`، فسؤال «كم قبضنا هذا الشهر؟» كان يعرض مقبوضات **يوم
+  // واحد** على أنها مقبوضات الشهر. والمقبوضات تدفّق يُجمع، لا رصيد لحظي.
+  const day = (offset) =>
+    new Date(Date.now() + 180 * 60_000 + offset * 86_400_000).toISOString().slice(0, 10);
+  const report = (date, amount, name) => ({
+    report_date: date,
+    created_at: new Date(Date.parse(`${date}T12:00:00Z`)).toISOString(),
+    payload: {
+      cashTotals: [{ currency: "$", opening: 0, closing: amount, externalIncoming: 0, externalOutgoing: 0 }],
+      cashboxes: [{ name: "صندوق", currency: "$", opening: 0, incoming: amount, outgoing: 0, closing: amount }],
+      payments: [{ name, amount, notes: "" }],
+      paymentSummary: { count: 1, totalUsd: amount }
+    }
+  });
+
+  const fixtures = defaultFixtures();
+  const first = `${day(0).slice(0, 7)}-01`;
+  // ثلاثة أيام من الشهر الحالي: 1 و2 واليوم. المجموع الصحيح 111+222+333=666.
+  fixtures.daily_movement_reports = [
+    report(day(0), 333, "زبون اليوم"),
+    report(`${first.slice(0, 8)}02`, 222, "زبون الثاني"),
+    report(first, 111, "زبون الأول")
+  ];
+
+  const a = await loadAssistant({ fixtures });
+  const monthly = await a.ask(TOKENS.owner, "كم قبضنا هذا الشهر؟");
+  const monthText = String(monthly.body.reply);
+  assert.equal(monthly.body.tool, "collections");
+  assert.ok(/666/.test(monthText), `لم يجمع مقبوضات أيام الشهر:\n${monthText}`);
+  for (const mark of ["111", "222", "333"]) {
+    assert.ok(monthText.includes(mark), `أسقط دفعة ${mark} من مجموع الشهر`);
+  }
+
+  // الأيام الغائبة تُعلَن: غيابها يبخس المجموع بلا أي أثر ظاهر لولا التصريح.
+  assert.ok(/داخل الفترة بلا تقرير حركة/.test(monthText), `لم يُعلن أيام الفترة الغائبة:\n${monthText}`);
+
+  // ويوم واحد يبقى بصيغته المفردة بلا حشو المدى
+  const b = await loadAssistant({ fixtures });
+  const single = String((await b.ask(TOKENS.owner, "كم قبضنا اليوم؟")).body.reply);
+  assert.ok(single.includes("333"), "لم يقرأ مقبوضات اليوم");
+  assert.ok(!single.includes("222") && !single.includes("111"), "أدخل أيام أخرى في جواب يوم واحد");
+
+  // الصندوق رصيد لحظي لا تدفّق: لا يُجمع، ويُقال أي يوم يمثّله الرقم
+  const c = await loadAssistant({ fixtures });
+  const boxText = String((await c.ask(TOKENS.owner, "كم صار بالصندوق هذا الشهر؟")).body.reply);
+  assert.ok(boxText.includes("333"), "لم يأخذ أحدث رصيد داخل الفترة");
+  assert.ok(!/666/.test(boxText), "جمع الأرصدة اللحظية عبر الأيام");
+  assert.ok(boxText.includes(day(0)), "لم يذكر اليوم الذي يمثّله الرصيد");
+  ok("المقبوضات تُجمع عبر كل أيام المدى وتُعلن الأيام الغائبة، والرصيد لا يُجمع");
+}
+
+// ── ف) الملخص التنفيذي لا يتجاوز حارس نافذة المزامنة ───────────────────────
+{
+  // ملاحظة Codex على PR #205 بعد df4b3df: الملخص مستهلك خامس لـreadSales،
+  // فكان يعرض «0 USD» أو صفوفاً غير محدَّثة كأنها مبيعات اليوم المؤكَّدة.
+  const today = new Date(Date.now() + 180 * 60_000).toISOString().slice(0, 10);
+  const fixtures = defaultFixtures();
+  fixtures.sales_line_items_sync_state = [];
+
+  const a = await loadAssistant({ fixtures });
+  const brief = await a.ask(TOKENS.owner, "ما أهم الأمور التي تحتاج انتباهي اليوم؟");
+  const briefText = String(brief.body.reply);
+  assert.equal(brief.body.tool, "briefing");
+  assert.ok(/لا يوجد سجل مزامنة مكتمل/.test(briefText), `الملخص عرض مبيعات اليوم بلا تحقُّق:\n${briefText}`);
+  assert.ok(a.metrics.tablesRead.has("sales_line_items_sync_state"), "الملخص لم يقرأ سجل المزامنة أصلاً");
+
+  // وبنافذة تغطي اليوم لا يُزعج التحذيرُ الملخصَ
+  const b = await loadAssistant({ fixtures: { ...fixtures, sales_line_items_sync_state: [{
+    source: "ameen_sales_line_items",
+    window_start: new Date(Date.now() + 180 * 60_000 - 29 * 86_400_000).toISOString().slice(0, 10),
+    window_end: today,
+    row_count: 3,
+    completed_at: new Date().toISOString()
+  }] } });
+  const okText = String((await b.ask(TOKENS.owner, "ما أهم الأمور التي تحتاج انتباهي اليوم؟")).body.reply);
+  assert.ok(!/لا يوجد سجل مزامنة مكتمل/.test(okText), "حذّر رغم أن اليوم داخل النافذة");
+  ok("الملخص التنفيذي يمرّ بنفس حارس نافذة المزامنة الذي تمرّ به أداة المبيعات");
+}
+
+// ── ص) المصاريف كذلك محدودة بنافذة تحديثها المتحقَّقة ───────────────────────
+{
+  // ملاحظة Codex على PR #205: push-expense-entries.ps1 يحدّث 7 أيام فقط
+  // ويترك ما قبلها. فمجموع «الشهر الماضي» قد يُسقط تاريخاً أو يحمل قيوداً
+  // بائدة، وكان يُعرض بوصفه «إجمالي» بلا أي إشارة.
+  const today = new Date(Date.now() + 180 * 60_000).toISOString().slice(0, 10);
+  const old = new Date(Date.now() + 180 * 60_000 - 40 * 86_400_000).toISOString().slice(0, 10);
+  const fixtures = defaultFixtures();
+  fixtures.expense_entries = [
+    { id: 1, entry_date: today, account_name: "محروقات", amount: 45, notes: "" },
+    { id: 2, entry_date: old, account_name: "أجور نقل", amount: 500, notes: "" }
+  ];
+  fixtures.expense_entries_sync_state = [{
+    source: "ameen_expense_entries",
+    window_start: new Date(Date.now() + 180 * 60_000 - 7 * 86_400_000).toISOString().slice(0, 10),
+    window_end: today,
+    row_count: 1,
+    completed_at: new Date().toISOString()
+  }];
+
+  // فترة داخل النافذة ⇒ بلا تحذير
+  const inside = await loadAssistant({ fixtures });
+  const insideText = String((await inside.ask(TOKENS.owner, "كم دفعنا اليوم؟")).body.reply);
+  assert.ok(!/خارج آخر نافذة مزامنة/.test(insideText), "حذّر رغم أن الفترة داخل نافذة المصاريف");
+
+  // فترة تمتد قبل النافذة ⇒ تحذير صريح يسمّي المصدر وحدّه
+  const outside = await loadAssistant({ fixtures });
+  const outsideText = String((await outside.ask(TOKENS.owner, "كم مصاريف اخر 60 يوم؟")).body.reply);
+  assert.ok(/خارج آخر نافذة مزامنة متحقَّقة لـحركة المصاريف/.test(outsideText),
+    `لم يُعلن خروج فترة المصاريف عن نافذتها:\n${outsideText}`);
+  assert.ok(outsideText.includes(fixtures.expense_entries_sync_state[0].window_start), "لم يذكر بداية نافذة المصاريف");
+  assert.ok(outside.metrics.tablesRead.has("expense_entries_sync_state"), "لم يقرأ سجل مزامنة المصاريف أصلاً");
+  // ولا يخلط الموضوعات: تحذير المصاريف لا يُنسب لسطور المبيعات
+  assert.ok(!/متحقَّقة لـسطور المبيعات/.test(outsideText), "نسب غياب التغطية إلى المصدر الخطأ");
+
+  // وغياب السجل كلياً ⇒ إعلان أن الأرقام غير متحقَّقة
+  const none = await loadAssistant({ fixtures: { ...fixtures, expense_entries_sync_state: [] } });
+  const noneText = String((await none.ask(TOKENS.owner, "كم دفعنا اليوم؟")).body.reply);
+  assert.ok(/لا يوجد سجل مزامنة مكتمل لـحركة المصاريف/.test(noneText), "لم يُعلن غياب سجل مزامنة المصاريف");
+  ok("المصاريف محدودة بنافذة تحديثها المتحقَّقة، وكل تحذير يسمّي مصدره لا مصدراً آخر");
+}
+
 console.log(`\nتوجيه المساعد الذكي: ${passed}/${passed} تحقق ناجح`);

@@ -114,6 +114,7 @@ const READABLE_TABLES = new Set([
   "daily_movement_reports",
   "expense_entries",
   "inventory_reports",
+  "expense_entries_sync_state",
   "sales_line_items",
   "sales_line_items_sync_state"
 ]);
@@ -161,31 +162,78 @@ async function readPaged(path: (range: string) => string) {
   return { rows, partial: true };
 }
 
-// تقرير الحركة اليومية المطلوب.
+// تقارير الحركة اليومية المطلوبة.
 //
-// حين يذكر السائل تاريخاً («كم قبضنا أمس؟») يجب أن يُقرأ تقرير **ذلك اليوم** لا
-// الأحدث. كان الكود يأخذ الأحدث دائماً، فيجيب عن اليوم ويقدّمه كأنه جواب أمس.
-// (رصدها Codex على PR #205.) وحين لا يُذكر تاريخ يبقى الأحدث هو الصحيح.
-// إن طُلب يوم بلا تقرير، يُقال ذلك ويُذكر أحدث تاريخ متاح — لا يُستبدل بغيره.
-async function movementReport(period: Period) {
+// حين يذكر السائل تاريخاً («كم قبضنا أمس؟») يجب أن تُقرأ تقارير **تلك الفترة**
+// لا الأحدث. كان الكود يأخذ الأحدث دائماً، فيجيب عن اليوم ويقدّمه كأنه جواب
+// أمس. (رصدها Codex على PR #205.)
+//
+// ثم مدىً كامل لا يوم واحد: أول إصلاح رشّح `report_date` لكنه أبقى `limit=1`،
+// فسؤال «كم قبضنا هذا الشهر؟» كان يعرض `paymentSummary` **ليوم واحد** على أنه
+// مقبوضات الشهر — نفس الكذبة بصيغة أخفّ. (رصدها Codex ثانيةً بعد df4b3df.)
+// فالقراءة الآن تشمل كل أيام الفترة، وأحدث لقطة لكل يوم هي المعتمدة، والأيام
+// الغائبة تُحصى وتُعلَن لأن غيابها يبخس المجموع بصمت.
+//
+// وبلا تاريخ مذكور يبقى الأحدث هو الصحيح — سؤال «كم بالصندوق؟» يريد الآن.
+type MovementDay = { report_date: string; payload: Record<string, unknown>; created_at: string };
+
+async function movementReports(period: Period): Promise<{
+  days: MovementDay[];
+  latestAvailable: string | null;
+  missingDays: string[];
+}> {
   if (!period.explicit) {
     const rows = await readRest(
-      "daily_movement_reports?select=report_date,payload,created_at&order=created_at.desc&limit=1"
+      "daily_movement_reports?select=report_date,payload,created_at&order=report_date.desc,created_at.desc&limit=1"
     );
-    return { row: (Array.isArray(rows) && rows[0]) || null, mismatch: null as string | null };
+    const row = (Array.isArray(rows) && rows[0]) || null;
+    return { days: row ? [row as MovementDay] : [], latestAvailable: null, missingDays: [] };
   }
-  const rows = await readRest(
+  // الترتيب تنازلي بالتاريخ ثم بوقت الإنشاء، فأول ظهور لكل report_date هو
+  // لقطته الأحدث — وما بعده إعادة رفع لنفس اليوم تُهمَل.
+  const { rows } = await readPaged((range) =>
     "daily_movement_reports?select=report_date,payload,created_at"
     + `&report_date=gte.${safeDate(period.from)}&report_date=lte.${safeDate(period.to)}`
-    + "&order=report_date.desc,created_at.desc&limit=1"
+    + `&order=report_date.desc,created_at.desc${range}`
   );
-  const row = (Array.isArray(rows) && rows[0]) || null;
-  if (row) return { row, mismatch: null as string | null };
-  const latest = await readRest(
-    "daily_movement_reports?select=report_date&order=report_date.desc&limit=1"
-  );
-  const latestDate = Array.isArray(latest) && latest[0] ? String(latest[0].report_date) : null;
-  return { row: null, mismatch: latestDate };
+  const days: MovementDay[] = [];
+  const seen = new Set<string>();
+  for (const row of rows) {
+    const date = String(row.report_date ?? "");
+    if (!date || seen.has(date)) continue;
+    seen.add(date);
+    days.push(row as unknown as MovementDay);
+  }
+  if (!days.length) {
+    const latest = await readRest(
+      "daily_movement_reports?select=report_date&order=report_date.desc&limit=1"
+    );
+    const latestDate = Array.isArray(latest) && latest[0] ? String(latest[0].report_date) : null;
+    return { days: [], latestAvailable: latestDate, missingDays: [] };
+  }
+  return { days, latestAvailable: null, missingDays: datesInPeriod(period).filter((d) => !seen.has(d)) };
+}
+
+// أيام الفترة كلها. السقف 366 حارس ضد فترة مشوّهة — parsePeriod لا تنتج أطول
+// من سنة أصلاً.
+function datesInPeriod(period: Period) {
+  const dates: string[] = [];
+  let day = period.from;
+  while (day <= period.to && dates.length < 366) {
+    dates.push(day);
+    day = damascusDateFrom(day, 1);
+  }
+  return dates;
+}
+
+// الأيام الغائبة عن الفترة المطلوبة: تُعلَن ولا تُبتلع، لأن يوماً بلا تقرير
+// يجعل المجموع أقلّ من الحقيقة بلا أي أثر ظاهر في الجواب.
+function missingDaysNote(missingDays: string[]) {
+  if (!missingDays.length) return "";
+  const shown = missingDays.slice(0, 10).join("، ");
+  return `\n\n> ⚠️ **${missingDays.length} يوم${missingDays.length > 2 ? "اً" : ""} داخل الفترة بلا تقرير حركة**: ${shown}`
+    + (missingDays.length > 10 ? ` و${missingDays.length - 10} غيرها` : "")
+    + `.\n> المجموع أعلاه يغطي الأيام الموجودة وحدها، فاقرأه **ناقصاً لا نهائياً**.`;
 }
 
 function noMovementReport(period: Period, latestDate: string | null): ToolResult {
@@ -402,10 +450,10 @@ type SalesRow = {
 // الماضي» يشمل 1–6 آب وهي خارج النافذة.
 type SyncWindow = { start: string; end: string; completedAt: string; rowCount: number } | null;
 
-async function salesSyncWindow(): Promise<SyncWindow> {
+async function syncWindow(table: string, source: string): Promise<SyncWindow> {
   const rows = await readRest(
-    "sales_line_items_sync_state?select=window_start,window_end,row_count,completed_at"
-    + "&source=eq.ameen_sales_line_items&order=completed_at.desc&limit=1"
+    `${table}?select=window_start,window_end,row_count,completed_at`
+    + `&source=eq.${encodeURIComponent(source)}&order=completed_at.desc&limit=1`
   );
   const row = Array.isArray(rows) && rows[0] ? rows[0] : null;
   if (!row?.window_start || !row?.window_end) return null;
@@ -417,10 +465,28 @@ async function salesSyncWindow(): Promise<SyncWindow> {
   };
 }
 
+const salesSyncWindow = () => syncWindow("sales_line_items_sync_state", "ameen_sales_line_items");
+
+// نافذة التحديث المتحقَّقة لحركة المصاريف — نفس علّة المبيعات بالضبط.
+//
+// `push-expense-entries.ps1` يستبدل آخر `-Days` يوماً (7 افتراضاً، ولا
+// `register-expense-entries-task.ps1` يمرّر غيرها) ويترك ما قبلها على حاله.
+// فصفوف ما قبل النافذة لا تُحدَّث: قيد مصروف عُدِّل أو حُذف في الأمين بعد خروج
+// تاريخه منها لا يصل إلى Supabase، وجدول حديث العهد قد لا يحمل تلك الأيام
+// إطلاقاً. تقديم مجموع «مصاريف الشهر الماضي» كإجمالي نهائي ادّعاءٌ لا يسنده
+// شيء. (رصدها Codex على PR #205 بعد df4b3df.)
+const expenseSyncWindow = () => syncWindow("expense_entries_sync_state", "ameen_expense_entries");
+
+// موضوع التحذير: أي مصدر يتكلم عنه، وأي جدول يحمل سجلّ مزامنته. تمريره صريح
+// لا افتراضي كي لا يُنسب غيابُ سجلٍّ إلى المصدر الخطأ في نص موجَّه للمالك.
+type CoverageSubject = { what: string; table: string };
+const SALES_COVERAGE: CoverageSubject = { what: "سطور المبيعات", table: "sales_line_items_sync_state" };
+const EXPENSE_COVERAGE: CoverageSubject = { what: "حركة المصاريف", table: "expense_entries_sync_state" };
+
 // تحذير التغطية: يُعيد نصاً حين لا تقع الفترة المطلوبة كاملةً داخل النافذة.
-function coverageWarning(period: Period, window: SyncWindow) {
+function coverageWarning(period: Period, window: SyncWindow, subject: CoverageSubject) {
   if (!window) {
-    return `\n\n> ⚠️ لا يوجد سجل مزامنة مكتمل لسطور المبيعات (\`sales_line_items_sync_state\` فارغ).`
+    return `\n\n> ⚠️ لا يوجد سجل مزامنة مكتمل لـ${subject.what} (\`${subject.table}\` فارغ).`
       + ` لا أستطيع تأكيد أن أرقام هذه الفترة محدَّثة، فاعتبرها **غير متحقَّقة**.`;
   }
   const outsideBefore = period.from < window.start;
@@ -429,7 +495,7 @@ function coverageWarning(period: Period, window: SyncWindow) {
   const parts: string[] = [];
   if (outsideBefore) parts.push(`من ${period.from} إلى ${damascusDateFrom(window.start, -1)}`);
   if (outsideAfter) parts.push(`من ${damascusDateFrom(window.end, 1)} إلى ${period.to}`);
-  return `\n\n> ⚠️ **جزء من الفترة خارج آخر نافذة مزامنة متحقَّقة.**\n`
+  return `\n\n> ⚠️ **جزء من الفترة خارج آخر نافذة مزامنة متحقَّقة لـ${subject.what}.**\n`
     + `> النافذة المتحقَّقة: **${window.start} → ${window.end}** (${window.rowCount} سطر، اكتملت ${window.completedAt.slice(0, 10)}).\n`
     + `> خارجها: ${parts.join("، ")}. صفوف هذه المدة موجودة من مزامنة أقدم ولا تُحدَّث،\n`
     + `> فأي تعديل أو حذف جرى في الأمين بعدها **لا ينعكس هنا**. المجموع أعلاه يشمل هذه الصفوف،\n`
@@ -552,12 +618,16 @@ const TOOLS: Tool[] = [
     ],
     async run(ctx) {
       // daily_movement_reports يخزّن كل شيء في payload — لا summary/items هنا.
-      const { row, mismatch } = await movementReport(ctx.period);
+      // الرصيد **مقدار لحظي لا تدفّق**، فلا يُجمع عبر الأيام: أحدث يوم داخل
+      // الفترة هو الجواب الصحيح. لكن حين تمتد الفترة أكثر من ذلك اليوم يُقال
+      // صراحةً أي يوم يمثّله الرقم، كي لا يُقرأ كأنه رصيد الفترة كلها.
+      const { days, latestAvailable } = await movementReports(ctx.period);
+      const row = days[0] ?? null;
       // بلا تاريخ مطلوب، غياب الصف يعني غياب التقارير أصلاً؛ ومع تاريخ مطلوب
-      // يعني أن ذلك اليوم بالذات بلا تقرير — وهما حالتان مختلفتان.
+      // يعني أن تلك الفترة بلا تقرير — وهما حالتان مختلفتان.
       if (!row) {
         return ctx.period.explicit
-          ? noMovementReport(ctx.period, mismatch)
+          ? noMovementReport(ctx.period, latestAvailable)
           : noData("الصناديق", ["daily_movement_reports"]);
       }
       if (!row.payload) return noData("الصناديق", ["daily_movement_reports"]);
@@ -587,6 +657,10 @@ const TOOLS: Tool[] = [
         ok: true,
         text: `**رصيد الصناديق — تقرير ${row.report_date}**\n${totalLines.join("\n")}${detail}`
           + `\n\nالمجموع معروض بكل عملة على حدة كما يسجّلها الأمين — لا يُجمع الدولار مع الليرة.`
+          + (ctx.period.explicit && ctx.period.from !== ctx.period.to
+            ? `\n\n> ℹ️ الرصيد مقدار لحظي لا يُجمع عبر الأيام. الرقم أعلاه رصيد **${row.report_date}**`
+              + ` وهو أحدث يوم له تقرير داخل ${ctx.period.label} (${ctx.period.from} → ${ctx.period.to}) — لا رصيد الفترة كلها.`
+            : "")
           + freshnessNote(row.created_at),
         sources: ["daily_movement_reports"],
         asOf: row.created_at
@@ -604,41 +678,69 @@ const TOOLS: Tool[] = [
       { re: /كم قبض|شو قبضنا/, w: 4 }
     ],
     async run(ctx) {
-      const { row, mismatch } = await movementReport(ctx.period);
-      // بلا تاريخ مطلوب، غياب الصف يعني غياب التقارير أصلاً؛ ومع تاريخ مطلوب
-      // يعني أن ذلك اليوم بالذات بلا تقرير — وهما حالتان مختلفتان.
-      if (!row) {
+      // المقبوضات **تدفّق لا مقدار لحظي**، فتُجمع عبر كل أيام الفترة. أخذ
+      // أحدث يوم وحده كان يعرض مقبوضات يوم واحد جواباً عن «هذا الشهر».
+      const { days, latestAvailable, missingDays } = await movementReports(ctx.period);
+      if (!days.length) {
         return ctx.period.explicit
-          ? noMovementReport(ctx.period, mismatch)
+          ? noMovementReport(ctx.period, latestAvailable)
           : noData("المقبوضات", ["daily_movement_reports"]);
       }
-      if (!row.payload) return noData("المقبوضات", ["daily_movement_reports"]);
-      const payments = Array.isArray(row.payload.payments) ? row.payload.payments : [];
-      const summary = row.payload.paymentSummary ?? {};
+      const withPayload = days.filter((day) => day.payload);
+      if (!withPayload.length) return noData("المقبوضات", ["daily_movement_reports"]);
+
+      type Payment = { date: string; name: string; amount: number; notes: string };
+      const payments: Payment[] = [];
+      let declaredCount = 0;
+      let declaredTotal = 0;
+      for (const day of withPayload) {
+        const list = Array.isArray(day.payload.payments) ? day.payload.payments : [];
+        const summary = (day.payload.paymentSummary ?? {}) as Record<string, unknown>;
+        // العدد والمجموع يؤخذان من paymentSummary لأنه رقم التقرير المعتمد؛
+        // والقائمة قد تكون مقتطعة في المصدر. وعند غيابه يُشتقّان من القائمة.
+        declaredCount += summary.count === undefined ? list.length : num(summary.count);
+        declaredTotal += summary.totalUsd === undefined
+          ? list.reduce((sum: number, p: Record<string, unknown>) => sum + num(p.amountUsd ?? p.amount), 0)
+          : num(summary.totalUsd);
+        for (const p of list as Array<Record<string, unknown>>) {
+          payments.push({
+            date: day.report_date,
+            name: String(p.name ?? p.customer ?? "بدون اسم"),
+            amount: num(p.amountUsd ?? p.amount),
+            notes: String(p.notes ?? "")
+          });
+        }
+      }
+
+      const multi = withPayload.length > 1;
+      const heading = multi
+        ? `**مقبوضات ${ctx.period.label} (${ctx.period.from} → ${ctx.period.to})** — من ${withPayload.length} يوم فيها تقرير`
+        : `**مقبوضات ${withPayload[0].report_date}**`;
+      const newest = withPayload[0].created_at;
+
       if (!payments.length) {
         return {
           ok: true,
-          text: `**مقبوضات ${row.report_date}**\nلا توجد أي دفعة مسجّلة من الزبائن في هذا التقرير — العدد **0** والمجموع **${money(summary.totalUsd ?? 0)}**.`
+          text: `${heading}\nلا توجد أي دفعة مسجّلة من الزبائن — العدد **0** والمجموع **${money(declaredTotal)}**.`
             + `\n\nهذا رقم حقيقي من تقرير الحركة وليس غياب بيانات.`
-            + freshnessNote(row.created_at),
+            + missingDaysNote(missingDays)
+            + freshnessNote(newest),
           sources: ["daily_movement_reports"],
-          asOf: row.created_at
+          asOf: newest
         };
       }
+
       const lines = payments
         .slice(0, 25)
-        .map(
-          (p: Record<string, unknown>) =>
-            `- ${String(p.name ?? p.customer ?? "بدون اسم")}: **${money(p.amountUsd ?? p.amount)}**`
-            + (p.notes ? ` — ${String(p.notes)}` : "")
-        );
+        .map((p) => `- ${multi ? `${p.date} — ` : ""}${p.name}: **${money(p.amount)}**` + (p.notes ? ` — ${p.notes}` : ""));
       return {
         ok: true,
-        text: `**مقبوضات ${row.report_date}** — العدد **${num(summary.count ?? payments.length)}**، المجموع **${money(summary.totalUsd)}**\n${lines.join("\n")}`
+        text: `${heading} — العدد **${declaredCount}**، المجموع **${money(declaredTotal)}**\n${lines.join("\n")}`
           + (payments.length > 25 ? `\n\n_معروض 25 من ${payments.length}._` : "")
-          + freshnessNote(row.created_at),
+          + missingDaysNote(missingDays)
+          + freshnessNote(newest),
         sources: ["daily_movement_reports"],
-        asOf: row.created_at
+        asOf: newest
       };
     }
   },
@@ -665,10 +767,13 @@ const TOOLS: Tool[] = [
         // فرّق بين «لا مصاريف بهذه الفترة» و«لا بيانات مصاريف إطلاقاً»
         const any = await readRest("expense_entries?select=entry_date&order=entry_date.desc&limit=1");
         if (!Array.isArray(any) || !any.length) return noData("المصاريف", ["expense_entries"]);
+        // «لا حركة مصروف» نفيٌ قاطع، والغياب خارج نافذة التحديث قد يكون غياب
+        // مزامنة لا غياب صرف — كما في المبيعات بالضبط.
         return {
           ok: true,
-          text: `**مصاريف ${ctx.period.label} (${ctx.period.from} → ${ctx.period.to})**\nلا توجد أي حركة مصروف مسجّلة في هذه الفترة. آخر مصروف مسجّل بتاريخ ${String(any[0].entry_date)}.`,
-          sources: ["expense_entries"]
+          text: `**مصاريف ${ctx.period.label} (${ctx.period.from} → ${ctx.period.to})**\nلا توجد أي حركة مصروف مسجّلة في هذه الفترة. آخر مصروف مسجّل بتاريخ ${String(any[0].entry_date)}.`
+            + coverageWarning(ctx.period, await expenseSyncWindow(), EXPENSE_COVERAGE),
+          sources: ["expense_entries", "expense_entries_sync_state"]
         };
       }
       const total = list.reduce((sum, row) => sum + num(row.amount), 0);
@@ -683,8 +788,9 @@ const TOOLS: Tool[] = [
           + (list.length > 20 ? `\n\n_معروض 20 من ${list.length}._` : "")
           + (partial
             ? `\n\n> ⚠️ بلغت القراءة سقف الأمان ${HARD_ROW_CAP} حركة، فالمجموع أعلاه **جزئي وليس إجمالي الفترة**. ضيّق الفترة.`
-            : ""),
-        sources: ["expense_entries"],
+            : "")
+          + coverageWarning(ctx.period, await expenseSyncWindow(), EXPENSE_COVERAGE),
+        sources: ["expense_entries", "expense_entries_sync_state"],
         partial
       };
     }
@@ -715,7 +821,7 @@ const TOOLS: Tool[] = [
           ok: true,
           text: `**مبيعات ${period.label} (${period.from} → ${period.to})**\nلا توجد أي فاتورة مسجّلة في هذه الفترة. آخر يوم فيه مبيعات مسجّلة هو **${String(any[0].sale_date)}**.`
             + `\n\nملاحظة: سطور المبيعات تصل عبر مزامنة الأمين، فإن كان اليوم ما زال في بدايته قد لا تكون فواتيره رُفعت بعد.`
-            + coverageWarning(period, await salesSyncWindow()),
+            + coverageWarning(period, await salesSyncWindow(), SALES_COVERAGE),
           sources: ["sales_line_items", "sales_line_items_sync_state"]
         };
       }
@@ -748,8 +854,8 @@ const TOOLS: Tool[] = [
         text += `\n\n> ⚠️ بلغت القراءة سقف الأمان ${HARD_ROW_CAP} سطر، فالإجمالي أعلاه **جزئي وليس نهائياً**. ضيّق الفترة للحصول على رقم كامل.`;
       }
       const window = await salesSyncWindow();
-      text += coverageWarning(period, window);
-      if (compare) text += coverageWarning(previousPeriod(period), window);
+      text += coverageWarning(period, window, SALES_COVERAGE);
+      if (compare) text += coverageWarning(previousPeriod(period), window, SALES_COVERAGE);
       return {
         ok: true,
         text,
@@ -1033,7 +1139,7 @@ const TOOLS: Tool[] = [
             .join("\n")
           + (stagnant.length > 25 ? `\n- _و${stagnant.length - 25} صنف آخر._` : "")
           + `\n\nالمقارنة بين مخزون ${report.report_date} وسطور المبيعات ${period.from} → ${period.to}.`
-          + coverageWarning(period, await salesSyncWindow()),
+          + coverageWarning(period, await salesSyncWindow(), SALES_COVERAGE),
         sources: ["inventory_reports:ameen_sql_agent", "sales_line_items", "sales_line_items_sync_state"],
         asOf: report.created_at
       };
@@ -1107,7 +1213,7 @@ const TOOLS: Tool[] = [
               + (e.negative ? " ⚠️ الرصيد **سالب** في الأمين — يحتاج مراجعة إدخال قبل الشراء" : ""))
             .join("\n")
           + `\n\nهذه قراءة وتحليل فقط — لا يُنشئ المساعد أي طلب شراء ولا يعدّل أي مخزون.`
-          + coverageWarning(period, await salesSyncWindow()),
+          + coverageWarning(period, await salesSyncWindow(), SALES_COVERAGE),
         sources: ["inventory_reports:ameen_sql_agent", "sales_line_items", "sales_line_items_sync_state"],
         asOf: report.created_at
       };
@@ -1189,7 +1295,7 @@ const TOOLS: Tool[] = [
           }
         }
       }
-      text += coverageWarning(period, await salesSyncWindow());
+      text += coverageWarning(period, await salesSyncWindow(), SALES_COVERAGE);
       return { ok: true, text, sources: ["approved_price_items", "sales_line_items", "sales_line_items_sync_state"] };
     }
   },
@@ -1467,11 +1573,17 @@ const TOOLS: Tool[] = [
       });
 
       await run("المبيعات", async () => {
-        const today = await readSales({ from: damascusDate(), to: damascusDate(), label: "اليوم", explicit: true }, ctx.role);
-        sources.push("sales_line_items");
+        // الملخص مستهلك خامس لـreadSales، وكان يتجاوز حارس نافذة المزامنة
+        // فيعرض «0 USD» أو صفوفاً غير محدَّثة كأنها مبيعات اليوم المؤكَّدة.
+        // (رصدها Codex على PR #205 بعد df4b3df.)
+        const period = { from: damascusDate(), to: damascusDate(), label: "اليوم", explicit: true };
+        const today = await readSales(period, ctx.role);
+        sources.push("sales_line_items", "sales_line_items_sync_state");
         const s = summarizeSales(today.rows);
         return `**مبيعات اليوم**: ${money(s.total)} على ${s.bills} فاتورة.`
-          + (s.bills === 0 ? " (لم تُرفع فواتير اليوم بعد أو لا يوجد بيع)" : "");
+          + (s.bills === 0 ? " (لم تُرفع فواتير اليوم بعد أو لا يوجد بيع)" : "")
+          + (today.partial ? ` ⚠️ قراءة جزئية عند سقف ${HARD_ROW_CAP} سطر — الرقم ليس نهائياً.` : "")
+          + coverageWarning(period, await salesSyncWindow(), SALES_COVERAGE);
       });
 
       await run("الذمم", async () => {
