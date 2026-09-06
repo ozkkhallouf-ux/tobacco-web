@@ -409,4 +409,102 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   ok("تطابق المعرّف يعرض الفواتير طبيعياً — التشديد لا يكسر الحالة السليمة");
 }
 
+// ── س) التاريخ المطلوب يُحترم في تقارير الحركة ─────────────────────────────
+{
+  // ملاحظة Codex على PR #205: «كم قبضنا أمس؟» كان يُحسب فيه parsePeriod صحيحاً
+  // ثم تتجاهله الأداة وتأخذ أحدث تقرير — فيُعرض مقبوض **اليوم** كأنه جواب أمس.
+  const today = new Date(Date.now() + 180 * 60_000).toISOString().slice(0, 10);
+  const yesterday = new Date(Date.now() + 180 * 60_000 - 86_400_000).toISOString().slice(0, 10);
+  const fixtures = defaultFixtures();
+  fixtures.daily_movement_reports = [
+    { report_date: today, created_at: new Date().toISOString(), payload: {
+      cashTotals: [{ currency: "$", opening: 900, closing: 999, externalIncoming: 0, externalOutgoing: 0 }],
+      cashboxes: [{ name: "صندوق", currency: "$", opening: 900, incoming: 99, outgoing: 0, closing: 999 }],
+      payments: [{ name: "زبون اليوم", amount: 777, notes: "" }],
+      paymentSummary: { count: 1, totalUsd: 777 } } },
+    { report_date: yesterday, created_at: new Date(Date.now() - 86_400_000).toISOString(), payload: {
+      cashTotals: [{ currency: "$", opening: 100, closing: 111, externalIncoming: 0, externalOutgoing: 0 }],
+      cashboxes: [{ name: "صندوق", currency: "$", opening: 100, incoming: 11, outgoing: 0, closing: 111 }],
+      payments: [{ name: "زبون أمس", amount: 222, notes: "" }],
+      paymentSummary: { count: 1, totalUsd: 222 } } }
+  ];
+
+  const a = await loadAssistant({ fixtures });
+  const yd = await a.ask(TOKENS.owner, "كم قبضنا امس؟");
+  const ydText = String(yd.body.reply);
+  assert.equal(yd.body.tool, "collections");
+  assert.ok(ydText.includes("222"), `لم يقرأ مقبوضات أمس:\n${ydText}`);
+  assert.ok(!ydText.includes("777"), "عرض مقبوضات اليوم جواباً عن أمس");
+  assert.ok(ydText.includes(yesterday), "لم يذكر تاريخ أمس");
+
+  const b = await loadAssistant({ fixtures });
+  const td = await b.ask(TOKENS.owner, "كم قبضنا اليوم؟");
+  assert.ok(String(td.body.reply).includes("777"), "لم يقرأ مقبوضات اليوم");
+
+  // وبلا تاريخ مذكور يبقى الأحدث هو الصحيح
+  const c = await loadAssistant({ fixtures });
+  const latest = await c.ask(TOKENS.owner, "كم يوجد بالصندوق؟");
+  assert.ok(String(latest.body.reply).includes("999"), "سؤال بلا تاريخ لم يأخذ أحدث تقرير");
+
+  // ويوم مطلوب بلا تقرير يُعلن، ولا يُستبدل بيوم آخر
+  const d = await loadAssistant({ fixtures: { ...fixtures, daily_movement_reports: [fixtures.daily_movement_reports[0]] } });
+  const missing = await d.ask(TOKENS.owner, "كم قبضنا امس؟");
+  const missText = String(missing.body.reply);
+  assert.equal(missing.body.answered, false, "ادّعى الجواب عن يوم بلا تقرير");
+  assert.ok(!missText.includes("777"), "استبدل اليوم الغائب بأرقام يوم آخر");
+  assert.ok(missText.includes(today), "لم يذكر أحدث تاريخ متاح");
+  ok("تقارير الحركة تحترم اليوم المطلوب، وتُعلن غيابه بدل استبداله بيوم آخر");
+}
+
+// ── ع) فترة خارج نافذة المزامنة المتحقَّقة تُعلَن ──────────────────────────
+{
+  // ملاحظة Codex على PR #205: المنتِج يعمل بـ-Days 30 وsales_line_items يحتفظ
+  // بصفوف أقدم لا تُحدَّث. تقديم مجموعها كإجمالي نهائي ادّعاء بلا سند.
+  // تحقُّق على الإنتاج 2026-09-06: النافذة 2026-08-07 → 2026-09-06 بينما
+  // الجدول يحمل صفوفاً من 2026-07-01.
+  const today = new Date(Date.now() + 180 * 60_000).toISOString().slice(0, 10);
+  const old = new Date(Date.now() + 180 * 60_000 - 50 * 86_400_000).toISOString().slice(0, 10);
+  const fixtures = defaultFixtures();
+  fixtures.sales_line_items = [
+    { id: 1, sale_date: today, bill_no: "1", bill_type: "retail", item_name: "أ", qty: 1, line_total: 100, unit_cost: 90, customer_name: "س" },
+    { id: 2, sale_date: old, bill_no: "2", bill_type: "retail", item_name: "أ", qty: 1, line_total: 50, unit_cost: 45, customer_name: "س" }
+  ];
+  fixtures.sales_line_items_sync_state = [{
+    source: "ameen_sales_line_items",
+    window_start: new Date(Date.now() + 180 * 60_000 - 29 * 86_400_000).toISOString().slice(0, 10),
+    window_end: today,
+    row_count: 1,
+    completed_at: new Date().toISOString()
+  }];
+
+  // فترة داخل النافذة ⇒ بلا تحذير
+  const inside = await loadAssistant({ fixtures });
+  const insideText = String((await inside.ask(TOKENS.owner, "كم مبيعات اليوم؟")).body.reply);
+  assert.ok(!/خارج آخر نافذة مزامنة/.test(insideText), "حذّر رغم أن الفترة داخل النافذة");
+
+  // فترة تمتد قبل النافذة ⇒ تحذير صريح بحدود النافذة
+  const outside = await loadAssistant({ fixtures });
+  const outsideResult = await outside.ask(TOKENS.owner, "كم مبيعات اخر 60 يوم؟");
+  const outsideText = String(outsideResult.body.reply);
+  assert.ok(/خارج آخر نافذة مزامنة متحقَّقة/.test(outsideText), `لم يُعلن خروج الفترة عن النافذة:\n${outsideText}`);
+  assert.ok(outsideText.includes(fixtures.sales_line_items_sync_state[0].window_start), "لم يذكر بداية النافذة المتحقَّقة");
+  assert.ok(outside.metrics.tablesRead.has("sales_line_items_sync_state"), "لم يقرأ سجل المزامنة أصلاً");
+
+  // وغياب سجل المزامنة كلياً ⇒ إعلان أن الأرقام غير متحقَّقة
+  const none = await loadAssistant({ fixtures: { ...fixtures, sales_line_items_sync_state: [] } });
+  const noneText = String((await none.ask(TOKENS.owner, "كم مبيعات اليوم؟")).body.reply);
+  assert.ok(/لا يوجد سجل مزامنة مكتمل/.test(noneText), "لم يُعلن غياب سجل المزامنة");
+
+  // وفترة خالية خارج النافذة: «لا توجد فاتورة» نفيٌ قاطع، والغياب هناك قد يكون
+  // غياب مزامنة لا غياب بيع. فالتحذير يلزم فرع الصفر كما يلزم فرع الأرقام.
+  const far = new Date(Date.now() + 180 * 60_000 - 100 * 86_400_000).toISOString().slice(0, 10);
+  const empty = await loadAssistant({ fixtures: { ...fixtures, sales_line_items: [
+    { id: 9, sale_date: far, bill_no: "9", bill_type: "retail", item_name: "أ", qty: 1, line_total: 10, unit_cost: 9, customer_name: "س" }
+  ] } });
+  const emptyText = String((await empty.ask(TOKENS.owner, "كم مبيعات اخر 60 يوم؟")).body.reply);
+  assert.ok(/لا توجد أي فاتورة/.test(emptyText), `لم يصل لفرع الصفر:\n${emptyText}`);
+  assert.ok(/خارج آخر نافذة مزامنة متحقَّقة/.test(emptyText), `نفى وجود فواتير في فترة خارج النافذة بلا تحذير:\n${emptyText}`);
+  ok("الفترة خارج نافذة المزامنة المتحقَّقة تُعلَن صراحةً — في فرع الأرقام وفرع الصفر وعند غياب السجل");
+}
+
 console.log(`\nتوجيه المساعد الذكي: ${passed}/${passed} تحقق ناجح`);

@@ -114,7 +114,8 @@ const READABLE_TABLES = new Set([
   "daily_movement_reports",
   "expense_entries",
   "inventory_reports",
-  "sales_line_items"
+  "sales_line_items",
+  "sales_line_items_sync_state"
 ]);
 
 async function readRest(path: string) {
@@ -158,6 +159,43 @@ async function readPaged(path: (range: string) => string) {
     if (!list.length || list.length < pageSize) return { rows, partial: false };
   }
   return { rows, partial: true };
+}
+
+// تقرير الحركة اليومية المطلوب.
+//
+// حين يذكر السائل تاريخاً («كم قبضنا أمس؟») يجب أن يُقرأ تقرير **ذلك اليوم** لا
+// الأحدث. كان الكود يأخذ الأحدث دائماً، فيجيب عن اليوم ويقدّمه كأنه جواب أمس.
+// (رصدها Codex على PR #205.) وحين لا يُذكر تاريخ يبقى الأحدث هو الصحيح.
+// إن طُلب يوم بلا تقرير، يُقال ذلك ويُذكر أحدث تاريخ متاح — لا يُستبدل بغيره.
+async function movementReport(period: Period) {
+  if (!period.explicit) {
+    const rows = await readRest(
+      "daily_movement_reports?select=report_date,payload,created_at&order=created_at.desc&limit=1"
+    );
+    return { row: (Array.isArray(rows) && rows[0]) || null, mismatch: null as string | null };
+  }
+  const rows = await readRest(
+    "daily_movement_reports?select=report_date,payload,created_at"
+    + `&report_date=gte.${safeDate(period.from)}&report_date=lte.${safeDate(period.to)}`
+    + "&order=report_date.desc,created_at.desc&limit=1"
+  );
+  const row = (Array.isArray(rows) && rows[0]) || null;
+  if (row) return { row, mismatch: null as string | null };
+  const latest = await readRest(
+    "daily_movement_reports?select=report_date&order=report_date.desc&limit=1"
+  );
+  const latestDate = Array.isArray(latest) && latest[0] ? String(latest[0].report_date) : null;
+  return { row: null, mismatch: latestDate };
+}
+
+function noMovementReport(period: Period, latestDate: string | null): ToolResult {
+  return {
+    ok: false,
+    text: `لا يوجد تقرير حركة يومية يغطي ${period.label} (${period.from} → ${period.to}).`
+      + (latestDate ? `\n\nأحدث تقرير متاح بتاريخ **${latestDate}**.` : "")
+      + `\n\nلن أعطيك أرقام يوم آخر مكانه — ستبدو جواباً عن اليوم المطلوب وهي ليست كذلك.`,
+    sources: ["daily_movement_reports"]
+  };
 }
 
 // أحدث صف من جدول تقارير بمفتاح summary/items
@@ -271,7 +309,11 @@ function safeDate(value: string) {
   return value;
 }
 
-type Period = { from: string; to: string; label: string };
+// `explicit` = ذُكر في السؤال تاريخ/فترة صراحةً. تمييزه ضروري: الأدوات التي
+// تقرأ «أحدث تقرير» يجب أن تحترم اليوم المطلوب متى طُلب، وأن تبقى على الأحدث
+// حين لا يذكر السائل تاريخاً — بلا هذا التمييز يصير «كم قبضنا أمس؟» جواباً
+// عن اليوم. (رصدها Codex على PR #205.)
+type Period = { from: string; to: string; label: string; explicit: boolean };
 
 // استخراج الفترة من السؤال. الافتراضي «اليوم» للأسئلة اللحظية.
 function parsePeriod(question: string, fallbackDays = 0): Period {
@@ -279,34 +321,34 @@ function parsePeriod(question: string, fallbackDays = 0): Period {
   const today = damascusDate();
   if (/(?:^| )امس(?: |$)|البارحه|مبارح/.test(q)) {
     const day = damascusDate(-1);
-    return { from: day, to: day, label: "أمس" };
+    return { from: day, to: day, label: "أمس", explicit: true };
   }
   // «هذا الشهر» تُفحص أولاً عمداً: سؤال «مبيعات هذا الشهر مقارنة بالشهر الماضي»
   // يحوي العبارتين معاً، والفترة المقصودة فيه هي الشهر الحالي — والشهر الماضي
   // يأتي من previousPeriod في فرع المقارنة، لا من هنا.
   if (/هذا الشهر|الشهر الحالي|شهري/.test(q)) {
-    return { from: `${today.slice(0, 7)}-01`, to: today, label: "هذا الشهر" };
+    return { from: `${today.slice(0, 7)}-01`, to: today, label: "هذا الشهر", explicit: true };
   }
   if (/الشهر الماضي|الشهر السابق|الشهر الفائت/.test(q)) {
     const first = `${today.slice(0, 7)}-01`;
     const prevEnd = damascusDateFrom(first, -1);
-    return { from: `${prevEnd.slice(0, 7)}-01`, to: prevEnd, label: "الشهر الماضي" };
+    return { from: `${prevEnd.slice(0, 7)}-01`, to: prevEnd, label: "الشهر الماضي", explicit: true };
   }
   if (/(?:^| )الشهر(?: |$)/.test(q)) {
-    return { from: `${today.slice(0, 7)}-01`, to: today, label: "هذا الشهر" };
+    return { from: `${today.slice(0, 7)}-01`, to: today, label: "هذا الشهر", explicit: true };
   }
   if (/الاسبوع|اسبوع|٧ ايام|7 ايام|اخر سبعه/.test(q)) {
-    return { from: damascusDate(-6), to: today, label: "آخر 7 أيام" };
+    return { from: damascusDate(-6), to: today, label: "آخر 7 أيام", explicit: true };
   }
   const explicitDays = q.match(/اخر (\d{1,3}) يوم/);
   if (explicitDays) {
     const days = Math.min(365, Math.max(1, Number(explicitDays[1])));
-    return { from: damascusDate(-(days - 1)), to: today, label: `آخر ${days} يوم` };
+    return { from: damascusDate(-(days - 1)), to: today, label: `آخر ${days} يوم`, explicit: true };
   }
   if (/(?:^| )اليوم(?: |$)|النهارده|هلق|الان/.test(q) || fallbackDays === 0) {
-    return { from: today, to: today, label: "اليوم" };
+    return { from: today, to: today, label: "اليوم", explicit: /(?:^| )اليوم(?: |$)|النهارده|هلق|الان/.test(q) };
   }
-  return { from: damascusDate(-(fallbackDays - 1)), to: today, label: `آخر ${fallbackDays} يوم` };
+  return { from: damascusDate(-(fallbackDays - 1)), to: today, label: `آخر ${fallbackDays} يوم`, explicit: false };
 }
 
 function damascusDateFrom(iso: string, offsetDays: number) {
@@ -322,7 +364,8 @@ function previousPeriod(period: Period): Period {
   return {
     from: damascusDateFrom(period.from, -days),
     to: damascusDateFrom(period.from, -1),
-    label: `الفترة السابقة (${days} يوم)`
+    label: `الفترة السابقة (${days} يوم)`,
+    explicit: true
   };
 }
 
@@ -346,6 +389,53 @@ type SalesRow = {
 // قراءة هذا العمود تعني إعطاء المالك رقم ربح كاذب، فالهامش يُحسب هنا من
 // line_total - unit_cost×qty، والرقم المحاسبي المعتمد يبقى تقرير
 // ameen_daily_profit (أداة profit). العطل نفسه في خط المزامنة لا في المساعد.
+// نافذة المزامنة المتحقَّقة لسطور المبيعات.
+//
+// المنتِج المجدوَل يعمل بـ`-Days 30` (tools/register-sales-line-items-task.ps1)،
+// وجدول sales_line_items يحتفظ بصفوف أقدم من ذلك بكثير. فالصفوف خارج آخر نافذة
+// مكتملة **لا تُحدَّث**: تعديل أو حذف فاتورة في الأمين بعد خروج تاريخها من
+// النافذة لا يصل إلى Supabase. تقديم مجموعها كإجمالي «نهائي» ادّعاءٌ لا يسنده
+// شيء. (رصدها Codex على PR #205.)
+//
+// تحقُّق على الإنتاج 2026-09-06: النافذة المتحقَّقة 2026-08-07 → 2026-09-06
+// (7,041 صفاً)، بينما الجدول يحمل صفوفاً من 2026-07-01. فسؤال «مبيعات الشهر
+// الماضي» يشمل 1–6 آب وهي خارج النافذة.
+type SyncWindow = { start: string; end: string; completedAt: string; rowCount: number } | null;
+
+async function salesSyncWindow(): Promise<SyncWindow> {
+  const rows = await readRest(
+    "sales_line_items_sync_state?select=window_start,window_end,row_count,completed_at"
+    + "&source=eq.ameen_sales_line_items&order=completed_at.desc&limit=1"
+  );
+  const row = Array.isArray(rows) && rows[0] ? rows[0] : null;
+  if (!row?.window_start || !row?.window_end) return null;
+  return {
+    start: String(row.window_start),
+    end: String(row.window_end),
+    completedAt: String(row.completed_at ?? ""),
+    rowCount: num(row.row_count)
+  };
+}
+
+// تحذير التغطية: يُعيد نصاً حين لا تقع الفترة المطلوبة كاملةً داخل النافذة.
+function coverageWarning(period: Period, window: SyncWindow) {
+  if (!window) {
+    return `\n\n> ⚠️ لا يوجد سجل مزامنة مكتمل لسطور المبيعات (\`sales_line_items_sync_state\` فارغ).`
+      + ` لا أستطيع تأكيد أن أرقام هذه الفترة محدَّثة، فاعتبرها **غير متحقَّقة**.`;
+  }
+  const outsideBefore = period.from < window.start;
+  const outsideAfter = period.to > window.end;
+  if (!outsideBefore && !outsideAfter) return "";
+  const parts: string[] = [];
+  if (outsideBefore) parts.push(`من ${period.from} إلى ${damascusDateFrom(window.start, -1)}`);
+  if (outsideAfter) parts.push(`من ${damascusDateFrom(window.end, 1)} إلى ${period.to}`);
+  return `\n\n> ⚠️ **جزء من الفترة خارج آخر نافذة مزامنة متحقَّقة.**\n`
+    + `> النافذة المتحقَّقة: **${window.start} → ${window.end}** (${window.rowCount} سطر، اكتملت ${window.completedAt.slice(0, 10)}).\n`
+    + `> خارجها: ${parts.join("، ")}. صفوف هذه المدة موجودة من مزامنة أقدم ولا تُحدَّث،\n`
+    + `> فأي تعديل أو حذف جرى في الأمين بعدها **لا ينعكس هنا**. المجموع أعلاه يشمل هذه الصفوف،\n`
+    + `> فاقرأه على أنه تقديري لا نهائي بالنسبة للجزء الخارج.`;
+}
+
 async function readSales(period: Period, role: Role): Promise<{ rows: SalesRow[]; partial: boolean }> {
   // عمود التكلفة للمالك فقط. الموظف لا يرى تكلفة ولا هامشاً.
   const columns = role === "owner"
@@ -460,13 +550,17 @@ const TOOLS: Tool[] = [
       { re: /صندوق|صناديق|سيوله|كاش|نقديه|خزنه/, w: 6 },
       { re: /كم يوجد|كم عندنا|كم باق/, w: 2 }
     ],
-    async run() {
+    async run(ctx) {
       // daily_movement_reports يخزّن كل شيء في payload — لا summary/items هنا.
-      const rows = await readRest(
-        "daily_movement_reports?select=report_date,payload,created_at&order=created_at.desc&limit=1"
-      );
-      const row = Array.isArray(rows) && rows[0] ? rows[0] : null;
-      if (!row?.payload) return noData("الصناديق", ["daily_movement_reports"]);
+      const { row, mismatch } = await movementReport(ctx.period);
+      // بلا تاريخ مطلوب، غياب الصف يعني غياب التقارير أصلاً؛ ومع تاريخ مطلوب
+      // يعني أن ذلك اليوم بالذات بلا تقرير — وهما حالتان مختلفتان.
+      if (!row) {
+        return ctx.period.explicit
+          ? noMovementReport(ctx.period, mismatch)
+          : noData("الصناديق", ["daily_movement_reports"]);
+      }
+      if (!row.payload) return noData("الصناديق", ["daily_movement_reports"]);
       const boxes = Array.isArray(row.payload.cashboxes) ? row.payload.cashboxes : [];
       const totals = Array.isArray(row.payload.cashTotals) ? row.payload.cashTotals : [];
       if (!boxes.length && !totals.length) return noData("الصناديق", ["daily_movement_reports"]);
@@ -509,12 +603,16 @@ const TOOLS: Tool[] = [
       { re: /قبضنا|مقبوضات|تحصيل|دفعات (?:اليوم|الزبائن)|وارد/, w: 6 },
       { re: /كم قبض|شو قبضنا/, w: 4 }
     ],
-    async run() {
-      const rows = await readRest(
-        "daily_movement_reports?select=report_date,payload,created_at&order=created_at.desc&limit=1"
-      );
-      const row = Array.isArray(rows) && rows[0] ? rows[0] : null;
-      if (!row?.payload) return noData("المقبوضات", ["daily_movement_reports"]);
+    async run(ctx) {
+      const { row, mismatch } = await movementReport(ctx.period);
+      // بلا تاريخ مطلوب، غياب الصف يعني غياب التقارير أصلاً؛ ومع تاريخ مطلوب
+      // يعني أن ذلك اليوم بالذات بلا تقرير — وهما حالتان مختلفتان.
+      if (!row) {
+        return ctx.period.explicit
+          ? noMovementReport(ctx.period, mismatch)
+          : noData("المقبوضات", ["daily_movement_reports"]);
+      }
+      if (!row.payload) return noData("المقبوضات", ["daily_movement_reports"]);
       const payments = Array.isArray(row.payload.payments) ? row.payload.payments : [];
       const summary = row.payload.paymentSummary ?? {};
       if (!payments.length) {
@@ -610,11 +708,15 @@ const TOOLS: Tool[] = [
       if (!current.rows.length) {
         const any = await readRest("sales_line_items?select=sale_date&order=sale_date.desc&limit=1");
         if (!Array.isArray(any) || !any.length) return noData("المبيعات", ["sales_line_items"]);
+        // «لا توجد فاتورة» نفيٌ قاطع، وهو أخطر من رقم ناقص متى كانت الفترة خارج
+        // نافذة المزامنة: الغياب هناك قد يكون غياب مزامنة لا غياب بيع. فالتحذير
+        // يلزم هذا الفرع كما يلزم فرع الأرقام.
         return {
           ok: true,
           text: `**مبيعات ${period.label} (${period.from} → ${period.to})**\nلا توجد أي فاتورة مسجّلة في هذه الفترة. آخر يوم فيه مبيعات مسجّلة هو **${String(any[0].sale_date)}**.`
-            + `\n\nملاحظة: سطور المبيعات تصل عبر مزامنة الأمين، فإن كان اليوم ما زال في بدايته قد لا تكون فواتيره رُفعت بعد.`,
-          sources: ["sales_line_items"]
+            + `\n\nملاحظة: سطور المبيعات تصل عبر مزامنة الأمين، فإن كان اليوم ما زال في بدايته قد لا تكون فواتيره رُفعت بعد.`
+            + coverageWarning(period, await salesSyncWindow()),
+          sources: ["sales_line_items", "sales_line_items_sync_state"]
         };
       }
 
@@ -645,7 +747,15 @@ const TOOLS: Tool[] = [
       if (current.partial) {
         text += `\n\n> ⚠️ بلغت القراءة سقف الأمان ${HARD_ROW_CAP} سطر، فالإجمالي أعلاه **جزئي وليس نهائياً**. ضيّق الفترة للحصول على رقم كامل.`;
       }
-      return { ok: true, text, sources: ["sales_line_items"], partial: current.partial };
+      const window = await salesSyncWindow();
+      text += coverageWarning(period, window);
+      if (compare) text += coverageWarning(previousPeriod(period), window);
+      return {
+        ok: true,
+        text,
+        sources: ["sales_line_items", "sales_line_items_sync_state"],
+        partial: current.partial
+      };
     }
   },
 
@@ -900,7 +1010,7 @@ const TOOLS: Tool[] = [
       if (!items.length) return noData("المخزون", ["inventory_reports:ameen_sql_agent"]);
       // الركود = مخزون موجود بلا مبيعات خلال النافذة. يُحسب من سطور المبيعات
       // الحقيقية لا من حقل جاهز، لأن staleItems في التقرير يعتمد تعريفاً آخر.
-      const period = { from: damascusDate(-59), to: damascusDate(), label: "آخر 60 يوم" };
+      const period = { from: damascusDate(-59), to: damascusDate(), label: "آخر 60 يوم", explicit: true };
       const sales = await readSales(period, ctx.role);
       const sold = new Set(sales.rows.map((row) => normalize(row.item_name)));
       const stagnant = items
@@ -922,8 +1032,9 @@ const TOOLS: Tool[] = [
               `- ${String(row.name ?? row.key)}: ${qty(row.stockQty)} ${String(row.unit1Name ?? "")}`)
             .join("\n")
           + (stagnant.length > 25 ? `\n- _و${stagnant.length - 25} صنف آخر._` : "")
-          + `\n\nالمقارنة بين مخزون ${report.report_date} وسطور المبيعات ${period.from} → ${period.to}.`,
-        sources: ["inventory_reports:ameen_sql_agent", "sales_line_items"],
+          + `\n\nالمقارنة بين مخزون ${report.report_date} وسطور المبيعات ${period.from} → ${period.to}.`
+          + coverageWarning(period, await salesSyncWindow()),
+        sources: ["inventory_reports:ameen_sql_agent", "sales_line_items", "sales_line_items_sync_state"],
         asOf: report.created_at
       };
     }
@@ -943,7 +1054,7 @@ const TOOLS: Tool[] = [
       const report = await latestReport("inventory_reports", "ameen_sql_agent");
       const items = Array.isArray(report?.items) ? report.items : [];
       if (!items.length) return noData("المخزون", ["inventory_reports:ameen_sql_agent"]);
-      const period = { from: damascusDate(-29), to: damascusDate(), label: "آخر 30 يوم" };
+      const period = { from: damascusDate(-29), to: damascusDate(), label: "آخر 30 يوم", explicit: true };
       const sales = await readSales(period, ctx.role);
       if (!sales.rows.length) {
         return {
@@ -995,8 +1106,9 @@ const TOOLS: Tool[] = [
               + `، بيع ${e.perDay.toFixed(1)}/يوم ⇒ **يكفي ${e.coverDays.toFixed(1)} يوم**`
               + (e.negative ? " ⚠️ الرصيد **سالب** في الأمين — يحتاج مراجعة إدخال قبل الشراء" : ""))
             .join("\n")
-          + `\n\nهذه قراءة وتحليل فقط — لا يُنشئ المساعد أي طلب شراء ولا يعدّل أي مخزون.`,
-        sources: ["inventory_reports:ameen_sql_agent", "sales_line_items"],
+          + `\n\nهذه قراءة وتحليل فقط — لا يُنشئ المساعد أي طلب شراء ولا يعدّل أي مخزون.`
+          + coverageWarning(period, await salesSyncWindow()),
+        sources: ["inventory_reports:ameen_sql_agent", "sales_line_items", "sales_line_items_sync_state"],
         asOf: report.created_at
       };
     }
@@ -1050,7 +1162,7 @@ const TOOLS: Tool[] = [
       }
 
       // الحركة من سطور المبيعات الحقيقية
-      const period = { from: damascusDate(-59), to: damascusDate(), label: "آخر 60 يوم" };
+      const period = { from: damascusDate(-59), to: damascusDate(), label: "آخر 60 يوم", explicit: true };
       const sales = await readSales(period, ctx.role);
       const mine = sales.rows.filter((row) => normalize(row.item_name) === normalize(name));
       if (!mine.length) {
@@ -1077,7 +1189,8 @@ const TOOLS: Tool[] = [
           }
         }
       }
-      return { ok: true, text, sources: ["approved_price_items", "sales_line_items"] };
+      text += coverageWarning(period, await salesSyncWindow());
+      return { ok: true, text, sources: ["approved_price_items", "sales_line_items", "sales_line_items_sync_state"] };
     }
   },
 
@@ -1354,7 +1467,7 @@ const TOOLS: Tool[] = [
       });
 
       await run("المبيعات", async () => {
-        const today = await readSales({ from: damascusDate(), to: damascusDate(), label: "اليوم" }, ctx.role);
+        const today = await readSales({ from: damascusDate(), to: damascusDate(), label: "اليوم", explicit: true }, ctx.role);
         sources.push("sales_line_items");
         const s = summarizeSales(today.rows);
         return `**مبيعات اليوم**: ${money(s.total)} على ${s.bills} فاتورة.`

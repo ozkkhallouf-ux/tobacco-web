@@ -230,16 +230,14 @@ export async function loadAssistant(options = {}) {
       }
       let rows = fixtures[key] ?? [];
 
-      // ترشيح التاريخ لسطور المبيعات والمصاريف — نحاكي gte/lte
-      const gte = query.match(/(?:sale_date|entry_date)=gte\.([0-9-]+)/);
-      const lte = query.match(/(?:sale_date|entry_date)=lte\.([0-9-]+)/);
-      if (gte || lte) {
-        const field = table === "expense_entries" ? "entry_date" : "sale_date";
+      // ترشيح gte/lte على أي حقل — لا على قائمة حقول مثبّتة. القائمة المثبّتة
+      // كانت تُسقط report_date بصمت، فيمرّ اختبارٌ لتقرير يوم بعينه وهو في
+      // الحقيقة يقرأ أحدث تقرير.
+      for (const [, field, op, value] of query.matchAll(/([a-z_]+)=(gte|lte)\.([0-9-]{10})/g)) {
         rows = rows.filter((row) => {
-          const value = String(row[field] ?? "");
-          if (gte && value < gte[1]) return false;
-          if (lte && value > lte[1]) return false;
-          return true;
+          const cell = String(row[field] ?? "");
+          if (!cell) return true;
+          return op === "gte" ? cell >= value : cell <= value;
         });
       }
 
