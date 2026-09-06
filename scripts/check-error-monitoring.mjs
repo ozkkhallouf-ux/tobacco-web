@@ -34,15 +34,20 @@ const check = (name, condition, detail) => {
 // ---------------------------------------------------------------------------
 // سياق متصفح مُصطنَع. `meta` = null يعني «لا وسم في الصفحة».
 // ---------------------------------------------------------------------------
-function boot({ meta, protocol = "https:", hostname = "ozktobacco.com", fetchImpl } = {}) {
+function boot({ meta, protocol = "https:", hostname = "ozktobacco.com", fetchImpl, respondWith } = {}) {
   const calls = [];
+  const consoleErrors = [];
   const listeners = new Map();
   const metaElement = meta
     ? { getAttribute: (name) => (name in meta ? meta[name] : null) }
     : null;
 
   const context = {
-    console,
+    // مرصد: أي `console.error` من المُرسِل يُلتقَط. «دخان ما بعد النشر» يعتبره
+    // فشلاً، فأداة الرصد لا يجوز أن تكون هي مصدره.
+    console: Object.assign(Object.create(Object.getPrototypeOf(console)), console, {
+      error: (...args) => { consoleErrors.push(args); },
+    }),
     Date,
     Math,
     JSON,
@@ -67,9 +72,11 @@ function boot({ meta, protocol = "https:", hostname = "ozktobacco.com", fetchImp
       hash: "#hash-secret",
     },
     navigator: { userAgent: "Mozilla/5.0 (Test)" },
+    // وعد حقيقي: `fetch` لا يرفض على 4xx/5xx، فالمحاكي يعكس ذلك بدقّة كي
+    // يُمارَس مسار `response.ok` فعلاً بدل أن يُفترَض.
     fetch: fetchImpl || ((url, init) => {
       calls.push({ url, init, body: JSON.parse(init.body) });
-      return { catch: () => {} };
+      return Promise.resolve(respondWith || { ok: true, status: 200 });
     }),
   };
   context.window = context;
@@ -84,6 +91,7 @@ function boot({ meta, protocol = "https:", hostname = "ozktobacco.com", fetchImp
 
   return {
     calls,
+    consoleErrors,
     listeners,
     context,
     emit(type, event) {
@@ -579,6 +587,26 @@ console.log("\n— الحدّ والمتانة —");
     `أُرسل ${live.calls.length} — لا سقف فعّال`);
 }
 {
+  // ⚠️ انحدار ملاحظة Codex P1 الثانية على PR #202. بعد حجب العربية صارت كل
+  // رسالة عربية `Error: [نص عربي محذوف]`، ومعالج الوعود لا يعطي filename ولا
+  // lineno — فالبصمة تطابقت لكل رفض عربي وابتُلع كل ما بعد الأوّل. أُثبت
+  // بالتشغيل: رفضان مختلفان أنتجا بلاغاً واحداً.
+  const live = boot({ meta: LIVE_META });
+  const reject = (msg, fn, file, line) => live.emit("unhandledrejection", {
+    reason: Object.assign(new Error(msg), {
+      name: "Error", stack: `Error: ${msg}\n  at ${fn} (https://ozktobacco.com/src/${file}:${line}:1)`,
+    }),
+  });
+  reject("فشل حفظ الطلب", "saveOrder", "app.js", 10);
+  reject("تعذر جلب الأسعار", "fetchPrices", "supabase-client.js", 99);
+  check("رفضان عربيان مختلفان يُرسَلان بلاغين لا بلاغاً واحداً",
+    live.calls.length === 2,
+    `أُرسل ${live.calls.length} — الحجب وحّد العناوين فابتلعت البصمةُ أخطاءً مختلفة`);
+  reject("فشل حفظ الطلب", "saveOrder", "app.js", 10);
+  check("الرفض المتطابق فعلاً ما زال يُبتلَع مرة واحدة",
+    live.calls.length === 2, `فقد منعُ التكرار أثره — ${live.calls.length}`);
+}
+{
   const live = boot({ meta: LIVE_META });
   live.emit("unhandledrejection", { reason: Object.assign(new Error("rejected"), { name: "RangeError", stack: "RangeError: rejected" }) });
   check("الوعود المرفوضة تُلتقَط", live.calls.length === 1, "لم يُلتقَط unhandledrejection");
@@ -597,7 +625,627 @@ console.log("\n— الحدّ والمتانة —");
   check("فشل الإرسال لا يُسقِط التطبيق", !threw, "استثناء المُرسِل تسرّب إلى معالج الخطأ العام");
 }
 
-// ===== 5) التوصيل في المستودع =====
+// ===== 5) حجب بيانات العمل والأشخاص (P1-1) =====
+//
+// ⚠️ كل البيانات أدناه **صناعية بالكامل**: أسماء وأرقام وهواتف وبُرد مُختلَقة
+// لهذا الفحص وحده. لا بيانات زبون حقيقي في هذا الملف، ولا حمولة تغادر إلى أي
+// خدمة أثناء الفحص — `fetch` محاكاة محلية تُجمّع الطلبات في مصفوفة.
+//
+// العقد: `scrub` تحجب الأسرار، وهذه الطبقة تحجب **بيانات العمل والأشخاص**.
+// أثبت التدقيق أن الثانية كانت غائبة تماماً: مرّت ست حالات حرفيةً بلا تغيير.
+console.log("\n— حجب بيانات العمل والأشخاص —");
+{
+  const live = boot({ meta: LIVE_META });
+  const redact = live.context.ozkErrorMonitoring.redactBusinessData;
+  const redactStack = live.context.ozkErrorMonitoring.redactStack;
+
+  const BUSINESS = [
+    ["اسم زبون ورصيده", 'فشل حفظ رصيد الزبون "محمد العلي" = 1,250,000 ل.س', ["محمد", "العلي", "1,250,000"]],
+    ["JSON رصيد وحدّ ائتمان", '{"customer_name":"أبو زياد","balance":1250000,"credit_limit":500000}', ["أبو", "زياد", "1250000", "500000"]],
+    ["رقم فاتورة وقيمتها", "فاتورة INV-2291 بمبلغ 3,400,000", ["2291", "3,400,000"]],
+    ["هاتف دولي", "تعذر إرسال رسالة إلى +963991234567", ["963991234567"]],
+    ["هاتف محلي", "phone 0991234567 unreachable", ["0991234567"]],
+    ["بريد إلكتروني", "notify failed for owner@example.com", ["owner@example.com"]],
+    ["اسم موظف من تعارض جرد", "تم جرد هذا الصنف بواسطة سامر الحلبي", ["سامر", "الحلبي"]],
+    ["اسم صنف تجاري", '{"item_key":"TOB-001","name":"غلواز قصير أحمر"}', ["غلواز", "قصير", "أحمر"]],
+    ["اسم عربي داخل نصّ إنجليزي", 'saveCustomer failed for زبون تجريبي', ["زبون", "تجريبي"]],
+  ];
+  for (const [label, input, leaks] of BUSINESS) {
+    const out = redact(input);
+    check(`تُحجب: ${label}`, leaks.every((x) => !out.includes(x)),
+      `بقي شيء من ${JSON.stringify(leaks)} — صار: ${out}`);
+  }
+
+  // الاسم الثنائي يُجمَع في علامة واحدة: علامتان متجاورتان تكشفان عدد الكلمات.
+  check("الاسم الثنائي علامة واحدة لا علامتان",
+    (redact("الزبون محمد العلي").match(/\[نص عربي محذوف\]/g) || []).length === 1,
+    `عدد العلامات يكشف بنية الاسم — صار: ${redact("الزبون محمد العلي")}`);
+
+  // ⚠️ انحدار ملاحظة Codex P1 الثالثة على PR #202 — الهاتف المحلي المفصول.
+  // لا `+` فيه ولا فواصل آلاف، فكانت قاعدة الأربع خانات تبتلع مجموعة واحدة
+  // وتترك الباقي: `0991 234 567` صار `[رقم محذوف] 234 567`. أُثبت بالتشغيل.
+  for (const [label, input, leaks] of [
+    ["هاتف بفواصل فراغ", "phone 0991 234 567", ["234", "567"]],
+    ["هاتف بشرطات", "phone 099-123-4567", ["099", "123"]],
+    ["هاتف بأقواس", "call (099) 123-4567", ["123", "4567"]],
+    ["هاتف متّصل", "phone 0991234567", ["0991234567"]],
+  ]) {
+    const out = redact(input);
+    check(`يُحجب الهاتف كاملاً: ${label}`, leaks.every((x) => !out.includes(x)),
+      `بقي جزء من الهاتف — صار: ${out}`);
+  }
+  // والحدّ الذي يمنع ابتلاع نصّ عادي: سبع خانات فأكثر بعد طرح الفواصل.
+  check("تسلسل أرقام قصير لا يُعَدّ هاتفاً", redact("at 1 2 3") === "at 1 2 3",
+    `أُفسد نصّ عادي — صار: ${redact("at 1 2 3")}`);
+
+  // ⚠️ انحدار ملاحظة Codex P1 الرابعة على PR #202 — القيم المالية القصيرة.
+  // حدّ الأربع خانات كان يحمي رموز الحالة لكنه يترك الأرصدة والأسعار الصغيرة،
+  // وهي بالضبط ما طُلب حجبه. الحجب هنا بالسياق لا بالطول.
+  for (const [label, input, leak] of [
+    ["رصيد ثلاثي", "balance=999", "999"],
+    ["سعر بفراغ", "price 350 USD", "350"],
+    ["سعر في JSON", '{"price":403}', "403"],
+    ["رصيد وحدّ ائتمان قصيران", '{"balance":880,"credit_limit":500}', "880"],
+    ["حدّ الائتمان نفسه", '{"balance":880,"credit_limit":500}', "500"],
+    ["رقم فاتورة ثلاثي", "invoice_no=221", "221"],
+    ["مبلغ مستحق", '{"total_due":75}', "75"],
+  ]) {
+    check(`تُحجب القيمة المالية القصيرة: ${label}`, !redact(input).includes(leak),
+      `بقي «${leak}» — الأرصدة والأسعار بيانات عمل مهما قصرت: ${redact(input)}`);
+  }
+  // والجانب المقابل: `status` ليست حقلاً تجارياً، ورموز الحالة تبقى للتشخيص.
+  for (const intact of [
+    "Failed to load resource: the server responded with a status of 500",
+    "Uncaught Error: Request failed with status code 404",
+    "the price of the item is unavailable",
+    "ChunkLoadError: Loading chunk 12 failed",
+  ]) {
+    check(`نصّ تشخيصي لا يُمَسّ: «${intact.slice(0, 44)}…»`, redact(intact) === intact,
+      `أُفسد نصّ تشخيصي — صار: ${redact(intact)}`);
+  }
+
+  // الجانب المقابل: ما يجب أن **يبقى** كي تظل المراقبة مفيدة.
+  for (const [label, input, kept] of [
+    ["اسم صنف الخطأ", "TypeError: Cannot read properties of undefined", "TypeError"],
+    ["اسم الخاصية المعطوبة", "Cannot read properties of undefined (reading 'approved_price_items')", "approved_price_items"],
+    ["رمز حالة HTTP", "Failed to load resource: the server responded with a status of 500", "500"],
+    ["نصّ تشخيصي إنجليزي", "Cannot read properties of undefined", "Cannot read properties"],
+    ["اسم دالة", "at renderInventoryReport", "renderInventoryReport"],
+  ]) {
+    check(`يبقى للتشخيص: ${label}`, redact(input).includes(kept),
+      `ضاع «${kept}» — صارت البلاغات بلا قيمة: ${redact(input)}`);
+  }
+
+  // ترتيب القواعد ليس تجميلياً: الفاصلة العربية (\u060C) والأرقام الهندية
+  // (\u0660-\u0669) تقعان **داخل** نطاق الحروف العربية. فلو سبقت قاعدةُ
+  // العربية قواعدَ الأرقام لالتقطت الفواصل وحدها وحوّلت `1،250،000` إلى
+  // ثلاث مجموعات من ثلاث خانات لا يطابقها حدّ الأربع خانات — فيتسرّب الرصيد.
+  for (const [label, input, leak] of [
+    ["رصيد بفاصلة عربية", "رصيد 1،250،000 ل.س", "250"],
+    ["رصيد بأرقام هندية", "رصيد \u0661\u0662\u0665\u0660\u0660\u0660\u0660 ل.س", "\u0661\u0662\u0665"],
+    ["رصيد بأرقام هندية وفاصلة", "\u0661\u060C\u0662\u0665\u0660\u060C\u0660\u0660\u0660", "\u0662\u0665\u0660"],
+  ]) {
+    check(`ترتيب القواعد يحمي: ${label}`, !redact(input).includes(leak),
+      `تسرّب «${leak}» — قاعدة الأرقام يجب أن تسبق قاعدة العربية: ${redact(input)}`);
+  }
+
+  // تركيب الطبقتين: علامة السرّ عربيةُ النصّ، فلو لم تُحمَ لالتهمتها قاعدةُ
+  // العربية وتحوّل «سرّ محذوف» إلى «نص عربي محذوف» — فيضيع تمييز نوع الحجب.
+  // ولو عُكس الترتيب لحُجبت أرقامُ رمزٍ سرّي قبل أن تتعرّف عليه قواعد الأسرار.
+  for (const [label, input, gone] of [
+    ["كلمة سرّ + اسم + رصيد", 'فشل تسجيل الزبون محمد password="Hunter2Hunter2" رصيد 1,250,000',
+     ["Hunter2Hunter2", "محمد", "1,250,000"]],
+    ["ترويسة ترخيص + اسم زبون", "Authorization: Bearer opaque-session-9911 للزبون أبو زياد",
+     ["opaque-session-9911", "زياد"]],
+  ]) {
+    const out = redact(live.context.ozkErrorMonitoring.scrub(input));
+    check(`الطبقتان معاً: ${label}`,
+      gone.every((x) => !out.includes(x)) && out.includes("[سرّ محذوف]"),
+      `إمّا تسرّب شيء وإمّا ضاع تمييز علامة السرّ — صار: ${out}`);
+  }
+
+  // --- أثر المكدّس: قائمة سماح، لا قائمة منع ---
+  const STACK = 'Error: فشل حفظ رصيد الزبون "محمد العلي" = 1,250,000\n'
+    + "  at saveBalance (https://ozktobacco.com/src/app.js:11830:25)\n"
+    + "  at HTMLButtonElement.onclick (https://ozktobacco.com/src/app.js:9002:11)";
+  const rs = redactStack(STACK);
+  check("الأثر: سطر الرسالة (غير الإطار) يسقط كاملاً",
+    !rs.includes("محمد") && !rs.includes("1,250,000"),
+    `تسرّبت بيانات من سطر رسالة الأثر — صار: ${rs}`);
+  check("الأثر: الإطارات تبقى كاملة بأرقام سطورها وأعمدتها",
+    rs.includes("src/app.js:11830:25") && rs.includes("src/app.js:9002:11") && rs.includes("saveBalance"),
+    `ضاعت أطر المكدّس — لا يبقى ما يُشخَّص به: ${rs}`);
+  check("الأثر: صيغة Firefox/Safari مقبولة كإطار",
+    redactStack("saveBalance@https://ozktobacco.com/src/app.js:11830:25").includes("11830:25"),
+    "أُسقطت أطر متصفحات غير V8 — تصير بلاغات Safari بلا أثر");
+  // ⚠️ انحدار ملاحظة Codex P1 الأولى على PR #202. V8 يضع نصّ الرسالة حرفياً
+  // في أوّل `error.stack`، فرسالة تحمل سطراً يبدأ بـ`at ` كانت تُصنَّف إطاراً،
+  // والإطار مُعفى من قاعدة الأرقام عمداً — فمرّ الرصيد كاملاً. الشاهد يثبت
+  // الأمرين: السطر المزيّف يسقط، **و**لا رقم يمرّ تحت غطاء إطار.
+  {
+    const forged = "Error: x\n at customer balance 1,250,000 و رصيد 987654\n  at f (https://h.com/a.js:1:2)";
+    const out = redactStack(forged);
+    check("الأثر: سطر رسالة يبدأ بـ«at » لا يُعَدّ إطاراً",
+      !out.includes("1,250,000") && !out.includes("987654"),
+      `مرّ رقم تحت غطاء إطار مزيّف — صار: ${out}`);
+    check("الأثر: الإطار الحقيقي بعده يبقى سليماً",
+      out.includes("a.js:1:2"), `أُسقط إطار حقيقي — صار: ${out}`);
+  }
+  // ⚠️ انحدار ملاحظة Codex P1 السادسة على PR #202 — لاحقة موقع مُصطنَعة.
+  // كان صون اللاحقة غير مشروط، فسطر `at invoice:1250000:987654` يُقبل إطاراً
+  // (ينتهي بـ`:رقم:رقم`) وتُصان لاحقته حرفياً — فيمرّ رصيد ورقم فاتورة تحت
+  // غطاء «سطر وعمود». الآن تُصان اللاحقة فقط إن حمل رأسُ السطر مرجعَ مصدر.
+  for (const [label, input, leaks] of [
+    ["لاحقة مُصطنَعة بلا مسار", "Error: x\n at invoice:1250000:987654", ["1250000", "987654"]],
+    ["لاحقة مُصطنَعة باسم عربي", "Error: x\n at رصيد:1250000:99", ["1250000"]],
+  ]) {
+    const out = redactStack(input);
+    check(`الأثر: ${label}`, leaks.every((x) => !out.includes(x)),
+      `مرّ رقم تحت غطاء لاحقة موقع — صار: ${out}`);
+  }
+  // ⚠️ انحدار ملاحظة Codex P1 الثامنة على PR #202. الجولة السابقة اشترطت
+  // «أثر مصدر» لكنها قبلت أي شرطة أو امتداد في **أي موضع**، فيكفي إقحام `/`
+  // أو `.js` قبل الرقمين كي تُصان اللاحقة حرفياً. الشرط الآن مزدوج: رأس
+  // السطر ينتهي فعلاً باسم ملف أو جذر مسار، والرقمان محدودان بستّ خانات.
+  for (const [label, input, leaks] of [
+    ["شرطة مقحمة", "Error: x\n at invoice/path:1250000:987654", ["1250000", "987654"]],
+    ["امتداد مقحم", "Error: x\n at bal.js:1250000:987654", ["1250000"]],
+    ["امتداد مقحم وسط النصّ", "Error: x\n at a.js/customer:1250000:99", ["1250000"]],
+  ]) {
+    const out = redactStack(input);
+    check(`الأثر: لاحقة مُصطنَعة تسقط رغم إقحام أثر مصدر (${label})`,
+      leaks.every((x) => !out.includes(x)),
+      `مرّ رقم تحت غطاء لاحقة موقع — صار: ${out}`);
+  }
+
+  // الحزام الثاني وحده (بلا اقتطاع رأس الرسالة): لاحقة بطول رمز استعادة
+  // تسقط أيضاً. رمز الاستعادة هنا `[0-9]{6,10}`، وأكبر ملف نحو 12 ألف سطر —
+  // فحدّ خمس خانات يحمي الأوّل ويكفي الثاني بهامش واسع.
+  for (const [label, input, leak] of [
+    ["ستّ خانات خلف اسم ملف", "Error: x\n at reset.js:123456:1", "123456"],
+    ["عشر خانات", "Error: x\n at reset.js:1234567890:1", "1234567890"],
+  ]) {
+    check(`الأثر: لاحقة بطول رمز استعادة تسقط (${label})`,
+      !redactStack(input).includes(leak),
+      `مرّ رمز بطول رمز الاستعادة كـ«رقم سطر» — صار: ${redactStack(input)}`);
+  }
+
+  // والمقابل: الإطار الحقيقي يحمل مسار ملفه دائماً، فلاحقته تبقى.
+  for (const [label, input, kept] of [
+    ["مسار كامل", "Error: x\n  at saveBalance (https://h.com/src/app.js:11830:25)", "app.js:11830:25"],
+    ["مسار نسبي", "Error: x\n    at Object.<anonymous> (/src/app.js:1234:9)", "app.js:1234:9"],
+    ["صيغة Firefox", "Error: x\nsaveBalance@https://h.com/src/app.js:11830:25", "app.js:11830:25"],
+  ]) {
+    check(`الأثر: لاحقة الإطار الحقيقي تبقى (${label})`, redactStack(input).includes(kept),
+      `ضاعت لاحقة موقع حقيقية — صار: ${redactStack(input)}`);
+  }
+
+  // ⚠️ انحدار ملاحظة Codex P1 السابعة على PR #202 — إشارة أو رمز عملة قبل القيمة.
+  for (const [label, input, leak] of [
+    ["إشارة سالبة", "balance -999", "999"],
+    ["رمز دولار", "price $350", "350"],
+    ["فراغ بعد الإشارة", "total - 480", "480"],
+    ["عملة مع فاصل", "amount $1,200", "1,200"],
+  ]) {
+    check(`تُحجب القيمة المُشارة: ${label}`, !redact(input).includes(leak),
+      `بقي «${leak}» — الإشارة ورمز العملة أشيع ما يسبق مبلغاً: ${redact(input)}`);
+  }
+  // ⚠️ انحدار ملاحظة Codex P1 التاسعة على PR #202: البديل غير المقتبَس كان
+  // يقف عند أوّل فراغ، فعلى `price: USD 350` حُجبت `USD` ومرّ `350` —
+  // والقاعدة العامة تُبقي الثلاثيات عمداً فلا شيء يلتقطه بعدها.
+  for (const [label, input, leak] of [
+    ["عملة نصّية قبل الرقم", "price: USD 350", "350"],
+    ["إشارة مفصولة بفراغ", "balance = - 999", "999"],
+    ["ليرة سورية", "total: SYP 480", "480"],
+    ["عملة نصّية بصيغة الفراغ", "amount EUR 250", "250"],
+  ]) {
+    check(`تُبتلَع القيمة المالية كاملةً: ${label}`, !redact(input).includes(leak),
+      `بقي «${leak}» — القيمة تُبتلَع كوحدة لا حتى أوّل فراغ: ${redact(input)}`);
+  }
+
+  // ⚠️ انحدار ملاحظة Codex P1 الثالثة عشرة — علامة العملة العربية `ل.س`،
+  // وهي العلامة المعتمدة في `src/app.js`. كان البديل العام يلتقطها وحدها،
+  // ثم تحذفها قاعدةُ العربية، ويمرّ الرقم الثلاثي.
+  for (const [label, input, leak] of [
+    ["بفاصل صريح", "price: ل.س 350", "350"],
+    ["بفراغ", "price ل.س 350", "350"],
+    ["مبلغ إجمالي", "total: ل.س 480", "480"],
+  ]) {
+    check(`تُبتلَع العملة العربية مع الرقم: ${label}`, !redact(input).includes(leak),
+      `بقي «${leak}» — علامة العملة «ل.س» معتمدة في التطبيق: ${redact(input)}`);
+  }
+
+  // ⚠️ انحدار ملاحظة Codex P1 السادسة عشرة — التسميات المالية **العربية**،
+  // وهي لغة هذا التطبيق. كانت قائمة الحقول إنجليزية بالكامل، فلا يُتعرَّف على
+  // السياق، ثم تحذف قاعدةُ العربية التسميةَ ويبقى الرقم القصير.
+  for (const [label, input, leak] of [
+    ["سعر بعملة عربية", "السعر: ل.س 350", "350"],
+    ["رصيد ثلاثي", "الرصيد: 999", "999"],
+    ["حدّ ائتمان", "حد الائتمان: 500", "500"],
+    ["مبلغ مستحق", "المبلغ المستحق: 480", "480"],
+    ["بلا أل التعريف", "رصيد الزبون 750", "750"],
+    ["فاتورة", "الفاتورة: 221", "221"],
+  ]) {
+    check(`تُحجب القيمة خلف تسمية عربية: ${label}`, !redact(input).includes(leak),
+      `بقي «${leak}» — التسميات العربية هي الأصل في هذا التطبيق: ${redact(input)}`);
+  }
+
+  // ⚠️ انحدار ملاحظة Codex P1 الثامنة عشرة — ترقيم بين التسمية والمبلغ.
+  // الفاصلة العربية والفاصلة المنقوطة أشيع من النقطتين في النصّ الحرّ،
+  // والقوسان صيغة محاسبية للسالب. وفُحص المقابل الإنجليزي فوجد يسرّب كذلك
+  // (لم تذكره الملاحظة) فعُولج معه.
+  for (const [label, input, leak] of [
+    ["فاصلة عربية", "الرصيد، 999", "999"],
+    ["قوسان محاسبيان", "الرصيد (999)", "999"],
+    ["مساواة ثم قوسان", "الرصيد = (999)", "999"],
+    ["فاصلة منقوطة عربية", "السعر؛ 350", "350"],
+    ["فاصلة إنجليزية", "balance, 999", "999"],
+    ["قوسان بالإنجليزية", "price (350)", "350"],
+  ]) {
+    check(`يبلغ الحجبُ المبلغَ خلف الترقيم: ${label}`, !redact(input).includes(leak),
+      `بقي «${leak}» — الترقيم لا يقطع سياق التسمية: ${redact(input)}`);
+  }
+  // ⚠️ انحدار ملاحظة Codex P1 التاسعة عشرة — الفجوة صارت عامة لا مُعدَّدة.
+  // الجولة السابقة أضافت الفاصلة والفاصلة المنقوطة، فجاءت الملاحظة بشرطة
+  // طويلة ومائلة وعلامة استفهام عربية. القاعدة الآن «أي شيء ليس حرفاً ولا
+  // رقماً»، فلا تُعدّ علامة ولا تبقى علامة خارج التغطية.
+  for (const [label, input, leak] of [
+    ["شرطة طويلة", "balance — 999", "999"],
+    ["مائلة", "balance / 999", "999"],
+    ["استفهام عربي", "الرصيد؟ 999", "999"],
+    ["شرطة عمودية", "balance | 999", "999"],
+    ["نقاط متتابعة", "السعر... 350", "350"],
+    ["مسافة جدولة", "balance\t999", "999"],
+  ]) {
+    check(`الفجوة العامة تبلغ المبلغ: ${label}`, !redact(input).includes(leak),
+      `بقي «${leak}» — الفجوة يجب ألّا تكون قائمةَ علامات مُعدَّدة: ${redact(input)}`);
+  }
+
+  // واشتراط الرقم هو ما يمنع ابتلاع قائمة أسماء أعمدة لا مبلغ فيها.
+  check("قائمة أسماء حقول لا تُبتلَع", redact("balance, price, total").includes("price"),
+    `أُفسدت قائمة أسماء — صار: ${redact("balance, price, total")}`);
+
+  check("«the price of the item» لا يُمَسّ رغم توسيع القاعدة",
+    redact("the price of the item is unavailable") === "the price of the item is unavailable",
+    "توسيع القاعدة أفسد نصّاً إنجليزياً عادياً");
+
+  // الحزام الثاني: حتى داخل إطار حقيقي، لا يبقى رقم إلا لاحقة الموقع.
+  check("الأثر: الأرقام داخل الإطار تُحجب إلا لاحقة الموقع",
+    (() => {
+      const out = redactStack("Error: x\n  at pay1250000 (https://h.com/a.js:4321:7)");
+      return !out.includes("1250000") && out.includes(":4321:7");
+    })(),
+    "إمّا مرّ رقم داخل الإطار وإمّا ضاعت لاحقة الموقع");
+
+  check("الأثر: إطار Safari الداخلي يبقى (لا موقع فيه ولا بيانات)",
+    redactStack("Error: x\nrequestAnimationFrame@[native code]").includes("requestAnimationFrame"),
+    "أُسقط إطار داخلي لا يحمل بيانات — بتر لأثر Safari بلا مكسب");
+  check("الأثر: نصّ حرّ مدسوس بين الأطر يسقط",
+    !redactStack("Error: x\nزبون سرّي هنا\n  at f (a.js:1:2)").includes("زبون"),
+    "نصّ غير إطار وجد طريقه إلى الخارج");
+  check("الأثر: أسطر السقوط المتتالية تُدمَج",
+    (redactStack("Error: a\nb\nc\n  at f (a.js:1:2)").match(/سطر غير إطار/g) || []).length === 1,
+    "امتلأ الأثر بعلامات السقوط");
+
+  // ⚠️ انحدار ملاحظة Codex P1 العاشرة على PR #202 — وهي الرابعة من عائلة
+  // «نصّ رسالة يتنكّر في هيئة إطار». ثلاث جولات عالجتها بتشديد شكل الإطار،
+  // وفي كل مرة وُجد شكل يجتاز الشرط الجديد؛ آخرها `at reset.js:123456:1`،
+  // وستّ خانات هي بالضبط طول `recoveryCode` في هذا التطبيق.
+  //
+  // العلاج يقطع الجذر: يُقتطع رأس `الاسم: الرسالة` من الأثر بمطابقة حرفية،
+  // فيسقط كلُّ ما يتحكّم به المحتوى دفعةً واحدة. والشاهد يفحص المسار الحقيقي
+  // (الحدث كاملاً) لا الدالة معزولةً، لأن الاقتطاع لا يعمل إلا برأس الرسالة.
+  {
+    const forged = "x\n at reset.js:987321:1";  // ستّ خانات = طول رمز الاستعادة
+    const live = boot({ meta: LIVE_META });
+    live.emit("error", {
+      message: forged,
+      filename: "https://ozktobacco.com/src/app.js",
+      lineno: 2450,
+      colno: 11,
+      error: Object.assign(new Error(forged), {
+        name: "Error",
+        stack: "Error: " + forged +
+          "\n    at submitReset (https://ozktobacco.com/src/app.js:2450:11)" +
+          "\n    at HTMLFormElement.onsubmit (https://ozktobacco.com/src/app.js:2400:5)",
+      }),
+    });
+    const wire = JSON.stringify(live.calls[0] || {});
+    check("إطار مزوَّر داخل الرسالة لا يصل الأثر (اقتطاع رأس الرسالة)",
+      !wire.includes("987321"),
+      `رمز استعادة سداسي غادر تحت غطاء لاحقة موقع — ${wire.slice(0, 400)}`);
+    const stack = String(live.calls[0]?.body?.data?.body?.message?.stack || "");
+    check("وأرقام أسطر الأطر الحقيقية تبقى كاملةً رغم ذلك",
+      stack.includes("app.js:2450:11") && stack.includes("app.js:2400:5"),
+      `ضاعت أرقام الأطر الحقيقية — صار: ${stack}`);
+    check("سطر الرسالة المزوَّر يسقط من الأثر",
+      !stack.includes("reset.js"),
+      `بقي سطر الرسالة داخل الأثر — صار: ${stack}`);
+  }
+  // ⚠️ انحدار ملاحظة Codex P1 الرابعة عشرة — رأس الأثر بدلالات
+  // `Error.prototype.toString`: باسمٍ فارغ يبدأ الأثر بالرسالة وحدها، والمعالج
+  // يستبدل `Error` بالاسم الفارغ فيفشل الاقتطاع الحرفي ويعود السطر المزوَّر
+  // يُقبل إطاراً. يُفحص المسار الكامل لأن الاقتطاع يعتمد على الحدث.
+  {
+    const forged = "x\n at reset.js:54321:1";
+    const live = boot({ meta: LIVE_META });
+    const err = new Error(forged);
+    err.name = "";
+    err.stack = forged + "\n    at f (https://ozktobacco.com/src/app.js:10:1)";
+    live.emit("error", {
+      message: forged, filename: "https://ozktobacco.com/src/app.js",
+      lineno: 10, colno: 1, error: err,
+    });
+    const wire = JSON.stringify(live.calls[0] || {});
+    check("اسم خطأ فارغ: الاقتطاع يتبع دلالات toString ولا يفشل",
+      !wire.includes("54321"),
+      `مرّ سطر مزوَّر لأن الرأس لم يكن «الاسم: الرسالة» — ${wire.slice(0, 300)}`);
+    check("والإطار الحقيقي يبقى رغم اختلاف شكل الرأس",
+      String(live.calls[0]?.body?.data?.body?.message?.stack || "").includes("app.js:10:1"),
+      "ابتلع الاقتطاعُ أطراً حقيقية");
+  }
+
+  // Firefox/Safari لا يضعان الرسالة في الأثر، فالاقتطاع لا يجد ما يطابقه.
+  check("اقتطاع رأس الرسالة لا يُتلف أثراً بلا رأس (صيغة Firefox)",
+    redactStack("saveBalance@https://ozktobacco.com/src/app.js:11830:25", "Error: boom")
+      .includes("app.js:11830:25"),
+    "أُتلف أثر لا يبدأ برأس رسالة");
+
+  // ⚠️ انحدار ملاحظة Codex P1 الحادية عشرة — رصيد بفواصل فراغ.
+  for (const [label, input, leaks] of [
+    ["رصيد بفواصل فراغ", "balance: 1 250 000", ["250", "000"]],
+    ["مبلغ بفواصل فراغ", "amount = 3 400 000", ["400", "000"]],
+  ]) {
+    check(`يُبتلَع المبلغ المفصول بفراغات: ${label}`,
+      leaks.every((x) => !redact(input).includes(x)),
+      `بقي جزء من المبلغ — صار: ${redact(input)}`);
+  }
+  check("الفراغ لا يبتلع الكلمة التالية", redact("total 5 items").includes("items"),
+    `ابتُلعت كلمة بعد الرقم — صار: ${redact("total 5 items")}`);
+
+  // --- الفحص الأقوى: الحمولة المرسَلة فعلاً، من طرف إلى طرف ---
+  const e2e = boot({ meta: LIVE_META });
+  e2e.emit("error", {
+    message: "m",
+    filename: "https://ozktobacco.com/src/app.js?v=tobacco-179",
+    lineno: 11830,
+    colno: 25,
+    error: Object.assign(
+      new Error('فشل حفظ رصيد الزبون "محمد العلي" = 1,250,000 ل.س فاتورة INV-2291 هاتف +963991234567 بريد owner@example.com'),
+      { name: "Error",
+        stack: 'Error: فشل حفظ رصيد الزبون "محمد العلي"\n  at saveBalance (https://ozktobacco.com/src/app.js:11830:25)' }),
+  });
+  const wire = JSON.stringify(e2e.calls[0] || {});
+  for (const leak of ["محمد", "العلي", "1,250,000", "2291", "963991234567", "owner@example.com", "زبون"]) {
+    check(`لا يغادر الحمولةَ: «${leak}»`, !wire.includes(leak),
+      `وصل «${leak}» إلى طرف ثالث في الحمولة المرسَلة فعلاً`);
+  }
+  check("الحمولة تبقى مفيدة: الموقع كامل رغم الحجب",
+    e2e.calls[0]?.body?.data?.custom?.lineno === 11830 &&
+    e2e.calls[0]?.body?.data?.custom?.colno === 25 &&
+    String(e2e.calls[0]?.body?.data?.body?.message?.stack || "").includes("app.js:11830:25"),
+    "ضاع الموقع مع البيانات — الحجب أفرغ البلاغ بدل أن يؤمّنه");
+}
+
+// ===== 6) رصد فشل التسليم (P1-2) =====
+//
+// `fetch` لا يرفض على 4xx/5xx، و`.catch` الفارغة كانت تبتلع كل شيء — فرمز
+// مرفوض أو حصة مستنفدة كانت تمرّ بصمت تامّ ويبقى «مفعّل» ادّعاءً بلا سند.
+console.log("\n— رصد فشل التسليم —");
+{
+  const boom = (i = 0) => ({
+    message: `e${i}`, filename: "https://ozktobacco.com/src/app.js", lineno: 100 + i, colno: 1,
+    error: Object.assign(new Error(`e${i}`), { name: "Error", stack: `Error: e${i}\n  at f (app.js:${100 + i}:1)` }),
+  });
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  for (const status of [401, 403, 429, 500, 503]) {
+    const live = boot({ meta: LIVE_META, respondWith: { ok: false, status } });
+    live.emit("error", boom());
+    await tick();
+    const d = live.context.ozkErrorMonitoring.delivery();
+    check(`${status} لا يُعامَل إرسالاً ناجحاً`,
+      d.delivered === 0 && d.failures === 1 && d.lastFailureStatus === status,
+      `حالة ${status} حُسبت نجاحاً أو ضاعت — ${JSON.stringify(d)}`);
+    check(`${status} لا يُنتج console.error`, live.consoleErrors.length === 0,
+      `أداة الرصد صارت مصدر ضجيج يكسر دخان ما بعد النشر`);
+  }
+
+  {
+    const live = boot({ meta: LIVE_META });
+    live.emit("error", boom());
+    await tick();
+    const d = live.context.ozkErrorMonitoring.delivery();
+    check("200 يُحصى نجاحاً", d.delivered === 1 && d.failures === 0, JSON.stringify(d));
+  }
+
+  {
+    const live = boot({ meta: LIVE_META, fetchImpl: () => Promise.reject(new Error("network down")) });
+    live.emit("error", boom());
+    await tick();
+    const d = live.context.ozkErrorMonitoring.delivery();
+    check("رفض الشبكة يُسجَّل فشلاً بلا حالة HTTP",
+      d.failures === 1 && d.lastFailureStatus === 0, JSON.stringify(d));
+    check("رفض الشبكة لا يكسر التطبيق ولا يُنتج ضجيجاً",
+      live.consoleErrors.length === 0, "ظهر console.error عند انقطاع الشبكة");
+  }
+
+  {
+    const live = boot({ meta: LIVE_META, respondWith: { ok: false, status: 401 } });
+    for (let i = 0; i < 6; i += 1) { live.emit("error", boom(i)); await tick(); }
+    check("قاطع الدارة: يتوقف الإرسال بعد ثلاثة إخفاقات قاتلة متتالية",
+      live.calls.length === 3, `أُرسل ${live.calls.length} — رمز مرفوض يغرق شبكة الزبون بلا مقابل`);
+    check("قاطع الدارة: الحالة تُبلّغ عن التوقف",
+      live.context.ozkErrorMonitoring.delivery().stopped === true, "لا سبيل لاكتشاف أن الإرسال توقف");
+  }
+
+  // ⚠️ انحدار ملاحظة Codex P1 الخامسة على PR #202 — التعافي بعد عطل عابر.
+  // كان قاطع الدارة يَعُدّ كل إخفاق ومنها انقطاع الشبكة (حالة 0)، فثلاثة
+  // أخطاء أثناء انقطاع مؤقّت على الهاتف تُعطّل المراقبة **نهائياً** لبقية عمر
+  // الصفحة: البوّابة تمنع كل طلب تالٍ، ومسارُ النجاح الذي يصفّر العدّاد لا
+  // يعمل إلا بطلب. الآن: القاتل وحده يوقف، والعابر يُسجَّل ولا يوقف.
+  {
+    let offline = true;
+    const live = boot({
+      meta: LIVE_META,
+      fetchImpl: () => (offline
+        ? Promise.reject(new Error("network down"))
+        : Promise.resolve({ ok: true, status: 200 })),
+    });
+    for (let i = 0; i < 4; i += 1) { live.emit("error", boom(i)); await tick(); }
+    check("انقطاع الشبكة لا يوقف المراقبة نهائياً",
+      live.context.ozkErrorMonitoring.delivery().stopped === false,
+      "عطل عابر عطّل المراقبة لبقية عمر الصفحة");
+    offline = false;
+    live.emit("error", boom(90));
+    await tick();
+    check("المراقبة تتعافى فعلاً بعد عودة الاتصال",
+      live.context.ozkErrorMonitoring.delivery().delivered === 1,
+      "لم يصل أي بلاغ بعد عودة الشبكة — لا تعافي");
+  }
+  // ⚠️ انحدار ملاحظة Codex P1 الثانية عشرة — بصمة سُجِّلت قبل معرفة النتيجة.
+  // خطأ متكرّر وقع أوّل مرة والجهاز خارج الشبكة كان يبقى مكتوماً لبقية عمر
+  // الصفحة حتى بعد عودة الاتصال. ولاحظ Codex بحقّ أن شاهد التعافي السابق نجح
+  // فقط لأنه أطلق بصمات مختلفة — فهذا الشاهد يعيد **البصمة نفسها** عمداً.
+  {
+    let offline = true;
+    const live = boot({
+      meta: LIVE_META,
+      fetchImpl: () => (offline
+        ? Promise.reject(new Error("network down"))
+        : Promise.resolve({ ok: true, status: 200 })),
+    });
+    const identical = () => live.emit("error", {
+      message: "same", filename: "https://ozktobacco.com/src/app.js", lineno: 5, colno: 1,
+      error: Object.assign(new Error("same"), {
+        name: "Error", stack: "Error: same\n  at f (https://ozktobacco.com/src/app.js:5:1)",
+      }),
+    });
+    identical(); await tick();
+    offline = false;
+    identical(); await tick();
+    check("الخطأ نفسه يُعاد إرساله بعد عودة الشبكة (لا يُكتَم ببصمة فاشلة)",
+      live.context.ozkErrorMonitoring.delivery().delivered === 1,
+      `بقي الخطأ مكتوماً رغم عودة الاتصال — ${JSON.stringify(live.context.ozkErrorMonitoring.delivery())}`);
+    identical(); await tick();
+    check("وبعد نجاح التسليم يعود منع التكرار فعّالاً",
+      live.context.ozkErrorMonitoring.delivery().delivered === 1,
+      "أُرسل الخطأ نفسه مرتين بعد نجاح — فقد منعُ التكرار أثره");
+  }
+
+  // ⚠️ انحدار ملاحظة Codex P1 الخامسة عشرة — الإخفاق العابر كان يستنفد سقف
+  // الصفحة. عشر تكرارات لخطأ واحد أثناء انقطاع تستهلك `sent` كاملاً، فتمنع
+  // البوّابةُ كلَّ إرسال بعد عودة الاتصال. الشاهد السابق غطّى إخفاقاً واحداً
+  // فلم يكشفه — فهذا يعيد **عشرة**.
+  {
+    let offline = true;
+    const live = boot({
+      meta: LIVE_META,
+      fetchImpl: () => (offline
+        ? Promise.reject(new Error("network down"))
+        : Promise.resolve({ ok: true, status: 200 })),
+    });
+    const identical = () => live.emit("error", {
+      message: "same", filename: "https://ozktobacco.com/src/app.js", lineno: 5, colno: 1,
+      error: Object.assign(new Error("same"), {
+        name: "Error", stack: "Error: same\n  at f (https://ozktobacco.com/src/app.js:5:1)",
+      }),
+    });
+    for (let i = 0; i < 10; i += 1) { identical(); await tick(); }
+    offline = false;
+    identical(); await tick();
+    check("عشر إخفاقات عابرة لا تستنفد سقف الصفحة",
+      live.context.ozkErrorMonitoring.delivery().delivered === 1,
+      `بقيت المراقبة معطّلة بعد عودة الاتصال — ${JSON.stringify(live.context.ozkErrorMonitoring.delivery())}`);
+  }
+  // ⚠️ انحدار ملاحظة Codex P1 السابعة عشرة — الميزانية لم تكن تُصفَّر بالنجاح،
+  // فكانت عدّاداً لعمر الصفحة كله. بنسبة فشلين عابرين لكل نجاح (واقعية على
+  // شبكة هاتف متقطّعة) تبلغ الميزانيةَ وتُسكِت المراقبة **رغم أن التسليم
+  // يعمل**. الشاهد السابق استعمل نسبة ١:١ فلم يبلغها.
+  {
+    let mode = "ok";
+    const live = boot({
+      meta: LIVE_META,
+      fetchImpl: () => (mode === "ok"
+        ? Promise.resolve({ ok: true, status: 200 })
+        : Promise.reject(new Error("network down"))),
+    });
+    let n = 0;
+    const fire = async () => {
+      n += 1;
+      live.emit("error", {
+        message: `e${n}`, filename: "https://ozktobacco.com/src/app.js", lineno: n, colno: 1,
+        error: Object.assign(new Error(`e${n}`), {
+          name: "Error", stack: `Error: e${n}\n  at f (https://ozktobacco.com/src/app.js:${n}:1)`,
+        }),
+      });
+      await tick();
+    };
+    for (let i = 0; i < 10; i += 1) {
+      mode = "fail"; await fire(); await fire();
+      mode = "ok"; await fire();
+    }
+    const d = live.context.ozkErrorMonitoring.delivery();
+    check("نجاح التسليم يستعيد ميزانية المحاولات العابرة",
+      d.stopped === false && d.delivered === 10,
+      `أُسكتت المراقبة رغم نجاح التسليم بينها — ${JSON.stringify(d)}`);
+  }
+
+  // وللمحاولات العابرة ميزانية منفصلة تمنع الحلقة اللانهائية.
+  {
+    const live = boot({ meta: LIVE_META, fetchImpl: () => Promise.reject(new Error("down")) });
+    for (let i = 0; i < 30; i += 1) {
+      live.emit("error", {
+        message: `e${i}`, filename: "https://ozktobacco.com/src/app.js", lineno: 200 + i, colno: 1,
+        error: Object.assign(new Error(`e${i}`), {
+          name: "Error", stack: `Error: e${i}\n  at f (https://ozktobacco.com/src/app.js:${200 + i}:1)`,
+        }),
+      });
+      await tick();
+    }
+    const d = live.context.ozkErrorMonitoring.delivery();
+    check("ميزانية المحاولات العابرة محدودة (لا حلقة بلا سقف)",
+      live.calls.length <= 20 && d.stopped === true,
+      `محاولات بلا سقف — أُرسل ${live.calls.length}، ${JSON.stringify(d)}`);
+  }
+
+  for (const status of [429, 500, 503]) {
+    const live = boot({ meta: LIVE_META, respondWith: { ok: false, status } });
+    for (let i = 0; i < 4; i += 1) { live.emit("error", boom(i)); await tick(); }
+    check(`${status} عابر: لا يوقف المراقبة نهائياً`,
+      live.context.ozkErrorMonitoring.delivery().stopped === false,
+      `حالة ${status} عابرة (حصة أو عطل خدمة) عُوملت كعطل إعداد دائم`);
+  }
+  for (const status of [401, 403]) {
+    const live = boot({ meta: LIVE_META, respondWith: { ok: false, status } });
+    for (let i = 0; i < 6; i += 1) { live.emit("error", boom(i)); await tick(); }
+    check(`${status} قاتل: يوقف بعد ثلاثة`,
+      live.calls.length === 3 && live.context.ozkErrorMonitoring.delivery().stopped === true,
+      `رمز مرفوض يجب أن يوقف الإرسال — أُرسل ${live.calls.length}`);
+  }
+
+  {
+    const live = boot({ meta: LIVE_META, respondWith: { ok: false, status: 401 } });
+    live.emit("error", boom());
+    await tick();
+    const d = live.context.ozkErrorMonitoring.delivery();
+    check("حالة التسليم لا تكشف الرمز ولا الحمولة",
+      !JSON.stringify(d).includes(LIVE_META["data-token"]) && !("payload" in d) && !("token" in d),
+      `تسرّب الرمز أو الحمولة عبر واجهة التشخيص: ${JSON.stringify(d)}`);
+    check("فشل التسليم لا يولّد بلاغاً جديداً (لا ارتداد)",
+      live.calls.length === 1, `أنتج الفشلُ إرسالاً إضافياً — حلقة ارتداد: ${live.calls.length}`);
+  }
+
+  {
+    // غياب Rollbar كلياً: لا وسم ⇒ لا مستمعات ⇒ التطبيق يعمل كأن الملف غير موجود.
+    const absent = boot({ meta: null });
+    check("غياب الإعداد لا يكسر شيئاً ولا يكشف واجهة",
+      absent.listeners.size === 0 && absent.context.ozkErrorMonitoring === undefined && absent.calls.length === 0,
+      "الملف ترك أثراً رغم غياب الإعداد");
+  }
+}
+
+// ===== 7) التوصيل في المستودع =====
 console.log("\n— التوصيل —");
 {
   const html = readFileSync(resolve(root, "index.html"), "utf8");

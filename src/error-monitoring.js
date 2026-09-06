@@ -18,8 +18,13 @@
 //   • نصّ الخطأ ونوعه وأثر المكدّس، بعد تنقية.
 //   • مسار الصفحة (pathname) بلا استعلام ولا شظية.
 //   • البيئة، ومعرّف النشرة (commit)، وسلسلة المتصفح.
-// ما لا يُرسَل أبداً: أي محتوى DOM، أي قيمة حقل، localStorage، الكوكيز،
-// عناوين تحمل استعلامات، أي شيء من بيانات الزبائن.
+// ما لا يُقرأ أبداً: أي محتوى DOM، أي قيمة حقل، localStorage، sessionStorage،
+// الكوكيز، عناوين تحمل استعلامات.
+//
+// وبيانات الزبائن: نصّ الخطأ نفسه قد يحملها (رسالة مُركّبة من قيم وقت
+// التشغيل)، فلا يكفي ألّا يقرأها الملف. لذلك تمرّ الرسالة والأثر بطبقة ثانية
+// تحجب العربية كلها والبُرد والهواتف والأرقام الطويلة، ويُصفّى الأثر بقائمة
+// سماح لا تُبقي إلا أطر المكدّس. التفصيل والحدود المعلَنة عند `redactBusinessData`.
 //
 // الإنتاج وحده: بلا رمز مُحقَن (وهو لا يُحقَن إلا في خطوة النشر) يبقى الملف
 // خاملاً تماماً. وحتى مع رمز، يشترط https ومضيفاً غير محلي — فنسخة مطوّر أو
@@ -343,8 +348,325 @@
     return out;
   }
 
-  function clamp(text, max) {
-    var value = scrub(text);
+  // ---------------------------------------------------------------------------
+  // الطبقة الثانية: حجب بيانات العمل والأشخاص (P1-1).
+  //
+  // التدقيق أثبت عملياً أن `scrub` تحجب الأسرار وحدها: مرّت ستّ حالات بيانات
+  // عمل حرفيةً بلا أي تغيير — اسم زبون ورصيده، و`customer_name`/`balance`/
+  // `credit_limit` في JSON، ورقم فاتورة وقيمتها، وهاتف وبريد. فوعد الرأس
+  // القديم بأن بيانات الزبائن «لا تُرسَل أبداً» كان يصف ما **لا يقرأه** الملف
+  // (DOM، تخزين، كوكيز، استعلام) لا ما قد يحمله **نصّ الخطأ** نفسه.
+  //
+  // الحدّ المعرفي الذي يفرض هذا التصميم: **اسم الزبون ونصّ الخطأ العربي
+  // متطابقان شكلاً.** «محمد العلي» و«تعذر الاتصال بالخادم» كلاهما حروف عربية،
+  // ولا قاعدة نصّية تفرّق بينهما بلا قائمة أسماء حقيقية — وهي ممنوعة صراحةً.
+  // فمحاولة تمييز «النوع» تعطي حمايةً احتمالية تنكسر عند أوّل اسم لم يخطر
+  // ببال كاتب النمط. الضمان البنيوي الوحيد هو حجب **كل** نصّ عربي.
+  //
+  // الثمن مدروس، والمقابل أن التشخيص هنا يقوم على **الموقع لا النثر**:
+  //   • `custom.filename` و`lineno` و`colno` تبقى كاملة.
+  //   • أطر المكدّس تبقى كاملة (الملف، الدالة، السطر، العمود).
+  //   • اسم صنف الخطأ (TypeError، RangeError…) يبقى — وهو إنجليزي.
+  //   • والأخطاء غير الملتقَطة أغلبها مولّدة من محرّك JS وهي إنجليزية أصلاً.
+  //
+  // ما يبقى خارج الضمان صراحةً — يُقال ولا يُدَّعى خلافه: اسمٌ **لاتيني**
+  // (`Ahmad Ali`) لا يُميَّز عن معرّف برمجي، فلا يُحجب. القاعدة تغطّي العربية
+  // وهي لغة بيانات هذا التطبيق كلها.
+  // ---------------------------------------------------------------------------
+
+  // نوّاب من محارف تحكّم أثناء المعالجة: العلامات النهائية عربية، فلو كُتبت
+  // مباشرةً لالتهمتها قاعدةُ العربية نفسها في الخطوة التالية. تُستبدَل دفعةً
+  // واحدة في `finishMarks` بعد انتهاء كل القواعد. ومحرف التحكّم لا يَرِد في
+  // نصّ خطأ حقيقي فلا يصطدم بمحتوى المستخدم.
+  var P_SECRET = "\u0001S\u0001";
+  var P_MAIL   = "\u0001M\u0001";
+  var P_PHONE  = "\u0001P\u0001";
+  var P_NUMBER = "\u0001N\u0001";
+  var P_ARABIC = "\u0001A\u0001";
+
+  var ARABIC_CLASS = "\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF";
+  // كلمات عربية متتالية تُجمَع في علامة واحدة كي لا يتحوّل الاسم الثنائي إلى
+  // علامتين تكشفان عدد كلماته. الواصلات المسموحة فراغات وترقيم شائع فقط.
+  var ARABIC_RUN = new RegExp(
+    "[" + ARABIC_CLASS + "]+(?:[\\s\\u060C\\u061B\\u061F.,:;!\\-\\u2013\\u2014\"'\\u00AB\\u00BB]*[" + ARABIC_CLASS + "]+)*",
+    "g"
+  );
+  var EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+  var INTL_PHONE_RE = /\+\d[\d\s\-().]{6,}\d/g;
+
+  // ⚠️ إصلاح ملاحظة Codex P1 الثالثة على PR #202: الهاتف المحلي المفصول
+  // (`0991 234 567`، `099-123-4567`) لم يكن يُطابَق — لا `+` فيه، ولا فواصل
+  // آلاف. فكانت قاعدةُ الأربع خانات تبتلع مجموعةً واحدة وتترك الباقي:
+  // `phone [رقم محذوف] 234 567`. أُثبت بالتشغيل.
+  //
+  // الشرط سبع خانات فأكثر **بعد** طرح الفواصل، لا طول النصّ — كي لا يُبتلَع
+  // `at 1 2 3` ولا نطاقٌ قصير، ويُبتلَع الهاتف مهما فُصل.
+  // يشترط فاصلاً واحداً على الأقل: الرقم المتّصل ليس «هاتفاً مفصولاً»،
+  // وقاعدةُ الأربع خانات تكفيه — فلا يُوسَم مبلغٌ متّصل بعلامة الهاتف.
+  var SEPARATED_DIGITS_RE = /\d[\d\s\-().]*[\s\-().][\d\s\-().]*\d/g;
+  function digitCount(text) { return text.replace(/\D/g, "").length; }
+
+  // ⚠️ إصلاح ملاحظة Codex P1 الرابعة على PR #202: القيم المالية القصيرة كانت
+  // تمرّ كاملةً — `balance=999` و`price 350` و`{"price":403}` و
+  // `{"credit_limit":500}` خرجت بلا مساس. حدّ الأربع خانات يحمي رموز الحالة
+  // لكنه يترك الأرصدة والأسعار الصغيرة، وهي بالضبط ما طُلب حجبه.
+  //
+  // فالحجب هنا **بالسياق لا بالطول**: اسم حقل تجاري معروف متبوعاً بفاصل
+  // صريح ⇒ تُحجب قيمته مهما قصرت. والقائمة محصورة بأسماء الحقول التجارية
+  // وحدها — `status` ليست منها فيبقى `status of 500` سليماً للتشخيص.
+  //
+  // الأسماء المركّبة (`credit_limit`) مُدرَجة صراحةً وقبل مكوّناتها: `_`
+  // محرف كلمة فيمنع حدّ `\b` — نفس الدرس الذي فرضته ملاحظات PR #188.
+  var BUSINESS_FIELDS = "credit_limit|creditLimit|credit_used|invoice_no|invoiceNo|invoiceNumber|" +
+    "stock_qty|unit_price|total_due|balance|invoice|price|amount|total|cost|debt|paid|due|discount";
+  // ⚠️ إصلاح ملاحظة Codex P1 التاسعة على PR #202: البديل غير المقتبَس كان
+  // `[^\s,;}\]\n]+` فيقف عند أوّل فراغ. فعلى `price: USD 350` حُجبت `USD`
+  // ومرّ `350`، وعلى `balance = - 999` حُجبت الإشارة ومرّ `999` — والقاعدة
+  // العامة تُبقي الثلاثيات عمداً، فلا شيء يلتقطهما بعدها. أُثبت بالتشغيل.
+  //
+  // فأُضيف بديل يبتلع «إشارة/عملة + رقم» كوحدة واحدة، **قبل** البديل العام
+  // كي يُجرَّب أولاً. ويبقى البديل العام آخراً للقيم غير الرقمية.
+  // ⚠️ إصلاح ملاحظة Codex P1 الثالثة عشرة على PR #202: `ل.س` هي علامة العملة
+  // المعتمدة في `src/app.js`، ولم تكن في القائمة. فعلى `price: ل.س 350`
+  // يلتقط البديلُ العام `ل.س` وحدها، ثم تحذفها قاعدةُ العربية، ويمرّ `350`
+  // لأنه ثلاثي. أُضيفت الرموز العربية الشائعة هنا لتُبتلَع مع الرقم.
+  var CURRENCY = "[$\\u20AC\\u00A3\\u00A5\\u20BA\\uFDFC]|USD|EUR|SYP|SAR|AED|TRY|LBP|GBP|JPY|" +
+    "\\u0644\\.\\u0633|\\u0644\\.\\u0644|\\u0631\\.\\u0633|\\u062F\\.\\u0625|\\u062C\\.\\u0645";
+  // الفراغ مسموح **داخل** الرقم بشرط أن يليه رقم — `balance: 1 250 000` يُبتلَع
+  // كاملاً (ملاحظة Codex P1 الحادية عشرة: كان يقف عند أوّل مجموعة فيمرّ الباقي،
+  // وستّ خانات مفصولة تفلت من حدّ الهاتف ومن حدّ الأربع خانات معاً)، بينما
+  // `total 5 items` يقف عند `5` فلا تُبتلَع الكلمة التالية.
+  // القوسان صيغة محاسبية شائعة للسالب (`(999)`)، ويُبتلعان مع الرقم لا حوله —
+  // وإلا بقي الرقم ظاهراً بينهما (ملاحظة Codex P1 الثامنة عشرة).
+  var SIGNED_AMOUNT = "\\(?[-+]?\\s*(?:" + CURRENCY + ")?\\s*[-+]?\\s*\\d(?:[\\d.,]|\\s(?=\\d))*\\)?";
+  // ⚠️ إصلاح ملاحظة Codex P1 التاسعة عشرة على PR #202. الجولة السابقة أضافت
+  // الفاصلة والفاصلة المنقوطة إلى قائمة الفواصل المسموحة، فجاءت الملاحظة
+  // بـ`balance — 999` و`balance / 999` و`الرصيد؟ 999`. والدرس أن **تعداد
+  // علامات الترقيم سباقٌ لا يُكسَب** — كما كان تعداد أشكال الإطار قبله.
+  //
+  // فالقاعدة الآن معكوسة: الفجوة بين التسمية والمبلغ هي «أي شيء ليس حرفاً ولا
+  // رقماً ولا سطراً جديداً»، بحدٍّ ثمانية محارف. فلا تُعدّ علامةٌ بعينها، ولا
+  // تبقى علامةٌ خارج التغطية.
+  //
+  // وما يمنع الإفراط ليس ضيقُ الفجوة بل **اشتراط الرقم** في `SIGNED_AMOUNT`:
+  // على `balance, price, total` تعبر الفجوةُ `، ` ثم يُطلب رقم فلا يوجد،
+  // فلا مطابقة — قائمة أسماء الأعمدة تبقى سليمة.
+  //
+  // وعلامات الترقيم العربية (`،` `؛` `؟` `ـ` `۔`) تقع داخل نطاق الحروف
+  // العربية، فلو نُفيت مع الحروف لسقط `الرصيد؟ 999` — وهو نصّ الملاحظة
+  // حرفياً. لذلك يُنفى هنا نطاقُ **الحروف** العربية وحده، لا الكتلة كلها.
+  var ARABIC_LETTERS = "\\u0621-\\u063A\\u0641-\\u065F\\u0660-\\u0669\\u066E-\\u06D3" +
+    "\\u06D5-\\u06FF\\u0750-\\u077F\\u08A0-\\u08FF\\uFB50-\\uFDFF\\uFE70-\\uFEFF";
+  var LABEL_GAP = "[^0-9A-Za-z\\n" + ARABIC_LETTERS + "]{0,8}";
+
+  var BUSINESS_ASSIGN_RE = new RegExp(
+    '(["\'`]?\\b(?:' + BUSINESS_FIELDS + ')\\b["\'`]?\\s*[=:]\\s*)' +
+    '("(?:\\\\[^\\n]|[^"\\\\\\n])*"?|\'(?:\\\\[^\\n]|[^\'\\\\\\n])*\'?|' +
+    SIGNED_AMOUNT + '|[^\\s,;}\\]\\n]+)',
+    "gi"
+  );
+  // الصيغة المفصولة بفراغ (`price 350 USD`) تشترط أن تكون القيمة رقماً، وإلا
+  // لحُجبت كلمةُ `of` في «the price of the item» وأُفسد نصّ إنجليزي عادي.
+  //
+  // ⚠️ إصلاح ملاحظة Codex P1 السابعة على PR #202: كان النمط يشترط رقماً
+  // مباشرةً بعد الفراغ، فمرّ `balance -999` و`price $350` بلا مساس — والإشارة
+  // ورمز العملة أشيع ما يسبق مبلغاً. أُثبت بالتشغيل. أُضيفا اختيارِيَّين،
+  // ويبقى اشتراط الرقم قائماً كي لا تُحجب كلمةُ `of` في «the price of the item».
+  // الترقيم بين التسمية والمبلغ (`balance, 999`) يمرّ كما يمرّ الفراغ. واشتراط
+  // الرقم داخل `SIGNED_AMOUNT` هو ما يمنع ابتلاع `balance, price` — قائمة
+  // أسماء أعمدة لا مبلغ فيها.
+  var BUSINESS_SPACED_RE = new RegExp(
+    "\\b(?:" + BUSINESS_FIELDS + "|credit limit)" + LABEL_GAP + "(" + SIGNED_AMOUNT + ")",
+    "gi"
+  );
+
+  // ⚠️ إصلاح ملاحظة Codex P1 السادسة عشرة على PR #202، وهي أهمّ ما في الباب:
+  // `BUSINESS_FIELDS` إنجليزية بالكامل، **وهذا تطبيق عربي**. فعلى
+  // `السعر: ل.س 350` و`الرصيد: 999` لا يُتعرَّف على السياق أصلاً، ثم تحذف
+  // قاعدةُ العربية التسميةَ والعملة، ويبقى الرقم القصير لأن القاعدة العامة
+  // تُبقي الثلاثيات عمداً. أُثبت بالتشغيل: أربع من خمس حالات سرّبت.
+  //
+  // فحجب السياق بالعربية أَولى منه بالإنجليزية لا مساوٍ له، والقاعدة تسبق
+  // `ARABIC_RUN` عمداً — لو تأخّرت عنها لاختفت التسمية قبل أن تُقرأ.
+  //
+  // `\b` لا تنفع هنا: الحرف العربي ليس `\w` في JavaScript، فحدود الكلمة لا
+  // تقع حوله. والاعتماد على التسمية وحدها مقبول — أسوأ ما يحدث حجبُ رقمٍ
+  // إضافي، وهو الاتجاه الآمن.
+  var ARABIC_FIELDS = "(?:ال)?(?:سعر|أسعار|رصيد|أرصدة|مبلغ|إجمالي|اجمالي|" +
+    "دين|ديون|فاتورة|فواتير|تكلفة|كلفة|مدفوع|دفعة|مستحق|خصم|حسم|ائتمان|قيمة|ربح)";
+  // تُسمَح كلمتان عربيتان بين التسمية والمبلغ: «رصيد **الزبون** 750» و«المبلغ
+  // **المستحق** 480» صيغتان طبيعيتان هنا. والاتجاه آمن: أسوأ ما يحدث حجبُ رقم
+  // إضافي جاء بعد تسمية مالية.
+  // ⚠️ إصلاح ملاحظة Codex P1 الثامنة عشرة على PR #202: الفاصل كان `\\s*[:=]?\\s*`
+  // فلا يبلغ المبلغَ خلف ترقيم عادي — `الرصيد، 999` و`الرصيد (999)` مرّا
+  // برقمهما. والفاصلة العربية والفاصلة المنقوطة أشيع من النقطتين في النصّ
+  // العربي الحرّ. (وفحصتُ المقابل الإنجليزي فوجدته يسرّب كذلك، فعُولج معه.)
+  var ARABIC_BUSINESS_RE = new RegExp(
+    ARABIC_FIELDS + "(?:[\\s\\u060C\\u061B]+[" + ARABIC_CLASS + "]+){0,2}" +
+      LABEL_GAP + "(" + SIGNED_AMOUNT + ")",
+    "g"
+  );
+
+  // أرقام بفواصل آلاف (`1,250,000`) — شكل الأرصدة وقيم الفواتير.
+  var GROUPED_NUMBER_RE = /\d{1,3}(?:[,،]\d{3})+(?:\.\d+)?/g;
+  // أربع خانات فأكثر: يبتلع أرقام الفواتير والمبالغ، ويُبقي رموز الحالة (500)
+  // وأرقام الأسطر القصيرة — وهي ما يفيد التشخيص فعلاً.
+  var LONG_NUMBER_RE = /\d{4,}/g;
+
+  function finishMarks(text) {
+    return text
+      .split(P_SECRET).join(REDACTED)
+      .split(P_MAIL).join("[بريد محذوف]")
+      .split(P_PHONE).join("[هاتف محذوف]")
+      .split(P_NUMBER).join("[رقم محذوف]")
+      .split(P_ARABIC).join("[نص عربي محذوف]");
+  }
+
+  function redactBusinessData(text) {
+    if (typeof text !== "string" || text.length === 0) return "";
+    // الترتيب مقصود: حقول السياق أولاً (تبتلع القيمة كاملةً مهما قصرت)، ثم
+    // الهواتف، ثم الأرقام، ثم العربية أخيراً — لأن الفاصلة العربية والأرقام
+    // الهندية تقعان داخل نطاق الحروف العربية.
+    var out = text
+      .split(REDACTED).join(P_SECRET)
+      .replace(EMAIL_RE, P_MAIL)
+      .replace(BUSINESS_ASSIGN_RE, function (match, prefix) { return prefix + P_NUMBER; })
+      .replace(BUSINESS_SPACED_RE, function (match, value) {
+        return match.slice(0, match.length - value.length) + P_NUMBER;
+      })
+      .replace(ARABIC_BUSINESS_RE, function (match, value) {
+        return match.slice(0, match.length - value.length) + P_NUMBER;
+      })
+      .replace(INTL_PHONE_RE, P_PHONE)
+      .replace(SEPARATED_DIGITS_RE, function (match) {
+        return digitCount(match) >= 7 ? P_PHONE : match;
+      })
+      .replace(GROUPED_NUMBER_RE, P_NUMBER)
+      .replace(LONG_NUMBER_RE, P_NUMBER)
+      .replace(ARABIC_RUN, P_ARABIC);
+    return finishMarks(out);
+  }
+
+  // أثر المكدّس: قائمة سماح لا قائمة منع. السطر الذي يطابق شكل إطارٍ معروف
+  // يبقى (بعد تنقيته)، وكل ما عداه يسقط — وأوّلها سطر الرسالة نفسه، وهو
+  // مُرسَل في `message` أصلاً فلا يضيع شيء. فأي نصّ حرّ يحقنه المحرّك أو
+  // الشيفرة داخل الأثر لا يجد طريقاً إلى الخارج.
+  // ⚠️ إصلاح ملاحظة Codex P1 الأولى على PR #202: كان النمط `/^\s*at\s+\S/`،
+  // وV8 يضع نصّ الرسالة حرفياً في أوّل `error.stack`. فرسالة تحمل سطراً يبدأ
+  // بـ`at ` كانت تُصنَّف إطاراً، والإطار كان يُعفى من قاعدة الأرقام عمداً —
+  // فمرّ `new Error("x\n at رصيد 1,250,000")` برصيده كاملاً. أُثبت بالتشغيل.
+  // فصار الإطار يشترط لاحقة موقع حقيقية (`:سطر:عمود`) أو قوساً معروفاً.
+  var FRAME_V8 = /^\s*at\s+.+?(?:\((?:<anonymous>|native)\)|:\d+:\d+\)?)\s*$/;  // Chrome/Edge/Node
+  var FRAME_SPIDERMONKEY = /^\s*[^\s@]*@\S+:\d+:\d+\s*$/;  // Firefox/Safari
+  // إطار داخلي في Safari: `requestAnimationFrame@[native code]`. لا موقع فيه
+  // ولا بيانات، لكن إسقاطه يبتر أثر Safari بلا أي مكسب أمني.
+  var FRAME_NATIVE = /^\s*[^\s@]*@\[native code\]\s*$/;
+  var DROPPED_LINE = "[سطر غير إطار — محذوف]";
+
+  // الإطار يمرّ بقواعد الرسالة **كلها** بما فيها الأرقام، إلا لاحقة الموقع
+  // في آخره (`:سطر:عمود`) — وهي وحدها الرقم الذي يفيد التشخيص. حزامٌ ثانٍ
+  // تحت تشديد `FRAME_V8`: حتى لو تسلّل سطرٌ غير إطار، لا يمرّ رقمٌ تحت غطائه.
+  // ⚠️ إصلاح ملاحظة Codex P1 الثامنة على PR #202. الجولة السابقة اشترطت
+  // «أثر مصدر» في رأس السطر، لكن الشرط كان أي `/` أو أي امتداد **في أي
+  // موضع** — فـ`at invoice/path:1250000:987654` يجتازه بإضافة شرطة واحدة،
+  // وتُصان لاحقته حرفياً. أُثبت بالتشغيل: مرّ الرقمان كاملين.
+  //
+  // فالشرط الآن مزدوج، ولا تُصان اللاحقة إلا باجتيازه كاملاً:
+  //   1) رأس السطر ينتهي **فعلاً** باسم ملف شيفرة أو بجذر مسار — لا مجرد
+  //      احتوائه على شرطة في مكان ما.
+  //   2) الرقمان محدودان بستّ خانات لكلٍّ منهما داخل النمط نفسه، فما تجاوزهما
+  //      لا يُطابَق أصلاً ويسقط السطر كله إلى الحجب الكامل. رقم سطر أو عمود
+  //      حقيقي لا يبلغ المليون، والمبالغ تبلغه.
+  //
+  // ويبقى حدٌّ معلَن: لاحقة بحجم رقم سطر معقول خلف اسم ملف حقيقي لا تُميَّز
+  // عن موقع فعلي. هذا سقف ما تستطيعه قاعدة نصّية، ويُقال ولا يُدَّعى خلافه.
+  // خمس خانات لا ستّ: رمز الاستعادة في هذا التطبيق ستّ خانات فأكثر
+  // (`[0-9]{6,10}`)، فحدُّ الستّ كان يسمح بمروره كـ«رقم سطر». وأكبر ملف
+  // هنا نحو اثني عشر ألف سطر، فخمس خانات (99999) هامشٌ واسع.
+  var FRAME_TAIL = /^([\s\S]*?):(\d{1,5}):(\d{1,5})(\)?\s*)$/;
+  var SOURCE_FILE_END = /(?:\.(?:js|mjs|cjs|jsx|ts|tsx|html|css)|\/)$/i;
+
+  function redactFrame(line) {
+    var m = line.match(FRAME_TAIL);
+    if (m && SOURCE_FILE_END.test(m[1])) {
+      return redactBusinessData(m[1]) + ":" + m[2] + ":" + m[3] + m[4];
+    }
+    return redactBusinessData(line);
+  }
+
+  // ⚠️ إصلاح ملاحظة Codex P1 العاشرة على PR #202، وهي الرابعة من عائلة واحدة:
+  // «نصّ رسالة يتنكّر في هيئة إطار». الجولات الثلاث السابقة عالجتها بتشديد
+  // **شكل** الإطار (لاحقة موقع، ثم بنية مصدر، ثم حدّ ستّ خانات)، وفي كل مرة
+  // وُجد شكلٌ يجتاز الشرط الجديد. آخرها `at reset.js:123456:1` — وستّ خانات
+  // هي بالضبط طول رمز الاستعادة في هذا التطبيق (`recoveryCode`).
+  //
+  // الدرس الذي فرضته أربع جولات: **تشديد الشكل سباقٌ لا يُكسَب.** ما دام
+  // المصنِّف يقرأ نصّاً قد يكون مصدره الرسالة، فكل شرط شكلي له صيغة تجتازه.
+  //
+  // فالعلاج هنا يقطع الجذر بدل ملاحقة الأشكال: V8 يبني `error.stack` بادئاً
+  // بـ`الاسم: الرسالة` حرفياً ثم الأطر. والرسالة **بحوزتنا**. فتُقتطع من رأس
+  // الأثر **بمطابقة نصّية حرفية** لا بنمط — فيسقط بذلك كلُّ ما يتحكّم به
+  // المحتوى دفعةً واحدة، ولا يبقى بعده إلا ما ولّده المحرّك.
+  //
+  // وهذا يُغني عن المفاضلة التي كانت مطروحة (إسقاط لاحقة الموقع كلياً مقابل
+  // فقدان أرقام أسطر الأطر): الأطر الحقيقية تحتفظ بأرقامها كاملةً، لأن الخطر
+  // لم يكن فيها قطّ بل في نصّ الرسالة المتنكّر بينها.
+  //
+  // وSafari/Firefox لا يضعان الرسالة في الأثر أصلاً، فالاقتطاع لا يجد ما
+  // يطابقه ولا يمسّ شيئاً. وتبقى الطبقات السابقة كلها حزاماً ثانياً.
+  // ⚠️ إصلاح ملاحظة Codex P1 الرابعة عشرة على PR #202: الاقتطاع كان يفترض أن
+  // الرأس دائماً `الاسم: الرسالة`. لكن V8 يتبع دلالات
+  // `Error.prototype.toString`: باسمٍ فارغ يبدأ الأثر **بالرسالة وحدها**،
+  // وبرسالةٍ فارغة بالاسم وحده. والمعالج يستبدل `Error` بالاسم الفارغ، فلا
+  // يطابق النصُّ المبنيُّ رأسَ الأثر ويعود السطر المزوَّر يُقبل إطاراً.
+  //
+  // فتُجرَّب مرشّحات الرأس كلها ويُقتطع أطولُ ما يطابق: صيغة toString، ثم
+  // الصيغة المعروضة، ثم الرسالة وحدها. الأطول أولاً كي لا يترك اقتطاعٌ قصير
+  // بقيةَ الرأس في الأثر.
+  function messageHeaders(rawName, rawMessage) {
+    var name = (rawName === undefined || rawName === null) ? "Error" : String(rawName);
+    var message = (rawMessage === undefined || rawMessage === null) ? "" : String(rawMessage);
+    var spec = name === "" ? message : (message === "" ? name : name + ": " + message);
+    return [spec, (name || "Error") + ": " + message, message];
+  }
+
+  function redactStack(stack, headers) {
+    if (typeof stack !== "string" || stack.length === 0) return "";
+    var body = stack;
+    var candidates = typeof headers === "string" ? [headers] : (headers || []);
+    var longest = "";
+    for (var h = 0; h < candidates.length; h += 1) {
+      var candidate = candidates[h];
+      if (typeof candidate === "string" && candidate.length > longest.length &&
+          body.indexOf(candidate) === 0) {
+        longest = candidate;
+      }
+    }
+    if (longest.length > 0) body = body.slice(longest.length);
+    var lines = scrub(body).split("\n");
+    var out = [];
+    var lastDropped = false;
+    for (var i = 0; i < lines.length; i += 1) {
+      var line = lines[i];
+      if (FRAME_V8.test(line) || FRAME_SPIDERMONKEY.test(line) || FRAME_NATIVE.test(line)) {
+        out.push(redactFrame(line));
+        lastDropped = false;
+      } else if (!lastDropped) {
+        // أسطر السقوط المتتالية تُدمَج في واحد كي لا يمتلئ الأثر بالعلامات.
+        out.push(DROPPED_LINE);
+        lastDropped = true;
+      }
+    }
+    return out.join("\n");
+  }
+
+  function clampMessage(text, max) {
+    var value = redactBusinessData(scrub(text));
+    return value.length > max ? value.slice(0, max) + "…[مقتطع]" : value;
+  }
+
+  function clampStack(text, max, headers) {
+    var value = redactStack(text, headers);
     return value.length > max ? value.slice(0, max) + "…[مقتطع]" : value;
   }
 
@@ -352,61 +674,198 @@
   // منع التكرار والفيضان. الحارس `reporting` يمنع الاستدعاء الارتدادي: خطأ
   // داخل المُرسِل نفسه لا يجوز أن يستدعي المُرسِل مرة أخرى.
   // ---------------------------------------------------------------------------
+  // ⚠️ إصلاح ملاحظة Codex P1 الثانية على PR #202: بعد حجب العربية صارت كل
+  // رسالة عربية `Error: [نص عربي محذوف]`، ومعالج الوعود المرفوضة لا يعطي
+  // `filename` ولا `lineno`. فالبصمة صارت متطابقة لكل رفض عربي على الصفحة:
+  // يُرسَل الأوّل ويُبتلع كل ما بعده مهما اختلفت دالّته. أُثبت بالتشغيل
+  // (رفضان مختلفان ⇒ بلاغ واحد). فأُدخلت تجزئة الأثر المنقّى في البصمة.
+  //
+  // محلية بحتة: تدخل البصمة ولا تُرسَل في الحمولة إطلاقاً، ومصدرها الأثر
+  // **بعد** التنقية والحجب — فلا تُشتقّ من بيانات خام.
+  function hashText(text) {
+    var hash = 5381;
+    for (var i = 0; i < text.length; i += 1) {
+      hash = ((hash * 33) ^ text.charCodeAt(i)) >>> 0;
+    }
+    return hash.toString(36);
+  }
+
   var sent = 0;
   var seen = Object.create(null);
   var reporting = false;
 
+  // ---------------------------------------------------------------------------
+  // رصد فشل التسليم (P1-2).
+  //
+  // العطل: `.catch` فارغ **و**`fetch` لا يرفض على 4xx/5xx إطلاقاً — الاستجابة
+  // غير الناجحة تُحلّ كأي استجابة. فرمز مرفوض (401) أو ممنوع (403) أو حصة
+  // مستنفدة (429) أو عطل خدمة (5xx) كان يمرّ بصمت تامّ لا أثر له، ويبقى
+  // «المراقبة مفعّلة» ادّعاءً لا يسنده شيء.
+  //
+  // الحلّ محكوم بأربعة قيود صريحة:
+  //   • **لا ارتداد:** المعالِج لا يرمي ولا يستدعي `send`. و`.catch` في نهاية
+  //     السلسلة يبتلع أي استثناء داخل `.then` نفسه، فلا يتحوّل إلى رفض غير
+  //     مُعالَج يوقظ مستمعنا فيُنتج حلقة.
+  //   • **لا ضجيج:** لا `console.error` ولا `console.warn` — «دخان ما بعد
+  //     النشر» يعتبر `console.error` فشلاً، وضجيج أداة رصد لا يجوز أن يكسره.
+  //   • **لا كشف:** تُحفَظ حالة HTTP وعدّاد فقط. لا الرمز ولا الحمولة ولا نصّ
+  //     الاستجابة يُخزَّن أو يُعرَض.
+  //   • **قابل للاكتشاف:** الحالة مقروءة عبر `ozkErrorMonitoring.delivery()`،
+  //     فيمكن لاختبار أو لفحص ما بعد النشر أن يؤكّد الوصول فعلاً.
+  //
+  // وقاطع الدارة: بعد ثلاثة إخفاقات متتالية يتوقف الإرسال. رمز خاطئ يعني أن
+  // كل بلاغ تالٍ سيفشل أيضاً، فالاستمرار إغراقٌ لشبكة الزبون بلا أي مقابل.
+  // ---------------------------------------------------------------------------
+  // ⚠️ إصلاح ملاحظة Codex P1 الخامسة على PR #202: قاطع الدارة كان يَعُدّ **كل**
+  // إخفاق، ومنها انقطاع الشبكة (حالة 0). فثلاثة أخطاء أثناء انقطاع مؤقّت على
+  // iPhone كانت **تُعطّل المراقبة نهائياً لبقية عمر الصفحة**: البوّابة تمنع كل
+  // طلب تالٍ، ومسارُ النجاح الذي يصفّر العدّاد لا يعمل إلا بطلب — فلا تعافي
+  // بعد عودة الاتصال. وهي حالة شائعة جداً على الهاتف، لا نادرة.
+  //
+  // فالتفريق الآن بين صنفَي إخفاق:
+  //   • **قاتل** (401/403/404/400/422): الرمز مرفوض أو العنوان خاطئ — عطلٌ في
+  //     الإعداد لن يُصلحه التكرار، فالإيقاف بعد ثلاثة منه في محلّه.
+  //   • **عابر** (انقطاع شبكة، 429، 5xx): يُسجَّل للرصد ولا يُوقف شيئاً. سقف
+  //     `MAX_ITEMS_PER_PAGE` يكفي وحده لمنع الإغراق، فلا حاجة لعقوبة دائمة.
+  var MAX_FATAL_FAILURES = 3;
+  // ⚠️ إصلاح ملاحظة Codex P1 الخامسة عشرة على PR #202: إزالة البصمة عند الفشل
+  // العابر أعادت المحاولة، لكن كل محاولة كانت تستهلك من `sent`. فعشر تكرارات
+  // لخطأ واحد أثناء انقطاع تستنفد سقف الصفحة، وتمنع البوّابةُ كلَّ إرسال بعد
+  // عودة الاتصال — نفس العطل الذي عولج، عائداً من باب آخر. وشاهدي السابق غطّى
+  // إخفاقاً واحداً فلم يكشفه.
+  //
+  // فالمحاولة الفاشلة عابراً **تُعيد ما استهلكته** من `sent`، ولها ميزانية
+  // منفصلة محدودة تمنع الحلقة اللانهائية: سقف الصفحة يحرس البلاغات الواصلة،
+  // وهذه تحرس عدد المحاولات الضائعة.
+  var MAX_TRANSIENT_ATTEMPTS = 20;
+  var transientAttempts = 0;
+  var FATAL_STATUSES = [400, 401, 403, 404, 422];
+  var delivered = 0;
+  var failures = 0;
+  var consecutiveFailures = 0;
+  var consecutiveFatalFailures = 0;
+  var lastFailureStatus = 0;
+
+  // محاولة ضاعت لسبب عابر: تُزال بصمتها ليُعاد الإرسال عند التكرار التالي،
+  // ويُعاد ما استهلكته من سقف الصفحة — فالسقف يحرس ما **وصل** لا ما فشل.
+  function releaseAttempt(fingerprint) {
+    delete seen[fingerprint];
+    if (sent > 0) sent -= 1;
+    transientAttempts += 1;
+  }
+
+  function isFatalStatus(status) {
+    return FATAL_STATUSES.indexOf(typeof status === "number" ? status : 0) !== -1;
+  }
+
+  function noteDelivery(ok, status) {
+    if (ok) {
+      delivered += 1;
+      consecutiveFailures = 0;
+      consecutiveFatalFailures = 0;
+      // ⚠️ إصلاح ملاحظة Codex P1 السابعة عشرة على PR #202: كانت
+      // `transientAttempts` عدّاداً **لعمر الصفحة كله** لا يُصفّره نجاح. فعلى
+      // شبكة متقطّعة (فشلان عابران لكل نجاح — نسبة واقعية على الهاتف) تبلغ
+      // الميزانيةَ وتُسكِت المراقبة نهائياً **رغم أن التسليم يعمل**. أُثبت
+      // بالتشغيل: توقّفت بعد تسع بلاغات ناجحة.
+      //
+      // ونجاحُ التسليم دليلٌ قاطع على أن العطل كان عابراً فعلاً، فهو أصدق
+      // إشارة لاستعادة الميزانية. وتبقى الحلقة محدودة: السقف الحقيقي هو
+      // `MAX_ITEMS_PER_PAGE` على البلاغات الواصلة، وهو لا يُستعاد.
+      transientAttempts = 0;
+      return;
+    }
+    failures += 1;
+    consecutiveFailures += 1;
+    // رقم الحالة وحده — لا جسم الاستجابة، فقد يردّد ما أرسلناه.
+    lastFailureStatus = typeof status === "number" ? status : 0;
+    if (FATAL_STATUSES.indexOf(lastFailureStatus) !== -1) consecutiveFatalFailures += 1;
+    else consecutiveFatalFailures = 0;
+  }
+
+  // بناء الحمولة معزول عن الإرسال: `send` كانت تجمع البوّابات ومنع التكرار
+  // والبناء والإرسال في دالة واحدة، فبلغت سبعة وستين سطراً (رصدها CodeFactor
+  // «Complex Method»). والفصل هنا ليس تجميلاً فقط — هذه الدالة هي **التعريف
+  // الكامل لما يغادر المتصفح**، فقراءتها وحدها تُظهر كل حقل مُرسَل.
+  function buildPayload(level, title, stack, context) {
+    return {
+      access_token: token,
+      data: {
+        environment: environment,
+        level: level,
+        platform: "browser",
+        language: "javascript",
+        timestamp: Math.floor(Date.now() / 1000),
+        // معرّف النشرة: يربط الخطأ بالـcommit المنشور بالضبط. بلا حقن يبقى
+        // فارغاً فلا نرسل حقلاً كاذباً.
+        code_version: injected(release) ? release : undefined,
+        notifier: { name: "ozk-error-monitoring", version: "1" },
+        body: { message: { body: title, stack: stack || undefined } },
+        request: {
+          // pathname وحده: الاستعلام والشظية قد يحملان معرّفات مستندات أو رموزاً.
+          url: location.origin + location.pathname
+        },
+        client: {
+          javascript: {
+            browser: String(navigator.userAgent || "").slice(0, 300),
+            source_map_enabled: false
+          }
+        },
+        custom: {
+          filename: context.filename || undefined,
+          lineno: context.lineno || undefined,
+          colno: context.colno || undefined
+        }
+      }
+    };
+  }
+
   function send(level, title, stack, context) {
     if (reporting || sent >= MAX_ITEMS_PER_PAGE) return;
-    var fingerprint = level + "|" + title + "|" + (context.filename || "") + ":" + (context.lineno || 0);
+    if (consecutiveFatalFailures >= MAX_FATAL_FAILURES) return;
+    if (transientAttempts >= MAX_TRANSIENT_ATTEMPTS) return;
+    var fingerprint = level + "|" + title + "|" + (context.filename || "") + ":" +
+      (context.lineno || 0) + "|" + hashText(stack || "");
     if (seen[fingerprint]) return;
     seen[fingerprint] = true;
     sent += 1;
     reporting = true;
 
     try {
-      var payload = {
-        access_token: token,
-        data: {
-          environment: environment,
-          level: level,
-          platform: "browser",
-          language: "javascript",
-          timestamp: Math.floor(Date.now() / 1000),
-          // معرّف النشرة: يربط الخطأ بالـcommit المنشور بالضبط. بلا حقن يبقى
-          // فارغاً فلا نرسل حقلاً كاذباً.
-          code_version: injected(release) ? release : undefined,
-          notifier: { name: "ozk-error-monitoring", version: "1" },
-          body: { message: { body: title, stack: stack || undefined } },
-          request: {
-            // pathname وحده: الاستعلام والشظية قد يحملان معرّفات مستندات أو رموزاً.
-            url: location.origin + location.pathname
-          },
-          client: {
-            javascript: {
-              browser: String(navigator.userAgent || "").slice(0, 300),
-              source_map_enabled: false
-            }
-          },
-          custom: {
-            filename: context.filename || undefined,
-            lineno: context.lineno || undefined,
-            colno: context.colno || undefined
-          }
-        }
-      };
+      var payload = buildPayload(level, title, stack, context);
 
       // keepalive: يُكمِل الإرسال حتى لو أُغلقت الصفحة فوراً بعد الخطأ.
-      // .catch فارغ متعمّد: فشل الشبكة إلى خدمة الرصد ليس حدثاً يستحق ضجيجاً
-      // في وحدة تحكّم المستخدم، ولا يجوز أن يتحوّل إلى رفض غير مُعالَج.
-      fetch(ENDPOINT, {
+      // النتيجة تُسجَّل ولا تُطبَع: الفشل صار مرصوداً بلا ضجيج ولا ارتداد،
+      // و`.catch` الأخيرة تشمل أخطاء `.then` نفسها فلا يفلت رفض غير مُعالَج.
+      var response = fetch(ENDPOINT, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
         keepalive: true,
         mode: "cors",
         credentials: "omit"
-      }).catch(function () {});
+      });
+      if (response && typeof response.then === "function") {
+        // ⚠️ إصلاح ملاحظة Codex P1 الثانية عشرة على PR #202: البصمة كانت
+        // تُسجَّل في `seen` **قبل** معرفة نتيجة الإرسال ولا تُزال عند فشل
+        // عابر. فخطأ متكرّر وقع أوّل مرة والجهاز خارج الشبكة يبقى مكتوماً
+        // لبقية عمر الصفحة حتى بعد عودة الاتصال — وهو سيناريو iPhone عادي.
+        // ولاحظ Codex بحقّ أن شاهد التعافي السابق نجح فقط لأنه أطلق بصمات
+        // مختلفة، فلم يكن يفحص هذا المسار أصلاً.
+        //
+        // فعند الفشل العابر تُزال البصمة ليُعاد المحاولة عند التكرار التالي.
+        // و`sent` **لا يُنقَص**: سقف الصفحة يبقى حدّاً فعّالاً على المحاولات
+        // فلا تتحوّل إعادةُ المحاولة إلى حلقة إرسال بلا سقف.
+        response.then(function (result) {
+          var ok = Boolean(result && result.ok);
+          noteDelivery(ok, result && result.status);
+          if (!ok && !isFatalStatus(result && result.status)) releaseAttempt(fingerprint);
+        }).catch(function () {
+          // انقطاع شبكة أو حجب من إضافة متصفح: لا حالة HTTP أصلاً، وهو عابر.
+          noteDelivery(false, 0);
+          releaseAttempt(fingerprint);
+        });
+      }
     } catch (ignored) {
       // المُرسِل لا يُسقِط التطبيق تحت أي ظرف.
     } finally {
@@ -418,7 +877,7 @@
     var error = event && event.error;
     var name = (error && error.name) || "Error";
     var message = (error && error.message) || (event && event.message) || "خطأ غير معروف";
-    send("error", clamp(name + ": " + message, MAX_MESSAGE_CHARS), clamp(error && error.stack, MAX_STACK_CHARS), {
+    send("error", clampMessage(name + ": " + message, MAX_MESSAGE_CHARS), clampStack(error && error.stack, MAX_STACK_CHARS, messageHeaders(error && error.name, error && error.message)), {
       // اسم الملف بلا استعلام: معامل ?v=tobacco-N يتغيّر كل نشرة فيمنع التجميع.
       filename: scrub(String((event && event.filename) || "").split("?")[0]),
       lineno: event && event.lineno,
@@ -430,14 +889,30 @@
     var reason = event && event.reason;
     var name = (reason && reason.name) || "UnhandledRejection";
     var message = (reason && reason.message) || String(reason === undefined ? "" : reason);
-    send("error", clamp(name + ": " + message, MAX_MESSAGE_CHARS), clamp(reason && reason.stack, MAX_STACK_CHARS), {});
+    send("error", clampMessage(name + ": " + message, MAX_MESSAGE_CHARS), clampStack(reason && reason.stack, MAX_STACK_CHARS, messageHeaders(reason && reason.name, reason && reason.message)), {});
   });
 
-  // كشف محدود للاختبار والتشخيص — لا يرسل شيئاً بذاته.
+  // كشف محدود للاختبار والتشخيص — لا يرسل شيئاً بذاته، ولا يكشف الرمز ولا
+  // الحمولة. `delivery()` تعيد عدّادات وحالة HTTP الأخيرة فقط، وهي ما يجعل
+  // فشل التسليم قابلاً للاكتشاف بدل أن يبقى صامتاً.
   window.ozkErrorMonitoring = {
     environment: environment,
     release: injected(release) ? release : null,
     scrub: scrub,
-    sentCount: function () { return sent; }
+    redactBusinessData: redactBusinessData,
+    redactStack: redactStack,
+    sentCount: function () { return sent; },
+    delivery: function () {
+      return {
+        delivered: delivered,
+        failures: failures,
+        consecutiveFailures: consecutiveFailures,
+        consecutiveFatalFailures: consecutiveFatalFailures,
+        transientAttempts: transientAttempts,
+        lastFailureStatus: lastFailureStatus,
+        stopped: consecutiveFatalFailures >= MAX_FATAL_FAILURES ||
+          transientAttempts >= MAX_TRANSIENT_ATTEMPTS
+      };
+    }
   };
 })();
