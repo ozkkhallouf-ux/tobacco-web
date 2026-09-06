@@ -182,7 +182,7 @@ export async function loadAssistant(options = {}) {
   const env = {
     SUPABASE_URL: "https://local.test",
     SUPABASE_SERVICE_ROLE_KEY: "local-service-role-stub",
-    ...(options.env ?? {})
+    ...options.env
   };
 
   const stubFetch = async (input, init = {}) => {
