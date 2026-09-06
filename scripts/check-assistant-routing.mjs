@@ -852,4 +852,100 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   ok("كل مستهلك لسطور المبيعات يمرّ بذيل الاكتمال الموحّد — التصفيح والنافذة معاً");
 }
 
+// ── ن) الأرقام العربية-الهندية تُفهم كما تُكتب على iPhone ───────────────────
+{
+  // ملاحظة Codex على PR #205 بعد 4fb0d18: لوحة iPhone العربية تكتب «٣٠» لا
+  // «30»، وكل أنماط الفترات تطابق \d. فالمطابقة تفشل ويسقط السؤال على فرع
+  // اليوم الافتراضي، فيُجاب سؤالُ شهرٍ بمبيعات **اليوم** بلا أي إشارة.
+  const day = (n) => new Date(Date.now() + 180 * 60_000 - n * 86_400_000).toISOString().slice(0, 10);
+  const fixtures = defaultFixtures();
+  fixtures.sales_line_items = [
+    { id: 1, sale_date: day(0), bill_no: "1", bill_type: "retail", item_name: "أ", qty: 1, line_total: 100, unit_cost: 90, customer_name: "س" },
+    { id: 2, sale_date: day(20), bill_no: "2", bill_type: "retail", item_name: "أ", qty: 1, line_total: 55, unit_cost: 50, customer_name: "س" }
+  ];
+  fixtures.sales_line_items_sync_state = [{
+    source: "ameen_sales_line_items", window_start: day(40), window_end: day(0),
+    row_count: 2, completed_at: new Date().toISOString()
+  }];
+
+  const a = await loadAssistant({ fixtures });
+  const arabic = String((await a.ask(TOKENS.owner, "كم مبيعات اخر ٣٠ يوم؟")).body.reply);
+  assert.ok(/155/.test(arabic), `لم يفهم «٣٠» فسقط على فترة أخرى:\n${arabic}`);
+  assert.ok(arabic.includes(day(29)), `لم تُحسب الفترة من ٣٠ يوماً:\n${arabic}`);
+
+  // والصيغة اللاتينية تبقى كما هي
+  const b = await loadAssistant({ fixtures });
+  assert.ok(/155/.test(String((await b.ask(TOKENS.owner, "كم مبيعات اخر 30 يوم؟")).body.reply)),
+    "كسرت الصيغة اللاتينية");
+  ok("الأرقام العربية-الهندية تُطبَّع، فسؤال «آخر ٣٠ يوم» لا يسقط على اليوم");
+}
+
+// ── هـ2) الموظف لا يعيد بناء تقرير المبيعات من أداة الصنف ───────────────────
+{
+  // ملاحظة Codex على PR #205 بعد 4fb0d18: أداة المبيعات محصورة بالمالك، لكن
+  // حركة الصنف مفتوحة للموظف وكانت تعرض قيمة المبيعات وأسماء أكبر المشترين
+  // وكمياتهم — فتكرارها على الأصناف يعيد بناء التقرير المحمي ونشاط الزبائن.
+  const owner = await loadAssistant();
+  const ownerText = String((await owner.ask(TOKENS.owner, "ما حركة ماستر طويل ورق؟")).body.reply);
+  assert.ok(/قيمة المبيعات/.test(ownerText), "المالك فقد قيمة المبيعات");
+  assert.ok(/جهاد التلي/.test(ownerText), "المالك فقد أسماء المشترين");
+
+  const employee = await loadAssistant();
+  const empResult = await employee.ask(TOKENS.employee, "ما حركة ماستر طويل ورق؟");
+  const empText = String(empResult.body.reply);
+  assert.equal(empResult.status, 200, "الموظف حُجب عن الأداة كلياً بدل حجب التفاصيل");
+  assert.ok(/الكمية المباعة/.test(empText), `الموظف فقد حركة المخزون المشروعة:\n${empText}`);
+  assert.ok(!/قيمة المبيعات/.test(empText), `الموظف رأى قيمة المبيعات:\n${empText}`);
+  assert.ok(!/أكثر المشترين/.test(empText), `الموظف رأى ترتيب المشترين:\n${empText}`);
+  assert.ok(!/جهاد التلي/.test(empText), `الموظف رأى اسم زبون:\n${empText}`);
+  // والحجب عند المصدر: العمودان لا يُقرآن أصلاً لغير المالك
+  const empReads = employee.metrics.reads.filter((q) => q.startsWith("sales_line_items?"));
+  assert.ok(empReads.length > 0, "لم يقرأ سطور المبيعات أصلاً");
+  for (const q of empReads) {
+    assert.ok(!/customer_name/.test(q), `طلب اسم الزبون لموظف: ${q}`);
+    assert.ok(!/line_total/.test(q), `طلب قيمة السطر لموظف: ${q}`);
+  }
+  ok("الموظف يرى كمية حركة الصنف فقط — لا قيمة ولا أسماء زبائن، ومحجوبة عند المصدر");
+}
+
+// ── و2) أولوية الشراء الموجبة تُحجب كذلك — الكميات مُوقَّعة ─────────────────
+{
+  // ملاحظة Codex على PR #205 بعد 4fb0d18، وهي تنقض تبريراً صرّحتُ به: ظننتُ
+  // البتر يخفض perDay وحده فيبقى الفرع الموجب سليماً. لكن الكميات مُوقَّعة
+  // والمرتجعات سالبة، فبتر صفٍّ سالب قديم مع إبقاء موجبٍ أحدث **يضخّم**
+  // المعدّل ويقصّر التغطية، فيدخل القائمةَ صنفٌ مخزونه كافٍ.
+  const today = new Date(Date.now() + 180 * 60_000).toISOString().slice(0, 10);
+  const fixtures = defaultFixtures();
+  fixtures["inventory_reports:ameen_sql_agent"] = [{
+    report_date: today, created_at: new Date().toISOString(),
+    summary: { totalStockItems: 1, lowStockItems: 0, outOfStockItems: 0 },
+    items: [{ key: "k1", name: "صنف مطلوب", stockQty: 10, unit1Name: "علبة" }]
+  }];
+  const rows = [];
+  for (let i = 0; i < 60; i += 1) {
+    rows.push({ id: i + 1, sale_date: today, bill_no: `b${i}`, bill_type: "retail",
+      item_name: "صنف مطلوب", qty: 5, line_total: 50, unit_cost: 40, customer_name: "س" });
+  }
+  fixtures.sales_line_items = rows;
+  fixtures.sales_line_items_sync_state = [{
+    source: "ameen_sales_line_items",
+    window_start: new Date(Date.now() + 180 * 60_000 - 60 * 86_400_000).toISOString().slice(0, 10),
+    window_end: today, row_count: rows.length, completed_at: new Date().toISOString()
+  }];
+
+  const a = await loadAssistant({ fixtures, hardRowCap: 40 });
+  const capped = await a.ask(TOKENS.owner, "ماذا يجب أن أشتري؟");
+  const cappedText = String(capped.body.reply);
+  assert.ok(/صنف مطلوب/.test(cappedText), `لم يدخل الفرع الموجب:\n${cappedText}`);
+  assert.equal(capped.body.answered, false, "أصدر أولوية شراء مؤكَّدة عن قراءة مبتورة");
+  assert.ok(/مرشّحون غير مؤكَّدين/.test(cappedText), `قدّمهم أولوية شراء مؤكَّدة:\n${cappedText}`);
+  assert.ok(!/^\*\*أولوية الشراء — مرتّبة/m.test(cappedText), "أبقى صيغة الحكم القاطع رغم البتر");
+
+  const b = await loadAssistant({ fixtures });
+  const settled = await b.ask(TOKENS.owner, "ماذا يجب أن أشتري؟");
+  assert.ok(/مرتّبة بأيام التغطية/.test(String(settled.body.reply)), "لم يحسم الأولوية رغم اكتمال القراءة");
+  assert.equal(settled.body.answered, true, "امتنع رغم اكتمال القراءة");
+  ok("أولوية الشراء الموجبة تُحجب عند البتر — الكميات مُوقَّعة فالبتر قد يضخّم المعدّل");
+}
+
 console.log(`\nتوجيه المساعد الذكي: ${passed}/${passed} تحقق ناجح`);

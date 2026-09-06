@@ -256,8 +256,19 @@ async function latestReport(table: string, source?: string) {
 }
 
 // ── أدوات نصية عربية ─────────────────────────────────────────────────────────
+// الأرقام العربية-الهندية (٠-٩) والفارسية (۰-۹) تُردّ إلى ASCII.
+//
+// لوحة مفاتيح iPhone العربية — وهي الواجهة الأساسية لهذا المشروع — تكتب «٣٠»
+// لا «30». وكل أنماط الفترات تطابق `\d`، فسؤال «مبيعات آخر ٣٠ يوم» كان يفشل
+// في المطابقة ثم يسقط على فرع اليوم الافتراضي (fallbackDays = 0)، فيُجاب سؤالُ
+// شهرٍ بمبيعات **اليوم** بلا أي إشارة إلى أن الفترة غير التي طُلبت.
+// (رصدها Codex على PR #205 بعد 4fb0d18.)
+const ARABIC_INDIC_DIGITS = /[\u0660-\u0669\u06F0-\u06F9]/g;
+const asciiDigit = (ch: string) => String((ch.codePointAt(0)! - (ch >= "\u06F0" ? 0x06F0 : 0x0660)));
+
 function normalize(value: unknown) {
   return String(value ?? "")
+    .replace(ARABIC_INDIC_DIGITS, asciiDigit)
     .toLowerCase()
     .replace(/[ً-ٰٟۖ-ۭ]/g, "")
     .replace(/[إأآٱ]/g, "ا")
@@ -537,10 +548,16 @@ async function salesCompleteness(period: Period, partial: boolean, window?: Sync
 }
 
 async function readSales(period: Period, role: Role): Promise<{ rows: SalesRow[]; partial: boolean }> {
-  // عمود التكلفة للمالك فقط. الموظف لا يرى تكلفة ولا هامشاً.
+  // أعمدة المالك وحده: التكلفة، وقيمة السطر، واسم الزبون.
+  //
+  // أداة المبيعات كلها محصورة بالمالك، لكن أداة حركة الصنف مفتوحة للموظف —
+  // فكانت تعرض له قيمة مبيعات الصنف وأسماء أكبر مشتريه وكمياتهم. وتكرار
+  // السؤال على الأصناف يعيد بناء تقرير المبيعات المحمي ونشاط الزبائن الشرائي
+  // صنفاً صنفاً. فالحجب عند المصدر لا عند العرض: ما لا يُقرأ لا يُسرَّب.
+  // (رصدها Codex على PR #205 بعد 4fb0d18.)
   const columns = role === "owner"
     ? "sale_date,bill_no,bill_type,item_name,qty,line_total,unit_cost,customer_name"
-    : "sale_date,bill_no,bill_type,item_name,qty,line_total,customer_name";
+    : "sale_date,bill_no,bill_type,item_name,qty";
   // ترتيب ثابت وقاطع (id ثانوياً) شرطٌ لصحة التصفيح: بلا مفتاح فارق قد يتكرر
   // صفٌّ أو يسقط آخر بين الصفحات.
   const { rows, partial } = await readPaged((range) =>
@@ -1278,12 +1295,12 @@ const TOOLS: Tool[] = [
         .filter((entry) => entry.perDay > 0 && entry.coverDays < 21)
         .sort((a, b) => a.coverDays - b.coverDays || b.perDay - a.perDay);
 
+      const state = await salesCompleteness(period, sales.partial);
       if (!ranked.length) {
         // «لا حاجة شراء عاجلة» حكمٌ نهائي يوقف تصرّفاً. وقراءةٌ ناقصة تبخس
         // معدّل البيع فتُدخل الجواب في هذا الفرع بالذات وتكتم طلباً لازماً.
         // فالتحذير الملحق لا يكفي هنا — يُقرأ الجواب «لا حاجة» ويُطوى معه.
         // الحكم يُحجب، ويُقال إن المعطيات لا تكفي للبتّ.
-        const state = await salesCompleteness(period, sales.partial);
         if (!state.complete) {
           return {
             ok: false,
@@ -1301,6 +1318,34 @@ const TOOLS: Tool[] = [
           text: `**توصية الشراء**\nلا يوجد صنف يبيع فعلياً ومخزونه يكفي أقل من 21 يوماً حسب معدّل ${period.label}. لا حاجة شراء عاجلة بهذا المعيار.`,
           sources: ["inventory_reports:ameen_sql_agent", "sales_line_items", "sales_line_items_sync_state"],
           partial: sales.partial
+        };
+      }
+      // الفرع الموجب يُحجب كذلك. كنتُ تركتُه بحجّة أن البتر يخفض `perDay`
+      // فيرفع `coverDays`، فما ظهر تحت 21 يوماً هو تحته يقيناً — والحجّة
+      // خاطئة: الكميات **مُوقَّعة** والمرتجعات تُحفظ سالبةً (راجع
+      // sales-line-items-atomic-refresh.sql). فبترُ صفٍّ سالب قديم مع إبقاء
+      // موجبٍ أحدث **يضخّم** المعدّل ويقصّر التغطية، فيُدفع صنفٌ مخزونه كافٍ
+      // إلى قائمة الشراء العاجل. (رصدها Codex على PR #205 بعد 4fb0d18.)
+      if (!state.complete) {
+        return {
+          ok: false,
+          text: `**أولوية الشراء — غير محسومة**\n`
+            + `ظهر ${ranked.length} صنف تحت 21 يوم تغطية، لكن قراءة المبيعات **غير مكتملة**.`
+            + ` والكميات مُوقَّعة (المرتجعات سالبة)، فبتر صفٍّ سالب يضخّم معدّل البيع`
+            + ` ويقصّر التغطية — فقد يدخل القائمةَ صنفٌ مخزونه كافٍ.`
+            + `\n\nهؤلاء **مرشّحون غير مؤكَّدين**، لا أولوية شراء مؤكَّدة:\n`
+            + ranked
+              .slice(0, 20)
+              .map((e) =>
+                `- ${String(e.row.name ?? e.row.key)}: مخزون ${qty(e.stock)} ${String(e.row.unit1Name ?? "")}`
+                + `، بيع ${e.perDay.toFixed(1)}/يوم ⇒ يكفي ${e.coverDays.toFixed(1)} يوم`
+                + (e.negative ? " ⚠️ الرصيد **سالب** في الأمين — يحتاج مراجعة إدخال" : ""))
+              .join("\n")
+            + `\n\nهذه قراءة وتحليل فقط — لا يُنشئ المساعد أي طلب شراء ولا يعدّل أي مخزون.`
+            + state.note,
+          sources: ["inventory_reports:ameen_sql_agent", "sales_line_items", "sales_line_items_sync_state"],
+          partial: sales.partial,
+          asOf: report.created_at
         };
       }
       return {
@@ -1384,18 +1429,23 @@ const TOOLS: Tool[] = [
             : `لم أجد مبيعات لهذا الصنف في ${period.label}، لكن قراءة المبيعات **غير مكتملة** — فلا أجزم بغيابها.`);
       } else {
         const totalQty = mine.reduce((sum, row) => sum + num(row.qty), 0);
-        const totalValue = mine.reduce((sum, row) => sum + num(row.line_total), 0);
-        const buyers = new Map<string, number>();
-        for (const row of mine) {
-          const buyer = String(row.customer_name ?? "").trim() || "بدون اسم";
-          buyers.set(buyer, (buyers.get(buyer) ?? 0) + num(row.qty));
-        }
-        const top = [...buyers.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);
         text += `\n\n**الحركة (${period.label})**\n`
           + `- الكمية المباعة: **${qty(totalQty)}** على ${mine.length} سطر\n`
-          + `- قيمة المبيعات: **${money(totalValue)}**\n`
-          + `- متوسط ${(totalQty / 60).toFixed(1)} بالوحدة يومياً\n`
-          + `- أكثر المشترين: ${top.map(([b, q]) => `${b} (${qty(q)})`).join("، ")}`;
+          + `- متوسط ${(totalQty / 60).toFixed(1)} بالوحدة يومياً`;
+        // القيمة وأسماء المشترين للمالك وحده. الكمية حركةُ مخزون يحتاجها
+        // الموظف في عمله؛ أما القيمة وقائمة الزبائن فهما تقرير المبيعات
+        // المحمي نفسه، مُعاد بناؤه صنفاً صنفاً.
+        if (ctx.role === "owner") {
+          const totalValue = mine.reduce((sum, row) => sum + num(row.line_total), 0);
+          const buyers = new Map<string, number>();
+          for (const row of mine) {
+            const buyer = String(row.customer_name ?? "").trim() || "بدون اسم";
+            buyers.set(buyer, (buyers.get(buyer) ?? 0) + num(row.qty));
+          }
+          const top = [...buyers.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);
+          text += `\n- قيمة المبيعات: **${money(totalValue)}**\n`
+            + `- أكثر المشترين: ${top.map(([b, q]) => `${b} (${qty(q)})`).join("، ")}`;
+        }
         if (ctx.role === "owner") {
           const withCost = mine.filter((row) => num(row.unit_cost) > 0);
           if (withCost.length) {
