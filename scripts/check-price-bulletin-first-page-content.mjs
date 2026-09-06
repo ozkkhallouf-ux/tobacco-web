@@ -79,17 +79,33 @@ const checkWithFont = (fontReady, name, condition, detail) => {
   check(name, condition, detail);
 };
 
-// نصّ مستند الطباعة كما هو في الترميز (مستقلّ عن الخط تماماً).
+// صفوف مستند الطباعة كما هي في الترميز — **مطابقة صفٍّ كامل، لا احتواء نصّي**
+// (مستقلّة عن الخط تماماً).
 //
-// مستندٌ غائب (فشل الزر في إنتاجه) = **كل الصفوف مفقودة**، لا «لا شيء مفقود».
-// بلا هذا التصريح كان `String(null)` يُنتج نصّاً لا يحوي أي اسم فيبدو الفحص
-// كأنه يعمل، أو يمرّ زوراً لو تغيّر التطبيع لاحقاً (ملاحظة DeepScan
-// INSUFFICIENT_NULL_CHECK: تُفحص القيمة قبلها ثم تُمرَّر هنا بلا فحص).
+// لماذا الصفّ كاملاً: التطبيع يحذف الفراغات، فاسمُ صنفٍ أقصر قد يكون مقطعاً
+// داخل اسم أطول («اليغانس سليم فضي» داخل «اليغانس سليم فضي بدون طبعة»)، فيقبله
+// `includes` ويمرّ حذفُ الأقصر زوراً — وهي نفس ثغرة الاحتواء التي أُغلقت في
+// قارئ الـPDF (ملاحظة Codex P1 على 3468f90). فنقارن الخلايا الثلاث بالتساوي
+// التام مع صفٍّ واحد من الترميز.
+//
+// ومستندٌ غائب (فشل الزر في إنتاجه) = **كل الصفوف مفقودة**، لا «لا شيء مفقود»
+// (ملاحظة DeepScan INSUFFICIENT_NULL_CHECK).
 const flattenForMarkup = (value) => String(value).normalize("NFKC").replace(/\s+/g, "");
+const MARKUP_CELL_SEPARATOR = "\u0001";
+function markupRowKeys(documentHtml) {
+  const keys = new Set();
+  for (const row of String(documentHtml).matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/g)) {
+    const cells = [...row[1].matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/g)]
+      .map((cell) => flattenForMarkup(cell[1].replace(/<[^>]*>/g, "")));
+    if (cells.length) keys.add(cells.join(MARKUP_CELL_SEPARATOR));
+  }
+  return keys;
+}
 function rowsMissingFromMarkup(documentHtml, rows) {
   if (typeof documentHtml !== "string" || !documentHtml) return [...rows];
-  const flat = flattenForMarkup(documentHtml.replace(/<[^>]*>/g, "\u0001"));
-  return rows.filter((row) => !flat.includes(flattenForMarkup(row.name)));
+  const keys = markupRowKeys(documentHtml);
+  return rows.filter((row) => !keys.has(
+    [row.name, row.unit, row.price].map(flattenForMarkup).join(MARKUP_CELL_SEPARATOR)));
 }
 
 const A4_HEIGHT_PX = 297 / 25.4 * 96;
@@ -167,7 +183,17 @@ async function printExportDocument(documentHtml) {
         forcedBreak: el.classList.contains("price-list-secondary-page")
       };
     });
-    return { headerHeight: +headerHeight.toFixed(2), blocks };
+    // **كل صفٍّ مخطَّط يجب أن يُنتج رسماً فعلياً على الورق.** بلا خط النشرة
+    // تتعذّر مطابقة النصّ، وحينها لا يكفي وجود الاسم في الترميز: انحدارُ طباعةٍ
+    // مثل `display:none` على صفوف يُبقي أسماءها في الترميز بينما لا تُرسم
+    // (ملاحظة Codex P1 على 3468f90). فنقيس الصفوف هندسياً — وهو قياسٌ لا علاقة
+    // له بشكل الحروف: صفٌّ بلا ارتفاع أو بلا عرض لم يُرسم.
+    const rows = [...section.querySelectorAll("tbody tr")];
+    const unrenderedRows = rows.filter((tr) => {
+      const rect = tr.getBoundingClientRect();
+      return rect.height <= 0 || rect.width <= 0;
+    }).length;
+    return { headerHeight: +headerHeight.toFixed(2), blocks, renderedRowCount: rows.length, unrenderedRows };
   });
   const pdf = await page.pdf({
     format: "A4", printBackground: true, preferCSSPageSize: true,
@@ -266,9 +292,15 @@ for (const sc of [
   check(`${sc.label}: صفوف الصفحة الأولى موجودة نصّاً في مستند الطباعة (مستقلّ عن الخط)`,
     missingFromMarkup.length === 0, `مفقودة من الترميز: ${JSON.stringify(missingFromMarkup.slice(0, 5))}`);
 
-  check(`${sc.label}: كمّ النصّ المرسوم على الورقة الأولى يوازي ما خُطِّط لها (مستقلّ عن الخط)`,
-    firstSheet.length >= planned.firstPageRows.length * 0.8,
-    `أسطر الورقة الأولى ${firstSheet.length} مقابل ${planned.firstPageRows.length} صفاً مخطَّطاً`);
+  // **كل صفٍّ يُنتج رسماً فعلياً** — قياس هندسي لا نصّي، فيسري حتى بلا خط النشرة.
+  // يرصد انحدار طباعةٍ (مثل `display:none`) يُبقي الاسم في الترميز بلا رسم.
+  check(`${sc.label}: كل صفوف المستند مرسومة فعلاً (لا صفّ بلا رسم)`,
+    printed.geometry.unrenderedRows === 0,
+    `${printed.geometry.unrenderedRows} صفاً بلا ارتفاع أو عرض من ${printed.geometry.renderedRowCount}`);
+
+  check(`${sc.label}: عدد صفوف المستند = عدد صفوف الـdataset`,
+    printed.geometry.renderedRowCount === planned.totalRows,
+    `في المستند ${printed.geometry.renderedRowCount} · بالبيانات ${planned.totalRows}`);
 
   const onFirst = rowsOnSheet(firstSheet, planned.firstPageRows);
   checkWithFont(fontReady, `${sc.label}: الورقة الأولى تحمل أصنافاً فعلاً (لا ورقة عنوان)`, onFirst > 0,
@@ -391,22 +423,34 @@ for (const sc of [
 
 // ===== ٢ب) شاهد سالب للبديل المستقلّ عن الخط =====
 // البديل يبقى مفروضاً حين يتعذّر الخط، فلا يجوز أن يكون شكلياً. نُثبت أنه يرصد
-// حذف صفٍّ من مستند الطباعة — وهو بالضبط ما كان التعليقُ وحده سيُمرّره.
+// حذف صفٍّ من مستند الطباعة، وأنه **لا يقبل الاحتواء النصّي**: اسمٌ أقصر داخل
+// اسم أطول لا يُشبِعه (وهي الثغرة التي رصدتها Codex على 3468f90).
 {
   const rows = [
-    { name: "ماستر سليم أزرق", unit: "كروز", price: "80,928 ل.س" },
-    { name: "غلواز قصير أحمر", unit: "كروز", price: "99,000 ل.س" }
+    { name: "اليغانس سليم فضي", unit: "كروز", price: "99,000 ل.س" },
+    { name: "غلواز قصير أحمر", unit: "كروز", price: "109,560 ل.س" }
   ];
-  const healthy = `<section class="ozk-price-list"><table><tr><td>${rows[0].name}</td></tr>`
-    + `<tr><td>${rows[1].name}</td></tr></table></section>`;
-  const stripped = healthy.replace(`<tr><td>${rows[1].name}</td></tr>`, "");
+  const asRow = (row) => `<tr><td class="name">${row.name}</td>`
+    + `<td class="unit">${row.unit}</td><td class="price">${row.price}</td></tr>`;
+  const healthy = `<section class="ozk-price-list"><table><tbody>`
+    + rows.map(asRow).join("") + `</tbody></table></section>`;
+  const stripped = healthy.replace(asRow(rows[1]), "");
+  // نفس الاسم الأقصر مبتلعاً داخل اسم أطول: القاعدة القديمة (`includes`) كانت تقبله.
+  const swallowed = healthy.replace(asRow(rows[0]),
+    asRow({ ...rows[0], name: `${rows[0].name} بدون طبعة` }));
 
   check("شاهد سالب (بديل مستقلّ عن الخط): المستند السليم بلا نقص",
     rowsMissingFromMarkup(healthy, rows).length === 0,
-    "المرجع السليم نفسه يبدو ناقصاً — الشاهد بلا قيمة");
-  check("شاهد سالب (بديل مستقلّ عن الخط): يرصد الصفّ المحذوف من الترميز",
+    `المرصود: ${JSON.stringify(rowsMissingFromMarkup(healthy, rows).map((r) => r.name))}`);
+  check("شاهد سالب (بديل مستقلّ عن الخط): يرصد الصفّ المحذوف",
     rowsMissingFromMarkup(stripped, rows).map((r) => r.name).join("") === rows[1].name,
     `المرصود: ${JSON.stringify(rowsMissingFromMarkup(stripped, rows).map((r) => r.name))}`);
+  check("شاهد سالب (بديل مستقلّ عن الخط): لا يقبل اسماً مبتلعاً داخل اسم أطول",
+    rowsMissingFromMarkup(swallowed, rows).map((r) => r.name).join("") === rows[0].name,
+    `المرصود: ${JSON.stringify(rowsMissingFromMarkup(swallowed, rows).map((r) => r.name))}`);
+  check("شاهد سالب (بديل مستقلّ عن الخط): مستند غائب = كل الصفوف مفقودة",
+    rowsMissingFromMarkup(null, rows).length === rows.length,
+    `المرصود ${rowsMissingFromMarkup(null, rows).length} من ${rows.length}`);
 }
 
 // ===== ٣) شاهد سالب: الحارس يرصد الرأس المهجور فعلاً =====

@@ -60,17 +60,33 @@ const checkWithFont = (fontReady, name, condition, detail) => {
   check(name, condition, detail);
 };
 
-// نصّ مستند الطباعة كما هو في الترميز (مستقلّ عن الخط تماماً).
+// صفوف مستند الطباعة كما هي في الترميز — **مطابقة صفٍّ كامل، لا احتواء نصّي**
+// (مستقلّة عن الخط تماماً).
 //
-// مستندٌ غائب (فشل الزر في إنتاجه) = **كل الصفوف مفقودة**، لا «لا شيء مفقود».
-// بلا هذا التصريح كان `String(null)` يُنتج نصّاً لا يحوي أي اسم فيبدو الفحص
-// كأنه يعمل، أو يمرّ زوراً لو تغيّر التطبيع لاحقاً (ملاحظة DeepScan
-// INSUFFICIENT_NULL_CHECK: تُفحص القيمة قبلها ثم تُمرَّر هنا بلا فحص).
+// لماذا الصفّ كاملاً: التطبيع يحذف الفراغات، فاسمُ صنفٍ أقصر قد يكون مقطعاً
+// داخل اسم أطول («اليغانس سليم فضي» داخل «اليغانس سليم فضي بدون طبعة»)، فيقبله
+// `includes` ويمرّ حذفُ الأقصر زوراً — وهي نفس ثغرة الاحتواء التي أُغلقت في
+// قارئ الـPDF (ملاحظة Codex P1 على 3468f90). فنقارن الخلايا الثلاث بالتساوي
+// التام مع صفٍّ واحد من الترميز.
+//
+// ومستندٌ غائب (فشل الزر في إنتاجه) = **كل الصفوف مفقودة**، لا «لا شيء مفقود»
+// (ملاحظة DeepScan INSUFFICIENT_NULL_CHECK).
 const flattenForMarkup = (value) => String(value).normalize("NFKC").replace(/\s+/g, "");
+const MARKUP_CELL_SEPARATOR = "\u0001";
+function markupRowKeys(documentHtml) {
+  const keys = new Set();
+  for (const row of String(documentHtml).matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/g)) {
+    const cells = [...row[1].matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/g)]
+      .map((cell) => flattenForMarkup(cell[1].replace(/<[^>]*>/g, "")));
+    if (cells.length) keys.add(cells.join(MARKUP_CELL_SEPARATOR));
+  }
+  return keys;
+}
 function rowsMissingFromMarkup(documentHtml, rows) {
   if (typeof documentHtml !== "string" || !documentHtml) return [...rows];
-  const flat = flattenForMarkup(documentHtml.replace(/<[^>]*>/g, "\u0001"));
-  return rows.filter((row) => !flat.includes(flattenForMarkup(row.name)));
+  const keys = markupRowKeys(documentHtml);
+  return rows.filter((row) => !keys.has(
+    [row.name, row.unit, row.price].map(flattenForMarkup).join(MARKUP_CELL_SEPARATOR)));
 }
 
 // ===== قراءة نص PDF =====
