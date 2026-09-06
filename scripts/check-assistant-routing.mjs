@@ -1085,4 +1085,89 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   ok("المشتريات وفواتير الزبون تُرشَّح بالفترة المطلوبة، وأعدادها مشتقّة منها");
 }
 
+// ── ض) لقطة المشتريات/الفواتير محدودة، فلا حكم قاطع خارجها ─────────────────
+{
+  // ملاحظات Codex الثلاث على PR #205 بعد d36b86f: الترشيح بالفترة الذي أُضيف
+  // في الجولة السابقة أنشأ **أحكاماً قاطعة على لقطة ناقصة**. المنتِجان يقرآن
+  // نافذة 60 يوماً ويقصّان كل جهة عند 200 فاتورة رافعَين truncated.
+  const day = (n) => new Date(Date.now() + 180 * 60_000 - n * 86_400_000).toISOString().slice(0, 10);
+  const windowStart = day(60);
+
+  const fixtures = defaultFixtures();
+  fixtures.ameen_purchase_invoice_reports = [{
+    report_date: day(0), created_at: new Date().toISOString(),
+    summary: { bills: 500, suppliers: 40, fromDate: windowStart },
+    items: [{ name: "مورّد", truncated: true, invoices: [{ date: day(5), items: [{ itemName: "س", qty: 1, lineTotal: 10, avgPrice: 10 }] }] }]
+  }];
+
+  // فترة تتجاوز نافذة التقرير ⇒ تُعلَن ولا تُقدَّم الأعداد محسوبةً عليها
+  const a = await loadAssistant({ fixtures });
+  const long = String((await a.ask(TOKENS.owner, "ما مشتريات اخر 365 يوم؟")).body.reply);
+  assert.ok(/تتجاوز نافذة تقرير المشتريات/.test(long), `لم يُعلن خروج الفترة عن نافذة التقرير:\n${long}`);
+  assert.ok(long.includes(windowStart), "لم يذكر حدّ نافذة التقرير");
+  assert.ok(!/محسوبة على الفترة المطلوبة وحدها/.test(long), `ادّعى الحساب على الفترة كاملةً:\n${long}`);
+
+  // واللقطة المقصوصة تُعلَن ولو كانت الفترة داخل النافذة
+  const b = await loadAssistant({ fixtures });
+  const short = String((await b.ask(TOKENS.owner, "ما مشتريات الاسبوع؟")).body.reply);
+  assert.ok(/اللقطة مقصوصة/.test(short), `لم يُعلن قصّ اللقطة (truncated):\n${short}`);
+
+  // وفترة بلا فواتير خارج التغطية ⇒ امتناع لا نفي قاطع
+  const c = await loadAssistant({ fixtures });
+  const emptyOutside = await c.ask(TOKENS.owner, "ما مشتريات اخر 365 يوم؟");
+  const outsideText = String(emptyOutside.body.reply);
+  if (/لا توجد فواتير شراء/.test(outsideText)) {
+    assert.equal(emptyOutside.body.answered, false, "نفى وجود مشتريات عن فترة لا يغطّيها التقرير");
+  }
+
+  // ولقطة كاملة غير مقصوصة تُحسم طبيعياً
+  const covered = {
+    ...fixtures,
+    ameen_purchase_invoice_reports: [{
+      ...fixtures.ameen_purchase_invoice_reports[0],
+      summary: { bills: 1, suppliers: 1, fromDate: day(60) },
+      items: [{ name: "مورّد", truncated: false, invoices: [{ date: day(5), items: [{ itemName: "س", qty: 1, lineTotal: 10, avgPrice: 10 }] }] }]
+    }]
+  };
+  const d = await loadAssistant({ fixtures: covered });
+  const clean = String((await d.ask(TOKENS.owner, "ما مشتريات الاسبوع؟")).body.reply);
+  assert.ok(!/تتجاوز نافذة|اللقطة مقصوصة/.test(clean), `حذّر رغم اكتمال التغطية:\n${clean}`);
+
+  // فواتير الزبون: نفس القاعدة — نفيٌ قاطع خارج التغطية يُمنع
+  const invFixtures = defaultFixtures();
+  invFixtures["inventory_reports:ameen_customer_invoices"] = [{
+    report_date: day(0), created_at: new Date().toISOString(),
+    summary: { fromDate: windowStart },
+    items: [{ customerGuid: "aaa11111", name: "جهاد التلي", truncated: true,
+      invoices: [{ date: day(5), lines: [{ material: "صنف", qty: 1, unit1: "علبة", price: 500, lineTotal: 500 }] }] }]
+  }];
+  const e = await loadAssistant({ fixtures: invFixtures });
+  const custLong = String((await e.ask(TOKENS.owner, "ماذا اشترى الزبون جهاد التلي اخر 365 يوم؟")).body.reply);
+  assert.ok(/تتجاوز نافذة تقرير فواتير الزبائن/.test(custLong),
+    `لم يُعلن خروج فترة الزبون عن نافذة التقرير:\n${custLong}`);
+
+  // وفرع الصفر تحديداً: فترة **داخل** النافذة بلا فواتير، لكن اللقطة مقصوصة
+  // ⇒ امتناع لا نفي. (بلا هذه الحالة يبقى فرع النفي بلا تغطية أصلاً.)
+  const f = await loadAssistant({ fixtures: invFixtures });
+  const custEmpty = String((await f.ask(TOKENS.owner, "ماذا اشترى الزبون جهاد التلي امس؟")).body.reply);
+  assert.ok(!/لا توجد فواتير لهذا الزبون ضمن/.test(custEmpty),
+    `نفى مشتريات الزبون رغم أن اللقطة مقصوصة:\n${custEmpty}`);
+  assert.ok(/المشتريات — غير محسومة/.test(custEmpty),
+    `لم يمتنع عن النفي رغم نقص التغطية:\n${custEmpty}`);
+
+  // ولقطة كاملة غير مقصوصة ⇒ النفي يُحسم طبيعياً
+  const cleanInv = {
+    ...invFixtures,
+    "inventory_reports:ameen_customer_invoices": [{
+      ...invFixtures["inventory_reports:ameen_customer_invoices"][0],
+      items: [{ ...invFixtures["inventory_reports:ameen_customer_invoices"][0].items[0], truncated: false }]
+    }]
+  };
+  const g = await loadAssistant({ fixtures: cleanInv });
+  const custClean = String((await g.ask(TOKENS.owner, "ماذا اشترى الزبون جهاد التلي امس؟")).body.reply);
+  assert.ok(/لا توجد فواتير لهذا الزبون ضمن/.test(custClean),
+    `امتنع عن النفي رغم اكتمال التغطية:\n${custClean}`);
+  ok("لقطة المشتريات وفواتير الزبائن: الفترة خارج نافذتها أو لقطةٌ مقصوصة تُعلَن، والنفي القاطع يُحجب");
+}
+
 console.log(`\nتوجيه المساعد الذكي: ${passed}/${passed} تحقق ناجح`);

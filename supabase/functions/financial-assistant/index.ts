@@ -428,6 +428,48 @@ function previousPeriod(period: Period): Period {
   };
 }
 
+// تغطية تقرير لقطة (فواتير الشراء وفواتير الزبائن).
+//
+// كلا المنتِجَين يقرأ نافذة `-PeriodDays` (60 افتراضاً) ويقصّ كل مورّد/زبون عند
+// `MaxInvoicesPer…` (200) رافعاً `truncated`. فالمصفوفة المخزَّنة ليست كل
+// الحقيقة بحدَّين مستقلَّين: مدىً لا تغطّيه اللقطة أصلاً، وفواتير أقدم قُصَّت
+// داخل المدى المغطّى.
+//
+// وترشيحُ هذه المصفوفة بالفترة المطلوبة — وهو ما أضيف لتوّه — يُنتج **حكماً
+// قاطعاً على ناقص**: «لا فواتير في هذه الفترة» عن مدىً لم يُقرأ أصلاً، أو
+// أعداداً تُقدَّم محسوبةً على فترة تتجاوز اللقطة. فالحدّان يُقاسان ويُعلَنان،
+// والنفي القاطع يُحجب متى كانت الفترة غير مغطّاة.
+// (رصدها Codex على PR #205 بعد d36b86f.)
+type ReportCoverage = { from: string; to: string; covered: boolean; truncated: boolean; note: string };
+
+function reportCoverage(
+  period: Period,
+  summary: Record<string, unknown>,
+  reportDate: unknown,
+  truncated: boolean,
+  what: string
+): ReportCoverage {
+  const from = String(summary.fromDate ?? "");
+  const to = String(reportDate ?? "");
+  const before = !!from && period.explicit && period.from < from;
+  const after = !!to && period.explicit && period.to > to;
+  const covered = !!from && !!to && !before && !after && !truncated;
+  const parts: string[] = [];
+  if (before) parts.push(`قبل ${from}`);
+  if (after) parts.push(`بعد ${to}`);
+  let note = "";
+  if (parts.length) {
+    note += `\n\n> ⚠️ **الفترة المطلوبة تتجاوز نافذة ${what}.**\n`
+      + `> النافذة المتاحة: **${from} → ${to}**، والمطلوب يمتدّ ${parts.join(" و")}.\n`
+      + `> ما خارجها لم يُقرأ أصلاً، فالأعداد أدناه تخصّ الجزء المغطّى وحده — لا الفترة المطلوبة.`;
+  }
+  if (truncated) {
+    note += `\n\n> ⚠️ **اللقطة مقصوصة**: المنتِج يحتفظ بأحدث 200 فاتورة لكل جهة ويرفع \`truncated\`.\n`
+      + `> فالفواتير الأقدم داخل النافذة غائبة، والأعداد أدناه حدٌّ أدنى لا إجمالياً.`;
+  }
+  return { from, to, covered, truncated, note };
+}
+
 // ── قراءة سطور المبيعات ──────────────────────────────────────────────────────
 type SalesRow = {
   sale_date?: string;
@@ -1151,21 +1193,36 @@ const TOOLS: Tool[] = [
           const periodLabel = ctx.period.explicit
             ? `${ctx.period.label} (${ctx.period.from} → ${ctx.period.to})`
             : `نافذة التقرير`;
+          // نفس حدَّي تقرير المشتريات: نافذة 60 يوماً وقصٌّ عند 200 فاتورة
+          // لكل زبون. فالنفي القاطع «لا فواتير في هذه الفترة» قد يكون غياب
+          // قراءة لا غياب شراء. (رصدها Codex على PR #205 بعد d36b86f.)
+          const invCoverage = reportCoverage(
+            ctx.period,
+            (invoiceReport?.summary ?? {}) as Record<string, unknown>,
+            invoiceReport?.report_date,
+            !!entry?.truncated,
+            "تقرير فواتير الزبائن"
+          );
           if (guid && !entry) {
             text += `\n\n**المشتريات**\nلم أجد في تقرير الفواتير (${window}) أي سجل مربوط بمعرّف هذا الزبون.`
               + `\n\nلن أنسب له فواتير بتشابه الاسم — لو فعلت لعرضتُ عليك مشتريات زبون آخر بأصنافه وأسعاره.`
               + ` إن كنت تتوقع وجود فواتير، فالأرجح أن تقرير الفواتير لم يُزامَن بعد أو أن سجلّه بلا معرّف.`;
           } else if (!invoices.length) {
-            text += `\n\n**المشتريات**\nلا توجد فواتير لهذا الزبون ضمن ${periodLabel}.`
-              + (ctx.period.explicit && allInvoices.length
-                ? ` له ${allInvoices.length} فاتورة خارج هذه الفترة داخل نافذة التقرير (${window}) — لم أعرضها لأنها ليست ما سألت عنه.`
-                : ` (نافذة تقرير الفواتير: ${window}.)`);
+            text += invCoverage.covered || !ctx.period.explicit
+              ? `\n\n**المشتريات**\nلا توجد فواتير لهذا الزبون ضمن ${periodLabel}.`
+                + (ctx.period.explicit && allInvoices.length
+                  ? ` له ${allInvoices.length} فاتورة خارج هذه الفترة داخل نافذة التقرير (${window}) — لم أعرضها لأنها ليست ما سألت عنه.`
+                  : ` (نافذة تقرير الفواتير: ${window}.)`)
+              : `\n\n**المشتريات — غير محسومة**\nلم أجد فواتير لهذا الزبون ضمن ${periodLabel}،`
+                + ` لكن تقرير الفواتير لا يغطّي هذه الفترة كاملةً — فلن أقول إنه لم يشترِ شيئاً.`
+                + (allInvoices.length ? ` (له ${allInvoices.length} فاتورة داخل النافذة المتاحة.)` : "");
           } else {
             if (identity === "name") {
               text += `\n\n> ℹ️ سجل الفواتير أدناه مطابَق بالاسم لأن حساب الزبون بلا معرّف في تقرير الأرصدة.`;
             }
             const shown = invoices.slice(0, 3);
-            text += `\n\n**آخر الفواتير** (${invoices.length} فاتورة ضمن ${periodLabel})`;
+            text += `\n\n**آخر الفواتير** (${invoices.length} فاتورة ضمن ${periodLabel})`
+              + (invCoverage.covered ? "" : " — العدد حدٌّ أدنى، انظر التنبيه أدناه");
             for (const inv of shown) {
               const lines = Array.isArray(inv.lines) ? inv.lines : [];
               const total = lines.reduce((sum: number, l: Record<string, unknown>) => sum + num(l.lineTotal), 0);
@@ -1178,6 +1235,7 @@ const TOOLS: Tool[] = [
                 + (lines.length > 10 ? `\n- _و${lines.length - 10} سطر آخر._` : "");
             }
           }
+          text += invCoverage.note;
         } catch {
           text += `\n\n> ⚠️ تعذّرت قراءة تقرير الفواتير، فلم أعرض المشتريات. الرصيد أعلاه من تقرير الأرصدة وهو صحيح — ولم أستبدل الفواتير بأي تقدير.`;
         }
@@ -1559,8 +1617,10 @@ const TOOLS: Tool[] = [
       };
       let lines = 0;
       let conflicting = 0;
+      let truncatedSuppliers = 0;
       const bySupplier = items
         .map((row: Record<string, unknown>) => {
+          if (row.truncated) truncatedSuppliers += 1;
           const invoices = (Array.isArray(row.invoices) ? row.invoices : []).filter(inPeriod);
           let lineCount = 0;
           for (const invoice of invoices) {
@@ -1584,11 +1644,26 @@ const TOOLS: Tool[] = [
         ? `${ctx.period.label} (${ctx.period.from} → ${ctx.period.to})`
         : `نافذة ${String(s.fromDate ?? "?")} → ${report.report_date}`;
 
+      const coverage = reportCoverage(ctx.period, s, report.report_date, truncatedSuppliers > 0, "تقرير المشتريات");
+
       if (ctx.period.explicit && !bills) {
+        // «لا فواتير في هذه الفترة» نفيٌ قاطع. وهو كاذب متى كانت الفترة خارج
+        // نافذة التقرير أصلاً، أو داخلها لكن اللقطة مقصوصة.
+        if (!coverage.covered) {
+          return {
+            ok: false,
+            text: `**المشتريات — ${scope} — غير محسومة**\n`
+              + `لم أجد فواتير شراء في هذه الفترة، لكن تقرير المشتريات لا يغطّيها كاملةً`
+              + ` — فالغياب هنا قد يكون غياب قراءة لا غياب شراء.`
+              + coverage.note,
+            sources: ["ameen_purchase_invoice_reports"],
+            asOf: report.created_at
+          };
+        }
         return {
           ok: true,
           text: `**المشتريات — ${scope}**\nلا توجد فواتير شراء في هذه الفترة.`
-            + `\n\nنافذة تقرير المشتريات المتاحة: ${String(s.fromDate ?? "?")} → ${report.report_date}.`,
+            + `\n\nنافذة تقرير المشتريات المتاحة: ${coverage.from} → ${coverage.to}.`,
           sources: ["ameen_purchase_invoice_reports"],
           asOf: report.created_at
         };
@@ -1597,7 +1672,8 @@ const TOOLS: Tool[] = [
       let text = `**المشتريات — ${scope}**\n`
         + `- عدد الفواتير: **${bills}** من **${bySupplier.length}** مورّد، بمجموع ${lines} سطر\n`
         + (ctx.period.explicit
-          ? `- محسوبة على الفترة المطلوبة وحدها، من نافذة تقرير ${String(s.fromDate ?? "?")} → ${report.report_date}.\n`
+          ? `- محسوبة على ${coverage.covered ? "الفترة المطلوبة وحدها" : "الجزء المغطّى منها"}،`
+            + ` من نافذة تقرير ${coverage.from} → ${coverage.to}.\n`
           : "")
         + `\n`
         + `**الموردون حسب عدد الفواتير**\n`
@@ -1633,6 +1709,7 @@ const TOOLS: Tool[] = [
           text += `\n\n_لم أجد مورّداً باسم «${ctx.entityText.trim()}» في هذا التقرير._`;
         }
       }
+      text += coverage.note;
       return { ok: true, text: text + freshnessNote(report.created_at), sources: ["ameen_purchase_invoice_reports"], asOf: report.created_at };
     }
   },
