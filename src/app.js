@@ -7186,7 +7186,7 @@ async function sendAiMessage(input) {
     const messages = state.aiMessages
       .filter((item) => item.role === "user" || item.role === "assistant")
       .map((item) => ({ role: item.role, content: item.content }));
-    const result = await dataStore.askFinancialAssistant(messages, state.aiProvider);
+    const result = await dataStore.askAssistant(messages);
     state.aiMessages.push({ role: "assistant", content: result.reply || "لم تصل إجابة من الخادم." });
   } catch (err) {
     state.aiMessages.push({ role: "assistant", content: `⚠️ خطأ: ${err.message}` });
@@ -7212,7 +7212,7 @@ function aiAssistant() {
   const messagesHtml = msgs.length === 0
     ? `<div class="ai-welcome">
          <p class="ai-welcome-title">مرحباً في المساعد الذكي</p>
-         <p class="muted">اسأل عن أرصدة حسابات الأمين، الصناديق، الذمم، المبيعات، الأرباح أو المصروفات. البيانات للقراءة والتحليل فقط.</p>
+         <p class="muted">اسأل بالعربية عن الصندوق، المبيعات، المقبوضات، المصاريف، الذمم، رصيد زبون ومشترياته، النواقص، الأصناف الراكدة، حركة صنف، المشتريات، المستودعات، الأرباح، أو «شو يحتاج انتباهي اليوم؟». البيانات للقراءة والتحليل فقط.</p>
        </div>`
     : msgs.map((m) => `
         <div class="ai-message ${m.role === "user" ? "ai-user" : "ai-bot"}">
@@ -7225,16 +7225,16 @@ function aiAssistant() {
   return shell(`
     <section class="panel wide ai-panel">
       <div class="ai-toolbar">
-        <div class="ai-provider-tabs"><span class="ai-tab active">المساعد المالي الآمن</span></div>
+        <div class="ai-provider-tabs"><span class="ai-tab active">المساعد الذكي</span></div>
         <div class="ai-toolbar-end">
           ${msgs.length > 0 ? `<button class="button secondary" style="font-size:0.8rem;padding:4px 12px" data-action="ai-clear">مسح</button>` : ""}
-          <span class="status-pill success">قراءة فقط من الأمين</span>
+          <span class="status-pill success">قراءة فقط</span>
         </div>
       </div>
 
       <div class="notice-panel success" style="margin-bottom:12px">
-        <strong>متصل بتقارير برنامج الأمين</strong>
-        <span>البيانات تبقى داخل Supabase ولا تُرسل لأي جهة خارجية، ولا يستطيع المساعد تعديل أي حساب أو قيد.</span>
+        <strong>متصل ببيانات وتقارير OZK المصرّح بها</strong>
+        <span>يقرأ من الصناديق والمبيعات والذمم والمخزون والمشتريات والمستودعات وتقارير الأمين — حسب صلاحية حسابك. البيانات تبقى داخل Supabase ولا تُرسل لأي جهة خارجية، والمساعد لا يستطيع تعديل أي حساب أو رصيد أو فاتورة أو مخزون.</span>
       </div>
 
       <div class="ai-messages" id="ai-messages">${messagesHtml}</div>
@@ -7243,7 +7243,7 @@ function aiAssistant() {
         <textarea
           class="ai-textarea"
           name="message"
-          placeholder="مثال: ما أرصدة الصناديق اليوم؟"
+          placeholder="مثال: كم يوجد بالصندوق؟"
           rows="2"
           dir="auto"
           ${state.aiLoading ? "disabled" : ""}
