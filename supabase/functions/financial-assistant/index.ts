@@ -483,14 +483,20 @@ type CoverageSubject = { what: string; table: string };
 const SALES_COVERAGE: CoverageSubject = { what: "سطور المبيعات", table: "sales_line_items_sync_state" };
 const EXPENSE_COVERAGE: CoverageSubject = { what: "حركة المصاريف", table: "expense_entries_sync_state" };
 
+// فجوة التغطية كقيمة لا كنصّ. النصّ وحده لا يكفي حين يكون الجواب **حكماً
+// نهائياً**: عندها يجب أن يُحجب الحكم لا أن يُذيَّل بتحذير.
+function coverageGap(period: Period, window: SyncWindow) {
+  if (!window) return { missing: true, before: false, after: false };
+  return { missing: false, before: period.from < window.start, after: period.to > window.end };
+}
+
 // تحذير التغطية: يُعيد نصاً حين لا تقع الفترة المطلوبة كاملةً داخل النافذة.
 function coverageWarning(period: Period, window: SyncWindow, subject: CoverageSubject) {
   if (!window) {
     return `\n\n> ⚠️ لا يوجد سجل مزامنة مكتمل لـ${subject.what} (\`${subject.table}\` فارغ).`
       + ` لا أستطيع تأكيد أن أرقام هذه الفترة محدَّثة، فاعتبرها **غير متحقَّقة**.`;
   }
-  const outsideBefore = period.from < window.start;
-  const outsideAfter = period.to > window.end;
+  const { before: outsideBefore, after: outsideAfter } = coverageGap(period, window);
   if (!outsideBefore && !outsideAfter) return "";
   const parts: string[] = [];
   if (outsideBefore) parts.push(`من ${period.from} إلى ${damascusDateFrom(window.start, -1)}`);
@@ -512,12 +518,22 @@ function coverageWarning(period: Period, window: SyncWindow, subject: CoverageSu
 // PR #205 بعد 244f209.)
 //
 // فصارا نداءً واحداً: من يعرض رقماً من سطور المبيعات يعرض حدود صدقه معه.
+//
+// ويُعاد مع النصّ **حكمٌ على الاكتمال** (`complete`). فالنصّ يكفي لرقم معروض،
+// ولا يكفي لحكم نهائي: تحذيرٌ ملحقٌ بجملة «لا حاجة شراء عاجلة» يُقرأ عملياً
+// كـ«لا حاجة»، والقراءة الناقصة هي بعينها ما يُدخل الجواب في ذلك الفرع.
+// (رصدها Codex على PR #205 بعد 85b4900.)
 async function salesCompleteness(period: Period, partial: boolean, window?: SyncWindow) {
-  return (partial
-    ? `\n\n> ⚠️ بلغت قراءة ${period.label} (${period.from} → ${period.to}) سقف الأمان ${HARD_ROW_CAP} سطر،`
-      + ` فالأرقام المشتقّة منها **جزئية وليست نهائية**. ضيّق الفترة.`
-    : "")
-    + coverageWarning(period, window === undefined ? await salesSyncWindow() : window, SALES_COVERAGE);
+  const resolved = window === undefined ? await salesSyncWindow() : window;
+  const gap = coverageGap(period, resolved);
+  return {
+    complete: !partial && !gap.missing && !gap.before && !gap.after,
+    note: (partial
+      ? `\n\n> ⚠️ بلغت قراءة ${period.label} (${period.from} → ${period.to}) سقف الأمان ${HARD_ROW_CAP} سطر،`
+        + ` فالأرقام المشتقّة منها **جزئية وليست نهائية**. ضيّق الفترة.`
+      : "")
+      + coverageWarning(period, resolved, SALES_COVERAGE)
+  };
 }
 
 async function readSales(period: Period, role: Role): Promise<{ rows: SalesRow[]; partial: boolean }> {
@@ -839,7 +855,7 @@ const TOOLS: Tool[] = [
           ok: true,
           text: `**مبيعات ${period.label} (${period.from} → ${period.to})**\nلا توجد أي فاتورة مسجّلة في هذه الفترة. آخر يوم فيه مبيعات مسجّلة هو **${String(any[0].sale_date)}**.`
             + `\n\nملاحظة: سطور المبيعات تصل عبر مزامنة الأمين، فإن كان اليوم ما زال في بدايته قد لا تكون فواتيره رُفعت بعد.`
-            + await salesCompleteness(period, current.partial),
+            + (await salesCompleteness(period, current.partial)).note,
           sources: ["sales_line_items", "sales_line_items_sync_state"],
           partial: current.partial
         };
@@ -881,8 +897,8 @@ const TOOLS: Tool[] = [
       }
 
       const window = await salesSyncWindow();
-      text += await salesCompleteness(period, current.partial, window);
-      if (comparePeriod) text += await salesCompleteness(comparePeriod, comparePartial, window);
+      text += (await salesCompleteness(period, current.partial, window)).note;
+      if (comparePeriod) text += (await salesCompleteness(comparePeriod, comparePartial, window)).note;
       return {
         ok: true,
         text,
@@ -1151,10 +1167,24 @@ const TOOLS: Tool[] = [
         .filter((row: Record<string, unknown>) => num(row.stockQty) > 0 && !sold.has(normalize(row.name ?? row.key)))
         .sort((a: Record<string, unknown>, b: Record<string, unknown>) => num(b.stockQty) - num(a.stockQty));
       if (!stagnant.length) {
+        // نفس منطق توصية الشراء: «لا يوجد صنف راكد» نفيٌ قاطع مبنيّ على أن
+        // قائمة المبيعات شاملة. وقراءة ناقصة تعني أصنافاً بيعت ولم تُقرأ —
+        // فيبقى الحكم غير قابل للبتّ، لا صحيحاً بتحذير.
+        const state = await salesCompleteness(period, sales.partial);
+        if (!state.complete) {
+          return {
+            ok: false,
+            text: `**الأصناف الراكدة — غير محسومة**\n`
+              + `لم يظهر صنف بمخزون بلا مبيعات خلال ${period.label}، لكن قراءة المبيعات المقارَن بها **غير مكتملة**.`
+              + `\n\nفلن أقول «لا يوجد صنف راكد» — الحكم يفترض قائمة مبيعات شاملة، وهي ليست كذلك هنا.`
+              + state.note,
+            sources: ["inventory_reports:ameen_sql_agent", "sales_line_items", "sales_line_items_sync_state"],
+            partial: sales.partial
+          };
+        }
         return {
           ok: true,
-          text: `**الأصناف الراكدة (${period.label})**\nكل مادة عليها مخزون سُجّلت لها مبيعات خلال ${period.label}. لا يوجد صنف راكد بهذا التعريف.`
-            + await salesCompleteness(period, sales.partial),
+          text: `**الأصناف الراكدة (${period.label})**\nكل مادة عليها مخزون سُجّلت لها مبيعات خلال ${period.label}. لا يوجد صنف راكد بهذا التعريف.`,
           sources: ["inventory_reports:ameen_sql_agent", "sales_line_items", "sales_line_items_sync_state"],
           partial: sales.partial
         };
@@ -1169,7 +1199,7 @@ const TOOLS: Tool[] = [
             .join("\n")
           + (stagnant.length > 25 ? `\n- _و${stagnant.length - 25} صنف آخر._` : "")
           + `\n\nالمقارنة بين مخزون ${report.report_date} وسطور المبيعات ${period.from} → ${period.to}.`
-          + await salesCompleteness(period, sales.partial),
+          + (await salesCompleteness(period, sales.partial)).note,
         sources: ["inventory_reports:ameen_sql_agent", "sales_line_items", "sales_line_items_sync_state"],
         partial: sales.partial,
         asOf: report.created_at
@@ -1197,7 +1227,7 @@ const TOOLS: Tool[] = [
         return {
           ok: false,
           text: `عندي حالة المخزون بتاريخ ${report.report_date}، لكن لا توجد سطور مبيعات في ${period.label} لأحسب منها معدّل الاستهلاك. بدون معدّل بيع حقيقي لا أستطيع ترتيب أولوية الشراء، ولن أرتّبها بالتخمين.`
-            + await salesCompleteness(period, sales.partial),
+            + (await salesCompleteness(period, sales.partial)).note,
           sources: ["inventory_reports:ameen_sql_agent", "sales_line_items", "sales_line_items_sync_state"]
         };
       }
@@ -1228,12 +1258,25 @@ const TOOLS: Tool[] = [
 
       if (!ranked.length) {
         // «لا حاجة شراء عاجلة» حكمٌ نهائي يوقف تصرّفاً. وقراءةٌ ناقصة تبخس
-        // معدّل البيع فتُدخل الجواب في هذا الفرع بالذات وتكتم طلباً لازماً —
-        // فحدود صدق البيانات ألزم هنا منها في أي فرع آخر.
+        // معدّل البيع فتُدخل الجواب في هذا الفرع بالذات وتكتم طلباً لازماً.
+        // فالتحذير الملحق لا يكفي هنا — يُقرأ الجواب «لا حاجة» ويُطوى معه.
+        // الحكم يُحجب، ويُقال إن المعطيات لا تكفي للبتّ.
+        const state = await salesCompleteness(period, sales.partial);
+        if (!state.complete) {
+          return {
+            ok: false,
+            text: `**توصية الشراء — غير محسومة**\n`
+              + `لم يظهر صنف تحت 21 يوم تغطية حسب معدّل ${period.label}، لكن قراءة المبيعات التي بُني عليها هذا المعدّل **غير مكتملة**.`
+              + ` والنقص يخفض المعدّل، وهو بعينه ما قد يكون أدخل الجواب في هذه النتيجة.`
+              + `\n\nفلن أقول «لا حاجة شراء عاجلة» — لا أملك ما يكفي للبتّ، وقولها قد يكتم طلباً لازماً.`
+              + state.note,
+            sources: ["inventory_reports:ameen_sql_agent", "sales_line_items", "sales_line_items_sync_state"],
+            partial: sales.partial
+          };
+        }
         return {
           ok: true,
-          text: `**توصية الشراء**\nلا يوجد صنف يبيع فعلياً ومخزونه يكفي أقل من 21 يوماً حسب معدّل ${period.label}. لا حاجة شراء عاجلة بهذا المعيار.`
-            + await salesCompleteness(period, sales.partial),
+          text: `**توصية الشراء**\nلا يوجد صنف يبيع فعلياً ومخزونه يكفي أقل من 21 يوماً حسب معدّل ${period.label}. لا حاجة شراء عاجلة بهذا المعيار.`,
           sources: ["inventory_reports:ameen_sql_agent", "sales_line_items", "sales_line_items_sync_state"],
           partial: sales.partial
         };
@@ -1250,7 +1293,7 @@ const TOOLS: Tool[] = [
               + (e.negative ? " ⚠️ الرصيد **سالب** في الأمين — يحتاج مراجعة إدخال قبل الشراء" : ""))
             .join("\n")
           + `\n\nهذه قراءة وتحليل فقط — لا يُنشئ المساعد أي طلب شراء ولا يعدّل أي مخزون.`
-          + await salesCompleteness(period, sales.partial),
+          + (await salesCompleteness(period, sales.partial)).note,
         sources: ["inventory_reports:ameen_sql_agent", "sales_line_items", "sales_line_items_sync_state"],
         partial: sales.partial,
         asOf: report.created_at
@@ -1333,7 +1376,7 @@ const TOOLS: Tool[] = [
           }
         }
       }
-      text += await salesCompleteness(period, sales.partial);
+      text += (await salesCompleteness(period, sales.partial)).note;
       return {
         ok: true,
         text,
@@ -1639,7 +1682,7 @@ const TOOLS: Tool[] = [
         const s = summarizeSales(today.rows);
         return `**مبيعات اليوم**: ${money(s.total)} على ${s.bills} فاتورة.`
           + (s.bills === 0 ? " (لم تُرفع فواتير اليوم بعد أو لا يوجد بيع)" : "")
-          + await salesCompleteness(period, today.partial);
+          + (await salesCompleteness(period, today.partial)).note;
       });
 
       await run("الذمم", async () => {

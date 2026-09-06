@@ -734,19 +734,67 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
     { id: 1, sale_date: today, bill_no: "1", bill_type: "retail", item_name: "ماستر طويل ورق", qty: 1, line_total: 10, unit_cost: 9, customer_name: "س" }
   ];
 
+  // متابعة Codex بعد 85b4900: التحذير المُلحق لا يكفي — الحكم نفسه يُحجب.
+  // تحذيرٌ بجانب «لا حاجة شراء عاجلة» يُقرأ عملياً كـ«لا حاجة»، والقراءة
+  // الناقصة هي بعينها ما يُدخل الجواب في ذلك الفرع.
   const a = await loadAssistant({ fixtures });
-  const advice = String((await a.ask(TOKENS.owner, "ماذا يجب أن أشتري؟")).body.reply);
-  assert.ok(/لا حاجة شراء عاجلة/.test(advice), `لم يدخل فرع الحكم النهائي:\n${advice}`);
-  assert.ok(/لا يوجد سجل مزامنة مكتمل/.test(advice),
-    `أصدر «لا حاجة شراء» عن بيانات غير متحقَّقة بلا إعلان:\n${advice}`);
+  const adviceResult = await a.ask(TOKENS.owner, "ماذا يجب أن أشتري؟");
+  const advice = String(adviceResult.body.reply);
+  // الصيغة المُثبِتة تحديداً: نصّ الامتناع يقتبس العبارة عمداً («فلن أقول …»)،
+  // فمطابقتها وحدها كانت تُسقط الاختبار على الجواب الصحيح.
+  assert.ok(!/لا حاجة شراء عاجلة بهذا المعيار/.test(advice), `أصدر حكم «لا حاجة شراء» عن بيانات ناقصة:\n${advice}`);
+  assert.equal(adviceResult.body.answered, false, "ادّعى حسم توصية الشراء عن بيانات غير متحقَّقة");
+  assert.ok(/غير محسومة/.test(advice), `لم يمتنع صراحةً عن البتّ:\n${advice}`);
+  assert.ok(/لا يوجد سجل مزامنة مكتمل/.test(advice), `لم يذكر سبب الامتناع:\n${advice}`);
   assert.ok(a.metrics.tablesRead.has("sales_line_items_sync_state"), "لم يقرأ سجل المزامنة في هذا الفرع");
 
   const b = await loadAssistant({ fixtures });
-  const stagnant = String((await b.ask(TOKENS.owner, "ما الأصناف الراكدة؟")).body.reply);
-  assert.ok(/لا يوجد صنف راكد/.test(stagnant), `لم يدخل فرع «لا صنف راكد»:\n${stagnant}`);
-  assert.ok(/لا يوجد سجل مزامنة مكتمل/.test(stagnant),
-    `أصدر «لا صنف راكد» عن بيانات غير متحقَّقة بلا إعلان:\n${stagnant}`);
-  ok("أحكام «لا شيء مطلوب» في الشراء والراكد تحمل حدود صدق بياناتها");
+  const stagnantResult = await b.ask(TOKENS.owner, "ما الأصناف الراكدة؟");
+  const stagnant = String(stagnantResult.body.reply);
+  assert.ok(!/لا يوجد صنف راكد بهذا التعريف/.test(stagnant), `أصدر حكم «لا صنف راكد» عن بيانات ناقصة:\n${stagnant}`);
+  assert.equal(stagnantResult.body.answered, false, "ادّعى حسم الأصناف الراكدة عن بيانات غير متحقَّقة");
+  assert.ok(/غير محسومة/.test(stagnant), `لم يمتنع صراحةً عن البتّ:\n${stagnant}`);
+
+  // وبنافذة تغطّي الفترة كاملةً يُحسم الحكم طبيعياً — التشديد لا يشلّ الأداة
+  const covered = {
+    ...fixtures,
+    sales_line_items_sync_state: [{
+      source: "ameen_sales_line_items",
+      window_start: new Date(Date.now() + 180 * 60_000 - 90 * 86_400_000).toISOString().slice(0, 10),
+      window_end: today,
+      row_count: 1,
+      completed_at: new Date().toISOString()
+    }]
+  };
+  const c = await loadAssistant({ fixtures: covered });
+  const settled = await c.ask(TOKENS.owner, "ماذا يجب أن أشتري؟");
+  assert.ok(/لا حاجة شراء عاجلة/.test(String(settled.body.reply)),
+    `لم يحسم الحكم رغم اكتمال التغطية:\n${String(settled.body.reply)}`);
+  assert.equal(settled.body.answered, true, "امتنع عن البتّ رغم اكتمال التغطية");
+  const d = await loadAssistant({ fixtures: covered });
+  const settledStagnant = await d.ask(TOKENS.owner, "ما الأصناف الراكدة؟");
+  assert.ok(/لا يوجد صنف راكد بهذا التعريف/.test(String(settledStagnant.body.reply)),
+    "لم يحسم «لا صنف راكد» رغم اكتمال التغطية");
+  // والمُشغِّل الثاني الذي سمّته المراجعة: بلوغ سقف الصفوف. النافذة هنا كاملة،
+  // والنقص من التصفيح وحده — ويجب أن يحجب الحكم كما يحجبه غياب النافذة.
+  const many = [];
+  for (let i = 0; i < 60; i += 1) {
+    many.push({ id: i + 1, sale_date: today, bill_no: `b${i}`, bill_type: "retail",
+      item_name: "ماستر طويل ورق", qty: 1, line_total: 10, unit_cost: 9, customer_name: "س" });
+  }
+  const truncated = { ...covered, sales_line_items: many };
+  const e = await loadAssistant({ fixtures: truncated, hardRowCap: 40 });
+  const capped = await e.ask(TOKENS.owner, "ماذا يجب أن أشتري؟");
+  const cappedText = String(capped.body.reply);
+  assert.ok(!/لا حاجة شراء عاجلة بهذا المعيار/.test(cappedText),
+    `أصدر حكم «لا حاجة شراء» عن قراءة مبتورة رغم اكتمال النافذة:\n${cappedText}`);
+  assert.equal(capped.body.answered, false, "ادّعى حسم توصية الشراء عن قراءة مبتورة");
+  assert.ok(/سقف الأمان/.test(cappedText), `لم يذكر بلوغ سقف الصفوف سبباً:\n${cappedText}`);
+
+  const f = await loadAssistant({ fixtures: truncated, hardRowCap: 40 });
+  const cappedStagnant = await f.ask(TOKENS.owner, "ما الأصناف الراكدة؟");
+  assert.equal(cappedStagnant.body.answered, false, "ادّعى حسم الأصناف الراكدة عن قراءة مبتورة");
+  ok("أحكام «لا شيء مطلوب» تُحجب عند نقص المعطيات — بغياب النافذة أو ببلوغ سقف الصفوف — وتُحسم عند اكتمالها");
 }
 
 // ── م) كل مستهلك لسطور المبيعات يمرّ بذيل الاكتمال — لا استثناء ─────────────
