@@ -57,8 +57,10 @@ $startAt = [datetime]::Today.Add([timespan]::ParseExact($StartAt, 'hh\:mm', $nul
 if ($startAt -le (Get-Date)) { $startAt = $startAt.AddDays(1) }
 $trigger = New-ScheduledTaskTrigger -Daily -At $startAt
 $trigger.Repetition = (New-ScheduledTaskTrigger -Once -At $startAt `
-    -RepetitionInterval (New-TimeSpan -Hours $IntervalHours) `
-    -RepetitionDuration ([timespan]::MaxValue)).Repetition
+    -RepetitionInterval (New-TimeSpan -Hours $IntervalHours)).Repetition
+# فراغ = تكرار بلا نهاية. TimeSpan::MaxValue يرفضه Task Scheduler عند التسجيل
+# فتفشل المهمة بصمت ولا تُنشأ أصلاً — نفس السابقة في register-ameen-sync-watchdog.ps1
+$trigger.Repetition.Duration = ""
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries `

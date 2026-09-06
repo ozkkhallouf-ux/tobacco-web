@@ -40,6 +40,22 @@ check("مهمة اللقطة تتكرر خلال اليوم ولا تعتمد ع
     "بقي البارامتر اليومي القديم");
 });
 
+check("مدّة التكرار تستعمل الصيغة التي يقبلها Task Scheduler", () => {
+  // [timespan]::MaxValue يرفضه Task Scheduler عند التسجيل فلا تُنشأ المهمة
+  // إطلاقاً — عطل صامت يُبطل الإصلاح كله. السابقة المعتمدة في المستودع:
+  // register-ameen-sync-watchdog.ps1 يضبط Repetition.Duration = "".
+  for (const file of [
+    "tools/register-purchase-item-snapshot-task.ps1",
+    "tools/register-supplier-obligations-task.ps1"
+  ]) {
+    const body = read(file);
+    assert.doesNotMatch(body, /-RepetitionDuration\s*\(\[timespan\]::MaxValue\)/,
+      `${file} يستعمل MaxValue الذي يرفضه Task Scheduler`);
+    assert.match(body, /\$trigger\.Repetition\.Duration\s*=\s*""/,
+      `${file} لا يضبط مدّة تكرار لا نهائية بالصيغة المدعومة`);
+  }
+});
+
 // ------------------------------------------- التزامات الموردين: لا مسح صامت
 const obligationsProducer = read("tools/push-supplier-obligations.ps1");
 const obligationsTask = read("tools/register-supplier-obligations-task.ps1");
@@ -82,6 +98,18 @@ check("سكريبتات هذا الإصلاح لا تكتب على قاعدة ا
     assert.doesNotMatch(body, /\b(INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM)\b(?![^\n]*rest\/v1)/i,
       `${file} يحتوي عبارة كتابة على SQL`);
   }
+});
+
+check("لا التزام مالي مُلفَّق من تقرير فواتير الشراء", () => {
+  const engine = read("src/decision-engine.js");
+  // التقرير يجمّع بالاسم بلا معرّف، ولا فاتورة فيه تحمل paidAmount، ويحمل
+  // مرتجعات بعلم isReturn — فأي رقم يُشتقّ منه التزاماً يكون مبنياً على عدم.
+  assert.doesNotMatch(engine, /purchaseReportObligations/,
+    "عاد الارتداد المالي المُلفَّق من تقرير الفواتير");
+  assert.doesNotMatch(engine, /currency:\s*"USD"/,
+    "عملة مثبَّتة يدوياً في اشتقاق التزام");
+  assert.match(engine, /obligationsState/,
+    "لا إعلان صريح عن حالة مصدر الالتزامات");
 });
 
 // ------------------------------------------------- تسجيل الأصول في الواجهة

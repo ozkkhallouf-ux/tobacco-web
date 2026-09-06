@@ -51,7 +51,7 @@
 
   function purchaseModel() {
     const api = scoring();
-    if (!api) return { items: [], duplicateCount: 0, unidentifiedCount: 0, nameMatchedCount: 0, valueScaleUsed: false, urgentCount: 0, dormantCount: 0 };
+    if (!api) return { items: [], duplicateCount: 0, unidentifiedCount: 0, nameMatchedCount: 0, valueScaleUsed: false, urgentCount: 0, dormantCount: 0, idleGateActive: false, idleGateNote: "" };
     return api.scoreItems({
       items: Array.isArray(state?.approvedPriceItems) ? state.approvedPriceItems : [],
       snapshots: snapshotRows(),
@@ -59,46 +59,43 @@
     });
   }
 
-  function invoiceRemaining(invoice) {
-    const explicit = invoice.remaining ?? invoice.remainingTotal ?? invoice.remaining_total;
-    if (hasNumber(explicit)) return Math.max(0, num(explicit));
-    const total = invoice.total ?? invoice.grandTotal ?? invoice.grand_total;
-    const paid = invoice.paidAmount ?? invoice.paid_amount ?? invoice.paidTotal ?? invoice.paid_total ?? invoice.paymentAmount ?? invoice.payment_amount;
-    if (hasNumber(total) && hasNumber(paid)) return Math.max(0, num(total) - num(paid));
-    return null;
-  }
-
-  // التزامات الموردين من تقرير فواتير الشراء — مصدر احتياطي يبقى معروضاً حين
-  // يكون جدول supplier_obligations فارغاً، بدل أن يُمحى القسم بالكامل.
-  function purchaseReportObligations() {
-    const groups = Array.isArray(state?.poAmeenReport?.items) ? state.poAmeenReport.items : [];
-    return groups.map((supplier) => {
-      const invoices = Array.isArray(supplier.invoices) ? supplier.invoices : [];
-      const known = invoices.map(invoiceRemaining).filter((value) => value !== null);
-      return {
-        supplierName: supplier.name || "مورد",
-        supplierGuid: supplier.guid || supplier.supplierGuid || supplier.supplier_guid || "",
-        amountDue: known.reduce((sum, value) => sum + value, 0),
-        currency: "USD",
-        invoiceCount: invoices.length,
-        knownCount: known.length,
-        complete: invoices.length > 0 && known.length === invoices.length
-      };
-    }).filter((row) => row.invoiceCount > 0);
-  }
-
+  // التزامات الموردين تُقرأ من جدولها المخصّص وحده.
+  //
+  // كان هنا ارتداد يبني الالتزام من تقرير فواتير الشراء عند فراغ الجدول، وأُزيل
+  // بعد ثلاث ملاحظات قياسية عليه:
+  //   • التقرير يجمّع الموردين بالاسم فقط (`$name = $b.supplier` في
+  //     pull-purchase-invoices-from-ameen.ps1) بلا معرّف، بينما مجموعات الأصناف
+  //     مفاتيحها معرّفات — فالالتزام ما كان ليرتبط بصاحبه أصلاً ويظهر «—» دائماً.
+  //   • كان يجمع كل الفواتير برقم واحد ويسمّيه دولاراً، متجاهلاً حقل currency
+  //     الحقيقي وعلم isReturn — فمرتجع شراء كان **يزيد** الالتزام بدل خفضه
+  //     (قياس على الإنتاج: فاتورة مرتجعة واحدة من 108).
+  //   • ولا فاتورة واحدة من 108 تحمل paidAmount، فالباقي غير معروف لأي منها،
+  //     وأي رقم يُعرض هنا يكون مبنياً على عدم.
+  //
+  // البديل ليس الصمت: القسم يعرض الموردين بأولوية الشراء كاملةً، وعمود الالتزام
+  // يقول صراحةً إن مصدره لم يصل بعد.
   function supplierModel(purchase) {
     const api = scoring();
     if (!api) return { suppliers: [], obligationCount: 0, linkedSupplierCount: 0 };
     const live = Array.isArray(window.ozkSupplierObligations) ? window.ozkSupplierObligations : [];
-    // الالتزام المالي يُقرأ من الجدول المخصّص حين توفّر، وإلا من تقرير الفواتير.
-    // في كلتا الحالتين لا يدخل ترتيب أولوية الشراء.
-    const obligations = live.length ? live : purchaseReportObligations().filter((row) => row.complete);
     return api.scoreSuppliers({
       items: purchase.items,
-      obligations,
+      obligations: live,
       now: new Date()
     });
+  }
+
+  function obligationsState() {
+    const state = window.ozkSupplierObligationsState;
+    if (!state?.loaded) return { known: false, note: "مصدر الالتزامات المالية لم يُقرأ بعد." };
+    if (state.error) return { known: false, note: "تعذّرت قراءة الالتزامات المالية — الأولوية أدناه غير متأثرة." };
+    if (!state.count) {
+      return {
+        known: true,
+        note: "جدول الالتزامات المالية فارغ — لم تُشغَّل مهمة سحب أرصدة الموردين بعد. أولوية الشراء أدناه لا تعتمد عليه إطلاقاً."
+      };
+    }
+    return { known: true, note: "" };
   }
 
   function riskBadge(level) {
@@ -180,6 +177,7 @@
     const collection = collectionModel();
     const purchase = purchaseModel();
     const suppliers = supplierModel(purchase);
+    const obligations = obligationsState();
     const health = snapshotHealth();
     // عند قِدَم اللقطة تبقى الأرقام معروضة للتشخيص، لكن عدّاد «شراء عاجل» لا
     // يدّعي رقماً موثوقاً — الادعاء بالحداثة هو ما أخفى العطل ستة أيام.
@@ -208,7 +206,7 @@
       <td dir="ltr">${(row.salesImportance * 100).toFixed(1)}٪</td>
       <td dir="ltr"><strong>${escape(row.score)}</strong>/100</td>
       <td>${supplierBadge(row.priority)}</td>
-      <td dir="ltr">${row.obligationAmount === null ? '<span class="muted">—</span>' : money(row.obligationAmount)}</td>
+      <td dir="ltr">${row.obligationAmount === null ? `<span class="muted">${obligations.known && obligations.note ? "غير متاح" : "—"}</span>` : money(row.obligationAmount)}</td>
     </tr>`).join("");
 
     const purchaseRows = purchase.items.slice(0, 12).map((row) => `<tr>
@@ -227,6 +225,9 @@
     const dedupeNote = purchase.duplicateCount > 0
       ? `<p class="decision-note">دُمج ${escape(purchase.duplicateCount)} سجلاً مكرراً بالمعرّف قبل التقييم، فلا يظهر الصنف الواحد مرتين. التكرار في المصدر لم يُحذف — يحتاج تنظيفاً منفصلاً بموافقتك.</p>`
       : "";
+    const idleGateNote = purchase.idleGateNote
+      ? `<p class="decision-note">${escape(purchase.idleGateNote)}</p>`
+      : "";
     const nameMatchNote = purchase.nameMatchedCount > 0
       ? `<p class="decision-note">${escape(purchase.nameMatchedCount)} صنفاً بلا معرّف مستقر ويُطابَق بالاسم — هوية هشّة أمام إعادة التسمية، تستحق مراجعة.</p>`
       : "";
@@ -244,8 +245,8 @@
         </div>
       </section>
       <section class="panel wide decision-section"><div class="panel-title-row"><div><h2 style="margin:0">💵 التحصيل والخطر الائتماني</h2></div><button class="button secondary" type="button" data-route="balances">فتح أرصدة الزبائن</button></div><div class="inv-table-wrap"><table class="inv-table"><thead><tr><th>الزبون</th><th>الرصيد</th><th>الحد المعتمد</th><th>آخر دفعة</th><th>أيام بلا دفع</th><th>الدرجة</th><th>الحالة</th><th>السبب</th></tr></thead><tbody>${collectionRows || '<tr><td colspan="8" class="muted">لا توجد أرصدة مدينة متاحة حالياً.</td></tr>'}</tbody></table></div></section>
-      <section class="panel wide decision-section"><div class="panel-title-row"><div><h2 style="margin:0">🚚 أولوية الموردين</h2></div><button class="button secondary" type="button" data-route="purchases">فتح المشتريات</button></div><div class="inv-table-wrap"><table class="inv-table"><thead><tr><th>#</th><th>المورد</th><th>أصناف عاجلة</th><th>نافد</th><th>فجوة التغطية</th><th>وزن المبيعات</th><th>أولوية الشراء</th><th>الحالة</th><th>الالتزام المالي</th></tr></thead><tbody>${supplierRows || '<tr><td colspan="9" class="muted">لا تتوفر أصناف مرتبطة بمورد لحساب أولوية الشراء حالياً.</td></tr>'}</tbody></table></div><p class="decision-note">أولوية الشراء تُحسب من نواقص أصناف المورد وسرعة دورانها وفجوة تغطيتها — <strong>لا من رصيده المالي</strong>. الالتزام المالي عمود مستقل للعلم فقط، ومورد رصيده صفر قد تكون أولويته عالية.</p></section>
-      <section class="panel wide decision-section"><div class="panel-title-row"><div><h2 style="margin:0">📦 أولوية الأصناف</h2></div><button class="button secondary" type="button" data-route="warehouses">فتح المستودعات</button></div><div class="inv-table-wrap"><table class="inv-table"><thead><tr><th>الصنف</th><th>المخزون</th><th>مبيع 30 يوم</th><th>معدل يومي</th><th>التغطية</th><th>آخر بيع</th><th>الدرجة</th><th>الحالة</th><th>كمية مقترحة</th><th>السبب</th></tr></thead><tbody>${purchaseRows || '<tr><td colspan="10" class="muted">لا توجد أصناف معتمدة متاحة حالياً.</td></tr>'}</tbody></table></div><p class="decision-note">الكمية المقترحة قيمة مساعدة لبلوغ ${escape(window.ozkDecisionScoring?.TUNABLES?.PURCHASE_TARGET_COVERAGE_DAYS ?? 14)} يوم تغطية — وليست أمر شراء، ولا يُنشأ أي طلب تلقائياً.</p>${dedupeNote}${nameMatchNote}</section>
+      <section class="panel wide decision-section"><div class="panel-title-row"><div><h2 style="margin:0">🚚 أولوية الموردين</h2></div><button class="button secondary" type="button" data-route="purchases">فتح المشتريات</button></div><div class="inv-table-wrap"><table class="inv-table"><thead><tr><th>#</th><th>المورد</th><th>أصناف عاجلة</th><th>نافد</th><th>فجوة التغطية</th><th>وزن المبيعات</th><th>أولوية الشراء</th><th>الحالة</th><th>الالتزام المالي</th></tr></thead><tbody>${supplierRows || '<tr><td colspan="9" class="muted">لا تتوفر أصناف مرتبطة بمورد لحساب أولوية الشراء حالياً.</td></tr>'}</tbody></table></div><p class="decision-note">أولوية الشراء تُحسب من نواقص أصناف المورد وسرعة دورانها وفجوة تغطيتها — <strong>لا من رصيده المالي</strong>. الالتزام المالي عمود مستقل للعلم فقط، ومورد رصيده صفر قد تكون أولويته عالية.${obligations.note ? ` <strong>${escape(obligations.note)}</strong>` : ""}</p></section>
+      <section class="panel wide decision-section"><div class="panel-title-row"><div><h2 style="margin:0">📦 أولوية الأصناف</h2></div><button class="button secondary" type="button" data-route="warehouses">فتح المستودعات</button></div><div class="inv-table-wrap"><table class="inv-table"><thead><tr><th>الصنف</th><th>المخزون</th><th>مبيع 30 يوم</th><th>معدل يومي</th><th>التغطية</th><th>آخر بيع</th><th>الدرجة</th><th>الحالة</th><th>كمية مقترحة</th><th>السبب</th></tr></thead><tbody>${purchaseRows || '<tr><td colspan="10" class="muted">لا توجد أصناف معتمدة متاحة حالياً.</td></tr>'}</tbody></table></div><p class="decision-note">الكمية المقترحة قيمة مساعدة لبلوغ ${escape(window.ozkDecisionScoring?.TUNABLES?.PURCHASE_TARGET_COVERAGE_DAYS ?? 14)} يوم تغطية — وليست أمر شراء، ولا يُنشأ أي طلب تلقائياً.</p>${idleGateNote}${dedupeNote}${nameMatchNote}</section>
     `);
   }
 

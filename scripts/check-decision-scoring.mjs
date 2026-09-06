@@ -223,6 +223,22 @@ check("غياب سعر موثوق يعيد توزيع الوزن ولا يوقف
   assert.ok(byName(unpriced, "أ").score > 0, "النموذج انهار بغياب السعر");
 });
 
+check("بوابة الركود الزمنية تُعلن تعطّلها حين يغيب تاريخ آخر بيع", () => {
+  const withoutDate = run(
+    [item(50, "بلا تاريخ")],
+    [snap(50, "بلا تاريخ", { stockUnit1: 0, unitsSold30d: 300 })]
+  );
+  assert.equal(withoutDate.idleGateActive, false, "ادّعت البوابة أنها عاملة بلا تاريخ");
+  assert.match(withoutDate.idleGateNote, /معطَّل/);
+
+  const withDate = run(
+    [item(51, "بتاريخ")],
+    [snap(51, "بتاريخ", { stockUnit1: 0, unitsSold30d: 300, lastSaleDate: daysAgo(1) })]
+  );
+  assert.equal(withDate.idleGateActive, true);
+  assert.equal(withDate.idleGateNote, "");
+});
+
 // ---------------------------------------------------------------- الموردون
 console.log("الموردون:");
 

@@ -455,8 +455,17 @@
       || (b.dailySales ?? -1) - (a.dailySales ?? -1)
       || a.name.localeCompare(b.name, "ar"));
 
+    // بوابة الركود شقّان: حدّ المعدّل اليومي، وحدّ الزمن منذ آخر بيع. الشق
+    // الثاني يعمل فقط إن حملت اللقطة lastSaleDate — وهو عمود لم يُطبَّق بعد
+    // (supabase/proposed/01). يُعلَن هنا صراحةً كي لا يُفترض أنه عامل: صنف يبيع
+    // فوق الحد الأدنى لكنه لم يُطلب منذ شهر يمرّ من البوابة اليوم.
+    const idleGateActive = prepared.some((entry) => entry.facts.idleDays !== null);
+
     return Object.freeze({
       items: Object.freeze(scored),
+      idleGateActive,
+      idleGateNote: idleGateActive ? "" :
+        "حدّ الركود الزمني معطَّل — تاريخ آخر بيع غير متوفر في اللقطة، فالاستبعاد يعتمد على المعدّل اليومي وحده.",
       duplicateCount: deduped.duplicateCount,
       unidentifiedCount: deduped.unidentifiedCount,
       nameMatchedCount: scored.filter((item) => item.identityBasis === "name").length,
