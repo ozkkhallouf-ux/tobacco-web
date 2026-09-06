@@ -27,8 +27,10 @@ const appJs = readFileSync(new URL("../src/app.js", import.meta.url), "utf8");
 
 const PATTERNS = {
   DOC_TYPE_LABELS: /const DOC_TYPE_LABELS = \{[\s\S]*?\n\};/,
-  sanitizeDocumentTitle: /function sanitizeDocumentTitle\(value\) \{[\s\S]*?\n\}\n/,
+  DOC_TITLE_REGEXES: /const DOC_TITLE_INVISIBLE = [^\n]*\nconst DOC_TITLE_DIACRITICS = [^\n]*\n/,
+  sanitizeDocumentTitle: /function sanitizeDocumentTitle\(value, max = 80\) \{[\s\S]*?\n\}\n/,
   fileDateLabel: /function fileDateLabel\(isoDate\) \{[\s\S]*?\n\}\n/,
+  NUMBERLESS_FILE_DOC_TYPES: /const NUMBERLESS_FILE_DOC_TYPES = [^\n]*\n/,
   archiveDocumentTitle: /function archiveDocumentTitle\(docType, meta\) \{[\s\S]*?\n\}\n/,
   withDocumentTitle: /function withDocumentTitle\(html, title\) \{[\s\S]*?\n\}\n/,
   salesTotals: /function salesTotals\(\) \{[\s\S]*?\n\}\n/,
@@ -82,14 +84,14 @@ const {
 test("normal invoice filename includes customer + invoice number", () => {
   const meta = { party: "حسن عباس", number: "562", date: "2026-08-31" };
   const title = archiveDocumentTitle("invoice", meta);
-  assert.equal(title, "فاتورة - حسن عباس - رقم 562 - 31-08-2026");
+  assert.equal(title, "فاتورة - حسن عباس - رقم 562 - 2026-08-31");
   assert.ok(title.includes("حسن عباس"), "اسم الزبون مفقود");
   assert.ok(title.includes("562"), "رقم الفاتورة مفقود");
 });
 
 test("return invoice filename includes customer + invoice number", () => {
   const title = archiveDocumentTitle("return_invoice", { party: "سامر", number: "44", date: "2026-08-31" });
-  assert.equal(title, "فاتورة مرتجع - سامر - رقم 44 - 31-08-2026");
+  assert.equal(title, "فاتورة مرتجع - سامر - رقم 44 - 2026-08-31");
   assert.ok(title.startsWith("فاتورة مرتجع"), "المرتجع يجب أن يبقى مستقلاً عن الفاتورة العادية");
 });
 
@@ -97,7 +99,8 @@ test("بلا تاريخ موثوق: الاسم يبقى صحيحاً بلا حش
   assert.equal(archiveDocumentTitle("invoice", { party: "حسن عباس", number: "562" }),
     "فاتورة - حسن عباس - رقم 562");
   assert.equal(fileDateLabel("غير صالح"), "");
-  assert.equal(fileDateLabel("2026-08-31"), "31-08-2026");
+  assert.equal(fileDateLabel("2026-08-31"), "2026-08-31");
+  assert.equal(fileDateLabel("2026-8-31"), "", "صيغة غير ISO لا تُقبل");
 });
 
 test("Arabic customer names preserved", () => {
@@ -124,8 +127,8 @@ test("invalid filename characters sanitized", () => {
 
 test("عنوان المستند يُفرض فعلياً داخل HTML المطبوع (وهو ما يقرأه كروم)", () => {
   const doc = "<!doctype html><html><head><meta charset=\"utf-8\"><title>فاتورة مبيعات 562</title></head><body>x</body></html>";
-  const out = withDocumentTitle(doc, "فاتورة - حسن عباس - رقم 562 - 31-08-2026");
-  assert.ok(out.includes("<title>فاتورة - حسن عباس - رقم 562 - 31-08-2026</title>"));
+  const out = withDocumentTitle(doc, "فاتورة - حسن عباس - رقم 562 - 2026-08-31");
+  assert.ok(out.includes("<title>فاتورة - حسن عباس - رقم 562 - 2026-08-31</title>"));
   assert.ok(!out.includes("<title>فاتورة مبيعات 562</title>"), "العنوان القديم لم يُستبدل");
   // مستند بلا <title>: يُحقن داخل <head>.
   const bare = "<!doctype html><html><head></head><body>y</body></html>";
@@ -152,7 +155,7 @@ test("exported filename metadata === archive metadata", () => {
   assert.ok(!/manualArchiveMeta/.test(appJs), "بقي أثر من مسار الفاتورة الميت");
 
   // ملف التنزيل المباشر لفاتورة المبيعات يستعمل نفس الكائن أيضاً.
-  assert.match(appJs, /const fileName = `\$\{archiveDocumentTitle\("invoice", pdfArchiveMeta\)\}\.pdf`;/);
+  assert.match(appJs, /const fileName = documentFileName\("invoice", pdfArchiveMeta\);/);
   assert.match(appJs, /archiveToICloud\("invoice", blob, pdfArchiveMeta\);/);
 
   // العنوان يصل فعلاً إلى المستند المطبوع لا إلى سمة الإطار وحدها.

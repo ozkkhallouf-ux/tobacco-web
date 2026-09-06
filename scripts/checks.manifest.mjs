@@ -34,6 +34,7 @@ export const CHECKS = [
   'check-decision-pipeline-safety.mjs',
   'check-decision-scoring.mjs',
   'check-docker-dev-port-binding.mjs',
+  'check-document-filenames.mjs',
   'check-error-monitoring.mjs',
   'check-expense-entries-security.mjs',
   'check-health-check-logic.mjs',

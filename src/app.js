@@ -1355,7 +1355,9 @@ async function printOverdueReport() {
       </table>
       <p style="margin-top:16px;font-size:0.82rem;color:#888">المجموع: ${overdue.length} زبون / أكثر من 7 أيام: ${overdue.filter((x) => x.daysSince !== null && x.daysSince >= 7).length}</p>
     </div>`;
-  const filename = `ozk-overdue-${new Date().toISOString().slice(0, 10)}.pdf`;
+  // الاسم من القاعدة المركزية (كان بالإنكليزية بينما نسخته المؤرشفة بالعربية).
+  const overdueArchiveMeta = { title: "تقرير الزبائن المتأخرين", date: todayIsoDate() };
+  const filename = documentFileName("other_report", overdueArchiveMeta);
   if (isHandheldDevice()) {
     try {
       const blob = await createPortablePdfBlob(html, filename, {
@@ -1372,7 +1374,7 @@ async function printOverdueReport() {
     return;
   }
 
-  archiveToICloud("other_report", html, { title: "تقرير الزبائن المتأخرين", date: todayIsoDate() });
+  archiveToICloud("other_report", html, overdueArchiveMeta);
   const container = document.createElement("div");
   container.innerHTML = html;
   document.body.appendChild(container);
@@ -3287,8 +3289,16 @@ async function openFreshPricePreview(useSyria = false, theme = state.bulletinPdf
 // إطار الطباعة المخفي يبقى في الصفحة حتى afterprint أو حتى المهلة الاحتياطية
 // (60 ثانية) — وعلى iOS كثيراً ما لا يصل afterprint. إغلاق المعاينة يعني أن
 // المستخدم انتهى، فنُسقط الإطار فوراً بدل تركه ومعه مستند النشرة كاملاً بالذاكرة.
+// حذفُ الإطار وحده لا يكفي: حجز عنوان الطباعة يُحرَّر في `cleanup` الخاص به،
+// و`cleanup` لا يصل إلا عبر `afterprint` أو السقف الاحتياطي — وكلاهما لا
+// يُجدَّل إلا **بعد** أن تُستدعى الطباعة فعلاً. فإغلاق المعاينة على الهاتف قبل
+// ذلك (زر رجوع أو إغلاق خلال أول ربع ثانية) كان يترك اسم المستند — واسم الزبون
+// معه — في عنوان التبويب إلى أن تُعاد الطباعة أو تُحمَّل الصفحة من جديد.
 function removePrintFrame() {
-  document.querySelectorAll("iframe[data-print-frame]").forEach((frame) => frame.remove());
+  document.querySelectorAll("iframe[data-print-frame]").forEach((frame) => {
+    if (typeof frame.ozkPrintCleanup === "function") frame.ozkPrintCleanup();
+    frame.remove();
+  });
 }
 
 function closePricePreview() {
@@ -3346,8 +3356,17 @@ function bulletinDocumentTitle(dataset) {
   return dataset.useSyria ? "نشرة المفرّق (ليرة)" : "نشرة الجملة (دولار)";
 }
 
+function bulletinCurrencyCode(dataset) {
+  return dataset && dataset.useSyria ? "SYP" : "USD";
+}
+
+// اسم ملف النشرة من القاعدة المركزية نفسها (`archiveDocumentTitle`) لا من صيغة
+// مستقلة هنا: صيغتان لنفس المستند تنحرفان عن بعضهما عند أول تعديل.
 function bulletinDocumentFilename(dataset) {
-  return `نشرة-الأسعار-${dataset.useSyria ? "SYP" : "USD"}-${todayIsoDate()}`;
+  return archiveDocumentTitle("price_list", {
+    currency: bulletinCurrencyCode(dataset),
+    date: todayIsoDate()
+  });
 }
 
 // تصدير النشرة إلى PDF عبر **طباعة المتصفح الأصلية** («حفظ بصيغة PDF»).
@@ -3380,7 +3399,11 @@ function exportBulletinPdf(dataset) {
     render();
     return false;
   }
+  // فرق مقصود: `title` نصّ بشري للتنبيه على الشاشة («نشرة الجملة (دولار)»)،
+  // و`fileTitle` هو اسم الملف. كان الأول يُمرَّر إلى printHtmlDocument فيدهس
+  // الثاني داخل `withDocumentTitle` — فيُحسب اسم الملف الصحيح ثم يُرمى.
   const title = bulletinDocumentTitle(dataset);
+  const fileTitle = bulletinDocumentFilename(dataset);
   const plan = bulletinRenderPlan(dataset);
   // نشرة ناقصة أسوأ من نشرة متأخّرة: لو أفلتت مجموعة من التوزيع فأصنافها تختفي
   // من الملف الذي يصل الزبون بلا أي أثر. نرفض التصدير ونسمّي المجموعة صراحةً.
@@ -3391,7 +3414,7 @@ function exportBulletinPdf(dataset) {
   }
   const documentHtml = template.printDocument({
     theme: dataset.theme,
-    title: bulletinDocumentFilename(dataset),
+    title: fileTitle,
     // نفس ناتج خطة الرسم التي تعرضها المعاينة حرفياً.
     // قرار الخط مختوم داخل الترميز نفسه (`data-fallback-font`)، فما يُطبع هو
     // ما قِيس بالضبط بلا وسيطٍ إضافي هنا.
@@ -3403,8 +3426,8 @@ function exportBulletinPdf(dataset) {
   // سبب عطل PDF على الهاتف، فلا يُعاد. الوصف الدقيق: «مشاركة/حفظ عبر نافذة النظام».
   if (state.pricePreview) state.pricePreview.printStatus = "opened";
   printHtmlDocument(documentHtml, {
-    title,
-    archive: { docType: "price_list", meta: { date: todayIsoDate() } },
+    title: fileTitle,
+    archive: { docType: "price_list", meta: { date: todayIsoDate(), currency: bulletinCurrencyCode(dataset) } },
     onError: () => {
       // حجب الطباعة/النوافذ: نُبقي المعاينة مفتوحة ونعرض سبباً واضحاً وزر إعادة
       // محاولة، بدل إغلاق الشاشة وترك المستخدم بلا مخرج ولا تفسير.
@@ -5152,8 +5175,9 @@ function printHtmlDocument(html, options = {}) {
   if (options.archive && options.archive.docType) {
     archiveToICloud(options.archive.docType, html, options.archive.meta);
   }
-  const previous = document.querySelector("iframe[data-print-frame]");
-  if (previous) previous.remove();
+  // تنظيف كامل لا حذف مجرّد: يُحرِّر حجز عنوان الطباعة السابق قبل أن نأخذ
+  // الحجز الجديد، فيُلتقط العنوان الأصلي للتبويب لا عنوان مستند سابق.
+  removePrintFrame();
 
   const frame = document.createElement("iframe");
   frame.setAttribute("data-print-frame", "");
@@ -5164,12 +5188,20 @@ function printHtmlDocument(html, options = {}) {
   frame.style.cssText =
     `position:fixed;left:-10000px;top:0;width:${BULLETIN_PAGE_WIDTH_PX}px;height:${BULLETIN_PAGE_HEIGHT_PX}px;opacity:0;border:0;pointer-events:none;`;
 
+  // العنوان يُرفع **قبل** إدراج الإطار: كروم يلتقط اسم الملف المقترح لحظة فتح
+  // ورقة المعاينة، فرفعه بعدها سباق خاسر. ويُعاد في cleanup — أي عند afterprint
+  // أو عند السقف الاحتياطي أو عند الحجب.
+  const releasePrintTitle = holdPrintDocumentTitle(options.title);
+
   let finished = false;
   const cleanup = () => {
     if (finished) return;
     finished = true;
+    releasePrintTitle();
     setTimeout(() => frame.remove(), 1000);
   };
+  // يُتاح لكل مسار يزيل الإطار (إغلاق المعاينة، زر الرجوع، طباعة تالية).
+  frame.ozkPrintCleanup = cleanup;
 
   frame.addEventListener("load", () => {
     const win = frame.contentWindow;
@@ -5225,8 +5257,16 @@ function printHtmlDocument(html, options = {}) {
     setTimeout(printOnce, FONT_WAIT_CEILING_MS);
   }, { once: true });
 
-  document.body.appendChild(frame);
+  // **srcdoc قبل الإدراج.** إطارٌ يُدرَج فارغاً ثم يُملأ يُطلق `load` **مرّتين**:
+  // مرة لمستند `about:blank` الأولي ومرة للمستند الحقيقي (قِيس على كروميوم
+  // وWebKit معاً، 2026-09-06). والمعالج المسجَّل بـ`{ once: true }` كان يلتقط
+  // الأولى، فينتج عن ذلك عطلان صامتان: `afterprint` يُسجَّل على نافذة تُستبدل
+  // بعدها فلا يصل التنظيف أبداً (يبقى الإطار — وعنوانُ الطباعة — معلّقَين حتى
+  // السقف الاحتياطي)، وتُنتظر جهوزيةُ خطوط مستندٍ فارغ بدل خطوط المستند
+  // المطبوع فيسقط الغرضُ كلّه من انتظار `document.fonts.ready`.
+  // بالترتيب الصحيح يُطلَق `load` مرة واحدة، على المستند المطبوع نفسه.
   frame.srcdoc = withDocumentTitle(html, options.title);
+  document.body.appendChild(frame);
 }
 
 // أرشفة صامتة إلى iCloud Drive عبر الجسر المحلي على الماك (src/icloud-archive.js).
@@ -5263,7 +5303,10 @@ const DOC_TYPE_LABELS = {
   invoice: "فاتورة",
   return_invoice: "فاتورة مرتجع",
   receipt: "سند قبض",
-  payment: "سند دفع",
+  // «سند صرف» لا «سند دفع»: هو النص المطبوع على المستند نفسه
+  // (`voucherPdfMarkup`) وعلى زرّه وتنبيهه، فاختلاف اسم الملف عنه كان يجعل
+  // المالك يبحث في الأرشيف عن اسم لا يراه على الورقة.
+  payment: "سند صرف",
   account_statement: "كشف حساب",
   stock_report: "تقرير المخزون",
   receivables_report: "تقرير الذمم",
@@ -5274,39 +5317,72 @@ const DOC_TYPE_LABELS = {
 
 // ينقّي جزءاً من اسم الملف: يحذف ما تمنعه أنظمة الملفات ومحارف التحكّم
 // والاتجاه غير المرئية، ويُبقي الحروف العربية والفراغات العادية كما هي.
-function sanitizeDocumentTitle(value) {
-  return String(value == null ? "" : value)
+//
+// **يطابق `sanitizePart` في `tools/mac-archive-bridge/lib/naming.mjs` قاعدةً
+// بقاعدة، وحدّاً بحدّ.** كانت النسختان تفترقان في ثلاثة مواضع صامتة، وكلٌّ منها
+// يُخرج للمالك اسمين مختلفين لنفس المستند (المنزَّل والمؤرشف):
+//   • التطويل U+0640: «محـــمد» في التنزيل و«محمد» في الأرشيف.
+//   • التشكيل: «مُحَمَّد» في التنزيل و«محمد» في الأرشيف.
+//   • الحدّ: 80 هنا مقابل 60 للطرف و40 للرقم هناك — فاسم طويل يُقصّ مرّتين
+//     بطولين مختلفين.
+// لذلك صار `max` وسيطاً صريحاً يمرّره كل حقل بحدّه، والحذف يسبق NFC كما هناك.
+// أي انحراف مستقبلي يُفشل حارس التطابق في `scripts/check-document-filenames.mjs`
+// الذي يقارن ناتج التنفيذين على مدخلات عربية حقيقية ومتطرّفة.
+const DOC_TITLE_INVISIBLE = /[\u200B-\u200F\u061C\u2066-\u2069\u202A-\u202E\uFEFF\u0640]/g;
+const DOC_TITLE_DIACRITICS = /[\u064B-\u0652\u0656-\u065F\u0670\u06D6-\u06ED]/g;
+
+function sanitizeDocumentTitle(value, max = 80) {
+  let text = String(value == null ? "" : value)
+    .replace(DOC_TITLE_INVISIBLE, "")
+    .replace(DOC_TITLE_DIACRITICS, "")
     .normalize("NFC")
     .replace(/[\u0000-\u001F\u007F]/g, " ")
-    .replace(/[\u200B-\u200F\u061C\u2066-\u2069\u202A-\u202E\uFEFF]/g, "")
-    .replace(/[/\\:*?"<>|]/g, " ")
+    .replace(/[/\\:]/g, " ")
+    .replace(/[<>"|?*]/g, " ")
     .replace(/\.{2,}/g, ".")
     .replace(/\s+/g, " ")
     .trim()
     .replace(/^[.\s-]+/, "")
-    .replace(/[.\s]+$/, "")
-    .slice(0, 80)
-    .trim();
+    .replace(/[.\s]+$/, "");
+  if (text.length > max) text = text.slice(0, max).trim();
+  return text;
 }
 
-// التاريخ في اسم الملف بصيغة يقرأها المالك (DD-MM-YYYY)، بينما يبقى اسم النسخة
-// المؤرشفة على YYYY-MM-DD حسب اصطلاح مجلدات iCloud المعتمد. المصدر واحد.
+// التاريخ في اسم الملف = YYYY-MM-DD، **نفس** صيغة اسم النسخة المؤرشفة في
+// iCloud. كانت الصيغتان مختلفتين عمداً (DD-MM-YYYY للملف)، فكان الملف المنزَّل
+// ونسخته في الأرشيف يبدوان مستندين مختلفين لنفس اليوم ولا يُفرزان معاً. صيغة
+// واحدة تُبقيهما متطابقين وتُرتّب الملفات زمنياً عند الفرز بالاسم.
 function fileDateLabel(isoDate) {
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(isoDate || "").slice(0, 10));
-  return match ? `${match[3]}-${match[2]}-${match[1]}` : "";
+  const value = String(isoDate || "").slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : "";
 }
+
+// أنواع لا يدخل رقمها اسم الملف. رقم السند يُولَّد **محلياً وعشوائياً**
+// (`docNumber` → «R-20260906-4821»)، فهو لا يعرّف شيئاً للمالك ولا للزبون
+// ووجوده في الاسم يطمس ما يميّز السند فعلاً: الطرف والتاريخ. يبقى في `meta`
+// كما هو لأن جسر الأرشفة يشترطه لتمييز سندين لنفس الطرف في اليوم نفسه.
+const NUMBERLESS_FILE_DOC_TYPES = new Set(["receipt", "payment"]);
 
 /**
- * عنوان المستند المطبوع = اسم الملف الذي يقترحه المتصفح.
+ * اسم المستند = اسم الملف الذي يقترحه المتصفح **وعنوان النسخة المؤرشفة**.
  * يُبنى من نفس `meta` التي تذهب إلى الأرشفة — لا لقطة أخرى ولا قيمة افتراضية.
+ * هذه هي القاعدة المركزية الوحيدة: أي مسار تصدير يشتقّ اسمه من هنا، ولا يُبنى
+ * اسم ملف بالتركيب اليدوي في أي موضع آخر.
  */
 function archiveDocumentTitle(docType, meta) {
   const info = meta || {};
+  // النشرة لها اصطلاحها الخاص (شرطات بلا فراغات + رمز العملة) المعتمد منذ
+  // PR #121 والذي يعرفه الزبائن على ملفاتهم. لا يُوحَّد قسراً مع بقية
+  // المستندات، لكنه يُبنى من هنا وحده فلا تنشأ قاعدة تسمية ثانية.
+  if (docType === "price_list") {
+    const currency = sanitizeDocumentTitle(info.currency, 8).toUpperCase();
+    return ["نشرة-الأسعار", currency, fileDateLabel(info.date)].filter(Boolean).join("-");
+  }
   const label = docType === "other_report"
-    ? (sanitizeDocumentTitle(info.title) || DOC_TYPE_LABELS.other_report)
+    ? (sanitizeDocumentTitle(info.title, 80) || DOC_TYPE_LABELS.other_report)
     : (DOC_TYPE_LABELS[docType] || "مستند");
-  const party = sanitizeDocumentTitle(info.party);
-  const number = sanitizeDocumentTitle(info.number);
+  const party = sanitizeDocumentTitle(info.party, 60);
+  const number = NUMBERLESS_FILE_DOC_TYPES.has(docType) ? "" : sanitizeDocumentTitle(info.number, 40);
   const date = fileDateLabel(info.date);
   let title = label;
   if (party) title += ` - ${party}`;
@@ -5315,7 +5391,49 @@ function archiveDocumentTitle(docType, meta) {
   return title;
 }
 
-// يفرض العنوان داخل المستند المطبوع نفسه — هو وحده ما يقرأه كروم.
+/** اسم الملف الكامل لأي مستند — نقطة واحدة تضيف الامتداد. */
+function documentFileName(docType, meta) {
+  return `${archiveDocumentTitle(docType, meta)}.pdf`;
+}
+
+// ===== أين يقرأ المتصفح اسم الملف المقترح فعلاً =====
+//
+// قياس فعلي (Chromium عبر Playwright، 2026-09-06): مستند مطبوع داخل iframe
+// عنوانه «فاتورة - حسن عباس - رقم 562 - 2026-09-06» أخرج PDF حقلُ /Title فيه
+// «OZK TOBACCO | خدمة العملاء» — أي **عنوان المستند الأعلى**، لا عنوان الإطار.
+// وبضبط `document.title` للمستند الأعلى وحده تغيّر /Title إلى الاسم المطلوب.
+// السبب في كروميوم: اسم «حفظ بصيغة PDF» يأتي من
+// `PrintViewManagerBase::RenderSourceName()` أي `WebContents::GetTitle()` —
+// عنوان التبويب. وسفاري لا يملك مصدراً آخر أصلاً. لذلك كان إصلاح 4a4af7f
+// (فرض العنوان داخل الإطار عبر `withDocumentTitle`) صحيحاً في نيّته ولا يصل
+// إلى المستخدم: العنوان يُكتب في مستند لا يقرأ المتصفح عنوانه.
+//
+// نرفع العنوان إلى المستند الأعلى طوال ورقة الطباعة ثم نعيده. حلٌّ واحد لكل
+// المتصفحات — لا فرع خاص بمتصفح — و`withDocumentTitle` يبقى لأنه لا يضرّ
+// ويُبقي المستند المطبوع معنوناً بنفسه.
+let printTitleHold = null;
+
+function holdPrintDocumentTitle(title) {
+  if (typeof document === "undefined") return () => {};
+  const next = String(title || "").trim();
+  if (!next) return () => {};
+  // العنوان الأصلي يُلتقط **مرة واحدة** عبر سلسلة الطباعات المتتابعة. طباعة
+  // تبدأ قبل انتهاء سابقتها (المستخدم يصدّر مستنداً ثم آخر) كانت — لو التقطناه
+  // من جديد — تحفظ اسم المستند السابق على أنه «الأصلي» فيعلق في التبويب أبداً.
+  const original = printTitleHold ? printTitleHold.original : document.title;
+  // ورمز ملكية: `printHtmlDocument` يحذف إطار الطباعة السابق بلا تشغيل تنظيفه،
+  // فتنظيفُه المتأخّر (السقف الاحتياطي) يجب ألا يسحب عنوان طباعةٍ أحدث منه.
+  const hold = { original };
+  printTitleHold = hold;
+  document.title = next;
+  return () => {
+    if (printTitleHold !== hold) return;
+    document.title = original;
+    printTitleHold = null;
+  };
+}
+
+// يفرض العنوان داخل المستند المطبوع نفسه أيضاً.
 function withDocumentTitle(html, title) {
   const safe = escapeHtml(String(title || "").trim());
   if (!safe) return html;
@@ -5333,13 +5451,16 @@ function withDocumentTitle(html, title) {
 // المحرّك القديم صار يطلّع صفحات بيضا بعد تحديثات كروم. الطباعة الأصلية
 // ترسم التقرير مثل الشاشة تماماً (عربي وألوان مظبوطة) ومستحيل تطلع فاضية.
 //
-// `archive` اختياري: { docType, meta } — عند تمريره تُحفظ نسخة في iCloud أيضاً،
-// ويُشتقّ منه عنوان المستند (اسم ملف كروم) فيتطابق الاسمان دائماً.
-async function exportReportPdf(bodyHtml, filename, archive) {
-  const title = archive && archive.docType
-    ? archiveDocumentTitle(archive.docType, archive.meta)
-    : String(filename || "تقرير").replace(/\.pdf$/i, "");
-  if (archive && archive.docType) archiveToICloud(archive.docType, bodyHtml, archive.meta);
+// `archive` = { docType, meta }: منه **وحده** يُشتقّ اسم الملف على المسارين
+// (تنزيل/مشاركة الهاتف، وعنوان ورقة الطباعة على سطح المكتب) واسم النسخة في
+// iCloud — فيستحيل أن يفترق الاسمان. كان المستدعي يمرّر اسم ملف مبنيّاً يدوياً
+// («سند-قبض-حسن_عباس-2026-09-06.pdf») يُستعمل على الهاتف فقط، فخرج للمالك اسم
+// بشرطات سفلية وبتاريخ اليوم بدل تاريخ المستند، ومختلف عن نسخة الأرشيف.
+async function exportReportPdf(bodyHtml, archive) {
+  const docType = archive && archive.docType;
+  const title = docType ? archiveDocumentTitle(docType, archive.meta) : "تقرير";
+  const filename = `${title}.pdf`;
+  if (docType) archiveToICloud(docType, bodyHtml, archive.meta);
   if (isHandheldDevice()) {
     try {
       const blob = await createPortablePdfBlob(bodyHtml, filename, { width: BULLETIN_PAGE_WIDTH_PX });
@@ -5580,10 +5701,8 @@ async function exportCustomerStatementPdf() {
     render();
     return;
   }
-  const safe = String(item.name || "customer").replace(/[^\p{L}\p{N}]+/gu, "_").slice(0, 40);
   const exported = await exportReportPdf(
     customerStatementPdfMarkup(item),
-    `كشف-حساب-${safe}-${todayIsoDate()}.pdf`,
     { docType: "account_statement", meta: { party: item.name, date: todayIsoDate() } }
   );
   if (exported) setNotice("success", isHandheldDevice() ? "تم تجهيز كشف الحساب كملف PDF." : "تم تجهيز كشف الحساب PDF.");
@@ -5701,8 +5820,6 @@ async function exportVoucherPdf(v) {
   const isPay = v.type === "payment";
   const isInv = v.type === "invoice";
   const isRet = v.type === "return";
-  const safe = String(v.name || (isInv ? "فاتورة" : (isRet ? "مرتجع" : (isPay ? "صرف" : "قبض")))).replace(/[^\p{L}\p{N}]+/gu, "_").slice(0, 40);
-  const prefix = isInv ? "فاتورة" : (isRet ? "فاتورة-مرتجع" : (isPay ? "سند-صرف" : "سند-قبض"));
   // وجهة الأرشفة: الفاتورة والمرتجع إلى «فواتير الزبائن»، السندان إلى «سندات
   // قبض ودفع». المرتجع نوع مستقل (`return_invoice`) لا يُخلط مع `invoice`
   // داخلياً، واسمه يبدأ بـ«فاتورة مرتجع» فيتميّز في الأرشيف عن بيع حقيقي.
@@ -5711,7 +5828,6 @@ async function exportVoucherPdf(v) {
   const archiveMeta = { party: v.name, number: v.no, date: archiveDate };
   const exported = await exportReportPdf(
     voucherPdfMarkup(v),
-    `${prefix}-${safe}-${todayIsoDate()}.pdf`,
     { docType: archiveDocType, meta: archiveMeta }
   );
   if (exported) setNotice("success", isInv ? "تم تجهيز الفاتورة PDF." : (isRet ? "تم تجهيز فاتورة المرتجع PDF." : (isPay ? "تم تجهيز سند الصرف PDF." : "تم تجهيز سند القبض PDF.")));
@@ -5769,7 +5885,6 @@ async function exportReceivablesPdf() {
   }
   const exported = await exportReportPdf(
     receivablesPdfMarkup(),
-    `تقرير-الذمم-${todayIsoDate()}.pdf`,
     { docType: "receivables_report", meta: { date: todayIsoDate() } }
   );
   if (exported) setNotice("success", "تم تجهيز تقرير الذمم PDF.");
@@ -6313,7 +6428,6 @@ async function exportInventoryReportPdf() {
   }
   const exported = await exportReportPdf(
     inventoryReportPdfMarkup(),
-    `تقرير-المخزون-${todayIsoDate()}.pdf`,
     { docType: "stock_report", meta: { date: todayIsoDate() } }
   );
   if (exported) setNotice("success", "تم تجهيز تقرير المخزون PDF.");
@@ -6410,7 +6524,6 @@ async function exportStagnantMaterialsPdf() {
   }
   const exported = await exportReportPdf(
     stagnantMaterialsPdfMarkup(),
-    `المواد-الراكدة-${todayIsoDate()}.pdf`,
     { docType: "other_report", meta: { title: "تقرير المواد الراكدة", date: todayIsoDate() } }
   );
   if (exported) setNotice("success", "تم تجهيز تقرير المواد الراكدة PDF.");
@@ -8540,7 +8653,7 @@ async function saveSalesInvoicePdf() {
     number: invNo,
     date: todayIsoDate()
   };
-  const fileName = `${archiveDocumentTitle("invoice", pdfArchiveMeta)}.pdf`;
+  const fileName = documentFileName("invoice", pdfArchiveMeta);
   // نحفظ موضع التمرير: **السبب الجذري للملف الفارغ** أن html2canvas يلتقط منطقة
   // خاطئة حين تكون الصفحة مُمرَّرة للأسفل — وهي حالة الهاتف دائماً عند الضغط على
   // زر أسفل الشاشة. قياس فعلي: صفحة عند 1500px تعطي لوحة بصفر حبر وملف 3 ك.ب،
@@ -9910,10 +10023,8 @@ async function saveReconSessionPdf(session) {
   if (!session) return;
   const warehouseName = session.warehouse_name || session.warehouseName || "مستودع";
   const sessionDate = session.session_date || session.sessionDate || todayIsoDate();
-  const safe = String(warehouseName).replace(/[^\p{L}\p{N}]+/gu, "_").slice(0, 40);
   const exported = await exportReportPdf(
     reconSessionPdfMarkup(session),
-    `جرد-${safe}-${sessionDate}.pdf`,
     { docType: "other_report", meta: { title: `تقرير جرد - ${warehouseName}`, date: String(sessionDate).slice(0, 10) } }
   );
   if (exported) setNotice("success", "تم تجهيز تقرير الجرد PDF.");
