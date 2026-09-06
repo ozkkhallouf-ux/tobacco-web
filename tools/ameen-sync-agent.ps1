@@ -382,8 +382,11 @@ function Build-CustomerBalanceReport($Rows) {
       # عدد الدفعات الفعلي داخل نافذة الزخم (90 يوماً). نموذج خطر التحصيل يقارنه
       # بعدد ما وصله ليعرف الاقتطاع يقيناً بدل الاستدلال عليه من التواريخ.
       paymentsInWindow = [int](To-Number $row.payments_in_window)
-      # حدّ النافذة الذي عُدَّ به، كي تَعُدّ طبقة التقييم بالحدّ نفسه.
-      paymentsWindowStart = if ($row.payments_window_start -is [DBNull] -or $null -eq $row.payments_window_start) { $null } else { ([datetime]$row.payments_window_start).ToString('yyyy-MM-dd') }
+      # حدّ النافذة الذي عُدَّ به، بنفس أساس تواريخ الدفعات بالضبط.
+      # ⚠️ لا يُرسَل تاريخاً مجرّداً "yyyy-MM-dd": المتصفح يقرأ التاريخ المجرّد
+      # منتصفَ ليل UTC بينما To-IsoDate تُصدِر تواريخ الدفعات بإزاحة محلية،
+      # فتُقرأ دفعة يوم الحدّ في دمشق (+03) قبله بثلاث ساعات وتُستبعَد ظلماً.
+      paymentsWindowStart = To-IsoDate $row.payments_window_start
       recentMovements = $recentMovements
       status = $status
       customerGuid = [string]$row.customer_guid

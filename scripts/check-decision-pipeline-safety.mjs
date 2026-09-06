@@ -105,6 +105,12 @@ check("مصدر الأرصدة يجلب دفعات تكفي نافذة الزخ�
   const agent = read("tools/ameen-sync-agent.ps1");
   assert.match(agent, /paymentsInWindow/, "وكيل المزامنة لا يمرّر العدّاد");
   assert.match(agent, /paymentsWindowStart/, "وكيل المزامنة لا يمرّر حدّ النافذة");
+  // الحدّ يُصدَّر بنفس دالة تواريخ الدفعات. تاريخ مجرّد "yyyy-MM-dd" يُقرأ في
+  // المتصفح منتصفَ ليل UTC بينما الدفعات محلية، فتسقط دفعة يوم الحدّ في دمشق.
+  assert.match(agent, /paymentsWindowStart\s*=\s*To-IsoDate/,
+    "حدّ النافذة لا يُصدَّر بأساس تواريخ الدفعات نفسه");
+  assert.doesNotMatch(agent, /paymentsWindowStart[^\n]*'yyyy-MM-dd'/,
+    "حدّ النافذة يُصدَّر تاريخاً مجرّداً — انزياح منطقة زمنية");
 });
 
 check("الترحيلة المقترحة تسمح بتفريغ مأذون ولا ترفضه مطلقاً", () => {

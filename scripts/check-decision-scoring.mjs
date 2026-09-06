@@ -519,6 +519,32 @@ check("اكتمال سجل الدفعات ثلاثي: مقتطع / مكتمل / 
   assert.equal(onBoundary.payments90d, 10000, "دفعة يوم الحدّ سقطت من الزخم");
 });
 
+check("حدّ النافذة والدفعات يُقرآن بأساس زمني واحد", () => {
+  // ⚠️ المراجعة الحادية عشرة: تاريخ مجرّد "yyyy-MM-dd" يُقرأ منتصفَ ليل UTC،
+  // بينما تواريخ الدفعات تصل بإزاحة محلية. في دمشق (+03) كانت دفعة يوم الحدّ
+  // تُقرأ قبله بثلاث ساعات فتُستبعَد من الزخم ويظهر اقتطاع كاذب.
+  const build = (windowStart, paymentDate) => S.scoreCustomers({
+    balances: [{
+      name: "زبون", customerGuid: guid(800), balance: 10000,
+      lastPaymentDate: paymentDate,
+      recentPayments: [{ date: paymentDate, amount: 4000 }],
+      paymentsInWindow: 1,
+      paymentsWindowStart: windowStart
+    }],
+    creditLimits: [], now: customerNow
+  }).customers[0];
+
+  // أساس واحد بإزاحة صريحة: الدفعة على الحدّ بالضبط تُعَدّ.
+  const aligned = build("2026-06-08T00:00:00.0000000+03:00", "2026-06-08T00:00:00.0000000+03:00");
+  assert.equal(aligned.payments90d, 4000, "دفعة يوم الحدّ سقطت من الزخم");
+  assert.equal(aligned.paymentsCompleteness, "complete", "ظهر اقتطاع حدّي كاذب");
+
+  // نفس اللحظة بإزاحة أخرى: القراءة مطلقة لا نصّية، فالنتيجة لا تتغيّر.
+  const utcSame = build("2026-06-07T21:00:00.000Z", "2026-06-08T00:00:00.0000000+03:00");
+  assert.equal(utcSame.payments90d, 4000);
+  assert.equal(utcSame.paymentsCompleteness, "complete");
+});
+
 check("الأولوية تقيس المال والتصنيف يقيس الاحتمال — بُعدان منفصلان", () => {
   const result = S.scoreCustomers({
     balances: [
