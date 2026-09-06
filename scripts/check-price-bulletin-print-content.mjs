@@ -174,17 +174,38 @@ async function printDocument(documentHtml) {
   const geometry = await page.evaluate(() => {
     const section = document.querySelector(".ozk-price-list");
     const top = section.getBoundingClientRect().top;
-    return [...document.querySelectorAll(".price-list-columns")].map((el) => {
+    const blocks = [...document.querySelectorAll(".price-list-columns")].map((el) => {
       const rect = el.getBoundingClientRect();
       return { top: +(rect.top - top).toFixed(2), bottom: +(rect.bottom - top).toFixed(2), height: +rect.height.toFixed(2) };
     });
+    // **كل صفٍّ مخطَّط يجب أن يُرسم فعلاً على الورق.** بلا خط النشرة تتعذّر مطابقة
+    // النصّ، وحينها لا يكفي وجود الاسم في الترميز: انحدارُ طباعةٍ مثل
+    // `display:none` يُبقي الأسماء بلا رسم. ولا يكفي صندوقُ التخطيط وحده:
+    // `visibility:hidden` أو `opacity:0` يُبقيان الصندوق كاملاً ولا يُرسم شيء
+    // (ملاحظتا Codex P1 على 3468f90 و34e7874). فنسأل المتصفح نفسه عن الظهور
+    // عبر `checkVisibility`، ونُكمل بفحص صريح للخاصّيتين حيث لا تتوفّر.
+    const rows = [...section.querySelectorAll("tbody tr")];
+    const unrenderedRows = rows.filter((tr) => {
+      const rect = tr.getBoundingClientRect();
+      if (rect.height <= 0 || rect.width <= 0) return true;
+      if (typeof tr.checkVisibility === "function"
+        && !tr.checkVisibility({ visibilityProperty: true, opacityProperty: true, contentVisibilityAuto: true })) {
+        return true;
+      }
+      for (let node = tr; node && node !== document.documentElement; node = node.parentElement) {
+        const style = getComputedStyle(node);
+        if (style.visibility === "hidden" || style.display === "none" || Number(style.opacity) === 0) return true;
+      }
+      return false;
+    }).length;
+    return { blocks, renderedRowCount: rows.length, unrenderedRows };
   });
   const pdf = await page.pdf({
     format: "A4", printBackground: true, preferCSSPageSize: true,
     margin: { top: "0", bottom: "0", left: "0", right: "0" }
   });
   await context.close();
-  return { pages: pdfPageLines(pdf), geometry, bytes: pdf.length };
+  return { pages: pdfPageLines(pdf), geometry: geometry.blocks, rowPaint: geometry, bytes: pdf.length };
 }
 
 // أول كتلة أعمدة تعيش تحت الرأس على **نفس الورقة**، فحدّها هو حدّ الورقة
@@ -281,6 +302,17 @@ for (const sc of [
 
   checkWithFont(fontReady, `${sc.label}: الورقة الأولى تحمل أصنافاً`, (itemsPerPage[0] || 0) > 0,
     `الورقة الأولى فيها ${itemsPerPage[0]} صنف`);
+
+  // **كل صفٍّ يُرسم فعلاً** — قياس يسأل المتصفح عن الظهور، لا عن صندوق التخطيط
+  // وحده، فيسري حتى بلا خط النشرة ويرصد `display:none` و`visibility:hidden`
+  // و`opacity:0` معاً (ملاحظتا Codex P1 على 3468f90 و34e7874).
+  check(`${sc.label}: كل صفوف المستند مرسومة فعلاً (لا صفّ مخفي)`,
+    printed.rowPaint.unrenderedRows === 0,
+    `${printed.rowPaint.unrenderedRows} صفاً غير مرسوم من ${printed.rowPaint.renderedRowCount}`);
+
+  check(`${sc.label}: عدد صفوف المستند = عدد صفوف المعاينة`,
+    printed.rowPaint.renderedRowCount === expected.rows.length,
+    `في المستند ${printed.rowPaint.renderedRowCount} · بالمعاينة ${expected.rows.length}`);
 
   // --- السبب الجذري: لا كتلة أعمدة تتجاوز ورقتها ---
   const overflowing = blocksOverflowingTheirPage(printed.geometry);

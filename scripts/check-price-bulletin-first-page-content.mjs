@@ -183,15 +183,25 @@ async function printExportDocument(documentHtml) {
         forcedBreak: el.classList.contains("price-list-secondary-page")
       };
     });
-    // **كل صفٍّ مخطَّط يجب أن يُنتج رسماً فعلياً على الورق.** بلا خط النشرة
-    // تتعذّر مطابقة النصّ، وحينها لا يكفي وجود الاسم في الترميز: انحدارُ طباعةٍ
-    // مثل `display:none` على صفوف يُبقي أسماءها في الترميز بينما لا تُرسم
-    // (ملاحظة Codex P1 على 3468f90). فنقيس الصفوف هندسياً — وهو قياسٌ لا علاقة
-    // له بشكل الحروف: صفٌّ بلا ارتفاع أو بلا عرض لم يُرسم.
+    // **كل صفٍّ مخطَّط يجب أن يُرسم فعلاً على الورق.** بلا خط النشرة تتعذّر مطابقة
+    // النصّ، وحينها لا يكفي وجود الاسم في الترميز: انحدارُ طباعةٍ مثل
+    // `display:none` يُبقي الأسماء بلا رسم. ولا يكفي صندوقُ التخطيط وحده:
+    // `visibility:hidden` أو `opacity:0` يُبقيان الصندوق كاملاً ولا يُرسم شيء
+    // (ملاحظتا Codex P1 على 3468f90 و34e7874). فنسأل المتصفح نفسه عن الظهور
+    // عبر `checkVisibility`، ونُكمل بفحص صريح للخاصّيتين حيث لا تتوفّر.
     const rows = [...section.querySelectorAll("tbody tr")];
     const unrenderedRows = rows.filter((tr) => {
       const rect = tr.getBoundingClientRect();
-      return rect.height <= 0 || rect.width <= 0;
+      if (rect.height <= 0 || rect.width <= 0) return true;
+      if (typeof tr.checkVisibility === "function"
+        && !tr.checkVisibility({ visibilityProperty: true, opacityProperty: true, contentVisibilityAuto: true })) {
+        return true;
+      }
+      for (let node = tr; node && node !== document.documentElement; node = node.parentElement) {
+        const style = getComputedStyle(node);
+        if (style.visibility === "hidden" || style.display === "none" || Number(style.opacity) === 0) return true;
+      }
+      return false;
     }).length;
     return { headerHeight: +headerHeight.toFixed(2), blocks, renderedRowCount: rows.length, unrenderedRows };
   });
@@ -451,6 +461,43 @@ for (const sc of [
   check("شاهد سالب (بديل مستقلّ عن الخط): مستند غائب = كل الصفوف مفقودة",
     rowsMissingFromMarkup(null, rows).length === rows.length,
     `المرصود ${rowsMissingFromMarkup(null, rows).length} من ${rows.length}`);
+}
+
+// ===== ٢ج) شاهد سالب لفحص الرسم: صفٌّ مخفيٌّ يُرصد بالطرق الثلاث =====
+// فحص الرسم يبقى مفروضاً حين يتعذّر الخط، فيجب أن يُثبت أنه يرصد ما لا يُرسم.
+// نأخذ مستند تصدير سليماً ونُخفي صفّاً بكلٍّ من الطرق الثلاث على حدة، ونطالب
+// برصده في كل مرة — بما فيها `visibility:hidden` و`opacity:0` اللتان تُبقيان
+// صندوق التخطيط كاملاً (ملاحظة Codex P1 على 34e7874).
+{
+  const { context, page } = await bootApp(1440, 900);
+  await page.evaluate(() => {
+    (0, eval)("state").syriaRateConfirmed = true;
+    window.openPricePreview(true, "dark");
+  });
+  await page.waitForSelector("[data-action='export-price-preview']", { timeout: 10000 });
+  await page.click("[data-action='export-price-preview']");
+  await page.waitForFunction(() => Boolean(document.querySelector("iframe[data-print-frame]")), null, { timeout: 10000 });
+  const healthy = await page.evaluate(() =>
+    document.querySelector("iframe[data-print-frame]").getAttribute("srcdoc"));
+  await context.close();
+
+  const healthyPrint = await printExportDocument(healthy);
+  check("شاهد سالب (فحص الرسم): المستند السليم بلا صفّ غير مرسوم",
+    healthyPrint.geometry.unrenderedRows === 0 && healthyPrint.geometry.renderedRowCount > 0,
+    `غير مرسوم ${healthyPrint.geometry.unrenderedRows} من ${healthyPrint.geometry.renderedRowCount}`);
+
+  for (const [label, rule] of [
+    ["display:none", "display:none"],
+    ["visibility:hidden", "visibility:hidden"],
+    ["opacity:0", "opacity:0"]
+  ]) {
+    const hidden = healthy.replace("</body>",
+      `<style>.ozk-price-list tbody tr:first-child{${rule} !important}</style></body>`);
+    const printedHidden = await printExportDocument(hidden);
+    check(`شاهد سالب (فحص الرسم): يرصد صفّاً مخفياً بـ${label}`,
+      printedHidden.geometry.unrenderedRows > 0,
+      `لم يُرصد أي صفّ غير مرسوم رغم إخفاء صفّ بـ${label}`);
+  }
 }
 
 // ===== ٣) شاهد سالب: الحارس يرصد الرأس المهجور فعلاً =====
