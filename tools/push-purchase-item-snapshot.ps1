@@ -66,8 +66,23 @@ if ($Apply) { $producerArgs += '--apply' }
 if ($WindowEnd) { $producerArgs += "--window-end=$WindowEnd" }
 
 Write-SnapshotLog ("Starting snapshot refresh (Apply={0})." -f [bool]$Apply)
-& $node.Source @producerArgs
-$exitCode = $LASTEXITCODE
+# refresh-ameen-item-snapshot.mjs يكتب كل رفض من بوابة حداثة المبيعات وكل عطل
+# مصادقة أو شبكة عبر console.error (stderr). ومع $ErrorActionPreference = "Stop"
+# أعلى هذا الملف، يحوّل Windows PowerShell 5.1 أي سطر stderr من أمر native إلى
+# NativeCommandError **منهٍ** — فيموت السكربت هنا قبل الوصول لالتقاط رمز الخروج
+# أو لفرع التسجيل/التنبيه بالأسفل. نفس السلوك المعالَج في auto-sync-price-lists.ps1:
+# نخفّض التفضيل حول نداء node وحده، ونحكم برمز الخروج فقط، ثم نعيد التفضيل كما كان.
+$previousErrorAction = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try {
+    & $node.Source @producerArgs 2>&1 | ForEach-Object {
+        $line = "$_"
+        Write-SnapshotLog $line
+    }
+    $exitCode = $LASTEXITCODE
+} finally {
+    $ErrorActionPreference = $previousErrorAction
+}
 
 if ($exitCode -ne 0) {
     Write-SnapshotLog "Snapshot refresh FAILED with exit code $exitCode."
