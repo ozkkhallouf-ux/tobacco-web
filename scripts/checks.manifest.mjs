@@ -55,6 +55,7 @@ export const CHECKS = [
   'check-owner-authorization-behavior.mjs',
   'check-post-deploy-smoke-console-gate.mjs',
   'check-price-bulletin-export-integrity.mjs',
+  'check-price-bulletin-first-page-content.mjs',
   'check-price-bulletin-group-packing.mjs',
   'check-price-bulletin-group-placement.mjs',
   'check-price-bulletin-item-coverage.mjs',
