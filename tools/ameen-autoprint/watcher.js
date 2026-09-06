@@ -17,12 +17,108 @@ const SALES_QUERY = fs.readFileSync(
   path.join(__dirname, "ameen-sales-query.sql"), "utf8"
 );
 
+// رصيد الزبون الحقيقي من دفتر أستاذ الأمين (cu000.Debit - Credit عبر AccountGUID)
+// نفس منطق Get-InvoiceDocumentBalance في ozk-print-bridge.ps1 — لا ربط باسم الزبون
+const CUSTOMER_BALANCE_QUERY = fs.readFileSync(
+  path.join(__dirname, "ameen-customer-balance-query.sql"), "utf8"
+);
+
+// يُعيد null إذا تعذّر العثور على مستند محاسبي حقيقي مرتبط بهذه الفاتورة —
+// في هذه الحالة يجب على طبقة العرض عدم اختلاق أي رقم رصيد.
+async function getCustomerBalance(pool, invoiceGuid) {
+  try {
+    const result = await pool.request()
+      .input("invoiceGuid", sql.UniqueIdentifier, invoiceGuid)
+      .query(CUSTOMER_BALANCE_QUERY);
+    if (!result.recordset.length) return null;
+    const row = result.recordset[0];
+    if (row.document_current === null || row.document_current === undefined) return null;
+    const current = Number(row.document_current);
+    // حارس: لا نقبل أي قيمة غير رقمية حقيقية (NaN/Infinity/-Infinity) كرصيد —
+    // الصفر الحقيقي (0) يبقى قيمة صالحة ويُعرض كصفر.
+    if (!Number.isFinite(current)) return null;
+    return {
+      accountGuid: row.account_guid,
+      current,
+    };
+  } catch (err) {
+    console.error(`تعذّر جلب رصيد الزبون لفاتورة GUID=${invoiceGuid}: ${err.message}`);
+    return null;
+  }
+}
+
+// ─── حراسة صريحة: هذه الأداة مخصّصة حصراً لمبيعات الجملة ─────────────────
+// GUID مبيعات المركز (الكاشير) — يُرفض صراحة كي لا تُستخدم هذه الأداة له أبداً
+const CASHIER_RETAIL_TYPE_GUID = "cc1097b1-662d-4d80-8e4e-3b493249591c";
+// قائمة GUIDs الجملة المعتمدة (من ozk-print-bridge.ps1 — نفس مصدر الحقيقة)
+const APPROVED_WHOLESALE_TYPE_GUIDS = [
+  "7f5b0921-61f3-4f23-a1f4-fbfae4144bf4",
+  "4a827bee-6ae1-4474-802b-970068872fcc",
+];
+
+function assertWholesaleConfig() {
+  const guid = String(config.wholesaleTypeGuid || "").toLowerCase();
+  if (guid === CASHIER_RETAIL_TYPE_GUID.toLowerCase()) {
+    throw new Error(
+      "رفض قاطع: wholesaleTypeGuid في config.js يطابق GUID مبيعات المركز (الكاشير). "
+      + "هذه الأداة مخصّصة للجملة فقط ولن تعمل."
+    );
+  }
+  if (!APPROVED_WHOLESALE_TYPE_GUIDS.map((g) => g.toLowerCase()).includes(guid)) {
+    throw new Error(
+      `رفض: wholesaleTypeGuid (${config.wholesaleTypeGuid}) ليس ضمن أنواع الجملة المعتمدة. `
+      + "لن تُطبع أي فاتورة حتى يُصحَّح config.js."
+    );
+  }
+}
+
+// ─── حراسة صريحة: طابعة Canon الفيزيائية يجب أن تكون موجودة ومتصلة ────────
+// يُمنع الاعتماد على default printer، ويُمنع أي منفذ RDP/Terminal-Services معاد توجيهه
+function assertPhysicalPrinterReady() {
+  const printer = config.printerName;
+  const ps = `
+    $p = Get-CimInstance Win32_Printer | Where-Object { $_.Name -eq '${printer.replace(/'/g, "''")}' }
+    if (-not $p) { Write-Output 'NOT_FOUND'; exit 0 }
+    Write-Output ("FOUND|" + $p.PortName + "|" + $p.WorkOffline + "|" + $p.PrinterStatus)
+  `;
+  const r = spawnSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", ps], {
+    timeout: 15_000,
+    encoding: "utf8",
+  });
+  const out = (r.stdout || "").trim();
+
+  if (r.status !== 0 || !out || out === "NOT_FOUND") {
+    throw new Error(
+      `رفض قاطع: الطابعة "${printer}" غير موجودة في Windows. `
+      + "لن تُطبع أي فاتورة جملة ولن يُستخدم أي fallback لطابعة أخرى أو للطابعة الافتراضية."
+    );
+  }
+
+  const [, port, workOffline] = out.split("|");
+  if (/^TS\d/i.test(port) || /redirected/i.test(printer)) {
+    throw new Error(
+      `رفض قاطع: الطابعة "${printer}" على منفذ "${port}" يبدو معاد توجيهه عبر جلسة عن بُعد (RDP)، `
+      + "وليس المنفذ الفيزيائي المباشر. لن تُطبع أي فاتورة جملة."
+    );
+  }
+  if (String(workOffline).trim().toLowerCase() === "true") {
+    throw new Error(`رفض قاطع: الطابعة "${printer}" غير متصلة حالياً (Work Offline).`);
+  }
+}
+
 // ─── تحليل سلسلة الاتصال (ODBC style → mssql config) ─────────────────────
 function parseSqlConnStr(cs) {
   const kv = {};
   cs.split(";").forEach((part) => {
     const eq = part.indexOf("=");
-    if (eq > 0) kv[part.slice(0, eq).trim().toLowerCase()] = part.slice(eq + 1).trim();
+    if (eq > 0) {
+      let val = part.slice(eq + 1).trim();
+      // إزالة علامتَي الاقتباس المحيطتين بالقيمة إن وُجدتا (نمط ODBC القياسي)
+      if (val.length >= 2 && val[0] === '"' && val[val.length - 1] === '"') {
+        val = val.slice(1, -1);
+      }
+      kv[part.slice(0, eq).trim().toLowerCase()] = val;
+    }
   });
   const cfg = {
     server:   kv["server"] || kv["data source"] || "localhost",
@@ -148,6 +244,8 @@ function sendToPrinter(pdfPath) {
 
 async function printInvoice(inv) {
   const html    = buildInvoiceHtml(inv);
+  // ملاحظة: inv.customerBalance / inv.customerBalanceFound يُفترض أنهما مضبوطان
+  // مسبقاً من poll() قبل الوصول إلى هنا (انظر استدعاء getCustomerBalance).
   const tmpPdf  = path.join(config.tempDir, `ozk-inv-${inv.number}-${Date.now()}.pdf`);
 
   await htmlToPdf(html, tmpPdf);
@@ -183,6 +281,11 @@ async function poll(pool, state) {
   for (const inv of invoices) {
     if (state.printedGuids[inv.guid]) continue; // مطبوعة سابقاً
     try {
+      // رصيد الزبون الحقيقي (Ameen) — عبر AccountGUID فقط، لا اسم الزبون.
+      // إن تعذّر العثور عليه، تبقى customerBalance فارغة ولا يُطبع أي رقم رصيد.
+      const balance = await getCustomerBalance(pool, inv.guid);
+      inv.customerBalanceFound = balance !== null;
+      inv.customerBalance = balance ? balance.current : null;
       await printInvoice(inv);
       state.printedGuids[inv.guid] = Date.now();
       changed = true;
@@ -207,6 +310,9 @@ async function main() {
     );
     process.exit(1);
   }
+
+  assertWholesaleConfig();
+  assertPhysicalPrinterReady();
 
   console.log("══════════════════════════════════════════════");
   console.log("    OZK TOBACCO — مراقب فواتير الجملة          ");
