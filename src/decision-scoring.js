@@ -150,7 +150,7 @@
   }
 
   function settings(overrides) {
-    return Object.freeze({ ...TUNABLES, ...(overrides || {}) });
+    return Object.freeze({ ...TUNABLES, ...overrides });
   }
 
   // --------------------------------------------------------- هوية الصنف والدمج
