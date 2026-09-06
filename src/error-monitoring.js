@@ -427,7 +427,11 @@
   // فأُضيف بديل يبتلع «إشارة/عملة + رقم» كوحدة واحدة، **قبل** البديل العام
   // كي يُجرَّب أولاً. ويبقى البديل العام آخراً للقيم غير الرقمية.
   var CURRENCY = "[$\\u20AC\\u00A3\\u00A5\\u20BA\\uFDFC]|USD|EUR|SYP|SAR|AED|TRY|LBP|GBP|JPY";
-  var SIGNED_AMOUNT = "[-+]?\\s*(?:" + CURRENCY + ")?\\s*[-+]?\\s*\\d[\\d.,]*";
+  // الفراغ مسموح **داخل** الرقم بشرط أن يليه رقم — `balance: 1 250 000` يُبتلَع
+  // كاملاً (ملاحظة Codex P1 الحادية عشرة: كان يقف عند أوّل مجموعة فيمرّ الباقي،
+  // وستّ خانات مفصولة تفلت من حدّ الهاتف ومن حدّ الأربع خانات معاً)، بينما
+  // `total 5 items` يقف عند `5` فلا تُبتلَع الكلمة التالية.
+  var SIGNED_AMOUNT = "[-+]?\\s*(?:" + CURRENCY + ")?\\s*[-+]?\\s*\\d(?:[\\d.,]|\\s(?=\\d))*";
   var BUSINESS_ASSIGN_RE = new RegExp(
     '(["\'`]?\\b(?:' + BUSINESS_FIELDS + ')\\b["\'`]?\\s*[=:]\\s*)' +
     '("(?:\\\\[^\\n]|[^"\\\\\\n])*"?|\'(?:\\\\[^\\n]|[^\'\\\\\\n])*\'?|' +
@@ -516,7 +520,10 @@
   //
   // ويبقى حدٌّ معلَن: لاحقة بحجم رقم سطر معقول خلف اسم ملف حقيقي لا تُميَّز
   // عن موقع فعلي. هذا سقف ما تستطيعه قاعدة نصّية، ويُقال ولا يُدَّعى خلافه.
-  var FRAME_TAIL = /^([\s\S]*?):(\d{1,6}):(\d{1,6})(\)?\s*)$/;
+  // خمس خانات لا ستّ: رمز الاستعادة في هذا التطبيق ستّ خانات فأكثر
+  // (`[0-9]{6,10}`)، فحدُّ الستّ كان يسمح بمروره كـ«رقم سطر». وأكبر ملف
+  // هنا نحو اثني عشر ألف سطر، فخمس خانات (99999) هامشٌ واسع.
+  var FRAME_TAIL = /^([\s\S]*?):(\d{1,5}):(\d{1,5})(\)?\s*)$/;
   var SOURCE_FILE_END = /(?:\.(?:js|mjs|cjs|jsx|ts|tsx|html|css)|\/)$/i;
 
   function redactFrame(line) {
@@ -527,9 +534,34 @@
     return redactBusinessData(line);
   }
 
-  function redactStack(stack) {
+  // ⚠️ إصلاح ملاحظة Codex P1 العاشرة على PR #202، وهي الرابعة من عائلة واحدة:
+  // «نصّ رسالة يتنكّر في هيئة إطار». الجولات الثلاث السابقة عالجتها بتشديد
+  // **شكل** الإطار (لاحقة موقع، ثم بنية مصدر، ثم حدّ ستّ خانات)، وفي كل مرة
+  // وُجد شكلٌ يجتاز الشرط الجديد. آخرها `at reset.js:123456:1` — وستّ خانات
+  // هي بالضبط طول رمز الاستعادة في هذا التطبيق (`recoveryCode`).
+  //
+  // الدرس الذي فرضته أربع جولات: **تشديد الشكل سباقٌ لا يُكسَب.** ما دام
+  // المصنِّف يقرأ نصّاً قد يكون مصدره الرسالة، فكل شرط شكلي له صيغة تجتازه.
+  //
+  // فالعلاج هنا يقطع الجذر بدل ملاحقة الأشكال: V8 يبني `error.stack` بادئاً
+  // بـ`الاسم: الرسالة` حرفياً ثم الأطر. والرسالة **بحوزتنا**. فتُقتطع من رأس
+  // الأثر **بمطابقة نصّية حرفية** لا بنمط — فيسقط بذلك كلُّ ما يتحكّم به
+  // المحتوى دفعةً واحدة، ولا يبقى بعده إلا ما ولّده المحرّك.
+  //
+  // وهذا يُغني عن المفاضلة التي كانت مطروحة (إسقاط لاحقة الموقع كلياً مقابل
+  // فقدان أرقام أسطر الأطر): الأطر الحقيقية تحتفظ بأرقامها كاملةً، لأن الخطر
+  // لم يكن فيها قطّ بل في نصّ الرسالة المتنكّر بينها.
+  //
+  // وSafari/Firefox لا يضعان الرسالة في الأثر أصلاً، فالاقتطاع لا يجد ما
+  // يطابقه ولا يمسّ شيئاً. وتبقى الطبقات السابقة كلها حزاماً ثانياً.
+  function redactStack(stack, messageHeader) {
     if (typeof stack !== "string" || stack.length === 0) return "";
-    var lines = scrub(stack).split("\n");
+    var body = stack;
+    if (typeof messageHeader === "string" && messageHeader.length > 0 &&
+        body.indexOf(messageHeader) === 0) {
+      body = body.slice(messageHeader.length);
+    }
+    var lines = scrub(body).split("\n");
     var out = [];
     var lastDropped = false;
     for (var i = 0; i < lines.length; i += 1) {
@@ -551,8 +583,8 @@
     return value.length > max ? value.slice(0, max) + "…[مقتطع]" : value;
   }
 
-  function clampStack(text, max) {
-    var value = redactStack(text);
+  function clampStack(text, max, messageHeader) {
+    var value = redactStack(text, messageHeader);
     return value.length > max ? value.slice(0, max) + "…[مقتطع]" : value;
   }
 
@@ -620,6 +652,10 @@
   var consecutiveFailures = 0;
   var consecutiveFatalFailures = 0;
   var lastFailureStatus = 0;
+
+  function isFatalStatus(status) {
+    return FATAL_STATUSES.indexOf(typeof status === "number" ? status : 0) !== -1;
+  }
 
   function noteDelivery(ok, status) {
     if (ok) {
@@ -698,11 +734,24 @@
         credentials: "omit"
       });
       if (response && typeof response.then === "function") {
+        // ⚠️ إصلاح ملاحظة Codex P1 الثانية عشرة على PR #202: البصمة كانت
+        // تُسجَّل في `seen` **قبل** معرفة نتيجة الإرسال ولا تُزال عند فشل
+        // عابر. فخطأ متكرّر وقع أوّل مرة والجهاز خارج الشبكة يبقى مكتوماً
+        // لبقية عمر الصفحة حتى بعد عودة الاتصال — وهو سيناريو iPhone عادي.
+        // ولاحظ Codex بحقّ أن شاهد التعافي السابق نجح فقط لأنه أطلق بصمات
+        // مختلفة، فلم يكن يفحص هذا المسار أصلاً.
+        //
+        // فعند الفشل العابر تُزال البصمة ليُعاد المحاولة عند التكرار التالي.
+        // و`sent` **لا يُنقَص**: سقف الصفحة يبقى حدّاً فعّالاً على المحاولات
+        // فلا تتحوّل إعادةُ المحاولة إلى حلقة إرسال بلا سقف.
         response.then(function (result) {
-          noteDelivery(Boolean(result && result.ok), result && result.status);
+          var ok = Boolean(result && result.ok);
+          noteDelivery(ok, result && result.status);
+          if (!ok && !isFatalStatus(result && result.status)) delete seen[fingerprint];
         }).catch(function () {
-          // انقطاع شبكة أو حجب من إضافة متصفح: لا حالة HTTP أصلاً.
+          // انقطاع شبكة أو حجب من إضافة متصفح: لا حالة HTTP أصلاً، وهو عابر.
           noteDelivery(false, 0);
+          delete seen[fingerprint];
         });
       }
     } catch (ignored) {
@@ -716,7 +765,7 @@
     var error = event && event.error;
     var name = (error && error.name) || "Error";
     var message = (error && error.message) || (event && event.message) || "خطأ غير معروف";
-    send("error", clampMessage(name + ": " + message, MAX_MESSAGE_CHARS), clampStack(error && error.stack, MAX_STACK_CHARS), {
+    send("error", clampMessage(name + ": " + message, MAX_MESSAGE_CHARS), clampStack(error && error.stack, MAX_STACK_CHARS, name + ": " + message), {
       // اسم الملف بلا استعلام: معامل ?v=tobacco-N يتغيّر كل نشرة فيمنع التجميع.
       filename: scrub(String((event && event.filename) || "").split("?")[0]),
       lineno: event && event.lineno,
@@ -728,7 +777,7 @@
     var reason = event && event.reason;
     var name = (reason && reason.name) || "UnhandledRejection";
     var message = (reason && reason.message) || String(reason === undefined ? "" : reason);
-    send("error", clampMessage(name + ": " + message, MAX_MESSAGE_CHARS), clampStack(reason && reason.stack, MAX_STACK_CHARS), {});
+    send("error", clampMessage(name + ": " + message, MAX_MESSAGE_CHARS), clampStack(reason && reason.stack, MAX_STACK_CHARS, name + ": " + message), {});
   });
 
   // كشف محدود للاختبار والتشخيص — لا يرسل شيئاً بذاته، ولا يكشف الرمز ولا

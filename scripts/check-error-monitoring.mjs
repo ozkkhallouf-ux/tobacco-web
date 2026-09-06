@@ -798,6 +798,18 @@ console.log("\n— حجب بيانات العمل والأشخاص —");
       `مرّ رقم تحت غطاء لاحقة موقع — صار: ${out}`);
   }
 
+  // الحزام الثاني وحده (بلا اقتطاع رأس الرسالة): لاحقة بطول رمز استعادة
+  // تسقط أيضاً. رمز الاستعادة هنا `[0-9]{6,10}`، وأكبر ملف نحو 12 ألف سطر —
+  // فحدّ خمس خانات يحمي الأوّل ويكفي الثاني بهامش واسع.
+  for (const [label, input, leak] of [
+    ["ستّ خانات خلف اسم ملف", "Error: x\n at reset.js:123456:1", "123456"],
+    ["عشر خانات", "Error: x\n at reset.js:1234567890:1", "1234567890"],
+  ]) {
+    check(`الأثر: لاحقة بطول رمز استعادة تسقط (${label})`,
+      !redactStack(input).includes(leak),
+      `مرّ رمز بطول رمز الاستعادة كـ«رقم سطر» — صار: ${redactStack(input)}`);
+  }
+
   // والمقابل: الإطار الحقيقي يحمل مسار ملفه دائماً، فلاحقته تبقى.
   for (const [label, input, kept] of [
     ["مسار كامل", "Error: x\n  at saveBalance (https://h.com/src/app.js:11830:25)", "app.js:11830:25"],
@@ -852,6 +864,59 @@ console.log("\n— حجب بيانات العمل والأشخاص —");
   check("الأثر: أسطر السقوط المتتالية تُدمَج",
     (redactStack("Error: a\nb\nc\n  at f (a.js:1:2)").match(/سطر غير إطار/g) || []).length === 1,
     "امتلأ الأثر بعلامات السقوط");
+
+  // ⚠️ انحدار ملاحظة Codex P1 العاشرة على PR #202 — وهي الرابعة من عائلة
+  // «نصّ رسالة يتنكّر في هيئة إطار». ثلاث جولات عالجتها بتشديد شكل الإطار،
+  // وفي كل مرة وُجد شكل يجتاز الشرط الجديد؛ آخرها `at reset.js:123456:1`،
+  // وستّ خانات هي بالضبط طول `recoveryCode` في هذا التطبيق.
+  //
+  // العلاج يقطع الجذر: يُقتطع رأس `الاسم: الرسالة` من الأثر بمطابقة حرفية،
+  // فيسقط كلُّ ما يتحكّم به المحتوى دفعةً واحدة. والشاهد يفحص المسار الحقيقي
+  // (الحدث كاملاً) لا الدالة معزولةً، لأن الاقتطاع لا يعمل إلا برأس الرسالة.
+  {
+    const forged = "x\n at reset.js:987321:1";  // ستّ خانات = طول رمز الاستعادة
+    const live = boot({ meta: LIVE_META });
+    live.emit("error", {
+      message: forged,
+      filename: "https://ozktobacco.com/src/app.js",
+      lineno: 2450,
+      colno: 11,
+      error: Object.assign(new Error(forged), {
+        name: "Error",
+        stack: "Error: " + forged +
+          "\n    at submitReset (https://ozktobacco.com/src/app.js:2450:11)" +
+          "\n    at HTMLFormElement.onsubmit (https://ozktobacco.com/src/app.js:2400:5)",
+      }),
+    });
+    const wire = JSON.stringify(live.calls[0] || {});
+    check("إطار مزوَّر داخل الرسالة لا يصل الأثر (اقتطاع رأس الرسالة)",
+      !wire.includes("987321"),
+      `رمز استعادة سداسي غادر تحت غطاء لاحقة موقع — ${wire.slice(0, 400)}`);
+    const stack = String(live.calls[0]?.body?.data?.body?.message?.stack || "");
+    check("وأرقام أسطر الأطر الحقيقية تبقى كاملةً رغم ذلك",
+      stack.includes("app.js:2450:11") && stack.includes("app.js:2400:5"),
+      `ضاعت أرقام الأطر الحقيقية — صار: ${stack}`);
+    check("سطر الرسالة المزوَّر يسقط من الأثر",
+      !stack.includes("reset.js"),
+      `بقي سطر الرسالة داخل الأثر — صار: ${stack}`);
+  }
+  // Firefox/Safari لا يضعان الرسالة في الأثر، فالاقتطاع لا يجد ما يطابقه.
+  check("اقتطاع رأس الرسالة لا يُتلف أثراً بلا رأس (صيغة Firefox)",
+    redactStack("saveBalance@https://ozktobacco.com/src/app.js:11830:25", "Error: boom")
+      .includes("app.js:11830:25"),
+    "أُتلف أثر لا يبدأ برأس رسالة");
+
+  // ⚠️ انحدار ملاحظة Codex P1 الحادية عشرة — رصيد بفواصل فراغ.
+  for (const [label, input, leaks] of [
+    ["رصيد بفواصل فراغ", "balance: 1 250 000", ["250", "000"]],
+    ["مبلغ بفواصل فراغ", "amount = 3 400 000", ["400", "000"]],
+  ]) {
+    check(`يُبتلَع المبلغ المفصول بفراغات: ${label}`,
+      leaks.every((x) => !redact(input).includes(x)),
+      `بقي جزء من المبلغ — صار: ${redact(input)}`);
+  }
+  check("الفراغ لا يبتلع الكلمة التالية", redact("total 5 items").includes("items"),
+    `ابتُلعت كلمة بعد الرقم — صار: ${redact("total 5 items")}`);
 
   // --- الفحص الأقوى: الحمولة المرسَلة فعلاً، من طرف إلى طرف ---
   const e2e = boot({ meta: LIVE_META });
@@ -953,6 +1018,36 @@ console.log("\n— رصد فشل التسليم —");
       live.context.ozkErrorMonitoring.delivery().delivered === 1,
       "لم يصل أي بلاغ بعد عودة الشبكة — لا تعافي");
   }
+  // ⚠️ انحدار ملاحظة Codex P1 الثانية عشرة — بصمة سُجِّلت قبل معرفة النتيجة.
+  // خطأ متكرّر وقع أوّل مرة والجهاز خارج الشبكة كان يبقى مكتوماً لبقية عمر
+  // الصفحة حتى بعد عودة الاتصال. ولاحظ Codex بحقّ أن شاهد التعافي السابق نجح
+  // فقط لأنه أطلق بصمات مختلفة — فهذا الشاهد يعيد **البصمة نفسها** عمداً.
+  {
+    let offline = true;
+    const live = boot({
+      meta: LIVE_META,
+      fetchImpl: () => (offline
+        ? Promise.reject(new Error("network down"))
+        : Promise.resolve({ ok: true, status: 200 })),
+    });
+    const identical = () => live.emit("error", {
+      message: "same", filename: "https://ozktobacco.com/src/app.js", lineno: 5, colno: 1,
+      error: Object.assign(new Error("same"), {
+        name: "Error", stack: "Error: same\n  at f (https://ozktobacco.com/src/app.js:5:1)",
+      }),
+    });
+    identical(); await tick();
+    offline = false;
+    identical(); await tick();
+    check("الخطأ نفسه يُعاد إرساله بعد عودة الشبكة (لا يُكتَم ببصمة فاشلة)",
+      live.context.ozkErrorMonitoring.delivery().delivered === 1,
+      `بقي الخطأ مكتوماً رغم عودة الاتصال — ${JSON.stringify(live.context.ozkErrorMonitoring.delivery())}`);
+    identical(); await tick();
+    check("وبعد نجاح التسليم يعود منع التكرار فعّالاً",
+      live.context.ozkErrorMonitoring.delivery().delivered === 1,
+      "أُرسل الخطأ نفسه مرتين بعد نجاح — فقد منعُ التكرار أثره");
+  }
+
   for (const status of [429, 500, 503]) {
     const live = boot({ meta: LIVE_META, respondWith: { ok: false, status } });
     for (let i = 0; i < 4; i += 1) { live.emit("error", boom(i)); await tick(); }
