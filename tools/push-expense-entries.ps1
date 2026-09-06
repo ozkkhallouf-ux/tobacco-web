@@ -26,7 +26,9 @@
 # ============================================================
 param(
     [switch]$DryRun,
-    [int]$Days = 7,
+    # السقف 31 مطابق لحارس النافذة في replace_expense_entries_window — أي قيمة
+    # أكبر كانت سترتدّ من القاعدة بعد قراءة الأمين كاملةً، فالرفض هنا أوضح.
+    [ValidateRange(1, 31)][int]$Days = 7,
     [string]$EnvFile = "$PSScriptRoot\.env",
     [string]$LogFile = "$PSScriptRoot\logs\expense-entries-push.log"
 )
@@ -117,8 +119,20 @@ JOIN ac000 a ON a.GUID = en.AccountGUID
 WHERE a.ParentGUID = '$EXPENSE_PARENT_GUID'
   AND en.Debit > 0
   AND en.Date >= DATEADD(day, -$Days, CAST(GETDATE() AS date))
+  AND en.Date < DATEADD(day, 1, CAST(GETDATE() AS date))
 ORDER BY en.Date DESC
 "@
+
+# حدّا النافذة المُستبدَلة — هما نفسهما حدّا الاستعلام أعلاه، فعلامة الاكتمال
+# تصف ما رُفع فعلاً لا ما نُوي رفعه.
+#
+# الحدّ الأعلى **نصف مفتوح** عمداً (< غدٍ) لا `<= اليوم`: `en.Date` يحمل مكوّن
+# وقت، فـ`<= CAST(GETDATE() AS date)` يقارن بمنتصف ليل اليوم فيُسقط كل قيد
+# سُجّل اليوم تقريباً — ثم تختم الـRPC النافذة حتى اليوم، فيُقدَّم مجموع منقوص
+# على أنه متحقَّق. وهي نفس صيغة push-sales-line-items.ps1.
+# (رصدها Codex على PR #205 بعد aca9bb2.)
+$windowStart = (Get-Date).AddDays(-$Days).ToString("yyyy-MM-dd")
+$windowEnd   = (Get-Date).ToString("yyyy-MM-dd")
 
 $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 Write-Log "bd2 sahb haraket masareef akher $Days yom..."
@@ -183,29 +197,42 @@ try {
         exit 0
     }
 
-    if ($rows.Count -eq 0) {
-        Write-Log "ma fi satr — khoroj bidoon rafe3."
-        exit 0
-    }
-
+    # لا خروج مبكر عند صفر صفوف. الخروج قبل الاستبدال كان يترك صفوف النافذة
+    # القديمة في Supabase تُعرض كأنها قائمة، فلو مُسحت مصاريف الأسبوع كلها من
+    # الأمين لبقيت ظاهرة عند المالك إلى الأبد. ونافذة فارغة حالة مشروعة:
+    # تُستبدل وتُختم كغيرها، فتبقى علامة الاكتمال صادقة.
     $token = Get-SupabaseAuthToken -SupabaseUrl $supabaseUrl -ApiKey $apiKey -Email $syncEmail -Password $syncPassword
     $hdr = @{ apikey = $apiKey; Authorization = "Bearer $token"; "Accept-Profile" = "public"; "Content-Profile" = "public" }
 
-    $cutoff = (Get-Date).AddDays(-$Days).ToString("yyyy-MM-dd")
-    Invoke-RestMethod -Method Delete -Uri "$supabaseUrl/rest/v1/expense_entries?entry_date=gte.$cutoff" `
-        -Headers ($hdr + @{ Prefer = "return=minimal" }) | Out-Null
-    Write-Log "tem masah al-sofoof al-qadima (>= $cutoff)."
-
-    $batchSize = 500
-    for ($i = 0; $i -lt $rows.Count; $i += $batchSize) {
-        $batch = $rows[$i..([Math]::Min($i + $batchSize - 1, $rows.Count - 1))]
-        $body = $batch | ConvertTo-Json -Depth 3
-        Invoke-RestMethod -Method Post -Uri "$supabaseUrl/rest/v1/expense_entries" `
-            -Headers ($hdr + @{ Prefer = "return=minimal" }) `
-            -ContentType "application/json; charset=utf-8" -Body $body | Out-Null
+    # الحذف والإدراج وختم الاكتمال في معاملة واحدة داخل القاعدة. الصيغة القديمة
+    # (DELETE ثم دفعات POST) كانت تترك نافذةً زمنيةً الجدولُ فيها ناقصٌ أو فارغ،
+    # ولا تُسجّل أي حدّ متحقَّق — فلا يعرف قارئ لاحق ما الذي جرى تحديثه فعلاً.
+    $body = @{
+        p_window_start = $windowStart
+        p_window_end   = $windowEnd
+        p_rows         = @($rows)
+    } | ConvertTo-Json -Depth 4 -Compress
+    $syncResult = @(
+        Invoke-RestMethod -Method Post `
+            -Uri "$supabaseUrl/rest/v1/rpc/replace_expense_entries_window" `
+            -Headers ($hdr + @{ Prefer = "return=representation" }) `
+            -ContentType "application/json; charset=utf-8" `
+            -Body $body `
+            -TimeoutSec 300
+    )
+    if ($syncResult.Count -ne 1) {
+        throw "atomic_expense_refresh_returned_unexpected_result_count"
+    }
+    $resultRow = $syncResult[0]
+    if ([int]$resultRow.row_count -ne $rows.Count -or
+        "$($resultRow.window_start)" -ne $windowStart -or
+        "$($resultRow.window_end)" -ne $windowEnd -or
+        [string]::IsNullOrWhiteSpace("$($resultRow.sync_run_id)") -or
+        [string]::IsNullOrWhiteSpace("$($resultRow.completed_at)")) {
+        throw "atomic_expense_refresh_verification_failed"
     }
 
-    Write-Log "tem raf3 $($rows.Count) satr b-najah ✓"
+    Write-Log "tem istibdal $($rows.Count) satr atomically ($windowStart..$windowEnd) ✓"
     exit 0
 
 } catch {
