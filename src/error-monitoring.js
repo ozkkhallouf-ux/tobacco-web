@@ -540,6 +540,43 @@
     lastFailureStatus = typeof status === "number" ? status : 0;
   }
 
+  // بناء الحمولة معزول عن الإرسال: `send` كانت تجمع البوّابات ومنع التكرار
+  // والبناء والإرسال في دالة واحدة، فبلغت سبعة وستين سطراً (رصدها CodeFactor
+  // «Complex Method»). والفصل هنا ليس تجميلاً فقط — هذه الدالة هي **التعريف
+  // الكامل لما يغادر المتصفح**، فقراءتها وحدها تُظهر كل حقل مُرسَل.
+  function buildPayload(level, title, stack, context) {
+    return {
+      access_token: token,
+      data: {
+        environment: environment,
+        level: level,
+        platform: "browser",
+        language: "javascript",
+        timestamp: Math.floor(Date.now() / 1000),
+        // معرّف النشرة: يربط الخطأ بالـcommit المنشور بالضبط. بلا حقن يبقى
+        // فارغاً فلا نرسل حقلاً كاذباً.
+        code_version: injected(release) ? release : undefined,
+        notifier: { name: "ozk-error-monitoring", version: "1" },
+        body: { message: { body: title, stack: stack || undefined } },
+        request: {
+          // pathname وحده: الاستعلام والشظية قد يحملان معرّفات مستندات أو رموزاً.
+          url: location.origin + location.pathname
+        },
+        client: {
+          javascript: {
+            browser: String(navigator.userAgent || "").slice(0, 300),
+            source_map_enabled: false
+          }
+        },
+        custom: {
+          filename: context.filename || undefined,
+          lineno: context.lineno || undefined,
+          colno: context.colno || undefined
+        }
+      }
+    };
+  }
+
   function send(level, title, stack, context) {
     if (reporting || sent >= MAX_ITEMS_PER_PAGE) return;
     if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) return;
@@ -551,36 +588,7 @@
     reporting = true;
 
     try {
-      var payload = {
-        access_token: token,
-        data: {
-          environment: environment,
-          level: level,
-          platform: "browser",
-          language: "javascript",
-          timestamp: Math.floor(Date.now() / 1000),
-          // معرّف النشرة: يربط الخطأ بالـcommit المنشور بالضبط. بلا حقن يبقى
-          // فارغاً فلا نرسل حقلاً كاذباً.
-          code_version: injected(release) ? release : undefined,
-          notifier: { name: "ozk-error-monitoring", version: "1" },
-          body: { message: { body: title, stack: stack || undefined } },
-          request: {
-            // pathname وحده: الاستعلام والشظية قد يحملان معرّفات مستندات أو رموزاً.
-            url: location.origin + location.pathname
-          },
-          client: {
-            javascript: {
-              browser: String(navigator.userAgent || "").slice(0, 300),
-              source_map_enabled: false
-            }
-          },
-          custom: {
-            filename: context.filename || undefined,
-            lineno: context.lineno || undefined,
-            colno: context.colno || undefined
-          }
-        }
-      };
+      var payload = buildPayload(level, title, stack, context);
 
       // keepalive: يُكمِل الإرسال حتى لو أُغلقت الصفحة فوراً بعد الخطأ.
       // النتيجة تُسجَّل ولا تُطبَع: الفشل صار مرصوداً بلا ضجيج ولا ارتداد،
