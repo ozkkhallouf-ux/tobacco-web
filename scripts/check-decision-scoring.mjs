@@ -480,39 +480,43 @@ check("زبون كبير متأخر لا يُدفن تحت تصنيف «مراق
     "المدين الكبير المتأخر ما زال مدفوناً تحت مدين صغير متجاوز");
 });
 
-check("الاقتطاع يحتاج دليلاً من المصدر ولا يُستدلّ عليه من التواريخ", () => {
+check("اكتمال سجل الدفعات ثلاثي: مقتطع / مكتمل / مجهول", () => {
+  const cutoff = daysAgo(90);
   const build = (extra) => S.scoreCustomers({
     balances: [{ name: "زبون", customerGuid: guid(700), balance: 20000,
       lastPaymentDate: daysAgo(1), ...extra }],
     creditLimits: [], now: customerNow
   }).customers[0];
 
-  // دليل صريح: المصدر يعلن 12 دفعة داخل النافذة ووصلتنا 6.
-  const truncated = build({
-    recentPayments: [1, 5, 9, 14, 20, 26].map((d) => ({ date: daysAgo(d), amount: 500 })),
-    paymentsInWindow: 12
-  });
-  assert.equal(truncated.paymentsTruncated, true, "لم يُكتشف اقتطاع معلَن");
+  const six = [1, 5, 9, 14, 20, 26].map((d) => ({ date: daysAgo(d), amount: 500 }));
+
+  const truncated = build({ recentPayments: six, paymentsInWindow: 12, paymentsWindowStart: cutoff });
+  assert.equal(truncated.paymentsCompleteness, "truncated");
   assert.match(truncated.reason, /مقتطع/);
 
-  // ⚠️ الإنذار الكاذب الذي كشفته المراجعة: دفعة واحدة قبل خمسة أيام، والسجل
-  // كامل. أقدم دفعة داخل النافذة، فالاستدلال بالتواريخ وحده كان يوسمه مقتطعاً.
-  const singleRecent = build({
+  // سجل قصير كامل — الإنذار الكاذب الذي كشفته المراجعة الثامنة.
+  const complete = build({
     recentPayments: [{ date: daysAgo(5), amount: 500 }],
-    paymentsInWindow: 1
+    paymentsInWindow: 1, paymentsWindowStart: cutoff
   });
-  assert.equal(singleRecent.paymentsTruncated, false,
-    "زبون سجله كامل وُسم بالاقتطاع");
-  assert.doesNotMatch(singleRecent.reason, /مقتطع/);
+  assert.equal(complete.paymentsCompleteness, "complete");
+  assert.doesNotMatch(complete.reason, /مقتطع|غير معروف/);
 
-  // غياب الحقل (مزامنة أقدم) لا يُنتج ادّعاءً في أي اتجاه.
-  const unknown = build({
-    recentPayments: [1, 5, 9, 14, 20, 26].map((d) => ({ date: daysAgo(d), amount: 500 }))
-  });
+  // ⚠️ المراجعة العاشرة: غياب العدّاد لا يعني الاكتمال.
+  const unknown = build({ recentPayments: six });
+  assert.equal(unknown.paymentsCompleteness, "unknown", "حُوِّل المجهول إلى مكتمل");
   assert.equal(unknown.paymentsTruncated, false, "ادُّعي اقتطاع بلا دليل");
+  assert.match(unknown.reason, /غير معروف/, "المجهول لا يُعلَن للقارئ");
 
-  // بلا دفعات إطلاقاً.
-  assert.equal(build({}).paymentsTruncated, false);
+  // ⚠️ المراجعة التاسعة: دفعة على حدّ النافذة بالضبط تُعَدّ بالحدّ الذي أعلنه
+  // المصدر، فلا يظهر اقتطاع حدّي كاذب ولا تسقط الدفعة من الزخم.
+  const onBoundary = build({
+    recentPayments: [{ date: cutoff, amount: 9000 }, { date: daysAgo(1), amount: 1000 }],
+    paymentsInWindow: 2, paymentsWindowStart: cutoff
+  });
+  assert.equal(onBoundary.paymentsCompleteness, "complete",
+    "دفعة يوم الحدّ أنتجت اقتطاعاً كاذباً");
+  assert.equal(onBoundary.payments90d, 10000, "دفعة يوم الحدّ سقطت من الزخم");
 });
 
 check("الأولوية تقيس المال والتصنيف يقيس الاحتمال — بُعدان منفصلان", () => {

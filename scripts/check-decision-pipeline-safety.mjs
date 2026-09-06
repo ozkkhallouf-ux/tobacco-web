@@ -99,8 +99,12 @@ check("مصدر الأرصدة يجلب دفعات تكفي نافذة الزخ�
   // العدّاد القاطع: بدونه يبقى الاقتطاع استدلالاً يُنتج إنذارات كاذبة.
   assert.match(sql, /payments_in_window/,
     "الاستعلام لا يعلن عدد الدفعات الفعلي داخل النافذة");
-  assert.match(read("tools/ameen-sync-agent.ps1"), /paymentsInWindow/,
-    "وكيل المزامنة لا يمرّر العدّاد إلى Supabase");
+  // الحدّ يُعلَن مع العدد، وإلا عدّ الطرفان بحدَّين مختلفين وظهرت فروقات كاذبة.
+  assert.match(sql, /payments_window_start/,
+    "الاستعلام لا يعلن حدّ النافذة الذي عدَّ به");
+  const agent = read("tools/ameen-sync-agent.ps1");
+  assert.match(agent, /paymentsInWindow/, "وكيل المزامنة لا يمرّر العدّاد");
+  assert.match(agent, /paymentsWindowStart/, "وكيل المزامنة لا يمرّر حدّ النافذة");
 });
 
 check("الترحيلة المقترحة تسمح بتفريغ مأذون ولا ترفضه مطلقاً", () => {

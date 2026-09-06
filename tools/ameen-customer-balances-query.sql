@@ -14,6 +14,7 @@ select
   -- عدد الدفعات الفعلي داخل نافذة الزخم (90 يوماً). يقارنه النموذج بعدد ما وصله
   -- فيعرف الاقتطاع يقيناً بدل الاستدلال عليه من تواريخ ما وصل.
   coalesce(payments_window.payments_in_window, 0) as payments_in_window,
+  payments_window.payments_window_start,
   coalesce(recent_movements.recent_movements_json, '[]') as recent_movements_json
 from dbo.cu000 cu
 left join dbo.ac000 ac  on ac.GUID = cu.AccountGUID
@@ -36,7 +37,11 @@ outer apply (
   ) as recent_payments_json
 ) recent_payments
 outer apply (
-  select count_big(*) as payments_in_window
+  -- يُعلَن حدّ النافذة مع العدد كي تَعُدّ طبقة التقييم بالحدّ نفسه بالضبط. من
+  -- دونه يقارن الطرفان عدَّين محسوبين بحدَّين مختلفين (منتصف ليل تقويمي هنا،
+  -- مقابل 90×24 ساعة متدحرجة في المتصفح) فتظهر فروقات حدّية كاذبة.
+  select count_big(*) as payments_in_window,
+         cast(dateadd(day, -90, cast(getdate() as date)) as date) as payments_window_start
   from dbo.en000 en
   where en.AccountGUID = cu.AccountGUID and coalesce(en.Credit, 0) > 0 and coalesce(en.Type, 0) = 0
     and en.Date >= dateadd(day, -90, cast(getdate() as date))

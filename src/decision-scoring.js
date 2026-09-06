@@ -619,30 +619,30 @@
 
   function paymentsWithin(row, nowMs, windowDays) {
     const list = Array.isArray(row?.recentPayments) ? row.recentPayments : [];
+    // المصدر يعلن حدّ نافذته وعددها. نَعُدّ بالحدّ نفسه بالضبط: حدّ تقويمي عند
+    // منتصف الليل هناك مقابل 90×24 ساعة متدحرجة هنا كان ينتج فروقات حدّية
+    // كاذبة تُظهر اقتطاعاً غير موجود وتُسقط دفعة يوم الحدّ من الزخم.
+    const declaredCount = num(row?.paymentsInWindow ?? row?.payments_in_window);
+    const sourceCutoff = toTime(row?.paymentsWindowStart ?? row?.payments_window_start);
+    const cutoffMs = sourceCutoff !== null ? sourceCutoff : nowMs - windowDays * DAY_MS;
+
     let total = 0;
     let count = 0;
-    let oldestAge = null;
     for (const payment of list) {
       const at = toTime(payment?.date);
-      if (at === null) continue;
-      const age = daysBetween(nowMs, at);
-      if (age === null) continue;
-      if (oldestAge === null || age > oldestAge) oldestAge = age;
-      if (age > windowDays) continue;
+      if (at === null || at < cutoffMs) continue;
       const amount = num(payment?.amount);
       if (amount === null || amount <= 0) continue;
       total += amount;
       count += 1;
     }
-    // الاقتطاع يحتاج **دليلاً** لا قرينة: زبون دفع مرة واحدة قبل خمسة أيام تكون
-    // أقدم دفعاته داخل النافذة وسجله كامل تماماً، فالاستدلال من التواريخ وحده
-    // يُنتج إنذاراً كاذباً. المصدر يعلن عدد الدفعات الفعلي داخل النافذة
-    // (payments_in_window)، فنقارنه بعدد ما وصلنا ونعرف يقيناً.
-    // وحين يغيب الحقل — نسخة مزامنة أقدم — لا يُدَّعى اقتطاع: الإنذار الكاذب
-    // أسوأ من صمت مؤقت، لأنه يوسم زبوناً منتظماً بأن سجله ناقص.
-    const declared = num(row?.paymentsInWindow ?? row?.payments_in_window);
-    const truncated = declared !== null && declared > count;
-    return { total, count, truncated, declaredCount: declared };
+
+    // ثلاث حالات لا اثنتان. «مجهول» ليس «مكتمل»: تقرير من وكيل مزامنة أقدم لا
+    // يحمل العدّاد، وقد يكون سجله مقتطعاً بالسقف القديم — فادّعاء الاكتمال
+    // يُعيد تضخّم الخسارة المتوقّعة صامتاً أثناء الترقية.
+    let completeness = "unknown";
+    if (declaredCount !== null) completeness = declaredCount > count ? "truncated" : "complete";
+    return { total, count, completeness, truncated: completeness === "truncated", declaredCount };
   }
 
   function scoreCustomers(input) {
@@ -786,6 +786,7 @@
         paymentCount90d: entry.payments.count,
         // مجموع الدفعات مقتطع من المصدر: الزخم أدناه حدّ أعلى للخطر لا قيمة نهائية.
         paymentsTruncated: entry.payments.truncated,
+        paymentsCompleteness: entry.payments.completeness,
         exposure, paymentDelay, utilization, momentum, behaviouralRisk, expectedLoss,
         score,
         // بُعدان مستقلان عمداً:
@@ -827,7 +828,10 @@
     if (entry.payments.total > 0 && entry.balance > 0 && entry.payments.total / entry.balance < 0.05) {
       parts.push("دفعات رمزية مقارنة بالرصيد");
     }
-    if (entry.payments.truncated) parts.push("سجل الدفعات مقتطع — الخطر قد يكون أقل");
+    if (entry.payments.completeness === "truncated") parts.push("سجل الدفعات مقتطع — الخطر قد يكون أقل");
+    else if (entry.payments.completeness === "unknown" && entry.payments.count > 0) {
+      parts.push("اكتمال سجل الدفعات غير معروف");
+    }
     return parts.length ? parts.join(" + ") : "ضمن المتابعة الاعتيادية";
   }
 
