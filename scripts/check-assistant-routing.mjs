@@ -948,4 +948,141 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   ok("أولوية الشراء الموجبة تُحجب عند البتر — الكميات مُوقَّعة فالبتر قد يضخّم المعدّل");
 }
 
+// ── ه‍3) استبدالٌ ذرّي أثناء التصفيح لا يمرّ كإجمالي كامل ───────────────────
+{
+  // ملاحظة Codex على PR #205 بعد 82e9022: التصفيح بـoffset يفترض جدولاً
+  // ساكناً، والاستبدال الذرّي يحذف النافذة ويُدرجها من جديد — فصفحةٌ لاحقة
+  // تكرّر صفوفاً وتُسقط أخرى، وعلامة المزامنة بعدها تبدو حديثة و`partial`
+  // يبقى false، فيُقدَّم إجمالي مشوّه على أنه كامل ومتحقَّق.
+  const today = new Date(Date.now() + 180 * 60_000).toISOString().slice(0, 10);
+  const rows = [];
+  for (let i = 0; i < 120; i += 1) {
+    rows.push({ id: i + 1, sale_date: today, bill_no: `b${i}`, bill_type: "retail",
+      item_name: "أ", qty: 1, line_total: 10, unit_cost: 9, customer_name: "س" });
+  }
+  const state = (runId) => [{
+    source: "ameen_sales_line_items", sync_run_id: runId,
+    window_start: today, window_end: today, row_count: rows.length,
+    completed_at: new Date().toISOString()
+  }];
+  const fixtures = { ...defaultFixtures(), sales_line_items: rows, sales_line_items_sync_state: state("run-1") };
+
+  // مزامنة تلتزم لقطة واحدة ⇒ الرقم كامل
+  const stable = await loadAssistant({ fixtures, maxRows: 40 });
+  const stableResult = await stable.ask(TOKENS.owner, "كم مبيعات اليوم؟");
+  assert.ok(/1,200/.test(String(stableResult.body.reply)), `لم يقرأ الفترة كاملةً:\n${String(stableResult.body.reply)}`);
+  assert.notEqual(stableResult.body.partial, true, "أعلن البتر رغم ثبات اللقطة");
+
+  // استبدالٌ واحد يلتزم بين الصفحات ⇒ تُعاد القراءة على لقطة ثابتة، فيخرج
+  // الرقم صحيحاً وكاملاً. الإعادة هي الغرض: لا رقم مشوّه ولا امتناع بلا داعٍ.
+  let flipped = false;
+  const shifting = await loadAssistant({
+    fixtures: { ...fixtures, sales_line_items_sync_state: state("run-1") },
+    maxRows: 40,
+    onRead: (query, fx) => {
+      if (!flipped && /offset=40/.test(query)) {
+        flipped = true;
+        fx.sales_line_items_sync_state = state("run-2");
+      }
+    }
+  });
+  const shiftedResult = await shifting.ask(TOKENS.owner, "كم مبيعات اليوم؟");
+  const shiftedText = String(shiftedResult.body.reply);
+  const firstPages = shifting.metrics.reads.filter((q) => q.startsWith("sales_line_items?") && /offset=0&/.test(q));
+  assert.ok(firstPages.length >= 2, "لم يُعِد القراءة رغم تبدّل لقطة المزامنة بين الصفحات");
+  assert.ok(/1,200/.test(shiftedText), `الرقم بعد الإعادة ليس المجموع الصحيح:\n${shiftedText}`);
+  assert.notEqual(shiftedResult.body.partial, true, "امتنع رغم أن الإعادة استقرّت");
+
+  // واستبدالٌ لا يستقرّ (يلتزم عند كل محاولة) ⇒ لا يُقدَّم الرقم نهائياً
+  let runs = 0;
+  const unstable = await loadAssistant({
+    fixtures: { ...fixtures, sales_line_items_sync_state: state("run-1") },
+    maxRows: 40,
+    onRead: (query, fx) => {
+      // بادئة مختلفة عن "run-1" الابتدائية: بدونها تُنتج أول قلبة نفس القيمة
+      // فتبدو اللقطة ثابتة، ويمرّ الاختبار على حالة لم تُحاكَ أصلاً.
+      if (/offset=40/.test(query)) fx.sales_line_items_sync_state = state(`shift-${++runs}`);
+    }
+  });
+  const unstableResult = await unstable.ask(TOKENS.owner, "كم مبيعات اليوم؟");
+  const unstableText = String(unstableResult.body.reply);
+  assert.equal(unstableResult.body.partial, true, "قدّم رقماً قُرئ عبر استبدال متكرّر على أنه نهائي");
+  assert.ok(/جزئية وليست نهائية|جزئي وليس نهائياً/.test(unstableText),
+    `لم يُعلن أن الرقم غير نهائي بعد تعذّر تثبيت اللقطة:\n${unstableText}`);
+  ok("القراءة تُثبَّت على لقطة مزامنة واحدة: تُعاد عند تبدّلها، وتُعلَن غير نهائية إن لم تستقرّ");
+}
+
+// ── ي) غياب جدول علامة المزامنة يُعلَن ولا يُسقط الأداة ─────────────────────
+{
+  // الملفّان SQL يُطبَّقان يدوياً ومستقلَّين عن نشر الدالة، فبينهما يردّ
+  // PostgREST 404 على جدول العلامة. لو رُميت هذه القراءة لسقطت الأداة كلها
+  // بـ«تعذّرت قراءة المصدر» — أي أن إضافة حارسٍ للتحقق تُعطّل جواباً يعمل.
+  const a = await loadAssistant({ failTable: "expense_entries_sync_state" });
+  const expenses = await a.ask(TOKENS.owner, "كم دفعنا اليوم؟");
+  assert.equal(expenses.status, 200);
+  assert.equal(expenses.body.tool, "expenses", "غياب جدول العلامة حوّل التوجيه");
+  const expText = String(expenses.body.reply);
+  assert.ok(!/تعذّرت قراءة مصدر البيانات/.test(expText), `غياب جدول العلامة أسقط أداة المصاريف:\n${expText}`);
+  assert.ok(/لا يوجد سجل مزامنة مكتمل/.test(expText), `لم يُعلن غياب التحقق:\n${expText}`);
+
+  const b = await loadAssistant({ failTable: "sales_line_items_sync_state" });
+  const sales = await b.ask(TOKENS.owner, "كم مبيعات اليوم؟");
+  assert.equal(sales.body.tool, "sales");
+  assert.ok(!/تعذّرت قراءة مصدر البيانات/.test(String(sales.body.reply)), "غياب جدول العلامة أسقط أداة المبيعات");
+  ok("غياب جدول علامة المزامنة يُعلَن «غير متحقَّق» ولا يُسقط الأداة");
+}
+
+// ── ط) الفترة المطلوبة تُحترم في المشتريات وفواتير الزبون ───────────────────
+{
+  // ملاحظتان لـCodex على PR #205 بعد 82e9022: كلتاهما نفس الصنف الذي عولج في
+  // تقارير الحركة — الفترة تُحسب صحيحةً ثم تتجاهلها الأداة.
+  const day = (n) => new Date(Date.now() + 180 * 60_000 - n * 86_400_000).toISOString().slice(0, 10);
+  const firstOfMonth = `${day(0).slice(0, 7)}-01`;
+  const lastMonthEnd = new Date(Date.parse(`${firstOfMonth}T00:00:00Z`) - 86_400_000).toISOString().slice(0, 10);
+  const lastMonthStart = `${lastMonthEnd.slice(0, 7)}-01`;
+
+  const fixtures = defaultFixtures();
+  fixtures.ameen_purchase_invoice_reports = [{
+    report_date: day(0),
+    created_at: new Date().toISOString(),
+    summary: { bills: 99, suppliers: 40, fromDate: lastMonthStart },
+    items: [
+      { name: "مورّد قديم", invoices: [{ date: lastMonthEnd, items: [{ itemName: "س", qty: 1, lineTotal: 10, avgPrice: 10 }] }] },
+      { name: "مورّد حالي", invoices: [{ date: day(0), items: [{ itemName: "ج", qty: 1, lineTotal: 20, avgPrice: 20 }] }] }
+    ]
+  }];
+
+  const a = await loadAssistant({ fixtures });
+  const lastMonth = String((await a.ask(TOKENS.owner, "ما مشتريات الشهر الماضي؟")).body.reply);
+  assert.ok(/مورّد قديم/.test(lastMonth), `لم يعرض مورّد الشهر الماضي:\n${lastMonth}`);
+  assert.ok(!/مورّد حالي/.test(lastMonth), `أدخل مورّد هذا الشهر في جواب الشهر الماضي:\n${lastMonth}`);
+  assert.ok(!/\*\*99\*\*/.test(lastMonth), `عرض عدد فواتير اللقطة كلها (99) بدل عدد الفترة:\n${lastMonth}`);
+  assert.ok(/عدد الفواتير: \*\*1\*\*/.test(lastMonth), `لم يشتقّ العدد من المجموعة المُرشَّحة:\n${lastMonth}`);
+
+  // وبلا فترة صريحة تبقى اللقطة كاملةً كما كانت
+  const b = await loadAssistant({ fixtures });
+  const all = String((await b.ask(TOKENS.owner, "ما المشتريات؟")).body.reply);
+  assert.ok(/مورّد قديم/.test(all) && /مورّد حالي/.test(all), "سؤال بلا فترة فقد جزءاً من اللقطة");
+
+  // فواتير الزبون: نفس القاعدة
+  const invFixtures = defaultFixtures();
+  invFixtures["inventory_reports:ameen_customer_invoices"] = [{
+    report_date: day(0),
+    created_at: new Date().toISOString(),
+    summary: { fromDate: lastMonthStart },
+    items: [{
+      customerGuid: "aaa11111", name: "جهاد التلي",
+      invoices: [
+        { date: day(0), lines: [{ material: "صنف اليوم", qty: 1, unit1: "علبة", price: 500, lineTotal: 500 }] },
+        { date: lastMonthEnd, lines: [{ material: "صنف الشهر الماضي", qty: 1, unit1: "علبة", price: 700, lineTotal: 700 }] }
+      ]
+    }]
+  }];
+  const c = await loadAssistant({ fixtures: invFixtures });
+  const bought = String((await c.ask(TOKENS.owner, "ماذا اشترى الزبون جهاد التلي الشهر الماضي؟")).body.reply);
+  assert.ok(/صنف الشهر الماضي/.test(bought), `لم يعرض فواتير الشهر الماضي:\n${bought}`);
+  assert.ok(!/صنف اليوم/.test(bought), `عرض فاتورة هذا الشهر جواباً عن الشهر الماضي:\n${bought}`);
+  ok("المشتريات وفواتير الزبون تُرشَّح بالفترة المطلوبة، وأعدادها مشتقّة منها");
+}
+
 console.log(`\nتوجيه المساعد الذكي: ${passed}/${passed} تحقق ناجح`);

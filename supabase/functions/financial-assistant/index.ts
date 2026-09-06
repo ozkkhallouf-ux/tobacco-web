@@ -459,21 +459,65 @@ type SalesRow = {
 // تحقُّق على الإنتاج 2026-09-06: النافذة المتحقَّقة 2026-08-07 → 2026-09-06
 // (7,041 صفاً)، بينما الجدول يحمل صفوفاً من 2026-07-01. فسؤال «مبيعات الشهر
 // الماضي» يشمل 1–6 آب وهي خارج النافذة.
-type SyncWindow = { start: string; end: string; completedAt: string; rowCount: number } | null;
+type SyncWindow = { start: string; end: string; completedAt: string; rowCount: number; runId: string } | null;
 
 async function syncWindow(table: string, source: string): Promise<SyncWindow> {
-  const rows = await readRest(
-    `${table}?select=window_start,window_end,row_count,completed_at`
-    + `&source=eq.${encodeURIComponent(source)}&order=completed_at.desc&limit=1`
-  );
+  // جدول علامة المزامنة قد يكون غير مُطبَّق بعد على القاعدة (ملفّا SQL
+  // يُطبَّقان يدوياً ومستقلَّين عن نشر الدالة). وPostgREST يردّ 404 عندها،
+  // فـreadRest ترمي، فتسقط **الأداة كلها** بـ«تعذّرت قراءة المصدر» — أي أن
+  // إضافة حارسٍ للتحقق كانت ستُعطّل جواباً كان يعمل. والغياب ليس عطلاً بل
+  // حالةٌ معناها «لا تحقُّق»، وهي بالضبط ما يُعبّر عنه `null`.
+  let rows: unknown;
+  try {
+    rows = await readRest(
+      `${table}?select=window_start,window_end,row_count,completed_at,sync_run_id`
+      + `&source=eq.${encodeURIComponent(source)}&order=completed_at.desc&limit=1`
+    );
+  } catch {
+    return null;
+  }
   const row = Array.isArray(rows) && rows[0] ? rows[0] : null;
   if (!row?.window_start || !row?.window_end) return null;
   return {
     start: String(row.window_start),
     end: String(row.window_end),
     completedAt: String(row.completed_at ?? ""),
-    rowCount: num(row.row_count)
+    rowCount: num(row.row_count),
+    runId: String(row.sync_run_id ?? "")
   };
+}
+
+// مُعرّف آخر تشغيل مزامنة — بصمة لقطة الجدول. تغيّره بين صفحتين يعني أن
+// القراءة عبرت استبدالاً ذرّياً.
+async function syncRunId(table: string, source: string) {
+  return (await syncWindow(table, source))?.runId ?? "";
+}
+
+// قراءة مُصفَّحة **مثبَّتة على لقطة واحدة**.
+//
+// التصفيح بـoffset يفترض جدولاً ساكناً. والاستبدال الذرّي يحذف نافذة كاملة
+// ويُدرجها من جديد، والصفوف الجديدة تسبق في الترتيب ما قُرئ فعلاً — فصفحةٌ
+// لاحقة تكرّر صفوفاً وتُسقط أخرى. والأسوأ أن علامة المزامنة بعدها تبدو
+// حديثة و`partial` يبقى false، فيُقدَّم إجمالي مشوّه على أنه كامل ومتحقَّق.
+// (رصدها Codex على PR #205 بعد 82e9022.)
+//
+// فالقراءة تُحاط ببصمة التشغيل قبلها وبعدها: إن تغيّرت أُعيدت، وإن لم تستقرّ
+// أُعلن الرقم غير نهائي بدل تمريره.
+async function readPagedPinned(
+  path: (range: string) => string,
+  table: string,
+  source: string
+): Promise<{ rows: Array<Record<string, unknown>>; partial: boolean; unstable: boolean }> {
+  let last: { rows: Array<Record<string, unknown>>; partial: boolean } = { rows: [], partial: false };
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const before = await syncRunId(table, source);
+    last = await readPaged(path);
+    const after = await syncRunId(table, source);
+    // بصمة فارغة (لا سجل مزامنة) لا تُثبِّت شيئاً، لكن غيابها مُعلَن أصلاً
+    // في تحذير التغطية — فلا تُضاف هنا دورةٌ لا تُفيد.
+    if (before === after) return { ...last, unstable: false };
+  }
+  return { rows: last.rows, partial: true, unstable: true };
 }
 
 const salesSyncWindow = () => syncWindow("sales_line_items_sync_state", "ameen_sales_line_items");
@@ -560,10 +604,11 @@ async function readSales(period: Period, role: Role): Promise<{ rows: SalesRow[]
     : "sale_date,bill_no,bill_type,item_name,qty";
   // ترتيب ثابت وقاطع (id ثانوياً) شرطٌ لصحة التصفيح: بلا مفتاح فارق قد يتكرر
   // صفٌّ أو يسقط آخر بين الصفحات.
-  const { rows, partial } = await readPaged((range) =>
+  const { rows, partial } = await readPagedPinned((range) =>
     `sales_line_items?select=${columns}`
     + `&sale_date=gte.${safeDate(period.from)}&sale_date=lte.${safeDate(period.to)}`
-    + `&order=sale_date.desc,id.asc${range}`
+    + `&order=sale_date.desc,id.asc${range}`,
+    "sales_line_items_sync_state", "ameen_sales_line_items"
   );
   return { rows: rows as SalesRow[], partial };
 }
@@ -809,10 +854,11 @@ const TOOLS: Tool[] = [
       // مُصفَّح: الحدّ الثابت 200 كان يعيد أحدث 200 حركة فقط ثم يعرض مجموعها
       // على أنه إجمالي الفترة كلها — فسؤال «آخر 365 يوم» كان يبخس المصاريف
       // بصمت. (رصدها Codex على PR #205.)
-      const { rows: list, partial } = await readPaged((range) =>
+      const { rows: list, partial } = await readPagedPinned((range) =>
         `expense_entries?select=id,entry_date,account_name,amount,notes`
         + `&entry_date=gte.${safeDate(ctx.period.from)}&entry_date=lte.${safeDate(ctx.period.to)}`
-        + `&order=entry_date.desc,id.asc${range}`
+        + `&order=entry_date.desc,id.asc${range}`,
+        "expense_entries_sync_state", "ameen_expense_entries"
       );
       if (!list.length) {
         // فرّق بين «لا مصاريف بهذه الفترة» و«لا بيانات مصاريف إطلاقاً»
@@ -1091,19 +1137,35 @@ const TOOLS: Tool[] = [
             }
           }
 
-          const invoices = Array.isArray(entry?.invoices) ? entry.invoices : [];
+          // الفترة المطلوبة تُحترم كما في تقارير الحركة: «مشتريات الزبون X
+          // الشهر الماضي» كان يعرض أحدث ثلاث فواتير من نافذة التقرير كلها،
+          // فتحلّ فواتير هذا الشهر محلّ المطلوبة أولَ الشهر.
+          // (رصدها Codex على PR #205 بعد 82e9022.)
+          const allInvoices = Array.isArray(entry?.invoices) ? entry.invoices : [];
+          const invoices = ctx.period.explicit
+            ? allInvoices.filter((inv: Record<string, unknown>) => {
+              const date = String(inv.date ?? "").slice(0, 10);
+              return date >= ctx.period.from && date <= ctx.period.to;
+            })
+            : allInvoices;
+          const periodLabel = ctx.period.explicit
+            ? `${ctx.period.label} (${ctx.period.from} → ${ctx.period.to})`
+            : `نافذة التقرير`;
           if (guid && !entry) {
             text += `\n\n**المشتريات**\nلم أجد في تقرير الفواتير (${window}) أي سجل مربوط بمعرّف هذا الزبون.`
               + `\n\nلن أنسب له فواتير بتشابه الاسم — لو فعلت لعرضتُ عليك مشتريات زبون آخر بأصنافه وأسعاره.`
               + ` إن كنت تتوقع وجود فواتير، فالأرجح أن تقرير الفواتير لم يُزامَن بعد أو أن سجلّه بلا معرّف.`;
           } else if (!invoices.length) {
-            text += `\n\n**المشتريات**\nلا توجد فواتير لهذا الزبون ضمن نافذة تقرير الفواتير (${window}).`;
+            text += `\n\n**المشتريات**\nلا توجد فواتير لهذا الزبون ضمن ${periodLabel}.`
+              + (ctx.period.explicit && allInvoices.length
+                ? ` له ${allInvoices.length} فاتورة خارج هذه الفترة داخل نافذة التقرير (${window}) — لم أعرضها لأنها ليست ما سألت عنه.`
+                : ` (نافذة تقرير الفواتير: ${window}.)`);
           } else {
             if (identity === "name") {
               text += `\n\n> ℹ️ سجل الفواتير أدناه مطابَق بالاسم لأن حساب الزبون بلا معرّف في تقرير الأرصدة.`;
             }
             const shown = invoices.slice(0, 3);
-            text += `\n\n**آخر الفواتير** (${invoices.length} فاتورة في نافذة التقرير)`;
+            text += `\n\n**آخر الفواتير** (${invoices.length} فاتورة ضمن ${periodLabel})`;
             for (const inv of shown) {
               const lines = Array.isArray(inv.lines) ? inv.lines : [];
               const total = lines.reduce((sum: number, l: Record<string, unknown>) => sum + num(l.lineTotal), 0);
@@ -1486,11 +1548,20 @@ const TOOLS: Tool[] = [
       // مقابل مبيعات 1.15 مليون في المدة نفسها — رقم مستحيل.
       // لذلك: لا يُعرض إجمالي قيمة، ويُعلَن التعارض بدل تمرير رقم يبدو دقيقاً.
       // الأعداد (الفواتير والموردون) سليمة ولا علاقة لها بالخلل، فتُعرض.
+      // أعداد الفواتير والموردين والأسطر تُشتقّ من المجموعة **المُرشَّحة
+      // بالفترة المطلوبة**، لا من ملخّص اللقطة. `summary.bills` يصف نافذة
+      // المنتِج كلها (قد تمتدّ شهوراً)، فسؤال «مشتريات الشهر الماضي» كان
+      // يُجاب بعدد فواتير يشمل شهوراً أخرى. (رصدها Codex بعد 82e9022.)
+      const inPeriod = (invoice: Record<string, unknown>) => {
+        if (!ctx.period.explicit) return true;
+        const date = String(invoice.date ?? "").slice(0, 10);
+        return date >= ctx.period.from && date <= ctx.period.to;
+      };
       let lines = 0;
       let conflicting = 0;
       const bySupplier = items
         .map((row: Record<string, unknown>) => {
-          const invoices = Array.isArray(row.invoices) ? row.invoices : [];
+          const invoices = (Array.isArray(row.invoices) ? row.invoices : []).filter(inPeriod);
           let lineCount = 0;
           for (const invoice of invoices) {
             for (const line of (Array.isArray(invoice.items) ? invoice.items : []) as Array<Record<string, unknown>>) {
@@ -1504,12 +1575,31 @@ const TOOLS: Tool[] = [
           const dates = invoices.map((invoice: Record<string, unknown>) => String(invoice.date ?? "")).filter(Boolean).sort();
           return { name: String(row.name ?? ""), count: invoices.length, lineCount, last: dates[dates.length - 1] ?? "" };
         })
+        .filter((row) => row.count > 0)
         .sort((a, b) => b.count - a.count);
 
       const unreliable = lines > 0 && conflicting / lines > 0.2;
+      const bills = bySupplier.reduce((sum, row) => sum + row.count, 0);
+      const scope = ctx.period.explicit
+        ? `${ctx.period.label} (${ctx.period.from} → ${ctx.period.to})`
+        : `نافذة ${String(s.fromDate ?? "?")} → ${report.report_date}`;
 
-      let text = `**المشتريات — نافذة ${String(s.fromDate ?? "?")} → ${report.report_date}**\n`
-        + `- عدد الفواتير: **${num(s.bills)}** من **${num(s.suppliers)}** مورّد، بمجموع ${lines} سطر\n\n`
+      if (ctx.period.explicit && !bills) {
+        return {
+          ok: true,
+          text: `**المشتريات — ${scope}**\nلا توجد فواتير شراء في هذه الفترة.`
+            + `\n\nنافذة تقرير المشتريات المتاحة: ${String(s.fromDate ?? "?")} → ${report.report_date}.`,
+          sources: ["ameen_purchase_invoice_reports"],
+          asOf: report.created_at
+        };
+      }
+
+      let text = `**المشتريات — ${scope}**\n`
+        + `- عدد الفواتير: **${bills}** من **${bySupplier.length}** مورّد، بمجموع ${lines} سطر\n`
+        + (ctx.period.explicit
+          ? `- محسوبة على الفترة المطلوبة وحدها، من نافذة تقرير ${String(s.fromDate ?? "?")} → ${report.report_date}.\n`
+          : "")
+        + `\n`
         + `**الموردون حسب عدد الفواتير**\n`
         + bySupplier
           .slice(0, 12)
@@ -1529,8 +1619,8 @@ const TOOLS: Tool[] = [
       if (ctx.entityText.trim()) {
         const hit = matchByName(items as Array<Record<string, unknown>>, (row) => String(row.name ?? ""), ctx.entityText, 1)[0];
         if (hit) {
-          const invoices = Array.isArray(hit.row.invoices) ? hit.row.invoices : [];
-          text += `\n\n**تفصيل ${String(hit.row.name)}**\n`
+          const invoices = (Array.isArray(hit.row.invoices) ? hit.row.invoices : []).filter(inPeriod);
+          text += `\n\n**تفصيل ${String(hit.row.name)} — ${scope}**\n`
             + invoices
               .slice(0, 8)
               .map((invoice: Record<string, unknown>) => {

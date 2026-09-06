@@ -220,6 +220,9 @@ export async function loadAssistant(options = {}) {
       const table = query.split("?")[0];
       metrics.reads.push(query);
       metrics.tablesRead.add(table);
+      // خطّاف يسمح بتبديل الوهميات **أثناء** سلسلة قراءات — بدونه يستحيل
+      // محاكاة استبدالٍ ذرّي يلتزم بين صفحتين، وهو عطل لا يظهر إلا بالتزامن.
+      if (options.onRead) options.onRead(query, fixtures);
       if (options.failTable && table === options.failTable) return jsonResponse(500, { error: "boom" });
 
       // inventory_reports متعدد المصادر — نفهرس بالمصدر كما يفعل PostgREST

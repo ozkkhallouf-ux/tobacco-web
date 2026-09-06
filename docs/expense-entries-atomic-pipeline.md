@@ -96,6 +96,13 @@ These are production steps, in order. None of them happen automatically.
 3. Let the scheduled task run once (or run `.\tools\push-expense-entries.ps1`
    on the Windows machine) so the first marker is written.
 
+Order matters less than it looks: step 2 before step 1 is safe. A missing
+`expense_entries_sync_state` table makes PostgREST answer 404, and `syncWindow()`
+treats that as "no verified marker" rather than a read failure — so the expenses
+tool keeps answering and simply reports its figures as unverified, instead of
+collapsing into "تعذّرت قراءة مصدر البيانات". `scripts/check-assistant-routing.mjs`
+pins that behaviour for both the sales and the expense marker.
+
 Between step 2 and step 3 the assistant will say that expense figures are
 unverified, because at that point they genuinely are. That is the intended
 direction of failure: it over-warns while the marker is missing rather than
