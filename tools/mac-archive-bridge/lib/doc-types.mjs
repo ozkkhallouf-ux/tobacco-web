@@ -12,8 +12,12 @@ export const DOC_TYPES = {
   // يُخلط مع `invoice` داخلياً: عنوانه «فاتورة مرتجع» يميّزه في الأرشيف عن بيع
   // حقيقي، ويبقى قابلاً لتغيير وجهته أو قواعده لاحقاً بلا مساس بمسار البيع.
   return_invoice: { folder: "فواتير الزبائن", label: "فاتورة مرتجع", needsParty: true, needsNumber: true },
-  receipt: { folder: "سندات قبض ودفع", label: "سند قبض", needsParty: true, needsNumber: true },
-  payment: { folder: "سندات قبض ودفع", label: "سند دفع", needsParty: true, needsNumber: true },
+  // السندان بلا رقم في الاسم (راجع naming.mjs)، فلا معنى لاشتراط الرقم:
+  // اشتراطُ حقلٍ لا يدخل الاسم كان يعني رفض الأرشفة بـ400 لسبب لا أثر له.
+  receipt: { folder: "سندات قبض ودفع", label: "سند قبض", needsParty: true, needsNumber: false },
+  // «سند صرف» هو النص المطبوع على المستند نفسه وعلى زرّه في الموقع؛ التسمية
+  // هنا تطابقه كي لا يبحث المالك في الأرشيف عن اسم لا يراه على الورقة.
+  payment: { folder: "سندات قبض ودفع", label: "سند صرف", needsParty: true, needsNumber: false },
   price_list: { folder: "نشرات أسعار", label: "نشرة أسعار", needsParty: false, needsNumber: false },
   stock_report: { folder: "تقرير المخزون", label: "تقرير المخزون", needsParty: false, needsNumber: false },
   receivables_report: { folder: "تقرير الذمم", label: "تقرير الذمم", needsParty: false, needsNumber: false },
