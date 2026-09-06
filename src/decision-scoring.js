@@ -216,7 +216,6 @@
     }
     return {
       rows: Array.from(byIdentity.values()),
-      identities: byIdentity,
       duplicateCount: (Array.isArray(rows) ? rows.length : 0) - byIdentity.size - skipped.length,
       unidentifiedCount: skipped.length
     };
@@ -311,7 +310,7 @@
     return Math.max(0, stock === null ? 0 : stock) / dailySales;
   }
 
-  function suggestQuantity(facts, coverageDays, config) {
+  function suggestQuantity(facts, config) {
     if (facts.dailySales === null || facts.dailySales <= 0) {
       return Object.freeze({ units: 0, cartons: null, unit2Factor: null, basis: "no_velocity" });
     }
@@ -442,7 +441,7 @@
         demandScale,
         valueScale,
         reason: buildItemReason(facts, coverageDays, demandScale),
-        suggested: suggestQuantity(facts, coverageDays, config)
+        suggested: suggestQuantity(facts, config)
       });
     });
 
