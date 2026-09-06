@@ -393,10 +393,46 @@
   );
   var EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
   var INTL_PHONE_RE = /\+\d[\d\s\-().]{6,}\d/g;
+
+  // ⚠️ إصلاح ملاحظة Codex P1 الثالثة على PR #202: الهاتف المحلي المفصول
+  // (`0991 234 567`، `099-123-4567`) لم يكن يُطابَق — لا `+` فيه، ولا فواصل
+  // آلاف. فكانت قاعدةُ الأربع خانات تبتلع مجموعةً واحدة وتترك الباقي:
+  // `phone [رقم محذوف] 234 567`. أُثبت بالتشغيل.
+  //
+  // الشرط سبع خانات فأكثر **بعد** طرح الفواصل، لا طول النصّ — كي لا يُبتلَع
+  // `at 1 2 3` ولا نطاقٌ قصير، ويُبتلَع الهاتف مهما فُصل.
+  var SEPARATED_DIGITS_RE = /\d[\d\s\-().]{5,}\d/g;
+  function digitCount(text) { return text.replace(/\D/g, "").length; }
+
+  // ⚠️ إصلاح ملاحظة Codex P1 الرابعة على PR #202: القيم المالية القصيرة كانت
+  // تمرّ كاملةً — `balance=999` و`price 350` و`{"price":403}` و
+  // `{"credit_limit":500}` خرجت بلا مساس. حدّ الأربع خانات يحمي رموز الحالة
+  // لكنه يترك الأرصدة والأسعار الصغيرة، وهي بالضبط ما طُلب حجبه.
+  //
+  // فالحجب هنا **بالسياق لا بالطول**: اسم حقل تجاري معروف متبوعاً بفاصل
+  // صريح ⇒ تُحجب قيمته مهما قصرت. والقائمة محصورة بأسماء الحقول التجارية
+  // وحدها — `status` ليست منها فيبقى `status of 500` سليماً للتشخيص.
+  //
+  // الأسماء المركّبة (`credit_limit`) مُدرَجة صراحةً وقبل مكوّناتها: `_`
+  // محرف كلمة فيمنع حدّ `\b` — نفس الدرس الذي فرضته ملاحظات PR #188.
+  var BUSINESS_FIELDS = "credit_limit|creditLimit|credit_used|invoice_no|invoiceNo|invoiceNumber|" +
+    "stock_qty|unit_price|total_due|balance|invoice|price|amount|total|cost|debt|paid|due|discount";
+  var BUSINESS_ASSIGN_RE = new RegExp(
+    '(["\'`]?\\b(?:' + BUSINESS_FIELDS + ')\\b["\'`]?\\s*[=:]\\s*)' +
+    '("(?:\\\\[^\\n]|[^"\\\\\\n])*"?|\'(?:\\\\[^\\n]|[^\'\\\\\\n])*\'?|[^\\s,;}\\]\\n]+)',
+    "gi"
+  );
+  // الصيغة المفصولة بفراغ (`price 350 USD`) تشترط أن تكون القيمة رقماً، وإلا
+  // لحُجبت كلمةُ `of` في «the price of the item» وأُفسد نصّ إنجليزي عادي.
+  var BUSINESS_SPACED_RE = new RegExp(
+    "\\b(?:" + BUSINESS_FIELDS + "|credit limit)\\s+(\\d[\\d.,]*)",
+    "gi"
+  );
+
   // أرقام بفواصل آلاف (`1,250,000`) — شكل الأرصدة وقيم الفواتير.
   var GROUPED_NUMBER_RE = /\d{1,3}(?:[,،]\d{3})+(?:\.\d+)?/g;
-  // أربع خانات فأكثر: يبتلع الهواتف المحلية وأرقام الفواتير والمبالغ، ويُبقي
-  // رموز الحالة (500) والكمّيات الصغيرة (403) وهي ما يفيد التشخيص فعلاً.
+  // أربع خانات فأكثر: يبتلع أرقام الفواتير والمبالغ، ويُبقي رموز الحالة (500)
+  // وأرقام الأسطر القصيرة — وهي ما يفيد التشخيص فعلاً.
   var LONG_NUMBER_RE = /\d{4,}/g;
 
   function finishMarks(text) {
@@ -410,10 +446,20 @@
 
   function redactBusinessData(text) {
     if (typeof text !== "string" || text.length === 0) return "";
+    // الترتيب مقصود: حقول السياق أولاً (تبتلع القيمة كاملةً مهما قصرت)، ثم
+    // الهواتف، ثم الأرقام، ثم العربية أخيراً — لأن الفاصلة العربية والأرقام
+    // الهندية تقعان داخل نطاق الحروف العربية.
     var out = text
       .split(REDACTED).join(P_SECRET)
       .replace(EMAIL_RE, P_MAIL)
+      .replace(BUSINESS_ASSIGN_RE, function (match, prefix) { return prefix + P_NUMBER; })
+      .replace(BUSINESS_SPACED_RE, function (match, value) {
+        return match.slice(0, match.length - value.length) + P_NUMBER;
+      })
       .replace(INTL_PHONE_RE, P_PHONE)
+      .replace(SEPARATED_DIGITS_RE, function (match) {
+        return digitCount(match) >= 7 ? P_PHONE : match;
+      })
       .replace(GROUPED_NUMBER_RE, P_NUMBER)
       .replace(LONG_NUMBER_RE, P_NUMBER)
       .replace(ARABIC_RUN, P_ARABIC);
@@ -522,22 +568,38 @@
   // وقاطع الدارة: بعد ثلاثة إخفاقات متتالية يتوقف الإرسال. رمز خاطئ يعني أن
   // كل بلاغ تالٍ سيفشل أيضاً، فالاستمرار إغراقٌ لشبكة الزبون بلا أي مقابل.
   // ---------------------------------------------------------------------------
-  var MAX_CONSECUTIVE_FAILURES = 3;
+  // ⚠️ إصلاح ملاحظة Codex P1 الخامسة على PR #202: قاطع الدارة كان يَعُدّ **كل**
+  // إخفاق، ومنها انقطاع الشبكة (حالة 0). فثلاثة أخطاء أثناء انقطاع مؤقّت على
+  // iPhone كانت **تُعطّل المراقبة نهائياً لبقية عمر الصفحة**: البوّابة تمنع كل
+  // طلب تالٍ، ومسارُ النجاح الذي يصفّر العدّاد لا يعمل إلا بطلب — فلا تعافي
+  // بعد عودة الاتصال. وهي حالة شائعة جداً على الهاتف، لا نادرة.
+  //
+  // فالتفريق الآن بين صنفَي إخفاق:
+  //   • **قاتل** (401/403/404/400/422): الرمز مرفوض أو العنوان خاطئ — عطلٌ في
+  //     الإعداد لن يُصلحه التكرار، فالإيقاف بعد ثلاثة منه في محلّه.
+  //   • **عابر** (انقطاع شبكة، 429، 5xx): يُسجَّل للرصد ولا يُوقف شيئاً. سقف
+  //     `MAX_ITEMS_PER_PAGE` يكفي وحده لمنع الإغراق، فلا حاجة لعقوبة دائمة.
+  var MAX_FATAL_FAILURES = 3;
+  var FATAL_STATUSES = [400, 401, 403, 404, 422];
   var delivered = 0;
   var failures = 0;
   var consecutiveFailures = 0;
+  var consecutiveFatalFailures = 0;
   var lastFailureStatus = 0;
 
   function noteDelivery(ok, status) {
     if (ok) {
       delivered += 1;
       consecutiveFailures = 0;
+      consecutiveFatalFailures = 0;
       return;
     }
     failures += 1;
     consecutiveFailures += 1;
     // رقم الحالة وحده — لا جسم الاستجابة، فقد يردّد ما أرسلناه.
     lastFailureStatus = typeof status === "number" ? status : 0;
+    if (FATAL_STATUSES.indexOf(lastFailureStatus) !== -1) consecutiveFatalFailures += 1;
+    else consecutiveFatalFailures = 0;
   }
 
   // بناء الحمولة معزول عن الإرسال: `send` كانت تجمع البوّابات ومنع التكرار
@@ -579,7 +641,7 @@
 
   function send(level, title, stack, context) {
     if (reporting || sent >= MAX_ITEMS_PER_PAGE) return;
-    if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) return;
+    if (consecutiveFatalFailures >= MAX_FATAL_FAILURES) return;
     var fingerprint = level + "|" + title + "|" + (context.filename || "") + ":" +
       (context.lineno || 0) + "|" + hashText(stack || "");
     if (seen[fingerprint]) return;
@@ -650,8 +712,9 @@
         delivered: delivered,
         failures: failures,
         consecutiveFailures: consecutiveFailures,
+        consecutiveFatalFailures: consecutiveFatalFailures,
         lastFailureStatus: lastFailureStatus,
-        stopped: consecutiveFailures >= MAX_CONSECUTIVE_FAILURES
+        stopped: consecutiveFatalFailures >= MAX_FATAL_FAILURES
       };
     }
   };

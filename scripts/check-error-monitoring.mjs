@@ -661,6 +661,49 @@ console.log("\n— حجب بيانات العمل والأشخاص —");
     (redact("الزبون محمد العلي").match(/\[نص عربي محذوف\]/g) || []).length === 1,
     `عدد العلامات يكشف بنية الاسم — صار: ${redact("الزبون محمد العلي")}`);
 
+  // ⚠️ انحدار ملاحظة Codex P1 الثالثة على PR #202 — الهاتف المحلي المفصول.
+  // لا `+` فيه ولا فواصل آلاف، فكانت قاعدة الأربع خانات تبتلع مجموعة واحدة
+  // وتترك الباقي: `0991 234 567` صار `[رقم محذوف] 234 567`. أُثبت بالتشغيل.
+  for (const [label, input, leaks] of [
+    ["هاتف بفواصل فراغ", "phone 0991 234 567", ["234", "567"]],
+    ["هاتف بشرطات", "phone 099-123-4567", ["099", "123"]],
+    ["هاتف بأقواس", "call (099) 123-4567", ["123", "4567"]],
+    ["هاتف متّصل", "phone 0991234567", ["0991234567"]],
+  ]) {
+    const out = redact(input);
+    check(`يُحجب الهاتف كاملاً: ${label}`, leaks.every((x) => !out.includes(x)),
+      `بقي جزء من الهاتف — صار: ${out}`);
+  }
+  // والحدّ الذي يمنع ابتلاع نصّ عادي: سبع خانات فأكثر بعد طرح الفواصل.
+  check("تسلسل أرقام قصير لا يُعَدّ هاتفاً", redact("at 1 2 3") === "at 1 2 3",
+    `أُفسد نصّ عادي — صار: ${redact("at 1 2 3")}`);
+
+  // ⚠️ انحدار ملاحظة Codex P1 الرابعة على PR #202 — القيم المالية القصيرة.
+  // حدّ الأربع خانات كان يحمي رموز الحالة لكنه يترك الأرصدة والأسعار الصغيرة،
+  // وهي بالضبط ما طُلب حجبه. الحجب هنا بالسياق لا بالطول.
+  for (const [label, input, leak] of [
+    ["رصيد ثلاثي", "balance=999", "999"],
+    ["سعر بفراغ", "price 350 USD", "350"],
+    ["سعر في JSON", '{"price":403}', "403"],
+    ["رصيد وحدّ ائتمان قصيران", '{"balance":880,"credit_limit":500}', "880"],
+    ["حدّ الائتمان نفسه", '{"balance":880,"credit_limit":500}', "500"],
+    ["رقم فاتورة ثلاثي", "invoice_no=221", "221"],
+    ["مبلغ مستحق", '{"total_due":75}', "75"],
+  ]) {
+    check(`تُحجب القيمة المالية القصيرة: ${label}`, !redact(input).includes(leak),
+      `بقي «${leak}» — الأرصدة والأسعار بيانات عمل مهما قصرت: ${redact(input)}`);
+  }
+  // والجانب المقابل: `status` ليست حقلاً تجارياً، ورموز الحالة تبقى للتشخيص.
+  for (const intact of [
+    "Failed to load resource: the server responded with a status of 500",
+    "Uncaught Error: Request failed with status code 404",
+    "the price of the item is unavailable",
+    "ChunkLoadError: Loading chunk 12 failed",
+  ]) {
+    check(`نصّ تشخيصي لا يُمَسّ: «${intact.slice(0, 44)}…»`, redact(intact) === intact,
+      `أُفسد نصّ تشخيصي — صار: ${redact(intact)}`);
+  }
+
   // الجانب المقابل: ما يجب أن **يبقى** كي تظل المراقبة مفيدة.
   for (const [label, input, kept] of [
     ["اسم صنف الخطأ", "TypeError: Cannot read properties of undefined", "TypeError"],
@@ -816,10 +859,49 @@ console.log("\n— رصد فشل التسليم —");
   {
     const live = boot({ meta: LIVE_META, respondWith: { ok: false, status: 401 } });
     for (let i = 0; i < 6; i += 1) { live.emit("error", boom(i)); await tick(); }
-    check("قاطع الدارة: يتوقف الإرسال بعد ثلاثة إخفاقات متتالية",
+    check("قاطع الدارة: يتوقف الإرسال بعد ثلاثة إخفاقات قاتلة متتالية",
       live.calls.length === 3, `أُرسل ${live.calls.length} — رمز مرفوض يغرق شبكة الزبون بلا مقابل`);
     check("قاطع الدارة: الحالة تُبلّغ عن التوقف",
       live.context.ozkErrorMonitoring.delivery().stopped === true, "لا سبيل لاكتشاف أن الإرسال توقف");
+  }
+
+  // ⚠️ انحدار ملاحظة Codex P1 الخامسة على PR #202 — التعافي بعد عطل عابر.
+  // كان قاطع الدارة يَعُدّ كل إخفاق ومنها انقطاع الشبكة (حالة 0)، فثلاثة
+  // أخطاء أثناء انقطاع مؤقّت على الهاتف تُعطّل المراقبة **نهائياً** لبقية عمر
+  // الصفحة: البوّابة تمنع كل طلب تالٍ، ومسارُ النجاح الذي يصفّر العدّاد لا
+  // يعمل إلا بطلب. الآن: القاتل وحده يوقف، والعابر يُسجَّل ولا يوقف.
+  {
+    let offline = true;
+    const live = boot({
+      meta: LIVE_META,
+      fetchImpl: () => (offline
+        ? Promise.reject(new Error("network down"))
+        : Promise.resolve({ ok: true, status: 200 })),
+    });
+    for (let i = 0; i < 4; i += 1) { live.emit("error", boom(i)); await tick(); }
+    check("انقطاع الشبكة لا يوقف المراقبة نهائياً",
+      live.context.ozkErrorMonitoring.delivery().stopped === false,
+      "عطل عابر عطّل المراقبة لبقية عمر الصفحة");
+    offline = false;
+    live.emit("error", boom(90));
+    await tick();
+    check("المراقبة تتعافى فعلاً بعد عودة الاتصال",
+      live.context.ozkErrorMonitoring.delivery().delivered === 1,
+      "لم يصل أي بلاغ بعد عودة الشبكة — لا تعافي");
+  }
+  for (const status of [429, 500, 503]) {
+    const live = boot({ meta: LIVE_META, respondWith: { ok: false, status } });
+    for (let i = 0; i < 4; i += 1) { live.emit("error", boom(i)); await tick(); }
+    check(`${status} عابر: لا يوقف المراقبة نهائياً`,
+      live.context.ozkErrorMonitoring.delivery().stopped === false,
+      `حالة ${status} عابرة (حصة أو عطل خدمة) عُوملت كعطل إعداد دائم`);
+  }
+  for (const status of [401, 403]) {
+    const live = boot({ meta: LIVE_META, respondWith: { ok: false, status } });
+    for (let i = 0; i < 6; i += 1) { live.emit("error", boom(i)); await tick(); }
+    check(`${status} قاتل: يوقف بعد ثلاثة`,
+      live.calls.length === 3 && live.context.ozkErrorMonitoring.delivery().stopped === true,
+      `رمز مرفوض يجب أن يوقف الإرسال — أُرسل ${live.calls.length}`);
   }
 
   {
