@@ -855,6 +855,21 @@ console.log("\n— حجب بيانات العمل والأشخاص —");
       `بقي «${leak}» — علامة العملة «ل.س» معتمدة في التطبيق: ${redact(input)}`);
   }
 
+  // ⚠️ انحدار ملاحظة Codex P1 السادسة عشرة — التسميات المالية **العربية**،
+  // وهي لغة هذا التطبيق. كانت قائمة الحقول إنجليزية بالكامل، فلا يُتعرَّف على
+  // السياق، ثم تحذف قاعدةُ العربية التسميةَ ويبقى الرقم القصير.
+  for (const [label, input, leak] of [
+    ["سعر بعملة عربية", "السعر: ل.س 350", "350"],
+    ["رصيد ثلاثي", "الرصيد: 999", "999"],
+    ["حدّ ائتمان", "حد الائتمان: 500", "500"],
+    ["مبلغ مستحق", "المبلغ المستحق: 480", "480"],
+    ["بلا أل التعريف", "رصيد الزبون 750", "750"],
+    ["فاتورة", "الفاتورة: 221", "221"],
+  ]) {
+    check(`تُحجب القيمة خلف تسمية عربية: ${label}`, !redact(input).includes(leak),
+      `بقي «${leak}» — التسميات العربية هي الأصل في هذا التطبيق: ${redact(input)}`);
+  }
+
   check("«the price of the item» لا يُمَسّ رغم توسيع القاعدة",
     redact("the price of the item is unavailable") === "the price of the item is unavailable",
     "توسيع القاعدة أفسد نصّاً إنجليزياً عادياً");
@@ -1108,6 +1123,39 @@ console.log("\n— رصد فشل التسليم —");
       live.context.ozkErrorMonitoring.delivery().delivered === 1,
       `بقيت المراقبة معطّلة بعد عودة الاتصال — ${JSON.stringify(live.context.ozkErrorMonitoring.delivery())}`);
   }
+  // ⚠️ انحدار ملاحظة Codex P1 السابعة عشرة — الميزانية لم تكن تُصفَّر بالنجاح،
+  // فكانت عدّاداً لعمر الصفحة كله. بنسبة فشلين عابرين لكل نجاح (واقعية على
+  // شبكة هاتف متقطّعة) تبلغ الميزانيةَ وتُسكِت المراقبة **رغم أن التسليم
+  // يعمل**. الشاهد السابق استعمل نسبة ١:١ فلم يبلغها.
+  {
+    let mode = "ok";
+    const live = boot({
+      meta: LIVE_META,
+      fetchImpl: () => (mode === "ok"
+        ? Promise.resolve({ ok: true, status: 200 })
+        : Promise.reject(new Error("network down"))),
+    });
+    let n = 0;
+    const fire = async () => {
+      n += 1;
+      live.emit("error", {
+        message: `e${n}`, filename: "https://ozktobacco.com/src/app.js", lineno: n, colno: 1,
+        error: Object.assign(new Error(`e${n}`), {
+          name: "Error", stack: `Error: e${n}\n  at f (https://ozktobacco.com/src/app.js:${n}:1)`,
+        }),
+      });
+      await tick();
+    };
+    for (let i = 0; i < 10; i += 1) {
+      mode = "fail"; await fire(); await fire();
+      mode = "ok"; await fire();
+    }
+    const d = live.context.ozkErrorMonitoring.delivery();
+    check("نجاح التسليم يستعيد ميزانية المحاولات العابرة",
+      d.stopped === false && d.delivered === 10,
+      `أُسكتت المراقبة رغم نجاح التسليم بينها — ${JSON.stringify(d)}`);
+  }
+
   // وللمحاولات العابرة ميزانية منفصلة تمنع الحلقة اللانهائية.
   {
     const live = boot({ meta: LIVE_META, fetchImpl: () => Promise.reject(new Error("down")) });
