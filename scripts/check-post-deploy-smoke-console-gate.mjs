@@ -17,6 +17,7 @@
 import { spawn } from "node:child_process";
 import http from "node:http";
 import assert from "node:assert/strict";
+import { fileURLToPath } from "node:url";
 
 const results = [];
 let failed = 0;
@@ -70,7 +71,10 @@ function startFixture(poisoned) {
 function runSmoke(base) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, ["scripts/smoke-production.mjs"], {
-      cwd: new URL("..", import.meta.url).pathname,
+      // fileURLToPath لا .pathname: على ويندوز يعطي .pathname مساراً بشرطة
+      // مائلة بادئة ("/C:/...") فيسقط spawn بخطأ ENOENT مضلِّل يشير إلى
+      // الملف التنفيذي بدل مجلد العمل الفعلي.
+      cwd: fileURLToPath(new URL("..", import.meta.url)),
       // EXPECTED_RELEASE فارغ عمداً: مطابقة معرّف النشرة لا معنى لها على موقع وهمي.
       env: { ...process.env, SMOKE_BASE_URL: base, EXPECTED_RELEASE: "" },
     });

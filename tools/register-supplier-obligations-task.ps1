@@ -63,10 +63,14 @@ $action = New-ScheduledTaskAction `
     -Execute $powerShellPath `
     -Argument $arguments `
     -WorkingDirectory $repoRoot
-$startAt = [datetime]::Today.Add([timespan]::ParseExact($StartAt, 'hh\:mm', $null))
-if ($startAt -le (Get-Date)) { $startAt = $startAt.AddDays(1) }
-$trigger = New-ScheduledTaskTrigger -Daily -At $startAt
-$trigger.Repetition = (New-ScheduledTaskTrigger -Once -At $startAt `
+# اسم مستقل عمداً عن $StartAt: أسماء المتغيرات في PowerShell غير حساسة لحالة
+# الأحرف، فـ$startAt و$StartAt هما نفس المتغير فعلياً. إسناد كائن [datetime]
+# لمتغير يحمل [ValidatePattern] الخاص بالسلسلة النصية يعيد تطبيق التحقق على
+# القيمة الجديدة فيفشل بخطأ ValidatePattern غامض لا علاقة له بالسبب الحقيقي.
+$firstRunAt = [datetime]::Today.Add([timespan]::ParseExact($StartAt, 'hh\:mm', $null))
+if ($firstRunAt -le (Get-Date)) { $firstRunAt = $firstRunAt.AddDays(1) }
+$trigger = New-ScheduledTaskTrigger -Daily -At $firstRunAt
+$trigger.Repetition = (New-ScheduledTaskTrigger -Once -At $firstRunAt `
     -RepetitionInterval (New-TimeSpan -Hours $IntervalHours)).Repetition
 # فراغ = تكرار بلا نهاية. TimeSpan::MaxValue يرفضه Task Scheduler عند التسجيل
 # فتفشل المهمة بصمت ولا تُنشأ أصلاً — نفس السابقة في register-ameen-sync-watchdog.ps1
