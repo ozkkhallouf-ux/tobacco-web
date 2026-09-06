@@ -1559,12 +1559,26 @@ const TOOLS: Tool[] = [
       };
 
       await run("الصناديق", async () => {
-        const rows = await readRest("daily_movement_reports?select=report_date,payload,created_at&order=created_at.desc&limit=1");
+        // ثالث قارئ مستقل لهذا الجدول، وكان يأخذ أحدث صف بـ`created_at` بصرف
+        // النظر عن `report_date`. فيومٌ لم يُرفع تقريره بعد — أو تقرير قديم
+        // رُفع **بعد** تقرير اليوم — كان يُعرض تحت عنوان «مقبوضات اليوم» في
+        // ملخصٍ كامل عنوانه «اليوم». (رصدها Codex على PR #205 بعد 9a12ea0.)
+        //
+        // فالقراءة تمرّ الآن من movementReports كما تمرّ الأداتان: ترشيح
+        // بالتاريخ لا ترتيب بوقت الرفع. ويوم بلا تقرير يُعلَن مع ذكر أحدث
+        // تاريخ متاح — ولا تُوضع أرقام يوم آخر مكانه.
+        const period = { from: damascusDate(), to: damascusDate(), label: "اليوم", explicit: true };
+        const { days, latestAvailable } = await movementReports(period);
         sources.push("daily_movement_reports");
-        const row = Array.isArray(rows) && rows[0] ? rows[0] : null;
-        if (!row?.payload) return "**السيولة**: لا يوجد تقرير حركة صناديق.";
+        const row = days[0] ?? null;
+        if (!row?.payload) {
+          return `**السيولة**: لا يوجد تقرير حركة صناديق لليوم (${period.from})`
+            + (latestAvailable
+              ? `. أحدث تقرير متاح بتاريخ **${latestAvailable}** — اسأل عن الصناديق مباشرةً لقراءته، فلن أضع أرقامه تحت عنوان اليوم.`
+              : ".");
+        }
         const totals = Array.isArray(row.payload.cashTotals) ? row.payload.cashTotals : [];
-        const paid = row.payload.paymentSummary ?? {};
+        const paid = (row.payload.paymentSummary ?? {}) as Record<string, unknown>;
         return `**السيولة (${row.report_date})**: `
           + (totals.length
             ? totals.map((t: Record<string, unknown>) => money(t.closing, String(t.currency ?? ""))).join(" + ")

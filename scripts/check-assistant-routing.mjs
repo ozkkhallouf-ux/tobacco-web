@@ -631,4 +631,47 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   ok("المصاريف محدودة بنافذة تحديثها المتحقَّقة، وكل تحذير يسمّي مصدره لا مصدراً آخر");
 }
 
+// ── ق) ملخص «اليوم» لا يحمل أرقام يوم آخر ──────────────────────────────────
+{
+  // ملاحظة Codex على PR #205 بعد 9a12ea0: قسم الصناديق في الملخص كان يقرأ
+  // أحدث صف بـcreated_at بصرف النظر عن report_date، ثم يسمّي مقبوضاته
+  // «مقبوضات اليوم» داخل ملخصٍ عنوانه «اليوم».
+  const today = new Date(Date.now() + 180 * 60_000).toISOString().slice(0, 10);
+  const yesterday = new Date(Date.now() + 180 * 60_000 - 86_400_000).toISOString().slice(0, 10);
+  const report = (date, createdAt, closing, paid) => ({
+    report_date: date,
+    created_at: createdAt,
+    payload: {
+      cashTotals: [{ currency: "$", opening: 0, closing, externalIncoming: 0, externalOutgoing: 0 }],
+      cashboxes: [{ name: "صندوق", currency: "$", opening: 0, incoming: closing, outgoing: 0, closing }],
+      payments: [{ name: "زبون", amount: paid, notes: "" }],
+      paymentSummary: { count: 1, totalUsd: paid }
+    }
+  });
+
+  // أ) تقرير اليوم لم يُرفع بعد ⇒ لا تُعرض أرقام أمس تحت عنوان اليوم
+  const pending = defaultFixtures();
+  pending.daily_movement_reports = [report(yesterday, new Date().toISOString(), 4321, 999)];
+  const a = await loadAssistant({ fixtures: pending });
+  const pendingText = String((await a.ask(TOKENS.owner, "ما أهم الأمور التي تحتاج انتباهي اليوم؟")).body.reply);
+  assert.ok(!/مقبوضات اليوم 999/.test(pendingText), `نسب مقبوضات أمس لليوم:\n${pendingText}`);
+  assert.ok(!pendingText.includes("4,321"), "عرض سيولة أمس تحت عنوان اليوم");
+  assert.ok(/لا يوجد تقرير حركة صناديق لليوم/.test(pendingText), `لم يُعلن غياب تقرير اليوم:\n${pendingText}`);
+  assert.ok(pendingText.includes(yesterday), "لم يذكر أحدث تاريخ متاح");
+
+  // ب) تقرير قديم رُفع **بعد** تقرير اليوم ⇒ الترتيب بوقت الرفع كان يقلب الجواب
+  const backfilled = defaultFixtures();
+  backfilled.daily_movement_reports = [
+    // الأحدث رفعاً هو الأقدم تاريخاً — بالضبط حالة إعادة التعبئة
+    report(yesterday, new Date().toISOString(), 4321, 999),
+    report(today, new Date(Date.now() - 3_600_000).toISOString(), 1234, 777)
+  ];
+  const b = await loadAssistant({ fixtures: backfilled });
+  const backText = String((await b.ask(TOKENS.owner, "ما أهم الأمور التي تحتاج انتباهي اليوم؟")).body.reply);
+  assert.ok(/مقبوضات اليوم 777/.test(backText), `أخذ التقرير الأحدث رفعاً لا الأحدث تاريخاً:\n${backText}`);
+  assert.ok(!backText.includes("999"), "سرّب مقبوضات يوم مُعاد تعبئته إلى ملخص اليوم");
+  assert.ok(backText.includes(today), "لم يعنون السيولة بتاريخ اليوم");
+  ok("ملخص «اليوم» يقرأ تقرير اليوم بالتاريخ لا بوقت الرفع، ويُعلن غيابه بدل استبداله");
+}
+
 console.log(`\nتوجيه المساعد الذكي: ${passed}/${passed} تحقق ناجح`);
