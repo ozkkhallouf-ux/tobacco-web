@@ -8,13 +8,20 @@
 // لماذا لا نستعمل نمط vm.createContext + شطب الأنواع بـregex الموجود في
 // check-owner-authorization-behavior.mjs: ذاك النمط يشطب مجموعة محدودة من صيغ
 // TypeScript بتعابير نمطية، وينكسر صامتاً أمام type aliases والـgenerics
-// والـcasts التي يستعملها هذا الملف بكثافة. Node 22 يشطب الأنواع أصلاً وبشكل
-// صحيح، فنشغّل **الملف الحقيقي** بدل نسخة مشوّهة منه — والحارس الذي يفحص كوداً
-// غير الكود المنشور حارسٌ بلا قيمة.
+// والـcasts التي يستعملها هذا الملف بكثافة. نشغّل **الملف الحقيقي** بدل نسخة
+// مشوّهة منه — والحارس الذي يفحص كوداً غير الكود المنشور حارسٌ بلا قيمة.
 //
-// المنهج: نسخة مؤقتة من الملف بعد إزالة استيراد jsr (لا يحلّه Node)، ثم
-// import ديناميكي بعد تركيب Deno وfetch وهميين على globalThis. اسم فريد لكل
-// تشغيل يتفادى ذاكرة وحدات ESM فيبقى كل اختبار معزولاً بحمولته.
+// لماذا مترجم TypeScript الحقيقي وليس شطب الأنواع المدمج في Node:
+// الشطب المدمج يحتاج Node 22.18 فأعلى، بينما كل workflows المستودع مثبّتة على
+// Node 20 (تسع مواضع). الاعتماد عليه جعل الحارس ينجح محلياً على 22.23 ويسقط
+// على CI بـERR_UNKNOWN_FILE_EXTENSION — أي حارس يختلف سلوكه بين الجهاز وCI.
+// transpileModule يعطي نفس النتيجة على كل إصدار، فلا تتكرر هذه الفجوة.
+// وهو أداة اختبار فقط: لا build step ولا أثر على الموقع (راجع CLAUDE.md).
+//
+// المنهج: نسخة مؤقتة من الملف بعد إزالة استيراد jsr (لا يحلّه Node) وشطب
+// الأنواع، ثم import ديناميكي بعد تركيب Deno وfetch وهميين على globalThis.
+// اسم فريد لكل تشغيل يتفادى ذاكرة وحدات ESM فيبقى كل اختبار معزولاً بحمولته.
+import ts from "typescript";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -263,11 +270,20 @@ export async function loadAssistant(options = {}) {
     throw new Error(`Unexpected fetch: ${method} ${url}`);
   };
 
-  // نسخة مؤقتة بلا استيراد jsr، باسم فريد لتفادي ذاكرة وحدات ESM
+  // نسخة مؤقتة بلا استيراد jsr، مشطوبة الأنواع، باسم فريد لتفادي ذاكرة وحدات ESM
   const source = functionSource().replace(/^import\s+["']jsr:[^"']+["'];\s*$/m, "");
+  const { outputText, diagnostics } = ts.transpileModule(source, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
+    reportDiagnostics: true,
+    fileName: "financial-assistant.ts"
+  });
+  // خطأ صياغة في الدالة يجب أن يُسقط الحارس، لا أن يمرّ كوحدة فارغة
+  if (diagnostics?.length) {
+    throw new Error(`financial-assistant لا يُترجم: ${diagnostics.map((d) => d.messageText).join("; ")}`);
+  }
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ozk-assistant-"));
-  const file = path.join(dir, "assistant.ts");
-  fs.writeFileSync(file, source, "utf8");
+  const file = path.join(dir, "assistant.mjs");
+  fs.writeFileSync(file, outputText, "utf8");
 
   let handler = null;
   const previous = { Deno: globalThis.Deno, fetch: globalThis.fetch };
