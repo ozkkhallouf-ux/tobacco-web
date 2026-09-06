@@ -342,19 +342,28 @@ check("13) دفعة رمزية 1$ لا تُطفئ الخطر", () => {
 });
 
 check("14) دفعة حقيقية حديثة تخفض الدرجة فعلاً", () => {
-  const build = (payments) => S.scoreCustomers({
-    balances: [{
-      name: "زبون", customerGuid: guid(301), balance: 10000,
-      lastPaymentDate: daysAgo(1), recentPayments: payments
-    }],
-    creditLimits: [{ customerGuid: guid(301), creditLimit: 10000 }],
+  // الدرجة معايَرة على مجتمع الزبائن، فالمقارنة الصحيحة داخل نداء واحد.
+  const result = S.scoreCustomers({
+    balances: [
+      { name: "دفع رمزياً", customerGuid: guid(301), balance: 10000,
+        lastPaymentDate: daysAgo(1), recentPayments: [{ date: daysAgo(1), amount: 1 }] },
+      { name: "دفع جدياً", customerGuid: guid(302), balance: 10000,
+        lastPaymentDate: daysAgo(1), recentPayments: [{ date: daysAgo(1), amount: 8000 }] }
+    ],
+    creditLimits: [
+      { customerGuid: guid(301), creditLimit: 10000 },
+      { customerGuid: guid(302), creditLimit: 10000 }
+    ],
     now: customerNow
-  }).customers[0];
-  const symbolic = build([{ date: daysAgo(1), amount: 1 }]);
-  const meaningful = build([{ date: daysAgo(1), amount: 8000 }]);
+  });
+  const symbolic = result.customers.find((row) => row.name === "دفع رمزياً");
+  const meaningful = result.customers.find((row) => row.name === "دفع جدياً");
   assert.ok(meaningful.score < symbolic.score,
-    "الدفعة الجوهرية لم تؤثر في الدرجة");
-  assert.ok(meaningful.momentum < 0.3);
+    `الدفعة الجوهرية لم تؤثر: ${meaningful.score} مقابل ${symbolic.score}`);
+  assert.ok(meaningful.expectedLoss < symbolic.expectedLoss,
+    "الخسارة المتوقّعة لم تنخفض بالسداد الجوهري");
+  assert.ok(meaningful.momentum < 0.3, "الزخم لم يعكس السداد الجوهري");
+  assert.ok(symbolic.momentum > 0.9, "الزخم لم يعكس ضآلة الدفعة الرمزية");
 });
 
 check("15) غياب الحد الائتماني لا يُخفي الزبون ويُعامل بمكوّن محايد", () => {
@@ -398,6 +407,43 @@ check("مدين صغير لا يتصدّر مديناً كبيراً بنفس ا
   assert.ok(result.customers[0].score > result.customers[2].score);
 });
 
+check("ب) رصيد كبير بسداد سليم لا يتصدّر بحكم الحجم وحده", () => {
+  // الوجه المقابل للحالة (أ): كما لا يجوز أن يتصدّر مدين تافه بسلوك سيئ، لا
+  // يجوز أن يتصدّر مدين ضخم يسدّد بانتظام ويبقى تحت حدّه. الحجم مُضاعِف للخطر
+  // لا مصدر له.
+  const result = S.scoreCustomers({
+    balances: [
+      {
+        name: "كبير منتظم", customerGuid: guid(520), balance: 30000,
+        lastPaymentDate: daysAgo(2),
+        recentPayments: [
+          { date: daysAgo(2), amount: 12000 },
+          { date: daysAgo(20), amount: 10000 },
+          { date: daysAgo(50), amount: 9000 }
+        ]
+      },
+      {
+        name: "متوسط متعثّر", customerGuid: guid(521), balance: 9000,
+        lastPaymentDate: daysAgo(70), recentPayments: []
+      }
+    ],
+    creditLimits: [
+      { customerGuid: guid(520), creditLimit: 60000 },
+      { customerGuid: guid(521), creditLimit: 4000 }
+    ],
+    now: customerNow
+  });
+  const big = result.customers.find((row) => row.name === "كبير منتظم");
+  const mid = result.customers.find((row) => row.name === "متوسط متعثّر");
+  assert.equal(result.customers[0].name, "متوسط متعثّر",
+    "الحجم وحده تصدّر رغم سداد سليم وحدّ غير مستهلك");
+  assert.ok(mid.score > big.score, `${mid.score} يجب أن تفوق ${big.score}`);
+  // السداد المنتظم يظهر في الزخم، والحدّ غير المستهلك في الاستخدام.
+  assert.ok(big.momentum < 0.3, "الزخم لم يعكس سداداً منتظماً");
+  assert.ok(big.utilization < 0.4, "الاستخدام لم يعكس حدّاً غير مستهلك");
+  assert.equal(big.exposure, 1, "العيّنة لا تختبر أعلى تعرّض");
+});
+
 check("زبون كبير متأخر لا يُدفن تحت تصنيف «مراقبة»", () => {
   // ابو علي اسعد في الإنتاج: 28,130$ بلا دفع 38 يوماً، نسبته 0.89 فصنّفه النموذج
   // القديم «مراقبة» ووضعه في المرتبة 110.
@@ -416,6 +462,32 @@ check("زبون كبير متأخر لا يُدفن تحت تصنيف «مراق
   });
   assert.equal(result.customers[0].name, "كبير متأخر",
     "المدين الكبير المتأخر ما زال مدفوناً تحت مدين صغير متجاوز");
+});
+
+check("الأولوية تقيس المال والتصنيف يقيس الاحتمال — بُعدان منفصلان", () => {
+  const result = S.scoreCustomers({
+    balances: [
+      // مبلغ كبير، سداد منتظم، ضمن الحد ⟵ أولوية عالية وشدّة منخفضة
+      { name: "ضخم منتظم", customerGuid: guid(600), balance: 40000,
+        lastPaymentDate: daysAgo(1),
+        recentPayments: [{ date: daysAgo(1), amount: 20000 }, { date: daysAgo(30), amount: 18000 }] },
+      // مبلغ صغير، متجاوز حدّه أضعافاً، ولم يدفع منذ شهر ⟵ أولوية أدنى وشدّة عالية
+      { name: "صغير متعثّر", customerGuid: guid(601), balance: 2743,
+        lastPaymentDate: daysAgo(36), recentPayments: [{ date: daysAgo(36), amount: 70 }] }
+    ],
+    creditLimits: [
+      { customerGuid: guid(600), creditLimit: 100000 },
+      { customerGuid: guid(601), creditLimit: 500 }
+    ],
+    now: customerNow
+  });
+  const big = result.customers.find((row) => row.name === "ضخم منتظم");
+  const small = result.customers.find((row) => row.name === "صغير متعثّر");
+  assert.ok(big.score > small.score, "أولوية التحصيل لا تتبع المال المعرَّض");
+  assert.equal(small.level, "critical",
+    "المدين المتعثّر الصغير صُنّف اعتيادياً لأن مبلغه صغير");
+  assert.equal(big.level, "normal",
+    "المدين الضخم المنتظم صُنّف خطراً عالياً لأن مبلغه كبير");
 });
 
 check("لم يدفع قط = أقصى مكوّن تأخير", () => {

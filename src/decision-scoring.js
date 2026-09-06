@@ -39,7 +39,13 @@
     SUPPLIER_SOON_AT: 45,
 
     // ---- خطر التحصيل ----
-    COLLECTION_WEIGHT_EXPOSURE: 0.30,
+    // التعرّض لم يعد وزناً جمعياً بل مقداراً مضروباً — انظر شرح الصيغة في
+    // scoreCustomers. هذا الثابت هو المئين المرجعي الذي تُعاير عليه الخسارة.
+    // 1.0 = أعلى خسارة متوقّعة في المجتمع هي المعيار. جُرّب 0.90 على عيّنة
+    // الإنتاج فتشبّع 13 زبوناً عند 100 بالضبط وضاع الترتيب داخل أهم شريحة —
+    // وهو عين العطل الذي بدأ منه هذا الإصلاح. يُخفَّض هذا الثابت فقط إن ظهر
+    // مدين شاذّ الحجم يسحق المقياس.
+    COLLECTION_EXPOSURE_REFERENCE_PERCENTILE: 1.0,
     COLLECTION_WEIGHT_PAYMENT_DELAY: 0.30,
     COLLECTION_WEIGHT_UTILIZATION: 0.25,
     COLLECTION_WEIGHT_MOMENTUM: 0.15,
@@ -47,6 +53,8 @@
     COLLECTION_MOMENTUM_WINDOW_DAYS: 90,  // نافذة قياس انتظام السداد
     COLLECTION_UTILIZATION_CAP: 1.5,      // نسبة الاستخدام التي تُشبع المكوّن
     COLLECTION_NEUTRAL_UTILIZATION: 0.5,  // بديل محايد حين لا يوجد حد معتمد
+    // عتبتا التصنيف تُقاسان على احتمال التعثّر (behaviouralRisk × 100)،
+    // لا على درجة الأولوية — انظر الشرح عند حقل level.
     COLLECTION_CRITICAL_AT: 70,
     COLLECTION_WATCH_AT: 45,
 
@@ -126,6 +134,19 @@
       }
       return clamp(low / (sorted.length - 1), 0, 1);
     };
+  }
+
+  // مئين بالمقدار (لا بالرتبة): يُستعمل معياراً لتعيير الخسارة المتوقّعة، فلا
+  // يفرض أكبرُ مدين وحده المقياس ولا يُفنى أصغرهم.
+  function percentileValue(values, fraction) {
+    const sorted = values.filter((value) => Number.isFinite(value) && value > 0).sort((a, b) => a - b);
+    if (!sorted.length) return 0;
+    if (sorted.length === 1) return sorted[0];
+    const position = clamp(fraction, 0, 1) * (sorted.length - 1);
+    const low = Math.floor(position);
+    const high = Math.ceil(position);
+    if (low === high) return sorted[low];
+    return sorted[low] + (sorted[high] - sorted[low]) * (position - low);
   }
 
   function settings(overrides) {
@@ -664,6 +685,53 @@
 
     const exposureRank = percentileRanker(prepared.map((entry) => entry.balance));
 
+    // ---- الصيغة النهائية: خسارة متوقّعة ----
+    //
+    //   behaviouralRisk = Σ(وزن × مكوّن سلوكي) ÷ Σ(الأوزان السلوكية)   ∈ [0,1]
+    //   expectedLoss    = balance × behaviouralRisk                      بالدولار
+    //   score           = 100 × min(1, expectedLoss ÷ p90(expectedLoss)) ∈ [0,100]
+    //
+    // لماذا لا الجمع الوزني المباشر: ثلاثة من المكوّنات الأربعة سلوكية ولا تعرف
+    // حجم المال، فتبلغ أقصاها لدى مدين تافه — وأنتج ذلك على عيّنة الإنتاج تصدّر
+    // مدين بـ177$ على مدين بـ16,796$.
+    //
+    // ولماذا لا التعرّض كرتبة مئوية مضروبة: الرتبة تجعل أصغر مدين = 0 فيُفنى
+    // حاصل الضرب كلّه مهما ساء سداده، وتُبالغ في الفوارق (مدينان بـ30 و9 آلاف
+    // تفصلهما رتبةُ 1 مقابل 0 لا نسبةُ 30:9). المقدار هو الصحيح لا الترتيب.
+    //
+    // المعيار هو أعلى خسارة متوقّعة في المجتمع، فتنتشر الدرجات على كامل المدى
+    // ولا يتساوى رأس القائمة. مئين أدنى (p90) يُشبع الشريحة العليا كلها عند 100
+    // فيعيد المشكلة الأصلية: قائمة لا تميّز بين أخطر زبائنها.
+    const behaviouralTotal = config.COLLECTION_WEIGHT_PAYMENT_DELAY
+      + config.COLLECTION_WEIGHT_UTILIZATION
+      + config.COLLECTION_WEIGHT_MOMENTUM;
+
+    const behaviouralOf = (paymentDelay, utilization, momentum) => (behaviouralTotal > 0
+      ? (config.COLLECTION_WEIGHT_PAYMENT_DELAY * paymentDelay
+        + config.COLLECTION_WEIGHT_UTILIZATION * utilization
+        + config.COLLECTION_WEIGHT_MOMENTUM * momentum) / behaviouralTotal
+      : 0);
+
+    const componentsOf = (entry) => {
+      // الزبون الذي لم يدفع قط يأخذ أقصى تأخير — غياب السجل ليس براءة.
+      const paymentDelay = entry.daysSincePayment === null
+        ? 1
+        : clamp(entry.daysSincePayment / config.COLLECTION_DELAY_CAP_DAYS, 0, 1);
+      const ratio = entry.limit.amount > 0 ? entry.balance / entry.limit.amount : null;
+      const utilization = ratio === null
+        ? config.COLLECTION_NEUTRAL_UTILIZATION
+        : clamp(ratio / config.COLLECTION_UTILIZATION_CAP, 0, 1);
+      // الزخم يقيس الدفعات مقابل حجم الدين، فالدفعة الرمزية لا تُطفئ الخطر.
+      const momentum = clamp(1 - entry.payments.total / entry.balance, 0, 1);
+      return { paymentDelay, utilization, momentum, ratio };
+    };
+
+    const expectedLosses = prepared.map((entry) => {
+      const parts = componentsOf(entry);
+      return entry.balance * behaviouralOf(parts.paymentDelay, parts.utilization, parts.momentum);
+    });
+    const lossReference = percentileValue(expectedLosses, config.COLLECTION_EXPOSURE_REFERENCE_PERCENTILE);
+
     const scored = prepared.map((entry) => {
       const exposure = exposureRank(entry.balance);
       // الزبون الذي لم يدفع قط يأخذ أقصى تأخير — غياب السجل ليس براءة.
@@ -677,26 +745,10 @@
       // الزخم يقيس الدفعات مقابل حجم الدين، فالدفعة الرمزية لا تُطفئ الخطر.
       const momentum = clamp(1 - entry.payments.total / entry.balance, 0, 1);
 
-      // صيغة الخسارة المتوقّعة: احتمال التعثّر × حجم المال المعرَّض.
-      //
-      // الجمع الوزني المباشر للمكوّنات الأربعة بدا سليماً نظرياً وأنتج على عيّنة
-      // الإنتاج ترتيباً خاطئاً تجارياً: زبون مدين بـ177$ لم يدفع قط تصدّر زبوناً
-      // مديناً بـ16,796$ — لأن ثلاثة من المكوّنات سلوكية ولا تعرف حجم المال،
-      // فبلغت أقصاها لدى مدين تافه. قائمة التحصيل تُرتَّب بالمال المعرَّض للخطر
-      // لا باحتمال التعثّر وحده، فالمكوّنات السلوكية تُجمع في «احتمال» واحد
-      // يُضرب بحجم التعرّض. الأوزان الأربعة كلها باقية بنسبها.
-      const behaviouralTotal = config.COLLECTION_WEIGHT_PAYMENT_DELAY
-        + config.COLLECTION_WEIGHT_UTILIZATION
-        + config.COLLECTION_WEIGHT_MOMENTUM;
-      const behaviouralRisk = behaviouralTotal > 0
-        ? (config.COLLECTION_WEIGHT_PAYMENT_DELAY * paymentDelay
-          + config.COLLECTION_WEIGHT_UTILIZATION * utilization
-          + config.COLLECTION_WEIGHT_MOMENTUM * momentum) / behaviouralTotal
-        : 0;
-      const exposureWeight = config.COLLECTION_WEIGHT_EXPOSURE;
-      const score = Math.round(clamp(100 * exposure * (
-        exposureWeight + (1 - exposureWeight) * behaviouralRisk
-      ), 0, 100));
+      const behaviouralRisk = behaviouralOf(paymentDelay, utilization, momentum);
+      const expectedLoss = entry.balance * behaviouralRisk;
+      const score = Math.round(clamp(
+        lossReference > 0 ? 100 * (expectedLoss / lossReference) : 0, 0, 100));
 
       return Object.freeze({
         id: entry.identity.id,
@@ -713,10 +765,16 @@
         lastPaymentAmount: entry.lastPaymentAmount,
         payments90d: entry.payments.total,
         paymentCount90d: entry.payments.count,
-        exposure, paymentDelay, utilization, momentum, behaviouralRisk,
+        exposure, paymentDelay, utilization, momentum, behaviouralRisk, expectedLoss,
         score,
-        level: score >= config.COLLECTION_CRITICAL_AT ? "critical"
-          : score >= config.COLLECTION_WATCH_AT ? "watch" : "normal",
+        // بُعدان مستقلان عمداً:
+        //   score = أولوية التحصيل (خسارة متوقّعة بالمال) — يحكم الترتيب.
+        //   level = شدّة الخطر (احتمال التعثّر) — يحكم لون الحالة والرسالة.
+        // خلطهما يُنتج تضليلاً في الاتجاهين: مدين بـ2,743$ متجاوز حدّه 5.5× ولم
+        // يدفع منذ 36 يوماً كان يظهر «اعتيادياً» لأن مبلغه صغير، ومدين ضخم
+        // منتظم السداد كان يظهر «خطراً عالياً» لأن مبلغه كبير.
+        level: behaviouralRisk >= config.COLLECTION_CRITICAL_AT / 100 ? "critical"
+          : behaviouralRisk >= config.COLLECTION_WATCH_AT / 100 ? "watch" : "normal",
         reason: buildCustomerReason(entry, ratio, exposure)
       });
     });
