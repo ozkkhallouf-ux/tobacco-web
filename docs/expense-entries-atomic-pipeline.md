@@ -59,9 +59,14 @@ was empty, and a failure in the middle left it that way with no marker.
 - Unlike its sales counterpart, the RPC **accepts an empty payload**. An empty
   week is legitimate here, and rejecting it would reproduce defect (2) from the
   database side. The early exit in the producer is gone for the same reason.
-- The Ameen query gained an upper bound (`en.Date <= CAST(GETDATE() AS date)`)
-  so the sealed window matches what is actually uploaded; `-Days` is capped at
-  31 to match the RPC's window guard.
+- The Ameen query gained an upper bound so the sealed window matches what is
+  actually uploaded; `-Days` is capped at 31 to match the RPC's window guard.
+  The bound is **half-open** (`en.Date < DATEADD(day, 1, CAST(GETDATE() AS date))`),
+  matching `push-sales-line-items.ps1`. A closed `<= CAST(GETDATE() AS date)`
+  was tried first and was worse than no bound at all: `en.Date` carries a time
+  component, so it compares against midnight and drops nearly every entry made
+  today — and the RPC still seals `window_end` as today, lending the shortfall
+  the appearance of verification.
 - `supabase/functions/financial-assistant/index.ts` reads the marker and
   appends an explicit coverage warning whenever the requested period is not
   fully inside the verified window — in the totals branch, in the zero-rows
