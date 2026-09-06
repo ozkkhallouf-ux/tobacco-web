@@ -695,6 +695,9 @@ console.log("\n— حجب بيانات العمل والأشخاص —");
   check("الأثر: صيغة Firefox/Safari مقبولة كإطار",
     redactStack("saveBalance@https://ozktobacco.com/src/app.js:11830:25").includes("11830:25"),
     "أُسقطت أطر متصفحات غير V8 — تصير بلاغات Safari بلا أثر");
+  check("الأثر: إطار Safari الداخلي يبقى (لا موقع فيه ولا بيانات)",
+    redactStack("Error: x\nrequestAnimationFrame@[native code]").includes("requestAnimationFrame"),
+    "أُسقط إطار داخلي لا يحمل بيانات — بتر لأثر Safari بلا مكسب");
   check("الأثر: نصّ حرّ مدسوس بين الأطر يسقط",
     !redactStack("Error: x\nزبون سرّي هنا\n  at f (a.js:1:2)").includes("زبون"),
     "نصّ غير إطار وجد طريقه إلى الخارج");

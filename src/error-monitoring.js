@@ -436,6 +436,9 @@
   // الشيفرة داخل الأثر لا يجد طريقاً إلى الخارج.
   var FRAME_V8 = /^\s*at\s+\S/;                            // Chrome/Edge/Node
   var FRAME_SPIDERMONKEY = /^\s*[^\s@]*@\S+:\d+:\d+\s*$/;  // Firefox/Safari
+  // إطار داخلي في Safari: `requestAnimationFrame@[native code]`. لا موقع فيه
+  // ولا بيانات، لكن إسقاطه يبتر أثر Safari بلا أي مكسب أمني.
+  var FRAME_NATIVE = /^\s*[^\s@]*@\[native code\]\s*$/;
   var DROPPED_LINE = "[سطر غير إطار — محذوف]";
 
   function redactStack(stack) {
@@ -445,7 +448,7 @@
     var lastDropped = false;
     for (var i = 0; i < lines.length; i += 1) {
       var line = lines[i];
-      if (FRAME_V8.test(line) || FRAME_SPIDERMONKEY.test(line)) {
+      if (FRAME_V8.test(line) || FRAME_SPIDERMONKEY.test(line) || FRAME_NATIVE.test(line)) {
         out.push(finishMarks(redactShared(line)));
         lastDropped = false;
       } else if (!lastDropped) {
