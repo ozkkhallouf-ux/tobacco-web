@@ -45,7 +45,8 @@ const check = (name, condition, detail) => {
 
 const PATTERNS = {
   DOC_TYPE_LABELS: /const DOC_TYPE_LABELS = \{[\s\S]*?\n\};/,
-  sanitizeDocumentTitle: /function sanitizeDocumentTitle\(value\) \{[\s\S]*?\n\}\n/,
+  DOC_TITLE_REGEXES: /const DOC_TITLE_INVISIBLE = [^\n]*\nconst DOC_TITLE_DIACRITICS = [^\n]*\n/,
+  sanitizeDocumentTitle: /function sanitizeDocumentTitle\(value, max = 80\) \{[\s\S]*?\n\}\n/,
   fileDateLabel: /function fileDateLabel\(isoDate\) \{[\s\S]*?\n\}\n/,
   NUMBERLESS_FILE_DOC_TYPES: /const NUMBERLESS_FILE_DOC_TYPES = [^\n]*\n/,
   archiveDocumentTitle: /function archiveDocumentTitle\(docType, meta\) \{[\s\S]*?\n\}\n/,
@@ -126,6 +127,11 @@ check("نشرة بلا عملة لا تُخرج شرطة مزدوجة",
 
 console.log("\n١ب) اسم الملف المنزَّل مقابل اسم النسخة في iCloud:");
 const TODAY = new Date(`${DATE}T00:00:00Z`);
+// المدخلات المتطرّفة هنا ليست تزيينية: أول ثلاث حالات منها هي بالضبط ما كان
+// يفترق فيه التنفيذان قبل إصلاح Codex P2 — التطويل والتشكيل والاسم الأطول من
+// 60 محرفاً. حالات «الأسماء البسيطة» وحدها كانت تنجح رغم الانحراف.
+const LONG_NAME = "مؤسسة " + "الشام".repeat(20);          // أطول من حدّ الطرف (60)
+const LONG_NUMBER = "INV-" + "9".repeat(60);              // أطول من حدّ الرقم (40)
 const PARITY = [
   ["invoice", { party: "حسن عباس", number: "562", date: DATE }],
   ["return_invoice", { party: "سامر الأحمد", number: "44", date: DATE }],
@@ -137,7 +143,23 @@ const PARITY = [
   ["stock_report", { date: DATE }],
   ["receivables_report", { date: DATE }],
   ["purchase_invoice", { party: "مورد الشام", number: "31", date: DATE }],
-  ["other_report", { title: "تقرير المواد الراكدة", date: DATE }]
+  ["other_report", { title: "تقرير المواد الراكدة", date: DATE }],
+  // تشكيل كامل على اسم زبون حقيقي
+  ["invoice", { party: "مُحَمَّد عَبَّاس", number: "77", date: DATE }],
+  // تطويل (U+0640) كما يكتبه الناس في الأمين وواتساب
+  ["invoice", { party: "محـــمد الحلبي", number: "78", date: DATE }],
+  // طرف ورقم أطول من الحدّين — يُقصّان بحدّين مختلفين إن افترق التنفيذان
+  ["invoice", { party: LONG_NAME, number: LONG_NUMBER, date: DATE }],
+  ["account_statement", { party: LONG_NAME, date: DATE }],
+  ["receipt", { party: LONG_NAME, date: DATE }],
+  ["other_report", { title: "تقرير " + "طويل ".repeat(30), date: DATE }],
+  // محارف تكسر أنظمة الملفات + علامات اتجاه غير مرئية + NFD
+  ["invoice", { party: 'حسن/عباس\\:*?"<>|', number: "1", date: DATE }],
+  ["invoice", { party: "حسن\u200F  عباس", number: "2", date: DATE }],
+  ["invoice", { party: "فواتير الزبائن".normalize("NFD"), number: "3", date: DATE }],
+  ["invoice", { party: "...بادئة", number: "4", date: DATE }],
+  // عملة بأحرف صغيرة ومسافات
+  ["price_list", { currency: " usd ", date: DATE }]
 ];
 for (const [docType, meta] of PARITY) {
   const downloaded = documentFileName(docType, meta);
@@ -290,6 +312,28 @@ check("عنوان التبويب يعود إلى أصله بعد انتهاء ا
   (await page.title()) === BASE_TITLE,
   `العنوان الآن: ${await page.title()} — المتوقع: ${BASE_TITLE}`);
 
+// إغلاق المعاينة **قبل** أن تُستدعى الطباعة (زر رجوع أو إغلاق خلال أول ربع
+// ثانية على الهاتف): `removePrintFrame` كان يحذف الإطار وحده، و`cleanup` لا
+// يُجدَّل قبل `printWhenReady` — فلا `afterprint` ولا سقف احتياطي، ويعلق اسم
+// الزبون في عنوان التبويب إلى أن تُعاد الطباعة أو تُحمَّل الصفحة. (Codex P1)
+const earlyClose = await page.evaluate(() => {
+  const NAME = "فاتورة - زبون أُغلقت معاينته - رقم 1 - 2026-09-06";
+  const before = document.title;
+  window.printHtmlDocument(
+    "<!doctype html><html><head><meta charset=\"utf-8\"><title>x</title></head><body>y</body></html>",
+    { title: NAME }
+  );
+  const during = document.title;
+  // نفس الدالة التي يستدعيها إغلاق المعاينة وزرّ الرجوع — بلا أي انتظار.
+  window.removePrintFrame();
+  return { before, during, after: document.title, name: NAME };
+});
+check("العنوان يُرفع فور استدعاء الطباعة", earlyClose.during === earlyClose.name,
+  `العنوان أثناء الطباعة: ${earlyClose.during}`);
+check("إغلاق المعاينة قبل الطباعة يُحرِّر العنوان فوراً (لا يعلق اسم الزبون)",
+  earlyClose.after === earlyClose.before,
+  `العنوان بعد الإغلاق: ${earlyClose.after} — المتوقع: ${earlyClose.before}`);
+
 check("لا أخطاء صفحة أثناء مسارات التصدير", pageErrors.length === 0, pageErrors.join(" | "));
 
 // --- 2ج) مسار الهاتف: نفس الاسم يصل إلى التنزيل/المشاركة
@@ -356,6 +400,11 @@ check("صيغة تسمية النشرة تُبنى داخل القاعدة ال�
   "صيغة اسم النشرة مكرّرة في أكثر من موضع");
 // إطار الطباعة يجب أن يُملأ قبل إدراجه، وإلا التقط معالجُ load مستندَ
 // about:blank الأولي: فلا يصل afterprint ولا يُعاد عنوان التبويب أبداً.
+check("كل إزالة لإطار الطباعة تُشغّل تنظيفه المسجَّل",
+  appJs.includes("frame.ozkPrintCleanup = cleanup;")
+    && /removePrintFrame\(\) \{[\s\S]{0,400}ozkPrintCleanup === "function"/.test(appJs)
+    && !/const previous = document\.querySelector\("iframe\[data-print-frame\]"\)/.test(appJs),
+  "عاد مسارٌ يحذف الإطار بلا تحرير حجز العنوان");
 check("srcdoc يُضبط قبل إدراج إطار الطباعة",
   appJs.indexOf("frame.srcdoc = withDocumentTitle(html, options.title);")
     < appJs.indexOf("document.body.appendChild(frame);"),

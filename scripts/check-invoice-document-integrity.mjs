@@ -27,7 +27,8 @@ const appJs = readFileSync(new URL("../src/app.js", import.meta.url), "utf8");
 
 const PATTERNS = {
   DOC_TYPE_LABELS: /const DOC_TYPE_LABELS = \{[\s\S]*?\n\};/,
-  sanitizeDocumentTitle: /function sanitizeDocumentTitle\(value\) \{[\s\S]*?\n\}\n/,
+  DOC_TITLE_REGEXES: /const DOC_TITLE_INVISIBLE = [^\n]*\nconst DOC_TITLE_DIACRITICS = [^\n]*\n/,
+  sanitizeDocumentTitle: /function sanitizeDocumentTitle\(value, max = 80\) \{[\s\S]*?\n\}\n/,
   fileDateLabel: /function fileDateLabel\(isoDate\) \{[\s\S]*?\n\}\n/,
   NUMBERLESS_FILE_DOC_TYPES: /const NUMBERLESS_FILE_DOC_TYPES = [^\n]*\n/,
   archiveDocumentTitle: /function archiveDocumentTitle\(docType, meta\) \{[\s\S]*?\n\}\n/,

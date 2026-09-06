@@ -3289,8 +3289,16 @@ async function openFreshPricePreview(useSyria = false, theme = state.bulletinPdf
 // إطار الطباعة المخفي يبقى في الصفحة حتى afterprint أو حتى المهلة الاحتياطية
 // (60 ثانية) — وعلى iOS كثيراً ما لا يصل afterprint. إغلاق المعاينة يعني أن
 // المستخدم انتهى، فنُسقط الإطار فوراً بدل تركه ومعه مستند النشرة كاملاً بالذاكرة.
+// حذفُ الإطار وحده لا يكفي: حجز عنوان الطباعة يُحرَّر في `cleanup` الخاص به،
+// و`cleanup` لا يصل إلا عبر `afterprint` أو السقف الاحتياطي — وكلاهما لا
+// يُجدَّل إلا **بعد** أن تُستدعى الطباعة فعلاً. فإغلاق المعاينة على الهاتف قبل
+// ذلك (زر رجوع أو إغلاق خلال أول ربع ثانية) كان يترك اسم المستند — واسم الزبون
+// معه — في عنوان التبويب إلى أن تُعاد الطباعة أو تُحمَّل الصفحة من جديد.
 function removePrintFrame() {
-  document.querySelectorAll("iframe[data-print-frame]").forEach((frame) => frame.remove());
+  document.querySelectorAll("iframe[data-print-frame]").forEach((frame) => {
+    if (typeof frame.ozkPrintCleanup === "function") frame.ozkPrintCleanup();
+    frame.remove();
+  });
 }
 
 function closePricePreview() {
@@ -5167,8 +5175,9 @@ function printHtmlDocument(html, options = {}) {
   if (options.archive && options.archive.docType) {
     archiveToICloud(options.archive.docType, html, options.archive.meta);
   }
-  const previous = document.querySelector("iframe[data-print-frame]");
-  if (previous) previous.remove();
+  // تنظيف كامل لا حذف مجرّد: يُحرِّر حجز عنوان الطباعة السابق قبل أن نأخذ
+  // الحجز الجديد، فيُلتقط العنوان الأصلي للتبويب لا عنوان مستند سابق.
+  removePrintFrame();
 
   const frame = document.createElement("iframe");
   frame.setAttribute("data-print-frame", "");
@@ -5191,6 +5200,8 @@ function printHtmlDocument(html, options = {}) {
     releasePrintTitle();
     setTimeout(() => frame.remove(), 1000);
   };
+  // يُتاح لكل مسار يزيل الإطار (إغلاق المعاينة، زر الرجوع، طباعة تالية).
+  frame.ozkPrintCleanup = cleanup;
 
   frame.addEventListener("load", () => {
     const win = frame.contentWindow;
@@ -5306,19 +5317,35 @@ const DOC_TYPE_LABELS = {
 
 // ينقّي جزءاً من اسم الملف: يحذف ما تمنعه أنظمة الملفات ومحارف التحكّم
 // والاتجاه غير المرئية، ويُبقي الحروف العربية والفراغات العادية كما هي.
-function sanitizeDocumentTitle(value) {
-  return String(value == null ? "" : value)
+//
+// **يطابق `sanitizePart` في `tools/mac-archive-bridge/lib/naming.mjs` قاعدةً
+// بقاعدة، وحدّاً بحدّ.** كانت النسختان تفترقان في ثلاثة مواضع صامتة، وكلٌّ منها
+// يُخرج للمالك اسمين مختلفين لنفس المستند (المنزَّل والمؤرشف):
+//   • التطويل U+0640: «محـــمد» في التنزيل و«محمد» في الأرشيف.
+//   • التشكيل: «مُحَمَّد» في التنزيل و«محمد» في الأرشيف.
+//   • الحدّ: 80 هنا مقابل 60 للطرف و40 للرقم هناك — فاسم طويل يُقصّ مرّتين
+//     بطولين مختلفين.
+// لذلك صار `max` وسيطاً صريحاً يمرّره كل حقل بحدّه، والحذف يسبق NFC كما هناك.
+// أي انحراف مستقبلي يُفشل حارس التطابق في `scripts/check-document-filenames.mjs`
+// الذي يقارن ناتج التنفيذين على مدخلات عربية حقيقية ومتطرّفة.
+const DOC_TITLE_INVISIBLE = /[\u200B-\u200F\u061C\u2066-\u2069\u202A-\u202E\uFEFF\u0640]/g;
+const DOC_TITLE_DIACRITICS = /[\u064B-\u0652\u0656-\u065F\u0670\u06D6-\u06ED]/g;
+
+function sanitizeDocumentTitle(value, max = 80) {
+  let text = String(value == null ? "" : value)
+    .replace(DOC_TITLE_INVISIBLE, "")
+    .replace(DOC_TITLE_DIACRITICS, "")
     .normalize("NFC")
     .replace(/[\u0000-\u001F\u007F]/g, " ")
-    .replace(/[\u200B-\u200F\u061C\u2066-\u2069\u202A-\u202E\uFEFF]/g, "")
-    .replace(/[/\\:*?"<>|]/g, " ")
+    .replace(/[/\\:]/g, " ")
+    .replace(/[<>"|?*]/g, " ")
     .replace(/\.{2,}/g, ".")
     .replace(/\s+/g, " ")
     .trim()
     .replace(/^[.\s-]+/, "")
-    .replace(/[.\s]+$/, "")
-    .slice(0, 80)
-    .trim();
+    .replace(/[.\s]+$/, "");
+  if (text.length > max) text = text.slice(0, max).trim();
+  return text;
 }
 
 // التاريخ في اسم الملف = YYYY-MM-DD، **نفس** صيغة اسم النسخة المؤرشفة في
@@ -5348,14 +5375,14 @@ function archiveDocumentTitle(docType, meta) {
   // PR #121 والذي يعرفه الزبائن على ملفاتهم. لا يُوحَّد قسراً مع بقية
   // المستندات، لكنه يُبنى من هنا وحده فلا تنشأ قاعدة تسمية ثانية.
   if (docType === "price_list") {
-    const currency = sanitizeDocumentTitle(info.currency).toUpperCase();
+    const currency = sanitizeDocumentTitle(info.currency, 8).toUpperCase();
     return ["نشرة-الأسعار", currency, fileDateLabel(info.date)].filter(Boolean).join("-");
   }
   const label = docType === "other_report"
-    ? (sanitizeDocumentTitle(info.title) || DOC_TYPE_LABELS.other_report)
+    ? (sanitizeDocumentTitle(info.title, 80) || DOC_TYPE_LABELS.other_report)
     : (DOC_TYPE_LABELS[docType] || "مستند");
-  const party = sanitizeDocumentTitle(info.party);
-  const number = NUMBERLESS_FILE_DOC_TYPES.has(docType) ? "" : sanitizeDocumentTitle(info.number);
+  const party = sanitizeDocumentTitle(info.party, 60);
+  const number = NUMBERLESS_FILE_DOC_TYPES.has(docType) ? "" : sanitizeDocumentTitle(info.number, 40);
   const date = fileDateLabel(info.date);
   let title = label;
   if (party) title += ` - ${party}`;
