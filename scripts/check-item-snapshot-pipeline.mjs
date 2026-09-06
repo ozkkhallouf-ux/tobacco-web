@@ -25,6 +25,19 @@ assert.equal(parseQuantity('1.125'), 1125n);
 assert.equal(parseQuantity('-0.5'), -500n);
 assert.throws(() => parseQuantity('1.0001'), /three decimal/);
 
+// 2026-09-06: قيم تصل كأرقام JS ناتجة عن حساب عائم (ضجيج تمثيل الفاصلة العائمة)
+// يجب أن تُطبَّع لأقرب ثلاث منازل وتُقبل، لا أن تُرفض بوصفها دقة تجارية زائدة.
+assert.equal(parseQuantity(2.4000000000000004), 2400n);
+assert.equal(parseQuantity(1.2340000000000002), 1234n);
+assert.equal(parseQuantity('2.4000000000000004'), 2400n);
+// لكن دقة تجارية حقيقية تتجاوز ثلاث منازل تبقى مرفوضة كما هي.
+assert.throws(() => parseQuantity(1.2345), /three decimal/);
+assert.throws(() => parseQuantity('1.2345'), /three decimal/);
+// NaN / Infinity تبقى مرفوضة بوضوح ولا تُطبَّع أبداً.
+assert.throws(() => parseQuantity(NaN), /three decimal/);
+assert.throws(() => parseQuantity(Infinity), /three decimal/);
+assert.throws(() => parseQuantity(-Infinity), /three decimal/);
+
 const aggregation = build({ salesLineItems: [
   sale('1', '1', '2026-07-18'), sale('1', '2.5'), sale('1', '2.5'),
   sale('1', '99', '2026-07-17'), sale('2', '8', '2026-08-17', 'wholesale'),
