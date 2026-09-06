@@ -408,16 +408,6 @@
       .split(P_ARABIC).join("[نص عربي محذوف]");
   }
 
-  // القواعد المشتركة بين الرسالة وإطار المكدّس. قاعدة الأرقام ليست منها عمداً:
-  // إطار المكدّس يحمل رقم السطر والعمود، وحجبهما يُفرغ الإطار من فائدته كلها.
-  function redactShared(text) {
-    return text
-      .split(REDACTED).join(P_SECRET)
-      .replace(EMAIL_RE, P_MAIL)
-      .replace(INTL_PHONE_RE, P_PHONE)
-      .replace(ARABIC_RUN, P_ARABIC);
-  }
-
   function redactBusinessData(text) {
     if (typeof text !== "string" || text.length === 0) return "";
     var out = text
@@ -434,12 +424,28 @@
   // يبقى (بعد تنقيته)، وكل ما عداه يسقط — وأوّلها سطر الرسالة نفسه، وهو
   // مُرسَل في `message` أصلاً فلا يضيع شيء. فأي نصّ حرّ يحقنه المحرّك أو
   // الشيفرة داخل الأثر لا يجد طريقاً إلى الخارج.
-  var FRAME_V8 = /^\s*at\s+\S/;                            // Chrome/Edge/Node
+  // ⚠️ إصلاح ملاحظة Codex P1 الأولى على PR #202: كان النمط `/^\s*at\s+\S/`،
+  // وV8 يضع نصّ الرسالة حرفياً في أوّل `error.stack`. فرسالة تحمل سطراً يبدأ
+  // بـ`at ` كانت تُصنَّف إطاراً، والإطار كان يُعفى من قاعدة الأرقام عمداً —
+  // فمرّ `new Error("x\n at رصيد 1,250,000")` برصيده كاملاً. أُثبت بالتشغيل.
+  // فصار الإطار يشترط لاحقة موقع حقيقية (`:سطر:عمود`) أو قوساً معروفاً.
+  var FRAME_V8 = /^\s*at\s+.+?(?:\((?:<anonymous>|native)\)|:\d+:\d+\)?)\s*$/;  // Chrome/Edge/Node
   var FRAME_SPIDERMONKEY = /^\s*[^\s@]*@\S+:\d+:\d+\s*$/;  // Firefox/Safari
   // إطار داخلي في Safari: `requestAnimationFrame@[native code]`. لا موقع فيه
   // ولا بيانات، لكن إسقاطه يبتر أثر Safari بلا أي مكسب أمني.
   var FRAME_NATIVE = /^\s*[^\s@]*@\[native code\]\s*$/;
   var DROPPED_LINE = "[سطر غير إطار — محذوف]";
+
+  // الإطار يمرّ بقواعد الرسالة **كلها** بما فيها الأرقام، إلا لاحقة الموقع
+  // في آخره (`:سطر:عمود`) — وهي وحدها الرقم الذي يفيد التشخيص. حزامٌ ثانٍ
+  // تحت تشديد `FRAME_V8`: حتى لو تسلّل سطرٌ غير إطار، لا يمرّ رقمٌ تحت غطائه.
+  var FRAME_TAIL = /^([\s\S]*?)(:\d+:\d+\)?\s*)$/;
+
+  function redactFrame(line) {
+    var m = line.match(FRAME_TAIL);
+    if (m) return redactBusinessData(m[1]) + m[2];
+    return redactBusinessData(line);
+  }
 
   function redactStack(stack) {
     if (typeof stack !== "string" || stack.length === 0) return "";
@@ -449,7 +455,7 @@
     for (var i = 0; i < lines.length; i += 1) {
       var line = lines[i];
       if (FRAME_V8.test(line) || FRAME_SPIDERMONKEY.test(line) || FRAME_NATIVE.test(line)) {
-        out.push(finishMarks(redactShared(line)));
+        out.push(redactFrame(line));
         lastDropped = false;
       } else if (!lastDropped) {
         // أسطر السقوط المتتالية تُدمَج في واحد كي لا يمتلئ الأثر بالعلامات.
@@ -474,6 +480,22 @@
   // منع التكرار والفيضان. الحارس `reporting` يمنع الاستدعاء الارتدادي: خطأ
   // داخل المُرسِل نفسه لا يجوز أن يستدعي المُرسِل مرة أخرى.
   // ---------------------------------------------------------------------------
+  // ⚠️ إصلاح ملاحظة Codex P1 الثانية على PR #202: بعد حجب العربية صارت كل
+  // رسالة عربية `Error: [نص عربي محذوف]`، ومعالج الوعود المرفوضة لا يعطي
+  // `filename` ولا `lineno`. فالبصمة صارت متطابقة لكل رفض عربي على الصفحة:
+  // يُرسَل الأوّل ويُبتلع كل ما بعده مهما اختلفت دالّته. أُثبت بالتشغيل
+  // (رفضان مختلفان ⇒ بلاغ واحد). فأُدخلت تجزئة الأثر المنقّى في البصمة.
+  //
+  // محلية بحتة: تدخل البصمة ولا تُرسَل في الحمولة إطلاقاً، ومصدرها الأثر
+  // **بعد** التنقية والحجب — فلا تُشتقّ من بيانات خام.
+  function hashText(text) {
+    var hash = 5381;
+    for (var i = 0; i < text.length; i += 1) {
+      hash = ((hash * 33) ^ text.charCodeAt(i)) >>> 0;
+    }
+    return hash.toString(36);
+  }
+
   var sent = 0;
   var seen = Object.create(null);
   var reporting = false;
@@ -521,7 +543,8 @@
   function send(level, title, stack, context) {
     if (reporting || sent >= MAX_ITEMS_PER_PAGE) return;
     if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) return;
-    var fingerprint = level + "|" + title + "|" + (context.filename || "") + ":" + (context.lineno || 0);
+    var fingerprint = level + "|" + title + "|" + (context.filename || "") + ":" +
+      (context.lineno || 0) + "|" + hashText(stack || "");
     if (seen[fingerprint]) return;
     seen[fingerprint] = true;
     sent += 1;

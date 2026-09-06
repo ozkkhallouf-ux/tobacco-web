@@ -587,6 +587,26 @@ console.log("\n— الحدّ والمتانة —");
     `أُرسل ${live.calls.length} — لا سقف فعّال`);
 }
 {
+  // ⚠️ انحدار ملاحظة Codex P1 الثانية على PR #202. بعد حجب العربية صارت كل
+  // رسالة عربية `Error: [نص عربي محذوف]`، ومعالج الوعود لا يعطي filename ولا
+  // lineno — فالبصمة تطابقت لكل رفض عربي وابتُلع كل ما بعد الأوّل. أُثبت
+  // بالتشغيل: رفضان مختلفان أنتجا بلاغاً واحداً.
+  const live = boot({ meta: LIVE_META });
+  const reject = (msg, fn, file, line) => live.emit("unhandledrejection", {
+    reason: Object.assign(new Error(msg), {
+      name: "Error", stack: `Error: ${msg}\n  at ${fn} (https://ozktobacco.com/src/${file}:${line}:1)`,
+    }),
+  });
+  reject("فشل حفظ الطلب", "saveOrder", "app.js", 10);
+  reject("تعذر جلب الأسعار", "fetchPrices", "supabase-client.js", 99);
+  check("رفضان عربيان مختلفان يُرسَلان بلاغين لا بلاغاً واحداً",
+    live.calls.length === 2,
+    `أُرسل ${live.calls.length} — الحجب وحّد العناوين فابتلعت البصمةُ أخطاءً مختلفة`);
+  reject("فشل حفظ الطلب", "saveOrder", "app.js", 10);
+  check("الرفض المتطابق فعلاً ما زال يُبتلَع مرة واحدة",
+    live.calls.length === 2, `فقد منعُ التكرار أثره — ${live.calls.length}`);
+}
+{
   const live = boot({ meta: LIVE_META });
   live.emit("unhandledrejection", { reason: Object.assign(new Error("rejected"), { name: "RangeError", stack: "RangeError: rejected" }) });
   check("الوعود المرفوضة تُلتقَط", live.calls.length === 1, "لم يُلتقَط unhandledrejection");
@@ -695,6 +715,27 @@ console.log("\n— حجب بيانات العمل والأشخاص —");
   check("الأثر: صيغة Firefox/Safari مقبولة كإطار",
     redactStack("saveBalance@https://ozktobacco.com/src/app.js:11830:25").includes("11830:25"),
     "أُسقطت أطر متصفحات غير V8 — تصير بلاغات Safari بلا أثر");
+  // ⚠️ انحدار ملاحظة Codex P1 الأولى على PR #202. V8 يضع نصّ الرسالة حرفياً
+  // في أوّل `error.stack`، فرسالة تحمل سطراً يبدأ بـ`at ` كانت تُصنَّف إطاراً،
+  // والإطار مُعفى من قاعدة الأرقام عمداً — فمرّ الرصيد كاملاً. الشاهد يثبت
+  // الأمرين: السطر المزيّف يسقط، **و**لا رقم يمرّ تحت غطاء إطار.
+  {
+    const forged = "Error: x\n at customer balance 1,250,000 و رصيد 987654\n  at f (https://h.com/a.js:1:2)";
+    const out = redactStack(forged);
+    check("الأثر: سطر رسالة يبدأ بـ«at » لا يُعَدّ إطاراً",
+      !out.includes("1,250,000") && !out.includes("987654"),
+      `مرّ رقم تحت غطاء إطار مزيّف — صار: ${out}`);
+    check("الأثر: الإطار الحقيقي بعده يبقى سليماً",
+      out.includes("a.js:1:2"), `أُسقط إطار حقيقي — صار: ${out}`);
+  }
+  // الحزام الثاني: حتى داخل إطار حقيقي، لا يبقى رقم إلا لاحقة الموقع.
+  check("الأثر: الأرقام داخل الإطار تُحجب إلا لاحقة الموقع",
+    (() => {
+      const out = redactStack("Error: x\n  at pay1250000 (https://h.com/a.js:4321:7)");
+      return !out.includes("1250000") && out.includes(":4321:7");
+    })(),
+    "إمّا مرّ رقم داخل الإطار وإمّا ضاعت لاحقة الموقع");
+
   check("الأثر: إطار Safari الداخلي يبقى (لا موقع فيه ولا بيانات)",
     redactStack("Error: x\nrequestAnimationFrame@[native code]").includes("requestAnimationFrame"),
     "أُسقط إطار داخلي لا يحمل بيانات — بتر لأثر Safari بلا مكسب");
