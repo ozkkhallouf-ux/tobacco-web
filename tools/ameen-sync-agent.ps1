@@ -379,6 +379,14 @@ function Build-CustomerBalanceReport($Rows) {
       lastPaymentDate = $lastPaymentDate
       lastPaymentNotes = [string]$row.last_payment_notes
       recentPayments = $recentPayments
+      # عدد الدفعات الفعلي داخل نافذة الزخم (90 يوماً). نموذج خطر التحصيل يقارنه
+      # بعدد ما وصله ليعرف الاقتطاع يقيناً بدل الاستدلال عليه من التواريخ.
+      paymentsInWindow = [int](To-Number $row.payments_in_window)
+      # حدّ النافذة الذي عُدَّ به، بنفس أساس تواريخ الدفعات بالضبط.
+      # ⚠️ لا يُرسَل تاريخاً مجرّداً "yyyy-MM-dd": المتصفح يقرأ التاريخ المجرّد
+      # منتصفَ ليل UTC بينما To-IsoDate تُصدِر تواريخ الدفعات بإزاحة محلية،
+      # فتُقرأ دفعة يوم الحدّ في دمشق (+03) قبله بثلاث ساعات وتُستبعَد ظلماً.
+      paymentsWindowStart = To-IsoDate $row.payments_window_start
       recentMovements = $recentMovements
       status = $status
       customerGuid = [string]$row.customer_guid

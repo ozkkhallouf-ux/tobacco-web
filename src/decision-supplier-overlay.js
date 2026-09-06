@@ -1,84 +1,80 @@
 (function () {
-  let paintToken = 0;
+  // ============================================================================
+  // طبقة الالتزامات المالية للموردين.
+  //
+  // عقدها الصارم: هذه الطبقة **تغذّي** لوحة القرار برصيد أمين، ولا تملك أبداً
+  // صلاحية محو ما رسمه المحرّك. النسخة السابقة كانت تستبدل tbody في كل حالة —
+  // فحين فرغ جدول supplier_obligations محت عشرين مورداً حقيقياً وأحلّت مكانهم
+  // رسالة «لا يوجد رصيد مستحق»، وهي رسالة عن الالتزام لا عن الموردين.
+  //
+  // الآن: النتيجة تُنشر في window.ozkSupplierObligations ويعيد المحرّك الرسم
+  // بنفسه. لا كتابة مباشرة في DOM القسم إطلاقاً.
+  // ============================================================================
 
-  const escape = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;"
-  }[char]));
+  const REFRESH_MS = 60 * 1000;
+  let inFlight = false;
+  let lastSignature = null;
 
-  const number = (value) => {
-    const n = Number(value);
-    return Number.isFinite(n) ? n : 0;
-  };
-
-  function findSupplierSection() {
-    return Array.from(document.querySelectorAll(".decision-section")).find((section) =>
-      String(section.querySelector("h2")?.textContent || "").includes("أولوية الموردين")
-    ) || null;
+  function sameRows(rows) {
+    const signature = JSON.stringify((rows || []).map((row) => [
+      row.supplier_key || row.supplierKey || "",
+      row.supplier_name || row.supplierName || "",
+      row.amount_due ?? row.amountDue ?? null,
+      row.currency || ""
+    ]));
+    if (signature === lastSignature) return true;
+    lastSignature = signature;
+    return false;
   }
 
-  function amountLabel(row) {
-    const amount = number(row.amount_due);
-    const formatted = amount.toLocaleString("en-US", { maximumFractionDigits: 0 });
-    if (row.currency === "USD") return `${formatted} $`;
-    if (row.currency === "SYP") return `${formatted} ل.س`;
-    return `${formatted} · عملة أمين`;
+  function normalize(rows) {
+    return (Array.isArray(rows) ? rows : []).map((row) => ({
+      supplierKey: row.supplier_key ?? row.supplierKey ?? "",
+      supplierGuid: row.supplier_key ?? row.supplierGuid ?? "",
+      supplierName: row.supplier_name ?? row.supplierName ?? "مورد",
+      amountDue: Number(row.amount_due ?? row.amountDue ?? 0) || 0,
+      currency: row.currency || "",
+      supplyRisk: String(row.supply_risk ?? row.supplyRisk ?? "normal").toLowerCase(),
+      updatedAt: row.updated_at ?? row.updatedAt ?? null,
+      source: row.source ?? ""
+    }));
   }
 
-  function priorityBadge(row, index) {
-    const risk = String(row.supply_risk || "normal").toLowerCase();
-    if (risk === "high" || risk === "critical" || index < 2) {
-      return '<span class="status-chip decision-danger">أولوية عالية</span>';
-    }
-    if (risk === "elevated" || index < 5) {
-      return '<span class="status-chip decision-warning">مراجعة اليوم</span>';
-    }
-    return '<span class="status-chip decision-pending">متابعة</span>';
-  }
+  async function refreshSupplierObligations() {
+    if (inFlight) return;
+    if (typeof state !== "undefined" && state?.route !== "decision") return;
+    const client = window.supplierObligationsData;
+    if (!client?.listSupplierObligations) return;
 
-  async function paintSupplierObligations() {
-    const token = ++paintToken;
+    inFlight = true;
     try {
-      if (typeof state !== "undefined" && state?.route !== "decision") return;
-      const section = findSupplierSection();
-      if (!section) return;
-      const source = window.supplierObligationsData;
-      if (!source?.listSupplierObligations) return;
-
-      const rows = await source.listSupplierObligations();
-      if (token !== paintToken) return;
-
-      const table = section.querySelector("table");
-      if (!table) return;
-      const thead = table.querySelector("thead");
-      const tbody = table.querySelector("tbody");
-      if (!thead || !tbody) return;
-
-      thead.innerHTML = "<tr><th>#</th><th>المورد</th><th>الرصيد المستحق</th><th>المصدر</th><th>الأولوية</th></tr>";
-      tbody.innerHTML = rows.slice(0, 8).map((row, index) =>
-        `<tr><td>${index + 1}</td><td><strong>${escape(row.supplier_name || "مورد")}</strong></td><td dir="ltr">${escape(amountLabel(row))}</td><td>رصيد أمين</td><td>${priorityBadge(row, index)}</td></tr>`
-      ).join("") || '<tr><td colspan="5" class="muted">لا يوجد حالياً رصيد موجب مستحق للموردين ضمن بيانات أمين المتزامنة.</td></tr>';
-
-      let note = section.querySelector(".supplier-obligation-source-note");
-      if (!note) {
-        note = document.createElement("p");
-        note.className = "decision-note supplier-obligation-source-note";
-        section.appendChild(note);
-      }
-      note.textContent = "مصدر الرصيد: الحساب المحاسبي الفعلي ac000 في أمين بعملة الأساس (دولار)، والحساب هو Credit - Debit للموردين الذين لديهم فواتير شراء. تتجدد البيانات تلقائياً كل 5 دقائق.";
+      const rows = await client.listSupplierObligations();
+      // جدول فارغ حقيقة تُسجَّل، لا سبباً لمسح شيء: المحرّك يسقط عندها إلى
+      // التزامات تقرير فواتير الشراء ويبقي أولوية الشراء كما هي.
+      window.ozkSupplierObligations = normalize(rows);
+      window.ozkSupplierObligationsState = {
+        loaded: true,
+        count: window.ozkSupplierObligations.length,
+        at: new Date().toISOString(),
+        error: null
+      };
+      if (!sameRows(rows) && typeof render === "function" && state?.route === "decision") render();
     } catch (error) {
+      // الفشل لا يُفرِّغ آخر نسخة صالحة ولا يمسّ العرض — يُسجَّل فقط.
+      window.ozkSupplierObligationsState = {
+        loaded: Array.isArray(window.ozkSupplierObligations),
+        count: Array.isArray(window.ozkSupplierObligations) ? window.ozkSupplierObligations.length : 0,
+        at: new Date().toISOString(),
+        error: String(error?.message || error)
+      };
       console.error("[OZK Supplier Obligations]", error);
+    } finally {
+      inFlight = false;
     }
   }
 
-  if (typeof render === "function") {
-    const baseRender = render;
-    render = function supplierAwareRender(...args) {
-      const result = baseRender.apply(this, args);
-      setTimeout(paintSupplierObligations, 0);
-      return result;
-    };
-  }
+  window.ozkRefreshSupplierObligations = refreshSupplierObligations;
 
-  setTimeout(paintSupplierObligations, 0);
-  setInterval(paintSupplierObligations, 60 * 1000);
+  setTimeout(refreshSupplierObligations, 0);
+  setInterval(refreshSupplierObligations, REFRESH_MS);
 })();

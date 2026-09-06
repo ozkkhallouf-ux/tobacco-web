@@ -22,140 +22,129 @@
     return Array.isArray(reports[0]?.items) ? reports[0].items : [];
   }
 
-  const customerKey = (row) => String(row?.customerKey || row?.customer_key || row?.key || row?.customerGuid || row?.customer_guid || row?.customerAccountGuid || row?.customer_account_guid || row?.guid || row?.name || "");
-  const customerName = (row) => String(row?.name || row?.customerName || row?.customer_name || "زبون");
-  const customerBalance = (row) => num(row?.balance ?? row?.debit ?? row?.amount ?? row?.remaining ?? 0);
-
-  // المعرّف الصفري الذي يكتبه الأمين بدل NULL ليس معرّفاً.
-  const ZERO_GUID = "00000000-0000-0000-0000-000000000000";
-  const rowGuid = (row) => {
-    const guid = String(row?.customerGuid || row?.customer_guid || "").trim().toLowerCase();
-    return !guid || guid === ZERO_GUID ? "" : guid;
-  };
-
-  function creditLimitFor(row) {
-    const key = customerKey(row);
-    const name = customerName(row).trim().toLowerCase();
-    const guid = rowGuid(row);
-    const limits = Array.isArray(state?.customerCreditLimits) ? state.customerCreditLimits : [];
-    // المعرّف أولاً — لا يتغيّر بإعادة تسمية الحساب في الأمين. والاحتياط بالاسم
-    // مقصور على حدود بلا معرّف حين يحمل الزبون معرّفاً، كي لا يرث حسابٌ حدَّ
-    // حسابٍ آخر يطابقه اسماً.
-    const nameFallbackOk = (x) => !guid || !rowGuid(x);
-    const match = (guid ? limits.find((x) => rowGuid(x) === guid) : null)
-      || limits.find((x) => nameFallbackOk(x) && String(x.customerKey || x.customer_key || "") === key)
-      || limits.find((x) => nameFallbackOk(x) && String(x.customerName || x.customer_name || "").trim().toLowerCase() === name);
-    const approvedLimit = num(match?.creditLimit ?? match?.credit_limit ?? 0);
-    if (approvedLimit > 0) {
-      return { amount: approvedLimit, source: "approved", updatedAt: match?.updatedAt || match?.updated_at || null };
-    }
-    const ameenLimit = num(row?.creditLimit ?? row?.credit_limit ?? 0);
-    if (ameenLimit > 0) return { amount: ameenLimit, source: "ameen", updatedAt: null };
-    return { amount: 0, source: "missing", updatedAt: null };
+  function scoring() {
+    return (typeof window !== "undefined" && window.ozkDecisionScoring) || null;
   }
 
-  function customerRiskRows() {
-    const order = { red: 0, orange: 1, unknown: 2, yellow: 3, green: 4 };
-    return balanceItems().map((row) => {
-      const balance = Math.max(0, customerBalance(row));
-      const credit = creditLimitFor(row);
-      const limit = credit.amount;
-      const ratio = limit > 0 ? balance / limit : null;
-      const overBy = ratio !== null ? Math.max(0, balance - limit) : null;
-      const available = ratio !== null ? Math.max(0, limit - balance) : null;
-      let level = "unknown";
-      if (ratio !== null && ratio >= 1) level = "red";
-      else if (ratio !== null && ratio >= 0.9) level = "orange";
-      else if (ratio !== null && ratio >= 0.75) level = "yellow";
-      else if (ratio !== null) level = "green";
-      return { name: customerName(row), balance, limit, ratio, overBy, available, level, limitSource: credit.source };
-    }).filter((row) => row.balance > 0).sort((a, b) => order[a.level] - order[b.level] || (b.ratio ?? -1) - (a.ratio ?? -1) || b.balance - a.balance);
-  }
-
-  function collectionFacts(risks) {
-    return {
-      totalReceivables: risks.reduce((sum, row) => sum + row.balance, 0),
-      overLimitTotal: risks.reduce((sum, row) => sum + (row.overBy || 0), 0),
-      missingLimitCount: risks.filter((row) => row.level === "unknown").length
-    };
-  }
-
-  function itemSnapshotRows() {
-    const candidates = [state?.ameenItemSnapshot, state?.ameenItemSnapshots, state?.itemSnapshots, state?.purchaseItemSnapshot];
+  function snapshotRows() {
+    const candidates = [state?.ameenItemSnapshot, state?.ameenItemSnapshots, state?.itemSnapshots, state?.poItemSnapshots];
     return candidates.find(Array.isArray) || [];
   }
 
-  function velocityFor(item) {
-    const direct = item.unitsSold30d ?? item.units_sold_30d ?? item.qtySold30d ?? item.qty_sold_30d;
-    if (hasNumber(direct)) return num(direct);
-    const key = String(item.itemKey || item.item_key || item.itemGuid || item.item_guid || "");
-    const name = String(item.itemName || item.item_name || "").trim().toLowerCase();
-    const snapshot = itemSnapshotRows().find((row) => String(row.itemKey || row.item_key || row.itemGuid || row.item_guid || "") === key)
-      || itemSnapshotRows().find((row) => String(row.itemName || row.item_name || "").trim().toLowerCase() === name);
-    const value = snapshot?.unitsSold30d ?? snapshot?.units_sold_30d ?? snapshot?.qtySold30d ?? snapshot?.qty_sold_30d;
-    return hasNumber(value) ? num(value) : null;
+  // حداثة اللقطة تُحسب مرة واحدة وتُمرَّر للعرض: التوصية لا تُقدَّم كأنها حديثة
+  // حين يكون مصدرها متوقفاً — وهو ما أخفى تجمّد ستة أيام دون أي إشارة.
+  function snapshotHealth() {
+    const api = scoring();
+    if (!api) return { generatedAt: null, ageHours: null, state: "missing", trusted: false, reason: "نواة التقييم غير محمّلة." };
+    return api.snapshotFreshness(snapshotRows(), { now: new Date() });
   }
 
-  function purchaseSignals() {
-    return (Array.isArray(state?.approvedPriceItems) ? state.approvedPriceItems : []).map((item) => {
-      const stock = Math.max(0, num(item.stockQty ?? item.stock_qty ?? 0));
-      const sold30d = velocityFor(item);
-      const status = String(item.stockStatus || item.stock_status || "").toLowerCase();
-      let score = 20;
-      let basis = "stock_only";
-      let daysCover = null;
-
-      if (sold30d !== null) {
-        basis = "sales_velocity";
-        if (sold30d > 0) daysCover = stock / (sold30d / 30);
-        if (sold30d <= 0) score = stock > 0 ? 5 : 15;
-        else if (stock <= 0 || /out|نفد|غير متوفر/.test(status)) score = 100;
-        else if (daysCover < 3) score = 95;
-        else if (daysCover < 7) score = 85;
-        else if (daysCover < 14) score = 70;
-        else if (daysCover < 30) score = 45;
-        else score = 20;
-      } else {
-        if (stock <= 0 || /out|نفد|غير متوفر/.test(status)) score = 70;
-        else if (stock <= 3) score = 55;
-        else if (stock <= 7) score = 40;
-        else score = 20;
-      }
-      return { name: item.itemName || item.item_name || "صنف", stock, sold30d, daysCover, score, basis };
-    }).sort((a, b) => b.score - a.score).slice(0, 8);
+  function collectionModel() {
+    const api = scoring();
+    if (!api) return { customers: [], totalReceivables: 0, overLimitTotal: 0, missingLimitCount: 0, missingLimitReceivables: 0, criticalCount: 0 };
+    return api.scoreCustomers({
+      balances: balanceItems(),
+      creditLimits: Array.isArray(state?.customerCreditLimits) ? state.customerCreditLimits : [],
+      now: new Date()
+    });
   }
 
-  function invoiceRemaining(invoice) {
-    const explicit = invoice.remaining ?? invoice.remainingTotal ?? invoice.remaining_total;
-    if (hasNumber(explicit)) return Math.max(0, num(explicit));
-    const total = invoice.total ?? invoice.grandTotal ?? invoice.grand_total;
-    const paid = invoice.paidAmount ?? invoice.paid_amount ?? invoice.paidTotal ?? invoice.paid_total ?? invoice.paymentAmount ?? invoice.payment_amount;
-    if (hasNumber(total) && hasNumber(paid)) return Math.max(0, num(total) - num(paid));
-    return null;
+  function purchaseModel() {
+    const api = scoring();
+    if (!api) return { items: [], duplicateCount: 0, unidentifiedCount: 0, nameMatchedCount: 0, valueScaleUsed: false, urgentCount: 0, dormantCount: 0, idleGateActive: false, idleGateNote: "" };
+    return api.scoreItems({
+      items: Array.isArray(state?.approvedPriceItems) ? state.approvedPriceItems : [],
+      snapshots: snapshotRows(),
+      now: new Date()
+    });
   }
 
-  function supplierSignals() {
-    const groups = Array.isArray(state?.poAmeenReport?.items) ? state.poAmeenReport.items : [];
-    return groups.map((supplier) => {
-      const invoices = Array.isArray(supplier.invoices) ? supplier.invoices : [];
-      const known = invoices.map(invoiceRemaining).filter((value) => value !== null);
+  // التزامات الموردين تُقرأ من جدولها المخصّص وحده.
+  //
+  // كان هنا ارتداد يبني الالتزام من تقرير فواتير الشراء عند فراغ الجدول، وأُزيل
+  // بعد ثلاث ملاحظات قياسية عليه:
+  //   • التقرير يجمّع الموردين بالاسم فقط (`$name = $b.supplier` في
+  //     pull-purchase-invoices-from-ameen.ps1) بلا معرّف، بينما مجموعات الأصناف
+  //     مفاتيحها معرّفات — فالالتزام ما كان ليرتبط بصاحبه أصلاً ويظهر «—» دائماً.
+  //   • كان يجمع كل الفواتير برقم واحد ويسمّيه دولاراً، متجاهلاً حقل currency
+  //     الحقيقي وعلم isReturn — فمرتجع شراء كان **يزيد** الالتزام بدل خفضه
+  //     (قياس على الإنتاج: فاتورة مرتجعة واحدة من 108).
+  //   • ولا فاتورة واحدة من 108 تحمل paidAmount، فالباقي غير معروف لأي منها،
+  //     وأي رقم يُعرض هنا يكون مبنياً على عدم.
+  //
+  // البديل ليس الصمت: القسم يعرض الموردين بأولوية الشراء كاملةً، وعمود الالتزام
+  // يقول صراحةً إن مصدره لم يصل بعد.
+  function supplierModel(purchase) {
+    const api = scoring();
+    if (!api) return { suppliers: [], obligationCount: 0, linkedSupplierCount: 0 };
+    const live = Array.isArray(window.ozkSupplierObligations) ? window.ozkSupplierObligations : [];
+    return api.scoreSuppliers({
+      items: purchase.items,
+      obligations: live,
+      now: new Date()
+    });
+  }
+
+  function obligationsState() {
+    const state = window.ozkSupplierObligationsState;
+    if (!state?.loaded) return { known: false, note: "مصدر الالتزامات المالية لم يُقرأ بعد." };
+    if (state.error) return { known: false, note: "تعذّرت قراءة الالتزامات المالية — الأولوية أدناه غير متأثرة." };
+    if (!state.count) {
       return {
-        name: supplier.name || "مورد",
-        total: known.reduce((sum, value) => sum + value, 0),
-        invoiceCount: invoices.length,
-        knownCount: known.length,
-        complete: invoices.length > 0 && known.length === invoices.length
+        known: true,
+        note: "جدول الالتزامات المالية فارغ — لم تُشغَّل مهمة سحب أرصدة الموردين بعد. أولوية الشراء أدناه لا تعتمد عليه إطلاقاً."
       };
-    }).filter((row) => row.invoiceCount > 0).sort((a, b) => {
-      if (a.complete !== b.complete) return a.complete ? -1 : 1;
-      return b.total - a.total;
-    }).slice(0, 8);
+    }
+    return { known: true, note: "" };
   }
 
   function riskBadge(level) {
-    const map = { red: ["متجاوز للحد", "danger"], orange: ["قريب من الحد", "warning"], unknown: ["حد غير محدد", "pending"], yellow: ["مراقبة", "pending"], green: ["ضمن الحد", "success"] };
-    const [label, cls] = map[level] || map.green;
+    const map = {
+      critical: ["خطر عالٍ", "danger"],
+      watch: ["متابعة", "warning"],
+      normal: ["ضمن المتابعة", "success"]
+    };
+    const [label, cls] = map[level] || map.normal;
     return `<span class="status-chip decision-${cls}">${label}</span>`;
+  }
+
+  function purchaseBadge(priority) {
+    const map = {
+      urgent: ["عاجل", "danger"],
+      soon: ["قريب", "warning"],
+      steady: ["مستقر", "success"],
+      dormant: ["راكد / طلب ضعيف", "pending"],
+      unknown: ["بلا حركة مسجّلة", "pending"]
+    };
+    const [label, cls] = map[priority] || map.unknown;
+    return `<span class="status-chip decision-${cls}">${label}</span>`;
+  }
+
+  function supplierBadge(priority) {
+    const map = {
+      urgent: ["أولوية عالية", "danger"],
+      soon: ["مراجعة اليوم", "warning"],
+      watch: ["متابعة", "pending"]
+    };
+    const [label, cls] = map[priority] || map.watch;
+    return `<span class="status-chip decision-${cls}">${label}</span>`;
+  }
+
+  const dash = (value, digits) => (value === null || value === undefined || !Number.isFinite(Number(value))
+    ? "—"
+    : Number(value).toLocaleString("en-US", { maximumFractionDigits: digits ?? 0 }));
+
+  function coverageLabel(days) {
+    if (days === null || days === undefined) return "—";
+    if (!Number.isFinite(days)) return "بلا حركة";
+    if (days < 1) return "أقل من يوم";
+    return `${Math.round(days)} يوم`;
+  }
+
+  function suggestedLabel(suggested) {
+    if (!suggested || !(suggested.units > 0)) return "—";
+    if (suggested.cartons) return `${dash(suggested.cartons)} كرتونة <small class="muted">(${dash(suggested.units)} وحدة)</small>`;
+    return `${dash(suggested.units)} وحدة`;
   }
 
   function liveLabel() {
@@ -172,44 +161,92 @@
     return "";
   }
 
+  function snapshotBanner(health) {
+    if (!health || health.trusted) return "";
+    const when = health.generatedAt
+      ? new Date(health.generatedAt).toLocaleString("ar", { dateStyle: "medium", timeStyle: "short" })
+      : "غير معروف";
+    const age = health.ageHours === null ? "" : ` (قبل ${Math.floor(health.ageHours)} ساعة)`;
+    return `<p class="decision-alert" role="status"><strong>⚠️ بيانات أولوية الشراء قديمة</strong> — آخر تحديث للقطة الأصناف: ${escape(when)}${escape(age)}. الدرجات أدناه محسوبة من مخزون وحركة غير حديثين ولا تُعتمد أمراً بالشراء حتى تُجدَّد اللقطة.</p>`;
+  }
+
   function decisionPage() {
     if (!state?.session) return shell(`<section class="panel"><h2>قرار اليوم</h2><p class="muted">سجّل الدخول أولاً لعرض قرارات السيولة والتحصيل والموردين.</p></section>`);
     if (!window.ozkCanAccessRoute?.(ROUTE)) return shell(`<section class="panel"><h2>غير متاح</h2><p class="muted">قرار اليوم متاح لحساب المالك فقط.</p></section>`);
-    const risks = customerRiskRows();
-    const facts = collectionFacts(risks);
-    const suppliers = supplierSignals();
-    const purchase = purchaseSignals();
-    const redCount = risks.filter((row) => row.level === "red").length;
-    const urgentBuy = purchase.filter((row) => row.score >= 85).length;
 
-    const collectionRows = risks.slice(0, 10).map((row) => {
-      const source = row.limitSource === "approved" ? "معتمد داخليًا" : row.limitSource === "ameen" ? "معتمد في أمين" : "";
-      const action = row.level === "unknown"
-        ? "تحديد حد معتمد قبل أي بيع آجل"
-        : row.level === "red"
-          ? `تحصيل ${money(row.overBy)} على الأقل قبل زيادة الآجل`
-          : row.level === "orange"
-            ? "متابعة التحصيل قبل بلوغ الحد"
-            : `متاح ضمن الحد: ${money(row.available)}`;
-      return `<tr><td><strong>${escape(row.name)}</strong></td><td dir="ltr">${money(row.balance)}</td><td dir="ltr">${row.limit > 0 ? `${money(row.limit)}<small class="muted" style="display:block">${escape(source)}</small>` : "غير محدد"}</td><td>${riskBadge(row.level)}</td><td>${action}</td></tr>`;
+    const collection = collectionModel();
+    const purchase = purchaseModel();
+    const suppliers = supplierModel(purchase);
+    const obligations = obligationsState();
+    const health = snapshotHealth();
+    // عند قِدَم اللقطة تبقى الأرقام معروضة للتشخيص، لكن عدّاد «شراء عاجل» لا
+    // يدّعي رقماً موثوقاً — الادعاء بالحداثة هو ما أخفى العطل ستة أيام.
+    const urgentBuy = health.trusted ? purchase.urgentCount : null;
+
+    const collectionRows = collection.customers.slice(0, 12).map((row) => {
+      const source = row.limitSource === "approved" ? "معتمد داخليًا" : row.limitSource === "ameen" ? "معتمد في أمين" : "بلا حد معتمد";
+      return `<tr>
+        <td><strong>${escape(row.name)}</strong></td>
+        <td dir="ltr">${money(row.balance)}</td>
+        <td dir="ltr">${row.limit > 0 ? `${money(row.limit)}<small class="muted" style="display:block">${escape(source)}</small>` : '<span class="muted">غير محدد</span>'}</td>
+        <td dir="ltr">${row.lastPaymentDate ? escape(row.lastPaymentDate) : "—"}</td>
+        <td dir="ltr">${row.daysSincePayment === null ? "—" : dash(Math.round(row.daysSincePayment))}</td>
+        <td dir="ltr"><strong>${escape(row.score)}</strong>/100</td>
+        <td>${riskBadge(row.level)}</td>
+        <td class="decision-reason">${escape(row.reason)}</td>
+      </tr>`;
     }).join("");
-    const supplierRows = suppliers.map((row, index) => `<tr><td>${index + 1}</td><td><strong>${escape(row.name)}</strong></td><td dir="ltr">${row.complete ? money(row.total) : "غير متاح"}</td><td>${escape(row.knownCount)}/${escape(row.invoiceCount)}</td><td>${row.complete ? (index < 2 ? '<span class="status-chip decision-danger">أولوية عالية</span>' : '<span class="status-chip decision-pending">مراجعة</span>') : '<span class="status-chip decision-warning">بيانات ناقصة</span>'}</td></tr>`).join("");
-    const purchaseRows = purchase.map((row) => `<tr><td><strong>${escape(row.name)}</strong></td><td dir="ltr">${escape(row.stock)}</td><td>${row.sold30d === null ? "—" : escape(row.sold30d)}</td><td><strong>${escape(row.score)}</strong>/100</td><td>${row.basis === "sales_velocity" ? (row.score >= 85 ? '<span class="status-chip decision-danger">عاجل</span>' : row.score >= 65 ? '<span class="status-chip decision-warning">قريب</span>' : '<span class="status-chip decision-success">مستقر</span>') : '<span class="status-chip decision-pending">تقدير احتياطي</span>'}</td></tr>`).join("");
+
+    const supplierRows = suppliers.suppliers.slice(0, 10).map((row, index) => `<tr>
+      <td>${index + 1}</td>
+      <td><strong>${escape(row.name)}</strong></td>
+      <td dir="ltr">${dash(row.urgentCount)}</td>
+      <td dir="ltr">${dash(row.stockoutCount)}</td>
+      <td dir="ltr">${Math.round(row.coverageGap * 100)}٪</td>
+      <td dir="ltr">${(row.salesImportance * 100).toFixed(1)}٪</td>
+      <td dir="ltr"><strong>${escape(row.score)}</strong>/100</td>
+      <td>${supplierBadge(row.priority)}</td>
+      <td dir="ltr">${row.obligationAmount === null ? `<span class="muted">${obligations.known && obligations.note ? "غير متاح" : "—"}</span>` : money(row.obligationAmount)}</td>
+    </tr>`).join("");
+
+    const purchaseRows = purchase.items.slice(0, 12).map((row) => `<tr>
+      <td><strong>${escape(row.name)}</strong></td>
+      <td dir="ltr">${dash(row.stock)}</td>
+      <td dir="ltr">${dash(row.sold30d)}</td>
+      <td dir="ltr">${row.dailySales === null ? "—" : escape(row.dailySales >= 10 ? String(Math.round(row.dailySales)) : row.dailySales.toFixed(2))}</td>
+      <td dir="ltr">${escape(coverageLabel(row.coverageDays))}</td>
+      <td dir="ltr">${row.lastSaleDate ? escape(row.lastSaleDate) : "—"}</td>
+      <td dir="ltr"><strong>${escape(row.score)}</strong>/100</td>
+      <td>${purchaseBadge(row.priority)}</td>
+      <td dir="ltr">${suggestedLabel(row.suggested)}</td>
+      <td class="decision-reason">${escape(row.reason)}</td>
+    </tr>`).join("");
+
+    const dedupeNote = purchase.duplicateCount > 0
+      ? `<p class="decision-note">دُمج ${escape(purchase.duplicateCount)} سجلاً مكرراً بالمعرّف قبل التقييم، فلا يظهر الصنف الواحد مرتين. التكرار في المصدر لم يُحذف — يحتاج تنظيفاً منفصلاً بموافقتك.</p>`
+      : "";
+    const idleGateNote = purchase.idleGateNote
+      ? `<p class="decision-note">${escape(purchase.idleGateNote)}</p>`
+      : "";
+    const nameMatchNote = purchase.nameMatchedCount > 0
+      ? `<p class="decision-note">${escape(purchase.nameMatchedCount)} صنفاً بلا معرّف مستقر ويُطابَق بالاسم — هوية هشّة أمام إعادة التسمية، تستحق مراجعة.</p>`
+      : "";
 
     return shell(`
       <section class="panel wide decision-page">
         <div class="panel-title-row"><div><h2 style="margin:0">📌 قرار اليوم</h2><p class="muted" style="margin:4px 0 0">ملخص تنفيذي مبني على آخر بيانات متاحة.</p></div><span class="decision-live ${liveClass()}"><i class="decision-live-dot"></i>${escape(liveLabel())}</span></div>
-        <p class="decision-note"><strong>أساس الحساب:</strong> الرصيد المستحق = مجموع القيود المدينة (الفواتير والسحوبات) ناقص القيود الدائنة (القبض والدفعات) من حساب الزبون في أمين. الحد الائتماني سقف معتمد مستقل، ولا يتم تخمينه من حجم الرصيد أو تاريخ المبيعات.</p>
+        ${snapshotBanner(health)}
+        <p class="decision-note"><strong>أساس الحساب:</strong> الرصيد المستحق = مجموع القيود المدينة ناقص القيود الدائنة من حساب الزبون في أمين. درجة خطر التحصيل تجمع حجم الرصيد وتأخّر السداد واستخدام الحد وانتظام الدفعات — والحد الائتماني أحد عواملها لا العامل الوحيد، ولا يُخمَّن حين يغيب. أولوية شراء الصنف تقوم على أيام التغطية وسرعة الدوران؛ النفاد وحده لا يمنح استعجالاً لصنف ضعيف الطلب.</p>
         <div class="decision-kpis">
-          <article class="decision-kpi"><small>إجمالي الرصيد المستحق</small><strong dir="ltr">${money(facts.totalReceivables)}</strong><span>فواتير وسحوبات ناقص القبض والدفعات</span></article>
-          <article class="decision-kpi"><small>التجاوز المؤكد للحدود</small><strong dir="ltr">${money(facts.overLimitTotal)}</strong><span>فقط للزبائن ذوي حد معتمد</span></article>
-          <article class="decision-kpi"><small>حدود ائتمانية غير محددة</small><strong>${facts.missingLimitCount}</strong><span>لا تُصنّف خطرًا بالتخمين</span></article>
-          <article class="decision-kpi"><small>أصناف شراء عاجل</small><strong>${urgentBuy}</strong><span>عند توفر سرعة المبيع تكون هي أساس التقييم</span></article>
+          <article class="decision-kpi"><small>إجمالي الرصيد المستحق</small><strong dir="ltr">${money(collection.totalReceivables)}</strong><span>فواتير وسحوبات ناقص القبض والدفعات</span></article>
+          <article class="decision-kpi"><small>زبائن بخطر تحصيل عالٍ</small><strong>${escape(collection.criticalCount)}</strong><span>مرتّبون بالدرجة لا بالحد وحده</span></article>
+          <article class="decision-kpi"><small>ذمم بلا حد معتمد</small><strong dir="ltr">${money(collection.missingLimitReceivables)}</strong><span>${escape(collection.missingLimitCount)} زبوناً — يظهرون في الترتيب ولا يُسقَطون</span></article>
+          <article class="decision-kpi"><small>أصناف شراء عاجل</small><strong>${urgentBuy === null ? "—" : escape(urgentBuy)}</strong><span>${urgentBuy === null ? "معلّق حتى تُجدَّد اللقطة" : `و${escape(purchase.dormantCount)} صنفاً راكداً مستبعَداً`}</span></article>
         </div>
       </section>
-      <section class="panel wide decision-section"><div class="panel-title-row"><div><h2 style="margin:0">💵 التحصيل والخطر الائتماني</h2></div><button class="button secondary" type="button" data-route="balances">فتح أرصدة الزبائن</button></div><div class="inv-table-wrap"><table class="inv-table"><thead><tr><th>الزبون</th><th>الرصيد</th><th>الحد المعتمد</th><th>الحالة</th><th>الإجراء</th></tr></thead><tbody>${collectionRows || '<tr><td colspan="5" class="muted">لا توجد أرصدة مدينة متاحة حالياً.</td></tr>'}</tbody></table></div></section>
-      <section class="panel wide decision-section"><div class="panel-title-row"><div><h2 style="margin:0">🚚 أولوية الموردين</h2></div><button class="button secondary" type="button" data-route="purchases">فتح المشتريات</button></div><div class="inv-table-wrap"><table class="inv-table"><thead><tr><th>#</th><th>المورد</th><th>الالتزام المؤكد</th><th>بيانات الفواتير</th><th>الأولوية</th></tr></thead><tbody>${supplierRows || '<tr><td colspan="5" class="muted">لا تتوفر التزامات موردين كافية للحساب حالياً.</td></tr>'}</tbody></table></div></section>
-      <section class="panel wide decision-section"><div class="panel-title-row"><div><h2 style="margin:0">📦 أولوية الأصناف</h2></div><button class="button secondary" type="button" data-route="warehouses">فتح المستودعات</button></div><div class="inv-table-wrap"><table class="inv-table"><thead><tr><th>الصنف</th><th>المخزون</th><th>مبيع 30 يوم</th><th>الأولوية</th><th>الحالة</th></tr></thead><tbody>${purchaseRows || '<tr><td colspan="5" class="muted">لا توجد أصناف معتمدة متاحة حالياً.</td></tr>'}</tbody></table></div><p class="decision-note">إذا لم تتوفر سرعة المبيع يظهر الصنف كـ «تقدير احتياطي» ولا يُعامل كتوصية شراء نهائية. التحديث يعمل تلقائياً كل دقيقة أثناء فتح الصفحة.</p></section>
+      <section class="panel wide decision-section"><div class="panel-title-row"><div><h2 style="margin:0">💵 التحصيل والخطر الائتماني</h2></div><button class="button secondary" type="button" data-route="balances">فتح أرصدة الزبائن</button></div><div class="inv-table-wrap"><table class="inv-table"><thead><tr><th>الزبون</th><th>الرصيد</th><th>الحد المعتمد</th><th>آخر دفعة</th><th>أيام بلا دفع</th><th>الدرجة</th><th>الحالة</th><th>السبب</th></tr></thead><tbody>${collectionRows || '<tr><td colspan="8" class="muted">لا توجد أرصدة مدينة متاحة حالياً.</td></tr>'}</tbody></table></div></section>
+      <section class="panel wide decision-section"><div class="panel-title-row"><div><h2 style="margin:0">🚚 أولوية الموردين</h2></div><button class="button secondary" type="button" data-route="purchases">فتح المشتريات</button></div><div class="inv-table-wrap"><table class="inv-table"><thead><tr><th>#</th><th>المورد</th><th>أصناف عاجلة</th><th>نافد</th><th>فجوة التغطية</th><th>وزن المبيعات</th><th>أولوية الشراء</th><th>الحالة</th><th>الالتزام المالي</th></tr></thead><tbody>${supplierRows || '<tr><td colspan="9" class="muted">لا تتوفر أصناف مرتبطة بمورد لحساب أولوية الشراء حالياً.</td></tr>'}</tbody></table></div><p class="decision-note">أولوية الشراء تُحسب من نواقص أصناف المورد وسرعة دورانها وفجوة تغطيتها — <strong>لا من رصيده المالي</strong>. الالتزام المالي عمود مستقل للعلم فقط، ومورد رصيده صفر قد تكون أولويته عالية.${obligations.note ? ` <strong>${escape(obligations.note)}</strong>` : ""}</p></section>
+      <section class="panel wide decision-section"><div class="panel-title-row"><div><h2 style="margin:0">📦 أولوية الأصناف</h2></div><button class="button secondary" type="button" data-route="warehouses">فتح المستودعات</button></div><div class="inv-table-wrap"><table class="inv-table"><thead><tr><th>الصنف</th><th>المخزون</th><th>مبيع 30 يوم</th><th>معدل يومي</th><th>التغطية</th><th>آخر بيع</th><th>الدرجة</th><th>الحالة</th><th>كمية مقترحة</th><th>السبب</th></tr></thead><tbody>${purchaseRows || '<tr><td colspan="10" class="muted">لا توجد أصناف معتمدة متاحة حالياً.</td></tr>'}</tbody></table></div><p class="decision-note">الكمية المقترحة قيمة مساعدة لبلوغ ${escape(window.ozkDecisionScoring?.TUNABLES?.PURCHASE_TARGET_COVERAGE_DAYS ?? 14)} يوم تغطية — وليست أمر شراء، ولا يُنشأ أي طلب تلقائياً.</p>${idleGateNote}${dedupeNote}${nameMatchNote}</section>
     `);
   }
 
