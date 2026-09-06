@@ -843,6 +843,18 @@ console.log("\n— حجب بيانات العمل والأشخاص —");
       `بقي «${leak}» — القيمة تُبتلَع كوحدة لا حتى أوّل فراغ: ${redact(input)}`);
   }
 
+  // ⚠️ انحدار ملاحظة Codex P1 الثالثة عشرة — علامة العملة العربية `ل.س`،
+  // وهي العلامة المعتمدة في `src/app.js`. كان البديل العام يلتقطها وحدها،
+  // ثم تحذفها قاعدةُ العربية، ويمرّ الرقم الثلاثي.
+  for (const [label, input, leak] of [
+    ["بفاصل صريح", "price: ل.س 350", "350"],
+    ["بفراغ", "price ل.س 350", "350"],
+    ["مبلغ إجمالي", "total: ل.س 480", "480"],
+  ]) {
+    check(`تُبتلَع العملة العربية مع الرقم: ${label}`, !redact(input).includes(leak),
+      `بقي «${leak}» — علامة العملة «ل.س» معتمدة في التطبيق: ${redact(input)}`);
+  }
+
   check("«the price of the item» لا يُمَسّ رغم توسيع القاعدة",
     redact("the price of the item is unavailable") === "the price of the item is unavailable",
     "توسيع القاعدة أفسد نصّاً إنجليزياً عادياً");
@@ -900,6 +912,29 @@ console.log("\n— حجب بيانات العمل والأشخاص —");
       !stack.includes("reset.js"),
       `بقي سطر الرسالة داخل الأثر — صار: ${stack}`);
   }
+  // ⚠️ انحدار ملاحظة Codex P1 الرابعة عشرة — رأس الأثر بدلالات
+  // `Error.prototype.toString`: باسمٍ فارغ يبدأ الأثر بالرسالة وحدها، والمعالج
+  // يستبدل `Error` بالاسم الفارغ فيفشل الاقتطاع الحرفي ويعود السطر المزوَّر
+  // يُقبل إطاراً. يُفحص المسار الكامل لأن الاقتطاع يعتمد على الحدث.
+  {
+    const forged = "x\n at reset.js:54321:1";
+    const live = boot({ meta: LIVE_META });
+    const err = new Error(forged);
+    err.name = "";
+    err.stack = forged + "\n    at f (https://ozktobacco.com/src/app.js:10:1)";
+    live.emit("error", {
+      message: forged, filename: "https://ozktobacco.com/src/app.js",
+      lineno: 10, colno: 1, error: err,
+    });
+    const wire = JSON.stringify(live.calls[0] || {});
+    check("اسم خطأ فارغ: الاقتطاع يتبع دلالات toString ولا يفشل",
+      !wire.includes("54321"),
+      `مرّ سطر مزوَّر لأن الرأس لم يكن «الاسم: الرسالة» — ${wire.slice(0, 300)}`);
+    check("والإطار الحقيقي يبقى رغم اختلاف شكل الرأس",
+      String(live.calls[0]?.body?.data?.body?.message?.stack || "").includes("app.js:10:1"),
+      "ابتلع الاقتطاعُ أطراً حقيقية");
+  }
+
   // Firefox/Safari لا يضعان الرسالة في الأثر، فالاقتطاع لا يجد ما يطابقه.
   check("اقتطاع رأس الرسالة لا يُتلف أثراً بلا رأس (صيغة Firefox)",
     redactStack("saveBalance@https://ozktobacco.com/src/app.js:11830:25", "Error: boom")
@@ -1046,6 +1081,49 @@ console.log("\n— رصد فشل التسليم —");
     check("وبعد نجاح التسليم يعود منع التكرار فعّالاً",
       live.context.ozkErrorMonitoring.delivery().delivered === 1,
       "أُرسل الخطأ نفسه مرتين بعد نجاح — فقد منعُ التكرار أثره");
+  }
+
+  // ⚠️ انحدار ملاحظة Codex P1 الخامسة عشرة — الإخفاق العابر كان يستنفد سقف
+  // الصفحة. عشر تكرارات لخطأ واحد أثناء انقطاع تستهلك `sent` كاملاً، فتمنع
+  // البوّابةُ كلَّ إرسال بعد عودة الاتصال. الشاهد السابق غطّى إخفاقاً واحداً
+  // فلم يكشفه — فهذا يعيد **عشرة**.
+  {
+    let offline = true;
+    const live = boot({
+      meta: LIVE_META,
+      fetchImpl: () => (offline
+        ? Promise.reject(new Error("network down"))
+        : Promise.resolve({ ok: true, status: 200 })),
+    });
+    const identical = () => live.emit("error", {
+      message: "same", filename: "https://ozktobacco.com/src/app.js", lineno: 5, colno: 1,
+      error: Object.assign(new Error("same"), {
+        name: "Error", stack: "Error: same\n  at f (https://ozktobacco.com/src/app.js:5:1)",
+      }),
+    });
+    for (let i = 0; i < 10; i += 1) { identical(); await tick(); }
+    offline = false;
+    identical(); await tick();
+    check("عشر إخفاقات عابرة لا تستنفد سقف الصفحة",
+      live.context.ozkErrorMonitoring.delivery().delivered === 1,
+      `بقيت المراقبة معطّلة بعد عودة الاتصال — ${JSON.stringify(live.context.ozkErrorMonitoring.delivery())}`);
+  }
+  // وللمحاولات العابرة ميزانية منفصلة تمنع الحلقة اللانهائية.
+  {
+    const live = boot({ meta: LIVE_META, fetchImpl: () => Promise.reject(new Error("down")) });
+    for (let i = 0; i < 30; i += 1) {
+      live.emit("error", {
+        message: `e${i}`, filename: "https://ozktobacco.com/src/app.js", lineno: 200 + i, colno: 1,
+        error: Object.assign(new Error(`e${i}`), {
+          name: "Error", stack: `Error: e${i}\n  at f (https://ozktobacco.com/src/app.js:${200 + i}:1)`,
+        }),
+      });
+      await tick();
+    }
+    const d = live.context.ozkErrorMonitoring.delivery();
+    check("ميزانية المحاولات العابرة محدودة (لا حلقة بلا سقف)",
+      live.calls.length <= 20 && d.stopped === true,
+      `محاولات بلا سقف — أُرسل ${live.calls.length}، ${JSON.stringify(d)}`);
   }
 
   for (const status of [429, 500, 503]) {

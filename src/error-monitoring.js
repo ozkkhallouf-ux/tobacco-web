@@ -426,7 +426,12 @@
   //
   // فأُضيف بديل يبتلع «إشارة/عملة + رقم» كوحدة واحدة، **قبل** البديل العام
   // كي يُجرَّب أولاً. ويبقى البديل العام آخراً للقيم غير الرقمية.
-  var CURRENCY = "[$\\u20AC\\u00A3\\u00A5\\u20BA\\uFDFC]|USD|EUR|SYP|SAR|AED|TRY|LBP|GBP|JPY";
+  // ⚠️ إصلاح ملاحظة Codex P1 الثالثة عشرة على PR #202: `ل.س` هي علامة العملة
+  // المعتمدة في `src/app.js`، ولم تكن في القائمة. فعلى `price: ل.س 350`
+  // يلتقط البديلُ العام `ل.س` وحدها، ثم تحذفها قاعدةُ العربية، ويمرّ `350`
+  // لأنه ثلاثي. أُضيفت الرموز العربية الشائعة هنا لتُبتلَع مع الرقم.
+  var CURRENCY = "[$\\u20AC\\u00A3\\u00A5\\u20BA\\uFDFC]|USD|EUR|SYP|SAR|AED|TRY|LBP|GBP|JPY|" +
+    "\\u0644\\.\\u0633|\\u0644\\.\\u0644|\\u0631\\.\\u0633|\\u062F\\.\\u0625|\\u062C\\.\\u0645";
   // الفراغ مسموح **داخل** الرقم بشرط أن يليه رقم — `balance: 1 250 000` يُبتلَع
   // كاملاً (ملاحظة Codex P1 الحادية عشرة: كان يقف عند أوّل مجموعة فيمرّ الباقي،
   // وستّ خانات مفصولة تفلت من حدّ الهاتف ومن حدّ الأربع خانات معاً)، بينما
@@ -554,13 +559,35 @@
   //
   // وSafari/Firefox لا يضعان الرسالة في الأثر أصلاً، فالاقتطاع لا يجد ما
   // يطابقه ولا يمسّ شيئاً. وتبقى الطبقات السابقة كلها حزاماً ثانياً.
-  function redactStack(stack, messageHeader) {
+  // ⚠️ إصلاح ملاحظة Codex P1 الرابعة عشرة على PR #202: الاقتطاع كان يفترض أن
+  // الرأس دائماً `الاسم: الرسالة`. لكن V8 يتبع دلالات
+  // `Error.prototype.toString`: باسمٍ فارغ يبدأ الأثر **بالرسالة وحدها**،
+  // وبرسالةٍ فارغة بالاسم وحده. والمعالج يستبدل `Error` بالاسم الفارغ، فلا
+  // يطابق النصُّ المبنيُّ رأسَ الأثر ويعود السطر المزوَّر يُقبل إطاراً.
+  //
+  // فتُجرَّب مرشّحات الرأس كلها ويُقتطع أطولُ ما يطابق: صيغة toString، ثم
+  // الصيغة المعروضة، ثم الرسالة وحدها. الأطول أولاً كي لا يترك اقتطاعٌ قصير
+  // بقيةَ الرأس في الأثر.
+  function messageHeaders(rawName, rawMessage) {
+    var name = (rawName === undefined || rawName === null) ? "Error" : String(rawName);
+    var message = (rawMessage === undefined || rawMessage === null) ? "" : String(rawMessage);
+    var spec = name === "" ? message : (message === "" ? name : name + ": " + message);
+    return [spec, (name || "Error") + ": " + message, message];
+  }
+
+  function redactStack(stack, headers) {
     if (typeof stack !== "string" || stack.length === 0) return "";
     var body = stack;
-    if (typeof messageHeader === "string" && messageHeader.length > 0 &&
-        body.indexOf(messageHeader) === 0) {
-      body = body.slice(messageHeader.length);
+    var candidates = typeof headers === "string" ? [headers] : (headers || []);
+    var longest = "";
+    for (var h = 0; h < candidates.length; h += 1) {
+      var candidate = candidates[h];
+      if (typeof candidate === "string" && candidate.length > longest.length &&
+          body.indexOf(candidate) === 0) {
+        longest = candidate;
+      }
     }
+    if (longest.length > 0) body = body.slice(longest.length);
     var lines = scrub(body).split("\n");
     var out = [];
     var lastDropped = false;
@@ -583,8 +610,8 @@
     return value.length > max ? value.slice(0, max) + "…[مقتطع]" : value;
   }
 
-  function clampStack(text, max, messageHeader) {
-    var value = redactStack(text, messageHeader);
+  function clampStack(text, max, headers) {
+    var value = redactStack(text, headers);
     return value.length > max ? value.slice(0, max) + "…[مقتطع]" : value;
   }
 
@@ -646,12 +673,31 @@
   //   • **عابر** (انقطاع شبكة، 429، 5xx): يُسجَّل للرصد ولا يُوقف شيئاً. سقف
   //     `MAX_ITEMS_PER_PAGE` يكفي وحده لمنع الإغراق، فلا حاجة لعقوبة دائمة.
   var MAX_FATAL_FAILURES = 3;
+  // ⚠️ إصلاح ملاحظة Codex P1 الخامسة عشرة على PR #202: إزالة البصمة عند الفشل
+  // العابر أعادت المحاولة، لكن كل محاولة كانت تستهلك من `sent`. فعشر تكرارات
+  // لخطأ واحد أثناء انقطاع تستنفد سقف الصفحة، وتمنع البوّابةُ كلَّ إرسال بعد
+  // عودة الاتصال — نفس العطل الذي عولج، عائداً من باب آخر. وشاهدي السابق غطّى
+  // إخفاقاً واحداً فلم يكشفه.
+  //
+  // فالمحاولة الفاشلة عابراً **تُعيد ما استهلكته** من `sent`، ولها ميزانية
+  // منفصلة محدودة تمنع الحلقة اللانهائية: سقف الصفحة يحرس البلاغات الواصلة،
+  // وهذه تحرس عدد المحاولات الضائعة.
+  var MAX_TRANSIENT_ATTEMPTS = 20;
+  var transientAttempts = 0;
   var FATAL_STATUSES = [400, 401, 403, 404, 422];
   var delivered = 0;
   var failures = 0;
   var consecutiveFailures = 0;
   var consecutiveFatalFailures = 0;
   var lastFailureStatus = 0;
+
+  // محاولة ضاعت لسبب عابر: تُزال بصمتها ليُعاد الإرسال عند التكرار التالي،
+  // ويُعاد ما استهلكته من سقف الصفحة — فالسقف يحرس ما **وصل** لا ما فشل.
+  function releaseAttempt(fingerprint) {
+    delete seen[fingerprint];
+    if (sent > 0) sent -= 1;
+    transientAttempts += 1;
+  }
 
   function isFatalStatus(status) {
     return FATAL_STATUSES.indexOf(typeof status === "number" ? status : 0) !== -1;
@@ -712,6 +758,7 @@
   function send(level, title, stack, context) {
     if (reporting || sent >= MAX_ITEMS_PER_PAGE) return;
     if (consecutiveFatalFailures >= MAX_FATAL_FAILURES) return;
+    if (transientAttempts >= MAX_TRANSIENT_ATTEMPTS) return;
     var fingerprint = level + "|" + title + "|" + (context.filename || "") + ":" +
       (context.lineno || 0) + "|" + hashText(stack || "");
     if (seen[fingerprint]) return;
@@ -747,11 +794,11 @@
         response.then(function (result) {
           var ok = Boolean(result && result.ok);
           noteDelivery(ok, result && result.status);
-          if (!ok && !isFatalStatus(result && result.status)) delete seen[fingerprint];
+          if (!ok && !isFatalStatus(result && result.status)) releaseAttempt(fingerprint);
         }).catch(function () {
           // انقطاع شبكة أو حجب من إضافة متصفح: لا حالة HTTP أصلاً، وهو عابر.
           noteDelivery(false, 0);
-          delete seen[fingerprint];
+          releaseAttempt(fingerprint);
         });
       }
     } catch (ignored) {
@@ -765,7 +812,7 @@
     var error = event && event.error;
     var name = (error && error.name) || "Error";
     var message = (error && error.message) || (event && event.message) || "خطأ غير معروف";
-    send("error", clampMessage(name + ": " + message, MAX_MESSAGE_CHARS), clampStack(error && error.stack, MAX_STACK_CHARS, name + ": " + message), {
+    send("error", clampMessage(name + ": " + message, MAX_MESSAGE_CHARS), clampStack(error && error.stack, MAX_STACK_CHARS, messageHeaders(error && error.name, error && error.message)), {
       // اسم الملف بلا استعلام: معامل ?v=tobacco-N يتغيّر كل نشرة فيمنع التجميع.
       filename: scrub(String((event && event.filename) || "").split("?")[0]),
       lineno: event && event.lineno,
@@ -777,7 +824,7 @@
     var reason = event && event.reason;
     var name = (reason && reason.name) || "UnhandledRejection";
     var message = (reason && reason.message) || String(reason === undefined ? "" : reason);
-    send("error", clampMessage(name + ": " + message, MAX_MESSAGE_CHARS), clampStack(reason && reason.stack, MAX_STACK_CHARS, name + ": " + message), {});
+    send("error", clampMessage(name + ": " + message, MAX_MESSAGE_CHARS), clampStack(reason && reason.stack, MAX_STACK_CHARS, messageHeaders(reason && reason.name, reason && reason.message)), {});
   });
 
   // كشف محدود للاختبار والتشخيص — لا يرسل شيئاً بذاته، ولا يكشف الرمز ولا
@@ -796,8 +843,10 @@
         failures: failures,
         consecutiveFailures: consecutiveFailures,
         consecutiveFatalFailures: consecutiveFatalFailures,
+        transientAttempts: transientAttempts,
         lastFailureStatus: lastFailureStatus,
-        stopped: consecutiveFatalFailures >= MAX_FATAL_FAILURES
+        stopped: consecutiveFatalFailures >= MAX_FATAL_FAILURES ||
+          transientAttempts >= MAX_TRANSIENT_ATTEMPTS
       };
     }
   };
