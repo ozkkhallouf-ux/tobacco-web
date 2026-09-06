@@ -502,6 +502,24 @@ function coverageWarning(period: Period, window: SyncWindow, subject: CoverageSu
     + `> فاقرأه على أنه تقديري لا نهائي بالنسبة للجزء الخارج.`;
 }
 
+// ذيل الاكتمال الموحّد لكل جواب مشتقّ من سطور المبيعات.
+//
+// حدّان يجعلان الرقم غير نهائي: بلوغ سقف الصفوف (`partial`)، وخروج الفترة عن
+// نافذة المزامنة المتحقَّقة. وكانا مفصولين: كل مستهلك جديد يتذكّر أحدهما
+// وينسى الآخر — ونُسيا فعلاً في المقارنة بالفترة السابقة، وفي فرعَي «لا شيء»
+// في الأصناف الراكدة وتوصية الشراء، وهي بالضبط المواضع التي يصدر فيها **حكم
+// نهائي** («لا حاجة شراء عاجلة») عن بيانات قد تكون ناقصة. (رصدها Codex على
+// PR #205 بعد 244f209.)
+//
+// فصارا نداءً واحداً: من يعرض رقماً من سطور المبيعات يعرض حدود صدقه معه.
+async function salesCompleteness(period: Period, partial: boolean, window?: SyncWindow) {
+  return (partial
+    ? `\n\n> ⚠️ بلغت قراءة ${period.label} (${period.from} → ${period.to}) سقف الأمان ${HARD_ROW_CAP} سطر،`
+      + ` فالأرقام المشتقّة منها **جزئية وليست نهائية**. ضيّق الفترة.`
+    : "")
+    + coverageWarning(period, window === undefined ? await salesSyncWindow() : window, SALES_COVERAGE);
+}
+
 async function readSales(period: Period, role: Role): Promise<{ rows: SalesRow[]; partial: boolean }> {
   // عمود التكلفة للمالك فقط. الموظف لا يرى تكلفة ولا هامشاً.
   const columns = role === "owner"
@@ -821,8 +839,9 @@ const TOOLS: Tool[] = [
           ok: true,
           text: `**مبيعات ${period.label} (${period.from} → ${period.to})**\nلا توجد أي فاتورة مسجّلة في هذه الفترة. آخر يوم فيه مبيعات مسجّلة هو **${String(any[0].sale_date)}**.`
             + `\n\nملاحظة: سطور المبيعات تصل عبر مزامنة الأمين، فإن كان اليوم ما زال في بدايته قد لا تكون فواتيره رُفعت بعد.`
-            + coverageWarning(period, await salesSyncWindow(), SALES_COVERAGE),
-          sources: ["sales_line_items", "sales_line_items_sync_state"]
+            + await salesCompleteness(period, current.partial),
+          sources: ["sales_line_items", "sales_line_items_sync_state"],
+          partial: current.partial
         };
       }
 
@@ -837,9 +856,17 @@ const TOOLS: Tool[] = [
           + `\n  - هذا هامش منتج تقديري قبل المصاريف والمرتجعات والحسومات. الرقم المحاسبي المعتمد للربح هو تقرير الأمين — اسأل: \`ما الأرباح؟\``;
       }
 
+      let comparePeriod: Period | null = null;
+      let comparePartial = false;
       if (compare) {
         const prev = previousPeriod(period);
-        const before = summarizeSales((await readSales(prev, ctx.role)).rows);
+        comparePeriod = prev;
+        // قراءة مستقلة بحدّ بتر مستقل. إسقاط `partial` هنا كان يعرض مجموع
+        // الفترة السابقة والفرق والنسبة **مبتورةً** بوصفها نهائية، ويُبقي
+        // `partial` في الجواب معبّراً عن الفترة الحالية وحدها.
+        const prevRead = await readSales(prev, ctx.role);
+        comparePartial = prevRead.partial;
+        const before = summarizeSales(prevRead.rows);
         const delta = now.total - before.total;
         const pct = before.total ? (delta / before.total) * 100 : null;
         text += `\n\n**مقارنة بـ${prev.label} (${prev.from} → ${prev.to})**\n`
@@ -847,20 +874,21 @@ const TOOLS: Tool[] = [
           + `- الفرق: **${delta >= 0 ? "+" : ""}${money(delta)}**`
           + (pct === null
             ? " (لا نسبة — الفترة السابقة صفر)"
-            : ` (${delta >= 0 ? "+" : ""}${pct.toFixed(1)}%)`);
+            : ` (${delta >= 0 ? "+" : ""}${pct.toFixed(1)}%)`)
+          + (comparePartial
+            ? `\n- ⚠️ قراءة الفترة السابقة بلغت سقف ${HARD_ROW_CAP} سطر، فمجموعها والفرق والنسبة أعلاه **مبتورة**.`
+            : "");
       }
 
-      if (current.partial) {
-        text += `\n\n> ⚠️ بلغت القراءة سقف الأمان ${HARD_ROW_CAP} سطر، فالإجمالي أعلاه **جزئي وليس نهائياً**. ضيّق الفترة للحصول على رقم كامل.`;
-      }
       const window = await salesSyncWindow();
-      text += coverageWarning(period, window, SALES_COVERAGE);
-      if (compare) text += coverageWarning(previousPeriod(period), window, SALES_COVERAGE);
+      text += await salesCompleteness(period, current.partial, window);
+      if (comparePeriod) text += await salesCompleteness(comparePeriod, comparePartial, window);
       return {
         ok: true,
         text,
         sources: ["sales_line_items", "sales_line_items_sync_state"],
-        partial: current.partial
+        // بتر أيّ من القراءتين يجعل الجواب جزئياً — لا الحالية وحدها.
+        partial: current.partial || comparePartial
       };
     }
   },
@@ -1125,8 +1153,10 @@ const TOOLS: Tool[] = [
       if (!stagnant.length) {
         return {
           ok: true,
-          text: `**الأصناف الراكدة (${period.label})**\nكل مادة عليها مخزون سُجّلت لها مبيعات خلال ${period.label}. لا يوجد صنف راكد بهذا التعريف.`,
-          sources: ["inventory_reports:ameen_sql_agent", "sales_line_items"]
+          text: `**الأصناف الراكدة (${period.label})**\nكل مادة عليها مخزون سُجّلت لها مبيعات خلال ${period.label}. لا يوجد صنف راكد بهذا التعريف.`
+            + await salesCompleteness(period, sales.partial),
+          sources: ["inventory_reports:ameen_sql_agent", "sales_line_items", "sales_line_items_sync_state"],
+          partial: sales.partial
         };
       }
       return {
@@ -1139,8 +1169,9 @@ const TOOLS: Tool[] = [
             .join("\n")
           + (stagnant.length > 25 ? `\n- _و${stagnant.length - 25} صنف آخر._` : "")
           + `\n\nالمقارنة بين مخزون ${report.report_date} وسطور المبيعات ${period.from} → ${period.to}.`
-          + coverageWarning(period, await salesSyncWindow(), SALES_COVERAGE),
+          + await salesCompleteness(period, sales.partial),
         sources: ["inventory_reports:ameen_sql_agent", "sales_line_items", "sales_line_items_sync_state"],
+        partial: sales.partial,
         asOf: report.created_at
       };
     }
@@ -1165,8 +1196,9 @@ const TOOLS: Tool[] = [
       if (!sales.rows.length) {
         return {
           ok: false,
-          text: `عندي حالة المخزون بتاريخ ${report.report_date}، لكن لا توجد سطور مبيعات في ${period.label} لأحسب منها معدّل الاستهلاك. بدون معدّل بيع حقيقي لا أستطيع ترتيب أولوية الشراء، ولن أرتّبها بالتخمين.`,
-          sources: ["inventory_reports:ameen_sql_agent", "sales_line_items"]
+          text: `عندي حالة المخزون بتاريخ ${report.report_date}، لكن لا توجد سطور مبيعات في ${period.label} لأحسب منها معدّل الاستهلاك. بدون معدّل بيع حقيقي لا أستطيع ترتيب أولوية الشراء، ولن أرتّبها بالتخمين.`
+            + await salesCompleteness(period, sales.partial),
+          sources: ["inventory_reports:ameen_sql_agent", "sales_line_items", "sales_line_items_sync_state"]
         };
       }
       const days = 30;
@@ -1195,10 +1227,15 @@ const TOOLS: Tool[] = [
         .sort((a, b) => a.coverDays - b.coverDays || b.perDay - a.perDay);
 
       if (!ranked.length) {
+        // «لا حاجة شراء عاجلة» حكمٌ نهائي يوقف تصرّفاً. وقراءةٌ ناقصة تبخس
+        // معدّل البيع فتُدخل الجواب في هذا الفرع بالذات وتكتم طلباً لازماً —
+        // فحدود صدق البيانات ألزم هنا منها في أي فرع آخر.
         return {
           ok: true,
-          text: `**توصية الشراء**\nلا يوجد صنف يبيع فعلياً ومخزونه يكفي أقل من 21 يوماً حسب معدّل ${period.label}. لا حاجة شراء عاجلة بهذا المعيار.`,
-          sources: ["inventory_reports:ameen_sql_agent", "sales_line_items"]
+          text: `**توصية الشراء**\nلا يوجد صنف يبيع فعلياً ومخزونه يكفي أقل من 21 يوماً حسب معدّل ${period.label}. لا حاجة شراء عاجلة بهذا المعيار.`
+            + await salesCompleteness(period, sales.partial),
+          sources: ["inventory_reports:ameen_sql_agent", "sales_line_items", "sales_line_items_sync_state"],
+          partial: sales.partial
         };
       }
       return {
@@ -1213,8 +1250,9 @@ const TOOLS: Tool[] = [
               + (e.negative ? " ⚠️ الرصيد **سالب** في الأمين — يحتاج مراجعة إدخال قبل الشراء" : ""))
             .join("\n")
           + `\n\nهذه قراءة وتحليل فقط — لا يُنشئ المساعد أي طلب شراء ولا يعدّل أي مخزون.`
-          + coverageWarning(period, await salesSyncWindow(), SALES_COVERAGE),
+          + await salesCompleteness(period, sales.partial),
         sources: ["inventory_reports:ameen_sql_agent", "sales_line_items", "sales_line_items_sync_state"],
+        partial: sales.partial,
         asOf: report.created_at
       };
     }
@@ -1295,8 +1333,13 @@ const TOOLS: Tool[] = [
           }
         }
       }
-      text += coverageWarning(period, await salesSyncWindow(), SALES_COVERAGE);
-      return { ok: true, text, sources: ["approved_price_items", "sales_line_items", "sales_line_items_sync_state"] };
+      text += await salesCompleteness(period, sales.partial);
+      return {
+        ok: true,
+        text,
+        sources: ["approved_price_items", "sales_line_items", "sales_line_items_sync_state"],
+        partial: sales.partial
+      };
     }
   },
 
@@ -1596,8 +1639,7 @@ const TOOLS: Tool[] = [
         const s = summarizeSales(today.rows);
         return `**مبيعات اليوم**: ${money(s.total)} على ${s.bills} فاتورة.`
           + (s.bills === 0 ? " (لم تُرفع فواتير اليوم بعد أو لا يوجد بيع)" : "")
-          + (today.partial ? ` ⚠️ قراءة جزئية عند سقف ${HARD_ROW_CAP} سطر — الرقم ليس نهائياً.` : "")
-          + coverageWarning(period, await salesSyncWindow(), SALES_COVERAGE);
+          + await salesCompleteness(period, today.partial);
       });
 
       await run("الذمم", async () => {

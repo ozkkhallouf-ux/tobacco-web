@@ -674,4 +674,104 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   ok("ملخص «اليوم» يقرأ تقرير اليوم بالتاريخ لا بوقت الرفع، ويُعلن غيابه بدل استبداله");
 }
 
+// ── ك) بتر الفترة السابقة لا يُسقَط من المقارنة ─────────────────────────────
+{
+  // ملاحظة Codex على PR #205 بعد 244f209: قراءة الفترة السابقة مستقلة بحدّ
+  // بتر مستقل، وكان `partial` الخاص بها يُرمى — فيُعرض مجموعها والفرق
+  // والنسبة مبتورةً بوصفها نهائية، و`partial` في الجواب يصف الحالية وحدها.
+  const today = new Date(Date.now() + 180 * 60_000).toISOString().slice(0, 10);
+  const dayBack = (n) => new Date(Date.now() + 180 * 60_000 - n * 86_400_000).toISOString().slice(0, 10);
+  const fixtures = defaultFixtures();
+  // الفترة الحالية «آخر 7 أيام» صغيرة، والسابقة مكتظّة بما يتجاوز سقف الخادم.
+  const rows = [];
+  let id = 1;
+  for (let d = 0; d < 7; d += 1) {
+    rows.push({ id: id++, sale_date: dayBack(d), bill_no: `c${d}`, bill_type: "retail", item_name: "أ", qty: 1, line_total: 10, unit_cost: 9, customer_name: "س" });
+  }
+  for (let i = 0; i < 300; i += 1) {
+    rows.push({ id: id++, sale_date: dayBack(7 + (i % 7)), bill_no: `p${i}`, bill_type: "retail", item_name: "أ", qty: 1, line_total: 10, unit_cost: 9, customer_name: "س" });
+  }
+  fixtures.sales_line_items = rows;
+  fixtures.sales_line_items_sync_state = [{
+    source: "ameen_sales_line_items",
+    window_start: dayBack(29), window_end: today, row_count: rows.length,
+    completed_at: new Date().toISOString()
+  }];
+
+  const a = await loadAssistant({ fixtures, maxRows: 40, hardRowCap: 80 });
+  const result = await a.ask(TOKENS.owner, "قارن مبيعات الاسبوع بالفترة السابقة");
+  const text = String(result.body.reply);
+  assert.equal(result.body.tool, "sales");
+  assert.ok(/مقارنة بـ/.test(text), `لم يدخل فرع المقارنة:\n${text}`);
+  // تحديداً: أن البتر منسوب إلى **أرقام المقارنة** لا إلى الفترة عموماً.
+  // «سقف» وحدها تظهر في ذيل الاكتمال أيضاً، فمطابقتها كانت تُنجح الاختبار
+  // لسبب آخر غير الذي يدّعيه.
+  assert.ok(/الفرق والنسبة/.test(text),
+    `لم يُنسب البتر إلى مجموع الفترة السابقة والفرق والنسبة:\n${text}`);
+  // وذيل الاكتمال يذكر حدود الفترة السابقة صراحةً أيضاً
+  assert.ok(text.includes(dayBack(13)), `ذيل الاكتمال لم يسمِّ حدود الفترة السابقة:\n${text}`);
+  assert.equal(result.body.partial, true, "بتر الفترة السابقة لم ينعكس على partial في الجواب");
+  ok("بتر قراءة الفترة السابقة يُعلَن ويُعاد في partial — لا يُرمى");
+}
+
+// ── ل) الأحكام النهائية «لا شيء مطلوب» تحمل حدود صدقها ─────────────────────
+{
+  // ملاحظة Codex على PR #205 بعد 244f209: فرع «لا حاجة شراء عاجلة» كان يتجاوز
+  // sales.partial ونافذة المزامنة معاً. وقراءة ناقصة تبخس معدّل البيع فتُدخل
+  // الجواب في هذا الفرع بالذات وتكتم طلب شراء لازماً — أخطر من رقم ناقص،
+  // لأنه حكم يوقف تصرّفاً.
+  const today = new Date(Date.now() + 180 * 60_000).toISOString().slice(0, 10);
+  const fixtures = defaultFixtures();
+  fixtures.sales_line_items_sync_state = [];  // بلا سجل مزامنة ⇒ غير متحقَّق
+  // مخزون وافر وبيع ضئيل ⇒ لا صنف تحت 21 يوم تغطية، ولا صنف راكد
+  fixtures["inventory_reports:ameen_sql_agent"] = [{
+    report_date: today,
+    created_at: new Date().toISOString(),
+    summary: { totalStockItems: 1, lowStockItems: 0, outOfStockItems: 0 },
+    items: [{ key: "k1", name: "ماستر طويل ورق", stockQty: 100000, unit1Name: "علبة" }]
+  }];
+  fixtures.sales_line_items = [
+    { id: 1, sale_date: today, bill_no: "1", bill_type: "retail", item_name: "ماستر طويل ورق", qty: 1, line_total: 10, unit_cost: 9, customer_name: "س" }
+  ];
+
+  const a = await loadAssistant({ fixtures });
+  const advice = String((await a.ask(TOKENS.owner, "ماذا يجب أن أشتري؟")).body.reply);
+  assert.ok(/لا حاجة شراء عاجلة/.test(advice), `لم يدخل فرع الحكم النهائي:\n${advice}`);
+  assert.ok(/لا يوجد سجل مزامنة مكتمل/.test(advice),
+    `أصدر «لا حاجة شراء» عن بيانات غير متحقَّقة بلا إعلان:\n${advice}`);
+  assert.ok(a.metrics.tablesRead.has("sales_line_items_sync_state"), "لم يقرأ سجل المزامنة في هذا الفرع");
+
+  const b = await loadAssistant({ fixtures });
+  const stagnant = String((await b.ask(TOKENS.owner, "ما الأصناف الراكدة؟")).body.reply);
+  assert.ok(/لا يوجد صنف راكد/.test(stagnant), `لم يدخل فرع «لا صنف راكد»:\n${stagnant}`);
+  assert.ok(/لا يوجد سجل مزامنة مكتمل/.test(stagnant),
+    `أصدر «لا صنف راكد» عن بيانات غير متحقَّقة بلا إعلان:\n${stagnant}`);
+  ok("أحكام «لا شيء مطلوب» في الشراء والراكد تحمل حدود صدق بياناتها");
+}
+
+// ── م) كل مستهلك لسطور المبيعات يمرّ بذيل الاكتمال — لا استثناء ─────────────
+{
+  // حارس بنيوي لا سلوكي: ثلاث جولات مراجعة متتالية كشفت مستهلكاً منسياً في
+  // كل مرة (المقارنة، ثم الملخص، ثم فرعا «لا شيء»). فالقاعدة تُثبَّت على
+  // الشكل نفسه: من ينادي readSales ينادي salesCompleteness في كل مخرج له.
+  const { readFile } = await import("node:fs/promises");
+  const src = await readFile(new URL("../supabase/functions/financial-assistant/index.ts", import.meta.url), "utf8");
+
+  const readSalesCalls = (src.match(/await readSales\(/g) ?? []).length - 0;
+  const completenessCalls = (src.match(/await salesCompleteness\(/g) ?? []).length;
+  assert.ok(readSalesCalls >= 6, `عدد مستهلكي readSales غير متوقَّع (${readSalesCalls})`);
+  assert.ok(
+    completenessCalls >= readSalesCalls,
+    `مستهلكو readSales ${readSalesCalls} وذيول الاكتمال ${completenessCalls} — مستهلك بلا حدود صدق`
+  );
+  // ولا يبقى نداء تحذيرِ نافذةٍ للمبيعات خارج الذيل الموحّد، وإلا عاد الانفصال
+  // الذي جعل كل جولة تكشف منسيّاً جديداً.
+  assert.doesNotMatch(
+    src.replace(/async function salesCompleteness[\s\S]*?\n}\n/, ""),
+    /coverageWarning\([^)]*SALES_COVERAGE\)/,
+    "تحذير نافذة المبيعات يجب أن يمرّ من salesCompleteness وحده"
+  );
+  ok("كل مستهلك لسطور المبيعات يمرّ بذيل الاكتمال الموحّد — التصفيح والنافذة معاً");
+}
+
 console.log(`\nتوجيه المساعد الذكي: ${passed}/${passed} تحقق ناجح`);

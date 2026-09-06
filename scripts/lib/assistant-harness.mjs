@@ -277,7 +277,16 @@ export async function loadAssistant(options = {}) {
   };
 
   // نسخة مؤقتة بلا استيراد jsr، مشطوبة الأنواع، باسم فريد لتفادي ذاكرة وحدات ESM
-  const source = functionSource().replace(/^import\s+["']jsr:[^"']+["'];\s*$/m, "");
+  // سقف الأمان الحقيقي 60 ألف صف. اختبارُه بحشو 60 ألف صف وهمي يبطّئ الحارس
+  // بلا فائدة، وتركُه بلا اختبار يترك مسار `partial` كله بلا تغطية — وهو
+  // المسار الذي يقرّر هل يُعرض الرقم نهائياً أم مبتوراً. فيُحقن سقف أصغر،
+  // والمنطق المُختبَر هو نفسه بلا تغيير.
+  let source = functionSource().replace(/^import\s+["']jsr:[^"']+["'];\s*$/m, "");
+  if (options.hardRowCap !== undefined) {
+    const before = source;
+    source = source.replace(/const HARD_ROW_CAP = [\d_]+;/, `const HARD_ROW_CAP = ${Number(options.hardRowCap)};`);
+    if (source === before) throw new Error("تعذّر حقن hardRowCap — تغيّر تعريف HARD_ROW_CAP");
+  }
   const { outputText, diagnostics } = ts.transpileModule(source, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
     reportDiagnostics: true,
