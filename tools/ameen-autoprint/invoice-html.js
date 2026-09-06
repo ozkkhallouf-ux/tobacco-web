@@ -123,7 +123,11 @@ function buildInvoiceHtml(inv) {
       ${inv.discount > 0 ? `<div class="row"><span>الحسم</span><b>${money(inv.discount)} ل.س</b></div>` : ""}
       ${inv.discount > 0 ? `<div class="row"><span>الصافي</span><b>${money(net)} ل.س</b></div>` : ""}
       <div class="row"><span>المدفوع</span><b>${money(inv.firstPay)} ل.س</b></div>
-      <div class="row"><span>الرصيد الحالي</span><b>${money(remaining)} ل.س</b></div>
+      <div class="row"><span>المتبقي من هذه الفاتورة</span><b>${money(remaining)} ل.س</b></div>
+      ${inv.customerBalanceFound
+        ? `<div class="row"><span>الرصيد الحالي للزبون</span><b>${money(inv.customerBalance)} ل.س</b></div>`
+        : `<div class="row"><span>الرصيد الحالي للزبون</span><b style="color:var(--muted)">غير متاح</b></div>`
+      }
     </div>
 
     <div class="stamp-wrap">

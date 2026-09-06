@@ -11,6 +11,9 @@ select
   last_payment.last_payment_date,
   last_payment.last_payment_notes,
   coalesce(recent_payments.recent_payments_json, '[]') as recent_payments_json,
+  -- عدد الدفعات الفعلي داخل نافذة الزخم (90 يوماً). يقارنه النموذج بعدد ما وصله
+  -- فيعرف الاقتطاع يقيناً بدل الاستدلال عليه من تواريخ ما وصل.
+  coalesce(payments_window.payments_in_window, 0) as payments_in_window,
   coalesce(recent_movements.recent_movements_json, '[]') as recent_movements_json
 from dbo.cu000 cu
 left join dbo.ac000 ac  on ac.GUID = cu.AccountGUID
@@ -32,6 +35,12 @@ outer apply (
     for json path
   ) as recent_payments_json
 ) recent_payments
+outer apply (
+  select count_big(*) as payments_in_window
+  from dbo.en000 en
+  where en.AccountGUID = cu.AccountGUID and coalesce(en.Credit, 0) > 0 and coalesce(en.Type, 0) = 0
+    and en.Date >= dateadd(day, -90, cast(getdate() as date))
+) payments_window
 outer apply (
   select (
     select top 10 cast(coalesce(en.Debit, 0) as decimal(18, 3)) as debit, cast(coalesce(en.Credit, 0) as decimal(18, 3)) as credit,

@@ -379,6 +379,9 @@ function Build-CustomerBalanceReport($Rows) {
       lastPaymentDate = $lastPaymentDate
       lastPaymentNotes = [string]$row.last_payment_notes
       recentPayments = $recentPayments
+      # عدد الدفعات الفعلي داخل نافذة الزخم (90 يوماً). نموذج خطر التحصيل يقارنه
+      # بعدد ما وصله ليعرف الاقتطاع يقيناً بدل الاستدلال عليه من التواريخ.
+      paymentsInWindow = [int](To-Number $row.payments_in_window)
       recentMovements = $recentMovements
       status = $status
       customerGuid = [string]$row.customer_guid

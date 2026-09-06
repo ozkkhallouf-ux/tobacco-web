@@ -17,6 +17,32 @@ const SALES_QUERY = fs.readFileSync(
   path.join(__dirname, "ameen-sales-query.sql"), "utf8"
 );
 
+// رصيد الزبون الحقيقي من دفتر أستاذ الأمين (cu000.Debit - Credit عبر AccountGUID)
+// نفس منطق Get-InvoiceDocumentBalance في ozk-print-bridge.ps1 — لا ربط باسم الزبون
+const CUSTOMER_BALANCE_QUERY = fs.readFileSync(
+  path.join(__dirname, "ameen-customer-balance-query.sql"), "utf8"
+);
+
+// يُعيد null إذا تعذّر العثور على مستند محاسبي حقيقي مرتبط بهذه الفاتورة —
+// في هذه الحالة يجب على طبقة العرض عدم اختلاق أي رقم رصيد.
+async function getCustomerBalance(pool, invoiceGuid) {
+  try {
+    const result = await pool.request()
+      .input("invoiceGuid", sql.UniqueIdentifier, invoiceGuid)
+      .query(CUSTOMER_BALANCE_QUERY);
+    if (!result.recordset.length) return null;
+    const row = result.recordset[0];
+    if (row.document_current === null || row.document_current === undefined) return null;
+    // رقم غير صالح = لا رصيد. بدون هذا الحارس يمرّ NaN إلى money() فيُطبع "0" ملفقاً.
+    const current = Number(row.document_current);
+    if (!Number.isFinite(current)) return null;
+    return { accountGuid: row.account_guid, current };
+  } catch (err) {
+    console.error(`تعذّر جلب رصيد الزبون لفاتورة GUID=${invoiceGuid}: ${err.message}`);
+    return null;
+  }
+}
+
 // ─── تحليل سلسلة الاتصال (ODBC style → mssql config) ─────────────────────
 function parseSqlConnStr(cs) {
   const kv = {};
@@ -147,6 +173,7 @@ function sendToPrinter(pdfPath) {
 }
 
 async function printInvoice(inv) {
+  // inv.customerBalance / inv.customerBalanceFound يُضبطان مسبقاً في poll()
   const html    = buildInvoiceHtml(inv);
   const tmpPdf  = path.join(config.tempDir, `ozk-inv-${inv.number}-${Date.now()}.pdf`);
 
@@ -183,6 +210,11 @@ async function poll(pool, state) {
   for (const inv of invoices) {
     if (state.printedGuids[inv.guid]) continue; // مطبوعة سابقاً
     try {
+      // رصيد الزبون الحقيقي (Ameen) — عبر AccountGUID فقط، لا اسم الزبون.
+      // إن تعذّر العثور عليه، تبقى customerBalance فارغة ولا يُطبع أي رقم رصيد.
+      const balance = await getCustomerBalance(pool, inv.guid);
+      inv.customerBalanceFound = balance !== null;
+      inv.customerBalance = balance ? balance.current : null;
       await printInvoice(inv);
       state.printedGuids[inv.guid] = Date.now();
       changed = true;

@@ -480,40 +480,39 @@ check("زبون كبير متأخر لا يُدفن تحت تصنيف «مراق
     "المدين الكبير المتأخر ما زال مدفوناً تحت مدين صغير متجاوز");
 });
 
-check("اقتطاع سجل الدفعات يُكتشف ويُعلَن ولا يُحسب سداداً سيئاً بصمت", () => {
-  // مصدر الأرصدة يعيد أحدث N دفعة فقط. إن كانت أقدم دفعة وصلتنا ما تزال داخل
-  // النافذة فقد تكون هناك أقدم منها لم تصل — 35 من 121 زبوناً في الإنتاج.
-  const truncated = S.scoreCustomers({
-    balances: [{
-      name: "مقتطع", customerGuid: guid(700), balance: 20000,
-      lastPaymentDate: daysAgo(1),
-      recentPayments: [1, 5, 9, 14, 20, 26].map((d) => ({ date: daysAgo(d), amount: 500 }))
-    }],
-    creditLimits: [],
-    now: customerNow
-  }).customers[0];
-  assert.equal(truncated.paymentsTruncated, true, "لم يُكتشف الاقتطاع");
-  assert.match(truncated.reason, /مقتطع/, "الاقتطاع غير معلَن في السبب");
-
-  // أقدم دفعة خارج النافذة ⟵ السجل كامل داخلها، فلا اقتطاع.
-  const complete = S.scoreCustomers({
-    balances: [{
-      name: "كامل", customerGuid: guid(701), balance: 20000,
-      lastPaymentDate: daysAgo(1),
-      recentPayments: [{ date: daysAgo(1), amount: 500 }, { date: daysAgo(120), amount: 500 }]
-    }],
-    creditLimits: [],
-    now: customerNow
-  }).customers[0];
-  assert.equal(complete.paymentsTruncated, false, "أُبلغ عن اقتطاع وهمي");
-  assert.doesNotMatch(complete.reason, /مقتطع/);
-
-  // بلا دفعات إطلاقاً: لا اقتطاع يُدَّعى.
-  const none = S.scoreCustomers({
-    balances: [{ name: "بلا", customerGuid: guid(702), balance: 5000 }],
+check("الاقتطاع يحتاج دليلاً من المصدر ولا يُستدلّ عليه من التواريخ", () => {
+  const build = (extra) => S.scoreCustomers({
+    balances: [{ name: "زبون", customerGuid: guid(700), balance: 20000,
+      lastPaymentDate: daysAgo(1), ...extra }],
     creditLimits: [], now: customerNow
   }).customers[0];
-  assert.equal(none.paymentsTruncated, false);
+
+  // دليل صريح: المصدر يعلن 12 دفعة داخل النافذة ووصلتنا 6.
+  const truncated = build({
+    recentPayments: [1, 5, 9, 14, 20, 26].map((d) => ({ date: daysAgo(d), amount: 500 })),
+    paymentsInWindow: 12
+  });
+  assert.equal(truncated.paymentsTruncated, true, "لم يُكتشف اقتطاع معلَن");
+  assert.match(truncated.reason, /مقتطع/);
+
+  // ⚠️ الإنذار الكاذب الذي كشفته المراجعة: دفعة واحدة قبل خمسة أيام، والسجل
+  // كامل. أقدم دفعة داخل النافذة، فالاستدلال بالتواريخ وحده كان يوسمه مقتطعاً.
+  const singleRecent = build({
+    recentPayments: [{ date: daysAgo(5), amount: 500 }],
+    paymentsInWindow: 1
+  });
+  assert.equal(singleRecent.paymentsTruncated, false,
+    "زبون سجله كامل وُسم بالاقتطاع");
+  assert.doesNotMatch(singleRecent.reason, /مقتطع/);
+
+  // غياب الحقل (مزامنة أقدم) لا يُنتج ادّعاءً في أي اتجاه.
+  const unknown = build({
+    recentPayments: [1, 5, 9, 14, 20, 26].map((d) => ({ date: daysAgo(d), amount: 500 }))
+  });
+  assert.equal(unknown.paymentsTruncated, false, "ادُّعي اقتطاع بلا دليل");
+
+  // بلا دفعات إطلاقاً.
+  assert.equal(build({}).paymentsTruncated, false);
 });
 
 check("الأولوية تقيس المال والتصنيف يقيس الاحتمال — بُعدان منفصلان", () => {

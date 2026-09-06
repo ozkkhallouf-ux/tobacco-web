@@ -634,12 +634,15 @@
       total += amount;
       count += 1;
     }
-    // المصدر يعيد أحدث N دفعة فقط (top-N في استعلام الأمين). فإن كانت أقدم دفعة
-    // وصلتنا ما تزال **داخل** النافذة، فقد تكون هناك دفعات أقدم منها في النافذة
-    // لم تصل — والمجموع عندها حدّ أدنى لا قيمة نهائية، فيبدو السداد أسوأ مما هو.
-    // الاختبار لا يعرف سقف المصدر ولا يحتاج معرفته.
-    const truncated = list.length > 0 && oldestAge !== null && oldestAge <= windowDays;
-    return { total, count, truncated };
+    // الاقتطاع يحتاج **دليلاً** لا قرينة: زبون دفع مرة واحدة قبل خمسة أيام تكون
+    // أقدم دفعاته داخل النافذة وسجله كامل تماماً، فالاستدلال من التواريخ وحده
+    // يُنتج إنذاراً كاذباً. المصدر يعلن عدد الدفعات الفعلي داخل النافذة
+    // (payments_in_window)، فنقارنه بعدد ما وصلنا ونعرف يقيناً.
+    // وحين يغيب الحقل — نسخة مزامنة أقدم — لا يُدَّعى اقتطاع: الإنذار الكاذب
+    // أسوأ من صمت مؤقت، لأنه يوسم زبوناً منتظماً بأن سجله ناقص.
+    const declared = num(row?.paymentsInWindow ?? row?.payments_in_window);
+    const truncated = declared !== null && declared > count;
+    return { total, count, truncated, declaredCount: declared };
   }
 
   function scoreCustomers(input) {
