@@ -80,8 +80,14 @@ const checkWithFont = (fontReady, name, condition, detail) => {
 };
 
 // نصّ مستند الطباعة كما هو في الترميز (مستقلّ عن الخط تماماً).
+//
+// مستندٌ غائب (فشل الزر في إنتاجه) = **كل الصفوف مفقودة**، لا «لا شيء مفقود».
+// بلا هذا التصريح كان `String(null)` يُنتج نصّاً لا يحوي أي اسم فيبدو الفحص
+// كأنه يعمل، أو يمرّ زوراً لو تغيّر التطبيع لاحقاً (ملاحظة DeepScan
+// INSUFFICIENT_NULL_CHECK: تُفحص القيمة قبلها ثم تُمرَّر هنا بلا فحص).
 const flattenForMarkup = (value) => String(value).normalize("NFKC").replace(/\s+/g, "");
 function rowsMissingFromMarkup(documentHtml, rows) {
+  if (typeof documentHtml !== "string" || !documentHtml) return [...rows];
   const flat = flattenForMarkup(documentHtml.replace(/<[^>]*>/g, "\u0001"));
   return rows.filter((row) => !flat.includes(flattenForMarkup(row.name)));
 }
