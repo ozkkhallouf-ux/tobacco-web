@@ -5811,6 +5811,7 @@ function voucherPdfMarkup(v) {
     </table>` : ""}
     <table>${rows.join("")}</table>
     <p class="muted" style="margin:8px 0 0">${noteLine}</p>
+    ${(isInv || isRet) ? `<div style="margin:10px 0 0;padding:7px 10px;border:1px solid #c8b890;border-radius:6px;background:#f6ead0;font-size:11.5px;font-weight:700;text-align:center">صفة البيع: ${escapeHtml(SALES_TRADE_CAPACITY)} · السجل التجاري: <span dir="ltr">${escapeHtml(SALES_TRADE_REGISTER_NO)}</span></div>` : ""}
     ${stamp}
     <div class="rfoot"><span>صادر آليًا عن نظام OZK TOBACCO · رقم المركز: 0994092038</span><span dir="ltr">0985000771 — 0984000662</span></div>
   </div>`;
