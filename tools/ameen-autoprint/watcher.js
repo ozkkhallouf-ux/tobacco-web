@@ -73,8 +73,36 @@ function assertWholesaleConfig() {
 }
 
 // ─── حراسة صريحة: طابعة Canon الفيزيائية يجب أن تكون موجودة ومتصلة ────────
-// يُمنع الاعتماد على default printer، ويُمنع أي منفذ RDP/Terminal-Services معاد توجيهه
-function assertPhysicalPrinterReady() {
+// يُمنع الاعتماد على default printer، ويُمنع أي منفذ RDP/Terminal-Services معاد توجيهه.
+//
+// تصنيف الأعطال (ملاحظة Codex P1 على PR #208):
+//   • عطل إعداد دائم  ⇒ يبقى قاتلاً كما كان: اسم طابعة غير موجود في Windows، أو
+//     منفذ معاد توجيهه عبر RDP. لا معنى لإعادة المحاولة — يحتاج تدخّل إنسان.
+//     (متسق مع assertWholesaleConfig التي ترمي فوراً على GUID خاطئ.)
+//   • عطل عابر ⇒ يُعاد فحصه دورياً بلا إنهاء المراقب: WorkOffline=true (طابعة
+//     Wi-Fi لم تلحق بالإقلاع)، أو فشل/مهلة PowerShell نفسه (خدمة CIM لم تجهز بعد
+//     عند الإقلاع). كلاهما يزول وحده متى عادت الطابعة، وإنهاء العملية بسببهما كان
+//     يترك المراقب ميتاً حتى إقلاع جديد لأن install-service.bat يستخدم /sc ONSTART
+//     بلا أي سياسة إعادة تشغيل عند الفشل.
+//
+// في الحالتين لا طباعة إطلاقاً ما لم تكن الطابعة جاهزة، ولا سقوط إلى أي طابعة أخرى.
+
+// إعادة المحاولة محدودة: تبدأ من 15 ثانية (نفس فاصل إعادة اتصال SQL) وتتضاعف حتى
+// سقف 5 دقائق، فلا تصاعد بلا حد ولا busy-loop.
+const PRINTER_RETRY_MIN_MS = 15_000;
+const PRINTER_RETRY_MAX_MS = 300_000;
+// مدة صلاحية نتيجة «جاهزة» قبل إعادة الفحص — تمنع استدعاء PowerShell كل دورة (5 ثوانٍ).
+const PRINTER_READY_TTL_MS = 30_000;
+
+// خطأ إعداد دائم: يُميَّز بعلامة صريحة كي لا تبتلعه حلقة الأخطاء العامة في main().
+function printerConfigError(message) {
+  const err = new Error(message);
+  err.fatalPrinterConfig = true;
+  return err;
+}
+
+// يفحص الطابعة مرة واحدة. يرمي عند عطل إعداد دائم، ويعيد {ready,reason} خلاف ذلك.
+function probePhysicalPrinter() {
   const printer = config.printerName;
   const ps = `
     $p = Get-CimInstance Win32_Printer | Where-Object { $_.Name -eq '${printer.replace(/'/g, "''")}' }
@@ -87,24 +115,91 @@ function assertPhysicalPrinterReady() {
   });
   const out = (r.stdout || "").trim();
 
-  if (r.status !== 0 || !out || out === "NOT_FOUND") {
-    throw new Error(
+  // اسم غير موجود = خطأ إعداد دائم (config.js خاطئ أو الطابعة غير مثبّتة أصلاً).
+  if (out === "NOT_FOUND") {
+    throw printerConfigError(
       `رفض قاطع: الطابعة "${printer}" غير موجودة في Windows. `
       + "لن تُطبع أي فاتورة جملة ولن يُستخدم أي fallback لطابعة أخرى أو للطابعة الافتراضية."
     );
   }
+  // فشل الاستعلام نفسه ليس دليلاً على غياب الطابعة — عابر، يُعاد فحصه.
+  if (r.status !== 0 || !out) {
+    return { ready: false, reason: "تعذّر الاستعلام عن حالة الطابعة من Windows (PowerShell/CIM غير جاهز بعد)" };
+  }
 
   const [, port, workOffline] = out.split("|");
   if (/^TS\d/i.test(port) || /redirected/i.test(printer)) {
-    throw new Error(
+    throw printerConfigError(
       `رفض قاطع: الطابعة "${printer}" على منفذ "${port}" يبدو معاد توجيهه عبر جلسة عن بُعد (RDP)، `
       + "وليس المنفذ الفيزيائي المباشر. لن تُطبع أي فاتورة جملة."
     );
   }
   if (String(workOffline).trim().toLowerCase() === "true") {
-    throw new Error(`رفض قاطع: الطابعة "${printer}" غير متصلة حالياً (Work Offline).`);
+    return { ready: false, reason: `الطابعة "${printer}" غير متصلة حالياً (Work Offline)` };
   }
+  return { ready: true, reason: "" };
 }
+
+// بوّابة الجاهزية: تُبقي المراقب حياً أثناء العطل العابر، وتمنع أي طباعة خلاله.
+// deps تُحقن كاملة في الاختبارات (probe/now/log) فلا حاجة لطابعة أو Windows.
+function createPrinterGate(deps) {
+  const d = deps || {};
+  const probe = d.probe || probePhysicalPrinter;
+  const now = d.now || (() => Date.now());
+  const log = d.log || console;
+  const minRetryMs = d.minRetryMs || PRINTER_RETRY_MIN_MS;
+  const maxRetryMs = d.maxRetryMs || PRINTER_RETRY_MAX_MS;
+  const readyTtlMs = d.readyTtlMs === undefined ? PRINTER_READY_TTL_MS : d.readyTtlMs;
+
+  let offlineSince = null;   // متى بدأ العطل العابر (null = جاهزة)
+  let nextProbeAt = 0;       // لا فحص قبل هذه اللحظة — يمنع الـbusy-loop
+  let backoffMs = minRetryMs;
+  let lastReason = "";
+  let readyUntil = 0;        // نافذة صلاحية نتيجة «جاهزة»
+
+  // true فقط عندما تكون الطابعة جاهزة فعلاً. لا تطبع أي شيء إن أعادت false.
+  function ready() {
+    const t = now();
+    if (offlineSince === null && t < readyUntil) return true;
+    if (offlineSince !== null && t < nextProbeAt) return false;
+
+    const r = probe(); // يرمي عند عطل إعداد دائم — يمرّ للأعلى عمداً
+    if (r.ready) {
+      if (offlineSince !== null) {
+        const secs = Math.max(1, Math.round((t - offlineSince) / 1000));
+        log.log(`الطابعة "${config.printerName}" عادت جاهزة بعد ${secs} ثانية — تستأنف المراقبة.`);
+      }
+      offlineSince = null;
+      backoffMs = minRetryMs;
+      lastReason = "";
+      readyUntil = t + readyTtlMs;
+      return true;
+    }
+
+    // تسجيل عند بداية العطل وعند تغيّر سببه فقط — لا تكرار كل دورة.
+    if (offlineSince === null || r.reason !== lastReason) {
+      log.warn(
+        `تعليق الطباعة: ${r.reason}. لن تُطبع أي فاتورة ولن تُستخدم أي طابعة بديلة. `
+        + `إعادة الفحص بعد ${Math.round(backoffMs / 1000)} ثانية.`
+      );
+    }
+    if (offlineSince === null) offlineSince = t;
+    lastReason = r.reason;
+    readyUntil = 0;
+    nextProbeAt = t + backoffMs;
+    backoffMs = Math.min(backoffMs * 2, maxRetryMs);
+    return false;
+  }
+
+  function isOffline() {
+    return offlineSince !== null;
+  }
+
+  return { ready, isOffline };
+}
+
+// البوّابة الوحيدة التي تقرّر هل يُسمح بالطباعة الآن.
+const printerGate = createPrinterGate();
 
 // ─── تحليل سلسلة الاتصال (ODBC style → mssql config) ─────────────────────
 function parseSqlConnStr(cs) {
@@ -297,6 +392,9 @@ async function poll(pool, state) {
 
   for (const inv of invoices) {
     if (state.printedGuids[inv.guid]) continue; // مطبوعة سابقاً
+    // إن سقطت الطابعة أثناء الدورة نتوقف فوراً: الفاتورة تبقى غير مطبوعة وغير
+    // مُعلَّمة في state، فتُلتقط كما هي في أول دورة بعد عودة الطابعة (dedup بلا تغيير).
+    if (!printerGate.ready()) break;
     try {
       // رصيد الزبون الحقيقي (Ameen) — عبر AccountGUID فقط، لا اسم الزبون.
       // إن تعذّر العثور عليه، تبقى customerBalance فارغة ولا يُطبع أي رقم رصيد.
@@ -332,7 +430,10 @@ async function main() {
   }
 
   assertWholesaleConfig();
-  assertPhysicalPrinterReady();
+  // عطل الإعداد الدائم يرمي من هنا وينهي العملية كما كان تماماً. أما العطل العابر
+  // (طابعة Wi-Fi لم تجهز بعد عند الإقلاع) فلا يُنهي المراقب: يُسجَّل، ويبدأ التشغيل
+  // معلَّق الطباعة، وتُستأنف المراقبة تلقائياً فور عودة الطابعة.
+  printerGate.ready();
 
   console.log("══════════════════════════════════════════════");
   console.log("    OZK TOBACCO — مراقب فواتير الجملة          ");
@@ -380,18 +481,23 @@ async function main() {
 
   // حلقة الاستعلام الرئيسية
   for (;;) {
-    try {
-      await poll(pool, state);
-    } catch (err) {
-      console.error(`خطأ: ${err.message}`);
-      // إعادة الاتصال إذا انقطع
-      if (!pool.connected) {
-        try {
-          await pool.close().catch(() => {});
-          pool = await new sql.ConnectionPool(sqlCfg).connect();
-          console.log("أُعيد الاتصال ✓");
-        } catch (e2) {
-          console.error(`فشل إعادة الاتصال: ${e2.message}`);
+    // fail-closed: لا استعلام ولا طباعة إطلاقاً ما لم تكن الطابعة جاهزة الآن.
+    // الاستدعاء خارج try عمداً: خطأ الإعداد الدائم يجب أن ينهي العملية لا أن يُبتلع.
+    if (printerGate.ready()) {
+      try {
+        await poll(pool, state);
+      } catch (err) {
+        if (err && err.fatalPrinterConfig) throw err;
+        console.error(`خطأ: ${err.message}`);
+        // إعادة الاتصال إذا انقطع
+        if (!pool.connected) {
+          try {
+            await pool.close().catch(() => {});
+            pool = await new sql.ConnectionPool(sqlCfg).connect();
+            console.log("أُعيد الاتصال ✓");
+          } catch (e2) {
+            console.error(`فشل إعادة الاتصال: ${e2.message}`);
+          }
         }
       }
     }
