@@ -25,26 +25,28 @@ const CUSTOMER_BALANCE_QUERY = fs.readFileSync(
 
 // يُعيد null إذا تعذّر العثور على مستند محاسبي حقيقي مرتبط بهذه الفاتورة —
 // في هذه الحالة يجب على طبقة العرض عدم اختلاق أي رقم رصيد.
+//
+// ملاحظة Codex P1 على PR #208: فشل الاستعلام نفسه (SQL/اتصال/timeout) لا يجوز
+// أن يُبتلع ويتحول إلى null/"غير متاح" مثل حالة "لا يوجد مستند محاسبي" —
+// فالأولى فشل تقني عابر يستحق إعادة محاولة، والثانية نتيجة عمل صحيحة نهائية.
+// لذا لا نلتقط أخطاء الاستعلام هنا؛ نتركها تنتشر إلى poll() حيث تُسجَّل ولا
+// تُطبع الفاتورة ولا تُعلَّم، فتُعاد محاولتها تلقائياً في دورة poll() التالية
+// (بلا حلقة انتظار داخلية وبلا إيقاف المراقب).
 async function getCustomerBalance(pool, invoiceGuid) {
-  try {
-    const result = await pool.request()
-      .input("invoiceGuid", sql.UniqueIdentifier, invoiceGuid)
-      .query(CUSTOMER_BALANCE_QUERY);
-    if (!result.recordset.length) return null;
-    const row = result.recordset[0];
-    if (row.document_current === null || row.document_current === undefined) return null;
-    const current = Number(row.document_current);
-    // حارس: لا نقبل أي قيمة غير رقمية حقيقية (NaN/Infinity/-Infinity) كرصيد —
-    // الصفر الحقيقي (0) يبقى قيمة صالحة ويُعرض كصفر.
-    if (!Number.isFinite(current)) return null;
-    return {
-      accountGuid: row.account_guid,
-      current,
-    };
-  } catch (err) {
-    console.error(`تعذّر جلب رصيد الزبون لفاتورة GUID=${invoiceGuid}: ${err.message}`);
-    return null;
-  }
+  const result = await pool.request()
+    .input("invoiceGuid", sql.UniqueIdentifier, invoiceGuid)
+    .query(CUSTOMER_BALANCE_QUERY);
+  if (!result.recordset.length) return null;
+  const row = result.recordset[0];
+  if (row.document_current === null || row.document_current === undefined) return null;
+  const current = Number(row.document_current);
+  // حارس: لا نقبل أي قيمة غير رقمية حقيقية (NaN/Infinity/-Infinity) كرصيد —
+  // الصفر الحقيقي (0) يبقى قيمة صالحة ويُعرض كصفر.
+  if (!Number.isFinite(current)) return null;
+  return {
+    accountGuid: row.account_guid,
+    current,
+  };
 }
 
 // ─── حراسة صريحة: هذه الأداة مخصّصة حصراً لمبيعات الجملة ─────────────────

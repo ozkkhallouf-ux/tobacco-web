@@ -148,7 +148,10 @@ await test("هوية الرصيد هي AccountGUID وليست اسم الزبو�
   assert.ok(!Object.prototype.hasOwnProperty.call(r, "customer"));
 });
 
-await test("استثناء أثناء الاستعلام ⇒ null، لا رمي (poll() يستمر بأمان)", async () => {
+// ملاحظة Codex P1 على PR #208: فشل الاستعلام نفسه (SQL/اتصال/timeout) لا يجوز
+// أن يُبتلع ويتحول إلى null/"غير متاح" — يجب أن يُميَّز عن "لا نتيجة" وينتشر،
+// فيلتقطه poll() (لا يطبع، لا يُعلِّم، يعيد المحاولة في الدورة التالية).
+await test("استثناء تقني أثناء الاستعلام ⇒ يُرمى (لا يتحول إلى null/'غير متاح' صامتاً)", async () => {
   const throwingPool = {
     request() {
       return {
@@ -161,8 +164,10 @@ await test("استثناء أثناء الاستعلام ⇒ null، لا رمي 
       };
     },
   };
-  const r = await getCustomerBalance(throwingPool, "inv-12");
-  assert.equal(r, null);
+  await assert.rejects(
+    () => getCustomerBalance(throwingPool, "inv-12"),
+    /محاكاة انقطاع اتصال/
+  );
 });
 
 console.log("\n== wholesale-regression: فحوص بنيوية على المصدر الحالي (نصّية) ==");
@@ -478,6 +483,135 @@ await test("سيناريو متكامل: كل حالات throw غير fatalPrint
   for (const c of cases) {
     assert.doesNotThrow(() => simulateCatch(c), `رمت الحلقة على: ${String(c)}`);
   }
+});
+
+console.log("\n== wholesale-regression: poll() — فشل استعلام رصيد الزبون (إصلاح P1 على PR #208) ==");
+
+// poll() وgroupIntoInvoices تُستخرجان من المصدر الفعلي وتُشغَّلان بمعزل —
+// بحقن pool/config/printerGate/getCustomerBalance/printInvoice/pruneOldGuids/
+// saveState وهمية. لا SQL حقيقي ولا Puppeteer ولا طباعة فعلية.
+const pollSrc = extractFunctionSource(watcherSrc, "async function poll(pool, state)");
+const groupIntoInvoicesSrc = extractFunctionSource(watcherSrc, "function groupIntoInvoices(rows)");
+
+function makePoll({ getCustomerBalance: gcb, printInvoice: pi }) {
+  const factory = new Function(
+    "sql",
+    "config",
+    "SALES_QUERY",
+    "printerGate",
+    "getCustomerBalance",
+    "printInvoice",
+    "pruneOldGuids",
+    "saveState",
+    `${groupIntoInvoicesSrc}\n${pollSrc}\nreturn poll;`
+  );
+  const sql = { UniqueIdentifier: "uniqueidentifier", NVarChar: "nvarchar" };
+  const config = { wholesaleTypeGuid: "wt-guid" };
+  const printerGate = { ready: () => true };
+  const pruneOldGuids = () => {};
+  const saveState = () => {};
+  return factory(sql, config, "-- test double --", printerGate, gcb, pi, pruneOldGuids, saveState);
+}
+
+function fakeSalesRow(overrides = {}) {
+  return {
+    invoice_guid: "inv-guid-1",
+    invoice_number: "1001",
+    invoice_date: "2026-09-01",
+    customer_name: "زبون تجريبي",
+    total: 100,
+    discount: 0,
+    first_pay: 0,
+    currency_val: 1,
+    currency_iso: "USD",
+    item_name: "صنف",
+    unit_name: "قطعة",
+    display_qty: 1,
+    ...overrides,
+  };
+}
+
+function fakePollPool(rows) {
+  return {
+    request() {
+      return {
+        input() { return this; },
+        async query() { return { recordset: rows }; },
+      };
+    },
+  };
+}
+
+await test("poll(): استعلام رصيد ناجح مع رصيد موجود ⇒ يُطبع ويُعلَّم (السلوك الحالي)", async () => {
+  const printed = [];
+  const poll = makePoll({
+    getCustomerBalance: async () => ({ accountGuid: "G1", current: 500 }),
+    printInvoice: async (inv) => { printed.push(inv); },
+  });
+  const state = { printedGuids: {}, watchFromDate: "2026-01-01" };
+  await poll(fakePollPool([fakeSalesRow()]), state);
+  assert.equal(printed.length, 1);
+  assert.equal(printed[0].customerBalanceFound, true);
+  assert.equal(printed[0].customerBalance, 500);
+  assert.ok(state.printedGuids["inv-guid-1"], "لم تُعلَّم الفاتورة بعد الطباعة");
+});
+
+await test("poll(): استعلام ناجح بلا نتيجة ⇒ يُطبع بـ'غير متاح' حسب العقد الحالي (لا رمي)", async () => {
+  const printed = [];
+  const poll = makePoll({
+    getCustomerBalance: async () => null, // لا صفوف — نتيجة عمل صحيحة، ليست فشلاً
+    printInvoice: async (inv) => { printed.push(inv); },
+  });
+  const state = { printedGuids: {}, watchFromDate: "2026-01-01" };
+  await poll(fakePollPool([fakeSalesRow()]), state);
+  assert.equal(printed.length, 1);
+  assert.equal(printed[0].customerBalanceFound, false);
+  assert.equal(printed[0].customerBalance, null);
+  assert.ok(state.printedGuids["inv-guid-1"], "لم تُعلَّم الفاتورة رغم نجاح الطباعة");
+});
+
+await test("poll(): فشل تقني عابر في استعلام الرصيد ⇒ لا طباعة، لا printedGuid، تُعاد المحاولة لاحقاً", async () => {
+  const printed = [];
+  const poll = makePoll({
+    getCustomerBalance: async () => { throw new Error("محاكاة timeout"); },
+    printInvoice: async (inv) => { printed.push(inv); },
+  });
+  const state = { printedGuids: {}, watchFromDate: "2026-01-01" };
+  await poll(fakePollPool([fakeSalesRow()]), state);
+  assert.equal(printed.length, 0, "طُبعت الفاتورة رغم فشل استعلام الرصيد تقنياً");
+  assert.ok(!state.printedGuids["inv-guid-1"], "عُلِّمت الفاتورة كمطبوعة رغم عدم طباعتها فعلياً");
+});
+
+await test("poll(): إعادة المحاولة اللاحقة بعد فشل عابر تنجح وتطبع الفاتورة مرة واحدة فقط", async () => {
+  const printed = [];
+  const state = { printedGuids: {}, watchFromDate: "2026-01-01" };
+  const rows = [fakeSalesRow()];
+
+  // الدورة الأولى: فشل تقني في استعلام الرصيد — لا طباعة، لا تعليم.
+  const failingPoll = makePoll({
+    getCustomerBalance: async () => { throw new Error("محاكاة انقطاع مؤقت"); },
+    printInvoice: async (inv) => { printed.push(inv); },
+  });
+  await failingPoll(fakePollPool(rows), state);
+  assert.equal(printed.length, 0);
+  assert.ok(!state.printedGuids["inv-guid-1"]);
+
+  // الدورة التالية (نفس state — dedup بلا تغيير): الاستعلام نجح هذه المرة.
+  const succeedingPoll = makePoll({
+    getCustomerBalance: async () => ({ accountGuid: "G1", current: 500 }),
+    printInvoice: async (inv) => { printed.push(inv); },
+  });
+  await succeedingPoll(fakePollPool(rows), state);
+  assert.equal(printed.length, 1, "لم تُطبع الفاتورة بعد نجاح إعادة المحاولة");
+  assert.ok(state.printedGuids["inv-guid-1"]);
+
+  // دورة ثالثة إضافية بعد أن صارت مُعلَّمة: لا طباعة مكرّرة (dedup).
+  const thirdPoll = makePoll({
+    getCustomerBalance: async () => ({ accountGuid: "G1", current: 500 }),
+    printInvoice: async (inv) => { printed.push(inv); },
+  });
+  await thirdPoll(fakePollPool(rows), state);
+  assert.equal(printed.length, 1, "طُبعت الفاتورة مرة ثانية — تكرار طباعة (duplicate print)");
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
