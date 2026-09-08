@@ -185,7 +185,6 @@ function createPrinterGate(deps) {
     }
     if (offlineSince === null) offlineSince = t;
     lastReason = r.reason;
-    readyUntil = 0;
     nextProbeAt = t + backoffMs;
     backoffMs = Math.min(backoffMs * 2, maxRetryMs);
     return false;
