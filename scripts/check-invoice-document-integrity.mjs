@@ -31,6 +31,9 @@ const PATTERNS = {
   sanitizeDocumentTitle: /function sanitizeDocumentTitle\(value, max = 80\) \{[\s\S]*?\n\}\n/,
   fileDateLabel: /function fileDateLabel\(isoDate\) \{[\s\S]*?\n\}\n/,
   NUMBERLESS_FILE_DOC_TYPES: /const NUMBERLESS_FILE_DOC_TYPES = [^\n]*\n/,
+  // صفة البيع والسجل التجاري: يستخدمهما voucherPdfMarkup، ويجب أن يُستخرجا من
+  // المصدر لا أن يُثبَّتا في الصندوق — كي يفشل الاختبار إن تغيّر النص في app.js.
+  SALES_TRADE_CONSTS: /const SALES_TRADE_REGISTER_NO = [^\n]*\nconst SALES_TRADE_CAPACITY = [^\n]*\n/,
   archiveDocumentTitle: /function archiveDocumentTitle\(docType, meta\) \{[\s\S]*?\n\}\n/,
   withDocumentTitle: /function withDocumentTitle\(html, title\) \{[\s\S]*?\n\}\n/,
   salesTotals: /function salesTotals\(\) \{[\s\S]*?\n\}\n/,
