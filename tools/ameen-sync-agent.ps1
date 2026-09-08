@@ -591,10 +591,18 @@ function Sync-Once {
   }
 
   # Customer invoice details are owned by this same permanent main-computer
-  # agent. The helper rate-limits successful uploads to once per hour, so the
-  # disabled legacy standalone task is no longer a health dependency.
+  # agent. The helper rate-limits successful uploads to once every five
+  # minutes, so the disabled legacy standalone task is no longer a health
+  # dependency.
+  #
+  # Why five and not sixty: this report is matched against the movement
+  # ledger, which refreshes every five minutes (balances every minute). At
+  # sixty, an invoice entered just after an upload stayed invisible to the
+  # site for up to an hour while its ledger entry was already there, so
+  # issuing a document for that movement failed with no invoice details.
+  # Five aligns invoice freshness with the movements it is matched against.
   try {
-    & "$PSScriptRoot\push-customer-invoices.ps1" -MinimumIntervalMinutes 60
+    & "$PSScriptRoot\push-customer-invoices.ps1" -MinimumIntervalMinutes 5
     if ($LASTEXITCODE -ne 0) { Write-AgentLog "Customer invoice sync returned a failure code." }
   } catch {
     Write-AgentLog ("Customer invoice sync failed: {0}" -f $_.Exception.Message)
