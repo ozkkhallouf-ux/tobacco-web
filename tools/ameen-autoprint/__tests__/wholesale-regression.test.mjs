@@ -417,5 +417,68 @@ await test("watcher.js: لم يعد الإقلاع ينهي العملية عن�
   assert.ok(/printerGate\.ready\(\);/.test(watcherSrc));
 });
 
+console.log("\n== wholesale-regression: describeError — DeepScan INSUFFICIENT_NULL_CHECK (حلقة الاستعلام الرئيسية) ==");
+
+// describeError تُستخرج من المصدر الفعلي وتُشغَّل بمعزل — لا نسخة يدوية قد تنحرف.
+const describeErrorSrc = extractFunctionSource(watcherSrc, "function describeError(err)");
+const describeError = new Function(`${describeErrorSrc}\nreturn describeError;`)();
+
+await test("describeError: كائن Error عادي ⇒ رسالته كما هي", () => {
+  assert.equal(describeError(new Error("x")), "x");
+});
+
+await test("describeError: null ⇒ نص آمن بلا رمي", () => {
+  assert.equal(describeError(null), "null");
+});
+
+await test("describeError: undefined ⇒ نص آمن بلا رمي", () => {
+  assert.equal(describeError(undefined), "undefined");
+});
+
+await test("describeError: سلسلة نصية مرمية مباشرة ⇒ تُعاد كما هي", () => {
+  assert.equal(describeError("string error"), "string error");
+});
+
+await test("describeError: رقم مرمى مباشرة ⇒ نص آمن", () => {
+  assert.equal(describeError(123), "123");
+});
+
+await test("describeError: كائن عادي فارغ بلا message ⇒ نص آمن بلا رمي", () => {
+  assert.equal(describeError({}), "{}");
+});
+
+await test("describeError: كائن يحمل خصائص دائرية (JSON.stringify يفشل) ⇒ نص آمن بلا رمي", () => {
+  const circular = {};
+  circular.self = circular;
+  assert.doesNotThrow(() => describeError(circular));
+});
+
+await test("watcher.js: catch حلقة poll() يعيد رمي fatalPrinterConfig فقط، ويستخدم describeError الآمن لغير ذلك", () => {
+  assert.ok(/if \(err && err\.fatalPrinterConfig\) throw err;\s*\n\s*console\.error\(`خطأ: \$\{describeError\(err\)\}`\);/.test(watcherSrc));
+  // لا رجوع إلى err.message المباشر غير المحروس داخل هذه الكتلة (سبب DeepScan INSUFFICIENT_NULL_CHECK الأصلي)
+});
+
+await test("سيناريو متكامل: throw Object.assign(new Error('fatal'), {fatalPrinterConfig:true}) يُعاد رميه كما هو (لا يُبتلع)", () => {
+  const err = Object.assign(new Error("fatal"), { fatalPrinterConfig: true });
+  function simulateCatch(e) {
+    if (e && e.fatalPrinterConfig) throw e;
+    return describeError(e);
+  }
+  let thrown = null;
+  try { simulateCatch(err); } catch (e) { thrown = e; }
+  assert.equal(thrown, err);
+});
+
+await test("سيناريو متكامل: كل حالات throw غير fatalPrinterConfig تُسجَّل بأمان ولا تُميت الحلقة", () => {
+  function simulateCatch(e) {
+    if (e && e.fatalPrinterConfig) throw e;
+    return describeError(e);
+  }
+  const cases = [new Error("x"), null, undefined, "string error", 123, {}];
+  for (const c of cases) {
+    assert.doesNotThrow(() => simulateCatch(c), `رمت الحلقة على: ${String(c)}`);
+  }
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

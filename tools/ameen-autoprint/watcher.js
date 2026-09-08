@@ -377,6 +377,17 @@ async function printInvoice(inv) {
   );
 }
 
+// يستخرج نصاً آمناً لأي قيمة مرمية مهما كان نوعها (null/undefined/نص/رقم/كائن عادي)
+// دون افتراض وجود .message — يمنع رمي استثناء جديد داخل معالج استثناء.
+function describeError(err) {
+  if (err instanceof Error) return err.message;
+  if (err === null || err === undefined) return String(err);
+  if (typeof err === "object") {
+    try { return JSON.stringify(err); } catch { return "[كائن خطأ غير قابل للعرض]"; }
+  }
+  return String(err);
+}
+
 // ─── دورة الاستعلام ───────────────────────────────────────────────────────
 async function poll(pool, state) {
   const result = await pool.request()
@@ -487,7 +498,7 @@ async function main() {
         await poll(pool, state);
       } catch (err) {
         if (err && err.fatalPrinterConfig) throw err;
-        console.error(`خطأ: ${err.message}`);
+        console.error(`خطأ: ${describeError(err)}`);
         // إعادة الاتصال إذا انقطع
         if (!pool.connected) {
           try {
