@@ -22,6 +22,14 @@ public class OzkSpoolNotSubmittedException : Exception
     public OzkSpoolNotSubmittedException(string message) : base(message) { }
 }
 
+// فشل حتمي في تصيير هذه الفاتورة بالذات: نتيجة محتواها وحده، فتكراره مضمون
+// ما دام المحتوى كما هو. يميّزه المستدعي عن الأعطال العابرة كي يعزل الفاتورة
+// بدل إعادة محاولتها إلى الأبد وحجب بقية الطابور.
+public class OzkReceiptUnrenderableException : Exception
+{
+    public OzkReceiptUnrenderableException(string message) : base(message) { }
+}
+
 public static class OzkRawThermalPrinter
 {
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -395,7 +403,8 @@ function New-OzkReceiptBitmap {
         # عند التجاوز نفشل صراحةً: طباعة إيصال مقصوص بصمت (سلوك النسخة السابقة)
         # تُخرج فاتورة بلا إجماليات ولا تذييل ويظنها الكاشير سليمة.
         if ($requiredHeight -gt $script:ReceiptMaxHeight) {
-            throw "Receipt layout needs $requiredHeight px which exceeds the $($script:ReceiptMaxHeight) px safety limit; refusing to print a silently truncated receipt."
+            throw (New-Object OzkReceiptUnrenderableException(
+                "Receipt layout needs $requiredHeight px which exceeds the $($script:ReceiptMaxHeight) px safety limit; refusing to print a silently truncated receipt."))
         }
 
         $bitmap = New-OzkReceiptCanvas $requiredHeight

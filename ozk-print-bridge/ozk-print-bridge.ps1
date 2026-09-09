@@ -53,6 +53,56 @@ $script:WholesaleTypeGuids = @(
 # صراحةً قبل أي استعلام أو تصيير أو أمر طباعة — بلا fallback وبلا إعادة توجيه.
 $script:CashierInvoiceTypes = @("Retail")
 
+function Test-PermanentInvoiceFailure($ErrorRecord) {
+    # صحيحة فقط للفشل الذي تحدّده محتويات الفاتورة وحدها، فتكراره مضمون ما دام
+    # المحتوى ثابتاً — كتجاوز حدّ ارتفاع الإيصال. مصدرها الوحيد النوع المميِّز
+    # OzkReceiptUnrenderableException. كل ما عداه يُعامل كعابر ويبقى قابلاً
+    # لإعادة المحاولة: الافتراض الآمن هو المحاولة ثانيةً لا العزل.
+    $exception = $ErrorRecord.Exception
+    while ($null -ne $exception) {
+        if ($exception.GetType().Name -eq "OzkReceiptUnrenderableException") { return $true }
+        $exception = $exception.InnerException
+    }
+    return $false
+}
+
+# --- عزل الفواتير المتعذّر تصييرها -------------------------------------------
+# طابور الطباعة يعالج الأقدم أولاً، فلو رمت فاتورة واحدة رمياً حتمياً قبل التسليم
+# خرج الاستثناء من الحلقة، فيموت الجسر ويعيده الـwatchdog فيلقى الفاتورة نفسها
+# أولاً ويفشل ثانيةً — بلا نهاية، وكل الإيصالات اللاحقة محجوبة.
+#
+# العزل منفصل تماماً عن seen: الفاتورة المعزولة ليست مطبوعة ولا يُدّعى ذلك، وهي
+# تبقى مرئية في state.json وتُعلَن عند كل إقلاع لتُراجَع يدوياً.
+#
+# ليس عزلاً أبدياً: تُخزَّن بصمة محتوى الفاتورة معه. فإن تغيّر المحتوى تغيّرت
+# البصمة وأُعيد تقييمها من جديد — نستعمل البصمة نفسها المستعملة لكشف التكرار،
+# فلا منطق موازٍ قد ينحرف عنها.
+function Get-QuarantineDecision($State, [string]$InvoiceGuid, [string]$Fingerprint) {
+    if ($null -eq $State.quarantined -or -not $State.quarantined.ContainsKey($InvoiceGuid)) { return "proceed" }
+    $entry = $State.quarantined[$InvoiceGuid]
+    $storedFingerprint = ""
+    if ($null -ne $entry) {
+        # حالة تالفة أو قديمة بلا بصمة: تُعامل كتغيّر محتوى فتُعاد المحاولة،
+        # ولا تُسقط الطابور ولا تُخفي الفاتورة صامتةً.
+        try { $storedFingerprint = [string]$entry.fingerprint } catch { $storedFingerprint = "" }
+    }
+    if ([string]::IsNullOrWhiteSpace($storedFingerprint)) { return "reevaluate" }
+    if ($storedFingerprint -eq $Fingerprint) { return "skip" }
+    return "reevaluate"
+}
+
+function Add-QuarantineEntry($State, $Candidate, [string]$Fingerprint, $ErrorRecord) {
+    if ($null -eq $State.quarantined) { $State.quarantined = @{} }
+    $State.quarantined[$Candidate.InvoiceGuid] = [ordered]@{
+        fingerprint = $Fingerprint
+        invoiceNumber = $Candidate.InvoiceNumber
+        category = "permanent_render_failure"
+        errorType = $ErrorRecord.Exception.GetType().FullName
+        reason = [string]$ErrorRecord.Exception.Message
+        quarantinedAt = (Get-Date).ToUniversalTime().ToString("o")
+    }
+}
+
 function Test-PreSubmissionFailure($ErrorRecord) {
     # صحيحة فقط للفشل المثبت أنه وقع قبل قبول spooler ويندوز لأي مهمة طباعة.
     # مصدرها الوحيد OzkSpoolNotSubmittedException التي ترميها وحدة العرض عند
@@ -802,6 +852,9 @@ function New-EmptyState {
         # Fingerprint -> {guid, invoiceNumber, printedAt}. Secondary dedup layer
         # only; never used to look up or change anything in Ameen itself.
         recentFingerprints = @{}
+        # GUID -> {fingerprint, invoiceNumber, category, reason, quarantinedAt}.
+        # فواتير تعذّر تصييرها تعذّراً حتمياً. منفصلة عن seen عمداً: ليست مطبوعة.
+        quarantined = @{}
     }
 }
 
@@ -819,6 +872,18 @@ function Read-BridgeState([string]$Path) {
     if ($null -ne $parsed.PSObject.Properties['recentFingerprints']) {
         foreach ($property in $parsed.recentFingerprints.psobject.Properties) {
             $state.recentFingerprints[$property.Name] = $property.Value
+        }
+    }
+    # ملفات حالة أقدم من العزل لا تحوي هذا الحقل، وملف تالف قد يحويه بشكل غير
+    # متوقّع. في الحالتين نبدأ بعزل فارغ بدل إسقاط الجسر — أسوأ ما يحدث حينها
+    # إعادة تقييم فاتورة معزولة مرة واحدة، وهو أسلم من توقّف الطابور.
+    if ($null -ne $parsed.PSObject.Properties['quarantined']) {
+        try {
+            foreach ($property in $parsed.quarantined.psobject.Properties) {
+                $state.quarantined[$property.Name.ToLowerInvariant()] = $property.Value
+            }
+        } catch {
+            $state.quarantined = @{}
         }
     }
     return $state
@@ -1036,6 +1101,19 @@ try {
     # حفظ نتيجة الإرسال. لا يعيد الجسر طباعتها آلياً (ذلك هو الغرض من العلامة)،
     # لكنه لا يبتلعها صامتاً أيضاً — تُسجَّل عند كل إقلاع ليقرّر المشغّل، وإعادة
     # الطباعة اليدوية عبر -Mode PrintInvoice تبقى متاحة له.
+    foreach ($entry in @($state.quarantined.GetEnumerator())) {
+        Write-BridgeLog ([pscustomobject]@{
+            Event = "quarantined_invoice_carried_over"
+            invoice_guid = $entry.Key
+            invoice_number = $entry.Value.invoiceNumber
+            category = $entry.Value.category
+            reason = $entry.Value.reason
+            At = (Get-Date).ToUniversalTime().ToString("o")
+            Remedy = "not printed and not marked printed; edit the invoice or raise the renderer limit, then it is re-evaluated automatically"
+            CustomerAndItemsRedacted = $true
+        })
+    }
+
     foreach ($entry in @($state.seen.GetEnumerator())) {
         if ([string]$entry.Value.status -eq "print_in_flight") {
             Write-BridgeLog ([pscustomobject]@{
@@ -1100,6 +1178,24 @@ try {
             $fingerprint = Get-InvoiceFingerprint $candidate $ready.Snapshot
             Remove-StaleFingerprints $state.recentFingerprints $now $script:DuplicateFingerprintRetentionSeconds
 
+            # الفاتورة المعزولة تُتخطّى بلا ضجيج ما دام محتواها كما هو. أثرها
+            # الدائم في state.json، ويُعلَن عند كل إقلاع — فلا تضيع صامتة.
+            $quarantineDecision = Get-QuarantineDecision $state $candidate.InvoiceGuid $fingerprint
+            if ($quarantineDecision -eq "skip") { continue }
+            if ($quarantineDecision -eq "reevaluate") {
+                # تغيّر محتوى الفاتورة (أو حالة عزل تالفة): تستحق محاولة جديدة.
+                [void]$state.quarantined.Remove($candidate.InvoiceGuid)
+                Write-BridgeLog ([pscustomobject]@{
+                    Event = "quarantine_released"
+                    invoice_guid = $candidate.InvoiceGuid
+                    invoice_number = $candidate.InvoiceNumber
+                    At = (Get-Date).ToUniversalTime().ToString("o")
+                    Reason = "invoice_content_changed_or_state_incomplete; re-evaluating"
+                    CustomerAndItemsRedacted = $true
+                })
+                Write-BridgeState $StatePath $state
+            }
+
             $duplicateMatch = $null
             if ($state.recentFingerprints.ContainsKey($fingerprint)) {
                 $priorEntry = $state.recentFingerprints[$fingerprint]
@@ -1150,7 +1246,32 @@ try {
                 # 1) كل ما يمكن أن يفشل بلا إنشاء أي مهمة طباعة يقع هنا، قبل أي
                 #    علامة: التحقق من الطابعة، وجود الطابور، التصيير، بناء ESC/POS.
                 #    فشل أي منها لا يترك أثراً، فإعادة المحاولة تبقى مضمونة.
-                $spoolJob = New-OzkReceiptSpoolJob -Receipt $receipt -LogoPath $script:ReceiptLogoPath -PrinterName $PrinterName
+                # الفشل الحتمي هنا (كتجاوز حدّ ارتفاع الإيصال) يتكرر حتماً ما دام
+                # المحتوى ثابتاً؛ فلو خرج من الحلقة لأسقط الجسر وأعاده الـwatchdog
+                # على الفاتورة نفسها بلا نهاية، فتُحجب كل الإيصالات اللاحقة. تُعزل
+                # هذه الفاتورة وحدها ويستمر الطابور. أما الفشل العابر (طابعة غير
+                # متاحة، خطأ CIM أو إدخال/إخراج) فيخرج كما كان — لا عزل له.
+                $spoolJob = $null
+                try {
+                    $spoolJob = New-OzkReceiptSpoolJob -Receipt $receipt -LogoPath $script:ReceiptLogoPath -PrinterName $PrinterName
+                } catch {
+                    if (-not (Test-PermanentInvoiceFailure $_)) { throw }
+                    Add-QuarantineEntry $state $candidate $fingerprint $_
+                    Write-BridgeLog ([pscustomobject]@{
+                        Event = "permanent_render_failure"
+                        invoice_guid = $candidate.InvoiceGuid
+                        invoice_number = $candidate.InvoiceNumber
+                        category = "permanent_render_failure"
+                        fingerprint = $fingerprint
+                        ErrorType = $_.Exception.GetType().FullName
+                        Message = [string]$_.Exception.Message
+                        At = (Get-Date).ToUniversalTime().ToString("o")
+                        Consequence = "invoice quarantined, not printed and not marked printed; queue continues"
+                        CustomerAndItemsRedacted = $true
+                    })
+                    Write-BridgeState $StatePath $state
+                    continue
+                }
 
                 # 2) من هنا فصاعداً قد تصير النتيجة غامضة، فتُحفظ العلامة على القرص
                 #    قبل التسليم. بدونها كان فشلُ حفظِ الحالة بعد نجاح التسليم يقتل

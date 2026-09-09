@@ -1295,5 +1295,236 @@ Test-Case "لا اقتباس ناقص ولا زائد في القيمة النه
     Assert-True ($quoteCount -eq 12) "يجب وجود ستة وسائط مُقتبسة (12 اقتباساً): exe و-File و-BridgeRoot و-PrinterName و-StatePath و-LogPath — وُجد: $quoteCount"
 }
 
+Write-Host "`n== P1-K: فاتورة متعذّرة التصيير تُعزل ولا تحجب الطابور =="
+
+. ([scriptblock]::Create((Get-ExtractedFunctionText $bridgeSrc "function Test-PermanentInvoiceFailure(`$ErrorRecord) {")))
+. ([scriptblock]::Create((Get-ExtractedFunctionText $bridgeSrc "function Get-QuarantineDecision(`$State, [string]`$InvoiceGuid, [string]`$Fingerprint) {")))
+. ([scriptblock]::Create((Get-ExtractedFunctionText $bridgeSrc "function Add-QuarantineEntry(`$State, `$Candidate, [string]`$Fingerprint, `$ErrorRecord) {")))
+
+function New-ErrorRecordOf($Exception) {
+    return [System.Management.Automation.ErrorRecord]::new($Exception, "test", "NotSpecified", $null)
+}
+
+Test-Case "التصنيف: تعذّر التصيير الحتمي يُميَّز" {
+    $record = New-ErrorRecordOf (New-Object OzkReceiptUnrenderableException("Receipt layout needs 21000 px which exceeds the 15000 px safety limit"))
+    Assert-True (Test-PermanentInvoiceFailure $record) "تجاوز حدّ الارتفاع يجب أن يُصنَّف حتمياً"
+}
+
+Test-Case "التصنيف: الأعطال العابرة تبقى غير حتمية (الافتراض الآمن إعادة المحاولة)" {
+    foreach ($ex in @(
+        (New-Object OzkSpoolNotSubmittedException("OpenPrinter failed with Win32 error 1801")),
+        (New-Object System.IO.IOException("transient I/O")),
+        (New-Object InvalidOperationException("Printer queue not found or ambiguous: XPRINTER XP-T80Q 80MM"))
+    )) {
+        Assert-True (-not (Test-PermanentInvoiceFailure (New-ErrorRecordOf $ex))) "يجب ألا يُصنَّف حتمياً: $($ex.GetType().Name)"
+    }
+}
+
+Test-Case "التصنيف يفحص InnerException" {
+    $inner = New-Object OzkReceiptUnrenderableException("too tall")
+    $outer = New-Object System.Management.Automation.MethodInvocationException("wrapped", $inner)
+    Assert-True (Test-PermanentInvoiceFailure (New-ErrorRecordOf $outer)) "الاستثناء المغلَّف يجب أن يُصنَّف حتمياً"
+}
+
+# ── محاكاة نبضة كاملة على طابور من ثلاث فواتير ────────────────────────────
+# تستعمل دوال العزل والحالة الحقيقية المستخرَجة من المصدر. لا SQL ولا طباعة.
+function New-QueueCandidate([string]$Guid, [int]$Number, [string]$Fingerprint) {
+    [pscustomobject]@{ InvoiceGuid = $Guid; InvoiceNumber = $Number; Fingerprint = $Fingerprint }
+}
+
+# $Behaviour: guid -> "ok" | "permanent" | "transient"
+function Invoke-QueuePoll([string]$StatePath, $Queue, [hashtable]$Behaviour, [switch]$LegacyNoQuarantine) {
+    $state = Read-BridgeState $StatePath
+    $printed = New-Object System.Collections.Generic.List[string]
+    $escaped = $null
+    foreach ($candidate in $Queue) {
+        if ($state.seen.ContainsKey($candidate.InvoiceGuid)) { continue }
+
+        if (-not $LegacyNoQuarantine) {
+            $decision = Get-QuarantineDecision $state $candidate.InvoiceGuid $candidate.Fingerprint
+            if ($decision -eq "skip") { continue }
+            if ($decision -eq "reevaluate") { [void]$state.quarantined.Remove($candidate.InvoiceGuid) }
+        }
+
+        $mode = if ($Behaviour.ContainsKey($candidate.InvoiceGuid)) { [string]$Behaviour[$candidate.InvoiceGuid] } else { "ok" }
+        $prepareError = $null
+        if ($mode -eq "permanent") { $prepareError = New-ErrorRecordOf (New-Object OzkReceiptUnrenderableException("receipt exceeds renderer safety height")) }
+        elseif ($mode -eq "transient") { $prepareError = New-ErrorRecordOf (New-Object System.IO.IOException("printer queue temporarily unavailable")) }
+
+        if ($null -ne $prepareError) {
+            if ($LegacyNoQuarantine) {
+                # السلوك القديم: الاستثناء يخرج من الحلقة فيموت الجسر
+                $escaped = $prepareError
+                break
+            }
+            if (-not (Test-PermanentInvoiceFailure $prepareError)) {
+                $escaped = $prepareError    # العابر يخرج كما كان — لا عزل
+                break
+            }
+            Add-QuarantineEntry $state $candidate $candidate.Fingerprint $prepareError
+            Write-BridgeState $StatePath $state
+            continue
+        }
+
+        $state.seen[$candidate.InvoiceGuid] = [ordered]@{ status = "spooled"; invoiceNumber = $candidate.InvoiceNumber }
+        Write-BridgeState $StatePath $state
+        $printed.Add($candidate.InvoiceGuid)
+    }
+    return [pscustomobject]@{ Printed = $printed.ToArray(); Escaped = $escaped; State = (Read-BridgeState $StatePath) }
+}
+
+$script:QueueABC = @(
+    (New-QueueCandidate "aaaa-1111" 1001 "fp-A-v1"),
+    (New-QueueCandidate "bbbb-2222" 1002 "fp-B"),
+    (New-QueueCandidate "cccc-3333" 1003 "fp-C")
+)
+
+Test-Case "1) السلوك القديم: A الحتمية تُسقط النبضة ولا تصل B/C إطلاقاً" {
+    $path = New-StatePath
+    $result = Invoke-QueuePoll $path $script:QueueABC @{ "aaaa-1111" = "permanent" } -LegacyNoQuarantine
+    Assert-True ($result.Printed.Count -eq 0) "لا يجوز أن تُطبع أي فاتورة في السلوك القديم، طُبع: $($result.Printed.Count)"
+    Assert-True ($null -ne $result.Escaped) "الاستثناء يجب أن يخرج من الحلقة"
+    # وتكرار النبضات لا يغيّر شيئاً: A بلا علامة فتُقابَل أولاً كل مرة
+    for ($i = 0; $i -lt 5; $i++) { [void](Invoke-QueuePoll $path $script:QueueABC @{ "aaaa-1111" = "permanent" } -LegacyNoQuarantine) }
+    $reloaded = Read-BridgeState $path
+    Assert-True ($reloaded.seen.Count -eq 0) "خمس إعادات تشغيل يجب ألا تطبع شيئاً — هذا هو الحجب"
+}
+
+Test-Case "1ب) بعد الإصلاح: A تُعزل وتُطبع B و C في النبضة نفسها" {
+    $path = New-StatePath
+    $result = Invoke-QueuePoll $path $script:QueueABC @{ "aaaa-1111" = "permanent" }
+    Assert-True ($null -eq $result.Escaped) "لا يجوز أن يخرج استثناء ويُسقط الطابور"
+    Assert-True ($result.Printed.Count -eq 2) "يجب طباعة فاتورتين، طُبع: $($result.Printed.Count)"
+    Assert-True ($result.Printed -contains "bbbb-2222" -and $result.Printed -contains "cccc-3333") "B و C يجب أن تُطبعا"
+    Assert-True ($result.State.quarantined.ContainsKey("aaaa-1111")) "A يجب أن تُعزل"
+    Assert-True (-not $result.State.seen.ContainsKey("aaaa-1111")) "A يجب ألا تُعتبر مطبوعة إطلاقاً"
+}
+
+Test-Case "لا تُخفى كمطبوعة: العزل منفصل عن seen وفيه سبب وفئة" {
+    $path = New-StatePath
+    $result = Invoke-QueuePoll $path $script:QueueABC @{ "aaaa-1111" = "permanent" }
+    $entry = $result.State.quarantined["aaaa-1111"]
+    Assert-True ([string]$entry.category -eq "permanent_render_failure") "يجب تسجيل الفئة"
+    Assert-True (-not [string]::IsNullOrWhiteSpace([string]$entry.reason)) "يجب تسجيل السبب"
+    Assert-True ([string]$entry.fingerprint -eq "fp-A-v1") "يجب تخزين بصمة المحتوى الفاشل"
+    Assert-True ([int]$entry.invoiceNumber -eq 1001) "يجب تسجيل رقم الفاتورة"
+}
+
+Test-Case "2) نبضات لاحقة بنفس البصمة: تُتخطّى بلا حلقة ولا حجب" {
+    $path = New-StatePath
+    [void](Invoke-QueuePoll $path $script:QueueABC @{ "aaaa-1111" = "permanent" })
+    for ($i = 0; $i -lt 5; $i++) {
+        $again = Invoke-QueuePoll $path $script:QueueABC @{ "aaaa-1111" = "permanent" }
+        Assert-True ($null -eq $again.Escaped) "لا يجوز أن تُسقط النبضة"
+        Assert-True ($again.Printed.Count -eq 0) "B و C مطبوعتان سابقاً فلا تُعادان"
+    }
+    $final = Read-BridgeState $path
+    Assert-True ($final.quarantined.ContainsKey("aaaa-1111")) "تبقى معزولة"
+    Assert-True (-not $final.seen.ContainsKey("aaaa-1111")) "وتبقى غير مطبوعة"
+    Assert-True ($final.seen.Count -eq 2) "B و C فقط هما المطبوعتان"
+}
+
+Test-Case "3) نفس GUID ببصمة جديدة: يُعاد تقييمها وتُطبع مرة واحدة" {
+    $path = New-StatePath
+    [void](Invoke-QueuePoll $path $script:QueueABC @{ "aaaa-1111" = "permanent" })
+    Assert-True ((Read-BridgeState $path).quarantined.ContainsKey("aaaa-1111")) "معزولة أولاً"
+    # عُدّلت الفاتورة: بصمة جديدة ومحتوى صار قابلاً للتصيير
+    $editedQueue = @(
+        (New-QueueCandidate "aaaa-1111" 1001 "fp-A-v2"),
+        (New-QueueCandidate "bbbb-2222" 1002 "fp-B"),
+        (New-QueueCandidate "cccc-3333" 1003 "fp-C")
+    )
+    $after = Invoke-QueuePoll $path $editedQueue @{}
+    Assert-True ($after.Printed -contains "aaaa-1111") "يجب أن تُطبع بعد التعديل"
+    Assert-True (-not $after.State.quarantined.ContainsKey("aaaa-1111")) "يجب رفع العزل"
+    $again = Invoke-QueuePoll $path $editedQueue @{}
+    Assert-True ($again.Printed.Count -eq 0) "ولا تُطبع مرة ثانية"
+}
+
+Test-Case "4) الفشل العابر قبل التسليم لا يُعزَل ويبقى قابلاً لإعادة المحاولة" {
+    $path = New-StatePath
+    $result = Invoke-QueuePoll $path $script:QueueABC @{ "aaaa-1111" = "transient" }
+    Assert-True ($null -ne $result.Escaped) "العابر يجب أن يخرج كما كان (دلالات P1-F بلا تغيير)"
+    Assert-True (-not $result.State.quarantined.ContainsKey("aaaa-1111")) "لا يجوز عزل الفشل العابر"
+    Assert-True (-not $result.State.seen.ContainsKey("aaaa-1111")) "ولا اعتبارها مطبوعة"
+    # عند زوال العطل تُطبع طبيعياً
+    $recovered = Invoke-QueuePoll $path $script:QueueABC @{}
+    Assert-True ($recovered.Printed -contains "aaaa-1111") "بعد زوال العطل العابر يجب أن تُطبع"
+}
+
+Test-Case "5) النجاح الطبيعي بلا تغيير" {
+    $path = New-StatePath
+    $result = Invoke-QueuePoll $path $script:QueueABC @{}
+    Assert-True ($result.Printed.Count -eq 3) "الثلاث يجب أن تُطبع، طُبع: $($result.Printed.Count)"
+    Assert-True ($result.State.quarantined.Count -eq 0) "لا عزل بلا سبب"
+    $again = Invoke-QueuePoll $path $script:QueueABC @{}
+    Assert-True ($again.Printed.Count -eq 0) "ولا إعادة طباعة"
+}
+
+Test-Case "6) دلالات ما بعد التسليم لم تتغيّر (العلامة والغموض كما هما)" {
+    Assert-True ($bridgeSrc -match 'status = "print_in_flight"') "علامة قيد الإرسال باقية"
+    Assert-True ($bridgeSrc -match 'Event = "state_persist_failed_after_spool"') "معالجة فشل الحفظ بعد التسليم باقية"
+    Assert-True ($bridgeSrc -match 'Event = "pre_submission_failure_retryable"') "تراجع الفشل قبل التسليم باقٍ"
+    # العزل يقع قبل العلامة، فلا يمسّ منطقة الغموض إطلاقاً
+    $quarantineIdx = $bridgeSrc.IndexOf("Add-QuarantineEntry `$state `$candidate")
+    $markerIdx = $bridgeSrc.IndexOf('status = "print_in_flight"')
+    Assert-True ($quarantineIdx -ge 0 -and $markerIdx -ge 0) "يجب وجود الموضعين"
+    Assert-True ($quarantineIdx -lt $markerIdx) "العزل يجب أن يقع قبل علامة قيد الإرسال"
+}
+
+Test-Case "7) العزل يبقى بعد إعادة التشغيل (يُقرأ من القرص)" {
+    $path = New-StatePath
+    [void](Invoke-QueuePoll $path $script:QueueABC @{ "aaaa-1111" = "permanent" })
+    # إعادة تشغيل = قراءة جديدة من الملف
+    $reloaded = Read-BridgeState $path
+    Assert-True ($reloaded.quarantined.ContainsKey("aaaa-1111")) "العزل يجب أن يُقرأ بعد إعادة التشغيل"
+    Assert-True ([string]$reloaded.quarantined["aaaa-1111"].fingerprint -eq "fp-A-v1") "البصمة يجب أن تبقى محفوظة"
+    $afterRestart = Invoke-QueuePoll $path $script:QueueABC @{ "aaaa-1111" = "permanent" }
+    Assert-True ($null -eq $afterRestart.Escaped) "بعد إعادة التشغيل لا يجوز أن تُسقط الفاتورة نفسها الطابور"
+}
+
+Test-Case "8) حالة عزل تالفة/ناقصة: تُعاد المحاولة بأمان بلا انهيار" {
+    $path = New-StatePath
+    $state = Read-BridgeState $path
+    $state.quarantined["dddd-4444"] = [ordered]@{ invoiceNumber = 1009 }   # بلا بصمة
+    Write-BridgeState $path $state
+    $reloaded = Read-BridgeState $path
+    $decision = Get-QuarantineDecision $reloaded "dddd-4444" "fp-anything"
+    Assert-True ($decision -eq "reevaluate") "الحالة الناقصة يجب أن تُعاد لا أن تُخفي الفاتورة، النتيجة: $decision"
+    $decisionNull = Get-QuarantineDecision $reloaded "not-there" "fp-x"
+    Assert-True ($decisionNull -eq "proceed") "غير المعزولة يجب أن تمرّ"
+}
+
+Test-Case "9) ملف حالة بلا حقل quarantined إطلاقاً (توافق خلفي)" {
+    $path = New-StatePath
+    $state = Read-BridgeState $path
+    $state.seen["zzzz-9999"] = [ordered]@{ status = "spooled"; invoiceNumber = 1 }
+    $state.Remove("quarantined")
+    Write-BridgeState $path $state
+    $reloaded = Read-BridgeState $path
+    Assert-True ($null -ne $reloaded.quarantined) "يجب أن يبدأ بعزل فارغ لا null"
+    Assert-True ((Get-QuarantineDecision $reloaded "any-guid" "fp") -eq "proceed") "ولا يسقط"
+}
+
+Test-Case "المعزولات تُعلَن عند الإقلاع (أثر واضح للمراجعة اليدوية)" {
+    Assert-True ($bridgeSrc -match 'Event = "quarantined_invoice_carried_over"') "يجب إعلان كل فاتورة معزولة عند الإقلاع"
+    Assert-True ($bridgeSrc -match 'Remedy = "not printed and not marked printed') "يجب توضيح أنها غير مطبوعة وطريق المعالجة"
+    Assert-True ($bridgeSrc -match 'Event = "quarantine_released"') "يجب تسجيل رفع العزل عند تغيّر المحتوى"
+}
+
+Test-Case "negative witness: بلا عزل يعود الاستثناء ليحجب الطابور" {
+    $path = New-StatePath
+    $withQuarantine = Invoke-QueuePoll $path $script:QueueABC @{ "aaaa-1111" = "permanent" }
+    $path2 = New-StatePath
+    $withoutQuarantine = Invoke-QueuePoll $path2 $script:QueueABC @{ "aaaa-1111" = "permanent" } -LegacyNoQuarantine
+    Assert-True ($withQuarantine.Printed.Count -eq 2) "مع العزل تُطبع فاتورتان"
+    Assert-True ($withoutQuarantine.Printed.Count -eq 0) "بلا عزل لا تُطبع أي فاتورة — وهذا هو العطل"
+}
+
+Test-Case "المصدر: التحضير محاط بمعالجة تعزل الحتمي وتمرّر العابر" {
+    Assert-True ($bridgeSrc -match '(?s)\$spoolJob = New-OzkReceiptSpoolJob[^\r\n]*\r?\n\s*\} catch \{\s*\r?\n\s*if \(-not \(Test-PermanentInvoiceFailure \$_\)\) \{ throw \}') "الفشل غير الحتمي يجب أن يُعاد رميه كما كان"
+    Assert-True ($bridgeSrc -match 'Event = "permanent_render_failure"') "يجب تسجيل الفشل الحتمي بحدث صريح"
+}
+
 Write-Host "`n$($script:passed) passed, $($script:failed) failed"
 if ($script:failed -gt 0) { exit 1 }
