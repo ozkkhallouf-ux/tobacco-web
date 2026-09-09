@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$ExpectedHostName = "OZK2026",
     [string]$BridgeRoot = $PSScriptRoot,
@@ -30,9 +30,9 @@ if (-not (Test-Path -LiteralPath $bridgeScript -PathType Leaf)) {
     throw "Print Bridge script was not found."
 }
 
-function Write-WatchdogEvent([string]$Event, [string]$Reason, [string]$ErrorType = "") {
+function Write-WatchdogEvent([string]$EventName, [string]$Reason, [string]$ErrorType = "") {
     $entry = [ordered]@{
-        Event = $Event
+        Event = $EventName
         At = (Get-Date).ToUniversalTime().ToString("o")
         Reason = $Reason
         ErrorType = $ErrorType
@@ -72,7 +72,7 @@ try {
 }
 
 if (-not $acquiredMutex) {
-    Write-WatchdogEvent -Event "watchdog_instance_already_running" -Reason "named_mutex_held_by_another_instance:$mutexName"
+    Write-WatchdogEvent -EventName "watchdog_instance_already_running" -Reason "named_mutex_held_by_another_instance:$mutexName"
     exit 0
 }
 
@@ -90,9 +90,9 @@ try {
     while ($true) {
         try {
             & $bridgeScript @bridgeParameters
-            Write-WatchdogEvent -Event "watchdog_restart" -Reason "bridge_completed"
+            Write-WatchdogEvent -EventName "watchdog_restart" -Reason "bridge_completed"
         } catch {
-            Write-WatchdogEvent -Event "watchdog_restart" -Reason "bridge_failed" -ErrorType $_.Exception.GetType().FullName
+            Write-WatchdogEvent -EventName "watchdog_restart" -Reason "bridge_failed" -ErrorType $_.Exception.GetType().FullName
         }
         Start-Sleep -Seconds 1
     }

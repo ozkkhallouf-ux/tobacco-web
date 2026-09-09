@@ -103,7 +103,10 @@ function Write-BridgeLog($EventObject) {
         $line = $EventObject | ConvertTo-Json -Compress -Depth 8
         [IO.File]::AppendAllText($fullPath, $line + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
     } catch {
-        # Logging is best-effort and must never stop invoice detection or printing.
+        # التسجيل best-effort ولا يجوز أن يوقف كشف الفواتير أو طباعتها. لا نستعمل
+        # Write-Error هنا: مع ErrorActionPreference=Stop يتحوّل إلى خطأ منهٍ فيُسقط
+        # الجسر — وهو بالضبط ما يمنعه هذا الحارس. التجاهل مقصود، وهذا السطر يوثّقه.
+        $null = $_
     }
 }
 
@@ -860,6 +863,24 @@ try {
 
     $stateExisted = Test-Path -LiteralPath $StatePath -PathType Leaf
     $state = Read-BridgeState $StatePath
+
+    # فاتورة بقيت print_in_flight من تشغيل سابق تعني: أُرسلت إلى الطابعة ثم تعذّر
+    # حفظ نتيجة الإرسال. لا يعيد الجسر طباعتها آلياً (ذلك هو الغرض من العلامة)،
+    # لكنه لا يبتلعها صامتاً أيضاً — تُسجَّل عند كل إقلاع ليقرّر المشغّل، وإعادة
+    # الطباعة اليدوية عبر -Mode PrintInvoice تبقى متاحة له.
+    foreach ($entry in @($state.seen.GetEnumerator())) {
+        if ([string]$entry.Value.status -eq "print_in_flight") {
+            Write-BridgeLog ([pscustomobject]@{
+                Event = "print_in_flight_carried_over"
+                invoice_guid = $entry.Key
+                invoice_number = $entry.Value.invoiceNumber
+                At = (Get-Date).ToUniversalTime().ToString("o")
+                Reason = "spooled_but_result_not_persisted; automatic reprint suppressed"
+                Remedy = "operator decides; manual reprint available via -Mode PrintInvoice"
+                CustomerAndItemsRedacted = $true
+            })
+        }
+    }
     if (-not $stateExisted) {
         foreach ($candidate in $candidates) {
             $state.seen[$candidate.InvoiceGuid] = [ordered]@{
@@ -931,7 +952,7 @@ try {
             }
 
             $pollWatch.Stop()
-            $event = Get-RedactedInvoiceEvent $candidate $ready $pollWatch.ElapsedMilliseconds
+            $invoiceEvent = Get-RedactedInvoiceEvent $candidate $ready $pollWatch.ElapsedMilliseconds
             $stateStatus = "observed_waiting_for_print_activation"
             if ($ConfirmPhysicalPrint) {
                 # طبقة دفاع ثانية: حتى لو وصل مرشّح غير كاشير إلى هنا رغم حارس
@@ -939,28 +960,63 @@ try {
                 Assert-CashierTypeGuid ([string]$candidate.TypeGuid) ([int]$candidate.InvoiceNumber)
                 Import-Module $script:ReceiptModulePath -Force
                 $receipt = Convert-SnapshotToReceipt $connection $ready.Snapshot
+
+                # --- علامة "قيد الإرسال" تُكتب على القرص قبل الإرسال مباشرةً -------
+                # بدونها كان فشلُ حفظِ الحالة بعد نجاح الإرسال يعني: يموت الجسر،
+                # يعيده الـwatchdog بعد ثانية، فيقرأ حالةً لا تحوي هذه الفاتورة
+                # فيطبعها ثانيةً — وقد يتكرر بلا نهاية إن كان العطل مستمراً.
+                # تُكتب العلامة بعد التصيير مباشرةً وقبل الإرسال تحديداً، فأي فشل
+                # سابق للإرسال (استيراد الوحدة، بناء الإيصال، الحارس) لا يترك أثراً
+                # ويبقى إعادة المحاولة مسموحاً — بينما أي فشل من لحظة الإرسال فصاعداً
+                # يترك أثراً يمنع إعادة الطباعة الآلية.
+                $state.seen[$candidate.InvoiceGuid] = [ordered]@{
+                    status = "print_in_flight"
+                    invoiceNumber = $candidate.InvoiceNumber
+                    observedAt = $now.ToUniversalTime().ToString("o")
+                    lineCount = $ready.Snapshot.LineCount
+                }
+                Write-BridgeState $StatePath $state
+
                 [void](Send-OzkReceiptToPrinter -Receipt $receipt -LogoPath $script:ReceiptLogoPath -PrinterName $PrinterName -ConfirmPhysicalPrint)
-                $event.Renderer = "ozk_80mm_v1"
-                $event.Printer = "submitted:$PrinterName"
+                $invoiceEvent.Renderer = "ozk_80mm_v1"
+                $invoiceEvent.Printer = "submitted:$PrinterName"
                 $stateStatus = "spooled"
             } else {
-                $event.Renderer = "ozk_80mm_v1_ready"
-                $event.Printer = "not_submitted"
+                $invoiceEvent.Renderer = "ozk_80mm_v1_ready"
+                $invoiceEvent.Printer = "not_submitted"
             }
-            $event
-            Write-BridgeLog $event
+            $invoiceEvent
+            Write-BridgeLog $invoiceEvent
             $state.seen[$candidate.InvoiceGuid] = [ordered]@{
                 status = $stateStatus
                 invoiceNumber = $candidate.InvoiceNumber
-                observedAt = $event.DetectedAt
-                lineCount = $event.LineCount
+                observedAt = $invoiceEvent.DetectedAt
+                lineCount = $invoiceEvent.LineCount
             }
             $state.recentFingerprints[$fingerprint] = [ordered]@{
                 guid = $candidate.InvoiceGuid
                 invoiceNumber = $candidate.InvoiceNumber
                 printedAt = $now.ToUniversalTime().ToString("o")
             }
-            Write-BridgeState $StatePath $state
+            try {
+                Write-BridgeState $StatePath $state
+            } catch {
+                if ($stateStatus -ne "spooled") { throw }
+                # الإيصال خرج فعلاً إلى الطابعة، وعلامة print_in_flight محفوظة على
+                # القرص من قبل الإرسال. إسقاطُ الجسر هنا لا يفيد: الحالة في الذاكرة
+                # تمنع التكرار في هذا التشغيل، والعلامة تمنعه بعد إعادة التشغيل.
+                # نسجّل العطل بوضوح ونواصل الرصد بدل ترك الكاشير بلا طباعة.
+                Write-BridgeLog ([pscustomobject]@{
+                    Event = "state_persist_failed_after_spool"
+                    invoice_number = $candidate.InvoiceNumber
+                    invoice_guid = $candidate.InvoiceGuid
+                    At = (Get-Date).ToUniversalTime().ToString("o")
+                    ErrorType = $_.Exception.GetType().FullName
+                    Message = [string]$_.Exception.Message
+                    Consequence = "receipt_printed_once; on-disk marker prevents automatic reprint"
+                    CustomerAndItemsRedacted = $true
+                })
+            }
         }
         if ($pollWatch.IsRunning) { $pollWatch.Stop() }
         Start-Sleep -Milliseconds $PollMilliseconds

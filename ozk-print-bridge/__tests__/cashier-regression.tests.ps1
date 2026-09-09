@@ -476,5 +476,117 @@ Test-RenderCase "تجاوز حدّ الأمان ينتج خطأ صريح لا ف
     Assert-True ($message -match "(?i)safety limit|exceeds") "رسالة الخطأ يجب أن توضّح تجاوز حدّ الأمان: $message"
 }
 
+Write-Host "`n== P1-E: لا إعادة طباعة آلية بعد نجاح الإرسال وفشل حفظ الحالة =="
+
+# تُستخرج دوال الحالة الثلاث من المصدر الفعلي وتُشغَّل بمعزل عن الحلقة الرئيسية
+# (التي تحتوي اتصال SQL وحلقة لا نهائية)، فنختبر آلة الحالة الحقيقية لا نسخة منها.
+. ([scriptblock]::Create((Get-ExtractedFunctionText $bridgeSrc "function New-EmptyState {")))
+. ([scriptblock]::Create((Get-ExtractedFunctionText $bridgeSrc "function Write-BridgeState([string]`$Path, `$State) {")))
+. ([scriptblock]::Create((Get-ExtractedFunctionText $bridgeSrc "function Read-BridgeState([string]`$Path) {")))
+
+$script:StateRoot = Join-Path ([IO.Path]::GetTempPath()) ("ozk-bridge-state-" + [guid]::NewGuid().ToString("N"))
+[void](New-Item -ItemType Directory -Path $script:StateRoot -Force)
+
+function New-StatePath { return Join-Path $script:StateRoot ((([guid]::NewGuid()).ToString("N")) + "\state.json") }
+
+# يحاكي تسلسل الحلقة الفعلي لفاتورة واحدة، ويسمح بحقن فشل في مرحلة محددة.
+#   FailAt = "before-send"  → عطل قبل كتابة علامة قيد الإرسال (تصيير/استيراد فشل)
+#   FailAt = "persist"      → الإرسال نجح ثم فشل حفظ النتيجة النهائية
+function Invoke-PrintIteration([string]$StatePath, [string]$Guid, [string]$FailAt = "") {
+    $state = Read-BridgeState $StatePath
+    if ($state.seen.ContainsKey($Guid)) { return "skipped" }
+
+    if ($FailAt -eq "before-send") { throw "render failed before any send" }
+
+    # علامة قيد الإرسال — تُكتب قبل الإرسال مباشرةً
+    $state.seen[$Guid] = [ordered]@{ status = "print_in_flight"; invoiceNumber = 1001; observedAt = (Get-Date).ToUniversalTime().ToString("o"); lineCount = 3 }
+    Write-BridgeState $StatePath $state
+
+    $script:SendCount++          # ← هنا يقع الإرسال الفيزيائي فعلياً
+
+    $state.seen[$Guid] = [ordered]@{ status = "spooled"; invoiceNumber = 1001; observedAt = (Get-Date).ToUniversalTime().ToString("o"); lineCount = 3 }
+    if ($FailAt -eq "persist") { return "spooled-persist-failed" }
+    Write-BridgeState $StatePath $state
+    return "spooled"
+}
+
+Test-Case "1) فشل قبل الإرسال: لا أثر على القرص، وإعادة المحاولة لاحقاً مسموحة" {
+    $path = New-StatePath
+    $guid = "aaaa-1111"
+    $script:SendCount = 0
+    Assert-Throws { Invoke-PrintIteration $path $guid "before-send" } "يجب أن يرمي قبل الإرسال"
+    Assert-True ($script:SendCount -eq 0) "لا يجوز أن يكون الإرسال قد وقع"
+    $reloaded = Read-BridgeState $path
+    Assert-True (-not $reloaded.seen.ContainsKey($guid)) "لا يجوز ترك أثر يمنع إعادة المحاولة"
+    $result = Invoke-PrintIteration $path $guid
+    Assert-True ($result -eq "spooled") "إعادة المحاولة يجب أن تنجح"
+    Assert-True ($script:SendCount -eq 1) "الطباعة تقع مرة واحدة عند إعادة المحاولة"
+}
+
+Test-Case "2) نجاح الإرسال + نجاح الحفظ: طباعة واحدة، والتشغيل التالي يتخطاها" {
+    $path = New-StatePath
+    $guid = "bbbb-2222"
+    $script:SendCount = 0
+    Assert-True ((Invoke-PrintIteration $path $guid) -eq "spooled") "يجب أن ينجح"
+    Assert-True ((Invoke-PrintIteration $path $guid) -eq "skipped") "التشغيل التالي يجب أن يتخطاها"
+    Assert-True ($script:SendCount -eq 1) "الإرسال مرة واحدة فقط، وقع: $($script:SendCount)"
+    $reloaded = Read-BridgeState $path
+    Assert-True ([string]$reloaded.seen[$guid].status -eq "spooled") "الحالة المحفوظة يجب أن تكون spooled"
+}
+
+Test-Case "3) نجاح الإرسال + فشل الحفظ: لا نسخة ثانية بعد إعادة التشغيل (الثابتة الأساسية)" {
+    $path = New-StatePath
+    $guid = "cccc-3333"
+    $script:SendCount = 0
+    Assert-True ((Invoke-PrintIteration $path $guid "persist") -eq "spooled-persist-failed") "يجب أن يمثّل فشل الحفظ بعد الإرسال"
+    Assert-True ($script:SendCount -eq 1) "الإرسال وقع مرة"
+    # إعادة تشغيل: تُقرأ الحالة من القرص من جديد
+    $reloaded = Read-BridgeState $path
+    Assert-True ($reloaded.seen.ContainsKey($guid)) "علامة ما قبل الإرسال يجب أن تكون محفوظة على القرص"
+    Assert-True ([string]$reloaded.seen[$guid].status -eq "print_in_flight") "الحالة المحفوظة يجب أن تكون print_in_flight"
+    Assert-True ((Invoke-PrintIteration $path $guid) -eq "skipped") "إعادة التشغيل يجب ألا تعيد الطباعة"
+    Assert-True ($script:SendCount -eq 1) "لا يجوز تجاوز إرسال واحد، وقع: $($script:SendCount)"
+}
+
+Test-Case "3ب) تكرار إعادة التشغيل لا يراكم نسخاً (العطل المستمر لا يصير حلقة طباعة)" {
+    $path = New-StatePath
+    $guid = "dddd-4444"
+    $script:SendCount = 0
+    [void](Invoke-PrintIteration $path $guid "persist")
+    for ($i = 0; $i -lt 5; $i++) { [void](Invoke-PrintIteration $path $guid) }
+    Assert-True ($script:SendCount -eq 1) "خمس إعادات تشغيل يجب ألا تنتج إلا إرسالاً واحداً، وقع: $($script:SendCount)"
+}
+
+Test-Case "4) فشل الحفظ بعد الإرسال لا يُسقط الجسر (يُسجَّل ويُواصل الرصد)" {
+    Assert-True ($bridgeSrc -match '(?s)try \{\s*\r?\n\s*Write-BridgeState \$StatePath \$state\s*\r?\n\s*\} catch \{\s*\r?\n\s*if \(\$stateStatus -ne "spooled"\) \{ throw \}') "فشل الحفظ بعد الإرسال يجب أن يُلتقط، وأي فشل آخر يُعاد رميه"
+    Assert-True ($bridgeSrc -match 'Event = "state_persist_failed_after_spool"') "يجب تسجيل الحدث بوضوح لا ابتلاعه"
+}
+
+Test-Case "5) الفاتورة العالقة من تشغيل سابق تُعلَن عند الإقلاع (لا تُبتلع صامتة)" {
+    Assert-True ($bridgeSrc -match 'Event = "print_in_flight_carried_over"') "يجب الإعلان عن أي فاتورة بقيت قيد الإرسال"
+    Assert-True ($bridgeSrc -match 'Remedy = "operator decides; manual reprint available via -Mode PrintInvoice"') "يجب توضيح المخرج اليدوي للمشغّل"
+}
+
+Test-Case "الترتيب في المصدر: علامة قيد الإرسال تُحفظ على القرص قبل أمر الإرسال" {
+    $markerIdx = $bridgeSrc.IndexOf('status = "print_in_flight"')
+    $writeIdx = $bridgeSrc.IndexOf("Write-BridgeState `$StatePath `$state", $markerIdx)
+    $sendIdx = $bridgeSrc.IndexOf("Send-OzkReceiptToPrinter -Receipt `$receipt", $markerIdx)
+    Assert-True ($markerIdx -ge 0 -and $writeIdx -ge 0 -and $sendIdx -ge 0) "يجب وجود المواضع الثلاثة"
+    Assert-True ($writeIdx -lt $sendIdx) "الحفظ على القرص يجب أن يسبق الإرسال إلى الطابعة"
+}
+
+Test-Case "negative witness: بلا علامة ما قبل الإرسال تعود إعادة الطباعة بعد فشل الحفظ" {
+    # محاكاة السلوك القديم: لا كتابة قبل الإرسال إطلاقاً
+    $path = New-StatePath
+    $guid = "eeee-5555"
+    $sends = 0
+    $state = Read-BridgeState $path
+    if (-not $state.seen.ContainsKey($guid)) { $sends++ }   # الإرسال الأول
+    # فشل الحفظ هنا: لا شيء يُكتب على القرص إطلاقاً
+    $reloaded = Read-BridgeState $path
+    if (-not $reloaded.seen.ContainsKey($guid)) { $sends++ }  # إعادة التشغيل تطبع ثانيةً
+    Assert-True ($sends -eq 2) "السلوك القديم يجب أن ينتج نسختين — وهذا ما يمنعه الإصلاح"
+}
+
 Write-Host "`n$($script:passed) passed, $($script:failed) failed"
 if ($script:failed -gt 0) { exit 1 }
