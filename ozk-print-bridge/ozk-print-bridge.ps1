@@ -313,7 +313,7 @@ function Get-CanonicalLineText($Line, [bool]$IncludeRecordIdentity) {
     return ($parts -join "|")
 }
 
-function Get-CanonicalReceiptText($Header, $Lines, [bool]$IncludeRecordIdentity, [string]$BranchGuid = "") {
+function Get-CanonicalReceiptText($Header, $Lines, [bool]$IncludeRecordIdentity, [string]$BranchGuid = "", $Balance = $null) {
     $head = New-Object System.Collections.Generic.List[string]
     if ($IncludeRecordIdentity) {
         $head.Add((Format-CanonicalValue $Header.InvoiceGuid))
@@ -321,6 +321,17 @@ function Get-CanonicalReceiptText($Header, $Lines, [bool]$IncludeRecordIdentity,
         $head.Add((Format-CanonicalValue $Header.InvoiceDate))
         $head.Add((Format-CanonicalValue $Header.IsPosted))
         $head.Add((Format-CanonicalValue $Header.RecordState))
+        # الرصيدان مطبوعان أيضاً، ومصدرهما مستند محاسبي منفصل (en000/ce000) يُقرأ
+        # بنفس اتصال READ UNCOMMITTED. فلو بقي خارج التوقيع لأمكن أن يُقرأ مستند
+        # جزئي غير فارغ فيُطبع رصيد نصف مكتوب وتُعلَّم الفاتورة مطبوعة نهائياً.
+        # يدخل في مسار الاستقرار وحده: بصمة كشف التكرار تصف البيعة لا حالة الحساب.
+        if ($null -eq $Balance) {
+            $head.Add("balance:none")
+        } else {
+            $head.Add("balance:" + (Format-CanonicalValue $Balance.Found))
+            $head.Add((Format-CanonicalValue $Balance.Previous))
+            $head.Add((Format-CanonicalValue $Balance.Current))
+        }
     } else {
         $head.Add((Format-CanonicalValue $BranchGuid))
         $parsedDate = [datetime]::Parse([string]$Header.InvoiceDate, $script:InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
@@ -673,15 +684,24 @@ order by bi.Number, bi.GUID;
     }
     if ($null -eq $header) { return $null }
 
+    # الرصيد يُقرأ هنا مرة واحدة لكل لقطة — لا مرة إضافية بعد الاستقرار. بذلك
+    # تكون القيمة التي شاركت في آخر لقطة مستقرة هي نفسها القيمة التي تُطبع.
+    # الشرط كما كان: لا رصيد بلا اسم زبون.
+    $balance = [pscustomobject]@{ Previous = 0.0; Current = 0.0; Found = $false }
+    if (-not [string]::IsNullOrWhiteSpace($header.CustomerName)) {
+        $balance = Get-InvoiceDocumentBalance $Connection ([guid]$header.InvoiceGuid)
+    }
+
     # يشمل الترويسة المطبوعة كاملةً لا الأسطر وحدها: الاتصال READ UNCOMMITTED،
-    # فتغيّر اسم الزبون أو الإجمالي أو الخصم أو الدفعة أو سعر الصرف بين اللقطتين
-    # كان يمرّ سابقاً بلا أثر على التوقيع فتُطبع فاتورة بأرقام نصف مكتوبة.
-    $signature = Get-CanonicalHash (Get-CanonicalReceiptText $header $lines $true)
+    # فتغيّر اسم الزبون أو الإجمالي أو الخصم أو الدفعة أو سعر الصرف أو الرصيد بين
+    # اللقطتين كان يمرّ سابقاً بلا أثر على التوقيع فتُطبع فاتورة بأرقام نصف مكتوبة.
+    $signature = Get-CanonicalHash (Get-CanonicalReceiptText $header $lines $true "" $balance)
 
     return [pscustomobject]@{
         Header = $header
         Lines = $lines.ToArray()
         LineCount = $lines.Count
+        Balance = $balance
         Signature = $signature
     }
 }
@@ -765,12 +785,13 @@ function Convert-ToReceiptAmount($Header, $Value) {
     return [double]$Value
 }
 
-function Convert-SnapshotToReceipt($Connection, $Snapshot) {
+# لا تأخذ اتصالاً عمداً: أي استعلام هنا يقع بعد اكتمال فحص الاستقرار، فيمكن أن
+# يعيد قيمة غير التي ثُبِّتت. الرصيد يأتي من اللقطة المستقرة نفسها لا من قراءة
+# جديدة — «ما استقرّ هو ما يُطبع».
+function Convert-SnapshotToReceipt($Snapshot) {
     $header = $Snapshot.Header
-    $balance = [pscustomobject]@{ Previous = 0.0; Current = 0.0; Found = $false }
-    if (-not [string]::IsNullOrWhiteSpace($header.CustomerName)) {
-        $balance = Get-InvoiceDocumentBalance $Connection ([guid]$header.InvoiceGuid)
-    }
+    $balance = if ($null -ne $Snapshot.Balance) { $Snapshot.Balance }
+               else { [pscustomobject]@{ Previous = 0.0; Current = 0.0; Found = $false } }
     $receiptLines = New-Object System.Collections.Generic.List[object]
     $totalQuantity = 0.0
     foreach ($line in @($Snapshot.Lines)) {
@@ -981,7 +1002,7 @@ try {
         $ready = Wait-InvoiceReady $connection ([guid]$selected.InvoiceGuid)
         if (-not $ready.Ready) { throw "The selected invoice is not stable yet. Try again shortly." }
         Import-Module $script:ReceiptModulePath -Force
-        $receipt = Convert-SnapshotToReceipt $connection $ready.Snapshot
+        $receipt = Convert-SnapshotToReceipt $ready.Snapshot
         if ($Mode -eq "PreviewInvoice") {
             $savedPath = Save-OzkReceiptPreview -Receipt $receipt -LogoPath $script:ReceiptLogoPath -Path $PreviewPath
             [pscustomobject]@{
@@ -1050,7 +1071,7 @@ try {
         $ready = Wait-InvoiceReady $connection ([guid]$latest.InvoiceGuid)
         if (-not $ready.Ready) { throw "The latest posted invoice is not stable yet." }
         Import-Module $script:ReceiptModulePath -Force
-        $receipt = Convert-SnapshotToReceipt $connection $ready.Snapshot
+        $receipt = Convert-SnapshotToReceipt $ready.Snapshot
         $savedPath = Save-OzkReceiptPreview -Receipt $receipt -LogoPath $script:ReceiptLogoPath -Path $PreviewPath
         [pscustomobject]@{
             Mode = "PreviewLatest"
@@ -1241,7 +1262,7 @@ try {
                 # بدء التشغيل، يُرفض قبل أي تصيير أو إرسال — بلا استثناء صامت.
                 Assert-CashierTypeGuid ([string]$candidate.TypeGuid) ([int]$candidate.InvoiceNumber)
                 Import-Module $script:ReceiptModulePath -Force
-                $receipt = Convert-SnapshotToReceipt $connection $ready.Snapshot
+                $receipt = Convert-SnapshotToReceipt $ready.Snapshot
 
                 # 1) كل ما يمكن أن يفشل بلا إنشاء أي مهمة طباعة يقع هنا، قبل أي
                 #    علامة: التحقق من الطابعة، وجود الطابور، التصيير، بناء ESC/POS.

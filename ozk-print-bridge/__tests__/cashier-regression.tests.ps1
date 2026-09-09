@@ -70,7 +70,7 @@ $script:InvariantCulture = [Globalization.CultureInfo]::InvariantCulture
 foreach ($signature in @(
     "function Format-CanonicalValue(`$Value) {",
     "function Get-CanonicalLineText(`$Line, [bool]`$IncludeRecordIdentity) {",
-    "function Get-CanonicalReceiptText(`$Header, `$Lines, [bool]`$IncludeRecordIdentity, [string]`$BranchGuid = `"`") {",
+    "function Get-CanonicalReceiptText(`$Header, `$Lines, [bool]`$IncludeRecordIdentity, [string]`$BranchGuid = `"`", `$Balance = `$null) {",
     "function Get-CanonicalHash([string]`$Text) {",
     "function Get-InvoiceFingerprint(`$Candidate, `$Snapshot) {",
     "function Remove-StaleFingerprints(`$RecentFingerprints, [datetime]`$Now, [int]`$MaxAgeSeconds) {"
@@ -300,7 +300,7 @@ $script:InvariantCulture = [Globalization.CultureInfo]::InvariantCulture
 foreach ($signature in @(
     'function Format-CanonicalValue($Value) {',
     'function Get-CanonicalLineText($Line, [bool]$IncludeRecordIdentity) {',
-    'function Get-CanonicalReceiptText($Header, $Lines, [bool]$IncludeRecordIdentity, [string]$BranchGuid = "") {',
+    'function Get-CanonicalReceiptText($Header, $Lines, [bool]$IncludeRecordIdentity, [string]$BranchGuid = "", $Balance = $null) {',
     'function Get-CanonicalHash([string]$Text) {',
     'function Get-InvoiceFingerprint($Candidate, $Snapshot) {'
 )) { . ([scriptblock]::Create((Get-Fn $signature))) }
@@ -1524,6 +1524,174 @@ Test-Case "negative witness: بلا عزل يعود الاستثناء ليحج�
 Test-Case "المصدر: التحضير محاط بمعالجة تعزل الحتمي وتمرّر العابر" {
     Assert-True ($bridgeSrc -match '(?s)\$spoolJob = New-OzkReceiptSpoolJob[^\r\n]*\r?\n\s*\} catch \{\s*\r?\n\s*if \(-not \(Test-PermanentInvoiceFailure \$_\)\) \{ throw \}') "الفشل غير الحتمي يجب أن يُعاد رميه كما كان"
     Assert-True ($bridgeSrc -match 'Event = "permanent_render_failure"') "يجب تسجيل الفشل الحتمي بحدث صريح"
+}
+
+Write-Host "`n== P1-L: الرصيد المحاسبي جزء من فحص الاستقرار =="
+
+. ([scriptblock]::Create((Get-ExtractedFunctionText $bridgeSrc "function Wait-InvoiceReady(`$Connection, [guid]`$InvoiceGuid) {")))
+. ([scriptblock]::Create((Get-ExtractedFunctionText $bridgeSrc "function Convert-ToReceiptAmount(`$Header, `$Value) {")))
+. ([scriptblock]::Create((Get-ExtractedFunctionText $bridgeSrc "function Convert-SnapshotToReceipt(`$Snapshot) {")))
+
+function New-TestBalance([bool]$Found, [double]$Previous = 0, [double]$Current = 0) {
+    return [pscustomobject]@{ Previous = $Previous; Current = $Current; Found = $Found }
+}
+
+# التوقيع كما تحسبه اللقطة الحقيقية: نفس الاستدعاء الموجود في Get-InvoiceSnapshot
+function Get-SnapshotSignatureWithBalance($Snapshot, $Balance) {
+    return Get-CanonicalHash (Get-CanonicalReceiptText $Snapshot.Header $Snapshot.Lines $true "" $Balance)
+}
+
+function New-SnapshotWithBalance($Balance) {
+    $snap = New-Snapshot
+    $snap | Add-Member -NotePropertyName Balance -NotePropertyValue $Balance -Force
+    $snap | Add-Member -NotePropertyName Signature -NotePropertyValue (Get-SnapshotSignatureWithBalance $snap $Balance) -Force
+    return $snap
+}
+
+# محاكاة Wait-InvoiceReady الحقيقية: لقطتان متتاليتان ومقارنة التوقيع.
+# $Sequence هي قائمة اللقطات التي تُعيدها القراءات المتتالية.
+$script:SnapshotQueue = $null
+$script:SnapshotReads = 0
+function Get-InvoiceSnapshot($Connection, [guid]$InvoiceGuid) {
+    $index = [math]::Min($script:SnapshotReads, $script:SnapshotQueue.Count - 1)
+    $script:SnapshotReads++
+    return $script:SnapshotQueue[$index]
+}
+$StabilityMilliseconds = 1
+
+function Invoke-ReadinessOn($Sequence) {
+    $script:SnapshotQueue = @($Sequence)
+    $script:SnapshotReads = 0
+    return Wait-InvoiceReady $null ([guid]::NewGuid())
+}
+
+Test-Case "1) الفاتورة مستقرة والرصيد مستقر → ready" {
+    $balance = New-TestBalance $true 1000 2500
+    $a = New-SnapshotWithBalance $balance
+    $b = New-SnapshotWithBalance $balance
+    $result = Invoke-ReadinessOn @($a, $b)
+    Assert-True $result.Ready "يجب أن تُعتبر جاهزة"
+}
+
+Test-Case "2) الفاتورة مستقرة والرصيد يتغيّر → not ready (جوهر العطل)" {
+    $a = New-SnapshotWithBalance (New-TestBalance $true 1000 2500)
+    $b = New-SnapshotWithBalance (New-TestBalance $true 1000 3900)
+    # نفس بيانات الفاتورة تماماً — الفرق في الرصيد وحده
+    Assert-True ($a.Header.InvoiceTotal -eq $b.Header.InvoiceTotal) "بيانات الفاتورة يجب أن تكون متطابقة"
+    Assert-True ($a.LineCount -eq $b.LineCount) "عدد الأسطر متطابق"
+    $result = Invoke-ReadinessOn @($a, $b)
+    Assert-True (-not $result.Ready) "تغيّر الرصيد يجب أن يمنع الجاهزية"
+}
+
+Test-Case "2ب) بعد استقرار الرصيد تُعتبر جاهزة (إعادة المحاولة تنجح)" {
+    $stable = New-TestBalance $true 1000 3900
+    $result = Invoke-ReadinessOn @((New-SnapshotWithBalance $stable), (New-SnapshotWithBalance $stable))
+    Assert-True $result.Ready "بعد استقرار الرصيد يجب أن تُعتبر جاهزة"
+}
+
+Test-Case "3) BalanceFound=false في القراءتين → ready (لا نشترط وجود الرصيد)" {
+    $none = New-TestBalance $false
+    $result = Invoke-ReadinessOn @((New-SnapshotWithBalance $none), (New-SnapshotWithBalance $none))
+    Assert-True $result.Ready "غياب المستند المحاسبي لا يمنع الطباعة ما دام مستقراً"
+}
+
+Test-Case "4) Found: false ثم true → not ready" {
+    $result = Invoke-ReadinessOn @(
+        (New-SnapshotWithBalance (New-TestBalance $false)),
+        (New-SnapshotWithBalance (New-TestBalance $true 0 500)))
+    Assert-True (-not $result.Ready) "ظهور المستند بين القراءتين يعني أن الترحيل جارٍ"
+}
+
+Test-Case "5) Found: true ثم false → not ready" {
+    $result = Invoke-ReadinessOn @(
+        (New-SnapshotWithBalance (New-TestBalance $true 0 500)),
+        (New-SnapshotWithBalance (New-TestBalance $false)))
+    Assert-True (-not $result.Ready) "اختفاء المستند بين القراءتين يعني أن الترحيل جارٍ"
+}
+
+Test-Case "تغيّر الرصيد السابق وحده يكفي لمنع الجاهزية" {
+    $result = Invoke-ReadinessOn @(
+        (New-SnapshotWithBalance (New-TestBalance $true 1000 2500)),
+        (New-SnapshotWithBalance (New-TestBalance $true 1750 2500)))
+    Assert-True (-not $result.Ready) "الرصيد السابق مطبوع فيجب أن يدخل في الاستقرار"
+}
+
+Test-Case "6) الرصيد يتذبذب ثم يستقر → القيمة المطبوعة هي الأخيرة المستقرة" {
+    $settled = New-TestBalance $true 1000 4200
+    $result = Invoke-ReadinessOn @((New-SnapshotWithBalance $settled), (New-SnapshotWithBalance $settled))
+    Assert-True $result.Ready "يجب أن تستقر"
+    $receipt = Convert-SnapshotToReceipt $result.Snapshot
+    Assert-True ($receipt.BalanceFound) "يجب أن يظهر الرصيد"
+    Assert-True ($receipt.PreviousBalance -eq 1000) "الرصيد السابق يجب أن يكون القيمة المستقرة، وُجد: $($receipt.PreviousBalance)"
+    Assert-True ($receipt.CurrentBalance -eq 4200) "الرصيد الحالي يجب أن يكون القيمة المستقرة، وُجد: $($receipt.CurrentBalance)"
+}
+
+Test-Case "7) تغيّر بيانات الفاتورة والرصيد ثابت → يبقى not ready كما كان" {
+    $balance = New-TestBalance $true 1000 2500
+    $a = New-Snapshot
+    $a | Add-Member -NotePropertyName Balance -NotePropertyValue $balance -Force
+    $a | Add-Member -NotePropertyName Signature -NotePropertyValue (Get-SnapshotSignatureWithBalance $a $balance) -Force
+    $b = New-Snapshot -CustomerName "زبون مختلف"
+    $b | Add-Member -NotePropertyName Balance -NotePropertyValue $balance -Force
+    $b | Add-Member -NotePropertyName Signature -NotePropertyValue (Get-SnapshotSignatureWithBalance $b $balance) -Force
+    $result = Invoke-ReadinessOn @($a, $b)
+    Assert-True (-not $result.Ready) "تغيّر بيانات الفاتورة يجب أن يبقى مانعاً للجاهزية"
+}
+
+Test-Case "8) «ما استقرّ هو ما يُطبع»: لا استعلام رصيد بعد اكتمال الاستقرار" {
+    # Convert-SnapshotToReceipt لم تعد تأخذ اتصالاً أصلاً، فلا سبيل لاستعلام جديد.
+    Assert-True ($bridgeSrc -match 'function Convert-SnapshotToReceipt\(\$Snapshot\)') "يجب ألا تأخذ الدالة اتصالاً"
+    Assert-True ($bridgeSrc -notmatch 'Convert-SnapshotToReceipt \$connection') "لا يجوز تمرير اتصال في أي موضع استدعاء"
+    # ولا يرد استعلام الرصيد إلا داخل اللقطة
+    $balanceCalls = [regex]::Matches($bridgeSrc, '\$balance = Get-InvoiceDocumentBalance')
+    Assert-True ($balanceCalls.Count -eq 1) "يجب أن يُستدعى استعلام الرصيد من موضع واحد فقط (داخل اللقطة)، وُجد: $($balanceCalls.Count)"
+    $snapshotText = Get-ExtractedFunctionText $bridgeSrc "function Get-InvoiceSnapshot(`$Connection, [guid]`$InvoiceGuid) {"
+    Assert-True ($snapshotText -match 'Get-InvoiceDocumentBalance') "الاستدعاء يجب أن يكون داخل Get-InvoiceSnapshot"
+    $convertText = Get-ExtractedFunctionText $bridgeSrc "function Convert-SnapshotToReceipt(`$Snapshot) {"
+    Assert-True ($convertText -notmatch 'Get-InvoiceDocumentBalance') "لا يجوز استعلام الرصيد أثناء بناء الإيصال"
+    Assert-True ($convertText -match '\$Snapshot\.Balance') "يجب أن يستهلك الرصيد المُثبَّت من اللقطة"
+}
+
+Test-Case "الرصيد يُقرأ مرة واحدة لكل لقطة (لا مضاعفة استعلامات)" {
+    $snapshotText = Get-ExtractedFunctionText $bridgeSrc "function Get-InvoiceSnapshot(`$Connection, [guid]`$InvoiceGuid) {"
+    $calls = [regex]::Matches($snapshotText, 'Get-InvoiceDocumentBalance')
+    Assert-True ($calls.Count -eq 1) "استدعاء واحد داخل اللقطة، وُجد: $($calls.Count)"
+    Assert-True ($snapshotText -match 'if \(-not \[string\]::IsNullOrWhiteSpace\(\$header\.CustomerName\)\)') "الشرط الأصلي (لا رصيد بلا اسم زبون) يجب أن يبقى"
+}
+
+Test-Case "9) فشل عابر في استعلام الرصيد → يخرج بأمان بلا طباعة" {
+    $script:BalanceShouldFail = $true
+    function Get-InvoiceDocumentBalance($Connection, [guid]$InvoiceGuid) {
+        if ($script:BalanceShouldFail) { throw "transient ledger query failure" }
+        return New-TestBalance $true 1000 2500
+    }
+    # اللقطة الحقيقية تستدعي الرصيد، ففشله يخرج ولا ينتج إيصالاً
+    Assert-Throws { Get-InvoiceDocumentBalance $null ([guid]::NewGuid()) } "الفشل العابر يجب أن يخرج"
+    $script:BalanceShouldFail = $false
+    $recovered = Get-InvoiceDocumentBalance $null ([guid]::NewGuid())
+    Assert-True ($recovered.Found) "بعد زوال العطل يجب أن ينجح"
+}
+
+Test-Case "10) دلالات الطباعة الناجحة لم تتغيّر" {
+    Assert-True ($bridgeSrc -match 'status = "print_in_flight"') "علامة قيد الإرسال باقية"
+    Assert-True ($bridgeSrc -match 'Event = "permanent_render_failure"') "عزل الفشل الحتمي باقٍ"
+    Assert-True ($bridgeSrc -match 'submitted_to_spooler:') "دلالة التسليم للطابور باقية"
+    # بصمة كشف التكرار لم يدخلها الرصيد: تصف البيعة لا حالة الحساب
+    $fingerprintText = Get-ExtractedFunctionText $bridgeSrc "function Get-InvoiceFingerprint(`$Candidate, `$Snapshot) {"
+    Assert-True ($fingerprintText -notmatch 'Balance') "الرصيد يجب ألا يدخل في بصمة التكرار"
+}
+
+Test-Case "negative witness: إخراج الرصيد من التوقيع يعيد اعتبار الفاتورة مستقرة خطأً" {
+    # التوقيع القديم: بلا رصيد إطلاقاً
+    $a = New-Snapshot; $b = New-Snapshot
+    $legacyA = Get-CanonicalHash (Get-CanonicalReceiptText $a.Header $a.Lines $true)
+    $legacyB = Get-CanonicalHash (Get-CanonicalReceiptText $b.Header $b.Lines $true)
+    Assert-True ($legacyA -eq $legacyB) "التوقيع القديم لا يرى الرصيد أصلاً"
+    # التوقيع الحالي يفرّق بين رصيدين مختلفين لنفس الفاتورة
+    $withA = Get-SnapshotSignatureWithBalance $a (New-TestBalance $true 1000 2500)
+    $withB = Get-SnapshotSignatureWithBalance $b (New-TestBalance $true 1000 3900)
+    Assert-True ($withA -ne $withB) "التوقيع الحالي يجب أن يلتقط تغيّر الرصيد"
+    Assert-True ($legacyA -ne $withA) "ضمّ الرصيد يجب أن يغيّر التوقيع فعلاً"
 }
 
 Write-Host "`n$($script:passed) passed, $($script:failed) failed"
