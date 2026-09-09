@@ -13,7 +13,7 @@
 // إن عاد أحدٌ إلى نزع الوسوم نصّياً.
 // ============================================================================
 import { chromium } from "playwright";
-import { createMarkupRowReader, flattenForMarkup, MARKUP_CELL_SEPARATOR } from "./lib/markup-rows.mjs";
+import { createMarkupRowReader, flattenForMarkup } from "./lib/markup-rows.mjs";
 
 let failed = 0;
 const check = (name, condition, detail) => {
