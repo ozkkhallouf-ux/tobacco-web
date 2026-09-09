@@ -12,6 +12,17 @@ function money(n) {
   return x.toLocaleString("en-US", { maximumFractionDigits: 3 });
 }
 
+// تسمية العملة الفعلية للفاتورة (my000.CurrencyISO) — لا نص «ل.س» ثابت.
+// USD → «$ 1,350»  ·  SYP أو مجهول → «1,350 ل.س»  ·  غيرهما → الرمز ISO.
+function amt(inv, value) {
+  const iso = String(inv && inv.currencyIso || "").trim().toUpperCase();
+  // dir="ltr" يثبّت ترتيب الرمز والرقم داخل صفحة RTL، فلا يقفز «$» بين
+  // بداية النص ونهايته حسب سياق الخلية.
+  if (iso === "USD") return `<span dir="ltr">$ ${money(value)}</span>`;
+  if (iso === "SYP" || iso === "") return `<span dir="ltr">${money(value)}</span> ل.س`;
+  return `<span dir="ltr">${money(value)} ${iso}</span>`;
+}
+
 function buildInvoiceHtml(inv) {
   const items = Array.isArray(inv.items) ? inv.items : [];
   const net = inv.total - inv.discount;
@@ -46,6 +57,11 @@ function buildInvoiceHtml(inv) {
           margin-bottom:16px; gap:10px; }
   .brand { font-weight:900; font-size:20px; }
   .brand small { display:block; font-weight:400; font-size:11px; color:var(--muted); }
+  .reg-line { text-align:center; font-size:12px; font-weight:700; color:var(--muted);
+              margin-bottom:14px; }
+  .sale-desc { text-align:center; font-size:12.5px; font-weight:700; color:var(--ink);
+               background:var(--cream); border:1px solid var(--line); border-radius:8px;
+               padding:8px 10px; margin:10px 0; }
   .title { text-align:left; }
   .title h1 { margin:0; font-size:19px; color:var(--gold); white-space:nowrap; }
   .title span { font-size:11px; color:var(--muted); }
@@ -100,13 +116,15 @@ function buildInvoiceHtml(inv) {
       </div>
     </div>
 
+    <div class="reg-line">رقم السجل التجاري: 0310109105</div>
+
     <div class="cust">
       <div>
         <div class="nm">${esc(inv.customer || "—")}</div>
       </div>
       <div class="amount-box">
         <div class="lbl">إجمالي الفاتورة</div>
-        <div class="big">${money(inv.total)} ل.س</div>
+        <div class="big">${amt(inv, inv.total)}</div>
       </div>
     </div>
 
@@ -115,16 +133,22 @@ function buildInvoiceHtml(inv) {
       ${rows}
       <tr class="totrow">
         <td colspan="2">إجمالي الفاتورة</td>
-        <td>${money(inv.total)} ل.س</td>
+        <td>${amt(inv, inv.total)}</td>
       </tr>
     </table>
 
     <div class="rows">
-      ${inv.discount > 0 ? `<div class="row"><span>الحسم</span><b>${money(inv.discount)} ل.س</b></div>` : ""}
-      ${inv.discount > 0 ? `<div class="row"><span>الصافي</span><b>${money(net)} ل.س</b></div>` : ""}
-      <div class="row"><span>المدفوع</span><b>${money(inv.firstPay)} ل.س</b></div>
-      <div class="row"><span>الرصيد الحالي</span><b>${money(remaining)} ل.س</b></div>
+      ${inv.discount > 0 ? `<div class="row"><span>الحسم</span><b>${amt(inv, inv.discount)}</b></div>` : ""}
+      ${inv.discount > 0 ? `<div class="row"><span>الصافي</span><b>${amt(inv, net)}</b></div>` : ""}
+      <div class="row"><span>المدفوع</span><b>${amt(inv, inv.firstPay)}</b></div>
+      <div class="row"><span>المتبقي من هذه الفاتورة</span><b>${amt(inv, remaining)}</b></div>
+      ${inv.customerBalanceFound
+        ? `<div class="row"><span>الرصيد الحالي للزبون</span><b>${amt(inv, inv.customerBalance)}</b></div>`
+        : `<div class="row"><span>الرصيد الحالي للزبون</span><b style="color:var(--muted)">غير متاح</b></div>`
+      }
     </div>
+
+    <div class="sale-desc">صفة البيع: من تاجر جملة الجملة إلى تاجر جملة ومفرق</div>
 
     <div class="stamp-wrap">
       <div class="seal">
