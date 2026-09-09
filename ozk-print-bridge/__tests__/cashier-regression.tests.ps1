@@ -1173,5 +1173,127 @@ Test-Case "المصدر: بلوغ السقف يُسجَّل صراحةً لا ص
     Assert-True ($bridgeSrc -match 'Event = "candidate_drain_paused"') "يجب تسجيل توقّف التصريف عند السقف"
 }
 
+Write-Host "`n== P1-J: المولّد يُنتج VBS صالحاً فعلاً (اختبار على الناتج لا على المصدر) =="
+
+# مفسّر مصغّر لتعبير VBScript: سلاسل حرفية (""" للاقتباس المحرّف) ومعرّفات
+# موصولة بـ&، وهو شكل التعبير الذي يبنيه المولّد. يرمي عند أي صياغة يرفضها
+# مفسّر VBScript فعلاً — سلسلة غير مغلقة، رمز خارج سلسلة، أو عامل ناقص.
+function ConvertFrom-VbsExpression([string]$Expression, [hashtable]$Variables) {
+    $i = 0
+    $n = $Expression.Length
+    $builder = New-Object System.Text.StringBuilder
+    $expectOperand = $true
+    while ($true) {
+        while ($i -lt $n -and $Expression[$i] -eq ' ') { $i++ }
+        if ($i -ge $n) { break }
+        if ($expectOperand) {
+            if ($Expression[$i] -eq '"') {
+                $i++
+                $closed = $false
+                while ($i -lt $n) {
+                    if ($Expression[$i] -eq '"') {
+                        if (($i + 1) -lt $n -and $Expression[$i + 1] -eq '"') {
+                            [void]$builder.Append('"'); $i += 2; continue
+                        }
+                        $i++; $closed = $true; break
+                    }
+                    [void]$builder.Append($Expression[$i]); $i++
+                }
+                if (-not $closed) { throw "VBS syntax error: unterminated string literal" }
+            } elseif ($Expression[$i] -match '[A-Za-z_]') {
+                $start = $i
+                while ($i -lt $n -and $Expression[$i] -match '[A-Za-z0-9_]') { $i++ }
+                $name = $Expression.Substring($start, $i - $start)
+                if (-not $Variables.ContainsKey($name)) { throw "VBS syntax error: unknown identifier '$name'" }
+                [void]$builder.Append([string]$Variables[$name])
+            } else {
+                throw "VBS syntax error: unexpected token '$($Expression[$i])' at $i"
+            }
+            $expectOperand = $false
+        } else {
+            if ($Expression[$i] -eq '&') { $i++; $expectOperand = $true }
+            else {
+                $tailText = $Expression.Substring($i, [math]::Min(14, $n - $i))
+                throw "VBS syntax error: missing '&' before '$tailText'"
+            }
+        }
+    }
+    if ($expectOperand) { throw "VBS syntax error: expression ends with a dangling operator" }
+    return $builder.ToString()
+}
+
+Test-Case "المفسّر المصغّر يميّز الصيغة المعطوبة عن الصحيحة" {
+    # علامتان: سلسلة فارغة ثم مسار خارج أي سلسلة — ترفضها VBScript
+    Assert-Throws { ConvertFrom-VbsExpression '""C:\Windows\powershell.exe"" -NoProfile' @{} } "الصيغة بعلامتين يجب أن تُرفض"
+    # ثلاث علامات: فتح + اقتباس محرّف — هي الصيغة الصحيحة
+    $value = ConvertFrom-VbsExpression '"""C:\Windows\powershell.exe"" -NoProfile"' @{}
+    Assert-True ($value -eq '"C:\Windows\powershell.exe" -NoProfile') "الصيغة بثلاث علامات يجب أن تعطي مساراً مُقتبساً، أعطت: [$value]"
+}
+
+# يُشغَّل المولّد الحقيقي إلى مسار مؤقت خارج المستودع. لا Scheduled Task ولا
+# تثبيت ولا طباعة — السكربت نفسه يوثّق أنه يطبع ملفاً فقط.
+$script:GeneratedCmdExpression = $null
+$script:GeneratorError = $null
+try {
+    $generatorPath = Join-Path (Join-Path $bridgeDir "install") "New-OzkPrintBridgeTaskWrapper.ps1"
+    $generatedPath = Join-Path ([IO.Path]::GetTempPath()) ("ozk-wrapper-" + [guid]::NewGuid().ToString("N") + ".vbs")
+    try {
+        & $generatorPath -OutputPath $generatedPath | Out-Null
+        $generatedText = Get-Content -LiteralPath $generatedPath -Raw -Encoding Unicode
+        $cmdLine = @($generatedText -split "`r?`n" | Where-Object { $_ -like 'cmd = *' })[0]
+        if ([string]::IsNullOrWhiteSpace($cmdLine)) { throw "لم يُعثر على سطر cmd في الناتج" }
+        $script:GeneratedCmdExpression = $cmdLine.Substring("cmd = ".Length)
+    } finally {
+        if (Test-Path -LiteralPath $generatedPath) { Remove-Item -LiteralPath $generatedPath -Force }
+    }
+} catch {
+    $script:GeneratorError = [string]$_.Exception.Message
+}
+
+$script:FakeBridgeRoot = 'C:\Users\Tester\AppData\Local\OZK-TOBACCO\PrintBridge'
+
+Test-Case "المولّد يُنتج ملفاً فيه سطر cmd" {
+    Assert-True ($null -eq $script:GeneratorError) "تعذّر توليد الـwrapper: $($script:GeneratorError)"
+    Assert-True (-not [string]::IsNullOrWhiteSpace($script:GeneratedCmdExpression)) "يجب استخراج تعبير cmd"
+}
+
+Test-Case "سطر cmd المولَّد صالح نحوياً كتعبير VBScript" {
+    $value = ConvertFrom-VbsExpression $script:GeneratedCmdExpression @{ bridgeRoot = $script:FakeBridgeRoot }
+    Assert-True (-not [string]::IsNullOrWhiteSpace($value)) "يجب أن ينتج قيمة"
+}
+
+Test-Case "قيمة cmd تبدأ بمسار powershell.exe محاطاً باقتباسين" {
+    $value = ConvertFrom-VbsExpression $script:GeneratedCmdExpression @{ bridgeRoot = $script:FakeBridgeRoot }
+    $expected = '"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"'
+    Assert-True ($value.StartsWith($expected)) "يجب أن تبدأ القيمة بـ$expected — بدأت بـ: [$($value.Substring(0, [math]::Min(70, $value.Length)))]"
+}
+
+Test-Case "مسار -File مُقتبس بشكل صحيح مع bridgeRoot الفعلي" {
+    $value = ConvertFrom-VbsExpression $script:GeneratedCmdExpression @{ bridgeRoot = $script:FakeBridgeRoot }
+    Assert-True ($value -like "*-File `"$($script:FakeBridgeRoot)\ozk-print-bridge-watchdog.ps1`"*") "مسار الـwatchdog يجب أن يكون مُقتبساً وموصولاً بـbridgeRoot"
+}
+
+Test-Case "بقية الوسائط مُقتبسة ومحفوظة كما هي (بلا تغيير في السلوك)" {
+    $value = ConvertFrom-VbsExpression $script:GeneratedCmdExpression @{ bridgeRoot = $script:FakeBridgeRoot }
+    Assert-True ($value -like "*-BridgeRoot `"$($script:FakeBridgeRoot)`"*") "-BridgeRoot يجب أن يكون مُقتبساً"
+    Assert-True ($value -like '*-PrinterName "XPRINTER XP-T80Q 80MM"*') "-PrinterName يجب أن يبقى كما هو ومُقتبساً"
+    Assert-True ($value -like "*-StatePath `"$($script:FakeBridgeRoot)\state.json`"*") "-StatePath يجب أن يكون مُقتبساً"
+    Assert-True ($value -like "*-LogPath `"$($script:FakeBridgeRoot)\logs\events.jsonl`"*") "-LogPath يجب أن يكون مُقتبساً"
+    Assert-True ($value -like '*-NoProfile*' -and $value -like '*-NonInteractive*' -and $value -like '*-ExecutionPolicy Bypass*') "وسائط PowerShell يجب أن تبقى"
+    Assert-True ($value -like '*-ConfirmPhysicalPrint*') "-ConfirmPhysicalPrint يجب أن يبقى ممرَّراً"
+}
+
+Test-Case "الكاشير فقط: لا -IncludeWholesale في الأمر المولَّد" {
+    $value = ConvertFrom-VbsExpression $script:GeneratedCmdExpression @{ bridgeRoot = $script:FakeBridgeRoot }
+    Assert-True ($value -notlike '*-IncludeWholesale*') "لا يجوز تمرير -IncludeWholesale في wrapper الكاشير"
+}
+
+Test-Case "لا اقتباس ناقص ولا زائد في القيمة النهائية" {
+    $value = ConvertFrom-VbsExpression $script:GeneratedCmdExpression @{ bridgeRoot = $script:FakeBridgeRoot }
+    $quoteCount = ([regex]::Matches($value, '"')).Count
+    Assert-True (($quoteCount % 2) -eq 0) "عدد الاقتباسات في القيمة النهائية يجب أن يكون زوجياً، وُجد: $quoteCount"
+    Assert-True ($quoteCount -eq 12) "يجب وجود ستة وسائط مُقتبسة (12 اقتباساً): exe و-File و-BridgeRoot و-PrinterName و-StatePath و-LogPath — وُجد: $quoteCount"
+}
+
 Write-Host "`n$($script:passed) passed, $($script:failed) failed"
 if ($script:failed -gt 0) { exit 1 }

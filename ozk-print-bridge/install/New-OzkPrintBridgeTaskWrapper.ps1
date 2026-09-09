@@ -40,18 +40,23 @@ $stateRel    = 'state.json'
 $logRel      = 'logs\events.jsonl'
 $printerEsc  = VbsEscape $PrinterName
 
+# اقتباسات طرفَي السلسلة: في البداية ثلاث علامات — الأولى تفتح سلسلة VBScript
+# والثانيتان اقتباسٌ محرّف يظهر في القيمة ليغلّف مسار powershell.exe. وفي النهاية
+# أربع — اقتباس محرّف يغلق قيمة -LogPath ثم علامة تُنهي السلسلة نفسها.
+# قبل هذا الإصلاح كان الطرفان ناقصَين علامةً كلٌّ منهما: البداية تُنتج سلسلة فارغة
+# يتبعها المسار خارج أي سلسلة، والنهاية تترك سلسلة مفتوحة — أي VBS لا يعمل إطلاقاً.
 # نبني سطر VBScript المسؤول عن تركيب سطر أوامر PowerShell بالكامل داخل VBScript
 # نفسه وقت التشغيل (concatenation بـ &)، بدل تضمين مسار ثابت هنا.
 # ملاحظة: لا -IncludeWholesale هنا افتراضياً — الكاشير فقط.
 # ملاحظة: -ConfirmPhysicalPrint دائماً ممرّر — لا طباعة صامتة بدون تأكيد فيزيائي.
 $cmdBuilderLine =
-    'cmd = ' + $q + $q + $psExe + $q + $q + ' -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ' + $q + $q + '" & bridgeRoot & "\' + $watchdogRel + '" & "' + $q + $q +
+    'cmd = ' + $q + $q + $q + $psExe + $q + $q + ' -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ' + $q + $q + '" & bridgeRoot & "\' + $watchdogRel + '" & "' + $q + $q +
     ' -BridgeRoot ' + $q + $q + '" & bridgeRoot & "' + $q + $q +
     ' -PollMilliseconds ' + $PollMilliseconds +
     ' -PrinterName ' + $q + $q + $printerEsc + $q + $q +
     ' -ConfirmPhysicalPrint' +
     ' -StatePath ' + $q + $q + '" & bridgeRoot & "\' + $stateRel + '" & "' + $q + $q +
-    ' -LogPath ' + $q + $q + '" & bridgeRoot & "\' + $logRel + '" & "' + $q + $q
+    ' -LogPath ' + $q + $q + '" & bridgeRoot & "\' + $logRel + '" & "' + $q + $q + $q
 
 $vbsLines = @(
     'Set shell = CreateObject("WScript.Shell")'
