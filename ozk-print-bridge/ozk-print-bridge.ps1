@@ -45,8 +45,28 @@ $script:WholesaleTypeGuids = @(
     "7f5b0921-61f3-4f23-a1f4-fbfae4144bf4",
     "4a827bee-6ae1-4474-802b-970068872fcc"
 )
-$script:ReceiptModulePath = Join-Path $PSScriptRoot "ozk-print-bridge\OzkReceiptRenderer.psm1"
-$script:ReceiptLogoPath = Join-Path $PSScriptRoot "ozk-print-bridge\assets\ozk-receipt-horse-logo.png"
+# --- Cashier-only responsibility boundary (P1-B) --------------------------------
+# طباعة فواتير الجملة يملكها مراقب ameen-autoprint في المستودع (PR #208)، وهو
+# يوجّهها إلى طابعة الفواتير الخاصة بها. هذا الجسر مسؤول عن الكاشير (Retail)
+# فقط، ولا يملك أي مسار صالح لطباعة فاتورة جملة: طابعته الوحيدة هي الحرارية
+# 80mm، وإرسال فاتورة جملة إليها عطل تجاري لا مجرد خطأ تنسيق. لذلك يُرفض النوع
+# صراحةً قبل أي استعلام أو تصيير أو أمر طباعة — بلا fallback وبلا إعادة توجيه.
+$script:CashierInvoiceTypes = @("Retail")
+
+function Assert-CashierTypeGuid([string]$TypeGuid, [int]$InvoiceNumber) {
+    if ([string]$TypeGuid -ne $script:RetailTypeGuid) {
+        throw "Refusing to print invoice $InvoiceNumber : its type GUID '$TypeGuid' is not the cashier (Retail) type. Wholesale invoices are owned by the Ameen wholesale autoprint watcher and must never reach the cashier thermal printer."
+    }
+}
+
+function Assert-CashierInvoiceType([string]$Name) {
+    if ($script:CashierInvoiceTypes -notcontains $Name) {
+        throw "OZK Print Bridge prints cashier (Retail) invoices only. Invoice type '$Name' is a wholesale type owned by the Ameen wholesale autoprint watcher; the cashier thermal printer must never receive it. Refusing before any query, render, or print."
+    }
+}
+
+$script:ReceiptModulePath = Join-Path $PSScriptRoot "OzkReceiptRenderer.psm1"
+$script:ReceiptLogoPath = Join-Path $PSScriptRoot "assets\ozk-receipt-horse-logo.png"
 
 # --- Secondary duplicate-invoice safety net (Observe mode only) -----------------
 # Ameen can save the SAME cashier sale twice within a few seconds and create a
@@ -705,6 +725,13 @@ function Get-RedactedInvoiceEvent($Candidate, $ReadyResult, [long]$DetectionMill
     }
 }
 
+# لا يجوز أبداً تسليح الطباعة الفيزيائية بينما أنواع الجملة مُدرَجة في الرصد:
+# ذلك المزيج هو المسار الوحيد الذي كان يمكن أن يوصل فاتورة جملة إلى الحرارية.
+# يُرفض عند بدء التشغيل قبل أي اتصال بقاعدة البيانات — لا يقتصر على واجهة الـUI.
+if ($IncludeWholesale -and $ConfirmPhysicalPrint) {
+    throw "OZK Print Bridge refuses to arm physical printing while wholesale invoice types are included (-IncludeWholesale with -ConfirmPhysicalPrint). Wholesale printing is owned by the Ameen wholesale autoprint watcher; the cashier thermal printer must never receive a wholesale invoice."
+}
+
 $connectionInfo = $null
 try {
     $connectionInfo = New-ReadOnlyConnection
@@ -713,6 +740,7 @@ try {
     $fromDate = (Get-Date).Date.AddDays(-$LookbackDays)
 
     if ($Mode -eq "PreviewInvoice" -or $Mode -eq "PrintInvoice") {
+        Assert-CashierInvoiceType $InvoiceType
         if ($InvoiceNumber -le 0) { throw "InvoiceNumber is required for manual preview or printing." }
         $invoiceTypeGuid = Get-InvoiceTypeGuid $InvoiceType
         $selected = Get-PostedInvoiceByNumber $connection $invoiceTypeGuid $InvoiceNumber $InvoiceDate
@@ -906,6 +934,9 @@ try {
             $event = Get-RedactedInvoiceEvent $candidate $ready $pollWatch.ElapsedMilliseconds
             $stateStatus = "observed_waiting_for_print_activation"
             if ($ConfirmPhysicalPrint) {
+                # طبقة دفاع ثانية: حتى لو وصل مرشّح غير كاشير إلى هنا رغم حارس
+                # بدء التشغيل، يُرفض قبل أي تصيير أو إرسال — بلا استثناء صامت.
+                Assert-CashierTypeGuid ([string]$candidate.TypeGuid) ([int]$candidate.InvoiceNumber)
                 Import-Module $script:ReceiptModulePath -Force
                 $receipt = Convert-SnapshotToReceipt $connection $ready.Snapshot
                 [void](Send-OzkReceiptToPrinter -Receipt $receipt -LogoPath $script:ReceiptLogoPath -PrinterName $PrinterName -ConfirmPhysicalPrint)

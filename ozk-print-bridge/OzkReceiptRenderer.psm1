@@ -129,6 +129,7 @@ public static class OzkRawThermalPrinter
 
 $script:ReceiptWidth = 576
 $script:ReceiptDpi = 203
+$script:ReceiptMaxHeight = 15000
 $script:CashierPrinterName = "XPRINTER XP-T80Q 80MM"
 $script:Invariant = [Globalization.CultureInfo]::InvariantCulture
 
@@ -200,26 +201,28 @@ function Get-OzkLineHeight($Graphics, [string]$Name, $Font, [float]$Width) {
     }
 }
 
-function New-OzkReceiptBitmap {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory = $true)]$Receipt,
-        [Parameter(Mandatory = $true)][string]$LogoPath
-    )
-
-    if (-not (Test-Path -LiteralPath $LogoPath -PathType Leaf)) { throw "Receipt logo not found: $LogoPath" }
-    $canvasHeight = 2600
-    $bitmap = New-Object Drawing.Bitmap($script:ReceiptWidth, $canvasHeight, [Drawing.Imaging.PixelFormat]::Format24bppRgb)
+function New-OzkReceiptCanvas([int]$Height) {
+    $bitmap = New-Object Drawing.Bitmap($script:ReceiptWidth, $Height, [Drawing.Imaging.PixelFormat]::Format24bppRgb)
     $bitmap.SetResolution($script:ReceiptDpi, $script:ReceiptDpi)
-    $graphics = [Drawing.Graphics]::FromImage($bitmap)
-    $logo = $null
+    return $bitmap
+}
+
+function New-OzkReceiptGraphics($Bitmap) {
+    $graphics = [Drawing.Graphics]::FromImage($Bitmap)
+    $graphics.Clear([Drawing.Color]::White)
+    $graphics.SmoothingMode = [Drawing.Drawing2D.SmoothingMode]::HighQuality
+    $graphics.InterpolationMode = [Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+    $graphics.TextRenderingHint = [Drawing.Text.TextRenderingHint]::SingleBitPerPixelGridFit
+    return $graphics
+}
+
+# ترسم الإيصال كاملاً على السطح المُمرَّر وتعيد موضع المؤشر النهائي $y — أي
+# الارتفاع الذي يحتاجه هذا الإيصال بالضبط. تُستدعى مرتين بنفس المدخلات: مرة
+# للقياس على لوحة مؤقتة، ومرة للرسم الفعلي. لأن الاستدعاءين ينفّذان هذا الكود
+# نفسه حرفياً، لا يمكن للقياس أن ينحرف عن التخطيط المرسوم.
+function Invoke-OzkReceiptDrawing($Graphics, $Receipt, $Logo) {
     $fonts = New-Object System.Collections.Generic.List[Drawing.Font]
     try {
-        $graphics.Clear([Drawing.Color]::White)
-        $graphics.SmoothingMode = [Drawing.Drawing2D.SmoothingMode]::HighQuality
-        $graphics.InterpolationMode = [Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
-        $graphics.TextRenderingHint = [Drawing.Text.TextRenderingHint]::SingleBitPerPixelGridFit
-
         $titleFont = New-OzkFont 54 ([Drawing.FontStyle]::Bold); $fonts.Add($titleFont)
         $subtitleFont = New-OzkFont 22; $fonts.Add($subtitleFont)
         $strongFont = New-OzkFont 22 ([Drawing.FontStyle]::Bold); $fonts.Add($strongFont)
@@ -234,7 +237,6 @@ function New-OzkReceiptBitmap {
         $saleFont = New-OzkFont 21 ([Drawing.FontStyle]::Bold); $fonts.Add($saleFont)
         $footerFont = New-OzkFont 22 ([Drawing.FontStyle]::Bold); $fonts.Add($footerFont)
 
-        $logo = [Drawing.Image]::FromFile((Resolve-Path -LiteralPath $LogoPath).Path)
         $graphics.DrawImage($logo, (New-Object Drawing.RectangleF(22, 0, 150, 168)))
         Draw-OzkText $graphics ([string]$Receipt.MerchantName) $titleFont 170 0 386 75 "Center" $true
         Draw-OzkText $graphics ([string]$Receipt.Subtitle) $subtitleFont 170 72 386 39 "Center" $true
@@ -340,22 +342,68 @@ function New-OzkReceiptBitmap {
         Draw-OzkText $graphics "◆ ─────  شكراً لتعاملكم معنا  ───── ◆" $footerFont 20 $y 536 50 "Center" $true
         $y += 64
 
-        $finalHeight = [math]::Min($canvasHeight, [math]::Ceiling($y))
-        $cropped = New-Object Drawing.Bitmap($script:ReceiptWidth, $finalHeight, [Drawing.Imaging.PixelFormat]::Format24bppRgb)
-        $cropped.SetResolution($script:ReceiptDpi, $script:ReceiptDpi)
-        $cropGraphics = [Drawing.Graphics]::FromImage($cropped)
+        return $y
+    } finally {
+        foreach ($font in $fonts) { $font.Dispose() }
+    }
+}
+
+function New-OzkReceiptBitmap {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]$Receipt,
+        [Parameter(Mandatory = $true)][string]$LogoPath
+    )
+
+    if (-not (Test-Path -LiteralPath $LogoPath -PathType Leaf)) { throw "Receipt logo not found: $LogoPath" }
+
+    $logo = $null
+    try {
+        $logo = [Drawing.Image]::FromFile((Resolve-Path -LiteralPath $LogoPath).Path)
+
+        # تمريرة قياس على لوحة بارتفاع 1: الرسم يُقصّ بلا ضرر، والمهم هو $y
+        # الناتج عن نفس حسابات التخطيط الفعلية (بما فيها MeasureString لالتفاف
+        # أسماء المواد)، فلا يوجد تقدير مستقل يمكن أن يختلف عن الرسم.
+        $measureBitmap = New-OzkReceiptCanvas 1
         try {
-            $cropGraphics.Clear([Drawing.Color]::White)
-            $cropGraphics.DrawImageUnscaled($bitmap, 0, 0)
+            $measureGraphics = New-OzkReceiptGraphics $measureBitmap
+            try {
+                $measuredHeight = Invoke-OzkReceiptDrawing $measureGraphics $Receipt $logo
+            } finally {
+                $measureGraphics.Dispose()
+            }
         } finally {
-            $cropGraphics.Dispose()
+            $measureBitmap.Dispose()
         }
-        return $cropped
+
+        $requiredHeight = [int][math]::Ceiling($measuredHeight)
+        if ($requiredHeight -lt 1) { $requiredHeight = 1 }
+
+        # حد أمان مُلزم: بلا سقف يصبح ارتفاع اللوحة دالةً في بيانات الفاتورة،
+        # فقد يُطلب تخصيص ذاكرة ضخم من صف واحد تالف. السقف 15000 بكسل عند 203
+        # DPI ≈ 1.87 متر ورق ≈ 245 بنداً — أبعد بكثير من أي إيصال كاشير حقيقي،
+        # ويبقى تخصيصاً محدوداً (‏576×15000×3 ≈ 26 ميغابايت).
+        # عند التجاوز نفشل صراحةً: طباعة إيصال مقصوص بصمت (سلوك النسخة السابقة)
+        # تُخرج فاتورة بلا إجماليات ولا تذييل ويظنها الكاشير سليمة.
+        if ($requiredHeight -gt $script:ReceiptMaxHeight) {
+            throw "Receipt layout needs $requiredHeight px which exceeds the $($script:ReceiptMaxHeight) px safety limit; refusing to print a silently truncated receipt."
+        }
+
+        $bitmap = New-OzkReceiptCanvas $requiredHeight
+        try {
+            $graphics = New-OzkReceiptGraphics $bitmap
+            try {
+                [void](Invoke-OzkReceiptDrawing $graphics $Receipt $logo)
+            } finally {
+                $graphics.Dispose()
+            }
+        } catch {
+            $bitmap.Dispose()
+            throw
+        }
+        return $bitmap
     } finally {
         if ($null -ne $logo) { $logo.Dispose() }
-        foreach ($font in $fonts) { $font.Dispose() }
-        $graphics.Dispose()
-        $bitmap.Dispose()
     }
 }
 

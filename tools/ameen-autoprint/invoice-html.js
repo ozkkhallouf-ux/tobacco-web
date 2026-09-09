@@ -12,6 +12,17 @@ function money(n) {
   return x.toLocaleString("en-US", { maximumFractionDigits: 3 });
 }
 
+// تسمية العملة الفعلية للفاتورة (my000.CurrencyISO) — لا نص «ل.س» ثابت.
+// USD → «$ 1,350»  ·  SYP أو مجهول → «1,350 ل.س»  ·  غيرهما → الرمز ISO.
+function amt(inv, value) {
+  const iso = String(inv && inv.currencyIso || "").trim().toUpperCase();
+  // dir="ltr" يثبّت ترتيب الرمز والرقم داخل صفحة RTL، فلا يقفز «$» بين
+  // بداية النص ونهايته حسب سياق الخلية.
+  if (iso === "USD") return `<span dir="ltr">$ ${money(value)}</span>`;
+  if (iso === "SYP" || iso === "") return `<span dir="ltr">${money(value)}</span> ل.س`;
+  return `<span dir="ltr">${money(value)} ${iso}</span>`;
+}
+
 function buildInvoiceHtml(inv) {
   const items = Array.isArray(inv.items) ? inv.items : [];
   const net = inv.total - inv.discount;
@@ -113,7 +124,7 @@ function buildInvoiceHtml(inv) {
       </div>
       <div class="amount-box">
         <div class="lbl">إجمالي الفاتورة</div>
-        <div class="big">${money(inv.total)} ل.س</div>
+        <div class="big">${amt(inv, inv.total)}</div>
       </div>
     </div>
 
@@ -122,17 +133,17 @@ function buildInvoiceHtml(inv) {
       ${rows}
       <tr class="totrow">
         <td colspan="2">إجمالي الفاتورة</td>
-        <td>${money(inv.total)} ل.س</td>
+        <td>${amt(inv, inv.total)}</td>
       </tr>
     </table>
 
     <div class="rows">
-      ${inv.discount > 0 ? `<div class="row"><span>الحسم</span><b>${money(inv.discount)} ل.س</b></div>` : ""}
-      ${inv.discount > 0 ? `<div class="row"><span>الصافي</span><b>${money(net)} ل.س</b></div>` : ""}
-      <div class="row"><span>المدفوع</span><b>${money(inv.firstPay)} ل.س</b></div>
-      <div class="row"><span>المتبقي من هذه الفاتورة</span><b>${money(remaining)} ل.س</b></div>
+      ${inv.discount > 0 ? `<div class="row"><span>الحسم</span><b>${amt(inv, inv.discount)}</b></div>` : ""}
+      ${inv.discount > 0 ? `<div class="row"><span>الصافي</span><b>${amt(inv, net)}</b></div>` : ""}
+      <div class="row"><span>المدفوع</span><b>${amt(inv, inv.firstPay)}</b></div>
+      <div class="row"><span>المتبقي من هذه الفاتورة</span><b>${amt(inv, remaining)}</b></div>
       ${inv.customerBalanceFound
-        ? `<div class="row"><span>الرصيد الحالي للزبون</span><b>${money(inv.customerBalance)} ل.س</b></div>`
+        ? `<div class="row"><span>الرصيد الحالي للزبون</span><b>${amt(inv, inv.customerBalance)}</b></div>`
         : `<div class="row"><span>الرصيد الحالي للزبون</span><b style="color:var(--muted)">غير متاح</b></div>`
       }
     </div>

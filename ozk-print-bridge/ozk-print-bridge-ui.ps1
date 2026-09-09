@@ -53,9 +53,9 @@ function Add-FieldLabel([string]$Text, [int]$Top) {
 Add-FieldLabel "نوع الفاتورة" 115
 $typeBox = New-Object Windows.Forms.ComboBox
 $typeBox.DropDownStyle = "DropDownList"
+# الكاشير فقط. أنواع الجملة ("مبيعات" و"مبيعات ل.س") أُزيلت عمداً: طباعة الجملة
+# يملكها مراقب ameen-autoprint، وهذه الواجهة لا تطبع إلا على الحرارية 80mm.
 [void]$typeBox.Items.Add("مبيعات مركز")
-[void]$typeBox.Items.Add("مبيعات")
-[void]$typeBox.Items.Add("مبيعات ل.س")
 $typeBox.SelectedIndex = 0
 $typeBox.SetBounds(115, 115, 240, 34)
 $form.Controls.Add($typeBox)
@@ -95,8 +95,6 @@ $form.Controls.Add($printButton)
 
 $typeMap = @{
     "مبيعات مركز" = "Retail"
-    "مبيعات" = "Wholesale"
-    "مبيعات ل.س" = "WholesaleSyp"
 }
 
 function Get-InvoiceSelection {
@@ -104,10 +102,14 @@ function Get-InvoiceSelection {
     if (-not [int]::TryParse($numberBox.Text.Trim(), [ref]$number) -or $number -le 0) {
         throw "أدخل رقم فاتورة صحيحاً."
     }
+    $type = $typeMap[[string]$typeBox.SelectedItem]
+    if ($type -ne "Retail") {
+        throw "هذه الواجهة تطبع فواتير الكاشير فقط. فواتير الجملة يطبعها نظام الجملة، ولا يجوز إرسالها إلى طابعة الكاشير الحرارية."
+    }
     return [pscustomobject]@{
         Number = $number
         Date = $datePicker.Value.ToString("yyyy-MM-dd")
-        Type = $typeMap[[string]$typeBox.SelectedItem]
+        Type = $type
     }
 }
 
