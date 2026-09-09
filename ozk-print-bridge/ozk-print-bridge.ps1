@@ -331,14 +331,41 @@ function Add-TypeGuidParameters($Command, [string[]]$TypeGuids) {
     return ($placeholders -join ",")
 }
 
-function Get-PostedInvoiceCandidates($Connection, [string[]]$TypeGuids, [datetime]$FromDate) {
+# حجم الصفحة الواحدة. الترتيب أحدثُ أولاً كما كان، ومفتاح الترقيم هو الثلاثي
+# (Date, Number, GUID) نفسه المستعمل في ORDER BY — فلا سطر يُقفز ولا يتكرر حتى
+# عند تساوي التاريخ والرقم بين عدة فواتير.
+$script:CandidatePageSize = 256
+# سقف الصفحات في النبضة الواحدة: يمنع أن تستغرق نبضة واحدة تصريف متراكم ضخم.
+# لا يسبب تجويعاً لأن التصريف يُستأنف من موضعه في النبضة التالية عبر المؤشر.
+$script:MaxCandidatePagesPerPoll = 8
+# عند تهيئة خط الأساس نحتاج تغطية النافذة كاملةً وإلا طُبع تاريخ قديم لاحقاً.
+$script:MaxCandidatePagesForBaseline = 4096
+
+function Get-PostedInvoiceCandidatePage($Connection, [string[]]$TypeGuids, [datetime]$FromDate, $After) {
     $command = $Connection.CreateCommand()
     $command.CommandTimeout = 10
     $typeSql = Add-TypeGuidParameters $command $TypeGuids
     [void]$command.Parameters.Add("@fromDate", [System.Data.SqlDbType]::DateTime)
     $command.Parameters["@fromDate"].Value = $FromDate
+
+    # شرط seek: يبدأ حصراً بعد آخر ثلاثي من الصفحة السابقة، بنفس اتجاه الترتيب.
+    $seekSql = ""
+    if ($null -ne $After) {
+        [void]$command.Parameters.Add("@afterDate", [System.Data.SqlDbType]::DateTime)
+        $command.Parameters["@afterDate"].Value = $After.InvoiceDateRaw
+        [void]$command.Parameters.Add("@afterNumber", [System.Data.SqlDbType]::Int)
+        $command.Parameters["@afterNumber"].Value = [int]$After.InvoiceNumber
+        [void]$command.Parameters.Add("@afterGuid", [System.Data.SqlDbType]::UniqueIdentifier)
+        $command.Parameters["@afterGuid"].Value = [guid]$After.InvoiceGuid
+        $seekSql = @"
+  and (u.Date < @afterDate
+       or (u.Date = @afterDate and u.Number < @afterNumber)
+       or (u.Date = @afterDate and u.Number = @afterNumber and u.GUID < @afterGuid))
+"@
+    }
+
     $command.CommandText = @"
-select top (256)
+select top ($script:CandidatePageSize)
     convert(varchar(36), u.GUID) as invoice_guid,
     u.Number as invoice_number,
     convert(varchar(36), u.TypeGUID) as type_guid,
@@ -355,7 +382,7 @@ where u.TypeGUID in ($typeSql)
   and bt.BillType = 1
   and u.IsPosted = 1
   and coalesce(u.RecState, 0) = 0
-  and u.Date >= @fromDate
+  and u.Date >= @fromDate$seekSql
 order by u.Date desc, u.Number desc, u.GUID desc;
 "@
 
@@ -369,6 +396,9 @@ order by u.Date desc, u.Number desc, u.GUID desc;
                 TypeGuid = ([string]$reader["type_guid"]).ToLowerInvariant()
                 TypeName = [string]$reader["type_name"]
                 InvoiceDate = Convert-ToUtcText $reader["invoice_date"]
+                # القيمة الخام كما هي في العمود — هي مفتاح الترقيم. النسخة النصية
+                # أعلاه محوّلة إلى UTC فلا تصلح للمقارنة مع u.Date مباشرةً.
+                InvoiceDateRaw = if ($reader["invoice_date"] -is [DBNull]) { $null } else { [datetime]$reader["invoice_date"] }
                 CreateDate = Convert-ToUtcText $reader["create_date"]
                 IsPosted = [bool]$reader["is_posted"]
                 RecordState = Convert-ToNullableInt $reader["record_state"]
@@ -380,6 +410,57 @@ order by u.Date desc, u.Number desc, u.GUID desc;
         $reader.Close()
     }
     return $rows.ToArray()
+}
+
+# الصفحة الأولى وحدها — يستعملها قياس الأداء الذي يقيس زمن استعلام واحد.
+function Get-PostedInvoiceCandidates($Connection, [string[]]$TypeGuids, [datetime]$FromDate) {
+    return Get-PostedInvoiceCandidatePage $Connection $TypeGuids $FromDate $null
+}
+
+# يجمع مرشّحي النافذة عبر صفحات seek متتالية.
+#
+# لماذا: الاستعلام كان يعيد أحدث 256 فقط، والترشيح بـseen يقع بعد الجلب. فلو
+# تراكمت أكثر من 256 فاتورة داخل النافذة — بعد انقطاع مثلاً — عادت كل نبضة
+# بالـ256 نفسها ولم تصل الأقدم أبداً، فتُفقد نهائياً.
+#
+# لماذا لا تجويع: الصفحة الأولى تُجلب من الأحدث في كل نبضة (فالفواتير الجديدة
+# تُطبع فوراً ولا يؤخّرها تصريف متراكم)، ثم يُستأنف التصريف من المؤشر المحفوظ
+# بين النبضات. وعند نفاد النافذة يُصفَّر المؤشر فتعود النبضة التالية إلى المشي
+# التسلسلي الكامل — فكل سطر داخل النافذة يُزار حتماً خلال عدد محدود من النبضات.
+#
+# لماذا لا تكرار: مفتاح الـseek هو الثلاثي الكامل، والصفحة التالية تبدأ حصراً
+# بعد آخر ثلاثي (مقارنة صارمة)، ويُحرس فوق ذلك بمجموعة GUIDات داخل النبضة.
+#
+# لماذا لا حلقة لا نهائية: كل دورة إما تنفد الصفحة (أقصر من الحجم) أو يتقدّم
+# المؤشر تقدّماً صارماً نحو الأقدم داخل مجموعة منتهية، فوق سقف صفحات صريح.
+function Get-PostedInvoiceCandidateSet($Connection, [string[]]$TypeGuids, [datetime]$FromDate, $ResumeCursor, [int]$MaxPages) {
+    $collected = New-Object System.Collections.Generic.List[object]
+    $seenGuids = New-Object System.Collections.Generic.HashSet[string]
+
+    $firstPage = @(Get-PostedInvoiceCandidatePage $Connection $TypeGuids $FromDate $null)
+    foreach ($row in $firstPage) { if ($seenGuids.Add($row.InvoiceGuid)) { $collected.Add($row) } }
+
+    $exhausted = $firstPage.Count -lt $script:CandidatePageSize
+    $cursor = if ($firstPage.Count -gt 0) { $firstPage[$firstPage.Count - 1] } else { $null }
+    # استئناف التصريف من حيث توقّفت النبضة السابقة إن كانت قد بلغت السقف.
+    if (-not $exhausted -and $null -ne $ResumeCursor) { $cursor = $ResumeCursor }
+
+    $pagesFetched = 1
+    while (-not $exhausted -and $pagesFetched -lt $MaxPages -and $null -ne $cursor) {
+        $page = @(Get-PostedInvoiceCandidatePage $Connection $TypeGuids $FromDate $cursor)
+        $pagesFetched++
+        if ($page.Count -eq 0) { $exhausted = $true; break }
+        foreach ($row in $page) { if ($seenGuids.Add($row.InvoiceGuid)) { $collected.Add($row) } }
+        if ($page.Count -lt $script:CandidatePageSize) { $exhausted = $true }
+        else { $cursor = $page[$page.Count - 1] }
+    }
+
+    return [pscustomobject]@{
+        Candidates = $collected.ToArray()
+        NextCursor = if ($exhausted) { $null } else { $cursor }
+        Exhausted = $exhausted
+        PagesFetched = $pagesFetched
+    }
 }
 
 function Get-PostedInvoiceByNumber($Connection, [string]$TypeGuid, [int]$Number, [datetime]$Date) {
@@ -894,7 +975,10 @@ try {
         exit 0
     }
 
-    $candidates = @(Get-PostedInvoiceCandidates $connection $typeGuids $fromDate)
+    # خط الأساس وPreviewLatest يحتاجان النافذة كاملة: لو اقتصر خط الأساس على
+    # أحدث صفحة لصارت الفواتير الأقدم «غير مرئية» عند التهيئة ثم طُبعت لاحقاً
+    # بعد أن صار الترقيم قادراً على الوصول إليها.
+    $candidates = @((Get-PostedInvoiceCandidateSet $connection $typeGuids $fromDate $null $script:MaxCandidatePagesForBaseline).Candidates)
     if ($Mode -eq "PreviewLatest") {
         $latest = $candidates | Select-Object -First 1
         if ($null -eq $latest) { throw "No posted POS invoice was found in the configured lookback window." }
@@ -985,10 +1069,28 @@ try {
     }
 
     $pollCount = 0
+    # مؤشر التصريف يعيش في الذاكرة عبر النبضات. لا داعي لحفظه على القرص: بعد
+    # إعادة التشغيل تبدأ المسيرة من الأحدث من جديد وتمرّ على النافذة كاملةً،
+    # وهو سلوك صحيح لا يفقد شيئاً — فقط يعيد عملاً رخيصاً.
+    $drainCursor = $null
     while ($MaxPolls -eq 0 -or $pollCount -lt $MaxPolls) {
         $pollCount++
         $pollWatch = [Diagnostics.Stopwatch]::StartNew()
-        $current = @(Get-PostedInvoiceCandidates $connection $typeGuids $fromDate)
+        $candidateSet = Get-PostedInvoiceCandidateSet $connection $typeGuids $fromDate $drainCursor $script:MaxCandidatePagesPerPoll
+        $drainCursor = $candidateSet.NextCursor
+        if (-not $candidateSet.Exhausted) {
+            # بلغت النبضة سقف الصفحات ولم تنفد النافذة: تُسجَّل الحالة صراحةً،
+            # وتُكمل النبضة التالية من المؤشر نفسه بدل أن تعيد الأحدث إلى ما لا نهاية.
+            Write-BridgeLog ([pscustomobject]@{
+                Event = "candidate_drain_paused"
+                pages_fetched = $candidateSet.PagesFetched
+                candidates_collected = @($candidateSet.Candidates).Count
+                At = (Get-Date).ToUniversalTime().ToString("o")
+                Reason = "page_cap_reached; next poll resumes from the same cursor"
+                CustomerAndItemsRedacted = $true
+            })
+        }
+        $current = @($candidateSet.Candidates)
         foreach ($candidate in @($current | Sort-Object InvoiceDate, InvoiceNumber)) {
             if ($state.seen.ContainsKey($candidate.InvoiceGuid)) { continue }
             $ready = Wait-InvoiceReady $connection ([guid]$candidate.InvoiceGuid)

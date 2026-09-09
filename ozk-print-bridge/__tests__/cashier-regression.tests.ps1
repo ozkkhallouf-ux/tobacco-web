@@ -959,5 +959,219 @@ Test-Case "وحدة العرض: الفشل قبل قبول المهمة يرمي
     Assert-True ($rendererSrc -match 'WritePrinter failed with Win32 error " \+ Marshal\.GetLastWin32Error\(\)\);') "WritePrinter يجب أن يبقى استثناءً غامضاً"
 }
 
+Write-Host "`n== P1-I: ترقيم صفحات المرشّحين (لا فاتورة تبقى خارج المتناول) =="
+
+. ([scriptblock]::Create((Get-ExtractedAssignmentText $bridgeSrc '$script:CandidatePageSize')))
+. ([scriptblock]::Create((Get-ExtractedAssignmentText $bridgeSrc '$script:MaxCandidatePagesPerPoll')))
+. ([scriptblock]::Create((Get-ExtractedFunctionText  $bridgeSrc "function Get-PostedInvoiceCandidateSet(`$Connection, [string[]]`$TypeGuids, [datetime]`$FromDate, `$ResumeCursor, [int]`$MaxPages) {")))
+
+# ── قاعدة بيانات وهمية: مجموعة مرشّحين مرتّبة أحدثُ أولاً ──────────────────
+# تُحاكي دلالات الاستعلام الحقيقية: seek صارم على الثلاثي (Date, Number, GUID)
+# بترتيب تنازلي، وسقف صفحة. لا اتصال SQL ولا طباعة.
+function New-FakeCandidate([datetime]$Date, [int]$Number, [string]$Guid) {
+    [pscustomobject]@{
+        InvoiceGuid = $Guid; InvoiceNumber = $Number
+        InvoiceDateRaw = $Date; InvoiceDate = $Date.ToString("o")
+        TypeGuid = "cc1097b1-662d-4d80-8e4e-3b493249591c"; TypeName = "مبيعات مركز"
+        BranchGuid = "br-1"; IsPosted = $true; RecordState = 0; SourceId = 0
+    }
+}
+
+function New-FakeUniverse([int]$Count, [switch]$AllSameDateAndNumber) {
+    $base = [datetime]::Parse("2026-01-05T00:00:00", $script:InvariantCulture)
+    $rows = New-Object System.Collections.Generic.List[object]
+    for ($i = 0; $i -lt $Count; $i++) {
+        if ($AllSameDateAndNumber) {
+            # كل الفواتير بنفس التاريخ والرقم: الـGUID وحده يفصل بينها.
+            $rows.Add((New-FakeCandidate $base 5000 ("g{0:d5}" -f ($Count - $i))))
+        } else {
+            $rows.Add((New-FakeCandidate ($base.AddSeconds(-$i)) (10000 - $i) ("g{0:d5}" -f ($Count - $i))))
+        }
+    }
+    # ترتيب تنازلي: Date desc, Number desc, Guid desc — نفس ORDER BY الحقيقي.
+    return @($rows | Sort-Object -Property @{E={$_.InvoiceDateRaw};D=$true}, @{E={$_.InvoiceNumber};D=$true}, @{E={$_.InvoiceGuid};D=$true})
+}
+
+$script:FakeUniverse = @()
+$script:FakePageCalls = 0
+
+# تحلّ محل الاستعلام الحقيقي داخل Get-PostedInvoiceCandidateSet المستخرَجة.
+function Get-PostedInvoiceCandidatePage($Connection, [string[]]$TypeGuids, [datetime]$FromDate, $After) {
+    $script:FakePageCalls++
+    $rows = @($script:FakeUniverse)
+    if ($null -ne $After) {
+        $rows = @($rows | Where-Object {
+            ($_.InvoiceDateRaw -lt $After.InvoiceDateRaw) -or
+            ($_.InvoiceDateRaw -eq $After.InvoiceDateRaw -and $_.InvoiceNumber -lt $After.InvoiceNumber) -or
+            ($_.InvoiceDateRaw -eq $After.InvoiceDateRaw -and $_.InvoiceNumber -eq $After.InvoiceNumber -and $_.InvoiceGuid -lt $After.InvoiceGuid)
+        })
+    }
+    return @($rows | Select-Object -First $script:CandidatePageSize)
+}
+
+# يُصرّف النافذة كاملةً عبر نبضات متتالية، تماماً كما تفعل حلقة الرصد.
+function Invoke-DrainAcrossPolls([int]$MaxPages, [int]$MaxPolls = 200) {
+    $cursor = $null
+    $reached = New-Object System.Collections.Generic.HashSet[string]
+    $polls = 0
+    do {
+        $polls++
+        $set = Get-PostedInvoiceCandidateSet $null @() ([datetime]::MinValue) $cursor $MaxPages
+        foreach ($c in @($set.Candidates)) { [void]$reached.Add($c.InvoiceGuid) }
+        $cursor = $set.NextCursor
+    } while ($null -ne $cursor -and $polls -lt $MaxPolls)
+    return [pscustomobject]@{ Reached = $reached; Polls = $polls; Cursor = $cursor }
+}
+
+Test-Case "أقل من حجم الصفحة (100) → صفحة واحدة وسلوك طبيعي" {
+    $script:FakeUniverse = New-FakeUniverse 100; $script:FakePageCalls = 0
+    $set = Get-PostedInvoiceCandidateSet $null @() ([datetime]::MinValue) $null $script:MaxCandidatePagesPerPoll
+    Assert-True (@($set.Candidates).Count -eq 100) "يجب جلب المئة كلها"
+    Assert-True ($set.Exhausted) "يجب أن تُعتبر النافذة منتهية"
+    Assert-True ($null -eq $set.NextCursor) "لا مؤشر متبقٍ"
+    Assert-True ($script:FakePageCalls -eq 1) "صفحة واحدة تكفي، جرى: $($script:FakePageCalls)"
+}
+
+Test-Case "بالضبط حجم الصفحة (256) → تُجلب كلها وتُكتشف النهاية بصفحة ثانية فارغة" {
+    $script:FakeUniverse = New-FakeUniverse $script:CandidatePageSize
+    $set = Get-PostedInvoiceCandidateSet $null @() ([datetime]::MinValue) $null $script:MaxCandidatePagesPerPoll
+    Assert-True (@($set.Candidates).Count -eq $script:CandidatePageSize) "يجب جلب الـ256"
+    Assert-True ($set.Exhausted) "يجب أن تنتهي النافذة"
+}
+
+Test-Case "257 مرشّحاً → الترقيم يصل إلى العنصر رقم 257" {
+    $script:FakeUniverse = New-FakeUniverse 257
+    $set = Get-PostedInvoiceCandidateSet $null @() ([datetime]::MinValue) $null $script:MaxCandidatePagesPerPoll
+    Assert-True (@($set.Candidates).Count -eq 257) "يجب جلب الـ257 كلها، جُلب: $(@($set.Candidates).Count)"
+    Assert-True ($set.Exhausted) "يجب أن تنتهي"
+}
+
+Test-Case "600 مرشّح → كلها يمكن الوصول إليها" {
+    $script:FakeUniverse = New-FakeUniverse 600
+    $set = Get-PostedInvoiceCandidateSet $null @() ([datetime]::MinValue) $null $script:MaxCandidatePagesPerPoll
+    Assert-True (@($set.Candidates).Count -eq 600) "يجب جلب الستمئة، جُلب: $(@($set.Candidates).Count)"
+    $reached = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($c in @($set.Candidates)) { [void]$reached.Add($c.InvoiceGuid) }
+    Assert-True ($reached.Count -eq 600) "لا تكرار: عدد الـGUIDات الفريدة يجب أن يساوي 600"
+}
+
+Test-Case "أول 256 كلها seen → الوصول إلى #257 وما بعدها (جوهر العطل)" {
+    $script:FakeUniverse = New-FakeUniverse 600
+    $set = Get-PostedInvoiceCandidateSet $null @() ([datetime]::MinValue) $null $script:MaxCandidatePagesPerPoll
+    $all = @($set.Candidates)
+    # يحاكي الترشيح الذي يقع بعد الجلب في الحلقة
+    $seen = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($c in $all[0..255]) { [void]$seen.Add($c.InvoiceGuid) }
+    $fresh = @($all | Where-Object { -not $seen.Contains($_.InvoiceGuid) })
+    Assert-True ($fresh.Count -eq 344) "يجب أن يبقى 344 مرشّحاً جديداً بعد استبعاد أول 256، وُجد: $($fresh.Count)"
+    Assert-True ($fresh[0].InvoiceGuid -eq $all[256].InvoiceGuid) "أول جديد يجب أن يكون العنصر رقم 257"
+}
+
+Test-Case "تساوي التاريخ والرقم لكل الفواتير → الـGUID يمنع القفز والتكرار" {
+    $script:FakeUniverse = New-FakeUniverse 600 -AllSameDateAndNumber
+    $set = Get-PostedInvoiceCandidateSet $null @() ([datetime]::MinValue) $null $script:MaxCandidatePagesPerPoll
+    $all = @($set.Candidates)
+    Assert-True ($all.Count -eq 600) "يجب جلب الستمئة رغم تساوي التاريخ والرقم، جُلب: $($all.Count)"
+    $unique = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($c in $all) { [void]$unique.Add($c.InvoiceGuid) }
+    Assert-True ($unique.Count -eq 600) "لا تكرار ولا قفز: الفريد يجب أن يساوي 600، وُجد: $($unique.Count)"
+}
+
+Test-Case "الترتيب الأحدث أولاً محفوظ" {
+    $script:FakeUniverse = New-FakeUniverse 600
+    $set = Get-PostedInvoiceCandidateSet $null @() ([datetime]::MinValue) $null $script:MaxCandidatePagesPerPoll
+    $all = @($set.Candidates)
+    for ($i = 1; $i -lt $all.Count; $i++) {
+        $prev = $all[$i - 1]; $cur = $all[$i]
+        $ordered = ($prev.InvoiceDateRaw -gt $cur.InvoiceDateRaw) -or
+                   ($prev.InvoiceDateRaw -eq $cur.InvoiceDateRaw -and $prev.InvoiceNumber -gt $cur.InvoiceNumber) -or
+                   ($prev.InvoiceDateRaw -eq $cur.InvoiceDateRaw -and $prev.InvoiceNumber -eq $cur.InvoiceNumber -and $prev.InvoiceGuid -gt $cur.InvoiceGuid)
+        Assert-True $ordered "الترتيب التنازلي يجب أن يبقى محفوظاً عند الموضع $i"
+    }
+}
+
+Test-Case "سقف الصفحات يوقف النبضة، والنبضة التالية تستأنف من المؤشر (لا تجويع)" {
+    $script:FakeUniverse = New-FakeUniverse 1200
+    # سقف صفحتين لكل نبضة: 512 مرشّحاً على الأكثر
+    $set = Get-PostedInvoiceCandidateSet $null @() ([datetime]::MinValue) $null 2
+    Assert-True (-not $set.Exhausted) "النافذة يجب ألا تنتهي عند السقف"
+    Assert-True ($null -ne $set.NextCursor) "يجب إعادة مؤشر للاستئناف"
+    Assert-True ($set.PagesFetched -eq 2) "يجب احترام سقف الصفحتين، جُلب: $($set.PagesFetched)"
+    $drain = Invoke-DrainAcrossPolls 2
+    Assert-True ($drain.Reached.Count -eq 1200) "التصريف عبر النبضات يجب أن يبلغ الـ1200 كلها، بلغ: $($drain.Reached.Count)"
+    Assert-True ($null -eq $drain.Cursor) "المؤشر يجب أن يُصفَّر عند نفاد النافذة"
+    Assert-True ($drain.Polls -lt 20) "يجب أن ينتهي بعدد نبضات معقول، استغرق: $($drain.Polls)"
+}
+
+Test-Case "التصريف ينتهي ولا يدور بلا تقدّم (لا busy loop)" {
+    $script:FakeUniverse = New-FakeUniverse 1200
+    $drain = Invoke-DrainAcrossPolls 2 30
+    Assert-True ($drain.Polls -lt 30) "يجب أن ينتهي قبل سقف النبضات، استغرق: $($drain.Polls)"
+    Assert-True ($null -eq $drain.Cursor) "يجب أن ينتهي بمؤشر مُصفَّر"
+}
+
+Test-Case "الصفحة الأولى تُجلب من الأحدث في كل نبضة (الفواتير الجديدة لا يؤخّرها التصريف)" {
+    $script:FakeUniverse = New-FakeUniverse 1200
+    $set1 = Get-PostedInvoiceCandidateSet $null @() ([datetime]::MinValue) $null 2
+    $newest = @($script:FakeUniverse)[0].InvoiceGuid
+    # نبضة تالية أثناء التصريف: يجب أن تحتوي الأحدث رغم وجود مؤشر
+    $set2 = Get-PostedInvoiceCandidateSet $null @() ([datetime]::MinValue) $set1.NextCursor 2
+    $guids = @($set2.Candidates | ForEach-Object { $_.InvoiceGuid })
+    Assert-True ($guids -contains $newest) "الأحدث يجب أن يظهر في كل نبضة حتى أثناء التصريف"
+}
+
+Test-Case "فشل صفحة عابر → يخرج بأمان والنبضة اللاحقة تعيد المحاولة" {
+    $script:FakeUniverse = New-FakeUniverse 600
+    $script:FailNextPage = $true
+    function Get-PostedInvoiceCandidatePage($Connection, [string[]]$TypeGuids, [datetime]$FromDate, $After) {
+        if ($script:FailNextPage) { $script:FailNextPage = $false; throw "transient query failure" }
+        $rows = @($script:FakeUniverse)
+        if ($null -ne $After) {
+            $rows = @($rows | Where-Object {
+                ($_.InvoiceDateRaw -lt $After.InvoiceDateRaw) -or
+                ($_.InvoiceDateRaw -eq $After.InvoiceDateRaw -and $_.InvoiceNumber -lt $After.InvoiceNumber) -or
+                ($_.InvoiceDateRaw -eq $After.InvoiceDateRaw -and $_.InvoiceNumber -eq $After.InvoiceNumber -and $_.InvoiceGuid -lt $After.InvoiceGuid)
+            })
+        }
+        return @($rows | Select-Object -First $script:CandidatePageSize)
+    }
+    Assert-Throws { Get-PostedInvoiceCandidateSet $null @() ([datetime]::MinValue) $null $script:MaxCandidatePagesPerPoll } "الفشل العابر يجب أن يخرج لا أن يُبتلع"
+    $retry = Get-PostedInvoiceCandidateSet $null @() ([datetime]::MinValue) $null $script:MaxCandidatePagesPerPoll
+    Assert-True (@($retry.Candidates).Count -eq 600) "إعادة المحاولة يجب أن تنجح كاملةً، جُلب: $(@($retry.Candidates).Count)"
+}
+
+Test-Case "negative witness: TOP(256) بلا ترقيم لا يصل إلى ما بعد الصفحة الأولى إطلاقاً" {
+    $script:FakeUniverse = New-FakeUniverse 600
+    # السلوك القديم: استعلام واحد بلا مؤشر، والترشيح بـseen بعد الجلب.
+    $legacyFetch = { return @(@($script:FakeUniverse) | Select-Object -First $script:CandidatePageSize) }
+    $seen = New-Object System.Collections.Generic.HashSet[string]
+    $reachedLegacy = New-Object System.Collections.Generic.HashSet[string]
+    for ($poll = 0; $poll -lt 10; $poll++) {
+        foreach ($c in (& $legacyFetch)) {
+            if ($seen.Contains($c.InvoiceGuid)) { continue }
+            [void]$seen.Add($c.InvoiceGuid); [void]$reachedLegacy.Add($c.InvoiceGuid)
+        }
+    }
+    Assert-True ($reachedLegacy.Count -eq $script:CandidatePageSize) "السلوك القديم يجب أن يعلق عند 256 مهما تكررت النبضات، بلغ: $($reachedLegacy.Count)"
+    # الإصلاح الحالي يبلغ الستمئة
+    $drain = Invoke-DrainAcrossPolls $script:MaxCandidatePagesPerPoll
+    Assert-True ($drain.Reached.Count -eq 600) "الترقيم الحالي يجب أن يبلغ الستمئة، بلغ: $($drain.Reached.Count)"
+}
+
+Test-Case "المصدر: شرط seek يستعمل الثلاثي الكامل بمقارنة صارمة" {
+    Assert-True ($bridgeSrc -match 'u\.Date < @afterDate') "يجب مقارنة التاريخ"
+    Assert-True ($bridgeSrc -match 'u\.Date = @afterDate and u\.Number < @afterNumber') "يجب فكّ التعادل بالرقم"
+    Assert-True ($bridgeSrc -match 'u\.Date = @afterDate and u\.Number = @afterNumber and u\.GUID < @afterGuid') "يجب فكّ التعادل النهائي بالـGUID"
+    Assert-True ($bridgeSrc -match 'order by u\.Date desc, u\.Number desc, u\.GUID desc') "الترتيب يجب أن يبقى كما كان"
+}
+
+Test-Case "المصدر: خط الأساس يغطي النافذة كاملةً لا صفحة واحدة" {
+    Assert-True ($bridgeSrc -match '\$candidates = @\(\(Get-PostedInvoiceCandidateSet \$connection \$typeGuids \$fromDate \$null \$script:MaxCandidatePagesForBaseline\)\.Candidates\)') "خط الأساس يجب أن يستعمل التصريف الكامل"
+}
+
+Test-Case "المصدر: بلوغ السقف يُسجَّل صراحةً لا صامتاً" {
+    Assert-True ($bridgeSrc -match 'Event = "candidate_drain_paused"') "يجب تسجيل توقّف التصريف عند السقف"
+}
+
 Write-Host "`n$($script:passed) passed, $($script:failed) failed"
 if ($script:failed -gt 0) { exit 1 }
