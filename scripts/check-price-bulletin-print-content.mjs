@@ -61,33 +61,11 @@ const checkWithFont = (fontReady, name, condition, detail) => {
 };
 
 // صفوف مستند الطباعة كما هي في الترميز — **مطابقة صفٍّ كامل، لا احتواء نصّي**
-// (مستقلّة عن الخط تماماً).
-//
-// لماذا الصفّ كاملاً: التطبيع يحذف الفراغات، فاسمُ صنفٍ أقصر قد يكون مقطعاً
-// داخل اسم أطول («اليغانس سليم فضي» داخل «اليغانس سليم فضي بدون طبعة»)، فيقبله
-// `includes` ويمرّ حذفُ الأقصر زوراً — وهي نفس ثغرة الاحتواء التي أُغلقت في
-// قارئ الـPDF (ملاحظة Codex P1 على 3468f90). فنقارن الخلايا الثلاث بالتساوي
-// التام مع صفٍّ واحد من الترميز.
-//
-// ومستندٌ غائب (فشل الزر في إنتاجه) = **كل الصفوف مفقودة**، لا «لا شيء مفقود»
-// (ملاحظة DeepScan INSUFFICIENT_NULL_CHECK).
-const flattenForMarkup = (value) => String(value).normalize("NFKC").replace(/\s+/g, "");
-const MARKUP_CELL_SEPARATOR = "\u0001";
-function markupRowKeys(documentHtml) {
-  const keys = new Set();
-  for (const row of String(documentHtml).matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/g)) {
-    const cells = [...row[1].matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/g)]
-      .map((cell) => flattenForMarkup(cell[1].replace(/<[^>]*>/g, "")));
-    if (cells.length) keys.add(cells.join(MARKUP_CELL_SEPARATOR));
-  }
-  return keys;
-}
-function rowsMissingFromMarkup(documentHtml, rows) {
-  if (typeof documentHtml !== "string" || !documentHtml) return [...rows];
-  const keys = markupRowKeys(documentHtml);
-  return rows.filter((row) => !keys.has(
-    [row.name, row.unit, row.price].map(flattenForMarkup).join(MARKUP_CELL_SEPARATOR)));
-}
+// (مستقلّة عن الخط تماماً). القارئ ومبرّراته في scripts/lib/markup-rows.mjs:
+// يُحلَّل الترميز بمحلّل HTML حقيقي لا بـregex، لأن حذف الوسوم بتعبير نمطي
+// يمرّ مرّةً واحدة كان يُسقط صفوفاً سليمة (الكيانات، سمة فيها قوس إغلاق)
+// ويُمرّر نصّاً ليس على الورق (تعليقات، وسم مشطور يلتحم) — وهو ما ترصده
+// قاعدة CodeQL js/incomplete-multi-character-sanitization.
 
 // ===== قراءة نص PDF =====
 // القارئ نفسه يعيش في وحدة مشتركة كي يستعمله حارس توزيع الصفحة الأولى بنفس
@@ -97,6 +75,7 @@ import {
   pdfPageLines, normalizeArabic, lineText, printedRow, printedGroup
 } from "./lib/price-bulletin-pdf-text.mjs";
 import { prepareBulletinFont } from "./lib/bulletin-font-ready.mjs";
+import { createMarkupRowReader } from "./lib/markup-rows.mjs";
 
 // الفحص برسالة صريحة تطلب توسيع القارئ إلى إعادة بناء الخلايا قبل اعتماده.
 const WRAP_PROBE = `(markup) => {
@@ -130,6 +109,7 @@ const PRICES = raw.map((r) => ({
 
 const A4_HEIGHT_PX = 297 / 25.4 * 96;
 const browser = await chromium.launch();
+const { rowsMissingFromMarkup } = createMarkupRowReader(browser);
 
 async function bootApp(width, height) {
   const context = await browser.newContext({ viewport: { width, height }, bypassCSP: true, serviceWorkers: "block" });
@@ -291,7 +271,7 @@ for (const sc of [
   // الورقة الأولى تحديداً هي التي كانت تخرج بالرأس وحده.
   // **بديلٌ مستقلّ عن الخط، مفروض دائماً.** يرصد إخفاء نصّ الأصناف أو تشويهه
   // حتى حين تتعذّر المطابقة الحرفية لغياب خط النشرة.
-  const missingFromMarkup = rowsMissingFromMarkup(documentHtml, expected.rows);
+  const missingFromMarkup = await rowsMissingFromMarkup(documentHtml, expected.rows);
   check(`${sc.label}: كل صفوف الأصناف موجودة نصّاً في مستند الطباعة (مستقلّ عن الخط)`,
     missingFromMarkup.length === 0, `مفقودة من الترميز: ${JSON.stringify(missingFromMarkup.slice(0, 5))}`);
 
