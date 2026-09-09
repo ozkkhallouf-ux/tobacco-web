@@ -63,72 +63,286 @@ function Get-ExtractedFunctionText([string]$SourceText, [string]$Signature) {
 $bridgeSrc = Get-Content -LiteralPath (Join-Path $bridgeDir "ozk-print-bridge.ps1") -Raw
 $watchdogSrc = Get-Content -LiteralPath (Join-Path $bridgeDir "ozk-print-bridge-watchdog.ps1") -Raw
 
-$fingerprintFnText = Get-ExtractedFunctionText $bridgeSrc "function Get-InvoiceFingerprint(`$Candidate, `$Snapshot) {"
-$staleFnText = Get-ExtractedFunctionText $bridgeSrc "function Remove-StaleFingerprints(`$RecentFingerprints, [datetime]`$Now, [int]`$MaxAgeSeconds) {"
+$script:InvariantCulture = [Globalization.CultureInfo]::InvariantCulture
 
-# ينفَّذ في نطاق منفصل عبر Invoke-Command داخل نفس الجلسة (لا new-runspace لازم) —
-# مجرد تعريف الدالتين هنا فقط، بلا أي تعريفات/تنفيذ آخر من الملف الأصلي.
-. ([scriptblock]::Create($fingerprintFnText))
-. ([scriptblock]::Create($staleFnText))
+# تُستخرج كل دوال التمثيل القانوني من المصدر الفعلي، فما يُختبر هنا هو العقد
+# نفسه الذي يعمل في الإنتاج لا نسخة موازية منه.
+foreach ($signature in @(
+    "function Format-CanonicalValue(`$Value) {",
+    "function Get-CanonicalLineText(`$Line, [bool]`$IncludeRecordIdentity) {",
+    "function Get-CanonicalReceiptText(`$Header, `$Lines, [bool]`$IncludeRecordIdentity, [string]`$BranchGuid = `"`") {",
+    "function Get-CanonicalHash([string]`$Text) {",
+    "function Get-InvoiceFingerprint(`$Candidate, `$Snapshot) {",
+    "function Remove-StaleFingerprints(`$RecentFingerprints, [datetime]`$Now, [int]`$MaxAgeSeconds) {"
+)) {
+    . ([scriptblock]::Create((Get-ExtractedFunctionText $bridgeSrc $signature)))
+}
 
-Write-Host "== cashier-regression: Get-InvoiceFingerprint / Remove-StaleFingerprints (المصدر الفعلي الحالي) =="
+Write-Host "== cashier-regression: التمثيل القانوني لمحتوى الإيصال (المصدر الفعلي) =="
 
-function New-Snapshot([string]$TypeGuid, [string]$InvoiceNumber, [string]$InvoiceDate, [string]$CustomerName, [double]$InvoiceTotal, [int]$LineCount) {
+function New-TestLine {
+    param(
+        [string]$ItemGuid = "M-1", [string]$ItemName = "مادة أ",
+        [double]$Qty = 2, [double]$RawPrice = 500,
+        [string]$LineGuid = "L-1", [int]$LineNumber = 1,
+        [double]$SelectedUnit = 1, [double]$Unit2Factor = 0
+    )
     [pscustomobject]@{
-        Header = [pscustomobject]@{
-            TypeGuid      = $TypeGuid
-            InvoiceNumber = $InvoiceNumber
-            InvoiceDate   = $InvoiceDate
-            CustomerName  = $CustomerName
-            InvoiceTotal  = $InvoiceTotal
-        }
-        LineCount = $LineCount
+        LineGuid = $LineGuid; LineNumber = $LineNumber
+        ItemGuid = $ItemGuid; ItemName = $ItemName
+        Qty = $Qty; SelectedUnit = $SelectedUnit; Unit2Factor = $Unit2Factor; RawPrice = $RawPrice
     }
 }
 
-Test-Case "نفس محتوى الفاتورة (نفس الحقول) ينتج نفس البصمة" {
-    $snap = New-Snapshot "TYPE-A" "1001" "2026-01-05" "زبون تجريبي" 1500.5 3
-    $cand = [pscustomobject]@{ BranchGuid = "BR-1" }
-    $fp1 = Get-InvoiceFingerprint $cand $snap
-    $fp2 = Get-InvoiceFingerprint $cand $snap
-    Assert-True ($fp1 -eq $fp2) "نفس المدخلات يجب أن تنتج نفس البصمة"
+function New-Snapshot {
+    param(
+        [string]$TypeGuid = "TYPE-A", [int]$InvoiceNumber = 1001,
+        [string]$InvoiceDate = "2026-01-05T00:00:00.0000000Z",
+        [string]$CreateDate = "2026-01-05T10:00:00.0000000Z",
+        [string]$CustomerName = "زبون تجريبي",
+        [double]$InvoiceTotal = 1500.5, [double]$TotalDiscount = 0,
+        [double]$TotalExtra = 0, [double]$FirstPayment = 0,
+        [double]$CurrencyValue = 1, [string]$CurrencyIso = "USD",
+        [string]$InvoiceGuid = "INV-1", [bool]$IsPosted = $true, [int]$RecordState = 0,
+        $Lines = $null
+    )
+    if ($null -eq $Lines) {
+        $Lines = @(
+            (New-TestLine -ItemGuid "M-1" -ItemName "مادة أ" -Qty 2 -RawPrice 500   -LineGuid "L-1" -LineNumber 1),
+            (New-TestLine -ItemGuid "M-2" -ItemName "مادة ب" -Qty 1 -RawPrice 500.5 -LineGuid "L-2" -LineNumber 2)
+        )
+    }
+    [pscustomobject]@{
+        Header = [pscustomobject]@{
+            InvoiceGuid = $InvoiceGuid; TypeGuid = $TypeGuid; InvoiceNumber = $InvoiceNumber
+            InvoiceDate = $InvoiceDate; CreateDate = $CreateDate; CustomerName = $CustomerName
+            InvoiceTotal = $InvoiceTotal; TotalDiscount = $TotalDiscount; TotalExtra = $TotalExtra
+            FirstPayment = $FirstPayment; CurrencyValue = $CurrencyValue; CurrencyIso = $CurrencyIso
+            IsPosted = $IsPosted; RecordState = $RecordState
+        }
+        Lines = @($Lines)
+        LineCount = @($Lines).Count
+    }
 }
 
-Test-Case "بصمة الفاتورة لا تعتمد على GUID الفاتورة (لا يوجد InvoiceGuid ضمن مدخلات الحساب)" {
-    $snap = New-Snapshot "TYPE-A" "1001" "2026-01-05" "زبون تجريبي" 1500.5 3
-    $cand1 = [pscustomobject]@{ BranchGuid = "BR-1"; InvoiceGuid = "AAAA-1111" }
-    $cand2 = [pscustomobject]@{ BranchGuid = "BR-1"; InvoiceGuid = "BBBB-2222" }
-    $fp1 = Get-InvoiceFingerprint $cand1 $snap
-    $fp2 = Get-InvoiceFingerprint $cand2 $snap
-    Assert-True ($fp1 -eq $fp2) "GUID الفاتورة يجب ألا يؤثر على البصمة — المحتوى فقط هو المعيار"
+function Get-ReadinessSignature($Snapshot) {
+    return Get-CanonicalHash (Get-CanonicalReceiptText $Snapshot.Header $Snapshot.Lines $true)
 }
 
-Test-Case "اختلاف الإجمالي (Total) ينتج بصمة مختلفة" {
-    $snapA = New-Snapshot "TYPE-A" "1001" "2026-01-05" "زبون تجريبي" 1500.5 3
-    $snapB = New-Snapshot "TYPE-A" "1001" "2026-01-05" "زبون تجريبي" 1600.0 3
-    $cand = [pscustomobject]@{ BranchGuid = "BR-1" }
-    $fp1 = Get-InvoiceFingerprint $cand $snapA
-    $fp2 = Get-InvoiceFingerprint $cand $snapB
-    Assert-True ($fp1 -ne $fp2) "اختلاف الإجمالي يجب أن يغيّر البصمة"
+$script:Cand = [pscustomobject]@{ BranchGuid = "BR-1"; InvoiceGuid = "INV-1" }
+
+Test-Case "التمثيل القانوني لا يعتمد على الثقافة المحلية (أرقام بثقافة ثابتة)" {
+    Assert-True ($bridgeSrc -match '\$script:InvariantCulture = \[Globalization\.CultureInfo\]::InvariantCulture') "يجب تثبيت الثقافة"
+    Assert-True ($bridgeSrc -match 'ToString\("R", \$script:InvariantCulture\)') "تنسيق الأرقام يجب أن يكون بثقافة ثابتة"
+    $saved = [Threading.Thread]::CurrentThread.CurrentCulture
+    try {
+        [Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]::GetCultureInfo("de-DE")
+        $a = Format-CanonicalValue 1500.5
+        [Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]::InvariantCulture
+        $b = Format-CanonicalValue 1500.5
+        Assert-True ($a -eq $b) "الفاصلة العشرية الألمانية يجب ألا تغيّر التمثيل: [$a] مقابل [$b]"
+        Assert-True ($a -eq "1500.5") "يجب أن يكون التمثيل بنقطة عشرية: [$a]"
+    } finally {
+        [Threading.Thread]::CurrentThread.CurrentCulture = $saved
+    }
 }
 
-Test-Case "اختلاف عدد السطور (LineCount) ينتج بصمة مختلفة" {
-    $snapA = New-Snapshot "TYPE-A" "1001" "2026-01-05" "زبون تجريبي" 1500.5 3
-    $snapB = New-Snapshot "TYPE-A" "1001" "2026-01-05" "زبون تجريبي" 1500.5 4
-    $cand = [pscustomobject]@{ BranchGuid = "BR-1" }
-    $fp1 = Get-InvoiceFingerprint $cand $snapA
-    $fp2 = Get-InvoiceFingerprint $cand $snapB
-    Assert-True ($fp1 -ne $fp2) "اختلاف عدد السطور يجب أن يغيّر البصمة"
+Write-Host "`n== P1-G: توقيع الاستقرار يغطي كل ما يُطبع لا الأسطر وحدها =="
+
+# كل حقل هنا يقرأه Convert-SnapshotToReceipt ويظهر على الورق. تغيّره بين
+# لقطتَي Wait-InvoiceReady يعني أن الترحيل لم ينتهِ، فيجب ألا تُعتبر مستقرة.
+$headerWitnesses = @(
+    @{ Name = "CustomerName";  Args = @{ CustomerName  = "زبون آخر" } },
+    @{ Name = "InvoiceTotal";  Args = @{ InvoiceTotal  = 1600.0 } },
+    @{ Name = "TotalDiscount"; Args = @{ TotalDiscount = 25.0 } },
+    @{ Name = "TotalExtra";    Args = @{ TotalExtra    = 10.0 } },
+    @{ Name = "FirstPayment";  Args = @{ FirstPayment  = 300.0 } },
+    @{ Name = "CurrencyValue"; Args = @{ CurrencyValue = 14050.0 } },
+    @{ Name = "CurrencyIso";   Args = @{ CurrencyIso   = "SYP" } },
+    @{ Name = "CreateDate";    Args = @{ CreateDate    = "2026-01-05T11:30:00.0000000Z" } },
+    @{ Name = "InvoiceDate";   Args = @{ InvoiceDate   = "2026-01-06T00:00:00.0000000Z" } },
+    @{ Name = "InvoiceNumber"; Args = @{ InvoiceNumber = 1002 } },
+    @{ Name = "IsPosted";      Args = @{ IsPosted      = $false } },
+    @{ Name = "RecordState";   Args = @{ RecordState   = 1 } }
+)
+
+foreach ($witness in $headerWitnesses) {
+    $witnessName = $witness.Name
+    $witnessArgs = $witness.Args
+    Test-Case "توقيع الاستقرار يلتقط تغيّر $witnessName بين اللقطتين" {
+        $a = New-Snapshot
+        $b = New-Snapshot @witnessArgs
+        Assert-True ((Get-ReadinessSignature $a) -ne (Get-ReadinessSignature $b)) "تغيّر $witnessName يجب أن يجعل اللقطتين غير مستقرتين"
+    }
 }
 
-Test-Case "فرق التاريخ فقط (بدون تغيير باقي الحقول) ينتج بصمة مختلفة" {
-    $snapA = New-Snapshot "TYPE-A" "1001" "2026-01-05" "زبون تجريبي" 1500.5 3
-    $snapB = New-Snapshot "TYPE-A" "1001" "2026-01-06" "زبون تجريبي" 1500.5 3
-    $cand = [pscustomobject]@{ BranchGuid = "BR-1" }
-    $fp1 = Get-InvoiceFingerprint $cand $snapA
-    $fp2 = Get-InvoiceFingerprint $cand $snapB
-    Assert-True ($fp1 -ne $fp2) "اختلاف التاريخ يجب أن يغيّر البصمة"
+Test-Case "توقيع الاستقرار يلتقط تغيّر محتوى سطر (اسم المادة)" {
+    $a = New-Snapshot
+    $b = New-Snapshot -Lines @(
+        (New-TestLine -ItemGuid "M-1" -ItemName "مادة مختلفة" -Qty 2 -RawPrice 500 -LineGuid "L-1" -LineNumber 1),
+        (New-TestLine -ItemGuid "M-2" -ItemName "مادة ب" -Qty 1 -RawPrice 500.5 -LineGuid "L-2" -LineNumber 2)
+    )
+    Assert-True ((Get-ReadinessSignature $a) -ne (Get-ReadinessSignature $b)) "تغيّر اسم المادة يجب أن يكسر الاستقرار"
 }
+
+Test-Case "توقيع الاستقرار يلتقط تبديل ترتيب الأسطر (الترتيب مطبوع)" {
+    $a = New-Snapshot
+    $b = New-Snapshot -Lines @(
+        (New-TestLine -ItemGuid "M-2" -ItemName "مادة ب" -Qty 1 -RawPrice 500.5 -LineGuid "L-2" -LineNumber 2),
+        (New-TestLine -ItemGuid "M-1" -ItemName "مادة أ" -Qty 2 -RawPrice 500   -LineGuid "L-1" -LineNumber 1)
+    )
+    Assert-True ((Get-ReadinessSignature $a) -ne (Get-ReadinessSignature $b)) "تبديل الترتيب يجب أن يكسر الاستقرار"
+}
+
+Test-Case "لقطتان متطابقتان فعلاً → مستقرة (لا حساسية زائفة)" {
+    $a = New-Snapshot
+    $b = New-Snapshot
+    Assert-True ((Get-ReadinessSignature $a) -eq (Get-ReadinessSignature $b)) "لقطتان متطابقتان يجب أن تعطيا التوقيع نفسه"
+}
+
+Test-Case "negative witness: توقيع مبني على الأسطر وحدها يفوّت كل حقول الترويسة" {
+    # النسخة القديمة: هاش لحقول الأسطر فقط. كل شواهد الترويسة تمرّ عليها.
+    $legacy = {
+        param($Snapshot)
+        $src = @($Snapshot.Lines | ForEach-Object {
+            "{0}|{1}|{2}|{3}|{4}" -f $_.LineGuid, $_.LineNumber, $_.Qty, $_.RawPrice, $_.SelectedUnit
+        }) -join "`n"
+        return Get-CanonicalHash $src
+    }
+    $a = New-Snapshot
+    $missed = 0
+    foreach ($witness in $headerWitnesses) {
+        $b = New-Snapshot @($witness.Args)[0]
+        if ((& $legacy $a) -eq (& $legacy $b)) { $missed++ }
+    }
+    Assert-True ($missed -eq $headerWitnesses.Count) "التوقيع القديم يجب أن يفوّت كل الحقول الـ$($headerWitnesses.Count)، فوّت: $missed"
+    foreach ($witness in $headerWitnesses) {
+        $b = New-Snapshot @($witness.Args)[0]
+        Assert-True ((Get-ReadinessSignature $a) -ne (Get-ReadinessSignature $b)) "التوقيع الحالي يجب أن يلتقط $($witness.Name)"
+    }
+}
+
+Write-Host "`n== P1-H: بصمة التكرار تعتمد المحتوى المطبوع لا الإجمالي وعدد الأسطر =="
+
+Test-Case "A) نفس المحتوى تماماً → نفس البصمة (قمع التكرار يبقى عاملاً)" {
+    $a = New-Snapshot -InvoiceGuid "AAAA-1111"
+    $b = New-Snapshot -InvoiceGuid "BBBB-2222"
+    $candA = [pscustomobject]@{ BranchGuid = "BR-1"; InvoiceGuid = "AAAA-1111" }
+    $candB = [pscustomobject]@{ BranchGuid = "BR-1"; InvoiceGuid = "BBBB-2222" }
+    Assert-True ((Get-InvoiceFingerprint $candA $a) -eq (Get-InvoiceFingerprint $candB $b)) "إعادة حفظ نفس البيعة يجب أن تعطي البصمة نفسها"
+}
+
+Test-Case "بصمة التكرار لا تعتمد على GUID الفاتورة ولا GUID الأسطر ولا CreateDate" {
+    $a = New-Snapshot -InvoiceGuid "AAAA-1111" -CreateDate "2026-01-05T10:00:00.0000000Z" -Lines @(
+        (New-TestLine -ItemGuid "M-1" -ItemName "مادة أ" -Qty 2 -RawPrice 500 -LineGuid "L-OLD-1" -LineNumber 1))
+    $b = New-Snapshot -InvoiceGuid "BBBB-2222" -CreateDate "2026-01-05T10:00:41.0000000Z" -Lines @(
+        (New-TestLine -ItemGuid "M-1" -ItemName "مادة أ" -Qty 2 -RawPrice 500 -LineGuid "L-NEW-9" -LineNumber 7))
+    $candA = [pscustomobject]@{ BranchGuid = "BR-1"; InvoiceGuid = "AAAA-1111" }
+    $candB = [pscustomobject]@{ BranchGuid = "BR-1"; InvoiceGuid = "BBBB-2222" }
+    Assert-True ((Get-InvoiceFingerprint $candA $a) -eq (Get-InvoiceFingerprint $candB $b)) "ما يُولَّد عند إعادة الحفظ يجب ألا يدخل في البصمة"
+}
+
+Test-Case "B) نفس الإجمالي وعدد الأسطر لكن المادة تغيّرت → بصمة مختلفة" {
+    $a = New-Snapshot -Lines @(
+        (New-TestLine -ItemGuid "M-1" -ItemName "مادة أ" -Qty 1 -RawPrice 1000 -LineGuid "L-1" -LineNumber 1))
+    $b = New-Snapshot -Lines @(
+        (New-TestLine -ItemGuid "M-9" -ItemName "مادة مختلفة" -Qty 1 -RawPrice 1000 -LineGuid "L-1" -LineNumber 1))
+    Assert-True ((Get-InvoiceFingerprint $script:Cand $a) -ne (Get-InvoiceFingerprint $script:Cand $b)) "تبديل المادة بأخرى بنفس السعر يجب ألا يُقمع"
+}
+
+Test-Case "C) نفس الإجمالي وعدد الأسطر لكن الكمية والسعر تبادلا → بصمة مختلفة" {
+    $a = New-Snapshot -Lines @(
+        (New-TestLine -ItemGuid "M-1" -ItemName "مادة أ" -Qty 2 -RawPrice 500 -LineGuid "L-1" -LineNumber 1))
+    $b = New-Snapshot -Lines @(
+        (New-TestLine -ItemGuid "M-1" -ItemName "مادة أ" -Qty 5 -RawPrice 200 -LineGuid "L-1" -LineNumber 1))
+    Assert-True ((Get-InvoiceFingerprint $script:Cand $a) -ne (Get-InvoiceFingerprint $script:Cand $b)) "تبادل الكمية والسعر مع ثبات الحاصل يجب ألا يُقمع"
+}
+
+Test-Case "D) تغيّر اسم الزبون → بصمة مختلفة" {
+    $a = New-Snapshot
+    $b = New-Snapshot -CustomerName "زبون آخر"
+    Assert-True ((Get-InvoiceFingerprint $script:Cand $a) -ne (Get-InvoiceFingerprint $script:Cand $b)) "اسم الزبون مطبوع فيجب أن يدخل في البصمة"
+}
+
+Test-Case "E) تغيّر العملة (سعر الصرف أو ISO) → بصمة مختلفة" {
+    $a = New-Snapshot
+    Assert-True ((Get-InvoiceFingerprint $script:Cand $a) -ne (Get-InvoiceFingerprint $script:Cand (New-Snapshot -CurrencyValue 14050.0))) "سعر الصرف يقسم كل مبلغ مطبوع"
+    Assert-True ((Get-InvoiceFingerprint $script:Cand $a) -ne (Get-InvoiceFingerprint $script:Cand (New-Snapshot -CurrencyIso "SYP"))) "ISO العملة يرافق الأرقام المعروضة"
+}
+
+Test-Case "الخصم والدفعة والإضافات تدخل في البصمة (كلها مطبوعة)" {
+    $a = New-Snapshot
+    foreach ($variant in @(@{TotalDiscount=25.0}, @{FirstPayment=300.0}, @{TotalExtra=10.0})) {
+        $b = New-Snapshot @variant
+        Assert-True ((Get-InvoiceFingerprint $script:Cand $a) -ne (Get-InvoiceFingerprint $script:Cand $b)) "تغيّر $($variant.Keys) يجب أن يغيّر البصمة"
+    }
+}
+
+Test-Case "F) نفس المحتوى بعد إعادة التشغيل → البصمة نفسها (حتمية عبر العمليات)" {
+    $a = New-Snapshot
+    $first = Get-InvoiceFingerprint $script:Cand $a
+
+    # تُحسب البصمة في عملية pwsh جديدة تماماً من نفس المصدر ونفس المدخلات.
+    # أي اعتماد على حالة العملية أو ترتيب تعداد أو ثقافة محلية سيظهر هنا.
+    $runner = Join-Path ([IO.Path]::GetTempPath()) ("ozk-fp-" + [guid]::NewGuid().ToString("N") + ".ps1")
+    $snapshotJson = $a | ConvertTo-Json -Depth 8 -Compress
+    $payload = @'
+param([string]$BridgePath, [string]$SnapshotJson)
+$ErrorActionPreference = "Stop"
+$bridgeSrc = Get-Content -Raw -LiteralPath $BridgePath
+function Get-Fn([string]$Signature) {
+    $s = $bridgeSrc.IndexOf($Signature)
+    $b = $bridgeSrc.IndexOf("{", $s)
+    $e = $bridgeSrc.IndexOf("`n}`n", $b)
+    return $bridgeSrc.Substring($s, ($e + 2) - $s)
+}
+$script:InvariantCulture = [Globalization.CultureInfo]::InvariantCulture
+foreach ($signature in @(
+    'function Format-CanonicalValue($Value) {',
+    'function Get-CanonicalLineText($Line, [bool]$IncludeRecordIdentity) {',
+    'function Get-CanonicalReceiptText($Header, $Lines, [bool]$IncludeRecordIdentity, [string]$BranchGuid = "") {',
+    'function Get-CanonicalHash([string]$Text) {',
+    'function Get-InvoiceFingerprint($Candidate, $Snapshot) {'
+)) { . ([scriptblock]::Create((Get-Fn $signature))) }
+$snapshot = $SnapshotJson | ConvertFrom-Json
+Get-InvoiceFingerprint ([pscustomobject]@{ BranchGuid = "BR-1"; InvoiceGuid = "INV-1" }) $snapshot
+'@
+    try {
+        Set-Content -LiteralPath $runner -Value $payload -Encoding utf8
+        $bridgePath = Join-Path $bridgeDir "ozk-print-bridge.ps1"
+        $second = (& pwsh -NoProfile -File $runner $bridgePath $snapshotJson) 2>&1
+        Assert-True ($first -eq ([string]$second).Trim()) "البصمة يجب أن تتطابق عبر عملية جديدة: [$first] مقابل [$second]"
+    } finally {
+        if (Test-Path -LiteralPath $runner) { Remove-Item -LiteralPath $runner -Force }
+    }
+}
+
+Test-Case "G) لا انحدار في التكرار الطبيعي: اختلاف الفرع أو النوع أو الرقم يغيّر البصمة" {
+    $a = New-Snapshot
+    $candOther = [pscustomobject]@{ BranchGuid = "BR-2"; InvoiceGuid = "INV-1" }
+    Assert-True ((Get-InvoiceFingerprint $script:Cand $a) -ne (Get-InvoiceFingerprint $candOther $a)) "الفرع يجب أن يميّز"
+    Assert-True ((Get-InvoiceFingerprint $script:Cand $a) -ne (Get-InvoiceFingerprint $script:Cand (New-Snapshot -TypeGuid "TYPE-B"))) "النوع يجب أن يميّز"
+    Assert-True ((Get-InvoiceFingerprint $script:Cand $a) -ne (Get-InvoiceFingerprint $script:Cand (New-Snapshot -InvoiceNumber 1002))) "رقم الفاتورة يجب أن يميّز"
+    Assert-True ((Get-InvoiceFingerprint $script:Cand $a) -ne (Get-InvoiceFingerprint $script:Cand (New-Snapshot -InvoiceDate "2026-01-06T00:00:00.0000000Z"))) "التاريخ يجب أن يميّز"
+    Assert-True ((Get-InvoiceFingerprint $script:Cand $a) -ne (Get-InvoiceFingerprint $script:Cand (New-Snapshot -Lines @((New-TestLine))))) "عدد الأسطر يجب أن يميّز"
+}
+
+Test-Case "negative witness: بصمة الإجمالي+العدد وحدهما تقمع فاتورة مصحَّحة" {
+    # النسخة القديمة: النوع|الرقم|التاريخ|الفرع|الزبون|الإجمالي|عدد الأسطر
+    $legacy = {
+        param($Cand, $Snapshot)
+        $h = $Snapshot.Header
+        $d = ([datetime]::Parse([string]$h.InvoiceDate)).ToString("yyyy-MM-dd")
+        $raw = "{0}|{1}|{2}|{3}|{4}|{5:F2}|{6}" -f $h.TypeGuid, $h.InvoiceNumber, $d, $Cand.BranchGuid, $h.CustomerName, [double]$h.InvoiceTotal, $Snapshot.LineCount
+        return Get-CanonicalHash $raw
+    }
+    $a = New-Snapshot -Lines @((New-TestLine -ItemGuid "M-1" -ItemName "مادة أ" -Qty 1 -RawPrice 1000 -LineGuid "L-1" -LineNumber 1))
+    $b = New-Snapshot -Lines @((New-TestLine -ItemGuid "M-9" -ItemName "مادة مختلفة" -Qty 1 -RawPrice 1000 -LineGuid "L-1" -LineNumber 1))
+    Assert-True ((& $legacy $script:Cand $a) -eq (& $legacy $script:Cand $b)) "البصمة القديمة يجب أن تعتبرهما متطابقتين — وهذا هو العطل"
+    Assert-True ((Get-InvoiceFingerprint $script:Cand $a) -ne (Get-InvoiceFingerprint $script:Cand $b)) "البصمة الحالية يجب أن تميّزهما"
+}
+
+Write-Host "`n== cashier-regression: Remove-StaleFingerprints =="
 
 Test-Case "Remove-StaleFingerprints تحذف الإدخالات الأقدم من النافذة الزمنية فقط" {
     $now = [datetime]::UtcNow
@@ -298,7 +512,7 @@ Test-Case "حارس بدء التشغيل يرفض تسليح الطباعة م�
 
 Test-Case "في حلقة Observe: فحص GUID الكاشير يسبق استيراد وحدة العرض وأمر الإرسال" {
     $assertIdx = $bridgeSrc.IndexOf("Assert-CashierTypeGuid (")
-    $sendIdx = $bridgeSrc.IndexOf("Send-OzkReceiptToPrinter -Receipt `$receipt -LogoPath `$script:ReceiptLogoPath -PrinterName `$PrinterName -ConfirmPhysicalPrint)")
+    $sendIdx = $bridgeSrc.IndexOf("Submit-OzkReceiptSpoolJob -Job `$spoolJob -ConfirmPhysicalPrint")
     Assert-True ($assertIdx -ge 0) "يجب وجود فحص GUID داخل حلقة الرصد"
     Assert-True ($sendIdx -ge 0) "يجب وجود أمر الإرسال داخل حلقة الرصد"
     Assert-True ($assertIdx -lt $sendIdx) "الفحص يجب أن يسبق الإرسال إلى الطابعة"
@@ -570,7 +784,7 @@ Test-Case "5) الفاتورة العالقة من تشغيل سابق تُعل�
 Test-Case "الترتيب في المصدر: علامة قيد الإرسال تُحفظ على القرص قبل أمر الإرسال" {
     $markerIdx = $bridgeSrc.IndexOf('status = "print_in_flight"')
     $writeIdx = $bridgeSrc.IndexOf("Write-BridgeState `$StatePath `$state", $markerIdx)
-    $sendIdx = $bridgeSrc.IndexOf("Send-OzkReceiptToPrinter -Receipt `$receipt", $markerIdx)
+    $sendIdx = $bridgeSrc.IndexOf("Submit-OzkReceiptSpoolJob -Job `$spoolJob", $markerIdx)
     Assert-True ($markerIdx -ge 0 -and $writeIdx -ge 0 -and $sendIdx -ge 0) "يجب وجود المواضع الثلاثة"
     Assert-True ($writeIdx -lt $sendIdx) "الحفظ على القرص يجب أن يسبق الإرسال إلى الطابعة"
 }
@@ -586,6 +800,163 @@ Test-Case "negative witness: بلا علامة ما قبل الإرسال تعو
     $reloaded = Read-BridgeState $path
     if (-not $reloaded.seen.ContainsKey($guid)) { $sends++ }  # إعادة التشغيل تطبع ثانيةً
     Assert-True ($sends -eq 2) "السلوك القديم يجب أن ينتج نسختين — وهذا ما يمنعه الإصلاح"
+}
+
+Write-Host "`n== P1-F: حدود التسليم — الفشل المؤكَّد قبل التسليم يبقى قابلاً لإعادة المحاولة =="
+
+. ([scriptblock]::Create((Get-ExtractedFunctionText $bridgeSrc "function Test-PreSubmissionFailure(`$ErrorRecord) {")))
+
+# النوع الحقيقي من وحدة العرض (استُوردت أعلاه)، فالتصنيف يُختبر على العقد الفعلي.
+Test-Case "نوع OzkSpoolNotSubmittedException معرَّف فعلاً في وحدة العرض" {
+    Assert-True ($null -ne ("OzkSpoolNotSubmittedException" -as [type])) "يجب أن تعرّف الوحدة نوع الفشل قبل التسليم"
+}
+
+Test-Case "التصنيف: فشل ما قبل التسليم يُميَّز بوضوح" {
+    $record = [System.Management.Automation.ErrorRecord]::new(
+        (New-Object OzkSpoolNotSubmittedException("OpenPrinter failed with Win32 error 1801")), "spool", "NotSpecified", $null)
+    Assert-True (Test-PreSubmissionFailure $record) "OpenPrinter/StartDocPrinter يجب أن يُصنَّف كفشل قبل التسليم"
+}
+
+Test-Case "التصنيف: أي فشل آخر يبقى غامضاً (لا يُفترض عدم الطباعة)" {
+    $record = [System.Management.Automation.ErrorRecord]::new(
+        (New-Object System.IO.IOException("Incomplete RAW printer write.")), "spool", "NotSpecified", $null)
+    Assert-True (-not (Test-PreSubmissionFailure $record)) "فشل الكتابة بعد بدء المهمة يجب أن يبقى غامضاً"
+    $record2 = [System.Management.Automation.ErrorRecord]::new(
+        (New-Object InvalidOperationException("WritePrinter failed with Win32 error 6")), "spool", "NotSpecified", $null)
+    Assert-True (-not (Test-PreSubmissionFailure $record2)) "أي InvalidOperationException بعد القبول يبقى غامضاً"
+}
+
+Test-Case "التصنيف يفحص InnerException أيضاً (التغليف لا يُخفي الحقيقة)" {
+    $inner = New-Object OzkSpoolNotSubmittedException("OpenPrinter failed")
+    $outer = New-Object System.Management.Automation.MethodInvocationException("wrapped", $inner)
+    $record = [System.Management.Automation.ErrorRecord]::new($outer, "spool", "NotSpecified", $null)
+    Assert-True (Test-PreSubmissionFailure $record) "الاستثناء المغلَّف يجب أن يُصنَّف بصح"
+}
+
+# محاكاة تسلسل الحلقة كاملاً بحدود التسليم الجديدة، مع حقن الفشل في كل مرحلة.
+#   FailAt = "prepare-*"   → فشل أثناء التحضير: لا علامة أصلاً
+#   FailAt = "pre-submit"  → فشل مؤكَّد داخل التسليم قبل قبول أي مهمة
+#   FailAt = "ambiguous"   → فشل داخل التسليم بعد احتمال القبول
+#   FailAt = "persist"     → التسليم نجح ثم فشل حفظ النتيجة
+function Invoke-BoundedPrintIteration([string]$StatePath, [string]$Guid, [string]$FailAt = "") {
+    $state = Read-BridgeState $StatePath
+    if ($state.seen.ContainsKey($Guid)) { return "skipped" }
+
+    # 1) التحضير — قبل أي علامة
+    if ($FailAt -like "prepare-*") { throw "$FailAt failed before any marker" }
+
+    # 2) العلامة
+    $state.seen[$Guid] = [ordered]@{ status = "print_in_flight"; invoiceNumber = 1001; observedAt = (Get-Date).ToUniversalTime().ToString("o"); lineCount = 2 }
+    Write-BridgeState $StatePath $state
+
+    # 3) التسليم
+    try {
+        if ($FailAt -eq "pre-submit") { throw (New-Object OzkSpoolNotSubmittedException("OpenPrinter failed with Win32 error 1801")) }
+        if ($FailAt -eq "ambiguous") { throw (New-Object System.IO.IOException("Incomplete RAW printer write.")) }
+        $script:SendCount++
+    } catch {
+        if (Test-PreSubmissionFailure $_) {
+            [void]$state.seen.Remove($Guid)
+            Write-BridgeState $StatePath $state
+            return "pre-submission-rolled-back"
+        }
+        return "ambiguous-marker-kept"
+    }
+
+    $state.seen[$Guid] = [ordered]@{ status = "spooled"; invoiceNumber = 1001; observedAt = (Get-Date).ToUniversalTime().ToString("o"); lineCount = 2 }
+    if ($FailAt -eq "persist") { return "spooled-persist-failed" }
+    Write-BridgeState $StatePath $state
+    return "spooled"
+}
+
+foreach ($stage in @("prepare-render", "prepare-printer-validation", "prepare-cim-lookup")) {
+    $stageName = $stage
+    Test-Case "فشل التحضير ($stageName) → لا علامة على القرص، وإعادة المحاولة تنجح" {
+        $path = New-StatePath; $guid = "prep-$stageName"; $script:SendCount = 0
+        Assert-Throws { Invoke-BoundedPrintIteration $path $guid $stageName } "يجب أن يرمي أثناء التحضير"
+        Assert-True ($script:SendCount -eq 0) "لا يجوز أن يقع تسليم"
+        $reloaded = Read-BridgeState $path
+        Assert-True (-not $reloaded.seen.ContainsKey($guid)) "لا يجوز ترك علامة تمنع إعادة المحاولة"
+        Assert-True ((Invoke-BoundedPrintIteration $path $guid) -eq "spooled") "إعادة المحاولة يجب أن تنجح"
+        Assert-True ($script:SendCount -eq 1) "تسليم واحد بعد إعادة المحاولة"
+    }
+}
+
+Test-Case "فشل OpenPrinter (مؤكَّد قبل التسليم) → تراجع عن العلامة وإعادة المحاولة مسموحة" {
+    $path = New-StatePath; $guid = "openprinter-1"; $script:SendCount = 0
+    Assert-True ((Invoke-BoundedPrintIteration $path $guid "pre-submit") -eq "pre-submission-rolled-back") "يجب التراجع عن العلامة"
+    Assert-True ($script:SendCount -eq 0) "لا تسليم وقع"
+    $reloaded = Read-BridgeState $path
+    Assert-True (-not $reloaded.seen.ContainsKey($guid)) "العلامة يجب أن تكون قد أُزيلت من القرص"
+    Assert-True ((Invoke-BoundedPrintIteration $path $guid) -eq "spooled") "poll لاحق يجب أن يطبعها"
+    Assert-True ($script:SendCount -eq 1) "طباعة واحدة بعد التعافي"
+}
+
+Test-Case "فشل StartDocPrinter (مؤكَّد قبل قبول المهمة) → قابل لإعادة المحاولة أيضاً" {
+    $path = New-StatePath; $guid = "startdoc-1"; $script:SendCount = 0
+    # نفس النوع الذي ترميه وحدة العرض عند فشل StartDocPrinter
+    Assert-True ((Invoke-BoundedPrintIteration $path $guid "pre-submit") -eq "pre-submission-rolled-back") "يجب التراجع"
+    Assert-True ((Read-BridgeState $path).seen.ContainsKey($guid) -eq $false) "لا أثر متبقٍ"
+}
+
+Test-Case "فشل في المنطقة الغامضة (بعد احتمال قبول المهمة) → العلامة تبقى، لا تكرار آلي" {
+    $path = New-StatePath; $guid = "ambiguous-1"; $script:SendCount = 0
+    Assert-True ((Invoke-BoundedPrintIteration $path $guid "ambiguous") -eq "ambiguous-marker-kept") "يجب الإبقاء على العلامة"
+    $reloaded = Read-BridgeState $path
+    Assert-True ($reloaded.seen.ContainsKey($guid)) "العلامة يجب أن تبقى محفوظة"
+    Assert-True ([string]$reloaded.seen[$guid].status -eq "print_in_flight") "الحالة يجب أن تبقى print_in_flight"
+    Assert-True ((Invoke-BoundedPrintIteration $path $guid) -eq "skipped") "إعادة التشغيل يجب ألا تعيد الطباعة"
+    Assert-True ($script:SendCount -eq 0) "لم يُحتسب تسليم ناجح، ومع ذلك لا تكرار"
+}
+
+Test-Case "لا فقدان صامت: كل فشل مؤكَّد قبل التسليم يُسجَّل بحدث صريح" {
+    Assert-True ($bridgeSrc -match 'Event = "pre_submission_failure_retryable"') "يجب تسجيل الفشل القابل لإعادة المحاولة"
+    Assert-True ($bridgeSrc -match 'MarkerRolledBack = \$rolledBack') "يجب توثيق نجاح/فشل التراجع عن العلامة"
+}
+
+Test-Case "الترتيب في المصدر: التحضير يسبق العلامة، والعلامة تسبق التسليم" {
+    $prepareIdx = $bridgeSrc.IndexOf("New-OzkReceiptSpoolJob -Receipt `$receipt")
+    $markerIdx = $bridgeSrc.IndexOf('status = "print_in_flight"')
+    $writeIdx = $bridgeSrc.IndexOf("Write-BridgeState `$StatePath `$state", $markerIdx)
+    $submitIdx = $bridgeSrc.IndexOf("Submit-OzkReceiptSpoolJob -Job `$spoolJob")
+    Assert-True ($prepareIdx -ge 0 -and $markerIdx -ge 0 -and $writeIdx -ge 0 -and $submitIdx -ge 0) "يجب وجود المواضع الأربعة"
+    Assert-True ($prepareIdx -lt $markerIdx) "التحضير يجب أن يسبق العلامة"
+    Assert-True ($writeIdx -lt $submitIdx) "حفظ العلامة يجب أن يسبق التسليم"
+}
+
+Test-Case "دلالات صريحة: النجاح يعني القبول في الطابور لا خروج الورق" {
+    Assert-True ($bridgeSrc -match 'submitted_to_spooler:') "الحدث يجب أن يقول إنه تسليم للطابور"
+    Assert-True ($rendererSrc -match 'لا يوجد أي إثبات على خروج الورق') "الوحدة يجب أن توثّق حدود الضمان"
+}
+
+Test-Case "negative witness: بلا تمييز الفشل قبل التسليم تُقمع فاتورة لم تُطبع أصلاً" {
+    # السلوك السابق: العلامة تُحفظ ثم أي فشل يُبقيها، فتُقمع الفاتورة نهائياً.
+    $path = New-StatePath; $guid = "nw-presubmit"
+    $state = Read-BridgeState $path
+    $state.seen[$guid] = [ordered]@{ status = "print_in_flight"; invoiceNumber = 1001 }
+    Write-BridgeState $path $state          # علامة بلا تراجع
+    $reloaded = Read-BridgeState $path
+    Assert-True ($reloaded.seen.ContainsKey($guid)) "بلا تراجع تبقى العلامة"
+    Assert-True ((Invoke-BoundedPrintIteration $path $guid) -eq "skipped") "فتُقمع الفاتورة نهائياً — وهذا ما يمنعه الإصلاح"
+}
+
+Test-Case "وحدة العرض: التحضير منفصل عن التسليم فعلياً" {
+    Assert-True ($rendererSrc -match 'function New-OzkReceiptSpoolJob') "يجب وجود دالة تحضير مستقلة"
+    Assert-True ($rendererSrc -match 'function Submit-OzkReceiptSpoolJob') "يجب وجود دالة تسليم مستقلة"
+    # كل ما يمكن أن يفشل بلا مهمة طباعة يقع في التحضير
+    $prepareText = Get-ExtractedFunctionText $rendererSrc "function New-OzkReceiptSpoolJob {"
+    Assert-True ($prepareText -match 'Get-CimInstance Win32_Printer') "فحص الطابور في التحضير"
+    Assert-True ($prepareText -match 'New-OzkReceiptBitmap') "التصيير في التحضير"
+    Assert-True ($prepareText -match 'ToEscPosRaster') "بناء ESC/POS في التحضير"
+    $submitText = Get-ExtractedFunctionText $rendererSrc "function Submit-OzkReceiptSpoolJob {"
+    Assert-True ($submitText -notmatch 'New-OzkReceiptBitmap|Get-CimInstance|ToEscPosRaster') "التسليم يجب ألا يحوي أي عمل تحضيري"
+    Assert-True ($submitText -match '\[OzkRawThermalPrinter\]::Send') "التسليم يستدعي التسليم الخام فقط"
+}
+
+Test-Case "وحدة العرض: الفشل قبل قبول المهمة يرمي النوع المميِّز" {
+    Assert-True ($rendererSrc -match 'if \(!OpenPrinter\(printerName, out printer, IntPtr\.Zero\)\) throw new OzkSpoolNotSubmittedException') "OpenPrinter يجب أن يرمي النوع المميِّز"
+    Assert-True ($rendererSrc -match 'if \(jobId <= 0\) throw new OzkSpoolNotSubmittedException') "StartDocPrinter يجب أن يرمي النوع المميِّز"
+    Assert-True ($rendererSrc -match 'WritePrinter failed with Win32 error " \+ Marshal\.GetLastWin32Error\(\)\);') "WritePrinter يجب أن يبقى استثناءً غامضاً"
 }
 
 Write-Host "`n$($script:passed) passed, $($script:failed) failed"

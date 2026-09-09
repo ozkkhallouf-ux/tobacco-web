@@ -14,6 +14,14 @@ using System.Drawing.Imaging;
 using System.IO;
 using System.Runtime.InteropServices;
 
+// يُرمى فقط عندما نستطيع إثبات أن Windows spooler لم يقبل أي مهمة طباعة بعد:
+// أي قبل أن يعيد StartDocPrinter رقم مهمة صالحاً. بعد تلك اللحظة تصير النتيجة
+// غامضة ولا يجوز افتراض عدم الطباعة.
+public class OzkSpoolNotSubmittedException : Exception
+{
+    public OzkSpoolNotSubmittedException(string message) : base(message) { }
+}
+
 public static class OzkRawThermalPrinter
 {
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -96,14 +104,15 @@ public static class OzkRawThermalPrinter
     public static int Send(string printerName, byte[] payload, string documentName)
     {
         IntPtr printer;
-        if (!OpenPrinter(printerName, out printer, IntPtr.Zero)) throw new InvalidOperationException("OpenPrinter failed with Win32 error " + Marshal.GetLastWin32Error());
+        if (!OpenPrinter(printerName, out printer, IntPtr.Zero)) throw new OzkSpoolNotSubmittedException("OpenPrinter failed with Win32 error " + Marshal.GetLastWin32Error());
         bool documentStarted = false;
         bool pageStarted = false;
         try
         {
             DOC_INFO_1 info = new DOC_INFO_1 { pDocName = documentName, pOutputFile = null, pDataType = "RAW" };
             int jobId = StartDocPrinter(printer, 1, ref info);
-            if (jobId <= 0) throw new InvalidOperationException("StartDocPrinter failed with Win32 error " + Marshal.GetLastWin32Error());
+            // آخر نقطة يمكن فيها إثبات عدم وجود مهمة طباعة. ما بعدها غامض.
+            if (jobId <= 0) throw new OzkSpoolNotSubmittedException("StartDocPrinter failed with Win32 error " + Marshal.GetLastWin32Error());
             documentStarted = true;
             if (!StartPagePrinter(printer)) throw new InvalidOperationException("StartPagePrinter failed with Win32 error " + Marshal.GetLastWin32Error());
             pageStarted = true;
@@ -426,6 +435,59 @@ function Save-OzkReceiptPreview {
     return $fullPath
 }
 
+# ── حدود التسليم للطابعة ────────────────────────────────────────────────────
+# كل ما يمكن أن يفشل بلا إنشاء أي مهمة طباعة يقع في New-OzkReceiptSpoolJob:
+# التحقق من اسم الطابعة، وجود الطابور، تصيير الصورة، وبناء بايتات ESC/POS.
+# فشل أي منها مثبتٌ أنه قبل التسليم، فإعادة المحاولة آمنة تماماً.
+#
+# Submit-OzkReceiptSpoolJob لا يفعل شيئاً سوى تسليم البايتات الجاهزة إلى
+# spooler ويندوز. داخله وحده تقع النقطة الغامضة: قبل أن يعيد StartDocPrinter
+# رقم مهمة صالحاً لا توجد مهمة (ويُرمى OzkSpoolNotSubmittedException)، وبعدها
+# لا نستطيع إثبات عدم الطباعة.
+#
+# ملاحظة صريحة على الدلالات: نجاح هذا المسار يعني «قُبلت المهمة في طابور
+# الطباعة» فقط. لا يوجد أي إثبات على خروج الورق فعلياً — لا استعلام عن اكتمال
+# المهمة ولا إشعار من الطابعة. لا يجوز لأي كود أعلى أن يدّعي أكثر من ذلك.
+function New-OzkReceiptSpoolJob {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]$Receipt,
+        [Parameter(Mandatory = $true)][string]$LogoPath,
+        [Parameter(Mandatory = $true)][string]$PrinterName
+    )
+    if ($PrinterName -cne $script:CashierPrinterName) {
+        throw "Cashier receipts are restricted to '$($script:CashierPrinterName)'; refusing '$PrinterName'."
+    }
+    $installed = @(Get-CimInstance Win32_Printer | Where-Object { $_.Name -eq $PrinterName })
+    if ($installed.Count -ne 1) { throw "Printer queue not found or ambiguous: $PrinterName" }
+    $bitmap = New-OzkReceiptBitmap -Receipt $Receipt -LogoPath $LogoPath
+    try {
+        $payload = [OzkRawThermalPrinter]::ToEscPosRaster($bitmap, 190)
+    } finally {
+        $bitmap.Dispose()
+    }
+    return [pscustomobject]@{
+        PrinterName = $PrinterName
+        Payload = $payload
+        DocumentName = "OZK Cashier Receipt 80mm"
+    }
+}
+
+function Submit-OzkReceiptSpoolJob {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]$Job,
+        [switch]$ConfirmPhysicalPrint
+    )
+    if (-not $ConfirmPhysicalPrint) { throw "Physical printing requires -ConfirmPhysicalPrint." }
+    if ($Job.PrinterName -cne $script:CashierPrinterName) {
+        throw "Cashier receipts are restricted to '$($script:CashierPrinterName)'; refusing '$($Job.PrinterName)'."
+    }
+    $jobId = [OzkRawThermalPrinter]::Send($Job.PrinterName, $Job.Payload, $Job.DocumentName)
+    return [pscustomobject]@{ Submitted = $true; PrinterName = $Job.PrinterName; JobId = $jobId; Transport = "RAW ESC/POS"; SubmittedAt = (Get-Date).ToString("o") }
+}
+
+# يبقى المسار المجمّع كما كان لمن يستدعيه دفعةً واحدة (إعادة الطباعة اليدوية).
 function Send-OzkReceiptToPrinter {
     [CmdletBinding()]
     param(
@@ -435,19 +497,8 @@ function Send-OzkReceiptToPrinter {
         [switch]$ConfirmPhysicalPrint
     )
     if (-not $ConfirmPhysicalPrint) { throw "Physical printing requires -ConfirmPhysicalPrint." }
-    if ($PrinterName -cne $script:CashierPrinterName) {
-        throw "Cashier receipts are restricted to '$($script:CashierPrinterName)'; refusing '$PrinterName'."
-    }
-    $installed = @(Get-CimInstance Win32_Printer | Where-Object { $_.Name -eq $PrinterName })
-    if ($installed.Count -ne 1) { throw "Printer queue not found or ambiguous: $PrinterName" }
-    $bitmap = New-OzkReceiptBitmap -Receipt $Receipt -LogoPath $LogoPath
-    try {
-        $payload = [OzkRawThermalPrinter]::ToEscPosRaster($bitmap, 190)
-        $jobId = [OzkRawThermalPrinter]::Send($PrinterName, $payload, "OZK Cashier Receipt 80mm")
-    } finally {
-        $bitmap.Dispose()
-    }
-    return [pscustomobject]@{ Submitted = $true; PrinterName = $PrinterName; JobId = $jobId; Transport = "RAW ESC/POS"; SubmittedAt = (Get-Date).ToString("o") }
+    $job = New-OzkReceiptSpoolJob -Receipt $Receipt -LogoPath $LogoPath -PrinterName $PrinterName
+    return (Submit-OzkReceiptSpoolJob -Job $job -ConfirmPhysicalPrint)
 }
 
-Export-ModuleMember -Function New-OzkReceiptBitmap, Save-OzkReceiptPreview, Send-OzkReceiptToPrinter
+Export-ModuleMember -Function New-OzkReceiptBitmap, Save-OzkReceiptPreview, Send-OzkReceiptToPrinter, New-OzkReceiptSpoolJob, Submit-OzkReceiptSpoolJob

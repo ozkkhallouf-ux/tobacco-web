@@ -53,6 +53,19 @@ $script:WholesaleTypeGuids = @(
 # صراحةً قبل أي استعلام أو تصيير أو أمر طباعة — بلا fallback وبلا إعادة توجيه.
 $script:CashierInvoiceTypes = @("Retail")
 
+function Test-PreSubmissionFailure($ErrorRecord) {
+    # صحيحة فقط للفشل المثبت أنه وقع قبل قبول spooler ويندوز لأي مهمة طباعة.
+    # مصدرها الوحيد OzkSpoolNotSubmittedException التي ترميها وحدة العرض عند
+    # فشل OpenPrinter أو StartDocPrinter. أي فشل آخر بعد تلك النقطة يبقى غامضاً
+    # ويُعامل على أنه ربما طُبع.
+    $exception = $ErrorRecord.Exception
+    while ($null -ne $exception) {
+        if ($exception.GetType().Name -eq "OzkSpoolNotSubmittedException") { return $true }
+        $exception = $exception.InnerException
+    }
+    return $false
+}
+
 function Assert-CashierTypeGuid([string]$TypeGuid, [int]$InvoiceNumber) {
     if ([string]$TypeGuid -ne $script:RetailTypeGuid) {
         throw "Refusing to print invoice $InvoiceNumber : its type GUID '$TypeGuid' is not the cashier (Retail) type. Wholesale invoices are owned by the Ameen wholesale autoprint watcher and must never reach the cashier thermal printer."
@@ -200,6 +213,92 @@ select
         Connection = $connection
         Database = $database
         Login = $login
+    }
+}
+
+# ── تمثيل قانوني موحّد لمحتوى الإيصال ───────────────────────────────────────
+# مصدر واحد يغذّي استعمالين لهما عقدان مختلفان عمداً:
+#
+#  • توقيع الاستقرار (Wait-InvoiceReady): يقارن لقطتين لنفس الفاتورة بفارق
+#    عشرات الأجزاء من الثانية، والاتصال READ UNCOMMITTED عمداً. فيجب أن يغطي
+#    كل قيمة تُطبع فعلاً — ترويسةً وأسطراً — لا الأسطر وحدها، وإلا اعتُبرت
+#    الفاتورة مستقرة بينما اسم الزبون أو الإجمالي أو الخصم أو الدفعة أو سعر
+#    الصرف ما زال قيد الكتابة. يشمل هوية السجل (GUID، CreateDate، أرقام
+#    الأسطر) لأن أي تبدّل فيها بين اللقطتين يعني أن الترحيل لم ينتهِ.
+#
+#  • بصمة التكرار (Get-InvoiceFingerprint): تقارن سجلَّين مختلفَي GUID لتحديد
+#    ما إذا كانا نفس البيعة المحفوظة مرتين. فتستبعد كل ما يُولَّد من جديد عند
+#    إعادة الحفظ (GUID الفاتورة، GUID الأسطر، أرقامها، CreateDate) وتعتمد
+#    المحتوى المطبوع نفسه. الاعتماد على الإجمالي وعدد الأسطر وحدهما كان يقمع
+#    فاتورةً مصحَّحة بمواد مختلفة تصادف تساوي إجماليها وعدد أسطرها.
+#
+# الحقول المشمولة هي بالضبط ما يقرأه Convert-SnapshotToReceipt ويرسمه
+# OzkReceiptRenderer — لا حقل زائد لتوسيع الهاش بلا أثر على الورق.
+$script:InvariantCulture = [Globalization.CultureInfo]::InvariantCulture
+
+function Format-CanonicalValue($Value) {
+    if ($null -eq $Value -or $Value -is [DBNull]) { return "" }
+    if ($Value -is [double] -or $Value -is [decimal] -or $Value -is [single] -or
+        $Value -is [int] -or $Value -is [long] -or $Value -is [short]) {
+        # "R" بثقافة ثابتة: لا فاصلة عشرية محلية ولا تقريب يخفي فرقاً حقيقياً.
+        return ([double]$Value).ToString("R", $script:InvariantCulture)
+    }
+    if ($Value -is [bool]) { return $(if ($Value) { "true" } else { "false" }) }
+    return ([string]$Value).Trim()
+}
+
+function Get-CanonicalLineText($Line, [bool]$IncludeRecordIdentity) {
+    $parts = New-Object System.Collections.Generic.List[string]
+    if ($IncludeRecordIdentity) {
+        $parts.Add((Format-CanonicalValue $Line.LineGuid))
+        $parts.Add((Format-CanonicalValue $Line.LineNumber))
+    }
+    # المادة وكميتها ووحدتها وسعرها: كل هذه تظهر على الإيصال.
+    $parts.Add((Format-CanonicalValue $Line.ItemGuid))
+    $parts.Add((Format-CanonicalValue $Line.ItemName))
+    $parts.Add((Format-CanonicalValue $Line.Qty))
+    $parts.Add((Format-CanonicalValue $Line.SelectedUnit))
+    $parts.Add((Format-CanonicalValue $Line.Unit2Factor))
+    $parts.Add((Format-CanonicalValue $Line.RawPrice))
+    return ($parts -join "|")
+}
+
+function Get-CanonicalReceiptText($Header, $Lines, [bool]$IncludeRecordIdentity, [string]$BranchGuid = "") {
+    $head = New-Object System.Collections.Generic.List[string]
+    if ($IncludeRecordIdentity) {
+        $head.Add((Format-CanonicalValue $Header.InvoiceGuid))
+        $head.Add((Format-CanonicalValue $Header.CreateDate))
+        $head.Add((Format-CanonicalValue $Header.InvoiceDate))
+        $head.Add((Format-CanonicalValue $Header.IsPosted))
+        $head.Add((Format-CanonicalValue $Header.RecordState))
+    } else {
+        $head.Add((Format-CanonicalValue $BranchGuid))
+        $parsedDate = [datetime]::Parse([string]$Header.InvoiceDate, $script:InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+        $head.Add($parsedDate.ToString("yyyy-MM-dd", $script:InvariantCulture))
+    }
+    $head.Add((Format-CanonicalValue $Header.TypeGuid))
+    $head.Add((Format-CanonicalValue $Header.InvoiceNumber))
+    $head.Add((Format-CanonicalValue $Header.CustomerName))
+    $head.Add((Format-CanonicalValue $Header.InvoiceTotal))
+    $head.Add((Format-CanonicalValue $Header.TotalDiscount))
+    $head.Add((Format-CanonicalValue $Header.TotalExtra))
+    $head.Add((Format-CanonicalValue $Header.FirstPayment))
+    # سعر الصرف يقسم كل مبلغ على الإيصال، وISO يرافق الأرقام المعروضة.
+    $head.Add((Format-CanonicalValue $Header.CurrencyValue))
+    $head.Add((Format-CanonicalValue $Header.CurrencyIso))
+
+    $lineTexts = @(foreach ($line in @($Lines)) { Get-CanonicalLineText $line $IncludeRecordIdentity })
+    # الترتيب جزء من العقد: الأسطر تُطبع بترتيب الاستعلام، فتبديلها تغيّر مرئي.
+    return (($head -join "|") + "`n" + ($lineTexts -join "`n") + "`n#" + (@($Lines).Count))
+}
+
+function Get-CanonicalHash([string]$Text) {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Text))
+        return -join ($bytes | ForEach-Object { $_.ToString("x2") })
+    } finally {
+        $sha.Dispose()
     }
 }
 
@@ -443,16 +542,10 @@ order by bi.Number, bi.GUID;
     }
     if ($null -eq $header) { return $null }
 
-    $signatureSource = @($lines | ForEach-Object {
-        "{0}|{1}|{2:R}|{3:R}|{4:R}" -f $_.LineGuid, $_.LineNumber, [double]$_.Qty, [double]$_.RawPrice, [double]$_.SelectedUnit
-    }) -join "`n"
-    $sha = [System.Security.Cryptography.SHA256]::Create()
-    try {
-        $hashBytes = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($signatureSource))
-        $signature = -join ($hashBytes | ForEach-Object { $_.ToString("x2") })
-    } finally {
-        $sha.Dispose()
-    }
+    # يشمل الترويسة المطبوعة كاملةً لا الأسطر وحدها: الاتصال READ UNCOMMITTED،
+    # فتغيّر اسم الزبون أو الإجمالي أو الخصم أو الدفعة أو سعر الصرف بين اللقطتين
+    # كان يمرّ سابقاً بلا أثر على التوقيع فتُطبع فاتورة بأرقام نصف مكتوبة.
+    $signature = Get-CanonicalHash (Get-CanonicalReceiptText $header $lines $true)
 
     return [pscustomobject]@{
         Header = $header
@@ -679,23 +772,14 @@ function Write-BridgeState([string]$Path, $State) {
 }
 
 function Get-InvoiceFingerprint($Candidate, $Snapshot) {
-    # Strongest available content signature for "is this really the same sale?",
-    # independent of GUID: document type, invoice number, invoice date, branch,
-    # customer, final total, and line count. Deliberately NOT just number+type+date.
-    $header = $Snapshot.Header
-    $dateOnly = ([datetime]::Parse([string]$header.InvoiceDate)).ToString("yyyy-MM-dd")
-    $branch = if ([string]::IsNullOrWhiteSpace($Candidate.BranchGuid)) { "" } else { $Candidate.BranchGuid }
-    $customer = if ([string]::IsNullOrWhiteSpace($header.CustomerName)) { "" } else { $header.CustomerName.Trim().ToLowerInvariant() }
-    $total = if ($null -eq $header.InvoiceTotal) { 0.0 } else { [math]::Round([double]$header.InvoiceTotal, 2) }
-    $raw = "{0}|{1}|{2}|{3}|{4}|{5:F2}|{6}" -f `
-        $header.TypeGuid, $header.InvoiceNumber, $dateOnly, $branch, $customer, $total, $Snapshot.LineCount
-    $sha = [System.Security.Cryptography.SHA256]::Create()
-    try {
-        $bytes = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($raw))
-        return -join ($bytes | ForEach-Object { $_.ToString("x2") })
-    } finally {
-        $sha.Dispose()
-    }
+    # «هل هذه نفس البيعة فعلاً؟» — مستقلة عن GUID الفاتورة وعن GUIDات الأسطر
+    # وأرقامها وCreateDate، لأنها كلها تُولَّد من جديد عند إعادة الحفظ. وتعتمد
+    # على المحتوى المطبوع كاملاً: النوع والرقم والتاريخ والفرع والزبون
+    # والإجماليات والدفعة والعملة، وكل سطر بمادته وكميته ووحدته وسعره وترتيبه.
+    # الاكتفاء بالإجمالي وعدد الأسطر كان يقمع فاتورة مصحَّحة بمواد مختلفة
+    # تصادف تساوي إجماليها وعدد أسطرها مع الأصل.
+    $branch = if ([string]::IsNullOrWhiteSpace($Candidate.BranchGuid)) { "" } else { [string]$Candidate.BranchGuid }
+    return Get-CanonicalHash (Get-CanonicalReceiptText $Snapshot.Header $Snapshot.Lines $false $branch)
 }
 
 function Remove-StaleFingerprints($RecentFingerprints, [datetime]$Now, [int]$MaxAgeSeconds) {
@@ -961,14 +1045,15 @@ try {
                 Import-Module $script:ReceiptModulePath -Force
                 $receipt = Convert-SnapshotToReceipt $connection $ready.Snapshot
 
-                # --- علامة "قيد الإرسال" تُكتب على القرص قبل الإرسال مباشرةً -------
-                # بدونها كان فشلُ حفظِ الحالة بعد نجاح الإرسال يعني: يموت الجسر،
-                # يعيده الـwatchdog بعد ثانية، فيقرأ حالةً لا تحوي هذه الفاتورة
-                # فيطبعها ثانيةً — وقد يتكرر بلا نهاية إن كان العطل مستمراً.
-                # تُكتب العلامة بعد التصيير مباشرةً وقبل الإرسال تحديداً، فأي فشل
-                # سابق للإرسال (استيراد الوحدة، بناء الإيصال، الحارس) لا يترك أثراً
-                # ويبقى إعادة المحاولة مسموحاً — بينما أي فشل من لحظة الإرسال فصاعداً
-                # يترك أثراً يمنع إعادة الطباعة الآلية.
+                # 1) كل ما يمكن أن يفشل بلا إنشاء أي مهمة طباعة يقع هنا، قبل أي
+                #    علامة: التحقق من الطابعة، وجود الطابور، التصيير، بناء ESC/POS.
+                #    فشل أي منها لا يترك أثراً، فإعادة المحاولة تبقى مضمونة.
+                $spoolJob = New-OzkReceiptSpoolJob -Receipt $receipt -LogoPath $script:ReceiptLogoPath -PrinterName $PrinterName
+
+                # 2) من هنا فصاعداً قد تصير النتيجة غامضة، فتُحفظ العلامة على القرص
+                #    قبل التسليم. بدونها كان فشلُ حفظِ الحالة بعد نجاح التسليم يقتل
+                #    الجسر، فيعيده الـwatchdog بعد ثانية ويقرأ حالةً لا تحوي هذه
+                #    الفاتورة فيطبعها ثانيةً — بلا نهاية إن كان العطل مستمراً.
                 $state.seen[$candidate.InvoiceGuid] = [ordered]@{
                     status = "print_in_flight"
                     invoiceNumber = $candidate.InvoiceNumber
@@ -977,9 +1062,37 @@ try {
                 }
                 Write-BridgeState $StatePath $state
 
-                [void](Send-OzkReceiptToPrinter -Receipt $receipt -LogoPath $script:ReceiptLogoPath -PrinterName $PrinterName -ConfirmPhysicalPrint)
+                # 3) التسليم وحده. فشلٌ مثبتٌ أنه قبل قبول أي مهمة (OpenPrinter أو
+                #    StartDocPrinter) يعني يقيناً أن الورق لم يخرج، فنتراجع عن
+                #    العلامة كي لا تُقمع فاتورة كاشير لم تُطبع أصلاً. أي فشل آخر
+                #    يبقى غامضاً فتبقى العلامة ويُمنع التكرار الآلي.
+                try {
+                    [void](Submit-OzkReceiptSpoolJob -Job $spoolJob -ConfirmPhysicalPrint)
+                } catch {
+                    if (Test-PreSubmissionFailure $_) {
+                        [void]$state.seen.Remove($candidate.InvoiceGuid)
+                        $rolledBack = $true
+                        try {
+                            Write-BridgeState $StatePath $state
+                        } catch {
+                            $rolledBack = $false
+                        }
+                        Write-BridgeLog ([pscustomobject]@{
+                            Event = "pre_submission_failure_retryable"
+                            invoice_number = $candidate.InvoiceNumber
+                            invoice_guid = $candidate.InvoiceGuid
+                            At = (Get-Date).ToUniversalTime().ToString("o")
+                            MarkerRolledBack = $rolledBack
+                            Consequence = if ($rolledBack) { "no_print_job_was_created; will retry on a later poll" }
+                                          else { "no_print_job_was_created; marker rollback failed - manual reprint may be required" }
+                            CustomerAndItemsRedacted = $true
+                        })
+                    }
+                    throw
+                }
                 $invoiceEvent.Renderer = "ozk_80mm_v1"
-                $invoiceEvent.Printer = "submitted:$PrinterName"
+                # الدلالة الدقيقة: قُبلت المهمة في طابور الطباعة. لا إثبات على خروج الورق.
+                $invoiceEvent.Printer = "submitted_to_spooler:$PrinterName"
                 $stateStatus = "spooled"
             } else {
                 $invoiceEvent.Renderer = "ozk_80mm_v1_ready"
