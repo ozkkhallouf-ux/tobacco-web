@@ -279,6 +279,8 @@ function Invoke-OzkReceiptDrawing($Graphics, $Receipt, $Logo) {
         Draw-OzkText $graphics "الوقت:" $bodyFont 190 $y 100 45 "Right" $true
         Draw-OzkText $graphics $Receipt.Time $bodyFont 20 $y 170 45 "Right" $false
         $y += 47
+        Draw-OzkText $graphics ("رقم الفاتورة:  {0}" -f $Receipt.InvoiceNumber) $bodyFont 20 $y 536 43 "Right" $true
+        $y += 43
         Draw-OzkText $graphics ("العميل:  {0}" -f $Receipt.CustomerName) $bodyFont 20 $y 536 43 "Right" $true
         $y += 43
         Draw-OzkText $graphics ("البيان:  {0}" -f $Receipt.Description) $bodyFont 20 $y 536 43 "Right" $true
@@ -466,6 +468,13 @@ function New-OzkReceiptSpoolJob {
     )
     if ($PrinterName -cne $script:CashierPrinterName) {
         throw "Cashier receipts are restricted to '$($script:CashierPrinterName)'; refusing '$PrinterName'."
+    }
+    # فشل مغلق: لا نطبع إيصالاً حقيقياً بلا رقم فاتورة صالح. هذا هو نقطة الاختناق
+    # الوحيدة المشتركة بين مسار الطباعة اليدوية والمراقبة التلقائية؛ لا يمسّ Preview.
+    $invoiceNumberValid = $false
+    try { $invoiceNumberValid = ([int]$Receipt.InvoiceNumber -gt 0) } catch { $invoiceNumberValid = $false }
+    if (-not $invoiceNumberValid) {
+        throw (New-Object OzkReceiptUnrenderableException("InvoiceNumber is missing or invalid; refusing to print receipt without a valid invoice number."))
     }
     $installed = @(Get-CimInstance Win32_Printer | Where-Object { $_.Name -eq $PrinterName })
     if ($installed.Count -ne 1) { throw "Printer queue not found or ambiguous: $PrinterName" }

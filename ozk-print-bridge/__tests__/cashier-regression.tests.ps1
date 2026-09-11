@@ -50,14 +50,18 @@ function Assert-Throws([scriptblock]$Body, [string]$Message) {
 }
 
 # ─── استخراج نصّي لدالة من مصدر ozk-print-bridge.ps1 (لا تنفيذ للملف كاملاً) ───
+# يتحمّل LF وCRLF معاً: checkout حقيقي على ويندوز مع core.autocrlf=true يعطي
+# \r\n، وأي checkout آخر (لينكس أو .gitattributes مختلف) قد يعطي \n فقط. لا
+# نفترض أياً منهما — نطابق \r?\n صراحة بدل marker حرفي بنهاية سطر واحدة.
 function Get-ExtractedFunctionText([string]$SourceText, [string]$Signature) {
     $startIdx = $SourceText.IndexOf($Signature)
     Assert-True ($startIdx -ge 0) "لم يُعثر على التوقيع: $Signature"
     $braceOpen = $SourceText.IndexOf("{", $startIdx)
-    $endMarker = "`n}`n"
-    $endIdx = $SourceText.IndexOf($endMarker, $braceOpen)
-    Assert-True ($endIdx -ge 0) "تعذّر تحديد نهاية الدالة لـ: $Signature"
-    return $SourceText.Substring($startIdx, ($endIdx + 2) - $startIdx)
+    $endMatch = [regex]::Match($SourceText.Substring($braceOpen), "\r?\n\}\r?\n")
+    Assert-True $endMatch.Success "تعذّر تحديد نهاية الدالة لـ: $Signature"
+    $endIdx = $braceOpen + $endMatch.Index
+    $closingBraceIdx = $SourceText.IndexOf("}", $endIdx)
+    return $SourceText.Substring($startIdx, ($closingBraceIdx + 1) - $startIdx)
 }
 
 $bridgeSrc = Get-Content -LiteralPath (Join-Path $bridgeDir "ozk-print-bridge.ps1") -Raw
@@ -293,8 +297,10 @@ $bridgeSrc = Get-Content -Raw -LiteralPath $BridgePath
 function Get-Fn([string]$Signature) {
     $s = $bridgeSrc.IndexOf($Signature)
     $b = $bridgeSrc.IndexOf("{", $s)
-    $e = $bridgeSrc.IndexOf("`n}`n", $b)
-    return $bridgeSrc.Substring($s, ($e + 2) - $s)
+    $m = [regex]::Match($bridgeSrc.Substring($b), "\r?\n\}\r?\n")
+    $e = $b + $m.Index
+    $c = $bridgeSrc.IndexOf("}", $e)
+    return $bridgeSrc.Substring($s, ($c + 1) - $s)
 }
 $script:InvariantCulture = [Globalization.CultureInfo]::InvariantCulture
 foreach ($signature in @(
@@ -578,7 +584,7 @@ try {
     $script:DrawingAvailable = $false
 }
 
-function New-TestReceipt([int]$LineCount, [string]$NamePattern = "مادة تجريبية") {
+function New-TestReceipt([int]$LineCount, [string]$NamePattern = "مادة تجريبية", [int]$InvoiceNumber = 1001) {
     $lines = New-Object System.Collections.Generic.List[object]
     for ($i = 1; $i -le $LineCount; $i++) {
         $lines.Add([pscustomobject]@{
@@ -595,6 +601,7 @@ function New-TestReceipt([int]$LineCount, [string]$NamePattern = "مادة تج�
         Phones = "011-1111111"
         CenterPhone = "0999999999"
         Address = "دمشق"
+        InvoiceNumber = $InvoiceNumber
         Date = "2026-09-09"
         Time = "12:30"
         CustomerName = "زبون تجريبي"
@@ -1692,6 +1699,73 @@ Test-Case "negative witness: إخراج الرصيد من التوقيع يعي�
     $withB = Get-SnapshotSignatureWithBalance $b (New-TestBalance $true 1000 3900)
     Assert-True ($withA -ne $withB) "التوقيع الحالي يجب أن يلتقط تغيّر الرصيد"
     Assert-True ($legacyA -ne $withA) "ضمّ الرصيد يجب أن يغيّر التوقيع فعلاً"
+}
+
+Write-Host "`n== P1-N: رقم الفاتورة يظهر على الإيصال المطبوع =="
+
+Test-Case "1) InvoiceNumber ينتقل من رأس اللقطة إلى الإيصال" {
+    $receipt = Convert-SnapshotToReceipt (New-Snapshot -InvoiceNumber 4321)
+    Assert-True ($receipt.InvoiceNumber -eq 4321) "الإيصال يجب أن يحمل رقم الفاتورة من الرأس، وُجد: $($receipt.InvoiceNumber)"
+}
+
+Test-Case "2) المُصيِّر يرسم رقم الفاتورة فعلاً، ومرة واحدة غير مشروطة" {
+    $drawText = Get-ExtractedFunctionText $rendererSrc "function Invoke-OzkReceiptDrawing(`$Graphics, `$Receipt, `$Logo) {"
+    $calls = [regex]::Matches($drawText, '\$Receipt\.InvoiceNumber')
+    Assert-True ($calls.Count -ge 1) "يجب أن يقرأ المُصيِّر Receipt.InvoiceNumber فعلاً"
+    Assert-True ($drawText -match 'رقم الفاتورة:\s*\{0\}.*-f \$Receipt\.InvoiceNumber') "يجب رسم نص عربي واضح لرقم الفاتورة"
+    # يقع الرسم قبل حلقة البنود (foreach)، فلا يتوقف على عددها ولا يختفي بطول الفاتورة
+    $numberIdx = $drawText.IndexOf('$Receipt.InvoiceNumber')
+    $loopIdx = $drawText.IndexOf('foreach')
+    Assert-True ($loopIdx -lt 0 -or $numberIdx -lt $loopIdx) "رسم رقم الفاتورة يجب أن يسبق أي حلقة على البنود لا أن يعتمد عليها"
+}
+
+Test-Case "3) الرقم المعروض هو رقم الفاتورة الفعلي لا رقم مُشتق" {
+    $receipt = Convert-SnapshotToReceipt (New-Snapshot -InvoiceNumber 9999)
+    Assert-True ($receipt.InvoiceNumber -eq 9999) "يجب أن يطابق رقم الفاتورة الحقيقي حرفياً"
+    Assert-True ($receipt.InvoiceNumber -ne $receipt.ItemCount) "يجب ألا يكون الرقم مشتقاً من عدد البنود"
+    Assert-True ($receipt.InvoiceNumber -ne $receipt.LineCount) "يجب ألا يكون الرقم مشتقاً من عدد أسطر اللقطة"
+}
+
+Test-Case "4) فاتورتان مختلفتا الرقم تنتجان قيمتين مختلفتين على الإيصال" {
+    $r1 = Convert-SnapshotToReceipt (New-Snapshot -InvoiceNumber 100)
+    $r2 = Convert-SnapshotToReceipt (New-Snapshot -InvoiceNumber 200)
+    Assert-True ($r1.InvoiceNumber -ne $r2.InvoiceNumber) "رقمان مختلفان في اللقطة يجب أن يبقيا مختلفين على الإيصال"
+    Assert-True ($r1.InvoiceNumber -eq 100 -and $r2.InvoiceNumber -eq 200) "يجب أن يطابق كل إيصال رقم فاتورته هو، وُجد: $($r1.InvoiceNumber) / $($r2.InvoiceNumber)"
+}
+
+Test-RenderCase "5) لا اختفاء لرقم الفاتورة على فاتورة طويلة (40 بند تتجاوز الالتفاف)" {
+    $longName = "مادة ذات اسم طويل جداً يجبر السطر على الالتفاف أكثر من مرة داخل عمود الاسم"
+    $bitmap = New-OzkReceiptBitmap -Receipt (New-TestReceipt 40 $longName 5555) -LogoPath $logoPath
+    try {
+        Assert-True ($bitmap.Height -gt 0) "يجب أن تُصيَّر الفاتورة الطويلة بلا استثناء رغم وجود رقم الفاتورة"
+    } finally { $bitmap.Dispose() }
+}
+
+Test-Case "6) لا تغيّر على الحقول الراسخة الأخرى (العميل والبيان والتاريخ والوقت)" {
+    $receipt = Convert-SnapshotToReceipt (New-Snapshot -InvoiceNumber 777 -CustomerName "زبون ثابت")
+    Assert-True ($receipt.CustomerName -eq "زبون ثابت") "اسم الزبون يجب ألا يتأثر بإضافة رقم الفاتورة"
+    Assert-True (-not [string]::IsNullOrEmpty($receipt.Date)) "التاريخ يجب أن يبقى موجوداً كما كان"
+    Assert-True (-not [string]::IsNullOrEmpty($receipt.Time)) "الوقت يجب أن يبقى موجوداً كما كان"
+    Assert-True ($receipt.Description -eq "-") "البيان يجب ألا يتأثر"
+    $drawText = Get-ExtractedFunctionText $rendererSrc "function Invoke-OzkReceiptDrawing(`$Graphics, `$Receipt, `$Logo) {"
+    Assert-True ($drawText -match 'العميل:\s*\{0\}.*-f \$Receipt\.CustomerName') "سطر العميل يجب أن يبقى كما هو"
+    Assert-True ($drawText -match 'البيان:\s*\{0\}.*-f \$Receipt\.Description') "سطر البيان يجب أن يبقى كما هو"
+}
+
+Test-Case "وحدة العرض: New-OzkReceiptSpoolJob يفشل مغلقاً بلا رقم فاتورة صالح" {
+    $prepareText = Get-ExtractedFunctionText $rendererSrc "function New-OzkReceiptSpoolJob {"
+    Assert-True ($prepareText -match 'InvoiceNumber') "يجب أن يتحقق التحضير من رقم الفاتورة قبل أي عمل آخر"
+    Assert-True ($prepareText -match 'throw') "غياب/بطلان الرقم يجب أن يرمي استثناءً صريحاً لا أن يمرّ بصمت"
+    # الفحص يجب أن يسبق فحص الطابعة والتصيير — فشل مبكر قبل أي عمل
+    $guardIdx = $prepareText.IndexOf('InvoiceNumber')
+    $cimIdx = $prepareText.IndexOf('Get-CimInstance')
+    Assert-True ($guardIdx -ge 0 -and $cimIdx -ge 0 -and $guardIdx -lt $cimIdx) "فحص رقم الفاتورة يجب أن يسبق فحص الطابعة"
+}
+
+Test-RenderCase "negative witness: إيصال بلا InvoiceNumber (السلوك القديم) يفشل تحت المُصيِّر الحالي" {
+    $legacy = New-TestReceipt 1
+    $legacy.PSObject.Properties.Remove("InvoiceNumber")
+    Assert-Throws { $b = New-OzkReceiptBitmap -Receipt $legacy -LogoPath $logoPath; $b.Dispose() } "غياب رقم الفاتورة يجب أن يفشل صراحةً تحت الوضع الصارم — هذا ما كان يسمح بطباعة إيصال بلا رقم (P1-N)"
 }
 
 Write-Host "`n$($script:passed) passed, $($script:failed) failed"

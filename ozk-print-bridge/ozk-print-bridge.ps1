@@ -821,6 +821,8 @@ function Convert-SnapshotToReceipt($Snapshot) {
         Phones = "0984000662 - 0985000771"
         CenterPhone = "0994092038"
         Address = "دوما / ساحة الغنم"
+        # رقم الفاتورة نفسه من رأس اللقطة المستقرة — لا رقم مُشتق ولا مُولَّد هنا.
+        InvoiceNumber = [int]$header.InvoiceNumber
         Date = $invoiceDate.ToString("yyyy/M/d")
         Time = $createDate.ToString("h:mm tt", [Globalization.CultureInfo]::GetCultureInfo("en-US"))
         CustomerName = if ([string]::IsNullOrWhiteSpace($header.CustomerName)) { "-" } else { $header.CustomerName.Trim() }
