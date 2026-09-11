@@ -56,6 +56,10 @@ function Write-WatchdogEvent([string]$EventName, [string]$Reason, [string]$Error
         try {
             Write-Warning "watchdog event logging failed for '$EventName' ($Reason): $($_.Exception.Message)"
         } catch {
+            # Even the fallback warning failed (e.g. no console attached). Deliberately
+            # swallowed and non-empty on purpose: logging must never crash the watchdog,
+            # and there is no further fallback to recurse into without risking a loop.
+            $null = $_
         }
     }
 }
