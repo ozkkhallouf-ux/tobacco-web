@@ -39,6 +39,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, extname, join, normalize, resolve } from "node:path";
 import { pdfPageLines, normalizeArabic, printedRow, printedGroup } from "./lib/price-bulletin-pdf-text.mjs";
 import { FONT_USABLE_PROBE, prepareBulletinFont } from "./lib/bulletin-font-ready.mjs";
+import { createMarkupRowReader } from "./lib/markup-rows.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const TYPES = {
@@ -80,33 +81,11 @@ const checkWithFont = (fontReady, name, condition, detail) => {
 };
 
 // صفوف مستند الطباعة كما هي في الترميز — **مطابقة صفٍّ كامل، لا احتواء نصّي**
-// (مستقلّة عن الخط تماماً).
-//
-// لماذا الصفّ كاملاً: التطبيع يحذف الفراغات، فاسمُ صنفٍ أقصر قد يكون مقطعاً
-// داخل اسم أطول («اليغانس سليم فضي» داخل «اليغانس سليم فضي بدون طبعة»)، فيقبله
-// `includes` ويمرّ حذفُ الأقصر زوراً — وهي نفس ثغرة الاحتواء التي أُغلقت في
-// قارئ الـPDF (ملاحظة Codex P1 على 3468f90). فنقارن الخلايا الثلاث بالتساوي
-// التام مع صفٍّ واحد من الترميز.
-//
-// ومستندٌ غائب (فشل الزر في إنتاجه) = **كل الصفوف مفقودة**، لا «لا شيء مفقود»
-// (ملاحظة DeepScan INSUFFICIENT_NULL_CHECK).
-const flattenForMarkup = (value) => String(value).normalize("NFKC").replace(/\s+/g, "");
-const MARKUP_CELL_SEPARATOR = "\u0001";
-function markupRowKeys(documentHtml) {
-  const keys = new Set();
-  for (const row of String(documentHtml).matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/g)) {
-    const cells = [...row[1].matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/g)]
-      .map((cell) => flattenForMarkup(cell[1].replace(/<[^>]*>/g, "")));
-    if (cells.length) keys.add(cells.join(MARKUP_CELL_SEPARATOR));
-  }
-  return keys;
-}
-function rowsMissingFromMarkup(documentHtml, rows) {
-  if (typeof documentHtml !== "string" || !documentHtml) return [...rows];
-  const keys = markupRowKeys(documentHtml);
-  return rows.filter((row) => !keys.has(
-    [row.name, row.unit, row.price].map(flattenForMarkup).join(MARKUP_CELL_SEPARATOR)));
-}
+// (مستقلّة عن الخط تماماً). القارئ ومبرّراته في scripts/lib/markup-rows.mjs:
+// يُحلَّل الترميز بمحلّل HTML حقيقي لا بـregex، لأن حذف الوسوم بتعبير نمطي
+// يمرّ مرّةً واحدة كان يُسقط صفوفاً سليمة (الكيانات، سمة فيها قوس إغلاق)
+// ويُمرّر نصّاً ليس على الورق (تعليقات، وسم مشطور يلتحم) — وهو ما ترصده
+// قاعدة CodeQL js/incomplete-multi-character-sanitization.
 
 const A4_HEIGHT_PX = 297 / 25.4 * 96;
 
@@ -124,6 +103,7 @@ const PRICES = raw.map((r) => ({
 }));
 
 const browser = await chromium.launch();
+const { rowsMissingFromMarkup } = createMarkupRowReader(browser);
 
 async function bootApp(width, height, { blockWebfont = false } = {}) {
   const context = await browser.newContext({ viewport: { width, height }, bypassCSP: true, serviceWorkers: "block" });
@@ -298,7 +278,7 @@ for (const sc of [
   // للصفحة الأولى يجب أن يُطبع على الورقة الأولى **نفسها**.
   // **بديلٌ مستقلّ عن الخط، مفروض دائماً.** يرصد إخفاء نصّ الأصناف أو تشويهه
   // حتى حين تتعذّر المطابقة الحرفية لغياب خط النشرة.
-  const missingFromMarkup = rowsMissingFromMarkup(documentHtml, planned.firstPageRows);
+  const missingFromMarkup = await rowsMissingFromMarkup(documentHtml, planned.firstPageRows);
   check(`${sc.label}: صفوف الصفحة الأولى موجودة نصّاً في مستند الطباعة (مستقلّ عن الخط)`,
     missingFromMarkup.length === 0, `مفقودة من الترميز: ${JSON.stringify(missingFromMarkup.slice(0, 5))}`);
 
@@ -449,18 +429,23 @@ for (const sc of [
   const swallowed = healthy.replace(asRow(rows[0]),
     asRow({ ...rows[0], name: `${rows[0].name} بدون طبعة` }));
 
+  // النداء صار غير متزامن (التحليل داخل المتصفّح)، فيُقرأ مرّةً في متغيّر:
+  // `await f(x).length` كان سيصير `await (f(x).length)` — أي await على undefined.
+  const missingNames = async (markup) =>
+    (await rowsMissingFromMarkup(markup, rows)).map((r) => r.name);
+
+  const onHealthy = await missingNames(healthy);
   check("شاهد سالب (بديل مستقلّ عن الخط): المستند السليم بلا نقص",
-    rowsMissingFromMarkup(healthy, rows).length === 0,
-    `المرصود: ${JSON.stringify(rowsMissingFromMarkup(healthy, rows).map((r) => r.name))}`);
+    onHealthy.length === 0, `المرصود: ${JSON.stringify(onHealthy)}`);
+  const onStripped = await missingNames(stripped);
   check("شاهد سالب (بديل مستقلّ عن الخط): يرصد الصفّ المحذوف",
-    rowsMissingFromMarkup(stripped, rows).map((r) => r.name).join("") === rows[1].name,
-    `المرصود: ${JSON.stringify(rowsMissingFromMarkup(stripped, rows).map((r) => r.name))}`);
+    onStripped.join("") === rows[1].name, `المرصود: ${JSON.stringify(onStripped)}`);
+  const onSwallowed = await missingNames(swallowed);
   check("شاهد سالب (بديل مستقلّ عن الخط): لا يقبل اسماً مبتلعاً داخل اسم أطول",
-    rowsMissingFromMarkup(swallowed, rows).map((r) => r.name).join("") === rows[0].name,
-    `المرصود: ${JSON.stringify(rowsMissingFromMarkup(swallowed, rows).map((r) => r.name))}`);
+    onSwallowed.join("") === rows[0].name, `المرصود: ${JSON.stringify(onSwallowed)}`);
+  const onAbsent = await rowsMissingFromMarkup(null, rows);
   check("شاهد سالب (بديل مستقلّ عن الخط): مستند غائب = كل الصفوف مفقودة",
-    rowsMissingFromMarkup(null, rows).length === rows.length,
-    `المرصود ${rowsMissingFromMarkup(null, rows).length} من ${rows.length}`);
+    onAbsent.length === rows.length, `المرصود ${onAbsent.length} من ${rows.length}`);
 }
 
 // ===== ٢ج) شاهد سالب لفحص الرسم: صفٌّ مخفيٌّ يُرصد بالطرق الثلاث =====
