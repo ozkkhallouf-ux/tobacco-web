@@ -1768,5 +1768,182 @@ Test-RenderCase "negative witness: إيصال بلا InvoiceNumber (السلوك
     Assert-Throws { $b = New-OzkReceiptBitmap -Receipt $legacy -LogoPath $logoPath; $b.Dispose() } "غياب رقم الفاتورة يجب أن يفشل صراحةً تحت الوضع الصارم — هذا ما كان يسمح بطباعة إيصال بلا رقم (P1-N)"
 }
 
+Write-Host "`n== P1-M: تأكيد الالتزام (committed confirmation) قبل الطباعة =="
+
+# الدالة المستخرجة هنا حقيقية من المصدر الفعلي. نستبدل فقط ما تتصل به فعلياً
+# بقاعدة البيانات (اتصال جديد + قراءة اللقطة الملتزمة) بمزيّفَين نتحكم بهما،
+# تماماً كما فُعل أعلاه مع Get-InvoiceSnapshot لاختبار Wait-InvoiceReady.
+. ([scriptblock]::Create((Get-ExtractedAssignmentText $bridgeSrc '$script:CommittedConfirmationLockTimeoutMilliseconds')))
+. ([scriptblock]::Create((Get-ExtractedFunctionText $bridgeSrc "function Confirm-InvoiceCommitted([guid]`$InvoiceGuid, `$ExpectedSnapshot) {")))
+. ([scriptblock]::Create((Get-ExtractedFunctionText $bridgeSrc "function Get-CommittedConfirmationDeferredEvent([string]`$InvoiceGuid, [int]`$InvoiceNumber, `$Confirmation) {")))
+
+$script:ConnectionShouldFail = $false
+$script:ConnectionOpened = 0
+function New-CommittedConfirmationConnection {
+    $script:ConnectionOpened++
+    if ($script:ConnectionShouldFail) { throw "simulated: committed confirmation connection failed" }
+    $conn = [pscustomobject]@{ State = "Open" }
+    $conn | Add-Member -MemberType ScriptMethod -Name Close -Value { $this.State = "Closed" } -Force
+    return $conn
+}
+
+$script:CommittedReadShouldFail = $false
+$script:CommittedReadException = "simulated: lock request time out period exceeded"
+$script:CommittedSnapshotToReturn = $null
+$script:CommittedReadCalls = 0
+function Get-InvoiceSnapshot($Connection, [guid]$InvoiceGuid) {
+    $script:CommittedReadCalls++
+    if ($script:CommittedReadShouldFail) { throw $script:CommittedReadException }
+    return $script:CommittedSnapshotToReturn
+}
+
+function Reset-CommittedConfirmationStubs {
+    $script:ConnectionShouldFail = $false
+    $script:ConnectionOpened = 0
+    $script:CommittedReadShouldFail = $false
+    $script:CommittedReadException = "simulated: lock request time out period exceeded"
+    $script:CommittedSnapshotToReturn = $null
+    $script:CommittedReadCalls = 0
+}
+
+Test-Case "1) قذرة مستقرة مطابقة + ملتزمة مطابقة → يُسمح بالطباعة" {
+    Reset-CommittedConfirmationStubs
+    $balance = New-TestBalance $true 1000 2500
+    $dirty = New-SnapshotWithBalance $balance
+    $script:CommittedSnapshotToReturn = New-SnapshotWithBalance $balance
+    $result = Confirm-InvoiceCommitted ([guid]::NewGuid()) $dirty
+    Assert-True $result.Confirmed "التطابق الكامل يجب أن يسمح بالطباعة"
+    Assert-True ($result.Snapshot.Signature -eq $script:CommittedSnapshotToReturn.Signature) "يجب إعادة اللقطة الملتزمة نفسها"
+}
+
+Test-Case "2) قذرة مستقرة + ملتزمة مختلفة → لا طباعة، إعادة محاولة" {
+    Reset-CommittedConfirmationStubs
+    $dirty = New-SnapshotWithBalance (New-TestBalance $true 1000 2500)
+    $script:CommittedSnapshotToReturn = New-SnapshotWithBalance (New-TestBalance $true 1000 3900)
+    $result = Confirm-InvoiceCommitted ([guid]::NewGuid()) $dirty
+    Assert-True (-not $result.Confirmed) "عدم التطابق يجب أن يمنع الطباعة"
+    Assert-True ($result.Reason -eq "signature_mismatch") "السبب يجب أن يكون عدم تطابق التوقيع، وُجد: $($result.Reason)"
+}
+
+Test-Case "3) قراءة التأكيد تُصادف مهلة قفل (lock timeout) → لا طباعة، إعادة محاولة لاحقة" {
+    Reset-CommittedConfirmationStubs
+    $script:CommittedReadShouldFail = $true
+    $dirty = New-SnapshotWithBalance (New-TestBalance $true 1000 2500)
+    $result = Confirm-InvoiceCommitted ([guid]::NewGuid()) $dirty
+    Assert-True (-not $result.Confirmed) "مهلة القفل ليست فشلاً دائماً"
+    Assert-True ($result.Reason -eq "confirmation_read_failed") "يجب تصنيفها كتأجيل قابل لإعادة المحاولة، وُجد: $($result.Reason)"
+    $deferredEvent = Get-CommittedConfirmationDeferredEvent "guid-1" 100 $result
+    Assert-True ($deferredEvent.Event -eq "committed_confirmation_deferred") "يجب تسجيل حدث التأجيل الصريح"
+}
+
+Test-Case "4) خطأ SQL عابر عند فتح اتصال التأكيد → لا طباعة، إعادة محاولة لاحقة" {
+    Reset-CommittedConfirmationStubs
+    $script:ConnectionShouldFail = $true
+    $dirty = New-SnapshotWithBalance (New-TestBalance $true 1000 2500)
+    $result = Confirm-InvoiceCommitted ([guid]::NewGuid()) $dirty
+    Assert-True (-not $result.Confirmed) "فشل فتح اتصال التأكيد ليس فشلاً دائماً"
+    Assert-True ($result.Reason -eq "confirmation_connection_failed") "وُجد: $($result.Reason)"
+    Assert-True ($script:CommittedReadCalls -eq 0) "لا قراءة يجب أن تقع إن تعذّر فتح الاتصال أصلاً"
+}
+
+Test-Case "5) اللقطة القذرة تتغيّر قبل الجاهزية → سلوك Wait-InvoiceReady كما كان بلا تغيير" {
+    # Wait-InvoiceReady نفسها يجب أن تبقى استقراراً مزدوجاً بحتاً على الاتصال
+    # القذر القائم، بلا أي إشارة إلى التأكيد الملتزم أو اتصال جديد بداخلها.
+    $waitText = Get-ExtractedFunctionText $bridgeSrc "function Wait-InvoiceReady(`$Connection, [guid]`$InvoiceGuid) {"
+    Assert-True ($waitText -notmatch 'Confirm-InvoiceCommitted') "يجب ألا يُستدعى التأكيد الملتزم من داخل فحص الاستقرار القذر"
+    Assert-True ($waitText -notmatch 'New-CommittedConfirmationConnection') "يجب ألا يفتح فحص الاستقرار القذر أي اتصال جديد"
+    Assert-True ($waitText -match '\$first\.Signature -eq \$second\.Signature') "الاستقرار المزدوج الأصلي يجب أن يبقى كما هو"
+}
+
+Test-Case "6) اللقطة الملتزمة تتذبذب ثم تستقر → يُطبع المحتوى الملتزم الأخير فقط" {
+    Reset-CommittedConfirmationStubs
+    $dirty = New-SnapshotWithBalance (New-TestBalance $true 1000 4200)
+    $script:CommittedSnapshotToReturn = New-SnapshotWithBalance (New-TestBalance $true 1000 3900)
+    $first = Confirm-InvoiceCommitted ([guid]::NewGuid()) $dirty
+    Assert-True (-not $first.Confirmed) "المحاولة الأولى (لم تستقر الملتزمة بعد) يجب ألا تُطبع"
+    $settled = New-SnapshotWithBalance (New-TestBalance $true 1000 4200)
+    $script:CommittedSnapshotToReturn = $settled
+    $second = Confirm-InvoiceCommitted ([guid]::NewGuid()) $dirty
+    Assert-True $second.Confirmed "بعد استقرار الملتزمة يجب أن تُقبل"
+    $receipt = Convert-SnapshotToReceipt $second.Snapshot
+    Assert-True ($receipt.CurrentBalance -eq 4200) "القيمة المطبوعة يجب أن تكون الملتزمة المستقرة الأخيرة، وُجد: $($receipt.CurrentBalance)"
+}
+
+Test-Case "7) الرصيد المحاسبي يختلف بين القذرة والملتزمة → لا طباعة" {
+    Reset-CommittedConfirmationStubs
+    $dirty = New-SnapshotWithBalance (New-TestBalance $true 1000 2500)
+    $script:CommittedSnapshotToReturn = New-SnapshotWithBalance (New-TestBalance $true 1750 2500)
+    $result = Confirm-InvoiceCommitted ([guid]::NewGuid()) $dirty
+    Assert-True (-not $result.Confirmed) "اختلاف الرصيد السابق وحده كافٍ لمنع الطباعة"
+}
+
+Test-Case "8) أسطر الفاتورة تختلف بين القذرة والملتزمة → لا طباعة" {
+    Reset-CommittedConfirmationStubs
+    $balance = New-TestBalance $true 1000 2500
+    $dirty = New-SnapshotWithBalance $balance
+    $committed = New-Snapshot -Lines @(New-TestLine -ItemGuid "M-9" -ItemName "مادة أخرى" -Qty 3 -RawPrice 750 -LineGuid "L-9" -LineNumber 1)
+    $committed | Add-Member -NotePropertyName Balance -NotePropertyValue $balance -Force
+    $committed | Add-Member -NotePropertyName Signature -NotePropertyValue (Get-SnapshotSignatureWithBalance $committed $balance) -Force
+    $script:CommittedSnapshotToReturn = $committed
+    $result = Confirm-InvoiceCommitted ([guid]::NewGuid()) $dirty
+    Assert-True (-not $result.Confirmed) "اختلاف الأسطر يجب أن يمنع الطباعة"
+}
+
+Test-Case "9) رقم الفاتورة يختلف بين القذرة والملتزمة → لا طباعة" {
+    Reset-CommittedConfirmationStubs
+    $balance = New-TestBalance $true 1000 2500
+    $dirty = New-SnapshotWithBalance $balance
+    $committed = New-Snapshot -InvoiceNumber 9999
+    $committed | Add-Member -NotePropertyName Balance -NotePropertyValue $balance -Force
+    $committed | Add-Member -NotePropertyName Signature -NotePropertyValue (Get-SnapshotSignatureWithBalance $committed $balance) -Force
+    $script:CommittedSnapshotToReturn = $committed
+    $result = Confirm-InvoiceCommitted ([guid]::NewGuid()) $dirty
+    Assert-True (-not $result.Confirmed) "اختلاف رقم الفاتورة يجب أن يمنع الطباعة"
+}
+
+Test-Case "10) بعد نجاح التأكيد لا تُقرأ الفاتورة ثانيةً قبل التصيير" {
+    # في كلا مساري الطباعة الحقيقيين يجب أن تُبنى الفاتورة من $confirmation.Snapshot
+    # لا من $ready.Snapshot، ولا يجوز أي استدعاء Get-InvoiceSnapshot إضافي بينهما.
+    $manualCalls = [regex]::Matches($bridgeSrc, 'Convert-SnapshotToReceipt \$confirmation\.Snapshot')
+    Assert-True ($manualCalls.Count -eq 2) "يجب أن يبني كلا مساري الطباعة الحقيقيين (اليدوي والآلي) الإيصال من لقطة التأكيد، وُجد: $($manualCalls.Count)"
+    Assert-True ($bridgeSrc -notmatch 'if \(\$ConfirmPhysicalPrint\) \{[^}]*Convert-SnapshotToReceipt \$ready\.Snapshot') "المسار الآلي يجب ألا يبني الإيصال من اللقطة القذرة بعد إضافة التأكيد"
+}
+
+Test-Case "11) فشل تأكيد الالتزام لا يمسّ حالة seen على الإطلاق" {
+    # الاستدعاء يجب أن يسبق أي تعديل على state.seen، وعند الفشل continue فوراً.
+    $confirmIdx = $bridgeSrc.IndexOf('$confirmation = Confirm-InvoiceCommitted ([guid]$candidate.InvoiceGuid)')
+    Assert-True ($confirmIdx -ge 0) "يجب أن يُستدعى التأكيد من الحلقة الآلية"
+    $continueIdx = $bridgeSrc.IndexOf("continue", $confirmIdx)
+    $seenAssignIdx = $bridgeSrc.IndexOf('$state.seen[$candidate.InvoiceGuid] = [ordered]@{`n                status = "print_in_flight"', $confirmIdx)
+    if ($seenAssignIdx -lt 0) {
+        $seenAssignIdx = $bridgeSrc.IndexOf('status = "print_in_flight"', $confirmIdx)
+    }
+    Assert-True ($continueIdx -ge 0 -and $continueIdx -lt $seenAssignIdx) "فشل التأكيد يجب أن يُنهي هذه الفاتورة (continue) قبل أي علامة print_in_flight"
+}
+
+Test-Case "12) دلالات P1-E/F/K القائمة لم تتغيّر" {
+    Assert-True ($bridgeSrc -match 'status = "print_in_flight"') "علامة قيد الإرسال باقية"
+    Assert-True ($bridgeSrc -match 'Event = "duplicate_suppressed"') "قمع التكرار باقٍ"
+    Assert-True ($bridgeSrc -match 'Event = "permanent_render_failure"') "عزل الفشل الحتمي باقٍ"
+    Assert-True ($bridgeSrc -match 'submitted_to_spooler:') "دلالة التسليم للطابور باقية"
+    Assert-True ($bridgeSrc -match '\$second\.Header\.IsPosted') "شرط الترحيل داخل Wait-InvoiceReady باقٍ"
+}
+
+Test-Case "negative witness: بلا تأكيد الالتزام كانت اللقطة القذرة المستقرة تُعتبر كافية للطباعة" {
+    # هذا بالضبط ما كانت تفعله شفرة ما قبل P1-M: قبول اللقطة القذرة فور استقرارها
+    # بلا أي قراءة READ COMMITTED تالية للتحقق من الالتزام الفعلي.
+    function Confirm-InvoiceCommitted-Legacy([guid]$InvoiceGuid, $ExpectedSnapshot) {
+        return [pscustomobject]@{ Confirmed = $true; Snapshot = $ExpectedSnapshot; Reason = "legacy_no_confirmation" }
+    }
+    $dirty = New-SnapshotWithBalance (New-TestBalance $true 1000 2500)
+    $legacyResult = Confirm-InvoiceCommitted-Legacy ([guid]::NewGuid()) $dirty
+    Assert-True $legacyResult.Confirmed "توثيقاً للعطل: السلوك القديم يوافق دائماً بلا أي قراءة تحقق فعلية"
+
+    Reset-CommittedConfirmationStubs
+    $script:CommittedSnapshotToReturn = New-SnapshotWithBalance (New-TestBalance $true 1000 9999)
+    $actual = Confirm-InvoiceCommitted ([guid]::NewGuid()) $dirty
+    Assert-True (-not $actual.Confirmed) "الدالة الحالية المستخرجة من المصدر الفعلي يجب أن ترفض هذه الحالة بعينها — هذا ما كان P1-M يسدّه"
+}
+
 Write-Host "`n$($script:passed) passed, $($script:failed) failed"
 if ($script:failed -gt 0) { exit 1 }

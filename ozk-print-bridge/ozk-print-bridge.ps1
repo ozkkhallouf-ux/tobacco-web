@@ -53,6 +53,13 @@ $script:WholesaleTypeGuids = @(
 # صراحةً قبل أي استعلام أو تصيير أو أمر طباعة — بلا fallback وبلا إعادة توجيه.
 $script:CashierInvoiceTypes = @("Retail")
 
+# --- Committed confirmation before printing (P1-M) ------------------------------
+# الاستقرار المزدوج في Wait-InvoiceReady يثبت فقط أن لقطتين READ UNCOMMITTED
+# تطابقتا؛ هذا لا يثبت الالتزام (commit). قيد مهلة القفل هنا صغير عمداً: هذه
+# قراءة تأكيد أخيرة واحدة قبل الطباعة مباشرة، لا فحص استقرار يتكرر كل استطلاع،
+# فتعليقها خلف قفل كتابة طويل يجمّد الطابور كله بلا داعٍ.
+$script:CommittedConfirmationLockTimeoutMilliseconds = 2000
+
 function Test-PermanentInvoiceFailure($ErrorRecord) {
     # صحيحة فقط للفشل الذي تحدّده محتويات الفاتورة وحدها، فتكراره مضمون ما دام
     # المحتوى ثابتاً — كتجاوز حدّ ارتفاع الإيصال. مصدرها الوحيد النوع المميِّز
@@ -263,6 +270,108 @@ select
         Connection = $connection
         Database = $database
         Login = $login
+    }
+}
+
+function New-CommittedConfirmationConnection {
+    # اتصال مستقل قصير العمر مخصَّص فقط لقراءة تأكيد الالتزام الأخيرة قبل
+    # الطباعة. لا يُبدَّل مستوى العزل على اتصال READ UNCOMMITTED القائم ثم
+    # يُعاد — بل اتصال READ COMMITTED جديد بالكامل يُفتح ويُغلق حول هذه القراءة
+    # الواحدة فقط. مهلة قفل محدودة كي لا يعلّق قرارَ الطباعة خلف قفل كتابة
+    # طويل من Al-Ameen؛ قراءة فقط، بلا أي كتابة على الإطلاق.
+    Add-Type -AssemblyName System.Data
+    $source = Get-RequiredUserSetting "AMEEN_SQL_CONNECTION_STRING"
+    $builder = New-Object System.Data.SqlClient.SqlConnectionStringBuilder $source
+    $builder["Application Name"] = "OZK Print Bridge - Committed Confirmation"
+    $builder["ApplicationIntent"] = "ReadOnly"
+    $builder["Enlist"] = $false
+    $builder["Connect Timeout"] = [math]::Min([math]::Max($builder.ConnectTimeout, 3), 10)
+
+    $connection = New-Object System.Data.SqlClient.SqlConnection $builder.ConnectionString
+    $connection.Open()
+
+    $sessionCommand = $connection.CreateCommand()
+    $sessionCommand.CommandTimeout = 3
+    $sessionCommand.CommandText = "set transaction isolation level read committed; set lock_timeout $script:CommittedConfirmationLockTimeoutMilliseconds;"
+    [void]$sessionCommand.ExecuteNonQuery()
+
+    return $connection
+}
+
+# التحقق النهائي: «ما التزم فعلاً هو ما يُطبع». الاستطلاع القذر (READ
+# UNCOMMITTED) والاستقرار المزدوج أعلاه يبقيان بلا تغيير؛ هذه قراءة إضافية
+# منفصلة تقع مرة واحدة فقط، عند وصول مرشّح إلى نقطة «على وشك الطباعة» —
+# لا في كل استطلاع. أي عائق عابر (مهلة قفل، deadlock، خطأ SQL مؤقت) أو عدم
+# تطابق مع اللقطة المستقرة يُعامل بلا استثناء كتأجيل قابل لإعادة المحاولة:
+# لا طباعة، لا علامة seen، لا عزل. اللقطة المُعادة هنا عند التطابق هي التي
+# يجب أن تُبنى منها الفاتورة — لا تُقرأ الفاتورة ثانيةً بعد هذه النقطة.
+function Confirm-InvoiceCommitted([guid]$InvoiceGuid, $ExpectedSnapshot) {
+    $connection = $null
+    try {
+        $connection = New-CommittedConfirmationConnection
+    } catch {
+        return [pscustomobject]@{
+            Confirmed = $false
+            Snapshot = $null
+            Reason = "confirmation_connection_failed"
+            ErrorType = $_.Exception.GetType().FullName
+            Message = [string]$_.Exception.Message
+        }
+    }
+    try {
+        try {
+            $committed = Get-InvoiceSnapshot $connection $InvoiceGuid
+        } catch {
+            return [pscustomobject]@{
+                Confirmed = $false
+                Snapshot = $null
+                Reason = "confirmation_read_failed"
+                ErrorType = $_.Exception.GetType().FullName
+                Message = [string]$_.Exception.Message
+            }
+        }
+        if ($null -eq $committed -or $committed.LineCount -eq 0 -or -not $committed.Header.IsPosted -or $committed.Header.RecordState -ne 0) {
+            return [pscustomobject]@{
+                Confirmed = $false
+                Snapshot = $committed
+                Reason = "not_committed_yet"
+                ErrorType = $null
+                Message = $null
+            }
+        }
+        $isMatch = $committed.LineCount -eq $ExpectedSnapshot.LineCount -and $committed.Signature -eq $ExpectedSnapshot.Signature
+        if (-not $isMatch) {
+            return [pscustomobject]@{
+                Confirmed = $false
+                Snapshot = $committed
+                Reason = "signature_mismatch"
+                ErrorType = $null
+                Message = $null
+            }
+        }
+        return [pscustomobject]@{
+            Confirmed = $true
+            Snapshot = $committed
+            Reason = "matched"
+            ErrorType = $null
+            Message = $null
+        }
+    } finally {
+        if ($null -ne $connection -and $connection.State -eq "Open") { $connection.Close() }
+    }
+}
+
+function Get-CommittedConfirmationDeferredEvent([string]$InvoiceGuid, [int]$InvoiceNumber, $Confirmation) {
+    return [pscustomobject]@{
+        Event = "committed_confirmation_deferred"
+        invoice_guid = $InvoiceGuid
+        invoice_number = $InvoiceNumber
+        Reason = $Confirmation.Reason
+        ErrorType = $Confirmation.ErrorType
+        Message = $Confirmation.Message
+        At = (Get-Date).ToUniversalTime().ToString("o")
+        Consequence = "no_print_no_mark_no_quarantine; retried on a later poll"
+        CustomerAndItemsRedacted = $true
     }
 }
 
@@ -1018,6 +1127,12 @@ try {
             }
         } else {
             if (-not $ConfirmPhysicalPrint) { throw "Manual physical printing requires -ConfirmPhysicalPrint." }
+            $confirmation = Confirm-InvoiceCommitted ([guid]$selected.InvoiceGuid) $ready.Snapshot
+            if (-not $confirmation.Confirmed) {
+                Write-BridgeLog (Get-CommittedConfirmationDeferredEvent $selected.InvoiceGuid $InvoiceNumber $confirmation)
+                throw "Committed confirmation did not match the stable snapshot yet ($($confirmation.Reason)); try again shortly."
+            }
+            $receipt = Convert-SnapshotToReceipt $confirmation.Snapshot
             $printResult = Send-OzkReceiptToPrinter -Receipt $receipt -LogoPath $script:ReceiptLogoPath -PrinterName $PrinterName -ConfirmPhysicalPrint
             $manualEvent = [pscustomobject]@{
                 Event = "manual_reprint_submitted"
@@ -1263,8 +1378,24 @@ try {
                 # طبقة دفاع ثانية: حتى لو وصل مرشّح غير كاشير إلى هنا رغم حارس
                 # بدء التشغيل، يُرفض قبل أي تصيير أو إرسال — بلا استثناء صامت.
                 Assert-CashierTypeGuid ([string]$candidate.TypeGuid) ([int]$candidate.InvoiceNumber)
+
+                # التأكيد النهائي (P1-M): استقرار READ UNCOMMITTED أعلاه لا يثبت
+                # التزاماً؛ هذه قراءة READ COMMITTED منفصلة تقع مرة واحدة هنا فقط،
+                # عند وصول المرشّح فعلاً إلى «على وشك الطباعة» — لا في كل استطلاع.
+                # أي تأجيل (قفل، deadlock، خطأ عابر، أو عدم تطابق) لا يترك أثراً
+                # على الإطلاق: لا طباعة، لا علامة seen، لا عزل؛ يُعاد تقييم نفس
+                # الفاتورة في استطلاع لاحق تماماً كأنها لم تصل إلى هنا بعد.
+                $confirmation = Confirm-InvoiceCommitted ([guid]$candidate.InvoiceGuid) $ready.Snapshot
+                if (-not $confirmation.Confirmed) {
+                    Write-BridgeLog (Get-CommittedConfirmationDeferredEvent $candidate.InvoiceGuid $candidate.InvoiceNumber $confirmation)
+                    continue
+                }
+
                 Import-Module $script:ReceiptModulePath -Force
-                $receipt = Convert-SnapshotToReceipt $ready.Snapshot
+                # ما التزم فعلاً هو ما يُطبع: الفاتورة تُبنى من لقطة التأكيد نفسها،
+                # لا من اللقطة القذرة السابقة، ولا تُقرأ الفاتورة ثانيةً بعد هذه
+                # النقطة قبل التصيير.
+                $receipt = Convert-SnapshotToReceipt $confirmation.Snapshot
 
                 # 1) كل ما يمكن أن يفشل بلا إنشاء أي مهمة طباعة يقع هنا، قبل أي
                 #    علامة: التحقق من الطابعة، وجود الطابور، التصيير، بناء ESC/POS.
