@@ -31,19 +31,33 @@ if (-not (Test-Path -LiteralPath $bridgeScript -PathType Leaf)) {
 }
 
 function Write-WatchdogEvent([string]$EventName, [string]$Reason, [string]$ErrorType = "") {
-    $entry = [ordered]@{
-        Event = $EventName
-        At = (Get-Date).ToUniversalTime().ToString("o")
-        Reason = $Reason
-        ErrorType = $ErrorType
-        CustomerAndItemsRedacted = $true
+    # Logging is best-effort: a locked events file, a missing/unwritable log
+    # directory, or a full disk must never crash the watchdog. This function
+    # is called from inside the bridge-restart catch block itself, so an
+    # unhandled exception here would escape the outer try/catch and kill the
+    # whole watchdog process (and with it the print-bridge restart loop) --
+    # not just fail to log one event. Never rethrow, and never let the
+    # fallback path itself recurse back into a failure.
+    try {
+        $entry = [ordered]@{
+            Event = $EventName
+            At = (Get-Date).ToUniversalTime().ToString("o")
+            Reason = $Reason
+            ErrorType = $ErrorType
+            CustomerAndItemsRedacted = $true
+        }
+        $line = $entry | ConvertTo-Json -Compress
+        $directory = Split-Path -Parent $LogPath
+        if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
+            [void](New-Item -ItemType Directory -Path $directory -Force)
+        }
+        [IO.File]::AppendAllText($LogPath, $line + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
+    } catch {
+        try {
+            Write-Warning "watchdog event logging failed for '$EventName' ($Reason): $($_.Exception.Message)"
+        } catch {
+        }
     }
-    $line = $entry | ConvertTo-Json -Compress
-    $directory = Split-Path -Parent $LogPath
-    if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
-        [void](New-Item -ItemType Directory -Path $directory -Force)
-    }
-    [IO.File]::AppendAllText($LogPath, $line + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
 }
 
 # --- Single Instance Guard (defense-in-depth on top of Task Scheduler's

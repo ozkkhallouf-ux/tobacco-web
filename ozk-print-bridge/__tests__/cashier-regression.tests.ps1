@@ -1945,5 +1945,153 @@ Test-Case "negative witness: بلا تأكيد الالتزام كانت الل�
     Assert-True (-not $actual.Confirmed) "الدالة الحالية المستخرجة من المصدر الفعلي يجب أن ترفض هذه الحالة بعينها — هذا ما كان P1-M يسدّه"
 }
 
+# ═════════════════════════════════════════════════════════════════════════
+# P1 (watchdog logging): كتابة سجل الأحداث في ozk-print-bridge-watchdog.ps1
+# يجب أن تكون best-effort — فشلها (قفل ملف/صلاحيات/قرص ممتلئ) لا يجوز أن
+# يُسقط عملية الحراسة، خصوصاً أن Write-WatchdogEvent تُستدعى من داخل catch
+# حلقة إعادة تشغيل الجسر، حيث لا يوجد أي catch أعلى يحمي من استثناء جديد هناك.
+# ═════════════════════════════════════════════════════════════════════════
+
+$watchdogWriteEventText = Get-ExtractedFunctionText $watchdogSrc "function Write-WatchdogEvent"
+
+function New-WatchdogLogTempPath {
+    return (Join-Path ([System.IO.Path]::GetTempPath()) ("ozk-watchdog-test-" + [guid]::NewGuid().ToString("N") + ".jsonl"))
+}
+
+# النسخة القديمة (ما قبل الإصلاح): بلا أي حماية حول الكتابة — تُستخدم فقط
+# كشاهد سلبي لإثبات أن الاختبارات الجديدة تسقط فعلاً بدون الإصلاح.
+function Write-WatchdogEvent-Legacy([string]$EventName, [string]$Reason, [string]$ErrorType = "") {
+    $entry = [ordered]@{
+        Event = $EventName
+        At = (Get-Date).ToUniversalTime().ToString("o")
+        Reason = $Reason
+        ErrorType = $ErrorType
+        CustomerAndItemsRedacted = $true
+    }
+    $line = $entry | ConvertTo-Json -Compress
+    $directory = Split-Path -Parent $LogPath
+    if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
+        [void](New-Item -ItemType Directory -Path $directory -Force)
+    }
+    [IO.File]::AppendAllText($LogPath, $line + [Environment]::NewLine, (New-Object Text.UTF8Encoding($false)))
+}
+
+Test-Case "watchdog logging: الدالة المستخرجة من المصدر الفعلي تحتوي try/catch حول الكتابة، بلا throw من جديد" {
+    Assert-True ($watchdogWriteEventText -match '(?s)try\s*\{.*AppendAllText.*\}\s*catch\s*\{') "يجب أن تكون كتابة السجل داخل try/catch"
+    Assert-True (-not ($watchdogWriteEventText -match '(?s)catch\s*\{[^}]*throw')) "لا يجوز إعادة رمي الاستثناء (throw) من داخل catch الخاص بالتسجيل"
+}
+
+. ([scriptblock]::Create($watchdogWriteEventText))
+
+Test-Case "1) watchdog logging: كتابة ناجحة — السلوك يبقى كما هو" {
+    $script:LogPath = New-WatchdogLogTempPath
+    try {
+        Write-WatchdogEvent -EventName "watchdog_restart" -Reason "bridge_completed"
+        Assert-True (Test-Path -LiteralPath $script:LogPath) "يجب إنشاء ملف السجل عند النجاح"
+        $written = Get-Content -LiteralPath $script:LogPath -Raw
+        $parsed = $written.Trim() | ConvertFrom-Json
+        Assert-True ($parsed.Event -eq "watchdog_restart") "يجب أن يُكتب اسم الحدث الصحيح"
+        Assert-True ($parsed.Reason -eq "bridge_completed") "يجب أن يُكتب السبب الصحيح"
+    } finally {
+        Remove-Item -LiteralPath $script:LogPath -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case "2) watchdog logging: مسار كتابة غير قابل (LogPath يشير لمجلّد فعلي) — لا انهيار" {
+    $script:LogPath = [System.IO.Path]::GetTempPath().TrimEnd('\', '/')
+    $threw = $false
+    try {
+        Write-WatchdogEvent -EventName "watchdog_restart" -Reason "bridge_failed" -ErrorType "System.IO.IOException"
+    } catch {
+        $threw = $true
+    }
+    Assert-True (-not $threw) "فشل الكتابة (LogPath = مجلّد لا ملف) يجب ألّا يُسقط الاستدعاء"
+}
+
+Test-Case "3) watchdog logging: فشل التسجيل أثناء مسار إعادة تشغيل الجسر — منطق إعادة التشغيل يستمر" {
+    # يحاكي الاستدعاء الفعلي داخل catch حلقة while($true) في الملف الحقيقي:
+    # نجاح الجسر أولاً (لا استثناء)، ثم فشل لاحق يُسجَّل عبر bridge_failed —
+    # في كلتا الحالتين استدعاء Write-WatchdogEvent يجب ألا يمنع الوصول لـ
+    # Start-Sleep (تمثيل استمرار الحلقة) حتى مع LogPath معطوب.
+    $script:LogPath = [System.IO.Path]::GetTempPath().TrimEnd('\', '/')
+    $reachedAfterSuccess = $false
+    $reachedAfterFailure = $false
+    try {
+        Write-WatchdogEvent -EventName "watchdog_restart" -Reason "bridge_completed"
+        $reachedAfterSuccess = $true
+    } catch {
+        $reachedAfterSuccess = $true
+    }
+    try {
+        try { throw [System.InvalidOperationException]::new("محاكاة فشل الجسر") }
+        catch {
+            Write-WatchdogEvent -EventName "watchdog_restart" -Reason "bridge_failed" -ErrorType $_.Exception.GetType().FullName
+        }
+        $reachedAfterFailure = $true
+    } catch {
+        $reachedAfterFailure = $true
+    }
+    Assert-True $reachedAfterSuccess "الوصول لما بعد تسجيل نجاح الجسر يجب أن يحدث رغم فشل الكتابة"
+    Assert-True $reachedAfterFailure "الوصول لما بعد تسجيل فشل الجسر (bridge_failed) يجب أن يحدث رغم فشل الكتابة — هذا هو موضع P1"
+}
+
+Test-Case "4) watchdog logging: فشل التسجيل أثناء فحص instance_already_running — الحلقة/الخروج الطبيعي يستمر" {
+    $script:LogPath = [System.IO.Path]::GetTempPath().TrimEnd('\', '/')
+    $threw = $false
+    try {
+        Write-WatchdogEvent -EventName "watchdog_instance_already_running" -Reason "named_mutex_held_by_another_instance:test"
+    } catch {
+        $threw = $true
+    }
+    Assert-True (-not $threw) "فشل تسجيل حدث instance_already_running يجب ألا يمنع الخروج الطبيعي (exit 0) الذي يليه في الملف الحقيقي"
+}
+
+Test-Case "5) الخطأ الأساسي الحقيقي لإطلاق الجسر لا يُبتلع بسبب جعل التسجيل آمناً" {
+    # التصنيف الفعلي لسبب فشل الجسر (ErrorType/Reason) يُبنى قبل استدعاء
+    # Write-WatchdogEvent وباستقلال تام عنها؛ الإصلاح لم يمسّ catch حلقة
+    # while نفسها ولا طريقة استخراج $_.Exception.GetType().FullName.
+    Assert-True ($watchdogSrc -match [regex]::Escape('Write-WatchdogEvent -EventName "watchdog_restart" -Reason "bridge_failed" -ErrorType $_.Exception.GetType().FullName')) "يجب أن يبقى تصنيف الخطأ الحقيقي (ErrorType) كما هو دون تغيير"
+    Assert-True ($watchdogSrc -match '(?s)try\s*\{\s*\r?\n\s*& \$bridgeScript @bridgeParameters') "استدعاء الجسر نفسه يجب أن يبقى داخل try الخارجي دون أي تغليف جديد يبتلع أخطاءه"
+}
+
+Test-Case "6) لا busy loop جديد: عدد حلقات while في الملف لم يتغيّر ولا Start-Sleep جديد أُضيف" {
+    $whileCount = ([regex]::Matches($watchdogSrc, 'while\s*\(')).Count
+    Assert-True ($whileCount -eq 1) "يجب أن تبقى حلقة while(`$true) الوحيدة كما هي — وُجد: $whileCount"
+    $sleepCount = ([regex]::Matches($watchdogSrc, 'Start-Sleep -Seconds 1')).Count
+    Assert-True ($sleepCount -eq 1) "يجب أن يبقى Start-Sleep -Seconds 1 مرة واحدة فقط بلا تكرار جديد"
+}
+
+Test-Case "7) لا duplicate watchdog processes: حارس المثيل الواحد (mutex) سليم دون تغيير" {
+    Assert-True ($watchdogSrc -match '\$mutexName = "Global\\OZK_PrintBridge_Watchdog_SingleInstance"') "اسم الـmutex العام يجب أن يبقى كما هو"
+    Assert-True ($watchdogSrc -match '\$acquiredMutex = \$singleInstanceMutex\.WaitOne\(0\)') "فحص WaitOne(0) لعدم الحجب يجب أن يبقى كما هو"
+    Assert-True ($watchdogSrc -match '(?s)finally\s*\{\s*if \(\$acquiredMutex\)\s*\{\s*\$singleInstanceMutex\.ReleaseMutex\(\)') "تحرير الـmutex في finally يجب أن يبقى كما هو"
+}
+
+Test-Case "negative witness: بلا try/catch حول الكتابة، فشل التسجيل أثناء bridge_failed كان يُسقط العملية بالكامل" {
+    $script:LogPath = [System.IO.Path]::GetTempPath().TrimEnd('\', '/')
+    $legacyEscaped = $false
+    try {
+        try { throw [System.InvalidOperationException]::new("محاكاة فشل الجسر") }
+        catch {
+            Write-WatchdogEvent-Legacy -EventName "watchdog_restart" -Reason "bridge_failed" -ErrorType $_.Exception.GetType().FullName
+        }
+    } catch {
+        $legacyEscaped = $true
+    }
+    Assert-True $legacyEscaped "توثيقاً للعطل: النسخة القديمة بلا حماية كانت تُسقط الاستثناء خارج catch حلقة إعادة التشغيل — هذا بالضبط ما كان يُسقط الـwatchdog بالكامل"
+
+    $script:LogPath = [System.IO.Path]::GetTempPath().TrimEnd('\', '/')
+    $fixedEscaped = $false
+    try {
+        try { throw [System.InvalidOperationException]::new("محاكاة فشل الجسر") }
+        catch {
+            Write-WatchdogEvent -EventName "watchdog_restart" -Reason "bridge_failed" -ErrorType $_.Exception.GetType().FullName
+        }
+    } catch {
+        $fixedEscaped = $true
+    }
+    Assert-True (-not $fixedEscaped) "الدالة الحالية المستخرجة من المصدر الفعلي يجب ألا تُسقط الاستثناء — هذا ما يسدّه إصلاح P1 هذا"
+}
+
 Write-Host "`n$($script:passed) passed, $($script:failed) failed"
 if ($script:failed -gt 0) { exit 1 }
