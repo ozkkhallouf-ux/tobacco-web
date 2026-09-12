@@ -128,4 +128,4 @@ jobs:
       # الفعلي (Task Scheduler)، وتشغيله هنا على 5.1 تحديداً بنفس منطق البنود أعلاه.
       - name: Ameen read worker - auth retry heartbeat regression test
         shell: powershell
-        run: .	ools	est-ameen-read-worker-auth-retry.ps1
+        run: .\tools\test-ameen-read-worker-auth-retry.ps1
