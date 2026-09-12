@@ -244,9 +244,10 @@ function New-ReadOnlyConnection {
         throw
     }
 
-    $command = $connection.CreateCommand()
-    $command.CommandTimeout = 15
-    $command.CommandText = @"
+    try {
+        $command = $connection.CreateCommand()
+        $command.CommandTimeout = 15
+        $command.CommandText = @"
 select
     db_name() as database_name,
     original_login() as login_name,
@@ -265,40 +266,45 @@ select
     has_perms_by_name('dbo.bi000', 'OBJECT', 'UPDATE') as can_update_bi000,
     has_perms_by_name('dbo.bi000', 'OBJECT', 'DELETE') as can_delete_bi000;
 "@
-    $reader = $command.ExecuteReader()
-    try {
-        if (-not $reader.Read()) { throw "Ameen permission probe returned no result." }
-        $database = [string]$reader["database_name"]
-        $login = [string]$reader["login_name"]
-        $readerRole = [int]$reader["is_data_reader"]
-        $writeChecks = @(
-            "is_data_writer", "is_db_owner", "can_insert_database", "can_update_database",
-            "can_delete_database", "can_create_table", "can_execute_database",
-            "can_insert_bu000", "can_update_bu000", "can_delete_bu000",
-            "can_insert_bi000", "can_update_bi000", "can_delete_bi000"
-        )
-        $writeAllowed = @($writeChecks | Where-Object { [int]$reader[$_] -eq 1 })
-    } finally {
-        $reader.Close()
-    }
+        $reader = $command.ExecuteReader()
+        try {
+            if (-not $reader.Read()) { throw "Ameen permission probe returned no result." }
+            $database = [string]$reader["database_name"]
+            $login = [string]$reader["login_name"]
+            $readerRole = [int]$reader["is_data_reader"]
+            $writeChecks = @(
+                "is_data_writer", "is_db_owner", "can_insert_database", "can_update_database",
+                "can_delete_database", "can_create_table", "can_execute_database",
+                "can_insert_bu000", "can_update_bu000", "can_delete_bu000",
+                "can_insert_bi000", "can_update_bi000", "can_delete_bi000"
+            )
+            $writeAllowed = @($writeChecks | Where-Object { [int]$reader[$_] -eq 1 })
+        } finally {
+            $reader.Close()
+        }
 
-    if ($database -ne "AmnDb002") {
-        $connection.Close()
-        throw "OZK Print Bridge refuses database '$database'; expected AmnDb002."
-    }
-    if ($readerRole -ne 1) {
-        $connection.Close()
-        throw "OZK Print Bridge requires a db_datareader account."
-    }
-    if ($writeAllowed.Count -ne 0) {
-        $connection.Close()
-        throw "OZK Print Bridge refuses a SQL principal with write permissions: $($writeAllowed -join ', ')."
-    }
+        if ($database -ne "AmnDb002") {
+            throw "OZK Print Bridge refuses database '$database'; expected AmnDb002."
+        }
+        if ($readerRole -ne 1) {
+            throw "OZK Print Bridge requires a db_datareader account."
+        }
+        if ($writeAllowed.Count -ne 0) {
+            throw "OZK Print Bridge refuses a SQL principal with write permissions: $($writeAllowed -join ', ')."
+        }
 
-    return [pscustomobject]@{
-        Connection = $connection
-        Database = $database
-        Login = $login
+        return [pscustomobject]@{
+            Connection = $connection
+            Database = $database
+            Login = $login
+        }
+    } catch {
+        # فحص الصلاحيات (من إنشاء الأمر حتى الإرجاع الناجح) قد يفشل لأسباب
+        # تقنية (ExecuteReader) أو يرفض الاتصال عمداً (قاعدة بيانات خاطئة، صلاحية
+        # كتابة). في الحالتين لا يجوز ترك الاتصال بلا مالك خارج هذه الدالة —
+        # Dispose هنا best-effort فقط ولا يجوز أن يُخفي الاستثناء الأصلي.
+        try { $connection.Dispose() } catch { }
+        throw
     }
 }
 

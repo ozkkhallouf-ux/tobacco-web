@@ -124,9 +124,22 @@ public static class OzkRawThermalPrinter
             documentStarted = true;
             if (!StartPagePrinter(printer)) throw new InvalidOperationException("StartPagePrinter failed with Win32 error " + Marshal.GetLastWin32Error());
             pageStarted = true;
-            int written;
-            if (!WritePrinter(printer, payload, payload.Length, out written)) throw new InvalidOperationException("WritePrinter failed with Win32 error " + Marshal.GetLastWin32Error());
-            if (written != payload.Length) throw new IOException("Incomplete RAW printer write.");
+            // WritePrinter لا يضمن كتابة كل البايتات دفعة واحدة (خصوصاً على RAW
+            // spooler لطابعات USB)؛ يجب الاستمرار حتى اكتمال الحمولة بالكامل، مع
+            // حدّين يمنعان أي حلقة غير منتهية: صفر بايت مكتوب أو تجاوز المطلوب.
+            int offset = 0;
+            while (offset < payload.Length)
+            {
+                int bytesRemaining = payload.Length - offset;
+                byte[] chunk = new byte[bytesRemaining];
+                Buffer.BlockCopy(payload, offset, chunk, 0, bytesRemaining);
+                int written;
+                if (!WritePrinter(printer, chunk, bytesRemaining, out written)) throw new InvalidOperationException("WritePrinter failed with Win32 error " + Marshal.GetLastWin32Error());
+                if (written <= 0) throw new IOException("WritePrinter wrote zero bytes with " + bytesRemaining + " bytes remaining; aborting to avoid an infinite loop.");
+                if (written > bytesRemaining) throw new IOException("WritePrinter reported writing more bytes than requested.");
+                offset += written;
+            }
+            if (offset != payload.Length) throw new IOException("Incomplete RAW printer write.");
             if (!EndPagePrinter(printer)) throw new InvalidOperationException("EndPagePrinter failed with Win32 error " + Marshal.GetLastWin32Error());
             pageStarted = false;
             if (!EndDocPrinter(printer)) throw new InvalidOperationException("EndDocPrinter failed with Win32 error " + Marshal.GetLastWin32Error());
