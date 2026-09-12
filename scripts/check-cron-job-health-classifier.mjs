@@ -234,8 +234,8 @@ for (const [needle, why] of [
 // ---------------------------------------------------------------------------
 const transitionAsserts = transitions.match(/\bassert /g) ?? [];
 assert.ok(
-  transitionAsserts.length >= 56,
-  `${TRANSITIONS}: عدد التأكيدات ${transitionAsserts.length} أقل من 56 — حُذف تأكيد`,
+  transitionAsserts.length >= 69,
+  `${TRANSITIONS}: عدد التأكيدات ${transitionAsserts.length} أقل من 69 — حُذف تأكيد`,
 );
 assert.match(
   transitions,
@@ -244,24 +244,32 @@ assert.match(
 );
 for (const [needle, why] of [
   ['5: محاولة جارية فوق فشل مكتمل', 'succeeded → failed → running'],
-  ['15: last_alert_at لم يُقدَّم', 'فشل A ⇒ إنذار ثم فشل B: الساعة لا تتقدّم'],
+  ['15: last_alert_at يتقدّم لأن terminal_at فشل جديد فعلاً', 'فشل A ⇒ إنذار ثم فشل B بterminal_at مختلف: الساعة تتقدّم'],
   ['20: التعافي خرج عند النجاح الفعلي', 'failed → running → succeeded'],
   ['24: صفر إشعارات في تسلسل سليم بالكامل', 'healthy → running → succeeded'],
   ['26: الفشل يظهر عند النتيجة النهائية', 'healthy → running → failed'],
   ['28: حادثة 09:14', 'حادثة الإنتاج كـfixture'],
   ['32: ثلاث دورات إضافية على نفس الفشل', 'لا إنذار مكرر لنفس الفشل'],
   ['35: محاولة جارية منذ 15 دقيقة', 'transient بعد المهلة ⇒ stuck'],
+  ['37ج: نفس الجمود بعد أكثر من ساعة', 'التذكير الدوري لـstuck ما زال يعمل بعد إصلاح 05'],
   ['39: is_healthy=null', 'never_run بلا حالة سابقة'],
   ['44: المحايدة لم تدهس حكم الفشل القائم', 'المحايدة لا تدهس حكماً'],
-  ['51: الفشل B لم يُقدّم last_alert_at', 'انحدار Codex P1 الثالثة صراحةً'],
-  ['55: التذكير الدوري خرج في موعده الأصلي', 'التذكير الدوري ما زال يعمل'],
+  ['49د: بعد أكثر من ساعة والمهمة ما زالت معطلة', 'التذكير الدوري لـdisabled ما زال يعمل بعد إصلاح 05'],
+  ['51: فشل B له terminal_at مختلف فعلياً ⇒ last_alert_at يتقدّم فوراً', 'انحدار Codex P1 الثالثة صراحةً'],
+  ['54: فشل B الحقيقي يخرج إنذاراً ثانياً فوراً', 'dedupe الحقيقي عبر notify_probe_insert لا يبتلع فشلاً جديداً'],
+  ['59: التهيئة الآمنة منعت الإنذار المكرر الكاذب بعد الترحيل', 'حالة موروثة قبل last_alerted_terminal_at (05، القسم ٣)'],
+  ['60: فشل جديد فعلي بعد التهيئة الآمنة ⇒ يُنذَر بلا إخفاء', 'التهيئة الآمنة لا تُخفي فشلاً حقيقياً جديداً'],
 ]) {
   assert.ok(transitions.includes(needle), `${TRANSITIONS}: تسلسل غير مغطّى — ${why}`);
 }
 // الحادثة تدخل كقيم مكتوبة، لا كاستعلام لبيانات إنتاج.
 assert.doesNotMatch(
-  transitions, /from cron\.job_run_details/,
+  transitions, /\bfrom cron\.job_run_details\b/,
   `${TRANSITIONS}: الاختبار يقرأ بيانات إنتاج — يجب أن يبني تاريخه بقيم مكتوبة`,
+);
+assert.match(
+  transitions, /notify_probe_insert/,
+  `${TRANSITIONS}: محاكاة dedupe الحقيقية (outbox) غُيِّبت — العودة إلى تسجيل غير مشروط`,
 );
 
 console.log(
