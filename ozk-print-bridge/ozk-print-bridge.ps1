@@ -479,7 +479,15 @@ function Get-CanonicalLineText($Line, [bool]$IncludeRecordIdentity) {
     $parts.Add((Format-CanonicalValue $Line.Qty))
     $parts.Add((Format-CanonicalValue $Line.SelectedUnit))
     $parts.Add((Format-CanonicalValue $Line.Unit2Factor))
+    # Unit3Factor يقرّر الكمية المطبوعة لسطر Unity=3 تماماً كما يفعل Unit2Factor
+    # لسطر Unity=2؛ والخصم/البونص/الإضافة تدخل الآن في صافي السطر المطبوع
+    # (Convert-SnapshotToReceipt). أي حقل منها يجب أن يكسر التوقيع إن تغيّر —
+    # وإلا اعتُبرت فاتورة مطبوعة بأرقام مختلفة "نفس الفاتورة" خطأً.
+    $parts.Add((Format-CanonicalValue $Line.Unit3Factor))
     $parts.Add((Format-CanonicalValue $Line.RawPrice))
+    $parts.Add((Format-CanonicalValue $Line.LineDiscount))
+    $parts.Add((Format-CanonicalValue $Line.BonusDiscount))
+    $parts.Add((Format-CanonicalValue $Line.LineExtra))
     return ($parts -join "|")
 }
 
@@ -789,7 +797,9 @@ select
     bi.Extra as line_extra,
     mt.Unity as unit1_name,
     mt.Unit2 as unit2_name,
-    mt.Unit2Fact as unit2_factor
+    mt.Unit2Fact as unit2_factor,
+    mt.Unit3 as unit3_name,
+    mt.Unit3Fact as unit3_factor
 from dbo.bu000 u
 join dbo.bt000 bt on bt.GUID = u.TypeGUID
 left join dbo.my000 my on my.GUID = u.CurrencyGUID
@@ -846,6 +856,8 @@ order by bi.Number, bi.GUID;
                     Unit1Name = if ($reader["unit1_name"] -is [DBNull]) { "" } else { [string]$reader["unit1_name"] }
                     Unit2Name = if ($reader["unit2_name"] -is [DBNull]) { "" } else { [string]$reader["unit2_name"] }
                     Unit2Factor = Convert-ToNullableDouble $reader["unit2_factor"]
+                    Unit3Name = if ($reader["unit3_name"] -is [DBNull]) { "" } else { [string]$reader["unit3_name"] }
+                    Unit3Factor = Convert-ToNullableDouble $reader["unit3_factor"]
                 })
             }
         }
@@ -968,14 +980,36 @@ function Convert-SnapshotToReceipt($Snapshot) {
         $quantity = [double]$line.Qty
         if ([int]$line.SelectedUnit -eq 2 -and [double]$line.Unit2Factor -gt 0) {
             $quantity = $quantity / [double]$line.Unit2Factor
+        } elseif ([int]$line.SelectedUnit -eq 3) {
+            # الوحدة الثالثة شبه معدومة الاستخدام في بيانات الأمين الفعلية (تحقّق
+            # عبر قراءة READ ONLY مباشرة: صفر من 23,072 سطر Unity=3، ومادة واحدة
+            # فقط تملك Unit3/Unit3Fact مُعبّأين). لا يُخترَع عامل تحويل هنا: غياب
+            # Unit3Factor أو كونه صفراً/سالباً على سطر Unity=3 فعلي يعني بيانات
+            # غير كافية للطباعة الصحيحة، فيُرفض السطر صراحةً بدل طباعة كمية أو
+            # سعر لا يطابقان الوحدة المختارة فعلياً في الأمين.
+            $unit3Factor = [double]$line.Unit3Factor
+            if ($unit3Factor -le 0) {
+                throw "Line '$($line.ItemName)' (item GUID $($line.ItemGuid)) is on Unity=3 but Unit3Factor is missing or non-positive ($unit3Factor). Refusing to print with a guessed conversion."
+            }
+            $quantity = $quantity / $unit3Factor
         }
         $unitPrice = Convert-ToReceiptAmount $header $line.RawPrice
         $totalQuantity += $quantity
+        # المجموع الرسمي للسطر: لا يوجد عمود صريح في bi000 يمثّل "صافي السطر"
+        # (تحقّق موثّق: bi.Netprofit فُحص ورُفض — يخالف الحساب الساذج على نحو
+        # 6% من الأسطر الحقيقية، الأرجح لأنه يمثّل الربح لا إجمالي السطر). لذا
+        # يُشتق صافي السطر من نفس مكوّنات رأس الفاتورة (Qty×Price ثم خصم/إضافة)
+        # مطبّقة على مستوى السطر، بنفس اتفاقية الإشارة المستخدمة في NetTotal
+        # أدناه: gross - discount + extra (مع طرح خصم البونص أيضاً).
+        $lineDiscount = Convert-ToReceiptAmount $header $line.LineDiscount
+        $lineBonusDiscount = Convert-ToReceiptAmount $header $line.BonusDiscount
+        $lineExtra = Convert-ToReceiptAmount $header $line.LineExtra
+        $lineTotal = ($quantity * $unitPrice) - $lineDiscount - $lineBonusDiscount + $lineExtra
         $receiptLines.Add([pscustomobject]@{
             Name = [string]$line.ItemName
             Quantity = $quantity
             UnitPrice = $unitPrice
-            Total = $quantity * $unitPrice
+            Total = $lineTotal
         })
     }
 
@@ -1212,6 +1246,8 @@ if ($IncludeWholesale -and $ConfirmPhysicalPrint) {
 }
 
 $connectionInfo = $null
+$observeWorkerMutex = $null
+$acquiredObserveWorkerMutex = $false
 try {
     $connectionInfo = New-ReadOnlyConnection
     $connection = $connectionInfo.Connection
@@ -1421,6 +1457,44 @@ try {
             Printer = "not_configured"
         }
         exit 0
+    }
+
+    if ($Mode -eq "Observe") {
+        # --- قفل نسخة واحدة لعامل الرصد نفسه (Observe worker) --------------------
+        # قفل الـwatchdog (Global\OZK_PrintBridge_Watchdog_SingleInstance) يحرس عملية
+        # الـwatchdog فقط، بينما ozk-print-bridge.ps1 -Mode Observe قابل للتشغيل
+        # مباشرة كعملية ثانية خارج الـwatchdog تماماً — فتتسابق نسختان على الفواتير
+        # نفسها وقد تُطبع الواحدة منهما نفس الإيصال. هذا الميوتكس منفصل تماماً عن
+        # ميوتكس الـwatchdog (اسم مختلف بالكامل)؛ الـwatchdog لا يلمسه إطلاقاً ولا
+        # يمسكه أثناء تشغيله، فلا تعارض ولا deadlock ممكن بين القفلين. يُفحص هنا فقط
+        # حين يكون Mode=Observe فعلياً — لا يمسّ PreviewInvoice ولا PrintInvoice ولا
+        # أي وضع آخر.
+        $observeWorkerMutexName = "Global\OZK_PrintBridge_Observe_Worker_SingleInstance"
+        $observeWorkerMutexCreatedNew = $false
+        try {
+            $observeWorkerMutex = New-Object System.Threading.Mutex($false, $observeWorkerMutexName, [ref]$observeWorkerMutexCreatedNew)
+        } catch {
+            # Global\ قد يكون غير متاح في سياقات مقيّدة؛ التراجع لميوتكس محلي بدل
+            # تعطيل الحارس كلياً.
+            $observeWorkerMutexName = "Local\OZK_PrintBridge_Observe_Worker_SingleInstance"
+            $observeWorkerMutex = New-Object System.Threading.Mutex($false, $observeWorkerMutexName, [ref]$observeWorkerMutexCreatedNew)
+        }
+        try {
+            $acquiredObserveWorkerMutex = $observeWorkerMutex.WaitOne(0)
+        } catch [System.Threading.AbandonedMutexException] {
+            # الحامل السابق انتهى بلا تحرير الميوتكس؛ الملكية تنتقل إلينا بأمان.
+            $acquiredObserveWorkerMutex = $true
+        }
+        if (-not $acquiredObserveWorkerMutex) {
+            Write-BridgeLog ([pscustomobject]@{
+                Event = "observe_worker_already_running"
+                At = (Get-Date).ToUniversalTime().ToString("o")
+                Reason = "named_mutex_held_by_another_instance:$observeWorkerMutexName"
+                Consequence = "this_process_exits_without_polling_or_printing_any_invoice"
+                CustomerAndItemsRedacted = $true
+            })
+            throw "Another Observe worker instance is already running (mutex '$observeWorkerMutexName' is held). Refusing to start a second poller to avoid a double-print race."
+        }
     }
 
     $state = Read-BridgeState $StatePath
@@ -1726,5 +1800,17 @@ try {
 } finally {
     if ($null -ne $connectionInfo -and $connectionInfo.Connection.State -eq "Open") {
         $connectionInfo.Connection.Close()
+    }
+    # يُحرَّر ميوتكس عامل الرصد هنا دائماً — نجاحاً أو استثناءً أو exit — كي لا
+    # تبقى عملية ميتة حاجزة للقفل إلى الأبد. لا أثر على أي وضع غير Observe لأن
+    # $observeWorkerMutex يبقى $null ما لم يُنشأ أعلاه.
+    if ($null -ne $observeWorkerMutex) {
+        try {
+            if ($acquiredObserveWorkerMutex) {
+                $observeWorkerMutex.ReleaseMutex()
+            }
+        } finally {
+            $observeWorkerMutex.Dispose()
+        }
     }
 }

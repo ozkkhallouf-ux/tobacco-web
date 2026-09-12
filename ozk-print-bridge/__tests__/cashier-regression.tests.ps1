@@ -90,12 +90,16 @@ function New-TestLine {
         [string]$ItemGuid = "M-1", [string]$ItemName = "مادة أ",
         [double]$Qty = 2, [double]$RawPrice = 500,
         [string]$LineGuid = "L-1", [int]$LineNumber = 1,
-        [double]$SelectedUnit = 1, [double]$Unit2Factor = 0
+        [double]$SelectedUnit = 1, [double]$Unit2Factor = 0,
+        [double]$Unit3Factor = 0, [double]$LineDiscount = 0,
+        [double]$BonusDiscount = 0, [double]$LineExtra = 0
     )
     [pscustomobject]@{
         LineGuid = $LineGuid; LineNumber = $LineNumber
         ItemGuid = $ItemGuid; ItemName = $ItemName
         Qty = $Qty; SelectedUnit = $SelectedUnit; Unit2Factor = $Unit2Factor; RawPrice = $RawPrice
+        Unit3Factor = $Unit3Factor; LineDiscount = $LineDiscount
+        BonusDiscount = $BonusDiscount; LineExtra = $LineExtra
     }
 }
 
@@ -3614,6 +3618,414 @@ Test-Case "شاهد سلبي (ب) P1-E: العودة إلى حارس Test-Path �
     }
     Assert-True $negativeWitnessFailed "الحارس القديم القائم على Test-Path (وجود الملف) يجب أن يُسقط سيناريو 'طباعة يدوية قبل أول Observe' لأن الملف موجود فعلاً فيتخطى بناء baseline بلا رجعة؛ إن لم يسقط فالشاهد السلبي غير فعّال."
 }
+
+
+Write-Host "`n== A: أسطر الوحدة الثالثة (Unity=3) =="
+
+Test-Case "A1) Unity=1: الكمية والسعر كما كانا تماماً (بلا أي تحويل)" {
+    $line = New-TestLine -Qty 7 -RawPrice 120 -SelectedUnit 1
+    $snap = New-Snapshot -Lines @($line)
+    $receipt = Convert-SnapshotToReceipt $snap
+    Assert-True ($receipt.Lines[0].Quantity -eq 7) "يجب ألا تتغيّر الكمية لسطر Unity=1"
+    Assert-True ($receipt.Lines[0].UnitPrice -eq 120) "يجب ألا يتغيّر سعر الوحدة لسطر Unity=1"
+}
+
+Test-Case "A2) Unity=2: منطق التحويل القائم يبقى كما هو دون أي تغيير" {
+    $line = New-TestLine -Qty 20 -RawPrice 100 -SelectedUnit 2 -Unit2Factor 10
+    $snap = New-Snapshot -Lines @($line)
+    $receipt = Convert-SnapshotToReceipt $snap
+    Assert-True ($receipt.Lines[0].Quantity -eq 2) "يجب أن تُقسَم الكمية على Unit2Factor كما في السلوك القائم (20/10=2)"
+    Assert-True ($receipt.Lines[0].UnitPrice -eq 100) "السعر لا يتأثر بعامل تحويل الوحدة الثانية"
+}
+
+Test-Case "A3) Unity=3: الكمية المطبوعة تُقسَم على Unit3Factor" {
+    $line = New-TestLine -Qty 15 -RawPrice 50 -SelectedUnit 3 -Unit3Factor 5
+    $snap = New-Snapshot -Lines @($line)
+    $receipt = Convert-SnapshotToReceipt $snap
+    Assert-True ($receipt.Lines[0].Quantity -eq 3) "يجب أن تُقسَم كمية سطر Unity=3 على Unit3Factor (15/5=3)"
+}
+
+Test-Case "A4) Unity=3: لا اسم وحدة مُختلَق على الإيصال (لا حقل اسم وحدة أصلاً)" {
+    $line = New-TestLine -Qty 9 -RawPrice 30 -SelectedUnit 3 -Unit3Factor 3
+    $snap = New-Snapshot -Lines @($line)
+    $receipt = Convert-SnapshotToReceipt $snap
+    $lineProps = $receipt.Lines[0].PSObject.Properties.Name
+    $fabricatedUnitNameProps = @($lineProps | Where-Object { $_ -match 'Unit' -and $_ -ne 'UnitPrice' })
+    Assert-True ($fabricatedUnitNameProps.Count -eq 0) "لا يجوز أن يحمل سطر الإيصال أي حقل 'اسم وحدة' مُخترَع (وجد: $($fabricatedUnitNameProps -join ', '))؛ UnitPrice وحده مسموح من بين حقول Unit*"
+    Assert-True ($rendererSrc -notmatch 'UnitName') "المُصيِّر لا يرسم اسم وحدة إطلاقاً — لا حاجة لاختراع بيانات لا مصدر موثوق لها"
+}
+
+Test-Case "A5) Unity=3: سعر الوحدة يبقى منفصلاً عن عامل تحويل الكمية" {
+    $line = New-TestLine -Qty 12 -RawPrice 75 -SelectedUnit 3 -Unit3Factor 4
+    $snap = New-Snapshot -Lines @($line)
+    $receipt = Convert-SnapshotToReceipt $snap
+    Assert-True ($receipt.Lines[0].UnitPrice -eq 75) "سعر الوحدة (RawPrice بعد تحويل العملة فقط) يجب ألا يُقسَم على Unit3Factor"
+    Assert-True ($receipt.Lines[0].Quantity -eq 3) "بينما الكمية تُقسَم عليه (12/4=3)"
+}
+
+Test-Case "A6) Unity=3: عوامل تحويل مختلفة تُنتج كميات صحيحة مطابقة" {
+    foreach ($case in @(
+        @{ Qty = 8;  Factor = 4;   Expected = 2 },
+        @{ Qty = 24; Factor = 6;   Expected = 4 },
+        @{ Qty = 10; Factor = 2.5; Expected = 4 }
+    )) {
+        $line = New-TestLine -Qty $case.Qty -RawPrice 10 -SelectedUnit 3 -Unit3Factor $case.Factor
+        $snap = New-Snapshot -Lines @($line)
+        $receipt = Convert-SnapshotToReceipt $snap
+        Assert-True ([math]::Abs($receipt.Lines[0].Quantity - $case.Expected) -lt 0.0001) "عامل $($case.Factor): توقّع كمية $($case.Expected)، وُجد $($receipt.Lines[0].Quantity)"
+    }
+}
+
+Test-Case "A7) Unity=3 بلا Unit3Factor موجب: رفض صريح (fail closed) بلا اختراع تحويل" {
+    $line = New-TestLine -Qty 10 -RawPrice 50 -SelectedUnit 3 -Unit3Factor 0
+    $snap = New-Snapshot -Lines @($line)
+    $threw = $false
+    try {
+        [void](Convert-SnapshotToReceipt $snap)
+    } catch {
+        $threw = $true
+    }
+    Assert-True $threw "غياب Unit3Factor (أو كونه صفراً) على سطر Unity=3 فعلي يجب أن يُسقط الطباعة صراحةً لا أن يطبع كمية مخمّنة"
+
+    $lineNeg = New-TestLine -Qty 10 -RawPrice 50 -SelectedUnit 3 -Unit3Factor (-2)
+    $snapNeg = New-Snapshot -Lines @($lineNeg)
+    $threwNeg = $false
+    try {
+        [void](Convert-SnapshotToReceipt $snapNeg)
+    } catch {
+        $threwNeg = $true
+    }
+    Assert-True $threwNeg "Unit3Factor سالب يجب أن يُرفض أيضاً بنفس المنطق"
+}
+
+Test-Case "شاهد سلبي A8: محاكاة السلوك القديم (بلا معالجة خاصة لـUnity=3) تُنتج كمية خاطئة" {
+    # السلوك القديم (قبل الإصلاح) كان يعامل كل الأسطر التي ليست Unity=2 كأنها
+    # Unity=1 — أي بلا أي قسمة على عامل تحويل. هذا يوثّق أن ذلك السلوك خاطئ
+    # فعلاً لسطر Unity=3 حقيقي، ويثبت أن مجموعة الاختبارات كانت لتكتشف انحداراً
+    # يعيد هذا الخطأ.
+    $qty = 15.0
+    $factor = 5.0
+    $correctQuantity = $qty / $factor   # = 3 (سلوك الإصلاح، مؤكَّد في A3)
+    $legacyQuantity = $qty              # = 15 (السلوك القديم: بلا تحويل إطلاقاً)
+    Assert-True ($legacyQuantity -ne $correctQuantity) "السلوك القديم بلا تحويل الوحدة الثالثة يجب أن يختلف عن السلوك الصحيح؛ فإن تساويا فالشاهد السلبي غير فعّال"
+
+    $line = New-TestLine -Qty $qty -RawPrice 50 -SelectedUnit 3 -Unit3Factor $factor
+    $snap = New-Snapshot -Lines @($line)
+    $receipt = Convert-SnapshotToReceipt $snap
+    Assert-True ($receipt.Lines[0].Quantity -eq $correctQuantity) "التطبيق الفعلي يجب أن يُنتج الكمية الصحيحة (3) لا كمية السلوك القديم الخاطئة (15)"
+}
+
+Write-Host "`n== B: المجموع الرسمي للسطر بعد الخصم/الإضافة =="
+
+Test-Case "B1) سطر بلا خصم: المجموع = الكمية × سعر الوحدة تماماً" {
+    $line = New-TestLine -Qty 4 -RawPrice 25
+    $snap = New-Snapshot -Lines @($line)
+    $receipt = Convert-SnapshotToReceipt $snap
+    Assert-True ($receipt.Lines[0].Total -eq 100) "بلا خصم أو إضافة، المجموع = 4×25 = 100"
+}
+
+Test-Case "B2) سطر بخصم: يُطرَح الخصم من مجموع السطر" {
+    $line = New-TestLine -Qty 4 -RawPrice 25 -LineDiscount 10
+    $snap = New-Snapshot -Lines @($line)
+    $receipt = Convert-SnapshotToReceipt $snap
+    Assert-True ($receipt.Lines[0].Total -eq 90) "4×25 - 10 = 90"
+}
+
+Test-Case "B3) سطر بإضافة (بونص/زيادة): تُضاف الإضافة إلى مجموع السطر" {
+    $line = New-TestLine -Qty 4 -RawPrice 25 -LineExtra 15
+    $snap = New-Snapshot -Lines @($line)
+    $receipt = Convert-SnapshotToReceipt $snap
+    Assert-True ($receipt.Lines[0].Total -eq 115) "4×25 + 15 = 115"
+}
+
+Test-Case "B4) حالة كسور عشرية: لا تقريب مبكر يُفقِد الدقة" {
+    $line = New-TestLine -Qty 3 -RawPrice 10.005
+    $snap = New-Snapshot -Lines @($line)
+    $receipt = Convert-SnapshotToReceipt $snap
+    $expected = 3 * 10.005
+    Assert-True ([math]::Abs($receipt.Lines[0].Total - $expected) -lt 0.0000001) "يجب أن يحافظ المجموع على الدقة الكاملة (3×10.005) بلا تقريب مبكر"
+}
+
+Test-Case "B5) المجموع الرسمي يختلف فعلاً عن Qty×Price الساذج حين تجتمع الحسومات والإضافات" {
+    $line = New-TestLine -Qty 5 -RawPrice 40 -LineDiscount 20 -BonusDiscount 5 -LineExtra 10
+    $snap = New-Snapshot -Lines @($line)
+    $receipt = Convert-SnapshotToReceipt $snap
+    $naive = 5 * 40
+    $authoritative = $naive - 20 - 5 + 10
+    Assert-True ($receipt.Lines[0].Total -ne $naive) "المجموع الرسمي (185) يجب أن يختلف عن الحساب الساذج (200) حين توجد حسومات وإضافات فعلية"
+    Assert-True ($receipt.Lines[0].Total -eq $authoritative) "يجب أن يطابق المجموع الرسمي: gross - خصم - بونص + إضافة = $authoritative"
+}
+
+Test-Case "B6) عرض مجموع سطر مختلف عن Qty×Price لا يُغيّر NetTotal في رأس الفاتورة" {
+    $line1 = New-TestLine -ItemGuid "M-1" -ItemName "مادة أ" -LineGuid "L-1" -LineNumber 1 -Qty 4 -RawPrice 25 -LineDiscount 10 -LineExtra 3
+    $line2 = New-TestLine -ItemGuid "M-2" -ItemName "مادة ب" -LineGuid "L-2" -LineNumber 2 -Qty 2 -RawPrice 50
+    $snap = New-Snapshot -Lines @($line1, $line2) -InvoiceTotal 200 -TotalDiscount 0 -TotalExtra 0
+    $receipt = Convert-SnapshotToReceipt $snap
+    Assert-True ($receipt.Lines[0].Total -ne ($line1.Qty * $line1.RawPrice)) "مجموع السطر الأول يجب أن يختلف فعلاً عن الحساب الساذج (وجود خصم وإضافة على مستوى السطر)"
+    Assert-True ($receipt.NetTotal -eq 200) "NetTotal يُشتق حصراً من رأس الفاتورة (InvoiceTotal/TotalDiscount/TotalExtra) ولا يتأثر بحسومات/إضافات الأسطر إطلاقاً"
+    Assert-True ($receipt.GrossTotal -eq 200) "GrossTotal كذلك يبقى كما في الرأس بلا تأثر بمجاميع الأسطر"
+}
+
+Test-Case "B7) غياب الحقول الاختيارية (خصم/بونص/إضافة) على السطر: قيمة افتراضية آمنة بلا استثناء" {
+    $line = New-TestLine -Qty 6 -RawPrice 15
+    Assert-True ($line.LineDiscount -eq 0 -and $line.BonusDiscount -eq 0 -and $line.LineExtra -eq 0) "القيم الافتراضية يجب أن تكون صفراً حين لا تُمرَّر"
+    $snap = New-Snapshot -Lines @($line)
+    $receipt = $null
+    $threw = $false
+    try {
+        $receipt = Convert-SnapshotToReceipt $snap
+    } catch {
+        $threw = $true
+    }
+    Assert-True (-not $threw) "غياب حقول الخصم/الإضافة الاختيارية يجب ألا يُسقط بناء الإيصال إطلاقاً"
+    Assert-True ($receipt.Lines[0].Total -eq 90) "المجموع يرتد بأمان لـQty×Price حين لا توجد حسومات/إضافات (6×15=90)"
+}
+
+Test-Case "شاهد سلبي B8: حساب ساذج يتجاهل خصم/إضافة السطر يختلف عن سلوك التطبيق الفعلي" {
+    $line = New-TestLine -Qty 5 -RawPrice 40 -LineDiscount 20 -LineExtra 10
+    $naiveTotal = $line.Qty * $line.RawPrice   # السلوك القديم المفترض: يتجاهل خصم/إضافة السطر تماماً
+    $snap = New-Snapshot -Lines @($line)
+    $receipt = Convert-SnapshotToReceipt $snap
+    Assert-True ($receipt.Lines[0].Total -ne $naiveTotal) "التطبيق الفعلي يجب أن يعكس خصم وإضافة السطر فعلياً، لا أن يُنتج نفس نتيجة الحساب الساذج القديم الذي يتجاهلهما"
+    Assert-True ($receipt.Lines[0].Total -eq ($naiveTotal - 20 + 10)) "يجب أن يطابق تحديداً: gross - خصم + إضافة"
+}
+
+Write-Host "`n== C: قفل نسخة واحدة لعامل الرصد (Observe worker lock) =="
+
+# استخراج منطق حجز قفل عامل الرصد الحقيقي من ozk-print-bridge.ps1 (وليس إعادة
+# تنفيذ منفصلة) — المقطع ليس دالة قائمة بذاتها فيُستخرج بحدَّين نصيَّين
+# فريدين، بنفس أسلوب Get-RendererTotalsFor أعلاه في قسم P1-A.
+function Get-ObserveWorkerLockLogicText() {
+    $startMarker = '$observeWorkerMutexName = "Global\OZK_PrintBridge_Observe_Worker_SingleInstance"'
+    $endMarker = 'throw "Another Observe worker instance is already running (mutex ''$observeWorkerMutexName'' is held). Refusing to start a second poller to avoid a double-print race."'
+    $startIdx = $bridgeSrc.IndexOf($startMarker)
+    Assert-True ($startIdx -ge 0) "يجب وجود بداية منطق قفل عامل الرصد في المصدر"
+    $endIdx = $bridgeSrc.IndexOf($endMarker, $startIdx)
+    Assert-True ($endIdx -ge 0) "يجب وجود نهاية منطق قفل عامل الرصد في المصدر"
+    $endIdx += $endMarker.Length
+    # الـthrow أعلاه متداخل داخل `if (-not $acquiredObserveWorkerMutex) { ... }` —
+    # القوس الختامي لهذا الـif لا يزال بعد نهاية سطر الـthrow، فيلزم تضمينه
+    # ليكون النص المُستخرَج scriptblock متوازن الأقواس صالحاً للتنفيذ.
+    $closingBraceIdx = $bridgeSrc.IndexOf('}', $endIdx)
+    Assert-True ($closingBraceIdx -ge 0) "يجب وجود القوس الختامي لكتلة if (-not \$acquiredObserveWorkerMutex) بعد الـthrow"
+    $endIdx = $closingBraceIdx + 1
+    return $bridgeSrc.Substring($startIdx, $endIdx - $startIdx)
+}
+
+# تنفيذ المنطق الحقيقي المُستخرَج، لكن باسم ميوتكس اختباري فريد بدل الاسم
+# الحقيقي — لتفادي أي تعارض مع عامل رصد حقيقي قد يعمل فعلاً على هذا الجهاز
+# عبر Task Scheduler (قيد أمان مطلق: لا لمس لأي عملية إنتاج فعلية).
+function Invoke-ObserveWorkerLockAttempt([string]$TestMutexName) {
+    $logic = Get-ObserveWorkerLockLogicText
+    $testLogic = $logic.Replace('"Global\OZK_PrintBridge_Observe_Worker_SingleInstance"', "`"$TestMutexName`"").Replace('"Local\OZK_PrintBridge_Observe_Worker_SingleInstance"', "`"$TestMutexName`"")
+    $sb = [scriptblock]::Create("param(`$TestMutexName)`nfunction Write-BridgeLog(`$Entry) { }`n$testLogic`n[pscustomobject]@{ Mutex = `$observeWorkerMutex; Acquired = `$acquiredObserveWorkerMutex; MutexName = `$observeWorkerMutexName }")
+    return & $sb $TestMutexName
+}
+
+# استخراج منطق التحرير الحقيقي من الـfinally الوحيد في السكريبت (كتلة
+# if/try/finally غير دالة أيضاً) — تسامح CRLF/LF بنفس أسلوب Get-ExtractedFunctionText.
+function Get-ObserveWorkerReleaseLogicText() {
+    $startMarker = 'if ($null -ne $observeWorkerMutex) {'
+    $disposeMarker = '$observeWorkerMutex.Dispose()'
+    $startIdx = $bridgeSrc.IndexOf($startMarker)
+    Assert-True ($startIdx -ge 0) "يجب وجود بداية منطق تحرير قفل عامل الرصد في المصدر"
+    $disposeIdx = $bridgeSrc.IndexOf($disposeMarker, $startIdx)
+    Assert-True ($disposeIdx -ge 0) "يجب وجود استدعاء Dispose في منطق التحرير"
+    $tailMatch = [regex]::Match($bridgeSrc.Substring($disposeIdx), '(?s)^.*?\r?\n\s*\}\r?\n\s*\}')
+    Assert-True $tailMatch.Success "تعذّر تحديد نهاية منطق تحرير القفل (الإغلاقين المتداخلين)"
+    $endIdx = $disposeIdx + $tailMatch.Index + $tailMatch.Length
+    return $bridgeSrc.Substring($startIdx, $endIdx - $startIdx)
+}
+
+function Invoke-ObserveWorkerReleaseBlock($MutexObj, [bool]$Acquired) {
+    $logic = Get-ObserveWorkerReleaseLogicText
+    $sb = [scriptblock]::Create("param(`$observeWorkerMutex, `$acquiredObserveWorkerMutex)`n$logic")
+    & $sb $MutexObj $Acquired
+}
+
+# فرع PreviewInvoice/PrintInvoice كاملاً كنص، لإثبات أنه لا يشير لقفل عامل
+# الرصد إطلاقاً — الفرعان مدمَجان بشرط واحد في المصدر (`if ($Mode -eq
+# "PreviewInvoice" -or $Mode -eq "PrintInvoice")`) وينتهيان قبل فرع Benchmark.
+function Get-ManualModeBranchText() {
+    $startMarker = 'if ($Mode -eq "PreviewInvoice" -or $Mode -eq "PrintInvoice") {'
+    $endMarker = 'if ($Mode -eq "Benchmark") {'
+    $startIdx = $bridgeSrc.IndexOf($startMarker)
+    Assert-True ($startIdx -ge 0) "يجب وجود فرع PreviewInvoice/PrintInvoice في المصدر"
+    $endIdx = $bridgeSrc.IndexOf($endMarker, $startIdx)
+    Assert-True ($endIdx -ge 0) "يجب وجود فرع Benchmark بعده لتحديد نهاية فرع المعاينة/الطباعة اليدوية"
+    return $bridgeSrc.Substring($startIdx, $endIdx - $startIdx)
+}
+
+# الميوتكس المسمّى في .NET/Windows قابل لإعادة الحجز (reentrant) لنفس الخيط:
+# خيط واحد يستطيع WaitOne(0) بنجاح على نفس الاسم عبر أكثر من كائن Mutex دون
+# أي حظر (تحقّقنا من هذا فعلياً). محاكاة "عامل Observe ثانٍ" باستدعاء
+# Invoke-ObserveWorkerLockAttempt مرتين على نفس الخيط لا تعكس واقع عمليتين
+# منفصلتين فعلياً، وتُخفي الحماية الحقيقية. لذا تُنفَّذ المحاولة الثانية على
+# runspace/خيط منفصل فعلاً — هذا يطابق دلالات الميوتكس عبر عمليات Windows.
+function Invoke-ObserveWorkerLockAttemptOnBackgroundThread([string]$TestMutexName) {
+    $logic = Get-ObserveWorkerLockLogicText
+    $testLogic = $logic.Replace('"Global\OZK_PrintBridge_Observe_Worker_SingleInstance"', "`"$TestMutexName`"").Replace('"Local\OZK_PrintBridge_Observe_Worker_SingleInstance"', "`"$TestMutexName`"")
+    $scriptText = "param(`$TestMutexName)`nfunction Write-BridgeLog(`$Entry) { }`n$testLogic`n[pscustomobject]@{ Acquired = `$acquiredObserveWorkerMutex }"
+    $rs = [runspacefactory]::CreateRunspace()
+    $rs.Open()
+    $ps = [powershell]::Create()
+    $ps.Runspace = $rs
+    try {
+        [void]$ps.AddScript($scriptText).AddArgument($TestMutexName)
+        $invokeResult = $null
+        $invokeThrew = $false
+        try {
+            $invokeResult = $ps.Invoke()
+        } catch {
+            $invokeThrew = $true
+        }
+        $threw = $invokeThrew -or $ps.HadErrors
+        # ملاحظة: .Count وحده هو الفحص الصحيح هنا أيضاً — راجع التعليق المماثل
+        # في اختبار C8 أدناه بخصوص unwrap مصفوفة العنصر الواحد في PowerShell.
+        $resultValue = if ($invokeResult.Count -gt 0) { $invokeResult[0] } else { $null }
+        return [pscustomobject]@{ Threw = $threw; Result = $resultValue }
+    } finally {
+        $ps.Dispose()
+        $rs.Close()
+    }
+}
+
+Test-Case "C1) أول عامل Observe يحصل على القفل بنجاح" {
+    $testMutex = "Local\ozk_test_observe_lock_$([guid]::NewGuid().ToString('N'))"
+    $r1 = Invoke-ObserveWorkerLockAttempt $testMutex
+    try {
+        Assert-True ($r1.Acquired -eq $true) "يجب أن ينجح أول عامل Observe في حجز القفل"
+        Assert-True ($null -ne $r1.Mutex) "يجب أن يُنشئ كائن Mutex فعلي"
+    } finally {
+        Invoke-ObserveWorkerReleaseBlock $r1.Mutex $r1.Acquired
+    }
+}
+
+Test-Case "C2) عامل Observe ثانٍ يفشل بوضوح قبل أي معالجة بينما الأول ممسك بالقفل" {
+    $testMutex = "Local\ozk_test_observe_lock_$([guid]::NewGuid().ToString('N'))"
+    $r1 = Invoke-ObserveWorkerLockAttempt $testMutex
+    Assert-True ($r1.Acquired -eq $true) "شرط مسبق: يجب أن ينجح الأول"
+    try {
+        $second = Invoke-ObserveWorkerLockAttemptOnBackgroundThread $testMutex
+        Assert-True $second.Threw "يجب أن ترفض المحاولة الثانية (على خيط منفصل يحاكي عملية Observe ثانية فعلية) بلا معالجة أي فاتورة، بينما الأولى ما زالت ممسكة بالقفل"
+        Assert-True ($null -eq $second.Result) "لا نتيجة نجاح ينبغي أن تصدر عن المحاولة الثانية"
+    } finally {
+        Invoke-ObserveWorkerReleaseBlock $r1.Mutex $r1.Acquired
+    }
+}
+
+Test-Case "C3) بعد تحرير الأول، يمكن لعامل Observe جديد أن يحصل على القفل" {
+    $testMutex = "Local\ozk_test_observe_lock_$([guid]::NewGuid().ToString('N'))"
+    $r1 = Invoke-ObserveWorkerLockAttempt $testMutex
+    Assert-True ($r1.Acquired -eq $true) "شرط مسبق: يجب أن ينجح الأول"
+    Invoke-ObserveWorkerReleaseBlock $r1.Mutex $r1.Acquired
+    $r2 = Invoke-ObserveWorkerLockAttempt $testMutex
+    try {
+        Assert-True ($r2.Acquired -eq $true) "بعد تحرير الأول يجب أن ينجح عامل جديد بنفس اسم القفل"
+    } finally {
+        Invoke-ObserveWorkerReleaseBlock $r2.Mutex $r2.Acquired
+    }
+}
+
+Test-Case "C4) مسار الاستثناء يُحرّر القفل أيضاً (finally الحقيقي لا اختصار)" {
+    $testMutex = "Local\ozk_test_observe_lock_$([guid]::NewGuid().ToString('N'))"
+    $r1 = Invoke-ObserveWorkerLockAttempt $testMutex
+    Assert-True ($r1.Acquired -eq $true) "شرط مسبق: يجب أن ينجح الأول"
+    try {
+        try {
+            throw "محاكاة عطل أثناء الرصد بعد حجز القفل"
+        } finally {
+            Invoke-ObserveWorkerReleaseBlock $r1.Mutex $r1.Acquired
+        }
+    } catch {
+        # الاستثناء المحاكى متوقّع ومقصود؛ الغرض إثبات أن finally الحقيقي نُفِّذ رغم الاستثناء
+    }
+    $r2 = Invoke-ObserveWorkerLockAttempt $testMutex
+    try {
+        Assert-True ($r2.Acquired -eq $true) "بعد استثناء أثناء تشغيل العامل الأول، يجب أن يُحرَّر القفل فيتاح لعامل جديد"
+    } finally {
+        Invoke-ObserveWorkerReleaseBlock $r2.Mutex $r2.Acquired
+    }
+}
+
+Test-Case "C5) وضع PreviewInvoice غير متأثر بقفل عامل الرصد إطلاقاً" {
+    $branchText = Get-ManualModeBranchText
+    Assert-True ($branchText -notmatch 'observeWorkerMutex') "فرع PreviewInvoice/PrintInvoice يجب ألا يشير إلى observeWorkerMutex بتاتاً"
+    Assert-True ($branchText -match 'Mode -eq "PreviewInvoice"') "تأكيد أن النص المستخرج هو الفرع الصحيح"
+}
+
+Test-Case "C6) وضع PrintInvoice اليدوي غير متأثر بقفل عامل الرصد إطلاقاً" {
+    $branchText = Get-ManualModeBranchText
+    Assert-True ($branchText -match 'ConfirmPhysicalPrint') "تأكيد أن النص المستخرج يشمل مسار PrintInvoice اليدوي أيضاً"
+    Assert-True ($branchText -notmatch 'observeWorkerMutex') "فرع PrintInvoice اليدوي يجب ألا يفحص أو يمسّ قفل عامل الرصد"
+}
+
+Test-Case "C7) قفل عامل الرصد منفصل تماماً عن ميوتكس الـwatchdog — لا تعارض ولا deadlock" {
+    Assert-True ($watchdogSrc -match [regex]::Escape('"Global\OZK_PrintBridge_Watchdog_SingleInstance"')) "يجب أن يستخدم الـwatchdog اسم الميوتكس المعروف"
+    Assert-True ($bridgeSrc -match [regex]::Escape('"Global\OZK_PrintBridge_Observe_Worker_SingleInstance"')) "يجب أن يستخدم عامل الرصد اسم ميوتكس مختلفاً"
+    Assert-True ($watchdogSrc -notmatch [regex]::Escape('OZK_PrintBridge_Observe_Worker_SingleInstance')) "الـwatchdog يجب ألا يلمس اسم ميوتكس عامل الرصد إطلاقاً"
+
+    # فحص فعلي: حجز الاسمين معاً في آن واحد (بأسماء اختبار منفصلة) دون أي حظر
+    # أو تعارض — يحاكي واقع تشغيل الـwatchdog وعامل الرصد معاً بلا deadlock.
+    $watchdogTestMutexName = "Local\ozk_test_watchdog_lock_$([guid]::NewGuid().ToString('N'))"
+    $workerTestMutexName = "Local\ozk_test_observe_lock_$([guid]::NewGuid().ToString('N'))"
+    $watchdogMutex = New-Object System.Threading.Mutex($false, $watchdogTestMutexName)
+    $watchdogAcquired = $watchdogMutex.WaitOne(0)
+    $workerResult = $null
+    try {
+        Assert-True $watchdogAcquired "يجب أن ينجح حجز ميوتكس الـwatchdog"
+        $workerResult = Invoke-ObserveWorkerLockAttempt $workerTestMutexName
+        Assert-True ($workerResult.Acquired -eq $true) "يجب أن ينجح حجز ميوتكس عامل الرصد أيضاً بينما ميوتكس الـwatchdog ما زال ممسوكاً — لا تعارض بينهما"
+    } finally {
+        if ($null -ne $workerResult) { Invoke-ObserveWorkerReleaseBlock $workerResult.Mutex $workerResult.Acquired }
+        if ($watchdogAcquired) { $watchdogMutex.ReleaseMutex() }
+        $watchdogMutex.Dispose()
+    }
+}
+
+Test-Case "شاهد سلبي C8: بلا فحص/رفض صريح، فشل WaitOne(0) للنسخة الثانية يمر صامتاً" {
+    # WaitOne(0) في .NET يعيد $false بصمت عند فشل الحجز — لا استثناء تلقائياً.
+    # هذا يوثّق أن الحماية الفعلية ليست خاصية مجانية من نظام التشغيل، بل سطر
+    # الفحص الصريح (`if (-not $acquiredObserveWorkerMutex) { throw ... }`) في
+    # الكود الحقيقي (مؤكَّد تنفيذه فعلياً في C2 أعلاه). لو حُذف ذلك السطر، لا
+    # شيء غيره كان ليمنع نسخة ثانية من المتابعة رغم فشل حجزها.
+    $testMutex = "Local\ozk_test_observe_lock_negwitness_$([guid]::NewGuid().ToString('N'))"
+    $m1 = New-Object System.Threading.Mutex($false, $testMutex)
+    $a1 = $m1.WaitOne(0)
+    Assert-True $a1 "شرط مسبق: يجب أن ينجح الأول بحجز الاختبار"
+    try {
+        # الميوتكس المسمّى قابل لإعادة الحجز لنفس الخيط، فالمحاولة الثانية يجب
+        # أن تُنفَّذ على خيط منفصل فعلاً كي تُحاكي عملية Observe ثانية حقيقية
+        # (نفس الأسلوب المستخدم في C2 أعلاه عبر Invoke-ObserveWorkerLockAttemptOnBackgroundThread).
+        $rs = [runspacefactory]::CreateRunspace(); $rs.Open()
+        $ps = [powershell]::Create(); $ps.Runspace = $rs
+        $a2 = $null
+        try {
+            [void]$ps.AddScript({
+                param($n)
+                $m = New-Object System.Threading.Mutex($false, $n)
+                $acquired = $m.WaitOne(0)
+                if ($acquired) { $m.ReleaseMutex() }
+                $m.Dispose()
+                return $acquired
+            }).AddArgument($testMutex)
+            $invokeResult = $ps.Invoke()
+            # تحذير: `$invokeResult -and ...` قد يفشل هنا بسبب "unwrap" التلقائي
+            # في PowerShell لمصفوفة بعنصر واحد فقط — إن كان ذلك العنصر $false
+            # (كما هنا تماماً)، تُعامَل المصفوفة نفسها كقيمة زائفة رغم احتوائها
+            # عنصراً فعلياً. لذا يُفحَص .Count وحده صراحة، لا truthiness المصفوفة.
+            $a2 = if ($invokeResult.Count -gt 0) { $invokeResult[0] } else { $null }
+        } finally {
+            $ps.Dispose(); $rs.Close()
+        }
+        Assert-True ($a2 -eq $false) "يجب أن يفشل حجز الثاني (على خيط منفصل فعلاً) على مستوى نظام التشغيل (سلوك .NET الأساسي بلا استثناء تلقائي)؛ هذا بالضبط ما يجعل سطر الرفض الصريح في الكود الحقيقي ضرورياً لا اختيارياً"
+        Assert-True ($bridgeSrc -match [regex]::Escape('throw "Another Observe worker instance is already running')) "يجب أن يبقى سطر الرفض الصريح موجوداً في الكود الحالي؛ حذفه هو بالضبط الانحدار الذي تكتشفه C2 أعلاه"
+    } finally {
+        if ($a1) { $m1.ReleaseMutex() }
+        $m1.Dispose()
+    }
+}
+
 
 Write-Host "`n$($script:passed) passed, $($script:failed) failed"
 if ($script:failed -gt 0) { exit 1 }
