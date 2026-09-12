@@ -139,7 +139,12 @@ try {
     $totalCol = Pick $biCols @("TotalPrice", "Total", "Net", "NetTotal", "NetValue", "Value", "Amount", "SubTotal", "LineTotal") $null
     $priceSel = if ($priceCol) { "COALESCE(bi.[$priceCol],0)" } else { "0" }
     $totalSel = if ($totalCol) { "COALESCE(bi.[$totalCol],0)" } elseif ($priceCol) { "(COALESCE(bi.Qty,0)*COALESCE(bi.[$priceCol],0))" } else { "0" }
-    Write-Log "اكتشاف: السعر = $(if($priceCol){$priceCol}else{'(غير موجود)'}) | إجمالي السطر = $(if($totalCol){$totalCol}else{'محسوب (كمية×سعر)'})"
+    # مصدر lineTotal: "ameen" لو أتى من عمود إجمالي حقيقي على bi000، أو "derived" لو
+    # كان محسوباً هنا كـ Qty×Price (fallback). القرار على مستوى المخطط لكل التشغيل،
+    # لا لكل سطر — يُرفَق مع كل line ليعرف المستهلك (src/app.js) ألا يثق بـ derived
+    # كإجمالي حقيقي عند تحديد أساس السعر (unit1/unit2).
+    $lineTotalSource = if ($totalCol) { "ameen" } else { "derived" }
+    Write-Log "اكتشاف: السعر = $(if($priceCol){$priceCol}else{'(غير موجود)'}) | إجمالي السطر = $(if($totalCol){$totalCol}else{'محسوب (كمية×سعر)'}) | lineTotalSource = $lineTotalSource"
 
     if ($Discover) {
         Write-Log "=== وضع الاكتشاف: عيّنة أحدث فاتورة مع محتوياتها ==="
@@ -257,13 +262,14 @@ ORDER BY u.Date DESC, u.GUID
         $f = [double]$r["unit2_fact"]
         $qtyUnits = if ($f -gt 0) { [math]::Round(([double]$r["qty"]) / $f, 3) } else { [double]$r["qty"] }
         $bills[$g].lines.Add(@{
-            material  = [string]$r["material"]
-            qty       = [double]$r["qty"]
-            qtyUnits  = $qtyUnits
-            price     = [double]$r["price"]
-            lineTotal = [double]$r["line_total"]
-            unit1     = [string]$r["unit1"]
-            unit2     = [string]$r["unit2"]
+            material         = [string]$r["material"]
+            qty              = [double]$r["qty"]
+            qtyUnits         = $qtyUnits
+            price            = [double]$r["price"]
+            lineTotal        = [double]$r["line_total"]
+            lineTotalSource  = $lineTotalSource
+            unit1            = [string]$r["unit1"]
+            unit2            = [string]$r["unit2"]
         })
     }
     $r.Close(); $conn.Close()

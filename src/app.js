@@ -1187,17 +1187,29 @@ function findReturnInvoiceForMovement(customer, movement) {
 // 201.50 لا 403. السعر يبقى سعر وحدة، والقيمة تصير عموداً مستقلاً.
 //
 // `stored` (Qty × Price كما سجّله الأمين لهذا السطر تحديداً) هو مصدر الحقيقة
-// الأول ما دام رقماً موجباً: هو محسوب أصلاً بنفس الوحدة التي أدخل بها الأمين
-// السعر، سطراً بسطر، بخلاف `invoicePriceBasis` التي تحسم أساساً واحداً لكل
-// الفاتورة وقد تُخطئ الأسطر التي أساسها مختلف عن غالبية الفاتورة (مثال: فاتورة
-// أغلبها كرتونة كاملة، وسطر واحد فيها بيع كمية جزئية بسعر الكروز). لا نلجأ
-// لإعادة الحساب حسب `invoicePriceBasis` إلا حين لا توجد قيمة مخزَّنة موثوقة.
+// الأول ما دام رقماً موجباً **وقادماً فعلاً من الأمين**: هو محسوب أصلاً بنفس
+// الوحدة التي أدخل بها الأمين السعر، سطراً بسطر، بخلاف `invoicePriceBasis`
+// التي تحسم أساساً واحداً لكل الفاتورة وقد تُخطئ الأسطر التي أساسها مختلف عن
+// غالبية الفاتورة (مثال: فاتورة أغلبها كرتونة كاملة، وسطر واحد فيها بيع كمية
+// جزئية بسعر الكروز). لا نلجأ لإعادة الحساب حسب `invoicePriceBasis` إلا حين
+// لا توجد قيمة مخزَّنة موثوقة.
+//
+// لكن حين `line.lineTotalSource === "derived"` فإن `stored` ليس إجمالياً
+// حقيقياً من الأمين، بل Qty×Price محسوبة بأداة الرفع نفسها كـfallback (حين لا
+// يوجد عمود إجمالي على bi000 بمخطط الأمين لهذا التنصيب) — وهي إذن مطابقة
+// حسابياً لـprice×qty بالتعريف، بصرف النظر عن كون `Price` فعلياً سعر الوحدة1
+// أو الوحدة2. الثقة بها هنا تُعيد بالضبط العطل الذي يعالجه هذا الملف (قيمة
+// سطر مبنية على سعر الوحدة الخطأ)، فلا نستخدمها ونعيد الحساب حسب أساس السعر
+// الصحيح (`invoicePriceBasis`) كما لو لم تكن `stored` موجودة أصلاً. الفواتير
+// القديمة بلا `lineTotalSource` (رُفعت قبل إضافة هذا الحقل) تبقى كما كانت:
+// `stored` يُعتمَد مباشرة، توافقاً رجعياً.
 function invoiceLineTotalValue(line, inv) {
   const price = Number(line?.price || 0);
   const qty = Number(line?.qty || 0);
   const qtyUnits = Number(line?.qtyUnits || 0);
   const stored = Number(line?.lineTotal || 0);
-  if (stored > 0) return roundPrice(stored);
+  const source = line?.lineTotalSource;
+  if (stored > 0 && source !== "derived") return roundPrice(stored);
   if (inv && qtyUnits > 0 && invoicePriceBasis(inv) === "unit2") {
     return roundPrice(price * qtyUnits);
   }
@@ -1245,7 +1257,15 @@ function invoicePriceBasis(inv) {
 // الفاتورة (بعض الأصناف كرتونة كاملة، وبعضها كمية جزئية بسعر الكروز)، لذا لا
 // يصح تعميم أساس واحد (`invoicePriceBasis`) على كل الأسطر. تعيد "unit1"،
 // "unit2"، أو null حين لا تتوفر قيمة مخزَّنة موثوقة للمقارنة.
+//
+// `line.lineTotalSource === "derived"` يعني أن `stored` مُصنَّعة بأداة الرفع
+// نفسها كـQty×Price (fallback عند غياب عمود إجمالي حقيقي على bi000)، لا
+// إجمالياً حقيقياً من الأمين. في هذه الحالة ستكون `diffBase` صفراً دائماً
+// بالتعريف (لأن stored = price×qty أصلاً)، ما يفرض "unit1" زوراً على كل سطر
+// كهذا بصرف النظر عن وحدته الحقيقية — فنعيد null صراحةً لنترك الحسم لأساس
+// الفاتورة العام (`invoicePriceBasis`) بدل الوثوق بمقارنة لا معنى لها.
 function invoiceLineBasis(line) {
+  if (line?.lineTotalSource === "derived") return null;
   const price = Number(line?.price || 0);
   const stored = Number(line?.lineTotal || 0);
   if (!(price > 0) || !(stored > 0)) return null;

@@ -81,7 +81,7 @@ vm.runInContext(source.join("\n"), sandbox);
 const {
   sanitizeDocumentTitle, fileDateLabel, archiveDocumentTitle, withDocumentTitle,
   salesTotals, voucherPdfMarkup, invoiceLineTotalValue, invoiceLineQty, invoiceLinePrice,
-  invoicePriceBasis, invoiceLineUnitPrice
+  invoicePriceBasis, invoiceLineUnitPrice, invoiceLineBasis
 } = sandbox;
 
 // ===== 1) اسم الملف: الزبون + الرقم =====
@@ -343,7 +343,10 @@ test("fallback adjustment يساوي فقط الفرق غير المفسر", () 
 // نصف كرتونة = 25 كروز، سعر الكروز 8.06، معامل الكرتونة 50.
 const halfCarton = { material: "ماستر", qty: 25, qtyUnits: 0.5, price: 8.06, lineTotal: 201.5, unit1: "كروز", unit2: "كرتونة" };
 const fullCarton = { material: "ماستر", qty: 50, qtyUnits: 1, price: 8.06, lineTotal: 403, unit1: "كروز", unit2: "كرتونة" };
-const invOf = (lines) => ({ total: lines.reduce((s, l) => s + l.lineTotal, 0), lines });
+const invOf = (lines, totalOverride) => ({
+  total: totalOverride != null ? totalOverride : lines.reduce((s, l) => s + l.lineTotal, 0),
+  lines
+});
 
 test("half carton displays unit price 403", () => {
   const inv = invOf([halfCarton]);
@@ -458,6 +461,86 @@ test("invariant: قيمة سطر مخزَّنة موجبة لا تتغيّر ب�
       );
     }
   }
+});
+
+// ===== 4ج) ملاحظة Codex P1 على PR #215: تمييز lineTotal الحقيقي من الأمين عن
+// lineTotal المشتق (fallback = Qty × Price) داخل tools/push-customer-invoices.ps1
+// حين لا يوجد عمود إجمالي حقيقي على bi000 لتنصيب أمين معيّن. المشتق يساوي
+// price×qty بالتعريف، فلو وثقنا به لحسم أساس السطر (`invoiceLineBasis`) لأعاد
+// "unit1" دائماً — يُسقط آلية الحسم لكل الفواتير على ذلك التنصيب بصمت. =====
+
+test("P1 — REAL AMEEN: lineTotalSource=ameen يبقى مصدر الحقيقة (10 كروز × 20.5 = 205$)", () => {
+  const line = {
+    material: "Marlboro أبيض ورق", qty: 10, qtyUnits: 0.2,
+    price: 20.5, lineTotal: 205, lineTotalSource: "ameen", unit1: "كروز", unit2: "كرتونة"
+  };
+  const inv = invOf([line]);
+  assert.equal(invoiceLineBasis(line), "unit1", "أساس السطر الحقيقي من الأمين يجب أن يُحسم بمقارنة stored");
+  assert.equal(invoiceLineTotalValue(line, inv), 205);
+});
+
+test("P1 — DERIVED + سعر الوحدة الكبرى (كرتونة): لا يجوز تصنيف السطر unit1 لمجرد أن stored = qty×price", () => {
+  // factor = 50 (qty÷qtyUnits)، السعر فعلياً سعر الكرتونة (1025)، لكن الأداة
+  // رفعت qty=10 (بوحدة الكروز) والقيمة المشتقة = 10 × 1025 = 10250 — رقم خاطئ
+  // تماماً، وليس القيمة الفعلية 0.2 كرتونة × 1025 = 205.
+  const price = 1025;
+  const qty = 10;
+  const qtyUnits = 0.2; // factor = qty / qtyUnits = 50
+  const derivedStored = qty * price; // 10250 — fallback خاطئ، وليس إجمالي أمين حقيقي
+  const line = {
+    material: "صنف بالجملة", qty, qtyUnits, price,
+    lineTotal: derivedStored, lineTotalSource: "derived", unit1: "كروز", unit2: "كرتونة"
+  };
+  // إجمالي الفاتورة الحقيقي (لو من الأمين) يطابق 0.2 كرتونة × 1025 = 205،
+  // فيحسم invoicePriceBasis أساس unit2 لهذه الفاتورة.
+  const inv = invOf([line], 205);
+  assert.equal(invoiceLineBasis(line), null, "derived لا يجوز أن يحسم أساساً من stored المصنَّعة");
+  assert.equal(invoicePriceBasis(inv), "unit2");
+  assert.equal(
+    invoiceLineTotalValue(line, inv), 205,
+    "يجب استخدام أساس الفاتورة (0.2 × 1025) لا stored المشتقة (10250)"
+  );
+});
+
+test("P1 — DERIVED + سعر الوحدة الصغرى (كروز): يبقى qty × price حين أساس الفاتورة unit1", () => {
+  const price = 20.5; // سعر الكروز
+  const qty = 10;
+  const qtyUnits = 0.2;
+  const derivedStored = qty * price; // 205 — يصادف أنها صحيحة هنا لأن الأساس فعلاً unit1
+  const line = {
+    material: "Marlboro أبيض ورق", qty, qtyUnits, price,
+    lineTotal: derivedStored, lineTotalSource: "derived", unit1: "كروز", unit2: "كرتونة"
+  };
+  const inv = invOf([line], 205); // يطابق qty×price، فيحسم invoicePriceBasis أساس unit1
+  assert.equal(invoiceLineBasis(line), null, "derived يبقى null بصرف النظر عن تطابق stored مصادفةً");
+  assert.equal(invoicePriceBasis(inv), "unit1");
+  assert.equal(invoiceLineTotalValue(line, inv), 205, "qty × price يبقى صحيحاً حين الأساس فعلاً unit1");
+});
+
+test("P1 — LEGACY: lineTotalSource غائب (فواتير رُفعت قبل إضافة الحقل) — لا تغيير بالسلوك", () => {
+  const line = {
+    material: "Master Queen أبيض", qty: 15, qtyUnits: 0.3,
+    price: 9.7, lineTotal: 145.5, unit1: "كروز", unit2: "كرتونة"
+    // لا lineTotalSource إطلاقاً
+  };
+  const inv = invOf([line]);
+  assert.equal(invoiceLineBasis(line), "unit1", "الفواتير القديمة بلا الحقل تبقى تُحسم من stored كما كانت");
+  assert.equal(invoiceLineTotalValue(line, inv), 145.5);
+});
+
+test("P1 — فاتورة مختلطة: سطر derived لا يفسد حسم الأساس لسطور ameen الحقيقية المجاورة", () => {
+  const realLine = {
+    material: "Marlboro أبيض ورق", qty: 10, qtyUnits: 0.2,
+    price: 20.5, lineTotal: 205, lineTotalSource: "ameen", unit1: "كروز", unit2: "كرتونة"
+  };
+  const derivedLine = {
+    material: "صنف بالجملة", qty: 10, qtyUnits: 0.2,
+    price: 1025, lineTotal: 10250, lineTotalSource: "derived", unit1: "كروز", unit2: "كرتونة"
+  };
+  const inv = invOf([realLine, derivedLine], 205 + 205);
+  assert.equal(invoiceLineBasis(realLine), "unit1", "سطر ameen الحقيقي يبقى محسوماً من stored الخاصة به");
+  assert.equal(invoiceLineTotalValue(realLine, inv), 205, "سطر ameen لا يتأثر بوجود سطر derived بجانبه");
+  assert.equal(invoiceLineTotalValue(derivedLine, inv), 205, "سطر derived يُحسب من أساس الفاتورة لا من stored المصنَّعة");
 });
 
 // ===== 5) كل مسارات تصدير الفاتورة تنسب الحسم والدفعة (لا مسار متخلّف) =====
