@@ -1,5 +1,10 @@
 param(
     [switch]$Apply,
+    # الكتابة الحالية delete-then-insert بلا قيد فريد في الجدول، فصفر صفوف يعني
+    # مسح كل الالتزامات. قراءة فارغة من الأمين قد تكون حقيقة (كل الموردين
+    # مسدَّدون) وقد تكون عطلاً في الاستعلام — والفرق لا يُخمَّن. المسح على صفر
+    # صفوف يحتاج إذناً صريحاً.
+    [switch]$AllowEmpty,
     [int]$MinimumIntervalMinutes = 0,
     [string]$EnvFile = "$PSScriptRoot\.env",
     [string]$LogFile = "$PSScriptRoot\logs\supplier-obligations-push.log",
@@ -103,6 +108,16 @@ $conn.Close()
 $rows = @($allRows | Where-Object { $_.amount_due -gt 0 })
 Write-Log "Found $($allRows.Count) purchase-linked suppliers; $($rows.Count) have a positive payable balance."
 
+# قراءة لم تُرجع أي مورد مرتبط بفواتير شراء = استعلام مشبوه لا حقيقة محاسبية.
+if ($allRows.Count -eq 0) {
+    Write-Log "ABORT: the Ameen read returned no purchase-linked suppliers at all. Refusing to touch Supabase."
+    throw "Supplier read returned zero rows; existing Supabase data was left untouched."
+}
+if ($Apply -and $rows.Count -eq 0 -and -not $AllowEmpty) {
+    Write-Log "ABORT: no supplier has a positive balance. Refusing to clear existing rows without -AllowEmpty."
+    throw "Zero payable suppliers. Re-run with -AllowEmpty only if clearing the table is intended."
+}
+
 if (-not $Apply) {
     Write-Host "=== DRY RUN: top supplier obligations ===" -ForegroundColor Yellow
     $rows | Sort-Object amount_due -Descending | Select-Object -First 20 supplier_name, debit_total, credit_total, amount_due, last_purchase_date | Format-Table -AutoSize
@@ -123,6 +138,7 @@ $headers = @{
     "Content-Profile" = "public"
 }
 
+Write-Log "Replacing $($rows.Count) supplier obligation rows."
 foreach ($sourceToReplace in @($SOURCE, $LEGACY_SOURCE)) {
     $encodedSource = [Uri]::EscapeDataString($sourceToReplace)
     Invoke-RestMethod -Method Delete `

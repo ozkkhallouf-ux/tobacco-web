@@ -11,6 +11,10 @@ select
   last_payment.last_payment_date,
   last_payment.last_payment_notes,
   coalesce(recent_payments.recent_payments_json, '[]') as recent_payments_json,
+  -- عدد الدفعات الفعلي داخل نافذة الزخم (90 يوماً). يقارنه النموذج بعدد ما وصله
+  -- فيعرف الاقتطاع يقيناً بدل الاستدلال عليه من تواريخ ما وصل.
+  coalesce(payments_window.payments_in_window, 0) as payments_in_window,
+  payments_window.payments_window_start,
   coalesce(recent_movements.recent_movements_json, '[]') as recent_movements_json
 from dbo.cu000 cu
 left join dbo.ac000 ac  on ac.GUID = cu.AccountGUID
@@ -23,13 +27,25 @@ outer apply (
 ) last_payment
 outer apply (
   select (
-    select top 6 cast(en.Credit as decimal(18, 3)) as amount, en.Date as date, en.Notes as notes, en.Number as number
+    -- 40 لا 6: نموذج خطر التحصيل يقيس زخم السداد على نافذة 90 يوماً، وسقف الستّ
+    -- كان يقتطعها لـ35 زبوناً من 121 (29%) فيُظهر سدادهم أسوأ مما هو.
+    select top 40 cast(en.Credit as decimal(18, 3)) as amount, en.Date as date, en.Notes as notes, en.Number as number
     from dbo.en000 en
     where en.AccountGUID = cu.AccountGUID and coalesce(en.Credit, 0) > 0 and coalesce(en.Type, 0) = 0
     order by en.Date desc, en.Number desc, en.GUID desc
     for json path
   ) as recent_payments_json
 ) recent_payments
+outer apply (
+  -- يُعلَن حدّ النافذة مع العدد كي تَعُدّ طبقة التقييم بالحدّ نفسه بالضبط. من
+  -- دونه يقارن الطرفان عدَّين محسوبين بحدَّين مختلفين (منتصف ليل تقويمي هنا،
+  -- مقابل 90×24 ساعة متدحرجة في المتصفح) فتظهر فروقات حدّية كاذبة.
+  select count_big(*) as payments_in_window,
+         cast(dateadd(day, -90, cast(getdate() as date)) as date) as payments_window_start
+  from dbo.en000 en
+  where en.AccountGUID = cu.AccountGUID and coalesce(en.Credit, 0) > 0 and coalesce(en.Type, 0) = 0
+    and en.Date >= dateadd(day, -90, cast(getdate() as date))
+) payments_window
 outer apply (
   select (
     select top 10 cast(coalesce(en.Debit, 0) as decimal(18, 3)) as debit, cast(coalesce(en.Credit, 0) as decimal(18, 3)) as credit,
