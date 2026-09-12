@@ -51,6 +51,7 @@ declare
   terminal_status text; terminal_at timestamptz;
   retry_running boolean; job_health text; detail_text text;
   previous_healthy boolean; previous_alert_at timestamptz;
+  previous_alerted_terminal_at timestamptz; should_alert boolean;
   cron_grace interval := interval '10 minutes';
 begin
   -- (١) أحدث تشغيل مطلقاً — هل هناك محاولة جارية الآن؟
@@ -74,24 +75,41 @@ begin
     else format('عالقة في حالة %s منذ %s',coalesce(last_job_status,'غير معروفة'),
      coalesce(round(extract(epoch from(p_now-last_job_at))/60.0,1)::text||' دقيقة','مدة غير معروفة'))
     end;
-   select is_healthy,last_alert_at into previous_healthy,previous_alert_at
+   select is_healthy,last_alert_at,last_alerted_terminal_at
+    into previous_healthy,previous_alert_at,previous_alerted_terminal_at
     from pg_temp.health_probe where task_key=p_key;
-   if previous_healthy is distinct from false or previous_alert_at is null
-      or previous_alert_at<p_now-interval '60 minutes' then
+
+   -- الإصلاح: 'failed' حادثة مكتملة — لا تُنذَر ثانية لمجرد مرور ساعة إن كانت
+   -- terminal_at نفسها لم تتغيّر (لا محاولة جديدة). 'stuck'/'disabled' حالتان
+   -- جاريتان فتبقيان على الحارس الزمني الأصلي (التذكير الدوري مقصود لهما).
+   if job_health='failed' then
+    should_alert:=previous_healthy is distinct from false
+     or previous_alert_at is null
+     or previous_alerted_terminal_at is distinct from terminal_at;
+   else
+    should_alert:=previous_healthy is distinct from false
+     or previous_alert_at is null
+     or previous_alert_at<p_now-interval '60 minutes';
+   end if;
+
+   if should_alert then
     insert into notify_probe(event_type,task_key,detail) values('project_task_failure',p_key,detail_text);
     previous_alert_at:=p_now;
+    if job_health='failed' then previous_alerted_terminal_at:=terminal_at; end if;
    end if;
-   insert into pg_temp.health_probe(task_key,is_healthy,last_observed_at,last_alert_at,last_detail)
-    values(p_key,false,p_now,previous_alert_at,detail_text)
-    on conflict(task_key) do update set is_healthy=false,last_observed_at=p_now,last_alert_at=excluded.last_alert_at,last_detail=excluded.last_detail;
+   insert into pg_temp.health_probe(task_key,is_healthy,last_observed_at,last_alert_at,last_alerted_terminal_at,last_detail)
+    values(p_key,false,p_now,previous_alert_at,previous_alerted_terminal_at,detail_text)
+    on conflict(task_key) do update set is_healthy=false,last_observed_at=p_now,last_alert_at=excluded.last_alert_at,
+     last_alerted_terminal_at=excluded.last_alerted_terminal_at,last_detail=excluded.last_detail;
   elsif job_health = 'ok' then
    select is_healthy into previous_healthy from pg_temp.health_probe where task_key=p_key;
    if previous_healthy=false then
     insert into notify_probe(event_type,task_key,detail) values('project_task_recovered',p_key,null);
    end if;
-   insert into pg_temp.health_probe(task_key,is_healthy,last_observed_at,last_success_at,last_alert_at,last_detail)
-    values(p_key,true,p_now,terminal_at,null,'يعمل')
-    on conflict(task_key) do update set is_healthy=true,last_observed_at=p_now,last_success_at=excluded.last_success_at,last_alert_at=null,last_detail='يعمل';
+   insert into pg_temp.health_probe(task_key,is_healthy,last_observed_at,last_success_at,last_alert_at,last_alerted_terminal_at,last_detail)
+    values(p_key,true,p_now,terminal_at,null,null,'يعمل')
+    on conflict(task_key) do update set is_healthy=true,last_observed_at=p_now,last_success_at=excluded.last_success_at,
+     last_alert_at=null,last_alerted_terminal_at=null,last_detail='يعمل';
   else
    -- 'inflight' / 'never_run': محايدة — لا إشعار من أي نوع، ولا مساس بالحكم.
    insert into pg_temp.health_probe(task_key,is_healthy,last_observed_at,last_detail)
@@ -154,13 +172,16 @@ begin
   v:=pg_temp.monitor_cycle(k,j,true,t0-interval '14 minutes');
   select * into after_row from health_probe where task_key=k;
   assert v='failed', '12: الفشل الثاني'; n:=n+1;
-  -- ما يخصّ هذا الـPR: الحالة والسبب. أمّا هل تصل رسالة ثانية خلال الساعة
-  -- فهي سياسة الإرسال (dedupe) — طبقة منفصلة وبند مستقل، لا تُختبر هنا.
   assert after_row.is_healthy=false, '13: تبقى unhealthy عند الفشل الثاني'; n:=n+1;
   assert after_row.last_detail is distinct from before_row.last_detail,
     '14: last_detail انتقل إلى الفشل الأحدث'; n:=n+1;
-  assert after_row.last_alert_at is not distinct from before_row.last_alert_at,
-    '15: last_alert_at لم يُقدَّم بسبب فشل ثانٍ قد تكتمه سياسة الإرسال'; n:=n+1;
+  -- terminal_at الفشل الثاني (t0-15د) يختلف فعلاً عن الأول (t0-30د) — فشل
+  -- متكرر عبر تشغيلتين منفصلتين (سيناريو D)، لا نفس الحادثة المكتملة تتكرر
+  -- ذكرها. يجب ألا يُخفى: last_alert_at يتقدّم وتخرج رسالة ثانية فوراً.
+  assert after_row.last_alert_at = t0-interval '14 minutes',
+    '15: last_alert_at يتقدّم لأن terminal_at فشل جديد فعلاً، لا إعادة نفس الحادثة'; n:=n+1;
+  assert (select count(*) from notify_probe where task_key=k and event_type='project_task_failure')=2,
+    '15ب: فشل متكرر بterminal_at مختلف ⇒ إنذار ثانٍ فوري (لا إخفاء فشل حقيقي)'; n:=n+1;
   assert (select count(*) from notify_probe where task_key=k and event_type='project_task_recovered')=0,
     '16: لا تعافٍ إطلاقاً في هذا التسلسل'; n:=n+1;
 
@@ -235,6 +256,7 @@ begin
 
   -- =====================================================================
   -- ٧) نفس الفشل النهائي عبر عدة دورات ⇒ لا يُعامل كفشل جديد كل مرة
+  --    (سيناريو B: حادثة أُنذر عنها سابقاً وانتهت، بلا محاولة جديدة)
   -- =====================================================================
   k:='cron:seq7'; j:=7;
   insert into runs_probe values (j,'failed',t0-interval '50 minutes');
@@ -247,10 +269,17 @@ begin
     '32: ثلاث دورات إضافية على نفس الفشل ⇒ لا إنذار مكرر'; n:=n+1;
   assert (select is_healthy from health_probe where task_key=k)=false, '33: تبقى unhealthy'; n:=n+1;
 
-  -- التذكير الدوري ما زال قادراً على العمل: بعد تجاوز الستين دقيقة يخرج إنذار.
+  -- الإصلاح المقصود بهذا الـPR: التذكير الدوري الساعي أُزيل عن حالة 'failed'
+  -- تحديداً — نفس terminal_at، لا محاولة جديدة، فلا مبرر لتكرار الرسالة ولو
+  -- بعد ستين دقيقة أو أكثر. هذا هو بالضبط العطل المُبلَّغ عنه إنتاجياً
+  -- (ozk-collection-followups وsend-morning-report يُعاد إنذارهما كل ساعة
+  -- طوال اليوم لمحاولة واحدة فشلت وانتهت).
   v:=pg_temp.monitor_cycle(k,j,true,t0+interval '12 minutes');
-  assert (select count(*) from notify_probe where task_key=k)=2,
-    '34: التذكير الدوري بعد ستين دقيقة ما زال يعمل'; n:=n+1;
+  assert (select count(*) from notify_probe where task_key=k)=1,
+    '34: تجاوز الستين دقيقة بلا فشل جديد لا يُعيد الإنذار — العطل المُصلَح'; n:=n+1;
+  v:=pg_temp.monitor_cycle(k,j,true,t0+interval '5 hours');
+  assert (select count(*) from notify_probe where task_key=k)=1,
+    '34ب: حتى بعد ساعات — طالما terminal_at نفسه، صفر تكرار'; n:=n+1;
 
   -- =====================================================================
   -- ٨) محاولة جارية تتجاوز المهلة ⇒ stuck
@@ -306,12 +335,18 @@ begin
   assert (select last_detail from health_probe where task_key=k)='المهمة معطلة', '49: نص التعطيل'; n:=n+1;
 
   -- =====================================================================
-  -- انحدار صريح لملاحظة Codex P1 الثالثة على PR #154:
-  --   فشل A ⇒ إنذار، ثم فشل B خلال ستين دقيقة.
-  -- يجب ألا يتقدّم last_alert_at لمجرد وقوع B: رسالة B قد تكتمها سياسة
-  -- dedupe في طبقة الإرسال (مفتاح project-cron-failure:<job> بمهلة 60 دقيقة،
-  -- وnotify_telegram دالة RETURNS void فلا تُبلّغ عن الكتم). تقديم الساعة كان
-  -- يعني تسجيل B كأنه أُنذر عنه، وتأجيل التذكير الدوري ستين دقيقة أخرى.
+  -- ١١) سياسة جديدة ومقصودة تحلّ محلّ ملاحظة Codex P1 الثالثة على PR #154:
+  --   فشل A ⇒ إنذار، ثم فشل B *بterminal_at مختلف فعلياً* خلال نفس الساعة.
+  --
+  -- الفرق عن المحاولة المرفوضة سابقاً: تلك كانت تُقدِّم previous_alert_at
+  -- بلا شرط مستقل عن الوقت، فتصطدم بمهلة dedupe الخاصة بطبقة
+  -- telegram_outbox (project-cron-failure:<job>, 60 دقيقة) وتُصفِّر ساعة
+  -- *التذكير الدوري نفسها* لرسالة قد تُكتَم دون وصول — فيتأجّل تذكير حالة لم
+  -- تُبلَّغ. هنا last_alerted_terminal_at مستقل تماماً عن ساعة التذكير
+  -- الدوري (لا وجود لتذكير دوري في فرع 'failed' أصلاً بعد هذا الإصلاح)،
+  -- ويتقدّم فقط حين يتغيّر terminal_at بالفعل — أي حين تقع محاولة تشغيل
+  -- منفصلة وتفشل، لا حين يمرّ الوقت فقط. فشل B هنا حادثة مكتملة جديدة
+  -- (سيناريو D: فشل متكرر عبر تشغيلات متعددة) ويستحق إنذاره الخاص.
   -- =====================================================================
   k:='cron:seq12-alert-clock'; j:=12;
   insert into runs_probe values (j,'failed',t0-interval '50 minutes');
@@ -319,22 +354,27 @@ begin
   select * into before_row from health_probe where task_key=k;
   assert before_row.last_alert_at = t0-interval '49 minutes',
     '50: إنذار الفشل A ضبط ساعة الإنذار'; n:=n+1;
+  assert before_row.last_alerted_terminal_at = t0-interval '50 minutes',
+    '50ب: last_alerted_terminal_at سُجِّل بزمن نهاية A'; n:=n+1;
 
   insert into runs_probe values (j,'failed',t0-interval '20 minutes');
   v:=pg_temp.monitor_cycle(k,j,true,t0-interval '19 minutes');
   select * into after_row from health_probe where task_key=k;
-  assert after_row.last_alert_at = before_row.last_alert_at,
-    '51: الفشل B لم يُقدّم last_alert_at — لا تُسجَّل رسالة قد تكون مكبوتة كأنها وصلت'; n:=n+1;
+  assert after_row.last_alert_at = t0-interval '19 minutes',
+    '51: فشل B له terminal_at مختلف فعلياً ⇒ last_alert_at يتقدّم فوراً'; n:=n+1;
+  assert after_row.last_alerted_terminal_at = t0-interval '20 minutes',
+    '51ب: last_alerted_terminal_at يتحدّث إلى نهاية B'; n:=n+1;
   assert after_row.is_healthy = false, '52: الحالة تبقى unhealthy عند الفشل B'; n:=n+1;
   assert after_row.last_detail like '%'||to_char((t0-interval '20 minutes') at time zone 'Asia/Riyadh','HH24:MI')||'%',
     '53: last_detail يعكس الفشل الأحدث B'; n:=n+1;
-  assert (select count(*) from notify_probe where task_key=k)=1,
-    '54: لا رسالة ثانية داخل نافذة الساعة (سلوك الحارس الأصلي، غير مُبدَّل)'; n:=n+1;
+  assert (select count(*) from notify_probe where task_key=k)=2,
+    '54: فشل B الحقيقي يخرج إنذاراً ثانياً فوراً — لا يُخفى فشل متكرر (سيناريو D)'; n:=n+1;
 
+  -- والآن، على نفس B، مرور الوقت وحده — بلا terminal_at جديد — لا يُعيد الإنذار.
   v:=pg_temp.monitor_cycle(k,j,true,t0+interval '12 minutes');
   assert (select count(*) from notify_probe where task_key=k)=2,
-    '55: التذكير الدوري خرج في موعده الأصلي — لم يتأجّل بسبب B'; n:=n+1;
+    '55: تجاوز الستين دقيقة على B نفسه بلا فشل جديد ⇒ لا إنذار ثالث'; n:=n+1;
 
-  assert n >= 47, format('عدد التأكيدات المنفَّذة %s أقل من 47 — حُذف تأكيد؟', n);
+  assert n >= 53, format('عدد التأكيدات المنفَّذة %s أقل من 53 — حُذف تأكيد؟', n);
   raise notice 'cron state transitions: % تأكيداً — كلها نجحت ✓', n;
 end $$;
