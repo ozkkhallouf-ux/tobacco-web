@@ -23,6 +23,14 @@ function Assert($Name, $Condition) {
  $script:results += [pscustomobject]@{ Test = $Name; Pass = [bool]$Condition }
 }
 
+# القسم ٤: Get-AuthSession يستدعي Write-Heartbeat عند كل محاولة فاشلة (نبض حياة مستقل عن نجاح
+# المصادقة نفسها). هنا نموذج (mock) يسجّل كل نداء بدل الكتابة الفعلية لملف — الهدف إثبات:
+# (أ) لا يُرمى استثناء غير ملتقط بسبب استدعاء دالة موجودة فعلياً بالسكربت الحقيقي فقط،
+# (ب) كل محاولة فاشلة تكتب نبضاً بحالة auth_retry قبل الانتظار — هذا ما يمنع
+# ensure-ameen-sync.ps1 من اعتبار العملية متجمّدة وإعادة تشغيلها أثناء انقطاع مصادقة طويل.
+$script:heartbeatCalls = @()
+function Write-Heartbeat([string]$Status="ok") { $script:heartbeatCalls += $Status }
+
 # --- اختبار 1: Auth غير متاح عند البدء (يفشل مرتين ثم ينجح) — تحقق أن السكربت لا يخرج ---
 $script:sessionCallCount = 0
 function Session($Url,$Key,$Email,$Password) {
@@ -30,6 +38,7 @@ function Session($Url,$Key,$Email,$Password) {
  if ($script:sessionCallCount -le 2) { throw "Connection terminated due to connection timeout" }
  return @{ access_token = "fake-token-not-a-real-secret" }
 }
+$script:heartbeatCalls = @()
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
 $warnings = @()
 $result = Get-AuthSession "https://example.invalid" "fake-key" "user@example.invalid" "fake-pass" 3>&1 | Tee-Object -Variable warnings | Where-Object { $_ -isnot [System.Management.Automation.WarningRecord] }
@@ -39,6 +48,11 @@ Assert "أول محاولة فشلت والثانية فشلت والثالثة 
 Assert "النجاح يحدث بعد فشل أول محاولة على الأقل" ($result.access_token -eq "fake-token-not-a-real-secret")
 # backoff المتوقع: محاولة1 فشل -> sleep 5s، محاولة2 فشل -> sleep 10s، محاولة3 نجح = ~15s كحد أدنى
 Assert "زمن الانتظار يعكس backoff تصاعدي (5s ثم 10s تقريباً، وليس فورياً)" ($sw.Elapsed.TotalSeconds -ge 14)
+# القسم ٤ — الانحدار المطلوب صراحة: كل محاولة فاشلة تكتب نبض auth_retry قبل الانتظار، فيبقى
+# heartbeat.json طازجاً طوال انقطاع المصادقة ولا يظن ensure-ameen-sync.ps1 أن العملية ميتة
+# فيعيد تشغيلها (لا فائدة من إعادة تشغيل عملية تعمل بالفعل وتعيد المحاولة بنفسها).
+Assert "نبض auth_retry يُكتب مرتين (بعدد المحاولتين الفاشلتين) قبل النجاح" (@($script:heartbeatCalls | Where-Object { $_ -eq "auth_retry" }).Count -eq 2)
+Assert "لا يُكتب نبض status=ok من داخل Get-AuthSession نفسها (لا تزوير نجاح مزامنة)" (@($script:heartbeatCalls | Where-Object { $_ -eq "ok" }).Count -eq 0)
 
 # --- اختبار 2: لا طباعة لأي كلمة مرور/مفتاح/token ضمن رسائل التحذير ---
 $warnTexts = ($warnings | ForEach-Object { $_.Message }) -join " | "
@@ -50,6 +64,7 @@ Assert "رسالة auth recovered ظهرت بعد نجاح تالٍ لفشل" ($
 
 # --- اختبار 3: النجاح من أول محاولة لا يطبع "recovered" (تجنّب ضجيج غير ضروري) وليس هناك تأخير ---
 $script:sessionCallCount = 0
+$script:heartbeatCalls = @()
 function Session($Url,$Key,$Email,$Password) { $script:sessionCallCount++; return @{ access_token = "ok" } }
 $sw2 = [System.Diagnostics.Stopwatch]::StartNew()
 $warnings2 = @()
@@ -57,6 +72,34 @@ $result2 = Get-AuthSession "u" "k" "e" "p" 3>&1 | Tee-Object -Variable warnings2
 $sw2.Stop()
 Assert "نجاح أول محاولة فوري بدون أي انتظار" ($sw2.Elapsed.TotalSeconds -lt 2)
 Assert "لا رسالة auth recovered عند نجاح أول محاولة مباشرة" (-not (($warnings2 | ForEach-Object { $_.Message }) -match "auth recovered"))
+Assert "لا نبض auth_retry إطلاقاً عند نجاح المحاولة الأولى (لا محاولة فاشلة لتسجيلها)" (@($script:heartbeatCalls).Count -eq 0)
+
+# --- اختبار 5 (القسم ٤، محاكاة الحارس): انقطاع مصادقة طويل (10 محاولات فاشلة) يجب ألا يترك
+# heartbeat.json عالقاً على قيمة قديمة — كل محاولة تكتب طابعاً زمنياً جديداً بstatus=auth_retry،
+# فتبقى "طازجة" بمقياس ensure-ameen-sync.ps1 (5 دقائق) طالما فاصل المحاولات لا يتجاوزها، مما
+# يمنع دورة إعادة تشغيل/عامل مكرر أثناء انقطاع طويل — هذا هو الانحدار المطلوب صراحة بالقسم ٤.
+$script:sessionCallCount = 0
+$script:heartbeatCalls = @()
+$script:heartbeatTimestamps = @()
+function Write-Heartbeat([string]$Status="ok") {
+ $script:heartbeatCalls += $Status
+ $script:heartbeatTimestamps += (Get-Date)
+}
+# جدول backoff الحقيقي ثابت داخل Get-AuthSession (لا يمكن تغييره من هنا)؛ نكتفي بأول محاولتين
+# فاشلتين (تغطي التصاعد 5s->10s) لإثبات الاستمرارية عبر دورات متعددة دون إطالة زمن الاختبار.
+function Session($Url,$Key,$Email,$Password) {
+ $script:sessionCallCount++
+ if ($script:sessionCallCount -le 2) { throw "auth service unavailable" }
+ return @{ access_token = "ok-after-outage" }
+}
+$resultOutage = Get-AuthSession "u" "k" "e" "p" 3>&1 | Where-Object { $_ -isnot [System.Management.Automation.WarningRecord] }
+Assert "نبض auth_retry يُكتب قبل كل محاولة تالية أثناء انقطاع متعدد الدورات" (@($script:heartbeatCalls | Where-Object { $_ -eq "auth_retry" }).Count -eq 2)
+$allFreshEnoughGap = $true
+for ($i = 1; $i -lt $script:heartbeatTimestamps.Count; $i++) {
+ $gapSec = ($script:heartbeatTimestamps[$i] - $script:heartbeatTimestamps[$i-1]).TotalSeconds
+ if ($gapSec -gt 300) { $allFreshEnoughGap = $false }
+}
+Assert "الفاصل بين نبضتي auth_retry أقل من حد الطزاجة (5 دقائق) في ensure-ameen-sync.ps1" $allFreshEnoughGap
 
 # --- اختبار 4: لا يوجد أي فعل كتابة (INSERT/UPDATE/DELETE/UPSERT) داخل الدوال المعدّلة أو ملف السكربت كله ---
 Assert "لا كتابة SQL ضمن ameen-read-worker.ps1 (READ-ONLY محفوظ)" ($source -notmatch '(?i)\b(INSERT|UPDATE|DELETE|UPSERT)\b')

@@ -120,3 +120,12 @@ jobs:
       - name: Auto-sync price lists - git push failure visibility test
         shell: powershell
         run: .\tools\tests\Test-AutoSyncGitPushFailure.ps1
+
+      # القسم ٤/٥ (PR #220): يثبت أن Get-AuthSession في ameen-read-worker.ps1 تكتب نبض
+      # auth_retry عند كل محاولة مصادقة فاشلة، كي لا يظن ensure-ameen-sync.ps1 (الذي يعمل
+      # فقط على Windows) أن العملية متجمّدة فيعيد تشغيلها/يشغّل نسخة مكرّرة أثناء انقطاع
+      # مصادقة طويل. لا فائدة من تشغيله على ubuntu: المنطق نفسه Windows-only التشغيل
+      # الفعلي (Task Scheduler)، وتشغيله هنا على 5.1 تحديداً بنفس منطق البنود أعلاه.
+      - name: Ameen read worker - auth retry heartbeat regression test
+        shell: powershell
+        run: .	ools	est-ameen-read-worker-auth-retry.ps1
