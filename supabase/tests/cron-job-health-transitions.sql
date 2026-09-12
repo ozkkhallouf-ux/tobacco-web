@@ -31,14 +31,42 @@ create temporary table runs_probe (
   start_time timestamptz not null
 );
 
--- سجل الإشعارات: بديل telegram_outbox داخل الاختبار. نسجّل قرار الإرسال كما
--- تتخذه الدالة، لا الإرسال نفسه.
+-- سجل الإشعارات: بديل telegram_outbox داخل الاختبار. يتضمن dedupe_key
+-- وcreated_at لأن قرار "هل خرجت الرسالة فعلاً" في الإنتاج لا يُحسم في
+-- monitor_project_tasks() نفسها بل في طبقة notify_telegram/telegram_outbox
+-- المنفصلة (مفتاح + نافذة زمنية بحتة، بلا أي وعي بمحتوى الرسالة). إغفال هذه
+-- الطبقة هنا كان يجعل اختبار "فشل B يُنذَر فوراً" (سيناريو ١١) يثق بقرار
+-- should_alert وحده بلا إثبات أن الرسالة كانت ستصل فعلاً عبر outbox حقيقي —
+-- وهذا بالضبط ما يُخفي عطل المفتاح الثابت الذي أصلحته 05.
 create temporary table notify_probe (
   seq bigserial primary key,
   event_type text not null,
   task_key text not null,
+  dedupe_key text,
+  created_at timestamptz not null,
   detail text
 );
+
+-- محاكاة أمينة لطبقة dedupe الحقيقية في
+-- private.notify_telegram_dispatch (supabase/telegram-notifications.sql):
+-- مفتاح + نافذة زمنية فقط، بلا أي علم بمحتوى الرسالة أو هوية الحدث. أي
+-- استدعاء بنفس dedupe_key خلال نافذة p_dedupe_minutes يُسقَط بصمت — تماماً
+-- كما تفعل telegram_outbox في الإنتاج.
+create function pg_temp.notify_probe_insert(
+  p_event_type text, p_task_key text, p_dedupe_key text,
+  p_dedupe_minutes int, p_detail text, p_now timestamptz
+) returns void language plpgsql as $$
+begin
+  if p_dedupe_key is not null and exists (
+    select 1 from pg_temp.notify_probe
+    where dedupe_key = p_dedupe_key
+      and created_at > p_now - make_interval(mins => greatest(p_dedupe_minutes, 1))
+  ) then
+    return;
+  end if;
+  insert into pg_temp.notify_probe(event_type, task_key, dedupe_key, created_at, detail)
+    values (p_event_type, p_task_key, p_dedupe_key, p_now, p_detail);
+end $$;
 
 -- ---------------------------------------------------------------------------
 -- دورة مراقب كاملة لمهمة واحدة — منسوخة عن حلقة cron في
@@ -52,7 +80,7 @@ declare
   retry_running boolean; job_health text; detail_text text;
   previous_healthy boolean; previous_alert_at timestamptz;
   previous_alerted_terminal_at timestamptz; should_alert boolean;
-  cron_grace interval := interval '10 minutes';
+  cron_grace interval := interval '10 minutes'; failure_dedupe_key text;
 begin
   -- (١) أحدث تشغيل مطلقاً — هل هناك محاولة جارية الآن؟
   select status,start_time into last_job_status,last_job_at from pg_temp.runs_probe
@@ -93,7 +121,15 @@ begin
    end if;
 
    if should_alert then
-    insert into notify_probe(event_type,task_key,detail) values('project_task_failure',p_key,detail_text);
+    -- 05: مفتاح dedupe لحالة 'failed' يتضمن terminal_at (هوية الحادثة)؛
+    -- 'stuck'/'disabled' يبقيان على مفتاح ثابت باسم المهمة فقط — نفس منطق
+    -- 05 حرفياً، كي يُثبت هذا الاختبار سلوك outbox الحقيقي بعد الإصلاح.
+    if job_health='failed' then
+     failure_dedupe_key:='failure:'||p_key||':'||to_char(terminal_at,'YYYYMMDDHH24MISS');
+    else
+     failure_dedupe_key:='failure:'||p_key;
+    end if;
+    perform pg_temp.notify_probe_insert('project_task_failure',p_key,failure_dedupe_key,60,detail_text,p_now);
     previous_alert_at:=p_now;
     if job_health='failed' then previous_alerted_terminal_at:=terminal_at; end if;
    end if;
@@ -104,7 +140,8 @@ begin
   elsif job_health = 'ok' then
    select is_healthy into previous_healthy from pg_temp.health_probe where task_key=p_key;
    if previous_healthy=false then
-    insert into notify_probe(event_type,task_key,detail) values('project_task_recovered',p_key,null);
+    perform pg_temp.notify_probe_insert('project_task_recovered',p_key,
+     'recovered:'||p_key||':'||to_char(p_now,'YYYYMMDDHH24MI'),1,null,p_now);
    end if;
    insert into pg_temp.health_probe(task_key,is_healthy,last_observed_at,last_success_at,last_alert_at,last_alerted_terminal_at,last_detail)
     values(p_key,true,p_now,terminal_at,null,null,'يعمل')
@@ -293,6 +330,20 @@ begin
     '36: الجمود يُنذَر عنه'; n:=n+1;
   assert (select last_detail from health_probe where task_key=k) like 'عالقة%', '37: نص الجمود'; n:=n+1;
 
+  -- نفس الجمود لا يزال قائماً (المحاولة نفسها لم تُحسم بعد) بعد أقل من ساعة
+  -- ⇒ لا تذكير مكرر بعد.
+  v:=pg_temp.monitor_cycle(k,j,true,t0+interval '20 minutes');
+  assert (select count(*) from notify_probe where task_key=k and event_type='project_task_failure')=1,
+    '37ب: نفس الجمود خلال أقل من ساعة ⇒ لا تذكير مكرر بعد'; n:=n+1;
+
+  -- دورة ثانية بعد تجاوز الستين دقيقة على التذكير السابق: 'stuck' حالة جارية
+  -- لم "تنتهِ" فعلياً (لا terminal_at لها بعد) — التذكير الدوري لها مقصود لا
+  -- عطل، ويجب أن يتكرر خلافاً لـ'failed'. هذا يثبت أن 05 لم يمسّ حارس
+  -- stuck/disabled الزمني إطلاقاً رغم تعديله لمفتاح dedupe الخاص بـ'failed'.
+  v:=pg_temp.monitor_cycle(k,j,true,t0+interval '75 minutes');
+  assert (select count(*) from notify_probe where task_key=k and event_type='project_task_failure')=2,
+    '37ج: نفس الجمود بعد أكثر من ساعة على التذكير السابق ⇒ تذكير دوري ثانٍ يخرج'; n:=n+1;
+
   -- =====================================================================
   -- ٩) الحالات المحايدة: never_run بلا تاريخ، وinflight لأول محاولة
   -- =====================================================================
@@ -333,6 +384,17 @@ begin
   v:=pg_temp.monitor_cycle(k,j,false,t0);
   assert v='disabled', '48: active=false ⇒ disabled'; n:=n+1;
   assert (select last_detail from health_probe where task_key=k)='المهمة معطلة', '49: نص التعطيل'; n:=n+1;
+  assert (select count(*) from notify_probe where task_key=k and event_type='project_task_failure')=1,
+    '49ب: إنذار التعطيل الأول خرج'; n:=n+1;
+
+  -- التذكير الدوري لـ'disabled': حالة جارية مقصودة، يجب أن تتكرر كل ساعة
+  -- طالما المهمة ما زالت معطلة — بلا تغيير من 05 (الإصلاح خاص بـ'failed' فقط).
+  v:=pg_temp.monitor_cycle(k,j,false,t0+interval '20 minutes');
+  assert (select count(*) from notify_probe where task_key=k and event_type='project_task_failure')=1,
+    '49ج: أقل من ساعة على تذكير التعطيل السابق ⇒ لا تكرار بعد'; n:=n+1;
+  v:=pg_temp.monitor_cycle(k,j,false,t0+interval '75 minutes');
+  assert (select count(*) from notify_probe where task_key=k and event_type='project_task_failure')=2,
+    '49د: بعد أكثر من ساعة والمهمة ما زالت معطلة ⇒ تذكير دوري ثانٍ يخرج'; n:=n+1;
 
   -- =====================================================================
   -- ١١) سياسة جديدة ومقصودة تحلّ محلّ ملاحظة Codex P1 الثالثة على PR #154:
@@ -375,6 +437,57 @@ begin
   assert (select count(*) from notify_probe where task_key=k)=2,
     '55: تجاوز الستين دقيقة على B نفسه بلا فشل جديد ⇒ لا إنذار ثالث'; n:=n+1;
 
-  assert n >= 53, format('عدد التأكيدات المنفَّذة %s أقل من 53 — حُذف تأكيد؟', n);
+  -- =====================================================================
+  -- ١٢) الحالة الموروثة قبل تهيئة last_alerted_terminal_at (05، القسم ٣):
+  --   مهمة كانت already-failed *قبل* تطبيق 04 (أي last_alerted_terminal_at
+  --   لم تكن موجودة أصلاً وقتها فتُهيَّأ NULL افتراضياً عند إضافة العمود).
+  --   هذا السيناريو يحاكي صفاً حقيقياً بهذه الصفة، ثم يطبّق بالضبط منطق
+  --   الـUPDATE الآمن في 05 (لا يُخترع terminal_at، يُشتق من أحدث تشغيل نهائي
+  --   فعلي، ومشروط بوجود last_alert_at كدليل إنذار سابق فعلي)، ثم يثبت أن
+  --   دورة مراقبة تالية بلا فشل جديد لا تُصدر إنذاراً مكرراً.
+  -- =====================================================================
+  k:='cron:seq13-legacy-migration'; j:=13;
+  -- فشل نهائي واحد سبق الترحيل، وأُنذر عنه فعلاً (last_alert_at موجود) —
+  -- هذا بالضبط ما يميّزه عن حادثة لم تُنذَر عنها قط.
+  insert into runs_probe values (j,'failed',t0-interval '100 minutes');
+  insert into pg_temp.health_probe(task_key,is_healthy,last_observed_at,last_alert_at,last_alerted_terminal_at,last_detail)
+    values (k,false,t0-interval '99 minutes',t0-interval '99 minutes',null,'فشل موروث قبل 04');
+  assert (select count(*) from notify_probe where task_key=k)=0,
+    '56: لا إنذار صادر بعد من هذا الاختبار نفسه — أي إنذار لاحق سيكون هو المكرر المحتمل'; n:=n+1;
+
+  -- تطبيق منطق الـUPDATE الآمن في 05 (نفس الشروط: is_healthy=false،
+  -- last_alerted_terminal_at is null، last_alert_at is not null، وterminal_at
+  -- مُشتقة من أحدث نتيجة نهائية فعلية — هنا من runs_probe بدل cron.job_run_details).
+  update pg_temp.health_probe s
+  set last_alerted_terminal_at = t.terminal_at
+  from (
+    select jobid, max(start_time) filter (where status in ('succeeded','failed')) as terminal_at
+    from pg_temp.runs_probe where jobid=j group by jobid
+  ) t
+  where s.task_key = k
+    and s.is_healthy = false
+    and s.last_alerted_terminal_at is null
+    and s.last_alert_at is not null;
+
+  assert (select last_alerted_terminal_at from health_probe where task_key=k) = t0-interval '100 minutes',
+    '57: التهيئة الآمنة استعادت terminal_at الحادثة الموروثة نفسها بلا اختراع قيمة'; n:=n+1;
+
+  -- دورة مراقبة تالية بلا أي محاولة تشغيل جديدة (terminal_at لم يتغيّر) —
+  -- يجب ألا تُصدر إنذاراً إطلاقاً، خلافاً للعطل المؤكَّد بلا هذه التهيئة
+  -- (previous_alerted_terminal_at NULL IS DISTINCT FROM terminal_at = TRUE
+  -- كانت ستُطلق إنذاراً كاذباً واحداً هنا).
+  v:=pg_temp.monitor_cycle(k,j,true,t0-interval '30 minutes');
+  assert v='failed', '58: لا يزال failed — نفس الحادثة القديمة فقط'; n:=n+1;
+  assert (select count(*) from notify_probe where task_key=k)=0,
+    '59: التهيئة الآمنة منعت الإنذار المكرر الكاذب بعد الترحيل'; n:=n+1;
+
+  -- وفشل جديد فعلي لاحقاً (terminal_at مختلف) يجب أن يُنذَر كالمعتاد — التهيئة
+  -- لا تُخفي فشلاً حقيقياً جديداً.
+  insert into runs_probe values (j,'failed',t0-interval '5 minutes');
+  v:=pg_temp.monitor_cycle(k,j,true,t0-interval '4 minutes');
+  assert (select count(*) from notify_probe where task_key=k)=1,
+    '60: فشل جديد فعلي بعد التهيئة الآمنة ⇒ يُنذَر بلا إخفاء'; n:=n+1;
+
+  assert n >= 60, format('عدد التأكيدات المنفَّذة %s أقل من 60 — حُذف تأكيد؟', n);
   raise notice 'cron state transitions: % تأكيداً — كلها نجحت ✓', n;
 end $$;
