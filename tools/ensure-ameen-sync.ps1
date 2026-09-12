@@ -201,6 +201,8 @@ if ($isMainComputer) {
       $hbEarly = Get-Content -LiteralPath $ameenWorkerHeartbeatPath -Raw | ConvertFrom-Json
       $hbEarlyTime = [datetime]::Parse([string]$hbEarly.timestampUtc, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind)
       $hbEarlyAge = [math]::Round(((Get-Date).ToUniversalTime() - $hbEarlyTime.ToUniversalTime()).TotalMinutes, 1)
+      # الطزاجة وحدها = "العملية حيّة" (status=ok أو auth_retry كلاهما نبض حقيقي من نفس العملية) —
+      # القسم ٤: لا نخلط هذا بـ"صحة المزامنة"؛ ذاك يُقرَّر لاحقاً من قيمة status نفسها.
       $heartbeatFreshEarly = ($hbEarlyAge -le $ameenWorkerStaleThresholdMinutes)
       if ((-not $workerTask) -and $heartbeatFreshEarly) { Write-Log ("INFO: worker task not visible in this session but heartbeat is fresh (" + $hbEarlyAge + " min) - treated as healthy") }
     } catch { }
@@ -211,24 +213,42 @@ if ($isMainComputer) {
     $diagAll = @(Get-ScheduledTask -ErrorAction SilentlyContinue); $diagNames = @($diagAll | Where-Object { $_.TaskName -like "TOBACCO *" } | ForEach-Object { $_.TaskName }); Write-Log ("FAIL: task not registered — [" + $ameenWorkerTaskName + "] | enumerated=" + $diagAll.Count + " | tobacco=" + ($diagNames -join ", "))
   } else {
     $heartbeatAgeMinutes = $null
+    $heartbeatStatus = $null
     if (Test-Path -LiteralPath $ameenWorkerHeartbeatPath) {
       try {
         $hb = Get-Content -LiteralPath $ameenWorkerHeartbeatPath -Raw | ConvertFrom-Json
         $hbTime = [datetime]::Parse([string]$hb.timestampUtc, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind)
         $heartbeatAgeMinutes = [math]::Round(((Get-Date).ToUniversalTime() - $hbTime.ToUniversalTime()).TotalMinutes, 1)
+        $heartbeatStatus = [string]$hb.status
       } catch {
         Write-Log "WARN: could not parse Ameen worker heartbeat — $($_.Exception.Message)"
       }
     }
 
-    # عالقة = المهمة تظهر Running لكن heartbeat غائب أو أقدم من الحد المسموح
+    # عالقة/ميتة فعلاً = المهمة تظهر Running لكن لا نبض حديث إطلاقاً من العملية (لا "ok" ولا
+    # "auth_retry") — أي انقطاع النبض نفسه، لا محتواه. القسم ٤: عملية تعيد محاولة المصادقة
+    # ما زالت تكتب نبضاً (auth_retry) فتبقى طازجة هنا فلا تُعتبر عالقة ولا تُعاد.
     $workerNotRunning = ($workerTask -and ([string]$workerTask.State -ne "Running"))
-    $workerStuck = $workerNotRunning -or
-                   (($null -eq $heartbeatAgeMinutes) -or ($heartbeatAgeMinutes -gt $ameenWorkerStaleThresholdMinutes))
+    $heartbeatFresh = (($null -ne $heartbeatAgeMinutes) -and ($heartbeatAgeMinutes -le $ameenWorkerStaleThresholdMinutes))
+    $workerStuck = $workerNotRunning -or (-not $heartbeatFresh)
+    # متدهورة لا عالقة: حيّة وتكتب نبضاً طازجاً، لكن status يقول إنها تعيد محاولة مصادقة —
+    # لا مزامنة فعلية تحدث الآن، لكن لا فائدة من إعادة تشغيلها (العطل خارجي).
+    $workerDegraded = (-not $workerStuck) -and ($heartbeatStatus -eq "auth_retry")
 
     $prevIncidentActive = $false
     if (Test-Path -LiteralPath $ameenWorkerIncidentStatePath) {
       try { $prevIncidentActive = [bool]((Get-Content -LiteralPath $ameenWorkerIncidentStatePath -Raw | ConvertFrom-Json).stuck) } catch {}
+    }
+    $prevDegradedActive = $false
+    if (Test-Path -LiteralPath $ameenWorkerIncidentStatePath) {
+      try { $prevDegradedActive = [bool]((Get-Content -LiteralPath $ameenWorkerIncidentStatePath -Raw | ConvertFrom-Json).degraded) } catch {}
+    }
+    # منفصل عن prevDegradedActive عمداً: يتتبّع نجاح التنبيه فعلياً لا استمرار الحالة
+    # المرصودة وحدها — Codex P1: كان degraded=true يُسجَّل حتى لو فشل TELEGRAM-NOTIFY،
+    # فتُحسب "تم التنبيه" رغم عدم الوصول ولا تُعاد المحاولة أبداً.
+    $prevDegradedAlerted = $false
+    if (Test-Path -LiteralPath $ameenWorkerIncidentStatePath) {
+      try { $prevDegradedAlerted = [bool]((Get-Content -LiteralPath $ameenWorkerIncidentStatePath -Raw | ConvertFrom-Json).degradedAlerted) } catch {}
     }
 
     if ($workerStuck) {
@@ -260,7 +280,26 @@ if ($isMainComputer) {
         Write-Log "FAIL: could not restart $ameenWorkerTaskName — $($_.Exception.Message)"
       }
 
-      @{ stuck = $true; since = (Get-Date).ToUniversalTime().ToString("o") } | ConvertTo-Json | Set-Content -LiteralPath $ameenWorkerIncidentStatePath -Encoding utf8
+      @{ stuck = $true; degraded = $false; since = (Get-Date).ToUniversalTime().ToString("o") } | ConvertTo-Json | Set-Content -LiteralPath $ameenWorkerIncidentStatePath -Encoding utf8
+    } elseif ($workerDegraded) {
+      # القسم ٤: حيّة وتحاول المصادقة بلا نجاح — لا نعيد التشغيل (لا يفيد) ولا نسكت عن الأمر
+      # (لا نطلق أيضاً تنبيه "عاد للعمل" الآن، لأنها لم تعد فعلياً بعد).
+      Write-Log "DEGRADED: $ameenWorkerTaskName still retrying auth (heartbeat fresh, status=auth_retry)"
+      $degradedAlerted = $prevDegradedAlerted
+      if (-not $prevDegradedAlerted) {
+        $degradedMsg = "⚠️ Ameen Read Worker حيّة لكنها تعيد محاولة تسجيل الدخول بلا نجاح — لا مزامنة تحدث الآن."
+        $notifyPathWorker = Join-Path $PSScriptRoot "send-telegram-notification.ps1"
+        if (Test-Path -LiteralPath $notifyPathWorker) {
+          $degradedNotifyOutput = & $notifyPathWorker -Message $degradedMsg -EventType "windows" -DedupeKey "ameen-read-worker-degraded" -DedupeMinutes 60 2>&1 6>&1
+          $degradedNotifyText = ($degradedNotifyOutput | Out-String).Trim()
+          # send-telegram-notification.ps1 يخرج exit 0 دائماً (best-effort)، حتى عند الفشل —
+          # فالنجاح يُعرَّف من نص الإخراج (TELEGRAM-NOTIFY OK) لا من رمز الخروج. فشل أو تخطٍّ
+          # (FAILED/SKIPPED) يترك degradedAlerted=false كي تُعاد المحاولة بالدورة التالية.
+          $degradedAlerted = ($degradedNotifyText -match "TELEGRAM-NOTIFY OK")
+          Write-Log ("ALERT sent for Ameen worker degraded (auth_retry) — " + ($degradedNotifyText -replace "\s+", " "))
+        }
+      }
+      @{ stuck = $false; degraded = $true; degradedAlerted = $degradedAlerted; since = (Get-Date).ToUniversalTime().ToString("o") } | ConvertTo-Json | Set-Content -LiteralPath $ameenWorkerIncidentStatePath -Encoding utf8
     } else {
       if ($prevIncidentActive) {
         # عاد للعمل بعد حادثة — تنبيه واحد فقط عند لحظة العودة
@@ -270,8 +309,16 @@ if ($isMainComputer) {
           $recoverNotifyOutput = & $notifyPathWorker -Message $recoverMsg -EventType "windows" -DedupeKey "ameen-read-worker-recovered" -DedupeMinutes 60 2>&1 6>&1
           Write-Log ("RECOVERY CONFIRMED for Ameen worker — " + (($recoverNotifyOutput | Out-String).Trim() -replace "\s+", " "))
         }
+      } elseif ($prevDegradedActive) {
+        # تعافت من auth_retry دون أن تمرّ بحالة stuck — نفس رسالة العودة، مفتاح dedupe مختلف غير مهم هنا
+        $recoverMsg = "✅ عاد Ameen Read Worker لتسجيل الدخول بنجاح."
+        $notifyPathWorker = Join-Path $PSScriptRoot "send-telegram-notification.ps1"
+        if (Test-Path -LiteralPath $notifyPathWorker) {
+          $recoverNotifyOutput = & $notifyPathWorker -Message $recoverMsg -EventType "windows" -DedupeKey "ameen-read-worker-recovered" -DedupeMinutes 60 2>&1 6>&1
+          Write-Log ("RECOVERY CONFIRMED for Ameen worker (from auth_retry) — " + (($recoverNotifyOutput | Out-String).Trim() -replace "\s+", " "))
+        }
       }
-      @{ stuck = $false } | ConvertTo-Json | Set-Content -LiteralPath $ameenWorkerIncidentStatePath -Encoding utf8
+      @{ stuck = $false; degraded = $false } | ConvertTo-Json | Set-Content -LiteralPath $ameenWorkerIncidentStatePath -Encoding utf8
     }
   }
 }

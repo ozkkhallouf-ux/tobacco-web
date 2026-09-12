@@ -51,6 +51,20 @@ create table if not exists private.project_task_health_state (
   last_detail text
 );
 
+-- مطبَّق فعلاً على الإنتاج (proposed/04-pgcron-failure-alert-dedupe.sql +
+-- proposed/05-pgcron-failure-event-dedupe-fix.sql، PR #220، تحقُّق مباشر على
+-- الإنتاج 2026-09-13). العمود يحفظ terminal_at لآخر فشل نهائي أُنذر عنه فعلاً
+-- لمهمة cron بعينها، ليصير مفتاح dedupe لحالة 'failed' مرتبطاً بهوية الحادثة
+-- نفسها لا باسم المهمة وحده فقط — راجع تعليقات monitor_project_tasks() أدناه.
+do $$ begin
+  if not exists (
+    select 1 from information_schema.columns
+    where table_schema='private' and table_name='project_task_health_state' and column_name='last_alerted_terminal_at'
+  ) then
+    alter table private.project_task_health_state add column if not exists last_alerted_terminal_at timestamptz;
+  end if;
+end $$;
+
 insert into private.project_task_monitors(task_key,task_label,report_source,max_age_minutes,enabled,source_table) values
  ('ameen-main','مزامنة أمين الرئيسية','ameen_sql_agent',10,true,'inventory_reports'),
  ('customer-balances','أرصدة الزبائن','ameen_customer_balances',10,true,'inventory_reports'),
@@ -149,8 +163,8 @@ update private.project_task_monitors set check_status=true where task_key='khali
 --
 -- القيم المُعادة:
 --   'disabled'   المهمة نفسها معطّلة              ⇒ إنذار فوري
---   'failed'     آخر نتيجة مكتملة فشلت              ⇒ إنذار فوري
---   'stuck'      محاولة جارية/مجهولة تجاوزت المهلة  ⇒ إنذار
+--   'failed'     آخر نتيجة مكتملة فشلت، ولا محاولة أحدث عالقة الآن فوقها ⇒ إنذار فوري
+--   'stuck'      محاولة جارية/مجهولة تجاوزت المهلة (بما فيها retry بعد فشل سابق) ⇒ إنذار
 --   'inflight'   محاولة أولى جارية بلا نتيجة مكتملة ⇒ لا إنذار
 --   'never_run'  لا تاريخ تشغيل إطلاقاً             ⇒ لا إنذار
 --   'ok'         آخر نتيجة مكتملة نجحت              ⇒ لا إنذار
@@ -172,13 +186,23 @@ create or replace function private.cron_job_health(
     -- تشمل NULL عمداً — حالة مجهولة النشاط تُعامل معاملة المعطّلة لا المُهمَلة.
     when p_active is not true then 'disabled'
 
-    -- الفشل النهائي حقيقة مكتملة، ولا تسقط لمجرد أن محاولة جديدة بدأت فوقها.
-    -- هذا هو جوهر إصلاح ملاحظة Codex P1 الثانية: النتيجة النهائية الأخيرة
-    -- تُقرأ مستقلة عن الصف الأحدث، فلا يبتلع retry جارٍ فشلاً مكتملاً.
-    when p_terminal_status = 'failed' then 'failed'
+    -- الفشل النهائي حقيقة مكتملة، ولا تسقط لمجرد أن محاولة جديدة بدأت فوقها —
+    -- ما لم تكن تلك المحاولة نفسها قد تجاوزت المهلة الآن (راجع شرط الاستثناء
+    -- أدناه، طابق شرط 'stuck'). هذا هو جوهر إصلاح ملاحظة Codex P1 الثانية
+    -- (الجولة الثانية): retry جديد عالق بعد فشل سابق يجب أن يظهر 'stuck' —
+    -- الحالة الحيّة الحقيقية الآن — لا 'failed' القديم الذي لم يعد يعكس واقع
+    -- المحاولة الجارية.
+    when p_terminal_status = 'failed'
+     and not (
+       p_latest_status is not null
+       and p_latest_status not in ('succeeded','failed')
+       and (p_latest_at is null or p_now - p_latest_at >= p_grace)
+     )
+    then 'failed'
 
     -- محاولة جارية تجاوزت المهلة (أو حالة مجهولة لا نستطيع إثبات حداثتها)
-    -- ⇒ جمود يستحق الإنذار. تأتي بعد 'failed' لأن الفشل حقيقة والجمود استنتاج.
+    -- ⇒ جمود يستحق الإنذار. تُفحص فعلياً ضمن استثناء 'failed' أعلاه أيضاً،
+    -- فأي retry عالق بعد فشل سابق يصل هنا لا إلى 'failed'.
     when p_latest_status is not null
      and p_latest_status not in ('succeeded','failed')
      and (p_latest_at is null or p_now - p_latest_at >= p_grace) then 'stuck'
@@ -197,6 +221,11 @@ $fn$;
 revoke all on function private.cron_job_health(boolean,text,timestamptz,text,timestamptz,interval,timestamptz)
   from public,anon,authenticated;
 
+-- Codex/Copilot، proposed/05-pgcron-failure-event-dedupe-fix.sql (PR #220):
+-- فرع 'failed' في حلقة cron.job أدناه يستخدم مفتاح dedupe ومنطق should_alert
+-- مرتبطَين بهوية الحادثة (terminal_at) لا باسم المهمة وحده — راجع تعليق 05
+-- الكامل للتفصيل الكامل لهذين الإصلاحين (Copilot CONFIRMED مرتين). 'stuck'
+-- و'disabled' يبقيان على الحارس الزمني الدوري الأصلي بلا أي تغيير بقصد.
 create or replace function private.monitor_project_tasks()
 returns void language plpgsql security definer
 set search_path=private,public,cron,pg_temp
@@ -206,6 +235,7 @@ declare cfg record; last_at timestamptz; age_minutes numeric; last_status text; 
  job_record record; last_job_status text; last_job_at timestamptz;
  job_health text; cron_grace interval:=interval '10 minutes';
  terminal_status text; terminal_at timestamptz; retry_running boolean;
+ previous_alerted_terminal_at timestamptz; should_alert boolean; failure_dedupe_key text;
 begin
  for cfg in select * from private.project_task_monitors where enabled order by task_key loop
   -- جولة ٤: source_table='inventory_reports' (الافتراضي) يبقي السلوك
@@ -238,11 +268,24 @@ begin
      format('تراكم محتمل (status=%s) — آخر دفعة كاملة عند %s',last_status,to_char(last_at at time zone 'Asia/Riyadh','YYYY-MM-DD HH24:MI'))
     end;
    if previous_healthy is distinct from false or previous_alert_at is null or previous_alert_at<now()-interval '60 minutes' then
-    perform public.notify_telegram('project_task_failure',
-     format('🚨 توقفت مهمة بالمشروع%1$s• المهمة: %2$s%1$s• المصدر: %3$s%1$s• الحالة: %4$s%1$s• الحد المسموح: %5$s دقيقة',
-      chr(10),cfg.task_label,cfg.report_source,detail_text,cfg.max_age_minutes),
-     'project-task-failure:'||cfg.task_key,60);
-    previous_alert_at:=now();
+    -- Codex P1 (PR #220، الملاحظة الثالثة): previous_alert_at:=now() كان يُسجَّل
+    -- بلا شرط بعد استدعاء notify_telegram، فأي استثناء أثناء الإرسال (رفض
+    -- تفويض، خطأ اتصال بقاعدة البيانات) كان يُحسب "تم التنبيه" رغم عدم قبول
+    -- الرسالة للإرسال أصلاً. notify_telegram/notify_telegram_dispatch عقدهما
+    -- الفعلي إدراج غير متزامن بطابور telegram_outbox (التسليم الحقيقي إلى
+    -- Telegram يجري لاحقاً وبشكل غير متزامن عبر dispatch_telegram_outbox،
+    -- ولا يمكن تأكيده مزامنةً هنا) — فـ"القبول الفعلي للإرسال وفق العقد
+    -- الحالي" هو نجاح هذا الإدراج بلا استثناء. عند فشله نُبقي previous_alert_at
+    -- كما كان (null أو قديم) فتُعاد المحاولة بالدورة التالية تلقائياً.
+    begin
+     perform public.notify_telegram('project_task_failure',
+      format('🚨 توقفت مهمة بالمشروع%1$s• المهمة: %2$s%1$s• المصدر: %3$s%1$s• الحالة: %4$s%1$s• الحد المسموح: %5$s دقيقة',
+       chr(10),cfg.task_label,cfg.report_source,detail_text,cfg.max_age_minutes),
+      'project-task-failure:'||cfg.task_key,60);
+     previous_alert_at:=now();
+    exception when others then
+     raise warning 'monitor_project_tasks: notify_telegram failed for %: %',cfg.task_key,sqlerrm;
+    end;
    end if;
    insert into private.project_task_health_state(task_key,is_healthy,last_observed_at,last_success_at,last_alert_at,last_detail)
     values(cfg.task_key,false,now(),last_at,previous_alert_at,detail_text)
@@ -293,9 +336,9 @@ begin
     else format('عالقة في حالة %s منذ %s',coalesce(last_job_status,'غير معروفة'),
      coalesce(round(extract(epoch from(now()-last_job_at))/60.0,1)::text||' دقيقة','مدة غير معروفة'))
     end;
-   select is_healthy,last_alert_at into previous_healthy,previous_alert_at
+   select is_healthy,last_alert_at,last_alerted_terminal_at into previous_healthy,previous_alert_at,previous_alerted_terminal_at
     from private.project_task_health_state where task_key='cron:'||job_record.jobname;
-   -- حارس الإنذار لم يتغيّر عن سلوكه الأصلي، عمداً.
+   -- حارس الإنذار لم يتغيّر عن سلوكه الأصلي لـ'stuck'/'disabled'، عمداً.
    --
    -- جُرّب هنا شرط رابع «فشل نهائي بدأ بعد آخر إنذار ⇒ فشل جديد» ثم أُسقط بعد
    -- ملاحظة Codex P1 الثالثة على PR #154، وكانت محقّة: مفتاح الإرسال
@@ -309,18 +352,53 @@ begin
    -- الفصل المقصود: هذا الملف مسؤول عن *صحة الحالة* (unhealthy، وسبب الفشل في
    -- last_detail، ولا تعافٍ إلا بنجاح نهائي). أمّا «هل تصل الرسالة مرة أم
    -- تُكتم» فهي سياسة الإرسال في طبقة telegram_outbox، وعلاجها الصحيح مفتاح
-   -- dedupe لكل تشغيل نهائي أو إشارة تأكيد من notify_telegram — بند مستقل
-   -- مسجَّل، لا يُخلط بتصنيف الحالة هنا.
-   if previous_healthy is distinct from false or previous_alert_at is null
-      or previous_alert_at<now()-interval '60 minutes' then
-    perform public.notify_telegram('project_task_failure',
-     format('🚨 توقفت مهمة داخل الموقع%1$s• المهمة: %2$s%1$s• الحالة: %3$s',chr(10),job_record.jobname,detail_text),
-     'project-cron-failure:'||job_record.jobname,60);
-    previous_alert_at:=now();
+   -- dedupe لكل تشغيل نهائي أو إشارة تأكيد من notify_telegram.
+   --
+   -- proposed/05: الحل الفعلي المطبَّق على الإنتاج لهذا البند بالذات —
+   -- 'failed' حادثة مكتملة، فلا تُنذَر ثانية لمجرد مرور ساعة إن كانت terminal_at
+   -- نفسها لم تتغيّر (لا محاولة جديدة)؛ 'stuck'/'disabled' حالتان جاريتان
+   -- فتبقيان على الحارس الزمني الأصلي (التذكير الدوري مقصود لهما).
+   if job_health='failed' then
+    should_alert:=previous_healthy is distinct from false or previous_alert_at is null
+     or previous_alerted_terminal_at is distinct from terminal_at;
+   else
+    should_alert:=previous_healthy is distinct from false or previous_alert_at is null
+     or previous_alert_at<now()-interval '60 minutes';
    end if;
-   insert into private.project_task_health_state(task_key,is_healthy,last_observed_at,last_alert_at,last_detail)
-    values('cron:'||job_record.jobname,false,now(),previous_alert_at,detail_text)
-    on conflict(task_key) do update set is_healthy=false,last_observed_at=now(),last_alert_at=excluded.last_alert_at,last_detail=excluded.last_detail;
+
+   if should_alert then
+    -- 05: مفتاح dedupe لحالة 'failed' يتضمن terminal_at (هوية الحادثة نفسها)
+    -- بدل اسم المهمة وحده — بهذا فشل جديد (terminal_at مختلف) خلال أقل من 60
+    -- دقيقة من إنذار سابق لنفس المهمة يحصل على مفتاح مختلف تماماً فلا يصطدم
+    -- بنافذة dedupe الخاصة بالفشل السابق، ويُرسَل فوراً. 'stuck'/'disabled':
+    -- المفتاح كما هو أصلاً بلا تغيير (التذكير الدوري يعتمد عمداً على نفس
+    -- المفتاح كل ساعة).
+    if job_health='failed' then
+     failure_dedupe_key:='project-cron-failure:'||job_record.jobname||':'||to_char(terminal_at,'YYYYMMDDHH24MISS');
+    else
+     failure_dedupe_key:='project-cron-failure:'||job_record.jobname;
+    end if;
+    -- Codex P1 (PR #220، الملاحظة الثانية): previous_alert_at/previous_alerted_terminal_at
+    -- كانا يُسجَّلان بلا شرط بعد notify_telegram، فيضيع إنذار 'failed' الوحيد
+    -- (dedupe بـterminal_at لا يتكرر) إن فشل الإرسال باستثناء. نفس التبرير
+    -- المذكور أعلاه في حلقة project_task_monitors: القبول الفعلي للإرسال هنا
+    -- هو نجاح إدراج notify_telegram بلا استثناء؛ عند الفشل نُبقي القيمتين
+    -- كما وردتا من الحالة المحفوظة (previous_healthy/select أعلاه) فيبقى
+    -- should_alert صحيحاً بالدورة التالية ويُعاد الإرسال.
+    begin
+     perform public.notify_telegram('project_task_failure',
+      format('🚨 توقفت مهمة داخل الموقع%1$s• المهمة: %2$s%1$s• الحالة: %3$s',chr(10),job_record.jobname,detail_text),
+      failure_dedupe_key,60);
+     previous_alert_at:=now();
+     if job_health='failed' then previous_alerted_terminal_at:=terminal_at; end if;
+    exception when others then
+     raise warning 'monitor_project_tasks: notify_telegram failed for cron:%: %',job_record.jobname,sqlerrm;
+    end;
+   end if;
+   insert into private.project_task_health_state(task_key,is_healthy,last_observed_at,last_alert_at,last_alerted_terminal_at,last_detail)
+    values('cron:'||job_record.jobname,false,now(),previous_alert_at,previous_alerted_terminal_at,detail_text)
+    on conflict(task_key) do update set is_healthy=false,last_observed_at=now(),last_alert_at=excluded.last_alert_at,
+     last_alerted_terminal_at=excluded.last_alerted_terminal_at,last_detail=excluded.last_detail;
   elsif job_health = 'ok' then
    -- 'ok' وحدها تمنح شهادة النجاح. لا محاولة قيد التنفيذ، ولا مهمة لم تُشغَّل.
    select is_healthy into previous_healthy from private.project_task_health_state where task_key='cron:'||job_record.jobname;
@@ -329,9 +407,13 @@ begin
      format('✅ عادت مهمة الموقع للعمل%1$s• المهمة: %2$s',chr(10),job_record.jobname),
      'project-cron-recovered:'||job_record.jobname||':'||to_char(now(),'YYYYMMDDHH24MI'),1);
    end if;
-   insert into private.project_task_health_state(task_key,is_healthy,last_observed_at,last_success_at,last_alert_at,last_detail)
-    values('cron:'||job_record.jobname,true,now(),terminal_at,null,'يعمل')
-    on conflict(task_key) do update set is_healthy=true,last_observed_at=now(),last_success_at=excluded.last_success_at,last_alert_at=null,last_detail='يعمل';
+   -- proposed/05: تعافٍ فعلي يُصفِّر last_alerted_terminal_at أيضاً، كي يُنذَر
+   -- فشلٌ مقبل بصرف النظر عن terminal_at القديم الذي كان مؤنذَراً عنه قبل هذا
+   -- التعافي.
+   insert into private.project_task_health_state(task_key,is_healthy,last_observed_at,last_success_at,last_alert_at,last_alerted_terminal_at,last_detail)
+    values('cron:'||job_record.jobname,true,now(),terminal_at,null,null,'يعمل')
+    on conflict(task_key) do update set is_healthy=true,last_observed_at=now(),last_success_at=excluded.last_success_at,
+     last_alert_at=null,last_alerted_terminal_at=null,last_detail='يعمل';
   else
    -- 'inflight' / 'never_run': حالة محايدة. لا إنذار ولا تعافٍ، ولا تُمَس
    -- is_healthy ولا last_alert_at ولا last_success_at ولا last_detail —

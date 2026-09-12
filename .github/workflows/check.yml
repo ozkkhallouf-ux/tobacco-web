@@ -120,3 +120,20 @@ jobs:
       - name: Auto-sync price lists - git push failure visibility test
         shell: powershell
         run: .\tools\tests\Test-AutoSyncGitPushFailure.ps1
+
+      # القسم ٤/٥ (PR #220): يثبت أن Get-AuthSession في ameen-read-worker.ps1 تكتب نبض
+      # auth_retry عند كل محاولة مصادقة فاشلة، كي لا يظن ensure-ameen-sync.ps1 (الذي يعمل
+      # فقط على Windows) أن العملية متجمّدة فيعيد تشغيلها/يشغّل نسخة مكرّرة أثناء انقطاع
+      # مصادقة طويل. لا فائدة من تشغيله على ubuntu: المنطق نفسه Windows-only التشغيل
+      # الفعلي (Task Scheduler)، وتشغيله هنا على 5.1 تحديداً بنفس منطق البنود أعلاه.
+      - name: Ameen read worker - auth retry heartbeat regression test
+        shell: powershell
+        run: .\tools\test-ameen-read-worker-auth-retry.ps1
+
+      # Codex P1 (PR #220): كان فرع degraded بensure-ameen-sync.ps1 يسجّل degraded=true
+      # (يُعتبر "تم التنبيه") حتى لو فشل TELEGRAM-NOTIFY فعلياً، فيضيع التنبيه ولا تُعاد
+      # المحاولة أبداً. الاختبار يستخرج جسم الفرع فعلياً من المصدر وينفّذه بسكريبت إشعار
+      # وهمي يُحاكي نجاح/فشل send-telegram-notification.ps1 (best-effort، exit 0 دائماً).
+      - name: Ensure Ameen sync - degraded alert delivery regression test
+        shell: powershell
+        run: .\tools\tests\Test-EnsureAmeenSyncDegradedAlert.ps1
