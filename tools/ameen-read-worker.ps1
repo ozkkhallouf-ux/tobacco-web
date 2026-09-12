@@ -23,17 +23,26 @@ function Get-AuthSession($Url,$Key,$Email,$Password){
    $delay=if($attempt -lt $backoffs.Count){$backoffs[$attempt]}else{30}
    Write-Warning ("Ameen read worker: auth attempt failed - "+$_.Exception.Message)
    Write-Warning ("Ameen read worker: retry delay ${delay}s")
+   # القسم ٤: العملية حيّة وتحاول فعلياً — نثبت ذلك بنبض status=auth_retry كي لا يظنّها
+   # ensure-ameen-sync.ps1 متجمّدة فيعيد تشغيلها بلا داعٍ أثناء انقطاع مصادقة طويل (لا يُعيد
+   # تشغيل العملية نفسها أي فائدة هنا؛ العطل خارجي: بيانات اعتماد/شبكة/خدمة المصادقة).
+   Write-Heartbeat "auth_retry"
    Start-Sleep -Seconds $delay
    $attempt++
   }
  }
 }
 function Broker($Url,$Key,$Token,$Body){$json=$Body|ConvertTo-Json -Depth 30;$utf8Body=[System.Text.Encoding]::UTF8.GetBytes($json);Invoke-RestMethod -Method Post -Uri "$Url/functions/v1/ameen-read-broker" -Headers @{apikey=$Key;Authorization="Bearer $Token"} -ContentType "application/json; charset=utf-8" -Body $utf8Body -TimeoutSec $RestTimeoutSec}
-function Write-Heartbeat{
+# $Status: "ok" = دورة poll/idle اكتملت فعلياً (صحة المزامنة نفسها).
+# "auth_retry" = العملية حيّة وتحاول تسجيل الدخول لكنه لم ينجح بعد بعد — ليست دورة مزامنة ناجحة،
+# لكنها تثبت أن العملية ليست متجمّدة/ميتة. الفصل هنا مقصود: ensure-ameen-sync.ps1 يعتمد على
+# طزاجة الطابع الزمني وحدها لقرار "حيّة أم لا"، وعلى قيمة status لقرار "سليمة أم متدهورة" —
+# فلا نسجّل أبداً "ok" أثناء إعادة محاولة المصادقة (قد يوهم بنجاح مزامنة لم تحدث).
+function Write-Heartbeat([string]$Status="ok"){
  try{
   $dir=Split-Path -Parent $heartbeatPath
   if(-not (Test-Path -LiteralPath $dir)){New-Item -ItemType Directory -Force -Path $dir|Out-Null}
-  @{timestampUtc=(Get-Date).ToUniversalTime().ToString("o");pid=$PID;status="ok"}|ConvertTo-Json|Set-Content -LiteralPath $heartbeatPath -Encoding utf8
+  @{timestampUtc=(Get-Date).ToUniversalTime().ToString("o");pid=$PID;status=$Status}|ConvertTo-Json|Set-Content -LiteralPath $heartbeatPath -Encoding utf8
  }catch{Write-Warning ("Ameen read worker: heartbeat write failed - "+$_.Exception.Message)}
 }
 $url=(Require-Env "TOBACCO_SUPABASE_URL").TrimEnd('/');$key=Require-Env "TOBACCO_SUPABASE_PUBLIC_KEY";$email=Require-Env "TOBACCO_SYNC_EMAIL";$password=Require-Env "TOBACCO_SYNC_PASSWORD"
