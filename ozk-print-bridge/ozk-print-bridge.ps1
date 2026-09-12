@@ -98,6 +98,27 @@ function Get-QuarantineDecision($State, [string]$InvoiceGuid, [string]$Fingerpri
     return "reevaluate"
 }
 
+# قرار التخطّي في نبضة الاستطلاع الرئيسية: seen ليست كتلة واحدة متجانسة.
+# observed_waiting_for_print_activation وحدها ليست نهائية — سُجِّلت في نبضة لم
+# يكن فيها ConfirmPhysicalPrint مفعَّلاً (رصد بلا طباعة)، فيجب أن تُعاد إلى
+# المسار الكامل (استقرار، عزل، تكرار، تأكيد التزام، طباعة) متى صار
+# ConfirmPhysicalPrint=true لاحقاً — وإلا اختفت فاتورة حقيقية لم تُطبع قط إلى
+# الأبد. لا تُعاد معالجتها في نفس وضع الرصد (ConfirmPhysicalPrint=false) حتى
+# لا تتكرر نبضة استطلاع/سجل كل 150ms لنفس الفاتورة بلا طائل (busy loop).
+# كل الحالات الأخرى — بما فيها أي حالة غير معروفة أو مدخل تالف/قديم بلا
+# status — تبقى نهائية محافظةً على السلوك القديم؛ التوسعة تقتصر على الحالة
+# الوحيدة المُثبَت أنها غير نهائية.
+function Should-SkipSeenInvoice($SeenEntry, [bool]$ConfirmPhysicalPrint) {
+    if ($null -eq $SeenEntry) { return $false }
+    $status = $null
+    try { $status = [string]$SeenEntry.status } catch { $status = $null }
+    if ([string]::IsNullOrWhiteSpace($status)) { return $true }
+    if ($status -eq "observed_waiting_for_print_activation") {
+        return -not $ConfirmPhysicalPrint
+    }
+    return $true
+}
+
 function Add-QuarantineEntry($State, $Candidate, [string]$Fingerprint, $ErrorRecord) {
     if ($null -eq $State.quarantined) { $State.quarantined = @{} }
     $State.quarantined[$Candidate.InvoiceGuid] = [ordered]@{
@@ -205,15 +226,23 @@ function New-ReadOnlyConnection {
     $builder["Connect Timeout"] = [math]::Min([math]::Max($builder.ConnectTimeout, 3), 10)
 
     $connection = New-Object System.Data.SqlClient.SqlConnection $builder.ConnectionString
-    $connection.Open()
+    try {
+        $connection.Open()
 
-    # Al-Ameen may briefly hold write locks while posting a bill. Reading uncommitted
-    # prevents the 150ms detector from waiting behind those locks; the mandatory
-    # double snapshot below still prevents printing a partially written invoice.
-    $sessionCommand = $connection.CreateCommand()
-    $sessionCommand.CommandTimeout = 3
-    $sessionCommand.CommandText = "set transaction isolation level read uncommitted; set lock_timeout 1000;"
-    [void]$sessionCommand.ExecuteNonQuery()
+        # Al-Ameen may briefly hold write locks while posting a bill. Reading uncommitted
+        # prevents the 150ms detector from waiting behind those locks; the mandatory
+        # double snapshot below still prevents printing a partially written invoice.
+        $sessionCommand = $connection.CreateCommand()
+        $sessionCommand.CommandTimeout = 3
+        $sessionCommand.CommandText = "set transaction isolation level read uncommitted; set lock_timeout 1000;"
+        [void]$sessionCommand.ExecuteNonQuery()
+    } catch {
+        # فشل بعد نجاح Open() (مثلاً أمر تهيئة الجلسة) كان يُسرِّب الاتصال: لا
+        # مرجع له يبقى خارج هذه الدالة. Dispose هنا best-effort فقط — فشلها لا
+        # يجوز أن يُخفي الاستثناء الأصلي الذي سبَّب دخول catch أصلاً.
+        try { $connection.Dispose() } catch { }
+        throw
+    }
 
     $command = $connection.CreateCommand()
     $command.CommandTimeout = 15
@@ -288,12 +317,20 @@ function New-CommittedConfirmationConnection {
     $builder["Connect Timeout"] = [math]::Min([math]::Max($builder.ConnectTimeout, 3), 10)
 
     $connection = New-Object System.Data.SqlClient.SqlConnection $builder.ConnectionString
-    $connection.Open()
+    try {
+        $connection.Open()
 
-    $sessionCommand = $connection.CreateCommand()
-    $sessionCommand.CommandTimeout = 3
-    $sessionCommand.CommandText = "set transaction isolation level read committed; set lock_timeout $script:CommittedConfirmationLockTimeoutMilliseconds;"
-    [void]$sessionCommand.ExecuteNonQuery()
+        $sessionCommand = $connection.CreateCommand()
+        $sessionCommand.CommandTimeout = 3
+        $sessionCommand.CommandText = "set transaction isolation level read committed; set lock_timeout $script:CommittedConfirmationLockTimeoutMilliseconds;"
+        [void]$sessionCommand.ExecuteNonQuery()
+    } catch {
+        # نفس منطق New-ReadOnlyConnection: فشل تهيئة الجلسة بعد Open() ناجح لا
+        # يجوز أن يُسرِّب الاتصال. هذه الدالة تُستدعى مرة لكل فاتورة تصل لحظة
+        # التأكيد، فتسريب متكرر هنا يستنزف مجمّع الاتصالات دون أن يُسقط الجسر.
+        try { $connection.Dispose() } catch { }
+        throw
+    }
 
     return $connection
 }
@@ -1308,7 +1345,7 @@ try {
         }
         $current = @($candidateSet.Candidates)
         foreach ($candidate in @($current | Sort-Object InvoiceDate, InvoiceNumber)) {
-            if ($state.seen.ContainsKey($candidate.InvoiceGuid)) { continue }
+            if (Should-SkipSeenInvoice $state.seen[$candidate.InvoiceGuid] $ConfirmPhysicalPrint) { continue }
             $ready = Wait-InvoiceReady $connection ([guid]$candidate.InvoiceGuid)
             if (-not $ready.Ready) { continue }
 
