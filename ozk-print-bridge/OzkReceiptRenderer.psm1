@@ -332,10 +332,28 @@ function Invoke-OzkReceiptDrawing($Graphics, $Receipt, $Logo) {
         $y += 6
         $totals = @(
             @{ Label = "الإجمالي:"; Value = $Receipt.GrossTotal; Net = $false },
-            @{ Label = "الخصومات:"; Value = $Receipt.Discount; Net = $false },
-            @{ Label = "صافي الفاتورة:"; Value = $Receipt.NetTotal; Net = $true },
-            @{ Label = "الدفعة:"; Value = $Receipt.Payment; Net = $false }
+            @{ Label = "الخصومات:"; Value = $Receipt.Discount; Net = $false }
         )
+        # TotalExtra محسوبة أصلاً في NetTotal (Gross - Discount + Extra) لكنها لم
+        # تكن تُعرض كبند مستقل، فيبدو الرصيد وكأنه لا يطابق الإجمالي والخصومات
+        # ظاهرياً. لا تُعرض إلا حين تكون قيمتها غير صفرية، ولا تُستخدم مطلقاً
+        # لإعادة حساب NetTotal هنا — القيمة المطبوعة لصافي الفاتورة تبقى كما
+        # وصلت من Receipt دون أي تعديل.
+        $extraValue = $null
+        if ($Receipt.PSObject.Properties.Match("TotalExtra").Count -gt 0) {
+            $extraValue = $Receipt.TotalExtra
+        } else {
+            # Receipt قديم/اختباري لا يحمل TotalExtra: fallback آمن فقط حين
+            # يكون قابلاً للاشتقاق يقيناً من الحقول الموجودة أصلاً، وإلا لا
+            # يُعرض أي بند بدل تخمين قيمة غير مؤكدة.
+            $derivedExtra = $Receipt.NetTotal - ($Receipt.GrossTotal - $Receipt.Discount)
+            if ($derivedExtra -ne 0) { $extraValue = $derivedExtra }
+        }
+        if ($null -ne $extraValue -and $extraValue -ne 0) {
+            $totals += @{ Label = "الإضافات:"; Value = $extraValue; Net = $false }
+        }
+        $totals += @{ Label = "صافي الفاتورة:"; Value = $Receipt.NetTotal; Net = $true }
+        $totals += @{ Label = "الدفعة:"; Value = $Receipt.Payment; Net = $false }
         # الرصيد يُطبع فقط إذا نجح العثور على مستند محاسبي حقيقي في Ameen لهذه
         # الفاتورة (BalanceFound = true). لا يجوز طباعة صفر أو رقم تقريبي كرصيد
         # حقيقي عندما تكون البيانات المحاسبية ناقصة أو غير موجودة.

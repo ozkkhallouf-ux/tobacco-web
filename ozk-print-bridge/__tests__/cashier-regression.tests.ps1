@@ -789,8 +789,13 @@ Test-Case "5) الفاتورة العالقة من تشغيل سابق تُعل�
     Assert-True ($bridgeSrc -match 'Remedy = "operator decides; manual reprint available via -Mode PrintInvoice"') "يجب توضيح المخرج اليدوي للمشغّل"
 }
 
-Test-Case "الترتيب في المصدر: علامة قيد الإرسال تُحفظ على القرص قبل أمر الإرسال" {
-    $markerIdx = $bridgeSrc.IndexOf('status = "print_in_flight"')
+Test-Case "الترتيب في المصدر: علامة قيد الإرسال تُحفظ على القرص قبل أمر الإرسال (حلقة Observe الآلية)" {
+    # المسار اليدوي (PrintInvoice) يسبق حلقة Observe في المصدر ويحمل نفس نص
+    # "status = \"print_in_flight\"" عمداً (نفس الدلالة)، فيُحدَّد أولاً موضع
+    # فريد لحلقة Observe الآلية لضمان أخذ المواضع التالية منها لا من الفرع اليدوي.
+    $observeLoopIdx = $bridgeSrc.IndexOf('Assert-CashierTypeGuid ([string]$candidate.TypeGuid)')
+    Assert-True ($observeLoopIdx -ge 0) "يجب وجود بداية فريدة لحلقة Observe الآلية"
+    $markerIdx = $bridgeSrc.IndexOf('status = "print_in_flight"', $observeLoopIdx)
     $writeIdx = $bridgeSrc.IndexOf("Write-BridgeState `$StatePath `$state", $markerIdx)
     $sendIdx = $bridgeSrc.IndexOf("Submit-OzkReceiptSpoolJob -Job `$spoolJob", $markerIdx)
     Assert-True ($markerIdx -ge 0 -and $writeIdx -ge 0 -and $sendIdx -ge 0) "يجب وجود المواضع الثلاثة"
@@ -922,11 +927,18 @@ Test-Case "لا فقدان صامت: كل فشل مؤكَّد قبل التسل�
     Assert-True ($bridgeSrc -match 'MarkerRolledBack = \$rolledBack') "يجب توثيق نجاح/فشل التراجع عن العلامة"
 }
 
-Test-Case "الترتيب في المصدر: التحضير يسبق العلامة، والعلامة تسبق التسليم" {
-    $prepareIdx = $bridgeSrc.IndexOf("New-OzkReceiptSpoolJob -Receipt `$receipt")
-    $markerIdx = $bridgeSrc.IndexOf('status = "print_in_flight"')
+Test-Case "الترتيب في المصدر: التحضير يسبق العلامة، والعلامة تسبق التسليم (حلقة Observe الآلية)" {
+    # المسار اليدوي (PrintInvoice) يستخدم نفس النمط الآمن مع متغيرات باسم مختلف
+    # (`$manualSpoolJob`/`$manualPrintResult`) ويسبق حلقة Observe في المصدر، لذا
+    # يُحدَّد أولاً موضع فريد يسبق تحضير حلقة Observe الآلية ولا يظهر إلا فيها
+    # (فحص GUID المرشَّح) لضمان أن كل المواضع التالية مأخوذة من حلقة Observe
+    # نفسها لا من الفرع اليدوي.
+    $observeLoopIdx = $bridgeSrc.IndexOf('Assert-CashierTypeGuid ([string]$candidate.TypeGuid)')
+    Assert-True ($observeLoopIdx -ge 0) "يجب وجود بداية فريدة لحلقة Observe الآلية"
+    $prepareIdx = $bridgeSrc.IndexOf("New-OzkReceiptSpoolJob -Receipt `$receipt", $observeLoopIdx)
+    $markerIdx = $bridgeSrc.IndexOf('status = "print_in_flight"', $observeLoopIdx)
     $writeIdx = $bridgeSrc.IndexOf("Write-BridgeState `$StatePath `$state", $markerIdx)
-    $submitIdx = $bridgeSrc.IndexOf("Submit-OzkReceiptSpoolJob -Job `$spoolJob")
+    $submitIdx = $bridgeSrc.IndexOf("Submit-OzkReceiptSpoolJob -Job `$spoolJob", $markerIdx)
     Assert-True ($prepareIdx -ge 0 -and $markerIdx -ge 0 -and $writeIdx -ge 0 -and $submitIdx -ge 0) "يجب وجود المواضع الأربعة"
     Assert-True ($prepareIdx -lt $markerIdx) "التحضير يجب أن يسبق العلامة"
     Assert-True ($writeIdx -lt $submitIdx) "حفظ العلامة يجب أن يسبق التسليم"
@@ -965,6 +977,151 @@ Test-Case "وحدة العرض: الفشل قبل قبول المهمة يرمي
     Assert-True ($rendererSrc -match 'if \(!OpenPrinter\(printerName, out printer, IntPtr\.Zero\)\) throw new OzkSpoolNotSubmittedException') "OpenPrinter يجب أن يرمي النوع المميِّز"
     Assert-True ($rendererSrc -match 'if \(jobId <= 0\) throw new OzkSpoolNotSubmittedException') "StartDocPrinter يجب أن يرمي النوع المميِّز"
     Assert-True ($rendererSrc -match 'WritePrinter failed with Win32 error " \+ Marshal\.GetLastWin32Error\(\)\);') "WritePrinter يجب أن يبقى استثناءً غامضاً"
+}
+
+Write-Host "`n== P1-C: الطباعة اليدوية الناجحة تُسجَّل spooled فتمنع تكراراً آلياً لاحقاً =="
+
+# نفس الدالتين المستخرجتين أعلاه (Should-SkipSeenInvoice تُستخرج هنا مبكراً
+# لأنها مُستخدمة في هذا القسم، وتُستخرج مجدداً لاحقاً في قسم NEW-2 بلا ضرر).
+. ([scriptblock]::Create((Get-ExtractedFunctionText $bridgeSrc "function Should-SkipSeenInvoice(`$SeenEntry, [bool]`$ConfirmPhysicalPrint) {")))
+
+# محاكاة صريحة للفرع اليدوي (`$manualSpoolJob`/`$manualPrintResult` في
+# -Mode PrintInvoice) بمعزل عن اتصال SQL وواجهة WinForms. الفرق الجوهري عن
+# Invoke-BoundedPrintIteration (المسار الآلي أعلاه): لا فحص state.seen كحارس
+# قبل الطباعة إطلاقاً (متطلب C — إعادة الطباعة اليدوية المقصودة تبقى ممكنة
+# دوماً)، وعلامة print_in_flight/spooled تُكتب بنفس دلالة المسار الآلي تماماً.
+function Invoke-ManualPrintIteration([string]$StatePath, [string]$Guid, [string]$FailAt = "") {
+    $state = Read-BridgeState $StatePath
+
+    # لا حارس state.seen هنا عمداً: هذا هو الفرق عن المسار الآلي.
+    if ($FailAt -like "prepare-*") { throw "$FailAt failed before any marker" }
+
+    $state.seen[$Guid] = [ordered]@{ status = "print_in_flight"; invoiceNumber = 1001; observedAt = (Get-Date).ToUniversalTime().ToString("o"); lineCount = 2 }
+    Write-BridgeState $StatePath $state
+
+    try {
+        if ($FailAt -eq "pre-submit") { throw (New-Object OzkSpoolNotSubmittedException("OpenPrinter failed with Win32 error 1801")) }
+        if ($FailAt -eq "ambiguous") { throw (New-Object System.IO.IOException("Incomplete RAW printer write.")) }
+        $script:ManualSendCount++
+    } catch {
+        if (Test-PreSubmissionFailure $_) {
+            [void]$state.seen.Remove($Guid)
+            try { Write-BridgeState $StatePath $state } catch { $null = $_ }
+        }
+        throw
+    }
+
+    $state.seen[$Guid] = [ordered]@{ status = "spooled"; invoiceNumber = 1001; observedAt = (Get-Date).ToUniversalTime().ToString("o"); lineCount = 2 }
+    if ($FailAt -eq "persist") { return "spooled-persist-failed" }
+    Write-BridgeState $StatePath $state
+    return "spooled"
+}
+
+# ربط المحاكاة بالمصدر الحقيقي: الفرع اليدوي (قبل بداية حلقة Observe الآلية
+# في المصدر، المحدَّدة بنفس المعلَم المستخدم أعلاه) لا يستدعي Should-SkipSeenInvoice
+# إطلاقاً، وعلامتاه بنفس نص المسار الآلي حرفياً.
+Test-Case "بنيوي: الفرع اليدوي لا يفحص state.seen كحارس قبل الطباعة (متطلب C)" {
+    $manualStart = $bridgeSrc.IndexOf('$manualSpoolJob = New-OzkReceiptSpoolJob')
+    # حد النهاية الدقيق هو exit 0 الذي يُنهي فرع PrintInvoice اليدوي نفسه، وليس
+    # لاحقة أبعد (مثل بداية حلقة Observe الآلية) والتي كانت تُدرِج خطأً استدعاء
+    # Should-SkipSeenInvoice المتعلّق بالحلقة الآلية داخل نص الفرع اليدوي المُستخرَج.
+    $manualEndIdx = $bridgeSrc.IndexOf('exit 0', $manualStart)
+    Assert-True ($manualStart -ge 0 -and $manualEndIdx -gt $manualStart) "يجب تحديد حدود الفرع اليدوي في المصدر"
+    $manualText = $bridgeSrc.Substring($manualStart, $manualEndIdx - $manualStart)
+    Assert-True ($manualText -notmatch 'Should-SkipSeenInvoice') "الفرع اليدوي يجب ألا يستخدم فحص التخطي الآلي كحارس"
+    Assert-True ($manualText -match 'status = "print_in_flight"') "العلامة قبل التسليم يجب أن تكون موجودة يدوياً أيضاً"
+    Assert-True ($manualText -match 'status = "spooled"') "العلامة النهائية بعد النجاح يجب أن تكون موجودة يدوياً أيضاً"
+}
+
+Test-Case "بنيوي: PreviewInvoice لم يتغيّر (متطلب D) — لا يكتب على state.seen إطلاقاً" {
+    $previewStart = $bridgeSrc.IndexOf('if ($Mode -eq "PreviewInvoice") {')
+    $previewEnd = $bridgeSrc.IndexOf('} else {', $previewStart)
+    Assert-True ($previewStart -ge 0 -and $previewEnd -gt $previewStart) "يجب تحديد حدود فرع PreviewInvoice"
+    $previewText = $bridgeSrc.Substring($previewStart, $previewEnd - $previewStart)
+    Assert-True ($previewText -notmatch 'state\.seen') "PreviewInvoice يجب ألا يقرأ أو يكتب state.seen إطلاقاً"
+    Assert-True ($previewText -notmatch 'Write-BridgeState') "PreviewInvoice يجب ألا يكتب ملف الحالة إطلاقاً"
+}
+
+Test-Case "1) طباعة يدوية ناجحة تُسجَّل status=spooled على القرص" {
+    $path = New-StatePath; $guid = "manual-ok-1"; $script:ManualSendCount = 0
+    Assert-True ((Invoke-ManualPrintIteration $path $guid) -eq "spooled") "يجب أن تنجح الطباعة اليدوية"
+    $reloaded = Read-BridgeState $path
+    Assert-True ($reloaded.seen.ContainsKey($guid)) "يجب أن تُكتب علامة على القرص"
+    Assert-True ([string]$reloaded.seen[$guid].status -eq "spooled") "الحالة النهائية يجب أن تكون spooled"
+    Assert-True ($null -ne $reloaded.seen[$guid].invoiceNumber -and $null -ne $reloaded.seen[$guid].observedAt) "يجب حفظ رقم الفاتورة ووقت الرصد على الأقل"
+}
+
+Test-Case "2) تشغيل Observe التالي على نفس GUID لا يُعيد طباعتها" {
+    $path = New-StatePath; $guid = "manual-ok-2"; $script:ManualSendCount = 0
+    [void](Invoke-ManualPrintIteration $path $guid)
+    $reloaded = Read-BridgeState $path
+    $entry = $reloaded.seen[$guid]
+    # هذا بالضبط قرار حلقة Observe الآلية الحقيقي (Should-SkipSeenInvoice) على
+    # نفس المدخل الذي كتبته الطباعة اليدوية — بلا -ConfirmPhysicalPrint (وضع الرصد).
+    Assert-True ((Should-SkipSeenInvoice $entry $false) -eq $true) "الرصد الآلي التالي يجب أن يتخطى نفس GUID بعد طباعة يدوية ناجحة"
+}
+
+Test-Case "3) إعادة الطباعة اليدوية المتعمدة تبقى مسموحة حتى لو كانت مُعلَّمة سابقاً" {
+    $path = New-StatePath; $guid = "manual-reprint-1"; $script:ManualSendCount = 0
+    [void](Invoke-ManualPrintIteration $path $guid)
+    Assert-True ($script:ManualSendCount -eq 1) "الطباعة الأولى يجب أن تقع"
+    # نفس المستخدم يطلب -Mode PrintInvoice مجدداً على نفس الفاتورة عمداً
+    Assert-True ((Invoke-ManualPrintIteration $path $guid) -eq "spooled") "إعادة الطباعة اليدوية يجب ألا تُمنع رغم وجود مدخل spooled سابق"
+    Assert-True ($script:ManualSendCount -eq 2) "الإرسال الفعلي يجب أن يقع مجدداً عند تأكيد المستخدم — لا حارس صامت"
+}
+
+Test-Case "4) فشل ما قبل التسليم لا يترك أي حالة spooled أو علامة عالقة" {
+    $path = New-StatePath; $guid = "manual-presubmit-fail"; $script:ManualSendCount = 0
+    Assert-Throws { Invoke-ManualPrintIteration $path $guid "pre-submit" } "يجب أن يرمي الفشل المؤكَّد قبل التسليم"
+    Assert-True ($script:ManualSendCount -eq 0) "لا يجوز أن يقع إرسال فعلي"
+    $reloaded = Read-BridgeState $path
+    Assert-True (-not $reloaded.seen.ContainsKey($guid)) "لا يجوز ترك أي علامة تمنع إعادة المحاولة"
+}
+
+Test-Case "5) فشل غامض بعد التسليم: العلامة تبقى print_in_flight، ولا تكرار آلي لاحق" {
+    $path = New-StatePath; $guid = "manual-ambiguous-1"; $script:ManualSendCount = 0
+    Assert-Throws { Invoke-ManualPrintIteration $path $guid "ambiguous" } "يجب أن يعاد رمي الفشل الغامض للمستخدم"
+    $reloaded = Read-BridgeState $path
+    Assert-True ($reloaded.seen.ContainsKey($guid)) "العلامة يجب أن تبقى محفوظة (لا تراجع في الحالة الغامضة)"
+    Assert-True ([string]$reloaded.seen[$guid].status -eq "print_in_flight") "الحالة يجب أن تبقى print_in_flight لا spooled"
+    Assert-True ((Should-SkipSeenInvoice $reloaded.seen[$guid] $false) -eq $true) "الرصد الآلي يجب ألا يطبعها تلقائياً وهي في حالة غامضة"
+}
+
+Test-Case "6) بيانات StatePath موجودة مسبقاً لفواتير أخرى لا تُمحى بطباعة يدوية جديدة" {
+    $path = New-StatePath
+    $preexisting = Read-BridgeState $path
+    $preexisting.seen["other-guid-1"] = [ordered]@{ status = "spooled"; invoiceNumber = 500; observedAt = (Get-Date).ToUniversalTime().ToString("o"); lineCount = 1 }
+    $preexisting.seen["other-guid-2"] = [ordered]@{ status = "print_in_flight"; invoiceNumber = 501; observedAt = (Get-Date).ToUniversalTime().ToString("o"); lineCount = 1 }
+    Write-BridgeState $path $preexisting
+    $script:ManualSendCount = 0
+    [void](Invoke-ManualPrintIteration $path "new-manual-guid")
+    $reloaded = Read-BridgeState $path
+    Assert-True ($reloaded.seen.ContainsKey("other-guid-1") -and [string]$reloaded.seen["other-guid-1"].status -eq "spooled") "مدخل سابق (spooled) يجب أن يبقى كما هو"
+    Assert-True ($reloaded.seen.ContainsKey("other-guid-2") -and [string]$reloaded.seen["other-guid-2"].status -eq "print_in_flight") "مدخل سابق (print_in_flight) يجب أن يبقى كما هو"
+    Assert-True ($reloaded.seen.ContainsKey("new-manual-guid")) "المدخل الجديد يجب أن يُضاف لا أن يستبدل الملف"
+}
+
+Test-Case "7) ملف حالة تالف/غير مدعوم → فشل مغلق بإبلاغ واضح لا طباعة صامتة" {
+    $path = New-StatePath
+    $directory = Split-Path -Parent $path
+    [void](New-Item -ItemType Directory -Path $directory -Force)
+    # نفس مسار القراءة الذي يستخدمه الفرع اليدوي مباشرة (Read-BridgeState $StatePath)
+    [IO.File]::WriteAllText($path, '{"schemaVersion":1,"database":"WrongDatabase","seen":{}}', (New-Object Text.UTF8Encoding($false)))
+    Assert-Throws { Read-BridgeState $path } "ملف حالة بقاعدة بيانات غير متوقعة يجب أن يفشل بوضوح بدل قبول صامت"
+    try { Read-BridgeState $path } catch { Assert-True ([string]$_.Exception.Message -eq "Unsupported OZK Print Bridge state file.") "رسالة الفشل يجب أن تكون واضحة، وُجد: $($_.Exception.Message)" }
+}
+
+Test-Case "negative witness: بلا كتابة spooled بعد الطباعة اليدوية يتكرر الطبع تلقائياً لاحقاً" {
+    # محاكاة السلوك القديم قبل P1-C: طباعة يدوية ناجحة لا تكتب أي أثر في state.seen.
+    $path = New-StatePath; $guid = "nw-manual-no-write"
+    $sends = 0
+    $state = Read-BridgeState $path
+    if (-not $state.seen.ContainsKey($guid)) { $sends++ }   # الطباعة اليدوية نفسها
+    # لا كتابة لأي علامة هنا — هذا بالضبط ما كان يحدث قبل الإصلاح
+    $reloaded = Read-BridgeState $path
+    # رصد آلي لاحق: بلا أي مدخل seen، Should-SkipSeenInvoice على مدخل $null يسمح بالطباعة
+    if ((Should-SkipSeenInvoice $reloaded.seen[$guid] $false) -eq $false) { $sends++ }
+    Assert-True ($sends -eq 2) "السلوك القديم يجب أن ينتج طباعتين لنفس الفاتورة — وهذا ما يمنعه P1-C"
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1625,7 +1782,10 @@ Test-Case "6) دلالات ما بعد التسليم لم تتغيّر (الع�
     Assert-True ($bridgeSrc -match 'Event = "pre_submission_failure_retryable"') "تراجع الفشل قبل التسليم باقٍ"
     # العزل يقع قبل العلامة، فلا يمسّ منطقة الغموض إطلاقاً
     $quarantineIdx = $bridgeSrc.IndexOf("Add-QuarantineEntry `$state `$candidate")
-    $markerIdx = $bridgeSrc.IndexOf('status = "print_in_flight"')
+    # المسار اليدوي (PrintInvoice) يسبق حلقة Observe في المصدر ويحمل نفس نص
+    # "status = \"print_in_flight\"" عمداً، فيُبحث عن العلامة بعد موضع العزل
+    # (فريد لحلقة Observe الآلية) لا من بداية الملف.
+    $markerIdx = $bridgeSrc.IndexOf('status = "print_in_flight"', $quarantineIdx)
     Assert-True ($quarantineIdx -ge 0 -and $markerIdx -ge 0) "يجب وجود الموضعين"
     Assert-True ($quarantineIdx -lt $markerIdx) "العزل يجب أن يقع قبل علامة قيد الإرسال"
 }
@@ -1917,6 +2077,112 @@ Test-RenderCase "negative witness: إيصال بلا InvoiceNumber (السلوك
     $legacy = New-TestReceipt 1
     $legacy.PSObject.Properties.Remove("InvoiceNumber")
     Assert-Throws { $b = New-OzkReceiptBitmap -Receipt $legacy -LogoPath $logoPath; $b.Dispose() } "غياب رقم الفاتورة يجب أن يفشل صراحةً تحت الوضع الصارم — هذا ما كان يسمح بطباعة إيصال بلا رقم (P1-N)"
+}
+
+Write-Host "`n== P1-A: بند «الإضافات» يظهر على الإيصال حين يوجد فعلاً =="
+
+# استخراج منطق بناء $totals الحقيقي من وحدة العرض (لا إعادة تنفيذ منفصلة)
+# وتشغيله بمعزل عن الرسم الفعلي، تماماً كأسلوب Get-ExtractedFunctionText
+# المستخدم أعلاه للدوال الكاملة — هنا المقطع ليس دالة قائمة بذاتها فيُستخرج
+# بحدَّين نصيَّين فريدين ثم يُنفَّذ كسكريبت بلوك يأخذ Receipt ويعيد $totals.
+function Get-RendererTotalsFor($Receipt) {
+    $startMarker = '$totals = @('
+    $endMarker = '$totals += @{ Label = "الكمية:"; Value = $Receipt.TotalQuantity; Net = $false; Quantity = $true }'
+    $startIdx = $rendererSrc.IndexOf($startMarker)
+    Assert-True ($startIdx -ge 0) "يجب وجود بداية بناء بنود المجاميع في المصدر"
+    $endIdx = $rendererSrc.IndexOf($endMarker, $startIdx)
+    Assert-True ($endIdx -ge 0) "يجب وجود نهاية بناء بنود المجاميع في المصدر"
+    $endIdx += $endMarker.Length
+    $snippet = $rendererSrc.Substring($startIdx, $endIdx - $startIdx)
+    $sb = [scriptblock]::Create("param(`$Receipt)`n$snippet`nreturn `$totals")
+    return & $sb $Receipt
+}
+
+function New-TotalsReceipt([double]$Gross, [double]$Discount, [double]$Net, $Extra = $null) {
+    $r = [pscustomobject]@{
+        GrossTotal = $Gross; Discount = $Discount; NetTotal = $Net
+        Payment = 0; BalanceFound = $false; PreviousBalance = 0; CurrentBalance = 0
+        ItemCount = 1; TotalQuantity = 1
+    }
+    if ($null -ne $Extra) { $r | Add-Member -NotePropertyName TotalExtra -NotePropertyValue $Extra -Force }
+    return $r
+}
+
+Test-Case "1) المثال الرقمي: Gross=242460 / Discount=0 / Extra=40 / Net=242500 يظهر بثلاثة بنود صحيحة" {
+    $receipt = New-TotalsReceipt 242460 0 242500 40
+    $totals = @(Get-RendererTotalsFor $receipt)
+    $gross = $totals | Where-Object { $_.Label -eq "الإجمالي:" }
+    $discount = $totals | Where-Object { $_.Label -eq "الخصومات:" }
+    $extra = $totals | Where-Object { $_.Label -eq "الإضافات:" }
+    $net = $totals | Where-Object { $_.Label -eq "صافي الفاتورة:" }
+    Assert-True ($null -ne $gross -and $gross.Value -eq 242460) "الإجمالي يجب أن يظهر بقيمته الصحيحة"
+    Assert-True ($null -ne $discount -and $discount.Value -eq 0) "الخصومات يجب أن تظهر بقيمتها الصحيحة"
+    Assert-True ($null -ne $extra -and $extra.Value -eq 40) "الإضافات يجب أن تظهر بقيمتها الصحيحة"
+    Assert-True ($null -ne $net -and $net.Value -eq 242500) "صافي الفاتورة يجب أن يظهر بقيمته الصحيحة دون أي إعادة حساب"
+}
+
+Test-Case "2) Extra=0 → بند الإضافات لا يظهر إطلاقاً" {
+    $receipt = New-TotalsReceipt 100000 0 100000 0
+    $totals = @(Get-RendererTotalsFor $receipt)
+    Assert-True (($totals | Where-Object { $_.Label -eq "الإضافات:" }).Count -eq 0) "لا يجوز ظهور بند الإضافات عند قيمة صفرية"
+}
+
+Test-Case "3) خصم وإضافة معاً: القيم الثلاث صحيحة في آن واحد" {
+    $receipt = New-TotalsReceipt 100000 5000 96000 1000
+    $totals = @(Get-RendererTotalsFor $receipt)
+    $discount = $totals | Where-Object { $_.Label -eq "الخصومات:" }
+    $extra = $totals | Where-Object { $_.Label -eq "الإضافات:" }
+    $net = $totals | Where-Object { $_.Label -eq "صافي الفاتورة:" }
+    Assert-True ($discount.Value -eq 5000) "الخصم يجب أن يظهر صحيحاً بوجود إضافة أيضاً"
+    Assert-True ($extra.Value -eq 1000) "الإضافة يجب أن تظهر صحيحة بوجود خصم أيضاً"
+    Assert-True ($net.Value -eq 96000) "الصافي يجب أن يبقى كما وصل دون أي حساب جديد: 100000-5000+1000=96000"
+}
+
+Test-Case "4) Receipt.TotalExtra يطابق مصدره في الرأس (TotalDiscount/TotalExtra من اللقطة)" {
+    $receipt = Convert-SnapshotToReceipt (New-Snapshot -TotalExtra 40 -TotalDiscount 0)
+    Assert-True ($receipt.TotalExtra -eq 40) "TotalExtra على الإيصال يجب أن يطابق header.TotalExtra حرفياً، وُجد: $($receipt.TotalExtra)"
+    $totals = @(Get-RendererTotalsFor $receipt)
+    $extra = $totals | Where-Object { $_.Label -eq "الإضافات:" }
+    Assert-True ($null -ne $extra -and $extra.Value -eq $receipt.TotalExtra) "البند المعروض يجب أن يطابق Receipt.TotalExtra نفسه"
+}
+
+Test-Case "5) المُصيِّر لا يغيّر NetTotal إطلاقاً (لا إعادة حساب في العرض)" {
+    $rendererTotalsText = $rendererSrc.Substring($rendererSrc.IndexOf('$totals = @('), 2000)
+    Assert-True ($rendererTotalsText -notmatch 'NetTotal\s*=') "لا يجوز لأي سطر في بناء المجاميع أن يسند قيمة جديدة إلى NetTotal"
+    $receipt = New-TotalsReceipt 500000 0 500000 0
+    $before = $receipt.NetTotal
+    [void](Get-RendererTotalsFor $receipt)
+    Assert-True ($receipt.NetTotal -eq $before) "قيمة NetTotal على كائن الإيصال نفسه يجب ألا تتغيّر بعد بناء بنود المجاميع"
+}
+
+Test-RenderCase "6) فاتورة طويلة: المجاميع (بما فيها الإضافات) لا تُقصّ ولا تُحذف" {
+    $longReceipt = New-TestReceipt 40 "مادة تجريبية طويلة" 6001
+    $longReceipt | Add-Member -NotePropertyName TotalExtra -NotePropertyValue 40 -Force
+    $longReceipt.NetTotal = $longReceipt.GrossTotal - $longReceipt.Discount + 40
+    $bitmap = New-OzkReceiptBitmap -Receipt $longReceipt -LogoPath $logoPath
+    try {
+        Assert-True ($bitmap.Height -gt 0) "يجب أن تُصيَّر الفاتورة الطويلة كاملة بلا استثناء رغم وجود بند الإضافات"
+    } finally { $bitmap.Dispose() }
+    $totals = @(Get-RendererTotalsFor $longReceipt)
+    Assert-True (@($totals | Where-Object { $_.Label -eq "الإضافات:" }).Count -eq 1) "بند الإضافات يجب أن يبقى موجوداً حتى على فاتورة طويلة"
+}
+
+Test-Case "negative witness: بلا بند الإضافات في المُصيِّر يختفي Extra من الإيصال المطبوع" {
+    # محاكاة السلوك القديم: بناء $totals بلا بند الإضافات إطلاقاً، حتى لو Extra != 0
+    $legacySnippet = @'
+$totals = @(
+    @{ Label = "الإجمالي:"; Value = $Receipt.GrossTotal; Net = $false },
+    @{ Label = "الخصومات:"; Value = $Receipt.Discount; Net = $false }
+)
+$totals += @{ Label = "صافي الفاتورة:"; Value = $Receipt.NetTotal; Net = $true }
+'@
+    $sb = [scriptblock]::Create("param(`$Receipt)`n$legacySnippet`nreturn `$totals")
+    $receipt = New-TotalsReceipt 242460 0 242500 40
+    $legacyTotals = @(& $sb $receipt)
+    Assert-True (($legacyTotals | Where-Object { $_.Label -eq "الإضافات:" }).Count -eq 0) "السلوك القديم لا يُظهر بند الإضافات إطلاقاً رغم Extra=40 — وهذا ما يمنعه P1-A"
+    # وبالمقارنة: المصدر الحقيقي الحالي يُظهره
+    $realTotals = @(Get-RendererTotalsFor $receipt)
+    Assert-True (@($realTotals | Where-Object { $_.Label -eq "الإضافات:" }).Count -eq 1) "المصدر الحالي (بعد الإصلاح) يجب أن يُظهر البند"
 }
 
 Write-Host "`n== P1-M: تأكيد الالتزام (committed confirmation) قبل الطباعة =="

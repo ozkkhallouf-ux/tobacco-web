@@ -982,6 +982,7 @@ function Convert-SnapshotToReceipt($Snapshot) {
         Lines = $receiptLines.ToArray()
         GrossTotal = $gross
         Discount = $discount
+        TotalExtra = $extra
         NetTotal = $gross - $discount + $extra
         Payment = Convert-ToReceiptAmount $header $header.FirstPayment
         # Ledger calculations stay in Al-Ameen's base currency. The receipt is
@@ -1176,14 +1177,80 @@ try {
                 throw "Committed confirmation did not match the stable snapshot yet ($($confirmation.Reason)); try again shortly."
             }
             $receipt = Convert-SnapshotToReceipt $confirmation.Snapshot
-            $printResult = Send-OzkReceiptToPrinter -Receipt $receipt -LogoPath $script:ReceiptLogoPath -PrinterName $PrinterName -ConfirmPhysicalPrint
+            $invoiceGuidKey = [string]$selected.InvoiceGuid
+
+            # نفس الفصل بين "قبل التسليم" (آمن للإعادة) و"التسليم" (غامض)
+            # المعتمد في مسار الرصد الآلي أدناه، بدل الاختصار عبر
+            # Send-OzkReceiptToPrinter الذي يدمج الطورين ولا يفرّق بينهما.
+            # فشلٌ هنا لا يترك أثراً في state.seen، فإعادة المحاولة تبقى مضمونة.
+            $manualSpoolJob = New-OzkReceiptSpoolJob -Receipt $receipt -LogoPath $script:ReceiptLogoPath -PrinterName $PrinterName
+
+            # تُحفظ علامة print_in_flight قبل التسليم بنفس أسلوب مسار الرصد
+            # الآلي، لتمنع تكراراً تلقائياً إن تحققت حالة غامضة أدناه. هذا لا
+            # يمنع إعادة الطباعة اليدوية المقصودة لاحقاً: -Mode PrintInvoice
+            # لا يفحص state.seen كحارس قبل الطباعة، بصرف النظر عمّا كُتب هنا.
+            # فشل الكتابة هنا يُترك ليُسقط العملية (fail closed): لا طباعة قد
+            # وقعت بعد، فالتوقف هنا أسلم من المتابعة بلا شبكة أمان.
+            $state = Read-BridgeState $StatePath
+            $state.seen[$invoiceGuidKey] = [ordered]@{
+                status = "print_in_flight"
+                invoiceNumber = $InvoiceNumber
+                observedAt = (Get-Date).ToUniversalTime().ToString("o")
+                lineCount = $ready.Snapshot.LineCount
+            }
+            Write-BridgeState $StatePath $state
+
+            try {
+                $manualPrintResult = Submit-OzkReceiptSpoolJob -Job $manualSpoolJob -ConfirmPhysicalPrint
+            } catch {
+                if (Test-PreSubmissionFailure $_) {
+                    # فشل مثبَت أنه قبل قبول أي مهمة طباعة: الورق يقيناً لم
+                    # يخرج، فتُزال العلامة كي لا تُقمع إعادة محاولة لاحقة.
+                    [void]$state.seen.Remove($invoiceGuidKey)
+                    try {
+                        Write-BridgeState $StatePath $state
+                    } catch {
+                        $null = $_
+                    }
+                }
+                # أي فشل آخر يبقى غامضاً: العلامة print_in_flight تبقى كما هي
+                # عمداً، فلا يُعيد الرصد الآلي طباعة فاتورة قد تكون خرجت فعلاً.
+                throw
+            }
+
+            # طباعة يدوية ناجحة فعلاً: تُسجَّل الحالة النهائية spooled كي لا
+            # يُعيد الرصد الآلي طباعتها تلقائياً لاحقاً على نفس الـGUID.
+            $state.seen[$invoiceGuidKey] = [ordered]@{
+                status = "spooled"
+                invoiceNumber = $InvoiceNumber
+                observedAt = (Get-Date).ToUniversalTime().ToString("o")
+                lineCount = $ready.Snapshot.LineCount
+            }
+            try {
+                Write-BridgeState $StatePath $state
+            } catch {
+                # الإيصال خرج فعلاً إلى الطابعة؛ إسقاط الجسر هنا لا يفيد ولا
+                # يصح إبلاغ المستخدم بفشل طباعة نجحت فعلياً. نسجّل العطل
+                # بوضوح ونتابع دون رفع الخطأ.
+                Write-BridgeLog ([pscustomobject]@{
+                    Event = "state_persist_failed_after_manual_spool"
+                    invoice_number = $InvoiceNumber
+                    invoice_guid = $invoiceGuidKey
+                    ErrorType = $_.Exception.GetType().FullName
+                    Message = [string]$_.Exception.Message
+                    At = (Get-Date).ToUniversalTime().ToString("o")
+                    Consequence = "invoice physically printed but spooled marker not persisted; a later automatic Observe run may reprint it"
+                    CustomerAndItemsRedacted = $true
+                })
+            }
+
             $manualEvent = [pscustomobject]@{
                 Event = "manual_reprint_submitted"
                 InvoiceNumber = $InvoiceNumber
                 InvoiceDate = $InvoiceDate.ToString("yyyy-MM-dd")
                 InvoiceType = $InvoiceType
                 Printer = $PrinterName
-                JobId = $printResult.JobId
+                JobId = $manualPrintResult.JobId
                 At = (Get-Date).ToUniversalTime().ToString("o")
                 CustomerAndItemsRedacted = $true
             }
