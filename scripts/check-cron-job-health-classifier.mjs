@@ -163,9 +163,12 @@ assert.equal(
 );
 
 // شهادة النجاح تُختم بزمن التشغيل الناجح، لا بزمن محاولة ما زالت جارية.
+// proposed/05 (مطبَّق على الإنتاج): التعافي يُصفِّر last_alerted_terminal_at
+// أيضاً (وسيط null إضافي قبل last_detail) كي يُنذَر فشلٌ مقبل بصرف النظر عن
+// terminal_at القديم المؤنذَر عنه قبل هذا التعافي.
 assert.match(
-  okBranch, /values\('cron:'\|\|job_record\.jobname,true,now\(\),terminal_at,null,'يعمل'\)/,
-  `${MONITOR_SQL}: last_success_at يجب أن يكون terminal_at لا last_job_at`,
+  okBranch, /values\('cron:'\|\|job_record\.jobname,true,now\(\),terminal_at,null,null,'يعمل'\)/,
+  `${MONITOR_SQL}: last_success_at يجب أن يكون terminal_at لا last_job_at، وlast_alerted_terminal_at يجب أن يُصفَّر عند التعافي (05)`,
 );
 
 // ---------------------------------------------------------------------------
