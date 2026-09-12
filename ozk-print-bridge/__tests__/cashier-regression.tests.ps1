@@ -924,8 +924,121 @@ Test-Case "فشل في المنطقة الغامضة (بعد احتمال قبو
 
 Test-Case "لا فقدان صامت: كل فشل مؤكَّد قبل التسليم يُسجَّل بحدث صريح" {
     Assert-True ($bridgeSrc -match 'Event = "pre_submission_failure_retryable"') "يجب تسجيل الفشل القابل لإعادة المحاولة"
-    Assert-True ($bridgeSrc -match 'MarkerRolledBack = \$rolledBack') "يجب توثيق نجاح/فشل التراجع عن العلامة"
+    Assert-True ($bridgeSrc -match 'MarkerRolledBack = \$rollback\.Success') "يجب توثيق نجاح/فشل التراجع عن العلامة"
 }
+
+Write-Host "`n== Persist-RetryablePrintRollback: rollback ذرّي محدود المحاولات (مشترك بين المسارين) =="
+
+# الدالة الحقيقية من المصدر — لا محاكاة لمنطقها، فقط استبدال Write-BridgeState
+# التي تستدعيها بنسخة قابلة للتحكم في عدد مرات الفشل.
+. ([scriptblock]::Create((Get-ExtractedFunctionText $bridgeSrc "function Persist-RetryablePrintRollback([string]`$StatePath, `$State, [string]`$InvoiceGuidKey) {")))
+
+# Write-BridgeState الحقيقية (المستخرجة أعلاه في سطر 706) تُحفظ هنا كي تبقى
+# قابلة للاستدعاء الفعلي من داخل الغلاف المزيَّف أدناه، ولإعادتها كما هي بعد
+# انتهاء هذا القسم فلا تتأثر بقية الاختبارات اللاحقة في هذا الملف.
+$realWriteBridgeState = ${function:Write-BridgeState}
+$script:MockWriteFailCount = 0
+$script:MockWriteCallCount = 0
+function Write-BridgeState([string]$Path, $State) {
+    $script:MockWriteCallCount++
+    if ($script:MockWriteCallCount -le $script:MockWriteFailCount) {
+        throw "simulated Write-BridgeState failure #$($script:MockWriteCallCount)"
+    }
+    & $realWriteBridgeState $Path $State
+}
+
+function Seed-RollbackState([string]$Path, [string]$Guid) {
+    $s = New-EmptyState
+    $s.seen[$Guid] = [ordered]@{ status = "print_in_flight"; invoiceNumber = 1001; observedAt = (Get-Date).ToUniversalTime().ToString("o"); lineCount = 2 }
+    & $realWriteBridgeState $Path $s
+    return $s
+}
+
+Test-Case "1) automatic/rollback: أول Write-BridgeState يفشل والثانية تنجح → rollback محفوظ فعلياً على القرص" {
+    $path = New-StatePath
+    $guid = "rollback-retry-ok"
+    $state = Seed-RollbackState $path $guid
+    $script:MockWriteFailCount = 1
+    $script:MockWriteCallCount = 0
+    $result = Persist-RetryablePrintRollback $path $state $guid
+    Assert-True $result.Success "يجب أن ينجح بعد المحاولة الثانية"
+    Assert-True ($result.Attempts -eq 2) "يجب أن يكون عدد المحاولات 2، وقع: $($result.Attempts)"
+    $reloaded = Read-BridgeState $path
+    Assert-True (-not $reloaded.seen.ContainsKey($guid)) "العلامة يجب أن تكون قد أُزيلت من القرص فعلياً"
+}
+
+Test-Case "2) automatic/rollback: كل المحاولات تفشل → bounded retry فقط (3) بلا ادعاء نجاح، والعلامة القديمة تبقى" {
+    $path = New-StatePath
+    $guid = "rollback-retry-exhausted"
+    $state = Seed-RollbackState $path $guid
+    $script:MockWriteFailCount = 99
+    $script:MockWriteCallCount = 0
+    $result = Persist-RetryablePrintRollback $path $state $guid
+    Assert-True (-not $result.Success) "يجب أن يفشل بوضوح، لا ادعاء نجاح"
+    Assert-True ($result.Attempts -eq 3) "يجب أن يتوقف عند 3 محاولات بالضبط، وقع: $($result.Attempts)"
+    Assert-True ($null -ne $result.Error) "يجب الاحتفاظ بالاستثناء الأصلي/آخر خطأ مفيد"
+    Assert-True ($script:MockWriteCallCount -eq 3) "يجب ألا يتجاوز عدد نداءات Write-BridgeState الفعلية 3 محاولات مضبوطة، وقع: $($script:MockWriteCallCount)"
+    $reloaded = Read-BridgeState $path
+    Assert-True ($reloaded.seen.ContainsKey($guid)) "العلامة يجب أن تبقى محفوظة على القرص لأن كل محاولات الحفظ فشلت — لا حذف بآلية غير ذرّية"
+    Assert-True ([string]$reloaded.seen[$guid].status -eq "print_in_flight") "الحالة على القرص يجب أن تبقى print_in_flight"
+}
+
+Test-Case "3) manual path: يستخدم نفس Persist-RetryablePrintRollback المشترك ولم يعد يبتلع فشل الحفظ صامتاً" {
+    $manualStart = $bridgeSrc.IndexOf('$manualSpoolJob = New-OzkReceiptSpoolJob')
+    $manualEndIdx = $bridgeSrc.IndexOf('exit 0', $manualStart)
+    Assert-True ($manualStart -ge 0 -and $manualEndIdx -gt $manualStart) "يجب تحديد حدود الفرع اليدوي في المصدر"
+    $manualText = $bridgeSrc.Substring($manualStart, $manualEndIdx - $manualStart)
+    Assert-True ($manualText -match 'Persist-RetryablePrintRollback') "الفرع اليدوي يجب أن يستدعي helper الـrollback المشترك، لا نسخة منفصلة"
+    Assert-True ($manualText -notmatch 'catch \{ \$null = \$_ \}') "لا يجوز أن يبتلع الفرع اليدوي فشل حفظ التراجع صامتاً بعد الآن"
+    Assert-True ($manualText -match 'Event = "pre_submission_failure_retryable"') "الفرع اليدوي يجب أن يسجّل الحدث أيضاً، بنفس سياسة الفرع الآلي"
+    # بما أن كلا الفرعين يستدعيان نفس الدالة المُختبَرة سلوكياً في الاختبارين
+    # (1) و(2) أعلاه، فسلوك bounded retry/loud-failure مضمون لكليهما معاً.
+}
+
+Test-Case "4) بعد rollback ناجح: إعادة التشغيل تُعامل الفاتورة كأنها لم تُرسل، ويمكن طباعتها لاحقاً" {
+    $path = New-StatePath
+    $guid = "rollback-restart-ok"
+    $state = Seed-RollbackState $path $guid
+    $script:MockWriteFailCount = 1
+    $script:MockWriteCallCount = 0
+    $result = Persist-RetryablePrintRollback $path $state $guid
+    Assert-True $result.Success "rollback يجب أن ينجح أولاً"
+    # محاكاة إعادة التشغيل: تحميل الحالة من القرص من جديد ثم معالجتها بمسار مستقل تماماً
+    $script:SendCount = 0
+    $script:MockWriteFailCount = 0
+    $script:MockWriteCallCount = 0
+    $post = Invoke-BoundedPrintIteration $path $guid
+    Assert-True ($post -eq "spooled") "بعد استرجاع القرص، الفاتورة ليست print_in_flight فيمكن معالجتها لاحقاً"
+    Assert-True ($script:SendCount -eq 1) "طباعة واحدة فقط بعد rollback الناجح"
+}
+
+Test-Case "7) rollback لا يمسّ إدخالات seen أخرى غير متعلقة بالفاتورة المستهدَفة" {
+    $path = New-StatePath
+    $guid = "rollback-scoped"
+    $otherGuid = "unrelated-guid"
+    $state = New-EmptyState
+    $state.seen[$guid] = [ordered]@{ status = "print_in_flight"; invoiceNumber = 1001 }
+    $state.seen[$otherGuid] = [ordered]@{ status = "spooled"; invoiceNumber = 999 }
+    & $realWriteBridgeState $path $state
+    $script:MockWriteFailCount = 0
+    $script:MockWriteCallCount = 0
+    $result = Persist-RetryablePrintRollback $path $state $guid
+    Assert-True $result.Success "rollback يجب أن ينجح"
+    $reloaded = Read-BridgeState $path
+    Assert-True (-not $reloaded.seen.ContainsKey($guid)) "الفاتورة المستهدفة أُزيلت"
+    Assert-True ($reloaded.seen.ContainsKey($otherGuid)) "إدخال آخر غير متعلق يجب ألا يتأثر"
+    Assert-True ([string]$reloaded.seen[$otherGuid].status -eq "spooled") "حالة الإدخال الآخر يجب ألا تتغيّر"
+}
+
+Test-Case "negative witness: bounded retry محدود صراحةً بثلاث محاولات بلا حلقة لا نهائية في الكود ذاته" {
+    $helperText = Get-ExtractedFunctionText $bridgeSrc "function Persist-RetryablePrintRollback([string]`$StatePath, `$State, [string]`$InvoiceGuidKey) {"
+    Assert-True ($helperText -match '@\(100,\s*250,\s*500\)') "عدد وتوقيت المحاولات يجب أن يكون محدوداً وصريحاً في المصدر"
+    Assert-True ($helperText -notmatch 'while\s*\(\s*\$true\s*\)') "يجب ألا تحوي الدالة حلقة لا نهائية"
+    Assert-True ($helperText -match 'for \(\$attempt = 1; \$attempt -le \$delaysMilliseconds\.Length; \$attempt\+\+\)') "الحلقة يجب أن تكون مربوطة صراحةً بطول مصفوفة محدودة، لا شرط دائم"
+}
+
+# استعادة Write-BridgeState الحقيقية قبل أي اختبار لاحق يعتمد عليها.
+${function:Write-BridgeState} = $realWriteBridgeState
 
 Test-Case "الترتيب في المصدر: التحضير يسبق العلامة، والعلامة تسبق التسليم (حلقة Observe الآلية)" {
     # المسار اليدوي (PrintInvoice) يستخدم نفس النمط الآمن مع متغيرات باسم مختلف

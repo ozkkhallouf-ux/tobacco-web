@@ -1130,6 +1130,33 @@ function Write-BridgeState([string]$Path, $State) {
     }
 }
 
+# --- Rollback ذرّي محدود المحاولات لعلامة print_in_flight ------------------
+# يُستدعى فقط بعد إثبات pre-submission failure (Test-PreSubmissionFailure):
+# لم تصل أي مهمة طباعة إلى spooler يقيناً، فإزالة العلامة من state.seen آمنة.
+# الإزالة تحدث في الذاكرة فوراً، ثم يُحاول حفظها ذرّياً على القرص بعدد محاولات
+# محدود (لا retry بلا نهاية): لو فشل Write-BridgeState نفسه هنا وبقيت العلامة
+# القديمة على القرص، فالـwatchdog يعيد تشغيل الجسر على حالة تُخفي هذه الفاتورة
+# للأبد (Should-SkipSeenInvoice تتخطى أي حالة غير observed_waiting_for_print_activation
+# بلا شرط). فشل كل المحاولات لا يُعامل أبداً كنجاح صامت — يُعاد للمستدعي ليفشل
+# بوضوح (fail loudly) بدل الادّعاء بأن rollback نجح.
+function Persist-RetryablePrintRollback([string]$StatePath, $State, [string]$InvoiceGuidKey) {
+    [void]$State.seen.Remove($InvoiceGuidKey)
+    $delaysMilliseconds = @(100, 250, 500)
+    $lastError = $null
+    for ($attempt = 1; $attempt -le $delaysMilliseconds.Length; $attempt++) {
+        try {
+            Write-BridgeState $StatePath $State
+            return [pscustomobject]@{ Success = $true; Attempts = $attempt; Error = $null }
+        } catch {
+            $lastError = $_
+            if ($attempt -lt $delaysMilliseconds.Length) {
+                Start-Sleep -Milliseconds $delaysMilliseconds[$attempt - 1]
+            }
+        }
+    }
+    return [pscustomobject]@{ Success = $false; Attempts = $delaysMilliseconds.Length; Error = $lastError }
+}
+
 function Get-InvoiceFingerprint($Candidate, $Snapshot) {
     # «هل هذه نفس البيعة فعلاً؟» — مستقلة عن GUID الفاتورة وعن GUIDات الأسطر
     # وأرقامها وCreateDate، لأنها كلها تُولَّد من جديد عند إعادة الحفظ. وتعتمد
@@ -1242,13 +1269,24 @@ try {
             } catch {
                 if (Test-PreSubmissionFailure $_) {
                     # فشل مثبَت أنه قبل قبول أي مهمة طباعة: الورق يقيناً لم
-                    # يخرج، فتُزال العلامة كي لا تُقمع إعادة محاولة لاحقة.
-                    [void]$state.seen.Remove($invoiceGuidKey)
-                    try {
-                        Write-BridgeState $StatePath $state
-                    } catch {
-                        $null = $_
-                    }
+                    # يخرج، فتُزال العلامة كي لا تُقمع إعادة محاولة لاحقة —
+                    # بنفس سياسة المسار الآلي: rollback محدود المحاولات، وفشله
+                    # لا يُبتلع صامتاً.
+                    $submissionError = $_
+                    $rollback = Persist-RetryablePrintRollback $StatePath $state $invoiceGuidKey
+                    Write-BridgeLog ([pscustomobject]@{
+                        Event = "pre_submission_failure_retryable"
+                        invoice_number = $InvoiceNumber
+                        invoice_guid = $invoiceGuidKey
+                        At = (Get-Date).ToUniversalTime().ToString("o")
+                        MarkerRolledBack = $rollback.Success
+                        RollbackAttempts = $rollback.Attempts
+                        Consequence = if ($rollback.Success) { "no_print_job_was_created; manual reprint may be retried" }
+                                      else { "no_print_job_was_created; rollback persistence failed after $($rollback.Attempts) attempt(s); invoice may remain print_in_flight; manual intervention/reprint may be required" }
+                        CustomerAndItemsRedacted = $true
+                    })
+                    if (-not $rollback.Success) { throw $rollback.Error }
+                    throw $submissionError
                 }
                 # أي فشل آخر يبقى غامضاً: العلامة print_in_flight تبقى كما هي
                 # عمداً، فلا يُعيد الرصد الآلي طباعة فاتورة قد تكون خرجت فعلاً.
@@ -1608,23 +1646,21 @@ try {
                     [void](Submit-OzkReceiptSpoolJob -Job $spoolJob -ConfirmPhysicalPrint)
                 } catch {
                     if (Test-PreSubmissionFailure $_) {
-                        [void]$state.seen.Remove($candidate.InvoiceGuid)
-                        $rolledBack = $true
-                        try {
-                            Write-BridgeState $StatePath $state
-                        } catch {
-                            $rolledBack = $false
-                        }
+                        $submissionError = $_
+                        $rollback = Persist-RetryablePrintRollback $StatePath $state $candidate.InvoiceGuid
                         Write-BridgeLog ([pscustomobject]@{
                             Event = "pre_submission_failure_retryable"
                             invoice_number = $candidate.InvoiceNumber
                             invoice_guid = $candidate.InvoiceGuid
                             At = (Get-Date).ToUniversalTime().ToString("o")
-                            MarkerRolledBack = $rolledBack
-                            Consequence = if ($rolledBack) { "no_print_job_was_created; will retry on a later poll" }
-                                          else { "no_print_job_was_created; marker rollback failed - manual reprint may be required" }
+                            MarkerRolledBack = $rollback.Success
+                            RollbackAttempts = $rollback.Attempts
+                            Consequence = if ($rollback.Success) { "no_print_job_was_created; will retry on a later poll" }
+                                          else { "no_print_job_was_created; rollback persistence failed after $($rollback.Attempts) attempt(s); invoice may remain print_in_flight; manual intervention/reprint may be required" }
                             CustomerAndItemsRedacted = $true
                         })
+                        if (-not $rollback.Success) { throw $rollback.Error }
+                        throw $submissionError
                     }
                     throw
                 }
