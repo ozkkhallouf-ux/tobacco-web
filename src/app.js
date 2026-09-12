@@ -1186,18 +1186,21 @@ function findReturnInvoiceForMovement(customer, movement) {
 // الكبرى (سعر الكرتونة 403)، فيُقرأ على أنه قيمة السطر. نصف كرتونة قيمتها
 // 201.50 لا 403. السعر يبقى سعر وحدة، والقيمة تصير عموداً مستقلاً.
 //
-// حين يكون أساس أسعار الفاتورة الوحدة الكبرى (`unit2`) يكون `Qty × Price`
-// القادم من الأمين محسوباً على أساس مختلف، فنحسب القيمة من الكمية بالوحدة
-// الكبرى — نفس المنطق الذي يحسم به `invoicePriceBasis` أساس السعر.
+// `stored` (Qty × Price كما سجّله الأمين لهذا السطر تحديداً) هو مصدر الحقيقة
+// الأول ما دام رقماً موجباً: هو محسوب أصلاً بنفس الوحدة التي أدخل بها الأمين
+// السعر، سطراً بسطر، بخلاف `invoicePriceBasis` التي تحسم أساساً واحداً لكل
+// الفاتورة وقد تُخطئ الأسطر التي أساسها مختلف عن غالبية الفاتورة (مثال: فاتورة
+// أغلبها كرتونة كاملة، وسطر واحد فيها بيع كمية جزئية بسعر الكروز). لا نلجأ
+// لإعادة الحساب حسب `invoicePriceBasis` إلا حين لا توجد قيمة مخزَّنة موثوقة.
 function invoiceLineTotalValue(line, inv) {
   const price = Number(line?.price || 0);
   const qty = Number(line?.qty || 0);
   const qtyUnits = Number(line?.qtyUnits || 0);
   const stored = Number(line?.lineTotal || 0);
+  if (stored > 0) return roundPrice(stored);
   if (inv && qtyUnits > 0 && invoicePriceBasis(inv) === "unit2") {
     return roundPrice(price * qtyUnits);
   }
-  if (stored > 0) return roundPrice(stored);
   return roundPrice(price * qty);
 }
 
@@ -1236,10 +1239,31 @@ function invoicePriceBasis(inv) {
   return Math.abs(sumBase - total) <= Math.abs(sumUnits - total) ? "unit1" : "unit2";
 }
 
-// سعر الوحدة معروضاً دائماً بالوحدة الكبرى (كرتونة/شرحة/طرد): إن كان أساس أسعار الفاتورة
-// الكروز نضرب بمعامل الوحدة (كمية الكروز ÷ كمية الكراتين لنفس السطر)، وإلا نعرضه كما هو.
-// نواة حسم الوحدة رقماً — مصدر واحد لكل من يحتاج سعر سطر الفاتورة (العرض في كشف
-// الحساب، وآخر سعر للزبون في بطاقة الصنف). تعيد { price, unit, converted } أو null.
+// أساس سعر هذا السطر بعينه (وليس الفاتورة كلها): نقارن القيمة المخزَّنة من
+// الأمين (`stored`) مع price×qty (أساس unit1/كروز) ومع price×qtyUnits (أساس
+// unit2/كرتونة-شرحة) ونختار الأقرب. الأساس قد يختلف من سطر لآخر ضمن نفس
+// الفاتورة (بعض الأصناف كرتونة كاملة، وبعضها كمية جزئية بسعر الكروز)، لذا لا
+// يصح تعميم أساس واحد (`invoicePriceBasis`) على كل الأسطر. تعيد "unit1"،
+// "unit2"، أو null حين لا تتوفر قيمة مخزَّنة موثوقة للمقارنة.
+function invoiceLineBasis(line) {
+  const price = Number(line?.price || 0);
+  const stored = Number(line?.lineTotal || 0);
+  if (!(price > 0) || !(stored > 0)) return null;
+  const qty = Number(line?.qty || 0);
+  const qtyUnits = Number(line?.qtyUnits || 0);
+  const diffBase = qty > 0 ? Math.abs(price * qty - stored) : Infinity;
+  const diffUnits = qtyUnits > 0 ? Math.abs(price * qtyUnits - stored) : Infinity;
+  if (!Number.isFinite(diffBase) && !Number.isFinite(diffUnits)) return null;
+  return diffBase <= diffUnits ? "unit1" : "unit2";
+}
+
+// سعر الوحدة معروضاً دائماً بالوحدة الكبرى (كرتونة/شرحة/طرد): إن كان أساس سعر
+// هذا السطر تحديداً هو الكروز نضرب بمعامل الوحدة (كمية الكروز ÷ كمية الكراتين
+// لنفس السطر)، وإلا نعرضه كما هو. نفضّل `invoiceLineBasis` (حسم لكل سطر على
+// حدة) على `invoicePriceBasis` (حسم لكل الفاتورة)، ولا نلجأ للأخيرة إلا حين
+// لا توجد قيمة مخزَّنة لهذا السطر تحديداً للمقارنة عليها. نواة حسم الوحدة
+// رقماً — مصدر واحد لكل من يحتاج سعر سطر الفاتورة (العرض في كشف الحساب،
+// وآخر سعر للزبون في بطاقة الصنف). تعيد { price, unit, converted } أو null.
 function invoiceLineUnitPrice(line, inv) {
   const price = Number(line?.price || 0);
   if (!(price > 0)) return null;
@@ -1248,7 +1272,8 @@ function invoiceLineUnitPrice(line, inv) {
   const qty = Number(line?.qty || 0);
   const qtyUnits = Number(line?.qtyUnits || 0);
   const factor = qty > 0 && qtyUnits > 0 ? qty / qtyUnits : 0;
-  if (inv && u2 && factor > 0 && invoicePriceBasis(inv) === "unit1") {
+  const basis = invoiceLineBasis(line) || (inv ? invoicePriceBasis(inv) : "unit2");
+  if (u2 && factor > 0 && basis === "unit1") {
     return { price: roundPrice(price * factor), unit: u2, converted: true };
   }
   return { price, unit: qtyUnits > 0 && u2 ? u2 : u1, converted: false };

@@ -36,8 +36,10 @@ const PATTERNS = {
   salesTotals: /function salesTotals\(\) \{[\s\S]*?\n\}\n/,
   roundPrice: /function roundPrice\(value\) \{[\s\S]*?\n\}\n/,
   formatMoney: /function formatMoney\(value\) \{[\s\S]*?\n\}\n/,
+  SALES_TRADE_META: /const SALES_TRADE_REGISTER_NO = [^\n]*\nconst SALES_TRADE_CAPACITY = [^\n]*\n/,
   voucherPdfMarkup: /function voucherPdfMarkup\(v\) \{[\s\S]*?\n\}\n/,
   invoicePriceBasis: /function invoicePriceBasis\(inv\) \{[\s\S]*?\n\}\n/,
+  invoiceLineBasis: /function invoiceLineBasis\(line\) \{[\s\S]*?\n\}\n/,
   invoiceLineTotalValue: /function invoiceLineTotalValue\(line, inv\) \{[\s\S]*?\n\}\n/,
   invoiceLineValueText: /function invoiceLineValueText\(line, inv\) \{[\s\S]*?\n\}\n/,
   invoiceLineQty: /function invoiceLineQty\(line\) \{[\s\S]*?\n\}\n/,
@@ -76,7 +78,8 @@ vm.createContext(sandbox);
 vm.runInContext(source.join("\n"), sandbox);
 const {
   sanitizeDocumentTitle, fileDateLabel, archiveDocumentTitle, withDocumentTitle,
-  salesTotals, voucherPdfMarkup, invoiceLineTotalValue, invoiceLineQty, invoiceLinePrice
+  salesTotals, voucherPdfMarkup, invoiceLineTotalValue, invoiceLineQty, invoiceLinePrice,
+  invoicePriceBasis, invoiceLineUnitPrice
 } = sandbox;
 
 // ===== 1) اسم الملف: الزبون + الرقم =====
@@ -377,6 +380,82 @@ test("PDF/print uses same lineTotal as invoice data", () => {
   assert.ok(html.includes("403"), "سعر الوحدة (الكرتونة) غير مطبوع");
   // الكمية والسعر والقيمة ثلاثة أعمدة منفصلة لا يُخلط بينها.
   assert.ok(html.includes("0.5 كرتونة"), "الكمية غير مطبوعة بالوحدة الكبرى");
+});
+
+// ===== 4ب) فاتورة #712 بتاريخ 2026-09-12: كمية جزئية من كروز بسعر الوحدة الصغرى
+// (العطل المُثبت: `price(كروز) × qtyUnits(كسر شرحة/كرتونة)` بدل `stored` الصحيحة) =====
+
+// معسل فاخر أسود كروز محرز: الشرحة = 12 كروز، سعر الشرحة 175$ → سعر الكروز
+// 175/12، والكمية المباعة 10 كروز (0.8333 شرحة).
+const shishaLine = {
+  material: "معسل فاخر أسود كروز محرز", qty: 10, qtyUnits: 10 / 12,
+  price: 175 / 12, lineTotal: (10 * 175) / 12, unit1: "كروز", unit2: "شرحة"
+};
+// Marlboro أبيض ورق: 10 كروز بسعر الكروز 20.5$، معامل الكرتونة يجعلها 0.2 كرتونة.
+const marlboroLine = {
+  material: "Marlboro أبيض ورق", qty: 10, qtyUnits: 0.2,
+  price: 20.5, lineTotal: 205, unit1: "كروز", unit2: "كرتونة"
+};
+// Master Queen أبيض: 15 كروز بسعر الكروز 9.7$، معامل الكرتونة يجعلها 0.3 كرتونة.
+const masterQueenLine = {
+  material: "Master Queen أبيض", qty: 15, qtyUnits: 0.3,
+  price: 9.7, lineTotal: 145.5, unit1: "كروز", unit2: "كرتونة"
+};
+
+test("معسل فاخر أسود كروز محرز: 10 كروز من شرحة 12 بسعر 175$ = 145.833$", () => {
+  const inv = invOf([shishaLine]);
+  assert.equal(invoiceLineTotalValue(shishaLine, inv), 145.833);
+});
+
+test("Marlboro أبيض ورق: 10 كروز بسعر الكروز 20.5$ = 205$", () => {
+  const inv = invOf([marlboroLine]);
+  assert.equal(invoiceLineTotalValue(marlboroLine, inv), 205);
+});
+
+test("Master Queen أبيض: 15 كروز بسعر الكروز 9.7$ = 145.5$", () => {
+  const inv = invOf([masterQueenLine]);
+  assert.equal(invoiceLineTotalValue(masterQueenLine, inv), 145.5);
+});
+
+test("فاتورة مختلطة الأساس (unit1 وunit2 معاً): كل سطر يحتفظ بقيمته الصحيحة", () => {
+  // سطر أغلبية الفاتورة بالقيمة: مسعّر بالكرتونة كاملة (unit2)، يجعل
+  // invoicePriceBasis(inv) يحسم "unit2" لكامل الفاتورة رغم أن سطر Marlboro
+  // مسعّر بالكروز (unit1) تحديداً.
+  const bigCartonLine = {
+    material: "صنف بالجملة", qty: 500, qtyUnits: 10,
+    price: 205, lineTotal: 2050, unit1: "كروز", unit2: "كرتونة"
+  };
+  const inv = invOf([marlboroLine, bigCartonLine]);
+  // تأكيد أن الفاتورة فعلاً "ملتبسة": الأساس المحسوم لكامل الفاتورة unit2،
+  // وهو ما كان يُطبَّق خطأً على سطر Marlboro أيضاً قبل الإصلاح.
+  assert.equal(invoicePriceBasis(inv), "unit2");
+  // ومع ذلك يجب أن يعطي كل سطر قيمته الصحيحة الخاصة به.
+  assert.equal(invoiceLineTotalValue(marlboroLine, inv), 205, "سطر الكروز يجب أن يبقى 205$ رغم أساس الفاتورة unit2");
+  assert.equal(invoiceLineTotalValue(bigCartonLine, inv), 2050);
+  // وعرض سعر الوحدة لا يخلط بين سعر الكروز وكمية الكرتونة: يُحوَّل لما يعادله
+  // بالكرتونة (20.5 × 50 = 1025) بدل عرض 20.5$ بجانب 0.2 كرتونة.
+  const marlboroPrice = invoiceLineUnitPrice(marlboroLine, inv);
+  assert.equal(marlboroPrice.unit, "كرتونة");
+  assert.equal(marlboroPrice.price, 1025);
+  const bigCartonPrice = invoiceLineUnitPrice(bigCartonLine, inv);
+  assert.equal(bigCartonPrice.price, 205);
+  assert.equal(bigCartonPrice.unit, "كرتونة");
+});
+
+test("invariant: قيمة سطر مخزَّنة موجبة لا تتغيّر بسبب تحويل الوحدة مهما كان أساس الفاتورة", () => {
+  // كل الأمثلة الثلاثة + الحالة المختلطة: `stored` (lineTotal من الأمين) هو
+  // القيمة الوحيدة المسموح بها دائماً حين تكون رقماً موجباً، بصرف النظر عن
+  // نتيجة invoicePriceBasis أو عن قيمة qtyUnits/price.
+  const lines = [shishaLine, marlboroLine, masterQueenLine];
+  for (const forcedBasisInv of [invOf(lines), { total: 0, lines: [] }, null]) {
+    for (const line of lines) {
+      assert.equal(
+        invoiceLineTotalValue(line, forcedBasisInv),
+        Math.round(line.lineTotal * 1000) / 1000,
+        `${line.material}: القيمة المخزَّنة يجب أن تفوز دائماً`
+      );
+    }
+  }
 });
 
 // ===== 5) كل مسارات تصدير الفاتورة تنسب الحسم والدفعة (لا مسار متخلّف) =====
