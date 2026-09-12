@@ -93,13 +93,22 @@ for (const verdict of VERDICTS) {
 }
 const fnStart = monitorCode.indexOf('create or replace function private.cron_job_health(');
 const fnBody = monitorCode.slice(fnStart, monitorCode.indexOf('$fn$;', fnStart) + 5);
-const iFailed = fnBody.indexOf("when p_terminal_status = 'failed' then 'failed'");
+const iFailed = fnBody.indexOf("when p_terminal_status = 'failed'");
 const iStuck = fnBody.indexOf("then 'stuck'");
 const iOk = fnBody.indexOf("when p_terminal_status = 'succeeded' then 'ok'");
 assert.ok(iFailed > 0, `${MONITOR_SQL}: الفشل النهائي غير مصنَّف صراحةً`);
 assert.ok(
   iFailed < iStuck && iStuck < iOk,
-  `${MONITOR_SQL}: الأسبقية يجب أن تبقى failed ثم stuck ثم ok — الفشل حقيقة والجمود استنتاج`,
+  `${MONITOR_SQL}: ترتيب الفروع في نص الدالة يجب أن يبقى failed ثم stuck ثم ok`,
+);
+// Codex P1 (الجولة الثانية، PR #220): فرع 'failed' يجب أن يستثني صراحةً حالة retry
+// عالق فوق فشل سابق — وإلا يبتلع 'failed' القديم تنبيه 'stuck' الدوري لمحاولة حيّة
+// تجاوزت المهلة الآن. الشرط نفسه (نصاً) يجب أن يظهر داخل جسم فرع 'failed'.
+const failedBranch = fnBody.slice(iFailed, iStuck);
+assert.match(
+  failedBranch,
+  /and not \(\s*p_latest_status is not null\s*and p_latest_status not in \('succeeded','failed'\)\s*and \(p_latest_at is null or p_now - p_latest_at >= p_grace\)\s*\)/,
+  `${MONITOR_SQL}: فرع 'failed' يجب أن يستثني retry عالقاً فوق فشل سابق (يجب أن يُصنَّف 'stuck' لا 'failed')`,
 );
 assert.match(
   fnBody, /when p_active is not true then 'disabled'/,

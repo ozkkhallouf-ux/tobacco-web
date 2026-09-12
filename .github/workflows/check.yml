@@ -129,3 +129,11 @@ jobs:
       - name: Ameen read worker - auth retry heartbeat regression test
         shell: powershell
         run: .\tools\test-ameen-read-worker-auth-retry.ps1
+
+      # Codex P1 (PR #220): كان فرع degraded بensure-ameen-sync.ps1 يسجّل degraded=true
+      # (يُعتبر "تم التنبيه") حتى لو فشل TELEGRAM-NOTIFY فعلياً، فيضيع التنبيه ولا تُعاد
+      # المحاولة أبداً. الاختبار يستخرج جسم الفرع فعلياً من المصدر وينفّذه بسكريبت إشعار
+      # وهمي يُحاكي نجاح/فشل send-telegram-notification.ps1 (best-effort، exit 0 دائماً).
+      - name: Ensure Ameen sync - degraded alert delivery regression test
+        shell: powershell
+        run: .\tools\tests\Test-EnsureAmeenSyncDegradedAlert.ps1

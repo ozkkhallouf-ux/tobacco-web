@@ -163,8 +163,8 @@ update private.project_task_monitors set check_status=true where task_key='khali
 --
 -- القيم المُعادة:
 --   'disabled'   المهمة نفسها معطّلة              ⇒ إنذار فوري
---   'failed'     آخر نتيجة مكتملة فشلت              ⇒ إنذار فوري
---   'stuck'      محاولة جارية/مجهولة تجاوزت المهلة  ⇒ إنذار
+--   'failed'     آخر نتيجة مكتملة فشلت، ولا محاولة أحدث عالقة الآن فوقها ⇒ إنذار فوري
+--   'stuck'      محاولة جارية/مجهولة تجاوزت المهلة (بما فيها retry بعد فشل سابق) ⇒ إنذار
 --   'inflight'   محاولة أولى جارية بلا نتيجة مكتملة ⇒ لا إنذار
 --   'never_run'  لا تاريخ تشغيل إطلاقاً             ⇒ لا إنذار
 --   'ok'         آخر نتيجة مكتملة نجحت              ⇒ لا إنذار
@@ -186,13 +186,23 @@ create or replace function private.cron_job_health(
     -- تشمل NULL عمداً — حالة مجهولة النشاط تُعامل معاملة المعطّلة لا المُهمَلة.
     when p_active is not true then 'disabled'
 
-    -- الفشل النهائي حقيقة مكتملة، ولا تسقط لمجرد أن محاولة جديدة بدأت فوقها.
-    -- هذا هو جوهر إصلاح ملاحظة Codex P1 الثانية: النتيجة النهائية الأخيرة
-    -- تُقرأ مستقلة عن الصف الأحدث، فلا يبتلع retry جارٍ فشلاً مكتملاً.
-    when p_terminal_status = 'failed' then 'failed'
+    -- الفشل النهائي حقيقة مكتملة، ولا تسقط لمجرد أن محاولة جديدة بدأت فوقها —
+    -- ما لم تكن تلك المحاولة نفسها قد تجاوزت المهلة الآن (راجع شرط الاستثناء
+    -- أدناه، طابق شرط 'stuck'). هذا هو جوهر إصلاح ملاحظة Codex P1 الثانية
+    -- (الجولة الثانية): retry جديد عالق بعد فشل سابق يجب أن يظهر 'stuck' —
+    -- الحالة الحيّة الحقيقية الآن — لا 'failed' القديم الذي لم يعد يعكس واقع
+    -- المحاولة الجارية.
+    when p_terminal_status = 'failed'
+     and not (
+       p_latest_status is not null
+       and p_latest_status not in ('succeeded','failed')
+       and (p_latest_at is null or p_now - p_latest_at >= p_grace)
+     )
+    then 'failed'
 
     -- محاولة جارية تجاوزت المهلة (أو حالة مجهولة لا نستطيع إثبات حداثتها)
-    -- ⇒ جمود يستحق الإنذار. تأتي بعد 'failed' لأن الفشل حقيقة والجمود استنتاج.
+    -- ⇒ جمود يستحق الإنذار. تُفحص فعلياً ضمن استثناء 'failed' أعلاه أيضاً،
+    -- فأي retry عالق بعد فشل سابق يصل هنا لا إلى 'failed'.
     when p_latest_status is not null
      and p_latest_status not in ('succeeded','failed')
      and (p_latest_at is null or p_now - p_latest_at >= p_grace) then 'stuck'
@@ -258,11 +268,24 @@ begin
      format('تراكم محتمل (status=%s) — آخر دفعة كاملة عند %s',last_status,to_char(last_at at time zone 'Asia/Riyadh','YYYY-MM-DD HH24:MI'))
     end;
    if previous_healthy is distinct from false or previous_alert_at is null or previous_alert_at<now()-interval '60 minutes' then
-    perform public.notify_telegram('project_task_failure',
-     format('🚨 توقفت مهمة بالمشروع%1$s• المهمة: %2$s%1$s• المصدر: %3$s%1$s• الحالة: %4$s%1$s• الحد المسموح: %5$s دقيقة',
-      chr(10),cfg.task_label,cfg.report_source,detail_text,cfg.max_age_minutes),
-     'project-task-failure:'||cfg.task_key,60);
-    previous_alert_at:=now();
+    -- Codex P1 (PR #220، الملاحظة الثالثة): previous_alert_at:=now() كان يُسجَّل
+    -- بلا شرط بعد استدعاء notify_telegram، فأي استثناء أثناء الإرسال (رفض
+    -- تفويض، خطأ اتصال بقاعدة البيانات) كان يُحسب "تم التنبيه" رغم عدم قبول
+    -- الرسالة للإرسال أصلاً. notify_telegram/notify_telegram_dispatch عقدهما
+    -- الفعلي إدراج غير متزامن بطابور telegram_outbox (التسليم الحقيقي إلى
+    -- Telegram يجري لاحقاً وبشكل غير متزامن عبر dispatch_telegram_outbox،
+    -- ولا يمكن تأكيده مزامنةً هنا) — فـ"القبول الفعلي للإرسال وفق العقد
+    -- الحالي" هو نجاح هذا الإدراج بلا استثناء. عند فشله نُبقي previous_alert_at
+    -- كما كان (null أو قديم) فتُعاد المحاولة بالدورة التالية تلقائياً.
+    begin
+     perform public.notify_telegram('project_task_failure',
+      format('🚨 توقفت مهمة بالمشروع%1$s• المهمة: %2$s%1$s• المصدر: %3$s%1$s• الحالة: %4$s%1$s• الحد المسموح: %5$s دقيقة',
+       chr(10),cfg.task_label,cfg.report_source,detail_text,cfg.max_age_minutes),
+      'project-task-failure:'||cfg.task_key,60);
+     previous_alert_at:=now();
+    exception when others then
+     raise warning 'monitor_project_tasks: notify_telegram failed for %: %',cfg.task_key,sqlerrm;
+    end;
    end if;
    insert into private.project_task_health_state(task_key,is_healthy,last_observed_at,last_success_at,last_alert_at,last_detail)
     values(cfg.task_key,false,now(),last_at,previous_alert_at,detail_text)
@@ -355,11 +378,22 @@ begin
     else
      failure_dedupe_key:='project-cron-failure:'||job_record.jobname;
     end if;
-    perform public.notify_telegram('project_task_failure',
-     format('🚨 توقفت مهمة داخل الموقع%1$s• المهمة: %2$s%1$s• الحالة: %3$s',chr(10),job_record.jobname,detail_text),
-     failure_dedupe_key,60);
-    previous_alert_at:=now();
-    if job_health='failed' then previous_alerted_terminal_at:=terminal_at; end if;
+    -- Codex P1 (PR #220، الملاحظة الثانية): previous_alert_at/previous_alerted_terminal_at
+    -- كانا يُسجَّلان بلا شرط بعد notify_telegram، فيضيع إنذار 'failed' الوحيد
+    -- (dedupe بـterminal_at لا يتكرر) إن فشل الإرسال باستثناء. نفس التبرير
+    -- المذكور أعلاه في حلقة project_task_monitors: القبول الفعلي للإرسال هنا
+    -- هو نجاح إدراج notify_telegram بلا استثناء؛ عند الفشل نُبقي القيمتين
+    -- كما وردتا من الحالة المحفوظة (previous_healthy/select أعلاه) فيبقى
+    -- should_alert صحيحاً بالدورة التالية ويُعاد الإرسال.
+    begin
+     perform public.notify_telegram('project_task_failure',
+      format('🚨 توقفت مهمة داخل الموقع%1$s• المهمة: %2$s%1$s• الحالة: %3$s',chr(10),job_record.jobname,detail_text),
+      failure_dedupe_key,60);
+     previous_alert_at:=now();
+     if job_health='failed' then previous_alerted_terminal_at:=terminal_at; end if;
+    exception when others then
+     raise warning 'monitor_project_tasks: notify_telegram failed for cron:%: %',job_record.jobname,sqlerrm;
+    end;
    end if;
    insert into private.project_task_health_state(task_key,is_healthy,last_observed_at,last_alert_at,last_alerted_terminal_at,last_detail)
     values('cron:'||job_record.jobname,false,now(),previous_alert_at,previous_alerted_terminal_at,detail_text)

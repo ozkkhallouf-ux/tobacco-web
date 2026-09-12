@@ -243,6 +243,13 @@ if ($isMainComputer) {
     if (Test-Path -LiteralPath $ameenWorkerIncidentStatePath) {
       try { $prevDegradedActive = [bool]((Get-Content -LiteralPath $ameenWorkerIncidentStatePath -Raw | ConvertFrom-Json).degraded) } catch {}
     }
+    # منفصل عن prevDegradedActive عمداً: يتتبّع نجاح التنبيه فعلياً لا استمرار الحالة
+    # المرصودة وحدها — Codex P1: كان degraded=true يُسجَّل حتى لو فشل TELEGRAM-NOTIFY،
+    # فتُحسب "تم التنبيه" رغم عدم الوصول ولا تُعاد المحاولة أبداً.
+    $prevDegradedAlerted = $false
+    if (Test-Path -LiteralPath $ameenWorkerIncidentStatePath) {
+      try { $prevDegradedAlerted = [bool]((Get-Content -LiteralPath $ameenWorkerIncidentStatePath -Raw | ConvertFrom-Json).degradedAlerted) } catch {}
+    }
 
     if ($workerStuck) {
       $ageText = if ($null -eq $heartbeatAgeMinutes) { "heartbeat غير موجود" } else { "آخر heartbeat منذ $heartbeatAgeMinutes دقيقة" }
@@ -278,15 +285,21 @@ if ($isMainComputer) {
       # القسم ٤: حيّة وتحاول المصادقة بلا نجاح — لا نعيد التشغيل (لا يفيد) ولا نسكت عن الأمر
       # (لا نطلق أيضاً تنبيه "عاد للعمل" الآن، لأنها لم تعد فعلياً بعد).
       Write-Log "DEGRADED: $ameenWorkerTaskName still retrying auth (heartbeat fresh, status=auth_retry)"
-      if (-not $prevDegradedActive) {
+      $degradedAlerted = $prevDegradedAlerted
+      if (-not $prevDegradedAlerted) {
         $degradedMsg = "⚠️ Ameen Read Worker حيّة لكنها تعيد محاولة تسجيل الدخول بلا نجاح — لا مزامنة تحدث الآن."
         $notifyPathWorker = Join-Path $PSScriptRoot "send-telegram-notification.ps1"
         if (Test-Path -LiteralPath $notifyPathWorker) {
           $degradedNotifyOutput = & $notifyPathWorker -Message $degradedMsg -EventType "windows" -DedupeKey "ameen-read-worker-degraded" -DedupeMinutes 60 2>&1 6>&1
-          Write-Log ("ALERT sent for Ameen worker degraded (auth_retry) — " + (($degradedNotifyOutput | Out-String).Trim() -replace "\s+", " "))
+          $degradedNotifyText = ($degradedNotifyOutput | Out-String).Trim()
+          # send-telegram-notification.ps1 يخرج exit 0 دائماً (best-effort)، حتى عند الفشل —
+          # فالنجاح يُعرَّف من نص الإخراج (TELEGRAM-NOTIFY OK) لا من رمز الخروج. فشل أو تخطٍّ
+          # (FAILED/SKIPPED) يترك degradedAlerted=false كي تُعاد المحاولة بالدورة التالية.
+          $degradedAlerted = ($degradedNotifyText -match "TELEGRAM-NOTIFY OK")
+          Write-Log ("ALERT sent for Ameen worker degraded (auth_retry) — " + ($degradedNotifyText -replace "\s+", " "))
         }
       }
-      @{ stuck = $false; degraded = $true; since = (Get-Date).ToUniversalTime().ToString("o") } | ConvertTo-Json | Set-Content -LiteralPath $ameenWorkerIncidentStatePath -Encoding utf8
+      @{ stuck = $false; degraded = $true; degradedAlerted = $degradedAlerted; since = (Get-Date).ToUniversalTime().ToString("o") } | ConvertTo-Json | Set-Content -LiteralPath $ameenWorkerIncidentStatePath -Encoding utf8
     } else {
       if ($prevIncidentActive) {
         # عاد للعمل بعد حادثة — تنبيه واحد فقط عند لحظة العودة
