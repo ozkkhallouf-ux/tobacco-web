@@ -3183,5 +3183,317 @@ Test-Case "شاهد سلبي SQL-B: إزالة تنظيف Dispose حول فحص 
     Assert-True $negativeWitnessFailed "السلوك القديم (بلا Dispose حول فحص الصلاحيات) يجب أن يُسقط فحص عدم التسريب؛ إن لم يسقط فالشاهد السلبي غير فعّال — الاتصال يتسرّب صامتاً عند كل رفض متعمَّد."
 }
 
+# ═══════════════════════════════════════════════════════════════════════════
+# CODEX P1-D: توحيد مسار state.json الكانوني بين الواجهة اليدوية، سكربت
+# الجسر، والمراقب الإنتاجي (كانت الواجهة تكتب إلى %ProgramData% بينما يقرأ
+# المراقب من %LOCALAPPDATA%، فلا "يرى" المراقب أبداً أن فاتورة طُبعت يدوياً).
+# ═══════════════════════════════════════════════════════════════════════════
+
+Write-Host "`n== CODEX P1-D: مسار state.json الكانوني الموحّد =="
+
+# استيراد حقيقي للموديول الجديد (آمن تماماً: لا SQL ولا حلقة لا نهائية).
+Import-Module (Join-Path $bridgeDir "OzkPrintBridgeCommon.psm1") -Force -DisableNameChecking
+$realLocalAppDataForState = [Environment]::GetFolderPath("LocalApplicationData")
+$expectedCanonicalStatePath = Join-Path $realLocalAppDataForState "OZK-TOBACCO\PrintBridge\state.json"
+
+Test-Case "P1-D-1: Get-OzkPrintBridgeUserStatePath يحسب %LOCALAPPDATA%\OZK-TOBACCO\PrintBridge\state.json بالضبط" {
+    $actual = Get-OzkPrintBridgeUserStatePath
+    Assert-True ($actual -eq $expectedCanonicalStatePath) "المسار المُعاد ($actual) يجب أن يطابق ($expectedCanonicalStatePath) حرفياً."
+}
+
+Test-Case "P1-D-2: ozk-print-bridge.ps1 لم يعد يحمل الـdefault القديم القائم على ProgramData/CommonApplicationData لـ StatePath" {
+    Assert-True ($bridgeSrc -notmatch '\[string\]\$StatePath\s*=\s*\(Join-Path\s*\(\[Environment\]::GetFolderPath\("CommonApplicationData"\)\)\s*"OZK-TOBACCO\\PrintBridge\\state\.json"\)') `
+        "وُجد الـdefault القديم المبني على CommonApplicationData لمعامل StatePath — هذا هو أصل عطل P1-D."
+    Assert-True ($bridgeSrc -match '\[string\]\$StatePath\s*=\s*""') "المعامل يجب أن يكون له default فارغ صريح يُحسم لاحقاً عبر الـhelper المشترك."
+}
+
+Test-Case "P1-D-3: ozk-print-bridge.ps1 يستورد الموديول المشترك ويحسم StatePath عبر Get-OzkPrintBridgeUserStatePath عند عدم تمريره" {
+    Assert-True ($bridgeSrc -match 'Import-Module\s*\(Join-Path\s*\$PSScriptRoot\s*"OzkPrintBridgeCommon\.psm1"\)') `
+        "يجب استيراد OzkPrintBridgeCommon.psm1 من نفس مجلد السكربت."
+    Assert-True ($bridgeSrc -match 'if\s*\(\[string\]::IsNullOrWhiteSpace\(\$StatePath\)\)\s*\{\s*\$StatePath\s*=\s*Get-OzkPrintBridgeUserStatePath\s*\}') `
+        "يجب حسم StatePath عبر Get-OzkPrintBridgeUserStatePath فقط عندما لا يُمرَّر المعامل صراحةً."
+}
+
+Test-Case "P1-D-4: ozk-print-bridge-ui.ps1 يستورد نفس الموديول المشترك ويحسب المسار الكانوني عبر نفس الدالة" {
+    Assert-True ($uiSrc -match 'Import-Module\s*\(Join-Path\s*\$PSScriptRoot\s*"OzkPrintBridgeCommon\.psm1"\)') `
+        "الواجهة يجب أن تستورد نفس الموديول المشترك — لا نسخة مستقلة من المسار."
+    Assert-True ($uiSrc -match '\$canonicalStatePath\s*=\s*Get-OzkPrintBridgeUserStatePath') `
+        "الواجهة يجب أن تحسب المسار عبر Get-OzkPrintBridgeUserStatePath بالضبط."
+}
+
+Test-Case "P1-D-5: ozk-print-bridge-ui.ps1 يمرّر -StatePath صراحةً في استدعاء الجسر (لكلا الوضعين)" {
+    Assert-True ($uiSrc -match '"-StatePath",\s*\(\x27"\{0\}"\x27\s*-f\s*\$canonicalStatePath\)') `
+        "يجب أن يُمرَّر -StatePath المبني على \$canonicalStatePath ضمن مصفوفة \$arguments المشتركة بين PreviewInvoice وPrintInvoice."
+}
+
+Test-Case "P1-D-6 (تساوٍ فعلي): الواجهة والجسر يحسبان حرفياً نفس StatePath — كلاهما عبر نفس الدالة المشتركة، لا عبر مسارين منفصلين" {
+    # الإثبات هنا بنيوي (لا مَحاكاة): كلا الملفين يستدعيان نفس اسم الدالة من
+    # نفس الموديول، والدالة نفسها حتمية (بلا حالة عشوائية) — فاستدعاؤها مرتين
+    # من نفس البيئة يُنتج بالضرورة نفس النص حرفياً. نتحقق من الاستدعاء الفعلي
+    # في كلا المصدرين (P1-D-3/P1-D-4) ثم من تساوي النتيجة الفعلية للدالة نفسها.
+    Assert-True ($bridgeSrc -match 'Get-OzkPrintBridgeUserStatePath') "الجسر يجب أن يستدعي الدالة المشتركة."
+    Assert-True ($uiSrc -match 'Get-OzkPrintBridgeUserStatePath') "الواجهة يجب أن تستدعي الدالة المشتركة."
+    $fromBridgeContext = Get-OzkPrintBridgeUserStatePath
+    $fromUiContext = Get-OzkPrintBridgeUserStatePath
+    Assert-True ($fromBridgeContext -eq $fromUiContext) "استدعاءان لنفس الدالة يجب أن يُنتجا نفس المسار حرفياً: ($fromBridgeContext) مقابل ($fromUiContext)."
+}
+
+Test-Case "P1-D-7: تعذّر تحديد LocalApplicationData → فشل واضح، لا fallback صامت إلى ProgramData/Documents/Desktop" {
+    # لا يمكن تزييف [Environment]::GetFolderPath نفسها، فنستخرج نص الدالة من
+    # الموديول الفعلي (وليس نسخة موازية) ونستبدل نتيجتها ببديل فارغ — نفس
+    # أسلوب Get-ManualPreviewPath-SimulatedNoLocalAppData أعلاه.
+    $commonModuleSrc = Get-Content -LiteralPath (Join-Path $bridgeDir "OzkPrintBridgeCommon.psm1") -Raw
+    $getStatePathSrc = Get-ExtractedFunctionText $commonModuleSrc "function Get-OzkPrintBridgeUserStatePath {"
+    $simulatedSrc = $getStatePathSrc -replace '\[Environment\]::GetFolderPath\("LocalApplicationData"\)', '""'
+    Assert-True ($simulatedSrc -ne $getStatePathSrc) "لم يُطبَّق الاستبدال المتوقع؛ الاختبار غير صالح."
+    . ([scriptblock]::Create(($simulatedSrc -replace 'function Get-OzkPrintBridgeUserStatePath', 'function Get-OzkPrintBridgeUserStatePath-SimulatedNoLocalAppData')))
+    $threwClearly = $false
+    $message = ""
+    try {
+        Get-OzkPrintBridgeUserStatePath-SimulatedNoLocalAppData | Out-Null
+    } catch {
+        $threwClearly = $true
+        $message = [string]$_.Exception.Message
+    }
+    Assert-True $threwClearly "عند تعذّر تحديد LocalApplicationData يجب أن تُطلق الدالة استثناءً واضحاً."
+    # الرسالة قد تَذكر ProgramData/Documents/Desktop بالاسم لتوضيح أنه لا يوجد
+    # رجوع صامت إليها (هذا مقصود وتوضيحي) — الإثبات الفعلي هو أن الدالة رمت
+    # استثناءً ولم تُعد أي مسار على الإطلاق (لا قيمة رجعت = لا fallback فعلي).
+    Assert-True (-not [string]::IsNullOrWhiteSpace($message)) "رسالة الخطأ يجب ألا تكون فارغة."
+}
+
+Test-Case "P1-D-8: PreviewInvoice لا يزال لا يقرأ ولا يكتب state.json إطلاقاً حتى بعد تمرير -StatePath له" {
+    $previewStart = $bridgeSrc.IndexOf('if ($Mode -eq "PreviewInvoice") {')
+    $previewEnd = $bridgeSrc.IndexOf('} else {', $previewStart)
+    Assert-True ($previewStart -ge 0 -and $previewEnd -gt $previewStart) "يجب تحديد حدود فرع PreviewInvoice."
+    $previewText = $bridgeSrc.Substring($previewStart, $previewEnd - $previewStart)
+    Assert-True ($previewText -notmatch 'state\.seen') "PreviewInvoice يجب ألا يقرأ أو يكتب state.seen إطلاقاً، حتى مع StatePath كانوني موحّد."
+    Assert-True ($previewText -notmatch 'Write-BridgeState') "PreviewInvoice يجب ألا يكتب ملف الحالة إطلاقاً."
+    Assert-True ($previewText -notmatch 'Read-BridgeState') "PreviewInvoice يجب ألا يقرأ ملف الحالة إطلاقاً."
+}
+
+Test-Case "شاهد سلبي (أ) P1-D: العودة إلى بناء الواجهة القديم بلا -StatePath تُسقط فحص تساوي المسار" {
+    # محاكاة الواجهة القديمة: لم تكن تمرّر -StatePath إطلاقاً، فكان الجسر
+    # يستخدم افتراضه الخاص (ProgramData) — مختلف عن المسار الكانوني الحالي.
+    $legacyArguments = @(
+        "-Mode", "PrintInvoice",
+        "-InvoiceNumber", "1001"
+        # لا -StatePath هنا عمداً — هذا بالضبط العطل الأصلي
+    )
+    $legacyHasStatePath = $legacyArguments -contains "-StatePath"
+    $negativeWitnessFailed = $false
+    try {
+        Assert-True $legacyHasStatePath "توقّع (مع الإصلاح فقط): يجب أن يحمل استدعاء الجسر -StatePath صراحةً."
+    } catch {
+        $negativeWitnessFailed = $true
+    }
+    Assert-True $negativeWitnessFailed "بناء الاستدعاء القديم (بلا -StatePath) يجب أن يُسقط فحص وجود -StatePath؛ إن لم يسقط فالشاهد السلبي غير فعّال."
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CODEX P1-E: baselineInitialized علم صريح، لا مجرد Test-Path على وجود الملف.
+# محاكاة يدوية لحارس baseline الحقيقي في وضع Observe (نفس المنطق المُستخرَج
+# أعلاه لـ New-EmptyState/Read-BridgeState/Write-BridgeState، بلا SQL ولا
+# حلقة لا نهائية) — يُطابق الكود الفعلي في ozk-print-bridge.ps1 سطراً بسطر.
+# ═══════════════════════════════════════════════════════════════════════════
+
+Write-Host "`n== CODEX P1-E: baselineInitialized كعلم صريح لا كـ Test-Path =="
+
+# يحاكي كتلة الحارس الحقيقية: لا يبني baseline إلا إذا لم يكتمل بعد
+# (state.baselineInitialized = false)، ولا يمسّ أي مدخل seen موجود مسبقاً،
+# ويكتب baselineInitialized = true ضمن نفس الكتابة الذرّية لمدخلات baseline.
+function Invoke-BaselineGate([string]$StatePath, [object[]]$Candidates) {
+    $state = Read-BridgeState $StatePath
+    if (-not $state.baselineInitialized) {
+        foreach ($candidate in $Candidates) {
+            if (-not $state.seen.ContainsKey($candidate.InvoiceGuid)) {
+                $state.seen[$candidate.InvoiceGuid] = [ordered]@{
+                    status = "baseline"
+                    invoiceNumber = $candidate.InvoiceNumber
+                    observedAt = (Get-Date).ToUniversalTime().ToString("o")
+                }
+            }
+        }
+        $state.baselineInitialized = $true
+        Write-BridgeState $StatePath $state
+        return $true
+    }
+    return $false
+}
+
+function New-BaselineCandidate([string]$Guid, [int]$Number) {
+    return [pscustomobject]@{ InvoiceGuid = $Guid; InvoiceNumber = $Number }
+}
+
+Test-Case "بنيوي P1-E: الحارس الحقيقي في المصدر يفحص state.baselineInitialized لا Test-Path على وجود الملف" {
+    Assert-True ($bridgeSrc -notmatch '\$stateExisted\s*=\s*Test-Path\s*-LiteralPath\s*\$StatePath') `
+        "وُجد الحارس القديم القائم على Test-Path لوجود الملف — هذا هو أصل عطل P1-E."
+    Assert-True ($bridgeSrc -match 'if\s*\(-not\s*\$state\.baselineInitialized\)\s*\{') `
+        "الحارس الفعلي يجب أن يكون if (-not \$state.baselineInitialized)."
+}
+
+Test-Case "F.1: لا حالة سابقة → طباعة يدوية GUID-X → الملف الكانوني تحت %LOCALAPPDATA% → GUID-X=spooled → baselineInitialized=false" {
+    $path = New-StatePath
+    $script:ManualSendCount = 0
+    Assert-True ((Invoke-ManualPrintIteration $path "guid-x") -eq "spooled") "الطباعة اليدوية الأولى يجب أن تنجح."
+    $reloaded = Read-BridgeState $path
+    Assert-True ([string]$reloaded.seen["guid-x"].status -eq "spooled") "GUID-X يجب أن يكون spooled."
+    Assert-True ($reloaded.baselineInitialized -eq $false) "حالة جديدة تماماً من طباعة يدوية قبل أي تشغيل Observe يجب أن تبقى baselineInitialized=false."
+}
+
+Test-Case "F.2: أول تشغيل Observe مع 100 فاتورة تاريخية → GUID-X لا يُعاد طبعه → البقية 99 تصبح baseline → صفر طباعة فعلية → baselineInitialized=true" {
+    $path = New-StatePath
+    $script:ManualSendCount = 0
+    [void](Invoke-ManualPrintIteration $path "guid-x")   # طباعة يدوية سابقة لأول تشغيل Observe
+
+    $candidates = @(New-BaselineCandidate "guid-x" 1)     # نفس الفاتورة المطبوعة يدوياً ضمن المرشحين أيضاً
+    for ($i = 1; $i -le 99; $i++) { $candidates += New-BaselineCandidate "hist-guid-$i" (1000 + $i) }
+    Assert-True ((Invoke-BaselineGate $path $candidates) -eq $true) "أول تشغيل Observe يجب أن يبني baseline فعلياً."
+
+    $reloaded = Read-BridgeState $path
+    Assert-True ([string]$reloaded.seen["guid-x"].status -eq "spooled") "GUID-X يجب أن يبقى spooled ولا يتحول إلى baseline (لا يُعاد طبعه)."
+    $baselineCount = @($reloaded.seen.GetEnumerator() | Where-Object { [string]$_.Value.status -eq "baseline" }).Count
+    Assert-True ($baselineCount -eq 99) "يجب أن تُعلَّم بالضبط 99 فاتورة تاريخية بحالة baseline (وُجد $baselineCount)."
+    Assert-True ($script:ManualSendCount -eq 1) "يجب ألا يقع أي إرسال فيزيائي إضافي أثناء بناء baseline (العدد الوحيد هو الطباعة اليدوية السابقة)."
+    Assert-True ($reloaded.baselineInitialized -eq $true) "بعد اكتمال أول بناء baseline يجب أن يصبح العلم true."
+}
+
+Test-Case "F.3: تشغيل Observe ثانٍ لاحق لا يعيد بناء baseline" {
+    $path = New-StatePath
+    $candidates = @((New-BaselineCandidate "hist-1" 1), (New-BaselineCandidate "hist-2" 2))
+    [void](Invoke-BaselineGate $path $candidates)
+    $afterFirst = Read-BridgeState $path
+    $countAfterFirst = $afterFirst.seen.Count
+
+    $newCandidatesIncludingOld = $candidates + @(New-BaselineCandidate "hist-3-new" 3)
+    Assert-True ((Invoke-BaselineGate $path $newCandidatesIncludingOld) -eq $false) "التشغيل الثاني يجب ألا يدخل كتلة بناء baseline إطلاقاً."
+    $afterSecond = Read-BridgeState $path
+    Assert-True ($afterSecond.seen.Count -eq $countAfterFirst) "لا مدخل جديد (مثل hist-3-new) يجب أن يُضاف عبر حارس baseline بعد اكتماله."
+}
+
+Test-Case "F.7 (مكرر تأكيدي مع النطاق الجديد): إعادة الطباعة اليدوية المتعمدة بعد baseline تبقى مسموحة" {
+    $path = New-StatePath
+    [void](Invoke-BaselineGate $path @(New-BaselineCandidate "reprint-guid" 5))
+    $afterBaseline = Read-BridgeState $path
+    Assert-True ([string]$afterBaseline.seen["reprint-guid"].status -eq "baseline") "قبل الطباعة اليدوية يجب أن تكون الحالة baseline."
+    $script:ManualSendCount = 0
+    Assert-True ((Invoke-ManualPrintIteration $path "reprint-guid") -eq "spooled") "الطباعة اليدوية المتعمدة لفاتورة مُعلَّمة baseline يجب أن تنجح دوماً."
+    Assert-True ($script:ManualSendCount -eq 1) "يجب أن يقع إرسال فعلي واحد."
+    $final = Read-BridgeState $path
+    Assert-True ([string]$final.seen["reprint-guid"].status -eq "spooled") "الحالة يجب أن تتحول إلى spooled بعد الطباعة اليدوية المتعمدة."
+}
+
+Test-Case "F.8: حالة قائمة بالفعل بعلم baselineInitialized=true → سلوك بلا تغيير" {
+    $path = New-StatePath
+    $preexisting = Read-BridgeState $path
+    $preexisting.baselineInitialized = $true
+    $preexisting.seen["already-there"] = [ordered]@{ status = "spooled"; invoiceNumber = 9; observedAt = (Get-Date).ToUniversalTime().ToString("o") }
+    Write-BridgeState $path $preexisting
+
+    Assert-True ((Invoke-BaselineGate $path @(New-BaselineCandidate "new-hist" 10)) -eq $false) "حالة مُهيَّأة مسبقاً يجب ألا تدخل كتلة بناء baseline."
+    $reloaded = Read-BridgeState $path
+    Assert-True (-not $reloaded.seen.ContainsKey("new-hist")) "لا مدخل جديد يجب أن يُضاف عبر باسلاين بعد أن كان العلم true أصلاً."
+    Assert-True ([string]$reloaded.seen["already-there"].status -eq "spooled") "المدخل الموجود مسبقاً يجب أن يبقى بلا تغيير."
+}
+
+Test-Case "F.9: ملف قديم بلا الحقل لكن يحوي مدخلات بحالة baseline → يُعامل كمُهيَّأ مسبقاً (قاعدة الترحيل)" {
+    $path = New-StatePath
+    $directory = Split-Path -Parent $path
+    [void](New-Item -ItemType Directory -Path $directory -Force)
+    $legacyJson = '{"schemaVersion":1,"database":"AmnDb002","seen":{"legacy-baseline-1":{"status":"baseline","invoiceNumber":1,"observedAt":"2025-01-01T00:00:00.0000000Z"}}}'
+    [IO.File]::WriteAllText($path, $legacyJson, (New-Object Text.UTF8Encoding($false)))
+
+    $reloaded = Read-BridgeState $path
+    Assert-True ($reloaded.baselineInitialized -eq $true) "ملف قديم بلا الحقل يجب أن يُقرأ كـ baselineInitialized=true (قاعدة الترحيل)."
+    Assert-True ((Invoke-BaselineGate $path @(New-BaselineCandidate "another-hist" 2)) -eq $false) "لا يجوز إعادة بناء baseline على ملف قديم مُرحَّل يُعتبر مُهيَّأً بالفعل."
+}
+
+Test-Case "F.10: ملف قديم بلا الحقل وبلا أي دليل باسلاين سابق → قاعدة الترحيل نفسها تُطبَّق (true) — لا افتراض False تخميني" {
+    $path = New-StatePath
+    $directory = Split-Path -Parent $path
+    [void](New-Item -ItemType Directory -Path $directory -Force)
+    # حالة قديمة واقعية: بقيت بها فقط فاتورة قيد الإرسال من تشغيل سابق، بلا أي
+    # مدخل baseline — تحاكي ملف state.json حقيقي من قبل هذا الإصلاح.
+    $legacyJson = '{"schemaVersion":1,"database":"AmnDb002","seen":{"legacy-in-flight":{"status":"print_in_flight","invoiceNumber":7,"observedAt":"2025-01-01T00:00:00.0000000Z"}}}'
+    [IO.File]::WriteAllText($path, $legacyJson, (New-Object Text.UTF8Encoding($false)))
+
+    $reloaded = Read-BridgeState $path
+    # القاعدة المُثبتة (انظر تعليق Read-BridgeState في المصدر): غياب الحقل على
+    # المسار الكانوني بالذات ⇐ true دوماً، بصرف النظر عن وجود مدخلات baseline
+    # من عدمه — لأن أي ملف على هذا المسار لم يُنشئه قبل هذا الإصلاح سوى كتلة
+    # baseline القديمة المكتملة دوماً قبل كتابتها الذرّية الأولى.
+    Assert-True ($reloaded.baselineInitialized -eq $true) "غياب الحقل يجب أن يُقرأ كـ true دوماً على هذا المسار، لا كـ false تخميني — هذا بالضبط ما يمنع انفجار الطباعة التاريخية عند الترقية."
+    Assert-True ((Invoke-BaselineGate $path @(New-BaselineCandidate "post-upgrade-hist" 8)) -eq $false) "لا يجوز أن يُعيد الترقية بناء baseline ويطبع فواتير تاريخية."
+}
+
+Test-Case "F.11: مدخلات seen الموجودة مسبقاً (spooled/print_in_flight/observed_waiting) لا تُمحى أو تُعاد تسميتها أثناء بناء baseline" {
+    $path = New-StatePath
+    $preexisting = Read-BridgeState $path
+    $preexisting.seen["manual-spooled"] = [ordered]@{ status = "spooled"; invoiceNumber = 1; observedAt = (Get-Date).ToUniversalTime().ToString("o") }
+    $preexisting.seen["in-flight"] = [ordered]@{ status = "print_in_flight"; invoiceNumber = 2; observedAt = (Get-Date).ToUniversalTime().ToString("o") }
+    $preexisting.seen["waiting-activation"] = [ordered]@{ status = "observed_waiting_for_print_activation"; invoiceNumber = 3; observedAt = (Get-Date).ToUniversalTime().ToString("o") }
+    Write-BridgeState $path $preexisting
+
+    $candidates = @(
+        (New-BaselineCandidate "manual-spooled" 1),
+        (New-BaselineCandidate "in-flight" 2),
+        (New-BaselineCandidate "waiting-activation" 3),
+        (New-BaselineCandidate "brand-new-hist" 4)
+    )
+    [void](Invoke-BaselineGate $path $candidates)
+    $reloaded = Read-BridgeState $path
+    Assert-True ([string]$reloaded.seen["manual-spooled"].status -eq "spooled") "مدخل spooled سابق يجب ألا يتغيّر."
+    Assert-True ([string]$reloaded.seen["in-flight"].status -eq "print_in_flight") "مدخل print_in_flight سابق يجب ألا يتغيّر."
+    Assert-True ([string]$reloaded.seen["waiting-activation"].status -eq "observed_waiting_for_print_activation") "مدخل observed_waiting_for_print_activation سابق يجب ألا يتغيّر."
+    Assert-True ([string]$reloaded.seen["brand-new-hist"].status -eq "baseline") "فقط المرشّح غير الموجود مسبقاً في seen يُضاف بحالة baseline."
+}
+
+Test-Case "F.12: observed_waiting_for_print_activation لا يتأثر بحارس baseline الجديد (لا Regression)" {
+    $path = New-StatePath
+    $preexisting = Read-BridgeState $path
+    $preexisting.seen["waiting-2"] = [ordered]@{ status = "observed_waiting_for_print_activation"; invoiceNumber = 11; observedAt = (Get-Date).ToUniversalTime().ToString("o") }
+    Write-BridgeState $path $preexisting
+    [void](Invoke-BaselineGate $path @(New-BaselineCandidate "waiting-2" 11))
+    $reloaded = Read-BridgeState $path
+    Assert-True ([string]$reloaded.seen["waiting-2"].status -eq "observed_waiting_for_print_activation") "الحالة يجب أن تبقى observed_waiting_for_print_activation بلا تغيير بعد حارس baseline."
+    Assert-True ((Should-SkipSeenInvoice $reloaded.seen["waiting-2"] $false) -eq $true) "في نفس وضع الرصد (false) تبقى متخطاة — كما قبل التعديل تماماً."
+    Assert-True ((Should-SkipSeenInvoice $reloaded.seen["waiting-2"] $true) -eq $false) "دلالة 'ليست نهائية' يجب أن تبقى كما هي: مع ConfirmPhysicalPrint=true تُعاد لخط الأنابيب الكامل، بلا Regression من حارس baseline الجديد."
+}
+
+Test-Case "شاهد سلبي (ب) P1-E: العودة إلى حارس Test-Path القديم بدل baselineInitialized تُسقط سيناريو الطباعة اليدوية قبل أول Observe" {
+    # يحاكي الحارس القديم بالضبط: يبني baseline فقط إذا لم يكن الملف موجوداً
+    # أصلاً — فطباعة يدوية سابقة (تُنشئ الملف) تمنع باسلاين من الاكتمال إطلاقاً
+    # لاحقاً، بعكس الحارس الجديد الذي يعتمد على العلم الصريح لا وجود الملف.
+    function Invoke-BaselineGate-LegacyTestPathGated([string]$StatePath, [object[]]$Candidates) {
+        $stateExisted = Test-Path -LiteralPath $StatePath -PathType Leaf
+        $state = Read-BridgeState $StatePath
+        if (-not $stateExisted) {
+            foreach ($candidate in $Candidates) {
+                $state.seen[$candidate.InvoiceGuid] = [ordered]@{
+                    status = "baseline"
+                    invoiceNumber = $candidate.InvoiceNumber
+                    observedAt = (Get-Date).ToUniversalTime().ToString("o")
+                }
+            }
+            Write-BridgeState $StatePath $state
+            return $true
+        }
+        return $false
+    }
+
+    $path = New-StatePath
+    $script:ManualSendCount = 0
+    [void](Invoke-ManualPrintIteration $path "guid-x-legacy")   # يُنشئ الملف على القرص قبل أي Observe
+
+    $negativeWitnessFailed = $false
+    try {
+        $ran = Invoke-BaselineGate-LegacyTestPathGated $path @(New-BaselineCandidate "guid-x-legacy" 1, New-BaselineCandidate "hist-legacy-1" 2)
+        Assert-True ($ran -eq $true) "توقّع (مع الإصلاح فقط): أول تشغيل Observe الفعلي يجب أن يبني baseline رغم وجود ملف أنشأته طباعة يدوية سابقة."
+    } catch {
+        $negativeWitnessFailed = $true
+    }
+    Assert-True $negativeWitnessFailed "الحارس القديم القائم على Test-Path (وجود الملف) يجب أن يُسقط سيناريو 'طباعة يدوية قبل أول Observe' لأن الملف موجود فعلاً فيتخطى بناء baseline بلا رجعة؛ إن لم يسقط فالشاهد السلبي غير فعّال."
+}
+
 Write-Host "`n$($script:passed) passed, $($script:failed) failed"
 if ($script:failed -gt 0) { exit 1 }

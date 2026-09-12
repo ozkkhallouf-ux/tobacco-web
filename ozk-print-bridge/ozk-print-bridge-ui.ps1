@@ -8,6 +8,13 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [Windows.Forms.Application]::EnableVisualStyles()
 
+# نفس helper المسار الكانوني الذي يستخدمه ozk-print-bridge.ps1 والمراقب
+# الإنتاجي (watchdog/task wrapper) — يضمن أن الطباعة اليدوية من هذه الواجهة
+# تكتب إلى نفس ملف state.json الذي يقرأه المراقب الآلي، لا إلى مسار مختلف
+# (إصلاح P1-D).
+Import-Module (Join-Path $PSScriptRoot "OzkPrintBridgeCommon.psm1") -Force -DisableNameChecking
+$canonicalStatePath = Get-OzkPrintBridgeUserStatePath
+
 function Get-ManualPreviewPath {
     # المعاينة تحتوي اسم الزبون والأصناف والأرصدة، فيجب ألا تُكتب أبداً داخل
     # نسخة Git (مجلد $BridgeRoot/$PSScriptRoot) حيث قد يلتقطها git add -A لاحقاً
@@ -155,7 +162,12 @@ function Invoke-Bridge([string]$Mode, [bool]$Print) {
         "-InvoiceDate", $selection.Date,
         "-InvoiceType", $selection.Type,
         "-PreviewPath", ('"{0}"' -f $previewPath),
-        "-PrinterName", '"XPRINTER XP-T80Q 80MM"'
+        "-PrinterName", '"XPRINTER XP-T80Q 80MM"',
+        # يُمرَّر صراحةً لكلا الوضعين (وليس فقط PrintInvoice) كي يبقى المسار
+        # المحسوب هنا مطابقاً حرفياً لما يستخدمه المراقب دائماً بصرف النظر عن
+        # الوضع — PreviewInvoice لا يقرأ/يكتب state.json أصلاً فتمريره له غير
+        # ضار، ويتيح اختبار تساوي المسار (P1-D) على كلا الوضعين.
+        "-StatePath", ('"{0}"' -f $canonicalStatePath)
     )
     if ($Print) { $arguments += "-ConfirmPhysicalPrint" }
     $form.UseWaitCursor = $true

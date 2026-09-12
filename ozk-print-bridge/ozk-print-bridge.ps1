@@ -34,12 +34,24 @@ param(
 
     [switch]$ConfirmPhysicalPrint,
 
-    [string]$StatePath = (Join-Path ([Environment]::GetFolderPath("CommonApplicationData")) "OZK-TOBACCO\PrintBridge\state.json"),
+    # لا يوجد default معقّد هنا عمداً: param() يجب أن يكون أول عبارة قابلة
+    # للتنفيذ في السكربت، فلا يمكن استدعاء helper من موديول لم يُستورد بعد
+    # داخل تعبير default. القيمة الفعلية تُحسم لاحقاً في جسم السكربت مباشرة
+    # (انظر أسفله) عبر Get-OzkPrintBridgeUserStatePath — نفس helper الذي
+    # تستخدمه ozk-print-bridge-ui.ps1، لضمان مسار كانوني واحد مطابق تماماً
+    # لما يستخدمه المراقب الإنتاجي (إصلاح P1-D). عدم تمرير -StatePath صراحةً
+    # يساوي "استخدم الافتراضي الكانوني"؛ تمريره فارغاً صراحةً مرفوض أدناه.
+    [string]$StatePath = "",
 
     [string]$LogPath = (Join-Path ([Environment]::GetFolderPath("CommonApplicationData")) "OZK-TOBACCO\PrintBridge\logs\events.jsonl")
 )
 
 $ErrorActionPreference = "Stop"
+
+Import-Module (Join-Path $PSScriptRoot "OzkPrintBridgeCommon.psm1") -Force -DisableNameChecking
+if ([string]::IsNullOrWhiteSpace($StatePath)) {
+    $StatePath = Get-OzkPrintBridgeUserStatePath
+}
 $script:RetailTypeGuid = "cc1097b1-662d-4d80-8e4e-3b493249591c"
 $script:WholesaleTypeGuids = @(
     "7f5b0921-61f3-4f23-a1f4-fbfae4144bf4",
@@ -1031,6 +1043,11 @@ function New-EmptyState {
         # GUID -> {fingerprint, invoiceNumber, category, reason, quarantinedAt}.
         # فواتير تعذّر تصييرها تعذّراً حتمياً. منفصلة عن seen عمداً: ليست مطبوعة.
         quarantined = @{}
+        # هل انتهى بناء baseline الأول فعلاً على هذا الملف؟ (P1-E) — علم صريح
+        # لا يُستنتج أبداً من مجرد وجود ملف state.json على القرص؛ وجود الملف
+        # وحده لا يعني أن baseline اكتمل (مثلاً ملف أنشأته PrintInvoice يدوياً
+        # قبل أي تشغيل لـ Observe). يبدأ False دائماً لملف جديد تماماً.
+        baselineInitialized = $false
     }
 }
 
@@ -1043,6 +1060,26 @@ function Read-BridgeState([string]$Path) {
     $state = New-EmptyState
     foreach ($property in $parsed.seen.psobject.Properties) {
         $state.seen[$property.Name.ToLowerInvariant()] = $property.Value
+    }
+    # قاعدة الترحيل الخلفي (P1-E): ملف state.json القديم (قبل هذا الإصلاح) لا
+    # يحوي baselineInitialized إطلاقاً. لا يجوز افتراض False هنا بلا دليل —
+    # هذا بالضبط ما قد يجعل نصباً قديماً في الإنتاج يعيد بناء baseline عند
+    # الترقية. الدليل الفعلي: Write-BridgeState يكتب ذرّياً دائماً (ملف مؤقت ثم
+    # IO.File]::Move/Replace)، ولا وجود لحالة كتابة جزئية؛ وقبل هذا الإصلاح لم
+    # تكن ozk-print-bridge-ui.ps1 تمرّر -StatePath إطلاقاً فكانت تكتب دوماً إلى
+    # المسار الافتراضي المختلف (ProgramData) لا إلى هذا المسار الكانوني
+    # (LOCALAPPDATA). إذن أي ملف قائم فعلاً على هذا المسار الكانوني بالذات لا
+    # يمكن أن يكون قد أُنشئ إلا عبر كتلة baseline القديمة في وضع Observe نفسها
+    # (Test-Path -gated)، وتلك الكتلة كانت تُنهي بناء baseline بالكامل ثم تكتبه
+    # ذرّياً قبل أن يصبح الملف قابلاً للقراءة أصلاً — أي أن وجود الملف بلا هذا
+    # الحقل يثبت أن baseline قد اكتمل فعلاً، وليس العكس. لذلك: غياب الحقل يُقرأ
+    # كـ True (مهيّأ مسبقاً)، وليس False — هذا يمنع بالضبط سيناريو "طباعة
+    # انفجارية للفواتير القديمة عند الترقية" الذي حذّر منه المستخدم، بلا أي
+    # تخمين: هو مبني على تتبّع تدفّق الكتابة الفعلي في الكود القديم.
+    if ($null -ne $parsed.PSObject.Properties['baselineInitialized']) {
+        $state.baselineInitialized = [bool]$parsed.baselineInitialized
+    } else {
+        $state.baselineInitialized = $true
     }
     # Older state files (before this fix) won't have this property yet.
     if ($null -ne $parsed.PSObject.Properties['recentFingerprints']) {
@@ -1342,7 +1379,6 @@ try {
         exit 0
     }
 
-    $stateExisted = Test-Path -LiteralPath $StatePath -PathType Leaf
     $state = Read-BridgeState $StatePath
 
     # فاتورة بقيت print_in_flight من تشغيل سابق تعني: أُرسلت إلى الطابعة ثم تعذّر
@@ -1375,14 +1411,29 @@ try {
             })
         }
     }
-    if (-not $stateExisted) {
+    if (-not $state.baselineInitialized) {
+        # (P1-E) الحارس الآن علم صريح baselineInitialized، لا مجرد وجود ملف —
+        # حتى لو كان state.json موجوداً بالفعل (مثلاً أنشأته PrintInvoice
+        # يدوياً قبل أول تشغيل لـ Observe)، يُبنى baseline طالما لم يكتمل بعد.
+        #
+        # لا يُمس أي مدخل موجود مسبقاً في seen مهما كانت حالته: GUID طُبع يدوياً
+        # (spooled)، أو print_in_flight، أو observed_waiting_for_print_activation
+        # — تُترك كما هي بدلالاتها الحالية بلا تغيير. فقط المرشّحون غير
+        # الموجودين إطلاقاً في seen يُضافون بحالة "baseline" (ملاحظون، غير
+        # مطبوعين).
         foreach ($candidate in $candidates) {
-            $state.seen[$candidate.InvoiceGuid] = [ordered]@{
-                status = "baseline"
-                invoiceNumber = $candidate.InvoiceNumber
-                observedAt = (Get-Date).ToUniversalTime().ToString("o")
+            if (-not $state.seen.ContainsKey($candidate.InvoiceGuid)) {
+                $state.seen[$candidate.InvoiceGuid] = [ordered]@{
+                    status = "baseline"
+                    invoiceNumber = $candidate.InvoiceNumber
+                    observedAt = (Get-Date).ToUniversalTime().ToString("o")
+                }
             }
         }
+        # يُكتب baselineInitialized = true ضمن نفس عملية الكتابة الذرّية التي
+        # تحفظ مدخلات baseline، لا في كتابة منفصلة قد تترك حالة غير متّسقة لو
+        # انقطع التنفيذ بينهما.
+        $state.baselineInitialized = $true
         Write-BridgeState $StatePath $state
         $baselineEvent = [pscustomobject]@{
             Event = "baseline_initialized"
