@@ -967,6 +967,156 @@ Test-Case "وحدة العرض: الفشل قبل قبول المهمة يرمي
     Assert-True ($rendererSrc -match 'WritePrinter failed with Win32 error " \+ Marshal\.GetLastWin32Error\(\)\);') "WritePrinter يجب أن يبقى استثناءً غامضاً"
 }
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Partial WritePrinter (P1): WritePrinter لا يضمن كتابة كل البايتات دفعة
+# واحدة. Send() في وحدة العرض يجب أن يستمر بالكتابة حتى اكتمال الحمولة كاملة،
+# بحدين يمنعان أي حلقة غير منتهية. WritePrinter الحقيقية تتطلب طابعة Win32
+# فعلية فلا يمكن استدعاؤها هنا؛ نُعيد تنفيذ نفس خوارزمية الحلقة حرفياً
+# بـPowerShell مع دالة WritePrinter وهمية قابلة للتحكم الكامل، ونربطها بالمصدر
+# الحقيقي عبر فحوصات بنيوية صريحة تمنع انحراف المحاكاة عن التطبيق الفعلي.
+# ═══════════════════════════════════════════════════════════════════════════
+Write-Host "`n== Partial WritePrinter (P1): حلقة الكتابة الكاملة =="
+
+Test-Case "بنيوي: حلقة الكتابة الحقيقية في وحدة العرض تطابق الخوارزمية المتوقَّعة" {
+    Assert-True ($rendererSrc -match 'while \(offset < payload\.Length\)') "يجب وجود حلقة حتى اكتمال الحمولة"
+    Assert-True ($rendererSrc -match 'Buffer\.BlockCopy\(payload, offset, chunk, 0, bytesRemaining\)') "يجب تمرير الجزء المتبقي فقط من المخزن المؤقت في كل استدعاء"
+    Assert-True ($rendererSrc -match 'if \(written <= 0\) throw new IOException') "يجب رمي استثناء صريح عند صفر بايت مكتوب لمنع حلقة غير منتهية"
+    Assert-True ($rendererSrc -match 'if \(written > bytesRemaining\) throw new IOException') "يجب الفشل المغلَق عند تجاوز الكتابة للمطلوب"
+    Assert-True ($rendererSrc -match 'offset \+= written;') "يجب تراكم البايتات المكتوبة فعلياً"
+    Assert-True ($rendererSrc -match 'if \(offset != payload\.Length\) throw new IOException\("Incomplete RAW printer write\."\);') "الاكتمال الكامل هو الشرط الوحيد للنجاح"
+}
+
+# محاكاة صريحة لنفس خوارزمية OzkRawThermalPrinter.Send الحقيقية (مربوطة
+# بالمصدر عبر الفحص البنيوي أعلاه). $WritePrinterSim يُستدعى بـ(offset,
+# bytesRemaining) ويعيد @{ Success; Written; Win32Error }.
+function Invoke-SimulatedWritePrinterLoop([int]$PayloadLength, [scriptblock]$WritePrinterSim) {
+    $offset = 0
+    $script:SimCallCount = 0
+    $maxIterations = $PayloadLength + 10   # سقف دفاعي: يثبت غياب الحلقة غير المنتهية داخل الاختبار نفسه
+    while ($offset -lt $PayloadLength) {
+        $script:SimCallCount++
+        if ($script:SimCallCount -gt $maxIterations) { throw "تجاوز عدد التكرارات المسموح — الحلقة لا تنتهي." }
+        $bytesRemaining = $PayloadLength - $offset
+        $result = & $WritePrinterSim $offset $bytesRemaining
+        if (-not $result.Success) { throw [InvalidOperationException]::new("WritePrinter failed with Win32 error " + $result.Win32Error) }
+        if ($result.Written -le 0) { throw [System.IO.IOException]::new("WritePrinter wrote zero bytes with $bytesRemaining bytes remaining; aborting to avoid an infinite loop.") }
+        if ($result.Written -gt $bytesRemaining) { throw [System.IO.IOException]::new("WritePrinter reported writing more bytes than requested.") }
+        $offset += $result.Written
+    }
+    if ($offset -ne $PayloadLength) { throw [System.IO.IOException]::new("Incomplete RAW printer write.") }
+    return $offset
+}
+
+Test-Case "1) كتابة كاملة باستدعاء واحد → مسار النجاح القديم يبقى صحيحاً" {
+    $written = Invoke-SimulatedWritePrinterLoop 500 { param($o, $r) @{ Success = $true; Written = $r } }
+    Assert-True ($written -eq 500) "الاكتمال يجب أن يساوي حجم الحمولة كاملاً"
+    Assert-True ($script:SimCallCount -eq 1) "استدعاء واحد فقط لكتابة كاملة"
+}
+
+Test-Case "2) جزئية ثم جزئية ثم كاملة → تكتمل الحمولة بنجاح" {
+    $calls = @(200, 150, 150)  # 500 بالمجموع
+    $script:CallIndex2 = 0
+    $written = Invoke-SimulatedWritePrinterLoop 500 { param($o, $r) $w = $calls[$script:CallIndex2]; $script:CallIndex2++; @{ Success = $true; Written = $w } }
+    Assert-True ($written -eq 500) "المجموع النهائي يجب أن يساوي 500"
+    Assert-True ($script:SimCallCount -eq 3) "ثلاثة استدعاءات بالضبط"
+}
+
+Test-Case "3) كتابات جزئية متعددة → لا فقدان ولا تكرار لأي بايت" {
+    $calls = @(64, 64, 64, 64, 64, 64, 64, 32)  # 480 بالمجموع
+    $script:CallIndex3 = 0
+    $script:OffsetsSeen = @()
+    $written = Invoke-SimulatedWritePrinterLoop 480 {
+        param($o, $r)
+        $script:OffsetsSeen += $o
+        $w = $calls[$script:CallIndex3]; $script:CallIndex3++
+        @{ Success = $true; Written = $w }
+    }
+    Assert-True ($written -eq 480) "المجموع النهائي يجب أن يساوي 480"
+    $expectedOffsets = @(0, 64, 128, 192, 256, 320, 384, 448)
+    Assert-True (($script:OffsetsSeen -join ",") -eq ($expectedOffsets -join ",")) "كل استدعاء يجب أن يبدأ من نهاية سابقه بالضبط — لا فقدان ولا تكرار"
+}
+
+Test-Case "4) WritePrinter=false قبل أي بايت → رمي استثناء" {
+    Assert-Throws { Invoke-SimulatedWritePrinterLoop 500 { param($o, $r) @{ Success = $false; Written = 0; Win32Error = 6 } } } "يجب الرمي عند فشل أول استدعاء"
+}
+
+Test-Case "5) WritePrinter=false بعد تقدّم جزئي → رمي استثناء" {
+    $script:CallIndex5 = 0
+    Assert-Throws {
+        Invoke-SimulatedWritePrinterLoop 500 {
+            param($o, $r)
+            $script:CallIndex5++
+            if ($script:CallIndex5 -eq 1) { return @{ Success = $true; Written = 200 } }
+            @{ Success = $false; Written = 0; Win32Error = 6 }
+        }
+    } "يجب الرمي عند فشل استدعاء لاحق حتى مع تقدّم سابق"
+    Assert-True ($script:CallIndex5 -eq 2) "يجب أن يصل الاستدعاء الثاني فعلاً قبل الرمي — إثبات أن الفشل اللاحق هو ما أوقف الحلقة"
+}
+
+Test-Case "6) written=0 مع bytesRemaining>0 → رمي استثناء ولا حلقة غير منتهية" {
+    $script:SimCallCount = 0
+    Assert-Throws { Invoke-SimulatedWritePrinterLoop 500 { param($o, $r) @{ Success = $true; Written = 0 } } } "يجب الرمي فوراً بدل التكرار للأبد"
+    Assert-True ($script:SimCallCount -eq 1) "يجب الرمي من أول استدعاء بصفر بايت — لا تكرار إضافي"
+}
+
+Test-Case "7) written أكبر من المطلوب المتبقي → فشل مغلَق" {
+    Assert-Throws { Invoke-SimulatedWritePrinterLoop 500 { param($o, $r) @{ Success = $true; Written = $r + 1 } } } "يجب الفشل المغلَق عند تجاوز الكتابة للمطلوب"
+}
+
+Test-Case "8) إجمالي البايتات المكتوبة يساوي حجم الحمولة بالضبط" {
+    $calls = @(300, 199, 1)
+    $script:CallIndex8 = 0
+    $written = Invoke-SimulatedWritePrinterLoop 500 { param($o, $r) $w = $calls[$script:CallIndex8]; $script:CallIndex8++; @{ Success = $true; Written = $w } }
+    Assert-True ($written -eq 500) "المجموع يجب أن يطابق حجم الحمولة تماماً، لا أقل ولا أكثر"
+}
+
+Test-Case "9) EndPage/EndDoc لا يُعتبران إثباتاً على نجاح الكتابة قبل اكتمال الحمولة" {
+    # بنيوي: فحص اكتمال offset مقابل payload.Length يجب أن يقع في المصدر قبل
+    # أول استدعاء لـEndPagePrinter — لا يجوز اعتبار EndPage/EndDoc دليل اكتمال.
+    $loopIdx = $rendererSrc.IndexOf('while (offset < payload.Length)')
+    $endPageIdx = $rendererSrc.IndexOf('EndPagePrinter(printer)) throw', $loopIdx)
+    Assert-True ($loopIdx -ge 0 -and $endPageIdx -ge 0) "يجب وجود الموضعين في المصدر الحقيقي"
+    Assert-True ($loopIdx -lt $endPageIdx) "حلقة اكتمال الكتابة يجب أن تسبق أي استدعاء لـEndPagePrinter في التسلسل"
+}
+
+Test-Case "10) السلوك النهائي للجسر: النجاح الكامل فقط يسمح بمسار النجاح الطبيعي" {
+    # بنيوي: عبارة "return jobId" يجب أن تقع بعد حلقة الكتابة الكاملة في المصدر،
+    # فلا يمكن الوصول لمسار النجاح الطبيعي إلا بعد اكتمال offset == payload.Length.
+    $loopIdx = $rendererSrc.IndexOf('while (offset < payload.Length)')
+    $returnIdx = $rendererSrc.IndexOf('return jobId;')
+    Assert-True ($loopIdx -ge 0 -and $returnIdx -ge 0) "يجب وجود الموضعين"
+    Assert-True ($loopIdx -lt $returnIdx) "return jobId يجب أن يقع بعد حلقة الكتابة الكاملة — لا نجاح جزئي"
+    # وسلوكياً: أي فشل في المحاكاة (جزئي غير مكتمل) يمنع الوصول لنقطة الاكتمال
+    Assert-Throws { Invoke-SimulatedWritePrinterLoop 500 { param($o, $r) @{ Success = $true; Written = 100 }; if ($o -ge 400) { @{ Success = $false; Written = 0; Win32Error = 6 } } } } "لا نجاح جزئي مسموح"
+}
+
+Test-Case "شاهد سلبي: العودة إلى استدعاء واحد لـWritePrinter مع فحص written != payload.Length يُسقط الكتابات الجزئية المشروعة" {
+    # التطبيق القديم (قبل الإصلاح): استدعاء واحد فقط، وأي عدد مكتوب أقل من
+    # الحمولة الكاملة — حتى لو كانت الطابعة ستكمل الباقي عند استدعاء لاحق —
+    # يُعامَل فوراً كفشل نهائي "Incomplete RAW printer write" دون أي محاولة لإكمال الكتابة.
+    function Invoke-LegacySingleWritePrinter([int]$PayloadLength, [scriptblock]$WritePrinterSim) {
+        $result = & $WritePrinterSim 0 $PayloadLength
+        if (-not $result.Success) { throw [InvalidOperationException]::new("WritePrinter failed with Win32 error " + $result.Win32Error) }
+        if ($result.Written -ne $PayloadLength) { throw [System.IO.IOException]::new("Incomplete RAW printer write.") }
+        return $result.Written
+    }
+
+    $legacyFailed = $false
+    try {
+        # كتابة جزئية مشروعة: الطابعة تكتب 300 من أصل 500 دفعة واحدة فقط
+        [void](Invoke-LegacySingleWritePrinter 500 { param($o, $r) @{ Success = $true; Written = 300 } })
+    } catch {
+        $legacyFailed = $true
+    }
+    Assert-True $legacyFailed "السلوك القديم (استدعاء واحد) يجب أن يفشل عند أول كتابة جزئية؛ إن لم يفشل فالشاهد السلبي غير صالح"
+
+    # نفس السيناريو بالضبط مع الحلقة الجديدة: يجب أن يكتمل بنجاح عبر استدعاءات لاحقة
+    $calls = @(300, 200)
+    $script:CallIndexNeg = 0
+    $written = Invoke-SimulatedWritePrinterLoop 500 { param($o, $r) $w = $calls[$script:CallIndexNeg]; $script:CallIndexNeg++; @{ Success = $true; Written = $w } }
+    Assert-True ($written -eq 500) "الحلقة الجديدة يجب أن تُكمل نفس السيناريو الذي أسقطه التطبيق القديم — هذا ما يثبته الإصلاح"
+}
+
 Write-Host "`n== P1-I: ترقيم صفحات المرشّحين (لا فاتورة تبقى خارج المتناول) =="
 
 . ([scriptblock]::Create((Get-ExtractedAssignmentText $bridgeSrc '$script:CandidatePageSize')))
@@ -2404,7 +2554,7 @@ $readOnlyFullSrc = Get-ExtractedFunctionText $bridgeSrc "function New-ReadOnlyCo
 $readOnlyCoreMarker = '$command = $connection.CreateCommand()'
 $readOnlyCoreEndIdx = $readOnlyFullSrc.IndexOf($readOnlyCoreMarker)
 Assert-True ($readOnlyCoreEndIdx -gt 0) "تعذّر تحديد نهاية جزء فتح الاتصال داخل New-ReadOnlyConnection؛ الاختبار غير صالح."
-$readOnlyCoreSrc = $readOnlyFullSrc.Substring(0, $readOnlyCoreEndIdx) + "    return `$connection`r`n}`r`n"
+$readOnlyCoreSrc = $readOnlyFullSrc.Substring(0, $readOnlyCoreEndIdx) + "    return `$connection`r`n    } catch { throw }`r`n}`r`n"
 $readOnlyCoreSrc = $readOnlyCoreSrc -replace [regex]::Escape('function New-ReadOnlyConnection {'), 'function Test-New-ReadOnlyConnectionCore {'
 $readOnlyCoreSrc = $readOnlyCoreSrc -replace [regex]::Escape('New-Object System.Data.SqlClient.SqlConnection $builder.ConnectionString'), 'New-TestSqlConnection'
 Assert-True ($readOnlyCoreSrc -match 'New-TestSqlConnection') "لم يُطبَّق استبدال بديل الاتصال (ReadOnly)؛ الاختبار غير صالح."
@@ -2521,6 +2671,250 @@ Test-Case "شاهد سلبي NEW-3: إزالة Dispose من كتلة catch تُ�
         $negativeWitnessFailed = $true
     }
     Assert-True $negativeWitnessFailed "السلوك القديم (بلا Dispose في catch) يجب أن يُسقط فحص عدم التسريب؛ إن لم يسقط فالشاهد السلبي غير فعّال — الاتصال يتسرّب صامتاً."
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SQL permission-probe leak (P1): من إنشاء أمر فحص الصلاحيات (CreateCommand)
+# حتى الإرجاع الناجح — يشمل ExecuteReader وفحوصات قاعدة البيانات/الدور/صلاحيات
+# الكتابة — يجب أن يعيش تحت try/catch موحّد يتخلّص من الاتصال في كل مسار فشل
+# (تقني أو رفض متعمَّد) دون إخفاء الاستثناء الأصلي. هذا نطاق منفصل تماماً عن
+# NEW-3 أعلاه (الذي يغطي فقط Open()+تهيئة الجلسة)، فيتطلّب بديل اتصال ممتد
+# يدعم CreateCommand→ExecuteReader→Reader وهمي بقراءة/فهرسة/إغلاق قابلة للتحكم.
+# ═══════════════════════════════════════════════════════════════════════════
+Write-Host "`n== SQL permission-probe leak (P1): تنظيف اتصال SQL عند فشل فحص الصلاحيات =="
+
+$script:TestExecuteReaderShouldFail = $false
+$script:TestReaderReadShouldReturnFalse = $false
+$script:TestReaderCloseCount = 0
+$script:TestReaderRow = @{
+    database_name = "AmnDb002"
+    login_name = "tobacco_sync_reader"
+    is_data_reader = 1
+    is_data_writer = 0
+    is_db_owner = 0
+    can_insert_database = 0
+    can_update_database = 0
+    can_delete_database = 0
+    can_create_table = 0
+    can_execute_database = 0
+    can_insert_bu000 = 0
+    can_update_bu000 = 0
+    can_delete_bu000 = 0
+    can_insert_bi000 = 0
+    can_update_bi000 = 0
+    can_delete_bi000 = 0
+}
+
+function Reset-TestReaderRow {
+    $script:TestReaderRow = @{
+        database_name = "AmnDb002"; login_name = "tobacco_sync_reader"; is_data_reader = 1
+        is_data_writer = 0; is_db_owner = 0; can_insert_database = 0; can_update_database = 0
+        can_delete_database = 0; can_create_table = 0; can_execute_database = 0
+        can_insert_bu000 = 0; can_update_bu000 = 0; can_delete_bu000 = 0
+        can_insert_bi000 = 0; can_update_bi000 = 0; can_delete_bi000 = 0
+    }
+}
+
+# يمتد فوق New-TestSqlConnection (NEW-3 أعلاه) فيضيف CreateCommand→ExecuteReader
+# تُعيد Hashtable (يدعم الفهرسة $reader["key"] أصلاً) مع ScriptMethod Read/Close
+# مُلحقة عبر Add-Member — لا حاجة لمحاكي SqlDataReader حقيقي.
+function New-TestSqlConnectionWithReader {
+    $conn = New-TestSqlConnection
+    $conn | Add-Member -MemberType ScriptMethod -Name CreateCommand -Value {
+        $cmd = [pscustomobject]@{ CommandTimeout = 0; CommandText = "" }
+        $cmd | Add-Member -MemberType ScriptMethod -Name ExecuteNonQuery -Value {
+            if ($script:TestConnSessionInitShouldFail) { throw [InvalidOperationException]::new("simulated: session init failed") }
+            return 0
+        } -Force
+        $cmd | Add-Member -MemberType ScriptMethod -Name ExecuteReader -Value {
+            if ($script:TestExecuteReaderShouldFail) { throw [InvalidOperationException]::new("simulated: ExecuteReader failed") }
+            $reader = @{}
+            foreach ($key in $script:TestReaderRow.Keys) { $reader[$key] = $script:TestReaderRow[$key] }
+            $reader | Add-Member -MemberType ScriptMethod -Name Read -Value { return (-not $script:TestReaderReadShouldReturnFalse) } -Force
+            $reader | Add-Member -MemberType ScriptMethod -Name Close -Value { $script:TestReaderCloseCount++ } -Force
+            return $reader
+        } -Force
+        return $cmd
+    } -Force
+    return $conn
+}
+
+function New-TestSqlConnectionWithReaderDisposeThrows {
+    $conn = New-TestSqlConnectionWithReader
+    $conn | Add-Member -MemberType ScriptMethod -Name Dispose -Value {
+        $script:TestConnDisposeCount++
+        throw [InvalidOperationException]::new("simulated: Dispose failed")
+    } -Force
+    return $conn
+}
+
+# بنيوي: تنظيف Dispose موجود عند كلتا نقطتي الفشل الحقيقيتين (تهيئة الجلسة
+# وفحص الصلاحيات) — إن كان العدد غير 2 فالإصلاح ناقص لإحدى النقطتين.
+$disposeCleanupMatches = [regex]::Matches($readOnlyFullSrc, [regex]::Escape('try { $connection.Dispose() } catch { }'))
+Assert-True ($disposeCleanupMatches.Count -eq 2) "يجب وجود تنظيف Dispose في نقطتي الفشل معاً (تهيئة الجلسة وفحص الصلاحيات) — الفعلي: $($disposeCleanupMatches.Count)"
+Assert-True ($readOnlyFullSrc -match '(?s)\$reader = \$command\.ExecuteReader\(\).*try \{.*\} finally \{.*\$reader\.Close\(\).*\}') "فحص الصلاحيات يجب أن يُغلق الـreader دائماً عبر finally"
+
+$readOnlyFullTestSrc = $readOnlyFullSrc -replace [regex]::Escape('function New-ReadOnlyConnection {'), 'function Test-New-ReadOnlyConnectionFull {'
+$readOnlyFullTestSrc = $readOnlyFullTestSrc -replace [regex]::Escape('New-Object System.Data.SqlClient.SqlConnection $builder.ConnectionString'), 'New-TestSqlConnectionWithReader'
+Assert-True ($readOnlyFullTestSrc -match 'New-TestSqlConnectionWithReader') "لم يُطبَّق استبدال بديل الاتصال الممتد (بفحص الصلاحيات)؛ الاختبار غير صالح."
+. ([scriptblock]::Create($readOnlyFullTestSrc))
+
+$readOnlyFullDisposeThrowsSrc = $readOnlyFullSrc -replace [regex]::Escape('function New-ReadOnlyConnection {'), 'function Test-New-ReadOnlyConnectionFullDisposeThrows {'
+$readOnlyFullDisposeThrowsSrc = $readOnlyFullDisposeThrowsSrc -replace [regex]::Escape('New-Object System.Data.SqlClient.SqlConnection $builder.ConnectionString'), 'New-TestSqlConnectionWithReaderDisposeThrows'
+. ([scriptblock]::Create($readOnlyFullDisposeThrowsSrc))
+
+Test-Case "SQL-B-1: نجاح فتح+تهيئة+فحص الصلاحيات → إرجاع الاتصال طبيعياً بلا Dispose مسبق" {
+    Reset-TestReaderRow
+    $script:TestConnDisposeCount = 0
+    $script:TestConnOpenShouldFail = $false
+    $script:TestConnSessionInitShouldFail = $false
+    $script:TestExecuteReaderShouldFail = $false
+    $script:TestReaderReadShouldReturnFalse = $false
+    $script:TestReaderCloseCount = 0
+
+    $result = Test-New-ReadOnlyConnectionFull
+    Assert-True ($null -ne $result) "يجب إرجاع كائن نتيجة."
+    Assert-True ($result.Database -eq "AmnDb002") "اسم قاعدة البيانات يجب أن يُعاد كما هو."
+    Assert-True ($result.Login -eq "tobacco_sync_reader") "اسم تسجيل الدخول يجب أن يُعاد كما هو."
+    Assert-True ($script:TestConnDisposeCount -eq 0) "لا يجوز التخلص من الاتصال في مسار النجاح."
+    Assert-True ($script:TestReaderCloseCount -eq 1) "يجب إغلاق الـreader مرة واحدة عبر finally."
+}
+
+Test-Case "SQL-B-2: فشل ExecuteReader → تخلّص من الاتصال + رمي الاستثناء الأصلي كما هو" {
+    Reset-TestReaderRow
+    $script:TestConnDisposeCount = 0
+    $script:TestConnOpenShouldFail = $false
+    $script:TestConnSessionInitShouldFail = $false
+    $script:TestExecuteReaderShouldFail = $true
+    $script:TestReaderReadShouldReturnFalse = $false
+    $threw = $false
+    try { Test-New-ReadOnlyConnectionFull | Out-Null } catch {
+        $threw = $true
+        Assert-True ($_.Exception.Message -match "simulated: ExecuteReader failed") "يجب أن يصل استثناء ExecuteReader الأصلي دون تغليف."
+    }
+    Assert-True $threw "فشل ExecuteReader يجب أن يُطلق استثناءً."
+    Assert-True ($script:TestConnDisposeCount -eq 1) "يجب التخلص من الاتصال مرة واحدة بالضبط عند فشل ExecuteReader."
+}
+
+Test-Case "SQL-B-3: reader.Read() يعيد false (لا نتيجة) → تخلّص من الاتصال + رمي خطأ صريح" {
+    Reset-TestReaderRow
+    $script:TestConnDisposeCount = 0
+    $script:TestConnOpenShouldFail = $false
+    $script:TestConnSessionInitShouldFail = $false
+    $script:TestExecuteReaderShouldFail = $false
+    $script:TestReaderReadShouldReturnFalse = $true
+    $threw = $false
+    try { Test-New-ReadOnlyConnectionFull | Out-Null } catch {
+        $threw = $true
+        Assert-True ($_.Exception.Message -match "Ameen permission probe returned no result") "يجب رسالة صريحة عند غياب نتيجة الفحص."
+    }
+    Assert-True $threw "غياب النتيجة يجب أن يُطلق استثناءً."
+    Assert-True ($script:TestConnDisposeCount -eq 1) "يجب التخلص من الاتصال مرة واحدة بالضبط عند غياب نتيجة الفحص."
+}
+
+Test-Case "SQL-B-4: قاعدة بيانات خاطئة → تخلّص من الاتصال + رفض صريح" {
+    Reset-TestReaderRow
+    $script:TestReaderRow.database_name = "SomeOtherDb"
+    $script:TestConnDisposeCount = 0
+    $script:TestConnOpenShouldFail = $false
+    $script:TestConnSessionInitShouldFail = $false
+    $script:TestExecuteReaderShouldFail = $false
+    $script:TestReaderReadShouldReturnFalse = $false
+    $threw = $false
+    try { Test-New-ReadOnlyConnectionFull | Out-Null } catch {
+        $threw = $true
+        Assert-True ($_.Exception.Message -match "refuses database 'SomeOtherDb'") "يجب رفض صريح لقاعدة البيانات الخاطئة."
+    }
+    Assert-True $threw "قاعدة بيانات خاطئة يجب أن تُطلق استثناءً."
+    Assert-True ($script:TestConnDisposeCount -eq 1) "يجب التخلص من الاتصال مرة واحدة بالضبط عند رفض قاعدة البيانات."
+}
+
+Test-Case "SQL-B-5: غياب دور db_datareader → تخلّص من الاتصال + رفض صريح" {
+    Reset-TestReaderRow
+    $script:TestReaderRow.is_data_reader = 0
+    $script:TestConnDisposeCount = 0
+    $script:TestConnOpenShouldFail = $false
+    $script:TestConnSessionInitShouldFail = $false
+    $script:TestExecuteReaderShouldFail = $false
+    $script:TestReaderReadShouldReturnFalse = $false
+    $threw = $false
+    try { Test-New-ReadOnlyConnectionFull | Out-Null } catch {
+        $threw = $true
+        Assert-True ($_.Exception.Message -match "requires a db_datareader account") "يجب رفض صريح لغياب db_datareader."
+    }
+    Assert-True $threw "غياب db_datareader يجب أن يُطلق استثناءً."
+    Assert-True ($script:TestConnDisposeCount -eq 1) "يجب التخلص من الاتصال مرة واحدة بالضبط عند غياب db_datareader."
+}
+
+Test-Case "SQL-B-6: صلاحية كتابة مكتشفة → تخلّص من الاتصال + رفض صريح" {
+    Reset-TestReaderRow
+    $script:TestReaderRow.can_insert_bu000 = 1
+    $script:TestConnDisposeCount = 0
+    $script:TestConnOpenShouldFail = $false
+    $script:TestConnSessionInitShouldFail = $false
+    $script:TestExecuteReaderShouldFail = $false
+    $script:TestReaderReadShouldReturnFalse = $false
+    $threw = $false
+    try { Test-New-ReadOnlyConnectionFull | Out-Null } catch {
+        $threw = $true
+        Assert-True ($_.Exception.Message -match "refuses a SQL principal with write permissions") "يجب رفض صريح لصلاحية الكتابة."
+        Assert-True ($_.Exception.Message -match "can_insert_bu000") "رسالة الرفض يجب أن تسمّي الصلاحية المكتشفة تحديداً."
+    }
+    Assert-True $threw "صلاحية كتابة مكتشفة يجب أن تُطلق استثناءً."
+    Assert-True ($script:TestConnDisposeCount -eq 1) "يجب التخلص من الاتصال مرة واحدة بالضبط عند اكتشاف صلاحية كتابة."
+}
+
+Test-Case "SQL-B-7: فشل Dispose نفسه أثناء التنظيف → لا يُخفي الاستثناء الأصلي" {
+    Reset-TestReaderRow
+    $script:TestReaderRow.database_name = "SomeOtherDb"
+    $script:TestConnDisposeCount = 0
+    $script:TestConnOpenShouldFail = $false
+    $script:TestConnSessionInitShouldFail = $false
+    $script:TestExecuteReaderShouldFail = $false
+    $script:TestReaderReadShouldReturnFalse = $false
+    $threw = $false
+    try { Test-New-ReadOnlyConnectionFullDisposeThrows | Out-Null } catch {
+        $threw = $true
+        Assert-True ($_.Exception.Message -match "refuses database 'SomeOtherDb'") "الاستثناء الواصل يجب أن يبقى استثناء رفض قاعدة البيانات الأصلي، وليس فشل Dispose."
+        Assert-True ($_.Exception.Message -notmatch "simulated: Dispose failed") "فشل Dispose يجب ألا يظهر بدلاً من الاستثناء الأصلي — best-effort فقط."
+    }
+    Assert-True $threw "يجب أن يصل الاستثناء الأصلي رغم فشل Dispose."
+    Assert-True ($script:TestConnDisposeCount -eq 1) "محاولة Dispose يجب أن تحدث رغم فشلها لاحقاً."
+}
+
+Test-Case "SQL-B-8: مسار النجاح لا يستدعي Dispose قبل الإرجاع (تكرار تأكيدي صريح)" {
+    Reset-TestReaderRow
+    $script:TestConnDisposeCount = 0
+    $script:TestConnOpenShouldFail = $false
+    $script:TestConnSessionInitShouldFail = $false
+    $script:TestExecuteReaderShouldFail = $false
+    $script:TestReaderReadShouldReturnFalse = $false
+    [void](Test-New-ReadOnlyConnectionFull)
+    Assert-True ($script:TestConnDisposeCount -eq 0) "الإرجاع الناجح يجب ألا يستدعي Dispose إطلاقاً قبله."
+}
+
+Test-Case "شاهد سلبي SQL-B: إزالة تنظيف Dispose حول فحص الصلاحيات تُسقط فحص عدم التسريب" {
+    $legacySrc = $readOnlyFullTestSrc -replace [regex]::Escape('try { $connection.Dispose() } catch { }'), ''
+    Assert-True ($legacySrc -ne $readOnlyFullTestSrc) "لم يُطبَّق حذف Dispose؛ الشاهد السلبي غير صالح."
+    $legacySrc = $legacySrc -replace [regex]::Escape('function Test-New-ReadOnlyConnectionFull {'), 'function Test-New-ReadOnlyConnectionFull-Legacy {'
+    . ([scriptblock]::Create($legacySrc))
+
+    Reset-TestReaderRow
+    $script:TestReaderRow.database_name = "SomeOtherDb"
+    $script:TestConnDisposeCount = 0
+    $script:TestConnOpenShouldFail = $false
+    $script:TestConnSessionInitShouldFail = $false
+    $script:TestExecuteReaderShouldFail = $false
+    $script:TestReaderReadShouldReturnFalse = $false
+    try { Test-New-ReadOnlyConnectionFull-Legacy | Out-Null } catch { }
+
+    $negativeWitnessFailed = $false
+    try {
+        Assert-True ($script:TestConnDisposeCount -eq 1) "توقّع (مع الإصلاح فقط): يُتخلَّص من الاتصال مرة واحدة عند رفض قاعدة البيانات."
+    } catch {
+        $negativeWitnessFailed = $true
+    }
+    Assert-True $negativeWitnessFailed "السلوك القديم (بلا Dispose حول فحص الصلاحيات) يجب أن يُسقط فحص عدم التسريب؛ إن لم يسقط فالشاهد السلبي غير فعّال — الاتصال يتسرّب صامتاً عند كل رفض متعمَّد."
 }
 
 Write-Host "`n$($script:passed) passed, $($script:failed) failed"
