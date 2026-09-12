@@ -52,7 +52,7 @@
 -- الحالة صحية" (هذا الملف) و"هل الرسالة نفسها وصلت" (طبقة outbox) يبقى كما هو
 -- موثَّق أصلاً في تعليقات monitor_project_tasks().
 --
--- الاختبار: supabase/tests/proposed-pgcron-failure-alert-dedupe.sql (مستقل،
+-- الاختبار: supabase/tests/cron-job-health-transitions.sql (مستقل،
 -- pg_temp فقط، لا يمسّ أي جدول إنتاج، لا يحتاج تطبيق هذا الملف لتشغيله).
 --
 -- التطبيق: هذا الملف كامل idempotent (ALTER ... ADD COLUMN IF NOT EXISTS +
