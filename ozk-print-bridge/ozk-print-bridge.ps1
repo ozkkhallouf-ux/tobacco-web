@@ -252,7 +252,9 @@ function New-ReadOnlyConnection {
         # فشل بعد نجاح Open() (مثلاً أمر تهيئة الجلسة) كان يُسرِّب الاتصال: لا
         # مرجع له يبقى خارج هذه الدالة. Dispose هنا best-effort فقط — فشلها لا
         # يجوز أن يُخفي الاستثناء الأصلي الذي سبَّب دخول catch أصلاً.
-        try { $connection.Dispose() } catch { }
+        try { $connection.Dispose() } catch {
+            Write-Verbose "Connection cleanup failed: $($_.Exception.Message)"
+        }
         throw
     }
 
@@ -315,7 +317,9 @@ select
         # تقنية (ExecuteReader) أو يرفض الاتصال عمداً (قاعدة بيانات خاطئة، صلاحية
         # كتابة). في الحالتين لا يجوز ترك الاتصال بلا مالك خارج هذه الدالة —
         # Dispose هنا best-effort فقط ولا يجوز أن يُخفي الاستثناء الأصلي.
-        try { $connection.Dispose() } catch { }
+        try { $connection.Dispose() } catch {
+            Write-Verbose "Connection cleanup failed: $($_.Exception.Message)"
+        }
         throw
     }
 }
@@ -346,7 +350,9 @@ function New-CommittedConfirmationConnection {
         # نفس منطق New-ReadOnlyConnection: فشل تهيئة الجلسة بعد Open() ناجح لا
         # يجوز أن يُسرِّب الاتصال. هذه الدالة تُستدعى مرة لكل فاتورة تصل لحظة
         # التأكيد، فتسريب متكرر هنا يستنزف مجمّع الاتصالات دون أن يُسقط الجسر.
-        try { $connection.Dispose() } catch { }
+        try { $connection.Dispose() } catch {
+            Write-Verbose "Connection cleanup failed: $($_.Exception.Message)"
+        }
         throw
     }
 

@@ -3033,7 +3033,10 @@ Test-Case "NEW-3-6: فشل تهيئة جلسة اتصال التأكيد ضمن 
 }
 
 Test-Case "شاهد سلبي NEW-3: إزالة Dispose من كتلة catch تُسقط فحص عدم التسريب" {
-    $legacySrc = $readOnlyCoreSrc -replace [regex]::Escape('try { $connection.Dispose() } catch { }'), ''
+    # النمط أصبح كتلة catch صريحة (Write-Verbose بدل catch {} فارغة — إصلاح
+    # PSAvoidUsingEmptyCatchBlock) بدل سطر واحد، فنطابقها بتعبير نمطي غير
+    # جشع بدل نص حرفي ثابت — المطابقة لا تزال تلتقط نفس الكتلة بالضبط.
+    $legacySrc = $readOnlyCoreSrc -replace '(?s)try \{ \$connection\.Dispose\(\) \} catch \{.*?\}', ''
     Assert-True ($legacySrc -ne $readOnlyCoreSrc) "لم يُطبَّق حذف Dispose؛ الشاهد السلبي غير صالح."
     $legacySrc = $legacySrc -replace [regex]::Escape('function Test-New-ReadOnlyConnectionCore {'), 'function Test-New-ReadOnlyConnectionCore-Legacy {'
     . ([scriptblock]::Create($legacySrc))
@@ -3041,7 +3044,9 @@ Test-Case "شاهد سلبي NEW-3: إزالة Dispose من كتلة catch تُ�
     $script:TestConnDisposeCount = 0
     $script:TestConnOpenShouldFail = $false
     $script:TestConnSessionInitShouldFail = $true
-    try { Test-New-ReadOnlyConnectionCore-Legacy | Out-Null } catch { }
+    try { Test-New-ReadOnlyConnectionCore-Legacy | Out-Null } catch {
+        Write-Verbose "Expected cleanup/test helper exception ignored: $($_.Exception.Message)"
+    }
 
     $negativeWitnessFailed = $false
     try {
@@ -3129,7 +3134,7 @@ function New-TestSqlConnectionWithReaderDisposeThrows {
 
 # بنيوي: تنظيف Dispose موجود عند كلتا نقطتي الفشل الحقيقيتين (تهيئة الجلسة
 # وفحص الصلاحيات) — إن كان العدد غير 2 فالإصلاح ناقص لإحدى النقطتين.
-$disposeCleanupMatches = [regex]::Matches($readOnlyFullSrc, [regex]::Escape('try { $connection.Dispose() } catch { }'))
+$disposeCleanupMatches = [regex]::Matches($readOnlyFullSrc, '(?s)try \{ \$connection\.Dispose\(\) \} catch \{.*?\}')
 Assert-True ($disposeCleanupMatches.Count -eq 2) "يجب وجود تنظيف Dispose في نقطتي الفشل معاً (تهيئة الجلسة وفحص الصلاحيات) — الفعلي: $($disposeCleanupMatches.Count)"
 Assert-True ($readOnlyFullSrc -match '(?s)\$reader = \$command\.ExecuteReader\(\).*try \{.*\} finally \{.*\$reader\.Close\(\).*\}') "فحص الصلاحيات يجب أن يُغلق الـreader دائماً عبر finally"
 
@@ -3273,7 +3278,7 @@ Test-Case "SQL-B-8: مسار النجاح لا يستدعي Dispose قبل ال�
 }
 
 Test-Case "شاهد سلبي SQL-B: إزالة تنظيف Dispose حول فحص الصلاحيات تُسقط فحص عدم التسريب" {
-    $legacySrc = $readOnlyFullTestSrc -replace [regex]::Escape('try { $connection.Dispose() } catch { }'), ''
+    $legacySrc = $readOnlyFullTestSrc -replace '(?s)try \{ \$connection\.Dispose\(\) \} catch \{.*?\}', ''
     Assert-True ($legacySrc -ne $readOnlyFullTestSrc) "لم يُطبَّق حذف Dispose؛ الشاهد السلبي غير صالح."
     $legacySrc = $legacySrc -replace [regex]::Escape('function Test-New-ReadOnlyConnectionFull {'), 'function Test-New-ReadOnlyConnectionFull-Legacy {'
     . ([scriptblock]::Create($legacySrc))
@@ -3285,7 +3290,9 @@ Test-Case "شاهد سلبي SQL-B: إزالة تنظيف Dispose حول فحص 
     $script:TestConnSessionInitShouldFail = $false
     $script:TestExecuteReaderShouldFail = $false
     $script:TestReaderReadShouldReturnFalse = $false
-    try { Test-New-ReadOnlyConnectionFull-Legacy | Out-Null } catch { }
+    try { Test-New-ReadOnlyConnectionFull-Legacy | Out-Null } catch {
+        Write-Verbose "Expected cleanup/test helper exception ignored: $($_.Exception.Message)"
+    }
 
     $negativeWitnessFailed = $false
     try {
