@@ -66,6 +66,7 @@ function Get-ExtractedFunctionText([string]$SourceText, [string]$Signature) {
 
 $bridgeSrc = Get-Content -LiteralPath (Join-Path $bridgeDir "ozk-print-bridge.ps1") -Raw
 $watchdogSrc = Get-Content -LiteralPath (Join-Path $bridgeDir "ozk-print-bridge-watchdog.ps1") -Raw
+$uiSrc = Get-Content -LiteralPath (Join-Path $bridgeDir "ozk-print-bridge-ui.ps1") -Raw
 
 $script:InvariantCulture = [Globalization.CultureInfo]::InvariantCulture
 
@@ -2091,6 +2092,92 @@ Test-Case "negative witness: بلا try/catch حول الكتابة، فشل ا�
         $fixedEscaped = $true
     }
     Assert-True (-not $fixedEscaped) "الدالة الحالية المستخرجة من المصدر الفعلي يجب ألا تُسقط الاستثناء — هذا ما يسدّه إصلاح P1 هذا"
+}
+
+Write-Host "== cashier-regression: مسار معاينة الفاتورة اليدوية (خارج نسخة Git) =="
+
+# المعاينة اليدوية تحتوي اسم الزبون والأصناف والأرصدة، فيجب ألا تُكتب أبداً داخل
+# نسخة Git. تُستخرج الدالة الفعلية نصياً من ozk-print-bridge-ui.ps1 (وليس من
+# نسخة موازية) حتى يُختبر العقد الحقيقي الموجود في الإنتاج.
+$manualPreviewSrc = Get-ExtractedFunctionText $uiSrc "function Get-ManualPreviewPath {"
+. ([scriptblock]::Create($manualPreviewSrc))
+
+$realLocalAppData = [Environment]::GetFolderPath("LocalApplicationData")
+
+Test-Case "1: PreviewPath لا يقع تحت `$PSScriptRoot / مجلد نسخة Git" {
+    $path = Get-ManualPreviewPath
+    Assert-True (-not $path.StartsWith($bridgeDir, [StringComparison]::OrdinalIgnoreCase)) `
+        "المسار المُعاد ($path) يقع داخل نسخة Git ($bridgeDir) — يجب ألا تُكتب المعاينة هناك."
+}
+
+Test-Case "2: PreviewPath يقع تحت LocalApplicationData/OZK-TOBACCO/PrintBridge/previews" {
+    $expectedRoot = Join-Path $realLocalAppData "OZK-TOBACCO\PrintBridge\previews"
+    $path = Get-ManualPreviewPath
+    Assert-True ($path.StartsWith($expectedRoot, [StringComparison]::OrdinalIgnoreCase)) `
+        "المسار المُعاد ($path) يجب أن يقع تحت ($expectedRoot)."
+}
+
+Test-Case "3: لا يوجد ربط نصّي مباشر لـ manual-preview.png مع `$BridgeRoot في المصدر" {
+    Assert-True ($uiSrc -notmatch 'Join-Path\s+\$BridgeRoot\s+"manual-preview\.png"') `
+        "وُجد بناء مسار قديم غير آمن: Join-Path `$BridgeRoot 'manual-preview.png' — هذا هو العيب الأصلي (thread PRRT_kwDOSfMJhM6hVWtC)."
+}
+
+Test-Case "4: مجلد previews يُنشأ تلقائياً عند غيابه" {
+    $expectedRoot = Join-Path $realLocalAppData "OZK-TOBACCO\PrintBridge\previews"
+    if (Test-Path -LiteralPath $expectedRoot -PathType Container) {
+        Remove-Item -LiteralPath $expectedRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Assert-True (-not (Test-Path -LiteralPath $expectedRoot -PathType Container)) "تعذّر تحضير حالة الاختبار (حذف المجلد مسبقاً)."
+    [void](Get-ManualPreviewPath)
+    Assert-True (Test-Path -LiteralPath $expectedRoot -PathType Container) "لم يتم إنشاء مجلد previews رغم غيابه."
+}
+
+Test-Case "5: فشل تحديد LocalApplicationData يُعطي خطأً واضحاً ولا يرجع صامتاً إلى مجلد المستودع" {
+    # لا يمكن تزييف [Environment]::GetFolderPath نفسها، فنستخرج نص الدالة مجدداً
+    # ونستبدل نتيجتها ببديل فارغ لمحاكاة بيئة لا تملك LocalApplicationData —
+    # هذا يختبر أن الدالة تفشل بوضوح (throw) بدل الرجوع الصامت لمجلد Git.
+    $simulatedFailureSrc = $manualPreviewSrc -replace `
+        '\[Environment\]::GetFolderPath\("LocalApplicationData"\)', '""'
+    Assert-True ($simulatedFailureSrc -ne $manualPreviewSrc) "لم يُطبَّق الاستبدال المتوقع؛ الاختبار غير صالح."
+    . ([scriptblock]::Create(($simulatedFailureSrc -replace 'function Get-ManualPreviewPath', 'function Get-ManualPreviewPath-SimulatedNoLocalAppData')))
+    $threwClearly = $false
+    $fellBackToRepo = $false
+    try {
+        Get-ManualPreviewPath-SimulatedNoLocalAppData | Out-Null
+    } catch {
+        $threwClearly = $true
+    }
+    Assert-True $threwClearly "عند تعذّر تحديد LocalApplicationData يجب أن تُطلق الدالة خطأً واضحاً بدل المتابعة صامتة."
+    Assert-True (-not $fellBackToRepo) "لا يجوز أي رجوع صامت لمجلد المستودع."
+}
+
+Test-Case "6: Start-Process يفتح المعاينة من `$previewPath (المتغيّر الجديد) لا من مسار قديم داخل Git" {
+    Assert-True ($uiSrc -match '\$previewButton\.Add_Click\(\{[\s\S]*?Start-Process\s+-FilePath\s+\$previewPath') `
+        "زر المعاينة يجب أن يستدعي Start-Process -FilePath `$previewPath، وهذا المتغير مبني على Get-ManualPreviewPath وليس على `$BridgeRoot."
+    Assert-True ($uiSrc -match '\$previewPath\s*=\s*Get-ManualPreviewPath') `
+        "`$previewPath يجب أن يُبنى عبر استدعاء Get-ManualPreviewPath."
+}
+
+Test-Case "7: اسم/بيانات الزبون لا تدخل أبداً في اسم الملف أو المسار" {
+    Assert-True ($manualPreviewSrc -notmatch '\$selection') "دالة بناء المسار يجب ألا تعرف شيئاً عن اختيار الفاتورة (`$selection)."
+    Assert-True ($manualPreviewSrc -notmatch '(?i)customer|Number|InvoiceNumber') "دالة بناء المسار يجب ألا تحمل اسم الزبون أو رقم الفاتورة في المسار."
+    $path = Get-ManualPreviewPath
+    Assert-True ((Split-Path -Leaf $path) -eq "manual-preview.png") "اسم الملف يجب أن يبقى ثابتاً (manual-preview.png) ولا يحمل أي بيانات متغيرة عن الفاتورة."
+}
+
+Test-Case "شاهد سلبي: العودة إلى Join-Path `$BridgeRoot 'manual-preview.png' يجب أن تُسقط فحص #1" {
+    function Get-ManualPreviewPath-Legacy([string]$BridgeRoot) {
+        return Join-Path $BridgeRoot "manual-preview.png"
+    }
+    $legacyPath = Get-ManualPreviewPath-Legacy $bridgeDir
+    $legacyTestFailed = $false
+    try {
+        Assert-True (-not $legacyPath.StartsWith($bridgeDir, [StringComparison]::OrdinalIgnoreCase)) `
+            "توقّع: المسار القديم يقع داخل `$BridgeRoot."
+    } catch {
+        $legacyTestFailed = $true
+    }
+    Assert-True $legacyTestFailed "السلوك القديم (Join-Path `$BridgeRoot 'manual-preview.png') يجب أن يُسقط فحص #1؛ إن لم يسقط فالاختبار غير فعّال."
 }
 
 Write-Host "`n$($script:passed) passed, $($script:failed) failed"

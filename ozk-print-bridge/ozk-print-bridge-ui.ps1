@@ -8,8 +8,26 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [Windows.Forms.Application]::EnableVisualStyles()
 
+function Get-ManualPreviewPath {
+    # المعاينة تحتوي اسم الزبون والأصناف والأرصدة، فيجب ألا تُكتب أبداً داخل
+    # نسخة Git (مجلد $BridgeRoot/$PSScriptRoot) حيث قد يلتقطها git add -A لاحقاً
+    # حتى لو لم يُعمل commit صراحةً لهذا الملف. تُكتب بدلاً من ذلك في مخزن محلي
+    # خاص بالمستخدم خارج أي نسخة مصدر، باسم ثابت لا يحمل أي بيانات عن الزبون
+    # أو الفاتورة. لا نفترض توفر LocalApplicationData بصمت — فشل تحديده يجب أن
+    # يظهر كخطأ واضح بدل الرجوع الصامت إلى مجلد المستودع.
+    $localAppData = [Environment]::GetFolderPath("LocalApplicationData")
+    if ([string]::IsNullOrWhiteSpace($localAppData)) {
+        throw "تعذّر تحديد مجلد LocalApplicationData الخاص بالمستخدم؛ لا يمكن إنشاء معاينة الفاتورة بأمان خارج نسخة Git."
+    }
+    $previewDir = Join-Path $localAppData "OZK-TOBACCO\PrintBridge\previews"
+    if (-not (Test-Path -LiteralPath $previewDir -PathType Container)) {
+        [void](New-Item -ItemType Directory -Path $previewDir -Force)
+    }
+    return Join-Path $previewDir "manual-preview.png"
+}
+
 $bridgeScript = Join-Path $BridgeRoot "ozk-print-bridge.ps1"
-$previewPath = Join-Path $BridgeRoot "manual-preview.png"
+$previewPath = Get-ManualPreviewPath
 $powershellPath = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
 if (-not (Test-Path -LiteralPath $bridgeScript -PathType Leaf)) {
     [Windows.Forms.MessageBox]::Show("ملف تشغيل OZK Print Bridge غير موجود.", "OZK", "OK", "Error") | Out-Null
@@ -115,6 +133,20 @@ function Get-InvoiceSelection {
 
 function Invoke-Bridge([string]$Mode, [bool]$Print) {
     $selection = Get-InvoiceSelection
+    if ($Mode -eq "PreviewInvoice") {
+        # حذف best-effort للمعاينة السابقة قبل توليد الجديدة، حتى لا يبقى ملف
+        # قديم قابلاً للفتح لو فشلت المعاينة الجديدة لأي سبب. القفل (مثلاً
+        # الملف لا يزال مفتوحاً بعارض صور) ليس سبباً لكسر الواجهة: يُبتلع صامتاً
+        # وتُستبدل نفس المسار الثابت عند الكتابة التالية أو تبقى المعاينة
+        # السابقة قابلة للفتح.
+        try {
+            if (Test-Path -LiteralPath $previewPath -PathType Leaf) {
+                Remove-Item -LiteralPath $previewPath -Force -ErrorAction Stop
+            }
+        } catch {
+            $null = $_
+        }
+    }
     $arguments = @(
         "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass",
         "-File", ('"{0}"' -f $bridgeScript),
