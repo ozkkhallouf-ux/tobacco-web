@@ -2180,5 +2180,348 @@ Test-Case "شاهد سلبي: العودة إلى Join-Path `$BridgeRoot 'manual
     Assert-True $legacyTestFailed "السلوك القديم (Join-Path `$BridgeRoot 'manual-preview.png') يجب أن يُسقط فحص #1؛ إن لم يسقط فالاختبار غير فعّال."
 }
 
+# ═══════════════════════════════════════════════════════════════════════════
+# NEW-2 (P1): observed_waiting_for_print_activation ليست حالة نهائية —
+# يجب أن تُعاد الفاتورة لخط الأنابيب الكامل متى صار ConfirmPhysicalPrint=true،
+# بلا busy loop في نفس وضع الرصد (false)، وبلا كسر أي حالة نهائية أخرى.
+# ═══════════════════════════════════════════════════════════════════════════
+Write-Host "`n== NEW-2 (P1): دلالات observed_waiting_for_print_activation عبر Should-SkipSeenInvoice =="
+
+$shouldSkipSrc = Get-ExtractedFunctionText $bridgeSrc "function Should-SkipSeenInvoice(`$SeenEntry, [bool]`$ConfirmPhysicalPrint) {"
+. ([scriptblock]::Create($shouldSkipSrc))
+
+# ── اختبارات وحدة مباشرة على القرار نفسه ──
+Test-Case "NEW-2-U1: مدخل seen غير موجود (`$null) → لا تخطّي" {
+    Assert-True ((Should-SkipSeenInvoice $null $false) -eq $false) "مدخل `$null يعني فاتورة جديدة تماماً؛ يجب ألا تُتخطى."
+}
+
+Test-Case "NEW-2-U2: observed_waiting_for_print_activation + ConfirmPhysicalPrint=false → تخطّي" {
+    $entry = [pscustomobject]@{ status = "observed_waiting_for_print_activation" }
+    Assert-True ((Should-SkipSeenInvoice $entry $false) -eq $true) "في نفس وضع الرصد (false) يجب أن تبقى الفاتورة متخطّاة."
+}
+
+Test-Case "NEW-2-U3: observed_waiting_for_print_activation + ConfirmPhysicalPrint=true → ليست نهائية" {
+    $entry = [pscustomobject]@{ status = "observed_waiting_for_print_activation" }
+    Assert-True ((Should-SkipSeenInvoice $entry $true) -eq $false) "بمجرد ConfirmPhysicalPrint=true يجب أن تُعاد الفاتورة لخط الأنابيب الكامل."
+}
+
+Test-Case "NEW-2-U4: baseline تبقى نهائية دائماً (مع false ومع true)" {
+    $entry = [pscustomobject]@{ status = "baseline" }
+    Assert-True ((Should-SkipSeenInvoice $entry $false) -eq $true) "baseline يجب أن تُتخطى مع false."
+    Assert-True ((Should-SkipSeenInvoice $entry $true) -eq $true) "baseline يجب أن تُتخطى مع true أيضاً — نهائية دائماً."
+}
+
+Test-Case "NEW-2-U5: duplicate_suppressed تبقى نهائية دائماً (مع false ومع true)" {
+    $entry = [pscustomobject]@{ status = "duplicate_suppressed" }
+    Assert-True ((Should-SkipSeenInvoice $entry $false) -eq $true) "duplicate_suppressed يجب أن تُتخطى مع false."
+    Assert-True ((Should-SkipSeenInvoice $entry $true) -eq $true) "duplicate_suppressed يجب أن تُتخطى مع true أيضاً."
+}
+
+Test-Case "NEW-2-U6: spooled تبقى نهائية دائماً (مع false ومع true)" {
+    $entry = [pscustomobject]@{ status = "spooled" }
+    Assert-True ((Should-SkipSeenInvoice $entry $false) -eq $true) "spooled يجب أن تُتخطى مع false."
+    Assert-True ((Should-SkipSeenInvoice $entry $true) -eq $true) "spooled يجب أن تُتخطى مع true أيضاً."
+}
+
+Test-Case "NEW-2-U7: print_in_flight تبقى نهائية دائماً (مع false ومع true)" {
+    $entry = [pscustomobject]@{ status = "print_in_flight" }
+    Assert-True ((Should-SkipSeenInvoice $entry $false) -eq $true) "print_in_flight يجب أن تُتخطى مع false."
+    Assert-True ((Should-SkipSeenInvoice $entry $true) -eq $true) "print_in_flight يجب أن تُتخطى مع true أيضاً."
+}
+
+Test-Case "NEW-2-U8/9: مدخل قديم/تالف بلا status أو بـstatus فارغ → السلوك المحافظ (تخطّي دائم)" {
+    $legacyEntry = [pscustomobject]@{ printedAt = "2024-01-01" }  # لا حقل status إطلاقاً
+    Assert-True ((Should-SkipSeenInvoice $legacyEntry $false) -eq $true) "مدخل قديم بلا status يجب أن يبقى متخطّى مع false."
+    Assert-True ((Should-SkipSeenInvoice $legacyEntry $true) -eq $true) "مدخل قديم بلا status يجب ألا يصبح قابلاً للطباعة مجدداً حتى مع true — السلامة المحافظة أولاً."
+    $blankEntry = [pscustomobject]@{ status = "" }
+    Assert-True ((Should-SkipSeenInvoice $blankEntry $true) -eq $true) "status فارغ يُعامل معاملة المدخل التالف: تخطّي محافظ."
+}
+
+# ── محاكاة تكاملية لنبضة استطلاع كاملة عبر القرار الحقيقي Should-SkipSeenInvoice ──
+# تُحاكي فقط ما بعد بوابة التخطّي في الحلقة الرئيسية بخطوة واحدة مبسّطة، لأن
+# هذه البوابة نفسها هي محل الإصلاح؛ بقية خط الأنابيب (استقرار/عزل/تكرار/تأكيد)
+# مُختبرة بمعزل عنها في أقسام أخرى من هذا الملف.
+function Invoke-SimulatedPollCycle {
+    param(
+        [hashtable]$State,
+        [string]$Guid,
+        [bool]$ConfirmPhysicalPrint,
+        [scriptblock]$SkipDecider
+    )
+    if (-not $State.ContainsKey('seen')) { $State.seen = @{} }
+    if (-not $State.ContainsKey('printCount')) { $State.printCount = 0 }
+    if (-not $State.ContainsKey('pipelineEntries')) { $State.pipelineEntries = 0 }
+
+    $entry = $State.seen[$Guid]
+    if (& $SkipDecider $entry $ConfirmPhysicalPrint) { return "skipped" }
+
+    $State.pipelineEntries++
+    if (-not $ConfirmPhysicalPrint) {
+        $State.seen[$Guid] = [pscustomobject]@{ status = "observed_waiting_for_print_activation" }
+        return "observed_no_print"
+    }
+    $State.printCount++
+    $State.seen[$Guid] = [pscustomobject]@{ status = "spooled" }
+    return "printed"
+}
+
+Test-Case "NEW-2-1: رصد فاتورة جديدة مع ConfirmPhysicalPrint=false → تُسجَّل observed_waiting_for_print_activation بلا طباعة" {
+    $state = @{}
+    $guid = [guid]::NewGuid().ToString()
+    $outcome = Invoke-SimulatedPollCycle -State $state -Guid $guid -ConfirmPhysicalPrint $false -SkipDecider ${function:Should-SkipSeenInvoice}
+    Assert-True ($outcome -eq "observed_no_print") "أول ظهور للفاتورة مع false يجب أن يسجّلها observed_waiting_for_print_activation بلا طباعة."
+    Assert-True ($state.seen[$guid].status -eq "observed_waiting_for_print_activation") "الحالة المسجَّلة يجب أن تكون observed_waiting_for_print_activation."
+    Assert-True ($state.printCount -eq 0) "لا طباعة فعلية في وضع الرصد."
+}
+
+Test-Case "NEW-2-2: نبضات لاحقة كثيرة بنفس false في نفس التشغيلة → تخطّي دائم، بلا busy loop" {
+    $state = @{}
+    $guid = [guid]::NewGuid().ToString()
+    [void](Invoke-SimulatedPollCycle -State $state -Guid $guid -ConfirmPhysicalPrint $false -SkipDecider ${function:Should-SkipSeenInvoice})
+    $entriesAfterFirst = $state.pipelineEntries
+    for ($i = 0; $i -lt 500; $i++) {
+        $outcome = Invoke-SimulatedPollCycle -State $state -Guid $guid -ConfirmPhysicalPrint $false -SkipDecider ${function:Should-SkipSeenInvoice}
+        Assert-True ($outcome -eq "skipped") "نبضة #$i يجب أن تُتخطى دون إعادة معالجة — busy loop ممنوع."
+    }
+    Assert-True ($state.pipelineEntries -eq $entriesAfterFirst) "500 نبضة إضافية يجب ألا تزيد دخول خط الأنابيب إطلاقاً (لا busy loop، لا تكرار تسجيل/طباعة كل ~150ms)."
+    Assert-True ($state.printCount -eq 0) "لا طباعة عبر كل هذه النبضات."
+}
+
+Test-Case "NEW-2-3/4/5: إعادة تشغيل بنفس StatePath مع ConfirmPhysicalPrint=true → إعادة تقييم، طباعة مرة واحدة، ثم عدم إعادة الطباعة لاحقاً" {
+    $state = @{}
+    $guid = [guid]::NewGuid().ToString()
+    [void](Invoke-SimulatedPollCycle -State $state -Guid $guid -ConfirmPhysicalPrint $false -SkipDecider ${function:Should-SkipSeenInvoice})
+    Assert-True ($state.seen[$guid].status -eq "observed_waiting_for_print_activation") "تمهيد الاختبار: يجب أن تكون الفاتورة observed أولاً."
+
+    # إعادة تشغيل الجسر بنفس StatePath، والآن ConfirmPhysicalPrint=true (سلوك watchdog الطبيعي).
+    $reentryOutcome = Invoke-SimulatedPollCycle -State $state -Guid $guid -ConfirmPhysicalPrint $true -SkipDecider ${function:Should-SkipSeenInvoice}
+    Assert-True ($reentryOutcome -eq "printed") "نفس GUID يجب أن يُعاد تقييمه بالكامل ويُطبع فور توفر true — لا يجوز أن يختفي إلى الأبد."
+    Assert-True ($state.printCount -eq 1) "يجب أن تُطبع الفاتورة مرة واحدة بالضبط عند إعادة الدخول."
+    Assert-True ($state.seen[$guid].status -eq "spooled") "بعد الطباعة يجب أن تنتقل الحالة إلى spooled (نهائية)."
+
+    # نبضة لاحقة بعد الطباعة: يجب ألا تُعاد الطباعة.
+    $afterPrintOutcome = Invoke-SimulatedPollCycle -State $state -Guid $guid -ConfirmPhysicalPrint $true -SkipDecider ${function:Should-SkipSeenInvoice}
+    Assert-True ($afterPrintOutcome -eq "skipped") "بعد الطباعة يجب أن تُتخطى الفاتورة في كل نبضة لاحقة."
+    Assert-True ($state.printCount -eq 1) "لا إعادة طباعة إطلاقاً بعد الطباعة الأولى."
+}
+
+Test-Case "NEW-2-6: baseline تبقى متخطّاة عبر محاكاة نبضة استطلاع كاملة" {
+    $state = @{ seen = @{} }
+    $guid = [guid]::NewGuid().ToString()
+    $state.seen[$guid] = [pscustomobject]@{ status = "baseline" }
+    $outcome = Invoke-SimulatedPollCycle -State $state -Guid $guid -ConfirmPhysicalPrint $true -SkipDecider ${function:Should-SkipSeenInvoice}
+    Assert-True ($outcome -eq "skipped") "baseline يجب أن تبقى متخطّاة حتى مع ConfirmPhysicalPrint=true."
+}
+
+Test-Case "NEW-2-7: duplicate_suppressed تبقى متخطّاة عبر محاكاة نبضة استطلاع كاملة" {
+    $state = @{ seen = @{} }
+    $guid = [guid]::NewGuid().ToString()
+    $state.seen[$guid] = [pscustomobject]@{ status = "duplicate_suppressed" }
+    $outcome = Invoke-SimulatedPollCycle -State $state -Guid $guid -ConfirmPhysicalPrint $true -SkipDecider ${function:Should-SkipSeenInvoice}
+    Assert-True ($outcome -eq "skipped") "duplicate_suppressed يجب أن تبقى متخطّاة حتى مع ConfirmPhysicalPrint=true."
+}
+
+Test-Case "NEW-2-8: spooled تبقى متخطّاة عبر محاكاة نبضة استطلاع كاملة" {
+    $state = @{ seen = @{} }
+    $guid = [guid]::NewGuid().ToString()
+    $state.seen[$guid] = [pscustomobject]@{ status = "spooled" }
+    $outcome = Invoke-SimulatedPollCycle -State $state -Guid $guid -ConfirmPhysicalPrint $true -SkipDecider ${function:Should-SkipSeenInvoice}
+    Assert-True ($outcome -eq "skipped") "spooled يجب أن تبقى متخطّاة حتى مع ConfirmPhysicalPrint=true."
+}
+
+Test-Case "NEW-2-9: مدخل seen تالف/قديم بلا status عبر محاكاة نبضة استطلاع كاملة → يبقى متخطّى" {
+    $state = @{ seen = @{} }
+    $guid = [guid]::NewGuid().ToString()
+    $state.seen[$guid] = [pscustomobject]@{ printedAt = "2024-01-01" }
+    $outcome = Invoke-SimulatedPollCycle -State $state -Guid $guid -ConfirmPhysicalPrint $true -SkipDecider ${function:Should-SkipSeenInvoice}
+    Assert-True ($outcome -eq "skipped") "مدخل بلا status يجب أن يبقى متخطّى حتى مع true — لا يصبح قابلاً للطباعة صدفةً."
+}
+
+Test-Case "شاهد سلبي NEW-2: العودة إلى `$state.seen.ContainsKey(`$guid) غير المشروط تُسقط سيناريو إعادة الدخول بعد Restart" {
+    $legacySkipDecider = { param($SeenEntry, $ConfirmPhysicalPrint) return ($null -ne $SeenEntry) }
+    $state = @{}
+    $guid = [guid]::NewGuid().ToString()
+    [void](Invoke-SimulatedPollCycle -State $state -Guid $guid -ConfirmPhysicalPrint $false -SkipDecider $legacySkipDecider)
+
+    $negativeWitnessFailed = $false
+    try {
+        $reentryOutcome = Invoke-SimulatedPollCycle -State $state -Guid $guid -ConfirmPhysicalPrint $true -SkipDecider $legacySkipDecider
+        Assert-True ($reentryOutcome -eq "printed") "توقّع (مع الإصلاح فقط): إعادة الدخول بعد true يجب أن تطبع."
+    } catch {
+        $negativeWitnessFailed = $true
+    }
+    Assert-True $negativeWitnessFailed "السلوك القديم (ContainsKey غير مشروط) يجب أن يُسقط سيناريو Observe→Physical-restart؛ إن لم يسقط فالشاهد السلبي غير فعّال — الفاتورة تختفي للأبد دون طباعة."
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# NEW-3 (P1): New-ReadOnlyConnection / New-CommittedConfirmationConnection —
+# فشل تهيئة الجلسة بعد Open() ناجح يجب ألا يُسرِّب الاتصال، ويجب أن يُعاد رمي
+# الاستثناء الأصلي كما هو دون ابتلاعه.
+# ═══════════════════════════════════════════════════════════════════════════
+Write-Host "`n== NEW-3 (P1): تنظيف اتصال SQL عند فشل تهيئة الجلسة بعد Open() ناجح =="
+
+$script:TestConnDisposeCount = 0
+$script:TestConnOpenShouldFail = $false
+$script:TestConnSessionInitShouldFail = $false
+
+# بديل اتصال قابل للتحكم بالكامل: لا شبكة ولا SQL حقيقي، فقط محاكاة Open/
+# CreateCommand/ExecuteNonQuery/Dispose بحقن فشل عند كل نقطة على حدة.
+function New-TestSqlConnection {
+    $conn = [pscustomobject]@{ IsOpen = $false; IsDisposed = $false }
+    $conn | Add-Member -MemberType ScriptMethod -Name Open -Value {
+        if ($script:TestConnOpenShouldFail) { throw [InvalidOperationException]::new("simulated: Open failed") }
+        $this.IsOpen = $true
+    } -Force
+    $conn | Add-Member -MemberType ScriptMethod -Name CreateCommand -Value {
+        $cmd = [pscustomobject]@{ CommandTimeout = 0; CommandText = "" }
+        $cmd | Add-Member -MemberType ScriptMethod -Name ExecuteNonQuery -Value {
+            if ($script:TestConnSessionInitShouldFail) { throw [InvalidOperationException]::new("simulated: session init failed") }
+            return 0
+        } -Force
+        return $cmd
+    } -Force
+    $conn | Add-Member -MemberType ScriptMethod -Name Dispose -Value {
+        $script:TestConnDisposeCount++
+        $this.IsDisposed = $true
+    } -Force
+    return $conn
+}
+
+# AMEEN_SQL_CONNECTION_STRING مطلوب حتى يمر Get-RequiredUserSetting + بنّاء
+# SqlConnectionStringBuilder الحقيقيان بلا أي اتصال شبكة فعلي.
+[Environment]::SetEnvironmentVariable("AMEEN_SQL_CONNECTION_STRING", "Server=test;Database=test;User Id=test;Password=test;", "Process")
+
+$getRequiredUserSettingSrc = Get-ExtractedFunctionText $bridgeSrc "function Get-RequiredUserSetting([string]`$Name) {"
+. ([scriptblock]::Create($getRequiredUserSettingSrc))
+$script:CommittedConfirmationLockTimeoutMilliseconds = 2000
+
+# New-ReadOnlyConnection الحقيقية تتابع بعد try/catch إلى استعلام صلاحيات
+# يتطلب ExecuteReader حقيقياً — خارج نطاق NEW-3 تماماً. نستخرج نص الدالة
+# الحقيقي نصياً، ثم نقتصر على الجزء الخاضع للإصلاح فقط (بناء الاتصال حتى
+# نهاية try/catch)، ونستبدل فقط سطر إنشاء SqlConnection ببديلنا القابل للتحكم.
+# هذا يختبر نفس try/catch/Dispose/throw الحقيقي المكتوب في الإنتاج، لا نسخة موازية.
+$readOnlyFullSrc = Get-ExtractedFunctionText $bridgeSrc "function New-ReadOnlyConnection {"
+$readOnlyCoreMarker = '$command = $connection.CreateCommand()'
+$readOnlyCoreEndIdx = $readOnlyFullSrc.IndexOf($readOnlyCoreMarker)
+Assert-True ($readOnlyCoreEndIdx -gt 0) "تعذّر تحديد نهاية جزء فتح الاتصال داخل New-ReadOnlyConnection؛ الاختبار غير صالح."
+$readOnlyCoreSrc = $readOnlyFullSrc.Substring(0, $readOnlyCoreEndIdx) + "    return `$connection`r`n}`r`n"
+$readOnlyCoreSrc = $readOnlyCoreSrc -replace [regex]::Escape('function New-ReadOnlyConnection {'), 'function Test-New-ReadOnlyConnectionCore {'
+$readOnlyCoreSrc = $readOnlyCoreSrc -replace [regex]::Escape('New-Object System.Data.SqlClient.SqlConnection $builder.ConnectionString'), 'New-TestSqlConnection'
+Assert-True ($readOnlyCoreSrc -match 'New-TestSqlConnection') "لم يُطبَّق استبدال بديل الاتصال (ReadOnly)؛ الاختبار غير صالح."
+Assert-True ($readOnlyCoreSrc -match '(?s)try\s*\{.*Dispose\(\).*\}\s*catch\s*\{.*\}\s*throw') "النص المُستخرَج لا يحتوي منطق try/catch/Dispose/throw الحقيقي؛ الاختبار غير صالح."
+. ([scriptblock]::Create($readOnlyCoreSrc))
+
+$committedFullSrc = Get-ExtractedFunctionText $bridgeSrc "function New-CommittedConfirmationConnection {"
+$committedCoreSrc = $committedFullSrc -replace [regex]::Escape('function New-CommittedConfirmationConnection {'), 'function Test-New-CommittedConfirmationConnectionCore {'
+$committedCoreSrc = $committedCoreSrc -replace [regex]::Escape('New-Object System.Data.SqlClient.SqlConnection $builder.ConnectionString'), 'New-TestSqlConnection'
+Assert-True ($committedCoreSrc -match 'New-TestSqlConnection') "لم يُطبَّق استبدال بديل الاتصال (Committed)؛ الاختبار غير صالح."
+. ([scriptblock]::Create($committedCoreSrc))
+
+Test-Case "NEW-3-1: نجاح Open + نجاح تهيئة الجلسة → إرجاع الاتصال طبيعياً (New-ReadOnlyConnection)" {
+    $script:TestConnDisposeCount = 0
+    $script:TestConnOpenShouldFail = $false
+    $script:TestConnSessionInitShouldFail = $false
+    $conn = Test-New-ReadOnlyConnectionCore
+    Assert-True ($null -ne $conn) "يجب أن تُعاد كائن اتصال."
+    Assert-True $conn.IsOpen "الاتصال المُعاد يجب أن يكون مفتوحاً."
+    Assert-True ($script:TestConnDisposeCount -eq 0) "لا يجوز التخلص من الاتصال في مسار النجاح."
+}
+
+Test-Case "NEW-3-2: فشل Open() → الاستثناء الأصلي يُرمى كما هو دون ابتلاع (New-ReadOnlyConnection)" {
+    $script:TestConnDisposeCount = 0
+    $script:TestConnOpenShouldFail = $true
+    $script:TestConnSessionInitShouldFail = $false
+    $threw = $false
+    try { Test-New-ReadOnlyConnectionCore | Out-Null } catch {
+        $threw = $true
+        Assert-True ($_.Exception.Message -match "simulated: Open failed") "يجب أن يصل الاستثناء الأصلي لفشل Open() دون تغليف أو استبدال."
+    }
+    Assert-True $threw "فشل Open() يجب أن يُطلق استثناءً."
+}
+
+Test-Case "NEW-3-3/4: فشل تهيئة الجلسة بعد Open() ناجح → Dispose مرة واحدة بالضبط + رمي الاستثناء الأصلي (New-ReadOnlyConnection)" {
+    $script:TestConnDisposeCount = 0
+    $script:TestConnOpenShouldFail = $false
+    $script:TestConnSessionInitShouldFail = $true
+    $threw = $false
+    try { Test-New-ReadOnlyConnectionCore | Out-Null } catch {
+        $threw = $true
+        Assert-True ($_.Exception.Message -match "simulated: session init failed") "يجب أن يصل الاستثناء الأصلي لفشل تهيئة الجلسة دون تغليف."
+    }
+    Assert-True $threw "فشل تهيئة الجلسة يجب أن يُطلق استثناءً."
+    Assert-True ($script:TestConnDisposeCount -eq 1) "يجب التخلص من الاتصال مرة واحدة بالضبط بعد فشل تهيئة الجلسة (قبل الإصلاح: تسريب بلا Dispose إطلاقاً)."
+}
+
+Test-Case "NEW-3-5: فشل تهيئة الجلسة بعد Open() ناجح → Dispose مرة واحدة بالضبط + رمي الاستثناء الأصلي (New-CommittedConfirmationConnection)" {
+    $script:TestConnDisposeCount = 0
+    $script:TestConnOpenShouldFail = $false
+    $script:TestConnSessionInitShouldFail = $true
+    $threw = $false
+    try { Test-New-CommittedConfirmationConnectionCore | Out-Null } catch {
+        $threw = $true
+        Assert-True ($_.Exception.Message -match "simulated: session init failed") "يجب أن يصل الاستثناء الأصلي دون تغليف (Committed)."
+    }
+    Assert-True $threw "فشل تهيئة الجلسة يجب أن يُطلق استثناءً (Committed)."
+    Assert-True ($script:TestConnDisposeCount -eq 1) "يجب التخلص من الاتصال مرة واحدة بالضبط (Committed) — لا تسريب."
+}
+
+# NEW-3-6: نفس الفشل، لكن ضمن نبضة استطلاع كاملة عبر Confirm-InvoiceCommitted
+# الحقيقية — تتحقق أن لا طباعة ولا علامة seen نهائية تحدث، وأن القرار يبقى
+# قابلاً لإعادة المحاولة لاحقاً، وأن الاتصال لا يتسرّب حتى في هذا المسار الأعلى.
+$getInvoiceSnapshotGuardSrc = @'
+function Get-InvoiceSnapshot($Connection, [guid]$InvoiceGuid) {
+    throw "Get-InvoiceSnapshot لا يجوز استدعاؤها إطلاقاً إذا فشل فتح اتصال التأكيد."
+}
+'@
+. ([scriptblock]::Create($getInvoiceSnapshotGuardSrc))
+
+$confirmInvoiceCommittedSrc = Get-ExtractedFunctionText $bridgeSrc "function Confirm-InvoiceCommitted([guid]`$InvoiceGuid, `$ExpectedSnapshot) {"
+. ([scriptblock]::Create($confirmInvoiceCommittedSrc))
+
+$deferredEventSrc = Get-ExtractedFunctionText $bridgeSrc "function Get-CommittedConfirmationDeferredEvent([string]`$InvoiceGuid, [int]`$InvoiceNumber, `$Confirmation) {"
+. ([scriptblock]::Create($deferredEventSrc))
+
+# Confirm-InvoiceCommitted تستدعي New-CommittedConfirmationConnection بالاسم
+# الحقيقي؛ نُعيد تعريفها هنا بنفس المنطق الحقيقي المُستخرَج نصياً (وليس Mock
+# كاملاً كما في قسم P1-M أعلاه) مع استبدال منشئ الاتصال فقط ببديلنا القابل للتحكم،
+# حتى يختبر هذا المسار الأعلى عقد try/catch/Dispose الحقيقي فعلياً لا محاكاته.
+$committedRealNamedSrc = $committedFullSrc -replace [regex]::Escape('New-Object System.Data.SqlClient.SqlConnection $builder.ConnectionString'), 'New-TestSqlConnection'
+. ([scriptblock]::Create($committedRealNamedSrc))
+
+Test-Case "NEW-3-6: فشل تهيئة جلسة اتصال التأكيد ضمن نبضة استطلاع → لا طباعة، لا علامة seen نهائية، إعادة محاولة لاحقاً، بلا تسريب" {
+    $script:TestConnDisposeCount = 0
+    $script:TestConnOpenShouldFail = $false
+    $script:TestConnSessionInitShouldFail = $true
+
+    $result = Confirm-InvoiceCommitted ([guid]::NewGuid()) ([pscustomobject]@{ LineCount = 1; Signature = "x" })
+
+    Assert-True (-not $result.Confirmed) "يجب ألا تُعتبر الفاتورة مؤكدة عند فشل اتصال التأكيد — أي: لا طباعة."
+    Assert-True ($result.Reason -eq "confirmation_connection_failed") "السبب المتوقع confirmation_connection_failed (فشل قبل أي قراءة)، والفعلي: $($result.Reason)"
+    Assert-True ($script:TestConnDisposeCount -eq 1) "الاتصال الذي فُتح بنجاح ثم فشلت تهيئة جلسته يجب أن يُتخلَّص منه مرة واحدة بالضبط — بلا تسريب حتى ضمن نبضة استطلاع كاملة."
+
+    $deferredEvent = Get-CommittedConfirmationDeferredEvent "g-1" 123 $result
+    Assert-True ($deferredEvent.Consequence -match "no_print_no_mark_no_quarantine") "الحدث المؤجَّل يجب أن يوثّق صراحة: لا طباعة، لا علامة seen نهائية، إعادة محاولة لاحقاً — يطابق سلوك NEW-3-6 المطلوب."
+}
+
+Test-Case "شاهد سلبي NEW-3: إزالة Dispose من كتلة catch تُسقط فحص عدم التسريب" {
+    $legacySrc = $readOnlyCoreSrc -replace [regex]::Escape('try { $connection.Dispose() } catch { }'), ''
+    Assert-True ($legacySrc -ne $readOnlyCoreSrc) "لم يُطبَّق حذف Dispose؛ الشاهد السلبي غير صالح."
+    $legacySrc = $legacySrc -replace [regex]::Escape('function Test-New-ReadOnlyConnectionCore {'), 'function Test-New-ReadOnlyConnectionCore-Legacy {'
+    . ([scriptblock]::Create($legacySrc))
+
+    $script:TestConnDisposeCount = 0
+    $script:TestConnOpenShouldFail = $false
+    $script:TestConnSessionInitShouldFail = $true
+    try { Test-New-ReadOnlyConnectionCore-Legacy | Out-Null } catch { }
+
+    $negativeWitnessFailed = $false
+    try {
+        Assert-True ($script:TestConnDisposeCount -eq 1) "توقّع (مع الإصلاح فقط): يُتخلَّص من الاتصال مرة واحدة."
+    } catch {
+        $negativeWitnessFailed = $true
+    }
+    Assert-True $negativeWitnessFailed "السلوك القديم (بلا Dispose في catch) يجب أن يُسقط فحص عدم التسريب؛ إن لم يسقط فالشاهد السلبي غير فعّال — الاتصال يتسرّب صامتاً."
+}
+
 Write-Host "`n$($script:passed) passed, $($script:failed) failed"
 if ($script:failed -gt 0) { exit 1 }
