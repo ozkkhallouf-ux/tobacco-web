@@ -236,10 +236,16 @@ const financialAssistant = readFileSync("supabase/functions/financial-assistant/
 const accountBalancesSql = readFileSync("supabase/ameen-account-balance-reports.sql", "utf8");
 const accountBalancesPush = readFileSync("tools/push-ameen-account-balances.ps1", "utf8");
 
+// عقد واجهة المساعد الذكي. تغيّر في 2026-09-06: لم يعد المساعد مقصوراً على
+// تقارير الأمين (صار يقرأ المبيعات والمصاريف والمشتريات والمستودعات وأسعار
+// Supabase أيضاً)، فسقطت عبارة «قراءة فقط من الأمين» لأنها صارت وصفاً غير دقيق
+// لمصادره. ما يبقى ملزماً: النداء يمر بـEdge Function محمية، والقراءة-فقط
+// معلنة في الواجهة. `askFinancialAssistant` باقٍ غلافاً متوافقاً لـ`askAssistant`.
 for (const contract of [
+  "askAssistant",
   "askFinancialAssistant",
   "/functions/v1/financial-assistant",
-  "قراءة فقط من الأمين"
+  "قراءة فقط"
 ]) {
   if (!app.includes(contract) && !readFileSync("src/supabase-client.js", "utf8").includes(contract)) {
     console.error(`Financial assistant client contract is missing: ${contract}`);
@@ -321,9 +327,33 @@ for (const forbidden of ["sessionStorage", "anthropic-dangerous-direct-browser-a
     failed = true;
   }
 }
-for (const contract of ["requireStaff", "SUPABASE_SERVICE_ROLE_KEY", "ameen_account_balance_reports", "externalDataShared: false"]) {
+// عقد خادم المساعد الذكي. `requireStaff` كان يخوّل بقائمة إيميلات ثابتة انفصلت
+// عن app_metadata.role، فمنعت المالك وسمحت للموظف بالبيانات المالية (تشخيص
+// 2026-09-06). خلفه `requireActor` الذي يخوّل بالدور وحده، والعقد هنا يفرض
+// المصدر الجديد ويمنع عودة أي قائمة إيميلات.
+for (const contract of [
+  "requireActor",
+  "app_metadata",
+  "SUPABASE_SERVICE_ROLE_KEY",
+  "ameen_account_balance_reports",
+  "READABLE_TABLES",
+  'method: "GET"',
+  "externalDataShared: false"
+]) {
   if (!financialAssistant.includes(contract)) {
     console.error(`Financial assistant server contract is missing: ${contract}`);
+    failed = true;
+  }
+}
+{
+  const code = financialAssistant.split("\n").filter((line) => !line.trim().startsWith("//")).join("\n");
+  const emails = code.match(/[\w.+-]+@[\w-]+\.[\w.]+/g) ?? [];
+  if (emails.length) {
+    console.error(`Financial assistant must authorize by role, not by an email list: ${emails.join(", ")}`);
+    failed = true;
+  }
+  for (const writeVerb of code.match(/method:\s*["'](POST|PATCH|PUT|DELETE)["']/g) ?? []) {
+    console.error(`Financial assistant must stay read-only: found ${writeVerb}`);
     failed = true;
   }
 }
