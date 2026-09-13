@@ -246,6 +246,64 @@ function noMovementReport(period: Period, latestDate: string | null): ToolResult
   };
 }
 
+// تقارير الربح اليومي المطلوبة (inventory_reports:ameen_daily_profit).
+//
+// كان الفرع يقرأ **أحدث تقرير دوماً** بلا نظر إلى ctx.period، فسؤال «كم ربحنا
+// الشهر الماضي؟» كان يُجاب بربح **اليوم** الحالي معروضاً على أنه ربح الشهر —
+// نفس عطل تقارير الحركة قبل movementReports أعلاه. (رصدها Codex على PR #205.)
+//
+// المنهج مطابق لـmovementReports: بلا فترة صريحة يُقرأ الأحدث فقط، ومع فترة
+// صريحة تُقرأ كل أيامها ولقطة كل يوم الأحدث تُعتمد، وتُحصى الأيام الغائبة.
+type ProfitDay = { report_date: string; summary: Record<string, unknown>; created_at: string };
+
+async function profitReports(period: Period): Promise<{
+  days: ProfitDay[];
+  latestAvailable: string | null;
+  missingDays: string[];
+}> {
+  const source = "ameen_daily_profit";
+  if (!period.explicit) {
+    const rows = await readRest(
+      "inventory_reports?select=report_date,summary,created_at"
+      + `&source=eq.${source}&order=report_date.desc,created_at.desc&limit=1`
+    );
+    const row = (Array.isArray(rows) && rows[0]) || null;
+    return { days: row ? [row as ProfitDay] : [], latestAvailable: null, missingDays: [] };
+  }
+  const { rows } = await readPaged((range) =>
+    "inventory_reports?select=report_date,summary,created_at"
+    + `&source=eq.${source}`
+    + `&report_date=gte.${safeDate(period.from)}&report_date=lte.${safeDate(period.to)}`
+    + `&order=report_date.desc,created_at.desc${range}`
+  );
+  const days: ProfitDay[] = [];
+  const seen = new Set<string>();
+  for (const row of rows) {
+    const date = String(row.report_date ?? "");
+    if (!date || seen.has(date)) continue;
+    seen.add(date);
+    days.push(row as unknown as ProfitDay);
+  }
+  if (!days.length) {
+    const latest = await readRest(
+      `inventory_reports?select=report_date&source=eq.${source}&order=report_date.desc&limit=1`
+    );
+    const latestDate = Array.isArray(latest) && latest[0] ? String(latest[0].report_date) : null;
+    return { days: [], latestAvailable: latestDate, missingDays: [] };
+  }
+  return { days, latestAvailable: null, missingDays: datesInPeriod(period).filter((d) => !seen.has(d)) };
+}
+
+function noProfitReport(period: Period, latestDate: string | null): ToolResult {
+  return {
+    ok: false,
+    text: `لا يوجد تقرير ربح يومي يغطي ${period.label} (${period.from} → ${period.to}).`
+      + (latestDate ? `\n\nأحدث تقرير متاح بتاريخ **${latestDate}**.` : "")
+      + `\n\nلن أعطيك أرقام يوم آخر مكانه — ستبدو جواباً عن الفترة المطلوبة وهي ليست كذلك.`,
+    sources: ["inventory_reports:ameen_daily_profit"]
+  };
+}
+
 // أحدث صف من جدول تقارير بمفتاح summary/items
 async function latestReport(table: string, source?: string) {
   const filter = source ? `&source=eq.${encodeURIComponent(source)}` : "";
@@ -721,7 +779,7 @@ type Tool = {
   id: string;
   title: string;
   minRole: Role;
-  entity?: "customer" | "item" | "account";
+  entity?: "customer" | "item" | "account" | "supplier";
   patterns: Array<{ re: RegExp; w: number }>;
   run: (ctx: ToolContext) => Promise<ToolResult>;
 };
@@ -1020,25 +1078,40 @@ const TOOLS: Tool[] = [
     title: "الأرباح",
     minRole: "owner",
     patterns: [{ re: /ربح|ارباح|خساره|هامش|مردود/, w: 6 }],
-    async run() {
-      const report = await latestReport("inventory_reports", "ameen_daily_profit");
-      if (!report?.summary) return noData("الأرباح", ["inventory_reports:ameen_daily_profit"]);
-      const s = report.summary as Record<string, unknown>;
-      const currency = String(s.currency ?? "USD");
-      const text = `**تقرير الربح — ${report.report_date}**\n`
-        + `- المبيعات الإجمالية: **${money(s.sales_gross, currency)}**\n`
-        + `- الحسومات: ${money(s.discounts, currency)} / المرتجعات: ${money(s.returns, currency)}\n`
-        + `- صافي المبيعات: **${money(s.net_sales, currency)}**\n`
-        + `- تكلفة البضاعة المباعة: ${money(s.sales_cost, currency)}\n`
-        + `- مجمل الربح: **${money(s.gross_profit, currency)}**\n`
-        + `- المصاريف: ${money(s.expenses, currency)}\n`
-        + `- **صافي الربح: ${money(s.net_profit, currency)}**\n`
-        + `- عدد الفواتير: ${num(s.sales_bill_count)} — عدد السطور: ${num(s.line_count)}`
-        + (num(s.missing_cost_lines) > 0
-          ? `\n\n> ⚠️ ${num(s.missing_cost_lines)} سطر بلا تكلفة معروفة، فالربح أعلاه ناقص بمقدار تكلفتها.`
+    async run(ctx) {
+      const { days, latestAvailable, missingDays } = await profitReports(ctx.period);
+      if (!days.length) {
+        return ctx.period.explicit
+          ? noProfitReport(ctx.period, latestAvailable)
+          : noData("الأرباح", ["inventory_reports:ameen_daily_profit"]);
+      }
+      const summaries = days.map((d) => d.summary as Record<string, unknown>);
+      const currency = String(summaries[0]?.currency ?? "USD");
+      const sum = (field: string) => summaries.reduce((total, s) => total + num(s[field]), 0);
+      const complete = summaries.every((s) => s.complete !== false);
+      const missingCostLines = sum("missing_cost_lines");
+      const newest = days.reduce((latest, d) => (d.created_at > latest ? d.created_at : latest), days[0].created_at);
+
+      const single = !ctx.period.explicit || days.length === 1;
+      const heading = single
+        ? `**تقرير الربح — ${days[0].report_date}**`
+        : `**تقرير الربح — ${ctx.period.label} (${ctx.period.from} → ${ctx.period.to})** — ${days.length} يوم`;
+
+      const text = `${heading}\n`
+        + `- المبيعات الإجمالية: **${money(sum("sales_gross"), currency)}**\n`
+        + `- الحسومات: ${money(sum("discounts"), currency)} / المرتجعات: ${money(sum("returns"), currency)}\n`
+        + `- صافي المبيعات: **${money(sum("net_sales"), currency)}**\n`
+        + `- تكلفة البضاعة المباعة: ${money(sum("sales_cost"), currency)}\n`
+        + `- مجمل الربح: **${money(sum("gross_profit"), currency)}**\n`
+        + `- المصاريف: ${money(sum("expenses"), currency)}\n`
+        + `- **صافي الربح: ${money(sum("net_profit"), currency)}**\n`
+        + `- عدد الفواتير: ${num(sum("sales_bill_count"))} — عدد السطور: ${num(sum("line_count"))}`
+        + (missingCostLines > 0
+          ? `\n\n> ⚠️ ${missingCostLines} سطر بلا تكلفة معروفة عبر ${single ? "هذا اليوم" : "أيام الفترة"}، فالربح أعلاه ناقص بمقدار تكلفتها.`
           : "")
-        + (s.complete === false ? `\n\n> ⚠️ التقرير غير مكتمل حسب مصدره.` : "");
-      return { ok: true, text: text + freshnessNote(report.created_at), sources: ["inventory_reports:ameen_daily_profit"], asOf: report.created_at };
+        + (!complete ? `\n\n> ⚠️ تقرير يوم واحد على الأقل غير مكتمل حسب مصدره.` : "")
+        + (!single ? missingDaysNote(missingDays) : "");
+      return { ok: true, text: text + freshnessNote(newest), sources: ["inventory_reports:ameen_daily_profit"], asOf: newest };
     }
   },
 
@@ -1616,6 +1689,7 @@ const TOOLS: Tool[] = [
     id: "purchases",
     title: "المشتريات والموردون",
     minRole: "owner",
+    entity: "supplier",
     patterns: [
       { re: /مشتريات|مورد|موردين|فواتير الشراء|اشترينا/, w: 7 }
     ],
@@ -1679,7 +1753,11 @@ const TOOLS: Tool[] = [
 
       const coverage = reportCoverage(ctx.period, s, report.report_date, truncatedSuppliers > 0, "تقرير المشتريات");
 
-      if (ctx.period.explicit && !bills) {
+      // ⚠️ الشرط أدناه كان `!bills` وحدها، فيُعلن «لا توجد فواتير شراء في هذه
+      // الفترة» حتى حين توجد مرتجعات شراء فيها بلا فواتير شراء جديدة —
+      // فيُخفي مرتجعاتٍ فعلية تحت نفيٍ قاطع خاطئ. المرتجع سطرٌ حقيقي في
+      // نافذة الفترة ويستحق أن يُعرض، لا أن يُبتلع. (رصدها Codex على PR #205.)
+      if (ctx.period.explicit && !bills && !returnsTotal) {
         // «لا فواتير في هذه الفترة» نفيٌ قاطع. وهو كاذب متى كانت الفترة خارج
         // نافذة التقرير أصلاً، أو داخلها لكن اللقطة مقصوصة.
         if (!coverage.covered) {

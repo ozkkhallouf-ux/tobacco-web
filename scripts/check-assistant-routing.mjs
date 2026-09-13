@@ -1229,4 +1229,111 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   ok("المرتجع يُفصل عن الشراء ويُعنون — في فواتير الزبون وفي المشتريات");
 }
 
+// ── ت) الأرباح تحترم الفترة المطلوبة — لا أحدث تقرير دائماً ─────────────────
+{
+  // إصلاح #25 على PR #205: أداة `profit` كانت تتجاهل ctx.period كلياً وتقرأ
+  // دائماً أحدث تقرير `ameen_daily_profit` بصرف النظر عن اليوم/الفترة
+  // المطلوبة — فسؤال «كم كان الربح أمس؟» كان يُجاب برقم **اليوم**.
+  const today = new Date(Date.now() + 180 * 60_000).toISOString().slice(0, 10);
+  const yesterday = new Date(Date.now() + 180 * 60_000 - 86_400_000).toISOString().slice(0, 10);
+  const dayBefore = new Date(Date.now() + 180 * 60_000 - 2 * 86_400_000).toISOString().slice(0, 10);
+  const profitDay = (date, net) => ({
+    report_date: date,
+    created_at: new Date(Date.parse(`${date}T12:00:00Z`)).toISOString(),
+    summary: {
+      currency: "USD", sales_gross: 1000, discounts: 0, returns: 0, net_sales: 1000,
+      sales_cost: 900, gross_profit: 100, expenses: 20, net_profit: net,
+      sales_bill_count: 1, line_count: 1, missing_cost_lines: 0, complete: true
+    },
+    items: []
+  });
+  const fixtures = defaultFixtures();
+  fixtures["inventory_reports:ameen_daily_profit"] = [
+    profitDay(today, 111),
+    profitDay(yesterday, 222)
+  ];
+
+  const a = await loadAssistant({ fixtures });
+  const yd = await a.ask(TOKENS.owner, "كم كان الربح امس؟");
+  const ydText = String(yd.body.reply);
+  assert.equal(yd.body.tool, "profit");
+  assert.ok(ydText.includes("222"), `لم يقرأ ربح أمس:\n${ydText}`);
+  assert.ok(!ydText.includes("111"), `عرض ربح اليوم جواباً عن أمس:\n${ydText}`);
+  assert.ok(ydText.includes(yesterday), "لم يذكر تاريخ أمس");
+
+  // «الاسبوع» = آخر 7 أيام (فترة صريحة تمتد أكثر من يوم) — لدينا تقريران فقط
+  // داخلها (اليوم وأمس)، فتجميعهما يثبت أن الفترة تُحسب لا يوماً واحداً، وبقية
+  // أيام الأسبوع فجوة يجب الإعلان عنها لا تجاهلها صامتاً.
+  const b = await loadAssistant({ fixtures });
+  const range = await b.ask(TOKENS.owner, "كم الربح هذا الاسبوع؟");
+  const rangeText = String(range.body.reply);
+  assert.ok(rangeText.includes("333"), `لم يجمع صافي الربح عبر يومي الفترة:\n${rangeText}`);
+  assert.ok(/بلا تقرير حركة/.test(rangeText), `لم يُعلن الأيام الغائبة داخل الفترة:\n${rangeText}`);
+
+  // وفترة صريحة بلا أي تقرير مطابق على الإطلاق ⇒ امتناع صريح، لا استبدال بتقرير من فترة أخرى
+  const oldFixtures = defaultFixtures();
+  oldFixtures["inventory_reports:ameen_daily_profit"] = [profitDay(dayBefore, 999)];
+  const c = await loadAssistant({ fixtures: oldFixtures });
+  const noneInRange = await c.ask(TOKENS.owner, "كم كان الربح امس؟");
+  assert.equal(noneInRange.body.answered, false, "ادّعى الجواب عن يوم ربح بلا تقرير مطابق");
+
+  // ويوم مطلوب صراحة بلا أي تقرير على الإطلاق ⇒ امتناع صريح، لا استبدال بيوم آخر
+  const d = await loadAssistant({ fixtures: { ...fixtures, "inventory_reports:ameen_daily_profit": [profitDay(today, 111)] } });
+  const missing = await d.ask(TOKENS.owner, "كم كان الربح امس؟");
+  const missText = String(missing.body.reply);
+  assert.equal(missing.body.answered, false, "ادّعى الجواب عن يوم ربح بلا تقرير");
+  assert.ok(!missText.includes("111"), "استبدل يوم الربح الغائب بأرقام يوم آخر");
+  assert.ok(missText.includes(today), "لم يذكر أحدث تاريخ متاح لتقرير الربح");
+
+  // وبلا فترة صريحة يبقى السلوك القديم: أحدث تقرير وحده
+  const e = await loadAssistant({ fixtures });
+  const latest = await e.ask(TOKENS.owner, "ما الأرباح؟");
+  assert.ok(String(latest.body.reply).includes("111"), "سؤال بلا فترة لم يأخذ أحدث تقرير ربح");
+  ok("أداة الأرباح تحترم الفترة المطلوبة: يوم محدد، تجميع مدى، وامتناع صريح عند الغياب");
+}
+
+// ── ث) مرتجعات الشراء وحدها في الفترة لا تُقرأ «لا توجد فواتير» ─────────────
+{
+  // إصلاح #27 على PR #205: الشرط كان `if (ctx.period.explicit && !bills)`،
+  // فيُعلن «لا توجد فواتير شراء في هذه الفترة» حتى حين توجد مرتجعات شراء
+  // فيها بلا فواتير شراء جديدة — نفيٌ كاذب يُخفي مرتجعات حقيقية.
+  const day = (n) => new Date(Date.now() + 180 * 60_000 - n * 86_400_000).toISOString().slice(0, 10);
+  const fixtures = defaultFixtures();
+  fixtures.ameen_purchase_invoice_reports = [{
+    report_date: day(0), created_at: new Date().toISOString(),
+    summary: { bills: 1, suppliers: 1, fromDate: day(60) },
+    items: [{ name: "مورّد", truncated: false, invoices: [
+      { date: day(2), isReturn: true, items: [{ itemName: "س", qty: 1, lineTotal: 10, avgPrice: 10 }] }
+    ] }]
+  }];
+
+  const a = await loadAssistant({ fixtures });
+  const result = await a.ask(TOKENS.owner, "ما مشتريات الاسبوع؟");
+  const text = String(result.body.reply);
+  assert.equal(result.body.tool, "purchases");
+  assert.ok(!/لا توجد فواتير شراء في هذه الفترة/.test(text), `أخفى المرتجع تحت نفي «لا فواتير» كاذب:\n${text}`);
+  assert.ok(/\*\*1\*\* مرتجع شراء/.test(text), `لم يُظهر مرتجع الشراء في الفترة:\n${text}`);
+  assert.ok(/عدد فواتير الشراء: \*\*0\*\*/.test(text), `لم يُصفّر عدد فواتير الشراء الجديدة:\n${text}`);
+  ok("فترة فيها مرتجعات شراء وحدها لا تُعلَن خطأً بلا فواتير — المرتجع يُعرض");
+}
+
+// ── خ) الترشيح بالمورّد أصبح ممكناً بعد ضبط entity على أداة المشتريات ───────
+{
+  // إصلاح #26 على PR #205: أداة `purchases` كانت بلا `entity`، فـ`ctx.entityText`
+  // يبقى دائماً "" (يُملأ في المخطِّط فقط عند `tool.entity` صادقة) — فكتلة
+  // الترشيح بالاسم (`if (ctx.entityText.trim())`) كانت شيفرة ميتة لا تُبلَغ أبداً.
+  const a = await loadAssistant();
+  const result = await a.ask(TOKENS.owner, "مشتريات مورد الذهبي");
+  const text = String(result.body.reply);
+  assert.equal(result.body.tool, "purchases");
+  assert.ok(/تفصيل.*الذهبي/.test(text), `لم يدخل فرع تفصيل المورّد المطابق:\n${text}`);
+  assert.ok(/قداحات ضو بايدا جديد/.test(text), `لم يعرض تفاصيل فواتير المورّد المطابق:\n${text}`);
+
+  // ومورّد غير موجود ⇒ رسالة صريحة بعدم العثور عليه، لا صمت ولا تخمين
+  const b = await loadAssistant();
+  const missing = await b.ask(TOKENS.owner, "مشتريات مورد غير موجود اطلاقا");
+  assert.ok(/لم أجد مورّداً باسم/.test(String(missing.body.reply)), "لم يُعلن عدم العثور على مورّد غير موجود");
+  ok("ضبط entity:\"supplier\" على أداة المشتريات فعّل ترشيح المورّد بالاسم — لم يعد شيفرة ميتة");
+}
+
 console.log(`\nتوجيه المساعد الذكي: ${passed}/${passed} تحقق ناجح`);
