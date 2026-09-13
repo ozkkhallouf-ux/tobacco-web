@@ -1337,4 +1337,98 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   ok("ضبط entity:\"supplier\" على أداة المشتريات فعّل ترشيح المورّد بالاسم — لم يعد شيفرة ميتة");
 }
 
+// ── ذ) فواتير الزبون: تعارض وحدة السطر يمنع الإجمالي القاطع (Codex #28) ─────
+{
+  // فواتير الزبون لا تحمل avgPrice كفواتير الشراء، فكشف التعارض هنا يقارن
+  // lineTotal المخزَّن بـ qty×price. سطر متسق طبيعي أولاً.
+  const consistentFixtures = defaultFixtures();
+  consistentFixtures["inventory_reports:ameen_customer_invoices"] = [{
+    report_date: "2026-09-06",
+    created_at: new Date().toISOString(),
+    summary: { bills: 1, customers: 1, fromDate: "2026-07-08" },
+    items: [{
+      name: "جهاد التلي",
+      customerGuid: "aaa11111",
+      invoices: [{ date: "2026-08-29", lines: [
+        { material: "صنف عادي", qty: 10, price: 100, unit1: "علبة", lineTotal: 1000 }
+      ] }]
+    }]
+  }];
+  const a = await loadAssistant({ fixtures: consistentFixtures });
+  const normal = String((await a.ask(TOKENS.owner, "ماذا اشترى الزبون جهاد التلي؟")).body.reply);
+  assert.ok(/إجمالي 1,000 USD/.test(normal), `فاتورة متسقة لم تُظهر إجمالياً صريحاً:\n${normal}`);
+  assert.ok(!normal.includes("لم أعرض إجمالي هذه الفاتورة عمداً"), "امتنع عن إجمالي فاتورة متسقة بلا سبب");
+
+  // وسطر متعارض الوحدة: qty×price يضخّم الناتج نحو 50 ضعف lineTotal الحقيقي
+  // (نفس نمط الخلل الحقيقي المرصود بأداة المشتريات) ⇒ يُمتنع عن الإجمالي.
+  const conflictFixtures = defaultFixtures();
+  conflictFixtures["inventory_reports:ameen_customer_invoices"] = [{
+    report_date: "2026-09-06",
+    created_at: new Date().toISOString(),
+    summary: { bills: 1, customers: 1, fromDate: "2026-07-08" },
+    items: [{
+      name: "جهاد التلي",
+      customerGuid: "aaa11111",
+      invoices: [{ date: "2026-08-27", lines: [
+        // qty×price = 4,593,750 بينما lineTotal المخزَّن = 91,850 — تعارض صريح
+        { material: "مالبورو غولد كرتون", qty: 3750, price: 1225, unit1: "كرتونة", lineTotal: 91850 }
+      ] }]
+    }]
+  }];
+  const b = await loadAssistant({ fixtures: conflictFixtures });
+  const conflict = String((await b.ask(TOKENS.owner, "ماذا اشترى الزبون جهاد التلي؟")).body.reply);
+  assert.ok(/لم أعرض إجمالي هذه الفاتورة عمداً/.test(conflict), `لم يمتنع عن إجمالي الفاتورة المتعارضة:\n${conflict}`);
+  assert.ok(!/إجمالي 91,850 USD/.test(conflict), "عرض إجمالياً قاطعاً رغم تعارض وحدة السعر");
+  // بند السطر نفسه يبقى معروضاً كما هو دون أي تعديل على lineTotal المخزَّن
+  assert.ok(conflict.includes("مالبورو غولد كرتون"), "أخفى بند الفاتورة رغم أن الإخفاء يخص الإجمالي فقط");
+  assert.ok(conflict.includes("= 91,850 USD"), "غيّر lineTotal المعروض بالسطر رغم أن التعديل ممنوع");
+
+  // ولا رجوع عن الحالة السليمة: الفواتير الافتراضية (متسقة) لا تتأثر بالحارس
+  const c = await loadAssistant();
+  const regression = String((await c.ask(TOKENS.owner, "ماذا اشترى الزبون جهاد التلي؟")).body.reply);
+  assert.ok(/إجمالي 8,945.5 USD/.test(regression), `فاتورة افتراضية متسقة تأثرت بالحارس الجديد:\n${regression}`);
+  assert.ok(!regression.includes("لم أعرض إجمالي هذه الفاتورة عمداً"), "الحارس الجديد سبّب امتناعاً كاذباً على بيانات سليمة");
+  ok("حارس تعارض وحدة السعر بفواتير الزبون: يمتنع عن الإجمالي عند التعارض فقط، ولا يمسّ الفواتير السليمة");
+}
+
+// ── ض) الملخص التنفيذي لا يعرض رقم ربح قاطع لتقرير ناقص (Codex #29) ────────
+{
+  const today = new Date(Date.now() + 180 * 60_000).toISOString().slice(0, 10);
+  const profitReport = (overrides) => ({
+    report_date: today,
+    created_at: new Date().toISOString(),
+    summary: {
+      currency: "USD", sales_gross: 1000, discounts: 0, returns: 0, net_sales: 1000,
+      sales_cost: 900, gross_profit: 100, expenses: 20, net_profit: 80,
+      sales_bill_count: 1, line_count: 1, missing_cost_lines: 0, complete: true,
+      ...overrides
+    },
+    items: []
+  });
+
+  // complete=true وmissing_cost_lines=0 ⇒ الرقم القاطع يظهر طبيعياً
+  const okFixtures = defaultFixtures();
+  okFixtures["inventory_reports:ameen_daily_profit"] = [profitReport({})];
+  const a = await loadAssistant({ fixtures: okFixtures });
+  const goodText = String((await a.ask(TOKENS.owner, "ما أهم الأمور التي تحتاج انتباهي اليوم؟")).body.reply);
+  assert.ok(/صافي 80 USD من صافي مبيعات 1,000 USD/.test(goodText), `تقرير مكتمل لم يُظهر رقم الربح القاطع:\n${goodText}`);
+
+  // complete=false ⇒ لا رقم قاطع رغم توفر net_profit خام بالتقرير
+  const incompleteFixtures = defaultFixtures();
+  incompleteFixtures["inventory_reports:ameen_daily_profit"] = [profitReport({ complete: false })];
+  const b = await loadAssistant({ fixtures: incompleteFixtures });
+  const incompleteText = String((await b.ask(TOKENS.owner, "ما أهم الأمور التي تحتاج انتباهي اليوم؟")).body.reply);
+  assert.ok(/غير متاح بدقة/.test(incompleteText), `تقرير غير مكتمل (complete=false) عرض رقماً قاطعاً:\n${incompleteText}`);
+  assert.ok(!/صافي 80 USD/.test(incompleteText), "عرض صافي الربح رغم complete=false");
+
+  // missing_cost_lines>0 مع complete=true ⇒ نفس الامتناع، لا استبدال الرقم
+  const missingCostFixtures = defaultFixtures();
+  missingCostFixtures["inventory_reports:ameen_daily_profit"] = [profitReport({ missing_cost_lines: 2 })];
+  const c = await loadAssistant({ fixtures: missingCostFixtures });
+  const missingCostText = String((await c.ask(TOKENS.owner, "ما أهم الأمور التي تحتاج انتباهي اليوم؟")).body.reply);
+  assert.ok(/غير متاح بدقة/.test(missingCostText), `تقرير بسطور ناقصة التكلفة عرض رقماً قاطعاً:\n${missingCostText}`);
+  assert.ok(!/صافي 80 USD/.test(missingCostText), "عرض صافي الربح رغم missing_cost_lines>0");
+  ok("الملخص التنفيذي يعتمد نفس معيار ثقة أداة الأرباح (complete/missing_cost_lines) قبل عرض رقم قاطع");
+}
+
 console.log(`\nتوجيه المساعد الذكي: ${passed}/${passed} تحقق ناجح`);

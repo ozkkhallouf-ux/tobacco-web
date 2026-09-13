@@ -414,6 +414,27 @@ function qty(value: unknown) {
   return num(value).toLocaleString("en-US", { maximumFractionDigits: 2 });
 }
 
+// رصدها Codex #28: كشف تعارض وحدة السطر — نفس فكرة أداة المشتريات (مقارنة
+// lineTotal المخزَّن بقيمة مُشتقّة من الكمية × السعر)، لكن مُعمَّمة لأي حقل
+// سعر مرجعي بدل الاقتصار على avgPrice (فواتير الزبون لا تحمل avgPrice أصلاً).
+// حين تكون lineTotal فعلياً = qty×price بالبناء (مثل lineTotalSource==="derived")
+// لا يظهر أي تعارض هنا — وهذا سليم، فالخطر الحقيقي فقط حين يكون lineTotal
+// قيمة حقيقية مستقلة (من الأمين) بينما qty×price بأساس وحدة مختلف.
+function lineTotalConflictStats(
+  lines: Array<Record<string, unknown>>,
+  priceField: string
+): { lines: number; conflicting: number; unreliable: boolean } {
+  let count = 0;
+  let conflicting = 0;
+  for (const line of lines) {
+    count += 1;
+    const stated = num(line.lineTotal);
+    const base = num(line.qty) * num(line[priceField]);
+    if (stated > 0 && base > 0 && Math.abs(stated - base) / Math.max(stated, base) > 0.2) conflicting += 1;
+  }
+  return { lines: count, conflicting, unreliable: count > 0 && conflicting / count > 0.2 };
+}
+
 // ── التواريخ ─────────────────────────────────────────────────────────────────
 function damascusDate(offsetDays = 0) {
   const now = new Date(Date.now() + DAMASCUS_OFFSET_MINUTES * 60_000 + offsetDays * 86_400_000);
@@ -1310,9 +1331,15 @@ const TOOLS: Tool[] = [
             }
             for (const inv of shown) {
               const lines = Array.isArray(inv.lines) ? inv.lines : [];
+              // رصدها Codex #28: قبل جمع lineTotal الخام، اكشف تعارض وحدة السطر
+              // (أسلوب أداة المشتريات نفسه) — إذا كانت الفاتورة متعارضة/غير
+              // موثوقة لا يُعرض إجمالي قاطع لها، لكن الأسطر تُعرض كما هي دون تعديل.
+              const { unreliable } = lineTotalConflictStats(lines as Array<Record<string, unknown>>, "price");
               const total = lines.reduce((sum: number, l: Record<string, unknown>) => sum + num(l.lineTotal), 0);
-              text += `\n\n**فاتورة ${String(inv.date ?? "")}** — إجمالي ${money(total)}\n`
-                + lines
+              text += unreliable
+                ? `\n\n**فاتورة ${String(inv.date ?? "")}** — ⚠️ لم أعرض إجمالي هذه الفاتورة عمداً (تعارض في وحدة السعر بين أسطرها)\n`
+                : `\n\n**فاتورة ${String(inv.date ?? "")}** — إجمالي ${money(total)}\n`;
+              text += lines
                   .slice(0, 10)
                   .map((l: Record<string, unknown>) =>
                     `- ${String(l.material ?? "")}: ${qty(l.qty)} ${String(l.unit1 ?? "")} × ${money(l.price)} = ${money(l.lineTotal)}`)
@@ -1326,8 +1353,11 @@ const TOOLS: Tool[] = [
                   .slice(0, 5)
                   .map((inv: Record<string, unknown>) => {
                     const lines = Array.isArray(inv.lines) ? inv.lines : [];
+                    // رصدها Codex #28: نفس كشف التعارض على مرتجعات الفواتير.
+                    const { unreliable } = lineTotalConflictStats(lines as Array<Record<string, unknown>>, "price");
                     const total = lines.reduce((sum: number, l: Record<string, unknown>) => sum + num(l.lineTotal), 0);
-                    return `- ${String(inv.date ?? "")}: ${money(total)}`
+                    const amount = unreliable ? "⚠️ غير محسوم (تعارض وحدة السعر)" : money(total);
+                    return `- ${String(inv.date ?? "")}: ${amount}`
                       + (lines.length ? ` (${lines.slice(0, 3).map((l: Record<string, unknown>) => String(l.material ?? "")).join("، ")}${lines.length > 3 ? "…" : ""})` : "");
                   })
                   .join("\n")
@@ -2070,6 +2100,11 @@ const TOOLS: Tool[] = [
         sources.push("inventory_reports:ameen_daily_profit");
         if (!report?.summary) return null;
         const s = report.summary as Record<string, unknown>;
+        // رصدها Codex #29: لا تعرض رقم ربح قاطع إذا كان التقرير غير مكتمل أو
+        // ناقص تكلفة سطور — نفس معيار الثقة المعتمد بأداة الأرباح (complete/missing_cost_lines).
+        if (s.complete === false || num(s.missing_cost_lines) > 0) {
+          return `**ربح ${report.report_date}**: غير متاح بدقة — تقرير الربح ناقص (تكلفة بعض السطور غير معروفة)، فلا رقم قاطع يُعرض هنا.`;
+        }
         return `**ربح ${report.report_date}**: صافي ${money(s.net_profit, String(s.currency ?? "USD"))} من صافي مبيعات ${money(s.net_sales, String(s.currency ?? "USD"))}.`;
       });
 
