@@ -57,14 +57,27 @@ const USERS = {
 const jsonResponse = (status, body) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
+// التواريخ الرئيسية (تقارير/مبيعات/مصاريف "اليوم" و"أمس") تُحسَب نسبةً إلى
+// الوقت الحقيقي، بنفس معادلة damascusDate() في index.ts (أوفست دمشق 180
+// دقيقة)، لا بتاريخ ثابت. تاريخ ثابت هنا كان يجعل أي اختبار بفترة صريحة
+// («اليوم») يفشل بمجرد مرور الوقت الحقيقي بعد ذلك التاريخ — وهذا ما حدث
+// فعلاً (تحقّق أصلاً بتاريخ 2026-09-06، والفشل ظهر عند 2026-09-13). التواريخ
+// التاريخية غير المقارَنة بـ"اليوم" (تفاصيل فواتير قديمة، fromDate وصفي) تبقى
+// ثابتة عمداً — تغييرها توسيع نطاق لا لزوم له.
+const DAMASCUS_OFFSET_MINUTES = 180;
+const relativeDate = (offsetDays = 0) =>
+  new Date(Date.now() + DAMASCUS_OFFSET_MINUTES * 60_000 - offsetDays * 86_400_000).toISOString().slice(0, 10);
+const TODAY = relativeDate(0);
+const YESTERDAY = relativeDate(1);
+
 // ── حمولات واقعية، مأخوذة من أشكال الصفوف الفعلية في Supabase ────────────────
 export function defaultFixtures() {
   return {
     daily_movement_reports: [{
-      report_date: "2026-09-06",
+      report_date: TODAY,
       created_at: new Date().toISOString(),
       payload: {
-        date: "2026-09-06",
+        date: TODAY,
         cashboxes: [
           { code: "133", name: "صندوق مبيعات المركز $", currency: "$", opening: 1200, incoming: 300, outgoing: 100, closing: 1400 },
           { code: "140", name: "صندوق الليرة", currency: "ل.س.", opening: 21304400.5, incoming: 0, outgoing: 0, closing: 21304400.5 }
@@ -81,16 +94,16 @@ export function defaultFixtures() {
       }
     }],
     expense_entries: [
-      { entry_date: "2026-09-06", account_name: "محروقات", amount: 45, notes: "" },
-      { entry_date: "2026-09-06", account_name: "أجور نقل", amount: 120, notes: "" }
+      { entry_date: TODAY, account_name: "محروقات", amount: 45, notes: "" },
+      { entry_date: TODAY, account_name: "أجور نقل", amount: 120, notes: "" }
     ],
     sales_line_items: [
-      { sale_date: "2026-09-06", bill_no: "101", bill_type: "wholesale", item_name: "ماستر طويل ورق", qty: 25, line_total: 8875, net_profit: 400, unit_cost: 339, customer_name: "جهاد التلي" },
-      { sale_date: "2026-09-06", bill_no: "101", bill_type: "wholesale", item_name: "كينغ دوم سليم", qty: 15, line_total: 70.5, net_profit: 6, unit_cost: 4.3, customer_name: "جهاد التلي" },
-      { sale_date: "2026-09-06", bill_no: "102", bill_type: "retail", item_name: "ماستر طويل ورق", qty: 5, line_total: 1800, net_profit: 80, unit_cost: 344, customer_name: "زبون نقدي" }
+      { sale_date: TODAY, bill_no: "101", bill_type: "wholesale", item_name: "ماستر طويل ورق", qty: 25, line_total: 8875, net_profit: 400, unit_cost: 339, customer_name: "جهاد التلي" },
+      { sale_date: TODAY, bill_no: "101", bill_type: "wholesale", item_name: "كينغ دوم سليم", qty: 15, line_total: 70.5, net_profit: 6, unit_cost: 4.3, customer_name: "جهاد التلي" },
+      { sale_date: TODAY, bill_no: "102", bill_type: "retail", item_name: "ماستر طويل ورق", qty: 5, line_total: 1800, net_profit: 80, unit_cost: 344, customer_name: "زبون نقدي" }
     ],
     ameen_purchase_invoice_reports: [{
-      report_date: "2026-09-06",
+      report_date: TODAY,
       created_at: new Date().toISOString(),
       summary: { bills: 108, suppliers: 20, fromDate: "2026-07-08" },
       items: [{
@@ -99,14 +112,14 @@ export function defaultFixtures() {
       }]
     }],
     ameen_warehouse_stock_reports: [{
-      report_date: "2026-09-06",
+      report_date: TODAY,
       created_at: new Date().toISOString(),
       summary: { warehouseKey: "25771C9C", warehouseName: "مستودع المشترك", item_count: 430 },
       items: []
     }],
     ameen_warehouse_transfer_reports: [],
     ameen_account_balance_reports: [{
-      report_date: "2026-09-06",
+      report_date: TODAY,
       created_at: new Date().toISOString(),
       summary: { accountCount: 408, nonZeroAccountCount: 210, accountingBasis: "ac000 Debit - Credit" },
       items: [
@@ -120,20 +133,20 @@ export function defaultFixtures() {
     ],
     // inventory_reports مفهرس بالمصدر — الحمولة مصفوفة لكل source
     "inventory_reports:ameen_customer_balances": [{
-      report_date: "2026-09-06",
+      report_date: TODAY,
       created_at: new Date().toISOString(),
       summary: {
         totalDebitBalance: 230551.427, totalCreditBalance: -830275.832,
         customersWithDebitBalance: 121, customersWithCreditBalance: 34, totalCustomers: 302
       },
       items: [
-        { key: "مركز الخيال مساكن برزه", name: "مركز الخيال / مساكن برزة", balance: 31597.2, customerGuid: "bbb09cbf", lastPaymentDate: "2026-09-05T00:00:00", recentPayments: [{ date: "2026-09-05T00:00:00", amount: 8500, notes: "بيد ابو زياد" }] },
+        { key: "مركز الخيال مساكن برزه", name: "مركز الخيال / مساكن برزة", balance: 31597.2, customerGuid: "bbb09cbf", lastPaymentDate: `${YESTERDAY}T00:00:00`, recentPayments: [{ date: `${YESTERDAY}T00:00:00`, amount: 8500, notes: "بيد ابو زياد" }] },
         { key: "جهاد التلي", name: "جهاد التلي", balance: 12000, customerGuid: "aaa11111", lastPaymentDate: "2026-09-01T00:00:00", recentPayments: [] },
         { key: "حساب دائن", name: "مورد سمير", balance: -4000, customerGuid: "ccc22222", recentPayments: [] }
       ]
     }],
     "inventory_reports:ameen_sql_agent": [{
-      report_date: "2026-09-06",
+      report_date: TODAY,
       created_at: new Date().toISOString(),
       summary: { totalStockItems: 430, availableItems: 256, lowStockItems: 222, outOfStockItems: 174, activeItems: 34, staleItems: 0, threshold: 50 },
       items: [
@@ -144,7 +157,7 @@ export function defaultFixtures() {
       ]
     }],
     "inventory_reports:ameen_daily_profit": [{
-      report_date: "2026-09-06",
+      report_date: TODAY,
       created_at: new Date().toISOString(),
       summary: {
         currency: "USD", sales_gross: 10745.5, discounts: 20, returns: 0, net_sales: 10725.5,
@@ -154,7 +167,7 @@ export function defaultFixtures() {
       items: []
     }],
     "inventory_reports:ameen_customer_invoices": [{
-      report_date: "2026-09-06",
+      report_date: TODAY,
       created_at: new Date().toISOString(),
       summary: { bills: 643, customers: 77, fromDate: "2026-07-08" },
       items: [{

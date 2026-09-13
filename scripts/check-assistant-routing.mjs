@@ -329,10 +329,11 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
 {
   // نفس العطل في المصاريف: الحد الثابت 200 كان يعرض مجموع أحدث 200 حركة
   // على أنه إجمالي الفترة كلها بلا أي تحذير.
+  const today = new Date(Date.now() + 180 * 60_000).toISOString().slice(0, 10);
   const fixtures = defaultFixtures();
   fixtures.expense_entries = Array.from({ length: 300 }, (_, i) => ({
     id: i + 1,
-    entry_date: "2026-09-06",
+    entry_date: today,
     account_name: `بند ${i + 1}`,
     amount: 10,
     notes: ""
