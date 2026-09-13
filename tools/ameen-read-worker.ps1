@@ -8,17 +8,25 @@ $RestTimeoutSec=30
 # دورة poll/idle اكتملت فعلياً — يميّز "Running وسليم" عن "Running ومتجمّد" لصالح ensure-ameen-sync.ps1.
 $heartbeatPath=Join-Path $PSScriptRoot "logs\ameen-read-worker.heartbeat.json"
 function Require-Env($Name){$v=[Environment]::GetEnvironmentVariable($Name,"User");if(-not $v){$v=[Environment]::GetEnvironmentVariable($Name,"Process")};if(-not $v){throw "Missing environment variable: $Name"};$v}
+# Codex P1: تُقرأ من البيئة من جديد في بداية كل محاولة auth (لا تُلتقط مرة واحدة عند
+# startup) — إن صُحِّحت/دُوِّرت TOBACCO_* أثناء انقطاع مصادقة طويل، المحاولة التالية
+# تستخدمها مباشرة بلا إعادة تشغيل يدوي للعملية. لا شيء آخر (مهلة الشبكة، مسارات الملفات...)
+# يُعاد تحميله هنا — الفصل مقصود كي لا يتحول كل retry إلى إعادة تحميل إعدادات كاملة غير لازمة.
+function Get-AmeenCredentials(){[pscustomobject]@{Url=(Require-Env "TOBACCO_SUPABASE_URL").TrimEnd('/');Key=Require-Env "TOBACCO_SUPABASE_PUBLIC_KEY";Email=Require-Env "TOBACCO_SYNC_EMAIL";Password=Require-Env "TOBACCO_SYNC_PASSWORD"}}
 function Session($Url,$Key,$Email,$Password){Invoke-RestMethod -Method Post -Uri "$Url/auth/v1/token?grant_type=password" -Headers @{apikey=$Key} -ContentType "application/json" -Body (@{email=$Email;password=$Password}|ConvertTo-Json) -TimeoutSec $RestTimeoutSec}
 # محاولات متكررة لتسجيل الدخول بدل خروج فوري: 5s -> 10s -> 20s -> 30s ثم تستمر كل 30s إلى ما لا نهاية.
 # لا تطبع أي secret/token — فقط نص رسالة الخطأ من Invoke-RestMethod (لا يتضمن كلمة المرور أو المفتاح).
-function Get-AuthSession($Url,$Key,$Email,$Password){
+# بيانات الاعتماد تُقرأ (Get-AmeenCredentials) من جديد في بداية كل محاولة — لا تُمرَّر كمعاملات
+# ثابتة من الاستدعاء الخارجي — فتُلتقط أي قيمة مصحَّحة فوراً بمجرد توفرها بيئياً.
+function Get-AuthSession(){
  $backoffs=@(5,10,20,30)
  $attempt=0
  while($true){
+  $c=Get-AmeenCredentials
   try{
-   $s=Session $Url $Key $Email $Password
+   $s=Session $c.Url $c.Key $c.Email $c.Password
    if($attempt -gt 0){Write-Warning "Ameen read worker: auth recovered after retry"}
-   return $s
+   return [pscustomobject]@{Session=$s;Url=$c.Url;Key=$c.Key}
   }catch{
    $delay=if($attempt -lt $backoffs.Count){$backoffs[$attempt]}else{30}
    Write-Warning ("Ameen read worker: auth attempt failed - "+$_.Exception.Message)
@@ -45,8 +53,7 @@ function Write-Heartbeat([string]$Status="ok"){
   @{timestampUtc=(Get-Date).ToUniversalTime().ToString("o");pid=$PID;status=$Status}|ConvertTo-Json|Set-Content -LiteralPath $heartbeatPath -Encoding utf8
  }catch{Write-Warning ("Ameen read worker: heartbeat write failed - "+$_.Exception.Message)}
 }
-$url=(Require-Env "TOBACCO_SUPABASE_URL").TrimEnd('/');$key=Require-Env "TOBACCO_SUPABASE_PUBLIC_KEY";$email=Require-Env "TOBACCO_SYNC_EMAIL";$password=Require-Env "TOBACCO_SYNC_PASSWORD"
-$session=Get-AuthSession $url $key $email $password;$token=$session.access_token
+$auth=Get-AuthSession;$url=$auth.Url;$key=$auth.Key;$token=$auth.Session.access_token
 while($true){
  try{
   $poll=Broker $url $key $token @{action='poll'};$job=$poll.job
@@ -58,7 +65,7 @@ while($true){
   Write-Heartbeat
  }catch{
   # فشل أي جزء من الدورة (بما فيه timeout الشبكة) لا يكتب heartbeat — يبقى heartbeat آخر دورة سليمة كما هو.
-  if($_.Exception.Message -match '401|JWT|token'){$session=Get-AuthSession $url $key $email $password;$token=$session.access_token}else{Write-Warning ("Ameen read worker: "+$_.Exception.Message)}
+  if($_.Exception.Message -match '401|JWT|token'){$auth=Get-AuthSession;$url=$auth.Url;$key=$auth.Key;$token=$auth.Session.access_token}else{Write-Warning ("Ameen read worker: "+$_.Exception.Message)}
  }
  Start-Sleep -Seconds ([math]::Max(2,$PollSeconds))
 }
