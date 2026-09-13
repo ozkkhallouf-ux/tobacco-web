@@ -80,6 +80,24 @@ do $$ begin
   end if;
 end $$;
 
+-- proposed/08 (PR #220، ملاحظة Codex P1 جديدة على 07): مفتاح dedupe لحالتَي
+-- 'stuck'/'disabled' في 07 صار job_health (التصنيف وحده)، فحلّ انتقال حقيقي
+-- بين تصنيفين لكنه لم يحلّ عودة *نفس* التصنيف مرتين خلال أقل من 60 دقيقة —
+-- stuck->disabled->stuck: الانتقال الثالث (العودة لـstuck) يحصل على نفس
+-- مفتاح "...:stuck" الذي أدرجه notify_telegram للحادثة الأولى قبل لحظات ضمن
+-- نافذة الـ60 دقيقة نفسها، فيُسقَط بصمت رغم أن should_alert صحيح. العمود
+-- يحفظ لحظة الدخول الفعلي في التصنيف الحالي (لا وقت الإنذار وحده)، فيصبح
+-- جزءاً من مفتاح الـdedupe: كل حادثة انتقال حقيقي تحصل على مفتاح جديد تماماً،
+-- بينما استمرار نفس التصنيف (تذكير دوري لاحق) يبقي نفس المفتاح كما كان.
+do $$ begin
+  if not exists (
+    select 1 from information_schema.columns
+    where table_schema='private' and table_name='project_task_health_state' and column_name='last_alerted_health_since'
+  ) then
+    alter table private.project_task_health_state add column if not exists last_alerted_health_since timestamptz;
+  end if;
+end $$;
+
 insert into private.project_task_monitors(task_key,task_label,report_source,max_age_minutes,enabled,source_table) values
  ('ameen-main','مزامنة أمين الرئيسية','ameen_sql_agent',10,true,'inventory_reports'),
  ('customer-balances','أرصدة الزبائن','ameen_customer_balances',10,true,'inventory_reports'),
@@ -252,6 +270,9 @@ declare cfg record; last_at timestamptz; age_minutes numeric; last_status text; 
  terminal_status text; terminal_at timestamptz; retry_running boolean;
  previous_alerted_terminal_at timestamptz; should_alert boolean; failure_dedupe_key text;
  previous_alerted_health text;
+ -- proposed/08: هوية incident لكل حادثة انتقال فعلي بين تصنيفَي stuck/disabled
+ -- (راجع تعليق عمود last_alerted_health_since أعلاه).
+ previous_alerted_health_since timestamptz; health_incident_since timestamptz;
 begin
  for cfg in select * from private.project_task_monitors where enabled order by task_key loop
   -- جولة ٤: source_table='inventory_reports' (الافتراضي) يبقي السلوك
@@ -352,8 +373,8 @@ begin
     else format('عالقة في حالة %s منذ %s',coalesce(last_job_status,'غير معروفة'),
      coalesce(round(extract(epoch from(now()-last_job_at))/60.0,1)::text||' دقيقة','مدة غير معروفة'))
     end;
-   select is_healthy,last_alert_at,last_alerted_terminal_at,last_alerted_health
-    into previous_healthy,previous_alert_at,previous_alerted_terminal_at,previous_alerted_health
+   select is_healthy,last_alert_at,last_alerted_terminal_at,last_alerted_health,last_alerted_health_since
+    into previous_healthy,previous_alert_at,previous_alerted_terminal_at,previous_alerted_health,previous_alerted_health_since
     from private.project_task_health_state where task_key='cron:'||job_record.jobname;
    -- حارس الإنذار لم يتغيّر عن سلوكه الأصلي لـ'stuck'/'disabled'، عمداً.
    --
@@ -407,7 +428,19 @@ begin
     if job_health='failed' then
      failure_dedupe_key:='project-cron-failure:'||job_record.jobname||':'||to_char(terminal_at,'YYYYMMDDHH24MISS');
     else
-     failure_dedupe_key:='project-cron-failure:'||job_record.jobname||':'||job_health;
+     -- proposed/08 (PR #220، ملاحظة Codex P1 جديدة على 07): job_health وحده
+     -- يحلّ انتقالاً حقيقياً بين تصنيفين لكن لا يحلّ عودة *نفس* التصنيف مرتين
+     -- خلال أقل من 60 دقيقة (stuck->disabled->stuck) — الانتقال الثالث يحصل
+     -- على نفس مفتاح "...:stuck" الذي أدرجه notify_telegram قبل لحظات لنفس
+     -- الحادثة الأولى، فيُسقَط بصمت رغم أن should_alert صحيح. health_incident_since
+     -- تُسجَّل عند كل دخول فعلي لتصنيف جديد (previous_alerted_health مختلف)
+     -- وتبقى كما هي عبر التذكير الدوري لنفس التصنيف (previous_alerted_health_since).
+     if previous_alerted_health is distinct from job_health then
+      health_incident_since:=now();
+     else
+      health_incident_since:=coalesce(previous_alerted_health_since,now());
+     end if;
+     failure_dedupe_key:='project-cron-failure:'||job_record.jobname||':'||job_health||':'||to_char(health_incident_since,'YYYYMMDDHH24MISSMS');
     end if;
     -- Codex P1 (PR #220، الملاحظة الثانية): previous_alert_at/previous_alerted_terminal_at
     -- كانا يُسجَّلان بلا شرط بعد notify_telegram، فيضيع إنذار 'failed' الوحيد
@@ -421,16 +454,22 @@ begin
       format('🚨 توقفت مهمة داخل الموقع%1$s• المهمة: %2$s%1$s• الحالة: %3$s',chr(10),job_record.jobname,detail_text),
       failure_dedupe_key,60);
      previous_alert_at:=now();
-     if job_health='failed' then previous_alerted_terminal_at:=terminal_at; end if;
+     if job_health='failed' then
+      previous_alerted_terminal_at:=terminal_at;
+      previous_alerted_health_since:=null;
+     else
+      previous_alerted_health_since:=health_incident_since;
+     end if;
      previous_alerted_health:=job_health;
     exception when others then
      raise warning 'monitor_project_tasks: notify_telegram failed for cron:%: %',job_record.jobname,sqlerrm;
     end;
    end if;
-   insert into private.project_task_health_state(task_key,is_healthy,last_observed_at,last_alert_at,last_alerted_terminal_at,last_alerted_health,last_detail)
-    values('cron:'||job_record.jobname,false,now(),previous_alert_at,previous_alerted_terminal_at,previous_alerted_health,detail_text)
+   insert into private.project_task_health_state(task_key,is_healthy,last_observed_at,last_alert_at,last_alerted_terminal_at,last_alerted_health,last_alerted_health_since,last_detail)
+    values('cron:'||job_record.jobname,false,now(),previous_alert_at,previous_alerted_terminal_at,previous_alerted_health,previous_alerted_health_since,detail_text)
     on conflict(task_key) do update set is_healthy=false,last_observed_at=now(),last_alert_at=excluded.last_alert_at,
      last_alerted_terminal_at=excluded.last_alerted_terminal_at,last_alerted_health=excluded.last_alerted_health,
+     last_alerted_health_since=excluded.last_alerted_health_since,
      last_detail=excluded.last_detail;
   elsif job_health = 'ok' then
    -- 'ok' وحدها تمنح شهادة النجاح. لا محاولة قيد التنفيذ، ولا مهمة لم تُشغَّل.
@@ -443,10 +482,10 @@ begin
    -- proposed/05: تعافٍ فعلي يُصفِّر last_alerted_terminal_at أيضاً، كي يُنذَر
    -- فشلٌ مقبل بصرف النظر عن terminal_at القديم الذي كان مؤنذَراً عنه قبل هذا
    -- التعافي.
-   insert into private.project_task_health_state(task_key,is_healthy,last_observed_at,last_success_at,last_alert_at,last_alerted_terminal_at,last_alerted_health,last_detail)
-    values('cron:'||job_record.jobname,true,now(),terminal_at,null,null,null,'يعمل')
+   insert into private.project_task_health_state(task_key,is_healthy,last_observed_at,last_success_at,last_alert_at,last_alerted_terminal_at,last_alerted_health,last_alerted_health_since,last_detail)
+    values('cron:'||job_record.jobname,true,now(),terminal_at,null,null,null,null,'يعمل')
     on conflict(task_key) do update set is_healthy=true,last_observed_at=now(),last_success_at=excluded.last_success_at,
-     last_alert_at=null,last_alerted_terminal_at=null,last_alerted_health=null,last_detail='يعمل';
+     last_alert_at=null,last_alerted_terminal_at=null,last_alerted_health=null,last_alerted_health_since=null,last_detail='يعمل';
   else
    -- 'inflight' / 'never_run': حالة محايدة. لا إنذار ولا تعافٍ، ولا تُمَس
    -- is_healthy ولا last_alert_at ولا last_success_at ولا last_detail —

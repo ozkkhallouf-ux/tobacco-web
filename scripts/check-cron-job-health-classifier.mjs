@@ -175,10 +175,17 @@ assert.equal(
 // proposed/05 (مطبَّق على الإنتاج): التعافي يُصفِّر last_alerted_terminal_at
 // أيضاً (وسيط null إضافي قبل last_detail) كي يُنذَر فشلٌ مقبل بصرف النظر عن
 // terminal_at القديم المؤنذَر عنه قبل هذا التعافي. proposed/06 (الجولة
-// الثالثة): last_alerted_health يُصفَّر أيضاً بنفس المنطق تماماً.
+// الثالثة): last_alerted_health يُصفَّر أيضاً بنفس المنطق تماماً. proposed/08:
+// last_alerted_health_since يُصفَّر أيضاً — وإلا تُستأنف حادثة منتهية فعلياً
+// بنفس هويتها القديمة عند عودة نفس التصنيف بعد تعافٍ حقيقي.
 assert.match(
-  okBranch, /values\('cron:'\|\|job_record\.jobname,true,now\(\),terminal_at,null,null,null,'يعمل'\)/,
-  `${MONITOR_SQL}: last_success_at يجب أن يكون terminal_at لا last_job_at، وlast_alerted_terminal_at/last_alerted_health يجب أن يُصفَّرا عند التعافي (05/06)`,
+  okBranch, /values\('cron:'\|\|job_record\.jobname,true,now\(\),terminal_at,null,null,null,null,'يعمل'\)/,
+  `${MONITOR_SQL}: last_success_at يجب أن يكون terminal_at لا last_job_at، وlast_alerted_terminal_at/last_alerted_health/last_alerted_health_since يجب أن تُصفَّر عند التعافي (05/06/08)`,
+);
+assert.match(
+  okBranch,
+  /last_alert_at=null,last_alerted_terminal_at=null,last_alerted_health=null,last_alerted_health_since=null,last_detail='يعمل'/,
+  `${MONITOR_SQL}: on conflict فرع التعافي يجب أن يصفّر last_alerted_health_since أيضاً (08) — وإلا تُستأنف حادثة منتهية بهويتها القديمة`,
 );
 
 // ---------------------------------------------------------------------------
@@ -213,10 +220,21 @@ assert.match(
 // من 60 دقيقة) بمفتاح التصنيف السابق فيُسقطه notify_telegram بصمت (return;
 // بلا استثناء) رغم صحة should_alert. المفتاح يجب أن يتضمن job_health لهاتين
 // الحالتين، بينما 'failed' يبقى على مفتاحه القائم على terminal_at (05) بلا تغيير.
+//
+// proposed/08: 07 وحدها لا تكفي أيضاً — نفس التصنيف قد يعود مرتين خلال أقل من
+// 60 دقيقة (stuck⇐disabled⇐stuck) فيصطدم الانتقال الثالث بمفتاح stuck الأول
+// ضمن نافذة الـ60 دقيقة نفسها. المفتاح يجب أن يتضمن أيضاً health_incident_since
+// (لحظة الدخول الفعلي إلى هذا التصنيف، لا مجرد اسم التصنيف) كي تحصل كل حادثة
+// انتقال فعلي على مفتاح مستقل.
 assert.match(
   failBranch,
-  /failure_dedupe_key:='project-cron-failure:'\|\|job_record\.jobname\|\|':'\|\|job_health;/,
-  `${MONITOR_SQL}: مفتاح dedupe لـ'stuck'/'disabled' يجب أن يتضمن job_health (07) — وإلا ينتقل التصنيف بصمت بلا إنذار`,
+  /if previous_alerted_health is distinct from job_health then\n\s*health_incident_since:=now\(\);\n\s*else\n\s*health_incident_since:=coalesce\(previous_alerted_health_since,now\(\)\);\n\s*end if;/,
+  `${MONITOR_SQL}: health_incident_since يجب أن تُسجَّل عند كل دخول فعلي لتصنيف جديد وتبقى كما هي عبر التذكير الدوري (08)`,
+);
+assert.match(
+  failBranch,
+  /failure_dedupe_key:='project-cron-failure:'\|\|job_record\.jobname\|\|':'\|\|job_health\|\|':'\|\|to_char\(health_incident_since,'YYYYMMDDHH24MISSMS'\);/,
+  `${MONITOR_SQL}: مفتاح dedupe لـ'stuck'/'disabled' يجب أن يتضمن health_incident_since (08) — وإلا يصطدم انتقال ثالث لنفس التصنيف بمفتاح حادثة سابقة`,
 );
 assert.match(
   failBranch,
@@ -268,8 +286,8 @@ for (const [needle, why] of [
 // ---------------------------------------------------------------------------
 const transitionAsserts = transitions.match(/\bassert /g) ?? [];
 assert.ok(
-  transitionAsserts.length >= 90,
-  `${TRANSITIONS}: عدد التأكيدات ${transitionAsserts.length} أقل من 90 — حُذف تأكيد`,
+  transitionAsserts.length >= 101,
+  `${TRANSITIONS}: عدد التأكيدات ${transitionAsserts.length} أقل من 101 — حُذف تأكيد`,
 );
 assert.match(
   transitions,
@@ -298,6 +316,9 @@ for (const [needle, why] of [
   ['91ب: مفتاحا stuck وdisabled مستقلان تماماً — لا اصطدام بينهما', 'إثبات استقلال مساحتي dedupe بين التصنيفين'],
   ['92: استمرار disabled خلال أقل من 60 دقيقة على تذكيره هو ⇒ لا تكرار', 'استمرار نفس التصنيف لا يُكرِّر الإنذار ضمن نافذة الـ60 دقيقة'],
   ['93: بعد تجاوز 60 دقيقة على تذكير disabled ⇒ تذكير دوري ثانٍ يخرج', 'التذكير الدوري لـdisabled يستمر بعد إصلاح 07'],
+  ['99: انتقال disabled⇐stuck (العودة) يُنذَر فوراً بمفتاح incident جديد', 'إصلاح 08 — العودة لنفس التصنيف خلال أقل من 60 دقيقة من حادثة سابقة لا تُسقَط بصمت'],
+  ['100: استمرار نفس stuck خلال أقل من 60 دقيقة على تذكيره ⇒ لا إنذار رابع', 'استمرار نفس الحادثة (08) لا يُكرِّر الإنذار'],
+  ['101: بعد تجاوز 60 دقيقة على تذكير stuck الثالث ⇒ تذكير دوري رابع يخرج', 'التذكير الدوري يستمر بعد إصلاح 08'],
 ]) {
   assert.ok(transitions.includes(needle), `${TRANSITIONS}: تسلسل غير مغطّى — ${why}`);
 }

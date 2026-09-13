@@ -68,6 +68,16 @@ begin
     values (p_event_type, p_task_key, p_dedupe_key, p_now, p_detail);
 end $$;
 
+-- محاكاة العمود المقترَح last_alerted_health_since (08) بمعزل عن مخطط
+-- health_probe نفسه (المشتقّ بـLIKE من الجدول الحقيقي — وlast_alerted_health_since
+-- لم يُطبَّق على الإنتاج بعد، فلا يجوز افتراض وجوده هناك). جدول مستقل هنا
+-- يسجّل لحظة الدخول الفعلي إلى كل تصنيف (stuck/disabled) بمعزل عن ساعة
+-- last_alert_at، تماماً كما يفعل 08 الحقيقي بعمودٍ فعلي على الجدول الحقيقي.
+create temporary table health_incident_probe (
+  task_key text primary key,
+  health_incident_since timestamptz
+);
+
 -- ---------------------------------------------------------------------------
 -- دورة مراقب كاملة لمهمة واحدة — منسوخة عن حلقة cron في
 -- monitor_project_tasks مع استبدال الجداول الحقيقية بجداول المِجَسّ.
@@ -86,6 +96,7 @@ declare
   previous_healthy boolean; previous_alert_at timestamptz;
   previous_alerted_terminal_at timestamptz; should_alert boolean;
   previous_alerted_health text;
+  previous_alerted_health_since timestamptz; health_incident_since timestamptz;
   cron_grace interval := interval '10 minutes'; failure_dedupe_key text;
 begin
   -- (١) أحدث تشغيل مطلقاً — هل هناك محاولة جارية الآن؟
@@ -112,6 +123,8 @@ begin
    select is_healthy,last_alert_at,last_alerted_terminal_at,last_alerted_health
     into previous_healthy,previous_alert_at,previous_alerted_terminal_at,previous_alerted_health
     from pg_temp.health_probe where task_key=p_key;
+   select health_incident_since into previous_alerted_health_since
+    from pg_temp.health_incident_probe where task_key=p_key;
 
    -- الإصلاح: 'failed' حادثة مكتملة — لا تُنذَر ثانية لمجرد مرور ساعة إن كانت
    -- terminal_at نفسها لم تتغيّر (لا محاولة جديدة). 'stuck'/'disabled' حالتان
@@ -131,13 +144,21 @@ begin
 
    if should_alert then
     -- 05: مفتاح dedupe لحالة 'failed' يتضمن terminal_at (هوية الحادثة)؛
-    -- 07: 'stuck'/'disabled' يتضمن الآن job_health أيضاً — كل تصنيف مساحة
-    -- dedupe مستقلة، نفس منطق 07 حرفياً، كي يُثبت هذا الاختبار سلوك outbox
-    -- الحقيقي بعد الإصلاح (وليس فقط should_alert المعزول عن dedupe الفعلي).
+    -- 08: 'stuck'/'disabled' يتضمن الآن job_health مع health_incident_since —
+    -- لحظة الدخول الفعلي إلى هذا التصنيف، لا وقت الإنذار فقط — كي تنتج كل
+    -- حادثة انتقال فعلي (حتى لو كررت تصنيفاً سابقاً خلال أقل من 60 دقيقة،
+    -- مثل stuck⇐disabled⇐stuck) مفتاح dedupe مستقلاً؛ استمرار نفس التصنيف
+    -- (تذكير دوري) يُبقي health_incident_since كما هي فيبقى نفس المفتاح.
+    -- هذا هو بالضبط الفارق بين 07 (job_health وحده) و08 (+ health_incident_since).
     if job_health='failed' then
      failure_dedupe_key:='failure:'||p_key||':'||to_char(terminal_at,'YYYYMMDDHH24MISS');
     else
-     failure_dedupe_key:='failure:'||p_key||':'||job_health;
+     if previous_alerted_health is distinct from job_health then
+      health_incident_since:=p_now;
+     else
+      health_incident_since:=coalesce(previous_alerted_health_since,p_now);
+     end if;
+     failure_dedupe_key:='failure:'||p_key||':'||job_health||':'||to_char(health_incident_since,'YYYYMMDDHH24MISSMS');
     end if;
     -- مطابق تماماً لـbegin/exception المضاف بـmonitor_project_tasks() الحقيقية:
     -- previous_alert_at/previous_alerted_terminal_at لا تُحدَّثان إلا بعد نجاح
@@ -150,7 +171,13 @@ begin
      end if;
      perform pg_temp.notify_probe_insert('project_task_failure',p_key,failure_dedupe_key,60,detail_text,p_now);
      previous_alert_at:=p_now;
-     if job_health='failed' then previous_alerted_terminal_at:=terminal_at; end if;
+     if job_health='failed' then
+      previous_alerted_terminal_at:=terminal_at;
+     else
+      insert into pg_temp.health_incident_probe(task_key,health_incident_since)
+       values(p_key,health_incident_since)
+       on conflict(task_key) do update set health_incident_since=excluded.health_incident_since;
+     end if;
      previous_alerted_health:=job_health;
     exception when others then
      raise warning 'monitor_cycle: simulated notify failure for %: %',p_key,sqlerrm;
@@ -167,6 +194,7 @@ begin
     perform pg_temp.notify_probe_insert('project_task_recovered',p_key,
      'recovered:'||p_key||':'||to_char(p_now,'YYYYMMDDHH24MI'),1,null,p_now);
    end if;
+   delete from pg_temp.health_incident_probe where task_key=p_key;
    insert into pg_temp.health_probe(task_key,is_healthy,last_observed_at,last_success_at,last_alert_at,last_alerted_terminal_at,last_alerted_health,last_detail)
     values(p_key,true,p_now,terminal_at,null,null,null,'يعمل')
     on conflict(task_key) do update set is_healthy=true,last_observed_at=p_now,last_success_at=excluded.last_success_at,
@@ -656,8 +684,8 @@ begin
     '88: إنذار الجمود الأول خرج'; n:=n+1;
   select dedupe_key into stuck_dedupe_key from notify_probe
    where task_key=k order by seq desc limit 1;
-  assert stuck_dedupe_key = 'failure:'||k||':stuck',
-    '88ب: مفتاح dedupe الجمود يتضمن التصنيف stuck (07)'; n:=n+1;
+  assert stuck_dedupe_key like 'failure:'||k||':stuck:%',
+    '88ب: مفتاح dedupe الجمود يتضمن التصنيف stuck (07) وhealth_incident_since (08)'; n:=n+1;
 
   -- (ب) خلال أقل من 60 دقيقة من إنذار الجمود، تتعطّل المهمة ⇒ انتقال حقيقي
   --   بين تصنيفين (stuck ⇐ disabled) — يجب أن يُنذَر فوراً رغم قرب الإنذار
@@ -673,8 +701,8 @@ begin
   --   هذا بالضبط ما يمنع الاصطدام الصامت.
   select dedupe_key into disabled_dedupe_key from notify_probe
    where task_key=k order by seq desc limit 1;
-  assert disabled_dedupe_key = 'failure:'||k||':disabled',
-    '91: مفتاح dedupe التعطيل يتضمن التصنيف disabled (07)'; n:=n+1;
+  assert disabled_dedupe_key like 'failure:'||k||':disabled:%',
+    '91: مفتاح dedupe التعطيل يتضمن التصنيف disabled (07) وhealth_incident_since (08)'; n:=n+1;
   assert stuck_dedupe_key is distinct from disabled_dedupe_key,
     '91ب: مفتاحا stuck وdisabled مستقلان تماماً — لا اصطدام بينهما'; n:=n+1;
 
@@ -690,6 +718,62 @@ begin
   assert (select count(*) from notify_probe where task_key=k and event_type='project_task_failure')=3,
     '93: بعد تجاوز 60 دقيقة على تذكير disabled ⇒ تذكير دوري ثانٍ يخرج'; n:=n+1;
 
-  assert n >= 93, format('عدد التأكيدات المنفَّذة %s أقل من 93 — حُذف تأكيد؟', n);
+  -- =====================================================================
+  -- ١٨) الإصلاح المقصود بـ08 (PR #220): مفتاح 07 (jobname||':'||job_health)
+  --   يحلّ انتقالاً حقيقياً بين تصنيفين، لكن لا يحلّ عودة *نفس* التصنيف
+  --   مرتين خلال أقل من 60 دقيقة. تسلسل stuck ⇐ disabled ⇐ stuck خلال أقل
+  --   من 60 دقيقة: الانتقال الثالث (العودة إلى stuck) يستوفي should_alert
+  --   لكنه بمفتاح 07 وحده كان سيصطدم بنفس مفتاح '...:stuck' الذي أدرجه
+  --   notify_probe_insert قبل لحظات لحادثة stuck الأولى ضمن نافذة الـ60
+  --   دقيقة نفسها، فيُسقَط بصمت رغم أن should_alert صحيح. monitor_cycle هنا
+  --   يطبّق منطق 08 كاملاً (health_incident_since عبر health_incident_probe)
+  --   فيثبت هذا السيناريو بالضبط الطلب الصريح للمالك: stuck alert ثم
+  --   disabled<60m ⇒ alert ثم stuck<60m ⇒ alert جديد بمفتاح مستقل ثم استمرار
+  --   نفس stuck<60m ⇒ no alert ثم بعد ≥60m ⇒ تذكير دوري.
+  -- =====================================================================
+  k:='cron:seq18-stuck-disabled-stuck-incident-dedupe'; j:=18;
+
+  -- (أ) stuck أول ⇒ إنذار بمفتاح '...:stuck:<incident1>'.
+  insert into runs_probe values (j,'running',t0-interval '15 minutes');
+  v:=pg_temp.monitor_cycle(k,j,true,t0);
+  assert v='stuck', '94: stuck الأول'; n:=n+1;
+  assert (select count(*) from notify_probe where task_key=k and event_type='project_task_failure')=1,
+    '95: إنذار stuck الأول خرج'; n:=n+1;
+
+  -- (ب) خلال أقل من 60 دقيقة ⇒ disabled — انتقال حقيقي، مفتاح '...:disabled:<incident2>'
+  --   مستقل تماماً عن مفتاح stuck ⇒ يُنذَر فوراً.
+  v:=pg_temp.monitor_cycle(k,j,false,t0+interval '10 minutes');
+  assert v='disabled', '96: تعطيل خلال أقل من ساعة من إنذار stuck الأول'; n:=n+1;
+  assert (select count(*) from notify_probe where task_key=k and event_type='project_task_failure')=2,
+    '97: انتقال stuck⇐disabled يُنذَر فوراً'; n:=n+1;
+
+  -- (ج) خلال أقل من 60 دقيقة من إنذار disabled ⇒ تعود المهمة إلى stuck — نفس
+  --   التصنيف الذي أُنذر عنه قبل 25 دقيقة فقط (ضمن نافذة الـ60 دقيقة نفسها
+  --   لمفتاح stuck الأول)، لكنه حادثة *جديدة* فعلياً (مرّت disabled بينهما).
+  --   هذا بالضبط ما يفشل فيه مفتاح 07 (نفس '...:stuck' القديم) وينجح فيه 08
+  --   (health_incident_since جديدة لأن previous_alerted_health='disabled').
+  insert into runs_probe values (j,'running',t0+interval '25 minutes' - interval '15 minutes');
+  v:=pg_temp.monitor_cycle(k,j,true,t0+interval '25 minutes');
+  assert v='stuck', '98: العودة إلى stuck خلال أقل من ساعة من إنذار disabled وأقل من ساعة من إنذار stuck الأول'; n:=n+1;
+  assert (select count(*) from notify_probe where task_key=k and event_type='project_task_failure')=3,
+    '99: انتقال disabled⇐stuck (العودة) يُنذَر فوراً بمفتاح incident جديد — هذا هو الانتقال الثالث المطلوب صراحة من المالك، ولا يُسقَط بصمت بفضل 08'; n:=n+1;
+  assert (select dedupe_key from notify_probe where task_key=k order by seq desc limit 1)
+    is distinct from (select dedupe_key from notify_probe where task_key=k and detail like 'عالقة%' order by seq asc limit 1),
+    '99ب: مفتاح incident الثالث (العودة إلى stuck) مختلف تماماً عن مفتاح إنذار stuck الأول — لا اصطدام رغم نفس التصنيف ونفس نافذة الـ60 دقيقة'; n:=n+1;
+
+  -- (د) استمرار نفس stuck (لا انتقال، لا terminal_at جديد) خلال أقل من 60
+  --   دقيقة على تذكيره هو ⇒ لا تكرار — التذكير الدوري الطبيعي وحده يحكم.
+  v:=pg_temp.monitor_cycle(k,j,true,t0+interval '55 minutes');
+  assert (select count(*) from notify_probe where task_key=k and event_type='project_task_failure')=3,
+    '100: استمرار نفس stuck خلال أقل من 60 دقيقة على تذكيره ⇒ لا إنذار رابع'; n:=n+1;
+
+  -- (هـ) بعد تجاوز 60 دقيقة على تذكير stuck الثالث، وما زالت المهمة عالقة
+  --   (نفس التصنيف، نفس health_incident_since) ⇒ التذكير الدوري الساعي
+  --   المعتاد يخرج كالمعتاد بنفس مفتاح incident الثالث.
+  v:=pg_temp.monitor_cycle(k,j,true,t0+interval '100 minutes');
+  assert (select count(*) from notify_probe where task_key=k and event_type='project_task_failure')=4,
+    '101: بعد تجاوز 60 دقيقة على تذكير stuck الثالث ⇒ تذكير دوري رابع يخرج'; n:=n+1;
+
+  assert n >= 101, format('عدد التأكيدات المنفَّذة %s أقل من 101 — حُذف تأكيد؟', n);
   raise notice 'cron state transitions: % تأكيداً — كلها نجحت ✓', n;
 end $$;

@@ -250,6 +250,16 @@ if ($isMainComputer) {
     if (Test-Path -LiteralPath $ameenWorkerIncidentStatePath) {
       try { $prevDegradedAlerted = [bool]((Get-Content -LiteralPath $ameenWorkerIncidentStatePath -Raw | ConvertFrom-Json).degradedAlerted) } catch {}
     }
+    # Codex P1 (جولة جديدة): مفتاح dedupe الثابت "ameen-read-worker-degraded" كان يجعل
+    # notify_telegram_dispatch يُسقط بصمت أي تنبيه لحادثة degraded ثانية تقع خلال أقل من
+    # 60 دقيقة من تنبيه حادثة سابقة — حتى لو تعافت العملية فعلياً بينهما (state المحلي
+    # يعيد التصفير بشكل صحيح، لكن مفتاح الـdedupe على مستوى SQL لا يميّز حادثة عن أخرى).
+    # الحل: هوية incident مستقلة (تُنشأ لحظة الدخول الفعلي في degraded، وتُحمَل في الحالة
+    # طالما الحادثة نفسها مستمرة) تُلحَق بالمفتاح، فكل حادثة تحصل على نافذة dedupe خاصة بها.
+    $prevDegradedIncidentId = $null
+    if (Test-Path -LiteralPath $ameenWorkerIncidentStatePath) {
+      try { $prevDegradedIncidentId = [string]((Get-Content -LiteralPath $ameenWorkerIncidentStatePath -Raw | ConvertFrom-Json).degradedIncidentId) } catch {}
+    }
     # نفس علاج degradedAlerted لكن لفرع stuck — Codex P1 (الجولة الثالثة): كان
     # stuck=true يُسجَّل بلا شرط بعد كل محاولة تنبيه، فيقرأ التشغيل التالي
     # $prevIncidentActive=true ويكتم المحاولة إلى الأبد حتى لو فشل الإرسال الأول
@@ -304,12 +314,15 @@ if ($isMainComputer) {
       # القسم ٤: حيّة وتحاول المصادقة بلا نجاح — لا نعيد التشغيل (لا يفيد) ولا نسكت عن الأمر
       # (لا نطلق أيضاً تنبيه "عاد للعمل" الآن، لأنها لم تعد فعلياً بعد).
       Write-Log "DEGRADED: $ameenWorkerTaskName still retrying auth (heartbeat fresh, status=auth_retry)"
+      # حادثة جديدة فقط إذا لم تكن degraded مستمرة أصلاً من التشغيل السابق — الاستمرار
+      # (retry ضمن نفس الحادثة) يحمل نفس الهوية بلا تغيير كي لا يتولّد مفتاح جديد لكل دورة.
+      $degradedIncidentId = if ($prevDegradedActive -and $prevDegradedIncidentId) { $prevDegradedIncidentId } else { (Get-Date).ToUniversalTime().Ticks.ToString() }
       $degradedAlerted = $prevDegradedAlerted
       if (-not $prevDegradedAlerted) {
         $degradedMsg = "⚠️ Ameen Read Worker حيّة لكنها تعيد محاولة تسجيل الدخول بلا نجاح — لا مزامنة تحدث الآن."
         $notifyPathWorker = Join-Path $PSScriptRoot "send-telegram-notification.ps1"
         if (Test-Path -LiteralPath $notifyPathWorker) {
-          $degradedNotifyOutput = & $notifyPathWorker -Message $degradedMsg -EventType "windows" -DedupeKey "ameen-read-worker-degraded" -DedupeMinutes 60 2>&1 6>&1
+          $degradedNotifyOutput = & $notifyPathWorker -Message $degradedMsg -EventType "windows" -DedupeKey "ameen-read-worker-degraded:$degradedIncidentId" -DedupeMinutes 60 2>&1 6>&1
           $degradedNotifyText = ($degradedNotifyOutput | Out-String).Trim()
           # send-telegram-notification.ps1 يخرج exit 0 دائماً (best-effort)، حتى عند الفشل —
           # فالنجاح يُعرَّف من نص الإخراج (TELEGRAM-NOTIFY OK) لا من رمز الخروج. فشل أو تخطٍّ
@@ -318,7 +331,7 @@ if ($isMainComputer) {
           Write-Log ("ALERT sent for Ameen worker degraded (auth_retry) — " + ($degradedNotifyText -replace "\s+", " "))
         }
       }
-      @{ stuck = $false; degraded = $true; degradedAlerted = $degradedAlerted; since = (Get-Date).ToUniversalTime().ToString("o") } | ConvertTo-Json | Set-Content -LiteralPath $ameenWorkerIncidentStatePath -Encoding utf8
+      @{ stuck = $false; degraded = $true; degradedAlerted = $degradedAlerted; degradedIncidentId = $degradedIncidentId; since = (Get-Date).ToUniversalTime().ToString("o") } | ConvertTo-Json | Set-Content -LiteralPath $ameenWorkerIncidentStatePath -Encoding utf8
     } else {
       if ($prevIncidentActive) {
         # عاد للعمل بعد حادثة — تنبيه واحد فقط عند لحظة العودة
