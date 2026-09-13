@@ -22,6 +22,7 @@ export const CHECKS = [
   // يبقى الأول دائماً — يفرضه scripts/check-checks-manifest.mjs
   'check.mjs',
   'check-alert-on-automation-failure.mjs',
+  'check-ameen-autoprint-regression.mjs',
   'check-ameen-read-gateway.mjs',
   'check-ameen-read-worker-registration.mjs',
   'check-assistant-authorization.mjs',
@@ -45,6 +46,7 @@ export const CHECKS = [
   'check-inventory-report-page-packing.mjs',
   'check-inventory-report-print-pages.mjs',
   'check-invoice-document-integrity.mjs',
+  'check-invoice-sync-cadence.mjs',
   'check-item-cost-matching.mjs',
   'check-item-guid-migrations.mjs',
   'check-item-guid-preservation.mjs',
@@ -65,6 +67,7 @@ export const CHECKS = [
   'check-price-bulletin-group-placement.mjs',
   'check-price-bulletin-item-coverage.mjs',
   'check-price-bulletin-layout.mjs',
+  'check-price-bulletin-markup-rows.mjs',
   'check-price-bulletin-print-content.mjs',
   'check-price-bulletin-print-ux.mjs',
   'check-project-task-monitors.mjs',

@@ -31,6 +31,9 @@ const PATTERNS = {
   sanitizeDocumentTitle: /function sanitizeDocumentTitle\(value, max = 80\) \{[\s\S]*?\n\}\n/,
   fileDateLabel: /function fileDateLabel\(isoDate\) \{[\s\S]*?\n\}\n/,
   NUMBERLESS_FILE_DOC_TYPES: /const NUMBERLESS_FILE_DOC_TYPES = [^\n]*\n/,
+  // صفة البيع والسجل التجاري: يستخدمهما voucherPdfMarkup، ويجب أن يُستخرجا من
+  // المصدر لا أن يُثبَّتا في الصندوق — كي يفشل الاختبار إن تغيّر النص في app.js.
+  SALES_TRADE_CONSTS: /const SALES_TRADE_REGISTER_NO = [^\n]*\nconst SALES_TRADE_CAPACITY = [^\n]*\n/,
   archiveDocumentTitle: /function archiveDocumentTitle\(docType, meta\) \{[\s\S]*?\n\}\n/,
   withDocumentTitle: /function withDocumentTitle\(html, title\) \{[\s\S]*?\n\}\n/,
   salesTotals: /function salesTotals\(\) \{[\s\S]*?\n\}\n/,
@@ -38,6 +41,12 @@ const PATTERNS = {
   formatMoney: /function formatMoney\(value\) \{[\s\S]*?\n\}\n/,
   voucherPdfMarkup: /function voucherPdfMarkup\(v\) \{[\s\S]*?\n\}\n/,
   invoicePriceBasis: /function invoicePriceBasis\(inv\) \{[\s\S]*?\n\}\n/,
+  invoiceLineBasis: /function invoiceLineBasis\(line\) \{[\s\S]*?\n\}\n/,
+  invoiceBasisTolerance: /function invoiceBasisTolerance\(lines\) \{[\s\S]*?\n\}\n/,
+  invoiceLineCandidates: /function invoiceLineCandidates\(line\) \{[\s\S]*?\n\}\n/,
+  INVOICE_BASIS_CONSTS: /const INVOICE_BASIS_SEARCH_BUDGET = [^\n]*\n[\s\S]*?const INVOICE_BASIS_PLAN_CACHE = [^\n]*\n/,
+  invoiceLineBasisPlan: /function invoiceLineBasisPlan\(inv\) \{[\s\S]*?\n\}\n/,
+  computeInvoiceLineBasisPlan: /function computeInvoiceLineBasisPlan\(lines, total\) \{[\s\S]*?\n\}\n/,
   invoiceLineTotalValue: /function invoiceLineTotalValue\(line, inv\) \{[\s\S]*?\n\}\n/,
   invoiceLineValueText: /function invoiceLineValueText\(line, inv\) \{[\s\S]*?\n\}\n/,
   invoiceLineQty: /function invoiceLineQty\(line\) \{[\s\S]*?\n\}\n/,
@@ -76,7 +85,8 @@ vm.createContext(sandbox);
 vm.runInContext(source.join("\n"), sandbox);
 const {
   sanitizeDocumentTitle, fileDateLabel, archiveDocumentTitle, withDocumentTitle,
-  salesTotals, voucherPdfMarkup, invoiceLineTotalValue, invoiceLineQty, invoiceLinePrice
+  salesTotals, voucherPdfMarkup, invoiceLineTotalValue, invoiceLineQty, invoiceLinePrice,
+  invoicePriceBasis, invoiceLineUnitPrice, invoiceLineBasis, invoiceLineBasisPlan
 } = sandbox;
 
 // ===== 1) اسم الملف: الزبون + الرقم =====
@@ -338,7 +348,10 @@ test("fallback adjustment يساوي فقط الفرق غير المفسر", () 
 // نصف كرتونة = 25 كروز، سعر الكروز 8.06، معامل الكرتونة 50.
 const halfCarton = { material: "ماستر", qty: 25, qtyUnits: 0.5, price: 8.06, lineTotal: 201.5, unit1: "كروز", unit2: "كرتونة" };
 const fullCarton = { material: "ماستر", qty: 50, qtyUnits: 1, price: 8.06, lineTotal: 403, unit1: "كروز", unit2: "كرتونة" };
-const invOf = (lines) => ({ total: lines.reduce((s, l) => s + l.lineTotal, 0), lines });
+const invOf = (lines, totalOverride) => ({
+  total: totalOverride != null ? totalOverride : lines.reduce((s, l) => s + l.lineTotal, 0),
+  lines
+});
 
 test("half carton displays unit price 403", () => {
   const inv = invOf([halfCarton]);
@@ -377,6 +390,397 @@ test("PDF/print uses same lineTotal as invoice data", () => {
   assert.ok(html.includes("403"), "سعر الوحدة (الكرتونة) غير مطبوع");
   // الكمية والسعر والقيمة ثلاثة أعمدة منفصلة لا يُخلط بينها.
   assert.ok(html.includes("0.5 كرتونة"), "الكمية غير مطبوعة بالوحدة الكبرى");
+});
+
+// ===== 4ب) فاتورة #712 بتاريخ 2026-09-12: كمية جزئية من كروز بسعر الوحدة الصغرى
+// (العطل المُثبت: `price(كروز) × qtyUnits(كسر شرحة/كرتونة)` بدل `stored` الصحيحة) =====
+
+// معسل فاخر أسود كروز محرز: الشرحة = 12 كروز، سعر الشرحة 175$ → سعر الكروز
+// 175/12، والكمية المباعة 10 كروز (0.8333 شرحة).
+const shishaLine = {
+  material: "معسل فاخر أسود كروز محرز", qty: 10, qtyUnits: 10 / 12,
+  price: 175 / 12, lineTotal: (10 * 175) / 12, unit1: "كروز", unit2: "شرحة"
+};
+// Marlboro أبيض ورق: 10 كروز بسعر الكروز 20.5$، معامل الكرتونة يجعلها 0.2 كرتونة.
+const marlboroLine = {
+  material: "Marlboro أبيض ورق", qty: 10, qtyUnits: 0.2,
+  price: 20.5, lineTotal: 205, unit1: "كروز", unit2: "كرتونة"
+};
+// Master Queen أبيض: 15 كروز بسعر الكروز 9.7$، معامل الكرتونة يجعلها 0.3 كرتونة.
+const masterQueenLine = {
+  material: "Master Queen أبيض", qty: 15, qtyUnits: 0.3,
+  price: 9.7, lineTotal: 145.5, unit1: "كروز", unit2: "كرتونة"
+};
+
+test("معسل فاخر أسود كروز محرز: 10 كروز من شرحة 12 بسعر 175$ = 145.833$", () => {
+  const inv = invOf([shishaLine]);
+  assert.equal(invoiceLineTotalValue(shishaLine, inv), 145.833);
+});
+
+test("Marlboro أبيض ورق: 10 كروز بسعر الكروز 20.5$ = 205$", () => {
+  const inv = invOf([marlboroLine]);
+  assert.equal(invoiceLineTotalValue(marlboroLine, inv), 205);
+});
+
+test("Master Queen أبيض: 15 كروز بسعر الكروز 9.7$ = 145.5$", () => {
+  const inv = invOf([masterQueenLine]);
+  assert.equal(invoiceLineTotalValue(masterQueenLine, inv), 145.5);
+});
+
+test("فاتورة مختلطة الأساس (unit1 وunit2 معاً): كل سطر يحتفظ بقيمته الصحيحة", () => {
+  // سطر أغلبية الفاتورة بالقيمة: مسعّر بالكرتونة كاملة (unit2)، يجعل
+  // invoicePriceBasis(inv) يحسم "unit2" لكامل الفاتورة رغم أن سطر Marlboro
+  // مسعّر بالكروز (unit1) تحديداً.
+  const bigCartonLine = {
+    material: "صنف بالجملة", qty: 500, qtyUnits: 10,
+    price: 205, lineTotal: 2050, unit1: "كروز", unit2: "كرتونة"
+  };
+  const inv = invOf([marlboroLine, bigCartonLine]);
+  // تأكيد أن الفاتورة فعلاً "ملتبسة": الأساس المحسوم لكامل الفاتورة unit2،
+  // وهو ما كان يُطبَّق خطأً على سطر Marlboro أيضاً قبل الإصلاح.
+  assert.equal(invoicePriceBasis(inv), "unit2");
+  // ومع ذلك يجب أن يعطي كل سطر قيمته الصحيحة الخاصة به.
+  assert.equal(invoiceLineTotalValue(marlboroLine, inv), 205, "سطر الكروز يجب أن يبقى 205$ رغم أساس الفاتورة unit2");
+  assert.equal(invoiceLineTotalValue(bigCartonLine, inv), 2050);
+  // وعرض سعر الوحدة لا يخلط بين سعر الكروز وكمية الكرتونة: يُحوَّل لما يعادله
+  // بالكرتونة (20.5 × 50 = 1025) بدل عرض 20.5$ بجانب 0.2 كرتونة.
+  const marlboroPrice = invoiceLineUnitPrice(marlboroLine, inv);
+  assert.equal(marlboroPrice.unit, "كرتونة");
+  assert.equal(marlboroPrice.price, 1025);
+  const bigCartonPrice = invoiceLineUnitPrice(bigCartonLine, inv);
+  assert.equal(bigCartonPrice.price, 205);
+  assert.equal(bigCartonPrice.unit, "كرتونة");
+});
+
+test("invariant: قيمة سطر مخزَّنة موجبة لا تتغيّر بسبب تحويل الوحدة مهما كان أساس الفاتورة", () => {
+  // كل الأمثلة الثلاثة + الحالة المختلطة: `stored` (lineTotal من الأمين) هو
+  // القيمة الوحيدة المسموح بها دائماً حين تكون رقماً موجباً، بصرف النظر عن
+  // نتيجة invoicePriceBasis أو عن قيمة qtyUnits/price.
+  const lines = [shishaLine, marlboroLine, masterQueenLine];
+  for (const forcedBasisInv of [invOf(lines), { total: 0, lines: [] }, null]) {
+    for (const line of lines) {
+      assert.equal(
+        invoiceLineTotalValue(line, forcedBasisInv),
+        Math.round(line.lineTotal * 1000) / 1000,
+        `${line.material}: القيمة المخزَّنة يجب أن تفوز دائماً`
+      );
+    }
+  }
+});
+
+// ===== 4ج) ملاحظة Codex P1 على PR #215: تمييز lineTotal الحقيقي من الأمين عن
+// lineTotal المشتق (fallback = Qty × Price) داخل tools/push-customer-invoices.ps1
+// حين لا يوجد عمود إجمالي حقيقي على bi000 لتنصيب أمين معيّن. المشتق يساوي
+// price×qty بالتعريف، فلو وثقنا به لحسم أساس السطر (`invoiceLineBasis`) لأعاد
+// "unit1" دائماً — يُسقط آلية الحسم لكل الفواتير على ذلك التنصيب بصمت. =====
+
+test("P1 — REAL AMEEN: lineTotalSource=ameen يبقى مصدر الحقيقة (10 كروز × 20.5 = 205$)", () => {
+  const line = {
+    material: "Marlboro أبيض ورق", qty: 10, qtyUnits: 0.2,
+    price: 20.5, lineTotal: 205, lineTotalSource: "ameen", unit1: "كروز", unit2: "كرتونة"
+  };
+  const inv = invOf([line]);
+  assert.equal(invoiceLineBasis(line), "unit1", "أساس السطر الحقيقي من الأمين يجب أن يُحسم بمقارنة stored");
+  assert.equal(invoiceLineTotalValue(line, inv), 205);
+});
+
+test("P1 — DERIVED + سعر الوحدة الكبرى (كرتونة): لا يجوز تصنيف السطر unit1 لمجرد أن stored = qty×price", () => {
+  // factor = 50 (qty÷qtyUnits)، السعر فعلياً سعر الكرتونة (1025)، لكن الأداة
+  // رفعت qty=10 (بوحدة الكروز) والقيمة المشتقة = 10 × 1025 = 10250 — رقم خاطئ
+  // تماماً، وليس القيمة الفعلية 0.2 كرتونة × 1025 = 205.
+  const price = 1025;
+  const qty = 10;
+  const qtyUnits = 0.2; // factor = qty / qtyUnits = 50
+  const derivedStored = qty * price; // 10250 — fallback خاطئ، وليس إجمالي أمين حقيقي
+  const line = {
+    material: "صنف بالجملة", qty, qtyUnits, price,
+    lineTotal: derivedStored, lineTotalSource: "derived", unit1: "كروز", unit2: "كرتونة"
+  };
+  // إجمالي الفاتورة الحقيقي (لو من الأمين) يطابق 0.2 كرتونة × 1025 = 205،
+  // فيحسم invoicePriceBasis أساس unit2 لهذه الفاتورة.
+  const inv = invOf([line], 205);
+  assert.equal(invoiceLineBasis(line), null, "derived لا يجوز أن يحسم أساساً من stored المصنَّعة");
+  assert.equal(invoicePriceBasis(inv), "unit2");
+  assert.equal(
+    invoiceLineTotalValue(line, inv), 205,
+    "يجب استخدام أساس الفاتورة (0.2 × 1025) لا stored المشتقة (10250)"
+  );
+});
+
+test("P1 — DERIVED + سعر الوحدة الصغرى (كروز): يبقى qty × price حين أساس الفاتورة unit1", () => {
+  const price = 20.5; // سعر الكروز
+  const qty = 10;
+  const qtyUnits = 0.2;
+  const derivedStored = qty * price; // 205 — يصادف أنها صحيحة هنا لأن الأساس فعلاً unit1
+  const line = {
+    material: "Marlboro أبيض ورق", qty, qtyUnits, price,
+    lineTotal: derivedStored, lineTotalSource: "derived", unit1: "كروز", unit2: "كرتونة"
+  };
+  const inv = invOf([line], 205); // يطابق qty×price، فيحسم invoicePriceBasis أساس unit1
+  assert.equal(invoiceLineBasis(line), null, "derived يبقى null بصرف النظر عن تطابق stored مصادفةً");
+  assert.equal(invoicePriceBasis(inv), "unit1");
+  assert.equal(invoiceLineTotalValue(line, inv), 205, "qty × price يبقى صحيحاً حين الأساس فعلاً unit1");
+});
+
+test("P1 — LEGACY: lineTotalSource غائب (فواتير رُفعت قبل إضافة الحقل) — لا تغيير بالسلوك", () => {
+  const line = {
+    material: "Master Queen أبيض", qty: 15, qtyUnits: 0.3,
+    price: 9.7, lineTotal: 145.5, unit1: "كروز", unit2: "كرتونة"
+    // لا lineTotalSource إطلاقاً
+  };
+  const inv = invOf([line]);
+  assert.equal(invoiceLineBasis(line), "unit1", "الفواتير القديمة بلا الحقل تبقى تُحسم من stored كما كانت");
+  assert.equal(invoiceLineTotalValue(line, inv), 145.5);
+});
+
+test("P1 — فاتورة مختلطة: سطر derived لا يفسد حسم الأساس لسطور ameen الحقيقية المجاورة", () => {
+  const realLine = {
+    material: "Marlboro أبيض ورق", qty: 10, qtyUnits: 0.2,
+    price: 20.5, lineTotal: 205, lineTotalSource: "ameen", unit1: "كروز", unit2: "كرتونة"
+  };
+  const derivedLine = {
+    material: "صنف بالجملة", qty: 10, qtyUnits: 0.2,
+    price: 1025, lineTotal: 10250, lineTotalSource: "derived", unit1: "كروز", unit2: "كرتونة"
+  };
+  const inv = invOf([realLine, derivedLine], 205 + 205);
+  assert.equal(invoiceLineBasis(realLine), "unit1", "سطر ameen الحقيقي يبقى محسوماً من stored الخاصة به");
+  assert.equal(invoiceLineTotalValue(realLine, inv), 205, "سطر ameen لا يتأثر بوجود سطر derived بجانبه");
+  assert.equal(invoiceLineTotalValue(derivedLine, inv), 205, "سطر derived يُحسب من أساس الفاتورة لا من stored المصنَّعة");
+});
+
+// ===== 4د) فاتورة #733 بتاريخ 2026-09-13 (مركز الشعلان دوما): القيمة المخزَّنة
+// القادمة من الأمين نفسها مبنية على وحدة خاطئة =====
+//
+// بيانات حقيقية من آخر تقرير `ameen_customer_invoices` (اللقطة المتأثرة، إجمالي
+// 1163.6$): كل `lineTotal` = `price × qty` و`qty` بالكروز، بينما أربعة من الأسعار
+// الخمسة أسعار كرتونة. فطُبع «14,300$» لكرتونة واحدة سعرها 286$، و«7,950$»
+// لنصف كرتونة سعرها 318$ — وطُبع الرقم نفسه «سعر الوحدة» أيضاً.
+//
+// السطر الخامس (غلواز قصير أصفر) شاهد أن أساساً واحداً لكل الفاتورة لا يكفي:
+// سعره 8.04$ سعر **كروز** فعلاً (8.04 × 50 = 402$ للكرتونة)، وقيمته المخزَّنة
+// 120.6$ صحيحة. فلا كل الأسطر كرتونة ولا كلها كروز.
+const inv733Lines = [
+  { material: "ماستر سليم أزرق", qty: 50, qtyUnits: 1, price: 286, lineTotal: 14300, unit1: "كروز", unit2: "كرتونة" },
+  { material: "ماستر سليم فضي", qty: 50, qtyUnits: 1, price: 290, lineTotal: 14500, unit1: "كروز", unit2: "كرتونة" },
+  { material: "اختمار سليم فضي", qty: 50, qtyUnits: 1, price: 308, lineTotal: 15400, unit1: "كروز", unit2: "كرتونة" },
+  { material: "اليغانس قصير فضي", qty: 25, qtyUnits: 0.5, price: 318, lineTotal: 7950, unit1: "كروز", unit2: "كرتونة" },
+  { material: "غلواز قصير أصفر", qty: 15, qtyUnits: 0.3, price: 8.04, lineTotal: 120.6, unit1: "كروز", unit2: "كرتونة" }
+];
+const INV_733_TOTAL = 1163.6;
+const inv733 = invOf(inv733Lines, INV_733_TOTAL);
+const INV_733_EXPECTED = [286, 290, 308, 159, 120.6];
+
+test("#733: قيم الأسطر الخمسة كما في فاتورة الأمين", () => {
+  assert.deepEqual(
+    inv733Lines.map((line) => invoiceLineTotalValue(line, inv733)),
+    INV_733_EXPECTED
+  );
+});
+
+test("#733: مجموع أسطر الطباعة = إجمالي الفاتورة 1163.6$", () => {
+  const sum = inv733Lines.reduce((acc, line) => acc + invoiceLineTotalValue(line, inv733), 0);
+  assert.equal(Math.round(sum * 1000) / 1000, INV_733_TOTAL);
+});
+
+test("#733: لا أساس واحد يطابق الإجمالي — المطابقة للخلطة وحدها", () => {
+  // شاهد أن الإصلاح ليس «اختر unit1 أو unit2 لكل الفاتورة»: كلا المجموعين بعيد.
+  const sumUnit1 = inv733Lines.reduce((a, l) => a + l.price * l.qty, 0);
+  const sumUnit2 = inv733Lines.reduce((a, l) => a + l.price * l.qtyUnits, 0);
+  assert.ok(Math.abs(sumUnit1 - INV_733_TOTAL) > 1, `مجموع unit1 = ${sumUnit1}`);
+  assert.ok(Math.abs(sumUnit2 - INV_733_TOTAL) > 1, `مجموع unit2 = ${sumUnit2}`);
+  // والمخزَّن مساوٍ لمجموع unit1 تماماً، فلا يصلح دليلاً على أساس أي سطر.
+  const sumStored = inv733Lines.reduce((a, l) => a + l.lineTotal, 0);
+  assert.equal(Math.round(sumStored * 1000) / 1000, Math.round(sumUnit1 * 1000) / 1000);
+});
+
+test("#733: سعر الوحدة معروض بالكرتونة (286/290/308/318/402) لا 14,300 ولا 15,400", () => {
+  assert.deepEqual(
+    inv733Lines.map((line) => invoiceLineUnitPrice(line, inv733).price),
+    [286, 290, 308, 318, 402]
+  );
+  for (const line of inv733Lines) {
+    assert.equal(invoiceLineUnitPrice(line, inv733).unit, "كرتونة");
+  }
+});
+
+test("#733: المستند المطبوع لا يحمل أي رقم من أرقام العطل", () => {
+  const html = voucherPdfMarkup({
+    type: "invoice", name: "مركز الشعلان دوما", no: "733", date: "2026-09-13", cur: "$",
+    amount: INV_733_TOTAL, prevBalance: 0, newBalance: INV_733_TOTAL, lines: inv733Lines
+  });
+  for (const wrong of ["14,300", "14,500", "15,400", "7,950", "6,030"]) {
+    assert.ok(!html.includes(wrong), `الرقم الخاطئ ${wrong} ما زال مطبوعاً`);
+  }
+  assert.ok(html.includes("<td>286 $ / كرتونة</td>"), "سعر كرتونة ماستر سليم أزرق غير مطبوع");
+  assert.ok(html.includes("<td>402 $ / كرتونة</td>"), "سعر كرتونة غلواز غير مطبوع");
+  assert.ok(html.includes("<td>159</td>"), "قيمة نصف كرتونة اليغانس غير مطبوعة");
+  assert.ok(html.includes("<td>120.6</td>"), "قيمة غلواز غير مطبوعة");
+});
+
+// ===== 4هـ) حصر مطلق: قيمة سطر لا تتجاوز إجمالي الفاتورة بحال =====
+//
+// العطل كله ينضغط في هذه العبارة: كرتونة واحدة سعرها 286$ لا تصير 14,300$، ونصف
+// كرتونة سعرها 318$ لا تصير 7,950$. الحصر معمَّم لا موقوف على أرقام #733: أي سطر
+// قيمته المطبوعة أكبر من إجمالي الفاتورة هو حساب خاطئ بالضرورة، لأن الأسطر كلها
+// موجبة ومجموعها هو الإجمالي.
+test("حصر: 1 كرتونة × 286$ لا تعطي 14,300$ أبداً", () => {
+  const line = inv733Lines[0];
+  const value = invoiceLineTotalValue(line, inv733);
+  assert.notEqual(value, 14300);
+  assert.equal(value, 286);
+  assert.notEqual(invoiceLineUnitPrice(line, inv733).price, 14300);
+});
+
+test("حصر: 0.5 كرتونة × 318$ لا تعطي 7,950$ أبداً", () => {
+  const line = inv733Lines[3];
+  const value = invoiceLineTotalValue(line, inv733);
+  assert.notEqual(value, 7950);
+  assert.equal(value, 159);
+  assert.notEqual(invoiceLineUnitPrice(line, inv733).price, 7950);
+});
+
+test("حصر معمَّم: لا سطر قيمته أكبر من إجمالي الفاتورة", () => {
+  for (const line of inv733Lines) {
+    const value = invoiceLineTotalValue(line, inv733);
+    assert.ok(value <= INV_733_TOTAL + 0.001, `${line.material}: ${value} > ${INV_733_TOTAL}`);
+  }
+});
+
+// ===== 4و) حالات حدّية للخطة: لا تتفعّل بلا مطابقة، ولا تُفسد فاتورة سليمة =====
+
+test("الخطة لا تتفعّل بلا إجمالي موثوق (الفواتير القديمة والاستدعاء بلا فاتورة)", () => {
+  for (const line of inv733Lines) {
+    // بلا إجمالي: لا حكم، فيبقى السلوك القديم (القيمة المخزَّنة كما هي).
+    assert.equal(invoiceLineTotalValue(line, { total: 0, lines: inv733Lines }), line.lineTotal);
+    assert.equal(invoiceLineTotalValue(line, null), line.lineTotal);
+  }
+});
+
+test("الخطة لا تتفعّل حين لا يوجد توزيع يطابق الإجمالي", () => {
+  // إجمالي لا يطابقه أي توزيع مرشّحات (ولا المخزَّن): لا حكم ⇒ السلوك القديم.
+  const bogus = invOf(inv733Lines, 999.99);
+  assert.equal(invoiceLineBasisPlan(bogus), null);
+  for (const line of inv733Lines) {
+    assert.equal(invoiceLineTotalValue(line, bogus), line.lineTotal);
+  }
+});
+
+test("فاتورة قيمها المخزَّنة تطابق الإجمالي تبقى بلا مساس", () => {
+  // نفس أسطر #733 لكن بقيم مخزَّنة صحيحة وإجمالي مطابق لها: الخطة لا تُستدعى
+  // للتغيير، والقيمة المخزَّنة تُطبع كما هي.
+  const healthy = inv733Lines.map((line, i) => ({ ...line, lineTotal: INV_733_EXPECTED[i] }));
+  const inv = invOf(healthy, INV_733_TOTAL);
+  assert.equal(invoiceLineBasisPlan(inv), null, "مجموع مخزَّن مطابق ⇒ لا حكم");
+  assert.deepEqual(healthy.map((line) => invoiceLineTotalValue(line, inv)), INV_733_EXPECTED);
+});
+
+test("سطر سعره صفر لا يُخرج الفاتورة السليمة من بوابة «المخزَّن موثوق»", () => {
+  // بيانات الجهاز فيها أسطر `price = 0` وقيمتها صفر (فاتورة #102 مثلاً). لو
+  // حُسبت القيمة الصفرية «غائبة» لسقطت البوابة، ودخلت فاتورة مجموعها المخزَّن
+  // مطابقٌ تماماً في بحثٍ لا حاجة له، وربما خرجت بتوزيع غير توزيعها الصحيح.
+  const lines = [
+    { material: "صنف مسعّر", qty: 15, qtyUnits: 0.3, price: 7.1, lineTotal: 106.5, unit1: "كروز", unit2: "كرتونة" },
+    { material: "صنف بسعر صفر", qty: 2, qtyUnits: 0.04, price: 0, lineTotal: 0, unit1: "كروز", unit2: "كرتونة" }
+  ];
+  const inv = invOf(lines, 106.5);
+  assert.equal(invoiceLineBasisPlan(inv), null, "مجموع مخزَّن مطابق ⇒ لا حكم ولا بحث");
+  assert.equal(invoiceLineTotalValue(lines[0], inv), 106.5);
+  assert.equal(invoiceLineTotalValue(lines[1], inv), 0);
+});
+
+test("أساس مختلط مع أسطر متطابقة المرشّحين: المجموع يطابق الإجمالي", () => {
+  // ثلاثة أسطر متطابقة تماماً (نفس السعر والكميات) واثنان يجب أن يُقرآ بالكروز:
+  // الخطة تختار عدداً لا هويةً، فلا تعدّد حلول بلا فرق في القيم.
+  const twin = { material: "معسل", qty: 3, qtyUnits: 0.25, price: 11.08, lineTotal: 33.24, unit1: "كروز", unit2: "شرحة" };
+  const carton = { material: "سجائر", qty: 50, qtyUnits: 1, price: 290, lineTotal: 14500, unit1: "كروز", unit2: "كرتونة" };
+  const lines = [carton, { ...twin }, { ...twin }, { ...twin }];
+  const total = 290 + 33.24 + 33.24 + 2.77; // كرتونة + سطران بالكروز + سطر بالشرحة
+  const inv = invOf(lines, total);
+  const values = lines.map((line) => invoiceLineTotalValue(line, inv));
+  assert.equal(values[0], 290, "سطر الكرتونة");
+  assert.equal(Math.round(values.reduce((a, b) => a + b, 0) * 100) / 100, Math.round(total * 100) / 100);
+});
+
+// ===== 4ز) فاتورة #698 (57 سطراً): الهامش يكبر بعدد الأسطر، فلا يُقبل توزيع
+// «داخل الهامش» قبل تجربة المضبوط =====
+//
+// العطل المُثبت: `invoiceBasisTolerance` تساوي 0.0006 × مجموع الأسعار، فبلغت
+// 3.644$ في فاتورة بـ57 سطراً. فقَبِل البحث أول توزيع يقع داخل الهامش وكان
+// بعيداً 3.234$ عن الإجمالي، رغم وجود توزيع مضبوط. النتيجة: سطر «تي اس سليم
+// فضي» سعره 3.3$ (سعر كروز، `unit1_price = 3.3` مقابل `unit2_price = 165` في
+// لائحة الأسعار المعتمدة) قُرئ كرتونةً فصارت قيمته 0.066$ بدل 3.3$.
+test("#698: توزيع مضبوط يتقدّم على توزيع «داخل هامش التقريب»", () => {
+  // مصغَّر أمين لنفس البنية: سطر كبير يستهلك الإجمالي، وسطران صغيران الفرق
+  // بينهما أصغر من هامش فاتورة طويلة — والمضبوط منهما واحد فقط.
+  const big = { material: "صنف كرتونة", qty: 50, qtyUnits: 1, price: 400, lineTotal: 20000, unit1: "كروز", unit2: "كرتونة" };
+  const cruise = { material: "صنف كروز", qty: 1, qtyUnits: 0.02, price: 3.3, lineTotal: 3.3, unit1: "كروز", unit2: "كرتونة" };
+  // الإجمالي الصحيح: 400 (كرتونة) + 3.3 (كروز) = 403.3
+  const inv = invOf([big, cruise], 403.3);
+  assert.equal(invoiceLineTotalValue(big, inv), 400, "السطر الكبير كرتونة");
+  assert.equal(invoiceLineTotalValue(cruise, inv), 3.3, "سطر الكروز لا يُقرأ كرتونة (0.066$)");
+  const sum = invoiceLineTotalValue(big, inv) + invoiceLineTotalValue(cruise, inv);
+  assert.equal(Math.round(sum * 1000) / 1000, 403.3, "المجموع مضبوط لا «قريب»");
+});
+
+test("هامش التقريب يبقى متاحاً حين لا يوجد توزيع مضبوط", () => {
+  // شرحة 12 كروز: `qtyUnits` مدوَّرة إلى 0.833 فلا تطابق تام ممكن، والهامش
+  // هو ما يجعل الفاتورة قابلة للحسم إطلاقاً. لا يجوز أن يُلغيه تفضيل المضبوط.
+  const line = { material: "معسل", qty: 10, qtyUnits: 0.833, price: 175, lineTotal: 1750, unit1: "كروز", unit2: "شرحة" };
+  const inv = invOf([line], 145.833);
+  assert.equal(invoiceLineBasisPlan(inv)?.get(line), "unit2", "الحسم يجب أن ينجح بالهامش");
+  assert.equal(invoiceLineTotalValue(line, inv), 145.775); // 175 × 0.833
+});
+
+// ===== 4ح) سعر الوحدة وقيمة السطر يقرآن الأساس من مصدر واحد =====
+//
+// خطر بنيوي: لو قرأت إحدى الدالتين الخطة والأخرى `stored` لظهر مستند «سعر وحدة
+// صحيح × كمية معروضة ≠ قيمة السطر» — وهي ورقة تُسلَّم للزبون ولا تُجمع.
+test("اتساق الأساس: سعر الوحدة المعروض × الكمية المعروضة = قيمة السطر", () => {
+  const cases = [
+    { lines: inv733Lines, total: INV_733_TOTAL },
+    { lines: [shishaLine, marlboroLine, masterQueenLine], total: undefined },
+    { lines: [halfCarton, fullCarton], total: undefined },
+    { // مختلطة: كرتونة + كروز + كسر كرتونة
+      lines: [
+        { material: "أ", qty: 50, qtyUnits: 1, price: 290, lineTotal: 14500, unit1: "كروز", unit2: "كرتونة" },
+        { material: "ب", qty: 15, qtyUnits: 0.3, price: 8.1, lineTotal: 121.5, unit1: "كروز", unit2: "كرتونة" },
+        { material: "ج", qty: 25, qtyUnits: 0.5, price: 318, lineTotal: 7950, unit1: "كروز", unit2: "كرتونة" }
+      ],
+      total: 290 + 121.5 + 159
+    }
+  ];
+  for (const testCase of cases) {
+    const inv = invOf(testCase.lines, testCase.total);
+    for (const line of testCase.lines) {
+      const resolved = invoiceLineUnitPrice(line, inv);
+      const value = invoiceLineTotalValue(line, inv);
+      if (!resolved || !(value > 0)) continue;
+      // الكمية المعروضة هي التي تقابل وحدة السعر المعروضة (نفس منطق invoiceLineQty).
+      const shownQty = resolved.unit === String(line.unit2 || "").trim() ? line.qtyUnits : line.qty;
+      assert.ok(
+        Math.abs(resolved.price * shownQty - value) <= Math.max(0.02, 0.002 * value),
+        `${line.material}: ${resolved.price} × ${shownQty} = ${resolved.price * shownQty} ≠ ${value}`
+      );
+    }
+  }
+});
+
+test("تدقيق المصدر: كلتا الدالتين تستشير خطة الفاتورة", () => {
+  // حارس بنيوي: لو أُضيف مسار قيمة أو سعر لا يقرأ الخطة، عاد خطر التنافر.
+  const valueFn = appJs.match(/function invoiceLineTotalValue\(line, inv\) \{[\s\S]*?\n\}\n/)[0];
+  const priceFn = appJs.match(/function invoiceLineUnitPrice\(line, inv\) \{[\s\S]*?\n\}\n/)[0];
+  assert.match(valueFn, /invoiceLineBasisPlan\(inv\)/, "invoiceLineTotalValue لا تقرأ الخطة");
+  assert.match(priceFn, /invoiceLineBasisPlan\(inv\)/, "invoiceLineUnitPrice لا تقرأ الخطة");
+  // والخطة تتقدّم على stored وعلى invoiceLineBasis في كل منهما.
+  assert.ok(
+    valueFn.indexOf("invoiceLineBasisPlan") < valueFn.indexOf("line?.lineTotalSource") ||
+    valueFn.indexOf("invoiceLineBasisPlan") < valueFn.indexOf("stored > 0"),
+    "الخطة يجب أن تُفحص قبل الوثوق بالقيمة المخزَّنة"
+  );
+  assert.ok(
+    priceFn.indexOf("invoiceLineBasisPlan") < priceFn.indexOf("invoiceLineBasis(line)"),
+    "الخطة يجب أن تُفحص قبل invoiceLineBasis"
+  );
 });
 
 // ===== 5) كل مسارات تصدير الفاتورة تنسب الحسم والدفعة (لا مسار متخلّف) =====

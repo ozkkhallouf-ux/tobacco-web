@@ -61,33 +61,11 @@ const checkWithFont = (fontReady, name, condition, detail) => {
 };
 
 // صفوف مستند الطباعة كما هي في الترميز — **مطابقة صفٍّ كامل، لا احتواء نصّي**
-// (مستقلّة عن الخط تماماً).
-//
-// لماذا الصفّ كاملاً: التطبيع يحذف الفراغات، فاسمُ صنفٍ أقصر قد يكون مقطعاً
-// داخل اسم أطول («اليغانس سليم فضي» داخل «اليغانس سليم فضي بدون طبعة»)، فيقبله
-// `includes` ويمرّ حذفُ الأقصر زوراً — وهي نفس ثغرة الاحتواء التي أُغلقت في
-// قارئ الـPDF (ملاحظة Codex P1 على 3468f90). فنقارن الخلايا الثلاث بالتساوي
-// التام مع صفٍّ واحد من الترميز.
-//
-// ومستندٌ غائب (فشل الزر في إنتاجه) = **كل الصفوف مفقودة**، لا «لا شيء مفقود»
-// (ملاحظة DeepScan INSUFFICIENT_NULL_CHECK).
-const flattenForMarkup = (value) => String(value).normalize("NFKC").replace(/\s+/g, "");
-const MARKUP_CELL_SEPARATOR = "\u0001";
-function markupRowKeys(documentHtml) {
-  const keys = new Set();
-  for (const row of String(documentHtml).matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/g)) {
-    const cells = [...row[1].matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/g)]
-      .map((cell) => flattenForMarkup(cell[1].replace(/<[^>]*>/g, "")));
-    if (cells.length) keys.add(cells.join(MARKUP_CELL_SEPARATOR));
-  }
-  return keys;
-}
-function rowsMissingFromMarkup(documentHtml, rows) {
-  if (typeof documentHtml !== "string" || !documentHtml) return [...rows];
-  const keys = markupRowKeys(documentHtml);
-  return rows.filter((row) => !keys.has(
-    [row.name, row.unit, row.price].map(flattenForMarkup).join(MARKUP_CELL_SEPARATOR)));
-}
+// (مستقلّة عن الخط تماماً). القارئ ومبرّراته في scripts/lib/markup-rows.mjs:
+// يُحلَّل الترميز بمحلّل HTML حقيقي لا بـregex، لأن حذف الوسوم بتعبير نمطي
+// يمرّ مرّةً واحدة كان يُسقط صفوفاً سليمة (الكيانات، سمة فيها قوس إغلاق)
+// ويُمرّر نصّاً ليس على الورق (تعليقات، وسم مشطور يلتحم) — وهو ما ترصده
+// قاعدة CodeQL js/incomplete-multi-character-sanitization.
 
 // ===== قراءة نص PDF =====
 // القارئ نفسه يعيش في وحدة مشتركة كي يستعمله حارس توزيع الصفحة الأولى بنفس
@@ -97,8 +75,24 @@ import {
   pdfPageLines, normalizeArabic, lineText, printedRow, printedGroup
 } from "./lib/price-bulletin-pdf-text.mjs";
 import { prepareBulletinFont } from "./lib/bulletin-font-ready.mjs";
+import { createMarkupRowReader } from "./lib/markup-rows.mjs";
 
 // الفحص برسالة صريحة تطلب توسيع القارئ إلى إعادة بناء الخلايا قبل اعتماده.
+//
+// **الكشف: عدد صناديق النص الفعلية، لا تخمين ارتفاع.** المحاولة السابقة قارنت
+// ارتفاع الخلية بـ`line-height` مقروءاً بـ`parseFloat`، لكن `.name` لا يضبط
+// `line-height` صراحةً فيرجع المتصفح الكلمة `"normal"` لا رقماً — `parseFloat`
+// يُرجع `NaN` فيسقط الحساب على افتراض `14px` لم يتحقق قطّ في هذا الخط/الحشو،
+// فارتفاع كل خليةٍ بسطر واحد (~21-22px مع الحشو) يتجاوزه دائماً ويُبلّغ التفافاً
+// زائفاً حتى بلا أي التفاف — نفس العطل المُصلَح في حارس توزيع الصفحة الأولى
+// (check-price-bulletin-first-page-content.mjs)، بنفس المبدأ هنا.
+// البديل المستقلّ عن أي تخمين لـ`line-height` أو حشو: نطاق `Range` يحيط بنصّ
+// الخلية، وصناديق `getClientRects()` عليه هي الصناديق التي رُسم فيها النص فعلياً.
+// **لكن عدد الصناديق وحده لا يكفي**: اسمٌ يخلط أرقاماً لاتينية بنصّ عربي (مثل
+// "1970 سليم أزرق") يُقسَّمه خوارزمية bidi إلى صندوقين على **نفس السطر** —
+// صندوقان بنفس `y` تماماً رغم كونها سطراً واحداً بصرياً. القياس الصحيح إذن هو
+// **عدد الأسطر المتمايزة** — نقيسه بعدد قيم `top` المختلفة (مقرَّبة لتفادي غبار
+// الفاصلة العائمة)، لا عدد الصناديق الخام.
 const WRAP_PROBE = `(markup) => {
   const probe = document.createElement("div");
   probe.style.cssText = "position:fixed;left:-10000px;top:0;width:794px;visibility:hidden;pointer-events:none";
@@ -108,8 +102,10 @@ const WRAP_PROBE = `(markup) => {
   try {
     return [...probe.querySelectorAll("td.name, .price-list-group-name")]
       .filter((cell) => {
-        const lineHeight = parseFloat(getComputedStyle(cell).lineHeight) || 14;
-        return cell.getBoundingClientRect().height > lineHeight * 1.4;
+        const range = document.createRange();
+        range.selectNodeContents(cell);
+        const lineTops = new Set([...range.getClientRects()].map((r) => Math.round(r.top)));
+        return lineTops.size > 1;
       })
       .map((cell) => cell.textContent.trim());
   } finally { probe.remove(); }
@@ -130,6 +126,7 @@ const PRICES = raw.map((r) => ({
 
 const A4_HEIGHT_PX = 297 / 25.4 * 96;
 const browser = await chromium.launch();
+const { rowsMissingFromMarkup } = createMarkupRowReader(browser);
 
 async function bootApp(width, height) {
   const context = await browser.newContext({ viewport: { width, height }, bypassCSP: true, serviceWorkers: "block" });
@@ -291,7 +288,7 @@ for (const sc of [
   // الورقة الأولى تحديداً هي التي كانت تخرج بالرأس وحده.
   // **بديلٌ مستقلّ عن الخط، مفروض دائماً.** يرصد إخفاء نصّ الأصناف أو تشويهه
   // حتى حين تتعذّر المطابقة الحرفية لغياب خط النشرة.
-  const missingFromMarkup = rowsMissingFromMarkup(documentHtml, expected.rows);
+  const missingFromMarkup = await rowsMissingFromMarkup(documentHtml, expected.rows);
   check(`${sc.label}: كل صفوف الأصناف موجودة نصّاً في مستند الطباعة (مستقلّ عن الخط)`,
     missingFromMarkup.length === 0, `مفقودة من الترميز: ${JSON.stringify(missingFromMarkup.slice(0, 5))}`);
 
@@ -655,9 +652,13 @@ for (const sc of [
     };
     const row = (name) => ({ name, unit: "كرتونة", price: "1,000 ل.س" });
     const detect = new Function(`return ${wrapProbe}`)();
+    // اسمٌ يخلط أرقاماً لاتينية بنصّ عربي: bidi كروم يرسمه في صندوقين على نفس
+    // السطر (نفس y)، لا سطرين — شاهد سالب يضمن أن عدّ الصناديق الخام لا يعود.
+    const BIDI = "1970 سليم أزرق";
     return {
       withLong: detect(T.render({ ...options, groups: [{ name: "ماستر", items: [row(LONG), row("ماستر صنف قصير")] }] })),
-      withoutLong: detect(T.render({ ...options, groups: [{ name: "ماستر", items: [row("ماستر صنف قصير")] }] }))
+      withoutLong: detect(T.render({ ...options, groups: [{ name: "ماستر", items: [row("ماستر صنف قصير")] }] })),
+      withBidiDigits: detect(T.render({ ...options, groups: [{ name: "ماستر", items: [row(BIDI)] }] }))
     };
   }, [LONG, WRAP_PROBE]);
   await context.close();
@@ -666,6 +667,8 @@ for (const sc of [
     `رصد: ${JSON.stringify(probe.withLong)}`);
   check("كاشف الالتفاف: لا ينذر على الأسماء العادية", probe.withoutLong.length === 0,
     JSON.stringify(probe.withoutLong));
+  check("كاشف الالتفاف: لا ينذر زوراً على اسم يخلط أرقاماً لاتينية بالعربية على سطر واحد (bidi)",
+    probe.withBidiDigits.length === 0, JSON.stringify(probe.withBidiDigits));
 }
 
 // ===== 3) حارس بنيوي: الصفحة الأولى لا تُعبَّأ بميزانية أكبر من ميزانيتها =====
