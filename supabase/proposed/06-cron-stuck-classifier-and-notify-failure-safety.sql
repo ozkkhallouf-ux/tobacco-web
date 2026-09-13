@@ -1,9 +1,10 @@
 -- ============================================================================
--- مقترح غير مُطبَّق — لا يلمس هذا الملف الإنتاج بذاته. ينفّذ ثلاث ملاحظات
--- Codex P1 من الجولة الثانية على PR #220 فوق 04+05 (المطبَّقتين فعلاً على
+-- مقترح غير مُطبَّق — لا يلمس هذا الملف الإنتاج بذاته. ينفّذ أربع ملاحظات
+-- Codex P1 (جولتان من المراجعة) على PR #220 فوق 04+05 (المطبَّقتين فعلاً على
 -- الإنتاج، راجع supabase/proposed/README.md)، ولا يُعدِّل أياً منهما ولا
--- يُعيد تطبيقهما. الملف idempotent بالكامل (CREATE OR REPLACE FUNCTION فقط،
--- بلا أي DDL على جدول أو DML على بيانات) ولا يمسّ جدولة أي مهمة cron.
+-- يُعيد تطبيقهما. الملف idempotent بالكامل (CREATE OR REPLACE FUNCTION،
+-- وDDL شرطي واحد يضيف عمود last_alerted_health إن لم يكن موجوداً) ولا يمسّ
+-- جدولة أي مهمة cron.
 --
 -- (١) supabase/project-task-health-monitor.sql:340 — private.cron_job_health():
 --     فرع 'failed' كان يسبق فحص 'stuck' بلا استثناء، فـretry جديد بدأ فعلاً
@@ -34,9 +35,36 @@
 --     فيُعاد الإرسال تلقائياً بلا loop سريع ولا spam (المهلة الدورية الأصلية
 --     60 دقيقة لم تتغيّر).
 --
+-- (٤) supabase/project-task-health-monitor.sql:365 — الجولة الثالثة من
+--     المراجعة: حلقة cron.job في monitor_project_tasks() كانت تعتمد لحالتَي
+--     'stuck'/'disabled' على حارس زمني ساعي وحده (previous_alert_at<now()-
+--     interval '60 minutes')، بلا أي وعي بأن الإنذار السابق قد يكون لتصنيف
+--     مختلف تماماً. مثال Codex الفعلي: فشل A أُنذر عنه قبل 39 دقيقة، ثم صارت
+--     المهمة الآن stuck (retry عالق فوق نفس الفشل) — previous_alert_at الحديث
+--     (39 دقيقة) يمنع should_alert رغم أن 'stuck' حالة حيّة لم يسبق إنذارها
+--     إطلاقاً. الإصلاح: عمود جديد last_alerted_health يحفظ آخر تصنيف
+--     (job_health) أُنذر عنه فعلاً بنجاح — لا وقت الإنذار وحده — ويُضاف شرط
+--     "previous_alerted_health is distinct from job_health" إلى should_alert
+--     لفرع 'stuck'/'disabled'؛ فانتقال حقيقي بين تصنيفين يُنذَر عنه فوراً
+--     بصرف النظر عن عمر آخر إنذار، والتذكير الدوري الساعي لنفس التصنيف
+--     المستمر يبقى كما هو بلا تغيير. last_alerted_health يُصفَّر عند التعافي
+--     الفعلي (job_health='ok') مثل last_alerted_terminal_at تماماً.
+--
 -- كلا الملفين نُسخة كاملة مطابقة لما في supabase/project-task-health-monitor.sql
 -- الحالي (canonical) — لا فرق متعمَّد بين هذا الملف وذاك بعد تطبيقه.
 -- ============================================================================
+
+-- DDL شرطي وحيد في هذا الملف: يضيف last_alerted_health إن لم يكن موجوداً
+-- بالفعل (تطبيق آمن للتكرار، لا يمسّ صفوفاً موجودة — القيمة الافتراضية NULL
+-- تعني "لم يُنذَر عن أي تصنيف بعد"، وهي صحيحة لكل صف قديم).
+do $$ begin
+  if not exists (
+    select 1 from information_schema.columns
+    where table_schema='private' and table_name='project_task_health_state' and column_name='last_alerted_health'
+  ) then
+    alter table private.project_task_health_state add column if not exists last_alerted_health text;
+  end if;
+end $$;
 
 create or replace function private.cron_job_health(
   p_active boolean,
@@ -97,6 +125,7 @@ declare cfg record; last_at timestamptz; age_minutes numeric; last_status text; 
  job_health text; cron_grace interval:=interval '10 minutes';
  terminal_status text; terminal_at timestamptz; retry_running boolean;
  previous_alerted_terminal_at timestamptz; should_alert boolean; failure_dedupe_key text;
+ previous_alerted_health text;
 begin
  for cfg in select * from private.project_task_monitors where enabled order by task_key loop
   last_status:=null;
@@ -176,15 +205,19 @@ begin
     else format('عالقة في حالة %s منذ %s',coalesce(last_job_status,'غير معروفة'),
      coalesce(round(extract(epoch from(now()-last_job_at))/60.0,1)::text||' دقيقة','مدة غير معروفة'))
     end;
-   select is_healthy,last_alert_at,last_alerted_terminal_at into previous_healthy,previous_alert_at,previous_alerted_terminal_at
+   select is_healthy,last_alert_at,last_alerted_terminal_at,last_alerted_health
+    into previous_healthy,previous_alert_at,previous_alerted_terminal_at,previous_alerted_health
     from private.project_task_health_state where task_key='cron:'||job_record.jobname;
 
    if job_health='failed' then
     should_alert:=previous_healthy is distinct from false or previous_alert_at is null
      or previous_alerted_terminal_at is distinct from terminal_at;
    else
+    -- (٤) انتقال حقيقي بين تصنيفين (مثلاً failed ⇒ stuck) يُنذَر عنه فوراً
+    -- بصرف النظر عن عمر آخر إنذار — راجع تعليق الرأس أعلاه.
     should_alert:=previous_healthy is distinct from false or previous_alert_at is null
-     or previous_alert_at<now()-interval '60 minutes';
+     or previous_alert_at<now()-interval '60 minutes'
+     or previous_alerted_health is distinct from job_health;
    end if;
 
    if should_alert then
@@ -206,14 +239,16 @@ begin
       failure_dedupe_key,60);
      previous_alert_at:=now();
      if job_health='failed' then previous_alerted_terminal_at:=terminal_at; end if;
+     previous_alerted_health:=job_health;
     exception when others then
      raise warning 'monitor_project_tasks: notify_telegram failed for cron:%: %',job_record.jobname,sqlerrm;
     end;
    end if;
-   insert into private.project_task_health_state(task_key,is_healthy,last_observed_at,last_alert_at,last_alerted_terminal_at,last_detail)
-    values('cron:'||job_record.jobname,false,now(),previous_alert_at,previous_alerted_terminal_at,detail_text)
+   insert into private.project_task_health_state(task_key,is_healthy,last_observed_at,last_alert_at,last_alerted_terminal_at,last_alerted_health,last_detail)
+    values('cron:'||job_record.jobname,false,now(),previous_alert_at,previous_alerted_terminal_at,previous_alerted_health,detail_text)
     on conflict(task_key) do update set is_healthy=false,last_observed_at=now(),last_alert_at=excluded.last_alert_at,
-     last_alerted_terminal_at=excluded.last_alerted_terminal_at,last_detail=excluded.last_detail;
+     last_alerted_terminal_at=excluded.last_alerted_terminal_at,last_alerted_health=excluded.last_alerted_health,
+     last_detail=excluded.last_detail;
   elsif job_health = 'ok' then
    select is_healthy into previous_healthy from private.project_task_health_state where task_key='cron:'||job_record.jobname;
    if previous_healthy=false then
@@ -221,10 +256,10 @@ begin
      format('✅ عادت مهمة الموقع للعمل%1$s• المهمة: %2$s',chr(10),job_record.jobname),
      'project-cron-recovered:'||job_record.jobname||':'||to_char(now(),'YYYYMMDDHH24MI'),1);
    end if;
-   insert into private.project_task_health_state(task_key,is_healthy,last_observed_at,last_success_at,last_alert_at,last_alerted_terminal_at,last_detail)
-    values('cron:'||job_record.jobname,true,now(),terminal_at,null,null,'يعمل')
+   insert into private.project_task_health_state(task_key,is_healthy,last_observed_at,last_success_at,last_alert_at,last_alerted_terminal_at,last_alerted_health,last_detail)
+    values('cron:'||job_record.jobname,true,now(),terminal_at,null,null,null,'يعمل')
     on conflict(task_key) do update set is_healthy=true,last_observed_at=now(),last_success_at=excluded.last_success_at,
-     last_alert_at=null,last_alerted_terminal_at=null,last_detail='يعمل';
+     last_alert_at=null,last_alerted_terminal_at=null,last_alerted_health=null,last_detail='يعمل';
   else
    insert into private.project_task_health_state(task_key,is_healthy,last_observed_at,last_detail)
     values('cron:'||job_record.jobname,null,now(),

@@ -174,10 +174,11 @@ assert.equal(
 // شهادة النجاح تُختم بزمن التشغيل الناجح، لا بزمن محاولة ما زالت جارية.
 // proposed/05 (مطبَّق على الإنتاج): التعافي يُصفِّر last_alerted_terminal_at
 // أيضاً (وسيط null إضافي قبل last_detail) كي يُنذَر فشلٌ مقبل بصرف النظر عن
-// terminal_at القديم المؤنذَر عنه قبل هذا التعافي.
+// terminal_at القديم المؤنذَر عنه قبل هذا التعافي. proposed/06 (الجولة
+// الثالثة): last_alerted_health يُصفَّر أيضاً بنفس المنطق تماماً.
 assert.match(
-  okBranch, /values\('cron:'\|\|job_record\.jobname,true,now\(\),terminal_at,null,null,'يعمل'\)/,
-  `${MONITOR_SQL}: last_success_at يجب أن يكون terminal_at لا last_job_at، وlast_alerted_terminal_at يجب أن يُصفَّر عند التعافي (05)`,
+  okBranch, /values\('cron:'\|\|job_record\.jobname,true,now\(\),terminal_at,null,null,null,'يعمل'\)/,
+  `${MONITOR_SQL}: last_success_at يجب أن يكون terminal_at لا last_job_at، وlast_alerted_terminal_at/last_alerted_health يجب أن يُصفَّرا عند التعافي (05/06)`,
 );
 
 // ---------------------------------------------------------------------------
@@ -200,6 +201,12 @@ assert.match(
 assert.match(
   failBranch, /previous_alert_at<now\(\)-interval '60 minutes'/,
   `${MONITOR_SQL}: تذكير الستين دقيقة لفشل مستمر اختفى`,
+);
+// proposed/06 (الجولة الثالثة): انتقال حقيقي بين تصنيفين (مثلاً failed⇐stuck)
+// يجب أن يُنذَر فوراً بصرف النظر عن عمر آخر إنذار، لا أن ينتظر حارس الستين دقيقة.
+assert.match(
+  failBranch, /previous_alerted_health is distinct from job_health/,
+  `${MONITOR_SQL}: شرط تجاوز الحارس الزمني عند انتقال التصنيف (failed⇐stuck) مفقود`,
 );
 
 // ---------------------------------------------------------------------------
