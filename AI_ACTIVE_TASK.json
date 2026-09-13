@@ -1,15 +1,12 @@
 {
   "schemaVersion": 1,
-  "status": "active",
-  "owner": "Claude",
-  "task": "إصلاح أساس وحدة سطر الفاتورة عند الطباعة (#733)",
-  "branch": "task branch pending for: إصلاح أساس وحدة سطر الفاتورة عند الطباعة (#733)",
-  "files": [
-    "src/app.js",
-    "scripts/check-invoice-document-integrity.mjs"
-  ],
-  "startedAt": "2026-09-13T11:10:30Z",
-  "updatedAt": "2026-09-13T11:10:30Z",
+  "status": "idle",
+  "owner": null,
+  "task": null,
+  "branch": null,
+  "files": [],
+  "startedAt": null,
+  "updatedAt": "2026-09-13T11:40:47Z",
   "pr": null,
-  "note": "Work in progress. Do not edit the reserved files."
+  "note": "No active task. Read AI_HANDOFF.md before starting work."
 }
