@@ -65,6 +65,21 @@ do $$ begin
   end if;
 end $$;
 
+-- proposed/06 (PR #220، الجولة الثالثة من مراجعة Codex): 'stuck'/'disabled'
+-- تبقيان على الحارس الزمني الدوري (60 دقيقة) عمداً، لكن هذا الحارس وحده كان
+-- يكتم انتقالاً حقيقياً بين حالتين مختلفتين — مثلاً failed أُنذر عنه قبل 39
+-- دقيقة، ثم صارت المهمة stuck الآن: previous_alert_at حديث فيمنع should_alert
+-- رغم أن 'stuck' حالة حيّة جديدة لم يسبق إنذارها إطلاقاً. العمود يحفظ آخر
+-- تصنيف (job_health) أُنذر عنه فعلاً — لا وقت الإنذار وحده — كي يُقارَن به.
+do $$ begin
+  if not exists (
+    select 1 from information_schema.columns
+    where table_schema='private' and table_name='project_task_health_state' and column_name='last_alerted_health'
+  ) then
+    alter table private.project_task_health_state add column if not exists last_alerted_health text;
+  end if;
+end $$;
+
 insert into private.project_task_monitors(task_key,task_label,report_source,max_age_minutes,enabled,source_table) values
  ('ameen-main','مزامنة أمين الرئيسية','ameen_sql_agent',10,true,'inventory_reports'),
  ('customer-balances','أرصدة الزبائن','ameen_customer_balances',10,true,'inventory_reports'),
@@ -236,6 +251,7 @@ declare cfg record; last_at timestamptz; age_minutes numeric; last_status text; 
  job_health text; cron_grace interval:=interval '10 minutes';
  terminal_status text; terminal_at timestamptz; retry_running boolean;
  previous_alerted_terminal_at timestamptz; should_alert boolean; failure_dedupe_key text;
+ previous_alerted_health text;
 begin
  for cfg in select * from private.project_task_monitors where enabled order by task_key loop
   -- جولة ٤: source_table='inventory_reports' (الافتراضي) يبقي السلوك
@@ -336,7 +352,8 @@ begin
     else format('عالقة في حالة %s منذ %s',coalesce(last_job_status,'غير معروفة'),
      coalesce(round(extract(epoch from(now()-last_job_at))/60.0,1)::text||' دقيقة','مدة غير معروفة'))
     end;
-   select is_healthy,last_alert_at,last_alerted_terminal_at into previous_healthy,previous_alert_at,previous_alerted_terminal_at
+   select is_healthy,last_alert_at,last_alerted_terminal_at,last_alerted_health
+    into previous_healthy,previous_alert_at,previous_alerted_terminal_at,previous_alerted_health
     from private.project_task_health_state where task_key='cron:'||job_record.jobname;
    -- حارس الإنذار لم يتغيّر عن سلوكه الأصلي لـ'stuck'/'disabled'، عمداً.
    --
@@ -362,8 +379,15 @@ begin
     should_alert:=previous_healthy is distinct from false or previous_alert_at is null
      or previous_alerted_terminal_at is distinct from terminal_at;
    else
+    -- Codex P1 (PR #220، الجولة الثالثة): الحارس الزمني الساعي وحده يفترض أن
+    -- previous_alert_at الحديث يعني أن هذه الحالة بعينها أُنذر عنها بالفعل —
+    -- خطأ حين يكون الإنذار السابق لتصنيف مختلف (failed أُنذر عنه قبل 39
+    -- دقيقة، والمهمة الآن stuck). انتقال حقيقي بين تصنيفين يستحق إنذاره
+    -- فوراً بصرف النظر عن عمر آخر إنذار، تماماً كما لو كانت previous_alert_at
+    -- غير موجودة أصلاً.
     should_alert:=previous_healthy is distinct from false or previous_alert_at is null
-     or previous_alert_at<now()-interval '60 minutes';
+     or previous_alert_at<now()-interval '60 minutes'
+     or previous_alerted_health is distinct from job_health;
    end if;
 
    if should_alert then
@@ -391,14 +415,16 @@ begin
       failure_dedupe_key,60);
      previous_alert_at:=now();
      if job_health='failed' then previous_alerted_terminal_at:=terminal_at; end if;
+     previous_alerted_health:=job_health;
     exception when others then
      raise warning 'monitor_project_tasks: notify_telegram failed for cron:%: %',job_record.jobname,sqlerrm;
     end;
    end if;
-   insert into private.project_task_health_state(task_key,is_healthy,last_observed_at,last_alert_at,last_alerted_terminal_at,last_detail)
-    values('cron:'||job_record.jobname,false,now(),previous_alert_at,previous_alerted_terminal_at,detail_text)
+   insert into private.project_task_health_state(task_key,is_healthy,last_observed_at,last_alert_at,last_alerted_terminal_at,last_alerted_health,last_detail)
+    values('cron:'||job_record.jobname,false,now(),previous_alert_at,previous_alerted_terminal_at,previous_alerted_health,detail_text)
     on conflict(task_key) do update set is_healthy=false,last_observed_at=now(),last_alert_at=excluded.last_alert_at,
-     last_alerted_terminal_at=excluded.last_alerted_terminal_at,last_detail=excluded.last_detail;
+     last_alerted_terminal_at=excluded.last_alerted_terminal_at,last_alerted_health=excluded.last_alerted_health,
+     last_detail=excluded.last_detail;
   elsif job_health = 'ok' then
    -- 'ok' وحدها تمنح شهادة النجاح. لا محاولة قيد التنفيذ، ولا مهمة لم تُشغَّل.
    select is_healthy into previous_healthy from private.project_task_health_state where task_key='cron:'||job_record.jobname;
@@ -410,10 +436,10 @@ begin
    -- proposed/05: تعافٍ فعلي يُصفِّر last_alerted_terminal_at أيضاً، كي يُنذَر
    -- فشلٌ مقبل بصرف النظر عن terminal_at القديم الذي كان مؤنذَراً عنه قبل هذا
    -- التعافي.
-   insert into private.project_task_health_state(task_key,is_healthy,last_observed_at,last_success_at,last_alert_at,last_alerted_terminal_at,last_detail)
-    values('cron:'||job_record.jobname,true,now(),terminal_at,null,null,'يعمل')
+   insert into private.project_task_health_state(task_key,is_healthy,last_observed_at,last_success_at,last_alert_at,last_alerted_terminal_at,last_alerted_health,last_detail)
+    values('cron:'||job_record.jobname,true,now(),terminal_at,null,null,null,'يعمل')
     on conflict(task_key) do update set is_healthy=true,last_observed_at=now(),last_success_at=excluded.last_success_at,
-     last_alert_at=null,last_alerted_terminal_at=null,last_detail='يعمل';
+     last_alert_at=null,last_alerted_terminal_at=null,last_alerted_health=null,last_detail='يعمل';
   else
    -- 'inflight' / 'never_run': حالة محايدة. لا إنذار ولا تعافٍ، ولا تُمَس
    -- is_healthy ولا last_alert_at ولا last_success_at ولا last_detail —

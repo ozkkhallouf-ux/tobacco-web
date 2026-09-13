@@ -250,18 +250,37 @@ if ($isMainComputer) {
     if (Test-Path -LiteralPath $ameenWorkerIncidentStatePath) {
       try { $prevDegradedAlerted = [bool]((Get-Content -LiteralPath $ameenWorkerIncidentStatePath -Raw | ConvertFrom-Json).degradedAlerted) } catch {}
     }
+    # نفس علاج degradedAlerted لكن لفرع stuck — Codex P1 (الجولة الثالثة): كان
+    # stuck=true يُسجَّل بلا شرط بعد كل محاولة تنبيه، فيقرأ التشغيل التالي
+    # $prevIncidentActive=true ويكتم المحاولة إلى الأبد حتى لو فشل الإرسال الأول
+    # فعلياً (SKIPPED/FAILED). stuckAlerted منفصل: يتتبّع نجاح الإرسال فعلياً لا
+    # استمرار الحالة العالقة وحدها، فتُعاد المحاولة كل دورة طالما لم يُؤكَّد الإرسال.
+    $prevStuckAlerted = $false
+    if (Test-Path -LiteralPath $ameenWorkerIncidentStatePath) {
+      try { $prevStuckAlerted = [bool]((Get-Content -LiteralPath $ameenWorkerIncidentStatePath -Raw | ConvertFrom-Json).stuckAlerted) } catch {}
+    }
 
     if ($workerStuck) {
       $ageText = if ($null -eq $heartbeatAgeMinutes) { "heartbeat غير موجود" } else { "آخر heartbeat منذ $heartbeatAgeMinutes دقيقة" }
       Write-Log "STUCK: $ameenWorkerTaskName ($ageText)"
+      # يُضاف للمجموع العام أيضاً — قناة احتياطية مستقلة (مفتاح dedupe "ameen-sync-watchdog"
+      # الخاص بها، 60 دقيقة) كي لا يبقى التوقف بلا أي تنبيه إن استمرت إعادة التشغيل بالفشل
+      # وتعذّر إرسال تنبيه الحادثة المخصّص أعلاه أيضاً (Codex P1، الجولة الثالثة).
+      $problems.Add("Ameen Read Worker متوقفة/عالقة — $ageText")
 
-      if (-not $prevIncidentActive) {
-        # حادثة جديدة فقط — تنبيه واحد، لا يتكرر كل تشغيل للحارس طالما الحادثة مستمرة
+      $stuckAlerted = $prevStuckAlerted
+      if (-not $prevStuckAlerted) {
+        # تنبيه واحد فقط بعد أول نجاح إرسال فعلي — لا يتكرر كل تشغيل للحارس طالما الحادثة مستمرة
         $stuckMsg = "🚨 توقف/تعليق Ameen Read Worker — $ageText."
         $notifyPathWorker = Join-Path $PSScriptRoot "send-telegram-notification.ps1"
         if (Test-Path -LiteralPath $notifyPathWorker) {
           $stuckNotifyOutput = & $notifyPathWorker -Message $stuckMsg -EventType "windows" -DedupeKey "ameen-read-worker-stuck" -DedupeMinutes 1440 2>&1 6>&1
-          Write-Log ("ALERT sent for Ameen worker stuck incident — " + (($stuckNotifyOutput | Out-String).Trim() -replace "\s+", " "))
+          $stuckNotifyText = ($stuckNotifyOutput | Out-String).Trim()
+          # نفس معيار degradedAlerted: النجاح يُعرَّف من نص الإخراج (TELEGRAM-NOTIFY OK) لا من
+          # رمز الخروج (best-effort دائماً exit 0). فشل أو تخطٍّ يترك stuckAlerted=false كي
+          # تُعاد المحاولة بالدورة التالية.
+          $stuckAlerted = ($stuckNotifyText -match "TELEGRAM-NOTIFY OK")
+          Write-Log ("ALERT sent for Ameen worker stuck incident — " + ($stuckNotifyText -replace "\s+", " "))
         }
       }
 
@@ -280,7 +299,7 @@ if ($isMainComputer) {
         Write-Log "FAIL: could not restart $ameenWorkerTaskName — $($_.Exception.Message)"
       }
 
-      @{ stuck = $true; degraded = $false; since = (Get-Date).ToUniversalTime().ToString("o") } | ConvertTo-Json | Set-Content -LiteralPath $ameenWorkerIncidentStatePath -Encoding utf8
+      @{ stuck = $true; degraded = $false; stuckAlerted = $stuckAlerted; since = (Get-Date).ToUniversalTime().ToString("o") } | ConvertTo-Json | Set-Content -LiteralPath $ameenWorkerIncidentStatePath -Encoding utf8
     } elseif ($workerDegraded) {
       # القسم ٤: حيّة وتحاول المصادقة بلا نجاح — لا نعيد التشغيل (لا يفيد) ولا نسكت عن الأمر
       # (لا نطلق أيضاً تنبيه "عاد للعمل" الآن، لأنها لم تعد فعلياً بعد).

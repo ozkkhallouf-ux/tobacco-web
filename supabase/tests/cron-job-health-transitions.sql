@@ -85,6 +85,7 @@ declare
   retry_running boolean; job_health text; detail_text text;
   previous_healthy boolean; previous_alert_at timestamptz;
   previous_alerted_terminal_at timestamptz; should_alert boolean;
+  previous_alerted_health text;
   cron_grace interval := interval '10 minutes'; failure_dedupe_key text;
 begin
   -- (١) أحدث تشغيل مطلقاً — هل هناك محاولة جارية الآن؟
@@ -108,13 +109,15 @@ begin
     else format('عالقة في حالة %s منذ %s',coalesce(last_job_status,'غير معروفة'),
      coalesce(round(extract(epoch from(p_now-last_job_at))/60.0,1)::text||' دقيقة','مدة غير معروفة'))
     end;
-   select is_healthy,last_alert_at,last_alerted_terminal_at
-    into previous_healthy,previous_alert_at,previous_alerted_terminal_at
+   select is_healthy,last_alert_at,last_alerted_terminal_at,last_alerted_health
+    into previous_healthy,previous_alert_at,previous_alerted_terminal_at,previous_alerted_health
     from pg_temp.health_probe where task_key=p_key;
 
    -- الإصلاح: 'failed' حادثة مكتملة — لا تُنذَر ثانية لمجرد مرور ساعة إن كانت
    -- terminal_at نفسها لم تتغيّر (لا محاولة جديدة). 'stuck'/'disabled' حالتان
-   -- جاريتان فتبقيان على الحارس الزمني الأصلي (التذكير الدوري مقصود لهما).
+   -- جاريتان فتبقيان على الحارس الزمني الأصلي (التذكير الدوري مقصود لهما)،
+   -- لكن انتقالاً حقيقياً بين تصنيفين (مثلاً failed ⇒ stuck) يُنذَر عنه فوراً
+   -- بصرف النظر عن عمر آخر إنذار — Codex P1، الجولة الثالثة على PR #220.
    if job_health='failed' then
     should_alert:=previous_healthy is distinct from false
      or previous_alert_at is null
@@ -122,7 +125,8 @@ begin
    else
     should_alert:=previous_healthy is distinct from false
      or previous_alert_at is null
-     or previous_alert_at<p_now-interval '60 minutes';
+     or previous_alert_at<p_now-interval '60 minutes'
+     or previous_alerted_health is distinct from job_health;
    end if;
 
    if should_alert then
@@ -146,24 +150,26 @@ begin
      perform pg_temp.notify_probe_insert('project_task_failure',p_key,failure_dedupe_key,60,detail_text,p_now);
      previous_alert_at:=p_now;
      if job_health='failed' then previous_alerted_terminal_at:=terminal_at; end if;
+     previous_alerted_health:=job_health;
     exception when others then
      raise warning 'monitor_cycle: simulated notify failure for %: %',p_key,sqlerrm;
     end;
    end if;
-   insert into pg_temp.health_probe(task_key,is_healthy,last_observed_at,last_alert_at,last_alerted_terminal_at,last_detail)
-    values(p_key,false,p_now,previous_alert_at,previous_alerted_terminal_at,detail_text)
+   insert into pg_temp.health_probe(task_key,is_healthy,last_observed_at,last_alert_at,last_alerted_terminal_at,last_alerted_health,last_detail)
+    values(p_key,false,p_now,previous_alert_at,previous_alerted_terminal_at,previous_alerted_health,detail_text)
     on conflict(task_key) do update set is_healthy=false,last_observed_at=p_now,last_alert_at=excluded.last_alert_at,
-     last_alerted_terminal_at=excluded.last_alerted_terminal_at,last_detail=excluded.last_detail;
+     last_alerted_terminal_at=excluded.last_alerted_terminal_at,last_alerted_health=excluded.last_alerted_health,
+     last_detail=excluded.last_detail;
   elsif job_health = 'ok' then
    select is_healthy into previous_healthy from pg_temp.health_probe where task_key=p_key;
    if previous_healthy=false then
     perform pg_temp.notify_probe_insert('project_task_recovered',p_key,
      'recovered:'||p_key||':'||to_char(p_now,'YYYYMMDDHH24MI'),1,null,p_now);
    end if;
-   insert into pg_temp.health_probe(task_key,is_healthy,last_observed_at,last_success_at,last_alert_at,last_alerted_terminal_at,last_detail)
-    values(p_key,true,p_now,terminal_at,null,null,'يعمل')
+   insert into pg_temp.health_probe(task_key,is_healthy,last_observed_at,last_success_at,last_alert_at,last_alerted_terminal_at,last_alerted_health,last_detail)
+    values(p_key,true,p_now,terminal_at,null,null,null,'يعمل')
     on conflict(task_key) do update set is_healthy=true,last_observed_at=p_now,last_success_at=excluded.last_success_at,
-     last_alert_at=null,last_alerted_terminal_at=null,last_detail='يعمل';
+     last_alert_at=null,last_alerted_terminal_at=null,last_alerted_health=null,last_detail='يعمل';
   else
    -- 'inflight' / 'never_run': محايدة — لا إشعار من أي نوع، ولا مساس بالحكم.
    insert into pg_temp.health_probe(task_key,is_healthy,last_observed_at,last_detail)
@@ -579,6 +585,55 @@ begin
   assert (select count(*) from notify_probe where task_key=k and event_type='project_task_failure')=1,
     '76: نفس terminal_at بعد النجاح، حتى بعد أكثر من ٦٠ دقيقة ⇒ لا تكرار'; n:=n+1;
 
-  assert n >= 76, format('عدد التأكيدات المنفَّذة %s أقل من 76 — حُذف تأكيد؟', n);
+  -- =====================================================================
+  -- ١٦) failed أُنذر عنه قبل 39 دقيقة (داخل نافذة الـ60 دقيقة) ثم صار retry
+  --   عالقاً stuck الآن ⇒ يجب أن يُنذَر فوراً بصرف النظر عن عمر إنذار الفشل
+  --   (Codex P1، الجولة الثالثة، PR #220 — المثال الفعلي بالمراجعة: "its
+  --   failure alert is recorded at t0-39m, then it expects a second alert
+  --   when the retry is stuck at t0"). الحارس الزمني الساعي وحده كان سيمنع
+  --   هذا الإنذار لأن previous_alert_at حديث (39 دقيقة)؛ last_alerted_health
+  --   يكشف أن الإنذار السابق كان لتصنيف مختلف (failed لا stuck) فيُنذر فوراً.
+  -- =====================================================================
+  k:='cron:seq16-failed-then-stuck-immediate'; j:=16;
+  insert into runs_probe values (j,'failed',t0-interval '40 minutes');
+  v:=pg_temp.monitor_cycle(k,j,true,t0-interval '39 minutes');
+  assert v='failed', '77: فشل نهائي أول ⇒ failed'; n:=n+1;
+  assert (select count(*) from notify_probe where task_key=k and event_type='project_task_failure')=1,
+    '78: إشعار الفشل الأول خرج'; n:=n+1;
+  assert (select last_alerted_health from health_probe where task_key=k)='failed',
+    '79: last_alerted_health يسجّل failed بعد إنذاره'; n:=n+1;
+
+  -- retry يبدأ فوق الفشل ويعلق ١٥ دقيقة (> مهلة الجمود) ⇒ stuck الآن، لكن
+  -- previous_alert_at لا يزال عمره ٣٩ دقيقة فقط (< ٦٠ دقيقة) — يجب أن يُنذَر
+  -- فوراً رغم ذلك لأنه انتقال حقيقي بين تصنيفين مختلفين.
+  insert into runs_probe values (j,'running',t0-interval '15 minutes');
+  v:=pg_temp.monitor_cycle(k,j,true,t0);
+  assert v='stuck', '80: retry عالق فوق فشل سابق ⇒ stuck'; n:=n+1;
+  assert (select count(*) from notify_probe where task_key=k and event_type='project_task_failure')=2,
+    '81: انتقال failed⇐stuck يُنذَر فوراً رغم أن آخر إنذار عمره ٣٩ دقيقة فقط (لولا last_alerted_health لكُتم)'; n:=n+1;
+  assert (select last_alerted_health from health_probe where task_key=k)='stuck',
+    '82: last_alerted_health يتحدّث إلى stuck بعد إنذاره'; n:=n+1;
+
+  -- نفس stuck لا يزال قائماً بعد أقل من ٦٠ دقيقة على تذكيره هو (لا فشله) ⇒
+  -- لا تذكير مكرر — التذكير الدوري الطبيعي لنفس التصنيف يبقى كما هو.
+  v:=pg_temp.monitor_cycle(k,j,true,t0+interval '20 minutes');
+  assert (select count(*) from notify_probe where task_key=k and event_type='project_task_failure')=2,
+    '83: نفس stuck خلال أقل من ٦٠ دقيقة على تذكيره ⇒ لا تذكير مكرر'; n:=n+1;
+
+  -- بعد تجاوز الستين دقيقة على تذكير stuck السابق ⇒ التذكير الدوري المعتاد
+  -- يخرج كالمعتاد، بلا علاقة بـlast_alerted_health (نفس التصنيف مستمر).
+  v:=pg_temp.monitor_cycle(k,j,true,t0+interval '75 minutes');
+  assert (select count(*) from notify_probe where task_key=k and event_type='project_task_failure')=3,
+    '84: نفس stuck بعد أكثر من ٦٠ دقيقة على تذكيره ⇒ تذكير دوري ثانٍ يخرج'; n:=n+1;
+
+  -- تعافٍ فعلي (نجاح) بعد ذلك ⇒ last_alerted_health يُصفَّر مثل
+  -- last_alerted_terminal_at تماماً، فلا يُخلَط بأي حالة سابقة عند فشل لاحق.
+  insert into runs_probe values (j,'succeeded',t0+interval '80 minutes');
+  v:=pg_temp.monitor_cycle(k,j,true,t0+interval '81 minutes');
+  assert v='ok', '85: تعافٍ فعلي بعد stuck ⇒ ok'; n:=n+1;
+  assert (select last_alerted_health from health_probe where task_key=k) is null,
+    '86: التعافي الفعلي يصفّر last_alerted_health'; n:=n+1;
+
+  assert n >= 86, format('عدد التأكيدات المنفَّذة %s أقل من 86 — حُذف تأكيد؟', n);
   raise notice 'cron state transitions: % تأكيداً — كلها نجحت ✓', n;
 end $$;
