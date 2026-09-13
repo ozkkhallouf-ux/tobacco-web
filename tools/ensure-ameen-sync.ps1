@@ -269,6 +269,18 @@ if ($isMainComputer) {
     if (Test-Path -LiteralPath $ameenWorkerIncidentStatePath) {
       try { $prevStuckAlerted = [bool]((Get-Content -LiteralPath $ameenWorkerIncidentStatePath -Raw | ConvertFrom-Json).stuckAlerted) } catch {}
     }
+    # Codex P1 (جولة جديدة): نفس علاج degradedIncidentId لكن لفرع stuck — مفتاح dedupe
+    # الثابت "ameen-read-worker-stuck" كان يجعل notify_telegram_dispatch يُسقط بصمت أي
+    # تنبيه لحادثة stuck ثانية تقع خلال أقل من نافذة الـdedupe (1440 دقيقة) من حادثة
+    # سابقة — حتى لو تعافى العامل فعلياً بينهما (stuckAlerted يعاد تصفيره بشكل صحيح في
+    # فرع else، لكن مفتاح الـdedupe على مستوى SQL لا يميّز حادثة عن أخرى فيُسقَط الإرسال
+    # الجديد ويُسجَّل stuckAlerted=true رغم عدم وصوله فعلياً). الحل: هوية incident مستقلة
+    # (تُنشأ لحظة الدخول الفعلي في stuck، وتُحمَل في الحالة طالما الحادثة نفسها مستمرة)
+    # تُلحَق بالمفتاح، فكل حادثة stuck تحصل على نافذة dedupe خاصة بها.
+    $prevStuckIncidentId = $null
+    if (Test-Path -LiteralPath $ameenWorkerIncidentStatePath) {
+      try { $prevStuckIncidentId = [string]((Get-Content -LiteralPath $ameenWorkerIncidentStatePath -Raw | ConvertFrom-Json).stuckIncidentId) } catch {}
+    }
 
     if ($workerStuck) {
       $ageText = if ($null -eq $heartbeatAgeMinutes) { "heartbeat غير موجود" } else { "آخر heartbeat منذ $heartbeatAgeMinutes دقيقة" }
@@ -278,13 +290,16 @@ if ($isMainComputer) {
       # وتعذّر إرسال تنبيه الحادثة المخصّص أعلاه أيضاً (Codex P1، الجولة الثالثة).
       $problems.Add("Ameen Read Worker متوقفة/عالقة — $ageText")
 
+      # حادثة جديدة فقط إذا لم تكن stuck مستمرة أصلاً من التشغيل السابق — الاستمرار
+      # (retry ضمن نفس الحادثة) يحمل نفس الهوية بلا تغيير كي لا يتولّد مفتاح جديد لكل دورة.
+      $stuckIncidentId = if ($prevIncidentActive -and $prevStuckIncidentId) { $prevStuckIncidentId } else { (Get-Date).ToUniversalTime().Ticks.ToString() }
       $stuckAlerted = $prevStuckAlerted
       if (-not $prevStuckAlerted) {
         # تنبيه واحد فقط بعد أول نجاح إرسال فعلي — لا يتكرر كل تشغيل للحارس طالما الحادثة مستمرة
         $stuckMsg = "🚨 توقف/تعليق Ameen Read Worker — $ageText."
         $notifyPathWorker = Join-Path $PSScriptRoot "send-telegram-notification.ps1"
         if (Test-Path -LiteralPath $notifyPathWorker) {
-          $stuckNotifyOutput = & $notifyPathWorker -Message $stuckMsg -EventType "windows" -DedupeKey "ameen-read-worker-stuck" -DedupeMinutes 1440 2>&1 6>&1
+          $stuckNotifyOutput = & $notifyPathWorker -Message $stuckMsg -EventType "windows" -DedupeKey "ameen-read-worker-stuck:$stuckIncidentId" -DedupeMinutes 1440 2>&1 6>&1
           $stuckNotifyText = ($stuckNotifyOutput | Out-String).Trim()
           # نفس معيار degradedAlerted: النجاح يُعرَّف من نص الإخراج (TELEGRAM-NOTIFY OK) لا من
           # رمز الخروج (best-effort دائماً exit 0). فشل أو تخطٍّ يترك stuckAlerted=false كي
@@ -309,7 +324,7 @@ if ($isMainComputer) {
         Write-Log "FAIL: could not restart $ameenWorkerTaskName — $($_.Exception.Message)"
       }
 
-      @{ stuck = $true; degraded = $false; stuckAlerted = $stuckAlerted; since = (Get-Date).ToUniversalTime().ToString("o") } | ConvertTo-Json | Set-Content -LiteralPath $ameenWorkerIncidentStatePath -Encoding utf8
+      @{ stuck = $true; degraded = $false; stuckAlerted = $stuckAlerted; stuckIncidentId = $stuckIncidentId; since = (Get-Date).ToUniversalTime().ToString("o") } | ConvertTo-Json | Set-Content -LiteralPath $ameenWorkerIncidentStatePath -Encoding utf8
     } elseif ($workerDegraded) {
       # القسم ٤: حيّة وتحاول المصادقة بلا نجاح — لا نعيد التشغيل (لا يفيد) ولا نسكت عن الأمر
       # (لا نطلق أيضاً تنبيه "عاد للعمل" الآن، لأنها لم تعد فعلياً بعد).
