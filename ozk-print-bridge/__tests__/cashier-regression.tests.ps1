@@ -784,7 +784,10 @@ Test-Case "3ب) تكرار إعادة التشغيل لا يراكم نسخاً 
 }
 
 Test-Case "4) فشل الحفظ بعد الإرسال لا يُسقط الجسر (يُسجَّل ويُواصل الرصد)" {
-    Assert-True ($bridgeSrc -match '(?s)try \{\s*\r?\n\s*Write-BridgeState \$StatePath \$state\s*\r?\n\s*\} catch \{\s*\r?\n\s*if \(\$stateStatus -ne "spooled"\) \{ throw \}') "فشل الحفظ بعد الإرسال يجب أن يُلتقط، وأي فشل آخر يُعاد رميه"
+    # نقطة الحفظ هذا قابلة للتزامن مع PrintInvoice اليدوي (P1-Y تصميم D)،
+    # فالكتابة الفعلية أصبحت عبر Merge-BridgeStateForWrite الآمنة للدمج لا
+    # Write-BridgeState المباشرة — الفحص يتحقق من نفس ضمان الالتقاط والإعادة.
+    Assert-True ($bridgeSrc -match '(?s)try \{\s*\r?\n\s*Merge-BridgeStateForWrite \$StatePath \$state\s*\r?\n\s*\} catch \{\s*\r?\n\s*if \(\$stateStatus -ne "spooled"\) \{ throw \}') "فشل الحفظ بعد الإرسال يجب أن يُلتقط، وأي فشل آخر يُعاد رميه"
     Assert-True ($bridgeSrc -match 'Event = "state_persist_failed_after_spool"') "يجب تسجيل الحدث بوضوح لا ابتلاعه"
 }
 
@@ -797,10 +800,12 @@ Test-Case "الترتيب في المصدر: علامة قيد الإرسال ت
     # المسار اليدوي (PrintInvoice) يسبق حلقة Observe في المصدر ويحمل نفس نص
     # "status = \"print_in_flight\"" عمداً (نفس الدلالة)، فيُحدَّد أولاً موضع
     # فريد لحلقة Observe الآلية لضمان أخذ المواضع التالية منها لا من الفرع اليدوي.
+    # الحفظ نفسه صار عبر Merge-BridgeStateForWrite الآمنة للدمج (P1-Y تصميم D)
+    # لا Write-BridgeState المباشرة، لأن هذه نقطة قابلة للتزامن مع PrintInvoice.
     $observeLoopIdx = $bridgeSrc.IndexOf('Assert-CashierTypeGuid ([string]$candidate.TypeGuid)')
     Assert-True ($observeLoopIdx -ge 0) "يجب وجود بداية فريدة لحلقة Observe الآلية"
     $markerIdx = $bridgeSrc.IndexOf('status = "print_in_flight"', $observeLoopIdx)
-    $writeIdx = $bridgeSrc.IndexOf("Write-BridgeState `$StatePath `$state", $markerIdx)
+    $writeIdx = $bridgeSrc.IndexOf("Merge-BridgeStateForWrite `$StatePath `$state", $markerIdx)
     $sendIdx = $bridgeSrc.IndexOf("Submit-OzkReceiptSpoolJob -Job `$spoolJob", $markerIdx)
     Assert-True ($markerIdx -ge 0 -and $writeIdx -ge 0 -and $sendIdx -ge 0) "يجب وجود المواضع الثلاثة"
     Assert-True ($writeIdx -lt $sendIdx) "الحفظ على القرص يجب أن يسبق الإرسال إلى الطابعة"
@@ -933,8 +938,14 @@ Test-Case "لا فقدان صامت: كل فشل مؤكَّد قبل التسل�
 
 Write-Host "`n== Persist-RetryablePrintRollback: rollback ذرّي محدود المحاولات (مشترك بين المسارين) =="
 
+# Persist-RetryablePrintRollback الحقيقية تستدعي داخلياً Merge-BridgeStateForWrite
+# (تصميم P1-Y D) لا Write-BridgeState مباشرة؛ يجب تعريفها هنا أولاً وإلا فنداء
+# Persist-RetryablePrintRollback الداخلي لها يفشل بـCommandNotFoundException صامتاً
+# ضمن حلقة إعادة المحاولة الخاصة بها، فلا يصل الاستدعاء أبداً إلى Write-BridgeState المزيَّفة أدناه.
+. ([scriptblock]::Create((Get-ExtractedFunctionText $bridgeSrc "function Merge-BridgeStateForWrite([string]`$Path, `$State, [string[]]`$DeletedSeenKeys = @()) {")))
+
 # الدالة الحقيقية من المصدر — لا محاكاة لمنطقها، فقط استبدال Write-BridgeState
-# التي تستدعيها بنسخة قابلة للتحكم في عدد مرات الفشل.
+# التي تستدعيها (عبر Merge-BridgeStateForWrite أعلاه) بنسخة قابلة للتحكم في عدد مرات الفشل.
 . ([scriptblock]::Create((Get-ExtractedFunctionText $bridgeSrc "function Persist-RetryablePrintRollback([string]`$StatePath, `$State, [string]`$InvoiceGuidKey) {")))
 
 # Write-BridgeState الحقيقية (المستخرجة أعلاه في سطر 706) تُحفظ هنا كي تبقى
@@ -1052,9 +1063,11 @@ Test-Case "الترتيب في المصدر: التحضير يسبق العلا�
     # نفسها لا من الفرع اليدوي.
     $observeLoopIdx = $bridgeSrc.IndexOf('Assert-CashierTypeGuid ([string]$candidate.TypeGuid)')
     Assert-True ($observeLoopIdx -ge 0) "يجب وجود بداية فريدة لحلقة Observe الآلية"
+    # الحفظ نفسه صار عبر Merge-BridgeStateForWrite الآمنة للدمج (P1-Y تصميم D)
+    # لا Write-BridgeState المباشرة، لأن هذه نقطة قابلة للتزامن مع PrintInvoice.
     $prepareIdx = $bridgeSrc.IndexOf("New-OzkReceiptSpoolJob -Receipt `$receipt", $observeLoopIdx)
     $markerIdx = $bridgeSrc.IndexOf('status = "print_in_flight"', $observeLoopIdx)
-    $writeIdx = $bridgeSrc.IndexOf("Write-BridgeState `$StatePath `$state", $markerIdx)
+    $writeIdx = $bridgeSrc.IndexOf("Merge-BridgeStateForWrite `$StatePath `$state", $markerIdx)
     $submitIdx = $bridgeSrc.IndexOf("Submit-OzkReceiptSpoolJob -Job `$spoolJob", $markerIdx)
     Assert-True ($prepareIdx -ge 0 -and $markerIdx -ge 0 -and $writeIdx -ge 0 -and $submitIdx -ge 0) "يجب وجود المواضع الأربعة"
     Assert-True ($prepareIdx -lt $markerIdx) "التحضير يجب أن يسبق العلامة"
@@ -4026,6 +4039,262 @@ Test-Case "شاهد سلبي C8: بلا فحص/رفض صريح، فشل WaitOne(
     }
 }
 
+
+Write-Host "`n== P1-X: عزل فشل Unity=3 داخل Convert-SnapshotToReceipt (لا يُسقط الحلقة) =="
+
+# Convert-SnapshotToReceipt مُستخرَجة أعلاه (سطر ~1968 لقسم P1-L)؛ Test-PermanentInvoiceFailure
+# وAdd-QuarantineEntry وGet-QuarantineDecision مُستخرَجة أعلاه في قسم P1-K.
+
+function New-Unity3Snapshot([double]$Unit3Factor, [string]$ItemGuid = "item-u3-1") {
+    $line = New-TestLine -ItemGuid $ItemGuid -ItemName "منتج وحدة ثالثة" -Qty 10 -RawPrice 50 -SelectedUnit 3 -Unit3Factor $Unit3Factor
+    return New-Snapshot -Lines @($line)
+}
+
+Test-Case "P1-X.1) Unity=3 بلا Unit3Factor صالح: يرمي OzkReceiptUnrenderableException (لا نوع عام)" {
+    $thrown = $null
+    try { [void](Convert-SnapshotToReceipt (New-Unity3Snapshot 0)) } catch { $thrown = $_ }
+    Assert-True ($null -ne $thrown) "يجب أن يرمي استثناءً"
+    Assert-True ($thrown.Exception.GetType().Name -eq "OzkReceiptUnrenderableException") "يجب أن يكون النوع المصنَّف حتمياً، وقع: $($thrown.Exception.GetType().Name)"
+    Assert-True (Test-PermanentInvoiceFailure $thrown) "يجب أن يُصنَّف Test-PermanentInvoiceFailure هذا الاستثناء حتمياً"
+}
+
+Test-Case "P1-X.2) Unity=3 بعامل سالب أيضاً يُصنَّف حتمياً (لا طباعة بتخمين)" {
+    $thrown = $null
+    try { [void](Convert-SnapshotToReceipt (New-Unity3Snapshot -1.5)) } catch { $thrown = $_ }
+    Assert-True ($null -ne $thrown -and (Test-PermanentInvoiceFailure $thrown)) "العامل السالب يجب أن يُرفض حتمياً لا أن يُخمَّن"
+}
+
+Test-Case "P1-X.3) عامل صالح: لا استثناء إطلاقاً (fail-closed لا يمنع الحالة السليمة)" {
+    $thrown = $null
+    $receipt = $null
+    try { $receipt = Convert-SnapshotToReceipt (New-Unity3Snapshot 12) } catch { $thrown = $_ }
+    Assert-True ($null -eq $thrown) "عامل موجب صالح يجب ألا يرمي: $($thrown.Exception.Message)"
+    Assert-True ($null -ne $receipt) "يجب إنتاج إيصال فعلي"
+}
+
+Test-Case "P1-X.4) المصدر: Convert-SnapshotToReceipt داخل نفس try/catch التي تعزل New-OzkReceiptSpoolJob" {
+    Assert-True ($bridgeSrc -match '(?s)\$spoolJob = \$null\s*\r?\n\s*try \{\s*\r?\n\s*\$receipt = Convert-SnapshotToReceipt \$confirmation\.Snapshot\s*\r?\n\s*\$spoolJob = New-OzkReceiptSpoolJob[^\r\n]*\r?\n\s*\} catch \{\s*\r?\n\s*if \(-not \(Test-PermanentInvoiceFailure \$_\)\) \{ throw \}') "التحويل من اللقطة يجب أن يقع داخل الحماية نفسها التي تحمي بناء مهمة الطباعة"
+    # \$spoolJob يُهيَّأ null قبل الـtry، فإن فشل Convert-SnapshotToReceipt يبقى null ولا يُرسَل أبداً
+    Assert-True ($bridgeSrc -notmatch '(?s)Submit-OzkReceiptSpoolJob[^\r\n]*\r?\n[^\r\n]*permanent_render_failure') "لا يجوز أن يقع أي إرسال بعد فشل حتمي مصنَّف"
+}
+
+Test-Case "P1-X.5) عزل كامل: فاتورة Unity=3 فاسدة تُعزل، لا مهمة طباعة، والطابور يستمر" {
+    $path = New-StatePath
+    $candidate = New-QueueCandidate "u3-guid-1" 9001 "fp-u3-v1"
+    $state = Read-BridgeState $path
+    $spoolJobCreated = $false
+    $prepareError = $null
+    try {
+        [void](Convert-SnapshotToReceipt (New-Unity3Snapshot 0))
+        $spoolJobCreated = $true   # لا يصل هنا أبداً في هذا الاختبار
+    } catch {
+        $prepareError = $_
+    }
+    Assert-True (-not $spoolJobCreated) "لا يجوز إنشاء مهمة طباعة لفاتورة Unity=3 فاسدة"
+    Assert-True (Test-PermanentInvoiceFailure $prepareError) "شرط مسبق: يجب أن يُصنَّف حتمياً"
+    Add-QuarantineEntry $state $candidate $candidate.Fingerprint $prepareError
+    Write-BridgeState $path $state
+    $reloaded = Read-BridgeState $path
+    Assert-True ($reloaded.quarantined.ContainsKey("u3-guid-1")) "يجب عزل الفاتورة"
+    Assert-True (-not $reloaded.seen.ContainsKey("u3-guid-1")) "لا يجوز اعتبارها مطبوعة"
+    Assert-True ([string]$reloaded.quarantined["u3-guid-1"].category -eq "permanent_render_failure") "الفئة يجب أن تكون فشل تصيير حتمي"
+    # الفاتورة التالية بالطابور غير متأثرة إطلاقاً (لا سقوط للحلقة، لا حجب)
+    $nextCandidate = New-QueueCandidate "next-guid-2" 9002 "fp-next"
+    $decision = Get-QuarantineDecision $reloaded $nextCandidate.InvoiceGuid $nextCandidate.Fingerprint
+    Assert-True ($decision -eq "proceed") "الفاتورة التالية يجب أن تُعامَل طبيعياً بلا تأثر بعزل سابقتها"
+}
+
+Test-Case "P1-X.6) لا حلقة إعادة تشغيل: نفس البصمة الفاسدة عبر نبضات متعددة تبقى معزولة دون تكرار" {
+    $path = New-StatePath
+    $candidate = New-QueueCandidate "u3-guid-loop" 9003 "fp-u3-loop"
+    for ($i = 0; $i -lt 4; $i++) {
+        $state = Read-BridgeState $path
+        $decision = Get-QuarantineDecision $state $candidate.InvoiceGuid $candidate.Fingerprint
+        if ($decision -eq "skip") { continue }
+        $prepareError = $null
+        try { [void](Convert-SnapshotToReceipt (New-Unity3Snapshot 0)) } catch { $prepareError = $_ }
+        Assert-True (Test-PermanentInvoiceFailure $prepareError) "يجب أن يبقى حتمياً في كل نبضة"
+        Add-QuarantineEntry $state $candidate $candidate.Fingerprint $prepareError
+        Write-BridgeState $path $state
+    }
+    $final = Read-BridgeState $path
+    Assert-True ($final.quarantined.ContainsKey("u3-guid-loop")) "تبقى معزولة بعد كل النبضات"
+    Assert-True (-not $final.seen.ContainsKey("u3-guid-loop")) "لا تُطبع أبداً"
+}
+
+Test-Case "P1-X.7) تعديل الفاتورة (بصمة جديدة وعامل صالح) يرفع العزل ويسمح بالطباعة" {
+    $path = New-StatePath
+    $candidate = New-QueueCandidate "u3-guid-fix" 9004 "fp-u3-broken"
+    $state = Read-BridgeState $path
+    $prepareError = $null
+    try { [void](Convert-SnapshotToReceipt (New-Unity3Snapshot 0)) } catch { $prepareError = $_ }
+    Add-QuarantineEntry $state $candidate $candidate.Fingerprint $prepareError
+    Write-BridgeState $path $state
+
+    $reloaded = Read-BridgeState $path
+    $fixedFingerprint = "fp-u3-fixed"
+    $decision = Get-QuarantineDecision $reloaded "u3-guid-fix" $fixedFingerprint
+    Assert-True ($decision -eq "reevaluate") "بصمة جديدة يجب أن تُعاد للتقييم"
+    [void]$reloaded.quarantined.Remove("u3-guid-fix")
+    $receipt = $null
+    try { $receipt = Convert-SnapshotToReceipt (New-Unity3Snapshot 8) } catch { }
+    Assert-True ($null -ne $receipt) "بعد الإصلاح يجب أن يُنتَج إيصال فعلي"
+}
+
+Test-Case "P1-X.8) خطأ بنيوي غير متعلق بالفاتورة (I/O/تشغيلي عابر) يبقى يُعاد رميه لا يُعزَل" {
+    # يحاكي أعطالاً بنيوية (اتصال SQL/CIM منقطع) بنفس نمط الاختبار القائم لتصنيف الأعطال العابرة
+    # (سطر ~1745) — أنواع مثل SqlException/CimException لا تُبنى مباشرة بـNew-Object (بلا مُنشئ عام)
+    foreach ($ex in @(
+        (New-Object System.IO.IOException("SQL connection lost")),
+        (New-Object InvalidOperationException("CIM session lost"))
+    )) {
+        $infraError = New-ErrorRecordOf $ex
+        Assert-True (-not (Test-PermanentInvoiceFailure $infraError)) "خطأ بنيوي عابر يجب ألا يُصنَّف حتمياً على مستوى الفاتورة: $($ex.GetType().Name)"
+    }
+}
+
+Write-Host "`n== P1-Y: كتابة حالة آمنة للتزامن (Merge-BridgeStateForWrite) بلا last-writer-wins =="
+
+. ([scriptblock]::Create((Get-ExtractedFunctionText $bridgeSrc "function Merge-BridgeStateForWrite([string]`$Path, `$State, [string[]]`$DeletedSeenKeys = @()) {")))
+
+Test-Case "P1-Y.1) دمج مفتاحي: إدخال seen جديد على القرص (كتبته العملية اليدوية) لا يُمحى بكتابة الرصد الآلي" {
+    $path = New-StatePath
+    $observeState = Read-BridgeState $path
+    $observeState.seen["observe-guid"] = [ordered]@{ status = "spooled"; invoiceNumber = 1 }
+    Write-BridgeState $path $observeState   # لقطة أولية على القرص
+
+    # بين قراءة Observe وكتابته، اليدوي يكتب فاتورة أخرى مباشرة على القرص
+    $manualState = Read-BridgeState $path
+    $manualState.seen["manual-guid"] = [ordered]@{ status = "spooled"; invoiceNumber = 2 }
+    Write-BridgeState $path $manualState
+
+    # الرصد الآلي يكتب من نسخته القديمة في الذاكرة (لا manual-guid فيها) عبر الدمج الآمن
+    Merge-BridgeStateForWrite $path $observeState
+    $final = Read-BridgeState $path
+    Assert-True ($final.seen.ContainsKey("observe-guid")) "إدخال الرصد الآلي يجب أن يبقى"
+    Assert-True ($final.seen.ContainsKey("manual-guid")) "إدخال اليدوي على القرص يجب ألا يُمحى — لا last-writer-wins"
+}
+
+Test-Case "P1-Y.2) recentFingerprints من القرص تُدمَج ولا تُفقَد" {
+    $path = New-StatePath
+    $s1 = Read-BridgeState $path
+    $s1.recentFingerprints["fp-on-disk"] = (Get-Date).ToUniversalTime().ToString("o")
+    Write-BridgeState $path $s1
+
+    $s2 = Read-BridgeState $path
+    $s2.recentFingerprints.Remove("fp-on-disk") 2>$null   # نسخة ذاكرة سابقة قبل قراءة fp-on-disk
+    Merge-BridgeStateForWrite $path $s2
+    $final = Read-BridgeState $path
+    Assert-True ($final.recentFingerprints.ContainsKey("fp-on-disk")) "البصمة الموجودة على القرص فقط يجب أن تُدمَج لا أن تُفقَد"
+}
+
+Test-Case "P1-Y.3) quarantined من القرص تُدمَج مع عزل جديد في الذاكرة معاً" {
+    $path = New-StatePath
+    $onDisk = Read-BridgeState $path
+    $onDisk.quarantined["disk-only-guid"] = [ordered]@{ category = "permanent_render_failure"; reason = "x"; fingerprint = "fp1"; invoiceNumber = 1 }
+    Write-BridgeState $path $onDisk
+
+    $inMemory = Read-BridgeState $path
+    [void]$inMemory.quarantined.Remove("disk-only-guid")   # كأن الذاكرة أقدم من هذه الكتابة
+    $inMemory.quarantined["memory-only-guid"] = [ordered]@{ category = "permanent_render_failure"; reason = "y"; fingerprint = "fp2"; invoiceNumber = 2 }
+    Merge-BridgeStateForWrite $path $inMemory
+    $final = Read-BridgeState $path
+    Assert-True ($final.quarantined.ContainsKey("disk-only-guid")) "عزل القرص يجب أن يبقى"
+    Assert-True ($final.quarantined.ContainsKey("memory-only-guid")) "عزل الذاكرة الجديد يجب أن يُكتب أيضاً"
+}
+
+Test-Case "P1-Y.4) baselineInitialized: القرص true يفرض true حتى لو الذاكرة false" {
+    $path = New-StatePath
+    $onDisk = Read-BridgeState $path
+    $onDisk.baselineInitialized = $true
+    Write-BridgeState $path $onDisk
+
+    $stale = Read-BridgeState $path
+    $stale.baselineInitialized = $true
+    # محاكاة نسخة ذاكرة أقدم لم تشهد التهيئة بعد
+    $olderInMemory = New-EmptyState
+    $olderInMemory.baselineInitialized = $false
+    Merge-BridgeStateForWrite $path $olderInMemory
+    $final = Read-BridgeState $path
+    Assert-True ($final.baselineInitialized -eq $true) "true على القرص يجب ألا يتراجع إلى false"
+}
+
+Test-Case "P1-Y.5) tombstone: مفتاح مُزال عمداً (rollback) لا يُعاد إحياؤه من نسخة قرص أقدم لنفس المفتاح" {
+    $path = New-StatePath
+    $guid = "rollback-guid"
+    $state = Read-BridgeState $path
+    $state.seen[$guid] = [ordered]@{ status = "print_in_flight"; invoiceNumber = 1 }
+    Write-BridgeState $path $state    # القرص يحوي العلامة القديمة
+
+    # في الذاكرة: قرار تراجع صريح (حذف tombstone)
+    $inMemory = Read-BridgeState $path
+    [void]$inMemory.seen.Remove($guid)
+    Merge-BridgeStateForWrite $path $inMemory @($guid)
+    $final = Read-BridgeState $path
+    Assert-True (-not $final.seen.ContainsKey($guid)) "الحذف المتعمَّد يجب ألا يُلغى بدمج نسخة قرص أقدم لنفس المفتاح"
+}
+
+Test-Case "P1-Y.6) tombstone لا يمنع دمج مفاتيح أخرى غير محذوفة من القرص" {
+    $path = New-StatePath
+    $state0 = Read-BridgeState $path
+    $state0.seen["rollback-guid"] = [ordered]@{ status = "print_in_flight"; invoiceNumber = 1 }
+    $state0.seen["untouched-guid"] = [ordered]@{ status = "spooled"; invoiceNumber = 2 }
+    Write-BridgeState $path $state0
+
+    $inMemory = New-EmptyState
+    Merge-BridgeStateForWrite $path $inMemory @("rollback-guid")
+    $final = Read-BridgeState $path
+    Assert-True (-not $final.seen.ContainsKey("rollback-guid")) "المفتاح المحذوف عمداً يبقى غائباً"
+    Assert-True ($final.seen.ContainsKey("untouched-guid")) "المفتاح الآخر على القرص يجب أن يُدمَج بلا تأثر بالـtombstone"
+}
+
+Test-Case "P1-Y.7) Persist-RetryablePrintRollback يستخدم الدمج الآمن مع tombstone صراحةً (لا last-writer-wins)" {
+    Assert-True ($bridgeSrc -match 'Merge-BridgeStateForWrite \$StatePath \$State @\(\$InvoiceGuidKey\)') "الدالة المشتركة يجب أن تمرّر المفتاح المحذوف كـtombstone صريح للدمج الآمن"
+}
+
+Test-Case "P1-Y.8) كل نقاط الكتابة المتبقية في الجسر تستخدم الدمج الآمن لا الكتابة المباشرة" {
+    # الاستثناءات الوحيدة المشروعة لـWrite-BridgeState المباشرة: تعريف الدالة نفسها،
+    # ودالة الدمج Merge-BridgeStateForWrite التي تستدعيها كخطوة أخيرة بعد الدمج.
+    $directWriteMatches = [regex]::Matches($bridgeSrc, 'Write-BridgeState \$(?:StatePath|path) \$state\b')
+    Assert-True ($directWriteMatches.Count -eq 0) "لا يجوز أن تبقى أي كتابة مباشرة بمتغير \$state (بالحرف الصغير) خارج الدمج الآمن، وُجد: $($directWriteMatches.Count)"
+}
+
+Test-Case "P1-Y.9) الحرية الآمنة للطباعة اليدوية: PrintInvoice ما زال يستدعي مسار الكتابة (الآن عبر الدمج)" {
+    Assert-True ($bridgeSrc -match 'Merge-BridgeStateForWrite \$StatePath \$state') "يجب أن يكون هناك على الأقل موضع دمج آمن يكتب حالة الفاتورة اليدوية"
+}
+
+Test-Case "P1-Y.10) PreviewInvoice يبقى بلا أي قراءة أو كتابة للحالة (لم يتغيّر)" {
+    $previewStart = $bridgeSrc.IndexOf('if ($Mode -eq "PreviewInvoice") {')
+    $previewEnd = $bridgeSrc.IndexOf('} else {', $previewStart)
+    Assert-True ($previewStart -ge 0 -and $previewEnd -gt $previewStart) "يجب تحديد حدود فرع PreviewInvoice"
+    $previewText = $bridgeSrc.Substring($previewStart, $previewEnd - $previewStart)
+    Assert-True ($previewText -notmatch 'Write-BridgeState|Read-BridgeState|Merge-BridgeStateForWrite') "PreviewInvoice يجب ألا يقرأ أو يكتب ملف الحالة إطلاقاً (لم يتأثر بإدخال الدمج الآمن)"
+}
+
+Test-Case "P1-Y.11) قراءة طازجة قبل قرار الطباعة الآلية: مصدرياً موجودة قبل بدء التحضير" {
+    Assert-True ($bridgeSrc -match '(?s)\$freshState = \$null\s*\r?\n\s*try \{\s*\r?\n\s*\$freshState = Read-BridgeState \$StatePath') "يجب وجود إعادة قراءة طازجة قبل التحضير للطباعة"
+    $freshIdx = $bridgeSrc.IndexOf('$freshState = $null')
+    $importIdx = $bridgeSrc.IndexOf('Import-Module $script:ReceiptModulePath -Force', $freshIdx)
+    Assert-True ($freshIdx -ge 0 -and $importIdx -ge 0 -and $freshIdx -lt $importIdx) "القراءة الطازجة يجب أن تسبق استيراد وحدة العرض والتحضير للطباعة"
+}
+
+Test-Case "P1-Y.12) الفحص الطازج يتخطّى فقط عند spooled أو print_in_flight، لا أي حالة أخرى" {
+    Assert-True ($bridgeSrc -match [regex]::Escape('$freshStatus -eq "print_in_flight" -or $freshStatus -eq "spooled"')) "شرط التخطي يجب أن يقتصر على هاتين الحالتين بالضبط"
+}
+
+Test-Case "P1-Y.13) الفحص الطازج لا يستبدل \$state بالكامل ولا يعدّله — القراءة الطازجة محلية فقط لقرار التخطي" {
+    # القراءة الطازجة تُخزَّن في متغير محلي (freshState/freshStatus) للفحص فقط؛ الاتساق مع القرص
+    # يتحقق لاحقاً عبر Merge-BridgeStateForWrite (التي تُعيد قراءة القرص بنفسها عند كل كتابة) —
+    # لا حاجة لدمج مزدوج هنا، وأي دمج هنا قد يمحو تحديثات محلية غير محفوظة (متطلب C).
+    Assert-True ($bridgeSrc -notmatch '(?s)\$freshState = Read-BridgeState \$StatePath[\s\S]{0,50}\$state = \$freshState') "لا يجوز استبدال \$state في الذاكرة بالكامل بالنسخة الطازجة — يمحو تحديثات محلية غير محفوظة"
+    Assert-True ($bridgeSrc -notmatch '(?s)\$freshState = Read-BridgeState \$StatePath[\s\S]{0,200}\$state\.seen\[') "الفحص الطازج يجب ألا يعدّل \$state.seen مباشرة — يبقى قراءة محلية فقط، والدمج الفعلي يقع عبر Merge-BridgeStateForWrite لاحقاً"
+}
+
+Test-Case "P1-Y.14) دلالات الغموض بعد التسليم لم تتغيّر مع إدخال الدمج الآمن" {
+    Assert-True ($bridgeSrc -match 'status = "print_in_flight"') "علامة قيد الإرسال باقية بلا تغيير دلالي"
+    Assert-True ($bridgeSrc -match 'Event = "state_persist_failed_after_spool"') "معالجة فشل الحفظ بعد التسليم باقية"
+    Assert-True ($bridgeSrc -match 'Event = "pre_submission_failure_retryable"') "تراجع الفشل قبل التسليم باقٍ بنفس الاسم"
+}
 
 Write-Host "`n$($script:passed) passed, $($script:failed) failed"
 if ($script:failed -gt 0) { exit 1 }

@@ -989,7 +989,12 @@ function Convert-SnapshotToReceipt($Snapshot) {
             # سعر لا يطابقان الوحدة المختارة فعلياً في الأمين.
             $unit3Factor = [double]$line.Unit3Factor
             if ($unit3Factor -le 0) {
-                throw "Line '$($line.ItemName)' (item GUID $($line.ItemGuid)) is on Unity=3 but Unit3Factor is missing or non-positive ($unit3Factor). Refusing to print with a guessed conversion."
+                # نوع الاستثناء نفسه المعتمد أصلاً لفشل التصيير الدائم (راجع
+                # OzkReceiptRenderer.psm1) كي يصنَّفه Test-PermanentInvoiceFailure
+                # حجراً صحياً لا انهياراً للرصد الآلي — نفس منطق fail-closed تماماً،
+                # فالطباعة بتخمين ما زالت ممنوعة، لكن الفاتورة الآن تُعزَل بدل أن
+                # تُسقط العملية بأكملها وتُدخل watchdog في حلقة إعادة تشغيل لا نهائية.
+                throw (New-Object OzkReceiptUnrenderableException("Line '$($line.ItemName)' (item GUID $($line.ItemGuid)) is on Unity=3 but Unit3Factor is missing or non-positive ($unit3Factor). Refusing to print with a guessed conversion."))
             }
             $quantity = $quantity / $unit3Factor
         }
@@ -1170,6 +1175,58 @@ function Write-BridgeState([string]$Path, $State) {
     }
 }
 
+# --- كتابة آمنة للتزامن بين Observe واستدعاء PrintInvoice اليدوي (P1-Y) ----
+# Observe يحمّل $state مرة واحدة عند الإقلاع ولا يعيد قراءته؛ PrintInvoice
+# اليدوي عملية منفصلة تقرأ وتكتب state.json في أي لحظة أثناء عمل Observe. كتابة
+# Write-BridgeState مباشرة من داخل حلقة Observe هي last-writer-wins على الكائن
+# كاملاً: تمحو أي تحديث كتبه PrintInvoice على القرص بعد أن حُمِّل $state هنا،
+# بما فيها علامة print_in_flight/spooled لفاتورة طُبعت يدوياً للتو — فيعيد
+# الرصد الآلي طباعتها. الحل هنا ليس قفلاً مشتركاً بين العمليتين (غير مطلوب في
+# هذه الجولة)، بل دمج على مستوى المفتاح عند كل نقطة كتابة: تُقرأ نسخة القرص
+# الحالية فوراً قبل الكتابة، ويُضاف من عليها كل مفتاح غائب عن $State في الذاكرة
+# في seen وrecentFingerprints وquarantined — دون المساس بأي مفتاح موجود أصلاً
+# في $State (قرار هذه الكتابة نفسها هو الأحدث لذلك المفتاح بالذات).
+#
+# الاستثناء الوحيد: $DeletedSeenKeys. Persist-RetryablePrintRollback يحذف
+# عمداً مفتاح seen لإتاحة إعادة محاولة مضمونة بعد فشل قبل التسليم؛ نسخة القرص
+# غالباً ما زالت تحمل نفس المفتاح (لأن هذه العملية نفسها كتبته قبل قليل)، فلو
+# دُمج بلا استثناء لأعاد هذا الدمج نفسه إحياء العلامة المحذوفة عمداً وأبطل
+# الـrollback. أي مفتاح في هذه القائمة لا يُستعاد من القرص إطلاقاً مهما وُجد.
+function Merge-BridgeStateForWrite([string]$Path, $State, [string[]]$DeletedSeenKeys = @()) {
+    $diskState = $null
+    if (Test-Path -LiteralPath $Path -PathType Leaf) {
+        try {
+            $diskState = Read-BridgeState $Path
+        } catch {
+            # قرص تالف أو غير قابل للقراءة الآن: يُكتفى بما في الذاكرة، فلا يصح
+            # إسقاط عملية طباعة سليمة بسبب فشل قراءة تمهيدي لمجرد الدمج.
+            $diskState = $null
+        }
+    }
+    if ($null -ne $diskState) {
+        foreach ($key in @($diskState.seen.Keys)) {
+            if ($DeletedSeenKeys -contains $key) { continue }
+            if (-not $State.seen.ContainsKey($key)) {
+                $State.seen[$key] = $diskState.seen[$key]
+            }
+        }
+        foreach ($key in @($diskState.recentFingerprints.Keys)) {
+            if (-not $State.recentFingerprints.ContainsKey($key)) {
+                $State.recentFingerprints[$key] = $diskState.recentFingerprints[$key]
+            }
+        }
+        foreach ($key in @($diskState.quarantined.Keys)) {
+            if (-not $State.quarantined.ContainsKey($key)) {
+                $State.quarantined[$key] = $diskState.quarantined[$key]
+            }
+        }
+        # (P1-E) أي طرف رأى baseline مكتملاً فعلاً يعني أنه اكتمل فعلاً؛ لا يجوز
+        # لكتابة لاحقة من طرف لم يُنهِ بناءه بعد أن تمحو هذا التقدّم بـFalse.
+        if ($diskState.baselineInitialized) { $State.baselineInitialized = $true }
+    }
+    Write-BridgeState $Path $State
+}
+
 # --- Rollback ذرّي محدود المحاولات لعلامة print_in_flight ------------------
 # يُستدعى فقط بعد إثبات pre-submission failure (Test-PreSubmissionFailure):
 # لم تصل أي مهمة طباعة إلى spooler يقيناً، فإزالة العلامة من state.seen آمنة.
@@ -1185,7 +1242,10 @@ function Persist-RetryablePrintRollback([string]$StatePath, $State, [string]$Inv
     $lastError = $null
     for ($attempt = 1; $attempt -le $delaysMilliseconds.Length; $attempt++) {
         try {
-            Write-BridgeState $StatePath $State
+            # الحذف هنا مقصود (tombstone)، لا مجرد غياب: يمنع الدمج الآمن من
+            # إعادة إحياء العلامة من نسخة القرص التي كتبتها هذه العملية نفسها
+            # قبل قليل (P1-Y). راجع Merge-BridgeStateForWrite أعلاه.
+            Merge-BridgeStateForWrite $StatePath $State @($InvoiceGuidKey)
             return [pscustomobject]@{ Success = $true; Attempts = $attempt; Error = $null }
         } catch {
             $lastError = $_
@@ -1304,7 +1364,7 @@ try {
                 observedAt = (Get-Date).ToUniversalTime().ToString("o")
                 lineCount = $ready.Snapshot.LineCount
             }
-            Write-BridgeState $StatePath $state
+            Merge-BridgeStateForWrite $StatePath $state
 
             try {
                 $manualPrintResult = Submit-OzkReceiptSpoolJob -Job $manualSpoolJob -ConfirmPhysicalPrint
@@ -1344,7 +1404,7 @@ try {
                 lineCount = $ready.Snapshot.LineCount
             }
             try {
-                Write-BridgeState $StatePath $state
+                Merge-BridgeStateForWrite $StatePath $state
             } catch {
                 # الإيصال خرج فعلاً إلى الطابعة؛ إسقاط الجسر هنا لا يفيد ولا
                 # يصح إبلاغ المستخدم بفشل طباعة نجحت فعلياً. نسجّل العطل
@@ -1552,7 +1612,7 @@ try {
         # تحفظ مدخلات baseline، لا في كتابة منفصلة قد تترك حالة غير متّسقة لو
         # انقطع التنفيذ بينهما.
         $state.baselineInitialized = $true
-        Write-BridgeState $StatePath $state
+        Merge-BridgeStateForWrite $StatePath $state
         $baselineEvent = [pscustomobject]@{
             Event = "baseline_initialized"
             SeenCount = $state.seen.Count
@@ -1610,7 +1670,7 @@ try {
                     Reason = "invoice_content_changed_or_state_incomplete; re-evaluating"
                     CustomerAndItemsRedacted = $true
                 })
-                Write-BridgeState $StatePath $state
+                Merge-BridgeStateForWrite $StatePath $state
             }
 
             $duplicateMatch = $null
@@ -1646,7 +1706,7 @@ try {
                     observedAt = $now.ToUniversalTime().ToString("o")
                     lineCount = $ready.Snapshot.LineCount
                 }
-                Write-BridgeState $StatePath $state
+                Merge-BridgeStateForWrite $StatePath $state
                 continue
             }
 
@@ -1670,22 +1730,58 @@ try {
                     continue
                 }
 
+                # (P1-Y) قبل أي قرار طباعة فعلي: تُقرأ نسخة طازجة من القرص وحدها
+                # للتحقق من حالة هذا الـGUID تحديداً — لا يُستبدَل $state في
+                # الذاكرة بها (أي تحديثات محلية لهذه النبضة لم تُحفظ بعد تبقى
+                # كما هي؛ الاستبدال الكامل هنا كان يمحوها). Observe حمّل $state
+                # مرة واحدة عند الإقلاع ولا يعيد قراءته بطبيعته؛ لو سجّلت
+                # PrintInvoice اليدوية على نفس الفاتورة print_in_flight أو
+                # spooled بين تلك اللحظة والآن، يجب أن يتخطّاها الرصد الآلي بدل
+                # طباعتها مكرَّرة. أي تحديث فعلي على $state في الذاكرة نفسها
+                # يلتقط هذه الفاتورة تلقائياً عند أول Merge-BridgeStateForWrite
+                # تالٍ (دمج مفتاحي، لا last-writer-wins) — هذا التحقق هنا حارس
+                # إضافي قبل التسليم، لا بديل عن الدمج عند الكتابة.
+                $freshState = $null
+                try {
+                    $freshState = Read-BridgeState $StatePath
+                } catch {
+                    $freshState = $null
+                }
+                if ($null -ne $freshState -and $freshState.seen.ContainsKey($candidate.InvoiceGuid)) {
+                    $freshStatus = $null
+                    try { $freshStatus = [string]$freshState.seen[$candidate.InvoiceGuid].status } catch { $freshStatus = $null }
+                    if ($freshStatus -eq "print_in_flight" -or $freshStatus -eq "spooled") {
+                        Write-BridgeLog ([pscustomobject]@{
+                            Event = "observe_skipped_after_fresh_state_check"
+                            invoice_guid = $candidate.InvoiceGuid
+                            invoice_number = $candidate.InvoiceNumber
+                            At = (Get-Date).ToUniversalTime().ToString("o")
+                            FreshStatus = $freshStatus
+                            Reason = "manual_print_recorded_concurrently; observer defers to it"
+                            CustomerAndItemsRedacted = $true
+                        })
+                        continue
+                    }
+                }
+
                 Import-Module $script:ReceiptModulePath -Force
-                # ما التزم فعلاً هو ما يُطبع: الفاتورة تُبنى من لقطة التأكيد نفسها،
-                # لا من اللقطة القذرة السابقة، ولا تُقرأ الفاتورة ثانيةً بعد هذه
-                # النقطة قبل التصيير.
-                $receipt = Convert-SnapshotToReceipt $confirmation.Snapshot
 
                 # 1) كل ما يمكن أن يفشل بلا إنشاء أي مهمة طباعة يقع هنا، قبل أي
-                #    علامة: التحقق من الطابعة، وجود الطابور، التصيير، بناء ESC/POS.
-                #    فشل أي منها لا يترك أثراً، فإعادة المحاولة تبقى مضمونة.
-                # الفشل الحتمي هنا (كتجاوز حدّ ارتفاع الإيصال) يتكرر حتماً ما دام
-                # المحتوى ثابتاً؛ فلو خرج من الحلقة لأسقط الجسر وأعاده الـwatchdog
-                # على الفاتورة نفسها بلا نهاية، فتُحجب كل الإيصالات اللاحقة. تُعزل
-                # هذه الفاتورة وحدها ويستمر الطابور. أما الفشل العابر (طابعة غير
-                # متاحة، خطأ CIM أو إدخال/إخراج) فيخرج كما كان — لا عزل له.
+                #    علامة: التحويل من اللقطة، التحقق من الطابعة، وجود الطابور،
+                #    التصيير، بناء ESC/POS. فشل أي منها لا يترك أثراً، فإعادة
+                #    المحاولة تبقى مضمونة.
+                # الفشل الحتمي هنا (كتجاوز حدّ ارتفاع الإيصال، أو Unity=3 بلا
+                # Unit3Factor صالح) يتكرر حتماً ما دام المحتوى ثابتاً؛ فلو خرج من
+                # الحلقة لأسقط الجسر وأعاده الـwatchdog على الفاتورة نفسها بلا
+                # نهاية، فتُحجب كل الإيصالات اللاحقة. تُعزل هذه الفاتورة وحدها
+                # ويستمر الطابور. أما الفشل العابر (طابعة غير متاحة، خطأ CIM أو
+                # إدخال/إخراج) فيخرج كما كان — لا عزل له. Convert-SnapshotToReceipt
+                # مضمَّن هنا عمداً: ما التزم فعلاً هو ما يُطبع، فالفاتورة تُبنى من
+                # لقطة التأكيد نفسها، لا من اللقطة القذرة السابقة، ولا تُقرأ
+                # الفاتورة ثانيةً بعد هذه النقطة قبل التصيير.
                 $spoolJob = $null
                 try {
+                    $receipt = Convert-SnapshotToReceipt $confirmation.Snapshot
                     $spoolJob = New-OzkReceiptSpoolJob -Receipt $receipt -LogoPath $script:ReceiptLogoPath -PrinterName $PrinterName
                 } catch {
                     if (-not (Test-PermanentInvoiceFailure $_)) { throw }
@@ -1702,7 +1798,7 @@ try {
                         Consequence = "invoice quarantined, not printed and not marked printed; queue continues"
                         CustomerAndItemsRedacted = $true
                     })
-                    Write-BridgeState $StatePath $state
+                    Merge-BridgeStateForWrite $StatePath $state
                     continue
                 }
 
@@ -1716,7 +1812,7 @@ try {
                     observedAt = $now.ToUniversalTime().ToString("o")
                     lineCount = $ready.Snapshot.LineCount
                 }
-                Write-BridgeState $StatePath $state
+                Merge-BridgeStateForWrite $StatePath $state
 
                 # 3) التسليم وحده. فشلٌ مثبتٌ أنه قبل قبول أي مهمة (OpenPrinter أو
                 #    StartDocPrinter) يعني يقيناً أن الورق لم يخرج، فنتراجع عن
@@ -1766,7 +1862,7 @@ try {
                 printedAt = $now.ToUniversalTime().ToString("o")
             }
             try {
-                Write-BridgeState $StatePath $state
+                Merge-BridgeStateForWrite $StatePath $state
             } catch {
                 if ($stateStatus -ne "spooled") { throw }
                 # الإيصال خرج فعلاً إلى الطابعة، وعلامة print_in_flight محفوظة على
