@@ -78,6 +78,21 @@ import { prepareBulletinFont } from "./lib/bulletin-font-ready.mjs";
 import { createMarkupRowReader } from "./lib/markup-rows.mjs";
 
 // الفحص برسالة صريحة تطلب توسيع القارئ إلى إعادة بناء الخلايا قبل اعتماده.
+//
+// **الكشف: عدد صناديق النص الفعلية، لا تخمين ارتفاع.** المحاولة السابقة قارنت
+// ارتفاع الخلية بـ`line-height` مقروءاً بـ`parseFloat`، لكن `.name` لا يضبط
+// `line-height` صراحةً فيرجع المتصفح الكلمة `"normal"` لا رقماً — `parseFloat`
+// يُرجع `NaN` فيسقط الحساب على افتراض `14px` لم يتحقق قطّ في هذا الخط/الحشو،
+// فارتفاع كل خليةٍ بسطر واحد (~21-22px مع الحشو) يتجاوزه دائماً ويُبلّغ التفافاً
+// زائفاً حتى بلا أي التفاف — نفس العطل المُصلَح في حارس توزيع الصفحة الأولى
+// (check-price-bulletin-first-page-content.mjs)، بنفس المبدأ هنا.
+// البديل المستقلّ عن أي تخمين لـ`line-height` أو حشو: نطاق `Range` يحيط بنصّ
+// الخلية، وصناديق `getClientRects()` عليه هي الصناديق التي رُسم فيها النص فعلياً.
+// **لكن عدد الصناديق وحده لا يكفي**: اسمٌ يخلط أرقاماً لاتينية بنصّ عربي (مثل
+// "1970 سليم أزرق") يُقسَّمه خوارزمية bidi إلى صندوقين على **نفس السطر** —
+// صندوقان بنفس `y` تماماً رغم كونها سطراً واحداً بصرياً. القياس الصحيح إذن هو
+// **عدد الأسطر المتمايزة** — نقيسه بعدد قيم `top` المختلفة (مقرَّبة لتفادي غبار
+// الفاصلة العائمة)، لا عدد الصناديق الخام.
 const WRAP_PROBE = `(markup) => {
   const probe = document.createElement("div");
   probe.style.cssText = "position:fixed;left:-10000px;top:0;width:794px;visibility:hidden;pointer-events:none";
@@ -87,8 +102,10 @@ const WRAP_PROBE = `(markup) => {
   try {
     return [...probe.querySelectorAll("td.name, .price-list-group-name")]
       .filter((cell) => {
-        const lineHeight = parseFloat(getComputedStyle(cell).lineHeight) || 14;
-        return cell.getBoundingClientRect().height > lineHeight * 1.4;
+        const range = document.createRange();
+        range.selectNodeContents(cell);
+        const lineTops = new Set([...range.getClientRects()].map((r) => Math.round(r.top)));
+        return lineTops.size > 1;
       })
       .map((cell) => cell.textContent.trim());
   } finally { probe.remove(); }
@@ -635,9 +652,13 @@ for (const sc of [
     };
     const row = (name) => ({ name, unit: "كرتونة", price: "1,000 ل.س" });
     const detect = new Function(`return ${wrapProbe}`)();
+    // اسمٌ يخلط أرقاماً لاتينية بنصّ عربي: bidi كروم يرسمه في صندوقين على نفس
+    // السطر (نفس y)، لا سطرين — شاهد سالب يضمن أن عدّ الصناديق الخام لا يعود.
+    const BIDI = "1970 سليم أزرق";
     return {
       withLong: detect(T.render({ ...options, groups: [{ name: "ماستر", items: [row(LONG), row("ماستر صنف قصير")] }] })),
-      withoutLong: detect(T.render({ ...options, groups: [{ name: "ماستر", items: [row("ماستر صنف قصير")] }] }))
+      withoutLong: detect(T.render({ ...options, groups: [{ name: "ماستر", items: [row("ماستر صنف قصير")] }] })),
+      withBidiDigits: detect(T.render({ ...options, groups: [{ name: "ماستر", items: [row(BIDI)] }] }))
     };
   }, [LONG, WRAP_PROBE]);
   await context.close();
@@ -646,6 +667,8 @@ for (const sc of [
     `رصد: ${JSON.stringify(probe.withLong)}`);
   check("كاشف الالتفاف: لا ينذر على الأسماء العادية", probe.withoutLong.length === 0,
     JSON.stringify(probe.withoutLong));
+  check("كاشف الالتفاف: لا ينذر زوراً على اسم يخلط أرقاماً لاتينية بالعربية على سطر واحد (bidi)",
+    probe.withBidiDigits.length === 0, JSON.stringify(probe.withBidiDigits));
 }
 
 // ===== 3) حارس بنيوي: الصفحة الأولى لا تُعبَّأ بميزانية أكبر من ميزانيتها =====

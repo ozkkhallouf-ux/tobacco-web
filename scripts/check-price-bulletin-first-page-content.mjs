@@ -206,6 +206,24 @@ function rowsOnSheet(sheetLines, rows) {
 
 // شرط صحة القراءة: القارئ يقارن صفّاً كاملاً بسطر واحد، فاسمٌ يلتفّ داخل خليته
 // يتوزّع على سطرين ولا يُطابَق. نفس الشرط المفروض في حارس محتوى الطباعة.
+//
+// **الكشف: عدد صناديق النص الفعلية، لا تخمين ارتفاع.** المحاولة السابقة قارنت
+// ارتفاع الخلية بـ`line-height` مقروءاً بـ`parseFloat`، لكن `.name` لا يضبط
+// `line-height` صراحةً فيرجع المتصفح الكلمة `"normal"` لا رقماً — `parseFloat`
+// يُرجع `NaN` فيسقط الحساب على افتراض `14px` لم يتحقق قطّ في هذا الخط/الحشو،
+// فارتفاع كل خليةٍ بسطر واحد (~21-22px مع الحشو) يتجاوزه دائماً ويُبلّغ التفافاً
+// زائفاً حتى بلا أي التفاف (تشخيص فعلي: 5 أسماء أُبلغت ملتفّة بينما نصّها
+// 73-85px داخل حيّز 190.83px، وكل واحدة منها كتلة نصّ واحدة لا اثنتان).
+// البديل المستقلّ عن أي تخمين لـ`line-height` أو حشو: نطاق `Range` يحيط بنصّ
+// الخلية، وصناديق `getClientRects()` عليه هي الصناديق التي رُسم فيها النص فعلياً.
+// **لكن عدد الصناديق وحده لا يكفي**: اسمٌ يخلط أرقاماً لاتينية بنصّ عربي (مثل
+// "1970 سليم أزرق") يُقسَّمه خوارزمية bidi إلى صندوقين على **نفس السطر** —
+// رُصد فعلياً: صندوقان بنفس `y` تماماً لخمسة أسماء تبدأ بأرقام، رغم كونها سطراً
+// واحداً بصرياً. القياس الصحيح إذن هو **عدد الأسطر المتمايزة** — نقيسه بعدد
+// قيم `top` المختلفة (مقرَّبة لتفادي غبار الفاصلة العائمة)، لا عدد الصناديق
+// الخام. (خلايا `td.name` و`.price-list-group-name` نصّ خام بلا عناصر ابنة —
+// `escapeHtml` وحده يُدرَج، راجع `price-list-template.js` — فلا خطر صناديق
+// زائفة من عناصر شقيقة، فقط من انقسام bidi على نفس السطر.)
 const WRAP_PROBE = `(markup) => {
   const probe = document.createElement("div");
   probe.style.cssText = "position:fixed;left:-10000px;top:0;width:794px;visibility:hidden;pointer-events:none";
@@ -215,8 +233,10 @@ const WRAP_PROBE = `(markup) => {
   try {
     return [...probe.querySelectorAll("td.name, .price-list-group-name")]
       .filter((cell) => {
-        const lineHeight = parseFloat(getComputedStyle(cell).lineHeight) || 14;
-        return cell.getBoundingClientRect().height > lineHeight * 1.4;
+        const range = document.createRange();
+        range.selectNodeContents(cell);
+        const lineTops = new Set([...range.getClientRects()].map((r) => Math.round(r.top)));
+        return lineTops.size > 1;
       })
       .map((cell) => cell.textContent.trim());
   } finally { probe.remove(); }
@@ -316,6 +336,39 @@ for (const sc of [
   check(`${sc.label}: كتلة الأعمدة الأولى داخل ورقتها (الأولى محسوبة مع الرأس)`,
     firstBlock != null && firstBlock.bottom <= A4_HEIGHT_PX + 0.5,
     `أسفل الكتلة ${firstBlock?.bottom} مقابل حدّ A4 ${A4_HEIGHT_PX.toFixed(2)} — خلوص ${clearance}px`);
+}
+
+// ===== ١ب) شاهد سالب لـWRAP_PROBE: يميّز السطر الواحد عن الالتفاف الحقيقي =====
+// لولا هذا الشاهد لكان WRAP_PROBE بلا معنى — القراءة السابقة بارتفاع الخلية
+// مقابل line-height مخمّن أعطت التفافاً زائفاً لأسماء سطر واحد فعلياً (راجع
+// التشخيص: كل اسمٍ منها clientRectsCount=1 بعرض نصّ 73-85px داخل حيّز 190.83px).
+// نثبت هنا الحالتين مباشرة: خليةٌ بنفس المحتوى/الحشو الحقيقي لا تُرصَد ملتفّة،
+// وخليةٌ مُجبرة فعلياً على سطرين (بعرض ضيّق جداً) تُرصَد كذلك.
+{
+  const { context, page } = await bootApp(800, 600);
+  const probeResult = await page.evaluate(([probe]) => {
+    const run = (markup) => new Function(`return ${probe}`)()(markup);
+    // سطر واحد فعلياً: نفس عرض/حشو `td.name` الحقيقي (206.828px محسوبة من التشخيص)
+    // بـtable-layout:fixed صريحاً حتى يُفرض عرض الجدول على الخلية كما في الإنتاج
+    // (بلا هذا لا يقيّد المتصفح العرض أصلاً بلا ورقة أنماط `.ozk-price-list`).
+    const asTable = (tableWidth) => `<section class="ozk-price-list"><table `
+      + `style="table-layout:fixed;width:${tableWidth}px;border-collapse:collapse"><tbody><tr>`
+      + `<td class="name" style="width:100%;padding:2.5px 8px;box-sizing:border-box;`
+      + `font-family:Almarai,sans-serif;font-weight:700;font-size:10px;white-space:normal;`
+      + `overflow-wrap:break-word;word-break:break-word">ماستر سليم أزرق</td></tr></tbody></table></section>`;
+    const singleLine = asTable(206.828);
+    // التفاف حقيقي: نفس الخلية بعرض ضيّق جداً يفرض سطرين فعلياً — لا تخمين ارتفاع.
+    const genuinelyWrapped = asTable(40);
+    return { single: run(singleLine), wrapped: run(genuinelyWrapped) };
+  }, [WRAP_PROBE]);
+  await context.close();
+
+  check("شاهد سالب (WRAP_PROBE): نصّ سطر واحد فعلياً بحشو حقيقي لا يُرصَد ملتفّاً",
+    probeResult.single.length === 0,
+    `رُصد ملتفّاً رغم أنه سطر واحد: ${JSON.stringify(probeResult.single)}`);
+  check("شاهد سالب (WRAP_PROBE): نصّ ملتفّ فعلياً على سطرين يُرصَد",
+    probeResult.wrapped.length === 1,
+    `لم يُرصد الالتفاف الحقيقي: ${JSON.stringify(probeResult.wrapped)}`);
 }
 
 // ===== ٢) ورقة العنوان مسموحة في حالة واحدة فقط — وبلا فقدان ولا قصّ =====
