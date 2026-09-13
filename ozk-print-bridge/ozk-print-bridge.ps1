@@ -676,8 +676,19 @@ function Get-PostedInvoiceCandidateSet($Connection, [string[]]$TypeGuids, [datet
     $collected = New-Object System.Collections.Generic.List[object]
     $seenGuids = New-Object System.Collections.Generic.HashSet[string]
 
+    # IsFreshPage يوسم مصدر كل مرشّح دون المساس بمنطق seek/cursor/exhaustion
+    # أدناه بأي شكل: page 1 وحدها تُجلب دوماً من الأحدث المطلق (After=null)،
+    # فهي وحدها "طازجة" بمعنى أن أي فاتورة أُنشئت للتو تقع فيها حتماً. صفحات
+    # الاستئناف (2..MaxPages) تكمل تصريف backlog من حيث توقّفت النبضة السابقة
+    # ولا تمثّل بالضرورة الأحدث. المستهلك أدناه (حلقة Observe) يستخدم هذا الوسم
+    # ليعالج page 1 قبل backlog المُستأنف دون أي تغيير على الجلب أو الترقيم.
     $firstPage = @(Get-PostedInvoiceCandidatePage $Connection $TypeGuids $FromDate $null)
-    foreach ($row in $firstPage) { if ($seenGuids.Add($row.InvoiceGuid)) { $collected.Add($row) } }
+    foreach ($row in $firstPage) {
+        if ($seenGuids.Add($row.InvoiceGuid)) {
+            Add-Member -InputObject $row -NotePropertyName IsFreshPage -NotePropertyValue $true -Force
+            $collected.Add($row)
+        }
+    }
 
     $exhausted = $firstPage.Count -lt $script:CandidatePageSize
     $cursor = if ($firstPage.Count -gt 0) { $firstPage[$firstPage.Count - 1] } else { $null }
@@ -689,7 +700,12 @@ function Get-PostedInvoiceCandidateSet($Connection, [string[]]$TypeGuids, [datet
         $page = @(Get-PostedInvoiceCandidatePage $Connection $TypeGuids $FromDate $cursor)
         $pagesFetched++
         if ($page.Count -eq 0) { $exhausted = $true; break }
-        foreach ($row in $page) { if ($seenGuids.Add($row.InvoiceGuid)) { $collected.Add($row) } }
+        foreach ($row in $page) {
+            if ($seenGuids.Add($row.InvoiceGuid)) {
+                Add-Member -InputObject $row -NotePropertyName IsFreshPage -NotePropertyValue $false -Force
+                $collected.Add($row)
+            }
+        }
         if ($page.Count -lt $script:CandidatePageSize) { $exhausted = $true }
         else { $cursor = $page[$page.Count - 1] }
     }
@@ -978,8 +994,18 @@ function Convert-SnapshotToReceipt($Snapshot) {
     $totalQuantity = 0.0
     foreach ($line in @($Snapshot.Lines)) {
         $quantity = [double]$line.Qty
-        if ([int]$line.SelectedUnit -eq 2 -and [double]$line.Unit2Factor -gt 0) {
-            $quantity = $quantity / [double]$line.Unit2Factor
+        if ([int]$line.SelectedUnit -eq 2) {
+            # نفس منطق fail-closed المعتمد أدناه لـUnity=3 بالحرف: Unit2Factor
+            # غائب أو صفر أو سالب على سطر Unity=2 فعلي يعني عدم القدرة على
+            # تحويل الكمية الأساسية إلى وحدة البيع الثانية بثقة — والكمية غير
+            # المحوَّلة مضروبة بـRawPrice (المسعَّر على مستوى الوحدة الثانية)
+            # تنتج كمية/إجمالي سطر خاطئين بصمت بلا أي استثناء. يُرفض السطر
+            # صراحةً بدل تخمين عامل التحويل أو الرجوع الضمني لوحدة 1.
+            $unit2Factor = [double]$line.Unit2Factor
+            if ($unit2Factor -le 0) {
+                throw (New-Object OzkReceiptUnrenderableException("Line '$($line.ItemName)' (item GUID $($line.ItemGuid)) is on Unity=2 but Unit2Factor is missing or non-positive ($unit2Factor). Refusing to print with a guessed conversion."))
+            }
+            $quantity = $quantity / $unit2Factor
         } elseif ([int]$line.SelectedUnit -eq 3) {
             # الوحدة الثالثة شبه معدومة الاستخدام في بيانات الأمين الفعلية (تحقّق
             # عبر قراءة READ ONLY مباشرة: صفر من 23,072 سطر Unity=3، ومادة واحدة
@@ -1646,7 +1672,15 @@ try {
             })
         }
         $current = @($candidateSet.Candidates)
-        foreach ($candidate in @($current | Sort-Object InvoiceDate, InvoiceNumber)) {
+        # الفواتير الطازجة (page 1 — الأحدث المطلق في هذه النبضة) تُعالَج قبل
+        # backlog المُستأنف كي لا تنتظر فاتورة كاشير للتو دورها خلف آلاف
+        # الفواتير القديمة المتراكمة بعد انقطاع. لا starvation لـbacklog: كل
+        # نبضة تعالج المجموعتين كاملتين، وbacklog يُستنزف بنفس آلية cursor
+        # الحالية بلا تغيير — فقط ترتيب المعالجة داخل النبضة الواحدة يتغيّر.
+        # الترتيب داخل كل مجموعة يبقى تصاعدياً (الأقدم أولاً) لثبات deterministic.
+        $freshCandidates = @($current | Where-Object { $_.IsFreshPage } | Sort-Object InvoiceDate, InvoiceNumber)
+        $backlogCandidates = @($current | Where-Object { -not $_.IsFreshPage } | Sort-Object InvoiceDate, InvoiceNumber)
+        foreach ($candidate in @($freshCandidates + $backlogCandidates)) {
             if (Should-SkipSeenInvoice $state.seen[$candidate.InvoiceGuid] $ConfirmPhysicalPrint) { continue }
             $ready = Wait-InvoiceReady $connection ([guid]$candidate.InvoiceGuid)
             if (-not $ready.Ready) { continue }

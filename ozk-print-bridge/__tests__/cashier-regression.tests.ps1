@@ -1618,6 +1618,146 @@ Test-Case "المصدر: بلوغ السقف يُسجَّل صراحةً لا ص
     Assert-True ($bridgeSrc -match 'Event = "candidate_drain_paused"') "يجب تسجيل توقّف التصريف عند السقف"
 }
 
+Write-Host "`n== C: أولوية الفواتير الطازجة (page 1) على backlog المُستأنف داخل النبضة الواحدة =="
+
+# يستخرج سطري تقسيم fresh/backlog من المصدر الفعلي ويعيد تنفيذهما حرفياً على
+# `$current` معطى — فما يُختبر هنا هو الترتيب نفسه الذي تنفّذه حلقة Observe لا
+# نسخة موازية منه. لا يمسّ استخراج Get-PostedInvoiceCandidateSet أعلاه ولا
+# ترقيمها/مؤشرها.
+$script:FreshLineMarker = '$freshCandidates = @($current | Where-Object { $_.IsFreshPage } | Sort-Object InvoiceDate, InvoiceNumber)'
+$script:BacklogLineMarker = '$backlogCandidates = @($current | Where-Object { -not $_.IsFreshPage } | Sort-Object InvoiceDate, InvoiceNumber)'
+Assert-True ($bridgeSrc.Contains($script:FreshLineMarker)) "سطر ترتيب fresh غير موجود بالمصدر بنفس الصياغة المتوقّعة"
+Assert-True ($bridgeSrc.Contains($script:BacklogLineMarker)) "سطر ترتيب backlog غير موجود بالمصدر بنفس الصياغة المتوقّعة"
+
+function Get-FreshBeforeBacklogOrder($current) {
+    $snippet = "param(`$current)`n$($script:FreshLineMarker)`n$($script:BacklogLineMarker)`nreturn @(`$freshCandidates + `$backlogCandidates)"
+    & ([scriptblock]::Create($snippet)) $current
+}
+
+Test-Case "C1) الصفحة الأولى تُعلَّم IsFreshPage=true وصفحات الاستئناف تُعلَّم false، وحقول الترقيم لا تتأثر" {
+    $script:FakeUniverse = New-FakeUniverse 600
+    $set = Get-PostedInvoiceCandidateSet $null @() ([datetime]::MinValue) $null 2
+    $all = @($set.Candidates)
+    $freshCount = @($all | Where-Object { $_.IsFreshPage }).Count
+    $backlogCount = @($all | Where-Object { -not $_.IsFreshPage }).Count
+    Assert-True ($freshCount -eq $script:CandidatePageSize) "الصفحة الأولى (256) يجب أن تُعلَّم كلها fresh، وُجد: $freshCount"
+    Assert-True ($backlogCount -eq ($all.Count - $script:CandidatePageSize)) "باقي المرشّحين من صفحات الاستئناف يجب أن يُعلَّموا backlog، وُجد: $backlogCount"
+    Assert-True ($set.PagesFetched -eq 2) "الترقيم (PagesFetched) لا يتأثر بوسم fresh/backlog"
+    Assert-True (-not $set.Exhausted) "الترقيم (Exhausted) لا يتأثر بوسم fresh/backlog"
+    Assert-True ($null -ne $set.NextCursor) "الترقيم (NextCursor) لا يتأثر بوسم fresh/backlog"
+}
+
+Test-Case "C2) backlog متراكم (أكثر من 256) وفاتورة جديدة واحدة → الجديدة تُعالَج أولاً" {
+    $script:FakeUniverse = New-FakeUniverse 1200
+    $set1 = Get-PostedInvoiceCandidateSet $null @() ([datetime]::MinValue) $null 2
+    # فاتورة كاشير جديدة تماماً: أحدث من كل ما في الكون الحالي
+    $brandNewGuid = "brand-new-invoice"
+    $newest = [datetime]::Parse("2026-01-06T00:00:00", $script:InvariantCulture)
+    $script:FakeUniverse = @((New-FakeCandidate $newest 99999 $brandNewGuid)) + $script:FakeUniverse
+    $set2 = Get-PostedInvoiceCandidateSet $null @() ([datetime]::MinValue) $set1.NextCursor 2
+    Assert-True (@($set2.Candidates | Where-Object { $_.InvoiceGuid -eq $brandNewGuid }).Count -eq 1) "الفاتورة الجديدة يجب أن تظهر في هذه النبضة (page 1 من الأحدث دوماً)"
+    $ordered = @(Get-FreshBeforeBacklogOrder $set2.Candidates)
+    # الترتيب داخل مجموعة fresh تصاعدي (الأقدم أولاً)، فالفاتورة الجديدة (الأحدث
+    # زمنياً) لا تقع بالضرورة عند index 0 من كامل $ordered — الضمان الفعلي هو أنها
+    # تسبق كل مرشّحي backlog، لا أنها أول عنصر مطلقاً داخل طبقة fresh نفسها.
+    $freshTierCount = @($ordered | Where-Object { $_.IsFreshPage }).Count
+    $newIndex = [array]::IndexOf(($ordered.InvoiceGuid), $brandNewGuid)
+    Assert-True ($newIndex -ge 0) "الفاتورة الجديدة يجب أن تظهر ضمن الترتيب النهائي"
+    Assert-True ($newIndex -lt $freshTierCount) "الفاتورة الجديدة يجب أن تُعالَج ضمن طبقة fresh، قبل كل مرشّحي backlog المتراكمة"
+}
+
+Test-Case "C3) backlog كبير (أكثر من 2048) → لا فقدان لأي فاتورة رغم إعادة الترتيب، ولا تكرار داخل النبضة الواحدة" {
+    $script:FakeUniverse = New-FakeUniverse 2100
+    $cursor = $null
+    $reached = New-Object System.Collections.Generic.HashSet[string]
+    $backlogReached = New-Object System.Collections.Generic.HashSet[string]
+    $duplicateWithinPoll = $false
+    $backlogDuplicateAcrossPolls = $false
+    $polls = 0
+    do {
+        $polls++
+        $set = Get-PostedInvoiceCandidateSet $null @() ([datetime]::MinValue) $cursor 2
+        $ordered = @(Get-FreshBeforeBacklogOrder $set.Candidates)
+        # لا تكرار داخل نتيجة نبضة واحدة — Get-PostedInvoiceCandidateSet يضمن هذا عبر
+        # seenGuids داخلياً؛ هذا الفحص يتحقق من نفس الضمان بعد إعادة ترتيب fresh/backlog.
+        $seenThisPoll = New-Object System.Collections.Generic.HashSet[string]
+        foreach ($c in $ordered) {
+            if (-not $seenThisPoll.Add($c.InvoiceGuid)) { $duplicateWithinPoll = $true }
+            [void]$reached.Add($c.InvoiceGuid)
+            # page 1 (fresh) تُعاد جلبها دوماً من الأحدث المطلق كل نبضة بالتصميم — قد
+            # تتكرر نفس الصفوف عبر نبضات متتالية بكون ثابت. أما backlog (المُستأنف عبر
+            # cursor) فيجب أن يتقدّم أحادياً دون تكرار عبر النبضات.
+            if (-not $c.IsFreshPage) {
+                if (-not $backlogReached.Add($c.InvoiceGuid)) { $backlogDuplicateAcrossPolls = $true }
+            }
+        }
+        $cursor = $set.NextCursor
+    } while ($null -ne $cursor -and $polls -lt 200)
+    Assert-True (-not $duplicateWithinPoll) "لا يجوز أن تتكرر أي فاتورة داخل نتيجة النبضة الواحدة بعد إعادة الترتيب"
+    Assert-True (-not $backlogDuplicateAcrossPolls) "backlog المُستأنف عبر cursor يجب ألا يتكرر عبر النبضات"
+    Assert-True ($reached.Count -eq 2100) "لا فقدان: يجب الوصول لكل الـ2100 فاتورة، وُصل: $($reached.Count)"
+}
+
+Test-Case "C4) نبضات متتالية تُصرّف backlog فعلياً إلى الصفر رغم أولوية fresh في كل نبضة" {
+    $script:FakeUniverse = New-FakeUniverse 1200
+    $drain = Invoke-DrainAcrossPolls 2
+    Assert-True ($drain.Reached.Count -eq 1200) "backlog يجب أن يُستنزف كاملاً، بلغ: $($drain.Reached.Count)"
+    Assert-True ($null -eq $drain.Cursor) "المؤشر يجب أن يُصفَّر عند نفاد النافذة — backlog صفر فعلياً"
+}
+
+Test-Case "C5) فواتير طازجة مستمرة عبر عدة نبضات لا تُجوِّع backlog القديم إلى الأبد" {
+    $oldBase = [datetime]::Parse("2026-01-01T00:00:00", $script:InvariantCulture)
+    $backlogRows = New-Object System.Collections.Generic.List[object]
+    for ($i = 0; $i -lt 1200; $i++) {
+        $backlogRows.Add((New-FakeCandidate ($oldBase.AddSeconds(-$i)) (5000 - $i) ("old{0:d5}" -f (1200 - $i))))
+    }
+    $script:FakeUniverse = @($backlogRows | Sort-Object -Property @{E={$_.InvoiceDateRaw};D=$true}, @{E={$_.InvoiceNumber};D=$true}, @{E={$_.InvoiceGuid};D=$true})
+    $backlogGuids = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($r in $script:FakeUniverse) { [void]$backlogGuids.Add($r.InvoiceGuid) }
+
+    $cursor = $null
+    $reachedBacklog = New-Object System.Collections.Generic.HashSet[string]
+    $polls = 0
+    while ($polls -lt 30) {
+        $polls++
+        # فاتورة طازجة جديدة تصل قبل كل نبضة — أحدث دوماً من backlog القديم
+        $freshNow = [datetime]::Parse("2026-02-01T00:00:00", $script:InvariantCulture).AddSeconds($polls)
+        $script:FakeUniverse = @((New-FakeCandidate $freshNow (90000 + $polls) ("fresh{0:d3}" -f $polls))) + $script:FakeUniverse
+        $set = Get-PostedInvoiceCandidatePage $null @() ([datetime]::MinValue) $null   # لا يُستهلك، فقط يتحقق من التوفّر؛ الجلب الفعلي عبر Get-PostedInvoiceCandidateSet أدناه
+        $fullSet = Get-PostedInvoiceCandidateSet $null @() ([datetime]::MinValue) $cursor 2
+        foreach ($c in @($fullSet.Candidates)) { if ($backlogGuids.Contains($c.InvoiceGuid)) { [void]$reachedBacklog.Add($c.InvoiceGuid) } }
+        $cursor = $fullSet.NextCursor
+        if ($null -eq $cursor) { break }
+    }
+    Assert-True ($reachedBacklog.Count -eq 1200) "رغم وصول فاتورة طازجة قبل كل نبضة، يجب أن يُستنزف backlog القديم كاملاً بلا تجويع دائم، بلغ: $($reachedBacklog.Count)"
+}
+
+Test-Case "C6) تعادل InvoiceDate داخل نفس المجموعة يُرتَّب بثبات (deterministic) بحسب InvoiceNumber" {
+    $base = [datetime]::Parse("2026-01-05T00:00:00", $script:InvariantCulture)
+    $tiedFresh = @(
+        [pscustomobject]@{ InvoiceGuid = "f-3"; InvoiceNumber = 3; InvoiceDate = $base; IsFreshPage = $true }
+        [pscustomobject]@{ InvoiceGuid = "f-1"; InvoiceNumber = 1; InvoiceDate = $base; IsFreshPage = $true }
+        [pscustomobject]@{ InvoiceGuid = "f-2"; InvoiceNumber = 2; InvoiceDate = $base; IsFreshPage = $true }
+    )
+    $ordered1 = @(Get-FreshBeforeBacklogOrder $tiedFresh)
+    $ordered2 = @(Get-FreshBeforeBacklogOrder $tiedFresh)
+    Assert-True (($ordered1 | ForEach-Object { $_.InvoiceGuid }) -join "," -eq "f-1,f-2,f-3") "عند تساوي التاريخ يجب الترتيب تصاعدياً حسب InvoiceNumber، وُجد: $(($ordered1 | ForEach-Object { $_.InvoiceGuid }) -join ',')"
+    Assert-True ((($ordered1 | ForEach-Object { $_.InvoiceGuid }) -join ",") -eq (($ordered2 | ForEach-Object { $_.InvoiceGuid }) -join ",")) "نفس المدخلات يجب أن تُنتج نفس الترتيب في كل مرة (ثبات deterministic)"
+}
+
+Test-Case "C7) لا معالجة مزدوجة: كل مرشّح يقع في مجموعة fresh أو backlog حصراً لا كليهما" {
+    $script:FakeUniverse = New-FakeUniverse 600
+    $set = Get-PostedInvoiceCandidateSet $null @() ([datetime]::MinValue) $null 2
+    $current = @($set.Candidates)
+    $fresh = @($current | Where-Object { $_.IsFreshPage })
+    $backlog = @($current | Where-Object { -not $_.IsFreshPage })
+    Assert-True (($fresh.Count + $backlog.Count) -eq $current.Count) "التقسيم يجب أن يكون شاملاً بلا فقدان أو إضافة، fresh=$($fresh.Count) backlog=$($backlog.Count) current=$($current.Count)"
+    $freshGuids = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($c in $fresh) { [void]$freshGuids.Add($c.InvoiceGuid) }
+    $overlap = @($backlog | Where-Object { $freshGuids.Contains($_.InvoiceGuid) })
+    Assert-True ($overlap.Count -eq 0) "لا يجوز أن يظهر أي GUID في كلتا المجموعتين معاً"
+}
+
 Write-Host "`n== P1-J: المولّد يُنتج VBS صالحاً فعلاً (اختبار على الناتج لا على المصدر) =="
 
 # مفسّر مصغّر لتعبير VBScript: سلاسل حرفية (""" للاقتباس المحرّف) ومعرّفات
@@ -3728,6 +3868,59 @@ Test-Case "شاهد سلبي A8: محاكاة السلوك القديم (بلا 
     Assert-True ($receipt.Lines[0].Quantity -eq $correctQuantity) "التطبيق الفعلي يجب أن يُنتج الكمية الصحيحة (3) لا كمية السلوك القديم الخاطئة (15)"
 }
 
+Write-Host "`n== A-U2: أسطر الوحدة الثانية (Unity=2) بعامل تحويل غير صالح — fail-closed كـUnity=3 بالحرف =="
+
+Test-Case "AU2.1) Unity=2 بلا Unit2Factor موجب (صفر): رفض صريح (fail closed) بلا اختراع تحويل" {
+    $line = New-TestLine -Qty 20 -RawPrice 100 -SelectedUnit 2 -Unit2Factor 0
+    $snap = New-Snapshot -Lines @($line)
+    $threw = $false
+    try {
+        [void](Convert-SnapshotToReceipt $snap)
+    } catch {
+        $threw = $true
+    }
+    Assert-True $threw "غياب Unit2Factor (أو كونه صفراً) على سطر Unity=2 فعلي يجب أن يُسقط الطباعة صراحةً لا أن يطبع كمية مخمّنة"
+}
+
+Test-Case "AU2.2) Unity=2 بعامل سالب: يُرفض بنفس المنطق" {
+    $line = New-TestLine -Qty 20 -RawPrice 100 -SelectedUnit 2 -Unit2Factor (-3)
+    $snap = New-Snapshot -Lines @($line)
+    $threw = $false
+    try {
+        [void](Convert-SnapshotToReceipt $snap)
+    } catch {
+        $threw = $true
+    }
+    Assert-True $threw "Unit2Factor سالب يجب أن يُرفض أيضاً بنفس المنطق"
+}
+
+Test-Case "AU2.3) Unity=2 بعامل null (DBNull من قاعدة البيانات): يُرفض بنفس المنطق لا رجوع ضمني لوحدة 1" {
+    $line = New-TestLine -Qty 20 -RawPrice 100 -SelectedUnit 2
+    $line.Unit2Factor = $null
+    $snap = New-Snapshot -Lines @($line)
+    $threw = $false
+    $thrownType = $null
+    try {
+        [void](Convert-SnapshotToReceipt $snap)
+    } catch {
+        $threw = $true
+        $thrownType = $_.Exception.GetType().Name
+    }
+    Assert-True $threw "Unit2Factor غائب (null) يجب أن يُسقط الطباعة صراحةً لا يفترض ضمنياً وحدة 1"
+    Assert-True ($thrownType -eq "OzkReceiptUnrenderableException") "يجب أن يكون النوع نفسه المستعمل لعزل Unity=3، وقع: $thrownType"
+}
+
+Test-Case "شاهد سلبي AU2.4: لو رجع الإصلاح فرضياً لوحدة 1 عند عامل غير صالح، لكانت الكمية الخام تُطبع بصمت بدل الرفض" {
+    # لو أن الكود يسقط إلى فرع Unity=1 بلا قسمة عند Unit2Factor=0 (بدل الرفض)، لظهرت
+    # الكمية الخام (20) بدل رفض الطباعة — وهذا بالضبط ما يمنعه هذا الإصلاح.
+    $legacyFallbackQuantity = 20.0
+    $line = New-TestLine -Qty 20 -RawPrice 100 -SelectedUnit 2 -Unit2Factor 0
+    $snap = New-Snapshot -Lines @($line)
+    $threw = $false
+    try { [void](Convert-SnapshotToReceipt $snap) } catch { $threw = $true }
+    Assert-True $threw "يجب رفض الطباعة صراحةً لا الرجوع الضمني لكمية $legacyFallbackQuantity المخمّنة"
+}
+
 Write-Host "`n== B: المجموع الرسمي للسطر بعد الخصم/الإضافة =="
 
 Test-Case "B1) سطر بلا خصم: المجموع = الكمية × سعر الوحدة تماماً" {
@@ -4151,6 +4344,100 @@ Test-Case "P1-X.8) خطأ بنيوي غير متعلق بالفاتورة (I/O/�
         $infraError = New-ErrorRecordOf $ex
         Assert-True (-not (Test-PermanentInvoiceFailure $infraError)) "خطأ بنيوي عابر يجب ألا يُصنَّف حتمياً على مستوى الفاتورة: $($ex.GetType().Name)"
     }
+}
+
+Write-Host "`n== P1-X-U2: عزل فشل Unity=2 بعامل غير صالح (نفس آلية P1-X بالحرف) =="
+
+function New-Unity2Snapshot([double]$Unit2Factor, [string]$ItemGuid = "item-u2-1") {
+    $line = New-TestLine -ItemGuid $ItemGuid -ItemName "منتج وحدة ثانية" -Qty 20 -RawPrice 100 -SelectedUnit 2 -Unit2Factor $Unit2Factor
+    return New-Snapshot -Lines @($line)
+}
+
+Test-Case "P1-X-U2.1) Unity=2 بلا Unit2Factor صالح: يرمي OzkReceiptUnrenderableException (لا نوع عام)" {
+    $thrown = $null
+    try { [void](Convert-SnapshotToReceipt (New-Unity2Snapshot 0)) } catch { $thrown = $_ }
+    Assert-True ($null -ne $thrown) "يجب أن يرمي استثناءً"
+    Assert-True ($thrown.Exception.GetType().Name -eq "OzkReceiptUnrenderableException") "يجب أن يكون النوع المصنَّف حتمياً، وقع: $($thrown.Exception.GetType().Name)"
+    Assert-True (Test-PermanentInvoiceFailure $thrown) "يجب أن يُصنَّف Test-PermanentInvoiceFailure هذا الاستثناء حتمياً"
+}
+
+Test-Case "P1-X-U2.2) Unity=2 بعامل سالب أيضاً يُصنَّف حتمياً (لا طباعة بتخمين)" {
+    $thrown = $null
+    try { [void](Convert-SnapshotToReceipt (New-Unity2Snapshot -4)) } catch { $thrown = $_ }
+    Assert-True ($null -ne $thrown -and (Test-PermanentInvoiceFailure $thrown)) "العامل السالب يجب أن يُرفض حتمياً لا أن يُخمَّن"
+}
+
+Test-Case "P1-X-U2.3) عامل صالح: لا استثناء إطلاقاً وكمية/سعر صحيحان (fail-closed لا يمنع الحالة السليمة)" {
+    $thrown = $null
+    $receipt = $null
+    try { $receipt = Convert-SnapshotToReceipt (New-Unity2Snapshot 10) } catch { $thrown = $_ }
+    Assert-True ($null -eq $thrown) "عامل موجب صالح يجب ألا يرمي: $($thrown.Exception.Message)"
+    Assert-True ($null -ne $receipt) "يجب إنتاج إيصال فعلي"
+    Assert-True ($receipt.Lines[0].Quantity -eq 2) "20/10=2 كما في A2، يجب أن يبقى صحيحاً"
+    Assert-True ($receipt.Lines[0].UnitPrice -eq 100) "السعر لا يتأثر بعامل تحويل الوحدة الثانية"
+}
+
+Test-Case "P1-X-U2.4) عزل كامل: فاتورة Unity=2 فاسدة تُعزل، لا مهمة طباعة، والفاتورة التالية بالطابور تستمر" {
+    $path = New-StatePath
+    $candidate = New-QueueCandidate "u2-guid-1" 9101 "fp-u2-v1"
+    $state = Read-BridgeState $path
+    $spoolJobCreated = $false
+    $prepareError = $null
+    try {
+        [void](Convert-SnapshotToReceipt (New-Unity2Snapshot 0))
+        $spoolJobCreated = $true   # لا يصل هنا أبداً في هذا الاختبار
+    } catch {
+        $prepareError = $_
+    }
+    Assert-True (-not $spoolJobCreated) "لا يجوز إنشاء مهمة طباعة لفاتورة Unity=2 فاسدة"
+    Assert-True (Test-PermanentInvoiceFailure $prepareError) "شرط مسبق: يجب أن يُصنَّف حتمياً"
+    Add-QuarantineEntry $state $candidate $candidate.Fingerprint $prepareError
+    Write-BridgeState $path $state
+    $reloaded = Read-BridgeState $path
+    Assert-True ($reloaded.quarantined.ContainsKey("u2-guid-1")) "يجب عزل الفاتورة"
+    Assert-True (-not $reloaded.seen.ContainsKey("u2-guid-1")) "لا يجوز اعتبارها مطبوعة"
+    Assert-True ([string]$reloaded.quarantined["u2-guid-1"].category -eq "permanent_render_failure") "الفئة يجب أن تكون فشل تصيير حتمي"
+    # الفاتورة التالية بالطابور غير متأثرة إطلاقاً (لا سقوط للحلقة، لا حجب)
+    $nextCandidate = New-QueueCandidate "next-guid-u2" 9102 "fp-next-u2"
+    $decision = Get-QuarantineDecision $reloaded $nextCandidate.InvoiceGuid $nextCandidate.Fingerprint
+    Assert-True ($decision -eq "proceed") "الفاتورة التالية يجب أن تُعامَل طبيعياً بلا تأثر بعزل سابقتها"
+}
+
+Test-Case "P1-X-U2.5) لا حلقة إعادة تشغيل: نفس بصمة Unity=2 الفاسدة عبر نبضات متعددة تبقى معزولة دون تكرار" {
+    $path = New-StatePath
+    $candidate = New-QueueCandidate "u2-guid-loop" 9103 "fp-u2-loop"
+    for ($i = 0; $i -lt 4; $i++) {
+        $state = Read-BridgeState $path
+        $decision = Get-QuarantineDecision $state $candidate.InvoiceGuid $candidate.Fingerprint
+        if ($decision -eq "skip") { continue }
+        $prepareError = $null
+        try { [void](Convert-SnapshotToReceipt (New-Unity2Snapshot 0)) } catch { $prepareError = $_ }
+        Assert-True (Test-PermanentInvoiceFailure $prepareError) "يجب أن يبقى حتمياً في كل نبضة"
+        Add-QuarantineEntry $state $candidate $candidate.Fingerprint $prepareError
+        Write-BridgeState $path $state
+    }
+    $final = Read-BridgeState $path
+    Assert-True ($final.quarantined.ContainsKey("u2-guid-loop")) "تبقى معزولة بعد كل النبضات"
+    Assert-True (-not $final.seen.ContainsKey("u2-guid-loop")) "لا تُطبع أبداً"
+}
+
+Test-Case "P1-X-U2.6) تعديل الفاتورة (بصمة جديدة وعامل صالح) يرفع العزل ويسمح بالطباعة" {
+    $path = New-StatePath
+    $candidate = New-QueueCandidate "u2-guid-fix" 9104 "fp-u2-broken"
+    $state = Read-BridgeState $path
+    $prepareError = $null
+    try { [void](Convert-SnapshotToReceipt (New-Unity2Snapshot 0)) } catch { $prepareError = $_ }
+    Add-QuarantineEntry $state $candidate $candidate.Fingerprint $prepareError
+    Write-BridgeState $path $state
+
+    $reloaded = Read-BridgeState $path
+    $fixedFingerprint = "fp-u2-fixed"
+    $decision = Get-QuarantineDecision $reloaded "u2-guid-fix" $fixedFingerprint
+    Assert-True ($decision -eq "reevaluate") "بصمة جديدة يجب أن تُعاد للتقييم"
+    [void]$reloaded.quarantined.Remove("u2-guid-fix")
+    $receipt = $null
+    try { $receipt = Convert-SnapshotToReceipt (New-Unity2Snapshot 10) } catch { }
+    Assert-True ($null -ne $receipt) "بعد الإصلاح يجب أن يُنتَج إيصال فعلي"
 }
 
 Write-Host "`n== P1-Y: كتابة حالة آمنة للتزامن (Merge-BridgeStateForWrite) بلا last-writer-wins =="
