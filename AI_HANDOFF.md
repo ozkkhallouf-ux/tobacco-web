@@ -2,6 +2,13 @@
 
 يقرأه Claude وCodex قبل كل مهمة. أحدث سجل يكون في الأعلى. لا تحذف السجلات السابقة.
 
+## 2026-09-13 - Claude - إصلاح أساس وحدة سطر الفاتورة عند الطباعة (#733)
+
+- Status: completed
+- Branch: task branch pending for: إصلاح أساس وحدة سطر الفاتورة عند الطباعة (#733)
+- Files: src/app.js, scripts/check-invoice-document-integrity.mjs
+- Result: PR #222 مدموج (merge 2e6d2b81). invoice integrity 56/56 وnpm run check 56/56. #733 = 286+290+308+159+120.6 = 1163.6 و#712 بلا regression. النشر والدخان نجحا واللقطة الحيّة تحمل الإصلاح. متبقٍّ: سطر #163 غير محسوم، وlineTotal المصدري يحتاج إصلاحاً منفصلاً في push-customer-invoices.ps1.
+- Handoff UTC: 2026-09-13T11:40:47Z
 ## 2026-09-05 - Claude - Fix Codex P1 (TOCTOU branch race) on PR #167 tools/auto-sync-price-lists.ps1
 
 - Status: completed
