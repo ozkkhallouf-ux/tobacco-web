@@ -173,7 +173,12 @@ Assert "لا استدعاء REST بطريقة PUT/PATCH/DELETE على الأمي
 # ملاحظة: Get-AmeenCredentials مكتوبة بالكامل على سطر واحد (بلا \n قبل الـ"}" الختامية)،
 # فـGet-FunctionBlock (المصمَّمة لدوال متعددة الأسطر) لا تناسبها — تُستخرج هنا بمطابقة السطر
 # نفسه فقط عبر $ (نهاية السطر) بدل \n} كي لا تلتقط محتوى الدوال التالية في الملف خطأً.
-$credBlockMatch = [regex]::Match($source, "(?m)^function Get-AmeenCredentials\([^\)]*\)\{.*\}$")
+# \r? قبل $: عدّاء GitHub Actions (windows-latest) يسحب الملف بنهايات أسطر CRLF (Git على
+# صور Windows الرسمية core.autocrlf=true افتراضياً) بينما نسخة العمل هنا LF بلا \r — فـ$
+# في وضع multiline يطابق الموضع قبل \n مباشرة، وإن كان قبله \r فإن "}" لم يعد آخر حرف قبل
+# ذلك الموضع فيفشل التطابق فقط على العدّاء لا محلياً (السبب الجذري لعطل CI؛ لا علاقة له
+# بالكود الإنتاجي في ameen-read-worker.ps1 نفسه ولا بأي BOM).
+$credBlockMatch = [regex]::Match($source, "(?m)^function Get-AmeenCredentials\([^\)]*\)\{.*\}\r?$")
 if (-not $credBlockMatch.Success) { throw "لم يتم العثور على تعريف الدالة: Get-AmeenCredentials" }
 $credBlock = $credBlockMatch.Value
 Assert "Get-AmeenCredentials تقرأ بيانات الاعتماد الأربعة فقط عبر Require-Env" (
