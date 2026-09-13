@@ -137,3 +137,10 @@ jobs:
       - name: Ensure Ameen sync - degraded alert delivery regression test
         shell: powershell
         run: .\tools\tests\Test-EnsureAmeenSyncDegradedAlert.ps1
+
+      # Codex P1 (PR #220، الجولة الثالثة): نفس المعيار تماماً على فرع stuckAlerted —
+      # كان مكتوباً ومُختبَراً محلياً لكنه لم يكن مسجَّلاً بهذا الـworkflow، فيمكن أن
+      # ينكسر بصمت رغم بقاء كل required checks خضراء.
+      - name: Ensure Ameen sync - stuck alert delivery regression test
+        shell: powershell
+        run: .\tools\tests\Test-EnsureAmeenSyncStuckAlert.ps1

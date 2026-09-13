@@ -208,6 +208,21 @@ assert.match(
   failBranch, /previous_alerted_health is distinct from job_health/,
   `${MONITOR_SQL}: شرط تجاوز الحارس الزمني عند انتقال التصنيف (failed⇐stuck) مفقود`,
 );
+// proposed/07: should_alert=true وحده لا يكفي — إن ظلّ مفتاح dedupe لـ
+// 'stuck'/'disabled' اسم المهمة وحده بلا تصنيف، يصطدم انتقال حقيقي (خلال أقل
+// من 60 دقيقة) بمفتاح التصنيف السابق فيُسقطه notify_telegram بصمت (return;
+// بلا استثناء) رغم صحة should_alert. المفتاح يجب أن يتضمن job_health لهاتين
+// الحالتين، بينما 'failed' يبقى على مفتاحه القائم على terminal_at (05) بلا تغيير.
+assert.match(
+  failBranch,
+  /failure_dedupe_key:='project-cron-failure:'\|\|job_record\.jobname\|\|':'\|\|job_health;/,
+  `${MONITOR_SQL}: مفتاح dedupe لـ'stuck'/'disabled' يجب أن يتضمن job_health (07) — وإلا ينتقل التصنيف بصمت بلا إنذار`,
+);
+assert.match(
+  failBranch,
+  /failure_dedupe_key:='project-cron-failure:'\|\|job_record\.jobname\|\|':'\|\|to_char\(terminal_at,'YYYYMMDDHH24MISS'\);/,
+  `${MONITOR_SQL}: مفتاح dedupe لـ'failed' يجب أن يبقى مبنياً على terminal_at (05) — مستقل تماماً عن مفتاح stuck/disabled`,
+);
 
 // ---------------------------------------------------------------------------
 // 8) نص الرسالة يفرّق بين الثلاث، ويذكر المحاولة الجارية فوق الفشل.
@@ -253,8 +268,8 @@ for (const [needle, why] of [
 // ---------------------------------------------------------------------------
 const transitionAsserts = transitions.match(/\bassert /g) ?? [];
 assert.ok(
-  transitionAsserts.length >= 69,
-  `${TRANSITIONS}: عدد التأكيدات ${transitionAsserts.length} أقل من 69 — حُذف تأكيد`,
+  transitionAsserts.length >= 90,
+  `${TRANSITIONS}: عدد التأكيدات ${transitionAsserts.length} أقل من 90 — حُذف تأكيد`,
 );
 assert.match(
   transitions,
@@ -278,6 +293,11 @@ for (const [needle, why] of [
   ['54: فشل B الحقيقي يخرج إنذاراً ثانياً فوراً', 'dedupe الحقيقي عبر notify_probe_insert لا يبتلع فشلاً جديداً'],
   ['59: التهيئة الآمنة منعت الإنذار المكرر الكاذب بعد الترحيل', 'حالة موروثة قبل last_alerted_terminal_at (05، القسم ٣)'],
   ['60: فشل جديد فعلي بعد التهيئة الآمنة ⇒ يُنذَر بلا إخفاء', 'التهيئة الآمنة لا تُخفي فشلاً حقيقياً جديداً'],
+  ['88ب: مفتاح dedupe الجمود يتضمن التصنيف stuck (07)', 'إثبات أن مفتاح dedupe لحالة stuck فعلاً يتضمن التصنيف'],
+  ['90: انتقال stuck⇐disabled خلال أقل من ساعة يُنذَر فوراً — العطل الذي أصلحته 07', 'إصلاح 07 — مفتاح dedupe classification-specific لـstuck/disabled'],
+  ['91ب: مفتاحا stuck وdisabled مستقلان تماماً — لا اصطدام بينهما', 'إثبات استقلال مساحتي dedupe بين التصنيفين'],
+  ['92: استمرار disabled خلال أقل من 60 دقيقة على تذكيره هو ⇒ لا تكرار', 'استمرار نفس التصنيف لا يُكرِّر الإنذار ضمن نافذة الـ60 دقيقة'],
+  ['93: بعد تجاوز 60 دقيقة على تذكير disabled ⇒ تذكير دوري ثانٍ يخرج', 'التذكير الدوري لـdisabled يستمر بعد إصلاح 07'],
 ]) {
   assert.ok(transitions.includes(needle), `${TRANSITIONS}: تسلسل غير مغطّى — ${why}`);
 }

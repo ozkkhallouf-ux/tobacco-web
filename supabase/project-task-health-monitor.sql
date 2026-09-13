@@ -394,13 +394,20 @@ begin
     -- 05: مفتاح dedupe لحالة 'failed' يتضمن terminal_at (هوية الحادثة نفسها)
     -- بدل اسم المهمة وحده — بهذا فشل جديد (terminal_at مختلف) خلال أقل من 60
     -- دقيقة من إنذار سابق لنفس المهمة يحصل على مفتاح مختلف تماماً فلا يصطدم
-    -- بنافذة dedupe الخاصة بالفشل السابق، ويُرسَل فوراً. 'stuck'/'disabled':
-    -- المفتاح كما هو أصلاً بلا تغيير (التذكير الدوري يعتمد عمداً على نفس
-    -- المفتاح كل ساعة).
+    -- بنافذة dedupe الخاصة بالفشل السابق، ويُرسَل فوراً.
+    -- 07 (PR #220): مفتاح dedupe لحالتَي 'stuck'/'disabled' كان اسم المهمة
+    -- وحده بلا تصنيف — فانتقال حقيقي بين التصنيفين (should_alert أعلاه يصير
+    -- true فوراً بفضل شرط previous_alerted_health) كان يصطدم مع نفس المفتاح
+    -- الذي أدرجه notify_telegram قبل لحظات لتصنيف مختلف ضمن نافذة الـ60 دقيقة
+    -- نفسها، فيُرجع notify_telegram silently (dedupe hit، بلا استثناء يُلتقط)
+    -- ولا يصل الإنذار الجديد إطلاقاً رغم أن should_alert صحيح. الإصلاح: إلحاق
+    -- job_health بالمفتاح — كل تصنيف له مساحة dedupe مستقلة، فانتقال التصنيف
+    -- يُنذَر فوراً، والاستمرار على نفس التصنيف يبقي نفس المفتاح فيعمل التذكير
+    -- الدوري الساعي كما كان بلا أي تغيير في مهلته.
     if job_health='failed' then
      failure_dedupe_key:='project-cron-failure:'||job_record.jobname||':'||to_char(terminal_at,'YYYYMMDDHH24MISS');
     else
-     failure_dedupe_key:='project-cron-failure:'||job_record.jobname;
+     failure_dedupe_key:='project-cron-failure:'||job_record.jobname||':'||job_health;
     end if;
     -- Codex P1 (PR #220، الملاحظة الثانية): previous_alert_at/previous_alerted_terminal_at
     -- كانا يُسجَّلان بلا شرط بعد notify_telegram، فيضيع إنذار 'failed' الوحيد
