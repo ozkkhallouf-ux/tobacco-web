@@ -131,12 +131,13 @@ begin
 
    if should_alert then
     -- 05: مفتاح dedupe لحالة 'failed' يتضمن terminal_at (هوية الحادثة)؛
-    -- 'stuck'/'disabled' يبقيان على مفتاح ثابت باسم المهمة فقط — نفس منطق
-    -- 05 حرفياً، كي يُثبت هذا الاختبار سلوك outbox الحقيقي بعد الإصلاح.
+    -- 07: 'stuck'/'disabled' يتضمن الآن job_health أيضاً — كل تصنيف مساحة
+    -- dedupe مستقلة، نفس منطق 07 حرفياً، كي يُثبت هذا الاختبار سلوك outbox
+    -- الحقيقي بعد الإصلاح (وليس فقط should_alert المعزول عن dedupe الفعلي).
     if job_health='failed' then
      failure_dedupe_key:='failure:'||p_key||':'||to_char(terminal_at,'YYYYMMDDHH24MISS');
     else
-     failure_dedupe_key:='failure:'||p_key;
+     failure_dedupe_key:='failure:'||p_key||':'||job_health;
     end if;
     -- مطابق تماماً لـbegin/exception المضاف بـmonitor_project_tasks() الحقيقية:
     -- previous_alert_at/previous_alerted_terminal_at لا تُحدَّثان إلا بعد نجاح
@@ -186,6 +187,7 @@ declare
   k text; j bigint; v text;
   before_row pg_temp.health_probe%rowtype; after_row pg_temp.health_probe%rowtype;
   n integer := 0;
+  stuck_dedupe_key text; disabled_dedupe_key text;
 begin
   -- =====================================================================
   -- ١) succeeded → failed → running   ⇒ الفشل لا يختفي تحت المحاولة الجارية
@@ -634,6 +636,60 @@ begin
   assert (select last_alerted_health from health_probe where task_key=k) is null,
     '86: التعافي الفعلي يصفّر last_alerted_health'; n:=n+1;
 
-  assert n >= 86, format('عدد التأكيدات المنفَّذة %s أقل من 86 — حُذف تأكيد؟', n);
+  -- =====================================================================
+  -- ١٧) الإصلاح المقصود بـ07 (PR #220): مفتاح dedupe لـstuck/disabled يتضمن
+  --   الآن job_health، فانتقال حقيقي بينهما خلال أقل من 60 دقيقة يُنذَر عنه
+  --   فوراً بمفتاح مستقل بدل أن يصطدم بمفتاح التصنيف السابق ويُبتلع بصمت عبر
+  --   notify_probe_insert (محاكاة telegram_outbox الحقيقية — لا mock مبسّط).
+  --   يثبت هذا السيناريو بالضبط النقاط الست التي طلبها المالك: (أ) إنذار
+  --   stuck يخرج، (ب) الانتقال إلى disabled خلال أقل من 60 دقيقة يُنذَر فوراً،
+  --   (ج) مفتاح disabled يختلف عن مفتاح stuck، (د) استمرار disabled قبل 60
+  --   دقيقة لا يُكرِّر الإنذار، (هـ) بعد تجاوز 60 دقيقة يعود التذكير الدوري.
+  -- =====================================================================
+  k:='cron:seq17-stuck-disabled-dedupe'; j:=17;
+
+  -- (أ) محاولة جارية تتجاوز مهلة الجمود ⇒ stuck، والمهمة ما زالت نشطة.
+  insert into runs_probe values (j,'running',t0-interval '15 minutes');
+  v:=pg_temp.monitor_cycle(k,j,true,t0);
+  assert v='stuck', '87: محاولة جارية متجاوزة المهلة ⇒ stuck'; n:=n+1;
+  assert (select count(*) from notify_probe where task_key=k and event_type='project_task_failure')=1,
+    '88: إنذار الجمود الأول خرج'; n:=n+1;
+  select dedupe_key into stuck_dedupe_key from notify_probe
+   where task_key=k order by seq desc limit 1;
+  assert stuck_dedupe_key = 'failure:'||k||':stuck',
+    '88ب: مفتاح dedupe الجمود يتضمن التصنيف stuck (07)'; n:=n+1;
+
+  -- (ب) خلال أقل من 60 دقيقة من إنذار الجمود، تتعطّل المهمة ⇒ انتقال حقيقي
+  --   بين تصنيفين (stuck ⇐ disabled) — يجب أن يُنذَر فوراً رغم قرب الإنذار
+  --   السابق (previous_alerted_health يكشف تغيّر التصنيف بصرف النظر عن الوقت).
+  --   بلا إصلاح 07 كان هذا الإنذار سيصطدم بمفتاح stuck نفسه ضمن نافذة الـ60
+  --   دقيقة فيُبتلع بصمت عبر notify_probe_insert رغم أن should_alert صحيح.
+  v:=pg_temp.monitor_cycle(k,j,false,t0+interval '10 minutes');
+  assert v='disabled', '89: تعطيل المهمة خلال أقل من ساعة من إنذار الجمود ⇒ disabled'; n:=n+1;
+  assert (select count(*) from notify_probe where task_key=k and event_type='project_task_failure')=2,
+    '90: انتقال stuck⇐disabled خلال أقل من ساعة يُنذَر فوراً — العطل الذي أصلحته 07'; n:=n+1;
+
+  -- (ج) مفتاح dedupe للتصنيف الجديد مختلف تماماً عن مفتاح stuck السابق —
+  --   هذا بالضبط ما يمنع الاصطدام الصامت.
+  select dedupe_key into disabled_dedupe_key from notify_probe
+   where task_key=k order by seq desc limit 1;
+  assert disabled_dedupe_key = 'failure:'||k||':disabled',
+    '91: مفتاح dedupe التعطيل يتضمن التصنيف disabled (07)'; n:=n+1;
+  assert stuck_dedupe_key is distinct from disabled_dedupe_key,
+    '91ب: مفتاحا stuck وdisabled مستقلان تماماً — لا اصطدام بينهما'; n:=n+1;
+
+  -- (د) استمرار حالة disabled قبل مرور 60 دقيقة على تذكيرها هي (لا تذكير
+  --   stuck) ⇒ لا تكرار — نفس المفتاح، ضمن نافذة الـ60 دقيقة الخاصة به.
+  v:=pg_temp.monitor_cycle(k,j,false,t0+interval '40 minutes');
+  assert (select count(*) from notify_probe where task_key=k and event_type='project_task_failure')=2,
+    '92: استمرار disabled خلال أقل من 60 دقيقة على تذكيره هو ⇒ لا تكرار'; n:=n+1;
+
+  -- (هـ) بعد تجاوز 60 دقيقة على تذكير disabled السابق، وما زالت المهمة
+  --   معطلة (نفس التصنيف) ⇒ التذكير الدوري الساعي يعمل كالمعتاد.
+  v:=pg_temp.monitor_cycle(k,j,false,t0+interval '85 minutes');
+  assert (select count(*) from notify_probe where task_key=k and event_type='project_task_failure')=3,
+    '93: بعد تجاوز 60 دقيقة على تذكير disabled ⇒ تذكير دوري ثانٍ يخرج'; n:=n+1;
+
+  assert n >= 93, format('عدد التأكيدات المنفَّذة %s أقل من 93 — حُذف تأكيد؟', n);
   raise notice 'cron state transitions: % تأكيداً — كلها نجحت ✓', n;
 end $$;
