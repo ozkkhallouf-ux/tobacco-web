@@ -18,6 +18,7 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: npm run check
+      - run: node --check src/decision-scoring.js
       - run: node --check src/decision-engine.js
       - run: node --check src/decision-data-bridge.js
       - run: node --check src/supplier-obligations-client.js
@@ -26,11 +27,13 @@ jobs:
       - run: node --check src/supabase-client.js
       - name: PWA asset coverage
         run: |
+          grep -q 'src/decision-scoring.js' public/service-worker.js
           grep -q 'src/decision-engine.js' public/service-worker.js
           grep -q 'src/decision-engine.css' public/service-worker.js
           grep -q 'src/decision-data-bridge.js' public/service-worker.js
           grep -q 'src/supplier-obligations-client.js' public/service-worker.js
           grep -q 'src/decision-supplier-overlay.js' public/service-worker.js
+          grep -q 'src/decision-scoring.js' index.html
           grep -q 'src/decision-engine.js' index.html
           grep -q 'src/decision-engine.css' index.html
           grep -q 'src/supplier-obligations-client.js' index.html

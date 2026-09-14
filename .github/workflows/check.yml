@@ -144,3 +144,27 @@ jobs:
       - name: Ensure Ameen sync - stuck alert delivery regression test
         shell: powershell
         run: .\tools\tests\Test-EnsureAmeenSyncStuckAlert.ps1
+
+      # عطل HOST حقيقي (2026-09-06): register-*-task.ps1 سقط بـValidatePattern
+      # غامض لأن $startAt و$StartAt هما نفس المتغير في PowerShell. الاختبار
+      # أُضيف مع الإصلاح لكنه لم يكن موصولاً بأي وظيفة CI — أي أنه لم يُشغَّل
+      # ولا مرة. وصله هنا هو ما يجعله اختبار انحدار فعلياً.
+      - name: Register task StartAt case-collision regression test
+        shell: powershell
+        run: .\tools\tests\Test-RegisterTaskStartAtCaseCollision.ps1
+
+      # ملاحظتا Codex P1 على التزامات الموردين: المسار صار نداءً ذرّياً واحداً،
+      # والحالة النهائية المُتحقَّقة (كل الموردين سدّدوا) تُنشر بدل أن تُجهض.
+      # السيناريوهات الثلاثة تُنفَّذ على الدوال المستخرجة من الملف الإنتاجي نفسه،
+      # وفخّ تفكيك المصفوفة أحادية العنصر لا يظهر إلا على 5.1.
+      - name: Supplier obligations - atomic replacement scenarios
+        shell: powershell
+        run: .\tools\tests\Test-SupplierObligationsReplacement.ps1
+
+      # ملاحظة Codex P1 على لقطة الأصناف: stderr من أمر native يصبح
+      # NativeCommandError منهياً تحت ErrorActionPreference=Stop على 5.1، فيموت
+      # المولّد قبل فرع التنبيه. الضابط السالب داخل الاختبار لا يعني شيئاً إلا
+      # على هذا العدّاء تحديداً.
+      - name: Purchase item snapshot - native stderr alert-path test
+        shell: powershell
+        run: .\tools\tests\Test-SnapshotProducerNativeStderr.ps1
