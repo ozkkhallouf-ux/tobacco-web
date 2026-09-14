@@ -39,6 +39,20 @@
 -- يُسقطا الإرسال بصمت (dedupe hit) بلا رمي أي استثناء، وهذا بالضبط ما يعالجه
 -- تفرّد المفتاح لكل حادثة انتقال بدل الاعتماد على begin...exception فقط.
 --
+-- تحديث لاحق (Codex P1، مراجعة إعادة الدمج على PR #220، commit df730b6):
+-- 'failed' *كانت* لا تتأثر، لكن اكتُشفت ثغرة مستقلة فيها بنفس الجولة: مهمة
+-- أُنذرت 'failed'، عُطِّلت (last_alerted_health='disabled')، ثم أُعيدت
+-- تفعيلها بلا تشغيل جديد — تعود 'failed' بنفس terminal_at القديم، فيبقى
+-- previous_alerted_terminal_at مطابقاً وpervious_healthy=false أصلاً فلا يتغيّر
+-- أي شرط، وينزلق الانتقال بلا إنذار رغم أن آخر ما رآه المشغّل هو "المهمة
+-- معطلة". الإصلاح: نفس شرط previous_alerted_health is distinct from job_health
+-- المستخدَم أعلاه لـstuck/disabled يُضاف الآن لفرع 'failed' أيضاً (بشرط IS NOT
+-- NULL كي لا تُنذَر الصفوف الموروثة السابقة لهذا العمود كاذباً)، مع طابع زمني
+-- طازج في مفتاح الـdedupe فقط عند انتقال حقيقي كي لا يصطدم بمفتاح 'failed'
+-- الأصلي المُستهلَك عند الإنذار الأول. راجع نفس الإصلاح والتحقق الكامل
+-- (تنفيذ فعلي على Postgres محلي، 31+122 تأكيداً) في
+-- supabase/project-task-health-monitor.sql وsupabase/tests/cron-job-health-transitions.sql.
+--
 -- هذا الملف نسخة كاملة مطابقة لما في supabase/project-task-health-monitor.sql
 -- الحالي (canonical) — لا فرق متعمَّد بين هذا الملف وذاك بعد تطبيقه.
 -- ============================================================================
@@ -141,8 +155,16 @@ begin
     from private.project_task_health_state where task_key='cron:'||job_record.jobname;
 
    if job_health='failed' then
+    -- Codex P1 (PR #220، ملاحظة إضافية فوق 08): previous_alerted_terminal_at وحدها
+    -- تفترض أن عودة terminal_at نفسها تعني "لا جديد" — خطأ حين تكون آخر حالة أُنذر
+    -- عنها فعلياً تصنيفاً مختلفاً (disabled) لنفس terminal_at القديم: مهمة أُنذرت
+    -- كـ'failed' ثم عُطِّلت (last_alerted_health='disabled')، وأُعيد تفعيلها بلا
+    -- تشغيل جديد — تعود 'failed' بنفس terminal_at القديم فلا يتغيّر أي شرط —
+    -- ينزلق الانتقال بلا إنذار. previous_alerted_health is not null يستثني الصفوف
+    -- الموروثة التي سبقت هذا العمود (لا تُعامَل كانتقال حقيقي فتُنذَر كاذباً).
     should_alert:=previous_healthy is distinct from false or previous_alert_at is null
-     or previous_alerted_terminal_at is distinct from terminal_at;
+     or previous_alerted_terminal_at is distinct from terminal_at
+     or (previous_alerted_health is not null and previous_alerted_health is distinct from job_health);
    else
     should_alert:=previous_healthy is distinct from false or previous_alert_at is null
      or previous_alert_at<now()-interval '60 minutes'
@@ -151,7 +173,14 @@ begin
 
    if should_alert then
     if job_health='failed' then
-     failure_dedupe_key:='project-cron-failure:'||job_record.jobname||':'||to_char(terminal_at,'YYYYMMDDHH24MISS');
+     -- انتقال حقيقي (previous_alerted_health مختلف) على terminal_at غير متغيّر
+     -- يحتاج طابعاً طازجاً كي لا يصطدم بمفتاح 'failed' الأصلي المُستهلَك أصلاً
+     -- عند الإنذار الأول قبل التعطيل.
+     if previous_alerted_health is distinct from job_health then
+      failure_dedupe_key:='project-cron-failure:'||job_record.jobname||':'||to_char(terminal_at,'YYYYMMDDHH24MISS')||':'||to_char(now(),'YYYYMMDDHH24MISSMS');
+     else
+      failure_dedupe_key:='project-cron-failure:'||job_record.jobname||':'||to_char(terminal_at,'YYYYMMDDHH24MISS');
+     end if;
     else
      -- proposed/08: راجع تعليق الرأس أعلاه للتفصيل الكامل — health_incident_since
      -- يميّز كل حادثة انتقال فعلي عن مجرد استمرار نفس التصنيف.
