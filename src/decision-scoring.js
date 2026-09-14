@@ -852,7 +852,11 @@
     toGuid
   });
 
-  if (typeof window !== "undefined") window.ozkDecisionScoring = api;
-  if (typeof globalThis !== "undefined") globalThis.ozkDecisionScoring = api;
+  // globalThis هو window نفسه داخل المتصفح، فإسناد الاثنين كان يكتب الخاصية
+  // ذاتها مرتين — الإسناد الأول يُطمس قبل أن يُقرأ. window يبقى ارتداداً
+  // لمتصفح أقدم من ES2020 وحده، لا مساراً موازياً.
+  const globalScope = typeof globalThis !== "undefined" ? globalThis
+    : (typeof window !== "undefined" ? window : null);
+  if (globalScope) globalScope.ozkDecisionScoring = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })();
