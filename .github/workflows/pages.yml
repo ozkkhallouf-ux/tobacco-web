@@ -156,13 +156,26 @@ jobs:
           # لعشر نشرات متتالية (run_number من 1593 إلى 1602). أُعيد إنتاجه فعلياً.
           test "$(grep -cE "v=tobacco-${NEW}([^0-9]|$)" "$FILE")" -gt 0
           test "$(grep -cE "v=tobacco-${CURRENT}([^0-9]|$)" "$FILE")" -eq 0
+      # يُنشر فقط ما يحتاجه الموقع الحيّ فعلياً. بلا هذه الخطوة يرفع
+      # upload-pages-artifact كامل المستودع (توثيق AI الداخلي، سكريبتات
+      # tools/*.ps1 الكاشفة لبنية SQL Server، supabase/migrations، إلخ) —
+      # مؤكَّد حياً بطلبات curl مباشرة رجعت 200 لملفات مثل AI_WORK_SYNC.md.
+      - name: Stage public-only site
+        run: |
+          set -e
+          mkdir -p _site
+          cp index.html service-worker.js 404.html privacy-policy.html \
+             terms-of-use.html receipt.html robots.txt sitemap.xml _site/
+          cp -r src _site/src
+          cp -r public _site/public
+
       - name: Configure Pages
         uses: actions/configure-pages@v5
 
       - name: Upload static site
         uses: actions/upload-pages-artifact@v3
         with:
-          path: .
+          path: _site
 
       # المحاولة الأولى — لا نُفشل الوظيفة فوراً كي نعيد المحاولة عند عثرة GitHub المؤقتة
       - name: Deploy
