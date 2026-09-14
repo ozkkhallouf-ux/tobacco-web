@@ -168,6 +168,7 @@ jobs:
              terms-of-use.html receipt.html robots.txt sitemap.xml _site/
           cp -r src _site/src
           cp -r public _site/public
+          cp -r tech-support _site/tech-support
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
