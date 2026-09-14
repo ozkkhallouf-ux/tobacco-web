@@ -1,1 +1,31 @@
 .decision-page,.decision-section{margin-bottom:16px}.decision-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-top:16px}.decision-kpi{background:var(--surface-soft);border:1px solid var(--line);border-radius:12px;padding:14px;display:flex;flex-direction:column;gap:6px;min-height:118px}.decision-kpi small,.decision-kpi span{color:var(--muted)}.decision-kpi strong{font-size:1.55rem;color:var(--accent)}.status-chip.decision-danger{background:color-mix(in srgb,var(--danger) 22%,transparent);color:var(--danger);border:1px solid color-mix(in srgb,var(--danger) 55%,transparent)}.status-chip.decision-warning{background:rgba(215,168,63,.16);color:var(--accent);border:1px solid rgba(215,168,63,.45)}.status-chip.decision-pending{background:var(--surface-soft);color:var(--muted);border:1px solid var(--line)}.status-chip.decision-success{background:rgba(80,180,120,.12);color:#88d6a5;border:1px solid rgba(80,180,120,.35)}.decision-live{display:inline-flex;align-items:center;gap:6px;color:var(--muted);font-size:.78rem}.decision-live-dot{width:8px;height:8px;border-radius:50%;background:#88d6a5;box-shadow:0 0 0 3px rgba(80,180,120,.12)}.decision-live.offline .decision-live-dot{background:var(--danger);box-shadow:none}.decision-note{margin-top:10px;padding:10px 12px;background:var(--surface-soft);border:1px solid var(--line);border-radius:9px;color:var(--muted)}@media(max-width:900px){.decision-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:640px){.decision-kpis{grid-template-columns:1fr}.decision-kpi{min-height:auto}.decision-section .panel-title-row{align-items:flex-start;gap:10px}.decision-section .button{width:100%}}
+/* تنبيه قِدَم لقطة الأصناف — يظهر فقط حين تفقد التوصية موثوقيتها الزمنية،
+   فلا يعتاد النظر عليه ويتوقف عن الإبلاغ. */
+.decision-alert {
+  margin: 12px 0 0;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(220, 38, 38, 0.35);
+  background: rgba(220, 38, 38, 0.08);
+  color: var(--decision-danger-text, #b91c1c);
+  font-size: 14px;
+  line-height: 1.7;
+}
+.decision-alert strong { font-weight: 700; }
+
+/* عمود السبب: نص تفسيري يبقى مقروءاً ولا يمدّد الجدول أفقياً. */
+.decision-reason {
+  font-size: 13px;
+  color: var(--muted, #6b7280);
+  max-width: 260px;
+  white-space: normal;
+  line-height: 1.6;
+}
+
+@media (prefers-color-scheme: dark) {
+  .decision-alert {
+    border-color: rgba(248, 113, 113, 0.4);
+    background: rgba(248, 113, 113, 0.12);
+    color: #fca5a5;
+  }
+}
