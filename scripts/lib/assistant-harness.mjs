@@ -209,7 +209,16 @@ export async function loadAssistant(options = {}) {
     const url = String(input);
     const method = String(init.method ?? "GET").toUpperCase();
 
-    if (url.startsWith("https://api.anthropic.com")) {
+    // ملاحظة CodeQL: startsWith على origin نصي يقبل أي host يبدأ بنفس النص
+    // (مثلاً https://api.anthropic.com.evil-site.com) — نتحقق من hostname الفعلي بدقة.
+    let isAnthropicHost = false;
+    try {
+      isAnthropicHost = new URL(url).hostname === "api.anthropic.com";
+    } catch {
+      isAnthropicHost = false;
+    }
+
+    if (isAnthropicHost) {
       metrics.externalCalls.push({ url, method, body: init.body });
       if (options.anthropic) return options.anthropic(init);
       throw new Error("anthropic_not_stubbed");
