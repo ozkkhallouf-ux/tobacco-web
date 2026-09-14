@@ -8,9 +8,16 @@
 --
 -- ترتيب التطبيق الإلزامي:
 --   1) هذا الملف (العمود + الدالة).
---   2) تعديل scripts/item-snapshot-pipeline.mjs ليُخرج last_sale_date.
---   3) تشغيل tools/push-purchase-item-snapshot.ps1 (بلا -Apply أولاً) والتحقق.
---   4) تشغيله بـ-Apply، ثم التأكد أن generated_at تغيّر وأن العمود امتلأ.
+--   2) تعديل scripts/item-snapshot-pipeline.mjs: إضافة 'last_sale_date' إلى
+--      SNAPSHOT_FIELDS وإخراجه من buildItemSnapshot.
+--   3) تعديل قائمة الأعمدة الصريحة في src/supabase-client.js (listItemSnapshots)
+--      لتشمل last_sale_date. بدون هذه الخطوة يمتلئ العمود في القاعدة ولا يصل
+--      المتصفح أبداً، فتبقى بوابة الركود الزمنية معطَّلة بصمت رغم تطبيق العمود.
+--   4) تشغيل tools/push-purchase-item-snapshot.ps1 (بلا -Apply أولاً) والتحقق.
+--   5) تشغيله بـ-Apply، ثم التأكد أن generated_at تغيّر وأن العمود امتلأ.
+--
+-- إلى أن تكتمل الخطوات الخمس، تُعلن طبقة القرار البوابة معطَّلة صراحةً عبر
+-- idleGateActive/idleGateNote في src/decision-scoring.js — لا تُفترض عاملة.
 --
 -- ملاحظة أمان: jsonb_to_recordset يتجاهل المفاتيح غير المعلَنة، فإخراج المولّد
 -- للحقل قبل تطبيق هذا الملف لا يكسر شيئاً — يُهمَل بصمت فقط.

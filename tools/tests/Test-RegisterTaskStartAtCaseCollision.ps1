@@ -37,6 +37,19 @@ $failures = New-Object System.Collections.ArrayList
 function Add-Failure([string]$m) { [void]$failures.Add($m); Write-Host "  FAIL: $m" -ForegroundColor Red }
 function Add-Pass([string]$m) { Write-Host "  ok  : $m" -ForegroundColor Green }
 
+# ------------------------------------------------------------
+# New-ScheduledTaskTrigger تأتي مع وحدة ScheduledTasks الخاصة بويندوز. الوظيفة
+# التي تشغّل هذا الاختبار في CI هي ps51-compat على windows-latest، وهناك تتوفّر
+# الوحدة فيُنفَّذ بناء الـtrigger فعلياً. على مضيف غير ويندوز (تشغيل محلي على
+# macOS مثلاً) يُتخطّى ذلك الشقّ بإعلان صريح بدل فشل كاذب — أما غيابها على مضيف
+# ويندوز فعطل حقيقي لأنه يُفرغ الاختبار من معناه.
+# ------------------------------------------------------------
+$hasScheduledTasks = $null -ne (Get-Command New-ScheduledTaskTrigger -ErrorAction SilentlyContinue)
+$isWindowsHost = ($null -eq $IsWindows) -or $IsWindows
+if (-not $hasScheduledTasks -and $isWindowsHost) {
+    Add-Failure "New-ScheduledTaskTrigger is unavailable on a Windows host; the ScheduledTasks module is required for this test to mean anything"
+}
+
 $targets = @(
     [pscustomobject]@{ Label = 'purchase item snapshot'; Path = Join-Path $repoRoot 'tools\register-purchase-item-snapshot-task.ps1' },
     [pscustomobject]@{ Label = 'supplier obligations';   Path = Join-Path $repoRoot 'tools\register-supplier-obligations-task.ps1' }
@@ -98,17 +111,22 @@ function $funcName {
 "@
     Invoke-Expression $funcSource
 
-    try {
-        $trigger = & $funcName -IntervalHours $defaultIntervalHours -StartAt $defaultStartAt -BlockSource $fixedBlock
-        if ($null -eq $trigger -or $null -eq $trigger.Repetition -or $null -eq $trigger.Repetition.Interval) {
-            Add-Failure "[$($target.Label)] trigger built but Repetition.Interval is missing"
-        } else {
-            Add-Pass "[$($target.Label)] fixed trigger-build block executed with default StartAt/IntervalHours without ValidatePattern failure"
-        }
-    } catch {
-        Add-Failure "[$($target.Label)] fixed trigger-build block threw $($_.Exception.GetType().Name): $($_.Exception.Message)"
-    } finally {
+    if (-not $hasScheduledTasks) {
+        Write-Host "  skip: [$($target.Label)] trigger build needs the Windows ScheduledTasks module; unavailable on this host"
         Remove-Item "function:\$funcName" -ErrorAction SilentlyContinue
+    } else {
+        try {
+            $trigger = & $funcName -IntervalHours $defaultIntervalHours -StartAt $defaultStartAt -BlockSource $fixedBlock
+            if ($null -eq $trigger -or $null -eq $trigger.Repetition -or $null -eq $trigger.Repetition.Interval) {
+                Add-Failure "[$($target.Label)] trigger built but Repetition.Interval is missing"
+            } else {
+                Add-Pass "[$($target.Label)] fixed trigger-build block executed with default StartAt/IntervalHours without ValidatePattern failure"
+            }
+        } catch {
+            Add-Failure "[$($target.Label)] fixed trigger-build block threw $($_.Exception.GetType().Name): $($_.Exception.Message)"
+        } finally {
+            Remove-Item "function:\$funcName" -ErrorAction SilentlyContinue
+        }
     }
 
     # ------------------------------------------------------------

@@ -15,6 +15,11 @@ param(
     # فلا داعي لإيقاع أسرع، والقراءة على الأمين تبقى خفيفة.
     [ValidateRange(1, 24)][int]$IntervalHours = 2,
     [ValidatePattern('^(?:[01]\d|2[0-3]):[0-5]\d$')][string]$StartAt = "00:23",
+    # بوابة إلزامية: الاستبدال الذرّي يعيش في دالة قاعدة بيانات
+    # (supabase/proposed/03-supplier-obligations-unique-key.sql). بلا تطبيقها على
+    # الإنتاج يفشل كل تشغيل مجدول عند أول نداء RPC. التسجيل بلا تأكيد صريح كان
+    # يعني جدولة كاتب لا يعمل — ولهذا لا قيمة افتراضية لهذا المفتاح.
+    [Switch]$AtomicReplacementApplied,
     [Switch]$ReplaceExisting
 )
 
@@ -56,8 +61,40 @@ $parserErrors = $null
 [Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$parserErrors) | Out-Null
 if ($parserErrors.Count -ne 0) { throw "Supplier obligations producer failed PowerShell parser validation." }
 
-# -AllowEmpty غائب عمداً: المهمة المجدولة لا تملك أبداً صلاحية تفريغ الجدول.
-# مسح الالتزامات قرار يدوي صريح، لا أثر جانبي لتشغيل آلي.
+# ============================================================================
+# لا تُجدوَل مهمة تكتب الالتزامات قبل أن يصبح مسار الكتابة ذرّياً فعلاً.
+#
+# المسار القديم كان delete-then-insert: بين الحذف والإدراج نافذة يكون فيها
+# الجدول فارغاً، وأي انقطاع أو انتهاء صلاحية مصادقة داخلها يترك الالتزامات
+# المالية ممسوحة. جدولة ذلك الكاتب كل ساعتين كانت تحوّل عطلاً محتملاً إلى
+# تعرّض متكرر مضمون. الفحوص الثلاثة أدناه تُثبت على الملف الإنتاجي نفسه أن
+# المسار صار نداءً ذرّياً واحداً، لا ادعاءً في تعليق.
+# ============================================================================
+$producerText = Get-Content -LiteralPath $scriptPath -Raw -Encoding UTF8
+if ($producerText -notmatch '\$REPLACE_RPC\s*=\s*"replace_supplier_obligations"') {
+    throw "The producer does not target public.replace_supplier_obligations. Refusing to schedule a non-atomic writer."
+}
+if ($producerText -notmatch 'rest/v1/rpc/\$REPLACE_RPC') {
+    throw "The producer does not publish through the atomic replacement RPC. Refusing to schedule a non-atomic writer."
+}
+if ($producerText -match '(?i)-Method\s+Delete') {
+    throw "The producer still issues a standalone REST DELETE. Refusing to schedule a writer that can empty the table outside a transaction."
+}
+if ($producerText -match '\$batchSize') {
+    throw "The producer still splits the payload into batches; batching breaks atomicity because each call deletes rows missing from its own batch."
+}
+if (-not $AtomicReplacementApplied) {
+    throw @"
+Refusing to register: confirm the atomic replacement migration is live first.
+
+  1) Apply supabase/proposed/03-supplier-obligations-unique-key.sql to production.
+  2) Verify: select public.replace_supplier_obligations('probe', '[]'::jsonb, true);
+  3) Re-run this script with -AtomicReplacementApplied.
+
+Without that function every scheduled run fails at the first RPC call.
+"@
+}
+
 $arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$scriptPath`" -Apply -MinimumIntervalMinutes 60"
 $action = New-ScheduledTaskAction `
     -Execute $powerShellPath `

@@ -13,7 +13,6 @@
     const n = Number(String(value ?? 0).replace(/,/g, ""));
     return Number.isFinite(n) ? n : 0;
   };
-  const hasNumber = (value) => value !== null && value !== undefined && value !== "" && Number.isFinite(Number(String(value).replace(/,/g, "")));
   const money = (value) => `${Math.abs(num(value)).toLocaleString("en-US", { maximumFractionDigits: 0 })} $`;
 
   function balanceItems() {
