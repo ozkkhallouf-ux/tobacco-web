@@ -356,9 +356,22 @@ if ($isMainComputer) {
         # المُحمَّلة من الحالة السابقة) بالمفتاح، كما جرى مسبقاً مع مفاتيح stuck/degraded.
         $recoverMsg = "✅ عاد Ameen Read Worker للعمل."
         $notifyPathWorker = Join-Path $PSScriptRoot "send-telegram-notification.ps1"
+        $recoverConfirmed = $false
         if (Test-Path -LiteralPath $notifyPathWorker) {
           $recoverNotifyOutput = & $notifyPathWorker -Message $recoverMsg -EventType "windows" -DedupeKey "ameen-read-worker-recovered:$prevStuckIncidentId" -DedupeMinutes 60 2>&1 6>&1
-          Write-Log ("RECOVERY CONFIRMED for Ameen worker — " + (($recoverNotifyOutput | Out-String).Trim() -replace "\s+", " "))
+          $recoverNotifyText = ($recoverNotifyOutput | Out-String).Trim()
+          # Codex P1 (جولة جديدة): كانت الحادثة تُمسَح بلا شرط حتى لو فشل الاتصال بـSupabase
+          # أثناء إرسال تنبيه العودة (send-telegram-notification.ps1 يخرج exit 0 دائماً)، فيضيع
+          # آخر تنبيه فعلي للمالك ويبقى يقرأ "توقف" رغم تعافي العامل. النجاح يُعرَّف من نص
+          # الإخراج (TELEGRAM-NOTIFY OK) كبقية الفروع — فشل أو تخطٍّ يُبقي الحادثة قائمة كي
+          # تُعاد محاولة تنبيه العودة بالدورة التالية بدل مسحها صامتاً.
+          $recoverConfirmed = ($recoverNotifyText -match "TELEGRAM-NOTIFY OK")
+          Write-Log ("RECOVERY " + $(if ($recoverConfirmed) { "CONFIRMED" } else { "PENDING (send failed/skipped)" }) + " for Ameen worker — " + ($recoverNotifyText -replace "\s+", " "))
+        }
+        if ($recoverConfirmed) {
+          @{ stuck = $false; degraded = $false } | ConvertTo-Json | Set-Content -LiteralPath $ameenWorkerIncidentStatePath -Encoding utf8
+        } else {
+          @{ stuck = $true; degraded = $false; stuckAlerted = $true; stuckIncidentId = $prevStuckIncidentId; since = (Get-Date).ToUniversalTime().ToString("o") } | ConvertTo-Json | Set-Content -LiteralPath $ameenWorkerIncidentStatePath -Encoding utf8
         }
       } elseif ($prevDegradedActive) {
         # تعافت من auth_retry دون أن تمرّ بحالة stuck — نفس علاج المفتاح أعلاه، بهوية
@@ -366,12 +379,23 @@ if ($isMainComputer) {
         # نافذة الـdedupe (Codex P1، نفس الجولة).
         $recoverMsg = "✅ عاد Ameen Read Worker لتسجيل الدخول بنجاح."
         $notifyPathWorker = Join-Path $PSScriptRoot "send-telegram-notification.ps1"
+        $recoverConfirmed = $false
         if (Test-Path -LiteralPath $notifyPathWorker) {
           $recoverNotifyOutput = & $notifyPathWorker -Message $recoverMsg -EventType "windows" -DedupeKey "ameen-read-worker-recovered:$prevDegradedIncidentId" -DedupeMinutes 60 2>&1 6>&1
-          Write-Log ("RECOVERY CONFIRMED for Ameen worker (from auth_retry) — " + (($recoverNotifyOutput | Out-String).Trim() -replace "\s+", " "))
+          $recoverNotifyText = ($recoverNotifyOutput | Out-String).Trim()
+          # نفس علاج فرع stuck أعلاه (Codex P1، جولة جديدة): لا نمسح حادثة degraded إلا
+          # بعد تأكيد إرسال تنبيه العودة فعلياً.
+          $recoverConfirmed = ($recoverNotifyText -match "TELEGRAM-NOTIFY OK")
+          Write-Log ("RECOVERY " + $(if ($recoverConfirmed) { "CONFIRMED" } else { "PENDING (send failed/skipped)" }) + " for Ameen worker (from auth_retry) — " + ($recoverNotifyText -replace "\s+", " "))
         }
+        if ($recoverConfirmed) {
+          @{ stuck = $false; degraded = $false } | ConvertTo-Json | Set-Content -LiteralPath $ameenWorkerIncidentStatePath -Encoding utf8
+        } else {
+          @{ stuck = $false; degraded = $true; degradedAlerted = $true; degradedIncidentId = $prevDegradedIncidentId; since = (Get-Date).ToUniversalTime().ToString("o") } | ConvertTo-Json | Set-Content -LiteralPath $ameenWorkerIncidentStatePath -Encoding utf8
+        }
+      } else {
+        @{ stuck = $false; degraded = $false } | ConvertTo-Json | Set-Content -LiteralPath $ameenWorkerIncidentStatePath -Encoding utf8
       }
-      @{ stuck = $false; degraded = $false } | ConvertTo-Json | Set-Content -LiteralPath $ameenWorkerIncidentStatePath -Encoding utf8
     }
   }
 }
