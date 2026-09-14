@@ -16,6 +16,9 @@ on:
       - 'public/service-worker.js'
       - '.github/workflows/business-os-foundation.yml'
 
+permissions:
+  contents: read
+
 jobs:
   validate-business-os:
     runs-on: ubuntu-latest

@@ -6,6 +6,9 @@ on:
   push:
     branches: [decision-engine-ui, feat/supplier-obligations-sync]
 
+permissions:
+  contents: read
+
 jobs:
   validate:
     runs-on: ubuntu-latest
