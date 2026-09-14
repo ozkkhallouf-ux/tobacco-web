@@ -51,7 +51,7 @@ $producerText = Get-Content -LiteralPath $producerPath -Raw -Encoding UTF8
 # استخرج الدالتين النقيتين من الملف الإنتاجي ونفّذهما هنا. أي انحراف في
 # الأسماء يُسقط الاختبار فوراً بدل أن يختبر نسخة قديمة.
 # ------------------------------------------------------------------
-foreach ($fn in @('Get-SupplierObligationsPlan', 'ConvertTo-ReplacePayloadJson')) {
+foreach ($fn in @('Get-SupplierObligationsPlan', 'ConvertTo-ReplacePayloadJson', 'Get-SupplierObligationsActivation')) {
     $match = [regex]::Match($producerText, "(?ms)^function\s+$([regex]::Escape($fn))\s*\{.*?^\}")
     if (-not $match.Success) {
         Write-Host "FAIL: could not extract $fn from the producer" -ForegroundColor Red
@@ -151,6 +151,39 @@ if ($json3 -notmatch '"p_rows":\[\]') { Add-Failure "scenario 3 must send an emp
 else { Add-Pass "scenario 3 sends an empty JSON array" }
 if ($json3 -notmatch '"p_allow_empty":true') { Add-Failure "scenario 3 must send p_allow_empty:true" }
 else { Add-Pass "scenario 3 sends p_allow_empty:true" }
+
+# ==================================================================
+# بوابة التفعيل: تغطي كل مُنادٍ، لا سكريبت التسجيل وحده.
+#
+# ملاحظة Codex P1: tools/ameen-sync-agent.ps1 ينادي المنتج بـ-Apply كل دقيقة،
+# فحارس على سكريبت التسجيل وحده لا يحرس شيئاً على المسار الإنتاجي الفعلي.
+# ==================================================================
+Write-Host "== activation gate covers every caller"
+$inactive = Get-SupplierObligationsActivation -MarkerExists $false -EnvValue $null
+if ($inactive.Active) { Add-Failure "a machine with no activation marker must not be active" }
+else { Add-Pass "no marker and no env var => inactive" }
+
+$byMarker = Get-SupplierObligationsActivation -MarkerExists $true -EnvValue $null
+if (-not $byMarker.Active) { Add-Failure "the durable activation marker must activate the producer" }
+else { Add-Pass "durable marker activates" }
+
+$byEnv = Get-SupplierObligationsActivation -MarkerExists $false -EnvValue "1"
+if (-not $byEnv.Active) { Add-Failure "TOBACCO_SUPPLIER_OBLIGATIONS_ACTIVE=1 must activate the producer" }
+else { Add-Pass "env var activates" }
+
+foreach ($junk in @("0", "", "no", "maybe")) {
+    $r = Get-SupplierObligationsActivation -MarkerExists $false -EnvValue $junk
+    if ($r.Active) { Add-Failure "env value '$junk' must not activate the producer" }
+}
+Add-Pass "junk env values do not activate"
+
+# الحارس يقع على -Apply نفسه داخل المنتج، قبل أي مصادقة أو كتابة.
+if ($producerText -notmatch '(?s)if \(\$Apply\)\s*\{[^}]*Get-SupplierObligationsActivation') {
+    Add-Failure "the producer does not gate -Apply on activation"
+} else { Add-Pass "the producer gates -Apply on activation" }
+if ($producerText -notmatch 'Skipped \(not activated\)') {
+    Add-Failure "an unactivated run must announce that it skipped"
+} else { Add-Pass "an unactivated run announces the skip (exit 0, no per-minute false failures)" }
 
 # ==================================================================
 # العقد النصّي على الملف الإنتاجي: لا حذف منفصل ولا تقسيم دفعات.

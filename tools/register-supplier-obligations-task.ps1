@@ -2,9 +2,16 @@
 # ============================================================================
 # تسجيل مهمة «التزامات الموردين» فقط. هذا السكريبت لا يشغّل المهمة ولا المنتج.
 #
-# سبب وجوده: تدقيق 2026-09-06 أثبت أن tools/push-supplier-obligations.ps1 مكتوب
-# ومختبَر لكنه غير مجدول إطلاقاً — لا توجد بين 22 سكريبت register-* واحدة له،
-# فبقي جدول supplier_obligations فارغاً منذ إنشائه.
+# سبب وجوده: لا توجد بين سكريبتات register-* واحدة لهذا المنتج، فلا مهمة مستقلة
+# تتحكم بإيقاعه.
+#
+# ⚠️ تصحيح لما ورد هنا سابقاً: لم يكن صحيحاً أن المنتج «غير مجدول إطلاقاً».
+# tools/ameen-sync-agent.ps1 ينادي push-supplier-obligations.ps1 بـ-Apply داخل
+# Sync-Once، ووتيرة تلك المهمة دقيقة واحدة. أي أن الكتابة كانت تجري فعلاً من
+# مسار آخر تماماً، ولم يكن سكريبت التسجيل هذا يتحكم بها إطلاقاً.
+#
+# ولهذا نُقلت بوابة التفعيل إلى المنتج نفسه (-Activate وعلامة دائمة على الجهاز):
+# حارس هنا وحده كان حارساً على باب لا يمرّ منه أحد.
 #
 # ما يغذّيه هذا الجدول هو **الالتزام المالي وحده**. أولوية الشراء من المورد
 # تُحسب في لوحة القرار من نواقص أصنافه، ولا تعتمد على هذا الجدول إطلاقاً.
@@ -83,6 +90,25 @@ if ($producerText -match '(?i)-Method\s+Delete') {
 if ($producerText -match '\$batchSize') {
     throw "The producer still splits the payload into batches; batching breaks atomicity because each call deletes rows missing from its own batch."
 }
+# البوابة الحاملة للثقل: علامة التفعيل الدائمة على هذا الجهاز. بدونها لا يكتب
+# المنتج شيئاً لأي مُنادٍ — بما فيه وكيل المزامنة الدقيقي — فجدولة مهمة هنا بلا
+# تفعيل تُنتج مهمة صامتة تتخطّى كل تشغيل.
+$activationMarker = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "logs\supplier-obligations-activated.txt"))
+if (-not (Test-Path -LiteralPath $activationMarker -PathType Leaf)) {
+    throw @"
+Refusing to register: the producer is not activated on this machine.
+
+The producer refuses to write for every caller until it is activated, so this
+task would run and skip every time. Activation is deliberate and durable:
+
+  .\tools\push-supplier-obligations.ps1 -Activate
+
+Do that only after applying supabase/proposed/03-supplier-obligations-unique-key.sql
+and reviewing a dry run. Note that tools/ameen-sync-agent.ps1 also calls this
+producer with -Apply every minute, so activation opens that path too.
+"@
+}
+
 if (-not $AtomicReplacementApplied) {
     throw @"
 Refusing to register: confirm the atomic replacement migration is live first.

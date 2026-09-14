@@ -1,9 +1,17 @@
 ﻿param(
     [switch]$Apply,
+    # التفعيل الدائم: بلا علامته لا يكتب هذا المنتج شيئاً مهما ناداه أحد.
+    # السبب أن الكتابة لا تمرّ عبر سكريبت التسجيل وحده — tools/ameen-sync-agent.ps1
+    # ينادي هذا الملف بـ-Apply داخل Sync-Once، ووتيرة تلك المهمة دقيقة واحدة.
+    # فحارس على سكريبت التسجيل وحده كان حارساً على باب لا يمرّ منه أحد: لحظة
+    # تطبيق ترحيلة 03 كانت حلقة الدقيقة ستنشر الجيل وتقاعد المصدر القديم خلال
+    # خمس دقائق، بلا تشغيل جاف ولا قرار بشري. الحارس هنا يغطي كل مُنادٍ.
+    [switch]$Activate,
     [int]$MinimumIntervalMinutes = 0,
     [string]$EnvFile = "$PSScriptRoot\.env",
     [string]$LogFile = "$PSScriptRoot\logs\supplier-obligations-push.log",
-    [string]$MarkerPath = "$PSScriptRoot\logs\supplier-obligations-last-success.txt"
+    [string]$MarkerPath = "$PSScriptRoot\logs\supplier-obligations-last-success.txt",
+    [string]$ActivationMarkerPath = "$PSScriptRoot\logs\supplier-obligations-activated.txt"
 )
 
 $ErrorActionPreference = "Stop"
@@ -74,6 +82,35 @@ function Get-SupplierObligationsPlan {
 }
 
 # ============================================================================
+# بوابة التفعيل — دالة نقية، تُختبر بلا ملفات ولا بيئة.
+#
+# التفعيل حالة دائمة على الجهاز يصنعها إنسان مرة واحدة (`-Activate`)، لا وسيط
+# سطر أوامر يمرّره كل مُنادٍ. ولهذا يغطي كل المنادين — بما فيهم
+# ameen-sync-agent.ps1 الذي يعمل كل دقيقة — لا سكريبت التسجيل وحده.
+#
+# غياب التفعيل ليس عطلاً بل حالة مقصودة، فالنتيجة تخطٍّ مُعلَن لا فشل: لو خرج
+# المنتج برمز غير صفري كل دقيقة لأغرق سجل وكيل المزامنة بفشل كاذب وأخفى الأعطال
+# الحقيقية.
+# ============================================================================
+function Get-SupplierObligationsActivation {
+    param(
+        [bool]$MarkerExists,
+        [string]$EnvValue
+    )
+
+    if ($MarkerExists) {
+        return [PSCustomObject]@{ Active = $true; Reason = "activation marker is present" }
+    }
+    if ($EnvValue -and ($EnvValue.Trim() -in @("1", "true", "yes"))) {
+        return [PSCustomObject]@{ Active = $true; Reason = "TOBACCO_SUPPLIER_OBLIGATIONS_ACTIVE is set" }
+    }
+    return [PSCustomObject]@{
+        Active = $false
+        Reason = "not activated on this machine; run push-supplier-obligations.ps1 -Activate after applying supabase/proposed/03 and reviewing a dry run"
+    }
+}
+
+# ============================================================================
 # استبدال ذرّي واحد عبر replace_supplier_obligations.
 #
 # لا حذف منفصل قبل الإدراج: الدالة تُدرج الجيل الحالي وتحذف ما ليس فيه داخل
@@ -122,6 +159,25 @@ $PURCHASE_TYPE_GUID = "91377a56-ebfc-48c0-b79e-72063e1d7e3a"
 $SOURCE = "ameen_ac000_credit_minus_debit"
 $LEGACY_SOURCE = "ameen_cu000_credit_minus_debit"
 $REPLACE_RPC = "replace_supplier_obligations"
+
+if ($Activate) {
+    $activationDir = Split-Path -Parent $ActivationMarkerPath
+    if (-not (Test-Path -LiteralPath $activationDir)) { New-Item -ItemType Directory -Force -Path $activationDir | Out-Null }
+    "activated $((Get-Date).ToUniversalTime().ToString('o'))" | Set-Content -LiteralPath $ActivationMarkerPath -Encoding UTF8
+    Write-Log "Activated. Every caller of this producer may now write to Supabase, including tools/ameen-sync-agent.ps1."
+    exit 0
+}
+
+# الحارس يسبق أي كتابة، ويغطي كل مُنادٍ لا سكريبت التسجيل وحده.
+if ($Apply) {
+    $activation = Get-SupplierObligationsActivation `
+        -MarkerExists ([bool](Test-Path -LiteralPath $ActivationMarkerPath)) `
+        -EnvValue (Get-Setting "TOBACCO_SUPPLIER_OBLIGATIONS_ACTIVE")
+    if (-not $activation.Active) {
+        Write-Log "Skipped (not activated): $($activation.Reason)"
+        exit 0
+    }
+}
 
 if ($Apply -and $MinimumIntervalMinutes -gt 0 -and (Test-Path -LiteralPath $MarkerPath)) {
     $lastSuccess = (Get-Item -LiteralPath $MarkerPath).LastWriteTimeUtc

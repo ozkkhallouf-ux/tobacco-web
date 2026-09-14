@@ -98,6 +98,30 @@ check("الكتابة ذرّية: نداء واحد، بلا حذف منفصل �
     "الحمولة ما زالت تُقسَّم دفعات — الذرّية مكسورة");
 });
 
+check("بوابة التفعيل في المنتج نفسه، فتغطي كل مُنادٍ لا سكريبت التسجيل وحده", () => {
+  // ملاحظة Codex P1 (2026-09-14، صحيحة): tools/ameen-sync-agent.ps1 ينادي
+  // push-supplier-obligations.ps1 بـ-Apply داخل Sync-Once، ووتيرة تلك المهمة
+  // دقيقة واحدة. فحارس على سكريبت التسجيل وحده كان حارساً على باب لا يمرّ منه
+  // أحد: لحظة تطبيق ترحيلة 03 كانت حلقة الدقيقة ستنشر الجيل وتقاعد المصدر
+  // القديم خلال خمس دقائق، بلا تشغيل جاف ولا قرار بشري.
+  const agent = read("tools/ameen-sync-agent.ps1");
+  assert.match(agent, /push-supplier-obligations\.ps1["']?\s+-Apply/,
+    "افتُرض هنا وجود مُنادٍ آخر للمنتج؛ إن زال فحدّث هذا الفحص بدل حذفه");
+
+  assert.match(obligationsProducer, /\$Activate/,
+    "لا مفتاح تفعيل دائم في المنتج");
+  assert.match(obligationsProducer, /function Get-SupplierObligationsActivation/,
+    "بوابة التفعيل ليست دالة نقية قابلة للاختبار");
+  // الحارس على -Apply نفسه، قبل أي مصادقة أو كتابة.
+  assert.match(obligationsProducer, /if \(\$Apply\)[\s\S]{0,400}Get-SupplierObligationsActivation/,
+    "المنتج لا يحرس -Apply بالتفعيل");
+  assert.match(obligationsProducer, /Skipped \(not activated\)/,
+    "التشغيل غير المفعَّل لا يعلن تخطّيه");
+  // التخطّي لا يكون فشلاً: خروج غير صفري كل دقيقة يغرق سجل الوكيل بفشل كاذب.
+  assert.match(obligationsProducer, /Skipped \(not activated\)[\s\S]{0,120}exit 0/,
+    "التشغيل غير المفعَّل يخرج برمز فشل — إغراق سجل وكيل المزامنة كل دقيقة");
+});
+
 check("المهمة لا تُسجَّل قبل أن يصبح المسار ذرّياً والترحيلة مطبَّقة", () => {
   const argumentsLine = /^\s*\$arguments\s*=.*$/m.exec(obligationsTask);
   assert.ok(argumentsLine, "تعذّر العثور على سطر وسائط المهمة");
@@ -115,6 +139,9 @@ check("المهمة لا تُسجَّل قبل أن يصبح المسار ذرّ
     "التسجيل لا يتحقق من غياب الحذف المنفصل في المنتج");
   assert.match(obligationsTask, /\$batchSize/,
     "التسجيل لا يتحقق من غياب تقسيم الدفعات في المنتج");
+  // ولا يُسجَّل شيء قبل التفعيل: مهمة بلا تفعيل تتخطّى كل تشغيل بصمت.
+  assert.match(obligationsTask, /supplier-obligations-activated\.txt/,
+    "التسجيل لا يشترط علامة التفعيل الدائمة");
 });
 
 check("مهمة التزامات الموردين مسجّلة الآن (كانت غائبة تماماً)", () => {

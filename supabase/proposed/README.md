@@ -17,10 +17,24 @@
 delete-then-insert صار `03` شرطاً لتشغيلها. هذا مقصود — التشغيل غير الذرّي كان
 يخاطر بمسح الالتزامات المالية، والفشل الصريح أرخص منه بكثير.
 
+> ⚠️ **المنتج ليس له مُنادٍ واحد.** `tools/ameen-sync-agent.ps1` ينادي
+> `push-supplier-obligations.ps1 -Apply` داخل `Sync-Once`، ووتيرة تلك المهمة
+> **دقيقة واحدة**. لذلك بوابة التفعيل تعيش في المنتج نفسه لا في سكريبت التسجيل:
+> بلا علامة تفعيل دائمة على الجهاز لا يكتب المنتج شيئاً لأي مُنادٍ، ويعلن تخطّيه
+> ويخرج بصفر (لا فشل كاذب كل دقيقة). **الخطوة 4 أدناه هي ما يفتح ذلك المسار
+> أيضاً** — انتبه أن التفعيل يعني أن حلقة الدقيقة ستبدأ النشر خلال ≤5 دقائق.
+
 **ترتيب التطبيق على الإنتاج (يدوي، بأمر منفصل من المالك):**
 
 1. طبّق `03-supplier-obligations-unique-key.sql`.
 2. تحقق: `select public.replace_supplier_obligations('probe', '[]'::jsonb, true);`
 3. شغّل `.\tools\push-supplier-obligations.ps1` بلا `-Apply` وراجع الأرقام.
-4. شغّله بـ`-Apply` مرة واحدة يدوياً وتأكد من عدد الصفوف.
-5. عندها فقط: `.\tools\register-supplier-obligations-task.ps1 -AtomicReplacementApplied`
+   (يعمل بلا تفعيل: التشغيل الجاف لا يكتب شيئاً.)
+4. فعّل صراحةً: `.\tools\push-supplier-obligations.ps1 -Activate`
+   — من هنا يصبح وكيل المزامنة الدقيقي قادراً على النشر.
+5. راقب أول نشر وتأكد من عدد الصفوف في `supplier_obligations`.
+6. اختياري: `.\tools\register-supplier-obligations-task.ps1 -AtomicReplacementApplied`
+   لمهمة مستقلة بإيقاع ساعتين. (يرفض التسجيل قبل الخطوة 4.)
+
+**للتراجع:** احذف `tools/logs/supplier-obligations-activated.txt` — يعود المنتج
+إلى التخطّي لكل مُنادٍ فوراً، بلا تعديل كود ولا إلغاء مهام.
