@@ -87,8 +87,8 @@ export function defaultFixtures() {
           { currency: "ل.س.", opening: 21304400.5, closing: 21304400.5, externalIncoming: 0, externalOutgoing: 0 }
         ],
         payments: [
-          { name: "مركز الخيال / مساكن برزة", amount: 8500, notes: "بيد ابو زياد" },
-          { name: "جهاد التلي", amount: 1500, notes: "" }
+          { name: "مؤسسة النموذج / حي الاختبار", amount: 8500, notes: "بيد خالد التجريبي" },
+          { name: "سامر الوهمي", amount: 1500, notes: "" }
         ],
         paymentSummary: { count: 2, totalUsd: 10000 }
       }
@@ -98,8 +98,8 @@ export function defaultFixtures() {
       { entry_date: TODAY, account_name: "أجور نقل", amount: 120, notes: "" }
     ],
     sales_line_items: [
-      { sale_date: TODAY, bill_no: "101", bill_type: "wholesale", item_name: "ماستر طويل ورق", qty: 25, line_total: 8875, net_profit: 400, unit_cost: 339, customer_name: "جهاد التلي" },
-      { sale_date: TODAY, bill_no: "101", bill_type: "wholesale", item_name: "كينغ دوم سليم", qty: 15, line_total: 70.5, net_profit: 6, unit_cost: 4.3, customer_name: "جهاد التلي" },
+      { sale_date: TODAY, bill_no: "101", bill_type: "wholesale", item_name: "ماستر طويل ورق", qty: 25, line_total: 8875, net_profit: 400, unit_cost: 339, customer_name: "سامر الوهمي" },
+      { sale_date: TODAY, bill_no: "101", bill_type: "wholesale", item_name: "كينغ دوم سليم", qty: 15, line_total: 70.5, net_profit: 6, unit_cost: 4.3, customer_name: "سامر الوهمي" },
       { sale_date: TODAY, bill_no: "102", bill_type: "retail", item_name: "ماستر طويل ورق", qty: 5, line_total: 1800, net_profit: 80, unit_cost: 344, customer_name: "زبون نقدي" }
     ],
     ameen_purchase_invoice_reports: [{
@@ -140,9 +140,9 @@ export function defaultFixtures() {
         customersWithDebitBalance: 121, customersWithCreditBalance: 34, totalCustomers: 302
       },
       items: [
-        { key: "مركز الخيال مساكن برزه", name: "مركز الخيال / مساكن برزة", balance: 31597.2, customerGuid: "bbb09cbf", lastPaymentDate: `${YESTERDAY}T00:00:00`, recentPayments: [{ date: `${YESTERDAY}T00:00:00`, amount: 8500, notes: "بيد ابو زياد" }] },
-        { key: "جهاد التلي", name: "جهاد التلي", balance: 12000, customerGuid: "aaa11111", lastPaymentDate: "2026-09-01T00:00:00", recentPayments: [] },
-        { key: "حساب دائن", name: "مورد سمير", balance: -4000, customerGuid: "ccc22222", recentPayments: [] }
+        { key: "مؤسسة النموذج حي الاختبار", name: "مؤسسة النموذج / حي الاختبار", balance: 31597.2, customerGuid: "bbb09cbf", lastPaymentDate: `${YESTERDAY}T00:00:00`, recentPayments: [{ date: `${YESTERDAY}T00:00:00`, amount: 8500, notes: "بيد خالد التجريبي" }] },
+        { key: "سامر الوهمي", name: "سامر الوهمي", balance: 12000, customerGuid: "aaa11111", lastPaymentDate: "2026-09-01T00:00:00", recentPayments: [] },
+        { key: "حساب دائن", name: "مورد وهمي", balance: -4000, customerGuid: "ccc22222", recentPayments: [] }
       ]
     }],
     "inventory_reports:ameen_sql_agent": [{
@@ -171,7 +171,7 @@ export function defaultFixtures() {
       created_at: new Date().toISOString(),
       summary: { bills: 643, customers: 77, fromDate: "2026-07-08" },
       items: [{
-        name: "جهاد التلي",
+        name: "سامر الوهمي",
         customerGuid: "aaa11111",
         invoices: [{
           date: "2026-08-29",

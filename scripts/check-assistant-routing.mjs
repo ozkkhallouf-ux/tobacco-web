@@ -25,8 +25,8 @@ const ROUTES = [
   ["ما المصاريف؟", "expenses", "expense_entries"],
   ["من أكبر الزبائن مديونية؟", "receivables", "inventory_reports"],
   ["ما الذمم علينا؟", "receivables", "inventory_reports"],
-  ["ما رصيد الزبون جهاد التلي؟", "customer", "inventory_reports"],
-  ["ماذا اشترى الزبون جهاد التلي؟", "customer", "inventory_reports"],
+  ["ما رصيد الزبون سامر الوهمي؟", "customer", "inventory_reports"],
+  ["ماذا اشترى الزبون سامر الوهمي؟", "customer", "inventory_reports"],
   ["ما الأصناف الناقصة؟", "inventory", "inventory_reports"],
   ["ما وضع المخزون؟", "inventory", "inventory_reports"],
   ["ما الأصناف الراكدة؟", "stagnant", "inventory_reports"],
@@ -382,7 +382,7 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
     created_at: new Date().toISOString(),
     summary: { bills: 1, customers: 1, fromDate: "2026-07-08" },
     items: [{
-      name: "جهاد التلي",
+      name: "سامر الوهمي",
       customerGuid: "GUID-مختلف-تماماً",
       invoices: [{ date: "2026-08-29", lines: [
         { material: "بضاعة زبون آخر", qty: 99, price: 1234, unit1: "كروز", lineTotal: 122166 }
@@ -390,7 +390,7 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
     }]
   }];
   const a = await loadAssistant({ fixtures });
-  const result = await a.ask(TOKENS.owner, "ماذا اشترى الزبون جهاد التلي؟");
+  const result = await a.ask(TOKENS.owner, "ماذا اشترى الزبون سامر الوهمي؟");
   const reply = String(result.body.reply);
   // الرصيد من تقرير الأرصدة يبقى صحيحاً
   assert.ok(reply.includes("12,000 USD"), "ضاع رصيد الزبون الصحيح");
@@ -404,7 +404,7 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
 {
   // وحين يتطابق المعرّف فعلاً، تُعرض الفواتير طبيعياً
   const a = await loadAssistant();
-  const result = await a.ask(TOKENS.owner, "ماذا اشترى الزبون جهاد التلي؟");
+  const result = await a.ask(TOKENS.owner, "ماذا اشترى الزبون سامر الوهمي؟");
   const reply = String(result.body.reply);
   assert.ok(/آخر الفواتير/.test(reply), "لم تُعرض الفواتير رغم تطابق المعرّف");
   assert.ok(reply.includes("ماستر طويل ورق"), "لم تُعرض بنود الفاتورة");
@@ -947,7 +947,7 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   const owner = await loadAssistant();
   const ownerText = String((await owner.ask(TOKENS.owner, "ما حركة ماستر طويل ورق؟")).body.reply);
   assert.ok(/قيمة المبيعات/.test(ownerText), "المالك فقد قيمة المبيعات");
-  assert.ok(/جهاد التلي/.test(ownerText), "المالك فقد أسماء المشترين");
+  assert.ok(/سامر الوهمي/.test(ownerText), "المالك فقد أسماء المشترين");
 
   const employee = await loadAssistant();
   const empResult = await employee.ask(TOKENS.employee, "ما حركة ماستر طويل ورق؟");
@@ -956,7 +956,7 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   assert.ok(/الكمية المباعة/.test(empText), `الموظف فقد حركة المخزون المشروعة:\n${empText}`);
   assert.ok(!/قيمة المبيعات/.test(empText), `الموظف رأى قيمة المبيعات:\n${empText}`);
   assert.ok(!/أكثر المشترين/.test(empText), `الموظف رأى ترتيب المشترين:\n${empText}`);
-  assert.ok(!/جهاد التلي/.test(empText), `الموظف رأى اسم زبون:\n${empText}`);
+  assert.ok(!/سامر الوهمي/.test(empText), `الموظف رأى اسم زبون:\n${empText}`);
   // والحجب عند المصدر: العمودان لا يُقرآن أصلاً لغير المالك
   const empReads = employee.metrics.reads.filter((q) => q.startsWith("sales_line_items?"));
   assert.ok(empReads.length > 0, "لم يقرأ سطور المبيعات أصلاً");
@@ -1130,7 +1130,7 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
     created_at: new Date().toISOString(),
     summary: { fromDate: lastMonthStart },
     items: [{
-      customerGuid: "aaa11111", name: "جهاد التلي",
+      customerGuid: "aaa11111", name: "سامر الوهمي",
       invoices: [
         { date: day(0), lines: [{ material: "صنف اليوم", qty: 1, unit1: "علبة", price: 500, lineTotal: 500 }] },
         { date: lastMonthEnd, lines: [{ material: "صنف الشهر الماضي", qty: 1, unit1: "علبة", price: 700, lineTotal: 700 }] }
@@ -1138,7 +1138,7 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
     }]
   }];
   const c = await loadAssistant({ fixtures: invFixtures });
-  const bought = String((await c.ask(TOKENS.owner, "ماذا اشترى الزبون جهاد التلي الشهر الماضي؟")).body.reply);
+  const bought = String((await c.ask(TOKENS.owner, "ماذا اشترى الزبون سامر الوهمي الشهر الماضي؟")).body.reply);
   assert.ok(/صنف الشهر الماضي/.test(bought), `لم يعرض فواتير الشهر الماضي:\n${bought}`);
   assert.ok(!/صنف اليوم/.test(bought), `عرض فاتورة هذا الشهر جواباً عن الشهر الماضي:\n${bought}`);
   ok("المشتريات وفواتير الزبون تُرشَّح بالفترة المطلوبة، وأعدادها مشتقّة منها");
@@ -1197,18 +1197,18 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   invFixtures["inventory_reports:ameen_customer_invoices"] = [{
     report_date: day(0), created_at: new Date().toISOString(),
     summary: { fromDate: windowStart },
-    items: [{ customerGuid: "aaa11111", name: "جهاد التلي", truncated: true,
+    items: [{ customerGuid: "aaa11111", name: "سامر الوهمي", truncated: true,
       invoices: [{ date: day(5), lines: [{ material: "صنف", qty: 1, unit1: "علبة", price: 500, lineTotal: 500 }] }] }]
   }];
   const e = await loadAssistant({ fixtures: invFixtures });
-  const custLong = String((await e.ask(TOKENS.owner, "ماذا اشترى الزبون جهاد التلي اخر 365 يوم؟")).body.reply);
+  const custLong = String((await e.ask(TOKENS.owner, "ماذا اشترى الزبون سامر الوهمي اخر 365 يوم؟")).body.reply);
   assert.ok(/تتجاوز نافذة تقرير فواتير الزبائن/.test(custLong),
     `لم يُعلن خروج فترة الزبون عن نافذة التقرير:\n${custLong}`);
 
   // وفرع الصفر تحديداً: فترة **داخل** النافذة بلا فواتير، لكن اللقطة مقصوصة
   // ⇒ امتناع لا نفي. (بلا هذه الحالة يبقى فرع النفي بلا تغطية أصلاً.)
   const f = await loadAssistant({ fixtures: invFixtures });
-  const custEmpty = String((await f.ask(TOKENS.owner, "ماذا اشترى الزبون جهاد التلي امس؟")).body.reply);
+  const custEmpty = String((await f.ask(TOKENS.owner, "ماذا اشترى الزبون سامر الوهمي امس؟")).body.reply);
   assert.ok(!/لا توجد فواتير لهذا الزبون ضمن/.test(custEmpty),
     `نفى مشتريات الزبون رغم أن اللقطة مقصوصة:\n${custEmpty}`);
   assert.ok(/المشتريات — غير محسومة/.test(custEmpty),
@@ -1223,7 +1223,7 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
     }]
   };
   const g = await loadAssistant({ fixtures: cleanInv });
-  const custClean = String((await g.ask(TOKENS.owner, "ماذا اشترى الزبون جهاد التلي امس؟")).body.reply);
+  const custClean = String((await g.ask(TOKENS.owner, "ماذا اشترى الزبون سامر الوهمي امس؟")).body.reply);
   assert.ok(/لا توجد فواتير لهذا الزبون ضمن/.test(custClean),
     `امتنع عن النفي رغم اكتمال التغطية:\n${custClean}`);
   ok("لقطة المشتريات وفواتير الزبائن: الفترة خارج نافذتها أو لقطةٌ مقصوصة تُعلَن، والنفي القاطع يُحجب");
@@ -1243,11 +1243,11 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   onlyReturn["inventory_reports:ameen_customer_invoices"] = [{
     report_date: day(0), created_at: new Date().toISOString(),
     summary: { fromDate: day(60) },
-    items: [{ customerGuid: "aaa11111", name: "جهاد التلي", truncated: false,
+    items: [{ customerGuid: "aaa11111", name: "سامر الوهمي", truncated: false,
       invoices: [{ date: day(3), isReturn: true, lines: [{ material: "بضاعة مُعادة", qty: 2, unit1: "علبة", price: 300, lineTotal: 600 }] }] }]
   }];
   const a = await loadAssistant({ fixtures: onlyReturn });
-  const retText = String((await a.ask(TOKENS.owner, "ماذا اشترى الزبون جهاد التلي؟")).body.reply);
+  const retText = String((await a.ask(TOKENS.owner, "ماذا اشترى الزبون سامر الوهمي؟")).body.reply);
   assert.ok(/مرتجع/.test(retText), `لم يذكر المرتجع إطلاقاً:\n${retText}`);
   assert.ok(/لا فاتورة \*\*شراء\*\* له/.test(retText),
     `عرض المرتجع كأنه شراء:\n${retText}`);
@@ -1258,13 +1258,13 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   mixed["inventory_reports:ameen_customer_invoices"] = [{
     report_date: day(0), created_at: new Date().toISOString(),
     summary: { fromDate: day(60) },
-    items: [{ customerGuid: "aaa11111", name: "جهاد التلي", truncated: false, invoices: [
+    items: [{ customerGuid: "aaa11111", name: "سامر الوهمي", truncated: false, invoices: [
       { date: day(2), lines: [{ material: "صنف مُشترى", qty: 1, unit1: "علبة", price: 900, lineTotal: 900 }] },
       { date: day(3), isReturn: true, lines: [{ material: "بضاعة مُعادة", qty: 2, unit1: "علبة", price: 300, lineTotal: 600 }] }
     ] }]
   }];
   const b = await loadAssistant({ fixtures: mixed });
-  const mixText = String((await b.ask(TOKENS.owner, "ماذا اشترى الزبون جهاد التلي؟")).body.reply);
+  const mixText = String((await b.ask(TOKENS.owner, "ماذا اشترى الزبون سامر الوهمي؟")).body.reply);
   assert.ok(/\(1 فاتورة شراء ضمن/.test(mixText), `لم يفصل عدد الشراء عن المرتجع:\n${mixText}`);
   assert.ok(/1 مرتجع/.test(mixText), `لم يذكر المرتجع مفصولاً:\n${mixText}`);
   assert.ok(/صنف مُشترى/.test(mixText), "أسقط فاتورة الشراء");
@@ -1404,7 +1404,7 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
     created_at: new Date().toISOString(),
     summary: { bills: 1, customers: 1, fromDate: "2026-07-08" },
     items: [{
-      name: "جهاد التلي",
+      name: "سامر الوهمي",
       customerGuid: "aaa11111",
       invoices: [{ date: "2026-08-29", lines: [
         { material: "صنف عادي", qty: 10, price: 100, unit1: "علبة", lineTotal: 1000 }
@@ -1412,7 +1412,7 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
     }]
   }];
   const a = await loadAssistant({ fixtures: consistentFixtures });
-  const normal = String((await a.ask(TOKENS.owner, "ماذا اشترى الزبون جهاد التلي؟")).body.reply);
+  const normal = String((await a.ask(TOKENS.owner, "ماذا اشترى الزبون سامر الوهمي؟")).body.reply);
   assert.ok(/إجمالي 1,000 USD/.test(normal), `فاتورة متسقة لم تُظهر إجمالياً صريحاً:\n${normal}`);
   assert.ok(!normal.includes("لم أعرض إجمالي هذه الفاتورة عمداً"), "امتنع عن إجمالي فاتورة متسقة بلا سبب");
 
@@ -1424,7 +1424,7 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
     created_at: new Date().toISOString(),
     summary: { bills: 1, customers: 1, fromDate: "2026-07-08" },
     items: [{
-      name: "جهاد التلي",
+      name: "سامر الوهمي",
       customerGuid: "aaa11111",
       invoices: [{ date: "2026-08-27", lines: [
         // qty×price = 4,593,750 بينما lineTotal المخزَّن = 91,850 — تعارض صريح
@@ -1433,7 +1433,7 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
     }]
   }];
   const b = await loadAssistant({ fixtures: conflictFixtures });
-  const conflict = String((await b.ask(TOKENS.owner, "ماذا اشترى الزبون جهاد التلي؟")).body.reply);
+  const conflict = String((await b.ask(TOKENS.owner, "ماذا اشترى الزبون سامر الوهمي؟")).body.reply);
   assert.ok(/لم أعرض إجمالي هذه الفاتورة عمداً/.test(conflict), `لم يمتنع عن إجمالي الفاتورة المتعارضة:\n${conflict}`);
   assert.ok(!/إجمالي 91,850 USD/.test(conflict), "عرض إجمالياً قاطعاً رغم تعارض وحدة السعر");
   // بند السطر نفسه يبقى معروضاً كما هو دون أي تعديل على lineTotal المخزَّن
@@ -1442,7 +1442,7 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
 
   // ولا رجوع عن الحالة السليمة: الفواتير الافتراضية (متسقة) لا تتأثر بالحارس
   const c = await loadAssistant();
-  const regression = String((await c.ask(TOKENS.owner, "ماذا اشترى الزبون جهاد التلي؟")).body.reply);
+  const regression = String((await c.ask(TOKENS.owner, "ماذا اشترى الزبون سامر الوهمي؟")).body.reply);
   assert.ok(/إجمالي 8,945.5 USD/.test(regression), `فاتورة افتراضية متسقة تأثرت بالحارس الجديد:\n${regression}`);
   assert.ok(!regression.includes("لم أعرض إجمالي هذه الفاتورة عمداً"), "الحارس الجديد سبّب امتناعاً كاذباً على بيانات سليمة");
   ok("حارس تعارض وحدة السعر بفواتير الزبون: يمتنع عن الإجمالي عند التعارض فقط، ولا يمسّ الفواتير السليمة");
