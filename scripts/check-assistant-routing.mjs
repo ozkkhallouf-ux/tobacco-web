@@ -1792,4 +1792,83 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   ok("توصية الشراء تُصدر حكماً «غير محسوم» صراحة عند مخزون قديم (≥12 ساعة) بدل «لا حاجة شراء عاجلة» واثقة، وتبقى واثقة عند مخزون طازج");
 }
 
+// ── ك.ك) دفعات الزبون المبتورة: لا نفي قاطع حين يُحتمل البتر ─────────────────
+{
+  // ملاحظة Codex idx46 على PR #205: tools/ameen-customer-balances-query.sql
+  // يعيد أحدث 40 دفعة فقط لكل زبون (TOP 40)، لا السجل كله. فإن جاءت النتيجة
+  // فارغة بعد الفلترة بفترة صريحة، الجزم بـ«لا دفعات مسجّلة» قد يكون كاذباً:
+  // قد توجد دفعة أقدم فعلاً ضمن الفترة لكنها سقطت خارج نافذة الـ40 المتاحة.
+  const day = (n) => new Date(Date.now() + 180 * 60_000 - n * 86_400_000).toISOString().slice(0, 10);
+  const balanceRow = (items) => [{
+    report_date: new Date().toISOString().slice(0, 10),
+    created_at: new Date().toISOString(),
+    summary: { totalDebitBalance: 0, totalCreditBalance: 0, customersWithDebitBalance: items.length, customersWithCreditBalance: 0, totalCustomers: items.length },
+    items
+  }];
+
+  // الحالة ١: 40 دفعة (السقف بالضبط) ولا واحدة منها ضمن الفترة المطلوبة (اليوم)
+  // ⇒ يجب ألا يُجزم بـ«لا دفعات مسجّلة»، بل يُقال إن النتيجة غير محسومة.
+  const f1 = defaultFixtures();
+  f1["inventory_reports:ameen_customer_balances"] = balanceRow([{
+    key: "زبون سداد الاختبار", name: "زبون سداد الاختبار", balance: 5000, customerGuid: "pay40001",
+    recentPayments: Array.from({ length: 40 }, (_, i) => ({ date: `${day(i + 1)}T00:00:00`, amount: 100 + i, notes: "" }))
+  }]);
+  const a1 = await loadAssistant({ fixtures: f1 });
+  const r1 = await a1.ask(TOKENS.owner, "كشف حساب زبون سداد الاختبار اليوم");
+  const t1 = String(r1.body.reply);
+  assert.ok(!/لا دفعات مسجّلة/.test(t1), `40 دفعة بلا أي منها ضمن الفترة يجب ألا يُجزم بـ«لا دفعات مسجّلة»:\n${t1}`);
+  assert.ok(/لا يمكن الجزم بعدم وجود دفعات/.test(t1), `النتيجة غير المحسومة لم تُذكر صراحة عند بلوغ سقف الـ40 دفعة:\n${t1}`);
+  ok("CASE 1: سجل دفعات ببلوغ سقف الـ40 وفترة صريحة بلا نتائج ⇒ نتيجة غير محسومة لا نفي قاطع");
+
+  // الحالة ٢: أقل من 40 دفعة، والفترة المطلوبة داخل تغطية البيانات الفعلية
+  // (أقدم دفعة متاحة أقدم من بداية الفترة)، ولا دفعات ضمنها ⇒ النفي القاطع
+  // المباشر يبقى صحيحاً كما هو، بلا تغيير.
+  const f2 = defaultFixtures();
+  f2["inventory_reports:ameen_customer_balances"] = balanceRow([{
+    key: "زبون سداد الاختبار", name: "زبون سداد الاختبار", balance: 5000, customerGuid: "pay40002",
+    recentPayments: [
+      { date: `${day(5)}T00:00:00`, amount: 100, notes: "" },
+      { date: `${day(10)}T00:00:00`, amount: 200, notes: "" },
+      { date: `${day(15)}T00:00:00`, amount: 300, notes: "" }
+    ]
+  }]);
+  const a2 = await loadAssistant({ fixtures: f2 });
+  const r2 = await a2.ask(TOKENS.owner, "كشف حساب زبون سداد الاختبار اليوم");
+  const t2 = String(r2.body.reply);
+  assert.ok(/لا دفعات مسجّلة لهذا الحساب في اليوم/.test(t2), `أقل من 40 دفعة وفترة مغطّاة فعلاً يجب أن يبقى النفي القاطع كما هو:\n${t2}`);
+  assert.ok(!/لا يمكن الجزم/.test(t2), `فترة مغطّاة فعلاً بالبيانات لا يجوز أن تحمل تحذير بتر غير لازم:\n${t2}`);
+  ok("CASE 2: سجل دفعات دون الـ40 وفترة داخل تغطية البيانات الفعلية ⇒ النفي القاطع كما هو");
+
+  // الحالة ٣: 40 دفعة (السقف) لكن إحداها فعلاً ضمن الفترة المطلوبة ⇒ تُعرض
+  // طبيعياً بلا أي تحذير بتر زائف.
+  const f3 = defaultFixtures();
+  f3["inventory_reports:ameen_customer_balances"] = balanceRow([{
+    key: "زبون سداد الاختبار", name: "زبون سداد الاختبار", balance: 5000, customerGuid: "pay40003",
+    recentPayments: [
+      { date: `${day(0)}T00:00:00`, amount: 999, notes: "دفعة اليوم" },
+      ...Array.from({ length: 39 }, (_, i) => ({ date: `${day(i + 1)}T00:00:00`, amount: 100 + i, notes: "" }))
+    ]
+  }]);
+  const a3 = await loadAssistant({ fixtures: f3 });
+  const r3 = await a3.ask(TOKENS.owner, "كشف حساب زبون سداد الاختبار اليوم");
+  const t3 = String(r3.body.reply);
+  assert.ok(/999/.test(t3), `40 دفعة مع دفعة فعلية ضمن الفترة يجب أن تُعرض:\n${t3}`);
+  assert.ok(!/لا يمكن الجزم/.test(t3), `وجود دفعة فعلية ضمن الفترة لا يجوز أن يُرفق بتحذير بتر زائف:\n${t3}`);
+  assert.ok(!/لا دفعات مسجّلة/.test(t3), `وجود دفعة فعلية ضمن الفترة لا يجوز أن يُقال معه «لا دفعات مسجّلة»:\n${t3}`);
+  ok("CASE 3: سجل دفعات ببلوغ سقف الـ40 لكن دفعة فعلية ضمن الفترة ⇒ تُعرض طبيعياً بلا تحذير بتر زائف");
+
+  // الحالة ٤: بلا فترة صريحة ⇒ السلوك الحالي (نافذة التقرير كاملة) بلا تغيير
+  const f4 = defaultFixtures();
+  f4["inventory_reports:ameen_customer_balances"] = balanceRow([{
+    key: "زبون سداد الاختبار", name: "زبون سداد الاختبار", balance: 5000, customerGuid: "pay40004",
+    recentPayments: []
+  }]);
+  const a4 = await loadAssistant({ fixtures: f4 });
+  const r4 = await a4.ask(TOKENS.owner, "كشف حساب زبون سداد الاختبار");
+  const t4 = String(r4.body.reply);
+  assert.ok(/لا دفعات مسجّلة لهذا الحساب في نافذة التقرير/.test(t4), `بلا فترة صريحة يجب أن يبقى السلوك كما هو تماماً (نافذة التقرير):\n${t4}`);
+  assert.ok(!/لا يمكن الجزم/.test(t4), `بلا فترة صريحة لا يجوز ظهور تحذير بتر أصلاً:\n${t4}`);
+  ok("CASE 4: بلا فترة صريحة ⇒ السلوك الحالي بلا تغيير");
+}
+
 console.log(`\nتوجيه المساعد الذكي: ${passed}/${passed} تحقق ناجح`);

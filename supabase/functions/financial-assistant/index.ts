@@ -164,6 +164,9 @@ async function readRest(path: string) {
 // لا تنتهي، وبلوغه يُعلَن `partial` صراحةً بدل تمريره كإجمالي.
 const PAGE_SIZE = 1000;
 const HARD_ROW_CAP = 60_000;
+// tools/ameen-customer-balances-query.sql: TOP 40 — أحدث 40 دفعة لكل زبون، وليس
+// السجل كله. مستخدَم لاكتشاف احتمال البتر عند فراغ نتيجة الدفعات المفلترة بفترة.
+const PAYMENTS_ROW_CAP = 40;
 
 async function readPaged(path: (range: string) => string) {
   const rows: Array<Record<string, unknown>> = [];
@@ -1344,8 +1347,40 @@ const TOOLS: Tool[] = [
             .map((p: Record<string, unknown>) =>
               `- ${String(p.date ?? "").slice(0, 10)}: **${money(p.amount)}**${p.notes ? ` — ${String(p.notes)}` : ""}`)
             .join("\n");
+      } else if (ctx.period.explicit) {
+        // المنتِج (ameen-customer-balances-query.sql) يعيد أحدث 40 دفعة فقط لكل
+        // زبون — لا كل السجل. فإن جاءت النتيجة فارغة بعد الفلترة بالفترة، هذا لا
+        // يعني «لا دفعات» بالضرورة: قد تقع الدفعة المطلوبة خارج نافذة الـ40 دفعة
+        // المتاحة أصلاً. الجزم هنا بلا دفعات كان يُنتج إجابة مالية خاطئة صريحة
+        // لزبون نشِط سداده يفوق 40 حركة. (رصدها Codex idx46 على PR #205.)
+        const oldestAvailable = allPayments.length
+          ? allPayments
+            .map((p: Record<string, unknown>) => String(p.date ?? "").slice(0, 10))
+            .filter(Boolean)
+            .sort()[0]
+          : undefined;
+        const windowStart = typeof customer.paymentsWindowStart === "string"
+          ? customer.paymentsWindowStart.slice(0, 10)
+          : undefined;
+        const windowCount = typeof customer.paymentsInWindow === "number" ? customer.paymentsInWindow : undefined;
+
+        let maybeTruncated: boolean;
+        if (windowStart !== undefined && windowCount !== undefined && ctx.period.from >= windowStart) {
+          // الفترة المطلوبة بالكامل داخل نافذة الـ90 يوماً التي يُعلن عنها
+          // المنتِج عددها الفعلي — إشارة موثوقة تحسم البتر يقيناً بدل تخمينه.
+          maybeTruncated = windowCount > allPayments.length;
+        } else {
+          // الفترة تسبق نافذة الـ90 يوماً أو الإشارة غير متوفرة بهذا الحساب:
+          // استدلال آمن من سقف القائمة المعروف (40) وأقدم تاريخ وصل فعلاً.
+          maybeTruncated = allPayments.length >= PAYMENTS_ROW_CAP
+            || (!!oldestAvailable && ctx.period.from < oldestAvailable);
+        }
+
+        text += maybeTruncated
+          ? `\n\n_لا يمكن الجزم بعدم وجود دفعات ضمن ${ctx.period.label} لأن سجل الدفعات المتاح لهذا الحساب محدود لأحدث ${allPayments.length} دفعة فقط، وقد توجد دفعات أقدم خارج هذا السجل._`
+          : `\n\n_لا دفعات مسجّلة لهذا الحساب في ${ctx.period.label}._`;
       } else {
-        text += `\n\n_لا دفعات مسجّلة لهذا الحساب${ctx.period.explicit ? ` في ${ctx.period.label}` : " في نافذة التقرير"}._`;
+        text += `\n\n_لا دفعات مسجّلة لهذا الحساب في نافذة التقرير._`;
       }
 
       const sources = ["inventory_reports:ameen_customer_balances"];
