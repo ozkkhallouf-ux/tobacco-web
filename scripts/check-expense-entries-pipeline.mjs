@@ -30,19 +30,25 @@ assert.doesNotMatch(
   'Ameen SQL must remain SELECT-only',
 );
 
-// حدّا الاستعلام هما حدّا النافذة المُختمة. بلا الحدّ الأعلى يمكن أن يُرفع قيد
-// بتاريخ مستقبلي خارج [windowStart, windowEnd] فترفضه الـRPC ويسقط الخط كله.
+// حدّا الاستعلام هما حدّا النافذة المُختمة حرفياً (لا GETDATE() حيّة داخل SQL)
+// — رصدها Codex: GETDATE() تُقيَّم بساعة SQL Server وقت تنفيذ الاستعلام بينما
+// $windowEnd تُحسَب بساعة Windows لاحقاً، فعبور منتصف الليل بينهما أو تفاوت
+// الساعتين ينتج صفاً بتاريخ خارج النافذة المختومة فترفضه الـRPC بكامله.
+// تثبيت القيمة مرّة واحدة في $today وحقنها كنص في SQL يُسقط هذا التعارض.
 //
 // والحدّ الأعلى **نصف مفتوح** إلزاماً: `en.Date` يحمل مكوّن وقت، فـ`<= اليوم`
 // يقارن بمنتصف الليل ويُسقط قيود اليوم كلها تقريباً، ثم تُختم النافذة حتى
 // اليوم فيُقدَّم مجموع منقوص على أنه متحقَّق — وهو أسوأ من غياب الحدّ أصلاً.
-assert.match(ameenSql, /en\.Date >= DATEADD\(day, -\$Days, CAST\(GETDATE\(\) AS date\)\)/i);
-assert.match(ameenSql, /en\.Date < DATEADD\(day, 1, CAST\(GETDATE\(\) AS date\)\)/i);
-assert.doesNotMatch(ameenSql, /en\.Date <= CAST\(GETDATE\(\) AS date\)/i,
+assert.match(ameenSql, /en\.Date >= '\$windowStart'/i);
+assert.match(ameenSql, /en\.Date < DATEADD\(day, 1, CAST\('\$windowEnd' AS date\)\)/i);
+assert.doesNotMatch(ameenSql, /en\.Date <= '?\$?windowEnd'?/i,
   'الحدّ المغلق يُسقط قيود اليوم لأن en.Date يحمل وقتاً');
+assert.doesNotMatch(ameenSql, /GETDATE\(\)/i,
+  'GETDATE() الحيّة داخل SQL تتعارض مع النافذة المحسوبة بساعة Windows — استعمل $windowStart/$windowEnd المثبَّتتين');
 assert.match(producer, /\[ValidateRange\(1, 31\)\]\[int\]\$Days = 7/);
-assert.match(producer, /\$windowStart = \(Get-Date\)\.AddDays\(-\$Days\)\.ToString\("yyyy-MM-dd"\)/);
-assert.match(producer, /\$windowEnd\s*= \(Get-Date\)\.ToString\("yyyy-MM-dd"\)/);
+assert.match(producer, /\$today\s*=\s*Get-Date\b/);
+assert.match(producer, /\$windowStart = \$today\.AddDays\(-\$Days\)\.ToString\("yyyy-MM-dd"\)/);
+assert.match(producer, /\$windowEnd\s*= \$today\.ToString\("yyyy-MM-dd"\)/);
 
 // ── المنتِج: الاستبدال ذرّي، بلا مسار كتابة مباشر ولا خروج مبكر ─────────────
 // مُنتهٍ بعلامة الاقتباس عمداً: بلا التثبيت، اسمٌ مُصحَّف مثل

@@ -108,6 +108,17 @@ if (-not $supabaseUrl -or -not $apiKey -or -not $syncEmail -or -not $syncPasswor
 # حساب "المصاريف" الرئيسي — مؤكّد عبر discover-ameen-expense-accounts.ps1
 $EXPENSE_PARENT_GUID = "6AE0066F-D39E-4805-83D5-B8DA92F7D7F1"
 
+# النافذة تُحسَب مرّة واحدة هنا من ساعة Windows، وتُستعمل حرفياً (كنص تاريخ)
+# داخل استعلام SQL Server **وكذلك** في $windowStart/$windowEnd المرسلة للـRPC.
+# رصدها Codex: النسخة القديمة كانت تستعمل GETDATE() الحيّة داخل SQL (تُقيَّم
+# بساعة SQL Server وقت تنفيذ الاستعلام) بينما تُحسب $windowEnd لاحقاً بساعة
+# Windows — فعبور منتصف الليل بين الاستعلام وحساب النافذة، أو مجرّد تفاوت
+# الساعتين، يجعل صفاً بتاريخ خارج النافذة المختومة فترفض الـRPC كامل التحديث
+# عند تحقّقها من entry_date. تثبيت القيمة مرّة واحدة يُسقط هذا التعارض تماماً.
+$today       = Get-Date
+$windowStart = $today.AddDays(-$Days).ToString("yyyy-MM-dd")
+$windowEnd   = $today.ToString("yyyy-MM-dd")
+
 $sql = @"
 SELECT
   CAST(en.Date AS date) AS entry_date,
@@ -118,21 +129,16 @@ FROM en000 en
 JOIN ac000 a ON a.GUID = en.AccountGUID
 WHERE a.ParentGUID = '$EXPENSE_PARENT_GUID'
   AND en.Debit > 0
-  AND en.Date >= DATEADD(day, -$Days, CAST(GETDATE() AS date))
-  AND en.Date < DATEADD(day, 1, CAST(GETDATE() AS date))
+  AND en.Date >= '$windowStart'
+  AND en.Date < DATEADD(day, 1, CAST('$windowEnd' AS date))
 ORDER BY en.Date DESC
 "@
 
-# حدّا النافذة المُستبدَلة — هما نفسهما حدّا الاستعلام أعلاه، فعلامة الاكتمال
-# تصف ما رُفع فعلاً لا ما نُوي رفعه.
-#
 # الحدّ الأعلى **نصف مفتوح** عمداً (< غدٍ) لا `<= اليوم`: `en.Date` يحمل مكوّن
-# وقت، فـ`<= CAST(GETDATE() AS date)` يقارن بمنتصف ليل اليوم فيُسقط كل قيد
-# سُجّل اليوم تقريباً — ثم تختم الـRPC النافذة حتى اليوم، فيُقدَّم مجموع منقوص
-# على أنه متحقَّق. وهي نفس صيغة push-sales-line-items.ps1.
+# وقت، فـ`<= '$windowEnd'` يقارن بمنتصف ليل اليوم فيُسقط كل قيد سُجّل اليوم
+# تقريباً — ثم تختم الـRPC النافذة حتى اليوم، فيُقدَّم مجموع منقوص على أنه
+# متحقَّق. وهي نفس صيغة push-sales-line-items.ps1.
 # (رصدها Codex على PR #205 بعد aca9bb2.)
-$windowStart = (Get-Date).AddDays(-$Days).ToString("yyyy-MM-dd")
-$windowEnd   = (Get-Date).ToString("yyyy-MM-dd")
 
 $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 Write-Log "bd2 sahb haraket masareef akher $Days yom..."

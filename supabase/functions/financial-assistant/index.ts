@@ -83,6 +83,23 @@ function json(request: Request, status: number, body: Record<string, unknown>) {
   return new Response(JSON.stringify(body), { status, headers: headers(request) });
 }
 
+// ── سجل تدقيق — رصدها Codex (تنفيذ القراءات الحسّاسة بلا أثر تدقيقي) ─────────
+// سطر log منظّم فقط، لا كتابة قاعدة بيانات: الدالة مقفلة قراءة فقط
+// (scripts/check-assistant-read-only.mjs)، فأي insert هنا يُسقط تلك البوابة.
+// Supabase يلتقط logs الدوال تلقائياً، فهذا كافٍ كأثر تدقيقي بلا فتح مسار كتابة.
+// ممنوع تسجيل نص السؤال أو أي بيانات عائدة للعميل — فقط الفاعل والأداة والنتيجة.
+function auditLog(entry: { actorId: string; role: string; toolId: string; outcome: "ok" | "error"; code?: string }) {
+  console.log(JSON.stringify({
+    audit: "financial_assistant_read",
+    at: new Date().toISOString(),
+    actorId: entry.actorId,
+    role: entry.role,
+    toolId: entry.toolId,
+    outcome: entry.outcome,
+    ...(entry.code ? { code: entry.code } : {})
+  }));
+}
+
 // ── التخويل — يُفرض على الخادم فقط ────────────────────────────────────────────
 async function requireActor(request: Request): Promise<Actor> {
   const auth = request.headers.get("authorization") ?? "";
@@ -483,6 +500,14 @@ function parsePeriod(question: string, fallbackDays = 0): Period {
   if (/(?:^| )الشهر(?: |$)/.test(q)) {
     return { from: `${today.slice(0, 7)}-01`, to: today, label: "هذا الشهر", explicit: true };
   }
+  // سنوات — رصدها Codex: كانت تسقط بلا تطابق فترجع "اليوم" صامتاً لسؤال سنوي كامل.
+  if (/هذه السنه|السنه الحاليه|هالسنه|هذا العام|العام الحالي|هالعام/.test(q)) {
+    return { from: `${today.slice(0, 4)}-01-01`, to: today, label: "هذه السنة", explicit: true };
+  }
+  if (/السنه الماضيه|السنه الفائته|السنه السابقه|العام الماضي|العام الفائت|العام السابق/.test(q)) {
+    const lastYear = String(Number(today.slice(0, 4)) - 1);
+    return { from: `${lastYear}-01-01`, to: `${lastYear}-12-31`, label: "السنة الماضية", explicit: true };
+  }
   if (/الاسبوع|اسبوع|٧ ايام|7 ايام|اخر سبعه/.test(q)) {
     return { from: damascusDate(-6), to: today, label: "آخر 7 أيام", explicit: true };
   }
@@ -810,6 +835,12 @@ type Tool = {
   minRole: Role;
   entity?: "customer" | "item" | "account" | "supplier";
   patterns: Array<{ re: RegExp; w: number }>;
+  // فاصل تعادل النقاط بين أداتين — رصدها Codex: "مقبوضات الصندوق اليوم" تُسجّل
+  // 6 لكل من المقبوضات (كلمة الفعل المالي الصريحة) والصندوق (مكان/وعاء عام قد
+  // يُسأل عن رصيده أو عمّا دخله)، و"أرباح المبيعات اليوم" تُسجّل 6 لكل من
+  // الأرباح (نتيجة صريحة) والمبيعات (أحد مدخلات تلك النتيجة). عند التعادل
+  // الفعل/النتيجة المالية الصريحة تُرجَّح على الوعاء/المُدخَل العام. الافتراضي 0.
+  priority?: number;
   run: (ctx: ToolContext) => Promise<ToolResult>;
 };
 
@@ -898,6 +929,7 @@ const TOOLS: Tool[] = [
     id: "collections",
     title: "المقبوضات والدفعات الواردة",
     minRole: "owner",
+    priority: 1,
     patterns: [
       { re: /قبضنا|مقبوضات|تحصيل|دفعات (?:اليوم|الزبائن)|وارد/, w: 6 },
       { re: /كم قبض|شو قبضنا/, w: 4 }
@@ -1105,6 +1137,7 @@ const TOOLS: Tool[] = [
   {
     id: "profit",
     title: "الأرباح",
+    priority: 1,
     minRole: "owner",
     patterns: [{ re: /ربح|ارباح|خساره|هامش|مردود/, w: 6 }],
     async run(ctx) {
@@ -2181,7 +2214,11 @@ function planDeterministic(question: string, rank: number): Plan {
     let score = 0;
     for (const { re, w } of tool.patterns) if (re.test(q)) score += w;
     if (score < MIN_PLAN_SCORE) continue;
-    if (!best || score > best.score) best = { tool, score, entityText: tool.entity ? extractEntity(question) : "" };
+    // تعادل النقاط لا يُحسم بترتيب التسجيل في TOOLS — priority أعلى يفوز، والتعادل
+    // فيها أيضاً يبقي أول تسجيل (استقرار)، فلا اعتماد ضمنياً على مكان الأداة بالمصفوفة.
+    if (!best || score > best.score || (score === best.score && (tool.priority ?? 0) > (best.tool.priority ?? 0))) {
+      best = { tool, score, entityText: tool.entity ? extractEntity(question) : "" };
+    }
   }
   return best;
 }
@@ -2270,6 +2307,7 @@ Deno.serve(async (request) => {
       result = await chosen.tool.run({ question, entityText: chosen.entityText, role, period });
     } catch (error) {
       const code = String((error as { message?: unknown } | undefined)?.message ?? "read_failed");
+      auditLog({ actorId: actor.id, role: actor.role, toolId: chosen.tool.id, outcome: "error", code });
       // فشل مصدر = اعتراف صريح. لا يُستبدل برقم من مصدر آخر ولا بتقدير.
       return json(request, 200, {
         reply: `تعذّرت قراءة مصدر البيانات الخاص بـ**${chosen.tool.title}** (${code}).\n\n`
@@ -2284,6 +2322,8 @@ Deno.serve(async (request) => {
         externalDataShared: false
       });
     }
+
+    auditLog({ actorId: actor.id, role: actor.role, toolId: chosen.tool.id, outcome: "ok" });
 
     return json(request, 200, {
       reply: result.text,

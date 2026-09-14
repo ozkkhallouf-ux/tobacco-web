@@ -27,10 +27,10 @@
 
 begin;
 
-create index if not exists idx_expense_entries_created_at
-  on public.expense_entries (created_at desc);
-
 -- ── متطلّب مسبق: الجدول وهوية كاتب المزامنة ──────────────────────────────
+-- يجب أن يسبق أي أمر يفترض وجود الجدول (مثل create index أدناه) — رصدها
+-- Codex: ترتيبها معكوساً كان يُسقط رسالة الخطأ الواضحة برسالة PostgreSQL
+-- الافتراضية "relation does not exist" عند تطبيق هذا الملف قبل جدوله.
 do $$
 begin
   if to_regclass('public.expense_entries') is null then
@@ -42,6 +42,14 @@ begin
       'أوقفت التنفيذ: الدالة public.sales_line_items_is_sync_writer() غير موجودة. طبّق sales-line-items-atomic-refresh.sql أولاً.';
   end if;
 end $$;
+
+create index if not exists idx_expense_entries_created_at
+  on public.expense_entries (created_at desc);
+
+-- منح استخدام التسلسل مطلوب للإدراج على bigserial — رصدها Codex: الإعداد
+-- المرجعي (expense-entries-table.sql) يمنح insert على الجدول فقط، فتمرّ
+-- RLS لكاتب المزامنة ثم يفشل PostgreSQL عند تخصيص id لغياب USAGE.
+grant usage, select on sequence public.expense_entries_id_seq to authenticated;
 
 -- هوية كاتب المزامنة **مُفوَّضة** لا مكرَّرة. المنتِجان (المبيعات والمصاريف)
 -- يصادقان بنفس TOBACCO_SYNC_EMAIL، فالمعرّف واحد. وتكراره حرفياً هنا كان
