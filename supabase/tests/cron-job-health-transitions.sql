@@ -123,7 +123,10 @@ begin
    select is_healthy,last_alert_at,last_alerted_terminal_at,last_alerted_health
     into previous_healthy,previous_alert_at,previous_alerted_terminal_at,previous_alerted_health
     from pg_temp.health_probe where task_key=p_key;
-   select health_incident_since into previous_alerted_health_since
+   -- مؤهَّل باسم الجدول لتفادي غموض plpgsql بين اسم العمود والمتغيّر المحلي
+   -- health_incident_since (نفس الاسم تماماً) — عطل حقيقي اكتُشف بالتنفيذ
+   -- الفعلي (psql) لا بالفحص النصّي وحده، غير مرتبط بإصلاح الجولة الحالية.
+   select health_incident_probe.health_incident_since into previous_alerted_health_since
     from pg_temp.health_incident_probe where task_key=p_key;
 
    -- الإصلاح: 'failed' حادثة مكتملة — لا تُنذَر ثانية لمجرد مرور ساعة إن كانت
@@ -132,9 +135,18 @@ begin
    -- لكن انتقالاً حقيقياً بين تصنيفين (مثلاً failed ⇒ stuck) يُنذَر عنه فوراً
    -- بصرف النظر عن عمر آخر إنذار — Codex P1، الجولة الثالثة على PR #220.
    if job_health='failed' then
+    -- انتقال حقيقي (previous_alerted_health مختلف) يُنذَر فوراً هنا أيضاً —
+    -- مثال: مهمة أُنذرت كـ'failed'، عُطِّلت (last_alerted_health='disabled')،
+    -- ثم أُعيد تفعيلها بلا تشغيل جديد فعادت 'failed' بنفس terminal_at
+    -- القديم؛ previous_alerted_terminal_at يبقى مطابقاً وpervious_healthy
+    -- يبقى false أصلاً فلا يتغيّر أي شرط آخر، فينزلق الانتقال بلا إنذار.
+    -- previous_alerted_health is null يعني حادثة موروثة سبقت وجود هذا العمود
+    -- (سيناريو ١٢ أدناه) — لا يُعتبر انتقالاً حقيقياً كي لا يُطلق إنذاراً كاذباً
+    -- فوق التهيئة الآمنة في 05 (التي سوَّت terminal_at أصلاً بلا حاجة لإنذار).
     should_alert:=previous_healthy is distinct from false
      or previous_alert_at is null
-     or previous_alerted_terminal_at is distinct from terminal_at;
+     or previous_alerted_terminal_at is distinct from terminal_at
+     or (previous_alerted_health is not null and previous_alerted_health is distinct from job_health);
    else
     should_alert:=previous_healthy is distinct from false
      or previous_alert_at is null
@@ -151,7 +163,14 @@ begin
     -- (تذكير دوري) يُبقي health_incident_since كما هي فيبقى نفس المفتاح.
     -- هذا هو بالضبط الفارق بين 07 (job_health وحده) و08 (+ health_incident_since).
     if job_health='failed' then
-     failure_dedupe_key:='failure:'||p_key||':'||to_char(terminal_at,'YYYYMMDDHH24MISS');
+     -- انتقال حقيقي (previous_alerted_health مختلف) على terminal_at غير
+     -- متغيّر يحتاج طابعاً طازجاً كي لا يصطدم بمفتاح 'failed' الأصلي لنفس
+     -- terminal_at (المُستهلَك أصلاً عند الإنذار الأول قبل التعطيل).
+     if previous_alerted_health is distinct from job_health then
+      failure_dedupe_key:='failure:'||p_key||':'||to_char(terminal_at,'YYYYMMDDHH24MISS')||':'||to_char(p_now,'YYYYMMDDHH24MISSMS');
+     else
+      failure_dedupe_key:='failure:'||p_key||':'||to_char(terminal_at,'YYYYMMDDHH24MISS');
+     end if;
     else
      if previous_alerted_health is distinct from job_health then
       health_incident_since:=p_now;
@@ -774,6 +793,62 @@ begin
   assert (select count(*) from notify_probe where task_key=k and event_type='project_task_failure')=4,
     '101: بعد تجاوز 60 دقيقة على تذكير stuck الثالث ⇒ تذكير دوري رابع يخرج'; n:=n+1;
 
-  assert n >= 101, format('عدد التأكيدات المنفَّذة %s أقل من 101 — حُذف تأكيد؟', n);
+  -- =====================================================================
+  -- ١٩) ملاحظة Codex P1 على PR #220 (كشف أثناء إعادة الدمج): مهمة أُنذرت
+  --   'failed'، ثم عُطِّلت، ثم أُعيد تفعيلها بلا تشغيل جديد — نفس terminal_at
+  --   القديم. previous_alerted_terminal_at يبقى مطابقاً وprevious_healthy
+  --   يبقى false أصلاً (كانت غير سليمة وهي معطّلة) فلا شرط من شروط 'failed'
+  --   الأصلية يتغيّر، وينزلق انتقال disabled⇐failed هذا بلا إنذار رغم أن آخر
+  --   ما رآه المشغّل هو "المهمة معطلة" لا "فشل نشِط الآن". الإصلاح: previous_
+  --   alerted_health مختلف عن job_health يُنذَر فوراً هنا أيضاً — تماماً كما في
+  --   فرع stuck/disabled — مع مفتاح dedupe يحمل طابعاً طازجاً كي لا يصطدم
+  --   بمفتاح 'failed' الأصلي المُستهلَك عند أول إنذار.
+  -- =====================================================================
+  k:='cron:seq19-failed-disabled-reenable-failed'; j:=19;
+
+  -- (أ) فشل نهائي أول ⇒ إنذار 'failed' الأول بمفتاح terminal_at الخام.
+  insert into runs_probe values (j,'failed',t0-interval '5 minutes');
+  v:=pg_temp.monitor_cycle(k,j,true,t0);
+  assert v='failed', '102: فشل نهائي أول ⇒ failed'; n:=n+1;
+  assert (select count(*) from notify_probe where task_key=k and event_type='project_task_failure')=1,
+    '103: إنذار الفشل الأول خرج'; n:=n+1;
+
+  -- (ب) تعطيل المهمة خلال أقل من 60 دقيقة ⇒ انتقال حقيقي (failed⇐disabled)
+  --   يُنذَر فوراً كالمعتاد (07/08 يعالجان فرع stuck/disabled بالفعل).
+  v:=pg_temp.monitor_cycle(k,j,false,t0+interval '5 minutes');
+  assert v='disabled', '104: تعطيل خلال أقل من ساعة من إنذار الفشل ⇒ disabled'; n:=n+1;
+  assert (select count(*) from notify_probe where task_key=k and event_type='project_task_failure')=2,
+    '105: انتقال failed⇐disabled يُنذَر فوراً'; n:=n+1;
+
+  -- (ج) إعادة تفعيل بلا تشغيل جديد (لا صف جديد في runs_probe) ⇒ نفس
+  --   terminal_at القديم يعود إلى 'failed'. previous_alerted_health='disabled'
+  --   يختلف عن job_health='failed' الآن — هذا بالضبط الانتقال الذي كان
+  --   ينزلق بلا إنذار قبل الإصلاح.
+  v:=pg_temp.monitor_cycle(k,j,true,t0+interval '10 minutes');
+  assert v='failed', '106: إعادة تفعيل بلا تشغيل جديد ⇒ failed بنفس terminal_at القديم'; n:=n+1;
+  assert (select count(*) from notify_probe where task_key=k and event_type='project_task_failure')=3,
+    '107: انتقال disabled⇐failed بلا تشغيل جديد يُنذَر فوراً — هذا العطل الذي كشفه Codex ولم يُصلَح قبل هذا السيناريو'; n:=n+1;
+
+  -- (د) مفتاح الإنذار الثالث (الانتقال) مختلف تماماً عن مفتاح الإنذار الأول
+  --   لنفس terminal_at — لولا الطابع الطازج لاصطدم بمفتاح 'failed' الأصلي
+  --   ولم يخرج الإنذار رغم أن should_alert صحيح.
+  assert (select dedupe_key from notify_probe where task_key=k order by seq desc limit 1)
+    is distinct from (select dedupe_key from notify_probe where task_key=k order by seq asc limit 1),
+    '108: مفتاح انتقال disabled⇐failed مستقل عن مفتاح إنذار failed الأول — لا اصطدام رغم نفس terminal_at'; n:=n+1;
+
+  -- (هـ) استمرار 'failed' بنفس terminal_at (لا انتقال جديد، previous_alerted_health
+  --   يطابق job_health الآن) خلال أقل من 60 دقيقة ⇒ لا تكرار — هذا يثبت أن
+  --   الإصلاح لم يُحوِّل 'failed' إلى تذكير دوري (السلوك الأصلي المقصود بـ05).
+  v:=pg_temp.monitor_cycle(k,j,true,t0+interval '20 minutes');
+  assert (select count(*) from notify_probe where task_key=k and event_type='project_task_failure')=3,
+    '109: استمرار نفس failed بنفس terminal_at ⇒ لا إنذار رابع'; n:=n+1;
+
+  -- (و) حتى بعد تجاوز 60 دقيقة، استمرار نفس failed بنفس terminal_at يبقى
+  --   بلا تذكير دوري — 'failed' حادثة مكتملة لا حالة جارية.
+  v:=pg_temp.monitor_cycle(k,j,true,t0+interval '90 minutes');
+  assert (select count(*) from notify_probe where task_key=k and event_type='project_task_failure')=3,
+    '110: استمرار نفس failed بعد تجاوز 60 دقيقة أيضاً ⇒ لا تذكير دوري (يبقى سلوك 05 كما هو)'; n:=n+1;
+
+  assert n >= 110, format('عدد التأكيدات المنفَّذة %s أقل من 110 — حُذف تأكيد؟', n);
   raise notice 'cron state transitions: % تأكيداً — كلها نجحت ✓', n;
 end $$;

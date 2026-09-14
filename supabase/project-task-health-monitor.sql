@@ -397,8 +397,23 @@ begin
    -- نفسها لم تتغيّر (لا محاولة جديدة)؛ 'stuck'/'disabled' حالتان جاريتان
    -- فتبقيان على الحارس الزمني الأصلي (التذكير الدوري مقصود لهما).
    if job_health='failed' then
+    -- Codex P1 (PR #220، ملاحظة إضافية): previous_alerted_terminal_at وحدها تفترض أن
+    -- عودة terminal_at نفسها تعني "لا جديد" — خطأ حين تكون آخر حالة أُنذر عنها فعلياً
+    -- تصنيفاً مختلفاً (disabled) لنفس terminal_at القديم: مهمة أُنذرت كـ'failed' ثم
+    -- عُطِّلت (last_alerted_health='disabled')، وأُعيد تفعيلها بلا تشغيل جديد — تعود
+    -- 'failed' بنفس terminal_at القديم، فيبقى previous_alerted_terminal_at مطابقاً
+    -- ويبقى previous_healthy=false أصلاً (عُطِّلت وهي غير سليمة) فلا يتغيّر أي شرط —
+    -- ينزلق الانتقال بلا إنذار رغم أن الحالة الحيّة الآن غير معروفة للمشغّل (آخر ما
+    -- رآه "المهمة معطلة"). انتقال تصنيف حقيقي (previous_alerted_health مختلف) يستحق
+    -- إنذاره فوراً هنا أيضاً، تماماً كما في فرع stuck/disabled أدناه.
+    -- previous_alerted_health is null يعني حادثة موروثة سبقت وجود هذا العمود
+    -- أصلاً (لا انتقال تصنيف حقيقي رُصد قط) — نفس سيناريو الترحيل في proposed/05
+    -- (last_alerted_terminal_at كانت NULL قبل 04)؛ اعتباره "انتقالاً" هنا كان
+    -- سيُطلق إنذاراً كاذباً واحداً فوراً على كل صف قديم رغم أن التهيئة الآمنة
+    -- في 05 سوَّت terminal_at أصلاً بلا حاجة لإنذار — لذا يُشترط NOT NULL.
     should_alert:=previous_healthy is distinct from false or previous_alert_at is null
-     or previous_alerted_terminal_at is distinct from terminal_at;
+     or previous_alerted_terminal_at is distinct from terminal_at
+     or (previous_alerted_health is not null and previous_alerted_health is distinct from job_health);
    else
     -- Codex P1 (PR #220، الجولة الثالثة): الحارس الزمني الساعي وحده يفترض أن
     -- previous_alert_at الحديث يعني أن هذه الحالة بعينها أُنذر عنها بالفعل —
@@ -426,7 +441,17 @@ begin
     -- يُنذَر فوراً، والاستمرار على نفس التصنيف يبقي نفس المفتاح فيعمل التذكير
     -- الدوري الساعي كما كان بلا أي تغيير في مهلته.
     if job_health='failed' then
-     failure_dedupe_key:='project-cron-failure:'||job_record.jobname||':'||to_char(terminal_at,'YYYYMMDDHH24MISS');
+     -- نفس علاج job_health أدناه لحالتَي stuck/disabled: مفتاح terminal_at وحده يصطدم
+     -- مع مفتاح إنذار 'failed' الأصلي (نفس terminal_at) حين يكون هذا انتقالاً حقيقياً
+     -- (previous_alerted_health مختلف، كإعادة تفعيل مهمة كانت معطّلة بلا تشغيل جديد)
+     -- لا تكراراً لنفس الحادثة — فيُسقَط الإنذار الجديد بصمت رغم أن should_alert صحيح.
+     -- إلحاق طابع انتقال طازج بالمفتاح فقط عند اختلاف previous_alerted_health يحلّ هذا
+     -- بلا مساس بالسلوك الأصلي (dedupe بـterminal_at وحده) حين لا يوجد انتقال تصنيف.
+     if previous_alerted_health is distinct from job_health then
+      failure_dedupe_key:='project-cron-failure:'||job_record.jobname||':'||to_char(terminal_at,'YYYYMMDDHH24MISS')||':'||to_char(now(),'YYYYMMDDHH24MISSMS');
+     else
+      failure_dedupe_key:='project-cron-failure:'||job_record.jobname||':'||to_char(terminal_at,'YYYYMMDDHH24MISS');
+     end if;
     else
      -- proposed/08 (PR #220، ملاحظة Codex P1 جديدة على 07): job_health وحده
      -- يحلّ انتقالاً حقيقياً بين تصنيفين لكن لا يحلّ عودة *نفس* التصنيف مرتين
