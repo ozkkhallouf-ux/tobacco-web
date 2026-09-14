@@ -1177,27 +1177,242 @@ function findReturnInvoiceForMovement(customer, movement) {
   return invs.find((x) => dateMatch(x) && amtMatch(x)) || invs.find((x) => amtMatch(x)) || null;
 }
 
-// كمية سطر الفاتورة بشكل مقروء (نفضّل الوحدة الأكبر إن وُجدت).
-// لا نعرض سعر/إجمالي السطر لأن أرقام الأسطر المفردة بمصدر الأمين غير دقيقة
-// (مجموعها لا يطابق إجمالي الفاتورة)؛ الموثوق هو إجمالي الفاتورة فقط.
-// قيمة السطر الفعلية. مصدر الحقيقة هو `lineTotal` القادم من الأمين
-// (Qty × Price كما يسجّلهما) — لا يُعاد حسابه من السعر المعروض.
-// **العطل الذي يعالجه:** المستند كان يعرض «سعر الوحدة» وحده، وهو سعر الوحدة
-// الكبرى (سعر الكرتونة 403)، فيُقرأ على أنه قيمة السطر. نصف كرتونة قيمتها
-// 201.50 لا 403. السعر يبقى سعر وحدة، والقيمة تصير عموداً مستقلاً.
+// ═══ حسم أساس سعر كل سطر بمطابقة إجمالي الفاتورة (الرقم الموثوق الوحيد) ═══
 //
-// حين يكون أساس أسعار الفاتورة الوحدة الكبرى (`unit2`) يكون `Qty × Price`
-// القادم من الأمين محسوباً على أساس مختلف، فنحسب القيمة من الكمية بالوحدة
-// الكبرى — نفس المنطق الذي يحسم به `invoicePriceBasis` أساس السعر.
+// **العطل المُثبت (فاتورة #733 بتاريخ 2026-09-13):** عمود إجمالي السطر القادم من
+// الأمين (`lineTotal`) يساوي `Price × Qty` و`Qty` بالوحدة الصغرى (كروز) بينما
+// `Price` نفسه سعر الوحدة الكبرى (كرتونة) — فكرتونة واحدة سعرها 286$ طُبعت
+// 14,300$ (286 × 50). فلا `lineTotal` ولا `lineTotalSource` كافيان للحكم: القيمة
+// «من الأمين» نفسها مبنية على وحدة خاطئة.
+//
+// ولا يكفي كذلك حسم أساس واحد لكل الفاتورة: في #733 أربعة أسطر مسعّرة بالكرتونة
+// وسطر واحد (غلواز قصير أصفر، 8.04$ سعر الكروز) مسعّر بالكروز، فلا مجموع
+// `price × qty` ولا مجموع `price × qtyUnits` يطابق الإجمالي 1163.6$ — الخلطة
+// وحدها تطابقه (286 + 290 + 308 + 159 + 120.6).
+//
+// لذلك لكل سطر مرشّحان فقط، `price × qty` (أساس الكروز) و`price × qtyUnits`
+// (أساس الكرتونة)، ونبحث عن التوزيع الذي مجموعه يساوي إجمالي الفاتورة. التطابق
+// دليل حسابي على الأساس، ولا يعتمد على اسم صنف ولا على استثناء لصنف بعينه.
+//
+// **قيس على بيانات الجهاز الحقيقية** (آخر تقرير `ameen_customer_invoices`، 669
+// فاتورة): 308 فاتورة مجموع `lineTotal` فيها يطابق الإجمالي فتبقى كما هي بلا
+// مساس، و361 لا تطابق — منها 162 يحسمها أساس واحد و199 تحتاج الخلطة. والـ361
+// كلها فُحصت سطراً بسطر بالكود الحقيقي: 361 توزيعاً، 358 منها مجموعه مضبوط
+// تماماً و3 داخل هامش التقريب (أسوأ فرق 0.022$)، و351 بحلٍّ وحيد. ولا سطر واحد
+// قيمته أكبر من إجمالي فاتورته، وسعر الوحدة المعروض × الكمية المعروضة = قيمة
+// السطر في كل سطر. وفروق المجموع في البيانات كلها إما صفر/تقريب أو انفجار وحدة؛
+// ولا فاتورة واحدة فرقها حسم رأس فاتورة (الثلاث الملتبسة #373 و#187 و#330 فرق
+// كل منها يساوي بالضبط مجموع فروق أسطرها المقروءة بالوحدة الخطأ).
+//
+// هامش التطابق يتبع خطأ التمثيل لا نسبة من الإجمالي: `qtyUnits` مدوّرة إلى ثلاث
+// خانات في أداة الرفع، فخطؤها الأقصى لكل سطر 0.0005 × السعر.
+function invoiceBasisTolerance(lines) {
+  let sumPrice = 0;
+  for (const line of lines) sumPrice += Math.abs(Number(line?.price || 0));
+  return Math.max(0.05, 0.0006 * sumPrice);
+}
+
+// قيمتا السطر الممكنتان. `switchable = false` يعني لا خيار (كمية بوحدة واحدة فقط،
+// أو سعر صفر، أو معامل وحدة = 1) فيُثبَّت السطر على قيمته الوحيدة ولا يدخل البحث.
+function invoiceLineCandidates(line) {
+  const price = Number(line?.price || 0);
+  const qty = Number(line?.qty || 0);
+  const qtyUnits = Number(line?.qtyUnits || 0);
+  const unit1 = price * qty;
+  const unit2 = price * qtyUnits;
+  return {
+    unit1,
+    unit2,
+    hasUnit1: qty > 0,
+    hasUnit2: qtyUnits > 0,
+    switchable: qty > 0 && qtyUnits > 0 && Math.abs(unit1 - unit2) > 1e-9
+  };
+}
+
+// سقف خطوات البحث. البحث مقلّم بالفروق مرتّبةً تنازلياً وبمجاميع اللاحقة، فينتهي
+// عملياً بمئات الخطوات (180 فاتورة حقيقية في 30 مللي ثانية)؛ السقف حماية من
+// فاتورة شاذة لا أكثر، وتجاوزه يعني «لا حكم» فيبقى السلوك القديم.
+const INVOICE_BASIS_SEARCH_BUDGET = 200000;
+
+// «مضبوط» = نصف قرش. المبالغ بثلاث خانات عشرية، فأي فرق أصغر خطأ عائم لا أكثر.
+const INVOICE_BASIS_EXACT_TOLERANCE = 0.005;
+
+// الخطة محسوبة لكل مصفوفة أسطر مرة واحدة: مسارات الطباعة تبني كائن فاتورة جديداً
+// لكل سطر (`{ total, lines }` داخل `map`) بينما مصفوفة الأسطر نفسها ثابتة.
+const INVOICE_BASIS_PLAN_CACHE = new WeakMap();
+
+// خطة أساس أسطر الفاتورة (`Map` من السطر إلى "unit1"/"unit2"/"stored")، أو `null`
+// حين لا حكم قاطع فيبقى السلوك القديم كما هو تماماً.
+//
+// «لا حكم» يعني أحد ثلاثة: لا إجمالي موثوق للفاتورة، أو مجموع القيم المخزَّنة
+// يطابق الإجمالي أصلاً (فالمخزَّن موثوق ولا سبب لتجاهله)، أو لا يوجد توزيع
+// مرشّحات يطابق الإجمالي. لا يُخمَّن أساس بلا مطابقة.
+//
+// حين يطابق أكثر من توزيع (10 فواتير من 361) نختار الوحيد المحسوم ترتيبياً:
+// الأسطر ذات الفرق الأكبر بين المرشّحين تُقرأ بأساس الكرتونة.
+//
+// **تحقّق مستقل على لائحة الأسعار المعتمدة** (`approved_price_items`): سعر السطر
+// يطابق `unit1_price` أو `unit2_price` وبينهما معامل 10–50، فاللائحة أوراكل
+// مستقل تماماً عن الحساب. على مواضع التأرجح الفعلية في الفواتير العشر (202 سطراً):
+// 201 سطراً أساسه المطبَّق يطابق اللائحة، صفر مخالف، وسطر واحد بلا حكم صريح
+// («مزايا سبيشل مكس» في #163: سعره 10$ مقابل `unit1_price = 5.917` و
+// `unit2_price = 142` — أقرب إلى الكروز بـ8.4 أضعاف لكن خارج نطاق التأكيد
+// الصارم). وخطة اللائحة نفسها تُجمِّع إلى إجمالي الفاتورة بالضبط في 8 من الـ10
+// (والاثنتان الباقيتان فيهما سطر بلا سجل في اللائحة إطلاقاً).
+function invoiceLineBasisPlan(inv) {
+  const lines = Array.isArray(inv?.lines) ? inv.lines : null;
+  const total = Number(inv?.total || 0);
+  if (!lines || !lines.length || !(total > 0)) return null;
+  const cached = INVOICE_BASIS_PLAN_CACHE.get(lines);
+  if (cached && cached.total === total) return cached.plan;
+  const plan = computeInvoiceLineBasisPlan(lines, total);
+  INVOICE_BASIS_PLAN_CACHE.set(lines, { total, plan });
+  return plan;
+}
+
+function computeInvoiceLineBasisPlan(lines, total) {
+  const tol = invoiceBasisTolerance(lines);
+
+  // مجموع القيم المخزَّنة يطابق الإجمالي ⇒ المخزَّن موثوق لهذه الفاتورة فلا نمسّها.
+  // يشترط أن يحمل **كل** سطر قيمة مخزَّنة، وإلا فالمجموع منقوص ومقارنته بلا معنى.
+  // الصفر قيمة مخزَّنة صحيحة لا قيمة غائبة: بيانات الجهاز فيها أسطر سعرها صفر
+  // (`price = 0`) وقيمتها صفر، ورفضها يُخرج فاتورة سليمة كاملةً من هذه البوابة
+  // ويرميها في البحث بلا سبب (فاتورة #102 مثلاً: مجموعها المخزَّن يطابق إجماليها
+  // 522.633$ بالضبط وفيها سطر صفري واحد).
+  let storedSum = 0;
+  let storedComplete = true;
+  for (const line of lines) {
+    const stored = Number(line?.lineTotal);
+    if (!Number.isFinite(stored) || stored < 0) { storedComplete = false; break; }
+    storedSum += stored;
+  }
+  if (storedComplete && Math.abs(storedSum - total) <= tol) return null;
+
+  // كل سطر قابل للتبديل يبدأ بأساس الكرتونة، والمثبَّت يأخذ قيمته الوحيدة. ثم
+  // نبحث عن مجموعة الأسطر التي تُقرأ بأساس الكروز فيطابق المجموع الإجمالي.
+  const basis = new Map();
+  const buckets = new Map();
+  let base = 0;
+  for (const line of lines) {
+    const candidates = invoiceLineCandidates(line);
+    if (!candidates.switchable) {
+      if (candidates.hasUnit2) { basis.set(line, "unit2"); base += candidates.unit2; }
+      else if (candidates.hasUnit1) { basis.set(line, "unit1"); base += candidates.unit1; }
+      // سطر بلا كمية بأي وحدة: لا مرشّح محسوب له، فتبقى قيمته المخزَّنة كما هي.
+      else { basis.set(line, "stored"); base += Number(line?.lineTotal || 0); }
+      continue;
+    }
+    basis.set(line, "unit2");
+    base += candidates.unit2;
+    // الأسطر المتطابقة في المرشّحين تُجمَّع: أيّها يُقرأ بالكروز لا يغيّر المجموع،
+    // فالبحث على «كم سطراً من المجموعة» لا «أيّ سطر» — يقلّص البحث ويمنع تعدّد
+    // حلول لا فرق بينها إلا تبديل مواضع متكافئة.
+    const key = `${candidates.unit1.toFixed(6)}|${candidates.unit2.toFixed(6)}`;
+    const bucket = buckets.get(key);
+    if (bucket) bucket.lines.push(line);
+    else buckets.set(key, { delta: candidates.unit1 - candidates.unit2, lines: [line] });
+  }
+
+  const target = total - base;
+  if (Math.abs(target) <= tol) return basis;
+
+  const groups = [...buckets.values()].sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
+  const count = groups.length;
+  if (!count) return null;
+
+  // حدّا ما تستطيعه المجموعات المتبقية، للتقليم: لا معنى لمتابعة فرع المتبقّي فيه
+  // خارج مدى مجاميعها الممكنة.
+  const suffixMax = new Array(count + 1).fill(0);
+  const suffixMin = new Array(count + 1).fill(0);
+  for (let i = count - 1; i >= 0; i -= 1) {
+    const span = groups[i].delta * groups[i].lines.length;
+    suffixMax[i] = suffixMax[i + 1] + Math.max(0, span);
+    suffixMin[i] = suffixMin[i + 1] + Math.min(0, span);
+  }
+
+  const picks = new Array(count).fill(0);
+  let steps = 0;
+  const searchWithin = (limit) => {
+    const walk = (index, remaining) => {
+      steps += 1;
+      if (steps > INVOICE_BASIS_SEARCH_BUDGET) return "budget";
+      if (Math.abs(remaining) <= limit) return "found";
+      if (index >= count) return null;
+      if (remaining > suffixMax[index] + limit || remaining < suffixMin[index] - limit) return null;
+      const group = groups[index];
+      for (let taken = 0; taken <= group.lines.length; taken += 1) {
+        picks[index] = taken;
+        const outcome = walk(index + 1, remaining - group.delta * taken);
+        if (outcome) return outcome;
+      }
+      picks[index] = 0;
+      return null;
+    };
+    return walk(0, target);
+  };
+
+  // التوزيع المضبوط أولاً، وهامش التقريب احتياطاً فقط.
+  //
+  // **العطل الذي يعالجه (فاتورة #698، 57 سطراً):** الهامش يكبر بعدد الأسطر
+  // (0.0006 × مجموع الأسعار = 3.644$ هنا)، فقَبِل أول توزيع يقع داخله وكان
+  // بعيداً 3.234$ عن الإجمالي — رغم وجود توزيع مضبوط تماماً. نتيجته أن سطر «تي
+  // اس سليم فضي» (سعره 3.3$ سعر كروز) قُرئ كرتونةً فصارت قيمته 0.066$ بدل 3.3$.
+  // تحقّق على لائحة الأسعار المعتمدة: `unit1_price = 3.3` و`unit2_price = 165`.
+  // فالهامش يُسمح به حين لا يوجد توزيع مضبوط (تقريب `qtyUnits` إلى ثلاث خانات
+  // يمنع التطابق التام في أصناف معاملها 12 أو 24)، لا قبل أن يُجرَّب المضبوط.
+  let outcome = searchWithin(INVOICE_BASIS_EXACT_TOLERANCE);
+  if (outcome !== "found" && outcome !== "budget" && tol > INVOICE_BASIS_EXACT_TOLERANCE) {
+    picks.fill(0);
+    outcome = searchWithin(tol);
+  }
+  if (outcome !== "found") return null;
+
+  groups.forEach((group, index) => {
+    for (let i = 0; i < picks[index]; i += 1) basis.set(group.lines[i], "unit1");
+  });
+  return basis;
+}
+
+// قيمة السطر الفعلية، عموداً مستقلاً عن سعر الوحدة.
+// **العطل الأول الذي عالجه هذا العمود:** المستند كان يعرض «سعر الوحدة» وحده، وهو
+// سعر الوحدة الكبرى (سعر الكرتونة 403)، فيُقرأ على أنه قيمة السطر. نصف كرتونة
+// قيمتها 201.50 لا 403. السعر يبقى سعر وحدة، والقيمة تصير عموداً مستقلاً.
+//
+// ترتيب مصادر القيمة بعد إصلاح #733 (2026-09-13):
+//   1) خطة الفاتورة (`invoiceLineBasisPlan`) حين تكون قاطعة — وهي وحدها المسنودة
+//      بمطابقة إجمالي الفاتورة، الرقم الموثوق الوحيد من الأمين.
+//   2) القيمة المخزَّنة `stored` (Qty × Price كما سجّله الأمين لهذا السطر) حين لا
+//      خطة: هي محسوبة سطراً بسطر بخلاف `invoicePriceBasis` التي تحسم أساساً
+//      واحداً لكل الفاتورة وقد تُخطئ سطراً أساسه مختلف عن غالبية الفاتورة.
+//   3) إعادة الحساب حسب `invoicePriceBasis` حين لا خطة ولا قيمة مخزَّنة موثوقة.
+//
+// `stored` ليس مصدر حقيقة مطلقاً: الخطة تتقدّم عليه لأن العمود القادم من الأمين قد
+// يكون هو نفسه `Price × Qty` بوحدتين مختلطتين (تفصيل العطل فوق `invoiceBasisTolerance`).
+//
+// لكن حين `line.lineTotalSource === "derived"` فإن `stored` ليس إجمالياً
+// حقيقياً من الأمين، بل Qty×Price محسوبة بأداة الرفع نفسها كـfallback (حين لا
+// يوجد عمود إجمالي على bi000 بمخطط الأمين لهذا التنصيب) — وهي إذن مطابقة
+// حسابياً لـprice×qty بالتعريف، بصرف النظر عن كون `Price` فعلياً سعر الوحدة1
+// أو الوحدة2. الثقة بها هنا تُعيد بالضبط العطل الذي يعالجه هذا الملف (قيمة
+// سطر مبنية على سعر الوحدة الخطأ)، فلا نستخدمها ونعيد الحساب حسب أساس السعر
+// الصحيح (`invoicePriceBasis`) كما لو لم تكن `stored` موجودة أصلاً. الفواتير
+// القديمة بلا `lineTotalSource` (رُفعت قبل إضافة هذا الحقل) تبقى كما كانت:
+// `stored` يُعتمَد مباشرة، توافقاً رجعياً.
 function invoiceLineTotalValue(line, inv) {
   const price = Number(line?.price || 0);
   const qty = Number(line?.qty || 0);
   const qtyUnits = Number(line?.qtyUnits || 0);
   const stored = Number(line?.lineTotal || 0);
+  const source = line?.lineTotalSource;
+  // خطة الفاتورة أولاً: هي الحكم الوحيد المسنود بمطابقة إجمالي الفاتورة، فتتقدّم
+  // على القيمة المخزَّنة (التي قد تكون هي نفسها محسوبة بالوحدة الخطأ).
+  const planned = invoiceLineBasisPlan(inv)?.get(line);
+  if (planned === "unit1") return roundPrice(price * qty);
+  if (planned === "unit2") return roundPrice(price * qtyUnits);
+  if (stored > 0 && source !== "derived") return roundPrice(stored);
   if (inv && qtyUnits > 0 && invoicePriceBasis(inv) === "unit2") {
     return roundPrice(price * qtyUnits);
   }
-  if (stored > 0) return roundPrice(stored);
   return roundPrice(price * qty);
 }
 
@@ -1206,6 +1421,7 @@ function invoiceLineValueText(line, inv) {
   return value > 0 ? formatMoney(value) : "—";
 }
 
+// كمية سطر الفاتورة بشكل مقروء (نفضّل الوحدة الأكبر إن وُجدت).
 function invoiceLineQty(line) {
   const u1 = String(line?.unit1 || "").trim();
   const u2 = String(line?.unit2 || "").trim();
@@ -1236,10 +1452,39 @@ function invoicePriceBasis(inv) {
   return Math.abs(sumBase - total) <= Math.abs(sumUnits - total) ? "unit1" : "unit2";
 }
 
-// سعر الوحدة معروضاً دائماً بالوحدة الكبرى (كرتونة/شرحة/طرد): إن كان أساس أسعار الفاتورة
-// الكروز نضرب بمعامل الوحدة (كمية الكروز ÷ كمية الكراتين لنفس السطر)، وإلا نعرضه كما هو.
-// نواة حسم الوحدة رقماً — مصدر واحد لكل من يحتاج سعر سطر الفاتورة (العرض في كشف
-// الحساب، وآخر سعر للزبون في بطاقة الصنف). تعيد { price, unit, converted } أو null.
+// أساس سعر هذا السطر بعينه (وليس الفاتورة كلها): نقارن القيمة المخزَّنة من
+// الأمين (`stored`) مع price×qty (أساس unit1/كروز) ومع price×qtyUnits (أساس
+// unit2/كرتونة-شرحة) ونختار الأقرب. الأساس قد يختلف من سطر لآخر ضمن نفس
+// الفاتورة (بعض الأصناف كرتونة كاملة، وبعضها كمية جزئية بسعر الكروز)، لذا لا
+// يصح تعميم أساس واحد (`invoicePriceBasis`) على كل الأسطر. تعيد "unit1"،
+// "unit2"، أو null حين لا تتوفر قيمة مخزَّنة موثوقة للمقارنة.
+//
+// `line.lineTotalSource === "derived"` يعني أن `stored` مُصنَّعة بأداة الرفع
+// نفسها كـQty×Price (fallback عند غياب عمود إجمالي حقيقي على bi000)، لا
+// إجمالياً حقيقياً من الأمين. في هذه الحالة ستكون `diffBase` صفراً دائماً
+// بالتعريف (لأن stored = price×qty أصلاً)، ما يفرض "unit1" زوراً على كل سطر
+// كهذا بصرف النظر عن وحدته الحقيقية — فنعيد null صراحةً لنترك الحسم لأساس
+// الفاتورة العام (`invoicePriceBasis`) بدل الوثوق بمقارنة لا معنى لها.
+function invoiceLineBasis(line) {
+  if (line?.lineTotalSource === "derived") return null;
+  const price = Number(line?.price || 0);
+  const stored = Number(line?.lineTotal || 0);
+  if (!(price > 0) || !(stored > 0)) return null;
+  const qty = Number(line?.qty || 0);
+  const qtyUnits = Number(line?.qtyUnits || 0);
+  const diffBase = qty > 0 ? Math.abs(price * qty - stored) : Infinity;
+  const diffUnits = qtyUnits > 0 ? Math.abs(price * qtyUnits - stored) : Infinity;
+  if (!Number.isFinite(diffBase) && !Number.isFinite(diffUnits)) return null;
+  return diffBase <= diffUnits ? "unit1" : "unit2";
+}
+
+// سعر الوحدة معروضاً دائماً بالوحدة الكبرى (كرتونة/شرحة/طرد): إن كان أساس سعر
+// هذا السطر تحديداً هو الكروز نضرب بمعامل الوحدة (كمية الكروز ÷ كمية الكراتين
+// لنفس السطر)، وإلا نعرضه كما هو. نفضّل `invoiceLineBasis` (حسم لكل سطر على
+// حدة) على `invoicePriceBasis` (حسم لكل الفاتورة)، ولا نلجأ للأخيرة إلا حين
+// لا توجد قيمة مخزَّنة لهذا السطر تحديداً للمقارنة عليها. نواة حسم الوحدة
+// رقماً — مصدر واحد لكل من يحتاج سعر سطر الفاتورة (العرض في كشف الحساب،
+// وآخر سعر للزبون في بطاقة الصنف). تعيد { price, unit, converted } أو null.
 function invoiceLineUnitPrice(line, inv) {
   const price = Number(line?.price || 0);
   if (!(price > 0)) return null;
@@ -1248,7 +1493,14 @@ function invoiceLineUnitPrice(line, inv) {
   const qty = Number(line?.qty || 0);
   const qtyUnits = Number(line?.qtyUnits || 0);
   const factor = qty > 0 && qtyUnits > 0 ? qty / qtyUnits : 0;
-  if (inv && u2 && factor > 0 && invoicePriceBasis(inv) === "unit1") {
+  // خطة الفاتورة تتقدّم على `invoiceLineBasis`: الأخيرة تحسم من القيمة المخزَّنة،
+  // وحين لا تطابق القيم المخزَّنة إجمالي الفاتورة فهي ليست دليلاً — الوثوق بها هنا
+  // يطبع 14,300$ «سعر الكرتونة» بدل 286$ في فاتورة #733.
+  const planned = invoiceLineBasisPlan(inv)?.get(line);
+  const basis = (planned === "unit1" || planned === "unit2" ? planned : null)
+    || invoiceLineBasis(line)
+    || (inv ? invoicePriceBasis(inv) : "unit2");
+  if (u2 && factor > 0 && basis === "unit1") {
     return { price: roundPrice(price * factor), unit: u2, converted: true };
   }
   return { price, unit: qtyUnits > 0 && u2 ? u2 : u1, converted: false };
@@ -5811,6 +6063,7 @@ function voucherPdfMarkup(v) {
     </table>` : ""}
     <table>${rows.join("")}</table>
     <p class="muted" style="margin:8px 0 0">${noteLine}</p>
+    ${(isInv || isRet) ? `<div style="margin:10px 0 0;padding:7px 10px;border:1px solid #c8b890;border-radius:6px;background:#f6ead0;font-size:11.5px;font-weight:700;text-align:center">صفة البيع: ${escapeHtml(SALES_TRADE_CAPACITY)} · السجل التجاري: <span dir="ltr">${escapeHtml(SALES_TRADE_REGISTER_NO)}</span></div>` : ""}
     ${stamp}
     <div class="rfoot"><span>صادر آليًا عن نظام OZK TOBACCO · رقم المركز: 0994092038</span><span dir="ltr">0985000771 — 0984000662</span></div>
   </div>`;

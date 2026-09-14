@@ -39,6 +39,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, extname, join, normalize, resolve } from "node:path";
 import { pdfPageLines, normalizeArabic, printedRow, printedGroup } from "./lib/price-bulletin-pdf-text.mjs";
 import { FONT_USABLE_PROBE, prepareBulletinFont } from "./lib/bulletin-font-ready.mjs";
+import { createMarkupRowReader } from "./lib/markup-rows.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const TYPES = {
@@ -80,33 +81,11 @@ const checkWithFont = (fontReady, name, condition, detail) => {
 };
 
 // صفوف مستند الطباعة كما هي في الترميز — **مطابقة صفٍّ كامل، لا احتواء نصّي**
-// (مستقلّة عن الخط تماماً).
-//
-// لماذا الصفّ كاملاً: التطبيع يحذف الفراغات، فاسمُ صنفٍ أقصر قد يكون مقطعاً
-// داخل اسم أطول («اليغانس سليم فضي» داخل «اليغانس سليم فضي بدون طبعة»)، فيقبله
-// `includes` ويمرّ حذفُ الأقصر زوراً — وهي نفس ثغرة الاحتواء التي أُغلقت في
-// قارئ الـPDF (ملاحظة Codex P1 على 3468f90). فنقارن الخلايا الثلاث بالتساوي
-// التام مع صفٍّ واحد من الترميز.
-//
-// ومستندٌ غائب (فشل الزر في إنتاجه) = **كل الصفوف مفقودة**، لا «لا شيء مفقود»
-// (ملاحظة DeepScan INSUFFICIENT_NULL_CHECK).
-const flattenForMarkup = (value) => String(value).normalize("NFKC").replace(/\s+/g, "");
-const MARKUP_CELL_SEPARATOR = "\u0001";
-function markupRowKeys(documentHtml) {
-  const keys = new Set();
-  for (const row of String(documentHtml).matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/g)) {
-    const cells = [...row[1].matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/g)]
-      .map((cell) => flattenForMarkup(cell[1].replace(/<[^>]*>/g, "")));
-    if (cells.length) keys.add(cells.join(MARKUP_CELL_SEPARATOR));
-  }
-  return keys;
-}
-function rowsMissingFromMarkup(documentHtml, rows) {
-  if (typeof documentHtml !== "string" || !documentHtml) return [...rows];
-  const keys = markupRowKeys(documentHtml);
-  return rows.filter((row) => !keys.has(
-    [row.name, row.unit, row.price].map(flattenForMarkup).join(MARKUP_CELL_SEPARATOR)));
-}
+// (مستقلّة عن الخط تماماً). القارئ ومبرّراته في scripts/lib/markup-rows.mjs:
+// يُحلَّل الترميز بمحلّل HTML حقيقي لا بـregex، لأن حذف الوسوم بتعبير نمطي
+// يمرّ مرّةً واحدة كان يُسقط صفوفاً سليمة (الكيانات، سمة فيها قوس إغلاق)
+// ويُمرّر نصّاً ليس على الورق (تعليقات، وسم مشطور يلتحم) — وهو ما ترصده
+// قاعدة CodeQL js/incomplete-multi-character-sanitization.
 
 const A4_HEIGHT_PX = 297 / 25.4 * 96;
 
@@ -124,6 +103,7 @@ const PRICES = raw.map((r) => ({
 }));
 
 const browser = await chromium.launch();
+const { rowsMissingFromMarkup } = createMarkupRowReader(browser);
 
 async function bootApp(width, height, { blockWebfont = false } = {}) {
   const context = await browser.newContext({ viewport: { width, height }, bypassCSP: true, serviceWorkers: "block" });
@@ -226,6 +206,24 @@ function rowsOnSheet(sheetLines, rows) {
 
 // شرط صحة القراءة: القارئ يقارن صفّاً كاملاً بسطر واحد، فاسمٌ يلتفّ داخل خليته
 // يتوزّع على سطرين ولا يُطابَق. نفس الشرط المفروض في حارس محتوى الطباعة.
+//
+// **الكشف: عدد صناديق النص الفعلية، لا تخمين ارتفاع.** المحاولة السابقة قارنت
+// ارتفاع الخلية بـ`line-height` مقروءاً بـ`parseFloat`، لكن `.name` لا يضبط
+// `line-height` صراحةً فيرجع المتصفح الكلمة `"normal"` لا رقماً — `parseFloat`
+// يُرجع `NaN` فيسقط الحساب على افتراض `14px` لم يتحقق قطّ في هذا الخط/الحشو،
+// فارتفاع كل خليةٍ بسطر واحد (~21-22px مع الحشو) يتجاوزه دائماً ويُبلّغ التفافاً
+// زائفاً حتى بلا أي التفاف (تشخيص فعلي: 5 أسماء أُبلغت ملتفّة بينما نصّها
+// 73-85px داخل حيّز 190.83px، وكل واحدة منها كتلة نصّ واحدة لا اثنتان).
+// البديل المستقلّ عن أي تخمين لـ`line-height` أو حشو: نطاق `Range` يحيط بنصّ
+// الخلية، وصناديق `getClientRects()` عليه هي الصناديق التي رُسم فيها النص فعلياً.
+// **لكن عدد الصناديق وحده لا يكفي**: اسمٌ يخلط أرقاماً لاتينية بنصّ عربي (مثل
+// "1970 سليم أزرق") يُقسَّمه خوارزمية bidi إلى صندوقين على **نفس السطر** —
+// رُصد فعلياً: صندوقان بنفس `y` تماماً لخمسة أسماء تبدأ بأرقام، رغم كونها سطراً
+// واحداً بصرياً. القياس الصحيح إذن هو **عدد الأسطر المتمايزة** — نقيسه بعدد
+// قيم `top` المختلفة (مقرَّبة لتفادي غبار الفاصلة العائمة)، لا عدد الصناديق
+// الخام. (خلايا `td.name` و`.price-list-group-name` نصّ خام بلا عناصر ابنة —
+// `escapeHtml` وحده يُدرَج، راجع `price-list-template.js` — فلا خطر صناديق
+// زائفة من عناصر شقيقة، فقط من انقسام bidi على نفس السطر.)
 const WRAP_PROBE = `(markup) => {
   const probe = document.createElement("div");
   probe.style.cssText = "position:fixed;left:-10000px;top:0;width:794px;visibility:hidden;pointer-events:none";
@@ -235,8 +233,10 @@ const WRAP_PROBE = `(markup) => {
   try {
     return [...probe.querySelectorAll("td.name, .price-list-group-name")]
       .filter((cell) => {
-        const lineHeight = parseFloat(getComputedStyle(cell).lineHeight) || 14;
-        return cell.getBoundingClientRect().height > lineHeight * 1.4;
+        const range = document.createRange();
+        range.selectNodeContents(cell);
+        const lineTops = new Set([...range.getClientRects()].map((r) => Math.round(r.top)));
+        return lineTops.size > 1;
       })
       .map((cell) => cell.textContent.trim());
   } finally { probe.remove(); }
@@ -298,7 +298,7 @@ for (const sc of [
   // للصفحة الأولى يجب أن يُطبع على الورقة الأولى **نفسها**.
   // **بديلٌ مستقلّ عن الخط، مفروض دائماً.** يرصد إخفاء نصّ الأصناف أو تشويهه
   // حتى حين تتعذّر المطابقة الحرفية لغياب خط النشرة.
-  const missingFromMarkup = rowsMissingFromMarkup(documentHtml, planned.firstPageRows);
+  const missingFromMarkup = await rowsMissingFromMarkup(documentHtml, planned.firstPageRows);
   check(`${sc.label}: صفوف الصفحة الأولى موجودة نصّاً في مستند الطباعة (مستقلّ عن الخط)`,
     missingFromMarkup.length === 0, `مفقودة من الترميز: ${JSON.stringify(missingFromMarkup.slice(0, 5))}`);
 
@@ -336,6 +336,39 @@ for (const sc of [
   check(`${sc.label}: كتلة الأعمدة الأولى داخل ورقتها (الأولى محسوبة مع الرأس)`,
     firstBlock != null && firstBlock.bottom <= A4_HEIGHT_PX + 0.5,
     `أسفل الكتلة ${firstBlock?.bottom} مقابل حدّ A4 ${A4_HEIGHT_PX.toFixed(2)} — خلوص ${clearance}px`);
+}
+
+// ===== ١ب) شاهد سالب لـWRAP_PROBE: يميّز السطر الواحد عن الالتفاف الحقيقي =====
+// لولا هذا الشاهد لكان WRAP_PROBE بلا معنى — القراءة السابقة بارتفاع الخلية
+// مقابل line-height مخمّن أعطت التفافاً زائفاً لأسماء سطر واحد فعلياً (راجع
+// التشخيص: كل اسمٍ منها clientRectsCount=1 بعرض نصّ 73-85px داخل حيّز 190.83px).
+// نثبت هنا الحالتين مباشرة: خليةٌ بنفس المحتوى/الحشو الحقيقي لا تُرصَد ملتفّة،
+// وخليةٌ مُجبرة فعلياً على سطرين (بعرض ضيّق جداً) تُرصَد كذلك.
+{
+  const { context, page } = await bootApp(800, 600);
+  const probeResult = await page.evaluate(([probe]) => {
+    const run = (markup) => new Function(`return ${probe}`)()(markup);
+    // سطر واحد فعلياً: نفس عرض/حشو `td.name` الحقيقي (206.828px محسوبة من التشخيص)
+    // بـtable-layout:fixed صريحاً حتى يُفرض عرض الجدول على الخلية كما في الإنتاج
+    // (بلا هذا لا يقيّد المتصفح العرض أصلاً بلا ورقة أنماط `.ozk-price-list`).
+    const asTable = (tableWidth) => `<section class="ozk-price-list"><table `
+      + `style="table-layout:fixed;width:${tableWidth}px;border-collapse:collapse"><tbody><tr>`
+      + `<td class="name" style="width:100%;padding:2.5px 8px;box-sizing:border-box;`
+      + `font-family:Almarai,sans-serif;font-weight:700;font-size:10px;white-space:normal;`
+      + `overflow-wrap:break-word;word-break:break-word">ماستر سليم أزرق</td></tr></tbody></table></section>`;
+    const singleLine = asTable(206.828);
+    // التفاف حقيقي: نفس الخلية بعرض ضيّق جداً يفرض سطرين فعلياً — لا تخمين ارتفاع.
+    const genuinelyWrapped = asTable(40);
+    return { single: run(singleLine), wrapped: run(genuinelyWrapped) };
+  }, [WRAP_PROBE]);
+  await context.close();
+
+  check("شاهد سالب (WRAP_PROBE): نصّ سطر واحد فعلياً بحشو حقيقي لا يُرصَد ملتفّاً",
+    probeResult.single.length === 0,
+    `رُصد ملتفّاً رغم أنه سطر واحد: ${JSON.stringify(probeResult.single)}`);
+  check("شاهد سالب (WRAP_PROBE): نصّ ملتفّ فعلياً على سطرين يُرصَد",
+    probeResult.wrapped.length === 1,
+    `لم يُرصد الالتفاف الحقيقي: ${JSON.stringify(probeResult.wrapped)}`);
 }
 
 // ===== ٢) ورقة العنوان مسموحة في حالة واحدة فقط — وبلا فقدان ولا قصّ =====
@@ -449,18 +482,23 @@ for (const sc of [
   const swallowed = healthy.replace(asRow(rows[0]),
     asRow({ ...rows[0], name: `${rows[0].name} بدون طبعة` }));
 
+  // النداء صار غير متزامن (التحليل داخل المتصفّح)، فيُقرأ مرّةً في متغيّر:
+  // `await f(x).length` كان سيصير `await (f(x).length)` — أي await على undefined.
+  const missingNames = async (markup) =>
+    (await rowsMissingFromMarkup(markup, rows)).map((r) => r.name);
+
+  const onHealthy = await missingNames(healthy);
   check("شاهد سالب (بديل مستقلّ عن الخط): المستند السليم بلا نقص",
-    rowsMissingFromMarkup(healthy, rows).length === 0,
-    `المرصود: ${JSON.stringify(rowsMissingFromMarkup(healthy, rows).map((r) => r.name))}`);
+    onHealthy.length === 0, `المرصود: ${JSON.stringify(onHealthy)}`);
+  const onStripped = await missingNames(stripped);
   check("شاهد سالب (بديل مستقلّ عن الخط): يرصد الصفّ المحذوف",
-    rowsMissingFromMarkup(stripped, rows).map((r) => r.name).join("") === rows[1].name,
-    `المرصود: ${JSON.stringify(rowsMissingFromMarkup(stripped, rows).map((r) => r.name))}`);
+    onStripped.join("") === rows[1].name, `المرصود: ${JSON.stringify(onStripped)}`);
+  const onSwallowed = await missingNames(swallowed);
   check("شاهد سالب (بديل مستقلّ عن الخط): لا يقبل اسماً مبتلعاً داخل اسم أطول",
-    rowsMissingFromMarkup(swallowed, rows).map((r) => r.name).join("") === rows[0].name,
-    `المرصود: ${JSON.stringify(rowsMissingFromMarkup(swallowed, rows).map((r) => r.name))}`);
+    onSwallowed.join("") === rows[0].name, `المرصود: ${JSON.stringify(onSwallowed)}`);
+  const onAbsent = await rowsMissingFromMarkup(null, rows);
   check("شاهد سالب (بديل مستقلّ عن الخط): مستند غائب = كل الصفوف مفقودة",
-    rowsMissingFromMarkup(null, rows).length === rows.length,
-    `المرصود ${rowsMissingFromMarkup(null, rows).length} من ${rows.length}`);
+    onAbsent.length === rows.length, `المرصود ${onAbsent.length} من ${rows.length}`);
 }
 
 // ===== ٢ج) شاهد سالب لفحص الرسم: صفٌّ مخفيٌّ يُرصد بالطرق الثلاث =====
