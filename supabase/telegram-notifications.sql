@@ -861,8 +861,9 @@ grant  execute on function public.notify_telegram(text, text, text, int, jsonb) 
 --   ٢) حلقة الإرسال (dispatch): كما كانت تماماً، فقط status الناتج بعد
 --      net.http_post صار 'dispatched' لا 'sent' — لأن الإرسال غير متزامن ولا
 --      يثبت التسليم بذاته.
--- الحد الأقصى للمحاولات 5 — بعده تتوقف إعادة المحاولة (يبقى 'failed' ظاهراً
--- في telegram_delivery_audit بدل إعادة محاولة أبدية على عطل دائم).
+-- الحد الأقصى للمحاولات 5 — بعده تتوقف إعادة المحاولة الفورية (يبقى 'failed'
+-- ظاهراً في telegram_delivery_audit)، لكنه ليس نهائياً: انظر خطوة الإحياء
+-- أدناه (Codex P1 الثالث، PR #220).
 create or replace function public.dispatch_telegram_outbox()
 returns void
 language plpgsql security definer
@@ -877,6 +878,20 @@ declare
   v_delivery    text;
   max_attempts  constant int := 5;
 begin
+  -- ٠) إحياء الفاشل نهائياً بعد تهدئة ساعة (Codex P1 الثالث، PR #220): عطل
+  --    تيليغرام/pg_net عابر أطول من دورة المحاولات الخمس (تُستهلَك خلال
+  --    دقائق لأن dispatch_telegram_outbox يعمل كل دقيقة) لا يجوز أن يُسقط
+  --    تنبيهاً حرجاً للأبد فقط لأن الخدمة كانت متعطلة وقت الاستنفاد —
+  --    وخصوصاً أن الجهة المُنتِجة (مثل monitor_project_tasks) تعتبر تنبيهها
+  --    "مُرسَلاً" فور قبول الإدراج في الطابور ولا تعيد المحاولة أبداً بنفسها.
+  --    تُعاد كل صف 'failed' إلى 'pending' بمحاولات صفرية بعد ساعة من آخر
+  --    محاولة، فتُمنح دورة خمس محاولات كاملة أخرى إن كانت الخدمة عادت. الحد
+  --    الطبيعي الوحيد المتبقي هو تنظيف الصفوف الأقدم من 14 يوماً.
+  update public.telegram_outbox
+  set status = 'pending', attempts = 0
+  where status = 'failed'
+    and sent_at < now() - interval '1 hour';
+
   -- ١) حلقة المطابقة: تصنيف الصفوف المُرسَلة سابقاً حسب ردّها الحقيقي
   for r in
     select o.id, o.attempts, o.sent_at, resp.status_code, resp.timed_out, resp.error_msg, resp.content
@@ -897,9 +912,15 @@ begin
         then 'network_error'
       when r.status_code between 200 and 299
         then case
-          when (private.safe_jsonb(r.content) ->> 'ok') = 'true' then 'ok_true'
+          -- Codex P1 الرابع (PR #220): ok=true وحدها لا تثبت أن تيليغرام
+          -- استلم الرسالة فعلاً — نفس شكل الجسم الذي يصنّفه
+          -- telegram_delivery_audit() 'unparsed' لغياب result.message_id
+          -- يجب أن يُعامَل هنا معاملة مطابقة تماماً، لا 'sent' نهائياً.
           when private.safe_jsonb(r.content) is null then 'unparsed'
-          else 'ok_false'
+          when (private.safe_jsonb(r.content) ->> 'ok') = 'true'
+           and jsonb_exists(private.safe_jsonb(r.content) -> 'result', 'message_id') then 'ok_true'
+          when (private.safe_jsonb(r.content) ->> 'ok') = 'false' then 'ok_false'
+          else 'unparsed' -- ok=true بلا message_id، أو شكل جسم آخر غير متوقع
         end
       else 'http_error'
     end;
@@ -911,7 +932,7 @@ begin
     elsif r.attempts < max_attempts then
       update public.telegram_outbox set status = 'pending' where id = r.id; -- إعادة محاولة
     else
-      update public.telegram_outbox set status = 'failed' where id = r.id; -- استنفدت المحاولات
+      update public.telegram_outbox set status = 'failed' where id = r.id; -- استنفدت المحاولات الآن (تُحيا لاحقاً)
     end if;
   end loop;
 
