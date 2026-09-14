@@ -41,4 +41,10 @@ function offlineFallback(request){
     return caches.match(request,{ignoreSearch:true}).then((loose)=>loose||caches.match("index.html"));
   });
 }
-self.addEventListener("fetch",(event)=>{if(event.request.method!=="GET")return;event.respondWith(fetch(event.request).then((response)=>{const copy=response.clone();caches.open(CACHE_NAME).then((cache)=>cache.put(event.request,copy));return response;}).catch(()=>offlineFallback(event.request)));});
+// **لا نخزّن كل استجابة GET ناجحة.** الشرط السابق كان يخزّن أي رد ناجح بلا
+// فحص أصل أو مسار — يشمل طلبات REST لـ`supabase.co` (بيانات عملاء/أرصدة/
+// أسعار حساسة تمرّ كـGET). ذلك يُبقي بيانات حساسة في Cache Storage على جهاز
+// العميل بلا أي مسح عند تسجيل الخروج. القيد same-origin+STATIC_ASSET_PATH هو
+// نفسه المستخدم أصلاً في offlineFallback؛ هنا فقط يُطبَّق **قبل** cache.put،
+// لا داخل مسار fallback وحده.
+self.addEventListener("fetch",(event)=>{if(event.request.method!=="GET")return;event.respondWith(fetch(event.request).then((response)=>{let url;try{url=new URL(event.request.url);}catch{url=null;}if(url&&url.origin===self.location.origin&&STATIC_ASSET_PATH.test(url.pathname)){const copy=response.clone();caches.open(CACHE_NAME).then((cache)=>cache.put(event.request,copy));}return response;}).catch(()=>offlineFallback(event.request)));});
