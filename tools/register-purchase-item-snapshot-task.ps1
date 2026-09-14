@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 # Registration only. This script never starts the task or the producer.
 [CmdletBinding()]
 param(

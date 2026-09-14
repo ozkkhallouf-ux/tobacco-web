@@ -1,4 +1,4 @@
-param(
+﻿param(
     [switch]$Apply,
     [int]$MinimumIntervalMinutes = 0,
     [string]$EnvFile = "$PSScriptRoot\.env",

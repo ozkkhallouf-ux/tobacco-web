@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 # ============================================================
 # Test-RegisterTaskStartAtCaseCollision.ps1
 #

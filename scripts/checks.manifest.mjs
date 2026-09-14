@@ -59,6 +59,7 @@ export const CHECKS = [
   'check-master-item-coverage-dedup.mjs',
   'check-owner-authorization-behavior.mjs',
   'check-post-deploy-smoke-console-gate.mjs',
+  'check-powershell-51-encoding.mjs',
   'check-price-bulletin-export-integrity.mjs',
   'check-price-bulletin-first-page-content.mjs',
   'check-price-bulletin-group-packing.mjs',
