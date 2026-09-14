@@ -1431,4 +1431,102 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   ok("الملخص التنفيذي يعتمد نفس معيار ثقة أداة الأرباح (complete/missing_cost_lines) قبل عرض رقم قاطع");
 }
 
+// ── h9ZJB) اسمان متطابقان تماماً ⇒ غموض حقيقي، لا اختيار عشوائي (PR #205) ───
+{
+  // كانت isAmbiguous() تعتمد على matches[0].exact وحده: حسابان مختلفان
+  // بنفس الاسم الحرفي (كلاهما exact=true) كانا يمرّان كـ"غير غامض" لأن أول
+  // مرشح فقط يُفحص — فيُختار أحدهما عشوائياً (ترتيب الفرز غير حاسم بين
+  // تعادلين) بدل الإعلان عن الغموض وطلب تحديد إضافي.
+  const balanceRow = (items) => [{
+    report_date: new Date().toISOString().slice(0, 10),
+    created_at: new Date().toISOString(),
+    summary: { totalDebitBalance: 0, totalCreditBalance: 0, customersWithDebitBalance: items.length, customersWithCreditBalance: 0, totalCustomers: items.length },
+    items
+  }];
+
+  const dupFixtures = defaultFixtures();
+  dupFixtures["inventory_reports:ameen_customer_balances"] = balanceRow([
+    { key: "سامي الحلبي", name: "سامي الحلبي", balance: 1000, customerGuid: "dup11111", recentPayments: [] },
+    { key: "سامي الحلبي", name: "سامي الحلبي", balance: 5000, customerGuid: "dup22222", recentPayments: [] }
+  ]);
+  const a = await loadAssistant({ fixtures: dupFixtures });
+  const dupResult = await a.ask(TOKENS.owner, "ما رصيد الزبون سامي الحلبي؟");
+  const dupText = String(dupResult.body.reply);
+  assert.equal(dupResult.body.answered, false, "اختار أحد حسابين متطابقين اسماً بدل الإعلان عن الغموض");
+  assert.ok(/يطابق أكثر من حساب/.test(dupText), `لم يُرجع رسالة غموض لاسمين متطابقين تماماً:\n${dupText}`);
+  assert.ok(!/1,000/.test(dupText) && !/5,000/.test(dupText), `عرض رصيد أحد الحسابين بدل طلب تحديد إضافي:\n${dupText}`);
+
+  // تطابق تامّ واحد وسط مرشحين آخرين (fuzzy) ⇒ يبقى التطابق التامّ صالحاً بلا غموض
+  const mixedFixtures = defaultFixtures();
+  mixedFixtures["inventory_reports:ameen_customer_balances"] = balanceRow([
+    { key: "سامي الحلبي", name: "سامي الحلبي", balance: 12000, customerGuid: "aaa99999", recentPayments: [] },
+    { key: "سامي الحلبي الجديد", name: "سامي الحلبي الجديد", balance: 900, customerGuid: "bbb88888", recentPayments: [] }
+  ]);
+  const b = await loadAssistant({ fixtures: mixedFixtures });
+  const exactResult = await b.ask(TOKENS.owner, "ما رصيد الزبون سامي الحلبي؟");
+  const exactText = String(exactResult.body.reply);
+  assert.equal(exactResult.body.answered, true, `تطابق تامّ واحد وسط مرشحين آخرين اعتُبر غامضاً بلا سبب:\n${exactText}`);
+  assert.ok(/12,000/.test(exactText), `لم يعرض رصيد التطابق التامّ الوحيد:\n${exactText}`);
+
+  // حساب واحد فقط مطابق ⇒ لا غموض، كالسابق (لا Regression)
+  const singleFixtures = defaultFixtures();
+  singleFixtures["inventory_reports:ameen_customer_balances"] = balanceRow([
+    { key: "سامي الحلبي", name: "سامي الحلبي", balance: 7000, customerGuid: "ccc77777", recentPayments: [] }
+  ]);
+  const c = await loadAssistant({ fixtures: singleFixtures });
+  const singleResult = await c.ask(TOKENS.owner, "ما رصيد الزبون سامي الحلبي؟");
+  assert.equal(singleResult.body.answered, true, "حساب واحد مطابق اعتُبر غامضاً بلا سبب");
+  assert.ok(/7,000/.test(String(singleResult.body.reply)), "لم يعرض رصيد الحساب الوحيد المطابق");
+  ok("اسمان متطابقان تماماً ⇒ غموض صريح؛ تطابق تامّ واحد وسط مرشحين آخرين وحساب واحد فقط ⇒ بلا غموض");
+}
+
+// ── h9ZJE) فترة ربح متعددة الأيام صراحة بلقطة يوم واحد لا تُخفي النقص (PR #205) ─
+{
+  // كان `single` (`!ctx.period.explicit || days.length === 1`) يُستخدم أيضاً
+  // لقمع missingDaysNote: فترة صريحة متعددة الأيام لم يصل منها إلا تقرير يوم
+  // واحد كانت تُعرض بلا أي تحذير بأن بقية أيام الفترة بلا تقرير — رقم يوم
+  // واحد يبدو كأنه يمثّل الفترة كاملة. periodIsMultiDay يفصل الحكمين.
+  const dayOffset = (n) => new Date(Date.now() + 180 * 60_000 - n * 86_400_000).toISOString().slice(0, 10);
+  const profitDay = (date, net) => ({
+    report_date: date,
+    created_at: new Date(Date.parse(`${date}T12:00:00Z`)).toISOString(),
+    summary: {
+      currency: "USD", sales_gross: 1000, discounts: 0, returns: 0, net_sales: 1000,
+      sales_cost: 900, gross_profit: 100, expenses: 20, net_profit: net,
+      sales_bill_count: 1, line_count: 1, missing_cost_lines: 0, complete: true
+    },
+    items: []
+  });
+
+  // فترة صريحة من 5 أيام (اخر 5 يوم)، ولا يتوفر فيها إلا تقرير يوم واحد
+  const oneOfFiveFixtures = defaultFixtures();
+  oneOfFiveFixtures["inventory_reports:ameen_daily_profit"] = [profitDay(dayOffset(0), 111)];
+  const a = await loadAssistant({ fixtures: oneOfFiveFixtures });
+  const partial = await a.ask(TOKENS.owner, "كم الربح اخر 5 يوم؟");
+  const partialText = String(partial.body.reply);
+  assert.equal(partial.body.tool, "profit");
+  assert.equal(partial.body.answered, true, `فترة صريحة فيها لقطة يوم واحد يجب أن تُجاب بها مع تحذير النقص:\n${partialText}`);
+  assert.ok(/داخل الفترة بلا تقرير حركة/.test(partialText), `لقطة يوم واحد من فترة 5 أيام صريحة أخفت تحذير الأيام الناقصة:\n${partialText}`);
+  assert.ok(/4 يوم/.test(partialText), `عدد الأيام الناقصة (4) غير مذكور بدقة:\n${partialText}`);
+
+  // فترة يوم واحد صريحة (أمس) ⇒ لا تحذير أيام ناقصة أصلاً (from === to)
+  const singleDayFixtures = defaultFixtures();
+  singleDayFixtures["inventory_reports:ameen_daily_profit"] = [profitDay(dayOffset(1), 222)];
+  const b = await loadAssistant({ fixtures: singleDayFixtures });
+  const singleDay = await b.ask(TOKENS.owner, "كم كان الربح امس؟");
+  const singleDayText = String(singleDay.body.reply);
+  assert.equal(singleDay.body.answered, true);
+  assert.ok(!/داخل الفترة بلا تقرير حركة/.test(singleDayText), `فترة يوم واحد صريحة أظهرت تحذير أيام ناقصة زائفاً:\n${singleDayText}`);
+
+  // فترة متعددة الأيام كاملة التغطية ⇒ لا تحذير كاذب (missingDays فارغة فعلاً)
+  const fullCoverageFixtures = defaultFixtures();
+  fullCoverageFixtures["inventory_reports:ameen_daily_profit"] = [0, 1, 2, 3, 4].map((n) => profitDay(dayOffset(n), 100 + n));
+  const c = await loadAssistant({ fixtures: fullCoverageFixtures });
+  const full = await c.ask(TOKENS.owner, "كم الربح اخر 5 يوم؟");
+  const fullText = String(full.body.reply);
+  assert.equal(full.body.answered, true);
+  assert.ok(!/داخل الفترة بلا تقرير حركة/.test(fullText), `فترة 5 أيام كاملة التغطية أظهرت تحذير أيام ناقصة زائفاً:\n${fullText}`);
+  ok("فترة ربح متعددة الأيام صراحة بلقطة يوم واحد تُظهر تحذير النقص؛ يوم واحد صريح ومدى كامل التغطية لا يُظهران تحذيراً زائفاً");
+}
+
 console.log(`\nتوجيه المساعد الذكي: ${passed}/${passed} تحقق ناجح`);

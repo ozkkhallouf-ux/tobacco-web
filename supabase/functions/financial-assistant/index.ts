@@ -396,7 +396,15 @@ function matchByName<T>(rows: T[], nameOf: (row: T) => string, needle: string, l
 // يميّز بينهما فعلاً، فلا يُختار أحدهما بالتخمين.
 const AMBIGUOUS_MARGIN = 2;
 function isAmbiguous<T>(matches: Array<{ row: T; score: number; exact: boolean }>) {
-  if (matches.length < 2 || matches[0].exact) return false;
+  if (matches.length < 2) return false;
+  // تطابقان تامّان (exact) أو أكثر لنفس الاسم الحرفي: الاسم لا يميّز بينهما
+  // إطلاقاً — كان `matches[0].exact` وحده يمرّ هذه الحالة كـ"غير غامض"
+  // ويختار الأول عشوائياً (ترتيب الفرز غير حاسم بين تعادلين). (رصدها Codex
+  // على PR #205 — h9ZJB.)
+  const exactCount = matches.filter((m) => m.exact).length;
+  if (exactCount > 1) return true;
+  // تطابق تامّ واحد فقط وهو الأفضل: لا غموض، كالسابق.
+  if (exactCount === 1 && matches[0].exact) return false;
   return matches[0].score - matches[1].score < AMBIGUOUS_MARGIN;
 }
 
@@ -1113,7 +1121,13 @@ const TOOLS: Tool[] = [
       const missingCostLines = sum("missing_cost_lines");
       const newest = days.reduce((latest, d) => (d.created_at > latest ? d.created_at : latest), days[0].created_at);
 
+      // `single` للعرض فقط (عنوان "يوم واحد" أم "فترة N يوم"). لا يصحّ اشتقاق
+      // قمع تحذير الأيام الناقصة منه: فترة صريحة متعددة الأيام لم يصل منها
+      // إلا تقرير يوم واحد كانت تُعرض كأنها "يوم واحد" كاملاً بلا أي تحذير
+      // بأن باقي أيام الفترة بلا تقرير. الحكم بوجود نقص يعتمد على الفترة
+      // **المطلوبة** لا على عدد الأيام **المُستلمة**. (رصدها Codex على PR #205 — h9ZJE.)
       const single = !ctx.period.explicit || days.length === 1;
+      const periodIsMultiDay = ctx.period.explicit && ctx.period.from !== ctx.period.to;
       const heading = single
         ? `**تقرير الربح — ${days[0].report_date}**`
         : `**تقرير الربح — ${ctx.period.label} (${ctx.period.from} → ${ctx.period.to})** — ${days.length} يوم`;
@@ -1131,7 +1145,7 @@ const TOOLS: Tool[] = [
           ? `\n\n> ⚠️ ${missingCostLines} سطر بلا تكلفة معروفة عبر ${single ? "هذا اليوم" : "أيام الفترة"}، فالربح أعلاه ناقص بمقدار تكلفتها.`
           : "")
         + (!complete ? `\n\n> ⚠️ تقرير يوم واحد على الأقل غير مكتمل حسب مصدره.` : "")
-        + (!single ? missingDaysNote(missingDays) : "");
+        + (periodIsMultiDay ? missingDaysNote(missingDays) : "");
       return { ok: true, text: text + freshnessNote(newest), sources: ["inventory_reports:ameen_daily_profit"], asOf: newest };
     }
   },
