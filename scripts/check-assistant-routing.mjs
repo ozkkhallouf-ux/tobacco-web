@@ -829,6 +829,63 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   ok("أحكام الراكد والشراء تُحجب عند نقص المعطيات — سالبةً وموجبةً — وتُحسم عند اكتمالها");
 }
 
+// ── لأ) مرتجع سالب وحده لا يُخرج صنفاً من قائمة الراكد (Codex على bea03ea) ──
+{
+  // كانت مجموعة «المُباع» في أداة الراكد تُبنى من كل سطور sales_line_items
+  // بلا تمييز إشارة الكمية — فمرتجع (qty<0) بلا أي بيع موجب مقابل كان يُدخل
+  // الصنف في «المُباع» ويُخفي ركوداً فعلياً.
+  const today = new Date(Date.now() + 180 * 60_000).toISOString().slice(0, 10);
+  const syncState = (rowCount) => [{
+    source: "ameen_sales_line_items",
+    window_start: new Date(Date.now() + 180 * 60_000 - 89 * 86_400_000).toISOString().slice(0, 10),
+    window_end: today,
+    row_count: rowCount,
+    completed_at: new Date().toISOString()
+  }];
+  const stockFixtures = (name) => ({
+    ...defaultFixtures(),
+    "inventory_reports:ameen_sql_agent": [{
+      report_date: today,
+      created_at: new Date().toISOString(),
+      summary: { totalStockItems: 1, lowStockItems: 0, outOfStockItems: 0 },
+      items: [{ key: "k1", name, stockQty: 100, unit1Name: "علبة" }]
+    }]
+  });
+
+  // CASE 1: مرتجع سالب فقط، بلا أي بيع موجب ⇒ يبقى راكداً
+  const returnOnlyFixtures = stockFixtures("صنف مرتجع فقط");
+  returnOnlyFixtures.sales_line_items = [
+    { id: 1, sale_date: today, bill_no: "1", bill_type: "retail", item_name: "صنف مرتجع فقط", qty: -3, line_total: -30, unit_cost: 9, customer_name: "س" }
+  ];
+  returnOnlyFixtures.sales_line_items_sync_state = syncState(1);
+  const caseReturnOnly = await loadAssistant({ fixtures: returnOnlyFixtures });
+  const returnOnlyText = String((await caseReturnOnly.ask(TOKENS.owner, "ما الأصناف الراكدة؟")).body.reply);
+  assert.ok(/صنف مرتجع فقط/.test(returnOnlyText), `مرتجع سالب وحده أخرج الصنف من الراكد خطأً:\n${returnOnlyText}`);
+
+  // CASE 2: مرتجع سالب + بيع موجب لنفس الصنف ⇒ مُباع فعلاً، لا راكد
+  const mixedFixtures = stockFixtures("صنف مباع ومرتجع");
+  mixedFixtures.sales_line_items = [
+    { id: 1, sale_date: today, bill_no: "1", bill_type: "retail", item_name: "صنف مباع ومرتجع", qty: -3, line_total: -30, unit_cost: 9, customer_name: "س" },
+    { id: 2, sale_date: today, bill_no: "2", bill_type: "retail", item_name: "صنف مباع ومرتجع", qty: 5, line_total: 50, unit_cost: 9, customer_name: "ص" }
+  ];
+  mixedFixtures.sales_line_items_sync_state = syncState(2);
+  const caseMixed = await loadAssistant({ fixtures: mixedFixtures });
+  const mixedText = String((await caseMixed.ask(TOKENS.owner, "ما الأصناف الراكدة؟")).body.reply);
+  assert.ok(!/صنف مباع ومرتجع/.test(mixedText), `بيع موجب موجود ولم يُستبعد الصنف من الراكد:\n${mixedText}`);
+
+  // CASE 3: بيع موجب طبيعي فقط (بلا مرتجع) ⇒ السلوك القديم يبقى كما هو
+  const plainFixtures = stockFixtures("صنف مباع عادي");
+  plainFixtures.sales_line_items = [
+    { id: 1, sale_date: today, bill_no: "1", bill_type: "retail", item_name: "صنف مباع عادي", qty: 5, line_total: 50, unit_cost: 9, customer_name: "س" }
+  ];
+  plainFixtures.sales_line_items_sync_state = syncState(1);
+  const casePlain = await loadAssistant({ fixtures: plainFixtures });
+  const plainText = String((await casePlain.ask(TOKENS.owner, "ما الأصناف الراكدة؟")).body.reply);
+  assert.ok(!/صنف مباع عادي/.test(plainText), `بيع موجب عادي بلا مرتجع صار راكداً خطأً:\n${plainText}`);
+
+  ok("مرتجع سالب بلا بيع موجب لا يُخرج الصنف من قائمة الراكد، وبيع موجب حقيقي يستبعده كما كان");
+}
+
 // ── م) كل مستهلك لسطور المبيعات يمرّ بذيل الاكتمال — لا استثناء ─────────────
 {
   // حارس بنيوي لا سلوكي: ثلاث جولات مراجعة متتالية كشفت مستهلكاً منسياً في

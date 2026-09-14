@@ -1443,7 +1443,12 @@ const TOOLS: Tool[] = [
       // الحقيقية لا من حقل جاهز، لأن staleItems في التقرير يعتمد تعريفاً آخر.
       const period = { from: damascusDate(-59), to: damascusDate(), label: "آخر 60 يوم", explicit: true };
       const sales = await readSales(period, ctx.role);
-      const sold = new Set(sales.rows.map((row) => normalize(row.item_name)));
+      // مرتجع (كمية سالبة) بلا بيع موجب مقابل ليس بيعاً — إدخاله بمجموعة
+      // «المُباع» يُخفي صنفاً راكداً فعلياً. الركود = بلا بيعٍ موجب، لا بلا
+      // أي سطر مبيعات إطلاقاً. (رصدها Codex بعد bea03ea.)
+      const sold = new Set(
+        sales.rows.filter((row) => num(row.qty) > 0).map((row) => normalize(row.item_name))
+      );
       const stagnant = items
         .filter((row: Record<string, unknown>) => num(row.stockQty) > 0 && !sold.has(normalize(row.name ?? row.key)))
         .sort((a: Record<string, unknown>, b: Record<string, unknown>) => num(b.stockQty) - num(a.stockQty));
