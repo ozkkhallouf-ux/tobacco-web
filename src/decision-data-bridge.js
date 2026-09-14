@@ -1,14 +1,37 @@
 (function () {
-  function text(value) {
-    return String(value == null ? "" : value).trim().toLowerCase();
+  // ============================================================================
+  // جسر بين خدمة البيانات ولوحة القرار.
+  //
+  // كان يطابق الأسعار المعتمدة بلقطة الأمين عبر `itemKey` أولاً — و`item_key`
+  // في `approved_price_items` يحمل **اسم الصنف بالعربية**، بينما يحمله في
+  // `ameen_item_snapshot` **GUID**. فلا يتقاطع المفتاحان في أي صف، وكان الجسر
+  // يسقط دائماً إلى المطابقة بالاسم: هوية هشّة أمام الهمزة والتاء المربوطة
+  // وإعادة التسمية في الأمين.
+  //
+  // الآن: المعرّف هو الهوية، والاسم مطابقة احتياطية لا تُستعمل إلا حين يغيب
+  // المعرّف تماماً — وتُلغى إذا كان الاسم مكرراً في اللقطة، فلا يرث صنفٌ حركة
+  // صنفٍ آخر يشبهه اسماً.
+  // ============================================================================
+
+  function scoring() {
+    return (typeof window !== "undefined" && window.ozkDecisionScoring) || null;
   }
 
-  function keyOf(row) {
-    return String(row?.itemKey || row?.item_key || row?.itemGuid || row?.item_guid || "").trim();
+  const ZERO_GUID = "00000000-0000-0000-0000-000000000000";
+  const GUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  function toGuid(value) {
+    const api = scoring();
+    if (api?.toGuid) return api.toGuid(value);
+    const text = String(value ?? "").trim().toLowerCase();
+    return !text || text === ZERO_GUID || !GUID_PATTERN.test(text) ? "" : text;
   }
 
-  function nameOf(row) {
-    return text(row?.itemName || row?.item_name || row?.name);
+  function normalizedName(value) {
+    const api = scoring();
+    if (api?.normalizedName) return api.normalizedName(value);
+    return String(value ?? "").trim().toLowerCase()
+      .replace(/[أإآٱ]/gu, "ا").replace(/ة/gu, "ه").replace(/[ً-ْـ]/gu, "");
   }
 
   function finiteOrNull(value) {
@@ -17,24 +40,31 @@
     return Number.isFinite(n) ? n : null;
   }
 
-  function buildSnapshotIndex(rows) {
-    const byKey = new Map();
+  function buildIndex(rows) {
+    const api = scoring();
+    if (api?.buildSnapshotIndex) return api.buildSnapshotIndex(rows);
+    const byGuid = new Map();
     const byName = new Map();
+    const nameCollisions = new Set();
     for (const row of Array.isArray(rows) ? rows : []) {
-      const key = keyOf(row);
-      const name = nameOf(row);
-      if (key && !byKey.has(key)) byKey.set(key, row);
-      if (name && !byName.has(name)) byName.set(name, row);
+      const guid = toGuid(row?.itemGuid ?? row?.item_guid) || toGuid(row?.itemKey ?? row?.item_key);
+      if (guid && !byGuid.has(guid)) byGuid.set(guid, row);
+      const name = normalizedName(row?.itemName ?? row?.item_name);
+      if (!name) continue;
+      if (byName.has(name)) nameCollisions.add(name);
+      else byName.set(name, row);
     }
-    return { byKey, byName };
+    return { byGuid, byName, nameCollisions };
   }
 
   function findSnapshot(index, item) {
-    const key = keyOf(item);
-    if (key && index.byKey.has(key)) return index.byKey.get(key);
-    const name = nameOf(item);
-    if (name && index.byName.has(name)) return index.byName.get(name);
-    return null;
+    const api = scoring();
+    if (api?.findSnapshot) return api.findSnapshot(index, item);
+    const guid = toGuid(item?.itemGuid ?? item?.item_guid) || toGuid(item?.itemKey ?? item?.item_key);
+    if (guid) return index.byGuid.get(guid) || null;
+    const name = normalizedName(item?.itemName ?? item?.item_name);
+    if (!name || index.nameCollisions.has(name)) return null;
+    return index.byName.get(name) || null;
   }
 
   function installBridge() {
@@ -48,13 +78,14 @@
         ? service.listApprovedPriceItems.bind(service)
         : null;
 
-    // Compatibility name used by the decision engine.
+    // الاسم الذي يستعمله محرّك القرار.
     if (typeof service.listAmeenItemSnapshot !== "function") {
       service.listAmeenItemSnapshot = originalListItemSnapshots;
     }
 
-    // Feed the decision engine the current Ameen stock and 30-day velocity while
-    // preserving approved selling-price metadata from approved_price_items.
+    // يمرّر مخزون الأمين وحركة الثلاثين يوماً إلى محرّك القرار مع الحفاظ على
+    // بيانات سعر البيع المعتمد. المخزون والحركة يأتيان من اللقطة نفسها كي لا
+    // يُخلط مخزونُ تاريخٍ بحالةِ تاريخٍ آخر.
     if (originalListApprovedPriceItems) {
       service.listApprovedPriceItems = async function listApprovedPriceItemsWithLiveSnapshot() {
         const [approvedResult, snapshotResult] = await Promise.allSettled([
@@ -67,7 +98,7 @@
         if (snapshotResult.status !== "fulfilled") return approved;
 
         const snapshots = Array.isArray(snapshotResult.value) ? snapshotResult.value : [];
-        const index = buildSnapshotIndex(snapshots);
+        const index = buildIndex(snapshots);
 
         return approved.map((item) => {
           const snapshot = findSnapshot(index, item);
@@ -81,9 +112,11 @@
             ...(stock !== null ? { stockQty: stock, stock_qty: stock } : {}),
             ...(sold30d !== null ? { unitsSold30d: sold30d, units_sold_30d: sold30d } : {}),
             ameenSnapshotGeneratedAt: snapshot.generatedAt || snapshot.generated_at || "",
+            ameenLastSaleDate: snapshot.lastSaleDate || snapshot.last_sale_date || "",
             ameenLastPurchaseDate: snapshot.lastPurchaseDate || snapshot.last_purchase_date || "",
             ameenLastPurchasePrice: snapshot.lastPurchasePrice ?? snapshot.last_purchase_price ?? null,
-            ameenLastSupplierName: snapshot.lastSupplierName || snapshot.last_supplier_name || ""
+            ameenLastSupplierName: snapshot.lastSupplierName || snapshot.last_supplier_name || "",
+            ameenLastSupplierGuid: snapshot.lastSupplierGuid || snapshot.last_supplier_guid || ""
           };
         });
       };

@@ -1,9 +1,17 @@
-param(
+﻿param(
     [switch]$Apply,
+    # التفعيل الدائم: بلا علامته لا يكتب هذا المنتج شيئاً مهما ناداه أحد.
+    # السبب أن الكتابة لا تمرّ عبر سكريبت التسجيل وحده — tools/ameen-sync-agent.ps1
+    # ينادي هذا الملف بـ-Apply داخل Sync-Once، ووتيرة تلك المهمة دقيقة واحدة.
+    # فحارس على سكريبت التسجيل وحده كان حارساً على باب لا يمرّ منه أحد: لحظة
+    # تطبيق ترحيلة 03 كانت حلقة الدقيقة ستنشر الجيل وتقاعد المصدر القديم خلال
+    # خمس دقائق، بلا تشغيل جاف ولا قرار بشري. الحارس هنا يغطي كل مُنادٍ.
+    [switch]$Activate,
     [int]$MinimumIntervalMinutes = 0,
     [string]$EnvFile = "$PSScriptRoot\.env",
     [string]$LogFile = "$PSScriptRoot\logs\supplier-obligations-push.log",
-    [string]$MarkerPath = "$PSScriptRoot\logs\supplier-obligations-last-success.txt"
+    [string]$MarkerPath = "$PSScriptRoot\logs\supplier-obligations-last-success.txt",
+    [string]$ActivationMarkerPath = "$PSScriptRoot\logs\supplier-obligations-activated.txt"
 )
 
 $ErrorActionPreference = "Stop"
@@ -29,6 +37,110 @@ function Write-Log($Message) {
     Add-Content -LiteralPath $LogFile -Value $line -Encoding UTF8
 }
 
+# ============================================================================
+# قرار الاستبدال — دالة نقية بلا شبكة ولا قاعدة بيانات، كي تُختبر مباشرة.
+#
+# ثلاث حالات لا رابع لها:
+#   1) القراءة لم تُرجع أي مورد مرتبط بفواتير شراء ⇒ الاستعلام نفسه مشبوه، لا
+#      حقيقة محاسبية. إجهاض مطلق، ولا عَلَم يتجاوزه.
+#   2) القراءة أرجعت موردين وكلهم مسدَّدون ⇒ حالة نهائية **مُتحقَّقة**: الحمولة
+#      الفارغة هنا حقيقة لا عطل. رفضها كان يُبقي دَيناً على من سدّد إلى الأبد
+#      (ملاحظة Codex P1، صحيحة). يُؤذَن بالتفريغ لأن القراءة المصدرية نفسها
+#      تحقَّقت — لا لأن أحداً مرّر عَلَماً.
+#   3) القراءة أرجعت موردين وبعضهم مدين ⇒ استبدال عادي بحمولة غير فارغة.
+#
+# الإذن مشتقّ من دليل، لا من مفتاح سطر أوامر. لهذا حُذف -AllowEmpty: عَلَم لا
+# يغيّر أي نتيجة يوهم بحماية غير موجودة، والحماية الحقيقية هي الحالة (1).
+# ============================================================================
+function Get-SupplierObligationsPlan {
+    param(
+        [AllowEmptyCollection()][object[]]$AllRows = @(),
+        [AllowEmptyCollection()][object[]]$PayableRows = @()
+    )
+
+    if ($AllRows.Count -eq 0) {
+        return [PSCustomObject]@{
+            Action     = "abort"
+            AllowEmpty = $false
+            Reason     = "the Ameen read returned no purchase-linked suppliers at all. Refusing to touch Supabase."
+        }
+    }
+
+    if ($PayableRows.Count -eq 0) {
+        return [PSCustomObject]@{
+            Action     = "replace"
+            AllowEmpty = $true
+            Reason     = "verified terminal state: all $($AllRows.Count) purchase-linked suppliers are settled."
+        }
+    }
+
+    return [PSCustomObject]@{
+        Action     = "replace"
+        AllowEmpty = $false
+        Reason     = "$($PayableRows.Count) of $($AllRows.Count) purchase-linked suppliers carry a positive payable balance."
+    }
+}
+
+# ============================================================================
+# بوابة التفعيل — دالة نقية، تُختبر بلا ملفات ولا بيئة.
+#
+# التفعيل حالة دائمة على الجهاز يصنعها إنسان مرة واحدة (`-Activate`)، لا وسيط
+# سطر أوامر يمرّره كل مُنادٍ. ولهذا يغطي كل المنادين — بما فيهم
+# ameen-sync-agent.ps1 الذي يعمل كل دقيقة — لا سكريبت التسجيل وحده.
+#
+# غياب التفعيل ليس عطلاً بل حالة مقصودة، فالنتيجة تخطٍّ مُعلَن لا فشل: لو خرج
+# المنتج برمز غير صفري كل دقيقة لأغرق سجل وكيل المزامنة بفشل كاذب وأخفى الأعطال
+# الحقيقية.
+# ============================================================================
+function Get-SupplierObligationsActivation {
+    param(
+        [bool]$MarkerExists,
+        [string]$EnvValue
+    )
+
+    if ($MarkerExists) {
+        return [PSCustomObject]@{ Active = $true; Reason = "activation marker is present" }
+    }
+    if ($EnvValue -and ($EnvValue.Trim() -in @("1", "true", "yes"))) {
+        return [PSCustomObject]@{ Active = $true; Reason = "TOBACCO_SUPPLIER_OBLIGATIONS_ACTIVE is set" }
+    }
+    return [PSCustomObject]@{
+        Active = $false
+        Reason = "not activated on this machine; run push-supplier-obligations.ps1 -Activate after applying supabase/proposed/03 and reviewing a dry run"
+    }
+}
+
+# ============================================================================
+# استبدال ذرّي واحد عبر replace_supplier_obligations.
+#
+# لا حذف منفصل قبل الإدراج: الدالة تُدرج الجيل الحالي وتحذف ما ليس فيه داخل
+# معاملة واحدة، فلا توجد لحظة يكون فيها الجدول فارغاً — وهي النافذة التي كان
+# انقطاع الشبكة داخلها يترك الالتزامات ممسوحة.
+#
+# الحمولة تُرسَل دفعة واحدة عمداً: تقسيمها إلى دفعات يكسر الذرّية نفسها، لأن كل
+# نداء يحذف ما ليس في دفعته هو.
+# ============================================================================
+function ConvertTo-ReplacePayloadJson {
+    param(
+        [string]$Source,
+        [AllowEmptyCollection()][object[]]$Rows = @(),
+        [bool]$AllowEmpty
+    )
+
+    # Windows PowerShell 5.1 يفكّ المصفوفة أحادية العنصر عند التحويل فينتج كائن
+    # لا مصفوفة، فيرفضه jsonb_typeof(p_rows) = 'array'. البناء الصريح يمنع ذلك.
+    if ($Rows.Count -eq 0) {
+        $rowsJson = "[]"
+    } else {
+        $rowsJson = ConvertTo-Json -InputObject @($Rows) -Depth 5 -Compress
+        if (-not $rowsJson.StartsWith("[")) { $rowsJson = "[$rowsJson]" }
+    }
+
+    $sourceJson = ConvertTo-Json -InputObject $Source -Compress
+    $allowJson = if ($AllowEmpty) { "true" } else { "false" }
+    return '{"p_source":' + $sourceJson + ',"p_allow_empty":' + $allowJson + ',"p_rows":' + $rowsJson + '}'
+}
+
 $connStr = Get-Setting "AMEEN_SQL_CONNECTION_STRING"
 $supabaseUrl = Get-Setting "TOBACCO_SUPABASE_URL"
 if (-not $supabaseUrl) { $supabaseUrl = "https://dyxbirfpxeocqffnfdeb.supabase.co" }
@@ -46,6 +158,26 @@ if ($Apply -and (-not $apiKey -or -not $syncEmail -or -not $syncPassword)) {
 $PURCHASE_TYPE_GUID = "91377a56-ebfc-48c0-b79e-72063e1d7e3a"
 $SOURCE = "ameen_ac000_credit_minus_debit"
 $LEGACY_SOURCE = "ameen_cu000_credit_minus_debit"
+$REPLACE_RPC = "replace_supplier_obligations"
+
+if ($Activate) {
+    $activationDir = Split-Path -Parent $ActivationMarkerPath
+    if (-not (Test-Path -LiteralPath $activationDir)) { New-Item -ItemType Directory -Force -Path $activationDir | Out-Null }
+    "activated $((Get-Date).ToUniversalTime().ToString('o'))" | Set-Content -LiteralPath $ActivationMarkerPath -Encoding UTF8
+    Write-Log "Activated. Every caller of this producer may now write to Supabase, including tools/ameen-sync-agent.ps1."
+    exit 0
+}
+
+# الحارس يسبق أي كتابة، ويغطي كل مُنادٍ لا سكريبت التسجيل وحده.
+if ($Apply) {
+    $activation = Get-SupplierObligationsActivation `
+        -MarkerExists ([bool](Test-Path -LiteralPath $ActivationMarkerPath)) `
+        -EnvValue (Get-Setting "TOBACCO_SUPPLIER_OBLIGATIONS_ACTIVE")
+    if (-not $activation.Active) {
+        Write-Log "Skipped (not activated): $($activation.Reason)"
+        exit 0
+    }
+}
 
 if ($Apply -and $MinimumIntervalMinutes -gt 0 -and (Test-Path -LiteralPath $MarkerPath)) {
     $lastSuccess = (Get-Item -LiteralPath $MarkerPath).LastWriteTimeUtc
@@ -103,6 +235,16 @@ $conn.Close()
 $rows = @($allRows | Where-Object { $_.amount_due -gt 0 })
 Write-Log "Found $($allRows.Count) purchase-linked suppliers; $($rows.Count) have a positive payable balance."
 
+$plan = Get-SupplierObligationsPlan -AllRows $allRows -PayableRows $rows
+if ($plan.Action -eq "abort") {
+    Write-Log "ABORT: $($plan.Reason)"
+    throw "Supplier read returned zero rows; existing Supabase data was left untouched."
+}
+Write-Log "Replacement plan: $($plan.Reason)"
+if ($plan.AllowEmpty) {
+    Write-Log "WARNING: publishing an EMPTY generation for $SOURCE. Every supplier row for this source will be removed atomically."
+}
+
 if (-not $Apply) {
     Write-Host "=== DRY RUN: top supplier obligations ===" -ForegroundColor Yellow
     $rows | Sort-Object amount_due -Descending | Select-Object -First 20 supplier_name, debit_total, credit_total, amount_due, last_purchase_date | Format-Table -AutoSize
@@ -123,15 +265,9 @@ $headers = @{
     "Content-Profile" = "public"
 }
 
-foreach ($sourceToReplace in @($SOURCE, $LEGACY_SOURCE)) {
-    $encodedSource = [Uri]::EscapeDataString($sourceToReplace)
-    Invoke-RestMethod -Method Delete `
-        -Uri "$supabaseUrl/rest/v1/supplier_obligations?source=eq.$encodedSource" `
-        -Headers ($headers + @{ Prefer = "return=minimal" }) `
-        -TimeoutSec 60 | Out-Null
-}
-
 $generatedAt = (Get-Date).ToUniversalTime().ToString("o")
+# source وupdated_at لا يُرسلان: الدالة تضبطهما بنفسها داخل المعاملة، فإرسالهما
+# يفتح باب جيل يحمل مصدراً مخالفاً لما طُلب استبداله.
 $payload = @($rows | ForEach-Object {
     [PSCustomObject]@{
         supplier_key = $_.supplier_key
@@ -142,24 +278,42 @@ $payload = @($rows | ForEach-Object {
         strategic_weight = 1.0
         supply_risk = "normal"
         notes = "Ameen ac000 base-currency balance: Credit - Debit; last purchase $($_.last_purchase_date); synced $generatedAt"
-        source = $SOURCE
-        updated_at = $generatedAt
     }
 })
 
-$batchSize = 200
-for ($i = 0; $i -lt $payload.Count; $i += $batchSize) {
-    $end = [Math]::Min($i + $batchSize - 1, $payload.Count - 1)
-    $batch = $payload[$i..$end]
-    $body = $batch | ConvertTo-Json -Depth 4 -Compress
-    Invoke-RestMethod -Method Post `
-        -Uri "$supabaseUrl/rest/v1/supplier_obligations" `
-        -Headers ($headers + @{ Prefer = "return=minimal" }) `
-        -ContentType "application/json; charset=utf-8" `
-        -TimeoutSec 60 `
-        -Body ([Text.Encoding]::UTF8.GetBytes($body)) | Out-Null
-    Write-Log "Uploaded rows $($i + 1)-$($end + 1)."
+function Invoke-ReplaceGeneration {
+    param([string]$Source, [AllowEmptyCollection()][object[]]$Rows = @(), [bool]$AllowEmpty)
+
+    $body = ConvertTo-ReplacePayloadJson -Source $Source -Rows $Rows -AllowEmpty $AllowEmpty
+    try {
+        return Invoke-RestMethod -Method Post `
+            -Uri "$supabaseUrl/rest/v1/rpc/$REPLACE_RPC" `
+            -Headers $headers `
+            -ContentType "application/json; charset=utf-8" `
+            -TimeoutSec 120 `
+            -Body ([Text.Encoding]::UTF8.GetBytes($body))
+    } catch {
+        $detail = $_.Exception.Message
+        try {
+            $stream = $_.Exception.Response.GetResponseStream()
+            if ($stream) { $detail = (New-Object IO.StreamReader($stream)).ReadToEnd() }
+        } catch { }
+        if ($detail -match "PGRST202" -or $detail -match "Could not find the function") {
+            throw "The atomic replacement function public.$REPLACE_RPC is missing on this project. Apply supabase/proposed/03-supplier-obligations-unique-key.sql before running this producer. Nothing was written."
+        }
+        throw "Atomic replacement failed for source '$Source': $detail"
+    }
 }
+
+Write-Log "Replacing generation for $SOURCE with $($payload.Count) row(s) in a single atomic call."
+$result = Invoke-ReplaceGeneration -Source $SOURCE -Rows $payload -AllowEmpty $plan.AllowEmpty
+$storedCount = if ($result -is [array]) { $result[0].row_count } else { $result.row_count }
+Write-Log "Atomic replacement committed: $storedCount row(s) now stored for $SOURCE."
+
+# المصدر القديم يُصفَّر **بعد** نجاح الجيل الحالي وحده: لو فشل ما سبق لبقيت
+# صفوفه في مكانها بدل أن يُترك الجدول بلا أي التزام.
+Write-Log "Retiring legacy source $LEGACY_SOURCE."
+Invoke-ReplaceGeneration -Source $LEGACY_SOURCE -Rows @() -AllowEmpty $true | Out-Null
 
 $markerDir = Split-Path -Parent $MarkerPath
 if (-not (Test-Path -LiteralPath $markerDir)) { New-Item -ItemType Directory -Force -Path $markerDir | Out-Null }
