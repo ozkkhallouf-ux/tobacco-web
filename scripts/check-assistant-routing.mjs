@@ -1586,4 +1586,210 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   ok("فترة ربح متعددة الأيام صراحة بلقطة يوم واحد تُظهر تحذير النقص؛ يوم واحد صريح ومدى كامل التغطية لا يُظهران تحذيراً زائفاً");
 }
 
+{
+  // «هذا الأسبوع» و«الأسبوع الماضي» كانتا تقعان كلتاهما ضمن النمط العام لآخر
+  // 7 أيام المتدحرجة (لا صلة له ببداية الأسبوع السوري=السبت)، فتُحسب فترتان
+  // مختلفتان فعلياً بنفس الحساب الخاطئ. اللقطة فارغة عمداً كي يظهر النص
+  // الرافض بتفاصيل الفترة (label/from/to) لكل صياغة، فتُقارَن الفترات الثلاث.
+  const emptyBalances = defaultFixtures();
+  emptyBalances["inventory_reports:ameen_customer_balances"] = [];
+
+  const extractWindow = (text) => {
+    const m = /\(([0-9-]{10}) → ([0-9-]{10})\)/.exec(text);
+    return m ? `${m[1]}→${m[2]}` : null;
+  };
+
+  const thisWeek = await loadAssistant({ fixtures: emptyBalances });
+  const thisWeekAnswer = await thisWeek.ask(TOKENS.owner, "كم ديون الزبائن هذا الاسبوع؟");
+  const thisWeekText = String(thisWeekAnswer.body.reply);
+  assert.equal(thisWeekAnswer.body.answered, false);
+  assert.ok(/هذا الأسبوع/.test(thisWeekText), `«هذا الاسبوع» لم يُترجم لعنوان «هذا الأسبوع»:\n${thisWeekText}`);
+  const thisWeekWindow = extractWindow(thisWeekText);
+  assert.ok(thisWeekWindow, `لم يظهر مدى تاريخ في رد «هذا الاسبوع»:\n${thisWeekText}`);
+
+  const lastWeek = await loadAssistant({ fixtures: emptyBalances });
+  const lastWeekAnswer = await lastWeek.ask(TOKENS.owner, "كم ديون الزبائن الاسبوع الماضي؟");
+  const lastWeekText = String(lastWeekAnswer.body.reply);
+  assert.equal(lastWeekAnswer.body.answered, false);
+  assert.ok(/الأسبوع الماضي/.test(lastWeekText), `«الاسبوع الماضي» لم يُترجم لعنوان «الأسبوع الماضي»:\n${lastWeekText}`);
+  const lastWeekWindow = extractWindow(lastWeekText);
+  assert.ok(lastWeekWindow, `لم يظهر مدى تاريخ في رد «الاسبوع الماضي»:\n${lastWeekText}`);
+
+  const rollingWeek = await loadAssistant({ fixtures: emptyBalances });
+  const rollingWeekAnswer = await rollingWeek.ask(TOKENS.owner, "كم ديون الزبائن اخر سبعه ايام؟");
+  const rollingWeekText = String(rollingWeekAnswer.body.reply);
+  assert.equal(rollingWeekAnswer.body.answered, false);
+  assert.ok(/آخر 7 أيام/.test(rollingWeekText), `«اخر سبعه ايام» لم يُترجم لعنوان «آخر 7 أيام»:\n${rollingWeekText}`);
+  const rollingWeekWindow = extractWindow(rollingWeekText);
+  assert.ok(rollingWeekWindow, `لم يظهر مدى تاريخ في رد «اخر سبعه ايام»:\n${rollingWeekText}`);
+
+  // الثلاث فترات يجب أن تختلف فعلياً — لو تعطّل الفصل رجعت جميعها لنفس مدى
+  // «آخر 7 أيام» المتدحرج كما كان الخلل قبل الإصلاح.
+  assert.notEqual(thisWeekWindow, rollingWeekWindow, `«هذا الاسبوع» و«اخر سبعه ايام» أعطتا نفس المدى (${thisWeekWindow}) — لم تُفصلا فعلياً`);
+  assert.notEqual(lastWeekWindow, rollingWeekWindow, `«الاسبوع الماضي» و«اخر سبعه ايام» أعطتا نفس المدى (${lastWeekWindow}) — لم تُفصلا فعلياً`);
+  assert.notEqual(thisWeekWindow, lastWeekWindow, `«هذا الاسبوع» و«الاسبوع الماضي» أعطتا نفس المدى (${thisWeekWindow})`);
+  ok("«هذا الاسبوع» و«الاسبوع الماضي» و«اخر سبعه ايام» تُحسب بثلاث فترات منفصلة فعلياً لا فترة متدحرجة واحدة مكررة");
+}
+
+{
+  // reportForPeriod: فترة تاريخية صريحة يجب أن تختار اللقطة التي يغطيها
+  // report_date لا أحدث لقطة بالإنشاء. بلا فترة صريحة يبقى latestReport
+  // (الأحدث بالإنشاء) كالسابق. فترة صريحة بلا أي لقطة تغطيها ⇒ رفض صريح.
+  const day = (n) => new Date(Date.now() + 180 * 60_000 - n * 86_400_000).toISOString().slice(0, 10);
+  const today = day(0);
+  const yesterday = day(1);
+  const twoSnapshots = defaultFixtures();
+  twoSnapshots["inventory_reports:ameen_customer_balances"] = [
+    {
+      report_date: today,
+      created_at: new Date(Date.now() + 180 * 60_000).toISOString(),
+      summary: { totalDebitBalance: 1000, totalCreditBalance: 0, customersWithDebitBalance: 1, customersWithCreditBalance: 0, totalCustomers: 1 },
+      items: [{ key: "زبون اليوم", name: "زبون اليوم", balance: 1000, customerGuid: "t1", recentPayments: [] }]
+    },
+    {
+      report_date: yesterday,
+      // created_at أقدم بيومين كي يبقى ترتيب الأحدث-بالإنشاء مخالفاً لترتيب
+      // report_date، فيتّضح الفرق بين latestReport وreportForPeriod.
+      created_at: new Date(Date.now() + 180 * 60_000 - 2 * 86_400_000).toISOString(),
+      summary: { totalDebitBalance: 2000, totalCreditBalance: 0, customersWithDebitBalance: 1, customersWithCreditBalance: 0, totalCustomers: 1 },
+      items: [{ key: "زبون الامس", name: "زبون الامس", balance: 2000, customerGuid: "y1", recentPayments: [] }]
+    }
+  ];
+
+  const bare = await loadAssistant({ fixtures: twoSnapshots });
+  const bareAnswer = await bare.ask(TOKENS.owner, "من أكبر الزبائن مديونية؟");
+  const bareText = String(bareAnswer.body.reply);
+  assert.equal(bareAnswer.body.answered, true, `سؤال بلا فترة يجب أن يُجاب من latestReport:\n${bareText}`);
+  assert.ok(bareText.includes(today), `سؤال بلا فترة لم يستخدم لقطة اليوم (الأحدث بالإنشاء):\n${bareText}`);
+  assert.ok(/1,000/.test(bareText), `سؤال بلا فترة لم يعرض إجمالي لقطة اليوم (1000):\n${bareText}`);
+
+  const yest = await loadAssistant({ fixtures: twoSnapshots });
+  const yestAnswer = await yest.ask(TOKENS.owner, "كم ديون الزبائن امس؟");
+  const yestText = String(yestAnswer.body.reply);
+  assert.equal(yestAnswer.body.answered, true, `سؤال «امس» صريح يجب أن يُجاب من لقطة الأمس رغم أنها ليست الأحدث بالإنشاء:\n${yestText}`);
+  assert.ok(yestText.includes(yesterday), `سؤال «امس» لم يستخدم لقطة الأمس (report_date):\n${yestText}`);
+  assert.ok(/2,000/.test(yestText), `سؤال «امس» لم يعرض إجمالي لقطة الأمس (2000) — استُخدمت لقطة اليوم بالخطأ:\n${yestText}`);
+
+  const noCover = await loadAssistant({ fixtures: twoSnapshots });
+  const noCoverAnswer = await noCover.ask(TOKENS.owner, "كم ديون الزبائن الشهر الماضي؟");
+  const noCoverText = String(noCoverAnswer.body.reply);
+  assert.equal(noCoverAnswer.body.answered, false, `فترة صريحة بلا أي لقطة تغطيها يجب أن تُرفض لا أن تعرض أحدث لقطة كأنها تاريخية:\n${noCoverText}`);
+  assert.ok(/الشهر الماضي/.test(noCoverText), `نص الرفض لم يذكر تسمية الفترة المطلوبة:\n${noCoverText}`);
+  ok("reportForPeriod يختار اللقطة المطابقة لـreport_date عند فترة صريحة (لا الأحدث بالإنشاء)، ويرفض صراحة عند غياب لقطة تغطي الفترة");
+}
+
+{
+  // اسمان متطابقان حرفياً بـitem_name (تعادل تام exactCount>1) يجب أن يُرفض
+  // اختيار أولهما صامتاً، ويُطلب من السائل تدقيق الاسم.
+  const dupItems = defaultFixtures();
+  dupItems.approved_price_items = [
+    {
+      item_name: "توتون خاص", item_key: "توتون خاص - أ", unit1_name: "كروز", unit1_price: 10,
+      unit2_name: "كرتونة", unit2_factor: 50, unit2_price: 500, sale_price: 10, stock_qty: 100, stock_status: "available"
+    },
+    {
+      item_name: "توتون خاص", item_key: "توتون خاص - ب", unit1_name: "كروز", unit1_price: 12,
+      unit2_name: "كرتونة", unit2_factor: 50, unit2_price: 600, sale_price: 12, stock_qty: 80, stock_status: "available"
+    }
+  ];
+  const a = await loadAssistant({ fixtures: dupItems });
+  const result = await a.ask(TOKENS.owner, "سعر توتون خاص");
+  const text = String(result.body.reply);
+  assert.equal(result.body.tool, "item");
+  assert.equal(result.body.answered, false, `اسم صنف يطابق سطرين بتعادل تام كان يجب رفضه لا اختيار الأول صامتاً:\n${text}`);
+  assert.ok(/يطابق أكثر من صنف/.test(text), `نص الرفض لا يذكر التعدد:\n${text}`);
+  assert.ok(/لن أخمّن بينها/.test(text), `نص الرفض لا يذكر رفض التخمين:\n${text}`);
+  const listedLines = (text.match(/^- توتون خاص$/gm) ?? []).length;
+  assert.equal(listedLines, 2, `نص الرفض يجب أن يسرد سطرين متنافسين باسم «توتون خاص» (item_name)، لا اختيار أحدهما صامتاً:\n${text}`);
+  ok("اسم صنف يطابق سطرين بتعادل تام (نفس item_name) يُرفض صراحة بدل اختيار أول سطر صامتاً");
+}
+
+{
+  // حركة الصنف كانت تتجاهل أي فترة صريحة بالسؤال وتستخدم دوماً نافذة ثابتة
+  // 60 يوماً (والمتوسط دوماً على /60). فترة صريحة يجب أن تُستخدم كما هي في
+  // كل من التسمية والمتوسط اليومي.
+  const a = await loadAssistant({ fixtures: defaultFixtures() });
+  const bareAnswer = await a.ask(TOKENS.owner, "حركة ماستر طويل ورق");
+  const bareText = String(bareAnswer.body.reply);
+  assert.equal(bareAnswer.body.tool, "item");
+  assert.ok(/\*\*الحركة \(آخر 60 يوم\)\*\*/.test(bareText), `سؤال بلا فترة صريحة يجب أن يستخدم نافذة آخر 60 يوم الافتراضية:\n${bareText}`);
+  assert.ok(/الكمية المباعة: \*\*30\*\*/.test(bareText), `سؤال بلا فترة لم يجمع كمية اليوم (30) بشكل صحيح:\n${bareText}`);
+  assert.ok(/متوسط 0\.5 بالوحدة يومياً/.test(bareText), `متوسط النافذة الافتراضية (30/60) غير صحيح:\n${bareText}`);
+
+  const b = await loadAssistant({ fixtures: defaultFixtures() });
+  const explicitAnswer = await b.ask(TOKENS.owner, "حركة ماستر طويل ورق اخر 10 يوم؟");
+  const explicitText = String(explicitAnswer.body.reply);
+  assert.equal(explicitAnswer.body.tool, "item");
+  assert.ok(/\*\*الحركة \(آخر 10 يوم\)\*\*/.test(explicitText), `فترة صريحة (اخر 10 يوم) لم تُستخدم في عنوان الحركة — استُخدمت النافذة الثابتة بدلاً منها:\n${explicitText}`);
+  assert.ok(/الكمية المباعة: \*\*30\*\*/.test(explicitText), `فترة اخر 10 يوم لم تجمع كمية اليوم (30) بشكل صحيح:\n${explicitText}`);
+  assert.ok(/متوسط 3\.0 بالوحدة يومياً/.test(explicitText), `متوسط فترة اخر 10 يوم (30/10=3.0) غير صحيح — يبدو أن القاسم بقي 60:\n${explicitText}`);
+  ok("حركة الصنف تستخدم الفترة الصريحة المطلوبة بدل نافذة 60 يوماً الثابتة، في كل من العنوان والمتوسط اليومي");
+}
+
+{
+  // دفعات الزبون كانت تُعرض دوماً من نافذة التقرير كاملة (أحدث 6 دفعات) بلا
+  // صلة بالفترة المطلوبة بالسؤال. فترة صريحة يجب أن تُصفّي الدفعات فعلياً.
+  const a = await loadAssistant({ fixtures: defaultFixtures() });
+  const bareAnswer = await a.ask(TOKENS.owner, "كشف حساب مؤسسة النموذج");
+  const bareText = String(bareAnswer.body.reply);
+  assert.equal(bareAnswer.body.tool, "customer");
+  assert.ok(/\*\*آخر الدفعات\*\*\n/.test(bareText), `سؤال بلا فترة يجب أن يعرض «آخر الدفعات» بلا تسمية فترة:\n${bareText}`);
+  assert.ok(/8,500/.test(bareText), `سؤال بلا فترة لم يعرض دفعة الأمس (8500) من نافذة التقرير:\n${bareText}`);
+
+  const b = await loadAssistant({ fixtures: defaultFixtures() });
+  const todayAnswer = await b.ask(TOKENS.owner, "كشف حساب مؤسسة النموذج اليوم");
+  const todayText = String(todayAnswer.body.reply);
+  assert.equal(todayAnswer.body.tool, "customer");
+  assert.ok(!/8,500/.test(todayText), `فترة «اليوم» الصريحة أظهرت دفعة الأمس رغم أنها خارج الفترة:\n${todayText}`);
+  assert.ok(/لا دفعات مسجّلة لهذا الحساب في اليوم/.test(todayText), `فترة «اليوم» بلا دفعات يجب أن تذكر ذلك صراحة مع تسمية الفترة:\n${todayText}`);
+
+  const c = await loadAssistant({ fixtures: defaultFixtures() });
+  const yestAnswer = await c.ask(TOKENS.owner, "كشف حساب مؤسسة النموذج امس");
+  const yestText = String(yestAnswer.body.reply);
+  assert.equal(yestAnswer.body.tool, "customer");
+  assert.ok(/\*\*آخر الدفعات\*\* \(أمس\)/.test(yestText), `فترة «امس» الصريحة يجب أن تُظهر تسمية الفترة بجانب «آخر الدفعات»:\n${yestText}`);
+  assert.ok(/8,500/.test(yestText), `فترة «امس» الصريحة لم تُظهر دفعة الأمس رغم أنها داخل الفترة:\n${yestText}`);
+  ok("دفعات الزبون تُصفّى فعلياً حسب الفترة الصريحة المطلوبة (اليوم يستبعد دفعة الأمس، وامس يعرضها) بدل عرض نافذة التقرير كاملة دوماً");
+}
+
+{
+  // توصية الشراء كانت تصدر أحكاماً واثقة («لا حاجة شراء عاجلة») حتى من تقرير
+  // مخزون قديم. اللقطات الافتراضية (ماستر/كينغ دوم) لا تنتج أي صنف عاجل
+  // (ranked فارغة)، فالفرع المختبر هنا هو `!ranked.length` مع stale/fresh.
+  // توصية الشراء تفحص اكتمال قراءة المبيعات (فرع «غير مكتملة») قبل فحص قِدَم
+  // المخزون، ومصدر المزامنة فارغ افتراضياً — فبلا سجل مزامنة يسقط الجواب على
+  // فرع الاكتمال أولاً ولا يصل لفرع القِدَم المقصود اختباره هنا إطلاقاً.
+  const day6 = (n) => new Date(Date.now() + 180 * 60_000 - n * 86_400_000).toISOString().slice(0, 10);
+  const syncState6 = [{
+    source: "ameen_sales_line_items", window_start: day6(29), window_end: day6(0),
+    row_count: 30, completed_at: new Date().toISOString()
+  }];
+
+  const staleFixtures = defaultFixtures();
+  staleFixtures.sales_line_items_sync_state = syncState6;
+  const staleReport = staleFixtures["inventory_reports:ameen_sql_agent"][0];
+  staleReport.created_at = new Date(Date.now() - 20 * 3_600_000).toISOString(); // 20 ساعة — أقدم من حد 12 ساعة
+  const stale = await loadAssistant({ fixtures: staleFixtures });
+  const staleAnswer = await stale.ask(TOKENS.owner, "ماذا يجب ان اشتري؟");
+  const staleText = String(staleAnswer.body.reply);
+  assert.equal(staleAnswer.body.tool, "purchase_advice");
+  assert.equal(staleAnswer.body.answered, false, `تقرير مخزون عمره 20 ساعة (أقدم من حد 12 ساعة) كان يجب ألا يُصدر حكم «لا حاجة شراء عاجلة» بثقة:\n${staleText}`);
+  assert.ok(/توصية الشراء — غير محسومة/.test(staleText), `نص التوصية على مخزون قديم لا يذكر أنها غير محسومة:\n${staleText}`);
+  assert.ok(/قديم/.test(staleText), `نص التوصية لا يصف تقرير المخزون بأنه قديم:\n${staleText}`);
+  assert.ok(/حدّث المخزون أولاً/.test(staleText), `نص التوصية على مخزون قديم لا يطلب تحديث المخزون أولاً:\n${staleText}`);
+
+  const freshFixtures = defaultFixtures();
+  freshFixtures.sales_line_items_sync_state = syncState6;
+  const freshReport = freshFixtures["inventory_reports:ameen_sql_agent"][0];
+  freshReport.created_at = new Date().toISOString(); // طازج — أقل من حد 12 ساعة
+  const fresh = await loadAssistant({ fixtures: freshFixtures });
+  const freshAnswer = await fresh.ask(TOKENS.owner, "ماذا يجب ان اشتري؟");
+  const freshText = String(freshAnswer.body.reply);
+  assert.equal(freshAnswer.body.tool, "purchase_advice");
+  assert.equal(freshAnswer.body.answered, true, `تقرير مخزون طازج يجب أن يصدر حكماً واثقاً:\n${freshText}`);
+  assert.ok(/\*\*توصية الشراء\*\*/.test(freshText), `نص التوصية الطازجة لا يحمل العنوان العادي (غير «غير محسومة»):\n${freshText}`);
+  assert.ok(/لا حاجة شراء عاجلة بهذا المعيار/.test(freshText), `نص التوصية الطازجة لا يذكر «لا حاجة شراء عاجلة»:\n${freshText}`);
+  ok("توصية الشراء تُصدر حكماً «غير محسوم» صراحة عند مخزون قديم (≥12 ساعة) بدل «لا حاجة شراء عاجلة» واثقة، وتبقى واثقة عند مخزون طازج");
+}
+
 console.log(`\nتوجيه المساعد الذكي: ${passed}/${passed} تحقق ناجح`);

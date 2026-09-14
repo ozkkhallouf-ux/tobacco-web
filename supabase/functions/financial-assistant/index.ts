@@ -330,6 +330,21 @@ async function latestReport(table: string, source?: string) {
   return Array.isArray(rows) && rows[0] ? rows[0] : null;
 }
 
+// نسخة latestReport التي تحترم فترة صريحة: لفترة تاريخية (ctx.period.explicit)
+// تُعاد أقرب لقطة يغطي تاريخ تقريرها الفترة المطلوبة بدل أحدث لقطة دوماً —
+// وإلا فأي سؤال عن ذمم شهر ماضٍ كان يعرض الرصيد الحالي مموَّهاً بتاريخ قديم.
+// بلا فترة صريحة، أو بلا لقطة تغطي الفترة، السلوك كما كان (أحدث/لا شيء).
+// (رصدها Codex على PR #205.)
+async function reportForPeriod(table: string, source: string, period: Period) {
+  if (!period.explicit) return latestReport(table, source);
+  const rows = await readRest(
+    `${table}?select=report_date,summary,items,created_at&source=eq.${encodeURIComponent(source)}`
+    + `&report_date=gte.${safeDate(period.from)}&report_date=lte.${safeDate(period.to)}`
+    + `&order=report_date.desc&limit=1`
+  );
+  return Array.isArray(rows) && rows[0] ? rows[0] : null;
+}
+
 // ── أدوات نصية عربية ─────────────────────────────────────────────────────────
 // الأرقام العربية-الهندية (٠-٩) والفارسية (۰-۹) تُردّ إلى ASCII.
 //
@@ -466,6 +481,18 @@ function damascusDate(offsetDays = 0) {
   return now.toISOString().slice(0, 10);
 }
 
+// يوم الأسبوع بتوقيت دمشق (0=أحد..6=سبت، مطابق لـ Date.getUTCDay على التاريخ
+// المُزاح). الأسبوع في هذا السياق يبدأ السبت وفق العرف السوري/الإقليمي.
+function damascusWeekday(offsetDays = 0) {
+  const now = new Date(Date.now() + DAMASCUS_OFFSET_MINUTES * 60_000 + offsetDays * 86_400_000);
+  return now.getUTCDay();
+}
+
+// عدد الأيام من بداية الأسبوع الحالي (السبت) حتى اليوم المطلوب.
+function daysSinceWeekStart(dow: number) {
+  return (dow + 1) % 7;
+}
+
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 function safeDate(value: string) {
   if (!ISO_DATE.test(value)) throw new Error("bad_date_range");
@@ -507,6 +534,20 @@ function parsePeriod(question: string, fallbackDays = 0): Period {
   if (/السنه الماضيه|السنه الفائته|السنه السابقه|العام الماضي|العام الفائت|العام السابق/.test(q)) {
     const lastYear = String(Number(today.slice(0, 4)) - 1);
     return { from: `${lastYear}-01-01`, to: `${lastYear}-12-31`, label: "السنة الماضية", explicit: true };
+  }
+  // «هذا الأسبوع» و«الأسبوع الماضي» يُفحصان قبل الفرع العام لـ«أسبوع» — نفس
+  // نمط الشهر/السنة أعلاه: عبارة محدّدة قبل العبارة العامة. بدون هذا التمييز
+  // كان أي ذكر لكلمة «أسبوع» يُرجع نافذة متحركة 7 أيام سواء قصد السائل
+  // الأسبوع التقويمي الحالي أو السابق أو آخر 7 أيام فعلاً. (رصدها Codex على PR #205.)
+  if (/هذا الاسبوع|الاسبوع الحالي|هالاسبوع/.test(q)) {
+    const start = damascusDate(-daysSinceWeekStart(damascusWeekday()));
+    return { from: start, to: today, label: "هذا الأسبوع", explicit: true };
+  }
+  if (/الاسبوع الماضي|الاسبوع السابق|الاسبوع الفائت/.test(q)) {
+    const currentStart = damascusDate(-daysSinceWeekStart(damascusWeekday()));
+    const prevEnd = damascusDateFrom(currentStart, -1);
+    const prevStart = damascusDateFrom(prevEnd, -6);
+    return { from: prevStart, to: prevEnd, label: "الأسبوع الماضي", explicit: true };
   }
   if (/الاسبوع|اسبوع|٧ ايام|7 ايام|اخر سبعه/.test(q)) {
     return { from: damascusDate(-6), to: today, label: "آخر 7 أيام", explicit: true };
@@ -1192,8 +1233,19 @@ const TOOLS: Tool[] = [
       { re: /ذمم|ديون|دين|مديونيه|مدين|علينا|علي?هم|مستحقات/, w: 6 },
       { re: /اكبر الزبائن|اكتر زبون/, w: 4 }
     ],
-    async run() {
-      const report = await latestReport("inventory_reports", "ameen_customer_balances");
+    async run(ctx) {
+      // لفترة تاريخية صريحة («ذمم الزبائن الشهر الماضي») يجب لقطة فعلية تغطي
+      // ذاك التاريخ — لا أحدث لقطة معروضة كأنها تاريخية. بلا فترة صريحة
+      // السلوك القديم (أحدث لقطة) كما هو. (رصدها Codex على PR #205.)
+      const report = await reportForPeriod("inventory_reports", "ameen_customer_balances", ctx.period);
+      if (ctx.period.explicit && !report) {
+        return {
+          ok: false,
+          text: `لا تتوفر لدي لقطة أرصدة زبائن تغطي ${ctx.period.label} (${ctx.period.from} → ${ctx.period.to}). `
+            + `لن أعرض الرصيد الحالي كأنه يعود لتلك الفترة — التقارير المحفوظة لا تغطيها.`,
+          sources: ["inventory_reports:ameen_customer_balances"]
+        };
+      }
       const items = Array.isArray(report?.items) ? report.items : [];
       if (!items.length) return noData("أرصدة الزبائن", ["inventory_reports:ameen_customer_balances"]);
       const s = (report.summary ?? {}) as Record<string, unknown>;
@@ -1274,16 +1326,26 @@ const TOOLS: Tool[] = [
       let text = `**${name}**\n`
         + `- الرصيد الحالي: **${money(customer.balance)}** ${num(customer.balance) > 0 ? "(مدين — عليه)" : num(customer.balance) < 0 ? "(دائن — له)" : "(مسدّد)"}\n`
         + `- تاريخ التقرير: ${balances.report_date}`;
-      const payments = Array.isArray(customer.recentPayments) ? customer.recentPayments : [];
+      const allPayments = Array.isArray(customer.recentPayments) ? customer.recentPayments : [];
+      // الفترة المطلوبة تُحترم هنا كما في فواتير الزبون أدناه: «دفعات الزبون X
+      // الشهر الماضي» كانت تعرض أحدث 6 دفعات من نافذة التقرير كلها بلا صلة
+      // بالفترة المطلوبة، فتحلّ دفعات حديثة محلّ المطلوبة. بلا فترة صريحة
+      // يبقى السلوك كما هو (أحدث 6 من نافذة التقرير).
+      const payments = ctx.period.explicit
+        ? allPayments.filter((p: Record<string, unknown>) => {
+          const date = String(p.date ?? "").slice(0, 10);
+          return date >= ctx.period.from && date <= ctx.period.to;
+        })
+        : allPayments;
       if (payments.length) {
-        text += `\n\n**آخر الدفعات**\n`
+        text += `\n\n**آخر الدفعات**${ctx.period.explicit ? ` (${ctx.period.label})` : ""}\n`
           + payments
             .slice(0, 6)
             .map((p: Record<string, unknown>) =>
               `- ${String(p.date ?? "").slice(0, 10)}: **${money(p.amount)}**${p.notes ? ` — ${String(p.notes)}` : ""}`)
             .join("\n");
       } else {
-        text += `\n\n_لا دفعات مسجّلة لهذا الحساب في نافذة التقرير._`;
+        text += `\n\n_لا دفعات مسجّلة لهذا الحساب${ctx.period.explicit ? ` في ${ctx.period.label}` : " في نافذة التقرير"}._`;
       }
 
       const sources = ["inventory_reports:ameen_customer_balances"];
@@ -1562,6 +1624,11 @@ const TOOLS: Tool[] = [
       const report = await latestReport("inventory_reports", "ameen_sql_agent");
       const items = Array.isArray(report?.items) ? report.items : [];
       if (!items.length) return noData("المخزون", ["inventory_reports:ameen_sql_agent"]);
+      // مخزون قديم يجعل حكماً قاطعاً («شراء عاجل» أو «لا حاجة») غير موثوق —
+      // نفس عتبة التحديث المستعملة في freshnessNote (≥12 ساعة). لا تُغيَّر
+      // قواعد الترتيب نفسها، فقط يُحجب الحكم القاطع عند القدم. (رصدها Codex على PR #205.)
+      const staleNote = freshnessNote(report.created_at);
+      const stale = staleNote !== "";
       const period = { from: damascusDate(-29), to: damascusDate(), label: "آخر 30 يوم", explicit: true };
       const sales = await readSales(period, ctx.role);
       if (!sales.rows.length) {
@@ -1615,11 +1682,24 @@ const TOOLS: Tool[] = [
             partial: sales.partial
           };
         }
+        if (stale) {
+          return {
+            ok: false,
+            text: `**توصية الشراء — غير محسومة**\n`
+              + `لم يظهر صنف تحت 21 يوم تغطية حسب معدّل ${period.label}، لكن تقرير المخزون الذي بُني عليه الحكم **قديم**.`
+              + `\n\nفلن أقول «لا حاجة شراء عاجلة» بثقة — حدّث المخزون أولاً ثم أعد السؤال.`
+              + staleNote,
+            sources: ["inventory_reports:ameen_sql_agent", "sales_line_items", "sales_line_items_sync_state"],
+            partial: sales.partial,
+            asOf: report.created_at
+          };
+        }
         return {
           ok: true,
           text: `**توصية الشراء**\nلا يوجد صنف يبيع فعلياً ومخزونه يكفي أقل من 21 يوماً حسب معدّل ${period.label}. لا حاجة شراء عاجلة بهذا المعيار.`,
           sources: ["inventory_reports:ameen_sql_agent", "sales_line_items", "sales_line_items_sync_state"],
-          partial: sales.partial
+          partial: sales.partial,
+          asOf: report.created_at
         };
       }
       // الفرع الموجب يُحجب كذلك. كنتُ تركتُه بحجّة أن البتر يخفض `perDay`
@@ -1645,6 +1725,25 @@ const TOOLS: Tool[] = [
               .join("\n")
             + `\n\nهذه قراءة وتحليل فقط — لا يُنشئ المساعد أي طلب شراء ولا يعدّل أي مخزون.`
             + state.note,
+          sources: ["inventory_reports:ameen_sql_agent", "sales_line_items", "sales_line_items_sync_state"],
+          partial: sales.partial,
+          asOf: report.created_at
+        };
+      }
+      if (stale) {
+        return {
+          ok: false,
+          text: `**أولوية الشراء — غير محسومة**\n`
+            + `ظهر ${ranked.length} صنف تحت 21 يوم تغطية، لكن تقرير المخزون الذي بُني عليه الحكم **قديم**.`
+            + `\n\nهؤلاء **مرشّحون غير مؤكَّدين**، لا أولوية شراء مؤكَّدة — حدّث المخزون أولاً ثم أعد السؤال:\n`
+            + ranked
+              .slice(0, 20)
+              .map((e) =>
+                `- ${String(e.row.name ?? e.row.key)}: مخزون ${qty(e.stock)} ${String(e.row.unit1Name ?? "")}`
+                + `، بيع ${e.perDay.toFixed(1)}/يوم ⇒ يكفي ${e.coverDays.toFixed(1)} يوم`
+                + (e.negative ? " ⚠️ الرصيد **سالب** في الأمين — يحتاج مراجعة إدخال" : ""))
+              .join("\n")
+            + staleNote,
           sources: ["inventory_reports:ameen_sql_agent", "sales_line_items", "sales_line_items_sync_state"],
           partial: sales.partial,
           asOf: report.created_at
@@ -1705,6 +1804,17 @@ const TOOLS: Tool[] = [
           sources: ["approved_price_items"]
         };
       }
+      // اسم غامض يطابق أكثر من صنف بلا فارق فعلي بينها — نفس منطق مطابقة
+      // الزبائن أعلاه: لا نخمّن، نطلب من السائل تدقيق الاسم. (رصدها Codex على PR #205.)
+      if (isAmbiguous(matches)) {
+        return {
+          ok: false,
+          text: `الاسم «${ctx.entityText.trim()}» يطابق أكثر من صنف:\n`
+            + matches.map((m) => `- ${String(m.row.item_name ?? m.row.item_key)}`).join("\n")
+            + `\n\nاكتب اسم الصنف بشكل أدق لأختار الصنف الصحيح — لن أخمّن بينها.`,
+          sources: ["approved_price_items"]
+        };
+      }
       const item = matches[0].row;
       const name = String(item.item_name ?? item.item_key ?? "");
       let text = `**${name}**\n`
@@ -1717,8 +1827,16 @@ const TOOLS: Tool[] = [
         text += `\n\n_أصناف مشابهة: ${matches.slice(1).map((m) => String(m.row.item_name)).join("، ")}_`;
       }
 
-      // الحركة من سطور المبيعات الحقيقية
-      const period = { from: damascusDate(-59), to: damascusDate(), label: "آخر 60 يوم", explicit: true };
+      // الحركة من سطور المبيعات الحقيقية. فترة صريحة بالسؤال («آخر 10 أيام»،
+      // «الأسبوع الماضي»...) تُستخدم كما هي بدل الافتراضي الثابت 60 يوماً —
+      // وإلا كانت كل أسئلة حركة الصنف تتجاهل الفترة المطلوبة صامتة. (رصدها Codex على PR #205.)
+      const period = ctx.period.explicit
+        ? ctx.period
+        : { from: damascusDate(-59), to: damascusDate(), label: "آخر 60 يوم", explicit: true };
+      const periodDays = Math.max(
+        1,
+        Math.round((new Date(`${period.to}T00:00:00Z`).getTime() - new Date(`${period.from}T00:00:00Z`).getTime()) / 86_400_000) + 1
+      );
       const sales = await readSales(period, ctx.role);
       const mine = sales.rows.filter((row) => normalize(row.item_name) === normalize(name));
       const itemState = await salesCompleteness(period, sales.partial);
@@ -1733,7 +1851,7 @@ const TOOLS: Tool[] = [
         const totalQty = mine.reduce((sum, row) => sum + num(row.qty), 0);
         text += `\n\n**الحركة (${period.label})**\n`
           + `- الكمية المباعة: **${qty(totalQty)}** على ${mine.length} سطر\n`
-          + `- متوسط ${(totalQty / 60).toFixed(1)} بالوحدة يومياً`;
+          + `- متوسط ${(totalQty / periodDays).toFixed(1)} بالوحدة يومياً`;
         // القيمة وأسماء المشترين للمالك وحده. الكمية حركةُ مخزون يحتاجها
         // الموظف في عمله؛ أما القيمة وقائمة الزبائن فهما تقرير المبيعات
         // المحمي نفسه، مُعاد بناؤه صنفاً صنفاً.
