@@ -12,10 +12,24 @@
 |---|---|---|
 | `20260823084956_smart_inventory_counter_isolation.sql` | `20260823085423` (بعده بـ4 دق.) | تعديل على منطق عزل العدادات في الجلسات |
 | `20260826094640_fix_ameen_read_requests_initplan_current_setting.sql` | `20260826104745` + `20260826133200` | تحسين أداء الاستعلام بفصل إصلاح initplan |
-| `20260830140000_khalil_audit_log.sql` | `20260830134123` + 3 آخرين | إضافة جداول الـaudit وتعريف الدوال مرحلياً |
-| `20260830144330_expense_entries_owner_only_rls.sql` | `20260830144806` | تعديل في تعريف سياسة RLS للمصروفات |
+| `20260830140000_khalil_audit_log.sql` | `20260830141802` (`khalil_audit_log`) — انظر ملاحظة* | مسودة محلية لإنشاء جداول الـaudit وتعريف الدوال، غير مطابقة لمحتوى الإنتاج المؤكَّد |
+| `20260830144330_expense_entries_owner_only_rls.sql` | `20260830172655` (`expense_entries_owner_only_rls`) | تعديل في تعريف سياسة RLS للمصروفات |
 | `20260831051500_fix_inventory_recon_match_key_fallbacks.sql` | `20260831020850` | تطبيق على الإنتاج قبل الـcommit المحلي |
 | `20260831120000_telegram_delivery_observability.sql` | `20260831185634` | إضافة `net_request_id` بنسخة مُصحَّحة |
+
+\* **تصحيح (2026-09-14):** الإدخال السابق لهذا السطر كان خاطئاً — كان يشير إلى
+`20260830134123` (وهذه في الواقع `harden_upsert_ameen_daily_profit_grants`، لا علاقة
+لها بـkhalil audit). الـmigration الحي الصحيح المرتبط فعلياً بإنشاء جداول khalil audit
+على الإنتاج هو `20260830141802` باسم `khalil_audit_log` (مؤكَّد عبر `supabase migration
+list` واسم الـmigration نفسه). **مهم:** لا يوجد إثبات أن محتوى SQL الفعلي لهذا الـmigration
+مطابق حرفياً لمسودة `20260830140000_khalil_audit_log.sql` المحلية — هذه المسودة مجرد
+نسخة محلية لم تُطبَّق قط ولا تُعتبر نسخة تاريخية مثبتة من الـmigration الحي. الغرض من هذا
+الجدول هو تتبّع أي timestamp إنتاجي يقابل أي محاولة محلية تقريبياً بالوقت، وليس إثبات تطابق
+المحتوى.
+
+كذلك تم تصحيح إدخال `expense_entries_owner_only_rls` أعلاه: كان يشير خطأً إلى
+`20260830144806` (وهذه `khalil_audit_notify_catch_query_canceled`)؛ الصحيح هو
+`20260830172655`.
 
 ## التحقق
 
@@ -25,4 +39,7 @@
 - `telegram_delivery_audit` function exists ✓
 - `khalil_audit_events` + جميع الجداول المرتبطة ✓
 
-التحقق الأخير عبر `supabase migration list`: 2026-09-02
+التحقق الأخير عبر `supabase migration list`: 2026-09-02 (جدول الاستبدال أعلاه صُحِّح
+لاحقاً بتاريخ 2026-09-14 بعد تدقيق أمني وجد مطابقتين خاطئتين — انظر الملاحظة أعلاه؛
+انظر أيضاً `supabase/migrations/<ts>_khalil_audit_migration_history_reconciliation.sql`
+للتوثيق الكامل).
