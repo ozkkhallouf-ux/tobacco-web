@@ -879,14 +879,20 @@ declare
 begin
   -- ١) حلقة المطابقة: تصنيف الصفوف المُرسَلة سابقاً حسب ردّها الحقيقي
   for r in
-    select o.id, o.attempts, resp.status_code, resp.timed_out, resp.error_msg, resp.content
+    select o.id, o.attempts, o.sent_at, resp.status_code, resp.timed_out, resp.error_msg, resp.content
     from public.telegram_outbox o
     left join net._http_response resp on resp.id = o.net_request_id
     where o.status = 'dispatched'
   loop
     v_delivery := case
       when r.status_code is null and r.error_msg is null and not coalesce(r.timed_out, false)
-        then 'no_response'   -- لم يصل ردّ pg_net بعد — انتظر الدورة التالية
+        then case
+          -- لم يصل ردّ pg_net بعد وما زال ضمن الهامش الطبيعي — انتظر الدورة التالية
+          when r.sent_at > now() - interval '15 minutes' then 'no_response'
+          -- تجاوز الهامش بلا ردّ إطلاقاً (تعطّل pg_net أو انتهاء نافذة استبقاء
+          -- رده الست ساعات): عامله كخطأ شبكة كي لا يبقى معلَّقاً بلا حدّ زمني
+          else 'network_error'
+        end
       when r.timed_out or r.error_msg is not null
         then 'network_error'
       when r.status_code between 200 and 299

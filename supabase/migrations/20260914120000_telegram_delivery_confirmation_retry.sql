@@ -16,6 +16,14 @@
 --      telegram_delivery_audit)، ثم إرسال كالمعتاد لكن بحالة ناتجة
 --      'dispatched' لا 'sent'. الفشل الحقيقي يعيد الصف إلى 'pending'
 --      (حتى 5 محاولات) ثم 'failed' نهائياً بعدها.
+--   ٣) ملاحظة Codex الثانية على نفس PR (بعد نشر الإصلاح أعلاه): صف بلا ردّ
+--      مسجَّل (`no_response`) كان يبقى 'dispatched' إلى الأبد — لا محاولة
+--      ولا فشل — حتى لو تعطّل pg_net أو انتهت نافذة استبقاء ردوده (٦ ساعات
+--      موثّقة). التنظيف الدوري يحذف الصف صامتاً بعد ١٤ يوماً فيضيع التنبيه
+--      كلياً بلا أثر. الإصلاح: أي صف dispatched مضى على إرساله أكثر من ١٥
+--      دقيقة (هامش كبير فوق زمن استجابة تيليغرام الطبيعي وتحت نافذة الست
+--      ساعات بكثير) بلا ردّ يُعامَل معاملة network_error — إعادة محاولة حتى
+--      ٥ مرات ثم 'failed' نهائياً، فلا يبقى صف معلَّقاً بلا حدّ زمني.
 --
 -- لا تغيير على notify_telegram()/دالة التصنيف telegram_delivery_audit()/
 -- private.safe_jsonb() — هذه الثلاثة تبقى كما في المرحلة أ تماماً.
@@ -40,14 +48,19 @@ declare
 begin
   -- ١) حلقة المطابقة: تصنيف الصفوف المُرسَلة سابقاً حسب ردّها الحقيقي
   for r in
-    select o.id, o.attempts, resp.status_code, resp.timed_out, resp.error_msg, resp.content
+    select o.id, o.attempts, o.sent_at, resp.status_code, resp.timed_out, resp.error_msg, resp.content
     from public.telegram_outbox o
     left join net._http_response resp on resp.id = o.net_request_id
     where o.status = 'dispatched'
   loop
     v_delivery := case
       when r.status_code is null and r.error_msg is null and not coalesce(r.timed_out, false)
-        then 'no_response'   -- لم يصل ردّ pg_net بعد — انتظر الدورة التالية
+        then case
+          -- لم يصل ردّ pg_net بعد وما زال ضمن الهامش الطبيعي — انتظر الدورة التالية
+          when r.sent_at > now() - interval '15 minutes' then 'no_response'
+          -- تجاوز الهامش بلا ردّ إطلاقاً: عامله كخطأ شبكة كي لا يُهمَل نهائياً
+          else 'network_error'
+        end
       when r.timed_out or r.error_msg is not null
         then 'network_error'
       when r.status_code between 200 and 299

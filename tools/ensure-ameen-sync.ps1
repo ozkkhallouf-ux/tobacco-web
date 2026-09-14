@@ -349,19 +349,25 @@ if ($isMainComputer) {
       @{ stuck = $false; degraded = $true; degradedAlerted = $degradedAlerted; degradedIncidentId = $degradedIncidentId; since = (Get-Date).ToUniversalTime().ToString("o") } | ConvertTo-Json | Set-Content -LiteralPath $ameenWorkerIncidentStatePath -Encoding utf8
     } else {
       if ($prevIncidentActive) {
-        # عاد للعمل بعد حادثة — تنبيه واحد فقط عند لحظة العودة
+        # عاد للعمل بعد حادثة — تنبيه واحد فقط عند لحظة العودة. Codex P1 (جولة جديدة):
+        # مفتاح dedupe ثابت "ameen-read-worker-recovered" كان يجعل حادثتي تعافٍ خلال أقل
+        # من 60 دقيقة تتشاركان نفس المفتاح — فيُسقَط تنبيه العودة الثاني بصمت رغم أن
+        # العامل تعافى فعلاً مرتين منفصلتين. الحل: إلحاق هوية الحادثة (stuckIncidentId
+        # المُحمَّلة من الحالة السابقة) بالمفتاح، كما جرى مسبقاً مع مفاتيح stuck/degraded.
         $recoverMsg = "✅ عاد Ameen Read Worker للعمل."
         $notifyPathWorker = Join-Path $PSScriptRoot "send-telegram-notification.ps1"
         if (Test-Path -LiteralPath $notifyPathWorker) {
-          $recoverNotifyOutput = & $notifyPathWorker -Message $recoverMsg -EventType "windows" -DedupeKey "ameen-read-worker-recovered" -DedupeMinutes 60 2>&1 6>&1
+          $recoverNotifyOutput = & $notifyPathWorker -Message $recoverMsg -EventType "windows" -DedupeKey "ameen-read-worker-recovered:$prevStuckIncidentId" -DedupeMinutes 60 2>&1 6>&1
           Write-Log ("RECOVERY CONFIRMED for Ameen worker — " + (($recoverNotifyOutput | Out-String).Trim() -replace "\s+", " "))
         }
       } elseif ($prevDegradedActive) {
-        # تعافت من auth_retry دون أن تمرّ بحالة stuck — نفس رسالة العودة، مفتاح dedupe مختلف غير مهم هنا
+        # تعافت من auth_retry دون أن تمرّ بحالة stuck — نفس علاج المفتاح أعلاه، بهوية
+        # الحادثة degradedIncidentId هذه المرة، كي لا تتشارك حادثتا تعافٍ منفصلتان نفس
+        # نافذة الـdedupe (Codex P1، نفس الجولة).
         $recoverMsg = "✅ عاد Ameen Read Worker لتسجيل الدخول بنجاح."
         $notifyPathWorker = Join-Path $PSScriptRoot "send-telegram-notification.ps1"
         if (Test-Path -LiteralPath $notifyPathWorker) {
-          $recoverNotifyOutput = & $notifyPathWorker -Message $recoverMsg -EventType "windows" -DedupeKey "ameen-read-worker-recovered" -DedupeMinutes 60 2>&1 6>&1
+          $recoverNotifyOutput = & $notifyPathWorker -Message $recoverMsg -EventType "windows" -DedupeKey "ameen-read-worker-recovered:$prevDegradedIncidentId" -DedupeMinutes 60 2>&1 6>&1
           Write-Log ("RECOVERY CONFIRMED for Ameen worker (from auth_retry) — " + (($recoverNotifyOutput | Out-String).Trim() -replace "\s+", " "))
         }
       }
