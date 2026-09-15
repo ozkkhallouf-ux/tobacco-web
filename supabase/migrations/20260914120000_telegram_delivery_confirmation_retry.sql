@@ -148,3 +148,11 @@ begin
   end loop;
 end;
 $$;
+
+-- Codex P1 (PR #220، بعد commit 1d00f10): نفس الملاحظة تنطبق على تعريف
+-- هذه الهجرة لـdispatch_telegram_outbox() — SECURITY DEFINER بلا حجب عن
+-- PUBLIC يسمح لأي مستدعي PostgREST مجهول باستدعاء
+-- /rest/v1/rpc/dispatch_telegram_outbox مباشرة. الحجب يقتصر على pg_cron
+-- (يستدعيها كـservice/superuser بمعزل عن هذه الأدوار) دون أن يمسّ تشغيلها
+-- المجدول. مطابق لنفس الإصلاح في supabase/telegram-notifications.sql.
+revoke execute on function public.dispatch_telegram_outbox() from public, anon, authenticated;

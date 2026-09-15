@@ -967,6 +967,14 @@ begin
 end;
 $$;
 
+-- Codex P1 (PR #220، بعد commit 1d00f10): الدالة SECURITY DEFINER ولم تكن
+-- محجوبة عن PUBLIC — أي مستدعي PostgREST مجهول قادر على استدعاء
+-- /rest/v1/rpc/dispatch_telegram_outbox مباشرة، فيستهلك محاولات إعادة
+-- الإرسال الخمس عمداً ويدفع تنبيهات حرجة إلى فترة تهدئة failed لساعة كاملة.
+-- الحجب يقتصر على pg_cron (الذي يستدعيها كـ service/superuser بمعزل عن
+-- هذه الأدوار) دون أن يمسّ تشغيلها المجدول.
+revoke execute on function public.dispatch_telegram_outbox() from public, anon, authenticated;
+
 -- طلب واتساب جديد: أزرار تجهيز/رفض مباشرة على الإشعار
 -- (زر «✅ تجهيز» → whatsapp_orders.status='processing'، «❌ رفض» → 'rejected'،
 --  المعالجة الفعلية بالبوت: supabase/functions/telegram-webhook/index.ts → handleOrderAction)
