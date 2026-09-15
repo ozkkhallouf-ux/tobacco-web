@@ -12,6 +12,7 @@
 | مزامنة الأمين | [ameen-sync.md](ameen-sync.md) |
 | الطباعة والفواتير | [printing.md](printing.md) |
 | الإشعارات والنشر | [notifications-deployment.md](notifications-deployment.md) |
+| تعاون Slack وGitHub والوكلاء | [collaboration-workflow.md](collaboration-workflow.md) |
 | الأرشفة إلى iCloud (ماك) | [icloud-archive.md](icloud-archive.md) |
 
 كل تقرير يحتفظ بستة أقسام إلزامية: الحالة الحالية، المصدر الموثوق، نطاق الملفات، القيود الثابتة، الفحوص الإلزامية، والخطوة التالية.
