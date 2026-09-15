@@ -103,3 +103,45 @@ export function assertTrustedSalesInput({ markerBefore, markerAfter, salesLineIt
   assertStableSalesSync(before, after);
   return before;
 }
+
+/**
+ * After local midnight the snapshot defaults to today's window_end, but the
+ * sales sync task (every 30 minutes) may still hold yesterday's sealed marker
+ * until its first post-midnight run. Aligning to that fresh yesterday marker
+ * avoids a phantom Telegram alert at the near-midnight hourly snapshot slot.
+ * Explicit --window-end= is never rewritten.
+ */
+export function resolveDefaultSnapshotWindowEnd({
+  requestedWindowEnd,
+  windowEndWasExplicit,
+  marker,
+  now = new Date(),
+  getSalesWindow,
+}) {
+  if (windowEndWasExplicit || !marker || typeof marker !== 'object') {
+    return { windowEnd: requestedWindowEnd, rebased: false };
+  }
+  const markerEnd = String(marker.window_end ?? '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(markerEnd) || markerEnd === requestedWindowEnd) {
+    return { windowEnd: requestedWindowEnd, rebased: false };
+  }
+  const requested = new Date(`${requestedWindowEnd}T00:00:00`);
+  const markerDay = new Date(`${markerEnd}T00:00:00`);
+  if (!Number.isFinite(requested.getTime()) || !Number.isFinite(markerDay.getTime())) {
+    return { windowEnd: requestedWindowEnd, rebased: false };
+  }
+  const dayMs = 24 * 60 * 60 * 1000;
+  if (requested.getTime() - markerDay.getTime() !== dayMs) {
+    return { windowEnd: requestedWindowEnd, rebased: false };
+  }
+  if (typeof getSalesWindow !== 'function') {
+    return { windowEnd: requestedWindowEnd, rebased: false };
+  }
+  try {
+    const provisional = getSalesWindow(markerEnd, 30);
+    validateSalesSyncMarker(marker, provisional, { now });
+    return { windowEnd: markerEnd, rebased: true };
+  } catch {
+    return { windowEnd: requestedWindowEnd, rebased: false };
+  }
+}
