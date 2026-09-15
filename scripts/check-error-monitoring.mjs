@@ -5,14 +5,15 @@
 // يقرأ أخطاء تطبيق تعرض شاشاته أسماء زبائن وأرصدتهم وأسعارهم ثم يرسل إلى طرف
 // ثالث. فالعقد المطلوب حراسته عقدان لا واحد:
 //
-//   أ) **لا يعمل إلا في الإنتاج.** بلا رمز مُحقَن، أو على http، أو على مضيف
-//      محلي — يبقى خاملاً تماماً: لا مستمعات ولا طلبات. بلا هذا الحارس يكفي
-//      خطأ في شرط واحد كي ترسل نسخة المطوّر بلاغات إلى بيانات الإنتاج.
+//   أ) **لا يعمل إلا في الإنتاج.** بلا رمز مُحقَن (مسار Rollbar)، أو على http،
+//      أو على مضيف محلي — يبقى خاملاً. وSentry يُعطَّل أيضاً خارج الإنتاج عبر
+//      enabled في sentryOnLoad. بلا هذا الحارس يكفي خطأ في شرط واحد كي ترسل
+//      نسخة المطوّر بلاغات إلى بيانات الإنتاج.
 //   ب) **لا يسرّب.** ما يُرسَل محصور في نصّ الخطأ وأثر مكدّسه ومسار الصفحة —
 //      بلا استعلام، بلا شظية، بلا كوكيز، بلا تخزين محلي، بلا محتوى DOM، ومع
-//      حذف كل ما يشبه السرّ. هذه فحوص سلوكية على الحمولة المرسَلة فعلاً، لا
-//      قراءةً للنصّ: التأكيد على الحمولة يمسك تسريباً تضيفه صياغة جديدة،
-//      بينما مطابقة النصّ تمسك صياغةً بعينها وحدها.
+//      حذف كل ما يشبه السرّ (ومعه scrubSentryEvent لمحمّل Sentry).
+//   ج) **مراقب واحد.** عند وجود meta[name=ozk-sentry] لا تُسجَّل مستمعات
+//      Rollbar ولا تُرسَل طلبات إلى api.rollbar.com.
 //
 // كل الفحوص أدناه تُشغّل الملف فعلاً داخل node:vm بسياق متصفح مُصطنَع، وتُطلق
 // أحداثاً حقيقية، وتفحص ما وصل إلى fetch. لا تأكيد واحد على وجود سلسلة نصية.
@@ -34,13 +35,21 @@ const check = (name, condition, detail) => {
 // ---------------------------------------------------------------------------
 // سياق متصفح مُصطنَع. `meta` = null يعني «لا وسم في الصفحة».
 // ---------------------------------------------------------------------------
-function boot({ meta, protocol = "https:", hostname = "ozktobacco.com", fetchImpl, respondWith } = {}) {
+function boot({ meta, sentryMeta = null, protocol = "https:", hostname = "ozktobacco.com", fetchImpl, respondWith } = {}) {
   const calls = [];
   const consoleErrors = [];
   const listeners = new Map();
   const metaElement = meta
     ? { getAttribute: (name) => (name in meta ? meta[name] : null) }
     : null;
+  // sentryMeta === true يعني «وسم Sentry موجود بلا سمات»؛ الكائن يكفي لـBoolean().
+  // لا نستخدم `sentryMeta ? … : (sentryMeta === true ? …)` لأن الفرع الثاني كان ميتاً (DeepScan).
+  let sentryElement = null;
+  if (sentryMeta === true) {
+    sentryElement = { getAttribute: () => null };
+  } else if (sentryMeta && typeof sentryMeta === "object") {
+    sentryElement = { getAttribute: (name) => (name in sentryMeta ? sentryMeta[name] : null) };
+  }
 
   const context = {
     // مرصد: أي `console.error` من المُرسِل يُلتقَط. «دخان ما بعد النشر» يعتبره
@@ -56,7 +65,11 @@ function boot({ meta, protocol = "https:", hostname = "ozktobacco.com", fetchImp
     Object,
     Array,
     document: {
-      querySelector: (selector) => (selector === 'meta[name="ozk-monitoring"]' ? metaElement : null),
+      querySelector: (selector) => {
+        if (selector === 'meta[name="ozk-monitoring"]') return metaElement;
+        if (selector === 'meta[name="ozk-sentry"]') return sentryElement;
+        return null;
+      },
       // فخّ: أي محاولة لقراءة محتوى الصفحة أو الكوكيز تُسقِط الفحص فوراً.
       get body() { throw new Error("مُنِع: قراءة DOM"); },
       get cookie() { throw new Error("مُنِع: قراءة الكوكيز"); },
@@ -138,6 +151,123 @@ console.log("\n— بوابة الإنتاج —");
   check("إنتاج فعلي: تُسجَّل مستمعات error وunhandledrejection",
     live.listeners.has("error") && live.listeners.has("unhandledrejection"),
     "لم تُسجَّل المستمعات رغم اكتمال الشروط — المراقبة معطّلة في الإنتاج");
+
+  const withSentry = boot({ meta: LIVE_META, sentryMeta: true });
+  withSentry.emit("error", {
+    message: "should-not-rollbar",
+    filename: "https://ozktobacco.com/src/app.js",
+    lineno: 1,
+    colno: 1,
+    error: Object.assign(new Error("should-not-rollbar"), { name: "Error" }),
+  });
+  check("مع علم Sentry: لا مستمعات Rollbar",
+    withSentry.listeners.size === 0,
+    "Sentry وRollbar يعملان معاً — مراقبان متزاحمان");
+  check("مع علم Sentry: لا طلبات إلى Rollbar",
+    withSentry.calls.length === 0,
+    `أُرسل ${withSentry.calls.length} طلباً رغم تفعيل Sentry`);
+  const sentryMon = withSentry.context.ozkErrorMonitoring;
+  check("مع علم Sentry: يُعرَّف sentryOnLoad وتنقية Sentry",
+    typeof withSentry.context.sentryOnLoad === "function" &&
+    Boolean(sentryMon) &&
+    sentryMon.transport === "sentry" &&
+    typeof sentryMon.scrubSentryEvent === "function",
+    "محمّل Sentry بلا تهيئة أو بلا طبقة تنقية");
+
+  const scrubbed = sentryMon
+    ? sentryMon.scrubSentryEvent({
+      message: "رصيد الزبون 1250000",
+      user: { email: "a@b.co", name: "Ali" },
+      request: { url: "https://ozktobacco.com/app?token=SECRET", cookies: "a=1", query_string: "x=1" },
+      exception: { values: [{ type: "Error", value: "password=secret123", stacktrace: { frames: [{ filename: "app.js?v=1", vars: { x: 1 } }] } }] },
+      breadcrumbs: [{
+        message: "فاتورة 9999",
+        data: {
+          url: "https://x.test/a?b=1",
+          request_body: "nope",
+          arguments: [{ group: "أسعار", prices: [12] }],
+          leaked: "customer-key-xyz",
+        },
+      }],
+      spans: [{
+        op: "http.client",
+        description: "GET https://dyxbirfpxeocqffnfdeb.supabase.co/rest/v1/x?customer_key=SECRETNAME",
+        data: {
+          "http.url": "https://dyxbirfpxeocqffnfdeb.supabase.co/rest/v1/x?customer_key=SECRETNAME",
+          "http.query": "customer_key=SECRETNAME",
+        },
+      }],
+    })
+    : null;
+  const crumbData = scrubbed && scrubbed.breadcrumbs && scrubbed.breadcrumbs[0] && scrubbed.breadcrumbs[0].data;
+  const span0 = scrubbed && scrubbed.spans && scrubbed.spans[0];
+  check("scrubSentryEvent يحجب العربية والأسرار ويمسح المستخدم والاستعلام",
+    Boolean(scrubbed) &&
+    scrubbed.message.includes("[نص عربي محذوف]") &&
+    scrubbed.exception.values[0].value.includes("[سرّ محذوف]") &&
+    !scrubbed.user.email && !scrubbed.user.name &&
+    scrubbed.request.url === "https://ozktobacco.com/app" &&
+    !("cookies" in scrubbed.request) &&
+    !("vars" in scrubbed.exception.values[0].stacktrace.frames[0]) &&
+    scrubbed.breadcrumbs[0].message.includes("[نص عربي محذوف]") &&
+    crumbData &&
+    crumbData.url === "https://x.test/a" &&
+    !("request_body" in crumbData) &&
+    !("arguments" in crumbData) &&
+    !("leaked" in crumbData),
+    JSON.stringify(scrubbed).slice(0, 500));
+
+  check("scrubSentryEvent ينقّي أوصاف spans وعناوينها",
+    Boolean(span0) &&
+    span0.description === "GET https://dyxbirfpxeocqffnfdeb.supabase.co/rest/v1/x" &&
+    span0.data["http.url"] === "https://dyxbirfpxeocqffnfdeb.supabase.co/rest/v1/x" &&
+    !("http.query" in span0.data),
+    JSON.stringify(span0).slice(0, 400));
+
+  const scrubbedTx = sentryMon && typeof sentryMon.scrubSentryTransaction === "function"
+    ? sentryMon.scrubSentryTransaction({
+      request: { url: "https://ozktobacco.com/app?token=SECRET" },
+      transaction: "https://ozktobacco.com/app?customer=1",
+      spans: [{
+        description: "https://api.example/rest?eq=name.علي",
+        data: { url: "https://api.example/rest?eq=name.علي", query_string: "eq=name" },
+      }],
+    })
+    : null;
+  check("scrubSentryTransaction يمسح استعلام الطلب والـspans",
+    Boolean(scrubbedTx) &&
+    scrubbedTx.request.url === "https://ozktobacco.com/app" &&
+    scrubbedTx.transaction === "https://ozktobacco.com/app" &&
+    scrubbedTx.spans[0].description === "https://api.example/rest" &&
+    scrubbedTx.spans[0].data.url === "https://api.example/rest" &&
+    !("query_string" in scrubbedTx.spans[0].data),
+    JSON.stringify(scrubbedTx).slice(0, 400));
+
+  let capturedInit = null;
+  withSentry.context.Sentry = {
+    init(opts) { capturedInit = opts; },
+    replayIntegration() { return { name: "Replay" }; },
+  };
+  if (typeof withSentry.context.sentryOnLoad === "function") withSentry.context.sentryOnLoad();
+  const stripped = capturedInit && typeof capturedInit.integrations === "function"
+    ? capturedInit.integrations([{ name: "Replay" }, { name: "BrowserTracing" }])
+    : null;
+  check("Sentry: Replay معطّل والتنقية مربوطة",
+    Boolean(capturedInit) &&
+    capturedInit.replaysSessionSampleRate === 0 &&
+    capturedInit.replaysOnErrorSampleRate === 0 &&
+    typeof capturedInit.beforeBreadcrumb === "function" &&
+    typeof capturedInit.beforeSendTransaction === "function" &&
+    Array.isArray(stripped) &&
+    stripped.length === 1 &&
+    stripped[0].name === "BrowserTracing",
+    JSON.stringify({
+      rates: capturedInit && {
+        session: capturedInit.replaysSessionSampleRate,
+        onError: capturedInit.replaysOnErrorSampleRate,
+      },
+      stripped,
+    }));
 }
 
 // ===== 2) الحمولة المرسَلة =====
@@ -1262,27 +1392,51 @@ console.log("\n— التوصيل —");
     tokenAttr.startsWith("__"),
     `data-token يحمل قيمة غير نائبة — سرّ في المستودع: ${tokenAttr.slice(0, 8)}…`);
 
-  check("CSP تسمح بنقطة استقبال Rollbar على connect-src وحدها",
+  check("CSP تسمح بنقاط استقبال Rollbar وSentry على connect-src",
     /connect-src[^;]*https:\/\/api\.rollbar\.com/.test(html) &&
-    !/script-src[^;]*rollbar/.test(html),
-    "إمّا connect-src تمنع الإرسال، وإمّا رُخِّيت script-src لطرف ثالث");
+    /connect-src[^;]*https:\/\/o4512087486693376\.ingest\.us\.sentry\.io/.test(html) &&
+    !/connect-src[^;]*\*\.sentry/.test(html),
+    "connect-src تمنع إرسال المراقبة أو تستخدم wildcard لـSentry");
+
+  check("CSP تسمح بمحمّل Sentry على script-src دون Rollbar CDN",
+    /script-src[^;]*https:\/\/js\.sentry-cdn\.com/.test(html) &&
+    /script-src[^;]*https:\/\/browser\.sentry-cdn\.com/.test(html) &&
+    !/script-src[^;]*rollbar/.test(html) &&
+    /worker-src[^;]*blob:/.test(html),
+    "script-src/worker-src غير جاهزين لمحمّل Sentry أو رُخّي Rollbar CDN");
+
+  check("وسم علم Sentry ومحمّل CDN موجودان",
+    html.includes('meta name="ozk-sentry"') &&
+    html.includes("https://js.sentry-cdn.com/cbc2bdf774c61bb4eac9192b8d9a8c4a.min.js"),
+    "اختفى محمّل Sentry أو علمه من index.html");
+
+  // فحص على قائمة ASSETS فقط (لا على ملف SW كاملاً): CodeQL يرفض
+  // includes("…sentry-cdn.com") كتحقق مضيف ناقص؛ حدود الاقتباس تكفي هنا.
+  const assetsLiteral = (sw.match(/const ASSETS = \[[\s\S]*?\];/) || [""])[0];
+  check("لا يُدرَج عنوان CDN لـSentry في ASSETS",
+    !/"[^"]*sentry-cdn\.com[^"]*"/.test(assetsLiteral),
+    "CDN داخل ASSETS يكسر التحميل المسبق أو يخزّن طرفاً ثالثاً");
 
   check("السكربت مُحمَّل مع معامل النسخة",
     /src\/error-monitoring\.js\?v=tobacco-\d+/.test(html),
     "بلا معامل النسخة يبقى الملف مخبّأً في متصفح الزبون بعد كل نشر");
 
-  check("الملف مُحمَّل قبل src/app.js (وإلا فاتته أخطاء الإقلاع)",
+  check("error-monitoring قبل محمّل Sentry وقبل src/app.js",
+    html.indexOf("src/error-monitoring.js") < html.indexOf("https://js.sentry-cdn.com/cbc2bdf774c61bb4eac9192b8d9a8c4a.min.js") &&
     html.indexOf("src/error-monitoring.js") < html.indexOf("src/app.js"),
-    "تحميل المراقبة بعد التطبيق يُضيّع أخطاء أول ثانية");
+    "ترتيب التحميل يضيّع تهيئة sentryOnLoad أو أخطاء الإقلاع");
 
-  check("service worker يُخبّئ الملف مسبقاً",
+  check("service worker يُخبّئ الملف المحلي مسبقاً",
     sw.includes('"src/error-monitoring.js"'),
     "بلا تخبئة مسبقة يفشل تحميله عند انقطاع الشبكة");
 
   const pages = readFileSync(resolve(root, ".github/workflows/pages.yml"), "utf8");
-  check("خط النشر يحقن الإعداد من سرّ GitHub",
-    pages.includes("ROLLBAR_POST_CLIENT_ITEM_TOKEN") && pages.includes("Inject error monitoring configuration"),
-    "اختفت خطوة الحقن — ستُنشَر المراقبة معطّلة بلا إنذار");
+  check("خط النشر يحقن بيئة/نشرة المراقبة",
+    pages.includes("ROLLBAR_POST_CLIENT_ITEM_TOKEN") &&
+    pages.includes("Inject error monitoring configuration") &&
+    pages.includes("__DEPLOY_COMMIT__") &&
+    pages.includes("__DEPLOY_ENVIRONMENT__"),
+    "اختفت خطوة الحقن — ستُنشَر المراقبة بلا ربط للنشرة");
   check("الحقن يسبق رفع معامل النسخة",
     pages.indexOf("Inject error monitoring configuration") < pages.indexOf("Bump asset version marker"),
     "ترتيب معكوس يخاطر بتداخل الاستبدالين على index.html");
