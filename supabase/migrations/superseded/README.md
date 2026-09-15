@@ -12,7 +12,7 @@
 |---|---|---|
 | `20260823084956_smart_inventory_counter_isolation.sql` | `20260823085423` (بعده بـ4 دق.) | تعديل على منطق عزل العدادات في الجلسات |
 | `20260826094640_fix_ameen_read_requests_initplan_current_setting.sql` | `20260826104745` + `20260826133200` | تحسين أداء الاستعلام بفصل إصلاح initplan |
-| `20260830140000_khalil_audit_log.sql` | `20260830141802` (`khalil_audit_log`) — انظر ملاحظة* | مسودة محلية لإنشاء جداول الـaudit وتعريف الدوال؛ لم يُثبت تطابقها مع محتوى الـmigration المطبَّق فعلياً على production |
+| `20260830140000_khalil_audit_log.sql` | `20260830141802` (`khalil_audit_log`) — انظر ملاحظة* + placeholder† | مسودة محلية لإنشاء جداول الـaudit وتعريف الدوال؛ لم يُثبت تطابقها مع محتوى الـmigration المطبَّق فعلياً على production |
 | `20260830144330_expense_entries_owner_only_rls.sql` | `20260830172655` (`expense_entries_owner_only_rls`) | تعديل في تعريف سياسة RLS للمصروفات |
 | `20260831051500_fix_inventory_recon_match_key_fallbacks.sql` | `20260831020850` | تطبيق على الإنتاج قبل الـcommit المحلي |
 | `20260831120000_telegram_delivery_observability.sql` | `20260831185634` | إضافة `net_request_id` بنسخة مُصحَّحة |
@@ -31,6 +31,13 @@
 قط ولا تُعتبر نسخة تاريخية مثبتة من الـmigration الحي. الغرض من هذا الجدول هو تتبّع أي
 timestamp إنتاجي يقابل أي محاولة محلية تقريبياً بالوقت، وليس إثبات تطابق المحتوى.
 
+† **placeholder لتسوية السجل (2026-09-15):** الملف
+`../20260830141802_khalil_audit_log.sql` (في مجلد المهاجرات الأب، **ليس** نسخة من
+هذه المسودة) هو placeholder قراءة-فقط يطابق طابع واسم الإنتاج كي يغلق فجوة
+remote-only أمام Supabase CLI. لا ينقل محتوى المسودة أعلاه ولا يخترع DDL إنشاء.
+**لا تنقل مسودة `superseded/` إلى الأب** — ذلك ممنوع أعلاه؛ الـplaceholder ملف
+مستقل وآمن.
+
 كذلك تم تصحيح إدخال `expense_entries_owner_only_rls` أعلاه: كان يشير خطأً إلى
 `20260830144806` (وهذه `khalil_audit_notify_catch_query_canceled`)؛ الصحيح هو
 `20260830172655`.
@@ -48,25 +55,47 @@ timestamp إنتاجي يقابل أي محاولة محلية تقريبياً 
 انظر أيضاً `supabase/migrations/20260915140000_khalil_audit_migration_history_reconciliation.sql`
 للتوثيق الكامل، بما فيه التصحيح الدقيق لنسبة كل جدول khalil_audit_* لمصدره).
 
-## تحذير تشغيلي — `--include-all` / Operator warning
+## تحذير تشغيلي — ترتيب النشر / Operator deployment order
+
+### 0) شرط مسبق — إغلاق remote-only قبل أي `db push`
+
+**EN:** Production records `20260830141802` (`khalil_audit_log`) but historically
+had no matching local file. `--include-all` only “Include[s] all migrations not
+found on remote history table”
+([supabase db push](https://supabase.com/docs/reference/cli/supabase-db-push));
+it does **not** handle the inverse (remote version missing locally), and the CLI
+still stops on that history mismatch. The correctly versioned read-only
+placeholder `../20260830141802_khalil_audit_log.sql` closes **this** gap. Other
+remote-only timestamps in the table above may still block push until each has a
+matching local placeholder (or an explicitly approved history-repair step) —
+check with `supabase migration list` before Stage 2.
+
+**AR:** الإنتاج يسجّل `20260830141802` (`khalil_audit_log`). العلم
+`--include-all` يعالج المهاجرات المحلية الناقصة من السجل البعيد فقط، **ولا**
+يغلق الحالة العكسية (طابع بعيد بلا ملف محلي) فيتوقف CLI. الـplaceholder
+`../20260830141802_khalil_audit_log.sql` يغلق **هذه** الفجوة. طوابع بعيدة-فقط
+أخرى في الجدول أعلاه قد تبقى حاجزاً إلى أن يُعالَج كلٌّ منها — راجع
+`supabase migration list` قبل المرحلة ٢.
+
+### 1) بعد إغلاق remote-only — `--include-all` أو المرحلة ٢
 
 **EN:** Production already records later stamps such as `20260914130000`. A plain
 `supabase db push` will **not** apply the still-pending older migrations
 `20260902050000_khalil_audit_tables_explicit_deny.sql` and
 `20260902080000_p2_heartbeat_rls_initplan.sql` just because the 09-15 reconciliation
-file sorts later. Before/when applying
+file sorts later. After step 0, when applying
 `20260915140000_khalil_audit_migration_history_reconciliation.sql` to such a remote,
 operators must either:
 
 1. Apply the separately approved 09-02 migrations first (Stage 2 — explicit owner
    approval), **then** push this reconciliation; **or**
 2. Use `supabase db push --include-all` so every migration missing from the remote
-   history table is included (see [supabase db push](https://supabase.com/docs/reference/cli/supabase-db-push)).
+   history table is included.
 
-**AR:** إذا كان الإنتاج يملك أصلاً طابعاً لاحقاً مثل `20260914130000`، فإن
-`supabase db push` العادي **لن** يطبّق المهاجرات المعلّقة الأقدم
-(`20260902050000` و`20260902080000`) لمجرد أن ملف التسوية `20260915140000` يرتّب
-بعدهما. عند تطبيق ملف التسوية على بيئة بهذه الحالة، يجب إما:
+**AR:** بعد الخطوة ٠: إذا كان الإنتاج يملك أصلاً طابعاً لاحقاً مثل
+`20260914130000`، فإن `supabase db push` العادي **لن** يطبّق المهاجرات المعلّقة
+الأقدم (`20260902050000` و`20260902080000`) لمجرد أن ملف التسوية `20260915140000`
+يرتّب بعدهما. عند تطبيق ملف التسوية على بيئة بهذه الحالة، يجب إما:
 
 1. تطبيق مهاجرات 09-02 المعتمدة بشكل منفصل أولاً (المرحلة ٢ — إذن صريح من المالك)،
    ثم دفع ملف التسوية؛ **أو**

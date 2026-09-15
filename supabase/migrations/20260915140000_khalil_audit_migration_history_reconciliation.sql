@@ -16,9 +16,11 @@
 --      khalil_audit_events, khalil_audit_cursor, and
 --      record_khalil_audit_event (per commit e2a81a6, "سجل تدقيق غير قابل
 --      للتعديل لعمليات خليل"). This migration was applied directly (e.g. via
---      SQL Editor) and was NEVER committed to this repository under that
---      timestamp or any other. It is not a rename or deletion of any git
---      file — it simply has no git-tracked counterpart.
+--      SQL Editor). The original DDL was never committed; the repository now
+--      carries a correctly versioned *read-only history placeholder*
+--      (`20260830141802_khalil_audit_log.sql`) so CLI remote/local history
+--      can match. That placeholder does NOT recreate or invent the original
+--      production DDL — it only verifies the base objects exist.
 --
 --      khalil_audit_sync_heartbeat and khalil_audit_notify_failures are NOT
 --      part of that base migration — git history shows they were designed
@@ -59,6 +61,16 @@
 --
 --      IMPORTANT — migration ordering / operator warning (EN + AR):
 --
+--      PREREQUISITE (remote-only history): production records
+--      `20260830141802` (`khalil_audit_log`). `--include-all` only includes
+--      local migrations missing from the remote history table; it does NOT
+--      reconcile the inverse (remote version missing locally) and the CLI
+--      still stops on that mismatch. The matching local placeholder
+--      `20260830141802_khalil_audit_log.sql` must be present (and on this
+--      branch it is) BEFORE any Stage 2 / `--include-all` push. Other
+--      remote-only versions listed in superseded/README.md may still need
+--      the same treatment if `supabase migration list` reports them.
+--
 --      This reconciliation file is timestamped 20260915140000, which is
 --      chronologically AFTER both pending 09-02 files AND after
 --      20260914120000 / 20260914130000 already on main (and typically
@@ -71,18 +83,27 @@
 --      `--include-all` ("Include all migrations not found on remote
 --      history table" — see supabase db push docs).
 --
---      Therefore operators MUST do ONE of the following before/when
---      applying this reconciliation to a remote that already has later
---      stamps:
+--      Therefore, AFTER the remote-only prerequisite above is satisfied,
+--      operators MUST do ONE of the following before/when applying this
+--      reconciliation to a remote that already has later stamps:
 --        (A) Apply the separately approved 09-02 migrations first
 --            (Stage 2 — explicit owner approval), then push this file; OR
 --        (B) Use `supabase db push --include-all` so the pending 09-02
 --            migrations are included alongside (or before) this file.
 --
 --      Arabic / تحذير للمشغّل:
---      إذا كان الإنتاج يملك أصلاً طابعاً لاحقاً مثل `20260914130000`، فإن
---      `supabase db push` العادي لن يطبّق مهاجرات 09-02 المعلّقة لمجرد أن
---      ملف التسوية هذا (09-15) يرتّب بعدهما زمنياً. يجب إما:
+--      شرط مسبق: الإنتاج يسجّل الطابع البعيد-فقط `20260830141802`. العلم
+--      `--include-all` لا يغلق هذه الفجوة (يعالج المهاجرات المحلية الناقصة
+--      من السجل البعيد فقط) وCLI يتوقف عند عدم التطابق. يجب وجود الملف
+--      المحلي المطابق `20260830141802_khalil_audit_log.sql` قبل المرحلة ٢
+--      أو `--include-all` (وهو موجود على هذا الفرع). طوابع بعيدة-فقط أخرى
+--      في superseded/README.md قد تحتاج المعاملة نفسها إن أبلغ عنها
+--      `supabase migration list`.
+--
+--      بعد إغلاق فجوة remote-only: إذا كان الإنتاج يملك أصلاً طابعاً لاحقاً
+--      مثل `20260914130000`، فإن `supabase db push` العادي لن يطبّق
+--      مهاجرات 09-02 المعلّقة لمجرد أن ملف التسوية هذا (09-15) يرتّب
+--      بعدهما زمنياً. يجب إما:
 --        (أ) تطبيق مهاجرات 09-02 المعتمدة بشكل منفصل أولاً، ثم دفع هذا
 --            الملف؛ أو
 --        (ب) استخدام `supabase db push --include-all` لإدراج كل
