@@ -757,7 +757,7 @@ await journey("owner-only-deep-link", "الرابط العميق إلى مسار
 // فتسريبٌ جديد لا يمرّ لمجرد أنه صامت.
 // مضيفات يقصدها التطبيق فعلاً وهي مقطوعة عمداً. المقارنة بلاحقة اسم المضيف
 // المستخرَج، لا بمطابقة السطر — فلا تمرّ وجهة جديدة بحيلة صياغة.
-const EXPECTED_ESCAPE_HOSTS = ["supabase.co", "rollbar.com", "fonts.googleapis.com", "fonts.gstatic.com"];
+const EXPECTED_ESCAPE_HOSTS = ["supabase.co", "rollbar.com", "sentry.io", "sentry-cdn.com", "fonts.googleapis.com", "fonts.gstatic.com"];
 const isExpectedHost = (host) => EXPECTED_ESCAPE_HOSTS.some((allowed) => host === allowed || host.endsWith(`.${allowed}`));
 const unexpectedEscapes = escapeAttempts.filter((entry) => !isExpectedHost(entry.host));
 

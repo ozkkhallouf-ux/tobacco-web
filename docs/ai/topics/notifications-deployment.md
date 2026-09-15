@@ -1,6 +1,10 @@
 # تقرير موضوع الإشعارات والنشر
 
-آخر تحديث: 2026-09-15
+آخر تحديث: 2026-09-15 (Sentry)
+
+## مراقبة أخطاء الواجهة (Sentry) — 2026-09-15
+
+المراقب الأساسي للمتصفح: محمّل Sentry CDN لمشروع `OZK TOBACCO / javascript` على `ozk-tobacco-ck.sentry.io`، مع تهيئة `window.sentryOnLoad` من `src/error-monitoring.js` (تنقية PII، تعطيل خارج الإنتاج، وإبقاء Replay مقنّعاً). مسار Rollbar يبقى احتياطاً فقط عند غياب `meta[name=ozk-sentry]`. لا تُضاف عناوين CDN إلى `ASSETS`. راجع ملاحظات الإعداد في متجر المشروع إن وُجدت.
 
 ## الحالة الحالية
 
