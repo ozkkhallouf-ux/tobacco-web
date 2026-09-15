@@ -185,6 +185,71 @@ export function defaultFixtures() {
   };
 }
 
+function fixtureKeyForQuery(table, query) {
+  const sourceMatch = query.match(/source=eq\.([^&]+)/);
+  if (table === "inventory_reports" && sourceMatch) {
+    return `inventory_reports:${decodeURIComponent(sourceMatch[1])}`;
+  }
+  return table;
+}
+
+function applyPostgrestQuery(rows, query, options = {}) {
+  let next = rows;
+
+  for (const [, field, op, value] of query.matchAll(/([a-z_]+)=(gte|lte)\.([0-9-]{10})/g)) {
+    next = next.filter((row) => {
+      const cell = String(row[field] ?? "");
+      if (!cell) return true;
+      return op === "gte" ? cell >= value : cell <= value;
+    });
+  }
+
+  const order = query.match(/order=([\w.]+)\.(asc|desc)/);
+  if (order) {
+    const [, field, direction] = order;
+    next = [...next].sort((left, right) => {
+      const a2 = String(left[field] ?? "");
+      const b2 = String(right[field] ?? "");
+      return direction === "desc" ? (a2 < b2 ? 1 : a2 > b2 ? -1 : 0) : (a2 > b2 ? 1 : a2 < b2 ? -1 : 0);
+    });
+  }
+
+  const offset = query.match(/offset=(\d+)/);
+  if (offset) next = next.slice(Number(offset[1]));
+  const limit = query.match(/limit=(\d+)/);
+  const requested = limit ? Number(limit[1]) : next.length;
+  const cap = options.maxRows ?? Infinity;
+  next = next.slice(0, Math.min(requested, cap));
+
+  const select = query.match(/select=([^&]+)/);
+  if (select && select[1] !== "*") {
+    const columns = decodeURIComponent(select[1]).split(",");
+    next = next.map((row) => Object.fromEntries(columns.filter((c) => c in row).map((c) => [c, row[c]])));
+  }
+  return next;
+}
+
+function isAnthropicApiHost(url) {
+  try {
+    return new URL(url).hostname === "api.anthropic.com";
+  } catch {
+    return false;
+  }
+}
+
+function handleRestGet(url, fixtures, metrics, options) {
+  const query = url.split("/rest/v1/")[1] ?? "";
+  const table = query.split("?")[0];
+  metrics.reads.push(query);
+  metrics.tablesRead.add(table);
+  if (options.onRead) options.onRead(query, fixtures);
+  if (options.failTable && table === options.failTable) return jsonResponse(500, { error: "boom" });
+
+  const key = fixtureKeyForQuery(table, query);
+  const rows = applyPostgrestQuery(fixtures[key] ?? [], query, options);
+  return jsonResponse(200, rows);
+}
+
 // تحميل نسخة معزولة من الدالة مع fetch وهمي.
 // options.fixtures  — بيانات الجداول (انظر defaultFixtures)
 // options.failTable — اسم جدول تفشل قراءته (لاختبار عزل فشل مصدر واحد)
@@ -211,14 +276,7 @@ export async function loadAssistant(options = {}) {
 
     // ملاحظة CodeQL: startsWith على origin نصي يقبل أي host يبدأ بنفس النص
     // (مثلاً https://api.anthropic.com.evil-site.com) — نتحقق من hostname الفعلي بدقة.
-    let isAnthropicHost = false;
-    try {
-      isAnthropicHost = new URL(url).hostname === "api.anthropic.com";
-    } catch {
-      isAnthropicHost = false;
-    }
-
-    if (isAnthropicHost) {
+    if (isAnthropicApiHost(url)) {
       metrics.externalCalls.push({ url, method, body: init.body });
       if (options.anthropic) return options.anthropic(init);
       throw new Error("anthropic_not_stubbed");
@@ -238,64 +296,7 @@ export async function loadAssistant(options = {}) {
         metrics.writes.push({ url, method });
         throw new Error(`WRITE ATTEMPTED: ${method} ${url}`);
       }
-      const query = url.split("/rest/v1/")[1] ?? "";
-      const table = query.split("?")[0];
-      metrics.reads.push(query);
-      metrics.tablesRead.add(table);
-      // خطّاف يسمح بتبديل الوهميات **أثناء** سلسلة قراءات — بدونه يستحيل
-      // محاكاة استبدالٍ ذرّي يلتزم بين صفحتين، وهو عطل لا يظهر إلا بالتزامن.
-      if (options.onRead) options.onRead(query, fixtures);
-      if (options.failTable && table === options.failTable) return jsonResponse(500, { error: "boom" });
-
-      // inventory_reports متعدد المصادر — نفهرس بالمصدر كما يفعل PostgREST
-      let key = table;
-      const sourceMatch = query.match(/source=eq\.([^&]+)/);
-      if (table === "inventory_reports" && sourceMatch) {
-        key = `inventory_reports:${decodeURIComponent(sourceMatch[1])}`;
-      }
-      let rows = fixtures[key] ?? [];
-
-      // ترشيح gte/lte على أي حقل — لا على قائمة حقول مثبّتة. القائمة المثبّتة
-      // كانت تُسقط report_date بصمت، فيمرّ اختبارٌ لتقرير يوم بعينه وهو في
-      // الحقيقة يقرأ أحدث تقرير.
-      for (const [, field, op, value] of query.matchAll(/([a-z_]+)=(gte|lte)\.([0-9-]{10})/g)) {
-        rows = rows.filter((row) => {
-          const cell = String(row[field] ?? "");
-          if (!cell) return true;
-          return op === "gte" ? cell >= value : cell <= value;
-        });
-      }
-
-      // احترام order وlimit كما يفعل PostgREST. بدونهما يفشل الحارس في رؤية
-      // أخطاء حقيقية: استعلام «آخر يوم فيه مبيعات» يعتمد على desc+limit=1،
-      // ولو أعاد الوهميُّ الصف الأول عشوائياً لبدا الجواب صحيحاً وهو خاطئ.
-      const order = query.match(/order=([\w.]+)\.(asc|desc)/);
-      if (order) {
-        const [, field, direction] = order;
-        rows = [...rows].sort((left, right) => {
-          const a2 = String(left[field] ?? "");
-          const b2 = String(right[field] ?? "");
-          return direction === "desc" ? (a2 < b2 ? 1 : a2 > b2 ? -1 : 0) : (a2 > b2 ? 1 : a2 < b2 ? -1 : 0);
-        });
-      }
-      // offset + limit + سقف صفوف الخادم — كما يفعل PostgREST بالضبط.
-      // `maxRows` يحاكي إعداد db-max-rows: الخادم يقصّ الاستجابة عنده مهما طلب
-      // العميل. بدون محاكاته لا يستطيع أي حارس رؤية عطل «إجمالي مبتور يُعرض
-      // كاملاً» الذي رصده Codex على PR #205.
-      const offset = query.match(/offset=(\d+)/);
-      if (offset) rows = rows.slice(Number(offset[1]));
-      const limit = query.match(/limit=(\d+)/);
-      const requested = limit ? Number(limit[1]) : rows.length;
-      const cap = options.maxRows ?? Infinity;
-      rows = rows.slice(0, Math.min(requested, cap));
-
-      // احترام قائمة الأعمدة — هكذا يُثبَت حجب أعمدة التكلفة عن الموظف
-      const select = query.match(/select=([^&]+)/);
-      if (select && select[1] !== "*") {
-        const columns = decodeURIComponent(select[1]).split(",");
-        rows = rows.map((row) => Object.fromEntries(columns.filter((c) => c in row).map((c) => [c, row[c]])));
-      }
-      return jsonResponse(200, rows);
+      return handleRestGet(url, fixtures, metrics, options);
     }
 
     throw new Error(`Unexpected fetch: ${method} ${url}`);

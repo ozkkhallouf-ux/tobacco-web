@@ -8,7 +8,7 @@
 // ولا يكتب في الأمين، ولا ينفّذ أي حركة مالية. مسموح فقط: قراءة وبحث وتجميع
 // وحساب ومقارنة وتحليل وتلخيص واقتراح.
 import assert from "node:assert/strict";
-import { loadAssistant, functionSource, defaultFixtures, TOKENS } from "./lib/assistant-harness.mjs";
+import { loadAssistant, functionSource, TOKENS } from "./lib/assistant-harness.mjs";
 
 let passed = 0;
 const ok = (label) => { passed += 1; console.log(`  ✓ ${label}`); };

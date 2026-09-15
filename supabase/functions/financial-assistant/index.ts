@@ -912,6 +912,419 @@ function freshnessNote(asOf: string | null | undefined) {
     : `\n\n> ⚠️ آخر تحديث لهذا المصدر منذ ${Math.floor(hours)} ساعة.`;
 }
 
+// ── مساعدات تخفيض تعقيد أدوات الزبون / الصنف / المشتريات (CodeFactor) ────────
+
+function rowsInPeriod(
+  rows: Array<Record<string, unknown>>,
+  period: Period,
+  dateOf: (row: Record<string, unknown>) => string = (row) => String(row.date ?? "")
+) {
+  if (!period.explicit) return rows;
+  return rows.filter((row) => {
+    const date = dateOf(row).slice(0, 10);
+    return date >= period.from && date <= period.to;
+  });
+}
+
+function paymentsWindowTruncated(
+  customer: Record<string, unknown>,
+  allPayments: Array<Record<string, unknown>>,
+  period: Period
+): boolean {
+  const oldestAvailable = allPayments.length
+    ? allPayments
+      .map((p) => String(p.date ?? "").slice(0, 10))
+      .filter(Boolean)
+      .sort()[0]
+    : undefined;
+  const windowStart = typeof customer.paymentsWindowStart === "string"
+    ? customer.paymentsWindowStart.slice(0, 10)
+    : undefined;
+  const windowCount = typeof customer.paymentsInWindow === "number"
+    ? customer.paymentsInWindow
+    : undefined;
+
+  if (windowStart !== undefined && windowCount !== undefined && period.from >= windowStart) {
+    return windowCount > allPayments.length;
+  }
+  return allPayments.length >= PAYMENTS_ROW_CAP
+    || (!!oldestAvailable && period.from < oldestAvailable);
+}
+
+function appendCustomerPaymentsText(
+  text: string,
+  customer: Record<string, unknown>,
+  period: Period
+): string {
+  const allPayments = Array.isArray(customer.recentPayments) ? customer.recentPayments : [];
+  const payments = rowsInPeriod(allPayments as Array<Record<string, unknown>>, period);
+  if (payments.length) {
+    return text
+      + `\n\n**آخر الدفعات**${period.explicit ? ` (${period.label})` : ""}\n`
+      + payments
+        .slice(0, 6)
+        .map((p) =>
+          `- ${String(p.date ?? "").slice(0, 10)}: **${money(p.amount)}**${p.notes ? ` — ${String(p.notes)}` : ""}`)
+        .join("\n");
+  }
+  if (period.explicit) {
+    const maybeTruncated = paymentsWindowTruncated(customer, allPayments as Array<Record<string, unknown>>, period);
+    return text + (maybeTruncated
+      ? `\n\n_لا يمكن الجزم بعدم وجود دفعات ضمن ${period.label} لأن سجل الدفعات المتاح لهذا الحساب محدود لأحدث ${allPayments.length} دفعة فقط، وقد توجد دفعات أقدم خارج هذا السجل._`
+      : `\n\n_لا دفعات مسجّلة لهذا الحساب في ${period.label}._`);
+  }
+  return text + `\n\n_لا دفعات مسجّلة لهذا الحساب في نافذة التقرير._`;
+}
+
+function formatCustomerInvoiceBlock(inv: Record<string, unknown>): string {
+  const lines = Array.isArray(inv.lines) ? inv.lines : [];
+  const { unreliable } = lineTotalConflictStats(lines as Array<Record<string, unknown>>, "price");
+  const total = lines.reduce((sum: number, l: Record<string, unknown>) => sum + num(l.lineTotal), 0);
+  let block = unreliable
+    ? `\n\n**فاتورة ${String(inv.date ?? "")}** — ⚠️ لم أعرض إجمالي هذه الفاتورة عمداً (تعارض في وحدة السعر بين أسطرها)\n`
+    : `\n\n**فاتورة ${String(inv.date ?? "")}** — إجمالي ${money(total)}\n`;
+  block += lines
+    .slice(0, 10)
+    .map((l: Record<string, unknown>) =>
+      `- ${String(l.material ?? "")}: ${qty(l.qty)} ${String(l.unit1 ?? "")} × ${money(l.price)} = ${money(l.lineTotal)}`)
+    .join("\n")
+    + (lines.length > 10 ? `\n- _و${lines.length - 10} سطر آخر._` : "");
+  return block;
+}
+
+function formatCustomerReturnsBlock(
+  returns: Array<Record<string, unknown>>,
+  periodLabel: string
+): string {
+  if (!returns.length) return "";
+  return `\n\n**🔁 مرتجعات ${periodLabel}** (${returns.length})\n`
+    + returns
+      .slice(0, 5)
+      .map((inv) => {
+        const lines = Array.isArray(inv.lines) ? inv.lines : [];
+        const { unreliable } = lineTotalConflictStats(lines as Array<Record<string, unknown>>, "price");
+        const total = lines.reduce((sum: number, l: Record<string, unknown>) => sum + num(l.lineTotal), 0);
+        const amount = unreliable ? "⚠️ غير محسوم (تعارض وحدة السعر)" : money(total);
+        return `- ${String(inv.date ?? "")}: ${amount}`
+          + (lines.length ? ` (${lines.slice(0, 3).map((l: Record<string, unknown>) => String(l.material ?? "")).join("، ")}${lines.length > 3 ? "…" : ""})` : "");
+      })
+      .join("\n")
+    + (returns.length > 5 ? `\n- _و${returns.length - 5} مرتجع آخر._` : "")
+    + `\n\nالمرتجع بضاعة **أعادها** الزبون، فلا يُحسب شراءً ولم يدخل في العدد أعلاه.`;
+}
+
+function resolveCustomerInvoiceEntry(
+  invRows: Array<Record<string, unknown>>,
+  guid: string,
+  name: string
+): { entry?: Record<string, unknown>; identity: "guid" | "name" | "none" } {
+  if (guid) {
+    const entry = invRows.find((row) => String(row.customerGuid ?? "") === guid);
+    return entry ? { entry, identity: "guid" } : { identity: "none" };
+  }
+  const named = matchByName(invRows, (row) => String(row.name ?? ""), name, 5);
+  if (named.length && !isAmbiguous(named)) {
+    return { entry: named[0].row, identity: "name" };
+  }
+  return { identity: "none" };
+}
+
+function formatMissingCustomerInvoices(
+  text: string,
+  opts: {
+    guid: string;
+    entry?: Record<string, unknown>;
+    invoices: Array<Record<string, unknown>>;
+    allInvoices: Array<Record<string, unknown>>;
+    period: Period;
+    periodLabel: string;
+    window: string;
+    invCoverage: ReturnType<typeof reportCoverage>;
+  }
+): string | null {
+  const { guid, entry, invoices, allInvoices, period, periodLabel, window, invCoverage } = opts;
+  if (guid && !entry) {
+    return text
+      + `\n\n**المشتريات**\nلم أجد في تقرير الفواتير (${window}) أي سجل مربوط بمعرّف هذا الزبون.`
+      + `\n\nلن أنسب له فواتير بتشابه الاسم — لو فعلت لعرضتُ عليك مشتريات زبون آخر بأصنافه وأسعاره.`
+      + ` إن كنت تتوقع وجود فواتير، فالأرجح أن تقرير الفواتير لم يُزامَن بعد أو أن سجلّه بلا معرّف.`;
+  }
+  if (invoices.length) return null;
+  return text + (invCoverage.covered || !period.explicit
+    ? `\n\n**المشتريات**\nلا توجد فواتير لهذا الزبون ضمن ${periodLabel}.`
+      + (period.explicit && allInvoices.length
+        ? ` له ${allInvoices.length} فاتورة خارج هذه الفترة داخل نافذة التقرير (${window}) — لم أعرضها لأنها ليست ما سألت عنه.`
+        : ` (نافذة تقرير الفواتير: ${window}.)`)
+    : `\n\n**المشتريات — غير محسومة**\nلم أجد فواتير لهذا الزبون ضمن ${periodLabel}،`
+      + ` لكن تقرير الفواتير لا يغطّي هذه الفترة كاملةً — فلن أقول إنه لم يشترِ شيئاً.`
+      + (allInvoices.length ? ` (له ${allInvoices.length} فاتورة داخل النافذة المتاحة.)` : ""))
+    + invCoverage.note;
+}
+
+function formatFoundCustomerInvoices(
+  text: string,
+  opts: {
+    identity: "guid" | "name" | "none";
+    invoices: Array<Record<string, unknown>>;
+    periodLabel: string;
+    invCoverage: ReturnType<typeof reportCoverage>;
+  }
+): string {
+  const { identity, invoices, periodLabel, invCoverage } = opts;
+  let out = text;
+  if (identity === "name") {
+    out += `\n\n> ℹ️ سجل الفواتير أدناه مطابَق بالاسم لأن حساب الزبون بلا معرّف في تقرير الأرصدة.`;
+  }
+  const purchases = invoices.filter((inv) => !inv.isReturn);
+  const returns = invoices.filter((inv) => inv.isReturn);
+  out += `\n\n**آخر الفواتير** (${purchases.length} فاتورة شراء ضمن ${periodLabel}`
+    + (returns.length ? `، و${returns.length} مرتجع` : "")
+    + `)`
+    + (invCoverage.covered ? "" : " — العدد حدٌّ أدنى، انظر التنبيه أدناه");
+  if (!purchases.length) {
+    out += `\n\nلا فاتورة **شراء** له في هذه الفترة — ما وُجد مرتجعات فقط.`;
+  }
+  for (const inv of purchases.slice(0, 3)) out += formatCustomerInvoiceBlock(inv);
+  out += formatCustomerReturnsBlock(returns, periodLabel);
+  return out + invCoverage.note;
+}
+
+async function appendCustomerPurchasesText(
+  text: string,
+  opts: { guid: string; name: string; period: Period; sources: string[] }
+): Promise<string> {
+  const { guid, name, period, sources } = opts;
+  try {
+    const invoiceReport = await latestReport("inventory_reports", "ameen_customer_invoices");
+    const invRows = Array.isArray(invoiceReport?.items) ? invoiceReport.items : [];
+    sources.push("inventory_reports:ameen_customer_invoices");
+    const window = `${(invoiceReport?.summary as Record<string, unknown>)?.fromDate ?? "?"} → ${invoiceReport?.report_date ?? "?"}`;
+    const { entry, identity } = resolveCustomerInvoiceEntry(
+      invRows as Array<Record<string, unknown>>,
+      guid,
+      name
+    );
+
+    const allInvoices = Array.isArray(entry?.invoices) ? entry.invoices : [];
+    const invoices = rowsInPeriod(allInvoices as Array<Record<string, unknown>>, period);
+    const periodLabel = period.explicit
+      ? `${period.label} (${period.from} → ${period.to})`
+      : `نافذة التقرير`;
+    const invCoverage = reportCoverage(
+      period,
+      (invoiceReport?.summary ?? {}) as Record<string, unknown>,
+      invoiceReport?.report_date,
+      !!entry?.truncated,
+      "تقرير فواتير الزبائن"
+    );
+
+    const missing = formatMissingCustomerInvoices(text, {
+      guid, entry, invoices, allInvoices: allInvoices as Array<Record<string, unknown>>,
+      period, periodLabel, window, invCoverage
+    });
+    if (missing !== null) return missing;
+
+    return formatFoundCustomerInvoices(text, { identity, invoices, periodLabel, invCoverage });
+  } catch {
+    return text
+      + `\n\n> ⚠️ تعذّرت قراءة تقرير الفواتير، فلم أعرض المشتريات. الرصيد أعلاه من تقرير الأرصدة وهو صحيح — ولم أستبدل الفواتير بأي تقدير.`;
+  }
+}
+
+function appendOwnerItemSalesStats(
+  text: string,
+  mine: Array<{ customer_name?: unknown; qty?: unknown; line_total?: unknown; unit_cost?: unknown }>
+): string {
+  const totalValue = mine.reduce((sum, row) => sum + num(row.line_total), 0);
+  const buyers = new Map<string, number>();
+  for (const row of mine) {
+    const buyer = String(row.customer_name ?? "").trim() || "بدون اسم";
+    buyers.set(buyer, (buyers.get(buyer) ?? 0) + num(row.qty));
+  }
+  const top = [...buyers.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);
+  let out = text
+    + `\n- قيمة المبيعات: **${money(totalValue)}**\n`
+    + `- أكثر المشترين: ${top.map(([b, q]) => `${b} (${qty(q)})`).join("، ")}`;
+  const withCost = mine.filter((row) => num(row.unit_cost) > 0);
+  if (withCost.length) {
+    const margin = withCost.reduce((sum, row) => sum + num(row.line_total) - num(row.unit_cost) * num(row.qty), 0);
+    out += `\n- هامش المنتج على ${withCost.length} سطر متوفرة تكلفتها: **${money(margin)}** (بيع ناقص تكلفة، قبل المصاريف)`;
+  }
+  return out;
+}
+
+async function appendItemSalesMovement(
+  text: string,
+  ctx: ToolContext,
+  name: string
+): Promise<{ text: string; partial: boolean }> {
+  const period = ctx.period.explicit
+    ? ctx.period
+    : { from: damascusDate(-59), to: damascusDate(), label: "آخر 60 يوم", explicit: true };
+  const periodDays = Math.max(
+    1,
+    Math.round((new Date(`${period.to}T00:00:00Z`).getTime() - new Date(`${period.from}T00:00:00Z`).getTime()) / 86_400_000) + 1
+  );
+  const sales = await readSales(period, ctx.role);
+  const mine = sales.rows.filter((row) => normalize(row.item_name) === normalize(name));
+  const itemState = await salesCompleteness(period, sales.partial);
+  let out = text;
+  if (!mine.length) {
+    out += `\n\n**الحركة (${period.label})**\n`
+      + (itemState.complete
+        ? `لا توجد أي مبيعات مسجّلة لهذا الصنف في ${period.label}.`
+        : `لم أجد مبيعات لهذا الصنف في ${period.label}، لكن قراءة المبيعات **غير مكتملة** — فلا أجزم بغيابها.`);
+  } else {
+    const totalQty = mine.reduce((sum, row) => sum + num(row.qty), 0);
+    out += `\n\n**الحركة (${period.label})**\n`
+      + `- الكمية المباعة: **${qty(totalQty)}** على ${mine.length} سطر\n`
+      + `- متوسط ${(totalQty / periodDays).toFixed(1)} بالوحدة يومياً`;
+    if (ctx.role === "owner") out = appendOwnerItemSalesStats(out, mine);
+  }
+  return { text: out + itemState.note, partial: sales.partial };
+}
+
+type PurchaseSupplierAgg = {
+  name: string;
+  count: number;
+  lineCount: number;
+  returnCount: number;
+  last: string;
+};
+
+function aggregatePurchaseSuppliers(
+  items: Array<Record<string, unknown>>,
+  inPeriod: (invoice: Record<string, unknown>) => boolean
+): { bySupplier: PurchaseSupplierAgg[]; lines: number; conflicting: number; truncatedSuppliers: number } {
+  let lines = 0;
+  let conflicting = 0;
+  let truncatedSuppliers = 0;
+  const bySupplier = items
+    .map((row) => {
+      if (row.truncated) truncatedSuppliers += 1;
+      const all = (Array.isArray(row.invoices) ? row.invoices : []).filter(inPeriod);
+      const invoices = all.filter((invoice: Record<string, unknown>) => !invoice.isReturn);
+      const returnCount = all.length - invoices.length;
+      let lineCount = 0;
+      for (const invoice of invoices) {
+        for (const line of (Array.isArray(invoice.items) ? invoice.items : []) as Array<Record<string, unknown>>) {
+          lineCount += 1;
+          lines += 1;
+          const stated = num(line.lineTotal);
+          const base = num(line.qty) * num(line.avgPrice);
+          if (stated > 0 && base > 0 && Math.abs(stated - base) / Math.max(stated, base) > 0.2) conflicting += 1;
+        }
+      }
+      const dates = invoices.map((invoice: Record<string, unknown>) => String(invoice.date ?? "")).filter(Boolean).sort();
+      return { name: String(row.name ?? ""), count: invoices.length, lineCount, returnCount, last: dates[dates.length - 1] ?? "" };
+    })
+    .filter((row) => row.count > 0 || row.returnCount > 0)
+    .sort((a, b) => b.count - a.count);
+  return { bySupplier, lines, conflicting, truncatedSuppliers };
+}
+
+function purchasesEmptyForPeriod(
+  scope: string,
+  coverage: ReturnType<typeof reportCoverage>,
+  asOf: string | null | undefined
+): ToolResult {
+  if (!coverage.covered) {
+    return {
+      ok: false,
+      text: `**المشتريات — ${scope} — غير محسومة**\n`
+        + `لم أجد فواتير شراء في هذه الفترة، لكن تقرير المشتريات لا يغطّيها كاملةً`
+        + ` — فالغياب هنا قد يكون غياب قراءة لا غياب شراء.`
+        + coverage.note,
+      sources: ["ameen_purchase_invoice_reports"],
+      asOf
+    };
+  }
+  return {
+    ok: true,
+    text: `**المشتريات — ${scope}**\nلا توجد فواتير شراء في هذه الفترة.`
+      + `\n\nنافذة تقرير المشتريات المتاحة: ${coverage.from} → ${coverage.to}.`,
+    sources: ["ameen_purchase_invoice_reports"],
+    asOf
+  };
+}
+
+function appendPurchasesSupplierDetail(
+  text: string,
+  opts: {
+    items: Array<Record<string, unknown>>;
+    entityText: string;
+    scope: string;
+    inPeriod: (invoice: Record<string, unknown>) => boolean;
+  }
+): string {
+  const { items, entityText, scope, inPeriod } = opts;
+  if (!entityText.trim()) return text;
+  const hit = matchByName(items, (row) => String(row.name ?? ""), entityText, 1)[0];
+  if (!hit) {
+    return text + `\n\n_لم أجد مورّداً باسم «${entityText.trim()}» في هذا التقرير._`;
+  }
+  const invoices = (Array.isArray(hit.row.invoices) ? hit.row.invoices : []).filter(inPeriod);
+  return text
+    + `\n\n**تفصيل ${String(hit.row.name)} — ${scope}**\n`
+    + invoices
+      .slice(0, 8)
+      .map((invoice: Record<string, unknown>) => {
+        const rows = Array.isArray(invoice.items) ? invoice.items : [];
+        return `- ${String(invoice.date ?? "")}: ${rows.length} صنف`
+          + (rows.length ? ` (${rows.slice(0, 3).map((line: Record<string, unknown>) => String(line.itemName ?? "")).join("، ")}${rows.length > 3 ? "…" : ""})` : "");
+      })
+      .join("\n");
+}
+
+function formatPurchasesBody(opts: {
+  scope: string;
+  bySupplier: PurchaseSupplierAgg[];
+  bills: number;
+  lines: number;
+  returnsTotal: number;
+  conflicting: number;
+  unreliable: boolean;
+  period: Period;
+  coverage: ReturnType<typeof reportCoverage>;
+  items: Array<Record<string, unknown>>;
+  entityText: string;
+  inPeriod: (invoice: Record<string, unknown>) => boolean;
+  asOf: string | null | undefined;
+}): ToolResult {
+  const {
+    scope, bySupplier, bills, lines, returnsTotal, conflicting, unreliable,
+    period, coverage, items, entityText, inPeriod, asOf
+  } = opts;
+  let text = `**المشتريات — ${scope}**\n`
+    + `- عدد فواتير الشراء: **${bills}** من **${bySupplier.length}** مورّد، بمجموع ${lines} سطر\n`
+    + (returnsTotal ? `- ومعها **${returnsTotal}** مرتجع شراء، غير داخلة في العدد أعلاه.\n` : "")
+    + (period.explicit
+      ? `- محسوبة على ${coverage.covered ? "الفترة المطلوبة وحدها" : "الجزء المغطّى منها"}،`
+        + ` من نافذة تقرير ${coverage.from} → ${coverage.to}.\n`
+      : "")
+    + `\n`
+    + `**الموردون حسب عدد الفواتير**\n`
+    + bySupplier
+      .slice(0, 12)
+      .map((row, index) =>
+        `${index + 1}. ${row.name}: **${row.count}** فاتورة شراء (${row.lineCount} سطر)`
+        + (row.returnCount ? ` و${row.returnCount} مرتجع` : "")
+        + (row.last ? ` — آخرها ${row.last}` : ""))
+      .join("\n");
+
+  if (unreliable) {
+    text += `\n\n> ⚠️ **لم أعرض إجمالي قيمة المشتريات عمداً.**\n`
+      + `> في ${conflicting} من ${lines} سطر، قيمة السطر المخزَّنة (\`lineTotal\`) لا توافق الكمية × متوسط سعر الوحدة:\n`
+      + `> \`price\` مسجَّل لوحدة والكمية \`qty\` لوحدة أخرى، فالضرب بينهما يضخّم القيمة بمقدار معامل الوحدة تقريباً.\n`
+      + `> أي إجمالي أعرضه سيكون خاطئاً بمضاعفات، فلن أعطيك رقماً. الخلل في خط مزامنة فواتير الشراء\n`
+      + `> (\`tools/pull-purchase-invoices-from-ameen.ps1\`) لا في المساعد، ويحتاج إصلاحاً هناك.`;
+  }
+
+  text = appendPurchasesSupplierDetail(text, { items, entityText, scope, inPeriod });
+  text += coverage.note;
+  return { ok: true, text: text + freshnessNote(asOf), sources: ["ameen_purchase_invoice_reports"], asOf };
+}
+
 const TOOLS: Tool[] = [
   // ── الصناديق والسيولة ─────────────────────────────────────────────────────
   {
@@ -1335,190 +1748,11 @@ const TOOLS: Tool[] = [
       let text = `**${name}**\n`
         + `- الرصيد الحالي: **${money(customer.balance)}** ${num(customer.balance) > 0 ? "(مدين — عليه)" : num(customer.balance) < 0 ? "(دائن — له)" : "(مسدّد)"}\n`
         + `- تاريخ التقرير: ${balances.report_date}`;
-      const allPayments = Array.isArray(customer.recentPayments) ? customer.recentPayments : [];
-      // الفترة المطلوبة تُحترم هنا كما في فواتير الزبون أدناه: «دفعات الزبون X
-      // الشهر الماضي» كانت تعرض أحدث 6 دفعات من نافذة التقرير كلها بلا صلة
-      // بالفترة المطلوبة، فتحلّ دفعات حديثة محلّ المطلوبة. بلا فترة صريحة
-      // يبقى السلوك كما هو (أحدث 6 من نافذة التقرير).
-      const payments = ctx.period.explicit
-        ? allPayments.filter((p: Record<string, unknown>) => {
-          const date = String(p.date ?? "").slice(0, 10);
-          return date >= ctx.period.from && date <= ctx.period.to;
-        })
-        : allPayments;
-      if (payments.length) {
-        text += `\n\n**آخر الدفعات**${ctx.period.explicit ? ` (${ctx.period.label})` : ""}\n`
-          + payments
-            .slice(0, 6)
-            .map((p: Record<string, unknown>) =>
-              `- ${String(p.date ?? "").slice(0, 10)}: **${money(p.amount)}**${p.notes ? ` — ${String(p.notes)}` : ""}`)
-            .join("\n");
-      } else if (ctx.period.explicit) {
-        // المنتِج (ameen-customer-balances-query.sql) يعيد أحدث 40 دفعة فقط لكل
-        // زبون — لا كل السجل. فإن جاءت النتيجة فارغة بعد الفلترة بالفترة، هذا لا
-        // يعني «لا دفعات» بالضرورة: قد تقع الدفعة المطلوبة خارج نافذة الـ40 دفعة
-        // المتاحة أصلاً. الجزم هنا بلا دفعات كان يُنتج إجابة مالية خاطئة صريحة
-        // لزبون نشِط سداده يفوق 40 حركة. (رصدها Codex idx46 على PR #205.)
-        const oldestAvailable = allPayments.length
-          ? allPayments
-            .map((p: Record<string, unknown>) => String(p.date ?? "").slice(0, 10))
-            .filter(Boolean)
-            .sort()[0]
-          : undefined;
-        const windowStart = typeof customer.paymentsWindowStart === "string"
-          ? customer.paymentsWindowStart.slice(0, 10)
-          : undefined;
-        const windowCount = typeof customer.paymentsInWindow === "number" ? customer.paymentsInWindow : undefined;
-
-        let maybeTruncated: boolean;
-        if (windowStart !== undefined && windowCount !== undefined && ctx.period.from >= windowStart) {
-          // الفترة المطلوبة بالكامل داخل نافذة الـ90 يوماً التي يُعلن عنها
-          // المنتِج عددها الفعلي — إشارة موثوقة تحسم البتر يقيناً بدل تخمينه.
-          maybeTruncated = windowCount > allPayments.length;
-        } else {
-          // الفترة تسبق نافذة الـ90 يوماً أو الإشارة غير متوفرة بهذا الحساب:
-          // استدلال آمن من سقف القائمة المعروف (40) وأقدم تاريخ وصل فعلاً.
-          maybeTruncated = allPayments.length >= PAYMENTS_ROW_CAP
-            || (!!oldestAvailable && ctx.period.from < oldestAvailable);
-        }
-
-        text += maybeTruncated
-          ? `\n\n_لا يمكن الجزم بعدم وجود دفعات ضمن ${ctx.period.label} لأن سجل الدفعات المتاح لهذا الحساب محدود لأحدث ${allPayments.length} دفعة فقط، وقد توجد دفعات أقدم خارج هذا السجل._`
-          : `\n\n_لا دفعات مسجّلة لهذا الحساب في ${ctx.period.label}._`;
-      } else {
-        text += `\n\n_لا دفعات مسجّلة لهذا الحساب في نافذة التقرير._`;
-      }
+      text = appendCustomerPaymentsText(text, customer, ctx.period);
 
       const sources = ["inventory_reports:ameen_customer_balances"];
       if (wantsPurchases) {
-        // الفواتير مصدر منفصل — فشله لا يلغي الرصيد أعلاه ولا يُستبدل بتقدير.
-        try {
-          const invoiceReport = await latestReport("inventory_reports", "ameen_customer_invoices");
-          const invRows = Array.isArray(invoiceReport?.items) ? invoiceReport.items : [];
-          sources.push("inventory_reports:ameen_customer_invoices");
-          const window = `${(invoiceReport?.summary as Record<string, unknown>)?.fromDate ?? "?"} → ${invoiceReport?.report_date ?? "?"}`;
-
-          // هوية الزبون بالـGUID أولاً وأخيراً متى توفّر.
-          //
-          // كان هنا ارتداد إلى مطابقة الاسم عند فشل مطابقة الـGUID، وهو خطأ
-          // خطير: إن كان تقرير الفواتير قديماً أو ناقص الربط، فأقرب اسم مشابه
-          // يفوز فتُعرض **فواتير زبون آخر** — بأصنافه وكمياته وأسعاره — تحت اسم
-          // الزبون المطلوب. وهذا ينقض قاعدة موثّقة في CLAUDE.md: الربط
-          // بـcustomerGuid أولاً، والمجموعة اليتيمة لا تُنسب لأحد بالتخمين بل
-          // يُكتفى بتحذير صريح.
-          //
-          // فحين يحمل حساب الزبون GUID موثوقاً: إمّا مطابقة GUID أو لا فواتير.
-          // ومطابقة الاسم لا تُستعمل إلا للسجلات القديمة التي بلا GUID أصلاً،
-          // وحتى حينها بحارس الالتباس لا بأخذ أقرب مرشح.
-          let entry: Record<string, unknown> | undefined;
-          let identity: "guid" | "name" | "none" = "none";
-          if (guid) {
-            entry = invRows.find((row: Record<string, unknown>) => String(row.customerGuid ?? "") === guid);
-            if (entry) identity = "guid";
-          } else {
-            const named = matchByName(invRows as Array<Record<string, unknown>>, (row) => String(row.name ?? ""), name, 5);
-            if (named.length && !isAmbiguous(named)) {
-              entry = named[0].row;
-              identity = "name";
-            }
-          }
-
-          // الفترة المطلوبة تُحترم كما في تقارير الحركة: «مشتريات الزبون X
-          // الشهر الماضي» كان يعرض أحدث ثلاث فواتير من نافذة التقرير كلها،
-          // فتحلّ فواتير هذا الشهر محلّ المطلوبة أولَ الشهر.
-          // (رصدها Codex على PR #205 بعد 82e9022.)
-          const allInvoices = Array.isArray(entry?.invoices) ? entry.invoices : [];
-          const invoices = ctx.period.explicit
-            ? allInvoices.filter((inv: Record<string, unknown>) => {
-              const date = String(inv.date ?? "").slice(0, 10);
-              return date >= ctx.period.from && date <= ctx.period.to;
-            })
-            : allInvoices;
-          const periodLabel = ctx.period.explicit
-            ? `${ctx.period.label} (${ctx.period.from} → ${ctx.period.to})`
-            : `نافذة التقرير`;
-          // نفس حدَّي تقرير المشتريات: نافذة 60 يوماً وقصٌّ عند 200 فاتورة
-          // لكل زبون. فالنفي القاطع «لا فواتير في هذه الفترة» قد يكون غياب
-          // قراءة لا غياب شراء. (رصدها Codex على PR #205 بعد d36b86f.)
-          const invCoverage = reportCoverage(
-            ctx.period,
-            (invoiceReport?.summary ?? {}) as Record<string, unknown>,
-            invoiceReport?.report_date,
-            !!entry?.truncated,
-            "تقرير فواتير الزبائن"
-          );
-          if (guid && !entry) {
-            text += `\n\n**المشتريات**\nلم أجد في تقرير الفواتير (${window}) أي سجل مربوط بمعرّف هذا الزبون.`
-              + `\n\nلن أنسب له فواتير بتشابه الاسم — لو فعلت لعرضتُ عليك مشتريات زبون آخر بأصنافه وأسعاره.`
-              + ` إن كنت تتوقع وجود فواتير، فالأرجح أن تقرير الفواتير لم يُزامَن بعد أو أن سجلّه بلا معرّف.`;
-          } else if (!invoices.length) {
-            text += invCoverage.covered || !ctx.period.explicit
-              ? `\n\n**المشتريات**\nلا توجد فواتير لهذا الزبون ضمن ${periodLabel}.`
-                + (ctx.period.explicit && allInvoices.length
-                  ? ` له ${allInvoices.length} فاتورة خارج هذه الفترة داخل نافذة التقرير (${window}) — لم أعرضها لأنها ليست ما سألت عنه.`
-                  : ` (نافذة تقرير الفواتير: ${window}.)`)
-              : `\n\n**المشتريات — غير محسومة**\nلم أجد فواتير لهذا الزبون ضمن ${periodLabel}،`
-                + ` لكن تقرير الفواتير لا يغطّي هذه الفترة كاملةً — فلن أقول إنه لم يشترِ شيئاً.`
-                + (allInvoices.length ? ` (له ${allInvoices.length} فاتورة داخل النافذة المتاحة.)` : "");
-          } else {
-            if (identity === "name") {
-              text += `\n\n> ℹ️ سجل الفواتير أدناه مطابَق بالاسم لأن حساب الزبون بلا معرّف في تقرير الأرصدة.`;
-            }
-            // المرتجع (BillType=3، يرفعه المنتِج بـ`isReturn`) ليس شراءً.
-            // عرضُه تحت «المشتريات» بأصنافه ومبلغه يجعل زبوناً **أعاد** بضاعة
-            // يظهر وكأنه اشتراها — وهو عكس الحقيقة تماماً، لا نقصٌ فيها.
-            // الواجهة تميّزه منذ زمن (src/app.js)، والمساعد وحده كان يخلطه.
-            // (رصدها Codex على PR #205 بعد ece2495.)
-            const purchases = invoices.filter((inv: Record<string, unknown>) => !inv.isReturn);
-            const returns = invoices.filter((inv: Record<string, unknown>) => inv.isReturn);
-            const shown = purchases.slice(0, 3);
-            text += `\n\n**آخر الفواتير** (${purchases.length} فاتورة شراء ضمن ${periodLabel}`
-              + (returns.length ? `، و${returns.length} مرتجع` : "")
-              + `)`
-              + (invCoverage.covered ? "" : " — العدد حدٌّ أدنى، انظر التنبيه أدناه");
-            if (!purchases.length) {
-              text += `\n\nلا فاتورة **شراء** له في هذه الفترة — ما وُجد مرتجعات فقط.`;
-            }
-            for (const inv of shown) {
-              const lines = Array.isArray(inv.lines) ? inv.lines : [];
-              // رصدها Codex #28: قبل جمع lineTotal الخام، اكشف تعارض وحدة السطر
-              // (أسلوب أداة المشتريات نفسه) — إذا كانت الفاتورة متعارضة/غير
-              // موثوقة لا يُعرض إجمالي قاطع لها، لكن الأسطر تُعرض كما هي دون تعديل.
-              const { unreliable } = lineTotalConflictStats(lines as Array<Record<string, unknown>>, "price");
-              const total = lines.reduce((sum: number, l: Record<string, unknown>) => sum + num(l.lineTotal), 0);
-              text += unreliable
-                ? `\n\n**فاتورة ${String(inv.date ?? "")}** — ⚠️ لم أعرض إجمالي هذه الفاتورة عمداً (تعارض في وحدة السعر بين أسطرها)\n`
-                : `\n\n**فاتورة ${String(inv.date ?? "")}** — إجمالي ${money(total)}\n`;
-              text += lines
-                  .slice(0, 10)
-                  .map((l: Record<string, unknown>) =>
-                    `- ${String(l.material ?? "")}: ${qty(l.qty)} ${String(l.unit1 ?? "")} × ${money(l.price)} = ${money(l.lineTotal)}`)
-                  .join("\n")
-                + (lines.length > 10 ? `\n- _و${lines.length - 10} سطر آخر._` : "");
-            }
-            // المرتجعات تُعرض مفصولةً ومعنونةً، لا مطويّةً ولا مخلوطة.
-            if (returns.length) {
-              text += `\n\n**🔁 مرتجعات ${periodLabel}** (${returns.length})\n`
-                + returns
-                  .slice(0, 5)
-                  .map((inv: Record<string, unknown>) => {
-                    const lines = Array.isArray(inv.lines) ? inv.lines : [];
-                    // رصدها Codex #28: نفس كشف التعارض على مرتجعات الفواتير.
-                    const { unreliable } = lineTotalConflictStats(lines as Array<Record<string, unknown>>, "price");
-                    const total = lines.reduce((sum: number, l: Record<string, unknown>) => sum + num(l.lineTotal), 0);
-                    const amount = unreliable ? "⚠️ غير محسوم (تعارض وحدة السعر)" : money(total);
-                    return `- ${String(inv.date ?? "")}: ${amount}`
-                      + (lines.length ? ` (${lines.slice(0, 3).map((l: Record<string, unknown>) => String(l.material ?? "")).join("، ")}${lines.length > 3 ? "…" : ""})` : "");
-                  })
-                  .join("\n")
-                + (returns.length > 5 ? `\n- _و${returns.length - 5} مرتجع آخر._` : "")
-                + `\n\nالمرتجع بضاعة **أعادها** الزبون، فلا يُحسب شراءً ولم يدخل في العدد أعلاه.`;
-            }
-          }
-          text += invCoverage.note;
-        } catch {
-          text += `\n\n> ⚠️ تعذّرت قراءة تقرير الفواتير، فلم أعرض المشتريات. الرصيد أعلاه من تقرير الأرصدة وهو صحيح — ولم أستبدل الفواتير بأي تقدير.`;
-        }
+        text = await appendCustomerPurchasesText(text, { guid, name, period: ctx.period, sources });
       }
       return { ok: true, text: text + freshnessNote(balances.created_at), sources, asOf: balances.created_at };
     }
@@ -1868,59 +2102,12 @@ const TOOLS: Tool[] = [
         text += `\n\n_أصناف مشابهة: ${matches.slice(1).map((m) => String(m.row.item_name)).join("، ")}_`;
       }
 
-      // الحركة من سطور المبيعات الحقيقية. فترة صريحة بالسؤال («آخر 10 أيام»،
-      // «الأسبوع الماضي»...) تُستخدم كما هي بدل الافتراضي الثابت 60 يوماً —
-      // وإلا كانت كل أسئلة حركة الصنف تتجاهل الفترة المطلوبة صامتة. (رصدها Codex على PR #205.)
-      const period = ctx.period.explicit
-        ? ctx.period
-        : { from: damascusDate(-59), to: damascusDate(), label: "آخر 60 يوم", explicit: true };
-      const periodDays = Math.max(
-        1,
-        Math.round((new Date(`${period.to}T00:00:00Z`).getTime() - new Date(`${period.from}T00:00:00Z`).getTime()) / 86_400_000) + 1
-      );
-      const sales = await readSales(period, ctx.role);
-      const mine = sales.rows.filter((row) => normalize(row.item_name) === normalize(name));
-      const itemState = await salesCompleteness(period, sales.partial);
-      if (!mine.length) {
-        // نفس الصنف: نفيٌ قاطع مبنيّ على قراءة قد تكون ناقصة. لا يُلغى الجواب
-        // (فيه سعر الصنف ومخزونه)، لكن النفي يُخفَّف إلى «لم أجد» مع سببه.
-        text += `\n\n**الحركة (${period.label})**\n`
-          + (itemState.complete
-            ? `لا توجد أي مبيعات مسجّلة لهذا الصنف في ${period.label}.`
-            : `لم أجد مبيعات لهذا الصنف في ${period.label}، لكن قراءة المبيعات **غير مكتملة** — فلا أجزم بغيابها.`);
-      } else {
-        const totalQty = mine.reduce((sum, row) => sum + num(row.qty), 0);
-        text += `\n\n**الحركة (${period.label})**\n`
-          + `- الكمية المباعة: **${qty(totalQty)}** على ${mine.length} سطر\n`
-          + `- متوسط ${(totalQty / periodDays).toFixed(1)} بالوحدة يومياً`;
-        // القيمة وأسماء المشترين للمالك وحده. الكمية حركةُ مخزون يحتاجها
-        // الموظف في عمله؛ أما القيمة وقائمة الزبائن فهما تقرير المبيعات
-        // المحمي نفسه، مُعاد بناؤه صنفاً صنفاً.
-        if (ctx.role === "owner") {
-          const totalValue = mine.reduce((sum, row) => sum + num(row.line_total), 0);
-          const buyers = new Map<string, number>();
-          for (const row of mine) {
-            const buyer = String(row.customer_name ?? "").trim() || "بدون اسم";
-            buyers.set(buyer, (buyers.get(buyer) ?? 0) + num(row.qty));
-          }
-          const top = [...buyers.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);
-          text += `\n- قيمة المبيعات: **${money(totalValue)}**\n`
-            + `- أكثر المشترين: ${top.map(([b, q]) => `${b} (${qty(q)})`).join("، ")}`;
-        }
-        if (ctx.role === "owner") {
-          const withCost = mine.filter((row) => num(row.unit_cost) > 0);
-          if (withCost.length) {
-            const margin = withCost.reduce((sum, row) => sum + num(row.line_total) - num(row.unit_cost) * num(row.qty), 0);
-            text += `\n- هامش المنتج على ${withCost.length} سطر متوفرة تكلفتها: **${money(margin)}** (بيع ناقص تكلفة، قبل المصاريف)`;
-          }
-        }
-      }
-      text += itemState.note;
+      const movement = await appendItemSalesMovement(text, ctx, name);
       return {
         ok: true,
-        text,
+        text: movement.text,
         sources: ["approved_price_items", "sales_line_items", "sales_line_items_sync_state"],
-        partial: sales.partial
+        partial: movement.partial
       };
     }
   },
@@ -1941,49 +2128,17 @@ const TOOLS: Tool[] = [
       const s = (report.summary ?? {}) as Record<string, unknown>;
 
       // ⚠️ قيمة السطر في هذا التقرير غير موثوقة (تحقّق على الإنتاج 2026-09-06).
-      // مثال فعلي: qty=3750 وunit="كرتونة" وprice=1225 وavgPrice=24.387، و
-      // lineTotal=4,593,750 = qty×price. لكن price سعر الكرتونة بينما avgPrice
-      // سعر الكروز (النسبة ≈ 50 = معامل الوحدة)، فإن كانت qty بالكروز فالسطر
-      // مضخَّم نحو 50 ضعفاً. المجموع بهذه القراءة 76.3 مليون دولار على شهرين،
-      // مقابل مبيعات 1.15 مليون في المدة نفسها — رقم مستحيل.
       // لذلك: لا يُعرض إجمالي قيمة، ويُعلَن التعارض بدل تمرير رقم يبدو دقيقاً.
-      // الأعداد (الفواتير والموردون) سليمة ولا علاقة لها بالخلل، فتُعرض.
-      // أعداد الفواتير والموردين والأسطر تُشتقّ من المجموعة **المُرشَّحة
-      // بالفترة المطلوبة**، لا من ملخّص اللقطة. `summary.bills` يصف نافذة
-      // المنتِج كلها (قد تمتدّ شهوراً)، فسؤال «مشتريات الشهر الماضي» كان
-      // يُجاب بعدد فواتير يشمل شهوراً أخرى. (رصدها Codex بعد 82e9022.)
+      // الأعداد تُشتقّ من المجموعة المُرشَّحة بالفترة المطلوبة لا من ملخّص اللقطة.
       const inPeriod = (invoice: Record<string, unknown>) => {
         if (!ctx.period.explicit) return true;
         const date = String(invoice.date ?? "").slice(0, 10);
         return date >= ctx.period.from && date <= ctx.period.to;
       };
-      let lines = 0;
-      let conflicting = 0;
-      let truncatedSuppliers = 0;
-      const bySupplier = items
-        .map((row: Record<string, unknown>) => {
-          if (row.truncated) truncatedSuppliers += 1;
-          // مرتجع الشراء يرفعه المنتِج بـ`isReturn` كذلك (السطر 350 من
-          // pull-purchase-invoices-from-ameen.ps1). عدُّه شراءً يضخّم عدد
-          // الفواتير ويقلب معنى الرقم عند مورّد كثير الإرجاع.
-          const all = (Array.isArray(row.invoices) ? row.invoices : []).filter(inPeriod);
-          const invoices = all.filter((invoice: Record<string, unknown>) => !invoice.isReturn);
-          const returnCount = all.length - invoices.length;
-          let lineCount = 0;
-          for (const invoice of invoices) {
-            for (const line of (Array.isArray(invoice.items) ? invoice.items : []) as Array<Record<string, unknown>>) {
-              lineCount += 1;
-              lines += 1;
-              const stated = num(line.lineTotal);
-              const base = num(line.qty) * num(line.avgPrice);
-              if (stated > 0 && base > 0 && Math.abs(stated - base) / Math.max(stated, base) > 0.2) conflicting += 1;
-            }
-          }
-          const dates = invoices.map((invoice: Record<string, unknown>) => String(invoice.date ?? "")).filter(Boolean).sort();
-          return { name: String(row.name ?? ""), count: invoices.length, lineCount, returnCount, last: dates[dates.length - 1] ?? "" };
-        })
-        .filter((row) => row.count > 0 || row.returnCount > 0)
-        .sort((a, b) => b.count - a.count);
+      const { bySupplier, lines, conflicting, truncatedSuppliers } = aggregatePurchaseSuppliers(
+        items as Array<Record<string, unknown>>,
+        inPeriod
+      );
 
       const unreliable = lines > 0 && conflicting / lines > 0.2;
       const bills = bySupplier.reduce((sum, row) => sum + row.count, 0);
@@ -1994,77 +2149,26 @@ const TOOLS: Tool[] = [
 
       const coverage = reportCoverage(ctx.period, s, report.report_date, truncatedSuppliers > 0, "تقرير المشتريات");
 
-      // ⚠️ الشرط أدناه كان `!bills` وحدها، فيُعلن «لا توجد فواتير شراء في هذه
-      // الفترة» حتى حين توجد مرتجعات شراء فيها بلا فواتير شراء جديدة —
-      // فيُخفي مرتجعاتٍ فعلية تحت نفيٍ قاطع خاطئ. المرتجع سطرٌ حقيقي في
-      // نافذة الفترة ويستحق أن يُعرض، لا أن يُبتلع. (رصدها Codex على PR #205.)
+      // المرتجع سطرٌ حقيقي في نافذة الفترة ويستحق أن يُعرض، لا أن يُبتلع خلف نفي قاطع.
       if (ctx.period.explicit && !bills && !returnsTotal) {
-        // «لا فواتير في هذه الفترة» نفيٌ قاطع. وهو كاذب متى كانت الفترة خارج
-        // نافذة التقرير أصلاً، أو داخلها لكن اللقطة مقصوصة.
-        if (!coverage.covered) {
-          return {
-            ok: false,
-            text: `**المشتريات — ${scope} — غير محسومة**\n`
-              + `لم أجد فواتير شراء في هذه الفترة، لكن تقرير المشتريات لا يغطّيها كاملةً`
-              + ` — فالغياب هنا قد يكون غياب قراءة لا غياب شراء.`
-              + coverage.note,
-            sources: ["ameen_purchase_invoice_reports"],
-            asOf: report.created_at
-          };
-        }
-        return {
-          ok: true,
-          text: `**المشتريات — ${scope}**\nلا توجد فواتير شراء في هذه الفترة.`
-            + `\n\nنافذة تقرير المشتريات المتاحة: ${coverage.from} → ${coverage.to}.`,
-          sources: ["ameen_purchase_invoice_reports"],
-          asOf: report.created_at
-        };
+        return purchasesEmptyForPeriod(scope, coverage, report.created_at);
       }
 
-      let text = `**المشتريات — ${scope}**\n`
-        + `- عدد فواتير الشراء: **${bills}** من **${bySupplier.length}** مورّد، بمجموع ${lines} سطر\n`
-        + (returnsTotal ? `- ومعها **${returnsTotal}** مرتجع شراء، غير داخلة في العدد أعلاه.\n` : "")
-        + (ctx.period.explicit
-          ? `- محسوبة على ${coverage.covered ? "الفترة المطلوبة وحدها" : "الجزء المغطّى منها"}،`
-            + ` من نافذة تقرير ${coverage.from} → ${coverage.to}.\n`
-          : "")
-        + `\n`
-        + `**الموردون حسب عدد الفواتير**\n`
-        + bySupplier
-          .slice(0, 12)
-          .map((row, index) =>
-            `${index + 1}. ${row.name}: **${row.count}** فاتورة شراء (${row.lineCount} سطر)`
-            + (row.returnCount ? ` و${row.returnCount} مرتجع` : "")
-            + (row.last ? ` — آخرها ${row.last}` : ""))
-          .join("\n");
-
-      if (unreliable) {
-        text += `\n\n> ⚠️ **لم أعرض إجمالي قيمة المشتريات عمداً.**\n`
-          + `> في ${conflicting} من ${lines} سطر، قيمة السطر المخزَّنة (\`lineTotal\`) لا توافق الكمية × متوسط سعر الوحدة:\n`
-          + `> \`price\` مسجَّل لوحدة والكمية \`qty\` لوحدة أخرى، فالضرب بينهما يضخّم القيمة بمقدار معامل الوحدة تقريباً.\n`
-          + `> أي إجمالي أعرضه سيكون خاطئاً بمضاعفات، فلن أعطيك رقماً. الخلل في خط مزامنة فواتير الشراء\n`
-          + `> (\`tools/pull-purchase-invoices-from-ameen.ps1\`) لا في المساعد، ويحتاج إصلاحاً هناك.`;
-      }
-
-      if (ctx.entityText.trim()) {
-        const hit = matchByName(items as Array<Record<string, unknown>>, (row) => String(row.name ?? ""), ctx.entityText, 1)[0];
-        if (hit) {
-          const invoices = (Array.isArray(hit.row.invoices) ? hit.row.invoices : []).filter(inPeriod);
-          text += `\n\n**تفصيل ${String(hit.row.name)} — ${scope}**\n`
-            + invoices
-              .slice(0, 8)
-              .map((invoice: Record<string, unknown>) => {
-                const rows = Array.isArray(invoice.items) ? invoice.items : [];
-                return `- ${String(invoice.date ?? "")}: ${rows.length} صنف`
-                  + (rows.length ? ` (${rows.slice(0, 3).map((line: Record<string, unknown>) => String(line.itemName ?? "")).join("، ")}${rows.length > 3 ? "…" : ""})` : "");
-              })
-              .join("\n");
-        } else {
-          text += `\n\n_لم أجد مورّداً باسم «${ctx.entityText.trim()}» في هذا التقرير._`;
-        }
-      }
-      text += coverage.note;
-      return { ok: true, text: text + freshnessNote(report.created_at), sources: ["ameen_purchase_invoice_reports"], asOf: report.created_at };
+      return formatPurchasesBody({
+        scope,
+        bySupplier,
+        bills,
+        lines,
+        returnsTotal,
+        conflicting,
+        unreliable,
+        period: ctx.period,
+        coverage,
+        items: items as Array<Record<string, unknown>>,
+        entityText: ctx.entityText,
+        inPeriod,
+        asOf: report.created_at
+      });
     }
   },
 
