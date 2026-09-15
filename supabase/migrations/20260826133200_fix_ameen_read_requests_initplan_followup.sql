@@ -9,26 +9,24 @@
 -- Confirm the live name with `supabase migration list`; rename the file's
 -- name segment if the CLI reports a mismatch (version must stay 20260826133200).
 --
--- Closes the remote-only history gap for Stage 2. Verify-only landmark shared
--- with 20260826104745 (same feature surface).
+-- Closes the remote-only history gap for Stage 2. Verify-or-skip landmark
+-- shared with 20260826104745 (same feature surface). Absent landmark →
+-- fresh-DB NOTICE no-op so clean replay continues.
 --
 -- No FORCE ROW LEVEL SECURITY. No migration repair. No production apply authorized.
 
 do $$
 begin
-  if to_regclass('public.ameen_read_requests') is null then
-    raise exception 'fix_ameen_read_requests_initplan_followup (20260826133200): table public.ameen_read_requests is missing — history placeholder will not invent DDL.';
+  if to_regclass('public.ameen_read_requests') is not null
+     and exists (
+       select 1 from pg_policies
+       where schemaname = 'public'
+         and tablename = 'ameen_read_requests'
+         and policyname = 'ameen_read_worker_update'
+     ) then
+    raise notice 'fix_ameen_read_requests_initplan_followup (20260826133200): landmark verified — history-safe no-op (not a claim of byte-for-byte equivalence with production apply).';
+  else
+    raise notice 'fix_ameen_read_requests_initplan_followup (20260826133200): landmark absent — treating as fresh-DB / out-of-band feature path; history placeholder no-op (will not invent DDL).';
   end if;
-
-  if not exists (
-    select 1 from pg_policies
-    where schemaname = 'public'
-      and tablename = 'ameen_read_requests'
-      and policyname = 'ameen_read_worker_update'
-  ) then
-    raise exception 'fix_ameen_read_requests_initplan_followup (20260826133200): policy ameen_read_worker_update is missing — history placeholder will not invent DDL.';
-  end if;
-
-  raise notice 'fix_ameen_read_requests_initplan_followup (20260826133200): landmark verified — history-safe no-op (not a claim of byte-for-byte equivalence with production apply).';
 end;
 $$;

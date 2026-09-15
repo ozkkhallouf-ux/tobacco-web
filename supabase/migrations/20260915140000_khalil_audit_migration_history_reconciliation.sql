@@ -70,10 +70,11 @@
 --      local migrations missing from the remote history table; it does NOT
 --      reconcile the inverse (remote version missing locally) and the CLI
 --      still stops on that mismatch. EVERY known remote-only version listed
---      in superseded/README.md now has a matching local file (verify-only
---      landmarks for non-audit stamps; bootstrap+refuse-if-present for
---      `20260830141802_khalil_audit_log.sql`). Confirm with
---      `supabase migration list` before Stage 2 / `--include-all`. If an
+--      in superseded/README.md now has a matching local file (verify-or-skip
+--      landmarks for non-audit stamps — NOTICE no-op on fresh DB when the
+--      landmark is absent, so clean replay is not aborted; bootstrap+
+--      refuse-if-present for `20260830141802_khalil_audit_log.sql`). Confirm
+--      with `supabase migration list` before Stage 2 / `--include-all`. If an
 --      unconfirmed *name* mismatches, rename only the name segment.
 --
 --      This reconciliation file is timestamped 20260915140000, which is

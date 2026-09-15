@@ -32,11 +32,15 @@
 timestamp إنتاجي يقابل أي محاولة محلية تقريبياً بالوقت، وليس إثبات تطابق المحتوى.
 
 † **placeholder تسوية سجل (2026-09-15):** ملف في المجلد الأب يطابق طابع الإنتاج
-(واسم تقريبي من المسودة المحلية حيث لم يُؤكَّد الاسم الحي). محتوى **تحقق قراءة-فقط**
-من معلم (landmark) — **لا** ينقل مسودة `superseded/` ولا يعيد تشغيل DDL غير مُثبت.
-عند غياب المعلم يرفع استثناء بدل اختراع مخطط. أسماء الطوابع غير المؤكَّدة
-(`20260826133200` خصوصاً) يجب مطابقتها مع `supabase migration list` وإعادة تسمية
-جزء الاسم فقط إن لزم (الإبقاء على رقم الإصدار).
+(واسم تقريبي من المسودة المحلية حيث لم يُؤكَّد الاسم الحي). محتوى **تحقق أو تخطٍّ**
+(verify-or-skip) لمعلم (landmark) — **لا** ينقل مسودة `superseded/` ولا يعيد
+تشغيل DDL غير مُثبت ولا يخترع مخططاً. إن وُجد المعلم: NOTICE تحقق. إن غاب
+(قاعدة فارغة / مسار ميزة خارج سلسلة المهاجرات النشطة): NOTICE no-op بلا
+استثناء حتى لا تُجهض إعادة تشغيل نظيفة قبل bootstrap الـaudit
+`20260830141802` (Codex P1 على PR #228). على الإنتاج يبقى CLI متخطّياً لأن
+الإصدار مسجَّل. أسماء الطوابع غير المؤكَّدة (`20260826133200` خصوصاً) يجب
+مطابقتها مع `supabase migration list` وإعادة تسمية جزء الاسم فقط إن لزم
+(الإبقاء على رقم الإصدار).
 
 †† **أساس audit قابل لإعادة التشغيل (2026-09-15):** `../20260830141802_khalil_audit_log.sql`
 ليس placeholder تحقق فقط. يوفّر DDL bootstrap لقاعدة فارغة مشتق من المسودة المحلية
@@ -76,13 +80,13 @@ above now has a matching local file under `../`:
 
 | version | local file | kind |
 |---|---|---|
-| `20260823085423` | `20260823085423_smart_inventory_counter_isolation.sql` | landmark verify |
-| `20260826104745` | `20260826104745_fix_ameen_read_requests_initplan_current_setting.sql` | landmark verify |
-| `20260826133200` | `20260826133200_fix_ameen_read_requests_initplan_followup.sql` | landmark verify (name unconfirmed) |
+| `20260823085423` | `20260823085423_smart_inventory_counter_isolation.sql` | landmark verify-or-skip (fresh no-op) |
+| `20260826104745` | `20260826104745_fix_ameen_read_requests_initplan_current_setting.sql` | landmark verify-or-skip (fresh no-op) |
+| `20260826133200` | `20260826133200_fix_ameen_read_requests_initplan_followup.sql` | landmark verify-or-skip (name unconfirmed) |
 | `20260830141802` | `20260830141802_khalil_audit_log.sql` | fresh-DB bootstrap + refuse-if-present |
-| `20260830172655` | `20260830172655_expense_entries_owner_only_rls.sql` | landmark verify |
-| `20260831020850` | `20260831020850_fix_inventory_recon_match_key_fallbacks.sql` | landmark verify |
-| `20260831185634` | `20260831185634_telegram_delivery_observability.sql` | landmark verify |
+| `20260830172655` | `20260830172655_expense_entries_owner_only_rls.sql` | landmark verify-or-skip (fresh no-op) |
+| `20260831020850` | `20260831020850_fix_inventory_recon_match_key_fallbacks.sql` | landmark verify-or-skip (fresh no-op) |
+| `20260831185634` | `20260831185634_telegram_delivery_observability.sql` | landmark verify-or-skip (fresh no-op) |
 
 Re-check with `supabase migration list` before Stage 2. If a **name** mismatch
 appears for an unconfirmed stamp, rename only the name segment (keep the version).

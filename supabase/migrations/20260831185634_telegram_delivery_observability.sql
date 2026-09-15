@@ -7,29 +7,27 @@
 -- Name note: derived from the local draft basename. Confirm with
 -- `supabase migration list` if the CLI reports a name mismatch.
 --
--- Closes the remote-only history gap for Stage 2. Verify-only landmark:
+-- Closes the remote-only history gap for Stage 2. Verify-or-skip landmark:
 -- telegram_outbox.net_request_id (also present in supabase/telegram-notifications.sql
 -- and later 20260914120000). Re-applying the draft's CREATE OR REPLACE of
 -- dispatch_telegram_outbox with an unproven body would be unsafe on production.
+-- Absent landmark → NOTICE no-op so clean replay is not aborted.
 --
 -- No FORCE ROW LEVEL SECURITY. No migration repair. No production apply authorized.
 
 do $$
 begin
-  if to_regclass('public.telegram_outbox') is null then
-    raise exception 'telegram_delivery_observability (20260831185634): table public.telegram_outbox is missing — history placeholder will not invent DDL.';
+  if to_regclass('public.telegram_outbox') is not null
+     and exists (
+       select 1
+       from information_schema.columns
+       where table_schema = 'public'
+         and table_name = 'telegram_outbox'
+         and column_name = 'net_request_id'
+     ) then
+    raise notice 'telegram_delivery_observability (20260831185634): landmark verified — history-safe no-op (not a claim of byte-for-byte equivalence with production apply).';
+  else
+    raise notice 'telegram_delivery_observability (20260831185634): landmark absent — treating as fresh-DB / out-of-band feature path; history placeholder no-op (will not invent DDL).';
   end if;
-
-  if not exists (
-    select 1
-    from information_schema.columns
-    where table_schema = 'public'
-      and table_name = 'telegram_outbox'
-      and column_name = 'net_request_id'
-  ) then
-    raise exception 'telegram_delivery_observability (20260831185634): column public.telegram_outbox.net_request_id is missing — history placeholder will not invent DDL.';
-  end if;
-
-  raise notice 'telegram_delivery_observability (20260831185634): landmark verified — history-safe no-op (not a claim of byte-for-byte equivalence with production apply).';
 end;
 $$;
