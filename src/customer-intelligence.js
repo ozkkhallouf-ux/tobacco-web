@@ -706,7 +706,9 @@
     }
 
     // ── الأرضية النسبية للتراجع: ربع وسيط مبيعات الفترة السابقة ──────────────
-    const positivePrevious = drafts
+    // الموردون خارج العيّنة: حجم مشترياتهم لا يحرّك وسيط الزبائن ولا يملأ مقاعد VIP.
+    const rankingDrafts = drafts.filter((draft) => !draft.isSupplier);
+    const positivePrevious = rankingDrafts
       .filter((draft) => draft.usableSales && draft.previous.netSales > 0)
       .map((draft) => draft.previous.netSales);
     const medianPrevious = median(positivePrevious) ?? 0;
@@ -714,7 +716,7 @@
 
     // ── ترتيب VIP النسبي ─────────────────────────────────────────────────────
     // المرشحون: من لديه صافي مبيعات موجب في النافذة (60 يوماً) وعدد فواتير كافٍ.
-    const vipCandidates = drafts.filter(
+    const vipCandidates = rankingDrafts.filter(
       (draft) => draft.usableSales && draft.combined.netSales > 0 && draft.combined.invoiceCount >= CONFIG.vipMinInvoices
     );
     const vipPopulation = vipCandidates.length;
@@ -831,7 +833,7 @@
       const noPurchasesInWindow = draft.usableSales && draft.combined.billCount === 0;
 
       if (isVip) flags.push("vip");
-      if (!vipRankingReliable && draft.usableSales && draft.combined.netSales > 0) flags.push("vip_ranking_unreliable");
+      if (!vipRankingReliable && !draft.isSupplier && draft.usableSales && draft.combined.netSales > 0) flags.push("vip_ranking_unreliable");
       if (isInactive) flags.push("inactive");
       if (isChurnRisk) flags.push("at_risk_churn");
       if (isReactivated) flags.push("reactivated");

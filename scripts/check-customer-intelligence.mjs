@@ -900,4 +900,133 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   assert.equal(namesake.creditLimitSource, "missing");
 }
 
-console.log(`ذكاء الزبائن: 32 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
+// ---------------------------------------------------------------------------
+// 33) Codex P1 — مورد بمبيعات كبيرة لا يفعّل ترتيب VIP ولا يأخذ مقعداً
+// ---------------------------------------------------------------------------
+{
+  function guidFor(n) {
+    return `500d8ef6-3563-48a3-b65b-${String(n).padStart(12, "0")}`;
+  }
+  function party(name, guid, isSupplier, invoices) {
+    return {
+      invoices: { name, customerGuid: guid, truncated: false, invoices },
+      balance: {
+        key: engine.normalizeName(name),
+        name,
+        balance: 0,
+        creditLimit: 0,
+        remainingLimit: 0,
+        status: "clear",
+        customerGuid: guid,
+        customerAccountGuid: guid,
+        isSupplier,
+        recentPayments: [],
+        recentMovements: []
+      }
+    };
+  }
+  const modest = [invoice("2026-07-20", 100), invoice("2026-08-20", 100)];
+  const huge = [invoice("2026-07-06", 20000), invoice("2026-07-20", 20000), invoice("2026-08-10", 20000), invoice("2026-08-28", 20000)];
+  const parties = [
+    party("زبون أ", guidFor(1), false, modest),
+    party("زبون ب", guidFor(2), false, modest),
+    party("زبون ج", guidFor(3), false, modest),
+    party("زبون د", guidFor(4), false, modest),
+    party("مورد جملة", guidFor(5), true, huge)
+  ];
+  const r33 = engine.build({
+    invoicesReport: {
+      source: "ameen_customer_invoices",
+      created_at: REFERENCE_ISO,
+      summary: { periodDays: 60, fromDate: FROM_DATE, customers: parties.length, bills: 0, syncedAt: REFERENCE_ISO },
+      items: parties.map((entry) => entry.invoices)
+    },
+    balancesReport: {
+      source: "ameen_customer_balances",
+      created_at: REFERENCE_ISO,
+      summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: parties.length },
+      items: parties.map((entry) => entry.balance)
+    },
+    movementsReport: null,
+    creditLimits: [],
+    now: NOW
+  });
+  const supplier33 = r33.customers.find((row) => row.customerName === "مورد جملة");
+  const customers33 = r33.customers.filter((row) => !row.isSupplier);
+  assert.ok(supplier33, "test 33: المورد يجب أن يظهر في السجلات");
+  assert.ok(supplier33.flags.includes("supplier_account"));
+  assert.ok(!supplier33.flags.includes("vip"), "test 33: المورد لا يأخذ مقعد VIP");
+  assert.equal(supplier33.vipRank, null, "test 33: المورد خارج ترتيب VIP");
+  assert.equal(r33.summary.vipCount, 0, "test 33: أربعة زبائن لا يكفيان لترتيب VIP موثوق");
+  assert.ok(customers33.every((row) => row.flags.includes("vip_ranking_unreliable")),
+    "test 33: الزبائن يُعلَّمون أن الترتيب غير موثوق");
+  assert.ok(!supplier33.flags.includes("vip_ranking_unreliable"),
+    "test 33: علم الترتيب غير الموثوق لا يُلصق بالمورد");
+}
+
+// ---------------------------------------------------------------------------
+// 34) Codex P1 — مورد ضخم لا يرفع أرضية التراجع فيحجب زبون متراجع
+// ---------------------------------------------------------------------------
+{
+  const CUST = "500d8ef6-3563-48a3-b65b-000000000021";
+  const SUP = "500d8ef6-3563-48a3-b65b-000000000022";
+  const mkB = (name, guid, isSupplier) => ({
+    key: engine.normalizeName(name),
+    name,
+    balance: 0,
+    creditLimit: 0,
+    remainingLimit: 0,
+    status: "clear",
+    customerGuid: guid,
+    customerAccountGuid: guid,
+    isSupplier,
+    recentPayments: [],
+    recentMovements: []
+  });
+  const r34 = engine.build({
+    invoicesReport: {
+      source: "ameen_customer_invoices",
+      created_at: REFERENCE_ISO,
+      summary: { periodDays: 60, fromDate: FROM_DATE, customers: 2, bills: 0, syncedAt: REFERENCE_ISO },
+      items: [
+        {
+          name: "زبون تراجع حقيقي",
+          customerGuid: CUST,
+          truncated: false,
+          invoices: [
+            invoice("2026-07-10", 50),
+            invoice("2026-07-20", 50),
+            invoice("2026-08-10", 35),
+            invoice("2026-08-20", 35)
+          ]
+        },
+        {
+          name: "مورد ضخم",
+          customerGuid: SUP,
+          truncated: false,
+          invoices: [
+            invoice("2026-07-10", 20000),
+            invoice("2026-07-20", 20000),
+            invoice("2026-08-10", 20000),
+            invoice("2026-08-20", 20000)
+          ]
+        }
+      ]
+    },
+    balancesReport: {
+      source: "ameen_customer_balances",
+      created_at: REFERENCE_ISO,
+      summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: 2 },
+      items: [mkB("زبون تراجع حقيقي", CUST, false), mkB("مورد ضخم", SUP, true)]
+    },
+    movementsReport: null,
+    creditLimits: [],
+    now: NOW
+  });
+  const declined = r34.customers.find((row) => row.customerName === "زبون تراجع حقيقي");
+  assert.ok(declined, "test 34: الزبون المتراجع يجب أن يظهر");
+  assert.equal(declined.purchaseTrend.percent, -30, "test 34: 100 ← 70 يجب أن تبقى -30%");
+  assert.ok(declined.flags.includes("declining"), "test 34: وسيط المورد لا يجوز أن يرفع أرضية التراجع فيحجب الزبون");
+}
+
+console.log(`ذكاء الزبائن: 34 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
