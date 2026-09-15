@@ -40,6 +40,12 @@ check("مهمة اللقطة تتكرر خلال اليوم ولا تعتمد ع
     "بقي البارامتر اليومي القديم");
 });
 
+check("أول تشغيل افتراضي بعد منتصف الليل يترك هامشاً لمزامنة المبيعات", () => {
+  // 00:07 كان يسبق أول دورة sales بعد لفّ النافذة → تنبيه تيليغرام وهمي.
+  assert.match(snapshotTask, /\$StartAt\s*=\s*"00:40"/);
+  assert.doesNotMatch(snapshotTask, /\$StartAt\s*=\s*"00:07"/);
+});
+
 check("مدّة التكرار تستعمل الصيغة التي يقبلها Task Scheduler", () => {
   // [timespan]::MaxValue يرفضه Task Scheduler عند التسجيل فلا تُنشأ المهمة
   // إطلاقاً — عطل صامت يُبطل الإصلاح كله. السابقة المعتمدة في المستودع:
@@ -246,6 +252,15 @@ check("الجسر يطابق بالمعرّف لا بالاسم", () => {
   assert.match(bridge, /byGuid/, "الجسر لا يبني فهرساً بالمعرّف");
   assert.match(bridge, /nameCollisions/,
     "الجسر لا يحمي من تصادم الأسماء");
+});
+
+// ------------------------------------------- حارس العامل: لا ادّعاء غياب بلا schtasks
+const ensureAmeen = read("tools/ensure-ameen-sync.ps1");
+check("غياب Read Worker يُثبت بـschtasks قبل تنبيه «غير مسجّلة»", () => {
+  assert.match(ensureAmeen, /schtasks\.exe \/Query \/TN \$ameenWorkerTaskName/);
+  assert.match(ensureAmeen, /أثبت schtasks\.exe غيابها/);
+  assert.match(ensureAmeen, /غير مرئية عبر Get-ScheduledTask رغم وجودها في schtasks/);
+  assert.doesNotMatch(ensureAmeen, /غير مسجّلة أو متوقفة \(لا نبض\)/);
 });
 
 console.log(`\ncheck-decision-pipeline-safety: اجتاز ${passed} فحصاً.`);

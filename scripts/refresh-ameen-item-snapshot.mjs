@@ -3,13 +3,15 @@ import {
   SALES_SYNC_SOURCE,
   assertTrustedSalesInput,
   getSingleSalesSyncMarker,
+  resolveDefaultSnapshotWindowEnd,
   validateSalesSyncMarker,
 } from './item-snapshot-freshness.mjs';
 
 const argumentsList = process.argv.slice(2);
 const apply = argumentsList.includes('--apply');
 const windowEndArgument = argumentsList.find((argument) => argument.startsWith('--window-end='));
-const windowEnd = windowEndArgument?.slice('--window-end='.length) ?? localDateString(new Date());
+const requestedWindowEnd = windowEndArgument?.slice('--window-end='.length) ?? localDateString(new Date());
+const windowEndWasExplicit = Boolean(windowEndArgument);
 const supabaseUrl = (process.env.TOBACCO_SUPABASE_URL || 'https://dyxbirfpxeocqffnfdeb.supabase.co').replace(/\/$/, '');
 const publicKey = process.env.TOBACCO_SUPABASE_PUBLIC_KEY || process.env.SUPABASE_PUBLIC_KEY;
 const email = process.env.TOBACCO_SYNC_EMAIL;
@@ -78,12 +80,22 @@ async function readAll(table, select, order, headers, filters = []) {
 
 async function main() {
   const headers = await authenticate();
-  const window = getSalesWindow(windowEnd, 30);
   const markerSelect = 'source,sync_run_id,window_start,window_end,row_count,completed_at';
   const markerFilters = [['source', `eq.${SALES_SYNC_SOURCE}`]];
   const markerBefore = getSingleSalesSyncMarker(await readAll(
     'sales_line_items_sync_state', markerSelect, 'source.asc', headers, markerFilters,
   ));
+  const resolved = resolveDefaultSnapshotWindowEnd({
+    requestedWindowEnd,
+    windowEndWasExplicit,
+    marker: markerBefore,
+    getSalesWindow,
+  });
+  const windowEnd = resolved.windowEnd;
+  if (resolved.rebased) {
+    console.log(`Snapshot window_end rebased to sealed sales marker ${windowEnd} (requested ${requestedWindowEnd} not sealed yet).`);
+  }
+  const window = getSalesWindow(windowEnd, 30);
   validateSalesSyncMarker(markerBefore, window);
   const [currentSnapshot, itemCosts, salesLineItems] = await Promise.all([
     readAll('ameen_item_snapshot', SNAPSHOT_FIELDS.join(','), 'item_key.asc', headers),
