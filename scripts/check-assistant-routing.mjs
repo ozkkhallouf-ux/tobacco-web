@@ -24,7 +24,8 @@ const ROUTES = [
   ["كم دفعنا اليوم؟", "expenses", "expense_entries"],
   ["ما المصاريف؟", "expenses", "expense_entries"],
   ["من أكبر الزبائن مديونية؟", "receivables", "inventory_reports"],
-  ["ما الذمم علينا؟", "receivables", "inventory_reports"],
+  ["ما الذمم علينا؟", "payables", null],
+  ["كم علينا ديون؟", "payables", null],
   ["ما رصيد الزبون سامر الوهمي؟", "customer", "inventory_reports"],
   ["ماذا اشترى الزبون سامر الوهمي؟", "customer", "inventory_reports"],
   ["مبيعات الزبون سامر الوهمي اليوم", "customer", "inventory_reports"],
@@ -2523,6 +2524,56 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   assert.ok(text.includes(lastMonthStart) || text.includes(lastMonthEnd),
     `لم يذكر حدود الشهر الماضي التقويمي:\n${text}`);
   ok("المقارنة بـ«الشهر الماضي» تستخدم الشهر التقويمي السابق لا نافذة ميكانيكية");
+}
+
+// ── Codex P1: «علينا» لا تُوجَّه لذمم الزبائن المدينة ───────────────────────
+{
+  // ملاحظة Codex على PR #205 (discussion_r4019158397): «كم علينا ديون؟» كانت
+  // تذهب لأداة الذمم المدينة وتعرض ما للزبائن علينا — عكس الميزانية.
+  const a = await loadAssistant();
+  const result = await a.ask(TOKENS.owner, "كم علينا ديون؟");
+  assert.equal(result.body.tool, "payables", `ذهب إلى ${result.body.tool} بدل payables:\n${result.body.reply}`);
+  assert.equal(result.body.answered, false, `ادّعى جواباً عن خصوم بلا مصدر:\n${result.body.reply}`);
+  assert.equal(a.metrics.tablesRead.size, 0, `قرأ مصادر رغم غياب خصوم الموردين:\n${[...a.metrics.tablesRead]}`);
+  assert.ok(/علينا|الموردين|غير متاح/.test(String(result.body.reply)),
+    `لم يوضح أن ديون الموردين غير متاحة:\n${result.body.reply}`);
+  assert.ok(!String(result.body.reply).includes("31,597"),
+    `عرض ذمماً مدينة جواباً عن «علينا»:\n${result.body.reply}`);
+
+  const b = await loadAssistant();
+  const customers = await b.ask(TOKENS.owner, "من أكبر الزبائن مديونية؟");
+  assert.equal(customers.body.tool, "receivables");
+  assert.equal(customers.body.answered, true);
+  ok("«علينا ديون» ترفض خصوم الموردين صراحة ولا تُرجع ذمم الزبائن المدينة");
+}
+
+// ── Codex P1: تواريخ المقارنة لا تُدمَج في الفترة الأساسية ───────────────────
+{
+  // ملاحظة Codex على PR #205 (discussion_r4019158383): «مبيعات 2026-09-15
+  // مقارنة بـ 2026-09-01» كانت تجمع الطرفين كمدى أساسي 01→15 ثم تقارن بـ01.
+  const fixtures = defaultFixtures();
+  fixtures.sales_line_items = [
+    { sale_date: "2026-09-01", bill_no: "1", bill_type: "retail", item_name: "أ", qty: 1, line_total: 100, unit_cost: 90, customer_name: "س" },
+    { sale_date: "2026-09-10", bill_no: "2", bill_type: "retail", item_name: "أ", qty: 1, line_total: 999, unit_cost: 90, customer_name: "س" },
+    { sale_date: "2026-09-15", bill_no: "3", bill_type: "retail", item_name: "أ", qty: 1, line_total: 250, unit_cost: 90, customer_name: "س" }
+  ];
+  fixtures.sales_line_items_sync_state = [{
+    source: "ameen_sales_line_items",
+    window_start: "2026-08-01",
+    window_end: "2026-09-15",
+    row_count: 3,
+    completed_at: new Date().toISOString()
+  }];
+  const a = await loadAssistant({ fixtures });
+  const result = await a.ask(TOKENS.owner, "مبيعات 2026-09-15 مقارنة بـ 2026-09-01");
+  const text = String(result.body.reply);
+  assert.equal(result.body.answered, true, `مقارنة يومين رُفضت:\n${text}`);
+  assert.ok(/250/.test(text), `لم يقرأ مبيعات 2026-09-15 وحدها كأساس:\n${text}`);
+  assert.ok(/100/.test(text), `لم يقارن بمبيعات 2026-09-01:\n${text}`);
+  assert.ok(!/999/.test(text), `أدمج المدى 01→15 فأدخل يوم الوسط:\n${text}`);
+  assert.ok(/2026-09-15/.test(text) && /2026-09-01/.test(text),
+    `لم يذكر يومي المقارنة منفصلين:\n${text}`);
+  ok("مقارنة تاريخين صريحين تفصل الأساس عن المقارنة ولا تدمجهما في مدى واحد");
 }
 
 console.log(`\nتوجيه المساعد الذكي: ${passed}/${passed} تحقق ناجح`);

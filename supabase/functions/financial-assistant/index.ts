@@ -735,7 +735,10 @@ type Period = { from: string; to: string; label: string; explicit: boolean };
 
 // استخراج الفترة من السؤال. الافتراضي «اليوم» للأسئلة اللحظية.
 function parsePeriod(question: string, fallbackDays = 0): Period {
-  const q = normalize(question);
+  // جملة المقارنة تُستثنى من الفترة الأساسية حتى لا تُدمَج تواريخ الطرفين في
+  // مدى واحد (مثال: «مبيعات 2026-09-15 مقارنة بـ 2026-09-01»). (Codex P1 —
+  // discussion_r4019158383.)
+  const q = stripComparisonClause(normalize(question));
   const today = damascusDate();
 
   // مدى ينتهي بـ«اليوم»/«أمس» قبل فرع اليوم المنفرد — وإلا «من 1/9/2026 إلى اليوم»
@@ -808,6 +811,15 @@ function parsePeriod(question: string, fallbackDays = 0): Period {
     return { from: today, to: today, label: "اليوم", explicit: false };
   }
   return { from: damascusDate(-(fallbackDays - 1)), to: today, label: `آخر ${fallbackDays} يوم`, explicit: false };
+}
+
+// يحذف جملة المقارنة من السؤال قبل جمع تواريخ الفترة الأساسية.
+function stripComparisonClause(q: string): string {
+  return q
+    .replace(/\s+(?:مقارنه|بالمقارنه)\s*(?:ب|مع|ل)?\s*.+$/, "")
+    .replace(/\s+مقابل\s+.+$/, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 // مدى صريح ينتهي بعبارة نسبية («إلى اليوم» / «إلى أمس»).
@@ -2206,13 +2218,15 @@ const TOOLS: Tool[] = [
     }
   },
 
-  // ── الذمم ─────────────────────────────────────────────────────────────────
+  // ── الذمم المدينة (ما للزبائن علينا / ما علينا من الزبائن) ────────────────
   {
     id: "receivables",
     title: "ذمم الزبائن",
     minRole: "owner",
     patterns: [
-      { re: /ذمم|ديون|دين|مديونيه|مدين|علينا|علي?هم|مستحقات/, w: 6 },
+      // «علينا» ليست هنا عمداً: تعني ما ندين به للموردين (جانب الخصوم)، لا
+      // ذمم الزبائن المدينة. (Codex P1 — discussion_r4019158397.)
+      { re: /ذمم|ديون|دين|مديونيه|مدين|علي?هم|مستحقات/, w: 6 },
       { re: /اكبر الزبائن|اكتر زبون/, w: 4 }
     ],
     async run(ctx) {
@@ -2248,6 +2262,31 @@ const TOOLS: Tool[] = [
         + `\n_المعروض أعلاه أكبر ${top.length} من ${debtors.length} حساب مدين في التقرير._`
         + freshnessNote(report.created_at);
       return { ok: true, text, sources: ["inventory_reports:ameen_customer_balances"], asOf: report.created_at };
+    }
+  },
+
+  // ── ما علينا للموردين (خصوم) — بلا مصدر قراءة حالياً ───────────────────────
+  {
+    id: "payables",
+    title: "ذمم الموردين (ما علينا)",
+    minRole: "owner",
+    patterns: [
+      // وزن أعلى من ذمم الزبائن حتى لا يفوز «ديون» وحده على سؤال «كم علينا ديون؟».
+      { re: /(?:^| )علينا(?: |$)/, w: 9 },
+      { re: /ذمم (?:ال)?مورد|ديون (?:ال)?مورد|مستحقات (?:ال)?مورد|الدائنون|ما ندين/, w: 8 }
+    ],
+    async run() {
+      // لا يوجد تقرير أرصدة موردين/خصوم في مصادر المساعد. ممنوع إرجاع ذمم
+      // الزبائن المدينة مكانها — عكس الميزانية. (Codex P1 — discussion_r4019158397.)
+      return {
+        ok: false,
+        text: "سألتَ عمّا **علينا** (ديون/ذمم للموردين أو الخصوم)، وهذا غير متاح للقراءة من المساعد حالياً.\n\n"
+          + "ما أملكه هو **ذمم الزبائن المدينة** (ما لهم علينا من الزبائن) من تقرير `ameen_customer_balances` — "
+          + "ولن أعرضها جواباً عن «علينا» لأنها الجانب المعاكس من الميزانية.\n\n"
+          + "اسأل مثلاً: `من أكبر الزبائن مديونية؟` إن أردت الذمم المدينة، "
+          + "أو راجع أرصدة الموردين من الأمين مباشرة حتى يتوفّر مصدر خصوم للمساعد.",
+        sources: []
+      };
     }
   },
 
