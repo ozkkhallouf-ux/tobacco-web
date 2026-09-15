@@ -12,8 +12,11 @@
 //   • يُحمَّل هذا الملف متزامناً في <head> قبل وسم المحمّل كي يضبط
 //     window.sentryOnLoad قبل أي تهيئة SDK.
 //   • لا يُشغَّل مسار Rollbar متى وُجد meta[name=ozk-sentry] — مراقب واحد فقط.
-//   • Session Replay يُفرَض عليه maskAllText / maskAllInputs / blockAllMedia؛
-//     beforeSend يمرّر الرسالة والأثر بنفس طبقات التنقية أدناه.
+//   • Session Replay معطّل تماماً (sample rates = 0 وإزالة تكامل Replay):
+//     maskAllText لا يحجب قيم السمات (data-customer-name وغيرها)، والتسجيل
+//     يتجاوز beforeSend — لا يُعاد تفعيله قبل تنقية سمات DOM صريحة.
+//   • تتبع الأداء مفعّل مع تنقية أوصاف الـspans وعناوينها في beforeSendTransaction.
+//   • فتات console: تُحذف arguments وأي مفتاح خارج قائمة سماح قبل الإرسال.
 //   • CSP تسمح بـ js.sentry-cdn.com وbrowser.sentry-cdn.com ومضيف ingest العائد
 //     للمشروع وworker-src blob — لا تُضاف عناوين CDN إلى ASSETS في service worker.
 //
@@ -943,18 +946,97 @@
     }
   }
 
+  // قائمة سماح لـcrumb.data: أي مفتاح آخر (ومنها arguments) يُحذَف قبل الإرسال.
+  var BREADCRUMB_DATA_ALLOW = {
+    url: true,
+    method: true,
+    status_code: true,
+    statusCode: true,
+    from: true,
+    to: true
+  };
+
+  function scrubUrlish(value) {
+    if (typeof value !== "string" || value.length === 0) return value;
+    // أوصاف fetch تكون غالباً "GET https://host/path?customer_key=…" — انزع
+    // الاستعلام/الشظية من كل عنوان مطلق (ومن المسارات بعد فراغ) قبل أي حجب نصّي.
+    var out = value.replace(/(https?:\/\/[^\s"')]+?)[?#][^\s"')]*/g, "$1");
+    out = out.replace(/(\s\/[^\s"')]*?)[?#][^\s"')]*/g, "$1");
+    if (out.charAt(0) === "/" || /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(out)) {
+      return stripUrlQuery(out);
+    }
+    return scrubTextForSentry(out);
+  }
+
+  function scrubSentryBreadcrumbData(data) {
+    if (!data || typeof data !== "object") return;
+    // Console breadcrumbs تضع كائنات العمل في arguments — احذفها دائماً.
+    delete data.arguments;
+    delete data.request_body;
+    delete data.response_body;
+    var keys = Object.keys(data);
+    for (var i = 0; i < keys.length; i += 1) {
+      var key = keys[i];
+      if (!BREADCRUMB_DATA_ALLOW[key]) {
+        delete data[key];
+        continue;
+      }
+      var val = data[key];
+      if (typeof val === "string") {
+        data[key] = (key === "url" || key === "from" || key === "to")
+          ? stripUrlQuery(val)
+          : scrubTextForSentry(val);
+      } else if (val !== null && typeof val === "object") {
+        delete data[key];
+      }
+    }
+  }
+
   function scrubSentryBreadcrumb(crumb) {
     if (!crumb) return;
     if (typeof crumb.message === "string") crumb.message = scrubTextForSentry(crumb.message);
     if (!crumb.data || typeof crumb.data !== "object") return;
-    if (typeof crumb.data.url === "string") crumb.data.url = stripUrlQuery(crumb.data.url);
-    delete crumb.data.request_body;
-    delete crumb.data.response_body;
+    scrubSentryBreadcrumbData(crumb.data);
   }
 
   function scrubSentryBreadcrumbs(breadcrumbs) {
     if (!Array.isArray(breadcrumbs)) return;
     for (var b = 0; b < breadcrumbs.length; b += 1) scrubSentryBreadcrumb(breadcrumbs[b]);
+  }
+
+  function scrubSentrySpanData(data) {
+    if (!data || typeof data !== "object") return;
+    delete data["http.query"];
+    delete data["http.fragment"];
+    delete data.query;
+    delete data.query_string;
+    var keys = Object.keys(data);
+    for (var i = 0; i < keys.length; i += 1) {
+      var key = keys[i];
+      var val = data[key];
+      if (typeof val !== "string") continue;
+      if (key === "url" || key === "http.url" || /url$/i.test(key) || key.indexOf("http.") === 0) {
+        data[key] = stripUrlQuery(val);
+      } else if (val.indexOf("?") >= 0 || val.indexOf("#") >= 0) {
+        data[key] = scrubUrlish(val);
+      }
+    }
+  }
+
+  function scrubSentrySpan(span) {
+    if (!span || typeof span !== "object") return;
+    if (typeof span.description === "string") span.description = scrubUrlish(span.description);
+    if (typeof span.op === "string") span.op = scrub(span.op);
+    scrubSentrySpanData(span.data);
+  }
+
+  function scrubSentrySpans(event) {
+    if (!event || typeof event !== "object") return;
+    if (typeof event.transaction === "string") event.transaction = scrubUrlish(event.transaction);
+    if (Array.isArray(event.spans)) {
+      for (var s = 0; s < event.spans.length; s += 1) scrubSentrySpan(event.spans[s]);
+    }
+    if (event.contexts && event.contexts.trace) scrubSentrySpan(event.contexts.trace);
   }
 
   function scrubSentryEvent(event) {
@@ -964,21 +1046,26 @@
     scrubSentryRequest(event.request);
     scrubSentryExceptions(event.exception);
     scrubSentryBreadcrumbs(event.breadcrumbs);
+    scrubSentrySpans(event);
     return event;
   }
 
-  function buildSentryReplayIntegrations(integrations) {
+  function scrubSentryTransaction(event) {
+    if (!event || typeof event !== "object") return event;
+    scrubSentryRequest(event.request);
+    scrubSentryBreadcrumbs(event.breadcrumbs);
+    scrubSentrySpans(event);
+    return event;
+  }
+
+  // Replay معطّل: أزل تكامل المحمّل الافتراضي ولا تُعِد إضافته.
+  function stripSentryReplayIntegrations(integrations) {
     var list = Array.isArray(integrations) ? integrations.slice() : [];
     var withoutReplay = [];
     for (var i = 0; i < list.length; i += 1) {
       var name = list[i] && list[i].name;
       if (name !== "Replay" && name !== "SessionReplay") withoutReplay.push(list[i]);
     }
-    withoutReplay.push(Sentry.replayIntegration({
-      maskAllText: true,
-      maskAllInputs: true,
-      blockAllMedia: true
-    }));
     return withoutReplay;
   }
 
@@ -986,26 +1073,27 @@
     var initOptions = {
       enabled: prod,
       sendDefaultPii: false,
+      // تتبع الأداء مسموح فقط مع تنقية قبل الإرسال (انظر scrubSentryTransaction).
       tracesSampleRate: 1.0,
-      replaysSessionSampleRate: 0.1,
-      replaysOnErrorSampleRate: 1.0,
+      // Session Replay متوقف حتى تنقية سمات DOM — التسجيل يتجاوز beforeSend.
+      replaysSessionSampleRate: 0,
+      replaysOnErrorSampleRate: 0,
+      integrations: stripSentryReplayIntegrations,
+      beforeBreadcrumb: function (crumb) {
+        scrubSentryBreadcrumb(crumb);
+        return crumb;
+      },
       beforeSend: function (event) {
         if (!prod) return null;
         return scrubSentryEvent(event);
       },
       beforeSendTransaction: function (event) {
         if (!prod) return null;
-        if (event && event.request && typeof event.request.url === "string") {
-          event.request.url = stripUrlQuery(event.request.url);
-        }
-        return event;
+        return scrubSentryTransaction(event);
       }
     };
     if (injected(environment)) initOptions.environment = environment;
     if (injected(release)) initOptions.release = release;
-    if (typeof Sentry.replayIntegration === "function") {
-      initOptions.integrations = buildSentryReplayIntegrations;
-    }
     return initOptions;
   }
 
@@ -1067,6 +1155,7 @@
       redactBusinessData: redactBusinessData,
       redactStack: redactStack,
       scrubSentryEvent: scrubSentryEvent,
+      scrubSentryTransaction: scrubSentryTransaction,
       sentCount: function () { return sent; },
       delivery: monitoringDeliverySnapshot
     };

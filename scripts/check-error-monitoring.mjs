@@ -180,9 +180,27 @@ console.log("\n— بوابة الإنتاج —");
       user: { email: "a@b.co", name: "Ali" },
       request: { url: "https://ozktobacco.com/app?token=SECRET", cookies: "a=1", query_string: "x=1" },
       exception: { values: [{ type: "Error", value: "password=secret123", stacktrace: { frames: [{ filename: "app.js?v=1", vars: { x: 1 } }] } }] },
-      breadcrumbs: [{ message: "فاتورة 9999", data: { url: "https://x.test/a?b=1", request_body: "nope" } }],
+      breadcrumbs: [{
+        message: "فاتورة 9999",
+        data: {
+          url: "https://x.test/a?b=1",
+          request_body: "nope",
+          arguments: [{ group: "أسعار", prices: [12] }],
+          leaked: "customer-key-xyz",
+        },
+      }],
+      spans: [{
+        op: "http.client",
+        description: "GET https://dyxbirfpxeocqffnfdeb.supabase.co/rest/v1/x?customer_key=SECRETNAME",
+        data: {
+          "http.url": "https://dyxbirfpxeocqffnfdeb.supabase.co/rest/v1/x?customer_key=SECRETNAME",
+          "http.query": "customer_key=SECRETNAME",
+        },
+      }],
     })
     : null;
+  const crumbData = scrubbed && scrubbed.breadcrumbs && scrubbed.breadcrumbs[0] && scrubbed.breadcrumbs[0].data;
+  const span0 = scrubbed && scrubbed.spans && scrubbed.spans[0];
   check("scrubSentryEvent يحجب العربية والأسرار ويمسح المستخدم والاستعلام",
     Boolean(scrubbed) &&
     scrubbed.message.includes("[نص عربي محذوف]") &&
@@ -192,8 +210,64 @@ console.log("\n— بوابة الإنتاج —");
     !("cookies" in scrubbed.request) &&
     !("vars" in scrubbed.exception.values[0].stacktrace.frames[0]) &&
     scrubbed.breadcrumbs[0].message.includes("[نص عربي محذوف]") &&
-    !("request_body" in scrubbed.breadcrumbs[0].data),
-    JSON.stringify(scrubbed).slice(0, 400));
+    crumbData &&
+    crumbData.url === "https://x.test/a" &&
+    !("request_body" in crumbData) &&
+    !("arguments" in crumbData) &&
+    !("leaked" in crumbData),
+    JSON.stringify(scrubbed).slice(0, 500));
+
+  check("scrubSentryEvent ينقّي أوصاف spans وعناوينها",
+    Boolean(span0) &&
+    span0.description === "GET https://dyxbirfpxeocqffnfdeb.supabase.co/rest/v1/x" &&
+    span0.data["http.url"] === "https://dyxbirfpxeocqffnfdeb.supabase.co/rest/v1/x" &&
+    !("http.query" in span0.data),
+    JSON.stringify(span0).slice(0, 400));
+
+  const scrubbedTx = sentryMon && typeof sentryMon.scrubSentryTransaction === "function"
+    ? sentryMon.scrubSentryTransaction({
+      request: { url: "https://ozktobacco.com/app?token=SECRET" },
+      transaction: "https://ozktobacco.com/app?customer=1",
+      spans: [{
+        description: "https://api.example/rest?eq=name.علي",
+        data: { url: "https://api.example/rest?eq=name.علي", query_string: "eq=name" },
+      }],
+    })
+    : null;
+  check("scrubSentryTransaction يمسح استعلام الطلب والـspans",
+    Boolean(scrubbedTx) &&
+    scrubbedTx.request.url === "https://ozktobacco.com/app" &&
+    scrubbedTx.transaction === "https://ozktobacco.com/app" &&
+    scrubbedTx.spans[0].description === "https://api.example/rest" &&
+    scrubbedTx.spans[0].data.url === "https://api.example/rest" &&
+    !("query_string" in scrubbedTx.spans[0].data),
+    JSON.stringify(scrubbedTx).slice(0, 400));
+
+  let capturedInit = null;
+  withSentry.context.Sentry = {
+    init(opts) { capturedInit = opts; },
+    replayIntegration() { return { name: "Replay" }; },
+  };
+  if (typeof withSentry.context.sentryOnLoad === "function") withSentry.context.sentryOnLoad();
+  const stripped = capturedInit && typeof capturedInit.integrations === "function"
+    ? capturedInit.integrations([{ name: "Replay" }, { name: "BrowserTracing" }])
+    : null;
+  check("Sentry: Replay معطّل والتنقية مربوطة",
+    Boolean(capturedInit) &&
+    capturedInit.replaysSessionSampleRate === 0 &&
+    capturedInit.replaysOnErrorSampleRate === 0 &&
+    typeof capturedInit.beforeBreadcrumb === "function" &&
+    typeof capturedInit.beforeSendTransaction === "function" &&
+    Array.isArray(stripped) &&
+    stripped.length === 1 &&
+    stripped[0].name === "BrowserTracing",
+    JSON.stringify({
+      rates: capturedInit && {
+        session: capturedInit.replaysSessionSampleRate,
+        onError: capturedInit.replaysOnErrorSampleRate,
+      },
+      stripped,
+    }));
 }
 
 // ===== 2) الحمولة المرسَلة =====
