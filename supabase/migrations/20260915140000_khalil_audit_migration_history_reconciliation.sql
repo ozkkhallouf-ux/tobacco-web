@@ -58,8 +58,9 @@
 --      unchanged by this file.
 --
 --      IMPORTANT — migration ordering: this reconciliation file is
---      timestamped 20260914120000, which is chronologically AFTER both of
---      the pending files above. Supabase CLI applies migrations in
+--      timestamped 20260915140000, which is chronologically AFTER both of
+--      the pending files above (and after 20260914120000 /
+--      20260914130000 already on main). Supabase CLI applies migrations in
 --      ascending timestamp order, so a plain `supabase db push` run after
 --      this file exists would apply BOTH pending 09-02 migrations BEFORE
 --      this file, not after it. This note does not authorize, trigger, or

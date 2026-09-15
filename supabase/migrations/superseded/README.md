@@ -45,5 +45,5 @@ timestamp إنتاجي يقابل أي محاولة محلية تقريبياً 
 
 التحقق الأخير عبر `supabase migration list`: 2026-09-02 (جدول الاستبدال أعلاه صُحِّح
 لاحقاً بتاريخ 2026-09-14 بعد تدقيق أمني وجد مطابقتين خاطئتين — انظر الملاحظة أعلاه؛
-انظر أيضاً `supabase/migrations/20260914120000_khalil_audit_migration_history_reconciliation.sql`
+انظر أيضاً `supabase/migrations/20260915140000_khalil_audit_migration_history_reconciliation.sql`
 للتوثيق الكامل، بما فيه التصحيح الدقيق لنسبة كل جدول khalil_audit_* لمصدره).
