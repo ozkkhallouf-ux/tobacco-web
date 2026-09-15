@@ -25,7 +25,7 @@ create table if not exists public.telegram_outbox (
   event_type  text not null,
   message     text not null,
   dedupe_key  text,
-  status      text not null default 'pending' check (status in ('pending','sent','failed')),
+  status      text not null default 'pending' check (status in ('pending','dispatched','sent','failed')),
   attempts    int  not null default 0,
   created_at  timestamptz not null default now(),
   sent_at     timestamptz,
@@ -34,10 +34,19 @@ create table if not exists public.telegram_outbox (
   -- نتيجة — والدالة غير متزامنة، فـ"sent" كانت تعني "سُلّم إلى pg_net" لا
   -- "تيليغرام استلمه". قياس على الإنتاج في نافذة 6 ساعات: 241 رسالة معلَّمة
   -- sent مقابل 230 رداً ناجحاً من تيليغرام — 11 بلا رد نجاح.
-  -- هذا العمود وحده يجعل الربط ممكناً؛ ولا يغيّر أي سلوك.
+  -- هذا العمود وحده يجعل الربط ممكناً؛ ولا يغيّر أي سلوك (كان ذلك في المرحلة أ).
+  --
+  -- المرحلة ب (2026-09-14، Codex P1 على PR #220 — راجع تعليق dispatch_telegram_outbox
+  -- أدناه): status='dispatched' حالة انتقالية جديدة بين الإرسال غير المتزامن
+  -- وتأكيد التسليم الحقيقي. القيد أُعيد تعريفه أدناه ليقبلها.
   net_request_id bigint
 );
 alter table public.telegram_outbox add column if not exists net_request_id bigint;
+-- المرحلة ب: توسيع قيد CHECK ليقبل 'dispatched' — الجدول موجود أصلاً في
+-- الإنتاج، فـ"create table if not exists" وحده لا يكفي لتحديث قيده.
+alter table public.telegram_outbox drop constraint if exists telegram_outbox_status_check;
+alter table public.telegram_outbox add constraint telegram_outbox_status_check
+  check (status in ('pending','dispatched','sent','failed'));
 create index if not exists telegram_outbox_pending_idx on public.telegram_outbox (status, created_at);
 create index if not exists telegram_outbox_dedupe_idx  on public.telegram_outbox (dedupe_key, created_at desc) where dedupe_key is not null;
 create index if not exists telegram_outbox_net_request_idx on public.telegram_outbox (net_request_id) where net_request_id is not null;
@@ -835,18 +844,99 @@ revoke execute on function public.notify_telegram(text, text, text, int, jsonb) 
 revoke execute on function public.notify_telegram(text, text, text, int, jsonb) from anon;
 grant  execute on function public.notify_telegram(text, text, text, int, jsonb) to authenticated, service_role;
 
+-- المرحلة ب (2026-09-14، رد على ملاحظة Codex P1 على PR #220):
+-- المرحلة أ (أعلاه في تعليق net_request_id) رصدت المشكلة فقط: status='sent'
+-- كانت تُكتب فور استدعاء net.http_post غير المتزامن، بلا أي تحقق من ردّ
+-- تيليغرام الفعلي — فرسالة فشل تسليمها الحقيقي كانت تُسجَّل "مُرسَلة" ولا
+-- تُعاد أبداً. القياس وقتها: 241 مُعلَّمة sent مقابل 230 نجاح فعلي (11 ضائعة).
+--
+-- الحل هنا: حلقتا معالجة بدل حلقة واحدة.
+--   ١) حلقة المطابقة (reconcile): تمرّ على الصفوف 'dispatched' من الدورة
+--      السابقة، وتصنّف كل صف حسب ردّه الحقيقي في net._http_response بنفس
+--      منطق تصنيف telegram_delivery_audit تماماً (استعمال private.safe_jsonb
+--      لا cast مباشر): نجاح 2xx وok=true → 'sent'؛ لا ردّ بعد (لم تمرّ
+--      net._http_response بعد) → تبقى 'dispatched' لدورة تالية؛ أي فشل آخر
+--      (لا ردّ إطلاقاً/network_error/http_error/ok=false/unparsed) → 'pending'
+--      لإعادة المحاولة إن كانت attempts < الحد الأقصى، وإلا 'failed' نهائياً.
+--   ٢) حلقة الإرسال (dispatch): كما كانت تماماً، فقط status الناتج بعد
+--      net.http_post صار 'dispatched' لا 'sent' — لأن الإرسال غير متزامن ولا
+--      يثبت التسليم بذاته.
+-- الحد الأقصى للمحاولات 5 — بعده تتوقف إعادة المحاولة الفورية (يبقى 'failed'
+-- ظاهراً في telegram_delivery_audit)، لكنه ليس نهائياً: انظر خطوة الإحياء
+-- أدناه (Codex P1 الثالث، PR #220).
 create or replace function public.dispatch_telegram_outbox()
 returns void
 language plpgsql security definer
 set search_path to 'public', 'net', 'vault', 'extensions'
 as $$
 declare
-  r    record;
-  tok  text;
-  chat bigint;
-  body jsonb;
-  rid  bigint;
+  r             record;
+  tok           text;
+  chat          bigint;
+  body          jsonb;
+  rid           bigint;
+  v_delivery    text;
+  max_attempts  constant int := 5;
 begin
+  -- ٠) إحياء الفاشل نهائياً بعد تهدئة ساعة (Codex P1 الثالث، PR #220): عطل
+  --    تيليغرام/pg_net عابر أطول من دورة المحاولات الخمس (تُستهلَك خلال
+  --    دقائق لأن dispatch_telegram_outbox يعمل كل دقيقة) لا يجوز أن يُسقط
+  --    تنبيهاً حرجاً للأبد فقط لأن الخدمة كانت متعطلة وقت الاستنفاد —
+  --    وخصوصاً أن الجهة المُنتِجة (مثل monitor_project_tasks) تعتبر تنبيهها
+  --    "مُرسَلاً" فور قبول الإدراج في الطابور ولا تعيد المحاولة أبداً بنفسها.
+  --    تُعاد كل صف 'failed' إلى 'pending' بمحاولات صفرية بعد ساعة من آخر
+  --    محاولة، فتُمنح دورة خمس محاولات كاملة أخرى إن كانت الخدمة عادت. الحد
+  --    الطبيعي الوحيد المتبقي هو تنظيف الصفوف الأقدم من 14 يوماً.
+  update public.telegram_outbox
+  set status = 'pending', attempts = 0
+  where status = 'failed'
+    and sent_at < now() - interval '1 hour';
+
+  -- ١) حلقة المطابقة: تصنيف الصفوف المُرسَلة سابقاً حسب ردّها الحقيقي
+  for r in
+    select o.id, o.attempts, o.sent_at, resp.status_code, resp.timed_out, resp.error_msg, resp.content
+    from public.telegram_outbox o
+    left join net._http_response resp on resp.id = o.net_request_id
+    where o.status = 'dispatched'
+  loop
+    v_delivery := case
+      when r.status_code is null and r.error_msg is null and not coalesce(r.timed_out, false)
+        then case
+          -- لم يصل ردّ pg_net بعد وما زال ضمن الهامش الطبيعي — انتظر الدورة التالية
+          when r.sent_at > now() - interval '15 minutes' then 'no_response'
+          -- تجاوز الهامش بلا ردّ إطلاقاً (تعطّل pg_net أو انتهاء نافذة استبقاء
+          -- رده الست ساعات): عامله كخطأ شبكة كي لا يبقى معلَّقاً بلا حدّ زمني
+          else 'network_error'
+        end
+      when r.timed_out or r.error_msg is not null
+        then 'network_error'
+      when r.status_code between 200 and 299
+        then case
+          -- Codex P1 الرابع (PR #220): ok=true وحدها لا تثبت أن تيليغرام
+          -- استلم الرسالة فعلاً — نفس شكل الجسم الذي يصنّفه
+          -- telegram_delivery_audit() 'unparsed' لغياب result.message_id
+          -- يجب أن يُعامَل هنا معاملة مطابقة تماماً، لا 'sent' نهائياً.
+          when private.safe_jsonb(r.content) is null then 'unparsed'
+          when (private.safe_jsonb(r.content) ->> 'ok') = 'true'
+           and jsonb_exists(private.safe_jsonb(r.content) -> 'result', 'message_id') then 'ok_true'
+          when (private.safe_jsonb(r.content) ->> 'ok') = 'false' then 'ok_false'
+          else 'unparsed' -- ok=true بلا message_id، أو شكل جسم آخر غير متوقع
+        end
+      else 'http_error'
+    end;
+
+    if v_delivery = 'no_response' then
+      continue; -- يبقى 'dispatched'، لا تغيير
+    elsif v_delivery = 'ok_true' then
+      update public.telegram_outbox set status = 'sent', sent_at = now() where id = r.id;
+    elsif r.attempts < max_attempts then
+      update public.telegram_outbox set status = 'pending' where id = r.id; -- إعادة محاولة
+    else
+      update public.telegram_outbox set status = 'failed' where id = r.id; -- استنفدت المحاولات الآن (تُحيا لاحقاً)
+    end if;
+  end loop;
+
+  -- ٢) حلقة الإرسال: كما كانت تماماً، فقط الحالة الناتجة 'dispatched' لا 'sent'
   select decrypted_secret into tok
   from vault.decrypted_secrets where name = 'telegram_bot_token' limit 1;
   if tok is null then return; end if;
@@ -865,20 +955,25 @@ begin
     if r.reply_markup is not null then
       body := body || jsonb_build_object('reply_markup', r.reply_markup);
     end if;
-    -- المرحلة أ (رصد فقط): نلتقط request_id بدل رميه بـperform. السلوك بعده
-    -- لم يتغيّر بحرف — status='sent' كما كان تماماً. الغرض الوحيد هو أن يصبح
-    -- كل صف قابلاً للربط بردّه الحقيقي في net._http_response.
     rid := net.http_post(
       url     := 'https://api.telegram.org/bot' || tok || '/sendMessage',
       headers := jsonb_build_object('Content-Type', 'application/json'),
       body    := body
     );
     update public.telegram_outbox
-    set status = 'sent', sent_at = now(), attempts = attempts + 1, net_request_id = rid
+    set status = 'dispatched', sent_at = now(), attempts = attempts + 1, net_request_id = rid
     where id = r.id;
   end loop;
 end;
 $$;
+
+-- Codex P1 (PR #220، بعد commit 1d00f10): الدالة SECURITY DEFINER ولم تكن
+-- محجوبة عن PUBLIC — أي مستدعي PostgREST مجهول قادر على استدعاء
+-- /rest/v1/rpc/dispatch_telegram_outbox مباشرة، فيستهلك محاولات إعادة
+-- الإرسال الخمس عمداً ويدفع تنبيهات حرجة إلى فترة تهدئة failed لساعة كاملة.
+-- الحجب يقتصر على pg_cron (الذي يستدعيها كـ service/superuser بمعزل عن
+-- هذه الأدوار) دون أن يمسّ تشغيلها المجدول.
+revoke execute on function public.dispatch_telegram_outbox() from public, anon, authenticated;
 
 -- طلب واتساب جديد: أزرار تجهيز/رفض مباشرة على الإشعار
 -- (زر «✅ تجهيز» → whatsapp_orders.status='processing'، «❌ رفض» → 'rejected'،
