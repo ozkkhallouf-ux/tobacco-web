@@ -46,6 +46,29 @@ assert(edge.includes("Never return the synthetic Auth email") && !/return reply\
 assert(edge.includes("smart_inventory_auth_preflight") && edge.includes("smart_inventory_auth_record"), "Login rate limiting contract missing.");
 assert(edge.includes("smart_inventory_revoke_user_sessions"), "Reset/disable must revoke existing sessions.");
 assert(edge.includes("smart_inventory_set_counter_auth_role"), "New and re-enabled counter accounts must receive the least-privilege database role.");
+assert(sql.includes("smart_inventory_set_counter_auth_role"), "smart-inventory.sql must define smart_inventory_set_counter_auth_role for feature bootstrap.");
+// After set_counter_auth_role, counter JWTs use DB role anon — bootstrap must
+// grant the six counting RPCs to anon (not owner RPCs). Codex P1 on PR #228.
+const counterRpcGrant = section(
+  sql,
+  "grant execute on function public.smart_inventory_available_warehouses(date)",
+  "grant execute on function public.smart_inventory_owner_dashboard(date)"
+);
+assert(/smart_inventory_available_warehouses\(date\)/.test(counterRpcGrant)
+  && /smart_inventory_start_or_join\(text\)/.test(counterRpcGrant)
+  && /smart_inventory_counter_session\(uuid\)/.test(counterRpcGrant)
+  && /smart_inventory_claim_item\(uuid\)/.test(counterRpcGrant)
+  && /smart_inventory_save_item\(uuid,uuid,text,numeric,numeric,numeric,bigint\)/.test(counterRpcGrant)
+  && /smart_inventory_complete_session\(uuid\)/.test(counterRpcGrant),
+  "smart-inventory.sql must list all six counter-facing RPCs in the anon grant block.");
+assert(/\bto\s+anon\s*,\s*authenticated\s*;/i.test(counterRpcGrant) || /\bto\s+anon\b/i.test(counterRpcGrant),
+  "smart-inventory.sql must GRANT the six counter RPCs to anon (counter JWT role).");
+assert(!/smart_inventory_owner_dashboard/.test(counterRpcGrant)
+  && !/smart_inventory_owner_report/.test(counterRpcGrant)
+  && !/smart_inventory_owner_open_recount/.test(counterRpcGrant)
+  && !/smart_inventory_owner_reopen_session/.test(counterRpcGrant)
+  && !/smart_inventory_owner_correct_item/.test(counterRpcGrant),
+  "Owner RPCs must not be included in the anon counter grant block.");
 for (const contract of [
   "set role = 'anon'", "deny_inventory_counter_access", "as restrictive", "to anon",
   "smart_inventory_set_counter_auth_role", "delete from auth.sessions"

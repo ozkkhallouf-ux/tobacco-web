@@ -91,18 +91,37 @@ begin
       v_with_check;
   end if;
 
-  -- 3. تأكد أن SELECT policy (owners can read) لا تزال موجودة وسليمة
-  select count(*) into v_count
-    from pg_policies
-   where schemaname = 'public'
-     and tablename  = 'khalil_audit_sync_heartbeat'
-     and policyname = 'owners can read khalil audit heartbeat'
-     and cmd        = 'SELECT';
+  -- 3. SELECT policy (owners can read) depends on public.is_staff().
+  -- That helper is outside active migration history; 20260830141802 defers
+  -- the policy on fresh replay when is_staff() is absent (Codex P1). Do not
+  -- abort clean replay for that deferred case. When the helper exists,
+  -- require the policy (recreate if missing so initplan fix stays complete).
+  if to_regprocedure('public.is_staff()') is null then
+    raise notice
+      'khalil_audit_sync_heartbeat: public.is_staff() absent — SELECT policy check skipped (deferred by audit bootstrap; RLS deny-by-default retained).';
+  else
+    select count(*) into v_count
+      from pg_policies
+     where schemaname = 'public'
+       and tablename  = 'khalil_audit_sync_heartbeat'
+       and policyname = 'owners can read khalil audit heartbeat'
+       and cmd        = 'SELECT';
 
-  if v_count <> 1 then
-    raise exception
-      'khalil_audit_sync_heartbeat: SELECT policy اختفت — عدد=%',
-      v_count;
+    if v_count = 0 then
+      execute $p$
+        create policy "owners can read khalil audit heartbeat"
+          on public.khalil_audit_sync_heartbeat for select
+          to authenticated
+          using (public.is_staff())
+      $p$;
+      v_count := 1;
+    end if;
+
+    if v_count <> 1 then
+      raise exception
+        'khalil_audit_sync_heartbeat: SELECT policy اختفت — عدد=%',
+        v_count;
+    end if;
   end if;
 
 end $$;

@@ -51,6 +51,15 @@ static-only — تطابق نص SQL بالـregex ولا تنفّذ شيئاً �
 
 الكود المرجعي في المستودع، الإصدارات المنشورة في Supabase/GitHub، ثم دليل endpoint أو الجهاز الفعلي. سجل outbox وحده لا يثبت ظهور إشعار على شاشة iPhone.
 
+## أساس تيليغرام في سلسلة المهاجرات النشطة (PR #228، 2026-09-15)
+
+`supabase/telegram-notifications.sql` يبقى المرجع التشغيلي الكامل (خارج المهاجرات).
+لإعادة تشغيل نظيفة لسلسلة `supabase/migrations/` دون تشغيل ذلك الملف يدوياً، يوفّر
+`20260830141802_khalil_audit_log.sql` على مسار القاعدة الفارغة فقط أساس الإدراج:
+`telegram_outbox` + `notify_telegram(text,text,text,int)` (+ `reply_markup`) مستخرجاً
+من المرجع — بلا dispatch/cron/triggers المجالات. الإنتاج يتخطّى الملف لأن الإصدار
+مسجَّل أصلاً.
+
 ## نطاق الملفات
 
 `src/web-push.js`, `public/service-worker.js`, `public/manifest.webmanifest`, `supabase/functions/web-push/`, `supabase/functions/telegram-webhook/`, `supabase/*notifications.sql`, `.github/workflows/`.
