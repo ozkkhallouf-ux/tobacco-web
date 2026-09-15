@@ -1871,4 +1871,73 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   ok("CASE 4: بلا فترة صريحة ⇒ السلوك الحالي بلا تغيير");
 }
 
+// ── مقارنة «اليوم × أمس» تختار اليوم أولاً ─────────────────────────────────
+{
+  // ملاحظة Codex على PR #205: parsePeriod كان يطابق «امس» قبل «اليوم»، فسؤال
+  // «مبيعات اليوم مقارنة بأمس» يصبح أمس مقابل ما قبله ولا يقرأ مبيعات اليوم.
+  const today = new Date(Date.now() + 180 * 60_000).toISOString().slice(0, 10);
+  const yesterday = new Date(Date.now() + 180 * 60_000 - 86_400_000).toISOString().slice(0, 10);
+  const dayBefore = new Date(Date.now() + 180 * 60_000 - 2 * 86_400_000).toISOString().slice(0, 10);
+  const fixtures = defaultFixtures();
+  fixtures.sales_line_items = [
+    { sale_date: today, bill_no: "1", bill_type: "retail", item_name: "أ", qty: 1, line_total: 200, net_profit: 20, unit_cost: 180, customer_name: "س" },
+    { sale_date: yesterday, bill_no: "2", bill_type: "retail", item_name: "أ", qty: 1, line_total: 80, net_profit: 8, unit_cost: 72, customer_name: "س" },
+    { sale_date: dayBefore, bill_no: "3", bill_type: "retail", item_name: "أ", qty: 1, line_total: 50, net_profit: 5, unit_cost: 45, customer_name: "س" }
+  ];
+  const a = await loadAssistant({ fixtures });
+  const result = await a.ask(TOKENS.owner, "مبيعات اليوم مقارنة بامس");
+  const text = String(result.body.reply);
+  assert.ok(text.includes("200 USD"), `لم يقرأ مبيعات اليوم كفترة أساسية:\n${text}`);
+  assert.ok(/مقارنة بـ/.test(text), `لم يدخل فرع المقارنة:\n${text}`);
+  assert.ok(text.includes("80") || /\+120 USD/.test(text), `لم يقارن بالأمس (80) بل بما قبله:\n${text}`);
+  assert.ok(!text.includes("50 USD") || /مقارنة/.test(text), "سرّب يوم ما قبل الأمس كفترة أساسية");
+  ok("مقارنة «اليوم × أمس» تختار اليوم أولاً ثم تقارن بالأمس");
+}
+
+// ── المناقلات: أسماء المستودعات + ترشيح الفترة ──────────────────────────────
+{
+  // ملاحظة Codex على PR #205: الحقول الحقيقية source/destination، والأداة كانت
+  // تقرأ from/to ⇒ «? → ?». كذلك run() بلا ctx يعيد لقطة ~60 يوماً لسؤال اليوم.
+  const today = new Date(Date.now() + 180 * 60_000).toISOString().slice(0, 10);
+  const old = new Date(Date.now() + 180 * 60_000 - 20 * 86_400_000).toISOString().slice(0, 10);
+  const fromDate = new Date(Date.now() + 180 * 60_000 - 60 * 86_400_000).toISOString().slice(0, 10);
+  const fixtures = defaultFixtures();
+  fixtures.ameen_warehouse_transfer_reports = [{
+    report_date: today,
+    created_at: new Date().toISOString(),
+    summary: { source: "ameen_warehouse_transfers", periodDays: 60, fromDate, transferCount: 2 },
+    items: [
+      {
+        date: today,
+        sourceWarehouseName: "مستودع المركز",
+        destinationWarehouseName: "مستودع الفرع",
+        items: [{ itemName: "ماستر", qty: 10 }]
+      },
+      {
+        date: old,
+        sourceWarehouseName: "مستودع قديم",
+        destinationWarehouseName: "مستودع أرشيف",
+        items: [{ itemName: "قديم", qty: 1 }]
+      }
+    ]
+  }];
+
+  const a = await loadAssistant({ fixtures });
+  const todayAsk = await a.ask(TOKENS.owner, "مناقلات اليوم");
+  const todayText = String(todayAsk.body.reply);
+  assert.equal(todayAsk.body.tool, "transfers");
+  assert.ok(todayText.includes("مستودع المركز"), `لم يعرض اسم المصدر الحقيقي:\n${todayText}`);
+  assert.ok(todayText.includes("مستودع الفرع"), `لم يعرض اسم الوجهة الحقيقي:\n${todayText}`);
+  assert.ok(!todayText.includes("? → ?"), `عرض ? بدل أسماء المنتِج:\n${todayText}`);
+  assert.ok(!todayText.includes("مستودع قديم"), `خلط مناقلة قديمة في جواب اليوم:\n${todayText}`);
+  assert.ok(/1 مناقلة/.test(todayText), `لم يعزل مناقلة اليوم وحدها:\n${todayText}`);
+
+  const b = await loadAssistant({ fixtures });
+  const bare = await b.ask(TOKENS.owner, "ما التحويلات بين المستودعات؟");
+  const bareText = String(bare.body.reply);
+  assert.ok(bareText.includes("مستودع قديم"), `سؤال بلا فترة صريحة يجب أن يعرض نافذة اللقطة:\n${bareText}`);
+  assert.ok(/2 مناقلة/.test(bareText), `سؤال بلا فترة لم يعدّ كل عناصر اللقطة:\n${bareText}`);
+  ok("المناقلات تعرض أسماء المنتِج وترشّح الفترة الصريحة");
+}
+
 console.log(`\nتوجيه المساعد الذكي: ${passed}/${passed} تحقق ناجح`);

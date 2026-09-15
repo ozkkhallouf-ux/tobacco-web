@@ -512,6 +512,12 @@ type Period = { from: string; to: string; label: string; explicit: boolean };
 function parsePeriod(question: string, fallbackDays = 0): Period {
   const q = normalize(question);
   const today = damascusDate();
+  // «اليوم» قبل «أمس» عمداً: سؤال «مبيعات اليوم مقارنة بأمس» يحوي العبارتين،
+  // والفترة المقصودة هي اليوم — وأمس يأتي من previousPeriod في فرع المقارنة.
+  // نفس نمط «هذا الشهر» قبل «الشهر الماضي» أدناه. (رصدها Codex على PR #205.)
+  if (/(?:^| )اليوم(?: |$)|النهارده|هلق|الان/.test(q)) {
+    return { from: today, to: today, label: "اليوم", explicit: true };
+  }
   if (/(?:^| )امس(?: |$)|البارحه|مبارح/.test(q)) {
     const day = damascusDate(-1);
     return { from: day, to: day, label: "أمس", explicit: true };
@@ -560,8 +566,8 @@ function parsePeriod(question: string, fallbackDays = 0): Period {
     const days = Math.min(365, Math.max(1, Number(explicitDays[1])));
     return { from: damascusDate(-(days - 1)), to: today, label: `آخر ${days} يوم`, explicit: true };
   }
-  if (/(?:^| )اليوم(?: |$)|النهارده|هلق|الان/.test(q) || fallbackDays === 0) {
-    return { from: today, to: today, label: "اليوم", explicit: /(?:^| )اليوم(?: |$)|النهارده|هلق|الان/.test(q) };
+  if (fallbackDays === 0) {
+    return { from: today, to: today, label: "اليوم", explicit: false };
   }
   return { from: damascusDate(-(fallbackDays - 1)), to: today, label: `آخر ${fallbackDays} يوم`, explicit: false };
 }
@@ -2101,7 +2107,11 @@ const TOOLS: Tool[] = [
     // الوزن أعلى من أداة المستودعات (7) عمداً: «التحويلات بين المستودعات» يحمل
     // كلمة «مستودعات» أيضاً، والنية فيه المناقلات لا قائمة المستودعات.
     patterns: [{ re: /مناقل|تحويلات? بين|نقل بين|نقل بضاعه|تحويلات المستودع/, w: 9 }],
-    async run() {
+    async run(ctx) {
+      // اللقطة أحدث رفع من المنتِج (افتراضياً ~60 يوماً). الأسئلة بفترة صريحة
+      // («مناقلات اليوم») كانت تتجاهل ctx.period وتعيد كل عناصر اللقطة —
+      // فتختلط مناقلات قديمة بعدّ اليوم. أسماء المستودعات من المنتِج هي
+      // sourceWarehouseName / destinationWarehouseName لا from/to. (Codex #205.)
       const report = await latestReport("ameen_warehouse_transfer_reports");
       const items = Array.isArray(report?.items) ? report.items : [];
       if (!report || !items.length) {
@@ -2111,15 +2121,50 @@ const TOOLS: Tool[] = [
           sources: ["ameen_warehouse_transfer_reports"]
         };
       }
+      const s = (report.summary ?? {}) as Record<string, unknown>;
+      const inPeriod = (row: Record<string, unknown>) => {
+        if (!ctx.period.explicit) return true;
+        const date = String(row.date ?? "").slice(0, 10);
+        return date >= ctx.period.from && date <= ctx.period.to;
+      };
+      const filtered = items.filter(inPeriod);
+      const coverage = reportCoverage(ctx.period, s, report.report_date, false, "تقرير المناقلات");
+      const scope = ctx.period.explicit
+        ? `${ctx.period.label} (${ctx.period.from} → ${ctx.period.to})`
+        : `نافذة ${String(s.fromDate ?? "?")} → ${report.report_date}`;
+
+      if (ctx.period.explicit && !filtered.length) {
+        if (!coverage.covered) {
+          return {
+            ok: false,
+            text: `لا أستطيع تأكيد مناقلات ${scope}: الفترة تتجاوز نافذة اللقطة المتاحة`
+              + ` (${String(s.fromDate ?? "?")} → ${report.report_date}).`
+              + coverage.note,
+            sources: ["ameen_warehouse_transfer_reports"],
+            asOf: report.created_at
+          };
+        }
+        return {
+          ok: true,
+          text: `**مناقلات المستودعات — ${scope}**\nلا توجد أي مناقلة مسجّلة في هذه الفترة.`
+            + coverage.note
+            + freshnessNote(report.created_at),
+          sources: ["ameen_warehouse_transfer_reports"],
+          asOf: report.created_at
+        };
+      }
+
       return {
         ok: true,
-        text: `**مناقلات المستودعات — ${report.report_date}** (${items.length} مناقلة)\n`
-          + items
+        text: `**مناقلات المستودعات — ${scope}** (${filtered.length} مناقلة)\n`
+          + filtered
             .slice(0, 15)
             .map((row: Record<string, unknown>) =>
-              `- ${String(row.date ?? "")}: ${String(row.fromWarehouseName ?? "?")} → ${String(row.toWarehouseName ?? "?")}`
+              `- ${String(row.date ?? "")}: ${String(row.sourceWarehouseName ?? "?")} → ${String(row.destinationWarehouseName ?? "?")}`
               + ` (${Array.isArray(row.items) ? row.items.length : 0} صنف)`)
             .join("\n")
+          + (filtered.length > 15 ? `\n… و${filtered.length - 15} مناقلة أخرى` : "")
+          + coverage.note
           + freshnessNote(report.created_at),
         sources: ["ameen_warehouse_transfer_reports"],
         asOf: report.created_at
