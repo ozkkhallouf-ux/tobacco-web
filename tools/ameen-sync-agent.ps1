@@ -279,6 +279,7 @@ function Build-InventoryReport($Rows, $LowThreshold) {
     $items += [ordered]@{
       key = $key
       name = $name
+      itemGuid = if ($row.PSObject.Properties.Name -contains "item_guid" -and $row.item_guid) { ([string]$row.item_guid).Trim().ToLowerInvariant() } else { $null }
       groupName = $groupName
       stockQty = [math]::Round($qty, 3)
       stockQtyNet = [math]::Round($qtyNet, 3)
