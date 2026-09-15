@@ -705,55 +705,91 @@
       });
     }
 
-    // ── الأرضية النسبية للتراجع: ربع وسيط مبيعات الفترة السابقة ──────────────
-    // الموردون خارج العيّنة: حجم مشترياتهم لا يحرّك وسيط الزبائن ولا يملأ مقاعد VIP.
-    const rankingDrafts = drafts.filter((draft) => !draft.isSupplier);
-    const positivePrevious = rankingDrafts
-      .filter((draft) => draft.usableSales && draft.previous.netSales > 0)
-      .map((draft) => draft.previous.netSales);
-    const medianPrevious = median(positivePrevious) ?? 0;
-    const declineFloor = Math.max(1, round(medianPrevious * CONFIG.declineMinPreviousShareOfMedian, 3));
-
-    // ── ترتيب VIP النسبي ─────────────────────────────────────────────────────
-    // المرشحون: من لديه صافي مبيعات موجب في النافذة (60 يوماً) وعدد فواتير كافٍ.
-    const vipCandidates = rankingDrafts.filter(
-      (draft) => draft.usableSales && draft.combined.netSales > 0 && draft.combined.invoiceCount >= CONFIG.vipMinInvoices
-    );
-    const vipPopulation = vipCandidates.length;
-    const vipRankingReliable = vipPopulation >= CONFIG.vipMinPopulation;
-
-    const valueSeries = vipCandidates.map((draft) => draft.combined.netSales).sort((a, b) => a - b);
-    const frequencySeries = vipCandidates.map((draft) => draft.combined.invoiceCount).sort((a, b) => a - b);
-    const continuitySeries = vipCandidates
-      .map((draft) => new Set(draft.combined.purchaseDays.map((day) => Math.floor(day / 7))).size)
-      .sort((a, b) => a - b);
-
-    const compositeByRecord = new Map();
-    for (const draft of vipCandidates) {
-      const activeWeeks = new Set(draft.combined.purchaseDays.map((day) => Math.floor(day / 7))).size;
-      const valueScore = percentileRank(valueSeries, draft.combined.netSales);
-      const frequencyScore = percentileRank(frequencySeries, draft.combined.invoiceCount);
-      const continuityScore = percentileRank(continuitySeries, activeWeeks);
-      const composite = round(
-        CONFIG.vipWeights.value * valueScore
-        + CONFIG.vipWeights.frequency * frequencyScore
-        + CONFIG.vipWeights.continuity * continuityScore,
-        2
+    // ── ترتيب وأرضية التراجع لكل عملة على حدة ───────────────────────────────
+    // الموردون خارج العيّنة. عملتان مختلفتان لا تدخلان وسيطاً واحداً ولا ترتيب VIP
+    // واحداً: رقم ليرة لا يُقارَن برقم دولار.
+    function rankCohort(cohortDrafts) {
+      const positivePrevious = cohortDrafts
+        .filter((draft) => draft.usableSales && draft.previous.netSales > 0)
+        .map((draft) => draft.previous.netSales);
+      const medianPrevious = median(positivePrevious) ?? 0;
+      const declineFloor = Math.max(1, round(medianPrevious * CONFIG.declineMinPreviousShareOfMedian, 3));
+      const vipCandidates = cohortDrafts.filter(
+        (draft) => draft.usableSales && draft.combined.netSales > 0 && draft.combined.invoiceCount >= CONFIG.vipMinInvoices
       );
-      compositeByRecord.set(draft.record.recordKey, { composite, valueScore, frequencyScore, continuityScore, activeWeeks });
+      const vipPopulation = vipCandidates.length;
+      const vipRankingReliable = vipPopulation >= CONFIG.vipMinPopulation;
+
+      const valueSeries = vipCandidates.map((draft) => draft.combined.netSales).sort((a, b) => a - b);
+      const frequencySeries = vipCandidates.map((draft) => draft.combined.invoiceCount).sort((a, b) => a - b);
+      const continuitySeries = vipCandidates
+        .map((draft) => new Set(draft.combined.purchaseDays.map((day) => Math.floor(day / 7))).size)
+        .sort((a, b) => a - b);
+
+      const compositeByRecord = new Map();
+      for (const draft of vipCandidates) {
+        const activeWeeks = new Set(draft.combined.purchaseDays.map((day) => Math.floor(day / 7))).size;
+        const valueScore = percentileRank(valueSeries, draft.combined.netSales);
+        const frequencyScore = percentileRank(frequencySeries, draft.combined.invoiceCount);
+        const continuityScore = percentileRank(continuitySeries, activeWeeks);
+        const composite = round(
+          CONFIG.vipWeights.value * valueScore
+          + CONFIG.vipWeights.frequency * frequencyScore
+          + CONFIG.vipWeights.continuity * continuityScore,
+          2
+        );
+        compositeByRecord.set(draft.record.recordKey, { composite, valueScore, frequencyScore, continuityScore, activeWeeks });
+      }
+
+      const ranked = vipCandidates.slice().sort((a, b) => {
+        const scoreA = compositeByRecord.get(a.record.recordKey).composite;
+        const scoreB = compositeByRecord.get(b.record.recordKey).composite;
+        return scoreB - scoreA
+          || b.combined.netSales - a.combined.netSales
+          || a.record.recordKey.localeCompare(b.record.recordKey);
+      });
+      const vipCutoff = vipRankingReliable ? Math.max(1, Math.ceil(CONFIG.vipTopShare * vipPopulation)) : 0;
+      return {
+        declineFloor,
+        vipPopulation,
+        vipRankingReliable,
+        compositeByRecord,
+        vipKeys: new Set(ranked.slice(0, vipCutoff).map((draft) => draft.record.recordKey)),
+        rankByRecord: new Map(ranked.map((draft, index) => [draft.record.recordKey, index + 1]))
+      };
     }
 
-    // ترتيب حتمي عند التعادل: الدرجة ثم صافي المبيعات ثم مفتاح السجل.
-    const ranked = vipCandidates.slice().sort((a, b) => {
-      const scoreA = compositeByRecord.get(a.record.recordKey).composite;
-      const scoreB = compositeByRecord.get(b.record.recordKey).composite;
-      return scoreB - scoreA
-        || b.combined.netSales - a.combined.netSales
-        || a.record.recordKey.localeCompare(b.record.recordKey);
-    });
-    const vipCutoff = vipRankingReliable ? Math.max(1, Math.ceil(CONFIG.vipTopShare * vipPopulation)) : 0;
-    const vipKeys = new Set(ranked.slice(0, vipCutoff).map((draft) => draft.record.recordKey));
-    const rankByRecord = new Map(ranked.map((draft, index) => [draft.record.recordKey, index + 1]));
+    const rankingDrafts = drafts.filter((draft) => !draft.isSupplier && !draft.currencyMixed);
+    const draftsByCurrency = new Map();
+    for (const draft of rankingDrafts) {
+      const code = draft.currency || CONFIG.baseCurrency;
+      const list = draftsByCurrency.get(code);
+      if (list) list.push(draft);
+      else draftsByCurrency.set(code, [draft]);
+    }
+
+    const compositeByRecord = new Map();
+    const vipKeys = new Set();
+    const rankByRecord = new Map();
+    const declineFloorByRecord = new Map();
+    const rankingReliableByRecord = new Map();
+    const rankedByCurrency = new Map();
+    for (const [code, cohort] of draftsByCurrency) {
+      const rankedCohort = rankCohort(cohort);
+      rankedByCurrency.set(code, rankedCohort);
+      for (const [key, value] of rankedCohort.compositeByRecord) compositeByRecord.set(key, value);
+      for (const key of rankedCohort.vipKeys) vipKeys.add(key);
+      for (const [key, rank] of rankedCohort.rankByRecord) rankByRecord.set(key, rank);
+      for (const draft of cohort) {
+        declineFloorByRecord.set(draft.record.recordKey, rankedCohort.declineFloor);
+        rankingReliableByRecord.set(draft.record.recordKey, rankedCohort.vipRankingReliable);
+      }
+    }
+
+    const baseCohort = rankedByCurrency.get(CONFIG.baseCurrency) || rankCohort([]);
+    const vipPopulation = baseCohort.vipPopulation;
+    const vipRankingReliable = baseCohort.vipRankingReliable;
+    const declineFloor = baseCohort.declineFloor;
 
     // ── التصنيف النهائي ──────────────────────────────────────────────────────
     const customers = drafts.map((draft) => {
@@ -812,7 +848,7 @@
 
       // تراجع: نشاط سابق ذو دلالة + انخفاض واضح.
       const previousQualifies = draft.previous.invoiceCount >= CONFIG.declineMinPreviousInvoices
-        && draft.previous.netSales >= declineFloor;
+        && draft.previous.netSales >= (declineFloorByRecord.get(draft.record.recordKey) ?? 1);
       const isDeclining = Boolean(
         draft.usableSales
         && trend.state === "measured"
@@ -833,7 +869,7 @@
       const noPurchasesInWindow = draft.usableSales && draft.combined.billCount === 0;
 
       if (isVip) flags.push("vip");
-      if (!vipRankingReliable && !draft.isSupplier && draft.usableSales && draft.combined.netSales > 0) flags.push("vip_ranking_unreliable");
+      if (rankingReliableByRecord.get(draft.record.recordKey) === false && !draft.isSupplier && draft.usableSales && draft.combined.netSales > 0) flags.push("vip_ranking_unreliable");
       if (isInactive) flags.push("inactive");
       if (isChurnRisk) flags.push("at_risk_churn");
       if (isReactivated) flags.push("reactivated");

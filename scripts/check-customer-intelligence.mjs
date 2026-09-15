@@ -1029,4 +1029,147 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   assert.ok(declined.flags.includes("declining"), "test 34: وسيط المورد لا يجوز أن يرفع أرضية التراجع فيحجب الزبون");
 }
 
-console.log(`ذكاء الزبائن: 34 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
+// ---------------------------------------------------------------------------
+// 35) Codex P1 — زبون ليرة بمبلغ ضخم لا يأخذ مقعد VIP من عيّنة الدولار
+// ---------------------------------------------------------------------------
+{
+  function guidFor(n) {
+    return `611e8ef6-3563-48a3-b65b-${String(n).padStart(12, "0")}`;
+  }
+  function party(name, guid, invoices) {
+    return {
+      invoices: { name, customerGuid: guid, truncated: false, invoices },
+      balance: {
+        key: engine.normalizeName(name),
+        name,
+        balance: 0,
+        creditLimit: 0,
+        remainingLimit: 0,
+        status: "clear",
+        customerGuid: guid,
+        customerAccountGuid: guid,
+        isSupplier: false,
+        recentPayments: [],
+        recentMovements: []
+      }
+    };
+  }
+  const usdInvoices = [invoice("2026-07-20", 100, { currency: "USD" }), invoice("2026-08-20", 100, { currency: "USD" })];
+  const sypInvoices = [
+    invoice("2026-07-06", 2000000, { currency: "SYP" }),
+    invoice("2026-07-20", 2000000, { currency: "SYP" }),
+    invoice("2026-08-10", 2000000, { currency: "SYP" }),
+    invoice("2026-08-28", 2000000, { currency: "SYP" })
+  ];
+  const parties = [
+    party("زبون دولار أ", guidFor(1), usdInvoices),
+    party("زبون دولار ب", guidFor(2), usdInvoices),
+    party("زبون دولار ج", guidFor(3), usdInvoices),
+    party("زبون دولار د", guidFor(4), usdInvoices),
+    party("زبون دولار هـ", guidFor(5), usdInvoices),
+    party("زبون ليرة ضخم", guidFor(6), sypInvoices)
+  ];
+  const r35 = engine.build({
+    invoicesReport: {
+      source: "ameen_customer_invoices",
+      created_at: REFERENCE_ISO,
+      summary: { periodDays: 60, fromDate: FROM_DATE, customers: parties.length, bills: 0, syncedAt: REFERENCE_ISO },
+      items: parties.map((entry) => entry.invoices)
+    },
+    balancesReport: {
+      source: "ameen_customer_balances",
+      created_at: REFERENCE_ISO,
+      summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: parties.length },
+      items: parties.map((entry) => entry.balance)
+    },
+    movementsReport: null,
+    creditLimits: [],
+    now: NOW
+  });
+  const sypRow = r35.customers.find((row) => row.customerName === "زبون ليرة ضخم");
+  const usdVip = r35.customers.filter((row) => row.currency === "USD" && row.flags.includes("vip"));
+  assert.ok(sypRow, "test 35: زبون الليرة يجب أن يظهر");
+  assert.ok(!sypRow.flags.includes("vip"), "test 35: مبلغ ليرة لا يجوز أن يأخذ مقعد VIP من عيّنة الدولار");
+  assert.ok(sypRow.flags.includes("vip_ranking_unreliable"), "test 35: زبون ليرة وحيد ⇒ ترتيب غير موثوق داخل عملته");
+  assert.equal(r35.dataAvailability.vipRankingReliable, true, "test 35: خمسة زبائن دولار تكفي لترتيب موثوق");
+  assert.equal(usdVip.length, 1, "test 35: أعلى 20% من خمسة زبائن دولار = مقعد واحد");
+}
+
+// ---------------------------------------------------------------------------
+// 36) Codex P1 — وسيط ليرة لا يرفع أرضية التراجع فيحجب تراجع دولار
+// ---------------------------------------------------------------------------
+{
+  const USD = "611e8ef6-3563-48a3-b65b-000000000031";
+  const SYP_A = "611e8ef6-3563-48a3-b65b-000000000032";
+  const SYP_B = "611e8ef6-3563-48a3-b65b-000000000033";
+  const mkB = (name, guid) => ({
+    key: engine.normalizeName(name),
+    name,
+    balance: 0,
+    creditLimit: 0,
+    remainingLimit: 0,
+    status: "clear",
+    customerGuid: guid,
+    customerAccountGuid: guid,
+    isSupplier: false,
+    recentPayments: [],
+    recentMovements: []
+  });
+  const r36 = engine.build({
+    invoicesReport: {
+      source: "ameen_customer_invoices",
+      created_at: REFERENCE_ISO,
+      summary: { periodDays: 60, fromDate: FROM_DATE, customers: 3, bills: 0, syncedAt: REFERENCE_ISO },
+      items: [
+        {
+          name: "زبون دولار متراجع",
+          customerGuid: USD,
+          truncated: false,
+          invoices: [
+            invoice("2026-07-10", 50, { currency: "USD" }),
+            invoice("2026-07-20", 50, { currency: "USD" }),
+            invoice("2026-08-10", 35, { currency: "USD" }),
+            invoice("2026-08-20", 35, { currency: "USD" })
+          ]
+        },
+        {
+          name: "زبون ليرة أ",
+          customerGuid: SYP_A,
+          truncated: false,
+          invoices: [
+            invoice("2026-07-10", 2000000, { currency: "SYP" }),
+            invoice("2026-07-20", 2000000, { currency: "SYP" }),
+            invoice("2026-08-10", 2000000, { currency: "SYP" }),
+            invoice("2026-08-20", 2000000, { currency: "SYP" })
+          ]
+        },
+        {
+          name: "زبون ليرة ب",
+          customerGuid: SYP_B,
+          truncated: false,
+          invoices: [
+            invoice("2026-07-10", 2000000, { currency: "SYP" }),
+            invoice("2026-07-20", 2000000, { currency: "SYP" }),
+            invoice("2026-08-10", 2000000, { currency: "SYP" }),
+            invoice("2026-08-20", 2000000, { currency: "SYP" })
+          ]
+        }
+      ]
+    },
+    balancesReport: {
+      source: "ameen_customer_balances",
+      created_at: REFERENCE_ISO,
+      summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: 3 },
+      items: [mkB("زبون دولار متراجع", USD), mkB("زبون ليرة أ", SYP_A), mkB("زبون ليرة ب", SYP_B)]
+    },
+    movementsReport: null,
+    creditLimits: [],
+    now: NOW
+  });
+  const declinedUsd = r36.customers.find((row) => row.customerName === "زبون دولار متراجع");
+  assert.ok(declinedUsd, "test 36: الزبون الدولاري يجب أن يظهر");
+  assert.equal(declinedUsd.purchaseTrend.percent, -30, "test 36: 100 ← 70 يجب أن تبقى -30%");
+  assert.ok(declinedUsd.flags.includes("declining"), "test 36: وسيط الليرة لا يجوز أن يحجب تراجع الدولار");
+}
+
+console.log(`ذكاء الزبائن: 36 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
