@@ -80,6 +80,19 @@ check("كل أصول src/ في index.html تحمل معامل النسخة",
   unversioned.length === 0,
   `بلا معامل: ${unversioned.join(", ")} — ستبقى مخبّأة بعد النشر`);
 
+// كل أصل محلي يُحمَّل من index.html يجب أن يكون في ASSETS مسبقاً. بدونه:
+// تفعيل SW جديد يمسح الكاش القديم ويملأ من ASSETS فقط؛ عند offline يرتدّ
+// offlineFallback إلى index.html فيُقدَّم HTML مكان سكربت → SyntaxError.
+const assetsLiteral = (SW_LOGIC.match(/const ASSETS = \[([\s\S]*?)\];/) || [])[0] || "";
+const precached = [...assetsLiteral.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+const pageLocals = [...new Set(
+  [...INDEX_HTML.matchAll(/(?:src|href)="((?:src|public)\/[^"?#]+)(?:\?[^"]*)?"/g)].map((m) => m[1])
+)];
+const missingFromAssets = pageLocals.filter((path) => !precached.includes(path));
+check("كل أصول src/ وpublic/ في index.html موجودة في ASSETS",
+  missingFromAssets.length === 0,
+  `غائبة عن التحميل المسبق: ${missingFromAssets.join(", ")}`);
+
 check("خط النشر يرفع معامل نسخة الأصول تلقائياً",
   /Bump asset version marker/.test(PAGES_YML) && /v=tobacco-\$\{CURRENT\}/.test(PAGES_YML),
   "بلا هذه الخطوة يعتمد إبطال الكاش على رفع يدوي — وقد نُسي ثلاث مرات متتالية");
