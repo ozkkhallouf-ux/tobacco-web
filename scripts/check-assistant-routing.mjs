@@ -2369,4 +2369,73 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   ok("مبيعات الزبون X تُوجَّه لملف الزبون وتُرشَّح بهويته — لا لإجمالي المبيعات");
 }
 
+// ── Codex P1: مدى بتاريخين صريحين لا يُختزل لليوم الأوّل ─────────────────────
+{
+  // ملاحظة Codex على PR #205 (discussion_r4018748908): «من 2026-09-01 إلى
+  // 2026-09-10» كانت تُقرأ كيوم واحد (الطرف الأوّل فقط).
+  const fixtures = defaultFixtures();
+  fixtures.sales_line_items = [
+    { sale_date: "2026-09-01", bill_no: "1", bill_type: "retail", item_name: "أ", qty: 1, line_total: 100, unit_cost: 90, customer_name: "س" },
+    { sale_date: "2026-09-05", bill_no: "2", bill_type: "retail", item_name: "أ", qty: 1, line_total: 200, unit_cost: 90, customer_name: "س" },
+    { sale_date: "2026-09-10", bill_no: "3", bill_type: "retail", item_name: "أ", qty: 1, line_total: 300, unit_cost: 90, customer_name: "س" },
+    { sale_date: "2026-09-15", bill_no: "4", bill_type: "retail", item_name: "أ", qty: 1, line_total: 999, unit_cost: 90, customer_name: "س" }
+  ];
+  fixtures.sales_line_items_sync_state = [{
+    source: "ameen_sales_line_items",
+    window_start: "2026-08-01",
+    window_end: "2026-09-15",
+    row_count: 4,
+    completed_at: new Date().toISOString()
+  }];
+
+  const a = await loadAssistant({ fixtures });
+  const result = await a.ask(TOKENS.owner, "كم مبيعات من 2026-09-01 إلى 2026-09-10؟");
+  const text = String(result.body.reply);
+  assert.equal(result.body.tool, "sales");
+  assert.equal(result.body.answered, true, `مدى تاريخي رُفض:\n${text}`);
+  assert.ok(/600/.test(text), `لم يجمع أيام المدى (100+200+300):\n${text}`);
+  assert.ok(!/999/.test(text), `أدخل يوماً خارج المدى:\n${text}`);
+  assert.ok(/2026-09-01/.test(text) && /2026-09-10/.test(text), `لم يذكر طرفي المدى:\n${text}`);
+  ok("مدى بتاريخين صريحين (من…إلى) يُقرأ بطرفيه ولا يُختزل لليوم الأوّل");
+}
+
+// ── Codex P1: توصية الشراء تربط المبيعات بـ MatGUID لا بالاسم المطبَّع ───────
+{
+  // ملاحظة Codex على PR #205 (discussion_r4018748920): بطاقتان بنفس الاسم بعد
+  // التطبيع تدمجان مبيعاتهما ثم تُنسَب كاملةً لكل صف → تغطية مبخوسة وتوصية زائفة.
+  const today = new Date(Date.now() + 180 * 60_000).toISOString().slice(0, 10);
+  const fixtures = defaultFixtures();
+  fixtures["inventory_reports:ameen_sql_agent"] = [{
+    report_date: today,
+    created_at: new Date().toISOString(),
+    summary: { totalStockItems: 2, availableItems: 2, lowStockItems: 2, outOfStockItems: 0, activeItems: 0, staleItems: 0, threshold: 50 },
+    items: [
+      { key: "غلواز كوين", name: "غلواز كوين", itemGuid: "guid-273", status: "low", stockQty: 10, unit1Name: "كروز" },
+      { key: "غلواز كوين", name: "غلواز كوين", itemGuid: "guid-274", status: "low", stockQty: 10, unit1Name: "كروز" }
+    ]
+  }];
+  fixtures.sales_line_items = [
+    { sale_date: today, bill_no: "1", bill_type: "retail", item_name: "غلواز كوين", item_key: "guid-273", qty: 30, line_total: 300, unit_cost: 5, customer_name: "س" },
+    { sale_date: today, bill_no: "2", bill_type: "retail", item_name: "غلواز كوين", item_key: "guid-274", qty: 3, line_total: 30, unit_cost: 5, customer_name: "س" }
+  ];
+  fixtures.sales_line_items_sync_state = [{
+    source: "ameen_sales_line_items",
+    window_start: new Date(Date.now() + 180 * 60_000 - 29 * 86_400_000).toISOString().slice(0, 10),
+    window_end: today,
+    row_count: 2,
+    completed_at: new Date().toISOString()
+  }];
+
+  const b = await loadAssistant({ fixtures });
+  const advice = await b.ask(TOKENS.owner, "ماذا يجب أن أشتري؟");
+  const adviceText = String(advice.body.reply);
+  assert.equal(advice.body.tool, "purchase_advice");
+  assert.equal(advice.body.answered, true, `توصية GUID رُفضت:\n${adviceText}`);
+  // guid-273: perDay=1, cover=10 → يظهر. guid-274: perDay=0.1, cover=100 → لا.
+  // بالدمج الخاطئ perDay=1.1 على الاثنين → كلاهما cover≈9 → صفّان.
+  const mentions = (adviceText.match(/غلواز كوين/g) || []).length;
+  assert.ok(mentions === 1, `دُمجت مبيعات البطاقتين أو كُرِّرت التوصية (ظهور الاسم ${mentions} مرة):\n${adviceText}`);
+  ok("توصية الشراء تربط المبيعات بـ MatGUID ولا تدمج بطاقات متصادمة الاسم");
+}
+
 console.log(`\nتوجيه المساعد الذكي: ${passed}/${passed} تحقق ناجح`);

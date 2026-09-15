@@ -835,48 +835,57 @@ function hasArabicMonthName(q: string) {
   return ARABIC_MONTHS.some(({ re }) => re.test(q));
 }
 
-// يوم + اسم شهر عربي (+ سنة اختيارية). بلا سنة تُؤخذ سنة دمشق الحالية.
-function parseArabicMonthDate(q: string): Period | "invalid" | null {
+// يجمع كل التواريخ التقويمية الصريحة في السؤال. أكثر من تاريخ = مدى
+// (من الأقدم إلى الأحدث)، لا يوم أوّل فقط. (رصدها Codex على PR #205 بعد 912e5c9.)
+function collectCalendarDays(q: string): string[] | "invalid" {
+  const days: string[] = [];
+  for (const m of q.matchAll(/(?:^| )(?:يوم )?(\d{4}) (\d{1,2}) (\d{1,2})(?= |$)/g)) {
+    const day = ymdIso(Number(m[1]), Number(m[2]), Number(m[3]));
+    if (!day) return "invalid";
+    days.push(day);
+  }
+  for (const m of q.matchAll(/(?:^| )(?:يوم )?(\d{1,2}) (\d{1,2}) (\d{4})(?= |$)/g)) {
+    const day = ymdIso(Number(m[3]), Number(m[2]), Number(m[1]));
+    if (!day) return "invalid";
+    days.push(day);
+  }
   for (const { re, month } of ARABIC_MONTHS) {
-    const dayFirst = q.match(new RegExp(`(?:^| )(?:يوم )?(\\d{1,2}) (${re.source})(?: (\\d{4}))?(?: |$)`, "u"));
-    if (dayFirst) {
-      const year = dayFirst[3] ? Number(dayFirst[3]) : Number(damascusDate().slice(0, 4));
-      const day = ymdIso(year, month, Number(dayFirst[1]));
+    for (const m of q.matchAll(new RegExp(`(?:^| )(?:يوم )?(\\d{1,2}) (${re.source})(?: (\\d{4}))?(?= |$)`, "gu"))) {
+      const year = m[3] ? Number(m[3]) : Number(damascusDate().slice(0, 4));
+      const day = ymdIso(year, month, Number(m[1]));
       if (!day) return "invalid";
-      return { from: day, to: day, label: day, explicit: true };
+      days.push(day);
     }
-    const monthFirst = q.match(new RegExp(`(?:^| )(${re.source}) (\\d{1,2})(?: (\\d{4}))?(?: |$)`, "u"));
-    if (monthFirst) {
-      const year = monthFirst[3] ? Number(monthFirst[3]) : Number(damascusDate().slice(0, 4));
-      const day = ymdIso(year, month, Number(monthFirst[2]));
+    for (const m of q.matchAll(new RegExp(`(?:^| )(${re.source}) (\\d{1,2})(?: (\\d{4}))?(?= |$)`, "gu"))) {
+      const year = m[3] ? Number(m[3]) : Number(damascusDate().slice(0, 4));
+      const day = ymdIso(year, month, Number(m[2]));
       if (!day) return "invalid";
-      return { from: day, to: day, label: day, explicit: true };
+      days.push(day);
     }
   }
-  return null;
+  return days;
 }
 
 // يقرأ تاريخاً تقويمياً صريحاً من السؤال المُطبَّع، أو "invalid" إن وُجدت
 // نية تاريخ دون صيغة مدعومة/صالحة — كي لا يُجاب «اليوم» مكان التاريخ المطلوب.
 function parseExplicitCalendarDate(q: string): Period | "invalid" | null {
-  // ISO بعد التطبيع: 2026 09 01 — مع أو بدون «يوم»
-  const iso = q.match(/(?:^| )(?:يوم )?(\d{4}) (\d{1,2}) (\d{1,2})(?: |$)/);
-  if (iso) {
-    const day = ymdIso(Number(iso[1]), Number(iso[2]), Number(iso[3]));
-    if (!day) return "invalid";
+  const collected = collectCalendarDays(q);
+  if (collected === "invalid") return "invalid";
+  if (collected.length >= 2) {
+    const sorted = [...collected].sort();
+    const from = sorted[0];
+    const to = sorted[sorted.length - 1];
+    return {
+      from,
+      to,
+      label: from === to ? from : `من ${from} إلى ${to}`,
+      explicit: true
+    };
+  }
+  if (collected.length === 1) {
+    const day = collected[0];
     return { from: day, to: day, label: day, explicit: true };
   }
-  // يوم/شهر/سنة شائع على iPhone: 1 9 2026 أو يوم 1 9 2026
-  const dmy = q.match(/(?:^| )(?:يوم )?(\d{1,2}) (\d{1,2}) (\d{4})(?: |$)/);
-  if (dmy) {
-    const day = ymdIso(Number(dmy[3]), Number(dmy[2]), Number(dmy[1]));
-    if (!day) return "invalid";
-    return { from: day, to: day, label: day, explicit: true };
-  }
-  // اسم شهر عربي: «15 سبتمبر» أو «يوم 15 سبتمبر 2026» — بلا هذا كانت
-  // تسقط على اليوم. (رصدها Codex على PR #205 بعد 3fdb433.)
-  const named = parseArabicMonthDate(q);
-  if (named) return named;
   // «يوم» ثم رقم دون صيغة كاملة معروفة — رفض صريح لا سقوط على اليوم
   if (/(?:^| )يوم \d/.test(q)) return "invalid";
   // رقم + اسم شهر حاضران لكن الصيغة لم تُحلّ (يوم خارج الشهر، إلخ)
@@ -950,6 +959,7 @@ type SalesRow = {
   bill_no?: string;
   bill_type?: string;
   item_name?: string;
+  item_key?: string;
   qty?: unknown;
   line_total?: unknown;
   unit_cost?: unknown;
@@ -1132,8 +1142,8 @@ async function readSales(period: Period, role: Role): Promise<{ rows: SalesRow[]
   // صنفاً صنفاً. فالحجب عند المصدر لا عند العرض: ما لا يُقرأ لا يُسرَّب.
   // (رصدها Codex على PR #205 بعد 4fb0d18.)
   const columns = role === "owner"
-    ? "sale_date,bill_no,bill_type,item_name,qty,line_total,unit_cost,customer_name"
-    : "sale_date,bill_no,bill_type,item_name,qty";
+    ? "sale_date,bill_no,bill_type,item_name,item_key,qty,line_total,unit_cost,customer_name"
+    : "sale_date,bill_no,bill_type,item_name,item_key,qty";
   // ترتيب ثابت وقاطع (id ثانوياً) شرطٌ لصحة التصفيح: بلا مفتاح فارق قد يتكرر
   // صفٌّ أو يسقط آخر بين الصفحات.
   const { rows, partial } = await readPagedPinned((range) =>
@@ -2293,11 +2303,30 @@ const TOOLS: Tool[] = [
       // مرتجع (كمية سالبة) بلا بيع موجب مقابل ليس بيعاً — إدخاله بمجموعة
       // «المُباع» يُخفي صنفاً راكداً فعلياً. الركود = بلا بيعٍ موجب، لا بلا
       // أي سطر مبيعات إطلاقاً. (رصدها Codex بعد bea03ea.)
-      const sold = new Set(
-        sales.rows.filter((row) => num(row.qty) > 0).map((row) => normalize(row.item_name))
+      const soldGuids = new Set(
+        sales.rows.filter((row) => num(row.qty) > 0).map((row) => String(row.item_key ?? "").trim()).filter(Boolean)
       );
+      const soldNames = new Set(
+        sales.rows.filter((row) => num(row.qty) > 0).map((row) => normalize(row.item_name)).filter(Boolean)
+      );
+      const nameCounts = new Map<string, number>();
+      for (const row of items as Array<Record<string, unknown>>) {
+        const nk = normalize(row.name ?? row.key);
+        if (nk) nameCounts.set(nk, (nameCounts.get(nk) ?? 0) + 1);
+      }
+      const collidingNames = new Set(
+        [...nameCounts.entries()].filter(([, n]) => n > 1).map(([k]) => k)
+      );
+      const wasSold = (row: Record<string, unknown>) => {
+        const guid = String(row.itemGuid ?? row.item_guid ?? "").trim();
+        if (guid) return soldGuids.has(guid);
+        const nk = normalize(row.name ?? row.key);
+        // اصطدام اسم بلا GUID: لا نعتبره «غير مبيع» ولا نُدخلُه قائمة الراكد بالتخمين.
+        if (nk && collidingNames.has(nk)) return true;
+        return !!nk && soldNames.has(nk);
+      };
       const stagnant = items
-        .filter((row: Record<string, unknown>) => num(row.stockQty) > 0 && !sold.has(normalize(row.name ?? row.key)))
+        .filter((row: Record<string, unknown>) => num(row.stockQty) > 0 && !wasSold(row))
         .sort((a: Record<string, unknown>, b: Record<string, unknown>) => num(b.stockQty) - num(a.stockQty));
       // الحكم الموجب أخطر من السالب هنا: قراءةٌ ناقصة تُصغّر مجموعة المُباع،
       // فتنتقل أصنافٌ تُباع فعلاً إلى قائمة «الراكد». والقائمة تُغري بتصفية
@@ -2392,14 +2421,40 @@ const TOOLS: Tool[] = [
         };
       }
       const days = 30;
-      const soldQty = new Map<string, number>();
-      for (const row of sales.rows) {
-        const key = normalize(row.item_name);
-        if (key) soldQty.set(key, (soldQty.get(key) ?? 0) + num(row.qty));
+      // الربط بـ MatGUID (sales.item_key ↔ inventory.itemGuid) لا بالاسم
+      // المطبَّع: بطاقتان بنفس الاسم بعد التطبيع كانت تدمجان مبيعاتهما ثم
+      // تُنسَب كاملةً لكل صف، فتُضاعَف الحاجة وتُبخَس أيام التغطية.
+      // عند غياب GUID واصطدام الأسماء: نُسقِط الصف من التوصية بدل التخمين.
+      // (رصدها Codex على PR #205 بعد 912e5c9.)
+      const nameCounts = new Map<string, number>();
+      for (const row of items as Array<Record<string, unknown>>) {
+        const nk = normalize(row.name ?? row.key);
+        if (nk) nameCounts.set(nk, (nameCounts.get(nk) ?? 0) + 1);
       }
+      const collidingNames = new Set(
+        [...nameCounts.entries()].filter(([, n]) => n > 1).map(([k]) => k)
+      );
+      const soldByGuid = new Map<string, number>();
+      const soldByName = new Map<string, number>();
+      for (const row of sales.rows) {
+        const guid = String(row.item_key ?? "").trim();
+        if (guid) soldByGuid.set(guid, (soldByGuid.get(guid) ?? 0) + num(row.qty));
+        const nk = normalize(row.item_name);
+        if (nk) soldByName.set(nk, (soldByName.get(nk) ?? 0) + num(row.qty));
+      }
+      const soldQtyFor = (row: Record<string, unknown>): number | null => {
+        const guid = String(row.itemGuid ?? row.item_guid ?? "").trim();
+        if (guid && soldByGuid.has(guid)) return soldByGuid.get(guid) ?? 0;
+        const nk = normalize(row.name ?? row.key);
+        if (!nk) return 0;
+        if (collidingNames.has(nk)) return null; // لا تخمين عند اصطدام الاسم بلا GUID
+        return soldByName.get(nk) ?? 0;
+      };
       const ranked = items
         .map((row: Record<string, unknown>) => {
-          const perDay = (soldQty.get(normalize(row.name ?? row.key)) ?? 0) / days;
+          const soldQty = soldQtyFor(row);
+          if (soldQty === null) return null;
+          const perDay = soldQty / days;
           const stock = num(row.stockQty);
           // المخزون السالب يقع فعلاً في الأمين (بيع قبل إدخال، أو خطأ إدخال).
           // «يكفي -13 يوم» جملة بلا معنى، فالتغطية تُقصّ عند الصفر ويُعلَن أن
@@ -2413,7 +2468,7 @@ const TOOLS: Tool[] = [
             coverDays: perDay > 0 ? usable / perDay : Infinity
           };
         })
-        .filter((entry) => entry.perDay > 0 && entry.coverDays < 21)
+        .filter((entry): entry is NonNullable<typeof entry> => !!entry && entry.perDay > 0 && entry.coverDays < 21)
         .sort((a, b) => a.coverDays - b.coverDays || b.perDay - a.perDay);
 
       const state = await salesCompleteness(period, sales.partial);
