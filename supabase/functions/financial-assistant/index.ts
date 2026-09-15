@@ -2304,7 +2304,10 @@ const TOOLS: Tool[] = [
       // «المُباع» يُخفي صنفاً راكداً فعلياً. الركود = بلا بيعٍ موجب، لا بلا
       // أي سطر مبيعات إطلاقاً. (رصدها Codex بعد bea03ea.)
       const soldGuids = new Set(
-        sales.rows.filter((row) => num(row.qty) > 0).map((row) => String(row.item_key ?? "").trim()).filter(Boolean)
+        sales.rows
+          .filter((row) => num(row.qty) > 0)
+          .map((row) => String(row.item_key ?? "").trim().toLowerCase())
+          .filter(Boolean)
       );
       const soldNames = new Set(
         sales.rows.filter((row) => num(row.qty) > 0).map((row) => normalize(row.item_name)).filter(Boolean)
@@ -2318,7 +2321,8 @@ const TOOLS: Tool[] = [
         [...nameCounts.entries()].filter(([, n]) => n > 1).map(([k]) => k)
       );
       const wasSold = (row: Record<string, unknown>) => {
-        const guid = String(row.itemGuid ?? row.item_guid ?? "").trim();
+        const guid = String(row.itemGuid ?? row.item_guid ?? "").trim().toLowerCase();
+        // GUID معروف ⇒ الحكم من item_key فقط (مطابقة بلا حساسية لحالة الأحرف)
         if (guid) return soldGuids.has(guid);
         const nk = normalize(row.name ?? row.key);
         // اصطدام اسم بلا GUID: لا نعتبره «غير مبيع» ولا نُدخلُه قائمة الراكد بالتخمين.
@@ -2437,14 +2441,15 @@ const TOOLS: Tool[] = [
       const soldByGuid = new Map<string, number>();
       const soldByName = new Map<string, number>();
       for (const row of sales.rows) {
-        const guid = String(row.item_key ?? "").trim();
+        const guid = String(row.item_key ?? "").trim().toLowerCase();
         if (guid) soldByGuid.set(guid, (soldByGuid.get(guid) ?? 0) + num(row.qty));
         const nk = normalize(row.item_name);
         if (nk) soldByName.set(nk, (soldByName.get(nk) ?? 0) + num(row.qty));
       }
       const soldQtyFor = (row: Record<string, unknown>): number | null => {
-        const guid = String(row.itemGuid ?? row.item_guid ?? "").trim();
-        if (guid && soldByGuid.has(guid)) return soldByGuid.get(guid) ?? 0;
+        const guid = String(row.itemGuid ?? row.item_guid ?? "").trim().toLowerCase();
+        // GUID معروف ⇒ المبيعات من item_key فقط؛ لا رجوع للاسم حتى لو صفر
+        if (guid) return soldByGuid.get(guid) ?? 0;
         const nk = normalize(row.name ?? row.key);
         if (!nk) return 0;
         if (collidingNames.has(nk)) return null; // لا تخمين عند اصطدام الاسم بلا GUID

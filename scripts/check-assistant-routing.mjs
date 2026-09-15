@@ -2435,6 +2435,27 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   // بالدمج الخاطئ perDay=1.1 على الاثنين → كلاهما cover≈9 → صفّان.
   const mentions = (adviceText.match(/غلواز كوين/g) || []).length;
   assert.ok(mentions === 1, `دُمجت مبيعات البطاقتين أو كُرِّرت التوصية (ظهور الاسم ${mentions} مرة):\n${adviceText}`);
+
+  // حالة الأحرف: SQL Server قد يعيد GUID بأحرف كبيرة بينما المبيعات محفوظة بأحرف صغيرة
+  const cased = {
+    ...fixtures,
+    "inventory_reports:ameen_sql_agent": [{
+      ...fixtures["inventory_reports:ameen_sql_agent"][0],
+      items: [
+        { key: "غلواز كوين", name: "غلواز كوين", itemGuid: "GUID-273", status: "low", stockQty: 10, unit1Name: "كروز" },
+        { key: "غلواز كوين", name: "غلواز كوين", itemGuid: "GUID-274", status: "low", stockQty: 10, unit1Name: "كروز" }
+      ]
+    }],
+    sales_line_items: fixtures.sales_line_items.map((row) => ({
+      ...row,
+      item_key: String(row.item_key).toLowerCase()
+    }))
+  };
+  const casedAdvice = await (await loadAssistant({ fixtures: cased })).ask(TOKENS.owner, "ماذا يجب أن أشتري؟");
+  const casedText = String(casedAdvice.body.reply);
+  assert.equal(casedAdvice.body.answered, true, `اختلاف حالة GUID رُفض:\n${casedText}`);
+  assert.equal((casedText.match(/غلواز كوين/g) || []).length, 1,
+    `اختلاف حالة GUID أعاد دمج البطاقتين:\n${casedText}`);
   ok("توصية الشراء تربط المبيعات بـ MatGUID ولا تدمج بطاقات متصادمة الاسم");
 }
 

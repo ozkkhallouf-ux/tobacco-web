@@ -4,7 +4,7 @@
 
 ## الحالة الحالية
 
-المبيعات جزء من PWA مع مسارات مزامنة منفصلة لتفاصيل أسطر الفواتير. توجد فحوص ذرية وأمنية وتسجيل مهمة ضمن `npm run check`. المساعد المالي (`financial-assistant`) يحجب نفي «لا فاتورة» خارج نافذة `sales_line_items_sync_state`، ويفصل كمية المبيع عن المرتجعات السالبة في حركة الصنف، ويوجّه «مبيعات الزبون…» إلى أداة الزبون مع ترشيح بالهوية، ويقرأ/يرفض تواريخ أسماء الأشهر العربية (PR #205، Codex P1 على `88bcdeb`).
+المبيعات جزء من PWA مع مسارات مزامنة منفصلة لتفاصيل أسطر الفواتير. توجد فحوص ذرية وأمنية وتسجيل مهمة ضمن `npm run check`. المساعد المالي (`financial-assistant`) يحجب نفي «لا فاتورة» خارج نافذة `sales_line_items_sync_state`، ويفصل كمية المبيع عن المرتجعات السالبة في حركة الصنف، ويوجّه «مبيعات الزبون…» إلى أداة الزبون مع ترشيح بالهوية، ويقرأ/يرفض تواريخ أسماء الأشهر العربية، ويجمع المدى الصريح ذا التاريخين (مثل من…إلى) بطرفيه، ويربط توصية الشراء والراكد بـ`item_key`/`itemGuid` (MatGUID، بلا حساسية لحالة الأحرف) مع حجب الأسماء المتصادمة بلا GUID (PR #205، `cb011c5`+).
 
 ## المصدر الموثوق
 
@@ -12,7 +12,7 @@
 
 ## نطاق الملفات
 
-`src/app.js`, `src/number-normalizer.js`, `tools/push-customer-invoices.ps1`, `tools/push-sales-line-items.ps1`, `tools/verify-customer-invoice-sync.ps1`, `supabase/sales-line-items-atomic-refresh.sql`, `supabase/functions/financial-assistant/index.ts`, `scripts/check-sales-line-items-*.mjs`, `scripts/check-assistant-routing.mjs`.
+`src/app.js`, `src/number-normalizer.js`, `tools/push-customer-invoices.ps1`, `tools/push-sales-line-items.ps1`, `tools/ameen-sync-agent.ps1`, `tools/verify-customer-invoice-sync.ps1`, `supabase/sales-line-items-atomic-refresh.sql`, `supabase/functions/financial-assistant/index.ts`, `scripts/check-sales-line-items-*.mjs`, `scripts/check-assistant-routing.mjs`.
 
 ## قيود ثابتة
 
@@ -20,6 +20,7 @@
 - أساس سعر السطر يُحسم بمطابقة الإجمالي، لا بافتراض وحدة ثابتة ولا بالوثوق بـ`lineTotal` القادم من الأمين (قد يكون هو نفسه `Price × Qty` بوحدتين مختلطتين). الأساس قد يختلف من سطر لآخر داخل الفاتورة نفسها — راجع `docs/ai/topics/printing.md` (فاتورة #733، 2026-09-13).
 - تعديل فاتورة أو حسابها لا يجوز أن يغيّر منطق المخزون أو الرصيد بلا تحقق مستقل.
 - نفي غياب المبيعات/المصاريف خارج نافذة المزامنة المتحقَّقة ممنوع؛ يُعاد جواب غير محسوم.
+- توصية الشراء تربط معدّل البيع بمخزون التقرير عبر GUID الأمين؛ تقارير قديمة بلا `itemGuid` وأسماء متصادمة بعد التطبيع تُحجب من النصيحة لا تُدمَج.
 
 ## فحوص إلزامية
 
@@ -27,4 +28,4 @@
 
 ## الخطوة التالية
 
-بعد دمج PR #205: نشر الدالة عند الطلب الصريح فقط؛ لا نشر تلقائي من هذا الإصلاح.
+بعد دمج PR #205: نشر الدالة عند الطلب الصريح فقط؛ لا نشر تلقائي من هذا الإصلاح. مزامنة مخزون لاحقة على Windows تملأ `itemGuid` في تقارير `ameen_sql_agent` الجديدة.
