@@ -4962,7 +4962,7 @@ function pricingRow(item) {
     <div class="pricing-card inventory-row-${escapeHtml(rowState)}">
       <div class="pricing-card-head">
         <strong title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</strong>
-        <span>${escapeHtml(qty)}</span>
+        <span>${escapeHtml(formatQtyCartons(item))}</span>
       </div>
       <small>${escapeHtml(unit2Name)} / ${escapeHtml(unit2Factor)} ${escapeHtml(unit1Name)}</small>
       <div class="pricing-price-summary">
