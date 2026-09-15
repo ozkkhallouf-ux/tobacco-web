@@ -53,11 +53,12 @@ const BASE = `http://127.0.0.1:${server.address().port}`;
 // حدّ العزل الشبكي — طبقة الوكيل، خارج توجيه الصفحة تماماً.
 //
 // ⚠️ ملاحظة Codex P1 على PR #199، وهي صحيحة: `page.route` **لا يعترض طلبات
-// الـService Worker** (قيد معروف في Playwright). و`public/service-worker.js`
-// يعترض كل طلب GET بلا تمييز أصل ثم ينفّذ `fetch(event.request)`. فبعد
-// activate و`clients.claim()` في المسار الأخير، كان يمكن لطلب مثل
-// `loadPublishedExchangeRate()` أن يصل Supabase الحيّ فعلاً بدل 503 المصطنع —
-// أي أن ادّعاء «صفر اتصال بأي خدمة حيّة» كان يسقط في آخر مسار بالضبط.
+// الـService Worker** (قيد معروف في Playwright). سابقاً كان
+// `public/service-worker.js` يعترض كل طلب GET بلا تمييز أصل ثم ينفّذ
+// `fetch(event.request)` — بما فيه CDN. بعد activate و`clients.claim()` كان
+// يمكن لطلب مثل `loadPublishedExchangeRate()` أن يصل Supabase الحيّ، وكان
+// فشل Sentry CDN يرتدّ إلى index.html فيُرفض بخطأ MIME. الآن الـSW يتخطّى
+// خارج الأصل؛ والوكيل المحلي يبقى الشاهد على أي محاولة خروج من الطبقة الشبكية.
 //
 // الحلّ حدٌّ عند مستوى المتصفح لا الصفحة: كل حركة غير الاسترجاع تُوجَّه إلى
 // وكيل محلي في هذه العملية نفسها. وهو ليس مجرّد سدّ — بل **شاهد**: يسجّل كل

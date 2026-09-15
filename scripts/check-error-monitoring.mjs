@@ -1326,8 +1326,11 @@ console.log("\n— التوصيل —");
     html.includes("https://js.sentry-cdn.com/cbc2bdf774c61bb4eac9192b8d9a8c4a.min.js"),
     "اختفى محمّل Sentry أو علمه من index.html");
 
+  // فحص على قائمة ASSETS فقط (لا على ملف SW كاملاً): CodeQL يرفض
+  // includes("…sentry-cdn.com") كتحقق مضيف ناقص؛ حدود الاقتباس تكفي هنا.
+  const assetsLiteral = (sw.match(/const ASSETS = \[[\s\S]*?\];/) || [""])[0];
   check("لا يُدرَج عنوان CDN لـSentry في ASSETS",
-    !sw.includes("js.sentry-cdn.com") && !sw.includes("browser.sentry-cdn.com"),
+    !/"[^"]*sentry-cdn\.com[^"]*"/.test(assetsLiteral),
     "CDN داخل ASSETS يكسر التحميل المسبق أو يخزّن طرفاً ثالثاً");
 
   check("السكربت مُحمَّل مع معامل النسخة",

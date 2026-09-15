@@ -6,6 +6,10 @@
 
 المراقب الأساسي للمتصفح: محمّل Sentry CDN لمشروع `OZK TOBACCO / javascript` على `ozk-tobacco-ck.sentry.io`، مع تهيئة `window.sentryOnLoad` من `src/error-monitoring.js` (تنقية PII، تعطيل خارج الإنتاج، وإبقاء Replay مقنّعاً). مسار Rollbar يبقى احتياطاً فقط عند غياب `meta[name=ozk-sentry]`. لا تُضاف عناوين CDN إلى `ASSETS`. راجع ملاحظات الإعداد في متجر المشروع إن وُجدت.
 
+### إصلاح 2026-09-15 — SW لا يعترض CDN ولا يرتدّ HTML خارجه
+
+`public/service-worker.js` كان يعترض كل GET بما فيه `js.sentry-cdn.com`؛ عند فشل الشبكة (وكيل الفحوص أو offline) كان `offlineFallback` يعيد `index.html` فيُرفض السكربت بخطأ MIME ويفشل `critical-journeys` (مسار Service Worker). الآن: لا اعتراض لطلبات خارج الأصل، والارتداد الخارجي يعيد `Response.error()` بدل HTML.
+
 ## الحالة الحالية
 
 يوجد Web Push وTelegram Edge Functions وGitHub Pages. آخر توثيق سابق أكد إشعار iPhone فعلياً بعد إصلاح الأيقونة، لكن أي حالة حية جديدة تحتاج اختباراً جديداً. نشر النشرات يعتمد workflow منفصلاً عن نشر الموقع.
