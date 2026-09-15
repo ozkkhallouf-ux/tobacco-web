@@ -13,6 +13,9 @@
 -- Fix: provision the baseline table (derived from approved-prices-table.sql,
 -- columns + indexes + RLS enable; staff policies only when is_staff() exists)
 -- with IF NOT EXISTS, then apply the original idempotent item_guid ADD.
+-- Price-feed / bot_health views remain out-of-band (approved-price-sync-feed-*,
+-- bot-health-alerts.sql); 20260902070000 verify-or-skips when they are absent
+-- (Codex P1) — this stamp does not invent those view definitions.
 -- Production Stage 2: this version is already recorded → CLI skips the file.
 -- No DROP. No refuse-if-exists abort. No invented columns beyond that file.
 -- ============================================================

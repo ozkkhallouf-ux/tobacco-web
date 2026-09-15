@@ -65,6 +65,15 @@
 -- ════════════════════════════════════════════════════════════════════════════
 -- القرار: لا تغيير — تحقق ذاتي فقط
 -- ════════════════════════════════════════════════════════════════════════════
+--
+-- Codex P1 (PR #228, 2026-09-15): production-landmark check is conditional.
+-- Audit bootstrap 20260830141802 intentionally omits dispatcher bodies
+-- (out-of-band telegram/web-push/reminders SQL). Unconditional "must be 3"
+-- aborted fresh replay before later 20260914120000 which defines
+-- dispatch_telegram_outbox. When the dispatcher subsystem is absent (0 of 3)
+-- or pg_net is not installed: NOTICE no-op. When partially present (1–2):
+-- still raise (broken production/out-of-band apply). When all 3 present:
+-- assert net.http_post usage as before. Will not invent dispatcher DDL here.
 
 DO $$
 declare
@@ -72,14 +81,16 @@ declare
   v_objects_in_pub  int;
   v_dispatch_count  int;
 begin
-  -- 1. تأكد أن pg_net ما زالت مثبَّتة
+  -- 1. pg_net extension (optional on migrations-only fresh DB)
   select n.nspname into v_pg_net_schema
     from pg_extension e
     join pg_namespace n on n.oid = e.extnamespace
    where e.extname = 'pg_net';
 
   if v_pg_net_schema is null then
-    raise exception 'pg_net: الـextension غير مثبَّتة — مسار Telegram معطَّل!';
+    raise notice
+      'p2_pg_net_schema_analysis (20260902090000): pg_net extension absent — treating as fresh-DB / non-Supabase path; skipping landmark (will not invent extension or dispatcher DDL).';
+    return;
   end if;
 
   -- 2. تأكد أن صفر كائنات pg_net في public (التحذير false positive)
@@ -97,7 +108,7 @@ begin
       v_objects_in_pub;
   end if;
 
-  -- 3. تأكد أن دوال الـdispatcher الثلاث موجودة وتستخدم schema net
+  -- 3. Dispatcher landmark — only when the out-of-band subsystem is present
   select count(*) into v_dispatch_count
     from pg_proc p
     join pg_namespace n on n.oid = p.pronamespace
@@ -109,9 +120,15 @@ begin
      )
      and pg_get_functiondef(p.oid) ilike '%net.http_post%';
 
+  if v_dispatch_count = 0 then
+    raise notice
+      'p2_pg_net_schema_analysis (20260902090000): dispatcher functions absent — treating as fresh-DB / out-of-band feature path; skipping 3/3 landmark (telegram dispatcher may arrive later via 20260914120000; web_push/reminders remain out-of-band).';
+    return;
+  end if;
+
   if v_dispatch_count <> 3 then
     raise exception
-      'dispatcher functions: توقَّعنا 3 دوال بـnet.http_post، وجدنا %',
+      'dispatcher functions: توقَّعنا 3 دوال بـnet.http_post، وجدنا % (partial subsystem — not a clean fresh skip)',
       v_dispatch_count;
   end if;
 

@@ -75,6 +75,13 @@ Codex P1). على الإنتاج: CLI يتخطّى الملف لأن الإصد�
 مع تأجيل `is_staff()` عند غياب المساعد — حتى لا يستطيع أي `authenticated`
 تزوير إشعارات المالك عبر PostgREST على DB مبني من المهاجرات فقط.
 
+**تدقيق الـviews وpg_net مشروط (Codex P1 لاحق، 2026-09-15):**
+`../20260902070000_p2_security_definer_views_audit.sql` يتخطّى بـNOTICE عند
+غياب `approved_price_sync_feed` / `available_price_sync_feed` / `bot_health_alerts`
+(خارج السلسلة النشطة). `../20260902090000_p2_pg_net_schema_analysis.sql` يتخطّى
+عند غياب pg_net أو عند صفر دوال dispatcher (لا يخترع أجسام الإرسال؛ جزئي 1–2
+ما زال يرفع استثناء).
+
 **أساس الأسعار / التكاليف قبل ALTER (Codex P1 لاحق، 2026-09-15):** المهاجرتان
 `../20260827110254_add_item_guid_to_approved_price_items.sql` و
 `../20260827110325_fix_item_costs_true_guid.sql` كانتا تجهضان إعادة التشغيل

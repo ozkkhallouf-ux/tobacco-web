@@ -59,6 +59,9 @@
 --   notify trigger and before later active migrations that ALTER
 --   `telegram_outbox`. Production already has Telegram from the out-of-band
 --   `telegram_notifications_system` apply and skips this file.
+-- - Dispatcher bodies intentionally omitted here; `20260902090000` now
+--   verify-or-skips when the three dispatch_* functions are absent (Codex P1)
+--   instead of inventing out-of-band dispatcher DDL in this bootstrap.
 -- - Telegram 4-arg EXECUTE guard (Codex P1, 2026-09-15): the fresh-path
 --   SECURITY DEFINER enqueue mirrors the authorization gate of the out-of-band
 --   5-arg wrapper in `supabase/telegram-notifications.sql` (~819–845) —
