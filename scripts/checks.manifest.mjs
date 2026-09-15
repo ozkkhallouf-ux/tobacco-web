@@ -34,6 +34,8 @@ export const CHECKS = [
   'check-command-center.mjs',
   'check-credit-limit-identity.mjs',
   'check-cron-job-health-classifier.mjs',
+  'check-customer-intelligence-wiring.mjs',
+  'check-customer-intelligence.mjs',
   'check-customer-invoice-identity.mjs',
   'check-decision-pipeline-safety.mjs',
   'check-decision-scoring.mjs',

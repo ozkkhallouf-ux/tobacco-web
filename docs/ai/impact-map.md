@@ -8,6 +8,7 @@
 | النشرات | `src/app.js`, `src/price-list-template.js`, `scripts/generate-*`, `scripts/exchange-rate.json`, `public/downloads/` | السعر، الصرف، الثيم، الكاش، PDF | فحص المشروع + التوليد + مطابقة الأسعار + فحص بصري للفاتح والداكن عند تغير الشكل |
 | المخزون | `src/business-snapshot.js`, `src/inventory-recon-calc.js`, `tools/ameen-sync-agent.ps1` | النشرات، الشراء، التنبيهات | فحص المشروع + مقارنة مستقلة مع حركات الأمين |
 | الأرصدة | `src/app.js`, `tools/ameen-customer-balances-query.sql`, `tools/push-ameen-account-balances.ps1` | كشف الحساب، الفاتورة، الائتمان | فحص المشروع + مقارنة رصيد وحركات مع `ac000` |
+| ذكاء الزبائن | `src/customer-intelligence.js`, `src/customer-intelligence-view.js`, `src/customer-intelligence.css`, `tools/push-customer-invoices.ps1`, `scripts/check-customer-intelligence*.mjs` | الأرصدة، الائتمان، حصر المالك، حداثة المصادر | فحص المشروع + مقارنة عيّنة زبون مع كشف الأمين؛ ممنوعة أي كتابة على الأمين |
 | المشتريات | `src/purchase-*`, `tools/pull-purchase-invoices-from-ameen.ps1`, `supabase/purchase-*` | التكلفة، المخزون، المورد، كتابة الأمين | فحص المشروع؛ لا كتابة فعلية للأمين بلا إذن صريح |
 | مزامنة الأمين | `tools/ameen-*`, `tools/push-*`, `tools/register-*` | كل التقارير المحاسبية وجدولة Windows | فحص السكربت + مهمة الجدولة + دليل حديث خاص بالعملية؛ نجاح المجدول وحده لا يكفي |
 | الطباعة | منطق PDF/الفاتورة في `src/`، وجسر الطباعة المركزي خارج هذا المستودع | طابعة خاطئة، تكرار وصل، عملة/رصيد | PDF بصري أو ورقة فعلية حسب نوع المهمة؛ لا ادعاء نجاح طابعة بلا خروج ورق |

@@ -8,6 +8,7 @@
 | نشرات الأسعار | [price-bulletins.md](price-bulletins.md) |
 | المخزون والجرد | [inventory.md](inventory.md) |
 | أرصدة الزبائن والدفعات | [customer-balances.md](customer-balances.md) |
+| ذكاء الزبائن | [customer-intelligence.md](customer-intelligence.md) |
 | المشتريات والموردون | [purchases-suppliers.md](purchases-suppliers.md) |
 | مزامنة الأمين | [ameen-sync.md](ameen-sync.md) |
 | الطباعة والفواتير | [printing.md](printing.md) |
