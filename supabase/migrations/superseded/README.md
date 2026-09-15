@@ -62,6 +62,16 @@ timestamp إنتاجي يقابل أي محاولة محلية تقريبياً 
 ولا جدولة cron ولا triggers المجالات — تلك تبقى خارج سلسلة المهاجرات النشطة
 أو في مهاجرات لاحقة. الإنتاج يملك النظام أصلاً ويتخطّى ملف الـbootstrap.
 
+**أساس الأسعار / التكاليف قبل ALTER (Codex P1 لاحق، 2026-09-15):** المهاجرتان
+`../20260827110254_add_item_guid_to_approved_price_items.sql` و
+`../20260827110325_fix_item_costs_true_guid.sql` كانتا تجهضان إعادة التشغيل
+النظيفة لأن `CREATE TABLE` لـ`approved_price_items` كان خارج السلسلة النشطة
+فقط (`supabase/approved-prices-table.sql`)، ولا يوجد `CREATE TABLE` لـ`item_costs`
+في المستودع أصلاً. الإصلاح: (1) `20260827110254` يوفّر الجدول من ملف الأساس
+بـ`IF NOT EXISTS` ثم يضيف `item_guid` (سياسات `is_staff` مؤجَّلة عند غياب
+المساعد)؛ (2) `20260827110325` يصبح verify-or-skip عند غياب `item_costs` —
+**بلا اختراع DDL**. الإنتاج يتخطّى الملفين لأن الإصدارين مسجَّلان.
+
 كذلك تم تصحيح إدخال `expense_entries_owner_only_rls` أعلاه: كان يشير خطأً إلى
 `20260830144806` (وهذه `khalil_audit_notify_catch_query_canceled`)؛ الصحيح هو
 `20260830172655`.
