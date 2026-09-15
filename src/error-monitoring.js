@@ -14,8 +14,8 @@
 //   • لا يُشغَّل مسار Rollbar متى وُجد meta[name=ozk-sentry] — مراقب واحد فقط.
 //   • Session Replay يُفرَض عليه maskAllText / maskAllInputs / blockAllMedia؛
 //     beforeSend يمرّر الرسالة والأثر بنفس طبقات التنقية أدناه.
-//   • CSP تسمح بـ js.sentry-cdn.com وbrowser.sentry-cdn.com و*.ingest.sentry.io
-//     وworker-src blob — لا تُضاف عناوين CDN إلى ASSETS في service worker.
+//   • CSP تسمح بـ js.sentry-cdn.com وbrowser.sentry-cdn.com ومضيف ingest العائد
+//     للمشروع وworker-src blob — لا تُضاف عناوين CDN إلى ASSETS في service worker.
 //
 // ما يُرسَل بعد التنقية:
 //   • نصّ الخطأ ونوعه وأثر المكدّس، بعد تنقية.

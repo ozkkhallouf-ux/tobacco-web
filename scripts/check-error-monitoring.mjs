@@ -1310,9 +1310,9 @@ console.log("\n— التوصيل —");
 
   check("CSP تسمح بنقاط استقبال Rollbar وSentry على connect-src",
     /connect-src[^;]*https:\/\/api\.rollbar\.com/.test(html) &&
-    /connect-src[^;]*https:\/\/\*\.ingest\.sentry\.io/.test(html) &&
-    /connect-src[^;]*https:\/\/\*\.sentry\.io/.test(html),
-    "connect-src تمنع إرسال المراقبة");
+    /connect-src[^;]*https:\/\/o4512087486693376\.ingest\.us\.sentry\.io/.test(html) &&
+    !/connect-src[^;]*\*\.sentry/.test(html),
+    "connect-src تمنع إرسال المراقبة أو تستخدم wildcard لـSentry");
 
   check("CSP تسمح بمحمّل Sentry على script-src دون Rollbar CDN",
     /script-src[^;]*https:\/\/js\.sentry-cdn\.com/.test(html) &&
