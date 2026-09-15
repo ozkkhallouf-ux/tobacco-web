@@ -45,6 +45,13 @@
 --   history — only out-of-band / non-migration SQL — so the heartbeat SELECT
 --   policy is deferred (NOTICE) when that helper is absent; RLS + revoke still
 --   deny direct reads. Production already has both helpers and skips this file.
+-- - Telegram baseline (Codex P1, 2026-09-15): `public.telegram_outbox` and
+--   `public.notify_telegram(text,text,text,int)` are provisioned on the fresh
+--   path from `supabase/telegram-notifications.sql` (table + enqueue helper
+--   only — not cron, not dispatch, not domain triggers) BEFORE the audit
+--   notify trigger and before later active migrations that ALTER
+--   `telegram_outbox`. Production already has Telegram from the out-of-band
+--   `telegram_notifications_system` apply and skips this file.
 -- - No FORCE ROW LEVEL SECURITY. No migration repair. This commit alone does
 --   not authorize applying SQL to production.
 -- ============================================================
@@ -74,6 +81,63 @@ end;
 $guard$;
 
 -- ----- fresh-DB bootstrap DDL (reached only when guard above passes) -----
+
+-- ------------------------------------------------------------
+-- Telegram enqueue baseline (fresh-DB only — never reached on production
+-- Stage 2). Derived from supabase/telegram-notifications.sql §§1–2 + the
+-- reply_markup column add. Intentionally NOT the full notifications system:
+-- no dispatch_telegram_outbox body, no pg_cron schedules, no domain triggers,
+-- no bot_config seed — those remain the out-of-band / later-migration path.
+-- Without this, live audit inserts cannot enqueue and
+-- 20260914120000_telegram_delivery_confirmation_retry.sql aborts on
+-- ALTER TABLE public.telegram_outbox (Codex P1 on PR #228).
+-- ------------------------------------------------------------
+create table if not exists public.telegram_outbox (
+  id          bigint generated always as identity primary key,
+  event_type  text not null,
+  message     text not null,
+  dedupe_key  text,
+  status      text not null default 'pending' check (status in ('pending','dispatched','sent','failed')),
+  attempts    int  not null default 0,
+  created_at  timestamptz not null default now(),
+  sent_at     timestamptz,
+  net_request_id bigint
+);
+alter table public.telegram_outbox add column if not exists net_request_id bigint;
+alter table public.telegram_outbox drop constraint if exists telegram_outbox_status_check;
+alter table public.telegram_outbox add constraint telegram_outbox_status_check
+  check (status in ('pending','dispatched','sent','failed'));
+alter table public.telegram_outbox add column if not exists reply_markup jsonb;
+create index if not exists telegram_outbox_pending_idx on public.telegram_outbox (status, created_at);
+create index if not exists telegram_outbox_dedupe_idx  on public.telegram_outbox (dedupe_key, created_at desc) where dedupe_key is not null;
+create index if not exists telegram_outbox_net_request_idx on public.telegram_outbox (net_request_id) where net_request_id is not null;
+alter table public.telegram_outbox enable row level security;
+comment on table public.telegram_outbox is 'قائمة انتظار إشعارات تيليغرام — يرسلها dispatch_telegram_outbox كل دقيقة';
+
+create or replace function public.notify_telegram(
+  p_event_type     text,
+  p_message        text,
+  p_dedupe_key     text default null,
+  p_dedupe_minutes int  default 60
+) returns void
+language plpgsql security definer set search_path = public
+as $$
+begin
+  if p_message is null or length(trim(p_message)) = 0 then return; end if;
+  if p_dedupe_key is not null and exists (
+    select 1 from public.telegram_outbox
+    where dedupe_key = p_dedupe_key
+      and created_at > now() - make_interval(mins => greatest(p_dedupe_minutes, 1))
+  ) then
+    return;
+  end if;
+  insert into public.telegram_outbox (event_type, message, dedupe_key)
+  values (p_event_type, left(p_message, 3900), p_dedupe_key);
+end;
+$$;
+revoke execute on function public.notify_telegram(text, text, text, int) from public;
+revoke execute on function public.notify_telegram(text, text, text, int) from anon;
+grant  execute on function public.notify_telegram(text, text, text, int) to authenticated, service_role;
 
 create table if not exists public.khalil_audit_events (
   id bigint generated always as identity primary key,
