@@ -4,7 +4,9 @@ import {
   SALES_SYNC_MAX_AGE_MINUTES,
   assertTrustedSalesInput,
   getSingleSalesSyncMarker,
+  resolveDefaultSnapshotWindowEnd,
 } from './item-snapshot-freshness.mjs';
+import { getSalesWindow } from './item-snapshot-pipeline.mjs';
 
 const now = new Date('2026-08-19T01:10:00.000Z');
 const snapshotWindow = { start: '2026-07-20', end: '2026-08-19' };
@@ -71,6 +73,42 @@ assert.throws(() => assertTrustedSalesInput({
   salesLineItems: salesRows, snapshotWindow, now,
 }), /must exactly match the full snapshot window/);
 
+// D2. Midnight race: default today may rebase to a fresh yesterday sealed marker.
+const midnightNow = new Date('2026-08-19T00:30:00.000Z');
+const yesterdayMarker = {
+  ...marker,
+  window_start: '2026-07-19',
+  window_end: '2026-08-18',
+  completed_at: '2026-08-18T23:50:00.000Z',
+};
+const rebased = resolveDefaultSnapshotWindowEnd({
+  requestedWindowEnd: '2026-08-19',
+  windowEndWasExplicit: false,
+  marker: yesterdayMarker,
+  now: midnightNow,
+  getSalesWindow,
+});
+assert.equal(rebased.windowEnd, '2026-08-18');
+assert.equal(rebased.rebased, true);
+const explicitKept = resolveDefaultSnapshotWindowEnd({
+  requestedWindowEnd: '2026-08-19',
+  windowEndWasExplicit: true,
+  marker: yesterdayMarker,
+  now: midnightNow,
+  getSalesWindow,
+});
+assert.equal(explicitKept.windowEnd, '2026-08-19');
+assert.equal(explicitKept.rebased, false);
+const staleYesterday = resolveDefaultSnapshotWindowEnd({
+  requestedWindowEnd: '2026-08-19',
+  windowEndWasExplicit: false,
+  marker: { ...yesterdayMarker, completed_at: '2026-08-18T22:00:00.000Z' },
+  now: midnightNow,
+  getSalesWindow,
+});
+assert.equal(staleYesterday.rebased, false);
+assert.equal(staleYesterday.windowEnd, '2026-08-19');
+
 // The producer can replace wider history, so the guard never treats older rows as immutable.
 const salesProducer = await readFile('tools/push-sales-line-items.ps1', 'utf8');
 assert.match(salesProducer, /\[ValidateRange\(1, 31\)\]\[int\]\$Days = 7/);
@@ -113,5 +151,7 @@ assert.doesNotMatch(producer, /max\s*\(\s*created_at\s*\)/i);
 assert.match(producer, /p_snapshot_window_start:\s*result\.window\.start/);
 assert.match(producer, /p_snapshot_window_end:\s*result\.window\.end/);
 assert.match(producer, /p_expected_sales_generation:\s*\{/);
+assert.match(producer, /resolveDefaultSnapshotWindowEnd/,
+  'producer must rebase default window_end onto a fresh yesterday sales marker after midnight');
 
 console.log('Item snapshot freshness guard contract checks passed.');

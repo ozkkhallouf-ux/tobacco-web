@@ -223,8 +223,24 @@ if ($isMainComputer) {
   }
 
   if ((-not $workerTask) -and (-not $heartbeatFreshEarly)) {
-    $problems.Add("المهمة «$ameenWorkerTaskName» غير مسجّلة أو متوقفة (لا نبض)")
-    $diagAll = @(Get-ScheduledTask -ErrorAction SilentlyContinue); $diagNames = @($diagAll | Where-Object { $_.TaskName -like "TOBACCO *" } | ForEach-Object { $_.TaskName }); Write-Log ("FAIL: task not registered — [" + $ameenWorkerTaskName + "] | enumerated=" + $diagAll.Count + " | tobacco=" + ($diagNames -join ", "))
+    # Get-ScheduledTask في جلسة المُجدوِل قد يُخفي المهمة؛ لا ندّعي «غير مسجّلة»
+    # إلا بعد إثبات مستقل بـschtasks.exe. إن وُجدت هناك بلا نبض = عطل رؤية/تشغيل لا غياب تسجيل.
+    $schtasksOut = & schtasks.exe /Query /TN $ameenWorkerTaskName 2>&1 | Out-String
+    $schtasksMissing = ($LASTEXITCODE -ne 0)
+    if ($schtasksMissing) {
+      $problems.Add("المهمة «$ameenWorkerTaskName» غير مسجّلة (أثبت schtasks.exe غيابها) — لا نبض حديث يناقض ذلك")
+      Write-Log ("FAIL: task not registered (schtasks proved missing) — [" + $ameenWorkerTaskName + "] | " + ($schtasksOut -replace "\s+", " ").Trim())
+    } else {
+      $problems.Add("المهمة «$ameenWorkerTaskName» غير مرئية عبر Get-ScheduledTask رغم وجودها في schtasks — لا نبض حديث")
+      Write-Log ("FAIL: task invisible to Get-ScheduledTask but present in schtasks — [" + $ameenWorkerTaskName + "] | attempting schtasks /Run")
+      try {
+        & schtasks.exe /Run /TN $ameenWorkerTaskName 2>&1 | Out-Null
+        Write-Log "RECOVERY ATTEMPT: schtasks /Run $ameenWorkerTaskName"
+      } catch {
+        Write-Log "FAIL: schtasks /Run could not start $ameenWorkerTaskName — $($_.Exception.Message)"
+      }
+    }
+    $diagAll = @(Get-ScheduledTask -ErrorAction SilentlyContinue); $diagNames = @($diagAll | Where-Object { $_.TaskName -like "TOBACCO *" } | ForEach-Object { $_.TaskName }); Write-Log ("DIAG: enumerated=" + $diagAll.Count + " | tobacco=" + ($diagNames -join ", "))
   } else {
     $heartbeatAgeMinutes = $null
     $heartbeatStatus = $null
