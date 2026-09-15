@@ -1,10 +1,12 @@
 # تقرير موضوع مزامنة الأمين
 
-آخر تحديث: 2026-08-23
+آخر تحديث: 2026-09-15
 
 ## الحالة الحالية
 
 توجد مهام Windows منفصلة للأسعار والمخزون والأرصدة والفواتير والحركات والتكاليف. قاعدة التشغيل المعتمدة هي `AmnDb002`. لا يثبت هذا التقرير أن كل مهمة تعمل الآن؛ يلزم دليل حديث لكل مسار عند تشخيصه.
+
+`Build-InventoryReport` في `tools/ameen-sync-agent.ps1` يحفظ `itemGuid` بأحرف صغيرة (من `item_guid` / `mt000.GUID` في `ameen-stock-query.sql`) على كل صف مخزون في تقرير `ameen_sql_agent`، كي يربط المساعد المالي سطور المبيعات (`sales_line_items.item_key` = MatGUID) بالمخزون دون دمج بطاقات تتصادم بعد تطبيع الاسم (PR #205).
 
 في تحقق حي مضبوط بتاريخ 2026-08-23، أُضيف حسابا المالك إلى قائمة السماح في `ameen-read-broker` v4 مع إبقاء الموارد محصورة في `health` و`stock` و`customers`. نُفّذ طلب Live واحد من جلسة مالك مصادق عليها من دون إعادة تشغيل العامل: نجحت الموارد الثلاثة بصورة مستقلة، وعاد المخزون بـ424 صفاً صالحاً و`stockAsOf=2026-08-23T17:41:08.1281924Z`. بقيت توصيات الشراء موثوقة وحديثة: 8 بطاقات بكميات رقمية وبيانات حركة حديثة، بلا fallback أو review-only. لم تحدث كتابة إلى الأمين أو تعديل Scheduled Task أو تشغيل يدوي.
 
@@ -14,7 +16,7 @@
 
 ## نطاق الملفات
 
-`tools/ameen-sync-agent.ps1`, `tools/ameen-read-*.ps1`, `tools/pull-*.ps1`, `tools/push-*.ps1`, `tools/register-*.ps1`, `tools/verify-*.ps1`, `supabase/ameen-*.sql`, `supabase/functions/ameen-read-broker/index.ts`, `scripts/check-ameen-read-gateway.mjs`.
+`tools/ameen-sync-agent.ps1`, `tools/ameen-stock-query.sql`, `tools/ameen-read-*.ps1`, `tools/pull-*.ps1`, `tools/push-*.ps1`, `tools/register-*.ps1`, `tools/verify-*.ps1`, `supabase/ameen-*.sql`, `supabase/functions/ameen-read-broker/index.ts`, `scripts/check-ameen-read-gateway.mjs`.
 
 ## قيود ثابتة
 
@@ -22,6 +24,7 @@
 - نجاح Scheduled Task أو process وحده ليس دليلاً؛ يلزم أثر العملية المحددة وحداثته.
 - الأسرار تبقى خارج Git ولا تُطبع أو تُنسخ إلى التقارير.
 - الكتابات إلى الأمين تحتاج صلاحية صريحة ومقارنة قبل/بعد مناسبة للمخاطر.
+- صفوف مخزون التقرير يجب أن تحمل `itemGuid` متى وفره الاستعلام؛ المساعد لا يعتمد على الاسم المطبَّع وحده لتوصية الشراء عند التصادم.
 
 ## فحوص إلزامية
 
@@ -29,4 +32,4 @@
 
 ## الخطوة التالية
 
-عند إصلاح أي مسار، سجّل اسم المهمة المنطقية ووقت آخر نجاح ودليل النتيجة من دون connection strings أو مفاتيح.
+عند إصلاح أي مسار، سجّل اسم المهمة المنطقية ووقت آخر نجاح ودليل النتيجة من دون connection strings أو مفاتيح. بعد دمج PR #205 شغّل مزامنة مخزون على Windows لملء `itemGuid` في التقارير الجديدة.
