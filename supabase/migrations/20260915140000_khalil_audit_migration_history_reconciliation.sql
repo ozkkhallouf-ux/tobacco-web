@@ -16,14 +16,19 @@
 --      khalil_audit_events, khalil_audit_cursor, and
 --      record_khalil_audit_event (per commit e2a81a6, "سجل تدقيق غير قابل
 --      للتعديل لعمليات خليل"). This migration was applied directly (e.g. via
---      SQL Editor). The original DDL was never committed; the repository now
---      carries a correctly versioned *read-only history placeholder*
---      (`20260830141802_khalil_audit_log.sql`) so CLI remote/local history
---      can match. That placeholder does NOT recreate or invent the original
---      production DDL — it only verifies the base objects exist.
+--      SQL Editor). The original SQL Editor DDL was never committed under this
+--      timestamp. The repository now carries
+--      `20260830141802_khalil_audit_log.sql` which:
+--        (a) matches the production version/name so CLI history aligns; and
+--        (b) provides *fresh-DB bootstrap* DDL derived from the local
+--            superseded draft so clean migration replay does not abort here
+--            (Codex P1). Byte-for-byte equivalence with the original production
+--            apply is NOT proven and is NOT claimed. If somehow executed
+--            against a DB that already has the base objects, a guard refuses
+--            re-apply (history-safe).
 --
 --      khalil_audit_sync_heartbeat and khalil_audit_notify_failures are NOT
---      part of that base migration — git history shows they were designed
+--      attributed to commit e2a81a6 — git history shows they were designed
 --      later and independently, on the same local draft file
 --      (superseded/20260830140000_khalil_audit_log.sql):
 --        - khalil_audit_sync_heartbeat: added per commit bf3e26d ("heartbeat
@@ -32,12 +37,12 @@
 --        - khalil_audit_notify_failures: added per commit 77e9f47 ("notify
 --          failsafe table"), an independent failsafe table plus a
 --          pg_cron-driven retry function.
---      No production timestamp is claimed for either of these two tables —
---      only their existence and their live objects are verified below
---      (read-only). Whether they were applied to production as part of
---      20260830141802 or as separate, unrecorded direct SQL Editor changes
---      is NOT established by any evidence available to this audit, and this
---      note does not guess at it.
+--      Live catalog checks confirm both tables exist on production. Whether
+--      they were applied as part of 20260830141802 or as separate, unrecorded
+--      SQL Editor changes is NOT established. The fresh-bootstrap path of
+--      `20260830141802_khalil_audit_log.sql` includes them so later active
+--      migrations and the sync agent can run on a clean database — that is a
+--      replay bootstrap choice, not a forensic claim about the original apply.
 --
 --   2. `supabase/migrations/superseded/20260830140000_khalil_audit_log.sql`
 --      is a separate local draft that was iterated on through many later
@@ -61,15 +66,15 @@
 --
 --      IMPORTANT — migration ordering / operator warning (EN + AR):
 --
---      PREREQUISITE (remote-only history): production records
---      `20260830141802` (`khalil_audit_log`). `--include-all` only includes
+--      PREREQUISITE (remote-only history): `--include-all` only includes
 --      local migrations missing from the remote history table; it does NOT
 --      reconcile the inverse (remote version missing locally) and the CLI
---      still stops on that mismatch. The matching local placeholder
---      `20260830141802_khalil_audit_log.sql` must be present (and on this
---      branch it is) BEFORE any Stage 2 / `--include-all` push. Other
---      remote-only versions listed in superseded/README.md may still need
---      the same treatment if `supabase migration list` reports them.
+--      still stops on that mismatch. EVERY known remote-only version listed
+--      in superseded/README.md now has a matching local file (verify-only
+--      landmarks for non-audit stamps; bootstrap+refuse-if-present for
+--      `20260830141802_khalil_audit_log.sql`). Confirm with
+--      `supabase migration list` before Stage 2 / `--include-all`. If an
+--      unconfirmed *name* mismatches, rename only the name segment.
 --
 --      This reconciliation file is timestamped 20260915140000, which is
 --      chronologically AFTER both pending 09-02 files AND after
@@ -92,13 +97,11 @@
 --            migrations are included alongside (or before) this file.
 --
 --      Arabic / تحذير للمشغّل:
---      شرط مسبق: الإنتاج يسجّل الطابع البعيد-فقط `20260830141802`. العلم
---      `--include-all` لا يغلق هذه الفجوة (يعالج المهاجرات المحلية الناقصة
---      من السجل البعيد فقط) وCLI يتوقف عند عدم التطابق. يجب وجود الملف
---      المحلي المطابق `20260830141802_khalil_audit_log.sql` قبل المرحلة ٢
---      أو `--include-all` (وهو موجود على هذا الفرع). طوابع بعيدة-فقط أخرى
---      في superseded/README.md قد تحتاج المعاملة نفسها إن أبلغ عنها
---      `supabase migration list`.
+--      شرط مسبق: العلم `--include-all` لا يغلق فجوات remote-only (يعالج
+--      المهاجرات المحلية الناقصة من السجل البعيد فقط). كل طابع بعيد-فقط
+--      معروف في superseded/README.md له الآن ملف محلي مطابق على هذا الفرع.
+--      راجع `supabase migration list` قبل المرحلة ٢ / `--include-all`.
+--      عند اختلاف الاسم فقط: أعد تسمية جزء الاسم مع الإبقاء على الإصدار.
 --
 --      بعد إغلاق فجوة remote-only: إذا كان الإنتاج يملك أصلاً طابعاً لاحقاً
 --      مثل `20260914130000`، فإن `supabase db push` العادي لن يطبّق

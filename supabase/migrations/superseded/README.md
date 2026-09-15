@@ -8,16 +8,16 @@
 
 ## جدول الاستبدال
 
-| الملف المحلي (لم يُطبَّق) | Timestamp الإنتاجي المقابل | ما الذي تغيَّر |
-|---|---|---|
-| `20260823084956_smart_inventory_counter_isolation.sql` | `20260823085423` (بعده بـ4 دق.) | تعديل على منطق عزل العدادات في الجلسات |
-| `20260826094640_fix_ameen_read_requests_initplan_current_setting.sql` | `20260826104745` + `20260826133200` | تحسين أداء الاستعلام بفصل إصلاح initplan |
-| `20260830140000_khalil_audit_log.sql` | `20260830141802` (`khalil_audit_log`) — انظر ملاحظة* + placeholder† | مسودة محلية لإنشاء جداول الـaudit وتعريف الدوال؛ لم يُثبت تطابقها مع محتوى الـmigration المطبَّق فعلياً على production |
-| `20260830144330_expense_entries_owner_only_rls.sql` | `20260830172655` (`expense_entries_owner_only_rls`) | تعديل في تعريف سياسة RLS للمصروفات |
-| `20260831051500_fix_inventory_recon_match_key_fallbacks.sql` | `20260831020850` | تطبيق على الإنتاج قبل الـcommit المحلي |
-| `20260831120000_telegram_delivery_observability.sql` | `20260831185634` | إضافة `net_request_id` بنسخة مُصحَّحة |
+| الملف المحلي (لم يُطبَّق) | Timestamp الإنتاجي المقابل | ملف التسوية في المجلد الأب | ما الذي تغيَّر |
+|---|---|---|---|
+| `20260823084956_smart_inventory_counter_isolation.sql` | `20260823085423` | `../20260823085423_smart_inventory_counter_isolation.sql` † | تعديل على منطق عزل العدادات في الجلسات |
+| `20260826094640_fix_ameen_read_requests_initplan_current_setting.sql` | `20260826104745` + `20260826133200` | `../20260826104745_...sql` + `../20260826133200_...sql` † | تحسين أداء الاستعلام بفصل إصلاح initplan |
+| `20260830140000_khalil_audit_log.sql` | `20260830141802` (`khalil_audit_log`) | `../20260830141802_khalil_audit_log.sql` †† | مسودة محلية لإنشاء جداول الـaudit وتعريف الدوال؛ لم يُثبت تطابقها مع محتوى الـmigration المطبَّق فعلياً على production |
+| `20260830144330_expense_entries_owner_only_rls.sql` | `20260830172655` (`expense_entries_owner_only_rls`) | `../20260830172655_expense_entries_owner_only_rls.sql` † | تعديل في تعريف سياسة RLS للمصروفات |
+| `20260831051500_fix_inventory_recon_match_key_fallbacks.sql` | `20260831020850` | `../20260831020850_fix_inventory_recon_match_key_fallbacks.sql` † | تطبيق على الإنتاج قبل الـcommit المحلي |
+| `20260831120000_telegram_delivery_observability.sql` | `20260831185634` | `../20260831185634_telegram_delivery_observability.sql` † | إضافة `net_request_id` بنسخة مُصحَّحة |
 
-\* **تصحيح (2026-09-14):** الإدخال السابق لهذا السطر كان خاطئاً — كان يشير إلى
+\* **تصحيح (2026-09-14):** الإدخال السابق لسطر khalil audit كان خاطئاً — كان يشير إلى
 `20260830134123` (وهذه في الواقع `harden_upsert_ameen_daily_profit_grants`، لا علاقة
 لها بـkhalil audit). الـmigration الحي الصحيح المرتبط فعلياً بإنشاء **الجداول الأساسية**
 لـkhalil audit (`khalil_audit_events`, `khalil_audit_cursor`) على الإنتاج هو
@@ -31,12 +31,19 @@
 قط ولا تُعتبر نسخة تاريخية مثبتة من الـmigration الحي. الغرض من هذا الجدول هو تتبّع أي
 timestamp إنتاجي يقابل أي محاولة محلية تقريبياً بالوقت، وليس إثبات تطابق المحتوى.
 
-† **placeholder لتسوية السجل (2026-09-15):** الملف
-`../20260830141802_khalil_audit_log.sql` (في مجلد المهاجرات الأب، **ليس** نسخة من
-هذه المسودة) هو placeholder قراءة-فقط يطابق طابع واسم الإنتاج كي يغلق فجوة
-remote-only أمام Supabase CLI. لا ينقل محتوى المسودة أعلاه ولا يخترع DDL إنشاء.
-**لا تنقل مسودة `superseded/` إلى الأب** — ذلك ممنوع أعلاه؛ الـplaceholder ملف
-مستقل وآمن.
+† **placeholder تسوية سجل (2026-09-15):** ملف في المجلد الأب يطابق طابع الإنتاج
+(واسم تقريبي من المسودة المحلية حيث لم يُؤكَّد الاسم الحي). محتوى **تحقق قراءة-فقط**
+من معلم (landmark) — **لا** ينقل مسودة `superseded/` ولا يعيد تشغيل DDL غير مُثبت.
+عند غياب المعلم يرفع استثناء بدل اختراع مخطط. أسماء الطوابع غير المؤكَّدة
+(`20260826133200` خصوصاً) يجب مطابقتها مع `supabase migration list` وإعادة تسمية
+جزء الاسم فقط إن لزم (الإبقاء على رقم الإصدار).
+
+†† **أساس audit قابل لإعادة التشغيل (2026-09-15):** `../20260830141802_khalil_audit_log.sql`
+ليس placeholder تحقق فقط. يوفّر DDL bootstrap لقاعدة فارغة مشتق من المسودة المحلية
+(مطلوب لإعادة تشغيل سلسلة المهاجرات — Codex P1). على الإنتاج: CLI يتخطّى الملف لأن
+الإصدار مسجَّل. إن شُغِّل يدوياً والكائنات موجودة: الحارس يرفض إعادة التطبيق
+(history-safe). **لا يدّعي** تطابقاً حرفياً مع SQL Editor الأصلي. **لا تنقل**
+مسودة `superseded/` إلى الأب كملف منفصل — الـbootstrap مضمَّن في ملف الإصدار الإنتاجي.
 
 كذلك تم تصحيح إدخال `expense_entries_owner_only_rls` أعلاه: كان يشير خطأً إلى
 `20260830144806` (وهذه `khalil_audit_notify_catch_query_canceled`)؛ الصحيح هو
@@ -57,25 +64,35 @@ remote-only أمام Supabase CLI. لا ينقل محتوى المسودة أع�
 
 ## تحذير تشغيلي — ترتيب النشر / Operator deployment order
 
-### 0) شرط مسبق — إغلاق remote-only قبل أي `db push`
+### 0) شرط مسبق — إغلاق كل remote-only المعروف قبل أي `db push`
 
-**EN:** Production records `20260830141802` (`khalil_audit_log`) but historically
-had no matching local file. `--include-all` only “Include[s] all migrations not
-found on remote history table”
+**EN:** Production records several versions that historically had no matching local
+file. `--include-all` only “Include[s] all migrations not found on remote history
+table”
 ([supabase db push](https://supabase.com/docs/reference/cli/supabase-db-push));
 it does **not** handle the inverse (remote version missing locally), and the CLI
-still stops on that history mismatch. The correctly versioned read-only
-placeholder `../20260830141802_khalil_audit_log.sql` closes **this** gap. Other
-remote-only timestamps in the table above may still block push until each has a
-matching local placeholder (or an explicitly approved history-repair step) —
-check with `supabase migration list` before Stage 2.
+still stops on that history mismatch. Every known remote-only stamp from the table
+above now has a matching local file under `../`:
 
-**AR:** الإنتاج يسجّل `20260830141802` (`khalil_audit_log`). العلم
-`--include-all` يعالج المهاجرات المحلية الناقصة من السجل البعيد فقط، **ولا**
-يغلق الحالة العكسية (طابع بعيد بلا ملف محلي) فيتوقف CLI. الـplaceholder
-`../20260830141802_khalil_audit_log.sql` يغلق **هذه** الفجوة. طوابع بعيدة-فقط
-أخرى في الجدول أعلاه قد تبقى حاجزاً إلى أن يُعالَج كلٌّ منها — راجع
-`supabase migration list` قبل المرحلة ٢.
+| version | local file | kind |
+|---|---|---|
+| `20260823085423` | `20260823085423_smart_inventory_counter_isolation.sql` | landmark verify |
+| `20260826104745` | `20260826104745_fix_ameen_read_requests_initplan_current_setting.sql` | landmark verify |
+| `20260826133200` | `20260826133200_fix_ameen_read_requests_initplan_followup.sql` | landmark verify (name unconfirmed) |
+| `20260830141802` | `20260830141802_khalil_audit_log.sql` | fresh-DB bootstrap + refuse-if-present |
+| `20260830172655` | `20260830172655_expense_entries_owner_only_rls.sql` | landmark verify |
+| `20260831020850` | `20260831020850_fix_inventory_recon_match_key_fallbacks.sql` | landmark verify |
+| `20260831185634` | `20260831185634_telegram_delivery_observability.sql` | landmark verify |
+
+Re-check with `supabase migration list` before Stage 2. If a **name** mismatch
+appears for an unconfirmed stamp, rename only the name segment (keep the version).
+
+**AR:** الإنتاج يسجّل عدة طوابع كانت بلا ملف محلي. العلم `--include-all` يعالج
+المهاجرات المحلية الناقصة من السجل البعيد فقط، **ولا** يغلق الحالة العكسية
+(طابع بعيد بلا ملف محلي). كل طابع remote-only معروف في الجدول أعلاه له الآن ملف
+محلي مطابق تحت `../` (انظر الجدول الإنجليزي). راجع `supabase migration list`
+قبل المرحلة ٢. عند اختلاف **الاسم** فقط لطابع غير مؤكَّد: أعد تسمية جزء الاسم
+مع الإبقاء على رقم الإصدار.
 
 ### 1) بعد إغلاق remote-only — `--include-all` أو المرحلة ٢
 
