@@ -517,24 +517,21 @@ function invoiceLineCandidates(line: Record<string, unknown>) {
   };
 }
 
-function computeInvoiceLineBasisPlan(
-  lines: Array<Record<string, unknown>>,
-  total: number
-): Map<Record<string, unknown>, InvoiceLineBasis> | null {
-  if (!(total > 0) || !lines.length) return null;
-  const tol = invoiceBasisTolerance(lines);
-
+function invoiceStoredSumMatchesTotal(lines: Array<Record<string, unknown>>, total: number, tol: number) {
   let storedSum = 0;
-  let storedComplete = true;
   for (const line of lines) {
     const stored = Number(line.lineTotal);
-    if (!Number.isFinite(stored) || stored < 0) { storedComplete = false; break; }
+    if (!Number.isFinite(stored) || stored < 0) return false;
     storedSum += stored;
   }
-  if (storedComplete && Math.abs(storedSum - total) <= tol) return null;
+  return Math.abs(storedSum - total) <= tol;
+}
 
+type InvoiceBasisBucket = { delta: number; lines: Array<Record<string, unknown>> };
+
+function seedInvoiceBasisBuckets(lines: Array<Record<string, unknown>>) {
   const basis = new Map<Record<string, unknown>, InvoiceLineBasis>();
-  const buckets = new Map<string, { delta: number; lines: Array<Record<string, unknown>> }>();
+  const buckets = new Map<string, InvoiceBasisBucket>();
   let base = 0;
   for (const line of lines) {
     const candidates = invoiceLineCandidates(line);
@@ -551,14 +548,16 @@ function computeInvoiceLineBasisPlan(
     if (bucket) bucket.lines.push(line);
     else buckets.set(key, { delta: candidates.unit1 - candidates.unit2, lines: [line] });
   }
+  return { basis, buckets, base };
+}
 
-  const target = total - base;
-  if (Math.abs(target) <= tol) return basis;
-
-  const groups = [...buckets.values()].sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
+function searchInvoiceBasisPicks(
+  groups: InvoiceBasisBucket[],
+  target: number,
+  tol: number
+): number[] | null {
   const count = groups.length;
   if (!count) return null;
-
   const suffixMax = new Array(count + 1).fill(0);
   const suffixMin = new Array(count + 1).fill(0);
   for (let i = count - 1; i >= 0; i -= 1) {
@@ -566,7 +565,6 @@ function computeInvoiceLineBasisPlan(
     suffixMax[i] = suffixMax[i + 1] + Math.max(0, span);
     suffixMin[i] = suffixMin[i + 1] + Math.min(0, span);
   }
-
   const picks = new Array(count).fill(0);
   let steps = 0;
   const searchWithin = (limit: number) => {
@@ -587,13 +585,29 @@ function computeInvoiceLineBasisPlan(
     };
     return walk(0, target);
   };
-
   let outcome = searchWithin(INVOICE_BASIS_EXACT_TOLERANCE);
   if (outcome !== "found" && outcome !== "budget" && tol > INVOICE_BASIS_EXACT_TOLERANCE) {
     picks.fill(0);
     outcome = searchWithin(tol);
   }
-  if (outcome !== "found") return null;
+  return outcome === "found" ? picks : null;
+}
+
+function computeInvoiceLineBasisPlan(
+  lines: Array<Record<string, unknown>>,
+  total: number
+): Map<Record<string, unknown>, InvoiceLineBasis> | null {
+  if (!(total > 0) || !lines.length) return null;
+  const tol = invoiceBasisTolerance(lines);
+  if (invoiceStoredSumMatchesTotal(lines, total, tol)) return null;
+
+  const { basis, buckets, base } = seedInvoiceBasisBuckets(lines);
+  const target = total - base;
+  if (Math.abs(target) <= tol) return basis;
+
+  const groups = [...buckets.values()].sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
+  const picks = searchInvoiceBasisPicks(groups, target, tol);
+  if (!picks) return null;
 
   groups.forEach((group, index) => {
     for (let i = 0; i < picks[index]; i += 1) basis.set(group.lines[i], "unit1");
@@ -1658,6 +1672,78 @@ function matchCustomerBalanceRow(
   return { customer: matches[0].row };
 }
 
+// فروع أداة المبيعات خارج `run` — خفض تعقيد CodeFactor (Complex Method).
+// (بعد ac0d560 ارتفع run ببوابة نفي الصفر؛ وبعد a0b6537 بقي معلَّقاً.)
+async function salesEmptyPeriodResult(period: Period, partial: boolean): Promise<ToolResult> {
+  const any = await readRest("sales_line_items?select=sale_date&order=sale_date.desc&limit=1");
+  if (!Array.isArray(any) || !any.length) return noData("المبيعات", ["sales_line_items"]);
+  // «لا توجد فاتورة» نفيٌ قاطع. خارج النافذة المتحقَّقة قد يكون الغياب
+  // غياب مزامنة لا غياب بيع — فتحذير ملحق بنفي لا يكفي؛ يُحجب الحكم عبر
+  // salesCompleteness.complete. (رصدها Codex على PR #205 بعد f5cabd6 —
+  // discussion_r4017908925.)
+  const emptyState = await salesCompleteness(period, partial);
+  if (!emptyState.complete) {
+    return {
+      ok: false,
+      text: `**مبيعات ${period.label} (${period.from} → ${period.to}) — غير محسومة**\n`
+        + `لم أجد أي فاتورة في هذه الفترة، لكن قراءة المبيعات **غير مكتملة** — فلا أجزم بغيابها.`
+        + `\n\nآخر يوم فيه مبيعات مسجّلة هو **${String(any[0].sale_date)}**.`
+        + emptyState.note,
+      sources: ["sales_line_items", "sales_line_items_sync_state"],
+      partial
+    };
+  }
+  return {
+    ok: true,
+    text: `**مبيعات ${period.label} (${period.from} → ${period.to})**\nلا توجد أي فاتورة مسجّلة في هذه الفترة. آخر يوم فيه مبيعات مسجّلة هو **${String(any[0].sale_date)}**.`
+      + `\n\nملاحظة: سطور المبيعات تصل عبر مزامنة الأمين، فإن كان اليوم ما زال في بدايته قد لا تكون فواتيره رُفعت بعد.`,
+    sources: ["sales_line_items", "sales_line_items_sync_state"],
+    partial
+  };
+}
+
+type SalesSummary = ReturnType<typeof summarizeSales>;
+
+function formatSalesBody(period: Period, now: SalesSummary, role: Role): string {
+  let text = `**مبيعات ${period.label} (${period.from} → ${period.to})**\n`
+    + `- الإجمالي: **${money(now.total)}**\n`
+    + `- عدد الفواتير: **${now.bills}** على ${now.lines} سطر\n`
+    + `- جملة: ${money(now.wholesale)} / مفرق: ${money(now.retail)}`;
+  if (role === "owner" && now.costKnown) {
+    const pct = now.marginRevenue ? (now.margin / now.marginRevenue) * 100 : 0;
+    text += `\n- هامش المنتج المحسوب (بيع ناقص تكلفة) على ${now.costKnown} سطر متوفرة تكلفتها: **${money(now.margin)}** (${pct.toFixed(1)}%)`
+      + (now.costMissing ? `\n  - ${now.costMissing} سطر بلا تكلفة معروفة، غير داخل في الهامش أعلاه.` : "")
+      + `\n  - هذا هامش منتج تقديري قبل المصاريف والمرتجعات والحسومات. الرقم المحاسبي المعتمد للربح هو تقرير الأمين — اسأل: \`ما الأرباح؟\``;
+  }
+  return text;
+}
+
+async function appendSalesComparison(
+  text: string,
+  period: Period,
+  now: SalesSummary,
+  role: Role
+): Promise<{ text: string; comparePeriod: Period; comparePartial: boolean }> {
+  const prev = previousPeriod(period);
+  // قراءة مستقلة بحدّ بتر مستقل. إسقاط `partial` هنا كان يعرض مجموع
+  // الفترة السابقة والفرق والنسبة **مبتورةً** بوصفها نهائية، ويُبقي
+  // `partial` في الجواب معبّراً عن الفترة الحالية وحدها.
+  const prevRead = await readSales(prev, role);
+  const before = summarizeSales(prevRead.rows);
+  const delta = now.total - before.total;
+  const pct = before.total ? (delta / before.total) * 100 : null;
+  text += `\n\n**مقارنة بـ${prev.label} (${prev.from} → ${prev.to})**\n`
+    + `- الفترة السابقة: **${money(before.total)}** على ${before.bills} فاتورة\n`
+    + `- الفرق: **${delta >= 0 ? "+" : ""}${money(delta)}**`
+    + (pct === null
+      ? " (لا نسبة — الفترة السابقة صفر)"
+      : ` (${delta >= 0 ? "+" : ""}${pct.toFixed(1)}%)`)
+    + (prevRead.partial
+      ? `\n- ⚠️ قراءة الفترة السابقة بلغت سقف ${HARD_ROW_CAP} سطر، فمجموعها والفرق والنسبة أعلاه **مبتورة**.`
+      : "");
+  return { text, comparePeriod: prev, comparePartial: prevRead.partial };
+}
+
 const TOOLS: Tool[] = [
   // ── الصناديق والسيولة ─────────────────────────────────────────────────────
   {
@@ -1876,69 +1962,17 @@ const TOOLS: Tool[] = [
       const period = ctx.period;
       const compare = /قارن|مقارنه|مقابل|بالمقارنه|نسبه التغير|اكثر من|اقل من الشهر/.test(normalize(ctx.question));
       const current = await readSales(period, ctx.role);
+      if (!current.rows.length) return salesEmptyPeriodResult(period, current.partial);
+
       const now = summarizeSales(current.rows);
-
-      if (!current.rows.length) {
-        const any = await readRest("sales_line_items?select=sale_date&order=sale_date.desc&limit=1");
-        if (!Array.isArray(any) || !any.length) return noData("المبيعات", ["sales_line_items"]);
-        // «لا توجد فاتورة» نفيٌ قاطع. خارج النافذة المتحقَّقة قد يكون الغياب
-        // غياب مزامنة لا غياب بيع — فتحذير ملحق بنفي لا يكفي؛ يُحجب الحكم عبر
-        // salesCompleteness.complete. (رصدها Codex على PR #205 بعد f5cabd6 —
-        // discussion_r4017908925.)
-        const emptyState = await salesCompleteness(period, current.partial);
-        if (!emptyState.complete) {
-          return {
-            ok: false,
-            text: `**مبيعات ${period.label} (${period.from} → ${period.to}) — غير محسومة**\n`
-              + `لم أجد أي فاتورة في هذه الفترة، لكن قراءة المبيعات **غير مكتملة** — فلا أجزم بغيابها.`
-              + `\n\nآخر يوم فيه مبيعات مسجّلة هو **${String(any[0].sale_date)}**.`
-              + emptyState.note,
-            sources: ["sales_line_items", "sales_line_items_sync_state"],
-            partial: current.partial
-          };
-        }
-        return {
-          ok: true,
-          text: `**مبيعات ${period.label} (${period.from} → ${period.to})**\nلا توجد أي فاتورة مسجّلة في هذه الفترة. آخر يوم فيه مبيعات مسجّلة هو **${String(any[0].sale_date)}**.`
-            + `\n\nملاحظة: سطور المبيعات تصل عبر مزامنة الأمين، فإن كان اليوم ما زال في بدايته قد لا تكون فواتيره رُفعت بعد.`,
-          sources: ["sales_line_items", "sales_line_items_sync_state"],
-          partial: current.partial
-        };
-      }
-
-      let text = `**مبيعات ${period.label} (${period.from} → ${period.to})**\n`
-        + `- الإجمالي: **${money(now.total)}**\n`
-        + `- عدد الفواتير: **${now.bills}** على ${now.lines} سطر\n`
-        + `- جملة: ${money(now.wholesale)} / مفرق: ${money(now.retail)}`;
-      if (ctx.role === "owner" && now.costKnown) {
-        const pct = now.marginRevenue ? (now.margin / now.marginRevenue) * 100 : 0;
-        text += `\n- هامش المنتج المحسوب (بيع ناقص تكلفة) على ${now.costKnown} سطر متوفرة تكلفتها: **${money(now.margin)}** (${pct.toFixed(1)}%)`
-          + (now.costMissing ? `\n  - ${now.costMissing} سطر بلا تكلفة معروفة، غير داخل في الهامش أعلاه.` : "")
-          + `\n  - هذا هامش منتج تقديري قبل المصاريف والمرتجعات والحسومات. الرقم المحاسبي المعتمد للربح هو تقرير الأمين — اسأل: \`ما الأرباح؟\``;
-      }
-
+      let text = formatSalesBody(period, now, ctx.role);
       let comparePeriod: Period | null = null;
       let comparePartial = false;
       if (compare) {
-        const prev = previousPeriod(period);
-        comparePeriod = prev;
-        // قراءة مستقلة بحدّ بتر مستقل. إسقاط `partial` هنا كان يعرض مجموع
-        // الفترة السابقة والفرق والنسبة **مبتورةً** بوصفها نهائية، ويُبقي
-        // `partial` في الجواب معبّراً عن الفترة الحالية وحدها.
-        const prevRead = await readSales(prev, ctx.role);
-        comparePartial = prevRead.partial;
-        const before = summarizeSales(prevRead.rows);
-        const delta = now.total - before.total;
-        const pct = before.total ? (delta / before.total) * 100 : null;
-        text += `\n\n**مقارنة بـ${prev.label} (${prev.from} → ${prev.to})**\n`
-          + `- الفترة السابقة: **${money(before.total)}** على ${before.bills} فاتورة\n`
-          + `- الفرق: **${delta >= 0 ? "+" : ""}${money(delta)}**`
-          + (pct === null
-            ? " (لا نسبة — الفترة السابقة صفر)"
-            : ` (${delta >= 0 ? "+" : ""}${pct.toFixed(1)}%)`)
-          + (comparePartial
-            ? `\n- ⚠️ قراءة الفترة السابقة بلغت سقف ${HARD_ROW_CAP} سطر، فمجموعها والفرق والنسبة أعلاه **مبتورة**.`
-            : "");
+        const compared = await appendSalesComparison(text, period, now, ctx.role);
+        text = compared.text;
+        comparePeriod = compared.comparePeriod;
+        comparePartial = compared.comparePartial;
       }
 
       const window = await salesSyncWindow();
