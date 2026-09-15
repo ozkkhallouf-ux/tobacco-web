@@ -1352,6 +1352,64 @@ function formatPurchasesBody(opts: {
   return { ok: true, text: text + freshnessNote(asOf), sources: ["ameen_purchase_invoice_reports"], asOf };
 }
 
+async function resolveCustomerBalanceReport(ctx: ToolContext): Promise<{
+  balances: Record<string, unknown> | null;
+  wantsPurchases: boolean;
+  needsHistoricalBalance: boolean;
+  error?: ToolResult;
+}> {
+  const qn = normalize(ctx.question);
+  const wantsPurchases = /اشتر|اخد|فواتير|بضاعه|مواد/.test(qn);
+  // سؤال **مبلغ الرصيد** بفترة تاريخية («كم كان رصيد … الشهر الماضي؟») يحتاج
+  // لقطة تغطي ذاك التاريخ. أما «كشف حساب / حركة … أمس» فيكتفي بأحدث لقطة
+  // للهوية ثم يصفّي الدفعات بالفترة — رفض اللقطة التاريخية كان يكسر ذلك.
+  // (رصدها Codex على PR #205.)
+  const asksBalanceAmount = /رصيد/.test(qn) && !/كشف حساب/.test(qn);
+  const needsHistoricalBalance = ctx.period.explicit && asksBalanceAmount && !wantsPurchases;
+  const balances = needsHistoricalBalance
+    ? await reportForPeriod("inventory_reports", "ameen_customer_balances", ctx.period)
+    : await latestReport("inventory_reports", "ameen_customer_balances");
+  if (needsHistoricalBalance && !balances) {
+    return {
+      balances: null,
+      wantsPurchases,
+      needsHistoricalBalance,
+      error: {
+        ok: false,
+        text: `لا تتوفر لدي لقطة أرصدة زبائن تغطي ${ctx.period.label} (${ctx.period.from} → ${ctx.period.to}). `
+          + `لن أعرض الرصيد الحالي كأنه يعود لتلك الفترة — التقارير المحفوظة لا تغطيها.`,
+        sources: ["inventory_reports:ameen_customer_balances"]
+      }
+    };
+  }
+  return { balances: balances as Record<string, unknown> | null, wantsPurchases, needsHistoricalBalance };
+}
+
+function matchCustomerBalanceRow(
+  rows: Array<Record<string, unknown>>,
+  entityText: string,
+  reportDate: unknown
+): ToolResult | { customer: Record<string, unknown> } {
+  const matches = matchByName(rows, (row) => String(row.name ?? row.key ?? ""), entityText);
+  if (!matches.length) {
+    return {
+      ok: false,
+      text: `لم أجد زبوناً باسم «${entityText.trim()}» في تقرير الأرصدة (${rows.length} حساب بتاريخ ${reportDate}). تأكد من الاسم كما هو مسجّل في الأمين.`,
+      sources: ["inventory_reports:ameen_customer_balances"]
+    };
+  }
+  if (isAmbiguous(matches)) {
+    return {
+      ok: false,
+      text: `الاسم «${entityText.trim()}» يطابق أكثر من حساب:\n`
+        + matches.map((m) => `- ${String(m.row.name ?? m.row.key)}`).join("\n")
+        + `\n\nاكتب الاسم بشكل أدق لأختار الحساب الصحيح — لن أخمّن بينها.`,
+      sources: ["inventory_reports:ameen_customer_balances"]
+    };
+  }
+  return { customer: matches[0].row };
+}
+
 const TOOLS: Tool[] = [
   // ── الصناديق والسيولة ─────────────────────────────────────────────────────
   {
@@ -1745,67 +1803,41 @@ const TOOLS: Tool[] = [
           sources: []
         };
       }
-      const qn = normalize(ctx.question);
-      const wantsPurchases = /اشتر|اخد|فواتير|بضاعه|مواد/.test(qn);
-      // سؤال **مبلغ الرصيد** بفترة تاريخية («كم كان رصيد … الشهر الماضي؟») يحتاج
-      // لقطة تغطي ذاك التاريخ. أما «كشف حساب / حركة … أمس» فيكتفي بأحدث لقطة
-      // للهوية ثم يصفّي الدفعات بالفترة — رفض اللقطة التاريخية كان يكسر ذلك.
-      // (رصدها Codex على PR #205.)
-      const asksBalanceAmount = /رصيد/.test(qn) && !/كشف حساب/.test(qn);
-      const needsHistoricalBalance = ctx.period.explicit && asksBalanceAmount && !wantsPurchases;
-      const balances = needsHistoricalBalance
-        ? await reportForPeriod("inventory_reports", "ameen_customer_balances", ctx.period)
-        : await latestReport("inventory_reports", "ameen_customer_balances");
-      if (needsHistoricalBalance && !balances) {
-        return {
-          ok: false,
-          text: `لا تتوفر لدي لقطة أرصدة زبائن تغطي ${ctx.period.label} (${ctx.period.from} → ${ctx.period.to}). `
-            + `لن أعرض الرصيد الحالي كأنه يعود لتلك الفترة — التقارير المحفوظة لا تغطيها.`,
-          sources: ["inventory_reports:ameen_customer_balances"]
-        };
-      }
+      const resolved = await resolveCustomerBalanceReport(ctx);
+      if (resolved.error) return resolved.error;
+      const { balances, wantsPurchases, needsHistoricalBalance } = resolved;
       const rows = Array.isArray(balances?.items) ? balances.items : [];
       if (!rows.length) return noData("أرصدة الزبائن", ["inventory_reports:ameen_customer_balances"]);
 
-      const matches = matchByName(
+      const matched = matchCustomerBalanceRow(
         rows as Array<Record<string, unknown>>,
-        (row) => String(row.name ?? row.key ?? ""),
-        ctx.entityText
+        ctx.entityText,
+        balances?.report_date
       );
-      if (!matches.length) {
-        return {
-          ok: false,
-          text: `لم أجد زبوناً باسم «${ctx.entityText.trim()}» في تقرير الأرصدة (${rows.length} حساب بتاريخ ${balances.report_date}). تأكد من الاسم كما هو مسجّل في الأمين.`,
-          sources: ["inventory_reports:ameen_customer_balances"]
-        };
-      }
-      if (isAmbiguous(matches)) {
-        return {
-          ok: false,
-          text: `الاسم «${ctx.entityText.trim()}» يطابق أكثر من حساب:\n`
-            + matches.map((m) => `- ${String(m.row.name ?? m.row.key)}`).join("\n")
-            + `\n\nاكتب الاسم بشكل أدق لأختار الحساب الصحيح — لن أخمّن بينها.`,
-          sources: ["inventory_reports:ameen_customer_balances"]
-        };
-      }
+      if ("ok" in matched) return matched;
 
-      const customer = matches[0].row;
+      const customer = matched.customer;
       const name = String(customer.name ?? customer.key ?? "");
       const guid = String(customer.customerGuid ?? "");
       const balanceLabel = needsHistoricalBalance
-        ? `الرصيد بتاريخ ${balances.report_date}`
+        ? `الرصيد بتاريخ ${balances?.report_date}`
         : "الرصيد الحالي";
 
       let text = `**${name}**\n`
         + `- ${balanceLabel}: **${money(customer.balance)}** ${num(customer.balance) > 0 ? "(مدين — عليه)" : num(customer.balance) < 0 ? "(دائن — له)" : "(مسدّد)"}\n`
-        + `- تاريخ التقرير: ${balances.report_date}`;
+        + `- تاريخ التقرير: ${balances?.report_date}`;
       text = appendCustomerPaymentsText(text, customer, ctx.period);
 
       const sources = ["inventory_reports:ameen_customer_balances"];
       if (wantsPurchases) {
         text = await appendCustomerPurchasesText(text, { guid, name, period: ctx.period, sources });
       }
-      return { ok: true, text: text + freshnessNote(balances.created_at), sources, asOf: balances.created_at };
+      return {
+        ok: true,
+        text: text + freshnessNote(balances?.created_at as string | null | undefined),
+        sources,
+        asOf: balances?.created_at as string | null | undefined
+      };
     }
   },
 
