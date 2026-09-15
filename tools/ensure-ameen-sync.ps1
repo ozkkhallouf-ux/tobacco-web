@@ -181,6 +181,18 @@ $ameenWorkerIncidentStatePath = Join-Path $logDirectory "ameen-read-worker-incid
 # أقصر من أي فاصل تشغيل معقول لهذا الحارس فلا تفوت حادثة كاملة.
 $ameenWorkerStaleThresholdMinutes = 5
 
+# قراءة حقل من ملف حالة الحادثة؛ JSON تالف = كأن لا حالة (مع تسجيل Verbose لا صمت فارغ).
+function Read-AmeenWorkerIncidentField([string]$Path, [string]$Field) {
+  if (-not (Test-Path -LiteralPath $Path)) { return $null }
+  try {
+    $obj = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+    return $obj.$Field
+  } catch {
+    Write-Verbose "تجاهل حالة حادثة تالفة ($Field): $($_.Exception.Message)"
+    return $null
+  }
+}
+
 if ($isMainComputer) {
   $workerTask = Get-ScheduledTask -TaskName $ameenWorkerTaskName -ErrorAction SilentlyContinue
   if (-not $workerTask) {
@@ -205,7 +217,9 @@ if ($isMainComputer) {
       # القسم ٤: لا نخلط هذا بـ"صحة المزامنة"؛ ذاك يُقرَّر لاحقاً من قيمة status نفسها.
       $heartbeatFreshEarly = ($hbEarlyAge -le $ameenWorkerStaleThresholdMinutes)
       if ((-not $workerTask) -and $heartbeatFreshEarly) { Write-Log ("INFO: worker task not visible in this session but heartbeat is fresh (" + $hbEarlyAge + " min) - treated as healthy") }
-    } catch { }
+    } catch {
+      Write-Verbose "تجاهل نبض عامل تالف أثناء الفحص المبكر: $($_.Exception.Message)"
+    }
   }
 
   if ((-not $workerTask) -and (-not $heartbeatFreshEarly)) {
@@ -235,40 +249,27 @@ if ($isMainComputer) {
     # لا مزامنة فعلية تحدث الآن، لكن لا فائدة من إعادة تشغيلها (العطل خارجي).
     $workerDegraded = (-not $workerStuck) -and ($heartbeatStatus -eq "auth_retry")
 
-    $prevIncidentActive = $false
-    if (Test-Path -LiteralPath $ameenWorkerIncidentStatePath) {
-      try { $prevIncidentActive = [bool]((Get-Content -LiteralPath $ameenWorkerIncidentStatePath -Raw | ConvertFrom-Json).stuck) } catch {}
-    }
-    $prevDegradedActive = $false
-    if (Test-Path -LiteralPath $ameenWorkerIncidentStatePath) {
-      try { $prevDegradedActive = [bool]((Get-Content -LiteralPath $ameenWorkerIncidentStatePath -Raw | ConvertFrom-Json).degraded) } catch {}
-    }
+    # قراءة حالة الحادثة السابقة: أي JSON تالف يُتجاهل ونبدأ كأن لا حالة محفوظة.
+    $prevIncidentActive = [bool](Read-AmeenWorkerIncidentField $ameenWorkerIncidentStatePath "stuck")
+    $prevDegradedActive = [bool](Read-AmeenWorkerIncidentField $ameenWorkerIncidentStatePath "degraded")
     # منفصل عن prevDegradedActive عمداً: يتتبّع نجاح التنبيه فعلياً لا استمرار الحالة
     # المرصودة وحدها — Codex P1: كان degraded=true يُسجَّل حتى لو فشل TELEGRAM-NOTIFY،
     # فتُحسب "تم التنبيه" رغم عدم الوصول ولا تُعاد المحاولة أبداً.
-    $prevDegradedAlerted = $false
-    if (Test-Path -LiteralPath $ameenWorkerIncidentStatePath) {
-      try { $prevDegradedAlerted = [bool]((Get-Content -LiteralPath $ameenWorkerIncidentStatePath -Raw | ConvertFrom-Json).degradedAlerted) } catch {}
-    }
+    $prevDegradedAlerted = [bool](Read-AmeenWorkerIncidentField $ameenWorkerIncidentStatePath "degradedAlerted")
     # Codex P1 (جولة جديدة): مفتاح dedupe الثابت "ameen-read-worker-degraded" كان يجعل
     # notify_telegram_dispatch يُسقط بصمت أي تنبيه لحادثة degraded ثانية تقع خلال أقل من
     # 60 دقيقة من تنبيه حادثة سابقة — حتى لو تعافت العملية فعلياً بينهما (state المحلي
     # يعيد التصفير بشكل صحيح، لكن مفتاح الـdedupe على مستوى SQL لا يميّز حادثة عن أخرى).
     # الحل: هوية incident مستقلة (تُنشأ لحظة الدخول الفعلي في degraded، وتُحمَل في الحالة
     # طالما الحادثة نفسها مستمرة) تُلحَق بالمفتاح، فكل حادثة تحصل على نافذة dedupe خاصة بها.
-    $prevDegradedIncidentId = $null
-    if (Test-Path -LiteralPath $ameenWorkerIncidentStatePath) {
-      try { $prevDegradedIncidentId = [string]((Get-Content -LiteralPath $ameenWorkerIncidentStatePath -Raw | ConvertFrom-Json).degradedIncidentId) } catch {}
-    }
+    $prevDegradedIncidentId = Read-AmeenWorkerIncidentField $ameenWorkerIncidentStatePath "degradedIncidentId"
+    if ($null -ne $prevDegradedIncidentId) { $prevDegradedIncidentId = [string]$prevDegradedIncidentId }
     # نفس علاج degradedAlerted لكن لفرع stuck — Codex P1 (الجولة الثالثة): كان
     # stuck=true يُسجَّل بلا شرط بعد كل محاولة تنبيه، فيقرأ التشغيل التالي
     # $prevIncidentActive=true ويكتم المحاولة إلى الأبد حتى لو فشل الإرسال الأول
     # فعلياً (SKIPPED/FAILED). stuckAlerted منفصل: يتتبّع نجاح الإرسال فعلياً لا
     # استمرار الحالة العالقة وحدها، فتُعاد المحاولة كل دورة طالما لم يُؤكَّد الإرسال.
-    $prevStuckAlerted = $false
-    if (Test-Path -LiteralPath $ameenWorkerIncidentStatePath) {
-      try { $prevStuckAlerted = [bool]((Get-Content -LiteralPath $ameenWorkerIncidentStatePath -Raw | ConvertFrom-Json).stuckAlerted) } catch {}
-    }
+    $prevStuckAlerted = [bool](Read-AmeenWorkerIncidentField $ameenWorkerIncidentStatePath "stuckAlerted")
     # Codex P1 (جولة جديدة): نفس علاج degradedIncidentId لكن لفرع stuck — مفتاح dedupe
     # الثابت "ameen-read-worker-stuck" كان يجعل notify_telegram_dispatch يُسقط بصمت أي
     # تنبيه لحادثة stuck ثانية تقع خلال أقل من نافذة الـdedupe (1440 دقيقة) من حادثة
@@ -277,10 +278,8 @@ if ($isMainComputer) {
     # الجديد ويُسجَّل stuckAlerted=true رغم عدم وصوله فعلياً). الحل: هوية incident مستقلة
     # (تُنشأ لحظة الدخول الفعلي في stuck، وتُحمَل في الحالة طالما الحادثة نفسها مستمرة)
     # تُلحَق بالمفتاح، فكل حادثة stuck تحصل على نافذة dedupe خاصة بها.
-    $prevStuckIncidentId = $null
-    if (Test-Path -LiteralPath $ameenWorkerIncidentStatePath) {
-      try { $prevStuckIncidentId = [string]((Get-Content -LiteralPath $ameenWorkerIncidentStatePath -Raw | ConvertFrom-Json).stuckIncidentId) } catch {}
-    }
+    $prevStuckIncidentId = Read-AmeenWorkerIncidentField $ameenWorkerIncidentStatePath "stuckIncidentId"
+    if ($null -ne $prevStuckIncidentId) { $prevStuckIncidentId = [string]$prevStuckIncidentId }
 
     if ($workerStuck) {
       $ageText = if ($null -eq $heartbeatAgeMinutes) { "heartbeat غير موجود" } else { "آخر heartbeat منذ $heartbeatAgeMinutes دقيقة" }

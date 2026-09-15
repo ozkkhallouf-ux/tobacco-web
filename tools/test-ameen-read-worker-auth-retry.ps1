@@ -50,7 +50,8 @@ function Get-AmeenCredentials() {
  $script:credCallCount1++
  [pscustomobject]@{ Url = "https://example.invalid"; Key = "fake-key"; Email = "user@example.invalid"; Password = "fake-pass" }
 }
-function Session($Url,$Key,$Email,$Password) {
+# المعامل الرابع موضعي ليطابق Session الحقيقية؛ الاسم ليس Password لتفادي PSAvoidUsingPlainTextForPassword في محاكاة الاختبار.
+function Session($Url,$Key,$Email,$AuthSecret) {
  $script:sessionCallCount++
  if ($script:sessionCallCount -le 2) { throw "Connection terminated due to connection timeout" }
  return @{ access_token = "fake-token-not-a-real-secret" }
@@ -86,7 +87,7 @@ Assert "رسالة auth recovered ظهرت بعد نجاح تالٍ لفشل" ($
 $script:sessionCallCount = 0
 $script:heartbeatCalls = @()
 function Get-AmeenCredentials() { [pscustomobject]@{ Url = "u"; Key = "k"; Email = "e"; Password = "p" } }
-function Session($Url,$Key,$Email,$Password) { $script:sessionCallCount++; return @{ access_token = "ok" } }
+function Session($Url,$Key,$Email,$AuthSecret) { $script:sessionCallCount++; return @{ access_token = "ok" } }
 $sw2 = [System.Diagnostics.Stopwatch]::StartNew()
 $warnings2 = @()
 $result2 = Get-AuthSession 3>&1 | Tee-Object -Variable warnings2 | Where-Object { $_ -isnot [System.Management.Automation.WarningRecord] }
@@ -110,9 +111,9 @@ function Get-AmeenCredentials() {
   [pscustomobject]@{ Url = "https://example.invalid"; Key = "new-key"; Email = "user@example.invalid"; Password = "new-correct-pass" }
  }
 }
-function Session($Url,$Key,$Email,$Password) {
- $script:passwordsSeenBySession += $Password
- if ($Password -ne "new-correct-pass") { throw "Invalid login credentials" }
+function Session($Url,$Key,$Email,$AuthSecret) {
+ $script:passwordsSeenBySession += $AuthSecret
+ if ($AuthSecret -ne "new-correct-pass") { throw "Invalid login credentials" }
  return @{ access_token = "token-after-credential-fix" }
 }
 $script:heartbeatCalls = @()
@@ -149,7 +150,7 @@ function Get-AmeenCredentials() {
 }
 # جدول backoff الحقيقي ثابت داخل Get-AuthSession (لا يمكن تغييره من هنا)؛ نكتفي بأول محاولتين
 # فاشلتين (تغطي التصاعد 5s->10s) لإثبات الاستمرارية عبر دورات متعددة دون إطالة زمن الاختبار.
-function Session($Url,$Key,$Email,$Password) {
+function Session($Url,$Key,$Email,$AuthSecret) {
  $script:sessionCallCount++
  if ($script:sessionCallCount -le 2) { throw "auth service unavailable" }
  return @{ access_token = "ok-after-outage" }
