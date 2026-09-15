@@ -39,6 +39,12 @@
 --   objects: the guard DO block raises and aborts before any bootstrap DDL
 --   (history-safe refuse-to-reapply — no CREATE OR REPLACE of live functions).
 -- - Fresh DB (base objects missing): guard passes; bootstrap DDL runs.
+-- - Auth helpers (Codex P1, 2026-09-15): `public.is_owner()` is provisioned on
+--   the fresh path from `supabase/owner-role-access.sql` before owner policies
+--   (not invented). `public.is_staff()` has no definition in active migration
+--   history — only out-of-band / non-migration SQL — so the heartbeat SELECT
+--   policy is deferred (NOTICE) when that helper is absent; RLS + revoke still
+--   deny direct reads. Production already has both helpers and skips this file.
 -- - No FORCE ROW LEVEL SECURITY. No migration repair. This commit alone does
 --   not authorize applying SQL to production.
 -- ============================================================
@@ -130,6 +136,27 @@ alter table public.khalil_audit_events enable row level security;
 -- لا SELECT/INSERT/UPDATE/DELETE مباشر لأي دور — القراءة فقط عبر سياسة
 -- is_owner أدناه، والكتابة فقط عبر الدالة SECURITY DEFINER.
 revoke all on public.khalil_audit_events from public, anon, authenticated, service_role;
+
+-- ------------------------------------------------------------
+-- Auth helper prerequisite (fresh-DB only — this block is never reached on
+-- production Stage 2). Derived verbatim from supabase/owner-role-access.sql;
+-- do not invent alternate owner semantics here.
+-- ------------------------------------------------------------
+create or replace function public.is_owner()
+returns boolean
+language sql
+stable
+security invoker
+set search_path = public, pg_temp
+as $$
+  select lower(coalesce(auth.jwt() -> 'app_metadata' ->> 'role', '')) = 'owner';
+$$;
+
+comment on function public.is_owner() is
+  'Owner authorization from immutable Auth app_metadata.role.';
+
+revoke all on function public.is_owner() from public, anon;
+grant execute on function public.is_owner() to authenticated, service_role;
 
 create policy "owners can read khalil audit events"
   on public.khalil_audit_events
@@ -739,10 +766,26 @@ alter table public.khalil_audit_sync_heartbeat enable row level security;
 revoke all on public.khalil_audit_sync_heartbeat from public, anon, authenticated, service_role;
 grant select, insert on public.khalil_audit_sync_heartbeat to authenticated;
 
-create policy "owners can read khalil audit heartbeat"
-  on public.khalil_audit_sync_heartbeat for select
-  to authenticated
-  using (public.is_staff());
+-- SELECT policy gates on public.is_staff(). That helper is NOT defined in
+-- active migration history (only referenced from out-of-band SQL such as
+-- approved-prices-table.sql / ameen-*-reports.sql). Inventing staff_allowlist
+-- semantics here would violate the no-invented-auth rule. Defer when absent:
+-- RLS stays enabled and grants alone do not bypass missing SELECT policies.
+do $staff_read_policy$
+begin
+  if to_regprocedure('public.is_staff()') is null then
+    raise notice
+      'khalil_audit_log (20260830141802): public.is_staff() absent — deferring SELECT policy "owners can read khalil audit heartbeat" (RLS deny-by-default retained; apply staff_allowlist/is_staff out-of-band then recreate policy if needed).';
+  else
+    execute $p$
+      create policy "owners can read khalil audit heartbeat"
+        on public.khalil_audit_sync_heartbeat for select
+        to authenticated
+        using (public.is_staff())
+    $p$;
+  end if;
+end;
+$staff_read_policy$;
 
 -- يعيد استخدام نفس دالة هوية المزامنة الموثوقة (UUID ثابت
 -- 9724dbe4-ecb0-49f7-a6b4-12f7f73c68f3) المعرّفة أعلاه لـ
