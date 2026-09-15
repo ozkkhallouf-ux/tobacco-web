@@ -102,8 +102,9 @@ $guard$;
 -- Telegram enqueue baseline (fresh-DB only — never reached on production
 -- Stage 2). Derived from supabase/telegram-notifications.sql §§1–2 + the
 -- reply_markup column add. Intentionally NOT the full notifications system:
--- no dispatch_telegram_outbox body, no pg_cron schedules, no domain triggers,
--- no bot_config seed — those remain the out-of-band / later-migration path.
+-- no dispatch_telegram_outbox body, no domain triggers, no bot_config seed —
+-- those remain the out-of-band / later-migration path. The notify-failure
+-- retry schedule below is gated on pg_cron presence (Codex P1 2026-09-15).
 -- Without this, live audit inserts cannot enqueue and
 -- 20260914120000_telegram_delivery_confirmation_retry.sql aborts on
 -- ALTER TABLE public.telegram_outbox (Codex P1 on PR #228).
@@ -680,7 +681,25 @@ $$;
 revoke all on function private.retry_khalil_audit_notify_failures()
   from public, anon, authenticated, service_role;
 
-do $$ declare old_job bigint; begin
+-- Codex P1 (PR #228, 2026-09-15): gate retry schedule on pg_cron availability.
+-- Fresh migrations-only replay may lack the extension (no CREATE EXTENSION
+-- pg_cron in active history). Unguarded cron.job / cron.schedule aborted
+-- bootstrap. Same verify-or-skip pattern as pg_net landmark (20260902090000):
+-- schedule when present; NOTICE no-op when absent (will not invent extension).
+-- Production / Supabase Stage 2: pg_cron already installed → schedule runs.
+do $$
+declare
+  old_job bigint;
+  v_has_pg_cron boolean := exists (
+    select 1 from pg_extension where extname = 'pg_cron'
+  );
+begin
+  if not v_has_pg_cron then
+    raise notice
+      'khalil_audit_log (20260830141802): pg_cron extension absent — treating as fresh-DB / out-of-band feature path; skipping retry-khalil-audit-notify-failures schedule (will not invent CREATE EXTENSION pg_cron).';
+    return;
+  end if;
+
   for old_job in select jobid from cron.job where jobname='retry-khalil-audit-notify-failures'
   loop perform cron.unschedule(old_job); end loop;
   perform cron.schedule('retry-khalil-audit-notify-failures', '*/5 * * * *',
