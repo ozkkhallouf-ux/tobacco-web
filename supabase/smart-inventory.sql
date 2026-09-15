@@ -724,6 +724,10 @@ grant execute on function public.smart_inventory_auth_preflight(text,text), publ
   public.smart_inventory_has_session_for_service(uuid,uuid),
   public.smart_inventory_enqueue_daily_summary() to service_role;
 
+-- Counter JWT role is set to anon by smart_inventory_set_counter_auth_role
+-- (inventory-auth). Expose only the six blind-counting RPCs to anon — same
+-- narrow grant as superseded/20260823084956_… — not owner dashboards/reports.
+-- Owners keep authenticated EXECUTE on both counter and owner RPCs.
 revoke all on function public.smart_inventory_available_warehouses(date),public.smart_inventory_start_or_join(text),
  public.smart_inventory_counter_session(uuid),public.smart_inventory_claim_item(uuid),
  public.smart_inventory_save_item(uuid,uuid,text,numeric,numeric,numeric,bigint),public.smart_inventory_complete_session(uuid),
@@ -733,8 +737,9 @@ revoke all on function public.smart_inventory_available_warehouses(date),public.
 from public,anon;
 grant execute on function public.smart_inventory_available_warehouses(date),public.smart_inventory_start_or_join(text),
  public.smart_inventory_counter_session(uuid),public.smart_inventory_claim_item(uuid),
- public.smart_inventory_save_item(uuid,uuid,text,numeric,numeric,numeric,bigint),public.smart_inventory_complete_session(uuid),
- public.smart_inventory_owner_dashboard(date),public.smart_inventory_owner_report(uuid),
+ public.smart_inventory_save_item(uuid,uuid,text,numeric,numeric,numeric,bigint),public.smart_inventory_complete_session(uuid)
+to anon, authenticated;
+grant execute on function public.smart_inventory_owner_dashboard(date),public.smart_inventory_owner_report(uuid),
  public.smart_inventory_owner_open_recount(uuid,text),public.smart_inventory_owner_reopen_session(uuid,text),
  public.smart_inventory_owner_correct_item(uuid,numeric,text)
 to authenticated;
