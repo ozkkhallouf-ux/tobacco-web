@@ -37,7 +37,11 @@ function offlineFallback(request){
     if(exact)return exact;
     let url;
     try{url=new URL(request.url);}catch{return caches.match("index.html");}
-    if(url.origin!==self.location.origin||!STATIC_ASSET_PATH.test(url.pathname))return caches.match("index.html");
+    // طلب خارج الأصل فاشل: لا نعيد index.html أبداً. سابقاً كان ارتداد HTML
+    // يُقدَّم مكان سكربت CDN (مثل Sentry) فيرفضه المتصفح بخطأ MIME ويُفسد
+    // مسار Service Worker في الفحوص والتشغيل offline.
+    if(url.origin!==self.location.origin)return Response.error();
+    if(!STATIC_ASSET_PATH.test(url.pathname))return caches.match("index.html");
     return caches.match(request,{ignoreSearch:true}).then((loose)=>loose||caches.match("index.html"));
   });
 }
@@ -47,4 +51,18 @@ function offlineFallback(request){
 // العميل بلا أي مسح عند تسجيل الخروج. القيد same-origin+STATIC_ASSET_PATH هو
 // نفسه المستخدم أصلاً في offlineFallback؛ هنا فقط يُطبَّق **قبل** cache.put،
 // لا داخل مسار fallback وحده.
-self.addEventListener("fetch",(event)=>{if(event.request.method!=="GET")return;event.respondWith(fetch(event.request).then((response)=>{let url;try{url=new URL(event.request.url);}catch{url=null;}if(url&&url.origin===self.location.origin&&STATIC_ASSET_PATH.test(url.pathname)){const copy=response.clone();caches.open(CACHE_NAME).then((cache)=>cache.put(event.request,copy));}return response;}).catch(()=>offlineFallback(event.request)));});
+// **ولا نعترض طلبات خارج الأصل.** محمّل Sentry وREST لـSupabase يمرّان عبر
+// الشبكة مباشرة؛ اعتراضها ثم فشل الشبكة كان يرتدّ إلى index.html (انظر أعلاه).
+self.addEventListener("fetch",(event)=>{
+  if(event.request.method!=="GET")return;
+  let url;
+  try{url=new URL(event.request.url);}catch{return;}
+  if(url.origin!==self.location.origin)return;
+  event.respondWith(fetch(event.request).then((response)=>{
+    if(STATIC_ASSET_PATH.test(url.pathname)){
+      const copy=response.clone();
+      caches.open(CACHE_NAME).then((cache)=>cache.put(event.request,copy));
+    }
+    return response;
+  }).catch(()=>offlineFallback(event.request)));
+});

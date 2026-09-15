@@ -143,6 +143,16 @@ check("ignoreSearch محصور بأصول ثابتة same-origin",
   /STATIC_ASSET_PATH\.test/.test(fallbackFn),
   "لم يعد الارتداد المتساهل محصوراً بأصول التطبيق الثابتة على نفس الأصل");
 
+check("ارتداد offline لا يعيد HTML لطلب خارج الأصل",
+  /url\.origin!==self\.location\.origin/.test(fallbackFn.replace(/\s+/g, "")) &&
+  /Response\.error\(\)/.test(fallbackFn),
+  "طلب CDN/API فاشل كان يرتدّ إلى index.html → خطأ MIME للسكربتات");
+
+check("معالج fetch لا يعترض طلبات خارج الأصل",
+  /url\.origin!==self\.location\.origin/.test(fetchHandler.replace(/\s+/g, "")) &&
+  /if\(url\.origin!==self\.location\.origin\)return;/.test(fetchHandler.replace(/\s+/g, "")),
+  "اعتراض cross-origin يعيد تفعيل ارتداد HTML لمحمّلات CDN");
+
 check("الارتداد الأخير ما زال index.html (تشغيل offline للصفحة)",
   /caches\.match\("index\.html"\)/.test(fallbackFn),
   "فُقد ارتداد الصفحة");
