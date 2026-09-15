@@ -337,11 +337,13 @@ async function latestReport(table: string, source?: string) {
 // تُعاد أقرب لقطة يغطي تاريخ تقريرها الفترة المطلوبة بدل أحدث لقطة دوماً —
 // وإلا فأي سؤال عن ذمم شهر ماضٍ كان يعرض الرصيد الحالي مموَّهاً بتاريخ قديم.
 // بلا فترة صريحة، أو بلا لقطة تغطي الفترة، السلوك كما كان (أحدث/لا شيء).
+// `source` اختياري: جداول مثل ameen_account_balance_reports بلا عمود مصدر.
 // (رصدها Codex على PR #205.)
-async function reportForPeriod(table: string, source: string, period: Period) {
+async function reportForPeriod(table: string, source: string | undefined, period: Period) {
   if (!period.explicit) return latestReport(table, source);
+  const sourceFilter = source ? `&source=eq.${encodeURIComponent(source)}` : "";
   const rows = await readRest(
-    `${table}?select=report_date,summary,items,created_at&source=eq.${encodeURIComponent(source)}`
+    `${table}?select=report_date,summary,items,created_at${sourceFilter}`
     + `&report_date=gte.${safeDate(period.from)}&report_date=lte.${safeDate(period.to)}`
     + `&order=report_date.desc&limit=1`
   );
@@ -795,6 +797,22 @@ async function salesCompleteness(period: Period, partial: boolean, window?: Sync
   };
 }
 
+// نفس منطق salesCompleteness للمصاريف: النفي القاطع («لا حركة مصروف») لا يُصدَر
+// خارج النافذة المتحقَّقة. التحذير الملحق بنفيٍ قاطع يُقرأ عملياً كـ«لا مصروف».
+// (رصدها Codex على PR #205 بعد f5cabd6 — discussion_r4017908914.)
+async function expenseCompleteness(period: Period, partial: boolean, window?: SyncWindow) {
+  const resolved = window === undefined ? await expenseSyncWindow() : window;
+  const gap = coverageGap(period, resolved);
+  return {
+    complete: !partial && !gap.missing && !gap.before && !gap.after,
+    note: (partial
+      ? `\n\n> ⚠️ بلغت قراءة ${period.label} (${period.from} → ${period.to}) سقف الأمان ${HARD_ROW_CAP} حركة،`
+        + ` فالمجموع أعلاه **جزئي وليس إجمالي الفترة**. ضيّق الفترة.`
+      : "")
+      + coverageWarning(period, resolved, EXPENSE_COVERAGE)
+  };
+}
+
 async function readSales(period: Period, role: Role): Promise<{ rows: SalesRow[]; partial: boolean }> {
   // أعمدة المالك وحده: التكلفة، وقيمة السطر، واسم الزبون.
   //
@@ -1175,11 +1193,26 @@ async function appendItemSalesMovement(
         ? `لا توجد أي مبيعات مسجّلة لهذا الصنف في ${period.label}.`
         : `لم أجد مبيعات لهذا الصنف في ${period.label}، لكن قراءة المبيعات **غير مكتملة** — فلا أجزم بغيابها.`);
   } else {
-    const totalQty = mine.reduce((sum, row) => sum + num(row.qty), 0);
-    out += `\n\n**الحركة (${period.label})**\n`
-      + `- الكمية المباعة: **${qty(totalQty)}** على ${mine.length} سطر\n`
-      + `- متوسط ${(totalQty / periodDays).toFixed(1)} بالوحدة يومياً`;
-    if (ctx.role === "owner") out = appendOwnerItemSalesStats(out, mine);
+    // الكميات مُوقَّعة عمداً: المرتجع سالب (sales-line-items-atomic-refresh).
+    // جمع التوقيع تحت عنوان «الكمية المباعة» يحوّل صافي الحركة إلى مبيع خام —
+    // فيظهر مرتجعٌ خالص سالباً، وبيع 10 ثم مرتجع 2 كمبيع 8. افصل الاثنين.
+    // (رصدها Codex على PR #205 بعد f5cabd6 — discussion_r4017908903.)
+    const sold = mine.filter((row) => num(row.qty) > 0);
+    const returned = mine.filter((row) => num(row.qty) < 0);
+    const soldQty = sold.reduce((sum, row) => sum + num(row.qty), 0);
+    const returnQty = returned.reduce((sum, row) => sum + Math.abs(num(row.qty)), 0);
+    out += `\n\n**الحركة (${period.label})**\n`;
+    if (sold.length) {
+      out += `- الكمية المباعة: **${qty(soldQty)}** على ${sold.length} سطر\n`
+        + `- متوسط ${(soldQty / periodDays).toFixed(1)} بالوحدة يومياً`;
+    } else {
+      out += `- لا مبيعات موجبة مسجّلة في ${period.label}`;
+    }
+    if (returned.length) {
+      out += `\n- مرتجعات: **${qty(returnQty)}** على ${returned.length} سطر`
+        + ` (لا تُحسب ضمن الكمية المباعة أعلاه)`;
+    }
+    if (ctx.role === "owner" && sold.length) out = appendOwnerItemSalesStats(out, sold);
   }
   return { text: out + itemState.note, partial: sales.partial };
 }
@@ -1577,12 +1610,23 @@ const TOOLS: Tool[] = [
         // فرّق بين «لا مصاريف بهذه الفترة» و«لا بيانات مصاريف إطلاقاً»
         const any = await readRest("expense_entries?select=entry_date&order=entry_date.desc&limit=1");
         if (!Array.isArray(any) || !any.length) return noData("المصاريف", ["expense_entries"]);
-        // «لا حركة مصروف» نفيٌ قاطع، والغياب خارج نافذة التحديث قد يكون غياب
-        // مزامنة لا غياب صرف — كما في المبيعات بالضبط.
+        // «لا حركة مصروف» نفيٌ قاطع. خارج النافذة المتحقَّقة قد يكون الغياب غياب
+        // مزامنة لا غياب صرف — فتحذير ملحق بنفي لا يكفي؛ يُحجب الحكم.
+        // (رصدها Codex على PR #205 بعد f5cabd6 — discussion_r4017908914.)
+        const emptyState = await expenseCompleteness(ctx.period, false);
+        if (!emptyState.complete) {
+          return {
+            ok: false,
+            text: `**مصاريف ${ctx.period.label} (${ctx.period.from} → ${ctx.period.to}) — غير محسومة**\n`
+              + `لم أجد أي حركة مصروف في هذه الفترة، لكن التغطية **غير متحقَّقة** — فلا أجزم بغياب المصروف.`
+              + `\n\nآخر مصروف مسجّل بتاريخ ${String(any[0].entry_date)}.`
+              + emptyState.note,
+            sources: ["expense_entries", "expense_entries_sync_state"]
+          };
+        }
         return {
           ok: true,
-          text: `**مصاريف ${ctx.period.label} (${ctx.period.from} → ${ctx.period.to})**\nلا توجد أي حركة مصروف مسجّلة في هذه الفترة. آخر مصروف مسجّل بتاريخ ${String(any[0].entry_date)}.`
-            + coverageWarning(ctx.period, await expenseSyncWindow(), EXPENSE_COVERAGE),
+          text: `**مصاريف ${ctx.period.label} (${ctx.period.from} → ${ctx.period.to})**\nلا توجد أي حركة مصروف مسجّلة في هذه الفترة. آخر مصروف مسجّل بتاريخ ${String(any[0].entry_date)}.`,
           sources: ["expense_entries", "expense_entries_sync_state"]
         };
       }
@@ -1590,16 +1634,14 @@ const TOOLS: Tool[] = [
       const lines = list
         .slice(0, 20)
         .map((row) => `- ${String(row.entry_date)} — ${String(row.account_name ?? "بند")}: **${money(row.amount)}**`);
+      const state = await expenseCompleteness(ctx.period, partial);
       return {
         ok: true,
         text: `**مصاريف ${ctx.period.label} (${ctx.period.from} → ${ctx.period.to})** — `
           + (partial ? `مجموع جزئي **${money(total)}**` : `إجمالي **${money(total)}**`)
           + ` على ${list.length} حركة\n${lines.join("\n")}`
           + (list.length > 20 ? `\n\n_معروض 20 من ${list.length}._` : "")
-          + (partial
-            ? `\n\n> ⚠️ بلغت القراءة سقف الأمان ${HARD_ROW_CAP} حركة، فالمجموع أعلاه **جزئي وليس إجمالي الفترة**. ضيّق الفترة.`
-            : "")
-          + coverageWarning(ctx.period, await expenseSyncWindow(), EXPENSE_COVERAGE),
+          + state.note,
         sources: ["expense_entries", "expense_entries_sync_state"],
         partial
       };
@@ -1624,14 +1666,26 @@ const TOOLS: Tool[] = [
       if (!current.rows.length) {
         const any = await readRest("sales_line_items?select=sale_date&order=sale_date.desc&limit=1");
         if (!Array.isArray(any) || !any.length) return noData("المبيعات", ["sales_line_items"]);
-        // «لا توجد فاتورة» نفيٌ قاطع، وهو أخطر من رقم ناقص متى كانت الفترة خارج
-        // نافذة المزامنة: الغياب هناك قد يكون غياب مزامنة لا غياب بيع. فالتحذير
-        // يلزم هذا الفرع كما يلزم فرع الأرقام.
+        // «لا توجد فاتورة» نفيٌ قاطع. خارج النافذة المتحقَّقة قد يكون الغياب
+        // غياب مزامنة لا غياب بيع — فتحذير ملحق بنفي لا يكفي؛ يُحجب الحكم عبر
+        // salesCompleteness.complete. (رصدها Codex على PR #205 بعد f5cabd6 —
+        // discussion_r4017908925.)
+        const emptyState = await salesCompleteness(period, current.partial);
+        if (!emptyState.complete) {
+          return {
+            ok: false,
+            text: `**مبيعات ${period.label} (${period.from} → ${period.to}) — غير محسومة**\n`
+              + `لم أجد أي فاتورة في هذه الفترة، لكن قراءة المبيعات **غير مكتملة** — فلا أجزم بغيابها.`
+              + `\n\nآخر يوم فيه مبيعات مسجّلة هو **${String(any[0].sale_date)}**.`
+              + emptyState.note,
+            sources: ["sales_line_items", "sales_line_items_sync_state"],
+            partial: current.partial
+          };
+        }
         return {
           ok: true,
           text: `**مبيعات ${period.label} (${period.from} → ${period.to})**\nلا توجد أي فاتورة مسجّلة في هذه الفترة. آخر يوم فيه مبيعات مسجّلة هو **${String(any[0].sale_date)}**.`
-            + `\n\nملاحظة: سطور المبيعات تصل عبر مزامنة الأمين، فإن كان اليوم ما زال في بدايته قد لا تكون فواتيره رُفعت بعد.`
-            + (await salesCompleteness(period, current.partial)).note,
+            + `\n\nملاحظة: سطور المبيعات تصل عبر مزامنة الأمين، فإن كان اليوم ما زال في بدايته قد لا تكون فواتيره رُفعت بعد.`,
           sources: ["sales_line_items", "sales_line_items_sync_state"],
           partial: current.partial
         };
@@ -2371,7 +2425,18 @@ const TOOLS: Tool[] = [
       { re: /رصيد (?:ال)?حساب/, w: 7 }
     ],
     async run(ctx) {
-      const report = await latestReport("ameen_account_balance_reports");
+      // لفترة تاريخية صريحة («رصيد حساب البنك الوطني الشهر الماضي») يجب لقطة
+      // تغطي ذاك التاريخ — لا أحدث لقطة معروضة كأنها تاريخية. (رصدها Codex على
+      // PR #205 بعد f5cabd6 — discussion_r4017908937.)
+      const report = await reportForPeriod("ameen_account_balance_reports", undefined, ctx.period);
+      if (ctx.period.explicit && !report) {
+        return {
+          ok: false,
+          text: `لا تتوفر لدي لقطة أرصدة حسابات تغطي ${ctx.period.label} (${ctx.period.from} → ${ctx.period.to}). `
+            + `لن أعرض الرصيد الحالي كأنه يعود لتلك الفترة — التقارير المحفوظة لا تغطيها.`,
+          sources: ["ameen_account_balance_reports"]
+        };
+      }
       const items = Array.isArray(report?.items) ? report.items : [];
       if (!items.length) return noData("أرصدة الحسابات", ["ameen_account_balance_reports"]);
       const s = (report.summary ?? {}) as Record<string, unknown>;

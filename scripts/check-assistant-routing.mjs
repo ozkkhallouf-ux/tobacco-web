@@ -115,8 +115,17 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
 
 {
   // فارغ ≠ صفر مختلق: يوم بلا مبيعات يجب أن يُقال إنه بلا مبيعات، لا أن يُسكت عنه
+  // النفي القاطع يشترط تغطية متحقَّقة — بلاها يُحجب الحكم (انظر فرع الصفر خارج النافذة).
   const empty = defaultFixtures();
   empty.sales_line_items = [{ sale_date: "2026-08-01", bill_no: "1", bill_type: "retail", item_name: "x", qty: 1, line_total: 5, customer_name: "y" }];
+  const today = new Date(Date.now() + 180 * 60_000).toISOString().slice(0, 10);
+  empty.sales_line_items_sync_state = [{
+    source: "ameen_sales_line_items",
+    window_start: new Date(Date.now() + 180 * 60_000 - 29 * 86_400_000).toISOString().slice(0, 10),
+    window_end: today,
+    row_count: 1,
+    completed_at: new Date().toISOString()
+  }];
   const a = await loadAssistant({ fixtures: empty });
   const result = await a.ask(TOKENS.owner, "كم مبيعات اليوم؟");
   assert.ok(/لا توجد أي فاتورة مسجّلة/.test(String(result.body.reply)), "لم يميّز بين «لا مبيعات» و«لا بيانات»");
@@ -497,16 +506,30 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   const noneText = String((await none.ask(TOKENS.owner, "كم مبيعات اليوم؟")).body.reply);
   assert.ok(/لا يوجد سجل مزامنة مكتمل/.test(noneText), "لم يُعلن غياب سجل المزامنة");
 
-  // وفترة خالية خارج النافذة: «لا توجد فاتورة» نفيٌ قاطع، والغياب هناك قد يكون
-  // غياب مزامنة لا غياب بيع. فالتحذير يلزم فرع الصفر كما يلزم فرع الأرقام.
+  // وفترة خالية خارج النافذة: «لا توجد فاتورة» نفيٌ قاطع كان يُصدَر مع تحذير
+  // ملحق — والتحذير لا يسحب النفي. يجب حجب الحكم (answered=false) عبر
+  // salesCompleteness.complete. (Codex P1 بعد f5cabd6 — discussion_r4017908925.)
   const far = new Date(Date.now() + 180 * 60_000 - 100 * 86_400_000).toISOString().slice(0, 10);
   const empty = await loadAssistant({ fixtures: { ...fixtures, sales_line_items: [
     { id: 9, sale_date: far, bill_no: "9", bill_type: "retail", item_name: "أ", qty: 1, line_total: 10, unit_cost: 9, customer_name: "س" }
   ] } });
-  const emptyText = String((await empty.ask(TOKENS.owner, "كم مبيعات اخر 60 يوم؟")).body.reply);
-  assert.ok(/لا توجد أي فاتورة/.test(emptyText), `لم يصل لفرع الصفر:\n${emptyText}`);
-  assert.ok(/خارج آخر نافذة مزامنة متحقَّقة/.test(emptyText), `نفى وجود فواتير في فترة خارج النافذة بلا تحذير:\n${emptyText}`);
-  ok("الفترة خارج نافذة المزامنة المتحقَّقة تُعلَن صراحةً — في فرع الأرقام وفرع الصفر وعند غياب السجل");
+  const emptyResult = await empty.ask(TOKENS.owner, "كم مبيعات اخر 60 يوم؟");
+  const emptyText = String(emptyResult.body.reply);
+  assert.equal(emptyResult.body.answered, false, `نفي قاطع عن فترة خارج النافذة رغم عدم اكتمال التغطية:\n${emptyText}`);
+  assert.ok(/غير محسومة/.test(emptyText), `لم يمتنع صراحةً عن البتّ:\n${emptyText}`);
+  assert.ok(/فلا أجزم بغيابها/.test(emptyText), `لم يصرّح بأن الغياب غير مؤكَّد:\n${emptyText}`);
+  assert.ok(!/لا توجد أي فاتورة مسجّلة/.test(emptyText), `نفى وجود فواتير رغم أن الفترة خارج النافذة:\n${emptyText}`);
+  assert.ok(/خارج آخر نافذة مزامنة متحقَّقة/.test(emptyText), `لم يُعلن خروج الفترة عن النافذة:\n${emptyText}`);
+
+  // وفترة خالية داخل النافذة ⇒ النفي القاطع مسموح
+  const todayOnly = await loadAssistant({ fixtures: { ...fixtures, sales_line_items: [
+    { id: 9, sale_date: far, bill_no: "9", bill_type: "retail", item_name: "أ", qty: 1, line_total: 10, unit_cost: 9, customer_name: "س" }
+  ] } });
+  const todayEmpty = await todayOnly.ask(TOKENS.owner, "كم مبيعات اليوم؟");
+  const todayEmptyText = String(todayEmpty.body.reply);
+  assert.equal(todayEmpty.body.answered, true, `فترة داخل النافذة بلا صفوف يجب أن تنفي بثقة:\n${todayEmptyText}`);
+  assert.ok(/لا توجد أي فاتورة مسجّلة/.test(todayEmptyText), `لم يصل لفرع الصفر داخل النافذة:\n${todayEmptyText}`);
+  ok("الفترة خارج نافذة المزامنة المتحقَّقة تُعلَن صراحةً — ونفي الصفر يُحجب خارجها ويُسمح داخله");
 }
 
 // ── غ) المدى المطلوب يُجمع، ولا يُختزل في يوم واحد ──────────────────────────
@@ -630,7 +653,34 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   const none = await loadAssistant({ fixtures: { ...fixtures, expense_entries_sync_state: [] } });
   const noneText = String((await none.ask(TOKENS.owner, "كم دفعنا اليوم؟")).body.reply);
   assert.ok(/لا يوجد سجل مزامنة مكتمل لـحركة المصاريف/.test(noneText), "لم يُعلن غياب سجل مزامنة المصاريف");
-  ok("المصاريف محدودة بنافذة تحديثها المتحقَّقة، وكل تحذير يسمّي مصدره لا مصدراً آخر");
+
+  // وفترة خالية خارج النافذة مع صفوف أحدث في الجدول: لا نفي قاطع.
+  // (Codex P1 بعد f5cabd6 — discussion_r4017908914.)
+  const emptyOutside = await loadAssistant({ fixtures: {
+    ...fixtures,
+    expense_entries: [
+      { id: 1, entry_date: today, account_name: "محروقات", amount: 45, notes: "" }
+    ]
+  } });
+  const emptyOutResult = await emptyOutside.ask(TOKENS.owner, "كم مصاريف الشهر الماضي؟");
+  const emptyOutText = String(emptyOutResult.body.reply);
+  assert.equal(emptyOutResult.body.answered, false, `نفي قاطع عن مصاريف خارج النافذة:\n${emptyOutText}`);
+  assert.ok(/غير محسومة/.test(emptyOutText), `لم يمتنع صراحة عن البتّ في المصاريف:\n${emptyOutText}`);
+  assert.ok(/فلا أجزم بغياب المصروف/.test(emptyOutText), `لم يصرّح بأن غياب المصروف غير مؤكَّد:\n${emptyOutText}`);
+  assert.ok(!/لا توجد أي حركة مصروف مسجّلة/.test(emptyOutText), `نفى المصروف رغم أن الفترة خارج النافذة:\n${emptyOutText}`);
+
+  // وفترة خالية داخل النافذة ⇒ النفي القاطع مسموح
+  const emptyInside = await loadAssistant({ fixtures: {
+    ...fixtures,
+    expense_entries: [
+      { id: 2, entry_date: old, account_name: "أجور نقل", amount: 500, notes: "" }
+    ]
+  } });
+  const emptyInResult = await emptyInside.ask(TOKENS.owner, "كم دفعنا اليوم؟");
+  const emptyInText = String(emptyInResult.body.reply);
+  assert.equal(emptyInResult.body.answered, true, `فترة مصاريف داخل النافذة بلا صفوف يجب أن تنفي بثقة:\n${emptyInText}`);
+  assert.ok(/لا توجد أي حركة مصروف مسجّلة/.test(emptyInText), `لم يصل لفرع صفر المصاريف داخل النافذة:\n${emptyInText}`);
+  ok("المصاريف محدودة بنافذة تحديثها المتحقَّقة، ونفي الصفر يُحجب خارجها ويُسمح داخله");
 }
 
 // ── ق) ملخص «اليوم» لا يحمل أرقام يوم آخر ──────────────────────────────────
@@ -2058,6 +2108,97 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   assert.ok(/صنف الأمل أ/.test(uniqueText), `لم يعرض فواتير المورّد المميَّز:\n${uniqueText}`);
   assert.ok(!/صنف الأمل ب/.test(uniqueText), `خلط فواتير المورّد الآخر:\n${uniqueText}`);
   ok("اسم مورّد غامض يُرفض صراحة قبل تفصيل فواتيره؛ الاسم المميَّز يعرض تفصيله وحده");
+}
+
+// ── Codex P1 f5cabd6: مرتجعات الصنف تُفصل عن الكمية المباعة ─────────────────
+{
+  // qty سالبة تُحفظ عمداً كمرتجع. جمع التوقيع تحت «الكمية المباعة» يحوّل
+  // صافي الحركة إلى مبيع خام. (discussion_r4017908903)
+  const today = new Date(Date.now() + 180 * 60_000).toISOString().slice(0, 10);
+  const fixtures = defaultFixtures();
+  fixtures.sales_line_items = [
+    { id: 1, sale_date: today, bill_no: "201", bill_type: "wholesale", item_name: "ماستر طويل ورق", qty: 10, line_total: 3550, unit_cost: 339, customer_name: "سامر الوهمي" },
+    { id: 2, sale_date: today, bill_no: "202", bill_type: "wholesale", item_name: "ماستر طويل ورق", qty: -2, line_total: -710, unit_cost: 339, customer_name: "سامر الوهمي" }
+  ];
+  fixtures.sales_line_items_sync_state = [{
+    source: "ameen_sales_line_items",
+    window_start: new Date(Date.now() + 180 * 60_000 - 29 * 86_400_000).toISOString().slice(0, 10),
+    window_end: today,
+    row_count: 2,
+    completed_at: new Date().toISOString()
+  }];
+
+  const a = await loadAssistant({ fixtures });
+  const mixed = await a.ask(TOKENS.owner, "حركة ماستر طويل ورق اليوم؟");
+  const mixedText = String(mixed.body.reply);
+  assert.equal(mixed.body.tool, "item");
+  assert.ok(/الكمية المباعة: \*\*10\*\*/.test(mixedText), `عرض صافي الحركة (8) كمبيع بدل 10:\n${mixedText}`);
+  assert.ok(!/الكمية المباعة: \*\*8\*\*/.test(mixedText), `وسم الكمية المباعة على الصافي 8:\n${mixedText}`);
+  assert.ok(/مرتجعات: \*\*2\*\*/.test(mixedText), `لم يفصل المرتجع عن المبيع:\n${mixedText}`);
+  assert.ok(/متوسط 10\.0 بالوحدة يومياً/.test(mixedText), `المتوسط بُني على الصافي لا على المبيع:\n${mixedText}`);
+
+  const returnOnly = defaultFixtures();
+  returnOnly.sales_line_items = [
+    { id: 3, sale_date: today, bill_no: "203", bill_type: "wholesale", item_name: "ماستر طويل ورق", qty: -4, line_total: -1420, unit_cost: 339, customer_name: "سامر الوهمي" }
+  ];
+  returnOnly.sales_line_items_sync_state = fixtures.sales_line_items_sync_state;
+  const b = await loadAssistant({ fixtures: returnOnly });
+  const retText = String((await b.ask(TOKENS.owner, "حركة ماستر طويل ورق اليوم؟")).body.reply);
+  assert.ok(/لا مبيعات موجبة/.test(retText), `مرتجع خالص لم يُعلن غياب المبيع الموجب:\n${retText}`);
+  assert.ok(/مرتجعات: \*\*4\*\*/.test(retText), `مرتجع خالص لم يعرض كمية المرتجع:\n${retText}`);
+  assert.ok(!/الكمية المباعة: \*\*-4\*\*/.test(retText), `عرض كمية مباعة سالبة من مرتجع خالص:\n${retText}`);
+  ok("حركة الصنف تفصل الكمية المباعة عن المرتجعات ولا تعرض صافي الحركة كمبيع");
+}
+
+// ── Codex P1 f5cabd6: رصيد حساب بفترة تاريخية يحترم اللقطة ──────────────────
+{
+  // «رصيد حساب شام كاش الشهر الماضي» كان يحمل أحدث لقطة دوماً.
+  // (discussion_r4017908937)
+  const today = new Date(Date.now() + 180 * 60_000).toISOString().slice(0, 10);
+  const now = new Date();
+  const lastMonthDate = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 15));
+  const lastMonth = lastMonthDate.toISOString().slice(0, 10);
+  const fixtures = defaultFixtures();
+  fixtures.ameen_account_balance_reports = [
+    {
+      report_date: today,
+      created_at: new Date().toISOString(),
+      summary: { accountCount: 2, nonZeroAccountCount: 1, accountingBasis: "ac000 Debit - Credit" },
+      items: [
+        { accountCode: "1301", accountName: "شام كاش", parentName: "الصناديق", balance: 5400, debit: 9000, credit: 3600 }
+      ]
+    },
+    {
+      report_date: lastMonth,
+      created_at: new Date(Date.now() - 40 * 86_400_000).toISOString(),
+      summary: { accountCount: 2, nonZeroAccountCount: 1, accountingBasis: "ac000 Debit - Credit" },
+      items: [
+        { accountCode: "1301", accountName: "شام كاش", parentName: "الصناديق", balance: 3210, debit: 5000, credit: 1790 }
+      ]
+    }
+  ];
+
+  const a = await loadAssistant({ fixtures });
+  const hist = await a.ask(TOKENS.owner, "ما رصيد حساب شام كاش الشهر الماضي؟");
+  const histText = String(hist.body.reply);
+  assert.equal(hist.body.tool, "accounts");
+  assert.equal(hist.body.answered, true, `فترة تاريخية بلقطة حساب مطابقة يجب أن تُجاب:\n${histText}`);
+  assert.ok(/3,210/.test(histText), `لم يعرض رصيد لقطة الشهر الماضي (3210):\n${histText}`);
+  assert.ok(!/5,400/.test(histText), `عرض الرصيد الحالي (5400) جواباً عن الشهر الماضي:\n${histText}`);
+  assert.ok(histText.includes(lastMonth), `لم يذكر تاريخ لقطة الشهر الماضي:\n${histText}`);
+
+  const bare = await loadAssistant({ fixtures });
+  const nowAsk = await bare.ask(TOKENS.owner, "ما رصيد حساب شام كاش؟");
+  const nowText = String(nowAsk.body.reply);
+  assert.ok(/5,400/.test(nowText), `سؤال بلا فترة لم يأخذ أحدث رصيد حساب:\n${nowText}`);
+
+  const noSnap = defaultFixtures();
+  noSnap.ameen_account_balance_reports = [fixtures.ameen_account_balance_reports[0]];
+  const c = await loadAssistant({ fixtures: noSnap });
+  const rejected = await c.ask(TOKENS.owner, "ما رصيد حساب شام كاش الشهر الماضي؟");
+  assert.equal(rejected.body.answered, false, `فترة حساب بلا لقطة تغطيها يجب أن تُرفض:\n${rejected.body.reply}`);
+  assert.ok(/لن أعرض الرصيد الحالي/.test(String(rejected.body.reply)), `نص الرفض لم يمنع عرض الرصيد الحالي:\n${rejected.body.reply}`);
+  ok("رصيد حساب بفترة تاريخية يأخذ لقطة الفترة (أو يرفض صراحة) ولا يعرض الرصيد الحالي مموَّهاً");
 }
 
 console.log(`\nتوجيه المساعد الذكي: ${passed}/${passed} تحقق ناجح`);

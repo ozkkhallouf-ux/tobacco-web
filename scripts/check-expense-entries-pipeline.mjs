@@ -135,13 +135,16 @@ for (const op of ['insert', 'update']) {
 // ── المساعد: يقرأ الختم ويحذّر خارجه ───────────────────────────────────────
 assert.match(assistant, /"expense_entries_sync_state"/, 'الجدول يجب أن يكون ضمن READABLE_TABLES');
 assert.match(assistant, /expenseSyncWindow = \(\) => syncWindow\("expense_entries_sync_state", "ameen_expense_entries"\)/);
-// فرع الأرقام وفرع الصفر كلاهما — النفي القاطع خارج النافذة كالرقم تماماً.
+assert.match(assistant, /async function expenseCompleteness\(/, 'expenseCompleteness يجب أن يوحّد حكم التغطية');
+// فرع الأرقام وفرع الصفر كلاهما عبر expenseCompleteness — النفي القاطع خارج
+// النافذة يُحجب بـcomplete لا بتحذير ملحق فقط.
 const expenseTool = assistant.match(/id: "expenses",[\s\S]*?\n  \},\n/)?.[0];
 assert.ok(expenseTool, 'expenses tool must exist');
 assert.equal(
-  (expenseTool.match(/coverageWarning\(ctx\.period, await expenseSyncWindow\(\), EXPENSE_COVERAGE\)/g) ?? []).length,
+  (expenseTool.match(/await expenseCompleteness\(/g) ?? []).length,
   2,
-  'تحذير النافذة يلزم فرع الأرقام وفرع الصفر معاً',
+  'اكتمال التغطية يلزم فرع الأرقام وفرع الصفر معاً',
 );
+assert.match(expenseTool, /emptyState\.complete/, 'فرع الصفر يجب أن يحجب النفي عند عدم اكتمال التغطية');
 
 console.log('Expense entries atomic pipeline contract checks passed.');
