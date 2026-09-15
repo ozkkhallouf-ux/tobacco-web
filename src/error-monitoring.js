@@ -65,8 +65,11 @@
 
   // مسار Rollbar يبقى للاختبارات وللاحتياط إن أُزيل علم Sentry من الصفحة.
   // مع Sentry لا يُرفَع شيء إلى Rollbar ولو كان الرمز محقوناً — مراقب واحد.
-  var rollbarActive = Boolean(meta) && injected(token) && injected(environment) &&
-    isProductionOrigin() && !useSentry;
+  function computeRollbarActive() {
+    return Boolean(meta) && injected(token) && injected(environment) &&
+      isProductionOrigin() && !useSentry;
+  }
+  var rollbarActive = computeRollbarActive();
 
   // ---------------------------------------------------------------------------
   // التنقية. تعمل على النصّ النهائي مهما كان مصدره، فلا تعتمد على معرفة أين
@@ -882,165 +885,198 @@
 
   // ---------------------------------------------------------------------------
   // Sentry: يُضبَط قبل محمّل CDN عبر window.sentryOnLoad (انظر index.html).
+  // دوال التنقية مجزّأة عمداً لإبقاء تعقيد كل دالة منخفضاً (CodeFactor/DeepScan).
   // ---------------------------------------------------------------------------
   function scrubTextForSentry(value) {
     if (typeof value !== "string" || value.length === 0) return value;
     return redactBusinessData(scrub(value));
   }
 
+  function stripUrlQuery(url) {
+    return String(url).split("?")[0].split("#")[0];
+  }
+
+  function scrubSentryUser(user) {
+    if (!user) return;
+    delete user.email;
+    delete user.ip_address;
+    delete user.username;
+    delete user.name;
+  }
+
+  function scrubSentryRequest(request) {
+    if (!request) return;
+    if (typeof request.url === "string") request.url = stripUrlQuery(request.url);
+    delete request.cookies;
+    delete request.headers;
+    delete request.query_string;
+    delete request.data;
+  }
+
+  function scrubSentryFrame(frame) {
+    if (!frame) return;
+    if (typeof frame.filename === "string") {
+      frame.filename = scrub(String(frame.filename).split("?")[0]);
+    }
+    if (typeof frame.abs_path === "string") {
+      frame.abs_path = scrub(String(frame.abs_path).split("?")[0]);
+    }
+    delete frame.vars;
+    delete frame.pre_context;
+    delete frame.post_context;
+    delete frame.context_line;
+  }
+
+  function scrubSentryExceptionItem(item) {
+    if (!item) return;
+    if (typeof item.value === "string") item.value = scrubTextForSentry(item.value);
+    if (typeof item.type === "string") item.type = scrub(item.type);
+    var frames = item.stacktrace && item.stacktrace.frames;
+    if (!Array.isArray(frames)) return;
+    for (var f = 0; f < frames.length; f += 1) scrubSentryFrame(frames[f]);
+  }
+
+  function scrubSentryExceptions(exception) {
+    if (!exception || !Array.isArray(exception.values)) return;
+    for (var i = 0; i < exception.values.length; i += 1) {
+      scrubSentryExceptionItem(exception.values[i]);
+    }
+  }
+
+  function scrubSentryBreadcrumb(crumb) {
+    if (!crumb) return;
+    if (typeof crumb.message === "string") crumb.message = scrubTextForSentry(crumb.message);
+    if (!crumb.data || typeof crumb.data !== "object") return;
+    if (typeof crumb.data.url === "string") crumb.data.url = stripUrlQuery(crumb.data.url);
+    delete crumb.data.request_body;
+    delete crumb.data.response_body;
+  }
+
+  function scrubSentryBreadcrumbs(breadcrumbs) {
+    if (!Array.isArray(breadcrumbs)) return;
+    for (var b = 0; b < breadcrumbs.length; b += 1) scrubSentryBreadcrumb(breadcrumbs[b]);
+  }
+
   function scrubSentryEvent(event) {
     if (!event || typeof event !== "object") return event;
-    if (event.user) {
-      delete event.user.email;
-      delete event.user.ip_address;
-      delete event.user.username;
-      delete event.user.name;
-    }
-    if (typeof event.message === "string") {
-      event.message = scrubTextForSentry(event.message);
-    }
-    if (event.request) {
-      if (typeof event.request.url === "string") {
-        event.request.url = String(event.request.url).split("?")[0].split("#")[0];
-      }
-      delete event.request.cookies;
-      delete event.request.headers;
-      delete event.request.query_string;
-      delete event.request.data;
-    }
-    if (event.exception && Array.isArray(event.exception.values)) {
-      for (var i = 0; i < event.exception.values.length; i += 1) {
-        var item = event.exception.values[i];
-        if (!item) continue;
-        if (typeof item.value === "string") item.value = scrubTextForSentry(item.value);
-        if (typeof item.type === "string") item.type = scrub(item.type);
-        if (item.stacktrace && Array.isArray(item.stacktrace.frames)) {
-          for (var f = 0; f < item.stacktrace.frames.length; f += 1) {
-            var frame = item.stacktrace.frames[f];
-            if (!frame) continue;
-            if (typeof frame.filename === "string") {
-              frame.filename = scrub(String(frame.filename).split("?")[0]);
-            }
-            if (typeof frame.abs_path === "string") {
-              frame.abs_path = scrub(String(frame.abs_path).split("?")[0]);
-            }
-            delete frame.vars;
-            delete frame.pre_context;
-            delete frame.post_context;
-            delete frame.context_line;
-          }
-        }
-      }
-    }
-    if (Array.isArray(event.breadcrumbs)) {
-      for (var b = 0; b < event.breadcrumbs.length; b += 1) {
-        var crumb = event.breadcrumbs[b];
-        if (!crumb) continue;
-        if (typeof crumb.message === "string") crumb.message = scrubTextForSentry(crumb.message);
-        if (crumb.data && typeof crumb.data === "object") {
-          if (typeof crumb.data.url === "string") {
-            crumb.data.url = String(crumb.data.url).split("?")[0].split("#")[0];
-          }
-          delete crumb.data.request_body;
-          delete crumb.data.response_body;
-        }
-      }
-    }
+    scrubSentryUser(event.user);
+    if (typeof event.message === "string") event.message = scrubTextForSentry(event.message);
+    scrubSentryRequest(event.request);
+    scrubSentryExceptions(event.exception);
+    scrubSentryBreadcrumbs(event.breadcrumbs);
     return event;
   }
 
-  if (useSentry) {
+  function buildSentryReplayIntegrations(integrations) {
+    var list = Array.isArray(integrations) ? integrations.slice() : [];
+    var withoutReplay = [];
+    for (var i = 0; i < list.length; i += 1) {
+      var name = list[i] && list[i].name;
+      if (name !== "Replay" && name !== "SessionReplay") withoutReplay.push(list[i]);
+    }
+    withoutReplay.push(Sentry.replayIntegration({
+      maskAllText: true,
+      maskAllInputs: true,
+      blockAllMedia: true
+    }));
+    return withoutReplay;
+  }
+
+  function buildSentryInitOptions(prod) {
+    var initOptions = {
+      enabled: prod,
+      sendDefaultPii: false,
+      tracesSampleRate: 1.0,
+      replaysSessionSampleRate: 0.1,
+      replaysOnErrorSampleRate: 1.0,
+      beforeSend: function (event) {
+        if (!prod) return null;
+        return scrubSentryEvent(event);
+      },
+      beforeSendTransaction: function (event) {
+        if (!prod) return null;
+        if (event && event.request && typeof event.request.url === "string") {
+          event.request.url = stripUrlQuery(event.request.url);
+        }
+        return event;
+      }
+    };
+    if (injected(environment)) initOptions.environment = environment;
+    if (injected(release)) initOptions.release = release;
+    if (typeof Sentry.replayIntegration === "function") {
+      initOptions.integrations = buildSentryReplayIntegrations;
+    }
+    return initOptions;
+  }
+
+  function installSentryOnLoad() {
     window.sentryOnLoad = function () {
       if (typeof Sentry === "undefined" || typeof Sentry.init !== "function") return;
-      var prod = isProductionOrigin();
-      var initOptions = {
-        enabled: prod,
-        sendDefaultPii: false,
-        tracesSampleRate: 1.0,
-        replaysSessionSampleRate: 0.1,
-        replaysOnErrorSampleRate: 1.0,
-        beforeSend: function (event) {
-          if (!prod) return null;
-          return scrubSentryEvent(event);
-        },
-        beforeSendTransaction: function (event) {
-          if (!prod) return null;
-          if (event && event.request && typeof event.request.url === "string") {
-            event.request.url = String(event.request.url).split("?")[0].split("#")[0];
-          }
-          return event;
-        }
-      };
-      if (injected(environment)) initOptions.environment = environment;
-      if (injected(release)) initOptions.release = release;
-      if (typeof Sentry.replayIntegration === "function") {
-        initOptions.integrations = function (integrations) {
-          var list = Array.isArray(integrations) ? integrations.slice() : [];
-          var withoutReplay = [];
-          for (var i = 0; i < list.length; i += 1) {
-            var name = list[i] && list[i].name;
-            if (name !== "Replay" && name !== "SessionReplay") withoutReplay.push(list[i]);
-          }
-          withoutReplay.push(Sentry.replayIntegration({
-            maskAllText: true,
-            maskAllInputs: true,
-            blockAllMedia: true
-          }));
-          return withoutReplay;
-        };
-      }
-      Sentry.init(initOptions);
+      Sentry.init(buildSentryInitOptions(isProductionOrigin()));
     };
   }
 
-  if (rollbarActive) {
-    window.addEventListener("error", function (event) {
-      var error = event && event.error;
-      var name = (error && error.name) || "Error";
-      var message = (error && error.message) || (event && event.message) || "خطأ غير معروف";
-      send("error", clampMessage(name + ": " + message, MAX_MESSAGE_CHARS), clampStack(error && error.stack, MAX_STACK_CHARS, messageHeaders(error && error.name, error && error.message)), {
-        // اسم الملف بلا استعلام: معامل ?v=tobacco-N يتغيّر كل نشرة فيمنع التجميع.
-        filename: scrub(String((event && event.filename) || "").split("?")[0]),
-        lineno: event && event.lineno,
-        colno: event && event.colno
-      });
-    });
-
-    window.addEventListener("unhandledrejection", function (event) {
-      var reason = event && event.reason;
-      var name = (reason && reason.name) || "UnhandledRejection";
-      var message = (reason && reason.message) || String(reason === undefined ? "" : reason);
-      send("error", clampMessage(name + ": " + message, MAX_MESSAGE_CHARS), clampStack(reason && reason.stack, MAX_STACK_CHARS, messageHeaders(reason && reason.name, reason && reason.message)), {});
+  function onRollbarError(event) {
+    var error = event && event.error;
+    var name = (error && error.name) || "Error";
+    var message = (error && error.message) || (event && event.message) || "خطأ غير معروف";
+    send("error", clampMessage(name + ": " + message, MAX_MESSAGE_CHARS), clampStack(error && error.stack, MAX_STACK_CHARS, messageHeaders(error && error.name, error && error.message)), {
+      // اسم الملف بلا استعلام: معامل ?v=tobacco-N يتغيّر كل نشرة فيمنع التجميع.
+      filename: scrub(String((event && event.filename) || "").split("?")[0]),
+      lineno: event && event.lineno,
+      colno: event && event.colno
     });
   }
 
-  // كشف محدود للاختبار والتشخيص — لا يرسل شيئاً بذاته، ولا يكشف الرمز ولا
-  // الحمولة. `delivery()` تعيد عدّادات وحالة HTTP الأخيرة فقط، وهي ما يجعل
-  // فشل التسليم قابلاً للاكتشاف بدل أن يبقى صامتاً.
-  // نُصدِر الواجهة عند تفعيل نقل فعلي (Sentry أو Rollbar) فقط — النوّاب alone
-  // تُبقي الملف بلا تصدير كما كان قبل دمج Sentry.
-  if (rollbarActive || useSentry) {
+  function onRollbarUnhandledRejection(event) {
+    var reason = event && event.reason;
+    var name = (reason && reason.name) || "UnhandledRejection";
+    var message = (reason && reason.message) || String(reason === undefined ? "" : reason);
+    send("error", clampMessage(name + ": " + message, MAX_MESSAGE_CHARS), clampStack(reason && reason.stack, MAX_STACK_CHARS, messageHeaders(reason && reason.name, reason && reason.message)), {});
+  }
+
+  function attachRollbarListeners() {
+    window.addEventListener("error", onRollbarError);
+    window.addEventListener("unhandledrejection", onRollbarUnhandledRejection);
+  }
+
+  function monitoringDeliverySnapshot() {
+    return {
+      delivered: delivered,
+      failures: failures,
+      consecutiveFailures: consecutiveFailures,
+      consecutiveFatalFailures: consecutiveFatalFailures,
+      transientAttempts: transientAttempts,
+      lastFailureStatus: lastFailureStatus,
+      stopped: consecutiveFatalFailures >= MAX_FATAL_FAILURES ||
+        transientAttempts >= MAX_TRANSIENT_ATTEMPTS
+    };
+  }
+
+  function exportMonitoringApi() {
+    // كشف محدود للاختبار والتشخيص — لا يرسل شيئاً بذاته، ولا يكشف الرمز ولا
+    // الحمولة. `delivery()` تعيد عدّادات وحالة HTTP الأخيرة فقط، وهي ما يجعل
+    // فشل التسليم قابلاً للاكتشاف بدل أن يبقى صامتاً.
+    // نُصدِر الواجهة عند تفعيل نقل فعلي (Sentry أو Rollbar) فقط — النوّاب alone
+    // تُبقي الملف بلا تصدير كما كان قبل دمج Sentry.
     window.ozkErrorMonitoring = {
-      environment: injected(environment) ? environment : environment,
+      environment: environment,
       release: injected(release) ? release : null,
-      transport: useSentry ? "sentry" : (rollbarActive ? "rollbar" : "idle"),
+      transport: useSentry ? "sentry" : "rollbar",
       scrub: scrub,
       redactBusinessData: redactBusinessData,
       redactStack: redactStack,
       scrubSentryEvent: scrubSentryEvent,
       sentCount: function () { return sent; },
-      delivery: function () {
-        return {
-          delivered: delivered,
-          failures: failures,
-          consecutiveFailures: consecutiveFailures,
-          consecutiveFatalFailures: consecutiveFatalFailures,
-          transientAttempts: transientAttempts,
-          lastFailureStatus: lastFailureStatus,
-          stopped: consecutiveFatalFailures >= MAX_FATAL_FAILURES ||
-            transientAttempts >= MAX_TRANSIENT_ATTEMPTS
-        };
-      }
+      delivery: monitoringDeliverySnapshot
     };
   }
+
+  function activateConfiguredTransports() {
+    if (useSentry) installSentryOnLoad();
+    if (rollbarActive) attachRollbarListeners();
+    if (rollbarActive || useSentry) exportMonitoringApi();
+  }
+
+  activateConfiguredTransports();
 })();

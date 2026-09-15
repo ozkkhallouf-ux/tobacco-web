@@ -42,9 +42,14 @@ function boot({ meta, sentryMeta = null, protocol = "https:", hostname = "ozktob
   const metaElement = meta
     ? { getAttribute: (name) => (name in meta ? meta[name] : null) }
     : null;
-  const sentryElement = sentryMeta
-    ? { getAttribute: (name) => (name in sentryMeta ? sentryMeta[name] : null) }
-    : (sentryMeta === true ? { getAttribute: () => null } : null);
+  // sentryMeta === true يعني «وسم Sentry موجود بلا سمات»؛ الكائن يكفي لـBoolean().
+  // لا نستخدم `sentryMeta ? … : (sentryMeta === true ? …)` لأن الفرع الثاني كان ميتاً (DeepScan).
+  let sentryElement = null;
+  if (sentryMeta === true) {
+    sentryElement = { getAttribute: () => null };
+  } else if (sentryMeta && typeof sentryMeta === "object") {
+    sentryElement = { getAttribute: (name) => (name in sentryMeta ? sentryMeta[name] : null) };
+  }
 
   const context = {
     // مرصد: أي `console.error` من المُرسِل يُلتقَط. «دخان ما بعد النشر» يعتبره
@@ -161,20 +166,25 @@ console.log("\n— بوابة الإنتاج —");
   check("مع علم Sentry: لا طلبات إلى Rollbar",
     withSentry.calls.length === 0,
     `أُرسل ${withSentry.calls.length} طلباً رغم تفعيل Sentry`);
+  const sentryMon = withSentry.context.ozkErrorMonitoring;
   check("مع علم Sentry: يُعرَّف sentryOnLoad وتنقية Sentry",
     typeof withSentry.context.sentryOnLoad === "function" &&
-    withSentry.context.ozkErrorMonitoring?.transport === "sentry" &&
-    typeof withSentry.context.ozkErrorMonitoring?.scrubSentryEvent === "function",
+    Boolean(sentryMon) &&
+    sentryMon.transport === "sentry" &&
+    typeof sentryMon.scrubSentryEvent === "function",
     "محمّل Sentry بلا تهيئة أو بلا طبقة تنقية");
 
-  const scrubbed = withSentry.context.ozkErrorMonitoring.scrubSentryEvent({
-    message: "رصيد الزبون 1250000",
-    user: { email: "a@b.co", name: "Ali" },
-    request: { url: "https://ozktobacco.com/app?token=SECRET", cookies: "a=1", query_string: "x=1" },
-    exception: { values: [{ type: "Error", value: "password=secret123", stacktrace: { frames: [{ filename: "app.js?v=1", vars: { x: 1 } }] } }] },
-    breadcrumbs: [{ message: "فاتورة 9999", data: { url: "https://x.test/a?b=1", request_body: "nope" } }],
-  });
+  const scrubbed = sentryMon
+    ? sentryMon.scrubSentryEvent({
+      message: "رصيد الزبون 1250000",
+      user: { email: "a@b.co", name: "Ali" },
+      request: { url: "https://ozktobacco.com/app?token=SECRET", cookies: "a=1", query_string: "x=1" },
+      exception: { values: [{ type: "Error", value: "password=secret123", stacktrace: { frames: [{ filename: "app.js?v=1", vars: { x: 1 } }] } }] },
+      breadcrumbs: [{ message: "فاتورة 9999", data: { url: "https://x.test/a?b=1", request_body: "nope" } }],
+    })
+    : null;
   check("scrubSentryEvent يحجب العربية والأسرار ويمسح المستخدم والاستعلام",
+    Boolean(scrubbed) &&
     scrubbed.message.includes("[نص عربي محذوف]") &&
     scrubbed.exception.values[0].value.includes("[سرّ محذوف]") &&
     !scrubbed.user.email && !scrubbed.user.name &&
