@@ -2459,4 +2459,70 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   ok("توصية الشراء تربط المبيعات بـ MatGUID ولا تدمج بطاقات متصادمة الاسم");
 }
 
+// ── Codex P1: مدى ينتهي بـ«اليوم» يحفظ البداية الصريحة ───────────────────────
+{
+  // discussion_r4018947150: «مبيعات من 1/9/2026 إلى اليوم» كانت تُختزل لليوم وحده.
+  const today = new Date(Date.now() + 180 * 60_000).toISOString().slice(0, 10);
+  const fixtures = defaultFixtures();
+  fixtures.sales_line_items = [
+    { sale_date: "2026-09-01", bill_no: "a", bill_type: "retail", item_key: "g1", item_name: "أ", qty: 1, line_total: 111, unit_cost: 100, customer_name: "س" },
+    { sale_date: today, bill_no: "b", bill_type: "retail", item_key: "g1", item_name: "أ", qty: 1, line_total: 222, unit_cost: 200, customer_name: "س" },
+    { sale_date: "2026-08-31", bill_no: "c", bill_type: "retail", item_key: "g1", item_name: "أ", qty: 1, line_total: 999, unit_cost: 900, customer_name: "س" }
+  ];
+  fixtures.sales_line_items_sync_state = [{
+    source: "ameen_sales_line_items",
+    window_start: "2026-01-01",
+    window_end: today,
+    row_count: 3,
+    completed_at: new Date().toISOString()
+  }];
+  const ask = await (await loadAssistant({ fixtures })).ask(
+    TOKENS.owner,
+    "مبيعات من 1/9/2026 إلى اليوم"
+  );
+  const text = String(ask.body.reply);
+  assert.equal(ask.body.answered, true, `مدى إلى اليوم رُفض:\n${text}`);
+  assert.ok(/333/.test(text), `لم يجمع البداية مع اليوم (111+222=333):\n${text}`);
+  assert.ok(!/999/.test(text), `أدخل يوماً قبل البداية:\n${text}`);
+  assert.ok(/2026-09-01/.test(text), `لم يذكر بداية المدى:\n${text}`);
+  assert.ok(/2/.test(text), `لم يعدّ فاتورتين في المدى:\n${text}`);
+  ok("مدى «من تاريخ إلى اليوم» يحفظ البداية ولا يُختزل لليوم وحده");
+}
+
+// ── Codex P1: المقارنة تحترم الفترة المُسمّاة لا previousPeriod فقط ─────────
+{
+  // discussion_r4018947162: «هذا الشهر مقارنة بالشهر الماضي» كانت تقارن بنافذة
+  // مساوية الطول قبل هذا الشهر لا بالشهر التقويمي السابق.
+  const today = new Date(Date.now() + 180 * 60_000).toISOString().slice(0, 10);
+  const firstOfMonth = `${today.slice(0, 7)}-01`;
+  const lastMonthEnd = new Date(Date.parse(`${firstOfMonth}T00:00:00Z`) - 86_400_000).toISOString().slice(0, 10);
+  const lastMonthStart = `${lastMonthEnd.slice(0, 7)}-01`;
+  const fixtures = defaultFixtures();
+  fixtures.sales_line_items = [
+    { sale_date: firstOfMonth, bill_no: "c1", bill_type: "retail", item_key: "g1", item_name: "أ", qty: 1, line_total: 500, unit_cost: 400, customer_name: "س" },
+    { sale_date: today, bill_no: "c2", bill_type: "retail", item_key: "g1", item_name: "أ", qty: 1, line_total: 100, unit_cost: 80, customer_name: "س" },
+    { sale_date: lastMonthStart, bill_no: "p1", bill_type: "retail", item_key: "g1", item_name: "أ", qty: 1, line_total: 200, unit_cost: 150, customer_name: "س" },
+    { sale_date: lastMonthEnd, bill_no: "p2", bill_type: "retail", item_key: "g1", item_name: "أ", qty: 1, line_total: 50, unit_cost: 40, customer_name: "س" }
+  ];
+  fixtures.sales_line_items_sync_state = [{
+    source: "ameen_sales_line_items",
+    window_start: "2026-01-01",
+    window_end: today,
+    row_count: 4,
+    completed_at: new Date().toISOString()
+  }];
+  const ask = await (await loadAssistant({ fixtures })).ask(
+    TOKENS.owner,
+    "مبيعات هذا الشهر مقارنة بالشهر الماضي"
+  );
+  const text = String(ask.body.reply);
+  assert.equal(ask.body.answered, true, `مقارنة الشهر رُفضت:\n${text}`);
+  assert.ok(/الشهر الماضي/.test(text), `لم يذكر الشهر الماضي في المقارنة:\n${text}`);
+  assert.ok(/600|500/.test(text), `لم يعرض مبيعات هذا الشهر:\n${text}`);
+  assert.ok(/250/.test(text), `لم يقارن بمجموع الشهر الماضي (200+50=250):\n${text}`);
+  assert.ok(text.includes(lastMonthStart) || text.includes(lastMonthEnd),
+    `لم يذكر حدود الشهر الماضي التقويمي:\n${text}`);
+  ok("المقارنة بـ«الشهر الماضي» تستخدم الشهر التقويمي السابق لا نافذة ميكانيكية");
+}
+
 console.log(`\nتوجيه المساعد الذكي: ${passed}/${passed} تحقق ناجح`);

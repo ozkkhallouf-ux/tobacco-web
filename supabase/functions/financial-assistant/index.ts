@@ -737,8 +737,15 @@ type Period = { from: string; to: string; label: string; explicit: boolean };
 function parsePeriod(question: string, fallbackDays = 0): Period {
   const q = normalize(question);
   const today = damascusDate();
+
+  // مدى ينتهي بـ«اليوم»/«أمس» قبل فرع اليوم المنفرد — وإلا «من 1/9/2026 إلى اليوم»
+  // كان يُختزل لليوم وحده. (Codex P1 — discussion_r4018947150.)
+  const relativeEnd = parseRangeEndingRelative(q, today);
+  if (relativeEnd === "invalid") throw new Error("unrecognized_date");
+  if (relativeEnd) return relativeEnd;
+
   // «اليوم» قبل «أمس» عمداً: سؤال «مبيعات اليوم مقارنة بأمس» يحوي العبارتين،
-  // والفترة المقصودة هي اليوم — وأمس يأتي من previousPeriod في فرع المقارنة.
+  // والفترة المقصودة هي اليوم — وأمس يأتي من جملة المقارنة لا من هنا.
   // نفس نمط «هذا الشهر» قبل «الشهر الماضي» أدناه. (رصدها Codex على PR #205.)
   if (/(?:^| )اليوم(?: |$)|النهارده|هلق|الان/.test(q)) {
     return { from: today, to: today, label: "اليوم", explicit: true };
@@ -749,7 +756,7 @@ function parsePeriod(question: string, fallbackDays = 0): Period {
   }
   // «هذا الشهر» تُفحص أولاً عمداً: سؤال «مبيعات هذا الشهر مقارنة بالشهر الماضي»
   // يحوي العبارتين معاً، والفترة المقصودة فيه هي الشهر الحالي — والشهر الماضي
-  // يأتي من previousPeriod في فرع المقارنة، لا من هنا.
+  // يأتي من جملة المقارنة.
   if (/هذا الشهر|الشهر الحالي|شهري/.test(q)) {
     return { from: `${today.slice(0, 7)}-01`, to: today, label: "هذا الشهر", explicit: true };
   }
@@ -801,6 +808,37 @@ function parsePeriod(question: string, fallbackDays = 0): Period {
     return { from: today, to: today, label: "اليوم", explicit: false };
   }
   return { from: damascusDate(-(fallbackDays - 1)), to: today, label: `آخر ${fallbackDays} يوم`, explicit: false };
+}
+
+// مدى صريح ينتهي بعبارة نسبية («إلى اليوم» / «إلى أمس»).
+function parseRangeEndingRelative(q: string, today: string): Period | "invalid" | null {
+  const toToday = /(?:الي|حتى) (?:اليوم|النهارده)(?: |$)/.test(q);
+  const toYesterday = /(?:الي|حتى) (?:امس|البارحه|مبارح)(?: |$)/.test(q);
+  if (!toToday && !toYesterday) return null;
+  const end = toToday ? today : damascusDate(-1);
+  const endLabel = toToday ? "اليوم" : "أمس";
+
+  if (/من (?:امس|البارحه|مبارح) (?:الي|حتى)/.test(q)) {
+    const from = damascusDate(-1);
+    if (from > end) return "invalid";
+    return { from, to: end, label: `من أمس إلى ${endLabel}`, explicit: true };
+  }
+  if (/من (?:اليوم|النهارده) (?:الي|حتى)/.test(q)) {
+    if (today > end) return "invalid";
+    return { from: today, to: end, label: `من اليوم إلى ${endLabel}`, explicit: true };
+  }
+
+  const days = collectCalendarDays(q);
+  if (days === "invalid") return "invalid";
+  if (!days.length) return null;
+  const from = [...days].sort()[0];
+  if (from > end) return "invalid";
+  return {
+    from,
+    to: end,
+    label: from === end ? endLabel : `من ${from} إلى ${endLabel}`,
+    explicit: true
+  };
 }
 
 // يبني YYYY-MM-DD بعد التحقق التقويمي الفعلي (لا يقبل 2026-02-31).
@@ -898,7 +936,7 @@ function damascusDateFrom(iso: string, offsetDays: number) {
   return new Date(base).toISOString().slice(0, 10);
 }
 
-// الفترة السابقة المكافئة — لأسئلة المقارنة
+// الفترة السابقة المكافئة — احتياط لأسئلة المقارنة بلا فترة مُسمّاة.
 function previousPeriod(period: Period): Period {
   const days = Math.round(
     (new Date(`${period.to}T00:00:00Z`).getTime() - new Date(`${period.from}T00:00:00Z`).getTime()) / 86_400_000
@@ -909,6 +947,38 @@ function previousPeriod(period: Period): Period {
     label: `الفترة السابقة (${days} يوم)`,
     explicit: true
   };
+}
+
+// فترة المقارنة كما سمّاها السائل («بالشهر الماضي»، «بأمس»…) لا previousPeriod
+// الميكانيكي. (Codex P1 — discussion_r4018947162.)
+function namedComparisonPeriod(question: string, primary: Period): Period {
+  const q = normalize(question);
+  let clause = "";
+  const byMuqarana = q.match(/مقارنه\s*(?:ب|مع|ل)?\s*(.+)$/);
+  if (byMuqarana) clause = byMuqarana[1].trim();
+  else {
+    const byMuqabil = q.match(/مقابل\s+(.+)$/);
+    if (byMuqabil) clause = byMuqabil[1].trim();
+  }
+  clause = clause.replace(/^ب/, "").trim();
+
+  // «قارن … بالفترة السابقة» بلا كلمة «مقارنة» لاحقة
+  if (!clause && /ب(?:ال)?فتره السابقه/.test(q)) return previousPeriod(primary);
+  if (!clause) {
+    const tagged = q.match(
+      /\bب(امس|البارحه|مبارح|الشهر الماضي|الشهر السابق|الشهر الفائت|الاسبوع الماضي|الاسبوع السابق|الاسبوع الفائت|السنه الماضيه|السنه الفائته|السنه السابقه|العام الماضي|العام الفائت|العام السابق|الفتره السابقه)\b/
+    );
+    if (tagged) clause = tagged[1];
+  }
+  if (!clause || /الفتره السابقه/.test(clause)) return previousPeriod(primary);
+
+  try {
+    const parsed = parsePeriod(clause, 0);
+    if (!parsed.explicit) return previousPeriod(primary);
+    return parsed;
+  } catch {
+    return previousPeriod(primary);
+  }
 }
 
 // تغطية تقرير لقطة (فواتير الشراء وفواتير الزبائن).
@@ -1819,9 +1889,10 @@ async function appendSalesComparison(
   text: string,
   period: Period,
   now: SalesSummary,
-  role: Role
+  role: Role,
+  question: string
 ): Promise<{ text: string; comparePeriod: Period; comparePartial: boolean }> {
-  const prev = previousPeriod(period);
+  const prev = namedComparisonPeriod(question, period);
   // قراءة مستقلة بحدّ بتر مستقل. إسقاط `partial` هنا كان يعرض مجموع
   // الفترة السابقة والفرق والنسبة **مبتورةً** بوصفها نهائية، ويُبقي
   // `partial` في الجواب معبّراً عن الفترة الحالية وحدها.
@@ -1830,13 +1901,13 @@ async function appendSalesComparison(
   const delta = now.total - before.total;
   const pct = before.total ? (delta / before.total) * 100 : null;
   text += `\n\n**مقارنة بـ${prev.label} (${prev.from} → ${prev.to})**\n`
-    + `- الفترة السابقة: **${money(before.total)}** على ${before.bills} فاتورة\n`
+    + `- الفترة المُقارَن بها: **${money(before.total)}** على ${before.bills} فاتورة\n`
     + `- الفرق: **${delta >= 0 ? "+" : ""}${money(delta)}**`
     + (pct === null
-      ? " (لا نسبة — الفترة السابقة صفر)"
+      ? " (لا نسبة — الفترة المُقارَن بها صفر)"
       : ` (${delta >= 0 ? "+" : ""}${pct.toFixed(1)}%)`)
     + (prevRead.partial
-      ? `\n- ⚠️ قراءة الفترة السابقة بلغت سقف ${HARD_ROW_CAP} سطر، فمجموعها والفرق والنسبة أعلاه **مبتورة**.`
+      ? `\n- ⚠️ قراءة الفترة المُقارَن بها بلغت سقف ${HARD_ROW_CAP} سطر، فمجموعها والفرق والنسبة أعلاه **مبتورة**.`
       : "");
   return { text, comparePeriod: prev, comparePartial: prevRead.partial };
 }
@@ -2066,7 +2137,7 @@ const TOOLS: Tool[] = [
       let comparePeriod: Period | null = null;
       let comparePartial = false;
       if (compare) {
-        const compared = await appendSalesComparison(text, period, now, ctx.role);
+        const compared = await appendSalesComparison(text, period, now, ctx.role, ctx.question);
         text = compared.text;
         comparePeriod = compared.comparePeriod;
         comparePartial = compared.comparePartial;
