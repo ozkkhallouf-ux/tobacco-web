@@ -37,7 +37,11 @@ timestamp إنتاجي يقابل أي محاولة محلية تقريبياً 
 تشغيل DDL غير مُثبت ولا يخترع مخططاً. إن وُجد المعلم: NOTICE تحقق. إن غاب
 (قاعدة فارغة / مسار ميزة خارج سلسلة المهاجرات النشطة): NOTICE no-op بلا
 استثناء حتى لا تُجهض إعادة التشغيل عند طابع remote-only / قبل الوصول إلى
-bootstrap الـaudit `20260830141802` (Codex P1 على PR #228). **هذا ليس ادّعاء
+bootstrap الـaudit `20260830141802` (Codex P1 على PR #228). **استثناء
+`20260823085423` (Codex P1 لاحق، 2026-09-15):** يوفّر **function-only** baseline
+لـ`smart_inventory_set_counter_auth_role(uuid)` من المسودة L5–36 (مطلوب لـ
+`inventory-auth`) — **بلا** حلقة السياسات / تحديثات auth الجماعية. ونفس
+الدالة أُضيفت إلى `supabase/smart-inventory.sql`. **هذا ليس ادّعاء
 إعادة تشغيل مستقلة كاملة لكل جداول المنتج** (الأسعار/التكاليف/المصادر تبقى
 خارج السلسلة أو تُوفَّر جزئياً كـbaseline). على الإنتاج يبقى CLI متخطّياً لأن
 الإصدار مسجَّل. أسماء الطوابع غير المؤكَّدة (`20260826133200` خصوصاً) يجب
@@ -65,6 +69,11 @@ Codex P1). على الإنتاج: CLI يتخطّى الملف لأن الإصد�
 تُعدِّل `telegram_outbox` (مثل `20260914120000`). لا يُعاد هنا تعريف المُرسِل
 ولا جدولة cron ولا triggers المجالات — تلك تبقى خارج سلسلة المهاجرات النشطة
 أو في مهاجرات لاحقة. الإنتاج يملك النظام أصلاً ويتخطّى ملف الـbootstrap.
+**حارس EXECUTE للنسخة رباعية المعاملات (Codex P1 لاحق، 2026-09-15):** جسم
+`notify_telegram(text,text,text,int)` على مسار القاعدة الفارغة يضم بوابة
+تفويض مطابقة لغلاف الخمسة معاملات في `telegram-notifications.sql` (~819–845)
+مع تأجيل `is_staff()` عند غياب المساعد — حتى لا يستطيع أي `authenticated`
+تزوير إشعارات المالك عبر PostgREST على DB مبني من المهاجرات فقط.
 
 **أساس الأسعار / التكاليف قبل ALTER (Codex P1 لاحق، 2026-09-15):** المهاجرتان
 `../20260827110254_add_item_guid_to_approved_price_items.sql` و
@@ -107,7 +116,7 @@ above now has a matching local file under `../`:
 
 | version | local file | kind |
 |---|---|---|
-| `20260823085423` | `20260823085423_smart_inventory_counter_isolation.sql` | landmark verify-or-skip (fresh no-op) |
+| `20260823085423` | `20260823085423_smart_inventory_counter_isolation.sql` | function-only baseline `smart_inventory_set_counter_auth_role(uuid)` (fresh); Stage 2 skip |
 | `20260826104745` | `20260826104745_fix_ameen_read_requests_initplan_current_setting.sql` | landmark verify-or-skip (fresh no-op) |
 | `20260826133200` | `20260826133200_fix_ameen_read_requests_initplan_followup.sql` | landmark verify-or-skip (name unconfirmed) |
 | `20260830141802` | `20260830141802_khalil_audit_log.sql` | fresh-DB bootstrap + refuse-if-present |

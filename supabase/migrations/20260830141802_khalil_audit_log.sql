@@ -59,6 +59,12 @@
 --   notify trigger and before later active migrations that ALTER
 --   `telegram_outbox`. Production already has Telegram from the out-of-band
 --   `telegram_notifications_system` apply and skips this file.
+-- - Telegram 4-arg EXECUTE guard (Codex P1, 2026-09-15): the fresh-path
+--   SECURITY DEFINER enqueue mirrors the authorization gate of the out-of-band
+--   5-arg wrapper in `supabase/telegram-notifications.sql` (~819–845) —
+--   JWT service_role / null PostgREST context / pg_trigger_depth()>0 /
+--   is_staff() when that helper exists — so authenticated callers cannot
+--   forge owner Telegram messages via PostgREST RPC on a migrations-only DB.
 -- - No FORCE ROW LEVEL SECURITY. No migration repair. This commit alone does
 --   not authorize applying SQL to production.
 -- ============================================================
@@ -121,6 +127,10 @@ create index if not exists telegram_outbox_net_request_idx on public.telegram_ou
 alter table public.telegram_outbox enable row level security;
 comment on table public.telegram_outbox is 'قائمة انتظار إشعارات تيليغرام — يرسلها dispatch_telegram_outbox كل دقيقة';
 
+-- 4-arg enqueue with the same caller gate as the out-of-band 5-arg wrapper
+-- (telegram-notifications.sql). SECURITY DEFINER bypasses RLS on
+-- telegram_outbox — without this check every authenticated grant could spam
+-- owner notifications via PostgREST (Codex P1 on PR #228).
 create or replace function public.notify_telegram(
   p_event_type     text,
   p_message        text,
@@ -129,7 +139,24 @@ create or replace function public.notify_telegram(
 ) returns void
 language plpgsql security definer set search_path = public
 as $$
+declare
+  v_jwt_role text := nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'role';
 begin
+  -- Mirror telegram-notifications.sql 5-arg gate. is_staff() is optional on
+  -- fresh migrations-only DBs (helper is out-of-band); absence must not raise
+  -- undefined_function — treat as "not staff" so the call is denied.
+  if not (
+    v_jwt_role is null
+    or v_jwt_role = 'service_role'
+    or pg_trigger_depth() > 0
+    or (
+      to_regprocedure('public.is_staff()') is not null
+      and public.is_staff()
+    )
+  ) then
+    raise exception 'notify_telegram: unauthorized direct call' using errcode = '42501';
+  end if;
+
   if p_message is null or length(trim(p_message)) = 0 then return; end if;
   if p_dedupe_key is not null and exists (
     select 1 from public.telegram_outbox

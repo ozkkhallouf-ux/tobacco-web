@@ -654,6 +654,38 @@ begin
   delete from auth.sessions where user_id=p_user_id;
 end; $$;
 
+-- Least-privilege DB role for inventory counter Auth users (service_role only).
+-- Same function-only baseline as migrations/superseded/20260823084956_… and
+-- active stamp 20260823085423 — required by inventory-auth create/enable.
+-- Does NOT include the superseded draft's policy loop / bulk auth rewrites.
+create or replace function public.smart_inventory_set_counter_auth_role(p_user_id uuid)
+returns void
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  if current_user not in ('service_role', 'postgres', 'supabase_admin') then
+    raise exception 'service_role_only' using errcode = '42501';
+  end if;
+
+  update auth.users u
+     set role = 'anon', updated_at = now()
+   where u.id = p_user_id
+     and exists (
+       select 1
+       from public.inventory_counter_accounts a
+       where a.user_id = u.id
+     );
+
+  if not found then
+    raise exception 'counter_account_not_found';
+  end if;
+
+  delete from auth.sessions where user_id = p_user_id;
+end;
+$$;
+
 create or replace function public.smart_inventory_has_session_for_service(p_session_id uuid,p_user_id uuid)
 returns boolean language plpgsql security definer set search_path = '' as $$
 begin
@@ -684,10 +716,12 @@ begin
 end; $$;
 
 revoke all on function public.smart_inventory_auth_preflight(text,text), public.smart_inventory_auth_record(text,text,boolean),
-  public.smart_inventory_revoke_user_sessions(uuid),public.smart_inventory_has_session_for_service(uuid,uuid),
+  public.smart_inventory_revoke_user_sessions(uuid),public.smart_inventory_set_counter_auth_role(uuid),
+  public.smart_inventory_has_session_for_service(uuid,uuid),
   public.smart_inventory_enqueue_daily_summary() from public,anon,authenticated;
 grant execute on function public.smart_inventory_auth_preflight(text,text), public.smart_inventory_auth_record(text,text,boolean),
-  public.smart_inventory_revoke_user_sessions(uuid),public.smart_inventory_has_session_for_service(uuid,uuid),
+  public.smart_inventory_revoke_user_sessions(uuid),public.smart_inventory_set_counter_auth_role(uuid),
+  public.smart_inventory_has_session_for_service(uuid,uuid),
   public.smart_inventory_enqueue_daily_summary() to service_role;
 
 revoke all on function public.smart_inventory_available_warehouses(date),public.smart_inventory_start_or_join(text),

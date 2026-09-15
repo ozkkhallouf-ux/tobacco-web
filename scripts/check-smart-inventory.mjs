@@ -46,6 +46,7 @@ assert(edge.includes("Never return the synthetic Auth email") && !/return reply\
 assert(edge.includes("smart_inventory_auth_preflight") && edge.includes("smart_inventory_auth_record"), "Login rate limiting contract missing.");
 assert(edge.includes("smart_inventory_revoke_user_sessions"), "Reset/disable must revoke existing sessions.");
 assert(edge.includes("smart_inventory_set_counter_auth_role"), "New and re-enabled counter accounts must receive the least-privilege database role.");
+assert(sql.includes("smart_inventory_set_counter_auth_role"), "smart-inventory.sql must define smart_inventory_set_counter_auth_role for feature bootstrap.");
 for (const contract of [
   "set role = 'anon'", "deny_inventory_counter_access", "as restrictive", "to anon",
   "smart_inventory_set_counter_auth_role", "delete from auth.sessions"
