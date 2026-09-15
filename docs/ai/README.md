@@ -37,6 +37,7 @@
 - [مزامنة الأمين](topics/ameen-sync.md)
 - [الطباعة والفواتير](topics/printing.md)
 - [الإشعارات والنشر](topics/notifications-deployment.md)
+- [تعاون Slack وGitHub والوكلاء](topics/collaboration-workflow.md)
 
 ## قاعدة التحديث
 
