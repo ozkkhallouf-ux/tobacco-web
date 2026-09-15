@@ -1940,4 +1940,124 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   ok("المناقلات تعرض أسماء المنتِج وترشّح الفترة الصريحة");
 }
 
+// ── Codex P1 c61b172: تعادل صرفنا×صندوق → المصاريف لا أرصدة الإغلاق ──────────
+{
+  // «كم صرفنا من الصندوق اليوم؟» يسجّل 6 للصندوق (صندوق) و6 للمصاريف (صرفنا).
+  // بلا priority على expenses كان ترتيب TOOLS يختار الصندوق ويعرض أرصدة
+  // الإغلاق بدل المنصرف. (discussion_r4017651295)
+  const a = await loadAssistant();
+  const result = await a.ask(TOKENS.owner, "كم صرفنا من الصندوق اليوم؟");
+  assert.equal(result.body.tool, "expenses", `تعادل صرفنا×صندوق ذهب إلى ${result.body.tool} بدل expenses`);
+  assert.ok(a.metrics.tablesRead.has("expense_entries"), "سؤال الصرف من الصندوق لم يقرأ expense_entries");
+  assert.ok(!String(result.body.reply).includes("2,193.09"), "تسرّب رصيد إغلاق الصندوق إلى جواب المصاريف");
+  assert.ok(/محروقات|أجور نقل|مصاريف/.test(String(result.body.reply)), `جواب المصاريف بلا بنود منصرف:\n${result.body.reply}`);
+
+  const bareBox = await loadAssistant();
+  const box = await bareBox.ask(TOKENS.owner, "كم يوجد بالصندوق؟");
+  assert.equal(box.body.tool, "cashbox", "سؤال الصندوق الصريح يجب أن يبقى على cashbox");
+  ok("فعل الصرف يفوز على اسم الوعاء عند تعادل النقاط؛ سؤال الصندوق الصريح يبقى للصناديق");
+}
+
+// ── Codex P1 c61b172: رصيد زبون بفترة تاريخية يستخدم لقطة الفترة ─────────────
+{
+  // «كم كان رصيد الزبون سامر الشهر الماضي؟» كان يحمل أحدث لقطة ويسمّيها
+  // «الرصيد الحالي». يجب reportForPeriod كالذمم، أو رفض صريح. (discussion_r4017651314)
+  const today = new Date(Date.now() + 180 * 60_000).toISOString().slice(0, 10);
+  const now = new Date();
+  const lastMonthDate = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 15));
+  const lastMonth = lastMonthDate.toISOString().slice(0, 10);
+  const fixtures = defaultFixtures();
+  fixtures["inventory_reports:ameen_customer_balances"] = [
+    {
+      report_date: today,
+      created_at: new Date().toISOString(),
+      summary: {
+        totalDebitBalance: 12000, totalCreditBalance: 0,
+        customersWithDebitBalance: 1, customersWithCreditBalance: 0, totalCustomers: 1
+      },
+      items: [{
+        key: "سامر الوهمي", name: "سامر الوهمي", balance: 12000, customerGuid: "aaa11111",
+        recentPayments: []
+      }]
+    },
+    {
+      report_date: lastMonth,
+      created_at: new Date(Date.now() - 40 * 86_400_000).toISOString(),
+      summary: {
+        totalDebitBalance: 7777, totalCreditBalance: 0,
+        customersWithDebitBalance: 1, customersWithCreditBalance: 0, totalCustomers: 1
+      },
+      items: [{
+        key: "سامر الوهمي", name: "سامر الوهمي", balance: 7777, customerGuid: "aaa11111",
+        recentPayments: []
+      }]
+    }
+  ];
+
+  const a = await loadAssistant({ fixtures });
+  const hist = await a.ask(TOKENS.owner, "كم كان رصيد الزبون سامر الوهمي الشهر الماضي؟");
+  const histText = String(hist.body.reply);
+  assert.equal(hist.body.tool, "customer");
+  assert.equal(hist.body.answered, true, `فترة تاريخية بلقطة مطابقة يجب أن تُجاب:\n${histText}`);
+  assert.ok(/7,777/.test(histText), `لم يعرض رصيد لقطة الشهر الماضي (7777):\n${histText}`);
+  assert.ok(!/12,000/.test(histText), `عرض الرصيد الحالي (12000) جواباً عن الشهر الماضي:\n${histText}`);
+  assert.ok(!/الرصيد الحالي/.test(histText), `وسم «الرصيد الحالي» على جواب تاريخي:\n${histText}`);
+  assert.ok(histText.includes(lastMonth), `لم يذكر تاريخ لقطة الشهر الماضي:\n${histText}`);
+
+  const bare = await loadAssistant({ fixtures });
+  const nowAsk = await bare.ask(TOKENS.owner, "ما رصيد الزبون سامر الوهمي؟");
+  const nowText = String(nowAsk.body.reply);
+  assert.ok(/12,000/.test(nowText), `سؤال بلا فترة لم يأخذ أحدث رصيد:\n${nowText}`);
+  assert.ok(/الرصيد الحالي/.test(nowText), `سؤال بلا فترة يجب أن يبقى بعنوان الرصيد الحالي:\n${nowText}`);
+
+  const noSnap = defaultFixtures();
+  noSnap["inventory_reports:ameen_customer_balances"] = [fixtures["inventory_reports:ameen_customer_balances"][0]];
+  const c = await loadAssistant({ fixtures: noSnap });
+  const rejected = await c.ask(TOKENS.owner, "كم كان رصيد الزبون سامر الوهمي الشهر الماضي؟");
+  assert.equal(rejected.body.answered, false, `فترة بلا لقطة تغطيها يجب أن تُرفض:\n${rejected.body.reply}`);
+  assert.ok(/لن أعرض الرصيد الحالي/.test(String(rejected.body.reply)), `نص الرفض لم يمنع عرض الرصيد الحالي:\n${rejected.body.reply}`);
+  ok("رصيد زبون بفترة تاريخية يأخذ لقطة الفترة (أو يرفض صراحة) ولا يعرض الرصيد الحالي مموَّهاً");
+}
+
+// ── Codex P1 c61b172: اسم مورّد غامض يُرفض قبل تفصيل فواتيره ─────────────────
+{
+  // limit=1 كان يرمي المنافسين قبل isAmbiguous فيختار أول مورّد صامتاً.
+  // (discussion_r4017651321)
+  const fixtures = defaultFixtures();
+  fixtures.ameen_purchase_invoice_reports = [{
+    report_date: new Date(Date.now() + 180 * 60_000).toISOString().slice(0, 10),
+    created_at: new Date().toISOString(),
+    summary: { bills: 2, suppliers: 2, fromDate: "2026-07-08" },
+    items: [
+      {
+        name: "شركة الأمل للتوريد",
+        invoices: [{ date: "2026-08-01", items: [{ itemName: "صنف الأمل أ", qty: 1, lineTotal: 100, avgPrice: 100 }] }]
+      },
+      {
+        name: "شركة الأمل التجارية",
+        invoices: [{ date: "2026-08-02", items: [{ itemName: "صنف الأمل ب", qty: 1, lineTotal: 200, avgPrice: 200 }] }]
+      }
+    ]
+  }];
+
+  const a = await loadAssistant({ fixtures });
+  const result = await a.ask(TOKENS.owner, "فواتير المورد شركة الأمل");
+  const text = String(result.body.reply);
+  assert.equal(result.body.tool, "purchases");
+  assert.equal(result.body.answered, false, `اسم مورّد غامض كان يجب رفضه لا اختيار الأول:\n${text}`);
+  assert.ok(/يطابق أكثر من مورّد/.test(text), `لم يُعلن الغموض:\n${text}`);
+  assert.ok(/شركة الأمل للتوريد/.test(text) && /شركة الأمل التجارية/.test(text), `لم يعرض المرشّحين:\n${text}`);
+  assert.ok(!/تفصيل/.test(text), `عرض تفصيل مورّد رغم الغموض:\n${text}`);
+  assert.ok(!/صنف الأمل أ/.test(text) && !/صنف الأمل ب/.test(text), `عرّض فواتير مورّد رغم الغموض:\n${text}`);
+
+  const exact = await loadAssistant({ fixtures });
+  const unique = await exact.ask(TOKENS.owner, "فواتير المورد شركة الأمل للتوريد");
+  const uniqueText = String(unique.body.reply);
+  assert.equal(unique.body.answered, true, `اسم مورّد مميَّز يجب أن يُجاب:\n${uniqueText}`);
+  assert.ok(/تفصيل.*شركة الأمل للتوريد/.test(uniqueText), `لم يعرض تفصيل المورّد المميَّز:\n${uniqueText}`);
+  assert.ok(/صنف الأمل أ/.test(uniqueText), `لم يعرض فواتير المورّد المميَّز:\n${uniqueText}`);
+  assert.ok(!/صنف الأمل ب/.test(uniqueText), `خلط فواتير المورّد الآخر:\n${uniqueText}`);
+  ok("اسم مورّد غامض يُرفض صراحة قبل تفصيل فواتيره؛ الاسم المميَّز يعرض تفصيله وحده");
+}
+
 console.log(`\nتوجيه المساعد الذكي: ${passed}/${passed} تحقق ناجح`);

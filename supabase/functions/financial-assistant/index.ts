@@ -1259,10 +1259,20 @@ function appendPurchasesSupplierDetail(
 ): string {
   const { items, entityText, scope, inPeriod } = opts;
   if (!entityText.trim()) return text;
-  const hit = matchByName(items, (row) => String(row.name ?? ""), entityText, 1)[0];
-  if (!hit) {
+  // limit الافتراضي (5) لا 1: الحدّ 1 كان يرمي المرشّحين الآخرين قبل أن
+  // ترى isAmbiguous() أي منافس، فيُعرض تفصيل أول مورّد صامتاً لاسم مختصر
+  // يطابق أكثر من حساب («فواتير المورد شركة الأمل»). (رصدها Codex على PR #205.)
+  const matches = matchByName(items, (row) => String(row.name ?? ""), entityText);
+  if (!matches.length) {
     return text + `\n\n_لم أجد مورّداً باسم «${entityText.trim()}» في هذا التقرير._`;
   }
+  if (isAmbiguous(matches)) {
+    return text
+      + `\n\nالاسم «${entityText.trim()}» يطابق أكثر من مورّد:\n`
+      + matches.map((m) => `- ${String(m.row.name ?? "")}`).join("\n")
+      + `\n\nاكتب الاسم بشكل أدق لأختار المورّد الصحيح — لن أخمّن بينها.`;
+  }
+  const hit = matches[0];
   const invoices = (Array.isArray(hit.row.invoices) ? hit.row.invoices : []).filter(inPeriod);
   return text
     + `\n\n**تفصيل ${String(hit.row.name)} — ${scope}**\n`
@@ -1295,6 +1305,23 @@ function formatPurchasesBody(opts: {
     scope, bySupplier, bills, lines, returnsTotal, conflicting, unreliable,
     period, coverage, items, entityText, inPeriod, asOf
   } = opts;
+
+  // غموض اسم المورّد يُرفض قبل أي تفصيل مالي لحساب بعينه — لا يُختار أول
+  // مرشّح صامتاً. (رصدها Codex على PR #205.)
+  if (entityText.trim()) {
+    const matches = matchByName(items, (row) => String(row.name ?? ""), entityText);
+    if (isAmbiguous(matches)) {
+      return {
+        ok: false,
+        text: `الاسم «${entityText.trim()}» يطابق أكثر من مورّد:\n`
+          + matches.map((m) => `- ${String(m.row.name ?? "")}`).join("\n")
+          + `\n\nاكتب الاسم بشكل أدق لأختار المورّد الصحيح — لن أخمّن بينها.`,
+        sources: ["ameen_purchase_invoice_reports"],
+        asOf
+      };
+    }
+  }
+
   let text = `**المشتريات — ${scope}**\n`
     + `- عدد فواتير الشراء: **${bills}** من **${bySupplier.length}** مورّد، بمجموع ${lines} سطر\n`
     + (returnsTotal ? `- ومعها **${returnsTotal}** مرتجع شراء، غير داخلة في العدد أعلاه.\n` : "")
@@ -1470,6 +1497,10 @@ const TOOLS: Tool[] = [
     id: "expenses",
     title: "المصاريف والمدفوعات",
     minRole: "owner",
+    // فعل الصرف يفوز على اسم الوعاء عند التعادل: «كم صرفنا من الصندوق؟»
+    // يسجّل 6 للصندوق و6 للمصاريف — بلا أولوية كان ترتيب TOOLS يختار الصندوق
+    // ويعرض أرصدة الإغلاق بدل المنصرف. (رصدها Codex على PR #205.)
+    priority: 1,
     patterns: [
       { re: /مصروف|مصاريف|صرفنا|دفعنا|منصرف|نفقات/, w: 6 },
       { re: /كم دفع/, w: 4 }
@@ -1714,7 +1745,25 @@ const TOOLS: Tool[] = [
           sources: []
         };
       }
-      const balances = await latestReport("inventory_reports", "ameen_customer_balances");
+      const qn = normalize(ctx.question);
+      const wantsPurchases = /اشتر|اخد|فواتير|بضاعه|مواد/.test(qn);
+      // سؤال **مبلغ الرصيد** بفترة تاريخية («كم كان رصيد … الشهر الماضي؟») يحتاج
+      // لقطة تغطي ذاك التاريخ. أما «كشف حساب / حركة … أمس» فيكتفي بأحدث لقطة
+      // للهوية ثم يصفّي الدفعات بالفترة — رفض اللقطة التاريخية كان يكسر ذلك.
+      // (رصدها Codex على PR #205.)
+      const asksBalanceAmount = /رصيد/.test(qn) && !/كشف حساب/.test(qn);
+      const needsHistoricalBalance = ctx.period.explicit && asksBalanceAmount && !wantsPurchases;
+      const balances = needsHistoricalBalance
+        ? await reportForPeriod("inventory_reports", "ameen_customer_balances", ctx.period)
+        : await latestReport("inventory_reports", "ameen_customer_balances");
+      if (needsHistoricalBalance && !balances) {
+        return {
+          ok: false,
+          text: `لا تتوفر لدي لقطة أرصدة زبائن تغطي ${ctx.period.label} (${ctx.period.from} → ${ctx.period.to}). `
+            + `لن أعرض الرصيد الحالي كأنه يعود لتلك الفترة — التقارير المحفوظة لا تغطيها.`,
+          sources: ["inventory_reports:ameen_customer_balances"]
+        };
+      }
       const rows = Array.isArray(balances?.items) ? balances.items : [];
       if (!rows.length) return noData("أرصدة الزبائن", ["inventory_reports:ameen_customer_balances"]);
 
@@ -1743,10 +1792,12 @@ const TOOLS: Tool[] = [
       const customer = matches[0].row;
       const name = String(customer.name ?? customer.key ?? "");
       const guid = String(customer.customerGuid ?? "");
-      const wantsPurchases = /اشتر|اخد|فواتير|بضاعه|مواد/.test(normalize(ctx.question));
+      const balanceLabel = needsHistoricalBalance
+        ? `الرصيد بتاريخ ${balances.report_date}`
+        : "الرصيد الحالي";
 
       let text = `**${name}**\n`
-        + `- الرصيد الحالي: **${money(customer.balance)}** ${num(customer.balance) > 0 ? "(مدين — عليه)" : num(customer.balance) < 0 ? "(دائن — له)" : "(مسدّد)"}\n`
+        + `- ${balanceLabel}: **${money(customer.balance)}** ${num(customer.balance) > 0 ? "(مدين — عليه)" : num(customer.balance) < 0 ? "(دائن — له)" : "(مسدّد)"}\n`
         + `- تاريخ التقرير: ${balances.report_date}`;
       text = appendCustomerPaymentsText(text, customer, ctx.period);
 
