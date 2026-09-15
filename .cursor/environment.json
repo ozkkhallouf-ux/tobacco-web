@@ -1,0 +1,14 @@
+{
+  "name": "tobacco-web",
+  "install": "npm ci && npx playwright install chromium",
+  "terminals": [
+    {
+      "name": "dev-server",
+      "command": "npm run dev",
+      "description": "Static site dev server (scripts/serve.mjs) on http://127.0.0.1:5173"
+    }
+  ],
+  "ports": [
+    { "name": "web", "port": 5173 }
+  ]
+}
