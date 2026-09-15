@@ -814,6 +814,48 @@ function ymdIso(year: number, month: number, day: number): string | null {
   return iso;
 }
 
+// أسماء الأشهر بعد normalize (ة→ه، أإآ→ا). «اب» يُحاط بحدود حرف لئلا
+// يطابق داخل «حساب».
+const ARABIC_MONTHS: Array<{ re: RegExp; month: number }> = [
+  { re: /يناير|كانون الثاني/, month: 1 },
+  { re: /فبراير|شباط/, month: 2 },
+  { re: /مارس|اذار/, month: 3 },
+  { re: /ابريل|نيسان/, month: 4 },
+  { re: /مايو|ايار/, month: 5 },
+  { re: /يونيو|حزيران/, month: 6 },
+  { re: /يوليو|تموز/, month: 7 },
+  { re: /اغسطس|(?<!\p{L})اب(?!\p{L})/u, month: 8 },
+  { re: /سبتمبر|ايلول/, month: 9 },
+  { re: /اكتوبر|تشرين الاول/, month: 10 },
+  { re: /نوفمبر|تشرين الثاني/, month: 11 },
+  { re: /ديسمبر|كانون الاول/, month: 12 }
+];
+
+function hasArabicMonthName(q: string) {
+  return ARABIC_MONTHS.some(({ re }) => re.test(q));
+}
+
+// يوم + اسم شهر عربي (+ سنة اختيارية). بلا سنة تُؤخذ سنة دمشق الحالية.
+function parseArabicMonthDate(q: string): Period | "invalid" | null {
+  for (const { re, month } of ARABIC_MONTHS) {
+    const dayFirst = q.match(new RegExp(`(?:^| )(?:يوم )?(\\d{1,2}) (${re.source})(?: (\\d{4}))?(?: |$)`, "u"));
+    if (dayFirst) {
+      const year = dayFirst[3] ? Number(dayFirst[3]) : Number(damascusDate().slice(0, 4));
+      const day = ymdIso(year, month, Number(dayFirst[1]));
+      if (!day) return "invalid";
+      return { from: day, to: day, label: day, explicit: true };
+    }
+    const monthFirst = q.match(new RegExp(`(?:^| )(${re.source}) (\\d{1,2})(?: (\\d{4}))?(?: |$)`, "u"));
+    if (monthFirst) {
+      const year = monthFirst[3] ? Number(monthFirst[3]) : Number(damascusDate().slice(0, 4));
+      const day = ymdIso(year, month, Number(monthFirst[2]));
+      if (!day) return "invalid";
+      return { from: day, to: day, label: day, explicit: true };
+    }
+  }
+  return null;
+}
+
 // يقرأ تاريخاً تقويمياً صريحاً من السؤال المُطبَّع، أو "invalid" إن وُجدت
 // نية تاريخ دون صيغة مدعومة/صالحة — كي لا يُجاب «اليوم» مكان التاريخ المطلوب.
 function parseExplicitCalendarDate(q: string): Period | "invalid" | null {
@@ -831,8 +873,14 @@ function parseExplicitCalendarDate(q: string): Period | "invalid" | null {
     if (!day) return "invalid";
     return { from: day, to: day, label: day, explicit: true };
   }
+  // اسم شهر عربي: «15 سبتمبر» أو «يوم 15 سبتمبر 2026» — بلا هذا كانت
+  // تسقط على اليوم. (رصدها Codex على PR #205 بعد 3fdb433.)
+  const named = parseArabicMonthDate(q);
+  if (named) return named;
   // «يوم» ثم رقم دون صيغة كاملة معروفة — رفض صريح لا سقوط على اليوم
   if (/(?:^| )يوم \d/.test(q)) return "invalid";
+  // رقم + اسم شهر حاضران لكن الصيغة لم تُحلّ (يوم خارج الشهر، إلخ)
+  if (hasArabicMonthName(q) && /\d/.test(q)) return "invalid";
   return null;
 }
 
@@ -1660,7 +1708,7 @@ async function resolveCustomerBalanceReport(ctx: ToolContext): Promise<{
   error?: ToolResult;
 }> {
   const qn = normalize(ctx.question);
-  const wantsPurchases = /اشتر|اخد|فواتير|بضاعه|مواد/.test(qn);
+  const wantsPurchases = /اشتر|اخد|فواتير|بضاعه|مواد|مبيعات/.test(qn);
   // سؤال **مبلغ الرصيد** بفترة تاريخية («كم كان رصيد … الشهر الماضي؟») يحتاج
   // لقطة تغطي ذاك التاريخ. أما «كشف حساب / حركة … أمس» فيكتفي بأحدث لقطة
   // للهوية ثم يصفّي الدفعات بالفترة — رفض اللقطة التاريخية كان يكسر ذلك.
@@ -2133,6 +2181,10 @@ const TOOLS: Tool[] = [
     patterns: [
       { re: /رصيد (?:ال)?(?:زبون|عميل)|كشف حساب|حركه (?:ال)?(?:زبون|عميل)/, w: 7 },
       { re: /(?:ماذا|شو) (?:اشتري|اخد)|مشتريات (?:ال)?زبون|فواتير (?:ال)?زبون/, w: 7 },
+      // «مبيعات الزبون X» كانت تذهب لأداة المبيعات الإجمالية (وزن 6 على
+      // «مبيعات») فتعرض إيراد كل الزبائن. وزن أعلى يوجّهها لملف الزبون مع
+      // ترشيح فواتيره. (رصدها Codex على PR #205 بعد 3fdb433.)
+      { re: /مبيعات (?:ال)?(?:زبون|عميل)/, w: 8 },
       // «ما رصيد أحمد؟» بلا كلمة «زبون». وزن منخفض عمداً كي تفوز أداة
       // دليل الحسابات على «رصيد حساب ...» التي تحمل وزن 7 على كلمة «حساب».
       { re: /رصيد /, w: 4 }

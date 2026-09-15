@@ -27,6 +27,7 @@ const ROUTES = [
   ["ما الذمم علينا؟", "receivables", "inventory_reports"],
   ["ما رصيد الزبون سامر الوهمي؟", "customer", "inventory_reports"],
   ["ماذا اشترى الزبون سامر الوهمي؟", "customer", "inventory_reports"],
+  ["مبيعات الزبون سامر الوهمي اليوم", "customer", "inventory_reports"],
   ["ما الأصناف الناقصة؟", "inventory", "inventory_reports"],
   ["ما وضع المخزون؟", "inventory", "inventory_reports"],
   ["ما الأصناف الراكدة؟", "stagnant", "inventory_reports"],
@@ -2303,10 +2304,69 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
     `نص الرفض لا يمنع السقوط على اليوم:\n${bad.body.reply}`);
   assert.ok(!String(bad.body.reply).includes("999"), `تاريخ فاسد أجاب بمبيعات اليوم:\n${bad.body.reply}`);
 
-  const vague = await (await loadAssistant({ fixtures })).ask(TOKENS.owner, "مبيعات يوم 15 سبتمبر");
-  assert.equal(vague.body.answered, false, `«يوم» بلا صيغة رقمية كاملة يجب أن تُرفض:\n${vague.body.reply}`);
-  assert.equal(vague.body.error, "unrecognized_date");
-  ok("تاريخ تقويمي صريح (ISO ويوم/شهر/سنة) يُقرأ، والصيغة المجهولة تُرفض بلا سقوط على اليوم");
+  // اسم شهر عربي — رصدها Codex بعد 3fdb433: «15 سبتمبر» بلا «يوم» كانت تسقط على اليوم.
+  const namedAsk = await (await loadAssistant({ fixtures })).ask(TOKENS.owner, "مبيعات 1 سبتمبر 2026");
+  const namedText = String(namedAsk.body.reply);
+  assert.equal(namedAsk.body.answered, true, `اسم شهر عربي رُفض:\n${namedText}`);
+  assert.ok(namedText.includes("321"), `«1 سبتمبر 2026» لم تُقرأ كمبيعات ${target}:\n${namedText}`);
+  assert.ok(!namedText.includes("999"), `اسم شهر عربي سقط على مبيعات اليوم:\n${namedText}`);
+
+  const namedDay = await (await loadAssistant({ fixtures })).ask(TOKENS.owner, "مبيعات يوم 1 سبتمبر");
+  const namedDayText = String(namedDay.body.reply);
+  assert.equal(namedDay.body.answered, true, `«يوم 1 سبتمبر» رُفض:\n${namedDayText}`);
+  assert.ok(namedDayText.includes("321"), `«يوم 1 سبتمبر» لم يُحلّ إلى ${target}:\n${namedDayText}`);
+  assert.ok(!namedDayText.includes("999"), `«يوم 1 سبتمبر» سقط على اليوم:\n${namedDayText}`);
+
+  const badMonth = await (await loadAssistant({ fixtures })).ask(TOKENS.owner, "مبيعات 99 سبتمبر");
+  assert.equal(badMonth.body.answered, false, `يوم خارج الشهر يجب أن يُرفض:\n${badMonth.body.reply}`);
+  assert.equal(badMonth.body.error, "unrecognized_date");
+  assert.ok(!String(badMonth.body.reply).includes("999"), `شهر عربي فاسد أجاب بمبيعات اليوم:\n${badMonth.body.reply}`);
+  ok("تاريخ تقويمي صريح (ISO / يوم-شهر-سنة / اسم شهر عربي) يُقرأ، والصيغة المجهولة تُرفض بلا سقوط على اليوم");
+}
+
+// ── Codex P1: مبيعات الزبون X لا تذهب لإجمالي المبيعات ───────────────────────
+{
+  // ملاحظة Codex على PR #205 (discussion_r4018513793): «مبيعات الزبون سامر اليوم»
+  // كانت تطابق أداة المبيعات الإجمالية فتعرض إيراد كل الزبائن.
+  const today = new Date(Date.now() + 180 * 60_000).toISOString().slice(0, 10);
+  const fixtures = defaultFixtures();
+  fixtures.sales_line_items = [
+    { sale_date: today, bill_no: "1", bill_type: "retail", item_name: "أ", qty: 1, line_total: 8888, unit_cost: 80, customer_name: "زبون آخر" },
+    { sale_date: today, bill_no: "2", bill_type: "retail", item_name: "ب", qty: 1, line_total: 111, unit_cost: 10, customer_name: "سامر الوهمي" }
+  ];
+  fixtures.sales_line_items_sync_state = [{
+    source: "ameen_sales_line_items",
+    window_start: today,
+    window_end: today,
+    row_count: 2,
+    completed_at: new Date().toISOString()
+  }];
+  fixtures["inventory_reports:ameen_customer_invoices"] = [{
+    report_date: today,
+    created_at: new Date().toISOString(),
+    summary: { bills: 1, customers: 1, fromDate: today },
+    items: [{
+      name: "سامر الوهمي",
+      customerGuid: "aaa11111",
+      invoices: [{
+        date: today,
+        total: 111,
+        isReturn: false,
+        items: [{ itemName: "ب", qty: 1, price: 111, lineTotal: 111 }]
+      }]
+    }]
+  }];
+
+  const a = await loadAssistant({ fixtures });
+  const result = await a.ask(TOKENS.owner, "مبيعات الزبون سامر الوهمي اليوم");
+  const text = String(result.body.reply);
+  assert.equal(result.body.tool, "customer", `ذهب إلى ${result.body.tool} بدل ملف الزبون:\n${text}`);
+  assert.equal(result.body.answered, true, `مبيعات الزبون رُفضت:\n${text}`);
+  assert.ok(/سامر الوهمي/.test(text), `لم يذكر الزبون المطلوب:\n${text}`);
+  assert.ok(a.metrics.tablesRead.has("inventory_reports"), `لم يقرأ تقارير الزبون:\n${[...a.metrics.tablesRead]}`);
+  assert.ok(!a.metrics.tablesRead.has("sales_line_items"), `قرأ سطور المبيعات الإجمالية رغم سؤال زبون معيّن:\n${[...a.metrics.tablesRead]}`);
+  assert.ok(!/8,888|8888/.test(text), `عرض إجمالي زبون آخر ضمن جواب مبيعات الزبون:\n${text}`);
+  ok("مبيعات الزبون X تُوجَّه لملف الزبون وتُرشَّح بهويته — لا لإجمالي المبيعات");
 }
 
 console.log(`\nتوجيه المساعد الذكي: ${passed}/${passed} تحقق ناجح`);
