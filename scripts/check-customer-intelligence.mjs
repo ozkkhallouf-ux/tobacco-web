@@ -1172,4 +1172,23 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   assert.ok(declinedUsd.flags.includes("declining"), "test 36: وسيط الليرة لا يجوز أن يحجب تراجع الدولار");
 }
 
-console.log(`ذكاء الزبائن: 36 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
+// ---------------------------------------------------------------------------
+// 37) Codex P1 — مسار ذكاء الزبائن يتجاوز baseRender() فيجب أن يربط خروج الغلاف
+// ---------------------------------------------------------------------------
+{
+  const viewSrc = readFileSync(new URL("../src/customer-intelligence-view.js", import.meta.url), "utf8");
+  const bindBlock = viewSrc.match(/function bind\(\) \{([\s\S]*?)\n  \}/);
+  assert.ok(bindBlock, "test 37: تعذّر استخراج bind() من واجهة ذكاء الزبائن");
+  assert.ok(
+    /data-action=['"]logout['"]/.test(bindBlock[1]) && /\blogout\b/.test(bindBlock[1]),
+    "test 37: bind() يجب أن يربط [data-action='logout'] بدالة logout لأن الشاشة تتجاوز baseRender()"
+  );
+  for (const action of ["toggle-theme", "retry-startup", "install"]) {
+    assert.ok(
+      bindBlock[1].includes(`data-action='${action}'`) || bindBlock[1].includes(`data-action="${action}"`),
+      `test 37: bind() يجب أن يربط زر الغلاف ${action}`
+    );
+  }
+}
+
+console.log(`ذكاء الزبائن: 37 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);

@@ -388,6 +388,16 @@
       event.preventDefault();
       setRoute(button.dataset.route);
     }));
+    // الشاشة تتجاوز baseRender() بعد رسم shell()، فبدون هذا الربط تبقى أزرار
+    // الغلاف (خروج/سمة/تثبيت) بلا مستمع — نفس ربط render() في app.js.
+    app.querySelector("[data-action='toggle-theme']")?.addEventListener("click", () => {
+      state.darkMode = !state.darkMode;
+      applyTheme();
+      render();
+    });
+    app.querySelector("[data-action='retry-startup']")?.addEventListener("click", () => { window.location.reload(); });
+    app.querySelector("[data-action='install']")?.addEventListener("click", installApp);
+    app.querySelector("[data-action='logout']")?.addEventListener("click", logout);
     app.querySelector("[data-action='ci-refresh']")?.addEventListener("click", loadIntel);
 
     const search = app.querySelector("[data-ci-search]");

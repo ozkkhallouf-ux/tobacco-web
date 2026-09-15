@@ -180,4 +180,18 @@ for (const step of ['replace(/[إأآٱ]/gu, "ا")', 'replace(/ى/gu, "ي")', 'r
   }
 }
 
-console.log(`ربط ذكاء الزبائن: 10 عقود محسومة — المسار ${ROUTE} للمالك فقط، والأصول محمّلة ومخزّنة مسبقاً.`);
+// ---------------------------------------------------------------------------
+// 11) أزرار الغلاف تُربَط رغم تجاوز baseRender() (وإلا خرج المالك بلا مستمع)
+// ---------------------------------------------------------------------------
+{
+  const bindBlock = viewJs.match(/function bind\(\) \{([\s\S]*?)\n  \}/);
+  assert.ok(bindBlock, "تعذّر استخراج bind() من واجهة ذكاء الزبائن");
+  assert.ok(
+    /querySelector\("\[data-action='logout'\]"\)\?\.addEventListener\("click", logout\)/.test(bindBlock[1]),
+    "bind() يجب أن يربط زر تسجيل الخروج بدالة logout المشتركة"
+  );
+  assert.ok(bindBlock[1].includes("installApp"), "bind() يجب أن يربط زر التثبيت");
+  assert.ok(bindBlock[1].includes("applyTheme"), "bind() يجب أن يربط زر السمة");
+}
+
+console.log(`ربط ذكاء الزبائن: 11 عقداً محسوماً — المسار ${ROUTE} للمالك فقط، والأصول محمّلة ومخزّنة مسبقاً.`);
