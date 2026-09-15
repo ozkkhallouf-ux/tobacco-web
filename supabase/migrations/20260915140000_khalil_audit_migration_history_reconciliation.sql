@@ -57,19 +57,43 @@
 --      application to production as of this reconciliation. They are
 --      unchanged by this file.
 --
---      IMPORTANT — migration ordering: this reconciliation file is
---      timestamped 20260915140000, which is chronologically AFTER both of
---      the pending files above (and after 20260914120000 /
---      20260914130000 already on main). Supabase CLI applies migrations in
---      ascending timestamp order, so a plain `supabase db push` run after
---      this file exists would apply BOTH pending 09-02 migrations BEFORE
---      this file, not after it. This note does not authorize, trigger, or
---      assume that push — applying those two migrations to production
---      remains a separate, explicitly-approved step (Stage 2), and this
---      file changes nothing about when or whether that happens. It is
---      called out here only so no reader mistakes this file's timestamp
---      for evidence that the pending migrations already ran or will run
---      "after" it.
+--      IMPORTANT — migration ordering / operator warning (EN + AR):
+--
+--      This reconciliation file is timestamped 20260915140000, which is
+--      chronologically AFTER both pending 09-02 files AND after
+--      20260914120000 / 20260914130000 already on main (and typically
+--      already recorded on production history).
+--
+--      When production ALREADY has a later stamp such as 20260914130000,
+--      a plain `supabase db push` will NOT pull in the older pending
+--      09-02 migrations merely because this 09-15 file sorts later.
+--      Supabase CLI skips out-of-order pending migrations unless you pass
+--      `--include-all` ("Include all migrations not found on remote
+--      history table" — see supabase db push docs).
+--
+--      Therefore operators MUST do ONE of the following before/when
+--      applying this reconciliation to a remote that already has later
+--      stamps:
+--        (A) Apply the separately approved 09-02 migrations first
+--            (Stage 2 — explicit owner approval), then push this file; OR
+--        (B) Use `supabase db push --include-all` so the pending 09-02
+--            migrations are included alongside (or before) this file.
+--
+--      Arabic / تحذير للمشغّل:
+--      إذا كان الإنتاج يملك أصلاً طابعاً لاحقاً مثل `20260914130000`، فإن
+--      `supabase db push` العادي لن يطبّق مهاجرات 09-02 المعلّقة لمجرد أن
+--      ملف التسوية هذا (09-15) يرتّب بعدهما زمنياً. يجب إما:
+--        (أ) تطبيق مهاجرات 09-02 المعتمدة بشكل منفصل أولاً، ثم دفع هذا
+--            الملف؛ أو
+--        (ب) استخدام `supabase db push --include-all` لإدراج كل
+--            المهاجرات غير الموجودة في سجل الإنتاج البعيد.
+--
+--      This note does not authorize, trigger, or assume that push —
+--      applying the two 09-02 migrations to production remains a
+--      separate, explicitly-approved step (Stage 2). It is called out
+--      here only so no reader mistakes this file's later timestamp for
+--      evidence that the pending migrations already ran, will run
+--      "after" it, or will be picked up automatically by a plain push.
 --
 -- This migration intentionally contains no DDL, DML, GRANT/REVOKE, or
 -- policy changes, and does not set FORCE ROW LEVEL SECURITY on anything.

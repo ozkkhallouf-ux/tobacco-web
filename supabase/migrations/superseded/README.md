@@ -47,3 +47,30 @@ timestamp إنتاجي يقابل أي محاولة محلية تقريبياً 
 لاحقاً بتاريخ 2026-09-14 بعد تدقيق أمني وجد مطابقتين خاطئتين — انظر الملاحظة أعلاه؛
 انظر أيضاً `supabase/migrations/20260915140000_khalil_audit_migration_history_reconciliation.sql`
 للتوثيق الكامل، بما فيه التصحيح الدقيق لنسبة كل جدول khalil_audit_* لمصدره).
+
+## تحذير تشغيلي — `--include-all` / Operator warning
+
+**EN:** Production already records later stamps such as `20260914130000`. A plain
+`supabase db push` will **not** apply the still-pending older migrations
+`20260902050000_khalil_audit_tables_explicit_deny.sql` and
+`20260902080000_p2_heartbeat_rls_initplan.sql` just because the 09-15 reconciliation
+file sorts later. Before/when applying
+`20260915140000_khalil_audit_migration_history_reconciliation.sql` to such a remote,
+operators must either:
+
+1. Apply the separately approved 09-02 migrations first (Stage 2 — explicit owner
+   approval), **then** push this reconciliation; **or**
+2. Use `supabase db push --include-all` so every migration missing from the remote
+   history table is included (see [supabase db push](https://supabase.com/docs/reference/cli/supabase-db-push)).
+
+**AR:** إذا كان الإنتاج يملك أصلاً طابعاً لاحقاً مثل `20260914130000`، فإن
+`supabase db push` العادي **لن** يطبّق المهاجرات المعلّقة الأقدم
+(`20260902050000` و`20260902080000`) لمجرد أن ملف التسوية `20260915140000` يرتّب
+بعدهما. عند تطبيق ملف التسوية على بيئة بهذه الحالة، يجب إما:
+
+1. تطبيق مهاجرات 09-02 المعتمدة بشكل منفصل أولاً (المرحلة ٢ — إذن صريح من المالك)،
+   ثم دفع ملف التسوية؛ **أو**
+2. استخدام `supabase db push --include-all` لإدراج كل المهاجرات غير الموجودة في
+   سجل الإنتاج البعيد.
+
+هذا التوثيق لا يصرّح بتطبيق أي شيء على الإنتاج — الدفع يبقى يدوياً وبإذن منفصل.
