@@ -217,7 +217,10 @@ await page.route("**", (route) => {
   const request = route.request();
   const url = request.url();
   // بلاغات الأخطاء: محجوبة تماماً. تشغيلة آلية لا تُلوّث بيانات مراقبة الإنتاج.
-  if (/(^|\.)rollbar\.com/i.test(new URL(url).hostname)) { abortedByHarness.add(url); return route.abort(); }
+  if (/(^|\.)rollbar\.com$/i.test(new URL(url).hostname) || /(^|\.)sentry\.io$/i.test(new URL(url).hostname) || /(^|\.)sentry-cdn\.com$/i.test(new URL(url).hostname)) {
+    abortedByHarness.add(url);
+    return route.abort();
+  }
   // ضمان «صفر كتابة» بالبنية لا بالنية.
   if (!["GET", "HEAD"].includes(request.method())) {
     blockedWrites.push(`${request.method()} ${url}`);

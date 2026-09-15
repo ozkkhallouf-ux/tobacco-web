@@ -53,11 +53,12 @@ const BASE = `http://127.0.0.1:${server.address().port}`;
 // حدّ العزل الشبكي — طبقة الوكيل، خارج توجيه الصفحة تماماً.
 //
 // ⚠️ ملاحظة Codex P1 على PR #199، وهي صحيحة: `page.route` **لا يعترض طلبات
-// الـService Worker** (قيد معروف في Playwright). و`public/service-worker.js`
-// يعترض كل طلب GET بلا تمييز أصل ثم ينفّذ `fetch(event.request)`. فبعد
-// activate و`clients.claim()` في المسار الأخير، كان يمكن لطلب مثل
-// `loadPublishedExchangeRate()` أن يصل Supabase الحيّ فعلاً بدل 503 المصطنع —
-// أي أن ادّعاء «صفر اتصال بأي خدمة حيّة» كان يسقط في آخر مسار بالضبط.
+// الـService Worker** (قيد معروف في Playwright). سابقاً كان
+// `public/service-worker.js` يعترض كل طلب GET بلا تمييز أصل ثم ينفّذ
+// `fetch(event.request)` — بما فيه CDN. بعد activate و`clients.claim()` كان
+// يمكن لطلب مثل `loadPublishedExchangeRate()` أن يصل Supabase الحيّ، وكان
+// فشل Sentry CDN يرتدّ إلى index.html فيُرفض بخطأ MIME. الآن الـSW يتخطّى
+// خارج الأصل؛ والوكيل المحلي يبقى الشاهد على أي محاولة خروج من الطبقة الشبكية.
 //
 // الحلّ حدٌّ عند مستوى المتصفح لا الصفحة: كل حركة غير الاسترجاع تُوجَّه إلى
 // وكيل محلي في هذه العملية نفسها. وهو ليس مجرّد سدّ — بل **شاهد**: يسجّل كل
@@ -645,6 +646,67 @@ const AUTHZ_ROLES = [
   },
 ];
 
+async function seedAuthzSession(page, session) {
+  await page.evaluate((s) => {
+    const state = (0, eval)("state");
+    state.session = s;
+    window.__ozkSession = s;
+    (0, eval)("render")();
+  }, session);
+}
+
+async function collectAuthzAccessProblems(page, role, ownerOnlyRoutes, problems) {
+  for (const route of ownerOnlyRoutes) {
+    const granted = await page.evaluate((r) => window.ozkCanAccessRoute?.(r), route);
+    if (granted !== role.ownerOnlyAllowed) {
+      problems.push(`${role.id}: canAccessRoute("${route}") أعطى ${granted} والمتوقَّع ${role.ownerOnlyAllowed}`);
+    }
+  }
+  for (const route of AUTHZ_PUBLIC_SAMPLE) {
+    const granted = await page.evaluate((r) => window.ozkCanAccessRoute?.(r), route);
+    if (granted !== role.publicAllowed) {
+      problems.push(`${role.id}: canAccessRoute("${route}") العام أعطى ${granted} والمتوقَّع ${role.publicAllowed}`);
+    }
+  }
+}
+
+async function collectAuthzRoutingProblems(page, role, ownerOnlyRoutes, problems) {
+  for (const route of ownerOnlyRoutes) {
+    await gotoRoute(page, route);
+    const landed = await currentRoute(page);
+    const expected = role.ownerOnlyAllowed ? route : role.fallback;
+    if (landed !== expected) {
+      problems.push(`${role.id}: setRoute("${route}") أنزل على "${landed}" والمتوقَّع "${expected}"`);
+    }
+    if (!role.ownerOnlyAllowed) {
+      // الرفض الصامت أسوأ من الرفض: المستخدم يظن أن الزر لم يعمل.
+      const notice = await page.evaluate(() => (0, eval)("state").notice);
+      if (!notice || notice.type !== "error" || !String(notice.text || "").trim()) {
+        problems.push(`${role.id}: رفض "${route}" بلا إشعار خطأ — رفض صامت`);
+      }
+    }
+    // الرفض لا يجوز أن يترك الشاشة فارغة أو مكسورة.
+    if (await page.locator(".app-shell").count() === 0) {
+      problems.push(`${role.id}: القشرة غير مرسومة بعد محاولة "${route}"`);
+    }
+  }
+}
+
+async function collectAuthzNavProblems(page, role, ownerOnlyRoutes, problems) {
+  // `addDecisionNav`/`addCommandNav` تحذفان العقد فعلياً عند انعدام الصلاحية،
+  // فالفحص على `document` لا على `aside nav` يمسك زراً تسرّب إلى أي مكان آخر.
+  await gotoRoute(page, role.fallback);
+  for (const route of ownerOnlyRoutes) {
+    const count = await page.locator(`[data-route='${route}']`).count();
+    if (role.ownerOnlyAllowed && count === 0) {
+      problems.push(`${role.id}: زر "${route}" غائب رغم الصلاحية`);
+    }
+    if (!role.ownerOnlyAllowed && count > 0) {
+      problems.push(`${role.id}: زر "${route}" ظاهر (${count}) رغم انعدام الصلاحية`);
+    }
+  }
+}
+
 await journey("authorization", "التفويض: المسارات المحصورة بالمالك مرفوضة فعلياً لغير المالك (ثلاثة أدوار)", async (page) => {
   const collected = await openApp(page);
 
@@ -656,64 +718,11 @@ await journey("authorization", "التفويض: المسارات المحصور�
     "تعذّر قراءة OWNER_ONLY_ROUTES من التطبيق — هل تغيّر اسم الثابت أو نطاقه؟");
 
   const problems = [];
-
   for (const role of AUTHZ_ROLES) {
-    // جلسة محلية بحتة: نفس أسلوب seedSession، بلا أي نداء مصادقة.
-    await page.evaluate((session) => {
-      const state = (0, eval)("state");
-      state.session = session;
-      window.__ozkSession = session;
-      (0, eval)("render")();
-    }, role.session);
-
-    // ── أ) العقد المنطقي: canAccessRoute الحقيقي، لا مطابقة نصّية ──────────
-    for (const route of ownerOnlyRoutes) {
-      const granted = await page.evaluate((r) => window.ozkCanAccessRoute?.(r), route);
-      if (granted !== role.ownerOnlyAllowed) {
-        problems.push(`${role.id}: canAccessRoute("${route}") أعطى ${granted} والمتوقَّع ${role.ownerOnlyAllowed}`);
-      }
-    }
-    for (const route of AUTHZ_PUBLIC_SAMPLE) {
-      const granted = await page.evaluate((r) => window.ozkCanAccessRoute?.(r), route);
-      if (granted !== role.publicAllowed) {
-        problems.push(`${role.id}: canAccessRoute("${route}") العام أعطى ${granted} والمتوقَّع ${role.publicAllowed}`);
-      }
-    }
-
-    // ── ب) العقد السلوكي: setRoute يردّ فعلاً إلى الملاذ الآمن ─────────────
-    for (const route of ownerOnlyRoutes) {
-      await gotoRoute(page, route);
-      const landed = await currentRoute(page);
-      const expected = role.ownerOnlyAllowed ? route : role.fallback;
-      if (landed !== expected) {
-        problems.push(`${role.id}: setRoute("${route}") أنزل على "${landed}" والمتوقَّع "${expected}"`);
-      }
-      if (!role.ownerOnlyAllowed) {
-        // الرفض الصامت أسوأ من الرفض: المستخدم يظن أن الزر لم يعمل.
-        const notice = await page.evaluate(() => (0, eval)("state").notice);
-        if (!notice || notice.type !== "error" || !String(notice.text || "").trim()) {
-          problems.push(`${role.id}: رفض "${route}" بلا إشعار خطأ — رفض صامت`);
-        }
-      }
-      // الرفض لا يجوز أن يترك الشاشة فارغة أو مكسورة.
-      if (await page.locator(".app-shell").count() === 0) {
-        problems.push(`${role.id}: القشرة غير مرسومة بعد محاولة "${route}"`);
-      }
-    }
-
-    // ── ج) العقد البصري: الزر غائب من المستند كله لا من الشريط وحده ───────
-    // `addDecisionNav`/`addCommandNav` تحذفان العقد فعلياً عند انعدام الصلاحية،
-    // فالفحص على `document` لا على `aside nav` يمسك زراً تسرّب إلى أي مكان آخر.
-    await gotoRoute(page, role.fallback);
-    for (const route of ownerOnlyRoutes) {
-      const count = await page.locator(`[data-route='${route}']`).count();
-      if (role.ownerOnlyAllowed && count === 0) {
-        problems.push(`${role.id}: زر "${route}" غائب رغم الصلاحية`);
-      }
-      if (!role.ownerOnlyAllowed && count > 0) {
-        problems.push(`${role.id}: زر "${route}" ظاهر (${count}) رغم انعدام الصلاحية`);
-      }
-    }
+    await seedAuthzSession(page, role.session);
+    await collectAuthzAccessProblems(page, role, ownerOnlyRoutes, problems);
+    await collectAuthzRoutingProblems(page, role, ownerOnlyRoutes, problems);
+    await collectAuthzNavProblems(page, role, ownerOnlyRoutes, problems);
   }
 
   assert(problems.length === 0, problems.join("\n     "));
@@ -757,7 +766,7 @@ await journey("owner-only-deep-link", "الرابط العميق إلى مسار
 // فتسريبٌ جديد لا يمرّ لمجرد أنه صامت.
 // مضيفات يقصدها التطبيق فعلاً وهي مقطوعة عمداً. المقارنة بلاحقة اسم المضيف
 // المستخرَج، لا بمطابقة السطر — فلا تمرّ وجهة جديدة بحيلة صياغة.
-const EXPECTED_ESCAPE_HOSTS = ["supabase.co", "rollbar.com", "fonts.googleapis.com", "fonts.gstatic.com"];
+const EXPECTED_ESCAPE_HOSTS = ["supabase.co", "rollbar.com", "sentry.io", "sentry-cdn.com", "fonts.googleapis.com", "fonts.gstatic.com"];
 const isExpectedHost = (host) => EXPECTED_ESCAPE_HOSTS.some((allowed) => host === allowed || host.endsWith(`.${allowed}`));
 const unexpectedEscapes = escapeAttempts.filter((entry) => !isExpectedHost(entry.host));
 

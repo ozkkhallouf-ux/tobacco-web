@@ -1,34 +1,38 @@
 // ============================================================================
-// مراقبة أخطاء الإنتاج — إرسال إلى Rollbar عبر Item API مباشرةً.
+// مراقبة أخطاء الإنتاج — Sentry (محمّل CDN لعمر) مع طبقة تنقية مشتركة،
+// وRollbar Item API كاحتياط فقط عندما لا يكون علم Sentry موجوداً في الصفحة.
 //
-// لماذا لا حزمة rollbar.js الرسمية:
-//   1. CSP في index.html هي `script-src 'self'` — لا سكربت من CDN إطلاقاً.
-//      استعمال الحزمة كان يعني إمّا إرخاء CSP (تراجع أمني حقيقي مقابل أداة
-//      رصد) أو نسخ حزمة ثالثة إلى public/vendor/ وحمل تحديثها.
-//   2. أهم ما تضيفه الحزمة telemetry: التقاط النقرات وطلبات الشبكة وقيم
+// لماذا لا يعتمد المسار الاحتياطي على حزمة rollbar.js الرسمية:
+//   1. أهم ما تضيفه الحزمة telemetry: التقاط النقرات وطلبات الشبكة وقيم
 //      الحقول وتغيّرات DOM. هذا بالضبط ما لا يجوز أن يُرسَل من هذا التطبيق —
-//      شاشاته تحمل أسماء زبائن وأرصدتهم وأسعاراً. فالميزة الكبرى للحزمة هي
-//      المخاطرة الكبرى هنا.
-//   3. خرائط المصدر (الميزة الثانية) بلا معنى: لا خطوة بناء في المستودع،
-//      والملفات تُخدَم كما هي.
-// فبقي من الحزمة غلافُ نداءٍ واحد على نقطة استقبال واحدة، وهو ما يفعله هذا
-// الملف في أقل من مئتَي سطر مقروءة — وبسيطرة تامّة على ما يُرسَل.
+//      شاشاته تحمل أسماء زبائن وأرصدتهم وأسعاراً.
+//   2. خرائط المصدر بلا معنى: لا خطوة بناء في المستودع، والملفات تُخدَم كما هي.
 //
-// ما يُرسَل بالضبط، ولا شيء غيره:
+// Sentry عبر محمّل js.sentry-cdn.com (إعداد Omar / ozk-tobacco-ck):
+//   • يُحمَّل هذا الملف متزامناً في <head> قبل وسم المحمّل كي يضبط
+//     window.sentryOnLoad قبل أي تهيئة SDK.
+//   • لا يُشغَّل مسار Rollbar متى وُجد meta[name=ozk-sentry] — مراقب واحد فقط.
+//   • Session Replay معطّل تماماً (sample rates = 0 وإزالة تكامل Replay):
+//     maskAllText لا يحجب قيم السمات (data-customer-name وغيرها)، والتسجيل
+//     يتجاوز beforeSend — لا يُعاد تفعيله قبل تنقية سمات DOM صريحة.
+//   • تتبع الأداء مفعّل مع تنقية أوصاف الـspans وعناوينها في beforeSendTransaction.
+//   • فتات console: تُحذف arguments وأي مفتاح خارج قائمة سماح قبل الإرسال.
+//   • CSP تسمح بـ js.sentry-cdn.com وbrowser.sentry-cdn.com ومضيف ingest العائد
+//     للمشروع وworker-src blob — لا تُضاف عناوين CDN إلى ASSETS في service worker.
+//
+// ما يُرسَل بعد التنقية:
 //   • نصّ الخطأ ونوعه وأثر المكدّس، بعد تنقية.
 //   • مسار الصفحة (pathname) بلا استعلام ولا شظية.
 //   • البيئة، ومعرّف النشرة (commit)، وسلسلة المتصفح.
-// ما لا يُقرأ أبداً: أي محتوى DOM، أي قيمة حقل، localStorage، sessionStorage،
+// ما لا يُقرأ أبداً: أي محتوى DOM خام، أي قيمة حقل، localStorage، sessionStorage،
 // الكوكيز، عناوين تحمل استعلامات.
 //
-// وبيانات الزبائن: نصّ الخطأ نفسه قد يحملها (رسالة مُركّبة من قيم وقت
-// التشغيل)، فلا يكفي ألّا يقرأها الملف. لذلك تمرّ الرسالة والأثر بطبقة ثانية
-// تحجب العربية كلها والبُرد والهواتف والأرقام الطويلة، ويُصفّى الأثر بقائمة
-// سماح لا تُبقي إلا أطر المكدّس. التفصيل والحدود المعلَنة عند `redactBusinessData`.
+// وبيانات الزبائن: نصّ الخطأ نفسه قد يحملها، فتمرّ الرسالة والأثر بطبقة تحجب
+// العربية كلها والبُرد والهواتف والأرقام الطويلة، ويُصفّى الأثر بقائمة سماح.
+// التفصيل عند `redactBusinessData`.
 //
-// الإنتاج وحده: بلا رمز مُحقَن (وهو لا يُحقَن إلا في خطوة النشر) يبقى الملف
-// خاملاً تماماً. وحتى مع رمز، يشترط https ومضيفاً غير محلي — فنسخة مطوّر أو
-// نسخة مسروقة من HTML المنشور لا تلوّث بيانات الإنتاج.
+// الإنتاج وحده لـRollbar: بلا رمز مُحقَن يبقى خاملاً. وSentry يُعطَّل خارج
+// https غير المحلي عبر enabled في sentryOnLoad — فنسخة مطوّر لا تلوّث الإنتاج.
 // ============================================================================
 (function () {
   "use strict";
@@ -39,11 +43,14 @@
   var MAX_STACK_CHARS = 4000;
 
   var meta = document.querySelector('meta[name="ozk-monitoring"]');
-  if (!meta) return;
+  var sentryMeta = document.querySelector('meta[name="ozk-sentry"]');
+  var useSentry = Boolean(sentryMeta);
+  // بلا Sentry وبلا وسم Rollbar: لا شيء يُفعَّل.
+  if (!meta && !useSentry) return;
 
-  var token = meta.getAttribute("data-token") || "";
-  var environment = meta.getAttribute("data-environment") || "";
-  var release = meta.getAttribute("data-release") || "";
+  var token = meta ? (meta.getAttribute("data-token") || "") : "";
+  var environment = meta ? (meta.getAttribute("data-environment") || "") : "";
+  var release = meta ? (meta.getAttribute("data-release") || "") : "";
 
   // قيمة تبدأ بـ__ هي النائب الحرفي في المستودع ولم تُستبدَل عند النشر.
   function injected(value) {
@@ -59,7 +66,13 @@
     return true;
   }
 
-  if (!injected(token) || !injected(environment) || !isProductionOrigin()) return;
+  // مسار Rollbar يبقى للاختبارات وللاحتياط إن أُزيل علم Sentry من الصفحة.
+  // مع Sentry لا يُرفَع شيء إلى Rollbar ولو كان الرمز محقوناً — مراقب واحد.
+  function computeRollbarActive() {
+    return Boolean(meta) && injected(token) && injected(environment) &&
+      isProductionOrigin() && !useSentry;
+  }
+  var rollbarActive = computeRollbarActive();
 
   // ---------------------------------------------------------------------------
   // التنقية. تعمل على النصّ النهائي مهما كان مصدره، فلا تعتمد على معرفة أين
@@ -873,7 +886,225 @@
     }
   }
 
-  window.addEventListener("error", function (event) {
+  // ---------------------------------------------------------------------------
+  // Sentry: يُضبَط قبل محمّل CDN عبر window.sentryOnLoad (انظر index.html).
+  // دوال التنقية مجزّأة عمداً لإبقاء تعقيد كل دالة منخفضاً (CodeFactor/DeepScan).
+  // ---------------------------------------------------------------------------
+  function scrubTextForSentry(value) {
+    if (typeof value !== "string" || value.length === 0) return value;
+    return redactBusinessData(scrub(value));
+  }
+
+  function stripUrlQuery(url) {
+    return String(url).split("?")[0].split("#")[0];
+  }
+
+  function scrubSentryUser(user) {
+    if (!user) return;
+    delete user.email;
+    delete user.ip_address;
+    delete user.username;
+    delete user.name;
+  }
+
+  function scrubSentryRequest(request) {
+    if (!request) return;
+    if (typeof request.url === "string") request.url = stripUrlQuery(request.url);
+    delete request.cookies;
+    delete request.headers;
+    delete request.query_string;
+    delete request.data;
+  }
+
+  function scrubSentryFrame(frame) {
+    if (!frame) return;
+    if (typeof frame.filename === "string") {
+      frame.filename = scrub(String(frame.filename).split("?")[0]);
+    }
+    if (typeof frame.abs_path === "string") {
+      frame.abs_path = scrub(String(frame.abs_path).split("?")[0]);
+    }
+    delete frame.vars;
+    delete frame.pre_context;
+    delete frame.post_context;
+    delete frame.context_line;
+  }
+
+  function scrubSentryExceptionItem(item) {
+    if (!item) return;
+    if (typeof item.value === "string") item.value = scrubTextForSentry(item.value);
+    if (typeof item.type === "string") item.type = scrub(item.type);
+    var frames = item.stacktrace && item.stacktrace.frames;
+    if (!Array.isArray(frames)) return;
+    for (var f = 0; f < frames.length; f += 1) scrubSentryFrame(frames[f]);
+  }
+
+  function scrubSentryExceptions(exception) {
+    if (!exception || !Array.isArray(exception.values)) return;
+    for (var i = 0; i < exception.values.length; i += 1) {
+      scrubSentryExceptionItem(exception.values[i]);
+    }
+  }
+
+  // قائمة سماح لـcrumb.data: أي مفتاح آخر (ومنها arguments) يُحذَف قبل الإرسال.
+  var BREADCRUMB_DATA_ALLOW = {
+    url: true,
+    method: true,
+    status_code: true,
+    statusCode: true,
+    from: true,
+    to: true
+  };
+
+  function scrubUrlish(value) {
+    if (typeof value !== "string" || value.length === 0) return value;
+    // أوصاف fetch تكون غالباً "GET https://host/path?customer_key=…" — انزع
+    // الاستعلام/الشظية من كل عنوان مطلق (ومن المسارات بعد فراغ) قبل أي حجب نصّي.
+    var out = value.replace(/(https?:\/\/[^\s"')]+?)[?#][^\s"')]*/g, "$1");
+    out = out.replace(/(\s\/[^\s"')]*?)[?#][^\s"')]*/g, "$1");
+    if (out.charAt(0) === "/" || /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(out)) {
+      return stripUrlQuery(out);
+    }
+    return scrubTextForSentry(out);
+  }
+
+  function scrubSentryBreadcrumbData(data) {
+    if (!data || typeof data !== "object") return;
+    // Console breadcrumbs تضع كائنات العمل في arguments — احذفها دائماً.
+    delete data.arguments;
+    delete data.request_body;
+    delete data.response_body;
+    var keys = Object.keys(data);
+    for (var i = 0; i < keys.length; i += 1) {
+      var key = keys[i];
+      if (!BREADCRUMB_DATA_ALLOW[key]) {
+        delete data[key];
+        continue;
+      }
+      var val = data[key];
+      if (typeof val === "string") {
+        data[key] = (key === "url" || key === "from" || key === "to")
+          ? stripUrlQuery(val)
+          : scrubTextForSentry(val);
+      } else if (val !== null && typeof val === "object") {
+        delete data[key];
+      }
+    }
+  }
+
+  function scrubSentryBreadcrumb(crumb) {
+    if (!crumb) return;
+    if (typeof crumb.message === "string") crumb.message = scrubTextForSentry(crumb.message);
+    if (!crumb.data || typeof crumb.data !== "object") return;
+    scrubSentryBreadcrumbData(crumb.data);
+  }
+
+  function scrubSentryBreadcrumbs(breadcrumbs) {
+    if (!Array.isArray(breadcrumbs)) return;
+    for (var b = 0; b < breadcrumbs.length; b += 1) scrubSentryBreadcrumb(breadcrumbs[b]);
+  }
+
+  function scrubSentrySpanData(data) {
+    if (!data || typeof data !== "object") return;
+    delete data["http.query"];
+    delete data["http.fragment"];
+    delete data.query;
+    delete data.query_string;
+    var keys = Object.keys(data);
+    for (var i = 0; i < keys.length; i += 1) {
+      var key = keys[i];
+      var val = data[key];
+      if (typeof val !== "string") continue;
+      if (key === "url" || key === "http.url" || /url$/i.test(key) || key.indexOf("http.") === 0) {
+        data[key] = stripUrlQuery(val);
+      } else if (val.indexOf("?") >= 0 || val.indexOf("#") >= 0) {
+        data[key] = scrubUrlish(val);
+      }
+    }
+  }
+
+  function scrubSentrySpan(span) {
+    if (!span || typeof span !== "object") return;
+    if (typeof span.description === "string") span.description = scrubUrlish(span.description);
+    if (typeof span.op === "string") span.op = scrub(span.op);
+    scrubSentrySpanData(span.data);
+  }
+
+  function scrubSentrySpans(event) {
+    if (!event || typeof event !== "object") return;
+    if (typeof event.transaction === "string") event.transaction = scrubUrlish(event.transaction);
+    if (Array.isArray(event.spans)) {
+      for (var s = 0; s < event.spans.length; s += 1) scrubSentrySpan(event.spans[s]);
+    }
+    if (event.contexts && event.contexts.trace) scrubSentrySpan(event.contexts.trace);
+  }
+
+  function scrubSentryEvent(event) {
+    if (!event || typeof event !== "object") return event;
+    scrubSentryUser(event.user);
+    if (typeof event.message === "string") event.message = scrubTextForSentry(event.message);
+    scrubSentryRequest(event.request);
+    scrubSentryExceptions(event.exception);
+    scrubSentryBreadcrumbs(event.breadcrumbs);
+    scrubSentrySpans(event);
+    return event;
+  }
+
+  function scrubSentryTransaction(event) {
+    if (!event || typeof event !== "object") return event;
+    scrubSentryRequest(event.request);
+    scrubSentryBreadcrumbs(event.breadcrumbs);
+    scrubSentrySpans(event);
+    return event;
+  }
+
+  // Replay معطّل: أزل تكامل المحمّل الافتراضي ولا تُعِد إضافته.
+  function stripSentryReplayIntegrations(integrations) {
+    var list = Array.isArray(integrations) ? integrations.slice() : [];
+    var withoutReplay = [];
+    for (var i = 0; i < list.length; i += 1) {
+      var name = list[i] && list[i].name;
+      if (name !== "Replay" && name !== "SessionReplay") withoutReplay.push(list[i]);
+    }
+    return withoutReplay;
+  }
+
+  function buildSentryInitOptions(prod) {
+    var initOptions = {
+      enabled: prod,
+      sendDefaultPii: false,
+      // تتبع الأداء مسموح فقط مع تنقية قبل الإرسال (انظر scrubSentryTransaction).
+      tracesSampleRate: 1.0,
+      // Session Replay متوقف حتى تنقية سمات DOM — التسجيل يتجاوز beforeSend.
+      replaysSessionSampleRate: 0,
+      replaysOnErrorSampleRate: 0,
+      integrations: stripSentryReplayIntegrations,
+      beforeBreadcrumb: function (crumb) {
+        scrubSentryBreadcrumb(crumb);
+        return crumb;
+      },
+      beforeSend: function (event) {
+        if (!prod) return null;
+        return scrubSentryEvent(event);
+      },
+      beforeSendTransaction: function (event) {
+        if (!prod) return null;
+        return scrubSentryTransaction(event);
+      }
+    };
+    if (injected(environment)) initOptions.environment = environment;
+    if (injected(release)) initOptions.release = release;
+    return initOptions;
+  }
+
+  function installSentryOnLoad() {
+    window.sentryOnLoad = function () {
+      if (typeof Sentry === "undefined" || typeof Sentry.init !== "function") return;
+      Sentry.init(buildSentryInitOptions(isProductionOrigin()));
+    };
+  }
+
+  function onRollbarError(event) {
     var error = event && event.error;
     var name = (error && error.name) || "Error";
     var message = (error && error.message) || (event && event.message) || "خطأ غير معروف";
@@ -883,36 +1114,58 @@
       lineno: event && event.lineno,
       colno: event && event.colno
     });
-  });
+  }
 
-  window.addEventListener("unhandledrejection", function (event) {
+  function onRollbarUnhandledRejection(event) {
     var reason = event && event.reason;
     var name = (reason && reason.name) || "UnhandledRejection";
     var message = (reason && reason.message) || String(reason === undefined ? "" : reason);
     send("error", clampMessage(name + ": " + message, MAX_MESSAGE_CHARS), clampStack(reason && reason.stack, MAX_STACK_CHARS, messageHeaders(reason && reason.name, reason && reason.message)), {});
-  });
+  }
 
-  // كشف محدود للاختبار والتشخيص — لا يرسل شيئاً بذاته، ولا يكشف الرمز ولا
-  // الحمولة. `delivery()` تعيد عدّادات وحالة HTTP الأخيرة فقط، وهي ما يجعل
-  // فشل التسليم قابلاً للاكتشاف بدل أن يبقى صامتاً.
-  window.ozkErrorMonitoring = {
-    environment: environment,
-    release: injected(release) ? release : null,
-    scrub: scrub,
-    redactBusinessData: redactBusinessData,
-    redactStack: redactStack,
-    sentCount: function () { return sent; },
-    delivery: function () {
-      return {
-        delivered: delivered,
-        failures: failures,
-        consecutiveFailures: consecutiveFailures,
-        consecutiveFatalFailures: consecutiveFatalFailures,
-        transientAttempts: transientAttempts,
-        lastFailureStatus: lastFailureStatus,
-        stopped: consecutiveFatalFailures >= MAX_FATAL_FAILURES ||
-          transientAttempts >= MAX_TRANSIENT_ATTEMPTS
-      };
-    }
-  };
+  function attachRollbarListeners() {
+    window.addEventListener("error", onRollbarError);
+    window.addEventListener("unhandledrejection", onRollbarUnhandledRejection);
+  }
+
+  function monitoringDeliverySnapshot() {
+    return {
+      delivered: delivered,
+      failures: failures,
+      consecutiveFailures: consecutiveFailures,
+      consecutiveFatalFailures: consecutiveFatalFailures,
+      transientAttempts: transientAttempts,
+      lastFailureStatus: lastFailureStatus,
+      stopped: consecutiveFatalFailures >= MAX_FATAL_FAILURES ||
+        transientAttempts >= MAX_TRANSIENT_ATTEMPTS
+    };
+  }
+
+  function exportMonitoringApi() {
+    // كشف محدود للاختبار والتشخيص — لا يرسل شيئاً بذاته، ولا يكشف الرمز ولا
+    // الحمولة. `delivery()` تعيد عدّادات وحالة HTTP الأخيرة فقط، وهي ما يجعل
+    // فشل التسليم قابلاً للاكتشاف بدل أن يبقى صامتاً.
+    // نُصدِر الواجهة عند تفعيل نقل فعلي (Sentry أو Rollbar) فقط — النوّاب alone
+    // تُبقي الملف بلا تصدير كما كان قبل دمج Sentry.
+    window.ozkErrorMonitoring = {
+      environment: environment,
+      release: injected(release) ? release : null,
+      transport: useSentry ? "sentry" : "rollbar",
+      scrub: scrub,
+      redactBusinessData: redactBusinessData,
+      redactStack: redactStack,
+      scrubSentryEvent: scrubSentryEvent,
+      scrubSentryTransaction: scrubSentryTransaction,
+      sentCount: function () { return sent; },
+      delivery: monitoringDeliverySnapshot
+    };
+  }
+
+  function activateConfiguredTransports() {
+    if (useSentry) installSentryOnLoad();
+    if (rollbarActive) attachRollbarListeners();
+    if (rollbarActive || useSentry) exportMonitoringApi();
+  }
+
+  activateConfiguredTransports();
 })();
