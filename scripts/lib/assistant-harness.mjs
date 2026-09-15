@@ -175,6 +175,7 @@ export function defaultFixtures() {
         customerGuid: "aaa11111",
         invoices: [{
           date: "2026-08-29",
+          total: 8945.5,
           lines: [
             { material: "ماستر طويل ورق", qty: 25, price: 355, unit1: "كروز", lineTotal: 8875 },
             { material: "كينغ دوم سليم", qty: 15, price: 4.7, unit1: "كروز", lineTotal: 70.5 }
@@ -204,14 +205,27 @@ function applyPostgrestQuery(rows, query, options = {}) {
     });
   }
 
-  const order = query.match(/order=([\w.]+)\.(asc|desc)/);
-  if (order) {
-    const [, field, direction] = order;
-    next = [...next].sort((left, right) => {
-      const a2 = String(left[field] ?? "");
-      const b2 = String(right[field] ?? "");
-      return direction === "desc" ? (a2 < b2 ? 1 : a2 > b2 ? -1 : 0) : (a2 > b2 ? 1 : a2 < b2 ? -1 : 0);
-    });
+  // PostgREST يقبل عدة مفاتيح: order=report_date.desc,created_at.desc
+  const orderMatch = query.match(/order=([^&]+)/);
+  if (orderMatch) {
+    const keys = decodeURIComponent(orderMatch[1])
+      .split(",")
+      .map((part) => {
+        const m = part.trim().match(/^([\w.]+)\.(asc|desc)$/);
+        return m ? { field: m[1], direction: m[2] } : null;
+      })
+      .filter(Boolean);
+    if (keys.length) {
+      next = [...next].sort((left, right) => {
+        for (const key of keys) {
+          const a2 = String(left[key.field] ?? "");
+          const b2 = String(right[key.field] ?? "");
+          if (a2 === b2) continue;
+          return key.direction === "desc" ? (a2 < b2 ? 1 : -1) : (a2 > b2 ? 1 : -1);
+        }
+        return 0;
+      });
+    }
   }
 
   const offset = query.match(/offset=(\d+)/);

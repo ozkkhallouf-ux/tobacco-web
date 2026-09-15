@@ -1444,10 +1444,11 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   ok("ضبط entity:\"supplier\" على أداة المشتريات فعّل ترشيح المورّد بالاسم — لم يعد شيفرة ميتة");
 }
 
-// ── ذ) فواتير الزبون: تعارض وحدة السطر يمنع الإجمالي القاطع (Codex #28) ─────
+// ── ذ) فواتير الزبون: إجمالي الرأس الموثوق + حسم وحدة الأسطر (Codex #28 / P1) ─
 {
-  // فواتير الزبون لا تحمل avgPrice كفواتير الشراء، فكشف التعارض هنا يقارن
-  // lineTotal المخزَّن بـ qty×price. سطر متسق طبيعي أولاً.
+  // فواتير الزبون لا تحمل avgPrice كفواتير الشراء. بلا inv.total يبقى حارس
+  // lineTotal مقابل qty×price. ومع inv.total يُعتمد رأس الفاتورة ويُحسَم أساس
+  // كل سطر (نمط invoiceLineBasisPlan في src/app.js / printing.md).
   const consistentFixtures = defaultFixtures();
   consistentFixtures["inventory_reports:ameen_customer_invoices"] = [{
     report_date: "2026-09-06",
@@ -1456,7 +1457,7 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
     items: [{
       name: "سامر الوهمي",
       customerGuid: "aaa11111",
-      invoices: [{ date: "2026-08-29", lines: [
+      invoices: [{ date: "2026-08-29", total: 1000, lines: [
         { material: "صنف عادي", qty: 10, price: 100, unit1: "علبة", lineTotal: 1000 }
       ] }]
     }]
@@ -1466,8 +1467,7 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   assert.ok(/إجمالي 1,000 USD/.test(normal), `فاتورة متسقة لم تُظهر إجمالياً صريحاً:\n${normal}`);
   assert.ok(!normal.includes("لم أعرض إجمالي هذه الفاتورة عمداً"), "امتنع عن إجمالي فاتورة متسقة بلا سبب");
 
-  // وسطر متعارض الوحدة: qty×price يضخّم الناتج نحو 50 ضعف lineTotal الحقيقي
-  // (نفس نمط الخلل الحقيقي المرصود بأداة المشتريات) ⇒ يُمتنع عن الإجمالي.
+  // بلا إجمالي رأس + تعارض qty×price مع lineTotal ⇒ امتناع (الحارس القديم).
   const conflictFixtures = defaultFixtures();
   conflictFixtures["inventory_reports:ameen_customer_invoices"] = [{
     report_date: "2026-09-06",
@@ -1484,18 +1484,49 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   }];
   const b = await loadAssistant({ fixtures: conflictFixtures });
   const conflict = String((await b.ask(TOKENS.owner, "ماذا اشترى الزبون سامر الوهمي؟")).body.reply);
-  assert.ok(/لم أعرض إجمالي هذه الفاتورة عمداً/.test(conflict), `لم يمتنع عن إجمالي الفاتورة المتعارضة:\n${conflict}`);
-  assert.ok(!/إجمالي 91,850 USD/.test(conflict), "عرض إجمالياً قاطعاً رغم تعارض وحدة السعر");
-  // بند السطر نفسه يبقى معروضاً كما هو دون أي تعديل على lineTotal المخزَّن
+  assert.ok(/لم أعرض إجمالي هذه الفاتورة عمداً/.test(conflict), `لم يمتنع عن إجمالي الفاتورة المتعارضة بلا رأس:\n${conflict}`);
+  assert.ok(!/إجمالي 91,850 USD/.test(conflict), "عرض إجمالياً قاطعاً رغم تعارض وحدة السعر بلا total");
   assert.ok(conflict.includes("مالبورو غولد كرتون"), "أخفى بند الفاتورة رغم أن الإخفاء يخص الإجمالي فقط");
-  assert.ok(conflict.includes("= 91,850 USD"), "غيّر lineTotal المعروض بالسطر رغم أن التعديل ممنوع");
+  assert.ok(conflict.includes("= 91,850 USD"), "غيّر lineTotal المعروض بالسطر رغم أن التعديل ممنوع عند غياب الخطة");
 
-  // ولا رجوع عن الحالة السليمة: الفواتير الافتراضية (متسقة) لا تتأثر بالحارس
+  // فاتورة #733: lineTotal = qty×price مضخَّم (سعر كرتونة × كمية كروز) فيطابق
+  // نفسه ولا يكشفه حارس التعارض — لكن inv.total = 1163.6 موثوق، والخطة تحسم
+  // أساس الكرتونة للأسطر الأربعة وأساس الكروز لسطر الغلواز.
+  const mixedFixtures = defaultFixtures();
+  mixedFixtures["inventory_reports:ameen_customer_invoices"] = [{
+    report_date: "2026-09-13",
+    created_at: new Date().toISOString(),
+    summary: { bills: 1, customers: 1, fromDate: "2026-07-08" },
+    items: [{
+      name: "سامر الوهمي",
+      customerGuid: "aaa11111",
+      invoices: [{
+        date: "2026-09-13",
+        total: 1163.6,
+        lines: [
+          { material: "صنف كرتون أ", qty: 50, qtyUnits: 1, price: 286, unit1: "كروز", unit2: "كرتونة", lineTotal: 14300 },
+          { material: "صنف كرتون ب", qty: 50, qtyUnits: 1, price: 290, unit1: "كروز", unit2: "كرتونة", lineTotal: 14500 },
+          { material: "صنف كرتون ج", qty: 50, qtyUnits: 1, price: 308, unit1: "كروز", unit2: "كرتونة", lineTotal: 15400 },
+          { material: "صنف نصف كرتون", qty: 25, qtyUnits: 0.5, price: 318, unit1: "كروز", unit2: "كرتونة", lineTotal: 7950 },
+          { material: "غلواز قصير أصفر", qty: 15, qtyUnits: 0.3, price: 8.04, unit1: "كروز", unit2: "كرتونة", lineTotal: 120.6 }
+        ]
+      }]
+    }]
+  }];
+  const m = await loadAssistant({ fixtures: mixedFixtures });
+  const mixed = String((await m.ask(TOKENS.owner, "ماذا اشترى الزبون سامر الوهمي؟")).body.reply);
+  assert.ok(/إجمالي 1,163\.6 USD/.test(mixed), `لم يعرض إجمالي رأس الفاتورة الموثوق 1163.6:\n${mixed}`);
+  assert.ok(!/14,300|52,270|71,270|52270/.test(mixed), `مرّر مجموع lineTotal المضخَّم بدل رأس الفاتورة:\n${mixed}`);
+  assert.ok(/= 286 USD/.test(mixed), `لم يحسم قيمة سطر الكرتونة إلى 286:\n${mixed}`);
+  assert.ok(/= 120\.6 USD/.test(mixed), `لم يحسم سطر الغلواز (أساس كروز) إلى 120.6:\n${mixed}`);
+  assert.ok(!mixed.includes("لم أعرض إجمالي هذه الفاتورة عمداً"), "امتنع عن إجمالي موثوق من الرأس بلا سبب");
+
+  // ولا رجوع عن الحالة السليمة: الفواتير الافتراضية (متسقة + total) لا تتأثر
   const c = await loadAssistant();
   const regression = String((await c.ask(TOKENS.owner, "ماذا اشترى الزبون سامر الوهمي؟")).body.reply);
   assert.ok(/إجمالي 8,945.5 USD/.test(regression), `فاتورة افتراضية متسقة تأثرت بالحارس الجديد:\n${regression}`);
   assert.ok(!regression.includes("لم أعرض إجمالي هذه الفاتورة عمداً"), "الحارس الجديد سبّب امتناعاً كاذباً على بيانات سليمة");
-  ok("حارس تعارض وحدة السعر بفواتير الزبون: يمتنع عن الإجمالي عند التعارض فقط، ولا يمسّ الفواتير السليمة");
+  ok("فواتير الزبون: إجمالي الرأس الموثوق + حسم وحدة الأسطر؛ بلا رأس يبقى حارس التعارض");
 }
 
 // ── ض) الملخص التنفيذي لا يعرض رقم ربح قاطع لتقرير ناقص (Codex #29) ────────
@@ -1726,6 +1757,38 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   assert.equal(noCoverAnswer.body.answered, false, `فترة صريحة بلا أي لقطة تغطيها يجب أن تُرفض لا أن تعرض أحدث لقطة كأنها تاريخية:\n${noCoverText}`);
   assert.ok(/الشهر الماضي/.test(noCoverText), `نص الرفض لم يذكر تسمية الفترة المطلوبة:\n${noCoverText}`);
   ok("reportForPeriod يختار اللقطة المطابقة لـreport_date عند فترة صريحة (لا الأحدث بالإنشاء)، ويرفض صراحة عند غياب لقطة تغطي الفترة");
+}
+
+{
+  // عدة لقطات بنفس report_date داخل فترة صريحة: يجب كسر التعادل بـcreated_at.desc
+  // وإلا قد تُعاد لقطة صباحية بدل آخر رصيد لذلك اليوم.
+  // (discussion_r4018189152)
+  const day = (n) => new Date(Date.now() + 180 * 60_000 - n * 86_400_000).toISOString().slice(0, 10);
+  const yesterday = day(1);
+  const sameDay = defaultFixtures();
+  sameDay["inventory_reports:ameen_customer_balances"] = [
+    {
+      report_date: yesterday,
+      created_at: `${yesterday}T06:00:00.000Z`,
+      summary: { totalDebitBalance: 1111, totalCreditBalance: 0, customersWithDebitBalance: 1, customersWithCreditBalance: 0, totalCustomers: 1 },
+      items: [{ key: "زبون الصباح", name: "زبون الصباح", balance: 1111, customerGuid: "m1", recentPayments: [] }]
+    },
+    {
+      report_date: yesterday,
+      created_at: `${yesterday}T18:00:00.000Z`,
+      summary: { totalDebitBalance: 9999, totalCreditBalance: 0, customersWithDebitBalance: 1, customersWithCreditBalance: 0, totalCustomers: 1 },
+      items: [{ key: "زبون المساء", name: "زبون المساء", balance: 9999, customerGuid: "e1", recentPayments: [] }]
+    }
+  ];
+
+  const a = await loadAssistant({ fixtures: sameDay });
+  const answer = await a.ask(TOKENS.owner, "كم ديون الزبائن امس؟");
+  const text = String(answer.body.reply);
+  assert.equal(answer.body.answered, true, `لقطتان بنفس اليوم يجب أن تُجابا بآخر إنشاء:\n${text}`);
+  assert.ok(/9,999/.test(text), `لم تُختر لقطة المساء (created_at الأحدث) عند تعادل report_date:\n${text}`);
+  assert.ok(!/1,111/.test(text), `عُرض رصيد لقطة الصباح بدل آخر لقطة لنفس اليوم:\n${text}`);
+  assert.ok(text.includes(yesterday), `لم يذكر تاريخ لقطة الأمس:\n${text}`);
+  ok("reportForPeriod يكسر تعادل نفس اليوم بـcreated_at.desc فيختار آخر لقطة");
 }
 
 {

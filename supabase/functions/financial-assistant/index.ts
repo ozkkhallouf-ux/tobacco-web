@@ -345,7 +345,10 @@ async function reportForPeriod(table: string, source: string | undefined, period
   const rows = await readRest(
     `${table}?select=report_date,summary,items,created_at${sourceFilter}`
     + `&report_date=gte.${safeDate(period.from)}&report_date=lte.${safeDate(period.to)}`
-    + `&order=report_date.desc&limit=1`
+    // created_at.desc بعد report_date.desc: عدة لقطات بنفس اليوم (دفع الأرصدة
+    // كل 15 دقيقة يُلحق صفاً جديداً) كانت تُعاد بترتيب غير محدَّد فيقتصر limit=1
+    // على لقطة صباحية بدل آخر رصيد لذلك اليوم. (رصدها Codex على PR #205.)
+    + `&order=report_date.desc,created_at.desc&limit=1`
   );
   return Array.isArray(rows) && rows[0] ? rows[0] : null;
 }
@@ -465,6 +468,12 @@ function qty(value: unknown) {
 // حين تكون lineTotal فعلياً = qty×price بالبناء (مثل lineTotalSource==="derived")
 // لا يظهر أي تعارض هنا — وهذا سليم، فالخطر الحقيقي فقط حين يكون lineTotal
 // قيمة حقيقية مستقلة (من الأمين) بينما qty×price بأساس وحدة مختلف.
+//
+// **حدّ مهم (Codex P1 على PR #205 / فاتورة #733):** حين يكون lineTotal نفسه =
+// Qty×Price بوحدة مختلطة (سعر كرتونة × كمية كروز)، فالمقارنة مع نفسها لا تكشف
+// شيئاً وتُمرِّر المجموع المضخَّم. لذلك لا يُعتمد هذا الحارس وحده إن وُجد
+// `inv.total` — الإجمالي من رأس الفاتورة هو الرقم الموثوق (انظر printing.md
+// و`invoiceLineBasisPlan` في src/app.js).
 function lineTotalConflictStats(
   lines: Array<Record<string, unknown>>,
   priceField: string
@@ -478,6 +487,206 @@ function lineTotalConflictStats(
     if (stated > 0 && base > 0 && Math.abs(stated - base) / Math.max(stated, base) > 0.2) conflicting += 1;
   }
   return { lines: count, conflicting, unreliable: count > 0 && conflicting / count > 0.2 };
+}
+
+// ── حسم أساس سطر الفاتورة بمطابقة إجمالي الرأس (نسخة مصغّرة من src/app.js) ──
+// inv.total من الأمين هو الرقم الموثوق الوحيد. lineTotal قد يساوي Price×Qty
+// بوحدة خاطئة فيتضخّم 50 ضعفاً دون أن يكشفه lineTotalConflictStats.
+type InvoiceLineBasis = "unit1" | "unit2" | "stored";
+const INVOICE_BASIS_SEARCH_BUDGET = 200_000;
+const INVOICE_BASIS_EXACT_TOLERANCE = 0.005;
+
+function invoiceBasisTolerance(lines: Array<Record<string, unknown>>) {
+  let sumPrice = 0;
+  for (const line of lines) sumPrice += Math.abs(num(line.price));
+  return Math.max(0.05, 0.0006 * sumPrice);
+}
+
+function invoiceLineCandidates(line: Record<string, unknown>) {
+  const price = num(line.price);
+  const q = num(line.qty);
+  const qtyUnits = num(line.qtyUnits);
+  const unit1 = price * q;
+  const unit2 = price * qtyUnits;
+  return {
+    unit1,
+    unit2,
+    hasUnit1: q > 0,
+    hasUnit2: qtyUnits > 0,
+    switchable: q > 0 && qtyUnits > 0 && Math.abs(unit1 - unit2) > 1e-9
+  };
+}
+
+function computeInvoiceLineBasisPlan(
+  lines: Array<Record<string, unknown>>,
+  total: number
+): Map<Record<string, unknown>, InvoiceLineBasis> | null {
+  if (!(total > 0) || !lines.length) return null;
+  const tol = invoiceBasisTolerance(lines);
+
+  let storedSum = 0;
+  let storedComplete = true;
+  for (const line of lines) {
+    const stored = Number(line.lineTotal);
+    if (!Number.isFinite(stored) || stored < 0) { storedComplete = false; break; }
+    storedSum += stored;
+  }
+  if (storedComplete && Math.abs(storedSum - total) <= tol) return null;
+
+  const basis = new Map<Record<string, unknown>, InvoiceLineBasis>();
+  const buckets = new Map<string, { delta: number; lines: Array<Record<string, unknown>> }>();
+  let base = 0;
+  for (const line of lines) {
+    const candidates = invoiceLineCandidates(line);
+    if (!candidates.switchable) {
+      if (candidates.hasUnit2) { basis.set(line, "unit2"); base += candidates.unit2; }
+      else if (candidates.hasUnit1) { basis.set(line, "unit1"); base += candidates.unit1; }
+      else { basis.set(line, "stored"); base += num(line.lineTotal); }
+      continue;
+    }
+    basis.set(line, "unit2");
+    base += candidates.unit2;
+    const key = `${candidates.unit1.toFixed(6)}|${candidates.unit2.toFixed(6)}`;
+    const bucket = buckets.get(key);
+    if (bucket) bucket.lines.push(line);
+    else buckets.set(key, { delta: candidates.unit1 - candidates.unit2, lines: [line] });
+  }
+
+  const target = total - base;
+  if (Math.abs(target) <= tol) return basis;
+
+  const groups = [...buckets.values()].sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
+  const count = groups.length;
+  if (!count) return null;
+
+  const suffixMax = new Array(count + 1).fill(0);
+  const suffixMin = new Array(count + 1).fill(0);
+  for (let i = count - 1; i >= 0; i -= 1) {
+    const span = groups[i].delta * groups[i].lines.length;
+    suffixMax[i] = suffixMax[i + 1] + Math.max(0, span);
+    suffixMin[i] = suffixMin[i + 1] + Math.min(0, span);
+  }
+
+  const picks = new Array(count).fill(0);
+  let steps = 0;
+  const searchWithin = (limit: number) => {
+    const walk = (index: number, remaining: number): "found" | "budget" | null => {
+      steps += 1;
+      if (steps > INVOICE_BASIS_SEARCH_BUDGET) return "budget";
+      if (Math.abs(remaining) <= limit) return "found";
+      if (index >= count) return null;
+      if (remaining > suffixMax[index] + limit || remaining < suffixMin[index] - limit) return null;
+      const group = groups[index];
+      for (let taken = 0; taken <= group.lines.length; taken += 1) {
+        picks[index] = taken;
+        const outcome = walk(index + 1, remaining - group.delta * taken);
+        if (outcome) return outcome;
+      }
+      picks[index] = 0;
+      return null;
+    };
+    return walk(0, target);
+  };
+
+  let outcome = searchWithin(INVOICE_BASIS_EXACT_TOLERANCE);
+  if (outcome !== "found" && outcome !== "budget" && tol > INVOICE_BASIS_EXACT_TOLERANCE) {
+    picks.fill(0);
+    outcome = searchWithin(tol);
+  }
+  if (outcome !== "found") return null;
+
+  groups.forEach((group, index) => {
+    for (let i = 0; i < picks[index]; i += 1) basis.set(group.lines[i], "unit1");
+  });
+  return basis;
+}
+
+function invoiceLineResolvedValue(
+  line: Record<string, unknown>,
+  basis: InvoiceLineBasis | undefined
+): number {
+  if (basis === "unit1") return num(line.price) * num(line.qty);
+  if (basis === "unit2") return num(line.price) * num(line.qtyUnits);
+  return num(line.lineTotal);
+}
+
+// عرض مبالغ فاتورة الزبون: إجمالي الرأس أولاً، ثم قيم الأسطر بعد حسم الأساس.
+// بلا total موثوق نعود لحارس التعارض القديم (lineTotal مقابل qty×price).
+function customerInvoiceAmountView(inv: Record<string, unknown>): {
+  total: number | null;
+  unreliable: boolean;
+  valueOf: (line: Record<string, unknown>) => number | null;
+  qtyLabelOf: (line: Record<string, unknown>) => string;
+} {
+  const lines = Array.isArray(inv.lines) ? inv.lines as Array<Record<string, unknown>> : [];
+  const defaultQtyLabel = (line: Record<string, unknown>) => {
+    const u2 = String(line.unit2 ?? "").trim();
+    if (num(line.qtyUnits) > 0 && u2) return `${qty(line.qtyUnits)} ${u2}`;
+    return `${qty(line.qty)} ${String(line.unit1 ?? "")}`.trim();
+  };
+  const qtyLabelForBasis = (line: Record<string, unknown>, basis: InvoiceLineBasis | undefined) => {
+    const u1 = String(line.unit1 ?? "").trim();
+    const u2 = String(line.unit2 ?? "").trim();
+    if (basis === "unit2" && num(line.qtyUnits) > 0) {
+      return `${qty(line.qtyUnits)} ${u2 || u1}`.trim();
+    }
+    if (basis === "unit1" || num(line.qty) > 0) {
+      return `${qty(line.qty)} ${u1}`.trim();
+    }
+    return defaultQtyLabel(line);
+  };
+  const headerTotal = num(inv.total);
+  if (headerTotal > 0) {
+    const plan = computeInvoiceLineBasisPlan(lines, headerTotal);
+    if (plan) {
+      return {
+        total: headerTotal,
+        unreliable: false,
+        valueOf: (line) => invoiceLineResolvedValue(line, plan.get(line)),
+        qtyLabelOf: (line) => qtyLabelForBasis(line, plan.get(line))
+      };
+    }
+    const tol = invoiceBasisTolerance(lines);
+    let storedSum = 0;
+    let storedComplete = true;
+    for (const line of lines) {
+      const stored = Number(line.lineTotal);
+      if (!Number.isFinite(stored) || stored < 0) { storedComplete = false; break; }
+      storedSum += stored;
+    }
+    if (storedComplete && Math.abs(storedSum - headerTotal) <= tol) {
+      return {
+        total: headerTotal,
+        unreliable: false,
+        valueOf: (line) => num(line.lineTotal),
+        qtyLabelOf: defaultQtyLabel
+      };
+    }
+    // إجمالي الرأس موثوق، لكن لا توزيع أسطر مطابق — نعرض الإجمالي ونحجب
+    // معادلة السطر المضخَّمة بدل تمرير lineTotal كحقيقة.
+    return {
+      total: headerTotal,
+      unreliable: true,
+      valueOf: () => null,
+      qtyLabelOf: defaultQtyLabel
+    };
+  }
+  const { unreliable } = lineTotalConflictStats(lines, "price");
+  if (unreliable) {
+    return {
+      total: null,
+      unreliable: true,
+      valueOf: (line) => num(line.lineTotal),
+      qtyLabelOf: defaultQtyLabel
+    };
+  }
+  const summed = lines.reduce((sum, line) => sum + num(line.lineTotal), 0);
+  return {
+    total: summed,
+    unreliable: false,
+    valueOf: (line) => num(line.lineTotal),
+    qtyLabelOf: defaultQtyLabel
+  };
 }
 
 // ── التواريخ ─────────────────────────────────────────────────────────────────
@@ -995,16 +1204,21 @@ function appendCustomerPaymentsText(
 }
 
 function formatCustomerInvoiceBlock(inv: Record<string, unknown>): string {
-  const lines = Array.isArray(inv.lines) ? inv.lines : [];
-  const { unreliable } = lineTotalConflictStats(lines as Array<Record<string, unknown>>, "price");
-  const total = lines.reduce((sum: number, l: Record<string, unknown>) => sum + num(l.lineTotal), 0);
-  let block = unreliable
+  const lines = Array.isArray(inv.lines) ? inv.lines as Array<Record<string, unknown>> : [];
+  const view = customerInvoiceAmountView(inv);
+  let block = view.total === null
     ? `\n\n**فاتورة ${String(inv.date ?? "")}** — ⚠️ لم أعرض إجمالي هذه الفاتورة عمداً (تعارض في وحدة السعر بين أسطرها)\n`
-    : `\n\n**فاتورة ${String(inv.date ?? "")}** — إجمالي ${money(total)}\n`;
+    : `\n\n**فاتورة ${String(inv.date ?? "")}** — إجمالي ${money(view.total)}`
+      + (view.unreliable ? ` _(أسطرها بلا حسم وحدة قاطع — الإجمالي من رأس الفاتورة)_\n` : `\n`);
   block += lines
     .slice(0, 10)
-    .map((l: Record<string, unknown>) =>
-      `- ${String(l.material ?? "")}: ${qty(l.qty)} ${String(l.unit1 ?? "")} × ${money(l.price)} = ${money(l.lineTotal)}`)
+    .map((l) => {
+      const lineValue = view.valueOf(l);
+      const qtyLabel = view.qtyLabelOf(l);
+      return lineValue === null
+        ? `- ${String(l.material ?? "")}: ${qtyLabel} × ${money(l.price)} _(قيمة السطر غير محسومة)_`
+        : `- ${String(l.material ?? "")}: ${qtyLabel} × ${money(l.price)} = ${money(lineValue)}`;
+    })
     .join("\n")
     + (lines.length > 10 ? `\n- _و${lines.length - 10} سطر آخر._` : "");
   return block;
@@ -1019,12 +1233,13 @@ function formatCustomerReturnsBlock(
     + returns
       .slice(0, 5)
       .map((inv) => {
-        const lines = Array.isArray(inv.lines) ? inv.lines : [];
-        const { unreliable } = lineTotalConflictStats(lines as Array<Record<string, unknown>>, "price");
-        const total = lines.reduce((sum: number, l: Record<string, unknown>) => sum + num(l.lineTotal), 0);
-        const amount = unreliable ? "⚠️ غير محسوم (تعارض وحدة السعر)" : money(total);
+        const lines = Array.isArray(inv.lines) ? inv.lines as Array<Record<string, unknown>> : [];
+        const view = customerInvoiceAmountView(inv);
+        const amount = view.total === null
+          ? "⚠️ غير محسوم (تعارض وحدة السعر)"
+          : money(view.total);
         return `- ${String(inv.date ?? "")}: ${amount}`
-          + (lines.length ? ` (${lines.slice(0, 3).map((l: Record<string, unknown>) => String(l.material ?? "")).join("، ")}${lines.length > 3 ? "…" : ""})` : "");
+          + (lines.length ? ` (${lines.slice(0, 3).map((l) => String(l.material ?? "")).join("، ")}${lines.length > 3 ? "…" : ""})` : "");
       })
       .join("\n")
     + (returns.length > 5 ? `\n- _و${returns.length - 5} مرتجع آخر._` : "")
