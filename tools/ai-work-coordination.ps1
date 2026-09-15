@@ -1,7 +1,7 @@
 param(
     [ValidateSet('Status', 'Claim', 'Complete')]
     [string]$Action = 'Status',
-    [ValidateSet('Claude', 'Codex', 'Human')]
+    [ValidateSet('Claude', 'Codex', 'Human', 'Cursor')]
     [string]$Owner,
     [string]$Task,
     [string[]]$Files = @(),
