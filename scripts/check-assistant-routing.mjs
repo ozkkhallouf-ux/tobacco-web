@@ -2264,4 +2264,49 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   ok("رصيد حساب بفترة تاريخية يأخذ لقطة الفترة (أو يرفض صراحة) ولا يعرض الرصيد الحالي مموَّهاً");
 }
 
+// ── Codex P1: تاريخ تقويمي صريح (ISO / يوم-شهر-سنة) لا يسقط على اليوم ───────
+{
+  // ملاحظة Codex على PR #205 (discussion_r4018343653): «مبيعات 2026-09-01»
+  // و«مبيعات يوم 1/9/2026» لم تطابق أي فرع فترة، فكانت تُجاب بأرقام اليوم.
+  const target = "2026-09-01";
+  const today = new Date(Date.now() + 180 * 60_000).toISOString().slice(0, 10);
+  const fixtures = defaultFixtures();
+  fixtures.sales_line_items = [
+    { sale_date: target, bill_no: "t1", bill_type: "retail", item_name: "أ", qty: 1, line_total: 321, net_profit: 21, unit_cost: 300, customer_name: "س" },
+    { sale_date: today, bill_no: "t0", bill_type: "retail", item_name: "أ", qty: 1, line_total: 999, net_profit: 9, unit_cost: 990, customer_name: "س" }
+  ];
+  fixtures.sales_line_items_sync_state = [{
+    source: "ameen_sales_line_items",
+    window_start: "2026-01-01",
+    window_end: today,
+    row_count: 2,
+    completed_at: new Date().toISOString()
+  }];
+
+  const isoAsk = await (await loadAssistant({ fixtures })).ask(TOKENS.owner, "مبيعات 2026-09-01");
+  const isoText = String(isoAsk.body.reply);
+  assert.equal(isoAsk.body.answered, true, `ISO صريح رُفض:\n${isoText}`);
+  assert.ok(isoText.includes("321"), `لم يقرأ مبيعات ${target}:\n${isoText}`);
+  assert.ok(!isoText.includes("999"), `سقط على مبيعات اليوم بدل التاريخ الصريح:\n${isoText}`);
+  assert.ok(isoText.includes(target) || /2026-09-01/.test(isoText), `لم يذكر التاريخ المطلوب في الجواب:\n${isoText}`);
+
+  const dmyAsk = await (await loadAssistant({ fixtures })).ask(TOKENS.owner, "مبيعات يوم 1/9/2026");
+  const dmyText = String(dmyAsk.body.reply);
+  assert.equal(dmyAsk.body.answered, true, `يوم/شهر/سنة رُفض:\n${dmyText}`);
+  assert.ok(dmyText.includes("321"), `صيغة 1/9/2026 لم تُقرأ كمبيعات ${target}:\n${dmyText}`);
+  assert.ok(!dmyText.includes("999"), `صيغة يوم/شهر/سنة سقطت على اليوم:\n${dmyText}`);
+
+  const bad = await (await loadAssistant({ fixtures })).ask(TOKENS.owner, "مبيعات يوم 99/99/2026");
+  assert.equal(bad.body.answered, false, `تاريخ غير صالح كان يجب رفضه:\n${bad.body.reply}`);
+  assert.equal(bad.body.error, "unrecognized_date", `رمز الرفض ليس unrecognized_date:\n${JSON.stringify(bad.body)}`);
+  assert.ok(/لن أجيب بأرقام/.test(String(bad.body.reply)) || /لم أتعرّف على صيغته/.test(String(bad.body.reply)),
+    `نص الرفض لا يمنع السقوط على اليوم:\n${bad.body.reply}`);
+  assert.ok(!String(bad.body.reply).includes("999"), `تاريخ فاسد أجاب بمبيعات اليوم:\n${bad.body.reply}`);
+
+  const vague = await (await loadAssistant({ fixtures })).ask(TOKENS.owner, "مبيعات يوم 15 سبتمبر");
+  assert.equal(vague.body.answered, false, `«يوم» بلا صيغة رقمية كاملة يجب أن تُرفض:\n${vague.body.reply}`);
+  assert.equal(vague.body.error, "unrecognized_date");
+  ok("تاريخ تقويمي صريح (ISO ويوم/شهر/سنة) يُقرأ، والصيغة المجهولة تُرفض بلا سقوط على اليوم");
+}
+
 console.log(`\nتوجيه المساعد الذكي: ${passed}/${passed} تحقق ناجح`);

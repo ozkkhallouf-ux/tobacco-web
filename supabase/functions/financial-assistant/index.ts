@@ -791,10 +791,49 @@ function parsePeriod(question: string, fallbackDays = 0): Period {
     const days = Math.min(365, Math.max(1, Number(explicitDays[1])));
     return { from: damascusDate(-(days - 1)), to: today, label: `آخر ${days} يوم`, explicit: true };
   }
+  // تاريخ تقويمي صريح (ISO أو يوم/شهر/سنة). normalize يحوّل الفواصل إلى
+  // مسافات، فـ`2026-09-01` و`1/9/2026` يصبحان `2026 09 01` و`1 9 2026`.
+  // بدون هذا الفرع كان السؤال يسقط على «اليوم» صامتاً. (رصدها Codex على PR #205.)
+  const calendar = parseExplicitCalendarDate(q);
+  if (calendar === "invalid") throw new Error("unrecognized_date");
+  if (calendar) return calendar;
   if (fallbackDays === 0) {
     return { from: today, to: today, label: "اليوم", explicit: false };
   }
   return { from: damascusDate(-(fallbackDays - 1)), to: today, label: `آخر ${fallbackDays} يوم`, explicit: false };
+}
+
+// يبني YYYY-MM-DD بعد التحقق التقويمي الفعلي (لا يقبل 2026-02-31).
+function ymdIso(year: number, month: number, day: number): string | null {
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) return null;
+  if (year < 2000 || year > 2100 || month < 1 || month > 12 || day < 1 || day > 31) return null;
+  const iso = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  const parsed = Date.parse(`${iso}T00:00:00Z`);
+  if (Number.isNaN(parsed)) return null;
+  if (new Date(parsed).toISOString().slice(0, 10) !== iso) return null;
+  return iso;
+}
+
+// يقرأ تاريخاً تقويمياً صريحاً من السؤال المُطبَّع، أو "invalid" إن وُجدت
+// نية تاريخ دون صيغة مدعومة/صالحة — كي لا يُجاب «اليوم» مكان التاريخ المطلوب.
+function parseExplicitCalendarDate(q: string): Period | "invalid" | null {
+  // ISO بعد التطبيع: 2026 09 01 — مع أو بدون «يوم»
+  const iso = q.match(/(?:^| )(?:يوم )?(\d{4}) (\d{1,2}) (\d{1,2})(?: |$)/);
+  if (iso) {
+    const day = ymdIso(Number(iso[1]), Number(iso[2]), Number(iso[3]));
+    if (!day) return "invalid";
+    return { from: day, to: day, label: day, explicit: true };
+  }
+  // يوم/شهر/سنة شائع على iPhone: 1 9 2026 أو يوم 1 9 2026
+  const dmy = q.match(/(?:^| )(?:يوم )?(\d{1,2}) (\d{1,2}) (\d{4})(?: |$)/);
+  if (dmy) {
+    const day = ymdIso(Number(dmy[3]), Number(dmy[2]), Number(dmy[1]));
+    if (!day) return "invalid";
+    return { from: day, to: day, label: day, explicit: true };
+  }
+  // «يوم» ثم رقم دون صيغة كاملة معروفة — رفض صريح لا سقوط على اليوم
+  if (/(?:^| )يوم \d/.test(q)) return "invalid";
+  return null;
 }
 
 function damascusDateFrom(iso: string, offsetDays: number) {
@@ -3000,7 +3039,29 @@ Deno.serve(async (request) => {
     // تحقق ثانٍ من الصلاحية عند التنفيذ — لا يُعتمد على المخطِّط وحده.
     if (actor.rank < rankOf(chosen.tool.minRole)) return json(request, 403, { error: "forbidden" });
 
-    const period = parsePeriod(question);
+    let period: Period;
+    try {
+      period = parsePeriod(question);
+    } catch (error) {
+      const code = String((error as { message?: unknown } | undefined)?.message ?? "bad_period");
+      // تاريخ تقويمي ذُكر بصيغة غير معروفة/غير صالحة — رفض صريح لا جواب «اليوم».
+      if (code === "unrecognized_date") {
+        auditLog({ actorId: actor.id, role: actor.role, toolId: chosen.tool.id, outcome: "error", code });
+        return json(request, 200, {
+          reply: `طلبتَ تاريخاً محدداً لكن لم أتعرّف على صيغته، ولن أجيب بأرقام **اليوم** مكانه.\n\n`
+            + `الصيغ المدعومة: \`2026-09-01\` أو \`1/9/2026\` أو \`يوم 1/9/2026\`.`,
+          provider: "internal",
+          readOnly: true,
+          tool: chosen.tool.id,
+          answered: false,
+          error: code,
+          sources: [],
+          role: actor.role,
+          externalDataShared: false
+        });
+      }
+      throw error;
+    }
     let result: ToolResult;
     try {
       result = await chosen.tool.run({ question, entityText: chosen.entityText, role, period });
