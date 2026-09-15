@@ -1735,10 +1735,12 @@
       return (data && data[0]) || null;
     },
 
-    // المساعد المالي يستدعي Edge Function محمية بجلسة الموظف. مفاتيح مزودي
-    // الذكاء الاصطناعي وقراءة التقارير الحساسة تبقى على الخادم ولا تصل للمتصفح.
-    async askFinancialAssistant(messages, provider = "chatgpt") {
-      if (!client) throw new Error("المساعد المالي يتطلب اتصالاً آمناً بـ Supabase.");
+    // المساعد الذكي يستدعي Edge Function محمية بجلسة الموظف. الصلاحية تُفرض
+    // على الخادم من app_metadata.role، ومفتاح service-role وقراءة التقارير
+    // الحساسة تبقى هناك ولا تصل للمتصفح. الاسم القديم askFinancialAssistant
+    // بقي غلافاً متوافقاً كي لا ينكسر أي نداء قائم.
+    async askAssistant(messages) {
+      if (!client) throw new Error("المساعد الذكي يتطلب اتصالاً آمناً بـ Supabase.");
       const { data: sessionData, error: sessionError } = await client.auth.getSession();
       if (sessionError) throw new Error(translateAuthError(sessionError.message));
       const accessToken = sessionData?.session?.access_token;
@@ -1752,22 +1754,27 @@
           "content-type": "application/json"
         },
         body: JSON.stringify({
-          provider: provider === "claude" ? "claude" : "chatgpt",
           messages: (Array.isArray(messages) ? messages : []).slice(-12)
         })
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
+        // «forbidden» تعني الآن أمراً واحداً محدداً: الحساب لا يحمل دوراً
+        // مخوَّلاً في app_metadata. الرسالة تقول ذلك كي لا يضيع وقت في البحث
+        // عن قائمة إيميلات لم تعد موجودة.
         const errors = {
-          forbidden: "هذا المساعد المالي متاح للحسابات الإدارية المخوّلة فقط.",
+          forbidden: "هذا الحساب لا يملك دوراً مخوّلاً لاستخدام المساعد الذكي (يلزم دور owner أو employee في صلاحيات الحساب).",
           unauthorized: "انتهت جلسة الدخول. سجّل الدخول مجدداً.",
-          openai_not_configured: "مفتاح OpenAI غير مضبوط في أسرار الخادم.",
-          anthropic_not_configured: "مفتاح Anthropic غير مضبوط في أسرار الخادم.",
           empty_message: "اكتب سؤالك أولاً."
         };
-        throw new Error(errors[payload.error] || "تعذر الحصول على إجابة من المساعد المالي.");
+        throw new Error(errors[payload.error] || "تعذر الحصول على إجابة من المساعد الذكي.");
       }
       return payload;
+    },
+
+    // غلاف توافقي للاسم القديم
+    async askFinancialAssistant(messages) {
+      return service.askAssistant(messages);
     },
 
     // الجرد الذكي: كل payload للموظف يأتي من RPC لا تضم expected_qty أو الفرق.
