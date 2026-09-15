@@ -21,11 +21,13 @@
 --      `20260830141802_khalil_audit_log.sql` which:
 --        (a) matches the production version/name so CLI history aligns; and
 --        (b) provides *fresh-DB bootstrap* DDL derived from the local
---            superseded draft so clean migration replay does not abort here
---            (Codex P1). Byte-for-byte equivalence with the original production
---            apply is NOT proven and is NOT claimed. If somehow executed
---            against a DB that already has the base objects, a guard refuses
---            re-apply (history-safe).
+--            superseded draft so clean migration replay does not abort *at
+--            this audit stamp* (Codex P1). This does NOT advertise a
+--            standalone end-to-end replay of every out-of-band product table
+--            (prices/costs/feeds). Byte-for-byte equivalence with the original
+--            production apply is NOT proven and is NOT claimed. If somehow
+--            executed against a DB that already has the base objects, a guard
+--            refuses re-apply (history-safe).
 --
 --      khalil_audit_sync_heartbeat and khalil_audit_notify_failures are NOT
 --      attributed to commit e2a81a6 — git history shows they were designed
@@ -40,9 +42,11 @@
 --      Live catalog checks confirm both tables exist on production. Whether
 --      they were applied as part of 20260830141802 or as separate, unrecorded
 --      SQL Editor changes is NOT established. The fresh-bootstrap path of
---      `20260830141802_khalil_audit_log.sql` includes them so later active
---      migrations and the sync agent can run on a clean database — that is a
---      replay bootstrap choice, not a forensic claim about the original apply.
+--      `20260830141802_khalil_audit_log.sql` includes them so later *audit*
+--      migrations and the sync agent can run once this stamp is reached —
+--      that is a replay bootstrap choice for the audit subsystem, not a
+--      forensic claim about the original apply, and not a claim that the
+--      full migrations/ tree alone recreates every out-of-band product table.
 --
 --   2. `supabase/migrations/superseded/20260830140000_khalil_audit_log.sql`
 --      is a separate local draft that was iterated on through many later
@@ -72,10 +76,15 @@
 --      still stops on that mismatch. EVERY known remote-only version listed
 --      in superseded/README.md now has a matching local file (verify-or-skip
 --      landmarks for non-audit stamps — NOTICE no-op on fresh DB when the
---      landmark is absent, so clean replay is not aborted; bootstrap+
---      refuse-if-present for `20260830141802_khalil_audit_log.sql`). Confirm
---      with `supabase migration list` before Stage 2 / `--include-all`. If an
---      unconfirmed *name* mismatches, rename only the name segment.
+--      landmark is absent, so remote-only / audit-stamp replay is not aborted
+--      at those versions; bootstrap+ refuse-if-present for
+--      `20260830141802_khalil_audit_log.sql`). Pre-audit price/cost stamps:
+--      `20260827110254` provisions approved_price_items from the known
+--      out-of-band file (IF NOT EXISTS; defer is_staff policies);
+--      `20260827110325` verify-or-skips item_costs (no CREATE in repo —
+--      will not invent). Confirm with `supabase migration list` before
+--      Stage 2 / `--include-all`. If an unconfirmed *name* mismatches,
+--      rename only the name segment.
 --
 --      This reconciliation file is timestamped 20260915140000, which is
 --      chronologically AFTER both pending 09-02 files AND after

@@ -11,9 +11,14 @@
 -- 1) Close the remote-only history gap so `supabase db push` / Stage 2 is
 --    not blocked by a production version with no matching local file.
 --    `--include-all` does NOT fix remote-only (inverse) gaps.
--- 2) Provide replayable bootstrap DDL for fresh DB / CI migration replay.
---    An exception-only "objects must already exist" placeholder aborts every
---    clean replay at this version (Codex P1 on PR #228).
+-- 2) Provide replayable bootstrap DDL for this stamp when it is reached on a
+--    fresh DB / CI migration path. An exception-only "objects must already
+--    exist" placeholder aborts every clean replay *at this version*
+--    (Codex P1 on PR #228). This is NOT a claim that every earlier or later
+--    active migration is a standalone end-to-end product bootstrap — price /
+--    cost / feed tables remain partially out-of-band (20260827110254
+--    provisions approved_price_items baseline from approved-prices-table.sql;
+--    20260827110325 verify-or-skips item_costs — no CREATE in repo).
 --
 -- Provenance / non-claims (critical)
 -- ----------------------------------
@@ -29,8 +34,10 @@
 -- were designed later on the same draft. Live catalog checks confirm those
 -- tables exist on production; whether they were part of this stamp or
 -- separate unrecorded SQL Editor applies is unproven. They are included in
--- the fresh-bootstrap path so later active migrations and the sync agent can
--- run on a clean database. This is bootstrap-for-replay, not a forensic claim.
+-- the fresh-bootstrap path so later *audit* migrations and the sync agent
+-- can run once this stamp is reached. This is bootstrap-for-replay of the
+-- audit subsystem, not a forensic claim and not a claim that the full
+-- active migration directory alone builds the entire production product.
 --
 -- Apply behavior / safety
 -- -----------------------

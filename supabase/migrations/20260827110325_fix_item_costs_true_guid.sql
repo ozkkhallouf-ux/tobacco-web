@@ -12,12 +12,13 @@
 -- No CREATE TABLE for public.item_costs exists in active migration history
 -- or in tracked out-of-band supabase/*.sql. Inventing DDL from the
 -- push-item-costs.ps1 upsert shape is forbidden (same rule as other #228
--- placeholders that refuse unsafe invented schemas).
+-- placeholders that refuse unsafe invented schemas; cost-leak risk).
 --
 -- When the table is absent (fresh DB / feature never bootstrapped): NOTICE
--- no-op so clean replay reaches audit bootstrap 20260830141802.
+-- no-op so replay can reach audit bootstrap 20260830141802.
 -- When present: apply the original rename + add column logic unchanged.
 -- Production Stage 2: this version is already recorded → CLI skips the file.
+-- Does NOT claim a standalone end-to-end product bootstrap.
 -- ============================================================
 
 do $$
@@ -39,5 +40,7 @@ begin
   end if;
 
   alter table public.item_costs add column if not exists item_guid text;
-  execute 'create index if not exists idx_item_costs_item_guid on public.item_costs(item_guid) where item_guid is not null;';
-end $$;
+  create index if not exists idx_item_costs_item_guid on public.item_costs(item_guid) where item_guid is not null;
+  raise notice 'fix_item_costs_true_guid (20260827110325): item_costs present — applied match_key rename (if needed) and item_guid column/index (idempotent).';
+end;
+$$;
