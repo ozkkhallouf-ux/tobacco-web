@@ -90,14 +90,27 @@ function group(name) {
 }
 
 // --- سيناريو 6: layoutGroupsMeasured يحترم ميزانية الصفحة الأولى الأصغر بسبب الرأس ---
+// الرأس يجلس على **نفس الورقة** فوق الأعمدة، فميزانية الصفحة الأولى = ارتفاع
+// الورقة - ارتفاع الرأس، ولا شيء يزيدها. تجاوزها يُنتج كتلة أعمدة أطول من
+// الورقة: كروم يُجزّئها فتظهر ورقة زائدة، وسفاري يدفعها كاملةً إلى الورقة
+// التالية بينما `overflow:hidden` يقصّ ما خرج — فتصل نشرة بالرأس وحده.
 {
-  const groups = [{ name: "ماستر", items: [{ name: "أ", unit: "ك", price: "$1" }] }];
-  const heights = new Map([["ماستر", 100]]);
-  const layout = template.layoutGroupsMeasured(groups, heights, { pageWidthPx: 794, headerHeightPx: 1122, safetyMarginPx: 6 });
-  // ميزانية صفحة1 = ارتفاع الصفحة(~1122) - الرأس(1122) = ~0، لكن آلية الإنقاذ
-  // تُعيد ملء الصفحة الأولى بالميزانية الكاملة — المجموعة تبقى في الصفحة الأولى لا تنتقل لثانية
-  check("ميزانية مخفّضة لصفر: آلية الإنقاذ تضع المجموعة في الصفحة الأولى لا الثانية",
-    layout.mainPages[0].right.some((g) => g.name === "ماستر") || layout.mainPages[0].left.some((g) => g.name === "ماستر"));
+  const groups = [
+    { name: "ماستر", items: [{ name: "أ", unit: "ك", price: "$1" }] },
+    { name: "كابتن بلاك", items: [{ name: "ب", unit: "ك", price: "$1" }] }
+  ];
+  // 470 + 500 = 970: يتّسعان معاً في ورقة كاملة، ولا يتّسعان معاً تحت رأس 156px.
+  const heights = new Map([["ماستر", 470], ["كابتن بلاك", 500]]);
+  const headerHeightPx = 156;
+  const layout = template.layoutGroupsMeasured(groups, heights, { pageWidthPx: 794, headerHeightPx, safetyMarginPx: 6 });
+  const first = layout.mainPages[0];
+  const firstBudget = template.computePageContentHeightPx(794) - 8 - headerHeightPx;
+  check("ميزانية الصفحة الأولى محترمة: أطول عمود لا يتجاوز (الورقة - الرأس)",
+    Math.max(first.rightHeight, first.leftHeight) <= firstBudget + 1e-6);
+  check("ميزانية الصفحة الأولى محترمة: الصفحة الأولى تحمل ماستر رغم التقييد",
+    first.right.some((g) => g.name === "ماستر") || first.left.some((g) => g.name === "ماستر"));
+  const placed = layout.mainPages.reduce((n, pg) => n + pg.right.length + pg.left.length, 0);
+  check("ميزانية الصفحة الأولى محترمة: لا مجموعة تُفقد", placed === groups.length);
 }
 
 // --- سيناريو 7 (قاعدة التوازن — العطل الحقيقي المُبلَّغ من المستخدم): تصنيف علامة
@@ -139,17 +152,30 @@ function group(name) {
   check("لا فيضان بعد التوازن: العمودان بقيا كما وُزّعا دون نقل غير آمن", pages[0]?.right.length === 1 && pages[0]?.left.length === 1);
 }
 
-// --- سيناريو 9 (حارس الانحدار — الإصلاح الجديد): الصفحة الأولى لا تخرج فارغة
-// أبداً حين تتوفر مجموعات — حتى حين يكون الرأس بطول الصفحة كاملاً. ---
+// --- سيناريو 9 (حارس الانحدار): الصفحة الأولى تحمل مجموعات كلما اتّسعت تحت
+// الرأس فعلاً؛ وإن لم تتّسع أي مجموعة (حالة متطرفة: رأس يملأ الورقة) فلا
+// مجموعة تُفقد ولا ورقة تفيض — تبدأ المجموعات من الورقة التالية. ---
 {
   const groups = [{ name: "ماستر", items: [{ name: "أ", unit: "ك", price: "$1" }] }];
   const heights = new Map([["ماستر", 100]]);
-  const layout = template.layoutGroupsMeasured(groups, heights, { pageWidthPx: 794, headerHeightPx: 1122, safetyMarginPx: 6 });
-  const firstPage = layout.mainPages[0];
-  check("لا صفحة أولى فارغة: mainPages[0] يحمل مجموعات حين تتوفر بيانات",
-    firstPage && (firstPage.right.length + firstPage.left.length) > 0);
-  check("لا صفحة أولى فارغة: ماستر في الصفحة الأولى لا الثانية",
+
+  const normal = template.layoutGroupsMeasured(groups, heights, { pageWidthPx: 794, headerHeightPx: 156, safetyMarginPx: 6 });
+  const firstPage = normal.mainPages[0];
+  check("رأس واقعي: mainPages[0] يحمل ماستر لا يدفعها لصفحة ثانية",
     firstPage?.right.some((g) => g.name === "ماستر") || firstPage?.left.some((g) => g.name === "ماستر"));
+  check("رأس واقعي: صفحة واحدة تكفي", normal.mainPages.length === 1);
+
+  // رأس بطول الورقة كاملة: لا مساحة تحته إطلاقاً. القاعدة هي **عدم الفيضان**،
+  // فتبدأ المجموعات من الورقة التالية بميزانيتها الكاملة، ولا شيء يضيع.
+  const degenerate = template.layoutGroupsMeasured(groups, heights, { pageWidthPx: 794, headerHeightPx: 1122, safetyMarginPx: 6 });
+  const budget = template.computePageContentHeightPx(794) - 8;
+  const overflowing = degenerate.mainPages.filter((pg, index) => {
+    const limit = index === 0 ? Math.max(0, budget - 1122) : budget;
+    return Math.max(pg.rightHeight, pg.leftHeight) > limit + 1e-6;
+  });
+  check("رأس يملأ الورقة: لا صفحة تتجاوز ميزانيتها (لا فيضان يقصّه سفاري)", overflowing.length === 0);
+  const placedAll = degenerate.mainPages.reduce((n, pg) => n + pg.right.length + pg.left.length, 0);
+  check("رأس يملأ الورقة: ماستر لم تُفقد — وُزّعت على ورقة تتّسع لها", placedAll === groups.length);
 }
 
 if (failed) {

@@ -9,6 +9,37 @@
   // تختلف عن خلفية النشرات المنشورة).
   const THEME_PAGE_BACKGROUND = Object.freeze({ dark: "#0c0a07", light: "#fffdf8" });
 
+  // خط النشرة وسلسلته الاحتياطية. مُصدَّران كي ينتظرهما `src/app.js` قبل القياس
+  // وكي يفرض السلسلة الاحتياطية على مستند الطباعة حين يقيس بها — بدل تكرار
+  // الأسماء حرفياً في مكانين، تكرارٌ يجعل تغيير الخط يكسر الانتظار بصمت.
+  const BULLETIN_FONT_FAMILY = "Almarai";
+  const BULLETIN_FALLBACK_FONT_STACK = "Tahoma,Arial,sans-serif";
+  // أوزان الخط التي يطلبها الـCSS أدناه فعلاً (400 افتراضي الجدول، و600/900
+  // تُستوفى من 700/800 المحمَّلين). القياس لا يكون سليماً حتى يجهز **كلّها**:
+  // وصولُ وزنٍ دون آخر يعني عموداً مقيساً بمقاييس مختلطة. مُصدَّرة كي ينتظرها
+  // `src/app.js` بلا تكرار القائمة في مكانين (ملاحظة Codex P1 على dd324da).
+  const BULLETIN_FONT_WEIGHTS = Object.freeze([400, 700, 800]);
+  // عيّنات الكشف: **واحدة لكل مجموعة محارف يطلبها القالب**. Google Fonts تُقسّم
+  // الخط إلى مجموعات فرعية (subsets) تصل مستقلّةً، فقد تكتمل اللاتينية بينما
+  // العربية ما زالت في الطريق. وعيّنة مختلطة تنجح عندئذٍ بفضل المحارف اللاتينية
+  // وحدها بينما تُقاس صفوف النشرة العربية بالخط الاحتياطي — ثم تُنهي الطباعة
+  // المجموعة العربية فيختلف المطبوع عن المقيس (ملاحظة Codex P1 على adf3f51).
+  // النشرة تحمل الاثنتين: أسماء عربية وأرقام أسعار لاتينية، فتُفحصان منفصلتين.
+  const BULLETIN_FONT_SAMPLES = Object.freeze(["نشرة الأسعار", "0123456789"]);
+
+  // **قرار الخط يسافر مع الترميز نفسه، لا مع المستند الذي يلفّه.**
+  //
+  // كان مستند الطباعة يتلقّى قاعدةً تفرض السلسلة الاحتياطية، بينما يُقاس الترميز
+  // في مستند التطبيق بلا تلك القاعدة. فحين يجهز بعضُ أوجه الخط دون بعض تكون
+  // النتيجة: قياسٌ بمقاييس **مختلطة** (ما جهز بـAlmarai والباقي بالاحتياطي)
+  // مقابل طباعةٍ بالاحتياطي **كاملةً** — أي اختلافٌ من باب آخر
+  // (ملاحظة Codex P1 على 20d0c44).
+  //
+  // الحلّ أن تُختم السمة `data-fallback-font` على `.ozk-price-list` داخل
+  // `render()`، فتحملها **نفس نسخة الترميز** التي يقيسها المجسّ والتي تُطبع.
+  // القاعدة نفسها مضمّنة في CSS المرافق للترميز، فتسري في المستندين معاً بلا
+  // أي حقنٍ منفصل — ويستحيل بنيوياً أن يُقاس بخطٍّ ويُطبع بآخر.
+
   function themePageBackground(theme) {
     return THEME_PAGE_BACKGROUND[theme === "light" ? "light" : "dark"];
   }
@@ -24,6 +55,7 @@
   // «نخلة» لم تصل الزبون (224 صنفاً في البيانات مقابل 220 في الملف).
   // الاشتقاق يجعل «اسم بلا وجهة» مستحيلاً بنيوياً.
   const SPECIAL_GROUPS = new Set([...SPECIAL_RIGHT_GROUPS, ...SPECIAL_LEFT_GROUPS]);
+
   const ARABIC_MONTHS = [
     "كانون الثاني", "شباط", "آذار", "نيسان", "أيار", "حزيران",
     "تموز", "آب", "أيلول", "تشرين الأول", "تشرين الثاني", "كانون الأول"
@@ -53,7 +85,7 @@
       --text:#f3ead2; --muted:#a88d61; --line:#33240d; --gold:#d7a83f;
       --gold-strong:#efc45d; --button-text:#0c0a07;
       width:100%; margin:0; padding:0; overflow:hidden; background:var(--page); color:var(--text);
-      direction:rtl; font-family:'Almarai',Tahoma,Arial,sans-serif; transition:background .2s ease,color .2s ease;
+      direction:rtl; font-family:'${BULLETIN_FONT_FAMILY}',${BULLETIN_FALLBACK_FONT_STACK}; transition:background .2s ease,color .2s ease;
     }
     .ozk-price-list[data-theme="light"] {
       --page:#fffdf8; --surface:#ffffff; --surface-alt:#f8f3e8; --surface-strong:#5b3a09;
@@ -127,9 +159,20 @@
     .ozk-price-list .price-list-column-stack {
       flex:1 1 0; min-width:0; background:var(--page); position:relative; z-index:1;
     }
+    /* السلسلة الاحتياطية مفروضةً. تُوسَم بها **نفس نسخة الترميز** التي تُقاس
+       والتي تُطبع، فيستحيل أن يُقاس بخطٍّ ويُطبع بآخر — راجع الشرح أعلى الملف
+       وbulletinFontUsable في src/app.js. */
+    .ozk-price-list[data-fallback-font],
+    .ozk-price-list[data-fallback-font] * { font-family:${BULLETIN_FALLBACK_FONT_STACK} !important; }
     .ozk-price-list .price-list-secondary-page {
       break-before:page; page-break-before:always; margin-top:8px;
     }
+    /* الكتلة الأولى وحدها (التي تتشارك ورقتها مع الرأس) بلا حاشية سفلية: لا
+       يليها شيء على ورقتها، وإسقاطها يرفع أسفلها 8px فيخرج أسوأ حالٍ مسموح من
+       نطاق «نقل الكتلة كاملةً» — بلا تغيير أي شيء في توزيع المجموعات.
+       راجع COLUMNS_PADDING_BOTTOM_PX أعلاه للقياسات. */
+    .ozk-price-list .price-list-columns:not(.price-list-secondary-page) { padding-bottom:0; }
+    .ozk-price-list .price-list-columns:not(.price-list-secondary-page)::before { bottom:0; }
     .ozk-price-list .price-list-group {
       break-inside:avoid; -webkit-column-break-inside:avoid; margin-bottom:5px;
       border:1px solid var(--line); border-radius:3px; overflow:hidden;
@@ -239,10 +282,54 @@
   const A4_WIDTH_PX = 210 / 25.4 * 96;
   const A4_HEIGHT_PX = 297 / 25.4 * 96;
 
+  // **لا تتجاوز الورقة الحقيقية أبداً.** صندوق الصفحة الذي يقطّع عليه محرك
+  // الطباعة هو A4 حرفياً (`@page{size:A4;margin:0}`) مهما كان عرض المجس الذي
+  // قِيست به الارتفاعات. التحجيم بنسبة `width / A4_WIDTH_PX` كان يمنح المجس
+  // القياسي (794px) ميزانيةَ 1122.94px — أي 0.42px **فوق** الورقة (1122.52px)،
+  // تُقتطع صامتةً من هامش الأمان الذي يفصل الصفحة الأولى عن حافة الورق.
   function computePageContentHeightPx(pageWidthPx = 794) {
     const width = Number(pageWidthPx) > 0 ? Number(pageWidthPx) : A4_WIDTH_PX;
-    return A4_HEIGHT_PX * (width / A4_WIDTH_PX);
+    return Math.min(A4_HEIGHT_PX, A4_HEIGHT_PX * (width / A4_WIDTH_PX));
   }
+
+  // حاشية أسفل كتلة الأعمدة. `.price-list-columns` تحمل `padding:0 8px 8px`،
+  // فتُخصم من ميزانية **كل** صفحة كي لا تتجاوز الكتلة (محتوى + حاشية) ورقتها.
+  const COLUMNS_PADDING_BOTTOM_PX = 8;
+
+  // خلوص الصفحة الأولى عن حافة الورقة — وهو وحده ما يفصلها عن عطل «ورقة العنوان».
+  //
+  // الصفحة الأولى هي الوحيدة التي تتشارك ورقتها مع الرأس، والرأس **يُقاس في
+  // مستند غير المستند الذي يُطبع**: القياس يجري داخل مجسّ في صفحة التطبيق
+  // (`buildMeasuredBulletinLayout` في src/app.js)، بينما الرسم يجري داخل إطار
+  // طباعة مستقلّ. قياسٌ فعليّ للفارق على نفس البيانات: عمودٌ قِيس 949px خرج
+  // مطبوعاً 902px — أي المستندان لا يتّفقان، والاتجاه ليس مضموناً.
+  //
+  // وسلوك كروم عند التجاوز **ليس خطياً**، وهذا ما يحدّد المطلوب. قياس عبر
+  // `page.pdf()` على نفس المستند بتجاوزات متدرّجة:
+  //   · تجاوز 1.86px … 7.86px ⇒ كروم ينقل الكتلة **كاملةً** إلى الورقة الثانية:
+  //     ورقة أولى بـ34 مقطع نصّ (= الرأس وحده)، وثانية بـ793 مقطعاً (= كل الأصناف).
+  //   · تجاوز ≥ ~13.86px ⇒ كروم **يشطر** الكتلة: 749 مقطعاً على الورقة الأولى
+  //     و78 على الثانية — أي الرأس يبقى ومعه أصناف، والعطل لا يظهر أصلاً.
+  // (جُرِّب إلغاء `overflow:hidden` وفرض `break-inside:auto` على كتلة الأعمدة:
+  //  لا يغيّران هذا السلوك، فالشطر ليس خياراً نملك فرضه.)
+  //
+  // فالنطاق الخطر ضيّق ومعروف: تجاوزٌ بين صفر و~8px. وبالحساب القديم كان أسوأ
+  // حالٍ مسموح يترك 5.58px فقط تحت الحافة — **داخل النطاق مباشرةً**، والعطل على
+  // بُعد خطأ تقريب واحد.
+  //
+  // **كيف يُوسَّع الخلوص بلا لمس التوزيع إطلاقاً:** الميزانية تخصم حاشية 8px من
+  // كل صفحة. والكتلة الأولى وحدها لا حاجة لها بتلك الحاشية: لا يليها شيء على
+  // ورقتها. فحين لا تُرسَم حاشيتُها (قاعدة CSS على
+  // `.price-list-columns:not(.price-list-secondary-page)` أدناه) يرتفع أسفلها
+  // 8px مجاناً — فيصير الخلوص 6px + 8px = **14px**، خارج النطاق الخطر كلّه.
+  //
+  // ولماذا هذا الطريق لا خصمٌ إضافي من الميزانية: أي خصم يُضيّق الصفحة الأولى
+  // يُغيّر **أي المجموعات تتّسع فيها**، فيضع التوزيع على حافة قرار. وقياس الخطوط
+  // في مستند التطبيق ما زال يسابق تحميل الخط، فعلى تلك الحافة يختلف التوزيع
+  // باختلاف البيئة: أُثبت عملياً أن خصم 6px جعل iPhone و1440px يُنتجان توزيعين
+  // مختلفين على CI (بينما يتطابقان بلا خصم)، وخصم 8px فأكثر يدفع القسم الخاص
+  // في نشرة الدولار إلى ورقة رابعة. إسقاط الحاشية يشتري الخلوص نفسه بلا أيٍّ من
+  // الثمنين: التوزيع يبقى مطابقاً لما كان حرفياً، وشكل النشرة لا يتغيّر.
 
   // نسبة التفاوت (من ميزانية العمود) التي تُعتبر "فراغاً كبيراً" يستحق محاولة
   // نقل مجموعة كاملة من العمود الأطول للأقصر — قاعدة التوازن (Balance Rule).
@@ -327,11 +414,8 @@
     while (ri < rq.length || li < lq.length) {
       const pageIndex = pages.length;
       const budgetForThisPage = pageIndex === 0 ? reducedFirstPageBudget : fullBudget;
-      let limit = Math.max(0, budgetForThisPage - safetyMarginPx);
+      const limit = Math.max(0, budgetForThisPage - safetyMarginPx);
       const page = { right: [], left: [], rightHeight: 0, leftHeight: 0 };
-      // نحفظ موضع الطابورَين عند بداية هذه الصفحة لإتاحة إعادة التوزيع إن لزم.
-      const riStart = ri;
-      const liStart = li;
 
       // عمود اليمين: من طابور اليمين أولاً، ثم فيضان من طابور اليسار إن نفد الأول.
       for (;;) {
@@ -363,40 +447,23 @@
         }
       }
 
-      // إن كانت هذه الصفحة الأولى فارغة تماماً (ميزانية = 0 أو الرأس يملأ الصفحة كلها)
-      // أو شبه فارغة (أطول عمود < 50% من الميزانية المخفَّضة) رغم وجود مجموعات في
-      // الطابور، نُعيد التوزيع بالميزانية الكاملة: الرأس في HTML منفصل فوق الأعمدة
-      // (وليس داخلها)، فالمساحة الفعلية أكبر من الميزانية المخفَّضة — والمتصفح يدير
-      // الفيضان الطبيعي دون كسر أي مجموعة (break-inside:avoid). الحالة الأولى
-      // (فارغة تماماً) تنطلق حتى حين reducedFirstPageBudget=0 لأن الشرط الثاني
-      // (< 0*0.5=0) لا يصح أبداً.
-      const firstPageIsEmpty = page.right.length === 0 && page.left.length === 0;
-      const firstPageUnderutilized = pageIndex === 0
-        && (firstPageIsEmpty || Math.max(page.rightHeight, page.leftHeight) < reducedFirstPageBudget * 0.5)
-        && (ri < rq.length || li < lq.length);
-      if (firstPageUnderutilized) {
-        ri = riStart;
-        li = liStart;
-        page.right = [];
-        page.left = [];
-        page.rightHeight = 0;
-        page.leftHeight = 0;
-        limit = Math.max(0, fullBudget - safetyMarginPx);
-        for (;;) {
-          if (ri < rq.length && page.rightHeight + rq[ri].h <= limit + 1e-6) {
-            page.right.push(rq[ri].group); page.rightHeight += rq[ri].h; ri += 1;
-          } else if (ri >= rq.length && li < lq.length && page.rightHeight + lq[li].h <= limit + 1e-6) {
-            page.right.push(lq[li].group); page.rightHeight += lq[li].h; li += 1;
-          } else { break; }
-        }
-        for (;;) {
-          if (li < lq.length && page.leftHeight + lq[li].h <= limit + 1e-6) {
-            page.left.push(lq[li].group); page.leftHeight += lq[li].h; li += 1;
-          } else if (li >= lq.length && ri < rq.length && page.leftHeight + rq[ri].h <= limit + 1e-6) {
-            page.left.push(rq[ri].group); page.leftHeight += rq[ri].h; ri += 1;
-          } else { break; }
-        }
-      }
+      // **لا تُملأ صفحةٌ بأكثر من ميزانيتها هي.** كانت هنا «كتلة إنقاذ» تُعيد
+      // تعبئة الصفحة الأولى بالميزانية الكاملة (ارتفاع الورقة كلها) متى خرجت
+      // فارغة أو مستغلّة أقل من نصف ميزانيتها المخفَّضة، بحجّة أن «الرأس فوق
+      // الأعمدة لا داخلها فالمساحة الفعلية أكبر». الحجّة مقلوبة: الرأس يجلس
+      // على **نفس الورقة** فوق الأعمدة، فمساحة الصفحة الأولى أقلّ من غيرها
+      // بمقدار ارتفاعه لا أكثر منها. فكانت كتلة الأعمدة الأولى تُبنى بارتفاع
+      // ورقة كاملة ثم يُركَّب فوقها الرأس (~156px) — أي كتلة أطول من الورقة
+      // بالضبط بمقدار الرأس. النتيجة المقاسة:
+      //   · كروم يُجزّئ الكتلة: ورقة زائدة ومحتوى الصفحة الأولى مشطور.
+      //   · سفاري يدفع الكتلة **كاملةً** إلى الورقة التالية (نفس سلوك الدفع
+      //     الموصوف في خصم حاشية الأعمدة أدناه)، و`.ozk-price-list` تحمل
+      //     `overflow:hidden` فيُقصّ ما خرج — فتصل الزبون نشرةٌ فيها **الرأس
+      //     وحده بلا أي صنف**، وهو بالضبط العطل الإنتاجي في نشرة الليرة.
+      // ميزانية الصفحة الأولى = ارتفاع الورقة - الرأس، ولا شيء يزيدها. وإن لم
+      // تتّسع أي مجموعة تحت الرأس فالصفحة الأولى تبقى بلا أعمدة (يتكفّل
+      // renderPagesBlock بعدم رسم كتلة فارغة) وتبدأ المجموعات من الورقة
+      // التالية بميزانيتها الكاملة — ورقة أهدر خيرٌ من أصناف تختفي.
       balancePageColumns(page, limit, heights, balanceThresholdPx);
       pages.push(page);
     }
@@ -509,7 +576,6 @@
     // بدون خصمها كانت حاوية الأعمدة تتجاوز حد الصفحة بـ2px (safetyMargin=6 - padding=8 = -2)،
     // فيدفعها سفاري بالكامل إلى الصفحة التالية بدل تقسيمها — فتظهر الصفحة الأولى فارغة
     // مع الرأس فقط. الخصم يضمن هامش 6px موجب على كل صفحة.
-    const COLUMNS_PADDING_BOTTOM_PX = 8;
     const effectivePageHeight = Math.max(0, pageHeightPx - COLUMNS_PADDING_BOTTOM_PX);
     const mainBudgets = {
       reducedFirstPageBudget: Math.max(0, effectivePageHeight - headerHeightPx),
@@ -626,8 +692,32 @@
   // عمودين لكل صفحة. أي صفحة غير الأولى على الإطلاق في المستند بأكمله تُجبر
   // على بدء صفحة جديدة (secondary-page) — سواء كانت امتداداً لفيض الأعمدة
   // الرئيسية أو بداية قسم المجموعات الخاصة.
+  //
+  // **متى تُطبع ورقةُ عنوان — وبأي قرار.** الصفحة الأولى تخرج بلا مجموعات في
+  // حالة واحدة فقط: ألا تتّسع أيٌّ من مجموعتَي رأس الطابورين تحت الرأس. وحينها
+  // تكون الكتلة التالية مُعبَّأة بميزانية **ورقة كاملة** (fullBudget)، فوضعها
+  // تحت الرأس يعني كتلةً أطول من ورقتها بمقدار الرأس (~156px) — وهو بالضبط
+  // الفيض الذي يوثّقه docs/ai/topics/price-bulletins.md: كروم يُجزّئ أو ينقل،
+  // وسفاري على iPhone **يدفع الكتلة كاملةً** بينما
+  // `.ozk-price-list{overflow:hidden}` يقصّ ما خرج — أي ورقة عنوان مجدداً، أو
+  // أسوأ: أصناف مقصوصة لا تصل الزبون. (ملاحظة Codex P1 على 1de3a48.)
+  //
+  // لذلك يبقى الفاصل القسري في مكانه، و**ورقة العنوان قرارٌ صريح** لهذه الحالة
+  // وحدها: أن يُهدر ورقٌ خيرٌ من أن يُقصّ صنف. وهي لا تقع بالبيانات الحقيقية
+  // أصلاً (رأسا الطابورين «ماستر» و«غلواز» أصغر بكثير من ميزانية الصفحة
+  // الأولى)، والحارس يفرض ألا تقع إلا حين تكون الصفحة الأولى المخطَّطة فارغة
+  // فعلاً — لا كأثر جانبي لفاصلٍ ورثه بلوك ليس صاحبه.
+  //
+  // أما العطل الإنتاجي المُبلَّغ (نشرة الليرة: «4 أوراق»، الأولى عنوان بلا صنف)
+  // فمصدره **ليس** هذه الحالة بل ضيقُ خلوص الصفحة الأولى عن حافة الورقة —
+  // راجع COLUMNS_PADDING_BOTTOM_PX أعلاه: كتلةٌ تتجاوز ورقتها بـ0…8px يَنقلها
+  // كروم كاملةً فيهجُر الرأس. وذلك مُغلَق بإسقاط حاشية الكتلة الأولى.
   function renderPagesBlock(pages, isDocumentFirstPage) {
     return pages.map((page, index) => {
+      // كتلة فارغة لا تُرسم (كانت تطبع حاشية وفاصلاً ذهبياً معلّقاً تحت رأس
+      // وحيد)، لكن مكانها يبقى في الترقيم كي تحتفظ الكتل التالية بفاصلها
+      // القسري — فلا تُوضع كتلةُ ورقةٍ كاملة تحت الرأس. راجع الشرح أعلاه.
+      if (!page.right.length && !page.left.length) return "";
       const forceBreak = !(isDocumentFirstPage && index === 0);
       return `
       <div class="price-list-columns${forceBreak ? " price-list-secondary-page" : ""}">
@@ -654,7 +744,7 @@
       : "";
     return `
       <style data-ozk-price-list-style="${VERSION}">${CSS}</style>
-      <section class="ozk-price-list${tools ? " has-document-tools" : ""}" lang="ar" dir="rtl" translate="no" data-theme="${options.theme === "light" ? "light" : "dark"}" data-template-version="${VERSION}">
+      <section class="ozk-price-list${tools ? " has-document-tools" : ""}" lang="ar" dir="rtl" translate="no"${options.fallbackFontOnly ? " data-fallback-font" : ""} data-theme="${options.theme === "light" ? "light" : "dark"}" data-template-version="${VERSION}">
         ${toolsMarkup}
         <header class="price-list-header">
           <img src="${escapeHtml(options.logoSrc)}" alt="OZK TOBACCO" class="price-list-header-logo">
@@ -683,6 +773,8 @@
   // بيضاء، وترسم الخلفية الداكنة على كامل الورقة. لا يُبنى هنا أي HTML بديل —
   // `bodyHtml` يجب أن يكون ناتج render() نفسه الذي تعرضه المعاينة، كي يستحيل
   // أن يختلف الملف المصدَّر عن المعاينة.
+  // لا خيار خطٍّ هنا: قرار الخط مختوم على الترميز نفسه (`data-fallback-font`)
+  // فيصل مع `bodyHtml` كما قِيس بالضبط.
   function printDocument(options = {}) {
     const theme = options.theme === "light" ? "light" : "dark";
     const title = String(options.title || "نشرة الأسعار");
@@ -704,6 +796,10 @@
     VERSION,
     CSS,
     THEME_PAGE_BACKGROUND,
+    BULLETIN_FONT_FAMILY,
+    BULLETIN_FALLBACK_FONT_STACK,
+    BULLETIN_FONT_WEIGHTS,
+    BULLETIN_FONT_SAMPLES,
     themePageBackground,
     documentBackgroundCss,
     printDocument,
@@ -715,6 +811,7 @@
     computePageContentHeightPx,
     packGroupsIntoBalancedPages,
     layoutGroupsMeasured,
-    DEFAULT_SAFETY_MARGIN_PX
+    DEFAULT_SAFETY_MARGIN_PX,
+    COLUMNS_PADDING_BOTTOM_PX
   });
 })(globalThis);

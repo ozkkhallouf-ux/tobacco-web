@@ -279,6 +279,7 @@ function Build-InventoryReport($Rows, $LowThreshold) {
     $items += [ordered]@{
       key = $key
       name = $name
+      itemGuid = if ($row.PSObject.Properties.Name -contains "item_guid" -and $row.item_guid) { ([string]$row.item_guid).Trim().ToLowerInvariant() } else { $null }
       groupName = $groupName
       stockQty = [math]::Round($qty, 3)
       stockQtyNet = [math]::Round($qtyNet, 3)
@@ -379,6 +380,14 @@ function Build-CustomerBalanceReport($Rows) {
       lastPaymentDate = $lastPaymentDate
       lastPaymentNotes = [string]$row.last_payment_notes
       recentPayments = $recentPayments
+      # عدد الدفعات الفعلي داخل نافذة الزخم (90 يوماً). نموذج خطر التحصيل يقارنه
+      # بعدد ما وصله ليعرف الاقتطاع يقيناً بدل الاستدلال عليه من التواريخ.
+      paymentsInWindow = [int](To-Number $row.payments_in_window)
+      # حدّ النافذة الذي عُدَّ به، بنفس أساس تواريخ الدفعات بالضبط.
+      # ⚠️ لا يُرسَل تاريخاً مجرّداً "yyyy-MM-dd": المتصفح يقرأ التاريخ المجرّد
+      # منتصفَ ليل UTC بينما To-IsoDate تُصدِر تواريخ الدفعات بإزاحة محلية،
+      # فتُقرأ دفعة يوم الحدّ في دمشق (+03) قبله بثلاث ساعات وتُستبعَد ظلماً.
+      paymentsWindowStart = To-IsoDate $row.payments_window_start
       recentMovements = $recentMovements
       status = $status
       customerGuid = [string]$row.customer_guid
@@ -591,10 +600,18 @@ function Sync-Once {
   }
 
   # Customer invoice details are owned by this same permanent main-computer
-  # agent. The helper rate-limits successful uploads to once per hour, so the
-  # disabled legacy standalone task is no longer a health dependency.
+  # agent. The helper rate-limits successful uploads to once every five
+  # minutes, so the disabled legacy standalone task is no longer a health
+  # dependency.
+  #
+  # Why five and not sixty: this report is matched against the movement
+  # ledger, which refreshes every five minutes (balances every minute). At
+  # sixty, an invoice entered just after an upload stayed invisible to the
+  # site for up to an hour while its ledger entry was already there, so
+  # issuing a document for that movement failed with no invoice details.
+  # Five aligns invoice freshness with the movements it is matched against.
   try {
-    & "$PSScriptRoot\push-customer-invoices.ps1" -MinimumIntervalMinutes 60
+    & "$PSScriptRoot\push-customer-invoices.ps1" -MinimumIntervalMinutes 5
     if ($LASTEXITCODE -ne 0) { Write-AgentLog "Customer invoice sync returned a failure code." }
   } catch {
     Write-AgentLog ("Customer invoice sync failed: {0}" -f $_.Exception.Message)

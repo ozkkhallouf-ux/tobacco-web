@@ -52,17 +52,29 @@ export function buildFileName(docType, meta = {}, today = new Date()) {
   const party = sanitizePart(meta.party);
   const number = sanitizePart(meta.number, { max: 40 });
   const title = sanitizePart(meta.title, { max: 80 });
+  const currency = sanitizePart(meta.currency, { max: 8 }).toUpperCase();
 
   if (spec.needsParty && !party) throw new Error(`الحقل «الاسم» مطلوب لنوع ${docType}`);
   if (spec.needsNumber && !number) throw new Error(`الحقل «الرقم» مطلوب لنوع ${docType}`);
 
+  // قرار المالك 2026-09-06: **اسم النسخة المؤرشفة = اسم الملف المنزَّل حرفياً**
+  // في كل المسارات (Save as PDF على سطح المكتب، التنزيل، مشاركة iOS، والأرشيف).
+  // فأي فرع هنا يجب أن يطابق `archiveDocumentTitle` في `src/app.js` نصّاً بنصّ —
+  // ويحرس التطابقَ فحصُ `scripts/check-document-filenames.mjs` الذي يقارن ناتج
+  // التنفيذين لكل نوع مستند، فلا تنحرف النسختان بصمت.
   let base;
   switch (docType) {
     case "invoice":
     case "return_invoice":
+      base = `${spec.label} - ${party} - رقم ${number} - ${date}`;
+      break;
     case "receipt":
     case "payment":
-      base = `${spec.label} - ${party} - رقم ${number} - ${date}`;
+      // بلا رقم: رقم السند يُولَّد في الموقع محلياً وعشوائياً («R-20260906-4821»)
+      // فلا يعرّف شيئاً، ووجوده كان يطمس ما يميّز السند فعلاً — الطرف والتاريخ.
+      // سندان لنفس الطرف في اليوم نفسه يفترقان بلاحقة `variantName` كما في
+      // كشف الحساب تماماً، ولا يُستبدل ملف موجود أبداً.
+      base = `${spec.label} - ${party} - ${date}`;
       break;
     case "purchase_invoice":
       // المورد اختياري: «فاتورة مشتريات - رقم 12 - 2026-08-31» عند غيابه.
@@ -76,8 +88,14 @@ export function buildFileName(docType, meta = {}, today = new Date()) {
     case "other_report":
       base = `${title || spec.label} - ${date}`;
       break;
+    case "price_list":
+      // اصطلاح النشرة الخاص (شرطات بلا فراغات + رمز العملة) المعتمد منذ PR #121
+      // ويعرفه الزبائن على ملفاتهم. والعملة تفرّق نشرتَي اليوم الواحد (دولار/ليرة)
+      // اللتين كانتا تتصادمان على اسم واحد فتُحفظ الثانية بلاحقة «(1)».
+      base = ["نشرة-الأسعار", currency, date].filter(Boolean).join("-");
+      break;
     default:
-      // price_list / stock_report / receivables_report: التاريخ وحده
+      // stock_report / receivables_report: التاريخ وحده
       base = `${spec.label} - ${date}`;
       break;
   }

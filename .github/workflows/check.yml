@@ -29,6 +29,58 @@ jobs:
         run: npm run check
 
   # ------------------------------------------------------------
+  # المسارات الحرجة: الطبقة الوحيدة التي تفتح التطبيق وتتنقّل فيه كما يفعل
+  # المستخدم. بقية الحرّاس تفحص وحداتٍ ومساراتٍ بعينها، فصنفٌ كامل من الأعطال
+  # كان يمرّ بلا إنذار — استثناء غير ملتقَط أثناء الرسم، مسارٌ مسجَّل في
+  # allowedRoutes وغائب عن pages، انكسار ربط الأحداث بعد تعديل render.
+  #
+  # وظيفة مستقلة لا خطوة داخل `check`: البوابة تعمل ثلاث مرات على كل PR
+  # (هنا، وفي Decision Engine Check، وفي pages.yml قبل النشر)، فوضعها داخلها
+  # يعني تشغيل متصفحٍ ثلاث مرات بلا فائدة. وهي تعمل بالتوازي مع `check`
+  # فلا تُطيل انتظار الـPR.
+  #
+  # ⚠️ الوظيفة بلا `name:` عمداً، فيصير سياق الفحص هو معرّفها `critical-journeys`
+  # — نفس نمط `check` و`validate` المسجَّلين في ruleset الفرع (سياق لاتيني قصير
+  # يسهل إضافته). فالحجب الفعلي للدمج خطوةُ إعدادٍ واحدة على GitHub:
+  #   gh api -X PUT repos/ozkkhallouf-ux/tobacco-web/rulesets/21808376 …
+  # أو من واجهة Rules → main-protection-with-admin-bypass → Required status
+  # checks → إضافة `critical-journeys`.
+  # قبل ذلك يظهر الفشل على الـPR بوضوح لكنه لا يمنع الدمج تقنياً.
+  # ------------------------------------------------------------
+  critical-journeys:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright Chromium browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Run critical journeys
+        run: npm run check:critical
+
+      # الأثر واللقطة لكل مسار فاشل وحده. `if: failure()` يمنع تراكم آثارٍ
+      # لا يقرأها أحد عند النجاح.
+      - name: Upload Playwright traces and screenshots
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: critical-journeys-failures
+          path: .playwright/critical-journeys/
+          retention-days: 7
+          if-no-files-found: warn
+
+  # ------------------------------------------------------------
   # عطل إنتاجي حيّ (2026-08-31): مهام Windows المجدولة تشغّل سكربتات
   # tools/*.ps1 عبر powershell.exe أي Windows PowerShell 5.1، بينما
   # التطوير يجري على PowerShell 7. صيغة صحيحة تماماً في 7 (استعمال if
@@ -50,3 +102,69 @@ jobs:
       - name: Khalil audit sync - PowerShell 5.1 regression test
         shell: powershell
         run: .\tools\tests\Test-KhalilAuditPs51Compat.ps1
+
+      # عطل إنتاجي حيّ (2026-09-05): قفل تنسيق عالق منع السحب اليومي ثلاثة
+      # أيام، لأن القفل كان يُقرأ من نسخة العمل المحلية قبل الجلب فتعذّر على
+      # الجهاز رؤية إفلاته. العطل في ترتيب عمليتَي git لا في صيغة سطر، فلا
+      # يلتقطه فحص ساكن — الاختبار يبني مستودعَي git مؤقتَين ويشغّل السكربت
+      # الإنتاجي عليهما فعلياً.
+      - name: Daily git pull - stale lock deadlock regression test
+        shell: powershell
+        run: .\tools\tests\Test-DailyGitPullStaleLock.ps1
+
+      # عطل إنتاجي حيّ (2026-08-29 → 2026-09-05): auto-sync-price-lists كان
+      # ينادي git push بلا فحص رمز خروج ويطبع سطر نجاح بلا شرط. وgit يكتب
+      # نتيجة الرفع على stderr حتى عند النجاح، فمع ErrorActionPreference=Stop
+      # يموت السكربت هناك في 5.1 تحديداً (يمرّ على 7). السلوك لا يلتقطه فحص
+      # ساكن ولا عدّاء ubuntu.
+      - name: Auto-sync price lists - git push failure visibility test
+        shell: powershell
+        run: .\tools\tests\Test-AutoSyncGitPushFailure.ps1
+
+      # القسم ٤/٥ (PR #220): يثبت أن Get-AuthSession في ameen-read-worker.ps1 تكتب نبض
+      # auth_retry عند كل محاولة مصادقة فاشلة، كي لا يظن ensure-ameen-sync.ps1 (الذي يعمل
+      # فقط على Windows) أن العملية متجمّدة فيعيد تشغيلها/يشغّل نسخة مكرّرة أثناء انقطاع
+      # مصادقة طويل. لا فائدة من تشغيله على ubuntu: المنطق نفسه Windows-only التشغيل
+      # الفعلي (Task Scheduler)، وتشغيله هنا على 5.1 تحديداً بنفس منطق البنود أعلاه.
+      - name: Ameen read worker - auth retry heartbeat regression test
+        shell: powershell
+        run: .\tools\test-ameen-read-worker-auth-retry.ps1
+
+      # Codex P1 (PR #220): كان فرع degraded بensure-ameen-sync.ps1 يسجّل degraded=true
+      # (يُعتبر "تم التنبيه") حتى لو فشل TELEGRAM-NOTIFY فعلياً، فيضيع التنبيه ولا تُعاد
+      # المحاولة أبداً. الاختبار يستخرج جسم الفرع فعلياً من المصدر وينفّذه بسكريبت إشعار
+      # وهمي يُحاكي نجاح/فشل send-telegram-notification.ps1 (best-effort، exit 0 دائماً).
+      - name: Ensure Ameen sync - degraded alert delivery regression test
+        shell: powershell
+        run: .\tools\tests\Test-EnsureAmeenSyncDegradedAlert.ps1
+
+      # Codex P1 (PR #220، الجولة الثالثة): نفس المعيار تماماً على فرع stuckAlerted —
+      # كان مكتوباً ومُختبَراً محلياً لكنه لم يكن مسجَّلاً بهذا الـworkflow، فيمكن أن
+      # ينكسر بصمت رغم بقاء كل required checks خضراء.
+      - name: Ensure Ameen sync - stuck alert delivery regression test
+        shell: powershell
+        run: .\tools\tests\Test-EnsureAmeenSyncStuckAlert.ps1
+
+      # عطل HOST حقيقي (2026-09-06): register-*-task.ps1 سقط بـValidatePattern
+      # غامض لأن $startAt و$StartAt هما نفس المتغير في PowerShell. الاختبار
+      # أُضيف مع الإصلاح لكنه لم يكن موصولاً بأي وظيفة CI — أي أنه لم يُشغَّل
+      # ولا مرة. وصله هنا هو ما يجعله اختبار انحدار فعلياً.
+      - name: Register task StartAt case-collision regression test
+        shell: powershell
+        run: .\tools\tests\Test-RegisterTaskStartAtCaseCollision.ps1
+
+      # ملاحظتا Codex P1 على التزامات الموردين: المسار صار نداءً ذرّياً واحداً،
+      # والحالة النهائية المُتحقَّقة (كل الموردين سدّدوا) تُنشر بدل أن تُجهض.
+      # السيناريوهات الثلاثة تُنفَّذ على الدوال المستخرجة من الملف الإنتاجي نفسه،
+      # وفخّ تفكيك المصفوفة أحادية العنصر لا يظهر إلا على 5.1.
+      - name: Supplier obligations - atomic replacement scenarios
+        shell: powershell
+        run: .\tools\tests\Test-SupplierObligationsReplacement.ps1
+
+      # ملاحظة Codex P1 على لقطة الأصناف: stderr من أمر native يصبح
+      # NativeCommandError منهياً تحت ErrorActionPreference=Stop على 5.1، فيموت
+      # المولّد قبل فرع التنبيه. الضابط السالب داخل الاختبار لا يعني شيئاً إلا
+      # على هذا العدّاء تحديداً.
+      - name: Purchase item snapshot - native stderr alert-path test
+        shell: powershell
+        run: .\tools\tests\Test-SnapshotProducerNativeStderr.ps1

@@ -185,26 +185,74 @@ order by
   return Invoke-SqlRowsParameterized -ConnectionString $ConnectionString -Query $query -Parameters @($dateParam)
 }
 
+# المعرّف الصفري الذي يكتبه الأمين بدل NULL ليس معرّفاً — عامله كغياب دائماً.
+function Get-NormalizedGuid($Value) {
+  if ($null -eq $Value) { return "" }
+  $guid = ([string]$Value).Trim().ToLowerInvariant()
+  if (-not $guid -or $guid -eq "00000000-0000-0000-0000-000000000000") { return "" }
+  return $guid
+}
+
+# هوية صاحب الحد `customer_guid` لا اسمه. هذا التقرير كان يطابق بالمفتاح النصّي
+# وحده، فإعادة تسمية حساب في الأمين تُسقط حدَّ صاحبه من عدّادَي «تجاوز الحد»
+# و«قريب من الحد» ومن الجدول المُرسَل — بالضبط كما كانت تسقطه الواجهة قبل
+# هذا الإصلاح. ثلاث خرائط لا واحدة، بنفس انضباط `customerLimitMaps` في
+# `src/app.js`:
+#   • ByGuid       — الهوية القطعية.
+#   • ByKeyLegacy  — حدود **بلا معرّف** فقط؛ هي وحدها ما يجوز مطابقته بالاسم
+#                    لزبون يحمل معرّفاً، وإلا ورث حسابٌ حدَّ حسابٍ آخر يطابقه اسماً.
+#   • ByKeyAny     — لتقارير أرصدة قديمة لا تحمل معرّفاً؛ السلوك السابق حرفياً.
 function Convert-CreditLimitsMap($Rows) {
-  $map = @{}
+  $byGuid = @{}
+  $byKeyLegacy = @{}
+  $byKeyAny = @{}
   foreach ($row in @($Rows)) {
+    $guid = Get-NormalizedGuid $row.customer_guid
+    if (-not $guid) { $guid = Get-NormalizedGuid $row.customerGuid }
+
+    $key = ""
     if ($row.customerKey) {
-      $map[[string]$row.customerKey] = $row
+      $key = [string]$row.customerKey
     } elseif ($row.customer_key) {
-      $map[[string]$row.customer_key] = $row
+      $key = [string]$row.customer_key
+    }
+
+    if ($guid -and -not $byGuid.ContainsKey($guid)) { $byGuid[$guid] = $row }
+    if ($key) {
+      if (-not $byKeyAny.ContainsKey($key)) { $byKeyAny[$key] = $row }
+      if (-not $guid -and -not $byKeyLegacy.ContainsKey($key)) { $byKeyLegacy[$key] = $row }
     }
   }
-  return $map
+  return @{ ByGuid = $byGuid; ByKeyLegacy = $byKeyLegacy; ByKeyAny = $byKeyAny }
+}
+
+function Get-InternalCreditLimit($Item, $CreditLimits) {
+  $guid = Get-NormalizedGuid $Item.customerGuid
+  if ($guid -and $CreditLimits.ByGuid.ContainsKey($guid)) {
+    return To-Number $CreditLimits.ByGuid[$guid].credit_limit
+  }
+
+  $key = [string]$Item.key
+  if (-not $key) { return 0 }
+
+  if ($guid) {
+    if ($CreditLimits.ByKeyLegacy.ContainsKey($key)) {
+      return To-Number $CreditLimits.ByKeyLegacy[$key].credit_limit
+    }
+    return 0
+  }
+
+  if ($CreditLimits.ByKeyAny.ContainsKey($key)) {
+    return To-Number $CreditLimits.ByKeyAny[$key].credit_limit
+  }
+  return 0
 }
 
 function Get-EffectiveCustomerItems($Items, $CreditLimits) {
   $result = @()
   foreach ($item in @($Items)) {
     $key = [string]$item.key
-    $internalLimit = 0
-    if ($CreditLimits.ContainsKey($key)) {
-      $internalLimit = To-Number $CreditLimits[$key].credit_limit
-    }
+    $internalLimit = Get-InternalCreditLimit -Item $item -CreditLimits $CreditLimits
 
     $ameenLimit = To-Number $item.creditLimit
     $limit = if ($internalLimit -gt 0) { $internalLimit } else { $ameenLimit }
@@ -394,7 +442,7 @@ $connectionString = Require-Env "AMEEN_SQL_CONNECTION_STRING"
 $session = Get-SupabaseSession -Url $supabaseUrl -ApiKey $supabaseKey -Email $syncEmail -Password $syncPassword
 $inventoryReports = @(Invoke-SupabaseGet -Url $supabaseUrl -ApiKey $supabaseKey -Session $session -PathAndQuery "inventory_reports?select=created_at,summary,items&source=eq.ameen_sql_agent&order=created_at.desc&limit=1")
 $customerReports = @(Invoke-SupabaseGet -Url $supabaseUrl -ApiKey $supabaseKey -Session $session -PathAndQuery "inventory_reports?select=created_at,summary,items&source=eq.ameen_customer_balances&order=created_at.desc&limit=1")
-$creditLimitRows = @(Invoke-SupabaseGet -Url $supabaseUrl -ApiKey $supabaseKey -Session $session -PathAndQuery "customer_credit_limits?select=customer_key,customer_name,credit_limit,notes")
+$creditLimitRows = @(Invoke-SupabaseGet -Url $supabaseUrl -ApiKey $supabaseKey -Session $session -PathAndQuery "customer_credit_limits?select=customer_key,customer_guid,customer_name,credit_limit,notes")
 
 if (-not $inventoryReports.Count) {
   throw "No Ameen inventory report found in Supabase."

@@ -37,10 +37,27 @@ export function getSalesWindow(windowEnd, lookbackDays = 30) {
   return { start: start.toISOString().slice(0, 10), end };
 }
 
+const QTY_PATTERN = /^([+-]?)(\d+)(?:\.(\d{1,3}))?$/;
+
+// بعض القيم تصل كأرقام JS ناتجة عن حساب عائم (مثال: 12 * 0.2 = 2.4000000000000004)
+// وهذا ليس دقة تجارية حقيقية بل ضجيج تمثيل الفاصلة العائمة. نطبّعه فقط عندما يكون
+// الفرق بين القيمة والقيمة المقرَّبة لأقرب ثلاث منازل أصغر بكثير من أي فرق تجاري
+// ممكن (tolerance)؛ أي قيمة تتجاوز ثلاث منازل فعلياً (١.٢٣٤٥ مثلاً) تُرفض كما كانت.
+function normalizeQuantityText(text) {
+  if (QTY_PATTERN.test(text)) return text;
+  const num = Number(text);
+  if (!Number.isFinite(num)) return text; // NaN / Infinity: تُترك لتُرفض من الفحص الرئيسي بنفس النص
+  const rounded = Math.round(num * 1000) / 1000;
+  const tolerance = Math.max(1e-9, Math.abs(num) * 1e-9);
+  if (Math.abs(num - rounded) > tolerance) return text; // دقة حقيقية تتجاوز ثلاث منازل
+  return rounded.toFixed(3);
+}
+
 export function parseQuantity(value) {
-  const text = String(value ?? '').trim();
-  const match = /^([+-]?)(\d+)(?:\.(\d{1,3}))?$/.exec(text);
-  if (!match) throw new Error(`qty must have at most three decimal places: ${text || '<empty>'}`);
+  const raw = String(value ?? '').trim();
+  const text = normalizeQuantityText(raw);
+  const match = QTY_PATTERN.exec(text);
+  if (!match) throw new Error(`qty must have at most three decimal places: ${raw || '<empty>'}`);
   const sign = match[1] === '-' ? -1n : 1n;
   const fraction = (match[3] ?? '').padEnd(3, '0');
   return sign * ((BigInt(match[2]) * SCALE) + BigInt(fraction || '0'));

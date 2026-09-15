@@ -1,0 +1,69 @@
+name: دخان ما بعد النشر
+
+# يعمل بعد نجاح "Deploy TOBACCO Web" وحده، ويفحص الموقع الحيّ **قراءةً فقط**:
+# رمز الاستجابة، الأصول الأساسية، النشرات المنشورة، ثم تحميلٌ فعليّ في متصفح
+# للتأكد أن جافاسكربت لا ينهار — وهو ما لا يلتقطه فحص رمز HTTP إطلاقاً.
+#
+# لماذا وُجد: بين «نجح النشر» واكتشاف عطل حقيقي لم يكن هناك شيء.
+# `health-check.yml` دوري كل 30 دقيقة، غير مرتبط بالنشر، ويفحص رمز HTTP
+# لصفحتين فقط. فموقعٌ يعيد 200 بينما التطبيق ينهار عند التحميل يمرّ «سليماً».
+#
+# ⚠️ **بلا rollback وبلا إصلاح تلقائي — إنذار فقط** (قرار صريح في هذه المرحلة).
+# ولا آلية تنبيه جديدة ولا Issues مكررة: فشل هذه التشغيلة يلتقطه اثنان قائمان
+# أصلاً، ولكلٍّ منهما منعُ تكرارٍ خاص به:
+#   • `alert-on-automation-failure.yml` — تيليغرام بمفتاح `gha-fail:<اسم>`
+#     ونافذة 60 دقيقة، فتكرار العطل نفسه لا يُرسل مرتين.
+#   • `scripts/health-check.mjs` — Issue واحد لكل مفتاح حادثة
+#     (`workflow-failure-<اسم>@<الفرع>`)، لا يُنشأ ثانٍ ما دام الأول مفتوحاً،
+#     ويُغلق تلقائياً عند أول تشغيلة ناجحة.
+
+on:
+  workflow_run:
+    workflows: ["Deploy TOBACCO Web"]
+    types: [completed]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: post-deploy-smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    # النشر وحده هو ما يستحق فحصاً بعده. تشغيلة `skipped` (وهي حالة معتادة في
+    # pages.yml حين يفشل توليد النشرات الذي يُطلقه) لم تنشر شيئاً، وتشغيلة
+    # فاشلة يتكفّل بها منبّه الأتمتة أصلاً.
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright Chromium browser
+        run: npx playwright install --with-deps chromium
+
+      # مهلة قصيرة قبل البدء: GitHub Pages ينشر عبر CDN وقد يسبق إعلانُ النجاح
+      # انتشارَ النسخة بثوانٍ. السكربت نفسه يعيد المحاولة أيضاً، فهذه تقليل
+      # احتمال لا اعتماد عليها.
+      - name: Wait for CDN propagation
+        run: sleep 30
+
+      - name: Run production smoke test (read-only)
+        env:
+          SMOKE_BASE_URL: https://ozktobacco.com
+          # معرّف النشرة المتوقَّعة: يثبت أن الشبكة تخدم النشرة الجديدة فعلاً،
+          # لا نسخة مخبّأة قديمة. فارغ عند التشغيل اليدوي فيُتخطّى الفحص.
+          EXPECTED_RELEASE: ${{ github.event.workflow_run.head_sha }}
+        run: npm run smoke:production

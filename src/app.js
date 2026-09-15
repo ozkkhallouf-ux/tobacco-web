@@ -366,6 +366,19 @@ function setNotice(type, text) {
   state.notice = { type, text };
 }
 
+// رسالة يجب أن **تُرى**. لوحة الرسائل تُرسم أعلى `<main>` مباشرةً، والأزرار التي
+// قد تفشل (تصدير فاتورة من بطاقة زبون أو من أرشيف الفواتير) تقع بعد مئات
+// البكسلات من التمرير — فكان الخطأ يُضبط ويُرسم ولا يراه أحد، وتُقرأ النتيجة
+// «الزر لا يفعل شيئاً ولا يظهر خطأ». هنا نرسم ثم نُظهر اللوحة فعلياً.
+function showNoticeNow(type, text) {
+  setNotice(type, text);
+  render();
+  const panel = document.querySelector(".message-panel");
+  if (panel && typeof panel.scrollIntoView === "function") {
+    panel.scrollIntoView({ block: "center", behavior: "smooth" });
+  }
+}
+
 function notifSupported() {
   return "Notification" in window;
 }
@@ -962,20 +975,201 @@ async function loadCustomerBalanceReports() {
   await loadCustomerWhatsapp();
 }
 
-// فواتير زبون محدّد مع محتوياتها (من تقرير ameen_customer_invoices، بمطابقة ذكية للاسم)
-function customerInvoicesFor(name) {
+// ===== هوية الزبون والفاتورة: المعرّف أولاً، الاسم احتياطاً =====
+//
+// **العطل المُثبت (2026-09-05):** أُعيدت تسمية الحساب `500d8ef6-3563-…` في
+// الأمين من «لؤي زهية الضاحية» إلى «لؤي خلوف المحترم / الضاحية» الساعة 10:26.
+// تقريرا الأرصدة والحركات (مزامنة كل دقيقة و30 دقيقة) حملا الاسم الجديد فوراً،
+// بينما بقي تقرير الفواتير (مزامنة كل ساعة) على الاسم القديم حتى 10:53. وفي
+// تلك النافذة كانت الفواتير مربوطة بالاسم وحده، فانقطع الربط تماماً: ظهرت
+// «لا توجد فواتير لهذا الزبون» في كشف الحساب، وفشل زر «فاتورة PDF».
+//
+// الاسم في الأمين نصٌّ قابل للتعديل في كل لحظة، وهو في تقرير الفواتير مأخوذ من
+// حقل مختلف أصلاً (`bu000.Cust_Name` لقطةً على رأس الفاتورة) عن مصدر الأرصدة
+// (`cu000.CustomerName` اسم الحساب). فاتّخاذه هوية خطأ بنيوي لا حادث عابر.
+// الهوية هنا `customerGuid`، والاسم لا يبقى إلا احتياطاً للتقارير القديمة.
+
+const ZERO_GUID = "00000000-0000-0000-0000-000000000000";
+
+// معرّف مطبَّع؛ فارغ إن غاب أو كان صفرياً. الأمين يكتب GUID صفرياً بدل NULL
+// (كل قيود `ameen_customer_movements` بلا استثناء تحمل الصفري اليوم)، فمعاملة
+// الصفري كمعرّف صالح تُنتج «مطابقة قطعية» على قيمة لا تعني شيئاً.
+function normGuid(value) {
+  const g = String(value ?? "").trim().toLowerCase();
+  return !g || g === ZERO_GUID ? "" : g;
+}
+
+// يوحّد مدخل الهوية: عنصر تقرير الأرصدة (يحمل customerGuid) أو اسم نصّي.
+// الاسم وحده يُرفع إلى معرّف عبر تقرير الأرصدة متى أمكن، فيصير كل المسارات
+// على هوية واحدة حتى حين يُمرَّر إليها نص.
+function customerIdentity(nameOrItem) {
+  if (nameOrItem && typeof nameOrItem === "object") {
+    return {
+      item: nameOrItem,
+      guid: normGuid(nameOrItem.customerGuid),
+      name: String(nameOrItem.name || "").trim()
+    };
+  }
+  const name = String(nameOrItem || "").trim();
+  const item = name ? smartNameMatch(latestCustomerBalanceItems(), (it) => it.name, name) : null;
+  return { item, guid: normGuid(item?.customerGuid), name };
+}
+
+// كل مجموعات الفواتير في التقرير (مجموعة لكل زبون).
+function customerInvoiceEntries() {
   const report = state.customerInvoicesReport;
-  const items = report && Array.isArray(report.items) ? report.items : [];
-  const match = smartNameMatch(items, (it) => it.name, name);
-  return match && Array.isArray(match.invoices) ? match.invoices : [];
+  return report && Array.isArray(report.items) ? report.items : [];
+}
+
+// مجموعات الفواتير «اليتيمة»: اسمها لا يطابق أي زبون في تقرير الأرصدة، أي لا
+// حساب قائماً بهذا الاسم. تنشأ لأن `bu000.Cust_Name` **لقطة نصّية على رأس كل
+// فاتورة**، فإعادة تسمية حساب في الأمين تُحدِّث نصّ بعض الفواتير دون بعض،
+// فتنشطر فواتير الزبون الواحد على اسمين. الحالة المقيسة 2026-09-05: فواتير
+// الحساب 500d8ef6 موزّعة على «لؤي خلوف المحترم / الضاحية» و«لؤي زهية الضاحية».
+//
+// **لا تُنسب هذه المجموعات لأحد هنا، ولا تُخمَّن ملكيتها.** جُرّبت نسبتها بمطابقة
+// دفتر الحساب (تاريخ + مبلغ + جهة) ورُفضت بعد قياس على بيانات الإنتاج: 12 من 864
+// زوج (تاريخ، مبلغ مدين) يتشاركه أكثر من زبون — 1.4%. ومجموعة بفاتورة واحدة
+// تُطابَق بزوج واحد فقط، فيكفي أن يغيب دفتر المالك الحقيقي عن اللقطة (تأخّر
+// مزامنة الحركات ~25 دقيقة، أو اقتطاع `MaxMovementsPerCustomer`) ليصير زبون
+// آخر «المرشّح الوحيد» فتُنسب إليه فاتورة ليست له — بأصنافها وأسعارها، وتُصدَّر
+// PDF باسمه. خطأ محاسبي في ورقة تُسلَّم للزبون أسوأ من فاتورة غائبة تُشرح صراحةً.
+//
+// الحلّ الجذري في المصدر لا في الواجهة: `push-customer-invoices.ps1` صار يجمّع
+// بـ`customerGuid`، فتعود المجموعة واحدة بلا أي استدلال. وحتى تصل تلك المزامنة،
+// نُظهر تحذيراً **لا ينسب شيئاً لأحد** بدل التخمين الصامت.
+
+// ذاكرة مؤقتة مربوطة **بهويّة كائنات التقارير نفسها**: كشف اليتامى يقارن كل
+// مجموعة فواتير بكل زبون (77 × 300 مطابقة اسم على بيانات الإنتاج)، ويُستدعى داخل
+// الرسم مرات كثيرة. المفتاح هو هوية الكائن لا نسخة منه: أي تحميل جديد للتقارير
+// يُبطل الذاكرة تلقائياً، فلا يمكن أن تُعرض نتيجة محسوبة على تقرير قديم.
+let _invoiceIdentityCache = null;
+function invoiceIdentityCache() {
+  const invoicesReport = state.customerInvoicesReport;
+  const balancesReport = (state.customerBalanceReports && state.customerBalanceReports[0]) || null;
+  const movementsReport = state.customerMovementsReport;
+  const cached = _invoiceIdentityCache;
+  if (cached
+    && cached.invoicesReport === invoicesReport
+    && cached.balancesReport === balancesReport
+    && cached.movementsReport === movementsReport) return cached;
+  _invoiceIdentityCache = { invoicesReport, balancesReport, movementsReport, orphans: null };
+  return _invoiceIdentityCache;
+}
+
+function orphanInvoiceEntries() {
+  const cache = invoiceIdentityCache();
+  if (cache.orphans) return cache.orphans;
+  const balances = latestCustomerBalanceItems();
+  cache.orphans = customerInvoiceEntries().filter((entry) => !smartNameMatch(balances, (b) => b.name, entry?.name));
+  return cache.orphans;
+}
+
+// تحذير عام عن انشطار محتمل — بلا نسبة أي فاتورة لأي زبون. يظهر فقط حين يعجز
+// التقرير عن الربط بالهوية (بلا `customerGuid`) وفيه مجموعة باسم لا حساب له.
+function invoiceIdentityWarning() {
+  const entries = customerInvoiceEntries();
+  if (!entries.length) return "";
+  if (entries.some((entry) => normGuid(entry?.customerGuid))) return "";
+  const orphans = orphanInvoiceEntries();
+  if (!orphans.length) return "";
+  const names = orphans.map((entry) => String(entry?.name || "").trim()).filter(Boolean);
+  return `تقرير الفواتير لا يحمل معرّف الحساب، وفيه ${orphans.length} مجموعة باسم لا حساب له اليوم${
+    names.length ? ` (${names.join("، ")})` : ""
+  } — غالباً حساب أُعيدت تسميته في الأمين. فواتير تلك المجموعات لا تُنسب لأحد هنا عمداً؛ شغّل مزامنة الفواتير المحدَّثة على Windows ليعود الربط بالمعرّف.`;
+}
+
+// مجموعة فواتير زبون محدّد بهويته: بالمعرّف أولاً ثم بالاسم.
+function customerInvoiceEntryFor(nameOrItem) {
+  const entries = customerInvoiceEntries();
+  if (!entries.length) return null;
+  const { guid, name } = customerIdentity(nameOrItem);
+
+  // المعرّف — الهوية الوحيدة التي لا تتغيّر بإعادة تسمية الحساب. متاح فقط في
+  // التقارير التي رفعتها نسخة `push-customer-invoices.ps1` بعد إضافته.
+  if (guid) {
+    const byGuid = entries.find((entry) => normGuid(entry?.customerGuid) === guid);
+    if (byGuid) return byGuid;
+  }
+  // الاسم — التقارير القديمة (وفواتير بلا حساب زبون).
+  return (name ? smartNameMatch(entries, (entry) => entry.name, name) : null) || null;
+}
+
+// فواتير زبون محدّد مع محتوياتها (من تقرير ameen_customer_invoices) — مجموعته
+// بهويته فقط، بلا أي استدلال. يقبل عنصر الأرصدة (مفضَّل، يحمل المعرّف) أو الاسم
+// نصّاً (توافقاً مع المسارات القديمة).
+function customerInvoicesFor(nameOrItem) {
+  const entry = customerInvoiceEntryFor(nameOrItem);
+  return entry && Array.isArray(entry.invoices) ? entry.invoices : [];
+}
+
+// فاتورة بمعرّفها في كامل التقرير — لا داخل مجموعة زبون واحد. معرّف الفاتورة
+// (`bu000.GUID`) فريد على مستوى الأمين كله، فالبحث به لا يحتاج معرفة الزبون
+// أصلاً؛ وهذا ما يجعل زر «فاتورة PDF» يصمد حين يكون اسم الزبون في تقرير
+// الفواتير قديماً. يعيد { invoice, entry } أو null.
+function invoiceByGuid(guid) {
+  const g = normGuid(guid);
+  if (!g) return null;
+  for (const entry of customerInvoiceEntries()) {
+    const invoices = Array.isArray(entry?.invoices) ? entry.invoices : [];
+    const invoice = invoices.find((inv) => normGuid(inv?.guid) === g);
+    if (invoice) return { invoice, entry };
+  }
+  return null;
+}
+
+// تأخّر مزامنة الفواتير خلف مزامنة الأرصدة بالدقائق (أو null إن تعذّر الحساب).
+// تقرير الأرصدة يُرفع كل دقيقة وتقرير الفواتير كل ربع ساعة على أحسن تقدير، فكل
+// فاتورة أُدخلت داخل هذا الفارق موجودة في الدفتر وغائبة عن تفاصيل الفواتير.
+// هذا رقم يُعرض للمستخدم، فلا يُختلق: null تعني «لا أعرف» ولا تُطبع صفراً.
+function invoiceSyncLagMinutes() {
+  const invoicesAt = reportSyncedAt(state.customerInvoicesReport);
+  const balancesAt = reportSyncedAt(state.customerBalanceReports?.[0]);
+  if (!invoicesAt || !balancesAt) return null;
+  const invoicesMs = new Date(invoicesAt).getTime();
+  const balancesMs = new Date(balancesAt).getTime();
+  if (!Number.isFinite(invoicesMs) || !Number.isFinite(balancesMs)) return null;
+  const lag = Math.round((balancesMs - invoicesMs) / 60000);
+  return lag > 0 ? lag : 0;
+}
+
+// سبب غياب فواتير زبون — بصيغة تُعرض للمستخدم بدل رسالة واحدة تخلط الأسباب.
+//   no_report      : لم تصل مزامنة الفواتير إطلاقاً.
+//   stale          : وصلت لكنها أقدم من دفتر الحساب، فالفاتورة الجديدة لم تدخلها بعد.
+//   none_in_window : مزامنة حديثة ولا فواتير لهذا الزبون خلال نافذة التقرير.
+function customerInvoicesStatus(nameOrItem) {
+  const invoices = customerInvoicesFor(nameOrItem);
+  const lag = invoiceSyncLagMinutes();
+  if (!state.customerInvoicesReport) return { status: "no_report", invoices, lag };
+  if (invoices.length) return { status: "ok", invoices, lag };
+  return { status: lag !== null && lag >= 2 ? "stale" : "none_in_window", invoices, lag };
+}
+
+// نص جاهز لغياب الفواتير — مصدر واحد لكل الشاشات كي لا تتناقض الرسائل.
+function customerInvoicesEmptyText(nameOrItem) {
+  const { status, lag } = customerInvoicesStatus(nameOrItem);
+  const windowDays = Math.max(1, Number(state.customerInvoicesReport?.summary?.periodDays || 60));
+  if (status === "no_report") return "لم تصل مزامنة تفاصيل الفواتير من الأمين بعد.";
+  // حالة «ok»: للزبون فواتير في التقرير لكن ليس المطلوبة — تُستدعى من مسار فشل
+  // التصدير، فلا يجوز أن تقول «لا توجد فواتير» وهي موجودة.
+  if (status === "ok") {
+    return lag !== null && lag >= 2
+      ? `آخر مزامنة لتفاصيل الفواتير أقدم من دفتر الحساب بـ${lag} دقيقة، وهذه الفاتورة ليست فيها.`
+      : "هذه الفاتورة غير موجودة في آخر مزامنة لتفاصيل الفواتير.";
+  }
+  if (status === "stale") {
+    return `مزامنة تفاصيل الفواتير أقدم من دفتر الحساب بـ${lag} دقيقة — أي فاتورة أُدخلت بعدها تظهر في الحركات ولا تظهر هنا حتى المزامنة التالية.`;
+  }
+  return `لا توجد فواتير لهذا الزبون خلال آخر ${windowDays} يوماً.`;
 }
 
 // مطابقة قيد دائن (دفعة محتملة) بفاتورة مرتجع فعلية بالتاريخ والمبلغ — قيود المرتجع في الأمين
 // لا تحمل معرّف الفاتورة (BiGUID) كالفواتير العادية، فلا مطابقة قطعية ممكنة هنا.
-function findReturnInvoiceForMovement(custName, movement) {
+// يقبل عنصر الأرصدة (مفضَّل) أو الاسم نصّاً، كسائر مسارات الفواتير.
+function findReturnInvoiceForMovement(customer, movement) {
   const credit = Number(movement?.credit || 0);
   if (!(credit > 0)) return null;
-  const invs = customerInvoicesFor(custName).filter((x) => x.isReturn);
+  const invs = customerInvoicesFor(customer).filter((x) => x.isReturn);
   if (!invs.length) return null;
   const dOnly = String(movement?.date || "").slice(0, 10);
   const amtMatch = (x) => Math.abs(Number(x.total || 0) - credit) < 1;
@@ -983,27 +1177,242 @@ function findReturnInvoiceForMovement(custName, movement) {
   return invs.find((x) => dateMatch(x) && amtMatch(x)) || invs.find((x) => amtMatch(x)) || null;
 }
 
-// كمية سطر الفاتورة بشكل مقروء (نفضّل الوحدة الأكبر إن وُجدت).
-// لا نعرض سعر/إجمالي السطر لأن أرقام الأسطر المفردة بمصدر الأمين غير دقيقة
-// (مجموعها لا يطابق إجمالي الفاتورة)؛ الموثوق هو إجمالي الفاتورة فقط.
-// قيمة السطر الفعلية. مصدر الحقيقة هو `lineTotal` القادم من الأمين
-// (Qty × Price كما يسجّلهما) — لا يُعاد حسابه من السعر المعروض.
-// **العطل الذي يعالجه:** المستند كان يعرض «سعر الوحدة» وحده، وهو سعر الوحدة
-// الكبرى (سعر الكرتونة 403)، فيُقرأ على أنه قيمة السطر. نصف كرتونة قيمتها
-// 201.50 لا 403. السعر يبقى سعر وحدة، والقيمة تصير عموداً مستقلاً.
+// ═══ حسم أساس سعر كل سطر بمطابقة إجمالي الفاتورة (الرقم الموثوق الوحيد) ═══
 //
-// حين يكون أساس أسعار الفاتورة الوحدة الكبرى (`unit2`) يكون `Qty × Price`
-// القادم من الأمين محسوباً على أساس مختلف، فنحسب القيمة من الكمية بالوحدة
-// الكبرى — نفس المنطق الذي يحسم به `invoicePriceBasis` أساس السعر.
+// **العطل المُثبت (فاتورة #733 بتاريخ 2026-09-13):** عمود إجمالي السطر القادم من
+// الأمين (`lineTotal`) يساوي `Price × Qty` و`Qty` بالوحدة الصغرى (كروز) بينما
+// `Price` نفسه سعر الوحدة الكبرى (كرتونة) — فكرتونة واحدة سعرها 286$ طُبعت
+// 14,300$ (286 × 50). فلا `lineTotal` ولا `lineTotalSource` كافيان للحكم: القيمة
+// «من الأمين» نفسها مبنية على وحدة خاطئة.
+//
+// ولا يكفي كذلك حسم أساس واحد لكل الفاتورة: في #733 أربعة أسطر مسعّرة بالكرتونة
+// وسطر واحد (غلواز قصير أصفر، 8.04$ سعر الكروز) مسعّر بالكروز، فلا مجموع
+// `price × qty` ولا مجموع `price × qtyUnits` يطابق الإجمالي 1163.6$ — الخلطة
+// وحدها تطابقه (286 + 290 + 308 + 159 + 120.6).
+//
+// لذلك لكل سطر مرشّحان فقط، `price × qty` (أساس الكروز) و`price × qtyUnits`
+// (أساس الكرتونة)، ونبحث عن التوزيع الذي مجموعه يساوي إجمالي الفاتورة. التطابق
+// دليل حسابي على الأساس، ولا يعتمد على اسم صنف ولا على استثناء لصنف بعينه.
+//
+// **قيس على بيانات الجهاز الحقيقية** (آخر تقرير `ameen_customer_invoices`، 669
+// فاتورة): 308 فاتورة مجموع `lineTotal` فيها يطابق الإجمالي فتبقى كما هي بلا
+// مساس، و361 لا تطابق — منها 162 يحسمها أساس واحد و199 تحتاج الخلطة. والـ361
+// كلها فُحصت سطراً بسطر بالكود الحقيقي: 361 توزيعاً، 358 منها مجموعه مضبوط
+// تماماً و3 داخل هامش التقريب (أسوأ فرق 0.022$)، و351 بحلٍّ وحيد. ولا سطر واحد
+// قيمته أكبر من إجمالي فاتورته، وسعر الوحدة المعروض × الكمية المعروضة = قيمة
+// السطر في كل سطر. وفروق المجموع في البيانات كلها إما صفر/تقريب أو انفجار وحدة؛
+// ولا فاتورة واحدة فرقها حسم رأس فاتورة (الثلاث الملتبسة #373 و#187 و#330 فرق
+// كل منها يساوي بالضبط مجموع فروق أسطرها المقروءة بالوحدة الخطأ).
+//
+// هامش التطابق يتبع خطأ التمثيل لا نسبة من الإجمالي: `qtyUnits` مدوّرة إلى ثلاث
+// خانات في أداة الرفع، فخطؤها الأقصى لكل سطر 0.0005 × السعر.
+function invoiceBasisTolerance(lines) {
+  let sumPrice = 0;
+  for (const line of lines) sumPrice += Math.abs(Number(line?.price || 0));
+  return Math.max(0.05, 0.0006 * sumPrice);
+}
+
+// قيمتا السطر الممكنتان. `switchable = false` يعني لا خيار (كمية بوحدة واحدة فقط،
+// أو سعر صفر، أو معامل وحدة = 1) فيُثبَّت السطر على قيمته الوحيدة ولا يدخل البحث.
+function invoiceLineCandidates(line) {
+  const price = Number(line?.price || 0);
+  const qty = Number(line?.qty || 0);
+  const qtyUnits = Number(line?.qtyUnits || 0);
+  const unit1 = price * qty;
+  const unit2 = price * qtyUnits;
+  return {
+    unit1,
+    unit2,
+    hasUnit1: qty > 0,
+    hasUnit2: qtyUnits > 0,
+    switchable: qty > 0 && qtyUnits > 0 && Math.abs(unit1 - unit2) > 1e-9
+  };
+}
+
+// سقف خطوات البحث. البحث مقلّم بالفروق مرتّبةً تنازلياً وبمجاميع اللاحقة، فينتهي
+// عملياً بمئات الخطوات (180 فاتورة حقيقية في 30 مللي ثانية)؛ السقف حماية من
+// فاتورة شاذة لا أكثر، وتجاوزه يعني «لا حكم» فيبقى السلوك القديم.
+const INVOICE_BASIS_SEARCH_BUDGET = 200000;
+
+// «مضبوط» = نصف قرش. المبالغ بثلاث خانات عشرية، فأي فرق أصغر خطأ عائم لا أكثر.
+const INVOICE_BASIS_EXACT_TOLERANCE = 0.005;
+
+// الخطة محسوبة لكل مصفوفة أسطر مرة واحدة: مسارات الطباعة تبني كائن فاتورة جديداً
+// لكل سطر (`{ total, lines }` داخل `map`) بينما مصفوفة الأسطر نفسها ثابتة.
+const INVOICE_BASIS_PLAN_CACHE = new WeakMap();
+
+// خطة أساس أسطر الفاتورة (`Map` من السطر إلى "unit1"/"unit2"/"stored")، أو `null`
+// حين لا حكم قاطع فيبقى السلوك القديم كما هو تماماً.
+//
+// «لا حكم» يعني أحد ثلاثة: لا إجمالي موثوق للفاتورة، أو مجموع القيم المخزَّنة
+// يطابق الإجمالي أصلاً (فالمخزَّن موثوق ولا سبب لتجاهله)، أو لا يوجد توزيع
+// مرشّحات يطابق الإجمالي. لا يُخمَّن أساس بلا مطابقة.
+//
+// حين يطابق أكثر من توزيع (10 فواتير من 361) نختار الوحيد المحسوم ترتيبياً:
+// الأسطر ذات الفرق الأكبر بين المرشّحين تُقرأ بأساس الكرتونة.
+//
+// **تحقّق مستقل على لائحة الأسعار المعتمدة** (`approved_price_items`): سعر السطر
+// يطابق `unit1_price` أو `unit2_price` وبينهما معامل 10–50، فاللائحة أوراكل
+// مستقل تماماً عن الحساب. على مواضع التأرجح الفعلية في الفواتير العشر (202 سطراً):
+// 201 سطراً أساسه المطبَّق يطابق اللائحة، صفر مخالف، وسطر واحد بلا حكم صريح
+// («مزايا سبيشل مكس» في #163: سعره 10$ مقابل `unit1_price = 5.917` و
+// `unit2_price = 142` — أقرب إلى الكروز بـ8.4 أضعاف لكن خارج نطاق التأكيد
+// الصارم). وخطة اللائحة نفسها تُجمِّع إلى إجمالي الفاتورة بالضبط في 8 من الـ10
+// (والاثنتان الباقيتان فيهما سطر بلا سجل في اللائحة إطلاقاً).
+function invoiceLineBasisPlan(inv) {
+  const lines = Array.isArray(inv?.lines) ? inv.lines : null;
+  const total = Number(inv?.total || 0);
+  if (!lines || !lines.length || !(total > 0)) return null;
+  const cached = INVOICE_BASIS_PLAN_CACHE.get(lines);
+  if (cached && cached.total === total) return cached.plan;
+  const plan = computeInvoiceLineBasisPlan(lines, total);
+  INVOICE_BASIS_PLAN_CACHE.set(lines, { total, plan });
+  return plan;
+}
+
+function computeInvoiceLineBasisPlan(lines, total) {
+  const tol = invoiceBasisTolerance(lines);
+
+  // مجموع القيم المخزَّنة يطابق الإجمالي ⇒ المخزَّن موثوق لهذه الفاتورة فلا نمسّها.
+  // يشترط أن يحمل **كل** سطر قيمة مخزَّنة، وإلا فالمجموع منقوص ومقارنته بلا معنى.
+  // الصفر قيمة مخزَّنة صحيحة لا قيمة غائبة: بيانات الجهاز فيها أسطر سعرها صفر
+  // (`price = 0`) وقيمتها صفر، ورفضها يُخرج فاتورة سليمة كاملةً من هذه البوابة
+  // ويرميها في البحث بلا سبب (فاتورة #102 مثلاً: مجموعها المخزَّن يطابق إجماليها
+  // 522.633$ بالضبط وفيها سطر صفري واحد).
+  let storedSum = 0;
+  let storedComplete = true;
+  for (const line of lines) {
+    const stored = Number(line?.lineTotal);
+    if (!Number.isFinite(stored) || stored < 0) { storedComplete = false; break; }
+    storedSum += stored;
+  }
+  if (storedComplete && Math.abs(storedSum - total) <= tol) return null;
+
+  // كل سطر قابل للتبديل يبدأ بأساس الكرتونة، والمثبَّت يأخذ قيمته الوحيدة. ثم
+  // نبحث عن مجموعة الأسطر التي تُقرأ بأساس الكروز فيطابق المجموع الإجمالي.
+  const basis = new Map();
+  const buckets = new Map();
+  let base = 0;
+  for (const line of lines) {
+    const candidates = invoiceLineCandidates(line);
+    if (!candidates.switchable) {
+      if (candidates.hasUnit2) { basis.set(line, "unit2"); base += candidates.unit2; }
+      else if (candidates.hasUnit1) { basis.set(line, "unit1"); base += candidates.unit1; }
+      // سطر بلا كمية بأي وحدة: لا مرشّح محسوب له، فتبقى قيمته المخزَّنة كما هي.
+      else { basis.set(line, "stored"); base += Number(line?.lineTotal || 0); }
+      continue;
+    }
+    basis.set(line, "unit2");
+    base += candidates.unit2;
+    // الأسطر المتطابقة في المرشّحين تُجمَّع: أيّها يُقرأ بالكروز لا يغيّر المجموع،
+    // فالبحث على «كم سطراً من المجموعة» لا «أيّ سطر» — يقلّص البحث ويمنع تعدّد
+    // حلول لا فرق بينها إلا تبديل مواضع متكافئة.
+    const key = `${candidates.unit1.toFixed(6)}|${candidates.unit2.toFixed(6)}`;
+    const bucket = buckets.get(key);
+    if (bucket) bucket.lines.push(line);
+    else buckets.set(key, { delta: candidates.unit1 - candidates.unit2, lines: [line] });
+  }
+
+  const target = total - base;
+  if (Math.abs(target) <= tol) return basis;
+
+  const groups = [...buckets.values()].sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
+  const count = groups.length;
+  if (!count) return null;
+
+  // حدّا ما تستطيعه المجموعات المتبقية، للتقليم: لا معنى لمتابعة فرع المتبقّي فيه
+  // خارج مدى مجاميعها الممكنة.
+  const suffixMax = new Array(count + 1).fill(0);
+  const suffixMin = new Array(count + 1).fill(0);
+  for (let i = count - 1; i >= 0; i -= 1) {
+    const span = groups[i].delta * groups[i].lines.length;
+    suffixMax[i] = suffixMax[i + 1] + Math.max(0, span);
+    suffixMin[i] = suffixMin[i + 1] + Math.min(0, span);
+  }
+
+  const picks = new Array(count).fill(0);
+  let steps = 0;
+  const searchWithin = (limit) => {
+    const walk = (index, remaining) => {
+      steps += 1;
+      if (steps > INVOICE_BASIS_SEARCH_BUDGET) return "budget";
+      if (Math.abs(remaining) <= limit) return "found";
+      if (index >= count) return null;
+      if (remaining > suffixMax[index] + limit || remaining < suffixMin[index] - limit) return null;
+      const group = groups[index];
+      for (let taken = 0; taken <= group.lines.length; taken += 1) {
+        picks[index] = taken;
+        const outcome = walk(index + 1, remaining - group.delta * taken);
+        if (outcome) return outcome;
+      }
+      picks[index] = 0;
+      return null;
+    };
+    return walk(0, target);
+  };
+
+  // التوزيع المضبوط أولاً، وهامش التقريب احتياطاً فقط.
+  //
+  // **العطل الذي يعالجه (فاتورة #698، 57 سطراً):** الهامش يكبر بعدد الأسطر
+  // (0.0006 × مجموع الأسعار = 3.644$ هنا)، فقَبِل أول توزيع يقع داخله وكان
+  // بعيداً 3.234$ عن الإجمالي — رغم وجود توزيع مضبوط تماماً. نتيجته أن سطر «تي
+  // اس سليم فضي» (سعره 3.3$ سعر كروز) قُرئ كرتونةً فصارت قيمته 0.066$ بدل 3.3$.
+  // تحقّق على لائحة الأسعار المعتمدة: `unit1_price = 3.3` و`unit2_price = 165`.
+  // فالهامش يُسمح به حين لا يوجد توزيع مضبوط (تقريب `qtyUnits` إلى ثلاث خانات
+  // يمنع التطابق التام في أصناف معاملها 12 أو 24)، لا قبل أن يُجرَّب المضبوط.
+  let outcome = searchWithin(INVOICE_BASIS_EXACT_TOLERANCE);
+  if (outcome !== "found" && outcome !== "budget" && tol > INVOICE_BASIS_EXACT_TOLERANCE) {
+    picks.fill(0);
+    outcome = searchWithin(tol);
+  }
+  if (outcome !== "found") return null;
+
+  groups.forEach((group, index) => {
+    for (let i = 0; i < picks[index]; i += 1) basis.set(group.lines[i], "unit1");
+  });
+  return basis;
+}
+
+// قيمة السطر الفعلية، عموداً مستقلاً عن سعر الوحدة.
+// **العطل الأول الذي عالجه هذا العمود:** المستند كان يعرض «سعر الوحدة» وحده، وهو
+// سعر الوحدة الكبرى (سعر الكرتونة 403)، فيُقرأ على أنه قيمة السطر. نصف كرتونة
+// قيمتها 201.50 لا 403. السعر يبقى سعر وحدة، والقيمة تصير عموداً مستقلاً.
+//
+// ترتيب مصادر القيمة بعد إصلاح #733 (2026-09-13):
+//   1) خطة الفاتورة (`invoiceLineBasisPlan`) حين تكون قاطعة — وهي وحدها المسنودة
+//      بمطابقة إجمالي الفاتورة، الرقم الموثوق الوحيد من الأمين.
+//   2) القيمة المخزَّنة `stored` (Qty × Price كما سجّله الأمين لهذا السطر) حين لا
+//      خطة: هي محسوبة سطراً بسطر بخلاف `invoicePriceBasis` التي تحسم أساساً
+//      واحداً لكل الفاتورة وقد تُخطئ سطراً أساسه مختلف عن غالبية الفاتورة.
+//   3) إعادة الحساب حسب `invoicePriceBasis` حين لا خطة ولا قيمة مخزَّنة موثوقة.
+//
+// `stored` ليس مصدر حقيقة مطلقاً: الخطة تتقدّم عليه لأن العمود القادم من الأمين قد
+// يكون هو نفسه `Price × Qty` بوحدتين مختلطتين (تفصيل العطل فوق `invoiceBasisTolerance`).
+//
+// لكن حين `line.lineTotalSource === "derived"` فإن `stored` ليس إجمالياً
+// حقيقياً من الأمين، بل Qty×Price محسوبة بأداة الرفع نفسها كـfallback (حين لا
+// يوجد عمود إجمالي على bi000 بمخطط الأمين لهذا التنصيب) — وهي إذن مطابقة
+// حسابياً لـprice×qty بالتعريف، بصرف النظر عن كون `Price` فعلياً سعر الوحدة1
+// أو الوحدة2. الثقة بها هنا تُعيد بالضبط العطل الذي يعالجه هذا الملف (قيمة
+// سطر مبنية على سعر الوحدة الخطأ)، فلا نستخدمها ونعيد الحساب حسب أساس السعر
+// الصحيح (`invoicePriceBasis`) كما لو لم تكن `stored` موجودة أصلاً. الفواتير
+// القديمة بلا `lineTotalSource` (رُفعت قبل إضافة هذا الحقل) تبقى كما كانت:
+// `stored` يُعتمَد مباشرة، توافقاً رجعياً.
 function invoiceLineTotalValue(line, inv) {
   const price = Number(line?.price || 0);
   const qty = Number(line?.qty || 0);
   const qtyUnits = Number(line?.qtyUnits || 0);
   const stored = Number(line?.lineTotal || 0);
+  const source = line?.lineTotalSource;
+  // خطة الفاتورة أولاً: هي الحكم الوحيد المسنود بمطابقة إجمالي الفاتورة، فتتقدّم
+  // على القيمة المخزَّنة (التي قد تكون هي نفسها محسوبة بالوحدة الخطأ).
+  const planned = invoiceLineBasisPlan(inv)?.get(line);
+  if (planned === "unit1") return roundPrice(price * qty);
+  if (planned === "unit2") return roundPrice(price * qtyUnits);
+  if (stored > 0 && source !== "derived") return roundPrice(stored);
   if (inv && qtyUnits > 0 && invoicePriceBasis(inv) === "unit2") {
     return roundPrice(price * qtyUnits);
   }
-  if (stored > 0) return roundPrice(stored);
   return roundPrice(price * qty);
 }
 
@@ -1012,6 +1421,7 @@ function invoiceLineValueText(line, inv) {
   return value > 0 ? formatMoney(value) : "—";
 }
 
+// كمية سطر الفاتورة بشكل مقروء (نفضّل الوحدة الأكبر إن وُجدت).
 function invoiceLineQty(line) {
   const u1 = String(line?.unit1 || "").trim();
   const u2 = String(line?.unit2 || "").trim();
@@ -1042,10 +1452,39 @@ function invoicePriceBasis(inv) {
   return Math.abs(sumBase - total) <= Math.abs(sumUnits - total) ? "unit1" : "unit2";
 }
 
-// سعر الوحدة معروضاً دائماً بالوحدة الكبرى (كرتونة/شرحة/طرد): إن كان أساس أسعار الفاتورة
-// الكروز نضرب بمعامل الوحدة (كمية الكروز ÷ كمية الكراتين لنفس السطر)، وإلا نعرضه كما هو.
-// نواة حسم الوحدة رقماً — مصدر واحد لكل من يحتاج سعر سطر الفاتورة (العرض في كشف
-// الحساب، وآخر سعر للزبون في بطاقة الصنف). تعيد { price, unit, converted } أو null.
+// أساس سعر هذا السطر بعينه (وليس الفاتورة كلها): نقارن القيمة المخزَّنة من
+// الأمين (`stored`) مع price×qty (أساس unit1/كروز) ومع price×qtyUnits (أساس
+// unit2/كرتونة-شرحة) ونختار الأقرب. الأساس قد يختلف من سطر لآخر ضمن نفس
+// الفاتورة (بعض الأصناف كرتونة كاملة، وبعضها كمية جزئية بسعر الكروز)، لذا لا
+// يصح تعميم أساس واحد (`invoicePriceBasis`) على كل الأسطر. تعيد "unit1"،
+// "unit2"، أو null حين لا تتوفر قيمة مخزَّنة موثوقة للمقارنة.
+//
+// `line.lineTotalSource === "derived"` يعني أن `stored` مُصنَّعة بأداة الرفع
+// نفسها كـQty×Price (fallback عند غياب عمود إجمالي حقيقي على bi000)، لا
+// إجمالياً حقيقياً من الأمين. في هذه الحالة ستكون `diffBase` صفراً دائماً
+// بالتعريف (لأن stored = price×qty أصلاً)، ما يفرض "unit1" زوراً على كل سطر
+// كهذا بصرف النظر عن وحدته الحقيقية — فنعيد null صراحةً لنترك الحسم لأساس
+// الفاتورة العام (`invoicePriceBasis`) بدل الوثوق بمقارنة لا معنى لها.
+function invoiceLineBasis(line) {
+  if (line?.lineTotalSource === "derived") return null;
+  const price = Number(line?.price || 0);
+  const stored = Number(line?.lineTotal || 0);
+  if (!(price > 0) || !(stored > 0)) return null;
+  const qty = Number(line?.qty || 0);
+  const qtyUnits = Number(line?.qtyUnits || 0);
+  const diffBase = qty > 0 ? Math.abs(price * qty - stored) : Infinity;
+  const diffUnits = qtyUnits > 0 ? Math.abs(price * qtyUnits - stored) : Infinity;
+  if (!Number.isFinite(diffBase) && !Number.isFinite(diffUnits)) return null;
+  return diffBase <= diffUnits ? "unit1" : "unit2";
+}
+
+// سعر الوحدة معروضاً دائماً بالوحدة الكبرى (كرتونة/شرحة/طرد): إن كان أساس سعر
+// هذا السطر تحديداً هو الكروز نضرب بمعامل الوحدة (كمية الكروز ÷ كمية الكراتين
+// لنفس السطر)، وإلا نعرضه كما هو. نفضّل `invoiceLineBasis` (حسم لكل سطر على
+// حدة) على `invoicePriceBasis` (حسم لكل الفاتورة)، ولا نلجأ للأخيرة إلا حين
+// لا توجد قيمة مخزَّنة لهذا السطر تحديداً للمقارنة عليها. نواة حسم الوحدة
+// رقماً — مصدر واحد لكل من يحتاج سعر سطر الفاتورة (العرض في كشف الحساب،
+// وآخر سعر للزبون في بطاقة الصنف). تعيد { price, unit, converted } أو null.
 function invoiceLineUnitPrice(line, inv) {
   const price = Number(line?.price || 0);
   if (!(price > 0)) return null;
@@ -1054,7 +1493,14 @@ function invoiceLineUnitPrice(line, inv) {
   const qty = Number(line?.qty || 0);
   const qtyUnits = Number(line?.qtyUnits || 0);
   const factor = qty > 0 && qtyUnits > 0 ? qty / qtyUnits : 0;
-  if (inv && u2 && factor > 0 && invoicePriceBasis(inv) === "unit1") {
+  // خطة الفاتورة تتقدّم على `invoiceLineBasis`: الأخيرة تحسم من القيمة المخزَّنة،
+  // وحين لا تطابق القيم المخزَّنة إجمالي الفاتورة فهي ليست دليلاً — الوثوق بها هنا
+  // يطبع 14,300$ «سعر الكرتونة» بدل 286$ في فاتورة #733.
+  const planned = invoiceLineBasisPlan(inv)?.get(line);
+  const basis = (planned === "unit1" || planned === "unit2" ? planned : null)
+    || invoiceLineBasis(line)
+    || (inv ? invoicePriceBasis(inv) : "unit2");
+  if (u2 && factor > 0 && basis === "unit1") {
     return { price: roundPrice(price * factor), unit: u2, converted: true };
   }
   return { price, unit: qtyUnits > 0 && u2 ? u2 : u1, converted: false };
@@ -1077,7 +1523,11 @@ async function loadCustomerCreditLimits() {
       ? await dataStore.listCustomerCreditLimits()
       : [];
   } catch (error) {
-    state.customerCreditLimits = [];
+    // **لا نمسح الحدود المحمَّلة عند فشل التحديث.** مسحها يجعل كل زبون يظهر
+    // «بلا حد»، فتختفي تنبيهات التجاوز والاقتراب من شاشة الزبائن ومن لوحة
+    // القيادة معاً — وهو غياب لا يميّزه الناظر عن «لا حدود مضبوطة أصلاً».
+    // الاحتفاظ بآخر نسخة ناجحة يُبقي التنبيه قائماً، ولافتة الخطأ أعلى الشاشة
+    // تقول صراحةً إن الأرقام قد تكون قديمة.
     state.customerLimitError = safeErrorMessage(error);
   }
 }
@@ -1157,7 +1607,9 @@ async function printOverdueReport() {
       </table>
       <p style="margin-top:16px;font-size:0.82rem;color:#888">المجموع: ${overdue.length} زبون / أكثر من 7 أيام: ${overdue.filter((x) => x.daysSince !== null && x.daysSince >= 7).length}</p>
     </div>`;
-  const filename = `ozk-overdue-${new Date().toISOString().slice(0, 10)}.pdf`;
+  // الاسم من القاعدة المركزية (كان بالإنكليزية بينما نسخته المؤرشفة بالعربية).
+  const overdueArchiveMeta = { title: "تقرير الزبائن المتأخرين", date: todayIsoDate() };
+  const filename = documentFileName("other_report", overdueArchiveMeta);
   if (isHandheldDevice()) {
     try {
       const blob = await createPortablePdfBlob(html, filename, {
@@ -1174,7 +1626,7 @@ async function printOverdueReport() {
     return;
   }
 
-  archiveToICloud("other_report", html, { title: "تقرير الزبائن المتأخرين", date: todayIsoDate() });
+  archiveToICloud("other_report", html, overdueArchiveMeta);
   const container = document.createElement("div");
   container.innerHTML = html;
   document.body.appendChild(container);
@@ -1711,12 +2163,16 @@ async function saveCustomerLimit(form) {
     // نطبّع دائماً — حتى مفتاح dataset — كي لا يتكرّر خلل عدم الارتباط
     // الذي جعل حد «مركز شريفة» لا يُطبَّق (ة مقابل ه).
     const customerKeyValue = normalizeItemName(form.dataset.customerKey || customerName);
+    // المعرّف هو الهوية. يبقى المفتاح النصّي محفوظاً معه لا بديلاً عنه: تقارير
+    // أرصدة قديمة قد تصل بلا معرّف، وعندها لا يبقى إلا الاسم.
+    const customerGuidValue = normGuid(form.dataset.customerGuid);
     const creditLimit = Math.max(0, toNumber(formValue(form, "creditLimit")));
 
     if (!customerKeyValue) throw new Error("لم أستطع تحديد الزبون لحفظ الحد.");
 
     await dataStore.upsertCustomerCreditLimit({
       customerKey: customerKeyValue,
+      customerGuid: customerGuidValue,
       customerName,
       creditLimit,
       notes: formValue(form, "notes")
@@ -2495,6 +2951,86 @@ const BULLETIN_PAGE_HEIGHT_PX = 1123;
 // فيُقاس دائماً بطباعة الطباعة. ويبقى القياس داخل المستند نفسه عمداً: خطوطه
 // وأوراق أنماطه محمّلة فعلاً، بينما مستند جديد يبدأ بخطوط غير جاهزة فيقيس
 // بأبعاد خط احتياطي وينحرف عن الطباعة الحقيقية.
+// **القياس والطباعة يجب أن يستعملا نفس الخط.** ترقيم النشرة يُحسب من ارتفاعات
+// تُقاس هنا في مستند التطبيق، ثم تُطبع في إطار طباعة مستقلّ. وخط النشرة يصل
+// عبر `@import` من Google Fonts، فقبل وصوله يقيس المجسّ بالخط الاحتياطي
+// (Tahoma) وبعده بـAlmarai — والفارق ليس تجميلياً: قياسٌ فعلي على نفس البيانات
+// أعطى رأساً 156.375px وعموداً 949px بالاحتياطي مقابل 152.375px و902px بـAlmarai.
+//
+// إن قِيست الصفحة بخطٍّ ثم طُبعت بآخر، اختلّ الترقيم: لفّ اسمٍ واحد يطيل العمود،
+// وتجاوزُ كتلة الأعمدة الأولى لورقتها — ولو ببضعة بكسلات — ينقلها كروم كاملةً
+// ويقصّها سفاري (`overflow:hidden`) فتضيع أسعار من نشرة الزبون.
+// (ملاحظة Codex P1 على cfcef74.)
+//
+// فننتظر جهوزية الخط **قبل القياس**، تماماً كما ينتظرها إطار الطباعة قبل
+// `print()` في printHtmlDocument. والانتظار محدود بسقف: خطٌّ لا يصل (شبكة
+// مقطوعة) يجب ألا يمنع فتح المعاينة ولا التصدير — وعندها يقيس الطرفان
+// بالاحتياطي معاً، وهو ما يبقيهما متطابقين أيضاً.
+// **وتُرجع القرار الذي وقع فعلاً**، لا مجرّد «انتهى الانتظار». مهلتان مستقلّتان
+// (واحدة هنا وأخرى في إطار الطباعة) لا تضمنان اتفاقاً: قد ينتهي انتظار القياس
+// بالخط الاحتياطي بينما يصل الخط أثناء انتظار الإطار، فيُقاس بخطٍّ ويُطبع بآخر.
+// لذلك يُختم القرار على الترميز نفسه في `bulletinRenderPlan` (السمة
+// `data-fallback-font`)، فتحمله نسخةُ الترميز التي تُقاس والتي تُطبع معاً — وهو
+// الضمان الوحيد للاتفاق (ملاحظتا Codex P1 على 6508dd7 و20d0c44).
+const BULLETIN_FONT_WAIT_CEILING_MS = 3000;
+// **هل يرسم المتصفح بخط النشرة فعلاً؟** سؤالٌ لا تُجيب عنه واجهةٌ واحدة:
+//   · `document.fonts.check()` يُرجع true أيضاً حين يكون التحميل قد **فشل**
+//     (لا شيء «معلّق» بعدها)، فيبدو الخط متاحاً وهو ليس كذلك — أُثبت بحجب
+//     Google Fonts عن المستند.
+//   · قياس `canvas.measureText` مسارُ مطابقةٍ **منفصل** عن مسار الرسم في DOM،
+//     وقد يتأخّر عنه؛ قياسٌ متكرر أعطى نتائج متضاربة بين تشغيلٍ وآخر على نفس
+//     الصفحة، فلا يصلح بوابةً.
+// الإجابة الصادقة الوحيدة من **نفس المسار الذي يرسم به المتصفح النشرة**: نرسم
+// نصّاً في DOM بخط النشرة وبخطّ ضابط ونقارن العرضين. تساويهما يعني أن الخط لم
+// يُطبَّق فسقط الرسم إلى الضابط.
+//
+// والفحص يشمل **كل وزن × كل مجموعة محارف** يطلبها القالب: الأوزان تصل مستقلّةً
+// عن بعضها، ومجموعات Google Fonts الفرعية (لاتينية/عربية) تصل مستقلّةً كذلك.
+// وصولُ بعضها دون بعض يعني عموداً مقيساً بمقاييس مختلطة، وهو نفس الخلل من باب
+// آخر (ملاحظتا Codex P1 على dd324da وadf3f51).
+function bulletinFontUsable() {
+  const template = window.OZKPriceListTemplate;
+  const family = template?.BULLETIN_FONT_FAMILY;
+  const weights = template?.BULLETIN_FONT_WEIGHTS;
+  const samples = template?.BULLETIN_FONT_SAMPLES;
+  if (!family || !Array.isArray(weights) || !weights.length
+    || !Array.isArray(samples) || !samples.length || typeof document === "undefined") return false;
+  const CONTROL = "monospace";
+  const probe = document.createElement("div");
+  probe.setAttribute("aria-hidden", "true");
+  probe.style.cssText = "position:fixed;left:-10000px;top:0;visibility:hidden;pointer-events:none;"
+    + "white-space:pre;font-size:40px;line-height:1";
+  document.body.appendChild(probe);
+  try {
+    const widthOf = (fontFamily, weight, text) => {
+      probe.style.fontFamily = fontFamily;
+      probe.style.fontWeight = String(weight);
+      probe.textContent = text;
+      return probe.getBoundingClientRect().width;
+    };
+    return weights.every((weight) => samples.every((sample) => {
+      const control = widthOf(CONTROL, weight, sample);
+      const candidate = widthOf(`"${family}",${CONTROL}`, weight, sample);
+      return Math.abs(candidate - control) > 0.5;
+    }));
+  } catch {
+    return false; // تعذّر القياس: نُثبّت الاحتياطي ولا نخمّن.
+  } finally {
+    probe.remove();
+  }
+}
+
+async function awaitBulletinFontReady() {
+  const fonts = typeof document !== "undefined" ? document.fonts : null;
+  if (!fonts || typeof fonts.ready?.then !== "function") return bulletinFontUsable();
+  if (bulletinFontUsable()) return true;
+  await Promise.race([
+    fonts.ready.catch(() => {}),
+    new Promise((resolve) => setTimeout(resolve, BULLETIN_FONT_WAIT_CEILING_MS))
+  ]);
+  return bulletinFontUsable();
+}
+
 function buildMeasuredBulletinLayout(template, groups, renderOptions) {
   if (typeof document === "undefined" || typeof template?.layoutGroupsMeasured !== "function") return null;
   const probe = document.createElement("div");
@@ -2600,6 +3136,12 @@ function bulletinRenderPlan(dataset) {
     unitLabel: useSyria ? "سعر المفرق للوحدة" : "سعر الكرتونة (جملة)",
     theme: normalizedBulletinPdfTheme(theme)
   };
+  // **قرار الخط يُتَّخذ مرة واحدة هنا، ويسافر مع الترميز.** إن لم يكن خط النشرة
+  // جاهزاً بكل أوجهه، تُوسَم نسخة الترميز بالسلسلة الاحتياطية — فيقيسها المجسّ
+  // بها وتُطبع بها. بلا ذلك يقيس المجسّ بمقاييس مختلطة (ما جهز من الأوجه
+  // بـAlmarai والباقي بالاحتياطي) بينما يُطبع المستند بالاحتياطي كاملاً
+  // (ملاحظة Codex P1 على 20d0c44).
+  renderOptions.fallbackFontOnly = !bulletinFontUsable();
   const layout = buildMeasuredBulletinLayout(template, templateGroups, renderOptions);
   if (layout?.oversized?.length) {
     console.warn("نشرة الأسعار: مجموعة أطول من عمود صفحة كاملة، لم تُقصّ ولم توضع:", layout.oversized);
@@ -2887,13 +3429,15 @@ function buildBulletinDataset(useSyria = false, theme = state.bulletinPdfTheme) 
 
 // يفتح معاينة النشرة قبل التصدير. لا يخزّن أي بيانات نشرة في state — فقط
 // اختيار النوع والثيم؛ البيانات تُبنى عند كل رسم من buildBulletinDataset.
-function openPricePreview(useSyria = false, theme = state.bulletinPdfTheme) {
+async function openPricePreview(useSyria = false, theme = state.bulletinPdfTheme) {
   if (useSyria && !state.syriaRateConfirmed) {
     state.showExchangeModal = true;
     render();
     return;
   }
   state.syriaRateConfirmed = false;
+  // الترقيم يُقاس عند كل رسم للمعاينة، فلا نرسمها قبل أن يجهز الخط.
+  await awaitBulletinFontReady();
   const built = buildBulletinDataset(useSyria, theme);
   if (!built.ok) {
     setNotice("error", built.message);
@@ -2989,7 +3533,7 @@ async function openFreshPricePreview(useSyria = false, theme = state.bulletinPdf
     if (useSyria) state.syriaRateConfirmed = false;
     return;
   }
-  openPricePreview(useSyria, theme);
+  await openPricePreview(useSyria, theme);
 }
 
 // إغلاق المعاينة يُسقط أيضاً مدخل التاريخ الذي أضافه فتحها، فيرجع زر «رجوع»
@@ -2997,8 +3541,16 @@ async function openFreshPricePreview(useSyria = false, theme = state.bulletinPdf
 // إطار الطباعة المخفي يبقى في الصفحة حتى afterprint أو حتى المهلة الاحتياطية
 // (60 ثانية) — وعلى iOS كثيراً ما لا يصل afterprint. إغلاق المعاينة يعني أن
 // المستخدم انتهى، فنُسقط الإطار فوراً بدل تركه ومعه مستند النشرة كاملاً بالذاكرة.
+// حذفُ الإطار وحده لا يكفي: حجز عنوان الطباعة يُحرَّر في `cleanup` الخاص به،
+// و`cleanup` لا يصل إلا عبر `afterprint` أو السقف الاحتياطي — وكلاهما لا
+// يُجدَّل إلا **بعد** أن تُستدعى الطباعة فعلاً. فإغلاق المعاينة على الهاتف قبل
+// ذلك (زر رجوع أو إغلاق خلال أول ربع ثانية) كان يترك اسم المستند — واسم الزبون
+// معه — في عنوان التبويب إلى أن تُعاد الطباعة أو تُحمَّل الصفحة من جديد.
 function removePrintFrame() {
-  document.querySelectorAll("iframe[data-print-frame]").forEach((frame) => frame.remove());
+  document.querySelectorAll("iframe[data-print-frame]").forEach((frame) => {
+    if (typeof frame.ozkPrintCleanup === "function") frame.ozkPrintCleanup();
+    frame.remove();
+  });
 }
 
 function closePricePreview() {
@@ -3056,8 +3608,17 @@ function bulletinDocumentTitle(dataset) {
   return dataset.useSyria ? "نشرة المفرّق (ليرة)" : "نشرة الجملة (دولار)";
 }
 
+function bulletinCurrencyCode(dataset) {
+  return dataset && dataset.useSyria ? "SYP" : "USD";
+}
+
+// اسم ملف النشرة من القاعدة المركزية نفسها (`archiveDocumentTitle`) لا من صيغة
+// مستقلة هنا: صيغتان لنفس المستند تنحرفان عن بعضهما عند أول تعديل.
 function bulletinDocumentFilename(dataset) {
-  return `نشرة-الأسعار-${dataset.useSyria ? "SYP" : "USD"}-${todayIsoDate()}`;
+  return archiveDocumentTitle("price_list", {
+    currency: bulletinCurrencyCode(dataset),
+    date: todayIsoDate()
+  });
 }
 
 // تصدير النشرة إلى PDF عبر **طباعة المتصفح الأصلية** («حفظ بصيغة PDF»).
@@ -3090,7 +3651,11 @@ function exportBulletinPdf(dataset) {
     render();
     return false;
   }
+  // فرق مقصود: `title` نصّ بشري للتنبيه على الشاشة («نشرة الجملة (دولار)»)،
+  // و`fileTitle` هو اسم الملف. كان الأول يُمرَّر إلى printHtmlDocument فيدهس
+  // الثاني داخل `withDocumentTitle` — فيُحسب اسم الملف الصحيح ثم يُرمى.
   const title = bulletinDocumentTitle(dataset);
+  const fileTitle = bulletinDocumentFilename(dataset);
   const plan = bulletinRenderPlan(dataset);
   // نشرة ناقصة أسوأ من نشرة متأخّرة: لو أفلتت مجموعة من التوزيع فأصنافها تختفي
   // من الملف الذي يصل الزبون بلا أي أثر. نرفض التصدير ونسمّي المجموعة صراحةً.
@@ -3101,8 +3666,10 @@ function exportBulletinPdf(dataset) {
   }
   const documentHtml = template.printDocument({
     theme: dataset.theme,
-    title: bulletinDocumentFilename(dataset),
+    title: fileTitle,
     // نفس ناتج خطة الرسم التي تعرضها المعاينة حرفياً.
+    // قرار الخط مختوم داخل الترميز نفسه (`data-fallback-font`)، فما يُطبع هو
+    // ما قِيس بالضبط بلا وسيطٍ إضافي هنا.
     bodyHtml: plan.markup
   });
   // الحفظ والمشاركة يجريان داخل **نافذة النظام** التي تفتحها الطباعة الأصلية،
@@ -3111,8 +3678,8 @@ function exportBulletinPdf(dataset) {
   // سبب عطل PDF على الهاتف، فلا يُعاد. الوصف الدقيق: «مشاركة/حفظ عبر نافذة النظام».
   if (state.pricePreview) state.pricePreview.printStatus = "opened";
   printHtmlDocument(documentHtml, {
-    title,
-    archive: { docType: "price_list", meta: { date: todayIsoDate() } },
+    title: fileTitle,
+    archive: { docType: "price_list", meta: { date: todayIsoDate(), currency: bulletinCurrencyCode(dataset) } },
     onError: () => {
       // حجب الطباعة/النوافذ: نُبقي المعاينة مفتوحة ونعرض سبباً واضحاً وزر إعادة
       // محاولة، بدل إغلاق الشاشة وترك المستخدم بلا مخرج ولا تفسير.
@@ -3131,6 +3698,11 @@ function exportBulletinPdf(dataset) {
 function exportPricePreview() {
   const preview = state.pricePreview;
   if (!preview) return;
+  // **لا انتظار هنا.** فتحُ المعاينة انتظر جهوزية الخط قبل أول قياس، فحين يصل
+  // المستخدم إلى هذا الزر تكون الحالة مستقرّة؛ وإعادة انتظارها عند كل ضغطة
+  // تُضيف حتى ثلاث ثوانٍ صامتة بين الضغط وفتح ورقة الطباعة — ضررٌ حقيقي على
+  // هاتف بطيء بلا مكسب. والاتفاق بين القياس والطباعة يأتي من `bulletinRenderPlan`
+  // الذي يختم قرار الخط على الترميز، فيُقاس ويُطبع بنفسه.
   const built = buildBulletinDataset(preview.useSyria, preview.theme);
   if (!built.ok) {
     setNotice("error", built.message);
@@ -4021,19 +4593,52 @@ function customerLimitSourceLabel(source) {
   }[source] || "بلا حد";
 }
 
-// التطبيع على الطرفين إلزامي: مفاتيح الحدود المحفوظة سابقاً غير مطبّعة أحياناً
+// هوية صاحب الحد هي `customerGuid`، لا اسمه. الاسم في الأمين نصّ قابل للتعديل
+// في أي لحظة، ومفتاح الحد المحفوظ سابقاً مشتقّ منه (`normalizeItemName`)، فإعادة
+// تسمية حساب واحدة كانت تُغيّر المفتاح فينفصل الحد عن صاحبه صامتاً: يظهر الزبون
+// «بلا حد» ويسقط عنه تصنيف «تجاوز الحد» و«قريب من الحد» كلياً. هذا نفس العطل
+// البنيوي الذي أصاب ربط الفواتير بالاسم (راجع `customerInvoiceEntryFor`).
+//
+// ثلاث خرائط لا واحدة، لأن الاحتياط بالاسم ليس واحداً في كل الحالات:
+//   • byGuid — الهوية القطعية.
+//   • byNameLegacy — حدود **بلا معرّف** فقط (سجلات قديمة لم تُنسب بعد). هي وحدها
+//     ما يجوز مطابقته بالاسم لزبون يحمل معرّفاً؛ ولو سمحنا بغيرها لأمكن أن يرث
+//     حسابٌ حدَّ حساب آخر يصادف أن يحمل الاسم نفسه.
+//   • byNameAny — لتقارير أرصدة قديمة لا تحمل معرّفاً أصلاً؛ سلوكها هو السلوك
+//     السابق حرفياً، فلا ينكسر شيء قبل وصول مزامنة تحمل المعرّف.
+//
+// التطبيع على طرفَي الاسم يبقى إلزامياً: مفاتيح محفوظة سابقاً غير مطبّعة أحياناً
 // (مثال حقيقي: «مركز شريفة اسعد شريفة» بالتاء المربوطة) بينما مزامنة الأرصدة
 // تطبّع (ة←ه)، فكان الحد لا يرتبط بصاحبه أبداً ويظهر «بلا حد محدّد».
-// التطبيع هنا يُصلح السجلات القديمة بلا ترحيل بيانات.
-function customerLimitMap() {
-  const map = new Map();
+function customerLimitMaps() {
+  const byGuid = new Map();
+  const byNameLegacy = new Map();
+  const byNameAny = new Map();
   (state.customerCreditLimits || []).forEach((limit) => {
-    const raw = limit && (limit.customerKey || limit.customerName);
-    if (!raw) return;
-    const key = normalizeItemName(String(raw));
-    if (key && !map.has(key)) map.set(key, limit);
+    if (!limit) return;
+    const guid = normGuid(limit.customerGuid);
+    if (guid && !byGuid.has(guid)) byGuid.set(guid, limit);
+    const raw = limit.customerKey || limit.customerName;
+    const key = raw ? normalizeItemName(String(raw)) : "";
+    if (!key) return;
+    if (!byNameAny.has(key)) byNameAny.set(key, limit);
+    if (!guid && !byNameLegacy.has(key)) byNameLegacy.set(key, limit);
   });
-  return map;
+  return { byGuid, byNameLegacy, byNameAny };
+}
+
+// يعيد { limit, matchedBy } — و`matchedBy` جزء من الناتج عمداً كي تستطيع الواجهة
+// والفحوص التمييز بين ربط قطعي بالمعرّف وربط احتياطي بالاسم.
+function customerLimitFor(item, maps) {
+  const guid = normGuid(item?.customerGuid);
+  if (guid) {
+    const byGuid = maps.byGuid.get(guid);
+    if (byGuid) return { limit: byGuid, matchedBy: "guid" };
+  }
+  const key = normalizeItemName(customerKey(item));
+  if (!key) return { limit: null, matchedBy: "none" };
+  const byName = guid ? maps.byNameLegacy.get(key) : maps.byNameAny.get(key);
+  return byName ? { limit: byName, matchedBy: "name" } : { limit: null, matchedBy: "none" };
 }
 
 function deriveCustomerStatus(balance, limit) {
@@ -4045,10 +4650,10 @@ function deriveCustomerStatus(balance, limit) {
 }
 
 function applyCustomerLimits(items) {
-  const limits = customerLimitMap();
+  const maps = customerLimitMaps();
   return items.map((item) => {
     const key = customerKey(item);
-    const savedLimit = limits.get(normalizeItemName(key)); // الطرف الآخر مطبّع أيضاً
+    const { limit: savedLimit, matchedBy } = customerLimitFor(item, maps);
     const ameenLimit = Number(item?.creditLimit || 0);
     const internalLimit = Number(savedLimit?.creditLimit || 0);
     const effectiveLimit = internalLimit > 0 ? internalLimit : ameenLimit;
@@ -4061,6 +4666,7 @@ function applyCustomerLimits(items) {
       internalCreditLimit: internalLimit,
       creditLimit: effectiveLimit,
       creditLimitNotes: savedLimit?.notes || "",
+      internalLimitMatchedBy: internalLimit > 0 ? matchedBy : "none",
       limitSource: internalLimit > 0 ? "internal" : ameenLimit > 0 ? "ameen" : "none",
       remainingLimit: effectiveLimit > 0 ? effectiveLimit - Math.max(0, balance) : 0,
       lastPaymentAmount: Number(item?.lastPaymentAmount || 0),
@@ -4543,7 +5149,7 @@ function customerBalanceRow(item) {
       <span>الرصيد: ${escapeHtml(formatMoney(customerBalance(item)))} / الحد: ${escapeHtml(limit > 0 ? formatMoney(limit) : "غير محدد")}</span>
       <span>المتبقي من الحد: ${escapeHtml(limit > 0 ? formatMoney(remaining) : "غير محدد")} / الحالة: ${escapeHtml(customerStatusLabel(item.status))} / المصدر: ${escapeHtml(customerLimitSourceLabel(item.limitSource))}</span>
       <span>آخر دفعة: ${escapeHtml(customerLastPaymentAmount(item) > 0 ? formatMoney(customerLastPaymentAmount(item)) : "غير متوفر")} / التاريخ: ${escapeHtml(customerLastPaymentDate(item) ? formatDate(customerLastPaymentDate(item)) : "غير متوفر")}</span>
-      <form class="customer-limit-editor" data-form="customer-limit" data-customer-key="${escapeHtml(key)}" data-customer-name="${escapeHtml(item.name || "")}">
+      <form class="customer-limit-editor" data-form="customer-limit" data-customer-key="${escapeHtml(key)}" data-customer-guid="${escapeHtml(normGuid(item.customerGuid))}" data-customer-name="${escapeHtml(item.name || "")}">
         <label>
           الحد الداخلي
           <input name="creditLimit" type="text" inputmode="decimal" dir="ltr" value="${escapeHtml(item.internalCreditLimit > 0 ? item.internalCreditLimit : "")}" placeholder="${escapeHtml(limit > 0 ? formatMoney(limit) : "0")}">
@@ -4821,8 +5427,9 @@ function printHtmlDocument(html, options = {}) {
   if (options.archive && options.archive.docType) {
     archiveToICloud(options.archive.docType, html, options.archive.meta);
   }
-  const previous = document.querySelector("iframe[data-print-frame]");
-  if (previous) previous.remove();
+  // تنظيف كامل لا حذف مجرّد: يُحرِّر حجز عنوان الطباعة السابق قبل أن نأخذ
+  // الحجز الجديد، فيُلتقط العنوان الأصلي للتبويب لا عنوان مستند سابق.
+  removePrintFrame();
 
   const frame = document.createElement("iframe");
   frame.setAttribute("data-print-frame", "");
@@ -4833,12 +5440,20 @@ function printHtmlDocument(html, options = {}) {
   frame.style.cssText =
     `position:fixed;left:-10000px;top:0;width:${BULLETIN_PAGE_WIDTH_PX}px;height:${BULLETIN_PAGE_HEIGHT_PX}px;opacity:0;border:0;pointer-events:none;`;
 
+  // العنوان يُرفع **قبل** إدراج الإطار: كروم يلتقط اسم الملف المقترح لحظة فتح
+  // ورقة المعاينة، فرفعه بعدها سباق خاسر. ويُعاد في cleanup — أي عند afterprint
+  // أو عند السقف الاحتياطي أو عند الحجب.
+  const releasePrintTitle = holdPrintDocumentTitle(options.title);
+
   let finished = false;
   const cleanup = () => {
     if (finished) return;
     finished = true;
+    releasePrintTitle();
     setTimeout(() => frame.remove(), 1000);
   };
+  // يُتاح لكل مسار يزيل الإطار (إغلاق المعاينة، زر الرجوع، طباعة تالية).
+  frame.ozkPrintCleanup = cleanup;
 
   frame.addEventListener("load", () => {
     const win = frame.contentWindow;
@@ -4853,8 +5468,14 @@ function printHtmlDocument(html, options = {}) {
     } catch {
       // بعض المتصفحات تمنع الاستماع داخل الإطار — تكفي المهلة الاحتياطية أدناه.
     }
-    // مهلة قصيرة كي تكتمل الخطوط والرسم قبل فتح ورقة الطباعة.
-    setTimeout(() => {
+    // **لا تُطبع قبل أن تجهز الخطوط.** مهلة 250ms العمياء كانت سباقاً: النشرة
+    // تُرقَّم بارتفاعات قِيست في مستند التطبيق (حيث الخط جاهز)، ثم تُرسم هنا في
+    // مستند جديد قد يبدأ بخط احتياطي. اختلاف مقاييس الخط بين المستندين يغيّر لفّ
+    // الأسماء فيطول العمود، وتجاوز كتلة الأعمدة الأولى لورقتها — ولو ببضعة
+    // بكسلات — يجعل كروم ينقلها **كاملةً** إلى الورقة التالية فتخرج الورقة الأولى
+    // بالرأس وحده. `document.fonts.ready` يجعل المطبوع هو المقيس نفسه.
+    // المهلة تبقى سقفاً احتياطياً: خط لا يصل أبداً يجب ألا يمنع الطباعة إطلاقاً.
+    const printWhenReady = () => {
       try {
         win.focus();
         win.print();
@@ -4865,11 +5486,39 @@ function printHtmlDocument(html, options = {}) {
       }
       // احتياط: إن لم يصل afterprint (شائع على iOS) نحذف الإطار بعد مهلة.
       setTimeout(cleanup, 60000);
-    }, 250);
+    };
+
+    // أول المُطلقَين يفوز، ولا يُطلق أيٌّ منهما مرتين: جهوزية الخطوط إن وصلت،
+    // وإلا السقف الاحتياطي. الـ250ms الأصلية تبقى حدّاً أدنى كي يكتمل الرسم.
+    let printed = false;
+    const printOnce = () => {
+      if (printed) return;
+      printed = true;
+      printWhenReady();
+    };
+    const MIN_SETTLE_MS = 250;
+    const FONT_WAIT_CEILING_MS = 3000;
+    setTimeout(() => {
+      const fonts = win.document && win.document.fonts;
+      if (!fonts || typeof fonts.ready?.then !== "function") {
+        printOnce();
+        return;
+      }
+      fonts.ready.then(printOnce, printOnce);
+    }, MIN_SETTLE_MS);
+    setTimeout(printOnce, FONT_WAIT_CEILING_MS);
   }, { once: true });
 
-  document.body.appendChild(frame);
+  // **srcdoc قبل الإدراج.** إطارٌ يُدرَج فارغاً ثم يُملأ يُطلق `load` **مرّتين**:
+  // مرة لمستند `about:blank` الأولي ومرة للمستند الحقيقي (قِيس على كروميوم
+  // وWebKit معاً، 2026-09-06). والمعالج المسجَّل بـ`{ once: true }` كان يلتقط
+  // الأولى، فينتج عن ذلك عطلان صامتان: `afterprint` يُسجَّل على نافذة تُستبدل
+  // بعدها فلا يصل التنظيف أبداً (يبقى الإطار — وعنوانُ الطباعة — معلّقَين حتى
+  // السقف الاحتياطي)، وتُنتظر جهوزيةُ خطوط مستندٍ فارغ بدل خطوط المستند
+  // المطبوع فيسقط الغرضُ كلّه من انتظار `document.fonts.ready`.
+  // بالترتيب الصحيح يُطلَق `load` مرة واحدة، على المستند المطبوع نفسه.
   frame.srcdoc = withDocumentTitle(html, options.title);
+  document.body.appendChild(frame);
 }
 
 // أرشفة صامتة إلى iCloud Drive عبر الجسر المحلي على الماك (src/icloud-archive.js).
@@ -4906,7 +5555,10 @@ const DOC_TYPE_LABELS = {
   invoice: "فاتورة",
   return_invoice: "فاتورة مرتجع",
   receipt: "سند قبض",
-  payment: "سند دفع",
+  // «سند صرف» لا «سند دفع»: هو النص المطبوع على المستند نفسه
+  // (`voucherPdfMarkup`) وعلى زرّه وتنبيهه، فاختلاف اسم الملف عنه كان يجعل
+  // المالك يبحث في الأرشيف عن اسم لا يراه على الورقة.
+  payment: "سند صرف",
   account_statement: "كشف حساب",
   stock_report: "تقرير المخزون",
   receivables_report: "تقرير الذمم",
@@ -4917,39 +5569,72 @@ const DOC_TYPE_LABELS = {
 
 // ينقّي جزءاً من اسم الملف: يحذف ما تمنعه أنظمة الملفات ومحارف التحكّم
 // والاتجاه غير المرئية، ويُبقي الحروف العربية والفراغات العادية كما هي.
-function sanitizeDocumentTitle(value) {
-  return String(value == null ? "" : value)
+//
+// **يطابق `sanitizePart` في `tools/mac-archive-bridge/lib/naming.mjs` قاعدةً
+// بقاعدة، وحدّاً بحدّ.** كانت النسختان تفترقان في ثلاثة مواضع صامتة، وكلٌّ منها
+// يُخرج للمالك اسمين مختلفين لنفس المستند (المنزَّل والمؤرشف):
+//   • التطويل U+0640: «محـــمد» في التنزيل و«محمد» في الأرشيف.
+//   • التشكيل: «مُحَمَّد» في التنزيل و«محمد» في الأرشيف.
+//   • الحدّ: 80 هنا مقابل 60 للطرف و40 للرقم هناك — فاسم طويل يُقصّ مرّتين
+//     بطولين مختلفين.
+// لذلك صار `max` وسيطاً صريحاً يمرّره كل حقل بحدّه، والحذف يسبق NFC كما هناك.
+// أي انحراف مستقبلي يُفشل حارس التطابق في `scripts/check-document-filenames.mjs`
+// الذي يقارن ناتج التنفيذين على مدخلات عربية حقيقية ومتطرّفة.
+const DOC_TITLE_INVISIBLE = /[\u200B-\u200F\u061C\u2066-\u2069\u202A-\u202E\uFEFF\u0640]/g;
+const DOC_TITLE_DIACRITICS = /[\u064B-\u0652\u0656-\u065F\u0670\u06D6-\u06ED]/g;
+
+function sanitizeDocumentTitle(value, max = 80) {
+  let text = String(value == null ? "" : value)
+    .replace(DOC_TITLE_INVISIBLE, "")
+    .replace(DOC_TITLE_DIACRITICS, "")
     .normalize("NFC")
     .replace(/[\u0000-\u001F\u007F]/g, " ")
-    .replace(/[\u200B-\u200F\u061C\u2066-\u2069\u202A-\u202E\uFEFF]/g, "")
-    .replace(/[/\\:*?"<>|]/g, " ")
+    .replace(/[/\\:]/g, " ")
+    .replace(/[<>"|?*]/g, " ")
     .replace(/\.{2,}/g, ".")
     .replace(/\s+/g, " ")
     .trim()
     .replace(/^[.\s-]+/, "")
-    .replace(/[.\s]+$/, "")
-    .slice(0, 80)
-    .trim();
+    .replace(/[.\s]+$/, "");
+  if (text.length > max) text = text.slice(0, max).trim();
+  return text;
 }
 
-// التاريخ في اسم الملف بصيغة يقرأها المالك (DD-MM-YYYY)، بينما يبقى اسم النسخة
-// المؤرشفة على YYYY-MM-DD حسب اصطلاح مجلدات iCloud المعتمد. المصدر واحد.
+// التاريخ في اسم الملف = YYYY-MM-DD، **نفس** صيغة اسم النسخة المؤرشفة في
+// iCloud. كانت الصيغتان مختلفتين عمداً (DD-MM-YYYY للملف)، فكان الملف المنزَّل
+// ونسخته في الأرشيف يبدوان مستندين مختلفين لنفس اليوم ولا يُفرزان معاً. صيغة
+// واحدة تُبقيهما متطابقين وتُرتّب الملفات زمنياً عند الفرز بالاسم.
 function fileDateLabel(isoDate) {
-  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(isoDate || "").slice(0, 10));
-  return match ? `${match[3]}-${match[2]}-${match[1]}` : "";
+  const value = String(isoDate || "").slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : "";
 }
+
+// أنواع لا يدخل رقمها اسم الملف. رقم السند يُولَّد **محلياً وعشوائياً**
+// (`docNumber` → «R-20260906-4821»)، فهو لا يعرّف شيئاً للمالك ولا للزبون
+// ووجوده في الاسم يطمس ما يميّز السند فعلاً: الطرف والتاريخ. يبقى في `meta`
+// كما هو لأن جسر الأرشفة يشترطه لتمييز سندين لنفس الطرف في اليوم نفسه.
+const NUMBERLESS_FILE_DOC_TYPES = new Set(["receipt", "payment"]);
 
 /**
- * عنوان المستند المطبوع = اسم الملف الذي يقترحه المتصفح.
+ * اسم المستند = اسم الملف الذي يقترحه المتصفح **وعنوان النسخة المؤرشفة**.
  * يُبنى من نفس `meta` التي تذهب إلى الأرشفة — لا لقطة أخرى ولا قيمة افتراضية.
+ * هذه هي القاعدة المركزية الوحيدة: أي مسار تصدير يشتقّ اسمه من هنا، ولا يُبنى
+ * اسم ملف بالتركيب اليدوي في أي موضع آخر.
  */
 function archiveDocumentTitle(docType, meta) {
   const info = meta || {};
+  // النشرة لها اصطلاحها الخاص (شرطات بلا فراغات + رمز العملة) المعتمد منذ
+  // PR #121 والذي يعرفه الزبائن على ملفاتهم. لا يُوحَّد قسراً مع بقية
+  // المستندات، لكنه يُبنى من هنا وحده فلا تنشأ قاعدة تسمية ثانية.
+  if (docType === "price_list") {
+    const currency = sanitizeDocumentTitle(info.currency, 8).toUpperCase();
+    return ["نشرة-الأسعار", currency, fileDateLabel(info.date)].filter(Boolean).join("-");
+  }
   const label = docType === "other_report"
-    ? (sanitizeDocumentTitle(info.title) || DOC_TYPE_LABELS.other_report)
+    ? (sanitizeDocumentTitle(info.title, 80) || DOC_TYPE_LABELS.other_report)
     : (DOC_TYPE_LABELS[docType] || "مستند");
-  const party = sanitizeDocumentTitle(info.party);
-  const number = sanitizeDocumentTitle(info.number);
+  const party = sanitizeDocumentTitle(info.party, 60);
+  const number = NUMBERLESS_FILE_DOC_TYPES.has(docType) ? "" : sanitizeDocumentTitle(info.number, 40);
   const date = fileDateLabel(info.date);
   let title = label;
   if (party) title += ` - ${party}`;
@@ -4958,7 +5643,49 @@ function archiveDocumentTitle(docType, meta) {
   return title;
 }
 
-// يفرض العنوان داخل المستند المطبوع نفسه — هو وحده ما يقرأه كروم.
+/** اسم الملف الكامل لأي مستند — نقطة واحدة تضيف الامتداد. */
+function documentFileName(docType, meta) {
+  return `${archiveDocumentTitle(docType, meta)}.pdf`;
+}
+
+// ===== أين يقرأ المتصفح اسم الملف المقترح فعلاً =====
+//
+// قياس فعلي (Chromium عبر Playwright، 2026-09-06): مستند مطبوع داخل iframe
+// عنوانه «فاتورة - حسن عباس - رقم 562 - 2026-09-06» أخرج PDF حقلُ /Title فيه
+// «OZK TOBACCO | خدمة العملاء» — أي **عنوان المستند الأعلى**، لا عنوان الإطار.
+// وبضبط `document.title` للمستند الأعلى وحده تغيّر /Title إلى الاسم المطلوب.
+// السبب في كروميوم: اسم «حفظ بصيغة PDF» يأتي من
+// `PrintViewManagerBase::RenderSourceName()` أي `WebContents::GetTitle()` —
+// عنوان التبويب. وسفاري لا يملك مصدراً آخر أصلاً. لذلك كان إصلاح 4a4af7f
+// (فرض العنوان داخل الإطار عبر `withDocumentTitle`) صحيحاً في نيّته ولا يصل
+// إلى المستخدم: العنوان يُكتب في مستند لا يقرأ المتصفح عنوانه.
+//
+// نرفع العنوان إلى المستند الأعلى طوال ورقة الطباعة ثم نعيده. حلٌّ واحد لكل
+// المتصفحات — لا فرع خاص بمتصفح — و`withDocumentTitle` يبقى لأنه لا يضرّ
+// ويُبقي المستند المطبوع معنوناً بنفسه.
+let printTitleHold = null;
+
+function holdPrintDocumentTitle(title) {
+  if (typeof document === "undefined") return () => {};
+  const next = String(title || "").trim();
+  if (!next) return () => {};
+  // العنوان الأصلي يُلتقط **مرة واحدة** عبر سلسلة الطباعات المتتابعة. طباعة
+  // تبدأ قبل انتهاء سابقتها (المستخدم يصدّر مستنداً ثم آخر) كانت — لو التقطناه
+  // من جديد — تحفظ اسم المستند السابق على أنه «الأصلي» فيعلق في التبويب أبداً.
+  const original = printTitleHold ? printTitleHold.original : document.title;
+  // ورمز ملكية: `printHtmlDocument` يحذف إطار الطباعة السابق بلا تشغيل تنظيفه،
+  // فتنظيفُه المتأخّر (السقف الاحتياطي) يجب ألا يسحب عنوان طباعةٍ أحدث منه.
+  const hold = { original };
+  printTitleHold = hold;
+  document.title = next;
+  return () => {
+    if (printTitleHold !== hold) return;
+    document.title = original;
+    printTitleHold = null;
+  };
+}
+
+// يفرض العنوان داخل المستند المطبوع نفسه أيضاً.
 function withDocumentTitle(html, title) {
   const safe = escapeHtml(String(title || "").trim());
   if (!safe) return html;
@@ -4976,13 +5703,16 @@ function withDocumentTitle(html, title) {
 // المحرّك القديم صار يطلّع صفحات بيضا بعد تحديثات كروم. الطباعة الأصلية
 // ترسم التقرير مثل الشاشة تماماً (عربي وألوان مظبوطة) ومستحيل تطلع فاضية.
 //
-// `archive` اختياري: { docType, meta } — عند تمريره تُحفظ نسخة في iCloud أيضاً،
-// ويُشتقّ منه عنوان المستند (اسم ملف كروم) فيتطابق الاسمان دائماً.
-async function exportReportPdf(bodyHtml, filename, archive) {
-  const title = archive && archive.docType
-    ? archiveDocumentTitle(archive.docType, archive.meta)
-    : String(filename || "تقرير").replace(/\.pdf$/i, "");
-  if (archive && archive.docType) archiveToICloud(archive.docType, bodyHtml, archive.meta);
+// `archive` = { docType, meta }: منه **وحده** يُشتقّ اسم الملف على المسارين
+// (تنزيل/مشاركة الهاتف، وعنوان ورقة الطباعة على سطح المكتب) واسم النسخة في
+// iCloud — فيستحيل أن يفترق الاسمان. كان المستدعي يمرّر اسم ملف مبنيّاً يدوياً
+// («سند-قبض-حسن_عباس-2026-09-06.pdf») يُستعمل على الهاتف فقط، فخرج للمالك اسم
+// بشرطات سفلية وبتاريخ اليوم بدل تاريخ المستند، ومختلف عن نسخة الأرشيف.
+async function exportReportPdf(bodyHtml, archive) {
+  const docType = archive && archive.docType;
+  const title = docType ? archiveDocumentTitle(docType, archive.meta) : "تقرير";
+  const filename = `${title}.pdf`;
+  if (docType) archiveToICloud(docType, bodyHtml, archive.meta);
   if (isHandheldDevice()) {
     try {
       const blob = await createPortablePdfBlob(bodyHtml, filename, { width: BULLETIN_PAGE_WIDTH_PX });
@@ -5016,10 +5746,18 @@ async function exportReportPdf(bodyHtml, filename, archive) {
   return true;
 }
 
-// يجلب حركات الزبون الكاملة (من تقرير ameen_customer_movements) بمطابقة الاسم
+// يجلب حركات الزبون الكاملة (من تقرير ameen_customer_movements): بالمعرّف أولاً
+// ثم بتطابق الاسم حرفياً. المطابقة تبقى **قطعية** في الحالتين — لا مطابقة ذكية
+// هنا: هذا مصدر كشف الحساب الرسمي، ونسبة دفتر زبون لزبون آخر خطأ محاسبي لا
+// يجوز أن ينتج عن تقارب أسماء.
 function customerFullMovements(item) {
   const report = state.customerMovementsReport;
   const items = Array.isArray(report?.items) ? report.items : [];
+  const guid = normGuid(item?.customerGuid);
+  if (guid) {
+    const byGuid = items.find((x) => normGuid(x?.customerGuid) === guid);
+    if (byGuid) return byGuid;
+  }
   const name = String(item?.name || "").trim();
   if (!name) return null;
   return items.find((x) => String(x.name || "").trim() === name) || null;
@@ -5029,7 +5767,9 @@ function customerFullMovements(item) {
 // بالتاريخ/المبلغ، فتصحّ حتى مع الحسومات وتعدد فواتير اليوم الواحد. null إن لم تصل
 // بيانات المزامنة المحدّثة بعد (فيرجع المستدعي للعرض الآمن: الرصيد الحالي فقط).
 function movementForBill(custName, billGuid) {
-  const g = String(billGuid || "").trim().toLowerCase();
+  // المعرّف الصفري ليس معرّفاً: البحث به كان يعيد أول قيد للزبون أياً كان، لأن
+  // كل القيود تحمل الصفري في بيانات الإنتاج اليوم.
+  const g = normGuid(billGuid);
   if (!g) return null;
   const report = state.customerMovementsReport;
   const items = report && Array.isArray(report.items) ? report.items : [];
@@ -5043,17 +5783,17 @@ function movementForBill(custName, billGuid) {
 
 // حركة الفاتورة في تقرير الحركات: نطابق بمعرّف القيد (GUID) إن وُجد وغير صفري، وإلا بالتاريخ
 // والمبلغ على جهة المدين. سبب الاحتياط: قيود السنة الجديدة (AmnDb002 بعد التدوير) تأتي أحياناً
-// بمعرّف صفري (00000000-...) فيفشل الربط بالمعرّف وحده.
+// بمعرّف صفري (00000000-...) فيفشل الربط بالمعرّف وحده — وقياس 2026-09-05 على بيانات
+// الإنتاج: **كل** الـ1830 قيداً في التقرير تحمل الصفري، فالربط بالمعرّف لا يعمل عملياً اليوم.
 function invoiceMovement(custName, inv) {
   const report = state.customerMovementsReport;
   const items = report && Array.isArray(report.items) ? report.items : [];
   const match = smartNameMatch(items, (it) => it.name, custName);
   const movements = match && Array.isArray(match.movements) ? match.movements : [];
   if (!movements.length) return null;
-  const g = String(inv?.guid || "").trim().toLowerCase();
-  const ZERO_GUID = "00000000-0000-0000-0000-000000000000";
-  if (g && g !== ZERO_GUID) {
-    const byGuid = movements.find((m) => String(m?.billGuid || "").trim().toLowerCase() === g);
+  const g = normGuid(inv?.guid);
+  if (g) {
+    const byGuid = movements.find((m) => normGuid(m?.billGuid) === g);
     if (byGuid) return byGuid;
   }
   const d = String(inv?.date || "").slice(0, 10);
@@ -5213,10 +5953,8 @@ async function exportCustomerStatementPdf() {
     render();
     return;
   }
-  const safe = String(item.name || "customer").replace(/[^\p{L}\p{N}]+/gu, "_").slice(0, 40);
   const exported = await exportReportPdf(
     customerStatementPdfMarkup(item),
-    `كشف-حساب-${safe}-${todayIsoDate()}.pdf`,
     { docType: "account_statement", meta: { party: item.name, date: todayIsoDate() } }
   );
   if (exported) setNotice("success", isHandheldDevice() ? "تم تجهيز كشف الحساب كملف PDF." : "تم تجهيز كشف الحساب PDF.");
@@ -5325,6 +6063,7 @@ function voucherPdfMarkup(v) {
     </table>` : ""}
     <table>${rows.join("")}</table>
     <p class="muted" style="margin:8px 0 0">${noteLine}</p>
+    ${(isInv || isRet) ? `<div style="margin:10px 0 0;padding:7px 10px;border:1px solid #c8b890;border-radius:6px;background:#f6ead0;font-size:11.5px;font-weight:700;text-align:center">صفة البيع: ${escapeHtml(SALES_TRADE_CAPACITY)} · السجل التجاري: <span dir="ltr">${escapeHtml(SALES_TRADE_REGISTER_NO)}</span></div>` : ""}
     ${stamp}
     <div class="rfoot"><span>صادر آليًا عن نظام OZK TOBACCO · رقم المركز: 0994092038</span><span dir="ltr">0985000771 — 0984000662</span></div>
   </div>`;
@@ -5334,8 +6073,6 @@ async function exportVoucherPdf(v) {
   const isPay = v.type === "payment";
   const isInv = v.type === "invoice";
   const isRet = v.type === "return";
-  const safe = String(v.name || (isInv ? "فاتورة" : (isRet ? "مرتجع" : (isPay ? "صرف" : "قبض")))).replace(/[^\p{L}\p{N}]+/gu, "_").slice(0, 40);
-  const prefix = isInv ? "فاتورة" : (isRet ? "فاتورة-مرتجع" : (isPay ? "سند-صرف" : "سند-قبض"));
   // وجهة الأرشفة: الفاتورة والمرتجع إلى «فواتير الزبائن»، السندان إلى «سندات
   // قبض ودفع». المرتجع نوع مستقل (`return_invoice`) لا يُخلط مع `invoice`
   // داخلياً، واسمه يبدأ بـ«فاتورة مرتجع» فيتميّز في الأرشيف عن بيع حقيقي.
@@ -5344,7 +6081,6 @@ async function exportVoucherPdf(v) {
   const archiveMeta = { party: v.name, number: v.no, date: archiveDate };
   const exported = await exportReportPdf(
     voucherPdfMarkup(v),
-    `${prefix}-${safe}-${todayIsoDate()}.pdf`,
     { docType: archiveDocType, meta: archiveMeta }
   );
   if (exported) setNotice("success", isInv ? "تم تجهيز الفاتورة PDF." : (isRet ? "تم تجهيز فاتورة المرتجع PDF." : (isPay ? "تم تجهيز سند الصرف PDF." : "تم تجهيز سند القبض PDF.")));
@@ -5402,7 +6138,6 @@ async function exportReceivablesPdf() {
   }
   const exported = await exportReportPdf(
     receivablesPdfMarkup(),
-    `تقرير-الذمم-${todayIsoDate()}.pdf`,
     { docType: "receivables_report", meta: { date: todayIsoDate() } }
   );
   if (exported) setNotice("success", "تم تجهيز تقرير الذمم PDF.");
@@ -5946,7 +6681,6 @@ async function exportInventoryReportPdf() {
   }
   const exported = await exportReportPdf(
     inventoryReportPdfMarkup(),
-    `تقرير-المخزون-${todayIsoDate()}.pdf`,
     { docType: "stock_report", meta: { date: todayIsoDate() } }
   );
   if (exported) setNotice("success", "تم تجهيز تقرير المخزون PDF.");
@@ -6043,7 +6777,6 @@ async function exportStagnantMaterialsPdf() {
   }
   const exported = await exportReportPdf(
     stagnantMaterialsPdfMarkup(),
-    `المواد-الراكدة-${todayIsoDate()}.pdf`,
     { docType: "other_report", meta: { title: "تقرير المواد الراكدة", date: todayIsoDate() } }
   );
   if (exported) setNotice("success", "تم تجهيز تقرير المواد الراكدة PDF.");
@@ -6234,7 +6967,7 @@ function customerBalanceSection(report) {
       </div>
       ${
         state.customerLimitError
-          ? `<div class="inline-warning">تعذر تحميل أو حفظ الحدود الداخلية. شغل ملف <code>supabase/customer-credit-limits.sql</code> في Supabase SQL Editor ثم حدث الصفحة. الخطأ: ${escapeHtml(state.customerLimitError)}</div>`
+          ? `<div class="inline-warning">تعذر تحميل أو حفظ الحدود الداخلية، والمعروض هنا آخر نسخة نجحت (قد تكون قديمة). إن كان الخطأ عن عمود <code>customer_guid</code> فالهجرة <code>supabase/migrations/20260905170644_credit_limits_customer_guid.sql</code> لم تُطبَّق بعد على Supabase. الخطأ: ${escapeHtml(state.customerLimitError)}</div>`
           : ""
       }
       <div class="inventory-controls">
@@ -6394,18 +7127,23 @@ function reportsPage() {
     .sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "ar"))
     .map((it) => `<option value="${escapeHtml(it.name || "")}"></option>`)
     .join("");
-  const selectedCustomerName = (() => {
-    const m = balItems.find((it) => customerKey(it) === state.selectedCustomerKey);
-    return m ? (m.name || "") : "";
-  })();
-
-  const selInvoices = selectedCustomerName ? customerInvoicesFor(selectedCustomerName) : [];
+  // الزبون يُمرَّر **كعنصر** لا كاسم: العنصر يحمل customerGuid، والاسم لا يحمل هوية.
+  const selectedCustomerItem = balItems.find((it) => customerKey(it) === state.selectedCustomerKey) || null;
+  const selectedCustomerName = selectedCustomerItem ? (selectedCustomerItem.name || "") : "";
+  const selInvoices = selectedCustomerItem ? customerInvoicesFor(selectedCustomerItem) : [];
+  // تحذير الانشطار يُعرض مع القائمة وبدونها: فاتورة ناقصة من كشف غير فارغ أخطر
+  // من كشف فارغ، لأن الكشف يبدو مكتملاً.
+  const identityWarn = invoiceIdentityWarning();
+  const identityWarnMarkup = identityWarn
+    ? `<p class="muted" style="margin-top:10px">⚠ ${escapeHtml(identityWarn)}</p>`
+    : "";
   const invoicesMarkup = !selectedCustomerName
     ? '<p class="muted" style="margin-top:10px">اختر زبوناً (أو اكتب اسمه) لعرض فواتيره ومحتوياتها.</p>'
     : !selInvoices.length
-      ? `<p class="muted" style="margin-top:10px">لا توجد فواتير لهذا الزبون${state.customerInvoicesReport ? " خلال آخر فترة مزامنة" : " — لم تصل مزامنة الفواتير بعد"}.</p>`
+      ? `<p class="muted" style="margin-top:10px">${escapeHtml(customerInvoicesEmptyText(selectedCustomerItem))}</p>${identityWarnMarkup}`
       : `<div style="margin-top:12px">
           <div class="sec">📋 فواتير «${escapeHtml(selectedCustomerName)}» (${selInvoices.length}) — اضغط فاتورة لرؤية محتوياتها</div>
+          ${identityWarnMarkup}
           ${selInvoices.map((inv) => `
             <details class="acc-group" style="margin:6px 0">
               <summary class="acc-summary"><span class="acc-title">${inv.isReturn ? "🔁 مرتجع" : "🧾 فاتورة"} ${escapeHtml(inv.number || "")} — ${escapeHtml(inv.date || "")}</span><span class="acc-count" style="${inv.isReturn ? "color:#16794f" : ""}">${escapeHtml(formatMoney(inv.total || 0))} $</span></summary>
@@ -6417,7 +7155,7 @@ function reportsPage() {
                   </tbody>
                 </table>
                 <p class="muted" style="margin:6px 2px 0">${inv.isReturn ? "إجمالي المرتجع" : "إجمالي الفاتورة"}: <b>${escapeHtml(formatMoney(inv.total || 0))} $</b></p>
-                <button class="button secondary mini-button" type="button" data-action="gen-invoice-doc" data-inv-number="${escapeHtml(String(inv.number || ""))}" data-inv-date="${escapeHtml(String(inv.date || ""))}" data-customer="${escapeHtml(selectedCustomerName)}" style="margin-top:8px">📄 ${inv.isReturn ? "تصدير فاتورة المرتجع PDF" : "تصدير الفاتورة PDF (مع الأصناف)"}</button>
+                <button class="button secondary mini-button" type="button" data-action="gen-invoice-doc" data-inv-guid="${escapeHtml(String(inv.guid || ""))}" data-inv-number="${escapeHtml(String(inv.number || ""))}" data-inv-date="${escapeHtml(String(inv.date || ""))}" data-customer="${escapeHtml(selectedCustomerName)}" style="margin-top:8px">📄 ${inv.isReturn ? "تصدير فاتورة المرتجع PDF" : "تصدير الفاتورة PDF (مع الأصناف)"}</button>
               </div>
             </details>`).join("")}
         </div>`;
@@ -7462,6 +8200,9 @@ function salesHistoryInvoices() {
     invoices.forEach((inv) => {
       out.push({
         customer,
+        // معرّف الفاتورة يُحمل معها إلى الزر: هو الهوية الوحيدة التي لا تلتبس
+        // برقم متكرر بين السلاسل ولا تتغيّر بتصحيح اسم الزبون.
+        guid: String(inv?.guid || ""),
         number: String(inv?.number ?? ""),
         date: String(inv?.date || "").slice(0, 10),
         total: Number(inv?.total || 0),
@@ -7515,10 +8256,27 @@ function salesHistoryPanel() {
           ${linesHtml}
         </details>
         <button class="button secondary mini-button" type="button" data-action="gen-invoice-doc"
+          data-inv-guid="${escapeHtml(inv.guid)}"
           data-inv-number="${escapeHtml(inv.number)}" data-inv-date="${escapeHtml(inv.date)}"
           data-customer="${escapeHtml(inv.customer)}" style="margin-top:8px">📄 ${inv.isReturn ? "تصدير فاتورة المرتجع PDF" : "تصدير الفاتورة PDF"}</button>
       </div>`;
   }).join("");
+
+  // حداثة المزامنة تُعرض دائماً على هذه الشاشة: «فاتورة أدخلتها للتو وغير ظاهرة»
+  // سؤال متكرر جوابه الوحيد هو وقت آخر مزامنة، فإخفاؤه يترك المستخدم يظنّ عطلاً.
+  const syncedAt = reportSyncedAt(state.customerInvoicesReport);
+  const lagMinutes = invoiceSyncLagMinutes();
+  const syncNote = syncedAt
+    ? `<p class="muted" style="margin-top:-6px">آخر مزامنة للتفاصيل: <b dir="ltr">${escapeHtml(formatDateTime(syncedAt))}</b>${
+        lagMinutes !== null && lagMinutes >= 2
+          ? ` — أقدم من دفتر الحسابات بـ${escapeHtml(lagMinutes)} دقيقة، فأي فاتورة أُدخلت بعدها لن تظهر هنا بعد.`
+          : ""
+      }</p>`
+    : "";
+  const identityWarn = invoiceIdentityWarning();
+  const identityNote = identityWarn
+    ? `<p class="muted" style="margin-top:-6px">⚠ ${escapeHtml(identityWarn)}</p>`
+    : "";
 
   const body = !state.customerInvoicesReport
     ? '<p class="muted">لم تصل مزامنة الفواتير من الأمين بعد. جرّب بعد دقائق.</p>'
@@ -7536,6 +8294,7 @@ function salesHistoryPanel() {
       </div>
       <h2>📄 الفواتير السابقة</h2>
       <p class="muted">فواتير المبيعات والمرتجعات المسجّلة في الأمين خلال آخر ${escapeHtml(periodDays)} يوماً — بما فيها ما أُصدر من برنامج الأمين مباشرةً.</p>
+      ${syncNote}${identityNote}
       <label class="inv-label" style="max-width:340px">بحث
         <input class="inv-input-main" id="sales-history-q" value="${escapeHtml(state.salesHistoryQuery)}" placeholder="اسم الزبون أو رقم الفاتورة" dir="auto" autocomplete="off">
       </label>
@@ -8147,7 +8906,7 @@ async function saveSalesInvoicePdf() {
     number: invNo,
     date: todayIsoDate()
   };
-  const fileName = `${archiveDocumentTitle("invoice", pdfArchiveMeta)}.pdf`;
+  const fileName = documentFileName("invoice", pdfArchiveMeta);
   // نحفظ موضع التمرير: **السبب الجذري للملف الفارغ** أن html2canvas يلتقط منطقة
   // خاطئة حين تكون الصفحة مُمرَّرة للأسفل — وهي حالة الهاتف دائماً عند الضغط على
   // زر أسفل الشاشة. قياس فعلي: صفحة عند 1500px تعطي لوحة بصفر حبر وملف 3 ك.ب،
@@ -9517,10 +10276,8 @@ async function saveReconSessionPdf(session) {
   if (!session) return;
   const warehouseName = session.warehouse_name || session.warehouseName || "مستودع";
   const sessionDate = session.session_date || session.sessionDate || todayIsoDate();
-  const safe = String(warehouseName).replace(/[^\p{L}\p{N}]+/gu, "_").slice(0, 40);
   const exported = await exportReportPdf(
     reconSessionPdfMarkup(session),
-    `جرد-${safe}-${sessionDate}.pdf`,
     { docType: "other_report", meta: { title: `تقرير جرد - ${warehouseName}`, date: String(sessionDate).slice(0, 10) } }
   );
   if (exported) setNotice("success", "تم تجهيز تقرير الجرد PDF.");
@@ -10452,7 +11209,13 @@ function render() {
         input.setCustomValidity("");
         state.syriaRateConfirmed = true;
         state.showExchangeModal = false;
-        openPricePreview(true);
+        // `openPricePreview` صارت async (تنتظر جهوزية خط النشرة قبل أول قياس).
+        // معالج النقرة لا ينتظرها، لكن رفضاً صامتاً يترك المستخدم أمام نافذة
+        // أُغلقت بلا معاينة ولا سبب — فنُمسك الفشل ونسمّيه.
+        openPricePreview(true).catch(() => {
+          setNotice("error", "تعذّر فتح معاينة النشرة. حدّث الصفحة وجرّب مجدداً.");
+          render();
+        });
       });
     }
     return;
@@ -11196,7 +11959,7 @@ function render() {
       voucherExportBusy = true;
       setTimeout(() => { voucherExportBusy = false; }, 1500);
       const item = selectedCustomer(latestCustomerBalanceItems());
-      if (!item) { setNotice("error", "اختر زبونًا أولاً."); render(); return; }
+      if (!item) { showNoticeNow("error", "اختر زبونًا أولاً."); return; }
       const debit = Number(el.dataset.debit || 0);
       const credit = Number(el.dataset.credit || 0);
       const key = customerKey(item);
@@ -11220,13 +11983,18 @@ function render() {
       const storedDocPrev = el.dataset.docPrev !== undefined && el.dataset.docPrev !== ""
         ? Number(el.dataset.docPrev) : null;
       if (debit > 0 && credit <= 0) {
-        const invs = customerInvoicesFor(item.name || "").filter((x) => !x.isReturn);
-        // نطابق الفاتورة التفصيلية بمعرّف القيد (قطعي) أولاً، ثم بالتاريخ/المبلغ كاحتياط.
-        const bg = String(el.dataset.billGuid || "").trim().toLowerCase();
+        // الزبون يُمرَّر كعنصر (يحمل customerGuid) لا كاسم — الاسم في تقرير الفواتير
+        // مصدره حقل نصّي آخر في الأمين وقد يتخلّف عن اسم الحساب بعد أي تعديل.
+        const invs = customerInvoicesFor(item).filter((x) => !x.isReturn);
+        // نطابق الفاتورة التفصيلية بمعرّف القيد (قطعي) أولاً — وعلى كامل التقرير،
+        // لا داخل مجموعة الزبون: معرّف الفاتورة فريد فلا يحتاج معرفة الزبون.
+        // ثم بالتاريخ/المبلغ داخل مجموعة الزبون كاحتياط.
+        const bg = normGuid(el.dataset.billGuid);
         const dOnly = String(el.dataset.date || "").slice(0, 10);
         const amtMatch = (x) => Math.abs(Number(x.total || 0) - debit) < 1;
         const dateMatch = (x) => String(x.date || "").slice(0, 10) === dOnly;
-        const match = (bg ? invs.find((x) => String(x.guid || "").trim().toLowerCase() === bg) : null)
+        const byGuid = bg ? invoiceByGuid(bg) : null;
+        const match = (byGuid && !byGuid.invoice.isReturn ? byGuid.invoice : null)
           || invs.find((x) => dateMatch(x) && amtMatch(x)) || invs.find((x) => amtMatch(x)) || invs.find((x) => dateMatch(x));
         if (match) {
           const total = match.total || debit;
@@ -11235,11 +12003,12 @@ function render() {
             opts.newBalance = roundPrice(storedDocNew);
             const prev = (storedDocPrev !== null && Number.isFinite(storedDocPrev)) ? storedDocPrev : (storedDocNew - debit);
             opts.prevBalance = roundPrice(prev);
-            // الحسم ودفعة الزبون يُنسبان أولاً إن توفّرا من المصدر، ويبقى ما لا
-            // يُنسب «تسوية» صريحة. **فجوة بيانات معروفة:** مزامنة فواتير الأمين
-            // (tools/push-customer-invoices.ps1) لا تجلب حسم رأس الفاتورة ولا
-            // الدفعة المرافقة، فيبقى الفرق كله غير منسوب حتى تُجلبا — ولهذا لا
-            // يُسمّى حسماً، لأن تسميته حسماً تطبع دفعة الزبون على أنها حسم.
+            // الحسم ودفعة الزبون يُنسبان أولاً، ويبقى ما لا يُنسب «تسوية» صريحة.
+            // (تصحيح 2026-09-05: التعليق السابق هنا كان يقول إن المزامنة لا تجلب
+            // الحقلين. هذا لم يعد صحيحاً — `push-customer-invoices.ps1` يجلب
+            // `TotalDisc` و`FirstPay` على رأس الفاتورة، وفي تقرير الإنتاج الحالي
+            // 67 فاتورة بحسم و58 بدفعة مرافقة من أصل 635.) ما يتبقّى بعد نسبتهما
+            // لا يُسمّى حسماً أبداً، لأن تسميته حسماً تطبع دفعة الزبون على أنها حسم.
             const knownDiscount = Math.max(0, roundPrice(Number(match.discount || 0)));
             const knownPayment = Math.max(0, roundPrice(Number(match.payment || 0)));
             if (knownDiscount > 0.009) opts.discount = knownDiscount;
@@ -11253,13 +12022,17 @@ function render() {
           }
           exportVoucherPdf(opts);
         } else {
-          setNotice("error", "لم أطابق فاتورة تفصيلية لهذه الحركة. افتح «التقارير» ← فواتير الزبون واضغط «📄 تصدير الفاتورة PDF (مع الأصناف)».");
-          render();
+          // لا فشل صامت: نقول أي مصدر ينقصه ماذا. أشيع سبب مُثبت هو تأخّر مزامنة
+          // تفاصيل الفواتير خلف دفتر الحساب — القيد وصل والفاتورة لم تصل بعد.
+          showNoticeNow(
+            "error",
+            `لم أجد تفاصيل فاتورة بقيمة ${formatMoney(debit)}$ بتاريخ ${dOnly || "—"} للزبون «${item.name || ""}». ${customerInvoicesEmptyText(item)}`
+          );
         }
       } else if (credit > 0) {
         // مرتجع المبيعات يُقيَّد دائناً كالدفعة تماماً — نطابقه أولاً بفاتورة مرتجع فعلية
         // (بالتاريخ والمبلغ، إذ لا معرّف قيد لقيود المرتجع) لنصدّره كفاتورة مرتجع مع أصنافها.
-        const retMatch = findReturnInvoiceForMovement(item.name || "", { date: el.dataset.date, credit });
+        const retMatch = findReturnInvoiceForMovement(item, { date: el.dataset.date, credit });
         if (retMatch) {
           const opts = { ...base, cur: "$", type: "return", amount: retMatch.total || credit, no: retMatch.number ? String(retMatch.number) : docNumber("RET"), lines: retMatch.lines || [] };
           if (storedDocNew !== null && Number.isFinite(storedDocNew)) {
@@ -11293,7 +12066,7 @@ function render() {
           exportVoucherPdf(opts);
         }
       } else {
-        setNotice("error", "لا يمكن تصدير هذا القيد."); render();
+        showNoticeNow("error", "لا يمكن تصدير هذا القيد.");
       }
     });
   });
@@ -11301,15 +12074,30 @@ function render() {
     el.addEventListener("click", () => {
       try {
         const cust = el.dataset.customer || "";
-        const invs = customerInvoicesFor(cust);
-        const inv = invs.find((x) => String(x.number || "") === el.dataset.invNumber && String(x.date || "") === el.dataset.invDate)
+        // **المعرّف أولاً وعلى كامل التقرير.** الرقم وحده لا يكفي: سلاسل الترقيم
+        // في الأمين تتكرر بين الأنواع، وتقييد البحث بمجموعة الزبون كان يُفشل
+        // التصدير كلما اختلف اسم الزبون في تقرير الفواتير عن اسم حسابه.
+        const byGuid = invoiceByGuid(el.dataset.invGuid);
+        const invs = byGuid ? [] : customerInvoicesFor(cust);
+        const inv = (byGuid && byGuid.invoice)
+          || invs.find((x) => String(x.number || "") === el.dataset.invNumber && String(x.date || "") === el.dataset.invDate)
           || invs.find((x) => String(x.number || "") === el.dataset.invNumber);
-        if (!inv) { setNotice("error", "تعذّر إيجاد الفاتورة."); render(); return; }
+        if (!inv) {
+          showNoticeNow("error", `تعذّر إيجاد الفاتورة ${el.dataset.invNumber || ""} في تفاصيل الفواتير. ${customerInvoicesEmptyText(cust)}`);
+          return;
+        }
         const invoiceTotal = inv.total || 0;
+        // حساب الزبون: بالاسم المعروض، فإن كان اسماً قديماً لا حساب له فبإثبات
+        // الدفتر لمجموعته. المستند يحمل بعدها **اسم الحساب الحالي** لا النصّ
+        // القديم على رأس الفاتورة — الورقة تذهب للزبون، فاسمه فيها يجب أن يكون
+        // اسمه اليوم، ورصيدا «قبل/بعد» يجب أن يُقرآ من دفتره هو.
         const custItem = smartNameMatch(latestCustomerBalanceItems(), (it) => it.name, cust);
+        // اسم المستند من الحساب متى وُجد، وإلا فنصّ الفاتورة كما سجّله الأمين.
+        // لا نستنتج حساباً لاسم لا حساب له — الاستنتاج هنا ينسب فاتورة لزبون بالتخمين.
+        const custName = (custItem && custItem.name) || cust;
         const opts = {
           type: inv.isReturn ? "return" : "invoice",
-          name: cust,
+          name: custName,
           amount: invoiceTotal,
           cur: "$",
           date: inv.date || todayIsoDate(),
@@ -11322,7 +12110,7 @@ function render() {
         // قيود المرتجع لا تحمل معرّف قيد، فتُستثنى وتعرض الرصيد الحالي فقط.
         // عند أي خطأ في حساب الرصيد نتجاهله ونعرض الرصيد الحالي فقط — دون منع تصدير الفاتورة.
         try {
-          const mv = inv.isReturn ? null : invoiceMovement(cust, inv);
+          const mv = inv.isReturn ? null : invoiceMovement(custName, inv);
           const db = mv ? movementDocBalances(mv) : null;
           if (db && Number.isFinite(db.newBalance) && Number.isFinite(db.prevBalance)) {
             opts.newBalance = roundPrice(db.newBalance);
@@ -11350,8 +12138,7 @@ function render() {
         }
         exportVoucherPdf(opts);
       } catch (error) {
-        setNotice("error", "تعذّر تصدير الفاتورة: " + (error && error.message ? error.message : String(error)));
-        render();
+        showNoticeNow("error", "تعذّر تصدير الفاتورة: " + (error && error.message ? error.message : String(error)));
       }
     });
   });

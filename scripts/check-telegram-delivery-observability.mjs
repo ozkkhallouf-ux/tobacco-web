@@ -3,16 +3,24 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
-// المرحلة أ — رصد تسليم تيليغرام، بلا أي تغيير سلوك.
+// المرحلة أ — رصد تسليم تيليغرام (2026-08-31)، والمرحلة ب — تأكيد التسليم
+// الحقيقي وإعادة المحاولة (2026-09-14، رد على Codex P1 على PR #220).
 //
-// العطل المرصود: dispatch_telegram_outbox يستدعي net.http_post — وهي غير
-// متزامنة — ثم يكتب status='sent' فوراً بلا رؤية أي رد. فـ'sent' تعني
-// "سُلّم إلى pg_net" لا "تيليغرام استلمه". قياس على الإنتاج في نافذة ست
-// ساعات: 241 رسالة معلَّمة sent مقابل 230 رداً ناجحاً ⇒ 11 بلا رد نجاح.
+// العطل المرصود أصلاً: dispatch_telegram_outbox يستدعي net.http_post — وهي
+// غير متزامنة — ثم كان يكتب status='sent' فوراً بلا رؤية أي رد. فـ'sent'
+// كانت تعني "سُلّم إلى pg_net" لا "تيليغرام استلمه". قياس على الإنتاج في
+// نافذة ست ساعات: 241 رسالة معلَّمة sent مقابل 230 رداً ناجحاً ⇒ 11 بلا رد
+// نجاح لم تُعَد أبداً.
 //
-// هذا الفحص يحرس حدود المرحلة أ تحديداً: تلتقط المعرّف ولا تغيّر شيئاً آخر.
-// أي انزلاق نحو retry أو حالات جديدة أو مساس بـdedupe يجب أن يسقط هنا، لأن
-// المرحلة ب لم تُصمَّم بعد وبياناتها لم تُجمع.
+// هذا الفحص يحرس حدود كلتا المرحلتين، بنطاقين مختلفين:
+//   - MIGRATION (الترحيل المُجمَّد 20260831120000): سجل تاريخي للمرحلة أ كما
+//     طُبِّقت فعلاً على الإنتاج — يجب ألا يتغيّر بحرف، فلا retry ولا حالات
+//     جديدة فيه إطلاقاً.
+//   - REFERENCE (telegram-notifications.sql، الملف الحي): يحمل المرحلة ب —
+//     حالة 'dispatched' جديدة، وحلقة مطابقة تعيد التصنيف وتقرر 'sent' أو
+//     'pending' (إعادة محاولة) أو 'failed' (بعد استنفاد المحاولات). ما لا
+//     يتغيّر مهما كانت المرحلة: notify_telegram* ودedupe وصلاحيات
+//     telegram_delivery_audit وsafe_jsonb — هذه تبقى حرفياً كما في المرحلة أ.
 const REFERENCE = 'supabase/telegram-notifications.sql';
 const MIGRATION = 'supabase/migrations/superseded/20260831120000_telegram_delivery_observability.sql';
 const TESTS = 'supabase/tests/telegram-delivery-audit.sql';
@@ -37,7 +45,9 @@ assert.equal(
 );
 
 // ---------------------------------------------------------------------------
-// 2) المعرّف يُلتقط ولا يُرمى — وهذا هو كل ما تفعله المرحلة أ في مسار الإرسال.
+// 2) المعرّف يُلتقط ولا يُرمى — في كلتا المرحلتين. الحالة الناتجة بعد
+//    net.http_post تختلف: 'sent' في الترحيل المُجمَّد (المرحلة أ كما طُبِّقت)،
+//    و'dispatched' في المرجع الحي (المرحلة ب — تنتظر تأكيد حلقة المطابقة).
 // ---------------------------------------------------------------------------
 for (const [name, code] of [[REFERENCE, refCode], [MIGRATION, migCode]]) {
   assert.match(
@@ -48,32 +58,44 @@ for (const [name, code] of [[REFERENCE, refCode], [MIGRATION, migCode]]) {
     code, /perform net\.http_post\(/,
     `${name}: عاد "perform net.http_post" — المعرّف يُرمى فيستحيل ربط الصف بردّه`,
   );
-  // الإسناد للصف الصحيح: نفس الدورة، ونفس المفتاح.
-  assert.match(
-    code,
-    /set status = 'sent', sent_at = now\(\), attempts = attempts \+ 1, net_request_id = rid\n\s*where id = r\.id;/,
-    `${name}: التحديث يجب أن يربط rid بصف الدورة نفسها (where id = r.id)`,
-  );
-}
-
-// ---------------------------------------------------------------------------
-// 3) لا انتقال حالات جديد. status='sent' كما كان، ولا 'submitted'/'unknown'.
-// ---------------------------------------------------------------------------
-for (const [name, code] of [[REFERENCE, refCode], [MIGRATION, migCode]]) {
-  for (const forbidden of ['submitted', 'unknown', 'retryable']) {
-    assert.doesNotMatch(
-      code, new RegExp(`'${forbidden}'`),
-      `${name}: ظهرت حالة "${forbidden}" — المرحلة أ لا تُدخل أي حالة جديدة`,
-    );
-  }
-  assert.doesNotMatch(
-    code, /alter table public\.telegram_outbox\s+drop constraint/i,
-    `${name}: قيد CHECK يجب ألا يُمَسّ في المرحلة أ`,
-  );
 }
 assert.match(
-  reference, /check \(status in \('pending','sent','failed'\)\)/,
-  `${REFERENCE}: قيد CHECK تغيّر عن صيغته الأصلية`,
+  migCode,
+  /set status = 'sent', sent_at = now\(\), attempts = attempts \+ 1, net_request_id = rid\n\s*where id = r\.id;/,
+  `${MIGRATION}: التحديث يجب أن يربط rid بصف الدورة نفسها (where id = r.id)`,
+);
+assert.match(
+  refCode,
+  /set status = 'dispatched', sent_at = now\(\), attempts = attempts \+ 1, net_request_id = rid\n\s*where id = r\.id;/,
+  `${REFERENCE}: المرحلة ب يجب أن تنتج 'dispatched' لا 'sent' فور net.http_post (التأكيد يأتي من حلقة المطابقة)`,
+);
+
+// ---------------------------------------------------------------------------
+// 3) لا حالات مُختَرَعة عشوائياً — فقط 'dispatched' في المرحلة ب، ولا شيء
+//    غيرها. الترحيل المُجمَّد يبقى بلا أي حالة جديدة ولا مساس بقيد CHECK.
+// ---------------------------------------------------------------------------
+for (const forbidden of ['submitted', 'unknown', 'retryable']) {
+  assert.doesNotMatch(
+    refCode, new RegExp(`'${forbidden}'`),
+    `${REFERENCE}: ظهرت حالة "${forbidden}" — المرحلة ب تضيف 'dispatched' فقط`,
+  );
+  assert.doesNotMatch(
+    migCode, new RegExp(`'${forbidden}'`),
+    `${MIGRATION}: ظهرت حالة "${forbidden}" — المرحلة أ لا تُدخل أي حالة جديدة`,
+  );
+}
+assert.doesNotMatch(
+  migCode, /alter table public\.telegram_outbox\s+drop constraint/i,
+  `${MIGRATION}: قيد CHECK يجب ألا يُمَسّ في الترحيل المُجمَّد للمرحلة أ`,
+);
+// المرحلة ب توسّع القيد ليقبل 'dispatched' فقط — لا حذف بلا إعادة، ولا حالات إضافية
+assert.match(
+  refCode, /alter table public\.telegram_outbox drop constraint if exists telegram_outbox_status_check;/,
+  `${REFERENCE}: المرحلة ب يجب أن تُسقط القيد القديم صراحة قبل إعادة تعريفه (توافق مع تركيب موجود في الإنتاج)`,
+);
+assert.match(
+  reference, /check \(status in \('pending','dispatched','sent','failed'\)\)/,
+  `${REFERENCE}: قيد CHECK يجب أن يقبل 'dispatched' بالضبط إلى جانب الحالات الثلاث الأصلية`,
 );
 
 // ---------------------------------------------------------------------------
@@ -93,6 +115,49 @@ for (const forbidden of [/backoff/i, /retry/i, /max_attempts/i, /attempts\s*<\s*
 assert.match(
   dispatcherBody, /where status = 'pending'\n\s*order by created_at asc\n\s*limit 20/,
   `${MIGRATION}: شرط التقاط الدفعة تغيّر`,
+);
+
+// ---------------------------------------------------------------------------
+// 4ب) المرحلة ب: retry حقيقي مطلوب في REFERENCE وحدها — يُثبَت وجوده صراحة
+//     بدل الاكتفاء بغياب حارس سلبي، وإلا يمكن حذف الإصلاح كله دون أن يسقط شيء.
+// ---------------------------------------------------------------------------
+const refDispatcherStart = refCode.indexOf('create or replace function public.dispatch_telegram_outbox()');
+const refDispatcherBody = refCode.slice(
+  refDispatcherStart,
+  refCode.indexOf('create or replace function public.tg_notify_whatsapp_order()', refDispatcherStart),
+);
+assert.match(
+  refDispatcherBody, /max_attempts\s+constant int := 5;/,
+  `${REFERENCE}: حد أقصى للمحاولات مفقود — بلا حد تتكرر إعادة المحاولة أبداً على عطل دائم`,
+);
+assert.match(
+  refDispatcherBody, /where o\.status = 'dispatched'/,
+  `${REFERENCE}: حلقة المطابقة على الصفوف 'dispatched' مفقودة`,
+);
+assert.match(
+  refDispatcherBody, /left join net\._http_response resp on resp\.id = o\.net_request_id/,
+  `${REFERENCE}: حلقة المطابقة يجب أن تربط بردّ pg_net الحقيقي عبر net_request_id`,
+);
+assert.match(
+  refDispatcherBody, /update public\.telegram_outbox set status = 'sent', sent_at = now\(\) where id = r\.id;/,
+  `${REFERENCE}: النجاح المؤكَّد (ok_true) يجب أن ينتقل إلى 'sent' فعلاً`,
+);
+assert.match(
+  refDispatcherBody, /r\.attempts < max_attempts[\s\S]{0,80}status = 'pending'/,
+  `${REFERENCE}: الفشل دون استنفاد المحاولات يجب أن يعيد الصف إلى 'pending' لإعادة المحاولة`,
+);
+assert.match(
+  refDispatcherBody, /status = 'failed'/,
+  `${REFERENCE}: استنفاد المحاولات يجب أن ينتهي إلى 'failed' نهائياً`,
+);
+// safe_jsonb لا cast مباشر — نفس ثغرة Codex P2 قابلة للتكرار هنا أيضاً
+assert.doesNotMatch(
+  refDispatcherBody, /r\.content::jsonb/,
+  `${REFERENCE}: حلقة المطابقة يجب ألا تحوّل r.content مباشرة — استعمل private.safe_jsonb`,
+);
+assert.match(
+  refDispatcherBody, /private\.safe_jsonb\(r\.content\)/,
+  `${REFERENCE}: حلقة المطابقة يجب أن تستعمل private.safe_jsonb لتحليل الجسم بأمان`,
 );
 
 // ---------------------------------------------------------------------------

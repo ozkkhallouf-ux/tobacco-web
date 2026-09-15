@@ -70,6 +70,39 @@
     try { return /Macintosh/i.test(navigator.userAgent || ""); } catch (e) { return false; }
   }
 
+  // أصل الصفحة داخل مجال العناوين المحلي نفسه الذي يسكنه الجسر؟
+  function isLoopbackOrigin() {
+    try {
+      var host = window.location.hostname || "";
+      return host === "127.0.0.1" || host === "localhost"
+        || host === "::1" || host === "[::1]" || /\.localhost$/i.test(host);
+    } catch (e) { return false; }
+  }
+
+  // هل يجوز إطلاق طلب **تلقائي** إلى الجسر من هذا الأصل؟
+  //
+  // قياس فعلي على https://ozktobacco.com (2026-09-06، Chromium): كل محاولة
+  // وصول إلى الجسر تُخرج خطأين في وحدة التحكّم قبل أن تغادر الشبكة أصلاً —
+  //   Access to fetch at 'http://127.0.0.1:8787/health' … has been blocked by
+  //   CORS policy: Permission was denied for this request to access the
+  //   `loopback` address space.
+  //   Failed to load resource: net::ERR_FAILED
+  // فكروم يحجب مخاطبة مجال العناوين المحلي من أصل عام (Private Network Access)
+  // ما لم يمنح المستخدم إذناً صريحاً. الحجب حالة إعداد ثابتة لا عطل عابر،
+  // فإعادة المحاولة عند كل إقلاع وكل تصدير ضجيج خالص يغرق أخطاء حقيقية.
+  //
+  // البوابة تفتح في ثلاث حالات كلها دليل إيجابي لا تخمين:
+  //   ١) الصفحة نفسها على أصل محلي (`com.ozk.local-site` على 127.0.0.1:5173) —
+  //      نفس مجال العناوين فلا بوابة PNA أصلاً. وهو المسار المعتمد على الماك،
+  //      فالجسر يعمل هناك تماماً كما كان بلا أي تغيير.
+  //   ٢) المالك فعّلها صراحةً على هذا المتصفح: `ozkArchive.enable()`.
+  //   ٣) رمز ربط محفوظ من هذا الأصل — أي أن /pair نجح فعلاً من هنا سابقاً.
+  function mayReachBridge() {
+    if (isLoopbackOrigin()) return true;
+    if (storageGet(ENABLED_KEY) === "1") return true;
+    return Boolean(storageGet(TOKEN_KEY));
+  }
+
   function withTimeout(ms) {
     var controller = new AbortController();
     var timer = setTimeout(function () { controller.abort(); }, ms);
@@ -117,6 +150,14 @@
     if (!force && healthCache) {
       var ttl = healthCache.value && healthCache.value.ok ? HEALTH_TTL_OK : HEALTH_TTL_DOWN;
       if (now - healthCache.at < ttl) return healthCache.value;
+    }
+    if (!mayReachBridge()) {
+      // خامل: لا طلب، فلا خطأ في وحدة التحكّم. الشارة تُبلّغ المالك بالحالة.
+      var dormant = { ok: false, reason: "needs_opt_in" };
+      healthCache = { at: now, value: dormant };
+      diag("خامل — أصل عام بلا تفعيل صريح، فلا طلب شبكي");
+      renderStatus(dormant);
+      return dormant;
     }
     var value;
     try {
@@ -251,6 +292,9 @@
   function unreachableMessage(reason) {
     var onHttps = false;
     try { onHttps = window.location.protocol === "https:"; } catch (e) { onHttps = false; }
+    if (reason === "needs_opt_in") {
+      return "أرشفة iCloud غير مفعّلة على هذا العنوان. نفّذ ozkArchive.enable() مرة واحدة من وحدة التحكّم واسمح بالوصول إلى الشبكة المحلية.";
+    }
     if (reason === "unreachable" && onHttps) {
       return "تعذّر حفظ نسخة في iCloud. تأكد أن الجسر يعمل، واسمح للموقع بالوصول إلى الشبكة المحلية عند طلب المتصفح.";
     }
@@ -297,6 +341,9 @@
       return;
     }
     var connected = Boolean(value && value.ok);
+    // التفريق ضروري: «غير متصلة» تعني حاولنا وفشلنا، و«غير مفعّلة» تعني لم
+    // نحاول أصلاً — ولو خُلطتا لطارد المالك عطلاً في جسرٍ يعمل.
+    var dormant = !connected && Boolean(value && value.reason === "needs_opt_in");
     if (!statusEl || !statusEl.isConnected) {
       statusEl = document.createElement("div");
       statusEl.setAttribute("data-ozk-archive-status", "");
@@ -317,7 +364,7 @@
     dot.style.cssText = "width:7px;height:7px;border-radius:50%;flex:0 0 auto;background:"
       + (connected ? "#3ecf7a" : "#b98b3a");
     var label = document.createElement("span");
-    label.textContent = "أرشفة iCloud: " + (connected ? "متصلة" : "غير متصلة");
+    label.textContent = "أرشفة iCloud: " + (connected ? "متصلة" : (dormant ? "غير مفعّلة" : "غير متصلة"));
     statusEl.appendChild(dot);
     statusEl.appendChild(label);
   }
@@ -361,7 +408,10 @@
     trace: function () { return trace.slice(); },
     isEnabled: isEnabled,
     isSupportedPlatform: isSupportedPlatform,
-    enable: function () { storageRemove(ENABLED_KEY); healthCache = null; probe(true); },
+    mayReachBridge: mayReachBridge,
+    // تفعيل صريح: يفتح بوابة الأصل العام ويُطلق طلباً حقيقياً — وهو ما يُظهر
+    // طلب إذن «الوصول إلى الشبكة المحلية» في كروم.
+    enable: function () { storageSet(ENABLED_KEY, "1"); healthCache = null; probe(true); },
     disable: function () { storageSet(ENABLED_KEY, "0"); renderStatus(null); },
     reset: function () { storageRemove(TOKEN_KEY); healthCache = null; },
     base: BASE

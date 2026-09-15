@@ -2,6 +2,21 @@
 
 يقرأه Claude وCodex قبل كل مهمة. أحدث سجل يكون في الأعلى. لا تحذف السجلات السابقة.
 
+## 2026-09-13 - Claude - إصلاح أساس وحدة سطر الفاتورة عند الطباعة (#733)
+
+- Status: completed
+- Branch: task branch pending for: إصلاح أساس وحدة سطر الفاتورة عند الطباعة (#733)
+- Files: src/app.js, scripts/check-invoice-document-integrity.mjs
+- Result: PR #222 مدموج (merge 2e6d2b81). invoice integrity 56/56 وnpm run check 56/56. #733 = 286+290+308+159+120.6 = 1163.6 و#712 بلا regression. النشر والدخان نجحا واللقطة الحيّة تحمل الإصلاح. متبقٍّ: سطر #163 غير محسوم، وlineTotal المصدري يحتاج إصلاحاً منفصلاً في push-customer-invoices.ps1.
+- Handoff UTC: 2026-09-13T11:40:47Z
+## 2026-09-05 - Claude - Fix Codex P1 (TOCTOU branch race) on PR #167 tools/auto-sync-price-lists.ps1
+
+- Status: completed
+- Branch: task branch pending for: Fix Codex P1 (TOCTOU branch race) on PR #167 tools/auto-sync-price-lists.ps1
+- Files: tools/auto-sync-price-lists.ps1, tools/lib/Assert-SyncBranch.ps1, tools/tests/Test-AutoSyncBranchGuardRace.ps1, .github/workflows/check.yml
+- Result: القفل كان عالقاً `active` منذ 2026-08-31T23:08:18Z بينما المهمة نفسها انتهت فعلاً: PR #167 مدموج في 2026-09-01T00:36:59Z والحارس موجود على main داخل tools/auto-sync-price-lists.ps1 (الكوميت 489fdc1). الجلسة التي أخذت القفل لم تُفلته. أثر العلوق: tools/daily-git-pull.ps1 يتخطى السحب اليومي على جهاز Windows ما دام القفل نشطاً — وسجل tools/logs/daily-git-pull.log يُظهر «SKIP: active AI task lock» في 09-02 و09-03 و09-04، فبقي الجهاز متأخراً عن main. أُفلت القفل هنا بعد التحقق: لا worktree على fix/auto-sync-branch-guard، ولا PR مفتوح له، ولا تعديل على ملف القفل منذ الحجز (mtime 2026-08-31T23:08:55Z). لم يُنفَّذ أي عمل برمجي ضمن هذا الإفلات.
+- Handoff UTC: 2026-09-05T12:20:09Z
+
 ## 2026-09-01 - Claude - Docker dev environment (PR #174) + health-check ESM fix (PR #173)
 
 - Status: awaiting Codex review, not merged

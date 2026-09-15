@@ -1,6 +1,6 @@
 const CACHE_NAME = "web-platform-tobacco-v632";
 const ASSETS = [
-  "./","index.html","404.html","src/app.js","src/icloud-archive.js","src/price-list-template.js","src/config.js","src/supabase-client.js","src/smart-inventory.js","src/web-push.js","src/purchase-business-settings.js","src/purchase-recommendation.js","src/business-snapshot.js","src/business-metrics.js","src/executive-team.js","src/ameen-live-client.js","src/command-center.js","src/styles.css","src/decision-engine.js","src/decision-engine.css","src/command-center.css","src/decision-data-bridge.js","src/supplier-obligations-client.js","src/decision-supplier-overlay.js","src/purchase-invoice-calc.js","src/inventory-recon-calc.js","public/manifest.webmanifest","public/icons/app-icon.png","public/icons/ozk-ios-full-notification-icon.png","public/icons/ozk-logo.png","public/icons/workspace-pattern.svg","public/vendor/html2pdf.bundle.min.js","public/vendor/supabase.js","public/vendor/xlsx.full.min.js"
+  "./","index.html","404.html","src/app.js","src/error-monitoring.js","src/number-normalizer.js","src/icloud-archive.js","src/price-list-template.js","src/config.js","src/supabase-client.js","src/smart-inventory.js","src/web-push.js","src/purchase-business-settings.js","src/purchase-recommendation.js","src/business-snapshot.js","src/business-metrics.js","src/executive-team.js","src/ameen-live-client.js","src/command-center.js","src/command-center-hotfix.js","src/styles.css","src/decision-engine.js","src/decision-engine.css","src/command-center.css","src/decision-scoring.js","src/decision-data-bridge.js","src/supplier-obligations-client.js","src/decision-supplier-overlay.js","src/purchase-invoice-calc.js","src/inventory-recon-calc.js","public/manifest.webmanifest","public/icons/app-icon.png","public/icons/ozk-ios-full-notification-icon.png","public/icons/ozk-logo.png","public/icons/workspace-pattern.svg","public/vendor/html2pdf.bundle.min.js","public/vendor/supabase.js","public/vendor/xlsx.full.min.js"
 ];
 // `cache:"reload"` في التحميل المسبق إلزامي: بدونه يمرّ addAll عبر كاش HTTP
 // (max-age=600 على GitHub Pages) فيملأ الـservice worker الجديد كاشه بملفات
@@ -37,8 +37,32 @@ function offlineFallback(request){
     if(exact)return exact;
     let url;
     try{url=new URL(request.url);}catch{return caches.match("index.html");}
-    if(url.origin!==self.location.origin||!STATIC_ASSET_PATH.test(url.pathname))return caches.match("index.html");
+    // طلب خارج الأصل فاشل: لا نعيد index.html أبداً. سابقاً كان ارتداد HTML
+    // يُقدَّم مكان سكربت CDN (مثل Sentry) فيرفضه المتصفح بخطأ MIME ويُفسد
+    // مسار Service Worker في الفحوص والتشغيل offline.
+    if(url.origin!==self.location.origin)return Response.error();
+    if(!STATIC_ASSET_PATH.test(url.pathname))return caches.match("index.html");
     return caches.match(request,{ignoreSearch:true}).then((loose)=>loose||caches.match("index.html"));
   });
 }
-self.addEventListener("fetch",(event)=>{if(event.request.method!=="GET")return;event.respondWith(fetch(event.request).then((response)=>{const copy=response.clone();caches.open(CACHE_NAME).then((cache)=>cache.put(event.request,copy));return response;}).catch(()=>offlineFallback(event.request)));});
+// **لا نخزّن كل استجابة GET ناجحة.** الشرط السابق كان يخزّن أي رد ناجح بلا
+// فحص أصل أو مسار — يشمل طلبات REST لـ`supabase.co` (بيانات عملاء/أرصدة/
+// أسعار حساسة تمرّ كـGET). ذلك يُبقي بيانات حساسة في Cache Storage على جهاز
+// العميل بلا أي مسح عند تسجيل الخروج. القيد same-origin+STATIC_ASSET_PATH هو
+// نفسه المستخدم أصلاً في offlineFallback؛ هنا فقط يُطبَّق **قبل** cache.put،
+// لا داخل مسار fallback وحده.
+// **ولا نعترض طلبات خارج الأصل.** محمّل Sentry وREST لـSupabase يمرّان عبر
+// الشبكة مباشرة؛ اعتراضها ثم فشل الشبكة كان يرتدّ إلى index.html (انظر أعلاه).
+self.addEventListener("fetch",(event)=>{
+  if(event.request.method!=="GET")return;
+  let url;
+  try{url=new URL(event.request.url);}catch{return;}
+  if(url.origin!==self.location.origin)return;
+  event.respondWith(fetch(event.request).then((response)=>{
+    if(STATIC_ASSET_PATH.test(url.pathname)){
+      const copy=response.clone();
+      caches.open(CACHE_NAME).then((cache)=>cache.put(event.request,copy));
+    }
+    return response;
+  }).catch(()=>offlineFallback(event.request)));
+});

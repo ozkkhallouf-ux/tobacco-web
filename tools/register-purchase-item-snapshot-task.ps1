@@ -1,8 +1,12 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 # Registration only. This script never starts the task or the producer.
 [CmdletBinding()]
 param(
-    [ValidatePattern('^(?:[01]\d|2[0-3]):[0-5]\d$')][string]$DailyAt = "05:05",
+    # الإيقاع الساعي مقصود: بوابة حداثة المبيعات ترفض أي تشغيل يبعد أكثر من 75
+    # دقيقة عن آخر مزامنة مبيعات، ومشغّل يومي واحد يعني أن أي رفض يجمّد اللقطة
+    # 24 ساعة كاملة. الساعي يعيد المحاولة من تلقائه ويحدّ الضرر بساعة واحدة.
+    [ValidateRange(1, 24)][int]$IntervalHours = 1,
+    [ValidatePattern('^(?:[01]\d|2[0-3]):[0-5]\d$')][string]$StartAt = "00:07",
     [Switch]$ReplaceExisting
 )
 
@@ -49,9 +53,19 @@ $action = New-ScheduledTaskAction `
     -Execute $powerShellPath `
     -Argument $arguments `
     -WorkingDirectory $repoRoot
-$startAt = [datetime]::Today.Add([timespan]::ParseExact($DailyAt, 'hh\:mm', $null))
-if ($startAt -le (Get-Date)) { $startAt = $startAt.AddDays(1) }
-$trigger = New-ScheduledTaskTrigger -Daily -At $startAt
+
+# اسم مستقل عمداً عن $StartAt: أسماء المتغيرات في PowerShell غير حساسة لحالة
+# الأحرف، فـ$startAt و$StartAt هما نفس المتغير فعلياً. إسناد كائن [datetime]
+# لمتغير يحمل [ValidatePattern] الخاص بالسلسلة النصية يعيد تطبيق التحقق على
+# القيمة الجديدة فيفشل بخطأ ValidatePattern غامض لا علاقة له بالسبب الحقيقي.
+$firstRunAt = [datetime]::Today.Add([timespan]::ParseExact($StartAt, 'hh\:mm', $null))
+if ($firstRunAt -le (Get-Date)) { $firstRunAt = $firstRunAt.AddDays(1) }
+$trigger = New-ScheduledTaskTrigger -Daily -At $firstRunAt
+$trigger.Repetition = (New-ScheduledTaskTrigger -Once -At $firstRunAt `
+    -RepetitionInterval (New-TimeSpan -Hours $IntervalHours)).Repetition
+# فراغ = تكرار بلا نهاية. TimeSpan::MaxValue يرفضه Task Scheduler عند التسجيل
+# فتفشل المهمة بصمت ولا تُنشأ أصلاً — نفس السابقة في register-ameen-sync-watchdog.ps1
+$trigger.Repetition.Duration = ""
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries `
@@ -69,7 +83,7 @@ $taskDefinition = New-ScheduledTask `
     -Trigger $trigger `
     -Settings $settings `
     -Principal $taskPrincipal `
-    -Description "Daily Supabase-only refresh of ameen_item_snapshot from trusted sales_line_items."
+    -Description "Hourly Supabase-only refresh of ameen_item_snapshot from trusted sales_line_items. Failures raise a Telegram alert."
 
 Write-Host "The task will run as $requiredUserId with LogonType Password."
 Write-Host "Enter the Windows password when prompted. It is not written to disk or printed."
@@ -100,5 +114,5 @@ try {
 }
 
 Write-Host "Registered task: $taskName"
-Write-Host "Schedule: daily at $DailyAt (local machine time)"
+Write-Host "Schedule: every $IntervalHours hour(s), first run at $StartAt (local machine time)"
 Write-Host "The task was not started by this registration script."

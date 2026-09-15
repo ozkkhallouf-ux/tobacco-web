@@ -8,6 +8,8 @@
     "dev": "node scripts/serve.mjs",
     "start": "node scripts/serve.mjs",
     "check": "node scripts/run-checks.mjs",
+    "check:critical": "node scripts/check-critical-journeys.mjs",
+    "smoke:production": "node scripts/smoke-production.mjs",
     "check:sales-line-items": "node scripts/check-sales-line-items-pipeline.mjs && node scripts/check-sales-line-items-security.mjs && node scripts/check-sales-line-items-registration.mjs",
     "generate": "node scripts/generate-price-lists.mjs && node scripts/generate-pdfs.mjs",
     "generate:lists": "node scripts/generate-price-lists.mjs",
@@ -17,9 +19,10 @@
     "archive:install": "bash tools/mac-archive-bridge/install-launch-agent.sh",
     "archive:uninstall": "bash tools/mac-archive-bridge/install-launch-agent.sh --uninstall",
     "archive:start": "node tools/mac-archive-bridge/server.mjs",
-    "check:bulletin": "node scripts/check-price-bulletin-export-integrity.mjs && node scripts/check-price-bulletin-item-coverage.mjs && node scripts/check-price-bulletin-print-ux.mjs"
+    "check:bulletin": "node scripts/check-price-bulletin-export-integrity.mjs && node scripts/check-price-bulletin-first-page-content.mjs && node scripts/check-price-bulletin-item-coverage.mjs && node scripts/check-price-bulletin-markup-rows.mjs && node scripts/check-price-bulletin-print-content.mjs && node scripts/check-price-bulletin-print-ux.mjs"
   },
   "devDependencies": {
-    "playwright": "^1.62.1"
+    "playwright": "^1.62.1",
+    "typescript": "5.9.3"
   }
 }

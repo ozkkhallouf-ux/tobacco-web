@@ -136,12 +136,17 @@ await test("اسم فاتورة عربي مطابق للاصطلاح المعت�
 
 await test("اصطلاحات بقية الأنواع", () => {
   const cases = [
-    ["receipt", { party: "سامر", number: "7", date: "2026-08-31" }, "سند قبض - سامر - رقم 7 - 2026-08-31.pdf", "سندات قبض ودفع"],
-    ["payment", { party: "كهرباء", number: "9", date: "2026-08-31" }, "سند دفع - كهرباء - رقم 9 - 2026-08-31.pdf", "سندات قبض ودفع"],
+    // السندان: «سند صرف» لا «سند دفع» (التسمية المطبوعة على المستند نفسه)، وبلا
+    // رقم — الرقم مولَّد محلياً وعشوائياً في الموقع فلا يعرّف شيئاً، والاسم يجب
+    // أن يطابق الملف المنزَّل حرفياً (قرار المالك 2026-09-06).
+    ["receipt", { party: "سامر", number: "7", date: "2026-08-31" }, "سند قبض - سامر - 2026-08-31.pdf", "سندات قبض ودفع"],
+    ["payment", { party: "كهرباء", number: "9", date: "2026-08-31" }, "سند صرف - كهرباء - 2026-08-31.pdf", "سندات قبض ودفع"],
     ["account_statement", { party: "حسن عباس", date: "2026-08-31" }, "كشف حساب - حسن عباس - 2026-08-31.pdf", "كشف حسابات"],
     ["stock_report", { date: "2026-08-31" }, "تقرير المخزون - 2026-08-31.pdf", "تقرير المخزون"],
     ["receivables_report", { date: "2026-08-31" }, "تقرير الذمم - 2026-08-31.pdf", "تقرير الذمم"],
-    ["price_list", { date: "2026-08-31" }, "نشرة أسعار - 2026-08-31.pdf", "نشرات أسعار"],
+    // النشرة باصطلاحها الخاص، والعملة تفرّق نشرتَي اليوم الواحد.
+    ["price_list", { currency: "USD", date: "2026-08-31" }, "نشرة-الأسعار-USD-2026-08-31.pdf", "نشرات أسعار"],
+    ["price_list", { currency: "SYP", date: "2026-08-31" }, "نشرة-الأسعار-SYP-2026-08-31.pdf", "نشرات أسعار"],
     ["purchase_invoice", { party: "مورد الشام", number: "31", date: "2026-08-31" }, "فاتورة مشتريات - مورد الشام - رقم 31 - 2026-08-31.pdf", "فواتير المشتريات"],
     ["purchase_invoice", { number: "31", date: "2026-08-31" }, "فاتورة مشتريات - رقم 31 - 2026-08-31.pdf", "فواتير المشتريات"],
     ["return_invoice", { party: "حسن عباس", number: "44", date: "2026-08-31" }, "فاتورة مرتجع - حسن عباس - رقم 44 - 2026-08-31.pdf", "فواتير الزبائن"],
@@ -200,7 +205,7 @@ await test("سند قبض يذهب إلى مجلد السندات المشترك
     body: archiveBody("receipt", { party: "سامر", number: "7", date: "2026-08-31" })
   });
   assert.equal(res.status, 200);
-  assert.ok(listFolder("سندات قبض ودفع").includes("سند قبض - سامر - رقم 7 - 2026-08-31.pdf"));
+  assert.ok(listFolder("سندات قبض ودفع").includes("سند قبض - سامر - 2026-08-31.pdf"));
 });
 
 await test("فاتورة المرتجع نوع مستقل يسكن مع فواتير الزبائن بلا خلط مع البيع", async () => {
@@ -452,7 +457,12 @@ if (await renderAvailable()) {
 
 // ===== 6) سقوط الموقع إلى التنزيل العادي حين يتوقف الجسر =====
 
-function loadArchiveClient({ fetchImpl, storage = new Map(), protocol = "http:", platform = "MacIntel" }) {
+// الأصل مصدرٌ واحد للبروتوكول والمضيف معاً. كان مثبَّتاً `https://ozktobacco.com`
+// بينما البروتوكول الافتراضي `http:` — تناقضٌ لم يكن يظهر قبل أن يصير الأصل
+// نفسه جزءاً من السلوك. الافتراضي الآن **أصل المرافق المحلي على الماك**، وهو
+// المسار المعتمد فعلياً (`com.ozk.local-site`) الذي يعمل عليه الجسر بلا إذن
+// شبكة محلية؛ فحالات «الجسر متوقف» تبقى تختبر ما وُجدت لتختبره بالضبط.
+function loadArchiveClient({ fetchImpl, storage = new Map(), origin = "http://127.0.0.1:5173", platform = "MacIntel" }) {
   const timers = [];
   const created = [];
   const makeNode = () => ({
@@ -487,8 +497,9 @@ function loadArchiveClient({ fetchImpl, storage = new Map(), protocol = "http:",
       createElement: makeNode
     }
   };
+  const loc = new URL(origin);
   sandbox.window = {
-    location: { origin: "https://ozktobacco.com", protocol },
+    location: { origin: loc.origin, protocol: loc.protocol, hostname: loc.hostname },
     localStorage: {
       getItem: (k) => (storage.has(k) ? storage.get(k) : null),
       setItem: (k, v) => storage.set(k, v),
@@ -563,7 +574,10 @@ await test("على https: رسالة الفشل تذكر إذن الشبكة ا�
   // وينجح بـ200 فور منحه. رسالة «الجسر غير متاح» وحدها تُرسل المالك خلف عطل
   // غير موجود.
   const { api, toasts } = loadArchiveClient({
-    protocol: "https:",
+    origin: "https://ozktobacco.com",
+    // التفعيل الصريح شرط خروج الطلب من أصل عام (بوابة PNA). المقيس هنا نصّ
+    // الرسالة حين **يفشل طلبٌ خرج فعلاً**، لا حالة الخمول.
+    storage: new Map([["ozk.archive.enabled", "1"]]),
     fetchImpl: async () => { throw new Error("Failed to fetch"); }
   });
   const result = await api.archive({ docType: "stock_report", html: "<p>x</p>", meta: {} });
@@ -575,7 +589,7 @@ await test("على https: رسالة الفشل تذكر إذن الشبكة ا�
 
 await test("على http محلي: رسالة الفشل تبقى مباشرة بلا حشو", async () => {
   const { api, toasts } = loadArchiveClient({
-    protocol: "http:",
+    origin: "http://127.0.0.1:5173",
     fetchImpl: async () => { throw new Error("ECONNREFUSED"); }
   });
   await api.archive({ docType: "stock_report", html: "<p>x</p>", meta: {} });
@@ -625,6 +639,31 @@ await test("diagnose يجيب عن كل أسئلة التشخيص بلا إزع�
   assert.equal(report.pair.gotToken, true);
   assert.equal(report.verdict, "الجسر متاح");
   assert.equal(created.length, 0, "التشخيص لا يعرض شيئاً للمستخدم");
+});
+
+await test("أصل عام بلا تفعيل: لا طلب شبكي إطلاقاً (منع ضجيج وحدة التحكّم)", async () => {
+  // قياس فعلي على الإنتاج (2026-09-06): كل محاولة من أصل عام تُخرج خطأين في
+  // وحدة التحكّم لأن كروم يحجب مجال العناوين المحلي قبل الشبكة. لا طلب ⇒ لا خطأ.
+  let touched = false;
+  const { api } = loadArchiveClient({
+    origin: "https://ozktobacco.com",
+    fetchImpl: async () => { touched = true; throw new Error("should not happen"); }
+  });
+  const result = await api.archive({ docType: "invoice", html: "<p>x</p>", meta: { party: "س", number: "1" } });
+  assert.equal(result.reason, "needs_opt_in");
+  assert.equal(touched, false, "أصل عام بلا تفعيل لا يجوز أن يُطلق طلباً");
+});
+
+await test("أصل عام برمز ربط محفوظ: الجسر يبقى مُخاطَباً (لا تعطيل صامت)", async () => {
+  // الخطر المقابل للضجيج: إسكاته بتعطيل الميزة. إعدادٌ ناجح سابقاً يجب ألا ينكسر.
+  let reached = false;
+  const { api } = loadArchiveClient({
+    origin: "https://ozktobacco.com",
+    storage: new Map([["ozk.archive.token", "T".repeat(64)]]),
+    fetchImpl: async () => { reached = true; throw new Error("down"); }
+  });
+  await api.archive({ docType: "stock_report", html: "<p>x</p>", meta: {} });
+  assert.equal(reached, true, "رمز محفوظ = دليل ربط ناجح سابق، فالبوابة تُفتح");
 });
 
 await test("إيقاف الميزة من المتصفح يمنع أي طلب شبكي", async () => {
@@ -677,8 +716,10 @@ await test("لم تسقط أي نقطة ربط للأرشفة من src/app.js", 
   // `return_invoice` يُمرَّر عبر متغيّر لا حرفياً، ويحرسه فحص المرتجع أعلاه.
   assert.ok(/isRet \? "return_invoice"/.test(appJs), "نقطة ربط مفقودة: return_invoice");
 
-  // الوسيطان اللذان يمرّ منهما باقي المستندات.
-  assert.match(appJs, /async function exportReportPdf\(bodyHtml, filename, archive\)/);
+  // الوسيطان اللذان يمرّ منهما باقي المستندات. `exportReportPdf` لم يعد يقبل
+  // اسم ملف من المستدعي: الاسم يُشتقّ من `archive` نفسها (نفس مصدر الأرشفة)،
+  // فبقاء وسيط `filename` كان يعني مصدرَي تسمية لمستند واحد.
+  assert.match(appJs, /async function exportReportPdf\(bodyHtml, archive\)/);
   assert.match(appJs, /if \(options\.archive && options\.archive\.docType\)/);
 });
 
