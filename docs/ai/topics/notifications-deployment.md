@@ -1,10 +1,14 @@
 # تقرير موضوع الإشعارات والنشر
 
-آخر تحديث: 2026-09-14
+آخر تحديث: 2026-09-15
 
 ## الحالة الحالية
 
 يوجد Web Push وTelegram Edge Functions وGitHub Pages. آخر توثيق سابق أكد إشعار iPhone فعلياً بعد إصلاح الأيقونة، لكن أي حالة حية جديدة تحتاج اختباراً جديداً. نشر النشرات يعتمد workflow منفصلاً عن نشر الموقع.
+
+## إصلاح 2026-09-15 — اكتمال قائمة ASSETS في الـService Worker
+
+`index.html` كان يحمّل `src/number-normalizer.js` و`src/command-center-hotfix.js` بلا إدراجهما في `ASSETS` داخل `public/service-worker.js`. بعد تفعيل SW جديد يُمسح الكاش القديم ويُملأ من القائمة فقط؛ في وضع offline يرتدّ الطلب الغائب إلى `index.html` فيُقدَّم HTML مكان سكربت → `SyntaxError`. أُضيفا للقائمة، وأُضيف حارس في `scripts/check-service-worker-update-cycle.mjs` يفرض أن كل `src`/`href` محلي تحت `src/` أو `public/` في `index.html` موجود في `ASSETS`. غلاف الجذر `service-worker.js` يبقى استيراداً فقط بلا تكرار.
 
 ## إصلاحات 2026-09-14 (مراجعة أمنية شاملة، فرع `fix/ameen-worker-recovery-and-pgcron-monitor`)
 
