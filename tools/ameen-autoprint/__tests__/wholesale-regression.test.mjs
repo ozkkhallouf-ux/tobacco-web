@@ -458,8 +458,8 @@ await test("describeError: كائن يحمل خصائص دائرية (JSON.strin
   assert.doesNotThrow(() => describeError(circular));
 });
 
-await test("watcher.js: catch حلقة poll() يعيد رمي fatalPrinterConfig فقط، ويستخدم describeError الآمن لغير ذلك", () => {
-  assert.ok(/if \(err && err\.fatalPrinterConfig\) throw err;\s*\n\s*console\.error\(`خطأ: \$\{describeError\(err\)\}`\);/.test(watcherSrc));
+await test("watcher.js: catch حلقة poll() يعيد رمي أخطاء الإعداد القاطعة، ويستخدم describeError الآمن لغير ذلك", () => {
+  assert.ok(/if \(err && \(err\.fatalPrinterConfig \|\| err\.fatalPersist\)\) throw err;\s*\n\s*console\.error\(`خطأ: \$\{describeError\(err\)\}`\);/.test(watcherSrc));
   // لا رجوع إلى err.message المباشر غير المحروس داخل هذه الكتلة (سبب DeepScan INSUFFICIENT_NULL_CHECK الأصلي)
 });
 
@@ -666,9 +666,10 @@ class FakeDate extends Date {
   static now() { return NOW; }
 }
 
-function makeWindowHarness(gate) {
+function makeWindowHarness(gate, extras = {}) {
   const printed = [];
   const printerGate = gate || { ready: () => true };
+  const persistState = extras.persistState || (() => true);
   const body = [
     `const WATCH_LOOKBACK_DAYS = ${WATCH_LOOKBACK_DAYS};`,
     `const PRINTED_RETENTION_DAYS = ${PRINTED_RETENTION_DAYS};`,
@@ -690,12 +691,12 @@ function makeWindowHarness(gate) {
     body
   )(
     { UniqueIdentifier: "u", NVarChar: "n" },
-    { wholesaleTypeGuid: "wt-guid" },
+    { wholesaleTypeGuid: "wt-guid", stateFilePath: extras.stateFilePath || "X" },
     "-- test double --",
     printerGate,
     async () => ({ accountGuid: "G1", current: 100 }),
     async (inv) => { printed.push(inv.number); },
-    () => true,
+    persistState,
     FakeDate,
     { log() {}, error() {} },
   );
@@ -1094,6 +1095,63 @@ await test("الترحيل لا يتبنّى فواتير فجوة النشر (�
     "فواتير فجوة النشر لم تُطبع بعد الترحيل");
 });
 
+await test("فشل حفظ الترحيل يُبقي الراية ولا يطبع فجوة النشر (ملاحظة Codex P1)", async () => {
+  // إن رُفعت الراية بعد تبنٍّ نجح في الذاكرة وفشل على القرص، الدورة التالية
+  // تطبع فجوة النشر، ثم إعادة التشغيل تعيد الترحيل فتُطبع مرة ثانية.
+  let persistOk = false;
+  const { poll, printed } = makeWindowHarness(undefined, { persistState: () => persistOk });
+  NOW = Date.parse("2026-09-16T09:00:00Z");
+  const ledger = [];
+  let seq = 400;
+  for (let d = 9; d <= 16; d++) {
+    const ds = `2026-09-${String(d).padStart(2, "0")}`;
+    ledger.push(fakeSalesRow({ invoice_guid: `P-${seq}`, invoice_number: String(seq), invoice_date: ds }));
+    seq++;
+  }
+  const state = {
+    watchFromDate: "2026-03-01",
+    schemaVersion: 2,
+    adoptBaseline: true,
+    printedGuids: Object.fromEntries(
+      ledger.filter((r) => r.invoice_date >= "2026-09-10" && r.invoice_date <= "2026-09-13")
+        .map((r) => [r.invoice_guid, Date.parse(`${r.invoice_date}T12:00:00Z`)])
+    ),
+  };
+  const guidOf = (d) => ledger.find((r) => r.invoice_date === `2026-09-${d}`).invoice_guid;
+
+  await assert.rejects(
+    () => poll(fakePollPool(rowsVisibleTo(ledger, state)), state),
+    (err) => err && err.fatalPersist && /رفض قاطع/.test(err.message),
+  );
+  assert.equal(printed.length, 0, "طُبع ورق بعد فشل حفظ الترحيل");
+  assert.ok(state.adoptBaseline, "رُفعت راية الترحيل رغم فشل الحفظ — الدورة التالية ستطبع فجوة النشر");
+  for (const d of ["14", "15", "16"]) {
+    assert.ok(!state.printedGuids[guidOf(d)],
+      `تُبنّيت أو طُبعت فاتورة ${d} أيلول رغم أن الترحيل لم يُحفظ`);
+  }
+
+  persistOk = true;
+  await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
+  assert.equal(printed.length, 0, "دورة الترحيل بعد نجاح الحفظ طبعت ورقاً");
+  assert.ok(!state.adoptBaseline, "لم تُستهلك الراية بعد نجاح الحفظ");
+
+  await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
+  assert.deepEqual(printed.sort(), ["405", "406", "407"].sort(),
+    "فواتير فجوة النشر لم تُطبع مرة واحدة بعد ترحيل محفوظ");
+});
+
+await test("watcher.js: فشل حفظ الترحيل مُجهِض ولا يُبتلع في حلقة الاستعلام", () => {
+  const pollAdopt = extractFunctionSource(watcherSrc, "async function poll(pool, state, hooks");
+  assert.ok(/fatalPersist/.test(pollAdopt), "دورة الترحيل لا تعلّم فشل الحفظ كقاطع");
+  assert.ok(/state\.adoptBaseline = true/.test(pollAdopt),
+    "فشل الحفظ لا يعيد الراية — الذاكرة تمضي بلا ترحيل");
+  assert.ok(/adoptedGuids/.test(pollAdopt),
+    "فشل الحفظ لا يلغي التبنّي في الذاكرة — يرفع خط الأساس فيلوّث فجوة النشر");
+  const mainSrc = extractFunctionSource(watcherSrc, "async function main()");
+  assert.ok(/err\.fatalPersist/.test(mainSrc),
+    "فشل حفظ الترحيل يُبتلع داخل حلقة الاستعلام فيُطبع بعده");
+});
+
 await test("watcher.js: فشل حفظ الحالة عند الإقلاع يمنع التشغيل (ملاحظة Codex P1)", () => {
   const src = extractFunctionSource(watcherSrc, "function persistInitialStateOrAbort(state)");
   assert.ok(/throw new Error/.test(src), "لا يُجهض الإقلاع عند فشل الحفظ الأول");
@@ -1283,6 +1341,19 @@ await test("watcher.js: القفل يُستحوذ قبل فحص الطابعة �
   assert.ok(lockIdx > 0 && lockIdx < sqlIdx, "القفل يُستحوذ بعد الاتصال بـSQL لا قبله");
   assert.ok(/lock\.beat\(\);/.test(watcherSrc), "لا نبضة داخل الحلقة الرئيسية");
   assert.ok(/process\.on\("exit", \(\) => lock\.release\(\)\)/.test(watcherSrc), "لا تحرير عند الخروج");
+});
+
+await test("watcher.js: القفل ينبض طوال إعادة محاولة اتصال SQL (ملاحظة Codex P1)", () => {
+  const mainSrc = extractFunctionSource(watcherSrc, "async function main()");
+  const sqlStart = mainSrc.indexOf("parseSqlConnStr");
+  const loadIdx = mainSrc.indexOf("loadState()");
+  assert.ok(sqlStart > 0 && loadIdx > sqlStart, "حلقة SQL لا تقع بين القفل وتحميل الحالة");
+  const sqlLoop = mainSrc.slice(sqlStart, loadIdx);
+  assert.ok(/setInterval\(\s*\(\)\s*=>\s*lock\.beat\(\)/.test(sqlLoop),
+    "لا مؤقّت نبض أثناء انتظار SQL — انقطاع عشر دقائق يُبيّت القفل");
+  assert.ok(/clearInterval\(keepLockAlive\)/.test(sqlLoop),
+    "مؤقّت النبض لا يُلغى بعد نجاح الاتصال");
+  assert.ok(/lock\.beat\(\)/.test(sqlLoop), "حلقة اتصال SQL لا تنبض القفل عند فشل المحاولة");
 });
 
 await test("watcher.js: fatalLockHeld يخرج برسالة مفهومة لا كـ'خطأ فادح' غامض", () => {

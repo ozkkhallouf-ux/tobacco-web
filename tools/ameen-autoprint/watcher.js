@@ -747,10 +747,12 @@ async function poll(pool, state, hooks = {}) {
     const cutoff = migrationAdoptCutoff(state);
     let adopted = 0;
     let deferred = 0;
+    const adoptedGuids = [];
     for (const inv of invoices) {
       if (state.printedGuids[inv.guid]) continue;
       if (String(inv.date) < cutoff) {
         state.printedGuids[inv.guid] = Date.now();
+        adoptedGuids.push(inv.guid);
         adopted++;
       } else {
         deferred++;
@@ -758,7 +760,20 @@ async function poll(pool, state, hooks = {}) {
     }
     delete state.adoptBaseline;
     pruneOldGuids(state);
-    persistState(state);
+    if (!persistState(state)) {
+      // لم تُطبع ورقة بعد: منطق «لا نرمي» لا يسري هنا. إن رُفعت الراية ومضينا،
+      // الدورة التالية تطبع فجوة النشر، ثم إعادة التشغيل تعيد الترحيل من القرص
+      // (الراية ما زالت هناك) فتُطبع الفواتير مرة ثانية.
+      state.adoptBaseline = true;
+      for (const guid of adoptedGuids) delete state.printedGuids[guid];
+      const err = new Error(
+        `رفض قاطع: تعذّر حفظ نتيجة الترحيل "${config.stateFilePath}".`
+        + " بلا حالة دائمة ستُطبع فواتير فجوة النشر ثم تُعاد بعد إعادة التشغيل."
+        + " صحّح صلاحيات الكتابة على المجلد أو مساحة القرص ثم أعد التشغيل."
+      );
+      err.fatalPersist = true;
+      throw err;
+    }
     console.log(
       `ترحيل الحالة: تُبنّيت ${adopted} فاتورة أقدم من ${cutoff} كمطبوعة مسبقاً — لن تُطبع.`
       + (deferred
@@ -854,19 +869,29 @@ async function main() {
   }
   console.log("══════════════════════════════════════════════\n");
 
-  // الاتصال بـSQL Server مع إعادة محاولة
+  // الاتصال بـSQL Server مع إعادة محاولة. النبضة أثناء الانتظار إلزامية:
+  // الحلقة قد تدوم أكثر من LOCK_STALE_MS إن كان الخادم متوقفاً، فبدون نبضة
+  // تستولي نسخة أخرى (start.bat أو إعادة تشغيل المهمة) على القفل، وبعد عودة
+  // SQL تعمل النسختان معاً وقد تدهس الأولى قفل الثانية عند نبضتها التالية.
   const sqlCfg = parseSqlConnStr(config.sqlConnectionString);
   let pool;
-  for (;;) {
-    try {
-      process.stdout.write("الاتصال بـSQL Server... ");
-      pool = await new sql.ConnectionPool(sqlCfg).connect();
-      console.log("ناجح ✓\n");
-      break;
-    } catch (err) {
-      console.error(`فشل: ${err.message}\nإعادة المحاولة بعد 15 ثانية...`);
-      await new Promise((r) => setTimeout(r, 15_000));
+  const keepLockAlive = setInterval(() => lock.beat(), LOCK_BEAT_MIN_INTERVAL_MS);
+  try {
+    for (;;) {
+      try {
+        process.stdout.write("الاتصال بـSQL Server... ");
+        pool = await new sql.ConnectionPool(sqlCfg).connect();
+        console.log("ناجح ✓\n");
+        break;
+      } catch (err) {
+        console.error(`فشل: ${err.message}\nإعادة المحاولة بعد 15 ثانية...`);
+        lock.beat();
+        await new Promise((r) => setTimeout(r, 15_000));
+      }
     }
+  } finally {
+    clearInterval(keepLockAlive);
+    lock.beat();
   }
 
   // تهيئة الحالة — أول تشغيل: لا تُطبع فواتير اليوم السابقة
@@ -911,7 +936,7 @@ async function main() {
       try {
         await poll(pool, state, { beat: () => lock.beat() });
       } catch (err) {
-        if (err && err.fatalPrinterConfig) throw err;
+        if (err && (err.fatalPrinterConfig || err.fatalPersist)) throw err;
         console.error(`خطأ: ${describeError(err)}`);
         // إعادة الاتصال إذا انقطع
         if (!pool.connected) {
