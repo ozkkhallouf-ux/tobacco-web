@@ -66,6 +66,7 @@
     over_credit_limit: "تجاوز حد الائتمان",
     near_credit_limit: "قريب من حد الائتمان",
     credit_limit_unknown: "بلا حد ائتمان محدد",
+    credit_balance_unknown: "الرصيد غير متاح",
     ambiguous_identity: "اسم ملتبس بين معرّفين",
     mixed_currency: "فواتير بأكثر من عملة",
     stale_data: "مصدر غير حديث",
@@ -85,6 +86,7 @@
     insufficient_history: "warn",
     cadence_unknown: "warn",
     credit_limit_unknown: "warn",
+    credit_balance_unknown: "warn",
     vip: "good",
     growing: "good",
     reactivated: "good",
@@ -256,7 +258,9 @@
       : ({ new_activity: "نشاط جديد", no_activity: "لا حركة", insufficient_data: "غير كافٍ", no_positive_baseline: "بلا أساس" }[row.purchaseTrend?.state] || "—");
     const creditText = isNumber(row.creditUsagePercent)
       ? `${Math.round(row.creditUsagePercent)}%`
-      : (row.creditStatus === "unknown_limit" ? "بلا حد" : "—");
+      : (row.creditStatus === "unknown_limit" ? "بلا حد"
+        : row.creditStatus === "unknown_balance" ? "رصيد غير متاح"
+        : "—");
     return `
       <tr class="ci-row ${view.selectedId === row.customerId ? "selected" : ""}" data-ci-customer="${escape(row.customerId)}" tabindex="0">
         <td class="ci-name">${escape(row.customerName)}</td>

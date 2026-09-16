@@ -167,17 +167,22 @@ for (const step of ['replace(/[إأآٱ]/gu, "ا")', 'replace(/ى/gu, "ي")', 'r
 
   // الهوية والعملة ومعرّف المادة: بدونها يعود الربط إلى الاسم وحده.
   for (const contract of ["$custGuidCol = Pick $buCols", "$custGuidSel AS customer_guid", "$currencyIsoSel AS currency_iso",
+    "$currencyValCol = Pick $buCols", "$currencyValSel AS currency_val",
     "LOWER(CAST(m.GUID AS varchar(40))) AS item_guid", "customerGuid = $b.customerGuid", "payloadVersion = 2"]) {
     assert.ok(ps1.includes(contract), `push-customer-invoices.ps1 ينقصه عقد الهوية: ${contract}`);
   }
+  assert.ok(ps1.includes("currencyVal = if ($r[\"currency_val\"]"),
+    "مزامنة الفواتير يجب أن ترفع currencyVal كما هو من الأمين بلا تحويل مزدوج في السكربت");
   // معرّف المجموعة لا يُملأ إلا باتفاق كل فواتيرها — وإلا دُمج زبونان باسم واحد.
   assert.ok(ps1.includes('$groupGuid = if ($groupGuids.Count -eq 1) { $groupGuids[0] } else { "" }'),
     "معرّف المجموعة يجب أن يبقى فارغاً عند اختلاف معرّفات فواتيرها");
 
   // والمحرك يقرأ هذه الحقول فعلاً (وإلا كانت المزامنة ترفع ما لا يُستعمل).
-  for (const field of ["customerGuid", "customer_guid", "itemGuid", "item_guid", "invoice?.currency"]) {
+  for (const field of ["customerGuid", "customer_guid", "itemGuid", "item_guid", "invoice?.currency", "invoice?.currencyVal"]) {
     assert.ok(engineJs.includes(field), `المحرك لا يقرأ الحقل ${field} الذي ترفعه المزامنة`);
   }
+  assert.ok(engineJs.includes("toInvoiceCurrency"), "المحرك يجب أن يحوّل الخام ÷ CurrencyVal قبل وسم عملة الفاتورة");
+  assert.ok(engineJs.includes("unknown_balance"), "غياب صف الرصيد يجب أن يبقى حالة unknown_balance لا صفراً");
 }
 
 // ---------------------------------------------------------------------------

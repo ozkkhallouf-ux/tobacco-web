@@ -43,7 +43,8 @@ function invoice(date, total, extra = {}) {
     payment: extra.payment ?? 0,
     isReturn: extra.isReturn ?? false,
     lines: extra.lines ?? [line(extra.material ?? "صنف افتراضي", 1, total)],
-    ...(extra.currency ? { currency: extra.currency } : {})
+    ...(extra.currency ? { currency: extra.currency } : {}),
+    ...(extra.currencyVal != null ? { currencyVal: extra.currencyVal } : {})
   };
 }
 
@@ -118,7 +119,10 @@ const returnsExceed = customer("returnsExceed", "زبون مرتجعه أكبر"
   ]
 });
 const mixedCurrency = customer("mixedCurrency", "زبون بعملتين", {
-  invoices: [invoice("2026-08-10", 500, { currency: "USD" }), invoice("2026-08-20", 3000000, { currency: "SYP" })]
+  invoices: [
+    invoice("2026-08-10", 500, { currency: "USD", currencyVal: 1 }),
+    invoice("2026-08-20", 3000000, { currency: "SYP", currencyVal: 1 })
+  ]
 });
 const boundary = customer("boundary", "زبون على الحدود", {
   invoices: [invoice("2026-08-03T00:00:00.0000000", 300), invoice("2026-08-04", 300)]
@@ -649,7 +653,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
 
   const nullPlusSyp = buildIsolated([
     invoice("2026-08-10", 500, {}),                           // بلا currency → يُطبَّع USD
-    invoice("2026-08-20", 3000000, { currency: "SYP" })
+    invoice("2026-08-20", 3000000, { currency: "SYP", currencyVal: 1 })
   ]);
   const row26 = nullPlusSyp.customers.find((r) => !r.isSupplier);
   assert.ok(row26, "test 26: يجب أن يُبنى سجل للزبون");
@@ -691,7 +695,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
         summary: { periodDays: 60, fromDate: FROM_DATE, customers: 2, bills: 0, syncedAt: REFERENCE_ISO },
         items: [
           { name: "زبون دولار",  invoices: [invoice("2026-08-10", 100, { currency: "USD" })],     truncated: false },
-          { name: "زبون ليرة",   invoices: [invoice("2026-08-10", 1000000, { currency: "SYP" })], truncated: false }
+          { name: "زبون ليرة",   invoices: [invoice("2026-08-10", 1000000, { currency: "SYP", currencyVal: 1 })], truncated: false }
         ]
       },
       balancesReport: {
@@ -759,9 +763,9 @@ if (!process.env.OZK_CI_TZ_CHILD) {
           truncated: false,
           invoices: [
             { date: "2026-08-10", number: "1", guid: "g1", total: 100, discount: 0, payment: 0, isReturn: false,
-              currency: "USD", lines: [line("صنف أ", 1, 100)] },
+              currency: "USD", currencyVal: 1, lines: [line("صنف أ", 1, 100)] },
             { date: "2026-08-11", number: "2", guid: "g2", total: 1000000, discount: 0, payment: 0, isReturn: false,
-              currency: "SYP", lines: [line("صنف أ", 1, 1000000)] }
+              currency: "SYP", currencyVal: 1, lines: [line("صنف أ", 1, 1000000)] }
           ]
         }]
       },
@@ -1054,12 +1058,12 @@ if (!process.env.OZK_CI_TZ_CHILD) {
       }
     };
   }
-  const usdInvoices = [invoice("2026-07-20", 100, { currency: "USD" }), invoice("2026-08-20", 100, { currency: "USD" })];
+  const usdInvoices = [invoice("2026-07-20", 100, { currency: "USD", currencyVal: 1 }), invoice("2026-08-20", 100, { currency: "USD", currencyVal: 1 })];
   const sypInvoices = [
-    invoice("2026-07-06", 2000000, { currency: "SYP" }),
-    invoice("2026-07-20", 2000000, { currency: "SYP" }),
-    invoice("2026-08-10", 2000000, { currency: "SYP" }),
-    invoice("2026-08-28", 2000000, { currency: "SYP" })
+    invoice("2026-07-06", 2000000, { currency: "SYP", currencyVal: 1 }),
+    invoice("2026-07-20", 2000000, { currency: "SYP", currencyVal: 1 }),
+    invoice("2026-08-10", 2000000, { currency: "SYP", currencyVal: 1 }),
+    invoice("2026-08-28", 2000000, { currency: "SYP", currencyVal: 1 })
   ];
   const parties = [
     party("زبون دولار أ", guidFor(1), usdInvoices),
@@ -1126,10 +1130,10 @@ if (!process.env.OZK_CI_TZ_CHILD) {
           customerGuid: USD,
           truncated: false,
           invoices: [
-            invoice("2026-07-10", 50, { currency: "USD" }),
-            invoice("2026-07-20", 50, { currency: "USD" }),
-            invoice("2026-08-10", 35, { currency: "USD" }),
-            invoice("2026-08-20", 35, { currency: "USD" })
+            invoice("2026-07-10", 50, { currency: "USD", currencyVal: 1 }),
+            invoice("2026-07-20", 50, { currency: "USD", currencyVal: 1 }),
+            invoice("2026-08-10", 35, { currency: "USD", currencyVal: 1 }),
+            invoice("2026-08-20", 35, { currency: "USD", currencyVal: 1 })
           ]
         },
         {
@@ -1137,10 +1141,10 @@ if (!process.env.OZK_CI_TZ_CHILD) {
           customerGuid: SYP_A,
           truncated: false,
           invoices: [
-            invoice("2026-07-10", 2000000, { currency: "SYP" }),
-            invoice("2026-07-20", 2000000, { currency: "SYP" }),
-            invoice("2026-08-10", 2000000, { currency: "SYP" }),
-            invoice("2026-08-20", 2000000, { currency: "SYP" })
+            invoice("2026-07-10", 2000000, { currency: "SYP", currencyVal: 1 }),
+            invoice("2026-07-20", 2000000, { currency: "SYP", currencyVal: 1 }),
+            invoice("2026-08-10", 2000000, { currency: "SYP", currencyVal: 1 }),
+            invoice("2026-08-20", 2000000, { currency: "SYP", currencyVal: 1 })
           ]
         },
         {
@@ -1148,10 +1152,10 @@ if (!process.env.OZK_CI_TZ_CHILD) {
           customerGuid: SYP_B,
           truncated: false,
           invoices: [
-            invoice("2026-07-10", 2000000, { currency: "SYP" }),
-            invoice("2026-07-20", 2000000, { currency: "SYP" }),
-            invoice("2026-08-10", 2000000, { currency: "SYP" }),
-            invoice("2026-08-20", 2000000, { currency: "SYP" })
+            invoice("2026-07-10", 2000000, { currency: "SYP", currencyVal: 1 }),
+            invoice("2026-07-20", 2000000, { currency: "SYP", currencyVal: 1 }),
+            invoice("2026-08-10", 2000000, { currency: "SYP", currencyVal: 1 }),
+            invoice("2026-08-20", 2000000, { currency: "SYP", currencyVal: 1 })
           ]
         }
       ]
@@ -1191,4 +1195,168 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   }
 }
 
-console.log(`ذكاء الزبائن: 37 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
+// ---------------------------------------------------------------------------
+// 38) Codex P1 — قيم الأمين بالدولار تُحوَّل بـCurrencyVal قبل وسمها ليرة
+// ---------------------------------------------------------------------------
+{
+  const GUID = "611e8ef6-3563-48a3-b65b-000000000038";
+  const r38 = engine.build({
+    invoicesReport: {
+      source: "ameen_customer_invoices",
+      created_at: REFERENCE_ISO,
+      summary: { periodDays: 60, fromDate: FROM_DATE, customers: 1, bills: 1, syncedAt: REFERENCE_ISO },
+      items: [{
+        name: "زبون فاتورة ليرة",
+        customerGuid: GUID,
+        truncated: false,
+        invoices: [invoice("2026-08-20", 100, {
+          currency: "SYP",
+          currencyVal: 0.01,
+          discount: 10,
+          payment: 5,
+          lines: [line("صنف ليرة", 1, 100)]
+        })]
+      }]
+    },
+    balancesReport: {
+      source: "ameen_customer_balances",
+      created_at: REFERENCE_ISO,
+      summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: 1 },
+      items: [{
+        key: engine.normalizeName("زبون فاتورة ليرة"),
+        name: "زبون فاتورة ليرة",
+        balance: 0,
+        creditLimit: 0,
+        remainingLimit: 0,
+        status: "clear",
+        customerGuid: GUID,
+        customerAccountGuid: GUID,
+        isSupplier: false,
+        recentPayments: [],
+        recentMovements: []
+      }]
+    },
+    movementsReport: null,
+    creditLimits: [],
+    now: NOW
+  });
+  const row38 = r38.customers.find((row) => row.customerName === "زبون فاتورة ليرة");
+  assert.ok(row38, "test 38: زبون فاتورة الليرة يجب أن يظهر");
+  assert.equal(row38.currency, "SYP", "test 38: بعد التحويل تُوسم الفاتورة بالليرة");
+  assert.equal(row38.netSales30d, 9000, "test 38: (100−10)÷0.01 = 9000 ل.س لا 90 دولاراً بوسم ليرة");
+  assert.equal(r38.summary.netSales30d, 0, "test 38: المبلغ المحوَّل لا يدخل إجمالي الدولار");
+}
+
+// ---------------------------------------------------------------------------
+// 39) Codex P1 — وسم ليرة بلا CurrencyVal يبقى عملة أساس لأن الأرقام دولار
+// ---------------------------------------------------------------------------
+{
+  const GUID = "611e8ef6-3563-48a3-b65b-000000000039";
+  const r39 = engine.build({
+    invoicesReport: {
+      source: "ameen_customer_invoices",
+      created_at: REFERENCE_ISO,
+      summary: { periodDays: 60, fromDate: FROM_DATE, customers: 1, bills: 1, syncedAt: REFERENCE_ISO },
+      items: [{
+        name: "زبون ليرة بلا معدّل",
+        customerGuid: GUID,
+        truncated: false,
+        invoices: [invoice("2026-08-20", 80, { currency: "SYP" })]
+      }]
+    },
+    balancesReport: {
+      source: "ameen_customer_balances",
+      created_at: REFERENCE_ISO,
+      summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: 1 },
+      items: [{
+        key: engine.normalizeName("زبون ليرة بلا معدّل"),
+        name: "زبون ليرة بلا معدّل",
+        balance: 0,
+        creditLimit: 0,
+        remainingLimit: 0,
+        status: "clear",
+        customerGuid: GUID,
+        customerAccountGuid: GUID,
+        isSupplier: false,
+        recentPayments: [],
+        recentMovements: []
+      }]
+    },
+    movementsReport: null,
+    creditLimits: [],
+    now: NOW
+  });
+  const row39 = r39.customers.find((row) => row.customerName === "زبون ليرة بلا معدّل");
+  assert.ok(row39, "test 39: الزبون يجب أن يظهر");
+  assert.equal(row39.currency, "USD", "test 39: بلا معدّل لا تُوسم الأرقام الدولارية ليرة");
+  assert.equal(row39.netSales30d, 80, "test 39: المبلغ يبقى كما خُزِّن في الأساس");
+  assert.equal(r39.summary.netSales30d, 80, "test 39: يدخل إجمالي الدولار لأنه أصلاً دولار");
+}
+
+// ---------------------------------------------------------------------------
+// 40) Codex P1 — غياب صف الرصيد ليس صفراً ولا يُدخل الذمم ولا يُعدّ ائتماناً طبيعياً
+// ---------------------------------------------------------------------------
+{
+  const KNOWN = "611e8ef6-3563-48a3-b65b-000000000040";
+  const MISSING = "611e8ef6-3563-48a3-b65b-000000000041";
+  const r40 = engine.build({
+    invoicesReport: {
+      source: "ameen_customer_invoices",
+      created_at: REFERENCE_ISO,
+      summary: { periodDays: 60, fromDate: FROM_DATE, customers: 2, bills: 2, syncedAt: REFERENCE_ISO },
+      items: [
+        {
+          name: "زبون رصيده معروف",
+          customerGuid: KNOWN,
+          truncated: false,
+          invoices: [invoice("2026-08-20", 40, { currency: "USD", currencyVal: 1 })]
+        },
+        {
+          name: "زبون بلا صف رصيد",
+          customerGuid: MISSING,
+          truncated: false,
+          invoices: [invoice("2026-08-20", 70, { currency: "USD", currencyVal: 1 })]
+        }
+      ]
+    },
+    balancesReport: {
+      source: "ameen_customer_balances",
+      created_at: REFERENCE_ISO,
+      summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: 1 },
+      items: [{
+        key: engine.normalizeName("زبون رصيده معروف"),
+        name: "زبون رصيده معروف",
+        balance: 250,
+        creditLimit: 1000,
+        remainingLimit: 750,
+        status: "clear",
+        customerGuid: KNOWN,
+        customerAccountGuid: KNOWN,
+        isSupplier: false,
+        recentPayments: [],
+        recentMovements: []
+      }]
+    },
+    movementsReport: null,
+    creditLimits: [{
+      customerKey: engine.normalizeName("زبون بلا صف رصيد"),
+      customerName: "زبون بلا صف رصيد",
+      customerGuid: MISSING,
+      credit_limit: 5000
+    }],
+    now: NOW
+  });
+  const known = r40.customers.find((row) => row.customerName === "زبون رصيده معروف");
+  const missing = r40.customers.find((row) => row.customerName === "زبون بلا صف رصيد");
+  assert.ok(known && missing, "test 40: الزبونان يجب أن يظهرا");
+  assert.equal(known.currentBalance, 250, "test 40: الرصيد المصرَّح يبقى 250");
+  assert.equal(known.creditStatus, "normal");
+  assert.equal(missing.currentBalance, null, "test 40: غياب صف الرصيد = null لا صفر");
+  assert.equal(missing.creditStatus, "unknown_balance", "test 40: الحالة unknown_balance لا normal");
+  assert.ok(missing.flags.includes("credit_balance_unknown"));
+  assert.ok(!missing.flags.includes("over_credit_limit"), "test 40: حد معتمد بلا رصيد لا يُنتج تجاوزاً");
+  assert.equal(r40.summary.totalReceivables, 250, "test 40: الذمم من الأرصدة المعروفة فقط");
+  assert.equal(r40.summary.unknownCreditBalanceCount, 1);
+}
+
+console.log(`ذكاء الزبائن: 40 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);

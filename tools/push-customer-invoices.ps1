@@ -141,12 +141,17 @@ try {
 
     # عملة الفاتورة: مطلوبة كي لا يُجمَع دولار مع ليرة في أي تحليل لاحق.
     # my000 جدول العملات المرجعي (GUID + CurrencyISO) — لا تخمين على GUID خام.
+    # القيم النقدية على bu000/bi000 مخزَّنة بعملة الأساس (دولار). المبلغ بعملة
+    # الفاتورة = الخام ÷ CurrencyVal (نفس ameen-sales-query.sql وwatcher.js).
+    # بلا معدّل لا يُرفع ISO أجنبي مع أرقام دولار — المحرك يُبقيها عملة أساس.
     $currencyCol = Pick $buCols @("CurrencyGUID", "CurGUID", "MyGUID") $null
     $myCols = Get-Columns "my000"
     $currencyIsoCol = Pick $myCols @("CurrencyISO") $null
     $currencyJoin = if ($currencyCol -and $currencyIsoCol) { "LEFT JOIN my000 cur ON cur.GUID = u.[$currencyCol]" } else { "" }
     $currencyIsoSel = if ($currencyCol -and $currencyIsoCol) { "cur.[$currencyIsoCol]" } else { "NULL" }
-    Write-Log "اكتشاف: نوع الفاتورة = u.$typeCol | رقم الفاتورة = $(if($numCol){$numCol}else{'(GUID)'}) | العملة = $(if($currencyCol -and $currencyIsoCol){$currencyCol}else{'(غير موجودة)'})"
+    $currencyValCol = Pick $buCols @("CurrencyVal") $null
+    $currencyValSel = if ($currencyValCol) { "CAST(NULLIF(u.[$currencyValCol],0) AS decimal(28,12))" } else { "CAST(NULL AS decimal(28,12))" }
+    Write-Log "اكتشاف: نوع الفاتورة = u.$typeCol | رقم الفاتورة = $(if($numCol){$numCol}else{'(GUID)'}) | العملة = $(if($currencyCol -and $currencyIsoCol){$currencyCol}else{'(غير موجودة)'}) | CurrencyVal = $(if($currencyValCol){$currencyValCol}else{'(غير موجود)'})"
 
     # اكتشاف أعمدة السعر/الإجمالي على bi000 (تختلف بين نسخ الأمين)
     $biCols = Get-Columns "bi000"
@@ -225,6 +230,7 @@ SELECT CAST(u.GUID AS varchar(40)) AS bill_guid,
        CAST(COALESCE(u.FirstPay,0)  AS decimal(18,3)) AS bill_first_pay,
        bt.BillType AS bill_type,
        $currencyIsoSel AS currency_iso,
+       $currencyValSel AS currency_val,
        LOWER(CAST(m.GUID AS varchar(40))) AS item_guid,
        LTRIM(RTRIM(COALESCE(m.Name,''))) AS material,
        CAST(COALESCE(bi.Qty,0)  AS decimal(18,3)) AS qty,
@@ -269,6 +275,7 @@ ORDER BY u.Date DESC, u.GUID
                 customerAccountGuid = $custAcct
                 accountName         = $custAccountName
                 currency = if ($r["currency_iso"] -is [DBNull] -or -not $r["currency_iso"]) { "" } else { ([string]$r["currency_iso"]).Trim().ToUpper() }
+                currencyVal = if ($r["currency_val"] -is [DBNull] -or -not $r["currency_val"]) { $null } else { [double]$r["currency_val"] }
                 total    = [double]$r["bill_total"]
                 discount = [double]$r["bill_discount"]
                 payment  = [double]$r["bill_first_pay"]
@@ -277,6 +284,7 @@ ORDER BY u.Date DESC, u.GUID
                 isReturn = ([int]$r["bill_type"] -eq 3)
                 lines    = New-Object System.Collections.Generic.List[object]
             }
+            if ($null -ne $bills[$g].currencyVal -and $bills[$g].currencyVal -le 0) { $bills[$g].currencyVal = $null }
         }
         $f = [double]$r["unit2_fact"]
         $qtyUnits = if ($f -gt 0) { [math]::Round(([double]$r["qty"]) / $f, 3) } else { [double]$r["qty"] }
@@ -322,6 +330,7 @@ ORDER BY u.Date DESC, u.GUID
             # فلا يُدمج زبونان يتطابق اسمهما بعد التطبيع ويختلف معرّفهما.
             customerGuid = $b.customerGuid
             currency = $b.currency
+            currencyVal = $b.currencyVal
             guid     = $g.ToLower()   # معرّف الفاتورة في الأمين — لربطها بقيدها في دفتر الحسابات
             total    = [math]::Round($b.total, 3)
             discount = [math]::Round($b.discount, 3)
@@ -381,7 +390,7 @@ ORDER BY u.Date DESC, u.GUID
         report_date = (Get-Date).ToString("yyyy-MM-dd")
         created_by  = $session.user.id
         summary     = @{
-            payloadVersion = 2   # v2 = يحمل customerGuid وcurrency وitemGuid
+            payloadVersion = 2   # v2 = يحمل customerGuid وcurrency وcurrencyVal وitemGuid
             periodDays = $PeriodDays
             fromDate   = $fromIso
             customers  = $items.Count

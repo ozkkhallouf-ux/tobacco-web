@@ -94,6 +94,22 @@
   };
   const numberOrZero = (value) => numberOrNull(value) ?? 0;
 
+  // الأمين يخزّن u.Total / u.TotalDisc / أسطر bi000 بعملة الأساس (دولار).
+  // المبلغ بعملة الفاتورة = الخام ÷ CurrencyVal (نفس watcher.js). بلا معدّل
+  // صالح لا تُوسم الفاتورة بـISO أجنبي — الأرقام تبقى أساس.
+  const invoiceCurrencyVal = (invoice) => {
+    const parsed = numberOrNull(invoice?.currencyVal ?? invoice?.currency_val);
+    return parsed !== null && parsed > 0 ? parsed : null;
+  };
+  const toInvoiceCurrency = (amount, currencyVal) => (
+    currencyVal === null ? amount : amount / currencyVal
+  );
+  const invoiceCurrencyCode = (invoice) => {
+    const iso = text(invoice?.currency).toUpperCase();
+    if (!iso || iso === CONFIG.baseCurrency) return iso || null;
+    return invoiceCurrencyVal(invoice) === null ? null : iso;
+  };
+
   const round = (value, digits = 2) => {
     const factor = Math.pow(10, digits);
     return Math.round((numberOrZero(value) + Number.EPSILON) * factor) / factor;
@@ -215,19 +231,20 @@
 
         const isReturn = invoice?.isReturn === true;
         const sign = isReturn ? -1 : 1;
-        const total = numberOrZero(invoice?.total);
-        const discount = numberOrZero(invoice?.discount);
+        const currencyVal = invoiceCurrencyVal(invoice);
+        const total = toInvoiceCurrency(numberOrZero(invoice?.total), currencyVal);
+        const discount = toInvoiceCurrency(numberOrZero(invoice?.discount), currencyVal);
         const gross = total - discount;
         // معرّف الزبون على مستوى الفاتورة إن وفّرته المزامنة، وإلا معرّف المجموعة.
         const guid = normalizeGuid(invoice?.customerGuid ?? invoice?.customer_guid) || groupGuid;
-        const currency = text(invoice?.currency).toUpperCase() || null;
+        const currency = invoiceCurrencyCode(invoice);
 
         const lines = (Array.isArray(invoice?.lines) ? invoice.lines : []).map((line) => ({
           itemGuid: normalizeGuid(line?.itemGuid ?? line?.item_guid),
           material: text(line?.material),
           qty: numberOrZero(line?.qty),
           qtyUnits: numberOrNull(line?.qtyUnits),
-          lineTotal: numberOrZero(line?.lineTotal)
+          lineTotal: toInvoiceCurrency(numberOrZero(line?.lineTotal), currencyVal)
         }));
 
         rows.push({
@@ -241,7 +258,7 @@
           currency,
           netValue: round(sign * gross, 3),
           grossValue: round(gross, 3),
-          firstPay: numberOrZero(invoice?.payment),
+          firstPay: toInvoiceCurrency(numberOrZero(invoice?.payment), currencyVal),
           number: text(invoice?.number),
           guid: text(invoice?.guid),
           lines
@@ -362,13 +379,24 @@
   // «غير محدد». غياب الحد **ليس** صفراً ولا يُنتج تجاوزاً.
   // --------------------------------------------------------------------------
   function resolveCredit(balanceRow, approvedLimit) {
-    const balance = numberOrZero(balanceRow?.balance);
+    const approved = approvedLimit !== null && approvedLimit > 0 ? approvedLimit : null;
     const ameenLimitRaw = numberOrNull(balanceRow?.creditLimit ?? balanceRow?.credit_limit);
     const ameenLimit = ameenLimitRaw !== null && ameenLimitRaw > 0 ? ameenLimitRaw : null;
-    const approved = approvedLimit !== null && approvedLimit > 0 ? approvedLimit : null;
-
     const creditLimit = approved ?? ameenLimit;
     const creditLimitSource = approved !== null ? "approved" : ameenLimit !== null ? "ameen" : "missing";
+
+    // صف الأرصدة الغائب أو الرصيد غير الرقمي = مجهول، لا صفر ملفّق.
+    if (!balanceRow || numberOrNull(balanceRow.balance) === null) {
+      return {
+        currentBalance: null,
+        creditLimit: creditLimit === null ? null : round(creditLimit, 3),
+        creditLimitSource,
+        creditUsagePercent: null,
+        creditStatus: "unknown_balance"
+      };
+    }
+
+    const balance = numberOrNull(balanceRow.balance);
     const exposure = Math.max(0, balance);
     const usagePercent = creditLimit !== null ? round((exposure / creditLimit) * 100, 2) : null;
     const ratio = creditLimit !== null ? exposure / creditLimit : null;
@@ -887,6 +915,7 @@
       if (draft.credit.creditStatus === "over_limit") flags.push("over_credit_limit");
       if (draft.credit.creditStatus === "near_limit") flags.push("near_credit_limit");
       if (draft.credit.creditStatus === "unknown_limit") flags.push("credit_limit_unknown");
+      if (draft.credit.creditStatus === "unknown_balance") flags.push("credit_balance_unknown");
 
       // ترتيب أولوية التصنيف الأساسي (موثّق في docs/ai/topics/customer-intelligence.md).
       // ملاحظة مقصودة: VIP يسبق التراجع، فزبون VIP متراجع يبقى VIP مع flag تراجع.
@@ -957,6 +986,7 @@
       if (draft.credit.creditStatus === "over_limit") reasons.push(`الرصيد ${draft.credit.creditUsagePercent}% من حد الائتمان المعتمد.`);
       else if (draft.credit.creditStatus === "near_limit") reasons.push(`الرصيد بلغ ${draft.credit.creditUsagePercent}% من حد الائتمان.`);
       else if (draft.credit.creditStatus === "unknown_limit") reasons.push("عليه رصيد مدين بلا حد ائتمان محدد.");
+      else if (draft.credit.creditStatus === "unknown_balance") reasons.push("لا يوجد صف رصيد من الأمين لهذا الزبون، فلا يُعرض صفراً ولا يُحسب ضمن الذمم.");
 
       return {
         customerId: draft.record.customerId,
@@ -1037,13 +1067,18 @@
       overCreditLimitCount: countFlag("over_credit_limit"),
       nearCreditLimitCount: countFlag("near_credit_limit"),
       unknownCreditLimitCount: countFlag("credit_limit_unknown"),
+      unknownCreditBalanceCount: countFlag("credit_balance_unknown"),
       insufficientDataCount: active.filter((row) => row.primarySegment === "insufficient_data").length,
       ambiguousIdentityCount: countFlag("ambiguous_identity"),
       // تجميع المبيعات بعملة الأساس فقط — ممنوع إضافة مبالغ SYP إلى إجمالي USD.
       // الأرصدة (totalReceivables) دائماً بعملة الأساس (من الأمين المحاسبي).
       netSales30d: round(active.filter((row) => row.currency === CONFIG.baseCurrency).reduce((sum, row) => sum + (row.netSales30d ?? 0), 0), 3),
       netSalesPrevious30d: round(active.filter((row) => row.currency === CONFIG.baseCurrency).reduce((sum, row) => sum + (row.netSalesPrevious30d ?? 0), 0), 3),
-      totalReceivables: round(active.reduce((sum, row) => sum + Math.max(0, row.currentBalance), 0), 3),
+      totalReceivables: round(active.reduce((sum, row) => {
+        const balance = row.currentBalance;
+        if (!Number.isFinite(balance)) return sum;
+        return sum + Math.max(0, balance);
+      }, 0), 3),
       currency: CONFIG.baseCurrency
     };
     summary.netSalesTrendPercent = summary.netSalesPrevious30d > 0
