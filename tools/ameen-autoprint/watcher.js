@@ -7,6 +7,7 @@
 
 const fs   = require("fs");
 const path = require("path");
+const os   = require("os");
 const { execSync, spawnSync } = require("child_process");
 const sql  = require("mssql");
 const puppeteer = require("puppeteer");
@@ -326,6 +327,107 @@ function pruneOldGuids(state) {
   }
 }
 
+// ─── قفل النسخة الواحدة ───────────────────────────────────────────────────
+// نسختان من المراقب على نفس ملف الحالة = طباعة مزدوجة مضمونة، وهي تبدو
+// للمستخدم «فواتير قديمة تُطبع من جديد». السبب أن كل نسخة تُحمّل الحالة إلى
+// الذاكرة مرة واحدة عند الإقلاع ثم تكتب الكائن **كاملاً**، فكتابة الثانية
+// تدهس علامات الأولى (lost update) فتعود الفواتير غير مُعلَّمة فتُطبع مرتين.
+// والكتابة الذرّية لا تحمي من هذا إطلاقاً: هي تمنع الملف المبتور لا الدهس.
+//
+// وهذا ليس احتمالاً نظرياً — المستودع نفسه يوفّر مسارَي تشغيل على نفس الملف:
+// المهمة المجدولة "OZK-AmeenAutoPrint" (تعمل كـSYSTEM عند الإقلاع عبر
+// install-service.bat) و`start.bat` اليدوي. تشغيل الثاني للتحقق «هل يعمل؟»
+// بينما الأولى تعمل يكفي لإنتاج العطل.
+const LOCK_STALE_HINT_MS = 10 * 60 * 1000;
+
+function lockHeldError(message) {
+  const err = new Error(message);
+  err.fatalLockHeld = true;
+  return err;
+}
+
+// true = العملية موجودة. EPERM تعني موجودة لكن بمستخدم آخر (SYSTEM مقابل
+// المستخدم المسجَّل) — وهي بالضبط الحالة التي يجب كشفها لا تجاهلها.
+function processAlive(pid) {
+  try { process.kill(pid, 0); return true; }
+  catch (err) { return Boolean(err) && err.code === "EPERM"; }
+}
+
+function lockFilePath() {
+  return `${config.stateFilePath}.lock`;
+}
+
+// يرمي fatalLockHeld إن كانت نسخة حيّة تحمل القفل. القفل المتروك من عملية
+// ميتة (انقطاع كهرباء) يُستولى عليه تلقائياً فلا يبقى المراقب معطّلاً للأبد.
+function acquireSingleInstanceLock(nowMs = Date.now()) {
+  const lockPath = lockFilePath();
+  let existing = null;
+  try { existing = JSON.parse(fs.readFileSync(lockPath, "utf8")); }
+  catch { existing = null; }
+
+  const pid = existing ? Number(existing.pid) : NaN;
+  if (Number.isInteger(pid) && pid > 0 && pid !== process.pid && processAlive(pid)) {
+    const beat = Number(existing.heartbeatAt) || 0;
+    const ageText = beat
+      ? `آخر نبضة قبل ${Math.max(0, Math.round((nowMs - beat) / 1000))} ثانية`
+      : "بلا نبضة مسجَّلة";
+    const staleHint = beat && (nowMs - beat) > LOCK_STALE_HINT_MS
+      ? " النبضة قديمة جداً، فقد تكون العملية بهذا الرقم برنامجاً آخر لا المراقب."
+      : "";
+    throw lockHeldError(
+      `رفض قاطع: نسخة أخرى من المراقب تحمل القفل (PID ${pid}، ${ageText}).`
+      + " تشغيل نسختين على نفس ملف الحالة يسبّب طباعة الفاتورة مرتين."
+      + ` أوقف النسخة الأخرى — أو المهمة "OZK-AmeenAutoPrint" —  ثم أعد التشغيل.${staleHint}`
+      + ` وإن تأكّدت أن العملية ${pid} ليست المراقب، احذف الملف: ${lockPath}`
+    );
+  }
+
+  const writeLock = (beatMs) => {
+    fs.writeFileSync(lockPath, JSON.stringify({
+      pid: process.pid,
+      host: os.hostname(),
+      startedAt: new Date(nowMs).toISOString(),
+      heartbeatAt: beatMs,
+    }, null, 2), "utf8");
+  };
+  writeLock(nowMs);
+
+  let released = false;
+  return {
+    path: lockPath,
+    // نبضة كل دورة: تُميّز مراقباً حيّاً من رقم عملية أُعيد استخدامه.
+    beat(t = Date.now()) { try { writeLock(t); } catch {} },
+    // لا يُحذف إلا قفلنا نحن — كي لا تحذف نسخةٌ فاشلة قفل النسخة العاملة.
+    release() {
+      if (released) return;
+      released = true;
+      try {
+        const cur = JSON.parse(fs.readFileSync(lockPath, "utf8"));
+        if (Number(cur.pid) === process.pid) fs.unlinkSync(lockPath);
+      } catch {}
+    },
+  };
+}
+
+// فشل حفظ الحالة عطل حرج لا تحذير عابر: الفواتير طُبعت فعلاً وعلاماتها في
+// الذاكرة وحدها، فأي إعادة تشغيل بعده يُعيد طباعتها كلها. يقع فعلاً حين
+// يُنشئ SYSTEM ملف الحالة ثم يُشغَّل start.bat بمستخدم لا يملك حق الكتابة،
+// أو حين يمتلئ القرص. لا يُرمى: الطباعة نجحت فعلاً ووقف الدورة لا يصلح شيئاً،
+// لكنه يجب أن يكون مستحيل التفويت في السجل.
+function persistState(state) {
+  try {
+    saveState(state);
+    return true;
+  } catch (err) {
+    console.error(
+      `!! عطل حرج: تعذّر حفظ ملف الحالة "${config.stateFilePath}" — ${describeError(err)}.`
+      + " الفواتير المطبوعة لن تبقى مُعلَّمة بعد إعادة التشغيل فستُطبع من جديد."
+      + " تحقّق من صلاحيات الكتابة على المجلد ومن مساحة القرص."
+    );
+    return false;
+  }
+}
+
 // ─── تسمية العملة ────────────────────────────────────────────────────────
 // USD → «$ 1,350»   ·   SYP أو مجهول → «1,350 ل.س»   ·   غيرهما → الرمز ISO.
 // مصدر التسمية هو my000.CurrencyISO للفاتورة نفسها، لا نص ثابت.
@@ -510,7 +612,7 @@ async function poll(pool, state) {
 
   if (changed) {
     pruneOldGuids(state);
-    saveState(state);
+    persistState(state);
   }
 }
 
@@ -526,6 +628,14 @@ async function main() {
 
   assertWholesaleConfig();
   assertDedupWindowInvariant();
+
+  // القفل قبل أي شيء آخر: لا فحص طابعة ولا اتصال SQL ولا طباعة إن كانت نسخة
+  // أخرى تعمل. ويُحرَّر في كل مسارات الخروج كي لا يبقى قفل متروك.
+  const lock = acquireSingleInstanceLock();
+  process.on("exit", () => lock.release());
+  for (const sig of ["SIGINT", "SIGTERM", "SIGHUP", "SIGBREAK"]) {
+    process.on(sig, () => { lock.release(); process.exit(0); });
+  }
   // عطل الإعداد الدائم يرمي من هنا وينهي العملية كما كان تماماً. أما العطل العابر
   // (طابعة Wi-Fi لم تجهز بعد عند الإقلاع) فلا يُنهي المراقب: يُسجَّل، ويبدأ التشغيل
   // معلَّق الطباعة، وتُستأنف المراقبة تلقائياً فور عودة الطابعة.
@@ -566,7 +676,7 @@ async function main() {
   if (!state) {
     const today = localDateStr(Date.now());
     state = { watchFromDate: today, printedGuids: {} };
-    saveState(state);
+    persistState(state);
     console.log(`تهيئة: بداية المراقبة من ${today} (الفواتير السابقة لن تُطبع)`);
   } else {
     const printed = Object.keys(state.printedGuids).length;
@@ -574,7 +684,7 @@ async function main() {
     // هنا فوراً وتُحفظ، فيتوقّف نزيف إعادة الطباعة من أول دورة لا بعد أيام.
     const movedFrom = advanceWatchFromDate(state);
     if (movedFrom !== null) {
-      saveState(state);
+      persistState(state);
       console.log(`تصحيح نافذة مجمّدة: ${movedFrom} ← ${state.watchFromDate}`);
     }
     console.log(`استئناف: مراقبة منذ ${state.watchFromDate} | ${printed} فاتورة مطبوعة سابقاً`);
@@ -604,11 +714,17 @@ async function main() {
         }
       }
     }
+    lock.beat();
     await new Promise((r) => setTimeout(r, config.pollIntervalMs));
   }
 }
 
 main().catch((err) => {
-  console.error("خطأ فادح:", err.message);
+  // القفل المحجوز خروج مقصود بسبب مفهوم، لا عطل غامض — يُميَّز في السجل.
+  if (err && err.fatalLockHeld) {
+    console.error(`\n${err.message}\n`);
+    process.exit(2);
+  }
+  console.error("خطأ فادح:", describeError(err));
   process.exit(1);
 });

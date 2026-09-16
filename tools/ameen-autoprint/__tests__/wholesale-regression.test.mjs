@@ -503,6 +503,7 @@ function makePoll({ getCustomerBalance: gcb, printInvoice: pi }) {
     "printInvoice",
     "pruneOldGuids",
     "saveState",
+    "persistState",
     "advanceWatchFromDate",
     `${groupIntoInvoicesSrc}\n${pollSrc}\nreturn poll;`
   );
@@ -511,12 +512,13 @@ function makePoll({ getCustomerBalance: gcb, printInvoice: pi }) {
   const printerGate = { ready: () => true };
   const pruneOldGuids = () => {};
   const saveState = () => {};
+  const persistState = () => true;
   // هذه الاختبارات تثبّت النافذة عمداً كي تقيس سلوك الطباعة وحده؛ تقدّم النافذة
   // نفسه له اختباراته المستقلة أدناه (قسم «نافذة المراقبة»).
   const advanceWatchFromDate = () => null;
   return factory(
     sql, "test-config" && config, "-- test double --", printerGate,
-    gcb, pi, pruneOldGuids, saveState, advanceWatchFromDate
+    gcb, pi, pruneOldGuids, saveState, persistState, advanceWatchFromDate
   );
 }
 
@@ -668,7 +670,7 @@ function makeWindowHarness() {
   ].join("\n");
   const api = new Function(
     "sql", "config", "SALES_QUERY", "printerGate",
-    "getCustomerBalance", "printInvoice", "saveState", "Date", "console",
+    "getCustomerBalance", "printInvoice", "persistState", "Date", "console",
     body
   )(
     { UniqueIdentifier: "u", NVarChar: "n" },
@@ -677,7 +679,7 @@ function makeWindowHarness() {
     { ready: () => true },
     async () => ({ accountGuid: "G1", current: 100 }),
     async (inv) => { printed.push(inv.number); },
-    () => {},
+    () => true,
     FakeDate,
     { log() {}, error() {} },
   );
@@ -847,6 +849,147 @@ await test("loadState: ملف تالف ≠ أول تشغيل صامت (يُسج�
   assert.ok(/console\.error/.test(loadSrc), "ملف الحالة التالف يمرّ صامتاً");
   assert.ok(/printedGuids/.test(loadSrc) && /watchFromDate/.test(loadSrc),
     "لا تحقّق من بنية الملف قبل قبوله");
+});
+
+console.log("\n== wholesale-regression: قفل النسخة الواحدة — منع الطباعة المزدوجة ==");
+
+// نسختان على نفس ملف الحالة = طباعة مزدوجة مضمونة: كل نسخة تُحمّل الحالة مرة
+// واحدة ثم تكتب الكائن كاملاً، فكتابة الثانية تدهس علامات الأولى (lost update).
+// المستودع يوفّر مسارَي تشغيل على نفس الملف (المهمة المجدولة وstart.bat)،
+// فالسيناريو واقعي لا نظري. الكتابة الذرّية لا تحمي منه: تمنع الملف المبتور
+// لا الدهس.
+
+import osMod from "node:os";
+
+const lockSrcs = [
+  "const LOCK_STALE_HINT_MS = 10 * 60 * 1000;",
+  extractFunctionSource(watcherSrc, "function lockHeldError(message)"),
+  extractFunctionSource(watcherSrc, "function processAlive(pid)"),
+  extractFunctionSource(watcherSrc, "function lockFilePath()"),
+  extractFunctionSource(watcherSrc, "function acquireSingleInstanceLock(nowMs"),
+].join("\n");
+
+function makeLockApi(stateFilePath, fakePid) {
+  const proc = {
+    pid: fakePid,
+    kill: (pid, sig) => process.kill(pid, sig),
+  };
+  return new Function(
+    "fs", "os", "config", "process",
+    `${lockSrcs}\nreturn { acquireSingleInstanceLock, lockFilePath, processAlive };`
+  )(fs, osMod, { stateFilePath }, proc);
+}
+
+function tmpStatePath(tag) {
+  return path.join(osMod.tmpdir(), `ozk-lock-test-${tag}-${process.pid}-${Math.random().toString(36).slice(2)}.json`);
+}
+
+await test("القفل: نسخة واحدة تحصل عليه وتكتب PID ونبضة", () => {
+  const sp = tmpStatePath("single");
+  const api = makeLockApi(sp, process.pid);
+  const lock = api.acquireSingleInstanceLock();
+  try {
+    const written = JSON.parse(fs.readFileSync(lock.path, "utf8"));
+    assert.equal(Number(written.pid), process.pid);
+    assert.ok(Number(written.heartbeatAt) > 0, "لا نبضة مسجَّلة");
+  } finally { lock.release(); }
+  assert.ok(!fs.existsSync(lock.path), "لم يُحرَّر القفل عند release");
+});
+
+await test("القفل: نسخة ثانية ونسخة حيّة تحمل القفل ⇒ ترفض الإقلاع (fatalLockHeld)", () => {
+  const sp = tmpStatePath("double");
+  // النسخة الأولى: PID حيّ فعلاً (عملية الاختبار نفسها)
+  const first = makeLockApi(sp, process.pid).acquireSingleInstanceLock();
+  try {
+    // النسخة الثانية: PID مختلف، تجد قفلاً لعملية حيّة
+    const second = makeLockApi(sp, process.pid + 100000);
+    assert.throws(
+      () => second.acquireSingleInstanceLock(),
+      (err) => {
+        assert.equal(err.fatalLockHeld, true, "لم تُعلَّم fatalLockHeld");
+        assert.ok(/طباعة الفاتورة مرتين/.test(err.message), "الرسالة لا تشرح الخطر");
+        assert.ok(err.message.includes(first.path), "الرسالة لا تذكر مسار ملف القفل");
+        return true;
+      }
+    );
+  } finally { first.release(); }
+});
+
+await test("القفل: قفل متروك من عملية ميتة يُستولى عليه (لا تعطيل دائم بعد انقطاع كهرباء)", () => {
+  const sp = tmpStatePath("stale");
+  const lockPath = `${sp}.lock`;
+  // PID شبه مستحيل أن يكون حياً
+  fs.writeFileSync(lockPath, JSON.stringify({ pid: 999999, heartbeatAt: Date.now() - 3600_000 }), "utf8");
+  const api = makeLockApi(sp, process.pid);
+  const lock = api.acquireSingleInstanceLock();
+  try {
+    assert.equal(Number(JSON.parse(fs.readFileSync(lockPath, "utf8")).pid), process.pid,
+      "لم يُستولَ على القفل المتروك");
+  } finally { lock.release(); }
+});
+
+await test("القفل: نسخة فاشلة لا تحذف قفل النسخة العاملة", () => {
+  const sp = tmpStatePath("nosteal");
+  const first = makeLockApi(sp, process.pid).acquireSingleInstanceLock();
+  try {
+    const second = makeLockApi(sp, process.pid + 100001);
+    try { second.acquireSingleInstanceLock(); } catch { /* مرفوضة كما هو متوقّع */ }
+    assert.ok(fs.existsSync(first.path), "حُذف قفل النسخة العاملة");
+    assert.equal(Number(JSON.parse(fs.readFileSync(first.path, "utf8")).pid), process.pid);
+  } finally { first.release(); }
+});
+
+await test("processAlive: EPERM (عملية بمستخدم آخر مثل SYSTEM) تُعدّ موجودة لا غائبة", () => {
+  const src = extractFunctionSource(watcherSrc, "function processAlive(pid)");
+  assert.ok(/EPERM/.test(src),
+    "EPERM غير معالَج — نسخة تعمل كـSYSTEM ستُعدّ ميتة فيُستولى على قفلها وتُطبع الفواتير مرتين");
+  const api = makeLockApi(tmpStatePath("alive"), process.pid);
+  assert.equal(api.processAlive(process.pid), true);
+  assert.equal(api.processAlive(999999), false);
+});
+
+await test("watcher.js: القفل يُستحوذ قبل فحص الطابعة والاتصال بـSQL، وينبض كل دورة", () => {
+  assert.ok(/assertDedupWindowInvariant\(\);[\s\S]{0,400}?acquireSingleInstanceLock\(\)/.test(watcherSrc),
+    "القفل لا يُستحوذ مبكراً عند الإقلاع");
+  const lockIdx = watcherSrc.indexOf("acquireSingleInstanceLock()");
+  const sqlIdx = watcherSrc.indexOf("new sql.ConnectionPool(sqlCfg).connect()");
+  assert.ok(lockIdx > 0 && lockIdx < sqlIdx, "القفل يُستحوذ بعد الاتصال بـSQL لا قبله");
+  assert.ok(/lock\.beat\(\);/.test(watcherSrc), "لا نبضة داخل الحلقة الرئيسية");
+  assert.ok(/process\.on\("exit", \(\) => lock\.release\(\)\)/.test(watcherSrc), "لا تحرير عند الخروج");
+});
+
+await test("watcher.js: fatalLockHeld يخرج برسالة مفهومة لا كـ'خطأ فادح' غامض", () => {
+  assert.ok(/err\.fatalLockHeld[\s\S]{0,200}process\.exit\(2\)/.test(watcherSrc),
+    "الخروج عند القفل المحجوز غير مميَّز");
+});
+
+console.log("\n== wholesale-regression: فشل حفظ الحالة — لا يمرّ صامتاً ==");
+
+await test("persistState: فشل الحفظ يُسجَّل كعطل حرج ولا يُرمى (الطباعة نجحت فعلاً)", () => {
+  const src = extractFunctionSource(watcherSrc, "function persistState(state)");
+  assert.ok(/console\.error/.test(src), "فشل الحفظ يمرّ صامتاً");
+  assert.ok(/عطل حرج/.test(src), "الرسالة لا تُصنّف العطل كحرج");
+  assert.ok(/فستُطبع من جديد|ستُطبع من جديد/.test(src), "الرسالة لا تشرح أثر الفشل (إعادة طباعة)");
+
+  let calls = 0;
+  const persistState = new Function("saveState", "console", "config", "describeError",
+    `${src}\nreturn persistState;`)(
+    () => { throw new Error("EACCES: permission denied"); },
+    { error: () => { calls++; } },
+    { stateFilePath: "X" },
+    (e) => e.message,
+  );
+  // لا يرمي مهما فشل الحفظ، ويُسجّل العطل فعلاً
+  assert.equal(persistState({ printedGuids: {} }), false, "أرجعت نجاحاً رغم فشل الحفظ");
+  assert.equal(calls, 1, "لم يُسجَّل العطل الحرج في السجل");
+});
+
+await test("watcher.js: كل مسارات حفظ الحالة تمرّ من persistState لا من saveState مباشرة", () => {
+  // saveState يُعرَّف مرة ويُستدعى مرة واحدة فقط — من داخل persistState.
+  const directCalls = (watcherSrc.match(/(?<!function )\bsaveState\(state\)/g) || []).length;
+  assert.equal(directCalls, 1,
+    `saveState(state) يُستدعى مباشرة ${directCalls} مرة — يجب أن تمرّ كلها من persistState`);
+  assert.ok(/persistState\(state\);/.test(watcherSrc), "persistState غير مستخدمة");
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
