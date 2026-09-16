@@ -6224,7 +6224,9 @@ const INVENTORY_GROUP_SEQUENCE = [
 
 function inventoryGroupInfo(it) {
   const label = String(it?.groupName || "مواد بدون مجموعة").trim() || "مواد بدون مجموعة";
-  const haystack = normalizeItemName(`${label} ${it?.name || ""}`);
+  // ترتيب المجموعة يُشتق من اسمها فقط لا من اسم الصنف، كي تحصل كل مجموعة على رتبة واحدة
+  // ثابتة فلا تتشظّى الأصناف وتتكرر المجموعة عبر الصفحات وتقرير المخزون
+  const haystack = normalizeItemName(label);
   const rank = INVENTORY_GROUP_SEQUENCE.findIndex((aliases) =>
     aliases.some((alias) => haystack.includes(normalizeItemName(alias)))
   );
