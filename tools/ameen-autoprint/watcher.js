@@ -258,6 +258,11 @@ function parseSqlConnStr(cs) {
 const WATCH_LOOKBACK_DAYS = 7;       // أبعد ما ينظر إليه الاستعلام إلى الوراء
 const PRINTED_RETENTION_DAYS = 30;   // مدة الاحتفاظ بعلامة «طُبعت»
 const WINDOW_SAFETY_MARGIN_DAYS = 3; // هامش يفصل أقصى نافذة عن حدّ الاحتفاظ
+// ما كانت **النسخة القديمة** تحتفظ به من علامات. يُستعمل في الترحيل وحده، ولا
+// يصحّ إسناد الحدّ إلى WATCH_LOOKBACK_DAYS: هذان مفهومان مختلفان يتساويان رقماً
+// الآن فقط، فرفع نافذة اللحاق لاحقاً كان سيجعل الترحيل يتبنّى أياماً كانت
+// النسخة القديمة ما زالت تحفظ علاماتها.
+const LEGACY_RETENTION_DAYS = 7;
 
 // نسخة بنية ملف الحالة. الحالة القادمة من النسخة القديمة (بلا رقم نسخة) خطرة
 // عند أول تشغيل للكود الجديد: النسخة القديمة كانت تحذف العلامات بعد 7 أيام،
@@ -732,7 +737,27 @@ function describeError(err) {
 function migrationAdoptCutoff(state, nowMs = Date.now()) {
   const processed = String(state.processedThrough || "");
   if (/^\d{4}-\d{2}-\d{2}$/.test(processed)) return processed;
-  return localDateStr(nowMs - WATCH_LOOKBACK_DAYS * DAY_MS);
+  return localDateStr(nowMs - LEGACY_RETENTION_DAYS * DAY_MS);
+}
+
+// يوم الحدّ نفسه ملتبس بنيوياً: النسخة القديمة تحذف العلامة بعد سبعة أيام من
+// **وقت الطباعة** لا من تاريخ الفاتورة، فداخل ذلك اليوم تنقضي علامات ما طُبع
+// أوّلَه وتبقى علامات ما طُبع آخره. فغياب العلامة في هذا اليوم بعينه ليس دليل
+// عدم طباعة — إنما هو يوم انتهاء الصلاحية. وترك اليوم بلا تبنٍّ يعني إعادة
+// طباعة جزء منه عند **كل** نشر، وهو عين ما يشكو منه المستخدم.
+//
+// فيُتبنّى، لكن بدليل موجب فقط: وجود علامة واحدة على الأقل طُبعت في ذلك اليوم
+// أو بعده يثبت أن النسخة القديمة كانت تعمل فيه. وبلا هذا الدليل لا تبنّي —
+// فلا تُبتلع فواتير يومٍ لم تكن النسخة القديمة تعمل فيه أصلاً.
+//
+// ملاحظة: الأختام تُستعمل هنا **دليل نشاط** لا لاستنتاج الحدّ — استنتاج الحدّ
+// من أحدث ختم هو ما كان يتبنّى الفاتورة الأقدم الفاشلة (ملاحظة Codex P1).
+function legacyWasActiveOn(state, cutoff) {
+  for (const ts of Object.values(state.printedGuids)) {
+    const n = Number(ts);
+    if (Number.isFinite(n) && n > 0 && localDateStr(n) >= cutoff) return true;
+  }
+  return false;
 }
 
 async function poll(pool, state, hooks = {}) {
@@ -766,12 +791,14 @@ async function poll(pool, state, hooks = {}) {
   // واحدة — ولا تلمس فواتير فجوة النشر، فتبقى لتُطبع في الدورة التالية.
   if (state.adoptBaseline) {
     const cutoff = migrationAdoptCutoff(state);
+    const adoptCutoffDay = legacyWasActiveOn(state, cutoff);
     let adopted = 0;
     let deferred = 0;
     const adoptedGuids = [];
     for (const inv of invoices) {
       if (state.printedGuids[inv.guid]) continue;
-      if (String(inv.date) < cutoff) {
+      const invDate = String(inv.date);
+      if (invDate < cutoff || (adoptCutoffDay && invDate === cutoff)) {
         state.printedGuids[inv.guid] = Date.now();
         adoptedGuids.push(inv.guid);
         adopted++;
