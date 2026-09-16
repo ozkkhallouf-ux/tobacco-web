@@ -677,7 +677,7 @@ function makeWindowHarness(gate, extras = {}) {
     `const WINDOW_SAFETY_MARGIN_DAYS = ${readConst("WINDOW_SAFETY_MARGIN_DAYS")};`,
     `const LEGACY_RETENTION_DAYS = ${readConst("LEGACY_RETENTION_DAYS")};`,
     extractFunctionSource(watcherSrc, "function migrationAdoptCutoff(state, nowMs"),
-    extractFunctionSource(watcherSrc, "function legacyWasActiveOn(state, cutoff)"),
+    extractFunctionSource(watcherSrc, "function cutoffDayHasContiguousProof(state, cutoff)"),
     "const DAY_MS = 24 * 60 * 60 * 1000;",
     localDateStrSrc,
     advanceSrc,
@@ -1187,10 +1187,11 @@ await test("الترحيل لا يتبنّى فاتورة أقدم فشلت بع
   assert.deepEqual(printed, ["410"], "الفاتورة الفاشلة لم تُطبع بعد الترحيل");
 });
 
-await test("ترحيل schema-v1 بلا processedThrough يتبنّى العلامات المحذوفة لا حدّ اللحاق (ملاحظة Codex P1)", async () => {
+await test("ترحيل schema-v1 بلا processedThrough لا يتبنّى يوم الحدّ بعلامات لاحقة (ملاحظة Codex P1)", async () => {
   // ملف حالة حقيقي من النسخة القديمة لا يحمل processedThrough. حدّ اللحاق يساوي
   // watchFromDate بعد advanceWatchFromDate، فـ date < cutoff لا يصيب شيئاً من
-  // الاستعلام وتُطبع فواتير 09-09 من جديد — علّة الترحيل الأصلية.
+  // الاستعلام. تبنّي يوم الحدّ لأن ختماً لاحقاً موجود كان يبتلع فاتورة فاشلة
+  // مؤرَّخة في ذلك اليوم رغم أن علامتها لم تُكتَب قط.
   const { poll, printed, migrationAdoptCutoff } = makeWindowHarness();
   NOW = Date.parse("2026-09-16T09:00:00Z");
   const ledger = [];
@@ -1216,11 +1217,16 @@ await test("ترحيل schema-v1 بلا processedThrough يتبنّى العلا
 
   await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
   assert.equal(printed.length, 0, "دورة الترحيل طبعت ورقاً");
-  assert.ok(state.printedGuids[guidOf("09")], "لم تُتبنَّ فاتورة 09-09 المحذوفة علامتها");
+  assert.ok(!state.printedGuids[guidOf("09")],
+    "تُبنّيت فاتورة يوم الحدّ لأن ختماً لاحقاً وُجد — فاتورة فاشلة في ذلك اليوم ستُفقد");
   for (const d of ["14", "15", "16"]) {
     assert.ok(!state.printedGuids[guidOf(d)],
       `تُبنّيت فاتورة ${d} أيلول من فجوة النشر`);
   }
+
+  await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
+  assert.deepEqual(printed.sort(), ["200", "205", "206", "207"].sort(),
+    "فاتورة يوم الحدّ الفاشلة وفجوة النشر لم تُطبع بعد الترحيل");
 });
 
 await test("watcher.js: فشل حفظ الحالة عند الإقلاع يمنع التشغيل (ملاحظة Codex P1)", () => {
@@ -1317,6 +1323,27 @@ await test("القفل: عملية ميتة ⇒ يُستولى عليه (لا ت
   try {
     assert.equal(Number(JSON.parse(fs.readFileSync(lockPath, "utf8")).pid), process.pid,
       "لم يُستولَ على قفل عملية ميتة");
+  } finally { lock.release(); }
+});
+
+await test("القفل: PID هذه العملية نفسها ونبضة طازجة بهوية إقلاع مختلفة ⇒ يُستولى عليه (ملاحظة Codex P1)", async () => {
+  // بعد انهيار أو إعادة تشغيل سريعة قد يُعيد Windows نفس الرقم لهذه العملية
+  // الجديدة بينما نبضة القفل المتروك ما زالت طازجة. processAlive تفحصنا نحن
+  // فيُرفض الإقلاع، والمهمة ONSTART بلا إعادة محاولة.
+  const sp = tmpStatePath("own-pid-fresh");
+  const lockPath = `${sp}.lock`;
+  const nowMs = Date.now();
+  fs.writeFileSync(lockPath, JSON.stringify({
+    pid: process.pid,
+    startedAt: "2026-01-01T00:00:00.000Z",
+    heartbeatAt: nowMs,
+  }), "utf8");
+  const lock = await makeLockApi(sp, process.pid).acquireSingleInstanceLock(nowMs, noWait);
+  try {
+    const written = JSON.parse(fs.readFileSync(lockPath, "utf8"));
+    assert.equal(Number(written.pid), process.pid);
+    assert.equal(written.startedAt, new Date(nowMs).toISOString(),
+      "لم يُستولَ على قفل PID هذه العملية بهوية إقلاع مختلفة — الطباعة تبقى معطّلة");
   } finally { lock.release(); }
 });
 
@@ -1508,6 +1535,8 @@ await test("watcher.js: إبدال النبضة والاستيلاء يعيدا�
   const rereadIdx = acquireSrc.indexOf("readLockJson(lockPath)");
   assert.ok(rereadIdx > 0 && rereadIdx < unlinkIdx,
     "الاستيلاء يحذف بلا إعادة قراءة — يدهس مالكاً جديداً");
+  assert.ok(/leftoverOwnPid/.test(acquireSrc) && /process\.pid/.test(acquireSrc),
+    "الاستحواذ لا يميّز قفل PID هذه العملية بهوية إقلاع مختلفة عن نسخة عاملة");
 });
 
 await test("watcher.js: الحلقة الرئيسية تُنهي العملية عند فقدان القفل قبل أي استعلام", () => {
@@ -1559,10 +1588,9 @@ await test("watcher.js: poll يفحص isLost قبل كل فاتورة لا بع�
     "فحص الملكية داخل poll يقع بعد الطباعة — باقي الدفعة يُطبع");
 });
 
-await test("حالة الجهاز الحقيقية 16 أيلول: فواتير 9 أيلول لا تُعاد طباعتها بعد الترحيل", async () => {
-  // يوم الحدّ ملتبس بنيوياً: النسخة القديمة تحذف العلامة بعد 7 أيام من **وقت
-  // الطباعة**، فداخل ذلك اليوم تنقضي علامات ما طُبع أوّلَه وتبقى علامات آخره.
-  // تركه بلا تبنٍّ يعني إعادة طباعة جزء منه عند كل نشر — وهو عين شكوى المستخدم.
+await test("حالة الجهاز الحقيقية 16 أيلول بلا علامة مائية: فواتير 9 أيلول تُطبع مرة لا تُبتلع", async () => {
+  // بلا processedThrough لا دليل اكتمال متجاور ليوم انتهاء صلاحية العلامات.
+  // تبنّيه لأن ختماً لاحقاً موجود كان يبتلع فاتورة فاشلة في ذلك اليوم.
   const { poll, printed } = makeWindowHarness();
   NOW = Date.parse("2026-09-16T09:00:00Z");
   const ledger = [];
@@ -1574,9 +1602,40 @@ await test("حالة الجهاز الحقيقية 16 أيلول: فواتير 9
       seq++;
     }
   }
-  // علامات 10→16 موجودة، وعلامات 9 أيلول حُذفت بحكم الاحتفاظ (وهي التي طُبعت اليوم)
+  const state = {
+    watchFromDate: "2026-03-01", schemaVersion: 1, adoptBaseline: true,
+    printedGuids: Object.fromEntries(
+      ledger.filter((r) => r.invoice_date > "2026-09-09")
+        .map((r) => [r.invoice_guid, Date.parse(`${r.invoice_date}T12:00:00Z`)])
+    ),
+  };
+
+  await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
+  assert.equal(printed.length, 0, "دورة الترحيل طبعت ورقاً");
+  for (const n of ["900", "901", "902", "903"]) {
+    assert.ok(!state.printedGuids[`R-${n}`],
+      `تُبنّيت فاتورة ${n} من يوم الحدّ بلا دليل اكتمال متجاور`);
+  }
+  await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
+  assert.deepEqual(printed.sort(), ["900", "901", "902", "903"].sort(),
+    "فواتير يوم الحدّ بلا علامة مائية لم تُطبع بعد الترحيل");
+});
+
+await test("علامة مائية متجاورة حتى يوم الحدّ: فواتير 9 أيلول لا تُعاد طباعتها", async () => {
+  const { poll, printed } = makeWindowHarness();
+  NOW = Date.parse("2026-09-16T09:00:00Z");
+  const ledger = [];
+  let seq = 920;
+  for (let d = 9; d <= 16; d++) {
+    const ds = `2026-09-${String(d).padStart(2, "0")}`;
+    for (let k = 0; k < 4; k++) {
+      ledger.push(fakeSalesRow({ invoice_guid: `W-${seq}`, invoice_number: String(seq), invoice_date: ds }));
+      seq++;
+    }
+  }
   const state = {
     watchFromDate: "2026-03-01", schemaVersion: 2, adoptBaseline: true,
+    processedThrough: "2026-09-09",
     printedGuids: Object.fromEntries(
       ledger.filter((r) => r.invoice_date > "2026-09-09")
         .map((r) => [r.invoice_guid, Date.parse(`${r.invoice_date}T12:00:00Z`)])
@@ -1587,17 +1646,16 @@ await test("حالة الجهاز الحقيقية 16 أيلول: فواتير 9
   assert.equal(printed.length, 0, "دورة الترحيل طبعت ورقاً");
   await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
   assert.equal(printed.length, 0,
-    `أُعيدت طباعة ${printed.length} فاتورة من 9 أيلول بعد الترحيل — نفس شكوى المستخدم`);
+    `أُعيدت طباعة ${printed.length} فاتورة من 9 أيلول رغم اكتمال اليوم بالماركة المائية`);
 });
 
-await test("يوم الحدّ لا يُتبنّى بلا دليل موجب على نشاط النسخة القديمة فيه", async () => {
-  // الوجه الآخر: لا يجوز ابتلاع فواتير يومٍ لم تكن النسخة القديمة تعمل فيه.
+await test("يوم الحدّ لا يُتبنّى بلا دليل اكتمال متجاور", async () => {
+  // الوجه الآخر: لا يجوز ابتلاع فواتير يومٍ لم تكتمل فواتيره.
   const { poll, printed } = makeWindowHarness();
   NOW = Date.parse("2026-09-16T09:00:00Z");
   const ledger = [
     fakeSalesRow({ invoice_guid: "N-1", invoice_number: "801", invoice_date: "2026-09-09" }),
   ];
-  // ولا علامة واحدة في يوم الحدّ أو بعده ⇒ لا دليل نشاط
   const state = {
     watchFromDate: "2026-03-01", schemaVersion: 2, adoptBaseline: true,
     printedGuids: { "old": Date.parse("2026-09-01T12:00:00Z") },
@@ -1606,12 +1664,12 @@ await test("يوم الحدّ لا يُتبنّى بلا دليل موجب عل�
   await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
   assert.equal(printed.length, 0, "دورة الترحيل طبعت ورقاً");
   assert.ok(!state.printedGuids["N-1"],
-    "تُبنّيت فاتورة يوم الحدّ بلا دليل أن النسخة القديمة كانت تعمل فيه — ستُفقد");
+    "تُبنّيت فاتورة يوم الحدّ بلا processedThrough مطابق — ستُفقد");
   await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
-  assert.deepEqual(printed, ["801"], "فاتورة يوم الحدّ بلا دليل نشاط لم تُطبع");
+  assert.deepEqual(printed, ["801"], "فاتورة يوم الحدّ بلا دليل اكتمال لم تُطبع");
 });
 
-await test("watcher.js: الأختام دليل نشاط لا مصدر للحدّ", () => {
+await test("watcher.js: يوم الحدّ لا يُتبنّى إلا بعلامة مائية متجاورة لا بأختام لاحقة", () => {
   const cutoffSrc = extractFunctionSource(watcherSrc, "function migrationAdoptCutoff(state, nowMs");
   assert.ok(!/Object\.values\(state\.printedGuids\)/.test(cutoffSrc),
     "الحدّ يُستنتج من الأختام — يتبنّى الفاتورة الأقدم الفاشلة (ملاحظة Codex P1)");
@@ -1619,9 +1677,13 @@ await test("watcher.js: الأختام دليل نشاط لا مصدر للحد�
     "الحدّ لا يعتمد على احتفاظ النسخة القديمة");
   assert.ok(!/WATCH_LOOKBACK_DAYS/.test(cutoffSrc),
     "الحدّ مُسنَد إلى نافذة اللحاق — مفهوم مختلف يتساوى رقماً الآن فقط");
-  const activeSrc = extractFunctionSource(watcherSrc, "function legacyWasActiveOn(state, cutoff)");
-  assert.ok(/Object\.values\(state\.printedGuids\)/.test(activeSrc),
-    "دليل النشاط لا يُقرأ من الأختام");
+  const proofSrc = extractFunctionSource(watcherSrc, "function cutoffDayHasContiguousProof(state, cutoff)");
+  assert.ok(/processedThrough/.test(proofSrc),
+    "دليل يوم الحدّ لا يُقرأ من العلامة المائية المتجاورة");
+  assert.ok(!/printedGuids/.test(proofSrc),
+    "دليل يوم الحدّ ما زال يعتمد على أختام لاحقة فيبتلع الفاتورة الفاشلة");
+  assert.ok(!/function legacyWasActiveOn/.test(watcherSrc),
+    "legacyWasActiveOn ما زال يتبنّى يوم الحدّ بنشاط لاحق");
 });
 
 console.log("\n== wholesale-regression: فشل حفظ الحالة — لا يمرّ صامتاً ==");

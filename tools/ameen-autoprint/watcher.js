@@ -552,8 +552,15 @@ async function acquireSingleInstanceLock(nowMs = Date.now(), deps = {}) {
     const beatAgeMs = beat ? nowMs - beat : Infinity;
     const alive = Number.isInteger(pid) && pid > 0 && processAlive(pid);
     const fresh = beatAgeMs < LOCK_STALE_MS;
+    // قفل يحمل PID هذه العملية بهوية إقلاع مختلفة ليس نسخة أخرى عاملة:
+    // بعد انهيار أو إعادة تشغيل سريعة قد يُعيد Windows نفس الرقم لهذه العملية
+    // الجديدة بينما النبضة ما زالت طازجة، فـprocessAlive تفحصنا نحن فيُرفض
+    // الإقلاع — والمهمة ONSTART بلا إعادة محاولة. startedAt المختلف يثبت أنه
+    // قفل متروك لا مِلك هذه الإقلاوة.
+    const leftoverOwnPid = Number.isInteger(pid) && pid === process.pid
+      && String(existing.startedAt || "") !== new Date(nowMs).toISOString();
 
-    if (alive && fresh) {
+    if (alive && fresh && !leftoverOwnPid) {
       throw lockHeldError(
         `رفض قاطع: نسخة أخرى من المراقب تحمل القفل (PID ${pid}،`
         + ` آخر نبضة قبل ${Math.max(0, Math.round(beatAgeMs / 1000))} ثانية).`
@@ -562,13 +569,16 @@ async function acquireSingleInstanceLock(nowMs = Date.now(), deps = {}) {
       );
     }
 
-    // القفل متروك: إما العملية ميتة، أو نبضتها متوقّفة منذ أكثر من عشر دقائق.
-    // الحالة الثانية تعني عملياً أن Windows أعاد استخدام رقم العملية لبرنامج
-    // آخر بعد إيقاف غير نظيف — ولولا الاستيلاء لبقيت الطباعة معطّلة إلى الأبد
-    // لأن المهمة مسجَّلة ONSTART بلا أي سياسة إعادة محاولة.
+    // القفل متروك: العملية ميتة، أو نبضتها متوقّفة أكثر من عشر دقائق (رقم
+    // أُعيد استخدامه لبرنامج آخر)، أو PID هذه العملية بهوية إقلاع مختلفة
+    // بعد انهيار. ولولا الاستيلاء لبقيت الطباعة معطّلة إلى الأبد لأن المهمة
+    // مسجَّلة ONSTART بلا أي سياسة إعادة محاولة.
     log.warn(
-      `قفل متروك يُزال: PID ${pid} ${alive ? "حيّ لكن نبضته متوقّفة" : "غير موجود"}`
-      + `${beat ? ` منذ ${Math.round(beatAgeMs / 1000)} ثانية` : " وبلا نبضة مسجَّلة"}.`
+      leftoverOwnPid
+        ? `قفل متروك يُزال: PID ${pid} هو هذه العملية نفسها بهوية إقلاع مختلفة`
+          + `${beat ? ` (آخر نبضة قبل ${Math.round(beatAgeMs / 1000)} ثانية)` : " وبلا نبضة مسجَّلة"}.`
+        : `قفل متروك يُزال: PID ${pid} ${alive ? "حيّ لكن نبضته متوقّفة" : "غير موجود"}`
+          + `${beat ? ` منذ ${Math.round(beatAgeMs / 1000)} ثانية` : " وبلا نبضة مسجَّلة"}.`
     );
     if (typeof deps.onBeforeStaleUnlink === "function") deps.onBeforeStaleUnlink();
     // إعادة قراءة قبل الحذف: مالك جديد قد يكون نشر قفله بين التشخيص والـunlink.
@@ -776,21 +786,15 @@ function migrationAdoptCutoff(state, nowMs = Date.now()) {
 // يوم الحدّ نفسه ملتبس بنيوياً: النسخة القديمة تحذف العلامة بعد سبعة أيام من
 // **وقت الطباعة** لا من تاريخ الفاتورة، فداخل ذلك اليوم تنقضي علامات ما طُبع
 // أوّلَه وتبقى علامات ما طُبع آخره. فغياب العلامة في هذا اليوم بعينه ليس دليل
-// عدم طباعة — إنما هو يوم انتهاء الصلاحية. وترك اليوم بلا تبنٍّ يعني إعادة
-// طباعة جزء منه عند **كل** نشر، وهو عين ما يشكو منه المستخدم.
+// عدم طباعة — إنما هو يوم انتهاء الصلاحية.
 //
-// فيُتبنّى، لكن بدليل موجب فقط: وجود علامة واحدة على الأقل طُبعت في ذلك اليوم
-// أو بعده يثبت أن النسخة القديمة كانت تعمل فيه. وبلا هذا الدليل لا تبنّي —
-// فلا تُبتلع فواتير يومٍ لم تكن النسخة القديمة تعمل فيه أصلاً.
-//
-// ملاحظة: الأختام تُستعمل هنا **دليل نشاط** لا لاستنتاج الحدّ — استنتاج الحدّ
-// من أحدث ختم هو ما كان يتبنّى الفاتورة الأقدم الفاشلة (ملاحظة Codex P1).
-function legacyWasActiveOn(state, cutoff) {
-  for (const ts of Object.values(state.printedGuids)) {
-    const n = Number(ts);
-    if (Number.isFinite(n) && n > 0 && localDateStr(n) >= cutoff) return true;
-  }
-  return false;
+// الدليل الوحيد المقبول لتبنّي يوم الحدّ هو اكتمال متجاور: `processedThrough`
+// يساوي الحدّ، أي أن ذلك اليوم اكتملت فواتيره كلها. ختم فاتورة أحدث (نشاط
+// لاحق) لا يثبت أن فاتورة معيّنة في يوم الحدّ طُبعت — فإن فشلت ونجحت أحدث
+// بعدها كانت تُتبنّى وتسقط من النافذة بلا طباعة (ملاحظة Codex P1).
+function cutoffDayHasContiguousProof(state, cutoff) {
+  const processed = String(state.processedThrough || "");
+  return /^\d{4}-\d{2}-\d{2}$/.test(processed) && processed === cutoff;
 }
 
 async function poll(pool, state, hooks = {}) {
@@ -824,7 +828,7 @@ async function poll(pool, state, hooks = {}) {
   // واحدة — ولا تلمس فواتير فجوة النشر، فتبقى لتُطبع في الدورة التالية.
   if (state.adoptBaseline) {
     const cutoff = migrationAdoptCutoff(state);
-    const adoptCutoffDay = legacyWasActiveOn(state, cutoff);
+    const adoptCutoffDay = cutoffDayHasContiguousProof(state, cutoff);
     let adopted = 0;
     let deferred = 0;
     const adoptedGuids = [];
@@ -856,7 +860,7 @@ async function poll(pool, state, hooks = {}) {
       throw err;
     }
     console.log(
-      `ترحيل الحالة: تُبنّيت ${adopted} فاتورة أقدم من ${cutoff} كمطبوعة مسبقاً — لن تُطبع.`
+      `ترحيل الحالة: تُبنّيت ${adopted} فاتورة ${adoptCutoffDay ? "حتى" : "أقدم من"} ${cutoff} كمطبوعة مسبقاً — لن تُطبع.`
       + (deferred
         ? ` و${deferred} فاتورة في يوم ${cutoff} أو بعده لم تُتبنَّ (فجوة النشر) وستُطبع في الدورة التالية.`
         : " ولا فواتير معلّقة في فجوة النشر.")
