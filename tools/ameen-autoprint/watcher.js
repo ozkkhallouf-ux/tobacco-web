@@ -235,18 +235,92 @@ function parseSqlConnStr(cs) {
 }
 
 // ─── إدارة الحالة ─────────────────────────────────────────────────────────
+//
+// نافذتان يجب أن تبقيا متّسقتين، وعدم اتّساقهما كان سبب عطل «إعادة طباعة فواتير
+// قديمة»:
+//   • نافذة الاستعلام  — كل فاتورة تاريخها >= state.watchFromDate.
+//   • ذاكرة الـdedup   — علامات state.printedGuids، تُحذف بعد PRINTED_RETENTION_DAYS.
+//
+// كانت watchFromDate تُضبط مرة واحدة يوم التثبيت ولا تتقدّم أبداً، فتكبر نافذة
+// الاستعلام بلا حد بينما الذاكرة محدودة بسبعة أيام. فما إن تُحذف علامة فاتورة
+// حتى يعيدها الاستعلام كأنها جديدة فتُطبع ثانية — وتأخذ ختماً زمنياً جديداً
+// فتُنسى بعد سبعة أيام أخرى وتُطبع من جديد، بلا نهاية. والأسوأ أن إعادة الطباعة
+// نفسها ترفع changed فتُشغّل prune مرة أخرى في الدورة نفسها، فتتحوّل إلى شلّال.
+//
+// الشرط الصارم: نافذة الاستعلام يجب أن تبقى **أقصر** من ذاكرة الـdedup، كي لا
+// يعود الاستعلام بفاتورة نُسيت علامتها أبداً.
+const WATCH_LOOKBACK_DAYS = 2;      // أبعد ما ينظر إليه الاستعلام إلى الوراء
+const PRINTED_RETENTION_DAYS = 7;   // مدة الاحتفاظ بعلامة «طُبعت»
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// حارس بنيوي يمنع إعادة إدخال العطل بتعديل لاحق على أحد الرقمين وحده.
+// الهامش (3 أيام) يغطّي فاتورة مؤرَّخة بالغد (الاستعلام يقبلها) طُبعت اليوم.
+function assertDedupWindowInvariant() {
+  if (PRINTED_RETENTION_DAYS < WATCH_LOOKBACK_DAYS + 3) {
+    throw new Error(
+      `رفض قاطع: PRINTED_RETENTION_DAYS (${PRINTED_RETENTION_DAYS}) يجب أن تتجاوز `
+      + `WATCH_LOOKBACK_DAYS (${WATCH_LOOKBACK_DAYS}) بثلاثة أيام على الأقل، وإلا `
+      + "أعاد الاستعلام فواتير حُذفت علاماتها فطُبعت من جديد."
+    );
+  }
+}
+
+// تاريخ محلّي YYYY-MM-DD. لا يجوز استعمال toISOString هنا: هو بتوقيت UTC بينما
+// u.Date وGETDATE() في الأمين بالتوقيت المحلّي (دمشق UTC+3)، فبين منتصف الليل
+// والثالثة فجراً يعطي UTC تاريخ الأمس فتتّسع النافذة يوماً كاملاً بلا قصد.
+function localDateStr(ms) {
+  const d = new Date(ms);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+// تقدّم بداية النافذة مع مرور الأيام، ولا تتراجع بها أبداً.
+// تُعيد التاريخ السابق عند التقدّم فعلاً، و null إن لم يتغيّر شيء.
+function advanceWatchFromDate(state, nowMs = Date.now()) {
+  const floor = localDateStr(nowMs - WATCH_LOOKBACK_DAYS * DAY_MS);
+  const current = String(state.watchFromDate || "");
+  if (current && current >= floor) return null;
+  state.watchFromDate = floor;
+  return current || "(غير مضبوط)";
+}
+
 function loadState() {
-  try { return JSON.parse(fs.readFileSync(config.stateFilePath, "utf8")); }
-  catch { return null; }
+  let raw;
+  try { raw = fs.readFileSync(config.stateFilePath, "utf8"); }
+  catch { return null; }  // لا ملف بعد — أول تشغيل، وهذه ليست حالة عطل
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object"
+        || !parsed.printedGuids || typeof parsed.printedGuids !== "object"
+        || !/^\d{4}-\d{2}-\d{2}$/.test(String(parsed.watchFromDate || ""))) {
+      throw new Error("بنية ملف الحالة غير صالحة");
+    }
+    return parsed;
+  } catch (err) {
+    // ملف موجود لكنه غير صالح ≠ أول تشغيل: يُسجَّل صراحةً لأن البدء من الصفر
+    // يعني إعادة طباعة فواتير اليوم، ولا يجوز أن يمرّ ذلك صامتاً.
+    console.error(
+      `تحذير: ملف الحالة "${config.stateFilePath}" غير صالح (${describeError(err)}) — `
+      + "تبدأ المراقبة من اليوم، وقد تُعاد طباعة فواتير اليوم المطبوعة سابقاً."
+    );
+    return null;
+  }
 }
 
 function saveState(state) {
-  fs.writeFileSync(config.stateFilePath, JSON.stringify(state, null, 2), "utf8");
+  // كتابة ذرّية: انقطاع أثناء writeFileSync يترك ملفاً مبتوراً، فيُقرأ لاحقاً
+  // كأنه أول تشغيل وتُعاد طباعة فواتير اليوم كلها. الملف المؤقّت بجانب الأصل
+  // (نفس القرص) فيكون rename ذرّياً فعلاً.
+  const tmpPath = `${config.stateFilePath}.tmp`;
+  fs.writeFileSync(tmpPath, JSON.stringify(state, null, 2), "utf8");
+  fs.renameSync(tmpPath, config.stateFilePath);
 }
 
-// حذف GUIDs أقدم من 7 أيام لمنع تضخّم الملف
+// حذف علامات الطباعة الأقدم من PRINTED_RETENTION_DAYS لمنع تضخّم الملف.
+// آمن فقط لأن النافذة أقصر منها (assertDedupWindowInvariant): كل علامة تُحذف
+// هنا تخصّ فاتورة خرجت أصلاً من نافذة الاستعلام فلن يعيدها أبداً.
 function pruneOldGuids(state) {
-  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  const cutoff = Date.now() - PRINTED_RETENTION_DAYS * DAY_MS;
   for (const [guid, ts] of Object.entries(state.printedGuids)) {
     if (ts < cutoff) delete state.printedGuids[guid];
   }
@@ -392,15 +466,24 @@ function describeError(err) {
 
 // ─── دورة الاستعلام ───────────────────────────────────────────────────────
 async function poll(pool, state) {
+  // تقديم النافذة **قبل** الاستعلام لا بعده: الاستعلام يجب ألا ينظر أبعد ممّا
+  // تتذكّره علامات الطباعة، وإلا أعاد فاتورة حُذفت علامتها فطُبعت من جديد.
+  const movedFrom = advanceWatchFromDate(state);
+  let changed = movedFrom !== null;
+  if (movedFrom !== null) {
+    console.log(
+      `تقديم نافذة المراقبة: ${movedFrom} ← ${state.watchFromDate}`
+      + " (الفواتير الأقدم لن تُستعلَم ولن تُطبع)"
+    );
+  }
+
   const result = await pool.request()
     .input("guid0",     sql.UniqueIdentifier, config.wholesaleTypeGuid)
     .input("watchFrom", sql.NVarChar,         state.watchFromDate)
     .query(SALES_QUERY);
 
-  if (!result.recordset.length) return;
-
-  const invoices = groupIntoInvoices(result.recordset);
-  let changed = false;
+  // لا نخرج مبكراً على نتيجة فارغة: تقديم النافذة أعلاه يجب أن يُحفظ أيضاً.
+  const invoices = result.recordset.length ? groupIntoInvoices(result.recordset) : [];
 
   for (const inv of invoices) {
     if (state.printedGuids[inv.guid]) continue; // مطبوعة سابقاً
@@ -442,6 +525,7 @@ async function main() {
   }
 
   assertWholesaleConfig();
+  assertDedupWindowInvariant();
   // عطل الإعداد الدائم يرمي من هنا وينهي العملية كما كان تماماً. أما العطل العابر
   // (طابعة Wi-Fi لم تجهز بعد عند الإقلاع) فلا يُنهي المراقب: يُسجَّل، ويبدأ التشغيل
   // معلَّق الطباعة، وتُستأنف المراقبة تلقائياً فور عودة الطابعة.
@@ -480,12 +564,19 @@ async function main() {
   // تهيئة الحالة — أول تشغيل: لا تُطبع فواتير اليوم السابقة
   let state = loadState();
   if (!state) {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = localDateStr(Date.now());
     state = { watchFromDate: today, printedGuids: {} };
     saveState(state);
     console.log(`تهيئة: بداية المراقبة من ${today} (الفواتير السابقة لن تُطبع)`);
   } else {
     const printed = Object.keys(state.printedGuids).length;
+    // حالة قادمة من نسخة قديمة: watchFromDate مجمّدة على يوم التثبيت. تُقدَّم
+    // هنا فوراً وتُحفظ، فيتوقّف نزيف إعادة الطباعة من أول دورة لا بعد أيام.
+    const movedFrom = advanceWatchFromDate(state);
+    if (movedFrom !== null) {
+      saveState(state);
+      console.log(`تصحيح نافذة مجمّدة: ${movedFrom} ← ${state.watchFromDate}`);
+    }
     console.log(`استئناف: مراقبة منذ ${state.watchFromDate} | ${printed} فاتورة مطبوعة سابقاً`);
   }
 

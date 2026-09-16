@@ -503,6 +503,7 @@ function makePoll({ getCustomerBalance: gcb, printInvoice: pi }) {
     "printInvoice",
     "pruneOldGuids",
     "saveState",
+    "advanceWatchFromDate",
     `${groupIntoInvoicesSrc}\n${pollSrc}\nreturn poll;`
   );
   const sql = { UniqueIdentifier: "uniqueidentifier", NVarChar: "nvarchar" };
@@ -510,7 +511,13 @@ function makePoll({ getCustomerBalance: gcb, printInvoice: pi }) {
   const printerGate = { ready: () => true };
   const pruneOldGuids = () => {};
   const saveState = () => {};
-  return factory(sql, config, "-- test double --", printerGate, gcb, pi, pruneOldGuids, saveState);
+  // هذه الاختبارات تثبّت النافذة عمداً كي تقيس سلوك الطباعة وحده؛ تقدّم النافذة
+  // نفسه له اختباراته المستقلة أدناه (قسم «نافذة المراقبة»).
+  const advanceWatchFromDate = () => null;
+  return factory(
+    sql, "test-config" && config, "-- test double --", printerGate,
+    gcb, pi, pruneOldGuids, saveState, advanceWatchFromDate
+  );
 }
 
 function fakeSalesRow(overrides = {}) {
@@ -612,6 +619,234 @@ await test("poll(): إعادة المحاولة اللاحقة بعد فشل ع�
   });
   await thirdPoll(fakePollPool(rows), state);
   assert.equal(printed.length, 1, "طُبعت الفاتورة مرة ثانية — تكرار طباعة (duplicate print)");
+});
+
+console.log("\n== wholesale-regression: نافذة المراقبة — عطل إعادة طباعة الفواتير القديمة ==");
+
+// العطل: watchFromDate كانت تُضبط مرة واحدة يوم التثبيت ولا تتقدّم أبداً، فنافذة
+// الاستعلام تكبر بلا حد بينما ذاكرة الـdedup محدودة بسبعة أيام. فما إن تُحذف علامة
+// فاتورة (pruneOldGuids) حتى يعيدها الاستعلام كأنها جديدة فتُطبع ثانية — وتأخذ
+// ختماً زمنياً جديداً فتتكرر الدورة بلا نهاية. والأسوأ أن إعادة الطباعة نفسها
+// ترفع changed فتُشغّل prune من جديد، فيتحوّل الأمر إلى شلّال ورق.
+//
+// هذه الاختبارات تُشغّل الدوال الحقيقية المستخرَجة من watcher.js بساعة مزيّفة،
+// بلا SQL ولا Puppeteer ولا طباعة فعلية.
+
+const localDateStrSrc = extractFunctionSource(watcherSrc, "function localDateStr(ms)");
+const advanceSrc = extractFunctionSource(watcherSrc, "function advanceWatchFromDate(state, nowMs");
+const pruneSrc = extractFunctionSource(watcherSrc, "function pruneOldGuids(state)");
+
+// الرقمان يُقرآن من المصدر الفعلي لا يُعاد كتابتهما، كي يفشل الاختبار إن غُيّرا.
+function readConst(name) {
+  const m = watcherSrc.match(new RegExp(`const ${name} = (\\d+);`));
+  assert.ok(m, `لم أجد الثابت ${name} في watcher.js`);
+  return Number(m[1]);
+}
+const WATCH_LOOKBACK_DAYS = readConst("WATCH_LOOKBACK_DAYS");
+const PRINTED_RETENTION_DAYS = readConst("PRINTED_RETENTION_DAYS");
+const DAY = 24 * 60 * 60 * 1000;
+
+// ساعة مزيّفة كاملة: new Date(ms) وnew Date() وDate.now() كلها تحترم NOW.
+let NOW = Date.parse("2026-01-01T09:00:00Z");
+class FakeDate extends Date {
+  constructor(...a) { if (a.length === 0) super(NOW); else super(...a); }
+  static now() { return NOW; }
+}
+
+function makeWindowHarness() {
+  const printed = [];
+  const body = [
+    `const WATCH_LOOKBACK_DAYS = ${WATCH_LOOKBACK_DAYS};`,
+    `const PRINTED_RETENTION_DAYS = ${PRINTED_RETENTION_DAYS};`,
+    "const DAY_MS = 24 * 60 * 60 * 1000;",
+    localDateStrSrc,
+    advanceSrc,
+    pruneSrc,
+    groupIntoInvoicesSrc,
+    pollSrc,
+    "return { poll, advanceWatchFromDate, localDateStr };",
+  ].join("\n");
+  const api = new Function(
+    "sql", "config", "SALES_QUERY", "printerGate",
+    "getCustomerBalance", "printInvoice", "saveState", "Date", "console",
+    body
+  )(
+    { UniqueIdentifier: "u", NVarChar: "n" },
+    { wholesaleTypeGuid: "wt-guid" },
+    "-- test double --",
+    { ready: () => true },
+    async () => ({ accountGuid: "G1", current: 100 }),
+    async (inv) => { printed.push(inv.number); },
+    () => {},
+    FakeDate,
+    { log() {}, error() {} },
+  );
+  return { ...api, printed };
+}
+
+// الاستعلام الحقيقي يفلتر بـ `CAST(u.Date AS date) >= @watchFrom`؛ هنا تُمرَّر
+// الصفوف مباشرة فنحاكي الفلتر نفسه كي يبقى السيناريو أميناً للـSQL.
+function rowsVisibleTo(ledger, state) {
+  return ledger.filter((r) => r.invoice_date >= state.watchFromDate);
+}
+
+await test("الثابتان: نافذة الاستعلام أقصر من ذاكرة الـdedup (شرط عدم تكرار الطباعة)", () => {
+  assert.ok(
+    PRINTED_RETENTION_DAYS >= WATCH_LOOKBACK_DAYS + 3,
+    `PRINTED_RETENTION_DAYS (${PRINTED_RETENTION_DAYS}) يجب أن تتجاوز `
+    + `WATCH_LOOKBACK_DAYS (${WATCH_LOOKBACK_DAYS}) بثلاثة أيام على الأقل`
+  );
+});
+
+await test("watcher.js: حارس assertDedupWindowInvariant موجود ويُستدعى في main()", () => {
+  assert.ok(/function assertDedupWindowInvariant\(\)/.test(watcherSrc), "الدالة غير موجودة");
+  assert.ok(/assertWholesaleConfig\(\);\s*\n\s*assertDedupWindowInvariant\(\);/.test(watcherSrc),
+    "لا تُستدعى عند الإقلاع بجانب assertWholesaleConfig");
+});
+
+await test("advanceWatchFromDate: تتقدّم مع مرور الأيام ولا تبقى مجمّدة على يوم التثبيت", () => {
+  const { advanceWatchFromDate, localDateStr } = makeWindowHarness();
+  const state = { watchFromDate: "2026-01-01", printedGuids: {} };
+  NOW = Date.parse("2026-06-01T09:00:00Z");
+  const moved = advanceWatchFromDate(state);
+  assert.equal(moved, "2026-01-01", "لم تُعِد التاريخ السابق عند التقدّم");
+  assert.equal(state.watchFromDate, localDateStr(NOW - WATCH_LOOKBACK_DAYS * DAY));
+});
+
+await test("advanceWatchFromDate: لا تتراجع أبداً إلى الوراء", () => {
+  const { advanceWatchFromDate } = makeWindowHarness();
+  NOW = Date.parse("2026-06-01T09:00:00Z");
+  const state = { watchFromDate: "2026-12-31", printedGuids: {} };
+  assert.equal(advanceWatchFromDate(state), null, "أبلغت عن تغيير رغم عدم وجوده");
+  assert.equal(state.watchFromDate, "2026-12-31", "تراجعت النافذة إلى الوراء");
+});
+
+await test("advanceWatchFromDate: تبقي نافذة اللحاق (أمس/اليوم) مفتوحة ولا تقفز إلى اليوم", () => {
+  const { advanceWatchFromDate } = makeWindowHarness();
+  NOW = Date.parse("2026-06-10T09:00:00Z");
+  const state = { watchFromDate: "2026-01-01", printedGuids: {} };
+  advanceWatchFromDate(state);
+  const lag = Math.round((Date.parse(`${"2026-06-10"}T00:00:00Z`) - Date.parse(`${state.watchFromDate}T00:00:00Z`)) / DAY);
+  assert.equal(lag, WATCH_LOOKBACK_DAYS, "نافذة اللحاق لا تساوي WATCH_LOOKBACK_DAYS");
+});
+
+await test("localDateStr: تاريخ محلّي لا UTC (يطابق u.Date وGETDATE() في الأمين)", () => {
+  assert.ok(!/toISOString\(\)\.slice\(0, 10\)/.test(watcherSrc),
+    "ما زال يُستخدم توقيت UTC لحساب تاريخ النافذة");
+  const { localDateStr } = makeWindowHarness();
+  const t = Date.parse("2026-03-05T12:00:00Z");
+  const d = new Date(t);
+  assert.equal(localDateStr(t),
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`);
+});
+
+await test("انحدار العطل: 90 يوماً متتالياً ⇒ صفر إعادة طباعة وصفر فاتورة ضائعة", async () => {
+  const { poll, printed } = makeWindowHarness();
+  const T0 = Date.parse("2026-01-01T09:00:00Z");
+  const state = { watchFromDate: "2026-01-01", printedGuids: {} };
+  const ledger = [];
+  let seq = 1000;
+
+  for (let day = 0; day < 90; day++) {
+    NOW = T0 + day * DAY;
+    const dateStr = new Date(NOW).toISOString().slice(0, 10);
+    for (let k = 0; k < 8; k++) {
+      ledger.push(fakeSalesRow({
+        invoice_guid: `g-${seq}`, invoice_number: String(seq), invoice_date: dateStr,
+      }));
+      seq++;
+    }
+    // ثلاث دورات في اليوم: prune يجري بعد الطباعة، والدورة التالية هي التي كانت
+    // تكشف العطل (تعيد الفواتير التي حُذفت علاماتها).
+    for (let cycle = 0; cycle < 3; cycle++) {
+      await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
+    }
+  }
+
+  const counts = {};
+  for (const n of printed) counts[n] = (counts[n] || 0) + 1;
+  const reprinted = Object.entries(counts).filter(([, c]) => c > 1);
+  assert.equal(reprinted.length, 0,
+    `أُعيدت طباعة ${reprinted.length} فاتورة قديمة — العطل عاد: ${reprinted.slice(0, 5).map(([n, c]) => `#${n}×${c}`).join(", ")}`);
+  assert.equal(printed.length, ledger.length,
+    `عدد الأوراق (${printed.length}) لا يساوي عدد الفواتير (${ledger.length})`);
+  assert.equal(Object.keys(counts).length, ledger.length, "فواتير لم تُطبع إطلاقاً");
+});
+
+await test("انحدار العطل: هدوء طويل ثم فاتورة واحدة ⇒ لا انفجار ورق في الدورة التالية", async () => {
+  const { poll, printed } = makeWindowHarness();
+  const T0 = Date.parse("2026-01-01T09:00:00Z");
+  const state = { watchFromDate: "2026-01-01", printedGuids: {} };
+  const ledger = [];
+  let seq = 7000;
+
+  for (let day = 0; day < 30; day++) {
+    NOW = T0 + day * DAY;
+    const dateStr = new Date(NOW).toISOString().slice(0, 10);
+    for (let k = 0; k < 8; k++) {
+      ledger.push(fakeSalesRow({ invoice_guid: `q-${seq}`, invoice_number: String(seq), invoice_date: dateStr }));
+      seq++;
+    }
+    await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
+  }
+  const afterWork = printed.length;
+
+  // عشرة أيام بلا أي فاتورة جديدة
+  for (let day = 30; day < 40; day++) {
+    NOW = T0 + day * DAY;
+    await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
+  }
+  assert.equal(printed.length - afterWork, 0, "طُبع ورق أثناء أيام بلا فواتير جديدة");
+
+  // فاتورة واحدة جديدة تُشغّل prune — هنا كان الانفجار يحدث
+  NOW = T0 + 40 * DAY;
+  ledger.push(fakeSalesRow({
+    invoice_guid: `q-${seq}`, invoice_number: String(seq),
+    invoice_date: new Date(NOW).toISOString().slice(0, 10),
+  }));
+  const before = printed.length;
+  await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
+  assert.equal(printed.length - before, 1, "الدورة التي تطبع الفاتورة الجديدة طبعت أكثر من ورقة");
+  const mid = printed.length;
+  await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
+  assert.equal(printed.length - mid, 0, "انفجار ورق في الدورة التالية لـprune — العطل عاد");
+});
+
+await test("ملف الحالة لا يتضخّم بلا حد رغم تقدّم النافذة", async () => {
+  const { poll } = makeWindowHarness();
+  const T0 = Date.parse("2026-01-01T09:00:00Z");
+  const state = { watchFromDate: "2026-01-01", printedGuids: {} };
+  const ledger = [];
+  let seq = 9000;
+  for (let day = 0; day < 120; day++) {
+    NOW = T0 + day * DAY;
+    const dateStr = new Date(NOW).toISOString().slice(0, 10);
+    for (let k = 0; k < 8; k++) {
+      ledger.push(fakeSalesRow({ invoice_guid: `z-${seq}`, invoice_number: String(seq), invoice_date: dateStr }));
+      seq++;
+    }
+    await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
+  }
+  const kept = Object.keys(state.printedGuids).length;
+  assert.ok(kept <= 8 * (PRINTED_RETENTION_DAYS + 2),
+    `ملف الحالة يحتفظ بـ${kept} علامة — أكثر من نافذة الاحتفاظ`);
+  assert.ok(kept < ledger.length, "لم يُحذف أي شيء — prune لا يعمل");
+});
+
+console.log("\n== wholesale-regression: ملف الحالة — كتابة ذرّية وقراءة متحقّقة ==");
+
+await test("saveState: كتابة ذرّية (ملف مؤقّت ثم rename) لا writeFileSync مباشرة على ملف الحالة", () => {
+  const saveSrc = extractFunctionSource(watcherSrc, "function saveState(state)");
+  assert.ok(/renameSync/.test(saveSrc), "لا يوجد rename ذرّي — ملف مبتور يعني إعادة طباعة فواتير اليوم");
+  assert.ok(/\.tmp/.test(saveSrc), "لا يُكتب إلى ملف مؤقّت أولاً");
+  assert.ok(!/writeFileSync\(\s*config\.stateFilePath/.test(saveSrc), "ما زال يكتب مباشرة على ملف الحالة");
+});
+
+await test("loadState: ملف تالف ≠ أول تشغيل صامت (يُسجَّل تحذير صريح)", () => {
+  const loadSrc = extractFunctionSource(watcherSrc, "function loadState()");
+  assert.ok(/console\.error/.test(loadSrc), "ملف الحالة التالف يمرّ صامتاً");
+  assert.ok(/printedGuids/.test(loadSrc) && /watchFromDate/.test(loadSrc),
+    "لا تحقّق من بنية الملف قبل قبوله");
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
