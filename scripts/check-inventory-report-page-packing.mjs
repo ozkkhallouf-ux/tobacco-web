@@ -3,8 +3,12 @@
 //
 // العطل الذي يحرسه هذا الفحص: التوزيع القديم كان يوازن العمودين ثم يفتح صفحة
 // جديدة عند أول مجموعة لا تتّسع في أيٍّ منهما — فيُهدر باقي **العمودين معاً**
-// دفعةً واحدة (حتى ربع صفحة بيضاء). العقد الجديد: تعبئة تسلسلية بالارتفاع
-// الحقيقي، بلا تقسيم مجموعة وبلا إعادة ترتيب.
+// دفعةً واحدة (حتى ربع صفحة بيضاء). العقد المحدَّث: تعبئة تسلسلية بالارتفاع
+// الحقيقي، بلا تقسيم مجموعة، مع تعبئة «النظرة الأمامية» (first-fit): حين تبقى
+// فجوة لا تتّسع فيها المجموعة التالية بالترتيب، تُسحَب أول مجموعة لاحقة تدخل
+// كاملةً لملء الفجوة (لا تقسيم، لا فقد، لا تكرار). قيد التثبيت: المجموعات الخمس
+// المثبَّتة (PRIORITY_INVENTORY_GROUPS: غلواز/ماستر/كابتن بلاك/اليغانس/كينغ دوم)
+// تُوضَع أولاً وبالترتيب، ولا تقفز مجموعة عادية أمام مجموعة مثبَّتة لم تُوضَع بعد.
 //
 // اختبار وحدة صِرف (Node بلا DOM) لأن الدوال المُختبَرة نقية: تأخذ ارتفاعات
 // مُقاسة (وهمية هنا) ولا تلمس document — فتُختبر الحالات القاسية (فراغ لا يتّسع،
@@ -29,6 +33,9 @@ function check(label, condition) {
 // --- استخراج الدوال النقية وتنفيذها فعلياً (لا مطابقة نصية) ---
 const PATTERNS = {
   INVENTORY_PACK_SAFETY_PX: /const INVENTORY_PACK_SAFETY_PX = \d+;/,
+  normalizeItemName: /function normalizeItemName\(value\) \{[\s\S]*?\n\}\n/,
+  PRIORITY_INVENTORY_GROUPS: /const PRIORITY_INVENTORY_GROUPS = \[[\s\S]*?\n\];/,
+  isPriorityInventoryGroup: /function isPriorityInventoryGroup\(label\) \{[\s\S]*?\n\}\n/,
   inventoryPageGeometry: /function inventoryPageGeometry\(mode\) \{[\s\S]*?\n\}\n/,
   inventoryPackPages: /function inventoryPackPages\(entries, options = \{\}\) \{[\s\S]*?\n\}\n/,
   inventoryBalanceLastPage: /function inventoryBalanceLastPage\(page, limit\) \{[\s\S]*?\n\}\n/,
@@ -57,7 +64,7 @@ vm.runInContext(
    function measureInventoryReportBlocks() { return __measureStub; }
    function inventoryPageGeometryStub() {}
    ${chunks.join("\n")}
-   ;globalThis.__api = { INVENTORY_PACK_SAFETY_PX, inventoryPageGeometry, inventoryPackPages, inventoryBalanceLastPage, inventoryTwoColumnPages,
+   ;globalThis.__api = { INVENTORY_PACK_SAFETY_PX, isPriorityInventoryGroup, inventoryPageGeometry, inventoryPackPages, inventoryBalanceLastPage, inventoryTwoColumnPages,
      runReportPages(measureStub, geometry, entriesCount) {
        __measureStub = measureStub;
        const parts = { entries: Array.from({ length: entriesCount }, (_, i) => ({ name: "م" + i, html: "", rows: 1 })) };
@@ -96,12 +103,16 @@ const flat = (pages) => pages.flatMap((page) => [...page.columns[0], ...page.col
     pages.every((page) => page.sizes.every((size) => size <= 1000 - 10 + 1e-6)));
 }
 
-// === 3) الترتيب لا يتغيّر إطلاقاً (قراءة: عمود أول ثم ثانٍ، صفحة بعد صفحة) ===
+// === 3) لا فقد ولا تكرار ولا تقسيم: كل مجموعة تُوضَع مرة واحدة بالضبط ===
+// (الترتيب قد يُخترَق بمقدار سحب مجموعة لاحقة لملء فجوة — تعبئة النظرة الأمامية.)
 {
   const entries = Array.from({ length: 25 }, (_, i) => g(`م${i}`, 90 + (i % 7) * 40));
   const pages = api.inventoryPackPages(entries, { fullBudget: 1000, firstPageBudget: 820, safetyPx: 10 });
-  check("الترتيب محفوظ حرفياً بعد التعبئة",
-    JSON.stringify(flat(pages)) === JSON.stringify(entries.map((entry) => entry.name)));
+  const placed = flat(pages);
+  const expected = entries.map((entry) => entry.name);
+  check("كل مجموعة وُضعت مرة واحدة بالضبط بلا فقد ولا تكرار",
+    placed.length === expected.length && new Set(placed).size === expected.length
+      && expected.every((name) => placed.includes(name)));
 }
 
 // === 4) الفراغ يتّسع بالضبط: لا تُدفع المجموعة لصفحة تالية بلا داعٍ ===
@@ -134,8 +145,10 @@ const flat = (pages) => pages.flatMap((page) => [...page.columns[0], ...page.col
   const pages = api.inventoryPackPages(entries, { fullBudget: 1000, safetyPx: 10 });
   const placed = flat(pages);
   check("مجموعة عملاقة: لم تُحذف ولا تكررت", placed.length === 3 && new Set(placed).size === 3);
-  check("مجموعة عملاقة: الترتيب بقي كما هو",
-    JSON.stringify(placed) === JSON.stringify(["صغيرة", "عملاقة", "تالية"]));
+  // العملاقة لا تتّسع في العمود الأول فتُملأ فجوته بالمجموعة اللاحقة «تالية»
+  // (نظرة أمامية)، وتُدفَع العملاقة بعدها لعمود فارغ — بلا تقسيم ولا فقد.
+  check("مجموعة عملاقة: الفجوة تُملأ بمجموعة لاحقة والعملاقة تُدفَع بعدها",
+    JSON.stringify(placed) === JSON.stringify(["صغيرة", "تالية", "عملاقة"]));
   check("مجموعة عملاقة: وُضعت وحدها بعمود فارغ (لم تُحشر فوق مجموعة أخرى)",
     pages.some((page) => page.columns.some((column) => column.length === 1 && column[0].name === "عملاقة")));
 }
@@ -243,8 +256,11 @@ const readingOrder = (pages) => pages.flatMap((page) => [...page.columns[0], ...
   const entries = Array.from({ length: 300 }, (_, i) => g(`م${i}`, 40 + (i % 11) * 25));
   const options = { fullBudget: 1000, firstPageBudget: 880, safetyPx: 10 };
   const pages = api.inventoryPackPages(entries, options);
-  check("بيانات كثيرة: كل المجموعات موجودة مرة واحدة وبالترتيب",
-    JSON.stringify(flat(pages)) === JSON.stringify(entries.map((entry) => entry.name)));
+  const placed = flat(pages);
+  const expected = entries.map((entry) => entry.name);
+  check("بيانات كثيرة: كل المجموعات موجودة مرة واحدة بالضبط (لا فقد/تكرار/تقسيم)",
+    placed.length === expected.length && new Set(placed).size === expected.length
+      && expected.every((name) => placed.includes(name)));
   check("بيانات كثيرة: لا فيضان بأي عمود",
     pages.every((page, index) => page.sizes.every((size) => size <= (index === 0 ? 880 : 1000) - 10 + 1e-6)));
   const gaps = avoidableBreaks(pages, options);
@@ -257,8 +273,10 @@ const readingOrder = (pages) => pages.flatMap((page) => [...page.columns[0], ...
     avoidableBreaks(legacy, options).length > 0);
   check("مرجع: التوزيع القديم كان يكسر ترتيب القراءة فعلاً",
     JSON.stringify(readingOrder(legacy)) !== JSON.stringify(entries.map((entry) => entry.name)));
-  check("الجديد: ترتيب القراءة (عمود أول ثم ثانٍ) مطابق لترتيب الإدخال حرفياً",
-    JSON.stringify(readingOrder(pages)) === JSON.stringify(entries.map((entry) => entry.name)));
+  // النظرة الأمامية تُزيل كل فجوة قابلة للتفادي بلا فقد أي مجموعة — الترتيب قد
+  // يُخترَق بمقدار سحب مجموعة لاحقة لملء فجوة، لكنه يبقى بلا فيضان وبلا فراغ مهدور.
+  check("الجديد: النظرة الأمامية أزالت كل الفجوات القابلة للتفادي",
+    avoidableBreaks(pages, options).length === 0);
 }
 
 // السيناريو الحقيقي: مجموعة كبيرة تتبعها صغيرات — أقسى حالة على «توازن ثم فشل»،
@@ -270,8 +288,11 @@ const readingOrder = (pages) => pages.flatMap((page) => [...page.columns[0], ...
   const pages = api.inventoryPackPages(entries, options);
   const gaps = avoidableBreaks(pages, options);
   check(`تقرير واقعي: لا فراغ كان يمكن تفاديه (${gaps.join(",") || "لا شيء"})`, gaps.length === 0);
-  check("تقرير واقعي: الترتيب محفوظ",
-    JSON.stringify(readingOrder(pages)) === JSON.stringify(entries.map((entry) => entry.name)));
+  const placedReal = readingOrder(pages);
+  const expectedReal = entries.map((entry) => entry.name);
+  check("تقرير واقعي: كل مجموعة مرة واحدة بالضبط بلا فقد/تكرار/تقسيم",
+    placedReal.length === expectedReal.length && new Set(placedReal).size === expectedReal.length
+      && expectedReal.every((name) => placedReal.includes(name)));
   const legacy = legacyBalancedPages(entries, options);
   check(`تقرير واقعي: صفحات أقل أو تساوي القديم (${pages.length} مقابل ${legacy.length})`,
     pages.length <= legacy.length);
@@ -412,6 +433,52 @@ const readingOrder = (pages) => pages.flatMap((page) => [...page.columns[0], ...
     appJs.includes("reserveEveryPage"));
   check("لا عودة لحلقة المحاولات الثابتة",
     !/for \(let attempt = 0; attempt < 4; attempt \+= 1\)[\s\S]{0,200}reservePx: measured\.footPx/.test(appJs));
+}
+
+// === 17) تعبئة النظرة الأمامية: مجموعة لاحقة صغيرة تملأ الفجوة (مثال «المليونير») ===
+// كبيرة تملأ معظم العمود، ثم المتوسطة لا تتّسع في الباقي — فبدل ترك الفجوة بيضاء
+// تُسحَب «مليونير» (الأصغر التالية) لتملأها، وتُدفَع المتوسطة للعمود الثاني.
+{
+  const entries = [g("كبيرة", 700), g("متوسطة", 350), g("مليونير", 250)];
+  const pages = api.inventoryPackPages(entries, { fullBudget: 1000, safetyPx: 0 });
+  const placed = flat(pages);
+  check("نظرة أمامية: صفحة واحدة بلا فجوة مهدورة", pages.length === 1);
+  check("نظرة أمامية: «مليونير» مُلئت بها فجوة العمود الأول بعد «كبيرة»",
+    JSON.stringify(names(pages[0])[0]) === JSON.stringify(["كبيرة", "مليونير"]));
+  check("نظرة أمامية: «متوسطة» انتقلت للعمود الثاني (لم تُقسَّم ولم تُفقَد)",
+    JSON.stringify(names(pages[0])[1]) === JSON.stringify(["متوسطة"]));
+  check("نظرة أمامية: كل المجموعات مرة واحدة بالضبط",
+    placed.length === 3 && new Set(placed).size === 3);
+  // بلا النظرة الأمامية كانت الفجوة تبقى بيضاء و«مليونير» تُدفَع لصفحة/عمود آخر.
+  const noLook = api.inventoryPackPages(entries, { fullBudget: 1000, safetyPx: 0, isPriority: () => true });
+  check("مرجع: بلا النظرة الأمامية تبقى فجوة العمود الأول (كبيرة وحدها)",
+    JSON.stringify(names(noLook[0])[0]) === JSON.stringify(["كبيرة"]));
+}
+
+// === 18) تثبيت المجموعات الخمس: لا تقفز مجموعة عادية أمام مجموعة مثبَّتة لم تُوضَع ===
+{
+  // isPriorityInventoryGroup يميّز الأسماء الخمسة (وبدائلها) عن سواها.
+  for (const name of ["غلواز", "ماستر", "كابتن بلاك", "اليغانس", "كينغ دوم",
+                      "جولواز", "كينج دوم", "master", "elegance"]) {
+    check(`تثبيت: «${name}» مجموعة مثبَّتة`, api.isPriorityInventoryGroup(name) === true);
+  }
+  for (const name of ["مانشستر", "اوسكار", "روز", "بارسا"]) {
+    check(`تثبيت: «${name}» ليست مثبَّتة`, api.isPriorityInventoryGroup(name) === false);
+  }
+  // مجموعتان مثبَّتتان ثم مجموعة عادية صغيرة: كينغ دوم لا تتّسع في باقي العمود
+  // الأول، فلا يجوز أن تُسحَب «مانشستر» أمامها لملء الفجوة — تبقى المثبَّتة أولاً.
+  const withGroup = (label, height) => ({ name: label, group: { label }, height });
+  const isPriority = (entry) => api.isPriorityInventoryGroup(entry.group && entry.group.label);
+  const entries = [withGroup("غلواز", 600), withGroup("كينغ دوم", 500), withGroup("مانشستر", 300)];
+  const pages = api.inventoryPackPages(entries, { fullBudget: 1000, safetyPx: 0, isPriority });
+  const order = flat(pages);
+  check("تثبيت: لم تُسحَب «مانشستر» أمام «كينغ دوم» غير الموضوعة",
+    JSON.stringify(names(pages[0])[0]) === JSON.stringify(["غلواز"]));
+  check("تثبيت: المثبَّتتان تسبقان العادية في ترتيب القراءة",
+    order.indexOf("غلواز") < order.indexOf("مانشستر")
+      && order.indexOf("كينغ دوم") < order.indexOf("مانشستر"));
+  check("تثبيت: كل المجموعات على صفحة واحدة مرة واحدة بالضبط",
+    pages.length === 1 && order.length === 3 && new Set(order).size === 3);
 }
 
 if (failed) {

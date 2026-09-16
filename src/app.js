@@ -6222,6 +6222,29 @@ const INVENTORY_GROUP_SEQUENCE = [
   ["سلفان"]
 ];
 
+// مجموعات مثبّتة على الصفحة الأولى دائماً وبهذا الترتيب حرفياً (طلب المالك):
+// غلواز، ماستر، كابتن بلاك، اليغانس، كينغ دوم. تُطابَق بنفس منطق inventoryGroupInfo
+// (تسامح الهمزات والتاء المربوطة عبر normalizeItemName). ترتيبها هنا هو ترتيب
+// ظهورها: تأخذ الرُّتب 0..4 قبل كل المجموعات الأخرى. أربعٌ منها متصدّرة أصلاً في
+// INVENTORY_GROUP_SEQUENCE؛ «كينغ دوم» كانت متأخرة (rank 12) فتُرفَّع هنا للمقدمة.
+const PRIORITY_INVENTORY_GROUPS = [
+  ["غلواز", "جولواز", "gauloises"],
+  ["ماستر", "master"],
+  ["كابتن بلاك", "captain black"],
+  ["اليغانس", "اليجنس", "elegance"],
+  ["كينغ دوم", "كينج دوم", "kingdom"]
+];
+
+// هل تنتمي المجموعة (باسمها/label) لإحدى المجموعات الخمس المثبَّتة على الصفحة الأولى؟
+// يُستعمَل في ترتيب الرُّتب وفي حارس المعبِّئ كي لا يقفز أي مجموعة عادية أمام
+// مجموعة مثبَّتة لم تُوضَع بعد.
+function isPriorityInventoryGroup(label) {
+  const haystack = normalizeItemName(String(label || ""));
+  return PRIORITY_INVENTORY_GROUPS.some((aliases) =>
+    aliases.some((alias) => haystack.includes(normalizeItemName(alias)))
+  );
+}
+
 function inventoryGroupInfo(it) {
   const label = String(it?.groupName || "مواد بدون مجموعة").trim() || "مواد بدون مجموعة";
   // الترتيب يُحسم من اسم المجموعة (label) وحده لا من اسم الصنف: فأصناف المجموعة
@@ -6230,10 +6253,19 @@ function inventoryGroupInfo(it) {
   // يمنح كل أصناف المجموعة نفس الترتيب فتبقى كتلة واحدة. لا دمج للأصناف — نوحّد
   // رأس المجموعة وترتيبها فقط.
   const haystack = normalizeItemName(label);
-  const rank = INVENTORY_GROUP_SEQUENCE.findIndex((aliases) =>
+  // المجموعات الخمس المثبَّتة تأخذ الرُّتب 0..4 أولاً (وبالترتيب المطلوب).
+  const priorityRank = PRIORITY_INVENTORY_GROUPS.findIndex((aliases) =>
     aliases.some((alias) => haystack.includes(normalizeItemName(alias)))
   );
-  return { label, rank: rank < 0 ? INVENTORY_GROUP_SEQUENCE.length : rank };
+  if (priorityRank >= 0) return { label, rank: priorityRank };
+  // بقية المجموعات تحافظ على ترتيبها النسبي في INVENTORY_GROUP_SEQUENCE، لكن بعد
+  // المثبَّتة كلها: نزيح رُتبها بمقدار عدد المثبَّتة كي لا تصطدم رتبةُ مجموعة عادية
+  // (مثل «اوسكار» rank 4) برتبة مجموعة مثبَّتة (كينغ دوم = 4).
+  const base = PRIORITY_INVENTORY_GROUPS.length;
+  const seqRank = INVENTORY_GROUP_SEQUENCE.findIndex((aliases) =>
+    aliases.some((alias) => haystack.includes(normalizeItemName(alias)))
+  );
+  return { label, rank: base + (seqRank < 0 ? INVENTORY_GROUP_SEQUENCE.length : seqRank) };
 }
 
 function isCriticalFastGroup(it) {
@@ -6330,14 +6362,24 @@ function inventoryPageGeometry(mode) {
 }
 
 // المحرّك الوحيد للتعبئة: يضع كل مجموعة **كاملة** في العمود الحالي إن اتّسعت،
-// وإلا ينتقل للعمود الثاني من نفس الصفحة، وإلا لصفحة جديدة. لا تقسيم ولا إعادة
-// ترتيب إطلاقاً. `sizeOf` يجعله صالحاً للقياس بالبكسل الحقيقي أو بعدد الأسطر
-// (المسار الاحتياطي حين لا يتوفر DOM).
+// وإلا ينتقل للعمود الثاني من نفس الصفحة، وإلا لصفحة جديدة. لا تقسيم إطلاقاً وكل
+// مجموعة تُوضَع مرة واحدة بالضبط. `sizeOf` يجعله صالحاً للقياس بالبكسل الحقيقي أو
+// بعدد الأسطر (المسار الاحتياطي حين لا يتوفر DOM).
+//
+// تعبئة «النظرة الأمامية» (first-fit): حين تبقى فجوة أسفل عمود غير فارغ ولا تتّسع
+// فيها المجموعة التالية بالترتيب، نبحث أماماً عن **أول** مجموعة لاحقة تدخل الفجوة
+// كاملةً فنسحبها (مثال المالك: «المليونير» تنزل في الفراغ). لا تُقسَّم مجموعة ولا
+// تُكرَّر، والترتيب يُخترَق فقط بمقدار سحب مجموعة لاحقة لملء فجوة.
+// حارس التثبيت: لا تُسحَب مجموعة مثبَّتة (isPriority) ولا تُتجاوَز مجموعة مثبَّتة لم
+// تُوضَع بعد، فتبقى المجموعات الخمس أولاً وعلى الصفحة الأولى.
 function inventoryPackPages(entries, options = {}) {
   const list = Array.isArray(entries) ? entries : [];
   const sizeOf = typeof options.sizeOf === "function"
     ? options.sizeOf
     : (entry) => Number(entry && entry.height) || 0;
+  const isPriority = typeof options.isPriority === "function"
+    ? options.isPriority
+    : () => false;
   const fullBudget = Math.max(0, Number(options.fullBudget) || 0);
   const firstPageBudget = Math.max(0, Number(options.firstPageBudget ?? fullBudget) || 0);
   const safetyPx = Number.isFinite(options.safetyPx) ? Number(options.safetyPx) : 0;
@@ -6353,30 +6395,55 @@ function inventoryPackPages(entries, options = {}) {
   const pages = [];
   const pushPage = () => {
     const page = { columns: [[], []], sizes: [0, 0] };
-      pages.push(page);
+    pages.push(page);
     return page;
   };
+  const placed = new Array(list.length).fill(false);
+  let remaining = list.length;
   let page = pushPage();
   let column = 0;
-  for (const entry of list) {
-    const size = sizeOf(entry);
-    for (;;) {
-      const limit = limitFor(pages.length - 1);
-      // العمود الفارغ يستقبل المجموعة مهما طالت — حارس أخير يمنع الدوران بلا
-      // نهاية فقط. لا يُعوَّل عليه للمجموعات الأطول من عمود كامل: هذه تُقسَّم
-      // مسبقاً في inventoryReportPages، لأن ترك المتصفح «يمدّها» مستحيل أصلاً
-      // (break-inside:avoid يمنعه) وكان يُخرج صفحات A4 بيضاء — راجع التعليق هناك.
-      if (page.sizes[column] + size <= limit + 1e-6 || page.columns[column].length === 0) {
-        page.columns[column].push(entry);
-        page.sizes[column] += size;
-        break;
+  let cursor = 0; // أول مجموعة لم تُوضَع بعد، بالترتيب الأصلي
+  const placeAt = (index) => {
+    page.columns[column].push(list[index]);
+    page.sizes[column] += sizeOf(list[index]);
+    placed[index] = true;
+    remaining -= 1;
+  };
+  while (remaining > 0) {
+    while (cursor < list.length && placed[cursor]) cursor += 1;
+    if (cursor >= list.length) break; // كل المجموعات وُضِعت (حارس؛ remaining يبلغ 0)
+    const limit = limitFor(pages.length - 1);
+    const nextSize = sizeOf(list[cursor]);
+    // العمود الفارغ يستقبل المجموعة مهما طالت — حارس أخير يمنع الدوران بلا نهاية
+    // فقط. لا يُعوَّل عليه للمجموعات الأطول من عمود كامل: هذه تُقسَّم مسبقاً في
+    // inventoryReportPages، لأن ترك المتصفح «يمدّها» مستحيل أصلاً (break-inside:
+    // avoid يمنعه) وكان يُخرج صفحات A4 بيضاء — راجع التعليق هناك.
+    if (page.sizes[column] + nextSize <= limit + 1e-6 || page.columns[column].length === 0) {
+      placeAt(cursor);
+      continue;
+    }
+    // المجموعة التالية بالترتيب لا تتّسع والعمود غير فارغ ⇒ فجوة. نملؤها بأول
+    // مجموعة لاحقة تدخل كاملةً — لكن فقط إن كانت التالية نفسها غير مثبَّتة، وبلا
+    // تجاوز أي مجموعة مثبَّتة لم تُوضَع (كي لا تُدفَع مثبَّتة خارج مكانها).
+    let promoted = false;
+    if (!isPriority(list[cursor])) {
+      for (let j = cursor + 1; j < list.length; j += 1) {
+        if (placed[j]) continue;
+        if (isPriority(list[j])) break; // لا نتجاوز مجموعة مثبَّتة لم تُوضَع بعد
+        if (page.sizes[column] + sizeOf(list[j]) <= limit + 1e-6) {
+          placeAt(j);
+          promoted = true;
+          break;
+        }
       }
-      if (column === 0) column = 1;
-      else {
-        page = pushPage();
+    }
+    if (promoted) continue;
+    // لا شيء يملأ الفجوة ⇒ انتقل للعمود التالي ثم لصفحة جديدة، ثم استأنف بالترتيب.
+    if (column === 0) column = 1;
+    else {
+      page = pushPage();
       column = 0;
     }
-  }
   }
   return pages;
 }
@@ -6415,7 +6482,8 @@ function inventoryTwoColumnPages(entries, columnCapacity = 48) {
   return inventoryPackPages(entries, {
     fullBudget: columnCapacity,
     firstPageBudget: columnCapacity,
-    sizeOf: (entry) => Number(entry && entry.rows) || 0
+    sizeOf: (entry) => Number(entry && entry.rows) || 0,
+    isPriority: (entry) => isPriorityInventoryGroup(entry?.group?.label)
   });
 }
 
@@ -6533,7 +6601,8 @@ function inventoryReportPages(parts, mode) {
   const entries = sourceEntries.map((entry, index) => ({ ...entry, height: measured.heights[index] }));
   const fullBudget = geometry.pageHeightPx - measured.headPx;      // الرأس يتكرر بكل صفحة
   const firstPageBudget = fullBudget - measured.cardsPx;           // البطاقات بالصفحة الأولى وحدها
-  const base = { fullBudget, firstPageBudget, safetyPx: INVENTORY_PACK_SAFETY_PX };
+  const isPriorityEntry = (entry) => isPriorityInventoryGroup(entry?.group?.label);
+  const base = { fullBudget, firstPageBudget, safetyPx: INVENTORY_PACK_SAFETY_PX, isPriority: isPriorityEntry };
 
   // سطر التذييل يظهر بالصفحة الأخيرة وحدها، ولا نعرف رقمها قبل التوزيع. نبحث عن
   // «نقطة ثبات»: توزيعٌ حُجز فيه ارتفاع التذييل على الصفحة التي صارت فعلاً أخيرته
@@ -6581,7 +6650,8 @@ function inventoryReportPages(parts, mode) {
     const reserveEveryPage = inventoryPackPages(entries, {
       fullBudget: fullBudget - measured.footPx,
       firstPageBudget: firstPageBudget - measured.footPx,
-      safetyPx: INVENTORY_PACK_SAFETY_PX
+      safetyPx: INVENTORY_PACK_SAFETY_PX,
+      isPriority: isPriorityEntry
     });
     pages = [reserveEveryPage, ...candidates]
       .filter(footerFits)
