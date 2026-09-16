@@ -1185,11 +1185,40 @@ await test("الترحيل لا يتبنّى فاتورة أقدم فشلت بع
   assert.deepEqual(printed, ["410"], "الفاتورة الفاشلة لم تُطبع بعد الترحيل");
 });
 
-await test("watcher.js: حدّ الترحيل من processedThrough لا من أحدث ختم Date.now()", () => {
-  const src = extractFunctionSource(watcherSrc, "function migrationAdoptCutoff(state, nowMs");
-  assert.ok(/processedThrough/.test(src), "لا يُستخدم processedThrough كعلامة مائية");
-  assert.ok(!/Object\.values\(state\.printedGuids\)/.test(src),
-    "ما زال الحدّ يُستنتَج من أحدث ختم طباعة");
+await test("ترحيل schema-v1 بلا processedThrough يتبنّى العلامات المحذوفة لا حدّ اللحاق (ملاحظة Codex P1)", async () => {
+  // ملف حالة حقيقي من النسخة القديمة لا يحمل processedThrough. حدّ اللحاق يساوي
+  // watchFromDate بعد advanceWatchFromDate، فـ date < cutoff لا يصيب شيئاً من
+  // الاستعلام وتُطبع فواتير 09-09 من جديد — علّة الترحيل الأصلية.
+  const { poll, printed, migrationAdoptCutoff } = makeWindowHarness();
+  NOW = Date.parse("2026-09-16T09:00:00Z");
+  const ledger = [];
+  let seq = 200;
+  for (let d = 9; d <= 16; d++) {
+    const ds = `2026-09-${String(d).padStart(2, "0")}`;
+    ledger.push(fakeSalesRow({ invoice_guid: `V1-${seq}`, invoice_number: String(seq), invoice_date: ds }));
+    seq++;
+  }
+  const state = {
+    watchFromDate: "2026-03-01",
+    schemaVersion: 1,
+    adoptBaseline: true,
+    printedGuids: Object.fromEntries(
+      ledger.filter((r) => r.invoice_date >= "2026-09-10" && r.invoice_date <= "2026-09-13")
+        .map((r) => [r.invoice_guid, Date.parse(`${r.invoice_date}T12:00:00Z`)])
+    ),
+  };
+  assert.ok(!Object.hasOwn(state, "processedThrough"));
+  assert.equal(migrationAdoptCutoff(state, NOW), "2026-09-13",
+    "بلا processedThrough يجب أن يكون الحدّ آخر يوم طبعت فيه النسخة القديمة");
+  const guidOf = (d) => ledger.find((r) => r.invoice_date === `2026-09-${d}`).invoice_guid;
+
+  await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
+  assert.equal(printed.length, 0, "دورة الترحيل طبعت ورقاً");
+  assert.ok(state.printedGuids[guidOf("09")], "لم تُتبنَّ فاتورة 09-09 المحذوفة علامتها");
+  for (const d of ["14", "15", "16"]) {
+    assert.ok(!state.printedGuids[guidOf(d)],
+      `تُبنّيت فاتورة ${d} أيلول من فجوة النشر`);
+  }
 });
 
 await test("watcher.js: فشل حفظ الحالة عند الإقلاع يمنع التشغيل (ملاحظة Codex P1)", () => {
@@ -1229,7 +1258,10 @@ const lockSrcs = [
   extractFunctionSource(watcherSrc, "function lockPayload(startedAtMs, beatMs)"),
   extractFunctionSource(watcherSrc, "function publishLockExclusive(lockPath, content)"),
   extractFunctionSource(watcherSrc, "function writeLockAtomic(lockPath, content)"),
-  extractFunctionSource(watcherSrc, "function makeLockHandle(lockPath, startedAtMs)"),
+  extractFunctionSource(watcherSrc, "function readLockJson(lockPath)"),
+  extractFunctionSource(watcherSrc, "function lockOwnedByUs(cur, startedAtMs)"),
+  extractFunctionSource(watcherSrc, "function replaceLockIfOwner(lockPath, startedAtMs, content"),
+  extractFunctionSource(watcherSrc, "function makeLockHandle(lockPath, startedAtMs, deps"),
   extractFunctionSource(watcherSrc, "async function acquireSingleInstanceLock(nowMs"),
 ].join("\n");
 
@@ -1424,6 +1456,56 @@ await test("القفل: ملف مفقود أثناء النبضة يُعدّ ف�
   lock.beat(1_000_000 + readConst("LOCK_BEAT_MIN_INTERVAL_MS") + 1000);
   assert.equal(lock.isLost(), true, "لم يُعَدّ الملف المفقود فقدانَ ملكية");
   assert.ok(!fs.existsSync(lock.path), "أُعيد إنشاء قفل قد يكون مالكه غيرنا");
+});
+
+await test("القفل: النبضة لا تدهس مالكاً جديداً نُشر بين القراءة والكتابة (ملاحظة Codex P1)", async () => {
+  const sp = tmpStatePath("cas-beat");
+  const other = process.pid + 4242;
+  const lock = await makeLockApi(sp, process.pid).acquireSingleInstanceLock(1_000_000, {
+    ...noWait,
+    onBeforeLockReplace: () => {
+      fs.writeFileSync(lock.path, JSON.stringify({ pid: other, startedAt: "other", heartbeatAt: 9 }));
+    },
+  });
+  lock.beat(1_000_000 + readConst("LOCK_BEAT_MIN_INTERVAL_MS") + 1000);
+  assert.equal(Number(JSON.parse(fs.readFileSync(lock.path, "utf8")).pid), other,
+    "rename غير المشروط دهس قفل المالك الجديد");
+  assert.equal(lock.isLost(), true);
+  fs.unlinkSync(lock.path);
+});
+
+await test("القفل: الاستيلاء على قفل متروك لا يحذف مالكاً جديداً نُشر قبل الـunlink (ملاحظة Codex P1)", async () => {
+  const sp = tmpStatePath("cas-takeover");
+  const lockPath = `${sp}.lock`;
+  const staleMs = readConst("LOCK_STALE_MS");
+  fs.writeFileSync(lockPath, JSON.stringify({
+    pid: 999999, startedAt: "2020-01-01T00:00:00.000Z", heartbeatAt: Date.now() - staleMs - 1000,
+  }), "utf8");
+  await assert.rejects(
+    () => makeLockApi(sp, process.pid + 100004).acquireSingleInstanceLock(Date.now(), {
+      ...noWait,
+      onBeforeStaleUnlink: () => {
+        fs.writeFileSync(lockPath, JSON.stringify({
+          pid: process.pid, startedAt: "2026-09-16T00:00:00.000Z", heartbeatAt: Date.now(),
+        }), "utf8");
+      },
+    }),
+    (err) => err && err.fatalLockHeld,
+  );
+  assert.equal(Number(JSON.parse(fs.readFileSync(lockPath, "utf8")).pid), process.pid,
+    "الاستيلاء حذف قفل المالك الجديد");
+  fs.unlinkSync(lockPath);
+});
+
+await test("watcher.js: إبدال النبضة والاستيلاء يعيدان قراءة الملكية قبل الطفرة", () => {
+  const replaceSrc = extractFunctionSource(watcherSrc, "function replaceLockIfOwner(lockPath, startedAtMs, content");
+  assert.ok((replaceSrc.match(/readLockJson\(lockPath\)/g) || []).length >= 2,
+    "replaceLockIfOwner لا يعيد القراءة قبل الإبدال");
+  const acquireSrc = extractFunctionSource(watcherSrc, "async function acquireSingleInstanceLock(nowMs");
+  const unlinkIdx = acquireSrc.indexOf("fs.unlinkSync(lockPath)");
+  const rereadIdx = acquireSrc.indexOf("readLockJson(lockPath)");
+  assert.ok(rereadIdx > 0 && rereadIdx < unlinkIdx,
+    "الاستيلاء يحذف بلا إعادة قراءة — يدهس مالكاً جديداً");
 });
 
 await test("watcher.js: الحلقة الرئيسية تُنهي العملية عند فقدان القفل قبل أي استعلام", () => {

@@ -442,7 +442,28 @@ function writeLockAtomic(lockPath, content) {
   fs.renameSync(tmpPath, lockPath);
 }
 
-function makeLockHandle(lockPath, startedAtMs) {
+function readLockJson(lockPath) {
+  try { return JSON.parse(fs.readFileSync(lockPath, "utf8")); }
+  catch { return null; }
+}
+
+function lockOwnedByUs(cur, startedAtMs) {
+  return Boolean(cur)
+    && Number(cur.pid) === process.pid
+    && String(cur.startedAt) === new Date(startedAtMs).toISOString();
+}
+
+// إبدال القفل فقط إن بقيت الملكية لنا بين القراءة والكتابة. rename غير مشروط
+// كان يدهس قفل مالك جديد نُشر في تلك الفجوة فيعود الاثنان يملكان الملف.
+function replaceLockIfOwner(lockPath, startedAtMs, content, onBeforeReplace) {
+  if (!lockOwnedByUs(readLockJson(lockPath), startedAtMs)) return false;
+  if (typeof onBeforeReplace === "function") onBeforeReplace();
+  if (!lockOwnedByUs(readLockJson(lockPath), startedAtMs)) return false;
+  writeLockAtomic(lockPath, content);
+  return true;
+}
+
+function makeLockHandle(lockPath, startedAtMs, deps = {}) {
   let released = false;
   let lastBeatAt = startedAtMs;
   let lost = false;
@@ -471,7 +492,9 @@ function makeLockHandle(lockPath, startedAtMs) {
         // أخرى كانت تدهسه بنبضتها التالية فتعود النسختان تعملان معاً.
         const cur = JSON.parse(fs.readFileSync(lockPath, "utf8"));
         if (Number(cur.pid) !== process.pid) { lost = true; return; }
-        writeLockAtomic(lockPath, lockPayload(startedAtMs, t));
+        if (!replaceLockIfOwner(lockPath, startedAtMs, lockPayload(startedAtMs, t), deps.onBeforeLockReplace)) {
+          lost = true;
+        }
       } catch {
         // ملف مفقود أو غير مقروء: لا نعيد إنشاءه — قد يكون مالكه غيرنا الآن.
         lost = true;
@@ -497,7 +520,7 @@ async function acquireSingleInstanceLock(nowMs = Date.now(), deps = {}) {
   for (let attempt = 0; attempt <= LOCK_UNREADABLE_RETRIES; attempt++) {
     try {
       publishLockExclusive(lockPath, lockPayload(nowMs, nowMs));
-      return makeLockHandle(lockPath, nowMs);
+      return makeLockHandle(lockPath, nowMs, deps);
     } catch (err) {
       if (!err || err.code !== "EEXIST") throw err;
     }
@@ -542,6 +565,15 @@ async function acquireSingleInstanceLock(nowMs = Date.now(), deps = {}) {
       `قفل متروك يُزال: PID ${pid} ${alive ? "حيّ لكن نبضته متوقّفة" : "غير موجود"}`
       + `${beat ? ` منذ ${Math.round(beatAgeMs / 1000)} ثانية` : " وبلا نبضة مسجَّلة"}.`
     );
+    if (typeof deps.onBeforeStaleUnlink === "function") deps.onBeforeStaleUnlink();
+    // إعادة قراءة قبل الحذف: مالك جديد قد يكون نشر قفله بين التشخيص والـunlink.
+    const latest = readLockJson(lockPath);
+    if (!latest
+      || Number(latest.pid) !== pid
+      || String(latest.startedAt || "") !== String(existing.startedAt || "")
+      || Number(latest.heartbeatAt) !== beat) {
+      continue;
+    }
     try { fs.unlinkSync(lockPath); } catch {}
     // الحلقة تعيد المحاولة؛ إن سبقتنا نسخة أخرى فستُعالج كمحجوزة في الدورة التالية.
   }
@@ -724,15 +756,21 @@ function describeError(err) {
 
 // ─── دورة الاستعلام ───────────────────────────────────────────────────────
 // خطّ أساس الترحيل: علامة مائية متجاورة (`processedThrough`) — آخر يوم اكتملت
-// فواتيره كلها. لا يُستنتَج من أحدث ختم في `printedGuids`: ذلك الختم هو
+// فواتيره كلها. لا يُستنتَج من أحدث ختم حين تكون العلامة موجودة: ذلك الختم هو
 // `Date.now()` لحظة نجاح الطباعة لا تاريخ الفاتورة، ففاتورة أقدم فشلت ثم نجحت
 // أحدث بعدها ترفع الخط فوق الفاشلة فتُتبنّى وتُفقد إلى الأبد.
-// بلا علامة مائية (حالة قديمة جداً): يُتبنّى ما خرج من نافذة اللحاق فقط، لا
-// أحدث ختم ولا «اليوم» (اليوم يبتلع فجوة النشر).
+// حالة schema-v1 الحقيقية بلا processedThrough: أحدث ختم هو آخر يوم طبعت فيه
+// النسخة القديمة فعلاً. حدّ نافذة اللحاق لا يصلح — main() تكون قد قدّمت
+// watchFromDate إليه، والتبنّي بـ`date < cutoff` لا يصيب أي فاتورة من الاستعلام.
 function migrationAdoptCutoff(state, nowMs = Date.now()) {
   const processed = String(state.processedThrough || "");
   if (/^\d{4}-\d{2}-\d{2}$/.test(processed)) return processed;
-  return localDateStr(nowMs - WATCH_LOOKBACK_DAYS * DAY_MS);
+  let newest = 0;
+  for (const ts of Object.values(state.printedGuids || {})) {
+    const n = Number(ts);
+    if (Number.isFinite(n) && n > newest) newest = n;
+  }
+  return localDateStr(newest > 0 ? newest : nowMs);
 }
 
 async function poll(pool, state, hooks = {}) {
