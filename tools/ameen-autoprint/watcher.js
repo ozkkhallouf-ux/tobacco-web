@@ -8,6 +8,7 @@
 const fs   = require("fs");
 const path = require("path");
 const os   = require("os");
+const net  = require("net");
 const { execSync, spawnSync } = require("child_process");
 const sql  = require("mssql");
 const puppeteer = require("puppeteer");
@@ -258,11 +259,6 @@ function parseSqlConnStr(cs) {
 const WATCH_LOOKBACK_DAYS = 7;       // أبعد ما ينظر إليه الاستعلام إلى الوراء
 const PRINTED_RETENTION_DAYS = 30;   // مدة الاحتفاظ بعلامة «طُبعت»
 const WINDOW_SAFETY_MARGIN_DAYS = 3; // هامش يفصل أقصى نافذة عن حدّ الاحتفاظ
-// ما كانت **النسخة القديمة** تحتفظ به من علامات. يُستعمل في الترحيل وحده، ولا
-// يصحّ إسناد الحدّ إلى WATCH_LOOKBACK_DAYS: هذان مفهومان مختلفان يتساويان رقماً
-// الآن فقط، فرفع نافذة اللحاق لاحقاً كان سيجعل الترحيل يتبنّى أياماً كانت
-// النسخة القديمة ما زالت تحفظ علاماتها.
-const LEGACY_RETENTION_DAYS = 7;
 
 // نسخة بنية ملف الحالة. الحالة القادمة من النسخة القديمة (بلا رقم نسخة) خطرة
 // عند أول تشغيل للكود الجديد: النسخة القديمة كانت تحذف العلامات بعد 7 أيام،
@@ -389,204 +385,71 @@ function pruneOldGuids(state) {
 // نبضة كل 30 ثانية، والقفل يُعدّ بائتاً بعد 10 دقائق = عشرون نبضة مفقودة.
 // الفجوة واسعة عمداً: الاستيلاء الخاطئ على قفل نسخة عاملة يعني طباعة مزدوجة،
 // والنبضة تُرسَل أيضاً بعد كل فاتورة داخل حلقة الطباعة فلا تبيت نسخة منتجة.
-const LOCK_BEAT_MIN_INTERVAL_MS = 30_000;
-const LOCK_STALE_MS = 10 * 60 * 1000;
-// قفل غير قابل للقراءة = نسخة أخرى في منتصف إنشائه (أو ملف تالف). يُعاد
-// فحصه قبل أي حكم — حذفه فوراً هو بالضبط ما يجعل النسختين تعملان معاً.
-const LOCK_UNREADABLE_RETRIES = 5;
-const LOCK_UNREADABLE_DELAY_MS = 200;
-
+// قفل النسخة الواحدة — **مملوك لنظام التشغيل**.
+//
+// النسخة الملفّية (PID + نبضة + بيات + استيلاء) أنتجت خمس ملاحظات P1 متتابعة،
+// وكلها من أصل واحد: ملف JSON لا يصلح mutex. كل تصميم «اقرأ ثم قرّر ثم اكتب»
+// يترك فجوة بين الفحص والكتابة، والنبضة تفتح الفجوة من جديد كل ثلاثين ثانية،
+// ورقم العملية قابل لإعادة الاستخدام — فيحجب الطباعة إلى الأبد لأن المهمة
+// مسجَّلة ONSTART بلا سياسة إعادة محاولة. وهذا ضرر **أسوأ** من العطل الذي
+// يمنعه القفل: طابعة صامتة بلا سبب ظاهر.
+//
+// البديل: حجز منفذ على 127.0.0.1. النظام يضمن أن عملية واحدة فقط تحجزه،
+// ويحرّره **هو** لحظة موت العملية — فلا PID ولا نبضة ولا بيات ولا ملف متروك
+// ولا تنظيف يدوي ولا فجوة سباق. ولا حاجة لفحص ملكية أثناء الطباعة: ما دامت
+// العملية حيّة فالحجز قائم بحكم النظام.
+//
+// المقايضة المقبولة: لو حجز برنامجٌ آخر المنفذ نفسه لم يُقلع المراقب، والرسالة
+// تسمّي المنفذ وموضع تغييره في config.js. واحتمال ذلك أقلّ بكثير من إعادة
+// استخدام رقم عملية، والفشل ظاهر وقابل للإصلاح بسطر واحد.
 function lockHeldError(message) {
   const err = new Error(message);
   err.fatalLockHeld = true;
   return err;
 }
 
-// true = العملية موجودة. EPERM تعني موجودة لكن بمستخدم آخر (SYSTEM مقابل
-// المستخدم المسجَّل) — وهي بالضبط الحالة التي يجب كشفها لا تجاهلها.
-function processAlive(pid) {
-  try { process.kill(pid, 0); return true; }
-  catch (err) { return Boolean(err) && err.code === "EPERM"; }
-}
-
-function lockFilePath() {
-  return `${config.stateFilePath}.lock`;
-}
-
-// يرمي fatalLockHeld إن كانت نسخة حيّة تحمل القفل. القفل المتروك من عملية
-// ميتة (انقطاع كهرباء) يُستولى عليه تلقائياً فلا يبقى المراقب معطّلاً للأبد.
-function lockPayload(startedAtMs, beatMs) {
-  return JSON.stringify({
-    pid: process.pid,
-    host: os.hostname(),
-    startedAt: new Date(startedAtMs).toISOString(),
-    heartbeatAt: beatMs,
-  }, null, 2);
-}
-
-// نشر ذرّي **بمحتواه**. الإنشاء الحصري بـ`openSync("wx")` لا يكفي: هو ينشر
-// ملفاً **فارغاً** أولاً ثم يكتب الـJSON، فنسخة تقرؤه في تلك اللحظة تراه غير
-// قابل للتحليل فتحسبه متروكاً وتحذفه — فتعمل النسختان معاً، وهو عين العطل
-// الذي يُفترض أن يمنعه القفل. أما `linkSync` فينشر الملف كاملاً في خطوة واحدة
-// ويفشل بـEEXIST إن كان الهدف قائماً.
-function publishLockExclusive(lockPath, content) {
-  const tmpPath = `${lockPath}.${process.pid}.create.tmp`;
-  fs.writeFileSync(tmpPath, content, "utf8");
-  try {
-    fs.linkSync(tmpPath, lockPath);
-  } finally {
-    try { fs.unlinkSync(tmpPath); } catch {}
-  }
-}
-
-// إبدال ذرّي للنبضة: `rename` يُبدل الملف كاملاً، فالقارئ يرى دائماً نسخة
-// تامّة (قديمة أو جديدة) ولا يرى ملفاً نصف مكتوب كل 30 ثانية.
-function writeLockAtomic(lockPath, content) {
-  const tmpPath = `${lockPath}.${process.pid}.beat.tmp`;
-  fs.writeFileSync(tmpPath, content, "utf8");
-  fs.renameSync(tmpPath, lockPath);
-}
-
-function readLockJson(lockPath) {
-  try { return JSON.parse(fs.readFileSync(lockPath, "utf8")); }
-  catch { return null; }
-}
-
-function lockOwnedByUs(cur, startedAtMs) {
-  return Boolean(cur)
-    && Number(cur.pid) === process.pid
-    && String(cur.startedAt) === new Date(startedAtMs).toISOString();
-}
-
-// إبدال القفل فقط إن بقيت الملكية لنا بين القراءة والكتابة. rename غير مشروط
-// كان يدهس قفل مالك جديد نُشر في تلك الفجوة فيعود الاثنان يملكان الملف.
-function replaceLockIfOwner(lockPath, startedAtMs, content, onBeforeReplace) {
-  if (!lockOwnedByUs(readLockJson(lockPath), startedAtMs)) return false;
-  if (typeof onBeforeReplace === "function") onBeforeReplace();
-  if (!lockOwnedByUs(readLockJson(lockPath), startedAtMs)) return false;
-  writeLockAtomic(lockPath, content);
-  return true;
-}
-
-function makeLockHandle(lockPath, startedAtMs, deps = {}) {
-  let released = false;
-  let lastBeatAt = startedAtMs;
-  let lost = false;
-  return {
-    path: lockPath,
-    // فقدنا الملكية = نسخة أخرى استولت على القفل. يُقرأ الملف في كل فحص، لا
-    // الاعتماد على كاش نبضة سابقة: نسخة وُقفت أكثر من عشر دقائق ثم استُؤنفت
-    // تصل هنا و`lost` ما زال false إن لم تُستدعَ beat() بعد.
-    isLost() {
-      if (lost || released) return true;
-      try {
-        const cur = JSON.parse(fs.readFileSync(lockPath, "utf8"));
-        if (Number(cur.pid) !== process.pid) { lost = true; return true; }
-        return false;
-      } catch {
-        lost = true;
-        return true;
-      }
-    },
-    beat(t = Date.now()) {
-      if (released || lost || t - lastBeatAt < LOCK_BEAT_MIN_INTERVAL_MS) return;
-      lastBeatAt = t;
-      try {
-        // تحقّق الملكية قبل الكتابة. النبض أثناء انتظار SQL يمنع تبييت قفلنا،
-        // لكنه لا يمنع النصف الآخر من الملاحظة: نسخة بات قفلها واستولت عليه
-        // أخرى كانت تدهسه بنبضتها التالية فتعود النسختان تعملان معاً.
-        const cur = JSON.parse(fs.readFileSync(lockPath, "utf8"));
-        if (Number(cur.pid) !== process.pid) { lost = true; return; }
-        if (!replaceLockIfOwner(lockPath, startedAtMs, lockPayload(startedAtMs, t), deps.onBeforeLockReplace)) {
-          lost = true;
-        }
-      } catch {
-        // ملف مفقود أو غير مقروء: لا نعيد إنشاءه — قد يكون مالكه غيرنا الآن.
-        lost = true;
-      }
-    },
-    // لا يُحذف إلا قفلنا نحن — كي لا تحذف نسخةٌ خارجةٌ قفل النسخة العاملة.
-    release() {
-      if (released) return;
-      released = true;
-      try {
-        const cur = JSON.parse(fs.readFileSync(lockPath, "utf8"));
-        if (Number(cur.pid) === process.pid) fs.unlinkSync(lockPath);
-      } catch {}
-    },
-  };
-}
-
-async function acquireSingleInstanceLock(nowMs = Date.now(), deps = {}) {
-  const wait = deps.wait || ((ms) => new Promise((r) => setTimeout(r, ms)));
-  const log = deps.log || console;
-  const lockPath = lockFilePath();
-
-  for (let attempt = 0; attempt <= LOCK_UNREADABLE_RETRIES; attempt++) {
-    try {
-      publishLockExclusive(lockPath, lockPayload(nowMs, nowMs));
-      return makeLockHandle(lockPath, nowMs, deps);
-    } catch (err) {
-      if (!err || err.code !== "EEXIST") throw err;
-    }
-
-    let existing = null;
-    try { existing = JSON.parse(fs.readFileSync(lockPath, "utf8")); }
-    catch { existing = null; }
-
-    if (existing === null) {
-      // لا يُحذف فوراً: قد تكون نسخة أخرى في منتصف نشره الآن.
-      if (attempt < LOCK_UNREADABLE_RETRIES) {
-        await wait(LOCK_UNREADABLE_DELAY_MS);
-        continue;
-      }
-      throw lockHeldError(
-        `رفض قاطع: ملف القفل "${lockPath}" موجود وغير قابل للقراءة بعد `
-        + `${LOCK_UNREADABLE_RETRIES} محاولات. يُعامَل كمحجوز احتياطاً لمنع طباعة مزدوجة.`
-        + " تأكّد من عدم وجود نسخة عاملة ثم احذف الملف يدوياً."
-      );
-    }
-
-    const pid = Number(existing.pid);
-    const beat = Number(existing.heartbeatAt) || 0;
-    const beatAgeMs = beat ? nowMs - beat : Infinity;
-    const alive = Number.isInteger(pid) && pid > 0 && processAlive(pid);
-    const fresh = beatAgeMs < LOCK_STALE_MS;
-
-    if (alive && fresh) {
-      throw lockHeldError(
-        `رفض قاطع: نسخة أخرى من المراقب تحمل القفل (PID ${pid}،`
-        + ` آخر نبضة قبل ${Math.max(0, Math.round(beatAgeMs / 1000))} ثانية).`
-        + " تشغيل نسختين على نفس ملف الحالة يسبّب طباعة الفاتورة مرتين."
-        + ' أوقف النسخة الأخرى — أو المهمة "OZK-AmeenAutoPrint" — ثم أعد التشغيل.'
-      );
-    }
-
-    // القفل متروك: إما العملية ميتة، أو نبضتها متوقّفة منذ أكثر من عشر دقائق.
-    // الحالة الثانية تعني عملياً أن Windows أعاد استخدام رقم العملية لبرنامج
-    // آخر بعد إيقاف غير نظيف — ولولا الاستيلاء لبقيت الطباعة معطّلة إلى الأبد
-    // لأن المهمة مسجَّلة ONSTART بلا أي سياسة إعادة محاولة.
-    log.warn(
-      `قفل متروك يُزال: PID ${pid} ${alive ? "حيّ لكن نبضته متوقّفة" : "غير موجود"}`
-      + `${beat ? ` منذ ${Math.round(beatAgeMs / 1000)} ثانية` : " وبلا نبضة مسجَّلة"}.`
+function singleInstancePort() {
+  const port = Number(config.singleInstancePort);
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) {
+    throw new Error(
+      `رفض قاطع: singleInstancePort في config.js غير صالح (${config.singleInstancePort}).`
+      + " يجب أن يكون رقم منفذ بين 1024 و65535."
     );
-    if (typeof deps.onBeforeStaleUnlink === "function") deps.onBeforeStaleUnlink();
-    // إعادة قراءة قبل الحذف: مالك جديد قد يكون نشر قفله بين التشخيص والـunlink.
-    const latest = readLockJson(lockPath);
-    if (!latest
-      || Number(latest.pid) !== pid
-      || String(latest.startedAt || "") !== String(existing.startedAt || "")
-      || Number(latest.heartbeatAt) !== beat) {
-      continue;
-    }
-    try { fs.unlinkSync(lockPath); } catch {}
-    // الحلقة تعيد المحاولة؛ إن سبقتنا نسخة أخرى فستُعالج كمحجوزة في الدورة التالية.
   }
+  return port;
+}
 
-  throw lockHeldError(
-    `رفض قاطع: تعذّر الاستحواذ على القفل "${lockPath}" بعد عدة محاولات — تنافس مستمر.`
-    + " تأكّد من عدم تشغيل نسختين ثم أعد المحاولة."
-  );
+function acquireSingleInstanceLock() {
+  return new Promise((resolve, reject) => {
+    // التحقّق داخل الوعد عمداً: الدالة ترفض دائماً ولا ترمي تزامنياً أحياناً،
+    // فيكفي مستدعياً واحداً أن يلتقط الفشل بـcatch واحد.
+    let port;
+    try { port = singleInstancePort(); }
+    catch (err) { reject(err); return; }
+
+    const server = net.createServer();
+    // لا يُبقي حلقة الأحداث حيّة: الحجز قائم ما دامت العملية تعمل، ولا يمنع خروجها.
+    server.unref();
+    server.once("error", (err) => {
+      if (err && err.code === "EADDRINUSE") {
+        reject(lockHeldError(
+          `رفض قاطع: نسخة أخرى من المراقب تعمل بالفعل (المنفذ ${port} محجوز).`
+          + " تشغيل نسختين على نفس ملف الحالة يسبّب طباعة الفاتورة مرتين."
+          + ' أوقف النسخة الأخرى — أو المهمة "OZK-AmeenAutoPrint" — ثم أعد التشغيل.'
+          + ` وإن تأكّدت أن الحاجز برنامج آخر لا المراقب، غيّر singleInstancePort في config.js.`
+        ));
+        return;
+      }
+      reject(err);
+    });
+    server.once("listening", () => {
+      resolve({
+        port,
+        release() { try { server.close(); } catch { /* الخروج يحرّره على أي حال */ } },
+      });
+    });
+    server.listen(port, "127.0.0.1");
+  });
 }
 
 // فشل حفظ الحالة عطل حرج لا تحذير عابر: الفواتير طُبعت فعلاً وعلاماتها في
@@ -759,41 +622,9 @@ function describeError(err) {
   return String(err);
 }
 
-// ─── دورة الاستعلام ───────────────────────────────────────────────────────
-// خطّ أساس الترحيل: علامة مائية متجاورة (`processedThrough`) — آخر يوم اكتملت
-// فواتيره كلها. لا يُستنتَج من أحدث ختم حين تكون العلامة موجودة: ذلك الختم هو
-// `Date.now()` لحظة نجاح الطباعة لا تاريخ الفاتورة، ففاتورة أقدم فشلت ثم نجحت
-// أحدث بعدها ترفع الخط فوق الفاشلة فتُتبنّى وتُفقد إلى الأبد.
-// حالة schema-v1 بلا processedThrough: حدّ احتفاظ النسخة القديمة
-// (`LEGACY_RETENTION_DAYS`) لا نافذة اللحاق. حدّ اللحاق يساوي watchFromDate بعد
-// التقديم، و`date < cutoff` حينها لا يصيب أي فاتورة من الاستعلام.
-function migrationAdoptCutoff(state, nowMs = Date.now()) {
-  const processed = String(state.processedThrough || "");
-  if (/^\d{4}-\d{2}-\d{2}$/.test(processed)) return processed;
-  return localDateStr(nowMs - LEGACY_RETENTION_DAYS * DAY_MS);
-}
 
-// يوم الحدّ نفسه ملتبس بنيوياً: النسخة القديمة تحذف العلامة بعد سبعة أيام من
-// **وقت الطباعة** لا من تاريخ الفاتورة، فداخل ذلك اليوم تنقضي علامات ما طُبع
-// أوّلَه وتبقى علامات ما طُبع آخره. فغياب العلامة في هذا اليوم بعينه ليس دليل
-// عدم طباعة — إنما هو يوم انتهاء الصلاحية. وترك اليوم بلا تبنٍّ يعني إعادة
-// طباعة جزء منه عند **كل** نشر، وهو عين ما يشكو منه المستخدم.
-//
-// فيُتبنّى، لكن بدليل موجب فقط: وجود علامة واحدة على الأقل طُبعت في ذلك اليوم
-// أو بعده يثبت أن النسخة القديمة كانت تعمل فيه. وبلا هذا الدليل لا تبنّي —
-// فلا تُبتلع فواتير يومٍ لم تكن النسخة القديمة تعمل فيه أصلاً.
-//
-// ملاحظة: الأختام تُستعمل هنا **دليل نشاط** لا لاستنتاج الحدّ — استنتاج الحدّ
-// من أحدث ختم هو ما كان يتبنّى الفاتورة الأقدم الفاشلة (ملاحظة Codex P1).
-function legacyWasActiveOn(state, cutoff) {
-  for (const ts of Object.values(state.printedGuids)) {
-    const n = Number(ts);
-    if (Number.isFinite(n) && n > 0 && localDateStr(n) >= cutoff) return true;
-  }
-  return false;
-}
 
-async function poll(pool, state, hooks = {}) {
+async function poll(pool, state) {
   // تقديم النافذة **قبل** الاستعلام لا بعده: الاستعلام يجب ألا ينظر أبعد ممّا
   // تتذكّره علامات الطباعة، وإلا أعاد فاتورة حُذفت علامتها فطُبعت من جديد.
   const moved = advanceWatchFromDate(state);
@@ -823,44 +654,56 @@ async function poll(pool, state, hooks = {}) {
   // دورة الترحيل: تتبنّى ما أثبتت الحالة القديمة أنه مرّ عليها، بلا طباعة ورقة
   // واحدة — ولا تلمس فواتير فجوة النشر، فتبقى لتُطبع في الدورة التالية.
   if (state.adoptBaseline) {
-    const cutoff = migrationAdoptCutoff(state);
-    const adoptCutoffDay = legacyWasActiveOn(state, cutoff);
-    let adopted = 0;
-    let deferred = 0;
-    const adoptedGuids = [];
+    // ترحيل حالة النسخة القديمة إلى خطّ أساس موثوق.
+    //
+    // لا يمكن **بنيوياً** تمييز «طُبعت وحُذفت علامتها» من «لم تُطبع» لأي فاتورة
+    // بلا علامة: النسخة القديمة تحذف العلامات بعد سبعة أيام من **وقت الطباعة**
+    // لا من تاريخ الفاتورة، ولا تحفظ أي علامة مائية. فداخل يوم انقضاء الصلاحية
+    // تنقضي علامات ما طُبع أوّلَه وتبقى علامات آخره، والفاتورة الفاشلة لا تُمييَّز
+    // عن المطبوعة المنسيّة.
+    //
+    // وكل تخمين جُرِّب أخطأ في أحد الاتجاهين: الحدّ من أحدث ختم يتبنّى الفاتورة
+    // الأقدم الفاشلة؛ والحدّ من مدة الاحتفاظ يُعيد طباعة يوم الحدّ كاملاً؛ ودليل
+    // نشاط اليوم دليلٌ على أن النسخة القديمة طبعت **شيئاً آخر** لا هذه الفاتورة.
+    //
+    // فلا تخمين: تُعَدّ كل فاتورة بلا علامة داخل النافذة مطبوعةً مسبقاً — فصفر
+    // إعادة طباعة **مضمونة** لا مرجّحة — وتُسرد صراحةً بأرقامها وتواريخها في
+    // السجل مع تعليمة التحقّق، فلا تُفقد واحدة بصمت. وهذا نفس عقد أول تشغيل:
+    // «الفواتير السابقة لن تُطبع».
+    const adopted = [];
     for (const inv of invoices) {
       if (state.printedGuids[inv.guid]) continue;
-      const invDate = String(inv.date);
-      if (invDate < cutoff || (adoptCutoffDay && invDate === cutoff)) {
-        state.printedGuids[inv.guid] = Date.now();
-        adoptedGuids.push(inv.guid);
-        adopted++;
-      } else {
-        deferred++;
-      }
+      state.printedGuids[inv.guid] = Date.now();
+      adopted.push({ guid: inv.guid, label: `#${inv.number} (${inv.date})` });
     }
     delete state.adoptBaseline;
     pruneOldGuids(state);
     if (!persistState(state)) {
       // لم تُطبع ورقة بعد: منطق «لا نرمي» لا يسري هنا. إن رُفعت الراية ومضينا،
-      // الدورة التالية تطبع فجوة النشر، ثم إعادة التشغيل تعيد الترحيل من القرص
+      // الدورة التالية تطبع ما تُبنّي، ثم إعادة التشغيل تعيد الترحيل من القرص
       // (الراية ما زالت هناك) فتُطبع الفواتير مرة ثانية.
       state.adoptBaseline = true;
-      for (const guid of adoptedGuids) delete state.printedGuids[guid];
+      for (const entry of adopted) delete state.printedGuids[entry.guid];
       const err = new Error(
         `رفض قاطع: تعذّر حفظ نتيجة الترحيل "${config.stateFilePath}".`
-        + " بلا حالة دائمة ستُطبع فواتير فجوة النشر ثم تُعاد بعد إعادة التشغيل."
+        + " بلا حالة دائمة ستُطبع الفواتير القديمة ثم تُعاد بعد إعادة التشغيل."
         + " صحّح صلاحيات الكتابة على المجلد أو مساحة القرص ثم أعد التشغيل."
       );
       err.fatalPersist = true;
       throw err;
     }
     console.log(
-      `ترحيل الحالة: تُبنّيت ${adopted} فاتورة أقدم من ${cutoff} كمطبوعة مسبقاً — لن تُطبع.`
-      + (deferred
-        ? ` و${deferred} فاتورة في يوم ${cutoff} أو بعده لم تُتبنَّ (فجوة النشر) وستُطبع في الدورة التالية.`
-        : " ولا فواتير معلّقة في فجوة النشر.")
+      `ترحيل الحالة: ${adopted.length} فاتورة داخل النافذة (${state.watchFromDate} ← اليوم)`
+      + " عُدّت مطبوعة مسبقاً ولن تُطبع. الطباعة تبدأ من الفواتير الجديدة بعد هذه اللحظة."
     );
+    if (adopted.length) {
+      // السرد الكامل مقصود: هو ما يمنع الفقدان الصامت. إن كانت فيها فاتورة لم
+      // تُطبع فعلاً (توقّفت النسخة القديمة قبل النشر) فهي هنا بالاسم والتاريخ.
+      console.log(
+        "   للتحقّق من الأمين وطباعة أي ناقص يدوياً — القائمة الكاملة: "
+        + adopted.map((e) => e.label).join("، ")
+      );
+    }
     return;
   }
 
@@ -873,12 +716,6 @@ async function poll(pool, state, hooks = {}) {
     // إن سقطت الطابعة أثناء الدورة نتوقف فوراً: الفاتورة تبقى غير مطبوعة وغير
     // مُعلَّمة في state، فتُلتقط كما هي في أول دورة بعد عودة الطابعة (dedup بلا تغيير).
     if (!printerGate.ready()) { fullyProcessed = false; break; }
-    // فُقد القفل وسط الدفعة: لا نطبع الباقي من حالة ذاكرة قديمة بينما نسخة
-    // أخرى صارت المالكة. الفواتير التي طُبعت قبل الكشف تُحفظ أدناه.
-    if (typeof hooks.isLost === "function" && hooks.isLost()) {
-      fullyProcessed = false;
-      break;
-    }
     try {
       // رصيد الزبون الحقيقي (Ameen) — عبر AccountGUID فقط، لا اسم الزبون.
       // إن تعذّر العثور عليه، تبقى customerBalance فارغة ولا يُطبع أي رقم رصيد.
@@ -891,9 +728,6 @@ async function poll(pool, state, hooks = {}) {
       await printInvoice(inv);
       state.printedGuids[inv.guid] = Date.now();
       changed = true;
-      // نبضة داخل الحلقة: دفعة طويلة لا يجوز أن تُبيت القفل فتسمح لنسخة أخرى
-      // بالاستيلاء عليه أثناء الطباعة.
-      if (typeof hooks.beat === "function") hooks.beat();
     } catch (printErr) {
       // تسجيل الخطأ بدون إيقاف البرنامج، لإعادة المحاولة في الدورة التالية.
       // وفاتورة لم تُطبع تعني أن اليوم لم يُنجَز، فلا تتقدّم علامة الفحص فوقها.
@@ -932,6 +766,7 @@ async function main() {
   // القفل قبل أي شيء آخر: لا فحص طابعة ولا اتصال SQL ولا طباعة إن كانت نسخة
   // أخرى تعمل. ويُحرَّر في كل مسارات الخروج كي لا يبقى قفل متروك.
   const lock = await acquireSingleInstanceLock();
+  console.log(`  قفل   →  منفذ ${lock.port} محجوز (نسخة واحدة فقط)`);
   process.on("exit", () => lock.release());
   for (const sig of ["SIGINT", "SIGTERM", "SIGHUP", "SIGBREAK"]) {
     process.on(sig, () => { lock.release(); process.exit(0); });
@@ -956,29 +791,21 @@ async function main() {
   }
   console.log("══════════════════════════════════════════════\n");
 
-  // الاتصال بـSQL Server مع إعادة محاولة. النبضة أثناء الانتظار إلزامية:
-  // الحلقة قد تدوم أكثر من LOCK_STALE_MS إن كان الخادم متوقفاً، فبدون نبضة
-  // تستولي نسخة أخرى (start.bat أو إعادة تشغيل المهمة) على القفل، وبعد عودة
-  // SQL تعمل النسختان معاً وقد تدهس الأولى قفل الثانية عند نبضتها التالية.
+  // الاتصال بـSQL Server مع إعادة محاولة. لا نبضة ولا إبقاء حيّ: الحجز مملوك
+  // للنظام، فطول انتظار SQL لا يُبيته ولا يسمح لنسخة أخرى بانتزاعه.
   const sqlCfg = parseSqlConnStr(config.sqlConnectionString);
   let pool;
-  const keepLockAlive = setInterval(() => lock.beat(), LOCK_BEAT_MIN_INTERVAL_MS);
-  try {
-    for (;;) {
-      try {
-        process.stdout.write("الاتصال بـSQL Server... ");
-        pool = await new sql.ConnectionPool(sqlCfg).connect();
-        console.log("ناجح ✓\n");
-        break;
-      } catch (err) {
-        console.error(`فشل: ${err.message}\nإعادة المحاولة بعد 15 ثانية...`);
-        lock.beat();
-        await new Promise((r) => setTimeout(r, 15_000));
-      }
+  // لا نبضة ولا إبقاء حيّ: الحجز مملوك للنظام، فطول انتظار SQL لا يُبيته.
+  for (;;) {
+    try {
+      process.stdout.write("الاتصال بـSQL Server... ");
+      pool = await new sql.ConnectionPool(sqlCfg).connect();
+      console.log("ناجح ✓\n");
+      break;
+    } catch (err) {
+      console.error(`فشل: ${err.message}\nإعادة المحاولة بعد 15 ثانية...`);
+      await new Promise((r) => setTimeout(r, 15_000));
     }
-  } finally {
-    clearInterval(keepLockAlive);
-    lock.beat();
   }
 
   // تهيئة الحالة — أول تشغيل: لا تُطبع فواتير اليوم السابقة
@@ -1017,19 +844,11 @@ async function main() {
 
   // حلقة الاستعلام الرئيسية
   for (;;) {
-    // فُقد القفل ⇒ نسخة أخرى تعمل الآن. المضي يعني نسختين تطبعان نفس الفواتير،
-    // فالخروج هو السلوك الآمن الوحيد.
-    if (lock.isLost()) {
-      throw lockHeldError(
-        "رفض قاطع: فُقدت ملكية القفل — نسخة أخرى من المراقب استولت عليه."
-        + " تتوقّف هذه النسخة فوراً كي لا تُطبع الفواتير مرتين."
-      );
-    }
     // fail-closed: لا استعلام ولا طباعة إطلاقاً ما لم تكن الطابعة جاهزة الآن.
     // الاستدعاء خارج try عمداً: خطأ الإعداد الدائم يجب أن ينهي العملية لا أن يُبتلع.
     if (printerGate.ready()) {
       try {
-        await poll(pool, state, { beat: () => lock.beat(), isLost: () => lock.isLost() });
+        await poll(pool, state);
       } catch (err) {
         if (err && (err.fatalPrinterConfig || err.fatalPersist)) throw err;
         console.error(`خطأ: ${describeError(err)}`);
@@ -1045,7 +864,6 @@ async function main() {
         }
       }
     }
-    lock.beat();
     await new Promise((r) => setTimeout(r, config.pollIntervalMs));
   }
 }

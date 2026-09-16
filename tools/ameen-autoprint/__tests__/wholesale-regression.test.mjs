@@ -490,7 +490,7 @@ console.log("\n== wholesale-regression: poll() — فشل استعلام رصي�
 // poll() وgroupIntoInvoices تُستخرجان من المصدر الفعلي وتُشغَّلان بمعزل —
 // بحقن pool/config/printerGate/getCustomerBalance/printInvoice/pruneOldGuids/
 // saveState وهمية. لا SQL حقيقي ولا Puppeteer ولا طباعة فعلية.
-const pollSrc = extractFunctionSource(watcherSrc, "async function poll(pool, state, hooks");
+const pollSrc = extractFunctionSource(watcherSrc, "async function poll(pool, state)");
 const groupIntoInvoicesSrc = extractFunctionSource(watcherSrc, "function groupIntoInvoices(rows)");
 
 function makePoll({ getCustomerBalance: gcb, printInvoice: pi }) {
@@ -675,16 +675,13 @@ function makeWindowHarness(gate, extras = {}) {
     `const PRINTED_RETENTION_DAYS = ${PRINTED_RETENTION_DAYS};`,
     "const STATE_SCHEMA_VERSION = 2;",
     `const WINDOW_SAFETY_MARGIN_DAYS = ${readConst("WINDOW_SAFETY_MARGIN_DAYS")};`,
-    `const LEGACY_RETENTION_DAYS = ${readConst("LEGACY_RETENTION_DAYS")};`,
-    extractFunctionSource(watcherSrc, "function migrationAdoptCutoff(state, nowMs"),
-    extractFunctionSource(watcherSrc, "function legacyWasActiveOn(state, cutoff)"),
     "const DAY_MS = 24 * 60 * 60 * 1000;",
     localDateStrSrc,
     advanceSrc,
     pruneSrc,
     groupIntoInvoicesSrc,
     pollSrc,
-    "return { poll, advanceWatchFromDate, localDateStr, migrationAdoptCutoff };",
+    "return { poll, advanceWatchFromDate, localDateStr };",
   ].join("\n");
   const api = new Function(
     "sql", "config", "SALES_QUERY", "printerGate",
@@ -699,7 +696,7 @@ function makeWindowHarness(gate, extras = {}) {
     async (inv) => { printed.push(inv.number); },
     persistState,
     FakeDate,
-    { log() {}, error() {} },
+    { log: extras.log || (() => {}), error: extras.error || (() => {}) },
   );
   return { ...api, printed };
 }
@@ -1057,512 +1054,44 @@ await test("انقطاع يتجاوز أقصى نافذة آمنة: يُقصّ �
     "لا تحذير مطبوع عند التخلّي عن أيام");
 });
 
-await test("الترحيل لا يتبنّى فواتير فجوة النشر (ملاحظة Codex P1)", async () => {
-  // النسخة القديمة توقّفت يوم 09-13، وأُدخلت فواتير يومي 14 و15 قبل تشغيل
-  // النسخة الجديدة. تبنّيها يعني فقدانها نهائياً — يجب أن تُطبع.
-  const { poll, printed } = makeWindowHarness();
+await test("الترحيل: صفر طباعة، وكل فاتورة بلا علامة تُعَدّ مطبوعة مسبقاً", async () => {
+  // بلا تخمين: لا يمكن بنيوياً تمييز «طُبعت وحُذفت علامتها» من «لم تُطبع» —
+  // فالضمانة هي صفر إعادة طباعة، والحماية من الفقدان هي السرد الصريح.
+  const logged = [];
+  const { poll, printed } = makeWindowHarness(undefined, { log: (m) => logged.push(m) });
   NOW = Date.parse("2026-09-16T09:00:00Z");
   const ledger = [];
-  let seq = 300;
+  let seq = 700;
   for (let d = 9; d <= 16; d++) {
     const ds = `2026-09-${String(d).padStart(2, "0")}`;
-    ledger.push(fakeSalesRow({ invoice_guid: `G-${seq}`, invoice_number: String(seq), invoice_date: ds }));
+    ledger.push(fakeSalesRow({ invoice_guid: `A-${seq}`, invoice_number: String(seq), invoice_date: ds }));
     seq++;
   }
-  // علامات حتى 09-13 فقط (آخر ما طبعته النسخة القديمة)، ولا شيء بعده
   const state = {
-    watchFromDate: "2026-03-01",
-    schemaVersion: 2,
-    adoptBaseline: true,
-    processedThrough: "2026-09-13",
+    watchFromDate: "2026-03-01", schemaVersion: 2, adoptBaseline: true,
     printedGuids: Object.fromEntries(
-      ledger.filter((r) => r.invoice_date >= "2026-09-10" && r.invoice_date <= "2026-09-13")
+      ledger.filter((r) => r.invoice_date >= "2026-09-12")
         .map((r) => [r.invoice_guid, Date.parse(`${r.invoice_date}T12:00:00Z`)])
     ),
   };
 
   await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
   assert.equal(printed.length, 0, "دورة الترحيل طبعت ورقاً");
-
-  // 09-09 أقدم من خطّ الأساس (09-13) ⇒ تُتبنّى؛ و14/15/16 لا تُتبنّى
-  const guidOf = (d) => ledger.find((r) => r.invoice_date === `2026-09-${d}`).invoice_guid;
-  assert.ok(state.printedGuids[guidOf("09")], "لم تُتبنَّ فاتورة 09-09 القديمة");
-  for (const d of ["14", "15", "16"]) {
-    assert.ok(!state.printedGuids[guidOf(d)],
-      `تُبنّيت فاتورة ${d} أيلول من فجوة النشر — ستُفقد نهائياً`);
+  for (const r of ledger) {
+    assert.ok(state.printedGuids[r.invoice_guid], `بقيت الفاتورة ${r.invoice_number} بلا علامة`);
   }
+  assert.ok(!state.adoptBaseline, "لم تُستهلك راية الترحيل");
 
-  // الدورة التالية تطبع فواتير الفجوة وحدها
-  await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
-  assert.deepEqual(printed.sort(), ["305", "306", "307"].sort(),
-    "فواتير فجوة النشر لم تُطبع بعد الترحيل");
-});
-
-await test("فشل حفظ الترحيل يُبقي الراية ولا يطبع فجوة النشر (ملاحظة Codex P1)", async () => {
-  // إن رُفعت الراية بعد تبنٍّ نجح في الذاكرة وفشل على القرص، الدورة التالية
-  // تطبع فجوة النشر، ثم إعادة التشغيل تعيد الترحيل فتُطبع مرة ثانية.
-  let persistOk = false;
-  const { poll, printed } = makeWindowHarness(undefined, { persistState: () => persistOk });
-  NOW = Date.parse("2026-09-16T09:00:00Z");
-  const ledger = [];
-  let seq = 400;
-  for (let d = 9; d <= 16; d++) {
-    const ds = `2026-09-${String(d).padStart(2, "0")}`;
-    ledger.push(fakeSalesRow({ invoice_guid: `P-${seq}`, invoice_number: String(seq), invoice_date: ds }));
-    seq++;
+  // والسرد الصريح هو ما يمنع الفقدان الصامت: أرقام وتواريخ الفواتير المتبنّاة.
+  const listing = logged.join("\n");
+  for (const d of ["09", "10", "11"]) {
+    assert.ok(listing.includes(`(2026-09-${d})`),
+      `فاتورة ${d} أيلول تُبنّيت بلا سرد صريح — فقدان صامت`);
   }
-  const state = {
-    watchFromDate: "2026-03-01",
-    schemaVersion: 2,
-    adoptBaseline: true,
-    processedThrough: "2026-09-13",
-    printedGuids: Object.fromEntries(
-      ledger.filter((r) => r.invoice_date >= "2026-09-10" && r.invoice_date <= "2026-09-13")
-        .map((r) => [r.invoice_guid, Date.parse(`${r.invoice_date}T12:00:00Z`)])
-    ),
-  };
-  const guidOf = (d) => ledger.find((r) => r.invoice_date === `2026-09-${d}`).invoice_guid;
-
-  await assert.rejects(
-    () => poll(fakePollPool(rowsVisibleTo(ledger, state)), state),
-    (err) => err && err.fatalPersist && /رفض قاطع/.test(err.message),
-  );
-  assert.equal(printed.length, 0, "طُبع ورق بعد فشل حفظ الترحيل");
-  assert.ok(state.adoptBaseline, "رُفعت راية الترحيل رغم فشل الحفظ — الدورة التالية ستطبع فجوة النشر");
-  for (const d of ["14", "15", "16"]) {
-    assert.ok(!state.printedGuids[guidOf(d)],
-      `تُبنّيت أو طُبعت فاتورة ${d} أيلول رغم أن الترحيل لم يُحفظ`);
-  }
-
-  persistOk = true;
-  await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
-  assert.equal(printed.length, 0, "دورة الترحيل بعد نجاح الحفظ طبعت ورقاً");
-  assert.ok(!state.adoptBaseline, "لم تُستهلك الراية بعد نجاح الحفظ");
-
-  await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
-  assert.deepEqual(printed.sort(), ["405", "406", "407"].sort(),
-    "فواتير فجوة النشر لم تُطبع مرة واحدة بعد ترحيل محفوظ");
+  assert.ok(/القائمة الكاملة/.test(listing), "لا تعليمة تحقّق في السجل");
 });
 
-await test("watcher.js: فشل حفظ الترحيل مُجهِض ولا يُبتلع في حلقة الاستعلام", () => {
-  const pollAdopt = extractFunctionSource(watcherSrc, "async function poll(pool, state, hooks");
-  assert.ok(/fatalPersist/.test(pollAdopt), "دورة الترحيل لا تعلّم فشل الحفظ كقاطع");
-  assert.ok(/state\.adoptBaseline = true/.test(pollAdopt),
-    "فشل الحفظ لا يعيد الراية — الذاكرة تمضي بلا ترحيل");
-  assert.ok(/adoptedGuids/.test(pollAdopt),
-    "فشل الحفظ لا يلغي التبنّي في الذاكرة — يرفع خط الأساس فيلوّث فجوة النشر");
-  const mainSrc = extractFunctionSource(watcherSrc, "async function main()");
-  assert.ok(/err\.fatalPersist/.test(mainSrc),
-    "فشل حفظ الترحيل يُبتلع داخل حلقة الاستعلام فيُطبع بعده");
-});
-
-await test("الترحيل لا يتبنّى فاتورة أقدم فشلت بعد نجاح أحدث (ملاحظة Codex P1)", async () => {
-  // أختام printedGuids هي Date.now() لحظة النجاح لا تاريخ الفاتورة. فاتورة
-  // 09-10 فشلت ثم نجحت 09-13: أحدث ختم = 09-13، والتبنّي بذلك الختم كان
-  // سيتبنّى الفاشلة. العلامة المائية المتجاورة (processedThrough) بقيت 09-09.
-  const { poll, printed, migrationAdoptCutoff } = makeWindowHarness();
-  NOW = Date.parse("2026-09-16T09:00:00Z");
-  const failed = fakeSalesRow({
-    invoice_guid: "fail-10", invoice_number: "410", invoice_date: "2026-09-10",
-  });
-  const laterOk = fakeSalesRow({
-    invoice_guid: "ok-13", invoice_number: "413", invoice_date: "2026-09-13",
-  });
-  const state = {
-    watchFromDate: "2026-09-09",
-    schemaVersion: 2,
-    adoptBaseline: true,
-    processedThrough: "2026-09-09",
-    printedGuids: { "ok-13": Date.parse("2026-09-13T18:00:00Z") },
-  };
-  assert.equal(migrationAdoptCutoff(state, NOW), "2026-09-09",
-    "الحدّ أُخذ من أحدث ختم لا من processedThrough");
-  const ledger = [failed, laterOk];
-  await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
-  assert.equal(printed.length, 0, "دورة الترحيل طبعت ورقاً");
-  assert.ok(!state.printedGuids["fail-10"],
-    "تُبنّيت الفاتورة الفاشلة لأن أحدث ختم رفع الخط فوقها");
-
-  await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
-  assert.deepEqual(printed, ["410"], "الفاتورة الفاشلة لم تُطبع بعد الترحيل");
-});
-
-await test("ترحيل schema-v1 بلا processedThrough يتبنّى العلامات المحذوفة لا حدّ اللحاق (ملاحظة Codex P1)", async () => {
-  // ملف حالة حقيقي من النسخة القديمة لا يحمل processedThrough. حدّ اللحاق يساوي
-  // watchFromDate بعد advanceWatchFromDate، فـ date < cutoff لا يصيب شيئاً من
-  // الاستعلام وتُطبع فواتير 09-09 من جديد — علّة الترحيل الأصلية.
-  const { poll, printed, migrationAdoptCutoff } = makeWindowHarness();
-  NOW = Date.parse("2026-09-16T09:00:00Z");
-  const ledger = [];
-  let seq = 200;
-  for (let d = 9; d <= 16; d++) {
-    const ds = `2026-09-${String(d).padStart(2, "0")}`;
-    ledger.push(fakeSalesRow({ invoice_guid: `V1-${seq}`, invoice_number: String(seq), invoice_date: ds }));
-    seq++;
-  }
-  const state = {
-    watchFromDate: "2026-03-01",
-    schemaVersion: 1,
-    adoptBaseline: true,
-    printedGuids: Object.fromEntries(
-      ledger.filter((r) => r.invoice_date >= "2026-09-10" && r.invoice_date <= "2026-09-13")
-        .map((r) => [r.invoice_guid, Date.parse(`${r.invoice_date}T12:00:00Z`)])
-    ),
-  };
-  assert.ok(!Object.hasOwn(state, "processedThrough"));
-  assert.equal(migrationAdoptCutoff(state, NOW), "2026-09-09",
-    "بلا processedThrough يجب أن يكون الحدّ يوم انتهاء صلاحية علامات النسخة القديمة");
-  const guidOf = (d) => ledger.find((r) => r.invoice_date === `2026-09-${d}`).invoice_guid;
-
-  await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
-  assert.equal(printed.length, 0, "دورة الترحيل طبعت ورقاً");
-  assert.ok(state.printedGuids[guidOf("09")], "لم تُتبنَّ فاتورة 09-09 المحذوفة علامتها");
-  for (const d of ["14", "15", "16"]) {
-    assert.ok(!state.printedGuids[guidOf(d)],
-      `تُبنّيت فاتورة ${d} أيلول من فجوة النشر`);
-  }
-});
-
-await test("watcher.js: فشل حفظ الحالة عند الإقلاع يمنع التشغيل (ملاحظة Codex P1)", () => {
-  const src = extractFunctionSource(watcherSrc, "function persistInitialStateOrAbort(state)");
-  assert.ok(/throw new Error/.test(src), "لا يُجهض الإقلاع عند فشل الحفظ الأول");
-  assert.ok(/ستُعيد طباعة الفواتير/.test(src), "الرسالة لا تشرح الأثر");
-  // ولا مسار إقلاع يستدعي persistState مباشرة بدل النسخة المُجهِضة
-  const mainSrc = extractFunctionSource(watcherSrc, "async function main()");
-  assert.ok(!/persistState\(state\)/.test(mainSrc),
-    "مسار إقلاع ما زال يتجاهل نتيجة الحفظ");
-  assert.equal((mainSrc.match(/persistInitialStateOrAbort\(state\)/g) || []).length, 2,
-    "ليست كل كتابات الإقلاع مُجهِضة عند الفشل");
-
-  const persistInitialStateOrAbort = new Function("persistState", "config",
-    `${src}\nreturn persistInitialStateOrAbort;`)(() => false, { stateFilePath: "X" });
-  assert.throws(() => persistInitialStateOrAbort({}), /رفض قاطع/);
-});
-
-console.log("\n== wholesale-regression: قفل النسخة الواحدة — منع الطباعة المزدوجة ==");
-
-// نسختان على نفس ملف الحالة = طباعة مزدوجة مضمونة: كل نسخة تُحمّل الحالة مرة
-// واحدة ثم تكتب الكائن كاملاً، فكتابة الثانية تدهس علامات الأولى (lost update).
-// المستودع يوفّر مسارَي تشغيل على نفس الملف (المهمة المجدولة وstart.bat)،
-// فالسيناريو واقعي لا نظري. الكتابة الذرّية لا تحمي منه: تمنع الملف المبتور
-// لا الدهس.
-
-import osMod from "node:os";
-
-const lockSrcs = [
-  `const LOCK_BEAT_MIN_INTERVAL_MS = ${readConst("LOCK_BEAT_MIN_INTERVAL_MS")};`,
-  `const LOCK_STALE_MS = ${readConst("LOCK_STALE_MS")};`,
-  `const LOCK_UNREADABLE_RETRIES = ${readConst("LOCK_UNREADABLE_RETRIES")};`,
-  `const LOCK_UNREADABLE_DELAY_MS = ${readConst("LOCK_UNREADABLE_DELAY_MS")};`,
-  extractFunctionSource(watcherSrc, "function lockHeldError(message)"),
-  extractFunctionSource(watcherSrc, "function processAlive(pid)"),
-  extractFunctionSource(watcherSrc, "function lockFilePath()"),
-  extractFunctionSource(watcherSrc, "function lockPayload(startedAtMs, beatMs)"),
-  extractFunctionSource(watcherSrc, "function publishLockExclusive(lockPath, content)"),
-  extractFunctionSource(watcherSrc, "function writeLockAtomic(lockPath, content)"),
-  extractFunctionSource(watcherSrc, "function readLockJson(lockPath)"),
-  extractFunctionSource(watcherSrc, "function lockOwnedByUs(cur, startedAtMs)"),
-  extractFunctionSource(watcherSrc, "function replaceLockIfOwner(lockPath, startedAtMs, content"),
-  extractFunctionSource(watcherSrc, "function makeLockHandle(lockPath, startedAtMs, deps"),
-  extractFunctionSource(watcherSrc, "async function acquireSingleInstanceLock(nowMs"),
-].join("\n");
-
-function makeLockApi(stateFilePath, fakePid) {
-  const proc = { pid: fakePid, kill: (pid, sig) => process.kill(pid, sig) };
-  return new Function(
-    "fs", "os", "config", "process",
-    `${lockSrcs}\nreturn { acquireSingleInstanceLock, processAlive };`
-  )(fs, osMod, { stateFilePath }, proc);
-}
-
-function tmpStatePath(tag) {
-  return path.join(osMod.tmpdir(), `ozk-lock-test-${tag}-${process.pid}-${Math.random().toString(36).slice(2)}.json`);
-}
-
-// لا انتظار حقيقي في الاختبارات: wait يُستبدل بدالة فورية.
-const noWait = { wait: async () => {}, log: { warn() {}, log() {} } };
-
-await test("القفل: نسخة واحدة تحصل عليه وتكتب PID ونبضة", async () => {
-  const sp = tmpStatePath("single");
-  const lock = await makeLockApi(sp, process.pid).acquireSingleInstanceLock(Date.now(), noWait);
-  try {
-    const written = JSON.parse(fs.readFileSync(lock.path, "utf8"));
-    assert.equal(Number(written.pid), process.pid);
-    assert.ok(Number(written.heartbeatAt) > 0, "لا نبضة مسجَّلة");
-  } finally { lock.release(); }
-  assert.ok(!fs.existsSync(lock.path), "لم يُحرَّر القفل عند release");
-});
-
-await test("القفل: نسخة حيّة ونبضتها طازجة ⇒ الثانية ترفض الإقلاع (fatalLockHeld)", async () => {
-  const sp = tmpStatePath("double");
-  const first = await makeLockApi(sp, process.pid).acquireSingleInstanceLock(Date.now(), noWait);
-  try {
-    const second = makeLockApi(sp, process.pid + 100000);
-    await assert.rejects(
-      () => second.acquireSingleInstanceLock(Date.now(), noWait),
-      (err) => {
-        assert.equal(err.fatalLockHeld, true, "لم تُعلَّم fatalLockHeld");
-        assert.ok(/طباعة الفاتورة مرتين/.test(err.message), "الرسالة لا تشرح الخطر");
-        return true;
-      }
-    );
-  } finally { first.release(); }
-});
-
-await test("القفل: عملية ميتة ⇒ يُستولى عليه (لا تعطيل دائم بعد انقطاع كهرباء)", async () => {
-  const sp = tmpStatePath("dead");
-  const lockPath = `${sp}.lock`;
-  fs.writeFileSync(lockPath, JSON.stringify({ pid: 999999, heartbeatAt: Date.now() }), "utf8");
-  const lock = await makeLockApi(sp, process.pid).acquireSingleInstanceLock(Date.now(), noWait);
-  try {
-    assert.equal(Number(JSON.parse(fs.readFileSync(lockPath, "utf8")).pid), process.pid,
-      "لم يُستولَ على قفل عملية ميتة");
-  } finally { lock.release(); }
-});
-
-await test("القفل: PID أُعيد استخدامه (حيّ لكن نبضته بائتة) ⇒ يُستولى عليه لا يُعطّل الطباعة للأبد", async () => {
-  // ملاحظة Codex P1: بعد إيقاف غير نظيف قد يُعيد Windows استخدام رقم العملية
-  // لبرنامج آخر. اعتبار ذلك «نسخة عاملة» يترك الطباعة معطّلة حتى تدخّل يدوي،
-  // لأن المهمة ONSTART بلا سياسة إعادة محاولة.
-  const sp = tmpStatePath("reused");
-  const lockPath = `${sp}.lock`;
-  const staleMs = readConst("LOCK_STALE_MS");
-  // PID حيّ فعلاً (عملية الاختبار) لكن نبضته أقدم من حدّ البيات
-  fs.writeFileSync(lockPath, JSON.stringify({
-    pid: process.pid, heartbeatAt: Date.now() - staleMs - 60_000,
-  }), "utf8");
-  const lock = await makeLockApi(sp, process.pid + 100002).acquireSingleInstanceLock(Date.now(), noWait);
-  try {
-    assert.equal(Number(JSON.parse(fs.readFileSync(lockPath, "utf8")).pid), process.pid + 100002,
-      "لم يُستولَ على قفل نبضته بائتة — الطباعة تبقى معطّلة بلا تدخّل يدوي");
-  } finally { lock.release(); }
-});
-
-await test("القفل: ملف غير قابل للقراءة يُعامَل كمحجوز ولا يُحذف فوراً", async () => {
-  // ملاحظة Codex P1: حذفه فوراً هو بالضبط ما يجعل نسختين تعملان معاً، لأن
-  // النسخة الأخرى قد تكون في منتصف نشره.
-  const sp = tmpStatePath("garbage");
-  const lockPath = `${sp}.lock`;
-  fs.writeFileSync(lockPath, "", "utf8");   // فارغ = نصف منشور
-  const api = makeLockApi(sp, process.pid);
-  let waits = 0;
-  await assert.rejects(
-    () => api.acquireSingleInstanceLock(Date.now(), { wait: async () => { waits++; }, log: { warn() {} } }),
-    (err) => {
-      assert.equal(err.fatalLockHeld, true, "لم يُعامَل كمحجوز");
-      assert.ok(/غير قابل للقراءة/.test(err.message));
-      return true;
-    }
-  );
-  assert.ok(waits >= 1, "لم يُعَد الفحص قبل الحكم");
-  assert.ok(fs.existsSync(lockPath), "حُذف قفل قد تكون نسخة أخرى في منتصف نشره");
-  fs.unlinkSync(lockPath);
-});
-
-await test("القفل: نسخة مرفوضة لا تحذف قفل النسخة العاملة", async () => {
-  const sp = tmpStatePath("nosteal");
-  const first = await makeLockApi(sp, process.pid).acquireSingleInstanceLock(Date.now(), noWait);
-  try {
-    const second = makeLockApi(sp, process.pid + 100001);
-    try { await second.acquireSingleInstanceLock(Date.now(), noWait); } catch { /* مرفوضة */ }
-    assert.ok(fs.existsSync(first.path), "حُذف قفل النسخة العاملة");
-    assert.equal(Number(JSON.parse(fs.readFileSync(first.path, "utf8")).pid), process.pid);
-  } finally { first.release(); }
-});
-
-await test("processAlive: EPERM (عملية بمستخدم آخر مثل SYSTEM) تُعدّ موجودة لا غائبة", () => {
-  const src = extractFunctionSource(watcherSrc, "function processAlive(pid)");
-  assert.ok(/EPERM/.test(src),
-    "EPERM غير معالَج — نسخة تعمل كـSYSTEM ستُعدّ ميتة فيُستولى على قفلها وتُطبع الفواتير مرتين");
-  const api = makeLockApi(tmpStatePath("alive"), process.pid);
-  assert.equal(api.processAlive(process.pid), true);
-  assert.equal(api.processAlive(999999), false);
-});
-
-await test("القفل: النشر ذرّي بمحتواه (linkSync) لا إنشاء فارغ ثم كتابة", () => {
-  // ملاحظة Codex P1: openSync("wx") ينشر ملفاً فارغاً أولاً، فنسخة تقرؤه في
-  // تلك اللحظة تراه تالفاً فتحذفه — فتعمل النسختان معاً.
-  const pub = extractFunctionSource(watcherSrc, "function publishLockExclusive(lockPath, content)");
-  assert.ok(/linkSync/.test(pub), "النشر ليس ذرّياً بمحتواه");
-  // تُجرَّد تعليقات السطر أولاً: الشرح نفسه يذكر openSync("wx") كسبب الرفض،
-  // فالمطابقة على النص الخام تصطاد التعليق لا الكود.
-  const codeOnly = watcherSrc.replace(/^\s*\/\/.*$/gm, "");
-  assert.ok(!/openSync\([^)]*"wx"\)/.test(codeOnly),
-    'ما زال يُستعمل openSync("wx") الذي ينشر ملفاً فارغاً قبل محتواه');
-  const beatSrc = extractFunctionSource(watcherSrc, "function writeLockAtomic(lockPath, content)");
-  assert.ok(/renameSync/.test(beatSrc), "النبضة ليست إبدالاً ذرّياً — تفتح نفس الثغرة كل 30 ثانية");
-});
-
-await test("القفل: نبضة مخنوقة بفاصل أدنى (لا كتابة ملف كل 5 ثوانٍ بلا داعٍ)", async () => {
-  const sp = tmpStatePath("beat");
-  const lock = await makeLockApi(sp, process.pid).acquireSingleInstanceLock(1_000_000, noWait);
-  try {
-    const first = JSON.parse(fs.readFileSync(lock.path, "utf8")).heartbeatAt;
-    lock.beat(1_000_100);
-    assert.equal(JSON.parse(fs.readFileSync(lock.path, "utf8")).heartbeatAt, first,
-      "النبضة كُتبت رغم أن الفاصل أقل من الحد الأدنى");
-    lock.beat(1_000_000 + readConst("LOCK_BEAT_MIN_INTERVAL_MS") + 1000);
-    assert.notEqual(JSON.parse(fs.readFileSync(lock.path, "utf8")).heartbeatAt, first,
-      "النبضة لم تُكتب بعد انقضاء الفاصل");
-  } finally { lock.release(); }
-});
-
-await test("watcher.js: القفل يُستحوذ قبل فحص الطابعة والاتصال بـSQL، وينبض كل دورة", () => {
-  assert.ok(/assertDedupWindowInvariant\(\);[\s\S]{0,400}?acquireSingleInstanceLock\(\)/.test(watcherSrc),
-    "القفل لا يُستحوذ مبكراً عند الإقلاع");
-  const lockIdx = watcherSrc.indexOf("acquireSingleInstanceLock()");
-  const sqlIdx = watcherSrc.indexOf("new sql.ConnectionPool(sqlCfg).connect()");
-  assert.ok(lockIdx > 0 && lockIdx < sqlIdx, "القفل يُستحوذ بعد الاتصال بـSQL لا قبله");
-  assert.ok(/lock\.beat\(\);/.test(watcherSrc), "لا نبضة داخل الحلقة الرئيسية");
-  assert.ok(/process\.on\("exit", \(\) => lock\.release\(\)\)/.test(watcherSrc), "لا تحرير عند الخروج");
-});
-
-await test("watcher.js: القفل ينبض طوال إعادة محاولة اتصال SQL (ملاحظة Codex P1)", () => {
-  const mainSrc = extractFunctionSource(watcherSrc, "async function main()");
-  const sqlStart = mainSrc.indexOf("parseSqlConnStr");
-  const loadIdx = mainSrc.indexOf("loadState()");
-  assert.ok(sqlStart > 0 && loadIdx > sqlStart, "حلقة SQL لا تقع بين القفل وتحميل الحالة");
-  const sqlLoop = mainSrc.slice(sqlStart, loadIdx);
-  assert.ok(/setInterval\(\s*\(\)\s*=>\s*lock\.beat\(\)/.test(sqlLoop),
-    "لا مؤقّت نبض أثناء انتظار SQL — انقطاع عشر دقائق يُبيّت القفل");
-  assert.ok(/clearInterval\(keepLockAlive\)/.test(sqlLoop),
-    "مؤقّت النبض لا يُلغى بعد نجاح الاتصال");
-  assert.ok(/lock\.beat\(\)/.test(sqlLoop), "حلقة اتصال SQL لا تنبض القفل عند فشل المحاولة");
-});
-
-await test("watcher.js: fatalLockHeld يخرج برسالة مفهومة لا كـ'خطأ فادح' غامض", () => {
-  assert.ok(/err\.fatalLockHeld[\s\S]{0,200}process\.exit\(2\)/.test(watcherSrc),
-    "الخروج عند القفل المحجوز غير مميَّز");
-});
-
-await test("القفل: النبضة لا تدهس قفل مالك جديد وتُعلِن فقدان الملكية (النصف الثاني من ملاحظة Codex)", async () => {
-  // النبض أثناء انتظار SQL يمنع تبييت قفلنا، لكن الملاحظة لها نصف آخر: نسخة
-  // بات قفلها واستولت عليه أخرى كانت تدهسه بنبضتها التالية فتعملان معاً.
-  const sp = tmpStatePath("ownership");
-  const lock = await makeLockApi(sp, process.pid).acquireSingleInstanceLock(1_000_000, noWait);
-  assert.equal(lock.isLost(), false, "أُعلن الفقدان بلا سبب");
-
-  fs.writeFileSync(lock.path, JSON.stringify({ pid: process.pid + 7777, heartbeatAt: Date.now() }), "utf8");
-  lock.beat(1_000_000 + readConst("LOCK_BEAT_MIN_INTERVAL_MS") + 1000);
-
-  assert.equal(Number(JSON.parse(fs.readFileSync(lock.path, "utf8")).pid), process.pid + 7777,
-    "دهست النبضة قفل المالك الجديد");
-  assert.equal(lock.isLost(), true, "لم تُعلَن ملكية مفقودة، فستستمر هذه النسخة بالطباعة");
-  fs.unlinkSync(lock.path);
-});
-
-await test("القفل: ملف مفقود أثناء النبضة يُعدّ فقدان ملكية ولا يُعاد إنشاؤه", async () => {
-  const sp = tmpStatePath("vanished");
-  const lock = await makeLockApi(sp, process.pid).acquireSingleInstanceLock(1_000_000, noWait);
-  fs.unlinkSync(lock.path);
-  lock.beat(1_000_000 + readConst("LOCK_BEAT_MIN_INTERVAL_MS") + 1000);
-  assert.equal(lock.isLost(), true, "لم يُعَدّ الملف المفقود فقدانَ ملكية");
-  assert.ok(!fs.existsSync(lock.path), "أُعيد إنشاء قفل قد يكون مالكه غيرنا");
-});
-
-await test("القفل: النبضة لا تدهس مالكاً جديداً نُشر بين القراءة والكتابة (ملاحظة Codex P1)", async () => {
-  const sp = tmpStatePath("cas-beat");
-  const other = process.pid + 4242;
-  const lock = await makeLockApi(sp, process.pid).acquireSingleInstanceLock(1_000_000, {
-    ...noWait,
-    onBeforeLockReplace: () => {
-      fs.writeFileSync(lock.path, JSON.stringify({ pid: other, startedAt: "other", heartbeatAt: 9 }));
-    },
-  });
-  lock.beat(1_000_000 + readConst("LOCK_BEAT_MIN_INTERVAL_MS") + 1000);
-  assert.equal(Number(JSON.parse(fs.readFileSync(lock.path, "utf8")).pid), other,
-    "rename غير المشروط دهس قفل المالك الجديد");
-  assert.equal(lock.isLost(), true);
-  fs.unlinkSync(lock.path);
-});
-
-await test("القفل: الاستيلاء على قفل متروك لا يحذف مالكاً جديداً نُشر قبل الـunlink (ملاحظة Codex P1)", async () => {
-  const sp = tmpStatePath("cas-takeover");
-  const lockPath = `${sp}.lock`;
-  const staleMs = readConst("LOCK_STALE_MS");
-  fs.writeFileSync(lockPath, JSON.stringify({
-    pid: 999999, startedAt: "2020-01-01T00:00:00.000Z", heartbeatAt: Date.now() - staleMs - 1000,
-  }), "utf8");
-  await assert.rejects(
-    () => makeLockApi(sp, process.pid + 100004).acquireSingleInstanceLock(Date.now(), {
-      ...noWait,
-      onBeforeStaleUnlink: () => {
-        fs.writeFileSync(lockPath, JSON.stringify({
-          pid: process.pid, startedAt: "2026-09-16T00:00:00.000Z", heartbeatAt: Date.now(),
-        }), "utf8");
-      },
-    }),
-    (err) => err && err.fatalLockHeld,
-  );
-  assert.equal(Number(JSON.parse(fs.readFileSync(lockPath, "utf8")).pid), process.pid,
-    "الاستيلاء حذف قفل المالك الجديد");
-  fs.unlinkSync(lockPath);
-});
-
-await test("watcher.js: إبدال النبضة والاستيلاء يعيدان قراءة الملكية قبل الطفرة", () => {
-  const replaceSrc = extractFunctionSource(watcherSrc, "function replaceLockIfOwner(lockPath, startedAtMs, content");
-  assert.ok((replaceSrc.match(/readLockJson\(lockPath\)/g) || []).length >= 2,
-    "replaceLockIfOwner لا يعيد القراءة قبل الإبدال");
-  const acquireSrc = extractFunctionSource(watcherSrc, "async function acquireSingleInstanceLock(nowMs");
-  const unlinkIdx = acquireSrc.indexOf("fs.unlinkSync(lockPath)");
-  const rereadIdx = acquireSrc.indexOf("readLockJson(lockPath)");
-  assert.ok(rereadIdx > 0 && rereadIdx < unlinkIdx,
-    "الاستيلاء يحذف بلا إعادة قراءة — يدهس مالكاً جديداً");
-});
-
-await test("watcher.js: الحلقة الرئيسية تُنهي العملية عند فقدان القفل قبل أي استعلام", () => {
-  const mainSrc = extractFunctionSource(watcherSrc, "async function main()");
-  assert.ok(/if \(lock\.isLost\(\)\)[\s\S]{0,300}throw lockHeldError/.test(mainSrc),
-    "الحلقة لا تُنهي العملية عند فقدان القفل");
-  const lostIdx = mainSrc.indexOf("lock.isLost()");
-  const pollIdx = mainSrc.indexOf("await poll(pool, state");
-  assert.ok(lostIdx > 0 && lostIdx < pollIdx, "فحص الفقدان لا يسبق الاستعلام");
-  assert.ok(/isLost:\s*\(\)\s*=>\s*lock\.isLost\(\)/.test(mainSrc),
-    "poll لا تتلقى فحص ملكية أثناء الدفعة");
-});
-
-await test("القفل: isLost يقرأ الملف ولا يعتمد على كاش النبضة (ملاحظة Codex P1)", async () => {
-  // نسخة وُقفت >10 دقائق: lost ما زال false إلى أن تُستدعَى beat(). إن دخلت
-  // poll قبل إعادة الفحص طُبع باقي الدفعة من حالة ذاكرة قديمة.
-  const sp = tmpStatePath("stale-cache");
-  const lock = await makeLockApi(sp, process.pid).acquireSingleInstanceLock(1_000_000, noWait);
-  assert.equal(lock.isLost(), false);
-  fs.writeFileSync(lock.path, JSON.stringify({ pid: process.pid + 8888, heartbeatAt: Date.now() }), "utf8");
-  assert.equal(lock.isLost(), true, "isLost لم يقرأ الملف — سيُدخل poll بملكية مفقودة");
-  assert.equal(Number(JSON.parse(fs.readFileSync(lock.path, "utf8")).pid), process.pid + 8888,
-    "قراءة الفقدان دهست قفل المالك الجديد");
-  fs.unlinkSync(lock.path);
-});
-
-await test("poll يتوقف عن الطباعة فور فقدان القفل وسط الدفعة (ملاحظة Codex P1)", async () => {
-  const { poll, printed } = makeWindowHarness();
-  NOW = Date.parse("2026-09-16T09:00:00Z");
-  const ledger = [1, 2, 3].map((n) => fakeSalesRow({
-    invoice_guid: `lost-${n}`, invoice_number: String(500 + n), invoice_date: "2026-09-16",
-  }));
-  const state = { watchFromDate: "2026-09-16", printedGuids: {} };
-  let seen = 0;
-  await poll(fakePollPool(ledger), state, {
-    isLost: () => { seen += 1; return seen > 1; },
-  });
-  assert.deepEqual(printed, ["501"],
-    `طُبع ${printed.join(",")} بعد فقدان القفل — يجب أن تتوقف الدفعة`);
-  assert.ok(!state.printedGuids["lost-2"] && !state.printedGuids["lost-3"],
-    "فواتير بعد فقدان القفل وُسمت كمطبوعة");
-});
-
-await test("watcher.js: poll يفحص isLost قبل كل فاتورة لا بعد النبضة فقط", () => {
-  const pollSrcNow = extractFunctionSource(watcherSrc, "async function poll(pool, state, hooks");
-  const lostIdx = pollSrcNow.indexOf("hooks.isLost");
-  const printIdx = pollSrcNow.indexOf("await printInvoice(inv)");
-  assert.ok(lostIdx > 0 && lostIdx < printIdx,
-    "فحص الملكية داخل poll يقع بعد الطباعة — باقي الدفعة يُطبع");
-});
-
-await test("حالة الجهاز الحقيقية 16 أيلول: فواتير 9 أيلول لا تُعاد طباعتها بعد الترحيل", async () => {
-  // يوم الحدّ ملتبس بنيوياً: النسخة القديمة تحذف العلامة بعد 7 أيام من **وقت
-  // الطباعة**، فداخل ذلك اليوم تنقضي علامات ما طُبع أوّلَه وتبقى علامات آخره.
-  // تركه بلا تبنٍّ يعني إعادة طباعة جزء منه عند كل نشر — وهو عين شكوى المستخدم.
+await test("حالة الجهاز الحقيقية 16 أيلول: صفر إعادة طباعة، والجديدة وحدها تُطبع", async () => {
   const { poll, printed } = makeWindowHarness();
   NOW = Date.parse("2026-09-16T09:00:00Z");
   const ledger = [];
@@ -1574,7 +1103,7 @@ await test("حالة الجهاز الحقيقية 16 أيلول: فواتير 9
       seq++;
     }
   }
-  // علامات 10→16 موجودة، وعلامات 9 أيلول حُذفت بحكم الاحتفاظ (وهي التي طُبعت اليوم)
+  // علامات 10→16 موجودة، وعلامات 9 أيلول حُذفت بحكم الاحتفاظ — وهي التي طُبعت اليوم
   const state = {
     watchFromDate: "2026-03-01", schemaVersion: 2, adoptBaseline: true,
     printedGuids: Object.fromEntries(
@@ -1584,44 +1113,168 @@ await test("حالة الجهاز الحقيقية 16 أيلول: فواتير 9
   };
 
   await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
-  assert.equal(printed.length, 0, "دورة الترحيل طبعت ورقاً");
   await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
   assert.equal(printed.length, 0,
-    `أُعيدت طباعة ${printed.length} فاتورة من 9 أيلول بعد الترحيل — نفس شكوى المستخدم`);
+    `أُعيدت طباعة ${printed.length} فاتورة من 9 أيلول — نفس شكوى المستخدم`);
+
+  NOW = Date.parse("2026-09-16T11:00:00Z");
+  ledger.push(fakeSalesRow({ invoice_guid: "R-NEW", invoice_number: "9999", invoice_date: "2026-09-16" }));
+  await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
+  assert.deepEqual(printed, ["9999"], "الفاتورة الجديدة وحدها يجب أن تُطبع");
 });
 
-await test("يوم الحدّ لا يُتبنّى بلا دليل موجب على نشاط النسخة القديمة فيه", async () => {
-  // الوجه الآخر: لا يجوز ابتلاع فواتير يومٍ لم تكن النسخة القديمة تعمل فيه.
-  const { poll, printed } = makeWindowHarness();
+await test("الترحيل: فشل الحفظ يُبقي الراية، يُرجع التبنّيات، ولا يطبع شيئاً", async () => {
+  let persistOk = false;
+  const { poll, printed } = makeWindowHarness(undefined, { persistState: () => persistOk });
   NOW = Date.parse("2026-09-16T09:00:00Z");
   const ledger = [
-    fakeSalesRow({ invoice_guid: "N-1", invoice_number: "801", invoice_date: "2026-09-09" }),
+    fakeSalesRow({ invoice_guid: "P-1", invoice_number: "401", invoice_date: "2026-09-09" }),
+    fakeSalesRow({ invoice_guid: "P-2", invoice_number: "402", invoice_date: "2026-09-16" }),
   ];
-  // ولا علامة واحدة في يوم الحدّ أو بعده ⇒ لا دليل نشاط
-  const state = {
-    watchFromDate: "2026-03-01", schemaVersion: 2, adoptBaseline: true,
-    printedGuids: { "old": Date.parse("2026-09-01T12:00:00Z") },
-  };
+  const state = { watchFromDate: "2026-03-01", schemaVersion: 2, adoptBaseline: true, printedGuids: {} };
 
+  await assert.rejects(
+    () => poll(fakePollPool(rowsVisibleTo(ledger, state)), state),
+    (err) => Boolean(err && err.fatalPersist && /رفض قاطع/.test(err.message)),
+  );
+  assert.equal(printed.length, 0, "طُبع ورق بعد فشل حفظ الترحيل");
+  assert.ok(state.adoptBaseline, "رُفعت الراية رغم فشل الحفظ");
+  assert.ok(!state.printedGuids["P-1"] && !state.printedGuids["P-2"],
+    "بقيت تبنّيات في الذاكرة بلا مقابل على القرص");
+
+  persistOk = true;
   await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
-  assert.equal(printed.length, 0, "دورة الترحيل طبعت ورقاً");
-  assert.ok(!state.printedGuids["N-1"],
-    "تُبنّيت فاتورة يوم الحدّ بلا دليل أن النسخة القديمة كانت تعمل فيه — ستُفقد");
+  assert.equal(printed.length, 0, "دورة الترحيل الناجحة طبعت ورقاً");
+  assert.ok(!state.adoptBaseline, "لم تُستهلك الراية بعد نجاح الحفظ");
+
+  NOW = Date.parse("2026-09-16T11:00:00Z");
+  ledger.push(fakeSalesRow({ invoice_guid: "P-3", invoice_number: "403", invoice_date: "2026-09-16" }));
   await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
-  assert.deepEqual(printed, ["801"], "فاتورة يوم الحدّ بلا دليل نشاط لم تُطبع");
+  assert.deepEqual(printed, ["403"], "الفاتورة الجديدة بعد الترحيل لم تُطبع وحدها");
 });
 
-await test("watcher.js: الأختام دليل نشاط لا مصدر للحدّ", () => {
-  const cutoffSrc = extractFunctionSource(watcherSrc, "function migrationAdoptCutoff(state, nowMs");
-  assert.ok(!/Object\.values\(state\.printedGuids\)/.test(cutoffSrc),
-    "الحدّ يُستنتج من الأختام — يتبنّى الفاتورة الأقدم الفاشلة (ملاحظة Codex P1)");
-  assert.ok(/LEGACY_RETENTION_DAYS/.test(cutoffSrc),
-    "الحدّ لا يعتمد على احتفاظ النسخة القديمة");
-  assert.ok(!/WATCH_LOOKBACK_DAYS/.test(cutoffSrc),
-    "الحدّ مُسنَد إلى نافذة اللحاق — مفهوم مختلف يتساوى رقماً الآن فقط");
-  const activeSrc = extractFunctionSource(watcherSrc, "function legacyWasActiveOn(state, cutoff)");
-  assert.ok(/Object\.values\(state\.printedGuids\)/.test(activeSrc),
-    "دليل النشاط لا يُقرأ من الأختام");
+await test("watcher.js: فشل حفظ الترحيل مُجهِض ولا يُبتلع في حلقة الاستعلام", () => {
+  assert.ok(/err\.fatalPersist = true;/.test(watcherSrc), "لا علامة إجهاض على فشل حفظ الترحيل");
+  assert.ok(/fatalPrinterConfig \|\| err\.fatalPersist/.test(watcherSrc),
+    "حلقة الاستعلام تبتلع فشل حفظ الترحيل");
+});
+
+await test("watcher.js: لا تخمين في الترحيل — لا حدّ ولا دليل نشاط ولا أختام", () => {
+  assert.ok(!/migrationAdoptCutoff/.test(watcherSrc), "ما زالت دالة الحدّ موجودة");
+  assert.ok(!/legacyWasActiveOn/.test(watcherSrc), "ما زال دليل نشاط اليوم موجوداً");
+  assert.ok(!/LEGACY_RETENTION_DAYS/.test(watcherSrc), "ما زال ثابت احتفاظ النسخة القديمة موجوداً");
+  const pollSrcNow = extractFunctionSource(watcherSrc, "async function poll(pool, state)");
+  assert.ok(/القائمة الكاملة/.test(pollSrcNow), "لا سرد صريح للفواتير المتبنّاة");
+});
+
+console.log("\n== wholesale-regression: قفل النسخة الواحدة — مملوك لنظام التشغيل ==");
+
+// النسخة الملفّية (PID + نبضة + بيات) أنتجت خمس ملاحظات P1 متتابعة من أصل واحد:
+// ملف JSON لا يصلح mutex. الحجز على منفذ محلّي يملكه النظام: يضمن نسخة واحدة،
+// ويحرّره هو عند موت العملية — فلا PID ولا نبضة ولا قفل متروك ولا سباق.
+import netMod from "node:net";
+
+const socketLockSrcs = [
+  extractFunctionSource(watcherSrc, "function lockHeldError(message)"),
+  extractFunctionSource(watcherSrc, "function singleInstancePort()"),
+  extractFunctionSource(watcherSrc, "function acquireSingleInstanceLock()"),
+].join("\n");
+
+function makeSocketLockApi(port) {
+  return new Function("net", "config",
+    `${socketLockSrcs}\nreturn { acquireSingleInstanceLock, singleInstancePort };`
+  )(netMod, { singleInstancePort: port });
+}
+
+let testPortSeq = 49230;
+const nextTestPort = () => testPortSeq++;
+
+await test("القفل: نسخة واحدة تحجز المنفذ", async () => {
+  const port = nextTestPort();
+  const lock = await makeSocketLockApi(port).acquireSingleInstanceLock();
+  try {
+    assert.equal(lock.port, port);
+  } finally { lock.release(); }
+});
+
+await test("القفل: النسخة الثانية ترفض الإقلاع (fatalLockHeld) والمنفذ محجوز", async () => {
+  const port = nextTestPort();
+  const first = await makeSocketLockApi(port).acquireSingleInstanceLock();
+  try {
+    await assert.rejects(
+      () => makeSocketLockApi(port).acquireSingleInstanceLock(),
+      (err) => {
+        assert.equal(err.fatalLockHeld, true, "لم تُعلَّم fatalLockHeld");
+        assert.ok(/طباعة الفاتورة مرتين/.test(err.message), "الرسالة لا تشرح الخطر");
+        assert.ok(/singleInstancePort/.test(err.message), "الرسالة لا تذكر موضع التغيير");
+        return true;
+      }
+    );
+  } finally { first.release(); }
+});
+
+await test("القفل: النظام يحرّره عند الإغلاق فتُقلع نسخة تالية", async () => {
+  const port = nextTestPort();
+  const first = await makeSocketLockApi(port).acquireSingleInstanceLock();
+  first.release();
+  // لا قفل متروك ولا تنظيف يدوي — وهذا كل الفرق عن النسخة الملفّية
+  const second = await makeSocketLockApi(port).acquireSingleInstanceLock();
+  try {
+    assert.equal(second.port, port);
+  } finally { second.release(); }
+});
+
+await test("القفل: منفذ غير صالح في config.js يُرفض برسالة واضحة", async () => {
+  for (const bad of [0, 80, 70000, "abc", null]) {
+    await assert.rejects(
+      () => makeSocketLockApi(bad).acquireSingleInstanceLock(),
+      (err) => Boolean(err && /singleInstancePort/.test(err.message)),
+      `المنفذ غير الصالح ${bad} لم يُرفض`
+    );
+  }
+});
+
+await test("config.js: singleInstancePort مضبوط ومعقول", () => {
+  const m = configSrc.match(/singleInstancePort:\s*(\d+)/);
+  assert.ok(m, "singleInstancePort غير مضبوط في config.js");
+  const port = Number(m[1]);
+  assert.ok(port >= 1024 && port <= 65535, `منفذ غير صالح: ${port}`);
+});
+
+await test("watcher.js: لا بقايا من القفل الملفّي (PID/نبضة/بيات/استيلاء)", () => {
+  // إعادة أيٍّ منها تُعيد صنف السباقات الذي أُزيل بالكامل.
+  for (const gone of [
+    "lockFilePath", "lockPayload", "publishLockExclusive", "writeLockAtomic",
+    "makeLockHandle", "processAlive", "LOCK_STALE_MS", "LOCK_BEAT_MIN_INTERVAL_MS",
+    "LOCK_UNREADABLE_RETRIES", "lockOwnedByUs", "isLost", "stillOwned",
+  ]) {
+    assert.ok(!watcherSrc.includes(gone), `ما زال ${gone} موجوداً — بقايا القفل الملفّي`);
+  }
+  assert.ok(/require\("net"\)/.test(watcherSrc), "net غير مستورد");
+  assert.ok(/server\.listen\(port, "127\.0\.0\.1"\)/.test(watcherSrc),
+    "الحجز ليس على 127.0.0.1");
+  assert.ok(/server\.unref\(\)/.test(watcherSrc), "الحجز يمنع خروج العملية");
+});
+
+await test("watcher.js: القفل يُستحوذ قبل فحص الطابعة والاتصال بـSQL ويُحرَّر عند الخروج", () => {
+  const mainSrc = extractFunctionSource(watcherSrc, "async function main()");
+  const lockIdx = mainSrc.indexOf("await acquireSingleInstanceLock()");
+  const sqlIdx = mainSrc.indexOf("new sql.ConnectionPool(sqlCfg).connect()");
+  assert.ok(lockIdx > 0 && lockIdx < sqlIdx, "القفل يُستحوذ بعد الاتصال بـSQL لا قبله");
+  assert.ok(/process\.on\("exit", \(\) => lock\.release\(\)\)/.test(mainSrc), "لا تحرير عند الخروج");
+  assert.ok(/assertDedupWindowInvariant\(\);[\s\S]{0,400}?acquireSingleInstanceLock\(\)/.test(watcherSrc),
+    "القفل لا يُستحوذ مبكراً عند الإقلاع");
+});
+
+await test("watcher.js: poll لم يعد يحتاج نبضة ولا فحص ملكية (الحجز يكفي)", () => {
+  const pollSrcNow = extractFunctionSource(watcherSrc, "async function poll(pool, state)");
+  assert.ok(!/hooks/.test(pollSrcNow), "ما زال poll يتلقّى خطّافات قفل");
+  assert.ok(!/beat\(/.test(pollSrcNow), "ما زالت هناك نبضة داخل الدورة");
+});
+
+await test("watcher.js: fatalLockHeld يخرج برسالة مفهومة لا كـ'خطأ فادح' غامض", () => {
+  assert.ok(/err\.fatalLockHeld[\s\S]{0,200}process\.exit\(2\)/.test(watcherSrc),
+    "الخروج عند القفل المحجوز غير مميَّز");
 });
 
 console.log("\n== wholesale-regression: فشل حفظ الحالة — لا يمرّ صامتاً ==");
