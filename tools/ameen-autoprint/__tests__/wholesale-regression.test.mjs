@@ -655,11 +655,13 @@ class FakeDate extends Date {
   static now() { return NOW; }
 }
 
-function makeWindowHarness() {
+function makeWindowHarness(gate) {
   const printed = [];
+  const printerGate = gate || { ready: () => true };
   const body = [
     `const WATCH_LOOKBACK_DAYS = ${WATCH_LOOKBACK_DAYS};`,
     `const PRINTED_RETENTION_DAYS = ${PRINTED_RETENTION_DAYS};`,
+    "const STATE_SCHEMA_VERSION = 2;",
     "const DAY_MS = 24 * 60 * 60 * 1000;",
     localDateStrSrc,
     advanceSrc,
@@ -676,7 +678,7 @@ function makeWindowHarness() {
     { UniqueIdentifier: "u", NVarChar: "n" },
     { wholesaleTypeGuid: "wt-guid" },
     "-- test double --",
-    { ready: () => true },
+    printerGate,
     async () => ({ accountGuid: "G1", current: 100 }),
     async (inv) => { printed.push(inv.number); },
     () => true,
@@ -851,6 +853,137 @@ await test("loadState: ملف تالف ≠ أول تشغيل صامت (يُسج�
     "لا تحقّق من بنية الملف قبل قبوله");
 });
 
+await test("انقطاع الطابعة أياماً: الفواتير تُطبع عند العودة ولا تُسقط بصمت", async () => {
+  // نافذة ضيّقة (يومان) كانت تُسقط كل فاتورة تعطّلت الطابعة أكثر من يومين
+  // بعدها — تراجع عن السلوك القديم الذي كان يطبعها ولو متأخّرة. اللحاق أسبوع.
+  let printerUp = true;
+  const { poll, printed } = makeWindowHarness({ ready: () => printerUp });
+  const T0 = Date.parse("2026-01-01T09:00:00Z");
+  const state = { watchFromDate: "2026-01-01", printedGuids: {} };
+  const ledger = [];
+  let seq = 4000;
+  const addDay = (dayIdx) => {
+    NOW = T0 + dayIdx * DAY;
+    const dateStr = new Date(NOW).toISOString().slice(0, 10);
+    for (let k = 0; k < 3; k++) {
+      ledger.push(fakeSalesRow({ invoice_guid: `o-${seq}`, invoice_number: String(seq), invoice_date: dateStr }));
+      seq++;
+    }
+  };
+
+  addDay(0);
+  await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
+  assert.equal(printed.length, 3, "اليوم الطبيعي لم يُطبع كاملاً");
+
+  // الطابعة تسقط خمسة أيام والفواتير تتراكم
+  printerUp = false;
+  for (let d = 1; d <= 5; d++) {
+    addDay(d);
+    await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
+  }
+  assert.equal(printed.length, 3, "طُبع ورق أثناء تعطّل الطابعة");
+
+  // الطابعة تعود باليوم السادس
+  printerUp = true;
+  addDay(6);
+  await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
+
+  assert.equal(printed.length, ledger.length,
+    `فواتير سقطت بصمت: طُبعت ${printed.length} من ${ledger.length} بعد عودة الطابعة`);
+  const counts = {};
+  for (const n of printed) counts[n] = (counts[n] || 0) + 1;
+  assert.equal(Object.entries(counts).filter(([, c]) => c > 1).length, 0, "اللحاق أعاد طباعة فواتير");
+});
+
+await test("الثابتان: اللحاق أسبوع على الأقل كي يحتمل انقطاعاً واقعياً للطابعة", () => {
+  assert.ok(WATCH_LOOKBACK_DAYS >= 7,
+    `WATCH_LOOKBACK_DAYS = ${WATCH_LOOKBACK_DAYS} — أقل من أسبوع يُسقط فواتير بصمت بعد انقطاع`);
+});
+
+await test("ترحيل الحالة القديمة: دورة الترحيل لا تطبع ورقة واحدة وتتبنّى القائم", async () => {
+  // إعادة بناء حالة الجهاز الحقيقية يوم 2026-09-16 كما وصفها المستخدم:
+  // النسخة القديمة جمّدت النافذة على يوم التثبيت وحذفت علامات 09-09 (7 أيام)،
+  // فطُبعت فواتير 9 أيلول من جديد. لو فُتحت النافذة الجديدة (7 أيام) على حالة
+  // كهذه بلا ترحيل، لأعادت طباعتها دفعة أخيرة بعد النشر.
+  const { poll, printed } = makeWindowHarness();
+  NOW = Date.parse("2026-09-16T09:00:00Z");
+  const ledger = [];
+  let seq = 700;
+  for (let d = 9; d <= 16; d++) {
+    const dateStr = `2026-09-${String(d).padStart(2, "0")}`;
+    for (let k = 0; k < 4; k++) {
+      ledger.push(fakeSalesRow({ invoice_guid: `m-${seq}`, invoice_number: String(seq), invoice_date: dateStr }));
+      seq++;
+    }
+  }
+  // حالة قديمة: نافذة مجمّدة، وعلامات آخر 6 أيام فقط (09-09 مفقودة كما حدث فعلاً)
+  const state = {
+    watchFromDate: "2026-03-01",
+    printedGuids: Object.fromEntries(
+      ledger.filter((r) => r.invoice_date > "2026-09-09").map((r) => [r.invoice_guid, NOW - DAY])
+    ),
+  };
+  const missingBefore = ledger.filter((r) => !state.printedGuids[r.invoice_guid]).length;
+  assert.equal(missingBefore, 4, "تهيئة الاختبار: يجب أن تكون فواتير 09-09 وحدها بلا علامة");
+
+  // ما يفعله main() على حالة قديمة
+  state.schemaVersion = 2;
+  state.adoptBaseline = true;
+
+  await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
+  assert.equal(printed.length, 0,
+    `دورة الترحيل طبعت ${printed.length} ورقة — يجب أن تكون صفراً`);
+  assert.ok(!state.adoptBaseline, "لم تُستهلك راية الترحيل فستتكرّر كل دورة");
+  for (const r of ledger) {
+    assert.ok(state.printedGuids[r.invoice_guid], `لم تُتبنَّ الفاتورة ${r.invoice_number}`);
+  }
+
+  // دورة تالية: لا شيء يُطبع
+  await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
+  assert.equal(printed.length, 0, "طُبعت فواتير قديمة بعد الترحيل");
+
+  // فاتورة جديدة فعلاً ⇒ تُطبع وحدها
+  ledger.push(fakeSalesRow({ invoice_guid: "m-new", invoice_number: "9999", invoice_date: "2026-09-16" }));
+  await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
+  assert.deepEqual(printed, ["9999"], "الفاتورة الجديدة وحدها يجب أن تُطبع");
+});
+
+await test("بلا ترحيل، نفس الحالة كانت ستُعيد طباعة فواتير 9 أيلول (شاهد سالب)", async () => {
+  const { poll, printed } = makeWindowHarness();
+  NOW = Date.parse("2026-09-16T09:00:00Z");
+  const ledger = [];
+  let seq = 800;
+  for (let d = 9; d <= 16; d++) {
+    const dateStr = `2026-09-${String(d).padStart(2, "0")}`;
+    for (let k = 0; k < 4; k++) {
+      ledger.push(fakeSalesRow({ invoice_guid: `n-${seq}`, invoice_number: String(seq), invoice_date: dateStr }));
+      seq++;
+    }
+  }
+  const state = {
+    schemaVersion: 2,   // كأن الترحيل لم يُطبَّق
+    watchFromDate: "2026-03-01",
+    printedGuids: Object.fromEntries(
+      ledger.filter((r) => r.invoice_date > "2026-09-09").map((r) => [r.invoice_guid, NOW - DAY])
+    ),
+  };
+  await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
+  assert.equal(printed.length, 4,
+    "الشاهد السالب فقد معناه: بلا ترحيل يجب أن تُطبع فواتير 09-09 الأربع");
+});
+
+await test("watcher.js: الحالة الجديدة تُوسم بنسخة البنية، والقديمة تُوسم للترحيل", () => {
+  assert.ok(/const STATE_SCHEMA_VERSION = \d+;/.test(watcherSrc), "لا ثابت لنسخة البنية");
+  assert.ok(/schemaVersion: STATE_SCHEMA_VERSION/.test(watcherSrc), "أول تشغيل لا يوسم النسخة");
+  assert.ok(/Number\(state\.schemaVersion \|\| 1\) < STATE_SCHEMA_VERSION/.test(watcherSrc),
+    "لا كشف للحالة القديمة");
+  assert.ok(/state\.adoptBaseline = true;/.test(watcherSrc), "لا وسم للترحيل");
+  // الترحيل يجب أن يسبق أي طباعة داخل poll
+  const adoptIdx = watcherSrc.indexOf("if (state.adoptBaseline)");
+  const printIdx = watcherSrc.indexOf("await printInvoice(inv);");
+  assert.ok(adoptIdx > 0 && adoptIdx < printIdx, "دورة الترحيل لا تسبق الطباعة");
+});
+
 console.log("\n== wholesale-regression: قفل النسخة الواحدة — منع الطباعة المزدوجة ==");
 
 // نسختان على نفس ملف الحالة = طباعة مزدوجة مضمونة: كل نسخة تُحمّل الحالة مرة
@@ -863,6 +996,7 @@ import osMod from "node:os";
 
 const lockSrcs = [
   "const LOCK_STALE_HINT_MS = 10 * 60 * 1000;",
+  (watcherSrc.match(/const LOCK_BEAT_MIN_INTERVAL_MS = [\d_]+;/) || ["const LOCK_BEAT_MIN_INTERVAL_MS = 30000;"])[0],
   extractFunctionSource(watcherSrc, "function lockHeldError(message)"),
   extractFunctionSource(watcherSrc, "function processAlive(pid)"),
   extractFunctionSource(watcherSrc, "function lockFilePath()"),
@@ -946,6 +1080,28 @@ await test("processAlive: EPERM (عملية بمستخدم آخر مثل SYSTEM)
   const api = makeLockApi(tmpStatePath("alive"), process.pid);
   assert.equal(api.processAlive(process.pid), true);
   assert.equal(api.processAlive(999999), false);
+});
+
+await test("القفل: إنشاء حصري (wx) لا كتابة عادية — يمنع سباق نسختين تقلعان معاً", () => {
+  const src = extractFunctionSource(watcherSrc, "function acquireSingleInstanceLock(nowMs");
+  assert.ok(/openSync\([^)]*"wx"\)/.test(src),
+    'لا إنشاء حصري "wx" — قراءة ثم كتابة تجعل نسختين متزامنتين تمضيان معاً (TOCTOU)');
+  assert.ok(/EEXIST/.test(src), "EEXIST غير معالَج");
+});
+
+await test("القفل: نبضة مخنوقة بفاصل أدنى (لا كتابة ملف كل 5 ثوانٍ بلا داعٍ)", () => {
+  assert.ok(/const LOCK_BEAT_MIN_INTERVAL_MS = [\d_]+;/.test(watcherSrc), "لا ثابت لخنق النبضة");
+  const sp = tmpStatePath("beat");
+  const lock = makeLockApi(sp, process.pid).acquireSingleInstanceLock(1_000_000);
+  try {
+    const first = JSON.parse(fs.readFileSync(lock.path, "utf8")).heartbeatAt;
+    lock.beat(1_000_100);                 // بعد 100ms — تُتجاهل
+    assert.equal(JSON.parse(fs.readFileSync(lock.path, "utf8")).heartbeatAt, first,
+      "النبضة كُتبت رغم أن الفاصل أقل من الحد الأدنى");
+    lock.beat(1_000_000 + 60_000);        // بعد دقيقة — تُكتب
+    assert.notEqual(JSON.parse(fs.readFileSync(lock.path, "utf8")).heartbeatAt, first,
+      "النبضة لم تُكتب بعد انقضاء الفاصل");
+  } finally { lock.release(); }
 });
 
 await test("watcher.js: القفل يُستحوذ قبل فحص الطابعة والاتصال بـSQL، وينبض كل دورة", () => {

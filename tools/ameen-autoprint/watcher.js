@@ -250,8 +250,26 @@ function parseSqlConnStr(cs) {
 //
 // الشرط الصارم: نافذة الاستعلام يجب أن تبقى **أقصر** من ذاكرة الـdedup، كي لا
 // يعود الاستعلام بفاتورة نُسيت علامتها أبداً.
-const WATCH_LOOKBACK_DAYS = 2;      // أبعد ما ينظر إليه الاستعلام إلى الوراء
-const PRINTED_RETENTION_DAYS = 7;   // مدة الاحتفاظ بعلامة «طُبعت»
+// اللحاق أسبوع كامل: نافذة ضيّقة (يومان) كانت تُسقط بصمت كل فاتورة تعطّلت
+// الطابعة أكثر من يومين بعدها — وهذا تراجع عن السلوك القديم الذي كان يطبعها
+// (بلا حد) ولو متأخّرة. والاحتفاظ شهر: العلامة سطر `guid: timestamp` بحدود 50
+// بايت، فثلاثون يوماً بخمسين فاتورة يومياً ≈ 75 كيلوبايت — لا وزن له، ويمنح
+// الشرط هامش 23 يوماً بدل 3.
+const WATCH_LOOKBACK_DAYS = 7;       // أبعد ما ينظر إليه الاستعلام إلى الوراء
+const PRINTED_RETENTION_DAYS = 30;   // مدة الاحتفاظ بعلامة «طُبعت»
+
+// نسخة بنية ملف الحالة. الحالة القادمة من النسخة القديمة (بلا رقم نسخة) خطرة
+// عند أول تشغيل للكود الجديد: النسخة القديمة كانت تحذف العلامات بعد 7 أيام،
+// فحالتها لا تتذكّر إلا آخر أسبوع، بينما النافذة الجديدة تُفتح على 7 أيام
+// كاملة. فأي فاتورة حُذفت علامتها قبيل الترحيل (وهي بالضبط الفواتير التي كانت
+// تُعاد طباعتها) تصبح «جديدة» في عين الكود الجديد فتُطبع مرة أخرى — دفعة
+// أخيرة من الورق يراها المستخدم بعد النشر تماماً كما كان يراها قبله.
+//
+// الحل: دورة ترحيل واحدة تتبنّى كل فاتورة قائمة داخل النافذة كـ«مطبوعة
+// مسبقاً» بلا طباعة، فتصبح الحالة خطَّ أساس موثوقاً، وتبدأ الطباعة من الفواتير
+// الجديدة بعد لحظة الترحيل فقط. هذا هو نفس عقد أول تشغيل: لا تُطبع فواتير
+// سابقة.
+const STATE_SCHEMA_VERSION = 2;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 // حارس بنيوي يمنع إعادة إدخال العطل بتعديل لاحق على أحد الرقمين وحده.
@@ -339,6 +357,7 @@ function pruneOldGuids(state) {
 // install-service.bat) و`start.bat` اليدوي. تشغيل الثاني للتحقق «هل يعمل؟»
 // بينما الأولى تعمل يكفي لإنتاج العطل.
 const LOCK_STALE_HINT_MS = 10 * 60 * 1000;
+const LOCK_BEAT_MIN_INTERVAL_MS = 30_000;
 
 function lockHeldError(message) {
   const err = new Error(message);
@@ -361,42 +380,80 @@ function lockFilePath() {
 // ميتة (انقطاع كهرباء) يُستولى عليه تلقائياً فلا يبقى المراقب معطّلاً للأبد.
 function acquireSingleInstanceLock(nowMs = Date.now()) {
   const lockPath = lockFilePath();
-  let existing = null;
-  try { existing = JSON.parse(fs.readFileSync(lockPath, "utf8")); }
-  catch { existing = null; }
+  const payload = (beatMs) => JSON.stringify({
+    pid: process.pid,
+    host: os.hostname(),
+    startedAt: new Date(nowMs).toISOString(),
+    heartbeatAt: beatMs,
+  }, null, 2);
 
-  const pid = existing ? Number(existing.pid) : NaN;
-  if (Number.isInteger(pid) && pid > 0 && pid !== process.pid && processAlive(pid)) {
-    const beat = Number(existing.heartbeatAt) || 0;
-    const ageText = beat
-      ? `آخر نبضة قبل ${Math.max(0, Math.round((nowMs - beat) / 1000))} ثانية`
-      : "بلا نبضة مسجَّلة";
-    const staleHint = beat && (nowMs - beat) > LOCK_STALE_HINT_MS
-      ? " النبضة قديمة جداً، فقد تكون العملية بهذا الرقم برنامجاً آخر لا المراقب."
-      : "";
-    throw lockHeldError(
-      `رفض قاطع: نسخة أخرى من المراقب تحمل القفل (PID ${pid}، ${ageText}).`
-      + " تشغيل نسختين على نفس ملف الحالة يسبّب طباعة الفاتورة مرتين."
-      + ` أوقف النسخة الأخرى — أو المهمة "OZK-AmeenAutoPrint" —  ثم أعد التشغيل.${staleHint}`
-      + ` وإن تأكّدت أن العملية ${pid} ليست المراقب، احذف الملف: ${lockPath}`
-    );
+  // إنشاء حصري ("wx") لا كتابة عادية: لو أقلعت نسختان في اللحظة نفسها، القراءة
+  // ثم الكتابة تجعل كلتيهما ترى «لا قفل» فتمضيان معاً (TOCTOU). الإنشاء الحصري
+  // يضمن أن واحدة فقط تنشئ الملف، ويرمي EEXIST للأخرى.
+  const tryCreate = () => {
+    const fd = fs.openSync(lockPath, "wx");
+    try { fs.writeFileSync(fd, payload(nowMs), "utf8"); }
+    finally { fs.closeSync(fd); }
+  };
+
+  try {
+    tryCreate();
+  } catch (err) {
+    if (!err || err.code !== "EEXIST") throw err;
+
+    let existing = null;
+    try { existing = JSON.parse(fs.readFileSync(lockPath, "utf8")); }
+    catch { existing = null; }
+
+    const pid = existing ? Number(existing.pid) : NaN;
+    if (Number.isInteger(pid) && pid > 0 && pid !== process.pid && processAlive(pid)) {
+      const beat = Number(existing.heartbeatAt) || 0;
+      const ageText = beat
+        ? `آخر نبضة قبل ${Math.max(0, Math.round((nowMs - beat) / 1000))} ثانية`
+        : "بلا نبضة مسجَّلة";
+      const staleHint = beat && (nowMs - beat) > LOCK_STALE_HINT_MS
+        ? " النبضة قديمة جداً، فقد تكون العملية بهذا الرقم برنامجاً آخر لا المراقب."
+        : "";
+      throw lockHeldError(
+        `رفض قاطع: نسخة أخرى من المراقب تحمل القفل (PID ${pid}، ${ageText}).`
+        + " تشغيل نسختين على نفس ملف الحالة يسبّب طباعة الفاتورة مرتين."
+        + ` أوقف النسخة الأخرى — أو المهمة "OZK-AmeenAutoPrint" — ثم أعد التشغيل.${staleHint}`
+        + ` وإن تأكّدت أن العملية ${pid} ليست المراقب، احذف الملف: ${lockPath}`
+      );
+    }
+
+    // قفل متروك من عملية ميتة (انقطاع كهرباء): يُزال ويُعاد الإنشاء حصرياً.
+    // فشل الإنشاء الثاني يعني أن نسخة أخرى سبقتنا في هذه اللحظة — تُعالج كمحجوز.
+    fs.unlinkSync(lockPath);
+    try {
+      tryCreate();
+    } catch (raceErr) {
+      if (raceErr && raceErr.code === "EEXIST") {
+        throw lockHeldError(
+          "رفض قاطع: نسخة أخرى من المراقب استحوذت على القفل في اللحظة نفسها."
+          + " أعد التشغيل بعد التأكّد من عدم وجود نسخة عاملة."
+        );
+      }
+      throw raceErr;
+    }
   }
 
   const writeLock = (beatMs) => {
-    fs.writeFileSync(lockPath, JSON.stringify({
-      pid: process.pid,
-      host: os.hostname(),
-      startedAt: new Date(nowMs).toISOString(),
-      heartbeatAt: beatMs,
-    }, null, 2), "utf8");
+    fs.writeFileSync(lockPath, payload(beatMs), "utf8");
   };
-  writeLock(nowMs);
 
   let released = false;
+  let lastBeatAt = nowMs;
   return {
     path: lockPath,
-    // نبضة كل دورة: تُميّز مراقباً حيّاً من رقم عملية أُعيد استخدامه.
-    beat(t = Date.now()) { try { writeLock(t); } catch {} },
+    // نبضة تُميّز مراقباً حيّاً من رقم عملية أُعيد استخدامه. مخنوقة بفاصل
+    // أدنى: الدورة كل 5 ثوانٍ، وكتابة الملف كل دورة تعني ~17 ألف كتابة يومياً
+    // على ملف لا يقرأه أحد إلا عند الإقلاع — ضجيج قرص بلا مقابل.
+    beat(t = Date.now()) {
+      if (released || t - lastBeatAt < LOCK_BEAT_MIN_INTERVAL_MS) return;
+      lastBeatAt = t;
+      try { writeLock(t); } catch {}
+    },
     // لا يُحذف إلا قفلنا نحن — كي لا تحذف نسخةٌ فاشلة قفل النسخة العاملة.
     release() {
       if (released) return;
@@ -587,6 +644,27 @@ async function poll(pool, state) {
   // لا نخرج مبكراً على نتيجة فارغة: تقديم النافذة أعلاه يجب أن يُحفظ أيضاً.
   const invoices = result.recordset.length ? groupIntoInvoices(result.recordset) : [];
 
+  // دورة الترحيل: تتبنّى ما هو قائم بلا طباعة، ثم تنتهي. لا ورقة واحدة تُطبع
+  // هنا — وهذا المقصود بالضبط: خطّ الأساس يُبنى بلا أثر على الطابعة.
+  if (state.adoptBaseline) {
+    let adopted = 0;
+    for (const inv of invoices) {
+      if (!state.printedGuids[inv.guid]) {
+        state.printedGuids[inv.guid] = Date.now();
+        adopted++;
+      }
+    }
+    delete state.adoptBaseline;
+    pruneOldGuids(state);
+    persistState(state);
+    console.log(
+      `ترحيل الحالة: تُبنّيت ${adopted} فاتورة قائمة داخل النافذة (${state.watchFromDate} ← اليوم)`
+      + " كمطبوعة مسبقاً — لن تُطبع أي منها."
+      + " الطباعة تبدأ من الفواتير الجديدة بعد هذه اللحظة."
+    );
+    return;
+  }
+
   for (const inv of invoices) {
     if (state.printedGuids[inv.guid]) continue; // مطبوعة سابقاً
     // إن سقطت الطابعة أثناء الدورة نتوقف فوراً: الفاتورة تبقى غير مطبوعة وغير
@@ -675,7 +753,7 @@ async function main() {
   let state = loadState();
   if (!state) {
     const today = localDateStr(Date.now());
-    state = { watchFromDate: today, printedGuids: {} };
+    state = { schemaVersion: STATE_SCHEMA_VERSION, watchFromDate: today, printedGuids: {} };
     persistState(state);
     console.log(`تهيئة: بداية المراقبة من ${today} (الفواتير السابقة لن تُطبع)`);
   } else {
@@ -683,9 +761,17 @@ async function main() {
     // حالة قادمة من نسخة قديمة: watchFromDate مجمّدة على يوم التثبيت. تُقدَّم
     // هنا فوراً وتُحفظ، فيتوقّف نزيف إعادة الطباعة من أول دورة لا بعد أيام.
     const movedFrom = advanceWatchFromDate(state);
-    if (movedFrom !== null) {
+    const legacy = Number(state.schemaVersion || 1) < STATE_SCHEMA_VERSION;
+    if (legacy) {
+      // علامات النسخة القديمة لا تغطّي النافذة الجديدة (كانت تُحذف بعد 7 أيام)،
+      // فدورة الترحيل تتبنّى القائم بلا طباعة قبل أي ورقة.
+      state.schemaVersion = STATE_SCHEMA_VERSION;
+      state.adoptBaseline = true;
+    }
+    if (movedFrom !== null || legacy) {
       persistState(state);
-      console.log(`تصحيح نافذة مجمّدة: ${movedFrom} ← ${state.watchFromDate}`);
+      if (movedFrom !== null) console.log(`تصحيح نافذة مجمّدة: ${movedFrom} ← ${state.watchFromDate}`);
+      if (legacy) console.log("حالة من نسخة قديمة — دورة ترحيل واحدة ستتبنّى الفواتير القائمة بلا طباعة.");
     }
     console.log(`استئناف: مراقبة منذ ${state.watchFromDate} | ${printed} فاتورة مطبوعة سابقاً`);
   }
