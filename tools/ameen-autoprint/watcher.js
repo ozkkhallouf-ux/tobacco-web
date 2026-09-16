@@ -448,9 +448,20 @@ function makeLockHandle(lockPath, startedAtMs) {
   let lost = false;
   return {
     path: lockPath,
-    // فقدنا الملكية = نسخة أخرى استولت على القفل. الطباعة بعدها تعني نسختين
-    // تطبعان نفس الفواتير، فالحلقة الرئيسية تفحص هذا قبل كل دورة وتُنهي العملية.
-    isLost() { return lost; },
+    // فقدنا الملكية = نسخة أخرى استولت على القفل. يُقرأ الملف في كل فحص، لا
+    // الاعتماد على كاش نبضة سابقة: نسخة وُقفت أكثر من عشر دقائق ثم استُؤنفت
+    // تصل هنا و`lost` ما زال false إن لم تُستدعَ beat() بعد.
+    isLost() {
+      if (lost || released) return true;
+      try {
+        const cur = JSON.parse(fs.readFileSync(lockPath, "utf8"));
+        if (Number(cur.pid) !== process.pid) { lost = true; return true; }
+        return false;
+      } catch {
+        lost = true;
+        return true;
+      }
+    },
     beat(t = Date.now()) {
       if (released || lost || t - lastBeatAt < LOCK_BEAT_MIN_INTERVAL_MS) return;
       lastBeatAt = t;
@@ -712,18 +723,16 @@ function describeError(err) {
 }
 
 // ─── دورة الاستعلام ───────────────────────────────────────────────────────
-// خطّ أساس الترحيل: آخر يوم كانت النسخة القديمة تطبع فيه فعلاً، مُستنتَجاً من
-// أحدث علامة في حالتها. الفواتير الأقدم منه كانت قد مرّت على النسخة القديمة
-// (وعلامتها حُذفت بحكم الاحتفاظ)، أما الفواتير في يومه أو بعده فبعضها لم يُطبع
-// أصلاً — فجوة النشر — ويجب أن تُطبع لا أن تُتبنّى.
-// بلا أي علامة: لا دليل على شيء، فيُتبنّى ما قبل اليوم ويُترك اليوم يُطبع.
+// خطّ أساس الترحيل: علامة مائية متجاورة (`processedThrough`) — آخر يوم اكتملت
+// فواتيره كلها. لا يُستنتَج من أحدث ختم في `printedGuids`: ذلك الختم هو
+// `Date.now()` لحظة نجاح الطباعة لا تاريخ الفاتورة، ففاتورة أقدم فشلت ثم نجحت
+// أحدث بعدها ترفع الخط فوق الفاشلة فتُتبنّى وتُفقد إلى الأبد.
+// بلا علامة مائية (حالة قديمة جداً): يُتبنّى ما خرج من نافذة اللحاق فقط، لا
+// أحدث ختم ولا «اليوم» (اليوم يبتلع فجوة النشر).
 function migrationAdoptCutoff(state, nowMs = Date.now()) {
-  let newest = 0;
-  for (const ts of Object.values(state.printedGuids)) {
-    const n = Number(ts);
-    if (Number.isFinite(n) && n > newest) newest = n;
-  }
-  return localDateStr(newest > 0 ? newest : nowMs);
+  const processed = String(state.processedThrough || "");
+  if (/^\d{4}-\d{2}-\d{2}$/.test(processed)) return processed;
+  return localDateStr(nowMs - WATCH_LOOKBACK_DAYS * DAY_MS);
 }
 
 async function poll(pool, state, hooks = {}) {
@@ -804,6 +813,12 @@ async function poll(pool, state, hooks = {}) {
     // إن سقطت الطابعة أثناء الدورة نتوقف فوراً: الفاتورة تبقى غير مطبوعة وغير
     // مُعلَّمة في state، فتُلتقط كما هي في أول دورة بعد عودة الطابعة (dedup بلا تغيير).
     if (!printerGate.ready()) { fullyProcessed = false; break; }
+    // فُقد القفل وسط الدفعة: لا نطبع الباقي من حالة ذاكرة قديمة بينما نسخة
+    // أخرى صارت المالكة. الفواتير التي طُبعت قبل الكشف تُحفظ أدناه.
+    if (typeof hooks.isLost === "function" && hooks.isLost()) {
+      fullyProcessed = false;
+      break;
+    }
     try {
       // رصيد الزبون الحقيقي (Ameen) — عبر AccountGUID فقط، لا اسم الزبون.
       // إن تعذّر العثور عليه، تبقى customerBalance فارغة ولا يُطبع أي رقم رصيد.
@@ -954,7 +969,7 @@ async function main() {
     // الاستدعاء خارج try عمداً: خطأ الإعداد الدائم يجب أن ينهي العملية لا أن يُبتلع.
     if (printerGate.ready()) {
       try {
-        await poll(pool, state, { beat: () => lock.beat() });
+        await poll(pool, state, { beat: () => lock.beat(), isLost: () => lock.isLost() });
       } catch (err) {
         if (err && (err.fatalPrinterConfig || err.fatalPersist)) throw err;
         console.error(`خطأ: ${describeError(err)}`);

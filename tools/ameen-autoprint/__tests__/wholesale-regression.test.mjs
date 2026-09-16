@@ -412,7 +412,7 @@ await test("watcher.js: الحلقة الرئيسية لا تستعلم ولا �
 });
 
 await test("watcher.js: poll لا يطبع فاتورة قبل التحقق من الجاهزية، والفاتورة تبقى غير مُعلَّمة", () => {
-  assert.ok(/if \(!printerGate\.ready\(\)\) \{[^}]*break; \}[\s\S]{0,700}await printInvoice\(inv\);/.test(watcherSrc));
+  assert.ok(/if \(!printerGate\.ready\(\)\) \{[^}]*break; \}[\s\S]{0,1200}await printInvoice\(inv\);/.test(watcherSrc));
   // العلامة تُكتب بعد الطباعة فقط — dedup بلا تغيير
   assert.ok(/await printInvoice\(inv\);\s*\n\s*state\.printedGuids\[inv\.guid\] = Date\.now\(\);/.test(watcherSrc));
 });
@@ -934,6 +934,7 @@ await test("ترحيل الحالة القديمة: دورة الترحيل لا
   // حالة قديمة: نافذة مجمّدة، وعلامات آخر 6 أيام فقط (09-09 مفقودة كما حدث فعلاً)
   const state = {
     watchFromDate: "2026-03-01",
+    processedThrough: "2026-09-16",
     printedGuids: Object.fromEntries(
       ledger.filter((r) => r.invoice_date > "2026-09-09").map((r) => [r.invoice_guid, NOW - DAY])
     ),
@@ -1071,6 +1072,7 @@ await test("الترحيل لا يتبنّى فواتير فجوة النشر (�
     watchFromDate: "2026-03-01",
     schemaVersion: 2,
     adoptBaseline: true,
+    processedThrough: "2026-09-13",
     printedGuids: Object.fromEntries(
       ledger.filter((r) => r.invoice_date >= "2026-09-10" && r.invoice_date <= "2026-09-13")
         .map((r) => [r.invoice_guid, Date.parse(`${r.invoice_date}T12:00:00Z`)])
@@ -1111,6 +1113,7 @@ await test("فشل حفظ الترحيل يُبقي الراية ولا يطبع
     watchFromDate: "2026-03-01",
     schemaVersion: 2,
     adoptBaseline: true,
+    processedThrough: "2026-09-13",
     printedGuids: Object.fromEntries(
       ledger.filter((r) => r.invoice_date >= "2026-09-10" && r.invoice_date <= "2026-09-13")
         .map((r) => [r.invoice_guid, Date.parse(`${r.invoice_date}T12:00:00Z`)])
@@ -1149,6 +1152,44 @@ await test("watcher.js: فشل حفظ الترحيل مُجهِض ولا يُب�
   const mainSrc = extractFunctionSource(watcherSrc, "async function main()");
   assert.ok(/err\.fatalPersist/.test(mainSrc),
     "فشل حفظ الترحيل يُبتلع داخل حلقة الاستعلام فيُطبع بعده");
+});
+
+await test("الترحيل لا يتبنّى فاتورة أقدم فشلت بعد نجاح أحدث (ملاحظة Codex P1)", async () => {
+  // أختام printedGuids هي Date.now() لحظة النجاح لا تاريخ الفاتورة. فاتورة
+  // 09-10 فشلت ثم نجحت 09-13: أحدث ختم = 09-13، والتبنّي بذلك الختم كان
+  // سيتبنّى الفاشلة. العلامة المائية المتجاورة (processedThrough) بقيت 09-09.
+  const { poll, printed, migrationAdoptCutoff } = makeWindowHarness();
+  NOW = Date.parse("2026-09-16T09:00:00Z");
+  const failed = fakeSalesRow({
+    invoice_guid: "fail-10", invoice_number: "410", invoice_date: "2026-09-10",
+  });
+  const laterOk = fakeSalesRow({
+    invoice_guid: "ok-13", invoice_number: "413", invoice_date: "2026-09-13",
+  });
+  const state = {
+    watchFromDate: "2026-09-09",
+    schemaVersion: 2,
+    adoptBaseline: true,
+    processedThrough: "2026-09-09",
+    printedGuids: { "ok-13": Date.parse("2026-09-13T18:00:00Z") },
+  };
+  assert.equal(migrationAdoptCutoff(state, NOW), "2026-09-09",
+    "الحدّ أُخذ من أحدث ختم لا من processedThrough");
+  const ledger = [failed, laterOk];
+  await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
+  assert.equal(printed.length, 0, "دورة الترحيل طبعت ورقاً");
+  assert.ok(!state.printedGuids["fail-10"],
+    "تُبنّيت الفاتورة الفاشلة لأن أحدث ختم رفع الخط فوقها");
+
+  await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
+  assert.deepEqual(printed, ["410"], "الفاتورة الفاشلة لم تُطبع بعد الترحيل");
+});
+
+await test("watcher.js: حدّ الترحيل من processedThrough لا من أحدث ختم Date.now()", () => {
+  const src = extractFunctionSource(watcherSrc, "function migrationAdoptCutoff(state, nowMs");
+  assert.ok(/processedThrough/.test(src), "لا يُستخدم processedThrough كعلامة مائية");
+  assert.ok(!/Object\.values\(state\.printedGuids\)/.test(src),
+    "ما زال الحدّ يُستنتَج من أحدث ختم طباعة");
 });
 
 await test("watcher.js: فشل حفظ الحالة عند الإقلاع يمنع التشغيل (ملاحظة Codex P1)", () => {
@@ -1392,6 +1433,46 @@ await test("watcher.js: الحلقة الرئيسية تُنهي العملية 
   const lostIdx = mainSrc.indexOf("lock.isLost()");
   const pollIdx = mainSrc.indexOf("await poll(pool, state");
   assert.ok(lostIdx > 0 && lostIdx < pollIdx, "فحص الفقدان لا يسبق الاستعلام");
+  assert.ok(/isLost:\s*\(\)\s*=>\s*lock\.isLost\(\)/.test(mainSrc),
+    "poll لا تتلقى فحص ملكية أثناء الدفعة");
+});
+
+await test("القفل: isLost يقرأ الملف ولا يعتمد على كاش النبضة (ملاحظة Codex P1)", async () => {
+  // نسخة وُقفت >10 دقائق: lost ما زال false إلى أن تُستدعَى beat(). إن دخلت
+  // poll قبل إعادة الفحص طُبع باقي الدفعة من حالة ذاكرة قديمة.
+  const sp = tmpStatePath("stale-cache");
+  const lock = await makeLockApi(sp, process.pid).acquireSingleInstanceLock(1_000_000, noWait);
+  assert.equal(lock.isLost(), false);
+  fs.writeFileSync(lock.path, JSON.stringify({ pid: process.pid + 8888, heartbeatAt: Date.now() }), "utf8");
+  assert.equal(lock.isLost(), true, "isLost لم يقرأ الملف — سيُدخل poll بملكية مفقودة");
+  assert.equal(Number(JSON.parse(fs.readFileSync(lock.path, "utf8")).pid), process.pid + 8888,
+    "قراءة الفقدان دهست قفل المالك الجديد");
+  fs.unlinkSync(lock.path);
+});
+
+await test("poll يتوقف عن الطباعة فور فقدان القفل وسط الدفعة (ملاحظة Codex P1)", async () => {
+  const { poll, printed } = makeWindowHarness();
+  NOW = Date.parse("2026-09-16T09:00:00Z");
+  const ledger = [1, 2, 3].map((n) => fakeSalesRow({
+    invoice_guid: `lost-${n}`, invoice_number: String(500 + n), invoice_date: "2026-09-16",
+  }));
+  const state = { watchFromDate: "2026-09-16", printedGuids: {} };
+  let seen = 0;
+  await poll(fakePollPool(ledger), state, {
+    isLost: () => { seen += 1; return seen > 1; },
+  });
+  assert.deepEqual(printed, ["501"],
+    `طُبع ${printed.join(",")} بعد فقدان القفل — يجب أن تتوقف الدفعة`);
+  assert.ok(!state.printedGuids["lost-2"] && !state.printedGuids["lost-3"],
+    "فواتير بعد فقدان القفل وُسمت كمطبوعة");
+});
+
+await test("watcher.js: poll يفحص isLost قبل كل فاتورة لا بعد النبضة فقط", () => {
+  const pollSrcNow = extractFunctionSource(watcherSrc, "async function poll(pool, state, hooks");
+  const lostIdx = pollSrcNow.indexOf("hooks.isLost");
+  const printIdx = pollSrcNow.indexOf("await printInvoice(inv)");
+  assert.ok(lostIdx > 0 && lostIdx < printIdx,
+    "فحص الملكية داخل poll يقع بعد الطباعة — باقي الدفعة يُطبع");
 });
 
 console.log("\n== wholesale-regression: فشل حفظ الحالة — لا يمرّ صامتاً ==");
