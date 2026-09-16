@@ -258,8 +258,6 @@ function parseSqlConnStr(cs) {
 const WATCH_LOOKBACK_DAYS = 7;       // أبعد ما ينظر إليه الاستعلام إلى الوراء
 const PRINTED_RETENTION_DAYS = 30;   // مدة الاحتفاظ بعلامة «طُبعت»
 const WINDOW_SAFETY_MARGIN_DAYS = 3; // هامش يفصل أقصى نافذة عن حدّ الاحتفاظ
-// ما كانت النسخة القديمة تحتفظ به — يُستعمل في الترحيل وحده.
-const LEGACY_RETENTION_DAYS = 7;
 
 // نسخة بنية ملف الحالة. الحالة القادمة من النسخة القديمة (بلا رقم نسخة) خطرة
 // عند أول تشغيل للكود الجديد: النسخة القديمة كانت تحذف العلامات بعد 7 أيام،
@@ -447,12 +445,26 @@ function writeLockAtomic(lockPath, content) {
 function makeLockHandle(lockPath, startedAtMs) {
   let released = false;
   let lastBeatAt = startedAtMs;
+  let lost = false;
   return {
     path: lockPath,
+    // فقدنا الملكية = نسخة أخرى استولت على القفل. الطباعة بعدها تعني نسختين
+    // تطبعان نفس الفواتير، فالحلقة الرئيسية تفحص هذا قبل كل دورة وتُنهي العملية.
+    isLost() { return lost; },
     beat(t = Date.now()) {
-      if (released || t - lastBeatAt < LOCK_BEAT_MIN_INTERVAL_MS) return;
+      if (released || lost || t - lastBeatAt < LOCK_BEAT_MIN_INTERVAL_MS) return;
       lastBeatAt = t;
-      try { writeLockAtomic(lockPath, lockPayload(startedAtMs, t)); } catch {}
+      try {
+        // تحقّق الملكية قبل الكتابة. النبض أثناء انتظار SQL يمنع تبييت قفلنا،
+        // لكنه لا يمنع النصف الآخر من الملاحظة: نسخة بات قفلها واستولت عليه
+        // أخرى كانت تدهسه بنبضتها التالية فتعود النسختان تعملان معاً.
+        const cur = JSON.parse(fs.readFileSync(lockPath, "utf8"));
+        if (Number(cur.pid) !== process.pid) { lost = true; return; }
+        writeLockAtomic(lockPath, lockPayload(startedAtMs, t));
+      } catch {
+        // ملف مفقود أو غير مقروء: لا نعيد إنشاءه — قد يكون مالكه غيرنا الآن.
+        lost = true;
+      }
     },
     // لا يُحذف إلا قفلنا نحن — كي لا تحذف نسخةٌ خارجةٌ قفل النسخة العاملة.
     release() {
@@ -930,6 +942,14 @@ async function main() {
 
   // حلقة الاستعلام الرئيسية
   for (;;) {
+    // فُقد القفل ⇒ نسخة أخرى تعمل الآن. المضي يعني نسختين تطبعان نفس الفواتير،
+    // فالخروج هو السلوك الآمن الوحيد.
+    if (lock.isLost()) {
+      throw lockHeldError(
+        "رفض قاطع: فُقدت ملكية القفل — نسخة أخرى من المراقب استولت عليه."
+        + " تتوقّف هذه النسخة فوراً كي لا تُطبع الفواتير مرتين."
+      );
+    }
     // fail-closed: لا استعلام ولا طباعة إطلاقاً ما لم تكن الطابعة جاهزة الآن.
     // الاستدعاء خارج try عمداً: خطأ الإعداد الدائم يجب أن ينهي العملية لا أن يُبتلع.
     if (printerGate.ready()) {

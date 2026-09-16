@@ -675,7 +675,6 @@ function makeWindowHarness(gate, extras = {}) {
     `const PRINTED_RETENTION_DAYS = ${PRINTED_RETENTION_DAYS};`,
     "const STATE_SCHEMA_VERSION = 2;",
     `const WINDOW_SAFETY_MARGIN_DAYS = ${readConst("WINDOW_SAFETY_MARGIN_DAYS")};`,
-    `const LEGACY_RETENTION_DAYS = ${readConst("LEGACY_RETENTION_DAYS")};`,
     extractFunctionSource(watcherSrc, "function migrationAdoptCutoff(state, nowMs"),
     "const DAY_MS = 24 * 60 * 60 * 1000;",
     localDateStrSrc,
@@ -1359,6 +1358,40 @@ await test("watcher.js: القفل ينبض طوال إعادة محاولة ا�
 await test("watcher.js: fatalLockHeld يخرج برسالة مفهومة لا كـ'خطأ فادح' غامض", () => {
   assert.ok(/err\.fatalLockHeld[\s\S]{0,200}process\.exit\(2\)/.test(watcherSrc),
     "الخروج عند القفل المحجوز غير مميَّز");
+});
+
+await test("القفل: النبضة لا تدهس قفل مالك جديد وتُعلِن فقدان الملكية (النصف الثاني من ملاحظة Codex)", async () => {
+  // النبض أثناء انتظار SQL يمنع تبييت قفلنا، لكن الملاحظة لها نصف آخر: نسخة
+  // بات قفلها واستولت عليه أخرى كانت تدهسه بنبضتها التالية فتعملان معاً.
+  const sp = tmpStatePath("ownership");
+  const lock = await makeLockApi(sp, process.pid).acquireSingleInstanceLock(1_000_000, noWait);
+  assert.equal(lock.isLost(), false, "أُعلن الفقدان بلا سبب");
+
+  fs.writeFileSync(lock.path, JSON.stringify({ pid: process.pid + 7777, heartbeatAt: Date.now() }), "utf8");
+  lock.beat(1_000_000 + readConst("LOCK_BEAT_MIN_INTERVAL_MS") + 1000);
+
+  assert.equal(Number(JSON.parse(fs.readFileSync(lock.path, "utf8")).pid), process.pid + 7777,
+    "دهست النبضة قفل المالك الجديد");
+  assert.equal(lock.isLost(), true, "لم تُعلَن ملكية مفقودة، فستستمر هذه النسخة بالطباعة");
+  fs.unlinkSync(lock.path);
+});
+
+await test("القفل: ملف مفقود أثناء النبضة يُعدّ فقدان ملكية ولا يُعاد إنشاؤه", async () => {
+  const sp = tmpStatePath("vanished");
+  const lock = await makeLockApi(sp, process.pid).acquireSingleInstanceLock(1_000_000, noWait);
+  fs.unlinkSync(lock.path);
+  lock.beat(1_000_000 + readConst("LOCK_BEAT_MIN_INTERVAL_MS") + 1000);
+  assert.equal(lock.isLost(), true, "لم يُعَدّ الملف المفقود فقدانَ ملكية");
+  assert.ok(!fs.existsSync(lock.path), "أُعيد إنشاء قفل قد يكون مالكه غيرنا");
+});
+
+await test("watcher.js: الحلقة الرئيسية تُنهي العملية عند فقدان القفل قبل أي استعلام", () => {
+  const mainSrc = extractFunctionSource(watcherSrc, "async function main()");
+  assert.ok(/if \(lock\.isLost\(\)\)[\s\S]{0,300}throw lockHeldError/.test(mainSrc),
+    "الحلقة لا تُنهي العملية عند فقدان القفل");
+  const lostIdx = mainSrc.indexOf("lock.isLost()");
+  const pollIdx = mainSrc.indexOf("await poll(pool, state");
+  assert.ok(lostIdx > 0 && lostIdx < pollIdx, "فحص الفقدان لا يسبق الاستعلام");
 });
 
 console.log("\n== wholesale-regression: فشل حفظ الحالة — لا يمرّ صامتاً ==");
