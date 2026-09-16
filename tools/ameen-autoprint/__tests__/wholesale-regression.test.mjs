@@ -408,11 +408,11 @@ await test("watcher.js: لا سقوط إلى الطابعة الافتراضية
 });
 
 await test("watcher.js: الحلقة الرئيسية لا تستعلم ولا تطبع ما لم تُصرّح البوّابة", () => {
-  assert.ok(/if \(printerGate\.ready\(\)\) \{[\s\S]{0,200}await poll\(pool, state\);/.test(watcherSrc));
+  assert.ok(/if \(printerGate\.ready\(\)\) \{[\s\S]{0,200}await poll\(pool, state/.test(watcherSrc));
 });
 
 await test("watcher.js: poll لا يطبع فاتورة قبل التحقق من الجاهزية، والفاتورة تبقى غير مُعلَّمة", () => {
-  assert.ok(/if \(!printerGate\.ready\(\)\) break;[\s\S]{0,600}await printInvoice\(inv\);/.test(watcherSrc));
+  assert.ok(/if \(!printerGate\.ready\(\)\) \{[^}]*break; \}[\s\S]{0,700}await printInvoice\(inv\);/.test(watcherSrc));
   // العلامة تُكتب بعد الطباعة فقط — dedup بلا تغيير
   assert.ok(/await printInvoice\(inv\);\s*\n\s*state\.printedGuids\[inv\.guid\] = Date\.now\(\);/.test(watcherSrc));
 });
@@ -490,7 +490,7 @@ console.log("\n== wholesale-regression: poll() — فشل استعلام رصي�
 // poll() وgroupIntoInvoices تُستخرجان من المصدر الفعلي وتُشغَّلان بمعزل —
 // بحقن pool/config/printerGate/getCustomerBalance/printInvoice/pruneOldGuids/
 // saveState وهمية. لا SQL حقيقي ولا Puppeteer ولا طباعة فعلية.
-const pollSrc = extractFunctionSource(watcherSrc, "async function poll(pool, state)");
+const pollSrc = extractFunctionSource(watcherSrc, "async function poll(pool, state, hooks");
 const groupIntoInvoicesSrc = extractFunctionSource(watcherSrc, "function groupIntoInvoices(rows)");
 
 function makePoll({ getCustomerBalance: gcb, printInvoice: pi }) {
@@ -505,6 +505,8 @@ function makePoll({ getCustomerBalance: gcb, printInvoice: pi }) {
     "saveState",
     "persistState",
     "advanceWatchFromDate",
+    "localDateStr",
+    "migrationAdoptCutoff",
     `${groupIntoInvoicesSrc}\n${pollSrc}\nreturn poll;`
   );
   const sql = { UniqueIdentifier: "uniqueidentifier", NVarChar: "nvarchar" };
@@ -516,9 +518,12 @@ function makePoll({ getCustomerBalance: gcb, printInvoice: pi }) {
   // هذه الاختبارات تثبّت النافذة عمداً كي تقيس سلوك الطباعة وحده؛ تقدّم النافذة
   // نفسه له اختباراته المستقلة أدناه (قسم «نافذة المراقبة»).
   const advanceWatchFromDate = () => null;
+  const localDateStr = (ms) => new Date(ms).toISOString().slice(0, 10);
+  const migrationAdoptCutoff = () => "9999-12-31";
   return factory(
     sql, "test-config" && config, "-- test double --", printerGate,
-    gcb, pi, pruneOldGuids, saveState, persistState, advanceWatchFromDate
+    gcb, pi, pruneOldGuids, saveState, persistState, advanceWatchFromDate,
+    localDateStr, migrationAdoptCutoff
   );
 }
 
@@ -640,9 +645,15 @@ const pruneSrc = extractFunctionSource(watcherSrc, "function pruneOldGuids(state
 
 // الرقمان يُقرآن من المصدر الفعلي لا يُعاد كتابتهما، كي يفشل الاختبار إن غُيّرا.
 function readConst(name) {
-  const m = watcherSrc.match(new RegExp(`const ${name} = (\\d+);`));
+  const m = watcherSrc.match(new RegExp(`const ${name} = ([^;]+);`));
   assert.ok(m, `لم أجد الثابت ${name} في watcher.js`);
-  return Number(m[1]);
+  // يقبل 7 و30_000 و10 * 60 * 1000 — وتُرفض أي صيغة غير حسابية بحتة كي لا
+  // يتحوّل قارئ الثوابت إلى تنفيذ تعبير عشوائي من المصدر.
+  const expr = m[1].trim();
+  assert.ok(/^[\d_\s*+]+$/.test(expr), `صيغة الثابت ${name} غير حسابية بحتة: ${expr}`);
+  const value = Number(new Function(`return (${expr});`)());
+  assert.ok(Number.isFinite(value), `تعذّر تقييم الثابت ${name}`);
+  return value;
 }
 const WATCH_LOOKBACK_DAYS = readConst("WATCH_LOOKBACK_DAYS");
 const PRINTED_RETENTION_DAYS = readConst("PRINTED_RETENTION_DAYS");
@@ -662,13 +673,16 @@ function makeWindowHarness(gate) {
     `const WATCH_LOOKBACK_DAYS = ${WATCH_LOOKBACK_DAYS};`,
     `const PRINTED_RETENTION_DAYS = ${PRINTED_RETENTION_DAYS};`,
     "const STATE_SCHEMA_VERSION = 2;",
+    `const WINDOW_SAFETY_MARGIN_DAYS = ${readConst("WINDOW_SAFETY_MARGIN_DAYS")};`,
+    `const LEGACY_RETENTION_DAYS = ${readConst("LEGACY_RETENTION_DAYS")};`,
+    extractFunctionSource(watcherSrc, "function migrationAdoptCutoff(state, nowMs"),
     "const DAY_MS = 24 * 60 * 60 * 1000;",
     localDateStrSrc,
     advanceSrc,
     pruneSrc,
     groupIntoInvoicesSrc,
     pollSrc,
-    "return { poll, advanceWatchFromDate, localDateStr };",
+    "return { poll, advanceWatchFromDate, localDateStr, migrationAdoptCutoff };",
   ].join("\n");
   const api = new Function(
     "sql", "config", "SALES_QUERY", "printerGate",
@@ -713,8 +727,9 @@ await test("advanceWatchFromDate: تتقدّم مع مرور الأيام ولا
   const state = { watchFromDate: "2026-01-01", printedGuids: {} };
   NOW = Date.parse("2026-06-01T09:00:00Z");
   const moved = advanceWatchFromDate(state);
-  assert.equal(moved, "2026-01-01", "لم تُعِد التاريخ السابق عند التقدّم");
+  assert.equal(moved && moved.previous, "2026-01-01", "لم تُعِد التاريخ السابق عند التقدّم");
   assert.equal(state.watchFromDate, localDateStr(NOW - WATCH_LOOKBACK_DAYS * DAY));
+  assert.equal(moved.abandonedFrom, null, "لا متأخّرات في التشغيل الطبيعي");
 });
 
 await test("advanceWatchFromDate: لا تتراجع أبداً إلى الوراء", () => {
@@ -984,6 +999,117 @@ await test("watcher.js: الحالة الجديدة تُوسم بنسخة الب
   assert.ok(adoptIdx > 0 && adoptIdx < printIdx, "دورة الترحيل لا تسبق الطباعة");
 });
 
+await test("انقطاع أطول من نافذة اللحاق: المتأخّرات تبقى مرئية وتُطبع (ملاحظة Codex P1)", async () => {
+  // النافذة كانت تتقدّم بمجرّد مرور الوقت، فانقطاعٌ أطول من اللحاق يُخرج
+  // المتأخّرات من الاستعلام نهائياً. الآن الحدّ لا يتجاوز آخر يوم فُحص فعلاً.
+  let printerUp = true;
+  const { poll, printed } = makeWindowHarness({ ready: () => printerUp });
+  const T0 = Date.parse("2026-01-01T09:00:00Z");
+  const state = { watchFromDate: "2026-01-01", processedThrough: "2026-01-01", printedGuids: {} };
+  const ledger = [];
+  let seq = 6000;
+  const addDay = (d) => {
+    NOW = T0 + d * DAY;
+    const ds = new Date(NOW).toISOString().slice(0, 10);
+    ledger.push(fakeSalesRow({ invoice_guid: `L-${seq}`, invoice_number: String(seq), invoice_date: ds }));
+    seq++;
+  };
+
+  addDay(0);
+  await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
+  assert.equal(printed.length, 1);
+
+  // الطابعة تسقط 12 يوماً — أطول من WATCH_LOOKBACK_DAYS (7)
+  printerUp = false;
+  for (let d = 1; d <= 12; d++) {
+    addDay(d);
+    await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
+  }
+  assert.equal(printed.length, 1, "طُبع ورق أثناء الانقطاع");
+
+  printerUp = true;
+  addDay(13);
+  await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
+
+  assert.equal(printed.length, ledger.length,
+    `سقطت متأخّرات بصمت: طُبعت ${printed.length} من ${ledger.length} بعد انقطاع 12 يوماً`);
+});
+
+await test("انقطاع يتجاوز أقصى نافذة آمنة: يُقصّ الحدّ لكن بتحذير صريح لا بصمت", () => {
+  const { advanceWatchFromDate } = makeWindowHarness();
+  const retention = readConst("PRINTED_RETENTION_DAYS");
+  const margin = readConst("WINDOW_SAFETY_MARGIN_DAYS");
+  NOW = Date.parse("2026-06-01T09:00:00Z");
+  // مفحوص حتى تاريخ أقدم بكثير من أقصى نافذة
+  const state = { watchFromDate: "2026-01-01", processedThrough: "2026-01-05", printedGuids: {} };
+  const moved = advanceWatchFromDate(state);
+  assert.ok(moved, "لم تتقدّم النافذة");
+  assert.equal(moved.abandonedFrom, "2026-01-05",
+    "لم تُسمَّ الأيام المتخلّى عنها — الإسقاط يمرّ بصمت");
+  const hardFloorMs = NOW - (retention - margin) * DAY;
+  assert.equal(state.watchFromDate, new Date(hardFloorMs).toISOString().slice(0, 10),
+    "الحدّ لم يُقصّ إلى أقصى نافذة آمنة");
+  // وحارس نصّي: التحذير يُطبع فعلاً
+  assert.ok(/abandonedFrom[\s\S]{0,400}console\.error/.test(watcherSrc),
+    "لا تحذير مطبوع عند التخلّي عن أيام");
+});
+
+await test("الترحيل لا يتبنّى فواتير فجوة النشر (ملاحظة Codex P1)", async () => {
+  // النسخة القديمة توقّفت يوم 09-13، وأُدخلت فواتير يومي 14 و15 قبل تشغيل
+  // النسخة الجديدة. تبنّيها يعني فقدانها نهائياً — يجب أن تُطبع.
+  const { poll, printed } = makeWindowHarness();
+  NOW = Date.parse("2026-09-16T09:00:00Z");
+  const ledger = [];
+  let seq = 300;
+  for (let d = 9; d <= 16; d++) {
+    const ds = `2026-09-${String(d).padStart(2, "0")}`;
+    ledger.push(fakeSalesRow({ invoice_guid: `G-${seq}`, invoice_number: String(seq), invoice_date: ds }));
+    seq++;
+  }
+  // علامات حتى 09-13 فقط (آخر ما طبعته النسخة القديمة)، ولا شيء بعده
+  const state = {
+    watchFromDate: "2026-03-01",
+    schemaVersion: 2,
+    adoptBaseline: true,
+    printedGuids: Object.fromEntries(
+      ledger.filter((r) => r.invoice_date >= "2026-09-10" && r.invoice_date <= "2026-09-13")
+        .map((r) => [r.invoice_guid, Date.parse(`${r.invoice_date}T12:00:00Z`)])
+    ),
+  };
+
+  await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
+  assert.equal(printed.length, 0, "دورة الترحيل طبعت ورقاً");
+
+  // 09-09 أقدم من خطّ الأساس (09-13) ⇒ تُتبنّى؛ و14/15/16 لا تُتبنّى
+  const guidOf = (d) => ledger.find((r) => r.invoice_date === `2026-09-${d}`).invoice_guid;
+  assert.ok(state.printedGuids[guidOf("09")], "لم تُتبنَّ فاتورة 09-09 القديمة");
+  for (const d of ["14", "15", "16"]) {
+    assert.ok(!state.printedGuids[guidOf(d)],
+      `تُبنّيت فاتورة ${d} أيلول من فجوة النشر — ستُفقد نهائياً`);
+  }
+
+  // الدورة التالية تطبع فواتير الفجوة وحدها
+  await poll(fakePollPool(rowsVisibleTo(ledger, state)), state);
+  assert.deepEqual(printed.sort(), ["305", "306", "307"].sort(),
+    "فواتير فجوة النشر لم تُطبع بعد الترحيل");
+});
+
+await test("watcher.js: فشل حفظ الحالة عند الإقلاع يمنع التشغيل (ملاحظة Codex P1)", () => {
+  const src = extractFunctionSource(watcherSrc, "function persistInitialStateOrAbort(state)");
+  assert.ok(/throw new Error/.test(src), "لا يُجهض الإقلاع عند فشل الحفظ الأول");
+  assert.ok(/ستُعيد طباعة الفواتير/.test(src), "الرسالة لا تشرح الأثر");
+  // ولا مسار إقلاع يستدعي persistState مباشرة بدل النسخة المُجهِضة
+  const mainSrc = extractFunctionSource(watcherSrc, "async function main()");
+  assert.ok(!/persistState\(state\)/.test(mainSrc),
+    "مسار إقلاع ما زال يتجاهل نتيجة الحفظ");
+  assert.equal((mainSrc.match(/persistInitialStateOrAbort\(state\)/g) || []).length, 2,
+    "ليست كل كتابات الإقلاع مُجهِضة عند الفشل");
+
+  const persistInitialStateOrAbort = new Function("persistState", "config",
+    `${src}\nreturn persistInitialStateOrAbort;`)(() => false, { stateFilePath: "X" });
+  assert.throws(() => persistInitialStateOrAbort({}), /رفض قاطع/);
+});
+
 console.log("\n== wholesale-regression: قفل النسخة الواحدة — منع الطباعة المزدوجة ==");
 
 // نسختان على نفس ملف الحالة = طباعة مزدوجة مضمونة: كل نسخة تُحمّل الحالة مرة
@@ -995,22 +1121,25 @@ console.log("\n== wholesale-regression: قفل النسخة الواحدة — �
 import osMod from "node:os";
 
 const lockSrcs = [
-  "const LOCK_STALE_HINT_MS = 10 * 60 * 1000;",
-  (watcherSrc.match(/const LOCK_BEAT_MIN_INTERVAL_MS = [\d_]+;/) || ["const LOCK_BEAT_MIN_INTERVAL_MS = 30000;"])[0],
+  `const LOCK_BEAT_MIN_INTERVAL_MS = ${readConst("LOCK_BEAT_MIN_INTERVAL_MS")};`,
+  `const LOCK_STALE_MS = ${readConst("LOCK_STALE_MS")};`,
+  `const LOCK_UNREADABLE_RETRIES = ${readConst("LOCK_UNREADABLE_RETRIES")};`,
+  `const LOCK_UNREADABLE_DELAY_MS = ${readConst("LOCK_UNREADABLE_DELAY_MS")};`,
   extractFunctionSource(watcherSrc, "function lockHeldError(message)"),
   extractFunctionSource(watcherSrc, "function processAlive(pid)"),
   extractFunctionSource(watcherSrc, "function lockFilePath()"),
-  extractFunctionSource(watcherSrc, "function acquireSingleInstanceLock(nowMs"),
+  extractFunctionSource(watcherSrc, "function lockPayload(startedAtMs, beatMs)"),
+  extractFunctionSource(watcherSrc, "function publishLockExclusive(lockPath, content)"),
+  extractFunctionSource(watcherSrc, "function writeLockAtomic(lockPath, content)"),
+  extractFunctionSource(watcherSrc, "function makeLockHandle(lockPath, startedAtMs)"),
+  extractFunctionSource(watcherSrc, "async function acquireSingleInstanceLock(nowMs"),
 ].join("\n");
 
 function makeLockApi(stateFilePath, fakePid) {
-  const proc = {
-    pid: fakePid,
-    kill: (pid, sig) => process.kill(pid, sig),
-  };
+  const proc = { pid: fakePid, kill: (pid, sig) => process.kill(pid, sig) };
   return new Function(
     "fs", "os", "config", "process",
-    `${lockSrcs}\nreturn { acquireSingleInstanceLock, lockFilePath, processAlive };`
+    `${lockSrcs}\nreturn { acquireSingleInstanceLock, processAlive };`
   )(fs, osMod, { stateFilePath }, proc);
 }
 
@@ -1018,10 +1147,12 @@ function tmpStatePath(tag) {
   return path.join(osMod.tmpdir(), `ozk-lock-test-${tag}-${process.pid}-${Math.random().toString(36).slice(2)}.json`);
 }
 
-await test("القفل: نسخة واحدة تحصل عليه وتكتب PID ونبضة", () => {
+// لا انتظار حقيقي في الاختبارات: wait يُستبدل بدالة فورية.
+const noWait = { wait: async () => {}, log: { warn() {}, log() {} } };
+
+await test("القفل: نسخة واحدة تحصل عليه وتكتب PID ونبضة", async () => {
   const sp = tmpStatePath("single");
-  const api = makeLockApi(sp, process.pid);
-  const lock = api.acquireSingleInstanceLock();
+  const lock = await makeLockApi(sp, process.pid).acquireSingleInstanceLock(Date.now(), noWait);
   try {
     const written = JSON.parse(fs.readFileSync(lock.path, "utf8"));
     assert.equal(Number(written.pid), process.pid);
@@ -1030,44 +1161,78 @@ await test("القفل: نسخة واحدة تحصل عليه وتكتب PID و�
   assert.ok(!fs.existsSync(lock.path), "لم يُحرَّر القفل عند release");
 });
 
-await test("القفل: نسخة ثانية ونسخة حيّة تحمل القفل ⇒ ترفض الإقلاع (fatalLockHeld)", () => {
+await test("القفل: نسخة حيّة ونبضتها طازجة ⇒ الثانية ترفض الإقلاع (fatalLockHeld)", async () => {
   const sp = tmpStatePath("double");
-  // النسخة الأولى: PID حيّ فعلاً (عملية الاختبار نفسها)
-  const first = makeLockApi(sp, process.pid).acquireSingleInstanceLock();
+  const first = await makeLockApi(sp, process.pid).acquireSingleInstanceLock(Date.now(), noWait);
   try {
-    // النسخة الثانية: PID مختلف، تجد قفلاً لعملية حيّة
     const second = makeLockApi(sp, process.pid + 100000);
-    assert.throws(
-      () => second.acquireSingleInstanceLock(),
+    await assert.rejects(
+      () => second.acquireSingleInstanceLock(Date.now(), noWait),
       (err) => {
         assert.equal(err.fatalLockHeld, true, "لم تُعلَّم fatalLockHeld");
         assert.ok(/طباعة الفاتورة مرتين/.test(err.message), "الرسالة لا تشرح الخطر");
-        assert.ok(err.message.includes(first.path), "الرسالة لا تذكر مسار ملف القفل");
         return true;
       }
     );
   } finally { first.release(); }
 });
 
-await test("القفل: قفل متروك من عملية ميتة يُستولى عليه (لا تعطيل دائم بعد انقطاع كهرباء)", () => {
-  const sp = tmpStatePath("stale");
+await test("القفل: عملية ميتة ⇒ يُستولى عليه (لا تعطيل دائم بعد انقطاع كهرباء)", async () => {
+  const sp = tmpStatePath("dead");
   const lockPath = `${sp}.lock`;
-  // PID شبه مستحيل أن يكون حياً
-  fs.writeFileSync(lockPath, JSON.stringify({ pid: 999999, heartbeatAt: Date.now() - 3600_000 }), "utf8");
-  const api = makeLockApi(sp, process.pid);
-  const lock = api.acquireSingleInstanceLock();
+  fs.writeFileSync(lockPath, JSON.stringify({ pid: 999999, heartbeatAt: Date.now() }), "utf8");
+  const lock = await makeLockApi(sp, process.pid).acquireSingleInstanceLock(Date.now(), noWait);
   try {
     assert.equal(Number(JSON.parse(fs.readFileSync(lockPath, "utf8")).pid), process.pid,
-      "لم يُستولَ على القفل المتروك");
+      "لم يُستولَ على قفل عملية ميتة");
   } finally { lock.release(); }
 });
 
-await test("القفل: نسخة فاشلة لا تحذف قفل النسخة العاملة", () => {
+await test("القفل: PID أُعيد استخدامه (حيّ لكن نبضته بائتة) ⇒ يُستولى عليه لا يُعطّل الطباعة للأبد", async () => {
+  // ملاحظة Codex P1: بعد إيقاف غير نظيف قد يُعيد Windows استخدام رقم العملية
+  // لبرنامج آخر. اعتبار ذلك «نسخة عاملة» يترك الطباعة معطّلة حتى تدخّل يدوي،
+  // لأن المهمة ONSTART بلا سياسة إعادة محاولة.
+  const sp = tmpStatePath("reused");
+  const lockPath = `${sp}.lock`;
+  const staleMs = readConst("LOCK_STALE_MS");
+  // PID حيّ فعلاً (عملية الاختبار) لكن نبضته أقدم من حدّ البيات
+  fs.writeFileSync(lockPath, JSON.stringify({
+    pid: process.pid, heartbeatAt: Date.now() - staleMs - 60_000,
+  }), "utf8");
+  const lock = await makeLockApi(sp, process.pid + 100002).acquireSingleInstanceLock(Date.now(), noWait);
+  try {
+    assert.equal(Number(JSON.parse(fs.readFileSync(lockPath, "utf8")).pid), process.pid + 100002,
+      "لم يُستولَ على قفل نبضته بائتة — الطباعة تبقى معطّلة بلا تدخّل يدوي");
+  } finally { lock.release(); }
+});
+
+await test("القفل: ملف غير قابل للقراءة يُعامَل كمحجوز ولا يُحذف فوراً", async () => {
+  // ملاحظة Codex P1: حذفه فوراً هو بالضبط ما يجعل نسختين تعملان معاً، لأن
+  // النسخة الأخرى قد تكون في منتصف نشره.
+  const sp = tmpStatePath("garbage");
+  const lockPath = `${sp}.lock`;
+  fs.writeFileSync(lockPath, "", "utf8");   // فارغ = نصف منشور
+  const api = makeLockApi(sp, process.pid);
+  let waits = 0;
+  await assert.rejects(
+    () => api.acquireSingleInstanceLock(Date.now(), { wait: async () => { waits++; }, log: { warn() {} } }),
+    (err) => {
+      assert.equal(err.fatalLockHeld, true, "لم يُعامَل كمحجوز");
+      assert.ok(/غير قابل للقراءة/.test(err.message));
+      return true;
+    }
+  );
+  assert.ok(waits >= 1, "لم يُعَد الفحص قبل الحكم");
+  assert.ok(fs.existsSync(lockPath), "حُذف قفل قد تكون نسخة أخرى في منتصف نشره");
+  fs.unlinkSync(lockPath);
+});
+
+await test("القفل: نسخة مرفوضة لا تحذف قفل النسخة العاملة", async () => {
   const sp = tmpStatePath("nosteal");
-  const first = makeLockApi(sp, process.pid).acquireSingleInstanceLock();
+  const first = await makeLockApi(sp, process.pid).acquireSingleInstanceLock(Date.now(), noWait);
   try {
     const second = makeLockApi(sp, process.pid + 100001);
-    try { second.acquireSingleInstanceLock(); } catch { /* مرفوضة كما هو متوقّع */ }
+    try { await second.acquireSingleInstanceLock(Date.now(), noWait); } catch { /* مرفوضة */ }
     assert.ok(fs.existsSync(first.path), "حُذف قفل النسخة العاملة");
     assert.equal(Number(JSON.parse(fs.readFileSync(first.path, "utf8")).pid), process.pid);
   } finally { first.release(); }
@@ -1082,23 +1247,29 @@ await test("processAlive: EPERM (عملية بمستخدم آخر مثل SYSTEM)
   assert.equal(api.processAlive(999999), false);
 });
 
-await test("القفل: إنشاء حصري (wx) لا كتابة عادية — يمنع سباق نسختين تقلعان معاً", () => {
-  const src = extractFunctionSource(watcherSrc, "function acquireSingleInstanceLock(nowMs");
-  assert.ok(/openSync\([^)]*"wx"\)/.test(src),
-    'لا إنشاء حصري "wx" — قراءة ثم كتابة تجعل نسختين متزامنتين تمضيان معاً (TOCTOU)');
-  assert.ok(/EEXIST/.test(src), "EEXIST غير معالَج");
+await test("القفل: النشر ذرّي بمحتواه (linkSync) لا إنشاء فارغ ثم كتابة", () => {
+  // ملاحظة Codex P1: openSync("wx") ينشر ملفاً فارغاً أولاً، فنسخة تقرؤه في
+  // تلك اللحظة تراه تالفاً فتحذفه — فتعمل النسختان معاً.
+  const pub = extractFunctionSource(watcherSrc, "function publishLockExclusive(lockPath, content)");
+  assert.ok(/linkSync/.test(pub), "النشر ليس ذرّياً بمحتواه");
+  // تُجرَّد تعليقات السطر أولاً: الشرح نفسه يذكر openSync("wx") كسبب الرفض،
+  // فالمطابقة على النص الخام تصطاد التعليق لا الكود.
+  const codeOnly = watcherSrc.replace(/^\s*\/\/.*$/gm, "");
+  assert.ok(!/openSync\([^)]*"wx"\)/.test(codeOnly),
+    'ما زال يُستعمل openSync("wx") الذي ينشر ملفاً فارغاً قبل محتواه');
+  const beatSrc = extractFunctionSource(watcherSrc, "function writeLockAtomic(lockPath, content)");
+  assert.ok(/renameSync/.test(beatSrc), "النبضة ليست إبدالاً ذرّياً — تفتح نفس الثغرة كل 30 ثانية");
 });
 
-await test("القفل: نبضة مخنوقة بفاصل أدنى (لا كتابة ملف كل 5 ثوانٍ بلا داعٍ)", () => {
-  assert.ok(/const LOCK_BEAT_MIN_INTERVAL_MS = [\d_]+;/.test(watcherSrc), "لا ثابت لخنق النبضة");
+await test("القفل: نبضة مخنوقة بفاصل أدنى (لا كتابة ملف كل 5 ثوانٍ بلا داعٍ)", async () => {
   const sp = tmpStatePath("beat");
-  const lock = makeLockApi(sp, process.pid).acquireSingleInstanceLock(1_000_000);
+  const lock = await makeLockApi(sp, process.pid).acquireSingleInstanceLock(1_000_000, noWait);
   try {
     const first = JSON.parse(fs.readFileSync(lock.path, "utf8")).heartbeatAt;
-    lock.beat(1_000_100);                 // بعد 100ms — تُتجاهل
+    lock.beat(1_000_100);
     assert.equal(JSON.parse(fs.readFileSync(lock.path, "utf8")).heartbeatAt, first,
       "النبضة كُتبت رغم أن الفاصل أقل من الحد الأدنى");
-    lock.beat(1_000_000 + 60_000);        // بعد دقيقة — تُكتب
+    lock.beat(1_000_000 + readConst("LOCK_BEAT_MIN_INTERVAL_MS") + 1000);
     assert.notEqual(JSON.parse(fs.readFileSync(lock.path, "utf8")).heartbeatAt, first,
       "النبضة لم تُكتب بعد انقضاء الفاصل");
   } finally { lock.release(); }
