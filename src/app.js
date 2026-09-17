@@ -6224,7 +6224,12 @@ const INVENTORY_GROUP_SEQUENCE = [
 
 function inventoryGroupInfo(it) {
   const label = String(it?.groupName || "مواد بدون مجموعة").trim() || "مواد بدون مجموعة";
-  const haystack = normalizeItemName(`${label} ${it?.name || ""}`);
+  // الترتيب يُحسم من اسم المجموعة (label) وحده لا من اسم الصنف: فأصناف المجموعة
+  // الواحدة كانت تنشطر على دلاء ترتيب مختلفة عند مطابقة اسم الصنف (تصادمات مثل
+  // «كروز» ↔ «روز»)، فتظهر المجموعة مكرَّرة عبر عدة كتل. حسم الـrank من الـlabel
+  // يمنح كل أصناف المجموعة نفس الترتيب فتبقى كتلة واحدة. لا دمج للأصناف — نوحّد
+  // رأس المجموعة وترتيبها فقط.
+  const haystack = normalizeItemName(label);
   const rank = INVENTORY_GROUP_SEQUENCE.findIndex((aliases) =>
     aliases.some((alias) => haystack.includes(normalizeItemName(alias)))
   );
