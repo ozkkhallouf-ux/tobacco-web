@@ -9704,17 +9704,34 @@ function poAmeenNavigate(direction) {
   render();
 }
 
+function poAmeenUnitCatalogs() {
+  const stockItems = latestStockReport() ? reportItems(latestStockReport()) : [];
+  return [
+    ...(state.approvedPriceItems || []),
+    ...(state.poItemSnapshots || []),
+    ...stockItems
+  ];
+}
+
 function poAmeenItemsRowsHtml(invoice, query) {
   const filteredItems = invoice ? poCalc.poAmeenItemMatches(query, invoice.items || []) : [];
-  return filteredItems.map((item) => `
+  const catalogs = poAmeenUnitCatalogs();
+  return filteredItems.map((item) => {
+    const factor = poCalc.poAmeenResolveUnit2Factor(item, catalogs);
+    const display = poCalc.poAmeenCartonDisplay(item, factor);
+    const qtyCell = display.qtyHint
+      ? `${escapeHtml(display.qtyText)}<small class="muted" style="display:block">${escapeHtml(display.qtyHint)}</small>`
+      : escapeHtml(display.qtyText);
+    return `
     <tr>
       <td>${escapeHtml(poCalc.poItemDisplayLabel(item.itemNumber, item.itemName))}</td>
-      <td class="inv-num">${escapeHtml(String(item.qty ?? "—"))}</td>
-      <td>${escapeHtml(item.unit || "—")}</td>
-      <td class="inv-line-total">${item.lastPrice != null ? Number(item.lastPrice).toFixed(2) : "—"}</td>
-      <td class="inv-line-total">${item.avgPrice != null ? Number(item.avgPrice).toFixed(2) : "—"}</td>
+      <td class="inv-num">${qtyCell}</td>
+      <td>${escapeHtml(display.unit)}</td>
+      <td class="inv-line-total">${escapeHtml(display.lastPriceText)}</td>
+      <td class="inv-line-total">${escapeHtml(display.avgPriceText)}</td>
     </tr>
-  `).join("") || `<tr><td colspan="5" class="muted">لا توجد بنود مطابقة.</td></tr>`;
+  `;
+  }).join("") || `<tr><td colspan="5" class="muted">لا توجد بنود مطابقة.</td></tr>`;
 }
 
 function poAmeenPanelHtml() {
@@ -9775,18 +9792,19 @@ function poAmeenPanelHtml() {
             <thead>
               <tr>
                 <th>الصنف</th>
-                <th style="width:90px">الكمية</th>
+                <th style="width:110px">الكمية</th>
                 <th style="width:90px">الوحدة</th>
-                <th style="width:130px">آخر تكلفة للوحدة الأساسية</th>
-                <th style="width:130px">متوسط تكلفة الوحدة الأساسية للفترة</th>
+                <th style="width:130px">آخر تكلفة للكرتونة</th>
+                <th style="width:130px">متوسط تكلفة الكرتونة للفترة</th>
               </tr>
             </thead>
             <tbody data-po-ameen-items-body>${itemsRows}</tbody>
           </table>
         </div>
         <p class="muted" style="margin:6px 4px;font-size:0.85em">
-          آخر تكلفة/متوسط تكلفة للوحدة الأساسية للمادة (وليس سعر الوحدة المختارة بعمود
-          «الوحدة» أعلاه)، محسوبان من فواتير الأمين الفعلية المسحوبة${report.summary && report.summary.periodDays ? ` لآخر ${escapeHtml(String(report.summary.periodDays))} يوماً` : ""}
+          الكمية وآخر/متوسط التكلفة معروضة بالكرتونة: كمية الأمين بالكروز ÷ معامل
+          الكرتونة، والتكلفة × المعامل. تحت الكمية يظهر أصلها بالكروز. إن غاب المعامل
+          تُترك القيم بالكروز كما وصلت من فواتير الأمين المسحوبة${report.summary && report.summary.periodDays ? ` لآخر ${escapeHtml(String(report.summary.periodDays))} يوماً` : ""}
           مع استبعاد مرتجعات المشتريات من المتوسط (تقريب، وليس رقماً محاسبياً مضموناً 100%).
         </p>
       ` : state.poAmeenSupplierName
