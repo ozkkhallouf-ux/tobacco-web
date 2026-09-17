@@ -2,7 +2,10 @@ node_modules/
 last-printed.json
 logs/
 run-watcher.bat
-bin/SumatraPDF.exe
+# كل ما في bin/ عدا العلامة: SumatraPDF يكتب ملف إعداداته هناك عند كل طباعة،
+# وأي ملف غير متتبَّع فيه يجعل daily-git-pull يتخطّى السحب إلى الأبد.
+bin/*
+!bin/.gitkeep
 *.pdf
 *.tmp
 *.lock
