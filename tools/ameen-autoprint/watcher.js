@@ -7,6 +7,8 @@
 
 const fs   = require("fs");
 const path = require("path");
+const os   = require("os");
+const net  = require("net");
 const { execSync, spawnSync } = require("child_process");
 const sql  = require("mssql");
 const puppeteer = require("puppeteer");
@@ -235,20 +237,250 @@ function parseSqlConnStr(cs) {
 }
 
 // ─── إدارة الحالة ─────────────────────────────────────────────────────────
+//
+// نافذتان يجب أن تبقيا متّسقتين، وعدم اتّساقهما كان سبب عطل «إعادة طباعة فواتير
+// قديمة»:
+//   • نافذة الاستعلام  — كل فاتورة تاريخها >= state.watchFromDate.
+//   • ذاكرة الـdedup   — علامات state.printedGuids، تُحذف بعد PRINTED_RETENTION_DAYS.
+//
+// كانت watchFromDate تُضبط مرة واحدة يوم التثبيت ولا تتقدّم أبداً، فتكبر نافذة
+// الاستعلام بلا حد بينما الذاكرة محدودة بسبعة أيام. فما إن تُحذف علامة فاتورة
+// حتى يعيدها الاستعلام كأنها جديدة فتُطبع ثانية — وتأخذ ختماً زمنياً جديداً
+// فتُنسى بعد سبعة أيام أخرى وتُطبع من جديد، بلا نهاية. والأسوأ أن إعادة الطباعة
+// نفسها ترفع changed فتُشغّل prune مرة أخرى في الدورة نفسها، فتتحوّل إلى شلّال.
+//
+// الشرط الصارم: نافذة الاستعلام يجب أن تبقى **أقصر** من ذاكرة الـdedup، كي لا
+// يعود الاستعلام بفاتورة نُسيت علامتها أبداً.
+// اللحاق أسبوع كامل: نافذة ضيّقة (يومان) كانت تُسقط بصمت كل فاتورة تعطّلت
+// الطابعة أكثر من يومين بعدها — وهذا تراجع عن السلوك القديم الذي كان يطبعها
+// (بلا حد) ولو متأخّرة. والاحتفاظ شهر: العلامة سطر `guid: timestamp` بحدود 50
+// بايت، فثلاثون يوماً بخمسين فاتورة يومياً ≈ 75 كيلوبايت — لا وزن له، ويمنح
+// الشرط هامش 23 يوماً بدل 3.
+const WATCH_LOOKBACK_DAYS = 7;       // أبعد ما ينظر إليه الاستعلام إلى الوراء
+const PRINTED_RETENTION_DAYS = 30;   // مدة الاحتفاظ بعلامة «طُبعت»
+const WINDOW_SAFETY_MARGIN_DAYS = 3; // هامش يفصل أقصى نافذة عن حدّ الاحتفاظ
+
+// نسخة بنية ملف الحالة. الحالة القادمة من النسخة القديمة (بلا رقم نسخة) خطرة
+// عند أول تشغيل للكود الجديد: النسخة القديمة كانت تحذف العلامات بعد 7 أيام،
+// فحالتها لا تتذكّر إلا آخر أسبوع، بينما النافذة الجديدة تُفتح على 7 أيام
+// كاملة. فأي فاتورة حُذفت علامتها قبيل الترحيل (وهي بالضبط الفواتير التي كانت
+// تُعاد طباعتها) تصبح «جديدة» في عين الكود الجديد فتُطبع مرة أخرى — دفعة
+// أخيرة من الورق يراها المستخدم بعد النشر تماماً كما كان يراها قبله.
+//
+// الحل: دورة ترحيل واحدة تتبنّى كل فاتورة قائمة داخل النافذة كـ«مطبوعة
+// مسبقاً» بلا طباعة، فتصبح الحالة خطَّ أساس موثوقاً، وتبدأ الطباعة من الفواتير
+// الجديدة بعد لحظة الترحيل فقط. هذا هو نفس عقد أول تشغيل: لا تُطبع فواتير
+// سابقة.
+const STATE_SCHEMA_VERSION = 2;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// حارس بنيوي يمنع إعادة إدخال العطل بتعديل لاحق على أحد الرقمين وحده.
+// الهامش (3 أيام) يغطّي فاتورة مؤرَّخة بالغد (الاستعلام يقبلها) طُبعت اليوم.
+function assertDedupWindowInvariant() {
+  if (PRINTED_RETENTION_DAYS < WATCH_LOOKBACK_DAYS + 3) {
+    throw new Error(
+      `رفض قاطع: PRINTED_RETENTION_DAYS (${PRINTED_RETENTION_DAYS}) يجب أن تتجاوز `
+      + `WATCH_LOOKBACK_DAYS (${WATCH_LOOKBACK_DAYS}) بثلاثة أيام على الأقل، وإلا `
+      + "أعاد الاستعلام فواتير حُذفت علاماتها فطُبعت من جديد."
+    );
+  }
+}
+
+// تاريخ محلّي YYYY-MM-DD. لا يجوز استعمال toISOString هنا: هو بتوقيت UTC بينما
+// u.Date وGETDATE() في الأمين بالتوقيت المحلّي (دمشق UTC+3)، فبين منتصف الليل
+// والثالثة فجراً يعطي UTC تاريخ الأمس فتتّسع النافذة يوماً كاملاً بلا قصد.
+function localDateStr(ms) {
+  const d = new Date(ms);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+// تقدّم بداية النافذة مع مرور الأيام، ولا تتراجع بها أبداً.
+// تُعيد التاريخ السابق عند التقدّم فعلاً، و null إن لم يتغيّر شيء.
+function advanceWatchFromDate(state, nowMs = Date.now()) {
+  const lookbackFloor = localDateStr(nowMs - WATCH_LOOKBACK_DAYS * DAY_MS);
+  // أقصى اتساع مسموح: يجب أن تبقى النافذة داخل ذاكرة العلامات وإلا عادت إعادة
+  // الطباعة (وهي العلّة الأصلية). الهامش يغطّي فاتورة مؤرَّخة بالغد.
+  const hardFloor = localDateStr(
+    nowMs - (PRINTED_RETENTION_DAYS - WINDOW_SAFETY_MARGIN_DAYS) * DAY_MS
+  );
+  const processed = String(state.processedThrough || "");
+
+  // الحدّ الأدنى لا يتجاوز آخر يوم فُحصت فواتيره فعلاً. بلا هذا القيد، انقطاعٌ
+  // أطول من نافذة اللحاق (طابعة متوقّفة والأمين يستمر بإدخال الفواتير) يدفع
+  // الحدّ بمجرّد مرور الوقت، فتُستثنى المتأخّرات من الاستعلام نهائياً وتُفقد.
+  let desired = lookbackFloor;
+  if (processed && processed < lookbackFloor) desired = processed;
+
+  // وإن طال الانقطاع حتى تجاوزت المتأخّرات أقصى نافذة آمنة، يُقصّ الحدّ —
+  // لكن لا بصمت: الأيام المتخلّى عنها تُسمّى صراحةً في السجل.
+  let abandonedFrom = null;
+  if (desired < hardFloor) {
+    abandonedFrom = desired;
+    desired = hardFloor;
+  }
+
+  const current = String(state.watchFromDate || "");
+  if (current && current >= desired) return null;
+  return {
+    previous: current || "(غير مضبوط)",
+    current: (state.watchFromDate = desired),
+    abandonedFrom,
+  };
+}
+
 function loadState() {
-  try { return JSON.parse(fs.readFileSync(config.stateFilePath, "utf8")); }
-  catch { return null; }
+  let raw;
+  try { raw = fs.readFileSync(config.stateFilePath, "utf8"); }
+  catch { return null; }  // لا ملف بعد — أول تشغيل، وهذه ليست حالة عطل
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object"
+        || !parsed.printedGuids || typeof parsed.printedGuids !== "object"
+        || !/^\d{4}-\d{2}-\d{2}$/.test(String(parsed.watchFromDate || ""))) {
+      throw new Error("بنية ملف الحالة غير صالحة");
+    }
+    return parsed;
+  } catch (err) {
+    // ملف موجود لكنه غير صالح ≠ أول تشغيل: يُسجَّل صراحةً لأن البدء من الصفر
+    // يعني إعادة طباعة فواتير اليوم، ولا يجوز أن يمرّ ذلك صامتاً.
+    console.error(
+      `تحذير: ملف الحالة "${config.stateFilePath}" غير صالح (${describeError(err)}) — `
+      + "تبدأ المراقبة من اليوم، وقد تُعاد طباعة فواتير اليوم المطبوعة سابقاً."
+    );
+    return null;
+  }
 }
 
 function saveState(state) {
-  fs.writeFileSync(config.stateFilePath, JSON.stringify(state, null, 2), "utf8");
+  // كتابة ذرّية: انقطاع أثناء writeFileSync يترك ملفاً مبتوراً، فيُقرأ لاحقاً
+  // كأنه أول تشغيل وتُعاد طباعة فواتير اليوم كلها. الملف المؤقّت بجانب الأصل
+  // (نفس القرص) فيكون rename ذرّياً فعلاً.
+  const tmpPath = `${config.stateFilePath}.tmp`;
+  fs.writeFileSync(tmpPath, JSON.stringify(state, null, 2), "utf8");
+  fs.renameSync(tmpPath, config.stateFilePath);
 }
 
-// حذف GUIDs أقدم من 7 أيام لمنع تضخّم الملف
+// حذف علامات الطباعة الأقدم من PRINTED_RETENTION_DAYS لمنع تضخّم الملف.
+// آمن فقط لأن النافذة أقصر منها (assertDedupWindowInvariant): كل علامة تُحذف
+// هنا تخصّ فاتورة خرجت أصلاً من نافذة الاستعلام فلن يعيدها أبداً.
 function pruneOldGuids(state) {
-  const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  const cutoff = Date.now() - PRINTED_RETENTION_DAYS * DAY_MS;
   for (const [guid, ts] of Object.entries(state.printedGuids)) {
     if (ts < cutoff) delete state.printedGuids[guid];
+  }
+}
+
+// ─── قفل النسخة الواحدة ───────────────────────────────────────────────────
+// نسختان من المراقب على نفس ملف الحالة = طباعة مزدوجة مضمونة، وهي تبدو
+// للمستخدم «فواتير قديمة تُطبع من جديد». السبب أن كل نسخة تُحمّل الحالة إلى
+// الذاكرة مرة واحدة عند الإقلاع ثم تكتب الكائن **كاملاً**، فكتابة الثانية
+// تدهس علامات الأولى (lost update) فتعود الفواتير غير مُعلَّمة فتُطبع مرتين.
+// والكتابة الذرّية لا تحمي من هذا إطلاقاً: هي تمنع الملف المبتور لا الدهس.
+//
+// وهذا ليس احتمالاً نظرياً — المستودع نفسه يوفّر مسارَي تشغيل على نفس الملف:
+// المهمة المجدولة "OZK-AmeenAutoPrint" (تعمل كـSYSTEM عند الإقلاع عبر
+// install-service.bat) و`start.bat` اليدوي. تشغيل الثاني للتحقق «هل يعمل؟»
+// بينما الأولى تعمل يكفي لإنتاج العطل.
+// نبضة كل 30 ثانية، والقفل يُعدّ بائتاً بعد 10 دقائق = عشرون نبضة مفقودة.
+// الفجوة واسعة عمداً: الاستيلاء الخاطئ على قفل نسخة عاملة يعني طباعة مزدوجة،
+// والنبضة تُرسَل أيضاً بعد كل فاتورة داخل حلقة الطباعة فلا تبيت نسخة منتجة.
+// قفل النسخة الواحدة — **مملوك لنظام التشغيل**.
+//
+// النسخة الملفّية (PID + نبضة + بيات + استيلاء) أنتجت خمس ملاحظات P1 متتابعة،
+// وكلها من أصل واحد: ملف JSON لا يصلح mutex. كل تصميم «اقرأ ثم قرّر ثم اكتب»
+// يترك فجوة بين الفحص والكتابة، والنبضة تفتح الفجوة من جديد كل ثلاثين ثانية،
+// ورقم العملية قابل لإعادة الاستخدام — فيحجب الطباعة إلى الأبد لأن المهمة
+// مسجَّلة ONSTART بلا سياسة إعادة محاولة. وهذا ضرر **أسوأ** من العطل الذي
+// يمنعه القفل: طابعة صامتة بلا سبب ظاهر.
+//
+// البديل: حجز منفذ على 127.0.0.1. النظام يضمن أن عملية واحدة فقط تحجزه،
+// ويحرّره **هو** لحظة موت العملية — فلا PID ولا نبضة ولا بيات ولا ملف متروك
+// ولا تنظيف يدوي ولا فجوة سباق. ولا حاجة لفحص ملكية أثناء الطباعة: ما دامت
+// العملية حيّة فالحجز قائم بحكم النظام.
+//
+// المقايضة المقبولة: لو حجز برنامجٌ آخر المنفذ نفسه لم يُقلع المراقب، والرسالة
+// تسمّي المنفذ وموضع تغييره في config.js. واحتمال ذلك أقلّ بكثير من إعادة
+// استخدام رقم عملية، والفشل ظاهر وقابل للإصلاح بسطر واحد.
+function lockHeldError(message) {
+  const err = new Error(message);
+  err.fatalLockHeld = true;
+  return err;
+}
+
+function singleInstancePort() {
+  const port = Number(config.singleInstancePort);
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) {
+    throw new Error(
+      `رفض قاطع: singleInstancePort في config.js غير صالح (${config.singleInstancePort}).`
+      + " يجب أن يكون رقم منفذ بين 1024 و65535."
+    );
+  }
+  return port;
+}
+
+function acquireSingleInstanceLock() {
+  return new Promise((resolve, reject) => {
+    // التحقّق داخل الوعد عمداً: الدالة ترفض دائماً ولا ترمي تزامنياً أحياناً،
+    // فيكفي مستدعياً واحداً أن يلتقط الفشل بـcatch واحد.
+    let port;
+    try { port = singleInstancePort(); }
+    catch (err) { reject(err); return; }
+
+    const server = net.createServer();
+    // لا يُبقي حلقة الأحداث حيّة: الحجز قائم ما دامت العملية تعمل، ولا يمنع خروجها.
+    server.unref();
+    server.once("error", (err) => {
+      if (err && err.code === "EADDRINUSE") {
+        reject(lockHeldError(
+          `رفض قاطع: نسخة أخرى من المراقب تعمل بالفعل (المنفذ ${port} محجوز).`
+          + " تشغيل نسختين على نفس ملف الحالة يسبّب طباعة الفاتورة مرتين."
+          + ' أوقف النسخة الأخرى — أو المهمة "OZK-AmeenAutoPrint" — ثم أعد التشغيل.'
+          + ` وإن تأكّدت أن الحاجز برنامج آخر لا المراقب، غيّر singleInstancePort في config.js.`
+        ));
+        return;
+      }
+      reject(err);
+    });
+    server.once("listening", () => {
+      resolve({
+        port,
+        release() { try { server.close(); } catch { /* الخروج يحرّره على أي حال */ } },
+      });
+    });
+    server.listen(port, "127.0.0.1");
+  });
+}
+
+// فشل حفظ الحالة عطل حرج لا تحذير عابر: الفواتير طُبعت فعلاً وعلاماتها في
+// الذاكرة وحدها، فأي إعادة تشغيل بعده يُعيد طباعتها كلها. يقع فعلاً حين
+// يُنشئ SYSTEM ملف الحالة ثم يُشغَّل start.bat بمستخدم لا يملك حق الكتابة،
+// أو حين يمتلئ القرص. لا يُرمى: الطباعة نجحت فعلاً ووقف الدورة لا يصلح شيئاً،
+// لكنه يجب أن يكون مستحيل التفويت في السجل.
+// عند الإقلاع الأمر مختلف عن أثناء التشغيل: حالة لا تُكتب أصلاً تعني أنه لا
+// يمكن تذكّر أي فاتورة، فكل إعادة تشغيل تُعيد طباعة كل شيء من جديد. هذا عطل
+// إعداد دائم (مجلد غير قابل للكتابة، قرص ممتلئ) يجب أن يمنع التشغيل لا أن
+// يُسجَّل ويُمضى — ومنطق «لا نرمي» لا يسري إلا بعد طباعة نجحت فعلاً.
+function persistInitialStateOrAbort(state) {
+  if (persistState(state)) return;
+  throw new Error(
+    `رفض قاطع: تعذّر كتابة ملف الحالة "${config.stateFilePath}" عند الإقلاع.`
+    + " بلا حالة دائمة لا يمكن تذكّر ما طُبع، فكل إعادة تشغيل ستُعيد طباعة الفواتير."
+    + " صحّح صلاحيات الكتابة على المجلد أو مساحة القرص ثم أعد التشغيل."
+  );
+}
+
+function persistState(state) {
+  try {
+    saveState(state);
+    return true;
+  } catch (err) {
+    console.error(
+      `!! عطل حرج: تعذّر حفظ ملف الحالة "${config.stateFilePath}" — ${describeError(err)}.`
+      + " الفواتير المطبوعة لن تبقى مُعلَّمة بعد إعادة التشغيل فستُطبع من جديد."
+      + " تحقّق من صلاحيات الكتابة على المجلد ومن مساحة القرص."
+    );
+    return false;
   }
 }
 
@@ -390,23 +622,100 @@ function describeError(err) {
   return String(err);
 }
 
-// ─── دورة الاستعلام ───────────────────────────────────────────────────────
+
+
 async function poll(pool, state) {
+  // تقديم النافذة **قبل** الاستعلام لا بعده: الاستعلام يجب ألا ينظر أبعد ممّا
+  // تتذكّره علامات الطباعة، وإلا أعاد فاتورة حُذفت علامتها فطُبعت من جديد.
+  const moved = advanceWatchFromDate(state);
+  let changed = moved !== null;
+  if (moved) {
+    console.log(
+      `تقديم نافذة المراقبة: ${moved.previous} ← ${moved.current}`
+      + " (الفواتير الأقدم لن تُستعلَم ولن تُطبع)"
+    );
+    if (moved.abandonedFrom) {
+      console.error(
+        `!! تحذير: انقطاع طويل. كان المفحوص حتى ${moved.abandonedFrom}، والنافذة`
+        + ` قُصّت إلى ${moved.current} كي لا تتجاوز ذاكرة العلامات.`
+        + " الفواتير بين التاريخين لن تُطبع تلقائياً — راجعها في الأمين واطبعها يدوياً."
+      );
+    }
+  }
+
   const result = await pool.request()
     .input("guid0",     sql.UniqueIdentifier, config.wholesaleTypeGuid)
     .input("watchFrom", sql.NVarChar,         state.watchFromDate)
     .query(SALES_QUERY);
 
-  if (!result.recordset.length) return;
+  // لا نخرج مبكراً على نتيجة فارغة: تقديم النافذة أعلاه يجب أن يُحفظ أيضاً.
+  const invoices = result.recordset.length ? groupIntoInvoices(result.recordset) : [];
 
-  const invoices = groupIntoInvoices(result.recordset);
-  let changed = false;
+  // دورة الترحيل: تتبنّى ما أثبتت الحالة القديمة أنه مرّ عليها، بلا طباعة ورقة
+  // واحدة — ولا تلمس فواتير فجوة النشر، فتبقى لتُطبع في الدورة التالية.
+  if (state.adoptBaseline) {
+    // ترحيل حالة النسخة القديمة إلى خطّ أساس موثوق.
+    //
+    // لا يمكن **بنيوياً** تمييز «طُبعت وحُذفت علامتها» من «لم تُطبع» لأي فاتورة
+    // بلا علامة: النسخة القديمة تحذف العلامات بعد سبعة أيام من **وقت الطباعة**
+    // لا من تاريخ الفاتورة، ولا تحفظ أي علامة مائية. فداخل يوم انقضاء الصلاحية
+    // تنقضي علامات ما طُبع أوّلَه وتبقى علامات آخره، والفاتورة الفاشلة لا تُمييَّز
+    // عن المطبوعة المنسيّة.
+    //
+    // وكل تخمين جُرِّب أخطأ في أحد الاتجاهين: الحدّ من أحدث ختم يتبنّى الفاتورة
+    // الأقدم الفاشلة؛ والحدّ من مدة الاحتفاظ يُعيد طباعة يوم الحدّ كاملاً؛ ودليل
+    // نشاط اليوم دليلٌ على أن النسخة القديمة طبعت **شيئاً آخر** لا هذه الفاتورة.
+    //
+    // فلا تخمين: تُعَدّ كل فاتورة بلا علامة داخل النافذة مطبوعةً مسبقاً — فصفر
+    // إعادة طباعة **مضمونة** لا مرجّحة — وتُسرد صراحةً بأرقامها وتواريخها في
+    // السجل مع تعليمة التحقّق، فلا تُفقد واحدة بصمت. وهذا نفس عقد أول تشغيل:
+    // «الفواتير السابقة لن تُطبع».
+    const adopted = [];
+    for (const inv of invoices) {
+      if (state.printedGuids[inv.guid]) continue;
+      state.printedGuids[inv.guid] = Date.now();
+      adopted.push({ guid: inv.guid, label: `#${inv.number} (${inv.date})` });
+    }
+    delete state.adoptBaseline;
+    pruneOldGuids(state);
+    if (!persistState(state)) {
+      // لم تُطبع ورقة بعد: منطق «لا نرمي» لا يسري هنا. إن رُفعت الراية ومضينا،
+      // الدورة التالية تطبع ما تُبنّي، ثم إعادة التشغيل تعيد الترحيل من القرص
+      // (الراية ما زالت هناك) فتُطبع الفواتير مرة ثانية.
+      state.adoptBaseline = true;
+      for (const entry of adopted) delete state.printedGuids[entry.guid];
+      const err = new Error(
+        `رفض قاطع: تعذّر حفظ نتيجة الترحيل "${config.stateFilePath}".`
+        + " بلا حالة دائمة ستُطبع الفواتير القديمة ثم تُعاد بعد إعادة التشغيل."
+        + " صحّح صلاحيات الكتابة على المجلد أو مساحة القرص ثم أعد التشغيل."
+      );
+      err.fatalPersist = true;
+      throw err;
+    }
+    console.log(
+      `ترحيل الحالة: ${adopted.length} فاتورة داخل النافذة (${state.watchFromDate} ← اليوم)`
+      + " عُدّت مطبوعة مسبقاً ولن تُطبع. الطباعة تبدأ من الفواتير الجديدة بعد هذه اللحظة."
+    );
+    if (adopted.length) {
+      // السرد الكامل مقصود: هو ما يمنع الفقدان الصامت. إن كانت فيها فاتورة لم
+      // تُطبع فعلاً (توقّفت النسخة القديمة قبل النشر) فهي هنا بالاسم والتاريخ.
+      console.log(
+        "   للتحقّق من الأمين وطباعة أي ناقص يدوياً — القائمة الكاملة: "
+        + adopted.map((e) => e.label).join("، ")
+      );
+    }
+    return;
+  }
+
+  // «فُحص حتى اليوم» لا تُرفع إلا إذا لم يبق في النافذة شيء غير مطبوع: وإلا
+  // تقدّمت النافذة فوق متأخّرات حقيقية فأُسقطت نهائياً.
+  let fullyProcessed = true;
 
   for (const inv of invoices) {
     if (state.printedGuids[inv.guid]) continue; // مطبوعة سابقاً
     // إن سقطت الطابعة أثناء الدورة نتوقف فوراً: الفاتورة تبقى غير مطبوعة وغير
     // مُعلَّمة في state، فتُلتقط كما هي في أول دورة بعد عودة الطابعة (dedup بلا تغيير).
-    if (!printerGate.ready()) break;
+    if (!printerGate.ready()) { fullyProcessed = false; break; }
     try {
       // رصيد الزبون الحقيقي (Ameen) — عبر AccountGUID فقط، لا اسم الزبون.
       // إن تعذّر العثور عليه، تبقى customerBalance فارغة ولا يُطبع أي رقم رصيد.
@@ -420,14 +729,24 @@ async function poll(pool, state) {
       state.printedGuids[inv.guid] = Date.now();
       changed = true;
     } catch (printErr) {
-      // تسجيل الخطأ بدون إيقاف البرنامج، لإعادة المحاولة في الدورة التالية
+      // تسجيل الخطأ بدون إيقاف البرنامج، لإعادة المحاولة في الدورة التالية.
+      // وفاتورة لم تُطبع تعني أن اليوم لم يُنجَز، فلا تتقدّم علامة الفحص فوقها.
+      fullyProcessed = false;
       console.error(`خطأ طباعة فاتورة #${inv.number}: ${printErr.message}`);
+    }
+  }
+
+  if (fullyProcessed) {
+    const today = localDateStr(Date.now());
+    if (state.processedThrough !== today) {
+      state.processedThrough = today;
+      changed = true;
     }
   }
 
   if (changed) {
     pruneOldGuids(state);
-    saveState(state);
+    persistState(state);
   }
 }
 
@@ -442,6 +761,16 @@ async function main() {
   }
 
   assertWholesaleConfig();
+  assertDedupWindowInvariant();
+
+  // القفل قبل أي شيء آخر: لا فحص طابعة ولا اتصال SQL ولا طباعة إن كانت نسخة
+  // أخرى تعمل. ويُحرَّر في كل مسارات الخروج كي لا يبقى قفل متروك.
+  const lock = await acquireSingleInstanceLock();
+  console.log(`  قفل   →  منفذ ${lock.port} محجوز (نسخة واحدة فقط)`);
+  process.on("exit", () => lock.release());
+  for (const sig of ["SIGINT", "SIGTERM", "SIGHUP", "SIGBREAK"]) {
+    process.on(sig, () => { lock.release(); process.exit(0); });
+  }
   // عطل الإعداد الدائم يرمي من هنا وينهي العملية كما كان تماماً. أما العطل العابر
   // (طابعة Wi-Fi لم تجهز بعد عند الإقلاع) فلا يُنهي المراقب: يُسجَّل، ويبدأ التشغيل
   // معلَّق الطباعة، وتُستأنف المراقبة تلقائياً فور عودة الطابعة.
@@ -462,9 +791,11 @@ async function main() {
   }
   console.log("══════════════════════════════════════════════\n");
 
-  // الاتصال بـSQL Server مع إعادة محاولة
+  // الاتصال بـSQL Server مع إعادة محاولة. لا نبضة ولا إبقاء حيّ: الحجز مملوك
+  // للنظام، فطول انتظار SQL لا يُبيته ولا يسمح لنسخة أخرى بانتزاعه.
   const sqlCfg = parseSqlConnStr(config.sqlConnectionString);
   let pool;
+  // لا نبضة ولا إبقاء حيّ: الحجز مملوك للنظام، فطول انتظار SQL لا يُبيته.
   for (;;) {
     try {
       process.stdout.write("الاتصال بـSQL Server... ");
@@ -480,12 +811,32 @@ async function main() {
   // تهيئة الحالة — أول تشغيل: لا تُطبع فواتير اليوم السابقة
   let state = loadState();
   if (!state) {
-    const today = new Date().toISOString().slice(0, 10);
-    state = { watchFromDate: today, printedGuids: {} };
-    saveState(state);
+    const today = localDateStr(Date.now());
+    state = {
+      schemaVersion: STATE_SCHEMA_VERSION,
+      watchFromDate: today,
+      processedThrough: today,
+      printedGuids: {},
+    };
+    persistInitialStateOrAbort(state);
     console.log(`تهيئة: بداية المراقبة من ${today} (الفواتير السابقة لن تُطبع)`);
   } else {
     const printed = Object.keys(state.printedGuids).length;
+    // حالة قادمة من نسخة قديمة: watchFromDate مجمّدة على يوم التثبيت. تُقدَّم
+    // هنا فوراً وتُحفظ، فيتوقّف نزيف إعادة الطباعة من أول دورة لا بعد أيام.
+    const movedFrom = advanceWatchFromDate(state);
+    const legacy = Number(state.schemaVersion || 1) < STATE_SCHEMA_VERSION;
+    if (legacy) {
+      // علامات النسخة القديمة لا تغطّي النافذة الجديدة (كانت تُحذف بعد 7 أيام)،
+      // فدورة الترحيل تتبنّى القائم بلا طباعة قبل أي ورقة.
+      state.schemaVersion = STATE_SCHEMA_VERSION;
+      state.adoptBaseline = true;
+    }
+    if (movedFrom !== null || legacy) {
+      persistInitialStateOrAbort(state);
+      if (movedFrom !== null) console.log(`تصحيح نافذة مجمّدة: ${movedFrom.previous} ← ${movedFrom.current}`);
+      if (legacy) console.log("حالة من نسخة قديمة — دورة ترحيل واحدة ستتبنّى الفواتير القائمة بلا طباعة.");
+    }
     console.log(`استئناف: مراقبة منذ ${state.watchFromDate} | ${printed} فاتورة مطبوعة سابقاً`);
   }
 
@@ -499,7 +850,7 @@ async function main() {
       try {
         await poll(pool, state);
       } catch (err) {
-        if (err && err.fatalPrinterConfig) throw err;
+        if (err && (err.fatalPrinterConfig || err.fatalPersist)) throw err;
         console.error(`خطأ: ${describeError(err)}`);
         // إعادة الاتصال إذا انقطع
         if (!pool.connected) {
@@ -518,6 +869,11 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error("خطأ فادح:", err.message);
+  // القفل المحجوز خروج مقصود بسبب مفهوم، لا عطل غامض — يُميَّز في السجل.
+  if (err && err.fatalLockHeld) {
+    console.error(`\n${err.message}\n`);
+    process.exit(2);
+  }
+  console.error("خطأ فادح:", describeError(err));
   process.exit(1);
 });
