@@ -65,6 +65,11 @@ vm.runInContext(
    function inventoryPageGeometryStub() {}
    ${chunks.join("\n")}
    ;globalThis.__api = { INVENTORY_PACK_SAFETY_PX, isPriorityInventoryGroup, inventoryPageGeometry, inventoryPackPages, inventoryBalanceLastPage, inventoryTwoColumnPages,
+     priorityInventoryGroupRank(label) {
+       const haystack = normalizeItemName(String(label || ""));
+       return PRIORITY_INVENTORY_GROUPS.findIndex((aliases) =>
+         aliases.some((alias) => haystack.includes(normalizeItemName(alias))));
+     },
      runReportPages(measureStub, geometry, entriesCount) {
        __measureStub = measureStub;
        const parts = { entries: Array.from({ length: entriesCount }, (_, i) => ({ name: "م" + i, html: "", rows: 1 })) };
@@ -456,27 +461,57 @@ const readingOrder = (pages) => pages.flatMap((page) => [...page.columns[0], ...
 }
 
 // === 18) تثبيت المجموعات الخمس: لا تقفز مجموعة عادية أمام مجموعة مثبَّتة لم تُوضَع ===
+// حاسم (Codex P1 على PR #244): label المجموعة في بيانات الأمين مختصرٌ ولا يحمل
+// اسم الصنف الكامل. المطابقة بـ haystack.includes(alias) (تضمين نصي)، فالبديل
+// الطويل «كابتن بلاك»/«كينغ دوم» لا يتضمَّنه label القصير «كابتن»/«كينغ» أبداً.
+// لذا نختبر بـ labels المجموعات الحقيقية المستخرجة من scripts/price-data.json،
+// ونؤكّد أن الخمس كلها تأخذ الرُّتب 0..4 بالترتيب المطلوب. هذا الفحص يفشل بلا
+// إضافة labels الأمين الفعلية للبدائل، وينجح بعدها.
 {
-  // isPriorityInventoryGroup يميّز الأسماء الخمسة (وبدائلها) عن سواها.
+  // labels المجموعات الحقيقية من بيانات الأسعار (لا الأسماء الطويلة للأصناف).
+  const priceData = JSON.parse(
+    readFileSync(new URL("./price-data.json", import.meta.url), "utf8")
+  );
+  const dataRows = Array.isArray(priceData)
+    ? priceData
+    : Object.values(priceData).find(Array.isArray);
+  const dataGroupLabels = new Set(
+    dataRows.map((row) => String(row && row.group != null ? row.group : "")).filter(Boolean)
+  );
+  // الخمس المثبَّتة بترتيبها المطلوب (rank المتوقَّع = الفهرس)، وكلٌّ بـ label
+  // الأمين الفعلي المختصر كما يظهر في price-data.json.
+  const priorityRealLabels = ["غلواز", "ماستر", "كابتن", "اليغانس", "كينغ"];
+  const rankOf = (label) => api.priorityInventoryGroupRank(label);
+  priorityRealLabels.forEach((label, expectedRank) => {
+    check(`تثبيت: label الأمين «${label}» موجود فعلاً في price-data.json`,
+      dataGroupLabels.has(label));
+    check(`تثبيت: «${label}» مجموعة مثبَّتة (isPriority=true)`,
+      api.isPriorityInventoryGroup(label) === true);
+    check(`تثبيت: «${label}» رُتبتها ${expectedRank} (الترتيب المطلوب محفوظ)`,
+      rankOf(label) === expectedRank);
+  });
+  // البدائل والصيغ اللاتينية تبقى مقبولة أيضاً (توافق خلفي).
   for (const name of ["غلواز", "ماستر", "كابتن بلاك", "اليغانس", "كينغ دوم",
                       "جولواز", "كينج دوم", "master", "elegance"]) {
     check(`تثبيت: «${name}» مجموعة مثبَّتة`, api.isPriorityInventoryGroup(name) === true);
   }
-  for (const name of ["مانشستر", "اوسكار", "روز", "بارسا"]) {
+  // مجموعات قريبة الاسم لكنها ليست مثبَّتة — خصوصاً «كينت» (Kent) التي يجب ألّا
+  // يلتقطها label القصير «كينغ».
+  for (const name of ["مانشستر", "اوسكار", "روز", "بارسا", "كينت"]) {
     check(`تثبيت: «${name}» ليست مثبَّتة`, api.isPriorityInventoryGroup(name) === false);
   }
-  // مجموعتان مثبَّتتان ثم مجموعة عادية صغيرة: كينغ دوم لا تتّسع في باقي العمود
+  // مجموعتان مثبَّتتان ثم مجموعة عادية صغيرة: كينغ لا تتّسع في باقي العمود
   // الأول، فلا يجوز أن تُسحَب «مانشستر» أمامها لملء الفجوة — تبقى المثبَّتة أولاً.
   const withGroup = (label, height) => ({ name: label, group: { label }, height });
   const isPriority = (entry) => api.isPriorityInventoryGroup(entry.group && entry.group.label);
-  const entries = [withGroup("غلواز", 600), withGroup("كينغ دوم", 500), withGroup("مانشستر", 300)];
+  const entries = [withGroup("غلواز", 600), withGroup("كينغ", 500), withGroup("مانشستر", 300)];
   const pages = api.inventoryPackPages(entries, { fullBudget: 1000, safetyPx: 0, isPriority });
   const order = flat(pages);
-  check("تثبيت: لم تُسحَب «مانشستر» أمام «كينغ دوم» غير الموضوعة",
+  check("تثبيت: لم تُسحَب «مانشستر» أمام «كينغ» غير الموضوعة",
     JSON.stringify(names(pages[0])[0]) === JSON.stringify(["غلواز"]));
   check("تثبيت: المثبَّتتان تسبقان العادية في ترتيب القراءة",
     order.indexOf("غلواز") < order.indexOf("مانشستر")
-      && order.indexOf("كينغ دوم") < order.indexOf("مانشستر"));
+      && order.indexOf("كينغ") < order.indexOf("مانشستر"));
   check("تثبيت: كل المجموعات على صفحة واحدة مرة واحدة بالضبط",
     pages.length === 1 && order.length === 3 && new Set(order).size === 3);
 }
