@@ -5,3 +5,4 @@ run-watcher.bat
 bin/SumatraPDF.exe
 *.pdf
 *.tmp
+*.lock
