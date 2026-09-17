@@ -481,6 +481,78 @@ const readingOrder = (pages) => pages.flatMap((page) => [...page.columns[0], ...
     pages.length === 1 && order.length === 3 && new Set(order).size === 3);
 }
 
+// === 19) أجزاء مجموعة مقسَّمة لا تُعاد ترتيبها بالنظرة الأمامية (ملاحظة Codex P1) ===
+// السيناريو: مجموعة عادية أطول من عمود كامل قُسِّمت إلى 3 أجزاء بـ
+// splitOversizedInventoryEntries (تحمل part/partCount وتتشارك group.label)،
+// يتبعها مجموعة صغيرة كاملة «تتّسع» في فجوة أسفل جزء 1/3.
+//
+// العطل الذي يرصده هذا الفحص: بعد وضع 1/3 (600px) في عمود 1000px تبقى فجوة
+// 400px؛ الجزء 2/3 (600px) لا يتّسع فيها، فكانت النظرة الأمامية القديمة تمسح
+// للأمام وتُرقّي أول ما يتّسع — إمّا الجزء 3/3 (300px) فينقلب الترتيب إلى
+// 1/3, 3/3, 2/3، أو المجموعة الكاملة الصغيرة فتُقحَم بين 1/3 و2/3. كلاهما
+// إفساد لتلاصق أجزاء المجموعة الواحدة وترتيبها. الإصلاح: استبعاد كل جزء مقسَّم
+// من الترقية + إلغاء النظرة الأمامية حين تكون المجموعة التالية جزءاً مفتوحاً.
+{
+  const part = (label, idx, count, height) =>
+    ({ name: `${label} ${idx + 1}/${count}`, group: { label }, part: idx, partCount: count, height });
+  const entries = [
+    part("عملاقة", 0, 3, 600),   // 1/3
+    part("عملاقة", 1, 3, 600),   // 2/3
+    part("عملاقة", 2, 3, 300),   // 3/3 — يتّسع في فجوة أسفل 1/3، طُعم إعادة الترتيب
+    g("صغيرة", 250)              // مجموعة كاملة تتّسع أيضاً في تلك الفجوة
+  ];
+  const pages = api.inventoryPackPages(entries, { fullBudget: 1000, safetyPx: 0 });
+  const order = flat(pages);
+
+  // أجزاء «عملاقة» بترتيبها الصارم 1/3, 2/3, 3/3.
+  const partOrder = order.filter((name) => name.startsWith("عملاقة"));
+  check("أجزاء مقسَّمة: الترتيب الصارم 1/3 ثم 2/3 ثم 3/3 محفوظ",
+    JSON.stringify(partOrder) === JSON.stringify(["عملاقة 1/3", "عملاقة 2/3", "عملاقة 3/3"]));
+
+  // تلاصق: لا مجموعة أخرى بين جزأين متتاليين — الأجزاء الثلاثة كتلة متّصلة.
+  const first = order.indexOf("عملاقة 1/3");
+  const contiguous = order.slice(first, first + 3);
+  check("أجزاء مقسَّمة: الأجزاء الثلاثة متلاصقة بلا إقحام مجموعة أخرى بينها",
+    JSON.stringify(contiguous) === JSON.stringify(["عملاقة 1/3", "عملاقة 2/3", "عملاقة 3/3"]));
+
+  // لا فقد ولا تكرار لأي جزء أو مجموعة.
+  check("أجزاء مقسَّمة: كل جزء/مجموعة مرة واحدة بالضبط بلا فقد ولا تكرار",
+    order.length === entries.length && new Set(order).size === entries.length);
+
+  // لا فيضان بأي عمود رغم منع الترقية.
+  check("أجزاء مقسَّمة: لا فيضان بأي عمود",
+    pages.every((page) => page.sizes.every((size) => size <= 1000 + 1e-6)));
+
+  // مرجع سلبي: محاكاة النظرة الأمامية القديمة (بلا حارسي الأجزاء) كانت تكسر
+  // الترتيب فعلاً — تُرقّي 3/3 أمام 2/3 غير الموضوع.
+  const legacyLookahead = (list, limit) => {
+    const cols = [];
+    let col = [];
+    let size = 0;
+    const done = new Array(list.length).fill(false);
+    let cur = 0;
+    let left = list.length;
+    while (left > 0) {
+      while (cur < list.length && done[cur]) cur += 1;
+      if (cur >= list.length) break;
+      const put = (k) => { col.push(list[k].name); size += list[k].height; done[k] = true; left -= 1; };
+      if (size + list[cur].height <= limit + 1e-6 || col.length === 0) { put(cur); continue; }
+      let promoted = false;
+      for (let j = cur + 1; j < list.length; j += 1) {
+        if (done[j]) continue;
+        if (size + list[j].height <= limit + 1e-6) { put(j); promoted = true; break; }
+      }
+      if (promoted) continue;
+      cols.push(col); col = []; size = 0;
+    }
+    if (col.length) cols.push(col);
+    return cols.flat();
+  };
+  const legacyOrder = legacyLookahead(entries, 1000).filter((name) => name.startsWith("عملاقة"));
+  check("مرجع: النظرة الأمامية القديمة كانت تقلب ترتيب الأجزاء فعلاً",
+    JSON.stringify(legacyOrder) !== JSON.stringify(["عملاقة 1/3", "عملاقة 2/3", "عملاقة 3/3"]));
+}
+
 if (failed) {
   console.error("\ninventory report page packing check FAILED");
   process.exit(1);

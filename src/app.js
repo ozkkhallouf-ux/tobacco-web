@@ -6398,6 +6398,9 @@ function inventoryPackPages(entries, options = {}) {
     pages.push(page);
     return page;
   };
+  // جزء من مجموعة قُسِّمت لأنها أطول من عمود كامل (splitOversizedInventoryEntries):
+  // يحمل partCount ≥ 2 ويتشارك مع بقية أجزائه ترتيباً إلزامياً (1/3 ثم 2/3 ثم 3/3).
+  const isSplitPart = (entry) => Number(entry && entry.partCount) > 1;
   const placed = new Array(list.length).fill(false);
   let remaining = list.length;
   let page = pushPage();
@@ -6425,11 +6428,20 @@ function inventoryPackPages(entries, options = {}) {
     // المجموعة التالية بالترتيب لا تتّسع والعمود غير فارغ ⇒ فجوة. نملؤها بأول
     // مجموعة لاحقة تدخل كاملةً — لكن فقط إن كانت التالية نفسها غير مثبَّتة، وبلا
     // تجاوز أي مجموعة مثبَّتة لم تُوضَع (كي لا تُدفَع مثبَّتة خارج مكانها).
+    //
+    // حارسان يمنعان النظرة الأمامية من إفساد ترتيب أجزاء مجموعة مقسَّمة:
+    // (١) لا نُرقّي أي جزء من مجموعة مقسَّمة (partCount ≥ 2) — فترقية جزء لاحق
+    //     (3/3) أمام جزء أسبق لم يُوضَع (2/3) كانت تقلب ترتيب صفوف المجموعة نفسها.
+    // (٢) إن كانت المجموعة التالية بالترتيب نفسها جزءاً من مجموعة مقسَّمة (تسلسل
+    //     مفتوح)، نُلغي النظرة الأمامية كلياً لهذه الخطوة كي لا تُقحَم مجموعة أخرى
+    //     بين جزأين متتاليين — تُوضَع الأجزاء بتسلسلها الطبيعي (تنتقل للعمود/الصفحة
+    //     التالية إن لم تتّسع) فتبقى متلاصقة وبترتيبها.
     let promoted = false;
-    if (!isPriority(list[cursor])) {
+    if (!isPriority(list[cursor]) && !isSplitPart(list[cursor])) {
       for (let j = cursor + 1; j < list.length; j += 1) {
         if (placed[j]) continue;
         if (isPriority(list[j])) break; // لا نتجاوز مجموعة مثبَّتة لم تُوضَع بعد
+        if (isSplitPart(list[j])) continue; // جزء مجموعة مقسَّمة: لا يُرقَّى ليبقى مع أجزائه بالترتيب
         if (page.sizes[column] + sizeOf(list[j]) <= limit + 1e-6) {
           placeAt(j);
           promoted = true;
