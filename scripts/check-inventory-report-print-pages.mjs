@@ -35,6 +35,12 @@ const ENGINE = [
   grab(/const REPORT_STYLE = `<style>[\s\S]*?<\/style>`;/, "REPORT_STYLE"),
   grab(/const INVENTORY_REPORT_STYLE = `<style>[\s\S]*?<\/style>`;/, "INVENTORY_REPORT_STYLE"),
   grab(/const INVENTORY_PACK_SAFETY_PX = \d+;/, "SAFETY"),
+  // النظرة الأمامية في المعبِّئ + تثبيت المجموعات الخمس تعتمد isPriorityInventoryGroup
+  // (وهي تستدعي normalizeItemName وتقرأ PRIORITY_INVENTORY_GROUPS) — بلا استخراجها
+  // ينهار المحرّك بـReferenceError داخل المتصفح.
+  grab(/function normalizeItemName\(value\) \{[\s\S]*?\n\}\n/, "normalizeItemName"),
+  grab(/const PRIORITY_INVENTORY_GROUPS = \[[\s\S]*?\n\];/, "PRIORITY_INVENTORY_GROUPS"),
+  grab(/function isPriorityInventoryGroup\(label\) \{[\s\S]*?\n\}\n/, "isPriorityInventoryGroup"),
   grab(/function inventoryPageGeometry\(mode\) \{[\s\S]*?\n\}\n/, "inventoryPageGeometry"),
   grab(/function inventoryPackPages\(entries, options = \{\}\) \{[\s\S]*?\n\}\n/, "inventoryPackPages"),
   grab(/function inventoryBalanceLastPage\(page, limit\) \{[\s\S]*?\n\}\n/, "inventoryBalanceLastPage"),
