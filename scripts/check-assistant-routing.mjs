@@ -1371,14 +1371,30 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   assert.ok(!ydText.includes("111"), `عرض ربح اليوم جواباً عن أمس:\n${ydText}`);
   assert.ok(ydText.includes(yesterday), "لم يذكر تاريخ أمس");
 
-  // «الاسبوع» = آخر 7 أيام (فترة صريحة تمتد أكثر من يوم) — لدينا تقريران فقط
-  // داخلها (اليوم وأمس)، فتجميعهما يثبت أن الفترة تُحسب لا يوماً واحداً، وبقية
-  // أيام الأسبوع فجوة يجب الإعلان عنها لا تجاهلها صامتاً.
+  // تجميع مدى متعدد الأيام يثبت أن الفترة تُحسب لا يوماً واحداً، وبقية الأيام
+  // فجوة يجب الإعلان عنها لا تجاهلها صامتاً.
+  //
+  // الصياغة يجب أن تكون «آخر 7 أيام» (أو «الاسبوع» بلا «هذا»)، لا «هذا الأسبوع».
+  // الأسبوع السوري يبدأ السبت: يوم السبت «هذا الأسبوع» = اليوم وحده، وأمس (الجمعة)
+  // خارج النافذة بالحساب الصحيح — فالاختبار القديم كان يسقط `npm run check`
+  // ويوقف pages.yml كل سبت رغم أن المنطق سليم (قيس 2026-09-19: الجواب 111 لا 333).
   const b = await loadAssistant({ fixtures });
-  const range = await b.ask(TOKENS.owner, "كم الربح هذا الاسبوع؟");
+  const range = await b.ask(TOKENS.owner, "كم الربح اخر 7 ايام؟");
   const rangeText = String(range.body.reply);
   assert.ok(rangeText.includes("333"), `لم يجمع صافي الربح عبر يومي الفترة:\n${rangeText}`);
   assert.ok(/بلا تقرير حركة/.test(rangeText), `لم يُعلن الأيام الغائبة داخل الفترة:\n${rangeText}`);
+
+  // و«هذا الأسبوع» يبقى أسبوعاً تقويمياً (سبت→اليوم) لا نافذة متدحرجة: يوم السبت
+  // لا يشمل ربح الجمعة، وفي بقية الأيام أمس داخل الأسبوع فيُجمع.
+  const cal = await loadAssistant({ fixtures });
+  const calText = String((await cal.ask(TOKENS.owner, "كم الربح هذا الاسبوع؟")).body.reply);
+  const damascusWeekday = new Date(Date.now() + 180 * 60_000).getUTCDay();
+  if (damascusWeekday === 6) {
+    assert.ok(calText.includes("111"), `سبت: «هذا الأسبوع» يجب أن يقرأ ربح اليوم فقط:\n${calText}`);
+    assert.ok(!calText.includes("222"), `سبت: «هذا الأسبوع» أدخل ربح الجمعة (أسبوع سابق):\n${calText}`);
+  } else {
+    assert.ok(calText.includes("333"), `«هذا الأسبوع» لم يجمع اليوم وأمس وهما داخل الأسبوع:\n${calText}`);
+  }
 
   // وفترة صريحة بلا أي تقرير مطابق على الإطلاق ⇒ امتناع صريح، لا استبدال بتقرير من فترة أخرى
   const oldFixtures = defaultFixtures();
