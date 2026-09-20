@@ -105,7 +105,21 @@ $KHALIL_USER_GUID = "9A5FE33A-720C-493B-8A13-CE33EE5A008E"
 $backfillHours = Get-Setting "KHALIL_AUDIT_BACKFILL_HOURS"
 if (-not $backfillHours) { $backfillHours = 0 }
 
-$connStr = Get-Setting "AMEEN_SQL_CONNECTION_STRING"
+# ⚠️ استثناء مقصود — لا تُبدِّله إلى AMEEN_SQL_CONNECTION_STRING.
+# هذا السكربت مسار قراءة محض (SELECT على log000 وحده، ولا يكتب إلى الأمين
+# إطلاقاً)، ومع ذلك يستعمل عمداً نصَّ اتصال الكتابة. السبب: دالّة
+# Get-DynamicOverlapCap أدناه تستعلم sys.dm_tran_active_transactions و
+# sys.dm_tran_database_transactions، وهما DMV على مستوى الخادم يتطلبان
+# صلاحية VIEW SERVER STATE. حساب القراءة المخصص (tobacco_sync_reader) بلا
+# أي صلاحية server-level بقرار صريح — يبقى محصوراً بـ db_datareader داخل
+# AmnDb002 — بينما حساب الكتابة (tobacco_sync_service) يملك VIEW SERVER
+# STATE بمنح صريح.
+# بدون هذه الصلاحية لا ينهار السكربت: استعلام الـDMV مُلتقَط بـ try/catch
+# ويعود $null، فيتوقف تقدّم حدّ الـoverlap (fail-closed) بلا فقدان أي حدث —
+# لكن نطاق إعادة المسح على log000 يتّسع بلا سقف مع كل تشغيل (كل دقيقتين)،
+# فالنتيجة تدهور أداء تراكمي صامت لا عطل ظاهر. لذلك التثبيت هنا مقصود.
+# يحرس هذا الاستثناءَ فحصُ scripts/check-ameen-read-connection-preference.mjs.
+$connStr = Get-Setting "AMEEN_SQL_WRITE_CONNECTION_STRING"
 $supabaseUrl = Get-Setting "TOBACCO_SUPABASE_URL"
 if (-not $supabaseUrl) { $supabaseUrl = "https://dyxbirfpxeocqffnfdeb.supabase.co" }
 $supabaseUrl = $supabaseUrl.TrimEnd("/")
@@ -114,7 +128,7 @@ if (-not $apiKey) { $apiKey = Get-Setting "SUPABASE_PUBLIC_KEY" }
 $syncEmail = Get-Setting "TOBACCO_SYNC_EMAIL"
 $syncPassword = Get-Setting "TOBACCO_SYNC_PASSWORD"
 
-if (-not $connStr) { Write-Log "ERROR: AMEEN_SQL_CONNECTION_STRING missing."; exit 1 }
+if (-not $connStr) { Write-Log "ERROR: AMEEN_SQL_WRITE_CONNECTION_STRING missing."; exit 1 }
 if (-not $apiKey -or -not $syncEmail -or -not $syncPassword) {
     Write-Log "ERROR: Supabase sync credentials missing."
     exit 1

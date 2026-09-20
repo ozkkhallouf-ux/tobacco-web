@@ -43,8 +43,8 @@ function Write-Log($msg) {
     Add-Content -LiteralPath $LogFile -Value $line -Encoding UTF8
 }
 
-$connStr = Get-Setting "AMEEN_SQL_WRITE_CONNECTION_STRING"
-if (-not $connStr) { $connStr = Get-Setting "AMEEN_SQL_CONNECTION_STRING" }
+$connStr = Get-Setting "AMEEN_SQL_CONNECTION_STRING"
+if (-not $connStr) { $connStr = Get-Setting "AMEEN_SQL_WRITE_CONNECTION_STRING" }
 $supabaseUrl = Get-Setting "TOBACCO_SUPABASE_URL"
 if (-not $supabaseUrl) { $supabaseUrl = "https://dyxbirfpxeocqffnfdeb.supabase.co" }
 $supabaseUrl = $supabaseUrl.TrimEnd("/")
@@ -53,7 +53,7 @@ if (-not $apiKey) { $apiKey = Get-Setting "SUPABASE_PUBLIC_KEY" }
 $syncEmail = Get-Setting "TOBACCO_SYNC_EMAIL"
 $syncPassword = Get-Setting "TOBACCO_SYNC_PASSWORD"
 
-if (-not $connStr) { Write-Log "خطأ: AMEEN_SQL_WRITE_CONNECTION_STRING غير موجود."; exit 1 }
+if (-not $connStr) { Write-Log "خطأ: AMEEN_SQL_CONNECTION_STRING غير موجود."; exit 1 }
 
 $fromDate = (Get-Date).Date.AddDays(-$PeriodDays)
 $fromIso = $fromDate.ToString("yyyy-MM-dd")

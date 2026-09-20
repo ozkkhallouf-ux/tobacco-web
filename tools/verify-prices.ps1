@@ -17,8 +17,8 @@ if (Test-Path $EnvFile) {
         [System.Environment]::SetEnvironmentVariable($parts[0].Trim(), $parts[1].Trim())
     }
 }
-$connStr = $env:AMEEN_SQL_WRITE_CONNECTION_STRING
-if (-not $connStr) { $connStr = $env:AMEEN_SQL_CONNECTION_STRING }
+$connStr = $env:AMEEN_SQL_CONNECTION_STRING
+if (-not $connStr) { $connStr = $env:AMEEN_SQL_WRITE_CONNECTION_STRING }
 if (-not $connStr) { Write-Host "خطأ: connection string غير موجود." -ForegroundColor Red; exit 1 }
 
 $jumlaGuid = $env:AMEEN_JUMLA_PRICELIST_GUID
