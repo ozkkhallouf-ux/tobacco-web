@@ -1,12 +1,14 @@
 {
-  "schemaVersion": 1,
-  "status": "idle",
-  "owner": null,
-  "task": null,
-  "branch": null,
-  "files": [],
-  "startedAt": null,
-  "updatedAt": "2026-09-13T11:40:47Z",
-  "pr": null,
-  "note": "No active task. Read AI_HANDOFF.md before starting work."
+    "schemaVersion":  1,
+    "status":  "active",
+    "owner":  "Claude",
+    "task":  "fix: stock_qty net calc (negative warehouse balances ignored)",
+    "branch":  "task branch pending for: fix: stock_qty net calc (negative warehouse balances ignored)",
+    "files":  [
+                  "tools/ameen-stock-query.sql,src/app.js"
+              ],
+    "startedAt":  "2026-09-20T13:18:46Z",
+    "updatedAt":  "2026-09-20T13:18:46Z",
+    "pr":  null,
+    "note":  "قراءة فقط من الأمين، لا كتابة"
 }
