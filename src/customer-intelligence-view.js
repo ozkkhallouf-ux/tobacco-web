@@ -11,7 +11,6 @@
 // ============================================================================
 (function () {
   "use strict";
-  console.log("[customerIntel:init]");
 
   const ROUTE = "customerIntel";
   const REFRESH_MS = 120000;
@@ -21,38 +20,6 @@
   let lastError = null;
   let lastUpdatedAt = null;
   let refreshTimer = null;
-
-  // تشخيص مؤقت لتتبّع سبب غياب الزر على iPhone — يُزال بعد إثبات السبب.
-  // لا بيانات زبائن هنا، فقط اسم مرحلة التنفيذ الأخيرة ثلاث قيم منطقية عند
-  // addNav، ومرئي فقط لمن يملك صلاحية هذا المسار أصلاً (نفس بوابة الوصول).
-  let diagStage = "INIT";
-  let diagDetail = null;
-
-  function renderDiagBadge() {
-    if (!window.ozkCanAccessRoute?.(ROUTE)) {
-      document.getElementById("ozk-ci-diag")?.remove();
-      return;
-    }
-    let badge = document.getElementById("ozk-ci-diag");
-    if (!badge) {
-      badge = document.createElement("div");
-      badge.id = "ozk-ci-diag";
-      badge.style.cssText = "position:fixed;bottom:8px;left:8px;z-index:2147483647;background:#111;color:#0f0;font:11px/1.4 monospace;padding:4px 8px;border-radius:4px;opacity:.85;pointer-events:none;direction:ltr;white-space:pre;";
-      document.body?.appendChild(badge);
-    }
-    const parts = [diagStage];
-    if (diagDetail) parts.push(JSON.stringify(diagDetail));
-    badge.textContent = "CI: " + parts.join(" ");
-  }
-
-  function setDiag(stage, detail) {
-    diagStage = stage;
-    diagDetail = detail || null;
-    renderDiagBadge();
-  }
-
-  window.ozkCustomerIntelDiag = Object.freeze({ get stage() { return diagStage; }, get detail() { return diagDetail; } });
-  setDiag("INIT");
 
   const view = {
     search: "",
@@ -474,18 +441,12 @@
   }
 
   function addNav() {
-    const accessAllowed = Boolean(window.ozkCanAccessRoute?.(ROUTE));
-    const existingButton = Boolean(document.querySelector(`[data-route="${ROUTE}"]`));
-    const nav = document.querySelector("aside .sidebar nav, aside nav, .sidebar nav");
-    const navFound = Boolean(nav);
-    console.log("[customerIntel:addNav]", { accessAllowed, existingButton, navFound });
-    setDiag("ADD_NAV", { accessAllowed, existingButton, navFound });
-
-    if (!accessAllowed) {
+    if (!window.ozkCanAccessRoute?.(ROUTE)) {
       document.querySelectorAll(`[data-route="${ROUTE}"]`).forEach((node) => node.remove());
       return;
     }
-    if (existingButton) return;
+    if (document.querySelector(`[data-route="${ROUTE}"]`)) return;
+    const nav = document.querySelector("aside .sidebar nav, aside nav, .sidebar nav");
     if (!nav) return;
     const template = nav.querySelector("[data-route]");
     const button = document.createElement(template?.tagName === "A" ? "a" : "button");
@@ -495,8 +456,6 @@
     if (button.tagName === "A") button.href = "?route=customerIntel";
     button.addEventListener("click", (event) => { event.preventDefault(); setRoute(ROUTE); });
     nav.insertBefore(button, nav.firstChild);
-    console.log("[customerIntel:inserted]");
-    setDiag("INSERTED", { accessAllowed, existingButton, navFound });
   }
 
   function syncTimer() {
@@ -514,8 +473,6 @@
 
   try {
     allowedRoutes.add(ROUTE);
-    console.log("[customerIntel:route-added]");
-    setDiag("ROUTE_ADDED");
     if (new URLSearchParams(window.location.search).get("route") === ROUTE && window.ozkCanAccessRoute?.(ROUTE)) state.route = ROUTE;
 
     const baseRender = render;
@@ -531,8 +488,6 @@
       addNav();
       syncTimer();
     };
-    console.log("[customerIntel:render-wrapped]");
-    setDiag("RENDER_WRAPPED");
 
     window.ozkCustomerIntelligenceView = Object.freeze({
       ROUTE,
@@ -548,7 +503,5 @@
     if (state?.route === ROUTE && window.ozkCanAccessRoute?.(ROUTE)) setTimeout(loadIntel, 0);
   } catch (error) {
     console.error("[OZK Customer Intelligence View Init]", error);
-    console.error("[customerIntel:error]", error?.name, error?.message, error?.stack);
-    setDiag("ERROR", { name: String(error?.name || "Error"), message: String(error?.message || "").slice(0, 200) });
   }
 })();
