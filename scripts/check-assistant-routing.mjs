@@ -1344,6 +1344,31 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   // إصلاح #25 على PR #205: أداة `profit` كانت تتجاهل ctx.period كلياً وتقرأ
   // دائماً أحدث تقرير `ameen_daily_profit` بصرف النظر عن اليوم/الفترة
   // المطلوبة — فسؤال «كم كان الربح أمس؟» كان يُجاب برقم **اليوم**.
+  //
+  // هذه الكتلة وحدها (حتى نهاية القسم) تحقن تاريخاً مرجعياً ثابتاً بدل
+  // الاعتماد على تاريخ التشغيل الفعلي — كان الفحص يفشل في بداية الأسبوع
+  // (السبت/الأحد) لأن «هذا الأسبوع» حينها يوم أو يومان فقط، وهما بالضبط
+  // اليومان اللذان لهما تقرير، فلا تبقى فجوة يُعلَن عنها. loadAssistant()
+  // يُنفّذ الوحدة الحقيقية financial-assistant/index.ts بنفس عملية Node
+  // (تحويل TS إلى ملف مؤقت ثم import)، فتجاوز Date العام هنا يطال حساب
+  // الفترة داخل المساعد أيضاً لا الاختبار وحده. مرجع الأربعاء عمداً: ليس
+  // بداية الأسبوع (سبت) ولا نهايته القريبة (أحد)، فتبقى الفجوة (سبت-اثنين)
+  // ثابتة أياً كان يوم التشغيل الحقيقي. للتحقق من عدم الاعتماد على تاريخ
+  // بعينه: CHECK_ASSISTANT_ROUTING_NOW=2026-09-19 (سبت، بداية الأسبوع) أو
+  // 2026-09-22 (ثلاثاء، وسطه) node scripts/check-assistant-routing.mjs
+  const referenceIso = process.env.CHECK_ASSISTANT_ROUTING_NOW || "2026-09-23"; // أربعاء
+  const RealDate = globalThis.Date;
+  class FixedDate extends RealDate {
+    constructor(...args) {
+      if (args.length === 0) super(`${referenceIso}T12:00:00.000Z`);
+      else super(...args);
+    }
+    static now() {
+      return new RealDate(`${referenceIso}T12:00:00.000Z`).getTime();
+    }
+  }
+  globalThis.Date = FixedDate;
+  try {
   const today = new Date(Date.now() + 180 * 60_000).toISOString().slice(0, 10);
   const yesterday = new Date(Date.now() + 180 * 60_000 - 86_400_000).toISOString().slice(0, 10);
   const dayBefore = new Date(Date.now() + 180 * 60_000 - 2 * 86_400_000).toISOString().slice(0, 10);
@@ -1371,9 +1396,12 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   assert.ok(!ydText.includes("111"), `عرض ربح اليوم جواباً عن أمس:\n${ydText}`);
   assert.ok(ydText.includes(yesterday), "لم يذكر تاريخ أمس");
 
-  // «الاسبوع» = آخر 7 أيام (فترة صريحة تمتد أكثر من يوم) — لدينا تقريران فقط
-  // داخلها (اليوم وأمس)، فتجميعهما يثبت أن الفترة تُحسب لا يوماً واحداً، وبقية
-  // أيام الأسبوع فجوة يجب الإعلان عنها لا تجاهلها صامتاً.
+  // «هذا الاسبوع» أسبوع تقويمي يبدأ السبت (financial-assistant/index.ts:
+  // parsePeriod، فرع «هذا الاسبوع|الاسبوع الحالي|هالاسبوع» — يُفحص قبل النمط
+  // العام «أسبوع» الذي يعني آخر 7 أيام فقط؛ إصلاح Codex على PR #205). التاريخ
+  // المرجعي أربعاء، فالفترة (سبت-أربعاء) خمسة أيام، لدينا تقريران فقط داخلها
+  // (اليوم وأمس)، فتجميعهما يثبت أن الفترة تُحسب لا يوماً واحداً، وبقية
+  // أيام الأسبوع (سبت-اثنين) فجوة حقيقية يجب الإعلان عنها لا تجاهلها صامتاً.
   const b = await loadAssistant({ fixtures });
   const range = await b.ask(TOKENS.owner, "كم الربح هذا الاسبوع؟");
   const rangeText = String(range.body.reply);
@@ -1400,6 +1428,9 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   const latest = await e.ask(TOKENS.owner, "ما الأرباح؟");
   assert.ok(String(latest.body.reply).includes("111"), "سؤال بلا فترة لم يأخذ أحدث تقرير ربح");
   ok("أداة الأرباح تحترم الفترة المطلوبة: يوم محدد، تجميع مدى، وامتناع صريح عند الغياب");
+  } finally {
+    globalThis.Date = RealDate;
+  }
 }
 
 // ── ث) مرتجعات الشراء وحدها في الفترة لا تُقرأ «لا توجد فواتير» ─────────────
