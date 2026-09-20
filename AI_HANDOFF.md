@@ -2,6 +2,13 @@
 
 يقرأه Claude وCodex قبل كل مهمة. أحدث سجل يكون في الأعلى. لا تحذف السجلات السابقة.
 
+## 2026-09-20 - Claude - fix stock_qty net calc
+
+- Status: completed
+- Branch: task branch pending for: fix: stock_qty net calc (negative warehouse balances ignored)
+- Files: tools/ameen-stock-query.sql,src/app.js
+- Result: 440 items، مجموع stock_qty=60307.44 مقابل mt000.Qty=60308.44، اليغانس طويل فضي=514، اليغانس سليم أزرق=-215، npm run check + check:critical ناجحان، commit 5ea7bc4 على فرع fix/ameen-stock-qty-net-calc مدفوع لـorigin
+- Handoff UTC: 2026-09-20T13:40:04Z
 ## 2026-09-13 - Claude - إصلاح أساس وحدة سطر الفاتورة عند الطباعة (#733)
 
 - Status: completed
