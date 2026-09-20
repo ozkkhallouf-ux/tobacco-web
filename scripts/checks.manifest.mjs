@@ -23,6 +23,7 @@ export const CHECKS = [
   'check.mjs',
   'check-alert-on-automation-failure.mjs',
   'check-ameen-autoprint-regression.mjs',
+  'check-ameen-read-connection-preference.mjs',
   'check-ameen-read-gateway.mjs',
   'check-ameen-read-worker-registration.mjs',
   'check-assistant-authorization.mjs',
