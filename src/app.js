@@ -4428,9 +4428,7 @@ const ameenFilters = [
 ];
 
 function itemQty(item) {
-  const qty = Number(item?.stockQty || 0);
-  const positiveQty = Number(item?.stockQtyPositive || 0);
-  return qty > 0 ? qty : positiveQty;
+  return Number(item?.stockQty || 0);
 }
 
 function itemUnit1Name(item) {
