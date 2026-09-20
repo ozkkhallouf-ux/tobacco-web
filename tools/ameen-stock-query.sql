@@ -11,6 +11,12 @@
 --   item_name, item_number, item_guid, group_name,
 --   stock_qty, stock_qty_net, stock_qty_positive,
 --   unit1_name, unit2_name, unit2_factor
+--
+-- stock_qty is always the NET balance across stores (stock_qty_net), including
+-- negative values. It must never fall back to stock_qty_positive: a material
+-- can be positive in one store and negative in another (uncleared transfer),
+-- and summing only the positive side inflates the reported total. stock_qty_net
+-- and stock_qty_positive stay separate diagnostic fields — do not remove them.
 
 with per_store as (
   select
@@ -41,13 +47,7 @@ select
   cast(mt.GUID as nvarchar(36)) as item_guid,
   mt.Name as item_name,
   nullif(ltrim(rtrim(gr.Name)), '') as group_name,
-  cast(
-    case
-      when coalesce(stock.stock_qty_positive, 0) > 0 then stock.stock_qty_positive
-      else coalesce(stock.stock_qty_net, mt.Qty, 0)
-    end
-    as decimal(18, 3)
-  ) as stock_qty,
+  cast(coalesce(stock.stock_qty_net, mt.Qty, 0) as decimal(18, 3)) as stock_qty,
   cast(coalesce(stock.stock_qty_net, mt.Qty, 0) as decimal(18, 3)) as stock_qty_net,
   cast(coalesce(stock.stock_qty_positive, 0) as decimal(18, 3)) as stock_qty_positive,
   nullif(ltrim(rtrim(mt.Unity)), '') as unit1_name,
