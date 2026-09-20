@@ -37,6 +37,7 @@ export const CHECKS = [
   'check-customer-intelligence-wiring.mjs',
   'check-customer-intelligence.mjs',
   'check-customer-invoice-identity.mjs',
+  'check-daily-pull-not-silently-stuck.mjs',
   'check-decision-pipeline-safety.mjs',
   'check-decision-scoring.mjs',
   'check-docker-dev-port-binding.mjs',

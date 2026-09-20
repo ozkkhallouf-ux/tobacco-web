@@ -38,6 +38,35 @@ function Send-FailureAlert([string]$Reason) {
   }
 }
 
+# التخطّي ليس فشلاً، لكن تكراره شلل صامت: الجهاز يتوقّف عن استلام أي تحديث ولا
+# أحد يعلم. وقع فعلاً بين 2026-09-07 و2026-09-17 — ملف `SumatraPDF-settings.txt`
+# غير المتتبَّع (يكتبه SumatraPDF عند كل طباعة) جعل الحارس يتخطّى **أحد عشر
+# يوماً متتالياً**، فبقي الجهاز 18 commit خلف main وظلّ يطبع فواتير قديمة رغم
+# أن الإصلاح كان مدموجاً في main. ولولا فحص يدوي لاستمرّ بلا حدّ.
+#
+# سابقة مشابهة مسجّلة أدناه: قفل مهمة AI أوقف السحب ثلاثة أيام بنفس الصمت.
+$SkipAlertThreshold = 3
+
+function Get-TrailingSkipCount {
+  if (-not (Test-Path -LiteralPath $logPath)) { return 0 }
+  $lines = @(Get-Content -LiteralPath $logPath -ErrorAction SilentlyContinue)
+  if ($lines.Count -eq 0) { return 0 }
+  $count = 0
+  for ($i = $lines.Count - 1; $i -ge 0; $i--) {
+    if ($lines[$i] -match " SKIP: ") { $count++ } else { break }
+  }
+  return $count
+}
+
+function Send-StuckAlert([string]$Reason) {
+  $skips = Get-TrailingSkipCount
+  if ($skips -lt $SkipAlertThreshold) { return }
+  $notifyPath = Join-Path $PSScriptRoot "send-telegram-notification.ps1"
+  if (Test-Path -LiteralPath $notifyPath) {
+    & $notifyPath -Message ("شلل السحب اليومي على جهاز Windows: تخطّى " + $skips + " مرة متتالية (" + $Reason + "). الجهاز لا يستلم أي تحديث من main.") -EventType "windows" -DedupeKey "daily-git-pull-stuck" -DedupeMinutes 1440
+  }
+}
+
 $dirty = & $git @gitArgs status --porcelain 2>$null
 if ($LASTEXITCODE -ne 0) {
   Add-Content -LiteralPath $logPath -Value "$stamp FAIL: git status failed"
@@ -46,6 +75,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 if ($dirty) {
   Add-Content -LiteralPath $logPath -Value "$stamp SKIP: uncommitted changes present"
+  Send-StuckAlert "تعديلات غير مُلتزَمة"
   exit 0
 }
 
@@ -77,6 +107,7 @@ if ($LASTEXITCODE -eq 0 -and $publishedLock) {
     $activeTask = ($publishedLock -join "`n") | ConvertFrom-Json
     if ($activeTask.status -eq "active") {
       Add-Content -LiteralPath $logPath -Value "$stamp SKIP: active AI task lock"
+      Send-StuckAlert "قفل مهمة AI نشط"
       exit 0
     }
   } catch {
