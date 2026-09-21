@@ -1177,6 +1177,14 @@
         throw new Error("تعذّر تحضير الحفظ الآمن (فشل قراءة الأسعار الحالية). لم يُحفظ شيء — حاول مجدداً.");
       }
 
+      // هوية البطاقة الموثوقة كما وصلت من الجرد الحي (app.js: savePricingItem).
+      const trustedGuidByKey = new Map();
+      for (const item of items || []) {
+        const key = cleanText(item && item.itemKey, 240);
+        const guid = String((item && item.itemGuid) ?? "").trim();
+        if (key && guid) trustedGuidByKey.set(key, guid);
+      }
+
       const withUser = (items || [])
         .map((item) => normalizeApprovedPriceInput(item, user.id))
         .filter((item) => item.item_key && item.item_name && item.sale_price > 0)
@@ -1184,24 +1192,25 @@
           numberByKey
             ? { ...rec, item_number: numberByKey[rec.item_key] ?? null, item_code: codeByKey[rec.item_key] ?? null }
             : rec
-        );
-
-      // هوية البطاقة الموثوقة كما وصلت من الجرد الحي (app.js: savePricingItem).
-      // تُستعمل **للفحص وحده ولا تُكتب**: الـupsert الجماعي في PostgREST يوحّد
-      // أعمدة الحمولة، فلو حمل بعضُ الصفوف item_guid دون بعض لكُتب NULL على
-      // البقية ومُسحت هوية قائمة — وهي مفتاح مطابقة متوسط التكلفة
-      // (push-item-costs.ps1). فالكتابة تبقى حصراً لمهمة أرقام الأصناف.
-      const trustedGuidByKey = new Map();
-      for (const item of items || []) {
-        const key = cleanText(item && item.itemKey, 240);
-        const guid = String((item && item.itemGuid) ?? "").trim();
-        if (key && guid) trustedGuidByKey.set(key, guid);
-      }
-      const rowsForGuardOnly = withUser.map((rec) =>
-        trustedGuidByKey.has(rec.item_key)
-          ? { ...rec, item_guid: trustedGuidByKey.get(rec.item_key) }
-          : rec
-      );
+        )
+        // هوية البطاقة تُكتب مع الصف نفسه، بنفس نمط replaceApprovedPriceItems:
+        // الموثوقة من الجرد الحي، وإلا المحفوظة لهذا المفتاح، وإلا null.
+        //
+        // لماذا تُكتب ولا تُترك لمهمة أرقام الأصناف وحدها: تلك المهمة تعمل كل
+        // ٦ ساعات افتراضياً (register-item-numbers-task.ps1) وقد تتعطّل أياماً.
+        // فصفّ بطاقة جديدة يبقى بهوية NULL طوال تلك النافذة، ولو أُعيدت تسمية
+        // بطاقته خلالها لما استطاع الحارس ربط المفتاح الجديد بالصف القائم —
+        // فيُنشأ صف ثانٍ وتعود الازدواجية (Codex P1 ثانٍ على #257).
+        //
+        // ولماذا يحمل **كل** صف هذا المفتاح: الـupsert الجماعي في PostgREST
+        // يوحّد أعمدة الحمولة، فلو حمله بعضُ الصفوف دون بعض لكُتب NULL على
+        // البقية ومُسحت هوية قائمة — وهي مفتاح مطابقة متوسط التكلفة
+        // (push-item-costs.ps1). إعادة القيمة المحفوظة صراحةً تمنع ذلك:
+        // لا صف يفقد هويته، ولا هوية تُخمَّن.
+        .map((rec) => ({
+          ...rec,
+          item_guid: trustedGuidByKey.get(rec.item_key) ?? guidByKey[rec.item_key] ?? null
+        }));
 
       // الحالة بعد الحفظ كما ستصير فعلاً، **محصورة ببطاقات هذه الحمولة**: صفوف
       // الحمولة تحلّ محلّ صفوف الجدول التي تحمل نفس item_key، ويُضمّ إليها من
@@ -1211,7 +1220,7 @@
       // أولاً: لا يُولد صف مكرر جديد على بطاقة مأهولة (السبب الجذري للـ53 القائمة).
       // يسبق فحص التعارض لأنه التشخيص الأدق حين ينطبق الاثنان معاً، وكلاهما
       // يرمي قبل أي كتابة فلا فرق في الأمان بينهما.
-      assertNoNewDuplicateGuidRow(rowsForGuardOnly, existingAll, guidByKey);
+      assertNoNewDuplicateGuidRow(withUser, existingAll, guidByKey);
       assertNoGuidPriceConflictForIncoming(withUser, existingAll, guidByKey);
 
       const { data, error } = await client

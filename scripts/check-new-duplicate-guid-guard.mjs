@@ -415,28 +415,83 @@ test("H7) savePricingItem يضع itemGuid في سجلّ الحفظ من المص
   assert.match(appSource, /itemGuid: item\.itemGuid \|\| price\?\.itemGuid \|\| ""/, "pricingWorklistItems يحملها أصلاً");
 });
 
-test("H8) الهوية تصل للحارس ولا تُكتب في قاعدة البيانات", () => {
+test("H8) الهوية تُثبَّت مع الصف المكتوب، وهي نفسها التي يفحصها الحارس", () => {
   const body = sliceFunction("upsertApprovedPriceItems");
   assert.match(body, /const trustedGuidByKey = new Map\(\)/, "تُبنى خريطة الهوية الموثوقة");
-  assert.match(body, /assertNoNewDuplicateGuidRow\(rowsForGuardOnly, existingAll, guidByKey\)/, "الحارس يتلقّى الصفوف الحاملة للهوية");
-  // الحمولة المكتوبة تبقى withUser بلا item_guid — وإلا وحّد PostgREST الأعمدة
-  // وكتب NULL على هوية قائمة.
-  assert.match(body, /\.upsert\(withUser, \{ onConflict: "item_key" \}\)/, "المكتوب هو withUser لا rowsForGuardOnly");
-  // بلا تعليقات: التعليقات تشرح لماذا لا تُكتب الهوية، فلا يجوز أن يُفشِل ذكرُها الشارح التأكيد.
-  const payloadBuild = body
-    .slice(body.indexOf("const withUser ="), body.indexOf("const trustedGuidByKey"))
-    .split("\n")
-    .filter((line) => !line.trim().startsWith("//"))
-    .join("\n");
-  assert.doesNotMatch(payloadBuild, /item_guid/, "حمولة الكتابة لا تحمل item_guid");
+  assert.match(
+    body,
+    /item_guid: trustedGuidByKey\.get\(rec\.item_key\) \?\? guidByKey\[rec\.item_key\] \?\? null/,
+    "الأولوية: الموثوقة ← المحفوظة ← null"
+  );
+  // صفّ بطاقة جديدة كان يبقى بهوية NULL حتى تعمل مهمة أرقام الأصناف (كل ٦ ساعات
+  // افتراضياً)، فتُفتح نافذة تعود فيها الازدواجية عند إعادة التسمية — Codex P1 ثانٍ.
+  assert.match(body, /assertNoNewDuplicateGuidRow\(withUser, existingAll, guidByKey\)/, "الحارس يفحص الحمولة المكتوبة نفسها");
+  assert.match(body, /\.upsert\(withUser, \{ onConflict: "item_key" \}\)/, "والمكتوب هو تلك الحمولة بعينها");
+  // خريطة الهوية تُبنى **قبل** withUser وإلا لم تكن متاحة عند تركيبها.
+  assert.ok(
+    body.indexOf("const trustedGuidByKey") < body.indexOf("const withUser ="),
+    "ترتيب البناء: الخريطة قبل الحمولة"
+  );
 });
 
-test("H9) normalizeApprovedPriceInput لا يُدخل item_guid في حمولة الكتابة", () => {
+test("H8ب) لا صف يفقد هويته المحفوظة: كل صف يحمل المفتاح صراحةً", () => {
+  const body = sliceFunction("upsertApprovedPriceItems");
+  // الـupsert الجماعي في PostgREST يوحّد أعمدة الحمولة: لو حمل item_guid بعضُ
+  // الصفوف دون بعض لكُتب NULL على البقية. لذلك المفتاح في map غير مشروط.
+  const attach = body.slice(body.indexOf(".map((rec) => ({"), body.indexOf(".map((rec) => ({") + 220);
+  assert.doesNotMatch(attach, /trustedGuidByKey\.has\(/, "ممنوع الإرفاق المشروط — يترك صفوفاً بلا المفتاح");
+  assert.match(attach, /\.\.\.rec,/, "بقية الأعمدة كما هي");
+  assert.match(attach, /guidByKey\[rec\.item_key\]/, "الهوية المحفوظة تُعاد صراحةً بدل تركها تُمحى");
+});
+
+test("H9) الهوية تُركَّب في مسار الحفظ لا في normalizeApprovedPriceInput", () => {
   const fn = clientSource.slice(
     clientSource.indexOf("function normalizeApprovedPriceInput("),
     clientSource.indexOf("function requirePriceGuidGuard(")
   );
-  assert.doesNotMatch(fn, /item_guid/, "عمود الهوية يبقى خارج الكتابة — تكتبه مهمة أرقام الأصناف وحدها");
+  // تبقى الدالة المشتركة بلا هوية: مسار الاستبدال يركّبها بنفسه بقاعدته الخاصة،
+  // فوضعُها هنا كان سيغيّر ذلك المسار ضمناً — وهو خارج نطاق هذا الإصلاح.
+  assert.doesNotMatch(fn, /item_guid/, "الدالة المشتركة تبقى بلا هوية");
+  const body = sliceFunction("upsertApprovedPriceItems");
+  assert.match(body, /item_guid: trustedGuidByKey\.get/, "بل تُركَّب في مسار الـupsert وحده");
+});
+
+// ---------------------------------------------------------------------------
+// I) نافذة الهوية الفارغة (Codex P1 الثاني على PR #257)
+//
+// صفّ بطاقة جديدة كان يُكتب بهوية NULL وتبقى كذلك حتى تعمل مهمة أرقام الأصناف
+// (كل ٦ ساعات افتراضياً، وقد تتعطّل أياماً). خلال تلك النافذة، إعادة تسمية
+// البطاقة تُنتج مفتاحاً جديداً لا يستطيع الحارس ربطه بالصف القائم — لأن الصف
+// بلا هوية أصلاً — فيُنشأ صف ثانٍ وتعود الازدواجية. الحل: تثبيت الهوية مع
+// الصف لحظة كتابته (يُتحقق منه في H8).
+// ---------------------------------------------------------------------------
+test("I) صف قائم بهوية NULL لا يمكن ربطه — هذا ما تمنعه الكتابة الفورية", () => {
+  const guid = "80B7143B-949A-4B3A-8A1E-E0217B2007F8";
+  const nulled = [{ item_key: "بطاقة جديدة", item_name: "بطاقة جديدة", item_guid: null }];
+  const renamed = incoming("بطاقة جديدة اصدار 2027", "بطاقة جديدة اصدار 2027", { item_guid: guid });
+  assert.equal(
+    findNewDuplicateGuidRows([renamed], nulled, guidMap(nulled)).length,
+    0,
+    "بهوية NULL يستحيل الربط — لذلك وجب تثبيتها لحظة الكتابة لا بعد ٦ ساعات"
+  );
+});
+
+test("I2) والصف نفسه بهويته المثبَّتة يُرصد فوراً", () => {
+  const guid = "80B7143B-949A-4B3A-8A1E-E0217B2007F8";
+  const stamped = [existingRow("بطاقة جديدة", guid)];
+  const renamed = incoming("بطاقة جديدة اصدار 2027", "بطاقة جديدة اصدار 2027", { item_guid: guid });
+  const found = findNewDuplicateGuidRows([renamed], stamped, guidMap(stamped));
+  assert.equal(found.length, 1, "الهوية المثبَّتة تُغلق النافذة");
+  assert.deepEqual(Array.from(found[0].existingKeys), ["بطاقة جديدة"]);
+});
+
+test("I3) الهوية المحفوظة تُعاد ولا تُمحى حين لا توجد هوية موثوقة", () => {
+  // يحاكي قاعدة الحمولة: trusted ?? stored ?? null — صف بلا هوية واردة يحتفظ
+  // بالمحفوظة، فلا يخسر أي صف هويته عند حفظ جماعي.
+  const table = [existingRow("مفتاح محفوظ", "55555555-0000-0000-0000-000000000005")];
+  const map = guidMap(table);
+  const resolved = map["مفتاح محفوظ"] ?? null;
+  assert.equal(resolved, "55555555-0000-0000-0000-000000000005", "المحفوظة تُستعاد لا تُفقد");
 });
 
 // ---------------------------------------------------------------------------
@@ -561,15 +616,20 @@ test("شاهد الطفرة (P1): تجاهل الهوية الصريحة يُس�
   );
 });
 
-test("شاهد الطفرة (P1، مصدري): تمرير withUser بدل rowsForGuardOnly يُبطل الإصلاح", () => {
-  // لو أُعيد الاستدعاء إلى withUser لَما وصلت الهوية الموثوقة إلى الحارس.
+test("شاهد الطفرة (P1، مصدري): إسقاط تركيب الهوية يُبطل الإصلاح", () => {
+  // لو حُذف سطر تركيب item_guid لما حملت الحمولة هوية، فلا وصلت للحارس ولا
+  // ثُبّتت في الصف الجديد — وتعود ثغرتا إعادة التسمية ونافذة الـNULL معاً.
   const body = sliceFunction("upsertApprovedPriceItems");
-  assert.ok(
-    !/assertNoNewDuplicateGuidRow\(withUser\b/.test(body),
-    "ممنوع تمرير withUser — لا يحمل الهوية الموثوقة فتعود ثغرة إعادة التسمية"
-  );
   assert.match(body, /trustedGuidByKey\.set\(key, guid\)/, "الخريطة تُملأ فعلاً");
-  assert.match(body, /item_guid: trustedGuidByKey\.get\(rec\.item_key\)/, "والهوية تُركَّب على صفوف الفحص");
+  assert.match(body, /item_guid: trustedGuidByKey\.get\(rec\.item_key\)/, "والهوية تُركَّب على الحمولة");
+  assert.ok(
+    body.indexOf("item_guid: trustedGuidByKey.get") < body.indexOf("assertNoNewDuplicateGuidRow("),
+    "التركيب يسبق الفحص وإلا فحص الحارس صفوفاً بلا هوية"
+  );
+  assert.ok(
+    body.indexOf("item_guid: trustedGuidByKey.get") < body.indexOf(".upsert("),
+    "ويسبق الكتابة وإلا كُتب الصف بلا هوية"
+  );
 });
 
 console.log(`check-new-duplicate-guid-guard: اجتاز ${results.length} اختباراً.`);
