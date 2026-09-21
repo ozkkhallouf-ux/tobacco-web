@@ -121,6 +121,38 @@
     return conflicts;
   }
 
+  /**
+   * يبني الحالة التي يجب فحصها لحفظ **جزئي** (upsert).
+   *
+   * لماذا النطاق ضروري: الـupsert يعالج بضعة أصناف، لكن فحص الجدول كله يعني أن
+   * أي تعارض قديم على بطاقة أخرى يُفشِل كل حفظ لاحق مهما كان سليماً — فيتجمّد
+   * تسعير اللائحة بأسرها ويستحيل حلّ التعارضات القديمة واحداً واحداً. (Codex P1
+   * ثانٍ على PR #256.) لذلك نضمّ من الصفوف القائمة **فقط** ما يشترك في هوية
+   * تلمسها الحمولة الحالية.
+   *
+   * ما يبقى مضموناً: الحفظ لا يستطيع إنشاء ولا إدامة تعارض على بطاقة يلمسها.
+   * ما يزول: شلل التسعير بسبب تعارض في بطاقة لا علاقة لها بهذا الحفظ.
+   */
+  function buildScopedConflictState(incomingRows, existingRows, guidByKey) {
+    const byKey = guidByKey || {};
+    const withGuid = (incomingRows || []).map((rec) => ({
+      ...rec,
+      item_guid: (rec && (rec.item_guid ?? rec.itemGuid)) ?? byKey[rec && rec.item_key] ?? null
+    }));
+    const incomingKeys = new Set(withGuid.map((rec) => rec.item_key));
+    const touchedGuids = new Set(
+      withGuid.map((rec) => normalizeGuid(rec.item_guid)).filter((guid) => guid)
+    );
+    const scopedExisting = (existingRows || []).filter(
+      (row) =>
+        row &&
+        row.item_key &&
+        !incomingKeys.has(row.item_key) &&
+        touchedGuids.has(normalizeGuid(row.item_guid ?? row.itemGuid))
+    );
+    return [...withGuid, ...scopedExisting];
+  }
+
   /** رسالة عربية مفصّلة للمستخدم — تعرض الهوية والمفاتيح والقيم المتعارضة. */
   function formatConflictMessage(conflicts) {
     const list = Array.isArray(conflicts) ? conflicts : [];
@@ -146,6 +178,7 @@
   root.priceGuidConflict = {
     MANAGED_FIELDS,
     findGuidPriceConflicts,
+    buildScopedConflictState,
     formatConflictMessage,
     normalizeGuid,
     round4

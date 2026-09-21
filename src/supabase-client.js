@@ -466,15 +466,32 @@
   // كتابة. القاعدة والمبرر الكامل في src/price-guid-conflict.js.
   // غياب الوحدة يوقف الحفظ: حارس صامت أسوأ من غيابه، لأنه يوهم بحماية لا وجود
   // لها بينما تمرّ أسعار متعارضة إلى الأمين.
-  function assertNoGuidPriceConflict(rows) {
+  function requirePriceGuidGuard() {
     const guard = window.priceGuidConflict;
-    if (!guard || typeof guard.findGuidPriceConflicts !== "function") {
+    if (
+      !guard ||
+      typeof guard.findGuidPriceConflicts !== "function" ||
+      typeof guard.buildScopedConflictState !== "function"
+    ) {
       throw new Error("تعذّر تحميل حارس أسعار البطاقات (price-guid-conflict.js). لم يُحفظ شيء.");
     }
+    return guard;
+  }
+
+  function assertNoGuidPriceConflict(rows) {
+    const guard = requirePriceGuidGuard();
     const conflicts = guard.findGuidPriceConflicts(rows);
     if (conflicts.length) {
       throw new Error(guard.formatConflictMessage(conflicts));
     }
+  }
+
+  // نسخة الحفظ الجزئي: تفحص **البطاقات التي تلمسها الحمولة وحدها**. تعارض قديم
+  // على بطاقة أخرى لا يجوز أن يمنع تسعير مادة سليمة — وإلا تجمّدت اللائحة كلها
+  // ولاستحال حلّ التعارضات القديمة واحداً واحداً. التفصيل في price-guid-conflict.js.
+  function assertNoGuidPriceConflictForIncoming(incomingRows, existingRows, guidByKey) {
+    const guard = requirePriceGuidGuard();
+    assertNoGuidPriceConflict(guard.buildScopedConflictState(incomingRows, existingRows, guidByKey));
   }
 
   function missingSessionMessage() {
@@ -1155,15 +1172,12 @@
             : rec
         );
 
-      // الحالة بعد الحفظ كما ستصير فعلاً: صفوف الحمولة تحلّ محلّ صفوف الجدول
-      // التي تحمل نفس item_key، وما عداها يبقى كما هو. الفحص على هذه الحالة
-      // المدموجة لا على الحمولة وحدها.
-      const incomingKeys = new Set(withUser.map((rec) => rec.item_key));
-      const mergedState = [
-        ...withUser.map((rec) => ({ ...rec, item_guid: rec.item_guid ?? guidByKey[rec.item_key] ?? null })),
-        ...existingAll.filter((row) => row && row.item_key && !incomingKeys.has(row.item_key))
-      ];
-      assertNoGuidPriceConflict(mergedState);
+      // الحالة بعد الحفظ كما ستصير فعلاً، **محصورة ببطاقات هذه الحمولة**: صفوف
+      // الحمولة تحلّ محلّ صفوف الجدول التي تحمل نفس item_key، ويُضمّ إليها من
+      // الصفوف الباقية ما يشترك معها في item_guid فقط. الفحص على هذه الحالة لا
+      // على الحمولة وحدها (فلا يمرّ تعارض جديد) ولا على الجدول كله (فلا يشلّ
+      // تعارضٌ قديم في بطاقة أخرى تسعيرَ مادة سليمة).
+      assertNoGuidPriceConflictForIncoming(withUser, existingAll, guidByKey);
 
       const { data, error } = await client
         .from(approvedPricesTable)

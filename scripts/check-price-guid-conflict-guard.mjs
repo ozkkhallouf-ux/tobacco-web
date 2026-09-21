@@ -13,6 +13,10 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 const results = [];
 function test(name, fn) {
@@ -36,7 +40,7 @@ const guardCode = guardSource
   .filter((line) => !line.trim().startsWith("//"))
   .join("\n");
 assert.ok(guard, "price-guid-conflict.js يجب أن يعرّف window.priceGuidConflict");
-const { findGuidPriceConflicts, formatConflictMessage } = guard;
+const { findGuidPriceConflicts, formatConflictMessage, buildScopedConflictState } = guard;
 
 const GUID_A = "A4EAA24F-89CF-4E3A-8B3A-D82039AE9DFB";
 const GUID_B = "E91B49C6-3AC3-4622-B44D-65DF2F05EB94";
@@ -240,6 +244,112 @@ test("11ب) الرسالة تعرض الهوية والمفاتيح والقيم
 });
 
 // ---------------------------------------------------------------------------
+// نطاق الحفظ الجزئي (Codex P1 الثاني على #256): الفحص يخص البطاقات الملموسة
+// وحدها. تعارض قديم على بطاقة أخرى لا يجوز أن يشلّ تسعير مادة سليمة.
+// ---------------------------------------------------------------------------
+const GUID_LEGACY = "AAAAAAAA-0000-0000-0000-000000000001"; // بطاقة متعارضة قديمة
+const GUID_CLEAN = "BBBBBBBB-0000-0000-0000-000000000002"; // بطاقة سليمة
+const GUID_TWIN = "CCCCCCCC-0000-0000-0000-000000000003";  // صفان متطابقان
+
+// حالة الجدول القائمة: تعارض قديم على A، وبطاقة سليمة B، وتوأم متطابق C.
+const existingTable = [
+  row("قديم-أ", GUID_LEGACY, { wholesale: 33, unit1: 2.063 }),
+  row("قديم-ب", GUID_LEGACY, { wholesale: 31, unit1: 1.938 }),
+  row("سليم-أ", GUID_CLEAN, { wholesale: 50, unit1: 5 }),
+  row("توأم-أ", GUID_TWIN, { wholesale: 70, unit1: 7 }),
+  row("توأم-ب", GUID_TWIN, { wholesale: 70, unit1: 7 })
+];
+const guidByKey = Object.fromEntries(existingTable.map((r) => [r.item_key, r.item_guid]));
+
+/** يحاكي ما يفعله upsertApprovedPriceItems: يبني الحالة المحصورة ثم يفحصها. */
+function upsertWouldReject(incoming) {
+  const state = buildScopedConflictState(incoming, existingTable, guidByKey);
+  return findGuidPriceConflicts(state).length > 0;
+}
+
+test("ن١) تعارض قديم على A لا يمنع حفظ مادة سليمة على B", () => {
+  assert.equal(
+    upsertWouldReject([row("سليم-أ", GUID_CLEAN, { wholesale: 55, unit1: 5.5 })]),
+    false,
+    "شلل التسعير بسبب بطاقة أخرى = العطل الذي رصده Codex"
+  );
+});
+
+test("ن٢) لمس A بقيمة لا تحسم تعارضه → رفض قبل أي كتابة", () => {
+  assert.equal(
+    upsertWouldReject([row("قديم-أ", GUID_LEGACY, { wholesale: 33, unit1: 2.063 })]),
+    true,
+    "الصف الآخر (31) يبقى فيبقى التعارض قائماً"
+  );
+});
+
+test("ن٢ب) لمس A بقيمة تحسم التعارض لكل صفوفه → يمرّ", () => {
+  assert.equal(
+    upsertWouldReject([
+      row("قديم-أ", GUID_LEGACY, { wholesale: 33, unit1: 2.063 }),
+      row("قديم-ب", GUID_LEGACY, { wholesale: 33, unit1: 2.063 })
+    ]),
+    false,
+    "توحيد كل صفوف البطاقة في حفظة واحدة يحسم التعارض"
+  );
+});
+
+test("ن٣) توأم متطابق: حفظ بنفس القيمة يمرّ ولا يُعدّ تعارضاً", () => {
+  assert.equal(upsertWouldReject([row("توأم-أ", GUID_TWIN, { wholesale: 70, unit1: 7 })]), false);
+});
+
+test("ن٤) محاولة إنشاء تعارض جديد داخل بطاقة سليمة → رفض", () => {
+  // C توأم متطابق على 70؛ تغيير أحد صفّيه وحده يخلق 70 مقابل 75.
+  assert.equal(upsertWouldReject([row("توأم-أ", GUID_TWIN, { wholesale: 75, unit1: 7.5 })]), true);
+});
+
+test("ن٥) حمولة بعدة بطاقات وفيها واحدة متعارضة → ترفض كلها (لا partial)", () => {
+  const incoming = [
+    row("سليم-أ", GUID_CLEAN, { wholesale: 55, unit1: 5.5 }),
+    row("توأم-أ", GUID_TWIN, { wholesale: 70, unit1: 7 }),
+    row("قديم-أ", GUID_LEGACY, { wholesale: 33, unit1: 2.063 })
+  ];
+  assert.equal(upsertWouldReject(incoming), true, "بطاقة واحدة متعارضة تُسقِط الحفظ كله");
+  // وإثبات أن الرفض واحد لا جزئي: الدالة ترمي مرة واحدة على مستوى العملية.
+  const conflicts = findGuidPriceConflicts(buildScopedConflictState(incoming, existingTable, guidByKey));
+  assert.ok(conflicts.every((c) => c.guid === GUID_LEGACY), "التعارض محصور بالبطاقة القديمة");
+});
+
+test("ن٦) قلب updated_at بين الصفوف لا يغيّر نتيجة التعارض", () => {
+  const older = [{ ...row("قديم-أ", GUID_LEGACY, { wholesale: 33 }), updated_at: "2020-01-01T00:00:00Z" }];
+  const newer = [{ ...row("قديم-أ", GUID_LEGACY, { wholesale: 33 }), updated_at: "2099-01-01T00:00:00Z" }];
+  assert.equal(upsertWouldReject(older), upsertWouldReject(newer), "الزمن لا يدخل القرار");
+  assert.equal(upsertWouldReject(older), true);
+});
+
+test("ن٧) تعارض قديم غير ملموس لا يدخل الحالة المفحوصة إطلاقاً", () => {
+  const state = buildScopedConflictState(
+    [row("سليم-أ", GUID_CLEAN, { wholesale: 55, unit1: 5.5 })],
+    existingTable,
+    guidByKey
+  );
+  const guids = new Set(Array.from(state, (r) => String(r.item_guid || "").toUpperCase()));
+  assert.ok(!guids.has(GUID_LEGACY), "بطاقة A غير الملموسة يجب ألا تظهر في الحالة المفحوصة");
+  assert.ok(!guids.has(GUID_TWIN), "ولا البطاقة C غير الملموسة");
+  assert.deepEqual(Array.from(guids), [GUID_CLEAN], "الحالة المفحوصة تقتصر على البطاقة الملموسة");
+});
+
+test("ن٧ب) لكن صفوف البطاقة الملموسة الأخرى تدخل كلها", () => {
+  const state = buildScopedConflictState(
+    [row("قديم-أ", GUID_LEGACY, { wholesale: 33 })],
+    existingTable,
+    guidByKey
+  );
+  const keys = Array.from(state, (r) => r.item_key).sort();
+  assert.deepEqual(keys, ["قديم-أ", "قديم-ب"], "الصف الآخر لنفس البطاقة إلزامي وإلا مرّ التعارض");
+});
+
+test("ن٧ج) صف وارد بلا هوية لا يسحب أي صف قائم إلى الفحص", () => {
+  const state = buildScopedConflictState([row("جديد", null, { wholesale: 10 })], existingTable, {});
+  assert.equal(state.length, 1, "بلا هوية لا تجميع ولا ضمّ");
+});
+
+// ---------------------------------------------------------------------------
 // ٩) B: الرفض يسبق أي كتابة في مساري الحفظ معاً
 // ---------------------------------------------------------------------------
 const clientSource = readFileSync(new URL("../src/supabase-client.js", import.meta.url), "utf8");
@@ -261,8 +371,11 @@ function sliceFunction(name) {
 for (const fnName of ["upsertApprovedPriceItems", "replaceApprovedPriceItems"]) {
   test(`9) ${fnName}: الحارس يُستدعى قبل أي delete/insert/upsert`, () => {
     const body = sliceFunction(fnName);
-    const guardAt = body.indexOf("assertNoGuidPriceConflict(");
-    assert.notEqual(guardAt, -1, `${fnName} يجب أن يستدعي assertNoGuidPriceConflict`);
+    const guardAt = Math.min(
+      ...[body.indexOf("assertNoGuidPriceConflict("), body.indexOf("assertNoGuidPriceConflictForIncoming(")]
+        .filter((at) => at !== -1)
+    );
+    assert.ok(Number.isFinite(guardAt), `${fnName} يجب أن يستدعي حارس التعارض`);
     for (const writeCall of [".delete(", ".insert(", ".upsert("]) {
       const at = body.indexOf(writeCall);
       if (at === -1) continue;
@@ -276,11 +389,12 @@ for (const fnName of ["upsertApprovedPriceItems", "replaceApprovedPriceItems"]) 
 
 test("9ب) الحارس يرمي عند التعارض ولا يُرجع قيمة (لا حفظ جزئي)", () => {
   const helper = clientSource.slice(
-    clientSource.indexOf("function assertNoGuidPriceConflict("),
+    clientSource.indexOf("function requirePriceGuidGuard("),
     clientSource.indexOf("function missingSessionMessage(")
   );
   assert.match(helper, /throw new Error\(guard\.formatConflictMessage\(conflicts\)\)/, "التعارض يرمي استثناءً");
-  assert.match(helper, /if \(!guard \|\| typeof guard\.findGuidPriceConflicts !== "function"\)/, "غياب الوحدة يوقف الحفظ");
+  assert.match(helper, /typeof guard\.findGuidPriceConflicts !== "function"/, "غياب الوحدة يوقف الحفظ");
+  assert.match(helper, /typeof guard\.buildScopedConflictState !== "function"/, "وغياب باني النطاق كذلك");
   assert.doesNotMatch(helper, /return\s+(true|false|conflicts)/, "لا يُعيد قراراً يمكن تجاهله");
 });
 
@@ -294,7 +408,8 @@ test("9د) upsert يوقف الحفظ إن تعذّرت قراءة الأسعا�
   const body = sliceFunction("upsertApprovedPriceItems");
   assert.match(body, /item_guid, unit2_price, sale_price, price_payload/, "الجلب يشمل الهوية والحقول المُدارة");
   assert.match(body, /if \(!existingAll\) \{[\s\S]{0,200}throw new Error/, "فشل القراءة يوقف الحفظ بدل المضي على العمياء");
-  assert.match(body, /mergedState/, "الفحص على الحالة المدموجة لا على الحمولة وحدها");
+  assert.match(body, /assertNoGuidPriceConflictForIncoming\(withUser, existingAll, guidByKey\)/, "الفحص محصور ببطاقات الحمولة");
+  assert.doesNotMatch(body, /existingAll\.filter\(\(row\) => row && row\.item_key && !incomingKeys/, "ممنوع ضمّ الجدول كله — يشلّ التسعير");
 });
 
 // ---------------------------------------------------------------------------
@@ -337,6 +452,64 @@ test("10ج) قاعدة التعارض في A-lite: قيم موجبة فقط، و
   assert.match(fn, /if \(\$group\.Count -lt 2\) \{ continue \}/, "صف واحد لا يعارض نفسه");
   assert.doesNotMatch(fn, /updated_at/, "لا ترجيح زمني في قرار التعارض");
   assert.doesNotMatch(fn, /Sort-Object .*Descending/, "لا ترتيب لاختيار فائز");
+});
+
+test("ن٨) سلوكي: Find-ConflictingGuids يعيد HashSet حقيقياً في الحالات الثلاث", () => {
+  // يُنفَّذ فعلياً على pwsh (متاح على عدّاءات ubuntu في CI وعلى جهاز التطوير).
+  // إن غاب المفسّر نكتفي بالتأكيد الثابت أعلاه (10د) ونقول ذلك صراحةً.
+  const probe = spawnSync("pwsh", ["-NoProfile", "-Command", "$PSVersionTable.PSVersion.Major"], {
+    encoding: "utf8"
+  });
+  if (probe.status !== 0) {
+    console.log("  ⚠ ن٨: pwsh غير متاح — اكتُفي بالتأكيد الثابت (10د)");
+    return;
+  }
+  // نستخرج الدالة من السكربت نفسه ونشغّلها — لا نسخة مكتوبة يدوياً.
+  const fnStart = applySource.indexOf("function Find-ConflictingGuids");
+  const fnEnd = applySource.indexOf("# يحدّث سعر مادة في قائمة أسعار");
+  assert.ok(fnStart !== -1 && fnEnd > fnStart, "تعذّر عزل الدالة من السكربت");
+  const fnSource = applySource.slice(fnStart, fnEnd);
+
+  const harness = [
+    "function Resolve-AmeenItemName($ItemName) { return ([string]$ItemName).Trim() }",
+    fnSource,
+    "$toNum = { param($v) $d = 0.0; if ([double]::TryParse([string]$v, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$d)) { $d } else { 0.0 } }",
+    "function New-Row($name, $u2, $sale, $retail) { [pscustomobject]@{ item_name = $name; unit2_price = $u2; sale_price = $sale; retail_carton_usd = $retail } }",
+    // صفر تعارض · تعارض واحد · تعارضان
+    "$mapNone = @{ 'أ' = 'g-clean' }",
+    "$none = Find-ConflictingGuids @((New-Row 'أ' 10 1 10)) $mapNone $toNum",
+    "$mapOne = @{ 'أ' = 'g1'; 'ب' = 'g1' }",
+    "$one  = Find-ConflictingGuids @((New-Row 'أ' 10 1 0), (New-Row 'ب' 11 1 0)) $mapOne $toNum",
+    "$mapTwo = @{ 'أ' = 'g1'; 'ب' = 'g1'; 'ج' = 'g2'; 'د' = 'g2' }",
+    "$two  = Find-ConflictingGuids @((New-Row 'أ' 10 1 0), (New-Row 'ب' 11 1 0), (New-Row 'ج' 20 2 0), (New-Row 'د' 21 2 0)) $mapTwo $toNum",
+    "$out = [ordered]@{",
+    "  noneNull = ($null -eq $none); noneType = $(if ($null -eq $none) { 'null' } else { $none.GetType().Name }); noneCount = $(if ($null -eq $none) { -1 } else { $none.Count });",
+    "  oneType = $one.GetType().Name; oneCount = $one.Count; oneHas = $one.Contains('g1'); oneSubstr = $one.Contains('g');",
+    "  twoType = $two.GetType().Name; twoCount = $two.Count; twoHas = ($two.Contains('g1') -and $two.Contains('g2'))",
+    "}",
+    "$out | ConvertTo-Json -Compress"
+  ].join("\n");
+
+  const dir = mkdtempSync(path.join(tmpdir(), "pgc-"));
+  const file = path.join(dir, "harness.ps1");
+  writeFileSync(file, harness, "utf8");
+  const run = spawnSync("pwsh", ["-NoProfile", "-File", file], { encoding: "utf8" });
+  assert.equal(run.status, 0, `فشل تشغيل الحارس في pwsh: ${run.stderr}`);
+  const r = JSON.parse(run.stdout.trim().split("\n").pop());
+
+  // فارغة: يجب ألا تعود $null وألا تنهار — هذا هو عطل P1 بعينه.
+  assert.equal(r.noneNull, false, "المجموعة الفارغة عادت $null — تفكيك pipeline (P1)");
+  assert.match(r.noneType, /HashSet/, "الفارغة يجب أن تبقى HashSet");
+  assert.equal(r.noneCount, 0);
+  // عنصر واحد: يجب ألا تنهار إلى String (وإلا صارت Contains مطابقة نصّية جزئية).
+  assert.match(r.oneType, /HashSet/, "عنصر واحد انهار إلى نوع آخر");
+  assert.equal(r.oneCount, 1);
+  assert.equal(r.oneHas, true, "عضوية حقيقية للمعرّف");
+  assert.equal(r.oneSubstr, false, "ممنوع أن تنجح مطابقة جزئية 'g' — دليل أنها ليست String");
+  // عنصران: مجموعة حقيقية أيضاً.
+  assert.match(r.twoType, /HashSet/);
+  assert.equal(r.twoCount, 2);
+  assert.equal(r.twoHas, true);
 });
 
 test("12) بقية المواد تستمر: التخطّي يخص الصنف وحده لا الدفعة", () => {
