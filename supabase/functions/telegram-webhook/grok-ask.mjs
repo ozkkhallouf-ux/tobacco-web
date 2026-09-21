@@ -1,5 +1,8 @@
 // بناء طلب Grok وتحليل ردّه — ملف مشترك بين دالة تيليغرام وفحص العقد.
-// لا مفاتيح هنا. لا بحث ويب. store=false حتى لا تُحفظ بيانات العمل على خوادم xAI.
+// لا مفاتيح هنا. store=false حتى لا تُحفظ بيانات العمل على خوادم xAI.
+// بحث الويب يبقى مطفأ: مسار Responses لا يبحث إلا إذا أُرسلت أداة بحث.
+// حقل بحث Chat Completions لا يُرسل هنا لأنه يرفض الطلب قبل الاستدلال
+// (P1 Codex على PR #261).
 
 export const GROK_URL = "https://api.x.ai/v1/responses";
 export const GROK_MODEL = "grok-4.6";
@@ -15,7 +18,6 @@ export function buildGrokRequestBody({ instructions, input }) {
   return {
     model: GROK_MODEL,
     store: false,
-    search_parameters: { mode: "off" },
     max_output_tokens: GROK_MAX_OUTPUT_TOKENS,
     instructions,
     input,

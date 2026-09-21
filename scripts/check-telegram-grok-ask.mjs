@@ -58,7 +58,8 @@ const ok = (label) => { passed += 1; console.log(`  ✓ ${label}`); };
   });
   assert.equal(body.model, GROK_MODEL);
   assert.equal(body.store, false);
-  assert.equal(body.search_parameters?.mode, "off");
+  assert.equal("search_parameters" in body, false, "search_parameters يرفضه /v1/responses");
+  assert.equal("tools" in body, false, "وجود tools قد يفعّل web_search");
   assert.equal(body.max_output_tokens, GROK_MAX_OUTPUT_TOKENS);
   assert.equal(typeof body.instructions, "string");
   assert.match(body.input, /سؤال المالك/);
@@ -80,9 +81,11 @@ const ok = (label) => { passed += 1; console.log(`  ✓ ${label}`); };
   assert.ok(!code.includes("ANTHROPIC_API_KEY"), "ANTHROPIC_API_KEY ما زال في مسار التيليغرام");
   assert.ok(!code.includes("anthropic-version"), "سؤال التيليغرام ما زال يرسل إلى Anthropic");
   const grokAsk = await readFile(path.join(repoRoot, "supabase/functions/telegram-webhook/grok-ask.mjs"), "utf8");
+  const grokCode = grokAsk.split("\n").filter((line) => !line.trim().startsWith("//")).join("\n");
   assert.ok(grokAsk.includes(GROK_URL), `grok-ask.mjs يجب أن يعرّف ${GROK_URL}`);
-  assert.ok(grokAsk.includes('store: false'), "grok-ask.mjs يجب أن يعطّل تخزين المحادثة على xAI");
-  assert.ok(grokAsk.includes('mode: "off"'), "grok-ask.mjs يجب أن يعطّل بحث الويب");
+  assert.ok(grokCode.includes("store: false"), "grok-ask.mjs يجب أن يعطّل تخزين المحادثة على xAI");
+  assert.ok(!grokCode.includes("search_parameters"), "search_parameters لا يُرسل على /v1/responses");
+  assert.ok(!grokCode.includes("web_search"), "web_search يجب أن يبقى غائباً حتى لا يُبحث في الويب");
   ok("سؤال الذكاء الاصطناعي في التيليغرام يمر عبر Grok فقط");
 }
 

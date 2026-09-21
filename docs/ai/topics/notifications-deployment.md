@@ -14,7 +14,7 @@
 
 يوجد Web Push وTelegram Edge Functions وGitHub Pages. آخر توثيق سابق أكد إشعار iPhone فعلياً بعد إصلاح الأيقونة، لكن أي حالة حية جديدة تحتاج اختباراً جديداً. نشر النشرات يعتمد workflow منفصلاً عن نشر الموقع.
 
-سؤال تيليغرام الحر («اسأل» وأي رسالة غير أمر/تذكير) يمر عبر Grok (`api.x.ai/v1/responses`، النموذج `grok-4.6`) بمفتاح `XAI_API_KEY` في أسرار الدالة. الطلب يُرسل `store: false` و`search_parameters.mode=off` حتى لا تُحفظ بيانات العمل ولا تُخلط أرقام الأمين ببحث ويب. الأوامر المحددة (رصيد، نواقص، ربح اليوم، …) تبقى قراءة SQL مباشرة. الصوت مسار مستقل: رسالة `voice` تُفرَّغ بـ Whisper ثم تُعامل كنص. `claude-assistant` في الموقع لم يُمسّ. التفعيل الحي يحتاج السر ثم نشر `telegram-webhook`.
+سؤال تيليغرام الحر («اسأل» وأي رسالة غير أمر/تذكير) يمر عبر Grok (`api.x.ai/v1/responses`، النموذج `grok-4.6`) بمفتاح `XAI_API_KEY` في أسرار الدالة. الطلب يُرسل `store: false` وبلا `tools` وبلا `search_parameters` حتى لا تُحفظ بيانات العمل ولا يُفعَّل بحث ويب (البحث في Responses يكون عبر `web_search` فقط). الأوامر المحددة (رصيد، نواقص، ربح اليوم، …) تبقى قراءة SQL مباشرة. الصوت مسار مستقل: رسالة `voice` تُفرَّغ بـ Whisper ثم تُعامل كنص. `claude-assistant` في الموقع لم يُمسّ. التفعيل الحي يحتاج السر ثم نشر `telegram-webhook`.
 
 مركز عمليات الوكلاء والمراجعة في Slack موثَّق في [collaboration-workflow.md](collaboration-workflow.md). تنبيهات فشل GitHub Actions تبقى عبر Telegram؛ Slack لا يستبدل هذا المسار ولا يُضاف له webhook من المستودع.
 
