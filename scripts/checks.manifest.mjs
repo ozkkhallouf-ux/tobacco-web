@@ -29,6 +29,7 @@ export const CHECKS = [
   'check-assistant-authorization.mjs',
   'check-assistant-read-only.mjs',
   'check-assistant-routing.mjs',
+  'check-business-audit-item-identity.mjs',
   'check-checks-manifest.mjs',
   'check-codex-review-gate-logic.mjs',
   'check-collection-priority.mjs',
