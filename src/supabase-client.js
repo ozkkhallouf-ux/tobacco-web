@@ -1186,6 +1186,23 @@
             : rec
         );
 
+      // هوية البطاقة الموثوقة كما وصلت من الجرد الحي (app.js: savePricingItem).
+      // تُستعمل **للفحص وحده ولا تُكتب**: الـupsert الجماعي في PostgREST يوحّد
+      // أعمدة الحمولة، فلو حمل بعضُ الصفوف item_guid دون بعض لكُتب NULL على
+      // البقية ومُسحت هوية قائمة — وهي مفتاح مطابقة متوسط التكلفة
+      // (push-item-costs.ps1). فالكتابة تبقى حصراً لمهمة أرقام الأصناف.
+      const trustedGuidByKey = new Map();
+      for (const item of items || []) {
+        const key = cleanText(item && item.itemKey, 240);
+        const guid = String((item && item.itemGuid) ?? "").trim();
+        if (key && guid) trustedGuidByKey.set(key, guid);
+      }
+      const rowsForGuardOnly = withUser.map((rec) =>
+        trustedGuidByKey.has(rec.item_key)
+          ? { ...rec, item_guid: trustedGuidByKey.get(rec.item_key) }
+          : rec
+      );
+
       // الحالة بعد الحفظ كما ستصير فعلاً، **محصورة ببطاقات هذه الحمولة**: صفوف
       // الحمولة تحلّ محلّ صفوف الجدول التي تحمل نفس item_key، ويُضمّ إليها من
       // الصفوف الباقية ما يشترك معها في item_guid فقط. الفحص على هذه الحالة لا
@@ -1194,7 +1211,7 @@
       // أولاً: لا يُولد صف مكرر جديد على بطاقة مأهولة (السبب الجذري للـ53 القائمة).
       // يسبق فحص التعارض لأنه التشخيص الأدق حين ينطبق الاثنان معاً، وكلاهما
       // يرمي قبل أي كتابة فلا فرق في الأمان بينهما.
-      assertNoNewDuplicateGuidRow(withUser, existingAll, guidByKey);
+      assertNoNewDuplicateGuidRow(rowsForGuardOnly, existingAll, guidByKey);
       assertNoGuidPriceConflictForIncoming(withUser, existingAll, guidByKey);
 
       const { data, error } = await client

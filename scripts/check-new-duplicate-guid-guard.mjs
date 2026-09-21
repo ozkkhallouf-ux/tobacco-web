@@ -299,6 +299,147 @@ test("تطبيع: النسخة في النواة تطابق normalizeItemName ف
 });
 
 // ---------------------------------------------------------------------------
+// H) إعادة التسمية الجوهرية (Codex P1 على PR #257)
+//
+// الثغرة المسدودة: حين يُعاد تسمية بطاقة أمين بتغيير لا يمحوه التطبيع، لا
+// يطابق الاسمُ الجديد أيَّ صف قائم، فكان الحارس يحلّ الهوية إلى "" ويسمح
+// بإنشاء صف ثانٍ — ثم تختمه مهمة أرقام الأصناف بنفس GUID فيعود الازدواج.
+// الحل: تمرير itemGuid الموثوق من الجرد الحي واستعماله هوية صريحة.
+// ---------------------------------------------------------------------------
+const GUID_RENAMED = "80B7143B-949A-4B3A-8A1E-E0217B2007F8"; // 13006 كابتن بلاك (حقيقي)
+
+// الصف القديم محفوظ باسمه السابق ويحمل هوية البطاقة.
+const RENAME_TABLE = [existingRow("اليغانس كوين ازرق", GUID_RENAMED, "اليغانس كوين أزرق")];
+const RENAME_GUIDS = guidMap(RENAME_TABLE);
+// الاسم الجديد من الأمين: تغيير جوهري — التطبيع لا يجعله مساوياً للقديم.
+const RENAMED_KEY = "اليغانس كوين ازرق اصدار محسن 2027";
+
+test("H0) شرط صحة السيناريو: التطبيع لا يساوي بين الاسمين", () => {
+  assert.notEqual(
+    normalizeIdentityName(RENAMED_KEY),
+    normalizeIdentityName("اليغانس كوين ازرق"),
+    "لو تساويا لكان المسار الاسمي كافياً ولَما اختبرنا شيئاً"
+  );
+  assert.notEqual(normalizeIdentityName(RENAMED_KEY), normalizeIdentityName("اليغانس كوين أزرق"));
+});
+
+test("H) اسم جديد جوهرياً + نفس GUID صريح ⇒ يُرفض قبل أي كتابة", () => {
+  const found = findNewDuplicateGuidRows(
+    [incoming(RENAMED_KEY, "اليغانس كوين ازرق اصدار محسن 2027", { item_guid: GUID_RENAMED })],
+    RENAME_TABLE,
+    RENAME_GUIDS
+  );
+  assert.equal(found.length, 1, "إعادة التسمية الجوهرية يجب أن تُرصد");
+  assert.equal(found[0].guid, GUID_RENAMED);
+  assert.equal(found[0].newKey, RENAMED_KEY);
+  assert.deepEqual(Array.from(found[0].existingKeys), ["اليغانس كوين ازرق"]);
+});
+
+test("H2) شاهد: بلا الهوية الصريحة تفلت الحالة نفسها تماماً", () => {
+  // هذا هو العطل قبل الإصلاح — يثبت أن التمرير هو ما يسدّ الثغرة لا شيء آخر.
+  assert.equal(
+    findNewDuplicateGuidRows([incoming(RENAMED_KEY)], RENAME_TABLE, RENAME_GUIDS).length,
+    0,
+    "المسار الاسمي وحده يسمح بإنشاء الصف — الثغرة التي أبلغ عنها Codex"
+  );
+});
+
+test("H3) 13005/13006: إعادة تسمية تتجاوز جدول الـalias تُرصد بالهوية", () => {
+  // البطاقتان الحقيقيتان اللتان وقعت عليهما إعادة التسمية فعلاً. جدول الـalias
+  // يغطّي «كوين ← كور … جديد» وحدها؛ أي تسمية لاحقة بلا alias تعتمد الهوية.
+  const table = [
+    existingRow("كابتن بلاك كور اسود جديد", "7D75F3E1-474C-4FD1-B797-7582A445B4E7"),
+    existingRow("كابتن بلاك كور ازرق جديد", GUID_RENAMED)
+  ];
+  const map = guidMap(table);
+  for (const [oldKey, guid] of Object.entries(map)) {
+    const newKey = oldKey.replace("جديد", "اصدار 2027 المطور");
+    assert.notEqual(normalizeIdentityName(newKey), normalizeIdentityName(oldKey), "تسمية جوهرية");
+    assert.equal(
+      findNewDuplicateGuidRows([incoming(newKey, newKey, { item_guid: guid })], table, map).length,
+      1,
+      `لم تُرصد إعادة تسمية ${oldKey}`
+    );
+    assert.equal(
+      findNewDuplicateGuidRows([incoming(newKey)], table, map).length,
+      0,
+      "وبلا الهوية الصريحة تفلت — شاهد سالب"
+    );
+  }
+});
+
+test("H4) الهوية الصريحة لا تكسر A: مفتاح موجود يبقى تحديثاً مسموحاً", () => {
+  assert.equal(
+    findNewDuplicateGuidRows(
+      [incoming("اليغانس كوين ازرق", "اليغانس كوين أزرق", { item_guid: GUID_RENAMED })],
+      RENAME_TABLE,
+      RENAME_GUIDS
+    ).length,
+    0
+  );
+});
+
+test("H5) الهوية الصريحة لا تكسر B: بطاقة جديدة بهوية غير مأهولة تمرّ", () => {
+  assert.equal(
+    findNewDuplicateGuidRows(
+      [incoming("صنف جديد فعلاً", "صنف جديد فعلاً", { item_guid: "44444444-0000-0000-0000-000000000004" })],
+      RENAME_TABLE,
+      RENAME_GUIDS
+    ).length,
+    0
+  );
+});
+
+test("H6) الأولوية: الهوية الصريحة تسبق المطابقة الاسمية", () => {
+  const core = guardSource.slice(
+    guardSource.indexOf("function resolveIncomingGuid("),
+    guardSource.indexOf("function findNewDuplicateGuidRows(")
+  );
+  const explicitAt = core.indexOf("const explicit = readGuid(rec);");
+  const byKeyAt = core.indexOf("guidByKey || {}");
+  const byNameAt = core.indexOf("guidsByNormalizedName.get(candidate)");
+  assert.ok(explicitAt !== -1 && byKeyAt !== -1 && byNameAt !== -1, "المسارات الثلاثة موجودة");
+  assert.ok(explicitAt < byKeyAt && byKeyAt < byNameAt, "الترتيب: صريح ← مفتاح ← اسم");
+});
+
+// ---------------------------------------------------------------------------
+// H7) مسار البيانات: app.js يمرّر الهوية، وsupabase-client يستعملها للفحص فقط
+// ---------------------------------------------------------------------------
+test("H7) savePricingItem يضع itemGuid في سجلّ الحفظ من المصدر الحي", () => {
+  const appSource = readFileSync(new URL("../src/app.js", import.meta.url), "utf8");
+  assert.match(
+    appSource,
+    /itemGuid: sourceItem\?\.itemGuid \|\| sourceExisting\?\.itemGuid \|\| ""/,
+    "الهوية تُؤخذ من الجرد الحي أولاً ثم الصف المحفوظ"
+  );
+  assert.match(appSource, /itemGuid: item\.itemGuid \|\| price\?\.itemGuid \|\| ""/, "pricingWorklistItems يحملها أصلاً");
+});
+
+test("H8) الهوية تصل للحارس ولا تُكتب في قاعدة البيانات", () => {
+  const body = sliceFunction("upsertApprovedPriceItems");
+  assert.match(body, /const trustedGuidByKey = new Map\(\)/, "تُبنى خريطة الهوية الموثوقة");
+  assert.match(body, /assertNoNewDuplicateGuidRow\(rowsForGuardOnly, existingAll, guidByKey\)/, "الحارس يتلقّى الصفوف الحاملة للهوية");
+  // الحمولة المكتوبة تبقى withUser بلا item_guid — وإلا وحّد PostgREST الأعمدة
+  // وكتب NULL على هوية قائمة.
+  assert.match(body, /\.upsert\(withUser, \{ onConflict: "item_key" \}\)/, "المكتوب هو withUser لا rowsForGuardOnly");
+  // بلا تعليقات: التعليقات تشرح لماذا لا تُكتب الهوية، فلا يجوز أن يُفشِل ذكرُها الشارح التأكيد.
+  const payloadBuild = body
+    .slice(body.indexOf("const withUser ="), body.indexOf("const trustedGuidByKey"))
+    .split("\n")
+    .filter((line) => !line.trim().startsWith("//"))
+    .join("\n");
+  assert.doesNotMatch(payloadBuild, /item_guid/, "حمولة الكتابة لا تحمل item_guid");
+});
+
+test("H9) normalizeApprovedPriceInput لا يُدخل item_guid في حمولة الكتابة", () => {
+  const fn = clientSource.slice(
+    clientSource.indexOf("function normalizeApprovedPriceInput("),
+    clientSource.indexOf("function requirePriceGuidGuard(")
+  );
+  assert.doesNotMatch(fn, /item_guid/, "عمود الهوية يبقى خارج الكتابة — تكتبه مهمة أرقام الأصناف وحدها");
+});
+
+// ---------------------------------------------------------------------------
 // G) حارس تعارض الأسعار (PR #256) لم يتغيّر
 // ---------------------------------------------------------------------------
 test("G) واجهة حارس #256 باقية كما هي ولم تُمَس قاعدته", () => {
@@ -393,6 +534,42 @@ test("شاهد الطفرة: تعطيل فحص «المفتاح جديد» يُ�
     0,
     "بإزالة الفحص تمرّ الحالة C — الاختبار C كان سيفشل"
   );
+});
+
+test("شاهد الطفرة (P1): تجاهل الهوية الصريحة يُسقط رصد إعادة التسمية", () => {
+  const payload = [incoming(RENAMED_KEY, RENAMED_KEY, { item_guid: GUID_RENAMED })];
+  // الأصل يرصدها.
+  assert.equal(findNewDuplicateGuidRows(payload, RENAME_TABLE, RENAME_GUIDS).length, 1, "الأصل يرصد H");
+
+  // طفرة ١: إبطال فرع الهوية الصريحة في resolveIncomingGuid.
+  const m1 = guardSource.replace(
+    "    const explicit = readGuid(rec);\n    if (explicit) return explicit;",
+    "    const explicit = \"\";\n    if (explicit) return explicit;"
+  );
+  assert.notEqual(m1, guardSource, "الطفرة ١ لم تُطبَّق");
+  assert.equal(
+    loadGuard(m1).findNewDuplicateGuidRows(payload, RENAME_TABLE, RENAME_GUIDS).length,
+    0,
+    "بإبطال الهوية الصريحة تفلت H — الاختبار H كان سيفشل"
+  );
+
+  // طفرة ٢: حذف تمرير itemGuid من الحمولة (محاكاة التراجع عن تعديل app.js).
+  assert.equal(
+    findNewDuplicateGuidRows([incoming(RENAMED_KEY)], RENAME_TABLE, RENAME_GUIDS).length,
+    0,
+    "بلا تمرير الهوية تفلت H"
+  );
+});
+
+test("شاهد الطفرة (P1، مصدري): تمرير withUser بدل rowsForGuardOnly يُبطل الإصلاح", () => {
+  // لو أُعيد الاستدعاء إلى withUser لَما وصلت الهوية الموثوقة إلى الحارس.
+  const body = sliceFunction("upsertApprovedPriceItems");
+  assert.ok(
+    !/assertNoNewDuplicateGuidRow\(withUser\b/.test(body),
+    "ممنوع تمرير withUser — لا يحمل الهوية الموثوقة فتعود ثغرة إعادة التسمية"
+  );
+  assert.match(body, /trustedGuidByKey\.set\(key, guid\)/, "الخريطة تُملأ فعلاً");
+  assert.match(body, /item_guid: trustedGuidByKey\.get\(rec\.item_key\)/, "والهوية تُركَّب على صفوف الفحص");
 });
 
 console.log(`check-new-duplicate-guid-guard: اجتاز ${results.length} اختباراً.`);

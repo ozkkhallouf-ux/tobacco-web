@@ -3914,6 +3914,13 @@ async function savePricingItem(form) {
       };
       return {
         itemKey: targetKey,
+        // هوية بطاقة الأمين من مصدرها الموثوق: الجرد الحي أولاً ثم الصف المحفوظ.
+        // لماذا تُمرَّر: حارس منع الازدواج (src/price-guid-conflict.js) كان يحلّ
+        // الهوية بالاسم المطبّع وحده، فتفلت منه **إعادة التسمية الجوهرية** —
+        // اسم جديد لا يطابق القديم بعد التطبيع فيُنشأ صف ثانٍ لنفس البطاقة، ثم
+        // تختمهما مهمة أرقام الأصناف بنفس GUID فيعود الازدواج (Codex P1 على
+        // PR #257؛ وهو ما وقع فعلاً في 13005/13006 كابتن بلاك «كوين» ← «كور»).
+        itemGuid: sourceItem?.itemGuid || sourceExisting?.itemGuid || "",
         itemName: sourceItem?.name || sourceExisting?.itemName || itemName,
         unit1Name: (sourceItem ? itemUnit1Name(sourceItem) : sourceExisting?.unit1Name) || unit1Name,
         unit2Name: (sourceItem ? itemUnit2Name(sourceItem) : sourceExisting?.unit2Name) || unit2Name,
