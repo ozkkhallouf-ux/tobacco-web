@@ -5315,13 +5315,24 @@ async function createPortablePdfBlob(bodyHtml, filename, options = {}) {
   const source = [...container.children].find((element) => element.tagName !== "STYLE") || container;
 
   // html2canvas قد يحذف المسافة العادية الملاصقة لكلمة عربية (مثل «رقم 1»
-  // فتصير «رقم1»). نثبّت مسافات عقد النص العربية فقط قبل الرسم؛ لا نغيّر HTML
-  // الأصلي ولا CSS ولا النصوص الإنكليزية الخالصة.
+  // فتصير «رقم1»). نثبّت المسافة **الملاصقة لحرف عربي من الجانبين المعنيَّين
+  // فقط**، لا كل مسافة في العقدة.
+  //
+  // الاستبدال الأعمى السابق (`replace(/ /g, NBSP)` على أي عقدة فيها عربي) كان
+  // يجمّد المسافات الملاصقة للأقواس والشرطة وعلامة العملة أيضاً. وNBSP محرف
+  // محايد لا يُكسر، فكان يلصق «(100 كروز)» و«$ 250 / كرتونة» بجوارهما فيعامل
+  // خوارزمُ الاتجاه المقطعَ كتلةً واحدة ويقلب ترتيبه. الآن نحمي وصلَي
+  // «عربي↔عربي» و«رقم↔عربي» فقط، ونترك المسافة الملاصقة لأي رمز (قوس أو شرطة
+  // أو / أو $) مسافةً عادية كي يفصل الخوارزم الاتجاهات كما يجب.
   const textWalker = document.createTreeWalker(source, NodeFilter.SHOW_TEXT);
   let textNode = textWalker.nextNode();
   while (textNode) {
-    if (/[\u0600-\u06ff]/.test(textNode.nodeValue || "")) {
-      textNode.nodeValue = String(textNode.nodeValue || "").replace(/ /g, "\u00a0");
+    const text = String(textNode.nodeValue || "");
+    if (/[\u0600-\u06ff]/.test(text)) {
+      textNode.nodeValue = text.replace(
+        /([\u0600-\u06ff]) (?=[\u0600-\u06ff0-9\u0660-\u0669])|([0-9\u0660-\u0669]) (?=[\u0600-\u06ff])/g,
+        (match, arabicBefore, digitBefore) => `${arabicBefore || digitBefore}\u00a0`
+      );
     }
     textNode = textWalker.nextNode();
   }
@@ -5352,7 +5363,7 @@ async function createPortablePdfBlob(bodyHtml, filename, options = {}) {
     // القياس قبل هذه المرحلة لا يرى انتقال التذييل وحده إلى صفحة رابعة.
     await worker.toContainer();
     const renderContainer = worker.prop && worker.prop.container;
-    const renderSource = renderContainer?.querySelector(".ozk-rpt") || renderContainer?.firstElementChild || renderContainer;
+    const renderSource = renderContainer?.querySelector(".ozk-rpt, .ozk-inv") || renderContainer?.firstElementChild || renderContainer;
     if (renderSource) trimTrailingPortablePdfDecorations(renderSource, options.margin || [8, 8, 8, 8]);
     await worker.toCanvas();
     const canvas = (worker.prop && worker.prop.canvas) || worker.canvas;
@@ -5730,7 +5741,7 @@ async function exportReportPdf(bodyHtml, archive) {
     '<style>@page{size:A4 portrait;margin:10mm}' +
     'html,body{margin:0;padding:0;background:#fff;-webkit-print-color-adjust:exact;print-color-adjust:exact}' +
     'img{max-width:100%}table{page-break-inside:auto}tr{page-break-inside:avoid}thead{display:table-header-group}tfoot{display:table-footer-group}' +
-    '@media print{.ozk-rpt{padding:0}}</style>' +
+    '@media print{.ozk-rpt,.ozk-inv{padding:0}}</style>' +
     '</head><body>' + bodyHtml +
     '</body></html>';
   printHtmlDocument(doc, {
@@ -5968,10 +5979,115 @@ function balanceText(bal, cur) {
   return `${formatMoney(Math.abs(b))} ${cur} ${b > 0 ? "(عليكم)" : "(لكم)"}`;
 }
 
+// بناء أسطر «دفتر» المستند (التاريخ، الأرصدة، الحسم، دفعة الزبون، التسوية)
+// كبيانات لا كـHTML. هذه هي نفس القواعد المحاسبية القائمة، مُستخرجة إلى مكان
+// واحد كي يستدعيها مسارا العرض معاً — القالب القديم (سندات القبض والصرف
+// والمرتجع) وقالب الفاتورة الرئيسي — فلا يُنسخ المنطق مرتين ولا يتباعدان.
+// لم يتغيّر أي شرط ولا أي صياغة ولا أي ترتيب عمّا كان.
+function voucherLedgerRows(v) {
+  const isPay = v.type === "payment";
+  const isInv = v.type === "invoice";
+  const isRet = v.type === "return";
+  const cur = v.cur || "ل.س";
+  const dstr = String(v.date || todayIsoDate()).slice(0, 10);
+  const balLabel = isInv ? "الرصيد الحالي" : (isRet ? "الرصيد بعد المرتجع" : (isPay ? "الرصيد بعد الصرف" : "الرصيد بعد الدفعة"));
+  // أرصدة الذمم تأتي من ac000 بعملة الأساس (الدولار) ولا تُحوَّل — فلا يجوز طبعها
+  // بوسم «ل.س» لزبون عملة وصله ليرة. عملة الرصيد مستقلة عن عملة المستند.
+  const balCur = v.balanceCur || "$";
+  const rows = [];
+  rows.push({ label: "التاريخ", value: dstr, width: "130px", isDate: true });
+  if (v.method) rows.push({ label: "طريقة الدفع", value: v.method });
+  if (v.notes) rows.push({ label: "البيان", value: v.notes });
+  // للفاتورة والمرتجع: نعرض الرصيد السابق ثم القيمة ثم الرصيد الجديد ليعرف الزبون وضعه بوضوح.
+  if ((isInv || isRet) && v.newBalance !== undefined && v.newBalance !== null) {
+    rows.push({ label: "الرصيد السابق", value: balanceText(v.prevBalance, balCur) });
+    rows.push({ label: isRet ? "قيمة هذا المرتجع" : "قيمة هذه الفاتورة", value: `${formatMoney(v.amount || 0)} ${cur}` });
+    // إن سُجّلت الفاتورة على الحساب بمبلغ أقل/أكثر من قيمتها (حسم أو تسوية) نُظهر الفرق
+    // ليبقى الحساب شفافاً: السابق + الفاتورة − الحسم = الجديد.
+    // الحسم ودفعة الزبون عمليتان محاسبيتان مستقلتان تماماً، ولكلٍّ سطره:
+    //   الرصيد الجديد = السابق + قيمة الفاتورة − الحسم − دفعة الزبون
+    // لا يجوز أن تُطبع دفعة داخل خانة الحسم ولا العكس. كلٌّ يظهر فقط إن وُجد.
+    if (Number(v.discount || 0) > 0.009) {
+      rows.push({ label: "الحسم", value: `− ${formatMoney(v.discount)} ${cur}`, tone: "cred" });
+    }
+    if (Number(v.payment || 0) > 0.009) {
+      rows.push({ label: "دفعة من الزبون", value: `− ${formatMoney(v.payment)} ${cur}`, tone: "cred" });
+    }
+    // `adjust` فرق **غير منسوب**: ما تبقّى من حركة الحساب بعد طرح الحسم والدفعة
+    // المعروفَين. لا يُسمّى حسماً: مصدر فواتير الأمين لا يفصل الحسم عن الدفعة
+    // (راجع tools/push-customer-invoices.ps1 — الفاتورة تصل بحقول
+    // number/date/guid/total/isReturn/lines فقط)، فتسميته حسماً تطبع دفعة زبون
+    // على أنها حسم في مستند يُسلَّم للزبون.
+    if (Number(v.adjust || 0) > 0.009) {
+      rows.push({ label: "تسوية على الحساب", value: `− ${formatMoney(v.adjust)} ${cur}`, tone: "cred" });
+    } else if (Number(v.adjust || 0) < -0.009) {
+      rows.push({ label: "إضافة / تسوية", value: `+ ${formatMoney(Math.abs(v.adjust))} ${cur}`, tone: "deb" });
+    }
+    rows.push({ label: "الرصيد الجديد", value: balanceText(v.newBalance, balCur), strong: true });
+  } else if (v.balance !== undefined && v.balance !== null && v.balance !== "") {
+    const lbl = v.balanceLabel || balLabel;
+    const balTxt = (isInv || isRet || v.type === "receipt") ? balanceText(v.balance, balCur) : `${formatMoney(v.balance)} ${cur}`;
+    rows.push({ label: lbl, value: balTxt });
+    // إن تحرّك الحساب بعد هذا القيد (فواتير لاحقة مثلاً) نعرض الرصيد الحالي أيضاً:
+    // سطر واحد لا يكفي — الزبون يقارن السند برصيده اليوم فيظنّ الفرق خطأً.
+    // محصور بسند القبض وحده: الفاتورة والمرتجع لهما سطرا «السابق/الجديد».
+    if (v.type === "receipt"
+      && v.currentBalance !== undefined && v.currentBalance !== null && v.currentBalance !== ""
+      && Math.abs(Number(v.currentBalance) - Number(v.balance)) > 0.009) {
+      const asOf = shortDateTime(v.currentBalanceAt);
+      rows.push({
+        label: "الرصيد الحالي",
+        value: balanceText(v.currentBalance, balCur),
+        suffixHtml: ` <small>(بعد حركات لاحقة${asOf ? " — حتى " + escapeHtml(asOf) : ""})</small>`
+      });
+    }
+  }
+  return rows;
+}
+
+// عرض سطر دفتر واحد بقالب السندات القديم. يُنتج نفس HTML السابق حرفاً بحرف.
+function voucherLedgerRowHtml(row) {
+  const width = row.width ? ` style="width:${row.width}"` : "";
+  const cls = row.tone ? ` class="${row.tone}"` : "";
+  const value = row.strong ? `<b>${escapeHtml(row.value)}</b>` : escapeHtml(row.value);
+  return `<tr><th${width}>${escapeHtml(row.label)}</th><td${cls}>${value}${row.suffixHtml || ""}</td></tr>`;
+}
+
+// محوّل فاتورة المبيعات إلى عقد قالب الفاتورة الرئيسي. لا يحسب شيئاً: يستدعي
+// `invoiceLineQty` و`invoiceLinePrice` و`invoiceLineValueText` القائمة كما هي.
+function saleInvoiceDocument(v) {
+  const lines = Array.isArray(v.lines) ? v.lines : [];
+  const inv = { total: v.amount, lines };
+  return {
+    kind: "invoice",
+    escapeHtml,
+    no: v.no || docNumber("INV"),
+    date: String(v.date || todayIsoDate()).slice(0, 10),
+    cur: v.cur || "ل.س",
+    party: v.name || "",
+    partyMeta: v.phone ? "هاتف: " + escapeHtml(v.phone) : "",
+    amountText: formatMoney(v.amount || 0),
+    lines: lines.map((line) => ({
+      material: line.material || "",
+      qtyText: invoiceLineQty(line),
+      priceText: invoiceLinePrice(line, inv),
+      valueText: invoiceLineValueText(line, inv)
+    })),
+    rows: voucherLedgerRows(v)
+  };
+}
+
 function voucherPdfMarkup(v) {
   const isPay = v.type === "payment";
   const isInv = v.type === "invoice";
   const isRet = v.type === "return";
+
+  // فاتورة المبيعات تُبنى بقالب الفاتورة الرئيسي المستقل عن قالب التقارير.
+  // المرتجع والسندان يبقيان على المسار القديم حتى مراحلهما.
+  if (isInv && typeof OZK_INVOICE !== "undefined" && OZK_INVOICE && typeof OZK_INVOICE.markup === "function") {
+    return OZK_INVOICE.markup(saleInvoiceDocument(v));
+  }
+
   const title = isInv ? "فاتورة" : (isRet ? "فاتورة مرتجع" : (isPay ? "سند صرف" : "سند قبض"));
   const cur = v.cur || "ل.س";
   const amtColor = (isPay || isInv) ? "#c0271f" : "#16794f";
@@ -5984,54 +6100,7 @@ function voucherPdfMarkup(v) {
       : (isPay
         ? "هذا سند رسمي بالمبلغ المصروف من صندوق OZK TOBACCO."
         : "شكراً لتعاملكم مع OZK TOBACCO. هذا سند رسمي بالمبلغ المستلم."));
-  const balLabel = isInv ? "الرصيد الحالي" : (isRet ? "الرصيد بعد المرتجع" : (isPay ? "الرصيد بعد الصرف" : "الرصيد بعد الدفعة"));
-  // أرصدة الذمم تأتي من ac000 بعملة الأساس (الدولار) ولا تُحوَّل — فلا يجوز طبعها
-  // بوسم «ل.س» لزبون عملة وصله ليرة. عملة الرصيد مستقلة عن عملة المستند.
-  const balCur = v.balanceCur || "$";
-  const rows = [];
-  rows.push(`<tr><th style="width:130px">التاريخ</th><td>${escapeHtml(dstr)}</td></tr>`);
-  if (v.method) rows.push(`<tr><th>طريقة الدفع</th><td>${escapeHtml(v.method)}</td></tr>`);
-  if (v.notes) rows.push(`<tr><th>البيان</th><td>${escapeHtml(v.notes)}</td></tr>`);
-  // للفاتورة والمرتجع: نعرض الرصيد السابق ثم القيمة ثم الرصيد الجديد ليعرف الزبون وضعه بوضوح.
-  if ((isInv || isRet) && v.newBalance !== undefined && v.newBalance !== null) {
-    rows.push(`<tr><th>الرصيد السابق</th><td>${escapeHtml(balanceText(v.prevBalance, balCur))}</td></tr>`);
-    rows.push(`<tr><th>${isRet ? "قيمة هذا المرتجع" : "قيمة هذه الفاتورة"}</th><td>${escapeHtml(formatMoney(v.amount || 0))} ${escapeHtml(cur)}</td></tr>`);
-    // إن سُجّلت الفاتورة على الحساب بمبلغ أقل/أكثر من قيمتها (حسم أو تسوية) نُظهر الفرق
-    // ليبقى الحساب شفافاً: السابق + الفاتورة − الحسم = الجديد.
-    // الحسم ودفعة الزبون عمليتان محاسبيتان مستقلتان تماماً، ولكلٍّ سطره:
-    //   الرصيد الجديد = السابق + قيمة الفاتورة − الحسم − دفعة الزبون
-    // لا يجوز أن تُطبع دفعة داخل خانة الحسم ولا العكس. كلٌّ يظهر فقط إن وُجد.
-    if (Number(v.discount || 0) > 0.009) {
-      rows.push(`<tr><th>الحسم</th><td class="cred">− ${escapeHtml(formatMoney(v.discount))} ${escapeHtml(cur)}</td></tr>`);
-    }
-    if (Number(v.payment || 0) > 0.009) {
-      rows.push(`<tr><th>دفعة من الزبون</th><td class="cred">− ${escapeHtml(formatMoney(v.payment))} ${escapeHtml(cur)}</td></tr>`);
-    }
-    // `adjust` فرق **غير منسوب**: ما تبقّى من حركة الحساب بعد طرح الحسم والدفعة
-    // المعروفَين. لا يُسمّى حسماً: مصدر فواتير الأمين لا يفصل الحسم عن الدفعة
-    // (راجع tools/push-customer-invoices.ps1 — الفاتورة تصل بحقول
-    // number/date/guid/total/isReturn/lines فقط)، فتسميته حسماً تطبع دفعة زبون
-    // على أنها حسم في مستند يُسلَّم للزبون.
-    if (Number(v.adjust || 0) > 0.009) {
-      rows.push(`<tr><th>تسوية على الحساب</th><td class="cred">− ${escapeHtml(formatMoney(v.adjust))} ${escapeHtml(cur)}</td></tr>`);
-    } else if (Number(v.adjust || 0) < -0.009) {
-      rows.push(`<tr><th>إضافة / تسوية</th><td class="deb">+ ${escapeHtml(formatMoney(Math.abs(v.adjust)))} ${escapeHtml(cur)}</td></tr>`);
-    }
-    rows.push(`<tr><th>الرصيد الجديد</th><td><b>${escapeHtml(balanceText(v.newBalance, balCur))}</b></td></tr>`);
-  } else if (v.balance !== undefined && v.balance !== null && v.balance !== "") {
-    const lbl = v.balanceLabel || balLabel;
-    const balTxt = (isInv || isRet || v.type === "receipt") ? balanceText(v.balance, balCur) : `${formatMoney(v.balance)} ${cur}`;
-    rows.push(`<tr><th>${escapeHtml(lbl)}</th><td>${escapeHtml(balTxt)}</td></tr>`);
-    // إن تحرّك الحساب بعد هذا القيد (فواتير لاحقة مثلاً) نعرض الرصيد الحالي أيضاً:
-    // سطر واحد لا يكفي — الزبون يقارن السند برصيده اليوم فيظنّ الفرق خطأً.
-    // محصور بسند القبض وحده: الفاتورة والمرتجع لهما سطرا «السابق/الجديد».
-    if (v.type === "receipt"
-      && v.currentBalance !== undefined && v.currentBalance !== null && v.currentBalance !== ""
-      && Math.abs(Number(v.currentBalance) - Number(v.balance)) > 0.009) {
-      const asOf = shortDateTime(v.currentBalanceAt);
-      rows.push(`<tr><th>الرصيد الحالي</th><td>${escapeHtml(balanceText(v.currentBalance, balCur))} <small>(بعد حركات لاحقة${asOf ? " — حتى " + escapeHtml(asOf) : ""})</small></td></tr>`);
-    }
-  }
+  const rows = voucherLedgerRows(v).map(voucherLedgerRowHtml);
   const stamp = `
     <div class="stamp-wrap"><div class="seal">
       <div class="s-name">مركز أبو زياد</div>

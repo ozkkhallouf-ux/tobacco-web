@@ -39,6 +39,11 @@ const PATTERNS = {
   salesTotals: /function salesTotals\(\) \{[\s\S]*?\n\}\n/,
   roundPrice: /function roundPrice\(value\) \{[\s\S]*?\n\}\n/,
   formatMoney: /function formatMoney\(value\) \{[\s\S]*?\n\}\n/,
+  // أسطر الدفتر خرجت من voucherPdfMarkup إلى دالة واحدة يستدعيها مسارا العرض
+  // (السندات القديمة وقالب الفاتورة الرئيسي) — فيجب استخراجها معه.
+  voucherLedgerRows: /function voucherLedgerRows\(v\) \{[\s\S]*?\n\}\n/,
+  voucherLedgerRowHtml: /function voucherLedgerRowHtml\(row\) \{[\s\S]*?\n\}\n/,
+  saleInvoiceDocument: /function saleInvoiceDocument\(v\) \{[\s\S]*?\n\}\n/,
   voucherPdfMarkup: /function voucherPdfMarkup\(v\) \{[\s\S]*?\n\}\n/,
   invoicePriceBasis: /function invoicePriceBasis\(inv\) \{[\s\S]*?\n\}\n/,
   invoiceLineBasis: /function invoiceLineBasis\(line\) \{[\s\S]*?\n\}\n/,
@@ -82,6 +87,12 @@ const sandbox = {
   todayIsoDate: () => "2026-08-31"
 };
 vm.createContext(sandbox);
+// قالب الفاتورة الرئيسي وحدة عامة مستقلة؛ نحمّلها أولاً كي يمرّ مستند الفاتورة
+// بالمسار الإنتاجي نفسه لا بمسار احتياطي.
+vm.runInContext(
+  readFileSync(new URL("../src/documents/invoice/ozk-invoice.js", import.meta.url), "utf8"),
+  sandbox
+);
 vm.runInContext(source.join("\n"), sandbox);
 const {
   sanitizeDocumentTitle, fileDateLabel, archiveDocumentTitle, withDocumentTitle,
@@ -199,7 +210,8 @@ test("invoice with both values prints two separate rows", () => {
   assert.ok(/0\.5/.test(html), "قيمة الحسم 0.5 غير مطبوعة");
   assert.ok(/\b50\b/.test(html), "قيمة الدفعة 50 غير مطبوعة");
   // ولا يجوز أن يُطبع 50 في سطر الحسم.
-  const discountRow = html.match(/<th>الحسم<\/th><td[^>]*>[^<]*/)[0];
+  // خلايا القيم صارت معزولة بـ<bdi> منعاً لانقلاب الاتجاه؛ القيم نفسها لم تتغيّر.
+  const discountRow = html.match(/<th>الحسم<\/th><td[^>]*>(?:<bdi>)?[^<]*/)[0];
   assert.ok(discountRow.includes("0.5"), `سطر الحسم يحمل قيمة خاطئة: ${discountRow}`);
   assert.ok(!discountRow.includes("50.00"), "الدفعة طُبعت داخل سطر الحسم");
 });
@@ -227,7 +239,9 @@ test("الفرق غير المنسوب لا يُسمّى حسماً أبداً",
   const html = invoiceDoc({ adjust: 50, newBalance: 150 });
   assert.ok(html.includes("تسوية على الحساب"), "الفرق غير المنسوب بلا تسمية صحيحة");
   assert.ok(!html.includes("<th>الحسم</th>"), "الفرق غير المنسوب طُبع بعنوان «حسم»");
-  assert.ok(!/<th>حسم<\/th>/.test(appJs.match(/function voucherPdfMarkup\(v\)[\s\S]*?\n\}\n/)[0]),
+  // أسطر الدفتر صارت في voucherLedgerRows، فالتدقيق النصّي يلاحقها إلى موضعها
+  // الجديد بدل أن يفحص دالةً لم تعد تحوي الأسطر أصلاً (ففحصها يصبح بلا معنى).
+  assert.ok(!/label: "حسم"/.test(appJs.match(/function voucherLedgerRows\(v\)[\s\S]*?\n\}\n/)[0]),
     "بقيت التسمية القديمة «حسم» للفرق غير المنسوب في الكود");
 });
 
@@ -285,7 +299,7 @@ test("invoice 561: discount = 0.500 و payment = 16626", () => {
   });
   assert.ok(html.includes("<th>الحسم</th>"), "سطر الحسم مفقود");
   assert.ok(html.includes("<th>دفعة من الزبون</th>"), "سطر الدفعة مفقود");
-  const discountRow = html.match(/<th>الحسم<\/th><td[^>]*>[^<]*/)[0];
+  const discountRow = html.match(/<th>الحسم<\/th><td[^>]*>(?:<bdi>)?[^<]*/)[0];
   assert.ok(discountRow.includes("0.5"), `سطر الحسم: ${discountRow}`);
   assert.ok(!/16,?626/.test(discountRow), "الدفعة دخلت سطر الحسم");
 });
@@ -611,10 +625,10 @@ test("#733: المستند المطبوع لا يحمل أي رقم من أرق�
   for (const wrong of ["14,300", "14,500", "15,400", "7,950", "6,030"]) {
     assert.ok(!html.includes(wrong), `الرقم الخاطئ ${wrong} ما زال مطبوعاً`);
   }
-  assert.ok(html.includes("<td>286 $ / كرتونة</td>"), "سعر كرتونة ماستر سليم أزرق غير مطبوع");
-  assert.ok(html.includes("<td>402 $ / كرتونة</td>"), "سعر كرتونة غلواز غير مطبوع");
-  assert.ok(html.includes("<td>159</td>"), "قيمة نصف كرتونة اليغانس غير مطبوعة");
-  assert.ok(html.includes("<td>120.6</td>"), "قيمة غلواز غير مطبوعة");
+  assert.ok(html.includes("<td><bdi>286 $ / كرتونة</bdi></td>"), "سعر كرتونة ماستر سليم أزرق غير مطبوع");
+  assert.ok(html.includes("<td><bdi>402 $ / كرتونة</bdi></td>"), "سعر كرتونة غلواز غير مطبوع");
+  assert.ok(html.includes("<td><bdi>159</bdi></td>"), "قيمة نصف كرتونة اليغانس غير مطبوعة");
+  assert.ok(html.includes("<td><bdi>120.6</bdi></td>"), "قيمة غلواز غير مطبوعة");
 });
 
 // ===== 4هـ) حصر مطلق: قيمة سطر لا تتجاوز إجمالي الفاتورة بحال =====
