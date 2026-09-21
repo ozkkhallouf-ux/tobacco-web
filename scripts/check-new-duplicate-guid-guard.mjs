@@ -229,9 +229,36 @@ test("E4) الجلب يشمل item_name — بدونه تتعذّر مطابقة
 // ---------------------------------------------------------------------------
 // F) هوية مفقودة/مجهولة لا تنتج إنذاراً كاذباً
 // ---------------------------------------------------------------------------
-test("F) صف قائم بلا هوية لا يحجز شيئاً", () => {
+test("F) صف قائم بلا هوية **يحجز** اسمه المطبّع (Codex P1 ثالث)", () => {
+  // صفّ بطاقة جديدة يبقى بهوية NULL حتى تعمل مهمة أرقام الأصناف (٦ ساعات).
+  // لو لم يحجز اسمه لَمرّ مفتاح ثانٍ لنفس البطاقة خلال تلك النافذة.
   const table = [existingRow("قديم بلا هوية", null), existingRow("قديم فارغ", "")];
-  assert.equal(findNewDuplicateGuidRows([incoming("قديم بلا هويه")], table, guidMap(table)).length, 0);
+  const found = findNewDuplicateGuidRows([incoming("قديم بلا هويه")], table, guidMap(table));
+  assert.equal(found.length, 1, "الاسم المطبّع نفسه ⇒ يُرفض رغم غياب الهوية");
+  assert.deepEqual(Array.from(found[0].existingKeys), ["قديم بلا هوية"]);
+  assert.match(found[0].guid, /بلا هوية مسجّلة/, "الرسالة تصرّح بغياب الهوية بدل اختلاق واحدة");
+});
+
+test("F1ب) صف بلا هوية لا يحجز إلا اسمه هو", () => {
+  const table = [existingRow("قديم بلا هوية", null)];
+  assert.equal(
+    findNewDuplicateGuidRows([incoming("مادة مختلفة تماماً")], table, guidMap(table)).length,
+    0,
+    "بلا تطابق اسمي لا حجز — لا توسيع للمنع"
+  );
+});
+
+test("F1ج) صف بلا هوية يحجز حتى حين يحمل الوارد هوية موثوقة", () => {
+  // هذه هي حالة Codex بالضبط: الوارد يحمل GUID البطاقة بعد إعادة التسمية،
+  // والصف القائم بلا هوية فلا يربطهما المالك — يربطهما الاسم.
+  const table = [existingRow("ايكوس الوميا برايم", null)];
+  const found = findNewDuplicateGuidRows(
+    [incoming("ايكوس الوميا برايمـ", "ايكوس الوميا برايم", { item_guid: GUID_LIVE })],
+    table,
+    guidMap(table)
+  );
+  assert.equal(found.length, 1);
+  assert.deepEqual(Array.from(found[0].existingKeys), ["ايكوس الوميا برايم"]);
 });
 
 test("F2) صف وارد لا تُحلّ هويته يمرّ", () => {
@@ -629,6 +656,24 @@ test("شاهد الطفرة (P1، مصدري): إسقاط تركيب الهوي�
   assert.ok(
     body.indexOf("item_guid: trustedGuidByKey.get") < body.indexOf(".upsert("),
     "ويسبق الكتابة وإلا كُتب الصف بلا هوية"
+  );
+});
+
+test("شاهد الطفرة (P1 ثالث): إسقاط صفوف بلا هوية من الفهرسة يعيد الثغرة", () => {
+  const table = [existingRow("ايكوس الوميا برايم", null)];
+  const payload = [incoming("ايكوس الوميا برايمـ", "ايكوس الوميا برايم", { item_guid: GUID_LIVE })];
+  assert.equal(findNewDuplicateGuidRows(payload, table, guidMap(table)).length, 1, "الأصل يرصدها");
+
+  // الطفرة: العودة إلى تخطّي كل صف بلا هوية (السلوك قبل الإصلاح).
+  const mutated = guardSource.replace(
+    "      if (!guid) {\n        for (const name of names) {",
+    "      if (!guid) {\n        for (const name of []) {"
+  );
+  assert.notEqual(mutated, guardSource, "الطفرة لم تُطبَّق — تغيّر نص الحلقة؟");
+  assert.equal(
+    loadGuard(mutated).findNewDuplicateGuidRows(payload, table, guidMap(table)).length,
+    0,
+    "بإسقاط الفهرسة تمرّ الحالة — الاختبارات F وF1ج كانت ستفشل"
   );
 });
 

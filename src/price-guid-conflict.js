@@ -269,17 +269,45 @@
 
     const keysByGuid = new Map();
     const guidsByNormalizedName = new Map();
+    // صفوف قائمة **بلا هوية مسجّلة**، مفهرسة بالاسم المطبّع. وجودها واقع لا
+    // فرضية: صفّ أي بطاقة جديدة يُسعَّر يبقى بهوية NULL حتى تعمل مهمة أرقام
+    // الأصناف (كل ٦ ساعات افتراضياً) — قيست 7 صفوف كهذه لحظة كتابة السطر.
+    // إسقاطها من الفهرسة كان يجعل الحارس يسمح بمفتاح ثانٍ لنفس البطاقة، لأن
+    // المالك لا يملك هوية يُقارَن بها (Codex P1 ثالث على #257).
+    const keylessKeysByNormalizedName = new Map();
     for (const row of existing) {
-      const guid = readGuid(row);
       const key = readKey(row);
-      if (!guid || !key) continue;
+      if (!key) continue;
+      const guid = readGuid(row);
+      const names = [normalizeIdentityName(key), normalizeIdentityName(readName(row))];
+      if (!guid) {
+        for (const name of names) {
+          if (!name) continue;
+          if (!keylessKeysByNormalizedName.has(name)) keylessKeysByNormalizedName.set(name, []);
+          const bucket = keylessKeysByNormalizedName.get(name);
+          if (!bucket.includes(key)) bucket.push(key);
+        }
+        continue;
+      }
       if (!keysByGuid.has(guid)) keysByGuid.set(guid, []);
       keysByGuid.get(guid).push(key);
-      for (const name of [normalizeIdentityName(key), normalizeIdentityName(readName(row))]) {
+      for (const name of names) {
         if (!name) continue;
         if (!guidsByNormalizedName.has(name)) guidsByNormalizedName.set(name, new Set());
         guidsByNormalizedName.get(name).add(guid);
       }
+    }
+
+    /** مفاتيح صفوف بلا هوية يطابقها الوارد بالاسم المطبّع. */
+    function keylessOwnersFor(rec, key) {
+      const owners = [];
+      for (const candidate of [normalizeIdentityName(key), normalizeIdentityName(readName(rec))]) {
+        if (!candidate) continue;
+        for (const owned of keylessKeysByNormalizedName.get(candidate) || []) {
+          if (!owners.includes(owned)) owners.push(owned);
+        }
+      }
+      return owners;
     }
 
     const found = [];
@@ -297,10 +325,29 @@
       if (seenNewKeys.has(key)) continue;
       seenNewKeys.add(key);
 
-      const guid = resolveIncomingGuid(rec, guidByKey, guidsByNormalizedName);
-      if (!guid) continue; // بلا هوية لا دعوى
+      // صفّ قائم بلا هوية يطابق الوارد بالاسم المطبّع: مالكٌ فعليّ رغم غياب
+      // هويته المسجّلة. يُفحص قبل حلّ الهوية لأن الهوية لا تربطهما أصلاً.
+      const keylessOwners = keylessOwnersFor(rec, key);
 
-      const owners = [...(keysByGuid.get(guid) || []), ...(claimedInPayload.get(guid) || [])];
+      const guid = resolveIncomingGuid(rec, guidByKey, guidsByNormalizedName);
+      if (!guid) {
+        // بلا هوية للوارد، يبقى مالك الاسم المطبّع وحده دليلاً كافياً.
+        if (keylessOwners.length) {
+          found.push({
+            guid: "(بلا هوية مسجّلة بعد)",
+            itemName: readName(rec) || key,
+            newKey: key,
+            existingKeys: keylessOwners
+          });
+        }
+        continue;
+      }
+
+      const owners = [
+        ...(keysByGuid.get(guid) || []),
+        ...(claimedInPayload.get(guid) || []),
+        ...keylessOwners
+      ];
       if (owners.length) {
         found.push({
           guid,
