@@ -92,6 +92,7 @@ export const CHECKS = [
   'check-smart-inventory.mjs',
   'check-stock-qty-net-calc.mjs',
   'check-telegram-delivery-observability.mjs',
+  'check-telegram-grok-ask.mjs',
 ];
 
 // ----------------------------------------------------------------------------

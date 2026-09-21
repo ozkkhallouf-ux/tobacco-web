@@ -1,4 +1,5 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import { GROK_URL, buildGrokRequestBody, parseGrokOutput } from "./grok-ask.mjs";
 
 const SUPA_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
@@ -81,6 +82,7 @@ const WELCOME = `أهلاً 👋 أنا مساعدك الشخصي.
 🤖 اسأل أي سؤال عن العمل:
 • اسأل مين أكثر زبون مديون؟
 • أو اكتب سؤالك مباشرة بدون "اسأل" — أي رسالة ما بتنعرف كأمر أو تذكير بترد عليها بالذكاء الاصطناعي تلقائياً
+• أو ابعت رسالة صوتية — بتتفرّغ لنص بعدين بينفهم نفس الرسالة المكتوبة
 
 ⚙️ إعدادات:
 • حد التنبيه 30
@@ -936,8 +938,9 @@ async function handleSalesChart(chatId: number): Promise<void> {
 
 // ============================================================
 // سؤال حر بالذكاء الاصطناعي — «اسأل <سؤال>»
-// يستخدم نفس مفتاح ANTHROPIC_API_KEY المضبوط أصلاً بأسرار Supabase
-// لدالة claude-assistant (الأسرار مشتركة بين كل دوال المشروع)
+// النموذج: Grok عبر xAI (XAI_API_KEY في أسرار الدالة). السياق يُبنى هنا
+// من جداول العمل ثم يُرسل نصاً فقط. الصوت لا يدخل Grok: يُفرَّغ أولاً
+// بـ Whisper ثم يُعامل كرسالة نصية.
 // ============================================================
 // مسافة Levenshtein بسيطة — تسمح بفرق حرف واحد بين كلمتين (مفيد لأخطاء
 // تفريغ الصوت الشائعة، متل "مستر" بدل "ماستر" — حرف ناقص بالنص).
@@ -1099,11 +1102,11 @@ async function buildBusinessContext(question: string): Promise<string> {
   return lines.join("\n");
 }
 
-async function askClaude(question: string, context: string): Promise<string> {
-  const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
-  if (!apiKey) throw new Error("ANTHROPIC_API_KEY غير مضبوط بأسرار Supabase");
+async function askGrok(question: string, context: string): Promise<string> {
+  const apiKey = Deno.env.get("XAI_API_KEY");
+  if (!apiKey) throw new Error("XAI_API_KEY غير مضبوط بأسرار Supabase — لازم تضيفه لحتى يشتغل سؤال الذكاء الاصطناعي");
 
-  const system = `أنت مساعد ذكي لصاحب محل دخان (OZK TOBACCO) وبترد بالعربية العامية السورية المختصرة والمباشرة، بدون مقدمات طويلة.
+  const instructions = `أنت مساعد ذكي لصاحب محل دخان (OZK TOBACCO) وبترد بالعربية العامية السورية المختصرة والمباشرة، بدون مقدمات طويلة.
 عندك بيانات حقيقية عن حالة العمل الآن — استخدمها فقط للإجابة على سؤال المستخدم، ولا تختلق أي رقم أو اسم مش موجود بالبيانات المعطاة.
 المبيعات والأرصدة ودفعات الزبائن بالدولار الأساس. أما حركة الصناديق فكل رقم معها عملته صراحةً؛ حافظ على الدولار والليرة منفصلين ولا تحوّل بينهما.
 إذا بالسياق قسم "نتائج بحث دقيقة عن مواد" وفيه مادة تناسب سؤال المستخدم، استخدم رقمها بالضبط
@@ -1111,30 +1114,26 @@ async function askClaude(question: string, context: string): Promise<string> {
 إذا السؤال بيحتاج بيانات مش متوفرة عندك بالسياق فعلاً، قول هيك بوضوح بدل ما تخمّن.
 خلّي الجواب مختصر (ما يتجاوز 6 أسطر) إلا إذا السؤال بالأصل بيطلب قائمة أطول.`;
 
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
+  const res = await fetch(GROK_URL, {
     method: "POST",
-    headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01", "content-type": "application/json" },
-    body: JSON.stringify({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 700,
-      system,
-      messages: [{ role: "user", content: `بيانات العمل الحالية:\n${context}\n\nسؤال المالك: ${question}` }],
-    }),
+    headers: { Authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+    body: JSON.stringify(buildGrokRequestBody({
+      instructions,
+      input: `بيانات العمل الحالية:\n${context}\n\nسؤال المالك: ${question}`,
+    })),
   });
   if (!res.ok) {
     const errText = await res.text().catch(() => "");
-    throw new Error(`anthropic_${res.status}: ${errText.slice(0, 200)}`);
+    throw new Error(`grok_${res.status}: ${errText.slice(0, 200)}`);
   }
-  const data = await res.json();
-  const text = data?.content?.[0]?.text;
-  if (typeof text !== "string" || !text.trim()) throw new Error("رد فارغ من Claude");
-  return text.trim();
+  return parseGrokOutput(await res.json());
 }
 
 // ============================================================
-// تفريغ الرسائل الصوتية (Speech-to-Text) — عبر OpenAI Whisper
-// (Anthropic ما بيدعم صوت مباشر عبر الـ Messages API). يحتاج
-// OPENAI_API_KEY بأسرار Edge Function — نفس أسلوب ضبط ANTHROPIC_API_KEY.
+// تفريغ الرسائل الصوتية (Speech-to-Text) — عبر OpenAI Whisper.
+// Grok والنماذج اللغوية هنا نص فقط؛ الرسالة الصوتية تُحوَّل لنص عربي
+// أولاً ثم تدخل نفس مسار الأوامر/السؤال الحر. يحتاج OPENAI_API_KEY
+// بأسرار Edge Function — مستقل عن XAI_API_KEY.
 // ============================================================
 async function transcribeVoice(fileId: string): Promise<string> {
   const apiKey = Deno.env.get("OPENAI_API_KEY");
@@ -1174,7 +1173,7 @@ async function handleAiQuestion(chatId: number, question: string): Promise<void>
   await tg("sendMessage", { chat_id: chatId, text: "🤔 عم فكر..." });
   try {
     const context = await buildBusinessContext(question);
-    const answer = await askClaude(question, context);
+    const answer = await askGrok(question, context);
     await tg("sendMessage", { chat_id: chatId, text: `🤖 ${answer}` });
   } catch (e) {
     await tg("sendMessage", { chat_id: chatId, text: `صار خطأ وأنا عم فكر بالسؤال 😕\n(${String(e).slice(0, 150)})` });
