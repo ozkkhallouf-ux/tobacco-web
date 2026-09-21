@@ -471,7 +471,9 @@
     if (
       !guard ||
       typeof guard.findGuidPriceConflicts !== "function" ||
-      typeof guard.buildScopedConflictState !== "function"
+      typeof guard.buildScopedConflictState !== "function" ||
+      typeof guard.findNewDuplicateGuidRows !== "function" ||
+      typeof guard.findGuidReassignments !== "function"
     ) {
       throw new Error("تعذّر تحميل حارس أسعار البطاقات (price-guid-conflict.js). لم يُحفظ شيء.");
     }
@@ -494,6 +496,29 @@
     assertNoGuidPriceConflict(guard.buildScopedConflictState(incomingRows, existingRows, guidByKey));
   }
 
+  // منع إنشاء صف مكرر جديد على بطاقة مسعّرة أصلاً — إصلاح السبب الجذري.
+  // يفحص **الولادة وحدها**: صف وارد بمفتاح غير موجود في الجدول يحلّ إلى هوية
+  // يملكها صف قائم بمفتاح آخر. تحديث صف بمفتاح موجود لا يمرّ من هنا إطلاقاً،
+  // فإعادة تسعير المجموعات المكررة القائمة تبقى مسموحة كما هي. القاعدة الكاملة
+  // والمبرر في src/price-guid-conflict.js.
+  function assertNoNewDuplicateGuidRow(incomingRows, existingRows, guidByKey) {
+    const guard = requirePriceGuidGuard();
+    const duplicates = guard.findNewDuplicateGuidRows(incomingRows, existingRows, guidByKey);
+    if (duplicates.length) {
+      throw new Error(guard.formatNewDuplicateMessage(duplicates));
+    }
+  }
+
+  // هوية صفٍّ قائم لا تُستبدل صامتاً بهوية واردة مخالفة — fail-closed قبل أي
+  // كتابة. القاعدة والمبرر في src/price-guid-conflict.js.
+  function assertNoGuidReassignment(incomingRows, storedByKey, trustedByKey) {
+    const guard = requirePriceGuidGuard();
+    const reassignments = guard.findGuidReassignments(incomingRows, storedByKey, trustedByKey);
+    if (reassignments.length) {
+      throw new Error(guard.formatGuidReassignmentMessage(reassignments));
+    }
+  }
+
   function missingSessionMessage() {
     return "لا توجد جلسة دخول فعالة. إذا أنشأت الحساب للتو، افتح رسالة التأكيد في البريد أو عطّل تأكيد البريد مؤقتا من Supabase ثم سجل الدخول.";
   }
@@ -513,6 +538,11 @@
     const msg = message || "";
     if (/pgrst116|no rows/i.test(msg)) return "لم يُعثر على البيانات المطلوبة.";
     if (/pgrst301|jwt.*expired/i.test(msg)) return "انتهت جلسة الدخول. سجّل الدخول مجدداً.";
+    // القيد الفريد على هوية البطاقة: آخر خط دفاع حين يتسابق حفظان على نفس
+    // البطاقة بمفتاحين مختلفين. يسبق الرسالة العامة كي يفهم المالك السبب.
+    if (/approved_price_items_item_guid_unique/i.test(msg)) {
+      return "تعذّر الحفظ: بطاقة الأمين هذه مرتبطة بصف آخر في لائحة الأسعار. لم يُحفظ شيء — حدّث الصفحة ثم أعد المحاولة.";
+    }
     if (/pgrst\d+|postgres|relation|column|violates|constraint/i.test(msg)) return "حدث خطأ في قاعدة البيانات. حاول مجدداً أو تواصل مع الدعم.";
     if (/fetch|network|ECONNREFUSED/i.test(msg)) return "تعذر الاتصال بالخادم. تحقق من اتصالك بالإنترنت.";
     if (/permission|denied|403|401/i.test(msg)) return "ليس لديك صلاحية لتنفيذ هذه العملية.";
@@ -1134,7 +1164,7 @@
           // item_guid والحقول السعرية المُدارة أُضيفت للحارس: الـupsert يعالج
           // جزءاً من اللائحة، فلا يكفي فحص الحمولة وحدها — يجب ضمّها للصفوف
           // الباقية التي تشترك معها في نفس item_guid.
-          .select("item_key, item_number, item_code, item_guid, unit2_price, sale_price, price_payload")
+          .select("item_key, item_name, item_number, item_code, item_guid, unit2_price, sale_price, price_payload")
           .limit(5000);
         if (!fetchErr) {
           numberByKey = {};
@@ -1163,6 +1193,14 @@
         throw new Error("تعذّر تحضير الحفظ الآمن (فشل قراءة الأسعار الحالية). لم يُحفظ شيء — حاول مجدداً.");
       }
 
+      // هوية البطاقة الموثوقة كما وصلت من الجرد الحي (app.js: savePricingItem).
+      const trustedGuidByKey = new Map();
+      for (const item of items || []) {
+        const key = cleanText(item && item.itemKey, 240);
+        const guid = String((item && item.itemGuid) ?? "").trim();
+        if (key && guid) trustedGuidByKey.set(key, guid);
+      }
+
       const withUser = (items || [])
         .map((item) => normalizeApprovedPriceInput(item, user.id))
         .filter((item) => item.item_key && item.item_name && item.sale_price > 0)
@@ -1170,13 +1208,44 @@
           numberByKey
             ? { ...rec, item_number: numberByKey[rec.item_key] ?? null, item_code: codeByKey[rec.item_key] ?? null }
             : rec
-        );
+        )
+        // هوية البطاقة تُكتب مع الصف نفسه، بنفس نمط replaceApprovedPriceItems:
+        // الموثوقة من الجرد الحي، وإلا المحفوظة لهذا المفتاح، وإلا null.
+        //
+        // لماذا تُكتب ولا تُترك لمهمة أرقام الأصناف وحدها: تلك المهمة تعمل كل
+        // ٦ ساعات افتراضياً (register-item-numbers-task.ps1) وقد تتعطّل أياماً.
+        // فصفّ بطاقة جديدة يبقى بهوية NULL طوال تلك النافذة، ولو أُعيدت تسمية
+        // بطاقته خلالها لما استطاع الحارس ربط المفتاح الجديد بالصف القائم —
+        // فيُنشأ صف ثانٍ وتعود الازدواجية (Codex P1 ثانٍ على #257).
+        //
+        // ولماذا يحمل **كل** صف هذا المفتاح: الـupsert الجماعي في PostgREST
+        // يوحّد أعمدة الحمولة، فلو حمله بعضُ الصفوف دون بعض لكُتب NULL على
+        // البقية ومُسحت هوية قائمة — وهي مفتاح مطابقة متوسط التكلفة
+        // (push-item-costs.ps1). إعادة القيمة المحفوظة صراحةً تمنع ذلك:
+        // لا صف يفقد هويته، ولا هوية تُخمَّن.
+        //
+        // الأسبقية: **المحفوظة أولاً** ثم الموثوقة. هوية صفٍّ قائم مرجع لا
+        // يُدهَس: لو وصلت هوية موثوقة خاطئة (بطاقتان تتصادمان على نفس الاسم
+        // المطبّع، و`savePricingItem` يحلّهما بـ`find` فيأخذ أولاهما) لأعادت
+        // إسناد الصف لبطاقة أخرى صامتاً وكسرت مطابقة التكلفة. الموثوقة تُثبَّت
+        // فقط حين لا هوية محفوظة — أي للصف الجديد أو لصفٍّ لم يُختم بعد.
+        // واختلاف المحفوظة عن الواردة تعارضٌ يرفضه assertNoGuidReassignment.
+        .map((rec) => ({
+          ...rec,
+          item_guid: guidByKey[rec.item_key] ?? trustedGuidByKey.get(rec.item_key) ?? null
+        }));
 
       // الحالة بعد الحفظ كما ستصير فعلاً، **محصورة ببطاقات هذه الحمولة**: صفوف
       // الحمولة تحلّ محلّ صفوف الجدول التي تحمل نفس item_key، ويُضمّ إليها من
       // الصفوف الباقية ما يشترك معها في item_guid فقط. الفحص على هذه الحالة لا
       // على الحمولة وحدها (فلا يمرّ تعارض جديد) ولا على الجدول كله (فلا يشلّ
       // تعارضٌ قديم في بطاقة أخرى تسعيرَ مادة سليمة).
+      // أولاً: لا يُولد صف مكرر جديد على بطاقة مأهولة (السبب الجذري للـ53 القائمة).
+      // يسبق فحص التعارض لأنه التشخيص الأدق حين ينطبق الاثنان معاً، وكلاهما
+      // يرمي قبل أي كتابة فلا فرق في الأمان بينهما.
+      assertNoNewDuplicateGuidRow(withUser, existingAll, guidByKey);
+      // ولا تُعاد هوية صفٍّ قائم إسناداً صامتاً إلى بطاقة أخرى.
+      assertNoGuidReassignment(withUser, guidByKey, Object.fromEntries(trustedGuidByKey));
       assertNoGuidPriceConflictForIncoming(withUser, existingAll, guidByKey);
 
       const { data, error } = await client
@@ -1265,6 +1334,13 @@
       // حارس هوية السعر: بطاقة أمين واحدة لا تحمل سعرين. يُفحص **قبل** الحذف
       // فلا تُمسّ البيانات إطلاقاً عند التعارض — لا حفظ جزئي ولا اختيار تلقائي.
       // القاعدة والتفصيل في src/price-guid-conflict.js.
+      //
+      // حارس «منع الصف المكرر الجديد» **لا يُستدعى هنا عمداً**: هذا المسار يحذف
+      // الجدول كله ثم يعيد إدخال الحمولة، فكل صف بعد الحذف «جديد» ومفهوم
+      // الإنشاء-مقابل-التحديث بلا معنى فيه. والأهم: حمولة الاستبدال تُبنى من
+      // الحالة في الذاكرة وتحوي بالضرورة صفَّي كل مجموعة من الـ53 القائمة،
+      // فتطبيق الفحص هنا كان سيرفض كل حفظ كامل للّائحة — أي تجميد الـ53 بدل
+      // منع ولادة جديد. هذا المسار يحفظ ما هو قائم ولا يخترع مفاتيح.
       assertNoGuidPriceConflict(withUser);
 
       const { error: deleteError } = await client.from(approvedPricesTable).delete().neq("item_key", "__never__");
