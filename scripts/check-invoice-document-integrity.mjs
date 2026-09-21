@@ -56,6 +56,7 @@ const PATTERNS = {
   computeInvoiceLineBasisPlan: /function computeInvoiceLineBasisPlan\(lines, total\) \{[\s\S]*?\n\}\n/,
   invoiceLineTotalValue: /function invoiceLineTotalValue\(line, inv\) \{[\s\S]*?\n\}\n/,
   invoiceLineValueText: /function invoiceLineValueText\(line, inv\) \{[\s\S]*?\n\}\n/,
+  invoiceLineQtyParts: /function invoiceLineQtyParts\(line\) \{[\s\S]*?\n\}\n/,
   invoiceLineQty: /function invoiceLineQty\(line\) \{[\s\S]*?\n\}\n/,
   invoiceLineUnitPrice: /function invoiceLineUnitPrice\(line, inv\) \{[\s\S]*?\n\}\n/,
   invoiceLinePrice: /function invoiceLinePrice\(line, inv\) \{[\s\S]*?\n\}\n/
@@ -409,7 +410,12 @@ test("PDF/print uses same lineTotal as invoice data", () => {
   assert.ok(html.includes("201.5"), "قيمة السطر الفعلية غير مطبوعة");
   assert.ok(html.includes("403"), "سعر الوحدة (الكرتونة) غير مطبوع");
   // الكمية والسعر والقيمة ثلاثة أعمدة منفصلة لا يُخلط بينها.
-  assert.ok(html.includes("0.5 كرتونة"), "الكمية غير مطبوعة بالوحدة الكبرى");
+  // الكمية صارت أجزاءً ذرّية في عناصر عزل مستقلة (محرّك الرسم على الهاتف يعيد
+  // ترتيب أي عقدة نصّية مختلطة) — فنفحص الجزأين وترتيبهما بدل السلسلة الملتصقة.
+  // القيمة والوحدة المتوقَّعتان كما هما، ولم يتغيّر أي رقم.
+  const qtyValueAt = html.indexOf("<bdi>0.5</bdi>");
+  const qtyUnitAt = html.indexOf("<bdi>كرتونة</bdi>");
+  assert.ok(qtyValueAt >= 0 && qtyUnitAt > qtyValueAt, "الكمية غير مطبوعة بالوحدة الكبرى");
 });
 
 // ===== 4ب) فاتورة #712 بتاريخ 2026-09-12: كمية جزئية من كروز بسعر الوحدة الصغرى

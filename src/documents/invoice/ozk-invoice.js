@@ -47,6 +47,7 @@ const OZK_INVOICE = (() => {
 .ozk-inv .rfoot{margin-top:16px;border-top:1.5px solid #b8892a;padding-top:7px;font-size:10px;color:#6b5535;display:flex;justify-content:space-between}
 .ozk-inv .items-table{table-layout:fixed}
 .ozk-inv .items-table td,.ozk-inv .items-table th{overflow-wrap:anywhere}
+.ozk-inv .q-det{color:#6b5535;font-size:.9em}
 .ozk-inv .stamp-wrap{margin-top:16px;display:flex;justify-content:flex-start;page-break-inside:avoid}
 .ozk-inv .seal{border:2.5px solid #16357a;outline:1.5px solid #16357a;outline-offset:3px;border-radius:12px;color:#16357a;padding:9px 20px;text-align:center;transform:rotate(-5deg);opacity:.9;line-height:1.45}
 .ozk-inv .seal .s-name{font-size:15px;font-weight:900}
@@ -138,16 +139,38 @@ const OZK_INVOICE = (() => {
   // ==========================================================================
   // جدول المواد بأعمدته الأربعة المعتمدة. عرضٌ محض: النصوص تصل جاهزة ولا
   // يُشتقّ هنا شيء من الكمية ولا الوحدة ولا سعر الوحدة ولا قيمة السطر.
+  // خانة الكمية: كل جزء في عنصر عزل مستقل، وبلا أي قوس.
+  //
+  // محرّك الرسم على الهاتف (`html2canvas` بلا foreignObjectRendering) لا يطبّق
+  // خوارزمية BiDi: يأخذ مواضع الصناديق من تخطيط المتصفح الحقيقي ثم يرسم نصّ كل
+  // عقدة بنفسه. فعقدة واحدة تحمل «0.12 كرتونة (6 كروز)» تخرج مُعاد ترتيبها،
+  // ولا ينفع معها عزلٌ ولا `dir` لأن المحرّك لا يقرؤهما. وثبت بالقياس أن
+  // القوسين لا ينجوان بأي صورة (حرفيَّين، أو عنصرين، أو بـ`dir="ltr"`، أو
+  // كـ`content` في CSS)، وأن إصلاح NBSP نفسه هو ما يُزيح الرقم عن وحدته.
+  // فالأجزاء الذرّية تحلّ الأمرين معاً: كل صندوق يضعه التخطيط الحقيقي في موضعه،
+  // ولا تبقى عقدة مختلطة يلحمها NBSP. التفصيل في
+  // `scripts/check-invoice-quantity-render.mjs`.
+  function qtyCellHtml(line, esc) {
+    const parts = line.qtyParts;
+    if (!parts) return `<bdi>${esc(line.qtyText || "")}</bdi>`;
+    const atom = (text) => `<bdi>${esc(text)}</bdi>`;
+    const main = [parts.value, parts.unit].filter(Boolean).map(atom).join(" ");
+    if (!parts.detailValue) return main;
+    // التوضيح ثانوي بصرياً (أخفت وأصغر) بدل الأقواس التي كانت تحمل هذا الدور.
+    return `${main} <span class="q-det">${atom(parts.detailValue)} ${atom(parts.detailUnit)}</span>`;
+  }
+
   function itemsTableHtml(doc, kind, esc) {
     const lines = Array.isArray(doc.lines) ? doc.lines : [];
     if (!lines.length) return "";
     const body = lines.map((line) => {
       // `<bdi>` يعزل كل خلية مختلطة الاتجاه عن جاراتها، فلا ينقلب
       // «2 كرتونة (100 كروز)» ولا يتبدّل ترتيب «$ 250 / كرتونة».
-      const cells = [line.material || "", line.qtyText || "", line.priceText || "", line.valueText || ""];
-      return `<tr>${cells.map((c, i) => (i === 0
-        ? `<td>${esc(c)}</td>`
-        : `<td><bdi>${esc(c)}</bdi></td>`)).join("")}</tr>`;
+      const rest = [line.priceText || "", line.valueText || ""];
+      return `<tr><td>${esc(line.material || "")}</td>`
+        + `<td>${qtyCellHtml(line, esc)}</td>`
+        + rest.map((c) => `<td><bdi>${esc(c)}</bdi></td>`).join("")
+        + `</tr>`;
     }).join("");
     return `
     <div class="sec">${esc(kind.itemsLabel)}</div>

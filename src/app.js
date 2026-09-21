@@ -1421,18 +1421,35 @@ function invoiceLineValueText(line, inv) {
   return value > 0 ? formatMoney(value) : "—";
 }
 
-// كمية سطر الفاتورة بشكل مقروء (نفضّل الوحدة الأكبر إن وُجدت).
-function invoiceLineQty(line) {
+// كمية سطر الفاتورة أجزاءً مفصولة (نفضّل الوحدة الأكبر إن وُجدت): القيمة ووحدتها،
+// ثم قيمة التوضيح ووحدته. القواعد هي نفسها التي كانت في `invoiceLineQty` حرفاً بحرف
+// — لم يتغيّر شرط ولا تحويل ولا معامل، إنما فُصل الناتج كي يستطيع قالب الفاتورة
+// رسم كل جزء في عنصر مستقل. السبب في `scripts/check-invoice-quantity-render.mjs`:
+// محرّك الرسم على الهاتف يعيد ترتيب أي عقدة نصّية تخلط رقماً وعربياً.
+function invoiceLineQtyParts(line) {
   const u1 = String(line?.unit1 || "").trim();
   const u2 = String(line?.unit2 || "").trim();
   const qty = Number(line?.qty || 0);
   const qtyUnits = Number(line?.qtyUnits || 0);
   if (qtyUnits > 0 && u2) {
-    const detail = qty > 0 && u1 && (qty !== qtyUnits || u1 !== u2) ? ` (${formatMoney(qty)} ${u1})` : "";
-    return `${formatMoney(qtyUnits)} ${u2}${detail}`;
+    const hasDetail = qty > 0 && u1 && (qty !== qtyUnits || u1 !== u2);
+    return {
+      value: formatMoney(qtyUnits),
+      unit: u2,
+      detailValue: hasDetail ? formatMoney(qty) : "",
+      detailUnit: hasDetail ? u1 : ""
+    };
   }
-  if (qty > 0) return `${formatMoney(qty)} ${u1}`.trim();
-  return "—";
+  if (qty > 0) return { value: formatMoney(qty), unit: u1, detailValue: "", detailUnit: "" };
+  return { value: "—", unit: "", detailValue: "", detailUnit: "" };
+}
+
+// كمية سطر الفاتورة بشكل مقروء (نفضّل الوحدة الأكبر إن وُجدت).
+// النص المسطّح كما كان تماماً — تستعمله الشاشة والقالب القديم (المرتجع والسندان).
+function invoiceLineQty(line) {
+  const p = invoiceLineQtyParts(line);
+  const main = `${p.value} ${p.unit}`.trim();
+  return p.detailValue ? `${main} (${p.detailValue} ${p.detailUnit})` : main;
 }
 
 // الأمين يسجّل سعر السطر بحسب طريقة إدخال الفاتورة: بعض الفواتير أسعارها للكرتونة
@@ -5816,6 +5833,21 @@ function invoiceMovement(custName, inv) {
   return null;
 }
 
+// هل يغطّي دفتر الحركات المحمَّل تاريخ هذا المستند فعلاً؟
+//
+// غياب قيد الفاتورة من الدفتر له تفسيران لا يميّزهما الغياب وحده: إمّا أن
+// الفاتورة ليست حركة على ذمة الزبون، وإمّا أن الدفتر ببساطة لا يصل إليها
+// (غير محمَّل، أو نافذته تبدأ بعد تاريخها). الأول يجيز عرض رصيد الحساب
+// مستقلاً، والثاني لا يجيز أي استنتاج. فنفصلهما هنا بدل الخلط بينهما.
+function movementsReportCovers(dateStr) {
+  const report = state.customerMovementsReport;
+  if (!report || !Array.isArray(report.items) || !report.items.length) return false;
+  const d = String(dateStr || "").slice(0, 10);
+  if (!d) return false;
+  const from = String(report.summary?.fromDate || "").slice(0, 10);
+  return !from || d >= from;
+}
+
 // الرصيد الزمني الحقيقي للحركة — يُفضَّل للمستندات المُرسَلة للزبون (فاتورة/سند) على `balance`
 // الذي هو بترتيب كشف الأمين (المدين قبل الدائن) فيتضخّم إن جاءت دفعة بين فاتورتَي نفس اليوم.
 function movementChronoBalance(m) {
@@ -6003,8 +6035,24 @@ function voucherLedgerRows(v) {
     voucherInvoiceBalanceRows(rows, v, cur, balCur, isRet);
   } else if (v.balance !== undefined && v.balance !== null && v.balance !== "") {
     voucherSingleBalanceRows(rows, v, cur, balCur, isInv, isRet, balLabel);
+  } else if (v.accountBalance !== undefined && v.accountBalance !== null && v.accountBalance !== "") {
+    voucherAccountBalanceRow(rows, v, balCur);
   }
   return rows;
+}
+
+// رصيد حساب الزبون معروضاً **مستقلاً تماماً** عن هذا المستند. يُستعمل وحده حين
+// يثبت أن الفاتورة ليست حركة على ذمة الزبون: فلا رصيد سابق ولا جديد يُطبعان،
+// ولا يُسمّى هذا السطر «الرصيد الجديد» ولا «الرصيد بعد الفاتورة». الوسم صريح
+// كي لا يقرأ الزبون رقماً لا علاقة له بفاتورته على أنه ناتجها — وهو ما كان
+// يحدث فعلاً: فاتورة بـ129.673 $ تحتها سطر وحيد «الرصيد الحالي 1.15 $ (لكم)».
+function voucherAccountBalanceRow(rows, v, balCur) {
+  const asOf = shortDateTime(v.accountBalanceAt);
+  rows.push({
+    label: "رصيد الحساب الحالي",
+    value: balanceText(v.accountBalance, balCur),
+    suffixHtml: ` <small>(رصيد حساب الزبون، مستقل عن هذه الفاتورة${asOf ? " — حتى " + escapeHtml(asOf) : ""})</small>`
+  });
 }
 
 // شقّ «الرصيد السابق → القيمة → الرصيد الجديد» للفاتورة والمرتجع. خرج من
@@ -6081,6 +6129,7 @@ function saleInvoiceDocument(v) {
     amountText: formatMoney(v.amount || 0),
     lines: lines.map((line) => ({
       material: line.material || "",
+      qtyParts: invoiceLineQtyParts(line),
       qtyText: invoiceLineQty(line),
       priceText: invoiceLinePrice(line, inv),
       valueText: invoiceLineValueText(line, inv)
@@ -12191,7 +12240,14 @@ function render() {
             );
             if (Math.abs(adjust) > 0.009) opts.adjust = adjust;
           } else {
-            opts.balance = customerBalance(item);
+            // قيد الحركة بلا أرصدة مخزَّنة (تقرير أقدم من تحديث المزامنة):
+            // نفس قاعدة مسار الفواتير — رصيد الحساب مستقلاً وموسوماً متى كان
+            // الدفتر يغطّي التاريخ، ولا شيء إطلاقاً متى لم يكن.
+            const account = customerBalance(item);
+            if (movementsReportCovers(el.dataset.date) && Number.isFinite(account)) {
+              opts.accountBalance = roundPrice(account);
+              opts.accountBalanceAt = reportSyncedAt(state.customerBalanceReports[0]);
+            }
           }
           exportVoucherPdf(opts);
         } else {
@@ -12302,12 +12358,33 @@ function render() {
               opts.prevBalance + invoiceTotal - knownDiscount - knownPayment - opts.newBalance
             );
             if (Math.abs(adjust) > 0.009) opts.adjust = adjust;
-          } else {
+          } else if (inv.isReturn) {
+            // المرتجع كما كان: قيوده بلا معرّف فتُستثنى أصلاً من مطابقة الدفتر.
             opts.balance = custItem ? customerBalance(custItem) : null;
-            if (inv.isReturn) opts.balanceLabel = "الرصيد بعد المرتجع";
+            opts.balanceLabel = "الرصيد بعد المرتجع";
+          } else {
+            // لا قيد لهذه الفاتورة في الدفتر. تفسيران لا يميّزهما الغياب وحده:
+            //   • الدفتر محمَّل ويغطّي تاريخها ⇒ ثبت أنها ليست حركة على ذمة
+            //     الزبون. لا رصيد سابق ولا جديد، ويُعرض رصيد الحساب مستقلاً
+            //     وموسوماً بذلك. ولا نسمّيها «نقدية»: غياب القيد لا يثبت أسلوب
+            //     التسوية (الفاتورة 2046 ثبت أنها على صندوق، بفحص الأمين لا
+            //     باستنتاج من الغياب).
+            //   • الدفتر غائب أو نافذته لا تصل إليها ⇒ لا نعرف شيئاً، فلا سطر
+            //     رصيد إطلاقاً. الصمت هنا أصدق من رقم بلا معنى.
+            const account = custItem ? customerBalance(custItem) : null;
+            if (movementsReportCovers(inv.date) && Number.isFinite(account)) {
+              opts.accountBalance = roundPrice(account);
+              opts.accountBalanceAt = reportSyncedAt(state.customerBalanceReports[0]);
+            }
           }
         } catch (_balErr) {
-          opts.balance = custItem ? customerBalance(custItem) : null;
+          // خطأ في حساب الرصيد لا يمنع تصدير الفاتورة، ولا يبرّر طبع رقم
+          // لا نثق به على مستند يُسلَّم للزبون: المرتجع يبقى على سلوكه،
+          // والفاتورة تخرج بلا سطر رصيد.
+          if (inv.isReturn) {
+            opts.balance = custItem ? customerBalance(custItem) : null;
+            opts.balanceLabel = "الرصيد بعد المرتجع";
+          }
         }
         exportVoucherPdf(opts);
       } catch (error) {

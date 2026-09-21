@@ -48,12 +48,15 @@ const PATTERNS = {
   computeInvoiceLineBasisPlan: /function computeInvoiceLineBasisPlan\(lines, total\) \{[\s\S]*?\n\}\n/,
   invoiceLineTotalValue: /function invoiceLineTotalValue\(line, inv\) \{[\s\S]*?\n\}\n/,
   invoiceLineValueText: /function invoiceLineValueText\(line, inv\) \{[\s\S]*?\n\}\n/,
+  invoiceLineQtyParts: /function invoiceLineQtyParts\(line\) \{[\s\S]*?\n\}\n/,
   invoiceLineQty: /function invoiceLineQty\(line\) \{[\s\S]*?\n\}\n/,
+  movementsReportCovers: /function movementsReportCovers\(dateStr\) \{[\s\S]*?\n\}\n/,
   invoiceLineUnitPrice: /function invoiceLineUnitPrice\(line, inv\) \{[\s\S]*?\n\}\n/,
   invoiceLinePrice: /function invoiceLinePrice\(line, inv\) \{[\s\S]*?\n\}\n/,
   voucherLedgerRows: /function voucherLedgerRows\(v\) \{[\s\S]*?\n\}\n/,
   voucherInvoiceBalanceRows: /function voucherInvoiceBalanceRows\(rows, v, cur, balCur, isRet\) \{[\s\S]*?\n\}\n/,
   voucherSingleBalanceRows: /function voucherSingleBalanceRows\(rows, v, cur, balCur, isInv, isRet, balLabel\) \{[\s\S]*?\n\}\n/,
+  voucherAccountBalanceRow: /function voucherAccountBalanceRow\(rows, v, balCur\) \{[\s\S]*?\n\}\n/,
   voucherLedgerRowHtml: /function voucherLedgerRowHtml\(row\) \{[\s\S]*?\n\}\n/,
   saleInvoiceDocument: /function saleInvoiceDocument\(v\) \{[\s\S]*?\n\}\n/,
   voucherPdfMarkup: /function voucherPdfMarkup\(v\) \{[\s\S]*?\n\}\n/
@@ -99,7 +102,7 @@ vm.runInContext(source.join("\n"), sandbox);
 
 // `const` في أعلى سكربت vm لا يصبح خاصية على كائن السياق، فنقرؤه بتقييم اسمه.
 const OZK_INVOICE = vm.runInContext("OZK_INVOICE", sandbox);
-const { voucherPdfMarkup, voucherLedgerRows, saleInvoiceDocument } = sandbox;
+const { voucherPdfMarkup, voucherLedgerRows, saleInvoiceDocument, invoiceLineQtyParts, invoiceLineQty, movementsReportCovers } = sandbox;
 // المصفوفات العائدة من vm تحمل نموذجاً أوّلياً من عالَم آخر، فـdeepEqual الصارم
 // يرفضها رغم تطابق المحتوى. ننسخها إلى مصفوفات هذا العالَم قبل المقارنة.
 const own = (value) => JSON.parse(JSON.stringify(value));
@@ -393,6 +396,106 @@ test("سندا القبض والصرف والمرتجع ما زالت على ا�
     const out = voucherPdfMarkup(base({ type, newBalance: 100, balance: 100 }));
     assert.ok(out.includes("ozk-rpt"), `${type} خرج عن المسار القديم قبل مرحلته`);
   }
+});
+
+// ===== دلالات التسوية: ثلاث حالات صريحة =====
+//
+// غياب قيد الذمم لفاتورة له تفسيران لا يميّزهما الغياب وحده. الفاتورة 2046
+// («ابو ياسر برغوت سوري»، 129.673 $) ثبت بفحص الأمين أنها مقيَّدة على صندوق
+// مبيعات المركز لا على ذمة الزبون — ورصيد حسابه بقي −1.15 قبلها وبعدها.
+// كان القالب يطبع تحتها سطراً وحيداً «الرصيد الحالي 1.15 $ (لكم)» فيُقرأ
+// كأنه ناتج الفاتورة. هذه الفحوص تثبّت الحالات الثلاث.
+
+const LEDGER_LABELS = (v) => own(voucherLedgerRows(v)).map((r) => r.label);
+
+test("حالة 1: فاتورة ذمم موثقة — أسطر الدفتر كما هي بلا تغيير", () => {
+  const labels = LEDGER_LABELS(base({ prevBalance: 1000, newBalance: 1380, discount: 25, payment: 100 }));
+  assert.deepEqual(labels, [
+    "التاريخ", "الرصيد السابق", "قيمة هذه الفاتورة", "الحسم", "دفعة من الزبون", "الرصيد الجديد"
+  ], "ترتيب أسطر فاتورة الذمم تغيّر");
+});
+
+test("حالة 2: فاتورة غير منعكسة على الذمة — لا رصيد سابق ولا جديد", () => {
+  const rows = own(voucherLedgerRows({
+    type: "invoice", date: "2026-09-21", cur: "$", balanceCur: "$",
+    amount: 129.673, accountBalance: -1.15, accountBalanceAt: "2026-09-21T13:47:10Z"
+  }));
+  const labels = rows.map((r) => r.label);
+  assert.deepEqual(labels, ["التاريخ", "رصيد الحساب الحالي"], "أسطر الحالة 2 ليست كما يجب");
+  for (const forbidden of ["الرصيد السابق", "الرصيد الجديد", "قيمة هذه الفاتورة", "الرصيد الحالي"]) {
+    assert.ok(!labels.includes(forbidden), `سطر «${forbidden}» ظهر على فاتورة لا تحرّك الذمة`);
+  }
+});
+
+test("حالة 2: رصيد الحساب موسوم صراحةً بأنه مستقل عن الفاتورة", () => {
+  const rows = own(voucherLedgerRows({
+    type: "invoice", date: "2026-09-21", cur: "$", balanceCur: "$",
+    amount: 129.673, accountBalance: -1.15, accountBalanceAt: "2026-09-21T13:47:10Z"
+  }));
+  const row = rows.find((r) => r.label === "رصيد الحساب الحالي");
+  assert.ok(row, "سطر رصيد الحساب مفقود");
+  assert.ok(/مستقل عن هذه الفاتورة/.test(row.suffixHtml || ""), "الوسم الصريح غائب — الرقم يُقرأ كناتج الفاتورة");
+  assert.ok(!/نقد/.test(row.suffixHtml || ""), "لا يجوز استنتاج أسلوب التسوية من غياب قيد الذمم");
+});
+
+test("حالة 2: قيمة الرصيد نفسها لم تتغيّر (1.15 لكم)", () => {
+  const rows = own(voucherLedgerRows({
+    type: "invoice", date: "2026-09-21", cur: "$", balanceCur: "$",
+    amount: 129.673, accountBalance: -1.15
+  }));
+  const row = rows.find((r) => r.label === "رصيد الحساب الحالي");
+  assert.ok(/1\.15/.test(row.value) && /\(لكم\)/.test(row.value), `قيمة الرصيد تغيّرت: ${row.value}`);
+});
+
+test("حالة 3: دلالة التسوية غير محسومة — لا سطر رصيد إطلاقاً (fail closed)", () => {
+  const labels = LEDGER_LABELS({ type: "invoice", date: "2026-09-21", cur: "$", balanceCur: "$", amount: 129.673 });
+  assert.deepEqual(labels, ["التاريخ"], "طُبع سطر رصيد رغم أن الدلالة غير محسومة");
+});
+
+test("تغطية دفتر الحركات: محمَّل ويغطّي ⇒ نعم، غائب أو خارج النافذة ⇒ لا", () => {
+  sandbox.state.customerMovementsReport = null;
+  assert.equal(movementsReportCovers("2026-09-21"), false, "دفتر غائب اعتُبر مغطّياً");
+
+  sandbox.state.customerMovementsReport = { items: [], summary: { fromDate: "2026-06-21" } };
+  assert.equal(movementsReportCovers("2026-09-21"), false, "دفتر فارغ اعتُبر مغطّياً");
+
+  sandbox.state.customerMovementsReport = { items: [{ name: "زبون" }], summary: { fromDate: "2026-06-21" } };
+  assert.equal(movementsReportCovers("2026-09-21"), true, "دفتر يغطّي التاريخ اعتُبر غير مغطٍّ");
+  assert.equal(movementsReportCovers("2026-05-01"), false, "تاريخ قبل بداية النافذة اعتُبر مغطّى");
+  assert.equal(movementsReportCovers(""), false, "تاريخ فارغ اعتُبر مغطّى");
+  sandbox.state.customerMovementsReport = null;
+});
+
+// ===== خانة الكمية: أجزاء ذرّية بلا أقواس =====
+
+test("أجزاء الكمية مفصولة، والنص المسطّح القديم لم يتغيّر", () => {
+  const line = { qty: 6, unit1: "كروز", qtyUnits: 0.12, unit2: "كرتونة" };
+  const parts = own(invoiceLineQtyParts(line));
+  assert.deepEqual(parts, { value: "0.12", unit: "كرتونة", detailValue: "6", detailUnit: "كروز" });
+  assert.equal(invoiceLineQty(line), "0.12 كرتونة (6 كروز)", "النص المسطّح تغيّر — ثلاثة مسارات تعتمده");
+});
+
+test("خانة الكمية في القالب: أجزاء ذرّية، بلا أقواس، بالترتيب الصحيح", () => {
+  const out = voucherPdfMarkup(base({
+    amount: 44.508,
+    lines: [{ material: "ماستر طويل ورق", qty: 6, unit1: "كروز", qtyUnits: 0.12, unit2: "كرتونة", price: 7.418, lineTotal: 44.509 }]
+  }));
+  const body = out.split("<tbody>")[1].split("</tbody>")[0];
+  assert.ok(!/[()]/.test(body), "عاد القوسان إلى خانة الكمية — لا ينجوان من محرّك الرسم");
+  const order = ["<bdi>0.12</bdi>", "<bdi>كرتونة</bdi>", "<bdi>6</bdi>", "<bdi>كروز</bdi>"];
+  let at = -1;
+  for (const token of order) {
+    const next = body.indexOf(token, at + 1);
+    assert.ok(next > at, `الجزء ${token} مفقود أو خارج ترتيبه`);
+    at = next;
+  }
+  assert.ok(body.includes("q-det"), "التوضيح فقد تمييزه البصري الثانوي");
+});
+
+test("كمية بلا وحدة كبرى: جزء واحد بلا توضيح", () => {
+  const parts = own(invoiceLineQtyParts({ qty: 6, unit1: "كروز" }));
+  assert.deepEqual(parts, { value: "6", unit: "كروز", detailValue: "", detailUnit: "" });
+  assert.equal(invoiceLineQty({ qty: 6, unit1: "كروز" }), "6 كروز");
 });
 
 // ===== النتيجة =====
