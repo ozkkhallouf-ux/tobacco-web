@@ -47,8 +47,10 @@ const OZK_INVOICE = (() => {
 .ozk-inv .rfoot{margin-top:16px;border-top:1.5px solid #b8892a;padding-top:7px;font-size:10px;color:#6b5535;display:flex;justify-content:space-between}
 .ozk-inv .items-table{table-layout:fixed}
 .ozk-inv .items-table td,.ozk-inv .items-table th{overflow-wrap:anywhere}
-.ozk-inv .qty{display:flex;flex-direction:row-reverse;flex-wrap:wrap;justify-content:flex-start;align-items:baseline;gap:2px 10px;direction:ltr}
-.ozk-inv .qg{display:flex;flex-direction:row-reverse;align-items:baseline;gap:3px;direction:ltr}
+.ozk-inv .qty{display:block}
+.ozk-inv .qg{display:block;overflow:hidden}
+.ozk-inv .qg .qv{float:right}
+.ozk-inv .qg .qu{float:right;margin-right:4px}
 .ozk-inv .qty span{white-space:nowrap}
 .ozk-inv .q-det{color:#6b5535;font-size:.9em}
 .ozk-inv .stamp-wrap{margin-top:16px;display:flex;justify-content:flex-start;page-break-inside:avoid}
@@ -142,42 +144,42 @@ const OZK_INVOICE = (() => {
   // ==========================================================================
   // جدول المواد بأعمدته الأربعة المعتمدة. عرضٌ محض: النصوص تصل جاهزة ولا
   // يُشتقّ هنا شيء من الكمية ولا الوحدة ولا سعر الوحدة ولا قيمة السطر.
-  // خانة الكمية لا تُركَّب بخوارزمية BiDi إطلاقاً — تُركَّب بالتخطيط.
+  // خانة الكمية تُركَّب **هندسياً**، لا بخوارزمية BiDi ولا بترتيب flex.
   //
-  // القصة على مرحلتين. أولاً: محرّك الرسم على الهاتف (`html2canvas` بلا
-  // foreignObjectRendering) لا يطبّق خوارزمية BiDi — يأخذ مواضع الصناديق من
-  // تخطيط المتصفح الحقيقي ثم يرسم نصّ كل عقدة بنفسه. فعقدة واحدة تحمل
-  // «0.12 كرتونة (6 كروز)» تخرج مُعاد ترتيبها، ولا ينفع معها عزلٌ ولا `dir`
-  // لأن المحرّك لا يقرؤهما. وثبت بالقياس أن القوسين لا ينجوان بأي صورة
-  // (حرفيَّين، أو عنصرين، أو بـ`dir="ltr"`، أو كـ`content` في CSS)، وأن إصلاح
-  // NBSP نفسه هو ما يُزيح الرقم عن وحدته. فكُسِرت الخانة إلى أجزاء ذرّية بلا
-  // أقواس — وهذا صحيح وباقٍ.
+  // ثلاث محاولات وثلاث قياسات:
+  //   ١. عقدة نصّية واحدة «0.12 كرتونة (6 كروز)» — `html2canvas` (بلا
+  //      foreignObjectRendering) لا يطبّق BiDi: يأخذ مواضع الصناديق من
+  //      التخطيط الحقيقي ثم يرسم نصّ كل عقدة بنفسه. والقوسان لا ينجوان بأي
+  //      صياغة. فكُسِرت الخانة إلى أجزاء ذرّية بلا أقواس — وهذا باقٍ.
+  //   ٢. الأجزاء داخل `<bdi>` سطرية — ترتيبها البصري يبقى ناتج BiDi، فخرج
+  //      صحيحاً على Chromium ومقلوباً على WebKit.
+  //   ٣. مجموعات flex بـ`direction:ltr` — وهذه زادت الطين بلّة: نُمذج طيّ
+  //      الخانة إلى فقرة واحدة بأساس ltr فأعاد لقطة الآيفون حرفاً بحرف في
+  //      الحالات الثلاث. أي أن `direction:ltr` نفسها كانت المادة الفعّالة.
   //
-  // ثانياً: الأجزاء كانت داخل `<bdi>` **سطرية**، فبقي ترتيبها البصري ناتج
-  // خوارزمية BiDi في المتصفح نفسه. خرجت صحيحة على Chromium ومقلوبة على
-  // WebKit (آيفون حقيقي، تصفّح خاص، على نفس الـcommit)، والفرق ظهر في معاينة
-  // الـPDF — فالمتغيّر مُركِّب الاتجاه، لا كاش ولا مسار تصدير آخر.
+  // فالعلاج الحالي لا يسأل المحرّك أن يرتّب شيئاً:
+  //   • كل مجموعة `display:block` ⇒ سطرها المستقل، فلا تتداخل مجموعتان.
+  //   • الرقم والوحدة `float:right` ⇒ موضعهما **فيزيائي**: الأول يمين
+  //     المجموعة والثاني يساره، بلا علاقة باتجاه الفقرة. والعائم صندوق
+  //     كتليّ — وهو الصنف الذي يحترمه المحرّك فعلاً (الجدول نفسه رُسم
+  //     سليماً على الآيفون بأعمدته وحدوده).
+  //   • علامة RLM في مقدّمة كل مجموعة تضمن الترتيب حتى لو طُوي كل شيء إلى
+  //     نصّ بأساس ltr. وقياسها على المحرّك: صفر حبر إضافي، فلا أثر بصري.
   //
-  // فالعلاج: كل جزء عنصر flex مستقل، والترتيب من `flex-direction:row-reverse`
-  // مع `direction:ltr` صريح على الحاوية. عندها يصير موضع كل صندوق قراراً
-  // تخطيطياً محضاً، ونصّ كل صندوق أحاديّ الاتجاه (رقم خالص أو عربي خالص) فلا
-  // يبقى لخوارزمية BiDi ما تعيد ترتيبه — لا في المتصفح ولا في المحرّك.
-  // والمسافات `gap` لا عقداً نصّية: فلا نصّ بين الأجزاء أصلاً كي يلحمها ماشي
-  // NBSP في `createPortablePdfBlob` أو يزيح رقماً عن وحدته.
-  //
-  // القياس القاطع لهذه الخاصية في `scripts/check-invoice-quantity-render.mjs`:
-  // يُقلب اتجاه المستند إلى ltr، فلو كان التركيب يعتمد BiDi لانقلب الترتيب.
+  // القياس الكامل للنماذج الأربعة في
+  // `scripts/check-invoice-quantity-render.mjs`.
   function qtyCellHtml(line, esc) {
     const parts = line.qtyParts;
     if (!parts) return `<bdi>${esc(line.qtyText || "")}</bdi>`;
     const group = (value, unit, cls) => {
-      const atoms = (value ? `<span class="qv">${esc(value)}</span>` : "")
-        + (unit ? `<span class="qu">${esc(unit)}</span>` : "");
-      return `<span class="qg${cls}">${atoms}</span>`;
+      const atoms = [
+        value ? `<span class="qv">${esc(value)}</span>` : "",
+        unit ? `<span class="qu">${esc(unit)}</span>` : ""
+      ].filter(Boolean).join(" ");
+      return `<span class="qg${cls}">\u200f${atoms}</span>`;
     };
     const main = group(parts.value, parts.unit, "");
-    // التوضيح ثانوي بصرياً (أخفت وأصغر) بدل الأقواس التي كانت تحمل هذا الدور
-    // ولا تنجو من محرّك الرسم بأي صياغة.
+    // التوضيح ثانوي بصرياً (أخفت وأصغر) بدل الأقواس التي كانت تحمل هذا الدور.
     const detail = parts.detailValue ? group(parts.detailValue, parts.detailUnit, " q-det") : "";
     return `<span class="qty">${main}${detail}</span>`;
   }

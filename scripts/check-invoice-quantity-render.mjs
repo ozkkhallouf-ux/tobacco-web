@@ -1,34 +1,35 @@
-// حارس رسم خانة الكمية في فاتورة المبيعات — **المسار المحمول الحقيقي**.
+// حارس رسم خانة الكمية في فاتورة المبيعات — المسار المحمول الحقيقي.
 //
-// ── لماذا أُعيدت كتابة هذا الحارس ─────────────────────────────────────────
-// نسخته الأولى كانت تمرّ بينما العطل قائم فعلاً على آيفون حقيقي. وسبب ذلك
-// ثغرتان منهجيتان، كلتاهما مُصلَحة هنا:
-//   1. كانت تفحص **خانة مفردة** مزروعة في صفحة اصطناعية، ولا تمرّ إطلاقاً
-//      على `createPortablePdfBlob` — وهي الدالة التي يستعملها الهاتف فعلاً
-//      (الحاوية، ماشي NBSP، الاستنساخ). فكانت تحرس شيئاً غير الذي يُصدَّر.
-//   2. كانت تقيس **هندسة DOM** فقط، وتعتبر الترتيب الصحيح فيها إثباتاً.
+// ── ما الذي يحرسه بالضبط ─────────────────────────────────────────────────
+// الشرط البصري المطلوب لكل سطر، حرفياً، سطران مستقلان:
+//       <رقم> <وحدة>        ← الأساسي، والرقم يمين وحدته
+//       <رقم> <وحدة>        ← التوضيح، أخفت وأصغر
+// ولا يكفي «عدم تداخل المجموعتين»: انعكاس «كرتونة 1» مرفوض أيضاً.
 //
-// ── حدّ هذا الحارس، منصوصاً عليه كي لا يُقرأ أكثر من حجمه ────────────────
-// المتاح هنا Chromium وحده. و**Chromium لا يُثبت صحّة WebKit**: العطل الذي
-// أوجب هذا التغيير خرج صحيحاً على Chromium ومقلوباً على آيفون حقيقي على
-// نفس الـcommit. فنجاح هذا الملف في CI ليس شهادة نجاح على آيفون، ولا يجوز
-// تقديمه على أنه كذلك — التحقّق من الآيفون يبقى بشرياً على جهاز حقيقي.
+// ── لماذا أُعيدت كتابته مرّتين ───────────────────────────────────────────
+// نسختان سابقتان مرّتا بينما العطل قائم على آيفون حقيقي:
+//   • الأولى فحصت خانة مفردة في صفحة اصطناعية ولم تمرّ على
+//     `createPortablePdfBlob` إطلاقاً.
+//   • الثانية قاست هندسة صناديق flex، و**اشترطت** `direction:ltr`
+//     و`flex-direction:row-reverse` — فثبّتت العطل بدل أن ترصده. وفحص «قلب
+//     الاتجاه» فيها قلب اتجاه الأب بينما الخانة تتجاوزه محلياً، فلم يصل
+//     القلب إلى النصّ أصلاً.
 //
-// ولذلك لا يقيس هذا الحارس «هل خرج الترتيب صحيحاً على هذا المحرّك» وحسب،
-// بل يقيس ما هو أقوى ومستقلّ عن المحرّك: **أن الترتيب البصري ليس ناتج
-// خوارزمية BiDi أصلاً**. والفحص القاطع لذلك هو فحص ٤: يُقلب اتجاه المستند
-// كلّه إلى ltr، فلو كان التركيب يعتمد BiDi لانقلب الترتيب — وثباته يعني أن
-// مصدره التخطيط وحده، وهو ما لا يختلف بين المحرّكات.
+// ── النماذج الأربعة ──────────────────────────────────────────────────────
+// المتاح هنا Chromium وحده، و**Chromium لا يُثبت صحّة WebKit**. فبدل أن
+// نسأل «هل خرج صحيحاً على هذا المحرّك»، نسأل ما هو أقوى: هل يبقى الترتيب
+// صحيحاً تحت كل نموذج معقول لسلوك المحرّك؟
+//   1. المسار المحمول الحقيقي: voucherPdfMarkup → createPortablePdfBlob →
+//      html2pdf، مقيساً على الشجرة كما تصل إلى المحرّك.
+//   2. rtl الطبيعي كما يُؤلَّف القالب.
+//   3. طيّ بأساس rtl: محتوى كل كتلة السطري يُطوى إلى نصّ واحد، وحدود الكتل
+//      محفوظة (وهي محفوظة فعلاً: الجدول نفسه رُسم سليماً على الآيفون).
+//   4. احتياط ltr: الأساس ltr وكل تجاوزات `direction` داخل الخانة مُلغاة،
+//      والتخطيط محفوظ. هذا النموذج هو الذي أسقط الصياغتين السابقتين.
 //
-// ما يفحصه الملف:
-//   1. الدوال الحقيقية: الأجزاء، والنص المسطّح القديم بلا تغيير.
-//   2. بنية الخانة في القالب للحالات الأربع الحقيقية، بلا أقواس.
-//   3. المسار المحمول الفعلي: voucherPdfMarkup → createPortablePdfBlob →
-//      html2pdf، مع التقاط الـDOM **كما يصل إلى المحرّك** بعد كل معالجة،
-//      وقياس الهندسة لكل سطر من الأسطر الأربعة، ثم حبر اللوحة واستقرارها.
-//   4. استقلال الترتيب عن اتجاه المستند (الفحص القاطع أعلاه).
-//   5. التصاق الرقم بوحدته: الفجوة داخل المجموعة أصغر من الفجوة بين
-//      المجموعتين — وهو شرط «primary number adjacent to its Arabic unit».
+// الضمانة تأتي من الهندسة الفيزيائية: `float:right` يضع كل جزء صندوقاً
+// كتلياً في موضع لا علاقة له باتجاه الفقرة، وعلامة RLM تضمن الترتيب حتى لو
+// طُوي كل شيء إلى نصّ. ولا شيء منهما يعتمد على خوارزمية BiDi في المتصفح.
 
 import assert from "node:assert/strict";
 import { readFileSync, existsSync } from "node:fs";
@@ -41,7 +42,6 @@ const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const appJs = readFileSync(join(root, "src/app.js"), "utf8");
 const invJs = readFileSync(join(root, "src/documents/invoice/ozk-invoice.js"), "utf8");
 const indexPath = join(root, "index.html");
-const bundlePath = join(root, "public/vendor/html2pdf.bundle.min.js");
 
 // الحالات البصرية الحقيقية الأربع المطلوب دعمها.
 const CASES = [
@@ -50,6 +50,7 @@ const CASES = [
   { material: "ماستر كوين أبيض", qty: 6,  unit1: "كروز", qtyUnits: 0.12, unit2: "كرتونة", price: 7.782, value: "0.12", detail: "6"  },
   { material: "معسل فاخر اسود",  qty: 25, unit1: "كروز", qtyUnits: 1,    unit2: "شرحة",   price: 6,     value: "1",    detail: "25" }
 ];
+const expectedLines = (c) => [`${c.value} ${c.unit2}`, `${c.detail} ${c.unit1}`];
 
 // ===== 1) الدوال الحقيقية من المصدر، لا نسخة مبسّطة =====
 
@@ -59,14 +60,12 @@ const PATTERNS = {
   invoiceLineQtyParts: /function invoiceLineQtyParts\(line\) \{[\s\S]*?\n\}\n/,
   invoiceLineQty: /function invoiceLineQty\(line\) \{[\s\S]*?\n\}\n/
 };
-
 let src = "";
 for (const [name, re] of Object.entries(PATTERNS)) {
   const m = appJs.match(re);
   assert.ok(m, `تعذّر استخراج ${name} من src/app.js — الحارس فقد هدفه`);
   src += m[0] + "\n";
 }
-
 const sandbox = { window: {}, console };
 vm.createContext(sandbox);
 vm.runInContext(invJs, sandbox);
@@ -88,12 +87,11 @@ for (const c of CASES) {
   );
 }
 
-// ===== 2) بنية الخانة في القالب: مجموعات تخطيطية، بلا أقواس =====
+// ===== 2) الأسلوب نفسه: هندسة فيزيائية، لا BiDi ولا flex =====
 
 const doc = {
   kind: "invoice", escapeHtml: (s) => String(s == null ? "" : s),
-  no: "777", date: "2026-09-17", cur: "$", party: "زبون اختبار",
-  amountText: "129.673",
+  no: "777", date: "2026-09-17", cur: "$", party: "زبون اختبار", amountText: "129.673",
   lines: CASES.map((c) => ({
     material: c.material,
     qtyParts: invoiceLineQtyParts(c),
@@ -103,58 +101,71 @@ const doc = {
   })),
   rows: []
 };
-
 const markup = OZK_INVOICE.markup(doc);
 const tbody = markup.split("<tbody>")[1].split("</tbody>")[0];
 
 assert.ok(!/[()]/.test(tbody), "عاد القوسان إلى خانة الكمية — لا ينجوان من محرّك الرسم");
-for (const c of CASES) {
-  const cell = `<span class="qty">`
-    + `<span class="qg"><span class="qv">${c.value}</span><span class="qu">${c.unit2}</span></span>`
-    + `<span class="qg q-det"><span class="qv">${c.detail}</span><span class="qu">${c.unit1}</span></span>`
-    + `</span>`;
-  assert.ok(tbody.includes(cell), `خانة الكمية ليست مجموعات تخطيطية بالترتيب (${c.material})`);
-}
-// الترتيب البصري يأتي من التخطيط لا من BiDi — فالقاعدتان شرط في الأسلوب نفسه.
-assert.ok(/\.ozk-inv \.qty\{[^}]*display:flex/.test(invJs), "حاوية الكمية لم تعد flex");
-assert.ok(/\.ozk-inv \.qty\{[^}]*flex-direction:row-reverse/.test(invJs), "ترتيب الحاوية لم يعد row-reverse");
-assert.ok(/\.ozk-inv \.qty\{[^}]*direction:ltr/.test(invJs), "حاوية الكمية لم تعد تثبّت اتجاهها صراحةً");
-assert.ok(/\.ozk-inv \.qg\{[^}]*flex-direction:row-reverse/.test(invJs), "مجموعة الكمية لم تعد row-reverse");
-assert.ok(/\.ozk-inv \.qg\{[^}]*direction:ltr/.test(invJs), "مجموعة الكمية لم تعد تثبّت اتجاهها صراحةً");
+assert.ok(/\.ozk-inv \.qg \.qv\{[^}]*float:right/.test(invJs), "الرقم لم يعد موضوعاً هندسياً بعائم");
+assert.ok(/\.ozk-inv \.qg \.qu\{[^}]*float:right/.test(invJs), "الوحدة لم تعد موضوعة هندسياً بعائم");
+assert.ok(/\.ozk-inv \.qg\{[^}]*display:block/.test(invJs), "المجموعة لم تعد كتلة مستقلة بسطرها");
+// الشرطان اللذان شفّرا العطل سابقاً: ممنوع عودتهما إلى خانة الكمية.
+assert.ok(!/\.ozk-inv \.qt?[yg][^{]*\{[^}]*display:flex/.test(invJs), "عاد flex إلى خانة الكمية");
+assert.ok(!/\.ozk-inv \.qt?[yg][^{]*\{[^}]*direction:ltr/.test(invJs), "عاد direction:ltr إلى خانة الكمية");
+assert.ok(tbody.includes("‏"), "علامة RLM غائبة — الترتيب بلا ضمانة عند طيّ النصّ");
 
-// ماشي NBSP في createPortablePdfBlob يستبدل المسافة داخل **عقدة** فيها عربي.
-// لا عقد نصّية بين الأجزاء هنا أصلاً (المسافات `gap`) — فلا شيء يمسّه.
+// ماشي NBSP في createPortablePdfBlob مشروط بوجود حرف عربي في العقدة.
 const walkerSrc = appJs.match(/const textWalker = document\.createTreeWalker[\s\S]*?\n  \}\n/);
 assert.ok(walkerSrc, "تعذّر إيجاد ماشي NBSP — عقد PDF المحمول فقد هدفه");
-assert.ok(
-  /\[\\u0600-\\u06ff\]/.test(walkerSrc[0]),
-  "ماشي NBSP لم يعد مشروطاً بوجود حرف عربي في العقدة"
-);
+assert.ok(/\[\\u0600-\\u06ff\]/.test(walkerSrc[0]), "ماشي NBSP لم يعد مشروطاً بوجود حرف عربي");
 
-// ===== 3) المسار المحمول الحقيقي داخل التطبيق المحمَّل =====
-
-assert.ok(existsSync(bundlePath), "حزمة html2pdf غائبة — مسار PDF على الهاتف يعتمدها");
-assert.ok(existsSync(indexPath), "index.html غائب — لا سبيل لتشغيل المسار الحقيقي");
-
-// قياس الهندسة يقرأ الصناديق كما يقرؤها html2canvas تماماً.
+// ===== 3) القياس البصري: رمزاً رمزاً، لا عقدةً عقدة =====
+//
+// `Range.getClientRects()` يعيد مستطيلاً لكل **مقطع اتجاهي** لا لكل كلمة —
+// وهذا بالذات ما أخفى العطل عن النسخة السابقة. فنبني نطاقاً لكل رمز وحده.
 const MEASURE = `(rootSelector) => {
   const rows = [...document.querySelectorAll(rootSelector + " .items-table tbody tr")];
   return rows.map((tr) => {
     const cell = tr.children[1];
-    const wrap = cell.querySelector(".qty");
-    const atoms = [...cell.querySelectorAll(".qv,.qu")].map((el) => {
-      const r = el.getBoundingClientRect();
-      return { text: el.textContent, cls: el.className, left: r.left, right: r.right };
-    });
-    return {
-      atoms,
-      textNodesBetween: [...(wrap ? wrap.childNodes : [])].filter((n) => n.nodeType === 3).length,
-      hasParens: /[()]/.test(cell.textContent),
-      display: wrap ? getComputedStyle(wrap).display : "",
-      flexDirection: wrap ? getComputedStyle(wrap).flexDirection : ""
-    };
+    const parts = [];
+    const walk = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT);
+    let node;
+    while ((node = walk.nextNode())) {
+      const text = node.nodeValue;
+      const re = /\\S+/g;
+      let m;
+      while ((m = re.exec(text))) {
+        const token = m[0].replace(/[\\u200e\\u200f\\u202a-\\u202e]/g, "");
+        if (!token) continue;
+        const r = document.createRange();
+        r.setStart(node, m.index);
+        r.setEnd(node, m.index + m[0].length);
+        const box = r.getBoundingClientRect();
+        if (!box.width && !box.height) continue;
+        parts.push({ t: token, right: box.right, top: Math.round(box.top) });
+      }
+    }
+    parts.sort((a, b) => (a.top - b.top) || (b.right - a.right));
+    const lines = [];
+    let cur = null;
+    for (const p of parts) {
+      if (!cur || Math.abs(cur.top - p.top) > 3) { cur = { top: p.top, t: [] }; lines.push(cur); }
+      cur.t.push(p.t);
+    }
+    return lines.map((l) => l.t.join(" "));
   });
 }`;
+
+const assertRows = (rows, model) => {
+  assert.ok(Array.isArray(rows) && rows.length === CASES.length,
+    `${model}: لم تصل أسطر الفاتورة كاملة (${rows && rows.length})`);
+  rows.forEach((lines, i) => {
+    const want = expectedLines(CASES[i]);
+    assert.deepEqual(lines, want,
+      `${model} — السطر ${i + 1} (${CASES[i].material}): الترتيب البصري ${JSON.stringify(lines)} والمطلوب ${JSON.stringify(want)}`);
+  });
+};
+
+assert.ok(existsSync(indexPath), "index.html غائب — لا سبيل لتشغيل المسار الحقيقي");
 
 const browser = await chromium.launch({ args: ["--allow-file-access-from-files"] });
 try {
@@ -165,26 +176,19 @@ try {
   await page.goto(pathToFileURL(indexPath).href, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(
     () => typeof voucherPdfMarkup === "function" && typeof createPortablePdfBlob === "function",
-    null,
-    { timeout: 20000 }
+    null, { timeout: 20000 }
   );
 
-  // نمرّر الفاتورة كاملة عبر المسار الذي يسلكه الهاتف حرفياً، ونعترض html2pdf
-  // كي نلتقط الجذر **كما يصل إلى المحرّك** بعد الحاوية وماشي NBSP والاستنساخ.
+  // ---- النموذج ١: المسار المحمول الحقيقي ----
   const real = await page.evaluate(async ({ cases, measureSrc }) => {
     const lines = cases.map((c) => ({ ...c, lineTotal: Math.round(c.price * c.qty * 1000) / 1000 }));
     const amount = Math.round(lines.reduce((s, l) => s + l.lineTotal, 0) * 1000) / 1000;
-    const voucher = {
-      type: "invoice", no: "777", date: "2026-09-17",
-      name: "زبون اختبار", cur: "$", balanceCur: "$",
-      amount, lines, prevBalance: 100, newBalance: 100 + amount
-    };
-    const markup = voucherPdfMarkup(voucher);
-
+    const markup = voucherPdfMarkup({
+      type: "invoice", no: "777", date: "2026-09-17", name: "زبون اختبار",
+      cur: "$", balanceCur: "$", amount, lines, prevBalance: 100, newBalance: 100 + amount
+    });
     const captured = {};
     const original = window.html2pdf;
-    // `.set()` يعيد كائن عامل جديد، فنغلّف كل كائن يمرّ بنا حتى نمسك `from`
-    // الحقيقية أياً كان موضعها في السلسلة.
     const wrap = (worker) => {
       if (!worker || worker.__ozkWrapped) return worker;
       worker.__ozkWrapped = true;
@@ -195,11 +199,7 @@ try {
           if (key === "from" && a[0] && a[0].querySelector) {
             const source = a[0];
             source.id = source.id || "ozk-prerender-root";
-            captured.rootId = source.id;
-            captured.rootHtml = source.innerHTML;
-            // `createPortablePdfBlob` يمرّر أول ابن غير <style>، وهو جذر الفاتورة نفسه.
             captured.usesMasterTemplate = source.classList.contains("ozk-inv") || !!source.querySelector(".ozk-inv");
-            // نقيس على الشجرة التي سلّمها createPortablePdfBlob للمحرّك.
             captured.rows = (0, eval)("(" + measureSrc + ")")("#" + source.id);
           }
           const r = fn.apply(this, a);
@@ -210,9 +210,7 @@ try {
                 try {
                   const { data } = c.getContext("2d").getImageData(0, 0, c.width, c.height);
                   let ink = 0;
-                  for (let i = 0; i < data.length; i += 4) {
-                    if (data[i] < 200 || data[i + 1] < 200 || data[i + 2] < 200) ink++;
-                  }
+                  for (let i = 0; i < data.length; i += 4) if (data[i] < 200) ink++;
                   captured.canvas = { ink, width: c.width, height: c.height };
                 } catch (e) { captured.canvasError = String(e && e.message ? e.message : e); }
               }
@@ -225,94 +223,56 @@ try {
       return worker;
     };
     window.html2pdf = function patched(...args) { return wrap(original.apply(this, args)); };
-
     let error = "";
-    try {
-      await createPortablePdfBlob(markup, "فاتورة-اختبار.pdf", { width: 794 });
-    } catch (e) {
-      error = String(e && e.message ? e.message : e);
-    } finally {
-      window.html2pdf = original;
-    }
+    try { await createPortablePdfBlob(markup, "فاتورة-اختبار.pdf", { width: 794 }); }
+    catch (e) { error = String(e && e.message ? e.message : e); }
+    finally { window.html2pdf = original; }
     return { error, markup, ...captured };
   }, { cases: CASES, measureSrc: MEASURE });
 
-  assert.equal(pageErrors.length, 0, `أخطاء في الصفحة أثناء المسار الحقيقي: ${pageErrors.join(" | ")}`);
+  assert.equal(pageErrors.length, 0, `أخطاء في الصفحة: ${pageErrors.join(" | ")}`);
   assert.equal(real.error, "", `فشل المسار المحمول الحقيقي: ${real.error}`);
   assert.ok(real.usesMasterTemplate, "المسار الحقيقي لم يستعمل قالب الفاتورة الرئيسي (ozk-inv)");
-  assert.ok(real.rows && real.rows.length === CASES.length, "لم تصل أسطر الفاتورة كاملة إلى المحرّك");
-
-  real.rows.forEach((row, i) => {
-    const c = CASES[i];
-    const where = `السطر ${i + 1} (${c.material})`;
-    assert.ok(!row.hasParens, `${where}: عاد القوسان إلى الخانة`);
-    assert.equal(row.display, "flex", `${where}: حاوية الكمية لم تعد flex عند المحرّك`);
-    assert.equal(row.flexDirection, "row-reverse", `${where}: ترتيب الحاوية لم يعد تخطيطياً`);
-    assert.equal(row.textNodesBetween, 0, `${where}: ظهرت عقدة نصّية بين المجموعتين — يمكن لماشي NBSP أن يلحمها`);
-    assert.equal(row.atoms.length, 4, `${where}: عدد أجزاء الخانة تغيّر`);
-
-    const [value, unit, detValue, detUnit] = row.atoms;
-    assert.equal(value.text, c.value, `${where}: الجزء الأول ليس قيمة الكمية`);
-    assert.equal(unit.text, c.unit2, `${where}: الجزء الثاني ليس الوحدة الكبرى`);
-    assert.equal(detValue.text, c.detail, `${where}: الجزء الثالث ليس قيمة التوضيح`);
-    assert.equal(detUnit.text, c.unit1, `${where}: الجزء الرابع ليس وحدة التوضيح`);
-
-    // في القراءة العربية: الأسبق منطقياً هو الأيمن بصرياً.
-    assert.ok(value.right > unit.right, `${where}: «${c.value}» ليست يمين «${c.unit2}» — العطل عاد`);
-    assert.ok(unit.right > detValue.right, `${where}: الكمية الأساسية لم تعد تسبق توضيحها`);
-    assert.ok(detValue.right > detUnit.right, `${where}: التوضيح نفسه مقلوب`);
-
-    // فحص ٥: الرقم ملاصق لوحدته. الفجوة داخل المجموعة أضيق من الفجوة بينهما.
-    const insideGap = value.left - unit.right;
-    const betweenGap = unit.left - detValue.right;
-    assert.ok(insideGap >= 0 && insideGap < 8, `${where}: الرقم ابتعد عن وحدته (${insideGap}px)`);
-    assert.ok(
-      betweenGap > insideGap + 2,
-      `${where}: المجموعتان التصقتا فضاع تمييز الأساسي عن التوضيح (${insideGap}px داخل / ${betweenGap}px بين)`
-    );
-  });
-
+  assertRows(real.rows, "١) المسار المحمول الحقيقي");
   assert.ok(real.canvas, `لم أستطع قراءة لوحة الرسم${real.canvasError ? ": " + real.canvasError : ""}`);
-  assert.ok(real.canvas.width > 0 && real.canvas.height > 0, "لوحة الرسم خرجت بأبعاد صفرية");
-  assert.ok(real.canvas.ink > 0, "لوحة الرسم خرجت بيضاء بالكامل — الفاتورة لا تُرسَم على الهاتف");
+  assert.ok(real.canvas.ink > 0, "لوحة الرسم خرجت بيضاء — الفاتورة لا تُرسَم على الهاتف");
 
-  // ===== 4) الفحص القاطع: الترتيب مستقلّ عن اتجاه المستند =====
-  //
-  // لو كان التركيب البصري يعتمد خوارزمية BiDi لانقلب الترتيب بقلب اتجاه
-  // المستند. ثباتُه يعني أن مصدره التخطيط وحده — وهذا ما لا يختلف بين
-  // Chromium وWebKit، وهو أقوى ما يمكن لهذه البيئة أن تُثبته.
-  const orderOf = (rows) => rows.map((r) => r.atoms.map((a) => a.text).join("|")).join(" // ");
-  const flipped = await page.evaluate(({ markupHtml, measureSrc }) => {
-    const host = document.createElement("div");
-    host.id = "ozk-bidi-probe";
-    host.setAttribute("dir", "ltr");
-    host.style.cssText = "direction:ltr;position:fixed;left:0;top:0;width:794px;background:#fff;z-index:-1";
-    host.innerHTML = markupHtml;
-    document.body.appendChild(host);
-    const measure = (0, eval)("(" + measureSrc + ")");
-    const ltr = measure("#ozk-bidi-probe");
-    host.setAttribute("dir", "rtl");
-    host.style.direction = "rtl";
-    const rtl = measure("#ozk-bidi-probe");
-    host.remove();
-    return { ltr, rtl };
+  // ---- النماذج ٢ و٣ و٤ ----
+  const models = await page.evaluate(({ markupHtml, measureSrc }) => {
+    const out = {};
+    const build = (model) => {
+      document.getElementById("ozk-model-probe")?.remove();
+      const host = document.createElement("div");
+      host.id = "ozk-model-probe";
+      host.style.cssText = "position:fixed;left:0;top:0;width:794px;background:#fff;z-index:-1";
+      host.setAttribute("dir", model === "ltr-fallback" ? "ltr" : "rtl");
+      host.style.direction = model === "ltr-fallback" ? "ltr" : "rtl";
+      host.innerHTML = markupHtml;
+      document.body.appendChild(host);
+      if (model === "ltr-fallback") {
+        // محرّك يتجاهل تجاوزات direction ويحترم صناديق التخطيط
+        host.querySelectorAll(".qty, .qty *").forEach((el) => { el.style.direction = "inherit"; });
+      }
+      if (model === "flat-rtl") {
+        // محرّك يطوي المحتوى السطري داخل كل كتلة إلى نصّ واحد
+        host.querySelectorAll(".qg").forEach((g) => {
+          g.textContent = [...g.childNodes].map((n) => n.textContent).join(" ").replace(/\s+/g, " ").trim();
+        });
+      }
+      const rows = (0, eval)("(" + measureSrc + ")")("#ozk-model-probe");
+      host.remove();
+      return rows;
+    };
+    for (const m of ["rtl", "flat-rtl", "ltr-fallback"]) out[m] = build(m);
+    return out;
   }, { markupHtml: real.markup, measureSrc: MEASURE });
 
-  assert.equal(
-    orderOf(flipped.ltr),
-    orderOf(flipped.rtl),
-    "ترتيب أجزاء الكمية تغيّر بتغيّر اتجاه المستند — فهو ما زال ناتج BiDi لا ناتج التخطيط"
-  );
-  flipped.ltr.forEach((row, i) => {
-    const [value, unit] = row.atoms;
-    assert.ok(
-      value.right > unit.right,
-      `السطر ${i + 1}: الرقم لم يبقَ يمين وحدته في سياق ltr — التركيب يعتمد BiDi`
-    );
-  });
+  assertRows(models["rtl"], "٢) rtl الطبيعي");
+  assertRows(models["flat-rtl"], "٣) طيّ بأساس rtl");
+  assertRows(models["ltr-fallback"], "٤) احتياط ltr بلا تجاوز direction");
 } finally {
   await browser.close();
 }
 
-console.log("✓ خانة الكمية: مجموعات تخطيطية بلا BiDi، ملاصقة ومرتّبة، عبر المسار المحمول الحقيقي");
+console.log("✓ خانة الكمية: الترتيب البصري المطلوب تحت النماذج الأربعة، والمسار المحمول الحقيقي ضمنها");
 console.log("  ملاحظة منهجية: Chromium لا يُثبت صحّة WebKit — نجاح هذا الفحص ليس شهادة نجاح على آيفون.");

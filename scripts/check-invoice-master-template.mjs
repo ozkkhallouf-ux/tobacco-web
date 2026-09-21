@@ -492,25 +492,28 @@ test("خانة الكمية في القالب: أجزاء ذرّية، بلا أ
   assert.ok(
     body.includes(
       '<span class="qty">'
-      + '<span class="qg"><span class="qv">0.12</span><span class="qu">كرتونة</span></span>'
-      + '<span class="qg q-det"><span class="qv">6</span><span class="qu">كروز</span></span>'
+      + '<span class="qg">\u200f<span class="qv">0.12</span> <span class="qu">كرتونة</span></span>'
+      + '<span class="qg q-det">\u200f<span class="qv">6</span> <span class="qu">كروز</span></span>'
       + '</span>'
     ),
-    "خانة الكمية ليست مجموعتين تخطيطيتين بالترتيب الصحيح"
+    "خانة الكمية ليست مجموعتين مستقلتين بأجزاء موضوعة هندسياً"
   );
   assert.ok(!/<bdi>/.test(body.split("</td>")[1] || ""), "الكمية عادت تعتمد عزل BiDi");
   assert.ok(body.includes("q-det"), "التوضيح فقد تمييزه البصري الثانوي");
 });
 
-test("ترتيب الكمية لا يأتي من BiDi: القواعد تثبّت الاتجاه والترتيب تخطيطياً", () => {
-  // الصياغة السابقة (bdi سطرية) كان ترتيبها البصري ناتج خوارزمية BiDi، فانقلب
-  // على WebKit وبقي صحيحاً على Chromium. هذه القواعد هي ما يجعل الترتيب
-  // قراراً تخطيطياً: حاوية row-reverse باتجاه مثبَّت صراحةً، وكل جزء صندوق
-  // مستقل نصُّه أحاديّ الاتجاه.
-  for (const rule of [/\.ozk-inv \.qty\{[^}]*display:flex/, /\.ozk-inv \.qty\{[^}]*flex-direction:row-reverse/,
-                      /\.ozk-inv \.qty\{[^}]*direction:ltr/, /\.ozk-inv \.qg\{[^}]*flex-direction:row-reverse/,
-                      /\.ozk-inv \.qg\{[^}]*direction:ltr/]) {
-    assert.ok(rule.test(invoiceJs), `قاعدة التخطيط الضامنة للترتيب سقطت: ${rule}`);
+test("ترتيب الكمية هندسيّ فيزيائي، لا BiDi ولا flex", () => {
+  // صياغتان سابقتان تركتا الترتيب البصري لخوارزمية BiDi (أجزاء داخل <bdi>
+  // سطرية، ثم مجموعات flex بـdirection:ltr)، فخرجتا صحيحتين على Chromium
+  // ومقلوبتين على WebKit. الآن: كتلة مستقلة لكل مجموعة، وعائم لكل جزء —
+  // وموضع العائم فيزيائي لا علاقة له باتجاه الفقرة.
+  for (const rule of [/\.ozk-inv \.qty\{[^}]*display:block/, /\.ozk-inv \.qg\{[^}]*display:block/,
+                      /\.ozk-inv \.qg \.qv\{[^}]*float:right/, /\.ozk-inv \.qg \.qu\{[^}]*float:right/]) {
+    assert.ok(rule.test(invoiceJs), `قاعدة الوضع الهندسي الضامنة للترتيب سقطت: ${rule}`);
+  }
+  // القاعدتان اللتان شفّرتا العطل: ممنوع عودتهما إلى خانة الكمية.
+  for (const banned of [/\.ozk-inv \.qt?[yg][^{]*\{[^}]*display:flex/, /\.ozk-inv \.qt?[yg][^{]*\{[^}]*direction:ltr/]) {
+    assert.ok(!banned.test(invoiceJs), `عادت قاعدة تُسلِّم الترتيب لخوارزمية الاتجاه: ${banned}`);
   }
 });
 
