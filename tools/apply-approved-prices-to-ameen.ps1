@@ -52,6 +52,68 @@ function Resolve-AmeenItemName($ItemName) {
     }
 }
 
+# ---------------------------------------------------------------------------
+# A-lite — الدفاع الثاني لهوية السعر (الأول في src/price-guid-conflict.js).
+#
+# يجمّع صفوف الـCSV حسب **بطاقة الأمين** لا حسب الاسم. سبب حلّ الهوية من
+# mt000 بدل الـCSV: النافذة approved_price_sync_feed لا تكشف item_guid بعد،
+# فلا سبيل لحمله في الملف اليوم. المطابقة هنا مطابقة الكاتب نفسها حرفياً
+# (LTRIM/RTRIM تحت ترتيب Arabic_CI_AI) — فما يراه الحارس هو ما سيكتبه الكاتب.
+#
+# القاعدة (قرار المالك): تعارض ⟺ حقل مُدار واحد يحمل أكثر من قيمة موجبة
+# مميّزة داخل صفوف نفس البطاقة. القيمة 0 = «غير مسعّر» ولا تعارض قيمة موجبة.
+# لا ترجيح بـ updated_at ولا بالاسم ولا بالأعلى ولا بالأحدث.
+# ---------------------------------------------------------------------------
+function Get-AmeenGuidByName($conn, $names) {
+    $map = @{}
+    $list = @($names | Where-Object { $_ })
+    if ($list.Count -eq 0) { return $map }
+    $cmd = $conn.CreateCommand()
+    $cmd.CommandTimeout = 60
+    $placeholders = New-Object System.Collections.Generic.List[string]
+    for ($i = 0; $i -lt $list.Count; $i++) {
+        $placeholders.Add("(@n$i)")
+        [void]$cmd.Parameters.AddWithValue("@n$i", [string]$list[$i])
+    }
+    $cmd.CommandText = "SELECT v.n AS src_name, LOWER(CAST(m.GUID AS varchar(36))) AS guid FROM (VALUES $($placeholders -join ',')) AS v(n) JOIN dbo.mt000 m ON LTRIM(RTRIM(m.Name)) = LTRIM(RTRIM(v.n));"
+    $reader = $cmd.ExecuteReader()
+    try {
+        while ($reader.Read()) { $map[[string]$reader.GetValue(0)] = [string]$reader.GetValue(1) }
+    } finally { $reader.Close() }
+    return $map
+}
+
+# يعيد مجموعة معرّفات البطاقات المتعارضة. صفر كتابة لكل معرّف فيها.
+function Find-ConflictingGuids($rows, $guidByName, $toNum) {
+    $conflicts = New-Object System.Collections.Generic.HashSet[string]
+    $byGuid = @{}
+    foreach ($row in $rows) {
+        $resolved = Resolve-AmeenItemName $row.item_name
+        $guid = $guidByName[$resolved]
+        if (-not $guid) { continue }   # بلا بطاقة مطابقة: يلتقطه عدّاد not-in-ameen
+        if (-not $byGuid.ContainsKey($guid)) { $byGuid[$guid] = New-Object System.Collections.Generic.List[object] }
+        $byGuid[$guid].Add($row)
+    }
+    foreach ($guid in $byGuid.Keys) {
+        $group = $byGuid[$guid]
+        if ($group.Count -lt 2) { continue }   # صف واحد لا يعارض نفسه
+        foreach ($field in @("unit2_price", "sale_price", "retail_carton_usd")) {
+            $positives = @(
+                $group | ForEach-Object {
+                    if ($_.PSObject.Properties[$field]) { [math]::Round((& $toNum $_.$field), 4) } else { 0.0 }
+                } | Where-Object { $_ -gt 0 } | Sort-Object -Unique
+            )
+            if ($positives.Count -gt 1) { [void]$conflicts.Add($guid); break }
+        }
+    }
+    # الفاصلة الأحادية إلزامية: PowerShell يفكّك أي IEnumerable عند الإرجاع، فمجموعة
+    # فارغة — وهي الحالة المستقرة المقصودة — كانت تعود $null فيرمي .Contains() ويُجهض
+    # التطبيق بصفر تحديث. وبعنصر واحد كانت تنهار إلى [string] فتصير .Contains() مطابقةً
+    # نصّية جزئية لا عضوية مجموعة (أسوأ: حجب صامت لبطاقة أخرى). أُثبت الأمران بـpwsh.
+    # (Codex P1 على PR #256.)
+    return ,$conflicts
+}
+
 # يحدّث سعر مادة في قائمة أسعار؛ وإن لم يكن لها سطر في القائمة يضيفه.
 # يرجع عدد أسطر المادة في القائمة بعد التطبيق (0 = المادة غير موجودة في mt000).
 function Apply-ListPrice($conn, $listGuid, $itemName, $unit1Price, $unit2Price) {
@@ -84,6 +146,9 @@ WHERE i.ParentGUID = @ListGuid AND LTRIM(RTRIM(m.Name)) = LTRIM(RTRIM(@ItemName)
 try {
     $prices = Import-Csv -Path $CsvFile -Encoding UTF8
     $sourceCount = $prices.Count
+    # الصفوف الخام قبل أي دمج: الدمج أدناه يجمّع بالاسم، والاسمان المتعارضان
+    # متطابقان نصّياً — فلو فُحص التعارض بعده لاختفى أحد الطرفين ولما ظهر أبداً.
+    $rawPrices = @($prices)
     $arabicCulture = [Globalization.CultureInfo]::GetCultureInfo("ar-SY")
     # سعر الجملة الصفري معناه «غير مسعّر» لا «سعره صفر». لذلك صفٌّ أحدث بسعر صفر
     # لا يحجب سعراً حقيقياً أقدم للمادة نفسها (يحدث مع مفاتيح مكررة بعد التطبيع).
@@ -124,15 +189,35 @@ try {
     $conn = New-Object System.Data.SqlClient.SqlConnection($connStr)
     $conn.Open()
 
+    # A-lite: يُحسب قبل الحلقة وعلى الصفوف الخام. الهوية من بطاقة الأمين نفسها.
+    $distinctNames = @($rawPrices | ForEach-Object { Resolve-AmeenItemName $_.item_name } | Where-Object { $_ } | Sort-Object -Unique)
+    $guidByName = Get-AmeenGuidByName $conn $distinctNames
+    $conflictGuids = Find-ConflictingGuids $rawPrices $guidByName $toNum
+    if ($conflictGuids.Count -gt 0) {
+        Write-Host "تعارض هوية سعر على $($conflictGuids.Count) بطاقة — لن تُكتب أسعارها إطلاقاً:" -ForegroundColor Red
+    }
+
     $jumlaApplied = 0
     $retailApplied = 0
     $skipped = 0
+    $conflicted = 0
+    $conflictNames = @()
     $notFound = @()
 
     foreach ($price in $prices) {
         $itemName = $price.item_name
         if (-not $itemName) { $skipped++; continue }
         $ameenItemName = Resolve-AmeenItemName $itemName
+
+        # صفر كتابة لبطاقة متعارضة — في القائمتين معاً. لا اختيار ولا ترجيح.
+        # بقية المواد السليمة تستمر طبيعياً بلا تأثر.
+        $itemGuid = $guidByName[$ameenItemName]
+        if ($itemGuid -and $conflictGuids.Contains($itemGuid)) {
+            $conflicted++
+            $conflictNames += $ameenItemName
+            Write-Host "  ⛔ $ameenItemName — تعارض سعر على البطاقة نفسها، لم يُكتب شيء" -ForegroundColor Red
+            continue
+        }
 
         $jumlaCarton = 0.0; $jumlaUnit1 = 0.0
         if ($price.unit2_price) { $jumlaCarton = [double]$price.unit2_price }
@@ -163,7 +248,9 @@ try {
 
     $conn.Close()
 
-    $msg = "[$timestamp] Applied: jumla=$jumlaApplied, retail=$retailApplied, skipped=$skipped, not-in-ameen=$($notFound.Count)"
+    $msg = "[$timestamp] Applied: jumla=$jumlaApplied, retail=$retailApplied, skipped=$skipped, not-in-ameen=$($notFound.Count), conflict=$conflicted"
+    # سطر آلي ASCII للمنسّق — لا يتأثر بترميز العربية داخل Task Scheduler.
+    Write-Output "PRICE_APPLY jumla=$jumlaApplied retail=$retailApplied skipped=$skipped notfound=$($notFound.Count) conflict=$conflicted"
     Write-Host ""
     Write-Host "أسعار جملة طُبقت على قائمة (جملة الجملة): $jumlaApplied" -ForegroundColor Green
     Write-Host "أسعار مفرق طُبقت على قائمة (كروزات مركز): $retailApplied" -ForegroundColor Green
@@ -175,6 +262,7 @@ try {
     if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
     $msg | Add-Content $LogFile
     if ($notFound.Count -gt 0) { "  not found: $($notFound -join '; ')" | Add-Content $LogFile }
+    if ($conflicted -gt 0) { "  conflict (zero writes): $($conflictNames -join '; ')" | Add-Content $LogFile }
 
     exit 0
 

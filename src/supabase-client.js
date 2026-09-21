@@ -462,6 +462,38 @@
     };
   }
 
+  // حارس هوية السعر — يُستدعى من مساري الحفظ معاً (upsert وreplace) قبل أي
+  // كتابة. القاعدة والمبرر الكامل في src/price-guid-conflict.js.
+  // غياب الوحدة يوقف الحفظ: حارس صامت أسوأ من غيابه، لأنه يوهم بحماية لا وجود
+  // لها بينما تمرّ أسعار متعارضة إلى الأمين.
+  function requirePriceGuidGuard() {
+    const guard = window.priceGuidConflict;
+    if (
+      !guard ||
+      typeof guard.findGuidPriceConflicts !== "function" ||
+      typeof guard.buildScopedConflictState !== "function"
+    ) {
+      throw new Error("تعذّر تحميل حارس أسعار البطاقات (price-guid-conflict.js). لم يُحفظ شيء.");
+    }
+    return guard;
+  }
+
+  function assertNoGuidPriceConflict(rows) {
+    const guard = requirePriceGuidGuard();
+    const conflicts = guard.findGuidPriceConflicts(rows);
+    if (conflicts.length) {
+      throw new Error(guard.formatConflictMessage(conflicts));
+    }
+  }
+
+  // نسخة الحفظ الجزئي: تفحص **البطاقات التي تلمسها الحمولة وحدها**. تعارض قديم
+  // على بطاقة أخرى لا يجوز أن يمنع تسعير مادة سليمة — وإلا تجمّدت اللائحة كلها
+  // ولاستحال حلّ التعارضات القديمة واحداً واحداً. التفصيل في price-guid-conflict.js.
+  function assertNoGuidPriceConflictForIncoming(incomingRows, existingRows, guidByKey) {
+    const guard = requirePriceGuidGuard();
+    assertNoGuidPriceConflict(guard.buildScopedConflictState(incomingRows, existingRows, guidByKey));
+  }
+
   function missingSessionMessage() {
     return "لا توجد جلسة دخول فعالة. إذا أنشأت الحساب للتو، افتح رسالة التأكيد في البريد أو عطّل تأكيد البريد مؤقتا من Supabase ثم سجل الدخول.";
   }
@@ -1094,14 +1126,21 @@
       // بيانات الموقع لا تحمل أرقام الأمين، فنُعيد ربطها من الصفوف الحالية عبر item_key.
       let numberByKey = null; // null = تعذّر الجلب → لا نلمس item_number/item_code (نفس السلوك السابق)
       let codeByKey = null;
+      let guidByKey = null;
+      let existingAll = null; // كل الصفوف الحالية — يحتاجها حارس هوية السعر أدناه
       try {
         const { data: existingRows, error: fetchErr } = await client
           .from(approvedPricesTable)
-          .select("item_key, item_number, item_code")
+          // item_guid والحقول السعرية المُدارة أُضيفت للحارس: الـupsert يعالج
+          // جزءاً من اللائحة، فلا يكفي فحص الحمولة وحدها — يجب ضمّها للصفوف
+          // الباقية التي تشترك معها في نفس item_guid.
+          .select("item_key, item_number, item_code, item_guid, unit2_price, sale_price, price_payload")
           .limit(5000);
         if (!fetchErr) {
           numberByKey = {};
           codeByKey = {};
+          guidByKey = {};
+          existingAll = existingRows || [];
           for (const row of existingRows || []) {
             if (!row || !row.item_key) continue;
             if (row.item_number != null && String(row.item_number) !== "") {
@@ -1110,9 +1149,19 @@
             if (row.item_code != null && String(row.item_code) !== "") {
               codeByKey[row.item_key] = row.item_code;
             }
+            if (row.item_guid != null && String(row.item_guid) !== "") {
+              guidByKey[row.item_key] = row.item_guid;
+            }
           }
         }
-      } catch (_) { numberByKey = null; codeByKey = null; }
+      } catch (_) { numberByKey = null; codeByKey = null; guidByKey = null; existingAll = null; }
+
+      // بلا الصفوف الحالية لا يمكن إثبات خلوّ الحفظ من تعارض سعر على بطاقة
+      // واحدة. المضي «على العمياء» يُفرغ الحارس من معناه، فنوقف الحفظ بأمان —
+      // نفس مبدأ replaceApprovedPriceItems: لم يُكتب شيء، والبيانات سليمة.
+      if (!existingAll) {
+        throw new Error("تعذّر تحضير الحفظ الآمن (فشل قراءة الأسعار الحالية). لم يُحفظ شيء — حاول مجدداً.");
+      }
 
       const withUser = (items || [])
         .map((item) => normalizeApprovedPriceInput(item, user.id))
@@ -1122,6 +1171,14 @@
             ? { ...rec, item_number: numberByKey[rec.item_key] ?? null, item_code: codeByKey[rec.item_key] ?? null }
             : rec
         );
+
+      // الحالة بعد الحفظ كما ستصير فعلاً، **محصورة ببطاقات هذه الحمولة**: صفوف
+      // الحمولة تحلّ محلّ صفوف الجدول التي تحمل نفس item_key، ويُضمّ إليها من
+      // الصفوف الباقية ما يشترك معها في item_guid فقط. الفحص على هذه الحالة لا
+      // على الحمولة وحدها (فلا يمرّ تعارض جديد) ولا على الجدول كله (فلا يشلّ
+      // تعارضٌ قديم في بطاقة أخرى تسعيرَ مادة سليمة).
+      assertNoGuidPriceConflictForIncoming(withUser, existingAll, guidByKey);
+
       const { data, error } = await client
         .from(approvedPricesTable)
         .upsert(withUser, { onConflict: "item_key" })
@@ -1204,6 +1261,11 @@
           item_code: codeByKey[rec.item_key] ?? null,
           item_guid: rec.item_guid ?? guidByKey[rec.item_key] ?? null
         }));
+
+      // حارس هوية السعر: بطاقة أمين واحدة لا تحمل سعرين. يُفحص **قبل** الحذف
+      // فلا تُمسّ البيانات إطلاقاً عند التعارض — لا حفظ جزئي ولا اختيار تلقائي.
+      // القاعدة والتفصيل في src/price-guid-conflict.js.
+      assertNoGuidPriceConflict(withUser);
 
       const { error: deleteError } = await client.from(approvedPricesTable).delete().neq("item_key", "__never__");
       if (deleteError) throw new Error(deleteError.message);

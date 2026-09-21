@@ -77,6 +77,7 @@ export const CHECKS = [
   'check-price-bulletin-markup-rows.mjs',
   'check-price-bulletin-print-content.mjs',
   'check-price-bulletin-print-ux.mjs',
+  'check-price-guid-conflict-guard.mjs',
   'check-project-task-monitors.mjs',
   'check-purchase-recommendation.mjs',
   'check-push-expense-entries-dryrun-safety.mjs',
