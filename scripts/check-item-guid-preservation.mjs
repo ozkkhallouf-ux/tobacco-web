@@ -33,11 +33,14 @@ assert.match(
   "فشل جلب item_guid يجب أن يوقف الحفظ بأمان تماماً مثل فشل جلب item_number/item_code."
 );
 
-// 4) الصفوف المُعاد إدخالها يجب أن تحمل item_guid المحفوظ (أو قيمة واردة أحدث إن توفرت).
+// 4) الصفوف المُعاد إدخالها يجب أن تحمل item_guid المحفوظ، وإلا الهوية الموثوقة
+//    الواردة من الجرد الحي (rec.item_guid). الترتيب مقصود: هوية صفٍّ قائم مرجع
+//    لا يُدهَس (نفس قاعدة upsertApprovedPriceItems وحارس #257)، والموثوقة تُثبَّت
+//    للمفتاح الجديد وحده — وهو ما كان يُدرَج بـ NULL قبل هذا الإصلاح.
 assert.match(
   fn,
-  /item_guid:\s*rec\.item_guid\s*\?\?\s*guidByKey\[rec\.item_key\]\s*\?\?\s*null/,
-  "الصفوف الجديدة يجب أن تُطبَّق عليها item_guid المحفوظ من guidByKey قبل الإدراج."
+  /item_guid:\s*guidByKey\[rec\.item_key\]\s*\?\?\s*rec\.item_guid\s*\?\?\s*null/,
+  "الصفوف المُعاد إدخالها يجب أن تحمل الهوية المحفوظة أولاً ثم الموثوقة الواردة."
 );
 
 console.log("check-item-guid-preservation: OK — replaceApprovedPriceItems() يحافظ على item_guid عبر الحذف/الإعادة.");

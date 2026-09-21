@@ -2345,6 +2345,14 @@ async function importLivePriceList(form) {
       row.correctedRaw = correctedPriceRow(row.raw, price.priceColumns, normalizedPrice);
       return {
         itemKey: row.key,
+        // هوية بطاقة الأمين من مصدرها الموثوق: صنف الجرد الحي الذي طابق السطر.
+        // لماذا تُمرَّر: هذا المسار يستبدل اللائحة كاملة، وأي مفتاح **جديد**
+        // (مادة تُسعَّر لأول مرة، أو بطاقة أُعيدت تسميتها فتغيّر مفتاحها
+        // المطبّع) لا يجد هويته في صفوف الجدول قبل الحذف، فكان يُدرَج بـ
+        // item_guid = NULL. صفّ بلا هوية لا يطابقه push-item-costs.ps1، ولا
+        // يستطيع حارس منع الازدواج ربطه ببطاقته — وهي نفس النافذة التي تولد
+        // فيها الصفوف المكررة التي عالجها #257. نفس مصدر savePricingItem.
+        itemGuid: stockItem?.itemGuid || "",
         itemName: row.name,
         unit1Name: itemUnit1Name(stockItem),
         unit2Name: itemUnit2Name(stockItem),
