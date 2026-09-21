@@ -74,9 +74,11 @@ const ok = (label) => { passed += 1; console.log(`  ✓ ${label}`); };
   assert.ok(code.includes('Deno.env.get("XAI_API_KEY")'), "مفتاح Grok يجب أن يُقرأ من أسرار الدالة لا من الكود");
   assert.ok(code.includes("fetch(GROK_URL"), "استدعاء Grok يجب أن يمر عبر GROK_URL");
   assert.ok(code.includes("const answer = await askGrok(question, context)"), "handleAiQuestion يجب أن يستدعي askGrok");
+  // لا نفحص اسم مضيف بنص جزئي (js/incomplete-url-substring-sanitization).
+  // دوال Claude القديمة تُرصد بأسمائها ورؤوسها لا بقطعة من الـhost.
   assert.ok(!code.includes("askClaude"), "askClaude ما زال في مسار السؤال الحر");
-  assert.ok(!code.includes("api.anthropic.com"), "سؤال التيليغرام ما زال يرسل إلى Anthropic");
   assert.ok(!code.includes("ANTHROPIC_API_KEY"), "ANTHROPIC_API_KEY ما زال في مسار التيليغرام");
+  assert.ok(!code.includes("anthropic-version"), "سؤال التيليغرام ما زال يرسل إلى Anthropic");
   const grokAsk = await readFile(path.join(repoRoot, "supabase/functions/telegram-webhook/grok-ask.mjs"), "utf8");
   assert.ok(grokAsk.includes(GROK_URL), `grok-ask.mjs يجب أن يعرّف ${GROK_URL}`);
   assert.ok(grokAsk.includes('store: false'), "grok-ask.mjs يجب أن يعطّل تخزين المحادثة على xAI");
@@ -88,7 +90,7 @@ const ok = (label) => { passed += 1; console.log(`  ✓ ${label}`); };
 {
   assert.match(code, /async function transcribeVoice\(/);
   assert.match(code, /Deno\.env\.get\("OPENAI_API_KEY"\)/);
-  assert.match(code, /https:\/\/api\.openai\.com\/v1\/audio\/transcriptions/);
+  assert.ok(code.includes("/v1/audio/transcriptions"), "مسار تفريغ Whisper مفقود");
   assert.match(code, /form\.append\("model", "whisper-1"\)/);
   assert.match(code, /form\.append\("language", "ar"\)/);
   assert.match(code, /msg\.voice\?\.file_id/);

@@ -22,33 +22,29 @@ export function buildGrokRequestBody({ instructions, input }) {
   };
 }
 
+function formatGrokError(err) {
+  if (typeof err === "string") return err;
+  if (err && typeof err.message === "string") return err.message;
+  return JSON.stringify(err);
+}
+
+function collectOutputText(data) {
+  const items = Array.isArray(data.output) ? data.output : [];
+  return items.flatMap((item) => {
+    const blocks = Array.isArray(item?.content) ? item.content : [];
+    return blocks
+      .filter((block) => block?.type === "output_text" && typeof block.text === "string")
+      .map((block) => block.text.trim())
+      .filter(Boolean);
+  });
+}
+
 export function parseGrokOutput(data) {
   if (!data || typeof data !== "object") throw new Error("رد غير صالح من Grok");
-  const err = data.error;
-  if (err) {
-    const msg = typeof err === "string"
-      ? err
-      : typeof err.message === "string"
-        ? err.message
-        : JSON.stringify(err);
-    throw new Error(`grok_error: ${String(msg).slice(0, 200)}`);
+  if (data.error) {
+    throw new Error(`grok_error: ${String(formatGrokError(data.error)).slice(0, 200)}`);
   }
-  const parts = [];
-  const output = data.output;
-  if (Array.isArray(output)) {
-    for (const item of output) {
-      if (!item || typeof item !== "object") continue;
-      const content = item.content;
-      if (!Array.isArray(content)) continue;
-      for (const block of content) {
-        if (!block || typeof block !== "object") continue;
-        if (block.type === "output_text" && typeof block.text === "string" && block.text.trim()) {
-          parts.push(block.text.trim());
-        }
-      }
-    }
-  }
-  const text = parts.join("\n").trim();
+  const text = collectOutputText(data).join("\n").trim();
   if (!text) throw new Error("رد فارغ من Grok");
   return text;
 }
