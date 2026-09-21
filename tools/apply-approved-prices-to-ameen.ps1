@@ -106,7 +106,12 @@ function Find-ConflictingGuids($rows, $guidByName, $toNum) {
             if ($positives.Count -gt 1) { [void]$conflicts.Add($guid); break }
         }
     }
-    return $conflicts
+    # الفاصلة الأحادية إلزامية: PowerShell يفكّك أي IEnumerable عند الإرجاع، فمجموعة
+    # فارغة — وهي الحالة المستقرة المقصودة — كانت تعود $null فيرمي .Contains() ويُجهض
+    # التطبيق بصفر تحديث. وبعنصر واحد كانت تنهار إلى [string] فتصير .Contains() مطابقةً
+    # نصّية جزئية لا عضوية مجموعة (أسوأ: حجب صامت لبطاقة أخرى). أُثبت الأمران بـpwsh.
+    # (Codex P1 على PR #256.)
+    return ,$conflicts
 }
 
 # يحدّث سعر مادة في قائمة أسعار؛ وإن لم يكن لها سطر في القائمة يضيفه.

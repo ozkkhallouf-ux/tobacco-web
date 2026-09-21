@@ -347,6 +347,41 @@ test("12) بقية المواد تستمر: التخطّي يخص الصنف و�
   assert.ok(!/\bexit\b/.test(loopBody), "لا exit داخل الحلقة");
 });
 
+test("10د) Find-ConflictingGuids يُرجع المجموعة بلا تفكيك (Codex P1 على #256)", () => {
+  const fn = applySource.slice(
+    applySource.indexOf("function Find-ConflictingGuids"),
+    applySource.indexOf("# يحدّث سعر مادة في قائمة أسعار")
+  );
+  // PowerShell يفكّك أي IEnumerable عند الإرجاع: مجموعة فارغة تعود $null فيرمي
+  // .Contains() ويُجهض التطبيق بصفر تحديث؛ وبعنصر واحد تنهار إلى [string] فتصير
+  // .Contains() مطابقةً نصّية جزئية. الفاصلة الأحادية وحدها تمنع الاثنين.
+  assert.match(fn, /return ,\$conflicts/, "الإرجاع يجب أن يكون بالفاصلة الأحادية: return ,$conflicts");
+  assert.doesNotMatch(fn, /return \$conflicts\s*$/m, "ممنوع الإرجاع المجرّد — يفكّك المجموعة");
+});
+
+test("10هـ) استدعاء الحارس لا يفترض قابلية المجموعة للتفكيك", () => {
+  assert.match(applySource, /\$conflictGuids = Find-ConflictingGuids/, "المجموعة تُسنَد كما هي");
+  assert.match(applySource, /\$conflictGuids\.Count -gt 0/, "تُستعمل كمجموعة (Count)");
+  assert.match(applySource, /\$conflictGuids\.Contains\(\$itemGuid\)/, "وتُستعمل كمجموعة (Contains)");
+});
+
+test("2ج) readRetailCarton يحتمل غياب price_payload بكل صوره", () => {
+  const cases = [
+    { item_key: "أ", item_guid: GUID_A, unit2_price: 0, sale_price: 0 },
+    { item_key: "ب", item_guid: GUID_A, price_payload: null },
+    { item_key: "ج", item_guid: GUID_A, price_payload: {} },
+    { item_key: "د", item_guid: GUID_A, price_payload: { retail: null } },
+    { item_key: "هـ", item_guid: GUID_A, price_payload: { retail: "نص" } }
+  ];
+  // لا انهيار، ولا تعارض: كلها «غير مسعّرة» للمفرق.
+  assert.equal(findGuidPriceConflicts(cases).length, 0);
+  // ومع صفٍّ مُسعّر واحد يبقى الحكم «لا تعارض».
+  assert.equal(
+    findGuidPriceConflicts([...cases, row("و", GUID_A, { retail: 325 })]).length,
+    0
+  );
+});
+
 test("12ب) التعارض يظهر في المخرَج الآلي والسجل", () => {
   assert.match(applySource, /PRICE_APPLY jumla=\$jumlaApplied retail=\$retailApplied skipped=\$skipped notfound=\$\(\$notFound\.Count\) conflict=\$conflicted/, "سطر آلي يحمل conflict");
   assert.match(applySource, /conflict \(zero writes\)/, "السجل يوثّق البطاقات المتعارضة");

@@ -43,7 +43,7 @@
   // سعر كرتونة المفرق يعيش داخل price_payload.retail.price — لا عمود مستقل له.
   function readRetailCarton(row) {
     const payload = (row && (row.price_payload ?? row.pricePayload)) || {};
-    const retail = payload && payload.retail;
+    const retail = payload.retail;
     if (!retail || typeof retail !== "object") return Number.NaN;
     return toNumber(retail.price);
   }
