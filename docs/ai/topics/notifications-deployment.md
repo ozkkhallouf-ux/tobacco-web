@@ -1,6 +1,6 @@
 # تقرير موضوع الإشعارات والنشر
 
-آخر تحديث: 2026-09-15 (Sentry)
+آخر تحديث: 2026-09-21 (Grok في سؤال تيليغرام الحر)
 
 ## مراقبة أخطاء الواجهة (Sentry) — 2026-09-15
 
@@ -13,6 +13,8 @@
 ## الحالة الحالية
 
 يوجد Web Push وTelegram Edge Functions وGitHub Pages. آخر توثيق سابق أكد إشعار iPhone فعلياً بعد إصلاح الأيقونة، لكن أي حالة حية جديدة تحتاج اختباراً جديداً. نشر النشرات يعتمد workflow منفصلاً عن نشر الموقع.
+
+سؤال تيليغرام الحر («اسأل» وأي رسالة غير أمر/تذكير) يمر عبر Grok (`api.x.ai/v1/responses`، النموذج `grok-4.6`) بمفتاح `XAI_API_KEY` في أسرار الدالة. الطلب يُرسل `store: false` و`search_parameters.mode=off` حتى لا تُحفظ بيانات العمل ولا تُخلط أرقام الأمين ببحث ويب. الأوامر المحددة (رصيد، نواقص، ربح اليوم، …) تبقى قراءة SQL مباشرة. الصوت مسار مستقل: رسالة `voice` تُفرَّغ بـ Whisper ثم تُعامل كنص. `claude-assistant` في الموقع لم يُمسّ. التفعيل الحي يحتاج السر ثم نشر `telegram-webhook`.
 
 مركز عمليات الوكلاء والمراجعة في Slack موثَّق في [collaboration-workflow.md](collaboration-workflow.md). تنبيهات فشل GitHub Actions تبقى عبر Telegram؛ Slack لا يستبدل هذا المسار ولا يُضاف له webhook من المستودع.
 
@@ -62,18 +64,18 @@ static-only — تطابق نص SQL بالـregex ولا تنفّذ شيئاً �
 
 ## نطاق الملفات
 
-`src/web-push.js`, `public/service-worker.js`, `public/manifest.webmanifest`, `supabase/functions/web-push/`, `supabase/functions/telegram-webhook/`, `supabase/*notifications.sql`, `.github/workflows/`.
+`src/web-push.js`, `public/service-worker.js`, `public/manifest.webmanifest`, `supabase/functions/web-push/`, `supabase/functions/telegram-webhook/` (`index.ts` + `grok-ask.mjs`)، `supabase/*notifications.sql`, `.github/workflows/`.
 
 ## قيود ثابتة
 
-- لا أسرار في المتصفح أو Git؛ Telegram token في Vault.
+- لا أسرار في المتصفح أو Git؛ Telegram token في Vault، و`XAI_API_KEY` و`OPENAI_API_KEY` في أسرار Edge Function فقط.
 - Edge Function المنشورة والنسخة المرجعية في المستودع تتغيران معاً.
 - تغيير ملفات الواجهة المنشورة يحتاج رفع `CACHE_NAME`، أما تغيير الوثائق فقط فلا يحتاجه.
 - workflow توليد النشرات لا يستخدم `[skip ci]` عند دفع الملفات التي يجب أن تطلق Pages.
 
 ## فحوص إلزامية
 
-`npm.cmd run check`، نجاح CI، فحص الرابط أو إصدار الدالة الحي، واختبار جهاز فعلي عندما يكون الادعاء متعلقاً بظهور إشعار أو كاش PWA.
+`npm.cmd run check` (يشمل `scripts/check-telegram-grok-ask.mjs`)، نجاح CI، فحص الرابط أو إصدار الدالة الحي، واختبار جهاز فعلي عندما يكون الادعاء متعلقاً بظهور إشعار أو كاش PWA. تفعيل سؤال Grok يحتاج `XAI_API_KEY` ثم نشر `telegram-webhook`؛ فهم الصوت يحتاج بقاء `OPENAI_API_KEY`.
 
 ## الخطوة التالية
 
