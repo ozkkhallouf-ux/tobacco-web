@@ -2331,8 +2331,26 @@ async function importLivePriceList(form) {
     }
 
     const price = await parsePriceWorkbook(priceFile);
-    const availableByKey = new Map(availableItems.map((item) => [item.key || normalizeItemName(item.name), item]));
+    const availableKeyOf = (item) => item.key || normalizeItemName(item.name);
+    const availableByKey = new Map(availableItems.map((item) => [availableKeyOf(item), item]));
     const availableKeys = new Set(availableByKey.keys());
+    // مفاتيح يتصادم عليها أكثر من بطاقة أمين حيّة (أسماء مختلفة تتطابق بعد
+    // التطبيع). الـMap أعلاه يحتفظ بآخر بطاقة صامتاً، فلا يجوز اعتبار هويتها
+    // «موثوقة» لسطر قد يخصّ البطاقة الأخرى — الهوية الخاطئة تكسر مطابقة متوسط
+    // التكلفة وتُسند الصف لبطاقة ليست له. نفس الصنف الذي يرفض
+    // tools/pull-item-numbers.ps1 اختياره عشوائياً. (Codex P1 على #259.)
+    // اختلاف الهوية وحده تصادم؛ صفّان لنفس البطاقة ليسا كذلك.
+    const ambiguousKeys = new Set();
+    const guidSeenForKey = new Map();
+    for (const item of availableItems) {
+      const key = availableKeyOf(item);
+      const guid = String(item?.itemGuid || "").trim().toUpperCase();
+      if (!guidSeenForKey.has(key)) {
+        guidSeenForKey.set(key, guid);
+      } else if (guidSeenForKey.get(key) !== guid) {
+        ambiguousKeys.add(key);
+      }
+    }
     const filteredRows = price.rows.filter((row) => availableKeys.has(row.key) && row.hasPrice);
     const excludedRows = price.rows.filter((row) => !availableKeys.has(row.key));
     const zeroPriceRows = price.rows.filter((row) => availableKeys.has(row.key) && !row.hasPrice);
@@ -2352,7 +2370,11 @@ async function importLivePriceList(form) {
         // item_guid = NULL. صفّ بلا هوية لا يطابقه push-item-costs.ps1، ولا
         // يستطيع حارس منع الازدواج ربطه ببطاقته — وهي نفس النافذة التي تولد
         // فيها الصفوف المكررة التي عالجها #257. نفس مصدر savePricingItem.
-        itemGuid: stockItem?.itemGuid || "",
+        //
+        // ولا تُمرَّر حين يتصادم على المفتاح أكثر من بطاقة حيّة: هوية مخمَّنة
+        // أسوأ من غيابها. الصف يُحفظ حينها كما كان قبل هذا الإصلاح (هويته
+        // المحفوظة إن وُجدت، وإلا NULL)، ويُنبَّه المستخدم بالعدد.
+        itemGuid: ambiguousKeys.has(row.key) ? "" : stockItem?.itemGuid || "",
         itemName: row.name,
         unit1Name: itemUnit1Name(stockItem),
         unit2Name: itemUnit2Name(stockItem),
@@ -2400,9 +2422,14 @@ async function importLivePriceList(form) {
       }
     }
     const correctionText = correctedPriceRows ? ` وتم تصحيح ${correctedPriceRows} سعر تلقائياً حسب عامل التحويل.` : "";
+    // التصادم لا يُحفظ صامتاً: المستخدم وحده يستطيع توحيد الاسم في الأمين.
+    const ambiguousPricedRows = filteredRows.filter((row) => ambiguousKeys.has(row.key)).length;
+    const ambiguityText = ambiguousPricedRows
+      ? ` تنبيه: ${ambiguousPricedRows} مادة يتطابق اسمها المطبّع مع أكثر من بطاقة في الأمين، فحُفظت بلا هوية بطاقة — وحّد أسماءها في الأمين.`
+      : "";
     setNotice(
-      zeroPriceRows.length || saveWarning ? "error" : "success",
-      `تم تنزيل لائحة البيع النهائية: ${filteredRows.length} مادة. تم حذف ${excludedRows.length} غير موجودة في المستودع، و${zeroPriceRows.length} موجودة لكن بلا سعر. تم استبدال لائحة المحاسبة بـ ${savedCount} سعر.${correctionText}${saveWarning}`
+      zeroPriceRows.length || saveWarning || ambiguousPricedRows ? "error" : "success",
+      `تم تنزيل لائحة البيع النهائية: ${filteredRows.length} مادة. تم حذف ${excludedRows.length} غير موجودة في المستودع، و${zeroPriceRows.length} موجودة لكن بلا سعر. تم استبدال لائحة المحاسبة بـ ${savedCount} سعر.${correctionText}${ambiguityText}${saveWarning}`
     );
   } catch (error) {
     setNotice("error", safeErrorMessage(error));

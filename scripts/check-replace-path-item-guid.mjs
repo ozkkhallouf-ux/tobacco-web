@@ -249,7 +249,7 @@ async function runImport({
   await sandbox.importLivePriceList(form);
   // importLivePriceList يبتلع كل خطأ في إشعار. بلا هذا الفحص كان عطل في
   // السقالة نفسها سيمرّ كـ«لم تصل الهوية» — تشخيص خاطئ.
-  const errors = notices.filter((n) => n.kind === "error" && !/بلا سعر/.test(n.message));
+  const errors = notices.filter((n) => !/تم تنزيل لائحة البيع النهائية/.test(n.message));
   assert.deepEqual(errors, [], `المسار انتهى بخطأ: ${JSON.stringify(errors)}`);
   return { captured: fake.captured, notices, dataStore, fake };
 }
@@ -291,7 +291,7 @@ function existingRow(itemKey, guid, extra = {}) {
 // مطفرة مصدرية (mutation test): تُزيل تمرير الهوية من `importLivePriceList`
 // وتعيد تشغيل نفس المسار. هذا يثبت أن السطر المضاف هو ما يصلح العطل فعلاً،
 // ولا يعتمد على تاريخ git فيبقى صالحاً بعد الدمج.
-const GUID_PASS_LINE = /\n\s*itemGuid: stockItem\?\.itemGuid \|\| "",/;
+const GUID_PASS_LINE = /\n\s*itemGuid: ambiguousKeys\.has\(row\.key\) \? "" : stockItem\?\.itemGuid \|\| "",/;
 
 const preFixAppSource = APP_SOURCE.replace(GUID_PASS_LINE, "\n");
 
@@ -451,6 +451,50 @@ await test("E2) فشل قراءة الصفوف الحالية يوقف الحف�
     /تعذّر تحضير الحفظ الآمن/
   );
   assert.equal(fake.captured.deleted, 0, "لا حذف أعمى");
+});
+
+// ===========================================================================
+// G) مفتاح يتصادم عليه أكثر من بطاقة حيّة: لا هوية تُخمَّن (Codex P1 على #259)
+// ===========================================================================
+// بطاقتان بأسماء مختلفة تتطابقان بعد التطبيع ⇒ الـMap يحتفظ بآخرهما صامتاً.
+// إسناد هوية تلك البطاقة لسطر قد يخصّ الأخرى يكسر مطابقة متوسط التكلفة
+// ويُسند الصف لبطاقة ليست له. الهوية المخمَّنة أسوأ من غيابها.
+const AMBIGUOUS = {
+  stockItems: [
+    stockItem("كابتن بلاك كور", "كابتن بلاك كوين", GUID_LIVE),
+    stockItem("كابتن بلاك كور", "كابتن بلاك كور", GUID_OTHER)
+  ],
+  priceRows: [priceRow("كابتن بلاك كور", "كابتن بلاك كور", 250)],
+  existingRows: []
+};
+
+const ambiguous = await runImport(AMBIGUOUS);
+
+await test("G1) تصادم بطاقتين على مفتاح واحد ⇒ الصف يُحفظ بلا هوية لا بهوية مخمَّنة", () => {
+  assert.equal(ambiguous.captured.inserted.length, 1);
+  assert.equal(
+    ambiguous.captured.inserted[0].item_guid,
+    null,
+    "عند التصادم لا تُمرَّر أي هوية — لا الأولى ولا الأخيرة"
+  );
+});
+
+await test("G2) والتصادم لا يمرّ صامتاً: المستخدم يُنبَّه بالعدد", () => {
+  const texts = ambiguous.notices.map((n) => n.message).join(" ");
+  assert.match(texts, /أكثر من بطاقة في الأمين/, "لا بدّ من تنبيه صريح");
+  assert.match(texts, /1 مادة/, "مع عدد المواد المتصادمة");
+});
+
+await test("G3) صفّان لنفس البطاقة (هوية واحدة) ليسا تصادماً — الهوية تمرّ", async () => {
+  const run = await runImport({
+    stockItems: [
+      stockItem("مالبورو احمر", "مالبورو أحمر", GUID_LIVE),
+      stockItem("مالبورو احمر", "مالبورو أحمر", GUID_LIVE.toLowerCase())
+    ],
+    priceRows: [priceRow("مالبورو احمر", "مالبورو أحمر", 250)],
+    existingRows: []
+  });
+  assert.ok(run.captured.inserted[0].item_guid, "تكرار البطاقة نفسها لا يمنع هويتها");
 });
 
 // ===========================================================================
