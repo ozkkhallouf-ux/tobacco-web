@@ -413,8 +413,8 @@ test("PDF/print uses same lineTotal as invoice data", () => {
   // الكمية صارت أجزاءً ذرّية في عناصر عزل مستقلة (محرّك الرسم على الهاتف يعيد
   // ترتيب أي عقدة نصّية مختلطة) — فنفحص الجزأين وترتيبهما بدل السلسلة الملتصقة.
   // القيمة والوحدة المتوقَّعتان كما هما، ولم يتغيّر أي رقم.
-  const qtyValueAt = html.indexOf("<bdi>0.5</bdi>");
-  const qtyUnitAt = html.indexOf("<bdi>كرتونة</bdi>");
+  const qtyValueAt = html.indexOf('<span class="qv">0.5</span>');
+  const qtyUnitAt = html.indexOf('<span class="qu">كرتونة</span>');
   assert.ok(qtyValueAt >= 0 && qtyUnitAt > qtyValueAt, "الكمية غير مطبوعة بالوحدة الكبرى");
 });
 

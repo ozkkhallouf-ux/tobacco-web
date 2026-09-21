@@ -323,14 +323,21 @@ test("سطر التاريخ في الدفتر معزول أيضاً", () => {
     "سطر التاريخ في الدفتر بلا عزل");
 });
 
-test("خلايا الكمية وسعر الوحدة وقيمة السطر معزولة بـbdi", () => {
+test("خلايا سعر الوحدة وقيمة السطر معزولة بـbdi، والكمية مركَّبة بالتخطيط", () => {
   const body = reference.slice(reference.indexOf("<tbody>"), reference.indexOf("</tbody>"));
   const cells = [...body.matchAll(/<td>(.*?)<\/td>/g)].map((m) => m[1]);
-  // أربع خلايا لكل سطر: الأولى (المادة) عربية خالصة بلا عزل، والثلاث الباقية معزولة.
+  // أربع خلايا لكل سطر: الأولى (المادة) عربية خالصة بلا عزل، والأخيرتان معزولتان.
+  // أما الكمية فلا تُعزَل بـbdi عمداً: العزل يترك التركيب البصري لخوارزمية
+  // BiDi، وهي التي انقلبت على WebKit. الكمية تُركَّب بمجموعات flex فيصير
+  // ترتيبها قراراً تخطيطياً لا يختلف بين المحرّكات.
   assert.equal(cells.length % 4, 0, "عدد الخلايا لا يطابق أربعة أعمدة");
   for (let i = 0; i < cells.length; i += 4) {
     assert.ok(!cells[i].startsWith("<bdi>"), "عمود المادة لا يحتاج عزلاً");
-    for (const offset of [1, 2, 3]) {
+    assert.ok(/^<span class="qty">[\s\S]*<\/span>$/.test(cells[i + 1]),
+      `خلية الكمية ${i + 1} لم تعد مجموعات تخطيطية`);
+    assert.ok(!/<bdi>/.test(cells[i + 1]),
+      `خلية الكمية ${i + 1} عادت تعتمد عزل BiDi في تركيبها البصري`);
+    for (const offset of [2, 3]) {
       assert.ok(/^<bdi>[\s\S]*<\/bdi>$/.test(cells[i + offset]),
         `الخلية ${i + offset} بلا عزل اتجاه`);
     }
@@ -482,14 +489,29 @@ test("خانة الكمية في القالب: أجزاء ذرّية، بلا أ
   }));
   const body = out.split("<tbody>")[1].split("</tbody>")[0];
   assert.ok(!/[()]/.test(body), "عاد القوسان إلى خانة الكمية — لا ينجوان من محرّك الرسم");
-  const order = ["<bdi>0.12</bdi>", "<bdi>كرتونة</bdi>", "<bdi>6</bdi>", "<bdi>كروز</bdi>"];
-  let at = -1;
-  for (const token of order) {
-    const next = body.indexOf(token, at + 1);
-    assert.ok(next > at, `الجزء ${token} مفقود أو خارج ترتيبه`);
-    at = next;
-  }
+  assert.ok(
+    body.includes(
+      '<span class="qty">'
+      + '<span class="qg"><span class="qv">0.12</span><span class="qu">كرتونة</span></span>'
+      + '<span class="qg q-det"><span class="qv">6</span><span class="qu">كروز</span></span>'
+      + '</span>'
+    ),
+    "خانة الكمية ليست مجموعتين تخطيطيتين بالترتيب الصحيح"
+  );
+  assert.ok(!/<bdi>/.test(body.split("</td>")[1] || ""), "الكمية عادت تعتمد عزل BiDi");
   assert.ok(body.includes("q-det"), "التوضيح فقد تمييزه البصري الثانوي");
+});
+
+test("ترتيب الكمية لا يأتي من BiDi: القواعد تثبّت الاتجاه والترتيب تخطيطياً", () => {
+  // الصياغة السابقة (bdi سطرية) كان ترتيبها البصري ناتج خوارزمية BiDi، فانقلب
+  // على WebKit وبقي صحيحاً على Chromium. هذه القواعد هي ما يجعل الترتيب
+  // قراراً تخطيطياً: حاوية row-reverse باتجاه مثبَّت صراحةً، وكل جزء صندوق
+  // مستقل نصُّه أحاديّ الاتجاه.
+  for (const rule of [/\.ozk-inv \.qty\{[^}]*display:flex/, /\.ozk-inv \.qty\{[^}]*flex-direction:row-reverse/,
+                      /\.ozk-inv \.qty\{[^}]*direction:ltr/, /\.ozk-inv \.qg\{[^}]*flex-direction:row-reverse/,
+                      /\.ozk-inv \.qg\{[^}]*direction:ltr/]) {
+    assert.ok(rule.test(invoiceJs), `قاعدة التخطيط الضامنة للترتيب سقطت: ${rule}`);
+  }
 });
 
 test("كمية بلا وحدة كبرى: جزء واحد بلا توضيح", () => {
