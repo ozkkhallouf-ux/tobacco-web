@@ -42,6 +42,8 @@ const PATTERNS = {
   // أسطر الدفتر خرجت من voucherPdfMarkup إلى دالة واحدة يستدعيها مسارا العرض
   // (السندات القديمة وقالب الفاتورة الرئيسي) — فيجب استخراجها معه.
   voucherLedgerRows: /function voucherLedgerRows\(v\) \{[\s\S]*?\n\}\n/,
+  voucherInvoiceBalanceRows: /function voucherInvoiceBalanceRows\(rows, v, cur, balCur, isRet\) \{[\s\S]*?\n\}\n/,
+  voucherSingleBalanceRows: /function voucherSingleBalanceRows\(rows, v, cur, balCur, isInv, isRet, balLabel\) \{[\s\S]*?\n\}\n/,
   voucherLedgerRowHtml: /function voucherLedgerRowHtml\(row\) \{[\s\S]*?\n\}\n/,
   saleInvoiceDocument: /function saleInvoiceDocument\(v\) \{[\s\S]*?\n\}\n/,
   voucherPdfMarkup: /function voucherPdfMarkup\(v\) \{[\s\S]*?\n\}\n/,
@@ -239,9 +241,13 @@ test("الفرق غير المنسوب لا يُسمّى حسماً أبداً",
   const html = invoiceDoc({ adjust: 50, newBalance: 150 });
   assert.ok(html.includes("تسوية على الحساب"), "الفرق غير المنسوب بلا تسمية صحيحة");
   assert.ok(!html.includes("<th>الحسم</th>"), "الفرق غير المنسوب طُبع بعنوان «حسم»");
-  // أسطر الدفتر صارت في voucherLedgerRows، فالتدقيق النصّي يلاحقها إلى موضعها
-  // الجديد بدل أن يفحص دالةً لم تعد تحوي الأسطر أصلاً (ففحصها يصبح بلا معنى).
-  assert.ok(!/label: "حسم"/.test(appJs.match(/function voucherLedgerRows\(v\)[\s\S]*?\n\}\n/)[0]),
+  // أسطر الرصيد صارت في voucherInvoiceBalanceRows، فالتدقيق النصّي يلاحقها إلى
+  // موضعها الجديد بدل أن يفحص دالةً لم تعد تحوي الأسطر أصلاً (ففحصها يصبح بلا
+  // معنى، ويمرّ فراغاً). الكتلة المستخرَجة تُلتقط أولاً ويُتحقَّق من وجودها.
+  const balanceRowsSrc = appJs.match(/function voucherInvoiceBalanceRows\(rows, v, cur, balCur, isRet\)[\s\S]*?\n\}\n/);
+  assert.ok(balanceRowsSrc, "تعذّر العثور على voucherInvoiceBalanceRows — التدقيق النصّي فقد هدفه");
+  assert.ok(/label: "الحسم"/.test(balanceRowsSrc[0]), "سطر الحسم الحقيقي غادر الكتلة — التدقيق يفحص موضعاً خاطئاً");
+  assert.ok(!/label: "حسم"/.test(balanceRowsSrc[0]),
     "بقيت التسمية القديمة «حسم» للفرق غير المنسوب في الكود");
 });
 

@@ -6000,49 +6000,61 @@ function voucherLedgerRows(v) {
   if (v.notes) rows.push({ label: "البيان", value: v.notes });
   // للفاتورة والمرتجع: نعرض الرصيد السابق ثم القيمة ثم الرصيد الجديد ليعرف الزبون وضعه بوضوح.
   if ((isInv || isRet) && v.newBalance !== undefined && v.newBalance !== null) {
-    rows.push({ label: "الرصيد السابق", value: balanceText(v.prevBalance, balCur) });
-    rows.push({ label: isRet ? "قيمة هذا المرتجع" : "قيمة هذه الفاتورة", value: `${formatMoney(v.amount || 0)} ${cur}` });
-    // إن سُجّلت الفاتورة على الحساب بمبلغ أقل/أكثر من قيمتها (حسم أو تسوية) نُظهر الفرق
-    // ليبقى الحساب شفافاً: السابق + الفاتورة − الحسم = الجديد.
-    // الحسم ودفعة الزبون عمليتان محاسبيتان مستقلتان تماماً، ولكلٍّ سطره:
-    //   الرصيد الجديد = السابق + قيمة الفاتورة − الحسم − دفعة الزبون
-    // لا يجوز أن تُطبع دفعة داخل خانة الحسم ولا العكس. كلٌّ يظهر فقط إن وُجد.
-    if (Number(v.discount || 0) > 0.009) {
-      rows.push({ label: "الحسم", value: `− ${formatMoney(v.discount)} ${cur}`, tone: "cred" });
-    }
-    if (Number(v.payment || 0) > 0.009) {
-      rows.push({ label: "دفعة من الزبون", value: `− ${formatMoney(v.payment)} ${cur}`, tone: "cred" });
-    }
-    // `adjust` فرق **غير منسوب**: ما تبقّى من حركة الحساب بعد طرح الحسم والدفعة
-    // المعروفَين. لا يُسمّى حسماً: مصدر فواتير الأمين لا يفصل الحسم عن الدفعة
-    // (راجع tools/push-customer-invoices.ps1 — الفاتورة تصل بحقول
-    // number/date/guid/total/isReturn/lines فقط)، فتسميته حسماً تطبع دفعة زبون
-    // على أنها حسم في مستند يُسلَّم للزبون.
-    if (Number(v.adjust || 0) > 0.009) {
-      rows.push({ label: "تسوية على الحساب", value: `− ${formatMoney(v.adjust)} ${cur}`, tone: "cred" });
-    } else if (Number(v.adjust || 0) < -0.009) {
-      rows.push({ label: "إضافة / تسوية", value: `+ ${formatMoney(Math.abs(v.adjust))} ${cur}`, tone: "deb" });
-    }
-    rows.push({ label: "الرصيد الجديد", value: balanceText(v.newBalance, balCur), strong: true });
+    voucherInvoiceBalanceRows(rows, v, cur, balCur, isRet);
   } else if (v.balance !== undefined && v.balance !== null && v.balance !== "") {
-    const lbl = v.balanceLabel || balLabel;
-    const balTxt = (isInv || isRet || v.type === "receipt") ? balanceText(v.balance, balCur) : `${formatMoney(v.balance)} ${cur}`;
-    rows.push({ label: lbl, value: balTxt });
-    // إن تحرّك الحساب بعد هذا القيد (فواتير لاحقة مثلاً) نعرض الرصيد الحالي أيضاً:
-    // سطر واحد لا يكفي — الزبون يقارن السند برصيده اليوم فيظنّ الفرق خطأً.
-    // محصور بسند القبض وحده: الفاتورة والمرتجع لهما سطرا «السابق/الجديد».
-    if (v.type === "receipt"
-      && v.currentBalance !== undefined && v.currentBalance !== null && v.currentBalance !== ""
-      && Math.abs(Number(v.currentBalance) - Number(v.balance)) > 0.009) {
-      const asOf = shortDateTime(v.currentBalanceAt);
-      rows.push({
-        label: "الرصيد الحالي",
-        value: balanceText(v.currentBalance, balCur),
-        suffixHtml: ` <small>(بعد حركات لاحقة${asOf ? " — حتى " + escapeHtml(asOf) : ""})</small>`
-      });
-    }
+    voucherSingleBalanceRows(rows, v, cur, balCur, isInv, isRet, balLabel);
   }
   return rows;
+}
+
+// شقّ «الرصيد السابق → القيمة → الرصيد الجديد» للفاتورة والمرتجع. خرج من
+// `voucherLedgerRows` كما هو: لا شرط ولا صياغة ولا ترتيب تغيّر فيه.
+function voucherInvoiceBalanceRows(rows, v, cur, balCur, isRet) {
+  rows.push({ label: "الرصيد السابق", value: balanceText(v.prevBalance, balCur) });
+  rows.push({ label: isRet ? "قيمة هذا المرتجع" : "قيمة هذه الفاتورة", value: `${formatMoney(v.amount || 0)} ${cur}` });
+  // إن سُجّلت الفاتورة على الحساب بمبلغ أقل/أكثر من قيمتها (حسم أو تسوية) نُظهر الفرق
+  // ليبقى الحساب شفافاً: السابق + الفاتورة − الحسم = الجديد.
+  // الحسم ودفعة الزبون عمليتان محاسبيتان مستقلتان تماماً، ولكلٍّ سطره:
+  //   الرصيد الجديد = السابق + قيمة الفاتورة − الحسم − دفعة الزبون
+  // لا يجوز أن تُطبع دفعة داخل خانة الحسم ولا العكس. كلٌّ يظهر فقط إن وُجد.
+  if (Number(v.discount || 0) > 0.009) {
+    rows.push({ label: "الحسم", value: `− ${formatMoney(v.discount)} ${cur}`, tone: "cred" });
+  }
+  if (Number(v.payment || 0) > 0.009) {
+    rows.push({ label: "دفعة من الزبون", value: `− ${formatMoney(v.payment)} ${cur}`, tone: "cred" });
+  }
+  // `adjust` فرق **غير منسوب**: ما تبقّى من حركة الحساب بعد طرح الحسم والدفعة
+  // المعروفَين. لا يُسمّى حسماً: مصدر فواتير الأمين لا يفصل الحسم عن الدفعة
+  // (راجع tools/push-customer-invoices.ps1 — الفاتورة تصل بحقول
+  // number/date/guid/total/isReturn/lines فقط)، فتسميته حسماً تطبع دفعة زبون
+  // على أنها حسم في مستند يُسلَّم للزبون.
+  if (Number(v.adjust || 0) > 0.009) {
+    rows.push({ label: "تسوية على الحساب", value: `− ${formatMoney(v.adjust)} ${cur}`, tone: "cred" });
+  } else if (Number(v.adjust || 0) < -0.009) {
+    rows.push({ label: "إضافة / تسوية", value: `+ ${formatMoney(Math.abs(v.adjust))} ${cur}`, tone: "deb" });
+  }
+  rows.push({ label: "الرصيد الجديد", value: balanceText(v.newBalance, balCur), strong: true });
+}
+
+// شقّ الرصيد المفرد (السندات وما لا رصيد جديد له). خرج من `voucherLedgerRows`
+// كما هو: لا شرط ولا صياغة ولا ترتيب تغيّر فيه.
+function voucherSingleBalanceRows(rows, v, cur, balCur, isInv, isRet, balLabel) {
+  const lbl = v.balanceLabel || balLabel;
+  const balTxt = (isInv || isRet || v.type === "receipt") ? balanceText(v.balance, balCur) : `${formatMoney(v.balance)} ${cur}`;
+  rows.push({ label: lbl, value: balTxt });
+  // إن تحرّك الحساب بعد هذا القيد (فواتير لاحقة مثلاً) نعرض الرصيد الحالي أيضاً:
+  // سطر واحد لا يكفي — الزبون يقارن السند برصيده اليوم فيظنّ الفرق خطأً.
+  // محصور بسند القبض وحده: الفاتورة والمرتجع لهما سطرا «السابق/الجديد».
+  if (v.type === "receipt"
+    && v.currentBalance !== undefined && v.currentBalance !== null && v.currentBalance !== ""
+    && Math.abs(Number(v.currentBalance) - Number(v.balance)) > 0.009) {
+    const asOf = shortDateTime(v.currentBalanceAt);
+    rows.push({
+      label: "الرصيد الحالي",
+      value: balanceText(v.currentBalance, balCur),
+      suffixHtml: ` <small>(بعد حركات لاحقة${asOf ? " — حتى " + escapeHtml(asOf) : ""})</small>`
+    });
+  }
 }
 
 // عرض سطر دفتر واحد بقالب السندات القديم. يُنتج نفس HTML السابق حرفاً بحرف.

@@ -136,6 +136,40 @@ const OZK_INVOICE = (() => {
   //    السطر والأرصدة ونصوصها. هذا القالب **عرض فقط** ولا يحسب شيئاً ولا
   //    يقرّب ولا يعيد كتابة منطق `invoiceLine*` ولا `balanceText`.
   // ==========================================================================
+  // جدول المواد بأعمدته الأربعة المعتمدة. عرضٌ محض: النصوص تصل جاهزة ولا
+  // يُشتقّ هنا شيء من الكمية ولا الوحدة ولا سعر الوحدة ولا قيمة السطر.
+  function itemsTableHtml(doc, kind, esc) {
+    const lines = Array.isArray(doc.lines) ? doc.lines : [];
+    if (!lines.length) return "";
+    const body = lines.map((line) => {
+      // `<bdi>` يعزل كل خلية مختلطة الاتجاه عن جاراتها، فلا ينقلب
+      // «2 كرتونة (100 كروز)» ولا يتبدّل ترتيب «$ 250 / كرتونة».
+      const cells = [line.material || "", line.qtyText || "", line.priceText || "", line.valueText || ""];
+      return `<tr>${cells.map((c, i) => (i === 0
+        ? `<td>${esc(c)}</td>`
+        : `<td><bdi>${esc(c)}</bdi></td>`)).join("")}</tr>`;
+    }).join("");
+    return `
+    <div class="sec">${esc(kind.itemsLabel)}</div>
+    <table class="items-table">
+      ${ITEMS_COLGROUP}
+      <thead><tr>${COLUMN_HEADS.map((h) => `<th>${esc(h)}</th>`).join("")}</tr></thead>
+      <tbody>${body}</tbody>
+    </table>`;
+  }
+
+  // أسطر الدفتر كما ينتجها `voucherLedgerRows`. لا يقرّر هذا الشقّ أي سطر
+  // يظهر ولا بأي ترتيب — يرسم ما وصله كما وصله.
+  function infoRowsHtml(doc, dateHtml, esc) {
+    return (doc.rows || []).map((row) => {
+      const width = row.width ? ` style="width:${row.width}"` : "";
+      const cls = row.tone === "cred" ? ' class="cred"' : (row.tone === "deb" ? ' class="deb"' : "");
+      const value = row.isDate ? dateHtml : `<bdi>${esc(row.value)}</bdi>`;
+      const body = row.strong ? `<b>${value}</b>` : value;
+      return `<tr><th${width}>${esc(row.label)}</th><td${cls}>${body}${row.suffixHtml || ""}</td></tr>`;
+    }).join("");
+  }
+
   function markup(doc) {
     const esc = doc.escapeHtml;
     const kind = KINDS[doc.kind] || KINDS.invoice;
@@ -146,31 +180,8 @@ const OZK_INVOICE = (() => {
     // خوارزم الاتجاه إلى 05-09-2026. `dir="ltr"` يعزله فيبقى 2026-09-05.
     const dateHtml = `<span dir="ltr">${esc(dstr)}</span>`;
 
-    const lines = Array.isArray(doc.lines) ? doc.lines : [];
-    const itemsTable = lines.length ? `
-    <div class="sec">${esc(kind.itemsLabel)}</div>
-    <table class="items-table">
-      ${ITEMS_COLGROUP}
-      <thead><tr>${COLUMN_HEADS.map((h) => `<th>${esc(h)}</th>`).join("")}</tr></thead>
-      <tbody>${lines.map((line) => {
-        // `<bdi>` يعزل كل خلية مختلطة الاتجاه عن جاراتها، فلا ينقلب
-        // «2 كرتونة (100 كروز)» ولا يتبدّل ترتيب «$ 250 / كرتونة».
-        // العزل عرضٌ محض: النصوص تصل جاهزة ولا نلمس منطق اشتقاقها.
-        const cells = [line.material || "", line.qtyText || "", line.priceText || "", line.valueText || ""];
-        return `<tr>${cells.map((c, i) => (i === 0
-          ? `<td>${esc(c)}</td>`
-          : `<td><bdi>${esc(c)}</bdi></td>`)).join("")}</tr>`;
-      }).join("")}</tbody>
-    </table>` : "";
-
-    const infoRows = (doc.rows || []).map((row) => {
-      const width = row.width ? ` style="width:${row.width}"` : "";
-      const cls = row.tone === "cred" ? ' class="cred"' : (row.tone === "deb" ? ' class="deb"' : "");
-      const value = row.isDate ? dateHtml : `<bdi>${esc(row.value)}</bdi>`;
-      const body = row.strong ? `<b>${value}</b>` : value;
-      return `<tr><th${width}>${esc(row.label)}</th><td${cls}>${body}${row.suffixHtml || ""}</td></tr>`;
-    }).join("");
-
+    const itemsTable = itemsTableHtml(doc, kind, esc);
+    const infoRows = infoRowsHtml(doc, dateHtml, esc);
     const partyMeta = doc.partyMeta || "";
 
     return `${STYLE}<div class="ozk-inv">
