@@ -286,11 +286,16 @@
     // مفاتيح جديدة حُجزت داخل هذه الحمولة نفسها: حمولة واحدة تحمل مفتاحين
     // جديدين لنفس البطاقة تُنشئ الازدواج بذاتها، فتُرفض كذلك.
     const claimedInPayload = new Map();
+    const seenNewKeys = new Set();
     for (const rec of Array.isArray(incomingRows) ? incomingRows : []) {
       const key = readKey(rec);
       // مفتاح موجود = تحديث لا إنشاء. مسموح دائماً — هنا تمرّ إعادة تسعير
       // المجموعات المكررة القائمة بلا مساس.
       if (!key || existingKeys.has(key)) continue;
+      // نفس المفتاح مكرراً داخل الحمولة يُنشئ **صفاً واحداً** (الـupsert يتعارض
+      // على item_key)، فلا يجوز أن يُحسب ازدواجاً على نفسه.
+      if (seenNewKeys.has(key)) continue;
+      seenNewKeys.add(key);
 
       const guid = resolveIncomingGuid(rec, guidByKey, guidsByNormalizedName);
       if (!guid) continue; // بلا هوية لا دعوى
