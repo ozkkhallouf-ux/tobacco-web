@@ -65,6 +65,7 @@ export const CHECKS = [
   'check-local-site-server.mjs',
   'check-mac-archive-bridge.mjs',
   'check-master-item-coverage-dedup.mjs',
+  'check-new-duplicate-guid-guard.mjs',
   'check-owner-authorization-behavior.mjs',
   'check-post-deploy-smoke-console-gate.mjs',
   'check-powershell-51-encoding.mjs',

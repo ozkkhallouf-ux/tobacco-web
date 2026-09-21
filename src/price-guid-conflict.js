@@ -175,11 +175,168 @@
     return lines.join("\n");
   }
 
+
+  // ==========================================================================
+  // منع إنشاء صف مكرر جديد على بطاقة أمين مسعّرة أصلاً (السبب الجذري).
+  //
+  // العلّة البنيوية: هدف التعارض في الـupsert هو `item_key`، وهو سلسلة **مشتقّة**
+  // من اسم المادة عبر تطبيع قابل للتغيّر (همزة/تاء مربوطة/تشكيل/ترقيم). فحين
+  // يتغيّر ناتج التطبيع لصنف قائم — بتشديد قاعدة التطبيع أو بإعادة تسمية بطاقة
+  // في الأمين — لا يُحدَّث الصف القديم بل **يُولد صف ثانٍ**، ثم تختم مهمة أرقام
+  // الأصناف الصفّين بنفس `item_guid`. هكذا وُلدت الـ53 مجموعة القائمة اليوم.
+  //
+  // ما يمنعه هذا الحارس: **الولادة وحدها**. لا يمسّ مجموعة قائمة ولا يجمّدها —
+  // تحديث صف بمفتاح موجود مسموح دائماً مهما بلغ عدد توائمه. القاعدة:
+  //
+  //   صف وارد مفتاحه غير موجود في الجدول (= سيُنشئ صفاً)
+  //   + يحلّ إلى `item_guid` غير فارغ
+  //   + ذلك الـGUID مملوك أصلاً لصف قائم بمفتاح آخر (أو لصف وارد آخر جديد)
+  //   ⇒ رفض قبل أي كتابة.
+  //
+  // كيف يُحلّ GUID لصف وارد جديد: حمولة الموقع لا تحمل `item_guid` إطلاقاً
+  // (راجع normalizeApprovedPriceInput)، فلا يكفي البحث بالمفتاح الحرفي — المفتاح
+  // الجديد بطبيعته غير موجود. لذلك نحلّه بالاسم المطبّع مقابل الصفوف القائمة:
+  // وهو **نفس المسار الذي يُنتج الازدواج**، فمطابقته هي عين ما يجب اعتراضه.
+  // وعند الالتباس (اسم مطبّع واحد يحمل أكثر من GUID) لا نخمّن ولا نمنع: الحظر
+  // على تخمين هوية خطأ أسوأ من تركه، والتعارض السعري يبقى خط الدفاع الثاني.
+  // ==========================================================================
+
+  // مرآة `normalizeItemName` في src/app.js. مكرّرة هنا عمداً لأن هذه الوحدة
+  // نقية بلا اعتماد على ترتيب التحميل؛ ويمنع الانحراف بينهما اختبارُ تطابقٍ
+  // يقارن التنفيذين على مجموعة حالات حقيقية (check-price-guid-conflict-guard.mjs).
+  const IDENTITY_ALIASES = new Map([
+    ["كابتن بلاك كوين ازرق", "كابتن بلاك كور ازرق جديد"],
+    ["كابتن بلاك كوين اسود", "كابتن بلاك كور اسود جديد"]
+  ]);
+
+  function normalizeIdentityName(value) {
+    const normalized = String(value ?? "")
+      .trim()
+      .replace(/^\d{2,}\s*[-–—]\s*/u, "")
+      .replace(/[ـًٌٍَُِّْ]/gu, "")
+      .replace(/[إأآٱ]/gu, "ا")
+      .replace(/ى/gu, "ي")
+      .replace(/ة/gu, "ه")
+      .replace(/[^\p{L}\p{N}]+/gu, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .toLowerCase();
+    return IDENTITY_ALIASES.get(normalized) || normalized;
+  }
+
+  function readKey(row) {
+    return String((row && (row.item_key ?? row.itemKey)) ?? "").trim();
+  }
+
+  function readName(row) {
+    return String((row && (row.item_name ?? row.itemName)) ?? "").trim();
+  }
+
+  function readGuid(row) {
+    return normalizeGuid(row && (row.item_guid ?? row.itemGuid));
+  }
+
+  /**
+   * يحلّ هوية صف وارد: هوية صريحة، ثم مفتاح حرفي قائم، ثم اسم مطبّع قائم.
+   * يعيد "" حين تتعذّر الهوية أو تلتبس — وغيابها لا يمنع الحفظ إطلاقاً.
+   */
+  function resolveIncomingGuid(rec, guidByKey, guidsByNormalizedName) {
+    const explicit = readGuid(rec);
+    if (explicit) return explicit;
+
+    const key = readKey(rec);
+    const byKey = normalizeGuid((guidByKey || {})[key]);
+    if (byKey) return byKey;
+
+    for (const candidate of [normalizeIdentityName(key), normalizeIdentityName(readName(rec))]) {
+      if (!candidate) continue;
+      const guids = guidsByNormalizedName.get(candidate);
+      // أكثر من هوية لنفس الاسم المطبّع = التباس: لا تخمين ولا منع.
+      if (guids && guids.size === 1) return [...guids][0];
+    }
+    return "";
+  }
+
+  /**
+   * يعيد قائمة الصفوف الواردة التي ستُنشئ صفاً مكرراً جديداً على بطاقة مأهولة.
+   * مصفوفة فارغة = لا شيء يُمنع.
+   *
+   * كل عنصر: { guid, itemName, newKey, existingKeys: [...] }
+   */
+  function findNewDuplicateGuidRows(incomingRows, existingRows, guidByKey) {
+    const existing = Array.isArray(existingRows) ? existingRows : [];
+    const existingKeys = new Set(existing.map(readKey).filter(Boolean));
+
+    const keysByGuid = new Map();
+    const guidsByNormalizedName = new Map();
+    for (const row of existing) {
+      const guid = readGuid(row);
+      const key = readKey(row);
+      if (!guid || !key) continue;
+      if (!keysByGuid.has(guid)) keysByGuid.set(guid, []);
+      keysByGuid.get(guid).push(key);
+      for (const name of [normalizeIdentityName(key), normalizeIdentityName(readName(row))]) {
+        if (!name) continue;
+        if (!guidsByNormalizedName.has(name)) guidsByNormalizedName.set(name, new Set());
+        guidsByNormalizedName.get(name).add(guid);
+      }
+    }
+
+    const found = [];
+    // مفاتيح جديدة حُجزت داخل هذه الحمولة نفسها: حمولة واحدة تحمل مفتاحين
+    // جديدين لنفس البطاقة تُنشئ الازدواج بذاتها، فتُرفض كذلك.
+    const claimedInPayload = new Map();
+    for (const rec of Array.isArray(incomingRows) ? incomingRows : []) {
+      const key = readKey(rec);
+      // مفتاح موجود = تحديث لا إنشاء. مسموح دائماً — هنا تمرّ إعادة تسعير
+      // المجموعات المكررة القائمة بلا مساس.
+      if (!key || existingKeys.has(key)) continue;
+
+      const guid = resolveIncomingGuid(rec, guidByKey, guidsByNormalizedName);
+      if (!guid) continue; // بلا هوية لا دعوى
+
+      const owners = [...(keysByGuid.get(guid) || []), ...(claimedInPayload.get(guid) || [])];
+      if (owners.length) {
+        found.push({
+          guid,
+          itemName: readName(rec) || key,
+          newKey: key,
+          existingKeys: owners.slice()
+        });
+      }
+      if (!claimedInPayload.has(guid)) claimedInPayload.set(guid, []);
+      claimedInPayload.get(guid).push(key);
+    }
+    return found;
+  }
+
+  /** رسالة عربية صريحة: الاسم والهوية والمفتاح القائم والمفتاح الجديد. */
+  function formatNewDuplicateMessage(duplicates) {
+    const list = Array.isArray(duplicates) ? duplicates : [];
+    if (!list.length) return "";
+    const lines = [
+      `تعذّر الحفظ: ${list.length} مادة ستُنشئ صفاً مكرراً جديداً على بطاقة أمين مسعّرة أصلاً. لم يُحفظ أي سعر.`,
+      "البطاقة الواحدة لا يجوز أن تُمثَّل بأكثر من صف، ولن يُنشأ الصف الثاني تلقائياً.",
+      ""
+    ];
+    for (const dup of list) {
+      lines.push(`• ${dup.itemName} — item_guid: ${dup.guid}`);
+      lines.push(`    المفتاح الموجود: ${dup.existingKeys.join(" ، ")}`);
+      lines.push(`    المفتاح الجديد: ${dup.newKey}`);
+    }
+    lines.push("");
+    lines.push("سعّر المادة من صفّها الموجود، أو وحّد اسمها في الأمين ثم أعد المحاولة.");
+    return lines.join("\n");
+  }
+
   root.priceGuidConflict = {
     MANAGED_FIELDS,
     findGuidPriceConflicts,
     buildScopedConflictState,
     formatConflictMessage,
+    findNewDuplicateGuidRows,
+    formatNewDuplicateMessage,
+    normalizeIdentityName,
     normalizeGuid,
     round4
   };

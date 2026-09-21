@@ -471,7 +471,8 @@
     if (
       !guard ||
       typeof guard.findGuidPriceConflicts !== "function" ||
-      typeof guard.buildScopedConflictState !== "function"
+      typeof guard.buildScopedConflictState !== "function" ||
+      typeof guard.findNewDuplicateGuidRows !== "function"
     ) {
       throw new Error("تعذّر تحميل حارس أسعار البطاقات (price-guid-conflict.js). لم يُحفظ شيء.");
     }
@@ -492,6 +493,19 @@
   function assertNoGuidPriceConflictForIncoming(incomingRows, existingRows, guidByKey) {
     const guard = requirePriceGuidGuard();
     assertNoGuidPriceConflict(guard.buildScopedConflictState(incomingRows, existingRows, guidByKey));
+  }
+
+  // منع إنشاء صف مكرر جديد على بطاقة مسعّرة أصلاً — إصلاح السبب الجذري.
+  // يفحص **الولادة وحدها**: صف وارد بمفتاح غير موجود في الجدول يحلّ إلى هوية
+  // يملكها صف قائم بمفتاح آخر. تحديث صف بمفتاح موجود لا يمرّ من هنا إطلاقاً،
+  // فإعادة تسعير المجموعات المكررة القائمة تبقى مسموحة كما هي. القاعدة الكاملة
+  // والمبرر في src/price-guid-conflict.js.
+  function assertNoNewDuplicateGuidRow(incomingRows, existingRows, guidByKey) {
+    const guard = requirePriceGuidGuard();
+    const duplicates = guard.findNewDuplicateGuidRows(incomingRows, existingRows, guidByKey);
+    if (duplicates.length) {
+      throw new Error(guard.formatNewDuplicateMessage(duplicates));
+    }
   }
 
   function missingSessionMessage() {
@@ -1134,7 +1148,7 @@
           // item_guid والحقول السعرية المُدارة أُضيفت للحارس: الـupsert يعالج
           // جزءاً من اللائحة، فلا يكفي فحص الحمولة وحدها — يجب ضمّها للصفوف
           // الباقية التي تشترك معها في نفس item_guid.
-          .select("item_key, item_number, item_code, item_guid, unit2_price, sale_price, price_payload")
+          .select("item_key, item_name, item_number, item_code, item_guid, unit2_price, sale_price, price_payload")
           .limit(5000);
         if (!fetchErr) {
           numberByKey = {};
@@ -1177,6 +1191,10 @@
       // الصفوف الباقية ما يشترك معها في item_guid فقط. الفحص على هذه الحالة لا
       // على الحمولة وحدها (فلا يمرّ تعارض جديد) ولا على الجدول كله (فلا يشلّ
       // تعارضٌ قديم في بطاقة أخرى تسعيرَ مادة سليمة).
+      // أولاً: لا يُولد صف مكرر جديد على بطاقة مأهولة (السبب الجذري للـ53 القائمة).
+      // يسبق فحص التعارض لأنه التشخيص الأدق حين ينطبق الاثنان معاً، وكلاهما
+      // يرمي قبل أي كتابة فلا فرق في الأمان بينهما.
+      assertNoNewDuplicateGuidRow(withUser, existingAll, guidByKey);
       assertNoGuidPriceConflictForIncoming(withUser, existingAll, guidByKey);
 
       const { data, error } = await client
@@ -1265,6 +1283,13 @@
       // حارس هوية السعر: بطاقة أمين واحدة لا تحمل سعرين. يُفحص **قبل** الحذف
       // فلا تُمسّ البيانات إطلاقاً عند التعارض — لا حفظ جزئي ولا اختيار تلقائي.
       // القاعدة والتفصيل في src/price-guid-conflict.js.
+      //
+      // حارس «منع الصف المكرر الجديد» **لا يُستدعى هنا عمداً**: هذا المسار يحذف
+      // الجدول كله ثم يعيد إدخال الحمولة، فكل صف بعد الحذف «جديد» ومفهوم
+      // الإنشاء-مقابل-التحديث بلا معنى فيه. والأهم: حمولة الاستبدال تُبنى من
+      // الحالة في الذاكرة وتحوي بالضرورة صفَّي كل مجموعة من الـ53 القائمة،
+      // فتطبيق الفحص هنا كان سيرفض كل حفظ كامل للّائحة — أي تجميد الـ53 بدل
+      // منع ولادة جديد. هذا المسار يحفظ ما هو قائم ولا يخترع مفاتيح.
       assertNoGuidPriceConflict(withUser);
 
       const { error: deleteError } = await client.from(approvedPricesTable).delete().neq("item_key", "__never__");
