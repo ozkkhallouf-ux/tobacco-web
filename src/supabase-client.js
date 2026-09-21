@@ -552,6 +552,29 @@
     throw new Error(lines.join("\n"));
   }
 
+  // ولا مفتاح واحد بصفّين في حمولة الإدراج: العمود item_key فريد
+  // (approved_price_items_item_key_key)، فصفّان بنفس المفتاح يُفشلان الإدراج
+  // **بعد** أن يكون الحذف الشامل قد نُفِّذ — أي تُمحى لائحة الأسعار كاملة.
+  // (upsert لا يعنيه هذا: onConflict يدمج.) الرفض هنا يسبق الحذف.
+  function assertNoDuplicateKeyInPayload(rows) {
+    const seen = new Set();
+    const clashes = new Set();
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const key = String((row && row.item_key) || "");
+      if (!key) continue;
+      if (seen.has(key)) clashes.add(key);
+      seen.add(key);
+    }
+    if (!clashes.size) return;
+    throw new Error(
+      [
+        `تعذّر الحفظ: ${clashes.size} مفتاح مادة تكرّر في نفس الحمولة. لم يُحذف شيء ولم يُحفظ شيء.`,
+        Array.from(clashes).slice(0, 10).join(" ، "),
+        "وحّد أسماء هذه المواد في ملف الأسعار أو في الأمين ثم أعد المحاولة."
+      ].join("\n")
+    );
+  }
+
   function missingSessionMessage() {
     return "لا توجد جلسة دخول فعالة. إذا أنشأت الحساب للتو، افتح رسالة التأكيد في البريد أو عطّل تأكيد البريد مؤقتا من Supabase ثم سجل الدخول.";
   }
@@ -1385,6 +1408,10 @@
       // ولا بطاقة واحدة بصفّين في الحمولة نفسها: القيد الفريد كان سيرفض
       // الإدراج **بعد** الحذف فتضيع اللائحة كاملة. الرفض هنا يسبق الحذف.
       assertNoDuplicateGuidInPayload(withUser);
+      // ولا مفتاح مكرر: القيد الفريد على item_key كان سيفشل الإدراج بعد الحذف
+      // فتُمحى اللائحة كاملة — وهي حالة يبلغها ملف أسعار باسمين يتطابقان بعد
+      // التطبيع، بلا أي تصادم بطاقات (Codex P1 على #259).
+      assertNoDuplicateKeyInPayload(withUser);
 
       const { error: deleteError } = await client.from(approvedPricesTable).delete().neq("item_key", "__never__");
       if (deleteError) throw new Error(deleteError.message);

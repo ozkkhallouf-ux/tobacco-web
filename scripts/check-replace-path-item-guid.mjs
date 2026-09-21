@@ -291,7 +291,7 @@ function existingRow(itemKey, guid, extra = {}) {
 // مطفرة مصدرية (mutation test): تُزيل تمرير الهوية من `importLivePriceList`
 // وتعيد تشغيل نفس المسار. هذا يثبت أن السطر المضاف هو ما يصلح العطل فعلاً،
 // ولا يعتمد على تاريخ git فيبقى صالحاً بعد الدمج.
-const GUID_PASS_LINE = /\n\s*itemGuid: ambiguousKeys\.has\(row\.key\) \? "" : stockItem\?\.itemGuid \|\| "",/;
+const GUID_PASS_LINE = /\n\s*itemGuid: stockItem\?\.itemGuid \|\| "",/;
 
 const preFixAppSource = APP_SOURCE.replace(GUID_PASS_LINE, "\n");
 
@@ -468,21 +468,57 @@ const AMBIGUOUS = {
   existingRows: []
 };
 
-const ambiguous = await runImport(AMBIGUOUS);
+// runImport يؤكّد خلوّ المسار من الأخطاء، فالحالة الرافضة تُشغَّل بنفسها.
+async function runImportExpectingRejection(scenario) {
+  const fake = makeFakeSupabase({ existingRows: scenario.existingRows || [] });
+  const dataStore = buildDataStore(fake);
+  const notices = [];
+  const sandbox = {
+    console,
+    dataStore,
+    state: {},
+    setNotice: (kind, message) => notices.push({ kind, message }),
+    render: () => {},
+    safeErrorMessage: (error) => String((error && error.message) || error),
+    latestStockReport: () => ({ id: "3f0d5f3c-1c2b-4a77-9d51-5f4a1c2b3d44", created_at: "2026-09-20T10:00:00Z" }),
+    liveAvailableItems: () => scenario.stockItems,
+    writePriceExportWorkbook: () => {
+      throw new Error("ممنوع تنزيل ملف عند رفض الاستيراد");
+    },
+    assertExcelSupport: () => {},
+    todayIsoDate: () => "2026-09-21",
+    parsePriceWorkbook: async () => ({
+      sheetName: "prices",
+      headers: ["المادة", "سعر الكرتونة"],
+      priceColumns: [{ index: 1, unit: "unit2" }],
+      rows: scenario.priceRows
+    })
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(appPipelineSource(), sandbox, { filename: "app-pipeline.js" });
+  await sandbox.importLivePriceList({ elements: { livePrice: { files: [{ name: "prices.xlsx" }] } } });
+  return { captured: fake.captured, notices };
+}
 
-await test("G1) تصادم بطاقتين على مفتاح واحد ⇒ الصف يُحفظ بلا هوية لا بهوية مخمَّنة", () => {
-  assert.equal(ambiguous.captured.inserted.length, 1);
-  assert.equal(
-    ambiguous.captured.inserted[0].item_guid,
-    null,
-    "عند التصادم لا تُمرَّر أي هوية — لا الأولى ولا الأخيرة"
-  );
+const ambiguous = await runImportExpectingRejection(AMBIGUOUS);
+
+await test("G1) تصادم بطاقتين على مفتاح واحد يرفض الاستيراد قبل أي كتابة", () => {
+  const texts = ambiguous.notices.map((n) => n.message).join(" ");
+  assert.match(texts, /تعذّر الاستيراد/, "الرفض صريح");
+  assert.match(texts, /أكثر من بطاقة في الأمين/, "والسبب مذكور");
+  assert.equal(ambiguous.captured.deleted, 0, "لا حذف");
+  assert.equal(ambiguous.captured.inserted, null, "ولا إدراج");
 });
 
-await test("G2) والتصادم لا يمرّ صامتاً: المستخدم يُنبَّه بالعدد", () => {
-  const texts = ambiguous.notices.map((n) => n.message).join(" ");
-  assert.match(texts, /أكثر من بطاقة في الأمين/, "لا بدّ من تنبيه صريح");
-  assert.match(texts, /1 مادة/, "مع عدد المواد المتصادمة");
+await test("G2) الرفض لا يُفرِّغ الهوية ولا يُسند الصف لبطاقة أخرى", () => {
+  // تفريغ الهوية كان يترك مسار الاستبدال يستعمل guidByKey للمفتاح نفسه،
+  // فيُسجَّل سعر البطاقة «ب» تحت هوية البطاقة «أ» (Codex P1 الثاني).
+  assert.equal(ambiguous.captured.inserted, null, "لا صف يُكتب إطلاقاً عند الالتباس");
+  assert.match(
+    ambiguous.notices.map((n) => n.message).join(" "),
+    /وحّد أسماء هذه المواد في الأمين/,
+    "الرسالة تقول للمستخدم ما يفعله"
+  );
 });
 
 await test("G3) صفّان لنفس البطاقة (هوية واحدة) ليسا تصادماً — الهوية تمرّ", async () => {
@@ -495,6 +531,21 @@ await test("G3) صفّان لنفس البطاقة (هوية واحدة) ليس�
     existingRows: []
   });
   assert.ok(run.captured.inserted[0].item_guid, "تكرار البطاقة نفسها لا يمنع هويتها");
+});
+
+await test("G4) مفتاح مكرر في الحمولة يُرفض قبل الحذف (القيد الفريد على item_key)", async () => {
+  const fake = makeFakeSupabase({ existingRows: [] });
+  const dataStore = buildDataStore(fake);
+  await assert.rejects(
+    () =>
+      dataStore.replaceApprovedPriceItems([
+        { itemKey: "مالبورو احمر", itemName: "مالبورو أحمر", unit2Price: 250, unit2Factor: 50 },
+        { itemKey: "مالبورو احمر", itemName: "مالبورو احمر", unit2Price: 300, unit2Factor: 50 }
+      ]),
+    /مفتاح مادة تكرّر في نفس الحمولة/
+  );
+  assert.equal(fake.captured.deleted, 0, "الحذف كان سيمحو اللائحة ثم يفشل الإدراج");
+  assert.equal(fake.captured.inserted, null);
 });
 
 // ===========================================================================
@@ -566,9 +617,10 @@ await test("F5) كل كتابة في مسار الاستبدال تقع بعد �
   const body = sliceBalanced(CLIENT_SOURCE, "async replaceApprovedPriceItems(items) {", "replaceApprovedPriceItems");
   const lastGuardAt = Math.max(
     body.indexOf("assertNoGuidPriceConflict(withUser)"),
-    body.indexOf("assertNoDuplicateGuidInPayload(")
+    body.indexOf("assertNoDuplicateGuidInPayload("),
+    body.indexOf("assertNoDuplicateKeyInPayload(")
   );
-  assert.ok(lastGuardAt > 0, "يجب وجود الحارسين");
+  assert.ok(lastGuardAt > 0, "يجب وجود الحرّاس الثلاثة");
   for (const writeCall of [".delete(", ".insert("]) {
     assert.ok(body.indexOf(writeCall) > lastGuardAt, `${writeCall} يجب أن تقع بعد الحرّاس`);
   }
