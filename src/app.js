@@ -2344,7 +2344,8 @@ async function importLivePriceList(form) {
     const guidSeenForKey = new Map();
     for (const item of availableItems) {
       const key = availableKeyOf(item);
-      const guid = String(item?.itemGuid || "").trim().toUpperCase();
+      // بلا ?. : السطر السابق يفكّ item بلا شرط داخل availableKeyOf.
+      const guid = String(item.itemGuid || "").trim().toUpperCase();
       if (!guidSeenForKey.has(key)) {
         guidSeenForKey.set(key, guid);
       } else if (guidSeenForKey.get(key) !== guid) {
