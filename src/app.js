@@ -2331,9 +2331,46 @@ async function importLivePriceList(form) {
     }
 
     const price = await parsePriceWorkbook(priceFile);
-    const availableByKey = new Map(availableItems.map((item) => [item.key || normalizeItemName(item.name), item]));
+    const availableKeyOf = (item) => item.key || normalizeItemName(item.name);
+    const availableByKey = new Map(availableItems.map((item) => [availableKeyOf(item), item]));
     const availableKeys = new Set(availableByKey.keys());
+    // مفاتيح يتصادم عليها أكثر من بطاقة أمين حيّة (أسماء مختلفة تتطابق بعد
+    // التطبيع). الـMap أعلاه يحتفظ بآخر بطاقة صامتاً، فلا يجوز اعتبار هويتها
+    // «موثوقة» لسطر قد يخصّ البطاقة الأخرى — الهوية الخاطئة تكسر مطابقة متوسط
+    // التكلفة وتُسند الصف لبطاقة ليست له. نفس الصنف الذي يرفض
+    // tools/pull-item-numbers.ps1 اختياره عشوائياً. (Codex P1 على #259.)
+    // اختلاف الهوية وحده تصادم؛ صفّان لنفس البطاقة ليسا كذلك.
+    const ambiguousKeys = new Set();
+    const guidSeenForKey = new Map();
+    for (const item of availableItems) {
+      const key = availableKeyOf(item);
+      // بلا ?. : السطر السابق يفكّ item بلا شرط داخل availableKeyOf.
+      const guid = String(item.itemGuid || "").trim().toUpperCase();
+      if (!guidSeenForKey.has(key)) {
+        guidSeenForKey.set(key, guid);
+      } else if (guidSeenForKey.get(key) !== guid) {
+        ambiguousKeys.add(key);
+      }
+    }
     const filteredRows = price.rows.filter((row) => availableKeys.has(row.key) && row.hasPrice);
+    // المفتاح الملتبس يوقف الاستيراد كلّه **قبل أي تنزيل أو حفظ**، ولا يُحفظ
+    // بهوية فارغة: تفريغ الهوية هنا لا يفكّ الارتباط أصلاً — مسار الاستبدال
+    // يفضّل الهوية المحفوظة لذلك المفتاح، فيُسجَّل سعر البطاقة «ب» واسمها تحت
+    // هوية البطاقة «أ». ولا يستطيع حارس ازدواج الحمولة رصده لأن السطر المسعَّر
+    // واحد. أي اختيار هنا تخمين، والتخمين في الهوية يكسر مطابقة متوسط التكلفة
+    // ويغذّي الأمين بسعر بطاقة ليست صاحبته. (Codex P1 على #259.)
+    const ambiguousNames = Array.from(
+      new Set(filteredRows.filter((row) => ambiguousKeys.has(row.key)).map((row) => row.name || row.key))
+    );
+    if (ambiguousNames.length) {
+      throw new Error(
+        [
+          `تعذّر الاستيراد: ${ambiguousNames.length} مادة يتطابق اسمها المطبّع مع أكثر من بطاقة في الأمين، فتعذّر تحديد بطاقتها بيقين. لم يُحفظ شيء ولم يُحذف شيء.`,
+          ambiguousNames.slice(0, 10).join(" ، ") + (ambiguousNames.length > 10 ? " …" : ""),
+          "وحّد أسماء هذه المواد في الأمين ثم أعد المحاولة."
+        ].join("\n")
+      );
+    }
     const excludedRows = price.rows.filter((row) => !availableKeys.has(row.key));
     const zeroPriceRows = price.rows.filter((row) => availableKeys.has(row.key) && !row.hasPrice);
     let correctedPriceRows = 0;
@@ -2345,6 +2382,15 @@ async function importLivePriceList(form) {
       row.correctedRaw = correctedPriceRow(row.raw, price.priceColumns, normalizedPrice);
       return {
         itemKey: row.key,
+        // هوية بطاقة الأمين من مصدرها الموثوق: صنف الجرد الحي الذي طابق السطر.
+        // لماذا تُمرَّر: هذا المسار يستبدل اللائحة كاملة، وأي مفتاح **جديد**
+        // (مادة تُسعَّر لأول مرة، أو بطاقة أُعيدت تسميتها فتغيّر مفتاحها
+        // المطبّع) لا يجد هويته في صفوف الجدول قبل الحذف، فكان يُدرَج بـ
+        // item_guid = NULL. صفّ بلا هوية لا يطابقه push-item-costs.ps1، ولا
+        // يستطيع حارس منع الازدواج ربطه ببطاقته — وهي نفس النافذة التي تولد
+        // فيها الصفوف المكررة التي عالجها #257. نفس مصدر savePricingItem.
+        // والمفاتيح الملتبسة لا تصل إلى هنا إطلاقاً: الاستيراد يرفضها أعلاه.
+        itemGuid: stockItem?.itemGuid || "",
         itemName: row.name,
         unit1Name: itemUnit1Name(stockItem),
         unit2Name: itemUnit2Name(stockItem),

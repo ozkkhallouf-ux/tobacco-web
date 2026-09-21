@@ -483,11 +483,22 @@ test("H9) الهوية تُركَّب في مسار الحفظ لا في normali
     clientSource.indexOf("function normalizeApprovedPriceInput("),
     clientSource.indexOf("function requirePriceGuidGuard(")
   );
-  // تبقى الدالة المشتركة بلا هوية: مسار الاستبدال يركّبها بنفسه بقاعدته الخاصة،
-  // فوضعُها هنا كان سيغيّر ذلك المسار ضمناً — وهو خارج نطاق هذا الإصلاح.
-  assert.doesNotMatch(fn, /item_guid/, "الدالة المشتركة تبقى بلا هوية");
+  // الدالة المشتركة **تنقل** الهوية الموثوقة ولا **تركّبها**: صار مسار
+  // الاستبدال يحتاجها لأن المفتاح الجديد لا هوية له في الجدول (راجع
+  // check-replace-path-item-guid.mjs). والنقل مشروط بوصولها فعلاً كي لا تكتب
+  // حمولةٌ لا تعرف الهوية قيمةَ NULL فوق هوية محفوظة.
+  assert.match(fn, /const trustedGuid = String\(input\.itemGuid \?\? ""\)\.trim\(\);/, "تُنقل كما وصلت");
+  assert.match(fn, /\.\.\.\(trustedGuid \? \{ item_guid: trustedGuid \} : \{\}\)/, "ومشروطة بوصولها");
+  assert.doesNotMatch(fn, /normalizeItemName/, "ولا تُشتقّ من الاسم أبداً");
+  // والقيمة النهائية تبقى قرار مسار الحفظ نفسه، بأسبقية المحفوظة في المسارين.
   const body = sliceFunction("upsertApprovedPriceItems");
-  assert.match(body, /item_guid: guidByKey\[rec\.item_key\] \?\? trustedGuidByKey\.get/, "بل تُركَّب في مسار الـupsert وحده");
+  assert.match(body, /item_guid: guidByKey\[rec\.item_key\] \?\? trustedGuidByKey\.get/, "الـupsert يركّبها بنفسه");
+  const replaceBody = sliceFunction("replaceApprovedPriceItems");
+  assert.match(
+    replaceBody,
+    /item_guid: guidByKey\[rec\.item_key\] \?\? rec\.item_guid \?\? null/,
+    "والاستبدال كذلك، وبنفس الأسبقية: المحفوظة ← الموثوقة ← null"
+  );
 });
 
 // ---------------------------------------------------------------------------

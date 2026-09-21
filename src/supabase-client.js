@@ -441,9 +441,15 @@
         : explicitSalePrice;
     const stockQty = parseNumber(input.stockQty || 0);
     const cleanSalePrice = Number.isFinite(salePrice) ? Math.max(0, roundPrice(salePrice)) : 0;
+    // هوية البطاقة تُنقل كما وصلت ولا تُشتقّ من الاسم أبداً: مصدرها الوحيد هو
+    // الجرد الحي (app.js). وتُحذف من الحمولة حين لا تصل، كي لا يكتب حفظٌ لا
+    // يعرف الهوية قيمةَ NULL فوق هوية محفوظة — مسارا الحفظ يُثبّتان القيمة
+    // النهائية بأنفسهما بعد قراءة الصفوف الحالية.
+    const trustedGuid = String(input.itemGuid ?? "").trim();
     return {
       item_key: cleanText(input.itemKey, 240),
       item_name: cleanText(input.itemName, 240),
+      ...(trustedGuid ? { item_guid: trustedGuid } : {}),
       sale_price: cleanSalePrice,
       stock_qty: Number.isFinite(stockQty) ? stockQty : 0,
       stock_status: cleanText(input.stockStatus, 40),
@@ -517,6 +523,56 @@
     if (reassignments.length) {
       throw new Error(guard.formatGuidReassignmentMessage(reassignments));
     }
+  }
+
+  // بطاقة واحدة لا يمثّلها صفّان في **نفس** حمولة الإدراج. هذا ما يفرضه القيد
+  // الفريد approved_price_items_item_guid_unique على upper(item_guid)، والفارق
+  // أن الرفض هنا يقع **قبل الحذف**: مسار الاستبدال يحذف الجدول كله ثم يُدرج،
+  // فلو رفضت القاعدةُ الإدراجَ لضاعت اللائحة كاملة. الفحص محصور بالحمولة
+  // نفسها — لا يفحص الجدول ولا يقرر ملكية، فهو لا يتقاطع مع حرّاس #257.
+  function assertNoDuplicateGuidInPayload(rows) {
+    const keysByGuid = new Map();
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const guid = String((row && row.item_guid) ?? "").trim().toUpperCase();
+      if (!guid) continue;
+      if (!keysByGuid.has(guid)) keysByGuid.set(guid, []);
+      keysByGuid.get(guid).push(String((row && row.item_key) || ""));
+    }
+    const clashes = Array.from(keysByGuid.entries()).filter(([, keys]) => keys.length > 1);
+    if (!clashes.length) return;
+    const lines = [
+      `تعذّر الحفظ: ${clashes.length} بطاقة وصلت بصفّين أو أكثر في نفس الحمولة. لم يُحذف شيء ولم يُحفظ شيء.`,
+      "البطاقة الواحدة لا تُمثَّل بأكثر من صف — وحّد اسم المادة في الأمين ثم أعد المحاولة.",
+      ""
+    ];
+    for (const [guid, keys] of clashes) {
+      lines.push(`• item_guid: ${guid}`);
+      lines.push(`    المفاتيح: ${keys.join(" ، ")}`);
+    }
+    throw new Error(lines.join("\n"));
+  }
+
+  // ولا مفتاح واحد بصفّين في حمولة الإدراج: العمود item_key فريد
+  // (approved_price_items_item_key_key)، فصفّان بنفس المفتاح يُفشلان الإدراج
+  // **بعد** أن يكون الحذف الشامل قد نُفِّذ — أي تُمحى لائحة الأسعار كاملة.
+  // (upsert لا يعنيه هذا: onConflict يدمج.) الرفض هنا يسبق الحذف.
+  function assertNoDuplicateKeyInPayload(rows) {
+    const seen = new Set();
+    const clashes = new Set();
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const key = String((row && row.item_key) || "");
+      if (!key) continue;
+      if (seen.has(key)) clashes.add(key);
+      seen.add(key);
+    }
+    if (!clashes.size) return;
+    throw new Error(
+      [
+        `تعذّر الحفظ: ${clashes.size} مفتاح مادة تكرّر في نفس الحمولة. لم يُحذف شيء ولم يُحفظ شيء.`,
+        Array.from(clashes).slice(0, 10).join(" ، "),
+        "وحّد أسماء هذه المواد في ملف الأسعار أو في الأمين ثم أعد المحاولة."
+      ].join("\n")
+    );
   }
 
   function missingSessionMessage() {
@@ -1328,7 +1384,14 @@
           ...rec,
           item_number: numberByKey[rec.item_key] ?? null,
           item_code: codeByKey[rec.item_key] ?? null,
-          item_guid: rec.item_guid ?? guidByKey[rec.item_key] ?? null
+          // الأسبقية للهوية **المحفوظة** ثم الموثوقة الواردة — نفس ترتيب
+          // upsertApprovedPriceItems وللسبب نفسه: هوية صفٍّ قائم مرجع لا
+          // يُدهَس، فبطاقتان تتصادمان على نفس الاسم المطبّع كانتا ستعيدان
+          // إسناد الصف صامتاً وتكسران مطابقة متوسط التكلفة (#257).
+          // والموثوقة (rec.item_guid، تنقلها normalizeApprovedPriceInput من
+          // stockItem.itemGuid) هي ما يمنع ولادة صف بهوية NULL لمفتاح جديد:
+          // المفتاح الجديد لا وجود له في guidByKey أصلاً.
+          item_guid: guidByKey[rec.item_key] ?? rec.item_guid ?? null
         }));
 
       // حارس هوية السعر: بطاقة أمين واحدة لا تحمل سعرين. يُفحص **قبل** الحذف
@@ -1342,6 +1405,13 @@
       // فتطبيق الفحص هنا كان سيرفض كل حفظ كامل للّائحة — أي تجميد الـ53 بدل
       // منع ولادة جديد. هذا المسار يحفظ ما هو قائم ولا يخترع مفاتيح.
       assertNoGuidPriceConflict(withUser);
+      // ولا بطاقة واحدة بصفّين في الحمولة نفسها: القيد الفريد كان سيرفض
+      // الإدراج **بعد** الحذف فتضيع اللائحة كاملة. الرفض هنا يسبق الحذف.
+      assertNoDuplicateGuidInPayload(withUser);
+      // ولا مفتاح مكرر: القيد الفريد على item_key كان سيفشل الإدراج بعد الحذف
+      // فتُمحى اللائحة كاملة — وهي حالة يبلغها ملف أسعار باسمين يتطابقان بعد
+      // التطبيع، بلا أي تصادم بطاقات (Codex P1 على #259).
+      assertNoDuplicateKeyInPayload(withUser);
 
       const { error: deleteError } = await client.from(approvedPricesTable).delete().neq("item_key", "__never__");
       if (deleteError) throw new Error(deleteError.message);
