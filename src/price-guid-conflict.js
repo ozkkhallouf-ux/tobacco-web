@@ -362,6 +362,59 @@
     return found;
   }
 
+  // ==========================================================================
+  // منع إعادة إسناد هوية صفٍّ قائم (Codex P1 على #257).
+  //
+  // العلّة: مسار الحفظ صار يكتب `item_guid` مع الصف. فلو وصلت هوية «موثوقة»
+  // خاطئة — مثل بطاقتَي أمين تتصادمان على نفس الاسم المطبّع (حالة 273/274،
+  // يحلّها `savePricingItem` بـ`find` فيأخذ أولاهما) — لدهست الهويةَ المخزّنة
+  // الصحيحة وأعادت إسناد الصف لبطاقة أخرى **صامتاً**، فتنكسر مطابقة متوسط
+  // التكلفة (push-item-costs.ps1) حتى تُصلحها المهمة المجدولة.
+  //
+  // القاعدة: الهوية المخزّنة لصفٍّ قائم **مرجع لا يُدهَس**. الهوية الواردة
+  // تُثبَّت فقط حين لا هوية مخزّنة. واختلافهما ليس ترجيحاً بل تعارضاً يُرفض.
+  // ==========================================================================
+  function findGuidReassignments(incomingRows, storedByKey, trustedByKey) {
+    const stored = storedByKey || {};
+    const trusted = trustedByKey || {};
+    const found = [];
+    for (const rec of Array.isArray(incomingRows) ? incomingRows : []) {
+      const key = readKey(rec);
+      if (!key) continue;
+      const storedGuid = normalizeGuid(stored[key]);
+      const incomingGuid = normalizeGuid(trusted[key]);
+      // بلا هوية مخزّنة لا دهس ممكن؛ وبلا هوية واردة لا دعوى.
+      if (!storedGuid || !incomingGuid) continue;
+      if (storedGuid === incomingGuid) continue;
+      found.push({
+        itemKey: key,
+        itemName: readName(rec) || key,
+        storedGuid,
+        incomingGuid
+      });
+    }
+    return found;
+  }
+
+  /** رسالة عربية صريحة: المادة وهويتها المخزّنة والهوية الواردة المخالفة. */
+  function formatGuidReassignmentMessage(reassignments) {
+    const list = Array.isArray(reassignments) ? reassignments : [];
+    if (!list.length) return "";
+    const lines = [
+      `تعذّر الحفظ: ${list.length} مادة وصلت بهوية بطاقة تخالف هويتها المحفوظة. لم يُحفظ أي سعر.`,
+      "هوية الصف المحفوظة لا تُستبدل تلقائياً — قد تكون بطاقتان مختلفتان بنفس الاسم.",
+      ""
+    ];
+    for (const entry of list) {
+      lines.push(`• ${entry.itemName} (${entry.itemKey})`);
+      lines.push(`    المحفوظة: ${entry.storedGuid}`);
+      lines.push(`    الواردة:  ${entry.incomingGuid}`);
+    }
+    lines.push("");
+    lines.push("وحّد اسم المادة في الأمين أو راجع بطاقتها، ثم أعد المحاولة.");
+    return lines.join("\n");
+  }
+
   /** رسالة عربية صريحة: الاسم والهوية والمفتاح القائم والمفتاح الجديد. */
   function formatNewDuplicateMessage(duplicates) {
     const list = Array.isArray(duplicates) ? duplicates : [];
@@ -388,6 +441,8 @@
     formatConflictMessage,
     findNewDuplicateGuidRows,
     formatNewDuplicateMessage,
+    findGuidReassignments,
+    formatGuidReassignmentMessage,
     normalizeIdentityName,
     normalizeGuid,
     round4
