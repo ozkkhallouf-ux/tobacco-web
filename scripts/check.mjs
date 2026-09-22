@@ -945,7 +945,12 @@ for (const contract of [
   'blob.type !== "application/pdf"',
   'canvasInkRatio(canvas) <= 0.001',
   'document.createTreeWalker(source, NodeFilter.SHOW_TEXT)',
-  '.replace(/ /g, "\\u00a0")'
+  // حماية المسافة الملاصقة لحرف عربي تبقى مطلوبة (بلا حمايةٍ يلصق html2canvas
+  // «رقم 1» فتصير «رقم1»)، لكن على وصلَي «عربي↔عربي» و«رقم↔عربي» وحدهما.
+  // الاستبدال الأعمى القديم كان يجمّد المسافة الملاصقة للأقواس والشرطة و/ و$
+  // أيضاً، وNBSP محرف محايد لا يُكسر، فكان خوارزم الاتجاه يقلب «(100 كروز)»
+  // و«$ 250 / كرتونة». العقد الآن يفرض الصيغة المحدَّدة لا الصيغة العمياء.
+  '(match, arabicBefore, digitBefore) => `${arabicBefore || digitBefore}\\u00a0`'
 ]) {
   if (!appJs.includes(contract)) {
     console.error(`Mobile PDF file contract is missing: ${contract}`);
