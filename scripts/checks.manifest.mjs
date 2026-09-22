@@ -29,6 +29,7 @@ export const CHECKS = [
   'check-assistant-authorization.mjs',
   'check-assistant-read-only.mjs',
   'check-assistant-routing.mjs',
+  'check-business-audit-item-identity.mjs',
   'check-checks-manifest.mjs',
   'check-codex-review-gate-logic.mjs',
   'check-collection-priority.mjs',
@@ -67,6 +68,7 @@ export const CHECKS = [
   'check-local-site-server.mjs',
   'check-mac-archive-bridge.mjs',
   'check-master-item-coverage-dedup.mjs',
+  'check-new-duplicate-guid-guard.mjs',
   'check-owner-authorization-behavior.mjs',
   'check-post-deploy-smoke-console-gate.mjs',
   'check-powershell-51-encoding.mjs',
@@ -83,6 +85,7 @@ export const CHECKS = [
   'check-project-task-monitors.mjs',
   'check-purchase-recommendation.mjs',
   'check-push-expense-entries-dryrun-safety.mjs',
+  'check-replace-path-item-guid.mjs',
   'check-sales-invoice-print-grace.mjs',
   'check-sales-line-items-pipeline.mjs',
   'check-sales-line-items-registration.mjs',
@@ -91,6 +94,7 @@ export const CHECKS = [
   'check-smart-inventory.mjs',
   'check-stock-qty-net-calc.mjs',
   'check-telegram-delivery-observability.mjs',
+  'check-telegram-grok-ask.mjs',
 ];
 
 // ----------------------------------------------------------------------------

@@ -1,0 +1,843 @@
+// ============================================================================
+// حارس السبب الجذري: منع إنشاء صف مكرر جديد في approved_price_items.
+//
+// العلّة التي يعالجها: هدف التعارض في الـupsert هو `item_key`، وهو سلسلة
+// **مشتقّة** من اسم المادة عبر تطبيع قابل للتغيّر (همزة/تاء مربوطة/تشكيل).
+// فحين يتغيّر ناتج التطبيع لصنف قائم — بتشديد قاعدة التطبيع أو بإعادة تسمية
+// بطاقة في الأمين — لا يُحدَّث الصف القديم بل يُولد صف ثانٍ، ثم تختم مهمة أرقام
+// الأصناف الصفّين بنفس `item_guid`. هكذا وُلدت الـ53 مجموعة القائمة (107 صفوف،
+// منها 54 صفاً يتيماً — تشخيص قراءة فقط 2026-09-21).
+//
+// نطاق هذا الحارس: **الولادة وحدها**. لا يجمّد مجموعة قائمة، ولا يمنع إعادة
+// تسعيرها، ولا يحذف شيئاً، ولا يختار canonical. القاعدة في
+// src/price-guid-conflict.js.
+// ============================================================================
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
+
+const results = [];
+function test(name, fn) {
+  fn();
+  results.push(name);
+}
+
+// ---------------------------------------------------------------------------
+// تحميل النواة النقية في sandbox (نفس نمط check-price-guid-conflict-guard.mjs)
+// ---------------------------------------------------------------------------
+const guardSource = readFileSync(new URL("../src/price-guid-conflict.js", import.meta.url), "utf8");
+
+function loadGuard(source = guardSource) {
+  const sandbox = { window: {} };
+  vm.createContext(sandbox);
+  vm.runInContext(source, sandbox, { filename: "price-guid-conflict.js" });
+  return sandbox.window.priceGuidConflict;
+}
+
+const guard = loadGuard();
+assert.ok(guard, "price-guid-conflict.js يجب أن يعرّف window.priceGuidConflict");
+const { findNewDuplicateGuidRows, formatNewDuplicateMessage, normalizeIdentityName } = guard;
+
+const GUID_LIVE = "9C345CF2-F949-4E6E-9E4E-38615CF5C886"; // اليغانس كوين ازرق (حقيقي)
+const GUID_OTHER = "F6232066-579C-46FC-9892-B67145B04842"; // اليغانس طويل فضي (حقيقي)
+
+function existingRow(itemKey, guid, itemName = itemKey) {
+  return { item_key: itemKey, item_name: itemName, item_guid: guid };
+}
+/** حمولة الموقع لا تحمل item_guid إطلاقاً — راجع normalizeApprovedPriceInput. */
+function incoming(itemKey, itemName = itemKey, extra = {}) {
+  return { item_key: itemKey, item_name: itemName, ...extra };
+}
+function guidMap(rows) {
+  return Object.fromEntries(rows.map((r) => [r.item_key, r.item_guid]));
+}
+
+// الحالة الحقيقية المصغّرة: مجموعة مكررة قائمة (مفتاحان، هوية واحدة) + مادة مفردة.
+const TABLE = [
+  existingRow("اليغانس كوين ازرق", GUID_LIVE, "اليغانس كوين أزرق"),
+  existingRow("اليغانس كوين أزرق", GUID_LIVE, "اليغانس كوين أزرق"),
+  existingRow("اليغانس طويل فضي", GUID_OTHER)
+];
+const GUIDS = guidMap(TABLE);
+
+const find = (rows, table = TABLE, map = GUIDS) => findNewDuplicateGuidRows(rows, table, map);
+
+// ---------------------------------------------------------------------------
+// A) نفس item_key + نفس GUID ⇒ تحديث مسموح
+// ---------------------------------------------------------------------------
+test("A) مفتاح موجود = تحديث، لا يُرفض أبداً", () => {
+  assert.equal(find([incoming("اليغانس طويل فضي")]).length, 0);
+});
+
+test("A2) مفتاح موجود داخل مجموعة مكررة = تحديث مسموح رغم وجود التوأم", () => {
+  assert.equal(find([incoming("اليغانس كوين ازرق", "اليغانس كوين أزرق")]).length, 0);
+});
+
+test("A3) هوية صريحة مطابقة على مفتاح موجود لا تُرفض", () => {
+  assert.equal(
+    find([incoming("اليغانس كوين ازرق", "اليغانس كوين أزرق", { item_guid: GUID_LIVE })]).length,
+    0
+  );
+});
+
+// ---------------------------------------------------------------------------
+// B) مفتاح جديد + GUID غير مستخدم ⇒ مسموح
+// ---------------------------------------------------------------------------
+test("B) مادة جديدة تماماً (اسم لا يطابق شيئاً) تمرّ", () => {
+  assert.equal(find([incoming("مارلبورو ذهبي جديد")]).length, 0);
+});
+
+test("B2) مفتاح جديد بهوية صريحة غير مستخدمة يمرّ", () => {
+  assert.equal(
+    find([incoming("صنف جديد", "صنف جديد", { item_guid: "11111111-0000-0000-0000-000000000001" })]).length,
+    0
+  );
+});
+
+// ---------------------------------------------------------------------------
+// C) مفتاح جديد + GUID موجود تحت مفتاح آخر ⇒ رفض
+// ---------------------------------------------------------------------------
+test("C) مفتاح جديد يحلّ لهوية مأهولة = يُرفض", () => {
+  // «اليغانس كوين ازرقـ» بتشكيل/تطويل: تطبيعه يطابق صفاً قائماً ⇒ ولادة مكرر.
+  const found = find([incoming("اليغانس كوين أَزرق")]);
+  assert.equal(found.length, 1, "يجب أن يُرصد صف واحد");
+  assert.equal(found[0].guid, GUID_LIVE);
+  assert.equal(found[0].newKey, "اليغانس كوين أَزرق");
+  assert.ok(found[0].existingKeys.includes("اليغانس كوين ازرق"), "يسمّي المفتاح القائم");
+});
+
+test("C2) الرسالة تتضمن الاسم والهوية والمفتاح الموجود والمفتاح الجديد", () => {
+  const msg = formatNewDuplicateMessage(find([incoming("اليغانس كوين أَزرق", "اليغانس كوين أزرق")]));
+  assert.ok(msg.includes("اليغانس كوين أزرق"), "اسم المادة");
+  assert.ok(msg.includes(GUID_LIVE), "item_guid");
+  assert.ok(msg.includes("اليغانس كوين ازرق"), "المفتاح الموجود");
+  assert.ok(msg.includes("اليغانس كوين أَزرق"), "المفتاح الجديد");
+  assert.ok(msg.includes("لم يُحفظ أي سعر"), "يصرّح أن شيئاً لم يُكتب");
+});
+
+test("C3) هوية صريحة مأهولة على مفتاح جديد = يُرفض أيضاً", () => {
+  const found = find([incoming("أي اسم", "أي اسم", { item_guid: GUID_OTHER })]);
+  assert.equal(found.length, 1);
+  // Array.from: المصفوفة مولودة داخل الـsandbox فنموذجها الأولي غير نموذج المضيف.
+  assert.deepEqual(Array.from(found[0].existingKeys), ["اليغانس طويل فضي"]);
+});
+
+test("C4) حمولة واحدة بمفتاحين جديدين لنفس البطاقة الخالية = تُرفض", () => {
+  const table = [];
+  const found = findNewDuplicateGuidRows(
+    [
+      incoming("صنف س", "صنف س", { item_guid: "22222222-0000-0000-0000-000000000002" }),
+      incoming("صنف ص", "صنف ص", { item_guid: "22222222-0000-0000-0000-000000000002" })
+    ],
+    table,
+    {}
+  );
+  assert.equal(found.length, 1, "الثاني هو الذي يُنشئ الازدواج");
+  assert.equal(found[0].newKey, "صنف ص");
+  assert.deepEqual(Array.from(found[0].existingKeys), ["صنف س"]);
+});
+
+test("C5) نفس المفتاح الجديد مكرراً في الحمولة = صف واحد، لا ازدواج", () => {
+  // الـupsert يتعارض على item_key، فمفتاح مكرر داخل حمولة واحدة يُنشئ صفاً
+  // واحداً — إنذار كاذب هنا كان سيمنع حفظاً سليماً.
+  const rec = incoming("صنف مفرد", "صنف مفرد", { item_guid: "33333333-0000-0000-0000-000000000003" });
+  assert.equal(findNewDuplicateGuidRows([rec, { ...rec }], [], {}).length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// D) المجموعات الـ53 القائمة: إعادة تسعير المفاتيح الموجودة لا تُرفض
+// ---------------------------------------------------------------------------
+test("D) fanout إعادة التسعير على مجموعة مكررة قائمة يمرّ كاملاً", () => {
+  // هذا ما يرسله src/app.js فعلياً: كل مفاتيح المجموعة في حمولة واحدة.
+  const payload = [
+    incoming("اليغانس كوين ازرق", "اليغانس كوين أزرق"),
+    incoming("اليغانس كوين أزرق", "اليغانس كوين أزرق")
+  ];
+  assert.equal(find(payload).length, 0, "لا شيء يُنشأ — كلا المفتاحين موجود");
+});
+
+test("D2) مجموعة ثلاثية قائمة (حالة 15004) تُعاد تسعيرها بلا رفض", () => {
+  const guid = "54FFC359-3CDC-44A7-836F-C053838B4C14";
+  const name = "حمرة طويلة قديمة عراقية";
+  const table = [
+    existingRow("حمره طويله قديمه عراقيه", guid, name),
+    existingRow("حمرة طويلة قديمة", guid, name),
+    existingRow("حمره طويله قديمه", guid, name)
+  ];
+  const payload = table.map((r) => incoming(r.item_key, name));
+  assert.equal(findNewDuplicateGuidRows(payload, table, guidMap(table)).length, 0);
+});
+
+test("D3) الحارس لا يرصد شيئاً على جدول مكرر ما لم يُنشأ مفتاح جديد", () => {
+  assert.equal(find(TABLE.map((r) => incoming(r.item_key, r.item_name))).length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// E) لا كتابة جزئية عند الرفض
+// ---------------------------------------------------------------------------
+const clientSource = readFileSync(new URL("../src/supabase-client.js", import.meta.url), "utf8");
+
+function sliceFunction(name) {
+  const start = clientSource.indexOf(`async ${name}(items) {`);
+  assert.notEqual(start, -1, `تعذّر عزل ${name}()`);
+  let depth = 0;
+  for (let i = clientSource.indexOf("{", start); i < clientSource.length; i++) {
+    if (clientSource[i] === "{") depth++;
+    else if (clientSource[i] === "}") {
+      depth--;
+      if (depth === 0) return clientSource.slice(start, i + 1);
+    }
+  }
+  throw new Error(`أقواس غير متوازنة في ${name}()`);
+}
+
+test("E) الرفض يسبق كل كتابة في upsertApprovedPriceItems", () => {
+  const body = sliceFunction("upsertApprovedPriceItems");
+  const guardAt = body.indexOf("assertNoNewDuplicateGuidRow(");
+  assert.notEqual(guardAt, -1, "يجب أن يُستدعى حارس الازدواج الجديد");
+  for (const writeCall of [".delete(", ".insert(", ".upsert("]) {
+    const at = body.indexOf(writeCall);
+    if (at === -1) continue;
+    assert.ok(guardAt < at, `${writeCall} يقع قبل الحارس — كتابة محتملة قبل الفحص`);
+  }
+});
+
+test("E2) التأكيد يرمي ولا يُعيد قراراً قابلاً للتجاهل", () => {
+  const helper = clientSource.slice(
+    clientSource.indexOf("function assertNoNewDuplicateGuidRow("),
+    clientSource.indexOf("function missingSessionMessage(")
+  );
+  assert.match(helper, /throw new Error\(guard\.formatNewDuplicateMessage\(duplicates\)\)/);
+  assert.doesNotMatch(helper, /return\s+(true|false|duplicates)/, "لا قرار يُتجاهل");
+  assert.doesNotMatch(helper, /catch\s*\(/, "لا ابتلاع للاستثناء");
+});
+
+test("E3) غياب الوحدة يوقف الحفظ (fail-closed)", () => {
+  const helper = clientSource.slice(
+    clientSource.indexOf("function requirePriceGuidGuard("),
+    clientSource.indexOf("function assertNoGuidPriceConflict(")
+  );
+  assert.match(helper, /typeof guard\.findNewDuplicateGuidRows !== "function"/, "غياب الدالة الجديدة يوقف الحفظ");
+  assert.match(helper, /throw new Error/);
+});
+
+test("E4) الجلب يشمل item_name — بدونه تتعذّر مطابقة الهوية بالاسم", () => {
+  const body = sliceFunction("upsertApprovedPriceItems");
+  assert.match(body, /\.select\("item_key, item_name, item_number, item_code, item_guid/);
+});
+
+// ---------------------------------------------------------------------------
+// F) هوية مفقودة/مجهولة لا تنتج إنذاراً كاذباً
+// ---------------------------------------------------------------------------
+test("F) صف قائم بلا هوية **يحجز** اسمه المطبّع (Codex P1 ثالث)", () => {
+  // صفّ بطاقة جديدة يبقى بهوية NULL حتى تعمل مهمة أرقام الأصناف (٦ ساعات).
+  // لو لم يحجز اسمه لَمرّ مفتاح ثانٍ لنفس البطاقة خلال تلك النافذة.
+  const table = [existingRow("قديم بلا هوية", null), existingRow("قديم فارغ", "")];
+  const found = findNewDuplicateGuidRows([incoming("قديم بلا هويه")], table, guidMap(table));
+  assert.equal(found.length, 1, "الاسم المطبّع نفسه ⇒ يُرفض رغم غياب الهوية");
+  assert.deepEqual(Array.from(found[0].existingKeys), ["قديم بلا هوية"]);
+  assert.match(found[0].guid, /بلا هوية مسجّلة/, "الرسالة تصرّح بغياب الهوية بدل اختلاق واحدة");
+});
+
+test("F1ب) صف بلا هوية لا يحجز إلا اسمه هو", () => {
+  const table = [existingRow("قديم بلا هوية", null)];
+  assert.equal(
+    findNewDuplicateGuidRows([incoming("مادة مختلفة تماماً")], table, guidMap(table)).length,
+    0,
+    "بلا تطابق اسمي لا حجز — لا توسيع للمنع"
+  );
+});
+
+test("F1ج) صف بلا هوية يحجز حتى حين يحمل الوارد هوية موثوقة", () => {
+  // هذه هي حالة Codex بالضبط: الوارد يحمل GUID البطاقة بعد إعادة التسمية،
+  // والصف القائم بلا هوية فلا يربطهما المالك — يربطهما الاسم.
+  const table = [existingRow("ايكوس الوميا برايم", null)];
+  const found = findNewDuplicateGuidRows(
+    [incoming("ايكوس الوميا برايمـ", "ايكوس الوميا برايم", { item_guid: GUID_LIVE })],
+    table,
+    guidMap(table)
+  );
+  assert.equal(found.length, 1);
+  assert.deepEqual(Array.from(found[0].existingKeys), ["ايكوس الوميا برايم"]);
+});
+
+test("F2) صف وارد لا تُحلّ هويته يمرّ", () => {
+  for (const value of [null, undefined, "", "   "]) {
+    assert.equal(find([incoming("اسم لا يطابق شيئاً", "اسم لا يطابق شيئاً", { item_guid: value })]).length, 0);
+  }
+});
+
+test("F3) التباس الهوية (اسم مطبّع واحد بهويتين) لا يمنع ولا يخمّن", () => {
+  const table = [
+    existingRow("غلواز كوين اصفر اس سبعه", "AAAA0001-0000-0000-0000-000000000001"),
+    existingRow("غلواز كوين اصفر اس سبعة", "BBBB0002-0000-0000-0000-000000000002")
+  ];
+  assert.equal(findNewDuplicateGuidRows([incoming("غلواز كوين اصفر اس سبعهـ")], table, guidMap(table)).length, 0);
+});
+
+test("F4) مدخلات فارغة/مشوّهة لا ترمي", () => {
+  assert.equal(findNewDuplicateGuidRows(null, null, null).length, 0);
+  assert.equal(findNewDuplicateGuidRows([], [], {}).length, 0);
+  assert.equal(findNewDuplicateGuidRows([{}], [{}], {}).length, 0);
+  assert.equal(formatNewDuplicateMessage([]), "");
+  assert.equal(formatNewDuplicateMessage(null), "");
+});
+
+test("F5) مقارنة الهوية بلا حساسية لحالة الأحرف", () => {
+  const found = find([incoming("مفتاح جديد", "مفتاح جديد", { item_guid: GUID_OTHER.toLowerCase() })]);
+  assert.equal(found.length, 1, "الهوية نفسها بحالة أحرف مختلفة تُرصد");
+});
+
+// ---------------------------------------------------------------------------
+// تطابق التطبيع مع src/app.js — يمنع انحراف النسختين
+// ---------------------------------------------------------------------------
+test("تطبيع: النسخة في النواة تطابق normalizeItemName في src/app.js حرفياً", () => {
+  const appSource = readFileSync(new URL("../src/app.js", import.meta.url), "utf8");
+  const start = appSource.indexOf("function normalizeItemName(value) {");
+  assert.notEqual(start, -1, "تعذّر عزل normalizeItemName من app.js");
+  let depth = 0;
+  let body = "";
+  for (let i = appSource.indexOf("{", start); i < appSource.length; i++) {
+    if (appSource[i] === "{") depth++;
+    else if (appSource[i] === "}") {
+      depth--;
+      if (depth === 0) { body = appSource.slice(start, i + 1); break; }
+    }
+  }
+  const box = { out: null };
+  vm.createContext(box);
+  vm.runInContext(`${body}; out = normalizeItemName;`, box);
+  const appNormalize = box.out;
+
+  const corpus = [
+    "اليغانس كوين أزرق", "اليغانس كوين ازرق", "معسل الاسطورة علكة ونعنع",
+    "معسل الاسطوره علكه ونعنع", "حمرة طويلة قديمة عراقية", "نخلة صلاحية شهر 10",
+    "كابتن بلاك كوين ازرق", "كابتن بلاك كور ازرق جديد", "كابتن بلاك كوين اسود",
+    "24007 - نخله صلاحيه شهر 10", "  فحم   الهيبة  ", "أَوريس شُوكولا",
+    "1970 سليم أزرق", "تي اس أزرق", "", "   ", "مانشستر كوين طقة توت"
+  ];
+  for (const value of corpus) {
+    assert.equal(
+      normalizeIdentityName(value),
+      appNormalize(value),
+      `انحراف تطبيع على: "${value}"`
+    );
+  }
+});
+
+// ---------------------------------------------------------------------------
+// H) إعادة التسمية الجوهرية (Codex P1 على PR #257)
+//
+// الثغرة المسدودة: حين يُعاد تسمية بطاقة أمين بتغيير لا يمحوه التطبيع، لا
+// يطابق الاسمُ الجديد أيَّ صف قائم، فكان الحارس يحلّ الهوية إلى "" ويسمح
+// بإنشاء صف ثانٍ — ثم تختمه مهمة أرقام الأصناف بنفس GUID فيعود الازدواج.
+// الحل: تمرير itemGuid الموثوق من الجرد الحي واستعماله هوية صريحة.
+// ---------------------------------------------------------------------------
+const GUID_RENAMED = "80B7143B-949A-4B3A-8A1E-E0217B2007F8"; // 13006 كابتن بلاك (حقيقي)
+
+// الصف القديم محفوظ باسمه السابق ويحمل هوية البطاقة.
+const RENAME_TABLE = [existingRow("اليغانس كوين ازرق", GUID_RENAMED, "اليغانس كوين أزرق")];
+const RENAME_GUIDS = guidMap(RENAME_TABLE);
+// الاسم الجديد من الأمين: تغيير جوهري — التطبيع لا يجعله مساوياً للقديم.
+const RENAMED_KEY = "اليغانس كوين ازرق اصدار محسن 2027";
+
+test("H0) شرط صحة السيناريو: التطبيع لا يساوي بين الاسمين", () => {
+  assert.notEqual(
+    normalizeIdentityName(RENAMED_KEY),
+    normalizeIdentityName("اليغانس كوين ازرق"),
+    "لو تساويا لكان المسار الاسمي كافياً ولَما اختبرنا شيئاً"
+  );
+  assert.notEqual(normalizeIdentityName(RENAMED_KEY), normalizeIdentityName("اليغانس كوين أزرق"));
+});
+
+test("H) اسم جديد جوهرياً + نفس GUID صريح ⇒ يُرفض قبل أي كتابة", () => {
+  const found = findNewDuplicateGuidRows(
+    [incoming(RENAMED_KEY, "اليغانس كوين ازرق اصدار محسن 2027", { item_guid: GUID_RENAMED })],
+    RENAME_TABLE,
+    RENAME_GUIDS
+  );
+  assert.equal(found.length, 1, "إعادة التسمية الجوهرية يجب أن تُرصد");
+  assert.equal(found[0].guid, GUID_RENAMED);
+  assert.equal(found[0].newKey, RENAMED_KEY);
+  assert.deepEqual(Array.from(found[0].existingKeys), ["اليغانس كوين ازرق"]);
+});
+
+test("H2) شاهد: بلا الهوية الصريحة تفلت الحالة نفسها تماماً", () => {
+  // هذا هو العطل قبل الإصلاح — يثبت أن التمرير هو ما يسدّ الثغرة لا شيء آخر.
+  assert.equal(
+    findNewDuplicateGuidRows([incoming(RENAMED_KEY)], RENAME_TABLE, RENAME_GUIDS).length,
+    0,
+    "المسار الاسمي وحده يسمح بإنشاء الصف — الثغرة التي أبلغ عنها Codex"
+  );
+});
+
+test("H3) 13005/13006: إعادة تسمية تتجاوز جدول الـalias تُرصد بالهوية", () => {
+  // البطاقتان الحقيقيتان اللتان وقعت عليهما إعادة التسمية فعلاً. جدول الـalias
+  // يغطّي «كوين ← كور … جديد» وحدها؛ أي تسمية لاحقة بلا alias تعتمد الهوية.
+  const table = [
+    existingRow("كابتن بلاك كور اسود جديد", "7D75F3E1-474C-4FD1-B797-7582A445B4E7"),
+    existingRow("كابتن بلاك كور ازرق جديد", GUID_RENAMED)
+  ];
+  const map = guidMap(table);
+  for (const [oldKey, guid] of Object.entries(map)) {
+    const newKey = oldKey.replace("جديد", "اصدار 2027 المطور");
+    assert.notEqual(normalizeIdentityName(newKey), normalizeIdentityName(oldKey), "تسمية جوهرية");
+    assert.equal(
+      findNewDuplicateGuidRows([incoming(newKey, newKey, { item_guid: guid })], table, map).length,
+      1,
+      `لم تُرصد إعادة تسمية ${oldKey}`
+    );
+    assert.equal(
+      findNewDuplicateGuidRows([incoming(newKey)], table, map).length,
+      0,
+      "وبلا الهوية الصريحة تفلت — شاهد سالب"
+    );
+  }
+});
+
+test("H4) الهوية الصريحة لا تكسر A: مفتاح موجود يبقى تحديثاً مسموحاً", () => {
+  assert.equal(
+    findNewDuplicateGuidRows(
+      [incoming("اليغانس كوين ازرق", "اليغانس كوين أزرق", { item_guid: GUID_RENAMED })],
+      RENAME_TABLE,
+      RENAME_GUIDS
+    ).length,
+    0
+  );
+});
+
+test("H5) الهوية الصريحة لا تكسر B: بطاقة جديدة بهوية غير مأهولة تمرّ", () => {
+  assert.equal(
+    findNewDuplicateGuidRows(
+      [incoming("صنف جديد فعلاً", "صنف جديد فعلاً", { item_guid: "44444444-0000-0000-0000-000000000004" })],
+      RENAME_TABLE,
+      RENAME_GUIDS
+    ).length,
+    0
+  );
+});
+
+test("H6) الأولوية: الهوية الصريحة تسبق المطابقة الاسمية", () => {
+  const core = guardSource.slice(
+    guardSource.indexOf("function resolveIncomingGuid("),
+    guardSource.indexOf("function findNewDuplicateGuidRows(")
+  );
+  const explicitAt = core.indexOf("const explicit = readGuid(rec);");
+  const byKeyAt = core.indexOf("guidByKey || {}");
+  const byNameAt = core.indexOf("guidsByNormalizedName.get(candidate)");
+  assert.ok(explicitAt !== -1 && byKeyAt !== -1 && byNameAt !== -1, "المسارات الثلاثة موجودة");
+  assert.ok(explicitAt < byKeyAt && byKeyAt < byNameAt, "الترتيب: صريح ← مفتاح ← اسم");
+});
+
+// ---------------------------------------------------------------------------
+// H7) مسار البيانات: app.js يمرّر الهوية، وsupabase-client يستعملها للفحص فقط
+// ---------------------------------------------------------------------------
+test("H7) savePricingItem يضع itemGuid في سجلّ الحفظ من المصدر الحي", () => {
+  const appSource = readFileSync(new URL("../src/app.js", import.meta.url), "utf8");
+  assert.match(
+    appSource,
+    /itemGuid: sourceItem\?\.itemGuid \|\| sourceExisting\?\.itemGuid \|\| ""/,
+    "الهوية تُؤخذ من الجرد الحي أولاً ثم الصف المحفوظ"
+  );
+  assert.match(appSource, /itemGuid: item\.itemGuid \|\| price\?\.itemGuid \|\| ""/, "pricingWorklistItems يحملها أصلاً");
+});
+
+test("H8) الهوية تُثبَّت مع الصف المكتوب، وهي نفسها التي يفحصها الحارس", () => {
+  const body = sliceFunction("upsertApprovedPriceItems");
+  assert.match(body, /const trustedGuidByKey = new Map\(\)/, "تُبنى خريطة الهوية الموثوقة");
+  // الأسبقية **للمحفوظة**: هوية صفٍّ قائم لا تُدهَس بهوية واردة (Codex P1 على
+  // #257 — بطاقتان تتصادمان بالاسم تُعيدان إسناد الصف صامتاً).
+  assert.match(
+    body,
+    /item_guid: guidByKey\[rec\.item_key\] \?\? trustedGuidByKey\.get\(rec\.item_key\) \?\? null/,
+    "الأولوية: المحفوظة ← الموثوقة ← null"
+  );
+  assert.doesNotMatch(
+    body,
+    /item_guid: trustedGuidByKey\.get\(rec\.item_key\) \?\? guidByKey/,
+    "ممنوع تقديم الموثوقة على المحفوظة"
+  );
+  // صفّ بطاقة جديدة كان يبقى بهوية NULL حتى تعمل مهمة أرقام الأصناف (كل ٦ ساعات
+  // افتراضياً)، فتُفتح نافذة تعود فيها الازدواجية عند إعادة التسمية — Codex P1 ثانٍ.
+  assert.match(body, /assertNoNewDuplicateGuidRow\(withUser, existingAll, guidByKey\)/, "الحارس يفحص الحمولة المكتوبة نفسها");
+  assert.match(body, /\.upsert\(withUser, \{ onConflict: "item_key" \}\)/, "والمكتوب هو تلك الحمولة بعينها");
+  // خريطة الهوية تُبنى **قبل** withUser وإلا لم تكن متاحة عند تركيبها.
+  assert.ok(
+    body.indexOf("const trustedGuidByKey") < body.indexOf("const withUser ="),
+    "ترتيب البناء: الخريطة قبل الحمولة"
+  );
+});
+
+test("H8ب) لا صف يفقد هويته المحفوظة: كل صف يحمل المفتاح صراحةً", () => {
+  const body = sliceFunction("upsertApprovedPriceItems");
+  // الـupsert الجماعي في PostgREST يوحّد أعمدة الحمولة: لو حمل item_guid بعضُ
+  // الصفوف دون بعض لكُتب NULL على البقية. لذلك المفتاح في map غير مشروط.
+  const attach = body.slice(body.indexOf(".map((rec) => ({"), body.indexOf(".map((rec) => ({") + 220);
+  assert.doesNotMatch(attach, /trustedGuidByKey\.has\(/, "ممنوع الإرفاق المشروط — يترك صفوفاً بلا المفتاح");
+  assert.match(attach, /\.\.\.rec,/, "بقية الأعمدة كما هي");
+  assert.match(attach, /guidByKey\[rec\.item_key\]/, "الهوية المحفوظة تُعاد صراحةً بدل تركها تُمحى");
+});
+
+test("H9) الهوية تُركَّب في مسار الحفظ لا في normalizeApprovedPriceInput", () => {
+  const fn = clientSource.slice(
+    clientSource.indexOf("function normalizeApprovedPriceInput("),
+    clientSource.indexOf("function requirePriceGuidGuard(")
+  );
+  // الدالة المشتركة **تنقل** الهوية الموثوقة ولا **تركّبها**: صار مسار
+  // الاستبدال يحتاجها لأن المفتاح الجديد لا هوية له في الجدول (راجع
+  // check-replace-path-item-guid.mjs). والنقل مشروط بوصولها فعلاً كي لا تكتب
+  // حمولةٌ لا تعرف الهوية قيمةَ NULL فوق هوية محفوظة.
+  assert.match(fn, /const trustedGuid = String\(input\.itemGuid \?\? ""\)\.trim\(\);/, "تُنقل كما وصلت");
+  assert.match(fn, /\.\.\.\(trustedGuid \? \{ item_guid: trustedGuid \} : \{\}\)/, "ومشروطة بوصولها");
+  assert.doesNotMatch(fn, /normalizeItemName/, "ولا تُشتقّ من الاسم أبداً");
+  // والقيمة النهائية تبقى قرار مسار الحفظ نفسه، بأسبقية المحفوظة في المسارين.
+  const body = sliceFunction("upsertApprovedPriceItems");
+  assert.match(body, /item_guid: guidByKey\[rec\.item_key\] \?\? trustedGuidByKey\.get/, "الـupsert يركّبها بنفسه");
+  const replaceBody = sliceFunction("replaceApprovedPriceItems");
+  assert.match(
+    replaceBody,
+    /item_guid: guidByKey\[rec\.item_key\] \?\? rec\.item_guid \?\? null/,
+    "والاستبدال كذلك، وبنفس الأسبقية: المحفوظة ← الموثوقة ← null"
+  );
+});
+
+// ---------------------------------------------------------------------------
+// I) نافذة الهوية الفارغة (Codex P1 الثاني على PR #257)
+//
+// صفّ بطاقة جديدة كان يُكتب بهوية NULL وتبقى كذلك حتى تعمل مهمة أرقام الأصناف
+// (كل ٦ ساعات افتراضياً، وقد تتعطّل أياماً). خلال تلك النافذة، إعادة تسمية
+// البطاقة تُنتج مفتاحاً جديداً لا يستطيع الحارس ربطه بالصف القائم — لأن الصف
+// بلا هوية أصلاً — فيُنشأ صف ثانٍ وتعود الازدواجية. الحل: تثبيت الهوية مع
+// الصف لحظة كتابته (يُتحقق منه في H8).
+// ---------------------------------------------------------------------------
+test("I) صف قائم بهوية NULL لا يمكن ربطه — هذا ما تمنعه الكتابة الفورية", () => {
+  const guid = "80B7143B-949A-4B3A-8A1E-E0217B2007F8";
+  const nulled = [{ item_key: "بطاقة جديدة", item_name: "بطاقة جديدة", item_guid: null }];
+  const renamed = incoming("بطاقة جديدة اصدار 2027", "بطاقة جديدة اصدار 2027", { item_guid: guid });
+  assert.equal(
+    findNewDuplicateGuidRows([renamed], nulled, guidMap(nulled)).length,
+    0,
+    "بهوية NULL يستحيل الربط — لذلك وجب تثبيتها لحظة الكتابة لا بعد ٦ ساعات"
+  );
+});
+
+test("I2) والصف نفسه بهويته المثبَّتة يُرصد فوراً", () => {
+  const guid = "80B7143B-949A-4B3A-8A1E-E0217B2007F8";
+  const stamped = [existingRow("بطاقة جديدة", guid)];
+  const renamed = incoming("بطاقة جديدة اصدار 2027", "بطاقة جديدة اصدار 2027", { item_guid: guid });
+  const found = findNewDuplicateGuidRows([renamed], stamped, guidMap(stamped));
+  assert.equal(found.length, 1, "الهوية المثبَّتة تُغلق النافذة");
+  assert.deepEqual(Array.from(found[0].existingKeys), ["بطاقة جديدة"]);
+});
+
+test("I3) الهوية المحفوظة تُعاد ولا تُمحى حين لا توجد هوية موثوقة", () => {
+  // يحاكي قاعدة الحمولة: trusted ?? stored ?? null — صف بلا هوية واردة يحتفظ
+  // بالمحفوظة، فلا يخسر أي صف هويته عند حفظ جماعي.
+  const table = [existingRow("مفتاح محفوظ", "55555555-0000-0000-0000-000000000005")];
+  const map = guidMap(table);
+  const resolved = map["مفتاح محفوظ"] ?? null;
+  assert.equal(resolved, "55555555-0000-0000-0000-000000000005", "المحفوظة تُستعاد لا تُفقد");
+});
+
+// ---------------------------------------------------------------------------
+// J) منع إعادة إسناد هوية صفٍّ قائم (Codex P1 على #257)
+//
+// العطل: مسار الحفظ صار يكتب item_guid. فبطاقتان تتصادمان على نفس الاسم
+// المطبّع (273/274) يحلّهما savePricingItem بـfind فيأخذ أولاهما — فتصل هوية
+// خاطئة وتدهس الهوية المخزّنة الصحيحة صامتاً، وتنكسر مطابقة متوسط التكلفة.
+// ---------------------------------------------------------------------------
+const { findGuidReassignments, formatGuidReassignmentMessage } = guard;
+const GUID_A = "AAAA1111-0000-0000-0000-00000000AAAA";
+const GUID_B = "BBBB2222-0000-0000-0000-00000000BBBB";
+
+test("J) هوية مخزّنة A + واردة B ⇒ يُرفض، ولا يُستبدَل شيء", () => {
+  const found = findGuidReassignments(
+    [incoming("غلواز كوين اصفر اس سبعه")],
+    { "غلواز كوين اصفر اس سبعه": GUID_A },
+    { "غلواز كوين اصفر اس سبعه": GUID_B }
+  );
+  assert.equal(found.length, 1, "الاختلاف يُرصد");
+  assert.equal(found[0].storedGuid, GUID_A);
+  assert.equal(found[0].incomingGuid, GUID_B);
+  assert.equal(found[0].itemKey, "غلواز كوين اصفر اس سبعه");
+});
+
+test("J2) الرسالة تسمّي المادة والهويتين ولا تختار إحداهما", () => {
+  const msg = formatGuidReassignmentMessage(
+    findGuidReassignments([incoming("مادة", "مادة س")], { "مادة": GUID_A }, { "مادة": GUID_B })
+  );
+  assert.ok(msg.includes("مادة س"), "اسم المادة");
+  assert.ok(msg.includes(GUID_A) && msg.includes(GUID_B), "الهويتان معاً");
+  assert.ok(msg.includes("لم يُحفظ أي سعر"), "يصرّح أن شيئاً لم يُكتب");
+  assert.doesNotMatch(msg, /سنستخدم|اخترنا|تم الاستبدال/, "لا ترجيح تلقائي");
+});
+
+test("J3) هوية متطابقة (ولو باختلاف حالة الأحرف) لا تُرصد", () => {
+  assert.equal(
+    findGuidReassignments([incoming("مادة")], { "مادة": GUID_A }, { "مادة": GUID_A.toLowerCase() }).length,
+    0
+  );
+});
+
+test("J4) بلا هوية مخزّنة: التثبيت مسموح ولا يُعدّ دهساً", () => {
+  assert.equal(findGuidReassignments([incoming("مادة")], {}, { "مادة": GUID_B }).length, 0);
+  assert.equal(findGuidReassignments([incoming("مادة")], { "مادة": null }, { "مادة": GUID_B }).length, 0);
+  assert.equal(findGuidReassignments([incoming("مادة")], { "مادة": "" }, { "مادة": GUID_B }).length, 0);
+});
+
+test("J5) بلا هوية واردة: لا دعوى", () => {
+  for (const v of [null, undefined, "", "   "]) {
+    assert.equal(findGuidReassignments([incoming("مادة")], { "مادة": GUID_A }, { "مادة": v }).length, 0);
+  }
+});
+
+test("J6) مدخلات فارغة/مشوّهة لا ترمي", () => {
+  assert.equal(findGuidReassignments(null, null, null).length, 0);
+  assert.equal(findGuidReassignments([{}], {}, {}).length, 0);
+  assert.equal(formatGuidReassignmentMessage([]), "");
+  assert.equal(formatGuidReassignmentMessage(null), "");
+});
+
+test("J7) الحمولة المكتوبة تأخذ المحفوظة لا الواردة", () => {
+  // محاكاة قاعدة السطر في upsertApprovedPriceItems
+  const guidByKey = { "مادة": GUID_A };
+  const trusted = new Map([["مادة", GUID_B]]);
+  const written = { item_guid: guidByKey["مادة"] ?? trusted.get("مادة") ?? null };
+  assert.equal(written.item_guid, GUID_A, "المحفوظة هي المكتوبة");
+});
+
+test("J8) الحارس مُستدعى قبل أي كتابة وبعد حارس الازدواج", () => {
+  const body = sliceFunction("upsertApprovedPriceItems");
+  const at = body.indexOf("assertNoGuidReassignment(");
+  assert.notEqual(at, -1, "يجب أن يُستدعى");
+  for (const w of [".upsert(", ".insert(", ".delete("]) {
+    const wi = body.indexOf(w);
+    if (wi !== -1) assert.ok(at < wi, `${w} قبل الحارس`);
+  }
+  assert.match(body, /assertNoGuidReassignment\(withUser, guidByKey, Object\.fromEntries\(trustedGuidByKey\)\)/);
+});
+
+test("J9) غياب الدالة يوقف الحفظ (fail-closed)", () => {
+  const helper = clientSource.slice(
+    clientSource.indexOf("function requirePriceGuidGuard("),
+    clientSource.indexOf("function assertNoGuidPriceConflict(")
+  );
+  assert.match(helper, /typeof guard\.findGuidReassignments !== "function"/);
+});
+
+test("شاهد الطفرة (P1 #6): قلب الأسبقية يسمح بالدهس", () => {
+  const guidByKey = { "مادة": GUID_A };
+  const trusted = new Map([["مادة", GUID_B]]);
+  // الأصل: المحفوظة تفوز.
+  assert.equal(guidByKey["مادة"] ?? trusted.get("مادة") ?? null, GUID_A);
+  // الطفرة: تقديم الموثوقة ⇒ تُكتب B فوق A — وهو العطل بعينه.
+  assert.equal(trusted.get("مادة") ?? guidByKey["مادة"] ?? null, GUID_B);
+  // وبلا الحارس لا شيء يعترض الاختلاف.
+  const mutated = guardSource.replace("if (!storedGuid || !incomingGuid) continue;", "continue;");
+  assert.notEqual(mutated, guardSource, "الطفرة لم تُطبَّق");
+  assert.equal(
+    loadGuard(mutated).findGuidReassignments([incoming("مادة")], guidByKey, { "مادة": GUID_B }).length,
+    0,
+    "بإبطال الفحص يمرّ الدهس — الاختبار J كان سيفشل"
+  );
+});
+
+// ---------------------------------------------------------------------------
+// K) خط الدفاع الأخير: القيد الفريد على الهوية (Codex P1 — سباق الكتابة)
+//
+// الحارس يعمل في المتصفح بين SELECT وupsert منفصلين، فنافذة TOCTOU قائمة:
+// تبويبان يحفظان مفتاحين مختلفين لنفس الهوية يمرّان كلاهما من الفحص. القيد
+// على مستوى قاعدة البيانات هو ما يجعل الثاني يفشل بدل أن يُنشئ مكرراً.
+// ---------------------------------------------------------------------------
+test("K) فشل القيد يصل للمستخدم كرسالة واضحة لا كخطأ عام", () => {
+  const fn = clientSource.slice(
+    clientSource.indexOf("function translateDbError("),
+    clientSource.indexOf("async function getSupabaseSession(")
+  );
+  const guidAt = fn.indexOf("approved_price_items_item_guid_unique");
+  const genericAt = fn.indexOf("violates|constraint");
+  assert.notEqual(guidAt, -1, "يجب أن تُترجم رسالة القيد الفريد للهوية");
+  assert.ok(guidAt < genericAt, "وتسبق الرسالة العامة وإلا ابتلعتها");
+  assert.match(fn, /بطاقة الأمين هذه مرتبطة بصف آخر/, "نص عربي يشرح السبب");
+  assert.match(fn, /لم يُحفظ شيء/, "يصرّح أن الحفظ لم يقع — لا نجاح كاذب");
+});
+
+test("K2) الخطأ يُرمى ولا يُبتلع: الحفظ يفشل ظاهرياً", () => {
+  const body = sliceFunction("upsertApprovedPriceItems");
+  assert.match(body, /if \(error\) throw new Error\(translateDbError\(error\.message\)\)/,
+    "خطأ الـupsert يُرمى مترجَماً");
+  assert.doesNotMatch(body, /catch\s*\([^)]*\)\s*\{\s*\}/, "لا ابتلاع صامت");
+});
+
+test("K3) الترحيل يطابق القيد المنشأ في الإنتاج حرفياً وهو idempotent", () => {
+  const sql = readFileSync(
+    new URL("../supabase/migrations/20260921073000_approved_price_items_item_guid_unique.sql", import.meta.url),
+    "utf8"
+  );
+  const ddl = sql.split("\n").filter((l) => !l.trim().startsWith("--")).join(" ").replace(/\s+/g, " ").trim();
+  // نفس الاسم ونفس التعبير ونفس الشرط الجزئي كما في pg_get_indexdef بالإنتاج:
+  // CREATE UNIQUE INDEX approved_price_items_item_guid_unique
+  //   ON public.approved_price_items USING btree (upper(item_guid)) WHERE (item_guid IS NOT NULL)
+  assert.match(ddl, /create unique index if not exists approved_price_items_item_guid_unique/i, "فريد + idempotent + نفس الاسم");
+  assert.match(ddl, /on public\.approved_price_items \(upper\(item_guid\)\)/i, "على upper(item_guid) لا على العمود الخام");
+  assert.match(ddl, /where item_guid is not null/i, "نفس الشرط الجزئي");
+  assert.doesNotMatch(ddl, /drop index/i, "لا إسقاط لقيد قائم");
+  assert.doesNotMatch(ddl, /\b(update|delete|insert)\b/i, "الترحيل لا يمسّ بيانات");
+  // الفهرس غير الفريد القديم يبقى — لا يُسقطه هذا الترحيل.
+  assert.doesNotMatch(ddl, /idx_approved_price_items_item_guid\b/i, "لا يلمس الفهرس القديم");
+});
+
+// ---------------------------------------------------------------------------
+// G) حارس تعارض الأسعار (PR #256) لم يتغيّر
+// ---------------------------------------------------------------------------
+test("G) واجهة حارس #256 باقية كما هي ولم تُمَس قاعدته", () => {
+  for (const fn of ["findGuidPriceConflicts", "buildScopedConflictState", "formatConflictMessage"]) {
+    assert.equal(typeof guard[fn], "function", `${fn} يجب أن تبقى موجودة`);
+  }
+  assert.equal(guard.MANAGED_FIELDS.length, 3, "الحقول المُدارة تبقى ثلاثة");
+  // القاعدة نفسها: قيمتان موجبتان مختلفتان = تعارض؛ صفر = غير مسعّر.
+  assert.equal(
+    guard.findGuidPriceConflicts([
+      { item_key: "أ", item_guid: GUID_LIVE, unit2_price: 33, sale_price: 2 },
+      { item_key: "ب", item_guid: GUID_LIVE, unit2_price: 31, sale_price: 2 }
+    ]).length,
+    1
+  );
+  assert.equal(
+    guard.findGuidPriceConflicts([
+      { item_key: "أ", item_guid: GUID_LIVE, unit2_price: 33, sale_price: 0 },
+      { item_key: "ب", item_guid: GUID_LIVE, unit2_price: 33, sale_price: 2 }
+    ]).length,
+    0
+  );
+});
+
+test("G2) الحارسان يُستدعيان كلاهما في upsert، والجديد أولاً", () => {
+  const body = sliceFunction("upsertApprovedPriceItems");
+  const dupAt = body.indexOf("assertNoNewDuplicateGuidRow(");
+  const priceAt = body.indexOf("assertNoGuidPriceConflictForIncoming(");
+  assert.notEqual(priceAt, -1, "حارس #256 ما زال مُستدعى");
+  assert.ok(dupAt < priceAt, "حارس الازدواج يسبق حارس التعارض");
+});
+
+test("G3) replaceApprovedPriceItems لم يتغيّر سلوكه: بلا حارس الازدواج", () => {
+  const body = sliceFunction("replaceApprovedPriceItems");
+  assert.ok(
+    !body.includes("assertNoNewDuplicateGuidRow("),
+    "لا يُستدعى هنا عمداً — الحذف الشامل يجعل كل صف «جديد» ويشلّ حفظ الـ53"
+  );
+  assert.match(body, /assertNoGuidPriceConflict\(withUser\)/, "حارس #256 باقٍ كما هو");
+  assert.ok(body.indexOf("assertNoGuidPriceConflict(withUser)") < body.indexOf(".delete("), "قبل الحذف");
+});
+
+// ---------------------------------------------------------------------------
+// عقود: هذا الحارس لا يحذف ولا يرجّح ولا يعتمد updated_at
+// ---------------------------------------------------------------------------
+test("عقد: النواة لا تقرأ updated_at ولا تختار canonical", () => {
+  const code = guardSource
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .split("\n")
+    .filter((line) => !line.trim().startsWith("//"))
+    .join("\n");
+  assert.ok(!code.includes("updated_at"), "الزمن لا يُقرأ إطلاقاً");
+  assert.ok(!code.includes("approved_at"), "ولا تاريخ الاعتماد");
+  assert.ok(!code.includes("fetch("), "بلا شبكة");
+  assert.ok(!code.includes("document."), "بلا DOM");
+});
+
+test("عقد: لا مسار حذف ولا تجاوز في مسار الحفظ", () => {
+  for (const forbidden of ["forceCreate", "allowDuplicateGuid", "ignoreDuplicate", "overrideDuplicate"]) {
+    assert.ok(!clientSource.includes(forbidden), `ممنوع وجود ${forbidden}`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// شاهد الطفرة: إزالة فحص الإنشاء يجب أن يُفشل الحالة C
+// ---------------------------------------------------------------------------
+test("شاهد الطفرة: تعطيل فحص «المفتاح جديد» يُسقط رصد الحالة C", () => {
+  // الطفرة: اعتبار كل صف وارد «تحديثاً» — أي إسقاط شرط الإنشاء.
+  const mutated = guardSource.replace(
+    "if (!key || existingKeys.has(key)) continue;",
+    "if (!key) continue;"
+  );
+  assert.notEqual(mutated, guardSource, "الطفرة لم تُطبَّق — تغيّر نص الشرط؟");
+  const mutant = loadGuard(mutated);
+
+  // الأصل يرصد الحالة C؛ الطافر — بإسقاط شرط الإنشاء — يرصد التحديث السليم أيضاً.
+  assert.equal(find([incoming("اليغانس كوين أَزرق")]).length, 1, "الأصل يرصد C");
+  assert.ok(
+    mutant.findNewDuplicateGuidRows(
+      [incoming("اليغانس كوين ازرق", "اليغانس كوين أزرق")],
+      TABLE,
+      GUIDS
+    ).length > 0,
+    "الطافر يرفض تحديثاً سليماً — الحالة A كانت ستفشل"
+  );
+
+  // طفرة ثانية: إسقاط شرط «الهوية مأهولة» ⇒ الحالة C لا تُرصد إطلاقاً.
+  const mutated2 = guardSource.replace("if (owners.length) {", "if (false) {");
+  assert.notEqual(mutated2, guardSource, "الطفرة الثانية لم تُطبَّق");
+  assert.equal(
+    loadGuard(mutated2).findNewDuplicateGuidRows([incoming("اليغانس كوين أَزرق")], TABLE, GUIDS).length,
+    0,
+    "بإزالة الفحص تمرّ الحالة C — الاختبار C كان سيفشل"
+  );
+});
+
+test("شاهد الطفرة (P1): تجاهل الهوية الصريحة يُسقط رصد إعادة التسمية", () => {
+  const payload = [incoming(RENAMED_KEY, RENAMED_KEY, { item_guid: GUID_RENAMED })];
+  // الأصل يرصدها.
+  assert.equal(findNewDuplicateGuidRows(payload, RENAME_TABLE, RENAME_GUIDS).length, 1, "الأصل يرصد H");
+
+  // طفرة ١: إبطال فرع الهوية الصريحة في resolveIncomingGuid.
+  const m1 = guardSource.replace(
+    "    const explicit = readGuid(rec);\n    if (explicit) return explicit;",
+    "    const explicit = \"\";\n    if (explicit) return explicit;"
+  );
+  assert.notEqual(m1, guardSource, "الطفرة ١ لم تُطبَّق");
+  assert.equal(
+    loadGuard(m1).findNewDuplicateGuidRows(payload, RENAME_TABLE, RENAME_GUIDS).length,
+    0,
+    "بإبطال الهوية الصريحة تفلت H — الاختبار H كان سيفشل"
+  );
+
+  // طفرة ٢: حذف تمرير itemGuid من الحمولة (محاكاة التراجع عن تعديل app.js).
+  assert.equal(
+    findNewDuplicateGuidRows([incoming(RENAMED_KEY)], RENAME_TABLE, RENAME_GUIDS).length,
+    0,
+    "بلا تمرير الهوية تفلت H"
+  );
+});
+
+test("شاهد الطفرة (P1، مصدري): إسقاط تركيب الهوية يُبطل الإصلاح", () => {
+  // لو حُذف سطر تركيب item_guid لما حملت الحمولة هوية، فلا وصلت للحارس ولا
+  // ثُبّتت في الصف الجديد — وتعود ثغرتا إعادة التسمية ونافذة الـNULL معاً.
+  const body = sliceFunction("upsertApprovedPriceItems");
+  assert.match(body, /trustedGuidByKey\.set\(key, guid\)/, "الخريطة تُملأ فعلاً");
+  assert.match(body, /item_guid: guidByKey\[rec\.item_key\] \?\? trustedGuidByKey\.get\(rec\.item_key\)/, "والهوية تُركَّب على الحمولة");
+  const attachAt = body.indexOf("item_guid: guidByKey[rec.item_key]");
+  assert.ok(attachAt !== -1, "سطر التركيب موجود");
+  assert.ok(attachAt < body.indexOf("assertNoNewDuplicateGuidRow("), "التركيب يسبق الفحص وإلا فحص الحارس صفوفاً بلا هوية");
+  assert.ok(attachAt < body.indexOf(".upsert("), "ويسبق الكتابة وإلا كُتب الصف بلا هوية");
+});
+
+test("شاهد الطفرة (P1 ثالث): إسقاط صفوف بلا هوية من الفهرسة يعيد الثغرة", () => {
+  const table = [existingRow("ايكوس الوميا برايم", null)];
+  const payload = [incoming("ايكوس الوميا برايمـ", "ايكوس الوميا برايم", { item_guid: GUID_LIVE })];
+  assert.equal(findNewDuplicateGuidRows(payload, table, guidMap(table)).length, 1, "الأصل يرصدها");
+
+  // الطفرة: العودة إلى تخطّي كل صف بلا هوية (السلوك قبل الإصلاح).
+  const mutated = guardSource.replace(
+    "      if (!guid) {\n        for (const name of names) {",
+    "      if (!guid) {\n        for (const name of []) {"
+  );
+  assert.notEqual(mutated, guardSource, "الطفرة لم تُطبَّق — تغيّر نص الحلقة؟");
+  assert.equal(
+    loadGuard(mutated).findNewDuplicateGuidRows(payload, table, guidMap(table)).length,
+    0,
+    "بإسقاط الفهرسة تمرّ الحالة — الاختبارات F وF1ج كانت ستفشل"
+  );
+});
+
+console.log(`check-new-duplicate-guid-guard: اجتاز ${results.length} اختباراً.`);
+for (const name of results) console.log(`  ✓ ${name}`);
