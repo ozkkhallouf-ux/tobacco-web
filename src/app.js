@@ -1235,7 +1235,7 @@ function returnDocLedger(inv, mv) {
   if (Number(inv.payment || 0) > 0.009) {
     return fail("مرتجع بدفعة نقدية مرافقة — حالة لم يُثبت معناها في الأمين.");
   }
-  if (!isReturnLegMovement(mv) || normGuid(mv.billGuid) !== normGuid(inv.guid)) {
+  if (!mv || !isReturnLegMovement(mv) || normGuid(mv.billGuid) !== normGuid(inv.guid)) {
     return fail("لم أجد قيد هذا المرتجع مربوطاً في دفتر الزبون.");
   }
   const present = (x) => x !== undefined && x !== null && x !== "";
