@@ -325,6 +325,24 @@ test("تطبيع: النسخة في النواة تطابق normalizeItemName ف
   }
 });
 
+// التطويل والحركات مكتوبة في النواة بصيغة escape والحركات أولاً (`[\u064B-\u0652\u0640]`)،
+// لا حركة تلي حرفاً داخل صنف regex (قاعدة no-misleading-character-class). app.js ما زال
+// يحمل الصيغة الحرفية، فالمقارنة الشاملة معه تثبت أن السلوك لم يتغيّر محرفاً.
+test("تطبيع: كل محرف في كتلة العربية U+0600–U+06FF يطابق app.js منفرداً وداخل كلمة", () => {
+  const appSource = readFileSync(new URL("../src/app.js", import.meta.url), "utf8");
+  const fn = appSource.match(/function normalizeItemName\(value\) \{[\s\S]*?\n\}\n/);
+  assert.ok(fn, "تعذّر عزل normalizeItemName من app.js");
+  const box = { out: null };
+  vm.createContext(box);
+  vm.runInContext(`${fn[0]}; out = normalizeItemName;`, box);
+  for (let cp = 0x0600; cp <= 0x06ff; cp += 1) {
+    const ch = String.fromCodePoint(cp);
+    for (const value of [ch, `كابتن${ch}بلاك`, `مَعسل ${ch}ـة`]) {
+      assert.equal(normalizeIdentityName(value), box.out(value), `انحراف تطبيع عند U+${cp.toString(16).toUpperCase()}`);
+    }
+  }
+});
+
 // ---------------------------------------------------------------------------
 // H) إعادة التسمية الجوهرية (Codex P1 على PR #257)
 //

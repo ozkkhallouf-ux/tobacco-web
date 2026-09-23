@@ -213,7 +213,7 @@
     const normalized = String(value ?? "")
       .trim()
       .replace(/^\d{2,}\s*[-–—]\s*/u, "")
-      .replace(/[ـًٌٍَُِّْ]/gu, "")
+      .replace(/[\u064B-\u0652\u0640]/gu, "")
       .replace(/[إأآٱ]/gu, "ا")
       .replace(/ى/gu, "ي")
       .replace(/ة/gu, "ه")
