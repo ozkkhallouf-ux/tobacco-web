@@ -96,6 +96,43 @@ WHERE cu.CustomerName IS NOT NULL AND LTRIM(RTRIM(cu.CustomerName)) <> ''
     $r.Close()
     foreach ($n in @($dupNames.Keys)) { $guidByName.Remove($n) }
 
+    # (1c) ربط قيد **مرتجع المبيعات** بفاتورته عبر er000 — للمرتجعات وحدها.
+    # سطر الزبون في قيد المرتجع يحمل BiGUID صفرياً، فيبقى bill_guid بلا ربط ويخمّن
+    # الموقع المرتجع بالتاريخ والمبلغ (فالتقط سندات قبض فعلية). الأمين يربط قيد كل
+    # فاتورة بها ربطاً قطعياً: er000.EntryGUID = ce000.GUID و er000.ParentGUID = bu000.GUID
+    # عند ParentType = 2 — مُثبت قراءةً على OZK2026 (2026-09-23): 3148 ربطاً من 3148 يشير
+    # إلى فاتورة، ولا قيد له أكثر من ربط واحد. فواتير البيع خارج هذا الربط عمداً.
+    # عمود نوع الفاتورة على bu000 يُكتشف كما في push-customer-invoices.ps1؛ إن غاب فلا
+    # ربط ولا علامة، ويبقى التقرير كما كان تماماً.
+    $buTypeCol = $null
+    $cmd = $conn.CreateCommand()
+    $cmd.CommandText = "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'bu000'"
+    $r = $cmd.ExecuteReader()
+    $buCols = @{}
+    while ($r.Read()) { $buCols[[string]$r.GetValue(0)] = $true }
+    $r.Close()
+    foreach ($c in @("TypeGUID", "BillTypeGUID", "BType")) { if (-not $buTypeCol -and $buCols.ContainsKey($c)) { $buTypeCol = $c } }
+    # OUTER APPLY بتجميع بلا GROUP BY يعيد صفاً واحداً بالضبط لكل سطر en — فلا يمكن
+    # أن يتضاعف سطر ولا أن يفسد الرصيد المتحرك. وCOUNT(*) = 1 يُسقط أي ربط مبهم بدل
+    # اختيار واحد من عدة.
+    $returnLinkApply = ""
+    $returnLinkSel = "CAST(NULL AS varchar(40))"
+    if ($buTypeCol) {
+        $returnLinkApply = @"
+    OUTER APPLY (
+        SELECT CASE WHEN COUNT(*) = 1 THEN MAX(CAST(er.ParentGUID AS varchar(40))) END AS ret_bill
+        FROM dbo.er000 er
+        JOIN dbo.bu000 rb ON rb.GUID = er.ParentGUID
+        JOIN dbo.bt000 rt ON rt.GUID = rb.[$buTypeCol]
+        WHERE er.EntryGUID = en.ParentGUID AND er.ParentType = 2 AND rt.BillType = 3
+    ) rl
+"@
+        $returnLinkSel = "rl.ret_bill"
+        Write-Log "ربط المرتجعات: er000 عبر bu000.$buTypeCol"
+    } else {
+        Write-Log "تنبيه: ما لقيت عمود نوع الفاتورة على bu000 — لا ربط للمرتجعات في هذا التقرير."
+    }
+
     # (2) حركات الفترة لكل زبون
     $movements = @{}
     $cmd = $conn.CreateCommand()
@@ -117,7 +154,9 @@ WITH led AS (
            LEFT(COALESCE(en.Notes,''), 70) AS notes,
            -- معرّف الفاتورة المولِّدة للقيد: BiGUID قد يشير لرأس الفاتورة مباشرة أو لسطرها
            -- (فنصعد للرأس عبر bi000.ParentGUID) — لربط قطعي بين القيد والفاتورة في الموقع.
-           COALESCE(LOWER(CAST(COALESCE(bib.ParentGUID, en.BiGUID) AS varchar(40))), '') AS bill_guid,
+           -- الصفري ليس معرّفاً فيصير فراغاً، ثم ربط er000 لقيود مرتجع المبيعات وحدها (1c).
+           COALESCE(NULLIF(LOWER(CAST(COALESCE(bib.ParentGUID, en.BiGUID) AS varchar(40))), '00000000-0000-0000-0000-000000000000'),
+                    LOWER($returnLinkSel), '') AS bill_guid,
            CAST(SUM(COALESCE(en.Debit,0) - COALESCE(en.Credit,0))
                 OVER (PARTITION BY en.AccountGUID
                       ORDER BY COALESCE(CASE WHEN ce.Date >= '2000-01-01' THEN ce.Date END, en.Date),
@@ -143,6 +182,7 @@ WITH led AS (
     JOIN dbo.cu000 cu ON cu.AccountGUID = en.AccountGUID
     LEFT JOIN dbo.ce000 ce ON ce.GUID = en.ParentGUID
     LEFT JOIN dbo.bi000 bib ON bib.GUID = en.BiGUID
+$returnLinkApply
     WHERE (COALESCE(en.Debit,0) > 0 OR COALESCE(en.Credit,0) > 0)
       AND cu.CustomerName IS NOT NULL AND LTRIM(RTRIM(cu.CustomerName)) <> ''
       AND (cu.bHide IS NULL OR cu.bHide = 0)
@@ -265,6 +305,10 @@ ORDER BY name, dt, isopen, iscredit, sortdt, cenum, num
             fromDate    = $fromIso
             customers   = $items.Count
             syncedAt    = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
+            # العلامة تعني: كل قيد مرتجع مبيعات في هذا التقرير يحمل billGuid فاتورته،
+            # فغياب المعرّف عن قيد دائن يعني أنه ليس مرتجعاً. بلا العلامة لا يعرف
+            # الموقع ذلك، فلا يصنّف (src/app.js: RETURN_LINK_MARKER).
+            billLinks   = $(if ($buTypeCol) { "er000-return-v1" } else { $null })
         }
         items       = $items
     }

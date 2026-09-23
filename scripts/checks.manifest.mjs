@@ -90,6 +90,7 @@ export const CHECKS = [
   'check-sales-line-items-pipeline.mjs',
   'check-sales-line-items-registration.mjs',
   'check-sales-line-items-security.mjs',
+  'check-sales-return-ledger.mjs',
   'check-service-worker-update-cycle.mjs',
   'check-smart-inventory.mjs',
   'check-stock-qty-net-calc.mjs',
