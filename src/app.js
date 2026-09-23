@@ -6289,15 +6289,35 @@ function voucherLedgerRowHtml(row) {
   return `<tr><th${width}>${escapeHtml(row.label)}</th><td${cls}>${value}${row.suffixHtml || ""}</td></tr>`;
 }
 
-// محوّل فاتورة المبيعات إلى عقد قالب الفاتورة الرئيسي. لا يحسب شيئاً: يستدعي
-// `invoiceLineQty` و`invoiceLinePrice` و`invoiceLineValueText` القائمة كما هي.
+// ملاحظة مرتجع لم يثبت أثره على الذمة: بلا «خُصمت من رصيد حسابكم».
+const RETURN_NOTE_UNPROVEN = "هذا سند رسمي بقيمة البضاعة المرتجعة إلى OZK TOBACCO.";
+
+// ما يُسمح بطبعه من دفتر مرتجع المبيعات: أرصدة قيده المثبتة وحدها (applyReturnLedger)
+// — السابق والجديد وحسمه. الرصيد الحالي والمفرد ودفعة الزبون والتسوية لا دلالة مثبتة لها
+// على المرتجع فتسقط مهما مرّرها المستدعي، ومع تحذير القيد أو نقص أحد الرصيدين يسقط كل رصيد.
+function returnLedgerView(v) {
+  const view = { ...v };
+  for (const k of ["balance", "balanceLabel", "accountBalance", "accountBalanceAt", "currentBalance", "currentBalanceAt", "payment", "adjust"]) delete view[k];
+  const known = (x) => x !== undefined && x !== null && x !== "" && Number.isFinite(Number(x));
+  if (view.ledgerWarning || !known(view.prevBalance) || !known(view.newBalance)) {
+    delete view.prevBalance;
+    delete view.newBalance;
+    delete view.discount;
+  }
+  return view;
+}
+
+// محوّل مستندات البيع (فاتورة المبيعات ومرتجعها) إلى عقد قالب الفاتورة الرئيسي. لا يحسب
+// شيئاً: يستدعي `invoiceLineQty` و`invoiceLinePrice` و`invoiceLineValueText` القائمة كما هي.
 function saleInvoiceDocument(v) {
+  const kind = v.type === "return" ? "return" : "invoice";
+  const ledger = kind === "return" ? returnLedgerView(v) : v;
   const lines = Array.isArray(v.lines) ? v.lines : [];
   const inv = { total: v.amount, lines };
-  return {
-    kind: "invoice",
+  const doc = {
+    kind,
     escapeHtml,
-    no: v.no || docNumber("INV"),
+    no: v.no || docNumber(OZK_INVOICE.KINDS[kind].prefix),
     date: String(v.date || todayIsoDate()).slice(0, 10),
     cur: v.cur || "ل.س",
     party: v.name || "",
@@ -6310,8 +6330,11 @@ function saleInvoiceDocument(v) {
       priceText: invoiceLinePrice(line, inv),
       valueText: invoiceLineValueText(line, inv)
     })),
-    rows: voucherLedgerRows(v)
+    rows: voucherLedgerRows(ledger)
   };
+  // «خُصمت من رصيد حسابكم» ادعاء أثر على الذمة: لا يُطبع إلا مع أرصدة قيد مثبت.
+  if (kind === "return" && ledger.newBalance === undefined) doc.note = RETURN_NOTE_UNPROVEN;
+  return doc;
 }
 
 function voucherPdfMarkup(v) {
@@ -6319,9 +6342,9 @@ function voucherPdfMarkup(v) {
   const isInv = v.type === "invoice";
   const isRet = v.type === "return";
 
-  // فاتورة المبيعات تُبنى بقالب الفاتورة الرئيسي المستقل عن قالب التقارير.
-  // المرتجع والسندان يبقيان على المسار القديم حتى مراحلهما.
-  if (isInv && typeof OZK_INVOICE !== "undefined" && OZK_INVOICE && typeof OZK_INVOICE.markup === "function") {
+  // فاتورة المبيعات ومرتجعها تُبنيان بقالب الفاتورة الرئيسي المستقل عن قالب التقارير.
+  // السندان (القبض والصرف) وكل نوع آخر يبقى على المسار القديم.
+  if ((isInv || isRet) && typeof OZK_INVOICE !== "undefined" && OZK_INVOICE && typeof OZK_INVOICE.markup === "function") {
     return OZK_INVOICE.markup(saleInvoiceDocument(v));
   }
 

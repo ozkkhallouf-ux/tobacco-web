@@ -58,6 +58,8 @@ const PATTERNS = {
   voucherSingleBalanceRows: /function voucherSingleBalanceRows\(rows, v, cur, balCur, isInv, isRet, balLabel\) \{[\s\S]*?\n\}\n/,
   voucherAccountBalanceRow: /function voucherAccountBalanceRow\(rows, v, balCur\) \{[\s\S]*?\n\}\n/,
   voucherLedgerRowHtml: /function voucherLedgerRowHtml\(row\) \{[\s\S]*?\n\}\n/,
+  RETURN_NOTE_UNPROVEN: /const RETURN_NOTE_UNPROVEN = [^\n]*\n/,
+  returnLedgerView: /function returnLedgerView\(v\) \{[\s\S]*?\n\}\n/,
   saleInvoiceDocument: /function saleInvoiceDocument\(v\) \{[\s\S]*?\n\}\n/,
   voucherPdfMarkup: /function voucherPdfMarkup\(v\) \{[\s\S]*?\n\}\n/
 };
@@ -398,11 +400,14 @@ test("الكمية المختلطة الاتجاه تصل كما تنتجها ا
   }
 });
 
-test("سندا القبض والصرف والمرتجع ما زالت على المسار القديم (نطاق المرحلة 1)", () => {
-  for (const type of ["receipt", "payment", "return"]) {
+test("سندا القبض والصرف ما زالا على المسار القديم، والمرتجع على القالب الرئيسي (المرحلة 2)", () => {
+  for (const type of ["receipt", "payment"]) {
     const out = voucherPdfMarkup(base({ type, newBalance: 100, balance: 100 }));
-    assert.ok(out.includes("ozk-rpt"), `${type} خرج عن المسار القديم قبل مرحلته`);
+    assert.ok(out.includes("ozk-rpt") && !out.includes("ozk-inv"), `${type} خرج عن المسار القديم قبل مرحلته`);
   }
+  const ret = voucherPdfMarkup(base({ type: "return", newBalance: 100, balance: 100 }));
+  assert.ok(ret.includes("ozk-inv") && !ret.includes("ozk-rpt"), "مرتجع المبيعات لم يصل إلى القالب الرئيسي");
+  // التفاصيل الكاملة للمرتجع في check-sales-return-master-invoice.mjs.
 });
 
 // ===== دلالات التسوية: ثلاث حالات صريحة =====
