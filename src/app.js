@@ -1545,12 +1545,21 @@ function invoiceLineValueText(line, inv) {
 // — لم يتغيّر شرط ولا تحويل ولا معامل، إنما فُصل الناتج كي يستطيع قالب الفاتورة
 // رسم كل جزء في عنصر مستقل. السبب في `scripts/check-invoice-quantity-render.mjs`:
 // محرّك الرسم على الهاتف يعيد ترتيب أي عقدة نصّية تخلط رقماً وعربياً.
+// كمية الوحدة الصغرى الكسرية (الأمين يسجّل العلب المفردة أعشارَ كروز: 107.6) تُعرض
+// بوحدتها كما هي؛ تحويلها يطبع كسر كرتونة لا معنى له (2.152). مرتجع #37 على iPhone.
+// قاعدة واحدة للكمية (`invoiceLineQtyParts`) وللسعر (`invoiceLinePrice`) كي تتبع وحدةُ
+// السعر وحدةَ الكمية المعروضة.
+function invoiceLineFractionalUnit1(line) {
+  const qty = Number(line?.qty || 0);
+  return qty > 0 && Boolean(String(line?.unit1 || "").trim()) && Math.abs(qty - Math.round(qty)) > 1e-9;
+}
+
 function invoiceLineQtyParts(line) {
   const u1 = String(line?.unit1 || "").trim();
   const u2 = String(line?.unit2 || "").trim();
   const qty = Number(line?.qty || 0);
   const qtyUnits = Number(line?.qtyUnits || 0);
-  if (qtyUnits > 0 && u2) {
+  if (qtyUnits > 0 && u2 && !invoiceLineFractionalUnit1(line)) {
     const hasDetail = qty > 0 && u1 && (qty !== qtyUnits || u1 !== u2);
     return {
       value: formatMoney(qtyUnits),
@@ -1645,7 +1654,17 @@ function invoiceLineUnitPrice(line, inv) {
 function invoiceLinePrice(line, inv) {
   const resolved = invoiceLineUnitPrice(line, inv);
   if (!resolved) return "—";
-  return `${formatMoney(resolved.price)} $${resolved.unit ? " / " + resolved.unit : ""}`;
+  let { price, unit } = resolved;
+  // الكروز الكسري يُطبع بالكروز (`invoiceLineFractionalUnit1`)، فسعر الكرتونة بجانبه لا
+  // يطابق ضربُه القيمة (107.6 كروز × 640 $ / كرتونة). نعرض سعر الكروز لنفس السطر. عرض فقط:
+  // `invoiceLineUnitPrice` والقيمة (`invoiceLineValueText`) كما هما. مرتجع #37، Codex على #264.
+  const u1 = String(line?.unit1 || "").trim();
+  const qtyUnits = Number(line?.qtyUnits || 0);
+  if (invoiceLineFractionalUnit1(line) && qtyUnits > 0 && unit !== u1) {
+    price = roundPrice(resolved.converted ? Number(line.price) : resolved.price * qtyUnits / Number(line.qty));
+    unit = u1;
+  }
+  return `${formatMoney(price)} $${unit ? " / " + unit : ""}`;
 }
 
 async function loadCustomerCreditLimits() {
@@ -6289,15 +6308,35 @@ function voucherLedgerRowHtml(row) {
   return `<tr><th${width}>${escapeHtml(row.label)}</th><td${cls}>${value}${row.suffixHtml || ""}</td></tr>`;
 }
 
-// محوّل فاتورة المبيعات إلى عقد قالب الفاتورة الرئيسي. لا يحسب شيئاً: يستدعي
-// `invoiceLineQty` و`invoiceLinePrice` و`invoiceLineValueText` القائمة كما هي.
+// ملاحظة مرتجع لم يثبت أثره على الذمة: بلا «خُصمت من رصيد حسابكم».
+const RETURN_NOTE_UNPROVEN = "هذا سند رسمي بقيمة البضاعة المرتجعة إلى OZK TOBACCO.";
+
+// ما يُسمح بطبعه من دفتر مرتجع المبيعات: أرصدة قيده المثبتة وحدها (applyReturnLedger)
+// — السابق والجديد وحسمه. الرصيد الحالي والمفرد ودفعة الزبون والتسوية لا دلالة مثبتة لها
+// على المرتجع فتسقط مهما مرّرها المستدعي، ومع تحذير القيد أو نقص أحد الرصيدين يسقط كل رصيد.
+function returnLedgerView(v) {
+  const view = { ...v };
+  for (const k of ["balance", "balanceLabel", "accountBalance", "accountBalanceAt", "currentBalance", "currentBalanceAt", "payment", "adjust"]) delete view[k];
+  const known = (x) => x !== undefined && x !== null && x !== "" && Number.isFinite(Number(x));
+  if (view.ledgerWarning || !known(view.prevBalance) || !known(view.newBalance)) {
+    delete view.prevBalance;
+    delete view.newBalance;
+    delete view.discount;
+  }
+  return view;
+}
+
+// محوّل مستندات البيع (فاتورة المبيعات ومرتجعها) إلى عقد قالب الفاتورة الرئيسي. لا يحسب
+// شيئاً: يستدعي `invoiceLineQty` و`invoiceLinePrice` و`invoiceLineValueText` القائمة كما هي.
 function saleInvoiceDocument(v) {
+  const kind = v.type === "return" ? "return" : "invoice";
+  const ledger = kind === "return" ? returnLedgerView(v) : v;
   const lines = Array.isArray(v.lines) ? v.lines : [];
   const inv = { total: v.amount, lines };
-  return {
-    kind: "invoice",
+  const doc = {
+    kind,
     escapeHtml,
-    no: v.no || docNumber("INV"),
+    no: v.no || docNumber(OZK_INVOICE.KINDS[kind].prefix),
     date: String(v.date || todayIsoDate()).slice(0, 10),
     cur: v.cur || "ل.س",
     party: v.name || "",
@@ -6310,8 +6349,11 @@ function saleInvoiceDocument(v) {
       priceText: invoiceLinePrice(line, inv),
       valueText: invoiceLineValueText(line, inv)
     })),
-    rows: voucherLedgerRows(v)
+    rows: voucherLedgerRows(ledger)
   };
+  // «خُصمت من رصيد حسابكم» ادعاء أثر على الذمة: لا يُطبع إلا مع أرصدة قيد مثبت.
+  if (kind === "return" && ledger.newBalance === undefined) doc.note = RETURN_NOTE_UNPROVEN;
+  return doc;
 }
 
 function voucherPdfMarkup(v) {
@@ -6319,9 +6361,9 @@ function voucherPdfMarkup(v) {
   const isInv = v.type === "invoice";
   const isRet = v.type === "return";
 
-  // فاتورة المبيعات تُبنى بقالب الفاتورة الرئيسي المستقل عن قالب التقارير.
-  // المرتجع والسندان يبقيان على المسار القديم حتى مراحلهما.
-  if (isInv && typeof OZK_INVOICE !== "undefined" && OZK_INVOICE && typeof OZK_INVOICE.markup === "function") {
+  // فاتورة المبيعات ومرتجعها تُبنيان بقالب الفاتورة الرئيسي المستقل عن قالب التقارير.
+  // السندان (القبض والصرف) وكل نوع آخر يبقى على المسار القديم.
+  if ((isInv || isRet) && typeof OZK_INVOICE !== "undefined" && OZK_INVOICE && typeof OZK_INVOICE.markup === "function") {
     return OZK_INVOICE.markup(saleInvoiceDocument(v));
   }
 
@@ -7181,6 +7223,12 @@ async function exportStagnantMaterialsPdf() {
   render();
 }
 
+// قيمة سمة data-* لرقم اختياري: فارغة حين لا قيمة (undefined/null)، وإلا نصّها مُهرَّباً.
+// الصفر قيمة حقيقية ويُكتب «0». يُبقي قالب قائمة المرتجعات تحت حد تعقيد CodeFactor.
+function optionalDataValue(value) {
+  return value !== undefined && value !== null ? escapeHtml(String(value)) : "";
+}
+
 function customerDetailsPanel(item) {
   if (!item) {
     return `
@@ -7287,7 +7335,7 @@ function customerDetailsPanel(item) {
                     <strong class="payment-amount">مرتجع: ${escapeHtml(formatMoney(Number(m?.credit || 0)))}</strong>
                     <span class="payment-date">${escapeHtml(m?.date ? formatDate(m.date) : "بلا تاريخ")}</span>
                     ${m?.notes ? `<small class="payment-note">${escapeHtml(m.notes)}</small>` : ""}
-                    ${m?._retKind === "return" ? `<button class="button secondary mini-button" type="button" data-action="gen-movement-doc" data-debit="0" data-credit="${escapeHtml(String(m?.credit || 0))}" data-date="${escapeHtml(m?.date || "")}" data-notes="${escapeHtml(m?.notes || "")}" data-balance="${m?.balance !== undefined && m?.balance !== null ? escapeHtml(String(m.balance)) : ""}" data-balance-chrono="${m?.balanceChrono !== undefined && m?.balanceChrono !== null ? escapeHtml(String(m.balanceChrono)) : ""}" data-doc-new="${m?.docNew !== undefined && m?.docNew !== null ? escapeHtml(String(m.docNew)) : ""}" data-doc-prev="${m?.docPrev !== undefined && m?.docPrev !== null ? escapeHtml(String(m.docPrev)) : ""}" data-bill-guid="${escapeHtml(String(m?.billGuid || ""))}" data-ledger-linked="${rowsLinked ? "1" : ""}" style="margin-top:6px">📄 فاتورة مرتجع PDF</button>`
+                    ${m?._retKind === "return" ? `<button class="button secondary mini-button" type="button" data-action="gen-movement-doc" data-debit="0" data-credit="${escapeHtml(String(m?.credit || 0))}" data-date="${escapeHtml(m?.date || "")}" data-notes="${escapeHtml(m?.notes || "")}" data-balance="${optionalDataValue(m?.balance)}" data-balance-chrono="${optionalDataValue(m?.balanceChrono)}" data-doc-new="${optionalDataValue(m?.docNew)}" data-doc-prev="${optionalDataValue(m?.docPrev)}" data-bill-guid="${escapeHtml(String(m?.billGuid || ""))}" data-ledger-linked="${rowsLinked ? "1" : ""}" style="margin-top:6px">📄 فاتورة مرتجع PDF</button>`
                       : `<small class="payment-note">${m?._retKind === "return-pending" ? "تفاصيل هذا المرتجع لم تُزامَن بعد — لا مستند له حتى المزامنة التالية." : "حركة دائنة تطابق مرتجعاً ولا ربط قطعياً لها بعد — لا تُطبع سنداً ولا مرتجعاً حتى تصل مزامنة الربط."}</small>`}
                   </div>
                 </div>`).join("")
