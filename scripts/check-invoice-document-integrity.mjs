@@ -39,6 +39,7 @@ const PATTERNS = {
   salesTotals: /function salesTotals\(\) \{[\s\S]*?\n\}\n/,
   roundPrice: /function roundPrice\(value\) \{[\s\S]*?\n\}\n/,
   formatMoney: /function formatMoney\(value\) \{[\s\S]*?\n\}\n/,
+  formatInvoiceMoney: /function formatInvoiceMoney\(value\) \{[\s\S]*?\n\}\n/,
   // أسطر الدفتر خرجت من voucherPdfMarkup إلى دالة واحدة يستدعيها مسارا العرض
   // (السندات القديمة وقالب الفاتورة الرئيسي) — فيجب استخراجها معه.
   voucherLedgerRows: /function voucherLedgerRows\(v\) \{[\s\S]*?\n\}\n/,

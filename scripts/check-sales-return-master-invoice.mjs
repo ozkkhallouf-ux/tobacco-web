@@ -53,7 +53,8 @@ const PATTERNS = {
   invoiceLinePrice: /function invoiceLinePrice\(line, inv\) \{[\s\S]*?\n\}\n/,
   returnLedgerBalances: /function returnLedgerBalances\(inv, docPrev, docNew\) \{[\s\S]*?\n\}\n/,
   applyReturnLedger: /function applyReturnLedger\(opts, inv, docPrev, docNew\) \{[\s\S]*?\n\}\n/,
-  balanceText: /function balanceText\(bal, cur\) \{[\s\S]*?\n\}\n/,
+  formatInvoiceMoney: /function formatInvoiceMoney\(value\) \{[\s\S]*?\n\}\n/,
+  balanceText: /function balanceText\(bal, cur, money = formatMoney\) \{[\s\S]*?\n\}\n/,
   voucherLedgerRows: /function voucherLedgerRows\(v\) \{[\s\S]*?\n\}\n/,
   voucherAccountBalanceRow: /function voucherAccountBalanceRow\(rows, v, balCur\) \{[\s\S]*?\n\}\n/,
   voucherInvoiceBalanceRows: /function voucherInvoiceBalanceRows\(rows, v, cur, balCur, isRet\) \{[\s\S]*?\n\}\n/,
@@ -294,15 +295,19 @@ test("الأرشفة واسم الملف: return_invoice ومطابق لـKINDS.
 // ===== 6) البيع والسندات لم تتغيّر بايتاً =====
 //
 // بصمات sha256 ملتقطة من main 2c0d094 (قبل Phase 2) بنفس هذا الـsandbox.
+// فاتورات البيع الثلاث الأولى أُعيد التقاطها عمداً بعد قرار المنزلتين (2026-09-23، فاتورة 830):
+// مقارنة المخرجات قبله وبعده أثبتت أن الفرق الوحيد نصوص المبالغ (505 ⇒ 505.00، 129.673 ⇒
+// 129.67، 1,370 ⇒ 1,370.00…) بنفس القيمة مقرّبة لمنزلتين، بلا أي تغيير في نص أو صف أو تخطيط.
+// صفوف 634 مثبّتة حرفياً أدناه كي لا يمرّ تغيير رقمي خلف بصمة جديدة.
 
 const SALE_LINES = [
   { material: "معسل فاخر اسود حرة كف", qty: 48, qtyUnits: 2, unit1: "كف", unit2: "كرتونة", price: 170 },
   { material: "فحم ايكو نارة احمر", qty: 80, qtyUnits: 5, unit1: "كف", unit2: "كرتونة", price: 33 }
 ];
 const GOLDEN = [
-  ["فاتورة بيع بحسم ودفعة وتسوية", { type: "invoice", no: "634", date: "2026-09-05", name: "زبون د", phone: "0985000771", cur: "$", amount: 505, prevBalance: 1000, newBalance: 1370, discount: 25, payment: 100, adjust: 10, lines: SALE_LINES }, "23871b2142500af51a8e53c5191fcdede6428760fe21e584d4d796d13dc9cc74"],
-  ["فاتورة بيع غير منعكسة على الذمة", { type: "invoice", no: "2046", date: "2026-09-05", name: "زبون هـ", cur: "$", amount: 129.673, accountBalance: -1.15, accountBalanceAt: "2026-09-05T10:00:00Z", lines: SALE_LINES }, "e2836f1bef7db946b03259a7f1533144686ee09b91707a2d8039f47fe9726a3a"],
-  ["فاتورة بيع بلا رقم ولا رصيد", { type: "invoice", date: "2026-09-05", name: "زبون و", amount: 50, lines: [] }, "4df50ffa14181ca4cf5b0d8bba2768e91d0c49a1ce676c7e74feea7f3aecb9ac"],
+  ["فاتورة بيع بحسم ودفعة وتسوية", { type: "invoice", no: "634", date: "2026-09-05", name: "زبون د", phone: "0985000771", cur: "$", amount: 505, prevBalance: 1000, newBalance: 1370, discount: 25, payment: 100, adjust: 10, lines: SALE_LINES }, "e0d0c5d95e9783670107530e55144b89ed9e9a0bb09f281a8d29d7a8f5333158"],
+  ["فاتورة بيع غير منعكسة على الذمة", { type: "invoice", no: "2046", date: "2026-09-05", name: "زبون هـ", cur: "$", amount: 129.673, accountBalance: -1.15, accountBalanceAt: "2026-09-05T10:00:00Z", lines: SALE_LINES }, "fedbb62635add674adb905e9efce86961232c0f712f802e19d76b58d7463a1b6"],
+  ["فاتورة بيع بلا رقم ولا رصيد", { type: "invoice", date: "2026-09-05", name: "زبون و", amount: 50, lines: [] }, "b409ac49fe5f539910d35deaec2b92cb49c0f5585a965f8f3ac2b94a4f86afdb"],
   ["سند قبض برصيد بعد الدفعة ورصيد حالي", { type: "receipt", no: "R-1", date: "2026-09-10", name: "زبون ز", cur: "$", amount: 20, balance: 80, balanceLabel: "الرصيد بعد الدفعة", currentBalance: 60.2, currentBalanceAt: "2026-09-10T10:00:00Z" }, "7964a1c9e7d49ff1b9c642618391cd18a25889ffd8498a06bf1cb4189e9cee5a"],
   ["سند قبض بمبلغ قريب من مرتجع بنفس اليوم", { type: "receipt", no: "R-2", date: "2026-09-10", name: "زبون ز", cur: "$", amount: 20, balance: 80, newBalance: 80, prevBalance: 100, lines: LINES_48 }, "bc8ff71504ce875f9c48b90e663903f90dc117681997135206a7f79f397c1e64"],
   ["سند صرف", { type: "payment", no: "PV-1", date: "2026-09-06", name: "أبو زياد للنقل", cur: "ل.س", amount: 90000, method: "نقدي", notes: "نقل", balance: 0 }, "ccd26af26cdbea7610992d9781153ed0bf901c07d1c6d28580c9e9408e708e90"],
@@ -335,6 +340,46 @@ test("البوابة: القبض والصرف وأي نوع غير المرتج�
   const gate = appJs.match(/function voucherPdfMarkup\(v\) \{[\s\S]*?\n\}\n/)[0];
   assert.match(gate, /if \(\(isInv \|\| isRet\) && typeof OZK_INVOICE !== "undefined"/, "البوابة ليست isInv || isRet حرفياً");
   assert.match(gate, /const isInv = v\.type === "invoice";\n {2}const isRet = v\.type === "return";/);
+});
+
+test("فاتورة البيع 634: الصفوف نفسها والقيم نفسها، بمنزلتين فقط", () => {
+  const doc = saleInvoiceDocument(GOLDEN[0][1]);
+  assert.deepEqual(own(doc.rows).map((r) => [r.label, r.value]), [
+    ["التاريخ", "2026-09-05"],
+    ["الرصيد السابق", "1,000.00 $ (عليكم)"],
+    ["قيمة هذه الفاتورة", "505.00 $"],
+    ["الحسم", "− 25.00 $"],
+    ["دفعة من الزبون", "− 100.00 $"],
+    ["تسوية على الحساب", "− 10.00 $"],
+    ["الرصيد الجديد", "1,370.00 $ (عليكم)"]
+  ]);
+  assert.equal(doc.amountText, "505.00");
+});
+
+test("فاتورة البيع 830 على القالب الرئيسي: 34,360.33 − 0.33 ⇒ الرصيد 34,360.00 لا 34,359.998", () => {
+  const v = { type: "invoice", no: "830", date: "2026-09-23", name: "زبون ط", cur: "$", amount: 34360.328, prevBalance: 0, newBalance: 34359.998, discount: 0.33, lines: [] };
+  const doc = saleInvoiceDocument(v);
+  assert.equal(doc.amountText, "34,360.33");
+  assert.deepEqual(own(doc.rows).map((r) => [r.label, r.value]), [
+    ["التاريخ", "2026-09-23"],
+    ["الرصيد السابق", "مسدّد (صفر)"],
+    ["قيمة هذه الفاتورة", "34,360.33 $"],
+    ["الحسم", "− 0.33 $"],
+    ["الرصيد الجديد", "34,360.00 $ (عليكم)"]
+  ]);
+  const text = visible(voucherPdfMarkup(v));
+  assert.ok(text.includes("34,360.00"), "الرصيد الجديد غير مطبوع بمنزلتين");
+  assert.ok(!text.includes("34,359.998") && !text.includes("34,360.328"), "مبلغ بثلاث منازل ما زال مطبوعاً");
+  assert.ok(!text.includes("دفعة من الزبون"), "الحسم طُبع دفعة");
+});
+
+test("المرتجع على صياغة Phase 2 حرفياً: قيمته وأرصدته بلا منزلتين مفروضتين", () => {
+  const doc = saleInvoiceDocument(movementOpts(INV_48, "زبون أ", 36273.646, 36120.426));
+  assert.equal(doc.kind, "return");
+  assert.equal(doc.amountText, sandbox.formatMoney(INV_48.total));
+  const rows = own(doc.rows).map((r) => [r.label, r.value]);
+  assert.deepEqual(rows.find((r) => r[0] === "الرصيد السابق"), ["الرصيد السابق", "36,273.646 $ (عليكم)"]);
+  assert.deepEqual(rows.find((r) => r[0] === "الرصيد الجديد"), ["الرصيد الجديد", "36,120.426 $ (عليكم)"]);
 });
 
 test("فاتورة البيع: kind invoice وبديل INV وملاحظتها كما هي", () => {

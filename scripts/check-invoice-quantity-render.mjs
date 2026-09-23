@@ -56,6 +56,7 @@ const expectedLines = (c) => [`${c.value} ${c.unit2}`, `${c.detail} ${c.unit1}`]
 
 const PATTERNS = {
   formatMoney: /function formatMoney\(value\) \{[\s\S]*?\n\}\n/,
+  formatInvoiceMoney: /function formatInvoiceMoney\(value\) \{[\s\S]*?\n\}\n/,
   roundPrice: /function roundPrice\(value\) \{[\s\S]*?\n\}\n/,
   invoiceLineFractionalUnit1: /function invoiceLineFractionalUnit1\(line\) \{[\s\S]*?\n\}\n/,
   invoiceLineQtyParts: /function invoiceLineQtyParts\(line\) \{[\s\S]*?\n\}\n/,

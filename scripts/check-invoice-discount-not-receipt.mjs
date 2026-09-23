@@ -50,7 +50,8 @@ const PATTERNS = {
   movementReturnLink: /function movementReturnLink\(movement\) \{[\s\S]*?\n\}\n/,
   creditMovementKind: /function creditMovementKind\(customer, movement, fromLinkedLedger\) \{[\s\S]*?\n\}\n/,
   invoiceDiscountCreditLine: /function invoiceDiscountCreditLine\(customer, movement\) \{[\s\S]*?\n\}\n/,
-  balanceText: /function balanceText\(bal, cur\) \{[\s\S]*?\n\}\n/,
+  formatInvoiceMoney: /function formatInvoiceMoney\(value\) \{[\s\S]*?\n\}\n/,
+  balanceText: /function balanceText\(bal, cur, money = formatMoney\) \{[\s\S]*?\n\}\n/,
   voucherLedgerRows: /function voucherLedgerRows\(v\) \{[\s\S]*?\n\}\n/,
   voucherAccountBalanceRow: /function voucherAccountBalanceRow\(rows, v, balCur\) \{[\s\S]*?\n\}\n/,
   voucherInvoiceBalanceRows: /function voucherInvoiceBalanceRows\(rows, v, cur, balCur, isRet\) \{[\s\S]*?\n\}\n/,
@@ -72,7 +73,7 @@ const state = { customerInvoicesReport: null, customerMovementsReport: null, cus
 const sandbox = { console, Intl, state, applyCustomerLimits: (items) => items };
 vm.createContext(sandbox);
 vm.runInContext(source.join("\n"), sandbox);
-const { creditMovementKind, voucherLedgerRows, roundPrice, formatMoney } = sandbox;
+const { creditMovementKind, voucherLedgerRows, roundPrice, formatMoney, formatInvoiceMoney } = sandbox;
 
 // ===== بيانات مجهولة الهوية بأرقام الشاهد =====
 
@@ -116,16 +117,18 @@ test("زر السند (القيد مُعاد بناؤه من data-*، القيم
   assert.equal(creditMovementKind(CUST, fromButton, true).kind, "invoice-discount");
 });
 
-test("مستند فاتورة 830: السابق 0 + 34,360.328 − الحسم 0.33 = 34,359.998 بلا «دفعة» وبلا تسوية", () => {
+test("مستند فاتورة 830: السابق 0 + 34,360.328 − الحسم 0.33 = 34,359.998 خاماً، ويُطبع 34,360.00 بلا «دفعة» وبلا تسوية", () => {
   const prev = roundPrice(DEBIT_830.docPrev);
   const next = roundPrice(DEBIT_830.docNew);
   const adjust = roundPrice(prev + INV_830.total - INV_830.discount - INV_830.payment - next);
   assert.equal(adjust, 0, "المعادلة تُغلق من الحسم وحده");
   const rows = voucherLedgerRows({ type: "invoice", cur: "$", date: "2026-09-23", amount: INV_830.total, prevBalance: prev, newBalance: next, discount: INV_830.discount });
   assert.deepEqual(labels(rows), ["التاريخ", "الرصيد السابق", "قيمة هذه الفاتورة", "الحسم", "الرصيد الجديد"]);
-  assert.equal(row(rows, "قيمة هذه الفاتورة").value, "34,360.328 $");
+  assert.equal(row(rows, "الرصيد السابق").value, "مسدّد (صفر)");
+  assert.equal(row(rows, "قيمة هذه الفاتورة").value, "34,360.33 $");
   assert.equal(row(rows, "الحسم").value, "− 0.33 $");
-  assert.equal(row(rows, "الرصيد الجديد").value, "34,359.998 $ (عليكم)");
+  assert.equal(row(rows, "الرصيد الجديد").value, "34,360.00 $ (عليكم)");
+  assert.ok(!JSON.stringify(rows).includes("34,359.998"), "الرصيد طُبع بثلاث منازل");
   assert.ok(!labels(rows).includes("دفعة من الزبون"));
 });
 
@@ -164,6 +167,7 @@ test("فاتورة بدفعة مرافقة (FirstPay 0.33) بلا حسم: الد
   assert.notEqual(creditMovementKind(CUST, DISC_830, true).kind, "invoice-discount");
   const rows = voucherLedgerRows({ type: "invoice", cur: "$", amount: 34360.328, prevBalance: 0, newBalance: 34359.998, payment: 0.33 });
   assert.equal(row(rows, "دفعة من الزبون").value, "− 0.33 $");
+  assert.equal(row(rows, "الرصيد الجديد").value, "34,360.00 $ (عليكم)");
   assert.ok(!labels(rows).includes("الحسم"), "الدفعة طُبعت باسم «الحسم»");
 });
 
@@ -192,7 +196,48 @@ test("الدولار: التنسيق لا يطبع ضجيج الفاصلة ال�
   assert.equal(roundPrice(34306.33 - 0.33), 34306);
 });
 
-// ===== 5) لوحة الزبون تفصل سطر الحسم عن سندات القبض وعن المرتجعات =====
+// ===== 5) قرار العمل 2026-09-23: مبالغ فاتورة البيع وأرصدتها بمنزلتين كعرض الأمين =====
+
+test("فاتورة 830: 34359.998 ⇒ \"34,360.00\" وليس \"34,359.998\"", () => {
+  assert.equal(formatInvoiceMoney(34359.998), "34,360.00");
+  assert.notEqual(formatInvoiceMoney(34359.998), "34,359.998");
+  assert.equal(formatMoney(34359.998), "34,359.998", "القيمة الخام وformatMoney لم تتغيّرا");
+});
+
+test("التقريب المحاسبي نصف-للأعلى بمنزلتين، بلا انحراف الفاصلة العائمة", () => {
+  const cases = [
+    [34360.328, "34,360.33"], [0.33, "0.33"], [0, "0.00"], [34306, "34,306.00"],
+    [1.005, "1.01"], [2.675, "2.68"], [1.004, "1.00"], [0.125, "0.13"],
+    [-1.005, "-1.01"], [-0.004, "0.00"], [34306.33 - 0.33, "34,306.00"], [0.1 + 0.2, "0.30"]
+  ];
+  for (const [input, expected] of cases) assert.equal(formatInvoiceMoney(input), expected, String(input));
+});
+
+test("فاتورة البيع وحدها بمنزلتين: القيمة الكبيرة في القالبين، والمرتجع على formatMoney", () => {
+  assert.match(appJs, /amountText: \(kind === "invoice" \? formatInvoiceMoney : formatMoney\)\(v\.amount \|\| 0\),/);
+  assert.match(appJs, /escapeHtml\(\(isInv \? formatInvoiceMoney : formatMoney\)\(v\.amount \|\| 0\)\)/);
+  assert.match(appJs, /const money = isRet \? formatMoney : formatInvoiceMoney;/);
+});
+
+test("المرتجع وسند القبض باقيان على صياغتهما (القرار لفاتورة البيع وحدها)", () => {
+  const ret = voucherLedgerRows({ type: "return", cur: "$", amount: 420.02, prevBalance: 2751.848, newBalance: 2331.848, discount: 0.02 });
+  assert.equal(row(ret, "الرصيد السابق").value, "2,751.848 $ (عليكم)");
+  assert.equal(row(ret, "قيمة هذا المرتجع").value, "420.02 $");
+  assert.equal(row(ret, "حسم على المرتجع").value, "+ 0.02 $");
+  assert.equal(row(ret, "الرصيد الجديد").value, "2,331.848 $ (عليكم)");
+  const rec = voucherLedgerRows({ type: "receipt", cur: "$", amount: 0.33, balance: 34359.998, balanceLabel: "الرصيد بعد الدفعة" });
+  assert.equal(row(rec, "الرصيد بعد الدفعة").value, "34,359.998 $ (عليكم)");
+});
+
+test("أسعار الأصناف وكمياتها وقيم أسطرها لا تمرّ بصيغة المنزلتين", () => {
+  for (const fn of ["invoiceLinePrice", "invoiceLineValueText", "invoiceLineQty", "invoiceLineQtyParts", "invoiceLineUnitPrice", "invoiceLineBasisPlan"]) {
+    const body = appJs.match(new RegExp(`function ${fn}\\([^)]*\\) \\{[\\s\\S]*?\\n\\}\\n`));
+    assert.ok(body, `لم أجد ${fn}`);
+    assert.ok(!body[0].includes("formatInvoiceMoney"), `${fn} صار بمنزلتين`);
+  }
+});
+
+// ===== 6) لوحة الزبون تفصل سطر الحسم عن سندات القبض وعن المرتجعات =====
 
 test("لوحة الزبون: invoice-discount خارج «سندات القبض» وخارج «المرتجعات»", () => {
   assert.match(appJs, /const returnMoves = classifiedCredits\.filter\(\(m\) => m\._retKind !== "receipt" && m\._retKind !== "invoice-discount"\);/);

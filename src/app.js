@@ -5010,6 +5010,21 @@ function formatMoney(value) {
   }).format(Number(value || 0));
 }
 
+// مبالغ فاتورة البيع النهائية وأرصدتها بمنزلتين كما يعرضها الأمين (قرار العمل 2026-09-23،
+// فاتورة 830: الرصيد 34,359.998 يُطبع 34,360.00). عرض وطباعة فقط — القيم الخام لا تُمسّ،
+// وأسعار الأصناف وكمياتها وإجماليات أسطرها، والمرتجع والسندات، تبقى على formatMoney.
+// التقريب نصف-للأعلى بعيداً عن الصفر على القيمة بثلاث منازل وبأعداد صحيحة: Intl على
+// double يُنزل 1.005 (المخزَّنة 1.00499…) إلى 1.00 خطأً.
+function formatInvoiceMoney(value) {
+  const v = roundPrice(value);
+  const cents = Math.floor((Math.round(Math.abs(v) * 1000) + 5) / 10);
+  const sign = v < 0 && cents > 0 ? "-" : "";
+  return sign + new Intl.NumberFormat("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  }).format(cents / 100);
+}
+
 function customerFilterCounts(items) {
   return {
     all: items.length,
@@ -6227,10 +6242,10 @@ async function exportCustomerStatementPdf() {
 
 // سند رسمي (قبض/صرف) بالتصميم المبرَند مع الختم الأزرق
 // صياغة الرصيد للزبون: القيمة المطلقة مع بيان الجهة (عليكم = دين عليه، لكم = رصيد له).
-function balanceText(bal, cur) {
+function balanceText(bal, cur, money = formatMoney) {
   const b = roundPrice(bal);
   if (Math.abs(b) < 0.01) return "مسدّد (صفر)";
-  return `${formatMoney(Math.abs(b))} ${cur} ${b > 0 ? "(عليكم)" : "(لكم)"}`;
+  return `${money(Math.abs(b))} ${cur} ${b > 0 ? "(عليكم)" : "(لكم)"}`;
 }
 
 // بناء أسطر «دفتر» المستند (التاريخ، الأرصدة، الحسم، دفعة الزبون، التسوية)
@@ -6272,7 +6287,7 @@ function voucherAccountBalanceRow(rows, v, balCur) {
   const asOf = shortDateTime(v.accountBalanceAt);
   rows.push({
     label: "رصيد الحساب الحالي",
-    value: balanceText(v.accountBalance, balCur),
+    value: balanceText(v.accountBalance, balCur, v.type === "invoice" ? formatInvoiceMoney : formatMoney),
     suffixHtml: ` <small>(رصيد حساب الزبون، مستقل عن هذه الفاتورة${asOf ? " — حتى " + escapeHtml(asOf) : ""})</small>`
   });
 }
@@ -6280,8 +6295,10 @@ function voucherAccountBalanceRow(rows, v, balCur) {
 // شقّ «الرصيد السابق → القيمة → الرصيد الجديد» للفاتورة والمرتجع. خرج من
 // `voucherLedgerRows` كما هو: لا شرط ولا صياغة ولا ترتيب تغيّر فيه.
 function voucherInvoiceBalanceRows(rows, v, cur, balCur, isRet) {
-  rows.push({ label: "الرصيد السابق", value: balanceText(v.prevBalance, balCur) });
-  rows.push({ label: isRet ? "قيمة هذا المرتجع" : "قيمة هذه الفاتورة", value: `${formatMoney(v.amount || 0)} ${cur}` });
+  // فاتورة البيع بمنزلتين كعرض الأمين؛ المرتجع باقٍ على صياغة Phase 2 حرفياً.
+  const money = isRet ? formatMoney : formatInvoiceMoney;
+  rows.push({ label: "الرصيد السابق", value: balanceText(v.prevBalance, balCur, money) });
+  rows.push({ label: isRet ? "قيمة هذا المرتجع" : "قيمة هذه الفاتورة", value: `${money(v.amount || 0)} ${cur}` });
   // إن سُجّلت الفاتورة على الحساب بمبلغ أقل/أكثر من قيمتها (حسم أو تسوية) نُظهر الفرق
   // ليبقى الحساب شفافاً: السابق + الفاتورة − الحسم = الجديد.
   // الحسم ودفعة الزبون عمليتان محاسبيتان مستقلتان تماماً، ولكلٍّ سطره:
@@ -6292,10 +6309,10 @@ function voucherInvoiceBalanceRows(rows, v, cur, balCur, isRet) {
     // الرصيد — الجديد = السابق − قيمة المرتجع + حسمه (مُثبت من قيد #32).
     rows.push(isRet
       ? { label: "حسم على المرتجع", value: `+ ${formatMoney(v.discount)} ${cur}`, tone: "deb" }
-      : { label: "الحسم", value: `− ${formatMoney(v.discount)} ${cur}`, tone: "cred" });
+      : { label: "الحسم", value: `− ${money(v.discount)} ${cur}`, tone: "cred" });
   }
   if (Number(v.payment || 0) > 0.009) {
-    rows.push({ label: "دفعة من الزبون", value: `− ${formatMoney(v.payment)} ${cur}`, tone: "cred" });
+    rows.push({ label: "دفعة من الزبون", value: `− ${money(v.payment)} ${cur}`, tone: "cred" });
   }
   // `adjust` فرق **غير منسوب**: ما تبقّى من حركة الحساب بعد طرح الحسم والدفعة
   // المعروفَين. لا يُسمّى حسماً: مصدر فواتير الأمين لا يفصل الحسم عن الدفعة
@@ -6303,18 +6320,18 @@ function voucherInvoiceBalanceRows(rows, v, cur, balCur, isRet) {
   // number/date/guid/total/isReturn/lines فقط)، فتسميته حسماً تطبع دفعة زبون
   // على أنها حسم في مستند يُسلَّم للزبون.
   if (Number(v.adjust || 0) > 0.009) {
-    rows.push({ label: "تسوية على الحساب", value: `− ${formatMoney(v.adjust)} ${cur}`, tone: "cred" });
+    rows.push({ label: "تسوية على الحساب", value: `− ${money(v.adjust)} ${cur}`, tone: "cred" });
   } else if (Number(v.adjust || 0) < -0.009) {
-    rows.push({ label: "إضافة / تسوية", value: `+ ${formatMoney(Math.abs(v.adjust))} ${cur}`, tone: "deb" });
+    rows.push({ label: "إضافة / تسوية", value: `+ ${money(Math.abs(v.adjust))} ${cur}`, tone: "deb" });
   }
-  rows.push({ label: "الرصيد الجديد", value: balanceText(v.newBalance, balCur), strong: true });
+  rows.push({ label: "الرصيد الجديد", value: balanceText(v.newBalance, balCur, money), strong: true });
 }
 
 // شقّ الرصيد المفرد (السندات وما لا رصيد جديد له). خرج من `voucherLedgerRows`
 // كما هو: لا شرط ولا صياغة ولا ترتيب تغيّر فيه.
 function voucherSingleBalanceRows(rows, v, cur, balCur, isInv, isRet, balLabel) {
   const lbl = v.balanceLabel || balLabel;
-  const balTxt = (isInv || isRet || v.type === "receipt") ? balanceText(v.balance, balCur) : `${formatMoney(v.balance)} ${cur}`;
+  const balTxt = (isInv || isRet || v.type === "receipt") ? balanceText(v.balance, balCur, isInv ? formatInvoiceMoney : formatMoney) : `${formatMoney(v.balance)} ${cur}`;
   rows.push({ label: lbl, value: balTxt });
   // إن تحرّك الحساب بعد هذا القيد (فواتير لاحقة مثلاً) نعرض الرصيد الحالي أيضاً:
   // سطر واحد لا يكفي — الزبون يقارن السند برصيده اليوم فيظنّ الفرق خطأً.
@@ -6372,7 +6389,7 @@ function saleInvoiceDocument(v) {
     cur: v.cur || "ل.س",
     party: v.name || "",
     partyMeta: v.phone ? "هاتف: " + escapeHtml(v.phone) : "",
-    amountText: formatMoney(v.amount || 0),
+    amountText: (kind === "invoice" ? formatInvoiceMoney : formatMoney)(v.amount || 0),
     lines: lines.map((line) => ({
       material: line.material || "",
       qtyParts: invoiceLineQtyParts(line),
@@ -6431,7 +6448,7 @@ function voucherPdfMarkup(v) {
       <div><div class="nm">${escapeHtml(v.name || "")}</div>
         <div class="muted">${isPay ? "جهة الصرف / المستفيد" : (v.phone ? "هاتف: " + escapeHtml(v.phone) : "")}</div></div>
       <div style="text-align:left"><div class="muted">${amtLabel}</div>
-        <div class="big" style="color:${amtColor}">${escapeHtml(formatMoney(v.amount || 0))} ${escapeHtml(cur)}</div></div>
+        <div class="big" style="color:${amtColor}">${escapeHtml((isInv ? formatInvoiceMoney : formatMoney)(v.amount || 0))} ${escapeHtml(cur)}</div></div>
     </div>
     ${((isInv || isRet) && Array.isArray(v.lines) && v.lines.length) ? `
     <div class="sec">${isRet ? "أصناف المرتجع" : "أصناف الفاتورة"}</div>
