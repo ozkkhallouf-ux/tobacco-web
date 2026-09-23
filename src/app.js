@@ -1196,6 +1196,7 @@ function movementReturnLink(movement) {
 //   return-pending  — مرتجع مربوط، تفاصيله لم تُزامَن: لا مستند، ولا سند قبض.
 //   unclassified    — لا يجوز الحكم (تقرير بلا ربط ومرتجع فعلي بنفس اليوم والمبلغ، أو
 //                     مرتجع لزبون آخر): لا مستند إطلاقاً بدل مستند خاطئ.
+//   invoice-discount — سطر حسم فاتورة بيع على سند قيدها نفسه (invoice): ليس سند قبض.
 //   receipt         — سند قبض.
 // `fromLinkedLedger`: الصف نفسه من تقرير الحركات الكامل الموسوم بالربط. العلامة وصف لصفوف
 // ذلك التقرير وحده؛ صفوف `recentMovements` في تقرير الأرصدة (الاحتياط حين لا يحمل التقرير
@@ -1211,6 +1212,8 @@ function creditMovementKind(customer, movement, fromLinkedLedger) {
     if (custGuid && invGuid && custGuid !== invGuid) return { kind: "unclassified" };
     return { kind: "return", invoice: link.found.invoice };
   }
+  const discounted = invoiceDiscountCreditLine(customer, movement);
+  if (discounted) return { kind: "invoice-discount", invoice: discounted };
   if (fromLinkedLedger === true && movementsReportLinksReturns()) return { kind: "receipt" };
   // تقرير قديم بلا ربط: التاريخ والمبلغ لا يجعلان القيد مرتجعاً، لكنهما يمنعان طبعه سند
   // قبض حين يطابق مرتجعاً فعلياً تماماً — يبقى بلا مستند حتى تصل المزامنة الجديدة.
@@ -1219,6 +1222,34 @@ function creditMovementKind(customer, movement, fromLinkedLedger) {
     && String(x.date || "").slice(0, 10) === d
     && Math.abs(Number(x.total || 0) - credit) < 0.01);
   return { kind: candidate ? "unclassified" : "receipt" };
+}
+
+// سطر الحسم الدائن لفاتورة بيع. الأمين يقيّد حسم الفاتورة (TotalDisc) دائناً على الزبون
+// **داخل سند قيد الفاتورة نفسه**، فهو ليس سند قبض. شاهد 2026-09-23 (فاتورة 830): مدين
+// 34,360.328 ودائن 0.33 على سند واحد (docPrev 0 ← docNew 34,359.998) وبلا billGuid، لأن
+// الربط القطعي محصور بالمرتجعات — فكان السطر الدائن يُعرض «دفعة: 0.33» في سندات القبض.
+// الإثبات من القيد لا بالتخمين: سطر مدين بنفس التاريخ ونفس رصيدَي السند (docPrev/docNew
+// يُحسبان لسند القيد كاملاً، فسند قبض مستقل لا يشاركهما)، وفاتورة بيع واحدة بقيمة ذلك
+// المدين يساوي حسمُها هذا الدائن. دفعة الفاتورة (FirstPay) بنفس المبلغ تجعله مبهماً ⇒ null.
+function invoiceDiscountCreditLine(customer, movement) {
+  const credit = Number(movement?.credit || 0);
+  if (!(credit > 0) || Number(movement?.debit || 0) > 0) return null;
+  const has = (v) => v !== undefined && v !== null && v !== "";
+  if (!has(movement?.docPrev) || !has(movement?.docNew)) return null;
+  const moves = customerFullMovements(customer)?.movements;
+  if (!Array.isArray(moves)) return null;
+  const d = String(movement?.date || "").slice(0, 10);
+  const same = (a, b) => Math.abs(roundPrice(a) - roundPrice(b)) < 0.0005;
+  const siblings = moves.filter((m) => Number(m?.debit || 0) > 0 && !(Number(m?.credit || 0) > 0)
+    && String(m?.date || "").slice(0, 10) === d && has(m?.docPrev) && has(m?.docNew)
+    && same(m.docPrev, movement.docPrev) && same(m.docNew, movement.docNew)
+    && !movementReturnLink(m));
+  if (siblings.length !== 1) return null;
+  const debit = Number(siblings[0].debit);
+  const invs = customerInvoicesFor(customer).filter((x) => x && !x.isReturn
+    && String(x.date || "").slice(0, 10) === d && same(x.total, debit) && same(x.discount, credit));
+  if (invs.length !== 1 || same(invs[0].payment, credit)) return null;
+  return invs[0];
 }
 
 // القيد الدائن لمرتجع بمعرّف فاتورته — على كامل تقرير الحركات لا داخل زبون بالاسم:
@@ -7261,8 +7292,12 @@ function customerDetailsPanel(item) {
   // بفاتورة المرتجع (creditMovementKind)، لا بالتاريخ والمبلغ. ما لا يجوز الحكم عليه
   // يُعرض مع المرتجعات بلا زر مستند، ولا يُطبع سند قبض له.
   const classifiedCredits = creditMoves.map((m) => ({ ...m, _retKind: creditMovementKind(item, m, rowsLinked).kind }));
-  const returnMoves = classifiedCredits.filter((m) => m._retKind !== "receipt");
+  // سطر حسم الفاتورة ليس دفعة ولا مرتجعاً: يُعرض تحت فاتورته (بنفس رصيدَي السند) لا غير.
+  const discountMoves = classifiedCredits.filter((m) => m._retKind === "invoice-discount");
+  const returnMoves = classifiedCredits.filter((m) => m._retKind !== "receipt" && m._retKind !== "invoice-discount");
   const paymentMoves = classifiedCredits.filter((m) => m._retKind === "receipt");
+  const invoiceDiscountOf = (m) => discountMoves.find((x) => String(x.date || "").slice(0, 10) === String(m?.date || "").slice(0, 10)
+    && Number(x.docPrev) === Number(m?.docPrev) && Number(x.docNew) === Number(m?.docNew));
 
   return `
     <section class="customer-detail-panel" data-customer-detail-panel>
@@ -7315,6 +7350,7 @@ function customerDetailsPanel(item) {
                     <strong class="payment-amount">فاتورة: ${escapeHtml(formatMoney(Number(m?.debit || 0)))}</strong>
                     <span class="payment-date">${escapeHtml(m?.date ? formatDate(m.date) : "بلا تاريخ")}</span>
                     ${m?.notes ? `<small class="payment-note">${escapeHtml(m.notes)}</small>` : ""}
+                    ${invoiceDiscountOf(m) ? `<small class="payment-note">حسم على الفاتورة: ${escapeHtml(formatMoney(Number(invoiceDiscountOf(m).credit || 0)))}</small>` : ""}
                     <button class="button secondary mini-button" type="button" data-action="gen-movement-doc" data-debit="${escapeHtml(String(m?.debit || 0))}" data-credit="0" data-date="${escapeHtml(m?.date || "")}" data-notes="${escapeHtml(m?.notes || "")}" data-balance="${m?.balance !== undefined && m?.balance !== null ? escapeHtml(String(m.balance)) : ""}" data-balance-chrono="${m?.balanceChrono !== undefined && m?.balanceChrono !== null ? escapeHtml(String(m.balanceChrono)) : ""}" data-doc-new="${m?.docNew !== undefined && m?.docNew !== null ? escapeHtml(String(m.docNew)) : ""}" data-doc-prev="${m?.docPrev !== undefined && m?.docPrev !== null ? escapeHtml(String(m.docPrev)) : ""}" data-bill-guid="${escapeHtml(String(m?.billGuid || ""))}" style="margin-top:6px">📄 فاتورة PDF</button>
                   </div>
                 </div>`).join("")
@@ -12498,7 +12534,7 @@ function render() {
       } else if (credit > 0) {
         // مرتجع المبيعات يُقيَّد دائناً كالدفعة تماماً — يُعرف بربطه القطعي بفاتورة المرتجع
         // (creditMovementKind) لا بالتاريخ والمبلغ، ويُصدَّر بأصنافه وأرصدة قيده هو.
-        const kind = creditMovementKind(item, { date: el.dataset.date, credit, billGuid: el.dataset.billGuid }, el.dataset.ledgerLinked === "1");
+        const kind = creditMovementKind(item, { date: el.dataset.date, credit, billGuid: el.dataset.billGuid, docPrev: el.dataset.docPrev, docNew: el.dataset.docNew }, el.dataset.ledgerLinked === "1");
         if (kind.kind === "return") {
           const retMatch = kind.invoice;
           const opts = { ...base, cur: "$", type: "return", amount: retMatch.total || credit, no: retMatch.number ? String(retMatch.number) : docNumber("RET"), lines: retMatch.lines || [] };
@@ -12506,7 +12542,9 @@ function render() {
           applyReturnLedger(opts, retMatch, el.dataset.docPrev, el.dataset.docNew);
           exportVoucherPdf(opts);
         } else if (kind.kind !== "receipt") {
-          showNoticeNow("error", kind.kind === "return-pending"
+          showNoticeNow("error", kind.kind === "invoice-discount"
+            ? "هذا السطر حسم على الفاتورة " + (kind.invoice?.number || "") + " وليس سند قبض — صدّر الفاتورة نفسها."
+            : kind.kind === "return-pending"
             ? "هذا القيد مرتجع مبيعات، وتفاصيله لم تُزامَن بعد — لا مستند له حتى المزامنة التالية."
             : "لا يمكن الحكم على هذا القيد: يطابق مرتجعاً ولا ربط قطعياً له — لم يُطبع سند قبض ولا مرتجع.");
         } else {

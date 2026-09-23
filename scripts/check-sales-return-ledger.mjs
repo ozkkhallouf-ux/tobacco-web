@@ -50,6 +50,8 @@ const PATTERNS = {
   movementsReportLinksReturns: /function movementsReportLinksReturns\(\) \{[\s\S]*?\n\}\n/,
   movementReturnLink: /function movementReturnLink\(movement\) \{[\s\S]*?\n\}\n/,
   creditMovementKind: /function creditMovementKind\(customer, movement, fromLinkedLedger\) \{[\s\S]*?\n\}\n/,
+  customerFullMovements: /function customerFullMovements\(item\) \{[\s\S]*?\n\}\n/,
+  invoiceDiscountCreditLine: /function invoiceDiscountCreditLine\(customer, movement\) \{[\s\S]*?\n\}\n/,
   returnMovementForBill: /function returnMovementForBill\(billGuid\) \{[\s\S]*?\n\}\n/,
   returnLedgerBalances: /function returnLedgerBalances\(inv, docPrev, docNew\) \{[\s\S]*?\n\}\n/,
   applyReturnLedger: /function applyReturnLedger\(opts, inv, docPrev, docNew\) \{[\s\S]*?\n\}\n/,
@@ -229,7 +231,7 @@ test("صف احتياط (recentMovements) في تقرير موسوم: لا يُ�
 test("لوحة الزبون وزرّا المرتجع والقبض يمرّرون مصدر الصف إلى التصنيف", () => {
   assert.match(appJs, /const rowsLinked = fromFullLedger && movementsReportLinksReturns\(\);/);
   assert.match(appJs, /creditMovementKind\(item, m, rowsLinked\)\.kind/);
-  assert.match(appJs, /creditMovementKind\(item, \{ date: el\.dataset\.date, credit, billGuid: el\.dataset\.billGuid \}, el\.dataset\.ledgerLinked === "1"\)/);
+  assert.match(appJs, /creditMovementKind\(item, \{ date: el\.dataset\.date, credit, billGuid: el\.dataset\.billGuid, docPrev: el\.dataset\.docPrev, docNew: el\.dataset\.docNew \}, el\.dataset\.ledgerLinked === "1"\)/);
   assert.equal((appJs.match(/data-ledger-linked="\$\{rowsLinked \? "1" : ""\}"/g) || []).length, 2, "زر المرتجع وزر سند القبض");
   assert.match(appJs, /if \(fromLinkedLedger === true && movementsReportLinksReturns\(\)\) return \{ kind: "receipt" \};/);
 });
