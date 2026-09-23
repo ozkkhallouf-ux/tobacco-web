@@ -1196,6 +1196,7 @@ function movementReturnLink(movement) {
 //   return-pending  — مرتجع مربوط، تفاصيله لم تُزامَن: لا مستند، ولا سند قبض.
 //   unclassified    — لا يجوز الحكم (تقرير بلا ربط ومرتجع فعلي بنفس اليوم والمبلغ، أو
 //                     مرتجع لزبون آخر): لا مستند إطلاقاً بدل مستند خاطئ.
+//   invoice-discount — سطر حسم فاتورة بيع على سند قيدها نفسه (invoice): ليس سند قبض.
 //   receipt         — سند قبض.
 // `fromLinkedLedger`: الصف نفسه من تقرير الحركات الكامل الموسوم بالربط. العلامة وصف لصفوف
 // ذلك التقرير وحده؛ صفوف `recentMovements` في تقرير الأرصدة (الاحتياط حين لا يحمل التقرير
@@ -1211,6 +1212,8 @@ function creditMovementKind(customer, movement, fromLinkedLedger) {
     if (custGuid && invGuid && custGuid !== invGuid) return { kind: "unclassified" };
     return { kind: "return", invoice: link.found.invoice };
   }
+  const discounted = invoiceDiscountCreditLine(customer, movement);
+  if (discounted) return { kind: "invoice-discount", invoice: discounted };
   if (fromLinkedLedger === true && movementsReportLinksReturns()) return { kind: "receipt" };
   // تقرير قديم بلا ربط: التاريخ والمبلغ لا يجعلان القيد مرتجعاً، لكنهما يمنعان طبعه سند
   // قبض حين يطابق مرتجعاً فعلياً تماماً — يبقى بلا مستند حتى تصل المزامنة الجديدة.
@@ -1219,6 +1222,35 @@ function creditMovementKind(customer, movement, fromLinkedLedger) {
     && String(x.date || "").slice(0, 10) === d
     && Math.abs(Number(x.total || 0) - credit) < 0.01);
   return { kind: candidate ? "unclassified" : "receipt" };
+}
+
+// سطر الحسم الدائن لفاتورة بيع. الأمين يقيّد حسم الفاتورة (TotalDisc) دائناً على الزبون
+// **داخل سند قيد الفاتورة نفسه**، فهو ليس سند قبض. شاهد 2026-09-23 (فاتورة 830): مدين
+// 34,360.328 ودائن 0.33 على سند واحد (docPrev 0 ← docNew 34,359.998) وبلا billGuid، لأن
+// الربط القطعي محصور بالمرتجعات — فكان السطر الدائن يُعرض «دفعة: 0.33» في سندات القبض.
+// الإثبات من القيد لا بالتخمين: سطر مدين بنفس التاريخ ونفس رصيدَي السند (docPrev/docNew
+// يُحسبان لسند القيد كاملاً، فسند قبض مستقل لا يشاركهما)، وفاتورة بيع واحدة بقيمة ذلك
+// المدين يساوي حسمُها هذا الدائن. دفعة الفاتورة (FirstPay) بنفس المبلغ تجعله مبهماً ⇒ null.
+function invoiceDiscountCreditLine(customer, movement) {
+  const credit = Number(movement?.credit || 0);
+  if (!(credit > 0) || Number(movement?.debit || 0) > 0) return null;
+  const has = (v) => v !== undefined && v !== null && v !== "";
+  if (!has(movement?.docPrev) || !has(movement?.docNew)) return null;
+  const moves = customerFullMovements(customer)?.movements;
+  if (!Array.isArray(moves)) return null;
+  const dayOf = (x) => String(x?.date || "").slice(0, 10);
+  const d = dayOf(movement);
+  const same = (a, b) => Math.abs(roundPrice(a) - roundPrice(b)) < 0.0005;
+  const sameDoc = (a, b) => has(a) && same(a, b);
+  const onSameEntry = (m) => sameDoc(m?.docPrev, movement.docPrev) && sameDoc(m?.docNew, movement.docNew);
+  const isPlainDebit = (m) => Number(m?.debit || 0) > 0 && !(Number(m?.credit || 0) > 0);
+  const siblings = moves.filter((m) => isPlainDebit(m) && dayOf(m) === d && onSameEntry(m) && !movementReturnLink(m));
+  if (siblings.length !== 1) return null;
+  const debit = Number(siblings[0].debit);
+  const matchesEntry = (x) => same(x.total, debit) && same(x.discount, credit);
+  const invs = customerInvoicesFor(customer).filter((x) => x && !x.isReturn && dayOf(x) === d && matchesEntry(x));
+  if (invs.length !== 1 || same(invs[0].payment, credit)) return null;
+  return invs[0];
 }
 
 // القيد الدائن لمرتجع بمعرّف فاتورته — على كامل تقرير الحركات لا داخل زبون بالاسم:
@@ -4979,6 +5011,21 @@ function formatMoney(value) {
   }).format(Number(value || 0));
 }
 
+// مبالغ فاتورة البيع النهائية وأرصدتها بمنزلتين كما يعرضها الأمين (قرار العمل 2026-09-23،
+// فاتورة 830: الرصيد 34,359.998 يُطبع 34,360.00). عرض وطباعة فقط — القيم الخام لا تُمسّ،
+// وأسعار الأصناف وكمياتها وإجماليات أسطرها، والمرتجع والسندات، تبقى على formatMoney.
+// التقريب نصف-للأعلى بعيداً عن الصفر على القيمة بثلاث منازل وبأعداد صحيحة: Intl على
+// double يُنزل 1.005 (المخزَّنة 1.00499…) إلى 1.00 خطأً.
+function formatInvoiceMoney(value) {
+  const v = roundPrice(value);
+  const cents = Math.floor((Math.round(Math.abs(v) * 1000) + 5) / 10);
+  const sign = v < 0 && cents > 0 ? "-" : "";
+  return sign + new Intl.NumberFormat("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  }).format(cents / 100);
+}
+
 function customerFilterCounts(items) {
   return {
     all: items.length,
@@ -6196,10 +6243,10 @@ async function exportCustomerStatementPdf() {
 
 // سند رسمي (قبض/صرف) بالتصميم المبرَند مع الختم الأزرق
 // صياغة الرصيد للزبون: القيمة المطلقة مع بيان الجهة (عليكم = دين عليه، لكم = رصيد له).
-function balanceText(bal, cur) {
+function balanceText(bal, cur, money = formatMoney) {
   const b = roundPrice(bal);
   if (Math.abs(b) < 0.01) return "مسدّد (صفر)";
-  return `${formatMoney(Math.abs(b))} ${cur} ${b > 0 ? "(عليكم)" : "(لكم)"}`;
+  return `${money(Math.abs(b))} ${cur} ${b > 0 ? "(عليكم)" : "(لكم)"}`;
 }
 
 // بناء أسطر «دفتر» المستند (التاريخ، الأرصدة، الحسم، دفعة الزبون، التسوية)
@@ -6241,7 +6288,7 @@ function voucherAccountBalanceRow(rows, v, balCur) {
   const asOf = shortDateTime(v.accountBalanceAt);
   rows.push({
     label: "رصيد الحساب الحالي",
-    value: balanceText(v.accountBalance, balCur),
+    value: balanceText(v.accountBalance, balCur, v.type === "invoice" ? formatInvoiceMoney : formatMoney),
     suffixHtml: ` <small>(رصيد حساب الزبون، مستقل عن هذه الفاتورة${asOf ? " — حتى " + escapeHtml(asOf) : ""})</small>`
   });
 }
@@ -6249,8 +6296,10 @@ function voucherAccountBalanceRow(rows, v, balCur) {
 // شقّ «الرصيد السابق → القيمة → الرصيد الجديد» للفاتورة والمرتجع. خرج من
 // `voucherLedgerRows` كما هو: لا شرط ولا صياغة ولا ترتيب تغيّر فيه.
 function voucherInvoiceBalanceRows(rows, v, cur, balCur, isRet) {
-  rows.push({ label: "الرصيد السابق", value: balanceText(v.prevBalance, balCur) });
-  rows.push({ label: isRet ? "قيمة هذا المرتجع" : "قيمة هذه الفاتورة", value: `${formatMoney(v.amount || 0)} ${cur}` });
+  // فاتورة البيع بمنزلتين كعرض الأمين؛ المرتجع باقٍ على صياغة Phase 2 حرفياً.
+  const money = isRet ? formatMoney : formatInvoiceMoney;
+  rows.push({ label: "الرصيد السابق", value: balanceText(v.prevBalance, balCur, money) });
+  rows.push({ label: isRet ? "قيمة هذا المرتجع" : "قيمة هذه الفاتورة", value: `${money(v.amount || 0)} ${cur}` });
   // إن سُجّلت الفاتورة على الحساب بمبلغ أقل/أكثر من قيمتها (حسم أو تسوية) نُظهر الفرق
   // ليبقى الحساب شفافاً: السابق + الفاتورة − الحسم = الجديد.
   // الحسم ودفعة الزبون عمليتان محاسبيتان مستقلتان تماماً، ولكلٍّ سطره:
@@ -6261,10 +6310,10 @@ function voucherInvoiceBalanceRows(rows, v, cur, balCur, isRet) {
     // الرصيد — الجديد = السابق − قيمة المرتجع + حسمه (مُثبت من قيد #32).
     rows.push(isRet
       ? { label: "حسم على المرتجع", value: `+ ${formatMoney(v.discount)} ${cur}`, tone: "deb" }
-      : { label: "الحسم", value: `− ${formatMoney(v.discount)} ${cur}`, tone: "cred" });
+      : { label: "الحسم", value: `− ${money(v.discount)} ${cur}`, tone: "cred" });
   }
   if (Number(v.payment || 0) > 0.009) {
-    rows.push({ label: "دفعة من الزبون", value: `− ${formatMoney(v.payment)} ${cur}`, tone: "cred" });
+    rows.push({ label: "دفعة من الزبون", value: `− ${money(v.payment)} ${cur}`, tone: "cred" });
   }
   // `adjust` فرق **غير منسوب**: ما تبقّى من حركة الحساب بعد طرح الحسم والدفعة
   // المعروفَين. لا يُسمّى حسماً: مصدر فواتير الأمين لا يفصل الحسم عن الدفعة
@@ -6272,18 +6321,40 @@ function voucherInvoiceBalanceRows(rows, v, cur, balCur, isRet) {
   // number/date/guid/total/isReturn/lines فقط)، فتسميته حسماً تطبع دفعة زبون
   // على أنها حسم في مستند يُسلَّم للزبون.
   if (Number(v.adjust || 0) > 0.009) {
-    rows.push({ label: "تسوية على الحساب", value: `− ${formatMoney(v.adjust)} ${cur}`, tone: "cred" });
+    rows.push({ label: "تسوية على الحساب", value: `− ${money(v.adjust)} ${cur}`, tone: "cred" });
   } else if (Number(v.adjust || 0) < -0.009) {
-    rows.push({ label: "إضافة / تسوية", value: `+ ${formatMoney(Math.abs(v.adjust))} ${cur}`, tone: "deb" });
+    rows.push({ label: "إضافة / تسوية", value: `+ ${money(Math.abs(v.adjust))} ${cur}`, tone: "deb" });
   }
-  rows.push({ label: "الرصيد الجديد", value: balanceText(v.newBalance, balCur), strong: true });
+  pushInvoiceRoundingDrift(rows, v, cur, balCur, isRet);
+  rows.push({ label: "الرصيد الجديد", value: balanceText(v.newBalance, balCur, money), strong: true });
+}
+
+// فاتورة البيع تُقرِّب كل مبلغ لمنزلتين وحده، فقد يخالف مجموعُ المطبوع الرصيدَ الجديد
+// المطبوع بسنت: 100.004 + 44.504 = 144.508 ⇒ «100.00 + 44.50 = 144.51». الرصيد الجديد
+// يبقى رصيد الأمين نفسه، والفرق سطر صريح كي لا تناقض الفاتورة معادلتها. يُحسب من النصوص
+// المطبوعة نفسها (والرصيد دون السنت يُطبع «مسدّد» أي صفراً). لا سطر للمرتجع (صياغته
+// باقية)، ولا إن تطابقت، أو اختلفت العملتان (لا معادلة أصلاً)، أو تجاوز الفرق ما يصنعه
+// التقريب — ذاك ليس فرق تقريب.
+function pushInvoiceRoundingDrift(rows, v, cur, balCur, isRet) {
+  if (isRet || cur !== balCur) return;
+  const cents = (x) => Math.round(Number(formatInvoiceMoney(x).replace(/,/g, "")) * 100);
+  const balCents = (b) => (Math.abs(roundPrice(b)) < 0.01 ? 0 : cents(roundPrice(b)));
+  const shownCredit = (x) => (Number(x || 0) > 0.009 ? cents(x) : 0);
+  const adjust = Math.abs(Number(v.adjust || 0)) > 0.009 ? cents(v.adjust) : 0;
+  const printed = balCents(v.prevBalance) + cents(v.amount || 0)
+    - shownCredit(v.discount) - shownCredit(v.payment) - adjust;
+  const drift = balCents(v.newBalance) - printed;
+  if (drift === 0 || Math.abs(drift) > 3) return;
+  rows.push(drift > 0
+    ? { label: "فرق تقريب", value: `+ ${formatInvoiceMoney(drift / 100)} ${cur}`, tone: "deb" }
+    : { label: "فرق تقريب", value: `− ${formatInvoiceMoney(-drift / 100)} ${cur}`, tone: "cred" });
 }
 
 // شقّ الرصيد المفرد (السندات وما لا رصيد جديد له). خرج من `voucherLedgerRows`
 // كما هو: لا شرط ولا صياغة ولا ترتيب تغيّر فيه.
 function voucherSingleBalanceRows(rows, v, cur, balCur, isInv, isRet, balLabel) {
   const lbl = v.balanceLabel || balLabel;
-  const balTxt = (isInv || isRet || v.type === "receipt") ? balanceText(v.balance, balCur) : `${formatMoney(v.balance)} ${cur}`;
+  const balTxt = (isInv || isRet || v.type === "receipt") ? balanceText(v.balance, balCur, isInv ? formatInvoiceMoney : formatMoney) : `${formatMoney(v.balance)} ${cur}`;
   rows.push({ label: lbl, value: balTxt });
   // إن تحرّك الحساب بعد هذا القيد (فواتير لاحقة مثلاً) نعرض الرصيد الحالي أيضاً:
   // سطر واحد لا يكفي — الزبون يقارن السند برصيده اليوم فيظنّ الفرق خطأً.
@@ -6341,7 +6412,7 @@ function saleInvoiceDocument(v) {
     cur: v.cur || "ل.س",
     party: v.name || "",
     partyMeta: v.phone ? "هاتف: " + escapeHtml(v.phone) : "",
-    amountText: formatMoney(v.amount || 0),
+    amountText: (kind === "invoice" ? formatInvoiceMoney : formatMoney)(v.amount || 0),
     lines: lines.map((line) => ({
       material: line.material || "",
       qtyParts: invoiceLineQtyParts(line),
@@ -6400,7 +6471,7 @@ function voucherPdfMarkup(v) {
       <div><div class="nm">${escapeHtml(v.name || "")}</div>
         <div class="muted">${isPay ? "جهة الصرف / المستفيد" : (v.phone ? "هاتف: " + escapeHtml(v.phone) : "")}</div></div>
       <div style="text-align:left"><div class="muted">${amtLabel}</div>
-        <div class="big" style="color:${amtColor}">${escapeHtml(formatMoney(v.amount || 0))} ${escapeHtml(cur)}</div></div>
+        <div class="big" style="color:${amtColor}">${escapeHtml((isInv ? formatInvoiceMoney : formatMoney)(v.amount || 0))} ${escapeHtml(cur)}</div></div>
     </div>
     ${((isInv || isRet) && Array.isArray(v.lines) && v.lines.length) ? `
     <div class="sec">${isRet ? "أصناف المرتجع" : "أصناف الفاتورة"}</div>
@@ -7261,8 +7332,16 @@ function customerDetailsPanel(item) {
   // بفاتورة المرتجع (creditMovementKind)، لا بالتاريخ والمبلغ. ما لا يجوز الحكم عليه
   // يُعرض مع المرتجعات بلا زر مستند، ولا يُطبع سند قبض له.
   const classifiedCredits = creditMoves.map((m) => ({ ...m, _retKind: creditMovementKind(item, m, rowsLinked).kind }));
-  const returnMoves = classifiedCredits.filter((m) => m._retKind !== "receipt");
+  // سطر حسم الفاتورة ليس دفعة ولا مرتجعاً: يُعرض تحت فاتورته (بنفس رصيدَي السند) لا غير.
+  const discountMoves = classifiedCredits.filter((m) => m._retKind === "invoice-discount");
+  const returnMoves = classifiedCredits.filter((m) => m._retKind !== "receipt" && m._retKind !== "invoice-discount");
   const paymentMoves = classifiedCredits.filter((m) => m._retKind === "receipt");
+  const invoiceDiscountOf = (m) => discountMoves.find((x) => String(x.date || "").slice(0, 10) === String(m?.date || "").slice(0, 10)
+    && Number(x.docPrev) === Number(m?.docPrev) && Number(x.docNew) === Number(m?.docNew));
+  const invoiceDiscountNote = (m) => {
+    const disc = invoiceDiscountOf(m);
+    return disc ? `<small class="payment-note">حسم على الفاتورة: ${escapeHtml(formatMoney(Number(disc.credit || 0)))}</small>` : "";
+  };
 
   return `
     <section class="customer-detail-panel" data-customer-detail-panel>
@@ -7315,6 +7394,7 @@ function customerDetailsPanel(item) {
                     <strong class="payment-amount">فاتورة: ${escapeHtml(formatMoney(Number(m?.debit || 0)))}</strong>
                     <span class="payment-date">${escapeHtml(m?.date ? formatDate(m.date) : "بلا تاريخ")}</span>
                     ${m?.notes ? `<small class="payment-note">${escapeHtml(m.notes)}</small>` : ""}
+                    ${invoiceDiscountNote(m)}
                     <button class="button secondary mini-button" type="button" data-action="gen-movement-doc" data-debit="${escapeHtml(String(m?.debit || 0))}" data-credit="0" data-date="${escapeHtml(m?.date || "")}" data-notes="${escapeHtml(m?.notes || "")}" data-balance="${m?.balance !== undefined && m?.balance !== null ? escapeHtml(String(m.balance)) : ""}" data-balance-chrono="${m?.balanceChrono !== undefined && m?.balanceChrono !== null ? escapeHtml(String(m.balanceChrono)) : ""}" data-doc-new="${m?.docNew !== undefined && m?.docNew !== null ? escapeHtml(String(m.docNew)) : ""}" data-doc-prev="${m?.docPrev !== undefined && m?.docPrev !== null ? escapeHtml(String(m.docPrev)) : ""}" data-bill-guid="${escapeHtml(String(m?.billGuid || ""))}" style="margin-top:6px">📄 فاتورة PDF</button>
                   </div>
                 </div>`).join("")
@@ -12498,7 +12578,7 @@ function render() {
       } else if (credit > 0) {
         // مرتجع المبيعات يُقيَّد دائناً كالدفعة تماماً — يُعرف بربطه القطعي بفاتورة المرتجع
         // (creditMovementKind) لا بالتاريخ والمبلغ، ويُصدَّر بأصنافه وأرصدة قيده هو.
-        const kind = creditMovementKind(item, { date: el.dataset.date, credit, billGuid: el.dataset.billGuid }, el.dataset.ledgerLinked === "1");
+        const kind = creditMovementKind(item, { date: el.dataset.date, credit, billGuid: el.dataset.billGuid, docPrev: el.dataset.docPrev, docNew: el.dataset.docNew }, el.dataset.ledgerLinked === "1");
         if (kind.kind === "return") {
           const retMatch = kind.invoice;
           const opts = { ...base, cur: "$", type: "return", amount: retMatch.total || credit, no: retMatch.number ? String(retMatch.number) : docNumber("RET"), lines: retMatch.lines || [] };
@@ -12506,7 +12586,9 @@ function render() {
           applyReturnLedger(opts, retMatch, el.dataset.docPrev, el.dataset.docNew);
           exportVoucherPdf(opts);
         } else if (kind.kind !== "receipt") {
-          showNoticeNow("error", kind.kind === "return-pending"
+          showNoticeNow("error", kind.kind === "invoice-discount"
+            ? "هذا السطر حسم على الفاتورة " + (kind.invoice?.number || "") + " وليس سند قبض — صدّر الفاتورة نفسها."
+            : kind.kind === "return-pending"
             ? "هذا القيد مرتجع مبيعات، وتفاصيله لم تُزامَن بعد — لا مستند له حتى المزامنة التالية."
             : "لا يمكن الحكم على هذا القيد: يطابق مرتجعاً ولا ربط قطعياً له — لم يُطبع سند قبض ولا مرتجع.");
         } else {
