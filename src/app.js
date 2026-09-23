@@ -1545,15 +1545,21 @@ function invoiceLineValueText(line, inv) {
 // — لم يتغيّر شرط ولا تحويل ولا معامل، إنما فُصل الناتج كي يستطيع قالب الفاتورة
 // رسم كل جزء في عنصر مستقل. السبب في `scripts/check-invoice-quantity-render.mjs`:
 // محرّك الرسم على الهاتف يعيد ترتيب أي عقدة نصّية تخلط رقماً وعربياً.
+// كمية الوحدة الصغرى الكسرية (الأمين يسجّل العلب المفردة أعشارَ كروز: 107.6) تُعرض
+// بوحدتها كما هي؛ تحويلها يطبع كسر كرتونة لا معنى له (2.152). مرتجع #37 على iPhone.
+// قاعدة واحدة للكمية (`invoiceLineQtyParts`) وللسعر (`invoiceLinePrice`) كي تتبع وحدةُ
+// السعر وحدةَ الكمية المعروضة.
+function invoiceLineFractionalUnit1(line) {
+  const qty = Number(line?.qty || 0);
+  return qty > 0 && Boolean(String(line?.unit1 || "").trim()) && Math.abs(qty - Math.round(qty)) > 1e-9;
+}
+
 function invoiceLineQtyParts(line) {
   const u1 = String(line?.unit1 || "").trim();
   const u2 = String(line?.unit2 || "").trim();
   const qty = Number(line?.qty || 0);
   const qtyUnits = Number(line?.qtyUnits || 0);
-  // كمية الوحدة الصغرى الكسرية (الأمين يسجّل العلب المفردة أعشارَ كروز: 107.6) تُعرض
-  // بوحدتها كما هي؛ تحويلها يطبع كسر كرتونة لا معنى له (2.152). مرتجع #37 على iPhone.
-  const fractionalUnit1 = qty > 0 && u1 && Math.abs(qty - Math.round(qty)) > 1e-9;
-  if (qtyUnits > 0 && u2 && !fractionalUnit1) {
+  if (qtyUnits > 0 && u2 && !invoiceLineFractionalUnit1(line)) {
     const hasDetail = qty > 0 && u1 && (qty !== qtyUnits || u1 !== u2);
     return {
       value: formatMoney(qtyUnits),
@@ -1648,7 +1654,17 @@ function invoiceLineUnitPrice(line, inv) {
 function invoiceLinePrice(line, inv) {
   const resolved = invoiceLineUnitPrice(line, inv);
   if (!resolved) return "—";
-  return `${formatMoney(resolved.price)} $${resolved.unit ? " / " + resolved.unit : ""}`;
+  let { price, unit } = resolved;
+  // الكروز الكسري يُطبع بالكروز (`invoiceLineFractionalUnit1`)، فسعر الكرتونة بجانبه لا
+  // يطابق ضربُه القيمة (107.6 كروز × 640 $ / كرتونة). نعرض سعر الكروز لنفس السطر. عرض فقط:
+  // `invoiceLineUnitPrice` والقيمة (`invoiceLineValueText`) كما هما. مرتجع #37، Codex على #264.
+  const u1 = String(line?.unit1 || "").trim();
+  const qtyUnits = Number(line?.qtyUnits || 0);
+  if (invoiceLineFractionalUnit1(line) && qtyUnits > 0 && unit !== u1) {
+    price = roundPrice(resolved.converted ? Number(line.price) : resolved.price * qtyUnits / Number(line.qty));
+    unit = u1;
+  }
+  return `${formatMoney(price)} $${unit ? " / " + unit : ""}`;
 }
 
 async function loadCustomerCreditLimits() {

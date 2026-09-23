@@ -46,6 +46,7 @@ const PATTERNS = {
   computeInvoiceLineBasisPlan: /function computeInvoiceLineBasisPlan\(lines, total\) \{[\s\S]*?\n\}\n/,
   invoiceLineTotalValue: /function invoiceLineTotalValue\(line, inv\) \{[\s\S]*?\n\}\n/,
   invoiceLineValueText: /function invoiceLineValueText\(line, inv\) \{[\s\S]*?\n\}\n/,
+  invoiceLineFractionalUnit1: /function invoiceLineFractionalUnit1\(line\) \{[\s\S]*?\n\}\n/,
   invoiceLineQtyParts: /function invoiceLineQtyParts\(line\) \{[\s\S]*?\n\}\n/,
   invoiceLineQty: /function invoiceLineQty\(line\) \{[\s\S]*?\n\}\n/,
   invoiceLineUnitPrice: /function invoiceLineUnitPrice\(line, inv\) \{[\s\S]*?\n\}\n/,
@@ -354,11 +355,11 @@ const LINES_37 = [
 ];
 const INV_37 = { guid: "00000000-0000-4000-8000-000000000037", number: "37", date: "2026-08-31", total: 1539.16, discount: 0, payment: 0, isReturn: true, customerGuid: "00000000-0000-4000-8000-0000000000c1", lines: LINES_37 };
 const EXPECTED_37 = [
-  ["مادة و", "107.6 كروز", "640 $ / كرتونة", "1,377.28"],
-  ["مادة ز", "11.4 كروز", "710 $ / كرتونة", "161.88"]
+  ["مادة و", "107.6 كروز", "12.8 $ / كروز", "1,377.28"],
+  ["مادة ز", "11.4 كروز", "14.2 $ / كروز", "161.88"]
 ];
 
-test("#37: 107.6 كروز و11.4 كروز فقط، بلا كسر كرتونة، والسعر والقيمة كما كانا", () => {
+test("#37: 107.6 كروز و11.4 كروز فقط، بلا كسر كرتونة، والسعر بالكروز والقيمة كما كانت", () => {
   const html = voucherPdfMarkup(listOpts(INV_37, "زبون ح", "", ""));
   assert.deepEqual(cells(html), EXPECTED_37);
   assert.ok(!/2\.152|0\.228/.test(visible(html)), "كسر الكرتونة ما زال مطبوعاً");
@@ -376,6 +377,33 @@ test("البيع والمرتجع يستعملان نفس قاعدة الكمي�
   assert.deepEqual(own(ret.lines), own(inv.lines));
   // سطر البيع الوحيد بكروز كسري في بيانات الجهاز (فاتورة 1393).
   assert.equal(sandbox.invoiceLineQty({ qty: 0.8, qtyUnits: 0.016, unit1: "كروز", unit2: "كرتونة" }), "0.8 كروز");
+});
+
+// مراجعة Codex على 9a40cf9: الكمية المعروضة × السعر المعروض = القيمة. الكروز الكسري
+// بجانب سعر الكرتونة يعطي 107.6 × 640 = 68,864 بدل 1,377.28.
+test("سعر السطر يتبع وحدة الكمية: الكمية × السعر المعروضان = القيمة، والقيمة لم تتغيّر", () => {
+  const num = (t) => Number(String(t).replace(/[^0-9.]/g, ""));
+  for (const row of EXPECTED_37) {
+    assert.ok(Math.abs(num(row[1]) * num(row[2]) - num(row[3])) < 0.005, JSON.stringify(row));
+  }
+  // القيمة من `invoiceLineValueText` نفسها قبل التعديل وبعده.
+  const inv = { total: 1539.16, lines: LINES_37 };
+  assert.deepEqual(LINES_37.map((l) => sandbox.invoiceLineValueText(l, inv)), ["1,377.28", "161.88"]);
+  // أساس الكرتونة (سعر مخزَّن للكرتونة، قيمة حقيقية من الأمين) بكروز كسري: سعر الكروز = 640 ÷ 50.
+  const cartonBasis = { qty: 107.6, qtyUnits: 2.152, unit1: "كروز", unit2: "كرتونة", price: 640, lineTotal: 1377.28 };
+  assert.equal(sandbox.invoiceLinePrice(cartonBasis, { total: 1377.28, lines: [cartonBasis] }), "12.8 $ / كروز");
+  assert.equal(sandbox.invoiceLineValueText(cartonBasis, { total: 1377.28, lines: [cartonBasis] }), "1,377.28");
+});
+
+test("سعر الكميات الصحيحة لم يتغيّر: 0.16 كرتونة (8 كروز) بسعر الكرتونة", () => {
+  const cases = [
+    [{ qty: 8, qtyUnits: 0.16, unit1: "كروز", unit2: "كرتونة", price: 12.8, lineTotal: 102.4, lineTotalSource: "derived" }, "640 $ / كرتونة"],
+    [{ qty: 50, qtyUnits: 1, unit1: "كروز", unit2: "كرتونة", price: 640, lineTotal: 640 }, "640 $ / كرتونة"],
+    [{ qty: 7, unit1: "كروز", price: 13.5, lineTotal: 94.5 }, "13.5 $ / كروز"]
+  ];
+  for (const [line, text] of cases) {
+    assert.equal(sandbox.invoiceLinePrice(line, { total: line.lineTotal, lines: [line] }), text, JSON.stringify(line));
+  }
 });
 
 test("الكميات الصحيحة لم تتغيّر: 0.16 كرتونة (8 كروز) وأمثالها", () => {

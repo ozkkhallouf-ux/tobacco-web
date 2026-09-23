@@ -12,8 +12,8 @@
 // المسار الحقيقي: voucherPdfMarkup → createPortablePdfBlob → html2pdf، والقياس
 // على الشجرة كما تصل إلى html2canvas (بعد ماشي NBSP). لكل كلمة لاتينية في الملاحظة
 // والتذييل: مستطيل نطاقها كما يأخذه html2canvas لا يتجاوز عرض رسمها الفعلي، ولا
-// يتقاطع مع جارتها، و«OZK» يسار «TOBACCO». ومعه خانة الكمية لأسطر #37:
-// «107.6 كروز» و«11.4 كروز» سطراً واحداً بلا كسر كرتونة.
+// يتقاطع مع جارتها، و«OZK» يسار «TOBACCO». ومعه خانتا الكمية والسعر لأسطر #37:
+// «107.6 كروز» و«11.4 كروز» سطراً واحداً بلا كسر كرتونة، وسعرهما بالكروز.
 //
 // Chromium لا يُثبت صحّة WebKit؛ هذا حارس الآلية المشخَّصة لا شهادة آيفون.
 
@@ -63,7 +63,8 @@ const MEASURE = `(source) => {
   };
   const qtyRows = [...source.querySelectorAll(".items-table tbody tr")].map((tr) =>
     [...tr.children[1].querySelectorAll(".qg")].map((g) => g.textContent.replace(/[\\u200e\\u200f]/g, "").replace(/\\s+/g, " ").trim()));
-  return { note: words(source.querySelector("p.muted")), foot: words(source.querySelector(".rfoot span")), qtyRows };
+  const priceRows = [...source.querySelectorAll(".items-table tbody tr")].map((tr) => tr.children[2].textContent.trim());
+  return { note: words(source.querySelector("p.muted")), foot: words(source.querySelector(".rfoot span")), qtyRows, priceRows };
 }`;
 
 const assertBrand = (words, where) => {
@@ -128,7 +129,9 @@ try {
     assertBrand(got.m.note, `${label} — الملاحظة`);
     assertBrand(got.m.foot, `${label} — التذييل`);
     assert.deepEqual(got.m.qtyRows, [["107.6 كروز"], ["11.4 كروز"]], `${label}: خانة الكمية ${JSON.stringify(got.m.qtyRows)}`);
-    console.log(`  ✅ ${label}: OZK TOBACCO بلا تداخل في الملاحظة والتذييل، والكمية 107.6 كروز / 11.4 كروز`);
+    // السعر بوحدة الكمية المعروضة (مراجعة Codex): 107.6 × 12.8 = 1,377.28.
+    assert.deepEqual(got.m.priceRows, ["12.8 $ / كروز", "14.2 $ / كروز"], `${label}: خانة السعر ${JSON.stringify(got.m.priceRows)}`);
+    console.log(`  ✅ ${label}: OZK TOBACCO بلا تداخل في الملاحظة والتذييل، والكمية 107.6 كروز / 11.4 كروز بسعر الكروز`);
   }
   assert.equal(pageErrors.length, 0, `أخطاء في الصفحة: ${pageErrors.join(" | ")}`);
 } finally {

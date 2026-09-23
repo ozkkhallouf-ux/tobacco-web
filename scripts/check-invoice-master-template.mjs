@@ -48,6 +48,7 @@ const PATTERNS = {
   computeInvoiceLineBasisPlan: /function computeInvoiceLineBasisPlan\(lines, total\) \{[\s\S]*?\n\}\n/,
   invoiceLineTotalValue: /function invoiceLineTotalValue\(line, inv\) \{[\s\S]*?\n\}\n/,
   invoiceLineValueText: /function invoiceLineValueText\(line, inv\) \{[\s\S]*?\n\}\n/,
+  invoiceLineFractionalUnit1: /function invoiceLineFractionalUnit1\(line\) \{[\s\S]*?\n\}\n/,
   invoiceLineQtyParts: /function invoiceLineQtyParts\(line\) \{[\s\S]*?\n\}\n/,
   invoiceLineQty: /function invoiceLineQty\(line\) \{[\s\S]*?\n\}\n/,
   movementsReportCovers: /function movementsReportCovers\(dateStr\) \{[\s\S]*?\n\}\n/,
