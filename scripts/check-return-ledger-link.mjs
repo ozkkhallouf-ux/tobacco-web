@@ -110,6 +110,8 @@ const R32 = "bbbbbbbb-0000-4000-8000-000000000032"; // مرتجع #32
 
 // حركة من مزامنة er000: المفتاح billType حاضر دائماً (null لغير الفواتير).
 const mvL = (o) => ({ billGuid: "", billType: null, ...o });
+// نفس الحركة كما في تقرير أقدم من تحديث المزامنة: بلا مفتاح billType.
+const withoutBillLink = (m) => { const copy = { ...m }; delete copy.billType; return copy; };
 
 const movementsA = [
   mvL({ date: "2026-07-13", debit: 0, credit: 100, balance: 46.666, docPrev: 146.666, docNew: 46.666 }),
@@ -188,7 +190,7 @@ test("T3 رجل فاتورة البيع الدائن (حسم/دفعة، BillType
 
 test("T4 تقرير قديم بلا ربط: مطابقة صارمة بنفس اليوم وسنت — لا «المبلغ وحده» ولا «أقل من 1»", () => {
   loadLinkedReports();
-  const legacy = (m) => { const { billType, ...rest } = m; return { ...rest, billGuid: "00000000-0000-0000-0000-000000000000" }; };
+  const legacy = (m) => ({ ...withoutBillLink(m), billGuid: "00000000-0000-0000-0000-000000000000" });
   assert.equal(movementHasBillLink(legacy(movementsA[1])), false);
   assert.equal(isReturnCreditMovement(custA, legacy(movementsA[1])), false, "20.00 مقابل 19.80 بفارق 0.20");
   assert.equal(isReturnCreditMovement(custB, legacy(movementsB[0])), false, "4.85 بيوم آخر");
@@ -306,8 +308,7 @@ test("T15 قيد لا يُغلق (إضافة على مرتجع زبون مثلا
 
 test("T16 حركة من تقرير قديم (بلا billType) لا تكفي لأرصدة المرتجع", () => {
   loadLinkedReports();
-  const { billType, ...legacy } = movementsC[1];
-  const ledger = returnDocLedger(ret32, legacy);
+  const ledger = returnDocLedger(ret32, withoutBillLink(movementsC[1]));
   assert.equal(ledger.ok, false);
 });
 
