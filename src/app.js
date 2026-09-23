@@ -1163,18 +1163,146 @@ function customerInvoicesEmptyText(nameOrItem) {
   return `لا توجد فواتير لهذا الزبون خلال آخر ${windowDays} يوماً.`;
 }
 
-// مطابقة قيد دائن (دفعة محتملة) بفاتورة مرتجع فعلية بالتاريخ والمبلغ — قيود المرتجع في الأمين
-// لا تحمل معرّف الفاتورة (BiGUID) كالفواتير العادية، فلا مطابقة قطعية ممكنة هنا.
+// ═══ ربط حركة الدفتر بفاتورتها (er000) ═══
+//
+// **مُثبت على AmnDb002 (2026-09-23):** `en000.BiGUID` صفري في كل أسطر حسابات
+// الزبائن (2378/2378)، فالمطابقة القديمة بالتاريخ والمبلغ كانت الطريق الوحيد —
+// وبها صُنِّف سند قبض 20$ مرتجعاً لأنه جاء بيوم مرتجع 19.80$، وثلاث قبضات صغيرة
+// مرتجعاً بفارق «أقل من 1». الربط القطعي موجود في `er000`: كل قيد له er واحد، وكل
+// فاتورة (ParentType=2 ⇐ bu000) قيد واحد، والسندات ParentType=4 (py000).
+// `push-customer-movements.ps1` يملأ منه `billGuid` ويضيف `billType` (bt000.BillType)
+// لكل حركة. حضور المفتاح `billType` في الحركة نفسها هو دليل الربط — لا علامة
+// التقرير وحدها، لأن الحركات قد تأتي من `recentMovements` في تقرير الأرصدة.
+function movementHasBillLink(m) {
+  return !!m && typeof m === "object" && Object.prototype.hasOwnProperty.call(m, "billType");
+}
+
+// نوع الفاتورة المولِّدة للحركة (1 بيع، 3 مرتجع مبيعات...) أو null لغير الفواتير.
+// لا نحوّل قبل فحص الغياب: `Number(null)` صفر، والصفر نوع حقيقي (مشتريات).
+function movementBillType(m) {
+  if (!movementHasBillLink(m) || !normGuid(m.billGuid)) return null;
+  const raw = m.billType;
+  if (raw === null || raw === undefined || raw === "") return null;
+  const t = Number(raw);
+  return Number.isInteger(t) ? t : null;
+}
+
+// رجلٌ من قيد مرتجع مبيعات: الدائن على الذمة، أو سطر حسمه المدين (مرتجع #32:
+// دائن 420.02 ومدين 0.02 في السند نفسه). سطر الحسم ليس فاتورة بيع.
+function isReturnLegMovement(m) {
+  return movementBillType(m) === 3;
+}
+
+// هل الحركة الدائنة مرتجع؟ مع الربط: قيدها مربوط بفاتورة BillType=3 وحسب —
+// السند وقيد اليد ورجل فاتورة البيع (دفعة/حسم) ليست مرتجعاً أبداً. بلا ربط (تقرير
+// أقدم من تحديث المزامنة): مطابقة صارمة بنفس اليوم والمبلغ فقط.
+function isReturnCreditMovement(customer, m) {
+  if (!(Number(m?.credit || 0) > 0)) return false;
+  if (movementHasBillLink(m)) return isReturnLegMovement(m);
+  return !!findReturnInvoiceForMovement(customer, m);
+}
+
+// فاتورة المرتجع لحركة دائنة. مع الربط: بمعرّفها على كامل تقرير الفواتير، بلا أي
+// احتياط بالتاريخ أو المبلغ. بلا ربط: نفس اليوم وفارق لا يتجاوز سنتاً — لا «المبلغ
+// وحده» ولا «أقل من 1» بعد اليوم، فذلك ما حوّل سندات القبض إلى مرتجعات.
 // يقبل عنصر الأرصدة (مفضَّل) أو الاسم نصّاً، كسائر مسارات الفواتير.
 function findReturnInvoiceForMovement(customer, movement) {
   const credit = Number(movement?.credit || 0);
   if (!(credit > 0)) return null;
-  const invs = customerInvoicesFor(customer).filter((x) => x.isReturn);
-  if (!invs.length) return null;
+  if (movementHasBillLink(movement)) {
+    if (!isReturnLegMovement(movement)) return null;
+    const found = invoiceByGuid(movement.billGuid);
+    return found && found.invoice && found.invoice.isReturn ? found.invoice : null;
+  }
   const dOnly = String(movement?.date || "").slice(0, 10);
-  const amtMatch = (x) => Math.abs(Number(x.total || 0) - credit) < 1;
-  const dateMatch = (x) => String(x.date || "").slice(0, 10) === dOnly;
-  return invs.find((x) => dateMatch(x) && amtMatch(x)) || invs.find((x) => amtMatch(x)) || null;
+  if (!dOnly) return null;
+  const invs = customerInvoicesFor(customer).filter((x) => x.isReturn);
+  return invs.find((x) => String(x.date || "").slice(0, 10) === dOnly
+    && Math.abs(Number(x.total || 0) - credit) <= 0.01) || null;
+}
+
+// أرصدة مستند المرتجع — من قيده المربوط في دفتر الزبون وحده، ولا رصيد حالي أبداً.
+// docPrev/docNew على مستوى السند كاملاً فيشملان سطر الحسم، والإغلاق إلزامي:
+//   السابق − (الإجمالي − الحسم) = الجديد   (مرتجع #32: 2751.848 − 420.00 = 2331.848)
+// ما لم يُثبت معناه في الأمين (مرتجع بلا زبون، بدفعة نقدية، بلا قيد مربوط، أو قيد
+// لا يُغلق — ومنه «إضافة» على مرتجع زبون) يخرج بلا أرصدة مع السبب: لا تخمين.
+function returnDocLedger(inv, mv) {
+  const fail = (reason) => ({ ok: false, reason });
+  if (!inv || !inv.isReturn) return fail("ليس مستند مرتجع.");
+  if (Object.prototype.hasOwnProperty.call(inv, "customerGuid") && !normGuid(inv.customerGuid)) {
+    return fail("مرتجع بلا حساب زبون — لا رصيد له.");
+  }
+  if (Number(inv.payment || 0) > 0.009) {
+    return fail("مرتجع بدفعة نقدية مرافقة — حالة لم يُثبت معناها في الأمين.");
+  }
+  if (!isReturnLegMovement(mv) || normGuid(mv.billGuid) !== normGuid(inv.guid)) {
+    return fail("لم أجد قيد هذا المرتجع مربوطاً في دفتر الزبون.");
+  }
+  const present = (x) => x !== undefined && x !== null && x !== "";
+  if (!present(mv.docPrev) || !present(mv.docNew)) return fail("أرصدة قيد المرتجع غير متوفرة.");
+  const prev = Number(mv.docPrev);
+  const next = Number(mv.docNew);
+  if (!Number.isFinite(prev) || !Number.isFinite(next)) return fail("أرصدة قيد المرتجع غير متوفرة.");
+  const gross = Number(inv.total || 0);
+  const discount = Math.max(0, Number(inv.discount || 0));
+  if (Math.abs((prev - next) - (gross - discount)) > 0.005) {
+    return fail("قيد المرتجع على الذمة لا يطابق إجماليه وحسمه.");
+  }
+  return { ok: true, prevBalance: roundPrice(prev), newBalance: roundPrice(next), discount: roundPrice(discount) };
+}
+
+// خيارات مستند المرتجع: الأصناف والإجمالي من الفاتورة، والأرصدة من `returnDocLedger`.
+// عند الإغلاق يُحمل السبب في `ledgerNotice` ليراه المستخدم، والمستند بلا أرصدة.
+function returnVoucherOptions(base, inv, mv) {
+  const opts = {
+    ...base,
+    type: "return",
+    amount: Number(inv.total || 0) || Number(mv?.credit || 0),
+    no: inv.number ? String(inv.number) : docNumber("RET"),
+    lines: inv.lines || []
+  };
+  const ledger = returnDocLedger(inv, mv);
+  if (ledger.ok) {
+    opts.prevBalance = ledger.prevBalance;
+    opts.newBalance = ledger.newBalance;
+    if (ledger.discount > 0.009) opts.discount = ledger.discount;
+  } else {
+    opts.ledgerNotice = ledger.reason;
+  }
+  return opts;
+}
+
+// سمات ربط الحركة على أزرارها: `data-bill-link="1"` تعني أن الحركة من مزامنة er000
+// (فيُعاد بناء `billType` عند النقر ولا تُطابَق بالتاريخ/المبلغ).
+function movementLinkAttrs(m) {
+  if (!movementHasBillLink(m)) return "";
+  const t = movementBillType(m);
+  return ` data-bill-link="1" data-bill-type="${t === null ? "" : escapeHtml(String(t))}"`;
+}
+
+// حركة من سمات زرّها — نفس الحقول التي يقرؤها `returnDocLedger` وفرز المرتجع.
+function movementFromDataset(ds, credit) {
+  const mv = {
+    date: ds.date || "",
+    credit,
+    billGuid: ds.billGuid || "",
+    docPrev: ds.docPrev,
+    docNew: ds.docNew
+  };
+  if (ds.billLink === "1") {
+    mv.billType = ds.billType === undefined || ds.billType === "" ? null : Number(ds.billType);
+  }
+  return mv;
+}
+
+// قيد المرتجع في دفتر الزبون بمعرّف فاتورته (er000) — الجهة الدائنة. null إن لم يُربط.
+function returnLedgerMovement(customer, inv) {
+  const g = normGuid(inv?.guid);
+  if (!g) return null;
+  const full = customerFullMovements(customer);
+  const movements = full && Array.isArray(full.movements) ? full.movements : [];
+  return movements.find((m) => isReturnLegMovement(m) && normGuid(m.billGuid) === g
+    && Number(m?.credit || 0) > 0) || null;
 }
 
 // ═══ حسم أساس سعر كل سطر بمطابقة إجمالي الفاتورة (الرقم الموثوق الوحيد) ═══
@@ -6119,7 +6247,11 @@ function voucherInvoiceBalanceRows(rows, v, cur, balCur, isRet) {
   //   الرصيد الجديد = السابق + قيمة الفاتورة − الحسم − دفعة الزبون
   // لا يجوز أن تُطبع دفعة داخل خانة الحسم ولا العكس. كلٌّ يظهر فقط إن وُجد.
   if (Number(v.discount || 0) > 0.009) {
-    rows.push({ label: "الحسم", value: `− ${formatMoney(v.discount)} ${cur}`, tone: "cred" });
+    // في المرتجع يُنقص الحسمُ ما يُردّ إلى حساب الزبون (الجديد = السابق − الإجمالي
+    // + الحسم)، فإشارته موجبة. الفاتورة على صياغتها كما هي.
+    rows.push(isRet
+      ? { label: "الحسم على المرتجع", value: `+ ${formatMoney(v.discount)} ${cur}`, tone: "deb" }
+      : { label: "الحسم", value: `− ${formatMoney(v.discount)} ${cur}`, tone: "cred" });
   }
   if (Number(v.payment || 0) > 0.009) {
     rows.push({ label: "دفعة من الزبون", value: `− ${formatMoney(v.payment)} ${cur}`, tone: "cred" });
@@ -6266,6 +6398,8 @@ async function exportVoucherPdf(v) {
     { docType: archiveDocType, meta: archiveMeta }
   );
   if (exported) setNotice("success", isInv ? "تم تجهيز الفاتورة PDF." : (isRet ? "تم تجهيز فاتورة المرتجع PDF." : (isPay ? "تم تجهيز سند الصرف PDF." : "تم تجهيز سند القبض PDF.")));
+  // مرتجع خرج بلا أرصدة: السبب يُعرض صراحةً بدل رسالة نجاح تُفهم أن المستند كامل.
+  if (exported && isRet && v.ledgerNotice) setNotice("error", `تم تجهيز فاتورة المرتجع PDF بلا أرصدة: ${v.ledgerNotice}`);
   render();
 }
 
@@ -7080,12 +7214,13 @@ function customerDetailsPanel(item) {
     : (Array.isArray(item.recentMovements)
         ? [...item.recentMovements].sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0))
         : []);
-  const invoiceMoves = movements.filter((m) => Number(m?.debit || 0) > 0);
+  // سطر حسم المرتجع (مدين، BillType=3) جزء من قيد المرتجع وليس فاتورة بيع.
+  const invoiceMoves = movements.filter((m) => Number(m?.debit || 0) > 0 && !isReturnLegMovement(m));
   const creditMoves = movements.filter((m) => Number(m?.credit || 0) > 0);
-  // مرتجع المبيعات يُقيَّد دائناً على حساب الزبون تماماً كالدفعة — نفرزه هنا بمطابقة
-  // فاتورة المرتجع الفعلية (بالتاريخ والمبلغ) ليُصدَّر كفاتورة مرتجع لا كسند قبض.
-  const returnMoves = creditMoves.filter((m) => findReturnInvoiceForMovement(item.name || "", m));
-  const paymentMoves = creditMoves.filter((m) => !findReturnInvoiceForMovement(item.name || "", m));
+  // مرتجع المبيعات يُقيَّد دائناً على حساب الزبون تماماً كالدفعة — نفرزه بربط قيده
+  // بفاتورة مرتجع (er000)، لا بالتاريخ والمبلغ، ليُصدَّر كفاتورة مرتجع لا كسند قبض.
+  const returnMoves = creditMoves.filter((m) => isReturnCreditMovement(item, m));
+  const paymentMoves = creditMoves.filter((m) => !isReturnCreditMovement(item, m));
 
   return `
     <section class="customer-detail-panel" data-customer-detail-panel>
@@ -7138,7 +7273,7 @@ function customerDetailsPanel(item) {
                     <strong class="payment-amount">فاتورة: ${escapeHtml(formatMoney(Number(m?.debit || 0)))}</strong>
                     <span class="payment-date">${escapeHtml(m?.date ? formatDate(m.date) : "بلا تاريخ")}</span>
                     ${m?.notes ? `<small class="payment-note">${escapeHtml(m.notes)}</small>` : ""}
-                    <button class="button secondary mini-button" type="button" data-action="gen-movement-doc" data-debit="${escapeHtml(String(m?.debit || 0))}" data-credit="0" data-date="${escapeHtml(m?.date || "")}" data-notes="${escapeHtml(m?.notes || "")}" data-balance="${m?.balance !== undefined && m?.balance !== null ? escapeHtml(String(m.balance)) : ""}" data-balance-chrono="${m?.balanceChrono !== undefined && m?.balanceChrono !== null ? escapeHtml(String(m.balanceChrono)) : ""}" data-doc-new="${m?.docNew !== undefined && m?.docNew !== null ? escapeHtml(String(m.docNew)) : ""}" data-doc-prev="${m?.docPrev !== undefined && m?.docPrev !== null ? escapeHtml(String(m.docPrev)) : ""}" data-bill-guid="${escapeHtml(String(m?.billGuid || ""))}" style="margin-top:6px">📄 فاتورة PDF</button>
+                    <button class="button secondary mini-button" type="button" data-action="gen-movement-doc" data-debit="${escapeHtml(String(m?.debit || 0))}" data-credit="0" data-date="${escapeHtml(m?.date || "")}" data-notes="${escapeHtml(m?.notes || "")}" data-balance="${m?.balance !== undefined && m?.balance !== null ? escapeHtml(String(m.balance)) : ""}" data-balance-chrono="${m?.balanceChrono !== undefined && m?.balanceChrono !== null ? escapeHtml(String(m.balanceChrono)) : ""}" data-doc-new="${m?.docNew !== undefined && m?.docNew !== null ? escapeHtml(String(m.docNew)) : ""}" data-doc-prev="${m?.docPrev !== undefined && m?.docPrev !== null ? escapeHtml(String(m.docPrev)) : ""}" data-bill-guid="${escapeHtml(String(m?.billGuid || ""))}"${movementLinkAttrs(m)} style="margin-top:6px">📄 فاتورة PDF</button>
                   </div>
                 </div>`).join("")
               : '<p class="muted" style="padding:12px 0">لا توجد فواتير مسجلة.</p>'}
@@ -7158,7 +7293,7 @@ function customerDetailsPanel(item) {
                     <strong class="payment-amount">مرتجع: ${escapeHtml(formatMoney(Number(m?.credit || 0)))}</strong>
                     <span class="payment-date">${escapeHtml(m?.date ? formatDate(m.date) : "بلا تاريخ")}</span>
                     ${m?.notes ? `<small class="payment-note">${escapeHtml(m.notes)}</small>` : ""}
-                    <button class="button secondary mini-button" type="button" data-action="gen-movement-doc" data-debit="0" data-credit="${escapeHtml(String(m?.credit || 0))}" data-date="${escapeHtml(m?.date || "")}" data-notes="${escapeHtml(m?.notes || "")}" data-balance="${m?.balance !== undefined && m?.balance !== null ? escapeHtml(String(m.balance)) : ""}" data-balance-chrono="${m?.balanceChrono !== undefined && m?.balanceChrono !== null ? escapeHtml(String(m.balanceChrono)) : ""}" data-doc-new="${m?.docNew !== undefined && m?.docNew !== null ? escapeHtml(String(m.docNew)) : ""}" data-doc-prev="${m?.docPrev !== undefined && m?.docPrev !== null ? escapeHtml(String(m.docPrev)) : ""}" style="margin-top:6px">📄 فاتورة مرتجع PDF</button>
+                    <button class="button secondary mini-button" type="button" data-action="gen-movement-doc" data-debit="0" data-credit="${escapeHtml(String(m?.credit || 0))}" data-date="${escapeHtml(m?.date || "")}" data-notes="${escapeHtml(m?.notes || "")}" data-balance="${m?.balance !== undefined && m?.balance !== null ? escapeHtml(String(m.balance)) : ""}" data-balance-chrono="${m?.balanceChrono !== undefined && m?.balanceChrono !== null ? escapeHtml(String(m.balanceChrono)) : ""}" data-doc-new="${m?.docNew !== undefined && m?.docNew !== null ? escapeHtml(String(m.docNew)) : ""}" data-doc-prev="${m?.docPrev !== undefined && m?.docPrev !== null ? escapeHtml(String(m.docPrev)) : ""}" data-bill-guid="${escapeHtml(String(m?.billGuid || ""))}"${movementLinkAttrs(m)} style="margin-top:6px">📄 فاتورة مرتجع PDF</button>
                   </div>
                 </div>`).join("")
               : '<p class="muted" style="padding:12px 0">لا توجد مرتجعات مسجلة.</p>'}
@@ -7178,7 +7313,7 @@ function customerDetailsPanel(item) {
                     <strong class="payment-amount">دفعة: ${escapeHtml(formatMoney(Number(m?.credit || 0)))}</strong>
                     <span class="payment-date">${escapeHtml(m?.date ? formatDate(m.date) : "بلا تاريخ")}</span>
                     ${m?.notes ? `<small class="payment-note">${escapeHtml(m.notes)}</small>` : ""}
-                    <button class="button secondary mini-button" type="button" data-action="gen-movement-doc" data-debit="0" data-credit="${escapeHtml(String(m?.credit || 0))}" data-date="${escapeHtml(m?.date || "")}" data-notes="${escapeHtml(m?.notes || "")}" data-balance="${m?.balance !== undefined && m?.balance !== null ? escapeHtml(String(m.balance)) : ""}" data-balance-chrono="${m?.balanceChrono !== undefined && m?.balanceChrono !== null ? escapeHtml(String(m.balanceChrono)) : ""}" data-doc-new="${m?.docNew !== undefined && m?.docNew !== null ? escapeHtml(String(m.docNew)) : ""}" data-doc-prev="${m?.docPrev !== undefined && m?.docPrev !== null ? escapeHtml(String(m.docPrev)) : ""}" style="margin-top:6px">📄 سند قبض PDF</button>
+                    <button class="button secondary mini-button" type="button" data-action="gen-movement-doc" data-debit="0" data-credit="${escapeHtml(String(m?.credit || 0))}" data-date="${escapeHtml(m?.date || "")}" data-notes="${escapeHtml(m?.notes || "")}" data-balance="${m?.balance !== undefined && m?.balance !== null ? escapeHtml(String(m.balance)) : ""}" data-balance-chrono="${m?.balanceChrono !== undefined && m?.balanceChrono !== null ? escapeHtml(String(m.balanceChrono)) : ""}" data-doc-new="${m?.docNew !== undefined && m?.docNew !== null ? escapeHtml(String(m.docNew)) : ""}" data-doc-prev="${m?.docPrev !== undefined && m?.docPrev !== null ? escapeHtml(String(m.docPrev)) : ""}" data-bill-guid="${escapeHtml(String(m?.billGuid || ""))}"${movementLinkAttrs(m)} style="margin-top:6px">📄 سند قبض PDF</button>
                   </div>
                 </div>`).join("")
               : '<p class="muted" style="padding:12px 0">لا توجد دفعات مسجلة.</p>'}
@@ -12257,7 +12392,11 @@ function render() {
         ? Number(el.dataset.docNew) : docBal;
       const storedDocPrev = el.dataset.docPrev !== undefined && el.dataset.docPrev !== ""
         ? Number(el.dataset.docPrev) : null;
-      if (debit > 0 && credit <= 0) {
+      if (debit > 0 && credit <= 0 && isReturnLegMovement(movementFromDataset(el.dataset, 0))) {
+        // سطر حسم على قيد مرتجع (BillType=3) — ليس فاتورة بيع، ومطابقته بفاتورة
+        // بالتاريخ وحده كانت تطبع فاتورة أخرى من نفس اليوم.
+        showNoticeNow("error", "هذا السطر جزء من قيد مرتجع (حسمه) وليس فاتورة — صدّر المرتجع نفسه من قائمة المرتجعات.");
+      } else if (debit > 0 && credit <= 0) {
         // الزبون يُمرَّر كعنصر (يحمل customerGuid) لا كاسم — الاسم في تقرير الفواتير
         // مصدره حقل نصّي آخر في الأمين وقد يتخلّف عن اسم الحساب بعد أي تعديل.
         const invs = customerInvoicesFor(item).filter((x) => !x.isReturn);
@@ -12312,20 +12451,18 @@ function render() {
           );
         }
       } else if (credit > 0) {
-        // مرتجع المبيعات يُقيَّد دائناً كالدفعة تماماً — نطابقه أولاً بفاتورة مرتجع فعلية
-        // (بالتاريخ والمبلغ، إذ لا معرّف قيد لقيود المرتجع) لنصدّره كفاتورة مرتجع مع أصنافها.
-        const retMatch = findReturnInvoiceForMovement(item, { date: el.dataset.date, credit });
-        if (retMatch) {
-          const opts = { ...base, cur: "$", type: "return", amount: retMatch.total || credit, no: retMatch.number ? String(retMatch.number) : docNumber("RET"), lines: retMatch.lines || [] };
-          if (storedDocNew !== null && Number.isFinite(storedDocNew)) {
-            opts.newBalance = roundPrice(storedDocNew);
-            const prev = (storedDocPrev !== null && Number.isFinite(storedDocPrev)) ? storedDocPrev : (storedDocNew + credit);
-            opts.prevBalance = roundPrice(prev);
+        // مرتجع المبيعات يُقيَّد دائناً كالدفعة تماماً — نفرزه بربط قيده بفاتورة مرتجع
+        // (er000)، وأرصدته من قيده المربوط وحده (`returnDocLedger`)، لا الرصيد الحالي.
+        const mv = movementFromDataset(el.dataset, credit);
+        if (isReturnCreditMovement(item, mv)) {
+          const retMatch = findReturnInvoiceForMovement(item, mv);
+          if (!retMatch) {
+            // مرتجع مؤكَّد بقيده، وتفاصيله (أصنافه) خارج آخر مزامنة للفواتير. لا نطبعه
+            // سند قبض بدلاً منه.
+            showNoticeNow("error", `هذه الحركة مرتجع مبيعات، وتفاصيله غير موجودة في آخر مزامنة للفواتير. ${customerInvoicesEmptyText(item)}`);
           } else {
-            opts.balance = customerBalance(item);
-            opts.balanceLabel = "الرصيد بعد المرتجع";
+            exportVoucherPdf(returnVoucherOptions({ ...base, cur: "$" }, retMatch, mv));
           }
-          exportVoucherPdf(opts);
         } else {
           const opts = { ...base, type: "receipt", amount: credit, no: docNumber("R") };
           if (storedDocNew !== null && Number.isFinite(storedDocNew)) {
@@ -12386,13 +12523,19 @@ function render() {
           no: inv.number ? String(inv.number) : docNumber(inv.isReturn ? "RET" : "INV"),
           lines: inv.lines || []
         };
+        // المرتجع: أرصدته من قيده المربوط بمعرّفه (er000) وحده — لا الرصيد الحالي أبداً،
+        // وما لم يُثبت يخرج بلا أرصدة مع السبب (`returnDocLedger`).
+        if (inv.isReturn) {
+          const ledgerCustomer = custItem || { name: custName, customerGuid: inv.customerGuid };
+          exportVoucherPdf(returnVoucherOptions(opts, inv, returnLedgerMovement(ledgerCustomer, inv)));
+          return;
+        }
         // الرصيد قبل/بعد الفاتورة من قيدها في دفتر الأمين. نستعمل الرصيد **الزمني الحقيقي**
         // (balanceChrono) لا رصيد ترتيب-الكشف، كي لا يتضخّم رصيد الفاتورة إن جاءت دفعة بينها
         // وبين فاتورة أخرى في نفس اليوم. المطابقة بالمعرّف أو بالتاريخ/المبلغ (المعرّف قد يكون صفرياً).
-        // قيود المرتجع لا تحمل معرّف قيد، فتُستثنى وتعرض الرصيد الحالي فقط.
-        // عند أي خطأ في حساب الرصيد نتجاهله ونعرض الرصيد الحالي فقط — دون منع تصدير الفاتورة.
+        // عند أي خطأ في حساب الرصيد نتجاهله — دون منع تصدير الفاتورة.
         try {
-          const mv = inv.isReturn ? null : invoiceMovement(custName, inv);
+          const mv = invoiceMovement(custName, inv);
           const db = mv ? movementDocBalances(mv) : null;
           if (db && Number.isFinite(db.newBalance) && Number.isFinite(db.prevBalance)) {
             opts.newBalance = roundPrice(db.newBalance);
@@ -12411,10 +12554,6 @@ function render() {
               opts.prevBalance + invoiceTotal - knownDiscount - knownPayment - opts.newBalance
             );
             if (Math.abs(adjust) > 0.009) opts.adjust = adjust;
-          } else if (inv.isReturn) {
-            // المرتجع كما كان: قيوده بلا معرّف فتُستثنى أصلاً من مطابقة الدفتر.
-            opts.balance = custItem ? customerBalance(custItem) : null;
-            opts.balanceLabel = "الرصيد بعد المرتجع";
           } else {
             // لا قيد لهذه الفاتورة في الدفتر. تفسيران لا يميّزهما الغياب وحده:
             //   • الدفتر محمَّل ويغطّي تاريخها ⇒ ثبت أنها ليست حركة على ذمة
@@ -12432,12 +12571,7 @@ function render() {
           }
         } catch (_balErr) {
           // خطأ في حساب الرصيد لا يمنع تصدير الفاتورة، ولا يبرّر طبع رقم
-          // لا نثق به على مستند يُسلَّم للزبون: المرتجع يبقى على سلوكه،
-          // والفاتورة تخرج بلا سطر رصيد.
-          if (inv.isReturn) {
-            opts.balance = custItem ? customerBalance(custItem) : null;
-            opts.balanceLabel = "الرصيد بعد المرتجع";
-          }
+          // لا نثق به على مستند يُسلَّم للزبون: الفاتورة تخرج بلا سطر رصيد.
         }
         exportVoucherPdf(opts);
       } catch (error) {

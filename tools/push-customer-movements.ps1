@@ -97,6 +97,13 @@ WHERE cu.CustomerName IS NOT NULL AND LTRIM(RTRIM(cu.CustomerName)) <> ''
     foreach ($n in @($dupNames.Keys)) { $guidByName.Remove($n) }
 
     # (2) حركات الفترة لكل زبون
+    # حارس الربط: قيد واحد لا يُنسب إلا لفاتورة واحدة. لو ظهر قيد بأكثر من er فاتورة
+    # لتضاعفت أسطره بالـJOIN أدناه وفسدت الأرصدة المتحركة — نوقف الرفع بدل نشر أرقام خاطئة.
+    $guardCmd = $conn.CreateCommand()
+    $guardCmd.CommandText = "SELECT COUNT(*) FROM (SELECT EntryGUID FROM dbo.er000 WHERE ParentType = 2 GROUP BY EntryGUID HAVING COUNT(*) > 1) x"
+    $multiLinked = [int]$guardCmd.ExecuteScalar()
+    if ($multiLinked -gt 0) { throw "er000: $multiLinked قيد مربوط بأكثر من فاتورة — أُوقف الرفع كي لا تتضاعف الحركات." }
+
     $movements = @{}
     $cmd = $conn.CreateCommand()
     # الرصيد المتحرك يُحسب بدالة نافذة على كل قيود الحساب. ترتيب كشف الأمين داخل اليوم:
@@ -115,9 +122,14 @@ WITH led AS (
            CAST(COALESCE(en.Debit,0)  AS decimal(18,3)) AS debit,
            CAST(COALESCE(en.Credit,0) AS decimal(18,3)) AS credit,
            LEFT(COALESCE(en.Notes,''), 70) AS notes,
-           -- معرّف الفاتورة المولِّدة للقيد: BiGUID قد يشير لرأس الفاتورة مباشرة أو لسطرها
-           -- (فنصعد للرأس عبر bi000.ParentGUID) — لربط قطعي بين القيد والفاتورة في الموقع.
-           COALESCE(LOWER(CAST(COALESCE(bib.ParentGUID, en.BiGUID) AS varchar(40))), '') AS bill_guid,
+           -- معرّف الفاتورة المولِّدة للقيد من er000 (ParentType=2 ⇐ bu000). مُثبت على
+           -- AmnDb002 (2026-09-23): كل قيد له er واحد وكل فاتورة قيد واحد، أما en.BiGUID
+           -- فصفري في كل أسطر حسابات الزبائن (2378/2378) فلا يصلح للربط إطلاقاً.
+           -- ParentType=4 سندات (py000) — تبقى بلا معرّف فاتورة عمداً.
+           CASE WHEN er.ParentType = 2 THEN LOWER(CAST(er.ParentGUID AS varchar(40))) ELSE '' END AS bill_guid,
+           -- نوع الفاتورة (bt000.BillType): 1 بيع، 3 مرتجع مبيعات، ... NULL لغير الفواتير.
+           -- يفصل رجل المرتجع عن رجل فاتورة البيع (دفعة/حسم) دون الاعتماد على نافذة تقرير الفواتير.
+           bt.BillType AS bill_type,
            CAST(SUM(COALESCE(en.Debit,0) - COALESCE(en.Credit,0))
                 OVER (PARTITION BY en.AccountGUID
                       ORDER BY COALESCE(CASE WHEN ce.Date >= '2000-01-01' THEN ce.Date END, en.Date),
@@ -142,7 +154,9 @@ WITH led AS (
     FROM dbo.en000 en
     JOIN dbo.cu000 cu ON cu.AccountGUID = en.AccountGUID
     LEFT JOIN dbo.ce000 ce ON ce.GUID = en.ParentGUID
-    LEFT JOIN dbo.bi000 bib ON bib.GUID = en.BiGUID
+    LEFT JOIN dbo.er000 er ON er.EntryGUID = en.ParentGUID AND er.ParentType = 2
+    LEFT JOIN dbo.bu000 bu ON bu.GUID = er.ParentGUID
+    LEFT JOIN dbo.bt000 bt ON bt.GUID = bu.TypeGUID
     WHERE (COALESCE(en.Debit,0) > 0 OR COALESCE(en.Credit,0) > 0)
       AND cu.CustomerName IS NOT NULL AND LTRIM(RTRIM(cu.CustomerName)) <> ''
       AND (cu.bHide IS NULL OR cu.bHide = 0)
@@ -161,7 +175,8 @@ SELECT name, dt, debit, credit, notes, bill_guid, balance, balanceChrono,
             THEN FIRST_VALUE(balanceChrono - (debit - credit)) OVER (PARTITION BY acct, parent
                    ORDER BY dt, isopen, sortdt, cenum, num
                    ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
-            ELSE balanceChrono - (debit - credit) END AS docPrev
+            ELSE balanceChrono - (debit - credit) END AS docPrev,
+       bill_type
 FROM led
 WHERE dt >= @fromDate
 ORDER BY name, dt, isopen, iscredit, sortdt, cenum, num
@@ -181,6 +196,9 @@ ORDER BY name, dt, isopen, iscredit, sortdt, cenum, num
             balanceChrono = [double]$r.GetValue(7)
             docNew   = [double]$r.GetValue(8)
             docPrev  = [double]$r.GetValue(9)
+            # null لغير الفواتير (سند/قيد يدوي). المفتاح حاضر دائماً: حضوره علامة أن
+            # billGuid في هذه الحركة جاء من ربط er000 لا من BiGUID الصفري القديم.
+            billType = $(if ($r.IsDBNull(10)) { $null } else { [int]$r.GetValue(10) })
         })
     }
     $r.Close()
@@ -263,6 +281,9 @@ ORDER BY name, dt, isopen, iscredit, sortdt, cenum, num
         summary     = @{
             periodDays  = $PeriodDays
             fromDate    = $fromIso
+            # ربط القيد بفاتورته قطعي عبر er000 (billGuid + billType) — الموقع لا يطابق
+            # المرتجع بالتاريخ/المبلغ متى حمل التقرير هذه العلامة.
+            billLink    = "er000"
             customers   = $items.Count
             syncedAt    = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
         }

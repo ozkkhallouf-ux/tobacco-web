@@ -86,6 +86,7 @@ export const CHECKS = [
   'check-purchase-recommendation.mjs',
   'check-push-expense-entries-dryrun-safety.mjs',
   'check-replace-path-item-guid.mjs',
+  'check-return-ledger-link.mjs',
   'check-sales-invoice-print-grace.mjs',
   'check-sales-line-items-pipeline.mjs',
   'check-sales-line-items-registration.mjs',
