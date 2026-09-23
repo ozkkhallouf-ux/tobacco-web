@@ -1349,9 +1349,16 @@ function invoiceLineCandidates(line) {
 }
 
 // سقف خطوات البحث. البحث مقلّم بالفروق مرتّبةً تنازلياً وبمجاميع اللاحقة، فينتهي
-// عملياً بمئات الخطوات (180 فاتورة حقيقية في 30 مللي ثانية)؛ السقف حماية من
-// فاتورة شاذة لا أكثر، وتجاوزه يعني «لا حكم» فيبقى السلوك القديم.
-const INVOICE_BASIS_SEARCH_BUDGET = 200000;
+// عملياً بمئات الخطوات على الفاتورة العادية؛ السقف حماية من فاتورة شاذة لا أكثر،
+// وتجاوزه يعني «لا حكم» فيبقى السلوك القديم.
+//
+// **العطل المُثبت 2026-09-23:** فاتورة مبيعات من 193 سطراً (129 مجموعة فروق،
+// الإجمالي لا يطابق أياً من الأساسين وحده) يقع توزيعها المضبوط عند الخطوة
+// 356037 بالترتيب نفسه — أخذ الصفر أولاً للفرق الأكبر. السقف 200000 كان
+// يستسلم قبلها فيرجع «لا حكم»، فتُطبَع كل الأسطر بأساس الكرتونة ويقل مجموعها
+// عن إجمالي الأمين بآلاف الدولارات رغم أن التعديل وصل في لقطة المزامنة.
+// السقف الجديد يغطي تلك الفاتورة بهامش ويبقى حدّاً لا بحثاً مفتوحاً.
+const INVOICE_BASIS_SEARCH_BUDGET = 1000000;
 
 // «مضبوط» = نصف قرش. المبالغ بثلاث خانات عشرية، فأي فرق أصغر خطأ عائم لا أكثر.
 const INVOICE_BASIS_EXACT_TOLERANCE = 0.005;
@@ -12835,15 +12842,34 @@ function render() {
 
 boot();
 
+// هل تُستطلع لقطة فواتير الأمين في الخلفية، ومتى يُعاد رسم الشاشة.
+// صفحات الأرصدة والتقارير تُحدَّث كل دقيقة أصلاً. شاشة «الفواتير السابقة» داخل
+// المبيعات لم تكن بينها، فتبويب مفتوح عليها يبقى على اللقطة التي حُمّلت عند
+// فتحه: تعديل فاتورة في الأمين يصل خلال دورة المزامنة ولا يظهر حتى يغادر
+// المستخدم الشاشة. نُدخلها في نفس الدورة، ونعيد الرسم فقط حين تتغيّر اللقطة
+// كي لا تُطوى فاتورة مفتوحة كل دقيقة بلا وصول بيانات جديدة.
+function customerInvoiceAutoRefresh(route, salesHistoryOpen) {
+  const backgroundRoutes = ["ameen", "balances", "pricing", "dashboard", "payments"];
+  const history = route === "sales" && !!salesHistoryOpen;
+  return {
+    poll: backgroundRoutes.includes(route) || history,
+    repaintOnlyWhenInvoicesChange: history && !backgroundRoutes.includes(route)
+  };
+}
+
 setInterval(() => {
   if (isInventoryCounter()) return;
   // لا نقاطع المستخدم أثناء الكتابة في نموذج
   const active = document.activeElement;
   if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.tagName === "SELECT")) return;
-  const autoRefreshRoutes = ["ameen", "balances", "pricing", "dashboard", "payments"];
-  if (autoRefreshRoutes.includes(state.route) && (!dataStore.isConfigured() || state.session)) {
+  const refresh = customerInvoiceAutoRefresh(state.route, state.salesHistoryOpen);
+  if (refresh.poll && (!dataStore.isConfigured() || state.session)) {
+    const invoiceStamp = reportSyncedAt(state.customerInvoicesReport);
     Promise.all([loadInventoryReports(), loadCustomerBalanceReports(), loadCustomerCreditLimits(), loadApprovedPriceItems()])
-      .then(() => render())
+      .then(() => {
+        if (refresh.repaintOnlyWhenInvoicesChange && reportSyncedAt(state.customerInvoicesReport) === invoiceStamp) return;
+        render();
+      })
       .catch(() => {});
   }
 }, 60000);
