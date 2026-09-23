@@ -6325,7 +6325,29 @@ function voucherInvoiceBalanceRows(rows, v, cur, balCur, isRet) {
   } else if (Number(v.adjust || 0) < -0.009) {
     rows.push({ label: "إضافة / تسوية", value: `+ ${money(Math.abs(v.adjust))} ${cur}`, tone: "deb" });
   }
+  pushInvoiceRoundingDrift(rows, v, cur, balCur, isRet);
   rows.push({ label: "الرصيد الجديد", value: balanceText(v.newBalance, balCur, money), strong: true });
+}
+
+// فاتورة البيع تُقرِّب كل مبلغ لمنزلتين وحده، فقد يخالف مجموعُ المطبوع الرصيدَ الجديد
+// المطبوع بسنت: 100.004 + 44.504 = 144.508 ⇒ «100.00 + 44.50 = 144.51». الرصيد الجديد
+// يبقى رصيد الأمين نفسه، والفرق سطر صريح كي لا تناقض الفاتورة معادلتها. يُحسب من النصوص
+// المطبوعة نفسها (والرصيد دون السنت يُطبع «مسدّد» أي صفراً). لا سطر للمرتجع (صياغته
+// باقية)، ولا إن تطابقت، أو اختلفت العملتان (لا معادلة أصلاً)، أو تجاوز الفرق ما يصنعه
+// التقريب — ذاك ليس فرق تقريب.
+function pushInvoiceRoundingDrift(rows, v, cur, balCur, isRet) {
+  if (isRet || cur !== balCur) return;
+  const cents = (x) => Math.round(Number(formatInvoiceMoney(x).replace(/,/g, "")) * 100);
+  const balCents = (b) => (Math.abs(roundPrice(b)) < 0.01 ? 0 : cents(roundPrice(b)));
+  const shownCredit = (x) => (Number(x || 0) > 0.009 ? cents(x) : 0);
+  const adjust = Math.abs(Number(v.adjust || 0)) > 0.009 ? cents(v.adjust) : 0;
+  const printed = balCents(v.prevBalance) + cents(v.amount || 0)
+    - shownCredit(v.discount) - shownCredit(v.payment) - adjust;
+  const drift = balCents(v.newBalance) - printed;
+  if (drift === 0 || Math.abs(drift) > 3) return;
+  rows.push(drift > 0
+    ? { label: "فرق تقريب", value: `+ ${formatInvoiceMoney(drift / 100)} ${cur}`, tone: "deb" }
+    : { label: "فرق تقريب", value: `− ${formatInvoiceMoney(-drift / 100)} ${cur}`, tone: "cred" });
 }
 
 // شقّ الرصيد المفرد (السندات وما لا رصيد جديد له). خرج من `voucherLedgerRows`

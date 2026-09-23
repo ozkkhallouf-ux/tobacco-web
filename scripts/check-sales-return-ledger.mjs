@@ -59,7 +59,8 @@ const PATTERNS = {
   movementsReportCovers: /function movementsReportCovers\(dateStr\) \{[\s\S]*?\n\}\n/,
   formatInvoiceMoney: /function formatInvoiceMoney\(value\) \{[\s\S]*?\n\}\n/,
   balanceText: /function balanceText\(bal, cur, money = formatMoney\) \{[\s\S]*?\n\}\n/,
-  voucherInvoiceBalanceRows: /function voucherInvoiceBalanceRows\(rows, v, cur, balCur, isRet\) \{[\s\S]*?\n\}\n/
+  voucherInvoiceBalanceRows: /function voucherInvoiceBalanceRows\(rows, v, cur, balCur, isRet\) \{[\s\S]*?\n\}\n/,
+  pushInvoiceRoundingDrift: /function pushInvoiceRoundingDrift\(rows, v, cur, balCur, isRet\) \{[\s\S]*?\n\}\n/
 };
 
 const source = [];

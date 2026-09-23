@@ -55,6 +55,7 @@ const PATTERNS = {
   voucherLedgerRows: /function voucherLedgerRows\(v\) \{[\s\S]*?\n\}\n/,
   voucherAccountBalanceRow: /function voucherAccountBalanceRow\(rows, v, balCur\) \{[\s\S]*?\n\}\n/,
   voucherInvoiceBalanceRows: /function voucherInvoiceBalanceRows\(rows, v, cur, balCur, isRet\) \{[\s\S]*?\n\}\n/,
+  pushInvoiceRoundingDrift: /function pushInvoiceRoundingDrift\(rows, v, cur, balCur, isRet\) \{[\s\S]*?\n\}\n/,
   voucherSingleBalanceRows: /function voucherSingleBalanceRows\(rows, v, cur, balCur, isInv, isRet, balLabel\) \{[\s\S]*?\n\}\n/
 };
 
@@ -219,6 +220,44 @@ test("فاتورة البيع وحدها بمنزلتين: القيمة الكب
   assert.match(appJs, /amountText: \(kind === "invoice" \? formatInvoiceMoney : formatMoney\)\(v\.amount \|\| 0\),/);
   assert.match(appJs, /escapeHtml\(\(isInv \? formatInvoiceMoney : formatMoney\)\(v\.amount \|\| 0\)\)/);
   assert.match(appJs, /const money = isRet \? formatMoney : formatInvoiceMoney;/);
+});
+
+// مراجعة Codex (P1): تقريب كل مبلغ وحده قد يجعل الفاتورة تناقض معادلتها بسنت.
+const shownCents = (text) => Math.round(Number(String(text).replace(/[^\d.\-−]/g, "").replace("−", "-")) * 100);
+test("فاتورة البيع: المطبوع يحقّق معادلته — فرق التقريب سطر صريح والرصيد الجديد رصيد الأمين", () => {
+  const rows = voucherLedgerRows({ type: "invoice", cur: "$", amount: 44.504, prevBalance: 100.004, newBalance: 144.508 });
+  assert.deepEqual(labels(rows), ["التاريخ", "الرصيد السابق", "قيمة هذه الفاتورة", "فرق تقريب", "الرصيد الجديد"]);
+  assert.equal(row(rows, "الرصيد السابق").value, "100.00 $ (عليكم)");
+  assert.equal(row(rows, "قيمة هذه الفاتورة").value, "44.50 $");
+  assert.equal(row(rows, "فرق تقريب").value, "+ 0.01 $");
+  assert.equal(row(rows, "الرصيد الجديد").value, "144.51 $ (عليكم)");
+  const sum = shownCents(row(rows, "الرصيد السابق").value) + shownCents(row(rows, "قيمة هذه الفاتورة").value)
+    + shownCents(row(rows, "فرق تقريب").value);
+  assert.equal(sum, shownCents(row(rows, "الرصيد الجديد").value));
+});
+
+test("فرق التقريب بالاتجاه الآخر، ومع الحسم والدفعة", () => {
+  const rows = voucherLedgerRows({ type: "invoice", cur: "$", amount: 10.005, prevBalance: 0.005 + 20, newBalance: 30.01 - 0.335 - 0.335, discount: 0.335, payment: 0.335 });
+  // المطبوع: 20.01 + 10.01 − 0.34 − 0.34 = 29.34، والرصيد 29.34 ⇒ لا سطر.
+  assert.ok(!labels(rows).includes("فرق تقريب"), JSON.stringify(labels(rows)));
+  const neg = voucherLedgerRows({ type: "invoice", cur: "$", amount: 10.005, prevBalance: 10.005, newBalance: 20.01 - 0.006 });
+  // 10.01 + 10.01 = 20.02، والرصيد 20.004 ⇒ 20.00: فرق −0.02.
+  assert.equal(row(neg, "فرق تقريب").value, "− 0.02 $");
+  assert.equal(row(neg, "فرق تقريب").tone, "cred");
+});
+
+test("لا سطر فرق تقريب لفاتورة 830، ولا للمرتجع، ولا حين تختلف عملة الفاتورة عن عملة الرصيد", () => {
+  const inv = voucherLedgerRows({ type: "invoice", cur: "$", amount: 34360.328, prevBalance: 0, newBalance: 34359.998, discount: 0.33 });
+  assert.ok(!labels(inv).includes("فرق تقريب"));
+  const ret = voucherLedgerRows({ type: "return", cur: "$", amount: 44.504, prevBalance: 144.508, newBalance: 100.004 });
+  assert.ok(!labels(ret).includes("فرق تقريب"));
+  const syp = voucherLedgerRows({ type: "invoice", cur: "ل.س", balanceCur: "$", amount: 44.504, prevBalance: 100.004, newBalance: 144.508 });
+  assert.ok(!labels(syp).includes("فرق تقريب"));
+});
+
+test("فرق أكبر من التقريب لا يُسمّى «فرق تقريب»", () => {
+  const rows = voucherLedgerRows({ type: "invoice", cur: "$", amount: 44.5, prevBalance: 100, newBalance: 144.55 });
+  assert.ok(!labels(rows).includes("فرق تقريب"));
 });
 
 test("المرتجع وسند القبض باقيان على صياغتهما (القرار لفاتورة البيع وحدها)", () => {
