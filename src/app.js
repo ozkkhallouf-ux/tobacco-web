@@ -1238,16 +1238,17 @@ function invoiceDiscountCreditLine(customer, movement) {
   if (!has(movement?.docPrev) || !has(movement?.docNew)) return null;
   const moves = customerFullMovements(customer)?.movements;
   if (!Array.isArray(moves)) return null;
-  const d = String(movement?.date || "").slice(0, 10);
+  const dayOf = (x) => String(x?.date || "").slice(0, 10);
+  const d = dayOf(movement);
   const same = (a, b) => Math.abs(roundPrice(a) - roundPrice(b)) < 0.0005;
-  const siblings = moves.filter((m) => Number(m?.debit || 0) > 0 && !(Number(m?.credit || 0) > 0)
-    && String(m?.date || "").slice(0, 10) === d && has(m?.docPrev) && has(m?.docNew)
-    && same(m.docPrev, movement.docPrev) && same(m.docNew, movement.docNew)
-    && !movementReturnLink(m));
+  const sameDoc = (a, b) => has(a) && same(a, b);
+  const onSameEntry = (m) => sameDoc(m?.docPrev, movement.docPrev) && sameDoc(m?.docNew, movement.docNew);
+  const isPlainDebit = (m) => Number(m?.debit || 0) > 0 && !(Number(m?.credit || 0) > 0);
+  const siblings = moves.filter((m) => isPlainDebit(m) && dayOf(m) === d && onSameEntry(m) && !movementReturnLink(m));
   if (siblings.length !== 1) return null;
   const debit = Number(siblings[0].debit);
-  const invs = customerInvoicesFor(customer).filter((x) => x && !x.isReturn
-    && String(x.date || "").slice(0, 10) === d && same(x.total, debit) && same(x.discount, credit));
+  const matchesEntry = (x) => same(x.total, debit) && same(x.discount, credit);
+  const invs = customerInvoicesFor(customer).filter((x) => x && !x.isReturn && dayOf(x) === d && matchesEntry(x));
   if (invs.length !== 1 || same(invs[0].payment, credit)) return null;
   return invs[0];
 }
