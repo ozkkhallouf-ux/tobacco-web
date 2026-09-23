@@ -114,6 +114,16 @@ const OZK_INVOICE = (() => {
     }
   };
 
+  // «OZK TOBACCO» داخل جملة عربية يُعزل اتجاهياً. html2canvas (PDF الهاتف) يرسم كل كلمة
+  // من الحافة اليسرى لمستطيلها ومعها ما يلاصقها من محايد، فبلا عزل تقع النقطة أو « —»
+  // يسار «OZK» ويرسم «TOBACCO» فوقها (مرتجع #37 على iPhone). والمسافة قبل العبارة في
+  // عنصرها وحدها: لو بقيت ذيلاً للكلمة العربية لرُسمت الكلمة ملاصقة للعبارة. النص نفسه
+  // لم يتغيّر حرفاً. يُطبَّق بعد الهروب، فلا يمرّ منه إلا هذا الوسم.
+  const BRAND = "<span> </span><bdi>OZK TOBACCO</bdi>";
+  function isolateBrand(html) {
+    return String(html).split(" OZK TOBACCO").join(BRAND);
+  }
+
   // ==========================================================================
   // 4) LEGAL — صفة البيع والسجل التجاري.
   //    مصدر الحقيقة واحد: الثابتان `SALES_TRADE_CAPACITY` و
@@ -246,10 +256,10 @@ const OZK_INVOICE = (() => {
         <div class="big" style="color:${doc.amountColor || kind.amountColor}"><bdi>${esc(doc.amountText || "")} ${esc(cur)}</bdi></div></div>
     </div>${itemsTable}
     <table>${infoRows}</table>
-    <p class="muted" style="margin:8px 0 0">${esc(doc.note || kind.note)}</p>
+    <p class="muted" style="margin:8px 0 0">${isolateBrand(esc(doc.note || kind.note))}</p>
     ${kind.legal ? legalBox(esc) : ""}
     ${kind.seal ? SEAL : ""}
-    <div class="rfoot"><span>صادر آليًا عن نظام OZK TOBACCO · رقم المركز: 0994092038</span><span dir="ltr">0985000771 — 0984000662</span></div>
+    <div class="rfoot"><span>صادر آليًا عن نظام${BRAND} · رقم المركز: 0994092038</span><span dir="ltr">0985000771 — 0984000662</span></div>
   </div>`;
   }
 

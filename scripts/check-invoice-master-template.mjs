@@ -232,7 +232,8 @@ test("النص القانوني ورقم السجل من مصدر واحد في 
 });
 
 test("التذييل المرجعي كامل", () => {
-  assert.ok(reference.includes("صادر آليًا عن نظام OZK TOBACCO"), "سطر التذييل مفقود");
+  // «OZK TOBACCO» معزول اتجاهياً (تداخل الكلمتين في PDF الهاتف)؛ يحرسه check-invoice-brand-isolation.mjs.
+  assert.ok(reference.includes("صادر آليًا عن نظام<span> </span><bdi>OZK TOBACCO</bdi> · "), "سطر التذييل مفقود أو بلا عزل");
   assert.ok(reference.includes("رقم المركز: 0994092038"), "رقم المركز مفقود");
   assert.ok(/<span dir="ltr">0985000771 — 0984000662<\/span>/.test(reference), "هواتف التذييل مفقودة أو بلا عزل");
 });

@@ -1550,7 +1550,10 @@ function invoiceLineQtyParts(line) {
   const u2 = String(line?.unit2 || "").trim();
   const qty = Number(line?.qty || 0);
   const qtyUnits = Number(line?.qtyUnits || 0);
-  if (qtyUnits > 0 && u2) {
+  // كمية الوحدة الصغرى الكسرية (الأمين يسجّل العلب المفردة أعشارَ كروز: 107.6) تُعرض
+  // بوحدتها كما هي؛ تحويلها يطبع كسر كرتونة لا معنى له (2.152). مرتجع #37 على iPhone.
+  const fractionalUnit1 = qty > 0 && u1 && Math.abs(qty - Math.round(qty)) > 1e-9;
+  if (qtyUnits > 0 && u2 && !fractionalUnit1) {
     const hasDetail = qty > 0 && u1 && (qty !== qtyUnits || u1 !== u2);
     return {
       value: formatMoney(qtyUnits),

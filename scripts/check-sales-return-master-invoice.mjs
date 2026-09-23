@@ -138,7 +138,12 @@ const listOpts = (inv, name, docPrev, docNew) => applyReturnLedger({
 
 const NOTE_PROVEN = "هذا سند رسمي بقيمة البضاعة المرتجعة إلى OZK TOBACCO — خُصمت من رصيد حسابكم.";
 const NOTE_NEUTRAL = "هذا سند رسمي بقيمة البضاعة المرتجعة إلى OZK TOBACCO.";
-const noteOf = (html) => { const m = html.match(/<p class="muted" style="margin:8px 0 0">([^<]*)<\/p>/); return m ? m[1] : null; };
+// « OZK TOBACCO» معزول اتجاهياً داخل الملاحظة والتذييل (مرتجع #37 على iPhone): المسافة
+// في عنصرها والعبارة في <bdi>. نص الملاحظة يُقارن بلا وسم العزل، والعزل يُفحص في قسمه.
+const BRAND_ISOLATED = "<span> </span><bdi>OZK TOBACCO</bdi>";
+const unisolate = (html) => html.split(BRAND_ISOLATED).join(" OZK TOBACCO");
+const noteHtmlOf = (html) => { const m = html.match(/<p class="muted" style="margin:8px 0 0">([\s\S]*?)<\/p>/); return m ? m[1] : null; };
+const noteOf = (html) => { const n = noteHtmlOf(html); return n === null ? null : unisolate(n); };
 const BALANCE_WORDS = /الرصيد|رصيد الحساب|\(عليكم\)|\(لكم\)|مسدّد/;
 
 // ===== 1) #48: مرتجع زبون عادي =====
@@ -304,13 +309,20 @@ const GOLDEN = [
   ["مرتجع مشتريات (غير مدعوم هنا)", { type: "purchase_return", no: "PRET-1", date: "2026-09-06", name: "مورد", cur: "$", amount: 5, newBalance: 5, lines: SALE_LINES }, "837d979d46a98b1a5564b151c8da05ad2442b9a3a35d4f1cf3b188221751bde3"],
   ["نوع فارغ", { date: "2026-09-06", name: "س", amount: 5, balance: 1 }, "f3030f67cc8fb1a543546b512afe0ffc4baa7e5f0bffb4e37971562562c415de"]
 ];
+// الاستثناء الوحيد المعتمد بعد main: عزل «OZK TOBACCO» بـ<bdi> في ملاحظة القالب الرئيسي
+// وتذييله. البصمة تبقى بصمة main نفسها بعد إزالة وسم العزل وحده، فأي فرق آخر (رقم،
+// صف، نص، تخطيط) يُسقط الفحص. وعدد مواضع العزل مثبت: اثنان في القالب الرئيسي (الملاحظة
+// والتذييل)، وصفر في القالب القديم.
 if (process.argv.includes("--print-golden")) {
-  for (const [label, v] of GOLDEN) console.log(`${sha(voucherPdfMarkup(v))}  ${label}`);
+  for (const [label, v] of GOLDEN) console.log(`${sha(unisolate(voucherPdfMarkup(v)))}  ${label}`);
   process.exit(0);
 }
 for (const [label, v, hash] of GOLDEN) {
-  test(`لم يتغيّر بايتاً: ${label}`, () => {
-    assert.equal(sha(voucherPdfMarkup(v)), hash, "مخرجات مستند غير المرتجع تغيّرت");
+  test(`لم يتغيّر إلا عزل OZK TOBACCO: ${label}`, () => {
+    const html = voucherPdfMarkup(v);
+    assert.equal(sha(unisolate(html)), hash, "مخرجات مستند غير المرتجع تغيّرت بأكثر من عزل OZK TOBACCO");
+    const isolated = html.split(BRAND_ISOLATED).length - 1;
+    assert.equal(isolated, html.includes('class="ozk-inv"') ? 2 : 0, `مواضع العزل ${isolated}`);
   });
 }
 
@@ -321,7 +333,7 @@ test("البوابة: القبض والصرف وأي نوع غير المرتج�
   }
   const gate = appJs.match(/function voucherPdfMarkup\(v\) \{[\s\S]*?\n\}\n/)[0];
   assert.match(gate, /if \(\(isInv \|\| isRet\) && typeof OZK_INVOICE !== "undefined"/, "البوابة ليست isInv || isRet حرفياً");
-  assert.match(gate, /const isInv = v\.type === "invoice";\n  const isRet = v\.type === "return";/);
+  assert.match(gate, /const isInv = v\.type === "invoice";\n {2}const isRet = v\.type === "return";/);
 });
 
 test("فاتورة البيع: kind invoice وبديل INV وملاحظتها كما هي", () => {
@@ -331,7 +343,85 @@ test("فاتورة البيع: kind invoice وبديل INV وملاحظتها ك
   assert.equal(doc.note, undefined, "فاتورة البيع حملت ملاحظة بديلة");
 });
 
-// ===== 7) نقاط الدخول الثلاث القائمة =====
+// ===== 7) الكمية الكسرية بالوحدة الصغرى (مرتجع #37، فشل iPhone 2026-09-23) =====
+//
+// الأمين يسجّل العلب المفردة أعشارَ كروز (107.6). تحويلها إلى كسر كرتونة (2.152) لا
+// معنى له، فتُعرض الكمية بالكروز وحده. الكروز الصحيح يبقى على السلوك القائم.
+
+const LINES_37 = [
+  { material: "مادة و", qty: 107.6, qtyUnits: 2.152, unit1: "كروز", unit2: "كرتونة", price: 12.8, lineTotal: 1377.28, lineTotalSource: "derived" },
+  { material: "مادة ز", qty: 11.4, qtyUnits: 0.228, unit1: "كروز", unit2: "كرتونة", price: 14.2, lineTotal: 161.88, lineTotalSource: "derived" }
+];
+const INV_37 = { guid: "00000000-0000-4000-8000-000000000037", number: "37", date: "2026-08-31", total: 1539.16, discount: 0, payment: 0, isReturn: true, customerGuid: "00000000-0000-4000-8000-0000000000c1", lines: LINES_37 };
+const EXPECTED_37 = [
+  ["مادة و", "107.6 كروز", "640 $ / كرتونة", "1,377.28"],
+  ["مادة ز", "11.4 كروز", "710 $ / كرتونة", "161.88"]
+];
+
+test("#37: 107.6 كروز و11.4 كروز فقط، بلا كسر كرتونة، والسعر والقيمة كما كانا", () => {
+  const html = voucherPdfMarkup(listOpts(INV_37, "زبون ح", "", ""));
+  assert.deepEqual(cells(html), EXPECTED_37);
+  assert.ok(!/2\.152|0\.228/.test(visible(html)), "كسر الكرتونة ما زال مطبوعاً");
+  assert.deepEqual(own(sandbox.invoiceLineQtyParts(LINES_37[0])), { value: "107.6", unit: "كروز", detailValue: "", detailUnit: "" });
+  assert.deepEqual(own(sandbox.invoiceLineQtyParts(LINES_37[1])), { value: "11.4", unit: "كروز", detailValue: "", detailUnit: "" });
+  assert.equal(sandbox.invoiceLineQty(LINES_37[0]), "107.6 كروز");
+  assert.equal(sandbox.invoiceLineQty(LINES_37[1]), "11.4 كروز");
+});
+
+test("البيع والمرتجع يستعملان نفس قاعدة الكمية الكسرية", () => {
+  const sale = voucherPdfMarkup({ type: "invoice", name: "زبون ح", amount: 1539.16, cur: "$", date: "2026-08-31", no: "37", lines: LINES_37 });
+  assert.deepEqual(cells(sale), EXPECTED_37);
+  const ret = saleInvoiceDocument(listOpts(INV_37, "زبون ح", "", ""));
+  const inv = saleInvoiceDocument({ type: "invoice", amount: 1539.16, lines: LINES_37 });
+  assert.deepEqual(own(ret.lines), own(inv.lines));
+  // سطر البيع الوحيد بكروز كسري في بيانات الجهاز (فاتورة 1393).
+  assert.equal(sandbox.invoiceLineQty({ qty: 0.8, qtyUnits: 0.016, unit1: "كروز", unit2: "كرتونة" }), "0.8 كروز");
+});
+
+test("الكميات الصحيحة لم تتغيّر: 0.16 كرتونة (8 كروز) وأمثالها", () => {
+  const same = [
+    [{ qty: 8, qtyUnits: 0.16, unit1: "كروز", unit2: "كرتونة" }, { value: "0.16", unit: "كرتونة", detailValue: "8", detailUnit: "كروز" }, "0.16 كرتونة (8 كروز)"],
+    [{ qty: 50, qtyUnits: 1, unit1: "كروز", unit2: "كرتونة" }, { value: "1", unit: "كرتونة", detailValue: "50", detailUnit: "كروز" }, "1 كرتونة (50 كروز)"],
+    [{ qty: 25, qtyUnits: 0.5, unit1: "كروز", unit2: "كرتونة" }, { value: "0.5", unit: "كرتونة", detailValue: "25", detailUnit: "كروز" }, "0.5 كرتونة (25 كروز)"],
+    [{ qty: 3, qtyUnits: 0.125, unit1: "كروز", unit2: "شرحة" }, { value: "0.125", unit: "شرحة", detailValue: "3", detailUnit: "كروز" }, "0.125 شرحة (3 كروز)"],
+    [{ qty: 48, qtyUnits: 2, unit1: "كف", unit2: "كرتونة" }, { value: "2", unit: "كرتونة", detailValue: "48", detailUnit: "كف" }, "2 كرتونة (48 كف)"],
+    [{ qty: 175, qtyUnits: 3.5, unit1: "كروز", unit2: "كرتونة" }, { value: "3.5", unit: "كرتونة", detailValue: "175", detailUnit: "كروز" }, "3.5 كرتونة (175 كروز)"],
+    [{ qty: 5, qtyUnits: 5, unit1: "كرتونة", unit2: "كرتونة" }, { value: "5", unit: "كرتونة", detailValue: "", detailUnit: "" }, "5 كرتونة"],
+    [{ qty: 7, unit1: "كروز" }, { value: "7", unit: "كروز", detailValue: "", detailUnit: "" }, "7 كروز"],
+    [{ qty: 0, qtyUnits: 0, unit1: "كروز", unit2: "كرتونة" }, { value: "—", unit: "", detailValue: "", detailUnit: "" }, "—"]
+  ];
+  for (const [line, parts, text] of same) {
+    assert.deepEqual(own(sandbox.invoiceLineQtyParts(line)), parts, JSON.stringify(line));
+    assert.equal(sandbox.invoiceLineQty(line), text);
+  }
+  // شاهد #48 بكل أسطره الصحيحة بقي على حاله (خانة الكمية في اختبار #48 أعلاه).
+});
+
+// ===== 8) عزل «OZK TOBACCO» اتجاهياً (تداخل الكلمتين في PDF الهاتف) =====
+
+test("ملاحظة المرتجع (بقيد ومحايدة) والبيع والتذييل: OZK TOBACCO معزول، والنص المرئي كما هو حرفاً", () => {
+  const cases = [
+    [voucherPdfMarkup(movementOpts(INV_48, "زبون أ", 36273.646, 36120.426)), "هذا سند رسمي بقيمة البضاعة المرتجعة إلى<span> </span><bdi>OZK TOBACCO</bdi> — خُصمت من رصيد حسابكم."],
+    [voucherPdfMarkup(listOpts(INV_37, "زبون ح", "", "")), "هذا سند رسمي بقيمة البضاعة المرتجعة إلى<span> </span><bdi>OZK TOBACCO</bdi>."],
+    [voucherPdfMarkup({ type: "invoice", name: "زبون", amount: 1, lines: [] }), "هذه فاتورة صادرة عن<span> </span><bdi>OZK TOBACCO</bdi>."]
+  ];
+  for (const [html, note] of cases) {
+    assert.equal(noteHtmlOf(html), note);
+    assert.equal(noteOf(html).replace(/<[^>]+>/g, ""), note.replace(/<[^>]+>/g, ""), "النص المرئي للملاحظة تغيّر");
+    assert.ok(html.includes('<div class="rfoot"><span>صادر آليًا عن نظام<span> </span><bdi>OZK TOBACCO</bdi> · رقم المركز: 0994092038</span>'), "التذييل بلا عزل");
+    // الترويسة والختم عنصران مستقلان سليمان أصلاً: بلا تغيير.
+    assert.ok(html.includes('<div class="brand">OZK TOBACCO<small>') && html.includes('<div class="s-logo">OZK TOBACCO</div>'));
+  }
+});
+
+test("عزل الملاحظة يسبق الهروب: نص الملاحظة ما زال مُهرَّباً", () => {
+  const doc = saleInvoiceDocument({ type: "return", amount: 1, lines: [] });
+  doc.note = "<b>x</b> OZK TOBACCO";
+  const html = OZK_INVOICE.markup(doc);
+  assert.equal(noteHtmlOf(html), "&lt;b&gt;x&lt;/b&gt;<span> </span><bdi>OZK TOBACCO</bdi>");
+});
+
+// ===== 9) نقاط الدخول الثلاث القائمة =====
 
 test("نقاط الدخول الثلاث لمرتجع المبيعات موصولة بالمعالجَين القائمَين", () => {
   // E1 لوحة الزبون، E2 فواتير الزبون بصفحة التقارير، E3 الفواتير السابقة.
@@ -345,7 +435,7 @@ test("المعالجان وحدهما يبنيان مستند مرتجع، وك�
   assert.equal(retBuilders.length, 2, `مواضع بناء مستند المرتجع: ${retBuilders.length}`);
   const e1 = appJs.match(/if \(kind\.kind === "return"\) \{[\s\S]*?exportVoucherPdf\(opts\);/);
   assert.ok(e1 && /applyReturnLedger\(opts, retMatch, el\.dataset\.docPrev, el\.dataset\.docNew\)/.test(e1[0]), "E1 لم يعد يمرّ بأرصدة قيده");
-  const e2 = appJs.match(/data-action='gen-invoice-doc'\][\s\S]*?\n  \}\);\n/);
+  const e2 = appJs.match(/data-action='gen-invoice-doc'\][\s\S]*?\n {2}\}\);\n/);
   assert.ok(e2 && /applyReturnLedgerForBill\(opts, inv\)/.test(e2[0]) && /exportVoucherPdf\(opts\)/.test(e2[0]), "E2/E3 لم يعد يمرّ بأرصدة قيده");
   assert.equal((appJs.match(/OZK_INVOICE\.markup\(/g) || []).length, 1, "القالب الرئيسي يُستدعى من خارج voucherPdfMarkup");
 });
