@@ -375,8 +375,19 @@ test("المزامنة: er000 عبر OUTER APPLY بتجميع COUNT(*) = 1 — �
 
 test("المزامنة: الربط لقيود مرتجع المبيعات وحدها (ParentType = 2 وBillType = 3)", () => {
   assert.match(movementsPs, /WHERE er\.EntryGUID = en\.ParentGUID AND er\.ParentType = 2 AND rt\.BillType = 3/);
-  assert.match(movementsPs, /billLinks\s+= \$\(if \(\$buTypeCol\) \{ "er000-return-v1" \} else \{ \$null \}\)/);
+  assert.match(movementsPs, /billLinks\s+= \$\(if \(\$buTypeCol -and \$ambiguousReturnEntries -eq 0\) \{ "er000-return-v1" \} else \{ \$null \}\)/);
   assert.match(appJs, /const RETURN_LINK_MARKER = "er000-return-v1";/);
+});
+
+// ملاحظة Codex P1 على 7200a6a: ربط مبهم يُسقطه COUNT(*) = 1 لا يجوز أن يمرّ تحت علامة
+// «كل مرتجع مربوط»، وإلا صار قيد المرتجع سند قبض في الموقع.
+test("المزامنة: قيد مرتجع بأكثر من ربط يمنع رفع العلامة (لا يصير سند قبض)", () => {
+  const ps = movementsPs.replace(/\r\n/g, "\n");
+  assert.match(ps, /\$ambiguousReturnEntries = 0\n/, "القيمة الافتراضية صفر قبل الفحص");
+  assert.match(ps, /WHERE ae\.ParentType = 2 AND abt\.BillType = 3\n\s*GROUP BY ae\.EntryGUID\n\s*HAVING COUNT\(\*\) > 1/);
+  assert.match(ps, /\$ambiguousReturnEntries = \[int\]\$ambCmd\.ExecuteScalar\(\)/);
+  const marker = ps.match(/billLinks\s+= \$\(if \(([^)]*)\)/);
+  assert.ok(marker && /\$ambiguousReturnEntries -eq 0/.test(marker[1]), "العلامة مشروطة بصفر روابط مبهمة");
 });
 
 // ===== النتيجة =====

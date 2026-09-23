@@ -117,6 +117,7 @@ WHERE cu.CustomerName IS NOT NULL AND LTRIM(RTRIM(cu.CustomerName)) <> ''
     # اختيار واحد من عدة.
     $returnLinkApply = ""
     $returnLinkSel = "CAST(NULL AS varchar(40))"
+    $ambiguousReturnEntries = 0
     if ($buTypeCol) {
         $returnLinkApply = @"
     OUTER APPLY (
@@ -129,6 +130,26 @@ WHERE cu.CustomerName IS NOT NULL AND LTRIM(RTRIM(cu.CustomerName)) <> ''
 "@
         $returnLinkSel = "rl.ret_bill"
         Write-Log "ربط المرتجعات: er000 عبر bu000.$buTypeCol"
+        # حارس العلامة: قيد مرتجع بأكثر من ربط يُسقط COUNT(*) = 1 ربطه فيصل بلا billGuid،
+        # والتقرير الموسوم يجعل الموقع يقرأ كل قيد دائن بلا ربط سند قبض. فالعلامة («كل
+        # قيد مرتجع يحمل معرّف فاتورته») لا تُرفع إلا إن لم يسقط أي ربط؛ وإلا يُعامَل
+        # التقرير كقديم: لا يُطبع سند قبض لقيد يطابق مرتجعاً. (اليوم: صفر قيود كهذه.)
+        $ambCmd = $conn.CreateCommand()
+        $ambCmd.CommandText = @"
+SELECT COUNT(*) FROM (
+    SELECT ae.EntryGUID
+    FROM dbo.er000 ae
+    JOIN dbo.bu000 ab ON ab.GUID = ae.ParentGUID
+    JOIN dbo.bt000 abt ON abt.GUID = ab.[$buTypeCol]
+    WHERE ae.ParentType = 2 AND abt.BillType = 3
+    GROUP BY ae.EntryGUID
+    HAVING COUNT(*) > 1
+) x
+"@
+        $ambiguousReturnEntries = [int]$ambCmd.ExecuteScalar()
+        if ($ambiguousReturnEntries -gt 0) {
+            Write-Log "تنبيه: $ambiguousReturnEntries قيد مرتجع مربوط بأكثر من فاتورة — لا علامة ربط في هذا التقرير."
+        }
     } else {
         Write-Log "تنبيه: ما لقيت عمود نوع الفاتورة على bu000 — لا ربط للمرتجعات في هذا التقرير."
     }
@@ -305,10 +326,11 @@ ORDER BY name, dt, isopen, iscredit, sortdt, cenum, num
             fromDate    = $fromIso
             customers   = $items.Count
             syncedAt    = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
-            # العلامة تعني: كل قيد مرتجع مبيعات في هذا التقرير يحمل billGuid فاتورته،
+            # العلامة تعني: كل قيد مرتجع مبيعات في هذا التقرير يحمل billGuid فاتورته
+            # (فلا تُرفع إن أسقط الحارس أعلاه أي ربط مبهم)،
             # فغياب المعرّف عن قيد دائن يعني أنه ليس مرتجعاً. بلا العلامة لا يعرف
             # الموقع ذلك، فلا يصنّف (src/app.js: RETURN_LINK_MARKER).
-            billLinks   = $(if ($buTypeCol) { "er000-return-v1" } else { $null })
+            billLinks   = $(if ($buTypeCol -and $ambiguousReturnEntries -eq 0) { "er000-return-v1" } else { $null })
         }
         items       = $items
     }
