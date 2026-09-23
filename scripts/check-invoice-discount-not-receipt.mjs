@@ -178,7 +178,9 @@ test("حسم ودفعة بالمبلغ نفسه على الفاتورة: مبه�
 
 test("دائن بلا رصيدَي سند (تقرير أقدم) لا يُعاد تصنيفه", () => {
   reset();
-  const { docPrev, docNew, ...bare } = DISC_830;
+  const bare = { ...DISC_830 };
+  delete bare.docPrev;
+  delete bare.docNew;
   assert.equal(creditMovementKind(CUST, bare, true).kind, "receipt");
 });
 
