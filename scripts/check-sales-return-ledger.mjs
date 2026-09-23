@@ -49,7 +49,7 @@ const PATTERNS = {
   RETURN_LINK_MARKER: /const RETURN_LINK_MARKER = "er000-return-v1";/,
   movementsReportLinksReturns: /function movementsReportLinksReturns\(\) \{[\s\S]*?\n\}\n/,
   movementReturnLink: /function movementReturnLink\(movement\) \{[\s\S]*?\n\}\n/,
-  creditMovementKind: /function creditMovementKind\(customer, movement\) \{[\s\S]*?\n\}\n/,
+  creditMovementKind: /function creditMovementKind\(customer, movement, fromLinkedLedger\) \{[\s\S]*?\n\}\n/,
   returnMovementForBill: /function returnMovementForBill\(billGuid\) \{[\s\S]*?\n\}\n/,
   returnLedgerBalances: /function returnLedgerBalances\(inv, docPrev, docNew\) \{[\s\S]*?\n\}\n/,
   applyReturnLedger: /function applyReturnLedger\(opts, inv, docPrev, docNew\) \{[\s\S]*?\n\}\n/,
@@ -164,7 +164,7 @@ const movesOf = (cust) => state.customerMovementsReport.items.find((x) => x.cust
 test("مرتجع عادي مربوط: يُصنَّف مرتجعاً بفاتورته وأرصدة قيده", () => {
   reset(linkedMovements());
   const m = movesOf(CUST_D)[1];
-  const k = creditMovementKind(CUST_D, m);
+  const k = creditMovementKind(CUST_D, m, true);
   assert.equal(k.kind, "return");
   assert.equal(k.invoice.number, "40");
   const opts = applyReturnLedger({}, k.invoice, m.docPrev, m.docNew);
@@ -177,8 +177,8 @@ test("مرتجع عادي مربوط: يُصنَّف مرتجعاً بفاتور
 test("زبون أ: قبض 20.00 بنفس يوم مرتجع 19.80 يبقى سند قبض، والمرتجع بمعرّفه", () => {
   reset(linkedMovements());
   const [receipt, ret] = movesOf(CUST_A);
-  assert.equal(creditMovementKind(CUST_A, receipt).kind, "receipt");
-  const k = creditMovementKind(CUST_A, ret);
+  assert.equal(creditMovementKind(CUST_A, receipt, true).kind, "receipt");
+  const k = creditMovementKind(CUST_A, ret, true);
   assert.equal(k.kind, "return");
   assert.equal(k.invoice.guid, RET_A);
 });
@@ -186,7 +186,7 @@ test("زبون أ: قبض 20.00 بنفس يوم مرتجع 19.80 يبقى سند
 test("زبون ب: القبضات 4.85/3.37/3.55 كلها سندات قبض، والمرتجع 4.226 وحده مرتجع", () => {
   reset(linkedMovements());
   const moves = movesOf(CUST_B);
-  assert.deepEqual(moves.map((m) => creditMovementKind(CUST_B, m).kind), ["receipt", "receipt", "receipt", "return"]);
+  assert.deepEqual(moves.map((m) => creditMovementKind(CUST_B, m, true).kind), ["receipt", "receipt", "receipt", "return"]);
 });
 
 test("تقرير قديم بلا ربط: لا تاريخ ولا مبلغ يجعل قيداً مرتجعاً أبداً", () => {
@@ -211,17 +211,37 @@ test("تقرير قديم: القبض القريب مبلغاً يبقى قبض�
 
 test("قيد دائن بلا معرّف في تقرير موسوم = سند قبض حتى لو طابق مرتجعاً يوماً ومبلغاً", () => {
   reset(linkedMovements());
-  assert.equal(creditMovementKind(CUST_D, { date: "2026-09-13", credit: 50, billGuid: "" }).kind, "receipt");
+  assert.equal(creditMovementKind(CUST_D, { date: "2026-09-13", credit: 50, billGuid: "" }, true).kind, "receipt");
+});
+
+// ملاحظة Codex P1 على 2756028: العلامة وصف لصفوف التقرير الكامل وحده. صف احتياط من
+// `recentMovements` (تقرير الأرصدة، بلا billGuid أصلاً) لا يصير سند قبض لمجرد أن التقرير
+// الكامل موسوم — وإلا طُبع مرتجع جديد سند قبض خلال فجوة المزامنة.
+test("صف احتياط (recentMovements) في تقرير موسوم: لا يُفترض سند قبض", () => {
+  reset(linkedMovements());
+  const fallback = { date: "2026-09-13", credit: 50 }; // مرتجع 50 جديد بلا معرّف
+  assert.equal(creditMovementKind(CUST_D, fallback).kind, "unclassified");
+  assert.equal(creditMovementKind(CUST_D, fallback, false).kind, "unclassified");
+  assert.equal(creditMovementKind(CUST_D, { date: "2026-09-13", credit: 9 }, false).kind, "receipt", "قبض لا يطابق مرتجعاً يبقى قبضاً");
+  assert.equal(creditMovementKind(CUST_D, { ...fallback, billGuid: "" }, true).kind, "receipt", "صف التقرير الكامل بلا معرّف = قبض");
+});
+
+test("لوحة الزبون وزرّا المرتجع والقبض يمرّرون مصدر الصف إلى التصنيف", () => {
+  assert.match(appJs, /const rowsLinked = fromFullLedger && movementsReportLinksReturns\(\);/);
+  assert.match(appJs, /creditMovementKind\(item, m, rowsLinked\)\.kind/);
+  assert.match(appJs, /creditMovementKind\(item, \{ date: el\.dataset\.date, credit, billGuid: el\.dataset\.billGuid \}, el\.dataset\.ledgerLinked === "1"\)/);
+  assert.equal((appJs.match(/data-ledger-linked="\$\{rowsLinked \? "1" : ""\}"/g) || []).length, 2, "زر المرتجع وزر سند القبض");
+  assert.match(appJs, /if \(fromLinkedLedger === true && movementsReportLinksReturns\(\)\) return \{ kind: "receipt" \};/);
 });
 
 test("مرتجع مربوط لزبون آخر: غير مصنَّف، لا مستند", () => {
   reset(linkedMovements());
-  assert.equal(creditMovementKind(CUST_A, { date: "2026-09-13", credit: 50, billGuid: RET_D }).kind, "unclassified");
+  assert.equal(creditMovementKind(CUST_A, { date: "2026-09-13", credit: 50, billGuid: RET_D }, true).kind, "unclassified");
 });
 
 test("مرتجع مربوط تفاصيله لم تُزامَن: return-pending، لا سند قبض ولا مرتجع", () => {
   reset(linkedMovements());
-  assert.equal(creditMovementKind(CUST_D, { date: "2026-09-13", credit: 7, billGuid: G(0xeee) }).kind, "return-pending");
+  assert.equal(creditMovementKind(CUST_D, { date: "2026-09-13", credit: 7, billGuid: G(0xeee) }, true).kind, "return-pending");
   // تقرير قديم بمعرّف مجهول: لا يُفترض أنه مرتجع.
   reset(oldMovements());
   assert.equal(movementReturnLink({ billGuid: G(0xeee) }), null);

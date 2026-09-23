@@ -1197,7 +1197,10 @@ function movementReturnLink(movement) {
 //   unclassified    — لا يجوز الحكم (تقرير بلا ربط ومرتجع فعلي بنفس اليوم والمبلغ، أو
 //                     مرتجع لزبون آخر): لا مستند إطلاقاً بدل مستند خاطئ.
 //   receipt         — سند قبض.
-function creditMovementKind(customer, movement) {
+// `fromLinkedLedger`: الصف نفسه من تقرير الحركات الكامل الموسوم بالربط. العلامة وصف لصفوف
+// ذلك التقرير وحده؛ صفوف `recentMovements` في تقرير الأرصدة (الاحتياط حين لا يحمل التقرير
+// الكامل صفوف الزبون) لا تحمل billGuid أصلاً، فغياب معرّفها لا يعني أنها ليست مرتجعاً.
+function creditMovementKind(customer, movement, fromLinkedLedger) {
   const credit = Number(movement?.credit || 0);
   if (!(credit > 0)) return { kind: "none" };
   const link = movementReturnLink(movement);
@@ -1208,7 +1211,7 @@ function creditMovementKind(customer, movement) {
     if (custGuid && invGuid && custGuid !== invGuid) return { kind: "unclassified" };
     return { kind: "return", invoice: link.found.invoice };
   }
-  if (movementsReportLinksReturns()) return { kind: "receipt" };
+  if (fromLinkedLedger === true && movementsReportLinksReturns()) return { kind: "receipt" };
   // تقرير قديم بلا ربط: التاريخ والمبلغ لا يجعلان القيد مرتجعاً، لكنهما يمنعان طبعه سند
   // قبض حين يطابق مرتجعاً فعلياً تماماً — يبقى بلا مستند حتى تصل المزامنة الجديدة.
   const d = String(movement?.date || "").slice(0, 10);
@@ -7195,7 +7198,10 @@ function customerDetailsPanel(item) {
   const allPayments = [...ameenPayments, ...manualPayments]
     .sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
   const fullMv = customerFullMovements(item);
-  const movements = (fullMv && Array.isArray(fullMv.movements) && fullMv.movements.length)
+  const fromFullLedger = !!(fullMv && Array.isArray(fullMv.movements) && fullMv.movements.length);
+  // صفوف التقرير الكامل وحدها تحمل الربط؛ صفوف الاحتياط تُصنَّف بلا علامة الربط.
+  const rowsLinked = fromFullLedger && movementsReportLinksReturns();
+  const movements = fromFullLedger
     ? [...fullMv.movements].sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0))
     : (Array.isArray(item.recentMovements)
         ? [...item.recentMovements].sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0))
@@ -7206,7 +7212,7 @@ function customerDetailsPanel(item) {
   // مرتجع المبيعات يُقيَّد دائناً على حساب الزبون تماماً كالدفعة — نفرزه بربطه القطعي
   // بفاتورة المرتجع (creditMovementKind)، لا بالتاريخ والمبلغ. ما لا يجوز الحكم عليه
   // يُعرض مع المرتجعات بلا زر مستند، ولا يُطبع سند قبض له.
-  const classifiedCredits = creditMoves.map((m) => ({ ...m, _retKind: creditMovementKind(item, m).kind }));
+  const classifiedCredits = creditMoves.map((m) => ({ ...m, _retKind: creditMovementKind(item, m, rowsLinked).kind }));
   const returnMoves = classifiedCredits.filter((m) => m._retKind !== "receipt");
   const paymentMoves = classifiedCredits.filter((m) => m._retKind === "receipt");
 
@@ -7281,7 +7287,7 @@ function customerDetailsPanel(item) {
                     <strong class="payment-amount">مرتجع: ${escapeHtml(formatMoney(Number(m?.credit || 0)))}</strong>
                     <span class="payment-date">${escapeHtml(m?.date ? formatDate(m.date) : "بلا تاريخ")}</span>
                     ${m?.notes ? `<small class="payment-note">${escapeHtml(m.notes)}</small>` : ""}
-                    ${m?._retKind === "return" ? `<button class="button secondary mini-button" type="button" data-action="gen-movement-doc" data-debit="0" data-credit="${escapeHtml(String(m?.credit || 0))}" data-date="${escapeHtml(m?.date || "")}" data-notes="${escapeHtml(m?.notes || "")}" data-balance="${m?.balance !== undefined && m?.balance !== null ? escapeHtml(String(m.balance)) : ""}" data-balance-chrono="${m?.balanceChrono !== undefined && m?.balanceChrono !== null ? escapeHtml(String(m.balanceChrono)) : ""}" data-doc-new="${m?.docNew !== undefined && m?.docNew !== null ? escapeHtml(String(m.docNew)) : ""}" data-doc-prev="${m?.docPrev !== undefined && m?.docPrev !== null ? escapeHtml(String(m.docPrev)) : ""}" data-bill-guid="${escapeHtml(String(m?.billGuid || ""))}" style="margin-top:6px">📄 فاتورة مرتجع PDF</button>`
+                    ${m?._retKind === "return" ? `<button class="button secondary mini-button" type="button" data-action="gen-movement-doc" data-debit="0" data-credit="${escapeHtml(String(m?.credit || 0))}" data-date="${escapeHtml(m?.date || "")}" data-notes="${escapeHtml(m?.notes || "")}" data-balance="${m?.balance !== undefined && m?.balance !== null ? escapeHtml(String(m.balance)) : ""}" data-balance-chrono="${m?.balanceChrono !== undefined && m?.balanceChrono !== null ? escapeHtml(String(m.balanceChrono)) : ""}" data-doc-new="${m?.docNew !== undefined && m?.docNew !== null ? escapeHtml(String(m.docNew)) : ""}" data-doc-prev="${m?.docPrev !== undefined && m?.docPrev !== null ? escapeHtml(String(m.docPrev)) : ""}" data-bill-guid="${escapeHtml(String(m?.billGuid || ""))}" data-ledger-linked="${rowsLinked ? "1" : ""}" style="margin-top:6px">📄 فاتورة مرتجع PDF</button>`
                       : `<small class="payment-note">${m?._retKind === "return-pending" ? "تفاصيل هذا المرتجع لم تُزامَن بعد — لا مستند له حتى المزامنة التالية." : "حركة دائنة تطابق مرتجعاً ولا ربط قطعياً لها بعد — لا تُطبع سنداً ولا مرتجعاً حتى تصل مزامنة الربط."}</small>`}
                   </div>
                 </div>`).join("")
@@ -7302,7 +7308,7 @@ function customerDetailsPanel(item) {
                     <strong class="payment-amount">دفعة: ${escapeHtml(formatMoney(Number(m?.credit || 0)))}</strong>
                     <span class="payment-date">${escapeHtml(m?.date ? formatDate(m.date) : "بلا تاريخ")}</span>
                     ${m?.notes ? `<small class="payment-note">${escapeHtml(m.notes)}</small>` : ""}
-                    <button class="button secondary mini-button" type="button" data-action="gen-movement-doc" data-debit="0" data-credit="${escapeHtml(String(m?.credit || 0))}" data-date="${escapeHtml(m?.date || "")}" data-notes="${escapeHtml(m?.notes || "")}" data-balance="${m?.balance !== undefined && m?.balance !== null ? escapeHtml(String(m.balance)) : ""}" data-balance-chrono="${m?.balanceChrono !== undefined && m?.balanceChrono !== null ? escapeHtml(String(m.balanceChrono)) : ""}" data-doc-new="${m?.docNew !== undefined && m?.docNew !== null ? escapeHtml(String(m.docNew)) : ""}" data-doc-prev="${m?.docPrev !== undefined && m?.docPrev !== null ? escapeHtml(String(m.docPrev)) : ""}" style="margin-top:6px">📄 سند قبض PDF</button>
+                    <button class="button secondary mini-button" type="button" data-action="gen-movement-doc" data-debit="0" data-credit="${escapeHtml(String(m?.credit || 0))}" data-date="${escapeHtml(m?.date || "")}" data-notes="${escapeHtml(m?.notes || "")}" data-balance="${m?.balance !== undefined && m?.balance !== null ? escapeHtml(String(m.balance)) : ""}" data-balance-chrono="${m?.balanceChrono !== undefined && m?.balanceChrono !== null ? escapeHtml(String(m.balanceChrono)) : ""}" data-doc-new="${m?.docNew !== undefined && m?.docNew !== null ? escapeHtml(String(m.docNew)) : ""}" data-doc-prev="${m?.docPrev !== undefined && m?.docPrev !== null ? escapeHtml(String(m.docPrev)) : ""}" data-ledger-linked="${rowsLinked ? "1" : ""}" style="margin-top:6px">📄 سند قبض PDF</button>
                   </div>
                 </div>`).join("")
               : '<p class="muted" style="padding:12px 0">لا توجد دفعات مسجلة.</p>'}
@@ -12444,7 +12450,7 @@ function render() {
       } else if (credit > 0) {
         // مرتجع المبيعات يُقيَّد دائناً كالدفعة تماماً — يُعرف بربطه القطعي بفاتورة المرتجع
         // (creditMovementKind) لا بالتاريخ والمبلغ، ويُصدَّر بأصنافه وأرصدة قيده هو.
-        const kind = creditMovementKind(item, { date: el.dataset.date, credit, billGuid: el.dataset.billGuid });
+        const kind = creditMovementKind(item, { date: el.dataset.date, credit, billGuid: el.dataset.billGuid }, el.dataset.ledgerLinked === "1");
         if (kind.kind === "return") {
           const retMatch = kind.invoice;
           const opts = { ...base, cur: "$", type: "return", amount: retMatch.total || credit, no: retMatch.number ? String(retMatch.number) : docNumber("RET"), lines: retMatch.lines || [] };
