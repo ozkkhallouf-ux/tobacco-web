@@ -7223,6 +7223,12 @@ async function exportStagnantMaterialsPdf() {
   render();
 }
 
+// قيمة سمة data-* لرقم اختياري: فارغة حين لا قيمة (undefined/null)، وإلا نصّها مُهرَّباً.
+// الصفر قيمة حقيقية ويُكتب «0». يُبقي قالب قائمة المرتجعات تحت حد تعقيد CodeFactor.
+function optionalDataValue(value) {
+  return value !== undefined && value !== null ? escapeHtml(String(value)) : "";
+}
+
 function customerDetailsPanel(item) {
   if (!item) {
     return `
@@ -7329,7 +7335,7 @@ function customerDetailsPanel(item) {
                     <strong class="payment-amount">مرتجع: ${escapeHtml(formatMoney(Number(m?.credit || 0)))}</strong>
                     <span class="payment-date">${escapeHtml(m?.date ? formatDate(m.date) : "بلا تاريخ")}</span>
                     ${m?.notes ? `<small class="payment-note">${escapeHtml(m.notes)}</small>` : ""}
-                    ${m?._retKind === "return" ? `<button class="button secondary mini-button" type="button" data-action="gen-movement-doc" data-debit="0" data-credit="${escapeHtml(String(m?.credit || 0))}" data-date="${escapeHtml(m?.date || "")}" data-notes="${escapeHtml(m?.notes || "")}" data-balance="${m?.balance !== undefined && m?.balance !== null ? escapeHtml(String(m.balance)) : ""}" data-balance-chrono="${m?.balanceChrono !== undefined && m?.balanceChrono !== null ? escapeHtml(String(m.balanceChrono)) : ""}" data-doc-new="${m?.docNew !== undefined && m?.docNew !== null ? escapeHtml(String(m.docNew)) : ""}" data-doc-prev="${m?.docPrev !== undefined && m?.docPrev !== null ? escapeHtml(String(m.docPrev)) : ""}" data-bill-guid="${escapeHtml(String(m?.billGuid || ""))}" data-ledger-linked="${rowsLinked ? "1" : ""}" style="margin-top:6px">📄 فاتورة مرتجع PDF</button>`
+                    ${m?._retKind === "return" ? `<button class="button secondary mini-button" type="button" data-action="gen-movement-doc" data-debit="0" data-credit="${escapeHtml(String(m?.credit || 0))}" data-date="${escapeHtml(m?.date || "")}" data-notes="${escapeHtml(m?.notes || "")}" data-balance="${optionalDataValue(m?.balance)}" data-balance-chrono="${optionalDataValue(m?.balanceChrono)}" data-doc-new="${optionalDataValue(m?.docNew)}" data-doc-prev="${optionalDataValue(m?.docPrev)}" data-bill-guid="${escapeHtml(String(m?.billGuid || ""))}" data-ledger-linked="${rowsLinked ? "1" : ""}" style="margin-top:6px">📄 فاتورة مرتجع PDF</button>`
                       : `<small class="payment-note">${m?._retKind === "return-pending" ? "تفاصيل هذا المرتجع لم تُزامَن بعد — لا مستند له حتى المزامنة التالية." : "حركة دائنة تطابق مرتجعاً ولا ربط قطعياً لها بعد — لا تُطبع سنداً ولا مرتجعاً حتى تصل مزامنة الربط."}</small>`}
                   </div>
                 </div>`).join("")
