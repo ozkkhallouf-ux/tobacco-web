@@ -401,13 +401,14 @@ test("الكميات الصحيحة لم تتغيّر: 0.16 كرتونة (8 كر
 
 test("ملاحظة المرتجع (بقيد ومحايدة) والبيع والتذييل: OZK TOBACCO معزول، والنص المرئي كما هو حرفاً", () => {
   const cases = [
-    [voucherPdfMarkup(movementOpts(INV_48, "زبون أ", 36273.646, 36120.426)), "هذا سند رسمي بقيمة البضاعة المرتجعة إلى<span> </span><bdi>OZK TOBACCO</bdi> — خُصمت من رصيد حسابكم."],
-    [voucherPdfMarkup(listOpts(INV_37, "زبون ح", "", "")), "هذا سند رسمي بقيمة البضاعة المرتجعة إلى<span> </span><bdi>OZK TOBACCO</bdi>."],
-    [voucherPdfMarkup({ type: "invoice", name: "زبون", amount: 1, lines: [] }), "هذه فاتورة صادرة عن<span> </span><bdi>OZK TOBACCO</bdi>."]
+    [voucherPdfMarkup(movementOpts(INV_48, "زبون أ", 36273.646, 36120.426)), "هذا سند رسمي بقيمة البضاعة المرتجعة إلى<span> </span><bdi>OZK TOBACCO</bdi> — خُصمت من رصيد حسابكم.", NOTE_PROVEN],
+    [voucherPdfMarkup(listOpts(INV_37, "زبون ح", "", "")), "هذا سند رسمي بقيمة البضاعة المرتجعة إلى<span> </span><bdi>OZK TOBACCO</bdi>.", NOTE_NEUTRAL],
+    [voucherPdfMarkup({ type: "invoice", name: "زبون", amount: 1, lines: [] }), "هذه فاتورة صادرة عن<span> </span><bdi>OZK TOBACCO</bdi>.", OZK_INVOICE.KINDS.invoice.note]
   ];
-  for (const [html, note] of cases) {
+  for (const [html, note, text] of cases) {
     assert.equal(noteHtmlOf(html), note);
-    assert.equal(noteOf(html).replace(/<[^>]+>/g, ""), note.replace(/<[^>]+>/g, ""), "النص المرئي للملاحظة تغيّر");
+    // بلا وسم العزل هو النص الأصلي حرفاً (والمسافة داخل <span> هي مسافته نفسها).
+    assert.equal(noteOf(html), text, "النص المرئي للملاحظة تغيّر");
     assert.ok(html.includes('<div class="rfoot"><span>صادر آليًا عن نظام<span> </span><bdi>OZK TOBACCO</bdi> · رقم المركز: 0994092038</span>'), "التذييل بلا عزل");
     // الترويسة والختم عنصران مستقلان سليمان أصلاً: بلا تغيير.
     assert.ok(html.includes('<div class="brand">OZK TOBACCO<small>') && html.includes('<div class="s-logo">OZK TOBACCO</div>'));
