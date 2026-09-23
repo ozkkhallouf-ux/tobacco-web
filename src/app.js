@@ -7316,6 +7316,10 @@ function customerDetailsPanel(item) {
   const paymentMoves = classifiedCredits.filter((m) => m._retKind === "receipt");
   const invoiceDiscountOf = (m) => discountMoves.find((x) => String(x.date || "").slice(0, 10) === String(m?.date || "").slice(0, 10)
     && Number(x.docPrev) === Number(m?.docPrev) && Number(x.docNew) === Number(m?.docNew));
+  const invoiceDiscountNote = (m) => {
+    const disc = invoiceDiscountOf(m);
+    return disc ? `<small class="payment-note">حسم على الفاتورة: ${escapeHtml(formatMoney(Number(disc.credit || 0)))}</small>` : "";
+  };
 
   return `
     <section class="customer-detail-panel" data-customer-detail-panel>
@@ -7368,7 +7372,7 @@ function customerDetailsPanel(item) {
                     <strong class="payment-amount">فاتورة: ${escapeHtml(formatMoney(Number(m?.debit || 0)))}</strong>
                     <span class="payment-date">${escapeHtml(m?.date ? formatDate(m.date) : "بلا تاريخ")}</span>
                     ${m?.notes ? `<small class="payment-note">${escapeHtml(m.notes)}</small>` : ""}
-                    ${invoiceDiscountOf(m) ? `<small class="payment-note">حسم على الفاتورة: ${escapeHtml(formatMoney(Number(invoiceDiscountOf(m).credit || 0)))}</small>` : ""}
+                    ${invoiceDiscountNote(m)}
                     <button class="button secondary mini-button" type="button" data-action="gen-movement-doc" data-debit="${escapeHtml(String(m?.debit || 0))}" data-credit="0" data-date="${escapeHtml(m?.date || "")}" data-notes="${escapeHtml(m?.notes || "")}" data-balance="${m?.balance !== undefined && m?.balance !== null ? escapeHtml(String(m.balance)) : ""}" data-balance-chrono="${m?.balanceChrono !== undefined && m?.balanceChrono !== null ? escapeHtml(String(m.balanceChrono)) : ""}" data-doc-new="${m?.docNew !== undefined && m?.docNew !== null ? escapeHtml(String(m.docNew)) : ""}" data-doc-prev="${m?.docPrev !== undefined && m?.docPrev !== null ? escapeHtml(String(m.docPrev)) : ""}" data-bill-guid="${escapeHtml(String(m?.billGuid || ""))}" style="margin-top:6px">📄 فاتورة PDF</button>
                   </div>
                 </div>`).join("")
