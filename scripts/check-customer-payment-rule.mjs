@@ -16,6 +16,9 @@
 // الفحص **يشغّل كتلة SQL الحقيقية** (بين علامتَي payment-rule في
 // tools/ameen-customer-balances-query.sql) على SQLite — لا نسخة مبسّطة:
 // node:sqlite إن وُجد (Node ≥ 22)، وإلا python3/sqlite3 (متاح على مشغّلات CI).
+//
+// «دفعات اليوم» في tools/push-daily-movement.ps1 تحمل الكتلة نفسها حرفياً، ويُشغَّل
+// paymentSql فيها كاملاً على قيود مصطنعة بأشكال شواهدها (قسم «دفعات اليوم» أدناه).
 // ============================================================================
 
 import { readFileSync } from "node:fs";
@@ -162,43 +165,48 @@ function toSqlite(block) {
   return block.replace(/--[^\n]*/g, "").replace(/\bdbo\./g, "");
 }
 
-function runPaymentRule(block) {
-  const sql = `${toSqlite(block)}\nselect GUID from payment_lines order by GUID`;
-  const schema = [
-    "create table ac000 (GUID text primary key, ParentGUID text)",
-    "create table ce000 (GUID text primary key, TypeGUID text)",
-    "create table en000 (GUID text primary key, ParentGUID text, AccountGUID text, ContraAccGUID text, Debit real, Credit real, Type integer)",
-  ];
+// يشغّل SQL على SQLite في الذاكرة: tables = { اسم: { columns, rows } } ويعيد الصفوف كائنات.
+function runSql(tables, sql) {
+  const schema = Object.entries(tables).map(([name, t]) => `create table ${name} (${t.columns.join(", ")})`);
   let sqlite = null;
   try { sqlite = process.getBuiltinModule?.("node:sqlite") ?? null; } catch { sqlite = null; }
   if (sqlite?.DatabaseSync) {
     const db = new sqlite.DatabaseSync(":memory:");
     for (const s of schema) db.exec(s);
-    const ins = (table, rows) => {
-      const stmt = db.prepare(`insert into ${table} values (${rows[0].map(() => "?").join(",")})`);
-      for (const r of rows) stmt.run(...r);
-    };
-    ins("ac000", ac000); ins("ce000", ce000); ins("en000", en000);
-    return db.prepare(sql).all().map((r) => r.GUID);
+    for (const [name, t] of Object.entries(tables)) {
+      const stmt = db.prepare(`insert into ${name} values (${t.columns.map(() => "?").join(",")})`);
+      for (const r of t.rows) stmt.run(...r);
+    }
+    return db.prepare(sql).all().map((r) => ({ ...r }));
   }
   const py = `
 import json, sqlite3, sys
 d = json.load(sys.stdin)
 c = sqlite3.connect(":memory:")
 for s in d["schema"]: c.execute(s)
-for t in ("ac000", "ce000", "en000"):
-    rows = d[t]
-    c.executemany("insert into %s values (%s)" % (t, ",".join("?" * len(rows[0]))), rows)
-print(json.dumps([r[0] for r in c.execute(d["sql"]).fetchall()]))
+for name, t in d["tables"].items():
+    c.executemany("insert into %s values (%s)" % (name, ",".join("?" * len(t["columns"]))), t["rows"])
+cur = c.execute(d["sql"])
+cols = [x[0] for x in cur.description]
+print(json.dumps([dict(zip(cols, r)) for r in cur.fetchall()]))
 `;
   const run = spawnSync("python3", ["-c", py], {
-    input: JSON.stringify({ schema, ac000, ce000, en000, sql }),
+    input: JSON.stringify({ schema, tables, sql }),
     encoding: "utf8",
   });
   if (run.error || run.status !== 0) {
     throw new Error(`تعذّر تشغيل SQLite (لا node:sqlite ولا python3): ${run.error?.message || run.stderr}`);
   }
   return JSON.parse(run.stdout);
+}
+
+function runPaymentRule(block) {
+  const sql = `${toSqlite(block)}\nselect GUID from payment_lines order by GUID`;
+  return runSql({
+    ac000: { columns: ["GUID text primary key", "ParentGUID text"], rows: ac000 },
+    ce000: { columns: ["GUID text primary key", "TypeGUID text"], rows: ce000 },
+    en000: { columns: ["GUID text primary key", "ParentGUID text", "AccountGUID text", "ContraAccGUID text", "Debit real", "Credit real", "Type integer"], rows: en000 },
+  }, sql).map((r) => r.GUID);
 }
 
 const balancesBlock = ruleBlock(balancesSql, "ameen-customer-balances-query.sql");
@@ -253,10 +261,192 @@ test("ameen-daily-summary.ps1 يحمل الكتلة نفسها حرفياً وي
   assert.match(ps, /max\(case when coalesce\(en\.Credit, 0\) > 0 and \(acp\.Name = N'الموردون' or pl\.GUID is not null\) then en\.Date end\) as last_payment_date/);
 });
 
-test("«دفعات اليوم» في push-daily-movement.ps1 خارج نطاق هذا الإصلاح (مسار مستقل)", () => {
-  assert.doesNotMatch(dailyMovementPs, /payment-rule:begin/, "push-daily-movement.ps1 عُدّل ضمن هذا الإصلاح");
+// ── «دفعات اليوم» (tools/push-daily-movement.ps1) ─────────────────────────────
+// العطل (2026-09-24): paymentSql كان يعدّ كل سطر دائن على حساب في cu000 دفعة، فظهر
+// حسم فاتورة صغير ضمن «دفعات اليوم». الإصلاح يحمل كتلة payment-rule نفسها ويُبقي فلتر
+// التاريخ وربط cu000 للاسم واستبعاد الموردين وشكل الصف. الفحص يشغّل paymentSql الحقيقي
+// كاملاً على قيود مصطنعة كلياً تحاكي أشكال الحالات المحاسبية وحدها: الأسماء والمبالغ
+// والمعرّفات والملاحظات كلها وهمية.
+const DM_DAY = "2026-09-24";
+
+function dailyMovementPaymentSql() {
+  const ps = dailyMovementPs.replace(/\r\n/g, "\n");
+  const match = ps.match(/\$paymentSql = @"\n([\s\S]*?)\n"@/);
+  assert.ok(match, "تعذّر إيجاد paymentSql في push-daily-movement.ps1");
+  return match[1];
+}
+
+// ترجمة T-SQL إلى SQLite: التعليقات وdbo. وN'' وDATEADD وLEFT فقط — المنطق نفسه حرفياً.
+function dailyMovementToSqlite(sql, day) {
+  const next = new Date(`${day}T00:00:00Z`);
+  next.setUTCDate(next.getUTCDate() + 1);
+  const nextDay = next.toISOString().slice(0, 10);
+  let out = toSqlite(sql);
+  const steps = [
+    [/DATEADD\(day,1,'\$Date'\)/g, `'${nextDay}'`],
+    [/'\$Date'/g, `'${day}'`],
+    [/\bN'/g, "'"],
+    [/LEFT\(COALESCE\(en\.Notes,''\), 120\)/g, "substr(COALESCE(en.Notes,''), 1, 120)"],
+  ];
+  for (const [pattern, replacement] of steps) {
+    assert.match(out, pattern, `نمط الترجمة غير موجود: ${pattern}`);
+    out = out.replace(pattern, replacement);
+  }
+  assert.doesNotMatch(out, /\$\w/, "بقي متغيّر PowerShell غير مترجم");
+  return out;
+}
+
+const D = {
+  boxUsd: fake("d1"), boxSyp: fake("d2"), boxDollar: fake("d3"), boxSham: fake("d4"),
+  custRoot: fake("d10"),
+  custA: fake("d11"), custB: fake("d12"), firstPay: fake("d13"), returner: fake("d14"),
+  purchaser: fake("d15"), custC: fake("d16"), custD: fake("d17"), opener: fake("d18"),
+  via135: fake("d19"), older: fake("d20"),
+  sales41: fake("d30"), returns42: fake("d31"), discount43: fake("d32"), inventory1241: fake("d33"),
+  nonCustomer: fake("d34"), suppliersRoot: fake("d40"), supplier: fake("d41"),
+};
+const dmAc000 = [
+  [RULE.cashRoot, ZERO, "الأموال الجاهزة"], [D.boxUsd, RULE.cashRoot, "صندوق أ"],
+  [D.boxSyp, RULE.cashRoot, "صندوق ب"], [D.boxDollar, RULE.cashRoot, "صندوق ج خارج الأربعة"],
+  [D.boxSham, RULE.cashRoot, "صندوق د"], [RULE.diff135, RULE.cashRoot, "فروقات الصندوق"],
+  [RULE.customers121, ZERO, "الزبائن"], [D.custRoot, RULE.customers121, "مجموعة زبائن"],
+  ...["custA", "custB", "firstPay", "returner", "purchaser", "custC", "custD", "opener", "via135", "older"]
+    .map((k) => [D[k], D.custRoot, `زبون ${k}`]),
+  [D.sales41, ZERO, "المبيعات"], [D.returns42, ZERO, "مرتجع المبيعات"], [D.discount43, ZERO, "الحسم الممنوح"],
+  [D.inventory1241, ZERO, "مخزون بضاعة"], [D.nonCustomer, ZERO, "حساب غير زبون"],
+  [D.suppliersRoot, ZERO, "الموردون"], [D.supplier, D.suppliersRoot, "مورد"],
+];
+const dmCu000 = [
+  ...["custA", "custB", "firstPay", "returner", "purchaser", "custC", "custD", "opener", "via135", "older"]
+    .map((k) => [D[k], `زبون ${k}`]),
+  [D.nonCustomer, "حساب غير زبون"], [D.supplier, "مورد"],
+];
+
+const dmCe000 = [];
+const dmEn000 = [];
+let dmSeq = 0;
+function dmEntry(tag, type = ZERO) {
+  const guid = fake(`e${tag}`);
+  dmCe000.push([guid, type]);
+  return guid;
+}
+function dmLine(parent, account, contra, debit, credit, date = DM_DAY) {
+  dmSeq += 1;
+  dmEn000.push([`dm${String(dmSeq).padStart(6, "0")}-0000-4000-8000-000000000000`, parent, account, contra, debit, credit, 0, `${date} 00:00:00`, dmSeq, "ملاحظة"]);
+}
+
+const DM_PAY = [];
+const DM_NOT = [];
+function pay(name, customer, amount) { DM_PAY.push({ name, customer, amount }); }
+function notPay(name, customer, amount) { DM_NOT.push({ name, customer, amount }); }
+
+// فاتورة بيع بحسم صغير ثم سند قبض حقيقي في اليوم نفسه.
+let e = dmEntry("f1");
+dmLine(e, D.custA, D.sales41, 300, 0); dmLine(e, D.custA, D.discount43, 0, 0.07); dmLine(e, D.discount43, D.custA, 0.07, 0);
+notPay("حسم فاتورة صغير مقابل 43", "زبون custA", 0.07);
+e = dmEntry("f2");
+dmLine(e, D.custA, D.boxSyp, 0, 512.345); dmLine(e, D.boxSyp, D.custA, 512.345, 0);
+pay("سند قبض بجانب الحسم الصغير", "زبون custA", 512.35);
+// حسم فاتورة ثم قيد يدوي على صندوق من شجرة 13 خارج الصناديق الأربعة.
+e = dmEntry("b1");
+dmLine(e, D.custB, D.sales41, 900, 0); dmLine(e, D.custB, D.discount43, 0, 2.5); dmLine(e, D.discount43, D.custB, 2.5, 0);
+notPay("حسم فاتورة ثانٍ مقابل 43", "زبون custB", 2.5);
+e = dmEntry("b2");
+dmLine(e, D.custB, D.boxDollar, 0, 12345); dmLine(e, D.boxDollar, D.custB, 12345, 0);
+pay("قيد يدوي مقابل صندوق", "زبون custB", 12345);
+// فاتورة بيع بدفعة أولى.
+e = dmEntry("p1");
+dmLine(e, D.firstPay, D.sales41, 800, 0); dmLine(e, D.firstPay, D.boxUsd, 0, 640); dmLine(e, D.boxUsd, D.firstPay, 640, 0);
+pay("الدفعة الأولى FirstPay", "زبون firstPay", 640);
+// مرتجع مبيعات.
+e = dmEntry("r1");
+dmLine(e, D.returner, D.returns42, 0, 75.5); dmLine(e, D.returns42, D.returner, 75.5, 0);
+notPay("مرتجع مبيعات مقابل 42", "زبون returner", 75.5);
+// فاتورة شراء من زبون: دائن مقابل مخزون 1241.
+e = dmEntry("i1");
+dmLine(e, D.purchaser, D.inventory1241, 0, 1111); dmLine(e, D.inventory1241, D.purchaser, 1111, 0);
+notPay("فاتورة شراء مقابل 1241", "زبون purchaser", 1111);
+// قبض مركّب بمقابل صفري: دفعة وحدها، ودفعة بجانب سطر آخر مقابل صندوق، ودفعتان في قيد واحد.
+e = dmEntry("z1");
+dmLine(e, D.custC, ZERO, 0, 101); dmLine(e, D.boxUsd, ZERO, 101, 0);
+pay("قبض مركّب وحده", "زبون custC", 101);
+e = dmEntry("z2");
+dmLine(e, D.custC, ZERO, 0, 202); dmLine(e, D.boxUsd, ZERO, 202, 0);
+dmLine(e, D.custC, D.boxSyp, 0, 17); dmLine(e, D.boxSyp, D.custC, 17, 0);
+pay("قبض مركّب بجانب سطر صندوق", "زبون custC", 202);
+pay("سطر مقابل صندوق في القيد المركّب نفسه", "زبون custC", 17);
+e = dmEntry("z3");
+dmLine(e, D.custD, ZERO, 0, 303); dmLine(e, D.custD, ZERO, 0, 404); dmLine(e, D.boxUsd, ZERO, 707, 0);
+pay("قبض مركّب أول في قيد واحد", "زبون custD", 303);
+pay("قبض مركّب ثانٍ في قيد واحد", "زبون custD", 404);
+// 135 فروقات الصندوق: زبون مقابله 135، وحساب غير زبون مسجّل في cu000 (بنية 515) مقابل 135 وصندوق و1241.
+e = dmEntry("c1");
+dmLine(e, D.via135, RULE.diff135, 0, 5); dmLine(e, RULE.diff135, D.via135, 5, 0);
+notPay("زبون مقابل 135", "زبون via135", 5);
+e = dmEntry("c2");
+dmLine(e, D.nonCustomer, RULE.diff135, 0, 66); dmLine(e, RULE.diff135, D.nonCustomer, 66, 0);
+notPay("حساب غير زبون (515) مقابل 135", "حساب غير زبون", 66);
+e = dmEntry("c3");
+dmLine(e, D.nonCustomer, D.boxSham, 0, 77); dmLine(e, D.boxSham, D.nonCustomer, 77, 0);
+notPay("حساب غير زبون (515) مقابل صندوق", "حساب غير زبون", 77);
+e = dmEntry("c4");
+dmLine(e, D.nonCustomer, D.inventory1241, 0, 88); dmLine(e, D.inventory1241, D.nonCustomer, 88, 0);
+notPay("حساب غير زبون (515) مقابل 1241", "حساب غير زبون", 88);
+// القيد الافتتاحي بمقابل صفري وفيه مدين على صندوق.
+e = dmEntry("o1", RULE.openingType);
+dmLine(e, D.opener, ZERO, 0, 60); dmLine(e, D.boxUsd, ZERO, 60, 0);
+notPay("القيد الافتتاحي", "زبون opener", 60);
+// مورد دائن مقابل صندوق: الموردون خارج «دفعات اليوم» كما كانوا.
+e = dmEntry("s1");
+dmLine(e, D.supplier, D.boxUsd, 0, 300); dmLine(e, D.boxUsd, D.supplier, 300, 0);
+notPay("مورد مقابل صندوق", "مورد", 300);
+// قبض حقيقي في يوم آخر: فلتر التاريخ باقٍ.
+e = dmEntry("d1");
+dmLine(e, D.older, D.boxUsd, 0, 500, "2026-09-23"); dmLine(e, D.boxUsd, D.older, 500, 0, "2026-09-23");
+notPay("قبض بتاريخ يوم آخر", "زبون older", 500);
+
+let dmRows = [];
+test("paymentSql في push-daily-movement.ps1 يعمل فعلاً على قيود ثابتة", () => {
+  dmRows = runSql({
+    ac000: { columns: ["GUID text primary key", "ParentGUID text", "Name text"], rows: dmAc000 },
+    ce000: { columns: ["GUID text primary key", "TypeGUID text"], rows: dmCe000 },
+    en000: { columns: ["GUID text primary key", "ParentGUID text", "AccountGUID text", "ContraAccGUID text", "Debit real", "Credit real", "Type integer", "Date text", "Number integer", "Notes text"], rows: dmEn000 },
+    cu000: { columns: ["AccountGUID text", "CustomerName text"], rows: dmCu000 },
+  }, dailyMovementToSqlite(dailyMovementPaymentSql(), DM_DAY));
+  assert.ok(dmRows.length > 0, "لم يُرجع paymentSql أي صف");
+});
+const dmKey = (customer, amount) => `${customer}|${Number(amount).toFixed(2)}`;
+const dmPicked = new Set(dmRows.map((r) => dmKey(r.customer, r.amount)));
+for (const c of DM_PAY) {
+  test(`دفعات اليوم — دفعة: ${c.name}`, () => assert.ok(dmPicked.has(dmKey(c.customer, c.amount)), `${c.name} لم يظهر في دفعات اليوم`));
+}
+for (const c of DM_NOT) {
+  test(`دفعات اليوم — ليست دفعة: ${c.name}`, () => assert.ok(!dmPicked.has(dmKey(c.customer, c.amount)), `${c.name} ظهر في دفعات اليوم`));
+}
+test("دفعات اليوم: لا صفوف زائدة، وشكل الصف customer/amount/number/notes كما هو", () => {
+  assert.equal(dmRows.length, DM_PAY.length, `عدد الصفوف ${dmRows.length} والمتوقع ${DM_PAY.length}`);
+  for (const r of dmRows) assert.deepEqual(Object.keys(r), ["customer", "amount", "number", "notes"]);
 });
 
+test("push-daily-movement.ps1 يحمل كتلة payment-rule نفسها حرفياً", () => {
+  assert.equal(ruleBlock(dailyMovementPs, "push-daily-movement.ps1"), balancesBlock, "الكتلة في دفعات اليوم انحرفت عن استعلام الأرصدة");
+});
+
+test("paymentSql يُبقي فلتر اليوم وربط cu000 واستبعاد الموردين ويضيف القاعدة", () => {
+  const sql = dailyMovementPaymentSql();
+  assert.match(sql, /AND en\.Date >= '\$Date' AND en\.Date < DATEADD\(day,1,'\$Date'\)/, "فلتر التاريخ تغيّر");
+  assert.match(sql, /JOIN cu000 c ON c\.AccountGUID = en\.AccountGUID/, "ربط cu000 للاسم تغيّر");
+  assert.match(sql, /AND \(acp\.Name IS NULL OR acp\.Name <> N'الموردون'\)/, "استبعاد الموردين تغيّر");
+  assert.match(sql, /AND en\.GUID IN \(SELECT pl\.GUID FROM payment_lines pl\)/, "paymentSql لا يستعمل payment_lines");
+});
+
+test("شكل الحمولة المرفوعة لم يتغيّر (payments وpaymentSummary وusdPayments)", () => {
+  const ps = dailyMovementPs.replace(/\r\n/g, "\n");
+  assert.match(ps, /payments = @\(\$payments\)/);
+  assert.match(ps, /paymentSummary = \[ordered\]@\{ count = @\(\$payments\)\.Count; totalUsd = \$paymentTotal \}/);
+  assert.match(ps, /usdPayments = @\(\$usdPayments\)/);
+  assert.match(ps, /customer = \$_\.Name\n\s+paid = /);
+});
 console.log("فحص قاعدة الدفعة الحقيقية للزبون:");
 console.log(results.join("\n"));
 if (failed) {

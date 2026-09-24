@@ -100,9 +100,62 @@ ORDER BY bt.Name, m.Unit2
 "@
     $sales = Query $salesSql
 
-    # Every customer credit movement is already expressed in Al-Ameen's USD
-    # base currency. Keep individual payments so names and notes are preserved.
+    # Customer payments are expressed in Al-Ameen's USD base currency. Keep
+    # individual payments so names and notes are preserved. A payment is money
+    # that reached a cashbox, not every customer credit line: the block between
+    # the payment-rule markers is copied verbatim from
+    # tools/ameen-customer-balances-query.sql (the check enforces it), so invoice
+    # discounts, returns, purchase bills, opening entries, transfers and non-121
+    # accounts registered in cu000 stay out. Suppliers remain excluded as before.
     $paymentSql = @"
+-- payment-rule:begin
+-- تعريف «الدفعة» الموحّد لآخر دفعة وسجل الدفعات وعدّاد نافذة الزخم معاً. كل سطر دائن
+-- على الزبون ليس دفعة: حسم الفاتورة (دائن مقابل 43 الحسم الممنوح) والمرتجع (مقابل 42)
+-- والقيد الافتتاحي والتسويات والتحويلات كلها دائنة. القبض الحقيقي هو ما دخل صندوقاً،
+-- والحكم بالمعرّفات وشجرة الحسابات لا بالأسماء ولا بالتاريخ والمبلغ (مُثبت قراءةً على
+-- الأمين في 2026-09-24 على كل الأسطر الدائنة للزبائن، بلا إيجابي ولا سلبي خاطئ معروف):
+--   • حساب الزبون تحت شجرة 121 الزبائن (e30187a7…) — يُخرج حسابات المصاريف والسلف
+--     المسجّلة في cu000.
+--   • مقابل السطر صندوق من شجرة 13 الأموال الجاهزة (c0dc3c06…) عدا 135 فروقات الصندوق
+--     (ef5d9f4c…) — يغطي سندات القبض والدفعة الأولى (FirstPay).
+--   • أو مقابل صفري (قيد مركب) وفي القيد نفسه (en.ParentGUID) مدين على ذلك الصندوق،
+--     والقيد ليس القيد الافتتاحي (ce.TypeGUID ea69ba80…). بلا مطابقة مبلغ عمداً: دفعة
+--     واحدة في قيد مركب قد تدخل صندوقين بمبلغين جزئيين.
+-- الموردون خارج هذا التعريف ويبقون على شرطهم السابق كما هو.
+with cash_tree as (
+  select ac.GUID, ac.ParentGUID from dbo.ac000 ac where ac.GUID = 'c0dc3c06-b2ac-4e57-beae-19d7da3f514c'
+  union all
+  select a.GUID, a.ParentGUID from dbo.ac000 a join cash_tree t on a.ParentGUID = t.GUID
+),
+cash_accounts as (
+  select t.GUID from cash_tree t where t.GUID <> 'ef5d9f4c-db3a-4307-a402-4fefe3e4e2b8'
+),
+customer_tree as (
+  select ac.GUID, ac.ParentGUID from dbo.ac000 ac where ac.GUID = 'e30187a7-eccc-4ff8-8a7d-f2df5e660b53'
+  union all
+  select a.GUID, a.ParentGUID from dbo.ac000 a join customer_tree t on a.ParentGUID = t.GUID
+),
+payment_lines as (
+  select en.GUID
+  from dbo.en000 en
+  join customer_tree ct on ct.GUID = en.AccountGUID
+  left join dbo.ce000 ce on ce.GUID = en.ParentGUID
+  where coalesce(en.Credit, 0) > 0 and coalesce(en.Type, 0) = 0
+    and (
+      en.ContraAccGUID in (select c.GUID from cash_accounts c)
+      or (
+        coalesce(en.ContraAccGUID, '00000000-0000-0000-0000-000000000000') = '00000000-0000-0000-0000-000000000000'
+        and ce.GUID is not null
+        and coalesce(ce.TypeGUID, '00000000-0000-0000-0000-000000000000') <> 'ea69ba80-662d-4fa4-90ee-4d2e1988a8ea'
+        and exists (
+          select 1 from dbo.en000 d
+          where d.ParentGUID = en.ParentGUID and coalesce(d.Debit, 0) > 0
+            and d.AccountGUID in (select c.GUID from cash_accounts c)
+        )
+      )
+    )
+)
+-- payment-rule:end
 SELECT c.CustomerName AS customer,
        CAST(en.Credit AS decimal(18,2)) AS amount,
        en.Number AS number,
@@ -116,6 +169,7 @@ WHERE en.Credit > 0
   AND en.Date >= '$Date' AND en.Date < DATEADD(day,1,'$Date')
   AND c.CustomerName IS NOT NULL AND LTRIM(RTRIM(c.CustomerName)) <> ''
   AND (acp.Name IS NULL OR acp.Name <> N'الموردون')
+  AND en.GUID IN (SELECT pl.GUID FROM payment_lines pl)
 ORDER BY en.Credit DESC, c.CustomerName, en.Number
 "@
     $payments = Query $paymentSql
