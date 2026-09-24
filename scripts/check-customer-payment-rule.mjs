@@ -263,10 +263,10 @@ test("ameen-daily-summary.ps1 يحمل الكتلة نفسها حرفياً وي
 
 // ── «دفعات اليوم» (tools/push-daily-movement.ps1) ─────────────────────────────
 // العطل (2026-09-24): paymentSql كان يعدّ كل سطر دائن على حساب في cu000 دفعة، فظهر
-// حسم فاتورة 0.01 ضمن «دفعات اليوم». الإصلاح يحمل كتلة payment-rule نفسها ويُبقي فلتر
+// حسم فاتورة صغير ضمن «دفعات اليوم». الإصلاح يحمل كتلة payment-rule نفسها ويُبقي فلتر
 // التاريخ وربط cu000 للاسم واستبعاد الموردين وشكل الصف. الفحص يشغّل paymentSql الحقيقي
-// كاملاً على قيود مصطنعة تحاكي أشكال الشواهد (الأسماء والمعرّفات وهمية، والمبالغ تحاكي
-// الشاهد فقط لتسمية الحالة).
+// كاملاً على قيود مصطنعة كلياً تحاكي أشكال الحالات المحاسبية وحدها: الأسماء والمبالغ
+// والمعرّفات والملاحظات كلها وهمية.
 const DM_DAY = "2026-09-24";
 
 function dailyMovementPaymentSql() {
@@ -299,27 +299,27 @@ function dailyMovementToSqlite(sql, day) {
 const D = {
   boxUsd: fake("d1"), boxSyp: fake("d2"), boxDollar: fake("d3"), boxSham: fake("d4"),
   custRoot: fake("d10"),
-  faisal: fake("d11"), baron: fake("d12"), firstPay: fake("d13"), returner: fake("d14"),
-  purchaser: fake("d15"), badr: fake("d16"), khayal: fake("d17"), opener: fake("d18"),
+  custA: fake("d11"), custB: fake("d12"), firstPay: fake("d13"), returner: fake("d14"),
+  purchaser: fake("d15"), custC: fake("d16"), custD: fake("d17"), opener: fake("d18"),
   via135: fake("d19"), older: fake("d20"),
   sales41: fake("d30"), returns42: fake("d31"), discount43: fake("d32"), inventory1241: fake("d33"),
-  acc515: fake("d34"), suppliersRoot: fake("d40"), supplier: fake("d41"),
+  nonCustomer: fake("d34"), suppliersRoot: fake("d40"), supplier: fake("d41"),
 };
 const dmAc000 = [
-  [RULE.cashRoot, ZERO, "الأموال الجاهزة"], [D.boxUsd, RULE.cashRoot, "صندوق دولار"],
-  [D.boxSyp, RULE.cashRoot, "صندوق سوري"], [D.boxDollar, RULE.cashRoot, "صندوق آخر خارج الأربعة"],
-  [D.boxSham, RULE.cashRoot, "شام كاش"], [RULE.diff135, RULE.cashRoot, "فروقات الصندوق"],
+  [RULE.cashRoot, ZERO, "الأموال الجاهزة"], [D.boxUsd, RULE.cashRoot, "صندوق أ"],
+  [D.boxSyp, RULE.cashRoot, "صندوق ب"], [D.boxDollar, RULE.cashRoot, "صندوق ج خارج الأربعة"],
+  [D.boxSham, RULE.cashRoot, "صندوق د"], [RULE.diff135, RULE.cashRoot, "فروقات الصندوق"],
   [RULE.customers121, ZERO, "الزبائن"], [D.custRoot, RULE.customers121, "مجموعة زبائن"],
-  ...["faisal", "baron", "firstPay", "returner", "purchaser", "badr", "khayal", "opener", "via135", "older"]
+  ...["custA", "custB", "firstPay", "returner", "purchaser", "custC", "custD", "opener", "via135", "older"]
     .map((k) => [D[k], D.custRoot, `زبون ${k}`]),
   [D.sales41, ZERO, "المبيعات"], [D.returns42, ZERO, "مرتجع المبيعات"], [D.discount43, ZERO, "الحسم الممنوح"],
-  [D.inventory1241, ZERO, "مخزون بضاعة"], [D.acc515, ZERO, "فرق جرد"],
+  [D.inventory1241, ZERO, "مخزون بضاعة"], [D.nonCustomer, ZERO, "حساب غير زبون"],
   [D.suppliersRoot, ZERO, "الموردون"], [D.supplier, D.suppliersRoot, "مورد"],
 ];
 const dmCu000 = [
-  ...["faisal", "baron", "firstPay", "returner", "purchaser", "badr", "khayal", "opener", "via135", "older"]
+  ...["custA", "custB", "firstPay", "returner", "purchaser", "custC", "custD", "opener", "via135", "older"]
     .map((k) => [D[k], `زبون ${k}`]),
-  [D.acc515, "فرق جرد"], [D.supplier, "مورد"],
+  [D.nonCustomer, "حساب غير زبون"], [D.supplier, "مورد"],
 ];
 
 const dmCe000 = [];
@@ -340,58 +340,58 @@ const DM_NOT = [];
 function pay(name, customer, amount) { DM_PAY.push({ name, customer, amount }); }
 function notPay(name, customer, amount) { DM_NOT.push({ name, customer, amount }); }
 
-// فاتورة بيع بحسم 0.01 ثم سند قبض 869.565 في اليوم نفسه.
+// فاتورة بيع بحسم صغير ثم سند قبض حقيقي في اليوم نفسه.
 let e = dmEntry("f1");
-dmLine(e, D.faisal, D.sales41, 700, 0); dmLine(e, D.faisal, D.discount43, 0, 0.01); dmLine(e, D.discount43, D.faisal, 0.01, 0);
-notPay("حسم فاتورة 0.01 مقابل 43", "زبون faisal", 0.01);
+dmLine(e, D.custA, D.sales41, 300, 0); dmLine(e, D.custA, D.discount43, 0, 0.07); dmLine(e, D.discount43, D.custA, 0.07, 0);
+notPay("حسم فاتورة صغير مقابل 43", "زبون custA", 0.07);
 e = dmEntry("f2");
-dmLine(e, D.faisal, D.boxSyp, 0, 869.565); dmLine(e, D.boxSyp, D.faisal, 869.565, 0);
-pay("سند قبض 869.565", "زبون faisal", 869.57);
-// حسم 1.83 ثم قيد يدوي 38,730 على صندوق من شجرة 13 خارج الصناديق الأربعة.
+dmLine(e, D.custA, D.boxSyp, 0, 512.345); dmLine(e, D.boxSyp, D.custA, 512.345, 0);
+pay("سند قبض بجانب الحسم الصغير", "زبون custA", 512.35);
+// حسم فاتورة ثم قيد يدوي على صندوق من شجرة 13 خارج الصناديق الأربعة.
 e = dmEntry("b1");
-dmLine(e, D.baron, D.sales41, 1000, 0); dmLine(e, D.baron, D.discount43, 0, 1.83); dmLine(e, D.discount43, D.baron, 1.83, 0);
-notPay("حسم فاتورة 1.83 مقابل 43", "زبون baron", 1.83);
+dmLine(e, D.custB, D.sales41, 900, 0); dmLine(e, D.custB, D.discount43, 0, 2.5); dmLine(e, D.discount43, D.custB, 2.5, 0);
+notPay("حسم فاتورة ثانٍ مقابل 43", "زبون custB", 2.5);
 e = dmEntry("b2");
-dmLine(e, D.baron, D.boxDollar, 0, 38730); dmLine(e, D.boxDollar, D.baron, 38730, 0);
-pay("قيد يدوي 38,730 مقابل صندوق", "زبون baron", 38730);
-// فاتورة بيع بدفعة أولى 1,047.
+dmLine(e, D.custB, D.boxDollar, 0, 12345); dmLine(e, D.boxDollar, D.custB, 12345, 0);
+pay("قيد يدوي مقابل صندوق", "زبون custB", 12345);
+// فاتورة بيع بدفعة أولى.
 e = dmEntry("p1");
-dmLine(e, D.firstPay, D.sales41, 1500, 0); dmLine(e, D.firstPay, D.boxUsd, 0, 1047); dmLine(e, D.boxUsd, D.firstPay, 1047, 0);
-pay("الدفعة الأولى FirstPay", "زبون firstPay", 1047);
+dmLine(e, D.firstPay, D.sales41, 800, 0); dmLine(e, D.firstPay, D.boxUsd, 0, 640); dmLine(e, D.boxUsd, D.firstPay, 640, 0);
+pay("الدفعة الأولى FirstPay", "زبون firstPay", 640);
 // مرتجع مبيعات.
 e = dmEntry("r1");
-dmLine(e, D.returner, D.returns42, 0, 420.02); dmLine(e, D.returns42, D.returner, 420.02, 0);
-notPay("مرتجع مبيعات مقابل 42", "زبون returner", 420.02);
+dmLine(e, D.returner, D.returns42, 0, 75.5); dmLine(e, D.returns42, D.returner, 75.5, 0);
+notPay("مرتجع مبيعات مقابل 42", "زبون returner", 75.5);
 // فاتورة شراء من زبون: دائن مقابل مخزون 1241.
 e = dmEntry("i1");
-dmLine(e, D.purchaser, D.inventory1241, 0, 2000); dmLine(e, D.inventory1241, D.purchaser, 2000, 0);
-notPay("فاتورة شراء مقابل 1241", "زبون purchaser", 2000);
-// قبض مركّب بمقابل صفري: 200 وحده، و450 بجانب سطر آخر مقابل صندوق، و760 و456 في قيد واحد.
+dmLine(e, D.purchaser, D.inventory1241, 0, 1111); dmLine(e, D.inventory1241, D.purchaser, 1111, 0);
+notPay("فاتورة شراء مقابل 1241", "زبون purchaser", 1111);
+// قبض مركّب بمقابل صفري: دفعة وحدها، ودفعة بجانب سطر آخر مقابل صندوق، ودفعتان في قيد واحد.
 e = dmEntry("z1");
-dmLine(e, D.badr, ZERO, 0, 200); dmLine(e, D.boxUsd, ZERO, 200, 0);
-pay("قبض مركّب 200", "زبون badr", 200);
+dmLine(e, D.custC, ZERO, 0, 101); dmLine(e, D.boxUsd, ZERO, 101, 0);
+pay("قبض مركّب وحده", "زبون custC", 101);
 e = dmEntry("z2");
-dmLine(e, D.badr, ZERO, 0, 450); dmLine(e, D.boxUsd, ZERO, 450, 0);
-dmLine(e, D.badr, D.boxSyp, 0, 20); dmLine(e, D.boxSyp, D.badr, 20, 0);
-pay("قبض مركّب 450", "زبون badr", 450);
-pay("سطر مقابل صندوق في القيد المركّب نفسه", "زبون badr", 20);
+dmLine(e, D.custC, ZERO, 0, 202); dmLine(e, D.boxUsd, ZERO, 202, 0);
+dmLine(e, D.custC, D.boxSyp, 0, 17); dmLine(e, D.boxSyp, D.custC, 17, 0);
+pay("قبض مركّب بجانب سطر صندوق", "زبون custC", 202);
+pay("سطر مقابل صندوق في القيد المركّب نفسه", "زبون custC", 17);
 e = dmEntry("z3");
-dmLine(e, D.khayal, ZERO, 0, 760); dmLine(e, D.khayal, ZERO, 0, 456); dmLine(e, D.boxUsd, ZERO, 1216, 0);
-pay("قبض مركّب 760", "زبون khayal", 760);
-pay("قبض مركّب 456", "زبون khayal", 456);
-// 135 فروقات الصندوق: زبون مقابله 135، والحساب 515 مقابل 135 وصندوق و1241.
+dmLine(e, D.custD, ZERO, 0, 303); dmLine(e, D.custD, ZERO, 0, 404); dmLine(e, D.boxUsd, ZERO, 707, 0);
+pay("قبض مركّب أول في قيد واحد", "زبون custD", 303);
+pay("قبض مركّب ثانٍ في قيد واحد", "زبون custD", 404);
+// 135 فروقات الصندوق: زبون مقابله 135، وحساب غير زبون مسجّل في cu000 (بنية 515) مقابل 135 وصندوق و1241.
 e = dmEntry("c1");
 dmLine(e, D.via135, RULE.diff135, 0, 5); dmLine(e, RULE.diff135, D.via135, 5, 0);
 notPay("زبون مقابل 135", "زبون via135", 5);
 e = dmEntry("c2");
-dmLine(e, D.acc515, RULE.diff135, 0, 673); dmLine(e, RULE.diff135, D.acc515, 673, 0);
-notPay("الحساب 515 مقابل 135", "فرق جرد", 673);
+dmLine(e, D.nonCustomer, RULE.diff135, 0, 66); dmLine(e, RULE.diff135, D.nonCustomer, 66, 0);
+notPay("حساب غير زبون (515) مقابل 135", "حساب غير زبون", 66);
 e = dmEntry("c3");
-dmLine(e, D.acc515, D.boxSham, 0, 1000); dmLine(e, D.boxSham, D.acc515, 1000, 0);
-notPay("الحساب 515 مقابل صندوق", "فرق جرد", 1000);
+dmLine(e, D.nonCustomer, D.boxSham, 0, 77); dmLine(e, D.boxSham, D.nonCustomer, 77, 0);
+notPay("حساب غير زبون (515) مقابل صندوق", "حساب غير زبون", 77);
 e = dmEntry("c4");
-dmLine(e, D.acc515, D.inventory1241, 0, 9863.18); dmLine(e, D.inventory1241, D.acc515, 9863.18, 0);
-notPay("الحساب 515 مقابل 1241", "فرق جرد", 9863.18);
+dmLine(e, D.nonCustomer, D.inventory1241, 0, 88); dmLine(e, D.inventory1241, D.nonCustomer, 88, 0);
+notPay("حساب غير زبون (515) مقابل 1241", "حساب غير زبون", 88);
 // القيد الافتتاحي بمقابل صفري وفيه مدين على صندوق.
 e = dmEntry("o1", RULE.openingType);
 dmLine(e, D.opener, ZERO, 0, 60); dmLine(e, D.boxUsd, ZERO, 60, 0);
