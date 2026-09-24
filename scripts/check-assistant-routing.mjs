@@ -1702,9 +1702,10 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
 
 {
   // «هذا الأسبوع» و«الأسبوع الماضي» كانتا تقعان كلتاهما ضمن النمط العام لآخر
-  // 7 أيام المتدحرجة (لا صلة له ببداية الأسبوع السوري=السبت)، فتُحسب فترتان
-  // مختلفتان فعلياً بنفس الحساب الخاطئ. اللقطة فارغة عمداً كي يظهر النص
-  // الرافض بتفاصيل الفترة (label/from/to) لكل صياغة، فتُقارَن الفترات الثلاث.
+  // 7 أيام المتدحرجة (لا صلة له ببداية الأسبوع السوري=السبت). اللقطة فارغة عمداً
+  // كي يظهر النص الرافض بتفاصيل الفترة (label/from/to) لكل صياغة. العناوين ثلاث
+  // مختلفة، والمدى يُطابَق بالحساب التقويمي لا بشرط «أرقام مختلفة دائماً»
+  // (الجمعة: هذا الأسبوع = آخر 7 أيام بالحساب الصحيح).
   const emptyBalances = defaultFixtures();
   emptyBalances["inventory_reports:ameen_customer_balances"] = [];
 
@@ -1737,12 +1738,40 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   const rollingWeekWindow = extractWindow(rollingWeekText);
   assert.ok(rollingWeekWindow, `لم يظهر مدى تاريخ في رد «اخر سبعه ايام»:\n${rollingWeekText}`);
 
-  // الثلاث فترات يجب أن تختلف فعلياً — لو تعطّل الفصل رجعت جميعها لنفس مدى
-  // «آخر 7 أيام» المتدحرج كما كان الخلل قبل الإصلاح.
-  assert.notEqual(thisWeekWindow, rollingWeekWindow, `«هذا الاسبوع» و«اخر سبعه ايام» أعطتا نفس المدى (${thisWeekWindow}) — لم تُفصلا فعلياً`);
-  assert.notEqual(lastWeekWindow, rollingWeekWindow, `«الاسبوع الماضي» و«اخر سبعه ايام» أعطتا نفس المدى (${lastWeekWindow}) — لم تُفصلا فعلياً`);
-  assert.notEqual(thisWeekWindow, lastWeekWindow, `«هذا الاسبوع» و«الاسبوع الماضي» أعطتا نفس المدى (${thisWeekWindow})`);
-  ok("«هذا الاسبوع» و«الاسبوع الماضي» و«اخر سبعه ايام» تُحسب بثلاث فترات منفصلة فعلياً لا فترة متدحرجة واحدة مكررة");
+  // الحارس ليس «الثلاث نوافذ مختلفة الأرقام دائماً». الأسبوع السوري يبدأ السبت
+  // وينتهي الجمعة، فيوم الجمعة «هذا الأسبوع» (سبت→جمعة) يطابق «آخر 7 أيام»
+  // بالحساب لا بالخلط. قيس 2026-09-18 (جمعة): الفحص القديم `notEqual` أسقط
+  // `npm run check` وأوقف نشر Pages على main رغم أن المنطق صحيح والعناوين مختلفة.
+  // العطل الأصلي كان سقوط العبارات الثلاث لنفس فرع «أسبوع» العام (نفس العنوان
+  // ونفس الحساب المتدحرج). نحرس الحساب نفسه: بداية الأسبوع سبت، الماضي أسبوع
+  // سبت→جمعة السابق، والمتدحرج اليوم−6→اليوم. العناوين فُحصت أعلاه.
+  const DAMASCUS_OFFSET_MS = 180 * 60_000;
+  const DAY_MS = 86_400_000;
+  const damascusDate = (offsetDays = 0) =>
+    new Date(Date.now() + DAMASCUS_OFFSET_MS + offsetDays * DAY_MS).toISOString().slice(0, 10);
+  const damascusWeekday = () =>
+    new Date(Date.now() + DAMASCUS_OFFSET_MS).getUTCDay();
+  const addIsoDays = (iso, days) =>
+    new Date(new Date(`${iso}T00:00:00Z`).getTime() + days * DAY_MS).toISOString().slice(0, 10);
+  const today = damascusDate();
+  const thisWeekStart = damascusDate(-((damascusWeekday() + 1) % 7));
+  const lastWeekEnd = addIsoDays(thisWeekStart, -1);
+  const lastWeekStart = addIsoDays(lastWeekEnd, -6);
+  const rollingStart = damascusDate(-6);
+
+  assert.equal(thisWeekWindow, `${thisWeekStart}→${today}`,
+    `«هذا الاسبوع» يجب أن يكون من سبت هذا الأسبوع حتى اليوم (${thisWeekStart}→${today}) لا ${thisWeekWindow}`);
+  assert.equal(lastWeekWindow, `${lastWeekStart}→${lastWeekEnd}`,
+    `«الاسبوع الماضي» يجب أن يكون السبت→الجمعة السابقين (${lastWeekStart}→${lastWeekEnd}) لا ${lastWeekWindow}`);
+  assert.equal(rollingWeekWindow, `${rollingStart}→${today}`,
+    `«اخر سبعه ايام» يجب أن تكون نافذة متدحرجة (${rollingStart}→${today}) لا ${rollingWeekWindow}`);
+  assert.equal(new Date(`${thisWeekStart}T00:00:00Z`).getUTCDay(), 6,
+    `بداية «هذا الأسبوع» ليست سبتاً (${thisWeekStart})`);
+  assert.notEqual(thisWeekWindow, lastWeekWindow,
+    `«هذا الاسبوع» و«الاسبوع الماضي» أعطتا نفس المدى (${thisWeekWindow})`);
+  assert.notEqual(lastWeekWindow, rollingWeekWindow,
+    `«الاسبوع الماضي» و«اخر سبعه ايام» أعطتا نفس المدى (${lastWeekWindow})`);
+  ok("«هذا الاسبوع» و«الاسبوع الماضي» و«اخر سبعه ايام» تُحسب بالقواعد التقويمية الصحيحة لا بفترة متدحرجة واحدة مكررة");
 }
 
 {
