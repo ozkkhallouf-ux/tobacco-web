@@ -222,11 +222,24 @@ if ($isMainComputer) {
     }
   }
 
+  # Get-ScheduledTask في جلسة المُجدوِل قد يُخفي المهمة؛ لا ندّعي «غير مسجّلة»
+  # إلا بعد إثبات مستقل بـschtasks.exe. إن وُجدت هناك بلا نبض = عطل رؤية/تشغيل لا غياب تسجيل.
+  # 2026-09-24: الحارس يعمل بحساب OZKSync، ومهمة العامل بحساب LOQ لا تمنحه قراءتها، فيرجع
+  # schtasks «Access is denied» برمز غير صفري — وكان يُقرأ «غير مسجّلة» فلا تُفتح حادثة ولا
+  # يصل تنبيه عودة. الرفض ليس غياباً: نمرّره لمسار النبض والحادثة العادي بلا أي محاولة
+  # تشغيل أو رفع صلاحيات من هذا الحساب؛ الاستعادة يتولاها محفّز التكرار في المهمة نفسها.
+  $workerTaskAccessDenied = $false
   if ((-not $workerTask) -and (-not $heartbeatFreshEarly)) {
-    # Get-ScheduledTask في جلسة المُجدوِل قد يُخفي المهمة؛ لا ندّعي «غير مسجّلة»
-    # إلا بعد إثبات مستقل بـschtasks.exe. إن وُجدت هناك بلا نبض = عطل رؤية/تشغيل لا غياب تسجيل.
     $schtasksOut = & schtasks.exe /Query /TN $ameenWorkerTaskName 2>&1 | Out-String
-    $schtasksMissing = ($LASTEXITCODE -ne 0)
+    $schtasksExitCode = $LASTEXITCODE
+    $workerTaskAccessDenied = ($schtasksExitCode -ne 0) -and ($schtasksOut -match 'Access is denied|0x80070005')
+    if ($workerTaskAccessDenied) {
+      Write-Log ("ACCESS DENIED: this account cannot read [" + $ameenWorkerTaskName + "] - registration not disproved; no restart attempted from here | " + ($schtasksOut -replace "\s+", " ").Trim())
+    }
+  }
+
+  if ((-not $workerTask) -and (-not $heartbeatFreshEarly) -and (-not $workerTaskAccessDenied)) {
+    $schtasksMissing = ($schtasksExitCode -ne 0)
     if ($schtasksMissing) {
       $problems.Add("المهمة «$ameenWorkerTaskName» غير مسجّلة (أثبت schtasks.exe غيابها) — لا نبض حديث يناقض ذلك")
       Write-Log ("FAIL: task not registered (schtasks proved missing) — [" + $ameenWorkerTaskName + "] | " + ($schtasksOut -replace "\s+", " ").Trim())
@@ -303,7 +316,11 @@ if ($isMainComputer) {
       # يُضاف للمجموع العام أيضاً — قناة احتياطية مستقلة (مفتاح dedupe "ameen-sync-watchdog"
       # الخاص بها، 60 دقيقة) كي لا يبقى التوقف بلا أي تنبيه إن استمرت إعادة التشغيل بالفشل
       # وتعذّر إرسال تنبيه الحادثة المخصّص أعلاه أيضاً (Codex P1، الجولة الثالثة).
-      $problems.Add("Ameen Read Worker متوقفة/عالقة — $ageText")
+      if ($workerTaskAccessDenied) {
+        $problems.Add("Ameen Read Worker متوقفة/عالقة — $ageText (لا صلاحية لهذا الحساب على المهمة؛ لم تُجرَ محاولة تشغيل من هنا)")
+      } else {
+        $problems.Add("Ameen Read Worker متوقفة/عالقة — $ageText")
+      }
 
       # حادثة جديدة فقط إذا لم تكن stuck مستمرة أصلاً من التشغيل السابق — الاستمرار
       # (retry ضمن نفس الحادثة) يحمل نفس الهوية بلا تغيير كي لا يتولّد مفتاح جديد لكل دورة.
@@ -324,19 +341,24 @@ if ($isMainComputer) {
         }
       }
 
-      # استعادة محددة لهذه المهمة فقط: لا kill عام لعمليات powershell، لا إعادة تشغيل لأي مهمة أخرى
-      try {
-        if ([string](Get-ScheduledTask -TaskName $ameenWorkerTaskName -ErrorAction SilentlyContinue).State -eq "Running") { Stop-ScheduledTask -TaskName $ameenWorkerTaskName -ErrorAction Stop }
-        $waitDeadline = (Get-Date).AddSeconds(30)
-        do {
-          Start-Sleep -Seconds 2
-          $stillRunning = ([string](Get-ScheduledTask -TaskName $ameenWorkerTaskName -ErrorAction SilentlyContinue).State) -eq "Running"
-        } while ($stillRunning -and (Get-Date) -lt $waitDeadline)
+      # استعادة محددة لهذه المهمة فقط: لا kill عام لعمليات powershell، لا إعادة تشغيل لأي مهمة أخرى.
+      # مع رفض الصلاحية لا نحاول أصلاً (محاولة محكومة بالفشل)؛ محفّز التكرار في المهمة يعيد العامل.
+      if ($workerTaskAccessDenied) {
+        Write-Log "RECOVERY SKIPPED: $ameenWorkerTaskName not accessible to this account - relying on the task's own recovery trigger"
+      } else {
+        try {
+          if ([string](Get-ScheduledTask -TaskName $ameenWorkerTaskName -ErrorAction SilentlyContinue).State -eq "Running") { Stop-ScheduledTask -TaskName $ameenWorkerTaskName -ErrorAction Stop }
+          $waitDeadline = (Get-Date).AddSeconds(30)
+          do {
+            Start-Sleep -Seconds 2
+            $stillRunning = ([string](Get-ScheduledTask -TaskName $ameenWorkerTaskName -ErrorAction SilentlyContinue).State) -eq "Running"
+          } while ($stillRunning -and (Get-Date) -lt $waitDeadline)
 
-        Start-ScheduledTask -TaskName $ameenWorkerTaskName -ErrorAction Stop
-        Write-Log "RECOVERY ATTEMPT: restarted $ameenWorkerTaskName"
-      } catch {
-        Write-Log "FAIL: could not restart $ameenWorkerTaskName — $($_.Exception.Message)"
+          Start-ScheduledTask -TaskName $ameenWorkerTaskName -ErrorAction Stop
+          Write-Log "RECOVERY ATTEMPT: restarted $ameenWorkerTaskName"
+        } catch {
+          Write-Log "FAIL: could not restart $ameenWorkerTaskName — $($_.Exception.Message)"
+        }
       }
 
       @{ stuck = $true; degraded = $false; stuckAlerted = $stuckAlerted; stuckIncidentId = $stuckIncidentId; since = (Get-Date).ToUniversalTime().ToString("o") } | ConvertTo-Json | Set-Content -LiteralPath $ameenWorkerIncidentStatePath -Encoding utf8

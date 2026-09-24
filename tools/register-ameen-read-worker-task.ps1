@@ -77,7 +77,15 @@ $action = New-ScheduledTaskAction `
     -Execute $powerShellPath `
     -Argument $arguments `
     -WorkingDirectory $repoRoot
-$trigger = New-ScheduledTaskTrigger -AtStartup
+$startupTrigger = New-ScheduledTaskTrigger -AtStartup
+# Same startup delay as the live task (PT2M), so a fresh registration matches what runs today.
+$startupTrigger.Delay = "PT2M"
+# Self-recovery trigger. The task runs as LOQ while the sync watchdog runs as OZKSync, which can
+# neither read nor start it; after a boot whose logon failed (2026-09-24) the worker stayed down
+# until started by hand. Repeating every 10 minutes with IgnoreNew never launches a second
+# instance while one is running, and restarts the worker on its own if it stops -- without
+# granting any account a new permission.
+$recoveryTrigger = New-ScheduledTaskTrigger -RepetitionInterval (New-TimeSpan -Minutes 10) -Once -At (Get-Date)
 $settings = New-ScheduledTaskSettingsSet `
     -StartWhenAvailable `
     -AllowStartIfOnBatteries `
@@ -92,7 +100,7 @@ $taskPrincipal = New-ScheduledTaskPrincipal `
     -RunLevel Limited
 $taskDefinition = New-ScheduledTask `
     -Action $action `
-    -Trigger $trigger `
+    -Trigger @($startupTrigger, $recoveryTrigger) `
     -Settings $settings `
     -Principal $taskPrincipal `
     -Description "Long-running read-only Ameen request worker."
@@ -122,5 +130,5 @@ try {
 }
 
 Write-Host "Registered scheduled task: $taskName"
-Write-Host "Trigger: AtStartup"
+Write-Host "Triggers: AtStartup (delay 2 min) + recovery every 10 minutes (IgnoreNew)"
 Write-Host "The task and worker were not started by this registration script."
