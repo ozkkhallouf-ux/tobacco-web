@@ -262,5 +262,12 @@ check("غياب Read Worker يُثبت بـschtasks قبل تنبيه «غير �
   assert.match(ensureAmeen, /غير مرئية عبر Get-ScheduledTask رغم وجودها في schtasks/);
   assert.doesNotMatch(ensureAmeen, /غير مسجّلة أو متوقفة \(لا نبض\)/);
 });
+check("رفض الصلاحية على مهمة العامل لا يُقرأ «غير مسجّلة» ولا يُتجاوز", () => {
+  assert.match(ensureAmeen, /\$workerTaskAccessDenied = \(\$schtasksExitCode -ne 0\) -and \(\$schtasksOut -match 'Access is denied\|0x80070005'\)/);
+  assert.match(ensureAmeen, /\(-not \$workerTask\) -and \(-not \$heartbeatFreshEarly\) -and \(-not \$workerTaskAccessDenied\)/);
+  assert.match(ensureAmeen, /RECOVERY SKIPPED: \$ameenWorkerTaskName not accessible to this account/);
+  // لا رفع صلاحيات ولا تعديل ACL من الحارس.
+  assert.doesNotMatch(ensureAmeen, /SetSecurityDescriptor|Set-Acl|runas|Start-Process[^\n]*-Verb/i);
+});
 
 console.log(`\ncheck-decision-pipeline-safety: اجتاز ${passed} فحصاً.`);

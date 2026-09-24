@@ -33,6 +33,7 @@ const EXECUTED_UNDER_PS51 = [
   "tools/tests/Test-RegisterTaskStartAtCaseCollision.ps1",
   "tools/tests/Test-SupplierObligationsReplacement.ps1",
   "tools/tests/Test-SnapshotProducerNativeStderr.ps1",
+  "tools/tests/Test-EnsureAmeenSyncWorkerAccessDenied.ps1",
   // منتجات وسكربتات تسجيل تشغّلها مهام Windows المجدولة
   "tools/push-supplier-obligations.ps1",
   "tools/push-purchase-item-snapshot.ps1",
