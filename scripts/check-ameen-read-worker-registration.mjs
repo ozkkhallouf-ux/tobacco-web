@@ -15,6 +15,11 @@ const requiredRegistrationContracts = [
   ['quoted worker action', /-NoProfile -ExecutionPolicy Bypass -File `"\$workerPath`"/],
   ['repository working directory', /-WorkingDirectory\s+\$repoRoot/],
   ['AtStartup trigger', /New-ScheduledTaskTrigger\s+-AtStartup/],
+  ['startup delay matches live task', /\$startupTrigger\.Delay\s*=\s*"PT2M"/],
+  // 2026-09-24: الحارس (OZKSync) لا يملك تشغيل مهمة LOQ، فالاستعادة بعد توقف العامل
+  // محفّز تكرار في المهمة نفسها — بلا صلاحية جديدة لأي حساب.
+  ['10-minute self-recovery trigger', /New-ScheduledTaskTrigger\s+-RepetitionInterval\s+\(New-TimeSpan -Minutes 10\)\s+-Once\s+-At/],
+  ['both triggers registered', /-Trigger\s+@\(\$startupTrigger,\s*\$recoveryTrigger\)/],
   ['StartWhenAvailable', /-StartWhenAvailable/],
   ['allow start on batteries', /-AllowStartIfOnBatteries/],
   ['keep running on batteries', /-DontStopIfGoingOnBatteries/],

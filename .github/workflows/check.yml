@@ -145,6 +145,14 @@ jobs:
         shell: powershell
         run: .\tools\tests\Test-EnsureAmeenSyncStuckAlert.ps1
 
+      # عطل إنتاجي حيّ (2026-09-24، OZK2026): الحارس يعمل بحساب OZKSync ولا يملك قراءة مهمة
+      # Read Worker (LOQ)، فكان «Access is denied» من schtasks يُقرأ «غير مسجّلة» فلا تُفتح
+      # حادثة ولا يصل تنبيه العودة. الاختبار ينفّذ قسم العامل المستخرج من المصدر مع بدائل
+      # وهمية، ويثبت أن الرفض يمرّ بمسار الحادثة العادي بلا أي محاولة تشغيل من هذا الحساب.
+      - name: Ensure Ameen sync - worker access-denied regression test
+        shell: powershell
+        run: .\tools\tests\Test-EnsureAmeenSyncWorkerAccessDenied.ps1
+
       # عطل HOST حقيقي (2026-09-06): register-*-task.ps1 سقط بـValidatePattern
       # غامض لأن $startAt و$StartAt هما نفس المتغير في PowerShell. الاختبار
       # أُضيف مع الإصلاح لكنه لم يكن موصولاً بأي وظيفة CI — أي أنه لم يُشغَّل
