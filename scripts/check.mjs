@@ -32,6 +32,14 @@ const required = [
   "docs/ai/project-map.md",
   "docs/ai/impact-map.md",
   "docs/ai/task-contract.md",
+  "docs/ai/task-template/README.md",
+  "docs/ai/task-template/main.md",
+  "docs/ai/task-template/addons/task-data.md",
+  "docs/ai/task-template/addons/helper-info.md",
+  "docs/ai/task-template/addons/workflow.md",
+  "docs/ai/task-template/addons/rules.md",
+  "docs/ai/task-template/addons/decision-report.md",
+  "docs/ai/task-template/addons/usage.md",
   "docs/regression-policy.md",
   "docs/ai/topics/README.md",
   "docs/ai/topics/sales.md",
@@ -120,6 +128,57 @@ for (const file of required) {
         console.error(`Topic report ${file} is missing required section: ${heading}`);
         failed = true;
       }
+    }
+  }
+  if (!knowledgeIndex.includes("task-template/README.md")) {
+    console.error("Project knowledge index is missing the Slack task template.");
+    failed = true;
+  }
+}
+
+// Slack task template must keep sections as inlined editable text, not as
+// document links/cards. Each addon file is copy-paste source for one section.
+{
+  const mainTemplate = readFileSync("docs/ai/task-template/main.md", "utf8");
+  const templateReadme = readFileSync("docs/ai/task-template/README.md", "utf8");
+  const collaboration = readFileSync("docs/ai/topics/collaboration-workflow.md", "utf8");
+  const addons = [
+    "task-data.md",
+    "helper-info.md",
+    "workflow.md",
+    "rules.md",
+    "decision-report.md",
+    "usage.md"
+  ];
+  const linkOnlySection = /^## .+\n+(?:\s*\[[^\]]+\]\([^)]+\)\s*\n*)+$/m;
+
+  if (!templateReadme.includes("نص داخل المستند الرئيسي") || !templateReadme.includes("addons/")) {
+    console.error("Task template README must describe inlined text and add-on files.");
+    failed = true;
+  }
+  if (!collaboration.includes("docs/ai/task-template/main.md") || !collaboration.includes("addons/")) {
+    console.error("Collaboration workflow must point to the inlined Slack task template.");
+    failed = true;
+  }
+  if (linkOnlySection.test(mainTemplate)) {
+    console.error("Task template main.md has a section that is only a markdown link. Inline the text.");
+    failed = true;
+  }
+  for (const file of addons) {
+    const addon = readFileSync(`docs/ai/task-template/addons/${file}`, "utf8").replace(/\r\n/g, "\n").trim();
+    const body = addon.replace(/^## [^\n]+\n+/, "").trim();
+    if (!body) {
+      console.error(`Task template addon ${file} is empty.`);
+      failed = true;
+      continue;
+    }
+    if (/^\[[^\]]+\]\([^)]+\)\s*$/.test(body)) {
+      console.error(`Task template addon ${file} is a link, not editable text.`);
+      failed = true;
+    }
+    if (!mainTemplate.includes(body)) {
+      console.error(`Task template main.md must inline the text of addons/${file}, not link to it.`);
+      failed = true;
     }
   }
 }
