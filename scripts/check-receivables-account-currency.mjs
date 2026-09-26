@@ -105,10 +105,6 @@ line(acct(5), USD, 120, 0, 1);
 line(acct(5), USD, 0, 20, 1);
 // (و) acct(6) بلا أي سطر ⇒ صفر.
 
-const accounts = [
-  [acct(1), SYP], [acct(2), SYP], [acct(3), SYP], [acct(4), SYP], [acct(5), USD], [acct(6), SYP]
-];
-
 function nativeBalance(accountGuid, currencyGuid) {
   const query = `select * from (${innerSelect.replace(/cu\.AccountGUID/g, `'${accountGuid}'`).replace(/ac\.CurrencyGUID/g, `'${currencyGuid}'`)})`;
   const rows = runSql({
