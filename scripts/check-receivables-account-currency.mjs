@@ -206,7 +206,7 @@ test("استخراج دوال تقرير الذمم", () => {
 const fixture = () => [
   { name: "حساب ليري مسدَّد", balance: 111.111, accountCurrency: "ل.س.", accountCurrencyIsBase: false, balanceAccountCcy: 0 },
   { name: "حساب ليري بكسر ليرة", balance: -3.3, accountCurrency: "ل.س.", accountCurrencyIsBase: false, balanceAccountCcy: 0.4 },
-  { name: "حساب ليري اتجاهه مقلوب", balance: -20.5, accountCurrency: "ل.س.", accountCurrencyIsBase: false, balanceAccountCcy: 500 },
+  { name: "حساب ليري اتجاهه مقلوب", balance: -20.5, accountCurrency: "ل.س.", accountCurrencyIsBase: false, balanceAccountCcy: 500, lastPaymentAmount: 75.47, lastPaymentDate: "2026-01-01T00:00:00" },
   { name: "حساب ليري دائن", balance: -0.9, accountCurrency: "ل.س.", accountCurrencyIsBase: false, balanceAccountCcy: -500 },
   { name: "حساب دولاري", balance: 100, accountCurrency: "$", accountCurrencyIsBase: true, balanceAccountCcy: 100 },
   { name: "تقرير قديم بلا حقول", balance: 50 },
@@ -245,6 +245,8 @@ test("مستند الذمم: إجمالي الدولار بلا حسابات ا�
   assert.ok(!html.includes("حساب ليري بكسر ليرة"), "حساب رصيده أقل من 1 ل.س ظهر في التقرير");
   assert.match(html, /الإجمالي بالدولار \(3 زبون\)<\/td><td class="deb">160<\/td><td class="cred">0<\/td>/);
   assert.match(html, /حساب ليري اتجاهه مقلوب<\/td><td class="deb">500 ل\.س\.<\/td><td class="cred">—<\/td>/);
+  // آخر دفعة بعملة الأساس: موسومة بالدولار على صف معروض بالليرة، وبلا وسم على صف دولاري.
+  assert.match(html, /حساب ليري اتجاهه مقلوب<\/td>[^\n]*?<td>2026-01-01<\/td><td>75\.47 \$<\/td><\/tr>/);
   assert.match(html, /الإجمالي بـل\.س\. \(2 زبون\)<\/td><td class="deb">500<\/td><td class="cred">500<\/td>/);
   assert.match(html, /2 حساب بعملة غير الدولار مسدَّد بعملته/);
   assert.ok(!html.includes("111.111"), "فرق الصرف ظهر رقماً في التقرير");

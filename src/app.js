@@ -6563,11 +6563,13 @@ function receivablesPdfMarkup() {
   const withBalance = groups.base
     .sort((a, b) => customerBalanceSortValue(b) - customerBalanceSortValue(a));
   const rowCount = withBalance.length + groups.native.length;
-  const paymentCells = (it) => {
+  // قيمة آخر دفعة تأتي من en000.Credit بعملة الأساس دائماً؛ على صف معروض بعملة
+  // أخرى تُوسم بالدولار صراحةً كي لا تُقرأ بعملة الرصيد المجاور.
+  const paymentCells = (it, usdLabel = "") => {
     const ld = customerLastPaymentDate(it);
     const la = customerLastPaymentAmount(it);
     return `<td>${ld ? escapeHtml(String(ld).slice(0, 10)) : "—"}</td>`
-      + `<td>${la > 0 ? escapeHtml(formatMoney(la)) : "—"}</td></tr>`;
+      + `<td>${la > 0 ? escapeHtml(formatMoney(la) + usdLabel) : "—"}</td></tr>`;
   };
   const baseRows = withBalance.map((it, idx) => {
     const bal = customerBalance(it);
@@ -6582,7 +6584,7 @@ function receivablesPdfMarkup() {
     return `<tr><td>${withBalance.length + idx + 1}</td><td>${escapeHtml(it.name || "")}</td>`
       + `<td class="deb">${amount > 0 ? text : "—"}</td>`
       + `<td class="cred">${amount > 0 ? "—" : text}</td>`
-      + paymentCells(it);
+      + paymentCells(it, " $");
   }).join("");
   const nativeTotalRows = [...groups.nativeTotals].map(([currency, t]) =>
     `<tr class="closing"><td></td><td>الإجمالي بـ${escapeHtml(currency)} (${escapeHtml(t.debitCustomers + t.creditCustomers)} زبون)</td>`
