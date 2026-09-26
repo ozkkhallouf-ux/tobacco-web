@@ -63,10 +63,40 @@ select
   -- فيعرف الاقتطاع يقيناً بدل الاستدلال عليه من تواريخ ما وصل.
   coalesce(payments_window.payments_in_window, 0) as payments_in_window,
   payments_window.payments_window_start,
-  coalesce(recent_movements.recent_movements_json, '[]') as recent_movements_json
+  coalesce(recent_movements.recent_movements_json, '[]') as recent_movements_json,
+  -- رصيد الحساب بعملته الأصلية، إلى جانب balance (عملة الأساس) الذي يبقى كما هو.
+  -- الأمين يخزّن كل سطر en000 بالدولار حسب سعر يومه، فحساب ليري سُدِّد كاملاً بعملته
+  -- يبقى عليه في ac000 فرق صرف بالدولار (مُثبت قراءةً على الأمين 2026-09-26).
+  -- الأساس = العملة التي CurrencyVal لها 1 في my000.
+  acc_cur.Code as account_currency,
+  case when acc_cur.GUID is null then null
+       when abs(coalesce(acc_cur.CurrencyVal, 0) - 1) < 0.000001 then 1 else 0 end as account_currency_is_base,
+  account_ccy.balance_account_ccy
 from dbo.cu000 cu
 left join dbo.ac000 ac  on ac.GUID = cu.AccountGUID
 left join dbo.ac000 acp on acp.GUID = ac.ParentGUID
+left join dbo.my000 acc_cur on acc_cur.GUID = ac.CurrencyGUID
+-- account-ccy:begin
+outer apply (
+  -- مجموع (مدين − دائن) ÷ سعر السطر، على أسطر عملة الحساب وحدها. يكفي سطر واحد بعملة
+  -- أخرى أو بلا سعر صالح لإرجاع NULL: رصيد ناقص أسوأ من غيابه، والمستهلك يرجع حينها
+  -- إلى balance كما كان.
+  -- المقارنة بعملة الحساب (ac.) داخل الجدول المشتق لا داخل SUM: SQL Server يرفض
+  -- تجميعاً يخلط عموداً خارجياً بعمود داخلي.
+  select case
+           when count(*) = 0 then cast(0 as decimal(28, 3))
+           when sum(l.other_line) > 0 then null
+           else cast(sum(l.amount / nullif(l.rate, 0)) as decimal(28, 3))
+         end as balance_account_ccy
+  from (
+    select coalesce(en.Debit, 0) - coalesce(en.Credit, 0) as amount,
+           en.CurrencyVal as rate,
+           case when en.CurrencyGUID = ac.CurrencyGUID and coalesce(en.CurrencyVal, 0) > 0 then 0 else 1 end as other_line
+    from dbo.en000 en
+    where en.AccountGUID = cu.AccountGUID
+  ) l
+) account_ccy
+-- account-ccy:end
 outer apply (
   select top 1 en.Credit as last_payment_amount, en.Date as last_payment_date, en.Notes as last_payment_notes
   from dbo.en000 en

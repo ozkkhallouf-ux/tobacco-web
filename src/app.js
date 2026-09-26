@@ -6505,45 +6505,117 @@ async function exportVoucherPdf(v) {
   render();
 }
 
+// تقرير الذمم وحده يحكم على الحساب بعملته الأصلية. `balance` رصيد ac000 بعملة
+// الأساس (الدولار)، والأمين يحوّل كل سطر ليرة بسعر يومه، فحساب ليري سُدِّد كاملاً
+// بعملته يبقى عليه فرق صرف بالدولار يظهر ذمةً كاذبة، وقد ينقلب اتجاهه (مُثبت قراءةً
+// على الأمين 2026-09-26).
+// `balance` نفسه لا يُمسّ هنا ولا في أي مستهلك آخر. تقرير قديم بلا الحقول الجديدة،
+// أو حساب رصيده بعملته مجهول (null)، يبقى على `balance` كما كان.
+const RECEIVABLES_NATIVE_SETTLED_BELOW = 1;
+
+function receivablesNativeBalance(item) {
+  if (item?.accountCurrencyIsBase !== false) return null;
+  const raw = item?.balanceAccountCcy;
+  if (raw === null || raw === undefined || raw === "") return null;
+  const amount = Number(raw);
+  if (!Number.isFinite(amount)) return null;
+  return {
+    amount: Math.abs(amount) < RECEIVABLES_NATIVE_SETTLED_BELOW ? 0 : amount,
+    currency: String(item?.accountCurrency || "").trim() || "عملة الحساب"
+  };
+}
+
+// يقسم الحسابات: base بالدولار كما كانت، وnative بعملتها الأصلية مع إجماليات لكل
+// عملة على حدة (لا جمع لعملتين)، وsettled حسابات مسدَّدة بعملتها تُستبعد.
+function receivablesReportGroups(items) {
+  const base = [];
+  const native = [];
+  let settled = 0;
+  items.forEach((item) => {
+    const own = receivablesNativeBalance(item);
+    if (!own) {
+      if (Math.abs(customerBalance(item)) > 0.009) base.push(item);
+    } else if (own.amount === 0) {
+      settled += 1;
+    } else {
+      native.push({ item, amount: own.amount, currency: own.currency });
+    }
+  });
+  const nativeTotals = new Map();
+  native.forEach(({ amount, currency }) => {
+    if (!nativeTotals.has(currency)) nativeTotals.set(currency, { debit: 0, credit: 0, debitCustomers: 0, creditCustomers: 0 });
+    const t = nativeTotals.get(currency);
+    if (amount > 0) { t.debit += amount; t.debitCustomers += 1; }
+    else { t.credit += Math.abs(amount); t.creditCustomers += 1; }
+  });
+  native.sort((a, b) => (a.currency === b.currency ? b.amount - a.amount : a.currency.localeCompare(b.currency)));
+  return { base, native, nativeTotals, settled };
+}
+
 function receivablesPdfMarkup() {
   const items = latestCustomerBalanceItems();
-  const totals = customerBalanceTotals(items);
+  const groups = receivablesReportGroups(items);
+  const totals = customerBalanceTotals(groups.base);
   const totalDebit = totals.totalDebitBalance;              // مجموع المدين (موجب)
   const totalCredit = Math.abs(totals.totalCreditBalance);  // مجموع الدائن (نعرضه موجباً)
   const net = totalDebit - totalCredit;                     // صافي الذمم لصالحنا
   // كل الزبائن أصحاب رصيد (مدين موجب أو دائن سالب) — بلا قصّ. المدينون أولاً ثم الدائنون.
-  const withBalance = items
-    .filter((i) => Math.abs(customerBalance(i)) > 0.009)
+  const withBalance = groups.base
     .sort((a, b) => customerBalanceSortValue(b) - customerBalanceSortValue(a));
-  const rows = withBalance.length
-    ? withBalance.map((it, idx) => {
-        const bal = customerBalance(it);
-        const isDebit = bal > 0;
-        const ld = customerLastPaymentDate(it);
-        const la = customerLastPaymentAmount(it);
-        return `<tr><td>${idx + 1}</td><td>${escapeHtml(it.name || "")}</td>`
-          + `<td class="deb">${isDebit ? escapeHtml(formatMoney(bal)) : "—"}</td>`
-          + `<td class="cred">${isDebit ? "—" : escapeHtml(formatMoney(Math.abs(bal)))}</td>`
-          + `<td>${ld ? escapeHtml(String(ld).slice(0, 10)) : "—"}</td>`
-          + `<td>${la > 0 ? escapeHtml(formatMoney(la)) : "—"}</td></tr>`;
-      }).join("")
-      + `<tr class="closing"><td></td><td>الإجمالي (${escapeHtml(withBalance.length)} زبون)</td>`
+  const rowCount = withBalance.length + groups.native.length;
+  const paymentCells = (it) => {
+    const ld = customerLastPaymentDate(it);
+    const la = customerLastPaymentAmount(it);
+    return `<td>${ld ? escapeHtml(String(ld).slice(0, 10)) : "—"}</td>`
+      + `<td>${la > 0 ? escapeHtml(formatMoney(la)) : "—"}</td></tr>`;
+  };
+  const baseRows = withBalance.map((it, idx) => {
+    const bal = customerBalance(it);
+    const isDebit = bal > 0;
+    return `<tr><td>${idx + 1}</td><td>${escapeHtml(it.name || "")}</td>`
+      + `<td class="deb">${isDebit ? escapeHtml(formatMoney(bal)) : "—"}</td>`
+      + `<td class="cred">${isDebit ? "—" : escapeHtml(formatMoney(Math.abs(bal)))}</td>`
+      + paymentCells(it);
+  }).join("");
+  const nativeRows = groups.native.map(({ item: it, amount, currency }, idx) => {
+    const text = escapeHtml(`${formatMoney(Math.abs(amount))} ${currency}`);
+    return `<tr><td>${withBalance.length + idx + 1}</td><td>${escapeHtml(it.name || "")}</td>`
+      + `<td class="deb">${amount > 0 ? text : "—"}</td>`
+      + `<td class="cred">${amount > 0 ? "—" : text}</td>`
+      + paymentCells(it);
+  }).join("");
+  const nativeTotalRows = [...groups.nativeTotals].map(([currency, t]) =>
+    `<tr class="closing"><td></td><td>الإجمالي بـ${escapeHtml(currency)} (${escapeHtml(t.debitCustomers + t.creditCustomers)} زبون)</td>`
+      + `<td class="deb">${escapeHtml(formatMoney(t.debit))}</td>`
+      + `<td class="cred">${escapeHtml(formatMoney(t.credit))}</td><td></td><td></td></tr>`).join("");
+  const nativeCards = [...groups.nativeTotals].map(([currency, t]) =>
+    `<div class="rcard"><div class="v red">${escapeHtml(formatMoney(t.debit - t.credit))} ${escapeHtml(currency)}</div><div class="l">صافي حسابات ${escapeHtml(currency)} بعملتها (مدين ${escapeHtml(t.debitCustomers)} · دائن ${escapeHtml(t.creditCustomers)})</div></div>`).join("");
+  const rows = rowCount
+    ? baseRows
+      + `<tr class="closing"><td></td><td>الإجمالي بالدولار (${escapeHtml(withBalance.length)} زبون)</td>`
       + `<td class="deb">${escapeHtml(formatMoney(totalDebit))}</td>`
       + `<td class="cred">${escapeHtml(formatMoney(totalCredit))}</td><td></td><td></td></tr>`
+      + nativeRows
+      + nativeTotalRows
     : `<tr><td colspan="6" class="muted">لا يوجد زبائن أصحاب أرصدة</td></tr>`;
+  const settledNote = groups.settled
+    ? `<p class="muted" style="margin:8px 0 0">${escapeHtml(groups.settled)} حساب بعملة غير الدولار مسدَّد بعملته (أقل من ${escapeHtml(RECEIVABLES_NATIVE_SETTLED_BELOW)} بعملة الحساب) فلا يُعرض ذمة؛ الباقي عليه بالدولار فرق صرف فقط.</p>`
+    : "";
   return `${REPORT_STYLE}<div class="ozk-rpt">
     <div class="rhead"><div class="brand">OZK TOBACCO<small>تقرير الذمم الإجمالي</small></div>
       <div class="rtitle"><h2>الذمم</h2><span>بتاريخ ${escapeHtml(todayIsoDate())}</span></div></div>
     <div class="cards">
-      <div class="rcard"><div class="v red">${escapeHtml(formatMoney(totalDebit))}</div><div class="l">إجمالي المدين — مستحق لنا (${escapeHtml(totals.debitCustomers)} زبون)</div></div>
-      <div class="rcard"><div class="v green">${escapeHtml(formatMoney(totalCredit))}</div><div class="l">إجمالي الدائن — لهم عندنا (${escapeHtml(totals.creditCustomers)} زبون)</div></div>
-      <div class="rcard"><div class="v gold">${escapeHtml(formatMoney(net))}</div><div class="l">صافي الذمم لصالحنا</div></div>
+      <div class="rcard"><div class="v red">${escapeHtml(formatMoney(totalDebit))}</div><div class="l">إجمالي المدين بالدولار — مستحق لنا (${escapeHtml(totals.debitCustomers)} زبون)</div></div>
+      <div class="rcard"><div class="v green">${escapeHtml(formatMoney(totalCredit))}</div><div class="l">إجمالي الدائن بالدولار — لهم عندنا (${escapeHtml(totals.creditCustomers)} زبون)</div></div>
+      <div class="rcard"><div class="v gold">${escapeHtml(formatMoney(net))}</div><div class="l">صافي الذمم بالدولار لصالحنا</div></div>
+      ${nativeCards}
     </div>
-    <div class="sec">أرصدة الزبائن — المدين والدائن (${escapeHtml(withBalance.length)} زبون)</div>
+    <div class="sec">أرصدة الزبائن — المدين والدائن (${escapeHtml(rowCount)} زبون)</div>
     <table>
       <thead><tr><th>#</th><th>الزبون</th><th>مدين (عليه)</th><th>دائن (له)</th><th>تاريخ آخر دفعة</th><th>قيمة آخر دفعة</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
+    ${settledNote}
   </div>`;
 }
 
