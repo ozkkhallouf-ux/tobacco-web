@@ -393,6 +393,11 @@ function Build-CustomerBalanceReport($Rows) {
       customerGuid = [string]$row.customer_guid
       customerAccountGuid = [string]$row.customer_account_guid
       isSupplier = ((To-Number $row.is_supplier) -eq 1)
+      # رصيد الحساب بعملته الأصلية، ولا يمسّ balance أعلاه. null يعني «غير معروف»
+      # فيرجع المستهلك إلى balance؛ لذلك لا يُحوَّل الغياب إلى صفر.
+      accountCurrency = [string]$row.account_currency
+      accountCurrencyIsBase = if ($null -eq $row.account_currency_is_base) { $null } else { ((To-Number $row.account_currency_is_base) -eq 1) }
+      balanceAccountCcy = if ($null -eq $row.balance_account_ccy) { $null } else { [math]::Round((To-Number $row.balance_account_ccy), 3) }
     }
   }
 
