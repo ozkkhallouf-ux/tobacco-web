@@ -88,6 +88,7 @@ export const CHECKS = [
   'check-project-task-monitors.mjs',
   'check-purchase-recommendation.mjs',
   'check-push-expense-entries-dryrun-safety.mjs',
+  'check-receivables-account-currency.mjs',
   'check-replace-path-item-guid.mjs',
   'check-sales-invoice-print-grace.mjs',
   'check-sales-line-items-pipeline.mjs',
