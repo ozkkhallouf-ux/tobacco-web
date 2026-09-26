@@ -234,7 +234,8 @@ test("الحساب الليري ذو الباقي الحقيقي يُعرض بع
 });
 test("الدولاري والتقرير القديم ومجهول العملة يبقون على balance كما كان", () => {
   const g = box.receivablesReportGroups(fixture());
-  assert.deepEqual([...g.base.map((i) => i.name)].sort(), ["تقرير قديم بلا حقول", "حساب دولاري", "ليري رصيده بعملته مجهول"].sort());
+  // مقارنة نصية: مصفوفة vm من عالم آخر فلا تطابق deepEqual الصارمة.
+  assert.equal(g.base.map((i) => i.name).sort().join(" | "), ["تقرير قديم بلا حقول", "حساب دولاري", "ليري رصيده بعملته مجهول"].sort().join(" | "));
 });
 test("balance لا يُعدَّل على العناصر", () => {
   const items = fixture();
