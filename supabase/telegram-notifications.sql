@@ -1456,6 +1456,10 @@ begin
   -- supplier-purchases:begin
   -- 2ج) مشتريات الموردين = فواتير شراء الأمين الفعلية (ameen_purchase_invoice_reports)،
   -- ومرتجعات المشتريات برسالة مستقلة. تقرير قديم/مفقود ⇒ تحذير صريح لا «صفر».
+  -- مفاتيح منع التكرار منفصلة لكل حالة كي لا يكتم تحذيرٌ أو «لا توجد» التقريرَ
+  -- الصحيح عند إعادة التشغيل في اليوم نفسه (نافذة 720 دقيقة):
+  --   evening-pur-warn:<يوم>:<missing|stale|invalid|error>  ·  evening-pur-none:<يوم>
+  --   evening-pur:<يوم>:<رقم الرسالة|total> للأرقام  ·  evening-pret:<يوم>:<رقم> للمرتجعات
   -- كتلة معزولة: أي خطأ غير متوقع هنا يُبلَّغ تحذيراً ولا يُسقط بقية التقرير المسائي.
   begin
   select created_at, summary, items into pur_report
@@ -1477,13 +1481,13 @@ begin
            else 'في تقرير فواتير المشتريات ' || coalesce(pur_bills, 0) || ' فاتورة لليوم بلا إجمالي صالح.'
          end
       || chr(10) || 'لم يُعرض أي رقم كي لا يُفهم خطأً أنه لا توجد مشتريات.',
-      'evening-pur:' || today || ':1', 720);
+      'evening-pur-warn:' || today || ':' || pur_kind, 720);
   elsif pur_kind = 'none' then
     perform public.notify_telegram('evening_report_purchases',
       '🛒 مشتريات الموردين اليوم — ' || today || chr(10) || chr(10)
       || 'لا توجد فواتير شراء في الأمين اليوم (آخر مزامنة '
       || to_char(pur_synced at time zone 'Asia/Damascus', 'HH24:MI') || ' بتوقيت دمشق).',
-      'evening-pur:' || today || ':1', 720);
+      'evening-pur-none:' || today, 720);
   elsif pur_kind is not null then
     -- المشتريات: سطر لكل مورد (ولكل عملة)، والإجمالي بعملته في آخر رسالة.
     line_no := 0; chunk_no := 0; chunk_lines := '';
@@ -1527,7 +1531,7 @@ begin
         '🛒 مشتريات الموردين اليوم — ' || today || chr(10) || chr(10)
         || 'لا توجد فواتير شراء في الأمين اليوم (آخر مزامنة '
         || to_char(pur_synced at time zone 'Asia/Damascus', 'HH24:MI') || ' بتوقيت دمشق).',
-        'evening-pur:' || today || ':1', 720);
+        'evening-pur-none:' || today, 720);
     end if;
 
     -- مرتجعات المشتريات: رسالة مستقلة، لا تُطرح من إجمالي المشتريات.
@@ -1561,7 +1565,7 @@ begin
       '🛒 مشتريات الموردين اليوم — ' || today || chr(10) || chr(10)
       || '⚠️ تعذّر الحكم على مشتريات اليوم: خطأ أثناء قراءة تقرير فواتير المشتريات ('
       || left(sqlerrm, 120) || ').',
-      'evening-pur:' || today || ':error', 720);
+      'evening-pur-warn:' || today || ':error', 720);
   end;
   -- supplier-purchases:end
 

@@ -26,6 +26,8 @@ const migrationPath = new URL("../supabase/migrations/20260926140000_evening_rep
 const referencePath = new URL("../supabase/telegram-notifications.sql", import.meta.url);
 const migration = readFileSync(migrationPath, "utf8").replace(/\r\n/g, "\n");
 const reference = readFileSync(referencePath, "utf8").replace(/\r\n/g, "\n");
+const dispatchStart = reference.indexOf("create or replace function private.notify_telegram_dispatch(");
+const dispatchSql = reference.slice(dispatchStart, reference.indexOf("$$;", dispatchStart) + 3);
 
 const results = [];
 let failed = 0;
@@ -55,6 +57,10 @@ test("قسم المشتريات لا يقرأ recentPayments ولا isSupplier",
   const section = region(migration, "-- supplier-purchases:begin", "-- supplier-purchases:end", "الترحيل");
   assert.ok(section.includes("ameen_purchase_invoice_reports"));
   assert.ok(!/recentPayments|isSupplier|ameen_customer_balances/.test(section));
+});
+
+test("مفتاح منع التكرار الحقيقي موجود في المرجع", () => {
+  assert.ok(dispatchStart >= 0 && dispatchSql.includes("dedupe_key = p_dedupe_key"));
 });
 
 test("لا أرقام شهود ولا استثناءات مثبّتة في الترحيل", () => {
@@ -129,10 +135,17 @@ function runDbTests() {
       create table whatsapp_orders(created_at timestamptz default now());
       create table price_change_log(item_name text, old_price numeric, new_price numeric, changed_at timestamptz default now());
       create table ameen_purchase_invoice_reports(id serial, report_date date, summary jsonb, items jsonb, created_by uuid, created_at timestamptz default now());
-      create table outbox(id serial, event_type text, message text, dedupe_key text);
-      create function notify_telegram(p_event text, p_msg text, p_key text default null, p_min int default 0, p_extra jsonb default null)
-        returns void language sql as $$ insert into outbox(event_type, message, dedupe_key) values (p_event, p_msg, p_key) $$;
+      create schema private;
+      create table telegram_outbox(id bigint generated always as identity primary key, event_type text not null, message text not null,
+        dedupe_key text, reply_markup jsonb, created_at timestamptz not null default now());
     `);
+    // منع التكرار الحقيقي: private.notify_telegram_dispatch حرفياً من النسخة المرجعية
+    // (نفس جسم الإنتاج). البوابة العامة notify_telegram هنا تفويض مباشر بلا فحص
+    // الصلاحيات (is_staff/JWT)، وهو ما لا يمسّ منطق منع التكرار.
+    sql(dispatchSql);
+    sql(`create function notify_telegram(p_event_type text, p_message text, p_dedupe_key text default null,
+        p_dedupe_minutes int default 60, p_reply_markup jsonb default null) returns void language plpgsql as $$
+      begin perform private.notify_telegram_dispatch(p_event_type, p_message, p_dedupe_key, p_dedupe_minutes, p_reply_markup); end $$;`);
     sql(migration);
 
     const today = sql("select to_char(current_date, 'YYYY-MM-DD');").trim();
@@ -166,16 +179,20 @@ function runDbTests() {
       ] },
     ];
 
-    function scenario({ items = mainItems, summary, createdAt = "now() - interval '5 minutes'", noReport = false, extraSql = "" }) {
+    // keepOutbox=true: لا يُفرَّغ telegram_outbox، فتُعاد الدالة في «اليوم نفسه» ضمن نافذة
+    // منع التكرار، ويُعاد فقط ما أُضيف في هذا التشغيل.
+    function scenario({ items = mainItems, summary, createdAt = "now() - interval '5 minutes'", noReport = false, extraSql = "", keepOutbox = false }) {
       const s = summary ?? { syncedAt: null, fromDate: from, periodDays: 60 };
+      if (!keepOutbox) sql("truncate telegram_outbox restart identity;");
+      const before = Number(sql("select coalesce(max(id), 0) from telegram_outbox;").trim());
       const out = sql(`
-        truncate outbox, inventory_reports, ameen_purchase_invoice_reports;
+        truncate inventory_reports, ameen_purchase_invoice_reports;
         insert into inventory_reports(source, summary, items) values ('ameen_customer_balances', '{}'::jsonb, ${q(balances)});
         ${noReport ? "" : `insert into ameen_purchase_invoice_reports(report_date, summary, items, created_at)
           values (current_date, ${q(s)}, ${q(items)}, ${createdAt});`}
         ${extraSql}
         select send_evening_report();
-        select event_type || chr(9) || replace(message, chr(10), ' ⏎ ') from outbox order by id;
+        select event_type || chr(9) || replace(message, chr(10), ' ⏎ ') from telegram_outbox where id > ${before} order by id;
       `);
       const rows = out.split("\n").filter(Boolean).map((l) => { const [type, ...m] = l.split("\t"); return { type, msg: m.join("\t") }; });
       const of = (t) => rows.filter((x) => x.type === t).map((x) => x.msg).join(" ‖ ");
@@ -271,6 +288,36 @@ function runDbTests() {
       assert.match(broken.purchases, /تعذّر الحكم/);
       assert.ok(broken.all.some((x) => x.type === "evening_report"));
       assert.match(broken.payments, /زبون اختبار/);
+    });
+
+    // ── منع التكرار الحقيقي عبر إعادة التشغيل في اليوم نفسه (نافذة 720 دقيقة) ──
+    scenario({ createdAt: "now() - interval '5 hours'" });
+    const afterWarn = scenario({ keepOutbox: true });
+    test("تحذير ثم تقرير صالح في اليوم نفسه ⇒ تصل أرقام المشتريات", () => {
+      assert.match(afterWarn.purchases, /مورد اختبار أ — 1,334\.50 \$/);
+      assert.match(afterWarn.purchases, /الإجمالي \(قبل الحسم\): 1,461\.75 \$/);
+      assert.match(afterWarn.returns, /مورد اختبار ب — 300\.00 \$/);
+    });
+    scenario({ items: [{ name: "مورد اختبار أ", invoices: [inv("hhhh-001", yesterday, 10)] }] });
+    const afterNone = scenario({ keepOutbox: true });
+    test("«لا توجد فواتير» ثم وصول فاتورة في اليوم نفسه ⇒ تصل المشتريات", () => {
+      assert.match(afterNone.purchases, /مورد اختبار أ — 1,334\.50 \$/);
+    });
+    scenario({});
+    const rerun = scenario({ keepOutbox: true });
+    test("إعادة التقرير نفسه ⇒ لا تتكرر رسائل المشتريات ولا المرتجعات", () => {
+      assert.equal(rerun.purchases, "");
+      assert.equal(rerun.returns, "");
+    });
+    scenario({ createdAt: "now() - interval '5 hours'" });
+    const warnAgain = scenario({ createdAt: "now() - interval '5 hours'", keepOutbox: true });
+    test("التحذير نفسه لا يتكرر عند إعادة التشغيل", () => {
+      assert.equal(warnAgain.purchases, "");
+    });
+    scenario({ items: [{ name: "مورد اختبار أ", invoices: [inv("iiii-001", yesterday, 10)] }] });
+    const noneAgain = scenario({ items: [{ name: "مورد اختبار أ", invoices: [inv("iiii-001", yesterday, 10)] }], keepOutbox: true });
+    test("«لا توجد فواتير» نفسها لا تتكرر عند إعادة التشغيل", () => {
+      assert.equal(noneAgain.purchases, "");
     });
 
     const digest = sql(`
