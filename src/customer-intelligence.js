@@ -242,6 +242,15 @@
     return round(((below + equal / 2) / sortedAscending.length) * 100, 2);
   }
 
+  // سبب تعذّر الحد الآلي حين يكون أحد مصدريه (الدفتر أو الأرصدة) غير حديث.
+  function staleCreditNote(source, sourcesFreshness) {
+    const label = source === "movements" ? "دفتر الحركات" : "تقرير الأرصدة";
+    const age = sourcesFreshness[source].ageMinutes;
+    return age === null
+      ? `${label} بلا وقت مزامنة معروف: لا حد آلي من بيانات غير مؤكدة الحداثة.`
+      : `${label} غير حديث (آخر مزامنة قبل ${age} دقيقة): لا حد آلي من بيانات قديمة.`;
+  }
+
   function freshnessOf(asOf, maxAgeMinutes, now) {
     if (!asOf) return { asOf: null, ageMinutes: null, maxAgeMinutes, state: "unknown", stale: true };
     const ageMinutes = Math.max(0, Math.round((now.getTime() - new Date(asOf).getTime()) / 60000));
@@ -1238,13 +1247,13 @@
 
     // حسابات ليست زبائن مبيعات (فروقات جرد، سلف، قنوات داخلية): السلوك المحاسبي
     // لا الاسم — سحبها في الدفتر لا تغطيه فواتير مبيع حقيقية. يُطبَّق فقط حين
-    // يغطي تقرير الفواتير نافذة السحب كاملة ويحمل معرّف الزبون في كل صف، وإلا
+    // يغطي تقرير الفواتير نافذة السحب كاملة، وهو حديث، ويحمل معرّف الزبون في كل صف، وإلا
     // يبقى قائمة المالك المؤكدة وحدها. تُستبعد من الحد ومن عيّنة المحفظة.
     const autoConfig = CONFIG.autoCredit;
     const creditWindowStart = window.referenceDay - autoConfig.salesWindowDays;
     const invoiceCoverageStart = dayNumber(invoicesReport?.summary?.fromDate)
       ?? (invoiceRows.length ? Math.min(...invoiceRows.map((row) => row.day)) : null);
-    const invoicesProveSales = invoicesAvailable
+    const invoicesProveSales = invoicesAvailable && !sourcesFreshness.invoices.stale
       && invoiceCoverageStart !== null && invoiceCoverageStart <= creditWindowStart
       && invoiceRows.every((row) => row.customerGuid);
     const invoicedSalesByGuid = new Map();
@@ -1423,17 +1432,11 @@
       const isSupplierRecord = record.balanceRow?.isSupplier === true;
       const display = accountDisplay(record.balanceRow, record.customerGuid);
       let auto = null;
-      if (!isSupplierRecord && record.customerGuid && ledger.byGuid.size > 0 && sourcesFreshness.movements.stale) {
-        // دفتر حركات متوقف المزامنة: لا حد آلي ولا حكم تعثّر من بيانات قديمة.
-        const age = sourcesFreshness.movements.ageMinutes;
-        auto = {
-          status: "unavailable",
-          limitBase: null,
-          staleLedger: true,
-          notes: [age === null
-            ? "دفتر الحركات بلا وقت مزامنة معروف: لا حد آلي من بيانات غير مؤكدة الحداثة."
-            : `دفتر الحركات غير حديث (آخر مزامنة قبل ${age} دقيقة): لا حد آلي من بيانات قديمة.`]
-        };
+      const staleCreditSource = sourcesFreshness.movements.stale ? "movements"
+        : sourcesFreshness.balances.stale ? "balances" : null;
+      if (!isSupplierRecord && record.customerGuid && ledger.byGuid.size > 0 && staleCreditSource) {
+        // دفتر حركات أو تقرير أرصدة متوقف المزامنة: لا حد آلي ولا حكم تعثّر من بيانات قديمة.
+        auto = { status: "unavailable", limitBase: null, staleLedger: true, notes: [staleCreditNote(staleCreditSource, sourcesFreshness)] };
       } else if (!isSupplierRecord && record.customerGuid && ledger.byGuid.size > 0) {
         const facts = factsByGuid.get(record.customerGuid) || null;
         const rawBalance = numberOrNull(record.balanceRow?.balance);

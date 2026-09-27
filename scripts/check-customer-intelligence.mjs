@@ -1468,7 +1468,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
 }
 
 // ---------------------------------------------------------------------------
-// 47–69) حد الائتمان الآلي (STEP 1): الحد المحسوب من دفتر حساب الزبون.
+// 47–71) حد الائتمان الآلي (STEP 1): الحد المحسوب من دفتر حساب الزبون.
 // كل الأرقام تركيبية. التاريخ المرجعي = REFERENCE_ISO (2026-09-02)، وd(n) = قبله بـn يوماً.
 // ---------------------------------------------------------------------------
 {
@@ -1758,6 +1758,28 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   assert.equal(unknownSteady.autoCredit.status, "unavailable", "test 68: بلا وقت مزامنة = غير متاح");
   assert.equal(rcUnknown.staleData, true, "test 68: وقت غير معروف يرفع التحذير العام");
 
+  // 70) تقرير أرصدة متوقف المزامنة (والدفتر حديث): لا حد آلي من رصيد قديم.
+  const rcStaleBal = engine.build({
+    ...reports,
+    balancesReport: { ...reports.balancesReport, created_at: staleIso, summary: { ...reports.balancesReport.summary, syncedAt: staleIso } }
+  });
+  assert.equal(rcStaleBal.sourcesFreshness.balances.stale, true);
+  assert.equal(rcStaleBal.sourcesFreshness.movements.stale, false);
+  const staleBalSteady = rcStaleBal.customers.find((c) => c.customerGuid === G_STEADY);
+  assert.equal(staleBalSteady.autoCredit.status, "unavailable", "test 70: أرصدة قديمة = غير متاح");
+  assert.ok(staleBalSteady.autoCredit.notes[0].includes("تقرير الأرصدة"), "test 70: الملاحظة تسمّي المصدر");
+  assert.ok(staleBalSteady.flags.includes("stale_data"));
+  assert.ok(!rcStaleBal.customers.some((c) => c.creditStatus === "delinquent"), "test 70: لا حكم تعثّر من أرصدة قديمة");
+
+  // 71) تقرير فواتير متوقف المزامنة: لا يُستنتج «ليس زبوناً» سلوكياً (قائمة المالك تبقى).
+  const rcStaleInv = engine.build({
+    ...reports,
+    invoicesReport: { ...reports.invoicesReport, created_at: staleIso, summary: { ...reports.invoicesReport.summary, syncedAt: staleIso } }
+  });
+  assert.equal(rcStaleInv.sourcesFreshness.invoices.stale, true);
+  assert.notEqual(rcStaleInv.customers.find((c) => c.customerGuid === G_NOTCUST).autoCredit.status, "non_customer",
+    "test 71: فواتير قديمة لا تثبت غياب المبيع");
+
   // 69) حارس الفاتورة الشاذة يخصم من شهر الفاتورة الفعلي: فاتورة شاذة في الشهر السابق
   //     لا تُخصم من سحب آخر 30 يوماً (وزنه 0.6) لمجرد أنه يكفيها.
   const priorLarge = {
@@ -1788,4 +1810,4 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   assert.equal(rc.summary.nonCustomerCreditCount, 1, "test 66: غير الزبون يُعدّ منفصلاً");
 }
 
-console.log(`ذكاء الزبائن: 69 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
+console.log(`ذكاء الزبائن: 71 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
