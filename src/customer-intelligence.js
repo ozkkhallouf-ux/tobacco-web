@@ -532,6 +532,82 @@
     return sorted[low] + (sorted[high] - sorted[low]) * (position - low);
   }
 
+  // تسوية FIFO: المدين الجديد يُسدَّد أولاً من الدفعات المسبقة المعلّقة.
+  function settleDebitFromAdvances(debit, advanceQueue, tolerance) {
+    while (debit.remaining > tolerance && advanceQueue.length) {
+      const advance = advanceQueue[0];
+      const take = Math.min(advance.remaining, debit.remaining);
+      advance.remaining -= take;
+      debit.remaining -= take;
+      if (debit.remaining <= tolerance) debit.settledDay = advance.day;
+      if (advance.remaining <= tolerance) advanceQueue.shift();
+    }
+  }
+
+  // تسوية FIFO: الدائن يسدّد أقدم مدين مفتوح أولاً، ويُعاد ما فاض عنه.
+  function settleCreditAgainstOpen(amount, day, openQueue, tolerance) {
+    let left = amount;
+    while (left > tolerance && openQueue.length) {
+      const debit = openQueue[0];
+      const take = Math.min(left, debit.remaining);
+      debit.remaining -= take;
+      left -= take;
+      if (debit.remaining <= tolerance) {
+        debit.settledDay = day;
+        openQueue.shift();
+      }
+    }
+    return left;
+  }
+
+  // سطر مدين في الدفتر: سحب النافذة (حديث/سابق) ثم تسويته FIFO.
+  function ledgerAddDebit(acc, row, span) {
+    if (!row.isOpening) {
+      acc.debitAmounts.push(row.debit);
+      if (acc.firstDebitDay === null || row.day < acc.firstDebitDay) acc.firstDebitDay = row.day;
+      if (span.inWindow(row.day)) {
+        acc.windowDebits.push({ day: row.day, amount: row.debit });
+        if (row.day >= span.recentStart) acc.salesRecent += row.debit;
+        else acc.salesPrior += row.debit;
+      }
+    }
+    const debit = { day: row.day, amount: row.debit, remaining: row.debit, isOpening: row.isOpening, settledDay: null };
+    acc.debits.push(debit);
+    settleDebitFromAdvances(debit, acc.advanceQueue, span.tolerance);
+    if (debit.remaining > span.tolerance) acc.openQueue.push(debit);
+  }
+
+  // سطر دائن في الدفتر: مرتجع أو دفعة (القيد الافتتاحي ليس دفعة)، ثم تسويته FIFO.
+  function ledgerAddCredit(acc, row, span) {
+    if (row.isReturn) {
+      if (span.inWindow(row.day)) acc.returns60 += row.credit;
+    } else if (!row.isOpening) {
+      acc.paymentDays.add(row.day);
+      acc.paymentsByDay.push({ day: row.day, amount: row.credit });
+      if (acc.lastPaymentDay === null || row.day > acc.lastPaymentDay) acc.lastPaymentDay = row.day;
+      if (span.inWindow(row.day)) acc.payments60 += row.credit;
+    }
+    const left = settleCreditAgainstOpen(row.credit, row.day, acc.openQueue, span.tolerance);
+    if (left > span.tolerance) acc.advanceQueue.push({ day: row.day, remaining: left });
+  }
+
+  // متوسط الرصيد اليومي الموجب بين يومين شاملين (لـDSO).
+  function averagePositiveBalance(rows, firstDay, lastDay) {
+    let running = 0;
+    let cursor = 0;
+    let balanceDaysSum = 0;
+    let balanceDays = 0;
+    for (let day = firstDay; day <= lastDay; day += 1) {
+      while (cursor < rows.length && rows[cursor].day <= day) {
+        running += rows[cursor].debit - rows[cursor].credit;
+        cursor += 1;
+      }
+      balanceDaysSum += Math.max(0, running);
+      balanceDays += 1;
+    }
+    return balanceDays ? balanceDaysSum / balanceDays : 0;
+  }
+
   // حقائق الزبون من دفتره: السحب، الدفعات، الرصيد، وأيام السداد بتسوية FIFO
   // (الدائن يسدّد أقدم مدين أولاً). الأمين لا يربط الدفعة بفاتورتها، فهذه
   // الطريقة المحاسبية المعيارية هي الربط الإحصائي المتاح.
@@ -542,128 +618,72 @@
     // النافذة: يوم المرجع وستون يوماً قبله (أعمار 0..60)، والسابقة أعمار 30..60 —
     // مطابق للمحاكاة المعتمدة.
     const windowStart = referenceDay - A.salesWindowDays;
-    const inWindow = (day) => day >= windowStart && day <= referenceDay;
+    const span = { tolerance, recentStart, inWindow: (day) => day >= windowStart && day <= referenceDay };
 
-    let salesRecent = 0;
-    let salesPrior = 0;
-    let returns60 = 0;
-    let payments60 = 0;
+    const acc = {
+      salesRecent: 0,
+      salesPrior: 0,
+      returns60: 0,
+      payments60: 0,
+      lastPaymentDay: null,
+      firstDebitDay: null,
+      debitAmounts: [],
+      windowDebits: [],
+      paymentDays: new Set(),
+      paymentsByDay: [],
+      debits: [],
+      openQueue: [],
+      advanceQueue: []
+    };
     let balance = 0;
     let balance30Ago = 0;
-    let lastPaymentDay = null;
-    let firstDebitDay = null;
-    const debitAmounts = [];
-    const windowDebits = [];
-    const paymentDays = new Set();
-    const paymentsByDay = [];
-
-    const debits = [];
-    const openQueue = [];
-    const advanceQueue = [];
 
     for (const row of entry.rows) {
       balance += row.debit - row.credit;
       if (row.day <= referenceDay - A.recentDays) balance30Ago += row.debit - row.credit;
-
-      if (row.debit > 0) {
-        if (!row.isOpening) {
-          debitAmounts.push(row.debit);
-          if (firstDebitDay === null || row.day < firstDebitDay) firstDebitDay = row.day;
-          if (inWindow(row.day)) {
-            windowDebits.push({ day: row.day, amount: row.debit });
-            if (row.day >= recentStart) salesRecent += row.debit;
-            else salesPrior += row.debit;
-          }
-        }
-        const debit = { day: row.day, amount: row.debit, remaining: row.debit, isOpening: row.isOpening, settledDay: null };
-        debits.push(debit);
-        while (debit.remaining > tolerance && advanceQueue.length) {
-          const advance = advanceQueue[0];
-          const take = Math.min(advance.remaining, debit.remaining);
-          advance.remaining -= take;
-          debit.remaining -= take;
-          if (debit.remaining <= tolerance) debit.settledDay = advance.day;
-          if (advance.remaining <= tolerance) advanceQueue.shift();
-        }
-        if (debit.remaining > tolerance) openQueue.push(debit);
-      }
-
-      if (row.credit > 0) {
-        if (row.isReturn) {
-          if (inWindow(row.day)) returns60 += row.credit;
-        } else if (!row.isOpening) {
-          paymentDays.add(row.day);
-          paymentsByDay.push({ day: row.day, amount: row.credit });
-          if (lastPaymentDay === null || row.day > lastPaymentDay) lastPaymentDay = row.day;
-          if (inWindow(row.day)) payments60 += row.credit;
-        }
-        let left = row.credit;
-        while (left > tolerance && openQueue.length) {
-          const debit = openQueue[0];
-          const take = Math.min(left, debit.remaining);
-          debit.remaining -= take;
-          left -= take;
-          if (debit.remaining <= tolerance) {
-            debit.settledDay = row.day;
-            openQueue.shift();
-          }
-        }
-        if (left > tolerance) advanceQueue.push({ day: row.day, remaining: left });
-      }
+      if (row.debit > 0) ledgerAddDebit(acc, row, span);
+      if (row.credit > 0) ledgerAddCredit(acc, row, span);
     }
 
     // أيام السداد لكل فاتورة (المفتوحة بعمرها الحالي — حد أدنى لا تخمين).
-    const dtpPairs = debits
+    const dtpPairs = acc.debits
       .filter((debit) => !debit.isOpening)
       .map((debit) => [(debit.settledDay ?? referenceDay) - debit.day, debit.amount]);
-    const open = debits.filter((debit) => debit.remaining > tolerance);
+    const open = acc.debits.filter((debit) => debit.remaining > tolerance);
     const oldestOpenAge = open.length ? referenceDay - Math.min(...open.map((debit) => debit.day)) : null;
 
-    const sortedPaymentDays = [...paymentDays].sort((a, b) => a - b);
+    const sortedPaymentDays = [...acc.paymentDays].sort((a, b) => a - b);
     const gaps = [];
     for (let index = 1; index < sortedPaymentDays.length; index += 1) gaps.push(sortedPaymentDays[index] - sortedPaymentDays[index - 1]);
 
     // متوسط الرصيد اليومي في نافذة السحب (لـDSO).
-    let running = 0;
-    let cursor = 0;
-    let balanceDaysSum = 0;
-    let balanceDays = 0;
     const firstBalanceDay = Math.max(windowStart, ledgerStartDay ?? windowStart);
-    for (let day = firstBalanceDay; day <= referenceDay; day += 1) {
-      while (cursor < entry.rows.length && entry.rows[cursor].day <= day) {
-        running += entry.rows[cursor].debit - entry.rows[cursor].credit;
-        cursor += 1;
-      }
-      balanceDaysSum += Math.max(0, running);
-      balanceDays += 1;
-    }
-
-    const maxDebit = windowDebits.reduce((best, debit) => (!best || debit.amount > best.amount ? debit : best), null);
+    const maxDebit = acc.windowDebits.reduce((best, debit) => (!best || debit.amount > best.amount ? debit : best), null);
 
     return {
       truncated: entry.truncated,
-      salesRecent,
-      salesPrior,
-      sales60: salesRecent + salesPrior,
-      returns60,
-      payments60,
+      salesRecent: acc.salesRecent,
+      salesPrior: acc.salesPrior,
+      sales60: acc.salesRecent + acc.salesPrior,
+      returns60: acc.returns60,
+      payments60: acc.payments60,
       balance,
       balance30Ago,
-      lastPaymentDay,
-      firstDebitDay,
-      debitCount: debitAmounts.length,
-      windowDebitCount: windowDebits.length,
+      lastPaymentDay: acc.lastPaymentDay,
+      firstDebitDay: acc.firstDebitDay,
+      debitCount: acc.debitAmounts.length,
+      windowDebitCount: acc.windowDebits.length,
       maxDebit60: maxDebit ? maxDebit.amount : 0,
       maxDebitIsRecent: maxDebit ? maxDebit.day >= recentStart : false,
-      medianDebit: median(debitAmounts),
+      medianDebit: median(acc.debitAmounts),
       daysToPayMedian: weightedQuantile(dtpPairs, 0.5),
       daysToPayP75: weightedQuantile(dtpPairs, 0.75),
       paymentDayCount: sortedPaymentDays.length,
       paymentIntervalMedian: median(gaps),
-      paymentsByDay,
+      paymentsByDay: acc.paymentsByDay,
       open,
       oldestOpenAge,
-      averageBalance60: balanceDays ? balanceDaysSum / balanceDays : 0,
+      averageBalance60: averagePositiveBalance(entry.rows, firstBalanceDay, referenceDay),
       recentStart,
       windowStart
     };
@@ -705,6 +725,132 @@
     return Math.floor(value / step + 1e-9) * step;
   }
 
+  // الدورة الديناميكية: وسيط أيام السداد (FIFO مرجّح بالمبلغ)، ثم وسيط الفاصل
+  // بين الدفعات، ثم وسيط المحفظة.
+  function autoCreditCycle(facts, stats) {
+    const A = CONFIG.autoCredit;
+    if (facts.debitCount >= A.cycleMinObservations && facts.daysToPayMedian !== null) {
+      const cycleRaw = Math.max(0, facts.daysToPayMedian);
+      return { cycleRaw, cycleBasis: "fifo_median", p75: Math.max(cycleRaw, facts.daysToPayP75 ?? cycleRaw) };
+    }
+    if (facts.paymentDayCount >= A.cycleMinObservations && facts.paymentIntervalMedian !== null) {
+      return { cycleRaw: facts.paymentIntervalMedian, cycleBasis: "payment_interval", p75: null };
+    }
+    return { cycleRaw: stats.medianDays, cycleBasis: "portfolio_median", p75: null };
+  }
+
+  // الدين المتأخر: الأقدم من max(2×الدورة، الدورة + هامش)، ودفعات تلك المدة.
+  function overdueFacts(facts, referenceDay, cycleDays) {
+    const A = CONFIG.autoCredit;
+    const overdueAfterDays = Math.max(cycleDays * A.delinquentCycleMultiple, cycleDays + A.delinquentMarginDays);
+    const overdueAmount = facts.open
+      .filter((debit) => referenceDay - debit.day > overdueAfterDays)
+      .reduce((sum, debit) => sum + debit.remaining, 0);
+    const paidInOverdueSpan = facts.paymentsByDay
+      .filter((payment) => payment.day > referenceDay - overdueAfterDays)
+      .reduce((sum, payment) => sum + payment.amount, 0);
+    return { overdueAfterDays, overdueAmount, paidInOverdueSpan };
+  }
+
+  // دائن/دفع مسبق: رصيده دائن ودفع ما سحب، أو يدفع قبل أن يسحب.
+  function isPrepaidAccount(facts, balance) {
+    const tolerance = CONFIG.autoCredit.settleTolerance;
+    return (balance < -tolerance && facts.payments60 >= facts.sales60)
+      || (balance <= tolerance && facts.daysToPayMedian !== null && facts.daysToPayMedian < 0);
+  }
+
+  // حارس الفاتورة الشاذة: فاتورة واحدة تتجاوز حصتها من السحب لا تنفخ السرعة.
+  function largeInvoiceAdjustedDraw(facts, notes) {
+    const A = CONFIG.autoCredit;
+    const S60 = facts.sales60;
+    let recent = facts.salesRecent;
+    let prior = facts.salesPrior;
+    if (facts.debitCount >= A.largeInvoiceMinCount && facts.maxDebit60 > A.largeInvoiceMaxShare * S60) {
+      const cut = facts.maxDebit60 - A.largeInvoiceMaxShare * S60;
+      if (recent >= cut) recent -= cut; else prior -= cut;
+      notes.push(`حارس الفاتورة الشاذة خفّض أثر فاتورة ${Math.round(facts.maxDebit60)} بمقدار ${Math.round(cut)}.`);
+    }
+    return { recent, prior };
+  }
+
+  // سرعة السحب اليومية على الأيام الفعلية، والوتيرة المقارَنة بالرصيد.
+  function drawVelocity(facts, age, draw) {
+    const A = CONFIG.autoCredit;
+    const fullWindow = age >= A.salesWindowDays;
+    const activeDays = fullWindow ? A.salesWindowDays : age + 1;
+    const velocity = fullWindow
+      ? (A.weightRecent * draw.recent + A.weightPrior * draw.prior) / A.recentDays
+      : (draw.recent + draw.prior) / activeDays;
+    // الرصيد يتكوّن من فواتير حديثة، فيقارن بوتيرة آخر 30 يوماً إن كانت أعلى.
+    const pace = Math.max(velocity, age >= A.recentDays ? facts.salesRecent / A.recentDays : velocity);
+    return { fullWindow, activeDays, velocity, pace };
+  }
+
+  // هامش الذروة: لمن تحصيله ≥ 90% ورصيده ضمن المعتاد فقط — p75 بحد 1.5× الوسيط.
+  function peakExposureCycle(cycle, coverage, balanceToCycle, stats, notes) {
+    const A = CONFIG.autoCredit;
+    const { cycleDays, p75 } = cycle;
+    if (p75 === null || (coverage ?? 0) < A.growthMinCoverage || balanceToCycle > A.balanceRiskFreeRatio) return cycleDays;
+    const peak = clamp(Math.min(p75, A.peakHeadroomMax * cycleDays), stats.floorDays, stats.capDays);
+    if (!(peak > cycleDays)) return cycleDays;
+    notes.push(`هامش ذروة: ${round(cycleDays, 1)} ← ${round(peak, 1)} يوماً (p75).`);
+    return peak;
+  }
+
+  // جودة السداد Q: التغطية، والانضباط (أقدم دين مقابل موعده)، والرصيد كعامل مخاطر.
+  function repaymentQuality(facts, balance, coverage, exposure) {
+    const A = CONFIG.autoCredit;
+    const { exposureCycle, pace } = exposure;
+    const coverageScore = coverage === null ? 0 : clamp((coverage - A.coverageFloor) / (A.coverageFull - A.coverageFloor), 0, 1);
+    const dueDays = exposureCycle * 1.5 + 3;
+    const punctuality = facts.oldestOpenAge === null ? 1 : clamp(1 - (facts.oldestOpenAge - dueDays) / dueDays, 0, 1);
+    const balanceRatio = exposure.amount > 0 ? Math.max(0, balance) / (pace * exposureCycle) : null;
+    const balanceRisk = balanceRatio === null ? 1 : clamp(1 - (balanceRatio - A.balanceRiskFreeRatio), 0, 1);
+    const s30 = facts.salesRecent;
+    const accumulation = s30 > 0 ? (facts.balance - facts.balance30Ago) / s30 : 0;
+    const accumulationRisk = clamp(1 - (accumulation - A.accumulationFreeShare) / 0.75, 0, 1);
+    const risk = Math.min(balanceRisk, accumulationRisk);
+    const W = A.qualityWeights;
+    const quality = A.qualityMin + A.qualitySpan * (W.coverage * coverageScore + W.punctuality * punctuality + W.risk * risk);
+    return { coverageScore, punctuality, balanceRatio, risk, quality };
+  }
+
+  // الاتجاه: عامل مستقل، ولا يرفع الحد مع تحصيل ضعيف أو رصيد غير معتاد.
+  function autoCreditTrend(facts, fullWindow, coverage, risk, notes) {
+    const A = CONFIG.autoCredit;
+    const s30 = facts.salesRecent;
+    const sb = facts.salesPrior;
+    const trend = fullWindow && sb > 0 ? clamp(1 + A.trendSlope * (s30 / sb - 1), A.trendMin, A.trendMax) : 1;
+    if (trend > 1 && ((coverage ?? 0) < A.growthMinCoverage || risk < 1)) {
+      notes.push("زيادة السحب لم ترفع الحد: التحصيل أقل من 90% أو الرصيد أعلى من المعتاد.");
+      return 1;
+    }
+    return trend;
+  }
+
+  // سقف التغطية ثم سقف البيانات غير الكافية (حد محافظ آلي).
+  function cappedAutoLimit(limit, facts, age, capInputs, notes) {
+    const A = CONFIG.autoCredit;
+    const { exposure, coverage, quality } = capInputs;
+    let capped = limit;
+    if (coverage !== null && coverage < A.growthMinCoverage) {
+      const coverageCap = exposure * coverage * quality;
+      if (capped > coverageCap) {
+        capped = coverageCap;
+        notes.push(`سقف التغطية: التحصيل ${Math.round(coverage * 100)}% فقط.`);
+      }
+    }
+    if (facts.debitCount >= A.lowDataMinDebits && age >= A.lowDataMinAgeDays) return { status: "normal", limit: capped };
+    const cap = Math.min(A.lowDataDrawShare * facts.sales60, A.lowDataMedianMultiple * (facts.medianDebit ?? 0));
+    if (capped > cap) capped = cap;
+    notes.push("بيانات غير كافية: حد محافظ آلي (≤ نصف سحبه و≤ ضعف وسيط فاتورته).");
+    return { status: "low_data", limit: capped };
+  }
+
+  function roundOrNull(value, digits) {
+    return value === null ? null : round(value, digits);
+  }
+
   // الحد المحسوب الحقيقي لزبون واحد (عملة الأساس، قبل التقريب) — صيغة المحاكاة
   // المعتمدة v5 حرفياً، مع قاعدة التعثّر المعتمدة (2026-09-27) بدل قاعدة «موقوف» القديمة.
   // balance: الرصيد الموحّد بعملة الأساس (لحساب الليرة: رصيده بعملته × سعر الصرف).
@@ -721,51 +867,28 @@
     }
 
     const tolerance = A.settleTolerance;
-    const s30 = facts.salesRecent;
-    const sb = facts.salesPrior;
     const S60 = facts.sales60;
-    const pay60 = facts.payments60;
     const age = facts.firstDebitDay === null ? A.salesWindowDays : referenceDay - facts.firstDebitDay;
     const net = S60 - facts.returns60;
-    const R0 = net > 0 ? Math.max(pay60 / net, 1 - Math.max(0, balance) / net) : null;
+    const R0 = net > 0 ? Math.max(facts.payments60 / net, 1 - Math.max(0, balance) / net) : null;
 
-    // الدورة الديناميكية: وسيط أيام السداد (FIFO مرجّح بالمبلغ)، ثم وسيط الفاصل
-    // بين الدفعات، ثم وسيط المحفظة — محصورة بين P10 وP90 للمحفظة الحية.
-    let cycleRaw;
-    let cycleBasis;
-    let p75 = null;
-    if (facts.debitCount >= A.cycleMinObservations && facts.daysToPayMedian !== null) {
-      cycleRaw = Math.max(0, facts.daysToPayMedian);
-      p75 = Math.max(cycleRaw, facts.daysToPayP75 ?? cycleRaw);
-      cycleBasis = "fifo_median";
-    } else if (facts.paymentDayCount >= A.cycleMinObservations && facts.paymentIntervalMedian !== null) {
-      cycleRaw = facts.paymentIntervalMedian;
-      cycleBasis = "payment_interval";
-    } else {
-      cycleRaw = stats.medianDays;
-      cycleBasis = "portfolio_median";
-    }
+    // الدورة محصورة بين P10 وP90 للمحفظة الحية.
+    const { cycleRaw, cycleBasis, p75 } = autoCreditCycle(facts, stats);
     const cycleDays = clamp(cycleRaw, stats.floorDays, stats.capDays);
     Object.assign(result, {
       cycleRawDays: round(cycleRaw, 2),
       cycleBasis,
       cycleDays: round(cycleDays, 2),
       paymentIntervalMedianDays: facts.paymentIntervalMedian,
-      salesRecent: round(s30, 3),
-      salesPrior: round(sb, 3),
+      salesRecent: round(facts.salesRecent, 3),
+      salesPrior: round(facts.salesPrior, 3),
       oldestOpenDays: facts.oldestOpenAge,
       daysSinceLastPayment: facts.lastPaymentDay === null ? null : referenceDay - facts.lastPaymentDay
     });
 
     // 1) متعثّر: رصيد قائم + دين أقدم من دورته بهامش واضح (وبقيمة معتبرة) +
     //    دفعات المدة لا تغطيه. يسبق «غير نشط»: الخامل المدين الذي لا يدفع متعثّر.
-    const overdueAfterDays = Math.max(cycleDays * A.delinquentCycleMultiple, cycleDays + A.delinquentMarginDays);
-    const overdueAmount = facts.open
-      .filter((debit) => referenceDay - debit.day > overdueAfterDays)
-      .reduce((sum, debit) => sum + debit.remaining, 0);
-    const paidInOverdueSpan = facts.paymentsByDay
-      .filter((payment) => payment.day > referenceDay - overdueAfterDays)
-      .reduce((sum, payment) => sum + payment.amount, 0);
+    const { overdueAfterDays, overdueAmount, paidInOverdueSpan } = overdueFacts(facts, referenceDay, cycleDays);
     Object.assign(result, {
       overdueAfterDays: round(overdueAfterDays, 2),
       overdueAmount: round(overdueAmount, 3),
@@ -787,76 +910,27 @@
     }
 
     // 3) دائن/دفع مسبق: لا تعرّض ائتماني.
-    if ((balance < -tolerance && pay60 >= S60) || (balance <= tolerance && facts.daysToPayMedian !== null && facts.daysToPayMedian < 0)) {
+    if (isPrepaidAccount(facts, balance)) {
       result.status = "prepaid";
       notes.push("رصيده دائن ويدفع قبل أن يسحب: لا تعرّض ائتماني ولا حد.");
       return result;
     }
 
     // 4) سرعة السحب اليومية على الأيام الفعلية، بعد حارس الفاتورة الشاذة.
-    let recent = s30;
-    let prior = sb;
-    if (facts.debitCount >= A.largeInvoiceMinCount && facts.maxDebit60 > A.largeInvoiceMaxShare * S60) {
-      const cut = facts.maxDebit60 - A.largeInvoiceMaxShare * S60;
-      if (recent >= cut) recent -= cut; else prior -= cut;
-      notes.push(`حارس الفاتورة الشاذة خفّض أثر فاتورة ${Math.round(facts.maxDebit60)} بمقدار ${Math.round(cut)}.`);
-    }
-    const fullWindow = age >= A.salesWindowDays;
-    const activeDays = fullWindow ? A.salesWindowDays : age + 1;
-    const velocity = fullWindow
-      ? (A.weightRecent * recent + A.weightPrior * prior) / A.recentDays
-      : (recent + prior) / activeDays;
+    const { fullWindow, activeDays, velocity, pace } = drawVelocity(facts, age, largeInvoiceAdjustedDraw(facts, notes));
 
-    // 5) هامش الذروة: لمن تحصيله ≥ 90% ورصيده ضمن المعتاد فقط — p75 بحد 1.5× الوسيط.
-    //    الرصيد يتكوّن من فواتير حديثة، فيقارن بوتيرة آخر 30 يوماً إن كانت أعلى.
-    const pace = Math.max(velocity, age >= A.recentDays ? s30 / A.recentDays : velocity);
+    // 5) هامش الذروة.
     const balanceToCycle = pace * cycleDays > 0 ? Math.max(0, balance) / (pace * cycleDays) : 0;
-    let exposureCycle = cycleDays;
-    if (p75 !== null && (R0 ?? 0) >= A.growthMinCoverage && balanceToCycle <= A.balanceRiskFreeRatio) {
-      const peak = clamp(Math.min(p75, A.peakHeadroomMax * cycleDays), stats.floorDays, stats.capDays);
-      if (peak > exposureCycle) {
-        notes.push(`هامش ذروة: ${round(cycleDays, 1)} ← ${round(peak, 1)} يوماً (p75).`);
-        exposureCycle = peak;
-      }
-    }
+    const exposureCycle = peakExposureCycle({ cycleDays, p75 }, R0, balanceToCycle, stats, notes);
     const exposure = velocity * exposureCycle;
 
-    // 6) جودة السداد Q: التغطية، والانضباط (أقدم دين مقابل موعده)، والرصيد كعامل مخاطر.
+    // 6) جودة السداد Q.
     const coverage = R0;
-    const coverageScore = coverage === null ? 0 : clamp((coverage - A.coverageFloor) / (A.coverageFull - A.coverageFloor), 0, 1);
-    const dueDays = exposureCycle * 1.5 + 3;
-    const punctuality = facts.oldestOpenAge === null ? 1 : clamp(1 - (facts.oldestOpenAge - dueDays) / dueDays, 0, 1);
-    const balanceRatio = exposure > 0 ? Math.max(0, balance) / (pace * exposureCycle) : null;
-    const balanceRisk = balanceRatio === null ? 1 : clamp(1 - (balanceRatio - A.balanceRiskFreeRatio), 0, 1);
-    const accumulation = s30 > 0 ? (facts.balance - facts.balance30Ago) / s30 : 0;
-    const accumulationRisk = clamp(1 - (accumulation - A.accumulationFreeShare) / 0.75, 0, 1);
-    const risk = Math.min(balanceRisk, accumulationRisk);
-    const W = A.qualityWeights;
-    const quality = A.qualityMin + A.qualitySpan * (W.coverage * coverageScore + W.punctuality * punctuality + W.risk * risk);
+    const { coverageScore, punctuality, balanceRatio, risk, quality } = repaymentQuality(facts, balance, coverage, { amount: exposure, exposureCycle, pace });
 
-    // 7) الاتجاه: عامل مستقل، ولا يرفع الحد مع تحصيل ضعيف أو رصيد غير معتاد.
-    let trend = fullWindow && sb > 0 ? clamp(1 + A.trendSlope * (s30 / sb - 1), A.trendMin, A.trendMax) : 1;
-    if (trend > 1 && ((coverage ?? 0) < A.growthMinCoverage || risk < 1)) {
-      trend = 1;
-      notes.push("زيادة السحب لم ترفع الحد: التحصيل أقل من 90% أو الرصيد أعلى من المعتاد.");
-    }
-
-    let limit = exposure * quality * trend;
-    if (coverage !== null && coverage < A.growthMinCoverage) {
-      const capped = exposure * coverage * quality;
-      if (limit > capped) {
-        limit = capped;
-        notes.push(`سقف التغطية: التحصيل ${Math.round(coverage * 100)}% فقط.`);
-      }
-    }
-
-    let status = "normal";
-    if (facts.debitCount < A.lowDataMinDebits || age < A.lowDataMinAgeDays) {
-      status = "low_data";
-      const cap = Math.min(A.lowDataDrawShare * S60, A.lowDataMedianMultiple * (facts.medianDebit ?? 0));
-      if (limit > cap) limit = cap;
-      notes.push("بيانات غير كافية: حد محافظ آلي (≤ نصف سحبه و≤ ضعف وسيط فاتورته).");
-    }
+    // 7) الاتجاه، ثم السقوف.
+    const trend = autoCreditTrend(facts, fullWindow, coverage, risk, notes);
+    const { status, limit } = cappedAutoLimit(exposure * quality * trend, facts, age, { exposure, coverage, quality }, notes);
 
     Object.assign(result, {
       status,
@@ -866,12 +940,12 @@
       velocity: round(velocity, 3),
       exposureCycleDays: round(exposureCycle, 2),
       expectedExposure: round(exposure, 3),
-      coverage: coverage === null ? null : round(coverage, 4),
+      coverage: roundOrNull(coverage, 4),
       coverageScore: round(coverageScore, 4),
       punctuality: round(punctuality, 4),
       quality: round(quality, 4),
       trend: round(trend, 4),
-      balanceRatio: balanceRatio === null ? null : round(balanceRatio, 4),
+      balanceRatio: roundOrNull(balanceRatio, 4),
       risk: round(risk, 4)
     });
     return result;
@@ -1000,50 +1074,13 @@
         const key = line.itemGuid || `name:${normalizeName(line.material)}`;
         if (!key || key === "name:") continue;
         if (line.itemGuid) keyedByGuid += 1; else keyedByName += 1;
-        if (!totals.has(key)) {
-          totals.set(key, {
-            itemGuid: line.itemGuid || null,
-            itemName: line.material,
-            netQty: 0,
-            netQtyUnits: 0,
-            netValue: 0,
-            unverifiedLines: 0,
-            unit1: "",
-            unit2: "",
-            unit2Fact: null,
-            lineCount: 0
-          });
-        }
-        const entry = totals.get(key);
-        entry.netQty += row.sign * line.qty;
-        entry.netQtyUnits += row.sign * (line.qtyUnits ?? 0);
-        if (line.lineValue === null) entry.unverifiedLines += 1;
-        else entry.netValue += row.sign * line.lineValue;
-        entry.lineCount += 1;
-        if (!entry.itemName && line.material) entry.itemName = line.material;
-        if (!entry.unit1 && line.unit1) entry.unit1 = line.unit1;
-        if (!entry.unit2 && line.unit2) entry.unit2 = line.unit2;
-        if (entry.unit2Fact === null && line.unit2Fact !== null && line.unit2Fact > 0) entry.unit2Fact = line.unit2Fact;
+        if (!totals.has(key)) totals.set(key, newTopItemEntry(line));
+        addLineToTopItem(totals.get(key), line, row.sign);
       }
     }
 
     const items = [...totals.values()]
-      .map((entry) => {
-        const valueVerified = entry.unverifiedLines === 0;
-        return {
-          itemGuid: entry.itemGuid,
-          itemName: entry.itemName,
-          netQty: round(entry.netQty, 3),
-          netQtyUnits: round(entry.netQtyUnits, 3),
-          unit1: entry.unit1 || null,
-          unit2: entry.unit2 || null,
-          unit2Fact: entry.unit2Fact,
-          netQtyUnit2: entry.unit2Fact ? round(entry.netQty / entry.unit2Fact, 3) : null,
-          netValue: valueVerified ? round(entry.netValue, 3) : null,
-          valueVerified,
-          lineCount: entry.lineCount
-        };
-      })
+      .map(topItemOutput)
       // ترتيب حتمي: المؤكَّد القيمة أولاً، ثم القيمة تنازلياً، ثم الاسم.
       .sort((a, b) => (Number(b.valueVerified) - Number(a.valueVerified))
         || ((b.netValue ?? 0) - (a.netValue ?? 0))
@@ -1053,6 +1090,51 @@
     return {
       items,
       identity: keyedByGuid > 0 && keyedByName === 0 ? "item_guid" : keyedByGuid > 0 ? "mixed" : "item_name"
+    };
+  }
+
+  function newTopItemEntry(line) {
+    return {
+      itemGuid: line.itemGuid || null,
+      itemName: line.material,
+      netQty: 0,
+      netQtyUnits: 0,
+      netValue: 0,
+      unverifiedLines: 0,
+      unit1: "",
+      unit2: "",
+      unit2Fact: null,
+      lineCount: 0
+    };
+  }
+
+  // يضيف سطر فاتورة (بإشارة المبيع/المرتجع) إلى مجموع صنفه.
+  function addLineToTopItem(entry, line, sign) {
+    entry.netQty += sign * line.qty;
+    entry.netQtyUnits += sign * (line.qtyUnits ?? 0);
+    if (line.lineValue === null) entry.unverifiedLines += 1;
+    else entry.netValue += sign * line.lineValue;
+    entry.lineCount += 1;
+    if (!entry.itemName && line.material) entry.itemName = line.material;
+    if (!entry.unit1 && line.unit1) entry.unit1 = line.unit1;
+    if (!entry.unit2 && line.unit2) entry.unit2 = line.unit2;
+    if (entry.unit2Fact === null && line.unit2Fact !== null && line.unit2Fact > 0) entry.unit2Fact = line.unit2Fact;
+  }
+
+  function topItemOutput(entry) {
+    const valueVerified = entry.unverifiedLines === 0;
+    return {
+      itemGuid: entry.itemGuid,
+      itemName: entry.itemName,
+      netQty: round(entry.netQty, 3),
+      netQtyUnits: round(entry.netQtyUnits, 3),
+      unit1: entry.unit1 || null,
+      unit2: entry.unit2 || null,
+      unit2Fact: entry.unit2Fact,
+      netQtyUnit2: entry.unit2Fact ? round(entry.netQty / entry.unit2Fact, 3) : null,
+      netValue: valueVerified ? round(entry.netValue, 3) : null,
+      valueVerified,
+      lineCount: entry.lineCount
     };
   }
 
