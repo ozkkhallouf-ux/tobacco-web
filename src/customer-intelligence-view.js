@@ -33,6 +33,16 @@
   const escape = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[char]));
   const isNumber = (value) => typeof value === "number" && Number.isFinite(value);
   const money = (value, currency = "USD") => (isNumber(value) ? `${value.toLocaleString("en-US", { maximumFractionDigits: 0 })} ${currency}` : "—");
+  // الكمية بوحدة مفهومة: الكرتونة أولاً إن عُرف معاملها، والكروز بين قوسين.
+  // المحرك يقدّم الرقمين (netQty بالوحدة الأولى، netQtyUnit2 بالثانية) — هنا تنسيق فقط.
+  const itemQuantity = (item) => {
+    const format = (value) => value.toLocaleString("en-US", { maximumFractionDigits: 2 });
+    const unit1 = item.unit1 ? ` ${escape(item.unit1)}` : "";
+    if (isNumber(item.netQtyUnit2) && item.unit2) {
+      return `<bdi>${format(item.netQtyUnit2)} ${escape(item.unit2)}</bdi> <span class="muted">(<bdi>${format(item.netQty)}${unit1}</bdi>)</span>`;
+    }
+    return `<bdi>${format(item.netQty)}${unit1}</bdi>`;
+  };
   const percent = (value) => (isNumber(value) ? `${value > 0 ? "+" : ""}${value.toFixed(1)}%` : "—");
   const count = (value) => (isNumber(value) ? value.toLocaleString("en-US") : "—");
   const day = (value) => (value ? escape(value) : "—");
@@ -281,7 +291,7 @@
     if (!row) return `<section class="panel ci-detail"><h3>تفاصيل الزبون</h3><p class="muted">اختر زبوناً من الجدول لعرض تحليله.</p></section>`;
 
     const items = row.topItems.length
-      ? `<ol class="ci-items">${row.topItems.map((item) => `<li><span>${escape(item.itemName || "صنف")}</span><span dir="ltr">${money(item.netValue, row.currency)} · ${item.netQty.toLocaleString("en-US", { maximumFractionDigits: 2 })}</span></li>`).join("")}</ol>`
+      ? `<ol class="ci-items">${row.topItems.map((item) => `<li><span>${escape(item.itemName || "صنف")}</span><span>${item.valueVerified ? `<span dir="ltr">${money(item.netValue, row.currency)}</span>` : `<span title="سطر بلا وحدة إدخال من الأمين — القيمة غير مؤكدة">قيمة غير مؤكدة</span>`} · ${itemQuantity(item)}</span></li>`).join("")}</ol>`
       : `<p class="muted">لا أصناف ضمن النافذة المتاحة.</p>`;
 
     const identityNote = row.customerGuid

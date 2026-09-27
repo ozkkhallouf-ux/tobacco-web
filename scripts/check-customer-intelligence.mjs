@@ -1359,4 +1359,108 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   assert.equal(r40.summary.unknownCreditBalanceCount, 1);
 }
 
-console.log(`ذكاء الزبائن: 40 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
+// ---------------------------------------------------------------------------
+// 41–46) أهم الأصناف بوحدة إدخال السطر (bi000.Unity ⇐ inputUnit).
+//
+// العطل الحي: `lineTotal` في الحمولة `derived` = Qty(كروز) × Price(سعر وحدة الإدخال)
+// بلا قسمة على المعامل، فسطر الكرتونة (معامل 50) نفخ قيمة الصنف 50 ضعفاً وظهرت
+// أصناف بمئات الآلاف لزبون مجموع فواتيره عشرات الآلاف. القيمة الصحيحة
+// Price × Qty ÷ factor، وهي تطابق إجمالي الفاتورة (مثبت 658/658 على الأمين الحي).
+// ---------------------------------------------------------------------------
+{
+  const UNITS = { unit1: "كروز", unit2: "كرتونة", unit2Fact: 50, unit3: "طرد", unit3Fact: 500 };
+  // سطر كما يرفعه push-customer-invoices.ps1 اليوم: lineTotal مشتق بلا قسمة.
+  const amLine = (material, qty, price, inputUnit, extra = {}) => ({
+    material, itemGuid: extra.itemGuid ?? "", qty, qtyUnits: qty / UNITS.unit2Fact, price,
+    lineTotal: qty * price, lineTotalSource: "derived", inputUnit, ...UNITS, ...extra
+  });
+  const bill = (date, lines, extra = {}) => {
+    const total = extra.total ?? lines.reduce((sum, l) => {
+      const f = l.inputUnit === 2 ? l.unit2Fact : l.inputUnit === 3 ? l.unit3Fact : 1;
+      return sum + (l.price * l.qty) / f;
+    }, 0);
+    return { date, number: extra.number ?? date, guid: extra.guid ?? `u-${date}-${total}`, total, discount: extra.discount ?? 0,
+      payment: 0, isReturn: extra.isReturn ?? false, currency: extra.currency ?? "USD", currencyVal: extra.currencyVal ?? 1, lines };
+  };
+  const buildOne = (name, guid, invoices) => engine.build({
+    invoicesReport: {
+      source: "ameen_customer_invoices",
+      created_at: REFERENCE_ISO,
+      summary: { periodDays: 60, fromDate: FROM_DATE, customers: 1, bills: invoices.length, syncedAt: REFERENCE_ISO, payloadVersion: 2 },
+      items: [{ name, customerGuid: guid, truncated: false, invoices }]
+    },
+    balancesReport: {
+      source: "ameen_customer_balances",
+      created_at: REFERENCE_ISO,
+      summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: 1 },
+      items: [{ name, key: engine.normalizeName(name), customerGuid: guid, balance: 0, isSupplier: false, recentPayments: [], recentMovements: [] }]
+    },
+    movementsReport: null, creditLimits: [], now: NOW
+  }).customers.find((row) => row.customerName === name);
+  const itemOf = (row, name) => row.topItems.find((item) => item.itemName === name);
+
+  // 41) سطر بالكرتونة: كرتونتان بسعر 250 = 500، لا 100 كروز × 250 = 25,000.
+  const r41 = buildOne("زبون كرتونة", "00000000-0000-4000-8000-000000000041", [
+    bill("2026-08-20", [amLine("دخان كرتونة", 100, 250, 2)])
+  ]);
+  const i41 = itemOf(r41, "دخان كرتونة");
+  assert.equal(i41.netValue, 500, "test 41: قيمة سطر الكرتونة = السعر × الكمية ÷ 50");
+  assert.notEqual(i41.netValue, 25000, "test 41: القيمة الخام المضخّمة ممنوعة");
+  assert.equal(i41.valueVerified, true);
+  assert.equal(i41.netQty, 100, "test 41: الكمية تبقى بالوحدة الأولى (كروز)");
+  assert.equal(i41.netQtyUnit2, 2, "test 41: وما يعادلها بالكرتونة");
+  assert.equal(i41.unit1, "كروز");
+  assert.equal(i41.unit2, "كرتونة");
+
+  // 42) فاتورة تخلط الوحدات الثلاث — مجموع الأصناف يطابق إجمالي الفاتورة.
+  const lines42 = [
+    amLine("صنف كرتونة", 150, 240, 2),   // 3 كراتين × 240 = 720
+    amLine("صنف كروز", 30, 5.2, 1),      // 30 × 5.2 = 156
+    amLine("صنف طرد", 1000, 2300, 3)     // 2 طرد × 2300 = 4600
+  ];
+  const r42 = buildOne("زبون وحدات مختلطة", "00000000-0000-4000-8000-000000000042", [bill("2026-08-21", lines42)]);
+  assert.equal(itemOf(r42, "صنف كرتونة").netValue, 720);
+  assert.equal(itemOf(r42, "صنف كروز").netValue, 156);
+  assert.equal(itemOf(r42, "صنف طرد").netValue, 4600);
+  const sum42 = r42.topItems.reduce((sum, item) => sum + item.netValue, 0);
+  assert.equal(Math.round(sum42 * 1000) / 1000, 5476, "test 42: Σ أهم الأصناف = إجمالي الفاتورة (مصالحة)");
+  assert.equal(Math.round(sum42 * 1000) / 1000, r42.netSales30d, "test 42: Σ الأصناف = صافي مبيعات الفترة بلا حسم");
+  assert.equal(r42.topItems[0].itemName, "صنف طرد", "test 42: الترتيب بالقيمة الحقيقية لا الخام");
+
+  // 43) مرتجع بالكرتونة يُطرح بنفس القاعدة، والمرتجع لا يُحسب مبيعاً موجباً.
+  const r43 = buildOne("زبون مرتجع كرتونة", "00000000-0000-4000-8000-000000000043", [
+    bill("2026-08-10", [amLine("دخان مرتجع", 100, 250, 2)]),
+    bill("2026-08-12", [amLine("دخان مرتجع", 50, 250, 2)], { isReturn: true })
+  ]);
+  const i43 = itemOf(r43, "دخان مرتجع");
+  assert.equal(i43.netValue, 250, "test 43: 500 − 250");
+  assert.equal(i43.netQty, 50);
+  assert.equal(i43.netQtyUnit2, 1);
+
+  // 44) فاتورة ليرة: السعر بعملة الأساس، القسمة على المعامل ثم ÷ CurrencyVal مرة واحدة.
+  const r44 = buildOne("زبون ليرة كرتونة", "00000000-0000-4000-8000-000000000044", [
+    bill("2026-08-15", [amLine("دخان ليرة", 100, 250, 2)], { currency: "SYP", currencyVal: 1 / 14000 })
+  ]);
+  const i44 = itemOf(r44, "دخان ليرة");
+  assert.equal(r44.currency, "SYP");
+  assert.equal(i44.netValue, 7000000, "test 44: 500 أساس ÷ (1/14000) = 7,000,000 ل.س، بلا ضرب مزدوج");
+  assert.equal(r44.netSales30d, 7000000, "test 44: الصنف والفاتورة بنفس العملة");
+
+  // 45) سطر مشتق بلا وحدة إدخال (حمولة أقدم): لا قيمة مضخّمة تُعرض كحقيقة.
+  const legacy = amLine("صنف بلا وحدة", 100, 250, undefined);
+  delete legacy.inputUnit;
+  const r45 = buildOne("زبون حمولة قديمة", "00000000-0000-4000-8000-000000000045", [
+    bill("2026-08-18", [legacy, amLine("صنف مؤكد", 10, 5, 1)], { total: 550 })
+  ]);
+  const i45 = itemOf(r45, "صنف بلا وحدة");
+  assert.equal(i45.netValue, null, "test 45: derived بلا inputUnit ⇒ قيمة null");
+  assert.equal(i45.valueVerified, false);
+  assert.equal(r45.topItems[0].itemName, "صنف مؤكد", "test 45: غير المؤكد لا يتقدّم على المؤكد");
+
+  // 46) عمود إجمالي حقيقي من الأمين (lineTotalSource = "ameen") بلا inputUnit يُعتمد كما هو.
+  const stored = { material: "صنف إجمالي حقيقي", qty: 100, price: 250, lineTotal: 500, lineTotalSource: "ameen" };
+  const r46 = buildOne("زبون إجمالي حقيقي", "00000000-0000-4000-8000-000000000046", [bill("2026-08-19", [stored], { total: 500 })]);
+  assert.equal(itemOf(r46, "صنف إجمالي حقيقي").netValue, 500, "test 46: الإجمالي الحقيقي يُعتمد");
+}
+
+console.log(`ذكاء الزبائن: 46 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);

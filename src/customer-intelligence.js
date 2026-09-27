@@ -200,6 +200,34 @@
   }
 
   // --------------------------------------------------------------------------
+  // قيمة سطر الفاتورة (عملة الأساس، قبل ÷ CurrencyVal).
+  //
+  // `bi000.Qty` مخزّنة دائماً بالوحدة الأولى (كروز)، و`bi000.Price` سعر **وحدة
+  // إدخال السطر** (`bi000.Unity` ⇐ `inputUnit`: 1/2/3). فالقيمة = Price × Qty ÷
+  // معامل تلك الوحدة — نفس قاعدة `invoiceLineInputUnit` في src/app.js (مثبتة على
+  // الأمين الحي: طابقت إجمالي 658/658 فاتورة). `lineTotal` في الحمولة الحالية
+  // `derived` = Qty × Price بلا قسمة، فسطر الكرتونة يتضخّم بمعامل الوحدة (50):
+  // هذا بالضبط ما نفخ «أهم الأصناف» إلى مئات الآلاف.
+  //
+  //   1) inputUnit صالح + سعر ⇒ Price × Qty ÷ factor           (basis "input_unit")
+  //   2) بلا inputUnit، و lineTotal من عمود إجمالي حقيقي أو حمولة قديمة بلا
+  //      lineTotalSource ⇒ lineTotal كما هو                       (basis "stored")
+  //   3) بلا inputUnit و lineTotalSource = "derived" ⇒ لا قيمة موثوقة: null
+  //      (basis "unverified") — لا رقم مضخَّم يُعرض كأنه حقيقة.
+  // --------------------------------------------------------------------------
+  function lineValueOf(line) {
+    const unit = Number(line?.inputUnit);
+    const price = numberOrNull(line?.price);
+    const qty = numberOrZero(line?.qty);
+    if (price !== null && (unit === 1 || unit === 2 || unit === 3)) {
+      const factor = unit === 1 ? 1 : numberOrNull(unit === 2 ? line?.unit2Fact : line?.unit3Fact);
+      if (factor !== null && factor > 0) return { amount: (price * qty) / factor, basis: "input_unit" };
+    }
+    if (text(line?.lineTotalSource).toLowerCase() === "derived") return { amount: null, basis: "unverified" };
+    return { amount: numberOrZero(line?.lineTotal), basis: "stored" };
+  }
+
+  // --------------------------------------------------------------------------
   // قراءة الفواتير: تسطيح تقرير ameen_customer_invoices إلى صفوف موحّدة.
   //
   // قيمة الفاتورة التجارية = Total − TotalDisc.
@@ -239,13 +267,20 @@
         const guid = normalizeGuid(invoice?.customerGuid ?? invoice?.customer_guid) || groupGuid;
         const currency = invoiceCurrencyCode(invoice);
 
-        const lines = (Array.isArray(invoice?.lines) ? invoice.lines : []).map((line) => ({
-          itemGuid: normalizeGuid(line?.itemGuid ?? line?.item_guid),
-          material: text(line?.material),
-          qty: numberOrZero(line?.qty),
-          qtyUnits: numberOrNull(line?.qtyUnits),
-          lineTotal: toInvoiceCurrency(numberOrZero(line?.lineTotal), currencyVal)
-        }));
+        const lines = (Array.isArray(invoice?.lines) ? invoice.lines : []).map((line) => {
+          const value = lineValueOf(line);
+          return {
+            itemGuid: normalizeGuid(line?.itemGuid ?? line?.item_guid),
+            material: text(line?.material),
+            qty: numberOrZero(line?.qty),
+            qtyUnits: numberOrNull(line?.qtyUnits),
+            unit1: text(line?.unit1),
+            unit2: text(line?.unit2),
+            unit2Fact: numberOrNull(line?.unit2Fact),
+            lineValue: value.amount === null ? null : toInvoiceCurrency(value.amount, currencyVal),
+            valueBasis: value.basis
+          };
+        });
 
         rows.push({
           customerName: groupName,
@@ -443,6 +478,11 @@
   // أهم الأصناف: صافي الكمية والقيمة بعد طرح أسطر المرتجعات.
   // المفتاح: GUID المادة إن توفّر (يُضاف عبر push-customer-invoices.ps1)، وإلا
   // الاسم المطبَّع — وتُعلَّم الحالة حتى لا يُقرأ التجميع كأنه معرّف موثوق.
+  //
+  // القيمة من `lineValue` (بوحدة الإدخال، انظر lineValueOf) لا من lineTotal الخام.
+  // الكمية بالوحدة الأولى (كروز) كما في الأمين، ومعها ما يعادلها بالوحدة الثانية
+  // (كرتونة) واسما الوحدتين للعرض. صنف فيه سطر واحد بلا قيمة موثوقة تصير قيمته
+  // null (`valueVerified = false`) ولا يُرتَّب فوق أصناف مؤكدة القيمة.
   // --------------------------------------------------------------------------
   function topItems(rows) {
     const totals = new Map();
@@ -461,29 +501,47 @@
             netQty: 0,
             netQtyUnits: 0,
             netValue: 0,
+            unverifiedLines: 0,
+            unit1: "",
+            unit2: "",
+            unit2Fact: null,
             lineCount: 0
           });
         }
         const entry = totals.get(key);
         entry.netQty += row.sign * line.qty;
         entry.netQtyUnits += row.sign * (line.qtyUnits ?? 0);
-        entry.netValue += row.sign * line.lineTotal;
+        if (line.lineValue === null) entry.unverifiedLines += 1;
+        else entry.netValue += row.sign * line.lineValue;
         entry.lineCount += 1;
         if (!entry.itemName && line.material) entry.itemName = line.material;
+        if (!entry.unit1 && line.unit1) entry.unit1 = line.unit1;
+        if (!entry.unit2 && line.unit2) entry.unit2 = line.unit2;
+        if (entry.unit2Fact === null && line.unit2Fact !== null && line.unit2Fact > 0) entry.unit2Fact = line.unit2Fact;
       }
     }
 
     const items = [...totals.values()]
-      .map((entry) => ({
-        itemGuid: entry.itemGuid,
-        itemName: entry.itemName,
-        netQty: round(entry.netQty, 3),
-        netQtyUnits: round(entry.netQtyUnits, 3),
-        netValue: round(entry.netValue, 3),
-        lineCount: entry.lineCount
-      }))
-      // ترتيب حتمي: القيمة تنازلياً ثم الاسم، فلا يتبدّل الناتج عند التعادل.
-      .sort((a, b) => b.netValue - a.netValue || a.itemName.localeCompare(b.itemName, "ar"))
+      .map((entry) => {
+        const valueVerified = entry.unverifiedLines === 0;
+        return {
+          itemGuid: entry.itemGuid,
+          itemName: entry.itemName,
+          netQty: round(entry.netQty, 3),
+          netQtyUnits: round(entry.netQtyUnits, 3),
+          unit1: entry.unit1 || null,
+          unit2: entry.unit2 || null,
+          unit2Fact: entry.unit2Fact,
+          netQtyUnit2: entry.unit2Fact ? round(entry.netQty / entry.unit2Fact, 3) : null,
+          netValue: valueVerified ? round(entry.netValue, 3) : null,
+          valueVerified,
+          lineCount: entry.lineCount
+        };
+      })
+      // ترتيب حتمي: المؤكَّد القيمة أولاً، ثم القيمة تنازلياً، ثم الاسم.
+      .sort((a, b) => (Number(b.valueVerified) - Number(a.valueVerified))
+        || ((b.netValue ?? 0) - (a.netValue ?? 0))
+        || a.itemName.localeCompare(b.itemName, "ar"))
       .slice(0, CONFIG.topItemsLimit);
 
     return {

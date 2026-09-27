@@ -47,6 +47,8 @@
 
 **العملة.** لا جمع بين عملتين أبداً. فواتير زبون بأكثر من عملة ⇒ `currencyMixed` وكل قيم مبيعاته `null` وتصنيفه `insufficient_data`. الأمين يخزّن `Total`/`TotalDisc`/أسطر `bi000` بعملة الأساس `USD`؛ المبلغ بعملة الفاتورة = الخام ÷ `CurrencyVal` (نفس `watcher.js`). `push-customer-invoices.ps1` يرفع الخام مع `currency` و`currencyVal` بلا تحويل مزدوج، والمحرك يحوّل قبل الترتيب والعرض. وسم ISO أجنبي بلا معدّل صالح يُتجاهل وتبقى الأرقام عملة أساس. غياب العملة يعني عملة الأساس `USD` (الأساس المحاسبي في الأمين — راجع [customer-balances.md](customer-balances.md)).
 
+**أهم الأصناف (إصلاح 2026-09-27).** قيمة السطر = `Price × Qty ÷ معامل وحدة الإدخال` (`lineValueOf`)، لا `lineTotal` الخام. `bi000.Qty` دائماً بالوحدة الأولى (كروز)، و`bi000.Price` سعر وحدة الإدخال (`bi000.Unity` ⇐ `inputUnit`)، و`lineTotal` في الحمولة `derived` = `Qty × Price` بلا قسمة — فسطر الكرتونة كان يتضخّم بمعامل الوحدة (50 ضعفاً). القاعدة نفسها في `invoiceLineInputUnit` بـ`src/app.js`، ومجموع الأسطر بها طابق إجمالي الفاتورة في 658/658 فاتورة حية. سطر `derived` بلا `inputUnit` لا يُعطى قيمة (`valueVerified = false` و`netValue = null`) بدل رقم مضخَّم؛ و`lineTotal` من عمود إجمالي حقيقي أو حمولة قديمة بلا `lineTotalSource` يُعتمد كما هو. الكمية تُعرض بالكرتونة (`netQtyUnit2 = netQty ÷ unit2Fact`) مع الكروز بين قوسين. مجموع الأصناف = مجموع `Total` للفواتير قبل حسم الرأس (`TotalDisc` غير موزّع على الأسطر).
+
 ## التصنيفات والعتبات
 
 كل عتبة في `CONFIG` داخل `src/customer-intelligence.js` — لا أرقام مبعثرة في الكود ولا في الواجهة.
