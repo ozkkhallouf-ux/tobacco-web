@@ -767,7 +767,7 @@
     let prior = facts.salesPrior;
     if (facts.debitCount >= A.largeInvoiceMinCount && facts.maxDebit60 > A.largeInvoiceMaxShare * S60) {
       const cut = facts.maxDebit60 - A.largeInvoiceMaxShare * S60;
-      if (recent >= cut) recent -= cut; else prior -= cut;
+      if (facts.maxDebitIsRecent) recent -= cut; else prior -= cut;
       notes.push(`حارس الفاتورة الشاذة خفّض أثر فاتورة ${Math.round(facts.maxDebit60)} بمقدار ${Math.round(cut)}.`);
     }
     return { recent, prior };

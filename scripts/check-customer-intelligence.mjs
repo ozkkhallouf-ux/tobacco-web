@@ -1468,7 +1468,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
 }
 
 // ---------------------------------------------------------------------------
-// 47–68) حد الائتمان الآلي (STEP 1): الحد المحسوب من دفتر حساب الزبون.
+// 47–69) حد الائتمان الآلي (STEP 1): الحد المحسوب من دفتر حساب الزبون.
 // كل الأرقام تركيبية. التاريخ المرجعي = REFERENCE_ISO (2026-09-02)، وd(n) = قبله بـn يوماً.
 // ---------------------------------------------------------------------------
 {
@@ -1758,9 +1758,34 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   assert.equal(unknownSteady.autoCredit.status, "unavailable", "test 68: بلا وقت مزامنة = غير متاح");
   assert.equal(rcUnknown.staleData, true, "test 68: وقت غير معروف يرفع التحذير العام");
 
+  // 69) حارس الفاتورة الشاذة يخصم من شهر الفاتورة الفعلي: فاتورة شاذة في الشهر السابق
+  //     لا تُخصم من سحب آخر 30 يوماً (وزنه 0.6) لمجرد أنه يكفيها.
+  const priorLarge = {
+    guid: gid(69), name: "ائتمان فاتورة شاذة سابقة",
+    movements: [
+      ...regular({ from: 60, to: 32, every: 4, amount: 500, lag: 3 }),
+      ...regular({ from: 28, every: 4, amount: 1500, lag: 3 }),
+      debit(45, 10000), pay(40, 10000)
+    ].sort((a, b) => a.date.localeCompare(b.date))
+  };
+  priorLarge.balance = ledgerBalance(priorLarge.movements);
+  const rc69 = engine.build({
+    ...reports,
+    invoicesReport: invoicesReportFor([priorLarge]),
+    balancesReport: { ...reports.balancesReport, items: [{ ...reports.balancesReport.items[0], key: engine.normalizeName(priorLarge.name), name: priorLarge.name,
+      balance: priorLarge.balance, balanceAccountCcy: priorLarge.balance, creditLimit: 0, customerGuid: priorLarge.guid, customerAccountGuid: priorLarge.guid }] },
+    movementsReport: { ...reports.movementsReport, items: [{ customerGuid: priorLarge.guid, name: priorLarge.name, truncated: false, movements: priorLarge.movements }] },
+    creditLimits: []
+  });
+  const large69 = rc69.customers.find((c) => c.customerGuid === priorLarge.guid).autoCredit;
+  assert.ok(large69.notes.some((note) => note.includes("الفاتورة الشاذة")), "test 69: الحارس فُعّل");
+  assert.equal(large69.fullWindow, true, "test 69: نافذة كاملة (الوزنان 0.6/0.4 مطبّقان)");
+  // الحديث 7 × 1500 = 10500؛ السابق 8 × 500 + 10000 = 14000؛ القص = 10000 − 0.35 × 24500 = 1425 من السابق.
+  assert.equal(large69.velocity, Number(((0.6 * 10500 + 0.4 * (14000 - 1425)) / 30).toFixed(3)), "test 69: القص من الشهر السابق لا الحديث");
+
   // 66) عدّادات الملخص؛ وتنبيه الحد يبقى مسودة داخلية: لا مسار تيليغرام في هذه المرحلة.
   assert.ok(rc.summary.delinquentCreditCount >= 2 && rc.summary.inactiveCreditCount >= 2 && rc.summary.lowDataCreditCount >= 1);
   assert.equal(rc.summary.nonCustomerCreditCount, 1, "test 66: غير الزبون يُعدّ منفصلاً");
 }
 
-console.log(`ذكاء الزبائن: 68 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
+console.log(`ذكاء الزبائن: 69 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
