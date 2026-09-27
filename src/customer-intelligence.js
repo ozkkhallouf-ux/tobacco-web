@@ -1123,6 +1123,11 @@
       // لا استخدام ولا تجاوز ولا تعثّر من رصيد قديم.
       return { ...base, currentBalance: round(balance, 3), balanceDisplay: round(balanceDisplay, 3), balanceCurrency, creditLimitSource: autoUsable ? base.creditLimitSource : "stale", creditUsagePercent: null, creditStatus: "stale_balance" };
     }
+    if ((dayMismatch || invoicesStale) && foreign && creditLimitSource === "ameen" && !confirmedStatus) {
+      // قرار المالك: معدّل تحويل حد الأمين لعملة الحساب من الفواتير نفسها، فمع لقطة فواتير قديمة
+      // أو على يوم آخر قد يكون قديماً — الحد يُعرض بمصدره، بلا نسبة استخدام ولا حكم تجاوز.
+      return { ...base, currentBalance: round(balance, 3), balanceDisplay: round(balanceDisplay, 3), balanceCurrency, creditUsagePercent: null, creditStatus: dayMismatch ? "accounting_day_mismatch" : "stale_invoices" };
+    }
     if (dayMismatch && !confirmedStatus && creditLimitSource !== "ameen") {
       // المصادر على يومين محاسبيين: لا حد آلي ولا استخدام ولا تجاوز ولا تعثّر ولا «غير نشط».
       return { ...base, currentBalance: round(balance, 3), balanceDisplay: round(balanceDisplay, 3), balanceCurrency, creditLimitSource: "day_mismatch", creditUsagePercent: null, creditStatus: "accounting_day_mismatch" };
@@ -1934,6 +1939,7 @@
       else if (draft.credit.creditStatus === "near_limit") reasons.push(`الرصيد بلغ ${draft.credit.creditUsagePercent}% من حد الائتمان.`);
       else if (draft.credit.creditStatus === "unknown_limit") reasons.push("عليه رصيد مدين بلا حد ائتمان محدد.");
       else if (draft.credit.creditStatus === "awaiting_typed_source") reasons.push(UNTYPED_LEDGER_NOTE);
+      else if (draft.credit.creditLimitSource === "ameen" && ["accounting_day_mismatch", "stale_invoices"].includes(draft.credit.creditStatus)) reasons.push("حد الأمين محفوظ بالدولار، ومعدّل تحويله لعملة الحساب من فواتير غير حديثة أو من يوم محاسبي آخر: لا نسبة استخدام ولا حكم تجاوز حتى تتحدّث الفواتير.");
       else if (draft.credit.creditStatus === "accounting_day_mismatch") reasons.push(ACCOUNTING_DAY_NOTE);
       else if (draft.credit.creditStatus === "stale_invoices") reasons.push("تقرير الفواتير غير حديث: حد الائتمان الآلي غير متاح، ولا نسبة استخدام ولا تجاوز ولا تعثّر ولا «غير نشط» من نافذة فواتير قديمة.");
       else if (draft.credit.creditStatus === "stale_balance") reasons.push("تقرير الأرصدة غير حديث: حد الائتمان غير متاح، ولا نسبة استخدام ولا حكم تجاوز من رصيد قديم.");

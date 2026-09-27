@@ -2399,10 +2399,34 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   assert.equal(unknownDay84.dataAvailability.accountingDayAligned, false, "test 84: يوم غير معروف ⇒ غير متطابق");
   assert.equal(unknownDay84.customers.find((c) => c.customerGuid === G_STEADY).creditStatus, "accounting_day_mismatch");
 
+  // 85) Codex P1 / قرار المالك — حد الأمين لحساب بعملة غير الأساس مع فواتير غير حديثة أو على يوم
+  //     آخر: معدّل التحويل من تلك الفواتير، فالحد يُعرض بمصدره «ameen» بلا نسبة استخدام ولا تجاوز.
+  //     حساب الأساس (دولار) بحد الأمين لا يحتاج معدّلاً فيبقى حكمه كما كان.
+  const withAmeenLimit = (report, limits) => ({ ...report, items: report.items.map((item) => (item.customerGuid in limits ? { ...item, creditLimit: limits[item.customerGuid] } : item)) });
+  const limits85 = { [G_SYP]: 100, [G_STEADY]: 100 };   // رصيد كل منهما أكبر بكثير من 100$ ⇒ «تجاوز» لو حُسب
+  const cases85 = [
+    ["فواتير غير حديثة", "stale_invoices", engine.build({ ...reports, balancesReport: withAmeenLimit(reports.balancesReport, limits85),
+      invoicesReport: { ...reports.invoicesReport, created_at: staleIso, summary: { ...reports.invoicesReport.summary, syncedAt: staleIso } } })],
+    ["يوم محاسبي آخر", "accounting_day_mismatch", engine.build({ ...reports, now: now84,
+      invoicesReport: at84(reports.invoicesReport, localIso(23, 50, -1), d(1)), movementsReport: at84(reports.movementsReport, localIso(0, 20), d(0)),
+      balancesReport: at84(withAmeenLimit(reports.balancesReport, limits85), localIso(0, 25), d(0)) })]
+  ];
+  for (const [label, status, built] of cases85) {
+    const syp85 = built.customers.find((c) => c.customerGuid === G_SYP);
+    assert.equal(syp85.creditLimitSource, "ameen", `test 85 (${label}): حد الأمين بمصدره`);
+    assert.equal(syp85.creditLimit, 100, `test 85 (${label}): قيمة الحد تُعرض`);
+    assert.equal(syp85.creditUsagePercent, null, `test 85 (${label}): لا نسبة استخدام بمعدّل قديم`);
+    assert.equal(syp85.creditStatus, status, `test 85 (${label}): لا حكم تجاوز`);
+    assert.ok(syp85.explanation.some((reason) => reason.includes("معدّل تحويله")), `test 85 (${label}): السبب ظاهر`);
+    const usd85 = built.customers.find((c) => c.customerGuid === G_STEADY);
+    assert.equal(usd85.creditLimitSource, "ameen");
+    assert.equal(usd85.creditStatus, "over_limit", `test 85 (${label}): حساب الدولار بحد الأمين يبقى حكمه`);
+  }
+
   // 66) عدّادات الملخص؛ وتنبيه الحد يبقى مسودة داخلية: لا مسار تيليغرام في هذه المرحلة.
   assert.ok(rc.summary.delinquentCreditCount >= 2 && rc.summary.inactiveCreditCount >= 2 && rc.summary.lowDataCreditCount >= 1);
   assert.equal(rc.summary.nonCustomerCreditCount, 0, "test 66: لا «ليس زبوناً» بالسلوك");
   assert.equal(rc.summary.needsReviewCreditCount, 1, "test 66: الشذوذ يُعدّ «يحتاج مراجعة» منفصلاً");
 }
 
-console.log(`ذكاء الزبائن: 84 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
+console.log(`ذكاء الزبائن: 85 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
