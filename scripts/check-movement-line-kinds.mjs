@@ -27,6 +27,8 @@ const test = (name, fn) => {
 
 const sel = here("lineKindSel");
 const apply = here("lineKindApply");
+const cte = here("lineKindCte");
+const balancesSql = readFileSync(new URL("../tools/ameen-customer-balances-query.sql", import.meta.url), "utf8");
 const ALLOWED = ["sale", "sale_payment", "discount", "return", "purchase", "purchase_payment", "purchase_return",
   "payment", "payment_out", "opening", "debt_transfer", "adjustment", "other", "unknown"];
 
@@ -55,8 +57,23 @@ test("المصدر: ربط er000 ونوع الفاتورة والحساب الم
 
 test("الحسم والدفعة عند البيع والشراء بالحساب المقابل لا بالتخمين", () => {
   assert.match(sel, /lbt\.BillType = 1 THEN CASE\s+WHEN lca\.Code = '43' THEN CASE WHEN en\.Credit > 0 THEN 'discount'/);
-  assert.match(sel, /WHEN lcp\.Code = '13' THEN CASE WHEN en\.Credit > 0 THEN 'sale_payment'/);
-  assert.match(sel, /lbt\.BillType = 0 THEN CASE\s+WHEN lcp\.Code = '13' THEN 'purchase_payment'\s+WHEN lca\.Code = '124' OR lcp\.Code = '124' THEN 'purchase'/);
+  assert.match(sel, /WHEN lkc\.isCash = 1 THEN CASE WHEN en\.Credit > 0 THEN 'sale_payment'/);
+  assert.match(sel, /lbt\.BillType = 0 THEN CASE\s+WHEN lkc\.isCash = 1 THEN 'purchase_payment'\s+WHEN lca\.Code = '124' OR lcp\.Code = '124' THEN 'purchase'/);
+});
+
+test("حركة الصندوق بتعريف الدفعة الموحّد نفسه في ameen-customer-balances-query.sql", () => {
+  // نفس المعرّفات: شجرة 13، واستثناء 135 فروقات الصندوق، وشجرة 121، والقيد الافتتاحي.
+  for (const guid of ["c0dc3c06-b2ac-4e57-beae-19d7da3f514c", "ef5d9f4c-db3a-4307-a402-4fefe3e4e2b8",
+    "e30187a7-eccc-4ff8-8a7d-f2df5e660b53", "ea69ba80-662d-4fa4-90ee-4d2e1988a8ea"]) {
+    assert.ok(balancesSql.includes(guid), `المعرّف ليس في التعريف الموحّد: ${guid}`);
+    assert.ok((cte + apply).includes(guid), `المعرّف غائب عن lineKind: ${guid}`);
+  }
+  assert.match(apply, /COALESCE\(en\.Type, 0\) = 0/, "سطر عادي فقط");
+  assert.match(apply, /en\.ContraAccGUID IN \(SELECT GUID FROM lk_cash\)/);
+  assert.match(apply, /EXISTS \(SELECT 1 FROM dbo\.en000 cd WHERE cd\.ParentGUID = en\.ParentGUID/, "القيد المركب بمقابل صفري");
+  assert.match(sel, /WHEN lkc\.isCash = 1 AND en\.Credit > 0 THEN CASE WHEN lkc\.isCustomerTree = 1 THEN 'payment' ELSE 'other' END/, "القبض دفعة زبون على شجرة 121 وحدها");
+  assert.match(sel, /WHEN lkc\.isCashDiff = 1 THEN 'adjustment'/, "135 فروقات الصندوق تسوية");
+  assert.ok(!/lcp\.Code = '13' THEN CASE/.test(sel), "لا اختصار «أبوه 13» للدفعة");
 });
 
 test("الانتماء بالشجرة لا ببادئة الرمز (545616 زبون تحت 1212)", () => {
@@ -65,6 +82,7 @@ test("الانتماء بالشجرة لا ببادئة الرمز (545616 زب�
 });
 
 test("العمود يُقرأ ويُرفع، والعلامة v1 مع مصدرها", () => {
+  assert.match(ps, /WITH \$lineKindCte led AS \(/);
   assert.match(ps, /\$lineKindSel AS line_kind,/);
   assert.match(ps, /\n\$lineKindApply\n\s+WHERE \(COALESCE\(en\.Debit,0\) > 0/);
   assert.match(ps, /docPrev,\n\s+line_kind\nFROM led/);
@@ -73,7 +91,7 @@ test("العمود يُقرأ ويُرفع، والعلامة v1 مع مصدره
 });
 
 test("قراءة فقط: لا كتابة إلى الأمين في كتلة التصنيف", () => {
-  for (const text of [sel, apply]) assert.ok(!/\b(INSERT|UPDATE|DELETE|MERGE|EXEC|DROP|ALTER|CREATE)\b/i.test(text));
+  for (const text of [sel, apply, cte]) assert.ok(!/\b(INSERT|UPDATE|DELETE|MERGE|EXEC|DROP|ALTER|CREATE)\b/i.test(text));
 });
 
 console.log(results.join("\n"));
