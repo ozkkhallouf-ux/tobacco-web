@@ -496,12 +496,17 @@
   const SETTLE_LINE_KINDS = new Set(["discount", "debt_transfer", "adjustment", "opening"]);
   // جانب المدين تحت v1: قائمة سماح صريحة — sale وحده سحب (Sales Velocity، الدورة، الفاتورة
   // الشاذة). جانب الشراء (مشترياتنا ودفعاتنا للحساب ومرتجع المشتريات) خارج دفتر الزبون
-  // كلياً كنظيره الدائن: لا سحب ولا دين FIFO. وما سواهما دين حقيقي بلا سحب.
+  // كلياً كنظيره الدائن: لا سحب ولا دين FIFO. وغير المحسوم (unknown/other) لا سحب ولا دين.
+  // وما سوى ذلك دين حقيقي بلا سحب.
   const SALE_LINE_KINDS = new Set(["sale"]);
   const PURCHASE_SIDE_LINE_KINDS = new Set(["purchase", "purchase_payment", "purchase_return", "payment_out"]);
   // مفردات عقد المصدر (#278، v1). أي قيمة خارجها تُقرأ unknown.
   const KNOWN_LINE_KINDS = new Set(["sale", "sale_payment", "payment", "receipt", "discount", "return", "purchase",
     "purchase_payment", "purchase_return", "payment_out", "opening", "debt_transfer", "adjustment", "other", "unknown"]);
+
+  // حركة محاسبية غير محسومة من منظور الائتمان (قرار المالك 2026-09-27): unknown، وother
+  // (حساب مقابل لم يثبت نوعه). لا سحب ولا دفعة ولا تسوية ولا دين، وأثرها المادي يوقف الحد.
+  const UNRESOLVED_LINE_KINDS = new Set(["unknown", "other"]);
 
   function normalizeLineKind(value) {
     const kind = text(value).toLowerCase();
@@ -549,7 +554,7 @@
         }
       }
       // حجم الحركات المجهولة (مدين + دائن) — مادّيتها تحكم «يحتاج مراجعة» (build).
-      const unknownAmount = rows.reduce((sum, row) => sum + (row.lineKind === "unknown" ? row.debit + row.credit : 0), 0);
+      const unknownAmount = rows.reduce((sum, row) => sum + (UNRESOLVED_LINE_KINDS.has(row.lineKind) ? row.debit + row.credit : 0), 0);
       byGuid.set(guid, { truncated: item?.truncated === true, rows, unknownAmount });
     }
     return { byGuid, startDay };
@@ -609,6 +614,7 @@
   // تصنيف سطر المدين: sale (سحب + دين FIFO)، debt (دين FIFO بلا سحب)، none (جانب الشراء).
   // بلا lineKind السلوك القديم: كل مدين غير افتتاحي سحب.
   function debitMetricKind(row) {
+    if (UNRESOLVED_LINE_KINDS.has(row.lineKind)) return "none";
     if (row.isOpening) return "debt";
     if (!row.lineKind) return "sale";
     if (SALE_LINE_KINDS.has(row.lineKind)) return "sale";

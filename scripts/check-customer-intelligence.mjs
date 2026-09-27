@@ -2117,10 +2117,49 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   assert.deepEqual(rc78.dataAvailability.creditCycle, rcNoUnknownAcct.dataAvailability.creditCycle, "test 78: الحساب الملتبس لا يلوّث معايرة المحفظة");
   assert.ok(engine.CONFIG.autoCredit.delinquentMinAmount === 50, "test 78: حد الأهمية نفسه");
 
+  // 79) قرار المالك (2026-09-27) — lineKind = other (حساب مقابل لم يثبت نوعه) حركة غير
+  //     محسومة كـunknown تماماً: لا سحب ولا دفعة ولا تسوية ولا دين؛ أثرها ≥ حد الأهمية (50)
+  //     ⇒ «يحتاج مراجعة» يسبق التعثّر، بلا حد، وخارج عيّنة المحفظة؛ دونه لا يوقف الحساب.
+  const otherMaterialDebit = { id: 111, name: "مدين other مادّي", movements: [tag(debit(50, 2000), "sale"), tag(debit(45, 500), "other")] };
+  const otherMaterialCredit = { id: 112, name: "دائن other مادّي", movements: [tag(debit(80, 2000), "sale"), tag(pay(20, 1500), "other")] };
+  const otherSmallDebit = { id: 113, name: "مدين other صغير", movements: [tag(debit(40, 2000), "sale"), tag(debit(20, 30), "other"), tag(pay(10, 2000), "sale_payment")] };
+  const otherSmallCredit = { id: 114, name: "دائن other صغير", movements: [tag(debit(40, 2000), "sale"), tag(pay(10, 30), "other")] };
+  const otherInPortfolio = { id: 115, name: "محفظة بحركة other",
+    movements: [...regular({ from: 59, every: 6, amount: 500, lag: 40 }).map((m) => tag(m, m.credit > 0 ? "payment" : "sale")), tag(pay(3, 100), "other")] };
+  const list79 = [otherMaterialDebit, otherMaterialCredit, otherSmallDebit, otherSmallCredit, otherInPortfolio];
+  const rc79 = build78(list79, "v1");
+  const legacy79 = build78(list79, null);
+  // 1) و2) مادّي ⇒ مراجعة بلا حد، ولا تعثّر من الغموض (الدفتر نفسه بلا العلامة متعثّر).
+  for (const id of [111, 112]) {
+    const r = at78(rc79, id);
+    assert.equal(r.creditStatus, "needs_review", `test 79: other مادّي ⇒ يحتاج مراجعة (${id})`);
+    assert.equal(r.creditLimit, null, `test 79: other مادّي ⇒ لا حد (${id})`);
+    assert.equal(r.autoCredit.overdueAmount, undefined, `test 79: other مادّي ⇒ لا حكم تعثّر (${id})`);
+  }
+  assert.equal(at78(legacy79, 111).creditStatus, "delinquent", "test 79: الضبط — الدفتر نفسه متعثّر بلا الحارس");
+  // 3) حساب المحفظة بـother مادّي خارج المعايرة.
+  assert.equal(at78(rc79, 115).creditStatus, "needs_review", "test 79: حساب المحفظة بـother مادّي يحتاج مراجعة");
+  assert.deepEqual(rc79.dataAvailability.creditCycle, build78(list79.slice(0, 4), "v1").dataAvailability.creditCycle, "test 79: other لا يلوّث معايرة المحفظة");
+  // 4) و6) مدين other صغير: لا سحب ولا دين، ولا يوقف الحساب.
+  const osd = at78(rc79, 113);
+  assert.notEqual(osd.creditStatus, "needs_review", "test 79: other دون حد الأهمية لا يوقف الحساب");
+  assert.equal(draws(osd), 2000, "test 79: مدين other لا يرفع Sales Velocity");
+  assert.equal(osd.autoCredit.oldestOpenDays, null, "test 79: مدين other ليس ديناً مؤكداً");
+  // 5) و6) دائن other صغير: لا دفعة ولا تسوية، ولا يوقف الحساب.
+  const osc = at78(rc79, 114);
+  assert.notEqual(osc.creditStatus, "needs_review", "test 79: دائن other صغير لا يوقف الحساب");
+  assert.equal(osc.autoCredit.paidInOverdueSpan, 0, "test 79: دائن other لا يُعدّ دفعة");
+  assert.equal(osc.autoCredit.daysSinceLastPayment, null, "test 79: دائن other ليس آخر دفعة");
+  assert.equal(osc.autoCredit.overdueAmount, 2000, "test 79: دائن other لا يسوّي الدين");
+  // 7) بلا العلامة: السلوك القديم كما هو — المدين سحب والدائن دفعة ولا مراجعة.
+  assert.equal(draws(at78(legacy79, 113)), 2030, "test 79: بلا علامة مدين other سحب كالسلوك القديم");
+  assert.equal(at78(legacy79, 114).autoCredit.paidInOverdueSpan, 30, "test 79: بلا علامة دائن other دفعة كالسلوك القديم");
+  for (const c of list79) assert.notEqual(at78(legacy79, c.id).creditStatus, "needs_review", `test 79: بلا علامة لا مراجعة (${c.id})`);
+
   // 66) عدّادات الملخص؛ وتنبيه الحد يبقى مسودة داخلية: لا مسار تيليغرام في هذه المرحلة.
   assert.ok(rc.summary.delinquentCreditCount >= 2 && rc.summary.inactiveCreditCount >= 2 && rc.summary.lowDataCreditCount >= 1);
   assert.equal(rc.summary.nonCustomerCreditCount, 0, "test 66: لا «ليس زبوناً» بالسلوك");
   assert.equal(rc.summary.needsReviewCreditCount, 1, "test 66: الشذوذ يُعدّ «يحتاج مراجعة» منفصلاً");
 }
 
-console.log(`ذكاء الزبائن: 78 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
+console.log(`ذكاء الزبائن: 79 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
