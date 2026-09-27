@@ -318,14 +318,19 @@
     portfolio_median: "وسيط المحفظة (بيانات قليلة)"
   };
 
+  // مصادر بلا حد معروض: نص ثابت.
+  const UNAVAILABLE_LIMIT_TEXT = {
+    stale: "غير متاح (تقرير الأرصدة غير حديث)",
+    untyped: "غير متاح (بانتظار تقرير حركات موسوم بالنوع)"
+  };
+
   function creditLimitText(row) {
     const auto = row.autoCredit;
     if (row.creditLimitSource === "auto") {
       const label = AUTO_STATUS_TEXT[auto?.status] || "آلي";
       return row.creditLimitDisplay === null ? escape(label) : `${money(row.creditLimitDisplay, row.creditCurrency || "USD")} (${escape(label)})`;
     }
-    if (row.creditLimitSource === "stale") return "غير متاح (تقرير الأرصدة غير حديث)";
-    if (row.creditLimitSource === "untyped") return "غير متاح (بانتظار تقرير حركات موسوم بالنوع)";
+    if (UNAVAILABLE_LIMIT_TEXT[row.creditLimitSource]) return UNAVAILABLE_LIMIT_TEXT[row.creditLimitSource];
     if (row.creditLimitSource === "ameen") return `${money(row.creditLimitDisplay ?? row.creditLimit, row.creditCurrency || "USD")} (من الأمين — لا دفتر حساب للحساب الآلي)`;
     return "غير محدد";
   }
