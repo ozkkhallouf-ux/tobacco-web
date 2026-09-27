@@ -1468,7 +1468,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
 }
 
 // ---------------------------------------------------------------------------
-// 47–60) حد الائتمان الآلي (STEP 1): الحد المحسوب من دفتر حساب الزبون.
+// 47–66) حد الائتمان الآلي (STEP 1): الحد المحسوب من دفتر حساب الزبون.
 // كل الأرقام تركيبية. التاريخ المرجعي = REFERENCE_ISO (2026-09-02)، وd(n) = قبله بـn يوماً.
 // ---------------------------------------------------------------------------
 {
@@ -1522,14 +1522,30 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   });
   const G_TRUNC = account(12, "ائتمان دفتر مقتطع", regular({ from: 59, every: 6, amount: 600, lag: 6 }), { truncated: true, creditLimit: 777 });
   const G_LEGACY = account(13, "ائتمان حد قديم", regular({ from: 59, every: 6, amount: 600, lag: 6 }));
+  // حساب ليس زبون مبيعات: سحب ودفع في الدفتر بلا فواتير مبيع (فروقات جرد/سلف).
+  const G_NOTCUST = account(14, "حساب داخلي بلا فواتير", regular({ from: 58, every: 7, amount: 900, lag: 50 }), { noInvoices: true });
+  // زبون حقيقي بفرق صغير غير مفوتر (دون حد الأهمية): يبقى زبوناً.
+  const G_SMALLGAP = account(15, "ائتمان بفرق تسوية صغير", [...regular({ from: 59, every: 6, amount: 600, lag: 6 }), debit(30, 40), pay(28, 40)],
+    { uninvoiced: new Set([d(30)]) });
+  // خامل مدين بدين قديم لم يُدفع منه شيء: متعثّر لا غير نشط.
+  const G_DORMANT = account(16, "ائتمان خامل مدين", [debit(80, 3000), pay(75, 100)]);
+
+  // فواتير المبيع = سحب الدفتر في النافذة (حساب الليرة بعملته)، إلا للحسابات غير الزبائن.
+  const salesInvoicesOf = (a) => a.movements
+    .filter((m) => m.debit > 0 && !m.notes && !(a.uninvoiced?.has(m.date)) && m.date >= FROM_DATE)
+    .map((m, index) => invoice(m.date, m.debit, {
+      guid: `bill-${a.guid}-${index}`,
+      ...(a.accountCurrencyIsBase === false ? { currency: "SYP", currencyVal: 1 / 14000 } : {})
+    }));
+  const invoicesReportFor = (list, fromDate = FROM_DATE) => ({
+    source: "ameen_customer_invoices", created_at: REFERENCE_ISO,
+    summary: { periodDays: 60, fromDate, customers: list.length, syncedAt: REFERENCE_ISO },
+    items: list.filter((a) => !a.noInvoices).map((a) => ({ name: a.name, customerGuid: a.guid, truncated: false, invoices: salesInvoicesOf(a) }))
+      .filter((group) => group.invoices.length > 0)
+  });
 
   const reports = {
-    invoicesReport: {
-      source: "ameen_customer_invoices", created_at: REFERENCE_ISO,
-      summary: { periodDays: 60, fromDate: FROM_DATE, customers: 1, bills: 1, syncedAt: REFERENCE_ISO },
-      items: [{ name: "ائتمان حساب ليرة", customerGuid: G_SYP, truncated: false,
-        invoices: [invoice(d(2), 7000000, { currency: "SYP", currencyVal: 1 / 14000 })] }]
-    },
+    invoicesReport: invoicesReportFor(accounts),
     balancesReport: {
       source: "ameen_customer_balances", created_at: REFERENCE_ISO,
       summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: accounts.length },
@@ -1567,14 +1583,16 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   assert.equal(steady.autoCredit.cycleRawDays, 6, "test 47: وسيط أيام السداد = 6");
   assert.ok(steady.creditLimit > 0, "test 47: زبون منتظم يحصل على حد");
   assert.equal(steady.creditLimit % stepOf(steady.creditLimit, "USD"), 0, "test 47: تقريب تجاري");
-  assert.ok(steady.autoCredit.coverage >= 0.9 && steady.creditStatus === "normal");
+  assert.ok(steady.autoCredit.coverage >= 0.9 && steady.autoCredit.punctuality === 1 && steady.autoCredit.risk === 1, "test 47: منتظم = انضباط كامل بلا مخاطر رصيد");
+  assert.equal(steady.creditLimit, engine.commercialRound(steady.autoCredit.limitBase, "USD"), "test 47: التقريب للأسفل");
 
-  // 48) الدورة محصورة بسقف المحفظة، والبطيء الذي يدفع باستمرار ليس متعثراً.
+  // 48) الدورة محصورة بين P10 وP90 للمحفظة الحية، والبطيء الذي يدفع باستمرار ليس متعثراً.
   const cycle = rc.dataAvailability.creditCycle;
   const slow = row(G_SLOW);
+  assert.equal(cycle.basis, "portfolio");
+  assert.ok(cycle.floorDays >= 1 && cycle.floorDays <= cycle.medianDays && cycle.medianDays <= cycle.capDays, "test 48: P10 ≤ الوسيط ≤ P90");
   assert.ok(slow.autoCredit.cycleRawDays > cycle.capDays, "test 48: وسيط أيام السداد الخام فوق السقف");
-  assert.equal(slow.autoCredit.cycleDays, cycle.capDays, "test 48: الدورة = سقف المحفظة");
-  assert.equal(cycle.capDays, cycle.medianDays + 7, "test 48: السقف = وسيط المحفظة + 7");
+  assert.equal(slow.autoCredit.cycleDays, cycle.capDays, "test 48: الدورة = سقف المحفظة (P90)");
   assert.notEqual(slow.creditStatus, "delinquent", "test 48: بطيء يدفع ليس متعثراً");
   assert.ok(slow.autoCredit.trend <= 1 && slow.creditLimit < slow.autoCredit.expectedExposure,
     "test 48: التحصيل الضعيف لا يرفع الحد فوق التعرض المعتاد");
@@ -1626,9 +1644,9 @@ if (!process.env.OZK_CI_TZ_CHILD) {
 
   // 56) نمو مع رصيد متراكم غير معتاد: الرصيد يمنع مكافأة النمو ويخفض الحد.
   const growBal = row(G_GROWHIGHBAL);
-  assert.ok(growBal.autoCredit.coverage >= 0.9, "test 56: التحصيل جيد — الرصيد وحده هو المانع");
+  assert.ok(growBal.autoCredit.risk < 1, "test 56: الرصيد عامل مخاطر داخل جودة السداد");
   assert.equal(growBal.autoCredit.trend, 1, "test 56: الرصيد المرتفع يمنع مكافأة النمو");
-  assert.ok(growBal.autoCredit.riskFactor < 1, "test 56: عامل الرصيد يخفض الحد");
+  assert.ok(growBal.autoCredit.quality < steady.autoCredit.quality, "test 56: الجودة أقل من المنتظم");
 
   // 57) حساب ليرة: الحساب داخلياً بالأساس، والعرض بعملة الحساب بلا خلط.
   const syp = row(G_SYP);
@@ -1649,18 +1667,59 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   assert.equal(legacyRow.legacyCreditLimit, 99999);
   assert.equal(legacyRow.creditLimit, steady.creditLimit, "test 59: نفس الدفتر = نفس الحد مهما كان الحد القديم");
 
-  // 60) التقريب التجاري لأقرب خطوة حسب الحجم والعملة (الخطوة من القيمة قبل التقريب).
+  // 60) التقريب التجاري للأسفل حسب الحجم والعملة — بلا كسور ولا رفع.
   assert.equal(engine.commercialRound(0, "USD"), 0);
   assert.equal(engine.commercialRound(40, "USD"), 0);
-  assert.equal(engine.commercialRound(690, "USD"), 700);
+  assert.equal(engine.commercialRound(690, "USD"), 600);
   assert.equal(engine.commercialRound(1120, "USD"), 1000);
-  assert.equal(engine.commercialRound(12345, "USD"), 12500);
-  assert.equal(engine.commercialRound(9960000, "SYP"), 10000000);
-  assert.equal(engine.commercialRound(12345678, "SYP"), 12500000);
+  assert.equal(engine.commercialRound(12345, "USD"), 12000);
+  assert.equal(engine.commercialRound(9960000, "SYP"), 9900000);
+  assert.equal(engine.commercialRound(12345678, "SYP"), 12000000);
   assert.equal(engine.commercialRound(123456789, "SYP"), 123000000);
 
-  // تنبيه الحد يبقى مسودة داخلية: لا مسار تيليغرام في هذه المرحلة.
-  assert.ok(rc.summary.delinquentCreditCount >= 1 && rc.summary.inactiveCreditCount >= 2 && rc.summary.lowDataCreditCount >= 1);
+  // 61) حساب ليس زبون مبيعات (سحب دفتري بلا فواتير مبيع): لا حد ولا تعثّر ولا تصنيف ائتماني.
+  const notCust = row(G_NOTCUST);
+  assert.equal(notCust.autoCredit.status, "non_customer", "test 61: ليس زبون مبيعات");
+  assert.equal(notCust.creditLimit, null, "test 61: لا حد");
+  assert.equal(notCust.creditStatus, "not_customer");
+  assert.ok(notCust.flags.includes("credit_not_customer") && !notCust.flags.includes("credit_delinquent"), "test 61: لا وسم تعثّر");
+
+  // 62) الحساب غير الزبون لا يدخل عيّنة دورة المحفظة: حدودها كما لو لم يوجد.
+  const withoutNotCust = accounts.filter((a) => a.guid !== G_NOTCUST);
+  const rcWithout = engine.build({
+    ...reports,
+    invoicesReport: invoicesReportFor(withoutNotCust),
+    balancesReport: { ...reports.balancesReport, items: reports.balancesReport.items.filter((item) => item.customerGuid !== G_NOTCUST) },
+    movementsReport: { ...reports.movementsReport, items: reports.movementsReport.items.filter((item) => item.customerGuid !== G_NOTCUST) }
+  });
+  assert.deepEqual(rc.dataAvailability.creditCycle, rcWithout.dataAvailability.creditCycle, "test 62: حدود الدورة لا تتأثر بغير الزبون");
+  assert.equal(rcWithout.customers.find((c) => c.customerGuid === G_STEADY).creditLimit, steady.creditLimit);
+
+  // 63) حساب أكّد المالك أنه ليس زبوناً يُستبعد ولو غطّت فواتيره سحبه — بالمعرّف لا بالاسم.
+  const ownerExcluded = engine.CONFIG.autoCredit.excludedAccountGuids[0];
+  const rcOwner = engine.build({
+    ...reports,
+    invoicesReport: invoicesReportFor([{ ...accounts[0], guid: ownerExcluded, name: "اسم عادي" }]),
+    balancesReport: { ...reports.balancesReport, items: [{ ...reports.balancesReport.items[0], customerGuid: ownerExcluded, customerAccountGuid: ownerExcluded, name: "اسم عادي", key: "اسم عادي" }] },
+    movementsReport: { ...reports.movementsReport, items: [{ ...reports.movementsReport.items[0], customerGuid: ownerExcluded, name: "اسم عادي" }] }
+  });
+  assert.equal(rcOwner.customers.find((c) => c.customerGuid === ownerExcluded).autoCredit.status, "non_customer", "test 63: قائمة المالك بالمعرّف");
+
+  // 64) فرق صغير غير مفوتر (دون حد الأهمية) لا يحوّل زبوناً حقيقياً إلى غير زبون،
+  //     وتقرير فواتير لا يغطي النافذة لا يصنّف أحداً غير زبون (لا حكم بلا دليل).
+  assert.notEqual(row(G_SMALLGAP).autoCredit.status, "non_customer", "test 64: الفرق الصغير لا يصنّف");
+  const rcShort = engine.build({ ...reports, invoicesReport: invoicesReportFor(accounts, d(20)) });
+  assert.ok(!rcShort.customers.some((c) => c.autoCredit?.status === "non_customer"), "test 64: تغطية ناقصة = لا تصنيف سلوكي");
+
+  // 65) خامل مدين بدين قديم لم يُسدَّد: متعثّر بحد صفر (لا «غير نشط»)؛ الخامل بلا دين غير نشط.
+  const dormant = row(G_DORMANT);
+  assert.equal(dormant.creditStatus, "delinquent", "test 65: الخامل المدين الذي لا يدفع متعثّر");
+  assert.equal(dormant.creditLimit, 0);
+  assert.equal(row(G_IDLE).creditStatus, "inactive_no_limit", "test 65: الخامل بلا دين ليس متعثّراً");
+
+  // 66) عدّادات الملخص؛ وتنبيه الحد يبقى مسودة داخلية: لا مسار تيليغرام في هذه المرحلة.
+  assert.ok(rc.summary.delinquentCreditCount >= 2 && rc.summary.inactiveCreditCount >= 2 && rc.summary.lowDataCreditCount >= 1);
+  assert.equal(rc.summary.nonCustomerCreditCount, 1, "test 66: غير الزبون يُعدّ منفصلاً");
 }
 
-console.log(`ذكاء الزبائن: 60 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
+console.log(`ذكاء الزبائن: 66 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);

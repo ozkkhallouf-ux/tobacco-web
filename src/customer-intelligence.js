@@ -91,21 +91,18 @@
       portfolioMinDebits: 5,           // زبون يدخل إحصاء المحفظة من 5 فواتير فأكثر
       portfolioMinSample: 5,
       cycleFloorPercentile: 0.1,       // أرضية الدورة = P10 المحفظة (ولا تقل عن يوم)
-      cycleCapAboveMedianDays: 7,      // سقف الدورة = وسيط المحفظة + 7 أيام
-      cycleFallbackMedianDays: 7,      // وسيط احتياطي حين تكون المحفظة أصغر من أن تُقاس
+      cycleCapPercentile: 0.9,         // سقف الدورة = P90 المحفظة
+      cycleFallbackMedianDays: 7,      // احتياط حين تكون المحفظة أصغر من أن تُقاس
+      cycleFallbackCapDays: 30,
       peakHeadroomMax: 1.5,            // هامش الذروة (p75) بحد أقصى 1.5× الوسيط
       coverageFloor: 0.8,
       coverageFull: 1,
       growthMinCoverage: 0.9,          // تحت 90% تحصيل: لا رفع بالنمو ولا هامش ذروة
-      qualityWeights: Object.freeze({ coverage: 0.4, speed: 0.3, regularity: 0.3 }),
+      qualityWeights: Object.freeze({ coverage: 0.4, punctuality: 0.3, risk: 0.3 }),
       qualityMin: 0.35,
       qualitySpan: 0.8,                // Q ∈ [0.35, 1.15]
-      regularityGraceDays: 3,
-      regularityLateFreeIntervals: 2,
-      regularityLateZeroIntervals: 6,
       balanceRiskFreeRatio: 1.25,      // الرصيد حتى 1.25× التعرض المعتاد طبيعي
       accumulationFreeShare: 0.25,     // تراكم الرصيد حتى 25% من سحب 30 يوماً طبيعي
-      balanceRiskMinFactor: 0.7,
       trendSlope: 0.3,
       trendMin: 0.8,
       trendMax: 1.1,
@@ -116,7 +113,15 @@
       delinquentCycleMultiple: 2,      // متأخر = أقدم من max(2× الدورة، الدورة + 14)
       delinquentMarginDays: 14,
       delinquentPaidShare: 0.5,        // ودفعات تلك المدة أقل من نصف المتأخر
-      delinquentMinAmount: 50          // دين متأخر دون 50 (عملة الأساس) بقايا لا تعثّر
+      delinquentMinAmount: 50,         // دين متأخر دون 50 (عملة الأساس) بقايا لا تعثّر
+      // حساب ليس زبون مبيعات: سحبه في النافذة غير مغطّى بفواتير مبيع حقيقية.
+      salesInvoiceMinShare: 0.5,
+      // حسابات أكّد المالك (2026-09-27) أنها ليست زبائن مبيعات ولا يكشفها السلوك
+      // وحده (معرّف cu000). تُستبعد من الحد ومن عيّنة المحفظة.
+      excludedAccountGuids: Object.freeze([
+        "ababf0d4-dea5-4a39-8a80-8329635d7a0c", // قناة مبيع داخلية بفواتير مبيع عادية
+        "1ef73b39-df30-4c3c-bea2-9ff0ded75064"  // فروقات جرد (يكشفه السلوك أيضاً)
+      ])
     }),
 
     // ── جديد ────────────────────────────────────────────────────────────────
@@ -522,7 +527,9 @@
     const A = CONFIG.autoCredit;
     const tolerance = A.settleTolerance;
     const recentStart = referenceDay - A.recentDays + 1;
-    const windowStart = referenceDay - A.salesWindowDays + 1;
+    // النافذة: يوم المرجع وستون يوماً قبله (أعمار 0..60)، والسابقة أعمار 30..60 —
+    // مطابق للمحاكاة المعتمدة.
+    const windowStart = referenceDay - A.salesWindowDays;
     const inWindow = (day) => day >= windowStart && day <= referenceDay;
 
     let salesRecent = 0;
@@ -650,61 +657,74 @@
     };
   }
 
-  // إحصاء المحفظة الحي: حدود الدورة من البيانات لا من رقم مختار.
+  // إحصاء المحفظة الحي: حدود الدورة من البيانات لا من رقم مختار (مطابق للمحاكاة
+  // المعتمدة v5). العيّنة: زبائن فعليون لهم سحب، و≥ 5 فواتير، وليسوا دافعين مسبقاً.
   function portfolioCycleStats(factsList) {
     const A = CONFIG.autoCredit;
     const sample = factsList
-      .filter((facts) => !facts.truncated && facts.debitCount >= A.portfolioMinDebits && facts.sales60 > 0
-        && facts.daysToPayMedian !== null && !(facts.balance <= 0 && facts.daysToPayMedian < 0))
+      .filter((facts) => !facts.truncated && facts.sales60 > 0 && facts.debitCount >= A.portfolioMinDebits
+        && facts.daysToPayMedian !== null && !(facts.balance < -A.settleTolerance && facts.payments60 >= facts.sales60))
       .map((facts) => Math.max(0, facts.daysToPayMedian));
     if (sample.length < A.portfolioMinSample) {
       return {
         sampleSize: sample.length,
         medianDays: A.cycleFallbackMedianDays,
         floorDays: 1,
-        capDays: A.cycleFallbackMedianDays + A.cycleCapAboveMedianDays,
+        capDays: A.cycleFallbackCapDays,
         basis: "fallback"
       };
     }
-    const medianDays = round(interpolatedPercentile(sample, 0.5), 2);
     return {
       sampleSize: sample.length,
-      medianDays,
+      medianDays: round(interpolatedPercentile(sample, 0.5), 2),
       floorDays: round(Math.max(1, interpolatedPercentile(sample, A.cycleFloorPercentile)), 2),
-      capDays: round(medianDays + A.cycleCapAboveMedianDays, 2),
+      capDays: round(interpolatedPercentile(sample, A.cycleCapPercentile), 2),
       basis: "portfolio"
     };
   }
 
-  // تقريب تجاري لأقرب خطوة حسب حجم الحد وعملته — بلا كسور. (التقريب للأسفل
-  // كان يأكل حتى 14% فيضع زبوناً منضبطاً عند 100% من حده.)
+  // تقريب تجاري للأسفل حسب حجم الحد وعملته — بلا كسور (مطابق للمحاكاة).
   function commercialRound(value, currency) {
     if (!(value > 0)) return 0;
     const steps = currency && currency !== CONFIG.baseCurrency
       ? [[10000000, 100000], [100000000, 500000], [Infinity, 1000000]]
       : [[1000, 100], [10000, 250], [Infinity, 500]];
     const step = steps.find(([below]) => value < below)[1];
-    return Math.round(value / step) * step;
+    return Math.floor(value / step + 1e-9) * step;
   }
 
-  // الحد المحسوب الحقيقي لزبون واحد (عملة الأساس، قبل التقريب).
+  // الحد المحسوب الحقيقي لزبون واحد (عملة الأساس، قبل التقريب) — صيغة المحاكاة
+  // المعتمدة v5 حرفياً، مع قاعدة التعثّر المعتمدة (2026-09-27) بدل قاعدة «موقوف» القديمة.
   // balance: الرصيد الموحّد بعملة الأساس (لحساب الليرة: رصيده بعملته × سعر الصرف).
-  function computeAutoCredit(facts, stats, balance, referenceDay) {
+  function computeAutoCredit(facts, stats, balance, referenceDay, account = {}) {
     const A = CONFIG.autoCredit;
     const notes = [];
     const result = { status: "unavailable", limitBase: null, notes };
     if (!facts) { notes.push("لا دفتر حساب لهذا الزبون في تقرير الحركات."); return result; }
     if (facts.truncated) { notes.push("دفتر هذا الزبون مقتطع، ولا يُبنى حد على بيانات ناقصة."); return result; }
+    if (account.nonCustomer) {
+      result.status = "non_customer";
+      notes.push(account.nonCustomerReason);
+      return result;
+    }
 
     const tolerance = A.settleTolerance;
-    const sales60 = facts.sales60;
+    const s30 = facts.salesRecent;
+    const sb = facts.salesPrior;
+    const S60 = facts.sales60;
+    const pay60 = facts.payments60;
+    const age = facts.firstDebitDay === null ? A.salesWindowDays : referenceDay - facts.firstDebitDay;
+    const net = S60 - facts.returns60;
+    const R0 = net > 0 ? Math.max(pay60 / net, 1 - Math.max(0, balance) / net) : null;
 
     // الدورة الديناميكية: وسيط أيام السداد (FIFO مرجّح بالمبلغ)، ثم وسيط الفاصل
-    // بين الدفعات، ثم وسيط المحفظة لقليلي البيانات — محصورة بحدود المحفظة الحية.
+    // بين الدفعات، ثم وسيط المحفظة — محصورة بين P10 وP90 للمحفظة الحية.
     let cycleRaw;
     let cycleBasis;
+    let p75 = null;
     if (facts.debitCount >= A.cycleMinObservations && facts.daysToPayMedian !== null) {
       cycleRaw = Math.max(0, facts.daysToPayMedian);
+      p75 = Math.max(cycleRaw, facts.daysToPayP75 ?? cycleRaw);
       cycleBasis = "fifo_median";
     } else if (facts.paymentDayCount >= A.cycleMinObservations && facts.paymentIntervalMedian !== null) {
       cycleRaw = facts.paymentIntervalMedian;
@@ -719,20 +739,14 @@
       cycleBasis,
       cycleDays: round(cycleDays, 2),
       paymentIntervalMedianDays: facts.paymentIntervalMedian,
-      salesRecent: round(facts.salesRecent, 3),
-      salesPrior: round(facts.salesPrior, 3),
-      oldestOpenDays: facts.oldestOpenAge
+      salesRecent: round(s30, 3),
+      salesPrior: round(sb, 3),
+      oldestOpenDays: facts.oldestOpenAge,
+      daysSinceLastPayment: facts.lastPaymentDay === null ? null : referenceDay - facts.lastPaymentDay
     });
 
-    // 1) دائن/دفع مسبق: لا تعرّض ائتماني.
-    if (balance <= tolerance && ((facts.daysToPayMedian !== null && facts.daysToPayMedian < 0)
-      || (sales60 > 0 && balance < -tolerance && facts.payments60 >= sales60))) {
-      result.status = "prepaid";
-      notes.push("رصيده دائن ويدفع قبل أن يسحب: لا تعرّض ائتماني ولا حد.");
-      return result;
-    }
-
-    // 2) متعثّر: دين قائم + متأخر عن دورته بهامش واضح + دفعات المدة لا تغطيه.
+    // 1) متعثّر: رصيد قائم + دين أقدم من دورته بهامش واضح (وبقيمة معتبرة) +
+    //    دفعات المدة لا تغطيه. يسبق «غير نشط»: الخامل المدين الذي لا يدفع متعثّر.
     const overdueAfterDays = Math.max(cycleDays * A.delinquentCycleMultiple, cycleDays + A.delinquentMarginDays);
     const overdueAmount = facts.open
       .filter((debit) => referenceDay - debit.day > overdueAfterDays)
@@ -752,86 +766,70 @@
       return result;
     }
 
-    // 3) غير نشط: لا سحب في نافذة السحب — لا حد، وليس متعثراً.
-    if (!(sales60 > 0)) {
+    // 2) غير نشط: لا سحب في نافذة السحب — لا حد، وليس متعثراً.
+    if (!(S60 > 0)) {
       result.status = "inactive";
       result.limitBase = 0;
       notes.push(`غير نشط: لا سحب خلال ${A.salesWindowDays} يوماً، فلا حد (وليس متعثراً).`);
       return result;
     }
 
+    // 3) دائن/دفع مسبق: لا تعرّض ائتماني.
+    if ((balance < -tolerance && pay60 >= S60) || (balance <= tolerance && facts.daysToPayMedian !== null && facts.daysToPayMedian < 0)) {
+      result.status = "prepaid";
+      notes.push("رصيده دائن ويدفع قبل أن يسحب: لا تعرّض ائتماني ولا حد.");
+      return result;
+    }
+
     // 4) سرعة السحب اليومية على الأيام الفعلية، بعد حارس الفاتورة الشاذة.
-    let recent = facts.salesRecent;
-    let prior = facts.salesPrior;
-    if (facts.windowDebitCount >= A.largeInvoiceMinCount && facts.maxDebit60 > A.largeInvoiceMaxShare * sales60) {
-      const cut = facts.maxDebit60 - A.largeInvoiceMaxShare * sales60;
-      if (facts.maxDebitIsRecent) recent -= cut; else prior -= cut;
+    let recent = s30;
+    let prior = sb;
+    if (facts.debitCount >= A.largeInvoiceMinCount && facts.maxDebit60 > A.largeInvoiceMaxShare * S60) {
+      const cut = facts.maxDebit60 - A.largeInvoiceMaxShare * S60;
+      if (recent >= cut) recent -= cut; else prior -= cut;
       notes.push(`حارس الفاتورة الشاذة خفّض أثر فاتورة ${Math.round(facts.maxDebit60)} بمقدار ${Math.round(cut)}.`);
     }
-    const historyStart = Math.max(facts.windowStart, facts.firstDebitDay ?? facts.windowStart);
-    const activeDays = referenceDay - historyStart + 1;
-    const fullWindow = activeDays >= A.salesWindowDays;
+    const fullWindow = age >= A.salesWindowDays;
+    const activeDays = fullWindow ? A.salesWindowDays : age + 1;
     const velocity = fullWindow
       ? (A.weightRecent * recent + A.weightPrior * prior) / A.recentDays
-      : (recent + prior) / Math.max(1, activeDays);
+      : (recent + prior) / activeDays;
 
-    // 5) جودة السداد: تغطية + سرعة (انضباط وDSO) + انتظام.
-    // التغطية لا تعاقب فاتورة لم يحن موعدها: الفجوة هي الدين المفتوح الأقدم من
-    // مهلة السداد. المهلة = الأقصر من دورة الزبون ووسيط المحفظة، فالبطيء لا
-    // يكسب مهلة أطول من عادته البطيئة نفسها.
-    const netSales = sales60 - facts.returns60;
-    const graceDays = Math.min(cycleDays, stats.medianDays);
-    const dueOpen = facts.open
-      .filter((debit) => referenceDay - debit.day > graceDays)
-      .reduce((sum, debit) => sum + debit.remaining, 0);
-    const coverageRaw = netSales > 0 ? facts.payments60 / netSales : null;
-    const coverage = coverageRaw === null ? null : Math.max(coverageRaw, 1 - dueOpen / netSales);
-    const coverageScore = coverage === null ? 0 : clamp((coverage - A.coverageFloor) / (A.coverageFull - A.coverageFloor), 0, 1);
-    const dueDays = cycleDays * 1.5 + 3;
-    const punctuality = facts.oldestOpenAge === null ? 1 : clamp(1 - (facts.oldestOpenAge - dueDays) / dueDays, 0, 1);
-    const dso = velocity > 0 ? facts.averageBalance60 / velocity : null;
-    const dsoScore = dso === null ? 1 : clamp(1 - (Math.max(0, dso) - stats.capDays) / stats.capDays, 0, 1);
-    const speedScore = Math.min(punctuality, dsoScore);
-    let regularityScore;
-    if (balance <= tolerance) regularityScore = 1;
-    else if (facts.paymentDayCount < A.cycleMinObservations || facts.paymentIntervalMedian === null) regularityScore = 0.5;
-    else {
-      const sinceLast = facts.lastPaymentDay === null ? Infinity : referenceDay - facts.lastPaymentDay;
-      const late = sinceLast / Math.max(1, facts.paymentIntervalMedian);
-      regularityScore = sinceLast <= A.regularityGraceDays ? 1
-        : clamp(1 - (late - A.regularityLateFreeIntervals) / (A.regularityLateZeroIntervals - A.regularityLateFreeIntervals), 0, 1);
-    }
-    const W = A.qualityWeights;
-    const quality = A.qualityMin + A.qualitySpan * (W.coverage * coverageScore + W.speed * speedScore + W.regularity * regularityScore);
-
-    // 6) الرصيد إشارة مخاطر لا أساس: مقارنته بتعرّضه المعتاد بوتيرة آخر 30 يوماً.
-    const pace = fullWindow ? Math.max(velocity, facts.salesRecent / A.recentDays) : velocity;
-    const balanceRatio = pace * cycleDays > 0 ? Math.max(0, balance) / (pace * cycleDays) : null;
-    const balanceRisk = balanceRatio === null ? 1 : clamp(1 - (balanceRatio - A.balanceRiskFreeRatio), 0, 1);
-    const accumulation = facts.salesRecent > 0 ? (facts.balance - facts.balance30Ago) / facts.salesRecent : 0;
-    const accumulationRisk = clamp(1 - (accumulation - A.accumulationFreeShare) / 0.75, 0, 1);
-    const risk = Math.min(balanceRisk, accumulationRisk);
-    const riskFactor = A.balanceRiskMinFactor + (1 - A.balanceRiskMinFactor) * risk;
-    const goodCollection = coverage !== null && coverage >= A.growthMinCoverage;
-
-    // هامش الذروة لمن تحصيله جيد ورصيده ضمن المعتاد فقط.
+    // 5) هامش الذروة: لمن تحصيله ≥ 90% ورصيده ضمن المعتاد فقط — p75 بحد 1.5× الوسيط.
+    //    الرصيد يتكوّن من فواتير حديثة، فيقارن بوتيرة آخر 30 يوماً إن كانت أعلى.
+    const pace = Math.max(velocity, age >= A.recentDays ? s30 / A.recentDays : velocity);
+    const balanceToCycle = pace * cycleDays > 0 ? Math.max(0, balance) / (pace * cycleDays) : 0;
     let exposureCycle = cycleDays;
-    if (goodCollection && risk >= 1 && facts.daysToPayP75 !== null && cycleBasis === "fifo_median") {
-      const peak = clamp(Math.min(Math.max(0, facts.daysToPayP75), A.peakHeadroomMax * cycleDays), stats.floorDays, stats.capDays);
-      if (peak > exposureCycle) exposureCycle = peak;
+    if (p75 !== null && (R0 ?? 0) >= A.growthMinCoverage && balanceToCycle <= A.balanceRiskFreeRatio) {
+      const peak = clamp(Math.min(p75, A.peakHeadroomMax * cycleDays), stats.floorDays, stats.capDays);
+      if (peak > exposureCycle) {
+        notes.push(`هامش ذروة: ${round(cycleDays, 1)} ← ${round(peak, 1)} يوماً (p75).`);
+        exposureCycle = peak;
+      }
     }
     const exposure = velocity * exposureCycle;
 
+    // 6) جودة السداد Q: التغطية، والانضباط (أقدم دين مقابل موعده)، والرصيد كعامل مخاطر.
+    const coverage = R0;
+    const coverageScore = coverage === null ? 0 : clamp((coverage - A.coverageFloor) / (A.coverageFull - A.coverageFloor), 0, 1);
+    const dueDays = exposureCycle * 1.5 + 3;
+    const punctuality = facts.oldestOpenAge === null ? 1 : clamp(1 - (facts.oldestOpenAge - dueDays) / dueDays, 0, 1);
+    const balanceRatio = exposure > 0 ? Math.max(0, balance) / (pace * exposureCycle) : null;
+    const balanceRisk = balanceRatio === null ? 1 : clamp(1 - (balanceRatio - A.balanceRiskFreeRatio), 0, 1);
+    const accumulation = s30 > 0 ? (facts.balance - facts.balance30Ago) / s30 : 0;
+    const accumulationRisk = clamp(1 - (accumulation - A.accumulationFreeShare) / 0.75, 0, 1);
+    const risk = Math.min(balanceRisk, accumulationRisk);
+    const W = A.qualityWeights;
+    const quality = A.qualityMin + A.qualitySpan * (W.coverage * coverageScore + W.punctuality * punctuality + W.risk * risk);
+
     // 7) الاتجاه: عامل مستقل، ولا يرفع الحد مع تحصيل ضعيف أو رصيد غير معتاد.
-    let trend = fullWindow && facts.salesPrior > 0
-      ? clamp(1 + A.trendSlope * (facts.salesRecent / facts.salesPrior - 1), A.trendMin, A.trendMax)
-      : 1;
-    if (trend > 1 && (!goodCollection || risk < 1)) {
+    let trend = fullWindow && sb > 0 ? clamp(1 + A.trendSlope * (s30 / sb - 1), A.trendMin, A.trendMax) : 1;
+    if (trend > 1 && ((coverage ?? 0) < A.growthMinCoverage || risk < 1)) {
       trend = 1;
       notes.push("زيادة السحب لم ترفع الحد: التحصيل أقل من 90% أو الرصيد أعلى من المعتاد.");
     }
 
-    let limit = exposure * quality * trend * riskFactor;
+    let limit = exposure * quality * trend;
     if (coverage !== null && coverage < A.growthMinCoverage) {
       const capped = exposure * coverage * quality;
       if (limit > capped) {
@@ -841,10 +839,9 @@
     }
 
     let status = "normal";
-    const ageDays = facts.firstDebitDay === null ? 0 : referenceDay - facts.firstDebitDay;
-    if (facts.debitCount < A.lowDataMinDebits || ageDays < A.lowDataMinAgeDays) {
+    if (facts.debitCount < A.lowDataMinDebits || age < A.lowDataMinAgeDays) {
       status = "low_data";
-      const cap = Math.min(A.lowDataDrawShare * sales60, A.lowDataMedianMultiple * (facts.medianDebit ?? 0));
+      const cap = Math.min(A.lowDataDrawShare * S60, A.lowDataMedianMultiple * (facts.medianDebit ?? 0));
       if (limit > cap) limit = cap;
       notes.push("بيانات غير كافية: حد محافظ آلي (≤ نصف سحبه و≤ ضعف وسيط فاتورته).");
     }
@@ -858,16 +855,12 @@
       exposureCycleDays: round(exposureCycle, 2),
       expectedExposure: round(exposure, 3),
       coverage: coverage === null ? null : round(coverage, 4),
-      coverageRaw: coverageRaw === null ? null : round(coverageRaw, 4),
       coverageScore: round(coverageScore, 4),
-      speedScore: round(speedScore, 4),
-      dso: dso === null ? null : round(dso, 2),
-      regularityScore: round(regularityScore, 4),
+      punctuality: round(punctuality, 4),
       quality: round(quality, 4),
       trend: round(trend, 4),
       balanceRatio: balanceRatio === null ? null : round(balanceRatio, 4),
-      risk: round(risk, 4),
-      riskFactor: round(riskFactor, 4)
+      risk: round(risk, 4)
     });
     return result;
   }
@@ -929,6 +922,7 @@
     if (autoUsable && auto.status === "delinquent") creditStatus = "delinquent";
     else if (autoUsable && auto.status === "inactive") creditStatus = "inactive_no_limit";
     else if (autoUsable && auto.status === "prepaid") creditStatus = "prepaid";
+    else if (autoUsable && auto.status === "non_customer") creditStatus = "not_customer";
     else if (creditLimitDisplay !== null && creditLimitDisplay > 0) {
       usagePercent = round((exposure / creditLimitDisplay) * 100, 2);
       const ratio = exposure / creditLimitDisplay;
@@ -1144,7 +1138,42 @@
       if (supplierGuids.has(guid)) continue;
       factsByGuid.set(guid, ledgerFacts(entry, window.referenceDay, ledger.startDay));
     }
-    const cycleStats = portfolioCycleStats([...factsByGuid.values()]);
+
+    // حسابات ليست زبائن مبيعات (فروقات جرد، سلف، قنوات داخلية): السلوك المحاسبي
+    // لا الاسم — سحبها في الدفتر لا تغطيه فواتير مبيع حقيقية. يُطبَّق فقط حين
+    // يغطي تقرير الفواتير نافذة السحب كاملة ويحمل معرّف الزبون في كل صف، وإلا
+    // يبقى قائمة المالك المؤكدة وحدها. تُستبعد من الحد ومن عيّنة المحفظة.
+    const autoConfig = CONFIG.autoCredit;
+    const creditWindowStart = window.referenceDay - autoConfig.salesWindowDays;
+    const invoiceCoverageStart = dayNumber(invoicesReport?.summary?.fromDate)
+      ?? (invoiceRows.length ? Math.min(...invoiceRows.map((row) => row.day)) : null);
+    const invoicesProveSales = invoicesAvailable
+      && invoiceCoverageStart !== null && invoiceCoverageStart <= creditWindowStart
+      && invoiceRows.every((row) => row.customerGuid);
+    const invoicedSalesByGuid = new Map();
+    for (const row of invoiceRows) {
+      if (row.isReturn || row.day < creditWindowStart || row.day > window.referenceDay) continue;
+      const baseValue = row.grossValue * (row.currencyVal ?? 1);
+      invoicedSalesByGuid.set(row.customerGuid, (invoicedSalesByGuid.get(row.customerGuid) || 0) + baseValue);
+    }
+    const excludedGuids = new Set(autoConfig.excludedAccountGuids.map(normalizeGuid));
+    const nonCustomerByGuid = new Map();
+    for (const [guid, facts] of factsByGuid) {
+      if (excludedGuids.has(guid)) {
+        nonCustomerByGuid.set(guid, "حساب أكّد المالك أنه ليس زبون مبيعات: لا حد ائتمان.");
+        continue;
+      }
+      if (!invoicesProveSales || facts.truncated || !(facts.sales60 > 0) || truncatedGuids.has(guid)) continue;
+      const invoiced = invoicedSalesByGuid.get(guid) || 0;
+      // فرق دون حد الأهمية (بقايا وتسويات صغيرة) لا يصنّف الحساب.
+      if (facts.sales60 - invoiced < autoConfig.delinquentMinAmount) continue;
+      if (invoiced < autoConfig.salesInvoiceMinShare * facts.sales60) {
+        nonCustomerByGuid.set(guid, `ليس زبون مبيعات: فواتير المبيع تغطي ${Math.round((invoiced / facts.sales60) * 100)}% فقط من سحبه في الدفتر.`);
+      }
+    }
+    const cycleStats = portfolioCycleStats([...factsByGuid.entries()]
+      .filter(([guid]) => !nonCustomerByGuid.has(guid))
+      .map(([, facts]) => facts));
 
     // سعر الصرف لحساب بعملة غير الأساس: آخر CurrencyVal لفواتير الزبون بتلك
     // العملة، وإلا آخر معدّل في المحفظة كلها لنفس العملة.
@@ -1306,7 +1335,11 @@
         const unifiedBalance = display.rate !== null && accountBalance !== null
           ? accountBalance * display.rate
           : (rawBalance ?? facts?.balance ?? 0);
-        auto = computeAutoCredit(facts, cycleStats, unifiedBalance, window.referenceDay);
+        const nonCustomerReason = nonCustomerByGuid.get(record.customerGuid) || null;
+        auto = computeAutoCredit(facts, cycleStats, unifiedBalance, window.referenceDay, {
+          nonCustomer: nonCustomerReason !== null,
+          nonCustomerReason
+        });
         if (display.rate !== null) auto.exchangeRate = display.rate;
       }
       const credit = resolveCredit(record.balanceRow, auto, display);
@@ -1527,6 +1560,7 @@
       if (draft.credit.creditStatus === "unknown_balance") flags.push("credit_balance_unknown");
       if (draft.credit.creditStatus === "delinquent") flags.push("credit_delinquent");
       if (draft.credit.creditStatus === "inactive_no_limit") flags.push("credit_inactive");
+      if (draft.credit.creditStatus === "not_customer") flags.push("credit_not_customer");
       if (draft.credit.autoCredit?.status === "low_data") flags.push("credit_low_data");
 
       // ترتيب أولوية التصنيف الأساسي (موثّق في docs/ai/topics/customer-intelligence.md).
@@ -1602,6 +1636,7 @@
       }
       else if (draft.credit.creditStatus === "delinquent") reasons.push(...draft.credit.autoCredit.notes);
       else if (draft.credit.creditStatus === "inactive_no_limit") reasons.push(...draft.credit.autoCredit.notes);
+      else if (draft.credit.creditStatus === "not_customer") reasons.push(...draft.credit.autoCredit.notes);
       else if (draft.credit.creditStatus === "near_limit") reasons.push(`الرصيد بلغ ${draft.credit.creditUsagePercent}% من حد الائتمان.`);
       else if (draft.credit.creditStatus === "unknown_limit") reasons.push("عليه رصيد مدين بلا حد ائتمان محدد.");
       else if (draft.credit.creditStatus === "unknown_balance") reasons.push("لا يوجد صف رصيد من الأمين لهذا الزبون، فلا يُعرض صفراً ولا يُحسب ضمن الذمم.");
@@ -1694,6 +1729,7 @@
       delinquentCreditCount: countFlag("credit_delinquent"),
       inactiveCreditCount: countFlag("credit_inactive"),
       lowDataCreditCount: countFlag("credit_low_data"),
+      nonCustomerCreditCount: countFlag("credit_not_customer"),
       insufficientDataCount: active.filter((row) => row.primarySegment === "insufficient_data").length,
       ambiguousIdentityCount: countFlag("ambiguous_identity"),
       // تجميع المبيعات بعملة الأساس فقط — ممنوع إضافة مبالغ SYP إلى إجمالي USD.

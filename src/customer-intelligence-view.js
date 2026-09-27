@@ -80,6 +80,7 @@
     credit_delinquent: "متعثّر: الائتمان موقوف",
     credit_inactive: "غير نشط: بلا حد",
     credit_low_data: "حد محافظ: بيانات قليلة",
+    credit_not_customer: "ليس زبون مبيعات: بلا حد",
     ambiguous_identity: "اسم ملتبس بين معرّفين",
     mixed_currency: "فواتير بأكثر من عملة",
     stale_data: "مصدر غير حديث",
@@ -294,14 +295,16 @@
     unknown_balance: "رصيد غير متاح",
     delinquent: "موقوف (متعثّر)",
     inactive_no_limit: "غير نشط",
-    prepaid: "رصيد دائن"
+    prepaid: "رصيد دائن",
+    not_customer: "ليس زبون مبيعات"
   };
   const AUTO_STATUS_TEXT = {
     normal: "آلي",
     low_data: "آلي محافظ (بيانات قليلة)",
     delinquent: "آلي: موقوف للتعثّر",
     inactive: "آلي: لا حد (غير نشط)",
-    prepaid: "آلي: لا تعرّض (دفع مسبق)"
+    prepaid: "آلي: لا تعرّض (دفع مسبق)",
+    non_customer: "لا حد: ليس زبون مبيعات"
   };
   const CYCLE_BASIS_TEXT = {
     fifo_median: "وسيط أيام السداد الفعلية",
@@ -329,7 +332,8 @@
       ["سرعة السحب اليومية", money(auto.velocity)],
       ["دورة السداد", `${auto.cycleDays} يوماً (${escape(CYCLE_BASIS_TEXT[auto.cycleBasis] || auto.cycleBasis)})`],
       ["التحصيل / جودة السداد", `${isNumber(auto.coverage) ? `${Math.round(auto.coverage * 100)}%` : "—"} · Q ${auto.quality}`],
-      ["الاتجاه / عامل الرصيد", `T ${auto.trend} · ${auto.riskFactor}`]
+      ["الانضباط / مخاطر الرصيد", `${auto.punctuality} · ${auto.risk}`],
+      ["الاتجاه", `T ${auto.trend}`]
     );
     return facts;
   }
