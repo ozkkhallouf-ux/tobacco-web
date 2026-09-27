@@ -114,13 +114,21 @@
       delinquentMarginDays: 14,
       delinquentPaidShare: 0.5,        // ودفعات تلك المدة أقل من نصف المتأخر
       delinquentMinAmount: 50,         // دين متأخر دون 50 (عملة الأساس) بقايا لا تعثّر
-      // حساب ليس زبون مبيعات: سحبه في النافذة غير مغطّى بفواتير مبيع حقيقية.
+      // عدم تطابق سحب الدفتر مع فواتير المبيع: مؤشر شذوذ لا مصنِّف (قرار المالك
+      // 2026-09-27) — يُعلَّم الحساب «يحتاج مراجعة» بلا حد آلي، ولا يُسمّى «ليس زبوناً».
       salesInvoiceMinShare: 0.5,
-      // حسابات أكّد المالك (2026-09-27) أنها ليست زبائن مبيعات ولا يكشفها السلوك
-      // وحده (معرّف cu000). تُستبعد من الحد ومن عيّنة المحفظة.
+      // حسابات أكّد المالك (2026-09-27) أنها ليست زبائن مبيعات (معرّف cu000).
+      // هذه القائمة وحدها تصنّف «ليس زبون مبيعات». تُستبعد من الحد ومن عيّنة المحفظة.
       excludedAccountGuids: Object.freeze([
         "ababf0d4-dea5-4a39-8a80-8329635d7a0c", // قناة مبيع داخلية بفواتير مبيع عادية
-        "1ef73b39-df30-4c3c-bea2-9ff0ded75064"  // فروقات جرد (يكشفه السلوك أيضاً)
+        "1ef73b39-df30-4c3c-bea2-9ff0ded75064", // فروقات جرد
+        "7a1f9a5a-00bc-445f-949a-e4ce8d306585"  // سلفة موظف ورواتب
+      ]),
+      // حسابات مختلطة أكّدها المالك (مورد وزبون على الحساب نفسه): حركتها تحوي
+      // مشتريات ومدفوعات مورد لا تُفصل بأمان من تقرير الحركات الحالي، فلا حد آلي
+      // ولا دخول في عيّنة المحفظة حتى يتوفر نوع المستند في المصدر.
+      reviewAccountGuids: Object.freeze([
+        "ece6ec27-b889-4441-adce-59a4fda5ccef"
       ])
     }),
 
@@ -856,6 +864,12 @@
     return { status: "low_data", limit: capped };
   }
 
+  function needsReviewResult(result, reason) {
+    result.status = "needs_review";
+    result.notes.push(reason);
+    return result;
+  }
+
   function roundOrNull(value, digits) {
     return value === null ? null : round(value, digits);
   }
@@ -874,6 +888,7 @@
       notes.push(account.nonCustomerReason);
       return result;
     }
+    if (account.needsReview === "explicit") return needsReviewResult(result, account.needsReviewReason);
 
     const tolerance = A.settleTolerance;
     const S60 = facts.sales60;
@@ -909,6 +924,10 @@
       notes.push(`متعثّر: دين أقدم من ${Math.round(overdueAfterDays)} يوماً (${Math.round(overdueAmount)}) ودفعات تلك المدة ${Math.round(paidInOverdueSpan)} فقط.`);
       return result;
     }
+
+    // دفتر لا تطابقه فواتير المبيع: مدخلات الحد غير موثوقة، فلا حد آلي (بعد
+    // التعثّر: الدين الحقيقي المتأخر يبقى تعثّراً أياً كان مصدره).
+    if (account.needsReview) return needsReviewResult(result, account.needsReviewReason);
 
     // 2) غير نشط: لا سحب في نافذة السحب — لا حد، وليس متعثراً.
     if (!(S60 > 0)) {
@@ -1019,6 +1038,7 @@
     else if (autoUsable && auto.status === "inactive") creditStatus = "inactive_no_limit";
     else if (autoUsable && auto.status === "prepaid") creditStatus = "prepaid";
     else if (autoUsable && auto.status === "non_customer") creditStatus = "not_customer";
+    else if (autoUsable && auto.status === "needs_review") creditStatus = "needs_review";
     else if (creditLimitDisplay !== null && creditLimitDisplay > 0) {
       usagePercent = round((exposure / creditLimitDisplay) * 100, 2);
       const ratio = exposure / creditLimitDisplay;
@@ -1263,22 +1283,29 @@
       invoicedSalesByGuid.set(row.customerGuid, (invoicedSalesByGuid.get(row.customerGuid) || 0) + baseValue);
     }
     const excludedGuids = new Set(autoConfig.excludedAccountGuids.map(normalizeGuid));
+    const reviewGuids = new Set(autoConfig.reviewAccountGuids.map(normalizeGuid));
     const nonCustomerByGuid = new Map();
+    const needsReviewByGuid = new Map();
     for (const [guid, facts] of factsByGuid) {
       if (excludedGuids.has(guid)) {
         nonCustomerByGuid.set(guid, "حساب أكّد المالك أنه ليس زبون مبيعات: لا حد ائتمان.");
         continue;
       }
+      if (reviewGuids.has(guid)) {
+        needsReviewByGuid.set(guid, { kind: "explicit", reason: "حساب مختلط (مورد وزبون): حركته تحوي مشتريات ومدفوعات مورد لا تُفصل بأمان من المصدر الحالي." });
+        continue;
+      }
       if (!invoicesProveSales || facts.truncated || !(facts.sales60 > 0) || truncatedGuids.has(guid)) continue;
       const invoiced = invoicedSalesByGuid.get(guid) || 0;
-      // فرق دون حد الأهمية (بقايا وتسويات صغيرة) لا يصنّف الحساب.
+      // فرق دون حد الأهمية (بقايا وتسويات صغيرة) لا يشغّل المراجعة.
       if (facts.sales60 - invoiced < autoConfig.delinquentMinAmount) continue;
       if (invoiced < autoConfig.salesInvoiceMinShare * facts.sales60) {
-        nonCustomerByGuid.set(guid, `ليس زبون مبيعات: فواتير المبيع تغطي ${Math.round((invoiced / facts.sales60) * 100)}% فقط من سحبه في الدفتر.`);
+        needsReviewByGuid.set(guid, { kind: "suspect", reason: `يحتاج مراجعة نوع الحركة: فواتير المبيع تغطي ${Math.round((invoiced / facts.sales60) * 100)}% فقط من سحبه في الدفتر.` });
       }
     }
+    // عيّنة المحفظة من حسابات موثوقة الحركة فقط.
     const cycleStats = portfolioCycleStats([...factsByGuid.entries()]
-      .filter(([guid]) => !nonCustomerByGuid.has(guid))
+      .filter(([guid]) => !nonCustomerByGuid.has(guid) && !needsReviewByGuid.has(guid))
       .map(([, facts]) => facts));
 
     // سعر الصرف لحساب بعملة غير الأساس: آخر CurrencyVal لفواتير الزبون بتلك
@@ -1447,9 +1474,12 @@
           ? accountBalance * display.rate
           : (rawBalance ?? facts?.balance ?? 0);
         const nonCustomerReason = nonCustomerByGuid.get(record.customerGuid) || null;
+        const review = needsReviewByGuid.get(record.customerGuid) || null;
         auto = computeAutoCredit(facts, cycleStats, unifiedBalance, window.referenceDay, {
           nonCustomer: nonCustomerReason !== null,
-          nonCustomerReason
+          nonCustomerReason,
+          needsReview: review?.kind ?? null,
+          needsReviewReason: review?.reason ?? null
         });
         if (display.rate !== null) auto.exchangeRate = display.rate;
       }
@@ -1671,6 +1701,7 @@
       if (draft.credit.creditStatus === "delinquent") flags.push("credit_delinquent");
       if (draft.credit.creditStatus === "inactive_no_limit") flags.push("credit_inactive");
       if (draft.credit.creditStatus === "not_customer") flags.push("credit_not_customer");
+      if (draft.credit.creditStatus === "needs_review") flags.push("credit_needs_review");
       if (draft.credit.autoCredit?.status === "low_data") flags.push("credit_low_data");
 
       // ترتيب أولوية التصنيف الأساسي (موثّق في docs/ai/topics/customer-intelligence.md).
@@ -1747,6 +1778,7 @@
       else if (draft.credit.creditStatus === "delinquent") reasons.push(...draft.credit.autoCredit.notes);
       else if (draft.credit.creditStatus === "inactive_no_limit") reasons.push(...draft.credit.autoCredit.notes);
       else if (draft.credit.creditStatus === "not_customer") reasons.push(...draft.credit.autoCredit.notes);
+      else if (draft.credit.creditStatus === "needs_review") reasons.push(...draft.credit.autoCredit.notes);
       else if (draft.credit.creditStatus === "near_limit") reasons.push(`الرصيد بلغ ${draft.credit.creditUsagePercent}% من حد الائتمان.`);
       else if (draft.credit.creditStatus === "unknown_limit") reasons.push("عليه رصيد مدين بلا حد ائتمان محدد.");
       else if (draft.credit.creditStatus === "unknown_balance") reasons.push("لا يوجد صف رصيد من الأمين لهذا الزبون، فلا يُعرض صفراً ولا يُحسب ضمن الذمم.");
@@ -1840,6 +1872,7 @@
       inactiveCreditCount: countFlag("credit_inactive"),
       lowDataCreditCount: countFlag("credit_low_data"),
       nonCustomerCreditCount: countFlag("credit_not_customer"),
+      needsReviewCreditCount: countFlag("credit_needs_review"),
       insufficientDataCount: active.filter((row) => row.primarySegment === "insufficient_data").length,
       ambiguousIdentityCount: countFlag("ambiguous_identity"),
       // تجميع المبيعات بعملة الأساس فقط — ممنوع إضافة مبالغ SYP إلى إجمالي USD.

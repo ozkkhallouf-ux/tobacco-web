@@ -81,6 +81,7 @@
     credit_inactive: "غير نشط: بلا حد",
     credit_low_data: "حد محافظ: بيانات قليلة",
     credit_not_customer: "ليس زبون مبيعات: بلا حد",
+    credit_needs_review: "حد الائتمان غير متاح: يحتاج مراجعة",
     ambiguous_identity: "اسم ملتبس بين معرّفين",
     mixed_currency: "فواتير بأكثر من عملة",
     stale_data: "مصدر غير حديث",
@@ -103,6 +104,7 @@
     credit_balance_unknown: "warn",
     credit_delinquent: "danger",
     credit_low_data: "warn",
+    credit_needs_review: "warn",
     vip: "good",
     growing: "good",
     reactivated: "good",
@@ -296,7 +298,8 @@
     delinquent: "موقوف (متعثّر)",
     inactive_no_limit: "غير نشط",
     prepaid: "رصيد دائن",
-    not_customer: "ليس زبون مبيعات"
+    not_customer: "ليس زبون مبيعات",
+    needs_review: "غير متاح: يحتاج مراجعة"
   };
   const AUTO_STATUS_TEXT = {
     normal: "آلي",
@@ -304,7 +307,8 @@
     delinquent: "آلي: موقوف للتعثّر",
     inactive: "آلي: لا حد (غير نشط)",
     prepaid: "آلي: لا تعرّض (دفع مسبق)",
-    non_customer: "لا حد: ليس زبون مبيعات"
+    non_customer: "لا حد: ليس زبون مبيعات",
+    needs_review: "حد الائتمان غير متاح: الحساب يحتاج مراجعة نوع الحركة"
   };
   const CYCLE_BASIS_TEXT = {
     fifo_median: "وسيط أيام السداد الفعلية",

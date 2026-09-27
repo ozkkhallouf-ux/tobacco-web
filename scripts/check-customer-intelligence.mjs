@@ -1468,7 +1468,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
 }
 
 // ---------------------------------------------------------------------------
-// 47–71) حد الائتمان الآلي (STEP 1): الحد المحسوب من دفتر حساب الزبون.
+// 47–72) حد الائتمان الآلي (STEP 1): الحد المحسوب من دفتر حساب الزبون.
 // كل الأرقام تركيبية. التاريخ المرجعي = REFERENCE_ISO (2026-09-02)، وd(n) = قبله بـn يوماً.
 // ---------------------------------------------------------------------------
 {
@@ -1521,7 +1521,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   });
   const G_TRUNC = account(12, "ائتمان دفتر مقتطع", regular({ from: 59, every: 6, amount: 600, lag: 6 }), { truncated: true, creditLimit: 777 });
   const G_LEGACY = account(13, "ائتمان حد قديم", regular({ from: 59, every: 6, amount: 600, lag: 6 }));
-  // حساب ليس زبون مبيعات: سحب ودفع في الدفتر بلا فواتير مبيع (فروقات جرد/سلف).
+  // حساب سحبه في الدفتر بلا فواتير مبيع: شذوذ يحتاج مراجعة، لا تصنيف «ليس زبوناً».
   const G_NOTCUST = account(14, "حساب داخلي بلا فواتير", regular({ from: 58, every: 7, amount: 900, lag: 50 }), { noInvoices: true });
   // زبون حقيقي بفرق صغير غير مفوتر (دون حد الأهمية): يبقى زبوناً.
   const G_SMALLGAP = account(15, "ائتمان بفرق تسوية صغير", [...regular({ from: 59, every: 6, amount: 600, lag: 6 }), debit(30, 40), pay(28, 40)],
@@ -1676,14 +1676,16 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   assert.equal(engine.commercialRound(12345678, "SYP"), 12000000);
   assert.equal(engine.commercialRound(123456789, "SYP"), 123000000);
 
-  // 61) حساب ليس زبون مبيعات (سحب دفتري بلا فواتير مبيع): لا حد ولا تعثّر ولا تصنيف ائتماني.
+  // 61) عدم تطابق عام بين سحب الدفتر وفواتير المبيع: «يحتاج مراجعة» بلا حد آلي، لا «ليس زبوناً».
   const notCust = row(G_NOTCUST);
-  assert.equal(notCust.autoCredit.status, "non_customer", "test 61: ليس زبون مبيعات");
-  assert.equal(notCust.creditLimit, null, "test 61: لا حد");
-  assert.equal(notCust.creditStatus, "not_customer");
-  assert.ok(notCust.flags.includes("credit_not_customer") && !notCust.flags.includes("credit_delinquent"), "test 61: لا وسم تعثّر");
+  assert.equal(notCust.autoCredit.status, "needs_review", "test 61: الشذوذ = يحتاج مراجعة");
+  assert.equal(notCust.creditLimit, null, "test 61: لا حد آلي");
+  assert.equal(notCust.creditLimitSource, "auto", "test 61: لا يُستبدل بحد الأمين");
+  assert.equal(notCust.creditStatus, "needs_review");
+  assert.ok(notCust.flags.includes("credit_needs_review") && !notCust.flags.includes("credit_not_customer"), "test 61: ليس «ليس زبون مبيعات»");
+  assert.ok(notCust.autoCredit.notes[0].includes("يحتاج مراجعة"), "test 61: السبب ظاهر");
 
-  // 62) الحساب غير الزبون لا يدخل عيّنة دورة المحفظة: حدودها كما لو لم يوجد.
+  // 62) الحساب المشكوك بحركته (يحتاج مراجعة) لا يلوّث عيّنة دورة المحفظة: حدودها كما لو لم يوجد.
   const withoutNotCust = accounts.filter((a) => a.guid !== G_NOTCUST);
   const rcWithout = engine.build({
     ...reports,
@@ -1691,24 +1693,38 @@ if (!process.env.OZK_CI_TZ_CHILD) {
     balancesReport: { ...reports.balancesReport, items: reports.balancesReport.items.filter((item) => item.customerGuid !== G_NOTCUST) },
     movementsReport: { ...reports.movementsReport, items: reports.movementsReport.items.filter((item) => item.customerGuid !== G_NOTCUST) }
   });
-  assert.deepEqual(rc.dataAvailability.creditCycle, rcWithout.dataAvailability.creditCycle, "test 62: حدود الدورة لا تتأثر بغير الزبون");
+  assert.deepEqual(rc.dataAvailability.creditCycle, rcWithout.dataAvailability.creditCycle, "test 62: حدود الدورة لا تتأثر بالحساب المشكوك");
   assert.equal(rcWithout.customers.find((c) => c.customerGuid === G_STEADY).creditLimit, steady.creditLimit);
 
-  // 63) حساب أكّد المالك أنه ليس زبوناً يُستبعد ولو غطّت فواتيره سحبه — بالمعرّف لا بالاسم.
-  const ownerExcluded = engine.CONFIG.autoCredit.excludedAccountGuids[0];
-  const rcOwner = engine.build({
+  // 63) قائمتا المالك بالمعرّف لا بالاسم، ولو غطّت الفواتير السحب كاملاً:
+  //     الاستبعاد الصريح (قناة داخلية، فروقات جرد، سلفة موظف) ⇒ «ليس زبون مبيعات»؛
+  //     الحساب المختلط (مورد وزبون) ⇒ «يحتاج مراجعة» بلا حد آلي، لا «ليس زبوناً».
+  const asOwnerListed = (guid) => engine.build({
     ...reports,
-    invoicesReport: invoicesReportFor([{ ...accounts[0], guid: ownerExcluded, name: "اسم عادي" }]),
-    balancesReport: { ...reports.balancesReport, items: [{ ...reports.balancesReport.items[0], customerGuid: ownerExcluded, customerAccountGuid: ownerExcluded, name: "اسم عادي", key: "اسم عادي" }] },
-    movementsReport: { ...reports.movementsReport, items: [{ ...reports.movementsReport.items[0], customerGuid: ownerExcluded, name: "اسم عادي" }] }
-  });
-  assert.equal(rcOwner.customers.find((c) => c.customerGuid === ownerExcluded).autoCredit.status, "non_customer", "test 63: قائمة المالك بالمعرّف");
+    invoicesReport: invoicesReportFor([{ ...accounts[0], guid, name: "اسم عادي" }]),
+    balancesReport: { ...reports.balancesReport, items: [{ ...reports.balancesReport.items[0], customerGuid: guid, customerAccountGuid: guid, name: "اسم عادي", key: "اسم عادي" }] },
+    movementsReport: { ...reports.movementsReport, items: [{ ...reports.movementsReport.items[0], customerGuid: guid, name: "اسم عادي" }] }
+  }).customers.find((c) => c.customerGuid === guid);
+  assert.equal(engine.CONFIG.autoCredit.excludedAccountGuids.length, 3, "test 63: ثلاثة حسابات مستبعدة صراحة");
+  for (const ownerExcluded of engine.CONFIG.autoCredit.excludedAccountGuids) {
+    const excluded = asOwnerListed(ownerExcluded);
+    assert.equal(excluded.autoCredit.status, "non_customer", `test 63: قائمة المالك بالمعرّف ${ownerExcluded}`);
+    assert.equal(excluded.creditLimit, null);
+  }
+  assert.ok(engine.CONFIG.autoCredit.excludedAccountGuids.includes("7a1f9a5a-00bc-445f-949a-e4ce8d306585"), "test 63: سلفة الموظف مستبعدة بالمعرّف");
+  const mixedGuid = engine.CONFIG.autoCredit.reviewAccountGuids[0];
+  const mixed = asOwnerListed(mixedGuid);
+  assert.equal(mixed.autoCredit.status, "needs_review", "test 63: الحساب المختلط يحتاج مراجعة");
+  assert.equal(mixed.creditLimit, null, "test 63: بلا حد آلي");
+  assert.equal(mixed.creditStatus, "needs_review");
+  assert.ok(!mixed.flags.includes("credit_not_customer"), "test 63: المختلط ليس «ليس زبون مبيعات»");
+  assert.ok(mixed.autoCredit.notes[0].includes("مختلط"), "test 63: السبب ظاهر");
 
   // 64) فرق صغير غير مفوتر (دون حد الأهمية) لا يحوّل زبوناً حقيقياً إلى غير زبون،
   //     وتقرير فواتير لا يغطي النافذة لا يصنّف أحداً غير زبون (لا حكم بلا دليل).
-  assert.notEqual(row(G_SMALLGAP).autoCredit.status, "non_customer", "test 64: الفرق الصغير لا يصنّف");
+  assert.ok(!["non_customer", "needs_review"].includes(row(G_SMALLGAP).autoCredit.status), "test 64: الفرق الصغير لا يشغّل المراجعة");
   const rcShort = engine.build({ ...reports, invoicesReport: invoicesReportFor(accounts, d(20)) });
-  assert.ok(!rcShort.customers.some((c) => c.autoCredit?.status === "non_customer"), "test 64: تغطية ناقصة = لا تصنيف سلوكي");
+  assert.ok(!rcShort.customers.some((c) => ["non_customer", "needs_review"].includes(c.autoCredit?.status)), "test 64: تغطية ناقصة = لا حكم سلوكي");
 
   // 65) خامل مدين بدين قديم لم يُسدَّد: متعثّر بحد صفر (لا «غير نشط»)؛ الخامل بلا دين غير نشط.
   const dormant = row(G_DORMANT);
@@ -1777,7 +1793,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
     invoicesReport: { ...reports.invoicesReport, created_at: staleIso, summary: { ...reports.invoicesReport.summary, syncedAt: staleIso } }
   });
   assert.equal(rcStaleInv.sourcesFreshness.invoices.stale, true);
-  assert.notEqual(rcStaleInv.customers.find((c) => c.customerGuid === G_NOTCUST).autoCredit.status, "non_customer",
+  assert.ok(!["non_customer", "needs_review"].includes(rcStaleInv.customers.find((c) => c.customerGuid === G_NOTCUST).autoCredit.status),
     "test 71: فواتير قديمة لا تثبت غياب المبيع");
 
   // 69) حارس الفاتورة الشاذة يخصم من شهر الفاتورة الفعلي: فاتورة شاذة في الشهر السابق
@@ -1805,9 +1821,40 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   // الحديث 7 × 1500 = 10500؛ السابق 8 × 500 + 10000 = 14000؛ القص = 10000 − 0.35 × 24500 = 1425 من السابق.
   assert.equal(large69.velocity, Number(((0.6 * 10500 + 0.4 * (14000 - 1425)) / 30).toFixed(3)), "test 69: القص من الشهر السابق لا الحديث");
 
+  // 72) نقل دين إلى حساب زبون حقيقي ليس مبيعاً، ولا يجعله «ليس زبوناً»:
+  //     زبون بفواتير قليلة ودين منقول كبير ⇒ زبون يحتاج مراجعة بلا حد آلي؛
+  //     زبون بلا فواتير في النافذة ودين منقول قديم لم يُسدَّد ⇒ متعثّر بدينه الحقيقي.
+  const transferActive = {
+    guid: gid(72), name: "زبون بدين منقول",
+    movements: [debit(50, 100), pay(45, 100), debit(30, 900), debit(20, 100), pay(15, 100)],
+    uninvoiced: new Set([d(30)])
+  };
+  const transferIdle = { guid: gid(73), name: "زبون خامل بدين منقول", movements: [debit(55, 400)], noInvoices: true };
+  for (const a of [transferActive, transferIdle]) a.balance = ledgerBalance(a.movements);
+  const withTransfers = [...accounts, transferActive, transferIdle];
+  const rc72 = engine.build({
+    ...reports,
+    invoicesReport: invoicesReportFor(withTransfers),
+    balancesReport: { ...reports.balancesReport, items: [...reports.balancesReport.items, ...[transferActive, transferIdle].map((a) => ({
+      ...reports.balancesReport.items[0], key: engine.normalizeName(a.name), name: a.name, balance: a.balance, balanceAccountCcy: a.balance,
+      creditLimit: 0, customerGuid: a.guid, customerAccountGuid: a.guid
+    }))] },
+    movementsReport: { ...reports.movementsReport, items: [...reports.movementsReport.items, ...[transferActive, transferIdle].map((a) => ({
+      customerGuid: a.guid, name: a.name, truncated: false, movements: a.movements
+    }))] }
+  });
+  const active72 = rc72.customers.find((c) => c.customerGuid === transferActive.guid);
+  const idle72 = rc72.customers.find((c) => c.customerGuid === transferIdle.guid);
+  assert.equal(active72.autoCredit.status, "needs_review", "test 72: دين منقول ⇒ يحتاج مراجعة");
+  assert.equal(active72.creditLimit, null, "test 72: النقل لا يدخل سرعة السحب ولا يعطي حداً");
+  assert.equal(idle72.autoCredit.status, "delinquent", "test 72: الدين المنقول غير المسدَّد تعثّر حقيقي");
+  for (const c of [active72, idle72]) assert.ok(!c.flags.includes("credit_not_customer"), "test 72: زبون لا «ليس زبون مبيعات»");
+  assert.deepEqual(rc72.dataAvailability.creditCycle, rc.dataAvailability.creditCycle, "test 72: لا تلوّث عيّنة المحفظة");
+
   // 66) عدّادات الملخص؛ وتنبيه الحد يبقى مسودة داخلية: لا مسار تيليغرام في هذه المرحلة.
   assert.ok(rc.summary.delinquentCreditCount >= 2 && rc.summary.inactiveCreditCount >= 2 && rc.summary.lowDataCreditCount >= 1);
-  assert.equal(rc.summary.nonCustomerCreditCount, 1, "test 66: غير الزبون يُعدّ منفصلاً");
+  assert.equal(rc.summary.nonCustomerCreditCount, 0, "test 66: لا «ليس زبوناً» بالسلوك");
+  assert.equal(rc.summary.needsReviewCreditCount, 1, "test 66: الشذوذ يُعدّ «يحتاج مراجعة» منفصلاً");
 }
 
-console.log(`ذكاء الزبائن: 71 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
+console.log(`ذكاء الزبائن: 72 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
