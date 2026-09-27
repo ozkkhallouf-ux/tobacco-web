@@ -2305,10 +2305,38 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   const fewInWindow = build82([debit(50, 300), pay(46, 300), debit(40, 300), pay(36, 300), debit(20, 6000), pay(16, 6000)]);
   assert.equal(guardFired(fewInWindow), false, "test 82: ثلاث فواتير فقط داخل النافذة (< 4) ⇒ لا قصّ");
 
+  // 83) Codex P1 / قرار المالك — يوم المرجع هو يوم المحاسبة المحلي (`report_date`) لا تاريخ UTC
+  //     من `syncedAt`. مزامنة الساعة 01:30 بتوقيت دمشق (22:30Z من اليوم السابق) وكل المصادر
+  //     حديثة: زبون اشترى اليوم المحلي لا يُحكم «غير نشط»، وسحب اليوم داخل النافذة.
+  const utcIso83 = new Date(REF_DAY - 90 * 60000).toISOString();   // 2026-09-01T22:30Z
+  const now83 = new Date(REF_DAY - 85 * 60000);
+  const today83 = { guid: gid(83), name: "مشترٍ بعد منتصف الليل المحلي", movements: [debit(0, 900)] };
+  const build83 = (withReportDate) => {
+    const at = (report) => ({ ...report, created_at: utcIso83, ...(withReportDate ? { report_date: d(0) } : {}),
+      summary: { ...report.summary, syncedAt: utcIso83 } });
+    return engine.build({
+      invoicesReport: at(invoicesReportFor([today83])),
+      balancesReport: at({ ...reports.balancesReport, items: [{ ...reports.balancesReport.items[0], key: engine.normalizeName(today83.name), name: today83.name,
+        balance: 900, balanceAccountCcy: 900, creditLimit: 0, customerGuid: today83.guid, customerAccountGuid: today83.guid }] }),
+      movementsReport: at({ ...reports.movementsReport, items: [{ customerGuid: today83.guid, name: today83.name, truncated: false, movements: today83.movements }] }),
+      creditLimits: [], now: now83
+    });
+  };
+  const local83 = build83(true);
+  assert.equal(local83.sourcesFreshness.invoices.stale || local83.sourcesFreshness.movements.stale || local83.sourcesFreshness.balances.stale, false,
+    "test 83: كل المصادر حديثة");
+  assert.equal(local83.window.referenceDate, d(0), "test 83: يوم المرجع = report_date المحلي");
+  const c83 = local83.customers.find((c) => c.customerGuid === today83.guid);
+  assert.notEqual(c83.autoCredit.status, "inactive", "test 83: مشترٍ اليوم لا يُحكم «غير نشط»");
+  assert.notEqual(c83.creditStatus, "inactive_no_limit");
+  assert.equal(c83.autoCredit.salesRecent, 900, "test 83: سحب اليوم داخل النافذة");
+  // بلا report_date (تقارير قديمة) يبقى الاحتياط تاريخ syncedAt كما كان.
+  assert.equal(build83(false).window.referenceDate, d(1), "test 83: بلا report_date الاحتياط syncedAt");
+
   // 66) عدّادات الملخص؛ وتنبيه الحد يبقى مسودة داخلية: لا مسار تيليغرام في هذه المرحلة.
   assert.ok(rc.summary.delinquentCreditCount >= 2 && rc.summary.inactiveCreditCount >= 2 && rc.summary.lowDataCreditCount >= 1);
   assert.equal(rc.summary.nonCustomerCreditCount, 0, "test 66: لا «ليس زبوناً» بالسلوك");
   assert.equal(rc.summary.needsReviewCreditCount, 1, "test 66: الشذوذ يُعدّ «يحتاج مراجعة» منفصلاً");
 }
 
-console.log(`ذكاء الزبائن: 82 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
+console.log(`ذكاء الزبائن: 83 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);

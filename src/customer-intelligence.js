@@ -428,7 +428,11 @@
       || isoOrNull(invoicesReport?.report_date ?? invoicesReport?.reportDate);
 
     const maxInvoiceDay = invoiceRows.reduce((max, row) => (max === null || row.day > max ? row.day : max), null);
-    const referenceDay = dayNumber(referenceIso) ?? maxInvoiceDay ?? dayNumber(now.toISOString());
+    // يوم المرجع هو يوم المحاسبة المحلي (`report_date` بتوقيت جهاز الأمين)، لا تاريخ UTC من
+    // `syncedAt`: بين منتصف الليل المحلي ومنتصف ليل UTC يسمّي `syncedAt` اليوم السابق فتخرج
+    // فواتير اليوم من النافذة. `syncedAt` يبقى للحداثة وحدها.
+    const localReportDay = dayNumber(invoicesReport?.report_date ?? invoicesReport?.reportDate);
+    const referenceDay = localReportDay ?? dayNumber(referenceIso) ?? maxInvoiceDay ?? dayNumber(now.toISOString());
 
     const period = CONFIG.periodDays;
     const currentStart = referenceDay - period + 1;   // شامل
