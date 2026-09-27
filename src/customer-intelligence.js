@@ -494,6 +494,19 @@
   // دفعة. الشراء ودفعاتنا للحساب وunknown لا دفعة ولا تسوية: لا تُحسّن أي مؤشر سداد.
   const PAYMENT_LINE_KINDS = new Set(["sale_payment", "payment", "receipt"]);
   const SETTLE_LINE_KINDS = new Set(["discount", "debt_transfer", "adjustment", "opening"]);
+  // جانب المدين تحت v1: قائمة سماح صريحة — sale وحده سحب (Sales Velocity، الدورة، الفاتورة
+  // الشاذة). جانب الشراء (مشترياتنا ودفعاتنا للحساب ومرتجع المشتريات) خارج دفتر الزبون
+  // كلياً كنظيره الدائن: لا سحب ولا دين FIFO. وما سواهما دين حقيقي بلا سحب.
+  const SALE_LINE_KINDS = new Set(["sale"]);
+  const PURCHASE_SIDE_LINE_KINDS = new Set(["purchase", "purchase_payment", "purchase_return", "payment_out"]);
+  // مفردات عقد المصدر (#278، v1). أي قيمة خارجها تُقرأ unknown.
+  const KNOWN_LINE_KINDS = new Set(["sale", "sale_payment", "payment", "receipt", "discount", "return", "purchase",
+    "purchase_payment", "purchase_return", "payment_out", "opening", "debt_transfer", "adjustment", "other", "unknown"]);
+
+  function normalizeLineKind(value) {
+    const kind = text(value).toLowerCase();
+    return KNOWN_LINE_KINDS.has(kind) ? kind : "unknown";
+  }
 
   function ledgerIndex(movementsReport) {
     const byGuid = new Map();
@@ -518,7 +531,7 @@
           credit,
           isReturn: Boolean(text(movement?.billGuid ?? movement?.bill_guid)),
           isOpening: OPENING_ENTRY.test(text(movement?.notes)),
-          lineKind: lineKindsTrusted ? (text(movement?.lineKind ?? movement?.line_kind).toLowerCase() || "unknown") : null
+          lineKind: lineKindsTrusted ? normalizeLineKind(movement?.lineKind ?? movement?.line_kind) : null
         });
       });
       rows.sort((a, b) => a.day - b.day || a.index - b.index);
@@ -535,7 +548,9 @@
           rows.unshift({ day, index: -1, debit: Math.max(0, carried), credit: Math.max(0, -carried), isReturn: false, isOpening: true, ageUnknown: true, lineKind: null });
         }
       }
-      byGuid.set(guid, { truncated: item?.truncated === true, rows });
+      // حجم الحركات المجهولة (مدين + دائن) — مادّيتها تحكم «يحتاج مراجعة» (build).
+      const unknownAmount = rows.reduce((sum, row) => sum + (row.lineKind === "unknown" ? row.debit + row.credit : 0), 0);
+      byGuid.set(guid, { truncated: item?.truncated === true, rows, unknownAmount });
     }
     return { byGuid, startDay };
   }
@@ -591,8 +606,21 @@
   }
 
   // سطر مدين في الدفتر: سحب النافذة (حديث/سابق) ثم تسويته FIFO.
+  // تصنيف سطر المدين: sale (سحب + دين FIFO)، debt (دين FIFO بلا سحب)، none (جانب الشراء).
+  // بلا lineKind السلوك القديم: كل مدين غير افتتاحي سحب.
+  function debitMetricKind(row) {
+    if (row.isOpening) return "debt";
+    if (!row.lineKind) return "sale";
+    if (SALE_LINE_KINDS.has(row.lineKind)) return "sale";
+    if (PURCHASE_SIDE_LINE_KINDS.has(row.lineKind)) return "none";
+    return "debt";
+  }
+
   function ledgerAddDebit(acc, row, span) {
-    if (!row.isOpening) {
+    const metric = debitMetricKind(row);
+    if (metric === "none") return;
+    const isSale = metric === "sale";
+    if (isSale) {
       acc.debitAmounts.push(row.debit);
       if (acc.firstDebitDay === null || row.day < acc.firstDebitDay) acc.firstDebitDay = row.day;
       if (span.inWindow(row.day)) {
@@ -601,7 +629,7 @@
         else acc.salesPrior += row.debit;
       }
     }
-    const debit = { day: row.day, amount: row.debit, remaining: row.debit, isOpening: row.isOpening, ageUnknown: row.ageUnknown === true, settledDay: null };
+    const debit = { day: row.day, amount: row.debit, remaining: row.debit, isOpening: row.isOpening, isSale, ageUnknown: row.ageUnknown === true, settledDay: null };
     acc.debits.push(debit);
     settleDebitFromAdvances(debit, acc.advanceQueue, span.tolerance);
     if (debit.remaining > span.tolerance) acc.openQueue.push(debit);
@@ -694,7 +722,7 @@
 
     // أيام السداد لكل فاتورة (المفتوحة بعمرها الحالي — حد أدنى لا تخمين).
     const dtpPairs = acc.debits
-      .filter((debit) => !debit.isOpening)
+      .filter((debit) => debit.isSale)
       .map((debit) => [(debit.settledDay ?? referenceDay) - debit.day, debit.amount]);
     const open = acc.debits.filter((debit) => debit.remaining > tolerance);
     const oldestOpenAge = open.length ? referenceDay - Math.min(...open.map((debit) => debit.day)) : null;
@@ -709,6 +737,7 @@
 
     return {
       truncated: entry.truncated,
+      unknownAmount: entry.unknownAmount ?? 0,
       salesRecent: acc.salesRecent,
       salesPrior: acc.salesPrior,
       sales60: acc.salesRecent + acc.salesPrior,
@@ -920,7 +949,8 @@
       notes.push(account.nonCustomerReason);
       return result;
     }
-    if (account.needsReview === "explicit") return needsReviewResult(result, account.needsReviewReason);
+    // المختلط المؤكد والحركات المجهولة المادية يسبقان التعثّر: لا حكم من بيانات ملتبسة.
+    if (account.needsReview === "explicit" || account.needsReview === "unknown") return needsReviewResult(result, account.needsReviewReason);
 
     const tolerance = A.settleTolerance;
     const S60 = facts.sales60;
@@ -1335,6 +1365,13 @@
       { kind: "explicit", reason: "حساب مختلط (مورد وزبون): حركته تحوي مشتريات ومدفوعات مورد لا تُفصل بأمان من المصدر الحالي." }]));
     for (const [guid, facts] of factsByGuid) {
       if (nonCustomerByGuid.has(guid) || needsReviewByGuid.has(guid)) continue;
+      // تحت lineKinds:v1: حركات unknown مادية (≥ حد الأهمية نفسه delinquentMinAmount = 50،
+      // المستعمل لشذوذ الدفتر أعلاه وللتعثّر) تجعل مدخلات الحد ملتبسة: «يحتاج مراجعة»، يسبق
+      // التعثّر، خارج عيّنة المحفظة. دون الحد لا يوقف الحساب (ولا يُعدّ سحباً ولا دفعة أصلاً).
+      if (facts.unknownAmount >= autoConfig.delinquentMinAmount) {
+        needsReviewByGuid.set(guid, { kind: "unknown", reason: `يحتاج مراجعة نوع الحركة: حركات غير مصنّفة من المصدر بقيمة ${Math.round(facts.unknownAmount)} في دفتره.` });
+        continue;
+      }
       if (!invoicesProveSales || facts.truncated || !(facts.sales60 > 0) || truncatedGuids.has(guid)) continue;
       const invoiced = invoicedSalesByGuid.get(guid) || 0;
       // فرق دون حد الأهمية (بقايا وتسويات صغيرة) لا يشغّل المراجعة.

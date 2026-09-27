@@ -2024,10 +2024,10 @@ if (!process.env.OZK_CI_TZ_CHILD) {
     { id: 92, kind: "purchase", ...NONE },        // 5) مشترياتنا ليست سداداً
     { id: 93, kind: "purchase_payment", ...NONE },// 6) ليس دفعة زبون
     { id: 94, kind: "debt_transfer", ...SETTLE }, // 7) نقل الدين ليس دفعة
-    { id: 95, kind: "unknown", ...NONE },         // 8) المجهول لا يحسّن مؤشرات السداد
     { id: 96, kind: "adjustment", ...SETTLE },
     { id: 97, kind: "return", ...SETTLE },
-    { id: 98, kind: "not_a_kind", ...NONE }       //    قيمة غير معروفة = مجهول
+    { id: 99, kind: "purchase_return", ...NONE }  //    جانب الشراء: لا دفعة ولا تسوية
+    // 8) unknown: عقد 78 (دون حد الأهمية لا يحسّن السداد؛ فوقه «يحتاج مراجعة»).
   ].map((c) => ({ ...c, name: `lineKind ${c.kind}` }));
   const rc77 = build77(cases77, "v1");
   for (const c of cases77) {
@@ -2053,10 +2053,74 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   // عيّنة المحفظة بأنواع v1 (sale/payment) = المحفظة القديمة بلا حقل: الدورة لا تتغير.
   assert.deepEqual(rc77.dataAvailability.creditCycle, legacy77.dataAvailability.creditCycle, "test 77: دورة المحفظة لا تتغير بالانتقال");
 
+  // 78) قرار المالك — جانب المدين وunknown المادّي تحت lineKinds:v1.
+  //     Sales Velocity بقائمة سماح: sale وحده سحب. جانب الشراء (purchase_payment،
+  //     payment_out، purchase_return) لا سحب ولا دين. debt_transfer/adjustment/unknown
+  //     دين بلا سحب. unknown بقيمة ≥ حد الأهمية (delinquentMinAmount = 50، نفس حد شذوذ
+  //     الدفتر) ⇒ «يحتاج مراجعة» يسبق التعثّر، بلا حد، وخارج عيّنة المحفظة. بلا العلامة لا شيء يتغير.
+  const tag = (m, kind) => ({ ...m, lineKind: kind });
+  const debitCases78 = [
+    { id: 101, kind: "sale", draws: 3000 },
+    { id: 102, kind: "purchase_payment", draws: 2000 },
+    { id: 103, kind: "payment_out", draws: 2000 },
+    { id: 104, kind: "purchase_return", draws: 2000 },
+    { id: 105, kind: "debt_transfer", draws: 2000 },
+    { id: 106, kind: "adjustment", draws: 2000 },
+    { id: 107, kind: "unknown", draws: 2000, amount: 30 }  // دون حد الأهمية: لا مراجعة ولا سحب
+  ].map((c) => ({ ...c, name: `مدين ${c.kind}`,
+    movements: [tag(debit(40, 2000), "sale"), tag(debit(20, c.amount ?? 1000), c.kind), tag(pay(10, 2000), "sale_payment")] }));
+  const materialUnknown = { id: 108, name: "مجهول مادّي", movements: [tag(debit(50, 2000), "sale"), tag(debit(45, 500), "unknown")] };
+  const smallUnknownCredit = { id: 109, name: "دائن مجهول صغير", movements: [tag(debit(40, 2000), "sale"), tag(pay(10, 30), "unknown")] };
+  const unknownInPortfolio = { id: 110, name: "محفظة بحركة مجهولة",
+    movements: [...regular({ from: 59, every: 6, amount: 500, lag: 40 }).map((m) => tag(m, m.credit > 0 ? "payment" : "sale")), tag(pay(3, 100), "unknown")] };
+  const build78 = (list, marker) => {
+    const all = [...portfolio77.map((a) => ({ ...a, movements: marker ? a.movements : a.movements.map(({ lineKind, ...m }) => m) })),
+      ...list.map((c) => ({ guid: gid(c.id), name: c.name, truncated: false, movements: marker ? c.movements : c.movements.map(({ lineKind, ...m }) => m) }))];
+    return engine.build({
+      now: NOW,
+      invoicesReport: invoicesReportFor(all.map((a) => ({ ...a }))),
+      balancesReport: { ...reports.balancesReport, items: all.map((a) => ({ ...reports.balancesReport.items[0], key: engine.normalizeName(a.name), name: a.name,
+        balance: ledgerBalance(a.movements), balanceAccountCcy: ledgerBalance(a.movements), creditLimit: 0, customerGuid: a.guid, customerAccountGuid: a.guid })) },
+      movementsReport: { ...reports.movementsReport, summary: { ...reports.movementsReport.summary, ...(marker ? { lineKinds: marker } : {}) },
+        items: all.map((a) => ({ customerGuid: a.guid, name: a.name, truncated: false, movements: a.movements })) },
+      creditLimits: []
+    });
+  };
+  const rc78 = build78([...debitCases78, materialUnknown, smallUnknownCredit, unknownInPortfolio], "v1");
+  const legacy78 = build78([...debitCases78, materialUnknown, smallUnknownCredit, unknownInPortfolio], null);
+  const at78 = (built, id) => built.customers.find((c) => c.customerGuid === gid(id));
+  const draws = (c) => c.autoCredit.salesRecent + c.autoCredit.salesPrior;
+  for (const c of debitCases78) {
+    const v1 = at78(rc78, c.id);
+    assert.equal(draws(v1), c.draws, `test 78: مدين ${c.kind} ${c.draws === 3000 ? "يدخل" : "لا يدخل"} Sales Velocity`);
+    assert.notEqual(v1.autoCredit.status, "needs_review", `test 78: ${c.kind} معروف لا «يحتاج مراجعة»`);
+    // بلا العلامة: كل مدين غير افتتاحي سحب كما اليوم.
+    assert.equal(draws(at78(legacy78, c.id)), 2000 + (c.amount ?? 1000), `test 78: بلا علامة ${c.kind} سحب كالسلوك القديم`);
+  }
+  // جانب الشراء لا يدخل FIFO: الدفعة 2000 تسدّد الفاتورة كلها فلا دين مفتوح.
+  for (const id of [102, 103, 104]) assert.equal(at78(rc78, id).autoCredit.oldestOpenDays, null, `test 78: جانب الشراء ليس ديناً على الزبون (${id})`);
+  // نقل الدين والتسوية دين حقيقي بلا سحب: يبقى مفتوحاً (عمره 20) بعد أن سدّدت الدفعة الفاتورة الأقدم.
+  for (const id of [105, 106]) assert.equal(at78(rc78, id).autoCredit.oldestOpenDays, 20, `test 78: دين غير سحبي يبقى ديناً (${id})`);
+  const mu = at78(rc78, 108);
+  assert.equal(mu.autoCredit.status, "needs_review", "test 78: unknown مادّي ⇒ يحتاج مراجعة");
+  assert.equal(mu.creditLimit, null, "test 78: unknown مادّي ⇒ لا حد");
+  assert.equal(mu.creditStatus, "needs_review");
+  assert.notEqual(at78(legacy78, 108).creditStatus, "needs_review", "test 78: بلا علامة لا مراجعة");
+  assert.equal(at78(legacy78, 108).creditStatus, "delinquent", "test 78: الضبط — الدفتر نفسه متعثّر بلا الحارس");
+  assert.ok(mu.explanation.some((reason) => reason.includes("غير مصنّفة")), "test 78: السبب ظاهر");
+  const su = at78(rc78, 109);
+  assert.notEqual(su.autoCredit.status, "needs_review", "test 78: unknown دون حد الأهمية لا يوقف الحساب");
+  assert.equal(su.autoCredit.paidInOverdueSpan, 0, "test 78: unknown لا يُعدّ دفعة");
+  assert.equal(su.autoCredit.daysSinceLastPayment, null);
+  assert.equal(at78(rc78, 110).autoCredit.status, "needs_review", "test 78: حساب المحفظة بمجهول مادّي يحتاج مراجعة");
+  const rcNoUnknownAcct = build78([...debitCases78, materialUnknown, smallUnknownCredit], "v1");
+  assert.deepEqual(rc78.dataAvailability.creditCycle, rcNoUnknownAcct.dataAvailability.creditCycle, "test 78: الحساب الملتبس لا يلوّث معايرة المحفظة");
+  assert.ok(engine.CONFIG.autoCredit.delinquentMinAmount === 50, "test 78: حد الأهمية نفسه");
+
   // 66) عدّادات الملخص؛ وتنبيه الحد يبقى مسودة داخلية: لا مسار تيليغرام في هذه المرحلة.
   assert.ok(rc.summary.delinquentCreditCount >= 2 && rc.summary.inactiveCreditCount >= 2 && rc.summary.lowDataCreditCount >= 1);
   assert.equal(rc.summary.nonCustomerCreditCount, 0, "test 66: لا «ليس زبوناً» بالسلوك");
   assert.equal(rc.summary.needsReviewCreditCount, 1, "test 66: الشذوذ يُعدّ «يحتاج مراجعة» منفصلاً");
 }
 
-console.log(`ذكاء الزبائن: 77 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
+console.log(`ذكاء الزبائن: 78 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
