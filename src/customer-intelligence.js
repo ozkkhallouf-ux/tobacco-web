@@ -252,12 +252,15 @@
 
   // سبب تعذّر الحد الآلي حين يكون أحد مصدريه (الدفتر أو الأرصدة) غير حديث.
   function staleCreditNote(source, sourcesFreshness) {
+    if (source === "accounting_day") return ACCOUNTING_DAY_NOTE;
     const label = source === "movements" ? "دفتر الحركات" : source === "invoices" ? "تقرير الفواتير" : "تقرير الأرصدة";
     const age = sourcesFreshness[source].ageMinutes;
     return age === null
       ? `${label} بلا وقت مزامنة معروف: لا حد آلي من بيانات غير مؤكدة الحداثة.`
       : `${label} غير حديث (آخر مزامنة قبل ${age} دقيقة): لا حد آلي من بيانات قديمة.`;
   }
+
+  const ACCOUNTING_DAY_NOTE = "الحد الآلي غير متاح: الفواتير والحركات والأرصدة لا تمثل يوم المحاسبة المحلي نفسه (report_date)، فلا يُدمج يومان ولا تُخمَّن مبيعات ناقصة.";
 
   function freshnessOf(asOf, maxAgeMinutes, now) {
     if (!asOf) return { asOf: null, ageMinutes: null, maxAgeMinutes, state: "unknown", stale: true };
@@ -1060,7 +1063,7 @@
   // الحساب — تُعرض مرجعاً تشخيصياً فقط (legacyCreditLimit).
   // غياب الحد **ليس** صفراً ولا يُنتج تجاوزاً.
   // --------------------------------------------------------------------------
-  function resolveCredit(balanceRow, auto, display, legacyCreditLimit = null, { balancesStale = false, invoicesStale = false, autoGated = false } = {}) {
+  function resolveCredit(balanceRow, auto, display, legacyCreditLimit = null, { balancesStale = false, invoicesStale = false, dayMismatch = false, autoGated = false } = {}) {
     const ameenLimitRaw = numberOrNull(balanceRow?.creditLimit ?? balanceRow?.credit_limit);
     // تقرير أرصدة غير حديث: لا حد الأمين من اللقطة نفسها بديلاً — رقم يبدو صالحاً وهو قديم.
     const ameenLimit = !balancesStale && ameenLimitRaw !== null && ameenLimitRaw > 0 ? ameenLimitRaw : null;
@@ -1119,6 +1122,10 @@
     if (balancesStale && !confirmedStatus) {
       // لا استخدام ولا تجاوز ولا تعثّر من رصيد قديم.
       return { ...base, currentBalance: round(balance, 3), balanceDisplay: round(balanceDisplay, 3), balanceCurrency, creditLimitSource: autoUsable ? base.creditLimitSource : "stale", creditUsagePercent: null, creditStatus: "stale_balance" };
+    }
+    if (dayMismatch && !confirmedStatus && creditLimitSource !== "ameen") {
+      // المصادر على يومين محاسبيين: لا حد آلي ولا استخدام ولا تجاوز ولا تعثّر ولا «غير نشط».
+      return { ...base, currentBalance: round(balance, 3), balanceDisplay: round(balanceDisplay, 3), balanceCurrency, creditLimitSource: "day_mismatch", creditUsagePercent: null, creditStatus: "accounting_day_mismatch" };
     }
     if (invoicesStale && !confirmedStatus && creditLimitSource !== "ameen") {
       // لقطة فواتير قديمة: لا حد آلي ولا استخدام ولا تجاوز ولا تعثّر ولا «غير نشط» من نافذتها.
@@ -1310,6 +1317,18 @@
     const { rows: invoiceRows, truncatedGuids, truncatedNameKeys } = flattenInvoices(invoicesReport);
     const identity = buildIdentityIndex(balanceItems);
     const window = resolveWindow(invoicesReport, invoiceRows, now);
+
+    // ── يوم المحاسبة المحلي لكل مصدر ─────────────────────────────────────────
+    // `report_date` بتوقيت جهاز الأمين (نفس تعريف يوم المرجع، 8d33476) — لا تاريخ UTC.
+    // الحد الآلي يحتاج المصادر الثلاثة على اليوم نفسه: بعد منتصف الليل المحلي قد تبقى لقطة
+    // الفواتير على الأمس (ضمن مهلة الحداثة) بينما الحركات والأرصدة انتقلت لليوم الجديد.
+    const reportLocalDay = (report) => dayNumber(report?.report_date ?? report?.reportDate ?? report?.summary?.reportDate);
+    const accountingDays = {
+      invoices: reportLocalDay(invoicesReport),
+      movements: reportLocalDay(movementsReport),
+      balances: reportLocalDay(balancesReport)
+    };
+    const accountingDayAligned = Object.values(accountingDays).every((day) => day !== null && day === accountingDays.invoices);
 
     // ── حداثة المصادر ────────────────────────────────────────────────────────
     const sourcesFreshness = {
@@ -1570,7 +1589,9 @@
       const staleCreditSource = ownerListed ? null
         : sourcesFreshness.movements.stale ? "movements"
           : sourcesFreshness.balances.stale ? "balances"
-            : sourcesFreshness.invoices.stale ? "invoices" : null;
+            : sourcesFreshness.invoices.stale ? "invoices"
+              // حداثة كل مصدر وحده لا تكفي: الثلاثة على يوم المحاسبة المحلي نفسه (تحت v1).
+              : ledger.lineKindsTrusted && !accountingDayAligned ? "accounting_day" : null;
       if (!isSupplierRecord && record.customerGuid && ownerListed) {
         // التصنيف من القائمة وحدها: لا يحتاج دفتراً ولا حركة ولا بيانات حديثة.
         auto = nonCustomerByGuid.has(record.customerGuid)
@@ -1612,6 +1633,7 @@
       const credit = resolveCredit(record.balanceRow, auto, display, legacyCreditLimit, {
         balancesStale: sourcesFreshness.balances.stale,
         invoicesStale: sourcesFreshness.invoices.stale && !isSupplierRecord,
+        dayMismatch: staleCreditSource === "accounting_day" && !isSupplierRecord,
         autoGated: autoCreditGated && !isSupplierRecord
       });
       // أصناف مختلطة العملة: لا نجمع lineTotals بعملات مختلفة — نُعيد صفر أصناف.
@@ -1912,6 +1934,7 @@
       else if (draft.credit.creditStatus === "near_limit") reasons.push(`الرصيد بلغ ${draft.credit.creditUsagePercent}% من حد الائتمان.`);
       else if (draft.credit.creditStatus === "unknown_limit") reasons.push("عليه رصيد مدين بلا حد ائتمان محدد.");
       else if (draft.credit.creditStatus === "awaiting_typed_source") reasons.push(UNTYPED_LEDGER_NOTE);
+      else if (draft.credit.creditStatus === "accounting_day_mismatch") reasons.push(ACCOUNTING_DAY_NOTE);
       else if (draft.credit.creditStatus === "stale_invoices") reasons.push("تقرير الفواتير غير حديث: حد الائتمان الآلي غير متاح، ولا نسبة استخدام ولا تجاوز ولا تعثّر ولا «غير نشط» من نافذة فواتير قديمة.");
       else if (draft.credit.creditStatus === "stale_balance") reasons.push("تقرير الأرصدة غير حديث: حد الائتمان غير متاح، ولا نسبة استخدام ولا حكم تجاوز من رصيد قديم.");
       else if (draft.credit.creditStatus === "unknown_balance") reasons.push("لا يوجد صف رصيد من الأمين لهذا الزبون، فلا يُعرض صفراً ولا يُحسب ضمن الذمم.");
@@ -2035,6 +2058,8 @@
         balancesAvailable: balanceItems.length > 0,
         movementsAvailable: Array.isArray(movementsReport?.items) && movementsReport.items.length > 0,
         autoCreditEnabled: ledger.byGuid.size > 0 && ledger.lineKindsTrusted,
+        accountingDayAligned,
+        accountingDays: Object.fromEntries(Object.entries(accountingDays).map(([key, day]) => [key, day === null ? null : dayNumberToKey(day)])),
         creditCycle: cycleStats,
         previousWindowCovered: window.previousWindowCovered,
         coverageDays: window.coverageDays,

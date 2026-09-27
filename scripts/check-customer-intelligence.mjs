@@ -56,6 +56,8 @@ const engine = Object.freeze({
 // أدوات بناء تركيبة اختبار
 // ---------------------------------------------------------------------------
 const REFERENCE_ISO = "2026-09-02T04:00:00.000Z";  // لحظة صلاحية تقرير الفواتير
+// يوم المحاسبة المحلي للمصادر الثلاثة (`report_date` بتوقيت جهاز الأمين، 07:00 دمشق).
+const REFERENCE_LOCAL_DAY = "2026-09-02";
 const FROM_DATE = "2026-07-04";                     // بداية تغطية التقرير
 // النافذة الناتجة: الحالية 2026-08-04..2026-09-02، السابقة 2026-07-05..2026-08-03.
 
@@ -202,19 +204,19 @@ function buildReports({ fromDate = FROM_DATE, syncedAt = REFERENCE_ISO } = {}) {
   return {
     invoicesReport: {
       source: "ameen_customer_invoices",
-      created_at: syncedAt,
+      created_at: syncedAt, report_date: REFERENCE_LOCAL_DAY,
       summary: { periodDays: 60, fromDate, customers: invoiceItems.length, bills: 0, syncedAt },
       items: invoiceItems
     },
     balancesReport: {
       source: "ameen_customer_balances",
-      created_at: syncedAt,
+      created_at: syncedAt, report_date: REFERENCE_LOCAL_DAY,
       summary: { source: "ameen_customer_balances", syncedAt, totalCustomers: balanceItems.length },
       items: balanceItems
     },
     movementsReport: {
       source: "ameen_customer_movements",
-      created_at: syncedAt,
+      created_at: syncedAt, report_date: REFERENCE_LOCAL_DAY,
       summary: { syncedAt },
       items: []
     },
@@ -392,11 +394,11 @@ assert.equal(result.dataAvailability.coverageDays, 61);
   // عيّنة أصغر من الحد الأدنى ⇒ لا ترتيب نسبي موثوق ⇒ لا VIP
   const tiny = engine.build({
     invoicesReport: {
-      created_at: REFERENCE_ISO,
+      created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
       summary: { periodDays: 60, fromDate: FROM_DATE, syncedAt: REFERENCE_ISO },
       items: [{ name: "زبون وحيد", invoices: [invoice("2026-08-10", 9999), invoice("2026-08-20", 9999)] }]
     },
-    balancesReport: { created_at: REFERENCE_ISO, summary: { syncedAt: REFERENCE_ISO }, items: [] },
+    balancesReport: { created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY, summary: { syncedAt: REFERENCE_ISO }, items: [] },
     now: NOW
   });
   assert.equal(tiny.dataAvailability.vipRankingReliable, false);
@@ -663,13 +665,13 @@ if (!process.env.OZK_CI_TZ_CHILD) {
     return engine.build({
       invoicesReport: {
         source: "ameen_customer_invoices",
-        created_at: REFERENCE_ISO,
+        created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
         summary: { periodDays: 60, fromDate: FROM_DATE, customers: 1, bills: 0, syncedAt: REFERENCE_ISO },
         items: [{ name, invoices: invoiceList, truncated: false }]
       },
       balancesReport: {
         source: "ameen_customer_balances",
-        created_at: REFERENCE_ISO,
+        created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
         summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: 1 },
         items: [{ key: engine.normalizeName(name), name, balance: 0, creditLimit: 0, remainingLimit: 0, status: "clear", customerGuid: "0000-26", customerAccountGuid: "0000-26", isSupplier: false, recentPayments: [], recentMovements: [] }]
       },
@@ -719,7 +721,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
     return engine.build({
       invoicesReport: {
         source: "ameen_customer_invoices",
-        created_at: REFERENCE_ISO,
+        created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
         summary: { periodDays: 60, fromDate: FROM_DATE, customers: 2, bills: 0, syncedAt: REFERENCE_ISO },
         items: [
           { name: "زبون دولار",  invoices: [invoice("2026-08-10", 100, { currency: "USD" })],     truncated: false },
@@ -728,7 +730,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
       },
       balancesReport: {
         source: "ameen_customer_balances",
-        created_at: REFERENCE_ISO,
+        created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
         summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: 2 },
         items: [
           mkCustomer("زبون دولار", "0000-27a"),
@@ -784,7 +786,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
     return engine.build({
       invoicesReport: {
         source: "ameen_customer_invoices",
-        created_at: REFERENCE_ISO,
+        created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
         summary: { periodDays: 60, fromDate: FROM_DATE, customers: 1, bills: 0, syncedAt: REFERENCE_ISO },
         items: [{
           name: "زبون مختلط",
@@ -799,7 +801,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
       },
       balancesReport: {
         source: "ameen_customer_balances",
-        created_at: REFERENCE_ISO,
+        created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
         summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: 1 },
         items: [mkB("زبون مختلط", "0000-29a")]
       },
@@ -828,7 +830,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
     return engine.build({
       invoicesReport: {
         source: "ameen_customer_invoices",
-        created_at: REFERENCE_ISO,
+        created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
         summary: { periodDays: 60, fromDate: FROM_DATE, customers: 1, bills: 0, syncedAt: REFERENCE_ISO },
         items: [{
           name: "زبون مقتطع",
@@ -838,7 +840,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
       },
       balancesReport: {
         source: "ameen_customer_balances",
-        created_at: REFERENCE_ISO,
+        created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
         summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: 1 },
         items: [mkB("زبون مقتطع", "0000-30a")]
       },
@@ -895,7 +897,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   const r32 = engine.build({
     invoicesReport: {
       source: "ameen_customer_invoices",
-      created_at: REFERENCE_ISO,
+      created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
       summary: { periodDays: 60, fromDate: FROM_DATE, customers: 1, bills: 0, syncedAt: REFERENCE_ISO },
       items: [{
         name: "لؤي خلوف المحترم / الضاحية",
@@ -906,7 +908,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
     },
     balancesReport: {
       source: "ameen_customer_balances",
-      created_at: REFERENCE_ISO,
+      created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
       summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: 2 },
       items: [
         mkB("لؤي خلوف المحترم / الضاحية", GUID, 4000),
@@ -973,13 +975,13 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   const r33 = engine.build({
     invoicesReport: {
       source: "ameen_customer_invoices",
-      created_at: REFERENCE_ISO,
+      created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
       summary: { periodDays: 60, fromDate: FROM_DATE, customers: parties.length, bills: 0, syncedAt: REFERENCE_ISO },
       items: parties.map((entry) => entry.invoices)
     },
     balancesReport: {
       source: "ameen_customer_balances",
-      created_at: REFERENCE_ISO,
+      created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
       summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: parties.length },
       items: parties.map((entry) => entry.balance)
     },
@@ -1022,7 +1024,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   const r34 = engine.build({
     invoicesReport: {
       source: "ameen_customer_invoices",
-      created_at: REFERENCE_ISO,
+      created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
       summary: { periodDays: 60, fromDate: FROM_DATE, customers: 2, bills: 0, syncedAt: REFERENCE_ISO },
       items: [
         {
@@ -1051,7 +1053,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
     },
     balancesReport: {
       source: "ameen_customer_balances",
-      created_at: REFERENCE_ISO,
+      created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
       summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: 2 },
       items: [mkB("زبون تراجع حقيقي", CUST, false), mkB("مورد ضخم", SUP, true)]
     },
@@ -1108,13 +1110,13 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   const r35 = engine.build({
     invoicesReport: {
       source: "ameen_customer_invoices",
-      created_at: REFERENCE_ISO,
+      created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
       summary: { periodDays: 60, fromDate: FROM_DATE, customers: parties.length, bills: 0, syncedAt: REFERENCE_ISO },
       items: parties.map((entry) => entry.invoices)
     },
     balancesReport: {
       source: "ameen_customer_balances",
-      created_at: REFERENCE_ISO,
+      created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
       summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: parties.length },
       items: parties.map((entry) => entry.balance)
     },
@@ -1154,7 +1156,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   const r36 = engine.build({
     invoicesReport: {
       source: "ameen_customer_invoices",
-      created_at: REFERENCE_ISO,
+      created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
       summary: { periodDays: 60, fromDate: FROM_DATE, customers: 3, bills: 0, syncedAt: REFERENCE_ISO },
       items: [
         {
@@ -1194,7 +1196,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
     },
     balancesReport: {
       source: "ameen_customer_balances",
-      created_at: REFERENCE_ISO,
+      created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
       summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: 3 },
       items: [mkB("زبون دولار متراجع", USD), mkB("زبون ليرة أ", SYP_A), mkB("زبون ليرة ب", SYP_B)]
     },
@@ -1235,7 +1237,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   const r38 = engine.build({
     invoicesReport: {
       source: "ameen_customer_invoices",
-      created_at: REFERENCE_ISO,
+      created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
       summary: { periodDays: 60, fromDate: FROM_DATE, customers: 1, bills: 1, syncedAt: REFERENCE_ISO },
       items: [{
         name: "زبون فاتورة ليرة",
@@ -1252,7 +1254,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
     },
     balancesReport: {
       source: "ameen_customer_balances",
-      created_at: REFERENCE_ISO,
+      created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
       summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: 1 },
       items: [{
         key: engine.normalizeName("زبون فاتورة ليرة"),
@@ -1287,7 +1289,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   const r39 = engine.build({
     invoicesReport: {
       source: "ameen_customer_invoices",
-      created_at: REFERENCE_ISO,
+      created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
       summary: { periodDays: 60, fromDate: FROM_DATE, customers: 1, bills: 1, syncedAt: REFERENCE_ISO },
       items: [{
         name: "زبون ليرة بلا معدّل",
@@ -1298,7 +1300,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
     },
     balancesReport: {
       source: "ameen_customer_balances",
-      created_at: REFERENCE_ISO,
+      created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
       summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: 1 },
       items: [{
         key: engine.normalizeName("زبون ليرة بلا معدّل"),
@@ -1334,7 +1336,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   const r40 = engine.build({
     invoicesReport: {
       source: "ameen_customer_invoices",
-      created_at: REFERENCE_ISO,
+      created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
       summary: { periodDays: 60, fromDate: FROM_DATE, customers: 2, bills: 2, syncedAt: REFERENCE_ISO },
       items: [
         {
@@ -1353,7 +1355,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
     },
     balancesReport: {
       source: "ameen_customer_balances",
-      created_at: REFERENCE_ISO,
+      created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
       summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: 1 },
       items: [{
         key: engine.normalizeName("زبون رصيده معروف"),
@@ -1417,13 +1419,13 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   const buildOne = (name, guid, invoices) => engine.build({
     invoicesReport: {
       source: "ameen_customer_invoices",
-      created_at: REFERENCE_ISO,
+      created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
       summary: { periodDays: 60, fromDate: FROM_DATE, customers: 1, bills: invoices.length, syncedAt: REFERENCE_ISO, payloadVersion: 2 },
       items: [{ name, customerGuid: guid, truncated: false, invoices }]
     },
     balancesReport: {
       source: "ameen_customer_balances",
-      created_at: REFERENCE_ISO,
+      created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
       summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: 1 },
       items: [{ name, key: engine.normalizeName(name), customerGuid: guid, balance: 0, isSupplier: false, recentPayments: [], recentMovements: [] }]
     },
@@ -1565,7 +1567,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
       ...(a.accountCurrencyIsBase === false ? { currency: "SYP", currencyVal: 1 / 14000 } : {})
     }));
   const invoicesReportFor = (list, fromDate = FROM_DATE) => ({
-    source: "ameen_customer_invoices", created_at: REFERENCE_ISO,
+    source: "ameen_customer_invoices", created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
     summary: { periodDays: 60, fromDate, customers: list.length, syncedAt: REFERENCE_ISO },
     items: list.filter((a) => !a.noInvoices).map((a) => ({ name: a.name, customerGuid: a.guid, truncated: false, invoices: salesInvoicesOf(a) }))
       .filter((group) => group.invoices.length > 0)
@@ -1574,7 +1576,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   const reports = {
     invoicesReport: invoicesReportFor(accounts),
     balancesReport: {
-      source: "ameen_customer_balances", created_at: REFERENCE_ISO,
+      source: "ameen_customer_balances", created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
       summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: accounts.length },
       items: accounts.map((a) => ({
         key: engine.normalizeName(a.name), name: a.name, balance: a.balance, creditLimit: a.creditLimit ?? 0,
@@ -1585,7 +1587,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
       }))
     },
     movementsReport: {
-      source: "ameen_customer_movements", created_at: REFERENCE_ISO,
+      source: "ameen_customer_movements", created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
       summary: { syncedAt: REFERENCE_ISO, periodDays: 92 },
       items: accounts.map((a) => ({ customerGuid: a.guid, name: a.name, truncated: a.truncated === true, movements: a.movements }))
     },
@@ -2312,7 +2314,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   const now83 = new Date(REF_DAY - 85 * 60000);
   const today83 = { guid: gid(83), name: "مشترٍ بعد منتصف الليل المحلي", movements: [debit(0, 900)] };
   const build83 = (withReportDate) => {
-    const at = (report) => ({ ...report, created_at: utcIso83, ...(withReportDate ? { report_date: d(0) } : {}),
+    const at = ({ report_date: _fixtureDay, ...report }) => ({ ...report, created_at: utcIso83, ...(withReportDate ? { report_date: d(0) } : {}),
       summary: { ...report.summary, syncedAt: utcIso83 } });
     return engine.build({
       invoicesReport: at(invoicesReportFor([today83])),
@@ -2333,10 +2335,74 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   // بلا report_date (تقارير قديمة) يبقى الاحتياط تاريخ syncedAt كما كان.
   assert.equal(build83(false).window.referenceDate, d(1), "test 83: بلا report_date الاحتياط syncedAt");
 
+  // 84) Codex P1 / قرار المالك — المصادر الثلاثة على يوم المحاسبة المحلي نفسه (report_date، تعريف 8d33476).
+  //     الساعة 00:30 بتوقيت دمشق (21:30Z): الفواتير مزامنة 23:50 وreport_date أمس، والحركات
+  //     والأرصدة بعد منتصف الليل وreport_date اليوم، وكلها ضمن مهل الحداثة ⇒ لا حد آلي ولا
+  //     «غير نشط» ولا تعثّر ولا تجاوز. وحين تتحدث الفواتير لليوم نفسه يعود المحرك طبيعياً.
+  const localIso = (hh, mm, dayOffset = 0) => new Date(REF_DAY + dayOffset * 86400000 + ((hh - 3) * 60 + mm) * 60000).toISOString(); // دمشق = UTC+3
+  const now84 = new Date(localIso(0, 30));
+  const at84 = (report, iso, day) => ({ ...report, created_at: iso, report_date: day, summary: { ...report.summary, syncedAt: iso } });
+  const build84 = (invoiceIso, invoiceDay) => engine.build({
+    ...reports,
+    invoicesReport: at84(reports.invoicesReport, invoiceIso, invoiceDay),
+    movementsReport: at84(reports.movementsReport, localIso(0, 20), d(0)),
+    balancesReport: at84(reports.balancesReport, localIso(0, 25), d(0)),
+    now: now84
+  });
+  const midnight = build84(localIso(23, 50, -1), d(1));
+  assert.deepEqual(Object.values(midnight.sourcesFreshness).map((f) => f.stale), [false, false, false], "test 84: كل المصادر ضمن مهلة الحداثة");
+  assert.equal(midnight.dataAvailability.accountingDayAligned, false, "test 84: يوم المحاسبة غير متطابق");
+  assert.deepEqual(midnight.dataAvailability.accountingDays, { invoices: d(1), movements: d(0), balances: d(0) });
+  const byGuid84 = new Map(midnight.customers.map((c) => [c.customerGuid, c]));
+  let gated84 = 0;
+  for (const fresh of rc.customers) {
+    if (fresh.isSupplier || !fresh.customerGuid) continue;
+    const c = byGuid84.get(fresh.customerGuid);
+    if (fresh.creditStatus === "not_customer") { assert.equal(c.creditStatus, "not_customer", "test 84: التصنيف المؤكد يبقى"); continue; }
+    if (fresh.creditStatus === "needs_review") {
+      // شذوذ الدفتر السلوكي يقارن الدفتر بالفواتير؛ عبر يومين لا يُحكم به، ويبقى مغلقاً بلا حد.
+      assert.ok(["needs_review", "accounting_day_mismatch"].includes(c.creditStatus), "test 84: المراجعة لا تنفتح");
+      assert.equal(c.creditLimit, null); continue;
+    }
+    if (c.creditLimitSource === "ameen") continue;
+    assert.ok(!["delinquent", "over_limit", "near_limit", "normal", "inactive_no_limit", "prepaid"].includes(c.creditStatus),
+      `test 84: لا حكم ائتمان عبر يومين (${fresh.customerGuid}: ${c.creditStatus})`);
+    assert.equal(c.creditLimit, null);
+    assert.equal(c.creditUsagePercent, null);
+    if (c.creditStatus === "accounting_day_mismatch") {
+      gated84 += 1;
+      assert.equal(c.creditLimitSource, "day_mismatch");
+      assert.ok(c.explanation.some((reason) => reason.includes("يوم المحاسبة")), "test 84: السبب ظاهر");
+    }
+  }
+  assert.ok(gated84 >= 5, "test 84: حسابات عادية ومتعثرة كلها مغلقة");
+  assert.equal(midnight.summary.delinquentCreditCount, 0, "test 84: لا متعثّر");
+  assert.notEqual(byGuid84.get(G_NEW).creditStatus, "inactive_no_limit", "test 84: المشتري حديثاً لا يصبح «غير نشط»");
+  for (const [guid, status] of [[engine.CONFIG.autoCredit.excludedAccountGuids[0], "not_customer"], [engine.CONFIG.autoCredit.reviewAccountGuids[0], "needs_review"]]) {
+    const listed = engine.build({ ...reports, now: now84,
+      invoicesReport: at84(reports.invoicesReport, localIso(23, 50, -1), d(1)), movementsReport: at84(reports.movementsReport, localIso(0, 20), d(0)),
+      balancesReport: at84({ ...reports.balancesReport, items: [...reports.balancesReport.items, { ...reports.balancesReport.items[0], key: "مدرج", name: "مدرج", balance: 900, balanceAccountCcy: 900, creditLimit: 0, customerGuid: guid, customerAccountGuid: guid }] }, localIso(0, 25), d(0)) })
+      .customers.find((c) => c.customerGuid === guid);
+    assert.equal(listed.creditStatus, status, `test 84: قائمة المالك تبقى (${status})`);
+  }
+  // الفواتير تتحدث لليوم نفسه ⇒ المحرك يعمل.
+  const aligned84 = build84(localIso(0, 28), d(0));
+  assert.equal(aligned84.dataAvailability.accountingDayAligned, true, "test 84: يوم المحاسبة متطابق");
+  const steady84 = aligned84.customers.find((c) => c.customerGuid === G_STEADY);
+  assert.equal(steady84.creditLimitSource, "auto", "test 84: بيوم متطابق يعود الحد الآلي");
+  assert.ok(steady84.creditLimit > 0);
+  assert.ok(aligned84.customers.every((c) => c.creditStatus !== "accounting_day_mismatch"));
+  // يوم مجهول لأي مصدر (بلا report_date) لا يُفترض تطابقه.
+  const { report_date: _noDay, ...invoicesNoDay } = at84(reports.invoicesReport, localIso(0, 28), d(0));
+  const unknownDay84 = engine.build({ ...reports, now: now84, invoicesReport: invoicesNoDay,
+    movementsReport: at84(reports.movementsReport, localIso(0, 20), d(0)), balancesReport: at84(reports.balancesReport, localIso(0, 25), d(0)) });
+  assert.equal(unknownDay84.dataAvailability.accountingDayAligned, false, "test 84: يوم غير معروف ⇒ غير متطابق");
+  assert.equal(unknownDay84.customers.find((c) => c.customerGuid === G_STEADY).creditStatus, "accounting_day_mismatch");
+
   // 66) عدّادات الملخص؛ وتنبيه الحد يبقى مسودة داخلية: لا مسار تيليغرام في هذه المرحلة.
   assert.ok(rc.summary.delinquentCreditCount >= 2 && rc.summary.inactiveCreditCount >= 2 && rc.summary.lowDataCreditCount >= 1);
   assert.equal(rc.summary.nonCustomerCreditCount, 0, "test 66: لا «ليس زبوناً» بالسلوك");
   assert.equal(rc.summary.needsReviewCreditCount, 1, "test 66: الشذوذ يُعدّ «يحتاج مراجعة» منفصلاً");
 }
 
-console.log(`ذكاء الزبائن: 83 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
+console.log(`ذكاء الزبائن: 84 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);

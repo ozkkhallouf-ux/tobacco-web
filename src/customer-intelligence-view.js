@@ -302,6 +302,7 @@
     stale_balance: "غير متاح: الرصيد غير حديث",
     awaiting_typed_source: "غير متاح: بانتظار مصدر حركات موسوم",
     stale_invoices: "غير متاح: الفواتير غير حديثة",
+    accounting_day_mismatch: "غير متاح: يوم المحاسبة غير متطابق",
     needs_review: "غير متاح: يحتاج مراجعة"
   };
   const AUTO_STATUS_TEXT = {
@@ -323,7 +324,8 @@
   const UNAVAILABLE_LIMIT_TEXT = {
     stale: "غير متاح (تقرير الأرصدة غير حديث)",
     untyped: "غير متاح (بانتظار تقرير حركات موسوم بالنوع)",
-    stale_invoices: "غير متاح (تقرير الفواتير غير حديث)"
+    stale_invoices: "غير متاح (تقرير الفواتير غير حديث)",
+    day_mismatch: "غير متاح (المصادر على يومين محاسبيين مختلفين)"
   };
 
   function creditLimitText(row) {
