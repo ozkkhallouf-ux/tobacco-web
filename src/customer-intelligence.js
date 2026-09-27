@@ -480,9 +480,11 @@
   // --------------------------------------------------------------------------
   // دفتر حساب الزبون (ameen_customer_movements) — مصدر حد الائتمان الآلي.
   //
-  // كل الحركات بعملة الأساس. الدائن الذي يحمل billGuid مرتجع (يسدّد ديناً لكنه
-  // ليس دفعة)، والقيد الافتتاحي (01-07) يدخل طابور التسوية لكن عمره الحقيقي
-  // مجهول فلا يدخل إحصاء أيام السداد. الربط بالمعرّف وحده — لا اسم.
+  // كل الحركات بعملة الأساس. تصنيف الدائن لمقاييس السداد من `lineKind` (نوع
+  // المستند + حساب المقابل من المصدر) لا من النص: payment/receipt دفعة، return
+  // مرتجع، وأي قيمة أخرى ظاهرة (discount/purchase/…) تسوية فقط. بلا الحقل يبقى
+  // السلوك الحالي: billGuid = مرتجع، والافتتاحي (01-07) يسوّي ولا يُعدّ دفعة.
+  // الربط بالمعرّف وحده — لا اسم.
   // --------------------------------------------------------------------------
   const OPENING_ENTRY = /افتتاح/u;
 
@@ -507,7 +509,8 @@
           debit,
           credit,
           isReturn: Boolean(text(movement?.billGuid ?? movement?.bill_guid)),
-          isOpening: OPENING_ENTRY.test(text(movement?.notes))
+          isOpening: OPENING_ENTRY.test(text(movement?.notes)),
+          lineKind: text(movement?.lineKind ?? movement?.line_kind).toLowerCase() || null
         });
       });
       rows.sort((a, b) => a.day - b.day || a.index - b.index);
@@ -521,7 +524,7 @@
         if (Number.isFinite(day)) {
           // تاريخه الاصطناعي يتحرك مع النافذة، فعمره الحقيقي مجهول و≥ عمر النافذة:
           // ageUnknown يحفظه متأخراً في كل لقطة لاحقة (لا يصغر عمره بتدحرج النافذة).
-          rows.unshift({ day, index: -1, debit: Math.max(0, carried), credit: Math.max(0, -carried), isReturn: false, isOpening: true, ageUnknown: true });
+          rows.unshift({ day, index: -1, debit: Math.max(0, carried), credit: Math.max(0, -carried), isReturn: false, isOpening: true, ageUnknown: true, lineKind: null });
         }
       }
       byGuid.set(guid, { truncated: item?.truncated === true, rows });
@@ -596,11 +599,26 @@
     if (debit.remaining > span.tolerance) acc.openQueue.push(debit);
   }
 
-  // سطر دائن في الدفتر: مرتجع أو دفعة (القيد الافتتاحي ليس دفعة)، ثم تسويته FIFO.
+  // تصنيف سطر الدائن لمقاييس السداد فقط. التسوية FIFO تتم دائماً بعدها.
+  // lineKind من المصدر — لا تخمين من الملاحظات أو المبلغ أو تطابق فاتورة.
+  function creditMetricKind(row) {
+    const kind = text(row?.lineKind).toLowerCase();
+    if (kind) {
+      if (kind === "return") return "return";
+      if (kind === "payment" || kind === "receipt") return "payment";
+      return "settle";
+    }
+    if (row.isReturn) return "return";
+    if (row.isOpening) return "settle";
+    return "payment";
+  }
+
+  // سطر دائن في الدفتر: مرتجع أو دفعة أو تسوية فقط، ثم FIFO.
   function ledgerAddCredit(acc, row, span) {
-    if (row.isReturn) {
+    const metric = creditMetricKind(row);
+    if (metric === "return") {
       if (span.inWindow(row.day)) acc.returns60 += row.credit;
-    } else if (!row.isOpening) {
+    } else if (metric === "payment") {
       acc.paymentDays.add(row.day);
       acc.paymentsByDay.push({ day: row.day, amount: row.credit });
       if (acc.lastPaymentDay === null || row.day > acc.lastPaymentDay) acc.lastPaymentDay = row.day;

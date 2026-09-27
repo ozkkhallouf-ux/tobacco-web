@@ -1988,10 +1988,62 @@ if (!process.env.OZK_CI_TZ_CHILD) {
     }
   }
 
+  // 77) Codex P1 / قرار المالك — دائن غير دفعة (حسم رأس / شراء) يسدّد FIFO
+  //     لكن لا يدخل مقاييس السداد. التصنيف من `lineKind` لا من تخمين النص.
+  //     بلا الحقل يبقى السلوك الحالي (يُعدّ دفعة) حتى تصل مزامنة المصدر.
+  const portfolio77 = [82, 83, 84, 85, 86, 87].map((id) => ({
+    guid: gid(id), name: `محفظة lineKind ${id}`, truncated: false,
+    movements: regular({ from: 59, every: 6, amount: 500, lag: 6 })
+  }));
+  const credit77 = (kind) => ({
+    date: d(5), debit: 0, credit: 1800, notes: "", billGuid: "",
+    ...(kind ? { lineKind: kind } : {})
+  });
+  const cases77 = [
+    { id: 88, name: "حسم رأس بـ lineKind", kind: "discount", delinquent: true, paid: 0, lastPayDays: null },
+    { id: 89, name: "دائن شراء بـ lineKind", kind: "purchase", delinquent: true, paid: 0, lastPayDays: null },
+    { id: 90, name: "دفعة بـ lineKind", kind: "payment", delinquent: false, paid: 1800, lastPayDays: 5 },
+    { id: 91, name: "دائن بلا lineKind (لقطة قديمة)", kind: null, delinquent: false, paid: 1800, lastPayDays: 5 }
+  ];
+  const all77 = [
+    ...portfolio77,
+    ...cases77.map((c) => ({ guid: gid(c.id), name: c.name, truncated: false, movements: [debit(40, 2000), credit77(c.kind)] }))
+  ];
+  const rc77 = engine.build({
+    now: NOW,
+    invoicesReport: invoicesReportFor(all77.map((a) => ({ ...a }))),
+    balancesReport: {
+      ...reports.balancesReport,
+      items: all77.map((a) => ({
+        ...reports.balancesReport.items[0], key: engine.normalizeName(a.name), name: a.name,
+        balance: ledgerBalance(a.movements), balanceAccountCcy: ledgerBalance(a.movements),
+        creditLimit: 0, customerGuid: a.guid, customerAccountGuid: a.guid
+      }))
+    },
+    movementsReport: {
+      ...reports.movementsReport,
+      items: all77.map((a) => ({ customerGuid: a.guid, name: a.name, truncated: false, movements: a.movements }))
+    },
+    creditLimits: []
+  });
+  for (const c of cases77) {
+    const row77 = rc77.customers.find((entry) => entry.customerGuid === gid(c.id));
+    assert.ok(row77, `test 77: السجل موجود (${c.name})`);
+    assert.equal(row77.autoCredit.overdueAmount, 200, `test 77: ${c.name} يسدّد FIFO (المتبقي 200)`);
+    assert.equal(row77.autoCredit.paidInOverdueSpan, c.paid, `test 77: ${c.name} مقاييس السداد`);
+    assert.equal(row77.autoCredit.daysSinceLastPayment, c.lastPayDays, `test 77: ${c.name} آخر دفعة`);
+    if (c.delinquent) {
+      assert.equal(row77.creditStatus, "delinquent", `test 77: ${c.name} لا يفلت من التعثّر بحسم/شراء`);
+      assert.equal(row77.creditLimit, 0);
+    } else {
+      assert.notEqual(row77.creditStatus, "delinquent", `test 77: ${c.name} دفعة حقيقية تُحتسب`);
+    }
+  }
+
   // 66) عدّادات الملخص؛ وتنبيه الحد يبقى مسودة داخلية: لا مسار تيليغرام في هذه المرحلة.
   assert.ok(rc.summary.delinquentCreditCount >= 2 && rc.summary.inactiveCreditCount >= 2 && rc.summary.lowDataCreditCount >= 1);
   assert.equal(rc.summary.nonCustomerCreditCount, 0, "test 66: لا «ليس زبوناً» بالسلوك");
   assert.equal(rc.summary.needsReviewCreditCount, 1, "test 66: الشذوذ يُعدّ «يحتاج مراجعة» منفصلاً");
 }
 
-console.log(`ذكاء الزبائن: 76 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
+console.log(`ذكاء الزبائن: 77 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
