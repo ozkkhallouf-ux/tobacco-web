@@ -1988,57 +1988,70 @@ if (!process.env.OZK_CI_TZ_CHILD) {
     }
   }
 
-  // 77) Codex P1 / قرار المالك — دائن غير دفعة (حسم رأس / شراء) يسدّد FIFO
-  //     لكن لا يدخل مقاييس السداد. التصنيف من `lineKind` لا من تخمين النص.
-  //     بلا الحقل يبقى السلوك الحالي (يُعدّ دفعة) حتى تصل مزامنة المصدر.
+  // 77) Codex P1 / قرار المالك (2026-09-27) — نوع الدائن من `lineKind` الموسوم وحده.
+  //     تحت summary.lineKinds = "v1": sale_payment (الاسم القانوني لدفعة البيع) و
+  //     payment/receipt (توافق) دفعة زبون تدخل التغطية والجودة والانتظام وFIFO واختبار
+  //     التعثّر. discount/debt_transfer/adjustment تُنقص الدين (FIFO) ولا تُعدّ دفعة.
+  //     purchase/purchase_payment/unknown لا دفعة ولا تسوية. return مرتجع لا دفعة.
+  //     بلا العلامة يُتجاهل الحقل ويبقى السلوك الحالي (الدائن دفعة) — لا نافذة انتقال.
   const portfolio77 = [82, 83, 84, 85, 86, 87].map((id) => ({
     guid: gid(id), name: `محفظة lineKind ${id}`, truncated: false,
-    movements: regular({ from: 59, every: 6, amount: 500, lag: 6 })
+    movements: regular({ from: 59, every: 6, amount: 500, lag: 6 }).map((m) => (m.credit > 0 ? { ...m, lineKind: "payment" } : { ...m, lineKind: "sale" }))
   }));
-  const credit77 = (kind) => ({
-    date: d(5), debit: 0, credit: 1800, notes: "", billGuid: "",
-    ...(kind ? { lineKind: kind } : {})
-  });
+  const credit77 = (kind) => ({ date: d(5), debit: 0, credit: 1800, notes: "", billGuid: "", ...(kind ? { lineKind: kind } : {}) });
+  const build77 = (cases, marker) => {
+    const all = [...portfolio77, ...cases.map((c) => ({ guid: gid(c.id), name: c.name, truncated: false,
+      movements: [{ ...debit(40, 2000), ...(marker ? { lineKind: "sale" } : {}) }, credit77(c.kind)] }))];
+    return engine.build({
+      now: NOW,
+      invoicesReport: invoicesReportFor(all.map((a) => ({ ...a }))),
+      balancesReport: { ...reports.balancesReport, items: all.map((a) => ({ ...reports.balancesReport.items[0], key: engine.normalizeName(a.name), name: a.name,
+        balance: ledgerBalance(a.movements), balanceAccountCcy: ledgerBalance(a.movements), creditLimit: 0, customerGuid: a.guid, customerAccountGuid: a.guid })) },
+      movementsReport: { ...reports.movementsReport, summary: { ...reports.movementsReport.summary, ...(marker ? { lineKinds: marker } : {}) },
+        items: all.map((a) => ({ customerGuid: a.guid, name: a.name, truncated: false, movements: a.movements })) },
+      creditLimits: []
+    });
+  };
+  // المتوقَّع لكل نوع: paid = ما دخل مقاييس السداد، overdue = ما بقي مفتوحاً متأخراً بعد FIFO.
+  const PAY = { paid: 1800, overdue: 200, lastPayDays: 5, delinquent: false };
+  const SETTLE = { paid: 0, overdue: 200, lastPayDays: null, delinquent: true };
+  const NONE = { paid: 0, overdue: 2000, lastPayDays: null, delinquent: true };
   const cases77 = [
-    { id: 88, name: "حسم رأس بـ lineKind", kind: "discount", delinquent: true, paid: 0, lastPayDays: null },
-    { id: 89, name: "دائن شراء بـ lineKind", kind: "purchase", delinquent: true, paid: 0, lastPayDays: null },
-    { id: 90, name: "دفعة بـ lineKind", kind: "payment", delinquent: false, paid: 1800, lastPayDays: 5 },
-    { id: 91, name: "دائن بلا lineKind (لقطة قديمة)", kind: null, delinquent: false, paid: 1800, lastPayDays: 5 }
-  ];
-  const all77 = [
-    ...portfolio77,
-    ...cases77.map((c) => ({ guid: gid(c.id), name: c.name, truncated: false, movements: [debit(40, 2000), credit77(c.kind)] }))
-  ];
-  const rc77 = engine.build({
-    now: NOW,
-    invoicesReport: invoicesReportFor(all77.map((a) => ({ ...a }))),
-    balancesReport: {
-      ...reports.balancesReport,
-      items: all77.map((a) => ({
-        ...reports.balancesReport.items[0], key: engine.normalizeName(a.name), name: a.name,
-        balance: ledgerBalance(a.movements), balanceAccountCcy: ledgerBalance(a.movements),
-        creditLimit: 0, customerGuid: a.guid, customerAccountGuid: a.guid
-      }))
-    },
-    movementsReport: {
-      ...reports.movementsReport,
-      items: all77.map((a) => ({ customerGuid: a.guid, name: a.name, truncated: false, movements: a.movements }))
-    },
-    creditLimits: []
-  });
+    { id: 88, kind: "sale_payment", ...PAY },     // 1) دفعة البيع الحقيقية
+    { id: 89, kind: "payment", ...PAY },          // 2) الاسم القديم يبقى دفعة
+    { id: 90, kind: "receipt", ...PAY },          // 3)
+    { id: 91, kind: "discount", ...SETTLE },      // 4) يُنقص الفاتورة، ليس دفعة
+    { id: 92, kind: "purchase", ...NONE },        // 5) مشترياتنا ليست سداداً
+    { id: 93, kind: "purchase_payment", ...NONE },// 6) ليس دفعة زبون
+    { id: 94, kind: "debt_transfer", ...SETTLE }, // 7) نقل الدين ليس دفعة
+    { id: 95, kind: "unknown", ...NONE },         // 8) المجهول لا يحسّن مؤشرات السداد
+    { id: 96, kind: "adjustment", ...SETTLE },
+    { id: 97, kind: "return", ...SETTLE },
+    { id: 98, kind: "not_a_kind", ...NONE }       //    قيمة غير معروفة = مجهول
+  ].map((c) => ({ ...c, name: `lineKind ${c.kind}` }));
+  const rc77 = build77(cases77, "v1");
   for (const c of cases77) {
-    const row77 = rc77.customers.find((entry) => entry.customerGuid === gid(c.id));
-    assert.ok(row77, `test 77: السجل موجود (${c.name})`);
-    assert.equal(row77.autoCredit.overdueAmount, 200, `test 77: ${c.name} يسدّد FIFO (المتبقي 200)`);
-    assert.equal(row77.autoCredit.paidInOverdueSpan, c.paid, `test 77: ${c.name} مقاييس السداد`);
-    assert.equal(row77.autoCredit.daysSinceLastPayment, c.lastPayDays, `test 77: ${c.name} آخر دفعة`);
-    if (c.delinquent) {
-      assert.equal(row77.creditStatus, "delinquent", `test 77: ${c.name} لا يفلت من التعثّر بحسم/شراء`);
-      assert.equal(row77.creditLimit, 0);
-    } else {
-      assert.notEqual(row77.creditStatus, "delinquent", `test 77: ${c.name} دفعة حقيقية تُحتسب`);
-    }
+    const r77 = rc77.customers.find((entry) => entry.customerGuid === gid(c.id));
+    assert.ok(r77, `test 77: السجل موجود (${c.kind})`);
+    assert.equal(r77.autoCredit.paidInOverdueSpan, c.paid, `test 77: ${c.kind} في مقاييس السداد`);
+    assert.equal(r77.autoCredit.overdueAmount, c.overdue, `test 77: ${c.kind} وتسوية FIFO`);
+    assert.equal(r77.autoCredit.daysSinceLastPayment, c.lastPayDays, `test 77: ${c.kind} آخر دفعة`);
+    assert.equal(r77.creditStatus === "delinquent", c.delinquent, `test 77: ${c.kind} واختبار التعثّر`);
+    if (c.paid === 0) assert.ok(!(r77.autoCredit.coverage > 0.5), `test 77: ${c.kind} لا يرفع التغطية`);
   }
+  // 9–10) لا نافذة انتقال: تقرير قديم بلا علامة (الدائن دفعة) وتقرير v1 بـsale_payment
+  //       يعطيان الحكم نفسه والحد نفسه؛ وبلا علامة يُتجاهل lineKind حتى لو ظهر.
+  const legacy77 = build77([{ id: 88, name: "lineKind sale_payment", kind: null }, { id: 91, name: "lineKind discount", kind: "discount" }], null);
+  const v1Pay = rc77.customers.find((c) => c.customerGuid === gid(88));
+  for (const id of [88, 91]) {
+    const old = legacy77.customers.find((c) => c.customerGuid === gid(id));
+    assert.equal(old.autoCredit.paidInOverdueSpan, 1800, `test 77: بلا علامة الدائن دفعة كما اليوم (${id})`);
+    assert.equal(old.creditStatus, v1Pay.creditStatus, `test 77: الحكم نفسه قبل الانتقال وبعده (${id})`);
+    assert.equal(old.creditLimit, v1Pay.creditLimit, `test 77: الحد نفسه قبل الانتقال وبعده (${id})`);
+    assert.equal(old.autoCredit.coverage, v1Pay.autoCredit.coverage, `test 77: التغطية نفسها (${id})`);
+  }
+  // عيّنة المحفظة بأنواع v1 (sale/payment) = المحفظة القديمة بلا حقل: الدورة لا تتغير.
+  assert.deepEqual(rc77.dataAvailability.creditCycle, legacy77.dataAvailability.creditCycle, "test 77: دورة المحفظة لا تتغير بالانتقال");
 
   // 66) عدّادات الملخص؛ وتنبيه الحد يبقى مسودة داخلية: لا مسار تيليغرام في هذه المرحلة.
   assert.ok(rc.summary.delinquentCreditCount >= 2 && rc.summary.inactiveCreditCount >= 2 && rc.summary.lowDataCreditCount >= 1);

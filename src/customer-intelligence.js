@@ -481,18 +481,26 @@
   // دفتر حساب الزبون (ameen_customer_movements) — مصدر حد الائتمان الآلي.
   //
   // كل الحركات بعملة الأساس. تصنيف الدائن لمقاييس السداد من `lineKind` (نوع
-  // المستند + حساب المقابل من المصدر) لا من النص: payment/receipt دفعة، return
-  // مرتجع، وأي قيمة أخرى ظاهرة (discount/purchase/…) تسوية فقط. بلا الحقل يبقى
-  // السلوك الحالي: billGuid = مرتجع، والافتتاحي (01-07) يسوّي ولا يُعدّ دفعة.
-  // الربط بالمعرّف وحده — لا اسم.
+  // المستند + الحساب المقابل من المصدر) لا من النص، ولا يُوثق به إلا حين يحمل
+  // التقرير العلامة `summary.lineKinds = "v1"` (push-customer-movements.ps1).
+  // بلا العلامة يبقى السلوك الحالي: billGuid = مرتجع، والافتتاحي يسوّي ولا يُعدّ
+  // دفعة، وأي دائن آخر دفعة. الربط بالمعرّف وحده — لا اسم.
   // --------------------------------------------------------------------------
   const OPENING_ENTRY = /افتتاح/u;
+  const LINE_KINDS_MARKER = "v1";
+  // تحت lineKinds:v1 (قرار المالك 2026-09-27): دفعة الزبون وحدها تدخل التغطية والجودة
+  // والانتظام واختبار التعثّر؛ sale_payment هو الاسم القانوني لدفعة البيع، وpayment/
+  // receipt للتوافق. المرتجع والحسم ونقل الدين والتسوية تُنقص الدين (FIFO) ولا تُعدّ
+  // دفعة. الشراء ودفعاتنا للحساب وunknown لا دفعة ولا تسوية: لا تُحسّن أي مؤشر سداد.
+  const PAYMENT_LINE_KINDS = new Set(["sale_payment", "payment", "receipt"]);
+  const SETTLE_LINE_KINDS = new Set(["discount", "debt_transfer", "adjustment", "opening"]);
 
   function ledgerIndex(movementsReport) {
     const byGuid = new Map();
     let startDay = null;
     const items = Array.isArray(movementsReport?.items) ? movementsReport.items : [];
     const reportFromDay = dayNumber(movementsReport?.summary?.fromDate);
+    const lineKindsTrusted = text(movementsReport?.summary?.lineKinds) === LINE_KINDS_MARKER;
     for (const item of items) {
       const guid = normalizeGuid(item?.customerGuid ?? item?.customer_guid);
       if (!guid || byGuid.has(guid)) continue;
@@ -510,7 +518,7 @@
           credit,
           isReturn: Boolean(text(movement?.billGuid ?? movement?.bill_guid)),
           isOpening: OPENING_ENTRY.test(text(movement?.notes)),
-          lineKind: text(movement?.lineKind ?? movement?.line_kind).toLowerCase() || null
+          lineKind: lineKindsTrusted ? (text(movement?.lineKind ?? movement?.line_kind).toLowerCase() || "unknown") : null
         });
       });
       rows.sort((a, b) => a.day - b.day || a.index - b.index);
@@ -599,14 +607,15 @@
     if (debit.remaining > span.tolerance) acc.openQueue.push(debit);
   }
 
-  // تصنيف سطر الدائن لمقاييس السداد فقط. التسوية FIFO تتم دائماً بعدها.
-  // lineKind من المصدر — لا تخمين من الملاحظات أو المبلغ أو تطابق فاتورة.
+  // تصنيف سطر الدائن: payment (مقاييس السداد + FIFO)، return (مرتجع + FIFO)، settle
+  // (FIFO وحدها)، none (لا هذا ولا ذاك). lineKind من المصدر الموسوم وحده — لا تخمين
+  // من الملاحظات أو المبلغ أو تطابق فاتورة.
   function creditMetricKind(row) {
-    const kind = text(row?.lineKind).toLowerCase();
-    if (kind) {
-      if (kind === "return") return "return";
-      if (kind === "payment" || kind === "receipt") return "payment";
-      return "settle";
+    if (row.lineKind) {
+      if (PAYMENT_LINE_KINDS.has(row.lineKind)) return "payment";
+      if (row.lineKind === "return") return "return";
+      if (SETTLE_LINE_KINDS.has(row.lineKind)) return "settle";
+      return "none";
     }
     if (row.isReturn) return "return";
     if (row.isOpening) return "settle";
@@ -616,6 +625,7 @@
   // سطر دائن في الدفتر: مرتجع أو دفعة أو تسوية فقط، ثم FIFO.
   function ledgerAddCredit(acc, row, span) {
     const metric = creditMetricKind(row);
+    if (metric === "none") return;
     if (metric === "return") {
       if (span.inWindow(row.day)) acc.returns60 += row.credit;
     } else if (metric === "payment") {
