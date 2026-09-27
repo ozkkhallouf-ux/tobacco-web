@@ -473,6 +473,7 @@
     const byGuid = new Map();
     let startDay = null;
     const items = Array.isArray(movementsReport?.items) ? movementsReport.items : [];
+    const reportFromDay = dayNumber(movementsReport?.summary?.fromDate);
     for (const item of items) {
       const guid = normalizeGuid(item?.customerGuid ?? item?.customer_guid);
       if (!guid || byGuid.has(guid)) continue;
@@ -493,6 +494,17 @@
         });
       });
       rows.sort((a, b) => a.day - b.day || a.index - b.index);
+      // دين أقدم من نافذة التقرير (92 يوماً) لا يأتي حركةً بل openingBalance = الرصيد
+      // قبل أول حركة معروضة. نضيفه قيداً افتتاحياً قبل بداية النافذة، وإلا خرج أقدم
+      // دين من تسوية FIFO ومن التعثّر بمجرد أن تتجاوز النافذةُ القيدَ الافتتاحي.
+      const carried = numberOrZero(item?.openingBalance ?? item?.opening_balance);
+      if (Math.abs(carried) > CONFIG.autoCredit.settleTolerance) {
+        const firstDay = rows.length ? rows[0].day : null;
+        const day = Math.min(...[reportFromDay, firstDay].filter((value) => value !== null)) - 1;
+        if (Number.isFinite(day)) {
+          rows.unshift({ day, index: -1, debit: Math.max(0, carried), credit: Math.max(0, -carried), isReturn: false, isOpening: true });
+        }
+      }
       byGuid.set(guid, { truncated: item?.truncated === true, rows });
     }
     return { byGuid, startDay };
@@ -1327,7 +1339,18 @@
       const isSupplierRecord = record.balanceRow?.isSupplier === true;
       const display = accountDisplay(record.balanceRow, record.customerGuid);
       let auto = null;
-      if (!isSupplierRecord && record.customerGuid && ledger.byGuid.size > 0) {
+      if (!isSupplierRecord && record.customerGuid && ledger.byGuid.size > 0 && sourcesFreshness.movements.stale) {
+        // دفتر حركات متوقف المزامنة: لا حد آلي ولا حكم تعثّر من بيانات قديمة.
+        const age = sourcesFreshness.movements.ageMinutes;
+        auto = {
+          status: "unavailable",
+          limitBase: null,
+          staleLedger: true,
+          notes: [age === null
+            ? "دفتر الحركات بلا وقت مزامنة معروف: لا حد آلي من بيانات غير مؤكدة الحداثة."
+            : `دفتر الحركات غير حديث (آخر مزامنة قبل ${age} دقيقة): لا حد آلي من بيانات قديمة.`]
+        };
+      } else if (!isSupplierRecord && record.customerGuid && ledger.byGuid.size > 0) {
         const facts = factsByGuid.get(record.customerGuid) || null;
         const rawBalance = numberOrNull(record.balanceRow?.balance);
         const accountBalance = numberOrNull(record.balanceRow?.balanceAccountCcy);
@@ -1469,7 +1492,7 @@
 
       if (draft.ambiguousIdentity) flags.push("ambiguous_identity");
       if (draft.currencyMixed) flags.push("mixed_currency");
-      if (staleData) flags.push("stale_data");
+      if (staleData || draft.credit.autoCredit?.staleLedger) flags.push("stale_data");
       if (draft.isSupplier) flags.push("supplier_account");
 
       const trend = draft.usableSales

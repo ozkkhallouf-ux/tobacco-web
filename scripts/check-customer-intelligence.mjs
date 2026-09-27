@@ -1468,7 +1468,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
 }
 
 // ---------------------------------------------------------------------------
-// 47–66) حد الائتمان الآلي (STEP 1): الحد المحسوب من دفتر حساب الزبون.
+// 47–68) حد الائتمان الآلي (STEP 1): الحد المحسوب من دفتر حساب الزبون.
 // كل الأرقام تركيبية. التاريخ المرجعي = REFERENCE_ISO (2026-09-02)، وd(n) = قبله بـn يوماً.
 // ---------------------------------------------------------------------------
 {
@@ -1716,9 +1716,39 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   assert.equal(dormant.creditLimit, 0);
   assert.equal(row(G_IDLE).creditStatus, "inactive_no_limit", "test 65: الخامل بلا دين ليس متعثّراً");
 
+  // 67) دين أقدم من نافذة تقرير الحركات يصل openingBalance لا حركة: يدخل FIFO والتعثّر.
+  //     زبون بسحب حديث قليل، وعليه دين قديم مرحَّل لم يُسدَّد منه شيء.
+  const carriedRows = [debit(10, 200), debit(5, 200)];
+  const carriedReports = (openingBalance) => ({
+    ...reports,
+    movementsReport: {
+      ...reports.movementsReport,
+      summary: { ...reports.movementsReport.summary, fromDate: d(60) },
+      items: [{ customerGuid: G_STEADY, name: "ائتمان منتظم", truncated: false, openingBalance, movements: carriedRows }]
+    }
+  });
+  const carried = engine.build(carriedReports(3000)).customers.find((c) => c.customerGuid === G_STEADY);
+  assert.equal(carried.creditStatus, "delinquent", "test 67: الدين المرحَّل القديم غير المسدَّد = تعثّر");
+  assert.ok(carried.autoCredit.oldestOpenDays > 60, "test 67: أقدم دين مفتوح هو المرحَّل");
+  assert.ok(carried.autoCredit.overdueAmount >= 3000);
+  const noCarry = engine.build(carriedReports(0)).customers.find((c) => c.customerGuid === G_STEADY);
+  assert.notEqual(noCarry.creditStatus, "delinquent", "test 67: بلا رصيد مرحَّل لا تعثّر");
+
+  // 68) دفتر حركات متوقف المزامنة: لا حد آلي ولا تعثّر من بيانات قديمة، ووسم المصدر غير الحديث.
+  const staleIso = new Date(NOW.getTime() - 3 * 3600000).toISOString();
+  const rcStale = engine.build({
+    ...reports,
+    movementsReport: { ...reports.movementsReport, created_at: staleIso, summary: { ...reports.movementsReport.summary, syncedAt: staleIso } }
+  });
+  const staleSteady = rcStale.customers.find((c) => c.customerGuid === G_STEADY);
+  assert.equal(staleSteady.autoCredit.status, "unavailable", "test 68: دفتر قديم = غير متاح");
+  assert.equal(staleSteady.creditLimit, null);
+  assert.ok(staleSteady.flags.includes("stale_data"), "test 68: وسم المصدر غير الحديث");
+  assert.ok(!rcStale.customers.some((c) => c.creditStatus === "delinquent"), "test 68: لا حكم تعثّر من دفتر قديم");
+
   // 66) عدّادات الملخص؛ وتنبيه الحد يبقى مسودة داخلية: لا مسار تيليغرام في هذه المرحلة.
   assert.ok(rc.summary.delinquentCreditCount >= 2 && rc.summary.inactiveCreditCount >= 2 && rc.summary.lowDataCreditCount >= 1);
   assert.equal(rc.summary.nonCustomerCreditCount, 1, "test 66: غير الزبون يُعدّ منفصلاً");
 }
 
-console.log(`ذكاء الزبائن: 66 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
+console.log(`ذكاء الزبائن: 68 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
