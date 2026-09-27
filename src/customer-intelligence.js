@@ -488,6 +488,7 @@
   // --------------------------------------------------------------------------
   const OPENING_ENTRY = /افتتاح/u;
   const LINE_KINDS_MARKER = "v1";
+  const UNTYPED_LEDGER_NOTE = "الحد الآلي غير متاح: تقرير الحركات لا يحمل نوع كل حركة (lineKinds:v1) بعد، فلا يُبنى حد ولا حكم تعثّر من دفتر يخلط الحسم والمشتريات بالدفعات.";
   // تحت lineKinds:v1 (قرار المالك 2026-09-27): دفعة الزبون وحدها تدخل التغطية والجودة
   // والانتظام واختبار التعثّر؛ sale_payment هو الاسم القانوني لدفعة البيع، وpayment/
   // receipt للتوافق. المرتجع والحسم ونقل الدين والتسوية تُنقص الدين (FIFO) ولا تُعدّ
@@ -557,7 +558,7 @@
       const unknownAmount = rows.reduce((sum, row) => sum + (UNRESOLVED_LINE_KINDS.has(row.lineKind) ? row.debit + row.credit : 0), 0);
       byGuid.set(guid, { truncated: item?.truncated === true, rows, unknownAmount });
     }
-    return { byGuid, startDay };
+    return { byGuid, startDay, lineKindsTrusted };
   }
 
   // مئين مرجّح بالمبلغ (أول قيمة يبلغ عندها الوزن التراكمي q من الإجمالي).
@@ -1053,7 +1054,7 @@
   // الحساب — تُعرض مرجعاً تشخيصياً فقط (legacyCreditLimit).
   // غياب الحد **ليس** صفراً ولا يُنتج تجاوزاً.
   // --------------------------------------------------------------------------
-  function resolveCredit(balanceRow, auto, display, legacyCreditLimit = null, { balancesStale = false } = {}) {
+  function resolveCredit(balanceRow, auto, display, legacyCreditLimit = null, { balancesStale = false, autoGated = false } = {}) {
     const ameenLimitRaw = numberOrNull(balanceRow?.creditLimit ?? balanceRow?.credit_limit);
     // تقرير أرصدة غير حديث: لا حد الأمين من اللقطة نفسها بديلاً — رقم يبدو صالحاً وهو قديم.
     const ameenLimit = !balancesStale && ameenLimitRaw !== null && ameenLimitRaw > 0 ? ameenLimitRaw : null;
@@ -1112,6 +1113,11 @@
     if (balancesStale && !confirmedStatus) {
       // لا استخدام ولا تجاوز ولا تعثّر من رصيد قديم.
       return { ...base, currentBalance: round(balance, 3), balanceDisplay: round(balanceDisplay, 3), balanceCurrency, creditLimitSource: autoUsable ? base.creditLimitSource : "stale", creditUsagePercent: null, creditStatus: "stale_balance" };
+    }
+    if (autoGated && !confirmedStatus && creditLimitSource !== "ameen") {
+      // لا حد آلي ولا استخدام ولا تجاوز ولا تعثّر قبل مصدر حركات موسوم بالنوع. حد الأمين
+      // المُدخل يدوياً (إن وُجد) يبقى بمصدره «ameen» كمسار الدفتر غير الحديث — ليس حداً آلياً.
+      return { ...base, currentBalance: round(balance, 3), balanceDisplay: round(balanceDisplay, 3), balanceCurrency, creditLimitSource: "untyped", creditUsagePercent: null, creditStatus: "awaiting_typed_source" };
     }
     if (autoUsable && auto.status === "delinquent") creditStatus = "delinquent";
     else if (autoUsable && auto.status === "inactive") creditStatus = "inactive_no_limit";
@@ -1386,6 +1392,8 @@
         needsReviewByGuid.set(guid, { kind: "suspect", reason: `يحتاج مراجعة نوع الحركة: فواتير المبيع تغطي ${Math.round((invoiced / facts.sales60) * 100)}% فقط من سحبه في الدفتر.` });
       }
     }
+    // الحد الآلي مغلق (fail-closed) ما لم يحمل تقرير الحركات العلامة lineKinds:v1.
+    const autoCreditGated = ledger.byGuid.size > 0 && !ledger.lineKindsTrusted;
     // عيّنة المحفظة من حسابات موثوقة الحركة فقط.
     const cycleStats = portfolioCycleStats([...factsByGuid.entries()]
       .filter(([guid]) => !nonCustomerByGuid.has(guid) && !needsReviewByGuid.has(guid))
@@ -1560,6 +1568,13 @@
           // «يحتاج مراجعة» حكم على نوع الحركة لا على حداثتها: يبقى، وبلا حد كما هو.
           ? { status: "needs_review", limitBase: null, staleLedger: true, notes: [review.reason, staleCreditNote(staleCreditSource, sourcesFreshness)] }
           : { status: "unavailable", limitBase: null, staleLedger: true, notes: [staleCreditNote(staleCreditSource, sourcesFreshness)] };
+      } else if (!isSupplierRecord && record.customerGuid && autoCreditGated) {
+        // قرار المالك (2026-09-27، Codex P1): بلا lineKinds:v1 يخلط الدفتر الحسم والمشتريات
+        // بالدفعات، فلا حد آلي ولا حكم تعثّر منه. «يحتاج مراجعة» حكم على الحساب يبقى.
+        const review = needsReviewByGuid.get(record.customerGuid) || null;
+        auto = review
+          ? { status: "needs_review", limitBase: null, untypedLedger: true, notes: [review.reason, UNTYPED_LEDGER_NOTE] }
+          : { status: "unavailable", limitBase: null, untypedLedger: true, notes: [UNTYPED_LEDGER_NOTE] };
       } else if (!isSupplierRecord && record.customerGuid && ledger.byGuid.size > 0) {
         const facts = factsByGuid.get(record.customerGuid) || null;
         const rawBalance = numberOrNull(record.balanceRow?.balance);
@@ -1579,7 +1594,7 @@
         });
         if (display.rate !== null) auto.exchangeRate = display.rate;
       }
-      const credit = resolveCredit(record.balanceRow, auto, display, legacyCreditLimit, { balancesStale: sourcesFreshness.balances.stale });
+      const credit = resolveCredit(record.balanceRow, auto, display, legacyCreditLimit, { balancesStale: sourcesFreshness.balances.stale, autoGated: autoCreditGated && !isSupplierRecord });
       // أصناف مختلطة العملة: لا نجمع lineTotals بعملات مختلفة — نُعيد صفر أصناف.
       const items = currencyMixed ? { items: [], identity: "item_guid" } : topItems(windowRows);
 
@@ -1877,6 +1892,7 @@
       else if (draft.credit.creditStatus === "needs_review") reasons.push(...draft.credit.autoCredit.notes);
       else if (draft.credit.creditStatus === "near_limit") reasons.push(`الرصيد بلغ ${draft.credit.creditUsagePercent}% من حد الائتمان.`);
       else if (draft.credit.creditStatus === "unknown_limit") reasons.push("عليه رصيد مدين بلا حد ائتمان محدد.");
+      else if (draft.credit.creditStatus === "awaiting_typed_source") reasons.push(UNTYPED_LEDGER_NOTE);
       else if (draft.credit.creditStatus === "stale_balance") reasons.push("تقرير الأرصدة غير حديث: حد الائتمان غير متاح، ولا نسبة استخدام ولا حكم تجاوز من رصيد قديم.");
       else if (draft.credit.creditStatus === "unknown_balance") reasons.push("لا يوجد صف رصيد من الأمين لهذا الزبون، فلا يُعرض صفراً ولا يُحسب ضمن الذمم.");
 
@@ -1998,6 +2014,7 @@
         invoicesAvailable,
         balancesAvailable: balanceItems.length > 0,
         movementsAvailable: Array.isArray(movementsReport?.items) && movementsReport.items.length > 0,
+        autoCreditEnabled: ledger.byGuid.size > 0 && ledger.lineKindsTrusted,
         creditCycle: cycleStats,
         previousWindowCovered: window.previousWindowCovered,
         coverageDays: window.coverageDays,

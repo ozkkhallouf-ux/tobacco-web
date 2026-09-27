@@ -300,6 +300,7 @@
     prepaid: "رصيد دائن",
     not_customer: "ليس زبون مبيعات",
     stale_balance: "غير متاح: الرصيد غير حديث",
+    awaiting_typed_source: "غير متاح: بانتظار مصدر حركات موسوم",
     needs_review: "غير متاح: يحتاج مراجعة"
   };
   const AUTO_STATUS_TEXT = {
@@ -324,6 +325,7 @@
       return row.creditLimitDisplay === null ? escape(label) : `${money(row.creditLimitDisplay, row.creditCurrency || "USD")} (${escape(label)})`;
     }
     if (row.creditLimitSource === "stale") return "غير متاح (تقرير الأرصدة غير حديث)";
+    if (row.creditLimitSource === "untyped") return "غير متاح (بانتظار تقرير حركات موسوم بالنوع)";
     if (row.creditLimitSource === "ameen") return `${money(row.creditLimitDisplay ?? row.creditLimit, row.creditCurrency || "USD")} (من الأمين — لا دفتر حساب للحساب الآلي)`;
     return "غير محدد";
   }

@@ -22,7 +22,35 @@ function loadEngine() {
   return engine;
 }
 
-const engine = loadEngine();
+const coreEngine = loadEngine();
+
+// قرار المالك (2026-09-27): بلا lineKinds:v1 الحد الآلي مغلق. عقود المحرك السابقة (1..76)
+// تُبنى على دفتر موسوم يطابق تصنيفها القديم حرفياً: مدين = sale (والافتتاحي opening)،
+// دائن = sale_payment (وbillGuid ⇒ return، والافتتاحي opening). `untyped: true` يمرّر
+// التقرير كما هو لاختبار المصدر غير الموسوم نفسه (77..80).
+const OPENING_NOTE = /افتتاح/u;
+const rawBuild = coreEngine.build;
+function typedMovements(report) {
+  if (!report || !Array.isArray(report.items) || report.summary?.lineKinds) return report;
+  const kindOf = (m) => {
+    if (m.lineKind) return m.lineKind;
+    if (OPENING_NOTE.test(m.notes || "")) return "opening";
+    if (Number(m.debit) > 0) return "sale";
+    return m.billGuid ? "return" : "sale_payment";
+  };
+  return {
+    ...report,
+    summary: { ...(report.summary || {}), lineKinds: "v1" },
+    items: report.items.map((item) => ({ ...item, movements: (item.movements || []).map((m) => ({ ...m, lineKind: kindOf(m) })) }))
+  };
+}
+const engine = Object.freeze({
+  ...coreEngine,
+  build: (input = {}) => {
+    const { untyped, ...rest } = input;
+    return rawBuild(untyped ? rest : { ...rest, movementsReport: typedMovements(rest.movementsReport) });
+  }
+});
 
 // ---------------------------------------------------------------------------
 // أدوات بناء تركيبة اختبار
@@ -1699,8 +1727,9 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   // 63) قائمتا المالك بالمعرّف لا بالاسم، ولو غطّت الفواتير السحب كاملاً:
   //     الاستبعاد الصريح (قناة داخلية، فروقات جرد، سلفة موظف) ⇒ «ليس زبون مبيعات»؛
   //     الحساب المختلط (مورد وزبون) ⇒ «يحتاج مراجعة» بلا حد آلي، لا «ليس زبوناً».
-  const asOwnerListed = (guid) => engine.build({
+  const asOwnerListed = (guid, untyped = false) => engine.build({
     ...reports,
+    untyped,
     invoicesReport: invoicesReportFor([{ ...accounts[0], guid, name: "اسم عادي" }]),
     balancesReport: { ...reports.balancesReport, items: [{ ...reports.balancesReport.items[0], customerGuid: guid, customerAccountGuid: guid, name: "اسم عادي", key: "اسم عادي" }] },
     movementsReport: { ...reports.movementsReport, items: [{ ...reports.movementsReport.items[0], customerGuid: guid, name: "اسم عادي" }] }
@@ -2003,6 +2032,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
     const all = [...portfolio77, ...cases.map((c) => ({ guid: gid(c.id), name: c.name, truncated: false,
       movements: [{ ...debit(40, 2000), ...(marker ? { lineKind: "sale" } : {}) }, credit77(c.kind)] }))];
     return engine.build({
+      untyped: !marker,
       now: NOW,
       invoicesReport: invoicesReportFor(all.map((a) => ({ ...a }))),
       balancesReport: { ...reports.balancesReport, items: all.map((a) => ({ ...reports.balancesReport.items[0], key: engine.normalizeName(a.name), name: a.name,
@@ -2039,16 +2069,16 @@ if (!process.env.OZK_CI_TZ_CHILD) {
     assert.equal(r77.creditStatus === "delinquent", c.delinquent, `test 77: ${c.kind} واختبار التعثّر`);
     if (c.paid === 0) assert.ok(!(r77.autoCredit.coverage > 0.5), `test 77: ${c.kind} لا يرفع التغطية`);
   }
-  // 9–10) لا نافذة انتقال: تقرير قديم بلا علامة (الدائن دفعة) وتقرير v1 بـsale_payment
-  //       يعطيان الحكم نفسه والحد نفسه؛ وبلا علامة يُتجاهل lineKind حتى لو ظهر.
+  // 9–10) لا نافذة انتقال (قرار المالك 2026-09-27، Codex P1): تقرير بلا العلامة ⇒ الحد
+  //       الآلي مغلق (fail-closed) لا حد من دفتر ملتبس؛ ومع v1 يعمل المحرك بالتصنيف الجديد.
+  //       فلا وقت يرسل فيه المصدر أنواعاً لا يفهمها المحرك، ولا وقت يُصدر فيه حداً من مصدر قديم.
   const legacy77 = build77([{ id: 88, name: "lineKind sale_payment", kind: null }, { id: 91, name: "lineKind discount", kind: "discount" }], null);
-  const v1Pay = rc77.customers.find((c) => c.customerGuid === gid(88));
+  assert.ok(rc77.customers.find((c) => c.customerGuid === gid(88)).creditLimit > 0, "test 77: مع v1 حد آلي للدافع");
   for (const id of [88, 91]) {
     const old = legacy77.customers.find((c) => c.customerGuid === gid(id));
-    assert.equal(old.autoCredit.paidInOverdueSpan, 1800, `test 77: بلا علامة الدائن دفعة كما اليوم (${id})`);
-    assert.equal(old.creditStatus, v1Pay.creditStatus, `test 77: الحكم نفسه قبل الانتقال وبعده (${id})`);
-    assert.equal(old.creditLimit, v1Pay.creditLimit, `test 77: الحد نفسه قبل الانتقال وبعده (${id})`);
-    assert.equal(old.autoCredit.coverage, v1Pay.autoCredit.coverage, `test 77: التغطية نفسها (${id})`);
+    assert.equal(old.creditLimit, null, `test 77: بلا علامة لا حد آلي (${id})`);
+    assert.equal(old.creditStatus, "awaiting_typed_source", `test 77: بلا علامة الحالة معلنة (${id})`);
+    assert.equal(old.creditUsagePercent, null, `test 77: بلا علامة لا نسبة استخدام (${id})`);
   }
   // عيّنة المحفظة بأنواع v1 (sale/payment) = المحفظة القديمة بلا حقل: الدورة لا تتغير.
   assert.deepEqual(rc77.dataAvailability.creditCycle, legacy77.dataAvailability.creditCycle, "test 77: دورة المحفظة لا تتغير بالانتقال");
@@ -2087,6 +2117,8 @@ if (!process.env.OZK_CI_TZ_CHILD) {
     });
   };
   const rc78 = build78([...debitCases78, materialUnknown, smallUnknownCredit, unknownInPortfolio], "v1");
+  // «legacy78/79» = الدفتر نفسه موسوماً بقاعدة التصنيف القديمة (المدين sale والدائن
+  // sale_payment) — ضبط يثبت أن الفرق من النوع المجهول وحده.
   const legacy78 = build78([...debitCases78, materialUnknown, smallUnknownCredit, unknownInPortfolio], null);
   const at78 = (built, id) => built.customers.find((c) => c.customerGuid === gid(id));
   const draws = (c) => c.autoCredit.salesRecent + c.autoCredit.salesPrior;
@@ -2095,7 +2127,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
     assert.equal(draws(v1), c.draws, `test 78: مدين ${c.kind} ${c.draws === 3000 ? "يدخل" : "لا يدخل"} Sales Velocity`);
     assert.notEqual(v1.autoCredit.status, "needs_review", `test 78: ${c.kind} معروف لا «يحتاج مراجعة»`);
     // بلا العلامة: كل مدين غير افتتاحي سحب كما اليوم.
-    assert.equal(draws(at78(legacy78, c.id)), 2000 + (c.amount ?? 1000), `test 78: بلا علامة ${c.kind} سحب كالسلوك القديم`);
+    assert.equal(draws(at78(legacy78, c.id)), 2000 + (c.amount ?? 1000), `test 78: بالتصنيف القديم ${c.kind} سحب كالسلوك القديم`);
   }
   // جانب الشراء لا يدخل FIFO: الدفعة 2000 تسدّد الفاتورة كلها فلا دين مفتوح.
   for (const id of [102, 103, 104]) assert.equal(at78(rc78, id).autoCredit.oldestOpenDays, null, `test 78: جانب الشراء ليس ديناً على الزبون (${id})`);
@@ -2105,7 +2137,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   assert.equal(mu.autoCredit.status, "needs_review", "test 78: unknown مادّي ⇒ يحتاج مراجعة");
   assert.equal(mu.creditLimit, null, "test 78: unknown مادّي ⇒ لا حد");
   assert.equal(mu.creditStatus, "needs_review");
-  assert.notEqual(at78(legacy78, 108).creditStatus, "needs_review", "test 78: بلا علامة لا مراجعة");
+  assert.notEqual(at78(legacy78, 108).creditStatus, "needs_review", "test 78: بالتصنيف القديم لا مراجعة");
   assert.equal(at78(legacy78, 108).creditStatus, "delinquent", "test 78: الضبط — الدفتر نفسه متعثّر بلا الحارس");
   assert.ok(mu.explanation.some((reason) => reason.includes("غير مصنّفة")), "test 78: السبب ظاهر");
   const su = at78(rc78, 109);
@@ -2152,9 +2184,43 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   assert.equal(osc.autoCredit.daysSinceLastPayment, null, "test 79: دائن other ليس آخر دفعة");
   assert.equal(osc.autoCredit.overdueAmount, 2000, "test 79: دائن other لا يسوّي الدين");
   // 7) بلا العلامة: السلوك القديم كما هو — المدين سحب والدائن دفعة ولا مراجعة.
-  assert.equal(draws(at78(legacy79, 113)), 2030, "test 79: بلا علامة مدين other سحب كالسلوك القديم");
-  assert.equal(at78(legacy79, 114).autoCredit.paidInOverdueSpan, 30, "test 79: بلا علامة دائن other دفعة كالسلوك القديم");
-  for (const c of list79) assert.notEqual(at78(legacy79, c.id).creditStatus, "needs_review", `test 79: بلا علامة لا مراجعة (${c.id})`);
+  assert.equal(draws(at78(legacy79, 113)), 2030, "test 79: بالتصنيف القديم مدين other سحب كالسلوك القديم");
+  assert.equal(at78(legacy79, 114).autoCredit.paidInOverdueSpan, 30, "test 79: بالتصنيف القديم دائن other دفعة كالسلوك القديم");
+  for (const c of list79) assert.notEqual(at78(legacy79, c.id).creditStatus, "needs_review", `test 79: بالتصنيف القديم لا مراجعة (${c.id})`);
+
+  // 80) قرار المالك (2026-09-27، Codex P1) — الحد الآلي fail-closed بلا lineKinds:v1: لا حد
+  //     آلي ولا نسبة استخدام ولا تجاوز ولا تعثّر من دفتر يخلط الحسم والمشتريات بالدفعات،
+  //     والتصنيفات المؤكدة (ليس زبوناً، مختلط، يحتاج مراجعة) تبقى. مع v1 حديث يعمل المحرك.
+  const untyped80 = engine.build({ ...reports, untyped: true });
+  assert.equal(untyped80.dataAvailability.autoCreditEnabled, false, "test 80: بلا علامة الحد الآلي مغلق");
+  assert.equal(rc.dataAvailability.autoCreditEnabled, true, "test 80: مع v1 الحد الآلي يعمل");
+  const byGuid80 = new Map(untyped80.customers.map((c) => [c.customerGuid, c]));
+  let gated80 = 0;
+  for (const typed of rc.customers) {
+    if (typed.isSupplier || !typed.customerGuid) continue;
+    const u = byGuid80.get(typed.customerGuid);
+    assert.ok(u, `test 80: السجل موجود (${typed.customerGuid})`);
+    assert.equal(u.creditLimit === null || u.creditLimitSource === "ameen", true, `test 80: لا حد آلي بلا علامة (${typed.customerGuid})`);
+    // حد مُدخل يدوياً في الأمين (إن وُجد) يبقى بمصدره كمسار الدفتر غير الحديث — ليس حداً آلياً.
+    if (u.creditLimitSource === "ameen") { assert.equal(typed.creditLimitSource, "ameen", "test 80: حد الأمين بمصدره"); continue; }
+    assert.ok(!["delinquent", "over_limit", "near_limit", "normal", "inactive_no_limit", "prepaid"].includes(u.creditStatus), `test 80: لا حكم ائتمان بلا علامة (${typed.customerGuid}: ${u.creditStatus})`);
+    assert.equal(u.creditUsagePercent, null, `test 80: لا نسبة استخدام بلا علامة (${typed.customerGuid})`);
+    if (["not_customer", "needs_review"].includes(typed.creditStatus)) {
+      assert.equal(u.creditStatus, typed.creditStatus, `test 80: التصنيف المؤكد يبقى (${typed.customerGuid})`);
+    } else if (u.creditStatus === "awaiting_typed_source") {
+      gated80 += 1;
+      assert.equal(u.creditLimit, null);
+      assert.ok(u.explanation.some((reason) => reason.includes("lineKinds:v1")), "test 80: السبب ظاهر");
+    }
+  }
+  assert.ok(gated80 >= 5, "test 80: حسابات عادية ومتعثرة كلها مغلقة بلا علامة");
+  for (const status of ["delinquent", "normal", "needs_review"]) {
+    assert.ok(rc.customers.some((c) => c.creditStatus === status), `test 80: التركيبة تغطي ${status} مع v1`);
+  }
+  // قائمتا المالك (ليس زبوناً / مختلط) تبقيان بلا علامة أيضاً.
+  assert.equal(asOwnerListed(engine.CONFIG.autoCredit.excludedAccountGuids[0], true).creditStatus, "not_customer", "test 80: ليس زبوناً يبقى بلا علامة");
+  assert.equal(asOwnerListed(engine.CONFIG.autoCredit.reviewAccountGuids[0], true).creditStatus, "needs_review", "test 80: المختلط يبقى بلا علامة");
+  assert.equal(untyped80.summary.delinquentCreditCount, 0, "test 80: لا متعثّر من مصدر ملتبس");
 
   // 66) عدّادات الملخص؛ وتنبيه الحد يبقى مسودة داخلية: لا مسار تيليغرام في هذه المرحلة.
   assert.ok(rc.summary.delinquentCreditCount >= 2 && rc.summary.inactiveCreditCount >= 2 && rc.summary.lowDataCreditCount >= 1);
@@ -2162,4 +2228,4 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   assert.equal(rc.summary.needsReviewCreditCount, 1, "test 66: الشذوذ يُعدّ «يحتاج مراجعة» منفصلاً");
 }
 
-console.log(`ذكاء الزبائن: 79 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
+console.log(`ذكاء الزبائن: 80 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
