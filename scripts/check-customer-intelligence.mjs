@@ -2282,10 +2282,33 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   assert.ok(untypedStale81.customers.every((c) => c.creditLimitSource !== "auto" && !["delinquent", "over_limit", "near_limit"].includes(c.creditStatus)),
     "test 81: بلا v1 وفواتير قديمة يبقى مغلقاً");
 
+  // 82) Codex P1 / قرار المالك — حارس الفاتورة الشاذة يعدّ فواتير نافذة السحب (60 يوماً) وحدها.
+  //     3 فواتير في الأيام 61–92 + فاتورة واحدة كبيرة داخل النافذة ⇒ windowDebitCount = 1 < 4:
+  //     لا قصّ. والحالة المقابلة (عدة فواتير داخل النافذة وواحدة كبيرة) يعمل فيها الحارس كما كان.
+  const build82 = (movements) => {
+    const a = { guid: gid(82), name: "حارس الفاتورة الشاذة بالنافذة", movements };
+    return engine.build({
+      ...reports,
+      invoicesReport: invoicesReportFor([a]),
+      balancesReport: { ...reports.balancesReport, items: [{ ...reports.balancesReport.items[0], key: engine.normalizeName(a.name), name: a.name,
+        balance: ledgerBalance(movements), balanceAccountCcy: ledgerBalance(movements), creditLimit: 0, customerGuid: a.guid, customerAccountGuid: a.guid }] },
+      movementsReport: { ...reports.movementsReport, items: [{ customerGuid: a.guid, name: a.name, truncated: false, movements }] },
+      creditLimits: []
+    }).customers.find((c) => c.customerGuid === a.guid).autoCredit;
+  };
+  const guardFired = (auto) => auto.notes.some((note) => note.includes("الفاتورة الشاذة"));
+  const oldPlusOne = build82([debit(90, 400), pay(86, 400), debit(80, 400), pay(76, 400), debit(70, 400), pay(66, 400), debit(30, 3000), pay(25, 3000)]);
+  assert.equal(guardFired(oldPlusOne), false, "test 82: فواتير الأيام 61–92 لا تجعل فاتورة النافذة الوحيدة شاذة");
+  assert.equal(oldPlusOne.salesPrior, 3000, "test 82: سحب النافذة كاملاً بلا قصّ");
+  const manyInWindow = build82([...regular({ from: 56, every: 8, amount: 300, lag: 4 }), debit(20, 6000), pay(16, 6000)]);
+  assert.equal(guardFired(manyInWindow), true, "test 82: عدة فواتير داخل النافذة ⇒ الحارس يعمل كما كان");
+  const fewInWindow = build82([debit(50, 300), pay(46, 300), debit(40, 300), pay(36, 300), debit(20, 6000), pay(16, 6000)]);
+  assert.equal(guardFired(fewInWindow), false, "test 82: ثلاث فواتير فقط داخل النافذة (< 4) ⇒ لا قصّ");
+
   // 66) عدّادات الملخص؛ وتنبيه الحد يبقى مسودة داخلية: لا مسار تيليغرام في هذه المرحلة.
   assert.ok(rc.summary.delinquentCreditCount >= 2 && rc.summary.inactiveCreditCount >= 2 && rc.summary.lowDataCreditCount >= 1);
   assert.equal(rc.summary.nonCustomerCreditCount, 0, "test 66: لا «ليس زبوناً» بالسلوك");
   assert.equal(rc.summary.needsReviewCreditCount, 1, "test 66: الشذوذ يُعدّ «يحتاج مراجعة» منفصلاً");
 }
 
-console.log(`ذكاء الزبائن: 81 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
+console.log(`ذكاء الزبائن: 82 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);

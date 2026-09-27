@@ -850,7 +850,9 @@
     const S60 = facts.sales60;
     let recent = facts.salesRecent;
     let prior = facts.salesPrior;
-    if (facts.debitCount >= A.largeInvoiceMinCount && facts.maxDebit60 > A.largeInvoiceMaxShare * S60) {
+    // العدد من نافذة السحب نفسها (60 يوماً) لا من كامل تقرير الحركات (92): فواتير الأيام
+    // 61–92 لا تجعل فاتورة النافذة الوحيدة «شاذة».
+    if (facts.windowDebitCount >= A.largeInvoiceMinCount && facts.maxDebit60 > A.largeInvoiceMaxShare * S60) {
       const cut = facts.maxDebit60 - A.largeInvoiceMaxShare * S60;
       if (facts.maxDebitIsRecent) recent -= cut; else prior -= cut;
       notes.push(`حارس الفاتورة الشاذة خفّض أثر فاتورة ${Math.round(facts.maxDebit60)} بمقدار ${Math.round(cut)}.`);
