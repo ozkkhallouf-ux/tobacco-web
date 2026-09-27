@@ -40,7 +40,7 @@ function typedMovements(report) {
   };
   return {
     ...report,
-    summary: { ...(report.summary || {}), lineKinds: "v1" },
+    summary: { ...report.summary, lineKinds: "v1" },
     items: report.items.map((item) => ({ ...item, movements: (item.movements || []).map((m) => ({ ...m, lineKind: kindOf(m) })) }))
   };
 }
