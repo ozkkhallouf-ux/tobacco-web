@@ -2222,10 +2222,70 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   assert.equal(asOwnerListed(engine.CONFIG.autoCredit.reviewAccountGuids[0], true).creditStatus, "needs_review", "test 80: المختلط يبقى بلا علامة");
   assert.equal(untyped80.summary.delinquentCreditCount, 0, "test 80: لا متعثّر من مصدر ملتبس");
 
+  // 81) قرار المالك (2026-09-27، Codex P1) — بوابة الحد الآلي تتطلب الفواتير حديثة أيضاً.
+  //     يوم المرجع ونافذة السحب من لقطة الفواتير: قِدمها يُخرج مبيعات أحدث من النافذة بينما
+  //     الرصيد وFIFO حاليان. مع v1 وحركات وأرصدة حديثة وفواتير قديمة: لا حد آلي ولا نسبة ولا
+  //     تجاوز ولا تعثّر ولا «غير نشط»، والتصنيفات المؤكدة وحد الأمين اليدوي بمصدره يبقيان.
+  const invoicesAt = (iso) => ({ ...reports.invoicesReport, created_at: iso, summary: { ...reports.invoicesReport.summary, syncedAt: iso } });
+  const oldInvoicesIso = new Date(NOW.getTime() - 35 * 86400000).toISOString();   // لقطة من الشهر الماضي
+  for (const [label, iso] of [["قبل 3 ساعات", staleIso], ["قبل 35 يوماً", oldInvoicesIso]]) {
+    const staleInv81 = engine.build({ ...reports, invoicesReport: invoicesAt(iso) });
+    assert.equal(staleInv81.sourcesFreshness.invoices.stale, true, `test 81 (${label}): الفواتير قديمة`);
+    assert.equal(staleInv81.sourcesFreshness.movements.stale || staleInv81.sourcesFreshness.balances.stale, false, `test 81 (${label}): الحركات والأرصدة حديثة`);
+    const byGuid81 = new Map(staleInv81.customers.map((c) => [c.customerGuid, c]));
+    let gated81 = 0;
+    for (const fresh of rc.customers) {
+      if (fresh.isSupplier || !fresh.customerGuid) continue;
+      const c = byGuid81.get(fresh.customerGuid);
+      assert.ok(c, `test 81: السجل موجود (${fresh.customerGuid})`);
+      if (fresh.creditStatus === "not_customer") {
+        assert.equal(c.creditStatus, "not_customer", `test 81 (${label}): التصنيف المؤكد يبقى (${fresh.customerGuid})`);
+        continue;
+      }
+      if (fresh.creditStatus === "needs_review") {
+        // شذوذ الدفتر السلوكي يُحكم من فواتير حديثة وحدها (عقد 71)؛ بلاها يبقى مغلقاً بلا حد.
+        assert.ok(["needs_review", "stale_invoices"].includes(c.creditStatus), `test 81 (${label}): المراجعة لا تنفتح (${fresh.customerGuid})`);
+        assert.equal(c.creditLimit, null);
+        continue;
+      }
+      if (c.creditLimitSource === "ameen") { assert.equal(fresh.creditLimitSource, "ameen", "test 81: حد الأمين بمصدره لا حداً آلياً"); continue; }
+      assert.ok(!["delinquent", "over_limit", "near_limit", "normal", "inactive_no_limit", "prepaid"].includes(c.creditStatus),
+        `test 81 (${label}): لا حكم ائتمان من فواتير قديمة (${fresh.customerGuid}: ${c.creditStatus})`);
+      assert.equal(c.creditLimit, null, `test 81 (${label}): لا حد آلي (${fresh.customerGuid})`);
+      assert.equal(c.creditUsagePercent, null, `test 81 (${label}): لا نسبة استخدام (${fresh.customerGuid})`);
+      if (c.creditStatus === "stale_invoices") {
+        gated81 += 1;
+        assert.equal(c.creditLimitSource, "stale_invoices");
+        assert.ok(c.explanation.some((reason) => reason.includes("الفواتير غير حديث")), "test 81: السبب ظاهر");
+      }
+    }
+    assert.ok(gated81 >= 5, `test 81 (${label}): حسابات عادية ومتعثرة كلها مغلقة`);
+    assert.equal(staleInv81.summary.delinquentCreditCount, 0, `test 81 (${label}): لا متعثّر`);
+    // زبون سحب حديثاً (يوما 12 و3): بلقطة فواتير عمرها 35 يوماً كان يُحكم «غير نشط» بحد صفر.
+    assert.notEqual(byGuid81.get(G_NEW).creditStatus, "inactive_no_limit", `test 81 (${label}): لا «غير نشط» من نافذة فواتير قديمة`);
+    assert.equal(byGuid81.get(G_NEW).creditStatus, "stale_invoices");
+    // قائمتا المالك تبقيان مع فواتير قديمة.
+    for (const [guid, status] of [[engine.CONFIG.autoCredit.excludedAccountGuids[0], "not_customer"], [engine.CONFIG.autoCredit.reviewAccountGuids[0], "needs_review"]]) {
+      const listed = engine.build({ ...reports, invoicesReport: invoicesAt(iso),
+        balancesReport: { ...reports.balancesReport, items: [...reports.balancesReport.items, { ...reports.balancesReport.items[0], key: "مدرج", name: "مدرج", balance: 900, balanceAccountCcy: 900, creditLimit: 0, customerGuid: guid, customerAccountGuid: guid }] } })
+        .customers.find((c) => c.customerGuid === guid);
+      assert.equal(listed.creditStatus, status, `test 81 (${label}): قائمة المالك تبقى (${status})`);
+    }
+  }
+  // الفواتير حديثة مع v1 وحركات وأرصدة حديثة: المحرك يعمل (عقد 47 وما بعده على rc نفسه).
+  assert.equal(rc.sourcesFreshness.invoices.stale, false);
+  assert.equal(row(G_STEADY).creditLimitSource, "auto", "test 81: بفواتير حديثة الحد آلي");
+  assert.ok(row(G_STEADY).creditLimit > 0);
+  assert.notEqual(row(G_NEW).creditStatus, "stale_invoices");
+  // بلا v1 يبقى مغلقاً (عقد 80)، ومع فواتير قديمة أيضاً لا حد ولا حكم.
+  const untypedStale81 = engine.build({ ...reports, untyped: true, invoicesReport: invoicesAt(staleIso) });
+  assert.ok(untypedStale81.customers.every((c) => c.creditLimitSource !== "auto" && !["delinquent", "over_limit", "near_limit"].includes(c.creditStatus)),
+    "test 81: بلا v1 وفواتير قديمة يبقى مغلقاً");
+
   // 66) عدّادات الملخص؛ وتنبيه الحد يبقى مسودة داخلية: لا مسار تيليغرام في هذه المرحلة.
   assert.ok(rc.summary.delinquentCreditCount >= 2 && rc.summary.inactiveCreditCount >= 2 && rc.summary.lowDataCreditCount >= 1);
   assert.equal(rc.summary.nonCustomerCreditCount, 0, "test 66: لا «ليس زبوناً» بالسلوك");
   assert.equal(rc.summary.needsReviewCreditCount, 1, "test 66: الشذوذ يُعدّ «يحتاج مراجعة» منفصلاً");
 }
 
-console.log(`ذكاء الزبائن: 80 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
+console.log(`ذكاء الزبائن: 81 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);

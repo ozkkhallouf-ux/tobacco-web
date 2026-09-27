@@ -301,6 +301,7 @@
     not_customer: "ليس زبون مبيعات",
     stale_balance: "غير متاح: الرصيد غير حديث",
     awaiting_typed_source: "غير متاح: بانتظار مصدر حركات موسوم",
+    stale_invoices: "غير متاح: الفواتير غير حديثة",
     needs_review: "غير متاح: يحتاج مراجعة"
   };
   const AUTO_STATUS_TEXT = {
@@ -321,7 +322,8 @@
   // مصادر بلا حد معروض: نص ثابت.
   const UNAVAILABLE_LIMIT_TEXT = {
     stale: "غير متاح (تقرير الأرصدة غير حديث)",
-    untyped: "غير متاح (بانتظار تقرير حركات موسوم بالنوع)"
+    untyped: "غير متاح (بانتظار تقرير حركات موسوم بالنوع)",
+    stale_invoices: "غير متاح (تقرير الفواتير غير حديث)"
   };
 
   function creditLimitText(row) {

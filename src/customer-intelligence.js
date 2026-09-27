@@ -252,7 +252,7 @@
 
   // سبب تعذّر الحد الآلي حين يكون أحد مصدريه (الدفتر أو الأرصدة) غير حديث.
   function staleCreditNote(source, sourcesFreshness) {
-    const label = source === "movements" ? "دفتر الحركات" : "تقرير الأرصدة";
+    const label = source === "movements" ? "دفتر الحركات" : source === "invoices" ? "تقرير الفواتير" : "تقرير الأرصدة";
     const age = sourcesFreshness[source].ageMinutes;
     return age === null
       ? `${label} بلا وقت مزامنة معروف: لا حد آلي من بيانات غير مؤكدة الحداثة.`
@@ -1054,7 +1054,7 @@
   // الحساب — تُعرض مرجعاً تشخيصياً فقط (legacyCreditLimit).
   // غياب الحد **ليس** صفراً ولا يُنتج تجاوزاً.
   // --------------------------------------------------------------------------
-  function resolveCredit(balanceRow, auto, display, legacyCreditLimit = null, { balancesStale = false, autoGated = false } = {}) {
+  function resolveCredit(balanceRow, auto, display, legacyCreditLimit = null, { balancesStale = false, invoicesStale = false, autoGated = false } = {}) {
     const ameenLimitRaw = numberOrNull(balanceRow?.creditLimit ?? balanceRow?.credit_limit);
     // تقرير أرصدة غير حديث: لا حد الأمين من اللقطة نفسها بديلاً — رقم يبدو صالحاً وهو قديم.
     const ameenLimit = !balancesStale && ameenLimitRaw !== null && ameenLimitRaw > 0 ? ameenLimitRaw : null;
@@ -1113,6 +1113,11 @@
     if (balancesStale && !confirmedStatus) {
       // لا استخدام ولا تجاوز ولا تعثّر من رصيد قديم.
       return { ...base, currentBalance: round(balance, 3), balanceDisplay: round(balanceDisplay, 3), balanceCurrency, creditLimitSource: autoUsable ? base.creditLimitSource : "stale", creditUsagePercent: null, creditStatus: "stale_balance" };
+    }
+    if (invoicesStale && !confirmedStatus && creditLimitSource !== "ameen") {
+      // لقطة فواتير قديمة: لا حد آلي ولا استخدام ولا تجاوز ولا تعثّر ولا «غير نشط» من نافذتها.
+      // حد الأمين اليدوي (إن وُجد) يبقى بمصدره «ameen» — ليس حداً آلياً.
+      return { ...base, currentBalance: round(balance, 3), balanceDisplay: round(balanceDisplay, 3), balanceCurrency, creditLimitSource: "stale_invoices", creditUsagePercent: null, creditStatus: "stale_invoices" };
     }
     if (autoGated && !confirmedStatus && creditLimitSource !== "ameen") {
       // لا حد آلي ولا استخدام ولا تجاوز ولا تعثّر قبل مصدر حركات موسوم بالنوع. حد الأمين
@@ -1553,9 +1558,13 @@
       // قائمتا المالك (بالمعرّف) لا تحتاجان بيانات حديثة، فتسبقان مسار المصدر القديم:
       // لا يظهر حد الأمين بديلاً لحساب مستبعد أو مختلط عند توقف المزامنة.
       const ownerListed = excludedGuids.has(record.customerGuid) || reviewGuids.has(record.customerGuid);
+      // بوابة الحد الآلي: الحركات والأرصدة والفواتير حديثة كلها (مهل CONFIG.freshnessMinutes
+      // نفسها). يوم المرجع ونافذة السحب مرتكزان إلى لقطة الفواتير، فقِدمها يُخرج مبيعات أحدث
+      // من النافذة بينما الرصيد وFIFO حاليان — لا حد ولا تعثّر ولا «غير نشط» منها.
       const staleCreditSource = ownerListed ? null
         : sourcesFreshness.movements.stale ? "movements"
-          : sourcesFreshness.balances.stale ? "balances" : null;
+          : sourcesFreshness.balances.stale ? "balances"
+            : sourcesFreshness.invoices.stale ? "invoices" : null;
       if (!isSupplierRecord && record.customerGuid && ownerListed) {
         // التصنيف من القائمة وحدها: لا يحتاج دفتراً ولا حركة ولا بيانات حديثة.
         auto = nonCustomerByGuid.has(record.customerGuid)
@@ -1594,7 +1603,11 @@
         });
         if (display.rate !== null) auto.exchangeRate = display.rate;
       }
-      const credit = resolveCredit(record.balanceRow, auto, display, legacyCreditLimit, { balancesStale: sourcesFreshness.balances.stale, autoGated: autoCreditGated && !isSupplierRecord });
+      const credit = resolveCredit(record.balanceRow, auto, display, legacyCreditLimit, {
+        balancesStale: sourcesFreshness.balances.stale,
+        invoicesStale: sourcesFreshness.invoices.stale && !isSupplierRecord,
+        autoGated: autoCreditGated && !isSupplierRecord
+      });
       // أصناف مختلطة العملة: لا نجمع lineTotals بعملات مختلفة — نُعيد صفر أصناف.
       const items = currencyMixed ? { items: [], identity: "item_guid" } : topItems(windowRows);
 
@@ -1893,6 +1906,7 @@
       else if (draft.credit.creditStatus === "near_limit") reasons.push(`الرصيد بلغ ${draft.credit.creditUsagePercent}% من حد الائتمان.`);
       else if (draft.credit.creditStatus === "unknown_limit") reasons.push("عليه رصيد مدين بلا حد ائتمان محدد.");
       else if (draft.credit.creditStatus === "awaiting_typed_source") reasons.push(UNTYPED_LEDGER_NOTE);
+      else if (draft.credit.creditStatus === "stale_invoices") reasons.push("تقرير الفواتير غير حديث: حد الائتمان الآلي غير متاح، ولا نسبة استخدام ولا تجاوز ولا تعثّر ولا «غير نشط» من نافذة فواتير قديمة.");
       else if (draft.credit.creditStatus === "stale_balance") reasons.push("تقرير الأرصدة غير حديث: حد الائتمان غير متاح، ولا نسبة استخدام ولا حكم تجاوز من رصيد قديم.");
       else if (draft.credit.creditStatus === "unknown_balance") reasons.push("لا يوجد صف رصيد من الأمين لهذا الزبون، فلا يُعرض صفراً ولا يُحسب ضمن الذمم.");
 
