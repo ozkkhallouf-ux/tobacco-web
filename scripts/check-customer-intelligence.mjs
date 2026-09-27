@@ -1719,6 +1719,21 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   assert.equal(mixed.creditStatus, "needs_review");
   assert.ok(!mixed.flags.includes("credit_not_customer"), "test 63: المختلط ليس «ليس زبون مبيعات»");
   assert.ok(mixed.autoCredit.notes[0].includes("مختلط"), "test 63: السبب ظاهر");
+  // ‏… وحتى مع دفتر أو أرصدة غير حديثة: لا يظهر حد الأمين بديلاً لحساب في قائمتي المالك.
+  const staleAt = new Date(NOW.getTime() - 3 * 3600000).toISOString();
+  for (const [guid, status] of [[mixedGuid, "needs_review"], [engine.CONFIG.autoCredit.excludedAccountGuids[2], "non_customer"]]) {
+    const staleOwner = engine.build({
+      ...reports,
+      invoicesReport: invoicesReportFor([{ ...accounts[0], guid, name: "اسم عادي" }]),
+      balancesReport: { ...reports.balancesReport, created_at: staleAt, summary: { ...reports.balancesReport.summary, syncedAt: staleAt },
+        items: [{ ...reports.balancesReport.items[0], customerGuid: guid, customerAccountGuid: guid, name: "اسم عادي", key: "اسم عادي", creditLimit: 5000 }] },
+      movementsReport: { ...reports.movementsReport, created_at: staleAt, summary: { ...reports.movementsReport.summary, syncedAt: staleAt },
+        items: [{ ...reports.movementsReport.items[0], customerGuid: guid, name: "اسم عادي" }] }
+    }).customers.find((c) => c.customerGuid === guid);
+    assert.equal(staleOwner.autoCredit.status, status, `test 63: قائمة المالك تسبق المصدر القديم (${status})`);
+    assert.equal(staleOwner.creditLimit, null, "test 63: لا حد أمين بديلاً");
+    assert.notEqual(staleOwner.creditLimitSource, "ameen");
+  }
 
   // 64) فرق صغير غير مفوتر (دون حد الأهمية) لا يحوّل زبوناً حقيقياً إلى غير زبون،
   //     وتقرير فواتير لا يغطي النافذة لا يصنّف أحداً غير زبون (لا حكم بلا دليل).

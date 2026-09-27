@@ -1459,8 +1459,12 @@
       const isSupplierRecord = record.balanceRow?.isSupplier === true;
       const display = accountDisplay(record.balanceRow, record.customerGuid);
       let auto = null;
-      const staleCreditSource = sourcesFreshness.movements.stale ? "movements"
-        : sourcesFreshness.balances.stale ? "balances" : null;
+      // قائمتا المالك (بالمعرّف) لا تحتاجان بيانات حديثة، فتسبقان مسار المصدر القديم:
+      // لا يظهر حد الأمين بديلاً لحساب مستبعد أو مختلط عند توقف المزامنة.
+      const ownerListed = excludedGuids.has(record.customerGuid) || reviewGuids.has(record.customerGuid);
+      const staleCreditSource = ownerListed ? null
+        : sourcesFreshness.movements.stale ? "movements"
+          : sourcesFreshness.balances.stale ? "balances" : null;
       if (!isSupplierRecord && record.customerGuid && ledger.byGuid.size > 0 && staleCreditSource) {
         // دفتر حركات أو تقرير أرصدة متوقف المزامنة: لا حد آلي ولا حكم تعثّر من بيانات قديمة.
         auto = { status: "unavailable", limitBase: null, staleLedger: true, notes: [staleCreditNote(staleCreditSource, sourcesFreshness)] };
