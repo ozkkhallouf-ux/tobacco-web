@@ -1743,8 +1743,20 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   const staleSteady = rcStale.customers.find((c) => c.customerGuid === G_STEADY);
   assert.equal(staleSteady.autoCredit.status, "unavailable", "test 68: دفتر قديم = غير متاح");
   assert.equal(staleSteady.creditLimit, null);
-  assert.ok(staleSteady.flags.includes("stale_data"), "test 68: وسم المصدر غير الحديث");
+  assert.equal(rcStale.staleData, true, "test 68: تقادم الحركات وحدها يرفع التحذير العام");
+  assert.equal(rcStale.sourcesFreshness.invoices.stale, false, "test 68: الفواتير حديثة");
+  assert.equal(rcStale.sourcesFreshness.balances.stale, false, "test 68: الأرصدة حديثة");
+  assert.equal(rcStale.sourcesFreshness.movements.stale, true);
+  assert.ok(rcStale.customers.every((row) => row.flags.includes("stale_data")), "test 68: وسم المصدر غير الحديث على كل سجل");
   assert.ok(!rcStale.customers.some((c) => c.creditStatus === "delinquent"), "test 68: لا حكم تعثّر من دفتر قديم");
+
+  const rcUnknown = engine.build({
+    ...reports,
+    movementsReport: { ...reports.movementsReport, created_at: undefined, summary: { ...reports.movementsReport.summary, syncedAt: undefined } }
+  });
+  const unknownSteady = rcUnknown.customers.find((c) => c.customerGuid === G_STEADY);
+  assert.equal(unknownSteady.autoCredit.status, "unavailable", "test 68: بلا وقت مزامنة = غير متاح");
+  assert.equal(rcUnknown.staleData, true, "test 68: وقت غير معروف يرفع التحذير العام");
 
   // 66) عدّادات الملخص؛ وتنبيه الحد يبقى مسودة داخلية: لا مسار تيليغرام في هذه المرحلة.
   assert.ok(rc.summary.delinquentCreditCount >= 2 && rc.summary.inactiveCreditCount >= 2 && rc.summary.lowDataCreditCount >= 1);

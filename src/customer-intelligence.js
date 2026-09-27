@@ -1121,7 +1121,9 @@
         now
       )
     };
-    const staleData = sourcesFreshness.invoices.stale || sourcesFreshness.balances.stale;
+    const staleData = sourcesFreshness.invoices.stale
+      || sourcesFreshness.balances.stale
+      || sourcesFreshness.movements.stale;
     const invoicesAvailable = Boolean(invoicesReport) && invoiceRows.length > 0;
 
     // ── حدود customer_credit_limits القديمة: مرجع تشخيصي فقط ─────────────────
