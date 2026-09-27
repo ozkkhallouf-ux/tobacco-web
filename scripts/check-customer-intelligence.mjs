@@ -896,11 +896,15 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   });
   const renamed = r32.customers.find((row) => row.customerGuid === GUID);
   assert.ok(renamed, "test 32: الزبون المعاد تسميته يجب أن يظهر");
-  assert.equal(renamed.creditLimit, 5000, "test 32: الحد يبقى مربوطاً بالمعرّف بعد تغيير الاسم");
-  assert.equal(renamed.creditLimitSource, "approved", "test 32: المصدر يجب أن يبقى الحد المعتمد داخلياً");
+  // حد customer_credit_limits القديم مرجع تشخيصي فقط (قرار 2026-09-27: حد آلي
+  // واحد) — لا يصير حداً فعلياً، لكنه يبقى مربوطاً بالمعرّف لا بالاسم.
+  assert.equal(renamed.legacyCreditLimit, 5000, "test 32: الحد القديم يبقى مربوطاً بالمعرّف بعد تغيير الاسم");
+  assert.equal(renamed.creditLimit, null, "test 32: الحد القديم لا يصير حداً فعلياً");
+  assert.equal(renamed.creditLimitSource, "missing", "test 32: بلا دفتر ولا حد أمين = غير محدد");
   const namesake = r32.customers.find((row) => row.customerGuid === OTHER);
   assert.ok(namesake, "test 32: الحساب الآخر يجب أن يظهر");
-  assert.equal(namesake.creditLimit, null, "test 32: حساب بمعرّف مختلف لا يرث الحد بالاسم");
+  assert.equal(namesake.legacyCreditLimit, null, "test 32: حساب بمعرّف مختلف لا يرث الحد القديم بالاسم");
+  assert.equal(namesake.creditLimit, null);
   assert.equal(namesake.creditLimitSource, "missing");
 }
 
@@ -1463,4 +1467,200 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   assert.equal(itemOf(r46, "صنف إجمالي حقيقي").netValue, 500, "test 46: الإجمالي الحقيقي يُعتمد");
 }
 
-console.log(`ذكاء الزبائن: 46 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
+// ---------------------------------------------------------------------------
+// 47–60) حد الائتمان الآلي (STEP 1): الحد المحسوب من دفتر حساب الزبون.
+// كل الأرقام تركيبية. التاريخ المرجعي = REFERENCE_ISO (2026-09-02)، وd(n) = قبله بـn يوماً.
+// ---------------------------------------------------------------------------
+{
+  const REF_DAY = Date.UTC(2026, 8, 2);
+  const d = (n) => new Date(REF_DAY - n * 86400000).toISOString().slice(0, 10);
+  const debit = (n, amount) => ({ date: d(n), debit: amount, credit: 0, notes: "", billGuid: "" });
+  const pay = (n, amount) => ({ date: d(n), debit: 0, credit: amount, notes: "", billGuid: "" });
+  const ret = (n, amount) => ({ date: d(n), debit: 0, credit: amount, notes: "", billGuid: "bill-return" });
+  const opening = (amount) => ({ date: d(62), debit: amount, credit: 0, notes: "القيد الافتتاحي", billGuid: "" });
+  const gid = (n) => `00000000-0000-4000-9000-${String(n).padStart(12, "0")}`;
+  // فواتير كل `every` يوماً من اليوم `from` حتى `to`، وكل واحدة تُسدَّد بعد `lag` يوماً.
+  const regular = ({ from, to = 1, every, amount, lag }) => {
+    const rows = [];
+    for (let n = from; n >= to; n -= every) {
+      rows.push(debit(n, amount));
+      if (lag !== null && n - lag >= 0) rows.push(pay(n - lag, amount));
+    }
+    return rows.sort((a, b) => a.date.localeCompare(b.date));
+  };
+  const ledgerBalance = (rows) => rows.reduce((sum, row) => sum + row.debit - row.credit, 0);
+
+  const accounts = [];
+  const account = (id, name, movements, extra = {}) => {
+    accounts.push({ guid: gid(id), name, movements, balance: extra.balance ?? ledgerBalance(movements), ...extra });
+    return gid(id);
+  };
+
+  const G_STEADY = account(1, "ائتمان منتظم", regular({ from: 59, every: 6, amount: 600, lag: 6 }));
+  const G_SLOW = account(2, "ائتمان بطيء يدفع", regular({ from: 59, every: 5, amount: 400, lag: 40 }));
+  const G_DELINQ = account(3, "ائتمان متعثّر", [debit(58, 1500), debit(50, 1500), pay(49, 200), debit(10, 300)]);
+  const G_IDLE = account(4, "ائتمان خامل بلا دين", [opening(0), pay(70, 0.01)]);
+  const G_RESIDUE = account(5, "ائتمان خامل ببقية صغيرة", [opening(20)]);
+  const G_PREPAID = account(6, "ائتمان دفع مسبق", [pay(40, 1000), debit(38, 500), pay(20, 800), debit(18, 600), debit(5, 400)]);
+  const G_NEW = account(7, "ائتمان جديد", [debit(12, 800), pay(10, 800), debit(3, 1000)]);
+  const G_LARGE = account(8, "ائتمان فاتورة شاذة", [
+    ...regular({ from: 56, every: 8, amount: 300, lag: 4 }),
+    debit(20, 6000), pay(16, 6000)
+  ]);
+  const G_GROWWEAK = account(9, "ائتمان نمو بتحصيل ضعيف", [
+    ...regular({ from: 58, to: 31, every: 7, amount: 200, lag: 5 }),
+    ...regular({ from: 28, every: 4, amount: 900, lag: null }),
+    pay(20, 900), pay(12, 900), pay(4, 900)
+  ]);
+  const G_GROWHIGHBAL = account(10, "ائتمان نمو برصيد متراكم", [
+    ...regular({ from: 58, to: 31, every: 7, amount: 300, lag: 3 }),
+    ...regular({ from: 24, to: 9, every: 5, amount: 600, lag: 3 }),
+    debit(1, 2000)
+  ]);
+  const G_SYP = account(11, "ائتمان حساب ليرة", regular({ from: 59, every: 6, amount: 700, lag: 5 }), {
+    balance: 740.25, accountCurrencyIsBase: false, accountCurrency: "ل.س.", balanceAccountCcy: 9800000
+  });
+  const G_TRUNC = account(12, "ائتمان دفتر مقتطع", regular({ from: 59, every: 6, amount: 600, lag: 6 }), { truncated: true, creditLimit: 777 });
+  const G_LEGACY = account(13, "ائتمان حد قديم", regular({ from: 59, every: 6, amount: 600, lag: 6 }));
+
+  const reports = {
+    invoicesReport: {
+      source: "ameen_customer_invoices", created_at: REFERENCE_ISO,
+      summary: { periodDays: 60, fromDate: FROM_DATE, customers: 1, bills: 1, syncedAt: REFERENCE_ISO },
+      items: [{ name: "ائتمان حساب ليرة", customerGuid: G_SYP, truncated: false,
+        invoices: [invoice(d(2), 7000000, { currency: "SYP", currencyVal: 1 / 14000 })] }]
+    },
+    balancesReport: {
+      source: "ameen_customer_balances", created_at: REFERENCE_ISO,
+      summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: accounts.length },
+      items: accounts.map((a) => ({
+        key: engine.normalizeName(a.name), name: a.name, balance: a.balance, creditLimit: a.creditLimit ?? 0,
+        remainingLimit: 0, status: "clear", customerGuid: a.guid, customerAccountGuid: a.guid, isSupplier: false,
+        recentPayments: [], recentMovements: [],
+        accountCurrencyIsBase: a.accountCurrencyIsBase ?? true, accountCurrency: a.accountCurrency ?? "$",
+        balanceAccountCcy: a.balanceAccountCcy ?? a.balance
+      }))
+    },
+    movementsReport: {
+      source: "ameen_customer_movements", created_at: REFERENCE_ISO,
+      summary: { syncedAt: REFERENCE_ISO, periodDays: 92 },
+      items: accounts.map((a) => ({ customerGuid: a.guid, name: a.name, truncated: a.truncated === true, movements: a.movements }))
+    },
+    creditLimits: [{ customerGuid: G_LEGACY, customerKey: "legacy", credit_limit: 99999 }],
+    now: NOW
+  };
+  const rc = engine.build(reports);
+  const row = (guid) => {
+    const found = rc.customers.find((entry) => entry.customerGuid === guid);
+    assert.ok(found, `سجل الائتمان مفقود: ${guid}`);
+    return found;
+  };
+  const stepOf = (value, currency) => (currency === "USD"
+    ? (value < 1000 ? 100 : value < 10000 ? 250 : 500)
+    : (value < 10000000 ? 100000 : value < 100000000 ? 500000 : 1000000));
+
+  // 47) دورة السداد من تسوية FIFO: كل فاتورة تُسدَّد بعد 6 أيام ⇒ الدورة 6 أيام.
+  const steady = row(G_STEADY);
+  assert.equal(steady.creditLimitSource, "auto", "test 47: الحد آلي");
+  assert.equal(steady.autoCredit.status, "normal");
+  assert.equal(steady.autoCredit.cycleBasis, "fifo_median");
+  assert.equal(steady.autoCredit.cycleRawDays, 6, "test 47: وسيط أيام السداد = 6");
+  assert.ok(steady.creditLimit > 0, "test 47: زبون منتظم يحصل على حد");
+  assert.equal(steady.creditLimit % stepOf(steady.creditLimit, "USD"), 0, "test 47: تقريب تجاري");
+  assert.ok(steady.autoCredit.coverage >= 0.9 && steady.creditStatus === "normal");
+
+  // 48) الدورة محصورة بسقف المحفظة، والبطيء الذي يدفع باستمرار ليس متعثراً.
+  const cycle = rc.dataAvailability.creditCycle;
+  const slow = row(G_SLOW);
+  assert.ok(slow.autoCredit.cycleRawDays > cycle.capDays, "test 48: وسيط أيام السداد الخام فوق السقف");
+  assert.equal(slow.autoCredit.cycleDays, cycle.capDays, "test 48: الدورة = سقف المحفظة");
+  assert.equal(cycle.capDays, cycle.medianDays + 7, "test 48: السقف = وسيط المحفظة + 7");
+  assert.notEqual(slow.creditStatus, "delinquent", "test 48: بطيء يدفع ليس متعثراً");
+  assert.ok(slow.autoCredit.trend <= 1 && slow.creditLimit < slow.autoCredit.expectedExposure,
+    "test 48: التحصيل الضعيف لا يرفع الحد فوق التعرض المعتاد");
+
+  // 49) متعثّر: رصيد قائم + دين أقدم من دورته بهامش واضح + دفعات المدة لا تغطيه.
+  const delinquent = row(G_DELINQ);
+  assert.equal(delinquent.creditStatus, "delinquent", "test 49: متعثّر");
+  assert.equal(delinquent.creditLimit, 0, "test 49: الحد صفر");
+  assert.ok(delinquent.flags.includes("credit_delinquent"));
+  assert.equal(delinquent.riskScore, 100);
+  assert.ok(delinquent.autoCredit.overdueAmount >= 2500, "test 49: المتأخر يُقاس من الفواتير المفتوحة");
+
+  // 50) خامل بلا دين = غير نشط، لا متعثّر.
+  const idle = row(G_IDLE);
+  assert.equal(idle.creditStatus, "inactive_no_limit", "test 50: غير نشط");
+  assert.equal(idle.creditLimit, 0);
+  assert.ok(idle.flags.includes("credit_inactive") && !idle.flags.includes("credit_delinquent"), "test 50: لا وسم تعثّر");
+
+  // 51) خامل ببقية كسور صغيرة (دون حد الأهمية) = غير نشط، لا متعثّر.
+  const residue = row(G_RESIDUE);
+  assert.equal(residue.creditStatus, "inactive_no_limit", "test 51: بقية صغيرة ليست تعثّراً");
+  assert.ok(!residue.flags.includes("credit_delinquent"));
+
+  // 52) دفع مسبق ورصيد دائن: لا تعرّض ولا حد.
+  const prepaid = row(G_PREPAID);
+  assert.equal(prepaid.autoCredit.status, "prepaid", "test 52: دفع مسبق");
+  assert.equal(prepaid.creditLimit, null);
+  assert.equal(prepaid.creditStatus, "prepaid");
+
+  // 53) زبون جديد/بيانات قليلة: حد آلي محافظ ≤ نصف سحبه و≤ ضعف وسيط فاتورته، مع وسم واضح.
+  const fresh = row(G_NEW);
+  assert.equal(fresh.autoCredit.status, "low_data", "test 53: بيانات قليلة");
+  assert.ok(fresh.flags.includes("credit_low_data"));
+  assert.equal(fresh.creditLimitSource, "auto", "test 53: يبقى آلياً");
+  assert.ok(fresh.creditLimit <= Math.min(0.5 * 1800, 2 * 900), "test 53: السقف المحافظ");
+
+  // 54) حارس الفاتورة الشاذة: فاتورة 6000 بين فواتير 300 لا تنفخ سرعة السحب.
+  const large = row(G_LARGE);
+  assert.ok(large.autoCredit.notes.some((note) => note.includes("الفاتورة الشاذة")), "test 54: الحارس فُعّل");
+  const naiveRecent = 6000 + 300 * 3;
+  assert.ok(large.autoCredit.velocity < (0.6 * naiveRecent + 0.4 * 300 * 4) / 30, "test 54: السرعة أقل من الحساب الساذج");
+
+  // 55) نمو مع تحصيل ضعيف: الاتجاه لا يرفع الحد، وسقف التغطية يطبَّق.
+  const growWeak = row(G_GROWWEAK);
+  assert.ok(growWeak.autoCredit.coverage < 0.9, "test 55: التحصيل أقل من 90%");
+  assert.equal(growWeak.autoCredit.trend, 1, "test 55: لا مكافأة نمو");
+  assert.ok(growWeak.creditLimit <= growWeak.autoCredit.expectedExposure * growWeak.autoCredit.coverage * growWeak.autoCredit.quality + 1,
+    "test 55: الحد ≤ التعرض × التغطية × الجودة");
+
+  // 56) نمو مع رصيد متراكم غير معتاد: الرصيد يمنع مكافأة النمو ويخفض الحد.
+  const growBal = row(G_GROWHIGHBAL);
+  assert.ok(growBal.autoCredit.coverage >= 0.9, "test 56: التحصيل جيد — الرصيد وحده هو المانع");
+  assert.equal(growBal.autoCredit.trend, 1, "test 56: الرصيد المرتفع يمنع مكافأة النمو");
+  assert.ok(growBal.autoCredit.riskFactor < 1, "test 56: عامل الرصيد يخفض الحد");
+
+  // 57) حساب ليرة: الحساب داخلياً بالأساس، والعرض بعملة الحساب بلا خلط.
+  const syp = row(G_SYP);
+  assert.equal(syp.creditCurrency, "SYP", "test 57: حد حساب الليرة بالليرة");
+  assert.equal(syp.balanceDisplay, 9800000, "test 57: الرصيد برصيد الحساب بعملته لا بالدولار المشوّه");
+  assert.equal(syp.creditLimitDisplay % stepOf(syp.creditLimitDisplay, "SYP"), 0, "test 57: تقريب بالليرة");
+  assert.equal(syp.creditLimit, Math.round(syp.creditLimitDisplay / 14000 * 1000) / 1000, "test 57: المكافئ بالأساس = الحد × المعدّل");
+  assert.equal(syp.creditUsagePercent, Math.round(9800000 / syp.creditLimitDisplay * 10000) / 100, "test 57: الاستخدام بعملة الحساب");
+
+  // 58) دفتر مقتطع: لا حد آلي على بيانات ناقصة؛ حد الأمين احتياط فقط.
+  const trunc = row(G_TRUNC);
+  assert.equal(trunc.autoCredit.status, "unavailable", "test 58: دفتر مقتطع = غير متاح");
+  assert.equal(trunc.creditLimitSource, "ameen");
+  assert.equal(trunc.creditLimit, 777);
+
+  // 59) الحد القديم في customer_credit_limits مرجع فقط ولا يغيّر الحد المحسوب.
+  const legacyRow = row(G_LEGACY);
+  assert.equal(legacyRow.legacyCreditLimit, 99999);
+  assert.equal(legacyRow.creditLimit, steady.creditLimit, "test 59: نفس الدفتر = نفس الحد مهما كان الحد القديم");
+
+  // 60) التقريب التجاري لأقرب خطوة حسب الحجم والعملة (الخطوة من القيمة قبل التقريب).
+  assert.equal(engine.commercialRound(0, "USD"), 0);
+  assert.equal(engine.commercialRound(40, "USD"), 0);
+  assert.equal(engine.commercialRound(690, "USD"), 700);
+  assert.equal(engine.commercialRound(1120, "USD"), 1000);
+  assert.equal(engine.commercialRound(12345, "USD"), 12500);
+  assert.equal(engine.commercialRound(9960000, "SYP"), 10000000);
+  assert.equal(engine.commercialRound(12345678, "SYP"), 12500000);
+  assert.equal(engine.commercialRound(123456789, "SYP"), 123000000);
+
+  // تنبيه الحد يبقى مسودة داخلية: لا مسار تيليغرام في هذه المرحلة.
+  assert.ok(rc.summary.delinquentCreditCount >= 1 && rc.summary.inactiveCreditCount >= 2 && rc.summary.lowDataCreditCount >= 1);
+}
+
+console.log(`ذكاء الزبائن: 60 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);

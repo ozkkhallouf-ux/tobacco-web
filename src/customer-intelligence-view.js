@@ -77,6 +77,9 @@
     near_credit_limit: "قريب من حد الائتمان",
     credit_limit_unknown: "بلا حد ائتمان محدد",
     credit_balance_unknown: "الرصيد غير متاح",
+    credit_delinquent: "متعثّر: الائتمان موقوف",
+    credit_inactive: "غير نشط: بلا حد",
+    credit_low_data: "حد محافظ: بيانات قليلة",
     ambiguous_identity: "اسم ملتبس بين معرّفين",
     mixed_currency: "فواتير بأكثر من عملة",
     stale_data: "مصدر غير حديث",
@@ -97,6 +100,8 @@
     cadence_unknown: "warn",
     credit_limit_unknown: "warn",
     credit_balance_unknown: "warn",
+    credit_delinquent: "danger",
+    credit_low_data: "warn",
     vip: "good",
     growing: "good",
     reactivated: "good",
@@ -175,8 +180,8 @@
       case "inactive": return has("inactive");
       case "reactivated": return has("reactivated");
       case "new": return has("new") || has("possibly_new");
-      case "credit": return has("over_credit_limit") || has("near_credit_limit");
-      case "attention": return has("over_credit_limit") || has("near_credit_limit") || has("declining") || has("inactive") || has("at_risk_churn");
+      case "credit": return has("over_credit_limit") || has("near_credit_limit") || has("credit_delinquent");
+      case "attention": return has("over_credit_limit") || has("near_credit_limit") || has("credit_delinquent") || has("declining") || has("inactive") || has("at_risk_churn");
       case "insufficient": return row.primarySegment === "insufficient_data";
       default: return true;
     }
@@ -246,7 +251,7 @@
       { label: "متراجعون", value: count(s.decliningCount), hint: `انخفاض ${Math.abs(intel.config.declineTrendPercent)}% أو أكثر` },
       { label: "متوقفون", value: count(s.inactiveCount), hint: "تجاوزوا ضعف نمطهم المعتاد" },
       { label: "عادوا للنشاط", value: count(s.reactivatedCount), hint: "اشتروا بعد انقطاع طويل" },
-      { label: "خطر ائتمان", value: count(s.overCreditLimitCount + s.nearCreditLimitCount), hint: `${count(s.overCreditLimitCount)} متجاوز · ${count(s.nearCreditLimitCount)} قريب` }
+      { label: "خطر ائتمان", value: count(s.overCreditLimitCount + s.nearCreditLimitCount + (s.delinquentCreditCount || 0)), hint: `${count(s.overCreditLimitCount)} متجاوز · ${count(s.nearCreditLimitCount)} قريب · ${count(s.delinquentCreditCount || 0)} متعثّر` }
     ];
     return cards.map((card) => `<article class="ci-card"><small>${escape(card.label)}</small><strong>${card.value}</strong><span>${escape(card.hint)}</span></article>`).join("");
   }
@@ -268,9 +273,7 @@
       : ({ new_activity: "نشاط جديد", no_activity: "لا حركة", insufficient_data: "غير كافٍ", no_positive_baseline: "بلا أساس" }[row.purchaseTrend?.state] || "—");
     const creditText = isNumber(row.creditUsagePercent)
       ? `${Math.round(row.creditUsagePercent)}%`
-      : (row.creditStatus === "unknown_limit" ? "بلا حد"
-        : row.creditStatus === "unknown_balance" ? "رصيد غير متاح"
-        : "—");
+      : (CREDIT_STATUS_TEXT[row.creditStatus] || "—");
     return `
       <tr class="ci-row ${view.selectedId === row.customerId ? "selected" : ""}" data-ci-customer="${escape(row.customerId)}" tabindex="0">
         <td class="ci-name">${escape(row.customerName)}</td>
@@ -280,10 +283,55 @@
         <td dir="ltr" class="${trendClass}">${escape(trendText)}</td>
         <td dir="ltr">${day(row.lastPurchaseAt)}</td>
         <td dir="ltr">${count(row.daysSinceLastPurchase)}</td>
-        <td dir="ltr">${money(row.currentBalance)}</td>
+        <td dir="ltr">${money(row.balanceDisplay ?? row.currentBalance, row.creditCurrency || "USD")}</td>
         <td dir="ltr">${escape(creditText)}</td>
         <td class="ci-flags">${flagChips(row.flags, 3)}</td>
       </tr>`;
+  }
+
+  const CREDIT_STATUS_TEXT = {
+    unknown_limit: "بلا حد",
+    unknown_balance: "رصيد غير متاح",
+    delinquent: "موقوف (متعثّر)",
+    inactive_no_limit: "غير نشط",
+    prepaid: "رصيد دائن"
+  };
+  const AUTO_STATUS_TEXT = {
+    normal: "آلي",
+    low_data: "آلي محافظ (بيانات قليلة)",
+    delinquent: "آلي: موقوف للتعثّر",
+    inactive: "آلي: لا حد (غير نشط)",
+    prepaid: "آلي: لا تعرّض (دفع مسبق)"
+  };
+  const CYCLE_BASIS_TEXT = {
+    fifo_median: "وسيط أيام السداد الفعلية",
+    payment_interval: "وسيط الفاصل بين الدفعات",
+    portfolio_median: "وسيط المحفظة (بيانات قليلة)"
+  };
+
+  function creditLimitText(row) {
+    const auto = row.autoCredit;
+    if (row.creditLimitSource === "auto") {
+      const label = AUTO_STATUS_TEXT[auto?.status] || "آلي";
+      return row.creditLimitDisplay === null ? escape(label) : `${money(row.creditLimitDisplay, row.creditCurrency || "USD")} (${escape(label)})`;
+    }
+    if (row.creditLimitSource === "ameen") return `${money(row.creditLimitDisplay ?? row.creditLimit, row.creditCurrency || "USD")} (من الأمين — لا دفتر حساب للحساب الآلي)`;
+    return "غير محدد";
+  }
+
+  // مكوّنات الحد الآلي كما حسبها المحرك — عرض فقط، بلا إعادة حساب.
+  function autoCreditFacts(row) {
+    const auto = row.autoCredit;
+    const facts = [];
+    if (isNumber(row.legacyCreditLimit)) facts.push(["الحد القديم (للمقارنة فقط)", money(row.legacyCreditLimit)]);
+    if (!auto || !isNumber(auto.velocity)) return facts;
+    facts.push(
+      ["سرعة السحب اليومية", money(auto.velocity)],
+      ["دورة السداد", `${auto.cycleDays} يوماً (${escape(CYCLE_BASIS_TEXT[auto.cycleBasis] || auto.cycleBasis)})`],
+      ["التحصيل / جودة السداد", `${isNumber(auto.coverage) ? `${Math.round(auto.coverage * 100)}%` : "—"} · Q ${auto.quality}`],
+      ["الاتجاه / عامل الرصيد", `T ${auto.trend} · ${auto.riskFactor}`]
+    );
+    return facts;
   }
 
   function detailPanel() {
@@ -309,9 +357,10 @@
       ["عدد الفواتير (30 يوم)", count(row.invoiceCount30d)],
       ["عدد الفواتير (السابقة)", count(row.invoiceCountPrevious30d)],
       ["متوسط الفاتورة", money(row.averageInvoice30d, row.currency)],
-      ["الرصيد الحالي", money(row.currentBalance)],
-      ["حد الائتمان", row.creditLimit === null ? "غير محدد" : `${money(row.creditLimit)} (${escape(row.creditLimitSource === "approved" ? "معتمد داخلياً" : "من الأمين")})`],
-      ["نسبة استخدام الائتمان", isNumber(row.creditUsagePercent) ? `${row.creditUsagePercent}%` : "—"],
+      ["الرصيد الحالي", money(row.balanceDisplay ?? row.currentBalance, row.creditCurrency || "USD")],
+      ["حد الائتمان", creditLimitText(row)],
+      ["نسبة استخدام الائتمان", isNumber(row.creditUsagePercent) ? `${row.creditUsagePercent}%` : (CREDIT_STATUS_TEXT[row.creditStatus] || "—")],
+      ...autoCreditFacts(row),
       ["نمط الشراء المعتاد", row.cadenceTrusted ? `كل ${row.typicalGapDays} يوماً` : "غير محسوب (تاريخ غير كافٍ)"],
       ["حد اعتبار التوقف", `${row.inactiveThresholdDays} يوماً`],
       ["درجة النشاط", count(row.activityScore)],
