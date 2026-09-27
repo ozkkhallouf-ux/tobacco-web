@@ -2438,10 +2438,41 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   assert.ok(syp86.explanation.some((reason) => reason.includes("سعر صرف")), "test 86: السبب ظاهر");
   assert.equal(rc86.customers.find((c) => c.customerGuid === G_STEADY).creditStatus, row(G_STEADY).creditStatus, "test 86: حساب الدولار لا يتأثر");
 
+  // 87) قرار المالك (2026-09-27، Codex P1، الخيار A) — مطابقة الرصيد: دين متأخر مادّي في الدفتر
+  //     لا يصنع «متعثّراً» إن كان الرصيد الحالي الموثوق لا يدعمه (دفعة فاتت لقطة الدفتر). حد
+  //     الأهمية نفسه (50). الرصيد المادّي يُبقي الحكم كما كان، ولا تتحسّن الدفعات بالمطابقة.
+  const build87 = (balance) => {
+    const a = { guid: gid(87), name: "مطابقة الرصيد", movements: [debit(80, 3000), pay(75, 100)] };
+    return engine.build({
+      ...reports,
+      invoicesReport: invoicesReportFor([a]),
+      balancesReport: { ...reports.balancesReport, items: [{ ...reports.balancesReport.items[0], key: engine.normalizeName(a.name), name: a.name,
+        balance, balanceAccountCcy: balance, creditLimit: 0, customerGuid: a.guid, customerAccountGuid: a.guid }] },
+      movementsReport: { ...reports.movementsReport, items: [{ customerGuid: a.guid, name: a.name, truncated: false, movements: a.movements }] },
+      creditLimits: []
+    }).customers.find((c) => c.customerGuid === a.guid);
+  };
+  const settled87 = build87(0.03);
+  assert.ok(settled87.autoCredit.overdueAmount >= 2900, "test 87: الدفتر ما زال يرى ديناً متأخراً مادّياً");
+  assert.equal(settled87.autoCredit.balanceSupportedOverdue, 0.03, "test 87: الرصيد الحالي لا يدعم منه إلا 0.03");
+  assert.notEqual(settled87.creditStatus, "delinquent", "test 87: رصيد ≈ 0.03 ⇒ ليس متعثّراً");
+  assert.notEqual(settled87.autoCredit.status, "delinquent");
+  const small87 = build87(49);
+  assert.notEqual(small87.creditStatus, "delinquent", "test 87: رصيد دون حد الأهمية لا يصنع تعثّراً");
+  const material87 = build87(2900);
+  assert.equal(material87.creditStatus, "delinquent", "test 87: رصيد يدعم الدين المادّي ⇒ متعثّر كما كان");
+  assert.equal(material87.autoCredit.balanceSupportedOverdue, 2900);
+  // المطابقة لا تصنع دفعات ولا تحسّن الجودة: مقاييس السداد نفسها في الحالتين.
+  for (const key of ["paidInOverdueSpan", "punctuality", "coverage", "daysSinceLastPayment"]) {
+    if (settled87.autoCredit[key] !== undefined && key !== "coverage") assert.equal(settled87.autoCredit[key], material87.autoCredit[key], `test 87: ${key} لا يتغير بالمطابقة`);
+  }
+  const partial87 = build87(400);
+  assert.equal(partial87.creditStatus, "delinquent", "test 87: رصيد 400 ما زال يدعم ديناً مادّياً ⇒ الحكم كما كان");
+
   // 66) عدّادات الملخص؛ وتنبيه الحد يبقى مسودة داخلية: لا مسار تيليغرام في هذه المرحلة.
   assert.ok(rc.summary.delinquentCreditCount >= 2 && rc.summary.inactiveCreditCount >= 2 && rc.summary.lowDataCreditCount >= 1);
   assert.equal(rc.summary.nonCustomerCreditCount, 0, "test 66: لا «ليس زبوناً» بالسلوك");
   assert.equal(rc.summary.needsReviewCreditCount, 1, "test 66: الشذوذ يُعدّ «يحتاج مراجعة» منفصلاً");
 }
 
-console.log(`ذكاء الزبائن: 86 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
+console.log(`ذكاء الزبائن: 87 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);

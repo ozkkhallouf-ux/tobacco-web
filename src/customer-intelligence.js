@@ -991,12 +991,18 @@
     // 1) متعثّر: رصيد قائم + دين أقدم من دورته بهامش واضح (وبقيمة معتبرة) +
     //    دفعات المدة لا تغطيه. يسبق «غير نشط»: الخامل المدين الذي لا يدفع متعثّر.
     const { overdueAfterDays, overdueAmount, paidInOverdueSpan } = overdueFacts(facts, referenceDay, cycleDays);
+    // مطابقة الرصيد (قرار المالك 2026-09-27): الدين المتأخر من الدفتر لا يُعدّ قائماً إلا بقدر ما
+    // يدعمه الرصيد الحالي الموثوق — لقطة دفتر أقدم قليلاً من الرصيد قد تفوتها دفعة. حد الأهمية
+    // نفسه (delinquentMinAmount). لا يمسّ سجل الدفعات ولا جودة السداد ولا شرط الدفعات أدناه.
+    const balanceSupportedOverdue = Math.min(overdueAmount, Math.max(0, balance));
     Object.assign(result, {
       overdueAfterDays: round(overdueAfterDays, 2),
       overdueAmount: round(overdueAmount, 3),
+      balanceSupportedOverdue: round(balanceSupportedOverdue, 3),
       paidInOverdueSpan: round(paidInOverdueSpan, 3)
     });
-    if (balance > tolerance && overdueAmount >= A.delinquentMinAmount && paidInOverdueSpan < A.delinquentPaidShare * overdueAmount) {
+    if (balance > tolerance && overdueAmount >= A.delinquentMinAmount && balanceSupportedOverdue >= A.delinquentMinAmount
+      && paidInOverdueSpan < A.delinquentPaidShare * overdueAmount) {
       result.status = "delinquent";
       result.limitBase = 0;
       notes.push(`متعثّر: دين أقدم من ${Math.round(overdueAfterDays)} يوماً (${Math.round(overdueAmount)}) ودفعات تلك المدة ${Math.round(paidInOverdueSpan)} فقط.`);
