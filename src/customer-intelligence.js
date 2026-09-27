@@ -714,6 +714,17 @@
     return balanceDays ? balanceDaysSum / balanceDays : 0;
   }
 
+  // مقاييس موسومة بالنوع لسطر واحد (lineKinds:v1 وحده؛ بلا العلامة lineKind فارغ فلا أثر).
+  function addLineKindFacts(kinds, row, span) {
+    if (row.lineKind === "purchase") kinds.purchaseAmount += row.credit - row.debit;
+    if (row.lineKind === "sale") kinds.saleAmount += row.debit;
+    if (span.inWindow(row.day)) {
+      if (row.lineKind === "sale_payment") kinds.salePayments60 += row.credit;
+      if (row.lineKind === "return" || row.lineKind === "discount") kinds.returnsDiscounts60 += row.credit;
+    }
+    if ((row.lineKind === "payment" || row.lineKind === "receipt") && row.credit > 0) kinds.receiptDays.push(row.day);
+  }
+
   // حقائق الزبون من دفتره: السحب، الدفعات، الرصيد، وأيام السداد بتسوية FIFO
   // (الدائن يسدّد أقدم مدين أولاً). الأمين لا يربط الدفعة بفاتورتها، فهذه
   // الطريقة المحاسبية المعيارية هي الربط الإحصائي المتاح.
@@ -748,13 +759,7 @@
 
     for (const row of entry.rows) {
       balance += row.debit - row.credit;
-      if (row.lineKind === "purchase") kinds.purchaseAmount += row.credit - row.debit;
-      if (row.lineKind === "sale") kinds.saleAmount += row.debit;
-      if (span.inWindow(row.day)) {
-        if (row.lineKind === "sale_payment") kinds.salePayments60 += row.credit;
-        if (row.lineKind === "return" || row.lineKind === "discount") kinds.returnsDiscounts60 += row.credit;
-      }
-      if ((row.lineKind === "payment" || row.lineKind === "receipt") && row.credit > 0) kinds.receiptDays.push(row.day);
+      addLineKindFacts(kinds, row, span);
       if (row.day <= referenceDay - A.recentDays) balance30Ago += row.debit - row.credit;
       if (row.debit > 0) ledgerAddDebit(acc, row, span);
       if (row.credit > 0) ledgerAddCredit(acc, row, span);
@@ -996,6 +1001,25 @@
     return value === null ? null : round(value, digits);
   }
 
+  // موانع تسبق أي حساب (بالترتيب نفسه): لا دفتر، دفتر مقتطع، ليس زبوناً، ومراجعة تسبق التعثّر.
+  // تُرجع true إن حسمت النتيجة (result معدّل في مكانه).
+  function autoCreditBlocked(facts, account, result) {
+    const notes = result.notes;
+    if (!facts) { notes.push("لا دفتر حساب لهذا الزبون في تقرير الحركات."); return true; }
+    if (facts.truncated) { notes.push("دفتر هذا الزبون مقتطع، ولا يُبنى حد على بيانات ناقصة."); return true; }
+    if (account.nonCustomer) {
+      result.status = "non_customer";
+      notes.push(account.nonCustomerReason);
+      return true;
+    }
+    // المختلط المؤكد والحركات المجهولة المادية يسبقان التعثّر: لا حكم من بيانات ملتبسة.
+    if (account.needsReview === "explicit" || account.needsReview === "unknown" || account.needsReview === "tree") {
+      needsReviewResult(result, account.needsReviewReason);
+      return true;
+    }
+    return false;
+  }
+
   // الحد المحسوب الحقيقي لزبون واحد (عملة الأساس، قبل التقريب) — صيغة المحاكاة
   // المعتمدة v5 حرفياً، مع قاعدة التعثّر المعتمدة (2026-09-27) بدل قاعدة «موقوف» القديمة.
   // balance: الرصيد الموحّد بعملة الأساس (لحساب الليرة: رصيده بعملته × سعر الصرف).
@@ -1004,15 +1028,7 @@
     const notes = [];
     const result = { status: "unavailable", limitBase: null, notes };
     if (account.needsReview === "mixed") result.mixedRole = true;
-    if (!facts) { notes.push("لا دفتر حساب لهذا الزبون في تقرير الحركات."); return result; }
-    if (facts.truncated) { notes.push("دفتر هذا الزبون مقتطع، ولا يُبنى حد على بيانات ناقصة."); return result; }
-    if (account.nonCustomer) {
-      result.status = "non_customer";
-      notes.push(account.nonCustomerReason);
-      return result;
-    }
-    // المختلط المؤكد والحركات المجهولة المادية يسبقان التعثّر: لا حكم من بيانات ملتبسة.
-    if (account.needsReview === "explicit" || account.needsReview === "unknown" || account.needsReview === "tree") return needsReviewResult(result, account.needsReviewReason);
+    if (autoCreditBlocked(facts, account, result)) return result;
 
     const tolerance = A.settleTolerance;
     const S60 = facts.sales60;
