@@ -58,6 +58,7 @@ const PATTERNS = {
   formatMoney: /function formatMoney\(value\) \{[\s\S]*?\n\}\n/,
   formatInvoiceMoney: /function formatInvoiceMoney\(value\) \{[\s\S]*?\n\}\n/,
   roundPrice: /function roundPrice\(value\) \{[\s\S]*?\n\}\n/,
+  invoiceLineInputUnit: /function invoiceLineInputUnit\(line\) \{[\s\S]*?\n\}\n/,
   invoiceLineFractionalUnit1: /function invoiceLineFractionalUnit1\(line\) \{[\s\S]*?\n\}\n/,
   invoiceLineQtyParts: /function invoiceLineQtyParts\(line\) \{[\s\S]*?\n\}\n/,
   invoiceLineQty: /function invoiceLineQty\(line\) \{[\s\S]*?\n\}\n/
