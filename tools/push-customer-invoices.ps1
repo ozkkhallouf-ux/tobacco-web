@@ -6,8 +6,11 @@
 #
 # سكيما الأمين المستخدمة:
 #   bu000 = رأس الفاتورة (GUID, Date, Cust_Name, Total, نوع الفاتورة)
-#   bi000 = أسطر الفاتورة (ParentGUID->الرأس, MatGUID->المادة, Qty, Qty2, Price, TotalPrice)
-#   mt000 = المواد (Name, Unity, Unit2, Unit2Fact)
+#   bi000 = أسطر الفاتورة (ParentGUID->الرأس, MatGUID->المادة, Qty, Qty2, Price, TotalPrice, Unity)
+#   mt000 = المواد (Name, Unity, Unit2, Unit2Fact, Unit3, Unit3Fact)
+#
+# أسطر الفاتورة تحمل inputUnit (= bi000.Unity: وحدة إدخال السطر 1/2/3) ومعاملَي
+# الوحدتين unit2Fact وunit3Fact — حقول مضافة لا تغيّر أي حقل قائم.
 #   bt000 = أنواع الفواتير (BillType = 1 يعني فاتورة مبيعات)
 #   my000 = العملات المرجعية (GUID, CurrencyISO)
 #
@@ -166,6 +169,15 @@ try {
     $lineTotalSource = if ($totalCol) { "ameen" } else { "derived" }
     Write-Log "اكتشاف: السعر = $(if($priceCol){$priceCol}else{'(غير موجود)'}) | إجمالي السطر = $(if($totalCol){$totalCol}else{'محسوب (كمية×سعر)'}) | lineTotalSource = $lineTotalSource"
 
+    # وحدة إدخال السطر (مُثبتة قراءةً على AmnDb002 في 2026-09-27): bi000.Unity رقم الوحدة
+    # التي أُدخل بها السطر — 1 = mt000.Unity، 2 = mt000.Unit2، 3 = mt000.Unit3. Qty مخزَّنة
+    # دائماً بالوحدة الأولى، وPrice سعر الوحدة التي يحددها Unity، فقيمة السطر
+    # Price × Qty ÷ معامل تلك الوحدة. طابقت bu000.Total في 200/200 فاتورة بيع حديثة، و24
+    # منها تخلط الوحدتين — فالوحدة لكل سطر لا لكل فاتورة. تُرفع كما هي (inputUnit) ولا
+    # تغيّر أي حقل قائم؛ غياب العمود في تنصيب آخر يترك inputUnit فارغاً فيبقى الموقع
+    # على منطقه القديم.
+    $unitySel = if (Pick $biCols @("Unity") $null) { "CAST(COALESCE(bi.Unity,0) AS int)" } else { "CAST(NULL AS int)" }
+
     if ($Discover) {
         Write-Log "=== وضع الاكتشاف: عيّنة أحدث فاتورة مع محتوياتها ==="
         Write-Log ("أعمدة bi000: " + (($biCols.Keys | Sort-Object) -join ", "))
@@ -239,7 +251,10 @@ SELECT CAST(u.GUID AS varchar(40)) AS bill_guid,
        CAST($totalSel AS decimal(18,3)) AS line_total,
        LTRIM(RTRIM(COALESCE(m.Unity,''))) AS unit1,
        LTRIM(RTRIM(COALESCE(m.Unit2,''))) AS unit2,
-       CAST(COALESCE(m.Unit2Fact,0) AS decimal(18,3)) AS unit2_fact
+       CAST(COALESCE(m.Unit2Fact,0) AS decimal(18,3)) AS unit2_fact,
+       LTRIM(RTRIM(COALESCE(m.Unit3,''))) AS unit3,
+       CAST(COALESCE(m.Unit3Fact,0) AS decimal(18,3)) AS unit3_fact,
+       $unitySel AS input_unit
 FROM bu000 u
 JOIN bt000 bt ON bt.GUID = u.$typeCol
 JOIN bi000 bi ON bi.ParentGUID = u.GUID
@@ -288,6 +303,8 @@ ORDER BY u.Date DESC, u.GUID
         }
         $f = [double]$r["unit2_fact"]
         $qtyUnits = if ($f -gt 0) { [math]::Round(([double]$r["qty"]) / $f, 3) } else { [double]$r["qty"] }
+        $inputUnit = if ($r["input_unit"] -is [DBNull]) { $null } else { [int]$r["input_unit"] }
+        if ($inputUnit -notin @(1, 2, 3)) { $inputUnit = $null }
         $bills[$g].lines.Add(@{
             itemGuid         = if ($r["item_guid"] -is [DBNull]) { "" } else { [string]$r["item_guid"] }
             material         = [string]$r["material"]
@@ -298,6 +315,10 @@ ORDER BY u.Date DESC, u.GUID
             lineTotalSource  = $lineTotalSource
             unit1            = [string]$r["unit1"]
             unit2            = [string]$r["unit2"]
+            unit2Fact        = $f
+            unit3            = [string]$r["unit3"]
+            unit3Fact        = [double]$r["unit3_fact"]
+            inputUnit        = $inputUnit
         })
     }
     $r.Close(); $conn.Close()

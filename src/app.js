@@ -1445,6 +1445,13 @@ function computeInvoiceLineBasisPlan(lines, total) {
   const buckets = new Map();
   let base = 0;
   for (const line of lines) {
+    // سطر بوحدة إدخال صريحة قيمته معروفة يقيناً: يدخل المجموع ثابتاً ولا يدخل البحث.
+    const explicit = invoiceLineInputUnit(line);
+    if (explicit) {
+      basis.set(line, "explicit");
+      base += Number(line?.price || 0) * Number(line?.qty || 0) / explicit.factor;
+      continue;
+    }
     const candidates = invoiceLineCandidates(line);
     if (!candidates.switchable) {
       if (candidates.hasUnit2) { basis.set(line, "unit2"); base += candidates.unit2; }
@@ -1524,6 +1531,29 @@ function computeInvoiceLineBasisPlan(lines, total) {
   return basis;
 }
 
+// وحدة إدخال السطر الصريحة من الأمين، أو `null` حين لا تكون متاحة أو صالحة.
+//
+// مُثبتة قراءةً على AmnDb002 (2026-09-27): `bi000.Unity` رقم الوحدة التي أُدخل بها السطر
+// (1 = `unit1`، 2 = `unit2`، 3 = `unit3`)، و`Qty` مخزَّنة دائماً بالوحدة الأولى، و`Price`
+// سعر الوحدة التي يحددها `Unity`. فالكمية المعروضة `qty ÷ factor`، والسعر `price` كما هو،
+// والقيمة `price × qty ÷ factor`. طابقت `bu000.Total` في 200/200 فاتورة بيع حديثة، و24 منها
+// تخلط الوحدتين في الفاتورة نفسها — فالوحدة لكل سطر، ولا أساس سعر واحد للفاتورة.
+//
+// فاتورة 830 شاهدها: «دفيدوف سليم غولد» 10 كروز × 22$ للكروز = 220 (Unity = 1)، كانت
+// تُطبع 0.333 كرتونة × 22 $ / كرتونة = 7.326 لأن التخمين قرأ سعر الكروز سعرَ كرتونة.
+//
+// الأسطر القديمة (رُفعت قبل `inputUnit`) ترجع `null` فتبقى على منطق التخمين كما هو.
+// ووحدة ثانية أو ثالثة بلا اسم أو بمعامل غير موجب لا تُقبل: القسمة عليها تختلق كمية.
+function invoiceLineInputUnit(line) {
+  const index = Number(line?.inputUnit);
+  if (index === 1) return { index, unit: String(line?.unit1 || "").trim(), factor: 1 };
+  if (index !== 2 && index !== 3) return null;
+  const unit = String((index === 2 ? line?.unit2 : line?.unit3) || "").trim();
+  const factor = Number(index === 2 ? line?.unit2Fact : line?.unit3Fact);
+  if (!unit || !Number.isFinite(factor) || !(factor > 0)) return null;
+  return { index, unit, factor };
+}
+
 // قيمة السطر الفعلية، عموداً مستقلاً عن سعر الوحدة.
 // **العطل الأول الذي عالجه هذا العمود:** المستند كان يعرض «سعر الوحدة» وحده، وهو
 // سعر الوحدة الكبرى (سعر الكرتونة 403)، فيُقرأ على أنه قيمة السطر. نصف كرتونة
@@ -1549,12 +1579,17 @@ function computeInvoiceLineBasisPlan(lines, total) {
 // الصحيح (`invoicePriceBasis`) كما لو لم تكن `stored` موجودة أصلاً. الفواتير
 // القديمة بلا `lineTotalSource` (رُفعت قبل إضافة هذا الحقل) تبقى كما كانت:
 // `stored` يُعتمَد مباشرة، توافقاً رجعياً.
+//
+// **وحدة الإدخال الصريحة تتقدّم على كل ما سبق** (`invoiceLineInputUnit`): حين يحمل
+// السطر `inputUnit` لا يبقى شيء يُخمَّن، وكل المسارات أعلاه احتياط للأسطر القديمة وحدها.
 function invoiceLineTotalValue(line, inv) {
   const price = Number(line?.price || 0);
   const qty = Number(line?.qty || 0);
   const qtyUnits = Number(line?.qtyUnits || 0);
   const stored = Number(line?.lineTotal || 0);
   const source = line?.lineTotalSource;
+  const explicit = invoiceLineInputUnit(line);
+  if (explicit) return roundPrice(price * qty / explicit.factor);
   // خطة الفاتورة أولاً: هي الحكم الوحيد المسنود بمطابقة إجمالي الفاتورة، فتتقدّم
   // على القيمة المخزَّنة (التي قد تكون هي نفسها محسوبة بالوحدة الخطأ).
   const planned = invoiceLineBasisPlan(inv)?.get(line);
@@ -1591,6 +1626,17 @@ function invoiceLineQtyParts(line) {
   const u2 = String(line?.unit2 || "").trim();
   const qty = Number(line?.qty || 0);
   const qtyUnits = Number(line?.qtyUnits || 0);
+  // الوحدة التي بِيع بها السطر فعلاً، وكمية الوحدة الأولى توضيحاً حين تختلف عنها.
+  const explicit = invoiceLineInputUnit(line);
+  if (explicit && qty > 0) {
+    const hasDetail = explicit.index !== 1 && Boolean(u1) && u1 !== explicit.unit;
+    return {
+      value: formatMoney(roundPrice(qty / explicit.factor)),
+      unit: explicit.unit,
+      detailValue: hasDetail ? formatMoney(qty) : "",
+      detailUnit: hasDetail ? u1 : ""
+    };
+  }
   if (qtyUnits > 0 && u2 && !invoiceLineFractionalUnit1(line)) {
     const hasDetail = qty > 0 && u1 && (qty !== qtyUnits || u1 !== u2);
     return {
@@ -1669,6 +1715,9 @@ function invoiceLineUnitPrice(line, inv) {
   const u2 = String(line?.unit2 || "").trim();
   const qty = Number(line?.qty || 0);
   const qtyUnits = Number(line?.qtyUnits || 0);
+  // وحدة الإدخال الصريحة: السعر سعرها كما سجّله الأمين، بلا تحويل ولا تخمين.
+  const explicit = invoiceLineInputUnit(line);
+  if (explicit) return { price, unit: explicit.unit, converted: false };
   const factor = qty > 0 && qtyUnits > 0 ? qty / qtyUnits : 0;
   // خطة الفاتورة تتقدّم على `invoiceLineBasis`: الأخيرة تحسم من القيمة المخزَّنة،
   // وحين لا تطابق القيم المخزَّنة إجمالي الفاتورة فهي ليست دليلاً — الوثوق بها هنا
@@ -1692,7 +1741,7 @@ function invoiceLinePrice(line, inv) {
   // `invoiceLineUnitPrice` والقيمة (`invoiceLineValueText`) كما هما. مرتجع #37، Codex على #264.
   const u1 = String(line?.unit1 || "").trim();
   const qtyUnits = Number(line?.qtyUnits || 0);
-  if (invoiceLineFractionalUnit1(line) && qtyUnits > 0 && unit !== u1) {
+  if (!invoiceLineInputUnit(line) && invoiceLineFractionalUnit1(line) && qtyUnits > 0 && unit !== u1) {
     price = roundPrice(resolved.converted ? Number(line.price) : resolved.price * qtyUnits / Number(line.qty));
     unit = u1;
   }
