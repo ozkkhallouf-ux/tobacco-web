@@ -154,6 +154,105 @@ SELECT COUNT(*) FROM (
         Write-Log "تنبيه: ما لقيت عمود نوع الفاتورة على bu000 — لا ربط للمرتجعات في هذا التقرير."
     }
 
+    # (1d) نوع كل سطر (lineKind) — من العلاقات المحاسبية وحدها، لا من نص الملاحظة:
+    # ربط er000 بمستنده (فاتورة bu000 ونوعها bt000.BillType، أو سند py000 ونوعه et000)
+    # + الحساب المقابل en.ContraAccGUID وأبوه في شجرة ac000. ما لا يثبت نوعه = unknown.
+    # حسابات دليل الأمين (مُثبتة قراءةً على OZK2026، 2026-09-27)، بالحساب أو بأبيه/جده في
+    # الشجرة لا ببادئة الرمز: 41 المبيعات، 42 مرتجع المبيعات، 43 الحسم الممنوح، 124 المخزون،
+    # 32 مرتجع المشتريات، 13 الأموال الجاهزة (الصناديق أبناؤه المباشرون)، 22 الموردون، 3/5
+    # التكاليف والمصاريف. قراءة فقط — لا تغيير محاسبي ولا كتابة إلى الأمين.
+    # er000 لا يحمل اليوم قيداً بأكثر من ربط؛ وإن حدث فالسطر unknown (COUNT OVER).
+    # حركة الصندوق بالتعريف الموحّد المُثبت في tools/ameen-customer-balances-query.sql
+    # (payment-rule): سطر عادي (en.Type = 0) مقابله صندوق من شجرة 13 عدا 135 فروقات
+    # الصندوق، أو مقابل صفري (قيد مركب) وفي القيد نفسه سطر صندوق معاكس والقيد ليس
+    # الافتتاحي. والقبض خارج فاتورة لا يكون payment إلا على حساب تحت شجرة 121 الزبائن
+    # كذلك التعريف؛ دفعة البيع (sale_payment) مثبتة بفاتورة المبيع نفسها.
+    $lineKindCte = ""
+    $lineKindApply = ""
+    $lineKindSel = "CAST(NULL AS varchar(20))"
+    if ($buTypeCol) {
+        $lineKindCte = @"
+lk_cash_tree AS (
+    SELECT ac.GUID FROM dbo.ac000 ac WHERE ac.GUID = 'c0dc3c06-b2ac-4e57-beae-19d7da3f514c'
+    UNION ALL
+    SELECT a.GUID FROM dbo.ac000 a JOIN lk_cash_tree t ON a.ParentGUID = t.GUID
+),
+lk_cash AS (
+    SELECT t.GUID FROM lk_cash_tree t WHERE t.GUID <> 'ef5d9f4c-db3a-4307-a402-4fefe3e4e2b8'
+),
+lk_customer_tree AS (
+    SELECT ac.GUID FROM dbo.ac000 ac WHERE ac.GUID = 'e30187a7-eccc-4ff8-8a7d-f2df5e660b53'
+    UNION ALL
+    SELECT a.GUID FROM dbo.ac000 a JOIN lk_customer_tree t ON a.ParentGUID = t.GUID
+),
+"@
+        $lineKindApply = @"
+    OUTER APPLY (
+        SELECT TOP (1) lr.ParentType AS pt, lr.ParentGUID AS pg, COUNT(*) OVER () AS n
+        FROM dbo.er000 lr WHERE lr.EntryGUID = en.ParentGUID
+    ) lk
+    LEFT JOIN dbo.bu000 lbu ON lk.n = 1 AND lk.pt = 2 AND lbu.GUID = lk.pg
+    LEFT JOIN dbo.bt000 lbt ON lbt.GUID = lbu.[$buTypeCol]
+    LEFT JOIN dbo.py000 lpy ON lk.n = 1 AND lk.pt = 4 AND lpy.GUID = lk.pg
+    LEFT JOIN dbo.et000 lety ON lety.GUID = lpy.TypeGUID
+    LEFT JOIN dbo.ac000 lca ON lca.GUID = en.ContraAccGUID
+    LEFT JOIN dbo.ac000 lcp ON lcp.GUID = lca.ParentGUID
+    LEFT JOIN dbo.ac000 lcg ON lcg.GUID = lcp.ParentGUID
+    OUTER APPLY (
+        SELECT
+            CASE WHEN COALESCE(en.Type, 0) = 0
+                  AND (en.ContraAccGUID IN (SELECT GUID FROM lk_cash)
+                       OR (COALESCE(en.ContraAccGUID, '00000000-0000-0000-0000-000000000000') = '00000000-0000-0000-0000-000000000000'
+                           AND ce.GUID IS NOT NULL
+                           AND COALESCE(ce.TypeGUID, '00000000-0000-0000-0000-000000000000') <> 'ea69ba80-662d-4fa4-90ee-4d2e1988a8ea'
+                           AND EXISTS (SELECT 1 FROM dbo.en000 cd WHERE cd.ParentGUID = en.ParentGUID
+                                         AND cd.AccountGUID IN (SELECT GUID FROM lk_cash)
+                                         AND ((en.Credit > 0 AND COALESCE(cd.Debit, 0) > 0) OR (en.Debit > 0 AND COALESCE(cd.Credit, 0) > 0)))))
+                 THEN 1 ELSE 0 END AS isCash,
+            CASE WHEN EXISTS (SELECT 1 FROM lk_customer_tree c WHERE c.GUID = en.AccountGUID) THEN 1 ELSE 0 END AS isCustomerTree,
+            CASE WHEN en.ContraAccGUID = 'ef5d9f4c-db3a-4307-a402-4fefe3e4e2b8' THEN 1 ELSE 0 END AS isCashDiff
+    ) lkc
+"@
+        $lineKindSel = @"
+CASE
+    WHEN lk.n > 1 THEN 'unknown'
+    WHEN lk.pt = 2 AND lbt.BillType = 1 THEN CASE
+        WHEN lca.Code = '43' THEN CASE WHEN en.Credit > 0 THEN 'discount' ELSE 'adjustment' END
+        WHEN lkc.isCash = 1 THEN CASE WHEN en.Credit > 0 THEN 'sale_payment' ELSE 'unknown' END
+        WHEN en.Debit > 0 AND (lca.Code = '41' OR lcp.Code = '41') THEN 'sale'
+        ELSE 'unknown' END
+    WHEN lk.pt = 2 AND lbt.BillType = 3 THEN CASE
+        WHEN lca.Code = '43' THEN 'adjustment'
+        WHEN en.Credit > 0 AND (lca.Code = '42' OR lcp.Code = '42') THEN 'return'
+        ELSE 'unknown' END
+    WHEN lk.pt = 2 AND lbt.BillType = 0 THEN CASE
+        WHEN lkc.isCash = 1 THEN 'purchase_payment'
+        WHEN lca.Code = '124' OR lcp.Code = '124' THEN 'purchase'
+        ELSE 'unknown' END
+    WHEN lk.pt = 2 AND lbt.BillType = 2 THEN CASE
+        WHEN lca.Code = '32' OR lcp.Code = '32' THEN 'purchase_return'
+        ELSE 'unknown' END
+    WHEN lk.pt = 2 AND lbt.BillType IN (4, 5) THEN 'adjustment'
+    WHEN lk.pt = 2 THEN 'unknown'
+    WHEN lk.pt = 4 AND lety.Name LIKE N'%افتتاح%' THEN 'opening'
+    WHEN lk.pt IS NOT NULL AND lk.pt <> 4 THEN 'unknown'
+    -- القبض دفعة زبون فقط على حساب تحت شجرة 121 (كتعريف الأرصدة)؛ الصرف من الصندوق للحساب payment_out.
+    WHEN lkc.isCash = 1 AND en.Credit > 0 THEN CASE WHEN lkc.isCustomerTree = 1 THEN 'payment' ELSE 'other' END
+    WHEN lkc.isCash = 1 THEN 'payment_out'
+    WHEN lkc.isCashDiff = 1 THEN 'adjustment'
+    -- صندوق مقابلاً لكن السطر خارج تعريف الدفعة (en.Type ≠ 0).
+    WHEN lcp.Code = '13' THEN 'unknown'
+    WHEN lca.Code = '43' THEN CASE WHEN en.Credit > 0 THEN 'discount' ELSE 'adjustment' END
+    WHEN lca.GUID IS NULL THEN 'unknown'
+    -- الانتماء بالشجرة (أب/جد) لا ببادئة الرمز: الرموز لا تتبع الشجرة دائماً (545616 زبون تحت 1212).
+    -- جذر 3/5 (تكاليف/مصاريف) يسبق فحص الزبون: «فرق جرد اخراج» (515 تحت 5) مسجّل زبوناً وهو تسوية.
+    WHEN lcp.Code IN ('3', '5') OR lcg.Code IN ('3', '5') THEN 'adjustment'
+    WHEN EXISTS (SELECT 1 FROM dbo.cu000 tc WHERE tc.AccountGUID = en.ContraAccGUID) OR lcp.Code = '22' OR lcg.Code = '22' THEN 'debt_transfer'
+    ELSE 'other'
+END
+"@
+    }
+
     # (2) حركات الفترة لكل زبون
     $movements = @{}
     $cmd = $conn.CreateCommand()
@@ -162,7 +261,7 @@ SELECT COUNT(*) FROM (
     # سند القيد (ce000.CreateDate) ثم رقمه — تحقق على كشفَي حسن عباس وشريفة (13 رصيداً).
     # (وقت الإنشاء وحده لا يكفي: الأمين يعرض فاتورة اليوم قبل سنداته ولو أُنشئت بعدها.)
     $cmd.CommandText = @"
-WITH led AS (
+WITH $lineKindCte led AS (
     SELECT LTRIM(RTRIM(cu.CustomerName)) AS name,
            en.AccountGUID AS acct, CAST(en.ParentGUID AS varchar(40)) AS parent,
            COALESCE(CASE WHEN ce.Date >= '2000-01-01' THEN ce.Date END, en.Date) AS dt, en.Number AS num,
@@ -178,6 +277,7 @@ WITH led AS (
            -- الصفري ليس معرّفاً فيصير فراغاً، ثم ربط er000 لقيود مرتجع المبيعات وحدها (1c).
            COALESCE(NULLIF(LOWER(CAST(COALESCE(bib.ParentGUID, en.BiGUID) AS varchar(40))), '00000000-0000-0000-0000-000000000000'),
                     LOWER($returnLinkSel), '') AS bill_guid,
+           $lineKindSel AS line_kind,
            CAST(SUM(COALESCE(en.Debit,0) - COALESCE(en.Credit,0))
                 OVER (PARTITION BY en.AccountGUID
                       ORDER BY COALESCE(CASE WHEN ce.Date >= '2000-01-01' THEN ce.Date END, en.Date),
@@ -204,6 +304,7 @@ WITH led AS (
     LEFT JOIN dbo.ce000 ce ON ce.GUID = en.ParentGUID
     LEFT JOIN dbo.bi000 bib ON bib.GUID = en.BiGUID
 $returnLinkApply
+$lineKindApply
     WHERE (COALESCE(en.Debit,0) > 0 OR COALESCE(en.Credit,0) > 0)
       AND cu.CustomerName IS NOT NULL AND LTRIM(RTRIM(cu.CustomerName)) <> ''
       AND (cu.bHide IS NULL OR cu.bHide = 0)
@@ -222,7 +323,8 @@ SELECT name, dt, debit, credit, notes, bill_guid, balance, balanceChrono,
             THEN FIRST_VALUE(balanceChrono - (debit - credit)) OVER (PARTITION BY acct, parent
                    ORDER BY dt, isopen, sortdt, cenum, num
                    ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
-            ELSE balanceChrono - (debit - credit) END AS docPrev
+            ELSE balanceChrono - (debit - credit) END AS docPrev,
+       line_kind
 FROM led
 WHERE dt >= @fromDate
 ORDER BY name, dt, isopen, iscredit, sortdt, cenum, num
@@ -242,6 +344,8 @@ ORDER BY name, dt, isopen, iscredit, sortdt, cenum, num
             balanceChrono = [double]$r.GetValue(7)
             docNew   = [double]$r.GetValue(8)
             docPrev  = [double]$r.GetValue(9)
+            # نوع السطر (1d)؛ فراغ حين لا تحمل هذه النسخة التصنيف (NULL ⇒ "").
+            lineKind = [string]$r.GetValue(10)
         })
     }
     $r.Close()
@@ -331,6 +435,9 @@ ORDER BY name, dt, isopen, iscredit, sortdt, cenum, num
             # فغياب المعرّف عن قيد دائن يعني أنه ليس مرتجعاً. بلا العلامة لا يعرف
             # الموقع ذلك، فلا يصنّف (src/app.js: RETURN_LINK_MARKER).
             billLinks   = $(if ($buTypeCol -and $ambiguousReturnEntries -eq 0) { "er000-return-v1" } else { $null })
+            # العلامة تعني: كل سطر يحمل lineKind من (1d) — من العلاقات المحاسبية لا من
+            # الملاحظة، وما لم يثبت نوعه unknown. بلا العلامة لا يثق الموقع بالحقل.
+            lineKinds   = $(if ($buTypeCol) { "v1" } else { $null })
         }
         items       = $items
     }
