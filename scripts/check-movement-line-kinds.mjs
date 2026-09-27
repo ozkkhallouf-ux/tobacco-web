@@ -94,6 +94,24 @@ test("قراءة فقط: لا كتابة إلى الأمين في كتلة ال�
   for (const text of [sel, apply, cte]) assert.ok(!/\b(INSERT|UPDATE|DELETE|MERGE|EXEC|DROP|ALTER|CREATE)\b/i.test(text));
 });
 
+test("عقد الإنتاج (#277): كل نوع يُنتجه المصدر معروف للمحرك، والعلامة نفسها", () => {
+  // المحرك (src/customer-intelligence.js) يقرأ lineKind فقط حين summary.lineKinds === LINE_KINDS_MARKER،
+  // وأي قيمة خارج KNOWN_LINE_KINDS تُعامل unknown — فيجب ألا يُنتج المصدر نوعاً لا يعرفه المحرك.
+  const engine = readFileSync(new URL("../src/customer-intelligence.js", import.meta.url), "utf8");
+  const known = engine.match(/const KNOWN_LINE_KINDS = new Set\(\[([\s\S]*?)\]\);/);
+  assert.ok(known, "KNOWN_LINE_KINDS غائب عن المحرك");
+  const engineKinds = new Set([...known[1].matchAll(/"([a-z_]+)"/g)].map((m) => m[1]));
+  const produced = new Set([...sel.matchAll(/THEN '([a-z_]+)'|ELSE '([a-z_]+)'/g)].map((m) => m[1] || m[2]));
+  for (const kind of produced) assert.ok(engineKinds.has(kind), `المصدر يُنتج نوعاً لا يعرفه المحرك: ${kind}`);
+  const marker = engine.match(/const LINE_KINDS_MARKER = "([^"]+)";/);
+  assert.ok(marker, "LINE_KINDS_MARKER غائب عن المحرك");
+  assert.match(ps, new RegExp(`lineKinds\\s+= \\$\\(if \\(\\$buTypeCol\\) \\{ "${marker[1]}" \\}`), "علامة المصدر تطابق علامة المحرك");
+  // المحرك يقرأ الحقل باسم lineKind لكل حركة، ويوم المحاسبة من report_date.
+  assert.match(engine, /movement\?\.lineKind \?\? movement\?\.line_kind/);
+  assert.match(ps, /lineKind = \[string\]\$r\.GetValue\(10\)/);
+  assert.match(ps, /report_date = \(Get-Date\)\.ToString\("yyyy-MM-dd"\)/, "يوم المحاسبة المحلي في التقرير");
+});
+
 console.log(results.join("\n"));
 if (failed) { console.error(`نوع سطر الحركة: فشل ${failed}`); process.exit(1); }
 console.log(`نوع سطر الحركة: ${results.length} عقود محسومة.`);
