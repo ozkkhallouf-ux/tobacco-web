@@ -519,7 +519,9 @@
         const firstDay = rows.length ? rows[0].day : null;
         const day = Math.min(...[reportFromDay, firstDay].filter((value) => value !== null)) - 1;
         if (Number.isFinite(day)) {
-          rows.unshift({ day, index: -1, debit: Math.max(0, carried), credit: Math.max(0, -carried), isReturn: false, isOpening: true });
+          // تاريخه الاصطناعي يتحرك مع النافذة، فعمره الحقيقي مجهول و≥ عمر النافذة:
+          // ageUnknown يحفظه متأخراً في كل لقطة لاحقة (لا يصغر عمره بتدحرج النافذة).
+          rows.unshift({ day, index: -1, debit: Math.max(0, carried), credit: Math.max(0, -carried), isReturn: false, isOpening: true, ageUnknown: true });
         }
       }
       byGuid.set(guid, { truncated: item?.truncated === true, rows });
@@ -588,7 +590,7 @@
         else acc.salesPrior += row.debit;
       }
     }
-    const debit = { day: row.day, amount: row.debit, remaining: row.debit, isOpening: row.isOpening, settledDay: null };
+    const debit = { day: row.day, amount: row.debit, remaining: row.debit, isOpening: row.isOpening, ageUnknown: row.ageUnknown === true, settledDay: null };
     acc.debits.push(debit);
     settleDebitFromAdvances(debit, acc.advanceQueue, span.tolerance);
     if (debit.remaining > span.tolerance) acc.openQueue.push(debit);
@@ -760,8 +762,10 @@
   function overdueFacts(facts, referenceDay, cycleDays) {
     const A = CONFIG.autoCredit;
     const overdueAfterDays = Math.max(cycleDays * A.delinquentCycleMultiple, cycleDays + A.delinquentMarginDays);
+    // الدين المرحَّل من قبل النافذة (ageUnknown) متأخر في كل لقطة أياً كان حد الدورة؛
+    // والتعثّر يبقى مشروطاً معه برصيد قائم وبدفعات لا تغطيه (computeAutoCredit).
     const overdueAmount = facts.open
-      .filter((debit) => referenceDay - debit.day > overdueAfterDays)
+      .filter((debit) => debit.ageUnknown || referenceDay - debit.day > overdueAfterDays)
       .reduce((sum, debit) => sum + debit.remaining, 0);
     const paidInOverdueSpan = facts.paymentsByDay
       .filter((payment) => payment.day > referenceDay - overdueAfterDays)
@@ -985,9 +989,10 @@
   // الحساب — تُعرض مرجعاً تشخيصياً فقط (legacyCreditLimit).
   // غياب الحد **ليس** صفراً ولا يُنتج تجاوزاً.
   // --------------------------------------------------------------------------
-  function resolveCredit(balanceRow, auto, display, legacyCreditLimit = null) {
+  function resolveCredit(balanceRow, auto, display, legacyCreditLimit = null, { balancesStale = false } = {}) {
     const ameenLimitRaw = numberOrNull(balanceRow?.creditLimit ?? balanceRow?.credit_limit);
-    const ameenLimit = ameenLimitRaw !== null && ameenLimitRaw > 0 ? ameenLimitRaw : null;
+    // تقرير أرصدة غير حديث: لا حد الأمين من اللقطة نفسها بديلاً — رقم يبدو صالحاً وهو قديم.
+    const ameenLimit = !balancesStale && ameenLimitRaw !== null && ameenLimitRaw > 0 ? ameenLimitRaw : null;
     const autoUsable = auto && auto.status !== "unavailable";
 
     const currency = display?.currency || CONFIG.baseCurrency;
@@ -1027,24 +1032,34 @@
     }
 
     const balance = numberOrNull(balanceRow.balance);
-    // حساب الليرة يُقارن بعملته (لا بالدولار المشوّه بفروقات الصرف).
+    // حساب الليرة يُقارن بعملته (لا بالدولار المشوّه بفروقات الصرف). وإن غاب رصيده
+    // بعملته (سطر بعملة أخرى أو معدّل غير صالح) فالمقارنة بعملة الأساس: الرصيد
+    // بالدولار مقابل ما يكافئ الحد بالدولار — لا دولار مقابل ليرة أبداً.
     const accountBalance = creditCurrency !== CONFIG.baseCurrency ? numberOrNull(balanceRow.balanceAccountCcy) : null;
+    const nativeComparable = creditCurrency === CONFIG.baseCurrency || accountBalance !== null;
     const balanceDisplay = accountBalance !== null ? accountBalance : balance;
+    const balanceCurrency = nativeComparable ? creditCurrency : CONFIG.baseCurrency;
     const exposure = Math.max(0, balanceDisplay);
+    const compareLimit = nativeComparable ? creditLimitDisplay : creditLimit;
 
     let creditStatus = "normal";
     let usagePercent = null;
+    const confirmedStatus = autoUsable && ["non_customer", "needs_review"].includes(auto.status);
+    if (balancesStale && !confirmedStatus) {
+      // لا استخدام ولا تجاوز ولا تعثّر من رصيد قديم.
+      return { ...base, currentBalance: round(balance, 3), balanceDisplay: round(balanceDisplay, 3), balanceCurrency, creditLimitSource: autoUsable ? base.creditLimitSource : "stale", creditUsagePercent: null, creditStatus: "stale_balance" };
+    }
     if (autoUsable && auto.status === "delinquent") creditStatus = "delinquent";
     else if (autoUsable && auto.status === "inactive") creditStatus = "inactive_no_limit";
     else if (autoUsable && auto.status === "prepaid") creditStatus = "prepaid";
     else if (autoUsable && auto.status === "non_customer") creditStatus = "not_customer";
     else if (autoUsable && auto.status === "needs_review") creditStatus = "needs_review";
-    else if (creditLimitDisplay !== null && creditLimitDisplay > 0) {
-      usagePercent = round((exposure / creditLimitDisplay) * 100, 2);
-      const ratio = exposure / creditLimitDisplay;
+    else if (compareLimit !== null && compareLimit > 0) {
+      usagePercent = round((exposure / compareLimit) * 100, 2);
+      const ratio = exposure / compareLimit;
       if (ratio >= 1) creditStatus = "over_limit";
       else if (ratio >= CONFIG.nearLimitRatio) creditStatus = "near_limit";
-    } else if (creditLimitDisplay === 0 && exposure > 0) {
+    } else if (compareLimit === 0 && exposure > 0) {
       creditStatus = "over_limit";               // حد محسوب أقل من أصغر خطوة تقريب
     } else if (exposure > 0) {
       creditStatus = "unknown_limit";
@@ -1054,6 +1069,7 @@
       ...base,
       currentBalance: round(balance, 3),
       balanceDisplay: round(balanceDisplay, 3),
+      balanceCurrency,
       creditUsagePercent: usagePercent,
       creditStatus
     };
@@ -1467,7 +1483,11 @@
           : sourcesFreshness.balances.stale ? "balances" : null;
       if (!isSupplierRecord && record.customerGuid && ledger.byGuid.size > 0 && staleCreditSource) {
         // دفتر حركات أو تقرير أرصدة متوقف المزامنة: لا حد آلي ولا حكم تعثّر من بيانات قديمة.
-        auto = { status: "unavailable", limitBase: null, staleLedger: true, notes: [staleCreditNote(staleCreditSource, sourcesFreshness)] };
+        const review = needsReviewByGuid.get(record.customerGuid) || null;
+        auto = review
+          // «يحتاج مراجعة» حكم على نوع الحركة لا على حداثتها: يبقى، وبلا حد كما هو.
+          ? { status: "needs_review", limitBase: null, staleLedger: true, notes: [review.reason, staleCreditNote(staleCreditSource, sourcesFreshness)] }
+          : { status: "unavailable", limitBase: null, staleLedger: true, notes: [staleCreditNote(staleCreditSource, sourcesFreshness)] };
       } else if (!isSupplierRecord && record.customerGuid && ledger.byGuid.size > 0) {
         const facts = factsByGuid.get(record.customerGuid) || null;
         const rawBalance = numberOrNull(record.balanceRow?.balance);
@@ -1487,7 +1507,7 @@
         });
         if (display.rate !== null) auto.exchangeRate = display.rate;
       }
-      const credit = resolveCredit(record.balanceRow, auto, display, legacyCreditLimit);
+      const credit = resolveCredit(record.balanceRow, auto, display, legacyCreditLimit, { balancesStale: sourcesFreshness.balances.stale });
       // أصناف مختلطة العملة: لا نجمع lineTotals بعملات مختلفة — نُعيد صفر أصناف.
       const items = currencyMixed ? { items: [], identity: "item_guid" } : topItems(windowRows);
 
@@ -1785,6 +1805,7 @@
       else if (draft.credit.creditStatus === "needs_review") reasons.push(...draft.credit.autoCredit.notes);
       else if (draft.credit.creditStatus === "near_limit") reasons.push(`الرصيد بلغ ${draft.credit.creditUsagePercent}% من حد الائتمان.`);
       else if (draft.credit.creditStatus === "unknown_limit") reasons.push("عليه رصيد مدين بلا حد ائتمان محدد.");
+      else if (draft.credit.creditStatus === "stale_balance") reasons.push("تقرير الأرصدة غير حديث: حد الائتمان غير متاح، ولا نسبة استخدام ولا حكم تجاوز من رصيد قديم.");
       else if (draft.credit.creditStatus === "unknown_balance") reasons.push("لا يوجد صف رصيد من الأمين لهذا الزبون، فلا يُعرض صفراً ولا يُحسب ضمن الذمم.");
 
       return {
@@ -1829,6 +1850,7 @@
         creditCurrency: draft.credit.creditCurrency,
         creditLimitDisplay: draft.credit.creditLimitDisplay,
         balanceDisplay: draft.credit.balanceDisplay,
+        balanceCurrency: draft.credit.balanceCurrency,
         legacyCreditLimit: draft.credit.legacyCreditLimit,
         autoCredit: draft.credit.autoCredit,
 

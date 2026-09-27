@@ -1866,10 +1866,111 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   for (const c of [active72, idle72]) assert.ok(!c.flags.includes("credit_not_customer"), "test 72: زبون لا «ليس زبون مبيعات»");
   assert.deepEqual(rc72.dataAvailability.creditCycle, rc.dataAvailability.creditCycle, "test 72: لا تلوّث عيّنة المحفظة");
 
+  // 73) Codex P1 — عملة الرصيد: حساب ليرة غاب رصيده بعملته (سطر بعملة أخرى أو معدّل
+  //     غير صالح) لا يُقارن رصيده بالدولار مع حده بالليرة؛ المقارنة بعملة الأساس.
+  const sypBase = row(G_SYP);
+  assert.equal(sypBase.creditCurrency, "SYP", "test 73: الحد معروض بالليرة");
+  assert.equal(sypBase.balanceCurrency, "SYP", "test 73: الرصيد بعملته حين يتوفر");
+  assert.ok(sypBase.creditLimit > 0 && sypBase.creditLimitDisplay > sypBase.creditLimit, "test 73: حد آلي بالليرة ومكافئه بالدولار");
+  const sypUsd = sypBase.creditLimit * 4;           // رصيد بالدولار يساوي أربعة أضعاف مكافئ الحد
+  const rcSypNoLocal = engine.build({
+    ...reports,
+    balancesReport: { ...reports.balancesReport, items: reports.balancesReport.items.map((item) => (item.customerGuid === G_SYP
+      ? { ...item, balance: sypUsd, balanceAccountCcy: null } : item)) }
+  });
+  const sypNoLocal = rcSypNoLocal.customers.find((c) => c.customerGuid === G_SYP);
+  assert.equal(sypNoLocal.creditCurrency, "SYP", "test 73: الحد ما زال معروضاً بالليرة");
+  assert.equal(sypNoLocal.balanceCurrency, "USD", "test 73: الرصيد البديل يُعرض بالدولار لا بالليرة");
+  assert.equal(sypNoLocal.creditStatus, "over_limit", "test 73: التجاوز لا يختفي باختلاف الوحدات");
+  assert.ok(Math.abs(sypNoLocal.creditUsagePercent - (sypUsd / sypNoLocal.creditLimit) * 100) < 0.01, "test 73: النسبة = دولار ÷ مكافئ الحد بالدولار");
+  assert.ok(sypNoLocal.flags.includes("over_credit_limit"));
+
+  // 74) Codex P1 — أرصدة غير حديثة: لا حد الأمين بديلاً، ولا نسبة استخدام ولا تجاوز ولا
+  //     تعثّر من رصيد قديم؛ والتصنيفات المؤكدة (ليس زبوناً / يحتاج مراجعة) تبقى.
+  const listedExcluded = engine.CONFIG.autoCredit.excludedAccountGuids[0];
+  const listedReview = engine.CONFIG.autoCredit.reviewAccountGuids[0];
+  const listedRows = [
+    { guid: listedExcluded, name: "مستبعد بالمعرّف" },
+    { guid: listedReview, name: "مختلط بالمعرّف" }
+  ];
+  const withListed = {
+    ...reports,
+    balancesReport: { ...reports.balancesReport, items: [
+      ...reports.balancesReport.items.map((item) => ({ ...item, creditLimit: 5000 })),
+      ...listedRows.map((a) => ({ ...reports.balancesReport.items[0], key: engine.normalizeName(a.name), name: a.name, balance: 4000, balanceAccountCcy: 4000,
+        creditLimit: 5000, customerGuid: a.guid, customerAccountGuid: a.guid }))
+    ] },
+    movementsReport: { ...reports.movementsReport, items: [
+      ...reports.movementsReport.items,
+      ...listedRows.map((a) => ({ customerGuid: a.guid, name: a.name, truncated: false, movements: regular({ from: 50, every: 7, amount: 800, lag: 3 }) }))
+    ] }
+  };
+  const rcStaleBal74 = engine.build({ ...withListed, balancesReport: { ...withListed.balancesReport, created_at: staleIso,
+    summary: { ...withListed.balancesReport.summary, syncedAt: staleIso } } });
+  assert.equal(rcStaleBal74.sourcesFreshness.balances.stale, true);
+  for (const c of rcStaleBal74.customers.filter((entry) => ![listedExcluded, listedReview, G_NOTCUST].includes(entry.customerGuid))) {
+    assert.equal(c.creditLimit, null, `test 74: لا حد من أرصدة قديمة (${c.customerName})`);
+    assert.notEqual(c.creditLimitSource, "ameen", `test 74: لا احتياط لحد الأمين (${c.customerName})`);
+    assert.equal(c.creditUsagePercent, null, `test 74: لا نسبة استخدام (${c.customerName})`);
+    assert.ok(!["over_limit", "near_limit", "delinquent"].includes(c.creditStatus), `test 74: لا حكم من رصيد قديم (${c.customerName})`);
+  }
+  const staleSteady74 = rcStaleBal74.customers.find((c) => c.customerGuid === G_STEADY);
+  assert.equal(staleSteady74.creditStatus, "stale_balance", "test 74: الحالة معلنة غير حديثة");
+  assert.equal(staleSteady74.creditLimitSource, "stale");
+  assert.ok(staleSteady74.flags.includes("stale_data"));
+  assert.ok(staleSteady74.explanation.some((reason) => reason.includes("غير حديث")), "test 74: السبب ظاهر");
+  const staleExcluded = rcStaleBal74.customers.find((c) => c.customerGuid === listedExcluded);
+  const staleReview = rcStaleBal74.customers.find((c) => c.customerGuid === listedReview);
+  assert.equal(staleExcluded.creditStatus, "not_customer", "test 74: «ليس زبوناً» المؤكد يبقى");
+  assert.equal(staleReview.creditStatus, "needs_review", "test 74: المختلط المؤكد يبقى «يحتاج مراجعة»");
+  assert.equal(rcStaleBal74.customers.find((c) => c.customerGuid === G_NOTCUST).creditStatus, "needs_review", "test 74: الشذوذ السلوكي يبقى «يحتاج مراجعة»");
+  for (const c of [staleExcluded, staleReview]) assert.equal(c.creditLimit, null);
+  // الضبط: الأرصدة نفسها حديثة ⇒ تعود الأحكام (الاختبار يقيس القِدم لا غياب الحد).
+  const freshSteady74 = engine.build(withListed).customers.find((c) => c.customerGuid === G_STEADY);
+  assert.equal(freshSteady74.creditLimitSource, "auto");
+  assert.ok(freshSteady74.creditLimit > 0);
+
+  // 75) Codex P1 — عمر الدين المرحَّل: تاريخه الاصطناعي يتدحرج مع نافذة الحركات، فلا
+  //     يصغر عمره في لقطة لاحقة ولا يفلت من «متأخر» حين يطول حد الدورة (> عمر النافذة).
+  //     وتبقى بقية شروط التعثّر: دين مرحَّل مغطّى بدفعات كافية ليس تعثّراً.
+  const longCycle = (id) => ({ guid: gid(id), name: `دورة طويلة ${id}`, truncated: false,
+    movements: regular({ from: 90, every: 5, amount: 500, lag: 55 }) });
+  const portfolio75 = [75, 76, 77, 78, 79, 80].map(longCycle);
+  const G75 = gid(81);
+  // سحب قديم غير مسدَّد يطيل دورة الزبون نفسه إلى سقف المحفظة (≈ 55 يوماً).
+  const target75 = regular({ from: 90, to: 60, every: 6, amount: 300, lag: null });
+  const snapshot75 = (fromDays, extraTarget = []) => {
+    const all = [...portfolio75, { guid: G75, name: "دين مرحَّل قديم", truncated: false, openingBalance: 3000, movements: [...target75, ...extraTarget] }];
+    return engine.build({
+      now: NOW,
+      invoicesReport: invoicesReportFor(all.map((a) => ({ ...a }))),
+      balancesReport: { ...reports.balancesReport, items: all.map((a) => ({ ...reports.balancesReport.items[0], key: engine.normalizeName(a.name), name: a.name,
+        balance: (a.openingBalance ?? 0) + ledgerBalance(a.movements), balanceAccountCcy: (a.openingBalance ?? 0) + ledgerBalance(a.movements),
+        creditLimit: 0, customerGuid: a.guid, customerAccountGuid: a.guid })) },
+      movementsReport: { ...reports.movementsReport, summary: { ...reports.movementsReport.summary, fromDate: d(fromDays) },
+        items: all.map((a) => ({ customerGuid: a.guid, name: a.name, truncated: false, openingBalance: a.openingBalance ?? 0, movements: a.movements })) },
+      creditLimits: []
+    }).customers.find((c) => c.customerGuid === G75);
+  };
+  // اللقطة الأولى (نافذة من 92 يوماً) ولقطة لاحقة بعد 30 يوماً: الدين نفسه يرحَّل من
+  // بداية أحدث، فتاريخه الاصطناعي يصبح أحدث بـ30 يوماً.
+  const early75 = snapshot75(92);
+  const later75 = snapshot75(62);
+  assert.ok(early75.autoCredit.overdueAfterDays > 93, "test 75: حد الدورة أطول من النافذة (السيناريو المقصود)");
+  for (const [label, c] of [["الأولى", early75], ["اللاحقة", later75]]) {
+    assert.ok(c.autoCredit.overdueAmount >= 3000, `test 75: الدين المرحَّل متأخر في اللقطة ${label}`);
+    assert.equal(c.creditStatus, "delinquent", `test 75: رصيد قائم + متأخر + بلا دفعات = تعثّر (${label})`);
+  }
+  assert.ok(later75.autoCredit.overdueAmount >= early75.autoCredit.overdueAmount, "test 75: لا يصغر عمر الدين في لقطة لاحقة");
+  // الحارس باقٍ: الدين المرحَّل نفسه مع دفعات تغطي أكثر من نصفه ليس تعثّراً.
+  const paid75 = snapshot75(92, [pay(40, 1200), pay(20, 1200)]);
+  assert.ok(paid75.autoCredit.overdueAmount > 0, "test 75: ما بقي من المرحَّل ما زال متأخراً");
+  assert.notEqual(paid75.creditStatus, "delinquent", "test 75: المرحَّل وحده لا يصنع تعثّراً");
+
   // 66) عدّادات الملخص؛ وتنبيه الحد يبقى مسودة داخلية: لا مسار تيليغرام في هذه المرحلة.
   assert.ok(rc.summary.delinquentCreditCount >= 2 && rc.summary.inactiveCreditCount >= 2 && rc.summary.lowDataCreditCount >= 1);
   assert.equal(rc.summary.nonCustomerCreditCount, 0, "test 66: لا «ليس زبوناً» بالسلوك");
   assert.equal(rc.summary.needsReviewCreditCount, 1, "test 66: الشذوذ يُعدّ «يحتاج مراجعة» منفصلاً");
 }
 
-console.log(`ذكاء الزبائن: 72 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
+console.log(`ذكاء الزبائن: 75 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);

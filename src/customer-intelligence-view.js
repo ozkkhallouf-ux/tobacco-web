@@ -286,7 +286,7 @@
         <td dir="ltr" class="${trendClass}">${escape(trendText)}</td>
         <td dir="ltr">${day(row.lastPurchaseAt)}</td>
         <td dir="ltr">${count(row.daysSinceLastPurchase)}</td>
-        <td dir="ltr">${money(row.balanceDisplay ?? row.currentBalance, row.creditCurrency || "USD")}</td>
+        <td dir="ltr">${money(row.balanceDisplay ?? row.currentBalance, row.balanceCurrency || row.creditCurrency || "USD")}</td>
         <td dir="ltr">${escape(creditText)}</td>
         <td class="ci-flags">${flagChips(row.flags, 3)}</td>
       </tr>`;
@@ -299,6 +299,7 @@
     inactive_no_limit: "غير نشط",
     prepaid: "رصيد دائن",
     not_customer: "ليس زبون مبيعات",
+    stale_balance: "غير متاح: الرصيد غير حديث",
     needs_review: "غير متاح: يحتاج مراجعة"
   };
   const AUTO_STATUS_TEXT = {
@@ -322,6 +323,7 @@
       const label = AUTO_STATUS_TEXT[auto?.status] || "آلي";
       return row.creditLimitDisplay === null ? escape(label) : `${money(row.creditLimitDisplay, row.creditCurrency || "USD")} (${escape(label)})`;
     }
+    if (row.creditLimitSource === "stale") return "غير متاح (تقرير الأرصدة غير حديث)";
     if (row.creditLimitSource === "ameen") return `${money(row.creditLimitDisplay ?? row.creditLimit, row.creditCurrency || "USD")} (من الأمين — لا دفتر حساب للحساب الآلي)`;
     return "غير محدد";
   }
@@ -365,7 +367,7 @@
       ["عدد الفواتير (30 يوم)", count(row.invoiceCount30d)],
       ["عدد الفواتير (السابقة)", count(row.invoiceCountPrevious30d)],
       ["متوسط الفاتورة", money(row.averageInvoice30d, row.currency)],
-      ["الرصيد الحالي", money(row.balanceDisplay ?? row.currentBalance, row.creditCurrency || "USD")],
+      ["الرصيد الحالي", money(row.balanceDisplay ?? row.currentBalance, row.balanceCurrency || row.creditCurrency || "USD")],
       ["حد الائتمان", creditLimitText(row)],
       ["نسبة استخدام الائتمان", isNumber(row.creditUsagePercent) ? `${row.creditUsagePercent}%` : (CREDIT_STATUS_TEXT[row.creditStatus] || "—")],
       ...autoCreditFacts(row),
