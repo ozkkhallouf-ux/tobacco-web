@@ -1069,7 +1069,7 @@
   // الحساب — تُعرض مرجعاً تشخيصياً فقط (legacyCreditLimit).
   // غياب الحد **ليس** صفراً ولا يُنتج تجاوزاً.
   // --------------------------------------------------------------------------
-  function resolveCredit(balanceRow, auto, display, legacyCreditLimit = null, { balancesStale = false, invoicesStale = false, dayMismatch = false, autoGated = false } = {}) {
+  function resolveCredit(balanceRow, auto, display, legacyCreditLimit = null, { balancesStale = false, invoicesStale = false, dayMismatch = false, ameenFxDayMismatch = false, autoGated = false } = {}) {
     const ameenLimitRaw = numberOrNull(balanceRow?.creditLimit ?? balanceRow?.credit_limit);
     // تقرير أرصدة غير حديث: لا حد الأمين من اللقطة نفسها بديلاً — رقم يبدو صالحاً وهو قديم.
     const ameenLimit = !balancesStale && ameenLimitRaw !== null && ameenLimitRaw > 0 ? ameenLimitRaw : null;
@@ -1143,10 +1143,10 @@
         creditStatus: "missing_rate"
       };
     }
-    if ((dayMismatch || invoicesStale) && foreign && creditLimitSource === "ameen" && !confirmedStatus) {
+    if ((dayMismatch || ameenFxDayMismatch || invoicesStale) && foreign && creditLimitSource === "ameen" && !confirmedStatus) {
       // قرار المالك: معدّل تحويل حد الأمين لعملة الحساب من الفواتير نفسها، فمع لقطة فواتير قديمة
       // أو على يوم آخر قد يكون قديماً — الحد يُعرض بمصدره، بلا نسبة استخدام ولا حكم تجاوز.
-      return { ...base, currentBalance: round(balance, 3), balanceDisplay: round(balanceDisplay, 3), balanceCurrency, creditUsagePercent: null, creditStatus: dayMismatch ? "accounting_day_mismatch" : "stale_invoices" };
+      return { ...base, currentBalance: round(balance, 3), balanceDisplay: round(balanceDisplay, 3), balanceCurrency, creditUsagePercent: null, creditStatus: dayMismatch || ameenFxDayMismatch ? "accounting_day_mismatch" : "stale_invoices" };
     }
     if (dayMismatch && !confirmedStatus && creditLimitSource !== "ameen") {
       // المصادر على يومين محاسبيين: لا حد آلي ولا استخدام ولا تجاوز ولا تعثّر ولا «غير نشط».
@@ -1661,6 +1661,8 @@
         balancesStale: sourcesFreshness.balances.stale,
         invoicesStale: sourcesFreshness.invoices.stale && !isSupplierRecord,
         dayMismatch: staleCreditSource === "accounting_day" && !isSupplierRecord,
+        // معدّل تحويل حد الأمين من الفواتير: اختلاف يوم المحاسبة يمسّه مع v1 وبدونه (Codex P1).
+        ameenFxDayMismatch: !accountingDayAligned && !isSupplierRecord,
         autoGated: autoCreditGated && !isSupplierRecord
       });
       // أصناف مختلطة العملة: لا نجمع lineTotals بعملات مختلفة — نُعيد صفر أصناف.

@@ -2469,10 +2469,25 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   const partial87 = build87(400);
   assert.equal(partial87.creditStatus, "delinquent", "test 87: رصيد 400 ما زال يدعم ديناً مادّياً ⇒ الحكم كما كان");
 
+  // 88) Codex P1 — حد الأمين لحساب بعملة غير الأساس مع اختلاف يوم المحاسبة، ومنتج الحركات الحالي
+  //     غير الموسوم (بلا lineKinds:v1): معدّل التحويل من فواتير الأمس، فلا نسبة استخدام ولا تجاوز.
+  const untyped88 = engine.build({ ...reports, now: now84, untyped: true,
+    invoicesReport: at84(reports.invoicesReport, localIso(23, 50, -1), d(1)), movementsReport: at84(reports.movementsReport, localIso(0, 20), d(0)),
+    balancesReport: at84(withAmeenLimit(reports.balancesReport, limits85), localIso(0, 25), d(0)) });
+  const syp88 = untyped88.customers.find((c) => c.customerGuid === G_SYP);
+  assert.equal(syp88.creditLimitSource, "ameen", "test 88: حد الأمين بمصدره");
+  assert.equal(syp88.creditUsagePercent, null, "test 88: لا نسبة استخدام بمعدّل يوم آخر بلا v1");
+  assert.equal(syp88.creditStatus, "accounting_day_mismatch", "test 88: لا حكم تجاوز");
+  const usd88 = untyped88.customers.find((c) => c.customerGuid === G_STEADY);
+  assert.equal(usd88.creditStatus, "over_limit", "test 88: حساب الدولار بحد الأمين لا يحتاج معدّلاً");
+  const aligned88 = engine.build({ ...reports, untyped: true, balancesReport: withAmeenLimit(reports.balancesReport, limits85) })
+    .customers.find((c) => c.customerGuid === G_SYP);
+  assert.equal(aligned88.creditStatus, "over_limit", "test 88: الأيام متطابقة بلا v1 = حكم حد الأمين كما كان");
+
   // 66) عدّادات الملخص؛ وتنبيه الحد يبقى مسودة داخلية: لا مسار تيليغرام في هذه المرحلة.
   assert.ok(rc.summary.delinquentCreditCount >= 2 && rc.summary.inactiveCreditCount >= 2 && rc.summary.lowDataCreditCount >= 1);
   assert.equal(rc.summary.nonCustomerCreditCount, 0, "test 66: لا «ليس زبوناً» بالسلوك");
   assert.equal(rc.summary.needsReviewCreditCount, 1, "test 66: الشذوذ يُعدّ «يحتاج مراجعة» منفصلاً");
 }
 
-console.log(`ذكاء الزبائن: 87 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
+console.log(`ذكاء الزبائن: 88 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
