@@ -1476,7 +1476,6 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   const d = (n) => new Date(REF_DAY - n * 86400000).toISOString().slice(0, 10);
   const debit = (n, amount) => ({ date: d(n), debit: amount, credit: 0, notes: "", billGuid: "" });
   const pay = (n, amount) => ({ date: d(n), debit: 0, credit: amount, notes: "", billGuid: "" });
-  const ret = (n, amount) => ({ date: d(n), debit: 0, credit: amount, notes: "", billGuid: "bill-return" });
   const opening = (amount) => ({ date: d(62), debit: amount, credit: 0, notes: "القيد الافتتاحي", billGuid: "" });
   const gid = (n) => `00000000-0000-4000-9000-${String(n).padStart(12, "0")}`;
   // فواتير كل `every` يوماً من اليوم `from` حتى `to`، وكل واحدة تُسدَّد بعد `lag` يوماً.

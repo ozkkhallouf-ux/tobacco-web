@@ -871,7 +871,7 @@
   // الحساب — تُعرض مرجعاً تشخيصياً فقط (legacyCreditLimit).
   // غياب الحد **ليس** صفراً ولا يُنتج تجاوزاً.
   // --------------------------------------------------------------------------
-  function resolveCredit(balanceRow, auto, display) {
+  function resolveCredit(balanceRow, auto, display, legacyCreditLimit = null) {
     const ameenLimitRaw = numberOrNull(balanceRow?.creditLimit ?? balanceRow?.credit_limit);
     const ameenLimit = ameenLimitRaw !== null && ameenLimitRaw > 0 ? ameenLimitRaw : null;
     const autoUsable = auto && auto.status !== "unavailable";
@@ -903,6 +903,7 @@
       creditLimitDisplay: creditLimitDisplay === null ? null : round(creditLimitDisplay, 3),
       creditCurrency,
       creditLimitSource,
+      legacyCreditLimit,
       autoCredit: auto || null
     };
 
@@ -1342,8 +1343,7 @@
         });
         if (display.rate !== null) auto.exchangeRate = display.rate;
       }
-      const credit = resolveCredit(record.balanceRow, auto, display);
-      credit.legacyCreditLimit = legacyCreditLimit;
+      const credit = resolveCredit(record.balanceRow, auto, display, legacyCreditLimit);
       // أصناف مختلطة العملة: لا نجمع lineTotals بعملات مختلفة — نُعيد صفر أصناف.
       const items = currencyMixed ? { items: [], identity: "item_guid" } : topItems(windowRows);
 
