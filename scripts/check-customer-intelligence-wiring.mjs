@@ -136,8 +136,14 @@ for (const [key, minutes] of [["balances", 10], ["movements", 30], ["invoices", 
 const snapshotJs = read("src/business-snapshot.js");
 assert.ok(snapshotJs.includes("ratio >= 0.9"), "تغيّرت عتبة القرب من الحد في business-snapshot.js");
 assert.ok(engineJs.includes("nearLimitRatio: 0.9"), "عتبة القرب من الحد في ذكاء الزبائن يجب أن تبقى 0.9 كما في business-snapshot.js");
-assert.ok(engineJs.includes('creditLimitSource = approved !== null ? "approved" : ameenLimit !== null ? "ameen" : "missing"'),
-  "ترتيب مصدر حد الائتمان يجب أن يبقى: معتمد ← الأمين ← غير محدد");
+// قرار المالك (2026-09-27): حد ذكاء الزبائن آلي واحد — الآلي ← حد الأمين احتياطاً
+// حين يتعذّر الحساب ← غير محدد. customer_credit_limits مرجع تشخيصي (legacyCreditLimit)
+// ولا يصير حداً فعلياً في هذا المحرك.
+assert.ok(engineJs.includes('creditLimitSource = "auto"') && engineJs.includes('creditLimitSource = "ameen"')
+  && engineJs.includes('let creditLimitSource = "missing"'),
+  "ترتيب مصدر حد الائتمان يجب أن يبقى: آلي ← الأمين احتياطاً ← غير محدد");
+assert.ok(!/creditLimitSource\s*=\s*"approved"/.test(engineJs),
+  "الحد المخزّن في customer_credit_limits لا يصير حداً فعلياً في ذكاء الزبائن");
 
 // ---------------------------------------------------------------------------
 // 9) التطبيع مشترك مع app.js وسكربت المزامنة (وإلا انكسر الربط بالاسم)

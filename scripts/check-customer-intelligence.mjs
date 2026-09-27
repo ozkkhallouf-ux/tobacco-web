@@ -22,12 +22,42 @@ function loadEngine() {
   return engine;
 }
 
-const engine = loadEngine();
+const coreEngine = loadEngine();
+
+// قرار المالك (2026-09-27): بلا lineKinds:v1 الحد الآلي مغلق. عقود المحرك السابقة (1..76)
+// تُبنى على دفتر موسوم يطابق تصنيفها القديم حرفياً: مدين = sale (والافتتاحي opening)،
+// دائن = sale_payment (وbillGuid ⇒ return، والافتتاحي opening). `untyped: true` يمرّر
+// التقرير كما هو لاختبار المصدر غير الموسوم نفسه (77..80).
+const OPENING_NOTE = /افتتاح/u;
+const rawBuild = coreEngine.build;
+function typedMovements(report) {
+  if (!report || !Array.isArray(report.items) || report.summary?.lineKinds) return report;
+  const kindOf = (m) => {
+    if (m.lineKind) return m.lineKind;
+    if (OPENING_NOTE.test(m.notes || "")) return "opening";
+    if (Number(m.debit) > 0) return "sale";
+    return m.billGuid ? "return" : "sale_payment";
+  };
+  return {
+    ...report,
+    summary: { ...report.summary, lineKinds: "v1" },
+    items: report.items.map((item) => ({ ...item, movements: (item.movements || []).map((m) => ({ ...m, lineKind: kindOf(m) })) }))
+  };
+}
+const engine = Object.freeze({
+  ...coreEngine,
+  build: (input = {}) => {
+    const { untyped, ...rest } = input;
+    return rawBuild(untyped ? rest : { ...rest, movementsReport: typedMovements(rest.movementsReport) });
+  }
+});
 
 // ---------------------------------------------------------------------------
 // أدوات بناء تركيبة اختبار
 // ---------------------------------------------------------------------------
 const REFERENCE_ISO = "2026-09-02T04:00:00.000Z";  // لحظة صلاحية تقرير الفواتير
+// يوم المحاسبة المحلي للمصادر الثلاثة (`report_date` بتوقيت جهاز الأمين، 07:00 دمشق).
+const REFERENCE_LOCAL_DAY = "2026-09-02";
 const FROM_DATE = "2026-07-04";                     // بداية تغطية التقرير
 // النافذة الناتجة: الحالية 2026-08-04..2026-09-02، السابقة 2026-07-05..2026-08-03.
 
@@ -174,19 +204,19 @@ function buildReports({ fromDate = FROM_DATE, syncedAt = REFERENCE_ISO } = {}) {
   return {
     invoicesReport: {
       source: "ameen_customer_invoices",
-      created_at: syncedAt,
+      created_at: syncedAt, report_date: REFERENCE_LOCAL_DAY,
       summary: { periodDays: 60, fromDate, customers: invoiceItems.length, bills: 0, syncedAt },
       items: invoiceItems
     },
     balancesReport: {
       source: "ameen_customer_balances",
-      created_at: syncedAt,
+      created_at: syncedAt, report_date: REFERENCE_LOCAL_DAY,
       summary: { source: "ameen_customer_balances", syncedAt, totalCustomers: balanceItems.length },
       items: balanceItems
     },
     movementsReport: {
       source: "ameen_customer_movements",
-      created_at: syncedAt,
+      created_at: syncedAt, report_date: REFERENCE_LOCAL_DAY,
       summary: { syncedAt },
       items: []
     },
@@ -364,11 +394,11 @@ assert.equal(result.dataAvailability.coverageDays, 61);
   // عيّنة أصغر من الحد الأدنى ⇒ لا ترتيب نسبي موثوق ⇒ لا VIP
   const tiny = engine.build({
     invoicesReport: {
-      created_at: REFERENCE_ISO,
+      created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
       summary: { periodDays: 60, fromDate: FROM_DATE, syncedAt: REFERENCE_ISO },
       items: [{ name: "زبون وحيد", invoices: [invoice("2026-08-10", 9999), invoice("2026-08-20", 9999)] }]
     },
-    balancesReport: { created_at: REFERENCE_ISO, summary: { syncedAt: REFERENCE_ISO }, items: [] },
+    balancesReport: { created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY, summary: { syncedAt: REFERENCE_ISO }, items: [] },
     now: NOW
   });
   assert.equal(tiny.dataAvailability.vipRankingReliable, false);
@@ -635,13 +665,13 @@ if (!process.env.OZK_CI_TZ_CHILD) {
     return engine.build({
       invoicesReport: {
         source: "ameen_customer_invoices",
-        created_at: REFERENCE_ISO,
+        created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
         summary: { periodDays: 60, fromDate: FROM_DATE, customers: 1, bills: 0, syncedAt: REFERENCE_ISO },
         items: [{ name, invoices: invoiceList, truncated: false }]
       },
       balancesReport: {
         source: "ameen_customer_balances",
-        created_at: REFERENCE_ISO,
+        created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
         summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: 1 },
         items: [{ key: engine.normalizeName(name), name, balance: 0, creditLimit: 0, remainingLimit: 0, status: "clear", customerGuid: "0000-26", customerAccountGuid: "0000-26", isSupplier: false, recentPayments: [], recentMovements: [] }]
       },
@@ -691,7 +721,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
     return engine.build({
       invoicesReport: {
         source: "ameen_customer_invoices",
-        created_at: REFERENCE_ISO,
+        created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
         summary: { periodDays: 60, fromDate: FROM_DATE, customers: 2, bills: 0, syncedAt: REFERENCE_ISO },
         items: [
           { name: "زبون دولار",  invoices: [invoice("2026-08-10", 100, { currency: "USD" })],     truncated: false },
@@ -700,7 +730,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
       },
       balancesReport: {
         source: "ameen_customer_balances",
-        created_at: REFERENCE_ISO,
+        created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
         summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: 2 },
         items: [
           mkCustomer("زبون دولار", "0000-27a"),
@@ -756,7 +786,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
     return engine.build({
       invoicesReport: {
         source: "ameen_customer_invoices",
-        created_at: REFERENCE_ISO,
+        created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
         summary: { periodDays: 60, fromDate: FROM_DATE, customers: 1, bills: 0, syncedAt: REFERENCE_ISO },
         items: [{
           name: "زبون مختلط",
@@ -771,7 +801,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
       },
       balancesReport: {
         source: "ameen_customer_balances",
-        created_at: REFERENCE_ISO,
+        created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
         summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: 1 },
         items: [mkB("زبون مختلط", "0000-29a")]
       },
@@ -800,7 +830,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
     return engine.build({
       invoicesReport: {
         source: "ameen_customer_invoices",
-        created_at: REFERENCE_ISO,
+        created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
         summary: { periodDays: 60, fromDate: FROM_DATE, customers: 1, bills: 0, syncedAt: REFERENCE_ISO },
         items: [{
           name: "زبون مقتطع",
@@ -810,7 +840,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
       },
       balancesReport: {
         source: "ameen_customer_balances",
-        created_at: REFERENCE_ISO,
+        created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
         summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: 1 },
         items: [mkB("زبون مقتطع", "0000-30a")]
       },
@@ -867,7 +897,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   const r32 = engine.build({
     invoicesReport: {
       source: "ameen_customer_invoices",
-      created_at: REFERENCE_ISO,
+      created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
       summary: { periodDays: 60, fromDate: FROM_DATE, customers: 1, bills: 0, syncedAt: REFERENCE_ISO },
       items: [{
         name: "لؤي خلوف المحترم / الضاحية",
@@ -878,7 +908,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
     },
     balancesReport: {
       source: "ameen_customer_balances",
-      created_at: REFERENCE_ISO,
+      created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
       summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: 2 },
       items: [
         mkB("لؤي خلوف المحترم / الضاحية", GUID, 4000),
@@ -896,11 +926,15 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   });
   const renamed = r32.customers.find((row) => row.customerGuid === GUID);
   assert.ok(renamed, "test 32: الزبون المعاد تسميته يجب أن يظهر");
-  assert.equal(renamed.creditLimit, 5000, "test 32: الحد يبقى مربوطاً بالمعرّف بعد تغيير الاسم");
-  assert.equal(renamed.creditLimitSource, "approved", "test 32: المصدر يجب أن يبقى الحد المعتمد داخلياً");
+  // حد customer_credit_limits القديم مرجع تشخيصي فقط (قرار 2026-09-27: حد آلي
+  // واحد) — لا يصير حداً فعلياً، لكنه يبقى مربوطاً بالمعرّف لا بالاسم.
+  assert.equal(renamed.legacyCreditLimit, 5000, "test 32: الحد القديم يبقى مربوطاً بالمعرّف بعد تغيير الاسم");
+  assert.equal(renamed.creditLimit, null, "test 32: الحد القديم لا يصير حداً فعلياً");
+  assert.equal(renamed.creditLimitSource, "missing", "test 32: بلا دفتر ولا حد أمين = غير محدد");
   const namesake = r32.customers.find((row) => row.customerGuid === OTHER);
   assert.ok(namesake, "test 32: الحساب الآخر يجب أن يظهر");
-  assert.equal(namesake.creditLimit, null, "test 32: حساب بمعرّف مختلف لا يرث الحد بالاسم");
+  assert.equal(namesake.legacyCreditLimit, null, "test 32: حساب بمعرّف مختلف لا يرث الحد القديم بالاسم");
+  assert.equal(namesake.creditLimit, null);
   assert.equal(namesake.creditLimitSource, "missing");
 }
 
@@ -941,13 +975,13 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   const r33 = engine.build({
     invoicesReport: {
       source: "ameen_customer_invoices",
-      created_at: REFERENCE_ISO,
+      created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
       summary: { periodDays: 60, fromDate: FROM_DATE, customers: parties.length, bills: 0, syncedAt: REFERENCE_ISO },
       items: parties.map((entry) => entry.invoices)
     },
     balancesReport: {
       source: "ameen_customer_balances",
-      created_at: REFERENCE_ISO,
+      created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
       summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: parties.length },
       items: parties.map((entry) => entry.balance)
     },
@@ -990,7 +1024,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   const r34 = engine.build({
     invoicesReport: {
       source: "ameen_customer_invoices",
-      created_at: REFERENCE_ISO,
+      created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
       summary: { periodDays: 60, fromDate: FROM_DATE, customers: 2, bills: 0, syncedAt: REFERENCE_ISO },
       items: [
         {
@@ -1019,7 +1053,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
     },
     balancesReport: {
       source: "ameen_customer_balances",
-      created_at: REFERENCE_ISO,
+      created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
       summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: 2 },
       items: [mkB("زبون تراجع حقيقي", CUST, false), mkB("مورد ضخم", SUP, true)]
     },
@@ -1076,13 +1110,13 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   const r35 = engine.build({
     invoicesReport: {
       source: "ameen_customer_invoices",
-      created_at: REFERENCE_ISO,
+      created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
       summary: { periodDays: 60, fromDate: FROM_DATE, customers: parties.length, bills: 0, syncedAt: REFERENCE_ISO },
       items: parties.map((entry) => entry.invoices)
     },
     balancesReport: {
       source: "ameen_customer_balances",
-      created_at: REFERENCE_ISO,
+      created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
       summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: parties.length },
       items: parties.map((entry) => entry.balance)
     },
@@ -1122,7 +1156,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   const r36 = engine.build({
     invoicesReport: {
       source: "ameen_customer_invoices",
-      created_at: REFERENCE_ISO,
+      created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
       summary: { periodDays: 60, fromDate: FROM_DATE, customers: 3, bills: 0, syncedAt: REFERENCE_ISO },
       items: [
         {
@@ -1162,7 +1196,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
     },
     balancesReport: {
       source: "ameen_customer_balances",
-      created_at: REFERENCE_ISO,
+      created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
       summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: 3 },
       items: [mkB("زبون دولار متراجع", USD), mkB("زبون ليرة أ", SYP_A), mkB("زبون ليرة ب", SYP_B)]
     },
@@ -1203,7 +1237,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   const r38 = engine.build({
     invoicesReport: {
       source: "ameen_customer_invoices",
-      created_at: REFERENCE_ISO,
+      created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
       summary: { periodDays: 60, fromDate: FROM_DATE, customers: 1, bills: 1, syncedAt: REFERENCE_ISO },
       items: [{
         name: "زبون فاتورة ليرة",
@@ -1220,7 +1254,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
     },
     balancesReport: {
       source: "ameen_customer_balances",
-      created_at: REFERENCE_ISO,
+      created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
       summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: 1 },
       items: [{
         key: engine.normalizeName("زبون فاتورة ليرة"),
@@ -1255,7 +1289,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   const r39 = engine.build({
     invoicesReport: {
       source: "ameen_customer_invoices",
-      created_at: REFERENCE_ISO,
+      created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
       summary: { periodDays: 60, fromDate: FROM_DATE, customers: 1, bills: 1, syncedAt: REFERENCE_ISO },
       items: [{
         name: "زبون ليرة بلا معدّل",
@@ -1266,7 +1300,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
     },
     balancesReport: {
       source: "ameen_customer_balances",
-      created_at: REFERENCE_ISO,
+      created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
       summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: 1 },
       items: [{
         key: engine.normalizeName("زبون ليرة بلا معدّل"),
@@ -1302,7 +1336,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   const r40 = engine.build({
     invoicesReport: {
       source: "ameen_customer_invoices",
-      created_at: REFERENCE_ISO,
+      created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
       summary: { periodDays: 60, fromDate: FROM_DATE, customers: 2, bills: 2, syncedAt: REFERENCE_ISO },
       items: [
         {
@@ -1321,7 +1355,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
     },
     balancesReport: {
       source: "ameen_customer_balances",
-      created_at: REFERENCE_ISO,
+      created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
       summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: 1 },
       items: [{
         key: engine.normalizeName("زبون رصيده معروف"),
@@ -1359,4 +1393,1101 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   assert.equal(r40.summary.unknownCreditBalanceCount, 1);
 }
 
-console.log(`ذكاء الزبائن: 40 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
+// ---------------------------------------------------------------------------
+// 41–46) أهم الأصناف بوحدة إدخال السطر (bi000.Unity ⇐ inputUnit).
+//
+// العطل الحي: `lineTotal` في الحمولة `derived` = Qty(كروز) × Price(سعر وحدة الإدخال)
+// بلا قسمة على المعامل، فسطر الكرتونة (معامل 50) نفخ قيمة الصنف 50 ضعفاً وظهرت
+// أصناف بمئات الآلاف لزبون مجموع فواتيره عشرات الآلاف. القيمة الصحيحة
+// Price × Qty ÷ factor، وهي تطابق إجمالي الفاتورة (مثبت 658/658 على الأمين الحي).
+// ---------------------------------------------------------------------------
+{
+  const UNITS = { unit1: "كروز", unit2: "كرتونة", unit2Fact: 50, unit3: "طرد", unit3Fact: 500 };
+  // سطر كما يرفعه push-customer-invoices.ps1 اليوم: lineTotal مشتق بلا قسمة.
+  const amLine = (material, qty, price, inputUnit, extra = {}) => ({
+    material, itemGuid: extra.itemGuid ?? "", qty, qtyUnits: qty / UNITS.unit2Fact, price,
+    lineTotal: qty * price, lineTotalSource: "derived", inputUnit, ...UNITS, ...extra
+  });
+  const bill = (date, lines, extra = {}) => {
+    const total = extra.total ?? lines.reduce((sum, l) => {
+      const f = l.inputUnit === 2 ? l.unit2Fact : l.inputUnit === 3 ? l.unit3Fact : 1;
+      return sum + (l.price * l.qty) / f;
+    }, 0);
+    return { date, number: extra.number ?? date, guid: extra.guid ?? `u-${date}-${total}`, total, discount: extra.discount ?? 0,
+      payment: 0, isReturn: extra.isReturn ?? false, currency: extra.currency ?? "USD", currencyVal: extra.currencyVal ?? 1, lines };
+  };
+  const buildOne = (name, guid, invoices) => engine.build({
+    invoicesReport: {
+      source: "ameen_customer_invoices",
+      created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
+      summary: { periodDays: 60, fromDate: FROM_DATE, customers: 1, bills: invoices.length, syncedAt: REFERENCE_ISO, payloadVersion: 2 },
+      items: [{ name, customerGuid: guid, truncated: false, invoices }]
+    },
+    balancesReport: {
+      source: "ameen_customer_balances",
+      created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
+      summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: 1 },
+      items: [{ name, key: engine.normalizeName(name), customerGuid: guid, balance: 0, isSupplier: false, recentPayments: [], recentMovements: [] }]
+    },
+    movementsReport: null, creditLimits: [], now: NOW
+  }).customers.find((row) => row.customerName === name);
+  const itemOf = (row, name) => row.topItems.find((item) => item.itemName === name);
+
+  // 41) سطر بالكرتونة: كرتونتان بسعر 250 = 500، لا 100 كروز × 250 = 25,000.
+  const r41 = buildOne("زبون كرتونة", "00000000-0000-4000-8000-000000000041", [
+    bill("2026-08-20", [amLine("دخان كرتونة", 100, 250, 2)])
+  ]);
+  const i41 = itemOf(r41, "دخان كرتونة");
+  assert.equal(i41.netValue, 500, "test 41: قيمة سطر الكرتونة = السعر × الكمية ÷ 50");
+  assert.notEqual(i41.netValue, 25000, "test 41: القيمة الخام المضخّمة ممنوعة");
+  assert.equal(i41.valueVerified, true);
+  assert.equal(i41.netQty, 100, "test 41: الكمية تبقى بالوحدة الأولى (كروز)");
+  assert.equal(i41.netQtyUnit2, 2, "test 41: وما يعادلها بالكرتونة");
+  assert.equal(i41.unit1, "كروز");
+  assert.equal(i41.unit2, "كرتونة");
+
+  // 42) فاتورة تخلط الوحدات الثلاث — مجموع الأصناف يطابق إجمالي الفاتورة.
+  const lines42 = [
+    amLine("صنف كرتونة", 150, 240, 2),   // 3 كراتين × 240 = 720
+    amLine("صنف كروز", 30, 5.2, 1),      // 30 × 5.2 = 156
+    amLine("صنف طرد", 1000, 2300, 3)     // 2 طرد × 2300 = 4600
+  ];
+  const r42 = buildOne("زبون وحدات مختلطة", "00000000-0000-4000-8000-000000000042", [bill("2026-08-21", lines42)]);
+  assert.equal(itemOf(r42, "صنف كرتونة").netValue, 720);
+  assert.equal(itemOf(r42, "صنف كروز").netValue, 156);
+  assert.equal(itemOf(r42, "صنف طرد").netValue, 4600);
+  const sum42 = r42.topItems.reduce((sum, item) => sum + item.netValue, 0);
+  assert.equal(Math.round(sum42 * 1000) / 1000, 5476, "test 42: Σ أهم الأصناف = إجمالي الفاتورة (مصالحة)");
+  assert.equal(Math.round(sum42 * 1000) / 1000, r42.netSales30d, "test 42: Σ الأصناف = صافي مبيعات الفترة بلا حسم");
+  assert.equal(r42.topItems[0].itemName, "صنف طرد", "test 42: الترتيب بالقيمة الحقيقية لا الخام");
+
+  // 43) مرتجع بالكرتونة يُطرح بنفس القاعدة، والمرتجع لا يُحسب مبيعاً موجباً.
+  const r43 = buildOne("زبون مرتجع كرتونة", "00000000-0000-4000-8000-000000000043", [
+    bill("2026-08-10", [amLine("دخان مرتجع", 100, 250, 2)]),
+    bill("2026-08-12", [amLine("دخان مرتجع", 50, 250, 2)], { isReturn: true })
+  ]);
+  const i43 = itemOf(r43, "دخان مرتجع");
+  assert.equal(i43.netValue, 250, "test 43: 500 − 250");
+  assert.equal(i43.netQty, 50);
+  assert.equal(i43.netQtyUnit2, 1);
+
+  // 44) فاتورة ليرة: السعر بعملة الأساس، القسمة على المعامل ثم ÷ CurrencyVal مرة واحدة.
+  const r44 = buildOne("زبون ليرة كرتونة", "00000000-0000-4000-8000-000000000044", [
+    bill("2026-08-15", [amLine("دخان ليرة", 100, 250, 2)], { currency: "SYP", currencyVal: 1 / 14000 })
+  ]);
+  const i44 = itemOf(r44, "دخان ليرة");
+  assert.equal(r44.currency, "SYP");
+  assert.equal(i44.netValue, 7000000, "test 44: 500 أساس ÷ (1/14000) = 7,000,000 ل.س، بلا ضرب مزدوج");
+  assert.equal(r44.netSales30d, 7000000, "test 44: الصنف والفاتورة بنفس العملة");
+
+  // 45) سطر مشتق بلا وحدة إدخال (حمولة أقدم): لا قيمة مضخّمة تُعرض كحقيقة.
+  const legacy = amLine("صنف بلا وحدة", 100, 250, undefined);
+  delete legacy.inputUnit;
+  const r45 = buildOne("زبون حمولة قديمة", "00000000-0000-4000-8000-000000000045", [
+    bill("2026-08-18", [legacy, amLine("صنف مؤكد", 10, 5, 1)], { total: 550 })
+  ]);
+  const i45 = itemOf(r45, "صنف بلا وحدة");
+  assert.equal(i45.netValue, null, "test 45: derived بلا inputUnit ⇒ قيمة null");
+  assert.equal(i45.valueVerified, false);
+  assert.equal(r45.topItems[0].itemName, "صنف مؤكد", "test 45: غير المؤكد لا يتقدّم على المؤكد");
+
+  // 46) عمود إجمالي حقيقي من الأمين (lineTotalSource = "ameen") بلا inputUnit يُعتمد كما هو.
+  const stored = { material: "صنف إجمالي حقيقي", qty: 100, price: 250, lineTotal: 500, lineTotalSource: "ameen" };
+  const r46 = buildOne("زبون إجمالي حقيقي", "00000000-0000-4000-8000-000000000046", [bill("2026-08-19", [stored], { total: 500 })]);
+  assert.equal(itemOf(r46, "صنف إجمالي حقيقي").netValue, 500, "test 46: الإجمالي الحقيقي يُعتمد");
+}
+
+// ---------------------------------------------------------------------------
+// 47–72) حد الائتمان الآلي (STEP 1): الحد المحسوب من دفتر حساب الزبون.
+// كل الأرقام تركيبية. التاريخ المرجعي = REFERENCE_ISO (2026-09-02)، وd(n) = قبله بـn يوماً.
+// ---------------------------------------------------------------------------
+{
+  const REF_DAY = Date.UTC(2026, 8, 2);
+  const d = (n) => new Date(REF_DAY - n * 86400000).toISOString().slice(0, 10);
+  const debit = (n, amount) => ({ date: d(n), debit: amount, credit: 0, notes: "", billGuid: "" });
+  const pay = (n, amount) => ({ date: d(n), debit: 0, credit: amount, notes: "", billGuid: "" });
+  const opening = (amount) => ({ date: d(62), debit: amount, credit: 0, notes: "القيد الافتتاحي", billGuid: "" });
+  const gid = (n) => `00000000-0000-4000-9000-${String(n).padStart(12, "0")}`;
+  // فواتير كل `every` يوماً من اليوم `from` حتى `to`، وكل واحدة تُسدَّد بعد `lag` يوماً.
+  const regular = ({ from, to = 1, every, amount, lag }) => {
+    const rows = [];
+    for (let n = from; n >= to; n -= every) {
+      rows.push(debit(n, amount));
+      if (lag !== null && n - lag >= 0) rows.push(pay(n - lag, amount));
+    }
+    return rows.sort((a, b) => a.date.localeCompare(b.date));
+  };
+  const ledgerBalance = (rows) => rows.reduce((sum, row) => sum + row.debit - row.credit, 0);
+
+  const accounts = [];
+  const account = (id, name, movements, extra = {}) => {
+    accounts.push({ guid: gid(id), name, movements, balance: extra.balance ?? ledgerBalance(movements), ...extra });
+    return gid(id);
+  };
+
+  const G_STEADY = account(1, "ائتمان منتظم", regular({ from: 59, every: 6, amount: 600, lag: 6 }));
+  const G_SLOW = account(2, "ائتمان بطيء يدفع", regular({ from: 59, every: 5, amount: 400, lag: 40 }));
+  const G_DELINQ = account(3, "ائتمان متعثّر", [debit(58, 1500), debit(50, 1500), pay(49, 200), debit(10, 300)]);
+  const G_IDLE = account(4, "ائتمان خامل بلا دين", [opening(0), pay(70, 0.01)]);
+  const G_RESIDUE = account(5, "ائتمان خامل ببقية صغيرة", [opening(20)]);
+  const G_PREPAID = account(6, "ائتمان دفع مسبق", [pay(40, 1000), debit(38, 500), pay(20, 800), debit(18, 600), debit(5, 400)]);
+  const G_NEW = account(7, "ائتمان جديد", [debit(12, 800), pay(10, 800), debit(3, 1000)]);
+  const G_LARGE = account(8, "ائتمان فاتورة شاذة", [
+    ...regular({ from: 56, every: 8, amount: 300, lag: 4 }),
+    debit(20, 6000), pay(16, 6000)
+  ]);
+  const G_GROWWEAK = account(9, "ائتمان نمو بتحصيل ضعيف", [
+    ...regular({ from: 58, to: 31, every: 7, amount: 200, lag: 5 }),
+    ...regular({ from: 28, every: 4, amount: 900, lag: null }),
+    pay(20, 900), pay(12, 900), pay(4, 900)
+  ]);
+  const G_GROWHIGHBAL = account(10, "ائتمان نمو برصيد متراكم", [
+    ...regular({ from: 58, to: 31, every: 7, amount: 300, lag: 3 }),
+    ...regular({ from: 24, to: 9, every: 5, amount: 600, lag: 3 }),
+    debit(1, 2000)
+  ]);
+  const G_SYP = account(11, "ائتمان حساب ليرة", regular({ from: 59, every: 6, amount: 700, lag: 5 }), {
+    balance: 740.25, accountCurrencyIsBase: false, accountCurrency: "ل.س.", balanceAccountCcy: 9800000
+  });
+  const G_TRUNC = account(12, "ائتمان دفتر مقتطع", regular({ from: 59, every: 6, amount: 600, lag: 6 }), { truncated: true, creditLimit: 777 });
+  const G_LEGACY = account(13, "ائتمان حد قديم", regular({ from: 59, every: 6, amount: 600, lag: 6 }));
+  // حساب سحبه في الدفتر بلا فواتير مبيع: شذوذ يحتاج مراجعة، لا تصنيف «ليس زبوناً».
+  const G_NOTCUST = account(14, "حساب داخلي بلا فواتير", regular({ from: 58, every: 7, amount: 900, lag: 50 }), { noInvoices: true });
+  // زبون حقيقي بفرق صغير غير مفوتر (دون حد الأهمية): يبقى زبوناً.
+  const G_SMALLGAP = account(15, "ائتمان بفرق تسوية صغير", [...regular({ from: 59, every: 6, amount: 600, lag: 6 }), debit(30, 40), pay(28, 40)],
+    { uninvoiced: new Set([d(30)]) });
+  // خامل مدين بدين قديم لم يُدفع منه شيء: متعثّر لا غير نشط.
+  const G_DORMANT = account(16, "ائتمان خامل مدين", [debit(80, 3000), pay(75, 100)]);
+
+  // فواتير المبيع = سحب الدفتر في النافذة (حساب الليرة بعملته)، إلا للحسابات غير الزبائن.
+  const salesInvoicesOf = (a) => a.movements
+    .filter((m) => m.debit > 0 && !m.notes && !(a.uninvoiced?.has(m.date)) && m.date >= FROM_DATE)
+    .map((m, index) => invoice(m.date, m.debit, {
+      guid: `bill-${a.guid}-${index}`,
+      ...(a.accountCurrencyIsBase === false ? { currency: "SYP", currencyVal: 1 / 14000 } : {})
+    }));
+  const invoicesReportFor = (list, fromDate = FROM_DATE) => ({
+    source: "ameen_customer_invoices", created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
+    summary: { periodDays: 60, fromDate, customers: list.length, syncedAt: REFERENCE_ISO },
+    items: list.filter((a) => !a.noInvoices).map((a) => ({ name: a.name, customerGuid: a.guid, truncated: false, invoices: salesInvoicesOf(a) }))
+      .filter((group) => group.invoices.length > 0)
+  });
+
+  const reports = {
+    invoicesReport: invoicesReportFor(accounts),
+    balancesReport: {
+      source: "ameen_customer_balances", created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
+      summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: accounts.length },
+      items: accounts.map((a) => ({
+        key: engine.normalizeName(a.name), name: a.name, balance: a.balance, creditLimit: a.creditLimit ?? 0,
+        remainingLimit: 0, status: "clear", customerGuid: a.guid, customerAccountGuid: a.guid, isSupplier: false,
+        recentPayments: [], recentMovements: [],
+        accountCurrencyIsBase: a.accountCurrencyIsBase ?? true, accountCurrency: a.accountCurrency ?? "$",
+        balanceAccountCcy: a.balanceAccountCcy ?? a.balance
+      }))
+    },
+    movementsReport: {
+      source: "ameen_customer_movements", created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
+      summary: { syncedAt: REFERENCE_ISO, periodDays: 92 },
+      items: accounts.map((a) => ({ customerGuid: a.guid, name: a.name, truncated: a.truncated === true, movements: a.movements }))
+    },
+    creditLimits: [{ customerGuid: G_LEGACY, customerKey: "legacy", credit_limit: 99999 }],
+    now: NOW
+  };
+  const rc = engine.build(reports);
+  const row = (guid) => {
+    const found = rc.customers.find((entry) => entry.customerGuid === guid);
+    assert.ok(found, `سجل الائتمان مفقود: ${guid}`);
+    return found;
+  };
+  const stepOf = (value, currency) => (currency === "USD"
+    ? (value < 1000 ? 100 : value < 10000 ? 250 : 500)
+    : (value < 10000000 ? 100000 : value < 100000000 ? 500000 : 1000000));
+
+  // 47) دورة السداد من تسوية FIFO: كل فاتورة تُسدَّد بعد 6 أيام ⇒ الدورة 6 أيام.
+  const steady = row(G_STEADY);
+  assert.equal(steady.creditLimitSource, "auto", "test 47: الحد آلي");
+  assert.equal(steady.autoCredit.status, "normal");
+  assert.equal(steady.autoCredit.cycleBasis, "fifo_median");
+  assert.equal(steady.autoCredit.cycleRawDays, 6, "test 47: وسيط أيام السداد = 6");
+  assert.ok(steady.creditLimit > 0, "test 47: زبون منتظم يحصل على حد");
+  assert.equal(steady.creditLimit % stepOf(steady.creditLimit, "USD"), 0, "test 47: تقريب تجاري");
+  assert.ok(steady.autoCredit.coverage >= 0.9 && steady.autoCredit.punctuality === 1 && steady.autoCredit.risk === 1, "test 47: منتظم = انضباط كامل بلا مخاطر رصيد");
+  assert.equal(steady.creditLimit, engine.commercialRound(steady.autoCredit.limitBase, "USD"), "test 47: التقريب للأسفل");
+
+  // 48) الدورة محصورة بين P10 وP90 للمحفظة الحية، والبطيء الذي يدفع باستمرار ليس متعثراً.
+  const cycle = rc.dataAvailability.creditCycle;
+  const slow = row(G_SLOW);
+  assert.equal(cycle.basis, "portfolio");
+  assert.ok(cycle.floorDays >= 1 && cycle.floorDays <= cycle.medianDays && cycle.medianDays <= cycle.capDays, "test 48: P10 ≤ الوسيط ≤ P90");
+  assert.ok(slow.autoCredit.cycleRawDays > cycle.capDays, "test 48: وسيط أيام السداد الخام فوق السقف");
+  assert.equal(slow.autoCredit.cycleDays, cycle.capDays, "test 48: الدورة = سقف المحفظة (P90)");
+  assert.notEqual(slow.creditStatus, "delinquent", "test 48: بطيء يدفع ليس متعثراً");
+  assert.ok(slow.autoCredit.trend <= 1 && slow.creditLimit < slow.autoCredit.expectedExposure,
+    "test 48: التحصيل الضعيف لا يرفع الحد فوق التعرض المعتاد");
+
+  // 49) متعثّر: رصيد قائم + دين أقدم من دورته بهامش واضح + دفعات المدة لا تغطيه.
+  const delinquent = row(G_DELINQ);
+  assert.equal(delinquent.creditStatus, "delinquent", "test 49: متعثّر");
+  assert.equal(delinquent.creditLimit, 0, "test 49: الحد صفر");
+  assert.ok(delinquent.flags.includes("credit_delinquent"));
+  assert.equal(delinquent.riskScore, 100);
+  assert.ok(delinquent.autoCredit.overdueAmount >= 2500, "test 49: المتأخر يُقاس من الفواتير المفتوحة");
+
+  // 50) خامل بلا دين = غير نشط، لا متعثّر.
+  const idle = row(G_IDLE);
+  assert.equal(idle.creditStatus, "inactive_no_limit", "test 50: غير نشط");
+  assert.equal(idle.creditLimit, 0);
+  assert.ok(idle.flags.includes("credit_inactive") && !idle.flags.includes("credit_delinquent"), "test 50: لا وسم تعثّر");
+
+  // 51) خامل ببقية كسور صغيرة (دون حد الأهمية) = غير نشط، لا متعثّر.
+  const residue = row(G_RESIDUE);
+  assert.equal(residue.creditStatus, "inactive_no_limit", "test 51: بقية صغيرة ليست تعثّراً");
+  assert.ok(!residue.flags.includes("credit_delinquent"));
+
+  // 52) دفع مسبق ورصيد دائن: لا تعرّض ولا حد.
+  const prepaid = row(G_PREPAID);
+  assert.equal(prepaid.autoCredit.status, "prepaid", "test 52: دفع مسبق");
+  assert.equal(prepaid.creditLimit, null);
+  assert.equal(prepaid.creditStatus, "prepaid");
+
+  // 53) زبون جديد/بيانات قليلة: حد آلي محافظ ≤ نصف سحبه و≤ ضعف وسيط فاتورته، مع وسم واضح.
+  const fresh = row(G_NEW);
+  assert.equal(fresh.autoCredit.status, "low_data", "test 53: بيانات قليلة");
+  assert.ok(fresh.flags.includes("credit_low_data"));
+  assert.equal(fresh.creditLimitSource, "auto", "test 53: يبقى آلياً");
+  assert.ok(fresh.creditLimit <= Math.min(0.5 * 1800, 2 * 900), "test 53: السقف المحافظ");
+
+  // 54) حارس الفاتورة الشاذة: فاتورة 6000 بين فواتير 300 لا تنفخ سرعة السحب.
+  const large = row(G_LARGE);
+  assert.ok(large.autoCredit.notes.some((note) => note.includes("الفاتورة الشاذة")), "test 54: الحارس فُعّل");
+  const naiveRecent = 6000 + 300 * 3;
+  assert.ok(large.autoCredit.velocity < (0.6 * naiveRecent + 0.4 * 300 * 4) / 30, "test 54: السرعة أقل من الحساب الساذج");
+
+  // 55) نمو مع تحصيل ضعيف: الاتجاه لا يرفع الحد، وسقف التغطية يطبَّق.
+  const growWeak = row(G_GROWWEAK);
+  assert.ok(growWeak.autoCredit.coverage < 0.9, "test 55: التحصيل أقل من 90%");
+  assert.equal(growWeak.autoCredit.trend, 1, "test 55: لا مكافأة نمو");
+  assert.ok(growWeak.creditLimit <= growWeak.autoCredit.expectedExposure * growWeak.autoCredit.coverage * growWeak.autoCredit.quality + 1,
+    "test 55: الحد ≤ التعرض × التغطية × الجودة");
+
+  // 56) نمو مع رصيد متراكم غير معتاد: الرصيد يمنع مكافأة النمو ويخفض الحد.
+  const growBal = row(G_GROWHIGHBAL);
+  assert.ok(growBal.autoCredit.risk < 1, "test 56: الرصيد عامل مخاطر داخل جودة السداد");
+  assert.equal(growBal.autoCredit.trend, 1, "test 56: الرصيد المرتفع يمنع مكافأة النمو");
+  assert.ok(growBal.autoCredit.quality < steady.autoCredit.quality, "test 56: الجودة أقل من المنتظم");
+
+  // 57) حساب ليرة: الحساب داخلياً بالأساس، والعرض بعملة الحساب بلا خلط.
+  const syp = row(G_SYP);
+  assert.equal(syp.creditCurrency, "SYP", "test 57: حد حساب الليرة بالليرة");
+  assert.equal(syp.balanceDisplay, 9800000, "test 57: الرصيد برصيد الحساب بعملته لا بالدولار المشوّه");
+  assert.equal(syp.creditLimitDisplay % stepOf(syp.creditLimitDisplay, "SYP"), 0, "test 57: تقريب بالليرة");
+  assert.equal(syp.creditLimit, Math.round(syp.creditLimitDisplay / 14000 * 1000) / 1000, "test 57: المكافئ بالأساس = الحد × المعدّل");
+  assert.equal(syp.creditUsagePercent, Math.round(9800000 / syp.creditLimitDisplay * 10000) / 100, "test 57: الاستخدام بعملة الحساب");
+
+  // 58) دفتر مقتطع: لا حد آلي على بيانات ناقصة؛ حد الأمين احتياط فقط.
+  const trunc = row(G_TRUNC);
+  assert.equal(trunc.autoCredit.status, "unavailable", "test 58: دفتر مقتطع = غير متاح");
+  assert.equal(trunc.creditLimitSource, "ameen");
+  assert.equal(trunc.creditLimit, 777);
+
+  // 59) الحد القديم في customer_credit_limits مرجع فقط ولا يغيّر الحد المحسوب.
+  const legacyRow = row(G_LEGACY);
+  assert.equal(legacyRow.legacyCreditLimit, 99999);
+  assert.equal(legacyRow.creditLimit, steady.creditLimit, "test 59: نفس الدفتر = نفس الحد مهما كان الحد القديم");
+
+  // 60) التقريب التجاري للأسفل حسب الحجم والعملة — بلا كسور ولا رفع.
+  assert.equal(engine.commercialRound(0, "USD"), 0);
+  assert.equal(engine.commercialRound(40, "USD"), 0);
+  assert.equal(engine.commercialRound(690, "USD"), 600);
+  assert.equal(engine.commercialRound(1120, "USD"), 1000);
+  assert.equal(engine.commercialRound(12345, "USD"), 12000);
+  assert.equal(engine.commercialRound(9960000, "SYP"), 9900000);
+  assert.equal(engine.commercialRound(12345678, "SYP"), 12000000);
+  assert.equal(engine.commercialRound(123456789, "SYP"), 123000000);
+
+  // 61) عدم تطابق عام بين سحب الدفتر وفواتير المبيع: «يحتاج مراجعة» بلا حد آلي، لا «ليس زبوناً».
+  const notCust = row(G_NOTCUST);
+  assert.equal(notCust.autoCredit.status, "needs_review", "test 61: الشذوذ = يحتاج مراجعة");
+  assert.equal(notCust.creditLimit, null, "test 61: لا حد آلي");
+  assert.equal(notCust.creditLimitSource, "auto", "test 61: لا يُستبدل بحد الأمين");
+  assert.equal(notCust.creditStatus, "needs_review");
+  assert.ok(notCust.flags.includes("credit_needs_review") && !notCust.flags.includes("credit_not_customer"), "test 61: ليس «ليس زبون مبيعات»");
+  assert.ok(notCust.autoCredit.notes[0].includes("يحتاج مراجعة"), "test 61: السبب ظاهر");
+
+  // 62) الحساب المشكوك بحركته (يحتاج مراجعة) لا يلوّث عيّنة دورة المحفظة: حدودها كما لو لم يوجد.
+  const withoutNotCust = accounts.filter((a) => a.guid !== G_NOTCUST);
+  const rcWithout = engine.build({
+    ...reports,
+    invoicesReport: invoicesReportFor(withoutNotCust),
+    balancesReport: { ...reports.balancesReport, items: reports.balancesReport.items.filter((item) => item.customerGuid !== G_NOTCUST) },
+    movementsReport: { ...reports.movementsReport, items: reports.movementsReport.items.filter((item) => item.customerGuid !== G_NOTCUST) }
+  });
+  assert.deepEqual(rc.dataAvailability.creditCycle, rcWithout.dataAvailability.creditCycle, "test 62: حدود الدورة لا تتأثر بالحساب المشكوك");
+  assert.equal(rcWithout.customers.find((c) => c.customerGuid === G_STEADY).creditLimit, steady.creditLimit);
+
+  // 63) قائمتا المالك بالمعرّف لا بالاسم، ولو غطّت الفواتير السحب كاملاً:
+  //     الاستبعاد الصريح (قناة داخلية، فروقات جرد، سلفة موظف) ⇒ «ليس زبون مبيعات»؛
+  //     الحساب المختلط (مورد وزبون) ⇒ «يحتاج مراجعة» بلا حد آلي، لا «ليس زبوناً».
+  const asOwnerListed = (guid, untyped = false) => engine.build({
+    ...reports,
+    untyped,
+    invoicesReport: invoicesReportFor([{ ...accounts[0], guid, name: "اسم عادي" }]),
+    balancesReport: { ...reports.balancesReport, items: [{ ...reports.balancesReport.items[0], customerGuid: guid, customerAccountGuid: guid, name: "اسم عادي", key: "اسم عادي" }] },
+    movementsReport: { ...reports.movementsReport, items: [{ ...reports.movementsReport.items[0], customerGuid: guid, name: "اسم عادي" }] }
+  }).customers.find((c) => c.customerGuid === guid);
+  assert.equal(engine.CONFIG.autoCredit.excludedAccountGuids.length, 3, "test 63: ثلاثة حسابات مستبعدة صراحة");
+  for (const ownerExcluded of engine.CONFIG.autoCredit.excludedAccountGuids) {
+    const excluded = asOwnerListed(ownerExcluded);
+    assert.equal(excluded.autoCredit.status, "non_customer", `test 63: قائمة المالك بالمعرّف ${ownerExcluded}`);
+    assert.equal(excluded.creditLimit, null);
+  }
+  assert.ok(engine.CONFIG.autoCredit.excludedAccountGuids.includes("7a1f9a5a-00bc-445f-949a-e4ce8d306585"), "test 63: سلفة الموظف مستبعدة بالمعرّف");
+  const mixedGuid = engine.CONFIG.autoCredit.reviewAccountGuids[0];
+  const mixed = asOwnerListed(mixedGuid);
+  assert.equal(mixed.autoCredit.status, "needs_review", "test 63: الحساب المختلط يحتاج مراجعة");
+  assert.equal(mixed.creditLimit, null, "test 63: بلا حد آلي");
+  assert.equal(mixed.creditStatus, "needs_review");
+  assert.ok(!mixed.flags.includes("credit_not_customer"), "test 63: المختلط ليس «ليس زبون مبيعات»");
+  assert.ok(mixed.autoCredit.notes[0].includes("مختلط"), "test 63: السبب ظاهر");
+  // ‏… وحتى مع دفتر أو أرصدة غير حديثة: لا يظهر حد الأمين بديلاً لحساب في قائمتي المالك.
+  const staleAt = new Date(NOW.getTime() - 3 * 3600000).toISOString();
+  for (const [guid, status] of [[mixedGuid, "needs_review"], [engine.CONFIG.autoCredit.excludedAccountGuids[2], "non_customer"]]) {
+    const staleOwner = engine.build({
+      ...reports,
+      invoicesReport: invoicesReportFor([{ ...accounts[0], guid, name: "اسم عادي" }]),
+      balancesReport: { ...reports.balancesReport, created_at: staleAt, summary: { ...reports.balancesReport.summary, syncedAt: staleAt },
+        items: [{ ...reports.balancesReport.items[0], customerGuid: guid, customerAccountGuid: guid, name: "اسم عادي", key: "اسم عادي", creditLimit: 5000 }] },
+      movementsReport: { ...reports.movementsReport, created_at: staleAt, summary: { ...reports.movementsReport.summary, syncedAt: staleAt },
+        items: [{ ...reports.movementsReport.items[0], customerGuid: guid, name: "اسم عادي" }] }
+    }).customers.find((c) => c.customerGuid === guid);
+    assert.equal(staleOwner.autoCredit.status, status, `test 63: قائمة المالك تسبق المصدر القديم (${status})`);
+    assert.equal(staleOwner.creditLimit, null, "test 63: لا حد أمين بديلاً");
+    assert.notEqual(staleOwner.creditLimitSource, "ameen");
+  }
+
+  // 64) فرق صغير غير مفوتر (دون حد الأهمية) لا يحوّل زبوناً حقيقياً إلى غير زبون،
+  //     وتقرير فواتير لا يغطي النافذة لا يصنّف أحداً غير زبون (لا حكم بلا دليل).
+  assert.ok(!["non_customer", "needs_review"].includes(row(G_SMALLGAP).autoCredit.status), "test 64: الفرق الصغير لا يشغّل المراجعة");
+  const rcShort = engine.build({ ...reports, invoicesReport: invoicesReportFor(accounts, d(20)) });
+  assert.ok(!rcShort.customers.some((c) => ["non_customer", "needs_review"].includes(c.autoCredit?.status)), "test 64: تغطية ناقصة = لا حكم سلوكي");
+
+  // 65) خامل مدين بدين قديم لم يُسدَّد: متعثّر بحد صفر (لا «غير نشط»)؛ الخامل بلا دين غير نشط.
+  const dormant = row(G_DORMANT);
+  assert.equal(dormant.creditStatus, "delinquent", "test 65: الخامل المدين الذي لا يدفع متعثّر");
+  assert.equal(dormant.creditLimit, 0);
+  assert.equal(row(G_IDLE).creditStatus, "inactive_no_limit", "test 65: الخامل بلا دين ليس متعثّراً");
+
+  // 67) دين أقدم من نافذة تقرير الحركات يصل openingBalance لا حركة: يدخل FIFO والتعثّر.
+  //     زبون بسحب حديث قليل، وعليه دين قديم مرحَّل لم يُسدَّد منه شيء.
+  const carriedRows = [debit(10, 200), debit(5, 200)];
+  const carriedReports = (openingBalance) => ({
+    ...reports,
+    movementsReport: {
+      ...reports.movementsReport,
+      summary: { ...reports.movementsReport.summary, fromDate: d(60) },
+      items: [{ customerGuid: G_STEADY, name: "ائتمان منتظم", truncated: false, openingBalance, movements: carriedRows }]
+    }
+  });
+  const carried = engine.build(carriedReports(3000)).customers.find((c) => c.customerGuid === G_STEADY);
+  assert.equal(carried.creditStatus, "delinquent", "test 67: الدين المرحَّل القديم غير المسدَّد = تعثّر");
+  assert.ok(carried.autoCredit.oldestOpenDays > 60, "test 67: أقدم دين مفتوح هو المرحَّل");
+  assert.ok(carried.autoCredit.overdueAmount >= 3000);
+  const noCarry = engine.build(carriedReports(0)).customers.find((c) => c.customerGuid === G_STEADY);
+  assert.notEqual(noCarry.creditStatus, "delinquent", "test 67: بلا رصيد مرحَّل لا تعثّر");
+
+  // 68) دفتر حركات متوقف المزامنة: لا حد آلي ولا تعثّر من بيانات قديمة، ووسم المصدر غير الحديث.
+  const staleIso = new Date(NOW.getTime() - 3 * 3600000).toISOString();
+  const rcStale = engine.build({
+    ...reports,
+    movementsReport: { ...reports.movementsReport, created_at: staleIso, summary: { ...reports.movementsReport.summary, syncedAt: staleIso } }
+  });
+  const staleSteady = rcStale.customers.find((c) => c.customerGuid === G_STEADY);
+  assert.equal(staleSteady.autoCredit.status, "unavailable", "test 68: دفتر قديم = غير متاح");
+  assert.equal(staleSteady.creditLimit, null);
+  assert.equal(rcStale.staleData, true, "test 68: تقادم الحركات وحدها يرفع التحذير العام");
+  assert.equal(rcStale.sourcesFreshness.invoices.stale, false, "test 68: الفواتير حديثة");
+  assert.equal(rcStale.sourcesFreshness.balances.stale, false, "test 68: الأرصدة حديثة");
+  assert.equal(rcStale.sourcesFreshness.movements.stale, true);
+  assert.ok(rcStale.customers.every((row) => row.flags.includes("stale_data")), "test 68: وسم المصدر غير الحديث على كل سجل");
+  assert.ok(!rcStale.customers.some((c) => c.creditStatus === "delinquent"), "test 68: لا حكم تعثّر من دفتر قديم");
+
+  const rcUnknown = engine.build({
+    ...reports,
+    movementsReport: { ...reports.movementsReport, created_at: undefined, summary: { ...reports.movementsReport.summary, syncedAt: undefined } }
+  });
+  const unknownSteady = rcUnknown.customers.find((c) => c.customerGuid === G_STEADY);
+  assert.equal(unknownSteady.autoCredit.status, "unavailable", "test 68: بلا وقت مزامنة = غير متاح");
+  assert.equal(rcUnknown.staleData, true, "test 68: وقت غير معروف يرفع التحذير العام");
+
+  // 70) تقرير أرصدة متوقف المزامنة (والدفتر حديث): لا حد آلي من رصيد قديم.
+  const rcStaleBal = engine.build({
+    ...reports,
+    balancesReport: { ...reports.balancesReport, created_at: staleIso, summary: { ...reports.balancesReport.summary, syncedAt: staleIso } }
+  });
+  assert.equal(rcStaleBal.sourcesFreshness.balances.stale, true);
+  assert.equal(rcStaleBal.sourcesFreshness.movements.stale, false);
+  const staleBalSteady = rcStaleBal.customers.find((c) => c.customerGuid === G_STEADY);
+  assert.equal(staleBalSteady.autoCredit.status, "unavailable", "test 70: أرصدة قديمة = غير متاح");
+  assert.ok(staleBalSteady.autoCredit.notes[0].includes("تقرير الأرصدة"), "test 70: الملاحظة تسمّي المصدر");
+  assert.ok(staleBalSteady.flags.includes("stale_data"));
+  assert.ok(!rcStaleBal.customers.some((c) => c.creditStatus === "delinquent"), "test 70: لا حكم تعثّر من أرصدة قديمة");
+
+  // 71) تقرير فواتير متوقف المزامنة: لا يُستنتج «ليس زبوناً» سلوكياً (قائمة المالك تبقى).
+  const rcStaleInv = engine.build({
+    ...reports,
+    invoicesReport: { ...reports.invoicesReport, created_at: staleIso, summary: { ...reports.invoicesReport.summary, syncedAt: staleIso } }
+  });
+  assert.equal(rcStaleInv.sourcesFreshness.invoices.stale, true);
+  assert.ok(!["non_customer", "needs_review"].includes(rcStaleInv.customers.find((c) => c.customerGuid === G_NOTCUST).autoCredit.status),
+    "test 71: فواتير قديمة لا تثبت غياب المبيع");
+
+  // 69) حارس الفاتورة الشاذة يخصم من شهر الفاتورة الفعلي: فاتورة شاذة في الشهر السابق
+  //     لا تُخصم من سحب آخر 30 يوماً (وزنه 0.6) لمجرد أنه يكفيها.
+  const priorLarge = {
+    guid: gid(69), name: "ائتمان فاتورة شاذة سابقة",
+    movements: [
+      ...regular({ from: 60, to: 32, every: 4, amount: 500, lag: 3 }),
+      ...regular({ from: 28, every: 4, amount: 1500, lag: 3 }),
+      debit(45, 10000), pay(40, 10000)
+    ].sort((a, b) => a.date.localeCompare(b.date))
+  };
+  priorLarge.balance = ledgerBalance(priorLarge.movements);
+  const rc69 = engine.build({
+    ...reports,
+    invoicesReport: invoicesReportFor([priorLarge]),
+    balancesReport: { ...reports.balancesReport, items: [{ ...reports.balancesReport.items[0], key: engine.normalizeName(priorLarge.name), name: priorLarge.name,
+      balance: priorLarge.balance, balanceAccountCcy: priorLarge.balance, creditLimit: 0, customerGuid: priorLarge.guid, customerAccountGuid: priorLarge.guid }] },
+    movementsReport: { ...reports.movementsReport, items: [{ customerGuid: priorLarge.guid, name: priorLarge.name, truncated: false, movements: priorLarge.movements }] },
+    creditLimits: []
+  });
+  const large69 = rc69.customers.find((c) => c.customerGuid === priorLarge.guid).autoCredit;
+  assert.ok(large69.notes.some((note) => note.includes("الفاتورة الشاذة")), "test 69: الحارس فُعّل");
+  assert.equal(large69.fullWindow, true, "test 69: نافذة كاملة (الوزنان 0.6/0.4 مطبّقان)");
+  // الحديث 7 × 1500 = 10500؛ السابق 8 × 500 + 10000 = 14000؛ القص = 10000 − 0.35 × 24500 = 1425 من السابق.
+  assert.equal(large69.velocity, Number(((0.6 * 10500 + 0.4 * (14000 - 1425)) / 30).toFixed(3)), "test 69: القص من الشهر السابق لا الحديث");
+
+  // 72) نقل دين إلى حساب زبون حقيقي ليس مبيعاً، ولا يجعله «ليس زبوناً»:
+  //     زبون بفواتير قليلة ودين منقول كبير ⇒ زبون يحتاج مراجعة بلا حد آلي؛
+  //     زبون بلا فواتير في النافذة ودين منقول قديم لم يُسدَّد ⇒ متعثّر بدينه الحقيقي.
+  const transferActive = {
+    guid: gid(72), name: "زبون بدين منقول",
+    movements: [debit(50, 100), pay(45, 100), debit(30, 900), debit(20, 100), pay(15, 100)],
+    uninvoiced: new Set([d(30)])
+  };
+  const transferIdle = { guid: gid(73), name: "زبون خامل بدين منقول", movements: [debit(55, 400)], noInvoices: true };
+  for (const a of [transferActive, transferIdle]) a.balance = ledgerBalance(a.movements);
+  const withTransfers = [...accounts, transferActive, transferIdle];
+  const rc72 = engine.build({
+    ...reports,
+    invoicesReport: invoicesReportFor(withTransfers),
+    balancesReport: { ...reports.balancesReport, items: [...reports.balancesReport.items, ...[transferActive, transferIdle].map((a) => ({
+      ...reports.balancesReport.items[0], key: engine.normalizeName(a.name), name: a.name, balance: a.balance, balanceAccountCcy: a.balance,
+      creditLimit: 0, customerGuid: a.guid, customerAccountGuid: a.guid
+    }))] },
+    movementsReport: { ...reports.movementsReport, items: [...reports.movementsReport.items, ...[transferActive, transferIdle].map((a) => ({
+      customerGuid: a.guid, name: a.name, truncated: false, movements: a.movements
+    }))] }
+  });
+  const active72 = rc72.customers.find((c) => c.customerGuid === transferActive.guid);
+  const idle72 = rc72.customers.find((c) => c.customerGuid === transferIdle.guid);
+  assert.equal(active72.autoCredit.status, "needs_review", "test 72: دين منقول ⇒ يحتاج مراجعة");
+  assert.equal(active72.creditLimit, null, "test 72: النقل لا يدخل سرعة السحب ولا يعطي حداً");
+  assert.equal(idle72.autoCredit.status, "delinquent", "test 72: الدين المنقول غير المسدَّد تعثّر حقيقي");
+  for (const c of [active72, idle72]) assert.ok(!c.flags.includes("credit_not_customer"), "test 72: زبون لا «ليس زبون مبيعات»");
+  assert.deepEqual(rc72.dataAvailability.creditCycle, rc.dataAvailability.creditCycle, "test 72: لا تلوّث عيّنة المحفظة");
+
+  // 73) Codex P1 — عملة الرصيد: حساب ليرة غاب رصيده بعملته (سطر بعملة أخرى أو معدّل
+  //     غير صالح) لا يُقارن رصيده بالدولار مع حده بالليرة؛ المقارنة بعملة الأساس.
+  const sypBase = row(G_SYP);
+  assert.equal(sypBase.creditCurrency, "SYP", "test 73: الحد معروض بالليرة");
+  assert.equal(sypBase.balanceCurrency, "SYP", "test 73: الرصيد بعملته حين يتوفر");
+  assert.ok(sypBase.creditLimit > 0 && sypBase.creditLimitDisplay > sypBase.creditLimit, "test 73: حد آلي بالليرة ومكافئه بالدولار");
+  const sypUsd = sypBase.creditLimit * 4;           // رصيد بالدولار يساوي أربعة أضعاف مكافئ الحد
+  const rcSypNoLocal = engine.build({
+    ...reports,
+    balancesReport: { ...reports.balancesReport, items: reports.balancesReport.items.map((item) => (item.customerGuid === G_SYP
+      ? { ...item, balance: sypUsd, balanceAccountCcy: null } : item)) }
+  });
+  const sypNoLocal = rcSypNoLocal.customers.find((c) => c.customerGuid === G_SYP);
+  assert.equal(sypNoLocal.creditCurrency, "SYP", "test 73: الحد ما زال معروضاً بالليرة");
+  assert.equal(sypNoLocal.balanceCurrency, "USD", "test 73: الرصيد البديل يُعرض بالدولار لا بالليرة");
+  assert.equal(sypNoLocal.creditStatus, "over_limit", "test 73: التجاوز لا يختفي باختلاف الوحدات");
+  assert.ok(Math.abs(sypNoLocal.creditUsagePercent - (sypUsd / sypNoLocal.creditLimit) * 100) < 0.01, "test 73: النسبة = دولار ÷ مكافئ الحد بالدولار");
+  assert.ok(sypNoLocal.flags.includes("over_credit_limit"));
+
+  // 74) Codex P1 — أرصدة غير حديثة: لا حد الأمين بديلاً، ولا نسبة استخدام ولا تجاوز ولا
+  //     تعثّر من رصيد قديم؛ والتصنيفات المؤكدة (ليس زبوناً / يحتاج مراجعة) تبقى.
+  const listedExcluded = engine.CONFIG.autoCredit.excludedAccountGuids[0];
+  const listedReview = engine.CONFIG.autoCredit.reviewAccountGuids[0];
+  const listedRows = [
+    { guid: listedExcluded, name: "مستبعد بالمعرّف" },
+    { guid: listedReview, name: "مختلط بالمعرّف" }
+  ];
+  const withListed = {
+    ...reports,
+    balancesReport: { ...reports.balancesReport, items: [
+      ...reports.balancesReport.items.map((item) => ({ ...item, creditLimit: 5000 })),
+      ...listedRows.map((a) => ({ ...reports.balancesReport.items[0], key: engine.normalizeName(a.name), name: a.name, balance: 4000, balanceAccountCcy: 4000,
+        creditLimit: 5000, customerGuid: a.guid, customerAccountGuid: a.guid }))
+    ] },
+    movementsReport: { ...reports.movementsReport, items: [
+      ...reports.movementsReport.items,
+      ...listedRows.map((a) => ({ customerGuid: a.guid, name: a.name, truncated: false, movements: regular({ from: 50, every: 7, amount: 800, lag: 3 }) }))
+    ] }
+  };
+  const rcStaleBal74 = engine.build({ ...withListed, balancesReport: { ...withListed.balancesReport, created_at: staleIso,
+    summary: { ...withListed.balancesReport.summary, syncedAt: staleIso } } });
+  assert.equal(rcStaleBal74.sourcesFreshness.balances.stale, true);
+  for (const c of rcStaleBal74.customers.filter((entry) => ![listedExcluded, listedReview, G_NOTCUST].includes(entry.customerGuid))) {
+    assert.equal(c.creditLimit, null, `test 74: لا حد من أرصدة قديمة (${c.customerName})`);
+    assert.notEqual(c.creditLimitSource, "ameen", `test 74: لا احتياط لحد الأمين (${c.customerName})`);
+    assert.equal(c.creditUsagePercent, null, `test 74: لا نسبة استخدام (${c.customerName})`);
+    assert.ok(!["over_limit", "near_limit", "delinquent"].includes(c.creditStatus), `test 74: لا حكم من رصيد قديم (${c.customerName})`);
+  }
+  const staleSteady74 = rcStaleBal74.customers.find((c) => c.customerGuid === G_STEADY);
+  assert.equal(staleSteady74.creditStatus, "stale_balance", "test 74: الحالة معلنة غير حديثة");
+  assert.equal(staleSteady74.creditLimitSource, "stale");
+  assert.ok(staleSteady74.flags.includes("stale_data"));
+  assert.ok(staleSteady74.explanation.some((reason) => reason.includes("غير حديث")), "test 74: السبب ظاهر");
+  const staleExcluded = rcStaleBal74.customers.find((c) => c.customerGuid === listedExcluded);
+  const staleReview = rcStaleBal74.customers.find((c) => c.customerGuid === listedReview);
+  assert.equal(staleExcluded.creditStatus, "not_customer", "test 74: «ليس زبوناً» المؤكد يبقى");
+  assert.equal(staleReview.creditStatus, "needs_review", "test 74: المختلط المؤكد يبقى «يحتاج مراجعة»");
+  assert.equal(rcStaleBal74.customers.find((c) => c.customerGuid === G_NOTCUST).creditStatus, "needs_review", "test 74: الشذوذ السلوكي يبقى «يحتاج مراجعة»");
+  for (const c of [staleExcluded, staleReview]) assert.equal(c.creditLimit, null);
+  // الضبط: الأرصدة نفسها حديثة ⇒ تعود الأحكام (الاختبار يقيس القِدم لا غياب الحد).
+  const freshSteady74 = engine.build(withListed).customers.find((c) => c.customerGuid === G_STEADY);
+  assert.equal(freshSteady74.creditLimitSource, "auto");
+  assert.ok(freshSteady74.creditLimit > 0);
+
+  // 75) Codex P1 — عمر الدين المرحَّل: تاريخه الاصطناعي يتدحرج مع نافذة الحركات، فلا
+  //     يصغر عمره في لقطة لاحقة ولا يفلت من «متأخر» حين يطول حد الدورة (> عمر النافذة).
+  //     وتبقى بقية شروط التعثّر: دين مرحَّل مغطّى بدفعات كافية ليس تعثّراً.
+  const longCycle = (id) => ({ guid: gid(id), name: `دورة طويلة ${id}`, truncated: false,
+    movements: regular({ from: 90, every: 5, amount: 500, lag: 55 }) });
+  const portfolio75 = [75, 76, 77, 78, 79, 80].map(longCycle);
+  const G75 = gid(81);
+  // سحب قديم غير مسدَّد يطيل دورة الزبون نفسه إلى سقف المحفظة (≈ 55 يوماً).
+  const target75 = regular({ from: 90, to: 60, every: 6, amount: 300, lag: null });
+  const snapshot75 = (fromDays, extraTarget = []) => {
+    const all = [...portfolio75, { guid: G75, name: "دين مرحَّل قديم", truncated: false, openingBalance: 3000, movements: [...target75, ...extraTarget] }];
+    return engine.build({
+      now: NOW,
+      invoicesReport: invoicesReportFor(all.map((a) => ({ ...a }))),
+      balancesReport: { ...reports.balancesReport, items: all.map((a) => ({ ...reports.balancesReport.items[0], key: engine.normalizeName(a.name), name: a.name,
+        balance: (a.openingBalance ?? 0) + ledgerBalance(a.movements), balanceAccountCcy: (a.openingBalance ?? 0) + ledgerBalance(a.movements),
+        creditLimit: 0, customerGuid: a.guid, customerAccountGuid: a.guid })) },
+      movementsReport: { ...reports.movementsReport, summary: { ...reports.movementsReport.summary, fromDate: d(fromDays) },
+        items: all.map((a) => ({ customerGuid: a.guid, name: a.name, truncated: false, openingBalance: a.openingBalance ?? 0, movements: a.movements })) },
+      creditLimits: []
+    }).customers.find((c) => c.customerGuid === G75);
+  };
+  // اللقطة الأولى (نافذة من 92 يوماً) ولقطة لاحقة بعد 30 يوماً: الدين نفسه يرحَّل من
+  // بداية أحدث، فتاريخه الاصطناعي يصبح أحدث بـ30 يوماً.
+  const early75 = snapshot75(92);
+  const later75 = snapshot75(62);
+  assert.ok(early75.autoCredit.overdueAfterDays > 93, "test 75: حد الدورة أطول من النافذة (السيناريو المقصود)");
+  for (const [label, c] of [["الأولى", early75], ["اللاحقة", later75]]) {
+    assert.ok(c.autoCredit.overdueAmount >= 3000, `test 75: الدين المرحَّل متأخر في اللقطة ${label}`);
+    assert.equal(c.creditStatus, "delinquent", `test 75: رصيد قائم + متأخر + بلا دفعات = تعثّر (${label})`);
+  }
+  assert.ok(later75.autoCredit.overdueAmount >= early75.autoCredit.overdueAmount, "test 75: لا يصغر عمر الدين في لقطة لاحقة");
+  // الحارس باقٍ: الدين المرحَّل نفسه مع دفعات تغطي أكثر من نصفه ليس تعثّراً.
+  const paid75 = snapshot75(92, [pay(40, 1200), pay(20, 1200)]);
+  assert.ok(paid75.autoCredit.overdueAmount > 0, "test 75: ما بقي من المرحَّل ما زال متأخراً");
+  assert.notEqual(paid75.creditStatus, "delinquent", "test 75: المرحَّل وحده لا يصنع تعثّراً");
+
+  // 76) Codex P1 — قائمتا المالك بلا أي حركة: حساب مدرج غاب عن تقرير الحركات (بلا
+  //     حركة ولا رصيد مرحَّل في النافذة) يبقى مصنَّفاً، ولا يسقط إلى حد الأمين.
+  const noMoveRows = [
+    { guid: engine.CONFIG.autoCredit.excludedAccountGuids[1], name: "مستبعد بلا حركة", status: "non_customer", credit: "not_customer" },
+    { guid: engine.CONFIG.autoCredit.reviewAccountGuids[0], name: "مختلط بلا حركة", status: "needs_review", credit: "needs_review" }
+  ];
+  const noMoveBalances = { ...reports.balancesReport, items: [...reports.balancesReport.items,
+    ...noMoveRows.map((a) => ({ ...reports.balancesReport.items[0], key: engine.normalizeName(a.name), name: a.name, balance: 3000,
+      balanceAccountCcy: 3000, creditLimit: 5000, customerGuid: a.guid, customerAccountGuid: a.guid }))] };
+  for (const [label, movementsReport] of [["دفتر بلا هذه الحسابات", reports.movementsReport], ["بلا تقرير حركات إطلاقاً", null]]) {
+    const built = engine.build({ ...reports, balancesReport: noMoveBalances, movementsReport });
+    for (const a of noMoveRows) {
+      const c = built.customers.find((entry) => entry.customerGuid === a.guid);
+      assert.ok(c, `test 76: السجل موجود (${a.name})`);
+      assert.equal(c.autoCredit?.status, a.status, `test 76 (${label}): ${a.name} يبقى مصنَّفاً`);
+      assert.equal(c.creditStatus, a.credit, `test 76 (${label}): ${a.name}`);
+      assert.equal(c.creditLimit, null, `test 76 (${label}): لا حد`);
+      assert.notEqual(c.creditLimitSource, "ameen", `test 76 (${label}): لا احتياط لحد الأمين`);
+    }
+  }
+
+  // 77) Codex P1 / قرار المالك (2026-09-27) — نوع الدائن من `lineKind` الموسوم وحده.
+  //     تحت summary.lineKinds = "v1": sale_payment (الاسم القانوني لدفعة البيع) و
+  //     payment/receipt (توافق) دفعة زبون تدخل التغطية والجودة والانتظام وFIFO واختبار
+  //     التعثّر. discount/debt_transfer/adjustment تُنقص الدين (FIFO) ولا تُعدّ دفعة.
+  //     purchase/purchase_payment/unknown لا دفعة ولا تسوية. return مرتجع لا دفعة.
+  //     بلا العلامة يُتجاهل الحقل ويبقى السلوك الحالي (الدائن دفعة) — لا نافذة انتقال.
+  const portfolio77 = [82, 83, 84, 85, 86, 87].map((id) => ({
+    guid: gid(id), name: `محفظة lineKind ${id}`, truncated: false,
+    movements: regular({ from: 59, every: 6, amount: 500, lag: 6 }).map((m) => (m.credit > 0 ? { ...m, lineKind: "payment" } : { ...m, lineKind: "sale" }))
+  }));
+  const credit77 = (kind) => ({ date: d(5), debit: 0, credit: 1800, notes: "", billGuid: "", ...(kind ? { lineKind: kind } : {}) });
+  const build77 = (cases, marker) => {
+    const all = [...portfolio77, ...cases.map((c) => ({ guid: gid(c.id), name: c.name, truncated: false,
+      movements: [{ ...debit(40, 2000), ...(marker ? { lineKind: "sale" } : {}) }, credit77(c.kind)] }))];
+    return engine.build({
+      untyped: !marker,
+      now: NOW,
+      invoicesReport: invoicesReportFor(all.map((a) => ({ ...a }))),
+      balancesReport: { ...reports.balancesReport, items: all.map((a) => ({ ...reports.balancesReport.items[0], key: engine.normalizeName(a.name), name: a.name,
+        balance: ledgerBalance(a.movements), balanceAccountCcy: ledgerBalance(a.movements), creditLimit: 0, customerGuid: a.guid, customerAccountGuid: a.guid })) },
+      movementsReport: { ...reports.movementsReport, summary: { ...reports.movementsReport.summary, ...(marker ? { lineKinds: marker } : {}) },
+        items: all.map((a) => ({ customerGuid: a.guid, name: a.name, truncated: false, movements: a.movements })) },
+      creditLimits: []
+    });
+  };
+  // المتوقَّع لكل نوع: paid = ما دخل مقاييس السداد، overdue = ما بقي مفتوحاً متأخراً بعد FIFO.
+  const PAY = { paid: 1800, overdue: 200, lastPayDays: 5, delinquent: false };
+  const SETTLE = { paid: 0, overdue: 200, lastPayDays: null, delinquent: true };
+  const NONE = { paid: 0, overdue: 2000, lastPayDays: null, delinquent: true };
+  const cases77 = [
+    { id: 88, kind: "sale_payment", ...PAY },     // 1) دفعة البيع الحقيقية
+    { id: 89, kind: "payment", ...PAY },          // 2) الاسم القديم يبقى دفعة
+    { id: 90, kind: "receipt", ...PAY },          // 3)
+    { id: 91, kind: "discount", ...SETTLE },      // 4) يُنقص الفاتورة، ليس دفعة
+    { id: 92, kind: "purchase", ...NONE },        // 5) مشترياتنا ليست سداداً
+    { id: 93, kind: "purchase_payment", ...NONE },// 6) ليس دفعة زبون
+    { id: 94, kind: "debt_transfer", ...SETTLE }, // 7) نقل الدين ليس دفعة
+    { id: 96, kind: "adjustment", ...SETTLE },
+    { id: 97, kind: "return", ...SETTLE },
+    { id: 99, kind: "purchase_return", ...NONE }  //    جانب الشراء: لا دفعة ولا تسوية
+    // 8) unknown: عقد 78 (دون حد الأهمية لا يحسّن السداد؛ فوقه «يحتاج مراجعة»).
+  ].map((c) => ({ ...c, name: `lineKind ${c.kind}` }));
+  const rc77 = build77(cases77, "v1");
+  for (const c of cases77) {
+    const r77 = rc77.customers.find((entry) => entry.customerGuid === gid(c.id));
+    assert.ok(r77, `test 77: السجل موجود (${c.kind})`);
+    assert.equal(r77.autoCredit.paidInOverdueSpan, c.paid, `test 77: ${c.kind} في مقاييس السداد`);
+    assert.equal(r77.autoCredit.overdueAmount, c.overdue, `test 77: ${c.kind} وتسوية FIFO`);
+    assert.equal(r77.autoCredit.daysSinceLastPayment, c.lastPayDays, `test 77: ${c.kind} آخر دفعة`);
+    assert.equal(r77.creditStatus === "delinquent", c.delinquent, `test 77: ${c.kind} واختبار التعثّر`);
+    if (c.paid === 0) assert.ok(!(r77.autoCredit.coverage > 0.5), `test 77: ${c.kind} لا يرفع التغطية`);
+  }
+  // 9–10) لا نافذة انتقال (قرار المالك 2026-09-27، Codex P1): تقرير بلا العلامة ⇒ الحد
+  //       الآلي مغلق (fail-closed) لا حد من دفتر ملتبس؛ ومع v1 يعمل المحرك بالتصنيف الجديد.
+  //       فلا وقت يرسل فيه المصدر أنواعاً لا يفهمها المحرك، ولا وقت يُصدر فيه حداً من مصدر قديم.
+  const legacy77 = build77([{ id: 88, name: "lineKind sale_payment", kind: null }, { id: 91, name: "lineKind discount", kind: "discount" }], null);
+  assert.ok(rc77.customers.find((c) => c.customerGuid === gid(88)).creditLimit > 0, "test 77: مع v1 حد آلي للدافع");
+  for (const id of [88, 91]) {
+    const old = legacy77.customers.find((c) => c.customerGuid === gid(id));
+    assert.equal(old.creditLimit, null, `test 77: بلا علامة لا حد آلي (${id})`);
+    assert.equal(old.creditStatus, "awaiting_typed_source", `test 77: بلا علامة الحالة معلنة (${id})`);
+    assert.equal(old.creditUsagePercent, null, `test 77: بلا علامة لا نسبة استخدام (${id})`);
+  }
+  // عيّنة المحفظة بأنواع v1 (sale/payment) = المحفظة القديمة بلا حقل: الدورة لا تتغير.
+  assert.deepEqual(rc77.dataAvailability.creditCycle, legacy77.dataAvailability.creditCycle, "test 77: دورة المحفظة لا تتغير بالانتقال");
+
+  // 78) قرار المالك — جانب المدين وunknown المادّي تحت lineKinds:v1.
+  //     Sales Velocity بقائمة سماح: sale وحده سحب. جانب الشراء (purchase_payment،
+  //     payment_out، purchase_return) لا سحب ولا دين. debt_transfer/adjustment/unknown
+  //     دين بلا سحب. unknown بقيمة ≥ حد الأهمية (delinquentMinAmount = 50، نفس حد شذوذ
+  //     الدفتر) ⇒ «يحتاج مراجعة» يسبق التعثّر، بلا حد، وخارج عيّنة المحفظة. بلا العلامة لا شيء يتغير.
+  const tag = (m, kind) => ({ ...m, lineKind: kind });
+  const debitCases78 = [
+    { id: 101, kind: "sale", draws: 3000 },
+    { id: 102, kind: "purchase_payment", draws: 2000 },
+    { id: 103, kind: "payment_out", draws: 2000 },
+    { id: 104, kind: "purchase_return", draws: 2000 },
+    { id: 105, kind: "debt_transfer", draws: 2000 },
+    { id: 106, kind: "adjustment", draws: 2000 },
+    { id: 107, kind: "unknown", draws: 2000, amount: 30 }  // دون حد الأهمية: لا مراجعة ولا سحب
+  ].map((c) => ({ ...c, name: `مدين ${c.kind}`,
+    movements: [tag(debit(40, 2000), "sale"), tag(debit(20, c.amount ?? 1000), c.kind), tag(pay(10, 2000), "sale_payment")] }));
+  const materialUnknown = { id: 108, name: "مجهول مادّي", movements: [tag(debit(50, 2000), "sale"), tag(debit(45, 500), "unknown")] };
+  const smallUnknownCredit = { id: 109, name: "دائن مجهول صغير", movements: [tag(debit(40, 2000), "sale"), tag(pay(10, 30), "unknown")] };
+  const unknownInPortfolio = { id: 110, name: "محفظة بحركة مجهولة",
+    movements: [...regular({ from: 59, every: 6, amount: 500, lag: 40 }).map((m) => tag(m, m.credit > 0 ? "payment" : "sale")), tag(pay(3, 100), "unknown")] };
+  const build78 = (list, marker) => {
+    const all = [...portfolio77.map((a) => ({ ...a, movements: marker ? a.movements : a.movements.map(({ lineKind, ...m }) => m) })),
+      ...list.map((c) => ({ guid: gid(c.id), name: c.name, truncated: false, movements: marker ? c.movements : c.movements.map(({ lineKind, ...m }) => m) }))];
+    return engine.build({
+      now: NOW,
+      invoicesReport: invoicesReportFor(all.map((a) => ({ ...a }))),
+      balancesReport: { ...reports.balancesReport, items: all.map((a) => ({ ...reports.balancesReport.items[0], key: engine.normalizeName(a.name), name: a.name,
+        balance: ledgerBalance(a.movements), balanceAccountCcy: ledgerBalance(a.movements), creditLimit: 0, customerGuid: a.guid, customerAccountGuid: a.guid })) },
+      movementsReport: { ...reports.movementsReport, summary: { ...reports.movementsReport.summary, ...(marker ? { lineKinds: marker } : {}) },
+        items: all.map((a) => ({ customerGuid: a.guid, name: a.name, truncated: false, movements: a.movements })) },
+      creditLimits: []
+    });
+  };
+  const rc78 = build78([...debitCases78, materialUnknown, smallUnknownCredit, unknownInPortfolio], "v1");
+  // «legacy78/79» = الدفتر نفسه موسوماً بقاعدة التصنيف القديمة (المدين sale والدائن
+  // sale_payment) — ضبط يثبت أن الفرق من النوع المجهول وحده.
+  const legacy78 = build78([...debitCases78, materialUnknown, smallUnknownCredit, unknownInPortfolio], null);
+  const at78 = (built, id) => built.customers.find((c) => c.customerGuid === gid(id));
+  const draws = (c) => c.autoCredit.salesRecent + c.autoCredit.salesPrior;
+  for (const c of debitCases78) {
+    const v1 = at78(rc78, c.id);
+    assert.equal(draws(v1), c.draws, `test 78: مدين ${c.kind} ${c.draws === 3000 ? "يدخل" : "لا يدخل"} Sales Velocity`);
+    assert.notEqual(v1.autoCredit.status, "needs_review", `test 78: ${c.kind} معروف لا «يحتاج مراجعة»`);
+    // بلا العلامة: كل مدين غير افتتاحي سحب كما اليوم.
+    assert.equal(draws(at78(legacy78, c.id)), 2000 + (c.amount ?? 1000), `test 78: بالتصنيف القديم ${c.kind} سحب كالسلوك القديم`);
+  }
+  // جانب الشراء لا يدخل FIFO: الدفعة 2000 تسدّد الفاتورة كلها فلا دين مفتوح.
+  for (const id of [102, 103, 104]) assert.equal(at78(rc78, id).autoCredit.oldestOpenDays, null, `test 78: جانب الشراء ليس ديناً على الزبون (${id})`);
+  // نقل الدين والتسوية دين حقيقي بلا سحب: يبقى مفتوحاً (عمره 20) بعد أن سدّدت الدفعة الفاتورة الأقدم.
+  for (const id of [105, 106]) assert.equal(at78(rc78, id).autoCredit.oldestOpenDays, 20, `test 78: دين غير سحبي يبقى ديناً (${id})`);
+  const mu = at78(rc78, 108);
+  assert.equal(mu.autoCredit.status, "needs_review", "test 78: unknown مادّي ⇒ يحتاج مراجعة");
+  assert.equal(mu.creditLimit, null, "test 78: unknown مادّي ⇒ لا حد");
+  assert.equal(mu.creditStatus, "needs_review");
+  assert.notEqual(at78(legacy78, 108).creditStatus, "needs_review", "test 78: بالتصنيف القديم لا مراجعة");
+  assert.equal(at78(legacy78, 108).creditStatus, "delinquent", "test 78: الضبط — الدفتر نفسه متعثّر بلا الحارس");
+  assert.ok(mu.explanation.some((reason) => reason.includes("غير مصنّفة")), "test 78: السبب ظاهر");
+  const su = at78(rc78, 109);
+  assert.notEqual(su.autoCredit.status, "needs_review", "test 78: unknown دون حد الأهمية لا يوقف الحساب");
+  assert.equal(su.autoCredit.paidInOverdueSpan, 0, "test 78: unknown لا يُعدّ دفعة");
+  assert.equal(su.autoCredit.daysSinceLastPayment, null);
+  assert.equal(at78(rc78, 110).autoCredit.status, "needs_review", "test 78: حساب المحفظة بمجهول مادّي يحتاج مراجعة");
+  const rcNoUnknownAcct = build78([...debitCases78, materialUnknown, smallUnknownCredit], "v1");
+  assert.deepEqual(rc78.dataAvailability.creditCycle, rcNoUnknownAcct.dataAvailability.creditCycle, "test 78: الحساب الملتبس لا يلوّث معايرة المحفظة");
+  assert.ok(engine.CONFIG.autoCredit.delinquentMinAmount === 50, "test 78: حد الأهمية نفسه");
+
+  // 79) قرار المالك (2026-09-27) — lineKind = other (حساب مقابل لم يثبت نوعه) حركة غير
+  //     محسومة كـunknown تماماً: لا سحب ولا دفعة ولا تسوية ولا دين؛ أثرها ≥ حد الأهمية (50)
+  //     ⇒ «يحتاج مراجعة» يسبق التعثّر، بلا حد، وخارج عيّنة المحفظة؛ دونه لا يوقف الحساب.
+  const otherMaterialDebit = { id: 111, name: "مدين other مادّي", movements: [tag(debit(50, 2000), "sale"), tag(debit(45, 500), "other")] };
+  const otherMaterialCredit = { id: 112, name: "دائن other مادّي", movements: [tag(debit(80, 2000), "sale"), tag(pay(20, 1500), "other")] };
+  const otherSmallDebit = { id: 113, name: "مدين other صغير", movements: [tag(debit(40, 2000), "sale"), tag(debit(20, 30), "other"), tag(pay(10, 2000), "sale_payment")] };
+  const otherSmallCredit = { id: 114, name: "دائن other صغير", movements: [tag(debit(40, 2000), "sale"), tag(pay(10, 30), "other")] };
+  const otherInPortfolio = { id: 115, name: "محفظة بحركة other",
+    movements: [...regular({ from: 59, every: 6, amount: 500, lag: 40 }).map((m) => tag(m, m.credit > 0 ? "payment" : "sale")), tag(pay(3, 100), "other")] };
+  const list79 = [otherMaterialDebit, otherMaterialCredit, otherSmallDebit, otherSmallCredit, otherInPortfolio];
+  const rc79 = build78(list79, "v1");
+  const legacy79 = build78(list79, null);
+  // 1) و2) مادّي ⇒ مراجعة بلا حد، ولا تعثّر من الغموض (الدفتر نفسه بلا العلامة متعثّر).
+  for (const id of [111, 112]) {
+    const r = at78(rc79, id);
+    assert.equal(r.creditStatus, "needs_review", `test 79: other مادّي ⇒ يحتاج مراجعة (${id})`);
+    assert.equal(r.creditLimit, null, `test 79: other مادّي ⇒ لا حد (${id})`);
+    assert.equal(r.autoCredit.overdueAmount, undefined, `test 79: other مادّي ⇒ لا حكم تعثّر (${id})`);
+  }
+  assert.equal(at78(legacy79, 111).creditStatus, "delinquent", "test 79: الضبط — الدفتر نفسه متعثّر بلا الحارس");
+  // 3) حساب المحفظة بـother مادّي خارج المعايرة.
+  assert.equal(at78(rc79, 115).creditStatus, "needs_review", "test 79: حساب المحفظة بـother مادّي يحتاج مراجعة");
+  assert.deepEqual(rc79.dataAvailability.creditCycle, build78(list79.slice(0, 4), "v1").dataAvailability.creditCycle, "test 79: other لا يلوّث معايرة المحفظة");
+  // 4) و6) مدين other صغير: لا سحب ولا دين، ولا يوقف الحساب.
+  const osd = at78(rc79, 113);
+  assert.notEqual(osd.creditStatus, "needs_review", "test 79: other دون حد الأهمية لا يوقف الحساب");
+  assert.equal(draws(osd), 2000, "test 79: مدين other لا يرفع Sales Velocity");
+  assert.equal(osd.autoCredit.oldestOpenDays, null, "test 79: مدين other ليس ديناً مؤكداً");
+  // 5) و6) دائن other صغير: لا دفعة ولا تسوية، ولا يوقف الحساب.
+  const osc = at78(rc79, 114);
+  assert.notEqual(osc.creditStatus, "needs_review", "test 79: دائن other صغير لا يوقف الحساب");
+  assert.equal(osc.autoCredit.paidInOverdueSpan, 0, "test 79: دائن other لا يُعدّ دفعة");
+  assert.equal(osc.autoCredit.daysSinceLastPayment, null, "test 79: دائن other ليس آخر دفعة");
+  assert.equal(osc.autoCredit.overdueAmount, 2000, "test 79: دائن other لا يسوّي الدين");
+  // 7) بلا العلامة: السلوك القديم كما هو — المدين سحب والدائن دفعة ولا مراجعة.
+  assert.equal(draws(at78(legacy79, 113)), 2030, "test 79: بالتصنيف القديم مدين other سحب كالسلوك القديم");
+  assert.equal(at78(legacy79, 114).autoCredit.paidInOverdueSpan, 30, "test 79: بالتصنيف القديم دائن other دفعة كالسلوك القديم");
+  for (const c of list79) assert.notEqual(at78(legacy79, c.id).creditStatus, "needs_review", `test 79: بالتصنيف القديم لا مراجعة (${c.id})`);
+
+  // 80) قرار المالك (2026-09-27، Codex P1) — الحد الآلي fail-closed بلا lineKinds:v1: لا حد
+  //     آلي ولا نسبة استخدام ولا تجاوز ولا تعثّر من دفتر يخلط الحسم والمشتريات بالدفعات،
+  //     والتصنيفات المؤكدة (ليس زبوناً، مختلط، يحتاج مراجعة) تبقى. مع v1 حديث يعمل المحرك.
+  const untyped80 = engine.build({ ...reports, untyped: true });
+  assert.equal(untyped80.dataAvailability.autoCreditEnabled, false, "test 80: بلا علامة الحد الآلي مغلق");
+  assert.equal(rc.dataAvailability.autoCreditEnabled, true, "test 80: مع v1 الحد الآلي يعمل");
+  const byGuid80 = new Map(untyped80.customers.map((c) => [c.customerGuid, c]));
+  let gated80 = 0;
+  for (const typed of rc.customers) {
+    if (typed.isSupplier || !typed.customerGuid) continue;
+    const u = byGuid80.get(typed.customerGuid);
+    assert.ok(u, `test 80: السجل موجود (${typed.customerGuid})`);
+    assert.equal(u.creditLimit === null || u.creditLimitSource === "ameen", true, `test 80: لا حد آلي بلا علامة (${typed.customerGuid})`);
+    // حد مُدخل يدوياً في الأمين (إن وُجد) يبقى بمصدره كمسار الدفتر غير الحديث — ليس حداً آلياً.
+    if (u.creditLimitSource === "ameen") { assert.equal(typed.creditLimitSource, "ameen", "test 80: حد الأمين بمصدره"); continue; }
+    assert.ok(!["delinquent", "over_limit", "near_limit", "normal", "inactive_no_limit", "prepaid"].includes(u.creditStatus), `test 80: لا حكم ائتمان بلا علامة (${typed.customerGuid}: ${u.creditStatus})`);
+    assert.equal(u.creditUsagePercent, null, `test 80: لا نسبة استخدام بلا علامة (${typed.customerGuid})`);
+    if (["not_customer", "needs_review"].includes(typed.creditStatus)) {
+      assert.equal(u.creditStatus, typed.creditStatus, `test 80: التصنيف المؤكد يبقى (${typed.customerGuid})`);
+    } else if (u.creditStatus === "awaiting_typed_source") {
+      gated80 += 1;
+      assert.equal(u.creditLimit, null);
+      assert.ok(u.explanation.some((reason) => reason.includes("lineKinds:v1")), "test 80: السبب ظاهر");
+    }
+  }
+  assert.ok(gated80 >= 5, "test 80: حسابات عادية ومتعثرة كلها مغلقة بلا علامة");
+  for (const status of ["delinquent", "normal", "needs_review"]) {
+    assert.ok(rc.customers.some((c) => c.creditStatus === status), `test 80: التركيبة تغطي ${status} مع v1`);
+  }
+  // قائمتا المالك (ليس زبوناً / مختلط) تبقيان بلا علامة أيضاً.
+  assert.equal(asOwnerListed(engine.CONFIG.autoCredit.excludedAccountGuids[0], true).creditStatus, "not_customer", "test 80: ليس زبوناً يبقى بلا علامة");
+  assert.equal(asOwnerListed(engine.CONFIG.autoCredit.reviewAccountGuids[0], true).creditStatus, "needs_review", "test 80: المختلط يبقى بلا علامة");
+  assert.equal(untyped80.summary.delinquentCreditCount, 0, "test 80: لا متعثّر من مصدر ملتبس");
+
+  // 81) قرار المالك (2026-09-27، Codex P1) — بوابة الحد الآلي تتطلب الفواتير حديثة أيضاً.
+  //     يوم المرجع ونافذة السحب من لقطة الفواتير: قِدمها يُخرج مبيعات أحدث من النافذة بينما
+  //     الرصيد وFIFO حاليان. مع v1 وحركات وأرصدة حديثة وفواتير قديمة: لا حد آلي ولا نسبة ولا
+  //     تجاوز ولا تعثّر ولا «غير نشط»، والتصنيفات المؤكدة وحد الأمين اليدوي بمصدره يبقيان.
+  const invoicesAt = (iso) => ({ ...reports.invoicesReport, created_at: iso, summary: { ...reports.invoicesReport.summary, syncedAt: iso } });
+  const oldInvoicesIso = new Date(NOW.getTime() - 35 * 86400000).toISOString();   // لقطة من الشهر الماضي
+  for (const [label, iso] of [["قبل 3 ساعات", staleIso], ["قبل 35 يوماً", oldInvoicesIso]]) {
+    const staleInv81 = engine.build({ ...reports, invoicesReport: invoicesAt(iso) });
+    assert.equal(staleInv81.sourcesFreshness.invoices.stale, true, `test 81 (${label}): الفواتير قديمة`);
+    assert.equal(staleInv81.sourcesFreshness.movements.stale || staleInv81.sourcesFreshness.balances.stale, false, `test 81 (${label}): الحركات والأرصدة حديثة`);
+    const byGuid81 = new Map(staleInv81.customers.map((c) => [c.customerGuid, c]));
+    let gated81 = 0;
+    for (const fresh of rc.customers) {
+      if (fresh.isSupplier || !fresh.customerGuid) continue;
+      const c = byGuid81.get(fresh.customerGuid);
+      assert.ok(c, `test 81: السجل موجود (${fresh.customerGuid})`);
+      if (fresh.creditStatus === "not_customer") {
+        assert.equal(c.creditStatus, "not_customer", `test 81 (${label}): التصنيف المؤكد يبقى (${fresh.customerGuid})`);
+        continue;
+      }
+      if (fresh.creditStatus === "needs_review") {
+        // شذوذ الدفتر السلوكي يُحكم من فواتير حديثة وحدها (عقد 71)؛ بلاها يبقى مغلقاً بلا حد.
+        assert.ok(["needs_review", "stale_invoices"].includes(c.creditStatus), `test 81 (${label}): المراجعة لا تنفتح (${fresh.customerGuid})`);
+        assert.equal(c.creditLimit, null);
+        continue;
+      }
+      if (c.creditLimitSource === "ameen") { assert.equal(fresh.creditLimitSource, "ameen", "test 81: حد الأمين بمصدره لا حداً آلياً"); continue; }
+      assert.ok(!["delinquent", "over_limit", "near_limit", "normal", "inactive_no_limit", "prepaid"].includes(c.creditStatus),
+        `test 81 (${label}): لا حكم ائتمان من فواتير قديمة (${fresh.customerGuid}: ${c.creditStatus})`);
+      assert.equal(c.creditLimit, null, `test 81 (${label}): لا حد آلي (${fresh.customerGuid})`);
+      assert.equal(c.creditUsagePercent, null, `test 81 (${label}): لا نسبة استخدام (${fresh.customerGuid})`);
+      if (c.creditStatus === "stale_invoices") {
+        gated81 += 1;
+        assert.equal(c.creditLimitSource, "stale_invoices");
+        assert.ok(c.explanation.some((reason) => reason.includes("الفواتير غير حديث")), "test 81: السبب ظاهر");
+      }
+    }
+    assert.ok(gated81 >= 5, `test 81 (${label}): حسابات عادية ومتعثرة كلها مغلقة`);
+    assert.equal(staleInv81.summary.delinquentCreditCount, 0, `test 81 (${label}): لا متعثّر`);
+    // زبون سحب حديثاً (يوما 12 و3): بلقطة فواتير عمرها 35 يوماً كان يُحكم «غير نشط» بحد صفر.
+    assert.notEqual(byGuid81.get(G_NEW).creditStatus, "inactive_no_limit", `test 81 (${label}): لا «غير نشط» من نافذة فواتير قديمة`);
+    assert.equal(byGuid81.get(G_NEW).creditStatus, "stale_invoices");
+    // قائمتا المالك تبقيان مع فواتير قديمة.
+    for (const [guid, status] of [[engine.CONFIG.autoCredit.excludedAccountGuids[0], "not_customer"], [engine.CONFIG.autoCredit.reviewAccountGuids[0], "needs_review"]]) {
+      const listed = engine.build({ ...reports, invoicesReport: invoicesAt(iso),
+        balancesReport: { ...reports.balancesReport, items: [...reports.balancesReport.items, { ...reports.balancesReport.items[0], key: "مدرج", name: "مدرج", balance: 900, balanceAccountCcy: 900, creditLimit: 0, customerGuid: guid, customerAccountGuid: guid }] } })
+        .customers.find((c) => c.customerGuid === guid);
+      assert.equal(listed.creditStatus, status, `test 81 (${label}): قائمة المالك تبقى (${status})`);
+    }
+  }
+  // الفواتير حديثة مع v1 وحركات وأرصدة حديثة: المحرك يعمل (عقد 47 وما بعده على rc نفسه).
+  assert.equal(rc.sourcesFreshness.invoices.stale, false);
+  assert.equal(row(G_STEADY).creditLimitSource, "auto", "test 81: بفواتير حديثة الحد آلي");
+  assert.ok(row(G_STEADY).creditLimit > 0);
+  assert.notEqual(row(G_NEW).creditStatus, "stale_invoices");
+  // بلا v1 يبقى مغلقاً (عقد 80)، ومع فواتير قديمة أيضاً لا حد ولا حكم.
+  const untypedStale81 = engine.build({ ...reports, untyped: true, invoicesReport: invoicesAt(staleIso) });
+  assert.ok(untypedStale81.customers.every((c) => c.creditLimitSource !== "auto" && !["delinquent", "over_limit", "near_limit"].includes(c.creditStatus)),
+    "test 81: بلا v1 وفواتير قديمة يبقى مغلقاً");
+
+  // 82) Codex P1 / قرار المالك — حارس الفاتورة الشاذة يعدّ فواتير نافذة السحب (60 يوماً) وحدها.
+  //     3 فواتير في الأيام 61–92 + فاتورة واحدة كبيرة داخل النافذة ⇒ windowDebitCount = 1 < 4:
+  //     لا قصّ. والحالة المقابلة (عدة فواتير داخل النافذة وواحدة كبيرة) يعمل فيها الحارس كما كان.
+  const build82 = (movements) => {
+    const a = { guid: gid(82), name: "حارس الفاتورة الشاذة بالنافذة", movements };
+    return engine.build({
+      ...reports,
+      invoicesReport: invoicesReportFor([a]),
+      balancesReport: { ...reports.balancesReport, items: [{ ...reports.balancesReport.items[0], key: engine.normalizeName(a.name), name: a.name,
+        balance: ledgerBalance(movements), balanceAccountCcy: ledgerBalance(movements), creditLimit: 0, customerGuid: a.guid, customerAccountGuid: a.guid }] },
+      movementsReport: { ...reports.movementsReport, items: [{ customerGuid: a.guid, name: a.name, truncated: false, movements }] },
+      creditLimits: []
+    }).customers.find((c) => c.customerGuid === a.guid).autoCredit;
+  };
+  const guardFired = (auto) => auto.notes.some((note) => note.includes("الفاتورة الشاذة"));
+  const oldPlusOne = build82([debit(90, 400), pay(86, 400), debit(80, 400), pay(76, 400), debit(70, 400), pay(66, 400), debit(30, 3000), pay(25, 3000)]);
+  assert.equal(guardFired(oldPlusOne), false, "test 82: فواتير الأيام 61–92 لا تجعل فاتورة النافذة الوحيدة شاذة");
+  assert.equal(oldPlusOne.salesPrior, 3000, "test 82: سحب النافذة كاملاً بلا قصّ");
+  const manyInWindow = build82([...regular({ from: 56, every: 8, amount: 300, lag: 4 }), debit(20, 6000), pay(16, 6000)]);
+  assert.equal(guardFired(manyInWindow), true, "test 82: عدة فواتير داخل النافذة ⇒ الحارس يعمل كما كان");
+  const fewInWindow = build82([debit(50, 300), pay(46, 300), debit(40, 300), pay(36, 300), debit(20, 6000), pay(16, 6000)]);
+  assert.equal(guardFired(fewInWindow), false, "test 82: ثلاث فواتير فقط داخل النافذة (< 4) ⇒ لا قصّ");
+
+  // 83) Codex P1 / قرار المالك — يوم المرجع هو يوم المحاسبة المحلي (`report_date`) لا تاريخ UTC
+  //     من `syncedAt`. مزامنة الساعة 01:30 بتوقيت دمشق (22:30Z من اليوم السابق) وكل المصادر
+  //     حديثة: زبون اشترى اليوم المحلي لا يُحكم «غير نشط»، وسحب اليوم داخل النافذة.
+  const utcIso83 = new Date(REF_DAY - 90 * 60000).toISOString();   // 2026-09-01T22:30Z
+  const now83 = new Date(REF_DAY - 85 * 60000);
+  const today83 = { guid: gid(83), name: "مشترٍ بعد منتصف الليل المحلي", movements: [debit(0, 900)] };
+  const build83 = (withReportDate) => {
+    const at = ({ report_date: _fixtureDay, ...report }) => ({ ...report, created_at: utcIso83, ...(withReportDate ? { report_date: d(0) } : {}),
+      summary: { ...report.summary, syncedAt: utcIso83 } });
+    return engine.build({
+      invoicesReport: at(invoicesReportFor([today83])),
+      balancesReport: at({ ...reports.balancesReport, items: [{ ...reports.balancesReport.items[0], key: engine.normalizeName(today83.name), name: today83.name,
+        balance: 900, balanceAccountCcy: 900, creditLimit: 0, customerGuid: today83.guid, customerAccountGuid: today83.guid }] }),
+      movementsReport: at({ ...reports.movementsReport, items: [{ customerGuid: today83.guid, name: today83.name, truncated: false, movements: today83.movements }] }),
+      creditLimits: [], now: now83
+    });
+  };
+  const local83 = build83(true);
+  assert.equal(local83.sourcesFreshness.invoices.stale || local83.sourcesFreshness.movements.stale || local83.sourcesFreshness.balances.stale, false,
+    "test 83: كل المصادر حديثة");
+  assert.equal(local83.window.referenceDate, d(0), "test 83: يوم المرجع = report_date المحلي");
+  const c83 = local83.customers.find((c) => c.customerGuid === today83.guid);
+  assert.notEqual(c83.autoCredit.status, "inactive", "test 83: مشترٍ اليوم لا يُحكم «غير نشط»");
+  assert.notEqual(c83.creditStatus, "inactive_no_limit");
+  assert.equal(c83.autoCredit.salesRecent, 900, "test 83: سحب اليوم داخل النافذة");
+  // بلا report_date (تقارير قديمة) يبقى الاحتياط تاريخ syncedAt كما كان.
+  assert.equal(build83(false).window.referenceDate, d(1), "test 83: بلا report_date الاحتياط syncedAt");
+
+  // 84) Codex P1 / قرار المالك — المصادر الثلاثة على يوم المحاسبة المحلي نفسه (report_date، تعريف 8d33476).
+  //     الساعة 00:30 بتوقيت دمشق (21:30Z): الفواتير مزامنة 23:50 وreport_date أمس، والحركات
+  //     والأرصدة بعد منتصف الليل وreport_date اليوم، وكلها ضمن مهل الحداثة ⇒ لا حد آلي ولا
+  //     «غير نشط» ولا تعثّر ولا تجاوز. وحين تتحدث الفواتير لليوم نفسه يعود المحرك طبيعياً.
+  const localIso = (hh, mm, dayOffset = 0) => new Date(REF_DAY + dayOffset * 86400000 + ((hh - 3) * 60 + mm) * 60000).toISOString(); // دمشق = UTC+3
+  const now84 = new Date(localIso(0, 30));
+  const at84 = (report, iso, day) => ({ ...report, created_at: iso, report_date: day, summary: { ...report.summary, syncedAt: iso } });
+  const build84 = (invoiceIso, invoiceDay) => engine.build({
+    ...reports,
+    invoicesReport: at84(reports.invoicesReport, invoiceIso, invoiceDay),
+    movementsReport: at84(reports.movementsReport, localIso(0, 20), d(0)),
+    balancesReport: at84(reports.balancesReport, localIso(0, 25), d(0)),
+    now: now84
+  });
+  const midnight = build84(localIso(23, 50, -1), d(1));
+  assert.deepEqual(Object.values(midnight.sourcesFreshness).map((f) => f.stale), [false, false, false], "test 84: كل المصادر ضمن مهلة الحداثة");
+  assert.equal(midnight.dataAvailability.accountingDayAligned, false, "test 84: يوم المحاسبة غير متطابق");
+  assert.deepEqual(midnight.dataAvailability.accountingDays, { invoices: d(1), movements: d(0), balances: d(0) });
+  const byGuid84 = new Map(midnight.customers.map((c) => [c.customerGuid, c]));
+  let gated84 = 0;
+  for (const fresh of rc.customers) {
+    if (fresh.isSupplier || !fresh.customerGuid) continue;
+    const c = byGuid84.get(fresh.customerGuid);
+    if (fresh.creditStatus === "not_customer") { assert.equal(c.creditStatus, "not_customer", "test 84: التصنيف المؤكد يبقى"); continue; }
+    if (fresh.creditStatus === "needs_review") {
+      // شذوذ الدفتر السلوكي يقارن الدفتر بالفواتير؛ عبر يومين لا يُحكم به، ويبقى مغلقاً بلا حد.
+      assert.ok(["needs_review", "accounting_day_mismatch"].includes(c.creditStatus), "test 84: المراجعة لا تنفتح");
+      assert.equal(c.creditLimit, null); continue;
+    }
+    if (c.creditLimitSource === "ameen") continue;
+    assert.ok(!["delinquent", "over_limit", "near_limit", "normal", "inactive_no_limit", "prepaid"].includes(c.creditStatus),
+      `test 84: لا حكم ائتمان عبر يومين (${fresh.customerGuid}: ${c.creditStatus})`);
+    assert.equal(c.creditLimit, null);
+    assert.equal(c.creditUsagePercent, null);
+    if (c.creditStatus === "accounting_day_mismatch") {
+      gated84 += 1;
+      assert.equal(c.creditLimitSource, "day_mismatch");
+      assert.ok(c.explanation.some((reason) => reason.includes("يوم المحاسبة")), "test 84: السبب ظاهر");
+    }
+  }
+  assert.ok(gated84 >= 5, "test 84: حسابات عادية ومتعثرة كلها مغلقة");
+  assert.equal(midnight.summary.delinquentCreditCount, 0, "test 84: لا متعثّر");
+  assert.notEqual(byGuid84.get(G_NEW).creditStatus, "inactive_no_limit", "test 84: المشتري حديثاً لا يصبح «غير نشط»");
+  for (const [guid, status] of [[engine.CONFIG.autoCredit.excludedAccountGuids[0], "not_customer"], [engine.CONFIG.autoCredit.reviewAccountGuids[0], "needs_review"]]) {
+    const listed = engine.build({ ...reports, now: now84,
+      invoicesReport: at84(reports.invoicesReport, localIso(23, 50, -1), d(1)), movementsReport: at84(reports.movementsReport, localIso(0, 20), d(0)),
+      balancesReport: at84({ ...reports.balancesReport, items: [...reports.balancesReport.items, { ...reports.balancesReport.items[0], key: "مدرج", name: "مدرج", balance: 900, balanceAccountCcy: 900, creditLimit: 0, customerGuid: guid, customerAccountGuid: guid }] }, localIso(0, 25), d(0)) })
+      .customers.find((c) => c.customerGuid === guid);
+    assert.equal(listed.creditStatus, status, `test 84: قائمة المالك تبقى (${status})`);
+  }
+  // الفواتير تتحدث لليوم نفسه ⇒ المحرك يعمل.
+  const aligned84 = build84(localIso(0, 28), d(0));
+  assert.equal(aligned84.dataAvailability.accountingDayAligned, true, "test 84: يوم المحاسبة متطابق");
+  const steady84 = aligned84.customers.find((c) => c.customerGuid === G_STEADY);
+  assert.equal(steady84.creditLimitSource, "auto", "test 84: بيوم متطابق يعود الحد الآلي");
+  assert.ok(steady84.creditLimit > 0);
+  assert.ok(aligned84.customers.every((c) => c.creditStatus !== "accounting_day_mismatch"));
+  // يوم مجهول لأي مصدر (بلا report_date) لا يُفترض تطابقه.
+  const { report_date: _noDay, ...invoicesNoDay } = at84(reports.invoicesReport, localIso(0, 28), d(0));
+  const unknownDay84 = engine.build({ ...reports, now: now84, invoicesReport: invoicesNoDay,
+    movementsReport: at84(reports.movementsReport, localIso(0, 20), d(0)), balancesReport: at84(reports.balancesReport, localIso(0, 25), d(0)) });
+  assert.equal(unknownDay84.dataAvailability.accountingDayAligned, false, "test 84: يوم غير معروف ⇒ غير متطابق");
+  assert.equal(unknownDay84.customers.find((c) => c.customerGuid === G_STEADY).creditStatus, "accounting_day_mismatch");
+
+  // 85) Codex P1 / قرار المالك — حد الأمين لحساب بعملة غير الأساس مع فواتير غير حديثة أو على يوم
+  //     آخر: معدّل التحويل من تلك الفواتير، فالحد يُعرض بمصدره «ameen» بلا نسبة استخدام ولا تجاوز.
+  //     حساب الأساس (دولار) بحد الأمين لا يحتاج معدّلاً فيبقى حكمه كما كان.
+  const withAmeenLimit = (report, limits) => ({ ...report, items: report.items.map((item) => (item.customerGuid in limits ? { ...item, creditLimit: limits[item.customerGuid] } : item)) });
+  const limits85 = { [G_SYP]: 100, [G_STEADY]: 100 };   // رصيد كل منهما أكبر بكثير من 100$ ⇒ «تجاوز» لو حُسب
+  const cases85 = [
+    ["فواتير غير حديثة", "stale_invoices", engine.build({ ...reports, balancesReport: withAmeenLimit(reports.balancesReport, limits85),
+      invoicesReport: { ...reports.invoicesReport, created_at: staleIso, summary: { ...reports.invoicesReport.summary, syncedAt: staleIso } } })],
+    ["يوم محاسبي آخر", "accounting_day_mismatch", engine.build({ ...reports, now: now84,
+      invoicesReport: at84(reports.invoicesReport, localIso(23, 50, -1), d(1)), movementsReport: at84(reports.movementsReport, localIso(0, 20), d(0)),
+      balancesReport: at84(withAmeenLimit(reports.balancesReport, limits85), localIso(0, 25), d(0)) })]
+  ];
+  for (const [label, status, built] of cases85) {
+    const syp85 = built.customers.find((c) => c.customerGuid === G_SYP);
+    assert.equal(syp85.creditLimitSource, "ameen", `test 85 (${label}): حد الأمين بمصدره`);
+    assert.equal(syp85.creditLimit, 100, `test 85 (${label}): قيمة الحد تُعرض`);
+    assert.equal(syp85.creditUsagePercent, null, `test 85 (${label}): لا نسبة استخدام بمعدّل قديم`);
+    assert.equal(syp85.creditStatus, status, `test 85 (${label}): لا حكم تجاوز`);
+    assert.ok(syp85.explanation.some((reason) => reason.includes("معدّل تحويله")), `test 85 (${label}): السبب ظاهر`);
+    const usd85 = built.customers.find((c) => c.customerGuid === G_STEADY);
+    assert.equal(usd85.creditLimitSource, "ameen");
+    assert.equal(usd85.creditStatus, "over_limit", `test 85 (${label}): حساب الدولار بحد الأمين يبقى حكمه`);
+  }
+
+  // 86) Codex P1 / قرار المالك — حساب بعملة غير الأساس بلا أي معدّل في لقطة الفواتير كلها: لا
+  //     يُعامَل كحساب دولار برصيد فيه فروقات صرف. الرصيد بعملته، بلا حد آلي ولا استخدام ولا تجاوز.
+  const noRateInvoices = { ...reports.invoicesReport, items: reports.invoicesReport.items.map((group) => ({
+    ...group, invoices: group.invoices.map(({ currency, currencyVal, ...rest }) => rest) })) };
+  const rc86 = engine.build({ ...reports, invoicesReport: noRateInvoices });
+  const syp86 = rc86.customers.find((c) => c.customerGuid === G_SYP);
+  assert.equal(syp86.creditStatus, "missing_rate", "test 86: لا حكم بلا معدّل");
+  assert.equal(syp86.creditUsagePercent, null, "test 86: لا نسبة استخدام بلا معدّل");
+  assert.equal(syp86.creditLimit, null, "test 86: لا حد آلي بعملة الأساس لحساب ليرة");
+  assert.equal(syp86.creditLimitSource, "missing_rate");
+  assert.equal(syp86.balanceDisplay, 9800000, "test 86: الرصيد بعملة الحساب لا بالدولار المشوّه");
+  assert.notEqual(syp86.balanceCurrency, "USD", "test 86: عملة الرصيد عملة الحساب المعلنة");
+  assert.ok(syp86.explanation.some((reason) => reason.includes("سعر صرف")), "test 86: السبب ظاهر");
+  assert.equal(rc86.customers.find((c) => c.customerGuid === G_STEADY).creditStatus, row(G_STEADY).creditStatus, "test 86: حساب الدولار لا يتأثر");
+
+  // 87) قرار المالك (2026-09-27، Codex P1، الخيار A) — مطابقة الرصيد: دين متأخر مادّي في الدفتر
+  //     لا يصنع «متعثّراً» إن كان الرصيد الحالي الموثوق لا يدعمه (دفعة فاتت لقطة الدفتر). حد
+  //     الأهمية نفسه (50). الرصيد المادّي يُبقي الحكم كما كان، ولا تتحسّن الدفعات بالمطابقة.
+  const build87 = (balance) => {
+    const a = { guid: gid(87), name: "مطابقة الرصيد", movements: [debit(80, 3000), pay(75, 100)] };
+    return engine.build({
+      ...reports,
+      invoicesReport: invoicesReportFor([a]),
+      balancesReport: { ...reports.balancesReport, items: [{ ...reports.balancesReport.items[0], key: engine.normalizeName(a.name), name: a.name,
+        balance, balanceAccountCcy: balance, creditLimit: 0, customerGuid: a.guid, customerAccountGuid: a.guid }] },
+      movementsReport: { ...reports.movementsReport, items: [{ customerGuid: a.guid, name: a.name, truncated: false, movements: a.movements }] },
+      creditLimits: []
+    }).customers.find((c) => c.customerGuid === a.guid);
+  };
+  const settled87 = build87(0.03);
+  assert.ok(settled87.autoCredit.overdueAmount >= 2900, "test 87: الدفتر ما زال يرى ديناً متأخراً مادّياً");
+  assert.equal(settled87.autoCredit.balanceSupportedOverdue, 0.03, "test 87: الرصيد الحالي لا يدعم منه إلا 0.03");
+  assert.notEqual(settled87.creditStatus, "delinquent", "test 87: رصيد ≈ 0.03 ⇒ ليس متعثّراً");
+  assert.notEqual(settled87.autoCredit.status, "delinquent");
+  const small87 = build87(49);
+  assert.notEqual(small87.creditStatus, "delinquent", "test 87: رصيد دون حد الأهمية لا يصنع تعثّراً");
+  const material87 = build87(2900);
+  assert.equal(material87.creditStatus, "delinquent", "test 87: رصيد يدعم الدين المادّي ⇒ متعثّر كما كان");
+  assert.equal(material87.autoCredit.balanceSupportedOverdue, 2900);
+  // المطابقة لا تصنع دفعات ولا تحسّن الجودة: مقاييس السداد نفسها في الحالتين.
+  for (const key of ["paidInOverdueSpan", "punctuality", "coverage", "daysSinceLastPayment"]) {
+    if (settled87.autoCredit[key] !== undefined && key !== "coverage") assert.equal(settled87.autoCredit[key], material87.autoCredit[key], `test 87: ${key} لا يتغير بالمطابقة`);
+  }
+  const partial87 = build87(400);
+  assert.equal(partial87.creditStatus, "delinquent", "test 87: رصيد 400 ما زال يدعم ديناً مادّياً ⇒ الحكم كما كان");
+
+  // 88) Codex P1 — حد الأمين لحساب بعملة غير الأساس مع اختلاف يوم المحاسبة، ومنتج الحركات الحالي
+  //     غير الموسوم (بلا lineKinds:v1): معدّل التحويل من فواتير الأمس، فلا نسبة استخدام ولا تجاوز.
+  const untyped88 = engine.build({ ...reports, now: now84, untyped: true,
+    invoicesReport: at84(reports.invoicesReport, localIso(23, 50, -1), d(1)), movementsReport: at84(reports.movementsReport, localIso(0, 20), d(0)),
+    balancesReport: at84(withAmeenLimit(reports.balancesReport, limits85), localIso(0, 25), d(0)) });
+  const syp88 = untyped88.customers.find((c) => c.customerGuid === G_SYP);
+  assert.equal(syp88.creditLimitSource, "ameen", "test 88: حد الأمين بمصدره");
+  assert.equal(syp88.creditUsagePercent, null, "test 88: لا نسبة استخدام بمعدّل يوم آخر بلا v1");
+  assert.equal(syp88.creditStatus, "accounting_day_mismatch", "test 88: لا حكم تجاوز");
+  const usd88 = untyped88.customers.find((c) => c.customerGuid === G_STEADY);
+  assert.equal(usd88.creditStatus, "over_limit", "test 88: حساب الدولار بحد الأمين لا يحتاج معدّلاً");
+  const aligned88 = engine.build({ ...reports, untyped: true, balancesReport: withAmeenLimit(reports.balancesReport, limits85) })
+    .customers.find((c) => c.customerGuid === G_SYP);
+  assert.equal(aligned88.creditStatus, "over_limit", "test 88: الأيام متطابقة بلا v1 = حكم حد الأمين كما كان");
+
+  // 66) عدّادات الملخص؛ وتنبيه الحد يبقى مسودة داخلية: لا مسار تيليغرام في هذه المرحلة.
+  assert.ok(rc.summary.delinquentCreditCount >= 2 && rc.summary.inactiveCreditCount >= 2 && rc.summary.lowDataCreditCount >= 1);
+  assert.equal(rc.summary.nonCustomerCreditCount, 0, "test 66: لا «ليس زبوناً» بالسلوك");
+  assert.equal(rc.summary.needsReviewCreditCount, 1, "test 66: الشذوذ يُعدّ «يحتاج مراجعة» منفصلاً");
+}
+
+console.log(`ذكاء الزبائن: 88 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
