@@ -1967,10 +1967,31 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   assert.ok(paid75.autoCredit.overdueAmount > 0, "test 75: ما بقي من المرحَّل ما زال متأخراً");
   assert.notEqual(paid75.creditStatus, "delinquent", "test 75: المرحَّل وحده لا يصنع تعثّراً");
 
+  // 76) Codex P1 — قائمتا المالك بلا أي حركة: حساب مدرج غاب عن تقرير الحركات (بلا
+  //     حركة ولا رصيد مرحَّل في النافذة) يبقى مصنَّفاً، ولا يسقط إلى حد الأمين.
+  const noMoveRows = [
+    { guid: engine.CONFIG.autoCredit.excludedAccountGuids[1], name: "مستبعد بلا حركة", status: "non_customer", credit: "not_customer" },
+    { guid: engine.CONFIG.autoCredit.reviewAccountGuids[0], name: "مختلط بلا حركة", status: "needs_review", credit: "needs_review" }
+  ];
+  const noMoveBalances = { ...reports.balancesReport, items: [...reports.balancesReport.items,
+    ...noMoveRows.map((a) => ({ ...reports.balancesReport.items[0], key: engine.normalizeName(a.name), name: a.name, balance: 3000,
+      balanceAccountCcy: 3000, creditLimit: 5000, customerGuid: a.guid, customerAccountGuid: a.guid }))] };
+  for (const [label, movementsReport] of [["دفتر بلا هذه الحسابات", reports.movementsReport], ["بلا تقرير حركات إطلاقاً", null]]) {
+    const built = engine.build({ ...reports, balancesReport: noMoveBalances, movementsReport });
+    for (const a of noMoveRows) {
+      const c = built.customers.find((entry) => entry.customerGuid === a.guid);
+      assert.ok(c, `test 76: السجل موجود (${a.name})`);
+      assert.equal(c.autoCredit?.status, a.status, `test 76 (${label}): ${a.name} يبقى مصنَّفاً`);
+      assert.equal(c.creditStatus, a.credit, `test 76 (${label}): ${a.name}`);
+      assert.equal(c.creditLimit, null, `test 76 (${label}): لا حد`);
+      assert.notEqual(c.creditLimitSource, "ameen", `test 76 (${label}): لا احتياط لحد الأمين`);
+    }
+  }
+
   // 66) عدّادات الملخص؛ وتنبيه الحد يبقى مسودة داخلية: لا مسار تيليغرام في هذه المرحلة.
   assert.ok(rc.summary.delinquentCreditCount >= 2 && rc.summary.inactiveCreditCount >= 2 && rc.summary.lowDataCreditCount >= 1);
   assert.equal(rc.summary.nonCustomerCreditCount, 0, "test 66: لا «ليس زبوناً» بالسلوك");
   assert.equal(rc.summary.needsReviewCreditCount, 1, "test 66: الشذوذ يُعدّ «يحتاج مراجعة» منفصلاً");
 }
 
-console.log(`ذكاء الزبائن: 75 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
+console.log(`ذكاء الزبائن: 76 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);

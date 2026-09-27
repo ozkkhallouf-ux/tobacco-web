@@ -1300,17 +1300,13 @@
     }
     const excludedGuids = new Set(autoConfig.excludedAccountGuids.map(normalizeGuid));
     const reviewGuids = new Set(autoConfig.reviewAccountGuids.map(normalizeGuid));
-    const nonCustomerByGuid = new Map();
-    const needsReviewByGuid = new Map();
+    // قائمتا المالك تُبنيان من المعرّفات مباشرة لا من الدفتر: حساب مدرج بلا أي حركة
+    // في نافذة التقرير (فيغيب عن تقرير الحركات) يبقى مصنَّفاً ولا يسقط إلى حد الأمين.
+    const nonCustomerByGuid = new Map([...excludedGuids].map((guid) => [guid, "حساب أكّد المالك أنه ليس زبون مبيعات: لا حد ائتمان."]));
+    const needsReviewByGuid = new Map([...reviewGuids].filter((guid) => !excludedGuids.has(guid)).map((guid) => [guid,
+      { kind: "explicit", reason: "حساب مختلط (مورد وزبون): حركته تحوي مشتريات ومدفوعات مورد لا تُفصل بأمان من المصدر الحالي." }]));
     for (const [guid, facts] of factsByGuid) {
-      if (excludedGuids.has(guid)) {
-        nonCustomerByGuid.set(guid, "حساب أكّد المالك أنه ليس زبون مبيعات: لا حد ائتمان.");
-        continue;
-      }
-      if (reviewGuids.has(guid)) {
-        needsReviewByGuid.set(guid, { kind: "explicit", reason: "حساب مختلط (مورد وزبون): حركته تحوي مشتريات ومدفوعات مورد لا تُفصل بأمان من المصدر الحالي." });
-        continue;
-      }
+      if (nonCustomerByGuid.has(guid) || needsReviewByGuid.has(guid)) continue;
       if (!invoicesProveSales || facts.truncated || !(facts.sales60 > 0) || truncatedGuids.has(guid)) continue;
       const invoiced = invoicedSalesByGuid.get(guid) || 0;
       // فرق دون حد الأهمية (بقايا وتسويات صغيرة) لا يشغّل المراجعة.
@@ -1481,7 +1477,12 @@
       const staleCreditSource = ownerListed ? null
         : sourcesFreshness.movements.stale ? "movements"
           : sourcesFreshness.balances.stale ? "balances" : null;
-      if (!isSupplierRecord && record.customerGuid && ledger.byGuid.size > 0 && staleCreditSource) {
+      if (!isSupplierRecord && record.customerGuid && ownerListed) {
+        // التصنيف من القائمة وحدها: لا يحتاج دفتراً ولا حركة ولا بيانات حديثة.
+        auto = nonCustomerByGuid.has(record.customerGuid)
+          ? { status: "non_customer", limitBase: null, notes: [nonCustomerByGuid.get(record.customerGuid)] }
+          : { status: "needs_review", limitBase: null, notes: [needsReviewByGuid.get(record.customerGuid).reason] };
+      } else if (!isSupplierRecord && record.customerGuid && ledger.byGuid.size > 0 && staleCreditSource) {
         // دفتر حركات أو تقرير أرصدة متوقف المزامنة: لا حد آلي ولا حكم تعثّر من بيانات قديمة.
         const review = needsReviewByGuid.get(record.customerGuid) || null;
         auto = review
