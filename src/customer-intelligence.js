@@ -1123,6 +1123,20 @@
       // لا استخدام ولا تجاوز ولا تعثّر من رصيد قديم.
       return { ...base, currentBalance: round(balance, 3), balanceDisplay: round(balanceDisplay, 3), balanceCurrency, creditLimitSource: autoUsable ? base.creditLimitSource : "stale", creditUsagePercent: null, creditStatus: "stale_balance" };
     }
+    if (currency !== CONFIG.baseCurrency && rate === null && !confirmedStatus) {
+      // قرار المالك (Codex P1): حساب بعملة غير الأساس بلا أي معدّل في لقطة الفواتير — رصيده بعملته،
+      // بلا حد آلي ولا نسبة استخدام ولا حكم تجاوز حتى يتوفر معدّل. حد الأمين يُعرض بعملة الأساس المخزَّن بها.
+      const nativeBalance = numberOrNull(balanceRow.balanceAccountCcy);
+      return {
+        ...base,
+        ...(creditLimitSource === "ameen" ? {} : { creditLimit: null, creditLimitDisplay: null, creditLimitSource: "missing_rate" }),
+        currentBalance: round(balance, 3),
+        balanceDisplay: round(nativeBalance ?? balance, 3),
+        balanceCurrency: nativeBalance !== null ? currency : CONFIG.baseCurrency,
+        creditUsagePercent: null,
+        creditStatus: "missing_rate"
+      };
+    }
     if ((dayMismatch || invoicesStale) && foreign && creditLimitSource === "ameen" && !confirmedStatus) {
       // قرار المالك: معدّل تحويل حد الأمين لعملة الحساب من الفواتير نفسها، فمع لقطة فواتير قديمة
       // أو على يوم آخر قد يكون قديماً — الحد يُعرض بمصدره، بلا نسبة استخدام ولا حكم تجاوز.
@@ -1454,7 +1468,9 @@
       // حساب ليرة بلا فواتير بعملته: أحدث معدّل لأي عملة غير الأساس (عملة واحدة حالياً).
       const fallback = [...latestRateByCurrency.entries()].sort((a, b) => b[1].day - a[1].day)[0];
       if (fallback) return { currency: fallback[0], rate: fallback[1].rate, rateBasis: "portfolio_latest_invoice" };
-      return { currency: CONFIG.baseCurrency, rate: null, rateBasis: "missing" };
+      // لا معدّل في اللقطة كلها: تبقى عملة الحساب المعلنة (لا يُعامَل كحساب دولار برصيد
+      // فيه فروقات صرف)، والمعدّل null يجعل الحد والاستخدام غير متاحين في resolveCredit.
+      return { currency: String(balanceRow.accountCurrency || "").trim() || "عملة الحساب", rate: null, rateBasis: "missing" };
     }
 
     // ── نسب صفوف الفواتير إلى هوية ──────────────────────────────────────────
@@ -1939,6 +1955,7 @@
       else if (draft.credit.creditStatus === "near_limit") reasons.push(`الرصيد بلغ ${draft.credit.creditUsagePercent}% من حد الائتمان.`);
       else if (draft.credit.creditStatus === "unknown_limit") reasons.push("عليه رصيد مدين بلا حد ائتمان محدد.");
       else if (draft.credit.creditStatus === "awaiting_typed_source") reasons.push(UNTYPED_LEDGER_NOTE);
+      else if (draft.credit.creditStatus === "missing_rate") reasons.push("حساب بعملة غير الدولار ولا يوجد سعر صرف لعملته في لقطة الفواتير: الرصيد بعملته، بلا حد آلي ولا نسبة استخدام ولا حكم تجاوز حتى يتوفر سعر.");
       else if (draft.credit.creditLimitSource === "ameen" && ["accounting_day_mismatch", "stale_invoices"].includes(draft.credit.creditStatus)) reasons.push("حد الأمين محفوظ بالدولار، ومعدّل تحويله لعملة الحساب من فواتير غير حديثة أو من يوم محاسبي آخر: لا نسبة استخدام ولا حكم تجاوز حتى تتحدّث الفواتير.");
       else if (draft.credit.creditStatus === "accounting_day_mismatch") reasons.push(ACCOUNTING_DAY_NOTE);
       else if (draft.credit.creditStatus === "stale_invoices") reasons.push("تقرير الفواتير غير حديث: حد الائتمان الآلي غير متاح، ولا نسبة استخدام ولا تجاوز ولا تعثّر ولا «غير نشط» من نافذة فواتير قديمة.");

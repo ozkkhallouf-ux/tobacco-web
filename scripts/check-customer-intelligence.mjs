@@ -2423,10 +2423,25 @@ if (!process.env.OZK_CI_TZ_CHILD) {
     assert.equal(usd85.creditStatus, "over_limit", `test 85 (${label}): حساب الدولار بحد الأمين يبقى حكمه`);
   }
 
+  // 86) Codex P1 / قرار المالك — حساب بعملة غير الأساس بلا أي معدّل في لقطة الفواتير كلها: لا
+  //     يُعامَل كحساب دولار برصيد فيه فروقات صرف. الرصيد بعملته، بلا حد آلي ولا استخدام ولا تجاوز.
+  const noRateInvoices = { ...reports.invoicesReport, items: reports.invoicesReport.items.map((group) => ({
+    ...group, invoices: group.invoices.map(({ currency, currencyVal, ...rest }) => rest) })) };
+  const rc86 = engine.build({ ...reports, invoicesReport: noRateInvoices });
+  const syp86 = rc86.customers.find((c) => c.customerGuid === G_SYP);
+  assert.equal(syp86.creditStatus, "missing_rate", "test 86: لا حكم بلا معدّل");
+  assert.equal(syp86.creditUsagePercent, null, "test 86: لا نسبة استخدام بلا معدّل");
+  assert.equal(syp86.creditLimit, null, "test 86: لا حد آلي بعملة الأساس لحساب ليرة");
+  assert.equal(syp86.creditLimitSource, "missing_rate");
+  assert.equal(syp86.balanceDisplay, 9800000, "test 86: الرصيد بعملة الحساب لا بالدولار المشوّه");
+  assert.notEqual(syp86.balanceCurrency, "USD", "test 86: عملة الرصيد عملة الحساب المعلنة");
+  assert.ok(syp86.explanation.some((reason) => reason.includes("سعر صرف")), "test 86: السبب ظاهر");
+  assert.equal(rc86.customers.find((c) => c.customerGuid === G_STEADY).creditStatus, row(G_STEADY).creditStatus, "test 86: حساب الدولار لا يتأثر");
+
   // 66) عدّادات الملخص؛ وتنبيه الحد يبقى مسودة داخلية: لا مسار تيليغرام في هذه المرحلة.
   assert.ok(rc.summary.delinquentCreditCount >= 2 && rc.summary.inactiveCreditCount >= 2 && rc.summary.lowDataCreditCount >= 1);
   assert.equal(rc.summary.nonCustomerCreditCount, 0, "test 66: لا «ليس زبوناً» بالسلوك");
   assert.equal(rc.summary.needsReviewCreditCount, 1, "test 66: الشذوذ يُعدّ «يحتاج مراجعة» منفصلاً");
 }
 
-console.log(`ذكاء الزبائن: 85 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
+console.log(`ذكاء الزبائن: 86 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
