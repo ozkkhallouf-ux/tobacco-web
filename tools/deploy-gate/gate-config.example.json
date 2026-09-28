@@ -1,0 +1,131 @@
+{
+  "_comment": "Reference only. The authoritative copy lives in C:\\ProgramData\\OZK-TOBACCO\\DeployGate\\gate-config.json (writable by Administrators/SYSTEM only). A merge to main never changes the installed copy.",
+  "expectedHost": "OZK2026",
+  "repoPath": "C:\\Users\\LOQ\\Documents\\OZK-TOBACCO\\tobacco-web",
+  "gateDir": "C:\\ProgramData\\OZK-TOBACCO\\DeployGate",
+  "githubRepo": "ozkkhallouf-ux/tobacco-web",
+  "windowsBranch": "windows-production",
+  "mainBranch": "main",
+  "deploymentEnvironment": "windows-production",
+  "deploymentCreator": "github-actions[bot]",
+  "requiredMainWorkflows": [
+    "Deploy TOBACCO Web",
+    "دخان ما بعد النشر"
+  ],
+  "requiredPrChecks": [
+    "check",
+    "validate",
+    "critical-journeys",
+    "توافق Windows PowerShell 5.1",
+    "Codex Review Gate"
+  ],
+  "drainTimeoutSeconds": 180,
+  "flagTtlMinutes": 15,
+  "pauseTasks": [
+    "TOBACCO Ameen Sync",
+    "TOBACCO Customer Movements Push",
+    "TOBACCO Customer Invoice Watcher",
+    "TOBACCO Invoice Series Push",
+    "TOBACCO Item Costs Push",
+    "TOBACCO Item Details Push",
+    "TOBACCO Item Numbers Pull",
+    "TOBACCO Ameen Item Snapshot Refresh",
+    "TOBACCO Approved Prices Pull",
+    "TOBACCO Purchase Invoices Pull",
+    "TOBACCO Sales Line Items Push",
+    "TOBACCO Expense Entries Push",
+    "TOBACCO Ameen Warehouse Reports",
+    "TOBACCO Khalil Audit Sync",
+    "TOBACCO Sync Watchdog",
+    "OZK Ameen Full Backup"
+  ],
+  "writerScripts": [
+    "tools/sync-approved-prices-to-ameen.ps1",
+    "tools/apply-approved-prices-to-ameen.ps1",
+    "tools/pull-approved-prices.ps1",
+    "tools/verify-prices.ps1",
+    "tools/publish-price-sync-status.ps1",
+    "tools/send-telegram-notification.ps1",
+    "tools/sync-purchase-invoices-to-ameen.ps1",
+    "tools/setup-ameen-retail-pricelist.ps1",
+    "tools/setup-shared-sql.ps1"
+  ],
+  "writeScan": {
+    "_comment": "Static detection of Ameen write capability in changed files (case-insensitive regexes, shared by the release workflow and the gate). A defence in depth only: every script uses a SQL login that can write, so the real control is a read-only login for readers (separate owner decision).",
+    "include": "^(tools|scripts)/.+\\.(ps1|psm1|sql|js|mjs|cjs|bat|cmd|vbs|py)$",
+    "exclude": [
+      "^tools/tests/",
+      "/__tests__/",
+      "^scripts/check[^/]*\\.mjs$"
+    ],
+    "patterns": [
+      "AMEEN_SQL_WRITE_CONNECTION_STRING",
+      "WRITE_CONNECTION",
+      "\\binsert\\s+into\\b",
+      "\\bupdate\\s+[\\w.\\[\\]]+\\s+set\\b",
+      "\\bdelete\\s+from\\b",
+      "\\bmerge\\s+into\\b",
+      "\\btruncate\\s+table\\b",
+      "\\b(drop|alter|create)\\s+(table|view|procedure|proc|function|trigger|index)\\b",
+      "\\bexec(ute)?\\s+(sp_|dbo\\.|\\[dbo\\])",
+      "ExecuteNonQuery",
+      "SqlBulkCopy",
+      "\\bbegin\\s+tran",
+      "Invoke-Sqlcmd",
+      "\\bsqlcmd(\\.exe)?\\b"
+    ]
+  },
+  "longRunningComponents": [
+    {
+      "name": "TOBACCO Ameen Read Worker",
+      "runner": "Scheduled Task (LOQ), one long PowerShell process",
+      "files": [
+        "tools/ameen-read-worker.ps1",
+        "tools/ameen-read-gateway.ps1",
+        "tools/ameen-stock-query.sql",
+        "tools/ameen-customer-balances-query.sql"
+      ],
+      "untrackedFiles": []
+    },
+    {
+      "name": "OZK-AmeenAutoPrint",
+      "runner": "Scheduled Task (ONSTART) -> tools/ameen-autoprint/run-watcher.bat -> node watcher.js",
+      "files": [
+        "tools/ameen-autoprint/watcher.js",
+        "tools/ameen-autoprint/config.js",
+        "tools/ameen-autoprint/invoice-html.js",
+        "tools/ameen-autoprint/ameen-sales-query.sql",
+        "tools/ameen-autoprint/ameen-customer-balance-query.sql",
+        "tools/ameen-autoprint/package.json",
+        "tools/ameen-autoprint/start.bat"
+      ],
+      "untrackedFiles": [
+        "tools/ameen-autoprint/run-watcher.bat"
+      ]
+    },
+    {
+      "name": "OZK-Tobacco-Server (scripts/serve.mjs)",
+      "runner": "Startup item OZK-Tobacco-Server.vbs (LOQ logon) -> node scripts/serve.mjs",
+      "files": [
+        "scripts/serve.mjs"
+      ],
+      "untrackedFiles": []
+    }
+  ],
+  "mainWorktree": {
+    "_comment": "Dedicated main checkout ONLY for tasks that must run on main (Codex P1 #5). Never a path to update operational Windows scripts: the gate never touches it and run-repo-task.ps1 refuses scripts outside repoPath. It must be a separate worktree/clone on main with the official remote before the operational repo is switched to windows-production.",
+    "path": "C:\\Users\\LOQ\\Documents\\OZK-TOBACCO\\tobacco-web-main",
+    "branch": "main",
+    "remote": "https://github.com/ozkkhallouf-ux/tobacco-web.git",
+    "allowedScripts": [
+      "tools/auto-sync-price-lists.ps1"
+    ]
+  },
+  "mainDependentTasks": [
+    {
+      "task": "OZK-PriceListSync",
+      "script": "tools/auto-sync-price-lists.ps1",
+      "reason": "commits price-data.json and pushes to main; exits unless its own worktree is on main"
+    }
+  ]
+}

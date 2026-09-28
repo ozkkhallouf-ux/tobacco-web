@@ -124,6 +124,27 @@ jobs:
         shell: powershell
         run: .\tools\tests\Test-DailyGitPullStaleLock.ps1
 
+      # بوابة نشر Windows (2026-09-28): الدمج إلى main لا يصل تلقائياً إلى
+      # OZK2026؛ الجهاز يتقدّم Fast-Forward إلى windows-production بعد موافقة
+      # المالك وCI أخضر على نفس الـSHA. الاختبار يبني مستودعات git حقيقية مؤقتة
+      # ويثبت كل مسار رفض (بلا موافقة، CI أحمر، شجرة متسخة، قفل AI، ليس على main،
+      # ليس Fast-Forward، سكربت كتابة بلا موافقة) والرجوع والتثبيت، على 5.1 تحديداً.
+      - name: Windows deploy gate - behavioural regression test
+        shell: powershell
+        run: .\tools\tests\Test-DeployGate.ps1
+
+      # المشغّل الموحّد للمهام: تخطٍّ أثناء النشر، عمر عَلَم النشر (القارئ يعود
+      # والكاتب يبقى متوقفاً)، وبصمات سكربتات الكتابة إلى الأمين.
+      - name: Windows deploy gate - task launcher regression test
+        shell: powershell
+        run: .\tools\tests\Test-RunRepoTask.ps1
+
+      # Codex P1 #5: مهمة نشرات الأسعار تحتاج main؛ تحويل المستودع التشغيلي إلى
+      # windows-production محجوب حتى تعمل من worktree مخصّص صحيح (فرع/remote/مسار).
+      - name: Windows deploy gate - migration preflight regression test
+        shell: powershell
+        run: .\tools\tests\Test-MigrationPreflight.ps1
+
       # عطل إنتاجي حيّ (2026-08-29 → 2026-09-05): auto-sync-price-lists كان
       # ينادي git push بلا فحص رمز خروج ويطبع سطر نجاح بلا شرط. وgit يكتب
       # نتيجة الرفع على stderr حتى عند النجاح، فمع ErrorActionPreference=Stop
