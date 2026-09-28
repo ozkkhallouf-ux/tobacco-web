@@ -182,6 +182,37 @@ try {
     Assert-True (-not $r.ok -and (Get-Verdict $r 'TOBACCO Ameen Sync').verdict -eq 'BLOCK') 'a disabled price-list task does not open the main worktree as a back door'
     $script:States = @{}
 
+    Write-Host '== Owner acceptance matrix (task explicitly Enabled = Ready)'
+    $script:States = @{ 'OZK-PriceListSync' = 'Ready' }
+    $matrix = @(
+        @{ label = 'Enabled on the operational windows-production repo => BLOCK'; script = $inRepo; ok = $false },
+        @{ label = 'Enabled on a detached legacy checkout => BLOCK'; script = $legacyScript; ok = $false },
+        @{ label = 'Enabled on an unconfigured checkout => BLOCK'; script = ((Join-Path $other 'tools') + $sep + 'auto-sync-price-lists.ps1'); ok = $false },
+        @{ label = 'Enabled on the approved independent main checkout => PASS'; script = $inMain; ok = $true }
+    )
+    foreach ($m in $matrix) {
+        $script:Tasks = @{ 'OZK-PriceListSync' = ($ps + ' -File "' + $m.script + '"') }
+        $r = Invoke-MigrationPreflight $config
+        Assert-True ($r.ok -eq $m.ok) $m.label
+    }
+    $script:Tasks = @{ 'OZK-PriceListSync' = ($ps + ' -File "' + $inMain + '"') }
+    Invoke-TestGit $mainWt @('checkout', '-q', '-b', 'feature/matrix') | Out-Null
+    $r = Invoke-MigrationPreflight $config
+    Assert-True (-not $r.ok) 'Enabled on the approved path but wrong branch => BLOCK'
+    Invoke-TestGit $mainWt @('checkout', '-q', 'main') | Out-Null
+    $savedRemote = Invoke-TestGit $repo @('remote', 'get-url', 'origin')
+    Invoke-TestGit $repo @('remote', 'set-url', 'origin', 'https://github.com/fhwvtqdc2q-svg/tobacco-web.git') | Out-Null
+    $r = Invoke-MigrationPreflight $config
+    Assert-True (-not $r.ok) 'Enabled on the approved path but wrong remote (fork) => BLOCK'
+    Invoke-TestGit $repo @('remote', 'set-url', 'origin', $savedRemote) | Out-Null
+    $script:States = @{ 'OZK-PriceListSync' = 'Disabled' }
+    $script:Tasks = @{ 'OZK-PriceListSync' = ($ps + ' -File "' + $inRepo + '"') }
+    $before = (Invoke-MigrationPreflight $config).ok
+    $script:States = @{ 'OZK-PriceListSync' = 'Ready' }
+    $after = (Invoke-MigrationPreflight $config).ok
+    Assert-True ($before -and -not $after) 'Disabled => allowed; the same task later Enabled without the approved path => fail closed'
+    $script:States = @{}
+
     Write-Host '== price-list sync contract unchanged'
     $sync = [System.IO.File]::ReadAllText((Join-Path (Join-Path $repoRoot 'tools') 'auto-sync-price-lists.ps1'))
     Assert-True ($sync -match 'rev-parse --abbrev-ref HEAD' -and $sync -match '-ne "main"') 'auto-sync-price-lists.ps1 still refuses to run off main (guard not weakened)'
