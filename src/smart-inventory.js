@@ -677,7 +677,10 @@
       if (state.finishing) return;
       button.dataset.smartSession ? openSession(button.dataset.smartSession, session) : startOrJoin(button.dataset.smartWarehouse, session);
     }));
-    root.querySelector("[data-smart-back]")?.addEventListener("click", () => { if (state.finishing) return; state.session = null; state.ownerReport = null; state.editingItemId = ""; state.loadedForRole = ""; load(session, true); });
+    root.querySelector("[data-smart-back]")?.addEventListener("click", () => {
+      if (state.finishing) return;
+      state.session = null; state.ownerReport = null; state.editingItemId = ""; state.loadedForRole = ""; load(session, true);
+    });
     root.querySelector("[data-smart-owner-back]")?.addEventListener("click", () => { state.session = null; state.ownerReport = null; state.loadedForRole = ""; load(session, true); });
     const search = root.querySelector("[data-smart-search]");
     if (search) {
