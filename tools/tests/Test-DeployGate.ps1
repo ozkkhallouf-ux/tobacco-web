@@ -58,7 +58,7 @@ $script:Alerts = New-Object System.Collections.ArrayList
 function Get-HostName { return 'TESTHOST' }
 # منطق الفحص نفسه مُختبَر في Test-MigrationPreflight.ps1؛ هنا نتيجته فقط.
 $script:Preflight = [pscustomobject]@{ ok = $true; results = @([pscustomobject]@{ task = 'OZK-PriceListSync'; verdict = 'PASS'; reason = 'stub' }) }
-function Invoke-MigrationPreflight($Config) { return $script:Preflight }
+function Invoke-InstallPreflight($Config) { return $script:Preflight }
 function Send-GateAlert([string]$Message, [string]$DedupeKey) { [void]$script:Alerts.Add($Message) }
 function Get-RunningTaskNames([string[]]$TaskNames) { return @($script:Running) }
 function Start-GateSleep([int]$Seconds) { Start-Sleep -Milliseconds 50 }

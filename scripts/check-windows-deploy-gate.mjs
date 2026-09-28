@@ -134,16 +134,29 @@ const pre = read("tools/deploy-gate/migration-preflight.ps1");
 assert.match(pre, /task definition not visible/, "مهمة غير مرئية ⇒ حجب");
 assert.match(pre, /outside its allow-list/, "لا باب خلفي عبر worktree الـmain");
 assert.match(pre, /main worktree must not be the operational repository/);
-assert.match(gateSrc, /\$pre = Invoke-MigrationPreflight \$Config[\s\S]{0,400}migration preflight blocked/, "Initialize يرفض ما لم ينجح الفحص");
+assert.match(gateSrc, /\$pre = Invoke-InstallPreflight \$Config[\s\S]{0,400}migration preflight blocked/, "Initialize يرفض ما لم ينجح الفحص");
 assert.match(checkWfRaw(), /tools\\tests\\Test-MigrationPreflight\.ps1/);
 ok("مزامنة النشرات تبقى على main عبر worktree مخصّص، والتحويل محجوب حتى ينجح الفحص (Codex P1 #5)");
 
-// حدود الثقة (تصميم التركيب القادم): ملفات الثقة لا يكتبها إلا حساب البوابة (SYSTEM)،
-// والمشغّل الذي يعمل بحسابات المهام لا يكتب في gateDir أبداً.
+// حدود الثقة (تصميم التركيب القادم، Codex P1 على #285): هوية بوابة مخصّصة لا تشغّل كود أي
+// مستودع؛ SYSTEM/OZKSync/LOQ/Administrators مرفوضة، وملفات الثقة لا يكتبها غيرها.
 const trust = cfg0.trust;
-assert.equal(trust.gateAccount, "SYSTEM");
-assert.deepEqual(trust.gateDirWriters, ["NT AUTHORITY\\SYSTEM", "BUILTIN\\Administrators"]);
-assert.ok(!trust.gateDirWriters.some((w) => /ozksync|loq/i.test(w)), "حسابات المهام لا تكتب في gateDir");
+const idKey = (s) => String(s).toLowerCase().replace(/^.*\\/, "").replace(/^localsystem$|^s-1-5-18$/, "system").replace(/^s-1-5-32-544$/, "administrators");
+assert.ok(trust.gateAccount && !["system", "ozksync", "loq", "administrators", "local service", "network service"].includes(idKey(trust.gateAccount)), "هوية البوابة مخصّصة لا SYSTEM/OZKSync/LOQ/Administrators");
+assert.deepEqual(trust.gateDirWriters, [trust.gateAccount], "ملفات الثقة تكتبها الهوية المخصّصة وحدها");
+for (const f of ["system", "ozksync", "loq", "administrators"]) assert.ok(trust.forbiddenGateIdentities.map(idKey).includes(f), `هوية مرفوضة مسجّلة: ${f}`);
+assert.ok(!trust.gateDirWriters.some((w) => ["system", "ozksync", "loq", "administrators"].includes(idKey(w))), "لا هوية عبء عمل ولا Administrators بين كتّاب ملفات الثقة");
+assert.match(read("tools/ameen-autoprint/install-service.bat"), /\/ru SYSTEM/, "سبب رفض SYSTEM ما زال قائماً: AutoPrint من المستودع بحساب SYSTEM");
+const preSrc = read("tools/deploy-gate/migration-preflight.ps1");
+for (const needle of ["function Invoke-GateIdentityPreflight", "forbidden gate identity", "dedicated gate identity is reused", "identity not verifiable", "writable by the dedicated gate identity only", "which may write the gate trust files", "function Invoke-InstallPreflight"]) assert.ok(preSrc.includes(needle), `حارس الهوية: ${needle}`);
+assert.match(gateSrc, /\$pre = Invoke-InstallPreflight \$Config/, "Initialize يشغّل فحص التثبيت الكامل (الهوية + نشرات الأسعار)");
+assert.match(checkWfRaw(), /tools\\tests\\Test-GateIdentityPreflight\.ps1/);
+// لا توصية بـSYSTEM هويةً للبوابة في أي مرجع إنتاجي.
+for (const f of ["docs/ai/topics/windows-deploy-gate.md", "tools/deploy-gate/README.md", "tools/deploy-gate/gate-config.example.json", "tools/deploy-gate/deploy-gate.ps1"]) {
+  const src = read(f);
+  assert.doesNotMatch(src, /"gateAccount":\s*"(SYSTEM|NT AUTHORITY\\\\SYSTEM|OZKSync|LOQ)"/i, `${f}: gateAccount غير مخصّص`);
+  assert.doesNotMatch(src, /Windows Deploy Gate[^\n]{0,40}\((SYSTEM)\)|تعمل بحساب \*\*SYSTEM\*\*|كتابته لـ \*\*SYSTEM وAdministrators فقط\*\*|Administrators\/SYSTEM فقط/, `${f} يوصي بـSYSTEM/Administrators حاجزاً`);
+}
 for (const f of ["state.json", "audit.jsonl", "writer-allowlist.json", "deploying.flag", "gate-config.json", "deploy-gate.ps1", "run-repo-task.ps1"]) assert.ok(trust.trustFiles.includes(f), `ملف ثقة: ${f}`);
 assert.ok(cfg0.logDir && !cfg0.logDir.toLowerCase().startsWith(cfg0.gateDir.toLowerCase() + "\\") && cfg0.logDir.toLowerCase() !== cfg0.gateDir.toLowerCase(), "logDir خارج gateDir");
 const launcherCode = read("tools/deploy-gate/run-repo-task.ps1").split("\n").filter((l) => !l.trim().startsWith("#")).join("\n");
@@ -161,7 +174,8 @@ const notifySrc = read("tools/deploy-gate/notify.ps1");
 assert.doesNotMatch(notifySrc, /WriteAllText|AppendAllText|Set-Content|Out-File|Remove-Item/, "notify.ps1 قراءة فقط");
 const doc = read("docs/ai/topics/windows-deploy-gate.md");
 assert.match(doc, /حدود الثقة لهوية البوابة/);
-assert.match(doc, /SYSTEM وAdministrators فقط/);
+assert.match(doc, /Dedicated Gate Identity/);
+assert.match(doc, /ليست حماية من مدير بشري خبيث/);
 assert.match(doc, /24 ساعة كاملة/);
 assert.match(doc, /88ae841c6696bef2cbe75579039b215396972a6e/);
 assert.match(doc, /مصدره غير متحقَّق/);
@@ -181,7 +195,7 @@ assert.match(doc, /20260928145121/);
 assert.match(doc, /ACTION TAKEN: NONE/);
 assert.match(doc, /خط الأساس الحالي على الجهاز `88ae841`/);
 assert.doesNotMatch(doc, /متجمّد على `1812c08`/, "الحالة الحالية لا تدّعي 1812c08");
-ok("حدود الثقة: البوابة (SYSTEM) وحدها تكتب ملفات الثقة، والمشغّل يكتب سجله في logDir فقط؛ والتوثيق يسجّل خط الأساس وحماية الفرع وDryRun 24 ساعة");
+ok("حدود الثقة: هوية بوابة مخصّصة وحدها تكتب ملفات الثقة (SYSTEM/OZKSync/LOQ/Administrators مرفوضة)، والمشغّل يكتب سجله في logDir فقط؛ والتوثيق يسجّل خط الأساس وحماية الفرع وDryRun 24 ساعة");
 
 // 2) الـworkflow
 const wf = read(".github/workflows/windows-release.yml").split("\n").filter((l) => !l.trim().startsWith("#")).join("\n");
@@ -240,7 +254,7 @@ ok(`writerScripts تغطي كل مسار كتابة الأسعار (${seen.size}
 const checkWf = read(".github/workflows/check.yml");
 assert.match(checkWf, /tools\\tests\\Test-DeployGate\.ps1/);
 assert.match(checkWf, /tools\\tests\\Test-RunRepoTask\.ps1/);
-for (const f of ["tools/deploy-gate/deploy-gate.ps1", "tools/deploy-gate/run-repo-task.ps1", "tools/deploy-gate/notify.ps1", "tools/deploy-gate/migration-preflight.ps1", "tools/tests/Test-DeployGate.ps1", "tools/tests/Test-RunRepoTask.ps1", "tools/tests/Test-MigrationPreflight.ps1"]) {
+for (const f of ["tools/deploy-gate/deploy-gate.ps1", "tools/deploy-gate/run-repo-task.ps1", "tools/deploy-gate/notify.ps1", "tools/deploy-gate/migration-preflight.ps1", "tools/tests/Test-DeployGate.ps1", "tools/tests/Test-RunRepoTask.ps1", "tools/tests/Test-MigrationPreflight.ps1", "tools/tests/Test-GateIdentityPreflight.ps1"]) {
   const bytes = readFileSync(path.join(root, f));
   assert.ok(bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf, `${f} يحمل BOM (5.1 يقرأ غيره ANSI)`);
 }

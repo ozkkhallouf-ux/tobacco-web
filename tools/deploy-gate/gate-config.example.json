@@ -1,5 +1,5 @@
 {
-  "_comment": "Reference only. The authoritative copy lives in C:\\ProgramData\\OZK-TOBACCO\\DeployGate\\gate-config.json (writable by Administrators/SYSTEM only). A merge to main never changes the installed copy.",
+  "_comment": "Reference only. The authoritative copy lives in C:\\ProgramData\\OZK-TOBACCO\\DeployGate\\gate-config.json, writable only by the dedicated gate identity (trust.gateAccount). A merge to main never changes the installed copy.",
   "expectedHost": "OZK2026",
   "repoPath": "C:\\Users\\LOQ\\Documents\\OZK-TOBACCO\\tobacco-web",
   "gateDir": "C:\\ProgramData\\OZK-TOBACCO\\DeployGate",
@@ -130,15 +130,33 @@
     }
   ],
   "trust": {
-    "_comment": "Future installation design only (nothing installed yet). The gate process owns the trust files; the scheduled tasks it protects must not be able to change them. Running the gate as OZKSync would let the OZKSync tasks rewrite writer-allowlist.json/state.json and silently disable the writer protection, so the gate runs as SYSTEM and gateDir is writable only by SYSTEM and Administrators. Task accounts only read gateDir and write their launcher log to logDir.",
-    "gateAccount": "SYSTEM",
-    "gateDirWriters": [
+    "_comment": "Future installation design only (nothing installed, no account created). The gate runs under a dedicated local identity that runs no code from tobacco-web or any other repository. SYSTEM, OZKSync, LOQ and Administrators are rejected: repository code already runs as SYSTEM (OZK-AmeenAutoPrint -> tools/ameen-autoprint/run-watcher.bat via install-service.bat), as LOQ (a member of Administrators) and as OZKSync, and SYSTEM/Administrators can override ACLs. The trust files are writable only by the dedicated identity; repository workload identities get read-only access. A local administrator can still technically take ownership: this separates automation trust domains so repository code cannot change the gate's trust state; it is not a defence against a malicious human administrator.",
+    "gateAccount": "OZK-DeployGate",
+    "gateTaskName": "TOBACCO Windows Deploy Gate",
+    "forbiddenGateIdentities": [
+      "SYSTEM",
+      "LocalSystem",
       "NT AUTHORITY\\SYSTEM",
-      "BUILTIN\\Administrators"
+      "S-1-5-18",
+      "OZKSync",
+      "LOQ",
+      "Administrators",
+      "BUILTIN\\Administrators",
+      "S-1-5-32-544",
+      "LOCAL SERVICE",
+      "NETWORK SERVICE"
+    ],
+    "gateDirWriters": [
+      "OZK-DeployGate"
     ],
     "gateDirReadOnlyAccounts": [
       "OZKSync",
-      "LOQ"
+      "LOQ",
+      "SYSTEM"
+    ],
+    "repositoryRoots": [
+      "C:\\Users\\LOQ\\Documents\\OZK-TOBACCO",
+      "C:\\Users\\LOQ\\.copilot\\repos"
     ],
     "trustFiles": [
       "gate-config.json",

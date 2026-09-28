@@ -34,7 +34,7 @@ function Read-LauncherJson([string]$Path) {
     return ($raw | ConvertFrom-Json)
 }
 
-# حدود الثقة: المشغّل يعمل بحسابات المهام (OZKSync/LOQ/SYSTEM) فلا يكتب أبداً في gateDir
+# حدود الثقة: المشغّل يعمل بحسابات المهام (OZKSync/LOQ/SYSTEM)، لا بهوية البوابة المخصّصة، فلا يكتب أبداً في gateDir
 # (ملفات الثقة: الحالة، البصمات، العلامة). سجله الوحيد في logDir المنفصل.
 function Write-LauncherLog([string]$LogDir, [string]$Message) {
     $line = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ' ' + $Message

@@ -145,6 +145,12 @@ jobs:
         shell: powershell
         run: .\tools\tests\Test-MigrationPreflight.ps1
 
+      # Codex P1 (#285): هوية البوابة مخصّصة؛ SYSTEM/OZKSync/LOQ/Administrators مرفوضة لأن كود
+      # المستودع يعمل بها (AutoPrint بحساب SYSTEM)، وأي إعادة استعمال للهوية أو هوية غير مقروءة = حجب.
+      - name: Windows deploy gate - gate identity preflight regression test
+        shell: powershell
+        run: .\tools\tests\Test-GateIdentityPreflight.ps1
+
       # عطل إنتاجي حيّ (2026-08-29 → 2026-09-05): auto-sync-price-lists كان
       # ينادي git push بلا فحص رمز خروج ويطبع سطر نجاح بلا شرط. وgit يكتب
       # نتيجة الرفع على stderr حتى عند النجاح، فمع ErrorActionPreference=Stop

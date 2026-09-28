@@ -38,6 +38,22 @@ function Get-PreflightTaskState([string]$TaskName) {
     return [string]$task.State
 }
 
+# جرد الهويات: كل مهمة (غير تابعة لـMicrosoft) باسمها وحسابها ونص الـAction، وكل خدمة
+# بحسابها ومسار تنفيذها. هوية غير مقروءة تبقى فارغة ⇒ يحكم الفحص عليها fail-closed.
+function Get-PreflightTaskInventory {
+    $out = @()
+    foreach ($t in @(Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.TaskPath -notlike '\Microsoft\*' })) {
+        $id = [string]$t.Principal.UserId
+        if (-not $id) { $id = [string]$t.Principal.GroupId }
+        $out += [pscustomobject]@{ name = [string]$t.TaskName; identity = $id; action = (@($t.Actions | ForEach-Object { [string]$_.Execute + ' ' + [string]$_.Arguments }) -join "`n") }
+    }
+    return $out
+}
+
+function Get-PreflightServiceInventory {
+    return @(Get-CimInstance Win32_Service -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject]@{ name = [string]$_.Name; identity = [string]$_.StartName; action = [string]$_.PathName } })
+}
+
 function Read-PreflightWrapperText([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path)) { return '' }
     return [System.IO.File]::ReadAllText($Path)
@@ -154,10 +170,93 @@ function Invoke-MigrationPreflight($Config) {
     return [pscustomobject]@{ ok = ($blocked.Count -eq 0); results = $results }
 }
 
+# ------------------------------------------------------------
+# هوية البوابة (Codex P1 على #285): حساب مخصّص لا يشغّل أي كود من أي مستودع.
+# ------------------------------------------------------------
+# مفتاح موحّد للهوية: بلا بادئة الجهاز/المجال، وأسماء SYSTEM وAdministrators بصيغة واحدة.
+function ConvertTo-IdentityKey([string]$Identity) {
+    $k = ([string]$Identity).Trim().ToLowerInvariant()
+    if (-not $k) { return '' }
+    if ($k.Contains('\')) { $k = $k.Substring($k.LastIndexOf('\') + 1) }
+    if ($k.StartsWith('.\')) { $k = $k.Substring(2) }
+    switch ($k) {
+        'localsystem' { return 'system' }
+        's-1-5-18' { return 'system' }
+        's-1-5-32-544' { return 'administrators' }
+        default { return $k }
+    }
+}
+
+# هل تشغّل هذه المهمة/الخدمة كوداً من مستودع؟ (مستوى واحد من الأغلفة)
+function Test-RepoWorkload($Config, [string]$ActionText) {
+    $roots = @(@($Config.repoPath) + @($Config.trust.repositoryRoots) | Where-Object { $_ } | ForEach-Object { ConvertTo-PreflightPath ([string]$_) })
+    $refs = @(Get-TaskScriptReferences $ActionText)
+    $refs += @([regex]::Matches([string]$ActionText, '(?:[A-Za-z]:\\|/)[^"''\r\n<>|]+?\.(exe|bat|cmd|js|mjs|ps1|vbs)\b') | ForEach-Object { $_.Value })
+    foreach ($r in $refs) {
+        $n = ConvertTo-PreflightPath $r
+        foreach ($root in $roots) { if ($n -eq $root -or $n.StartsWith($root + '\')) { return $true } }
+    }
+    return $false
+}
+
+function Invoke-GateIdentityPreflight($Config) {
+    $results = @()
+    $block = { param([string]$Subject, [string]$Reason) [pscustomobject]@{ task = $Subject; verdict = 'BLOCK'; reason = $Reason } }
+    $trust = $Config.trust
+    $gate = ConvertTo-IdentityKey ([string]$trust.gateAccount)
+    if (-not $gate) { return [pscustomobject]@{ ok = $false; results = @(& $block 'gate identity' 'no dedicated gate identity configured') } }
+    $forbidden = @(@($trust.forbiddenGateIdentities) + @('system', 'administrators', 'ozksync', 'loq') | ForEach-Object { ConvertTo-IdentityKey ([string]$_) } | Select-Object -Unique)
+    if ($forbidden -contains $gate) { $results += & $block 'gate identity' ('forbidden gate identity: ' + $trust.gateAccount + ' (repository code runs as or can override this identity)') }
+    $writers = @(@($trust.gateDirWriters) | ForEach-Object { ConvertTo-IdentityKey ([string]$_) } | Where-Object { $_ } | Select-Object -Unique)
+    if ($writers.Count -ne 1 -or $writers[0] -ne $gate) { $results += & $block 'gate trust files' ('trust files must be writable by the dedicated gate identity only; configured writers: ' + (@($trust.gateDirWriters) -join ', ')) }
+    $gateDirKey = ConvertTo-PreflightPath $Config.gateDir
+    $gateTask = [string]$trust.gateTaskName
+
+    $inventory = @()
+    try {
+        $inventory += @(Get-PreflightTaskInventory | ForEach-Object { $_ | Add-Member -NotePropertyName kind -NotePropertyValue 'task' -PassThru -Force })
+        $inventory += @(Get-PreflightServiceInventory | ForEach-Object { $_ | Add-Member -NotePropertyName kind -NotePropertyValue 'service' -PassThru -Force })
+    } catch {
+        return [pscustomobject]@{ ok = $false; results = @($results + (& $block 'inventory' ('cannot enumerate tasks/services: ' + $_.Exception.Message))) }
+    }
+    if (@($inventory | Where-Object { $_.kind -eq 'task' }).Count -eq 0) { $results += & $block 'inventory' 'no scheduled tasks visible; run the preflight as an administrator' }
+
+    foreach ($item in $inventory) {
+        $subject = $item.kind + ' ' + $item.name
+        $key = ConvertTo-IdentityKey ([string]$item.identity)
+        $isRepo = Test-RepoWorkload $Config ([string]$item.action)
+        if (-not $key) {
+            # هوية غير مقروءة: لمهمة دائماً حجب؛ لخدمة فقط إن كانت تشغّل كود مستودع.
+            if ($item.kind -eq 'task' -or $isRepo) { $results += & $block $subject 'identity not verifiable' }
+            continue
+        }
+        if ($key -eq $gate) {
+            if ($item.kind -eq 'task' -and $item.name -eq $gateTask) {
+                $outside = @(Get-TaskScriptReferences ([string]$item.action) | Where-Object { -not (ConvertTo-PreflightPath $_).StartsWith($gateDirKey + '\') })
+                if ($isRepo -or $outside.Count -gt 0) { $results += & $block $subject 'the gate task must run only the gate scripts in gateDir' }
+            } else {
+                $results += & $block $subject ('dedicated gate identity is reused by ' + $item.kind + ' ' + $item.name)
+            }
+            continue
+        }
+        if ($isRepo -and $writers -contains $key) { $results += & $block $subject ('repository workload runs as ' + $item.identity + ', which may write the gate trust files') }
+    }
+    $blocked = @($results | Where-Object { $_.verdict -ne 'PASS' })
+    if ($blocked.Count -eq 0) { $results += [pscustomobject]@{ task = 'gate identity'; verdict = 'PASS'; reason = ('dedicated identity ' + $trust.gateAccount + ' is not used by any repository workload') } }
+    return [pscustomobject]@{ ok = ($blocked.Count -eq 0); results = $results }
+}
+
+# فحص التثبيت الكامل: نشرات الأسعار (main) + هوية البوابة. يستدعيه -Mode Initialize.
+function Invoke-InstallPreflight($Config) {
+    $a = Invoke-MigrationPreflight $Config
+    $b = Invoke-GateIdentityPreflight $Config
+    return [pscustomobject]@{ ok = ($a.ok -and $b.ok); results = @(@($a.results) + @($b.results)) }
+}
+
 if ($MyInvocation.InvocationName -ne '.') {
     if ([string]::IsNullOrWhiteSpace($PreflightConfigPath)) { $PreflightConfigPath = Join-Path $PSScriptRoot 'gate-config.json' }
     $config = [System.IO.File]::ReadAllText($PreflightConfigPath) | ConvertFrom-Json
-    $report = Invoke-MigrationPreflight $config
+    $report = Invoke-InstallPreflight $config
     foreach ($r in $report.results) { Write-Host ($r.verdict + ' ' + $r.task + ': ' + $r.reason) }
     if ($report.ok) { Write-Host 'PREFLIGHT PASS'; exit 0 }
     Write-Host 'PREFLIGHT BLOCKED: do not switch the operational repository to windows-production'

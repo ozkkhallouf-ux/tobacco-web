@@ -77,13 +77,40 @@
     `deploying.flag`.
   - لو عملت بحساب OZKSync وكانت ملفاتها قابلة للكتابة له، فالمهام المحمية نفسها (وأغلبها
     OZKSync) تستطيع تعديل قائمة البصمات أو الحالة، فتُلغى حماية الكتّاب بصمت.
-- **التصميم المقترح** (مسجّل في `trust` داخل `gate-config.example.json`):
-  - مهمة «TOBACCO Windows Deploy Gate» تعمل بحساب **SYSTEM**.
-  - `C:\ProgramData\OZK-TOBACCO\DeployGate` كتابته لـ **SYSTEM وAdministrators فقط**، وOZKSync
-    وLOQ قراءة وتنفيذ.
+- **SYSTEM ليست حدود ثقة (Codex P1 على #285).** لا تصلح أيٌّ من هذه الهويات للبوابة:
+  - **SYSTEM:** كود المستودع يعمل بها اليوم. `OZK-AmeenAutoPrint` يشغّل
+    `tools/ameen-autoprint/run-watcher.bat` من المستودع بحساب SYSTEM (`install-service.bat`).
+  - **LOQ:** عضو Administrators، ويشغّل مهام من المستودع (Read Worker، Khalil Audit، وغيرها).
+  - **OZKSync:** يشغّل أغلب مهام المستودع.
+  - **Administrators:** SYSTEM وAdministrators يستطيعان تجاوز ACL أو الاستيلاء على الملفات.
+- **التصميم المقترح — Dedicated Gate Identity** (مسجّل في `trust` داخل `gate-config.example.json`):
+  - حساب محلي مخصّص (`OZK-DeployGate`، **لم يُنشأ**). وظيفته الوحيدة البوابة وحالة الثقة التي
+    تحتاجها.
+  - لا يشغّل أي كود من tobacco-web أو أي مستودع آخر: لا Ameen Read Worker، ولا AutoPrint، ولا
+    `serve.mjs`، ولا سكربتات sync/push/price.
+  - مهمة «TOBACCO Windows Deploy Gate» هي المهمة الوحيدة بهذه الهوية، ولا تشغّل إلا سكربتات
+    البوابة من `gateDir`.
+  - ملفات الثقة، وهي البوابة التنفيذية، والإعداد، والبصمات، وحالة الإصدار المعتمد، والتدقيق،
+    قابلة للكتابة **للهوية المخصّصة وحدها**، مع الحد الأدنى الضروري لنظام Windows.
+  - هويات repo workloads (OZKSync وLOQ وSYSTEM) قراءة فقط.
+  - لا يُعتمد على «Administrators فقط» كحاجز.
   - المشغّل `run-repo-task.ps1` يعمل بحسابات المهام ولا يكتب في مجلد البوابة أبداً؛ سجله
     الوحيد في `logDir` منفصل (`C:\ProgramData\OZK-TOBACCO\DeployGateLogs`).
-  - لا توسيع لصلاحيات OZKSync.
+  - لا توسيع لصلاحيات OZKSync، ولا تغيير لحسابات المهام الحالية.
+- **حدود هذه الحماية:** المدير المحلي (Local Administrator) يبقى قادراً تقنياً على تجاوز ACL
+  والاستيلاء على الملفات. الهدف فصل نطاقات ثقة الأتمتة، ومنع كود المستودع من تعديل ثقة
+  البوابة تلقائياً. ليست حماية من مدير بشري خبيث.
+- **حارس التثبيت** (`Invoke-GateIdentityPreflight` ضمن `Invoke-InstallPreflight`، ويستدعيه
+  `-Mode Initialize`) يحجب التثبيت (fail-closed) إذا:
+  - كانت هوية البوابة SYSTEM، أو OZKSync، أو LOQ، أو Administrators، أو أي صيغة لها (SID،
+    بادئة الجهاز).
+  - كانت كتابة ملفات الثقة لغير الهوية المخصّصة.
+  - استُعملت الهوية المخصّصة لأي مهمة أو خدمة أخرى.
+  - كانت مهمة البوابة تشغّل شيئاً خارج `gateDir`.
+  - كان repo workload يعمل بهوية مسموح لها بكتابة ملفات الثقة.
+  - كانت هوية مهمة غير مقروءة، أو لم تكن المهام مرئية.
+
+  على التخطيط الحالي لـOZK2026 يثبت الحارس أن SYSTEM غير صالحة.
 - **الإثبات الساكن** (`check-windows-deploy-gate.mjs`):
   - المشغّل لا يكتب إلا في `logDir`.
   - كل ملفات الثقة تحت `gateDir`.
@@ -121,7 +148,7 @@
 |---|---|
 | مرجع نشر Windows | فرع `windows-production` على GitHub. يتقدّم Fast-Forward فقط |
 | الموافقة | GitHub Deployment في بيئة `windows-production`، حمولته `kind: "ozk-windows-release"` ونفس الـSHA |
-| البوابة المعتمدة | `C:\ProgramData\OZK-TOBACCO\DeployGate\` (كتابة لـAdministrators/SYSTEM فقط) |
+| البوابة المعتمدة | `C:\ProgramData\OZK-TOBACCO\DeployGate\` (كتابة لهوية البوابة المخصّصة وحدها) |
 | الحالة والتدقيق | `state.json`، `audit.jsonl`، `writer-allowlist.json`، `deploying.flag` في المجلد نفسه |
 | النسخة المرجعية | `tools/deploy-gate/` للمراجعة والاختبار فقط. الدمج لا يغيّر النسخة المثبّتة |
 
@@ -266,7 +293,7 @@
    عندما يكون HEAD مساوياً له. ثم `deploy-gate.ps1 -Mode Initialize`، الذي يعيد الفحص ويرفض
    التسجيل إذا لم ينجح.
 5. توجيه المهام إلى `run-repo-task.ps1` واحدة واحدة، والكاتب في النهاية.
-6. مهمة «TOBACCO Windows Deploy Gate» (SYSTEM) كل 10 دقائق، بوضع `-Mode DryRun` **24 ساعة كاملة**
+6. مهمة «TOBACCO Windows Deploy Gate» (الهوية المخصّصة، لا SYSTEM) كل 10 دقائق، بوضع `-Mode DryRun` **24 ساعة كاملة**
    قبل أول نشر حقيقي. لا نشر إنتاجي فوري، ثم Deploy بموافقة المالك.
 7. تمارين:
    - إصدار توثيقي.

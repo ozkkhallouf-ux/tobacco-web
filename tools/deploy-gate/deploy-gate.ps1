@@ -3,8 +3,9 @@
 # deploy-gate.ps1 — بوابة نشر Windows (نسخة مرجعية)
 #
 # النسخة المعتمدة تعيش في C:\ProgramData\OZK-TOBACCO\DeployGate\ (كتابة لـ
-# Administrators/SYSTEM فقط) ولا تُستدعى من المستودع أبداً. هذا الملف في
+# هوية البوابة المخصّصة فقط) ولا تُستدعى من المستودع أبداً. هذا الملف في
 # المستودع للمراجعة والاختبار فقط: الدمج إلى main لا يغيّر البوابة المثبّتة.
+# تعمل بهوية مخصّصة (trust.gateAccount) لا تشغّل أي كود من أي مستودع.
 #
 # القاعدة: الجهاز يتبع فرع windows-production وحده، ويتقدّم Fast-Forward فقط
 # إلى SHA له Deployment ناجح في بيئة windows-production (موافقة المالك) وCI
@@ -403,7 +404,7 @@ function Invoke-DeployGate {
 
     if ($GateMode -eq 'Initialize') {
         if ($state) { return Complete-Gate $paths $record 'STOP' 'already initialized' $false }
-        $pre = Invoke-MigrationPreflight $Config
+        $pre = Invoke-InstallPreflight $Config
         $record.preflight = @($pre.results | ForEach-Object { $_.verdict + ' ' + $_.task + ': ' + $_.reason })
         if (-not $pre.ok) {
             return Complete-Gate $paths $record 'STOP' ('migration preflight blocked: ' + (@($pre.results | Where-Object { $_.verdict -ne 'PASS' -and $_.verdict -ne 'OUT_OF_SCOPE_DISABLED' } | ForEach-Object { $_.task + ' (' + $_.reason + ')' }) -join '; ')) $true
