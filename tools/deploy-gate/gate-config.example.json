@@ -3,6 +3,7 @@
   "expectedHost": "OZK2026",
   "repoPath": "C:\\Users\\LOQ\\Documents\\OZK-TOBACCO\\tobacco-web",
   "gateDir": "C:\\ProgramData\\OZK-TOBACCO\\DeployGate",
+  "logDir": "C:\\ProgramData\\OZK-TOBACCO\\DeployGateLogs",
   "githubRepo": "ozkkhallouf-ux/tobacco-web",
   "windowsBranch": "windows-production",
   "mainBranch": "main",
@@ -127,5 +128,33 @@
       "script": "tools/auto-sync-price-lists.ps1",
       "reason": "commits price-data.json and pushes to main; exits unless its own worktree is on main"
     }
-  ]
+  ],
+  "trust": {
+    "_comment": "Future installation design only (nothing installed yet). The gate process owns the trust files; the scheduled tasks it protects must not be able to change them. Running the gate as OZKSync would let the OZKSync tasks rewrite writer-allowlist.json/state.json and silently disable the writer protection, so the gate runs as SYSTEM and gateDir is writable only by SYSTEM and Administrators. Task accounts only read gateDir and write their launcher log to logDir.",
+    "gateAccount": "SYSTEM",
+    "gateDirWriters": [
+      "NT AUTHORITY\\SYSTEM",
+      "BUILTIN\\Administrators"
+    ],
+    "gateDirReadOnlyAccounts": [
+      "OZKSync",
+      "LOQ"
+    ],
+    "trustFiles": [
+      "gate-config.json",
+      "deploy-gate.ps1",
+      "run-repo-task.ps1",
+      "notify.ps1",
+      "migration-preflight.ps1",
+      "state.json",
+      "audit.jsonl",
+      "writer-allowlist.json",
+      "deploying.flag",
+      "deploy-gate.log",
+      "deploy-gate.lock"
+    ],
+    "taskWritable": [
+      "logDir"
+    ]
+  }
 }

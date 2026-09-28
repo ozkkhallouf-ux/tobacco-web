@@ -179,6 +179,11 @@ try {
     $script:Preflight = [pscustomobject]@{ ok = $true; results = @([pscustomobject]@{ task = 'OZK-PriceListSync'; verdict = 'PASS'; reason = 'runs from the dedicated main worktree' }) }
     $r = Invoke-DeployGate -Config $ep.Config -GateMode 'Initialize'
     Assert-True ($r.result -eq 'OK' -and @($r.preflight).Count -eq 1) 'Initialize proceeds and records the preflight once it passes'
+    $eq = New-GateTestEnv; [void]$environments.Add($eq)
+    $script:Preflight = [pscustomobject]@{ ok = $true; results = @([pscustomobject]@{ task = 'OZK-PriceListSync'; verdict = 'OUT_OF_SCOPE_DISABLED'; reason = 'task is Disabled in Task Scheduler' }) }
+    $r = Invoke-DeployGate -Config $eq.Config -GateMode 'Initialize'
+    Assert-True ($r.result -eq 'OK' -and (@($r.preflight) -join ' ') -like '*OUT_OF_SCOPE_DISABLED OZK-PriceListSync*') 'Initialize proceeds with a Disabled price-list task and records OUT_OF_SCOPE_DISABLED'
+    $script:Preflight = [pscustomobject]@{ ok = $true; results = @([pscustomobject]@{ task = 'OZK-PriceListSync'; verdict = 'PASS'; reason = 'stub' }) }
 
     Write-Host '== Initialize'
     $e = New-GateTestEnv; [void]$environments.Add($e)

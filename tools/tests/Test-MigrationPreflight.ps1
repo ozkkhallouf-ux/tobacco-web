@@ -47,7 +47,14 @@ function Write-TestFile([string]$Path, [string]$Content) {
 
 # المهام المجدولة الوهمية: اسم ⇒ نص الـAction.
 $script:Tasks = @{}
+$script:States = @{}
 function Get-PreflightTaskNames { return @($script:Tasks.Keys) }
+# حالة Task Scheduler: صريحة في $script:States، وإلا Ready لمهمة مسجّلة، و$null لغير المرئية.
+function Get-PreflightTaskState([string]$TaskName) {
+    if ($script:States.ContainsKey($TaskName)) { return $script:States[$TaskName] }
+    if ($script:Tasks.ContainsKey($TaskName)) { return 'Ready' }
+    return $null
+}
 function Get-PreflightTaskActionText([string]$TaskName) { if ($script:Tasks.ContainsKey($TaskName)) { return $script:Tasks[$TaskName] } return $null }
 
 $base = Join-Path ([System.IO.Path]::GetTempPath()) ('ozk-preflight-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
@@ -135,6 +142,45 @@ try {
     $script:Tasks = @{}
     $r = Invoke-MigrationPreflight $config
     Assert-True (-not $r.ok -and (Get-Verdict $r 'OZK-PriceListSync').reason -like '*not visible*') 'task not visible to this account => BLOCK (run as administrator)'
+
+    Write-Host '== Disabled main-dependent task is OUT_OF_SCOPE_DISABLED (and fails closed once enabled)'
+    # محاكاة الجهاز الحقيقي: المهمة معطّلة وتشير إلى worktree قديم منفصل (detached) لا إلى المسار المعتمد.
+    $legacy = Join-Path $base 'tobacco-web-main-sync'
+    Invoke-TestGit $repo @('worktree', 'add', '-q', '--detach', $legacy, 'main') | Out-Null
+    $legacyScript = (Join-Path $legacy 'tools') + $sep + 'auto-sync-price-lists.ps1'
+    $script:Tasks = @{ 'OZK-PriceListSync' = ($ps + ' -File "' + $legacyScript + '"') }
+    $script:States = @{ 'OZK-PriceListSync' = 'Disabled' }
+    $r = Invoke-MigrationPreflight $config
+    Assert-True ($r.ok -and (Get-Verdict $r 'OZK-PriceListSync').verdict -eq 'OUT_OF_SCOPE_DISABLED') 'Disabled price-list task on a legacy detached worktree => OUT_OF_SCOPE_DISABLED, migration not blocked'
+    $script:Tasks = @{ 'OZK-PriceListSync' = ($ps + ' -File "' + $inRepo + '"') }
+    $r = Invoke-MigrationPreflight $config
+    Assert-True ($r.ok -and (Get-Verdict $r 'OZK-PriceListSync').verdict -eq 'OUT_OF_SCOPE_DISABLED') 'Disabled task still pointing at the operational repo => OUT_OF_SCOPE_DISABLED'
+    $script:Tasks = @{}
+    $r = Invoke-MigrationPreflight $config
+    Assert-True ($r.ok) 'Disabled task whose action is not readable => OUT_OF_SCOPE_DISABLED (state is authoritative)'
+    foreach ($enabled in @('Ready', 'Running', 'Queued', 'disabled', 'Unknown')) {
+        $script:Tasks = @{ 'OZK-PriceListSync' = ($ps + ' -File "' + $legacyScript + '"') }
+        $script:States = @{ 'OZK-PriceListSync' = $enabled }
+        $r = Invoke-MigrationPreflight $config
+        Assert-True (-not $r.ok -and (Get-Verdict $r 'OZK-PriceListSync').verdict -eq 'BLOCK') ("state '" + $enabled + "' on the legacy worktree => BLOCK (fail closed)")
+    }
+    $script:Tasks = @{ 'OZK-PriceListSync' = ($ps + ' -File "' + $inRepo + '"') }
+    $script:States = @{ 'OZK-PriceListSync' = 'Ready' }
+    $r = Invoke-MigrationPreflight $config
+    Assert-True (-not $r.ok) 'enabled again on the operational repo => BLOCK'
+    $script:Tasks = @{ 'OZK-PriceListSync' = ($ps + ' -File "' + $inMain + '"') }
+    $r = Invoke-MigrationPreflight $config
+    Assert-True ($r.ok -and (Get-Verdict $r 'OZK-PriceListSync').verdict -eq 'PASS') 'enabled on the approved main checkout => PASS'
+    $script:Tasks = @{ 'OZK-PriceListSync' = ($ps + ' -File "' + $inMain + '"') }
+    $script:States = @{}
+    $script:Tasks.Remove('OZK-PriceListSync')
+    $r = Invoke-MigrationPreflight $config
+    Assert-True (-not $r.ok) 'state not visible => BLOCK'
+    $script:Tasks = @{ 'OZK-PriceListSync' = ($ps + ' -File "' + $inRepo + '"'); 'TOBACCO Ameen Sync' = ($ps + ' -File "' + ((Join-Path $mainWt 'tools') + $sep + 'other.ps1') + '"') }
+    $script:States = @{ 'OZK-PriceListSync' = 'Disabled' }
+    $r = Invoke-MigrationPreflight $config
+    Assert-True (-not $r.ok -and (Get-Verdict $r 'TOBACCO Ameen Sync').verdict -eq 'BLOCK') 'a disabled price-list task does not open the main worktree as a back door'
+    $script:States = @{}
 
     Write-Host '== price-list sync contract unchanged'
     $sync = [System.IO.File]::ReadAllText((Join-Path (Join-Path $repoRoot 'tools') 'auto-sync-price-lists.ps1'))

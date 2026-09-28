@@ -34,11 +34,15 @@ function Read-LauncherJson([string]$Path) {
     return ($raw | ConvertFrom-Json)
 }
 
-function Write-LauncherLog([string]$GateDir, [string]$Message) {
+# حدود الثقة: المشغّل يعمل بحسابات المهام (OZKSync/LOQ/SYSTEM) فلا يكتب أبداً في gateDir
+# (ملفات الثقة: الحالة، البصمات، العلامة). سجله الوحيد في logDir المنفصل.
+function Write-LauncherLog([string]$LogDir, [string]$Message) {
+    $line = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ' ' + $Message
+    if ([string]::IsNullOrWhiteSpace($LogDir)) { Write-Host $line; return }
     try {
-        $line = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ' ' + $Message
-        [System.IO.File]::AppendAllText((Join-Path $GateDir 'launcher.log'), $line + [Environment]::NewLine, (New-Object System.Text.UTF8Encoding($false)))
-    } catch { Write-Host $Message }
+        if (-not (Test-Path -LiteralPath $LogDir)) { New-Item -ItemType Directory -Force -Path $LogDir | Out-Null }
+        [System.IO.File]::AppendAllText((Join-Path $LogDir 'launcher.log'), $line + [Environment]::NewLine, (New-Object System.Text.UTF8Encoding($false)))
+    } catch { Write-Host $line }
 }
 
 function Send-LauncherAlert([string]$Message, [string]$DedupeKey) {
@@ -53,15 +57,16 @@ function Invoke-RepoTask {
     param($Config, [string]$RelativeScript, [string[]]$Arguments, [string]$PsExe)
 
     $gateDir = [string]$Config.gateDir
+    $logDir = [string]$Config.logDir
     $rel = ($RelativeScript -replace '\\', '/').TrimStart('/')
     $repoFull = [System.IO.Path]::GetFullPath([string]$Config.repoPath).TrimEnd('\', '/')
     $scriptFull = [System.IO.Path]::GetFullPath((Join-Path $repoFull ($rel -replace '/', [IO.Path]::DirectorySeparatorChar)))
     if (-not $scriptFull.StartsWith($repoFull + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
-        Write-LauncherLog $gateDir ('REFUSE outside repo: ' + $RelativeScript)
+        Write-LauncherLog $logDir ('REFUSE outside repo: ' + $RelativeScript)
         return 2
     }
     if (-not (Test-Path -LiteralPath $scriptFull)) {
-        Write-LauncherLog $gateDir ('REFUSE missing script: ' + $rel)
+        Write-LauncherLog $logDir ('REFUSE missing script: ' + $rel)
         Send-LauncherAlert ('مهمة Windows تشير إلى سكربت غير موجود: ' + $rel) ('launcher-missing-' + $rel)
         return 2
     }
@@ -78,21 +83,21 @@ function Invoke-RepoTask {
     if (Test-Path -LiteralPath $flagPath) {
         $ageMinutes = ((Get-Date) - (Get-Item -LiteralPath $flagPath).LastWriteTime).TotalMinutes
         if ($ageMinutes -lt [double]$Config.flagTtlMinutes) {
-            Write-LauncherLog $gateDir ('SKIP deploy in progress: ' + $rel)
+            Write-LauncherLog $logDir ('SKIP deploy in progress: ' + $rel)
             return 0
         }
         if ($isWriter) {
-            Write-LauncherLog $gateDir ('SKIP stale deploy flag, writer stays paused: ' + $rel)
+            Write-LauncherLog $logDir ('SKIP stale deploy flag, writer stays paused: ' + $rel)
             Send-LauncherAlert ('علامة نشر Windows عالقة منذ ' + [int]$ageMinutes + ' دقيقة — مهمة الكتابة متوقفة: ' + $rel) 'launcher-stale-flag-writer'
             return 0
         }
-        Write-LauncherLog $gateDir ('RUN despite stale deploy flag (reader): ' + $rel)
+        Write-LauncherLog $logDir ('RUN despite stale deploy flag (reader): ' + $rel)
         Send-LauncherAlert ('علامة نشر Windows عالقة منذ ' + [int]$ageMinutes + ' دقيقة — مهام القراءة عادت للعمل') 'launcher-stale-flag'
     }
 
     if ($isWriter) {
         if (-not $allow) {
-            Write-LauncherLog $gateDir ('REFUSE writer without allowlist: ' + $rel)
+            Write-LauncherLog $logDir ('REFUSE writer without allowlist: ' + $rel)
             Send-LauncherAlert ('رُفض تشغيل سكربت كتابة بلا قائمة بصمات معتمدة: ' + $rel) 'launcher-writer-no-allowlist'
             return 1
         }
@@ -102,7 +107,7 @@ function Invoke-RepoTask {
             $actual = ''
             if (Test-Path -LiteralPath $wFull) { $actual = (Get-FileHash -LiteralPath $wFull -Algorithm SHA256).Hash.ToLowerInvariant() }
             if ($expected -ne $actual) {
-                Write-LauncherLog $gateDir ('REFUSE writer hash mismatch: ' + $w + ' (running ' + $rel + ')')
+                Write-LauncherLog $logDir ('REFUSE writer hash mismatch: ' + $w + ' (running ' + $rel + ')')
                 Send-LauncherAlert ('رُفض تشغيل مهمة كتابة: بصمة ' + $w + ' غير معتمدة') ('launcher-writer-hash-' + $w)
                 return 1
             }

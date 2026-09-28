@@ -52,8 +52,9 @@ Write-TestFile (Join-Path $repo 'tools/writer.ps1') ($body -replace 'MARKER', ($
 Write-TestFile (Join-Path $repo 'tools/writer-helper.ps1') "'helper'`n"
 Write-TestFile (Join-Path $base 'outside.ps1') "exit 0`n"
 
+$logs = Join-Path $base 'logs'
 $config = [pscustomobject]@{
-    repoPath = $repo; gateDir = $gate; flagTtlMinutes = 15
+    repoPath = $repo; gateDir = $gate; logDir = $logs; flagTtlMinutes = 15
     writerScripts = @('tools/writer.ps1', 'tools/writer-helper.ps1')
 }
 $flag = Join-Path $gate 'deploying.flag'
@@ -111,6 +112,12 @@ try {
     Add-Content -LiteralPath (Join-Path $repo 'tools/detected.ps1') -Value "# tampered"
     $code = Invoke-RepoTask -Config $config -RelativeScript 'tools/detected.ps1' -Arguments @('-Tag', 'd2') -PsExe $psExe
     Assert-True ($code -eq 1 -and -not ((Get-Runs) -contains 'd2')) 'pinned detected writer with changed content is refused'
+
+    Write-Host '== Trust boundary: the launcher never writes into gateDir'
+    Assert-True (Test-Path -LiteralPath (Join-Path $logs 'launcher.log')) 'launcher log is written to logDir'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $gate 'launcher.log'))) 'no launcher log inside gateDir (trust files only)'
+    $gateFiles = @(Get-ChildItem -LiteralPath $gate -File | ForEach-Object { $_.Name } | Sort-Object)
+    Assert-True (@($gateFiles | Where-Object { @('writer-allowlist.json', 'deploying.flag') -notcontains $_ }).Count -eq 0) 'gateDir holds only files the test itself placed there'
 
     Write-Host '== Path safety'
     $code = Invoke-RepoTask -Config $config -RelativeScript '../outside.ps1' -Arguments @() -PsExe $psExe

@@ -138,6 +138,37 @@ assert.match(gateSrc, /\$pre = Invoke-MigrationPreflight \$Config[\s\S]{0,400}mi
 assert.match(checkWfRaw(), /tools\\tests\\Test-MigrationPreflight\.ps1/);
 ok("مزامنة النشرات تبقى على main عبر worktree مخصّص، والتحويل محجوب حتى ينجح الفحص (Codex P1 #5)");
 
+// حدود الثقة (تصميم التركيب القادم): ملفات الثقة لا يكتبها إلا حساب البوابة (SYSTEM)،
+// والمشغّل الذي يعمل بحسابات المهام لا يكتب في gateDir أبداً.
+const trust = cfg0.trust;
+assert.equal(trust.gateAccount, "SYSTEM");
+assert.deepEqual(trust.gateDirWriters, ["NT AUTHORITY\\SYSTEM", "BUILTIN\\Administrators"]);
+assert.ok(!trust.gateDirWriters.some((w) => /ozksync|loq/i.test(w)), "حسابات المهام لا تكتب في gateDir");
+for (const f of ["state.json", "audit.jsonl", "writer-allowlist.json", "deploying.flag", "gate-config.json", "deploy-gate.ps1", "run-repo-task.ps1"]) assert.ok(trust.trustFiles.includes(f), `ملف ثقة: ${f}`);
+assert.ok(cfg0.logDir && !cfg0.logDir.toLowerCase().startsWith(cfg0.gateDir.toLowerCase() + "\\") && cfg0.logDir.toLowerCase() !== cfg0.gateDir.toLowerCase(), "logDir خارج gateDir");
+const launcherCode = read("tools/deploy-gate/run-repo-task.ps1").split("\n").filter((l) => !l.trim().startsWith("#")).join("\n");
+const launcherWrites = [...launcherCode.matchAll(/(WriteAllText|AppendAllText|WriteAllBytes|Set-Content|Add-Content|Out-File|Remove-Item|Move-Item|Copy-Item|New-Item)[^\n]*/g)].map((m) => m[0]);
+assert.ok(launcherWrites.length >= 1);
+for (const w of launcherWrites) assert.ok(/\$LogDir/.test(w), `المشغّل يكتب خارج logDir: ${w}`);
+assert.doesNotMatch(launcherCode, /Join-Path \$gateDir 'launcher\.log'/);
+for (const f of ["writer-allowlist.json", "deploying.flag", "state.json"]) {
+  for (const m of launcherCode.matchAll(new RegExp(`[^\\n]*${f.replace(".", "\\.")}[^\\n]*`, "g"))) assert.doesNotMatch(m[0], /Write|Set-Content|Remove-Item|Move-Item|Out-File/, `المشغّل لا يكتب ${f}`);
+}
+const gatePathsFn = gateSrc.slice(gateSrc.indexOf("function Get-GatePaths"), gateSrc.indexOf("function Write-GateLog"));
+for (const f of ["state.json", "audit.jsonl", "writer-allowlist.json", "deploying.flag", "deploy-gate.log", "deploy-gate.lock"]) assert.match(gatePathsFn, new RegExp(`Join-Path \\$Config\\.gateDir '${f.replace(".", "\\.")}'`), `ملف الثقة ${f} تحت gateDir`);
+assert.doesNotMatch(gateSrc, /(WriteAllText|AppendAllText|Set-Content|Out-File)\s*\(?\s*\(?\s*Join-Path \$Config\.repoPath/, "البوابة لا تكتب داخل المستودع إلا عبر git");
+const notifySrc = read("tools/deploy-gate/notify.ps1");
+assert.doesNotMatch(notifySrc, /WriteAllText|AppendAllText|Set-Content|Out-File|Remove-Item/, "notify.ps1 قراءة فقط");
+const doc = read("docs/ai/topics/windows-deploy-gate.md");
+assert.match(doc, /حدود الثقة لهوية البوابة/);
+assert.match(doc, /SYSTEM وAdministrators فقط/);
+assert.match(doc, /24 ساعة كاملة/);
+assert.match(doc, /88ae841c6696bef2cbe75579039b215396972a6e/);
+assert.match(doc, /مصدره غير متحقَّق/);
+assert.match(doc, /windows-production-integrity/);
+assert.match(read("tools/deploy-gate/migration-preflight.ps1"), /\$taskState -ceq 'Disabled'/, "Disabled حرفياً من Task Scheduler وحده");
+ok("حدود الثقة: البوابة (SYSTEM) وحدها تكتب ملفات الثقة، والمشغّل يكتب سجله في logDir فقط؛ والتوثيق يسجّل خط الأساس وحماية الفرع وDryRun 24 ساعة");
+
 // 2) الـworkflow
 const wf = read(".github/workflows/windows-release.yml").split("\n").filter((l) => !l.trim().startsWith("#")).join("\n");
 const onBlock = wf.slice(wf.indexOf("\non:"), wf.indexOf("\npermissions:"));

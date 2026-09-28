@@ -6,12 +6,88 @@
   «TOBACCO Daily Git Pull». لم يعد الدمج إلى `main` يصل تلقائياً إلى OZK2026.
   الجهاز متجمّد على `1812c08` إلى أن تُفعَّل البوابة. التعطيل لم يغيّر الـTrigger
   ولا الـAction، والرجوع عنه يكون بـ `Enable-ScheduledTask -TaskName 'TOBACCO Daily Git Pull'`.
-- **المرحلة 1 (هذا التقرير):** الكود المرجعي للبوابة، والـworkflow، والاختبارات،
-  والتوثيق، داخل المستودع فقط. لم يُثبَّت شيء على OZK2026 بعد، ولم يُنشأ فرع
-  `windows-production` ولا Environment ولا Ruleset. كل ذلك خطوات مالك لاحقة.
+- **المرحلة 1 (PR #281، مدموج في `24dc586`):** الكود المرجعي للبوابة، والـworkflow، والاختبارات،
+  والتوثيق، داخل المستودع فقط.
+- **إعداد GitHub (2026-09-28، بأمر المالك):**
+  - فرع `windows-production` على `88ae841`.
+  - Ruleset «windows-production-integrity».
+  - Environment «windows-production» (راجع «حماية فرع windows-production» أدناه).
+- **التركيب على OZK2026 أوقفه المالك (2026-09-28):**
+  - لم يُثبَّت شيء في ProgramData.
+  - لم تُحوَّل أي مهمة، ولم تُغيَّر أي أغلفة vbs أو صلاحيات.
+  - «TOBACCO Daily Git Pull» ما زالت معطّلة.
+- **لا نشر إنتاجي فوري:** أول نشر حقيقي على Windows يسبقه تشغيل البوابة بوضع
+  `-Mode DryRun` مدة **24 ساعة كاملة**.
 - السبب: `tools/daily-git-pull.ps1` كان يسحب `main` بـ`pull --rebase` كل يوم 07:30
   بلا أي موافقة ولا فحص CI. فدمجُ #279 فعّل `accountClasses:v1` على الجهاز قبل
   أمر المالك.
+
+## خط الأساس (baseline)
+
+- **خط أساس نشر Windows: `88ae841c6696bef2cbe75579039b215396972a6e`.** هذا الـSHA المسجّل على
+  OZK2026، وعليه أُنشئ `windows-production`.
+- **تحديث من خارج البوابة، مرصود ومصدره غير متحقَّق:**
+  - الجهاز انتقل من `1812c08` إلى `88ae841` بـ`pull origin main: Fast-forward` يدوي، الساعة
+    18:48:57 بتوقيت الجهاز (15:48:57Z) في 2026-09-28.
+  - حدث ذلك بعد تعطيل «TOBACCO Daily Git Pull» (آخر تشغيل لها 07:30)، فلم تفعله المهمة.
+  - لم يُتحقَّق من هوية من نفّذه ولا من موافقة المالك عليه، فلا يُعدّ نشراً مصرّحاً.
+  - سُجّل كما هو، ولم يُرجَع عنه.
+  - أوصل إلى الجهاز تغييرات #282: `tools/push-ameen-warehouse-stock.ps1` و
+    `tools/ameen-warehouse-stock-retention.ps1`.
+
+## حماية فرع windows-production
+
+- **مفعَّل:** Ruleset «windows-production-integrity» بلا أي استثناء:
+  - منع force push (`non_fast_forward`).
+  - منع الحذف (`deletion`).
+- **غير ممكن بالتصميم الموثّق:** «التحديث عبر workflow الإصدار وحده». GitHub رفض Ruleset
+  «Restrict updates» مع استثناء تطبيق GitHub Actions، لأن المستودع شخصي وليس منظمة
+  («Actor GitHub Actions integration must be part of the ruleset source or owner organization»).
+  لذلك أي حساب بصلاحية كتابة يستطيع اليوم تقديم الفرع Fast-Forward.
+- **ما يبقى حامياً:** البوابة على الجهاز لا تطبّق أي SHA ما لم يتحقق الشرطان معاً:
+  - له GitHub Deployment ناجح في بيئة `windows-production`، بحمولة الإصدار نفسها
+    (`kind: ozk-windows-release` ونفس الـSHA)، أنشأه الـworkflow بعد موافقة المالك.
+  - CI أخضر على نفس الـSHA.
+
+  فدفعٌ يدوي إلى الفرع لا يصل إلى الجهاز.
+- **Environment «windows-production»:**
+  - المراجع المطلوب ozkkhallouf-ux.
+  - `prevent_self_review` معطّل.
+  - يقبل التشغيل من فرع `main` وحده.
+- **تحصين لاحق (غير منفّذ، لا مفاتيح ولا أسرار الآن):** تقييد كاتب الفرع، مثلاً Deploy Key
+  بصلاحية كتابة سرّه داخل الـEnvironment وحده، مع Ruleset «Restrict updates» يستثني
+  الـDeploy Keys. هذا يحتاج PR يعدّل الـworkflow.
+
+## حدود الثقة لهوية البوابة (تصميم للتركيب القادم، غير مثبَّت)
+
+- **المشكلة المكتشفة:**
+  - البوابة تكتب ملفات الثقة: `state.json`، `audit.jsonl`، `writer-allowlist.json`،
+    `deploying.flag`.
+  - لو عملت بحساب OZKSync وكانت ملفاتها قابلة للكتابة له، فالمهام المحمية نفسها (وأغلبها
+    OZKSync) تستطيع تعديل قائمة البصمات أو الحالة، فتُلغى حماية الكتّاب بصمت.
+- **التصميم المقترح** (مسجّل في `trust` داخل `gate-config.example.json`):
+  - مهمة «TOBACCO Windows Deploy Gate» تعمل بحساب **SYSTEM**.
+  - `C:\ProgramData\OZK-TOBACCO\DeployGate` كتابته لـ **SYSTEM وAdministrators فقط**، وOZKSync
+    وLOQ قراءة وتنفيذ.
+  - المشغّل `run-repo-task.ps1` يعمل بحسابات المهام ولا يكتب في مجلد البوابة أبداً؛ سجله
+    الوحيد في `logDir` منفصل (`C:\ProgramData\OZK-TOBACCO\DeployGateLogs`).
+  - لا توسيع لصلاحيات OZKSync.
+- **الإثبات الساكن** (`check-windows-deploy-gate.mjs`):
+  - المشغّل لا يكتب إلا في `logDir`.
+  - كل ملفات الثقة تحت `gateDir`.
+  - البوابة لا تكتب داخل المستودع إلا عبر git.
+  - `logDir` خارج `gateDir`.
+- **لم يُنفَّذ منه شيء:** لا أغلفة vbs، ولا مهام، ولا صلاحيات.
+
+## مزامنة نشرات الأسعار (OZK-PriceListSync)
+
+- على OZK2026 المهمة **معطّلة** (Disabled منذ 2026-09-07). تشير إلى worktree قديم
+  `tobacco-web-main-sync`، وهو detached HEAD لا على main.
+- `migration-preflight.ps1` يقرأ حالتها الفعلية من Task Scheduler:
+  - **Disabled** تعني `OUT_OF_SCOPE_DISABLED`، ولا تحجب ترحيل البوابة.
+  - أي حالة أخرى (Ready، Running، وغيرها)، أو حالة غير مرئية، تعيدها إلى كل الشروط (fail-closed):
+    checkout مستقل معتمد على main بالـremote الرسمي، وإلا BLOCK.
+- لا تُفعَّل المهمة، ولا يُنشأ clone أو worktree الآن، ولا push إلى main من checkout النشرات.
 
 ## المصدر الموثوق
 
@@ -149,18 +225,23 @@
    - نسخ `tools/deploy-gate/*` إلى `C:\ProgramData\OZK-TOBACCO\DeployGate\`.
    - صلاحيات: OZKSync قراءة وتنفيذ فقط.
    - `gate-config.json` من المثال.
-3. **قبل تبديل الفرع** (Codex P1 #5)، مهمة نشرات الأسعار `OZK-PriceListSync` تحتاج main:
-   1. إنشاء worktree مستقل موثوق لـmain في `mainWorktree.path`
-      (`C:\Users\LOQ\Documents\OZK-TOBACCO\tobacco-web-main`).
-   2. التحقق أنه على `main`، وأن الـremote هو المستودع الرسمي.
-   3. نقل مهمة نشرات الأسعار إليه صراحةً.
-   4. اختبارها.
-   5. `migration-preflight.ps1` بحساب مدير يجب أن يعطي `PREFLIGHT PASS`.
+3. **قبل تبديل الفرع** (Codex P1 #5): `migration-preflight.ps1` بحساب مدير يجب أن يعطي
+   `PREFLIGHT PASS`.
+   - ما دامت `OZK-PriceListSync` معطّلة، فهي `OUT_OF_SCOPE_DISABLED` ولا تحجب.
+   - قبل تفعيلها في أي وقت، يلزم الترتيب التالي:
+     1. checkout مستقل موثوق لـmain في `mainWorktree.path`
+        (`C:\Users\LOQ\Documents\OZK-TOBACCO\tobacco-web-main`). يُفضَّل clone بـ`.git` خاص،
+        لأن worktree لا يأخذ main ما دام المستودع التشغيلي عليه.
+     2. التحقق أنه على `main`، وأن الـremote هو المستودع الرسمي.
+     3. نقل المهمة إليه صراحةً.
+     4. اختبارها بموافقة المالك، لأنها تدفع إلى main.
+     5. `PREFLIGHT PASS`.
 4. تبديل الفرع المحلي بلا تغيير ملفات: `git switch -c windows-production --track origin/windows-production`
    عندما يكون HEAD مساوياً له. ثم `deploy-gate.ps1 -Mode Initialize`، الذي يعيد الفحص ويرفض
    التسجيل إذا لم ينجح.
 5. توجيه المهام إلى `run-repo-task.ps1` واحدة واحدة، والكاتب في النهاية.
-6. مهمة «TOBACCO Windows Deploy Gate» كل 10 دقائق، بوضع `-Mode DryRun` يوماً كاملاً، ثم Deploy.
+6. مهمة «TOBACCO Windows Deploy Gate» (SYSTEM) كل 10 دقائق، بوضع `-Mode DryRun` **24 ساعة كاملة**
+   قبل أول نشر حقيقي. لا نشر إنتاجي فوري، ثم Deploy بموافقة المالك.
 7. تمارين:
    - إصدار توثيقي.
    - إصدار PS1 قراءة.

@@ -31,6 +31,13 @@ function Get-PreflightTaskActionText([string]$TaskName) {
     return (@($task.Actions | ForEach-Object { [string]$_.Execute + ' ' + [string]$_.Arguments + ' ' + [string]$_.WorkingDirectory }) -join "`n")
 }
 
+# حالة المهمة الفعلية من Task Scheduler (Ready/Running/Disabled/...)، أو $null إن لم تكن مرئية.
+function Get-PreflightTaskState([string]$TaskName) {
+    $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    if (-not $task) { return $null }
+    return [string]$task.State
+}
+
 function Read-PreflightWrapperText([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path)) { return '' }
     return [System.IO.File]::ReadAllText($Path)
@@ -109,6 +116,11 @@ function Invoke-MigrationPreflight($Config) {
 
     foreach ($dep in $dependent) {
         $name = [string]$dep.task
+        # مهمة معطّلة فعلاً (حالتها من Task Scheduler نفسه، لا من الإعداد) لا تعمل من أي checkout،
+        # فلا تحجب التحويل: OUT_OF_SCOPE_DISABLED. إن فُعّلت لاحقاً يعود كل شرط أدناه (fail-closed):
+        # checkout مستقل معتمد على main بالـremote الرسمي. أي حالة أخرى أو غير مرئية تُفحص كاملاً.
+        $taskState = Get-PreflightTaskState $name
+        if ($taskState -ceq 'Disabled') { $results += [pscustomobject]@{ task = $name; verdict = 'OUT_OF_SCOPE_DISABLED'; reason = 'task is Disabled in Task Scheduler; enabling it requires a PASS from an approved independent main checkout' }; continue }
         $action = Get-PreflightTaskActionText $name
         # مهمة غير مرئية (غير مسجّلة أو لا يملك الحساب الحالي صلاحية قراءتها) = لا يمكن التحقق ⇒ حجب.
         # شغّل الفحص بحساب مدير يرى كل المهام.
@@ -138,7 +150,7 @@ function Invoke-MigrationPreflight($Config) {
         }
     }
 
-    $blocked = @($results | Where-Object { $_.verdict -ne 'PASS' })
+    $blocked = @($results | Where-Object { $_.verdict -ne 'PASS' -and $_.verdict -ne 'OUT_OF_SCOPE_DISABLED' })
     return [pscustomobject]@{ ok = ($blocked.Count -eq 0); results = $results }
 }
 

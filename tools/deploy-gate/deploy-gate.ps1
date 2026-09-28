@@ -406,7 +406,7 @@ function Invoke-DeployGate {
         $pre = Invoke-MigrationPreflight $Config
         $record.preflight = @($pre.results | ForEach-Object { $_.verdict + ' ' + $_.task + ': ' + $_.reason })
         if (-not $pre.ok) {
-            return Complete-Gate $paths $record 'STOP' ('migration preflight blocked: ' + (@($pre.results | Where-Object { $_.verdict -ne 'PASS' } | ForEach-Object { $_.task + ' (' + $_.reason + ')' }) -join '; ')) $true
+            return Complete-Gate $paths $record 'STOP' ('migration preflight blocked: ' + (@($pre.results | Where-Object { $_.verdict -ne 'PASS' -and $_.verdict -ne 'OUT_OF_SCOPE_DISABLED' } | ForEach-Object { $_.task + ' (' + $_.reason + ')' }) -join '; ')) $true
         }
         if ($branch -ne [string]$Config.windowsBranch) { return Complete-Gate $paths $record 'STOP' ('expected branch ' + $Config.windowsBranch + ', found ' + $branch) $true }
         if (@(Get-DirtyEntries $Config).Count -gt 0) { return Complete-Gate $paths $record 'STOP' 'worktree not clean' $true }
