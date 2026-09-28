@@ -71,6 +71,8 @@ Slack (على Mac Mini، تطبيقات GitHub وCursor وCodex وClaude مرب�
 
 ## سجل القرارات المشتركة
 
+- 2026-09-28 (جرد ذكي — EXECUTE لـ anon على دوال العدّ مطلوب): حسابات الموظفين تعمل بدور Postgres `anon` لأن `smart_inventory_set_counter_auth_role` يضبط `auth.users.role`. هجرتا `20260826081831` و`20260914061335` (`fix_smart_inventory_anon_grant_drift`) سحبتا هذا المنح باعتباره انحرافاً، فصار كل دخول موظف 401 «ليس لديك صلاحية لتنفيذ هذه العملية» على `smart_inventory_available_warehouses`. كل دالة عدّ تتحقق من `smart_inventory_is_counter()`؛ المنح ليس فتحاً عاماً. الإنتاج أُصلح بموافقة عمر بهجرة `20260928170206_restore_counter_rpc_grants_to_anon_again` (منح الست لـ anon، وسحب `smart_inventory_owner_*` من anon). المستودع يطابق النص، و`scripts/check-smart-inventory.mjs` يرفض أي SQL متتبَّع يعيد السحب أو يمنح دوال المالك لـ anon. لا تُعاد الهجرة على الإنتاج.
+
 - 2026-09-23 (Master Invoice — المرحلة 2: مرتجع المبيعات): المرتجع يُرسم بقالب الفاتورة الرئيسي (`kind: "return"`) عبر نفس المحوّل `saleInvoiceDocument`، والبوابة في `voucherPdfMarkup` هي `isInv || isRet` وحدها (القبض والصرف على القديم). لا حساب جديد ولا تغيير في دلالات PR #263. على المرتجع وحده: لا رصيد حالي/مفرد/دفعة/تسوية أبداً، والسابق/الجديد من قيده المثبت فقط، وبلا قيد مثبت تُطبع ملاحظة محايدة بلا «خُصمت من رصيد حسابكم» (`returnLedgerView`). الفحص: `scripts/check-sales-return-master-invoice.mjs`. بعد فشل iPhone على المرتجع #37 أُضيف إصلاحان بموافقة عمر الصريحة:
   - `invoiceLineQtyParts`: الكروز الكسري يُعرض «107.6 كروز» بلا كسر كرتونة، والكميات الصحيحة كما كانت.
   - `invoiceLinePrice`: سعر السطر الكسري يُطبع بالكروز «12.8 $ / كروز» كي يطابق الضربُ القيمة (قرار عمر بعد مراجعة Codex). عرض فقط، والقيمة والإجمالي كما هما.

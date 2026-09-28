@@ -16,13 +16,15 @@
 
 يعزل ترحيل `smart_inventory_counter_isolation` حسابات الجرد عن دور قاعدة البيانات الإداري `authenticated`: تُصدر جلساتها بدور قاعدة البيانات `anon` وتُمنح فقط RPCs العد الأعمى التي تتحقق من `app_metadata` و`auth.uid()` والجلسة الحية. توجد أيضاً سياسة RLS تقييدية تمنع أي token قديم بدور `authenticated` ويحمل `inventory_counter` من قراءة أو تعديل جداول النظام. لا توجد منح جداول مباشرة للحساب الجديد.
 
+EXECUTE لدور `anon` على دوال العدّ الست مطلوب وليس انحراف صلاحيات. `smart_inventory_set_counter_auth_role` يضبط `auth.users.role = 'anon'`، وPostgREST ينادي الدوال بذلك الدور، وكل دالة تتحقق من `smart_inventory_is_counter()` قبل العمل. سحب هذا المنح يعيد 401 «ليس لديك صلاحية لتنفيذ هذه العملية» لكل موظف. وقع ذلك في `20260826081831` (أُصلح بـ `20260831134213`) ثم في `20260914061335` (`fix_smart_inventory_anon_grant_drift`، وُصف يومها خطأً كانحراف). الإنتاج أُصلح في 2026-09-28 بهجرة `20260928170206_restore_counter_rpc_grants_to_anon_again` بموافقة عمر: منح الست لـ anon، وسحب كل `smart_inventory_owner_*` من anon. المستودع يطابق ذلك في `supabase/smart-inventory.sql` وملف الهجرة. لا تُعاد الهجرة على الإنتاج؛ الإصدار مسجَّل.
+
 ## المصدر الموثوق
 
 حركات فواتير الأمين في `AmnDb002` مع أعلام الإدخال والإخراج، لا حقل `ms000` بعد تدوير السنة. مصدر جلسة الجرد هو أحدث `ameen_warehouse_stock_reports` للمستودع عند وقت القطع، مع `smart_inventory_movement_adjustments` للحركات الموقعة بعد القطع. لا توجد أي كتابة أو تسوية إلى الأمين.
 
 ## نطاق الملفات
 
-`src/business-snapshot.js`, `src/inventory-recon-calc.js`, `src/smart-inventory.js`, `src/supabase-client.js`, `src/app.js`, `src/styles.css`, `tools/ameen-stock-query.sql`, `tools/ameen-sync-agent.ps1`, `tools/push-ameen-warehouse-stock.ps1`, `tools/ameen-warehouse-stock-retention.ps1`, `scripts/item-snapshot-*.mjs`, `scripts/check-smart-inventory.mjs`, `scripts/check-warehouse-stock-prune.mjs`, `supabase/inventory-reconciliation-table.sql`, `supabase/smart-inventory.sql`, `supabase/migrations/20260928140000_prune_ameen_warehouse_stock_reports.sql`, `supabase/migrations/*smart_inventory_counter_isolation.sql`, `supabase/functions/inventory-auth/index.ts`, `supabase/tests/smart-inventory-security.sql`, `supabase/tests/prune-ameen-warehouse-stock-reports.sql`.
+`src/business-snapshot.js`, `src/inventory-recon-calc.js`, `src/smart-inventory.js`, `src/supabase-client.js`, `src/app.js`, `src/styles.css`, `tools/ameen-stock-query.sql`, `tools/ameen-sync-agent.ps1`, `tools/push-ameen-warehouse-stock.ps1`, `tools/ameen-warehouse-stock-retention.ps1`, `scripts/item-snapshot-*.mjs`, `scripts/check-smart-inventory.mjs`, `scripts/check-warehouse-stock-prune.mjs`, `supabase/inventory-reconciliation-table.sql`, `supabase/smart-inventory.sql`, `supabase/migrations/20260928140000_prune_ameen_warehouse_stock_reports.sql`, `supabase/migrations/20260928170206_restore_counter_rpc_grants_to_anon_again.sql`, `supabase/migrations/*smart_inventory_counter_isolation.sql`, `supabase/functions/inventory-auth/index.ts`, `supabase/tests/smart-inventory-security.sql`, `supabase/tests/prune-ameen-warehouse-stock-reports.sql`.
 
 ## قيود ثابتة
 
@@ -33,6 +35,7 @@
 - الصنف المحفوظ لا يُفتح تلقائياً ولا يستطيع موظف الكتابة فوق عد موظف آخر. إعادة العد تحتاج فتحاً من المالك وموظفاً آخر، والتصحيح/إعادة فتح الجلسة للمالك فقط مع سبب.
 - الفراغ ليس صفراً؛ الحالات المنفصلة: معدود، صفر فعلي، غير موجود في موقعه، تالف، وغير معدود.
 - `inventory_counter` مساره الوحيد `smartInventory` ولا تبدأ له loaders القديمة. لا تُمنح جداول الجرد صلاحيات REST مباشرة؛ الوصول عبر RPC ضيقة فقط.
+- دور قاعدة بيانات الموظف هو `anon` عن قصد. الدوال الست (`available_warehouses`, `start_or_join`, `counter_session`, `claim_item`, `save_item`, `complete_session`) تبقى EXECUTE لـ anon، وكل واحدة تستدعي `smart_inventory_is_counter()`. سحب هذا المنح ليس تصحيح انحراف. دوال `smart_inventory_owner_*` لا تُمنح لـ anon ولا لـ PUBLIC.
 - `smart_inventory_expectations` والفروقات وسجل المقارنة owner-only، ولا تظهر في Counter RPC أو HTML/JS state للموظف.
 - لا تعتمد صلاحيات الجرد على `user_metadata` أو الاسم المعروض أو البريد؛ الدور في `app_metadata` والهوية `auth.uid()`.
 - دفتر الجرد المطبوع أعمى: مستودع/صفحة/كود/اسم/وحدة وحقل فارغ، بلا كمية أمين.
