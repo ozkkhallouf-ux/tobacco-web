@@ -328,7 +328,7 @@
     const counted = items.filter((item) => item.countState !== "uncounted").length;
     const progress = items.length ? Math.round(counted / items.length * 100) : 0;
     return `<section class="panel wide smart-session-head">
-      <div><button class="button secondary" data-smart-back type="button">← المستودعات</button><h2>${esc(state.session.warehouseName)}</h2>
+      <div><button class="button secondary" data-smart-back type="button"${state.finishing ? " disabled" : ""}>← المستودعات</button><h2>${esc(state.session.warehouseName)}</h2>
       <p class="muted">وقت القطع المرجعي: ${esc(fmtDate(state.session.cutoffAt))} · ${onlineLabel()}</p></div>
       <div class="smart-session-progress"><strong dir="ltr">${counted} / ${items.length}</strong><div class="smart-progress"><span style="width:${progress}%"></span></div></div>
     </section>
@@ -521,8 +521,14 @@
   function bind(root, session, api) {
     callbacks = api || callbacks;
     root.querySelector("[data-smart-retry]")?.addEventListener("click", () => { state.loadedForRole = ""; load(session, true); });
-    root.querySelectorAll("[data-smart-warehouse]").forEach((button) => button.addEventListener("click", () => button.dataset.smartSession ? openSession(button.dataset.smartSession, session) : startOrJoin(button.dataset.smartWarehouse, session)));
-    root.querySelector("[data-smart-back]")?.addEventListener("click", () => { state.session = null; state.ownerReport = null; state.loadedForRole = ""; load(session, true); });
+    root.querySelectorAll("[data-smart-warehouse]").forEach((button) => button.addEventListener("click", () => {
+      if (state.finishing) return;
+      button.dataset.smartSession ? openSession(button.dataset.smartSession, session) : startOrJoin(button.dataset.smartWarehouse, session);
+    }));
+    root.querySelector("[data-smart-back]")?.addEventListener("click", () => {
+      if (state.finishing) return;
+      state.session = null; state.ownerReport = null; state.loadedForRole = ""; load(session, true);
+    });
     root.querySelector("[data-smart-owner-back]")?.addEventListener("click", () => { state.session = null; state.ownerReport = null; state.loadedForRole = ""; load(session, true); });
     const search = root.querySelector("[data-smart-search]");
     if (search) {
@@ -654,7 +660,7 @@
     } catch (error) {
       if (isNetworkError(error)) {
         await refreshCurrent(session, { keepNotice: true }).catch(() => {});
-        const saved = linesStoredAsZero(plan.zeros, zeroedByUs, state.session?.items);
+        const saved = linesStoredAsZero(plan.zeros, zeroedByUs, state.session?.id === sessionId ? state.session.items : activeSession.items);
         callbacks.notice("warning", `انقطع الاتصال أثناء احتساب الأصفار. ${storedZeroText(saved)} أعد إغلاق الجرد عند عودة الإنترنت؛ ما حُحفظ لن يُكرَّر.`);
       } else {
         callbacks.notice("error", error.message);
