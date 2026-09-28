@@ -8,8 +8,17 @@
   "mainBranch": "main",
   "deploymentEnvironment": "windows-production",
   "deploymentCreator": "github-actions[bot]",
-  "requiredMainWorkflows": ["Deploy TOBACCO Web", "دخان ما بعد النشر"],
-  "requiredPrChecks": ["check", "validate", "critical-journeys", "توافق Windows PowerShell 5.1", "Codex Review Gate"],
+  "requiredMainWorkflows": [
+    "Deploy TOBACCO Web",
+    "دخان ما بعد النشر"
+  ],
+  "requiredPrChecks": [
+    "check",
+    "validate",
+    "critical-journeys",
+    "توافق Windows PowerShell 5.1",
+    "Codex Review Gate"
+  ],
   "drainTimeoutSeconds": 180,
   "flagTtlMinutes": 15,
   "pauseTasks": [
@@ -30,7 +39,6 @@
     "TOBACCO Sync Watchdog",
     "OZK Ameen Full Backup"
   ],
-  "longRunningTasks": ["TOBACCO Ameen Read Worker", "TOBACCO Local Web Server"],
   "writerScripts": [
     "tools/sync-approved-prices-to-ameen.ps1",
     "tools/apply-approved-prices-to-ameen.ps1",
@@ -41,5 +49,67 @@
     "tools/sync-purchase-invoices-to-ameen.ps1",
     "tools/setup-ameen-retail-pricelist.ps1",
     "tools/setup-shared-sql.ps1"
+  ],
+  "writeScan": {
+    "_comment": "Static detection of Ameen write capability in changed files (case-insensitive regexes, shared by the release workflow and the gate). A defence in depth only: every script uses a SQL login that can write, so the real control is a read-only login for readers (separate owner decision).",
+    "include": "^(tools|scripts)/.+\\.(ps1|psm1|sql|js|mjs|cjs|bat|cmd|vbs|py)$",
+    "exclude": [
+      "^tools/tests/",
+      "/__tests__/",
+      "^scripts/check[^/]*\\.mjs$"
+    ],
+    "patterns": [
+      "AMEEN_SQL_WRITE_CONNECTION_STRING",
+      "WRITE_CONNECTION",
+      "\\binsert\\s+into\\b",
+      "\\bupdate\\s+[\\w.\\[\\]]+\\s+set\\b",
+      "\\bdelete\\s+from\\b",
+      "\\bmerge\\s+into\\b",
+      "\\btruncate\\s+table\\b",
+      "\\b(drop|alter|create)\\s+(table|view|procedure|proc|function|trigger|index)\\b",
+      "\\bexec(ute)?\\s+(sp_|dbo\\.|\\[dbo\\])",
+      "ExecuteNonQuery",
+      "SqlBulkCopy",
+      "\\bbegin\\s+tran",
+      "Invoke-Sqlcmd",
+      "\\bsqlcmd(\\.exe)?\\b"
+    ]
+  },
+  "longRunningComponents": [
+    {
+      "name": "TOBACCO Ameen Read Worker",
+      "runner": "Scheduled Task (LOQ), one long PowerShell process",
+      "files": [
+        "tools/ameen-read-worker.ps1",
+        "tools/ameen-read-gateway.ps1",
+        "tools/ameen-stock-query.sql",
+        "tools/ameen-customer-balances-query.sql"
+      ],
+      "untrackedFiles": []
+    },
+    {
+      "name": "OZK-AmeenAutoPrint",
+      "runner": "Scheduled Task (ONSTART) -> tools/ameen-autoprint/run-watcher.bat -> node watcher.js",
+      "files": [
+        "tools/ameen-autoprint/watcher.js",
+        "tools/ameen-autoprint/config.js",
+        "tools/ameen-autoprint/invoice-html.js",
+        "tools/ameen-autoprint/ameen-sales-query.sql",
+        "tools/ameen-autoprint/ameen-customer-balance-query.sql",
+        "tools/ameen-autoprint/package.json",
+        "tools/ameen-autoprint/start.bat"
+      ],
+      "untrackedFiles": [
+        "tools/ameen-autoprint/run-watcher.bat"
+      ]
+    },
+    {
+      "name": "OZK-Tobacco-Server (scripts/serve.mjs)",
+      "runner": "Startup item OZK-Tobacco-Server.vbs (LOQ logon) -> node scripts/serve.mjs",
+      "files": [
+        "scripts/serve.mjs"
+      ],
+      "untrackedFiles": []
+    }
   ]
 }

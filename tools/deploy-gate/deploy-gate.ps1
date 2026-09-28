@@ -16,12 +16,17 @@
 #   -Mode Initialize  أول تثبيت: يسجّل الحالة الحالية وبصمات ملفات الكتابة
 #   -Mode Rollback -To <sha>   رجوع طارئ يدوي (reset --keep) ثم تثبيت الحالة
 #   -Mode Unpin       فك التثبيت بعد نشر إصدار مصحَّح على windows-production
+#   -Mode AckRestart -Components <أسماء>   تسجيل أن المالك أعاد تشغيل عملية طويلة يدوياً
+#
+# البوابة لا تعيد تشغيل أي مهمة ولا توقف أي عملية أبداً: إصدار يمسّ ملفات عملية
+# طويلة (longRunningComponents) يُسجَّل DEPLOYED_PENDING_RESTART مع تنبيه يسمّيها.
 # ============================================================
 [CmdletBinding()]
 param(
-    [ValidateSet('Deploy', 'DryRun', 'Initialize', 'Rollback', 'Unpin')]
+    [ValidateSet('Deploy', 'DryRun', 'Initialize', 'Rollback', 'Unpin', 'AckRestart')]
     [string]$Mode = 'Deploy',
     [string]$To = '',
+    [string[]]$Components = @(),
     [string]$ConfigPath = ''
 )
 
@@ -178,10 +183,67 @@ function Get-ChangeSummary($Config, $Files) {
     }
 }
 
+# كشف قدرة الكتابة إلى الأمين (دفاع إضافي متحفّظ، نفس قواعد windows-release-verify.mjs).
+# ليس بديلاً عن فصل صلاحيات SQL: كل السكربتات اليوم تتصل بحساب يملك الكتابة.
+function Test-InWriteScanScope($Config, [string]$Path) {
+    $p = ConvertTo-RepoRelative $Path
+    if ($p -notmatch [string]$Config.writeScan.include) { return $false }
+    foreach ($rx in @($Config.writeScan.exclude)) { if ($p -match [string]$rx) { return $false } }
+    return $true
+}
+
+function Get-WriteIndicators($Config, [string]$Content) {
+    return @(@($Config.writeScan.patterns) | Where-Object { $Content -match [string]$_ })
+}
+
+# الملفات القادرة على الكتابة في الشجرة الحالية على القرص (تدخل قائمة البصمات المحمية).
+function Get-WriteCapableTrackedFiles($Config) {
+    $found = @()
+    foreach ($rel in @((Invoke-GateGit $Config @('ls-files')).Out)) {
+        if (-not $rel -or -not (Test-InWriteScanScope $Config $rel)) { continue }
+        $full = Join-Path $Config.repoPath ((ConvertTo-RepoRelative $rel) -replace '/', [IO.Path]::DirectorySeparatorChar)
+        if (-not (Test-Path -LiteralPath $full)) { continue }
+        if (@(Get-WriteIndicators $Config ([System.IO.File]::ReadAllText($full))).Count -gt 0) { $found += (ConvertTo-RepoRelative $rel) }
+    }
+    return $found
+}
+
+# الملفات المتغيّرة القادرة على الكتابة في الهدف. تعذّر قراءة الملف = يُعامَل كاتباً (fail-closed).
+function Get-WriteCapableChanged($Config, $Files, [string]$Target) {
+    $detected = @()
+    foreach ($f in @($Files | Where-Object { $_.status -ne 'D' -and (Test-InWriteScanScope $Config $_.path) })) {
+        $show = Invoke-GateGit $Config @('show', ($Target + ':' + $f.path))
+        if ($show.Code -ne 0 -or @(Get-WriteIndicators $Config $show.Text).Count -gt 0) { $detected += $f.path }
+    }
+    return $detected
+}
+
+# العمليات الطويلة التي يمسّ الإصدار ملفاتها — تبقى تشغّل الكود القديم حتى إعادة تشغيل يدوية.
+function Get-AffectedLongRunning($Config, [string[]]$ChangedPaths) {
+    $names = @()
+    foreach ($c in @($Config.longRunningComponents)) {
+        foreach ($f in @($c.files)) {
+            if ($ChangedPaths -contains (ConvertTo-RepoRelative ([string]$f))) { $names += [string]$c.name; break }
+        }
+    }
+    return $names
+}
+
+function Save-GateState($Paths, [string]$LastDeployedSha, [string]$Branch, [string]$PinnedSha, [string]$RolledBackFrom, [string[]]$PendingRestart) {
+    $pending = @(@($PendingRestart) | Where-Object { $_ } | Select-Object -Unique)
+    $status = 'ok'
+    if ($PinnedSha) { $status = 'ROLLED_BACK_PINNED' } elseif ($pending.Count -gt 0) { $status = 'DEPLOYED_PENDING_RESTART' }
+    $pinned = $null; if ($PinnedSha) { $pinned = $PinnedSha }
+    $from = $null; if ($RolledBackFrom) { $from = $RolledBackFrom }
+    Write-JsonFile $Paths.State ([pscustomobject]@{ status = $status; lastDeployedSha = $LastDeployedSha; branch = $Branch; pinnedSha = $pinned; rolledBackFrom = $from; pendingRestart = $pending })
+}
+
+function Get-StatePending($State) { return @(@($State.pendingRestart) | Where-Object { $_ }) }
+
 function Get-WriterDiskHashes($Config) {
     $hashes = [ordered]@{}
-    foreach ($rel in $Config.writerScripts) {
-        $relPath = ConvertTo-RepoRelative ([string]$rel)
+    $all = @(@($Config.writerScripts | ForEach-Object { ConvertTo-RepoRelative ([string]$_) }) + @(Get-WriteCapableTrackedFiles $Config) | Select-Object -Unique)
+    foreach ($relPath in $all) {
         $full = Join-Path $Config.repoPath ($relPath -replace '/', [IO.Path]::DirectorySeparatorChar)
         if (Test-Path -LiteralPath $full) { $hashes[$relPath] = (Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash.ToLowerInvariant() }
     }
@@ -215,25 +277,44 @@ function Get-ReleaseApproval($Config, [string]$Sha) {
     return [pscustomobject]@{ ok = $false; reason = 'no successful windows-production deployment for this SHA' }
 }
 
+# أحدث تشغيل بالاسم هو الحَكَم وحده (Codex P1): نجاح قديم لا يغطّي إعادة تشغيل أحدث فشلت أو
+# أُلغيت أو انتهت مهلتها أو ما زالت جارية. الترتيب: وقت البدء/الإنشاء ثم المعرّف.
+function Get-NewestVerdict($Items, [string]$Name, [string]$TimeField) {
+    $newest = @($Items | Where-Object { [string]$_.name -eq $Name } |
+        Sort-Object -Property @{ Expression = { [string]$_.$TimeField }; Descending = $true }, @{ Expression = { [long]$_.id }; Descending = $true }) | Select-Object -First 1
+    if (-not $newest) { return 'missing' }
+    return ([string]$newest.status + '/' + [string]$newest.conclusion)
+}
+
+# هل محتوى ملف الكتابة (blob — بصمة المحتوى نفسه) معتمد صراحةً في أي إصدار ناجح؟ الجهاز قد
+# يلحق عدة إصدارات معتمدة دفعة واحدة، وحمولة كل إصدار تغطي تغييراته هو فقط منذ الإصدار
+# السابق؛ فيُقبل الـblob إن اعتمده الإصدار الهدف أو أي إصدار سابق بموافقة كتابة صريحة.
+function Test-WriterBlobApproved($Config, $Approval, [string]$Path, [string]$Blob) {
+    if ([bool]$Approval.payload.writeScriptsApproved -and [string]$Approval.payload.writerBlobs.$Path -eq $Blob) { return $true }
+    $list = @(Get-GitHubJson $Config ('deployments?environment=' + [uri]::EscapeDataString($Config.deploymentEnvironment) + '&per_page=100'))
+    foreach ($dep in $list) {
+        if ($Config.deploymentCreator -and [string]$dep.creator.login -ne [string]$Config.deploymentCreator) { continue }
+        $payload = $dep.payload
+        if ($payload -is [string] -and $payload) { $payload = $payload | ConvertFrom-Json }
+        if (-not $payload -or [string]$payload.kind -ne 'ozk-windows-release' -or [string]$payload.sha -ne [string]$dep.sha) { continue }
+        if (-not [bool]$payload.writeScriptsApproved -or [string]$payload.writerBlobs.$Path -ne $Blob) { continue }
+        $statuses = @(Get-GitHubJson $Config ('deployments/' + $dep.id + '/statuses?per_page=5'))
+        if ($statuses.Count -gt 0 -and [string]$statuses[0].state -eq 'success') { return $true }
+    }
+    return $false
+}
+
 function Get-CiVerdict($Config, [string]$Sha) {
     $results = [ordered]@{}
     $runs = @((Get-GitHubJson $Config ('actions/runs?head_sha=' + $Sha + '&per_page=100')).workflow_runs)
-    foreach ($name in $Config.requiredMainWorkflows) {
-        $match = @($runs | Where-Object { [string]$_.name -eq [string]$name } | Sort-Object { [datetime]$_.created_at } -Descending)
-        if ($match.Count -eq 0) { $results[[string]$name] = 'missing' } else { $results[[string]$name] = ([string]$match[0].status + '/' + [string]$match[0].conclusion) }
-    }
+    foreach ($name in $Config.requiredMainWorkflows) { $results[[string]$name] = Get-NewestVerdict $runs ([string]$name) 'created_at' }
     $pulls = @(Get-GitHubJson $Config ('commits/' + $Sha + '/pulls'))
     $pr = @($pulls | Where-Object { [string]$_.merge_commit_sha -eq $Sha -and $_.merged_at }) | Select-Object -First 1
     if (-not $pr) { $results['pull_request'] = 'missing' }
     else {
         $results['pull_request'] = '#' + $pr.number
         $checks = @((Get-GitHubJson $Config ('commits/' + $pr.head.sha + '/check-runs?per_page=100')).check_runs)
-        foreach ($name in $Config.requiredPrChecks) {
-            $match = @($checks | Where-Object { [string]$_.name -eq [string]$name })
-            if ($match.Count -eq 0) { $results['pr:' + $name] = 'missing' }
-            elseif (@($match | Where-Object { [string]$_.conclusion -eq 'success' }).Count -gt 0) { $results['pr:' + $name] = 'completed/success' }
-            else { $results['pr:' + $name] = ([string]$match[0].status + '/' + [string]$match[0].conclusion) }
-        }
+        foreach ($name in $Config.requiredPrChecks) { $results['pr:' + $name] = Get-NewestVerdict $checks ([string]$name) 'started_at' }
     }
     $bad = @($results.Keys | Where-Object { $_ -ne 'pull_request' -and $results[$_] -ne 'completed/success' })
     if ($results['pull_request'] -eq 'missing') { $bad += 'pull_request' }
@@ -273,7 +354,8 @@ function New-GateRecord($Config, [string]$GateMode) {
         old_sha = $null; new_sha = $null; rollback_sha = $null
         deployment_id = $null; approver = $null; run_id = $null
         ci = $null; changed_files = @(); ps1_changed = $false; sql_changed = $false; mjs_changed = $false
-        writer_scripts_changed = @(); writer_hashes_before = $null; writer_hashes_after = $null
+        writer_scripts_changed = @(); write_capable_detected = @(); writer_hashes_before = $null; writer_hashes_after = $null
+        pending_restart = @()
         pause_ms = 0; stash_count_before = $null; stash_count_after = $null
         result = $null; reason = $null
     }
@@ -290,7 +372,7 @@ function Complete-Gate($Paths, $Record, [string]$Result, [string]$Reason, [bool]
 }
 
 function Invoke-DeployGate {
-    param($Config, [string]$GateMode = 'Deploy', [string]$RollbackTo = '')
+    param($Config, [string]$GateMode = 'Deploy', [string]$RollbackTo = '', [string[]]$AckComponents = @())
 
     $paths = Get-GatePaths $Config
     $record = New-GateRecord $Config $GateMode
@@ -317,7 +399,7 @@ function Invoke-DeployGate {
         $remote = Get-GitValue $Config @('rev-parse', ('origin/' + $Config.windowsBranch))
         if ($remote -ne $head) { return Complete-Gate $paths $record 'STOP' 'HEAD differs from origin/windows-production' $true }
         $record.writer_hashes_after = Save-WriterAllowlist $Config $paths $head
-        Write-JsonFile $paths.State ([pscustomobject]@{ status = 'ok'; lastDeployedSha = $head; branch = $branch; pinnedSha = $null; rolledBackFrom = $null })
+        Save-GateState $paths $head $branch '' '' @()
         $record.new_sha = $head
         return Complete-Gate $paths $record 'OK' 'initialized' $false
     }
@@ -329,6 +411,7 @@ function Invoke-DeployGate {
 
     if ($GateMode -eq 'Rollback') { return Invoke-GateRollback $Config $paths $record $state $head $RollbackTo }
     if ($GateMode -eq 'Unpin') { return Invoke-GateUnpin $Config $paths $record $state $head }
+    if ($GateMode -eq 'AckRestart') { return Invoke-GateAckRestart $paths $record $state $head $AckComponents }
 
     if ([string]$state.status -eq 'ROLLED_BACK_PINNED') { return Complete-Gate $paths $record 'STOP' ('pinned after rollback at ' + $state.pinnedSha) $true }
     if ($head -ne [string]$state.lastDeployedSha) { return Complete-Gate $paths $record 'STOP' ('HEAD drift: expected ' + $state.lastDeployedSha + ', found ' + $head) $true }
@@ -339,7 +422,15 @@ function Invoke-DeployGate {
     $target = Get-GitValue $Config @('rev-parse', ('origin/' + $Config.windowsBranch))
     $record.new_sha = $target
     $record.rollback_sha = $head
-    if ($target -eq $head) { $record.new_sha = $head; return Complete-Gate $paths $record 'NOOP' 'up to date' $false }
+    if ($target -eq $head) {
+        $record.new_sha = $head
+        $stillPending = @(Get-StatePending $state)
+        if ($stillPending.Count -gt 0) {
+            Send-GateAlert ('تذكير: عمليات Windows طويلة ما زالت تشغّل كوداً قديماً وتحتاج إعادة تشغيل يدوية بموافقة: ' + ($stillPending -join '، ')) 'deploy-gate-pending-restart'
+            return Complete-Gate $paths $record 'NOOP' ('up to date; pending restart: ' + ($stillPending -join ', ')) $false
+        }
+        return Complete-Gate $paths $record 'NOOP' 'up to date' $false
+    }
 
     # الـcommits المحلية يلتقطها فحص الانحراف أعلاه (HEAD يساوي آخر SHA منشور). هنا:
     # الهدف يجب أن يحوي HEAD كاملاً (Fast-Forward)، وإلا فتاريخه أُعيدت كتابته.
@@ -357,7 +448,12 @@ function Invoke-DeployGate {
     $record.ps1_changed = $summary.ps1_changed
     $record.sql_changed = $summary.sql_changed
     $record.mjs_changed = $summary.mjs_changed
-    $record.writer_scripts_changed = $summary.writer_scripts_changed
+    $detected = @(Get-WriteCapableChanged $Config $files $target)
+    $writerChanged = @(@($summary.writer_scripts_changed) + $detected | Where-Object { $_ } | Select-Object -Unique)
+    $record.write_capable_detected = $detected
+    $record.writer_scripts_changed = $writerChanged
+    $affected = @(Get-AffectedLongRunning $Config @($files | ForEach-Object { $_.path }))
+    $record.pending_restart = @(@(Get-StatePending $state) + $affected | Select-Object -Unique)
 
     try {
         $approval = Get-ReleaseApproval $Config $target
@@ -372,15 +468,19 @@ function Invoke-DeployGate {
     $record.approver = $approval.approver
     $record.run_id = $approval.runId
 
-    if ($summary.writer_scripts_changed.Count -gt 0) {
-        if (-not [bool]$approval.payload.writeScriptsApproved) {
-            return Complete-Gate $paths $record 'STOP' ('writer scripts changed without writeScriptsApproved: ' + ($summary.writer_scripts_changed -join ', ')) $true
+    if ($writerChanged.Count -gt 0) {
+        $unapproved = @()
+        try {
+            foreach ($f in @($files | Where-Object { $writerChanged -contains $_.path })) {
+                $actualBlob = 'deleted'
+                if ($f.status -ne 'D') { $actualBlob = Get-GitValue $Config @('rev-parse', ($target + ':' + $f.path)) }
+                if (-not (Test-WriterBlobApproved $Config $approval $f.path $actualBlob)) { $unapproved += $f.path }
+            }
+        } catch {
+            return Complete-Gate $paths $record 'FAIL' ('GitHub verification unavailable: ' + $_.Exception.Message) $true
         }
-        foreach ($f in @($files | Where-Object { $summary.writer_scripts_changed -contains $_.path })) {
-            $approvedBlob = [string]$approval.payload.writerBlobs.($f.path)
-            $actualBlob = 'deleted'
-            if ($f.status -ne 'D') { $actualBlob = Get-GitValue $Config @('rev-parse', ($target + ':' + $f.path)) }
-            if ($approvedBlob -ne $actualBlob) { return Complete-Gate $paths $record 'STOP' ('writer blob not approved: ' + $f.path) $true }
+        if ($unapproved.Count -gt 0) {
+            return Complete-Gate $paths $record 'STOP' ('writer scripts changed without writeScriptsApproved: ' + ($unapproved -join ', ')) $true
         }
     }
 
@@ -404,7 +504,7 @@ function Invoke-DeployGate {
     if ($merge.Code -ne 0 -or $newHead -ne $target) {
         $consistent = ($dirtyAfter.Count -eq 0 -and ($newHead -eq $head -or $newHead -eq $target))
         if ($consistent) {
-            if ($newHead -eq $target) { Write-JsonFile $paths.State ([pscustomobject]@{ status = 'ok'; lastDeployedSha = $target; branch = $branch; pinnedSha = $null; rolledBackFrom = $null }) }
+            if ($newHead -eq $target) { Save-GateState $paths $target $branch '' '' $record.pending_restart }
             Clear-DeployFlag $paths
             return Complete-Gate $paths $record 'FAIL' ('ff-merge failed, tree consistent: ' + $merge.Text) $true
         }
@@ -416,8 +516,12 @@ function Invoke-DeployGate {
     }
 
     $record.writer_hashes_after = Save-WriterAllowlist $Config $paths $target
-    Write-JsonFile $paths.State ([pscustomobject]@{ status = 'ok'; lastDeployedSha = $target; branch = $branch; pinnedSha = $null; rolledBackFrom = $null })
+    Save-GateState $paths $target $branch '' '' $record.pending_restart
     Clear-DeployFlag $paths
+    if (@($record.pending_restart).Count -gt 0) {
+        # الملفات نُشرت، لكن الإصدار ليس مطبَّقاً بالكامل: لا إعادة تشغيل تلقائية ولا إيقاف عمليات.
+        return Complete-Gate $paths $record 'DEPLOYED_PENDING_RESTART' ('deployed ' + $head.Substring(0, 7) + ' -> ' + $target.Substring(0, 7) + '; manual restart (owner approval) required for: ' + (@($record.pending_restart) -join ', ')) $true
+    }
     $result = Complete-Gate $paths $record 'OK' ('deployed ' + $head.Substring(0, 7) + ' -> ' + $target.Substring(0, 7)) $false
     Send-GateAlert ('نُشر إصدار Windows: ' + $head.Substring(0, 7) + ' → ' + $target.Substring(0, 7) + ' (ملفات: ' + $files.Count + '، PS1: ' + $summary.ps1_changed + '، SQL: ' + $summary.sql_changed + '، كتّاب: ' + $summary.writer_scripts_changed.Count + ')') ('deploy-gate-ok-' + $target)
     return $result
@@ -454,7 +558,10 @@ function Invoke-GateRollback($Config, $Paths, $Record, $State, [string]$Head, [s
     $Record.stash_count_after = Get-StashCount $Config
     if ($reset.Code -ne 0 -or $newHead -ne $toSha) { return Complete-Gate $Paths $Record 'FAIL' ('rollback failed; deploy flag kept: ' + $reset.Text) $true }
     $Record.writer_hashes_after = Save-WriterAllowlist $Config $Paths $toSha
-    Write-JsonFile $Paths.State ([pscustomobject]@{ status = 'ROLLED_BACK_PINNED'; lastDeployedSha = $toSha; branch = $State.branch; pinnedSha = $toSha; rolledBackFrom = $Head })
+    $changedBack = @(Get-ChangedFiles $Config $toSha $Head | ForEach-Object { $_.path })
+    $Record.changed_files = $changedBack
+    $Record.pending_restart = @(@(Get-StatePending $State) + @(Get-AffectedLongRunning $Config $changedBack) | Select-Object -Unique)
+    Save-GateState $Paths $toSha $State.branch $toSha $Head $Record.pending_restart
     Clear-DeployFlag $Paths
     return Complete-Gate $Paths $Record 'OK' ('rolled back ' + $Head.Substring(0, 7) + ' -> ' + $toSha.Substring(0, 7) + '; pinned') $true
 }
@@ -468,9 +575,24 @@ function Invoke-GateUnpin($Config, $Paths, $Record, $State, [string]$Head) {
     if ($remote -eq [string]$State.rolledBackFrom) {
         return Complete-Gate $Paths $Record 'STOP' 'windows-production still points at the rolled-back release; publish a fixed release first' $true
     }
-    Write-JsonFile $Paths.State ([pscustomobject]@{ status = 'ok'; lastDeployedSha = $Head; branch = $State.branch; pinnedSha = $null; rolledBackFrom = $null })
+    Save-GateState $Paths $Head $State.branch '' '' @(Get-StatePending $State)
     $Record.new_sha = $Head
+    $Record.pending_restart = @(Get-StatePending $State)
     return Complete-Gate $Paths $Record 'OK' 'unpinned' $false
+}
+
+# تسجيل يدوي بعد أن يعيد المالك تشغيل عملية طويلة بنفسه. لا يمسّ أي مهمة ولا عملية.
+function Invoke-GateAckRestart($Paths, $Record, $State, [string]$Head, [string[]]$Names) {
+    $pending = @(Get-StatePending $State)
+    $names = @(@($Names) | Where-Object { $_ })
+    if ($names.Count -eq 0) { return Complete-Gate $Paths $Record 'STOP' 'AckRestart requires -Components' $false }
+    $unknown = @($names | Where-Object { $pending -notcontains $_ })
+    if ($unknown.Count -gt 0) { return Complete-Gate $Paths $Record 'STOP' ('not pending restart: ' + ($unknown -join ', ')) $false }
+    $remaining = @($pending | Where-Object { $names -notcontains $_ })
+    Save-GateState $Paths ([string]$State.lastDeployedSha) ([string]$State.branch) ([string]$State.pinnedSha) ([string]$State.rolledBackFrom) $remaining
+    $Record.new_sha = $Head
+    $Record.pending_restart = $remaining
+    return Complete-Gate $Paths $Record 'OK' ('restart acknowledged: ' + ($names -join ', ')) $false
 }
 
 # ------------------------------------------------------------
@@ -488,7 +610,7 @@ if ($MyInvocation.InvocationName -ne '.') {
         exit 0
     }
     try {
-        $outcome = Invoke-DeployGate -Config $config -GateMode $Mode -RollbackTo $To
+        $outcome = Invoke-DeployGate -Config $config -GateMode $Mode -RollbackTo $To -AckComponents $Components
         Write-Host ($outcome.result + ': ' + $outcome.reason)
         if ($outcome.result -eq 'FAIL') { exit 1 }
         exit 0

@@ -19,6 +19,7 @@ try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { Write-V
 
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $gateScript = Join-Path (Join-Path $repoRoot 'tools') (Join-Path 'deploy-gate' 'deploy-gate.ps1')
+$script:ExampleConfig = Join-Path (Join-Path $repoRoot 'tools') (Join-Path 'deploy-gate' 'gate-config.example.json')
 
 $failures = New-Object System.Collections.ArrayList
 function Add-Failure([string]$m) { [void]$failures.Add($m); Write-Host "  FAIL: $m" -ForegroundColor Red }
@@ -48,6 +49,7 @@ function Write-TestFile([string]$Path, [string]$Content) {
 . $gateScript
 
 $script:Approved = @{}
+$script:PrChecks = @{}
 $script:RedCi = @{}
 $script:UnkindOnly = @{}
 $script:Running = @()
@@ -66,6 +68,11 @@ function Get-GitHubJson($Config, [string]$RelativePath) {
         if (-not $script:Approved.ContainsKey($sha)) { return @() }
         return @([pscustomobject]@{ id = 42; sha = $sha; creator = [pscustomobject]@{ login = 'github-actions[bot]' }; payload = $script:Approved[$sha] })
     }
+    if ($RelativePath -match '^deployments\?environment=[^&]+&per_page=') {
+        $all = @()
+        foreach ($k in $script:Approved.Keys) { $all += [pscustomobject]@{ id = 42; sha = $k; creator = [pscustomobject]@{ login = 'github-actions[bot]' }; payload = $script:Approved[$k] } }
+        return $all
+    }
     if ($RelativePath -match '^deployments/\d+/statuses') { return @([pscustomobject]@{ state = 'success' }) }
     if ($RelativePath -match '^actions/runs\?head_sha=([0-9a-f]{40})') {
         $conclusion = 'success'
@@ -73,10 +80,11 @@ function Get-GitHubJson($Config, [string]$RelativePath) {
         return [pscustomobject]@{ workflow_runs = @([pscustomobject]@{ name = 'Deploy TOBACCO Web'; status = 'completed'; conclusion = $conclusion; created_at = '2026-09-28T00:00:00Z' }) }
     }
     if ($RelativePath -match '^commits/([0-9a-f]{40})/pulls') {
-        return @([pscustomobject]@{ number = 1; merge_commit_sha = $Matches[1]; merged_at = '2026-09-28T00:00:00Z'; head = [pscustomobject]@{ sha = 'prhead' } })
+        return @([pscustomobject]@{ number = 1; merge_commit_sha = $Matches[1]; merged_at = '2026-09-28T00:00:00Z'; head = [pscustomobject]@{ sha = ('prhead-' + $Matches[1]) } })
     }
-    if ($RelativePath -match '^commits/prhead/check-runs') {
-        return [pscustomobject]@{ check_runs = @([pscustomobject]@{ name = 'check'; status = 'completed'; conclusion = 'success' }) }
+    if ($RelativePath -match '^commits/prhead-([0-9a-f]{40})/check-runs') {
+        if ($script:PrChecks.ContainsKey($Matches[1])) { return [pscustomobject]@{ check_runs = @($script:PrChecks[$Matches[1]]) } }
+        return [pscustomobject]@{ check_runs = @([pscustomobject]@{ id = 1; name = 'check'; status = 'completed'; conclusion = 'success'; started_at = '2026-09-28T00:00:00Z' }) }
     }
     throw "unexpected GitHub path: $RelativePath"
 }
@@ -104,20 +112,19 @@ function New-GateTestEnv {
     Invoke-TestGit $base @('clone', '-q', $origin, $repo) | Out-Null
     Invoke-TestGit $repo @('checkout', '-q', '-B', 'windows-production', 'origin/windows-production') | Out-Null
     Invoke-TestGit $repo @('branch', '-q', '--set-upstream-to=origin/windows-production') | Out-Null
-    $config = [pscustomobject]@{
-        expectedHost = 'TESTHOST'; repoPath = $repo; gateDir = $gate; githubRepo = 'test/test'
-        windowsBranch = 'windows-production'; mainBranch = 'main'; deploymentEnvironment = 'windows-production'
-        deploymentCreator = 'github-actions[bot]'; requiredMainWorkflows = @('Deploy TOBACCO Web'); requiredPrChecks = @('check')
-        drainTimeoutSeconds = 1; flagTtlMinutes = 15; pauseTasks = @('T1'); longRunningTasks = @()
-        writerScripts = @('tools/sync-approved-prices-to-ameen.ps1')
-    }
-    $script:Approved = @{}; $script:RedCi = @{}; $script:UnkindOnly = @{}; $script:Running = @(); $script:Alerts.Clear()
+    # الإعداد الحقيقي (writeScan وlongRunningComponents وwriterScripts) مع مسارات مؤقتة.
+    $config = [System.IO.File]::ReadAllText($script:ExampleConfig) | ConvertFrom-Json
+    $config.expectedHost = 'TESTHOST'; $config.repoPath = $repo; $config.gateDir = $gate; $config.githubRepo = 'test/test'
+    $config.requiredMainWorkflows = @('Deploy TOBACCO Web'); $config.requiredPrChecks = @('check')
+    $config.drainTimeoutSeconds = 1; $config.pauseTasks = @('T1')
+    $script:Approved = @{}; $script:PrChecks = @{}; $script:RedCi = @{}; $script:UnkindOnly = @{}; $script:Running = @(); $script:Alerts.Clear()
     return [pscustomobject]@{ Base = $base; Seed = $seed; Repo = $repo; Gate = $gate; Config = $config }
 }
 
 # ينشر commit على main ثم يقدّم windows-production إليه (كما يفعل الـworkflow).
 function Publish-TestRelease($T, [hashtable]$Files, [switch]$Approve, [switch]$WriteApproved, [switch]$OffMain, [string]$BlobOverride = '') {
     Invoke-TestGit $T.Seed @('fetch', '-q', 'origin') | Out-Null
+    $previous = Invoke-TestGit $T.Seed @('rev-parse', 'origin/windows-production')
     if ($OffMain) { Invoke-TestGit $T.Seed @('checkout', '-q', '-B', 'side', 'origin/windows-production') | Out-Null }
     else { Invoke-TestGit $T.Seed @('checkout', '-q', 'main') | Out-Null }
     foreach ($k in $Files.Keys) { Write-TestFile (Join-Path $T.Seed $k) $Files[$k] }
@@ -127,13 +134,15 @@ function Publish-TestRelease($T, [hashtable]$Files, [switch]$Approve, [switch]$W
     if (-not $OffMain) { Invoke-TestGit $T.Seed @('push', '-q', 'origin', 'main') | Out-Null }
     Invoke-TestGit $T.Seed @('push', '-q', '--force', 'origin', ($sha + ':refs/heads/windows-production')) | Out-Null
     if ($Approve) {
+        # كما يفعل windows-release-verify.mjs: blob لكل ملف متغيّر منذ الإصدار السابق.
         $blobs = @{}
-        foreach ($k in $Files.Keys) {
-            if ($T.Config.writerScripts -contains $k) {
-                $blob = Invoke-TestGit $T.Seed @('rev-parse', ($sha + ':' + $k))
-                if ($BlobOverride) { $blob = $BlobOverride }
-                $blobs[$k] = $blob
-            }
+        foreach ($line in ((Invoke-TestGit $T.Seed @('diff', '--name-status', '--no-renames', $previous, $sha)) -split "`n")) {
+            if ($line -notmatch '^([A-Z])\s+(.+)$') { continue }
+            $k = $Matches[2].Trim()
+            $blob = 'deleted'
+            if ($Matches[1] -ne 'D') { $blob = Invoke-TestGit $T.Seed @('rev-parse', ($sha + ':' + $k)) }
+            if ($BlobOverride) { $blob = $BlobOverride }
+            $blobs[$k] = $blob
         }
         $script:Approved[$sha] = [pscustomobject]@{ kind = 'ozk-windows-release'; sha = $sha; approver = 'owner'; runId = '1'; writeScriptsApproved = [bool]$WriteApproved; writerBlobs = [pscustomobject]$blobs }
     }
@@ -267,7 +276,7 @@ try {
     Assert-True ($r.result -eq 'STOP' -and $r.reason -like 'writer scripts changed*' -and (Get-TestHead $e5) -eq $before) 'writer change without writeScriptsApproved => STOP'
     [void](Publish-TestRelease $e5 @{ 'tools/sync-approved-prices-to-ameen.ps1' = "'writer v3'`n" } -Approve -WriteApproved -BlobOverride '0000000000000000000000000000000000000000')
     $r = Invoke-DeployGate -Config $e5.Config -GateMode 'Deploy'
-    Assert-True ($r.result -eq 'STOP' -and $r.reason -like 'writer blob not approved*' -and (Get-TestHead $e5) -eq $before) 'approved blob mismatch => STOP'
+    Assert-True ($r.result -eq 'STOP' -and $r.reason -like 'writer scripts changed*' -and (Get-TestHead $e5) -eq $before) 'approved blob mismatch => STOP'
     $sha = Publish-TestRelease $e5 @{ 'tools/sync-approved-prices-to-ameen.ps1' = "'writer v4'`n" } -Approve -WriteApproved
     $r = Invoke-DeployGate -Config $e5.Config -GateMode 'Deploy'
     Assert-True ($r.result -eq 'OK' -and (Get-TestHead $e5) -eq $sha) 'explicitly approved writer change deploys'
@@ -297,10 +306,116 @@ try {
     $r = Invoke-DeployGate -Config $e6.Config -GateMode 'Deploy'
     Assert-True ($r.result -eq 'OK' -and (Get-TestHead $e6) -eq $v3) 'fixed release deploys fast-forward after unpin'
 
+    Write-Host '== CI: newest run per required check decides (Codex P1 #1)'
+    $e7 = New-InitializedEnv
+    $before = Get-TestHead $e7
+    $sha = Publish-TestRelease $e7 @{ 'tools/reader.ps1' = "'rerun'`n" } -Approve
+    $script:PrChecks[$sha] = @(
+        [pscustomobject]@{ id = 10; name = 'check'; status = 'completed'; conclusion = 'success'; started_at = '2026-09-28T01:00:00Z' },
+        [pscustomobject]@{ id = 11; name = 'check'; status = 'completed'; conclusion = 'failure'; started_at = '2026-09-28T02:00:00Z' })
+    $r = Invoke-DeployGate -Config $e7.Config -GateMode 'Deploy'
+    Assert-True ($r.result -eq 'STOP' -and $r.reason -like 'CI not green*' -and (Get-TestHead $e7) -eq $before) 'old success + newer failure => BLOCK'
+    foreach ($bad in @(@('completed', 'cancelled'), @('completed', 'timed_out'), @('in_progress', ''))) {
+        $script:PrChecks[$sha] = @(
+            [pscustomobject]@{ id = 10; name = 'check'; status = 'completed'; conclusion = 'success'; started_at = '2026-09-28T01:00:00Z' },
+            [pscustomobject]@{ id = 12; name = 'check'; status = $bad[0]; conclusion = $bad[1]; started_at = '2026-09-28T03:00:00Z' })
+        $r = Invoke-DeployGate -Config $e7.Config -GateMode 'Deploy'
+        Assert-True ($r.result -eq 'STOP' -and (Get-TestHead $e7) -eq $before) ('old success + newer ' + $bad[0] + '/' + $bad[1] + ' => BLOCK')
+    }
+    $script:PrChecks[$sha] = @(
+        [pscustomobject]@{ id = 11; name = 'check'; status = 'completed'; conclusion = 'failure'; started_at = '2026-09-28T02:00:00Z' },
+        [pscustomobject]@{ id = 13; name = 'check'; status = 'completed'; conclusion = 'success'; started_at = '2026-09-28T04:00:00Z' })
+    $r = Invoke-DeployGate -Config $e7.Config -GateMode 'Deploy'
+    Assert-True ($r.result -eq 'OK' -and (Get-TestHead $e7) -eq $sha) 'old failure + newer success => PASS'
+
+    Write-Host '== Newly introduced Ameen writer (Codex P1 #2)'
+    $e8 = New-InitializedEnv
+    $v0 = Publish-TestRelease $e8 @{ 'tools/push-customer-movements.ps1' = "`$q = 'SELECT 1 FROM cu000'`n" } -Approve
+    $r = Invoke-DeployGate -Config $e8.Config -GateMode 'Deploy'
+    Assert-True ($r.result -eq 'OK') 'known reader (SELECT only) deploys without write approval'
+    $before = Get-TestHead $e8
+    [void](Publish-TestRelease $e8 @{ 'tools/push-customer-movements.ps1' = "`$cmd.CommandText = 'UPDATE bt000 SET Flag = 1'`n`$cmd.ExecuteNonQuery()`n" } -Approve)
+    $r = Invoke-DeployGate -Config $e8.Config -GateMode 'Deploy'
+    Assert-True ($r.result -eq 'STOP' -and $r.reason -like 'writer scripts changed*push-customer-movements*' -and (Get-TestHead $e8) -eq $before) 'reader turned writer (UPDATE/ExecuteNonQuery) blocked without write approval'
+    Assert-True (@($r.write_capable_detected) -contains 'tools/push-customer-movements.ps1') 'audit names the newly write-capable file'
+    [void](Publish-TestRelease $e8 @{ 'tools/push-customer-movements.ps1' = "`$cs = `$env:AMEEN_SQL_WRITE_CONNECTION_STRING`n" } -Approve)
+    $r = Invoke-DeployGate -Config $e8.Config -GateMode 'Deploy'
+    Assert-True ($r.result -eq 'STOP' -and (Get-TestHead $e8) -eq $before) 'reader switched to the write connection blocked without write approval'
+    [void](Publish-TestRelease $e8 @{ 'tools/ameen-new-writer.sql' = "INSERT INTO mt000 (Name) VALUES ('x')`n" } -Approve)
+    $r = Invoke-DeployGate -Config $e8.Config -GateMode 'Deploy'
+    Assert-True ($r.result -eq 'STOP' -and (Get-TestHead $e8) -eq $before) 'new SQL file with INSERT blocked without write approval'
+    $e8b = New-InitializedEnv
+    $sha = Publish-TestRelease $e8b @{ 'tools/push-customer-movements.ps1' = "`$cmd.CommandText = 'DELETE FROM bt000'`n"; 'tools/ameen-new-writer.sql' = "INSERT INTO mt000 (Name) VALUES ('x')`n" } -Approve -WriteApproved
+    $r = Invoke-DeployGate -Config $e8b.Config -GateMode 'Deploy'
+    Assert-True ($r.result -eq 'OK' -and (Get-TestHead $e8b) -eq $sha) 'explicitly approved new writers deploy'
+    $allow = [System.IO.File]::ReadAllText((Join-Path $e8b.Gate 'writer-allowlist.json')) | ConvertFrom-Json
+    Assert-True ($null -ne $allow.files.'tools/push-customer-movements.ps1' -and $null -ne $allow.files.'tools/ameen-new-writer.sql') 'newly write-capable files join the pinned hash list'
+
+    Write-Host '== Catch-up across several approved releases'
+    $e8c = New-InitializedEnv
+    [void](Publish-TestRelease $e8c @{ 'tools/push-invoice-series.ps1' = "`$cs = `$env:AMEEN_SQL_WRITE_CONNECTION_STRING`n" } -Approve -WriteApproved)
+    $r2 = Publish-TestRelease $e8c @{ 'docs/after.md' = "z`n" } -Approve
+    $r = Invoke-DeployGate -Config $e8c.Config -GateMode 'Deploy'
+    Assert-True ($r.result -eq 'OK' -and (Get-TestHead $e8c) -eq $r2) 'writer approved in an earlier release stays approved when catching up'
+    $e8d = New-InitializedEnv
+    $before = Get-TestHead $e8d
+    [void](Publish-TestRelease $e8d @{ 'tools/push-invoice-series.ps1' = "`$cs = `$env:AMEEN_SQL_WRITE_CONNECTION_STRING`n" } -Approve)
+    [void](Publish-TestRelease $e8d @{ 'docs/after.md' = "z`n" } -Approve -WriteApproved)
+    $r = Invoke-DeployGate -Config $e8d.Config -GateMode 'Deploy'
+    Assert-True ($r.result -eq 'STOP' -and (Get-TestHead $e8d) -eq $before) 'a later write approval does not cover an earlier unapproved writer blob'
+
+    $e8e = New-InitializedEnv
+    [void](Publish-TestRelease $e8e @{ 'tools/tests/Test-Fixture.ps1' = "'INSERT INTO t VALUES (1)'`n"; 'docs/notes.md' = "update x set y`n" } -Approve)
+    $r = Invoke-DeployGate -Config $e8e.Config -GateMode 'Deploy'
+    Assert-True ($r.result -eq 'OK') 'tests and docs are outside the write scan scope'
+
+    Write-Host '== Long-running components (Codex P1 #3)'
+    $e9 = New-InitializedEnv
+    $sha = Publish-TestRelease $e9 @{ 'docs/unrelated.md' = "x`n"; 'tools/reader.ps1' = "'v9'`n" } -Approve
+    $r = Invoke-DeployGate -Config $e9.Config -GateMode 'Deploy'
+    Assert-True ($r.result -eq 'OK' -and @($r.pending_restart).Count -eq 0 -and (Get-TestState $e9).status -eq 'ok') 'unrelated files only => OK, no pending restart'
+    $cases = @(
+        @{ file = 'tools/ameen-read-worker.ps1'; name = 'TOBACCO Ameen Read Worker' },
+        @{ file = 'tools/ameen-read-gateway.ps1'; name = 'TOBACCO Ameen Read Worker' },
+        @{ file = 'tools/ameen-autoprint/invoice-html.js'; name = 'OZK-AmeenAutoPrint' },
+        @{ file = 'tools/ameen-autoprint/package.json'; name = 'OZK-AmeenAutoPrint' },
+        @{ file = 'scripts/serve.mjs'; name = 'OZK-Tobacco-Server (scripts/serve.mjs)' })
+    foreach ($c in $cases) {
+        $ec = New-InitializedEnv
+        $sha = Publish-TestRelease $ec @{ ($c.file) = ("// change " + [guid]::NewGuid().ToString('N') + "`n") } -Approve
+        $r = Invoke-DeployGate -Config $ec.Config -GateMode 'Deploy'
+        $st = Get-TestState $ec
+        $a = @(Get-AuditLines $ec)[-1]
+        Assert-True ($r.result -eq 'DEPLOYED_PENDING_RESTART' -and (Get-TestHead $ec) -eq $sha) ($c.file + ' => files deployed, DEPLOYED_PENDING_RESTART')
+        Assert-True (@($st.pendingRestart) -contains $c.name -and $st.status -eq 'DEPLOYED_PENDING_RESTART' -and $st.lastDeployedSha -eq $sha) ('state names ' + $c.name)
+        Assert-True ($a.result -eq 'DEPLOYED_PENDING_RESTART' -and $a.result -ne 'OK' -and @($a.pending_restart) -contains $c.name) ('audit records pending restart for ' + $c.name + ' and not OK')
+        Assert-True (@($script:Alerts | Where-Object { $_ -like ('*' + $c.name + '*') }).Count -gt 0) ('alert names ' + $c.name)
+    }
+    $em = New-InitializedEnv
+    $sha = Publish-TestRelease $em @{ 'tools/ameen-read-worker.ps1' = "'w2'`n"; 'tools/ameen-autoprint/watcher.js' = "// w2`n"; 'scripts/serve.mjs' = "// s2`n" } -Approve
+    $r = Invoke-DeployGate -Config $em.Config -GateMode 'Deploy'
+    $names = @('TOBACCO Ameen Read Worker', 'OZK-AmeenAutoPrint', 'OZK-Tobacco-Server (scripts/serve.mjs)')
+    Assert-True ($r.result -eq 'DEPLOYED_PENDING_RESTART' -and @($names | Where-Object { @($r.pending_restart) -notcontains $_ }).Count -eq 0 -and @($r.pending_restart).Count -eq 3) 'multiple components => complete list, no name lost'
+    $sha2 = Publish-TestRelease $em @{ 'docs/later.md' = "y`n" } -Approve
+    $r = Invoke-DeployGate -Config $em.Config -GateMode 'Deploy'
+    Assert-True ($r.result -eq 'DEPLOYED_PENDING_RESTART' -and @($r.pending_restart).Count -eq 3) 'a later unrelated release keeps the pending list (old code still running)'
+    $script:Alerts.Clear()
+    $r = Invoke-DeployGate -Config $em.Config -GateMode 'Deploy'
+    Assert-True ($r.result -eq 'NOOP' -and @($script:Alerts | Where-Object { $_ -like '*OZK-AmeenAutoPrint*' }).Count -eq 1) 'NOOP while pending sends a reminder naming the components'
+    $r = Invoke-DeployGate -Config $em.Config -GateMode 'AckRestart' -AckComponents @('Unknown Component')
+    Assert-True ($r.result -eq 'STOP') 'acknowledging an unknown component is refused'
+    $r = Invoke-DeployGate -Config $em.Config -GateMode 'AckRestart' -AckComponents @('TOBACCO Ameen Read Worker')
+    $st = Get-TestState $em
+    Assert-True ($r.result -eq 'OK' -and @($st.pendingRestart).Count -eq 2 -and $st.status -eq 'DEPLOYED_PENDING_RESTART') 'manual acknowledgement clears only the named component'
+    $r = Invoke-DeployGate -Config $em.Config -GateMode 'AckRestart' -AckComponents @('OZK-AmeenAutoPrint', 'OZK-Tobacco-Server (scripts/serve.mjs)')
+    Assert-True ($r.result -eq 'OK' -and (Get-TestState $em).status -eq 'ok') 'state returns to ok once every restart is acknowledged'
+
     Write-Host '== Safety invariants in the source'
     $src = [System.IO.File]::ReadAllText($gateScript)
     Assert-True ($src -notmatch "'pull'" -and $src -notmatch "'rebase'" -and $src -notmatch "'--hard'") 'gate never passes pull, rebase or --hard to git'
     Assert-True ($src -match "'merge', '--ff-only'") 'gate updates with merge --ff-only'
+    $forbidden = @('Stop-ScheduledTask', 'Start-ScheduledTask', 'Enable-ScheduledTask', 'Disable-ScheduledTask', 'Set-ScheduledTask', 'Register-ScheduledTask', 'Unregister-ScheduledTask', 'Stop-Process', 'Restart-Service', 'Stop-Service', 'taskkill', 'schtasks')
+    Assert-True (@($forbidden | Where-Object { $src -match [regex]::Escape($_) }).Count -eq 0) 'gate never restarts, stops or mutates tasks/processes'
 } catch {
     Add-Failure ('unexpected error: ' + $_.Exception.Message + ' @ ' + $_.InvocationInfo.PositionMessage)
 } finally {

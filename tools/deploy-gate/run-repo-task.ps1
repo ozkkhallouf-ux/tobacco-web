@@ -67,7 +67,12 @@ function Invoke-RepoTask {
     }
 
     $writers = @($Config.writerScripts | ForEach-Object { ([string]$_ -replace '\\', '/').TrimStart('/') })
-    $isWriter = ($writers -contains $rel)
+    # قائمة البصمات تضم أيضاً كل ملف كشفت البوابة قدرته على الكتابة (متغيّر اتصال الكتابة أو
+    # تعليمات تعديل SQL) — فالسكربت «القارئ» الذي صار كاتباً يُعامَل كاتباً هنا أيضاً.
+    $allow = Read-LauncherJson (Join-Path $gateDir 'writer-allowlist.json')
+    $pinned = @()
+    if ($allow -and $allow.files) { $pinned = @($allow.files.PSObject.Properties | ForEach-Object { $_.Name }) }
+    $isWriter = ($writers -contains $rel) -or ($pinned -contains $rel)
 
     $flagPath = Join-Path $gateDir 'deploying.flag'
     if (Test-Path -LiteralPath $flagPath) {
@@ -86,13 +91,12 @@ function Invoke-RepoTask {
     }
 
     if ($isWriter) {
-        $allow = Read-LauncherJson (Join-Path $gateDir 'writer-allowlist.json')
         if (-not $allow) {
             Write-LauncherLog $gateDir ('REFUSE writer without allowlist: ' + $rel)
             Send-LauncherAlert ('رُفض تشغيل سكربت كتابة بلا قائمة بصمات معتمدة: ' + $rel) 'launcher-writer-no-allowlist'
             return 1
         }
-        foreach ($w in $writers) {
+        foreach ($w in @(@($writers) + $pinned | Select-Object -Unique)) {
             $wFull = Join-Path $repoFull ($w -replace '/', [IO.Path]::DirectorySeparatorChar)
             $expected = [string]$allow.files.$w
             $actual = ''

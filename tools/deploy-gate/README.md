@@ -22,6 +22,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\ProgramData\OZK-TOBAC
 # رجوع طارئ يدوي إلى SHA سبق نشره (مسجَّل في audit.jsonl)، ثم تثبيت الحالة
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\ProgramData\OZK-TOBACCO\DeployGate\deploy-gate.ps1 -Mode Rollback -To <sha>
 
+# بعد أن يعيد المالك تشغيل عملية طويلة يدوياً (البوابة لا تعيد تشغيل شيئاً بنفسها)
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\ProgramData\OZK-TOBACCO\DeployGate\deploy-gate.ps1 -Mode AckRestart -Components "TOBACCO Ameen Read Worker"
+
 # فك التثبيت بعد نشر إصدار مصحَّح على windows-production
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\ProgramData\OZK-TOBACCO\DeployGate\deploy-gate.ps1 -Mode Unpin
 ```

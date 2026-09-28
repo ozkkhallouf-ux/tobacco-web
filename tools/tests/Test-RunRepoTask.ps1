@@ -100,6 +100,18 @@ try {
     $code = Invoke-RepoTask -Config $config -RelativeScript 'tools/reader.ps1' -Arguments @('-Tag', 'r5') -PsExe $psExe
     Assert-True ($code -eq 3 -and (Get-Runs) -contains 'r5') 'readers are not blocked by writer hashes'
 
+    Write-Host '== Detected writers (pinned by the gate, not in writerScripts)'
+    Write-TestFile (Join-Path $repo 'tools/detected.ps1') ($body -replace 'MARKER', ($marker -replace "'", "''"))
+    Save-Allowlist
+    $allow = [System.IO.File]::ReadAllText($allowPath) | ConvertFrom-Json
+    $allow.files | Add-Member -NotePropertyName 'tools/detected.ps1' -NotePropertyValue ((Get-FileHash -LiteralPath (Join-Path $repo 'tools/detected.ps1') -Algorithm SHA256).Hash.ToLowerInvariant())
+    [System.IO.File]::WriteAllText($allowPath, ($allow | ConvertTo-Json -Depth 5))
+    $code = Invoke-RepoTask -Config $config -RelativeScript 'tools/detected.ps1' -Arguments @('-Tag', 'd1') -PsExe $psExe
+    Assert-True ($code -eq 3 -and (Get-Runs) -contains 'd1') 'pinned detected writer with matching hash runs'
+    Add-Content -LiteralPath (Join-Path $repo 'tools/detected.ps1') -Value "# tampered"
+    $code = Invoke-RepoTask -Config $config -RelativeScript 'tools/detected.ps1' -Arguments @('-Tag', 'd2') -PsExe $psExe
+    Assert-True ($code -eq 1 -and -not ((Get-Runs) -contains 'd2')) 'pinned detected writer with changed content is refused'
+
     Write-Host '== Path safety'
     $code = Invoke-RepoTask -Config $config -RelativeScript '../outside.ps1' -Arguments @() -PsExe $psExe
     Assert-True ($code -eq 2) 'script outside the repository refused'

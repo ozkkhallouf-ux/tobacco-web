@@ -45,27 +45,46 @@ export function classifyChanges(nameStatusText, writerScripts) {
   };
 }
 
-// أحدث تشغيل لكل workflow مطلوب على الـSHA، ثم الفحوص المطلوبة على رأس الـPR.
+// أحدث تشغيل بالاسم هو الحَكَم وحده (Codex P1): نجاح قديم لا يغطّي إعادة تشغيل أحدث
+// فشلت أو أُلغيت أو انتهت مهلتها أو ما زالت جارية. الترتيب: وقت البدء/الإنشاء ثم المعرّف.
+export function newestByName(items, name, timeField) {
+  return items
+    .filter((x) => x.name === name)
+    .sort((a, b) => String(b[timeField] || "").localeCompare(String(a[timeField] || "")) || Number(b.id || 0) - Number(a.id || 0))[0] || null;
+}
+
+const verdict = (run) => (run ? `${run.status}/${run.conclusion}` : "missing");
+
+// أحدث تشغيل لكل workflow مطلوب على الـSHA، ثم أحدث تشغيل لكل فحص مطلوب على رأس الـPR.
 export function evaluateCi({ runs, requiredMainWorkflows, pullRequest, prCheckRuns, requiredPrChecks }) {
   const results = {};
-  for (const name of requiredMainWorkflows) {
-    const latest = runs
-      .filter((r) => r.name === name)
-      .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0];
-    results[name] = latest ? `${latest.status}/${latest.conclusion}` : "missing";
-  }
+  for (const name of requiredMainWorkflows) results[name] = verdict(newestByName(runs, name, "created_at"));
   results.pull_request = pullRequest ? `#${pullRequest.number}` : "missing";
   if (pullRequest) {
-    for (const name of requiredPrChecks) {
-      const matches = prCheckRuns.filter((c) => c.name === name);
-      results[`pr:${name}`] = !matches.length
-        ? "missing"
-        : matches.some((c) => c.conclusion === "success") ? "completed/success" : `${matches[0].status}/${matches[0].conclusion}`;
-    }
+    for (const name of requiredPrChecks) results[`pr:${name}`] = verdict(newestByName(prCheckRuns, name, "started_at"));
   }
   const failing = Object.keys(results).filter((k) => k !== "pull_request" && results[k] !== "completed/success");
   if (!pullRequest) failing.push("pull_request");
   return { ok: failing.length === 0, results, failing };
+}
+
+// كشف قدرة الكتابة إلى الأمين (دفاع إضافي، متحفّظ): ملف تنفيذي تحت tools/ أو scripts/
+// (خارج الاختبارات) يحوي متغيّر اتصال الكتابة أو تعليمات تعديل SQL. ليس بديلاً عن فصل
+// صلاحيات SQL: كل السكربتات اليوم تتصل بحساب يملك الكتابة.
+export function inWriteScanScope(filePath, writeScan) {
+  const p = normalize(filePath);
+  if (!new RegExp(writeScan.include, "i").test(p)) return false;
+  return !writeScan.exclude.some((rx) => new RegExp(rx, "i").test(p));
+}
+
+export function writeIndicators(content, writeScan) {
+  return writeScan.patterns.filter((rx) => new RegExp(rx, "i").test(String(content)));
+}
+
+// العمليات الطويلة التي يمسّ الإصدار ملفاتها: تبقى تشغّل الكود القديم حتى إعادة تشغيل يدوية.
+export function affectedLongRunning(changedPaths, components) {
+  const changed = new Set(changedPaths.map(normalize));
+  return components.filter((c) => c.files.some((f) => changed.has(normalize(f)))).map((c) => c.name);
 }
 
 function git(args) {
@@ -132,7 +151,8 @@ function writeStepSummary(summary) {
   if (!process.env.GITHUB_STEP_SUMMARY) return;
   appendFileSync(process.env.GITHUB_STEP_SUMMARY, [
     `## إصدار Windows: \`${summary.base.slice(0, 7)}\` → \`${summary.sha.slice(0, 7)}\``,
-    `- ملفات متغيّرة: ${summary.changedFiles.length} — PS1: ${summary.ps1Changed} — SQL: ${summary.sqlChanged} — كتّاب: ${summary.writerScriptsChanged.join(", ") || "لا"}`,
+    `- ملفات متغيّرة: ${summary.changedFiles.length} — PS1: ${summary.ps1Changed} — SQL: ${summary.sqlChanged} — قادرة على الكتابة: ${summary.writerScriptsChanged.join(", ") || "لا"}`,
+    `- عمليات طويلة تحتاج إعادة تشغيل يدوية بعد النشر: ${summary.pendingRestart.join(", ") || "لا"}`,
     ...Object.entries(summary.ci).map(([k, v]) => `- CI ${k}: ${v}`),
     "", "```", ...summary.changedFiles, "```"
   ].join("\n") + "\n");
@@ -145,6 +165,11 @@ async function main() {
   const base = verifyGitPreconditions(sha, config);
 
   const change = classifyChanges(git(["diff", "--name-status", "--no-renames", base, sha]), config.writerScripts);
+  const detected = change.files
+    .filter((f) => f.status !== "D" && inWriteScanScope(f.path, config.writeScan))
+    .filter((f) => writeIndicators(git(["show", `${sha}:${f.path}`]), config.writeScan).length > 0)
+    .map((f) => f.path);
+  change.writerScriptsChanged = [...new Set([...change.writerScriptsChanged, ...detected])].sort();
   if (change.writerScriptsChanged.length && !writeApproved) {
     throw new Error(`writer scripts changed and write_scripts_approved is false: ${change.writerScriptsChanged.join(", ")}`);
   }
@@ -152,7 +177,8 @@ async function main() {
   const summary = {
     kind: RELEASE_KIND, sha, base, windowsRef: config.windowsBranch, writeScriptsApproved: writeApproved, writerBlobs: writerBlobsFor(change, sha),
     changedFiles: change.files.map((f) => `${f.status} ${f.path}`), ps1Changed: change.ps1Changed, sqlChanged: change.sqlChanged,
-    mjsChanged: change.mjsChanged, writerScriptsChanged: change.writerScriptsChanged, ci: ci.results
+    mjsChanged: change.mjsChanged, writerScriptsChanged: change.writerScriptsChanged, ci: ci.results,
+    pendingRestart: affectedLongRunning(change.files.map((f) => f.path), config.longRunningComponents)
   };
   writeFileSync(out, JSON.stringify(summary, null, 2));
   writeStepSummary(summary);
