@@ -113,7 +113,7 @@ create table if not exists public.smart_inventory_count_attempts (
   session_id uuid not null references public.smart_inventory_sessions(id) on delete cascade,
   item_id uuid not null references public.smart_inventory_items(id) on delete cascade,
   attempt_no integer not null check (attempt_no > 0),
-  attempt_kind text not null check (attempt_kind in ('primary','recount','owner_correction')),
+  attempt_kind text not null check (attempt_kind in ('primary','recount','owner_correction','self_correction')),
   count_state text not null check (count_state in ('counted','zero','not_found','damaged')),
   unit1_qty numeric(18,3) not null default 0 check (unit1_qty >= 0),
   unit2_qty numeric(18,3) not null default 0 check (unit2_qty >= 0),
@@ -363,6 +363,7 @@ begin
     'id',i.id,'itemKey',i.item_key,'itemGuid',i.item_guid,'itemCode',i.item_code,'itemName',i.item_name,
     'shelfLocation',i.shelf_location,'unit1Name',i.unit1_name,'unit2Name',i.unit2_name,'unit2Factor',i.unit2_factor,
     'countState',i.count_state,
+    'countedByMe',coalesce(i.counted_by = auth.uid(), false),
     'unit1Qty',case when i.recount_requested and i.counted_by<>auth.uid() and not public.smart_inventory_is_owner() then null else i.unit1_qty end,
     'unit2Qty',case when i.recount_requested and i.counted_by<>auth.uid() and not public.smart_inventory_is_owner() then null else i.unit2_qty end,
     'damagedUnit1Qty',case when i.recount_requested and i.counted_by<>auth.uid() and not public.smart_inventory_is_owner() then null else i.damaged_unit1_qty end,
@@ -392,7 +393,12 @@ begin
   if v_item.id is null then raise exception 'item_not_found'; end if;
   select * into v_session from public.smart_inventory_sessions where id=v_item.session_id;
   if v_session.status<>'in_progress' then return jsonb_build_object('ok',false,'code','session_closed'); end if;
-  if v_item.count_state<>'uncounted' and not v_item.recount_requested then
+  -- A saved row stays locked for everyone except the counter who saved it, and only while this session is still open.
+  if v_item.count_state<>'uncounted' and not v_item.recount_requested and v_item.counted_by is distinct from auth.uid() then
+    return jsonb_build_object('ok',false,'code','already_counted','countedByDisplayName',v_item.counted_by_display_name,'countedAt',v_item.counted_at);
+  end if;
+  if v_item.count_state<>'uncounted' and not v_item.recount_requested and v_item.counted_by=auth.uid()
+     and not exists (select 1 from public.smart_inventory_participants p where p.session_id=v_item.session_id and p.user_id=auth.uid()) then
     return jsonb_build_object('ok',false,'code','already_counted','countedByDisplayName',v_item.counted_by_display_name,'countedAt',v_item.counted_at);
   end if;
   if v_item.recount_requested and v_item.counted_by=auth.uid() then
@@ -431,7 +437,12 @@ begin
   if v_item.id is null then raise exception 'item_not_found'; end if;
   select * into v_session from public.smart_inventory_sessions where id=v_item.session_id for share;
   if v_session.status<>'in_progress' then return jsonb_build_object('ok',false,'code','session_closed'); end if;
-  if v_item.count_state<>'uncounted' and not v_item.recount_requested then
+  -- Same counter may correct their own row before the session is completed. Another counter still loses with already_counted.
+  if v_item.count_state<>'uncounted' and not v_item.recount_requested and v_item.counted_by is distinct from auth.uid() then
+    return jsonb_build_object('ok',false,'code','already_counted','countedByDisplayName',v_item.counted_by_display_name,'countedAt',v_item.counted_at);
+  end if;
+  if v_item.count_state<>'uncounted' and not v_item.recount_requested and v_item.counted_by=auth.uid()
+     and not exists (select 1 from public.smart_inventory_participants p where p.session_id=v_item.session_id and p.user_id=auth.uid()) then
     return jsonb_build_object('ok',false,'code','already_counted','countedByDisplayName',v_item.counted_by_display_name,'countedAt',v_item.counted_at);
   end if;
   if p_expected_version is not null and v_item.row_version<>p_expected_version then
@@ -444,12 +455,12 @@ begin
   v_actual:=round(coalesce(p_unit1_qty,0)+coalesce(p_unit2_qty,0)*v_item.unit2_factor,3);
   if p_count_state in ('zero','not_found') and v_actual<>0 then raise exception 'zero_state_requires_zero'; end if;
   select coalesce(max(attempt_no),0)+1 into v_no from public.smart_inventory_count_attempts where item_id=p_item_id;
-  v_kind:=case when v_item.recount_requested then 'recount' else 'primary' end;
+  v_kind:=case when v_item.recount_requested then 'recount' when v_item.count_state<>'uncounted' and v_item.counted_by=auth.uid() then 'self_correction' else 'primary' end;
   insert into public.smart_inventory_count_attempts(request_id,session_id,item_id,attempt_no,attempt_kind,count_state,
     unit1_qty,unit2_qty,damaged_unit1_qty,actual_qty_unit1,counted_by,counted_by_display_name)
   values(p_request_id,v_item.session_id,p_item_id,v_no,v_kind,p_count_state,coalesce(p_unit1_qty,0),coalesce(p_unit2_qty,0),
     coalesce(p_damaged_unit1_qty,0),v_actual,auth.uid(),v_actor) returning * into v_attempt;
-  if v_kind='primary' then
+  if v_kind in ('primary','self_correction') then
     update public.smart_inventory_items set count_state=p_count_state,unit1_qty=coalesce(p_unit1_qty,0),unit2_qty=coalesce(p_unit2_qty,0),
       damaged_unit1_qty=coalesce(p_damaged_unit1_qty,0),actual_qty_unit1=v_actual,counted_by=auth.uid(),counted_by_display_name=v_actor,
       counted_at=v_attempt.counted_at,claimed_by=null,claimed_by_display_name=null,claimed_at=null,claim_expires_at=null,
@@ -461,9 +472,10 @@ begin
   insert into public.smart_inventory_participants(session_id,user_id,display_name) values(v_item.session_id,auth.uid(),v_actor)
     on conflict(session_id,user_id) do update set last_activity_at=now(),display_name=excluded.display_name;
   insert into public.smart_inventory_audit_log(session_id,item_id,action,actor_user_id,actor_display_name,before_data,after_data)
-  values(v_item.session_id,p_item_id,case when v_kind='primary' then 'item_counted' else 'item_recounted' end,auth.uid(),v_actor,
-    jsonb_build_object('countState',v_item.count_state,'rowVersion',v_item.row_version),
-    jsonb_build_object('countState',p_count_state,'unit1Qty',coalesce(p_unit1_qty,0),'unit2Qty',coalesce(p_unit2_qty,0),'actualQtyUnit1',v_actual,'attemptNo',v_no));
+  values(v_item.session_id,p_item_id,case when v_kind='primary' then 'item_counted' when v_kind='self_correction' then 'item_self_corrected' else 'item_recounted' end,auth.uid(),v_actor,
+    case when v_kind='self_correction' then jsonb_build_object('countState',v_item.count_state,'unit1Qty',v_item.unit1_qty,'unit2Qty',v_item.unit2_qty,'damagedUnit1Qty',v_item.damaged_unit1_qty,'actualQtyUnit1',v_item.actual_qty_unit1,'rowVersion',v_item.row_version)
+      else jsonb_build_object('countState',v_item.count_state,'rowVersion',v_item.row_version) end,
+    jsonb_build_object('countState',p_count_state,'unit1Qty',coalesce(p_unit1_qty,0),'unit2Qty',coalesce(p_unit2_qty,0),'actualQtyUnit1',v_actual,'attemptNo',v_no,'attemptKind',v_kind));
   return jsonb_build_object('ok',true,'code','saved','attemptKind',v_kind,'countedByDisplayName',v_actor,'countedAt',v_attempt.counted_at,'actualQtyUnit1',v_actual,'rowVersion',v_item.row_version+1);
 exception when unique_violation then
   select * into v_attempt from public.smart_inventory_count_attempts where request_id=p_request_id;
@@ -745,7 +757,7 @@ grant execute on function public.smart_inventory_owner_dashboard(date),public.sm
 to authenticated;
 
 comment on table public.smart_inventory_expectations is 'Owner-only Ameen snapshot quantities. Never returned by counter RPCs.';
-comment on function public.smart_inventory_save_item(uuid,uuid,text,numeric,numeric,numeric,bigint) is 'Atomic first-save-wins count. Identity is always auth.uid(); browser cannot set counted_by.';
+comment on function public.smart_inventory_save_item(uuid,uuid,text,numeric,numeric,numeric,bigint) is 'Atomic first-save-wins count. The same counter may correct their own row while the session is in_progress (attempt_kind self_correction). Identity is always auth.uid(); browser cannot set counted_by.';
 comment on table public.smart_inventory_movement_adjustments is 'Read-only import of signed Ameen movements after cutoff; never writes any adjustment back to Ameen.';
 
 commit;

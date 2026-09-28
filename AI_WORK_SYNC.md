@@ -71,6 +71,8 @@ Slack (على Mac Mini، تطبيقات GitHub وCursor وCodex وClaude مرب�
 
 ## سجل القرارات المشتركة
 
+- 2026-09-28 (الجرد الذكي — الموظف يصحّح صنفه قبل إغلاق الجلسة، issue #286): القفل لم يكن حالة الجلسة وحدها. الواجهة تعطّل أي صف `countState !== uncounted` بلا إعادة عد، و`smart_inventory_save_item` / `smart_inventory_claim_item` تردّان `already_counted` حتى على `counted_by = auth.uid()`. الجلسة `completed` كانت وترفض بـ`session_closed`. صار الموظف يفتح صنفه هو فقط داخل جلسته المفتوحة (مشارك + `in_progress`) ويحفظ تعديلاً كمحاولة `self_correction` تُحدّث الكمية والحالة وتُبقي العد الأول في `smart_inventory_count_attempts` وسجل `item_self_corrected`. موظف آخر ما زال يأخذ `already_counted`. إعادة العد العمياء وتصحيح المالك كما هما. الهجرة `20260928183000_smart_inventory_counter_self_correction.sql` في المستودع فقط ولم تُطبَّق على الإنتاج. قد يتعارض مع PR #283 في `src/smart-inventory.js` حول `disabled` و`saveItem` و`refreshCurrent`.
+
 - 2026-09-23 (Master Invoice — المرحلة 2: مرتجع المبيعات): المرتجع يُرسم بقالب الفاتورة الرئيسي (`kind: "return"`) عبر نفس المحوّل `saleInvoiceDocument`، والبوابة في `voucherPdfMarkup` هي `isInv || isRet` وحدها (القبض والصرف على القديم). لا حساب جديد ولا تغيير في دلالات PR #263. على المرتجع وحده: لا رصيد حالي/مفرد/دفعة/تسوية أبداً، والسابق/الجديد من قيده المثبت فقط، وبلا قيد مثبت تُطبع ملاحظة محايدة بلا «خُصمت من رصيد حسابكم» (`returnLedgerView`). الفحص: `scripts/check-sales-return-master-invoice.mjs`. بعد فشل iPhone على المرتجع #37 أُضيف إصلاحان بموافقة عمر الصريحة:
   - `invoiceLineQtyParts`: الكروز الكسري يُعرض «107.6 كروز» بلا كسر كرتونة، والكميات الصحيحة كما كانت.
   - `invoiceLinePrice`: سعر السطر الكسري يُطبع بالكروز «12.8 $ / كروز» كي يطابق الضربُ القيمة (قرار عمر بعد مراجعة Codex). عرض فقط، والقيمة والإجمالي كما هما.

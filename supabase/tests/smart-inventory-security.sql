@@ -51,4 +51,9 @@ end $$;
 -- 8. Disable A in inventory_counter_accounts; A's current session is rejected.
 -- 9. Empty quantity is not persisted as zero; explicit state=zero with qty=0 is.
 -- 10. A counter JWT cannot read Ameen snapshots, sales, owner RPCs, or account tables.
+-- 11. Counter A saves an item, then saves it again while the session is in_progress:
+--     the second call is attempt_kind self_correction, updates quantity and count_state
+--     (including not_found and damaged), and keeps the first attempt. Counter B still
+--     receives already_counted. After the session is completed both receive session_closed.
+--     A is not a participant of another session's row. Owner RPCs stay revoked from anon.
 rollback;

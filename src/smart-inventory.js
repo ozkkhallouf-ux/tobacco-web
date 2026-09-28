@@ -15,6 +15,7 @@
     filter: "all",
     busyItemId: "",
     accountBusy: false,
+    editingItemId: "",
     lastError: "",
     localNotice: ""
   };
@@ -28,6 +29,14 @@
   function jsonWrite(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch {} }
   function uuid() { return crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`; }
   function isOwner(session) { return session?.accessRole === "owner"; }
+  // الموظف يعدّل صنفاً عدّه هو فقط، والجلسة ما زالت مفتوحة. الحكم النهائي على السيرفر.
+  function canCounterCorrect(item, sessionStatus) {
+    return !!item
+      && item.countedByMe === true
+      && item.countState !== "uncounted"
+      && item.recountRequested !== true
+      && sessionStatus === "in_progress";
+  }
   function fmtDate(value) { if (!value) return "—"; try { return new Intl.DateTimeFormat("ar-LB", { dateStyle: "short", timeStyle: "short", timeZone: "Asia/Beirut" }).format(new Date(value)); } catch { return String(value); } }
   function fmtNum(value) { const number = Number(value); return Number.isFinite(number) ? number.toLocaleString("en-US", { maximumFractionDigits: 3 }) : "—"; }
   function normalizeSearch(value) { return String(value || "").normalize("NFKC").toLowerCase().replace(/[أإآ]/g, "ا").replace(/ى/g, "ي").replace(/ة/g, "ه").replace(/\s+/g, " ").trim(); }
@@ -83,6 +92,8 @@
     if (!state.session?.id) return load(session, true);
     try {
       state.session = await store.getSmartInventoryCounterSession(state.session.id);
+      const editing = state.session?.items?.find((row) => row.id === state.editingItemId);
+      if (!canCounterCorrect(editing, state.session?.status)) state.editingItemId = "";
       if (isOwner(session) && state.ownerReport) state.ownerReport = await store.getSmartInventoryOwnerReport(state.session.id);
       callbacks.render();
     } catch (error) { callbacks.notice("error", error.message); }
@@ -129,18 +140,28 @@
     const allDrafts = drafts();
     const draft = allDrafts[item.id] || {};
     const saved = item.countState !== "uncounted" && !item.recountRequested;
+    const ownCorrectable = canCounterCorrect(item, state.session?.status);
+    const editing = ownCorrectable && state.editingItemId === item.id;
     const claimed = item.claimedByDisplayName && new Date(item.claimExpiresAt || 0) > new Date();
     const lockedByOther = claimed && !item.claimedByMe;
-    const unit1 = draft.unit1Qty ?? (item.unit1Qty ?? "");
-    const unit2 = draft.unit2Qty ?? (item.unit2Qty ?? "");
-    const damaged = draft.damagedUnit1Qty ?? (item.damagedUnit1Qty ?? "");
-    const countState = draft.countState || (item.recountRequested ? "counted" : item.countState);
-    const disabled = saved || lockedByOther || state.session?.status === "completed";
+    const showDraft = !saved || editing;
+    const unit1 = showDraft ? (draft.unit1Qty ?? (item.unit1Qty ?? "")) : (item.unit1Qty ?? "");
+    const unit2 = showDraft ? (draft.unit2Qty ?? (item.unit2Qty ?? "")) : (item.unit2Qty ?? "");
+    const damaged = showDraft ? (draft.damagedUnit1Qty ?? (item.damagedUnit1Qty ?? "")) : (item.damagedUnit1Qty ?? "");
+    const countState = (showDraft && draft.countState) || (item.recountRequested ? "counted" : item.countState);
+    const disabled = (saved && !editing) || lockedByOther || state.session?.status === "completed" || state.finishing;
     let lockText = "";
-    if (saved) lockText = `تم جرد هذا الصنف بواسطة ${esc(item.countedByDisplayName || "موظف")}${item.countedAt ? ` — ${esc(fmtDate(item.countedAt))}` : ""}`;
+    if (editing) lockText = "عدّل الكمية أو الحالة ثم احفظ. بعد إغلاق الجلسة لا يُقبل التعديل.";
+    else if (ownCorrectable) lockText = `عدّك محفوظ${item.countedAt ? ` — ${esc(fmtDate(item.countedAt))}` : ""}. يمكنك تعديله قبل إغلاق الجرد.`;
+    else if (saved) lockText = `تم جرد هذا الصنف بواسطة ${esc(item.countedByDisplayName || "موظف")}${item.countedAt ? ` — ${esc(fmtDate(item.countedAt))}` : ""}`;
     else if (lockedByOther) lockText = `يقوم ${esc(item.claimedByDisplayName)} بجرده الآن`;
     else if (item.recountRequested) lockText = "إعادة عد مطلوبة من موظف آخر — الكمية المتوقعة مخفية";
-    return `<article class="panel smart-item ${saved ? "is-counted" : ""}" data-smart-item-card="${esc(item.id)}">
+    const saveLabel = state.busyItemId === item.id ? "جاري الحفظ…" : (editing ? "حفظ التعديل" : "حفظ الصنف");
+    const editLocked = state.finishing || state.session?.status === "completed" || state.busyItemId === item.id;
+    const action = ownCorrectable && !editing
+      ? `<button class="button secondary" type="button" data-smart-edit="${esc(item.id)}" ${editLocked ? "disabled" : ""}>تعديل الصنف</button>`
+      : `<button class="button primary" type="button" data-smart-save="${esc(item.id)}" ${disabled || state.busyItemId === item.id ? "disabled" : ""}>${saveLabel}</button>${editing ? `<button class="button secondary" type="button" data-smart-edit-cancel="${esc(item.id)}">إلغاء</button>` : ""}`;
+    return `<article class="panel smart-item ${saved && !editing ? "is-counted" : ""} ${editing ? "is-editing" : ""}" data-smart-item-card="${esc(item.id)}">
       <div class="smart-item-head"><div><small>${esc(item.itemCode || item.itemKey)}</small><h3>${esc(item.itemName)}</h3></div><span class="smart-line-state">${esc(itemStatusLabel(item.countState))}</span></div>
       <div class="smart-count-grid">
         <label>${esc(item.unit1Name || "الوحدة الأولى")}<input type="number" min="0" step="0.001" inputmode="decimal" data-smart-qty="unit1Qty" data-item-id="${esc(item.id)}" value="${esc(unit1)}" ${disabled ? "disabled" : ""}></label>
@@ -153,7 +174,7 @@
         </select></label>
         <label class="smart-damaged">تالف (${esc(item.unit1Name || "الوحدة الأولى")})<input type="number" min="0" step="0.001" inputmode="decimal" data-smart-qty="damagedUnit1Qty" data-item-id="${esc(item.id)}" value="${esc(damaged)}" ${disabled ? "disabled" : ""}></label>
       </div>
-      <div class="button-row"><button class="button primary" type="button" data-smart-save="${esc(item.id)}" ${disabled || state.busyItemId === item.id ? "disabled" : ""}>${state.busyItemId === item.id ? "جاري الحفظ…" : "حفظ الصنف"}</button></div>
+      <div class="button-row">${action}</div>
       ${lockText ? `<p class="smart-lock-note">${lockText}</p>` : '<p class="muted">الخانة الفارغة ليست صفراً. اختر «صفر فعلي» عند التأكد.</p>'}
     </article>`;
   }
@@ -225,8 +246,15 @@
   }
 
   async function saveItem(itemId, root, session, queued = null) {
+    if (state.finishing) return;
     const item = state.session.items.find((row) => row.id === itemId);
     if (!item) return;
+    if (state.session?.status === "completed") { callbacks.notice("error", "الجلسة مغلقة. لا يمكن تعديل الجرد."); return; }
+    const correcting = canCounterCorrect(item, state.session?.status);
+    if (item.countState !== "uncounted" && !item.recountRequested && !correcting) {
+      callbacks.notice("error", "لا يمكن تعديل صنف عدّه موظف آخر.");
+      return;
+    }
     let input;
     try { input = queued || readRow(itemId, root); } catch (error) { callbacks.notice("error", error.message); return; }
     const entry = { itemId, requestId: queued?.requestId || uuid(), expectedVersion: item.rowVersion, ...input };
@@ -234,15 +262,23 @@
     try {
       const result = await store.saveSmartInventoryItem(entry);
       if (!result?.ok) {
-        if (result.code === "already_counted") throw new Error(`تم جرد هذا الصنف بواسطة ${result.countedByDisplayName || "موظف آخر"} — ${fmtDate(result.countedAt)}`);
+        if (result.code === "already_counted") {
+          state.editingItemId = "";
+          throw new Error(`تم جرد هذا الصنف بواسطة ${result.countedByDisplayName || "موظف آخر"} — ${fmtDate(result.countedAt)}`);
+        }
+        if (result.code === "session_closed") {
+          state.editingItemId = "";
+          throw new Error("الجلسة مغلقة. لا يمكن تعديل الجرد.");
+        }
         if (result.code === "claimed") throw new Error(`يقوم ${result.claimedByDisplayName || "موظف آخر"} بجرده الآن.`);
         if (result.code === "version_conflict") throw new Error("تغيّر الصنف على جهاز آخر. تم تحديث الصفحة دون الكتابة فوقه.");
         if (result.code === "recount_requires_other_counter") throw new Error("إعادة العد يجب أن ينفذها موظف آخر.");
         throw new Error("لم يتم حفظ الصنف.");
       }
       removeOutbox(entry.requestId); clearDraft(itemId);
+      state.editingItemId = "";
       state.session = await store.getSmartInventoryCounterSession(state.session.id);
-      callbacks.notice("success", "حُفظ الصنف وربط باسم الموظف ووقت العد.");
+      callbacks.notice("success", correcting ? "حُفظ تعديل الصنف على السيرفر." : "حُفظ الصنف وربط باسم الموظف ووقت العد.");
     } catch (error) {
       if (!navigator.onLine || /network|fetch|الاتصال/i.test(error.message)) {
         queueOutbox(entry); callbacks.notice("warning", "انقطع الاتصال. احتفظ الجهاز بالعملية وسيعيد إرسالها دون تكرار عند عودة الإنترنت.");
@@ -299,7 +335,7 @@
     callbacks = api || callbacks;
     root.querySelector("[data-smart-retry]")?.addEventListener("click", () => { state.loadedForRole = ""; load(session, true); });
     root.querySelectorAll("[data-smart-warehouse]").forEach((button) => button.addEventListener("click", () => button.dataset.smartSession ? openSession(button.dataset.smartSession, session) : startOrJoin(button.dataset.smartWarehouse, session)));
-    root.querySelector("[data-smart-back]")?.addEventListener("click", () => { state.session = null; state.ownerReport = null; state.loadedForRole = ""; load(session, true); });
+    root.querySelector("[data-smart-back]")?.addEventListener("click", () => { state.session = null; state.ownerReport = null; state.editingItemId = ""; state.loadedForRole = ""; load(session, true); });
     root.querySelector("[data-smart-owner-back]")?.addEventListener("click", () => { state.session = null; state.ownerReport = null; state.loadedForRole = ""; load(session, true); });
     root.querySelector("[data-smart-search]")?.addEventListener("input", (event) => { state.query = event.currentTarget.value; callbacks.render(); });
     root.querySelectorAll("[data-smart-filter]").forEach((button) => button.addEventListener("click", () => { state.filter = button.dataset.smartFilter; callbacks.render(); }));
@@ -307,7 +343,10 @@
     root.querySelectorAll("[data-smart-qty],[data-smart-state]").forEach((input) => {
       const claim = () => store.claimSmartInventoryItem(input.dataset.itemId).then((result) => {
         if (!result?.ok && result?.code === "claimed") callbacks.notice("warning", `يقوم ${result.claimedByDisplayName} بجرده الآن.`);
-        if (!result?.ok && result?.code === "already_counted") refreshCurrent(session);
+        if (!result?.ok && (result?.code === "already_counted" || result?.code === "session_closed")) {
+          state.editingItemId = "";
+          refreshCurrent(session);
+        }
       }).catch(() => {});
       input.addEventListener("focus", claim, { once: true });
       input.addEventListener("input", () => {
@@ -320,6 +359,18 @@
       });
     });
     root.querySelectorAll("[data-smart-save]").forEach((button) => button.addEventListener("click", () => saveItem(button.dataset.smartSave, root, session)));
+    root.querySelectorAll("[data-smart-edit]").forEach((button) => button.addEventListener("click", () => {
+      const itemId = button.dataset.smartEdit;
+      const item = state.session?.items?.find((row) => row.id === itemId);
+      if (!canCounterCorrect(item, state.session?.status) || state.finishing) return;
+      state.editingItemId = itemId;
+      callbacks.render();
+    }));
+    root.querySelectorAll("[data-smart-edit-cancel]").forEach((button) => button.addEventListener("click", () => {
+      clearDraft(button.dataset.smartEditCancel);
+      state.editingItemId = "";
+      callbacks.render();
+    }));
     root.querySelector("[data-smart-complete]")?.addEventListener("click", async () => {
       try { const result = await store.completeSmartInventorySession(state.session.id); if (!result.ok) throw new Error(`بقي ${result.remaining} صنفاً غير معدود أو بانتظار إعادة عد.`); callbacks.notice("success", "تم إغلاق الجرد. لا يمكن للموظفين تعديله الآن."); await refreshCurrent(session); }
       catch (error) { callbacks.notice("error", error.message); }
@@ -358,5 +409,5 @@
   }
 
   window.addEventListener("online", () => { state.localNotice = "عاد الاتصال"; flushOutbox(window.__ozkSession).then(() => refreshCurrent(window.__ozkSession)); });
-  window.SmartInventory = { state, load, render, bind, deviceId, reset() { state.loadedForRole = ""; state.session = null; state.ownerReport = null; state.warehouses = []; state.dashboard = []; } };
+  window.SmartInventory = { state, load, render, bind, deviceId, canCounterCorrect, reset() { state.loadedForRole = ""; state.session = null; state.ownerReport = null; state.warehouses = []; state.dashboard = []; state.editingItemId = ""; } };
 })();

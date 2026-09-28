@@ -760,6 +760,127 @@ await journey("owner-only-deep-link", "الرابط العميق إلى مسار
   assert(problems.length === 0, problems.join("\n     "));
 });
 
+// ===== ١٤) موظف الجرد يعدّل صنفاً عدّه قبل إغلاق الجلسة =====
+// الواجهة فقط: الحفظ يُستبدل محلياً فلا يغادر طلباً. حكم السيرفر في
+// scripts/check-smart-inventory.mjs وهجرة self_correction.
+await journey("smart-inventory-correct", "موظف الجرد يفتح صنفاً عدّه ويعدّل الكمية والحالة قبل إغلاق الجلسة", async (page) => {
+  const collected = await openApp(page);
+  await page.evaluate(() => {
+    const session = {
+      id: "crit-counter", name: "موظف جرد اختبار", role: "موظف جرد",
+      email: "", accessRole: "inventory_counter"
+    };
+    const appState = (0, eval)("state");
+    appState.session = session;
+    window.__ozkSession = session;
+    const si = window.SmartInventory;
+    si.state.loadedForRole = "inventory_counter";
+    si.state.loading = false;
+    si.state.editingItemId = "";
+    si.state.session = {
+      id: "sess-crit",
+      status: "in_progress",
+      warehouseName: "مستودع الاختبار",
+      cutoffAt: "2026-09-28T05:00:00.000Z",
+      items: [
+        {
+          id: "own", itemKey: "own", itemCode: "11", itemName: "صنف الموظف",
+          unit1Name: "كروز", unit2Name: "كرتونة", unit2Factor: 10,
+          countState: "counted", unit1Qty: 4, unit2Qty: 0, damagedUnit1Qty: 0,
+          countedByMe: true, countedByDisplayName: "موظف جرد اختبار",
+          countedAt: "2026-09-28T06:00:00.000Z", recountRequested: false,
+          rowVersion: 3, claimedByMe: false
+        },
+        {
+          id: "other", itemKey: "other", itemCode: "22", itemName: "صنف الزميل",
+          unit1Name: "كروز", unit2Factor: 1, countState: "counted", unit1Qty: 9,
+          unit2Qty: 0, damagedUnit1Qty: 0, countedByMe: false,
+          countedByDisplayName: "عثمان", recountRequested: false,
+          rowVersion: 1, claimedByMe: false
+        }
+      ]
+    };
+    window.__siSaves = [];
+    const store = window.tobaccoData;
+    store.claimSmartInventoryItem = async () => ({ ok: true, code: "claimed" });
+    store.saveSmartInventoryItem = async (entry) => {
+      window.__siSaves.push(entry);
+      return { ok: true, code: "saved", attemptKind: "self_correction" };
+    };
+    store.getSmartInventoryCounterSession = async () => {
+      const live = window.SmartInventory.state.session;
+      const last = window.__siSaves.at(-1);
+      const own = live.items.find((item) => item.id === "own");
+      if (own && last && last.itemId === "own") {
+        own.countState = last.countState;
+        own.unit1Qty = last.unit1Qty;
+        own.unit2Qty = last.unit2Qty;
+        own.damagedUnit1Qty = last.damagedUnit1Qty;
+        own.rowVersion = (own.rowVersion || 0) + 1;
+        own.countedByMe = true;
+      }
+      return live;
+    };
+    (0, eval)("setRoute")("smartInventory");
+  });
+
+  const ownQty = page.locator('[data-smart-qty="unit1Qty"][data-item-id="own"]');
+  const otherQty = page.locator('[data-smart-qty="unit1Qty"][data-item-id="other"]');
+  assert(await ownQty.isDisabled(), "صنف الموظف كان قابلاً للكتابة قبل فتح التعديل");
+  assert(await otherQty.isDisabled(), "صنف الزميل لم يبقَ مقفلاً");
+  assert(await page.locator('[data-smart-edit="own"]').count() === 1, "زر تعديل الصنف غائب عن صنف الموظف");
+  assert(await page.locator('[data-smart-edit="other"]').count() === 0, "ظهر زر تعديل على صنف موظف آخر");
+  assert((await page.locator("body").innerText()).includes("عثمان"), "قفل صنف الزميل لا يسمّي من عدّه");
+
+  await page.locator('[data-smart-edit="own"]').click();
+  await page.locator('[data-smart-edit-cancel="own"]').waitFor();
+  await page.locator('[data-smart-edit-cancel="own"]').click();
+  assert(await ownQty.isDisabled(), "إلغاء التعديل لم يُعد قفل الصنف");
+
+  await page.locator('[data-smart-edit="own"]').click();
+  await page.locator('[data-smart-save="own"]').waitFor();
+  assert(!(await ownQty.isDisabled()), "فتح التعديل لم يفعّل خانة الكمية");
+  await ownQty.fill("7");
+  await page.locator('[data-smart-qty="unit2Qty"][data-item-id="own"]').fill("1");
+  await page.locator('[data-smart-qty="damagedUnit1Qty"][data-item-id="own"]').fill("2");
+  await page.locator('[data-smart-state][data-item-id="own"]').selectOption("damaged");
+  await page.locator('[data-smart-save="own"]').click();
+  await pollUntil(page, () => {
+    const saves = window.__siSaves || [];
+    return saves.length === 1 && saves[0].countState === "damaged" && saves[0].unit1Qty === 7;
+  }, { message: "حفظ التعديل لم يرسل الحالة تالف والكمية 7" });
+  const saved = await page.evaluate(() => window.__siSaves[0]);
+  assert(saved.unit2Qty === 1 && saved.damagedUnit1Qty === 2 && saved.expectedVersion === 3,
+    `حمولة التعديل ناقصة: ${JSON.stringify(saved)}`);
+  assert((await page.locator("body").innerText()).includes("حُفظ تعديل الصنف على السيرفر."),
+    "لم تظهر رسالة حفظ التعديل");
+  assert(await ownQty.isDisabled(), "بعد الحفظ بقيت الخانة مفتوحة");
+
+  await page.locator('[data-smart-edit="own"]').click();
+  await page.locator('[data-smart-state][data-item-id="own"]').selectOption("not_found");
+  await ownQty.fill("0");
+  await page.locator('[data-smart-qty="unit2Qty"][data-item-id="own"]').fill("0");
+  await page.locator('[data-smart-qty="damagedUnit1Qty"][data-item-id="own"]').fill("0");
+  await page.locator('[data-smart-save="own"]').click();
+  await pollUntil(page, () => {
+    const saves = window.__siSaves || [];
+    return saves.length === 2 && saves[1].countState === "not_found" && saves[1].unit1Qty === 0 && saves[1].expectedVersion === 4;
+  }, { message: "تعديل «غير موجود» لم يُحفظ بكمية صفر ونسخة الصف التالية" });
+  const second = await page.evaluate(() => window.__siSaves[1]);
+  assert(second.unit2Qty === 0 && second.damagedUnit1Qty === 0,
+    `حالة غير موجود حملت كمية: ${JSON.stringify(second)}`);
+
+  await page.evaluate(() => {
+    window.SmartInventory.state.session.status = "completed";
+    window.SmartInventory.state.editingItemId = "";
+    (0, eval)("render")();
+  });
+  assert(await page.locator("[data-smart-edit]").count() === 0, "الجلسة المغلقة ما زالت تعرض التعديل");
+  assert(await ownQty.isDisabled(), "الجلسة المغلقة تركت الكمية قابلة للكتابة");
+  assert(collected.writeRequests.length === 0, `التعديل أطلق طلباً شبكياً: ${collected.writeRequests.join(" | ")}`);
+  assertClean("تعديل الجرد", collected);
+});
+
 // ===== شهادة العزل الشبكي =====
 // كل ما تجاوز توجيه الصفحة انتهى عند الوكيل المحلي في هذه العملية. نطبع ما
 // حاول الخروج (دليلٌ لا ادّعاء)، ونُفشل الفحص إن قصد وجهةً غير متوقَّعة —
