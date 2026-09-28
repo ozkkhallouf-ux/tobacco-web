@@ -2484,10 +2484,154 @@ if (!process.env.OZK_CI_TZ_CHILD) {
     .customers.find((c) => c.customerGuid === G_SYP);
   assert.equal(aligned88.creditStatus, "over_limit", "test 88: الأيام متطابقة بلا v1 = حكم حد الأمين كما كان");
 
+  // 89–91) قرارات المالك (2026-09-28) تحت lineKinds:v1: الدور المختلط، تحصيل الدين القديم،
+  //         وتصنيف الحساب من شجرة دليل الحسابات. لا تغيير في الصيغة ولا Q ولا T ولا النافذة.
+  const build89 = (list, { classes = false } = {}) => {
+    const all = [...portfolio77.map((a) => ({ ...a, accountClass: "customer" })), ...list.map((c) => ({ ...c, guid: gid(c.id) }))];
+    return engine.build({
+      now: NOW,
+      invoicesReport: invoicesReportFor(all.map((a) => ({ ...a }))),
+      balancesReport: { ...reports.balancesReport, summary: { ...reports.balancesReport.summary, ...(classes ? { accountClasses: "v1" } : {}) },
+        items: all.map((a) => ({ ...reports.balancesReport.items[0], key: engine.normalizeName(a.name), name: a.name,
+          balance: a.balance ?? ((a.openingBalance ?? 0) + ledgerBalance(a.movements)), balanceAccountCcy: a.balance ?? ((a.openingBalance ?? 0) + ledgerBalance(a.movements)),
+          creditLimit: 0, customerGuid: a.guid, customerAccountGuid: a.guid, isSupplier: a.isSupplier === true,
+          ...(classes && a.accountClass !== undefined ? { accountClass: a.accountClass } : {}) })) },
+      movementsReport: { ...reports.movementsReport, summary: { ...reports.movementsReport.summary, lineKinds: "v1" },
+        items: all.filter((a) => a.movements.length || a.openingBalance).map((a) => ({ customerGuid: a.guid, name: a.name, truncated: false,
+          openingBalance: a.openingBalance ?? 0, movements: a.movements })) },
+      creditLimits: []
+    });
+  };
+  const at89 = (built, id) => built.customers.find((c) => c.customerGuid === gid(id));
+
+  // 89) الدور المختلط: مشتريات ≥ 50 و≥ 5% من (المشتريات + المبيعات).
+  const jasemSales = [debit(50, 3000), debit(40, 3000), debit(30, 3000), debit(20, 3000)].map((m) => tag(m, "sale"));
+  const jasemPays = [pay(45, 2500), pay(35, 2500), pay(25, 2500), pay(15, 2500)].map((m) => tag(m, "payment"));
+  const jasemPurchases = [pay(38, 1500), pay(28, 1200)].map((m) => tag(m, "purchase"));   // 2700 ÷ 14700 = 18.4%
+  const mixed89 = [
+    { id: 121, name: "شاهد ابو جاسم", accountClass: "customer", movements: [...jasemSales, ...jasemPays, ...jasemPurchases].sort((a, b) => a.date.localeCompare(b.date)) },
+    { id: 122, name: "شاهد البيارق", accountClass: "customer", movements: [tag(debit(80, 3000), "sale"), tag(pay(60, 2068), "purchase")] },
+    { id: 123, name: "شاهد الخيال", accountClass: "customer",
+      movements: [...regular({ from: 58, every: 6, amount: 3000, lag: 4 }).map((m) => tag(m, m.credit > 0 ? "payment" : "sale")), tag(pay(20, 1000), "purchase")] },
+    { id: 124, name: "مشتريات دون حد الأهمية", accountClass: "customer", movements: [tag(debit(30, 300), "sale"), tag(pay(20, 40), "purchase")] }
+  ];
+  const rc89 = build89(mixed89);
+  const jasem = at89(rc89, 121);
+  assert.equal(jasem.autoCredit.status, "needs_review", "test 89: ابو جاسم ⇒ دور مختلط يحتاج مراجعة");
+  assert.equal(jasem.autoCredit.mixedRole, true);
+  assert.equal(jasem.creditLimit, null, "test 89: ابو جاسم بلا حد آلي");
+  assert.ok(jasem.flags.includes("credit_mixed_role"), "test 89: وسم الدور المختلط");
+  assert.ok(jasem.explanation.some((reason) => reason.includes("دور مختلط")), "test 89: السبب ظاهر");
+  const jasemNoPurchases = at89(build89([{ ...mixed89[0], movements: [...jasemSales, ...jasemPays].sort((a, b) => a.date.localeCompare(b.date)) }]), 121);
+  assert.ok(jasemNoPurchases.creditLimit > 0, "test 89: الضبط — الدفتر نفسه بلا مشتريات ينال حداً آلياً (سقط بالمختلط)");
+  const bayareq = at89(rc89, 122);
+  assert.equal(bayareq.creditStatus, "delinquent", "test 89: البيارق ⇒ التعثّر الحقيقي يبقى ظاهراً");
+  assert.ok(bayareq.flags.includes("credit_delinquent") && bayareq.flags.includes("credit_mixed_role"), "test 89: البيارق ⇒ MIXED_ROLE + DELINQUENT معاً");
+  assert.equal(bayareq.autoCredit.mixedRole, true);
+  const khayal = at89(rc89, 123);
+  assert.ok(!khayal.flags.includes("credit_mixed_role"), "test 89: الخيال (3.x%) ليس دوراً مختلطاً");
+  assert.notEqual(khayal.autoCredit.status, "needs_review");
+  assert.ok(!at89(rc89, 124).flags.includes("credit_mixed_role"), "test 89: مشتريات 40 < 50 ليست مادية");
+  assert.equal(rc89.summary.mixedRoleCreditCount, 2, "test 89: عدّاد الدور المختلط (ابو جاسم + البيارق)");
+  assert.deepEqual(rc89.dataAvailability.creditCycle, build89(mixed89.filter((c) => ![121, 122].includes(c.id))).dataAvailability.creditCycle,
+    "test 89: المختلط خارج معايرة المحفظة");
+
+  // 90) تحصيل الدين القديم: ≥ 80% دين قديم، ≥ دفعتا قبض حقيقيتان في 60 يوماً، آخرهما ≤ 30 يوماً.
+  const nazirMoves = [tag(debit(55, 230), "debt_transfer"), tag(debit(52, 53), "sale"),
+    ...[45, 38, 31].map((n) => tag(pay(n, 40), "payment")), ...[17, 10, 4].map((n) => tag(pay(n, 80), "payment"))].sort((a, b) => a.date.localeCompare(b.date));
+  const old90 = [
+    { id: 131, name: "شاهد ابو نزير", accountClass: "customer", openingBalance: 400, movements: nazirMoves },
+    { id: 132, name: "شاهد غيث", accountClass: "customer", openingBalance: 2153, movements: [tag(pay(56, 253), "payment"), tag(pay(25, 200), "payment")] },
+    { id: 133, name: "دين قديم بلا سداد منتظم", accountClass: "customer", openingBalance: 900, movements: [tag(pay(50, 100), "payment")] },
+    { id: 134, name: "مبيعات حديثة غالبة", accountClass: "customer", openingBalance: 100,
+      movements: [tag(debit(20, 900), "sale"), tag(pay(15, 50), "payment"), tag(pay(5, 50), "payment")] }
+  ];
+  const rc90 = build89(old90);
+  const nazir = at89(rc90, 131);
+  assert.ok(nazir.autoCredit.oldDebtCollection, "test 90: ابو نزير ⇒ تحصيل دين قديم");
+  assert.equal(nazir.creditStatus, "old_debt_collection", "test 90: ابو نزير لا «تجاوز حد» مضلل");
+  assert.equal(nazir.creditUsagePercent, null, "test 90: بلا نسبة استخدام مضللة");
+  assert.equal(nazir.currentBalance, 323, "test 90: الرصيد لا يُمسّ ولا يُعتبر مسدداً");
+  assert.ok(nazir.flags.includes("old_debt_collection") && !nazir.flags.includes("over_credit_limit"));
+  assert.ok(nazir.explanation.some((reason) => reason.includes("تحصيل دين قديم")), "test 90: السبب ظاهر");
+  // الوسم وصفي: الحالة الآلية وحدها كما حسبتها الصيغة (لا تحسين لـQ ولا الدورة ولا الحد).
+  assert.ok(["normal", "low_data"].includes(nazir.autoCredit.status), "test 90: الحالة الآلية لا تتغير بالوسم");
+  assert.ok(nazir.creditLimit !== null && nazir.creditLimit < nazir.currentBalance, "test 90: الحد المبني على مبيعات حديثة صغيرة أقل من الدين القديم");
+  const ghaith = at89(rc90, 132);
+  assert.equal(ghaith.creditStatus, "delinquent", "test 90: غيث يبقى متعثّراً إن تحققت شروطه");
+  assert.ok(ghaith.flags.includes("old_debt_collection") && ghaith.flags.includes("credit_delinquent"), "test 90: غيث ⇒ DELINQUENT + تحصيل دين قديم");
+  assert.ok(!ghaith.flags.includes("credit_not_customer") && !ghaith.flags.includes("credit_mixed_role"), "test 90: غيث زبون لا غير");
+  assert.ok(!at89(rc90, 133).autoCredit.oldDebtCollection, "test 90: دفعة واحدة ليست سداداً منتظماً");
+  assert.ok(!at89(rc90, 134).autoCredit.oldDebtCollection, "test 90: الرصيد من مبيعات حديثة ليس ديناً قديماً");
+  assert.equal(rc90.summary.oldDebtCollectionCount, 2, "test 90: عدّاد تحصيل الدين القديم");
+
+  // 91) تصنيف الحساب من شجرة الدليل (accountClasses:v1). بلا العلامة لا شيء يتغير.
+  const tree91 = [
+    { id: 141, name: "شاهد طابعة ليزرية", accountClass: "asset", openingBalance: 125, movements: [] },
+    { id: 142, name: "سلفة موظف", accountClass: "employee", openingBalance: 300, movements: [] },
+    { id: 143, name: "مسار غامض", accountClass: "other", movements: [tag(debit(30, 500), "sale")] },
+    { id: 144, name: "بلا تصنيف مع العلامة", movements: [tag(debit(30, 500), "sale")] },
+    { id: 145, name: "مورد بالشجرة", accountClass: "supplier", movements: [tag(pay(20, 900), "purchase")] },
+    { id: 146, name: "مورد بالاسم", accountClass: "supplier", isSupplier: true, movements: [tag(pay(20, 900), "purchase")] },
+    { id: 147, name: "زبون بالشجرة", accountClass: "customer", movements: [tag(debit(30, 500), "sale"), tag(pay(20, 500), "payment")] }
+  ];
+  const rc91 = build89(tree91, { classes: true });
+  const legacy91 = build89(tree91, { classes: false });
+  assert.equal(rc91.dataAvailability.accountClassesTrusted, true);
+  assert.equal(legacy91.dataAvailability.accountClassesTrusted, false);
+  const printer = at89(rc91, 141);
+  assert.equal(printer.creditStatus, "not_customer", "test 91: الطابعة ⇒ ليس زبوناً من مسارها");
+  assert.ok(printer.autoCredit.notes[0].includes("موجودات"), "test 91: السبب من الشجرة لا الاسم");
+  assert.notEqual(at89(legacy91, 141).creditStatus, "not_customer", "test 91: بلا العلامة لا إعادة تصنيف (السلوك الحالي، لا كسر للإنتاج)");
+  assert.equal(at89(rc91, 142).creditStatus, "not_customer", "test 91: سلفة الموظف ليست زبوناً");
+  assert.equal(at89(rc91, 143).creditStatus, "needs_review", "test 91: مسار غامض ⇒ يحتاج مراجعة لا تخمين");
+  assert.equal(at89(rc91, 144).creditStatus, "needs_review", "test 91: تصنيف غائب مع العلامة ⇒ يحتاج مراجعة");
+  assert.notEqual(at89(legacy91, 144).creditStatus, "needs_review", "test 91: وبلا العلامة لا مراجعة");
+  for (const id of [145, 146]) {
+    const supplier = at89(rc91, id);
+    assert.equal(supplier.autoCredit, null, `test 91: المورد (${id}) لا يُعامل زبوناً ولا حد له`);
+    assert.ok(!supplier.flags.includes("credit_not_customer") && !supplier.flags.includes("credit_needs_review"), `test 91: المورد (${id}) لا يُعاد تصنيفه`);
+  }
+  const cust147 = at89(rc91, 147);
+  const cust147Legacy = at89(legacy91, 147);
+  assert.equal(cust147.creditStatus, cust147Legacy.creditStatus, "test 91: الزبون بالشجرة كما هو");
+  assert.equal(cust147.creditLimit, cust147Legacy.creditLimit);
+  // المشتريات والحسم ليست دفعة زبون (عقد 77): تبقى كذلك مع هذه القواعد.
+  assert.equal(rc77.customers.find((c) => c.customerGuid === gid(92)).autoCredit.paidInOverdueSpan, 0, "test 91: purchase ليس دفعة زبون");
+  assert.equal(rc77.customers.find((c) => c.customerGuid === gid(91)).autoCredit.paidInOverdueSpan, 0, "test 91: discount ليس دفعة زبون");
+
+  // 92) تعريف واحد للمورد (ملاحظة Codex P1): مع accountClasses:v1 صنف الشجرة هو المصدر في كل
+  //     المحرك (الفوج، المعايرة، الحقل isSupplier، العدّادات)؛ بلا العلامة isSupplier القديم كما هو.
+  const trade92 = () => regular({ from: 58, every: 6, amount: 3000, lag: 4 }).map((m) => tag(m, m.credit > 0 ? "payment" : "sale"));
+  const sup92 = [
+    { id: 151, name: "مورد بالشجرة وعلامته القديمة false", accountClass: "supplier", isSupplier: false, movements: trade92() },
+    { id: 152, name: "مورد بالشجرة والعلامة", accountClass: "supplier", isSupplier: true, movements: trade92() },
+    { id: 153, name: "زبون بالشجرة وعلامته القديمة مورد", accountClass: "customer", isSupplier: true, movements: trade92() }
+  ];
+  const rc92 = build89(sup92, { classes: true });
+  const legacy92 = build89(sup92, { classes: false });
+  const base92 = build89([], { classes: true });
+  const treeSupplier = at89(rc92, 151);
+  assert.equal(treeSupplier.isSupplier, true, "test 92: الشجرة supplier + isSupplier=false ⇒ مورد");
+  assert.equal(treeSupplier.autoCredit, null, "test 92: المورد بالشجرة بلا حد آلي");
+  assert.ok(treeSupplier.flags.includes("supplier_account"), "test 92: وسم المورد من الشجرة");
+  assert.equal(at89(rc92, 152).isSupplier, true, "test 92: supplier + isSupplier=true يبقى مورداً");
+  const treeCustomer = at89(rc92, 153);
+  assert.equal(treeCustomer.isSupplier, false, "test 92: الشجرة customer تسبق العلامة القديمة المتعارضة");
+  assert.ok(treeCustomer.autoCredit, "test 92: الزبون بالشجرة يُحسب له الائتمان");
+  assert.equal(rc92.summary.totalCustomers, base92.summary.totalCustomers + 1, "test 92: المورد بالشجرة خارج عدّادات الزبائن");
+  assert.deepEqual(rc92.dataAvailability.creditCycle, build89([sup92[2]], { classes: true }).dataAvailability.creditCycle,
+    "test 92: المورد بالشجرة خارج معايرة المحفظة");
+  // بلا العلامة: السلوك القديم حرفياً (العلامة القديمة وحدها).
+  assert.equal(at89(legacy92, 151).isSupplier, false, "test 92: بلا v1 لا يُقرأ الصنف");
+  assert.ok(at89(legacy92, 151).autoCredit, "test 92: بلا v1 يبقى زبوناً كما في الإنتاج");
+  assert.equal(at89(legacy92, 152).isSupplier, true);
+  assert.equal(at89(legacy92, 153).isSupplier, true, "test 92: بلا v1 العلامة القديمة وحدها");
+
   // 66) عدّادات الملخص؛ وتنبيه الحد يبقى مسودة داخلية: لا مسار تيليغرام في هذه المرحلة.
   assert.ok(rc.summary.delinquentCreditCount >= 2 && rc.summary.inactiveCreditCount >= 2 && rc.summary.lowDataCreditCount >= 1);
   assert.equal(rc.summary.nonCustomerCreditCount, 0, "test 66: لا «ليس زبوناً» بالسلوك");
   assert.equal(rc.summary.needsReviewCreditCount, 1, "test 66: الشذوذ يُعدّ «يحتاج مراجعة» منفصلاً");
 }
 
-console.log(`ذكاء الزبائن: 88 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
+console.log(`ذكاء الزبائن: 92 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);

@@ -82,6 +82,8 @@
     credit_low_data: "حد محافظ: بيانات قليلة",
     credit_not_customer: "ليس زبون مبيعات: بلا حد",
     credit_needs_review: "حد الائتمان غير متاح: يحتاج مراجعة",
+    credit_mixed_role: "دور مختلط (زبون ومورد)",
+    old_debt_collection: "تحصيل دين قديم",
     ambiguous_identity: "اسم ملتبس بين معرّفين",
     mixed_currency: "فواتير بأكثر من عملة",
     stale_data: "مصدر غير حديث",
@@ -105,6 +107,8 @@
     credit_delinquent: "danger",
     credit_low_data: "warn",
     credit_needs_review: "warn",
+    credit_mixed_role: "warn",
+    old_debt_collection: "warn",
     vip: "good",
     growing: "good",
     reactivated: "good",
@@ -304,7 +308,8 @@
     stale_invoices: "غير متاح: الفواتير غير حديثة",
     accounting_day_mismatch: "غير متاح: يوم المحاسبة غير متطابق",
     missing_rate: "غير متاح: لا سعر صرف لعملة الحساب",
-    needs_review: "غير متاح: يحتاج مراجعة"
+    needs_review: "غير متاح: يحتاج مراجعة",
+    old_debt_collection: "تحصيل دين قديم"
   };
   const AUTO_STATUS_TEXT = {
     normal: "آلي",
