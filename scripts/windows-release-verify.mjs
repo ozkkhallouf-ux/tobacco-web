@@ -47,10 +47,17 @@ export function classifyChanges(nameStatusText, writerScripts) {
 
 // أحدث تشغيل بالاسم هو الحَكَم وحده (Codex P1): نجاح قديم لا يغطّي إعادة تشغيل أحدث
 // فشلت أو أُلغيت أو انتهت مهلتها أو ما زالت جارية. الترتيب: وقت البدء/الإنشاء ثم المعرّف.
+// وقت فارغ (queued/in_progress بلا started_at من GitHub) = أحدث، وإلا يفوز النجاح القديم.
 export function newestByName(items, name, timeField) {
   return items
     .filter((x) => x.name === name)
-    .sort((a, b) => String(b[timeField] || "").localeCompare(String(a[timeField] || "")) || Number(b.id || 0) - Number(a.id || 0))[0] || null;
+    .sort((a, b) => {
+      const ta = String(a[timeField] || "");
+      const tb = String(b[timeField] || "");
+      if (!ta && tb) return -1;
+      if (ta && !tb) return 1;
+      return tb.localeCompare(ta) || Number(b.id || 0) - Number(a.id || 0);
+    })[0] || null;
 }
 
 const verdict = (run) => (run ? `${run.status}/${run.conclusion}` : "missing");

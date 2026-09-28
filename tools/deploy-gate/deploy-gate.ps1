@@ -279,9 +279,16 @@ function Get-ReleaseApproval($Config, [string]$Sha) {
 
 # أحدث تشغيل بالاسم هو الحَكَم وحده (Codex P1): نجاح قديم لا يغطّي إعادة تشغيل أحدث فشلت أو
 # أُلغيت أو انتهت مهلتها أو ما زالت جارية. الترتيب: وقت البدء/الإنشاء ثم المعرّف.
+# وقت فارغ (queued/in_progress بلا started_at من GitHub) = أحدث، وإلا يفوز النجاح القديم.
 function Get-NewestVerdict($Items, [string]$Name, [string]$TimeField) {
     $newest = @($Items | Where-Object { [string]$_.name -eq $Name } |
-        Sort-Object -Property @{ Expression = { [string]$_.$TimeField }; Descending = $true }, @{ Expression = { [long]$_.id }; Descending = $true }) | Select-Object -First 1
+        Sort-Object -Property @{
+            Expression = {
+                $t = [string]$_.$TimeField
+                if ([string]::IsNullOrWhiteSpace($t)) { '9999-12-31T23:59:59Z' } else { $t }
+            }
+            Descending = $true
+        }, @{ Expression = { [long]$_.id }; Descending = $true }) | Select-Object -First 1
     if (-not $newest) { return 'missing' }
     return ([string]$newest.status + '/' + [string]$newest.conclusion)
 }

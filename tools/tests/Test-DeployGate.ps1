@@ -315,12 +315,19 @@ try {
         [pscustomobject]@{ id = 11; name = 'check'; status = 'completed'; conclusion = 'failure'; started_at = '2026-09-28T02:00:00Z' })
     $r = Invoke-DeployGate -Config $e7.Config -GateMode 'Deploy'
     Assert-True ($r.result -eq 'STOP' -and $r.reason -like 'CI not green*' -and (Get-TestHead $e7) -eq $before) 'old success + newer failure => BLOCK'
-    foreach ($bad in @(@('completed', 'cancelled'), @('completed', 'timed_out'), @('in_progress', ''))) {
+    foreach ($bad in @(@('completed', 'cancelled'), @('completed', 'timed_out'), @('in_progress', ''), @('queued', ''))) {
         $script:PrChecks[$sha] = @(
             [pscustomobject]@{ id = 10; name = 'check'; status = 'completed'; conclusion = 'success'; started_at = '2026-09-28T01:00:00Z' },
             [pscustomobject]@{ id = 12; name = 'check'; status = $bad[0]; conclusion = $bad[1]; started_at = '2026-09-28T03:00:00Z' })
         $r = Invoke-DeployGate -Config $e7.Config -GateMode 'Deploy'
         Assert-True ($r.result -eq 'STOP' -and (Get-TestHead $e7) -eq $before) ('old success + newer ' + $bad[0] + '/' + $bad[1] + ' => BLOCK')
+    }
+    foreach ($pending in @('queued', 'in_progress', 'waiting')) {
+        $script:PrChecks[$sha] = @(
+            [pscustomobject]@{ id = 10; name = 'check'; status = 'completed'; conclusion = 'success'; started_at = '2026-09-28T01:00:00Z' },
+            [pscustomobject]@{ id = 14; name = 'check'; status = $pending; conclusion = $null; started_at = $null })
+        $r = Invoke-DeployGate -Config $e7.Config -GateMode 'Deploy'
+        Assert-True ($r.result -eq 'STOP' -and (Get-TestHead $e7) -eq $before) ('old success + newer ' + $pending + ' without started_at => BLOCK')
     }
     $script:PrChecks[$sha] = @(
         [pscustomobject]@{ id = 11; name = 'check'; status = 'completed'; conclusion = 'failure'; started_at = '2026-09-28T02:00:00Z' },

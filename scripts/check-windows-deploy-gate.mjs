@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 import { readFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { classifyChanges, evaluateCi, loadGateConfig, RELEASE_KIND, inWriteScanScope, writeIndicators, affectedLongRunning } from "./windows-release-verify.mjs";
+import { classifyChanges, evaluateCi, loadGateConfig, RELEASE_KIND, inWriteScanScope, writeIndicators, affectedLongRunning, newestByName } from "./windows-release-verify.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const read = (rel) => readFileSync(path.join(root, rel), "utf8");
@@ -61,6 +61,11 @@ for (const [status, conclusion] of [["completed", "cancelled"], ["completed", "t
   assert.equal(evaluateCi({ ...base, prCheckRuns: [pr("success", "completed", "2026-09-28T01:00:00Z", 1), pr(conclusion, status, "2026-09-28T03:00:00Z", 3)] }).ok, false, `newer ${status}/${conclusion} = BLOCK`);
 }
 assert.equal(evaluateCi({ ...base, prCheckRuns: [pr("failure", "completed", "2026-09-28T01:00:00Z", 1), pr("success", "completed", "2026-09-28T01:00:00Z", 2)] }).ok, true, "same start time: higher id is newer");
+for (const [status, conclusion, startedAt] of [["queued", null, null], ["queued", null, ""], ["in_progress", null, null], ["waiting", null, null]]) {
+  assert.equal(evaluateCi({ ...base, prCheckRuns: [pr("success", "completed", "2026-09-28T01:00:00Z", 1), pr(conclusion, status, startedAt, 9)] }).ok, false, `newer ${status} without started_at = BLOCK`);
+}
+assert.equal(newestByName([pr("success", "completed", "2026-09-28T01:00:00Z", 1), pr(null, "queued", null, 9)], "check", "started_at").id, 9);
+assert.match(read("tools/deploy-gate/deploy-gate.ps1"), /9999-12-31T23:59:59Z/, "Get-NewestVerdict: وقت فارغ = أحدث");
 ok("فحوص الـPR بأحدث تشغيل: نجاح قديم لا يغطّي فشلاً/إلغاءً/مهلة/تشغيلاً جارياً أحدث (Codex P1 #1)");
 
 // Codex P1 #2: كشف قدرة الكتابة لا يعتمد على أسماء الملفات.
