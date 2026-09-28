@@ -286,46 +286,131 @@
     }).join("")}</section>`;
   }
 
-  function counterRow(item) {
-    const allDrafts = drafts();
-    const draft = allDrafts[item.id] || {};
+  function rowFieldValue(showDraft, draftValue, savedValue) {
+    if (!showDraft) return savedValue ?? "";
+    return draftValue ?? (savedValue ?? "");
+  }
+
+  function rowCountState(item, draft, showDraft) {
+    if (showDraft && draft.countState) return draft.countState;
+    if (item.recountRequested) return "counted";
+    return item.countState;
+  }
+
+  function rowDisabled(saved, editing, lockedByOther) {
+    if (saved && !editing) return true;
+    if (lockedByOther) return true;
+    if (state.session?.status === "completed") return true;
+    return state.finishing === true;
+  }
+
+  function countedWhen(item) {
+    if (!item.countedAt) return "";
+    return ` — ${esc(fmtDate(item.countedAt))}`;
+  }
+
+  function rowLockText(item, view) {
+    if (view.editing) return "عدّل الكمية أو الحالة ثم احفظ. بعد إغلاق الجلسة لا يُقبل التعديل.";
+    if (view.ownCorrectable) return `عدّك محفوظ${countedWhen(item)}. يمكنك تعديله قبل إغلاق الجرد.`;
+    if (view.saved) return `تم جرد هذا الصنف بواسطة ${esc(item.countedByDisplayName || "موظف")}${countedWhen(item)}`;
+    if (view.lockedByOther) return `يقوم ${esc(item.claimedByDisplayName)} بجرده الآن`;
+    if (item.recountRequested) return "إعادة عد مطلوبة من موظف آخر — الكمية المتوقعة مخفية";
+    return "";
+  }
+
+  function counterRowView(item) {
+    const draft = drafts()[item.id] || {};
     const saved = item.countState !== "uncounted" && !item.recountRequested;
     const ownCorrectable = canCounterCorrect(item, state.session?.status);
     const editing = ownCorrectable && state.editingItemId === item.id;
     const claimed = item.claimedByDisplayName && new Date(item.claimExpiresAt || 0) > new Date();
     const lockedByOther = claimed && !item.claimedByMe;
     const showDraft = !saved || editing;
-    const unit1 = showDraft ? (draft.unit1Qty ?? (item.unit1Qty ?? "")) : (item.unit1Qty ?? "");
-    const unit2 = showDraft ? (draft.unit2Qty ?? (item.unit2Qty ?? "")) : (item.unit2Qty ?? "");
-    const damaged = showDraft ? (draft.damagedUnit1Qty ?? (item.damagedUnit1Qty ?? "")) : (item.damagedUnit1Qty ?? "");
-    const countState = (showDraft && draft.countState) || (item.recountRequested ? "counted" : item.countState);
-    const disabled = (saved && !editing) || lockedByOther || state.session?.status === "completed" || state.finishing;
-    let lockText = "";
-    if (editing) lockText = "عدّل الكمية أو الحالة ثم احفظ. بعد إغلاق الجلسة لا يُقبل التعديل.";
-    else if (ownCorrectable) lockText = `عدّك محفوظ${item.countedAt ? ` — ${esc(fmtDate(item.countedAt))}` : ""}. يمكنك تعديله قبل إغلاق الجرد.`;
-    else if (saved) lockText = `تم جرد هذا الصنف بواسطة ${esc(item.countedByDisplayName || "موظف")}${item.countedAt ? ` — ${esc(fmtDate(item.countedAt))}` : ""}`;
-    else if (lockedByOther) lockText = `يقوم ${esc(item.claimedByDisplayName)} بجرده الآن`;
-    else if (item.recountRequested) lockText = "إعادة عد مطلوبة من موظف آخر — الكمية المتوقعة مخفية";
-    const saveLabel = state.busyItemId === item.id ? "جاري الحفظ…" : (editing ? "حفظ التعديل" : "حفظ الصنف");
-    const editLocked = state.finishing || state.session?.status === "completed" || state.busyItemId === item.id;
-    const action = ownCorrectable && !editing
-      ? `<button class="button secondary" type="button" data-smart-edit="${esc(item.id)}" ${editLocked ? "disabled" : ""}>تعديل الصنف</button>`
-      : `<button class="button primary" type="button" data-smart-save="${esc(item.id)}" ${disabled || state.busyItemId === item.id ? "disabled" : ""}>${saveLabel}</button>${editing ? `<button class="button secondary" type="button" data-smart-edit-cancel="${esc(item.id)}">إلغاء</button>` : ""}`;
-    return `<article class="panel smart-item ${saved && !editing ? "is-counted" : ""} ${editing ? "is-editing" : ""}" data-smart-item-card="${esc(item.id)}">
+    const view = { item, saved, ownCorrectable, editing, lockedByOther, showDraft };
+    view.unit1 = rowFieldValue(showDraft, draft.unit1Qty, item.unit1Qty);
+    view.unit2 = rowFieldValue(showDraft, draft.unit2Qty, item.unit2Qty);
+    view.damaged = rowFieldValue(showDraft, draft.damagedUnit1Qty, item.damagedUnit1Qty);
+    view.countState = rowCountState(item, draft, showDraft);
+    view.disabled = rowDisabled(saved, editing, lockedByOther);
+    view.lockText = rowLockText(item, view);
+    return view;
+  }
+
+  function attrDisabled(flag) {
+    return flag ? "disabled" : "";
+  }
+
+  function optionTag(value, label, current) {
+    const selected = current === value ? " selected" : "";
+    return `<option value="${value}"${selected}>${label}</option>`;
+  }
+
+  function stateOptions(countState) {
+    return [
+      ["counted", "معدود"],
+      ["zero", "صفر فعلي"],
+      ["not_found", "غير موجود في موقعه"],
+      ["damaged", "تالف"]
+    ].map(([value, label]) => optionTag(value, label, countState)).join("");
+  }
+
+  function qtyField(label, name, itemId, value, disabled, className = "") {
+    const cls = className ? ` class="${className}"` : "";
+    return `<label${cls}>${label}<input type="number" min="0" step="0.001" inputmode="decimal" data-smart-qty="${name}" data-item-id="${esc(itemId)}" value="${esc(value)}" ${attrDisabled(disabled)}></label>`;
+  }
+
+  function unit2Field(item, value, disabled) {
+    if (!item.unit2Name || !(Number(item.unit2Factor) > 1)) return "";
+    const label = `${esc(item.unit2Name)} <small>× ${fmtNum(item.unit2Factor)}</small>`;
+    return qtyField(label, "unit2Qty", item.id, value, disabled);
+  }
+
+  function counterCardClass(view) {
+    const classes = [];
+    if (view.saved && !view.editing) classes.push("is-counted");
+    if (view.editing) classes.push("is-editing");
+    return classes.join(" ");
+  }
+
+  function rowSaveLabel(itemId, editing) {
+    if (state.busyItemId === itemId) return "جاري الحفظ…";
+    if (editing) return "حفظ التعديل";
+    return "حفظ الصنف";
+  }
+
+  function rowEditLocked(itemId) {
+    if (state.finishing) return true;
+    if (state.session?.status === "completed") return true;
+    return state.busyItemId === itemId;
+  }
+
+  function rowActions(view) {
+    const item = view.item;
+    if (view.ownCorrectable && !view.editing) {
+      return `<button class="button secondary" type="button" data-smart-edit="${esc(item.id)}" ${attrDisabled(rowEditLocked(item.id))}>تعديل الصنف</button>`;
+    }
+    const saveDisabled = view.disabled || state.busyItemId === item.id;
+    const cancel = view.editing ? `<button class="button secondary" type="button" data-smart-edit-cancel="${esc(item.id)}">إلغاء</button>` : "";
+    return `<button class="button primary" type="button" data-smart-save="${esc(item.id)}" ${attrDisabled(saveDisabled)}>${rowSaveLabel(item.id, view.editing)}</button>${cancel}`;
+  }
+
+  function rowFoot(lockText) {
+    if (lockText) return `<p class="smart-lock-note">${lockText}</p>`;
+    return '<p class="muted">الخانة الفارغة تبقى غير معدودة. عند إغلاق الجرد تُحتسب صفراً بعد التأكيد.</p>';
+  }
+
+  function counterRow(item) {
+    const view = counterRowView(item);
+    return `<article class="panel smart-item ${counterCardClass(view)}" data-smart-item-card="${esc(item.id)}">
       <div class="smart-item-head"><div><small>${esc(item.itemCode || item.itemKey)}</small><h3>${esc(item.itemName)}</h3></div><span class="smart-line-state">${esc(itemStatusLabel(item.countState))}</span></div>
       <div class="smart-count-grid">
-        <label>${esc(item.unit1Name || "الوحدة الأولى")}<input type="number" min="0" step="0.001" inputmode="decimal" data-smart-qty="unit1Qty" data-item-id="${esc(item.id)}" value="${esc(unit1)}" ${disabled ? "disabled" : ""}></label>
-        ${item.unit2Name && Number(item.unit2Factor) > 1 ? `<label>${esc(item.unit2Name)} <small>× ${fmtNum(item.unit2Factor)}</small><input type="number" min="0" step="0.001" inputmode="decimal" data-smart-qty="unit2Qty" data-item-id="${esc(item.id)}" value="${esc(unit2)}" ${disabled ? "disabled" : ""}></label>` : ""}
-        <label>الحالة<select data-smart-state data-item-id="${esc(item.id)}" ${disabled ? "disabled" : ""}>
-          <option value="counted" ${countState === "counted" ? "selected" : ""}>معدود</option>
-          <option value="zero" ${countState === "zero" ? "selected" : ""}>صفر فعلي</option>
-          <option value="not_found" ${countState === "not_found" ? "selected" : ""}>غير موجود في موقعه</option>
-          <option value="damaged" ${countState === "damaged" ? "selected" : ""}>تالف</option>
-        </select></label>
-        <label class="smart-damaged">تالف (${esc(item.unit1Name || "الوحدة الأولى")})<input type="number" min="0" step="0.001" inputmode="decimal" data-smart-qty="damagedUnit1Qty" data-item-id="${esc(item.id)}" value="${esc(damaged)}" ${disabled ? "disabled" : ""}></label>
+        ${qtyField(esc(item.unit1Name || "الوحدة الأولى"), "unit1Qty", item.id, view.unit1, view.disabled)}
+        ${unit2Field(item, view.unit2, view.disabled)}
+        <label>الحالة<select data-smart-state data-item-id="${esc(item.id)}" ${attrDisabled(view.disabled)}>${stateOptions(view.countState)}</select></label>
+        ${qtyField(`تالف (${esc(item.unit1Name || "الوحدة الأولى")})`, "damagedUnit1Qty", item.id, view.damaged, view.disabled, "smart-damaged")}
       </div>
-      <div class="button-row">${action}</div>
-      ${lockText ? `<p class="smart-lock-note">${lockText}</p>` : '<p class="muted">الخانة الفارغة تبقى غير معدودة. عند إغلاق الجرد تُحتسب صفراً بعد التأكيد.</p>'}
+      <div class="button-row">${rowActions(view)}</div>
+      ${rowFoot(view.lockText)}
     </article>`;
   }
 
@@ -426,13 +511,42 @@
     return parseCountInput(countState, get("unit1Qty"), get("unit2Qty"), get("damagedUnit1Qty"));
   }
 
+  function foreignCountLocked(item, correcting) {
+    return item.countState !== "uncounted" && !item.recountRequested && !correcting;
+  }
+
+  function saveClearsEdit(code) {
+    return code === "already_counted" || code === "session_closed";
+  }
+
+  function saveRejectedMessage(result) {
+    if (result.code === "already_counted") return `تم جرد هذا الصنف بواسطة ${result.countedByDisplayName || "موظف آخر"} — ${fmtDate(result.countedAt)}`;
+    if (result.code === "session_closed") return "الجلسة مغلقة. لا يمكن تعديل الجرد.";
+    if (result.code === "claimed") return `يقوم ${result.claimedByDisplayName || "موظف آخر"} بجرده الآن.`;
+    if (result.code === "version_conflict") return "تغيّر الصنف على جهاز آخر. تم تحديث الصفحة دون الكتابة فوقه.";
+    if (result.code === "recount_requires_other_counter") return "إعادة العد يجب أن ينفذها موظف آخر.";
+    return "لم يتم حفظ الصنف.";
+  }
+
+  function saveSuccessText(correcting) {
+    if (correcting) return "حُفظ تعديل الصنف على السيرفر.";
+    return "حُفظ الصنف وربط باسم الموظف ووقت العد.";
+  }
+
+  function rememberOfflineSave(error, entry) {
+    if (navigator.onLine && !/network|fetch|الاتصال/i.test(error.message || "")) return false;
+    queueOutbox(entry);
+    callbacks.notice("warning", "انقطع الاتصال. احتفظ الجهاز بالعملية وسيعيد إرسالها دون تكرار عند عودة الإنترنت.");
+    return true;
+  }
+
   async function saveItem(itemId, root, session, queued = null) {
     if (state.finishing) return;
     const item = state.session.items.find((row) => row.id === itemId);
     if (!item) return;
     if (state.session?.status === "completed") { callbacks.notice("error", "الجلسة مغلقة. لا يمكن تعديل الجرد."); return; }
     const correcting = canCounterCorrect(item, state.session?.status);
-    if (item.countState !== "uncounted" && !item.recountRequested && !correcting) {
+    if (foreignCountLocked(item, correcting)) {
       callbacks.notice("error", "لا يمكن تعديل صنف عدّه موظف آخر.");
       return;
     }
@@ -443,27 +557,15 @@
     try {
       const result = await store.saveSmartInventoryItem(entry);
       if (!result?.ok) {
-        if (result.code === "already_counted") {
-          state.editingItemId = "";
-          throw new Error(`تم جرد هذا الصنف بواسطة ${result.countedByDisplayName || "موظف آخر"} — ${fmtDate(result.countedAt)}`);
-        }
-        if (result.code === "session_closed") {
-          state.editingItemId = "";
-          throw new Error("الجلسة مغلقة. لا يمكن تعديل الجرد.");
-        }
-        if (result.code === "claimed") throw new Error(`يقوم ${result.claimedByDisplayName || "موظف آخر"} بجرده الآن.`);
-        if (result.code === "version_conflict") throw new Error("تغيّر الصنف على جهاز آخر. تم تحديث الصفحة دون الكتابة فوقه.");
-        if (result.code === "recount_requires_other_counter") throw new Error("إعادة العد يجب أن ينفذها موظف آخر.");
-        throw new Error("لم يتم حفظ الصنف.");
+        if (saveClearsEdit(result.code)) state.editingItemId = "";
+        throw new Error(saveRejectedMessage(result));
       }
       removeOutbox(entry.requestId); clearDraft(itemId);
       state.editingItemId = "";
       state.session = await store.getSmartInventoryCounterSession(state.session.id);
-      callbacks.notice("success", correcting ? "حُفظ تعديل الصنف على السيرفر." : "حُفظ الصنف وربط باسم الموظف ووقت العد.");
+      callbacks.notice("success", saveSuccessText(correcting));
     } catch (error) {
-      if (!navigator.onLine || /network|fetch|الاتصال/i.test(error.message)) {
-        queueOutbox(entry); callbacks.notice("warning", "انقطع الاتصال. احتفظ الجهاز بالعملية وسيعيد إرسالها دون تكرار عند عودة الإنترنت.");
-      } else {
+      if (!rememberOfflineSave(error, entry)) {
         callbacks.notice("error", error.message);
         state.session = await store.getSmartInventoryCounterSession(state.session.id).catch(() => state.session);
       }
@@ -664,8 +766,37 @@
     return false;
   }
 
+  function finishAlreadyRunning() {
+    return state.finishing || !state.session || state.session.status === "completed";
+  }
+
+  function applyZeroSave(item, result, zeroedByUs) {
+    if (!result?.ok) {
+      if (result?.code === "already_counted") clearDraft(item.id);
+      else throw new Error(`${saveFailureText(result)} ${storedZeroText(zeroedByUs)}`);
+      return;
+    }
+    clearDraft(item.id);
+    item.countState = "zero";
+    item.unit1Qty = 0;
+    item.unit2Qty = 0;
+    item.damagedUnit1Qty = 0;
+    zeroedByUs.push(item);
+  }
+
+  async function reportFinishFailure(error, plan, zeroedByUs, session) {
+    if (!isNetworkError(error)) {
+      callbacks.notice("error", error.message);
+      await refreshCurrent(session, { keepNotice: true }).catch(() => {});
+      return;
+    }
+    await refreshCurrent(session, { keepNotice: true }).catch(() => {});
+    const saved = linesStoredAsZero(plan.zeros, zeroedByUs, state.session?.items);
+    callbacks.notice("warning", `انقطع الاتصال أثناء احتساب الأصفار. ${storedZeroText(saved)} أعد إغلاق الجرد عند عودة الإنترنت؛ ما حُفظ لن يُكرَّر.`);
+  }
+
   async function finishSession(root, session) {
-    if (state.finishing || !state.session || state.session.status === "completed") return;
+    if (finishAlreadyRunning()) return;
     callbacks.clearNotice?.();
     let plan = readFinishPlan(root);
     if (shouldAbortFinish(plan)) return;
@@ -681,18 +812,7 @@
     try {
       for (const item of plan.zeros) {
         const entry = { itemId: item.id, requestId: uuid(), ...zeroCountPayload(item) };
-        const result = await store.saveSmartInventoryItem(entry);
-        if (!result?.ok) {
-          if (result?.code === "already_counted") clearDraft(item.id);
-          else throw new Error(`${saveFailureText(result)} ${storedZeroText(zeroedByUs)}`);
-        } else {
-          clearDraft(item.id);
-          item.countState = "zero";
-          item.unit1Qty = 0;
-          item.unit2Qty = 0;
-          item.damagedUnit1Qty = 0;
-          zeroedByUs.push(item);
-        }
+        applyZeroSave(item, await store.saveSmartInventoryItem(entry), zeroedByUs);
         if (state.finishProgress) state.finishProgress.done += 1;
         callbacks.render();
       }
@@ -702,14 +822,7 @@
       callbacks.notice("success", finishZeroSuccessText(zeroedByUs.length));
       await refreshCurrent(session, { keepNotice: true });
     } catch (error) {
-      if (isNetworkError(error)) {
-        await refreshCurrent(session, { keepNotice: true }).catch(() => {});
-        const saved = linesStoredAsZero(plan.zeros, zeroedByUs, state.session?.items);
-        callbacks.notice("warning", `انقطع الاتصال أثناء احتساب الأصفار. ${storedZeroText(saved)} أعد إغلاق الجرد عند عودة الإنترنت؛ ما حُحفظ لن يُكرَّر.`);
-      } else {
-        callbacks.notice("error", error.message);
-        await refreshCurrent(session, { keepNotice: true }).catch(() => {});
-      }
+      await reportFinishFailure(error, plan, zeroedByUs, session);
     } finally {
       state.finishing = false;
       state.finishProgress = null;
