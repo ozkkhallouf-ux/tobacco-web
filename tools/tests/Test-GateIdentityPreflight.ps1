@@ -61,7 +61,7 @@ function New-Task([string]$Name, [string]$Identity, [string]$Action, $Actions = 
         $m = [regex]::Match($Action, '^\s*("[^"]+"|\S+)\s*(.*)$')
         $Actions = @([pscustomobject]@{ execute = $m.Groups[1].Value.Trim('"'); arguments = $m.Groups[2].Value })
     }
-    return [pscustomobject]@{ name = $Name; identity = $Identity; action = $Action; actions = @($Actions) }
+    return [pscustomobject]@{ name = $Name; path = '\'; identity = $Identity; action = $Action; actions = @($Actions) }
 }
 # مهمة البوابة بـAction منظَّم (المفسّر + الوسائط كما في Task Scheduler).
 $approvedPs = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
@@ -84,8 +84,11 @@ function Get-CurrentLayout {
 }
 
 # تخطيط مستقبلي «نظيف»: كل repo workloads بهويات عادية غير إدارية (للتحقق من حالة eligible).
-function Get-CleanLayout {
-    return @(
+function Get-ValidGateTask { return New-GateTask $approvedPs ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $gateDir + '\deploy-gate.ps1" -Mode DryRun') }
+function Get-CleanLayout([switch]$NoGate) {
+    $gt = @()
+    if (-not $NoGate) { $gt = @(Get-ValidGateTask) }
+    return @($gt) + @(
         (New-Task 'OZK-AmeenAutoPrint' 'OZK-AutoPrint' ('wscript.exe "' + $autoprintVbs + '"')),
         (New-Task 'TOBACCO Ameen Read Worker' 'OZK-ReadWorker' ($ps + ' -File "' + $repo + '\tools\ameen-read-worker.ps1"')),
         (New-Task 'TOBACCO Customer Movements Push' 'OZKSync' ($ps + ' -File "' + $repo + '\tools\push-customer-movements.ps1"')),
@@ -164,10 +167,10 @@ try {
     $script:Tasks = Get-CleanLayout
     $r = Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())
     Assert-True ($r.ok) 'ordinary non-admin repo workloads only + dedicated identity unused => eligible'
-    $script:Tasks = @(Get-CleanLayout) + @(New-GateTask $approvedPs ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $gateDir + '\deploy-gate.ps1"'))
+    $script:Tasks = @(Get-CleanLayout -NoGate) + @(New-GateTask $approvedPs ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $gateDir + '\deploy-gate.ps1"'))
     $r = Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())
     Assert-True ($r.ok) 'the gate task itself under the dedicated identity running only gateDir scripts => eligible'
-    $script:Tasks = @(Get-CleanLayout) + @(New-GateTask $approvedPs ('-File "' + $repo + '\tools\deploy-gate\deploy-gate.ps1"'))
+    $script:Tasks = @(Get-CleanLayout -NoGate) + @(New-GateTask $approvedPs ('-File "' + $repo + '\tools\deploy-gate\deploy-gate.ps1"'))
     $r = Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())
     Assert-True (-not $r.ok -and (Test-BlockLike $r '*gate task must run only*')) 'the gate task running the repository copy of the gate => BLOCK'
     $script:Tasks = @(Get-CleanLayout) + @(New-Task 'TOBACCO Item Costs Push' 'OZK2026\OZK-DeployGate' ($ps + ' -File "' + $repo + '\tools\push-item-costs.ps1"'))
@@ -373,13 +376,115 @@ try {
         @{ ok = $false; label = 'no -File at all => BLOCK'; exe = $approvedPs; args = '-NoProfile' }
     )
     foreach ($c in $cases) {
-        $script:Tasks = @(Get-CleanLayout) + @(New-GateTask $c.exe $c.args)
+        $script:Tasks = @(Get-CleanLayout -NoGate) + @(New-GateTask $c.exe $c.args)
         $r = Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())
         Assert-True ($r.ok -eq $c.ok) $c.label
     }
     $twoActions = New-Task 'TOBACCO Windows Deploy Gate' 'OZK2026\OZK-DeployGate' 'x' @([pscustomobject]@{ execute = $approvedPs; arguments = ('-File "' + $gatePath + '"') }, [pscustomobject]@{ execute = 'C:\Tools\anything.exe'; arguments = '' })
-    $script:Tasks = @(Get-CleanLayout) + @($twoActions)
+    $script:Tasks = @(Get-CleanLayout -NoGate) + @($twoActions)
     Assert-True (-not (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())).ok) 'a second action on the gate task => BLOCK'
+
+    Write-Host '== Structured action fields, tri-state REPO / NOT_REPO / UNKNOWN (Codex P1)'
+    $cfgR = New-Config 'OZK2026\OZK-DeployGate' @()
+    function Act([string]$E, [string]$A = '', [string]$W = '') { return [pscustomobject]@{ execute = $E; arguments = $A; workingDirectory = $W } }
+    $node = 'C:\Program Files\nodejs\node.exe'
+    $reachCases = @(
+        @{ label = 'node.exe + scripts\serve.mjs + repo WorkingDirectory => REPO'; a = (Act $node 'scripts\serve.mjs' $repo); want = 'REPO' },
+        @{ label = 'powershell.exe + relative ps1 + repo WorkingDirectory => REPO'; a = (Act $ps '-NoProfile -File tools\x.ps1' $repo); want = 'REPO' },
+        @{ label = 'relative target resolved against a repo sub-folder WorkingDirectory => REPO'; a = (Act 'node.exe' 'serve.mjs' ($repo + '\scripts')); want = 'REPO' },
+        @{ label = 'absolute executable inside the repo => REPO'; a = (Act ($repo + '\tools\bin\helper.exe')); want = 'REPO' },
+        @{ label = 'absolute script inside the repo => REPO'; a = (Act $ps ('-File "' + $repo + '\tools\x.ps1"')); want = 'REPO' },
+        @{ label = 'relative target + unrelated trusted WorkingDirectory => NOT_REPO'; a = (Act $node 'server.js' 'C:\Tools\svc'); want = 'NOT_REPO' },
+        @{ label = 'relative target traversing from an unrelated WorkingDirectory into the repo => REPO'; a = (Act $node '..\..\Users\LOQ\Documents\OZK-TOBACCO\tobacco-web\scripts\serve.mjs' 'C:\Tools\svc'); want = 'REPO' },
+        @{ label = 'interpreter path does not swallow arguments/working directory (C:\Windows path first)'; a = (Act 'C:\Windows\System32\cmd.exe' '/c run.bat' $repo); want = 'REPO' },
+        @{ label = 'relative script with no WorkingDirectory => UNKNOWN'; a = (Act $node 'scripts\serve.mjs'); want = 'UNKNOWN' },
+        @{ label = 'relative WorkingDirectory => UNKNOWN'; a = (Act $node 'serve.mjs' 'tobacco-web'); want = 'UNKNOWN' },
+        @{ label = 'malformed quoting in executable => UNKNOWN'; a = (Act '"C:\Tools\a.exe' ''); want = 'UNKNOWN' },
+        @{ label = 'malformed quoting in arguments => UNKNOWN'; a = (Act $node '"serve.mjs' 'C:\Tools'); want = 'UNKNOWN' },
+        @{ label = 'glued quotes a"b c" (ambiguous) => UNKNOWN'; a = (Act $node 'x"serve.mjs y"' 'C:\Tools'); want = 'UNKNOWN' },
+        @{ label = 'empty executable => UNKNOWN'; a = (Act '' '-File x.ps1'); want = 'UNKNOWN' },
+        @{ label = 'PowerShell -EncodedCommand => UNKNOWN'; a = (Act $ps '-NoProfile -EncodedCommand SQBFAFgAIAAoAGcAYwAgAGMAOgBcAHIAZQBwAG8AKQA='); want = 'UNKNOWN' },
+        @{ label = 'PowerShell -enc / -e / -ec abbreviations => UNKNOWN'; a = (Act $ps '-e SQBFAFgA'); want = 'UNKNOWN' },
+        @{ label = 'PowerShell -ec => UNKNOWN'; a = (Act 'powershell' '-ec SQBFAFgA'); want = 'UNKNOWN' },
+        @{ label = 'PowerShell -Command with a dynamic expression => UNKNOWN'; a = (Act $ps '-Command "& (Join-Path $root x.ps1)"'); want = 'UNKNOWN' },
+        @{ label = 'PowerShell -c with a pipeline => UNKNOWN'; a = (Act $ps '-c "Get-Content C:\Tools\list.txt | ForEach-Object { & $_ }"'); want = 'UNKNOWN' },
+        @{ label = 'PowerShell -Command - (stdin) => UNKNOWN'; a = (Act $ps '-Command -'); want = 'UNKNOWN' },
+        @{ label = 'PowerShell positional command (no -File) => UNKNOWN unless a static ps1'; a = (Act $ps 'Start-Process notepad'); want = 'UNKNOWN' },
+        @{ label = 'PowerShell with no target at all => UNKNOWN'; a = (Act $ps '-NoProfile'); want = 'UNKNOWN' },
+        @{ label = 'PowerShell unknown/ambiguous parameter => UNKNOWN'; a = (Act $ps '-No -File C:\Tools\x.ps1'); want = 'UNKNOWN' },
+        @{ label = 'PowerShell -Command static absolute ps1 outside the repo => NOT_REPO'; a = (Act $ps '-NoProfile -Command "& ''C:\Tools\report.ps1'' -Quiet"'); want = 'NOT_REPO' },
+        @{ label = 'PowerShell -Command static absolute ps1 inside the repo => REPO'; a = (Act $ps ('-Command "& ''' + $repo + '\tools\x.ps1''"')); want = 'REPO' },
+        @{ label = 'cmd /c with a dynamic block => UNKNOWN'; a = (Act 'cmd.exe' '/c (for /f %i in (list.txt) do call %i)'); want = 'UNKNOWN' },
+        @{ label = 'cmd /c if/else control flow => UNKNOWN'; a = (Act 'cmd.exe' '/c if exist C:\Tools\a.txt C:\Tools\b.exe'); want = 'UNKNOWN' },
+        @{ label = 'cmd without /c => UNKNOWN'; a = (Act 'cmd.exe' ''); want = 'UNKNOWN' },
+        @{ label = 'cmd /c chained: cd into repo && node serve.mjs => REPO'; a = (Act 'cmd.exe' ('/c cd /d "' + $repo + '" && node scripts\serve.mjs')); want = 'REPO' },
+        @{ label = 'cmd /c start "" relative script with no WorkingDirectory => UNKNOWN'; a = (Act 'cmd.exe' '/c start "" run.bat'); want = 'UNKNOWN' },
+        @{ label = 'cmd /c known static command with redirection => NOT_REPO'; a = (Act 'C:\Windows\System32\cmd.exe' '/c "C:\Tools\backup.exe" /quiet > "C:\Logs\b.log" 2>&1'); want = 'NOT_REPO' },
+        @{ label = 'wscript without a script target => UNKNOWN'; a = (Act 'wscript.exe' '//B //Nologo'); want = 'UNKNOWN' },
+        @{ label = 'cscript relative script with no WorkingDirectory => UNKNOWN'; a = (Act 'cscript.exe' '//Nologo helper.vbs'); want = 'UNKNOWN' },
+        @{ label = 'node -e inline code => UNKNOWN'; a = (Act 'node.exe' '-e "require(process.argv[1])"' 'C:\Tools'); want = 'UNKNOWN' },
+        @{ label = 'python -c inline code => UNKNOWN'; a = (Act 'python.exe' '-c "import runpy"' 'C:\Tools'); want = 'UNKNOWN' },
+        @{ label = 'interpreter with no static target => UNKNOWN'; a = (Act 'node.exe' '--max-old-space-size=4096'); want = 'UNKNOWN' },
+        @{ label = 'unresolved environment variable in Arguments => UNKNOWN'; a = (Act $ps '-File "%OZK_ROOT%\tools\x.ps1"'); want = 'UNKNOWN' },
+        @{ label = 'known unrelated static command => NOT_REPO'; a = (Act 'C:\Windows\system32\sc.exe' 'start w32time task_started'); want = 'NOT_REPO' },
+        @{ label = 'known unrelated static PowerShell -File => NOT_REPO'; a = (Act $ps '-NoProfile -File "C:\Tools\report.ps1"'); want = 'NOT_REPO' }
+    )
+    foreach ($c in $reachCases) {
+        $got = Resolve-TaskReach $cfgR @($c.a) 'OZK2026\OZKSync'
+        Assert-True ($got.status -eq $c.want) ($c.label + ' (got ' + $got.status + ')')
+    }
+    Assert-True ((Resolve-TaskReach $cfgR @() 'SYSTEM').status -eq 'UNKNOWN') 'task with no readable actions => UNKNOWN'
+    Assert-True ((Resolve-TaskReach $cfgR @([pscustomobject]@{ execute = ''; arguments = ''; workingDirectory = ''; classId = '{00000000-0000-0000-0000-000000000001}' }) 'SYSTEM').status -eq 'UNKNOWN') 'COM handler that cannot be resolved to a binary => UNKNOWN'
+    Assert-True ((Resolve-TaskReach $cfgR @([pscustomobject]@{ execute = 'C:\Windows\System32\wininet.dll'; arguments = ''; workingDirectory = ''; classId = '{00000000-0000-0000-0000-000000000002}' }) 'SYSTEM').status -eq 'NOT_REPO') 'COM handler resolved to a system binary => NOT_REPO'
+    Assert-True ((Resolve-TaskReach $cfgR @((Act 'C:\Tools\a.exe'), (Act $node 'scripts\serve.mjs' $repo)) 'OZKSync').status -eq 'REPO') 'second action reaching the repo => REPO (every action is evaluated)'
+
+    Write-Host '== Opaque / ambiguous privileged commands fail closed (Codex P1)'
+    $privCases = @(
+        @{ label = 'privileged + EncodedCommand => BLOCK'; a = (Act $ps '-NoProfile -WindowStyle Hidden -EncodedCommand SQBFAFgAIAAoAGcAYwAgAGMAOgBcAHIAZQBwAG8AKQA=') },
+        @{ label = 'privileged + ambiguous -Command => BLOCK'; a = (Act $ps '-Command "$p = Get-Content C:\Tools\target.txt; & $p"') },
+        @{ label = 'privileged + cmd /c ambiguous => BLOCK'; a = (Act 'cmd.exe' '/c for /f %i in (C:\Tools\list.txt) do call %i') },
+        @{ label = 'privileged + unresolvable script target => BLOCK'; a = (Act 'wscript.exe' '"helper.vbs"') },
+        @{ label = 'privileged + relative repo target via WorkingDirectory => BLOCK privileged'; a = (Act $node 'scripts\serve.mjs' $repo) }
+    )
+    foreach ($c in $privCases) {
+        $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Opaque Priv' 'SYSTEM' 'x' @($c.a))
+        $r = Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())
+        Assert-True (-not $r.ok -and ((Test-BlockLike $r '*Opaque Priv*cannot determine whether*') -or (Test-BlockLike $r '*Opaque Priv*privileged repository workload*'))) $c.label
+    }
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Opaque NonAdmin' 'OZKSync' 'x' @(Act $ps '-EncodedCommand SQBFAFgA'))
+    Assert-True ((Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())).ok) 'non-privileged task with an opaque command is not a privilege risk (UNKNOWN only blocks privileged identities)'
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Known Static Priv' 'SYSTEM' 'x' @(Act 'C:\Windows\system32\sc.exe' 'start w32time task_started'))
+    Assert-True ((Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())).ok) 'privileged known unrelated static command => NOT_REPO (not blocked)'
+
+    Write-Host '== Initialize requires exactly one validated gate task (Codex P1)'
+    $gateCases = @(
+        @{ label = 'zero gate tasks => BLOCK'; tasks = @(Get-CleanLayout -NoGate); pattern = '*gate task*is not registered*' },
+        @{ label = 'exactly one valid gate task => PASS'; tasks = @(Get-CleanLayout); pattern = '' },
+        @{ label = 'duplicate gate tasks => BLOCK'; tasks = (@(Get-CleanLayout) + @(& { $d = Get-ValidGateTask; $d.path = '\OZK\'; $d })); pattern = '*duplicate gate tasks*' },
+        @{ label = 'one expected + gate-like conflicting task (runs deploy-gate.ps1) => BLOCK'; tasks = (@(Get-CleanLayout) + @(New-Task 'OZK Gate Shadow' 'OZKSync' 'x' @(Act $approvedPs ('-File "' + $gateDir + '\deploy-gate.ps1" -Mode Deploy')))); pattern = '*OZK Gate Shadow*gate-like task conflicts*' },
+        @{ label = 'one expected + gate-like conflicting task (name) => BLOCK'; tasks = (@(Get-CleanLayout) + @(New-Task 'TOBACCO Deploy Gate Legacy' 'OZKSync' 'x' @(Act 'C:\Tools\a.exe'))); pattern = '*Deploy Gate Legacy*gate-like task conflicts*' },
+        @{ label = 'gate task in an unexpected folder => BLOCK'; tasks = (@(Get-CleanLayout -NoGate) + @(& { $d = Get-ValidGateTask; $d.path = '\Other\'; $d })); pattern = '*gate task path is \Other\*' },
+        @{ label = 'unreadable gate task (no actions) => BLOCK'; tasks = (@(Get-CleanLayout -NoGate) + @(New-Task 'TOBACCO Windows Deploy Gate' 'OZK2026\OZK-DeployGate' 'x' @())); pattern = '*expected exactly one action, found 0*' },
+        @{ label = 'gate task with unreadable identity => BLOCK'; tasks = (@(Get-CleanLayout -NoGate) + @(New-GateTask $approvedPs ('-File "' + $gateDir + '\deploy-gate.ps1"') '')); pattern = '*gate task identity not verifiable*' },
+        @{ label = 'wrong identity (SYSTEM) => BLOCK'; tasks = (@(Get-CleanLayout -NoGate) + @(New-GateTask $approvedPs ('-File "' + $gateDir + '\deploy-gate.ps1"') 'SYSTEM')); pattern = '*must run as the dedicated gate identity*' },
+        @{ label = 'wrong identity (OZKSync) => BLOCK'; tasks = (@(Get-CleanLayout -NoGate) + @(New-GateTask $approvedPs ('-File "' + $gateDir + '\deploy-gate.ps1"') 'OZKSync')); pattern = '*must run as the dedicated gate identity*' },
+        @{ label = 'wrong action (wrapper) => BLOCK'; tasks = (@(Get-CleanLayout -NoGate) + @(New-GateTask 'C:\Windows\System32\cmd.exe' ('/c "' + $gateDir + '\deploy-gate.cmd"'))); pattern = '*gate task must run only*' },
+        @{ label = 'wrong action (disallowed mode) => BLOCK'; tasks = (@(Get-CleanLayout -NoGate) + @(New-GateTask $approvedPs ('-File "' + $gateDir + '\deploy-gate.ps1" -Mode Initialize'))); pattern = '*disallowed script argument*' },
+        @{ label = 'gate task working directory outside gateDir => BLOCK'; tasks = (@(Get-CleanLayout -NoGate) + @(New-Task 'TOBACCO Windows Deploy Gate' 'OZK2026\OZK-DeployGate' 'x' @(Act $approvedPs ('-File "' + $gateDir + '\deploy-gate.ps1"') $repo))); pattern = '*working directory must be empty or gateDir*' }
+    )
+    foreach ($c in $gateCases) {
+        $script:Tasks = $c.tasks
+        $r = Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())
+        if (-not $c.pattern) { Assert-True ($r.ok) $c.label } else { Assert-True (-not $r.ok -and (Test-BlockLike $r $c.pattern)) $c.label }
+    }
+    $script:Tasks = @(Get-CleanLayout -NoGate)
+    function Test-GateTrustAcl($Config) { return [pscustomobject]@{ ok = $true; results = @() } }
+    function Get-PreflightTaskActionText([string]$TaskName) { return $null }
+    function Get-PreflightTaskState([string]$TaskName) { if ($TaskName -eq 'OZK-PriceListSync') { return 'Disabled' } return $null }
+    function Get-PreflightTaskNames { return @() }
+    Assert-True (-not (Invoke-InstallPreflight (New-Config 'OZK2026\OZK-DeployGate' @())).ok) 'install preflight (Initialize) with no registered gate task => BLOCKED'
+    $script:Tasks = @(Get-CleanLayout)
+    Assert-True ((Invoke-InstallPreflight (New-Config 'OZK2026\OZK-DeployGate' @())).ok) 'install preflight (Initialize) with exactly one validated gate task => PASS'
 
     Write-Host '== Install preflight combines price-list and identity checks'
     # فحص ACL الفعلية مُختبَر في Test-GateTrustAcl.ps1؛ هنا نتيجته ناجحة لعزل الهوية ونشرات الأسعار.

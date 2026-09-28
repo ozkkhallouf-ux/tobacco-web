@@ -155,7 +155,8 @@ assert.match(preSrc, /Get-CimInstance -ClassName Win32_Service -ErrorAction Stop
 assert.doesNotMatch(preSrc, /Win32_Service -ErrorAction SilentlyContinue|Get-ScheduledTask -ErrorAction SilentlyContinue \| Where-Object \{ \$_\.TaskPath/, "لا جرد صامت الفشل");
 assert.ok(preSrc.includes("service inventory is empty"), "قائمة خدمات فارغة = حجب");
 for (const needle of ["function Test-ExactGateAction", "interpreter is not the approved PowerShell", "disallowed PowerShell argument", "arguments cannot be parsed unambiguously", "script path is not an absolute canonical path", "disallowed script argument", "expected exactly one action"]) assert.ok(preSrc.includes(needle), `Action البوابة الحرفي: ${needle}`);
-assert.doesNotMatch(preSrc, /'-command'|'-encodedcommand'|'-c'|'-enc'/i, "لا مفتاح تنفيذ مضمَّن ضمن القائمة المسموحة");
+{ const i = preSrc.indexOf("function Test-ExactGateAction"); const exact = preSrc.slice(i, preSrc.indexOf("\nfunction ", i + 10));
+  assert.doesNotMatch(exact, /'-command'|'-encodedcommand'|'-c'|'-enc'/i, "لا مفتاح تنفيذ مضمَّن ضمن القائمة المسموحة لمهمة البوابة"); }
 // مكان المهمة لا يمنح استثناء: لا إعادة لاستثناء \Microsoft\ (أو أي TaskPath) من جرد الهويات.
 const preCode = preSrc.split("\n").filter((l) => !l.trim().startsWith("#")).join("\n");
 assert.doesNotMatch(preCode, /TaskPath\s+-(not)?(like|match|eq)|\.TaskPath\s*-(not)?(like|match)|\\\\?Microsoft\\\\?\*/i, "لا استثناء لمهام حسب TaskPath (ومنها \\Microsoft\\)");
@@ -163,16 +164,40 @@ assert.match(preCode, /Get-ScheduledTask -ErrorAction Stop\)\)/, "جرد كل ا
 for (const needle of ["function Resolve-WorkloadReach", "cannot determine whether this", "function Expand-UserProfileVariables", "function Expand-MachineVariables", "$depth -ge 3"]) assert.ok(preSrc.includes(needle), `تتبّع الأغلفة: ${needle}`);
 // Codex P1: مراجع البيئة تُفحص في الـAction وفي كل غلاف بالمسار نفسه — لا تقتصر على الـAction.
 {
-  const i = preSrc.indexOf("function Resolve-WorkloadReach"); const j = preSrc.indexOf("\nfunction ", i + 10);
-  const reach = preSrc.slice(i, j);
-  const calls = [...reach.matchAll(/Expand-TraceText /g)].length;
-  assert.ok(calls >= 2, "Expand-TraceText على الـAction وعلى جسم كل غلاف");
-  assert.match(reach, /Expand-TraceText \(\[string\]\$inner\) \$Identity \$path/, "جسم الغلاف يمرّ بفحص البيئة");
-  assert.match(reach, /if \(\$xi\.undetermined\) \{ \$undetermined = \$true \}/, "مرجع غلاف غير محلول ⇒ undetermined");
-  assert.doesNotMatch(reach, /Expand-UserProfileVariables|Expand-MachineVariables|%\[A-Za-z_\]/, "لا توسيع/فحص بيئة مباشر خارج Expand-TraceText");
+  const body = (n) => { const i = preSrc.indexOf(`function ${n}`); assert.ok(i >= 0, n); const j = preSrc.indexOf("\nfunction ", i + 10); return preSrc.slice(i, j < 0 ? undefined : j); };
+  const act = body("Get-ActionReach"), wrap = body("Get-WrapperReach");
+  assert.match(act, /foreach \(\$pair in @\(@\('execute', \$Execute\), @\('arguments', \$Arguments\), @\('workingDirectory', \$WorkingDirectory\)\)\)[\s\S]*Expand-TraceText/, "كل حقل Action يمرّ بفحص البيئة");
+  assert.match(wrap, /\$xi = Expand-TraceText \(\[string\]\$inner\) \$Ctx\.identity \$Path\s+if \(\$xi\.undetermined\) \{ \$r = Join-Reach \$r \(New-Reach 'UNKNOWN'/, "جسم الغلاف يمرّ بفحص البيئة ⇒ UNKNOWN");
+  for (const b of [act, wrap]) assert.doesNotMatch(b, /Expand-UserProfileVariables|Expand-MachineVariables|%\[A-Za-z_\]/, "لا توسيع/فحص بيئة مباشر خارج Expand-TraceText");
   const i2 = preSrc.indexOf("function Expand-TraceText"); const tx = preSrc.slice(i2, preSrc.indexOf("\nfunction ", i2 + 10));
   for (const needle of ["\\$\\{env:", "\\$env:", "!([A-Za-z_]", "GetEnvironmentVariable", "\\.Environment\\s*\\(", "%~dp0", "$undetermined = $true }\n    return"]) assert.ok(tx.includes(needle), `صيغة بيئة مغطّاة: ${needle}`);
   assert.match(preSrc, /function ConvertTo-CanonicalTracePath/, "تطبيع '..' قبل فحص الجذر");
+}
+// Codex P1 (#285): حقول Action منفصلة، ثلاثي الحالة بلا سقوط UNKNOWN→NOT_REPO، ومهمة بوابة واحدة إلزامية.
+{
+  const body = (n) => { const i = preSrc.indexOf(`function ${n}`); assert.ok(i >= 0, n); const j = preSrc.indexOf("\nfunction ", i + 10); return preSrc.slice(i, j < 0 ? undefined : j); };
+  const inv = body("Get-PreflightTaskInventory"), idp = body("Invoke-GateIdentityPreflight"), act = body("Get-ActionReach"), join = body("Join-Reach");
+  // 1) لا دمج لحقول الـAction في نص واحد للتحليل الأمني.
+  assert.doesNotMatch(inv, /\+ ' ' \+|-join "`n"|action = \(/, "الجرد لا يدمج Execute/Arguments/WorkingDirectory");
+  assert.match(inv, /execute = \[string\]\$_\.Execute; arguments = \[string\]\$_\.Arguments; workingDirectory = \[string\]\$_\.WorkingDirectory/);
+  assert.match(idp, /if \(\$item\.kind -eq 'task'\) \{ \$reach = Resolve-TaskReach \$Config \$item\.actions/, "المهام تُصنَّف بحقولها المنظّمة");
+  assert.doesNotMatch(idp, /Resolve-WorkloadReach \$Config \(\[string\]\$item\.action\) \(\[string\]\$item\.identity\)\s*\n\s*\$isRepo/, "لا تصنيف مهمة من نص مدموج");
+  assert.match(act, /Get-TargetReach \$Ctx \$exe \$wd/, "البرنامج يُحلّ بالنسبة لمجلد العمل");
+  assert.match(body("Get-TargetReach"), /Resolve-TracePath \$Target \$WorkDir/, "الهدف النسبي يُحلّ بالنسبة لمجلد العمل");
+  assert.match(act, /working directory inside a repository root/);
+  // 2) لا سقوط UNKNOWN → NOT_REPO.
+  assert.match(join, /foreach \(\$s in @\('REPO', 'UNKNOWN'\)\)/, "أولوية REPO ثم UNKNOWN ثم NOT_REPO");
+  assert.match(idp, /if \(\$reach\.status -eq 'UNKNOWN' -and \$maybePrivileged\)/, "UNKNOWN مع صلاحية ⇒ حجب");
+  assert.doesNotMatch(preSrc, /catch \{[^}]*New-Reach 'NOT_REPO'|New-Reach 'NOT_REPO' \('/, "لا NOT_REPO عند فشل أو سبب");
+  for (const needle of ["PowerShell -EncodedCommand: payload cannot be inspected statically", "PowerShell -Command without a provable static target", "cmd invocation without a parsable /c command", "without a script target", "invocation without a static target", "arguments cannot be parsed unambiguously", "cannot be resolved statically"]) assert.ok(preSrc.includes(needle), `أمر مبهم ⇒ UNKNOWN: ${needle}`);
+  // 3) Initialize لا ينجح بلا مهمة بوابة واحدة مطابقة.
+  for (const needle of ["is not registered: Initialize requires exactly one validated gate task", "duplicate gate tasks", "gate task must run as the dedicated gate identity", "gate task identity not verifiable", "gate-like task conflicts", "gate task path is"]) assert.ok(idp.includes(needle), `مهمة البوابة إلزامية: ${needle}`);
+  assert.match(idp, /\$why = Test-ExactGateAction \$Config \$gateTaskItem/, "Action مهمة البوابة يُفحص حرفياً دائماً");
+  assert.match(idp, /\$named = @\(\$inventory \| Where-Object \{ \$_\.kind -eq 'task' -and \(\[string\]\$_\.name\) -eq \$gateTask \}\)\s+if \(\$named\.Count -eq 0\) \{ \$results \+= & \$block 'gate task'[^\n]*\n\s+elseif \(\$named\.Count -gt 1\) \{ \$results \+= & \$block 'gate task'/, "صفر أو أكثر من مهمة بوابة ⇒ حجب");
+  assert.match(idp, /if \(-not \$gateTask\) \{ \$results \+= & \$block 'gate task' 'no gateTaskName configured' \}/);
+  assert.match(body("Invoke-InstallPreflight"), /Invoke-GateIdentityPreflight \$Config/);
+  assert.equal(cfg0.trust.gateTaskPath, "\\", "مسار مهمة البوابة المتوقع");
+  assert.match(read("docs/ai/topics/windows-deploy-gate.md"), /bootstrap/, "ترتيب التثبيت: مرحلة bootstrap قبل Initialize");
 }
 // Codex P1: قرارات الثقة بالـSID حصراً — لا عودة لمقارنة الاسم بعد حذف بادئة الجهاز/المجال.
 assert.ok(!preSrc.includes("ConvertTo-IdentityKey"), "مفتاح الهوية بالاسم محذوف نهائياً");

@@ -47,10 +47,28 @@ function Get-PreflightTaskInventory {
     foreach ($t in @(Get-ScheduledTask -ErrorAction Stop)) {
         $id = [string]$t.Principal.UserId
         if (-not $id) { $id = [string]$t.Principal.GroupId }
-        $acts = @($t.Actions | ForEach-Object { [pscustomobject]@{ execute = [string]$_.Execute; arguments = [string]$_.Arguments; workingDirectory = [string]$_.WorkingDirectory } })
-        $out += [pscustomobject]@{ name = [string]$t.TaskName; path = [string]$t.TaskPath; identity = $id; action = (@($acts | ForEach-Object { $_.execute + ' ' + $_.arguments + ' ' + $_.workingDirectory }) -join "`n"); actions = $acts }
+        # الحقول تبقى منفصلة (Codex P1): لا دمج Execute/Arguments/WorkingDirectory في سطر واحد.
+        $acts = @($t.Actions | ForEach-Object {
+            $cls = if ($_.PSObject.Properties['ClassId']) { [string]$_.ClassId } else { '' }
+            if ($cls) { [pscustomobject]@{ execute = (Get-PreflightComHandlerPath $cls); arguments = ''; workingDirectory = ''; classId = $cls } }
+            else { [pscustomobject]@{ execute = [string]$_.Execute; arguments = [string]$_.Arguments; workingDirectory = [string]$_.WorkingDirectory } }
+        })
+        $out += [pscustomobject]@{ name = [string]$t.TaskName; path = [string]$t.TaskPath; identity = $id; actions = $acts }
     }
     return $out
+}
+
+# ملف COM handler المسجَّل (InprocServer32/LocalServer32) قراءةً من السجل؛ '' إن تعذّر ⇒ UNKNOWN.
+function Get-PreflightComHandlerPath([string]$ClassId) {
+    foreach ($root in @('HKLM:\SOFTWARE\Classes\CLSID', 'HKLM:\SOFTWARE\WOW6432Node\Classes\CLSID')) {
+        foreach ($server in @('InprocServer32', 'LocalServer32')) {
+            try {
+                $v = (Get-Item -LiteralPath ($root + '\' + $ClassId + '\' + $server) -ErrorAction Stop).GetValue('')
+                if ($v) { return ([Environment]::ExpandEnvironmentVariables([string]$v)).Trim('"') }
+            } catch { }
+        }
+    }
+    return ''
 }
 
 # أعضاء مجموعة Administrators المحلية (S-1-5-32-544) كـSIDs. $null إن تعذّر التحديد ⇒ fail-closed،
@@ -306,44 +324,343 @@ function Expand-TraceText([string]$Text, [string]$Identity, [string]$SelfPath = 
     return [pscustomobject]@{ text = $t; undetermined = $undetermined }
 }
 
-function Resolve-WorkloadReach($Config, [string]$ActionText, [string]$Identity = '') {
+# ------------------------------------------------------------
+# تصنيف الوصول إلى المستودع — ثلاثي الحالة: REPO / NOT_REPO / UNKNOWN (Codex P1).
+# UNKNOWN لا يسقط أبداً إلى NOT_REPO: مع هوية ذات صلاحية يعني حجباً. التحليل ساكن للقراءة فقط.
+# حقول الـAction (Execute وArguments وWorkingDirectory) تُحلَّل منفصلة، ولا تُدمج في سطر واحد.
+# ------------------------------------------------------------
+function New-Reach([string]$Status, [string]$Why = '') {
+    return [pscustomobject]@{ status = $Status; repo = ($Status -eq 'REPO'); undetermined = ($Status -eq 'UNKNOWN'); why = $Why }
+}
+
+# REPO يغلب، ثم UNKNOWN، ثم NOT_REPO.
+function Join-Reach($A, $B) {
+    foreach ($s in @('REPO', 'UNKNOWN')) {
+        if ($A.status -eq $s) { return $A }
+        if ($B.status -eq $s) { return $B }
+    }
+    return $A
+}
+
+# رموز سطر أوامر بعلامات اقتباس مزدوجة: {value, quoted}. $null إن كانت الاقتباسات غير متوازنة أو
+# ملتصقة بنص آخر (a"b c") — تفسير ملتبس لا يُخمَّن.
+function Split-CommandTokens([string]$Text) {
+    $t = [string]$Text
+    if (([regex]::Matches($t, '"')).Count % 2 -ne 0) { return $null }
+    $tokens = @()
+    foreach ($m in [regex]::Matches($t, '"([^"]*)"|([^\s"]+)')) {
+        $before = if ($m.Index -gt 0) { $t[$m.Index - 1] } else { ' ' }
+        $end = $m.Index + $m.Length
+        $after = if ($end -lt $t.Length) { $t[$end] } else { ' ' }
+        if (-not [char]::IsWhiteSpace($before) -or -not [char]::IsWhiteSpace($after)) { return $null }
+        if ($m.Groups[1].Success) { $tokens += [pscustomobject]@{ value = $m.Groups[1].Value; quoted = $true } }
+        else { $tokens += [pscustomobject]@{ value = $m.Groups[2].Value; quoted = $false } }
+    }
+    return , $tokens
+}
+
+function Join-CommandTokens($Tokens) {
+    return (@($Tokens | ForEach-Object { if ($_.quoted) { '"' + $_.value + '"' } else { $_.value } }) -join ' ')
+}
+
+function Test-AbsoluteTracePath([string]$Path) { return ([string]$Path -match '^[A-Za-z]:\\|^\\\\[^\\]') }
+
+# مسار هدف: مطلق كما هو، أو نسبي إلى مجلد عمل موثوق. $null = غير قابل للإثبات.
+function Resolve-TracePath([string]$Value, [string]$WorkDir) {
+    $v = ([string]$Value).Trim() -replace '/', '\'
+    if (-not $v) { return $null }
+    if (Test-AbsoluteTracePath $v) { return (ConvertTo-CanonicalTracePath $v) }
+    if ($v -match ':' -or $v.StartsWith('\')) { return $null }
+    if (-not $WorkDir) { return $null }
+    return (ConvertTo-CanonicalTracePath ($WorkDir + '\' + $v))
+}
+
+function New-ReachContext($Config, [string]$Identity) {
     $roots = @(@($Config.repoPath) + @($Config.trust.repositoryRoots) | Where-Object { $_ } | ForEach-Object { ConvertTo-CanonicalTracePath ([string]$_) })
-    $inRoot = {
-        param([string]$Candidate)
-        $n = ConvertTo-CanonicalTracePath $Candidate
-        foreach ($root in $roots) { if ($n -eq $root -or $n.StartsWith($root + '\')) { return $true } }
-        return $false
+    return [pscustomobject]@{ roots = $roots; identity = $Identity; seen = @{} }
+}
+
+function Test-InRepoRoot($Ctx, [string]$Candidate) {
+    $n = ConvertTo-CanonicalTracePath $Candidate
+    if (-not $n) { return $false }
+    foreach ($root in $Ctx.roots) { if ($n -eq $root -or $n.StartsWith($root + '\')) { return $true } }
+    return $false
+}
+
+# أي مسار مطلق داخل حقل واحد (لا عبر الحقول) يقع في جذر مستودع.
+function Test-FieldReachesRepo($Ctx, [string]$Field) {
+    foreach ($m in [regex]::Matches([string]$Field, '(?:[A-Za-z]:\\|\\\\[^\\"\s]+\\)[^"''\r\n<>|]*')) {
+        if (Test-InRepoRoot $Ctx ($m.Value.Trim())) { return $true }
     }
-    $undetermined = $false
-    # الـAction وكل غلاف يمرّان بالمسار نفسه: Expand-TraceText ثم فحص الجذور ثم الطابور.
-    $x = Expand-TraceText ([string]$ActionText) $Identity
-    if ($x.undetermined) { $undetermined = $true }
-    $text = $x.text
-    $rx = '(?:[A-Za-z]:\\|/)[^"''\r\n<>|]+?\.(exe|bat|cmd|js|mjs|cjs|ps1|psm1|vbs|py)\b'
-    $dirRx = '(?:[A-Za-z]:\\|/)[^"''\r\n<>|]+'
-    foreach ($m in [regex]::Matches($text, $dirRx)) { if (& $inRoot ($m.Value.Trim())) { return [pscustomobject]@{ repo = $true; undetermined = $false } } }
-    $queue = New-Object System.Collections.Queue
-    foreach ($m in [regex]::Matches($text, $rx)) { $queue.Enqueue(@($m.Value, 0)) }
-    $seen = @{}
-    while ($queue.Count -gt 0) {
-        $entry = $queue.Dequeue()
-        $path = [string]$entry[0]
-        $depth = [int]$entry[1]
-        $k = ConvertTo-CanonicalTracePath $path
-        if ($seen.ContainsKey($k)) { continue }
-        $seen[$k] = $true
-        if (& $inRoot $path) { return [pscustomobject]@{ repo = $true; undetermined = $false } }
-        if ($path -notmatch '\.(vbs|cmd|bat|ps1|psm1)$') { continue }
-        if ($depth -ge 3) { $undetermined = $true; continue }
-        try { $inner = Read-PreflightWrapperText $path } catch { $undetermined = $true; continue }
-        if ($null -eq $inner) { $undetermined = $true; continue }
-        $xi = Expand-TraceText ([string]$inner) $Identity $path
-        if ($xi.undetermined) { $undetermined = $true }
-        $inner = $xi.text
-        foreach ($m in [regex]::Matches($inner, $dirRx)) { if (& $inRoot ($m.Value.Trim())) { return [pscustomobject]@{ repo = $true; undetermined = $false } } }
-        foreach ($m in [regex]::Matches($inner, $rx)) { $queue.Enqueue(@($m.Value, $depth + 1)) }
+    foreach ($tk in @(Split-CommandTokens $Field)) { if ($tk -and (Test-AbsoluteTracePath $tk.value) -and (Test-InRepoRoot $Ctx $tk.value)) { return $true } }
+    return $false
+}
+
+# غلاف (vbs/cmd/bat/ps1/psm1، أو هدف مضيف سكربت) خارج المستودع: يُقرأ نصه ولا يُنفَّذ، حتى 3 مستويات.
+function Get-WrapperReach($Ctx, [string]$Path, [int]$depth) {
+    $k = ConvertTo-CanonicalTracePath $Path
+    if ($Ctx.seen.ContainsKey($k)) { return (New-Reach 'NOT_REPO') }
+    $Ctx.seen[$k] = $true
+    if (Test-InRepoRoot $Ctx $Path) { return (New-Reach 'REPO' ('script inside a repository root: ' + $Path)) }
+    if ($depth -ge 3) { return (New-Reach 'UNKNOWN' ('wrapper chain deeper than 3 levels at ' + $Path)) }
+    try { $inner = Read-PreflightWrapperText $Path } catch { return (New-Reach 'UNKNOWN' ('wrapper cannot be read: ' + $Path)) }
+    if ($null -eq $inner) { return (New-Reach 'UNKNOWN' ('wrapper cannot be read: ' + $Path)) }
+    $r = New-Reach 'NOT_REPO'
+    $xi = Expand-TraceText ([string]$inner) $Ctx.identity $Path
+    if ($xi.undetermined) { $r = Join-Reach $r (New-Reach 'UNKNOWN' ('unresolved environment reference in wrapper ' + $Path)) }
+    $inner = $xi.text
+    # حمولة مشفّرة أو تنفيذ نص ديناميكي داخل الغلاف: لا يمكن إثبات هدفها.
+    if ($inner -match '(?i)\s[-/](e|ec|en|enc|enco|encod|encode|encoded|encodedc\w*)\s+[A-Za-z0-9+/=]{8,}|FromBase64String|Invoke-Expression|(?<![\w-])iex(?![\w-])') {
+        $r = Join-Reach $r (New-Reach 'UNKNOWN' ('opaque/dynamic command in wrapper ' + $Path))
     }
-    return [pscustomobject]@{ repo = $false; undetermined = $undetermined }
+    foreach ($line in ($inner -split "`r?`n")) {
+        if (Test-FieldReachesRepo $Ctx $line) { return (New-Reach 'REPO' ('wrapper ' + $Path + ' references a repository path')) }
+    }
+    foreach ($m in [regex]::Matches($inner, '(?:[A-Za-z]:\\|/)[^"''\r\n<>|]+?\.(vbs|cmd|bat|ps1|psm1)\b')) {
+        $r = Join-Reach $r (Get-WrapperReach $Ctx $m.Value ($depth + 1))
+        if ($r.status -eq 'REPO') { return $r }
+    }
+    return $r
+}
+
+# هدف ثابت لمفسّر: يُحلّ ويُفحص ويُتتبَّع إن كان غلافاً. $null/غير قابل للحل ⇒ UNKNOWN.
+function Get-TargetReach($Ctx, [string]$Target, [string]$WorkDir, [int]$Depth, [string]$Kind) {
+    $p = Resolve-TracePath $Target $WorkDir
+    if (-not $p) { return (New-Reach 'UNKNOWN' ($Kind + ' target cannot be resolved statically: ' + $Target)) }
+    if (Test-InRepoRoot $Ctx $p) { return (New-Reach 'REPO' ($Kind + ' target inside a repository root: ' + $p)) }
+    if ($p -match '\.(vbs|cmd|bat|ps1|psm1|js|wsf|jse|vbe)$') { return (Get-WrapperReach $Ctx $p $Depth) }
+    return (New-Reach 'NOT_REPO')
+}
+
+# معاملات powershell.exe/pwsh (أسماء كاملة؛ الاختصار يُقبل إن كان بادئة فريدة كما يفعل PowerShell).
+$script:PsValueParams = @('psconsolefile', 'version', 'inputformat', 'outputformat', 'windowstyle', 'configurationname', 'executionpolicy', 'workingdirectory', 'settingsfile', 'custompipename')
+$script:PsFlagParams = @('nologo', 'noexit', 'sta', 'mta', 'noprofile', 'noninteractive', 'noprofileloadtime', 'login', 'interactive', 'help')
+$script:PsAllParams = @($script:PsValueParams + $script:PsFlagParams + @('encodedcommand', 'encodedarguments', 'file', 'command', 'commandwithargs'))
+
+function Resolve-PsParamName([string]$Name) {
+    $n = $Name.ToLowerInvariant()
+    switch ($n) { 'e' { return 'encodedcommand' } 'ec' { return 'encodedcommand' } 'ea' { return 'encodedarguments' } 'c' { return 'command' } 'f' { return 'file' } 'ep' { return 'executionpolicy' } 'ex' { return 'executionpolicy' } 'cwa' { return 'commandwithargs' } 'wd' { return 'workingdirectory' } 'w' { return 'windowstyle' } }
+    if ($script:PsAllParams -contains $n) { return $n }
+    $c = @($script:PsAllParams | Where-Object { $_.StartsWith($n) })
+    if ($c.Count -eq 1) { return $c[0] }
+    return $null
+}
+
+# -Command: يُقبل فقط استدعاء سكربت ps1 بمسار مطلق ثابت بلا تعابير أخرى؛ غير ذلك غير قابل للإثبات.
+function Get-PsCommandReach($Ctx, [string]$Command, [string]$WorkDir, [int]$Depth) {
+    $m = [regex]::Match([string]$Command, '^\s*(?:&\s*)?([''"]?)([A-Za-z]:\\[^''"\r\n;|&`$(){}]+?\.ps1)\1(\s+[^;|&`$(){}@\r\n]*)?\s*$')
+    if (-not $m.Success) { return (New-Reach 'UNKNOWN' 'PowerShell -Command without a provable static target') }
+    return (Get-TargetReach $Ctx $m.Groups[2].Value $WorkDir $Depth 'PowerShell -Command')
+}
+
+function Get-PowerShellReach($Ctx, $Tokens, [string]$WorkDir, [int]$Depth, [bool]$IsPwsh) {
+    $wd = $WorkDir
+    $i = 0
+    while ($i -lt $Tokens.Count) {
+        $tk = $Tokens[$i]
+        $v = [string]$tk.value
+        if (-not $tk.quoted -and $v -match '^[-/]([A-Za-z]+)(?::(.*))?$') {
+            $name = Resolve-PsParamName $Matches[1]
+            $inline = $Matches[2]
+            if (-not $name) { return (New-Reach 'UNKNOWN' ('unrecognised or ambiguous PowerShell parameter: ' + $v)) }
+            if ($name -eq 'encodedcommand' -or $name -eq 'encodedarguments') { return (New-Reach 'UNKNOWN' 'PowerShell -EncodedCommand: payload cannot be inspected statically') }
+            if ($script:PsFlagParams -contains $name) { $i++; continue }
+            $value = $inline
+            $step = 1
+            if ($null -eq $value) { if ($i + 1 -ge $Tokens.Count) { return (New-Reach 'UNKNOWN' ('PowerShell parameter without a value: ' + $v)) }; $value = [string]$Tokens[$i + 1].value; $step = 2 }
+            if ($name -eq 'file') { return (Get-TargetReach $Ctx $value $wd $Depth 'PowerShell -File') }
+            if ($name -eq 'command' -or $name -eq 'commandwithargs') {
+                $rest = if ($null -ne $inline) { @($Tokens | Select-Object -Skip ($i + 1)) } else { @($Tokens | Select-Object -Skip ($i + 2)) }
+                $cmd = ($value + ' ' + (Join-CommandTokens $rest)).Trim()
+                if ($cmd -eq '-') { return (New-Reach 'UNKNOWN' 'PowerShell -Command - reads the command from stdin') }
+                return (Get-PsCommandReach $Ctx $cmd $wd $Depth)
+            }
+            if ($name -eq 'workingdirectory') {
+                $wdp = Resolve-TracePath $value $wd
+                if (-not $wdp) { return (New-Reach 'UNKNOWN' ('PowerShell -WorkingDirectory cannot be resolved: ' + $value)) }
+                if (Test-InRepoRoot $Ctx $wdp) { return (New-Reach 'REPO' ('PowerShell working directory inside a repository root: ' + $wdp)) }
+                $wd = $wdp
+            }
+            $i += $step
+            continue
+        }
+        # أول وسيط موضعي: powershell.exe يعامله كـ-Command، وpwsh كـ-File.
+        if ($IsPwsh) { return (Get-TargetReach $Ctx $v $wd $Depth 'pwsh positional -File') }
+        return (Get-PsCommandReach $Ctx (Join-CommandTokens @($Tokens | Select-Object -Skip $i)) $wd $Depth)
+    }
+    return (New-Reach 'UNKNOWN' 'PowerShell invocation without a static -File/-Command target')
+}
+
+# سطر cmd بعد /c: يُقسَّم على & و&& و|| و| خارج الاقتباس، وكل مقطع يُصنَّف كـAction مستقل.
+function Get-CmdLineReach($Ctx, [string]$Line, [string]$WorkDir, [int]$Depth) {
+    $text = [string]$Line
+    # cmd يزيل الاقتباس الخارجي إن بدأ السطر بـ" وانتهى بـ" واحتوى اقتباسات داخلية.
+    if ($null -eq (Split-CommandTokens $text) -and $text -match '^\s*"(.*)"\s*$') { $text = $Matches[1] }
+    $unquoted = [regex]::Replace($text, '"[^"]*"', '""')
+    if ($unquoted -match '[\^()]') { return (New-Reach 'UNKNOWN' 'cmd command uses escapes/blocks that cannot be parsed statically') }
+    # إعادة التوجيه ليست تنفيذاً: تُحذف قبل التقسيم (المسار المطلق فيها فُحص مسبقاً على مستوى الحقل).
+    $text = [regex]::Replace($text, '\d?>>?&\d|\d?>>?\s*("[^"]*"|[^\s&|]+)|<\s*("[^"]*"|[^\s&|]+)', ' ')
+    $segments = @()
+    $cur = New-Object System.Text.StringBuilder
+    $inQ = $false
+    for ($j = 0; $j -lt $text.Length; $j++) {
+        $ch = $text[$j]
+        if ($ch -eq '"') { $inQ = -not $inQ }
+        if (-not $inQ -and ($ch -eq '&' -or $ch -eq '|')) {
+            $segments += $cur.ToString(); [void]$cur.Clear()
+            if ($j + 1 -lt $text.Length -and $text[$j + 1] -eq $ch) { $j++ }
+            continue
+        }
+        [void]$cur.Append($ch)
+    }
+    $segments += $cur.ToString()
+    $wd = $WorkDir
+    $r = New-Reach 'NOT_REPO'
+    foreach ($seg in $segments) {
+        $tokens = Split-CommandTokens $seg
+        if ($null -eq $tokens) { return (Join-Reach $r (New-Reach 'UNKNOWN' ('cmd segment cannot be parsed unambiguously: ' + $seg.Trim()))) }
+        $tokens = @($tokens)
+        if ($tokens.Count -eq 0) { continue }
+        $head = ([string]$tokens[0].value).ToLowerInvariant()
+        if (-not $tokens[0].quoted) {
+            if (@('echo', 'rem', 'exit', 'cls', 'ver', 'title', 'setlocal', 'endlocal', 'set', 'timeout') -contains $head) { continue }
+            if (@('if', 'for', 'goto', 'call:', 'shift') -contains $head -or $head.StartsWith(':')) { return (Join-Reach $r (New-Reach 'UNKNOWN' ('cmd control flow cannot be evaluated statically: ' + $head))) }
+            if ($head -eq 'cd' -or $head -eq 'chdir' -or $head -eq 'pushd') {
+                $args2 = @($tokens | Select-Object -Skip 1 | Where-Object { -not ($_.value -match '^/[dD]$') })
+                if ($args2.Count -ne 1) { return (Join-Reach $r (New-Reach 'UNKNOWN' 'cmd directory change cannot be resolved')) }
+                $wdp = Resolve-TracePath $args2[0].value $wd
+                if (-not $wdp) { return (Join-Reach $r (New-Reach 'UNKNOWN' ('cmd directory change cannot be resolved: ' + $args2[0].value))) }
+                if (Test-InRepoRoot $Ctx $wdp) { return (New-Reach 'REPO' ('cmd changes directory into a repository root: ' + $wdp)) }
+                $wd = $wdp
+                continue
+            }
+            if ($head -eq 'call') { $tokens = @($tokens | Select-Object -Skip 1) }
+            elseif ($head -eq 'start') {
+                $tokens = @($tokens | Select-Object -Skip 1)
+                while ($tokens.Count -gt 0 -and -not $tokens[0].quoted -and $tokens[0].value.StartsWith('/')) {
+                    if ($tokens[0].value -match '^/[dD]$' -and $tokens.Count -gt 1) {
+                        $wdp = Resolve-TracePath $tokens[1].value $wd
+                        if (-not $wdp) { return (Join-Reach $r (New-Reach 'UNKNOWN' 'start /D cannot be resolved')) }
+                        if (Test-InRepoRoot $Ctx $wdp) { return (New-Reach 'REPO' ('start /D inside a repository root: ' + $wdp)) }
+                        $wd = $wdp
+                        $tokens = @($tokens | Select-Object -Skip 2)
+                        continue
+                    }
+                    $tokens = @($tokens | Select-Object -Skip 1)
+                }
+                if ($tokens.Count -ge 2 -and $tokens[0].quoted) { $tokens = @($tokens | Select-Object -Skip 1) }
+            }
+        }
+        if ($tokens.Count -eq 0) { return (Join-Reach $r (New-Reach 'UNKNOWN' 'cmd call/start without a target')) }
+        $r = Join-Reach $r (Get-ActionReach $Ctx ([string]$tokens[0].value) (Join-CommandTokens @($tokens | Select-Object -Skip 1)) $wd ($Depth + 1))
+        if ($r.status -eq 'REPO') { return $r }
+    }
+    return $r
+}
+
+$script:ScriptExtensions = 'ps1|psm1|vbs|vbe|js|jse|wsf|cmd|bat|mjs|cjs|py|pyw|rb|pl|php|sh|jar'
+
+# Action واحد بحقول منفصلة. $Execute وحده هو البرنامج؛ لا يبتلع الوسائط ولا مجلد العمل.
+function Get-ActionReach($Ctx, [string]$Execute, [string]$Arguments, [string]$WorkingDirectory, [int]$Depth) {
+    if ($Depth -ge 4) { return (New-Reach 'UNKNOWN' 'command nesting deeper than 3 levels') }
+    $r = New-Reach 'NOT_REPO'
+    $fx = @{}
+    foreach ($pair in @(@('execute', $Execute), @('arguments', $Arguments), @('workingDirectory', $WorkingDirectory))) {
+        $x = Expand-TraceText ([string]$pair[1]) $Ctx.identity
+        if ($x.undetermined) { $r = Join-Reach $r (New-Reach 'UNKNOWN' ('unresolved environment reference in ' + $pair[0])) }
+        $fx[$pair[0]] = [string]$x.text
+    }
+    # مجلد العمل: مطلق فقط؛ داخل المستودع ⇒ REPO (الهدف النسبي يُحلّ بالنسبة إليه).
+    $wd = $fx['workingDirectory'].Trim()
+    if ($wd.StartsWith('"')) { if ($wd -notmatch '^"[^"]+"$') { return (Join-Reach $r (New-Reach 'UNKNOWN' 'malformed quoting in working directory')) }; $wd = $wd.Trim('"') }
+    if ($wd) {
+        if (-not (Test-AbsoluteTracePath $wd) -or $wd.Contains('"')) { $r = Join-Reach $r (New-Reach 'UNKNOWN' ('working directory is not an absolute path: ' + $wd)); $wd = '' }
+        elseif (Test-InRepoRoot $Ctx $wd) { return (New-Reach 'REPO' ('working directory inside a repository root: ' + $wd)) }
+        else { $wd = ConvertTo-CanonicalTracePath $wd }
+    }
+    foreach ($f in @('execute', 'arguments')) {
+        if (Test-FieldReachesRepo $Ctx $fx[$f]) { return (New-Reach 'REPO' ('repository path in action ' + $f)) }
+    }
+    # البرنامج.
+    $exe = $fx['execute'].Trim()
+    if ($exe.StartsWith('"')) {
+        if ($exe -notmatch '^"[^"]+"$') { return (Join-Reach $r (New-Reach 'UNKNOWN' 'malformed quoting in executable')) }
+        $exe = $exe.Trim('"')
+    } elseif ($exe.Contains('"')) { return (Join-Reach $r (New-Reach 'UNKNOWN' 'malformed quoting in executable')) }
+    if (-not $exe) { return (Join-Reach $r (New-Reach 'UNKNOWN' 'action has no executable')) }
+    $leaf = (($exe -replace '/', '\') -split '\\')[-1].ToLowerInvariant()
+    if ($exe -match '[\\/]' -or $leaf -match ('\.(' + $script:ScriptExtensions + ')$')) {
+        $r = Join-Reach $r (Get-TargetReach $Ctx $exe $wd $Depth 'executable')
+        if ($r.status -eq 'REPO') { return $r }
+    }
+    $tokens = Split-CommandTokens $fx['arguments']
+    if ($null -eq $tokens) { return (Join-Reach $r (New-Reach 'UNKNOWN' 'arguments cannot be parsed unambiguously')) }
+    $tokens = @($tokens)
+    $name = $leaf -replace '\.(exe|com)$', ''
+    switch -regex ($name) {
+        '^(powershell|pwsh)$' { return (Join-Reach $r (Get-PowerShellReach $Ctx $tokens $wd $Depth ($name -eq 'pwsh'))) }
+        '^cmd$' {
+            $m = [regex]::Match($fx['arguments'], '^\s*(?:/(?:[dqasu]|[efv]:(?:on|off)|t:[0-9a-f]{1,2})\s+)*/[ckr]\s+(.*)$', 'IgnoreCase, Singleline')
+            if (-not $m.Success) { return (Join-Reach $r (New-Reach 'UNKNOWN' 'cmd invocation without a parsable /c command')) }
+            return (Join-Reach $r (Get-CmdLineReach $Ctx $m.Groups[1].Value $wd $Depth))
+        }
+        '^(wscript|cscript)$' {
+            $target = @($tokens | Where-Object { $_.quoted -or -not $_.value.StartsWith('//') }) | Select-Object -First 1
+            if (-not $target) { return (Join-Reach $r (New-Reach 'UNKNOWN' ($name + ' without a script target'))) }
+            return (Join-Reach $r (Get-TargetReach $Ctx $target.value $wd $Depth $name))
+        }
+        '^(node|nodejs|python\d*(\.\d+)?|pythonw|py|pyw|ruby|perl|php|bash|sh|java|javaw|deno|bun|mshta|rundll32|regsvr32|msbuild|dotnet|npm|npx|git|bash)$' {
+            # مفسّر: شيفرة مضمّنة أو وحدة محمَّلة غير قابلة للإثبات؛ الهدف الموضعي الأول يجب أن يُحلّ.
+            $inline = @('-e', '--eval', '-p', '--print', '-c', '-m', '-r', '--require', '--import', '--loader', '--experimental-loader', '-x', '--command', 'run', 'exec', 'x', '-i')
+            foreach ($t in $tokens) { if (-not $t.quoted -and ($inline -contains $t.value.ToLowerInvariant() -or $t.value -match '^(javascript|vbscript):')) { return (Join-Reach $r (New-Reach 'UNKNOWN' ($name + ' inline code/module cannot be inspected statically: ' + $t.value))) } }
+            $target = @($tokens | Where-Object { $_.quoted -or -not ($_.value.StartsWith('-') -or $_.value.StartsWith('/')) }) | Select-Object -First 1
+            if (-not $target) { return (Join-Reach $r (New-Reach 'UNKNOWN' ($name + ' invocation without a static target'))) }
+            $tv = ([string]$target.value) -replace ',[^\\/]*$', ''
+            return (Join-Reach $r (Get-TargetReach $Ctx $tv $wd $Depth $name))
+        }
+        default {
+            # برنامج عادي: كل وسيط يشبه سكربتاً يُحلّ؛ النسبي بلا مجلد عمل ⇒ غير قابل للإثبات.
+            foreach ($t in $tokens) {
+                if ($t.value -match ('\.(' + $script:ScriptExtensions + ')$')) {
+                    $r = Join-Reach $r (Get-TargetReach $Ctx $t.value $wd $Depth ('argument of ' + $name))
+                    if ($r.status -eq 'REPO') { return $r }
+                }
+            }
+            return $r
+        }
+    }
+}
+
+# مهمة مجدولة: كل Action بحقوله المنظّمة. لا Actions مقروءة ⇒ UNKNOWN.
+function Resolve-TaskReach($Config, $Actions, [string]$Identity = '') {
+    $acts = @($Actions | Where-Object { $null -ne $_ })
+    if ($acts.Count -eq 0) { return (New-Reach 'UNKNOWN' 'task actions are not readable') }
+    $r = New-Reach 'NOT_REPO'
+    foreach ($a in $acts) {
+        $ctx = New-ReachContext $Config $Identity
+        $classId = if ($a.PSObject.Properties['classId']) { [string]$a.classId } else { '' }
+        if ($classId) {
+            # COM handler: يُقيَّم ملفه المسجَّل؛ غير محلول ⇒ UNKNOWN.
+            if (-not $a.execute) { $r = Join-Reach $r (New-Reach 'UNKNOWN' ('COM handler ' + $classId + ' cannot be resolved to a binary')); continue }
+            $p = [string]$a.execute
+            if (Test-InRepoRoot $ctx $p) { return (New-Reach 'REPO' ('COM handler binary inside a repository root: ' + $p)) }
+            if (-not (Test-AbsoluteTracePath $p)) { $r = Join-Reach $r (New-Reach 'UNKNOWN' ('COM handler binary path is not absolute: ' + $p)) }
+            continue
+        }
+        $r = Join-Reach $r (Get-ActionReach $ctx ([string]$a.execute) ([string]$a.arguments) ([string]$a.workingDirectory) 0)
+        if ($r.status -eq 'REPO') { return $r }
+    }
+    return $r
+}
+
+# سطر أوامر واحد (مسار خدمة): البرنامج أولاً (مقتبس، أو حتى .exe، أو أول رمز) ثم الوسائط.
+function Resolve-WorkloadReach($Config, [string]$ActionText, [string]$Identity = '') {
+    $t = ([string]$ActionText).Trim()
+    if (-not $t) { return (New-Reach 'UNKNOWN' 'empty command line') }
+    $m = [regex]::Match($t, '^"([^"]+)"\s*(.*)$', 'Singleline')
+    if (-not $m.Success) { $m = [regex]::Match($t, '^(.+?\.(?:exe|com))(?:\s+(.*))?$', 'IgnoreCase, Singleline') }
+    if (-not $m.Success) { $m = [regex]::Match($t, '^(\S+)(?:\s+(.*))?$', 'Singleline') }
+    return (Get-ActionReach (New-ReachContext $Config $Identity) $m.Groups[1].Value $m.Groups[2].Value '' 0)
 }
 
 function Test-RepoWorkload($Config, [string]$ActionText) { return (Resolve-WorkloadReach $Config $ActionText).repo }
@@ -363,6 +680,9 @@ function Split-GateArguments([string]$Text) {
 function Test-ExactGateAction($Config, $Task) {
     $acts = @($Task.actions)
     if ($acts.Count -ne 1) { return ('expected exactly one action, found ' + $acts.Count) }
+    if ($acts[0].PSObject.Properties['classId'] -and $acts[0].classId) { return 'COM handler action is not the gate script' }
+    $wdv = ([string]$acts[0].workingDirectory).Trim().Trim('"')
+    if ($wdv -and (ConvertTo-CanonicalTracePath $wdv) -ne (ConvertTo-CanonicalTracePath ([string]$Config.gateDir))) { return ('working directory must be empty or gateDir: ' + $wdv) }
     $exe = ([string]$acts[0].execute).Trim().Trim('"')
     $allowedExe = ConvertTo-PreflightPath ([string]$Config.trust.gateInterpreter)
     if (-not $allowedExe -or (ConvertTo-PreflightPath $exe) -ne $allowedExe) { return ('interpreter is not the approved PowerShell: ' + $exe) }
@@ -495,6 +815,7 @@ function Invoke-GateIdentityPreflight($Config) {
     $writers = @($writers | Select-Object -Unique)
     if ($writers.Count -ne 1 -or $writers[0] -ne $gate) { $results += & $block 'gate trust files' ('trust files must be writable by the dedicated gate identity only; configured writers: ' + (@($trust.gateDirWriters) -join ', ')) }
     $gateTask = [string]$trust.gateTaskName
+    $gateTaskPath = if ($trust.PSObject.Properties['gateTaskPath'] -and $trust.gateTaskPath) { [string]$trust.gateTaskPath } else { '\' }
 
     $inventory = @()
     try {
@@ -509,6 +830,34 @@ function Invoke-GateIdentityPreflight($Config) {
     }
     if (@($inventory | Where-Object { $_.kind -eq 'task' }).Count -eq 0) { $results += & $block 'inventory' 'no scheduled tasks visible; run the preflight as an administrator' }
     if (@($inventory | Where-Object { $_.kind -eq 'service' }).Count -eq 0) { $results += & $block 'inventory' 'service inventory is empty; an empty list is not evidence that no services exist' }
+
+    # Initialize يتطلب مهمة بوابة واحدة بالضبط، مسجّلة ومقروءة ومطابقة للعقد بالكامل (Codex P1).
+    # غيابها لا يعني «لا شيء للفحص»: المهمة تُسجَّل في مرحلة bootstrap (معطّلة) قبل Initialize.
+    $gateTaskItem = $null
+    if (-not $gateTask) { $results += & $block 'gate task' 'no gateTaskName configured' }
+    else {
+        $named = @($inventory | Where-Object { $_.kind -eq 'task' -and ([string]$_.name) -eq $gateTask })
+        if ($named.Count -eq 0) { $results += & $block 'gate task' ('gate task ' + $gateTask + ' is not registered: Initialize requires exactly one validated gate task (register it in the bootstrap phase, disabled, before Initialize)') }
+        elseif ($named.Count -gt 1) { $results += & $block 'gate task' ('duplicate gate tasks: ' + $named.Count + ' tasks named ' + $gateTask + ' (' + (@($named | ForEach-Object { [string]$_.path }) -join ', ') + ')') }
+        else {
+            $gateTaskItem = $named[0]
+            $gsub = 'task ' + ([string]$gateTaskItem.path) + $gateTask
+            if (([string]$gateTaskItem.path) -ne $gateTaskPath) { $results += & $block $gsub ('gate task path is ' + $gateTaskItem.path + ', expected ' + $gateTaskPath) }
+            $gid = ([string]$gateTaskItem.identity).Trim()
+            $gidSid = Resolve-PrincipalSid $gid
+            if (-not $gid -or -not $gidSid) { $results += & $block $gsub ('gate task identity not verifiable: ' + $gid) }
+            elseif ($gidSid -ne $gate) { $results += & $block $gsub ('gate task must run as the dedicated gate identity ' + $gateName + '; found ' + $gid) }
+            $why = Test-ExactGateAction $Config $gateTaskItem
+            if ($why) { $results += & $block $gsub ('the gate task must run only the gate scripts in gateDir: ' + $why) }
+        }
+    }
+    # أي مهمة أخرى تشبه البوابة (اسماً أو تشغّل سكربتاتها) تتعارض معها.
+    $gateDirKey = ConvertTo-CanonicalTracePath ([string]$Config.gateDir)
+    foreach ($t in @($inventory | Where-Object { $_.kind -eq 'task' -and -not [object]::ReferenceEquals($_, $gateTaskItem) -and ([string]$_.name) -ne $gateTask })) {
+        $fields = @(@($t.actions) | ForEach-Object { if ($_) { [string]$_.execute; [string]$_.arguments; [string]$_.workingDirectory } })
+        $touchesGate = @($fields | Where-Object { ($gateDirKey -and (ConvertTo-PreflightPath $_).Contains($gateDirKey)) -or $_ -match '(?i)deploy-gate\.ps1' }).Count -gt 0
+        if ($touchesGate -or ([string]$t.name) -like '*Deploy*Gate*') { $results += & $block ('task ' + ([string]$t.path) + $t.name) ('gate-like task conflicts with the single gate task ' + $gateTask) }
+    }
 
     # قرار أمني: repo workload مؤتمت بصلاحية تتجاوز ACL (SYSTEM، أو حساب مدير محلي، أو عضو
     # Administrators، أو هوية البوابة نفسها) يحجب التثبيت بغض النظر عن قائمة كتّاب ملفات الثقة.
@@ -533,12 +882,14 @@ function Invoke-GateIdentityPreflight($Config) {
             $results += & $block $subject ('identity cannot be resolved to a SID: ' + $identityText)
             continue
         }
-        $reach = Resolve-WorkloadReach $Config ([string]$item.action) ([string]$item.identity)
-        $isRepo = [bool]$reach.repo
+        # المهام بحقولها المنظّمة؛ الخدمات بسطر أوامرها (PathName). ثلاثي الحالة، وUNKNOWN لا يصير NOT_REPO.
+        if ($item.kind -eq 'task') { $reach = Resolve-TaskReach $Config $item.actions ([string]$item.identity) }
+        else { $reach = Resolve-WorkloadReach $Config ([string]$item.action) ([string]$item.identity) }
+        $isRepo = $reach.status -eq 'REPO'
         # لا يمكن إثبات أن الـAction لا يصل إلى المستودع، والهوية ذات صلاحية (أو غير معروفة) ⇒ حجب.
         $maybePrivileged = (-not $key) -or $key -eq 'S-1-5-18' -or $key -eq 'S-1-5-32-544' -or $key -eq $gate -or ($null -eq $adminKeys) -or ($adminKeys -contains $key)
-        if (-not $isRepo -and $reach.undetermined -and $maybePrivileged) {
-            $results += & $block $subject ('cannot determine whether this ' + $item.kind + ' reaches a repository workload (identity ' + $item.identity + ')')
+        if ($reach.status -eq 'UNKNOWN' -and $maybePrivileged) {
+            $results += & $block $subject ('cannot determine whether this ' + $item.kind + ' reaches a repository workload (identity ' + $item.identity + '): ' + $reach.why)
             continue
         }
         if ($isRepo -and $key) {
@@ -557,9 +908,8 @@ function Invoke-GateIdentityPreflight($Config) {
             continue
         }
         if ($key -eq $gate) {
-            if ($item.kind -eq 'task' -and $item.name -eq $gateTask) {
-                $why = Test-ExactGateAction $Config $item
-                if ($isRepo -or $why) { $results += & $block $subject ('the gate task must run only the gate scripts in gateDir: ' + $why) }
+            if ($item.kind -eq 'task' -and [object]::ReferenceEquals($item, $gateTaskItem)) {
+                if ($isRepo) { $results += & $block $subject 'the gate task must run only the gate scripts in gateDir: reaches a repository root' }
             } else {
                 $results += & $block $subject ('dedicated gate identity is reused by ' + $item.kind + ' ' + $item.name)
             }
