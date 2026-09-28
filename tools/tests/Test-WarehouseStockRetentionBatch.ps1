@@ -23,7 +23,9 @@ param()
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {
+  Write-Verbose 'تعذّر ضبط ترميز المخرجات على UTF-8.'
+}
 
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $retentionPath = Join-Path (Join-Path $repoRoot 'tools') 'ameen-warehouse-stock-retention.ps1'

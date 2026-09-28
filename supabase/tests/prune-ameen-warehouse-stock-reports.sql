@@ -10,7 +10,12 @@
 
 do $$
 begin
-  if inet_server_addr() is not null
+  -- اتصال TCP من مشغّل CI إلى حاوية postgres:16 يجعل inet_server_addr()
+  -- عنوان الجسر لا 127.0.0.1. الاستثناء محصور بقاعدة الاختبار المؤقتة
+  -- التي ينشئها scripts/check-warehouse-stock-prune.mjs. أي قاعدة أخرى
+  -- خارج الحلقة المحلية تُرفض، وشكل الإنتاج يُرفض في الحالتين.
+  if current_database() is distinct from 'ozk_prune_warehouse_stock_test'
+     and inet_server_addr() is not null
      and host(inet_server_addr()) not in ('127.0.0.1', '::1') then
     raise exception 'prune test refuses a non-loopback server';
   end if;

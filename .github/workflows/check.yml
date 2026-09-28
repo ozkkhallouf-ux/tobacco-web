@@ -22,6 +22,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Postgres محلي لهذه الوظيفة: فحص التنظيف يتصل بمقبس peer عبر sudo
+      # عندما لا يُضبط PGHOST. وظيفتا validate وpages تستخدمان خدمة postgres:16.
       - name: Start throwaway Postgres for the warehouse prune test
         run: |
           sudo apt-get update

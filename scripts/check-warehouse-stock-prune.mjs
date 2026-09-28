@@ -58,51 +58,89 @@ for (const contract of [
   "the KEY SHARE row was deleted",
   "refusing: ameen_warehouse_stock_reports has the production shape",
   "refusing: smart_inventory_sessions has the production shape",
+  "prune test refuses a non-loopback server",
+  "ozk_prune_warehouse_stock_test",
 ]) {
   assert(sqlTest.includes(contract), `Warehouse prune SQL test missing: ${contract}`);
 }
 
-function runSql() {
-  const probe = spawnSync("sudo", ["-n", "-u", "postgres", "psql", "-d", "postgres", "-tAc", "select 1"], { encoding: "utf8" });
-  if (probe.status !== 0) {
-    if (process.env.CI === "true") {
-      console.error(probe.stderr || probe.stdout || "psql is not available");
-      console.error("CI must execute supabase/tests/prune-ameen-warehouse-stock-reports.sql");
-      process.exit(1);
-    }
-    console.log("check-warehouse-stock-prune: static contracts passed; live SQL skipped (no local postgres).");
-    return;
-  }
+const PRUNE_DB = "ozk_prune_warehouse_stock_test";
+const MISSING_RECON_DB = "ozk_prune_missing_recon_test";
 
-  const db = "ozk_prune_warehouse_stock_test";
-  const drop = spawnSync("sudo", ["-n", "-u", "postgres", "psql", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", `drop database if exists ${db}`], { encoding: "utf8" });
-  const create = spawnSync("sudo", ["-n", "-u", "postgres", "psql", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", `create database ${db}`], { encoding: "utf8" });
-  const exec = spawnSync("sudo", ["-n", "-u", "postgres", "psql", "-d", db, "-v", "ON_ERROR_STOP=1", "-f", testPath], { encoding: "utf8" });
-  spawnSync("sudo", ["-n", "-u", "postgres", "psql", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", `drop database if exists ${db}`], { encoding: "utf8" });
-  const output = `${drop.stdout || ""}${drop.stderr || ""}${create.stdout || ""}${create.stderr || ""}${exec.stdout || ""}${exec.stderr || ""}`;
-  spawnSync("sudo", ["-n", "-u", "postgres", "psql", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", `drop database if exists ${db}`], { encoding: "utf8" });
+function psql(args, options = {}) {
+  const viaTcp = Boolean(process.env.PGHOST);
+  const command = viaTcp ? "psql" : "sudo";
+  const argv = viaTcp ? args : ["-n", "-u", "postgres", "psql", ...args];
+  return spawnSync(command, argv, { encoding: "utf8", ...options });
+}
+
+function commandOutput(result) {
+  return `${result.stdout || ""}${result.stderr || ""}`;
+}
+
+function adminSql(sql) {
+  return psql(["-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", sql]);
+}
+
+function dropDatabase(name) {
+  return adminSql(`drop database if exists ${name}`);
+}
+
+function createDatabase(name) {
+  return adminSql(`create database ${name}`);
+}
+
+function postgresProbe() {
+  return psql(["-d", "postgres", "-tAc", "select 1"]);
+}
+
+function requirePostgres() {
+  const probe = postgresProbe();
+  if (probe.status === 0) return true;
+  if (process.env.CI === "true" || process.env.PGHOST) {
+    console.error(commandOutput(probe) || "psql is not available");
+    console.error("CI must execute supabase/tests/prune-ameen-warehouse-stock-reports.sql");
+    process.exit(1);
+  }
+  console.log("check-warehouse-stock-prune: static contracts passed; live SQL skipped (no local postgres).");
+  return false;
+}
+
+function runPruneDatabase() {
+  const drop = dropDatabase(PRUNE_DB);
+  const create = createDatabase(PRUNE_DB);
+  const exec = psql(["-d", PRUNE_DB, "-v", "ON_ERROR_STOP=1", "-f", testPath]);
+  const output = `${commandOutput(drop)}${commandOutput(create)}${commandOutput(exec)}`;
+  dropDatabase(PRUNE_DB);
   if (drop.status !== 0 || create.status !== 0 || exec.status !== 0 || !output.includes("PRUNE_TEST_OK")) {
     console.error(output);
     console.error("prune SQL test failed");
     process.exit(exec.status || 1);
   }
+}
 
-  const missing = "ozk_prune_missing_recon_test";
+function runMissingReconDatabase() {
   const missingSql = [
     "create table public.ameen_warehouse_stock_reports (id uuid primary key, created_at timestamptz not null);",
     "create table public.smart_inventory_sessions (id uuid primary key, source_report_id uuid);",
     `\\i ${migrationPath}`,
   ].join("\n");
-  spawnSync("sudo", ["-n", "-u", "postgres", "psql", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", `drop database if exists ${missing}`], { encoding: "utf8" });
-  const missingCreate = spawnSync("sudo", ["-n", "-u", "postgres", "psql", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", `create database ${missing}`], { encoding: "utf8" });
-  const missingRun = spawnSync("sudo", ["-n", "-u", "postgres", "psql", "-d", missing, "-v", "ON_ERROR_STOP=1"], { encoding: "utf8", input: missingSql });
-  spawnSync("sudo", ["-n", "-u", "postgres", "psql", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", `drop database if exists ${missing}`], { encoding: "utf8" });
-  const missingOutput = `${missingCreate.stdout || ""}${missingCreate.stderr || ""}${missingRun.stdout || ""}${missingRun.stderr || ""}`;
+  dropDatabase(MISSING_RECON_DB);
+  const missingCreate = createDatabase(MISSING_RECON_DB);
+  const missingRun = psql(["-d", MISSING_RECON_DB, "-v", "ON_ERROR_STOP=1"], { input: missingSql });
+  const missingOutput = `${commandOutput(missingCreate)}${commandOutput(missingRun)}`;
+  dropDatabase(MISSING_RECON_DB);
   if (missingCreate.status !== 0 || missingRun.status === 0 || !missingOutput.includes("inventory_recon_sessions")) {
     console.error(missingOutput);
     console.error("migration must stop when inventory_recon_sessions is absent");
     process.exit(1);
   }
+}
+
+function runSql() {
+  if (!requirePostgres()) return;
+  runPruneDatabase();
+  runMissingReconDatabase();
   console.log("check-warehouse-stock-prune: referenced reports survived a live SQL run, including the lock race and the cascade refusal.");
 }
 
