@@ -1,18 +1,19 @@
 ﻿#Requires -Version 5.1
-# قاعدة الاحتفاظ بتقارير مخزون المستودعات، والحذف على دفعات.
+# قاعدة الاحتفاظ بتقارير مخزون المستودعات، واستدعاء الحذف على دفعات.
 #
 # الحد نفسه الذي كان في tools/push-ameen-warehouse-stock.ps1:
 # يُحذف الصف فقط إذا كان created_at أقدم تماماً من (الآن UTC − يومين).
 # صف الحدّ نفسه، وكل تقرير أحدث منه، يبقى. هذا يشمل التقارير التي تُرفع
 # في نفس تشغيل المهمة.
 #
+# الحذف نفسه ليس هنا. الدالة prune_ameen_warehouse_stock_reports على
+# Supabase تحذف دفعة محدودة وتتجاوز أي تقرير ما زال source_report_id
+# لجلسة جرد ذكي أو جلسة مطابقة. هذا الملف يكرر النداء حتى ترجع الدالة
+# صفراً أو أصغر من حجم الدفعة، أو حتى حد الجولات. كل نداء معاملة مستقلة،
+# فتقدّم الجولة يبقى لو انتهت مهلة بيان لاحقة.
+#
 # لماذا الدفعات: دور authenticated على Supabase مهلته 8 ثوانٍ. حذف كل
-# الصفوف المطابقة ببيان واحد كان يُلغى (57014) فيتراجع ولا يُحذف شيء،
-# لأن المتراكم آلاف الصفوف وعمود items كبير. الفهرس
-# ameen_warehouse_stock_reports_created_at_idx موجود أصلاً على created_at
-# في الإنتاج وفي supabase/ameen-warehouse-stock-reports.sql. قراءة صفحة
-# مرتبة ومحدودة تستخدمه. حذف الجدول كله دفعة واحدة لا يستخدمه لأن أغلب
-# الصفوف تطابق الشرط، فيمسح الجدول. لذلك لا هجرة فهرس جديدة.
+# الصفوف المطابقة ببيان واحد كان يُلغى (57014) فيتراجع ولا يُحذف شيء.
 
 function ConvertTo-AmeenWarehouseStockUtc {
   param([Parameter(Mandatory = $true)]$Value)
@@ -54,81 +55,33 @@ function Test-AmeenWarehouseStockRowExpired {
   return $created -lt $cutoff
 }
 
-function Test-AmeenWarehouseStockReportId {
-  param([string]$Id)
-  return $Id -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
-}
-
-function Select-AmeenWarehouseStockCleanupIds {
-  param(
-    $Rows,
-    [Parameter(Mandatory = $true)][string]$CutoffText,
-    [Parameter(Mandatory = $true)][int]$BatchSize
-  )
-  # غلاف وليس مصفوفة: إرجاع المصفوفة من دالة يفكّها PowerShell، وصفّ
-  # واحد أو مصفوفة فارغة يُحسبان غلطاً كعنصر. Ids تبقى مجموعة حتى لو فارغة.
-  $chosen = New-Object System.Collections.Generic.List[object]
-  # $Rows و$pageRows ليسا نفس المتغير: أسماء PowerShell لا تفرّق حالة الأحرف.
-  $pageRows = @()
-  if ($null -ne $Rows) { $pageRows = @($Rows) }
-  foreach ($row in $pageRows) {
-    if ($null -eq $row) { continue }
-    if ($row -is [System.Array]) { continue }
-    $id = [string]$row.id
-    if ([string]::IsNullOrWhiteSpace($id)) { continue }
-    if (-not (Test-AmeenWarehouseStockReportId $id)) {
-      throw "معرّف تقرير مخزون غير صالح للحذف."
-    }
-    if (-not (Test-AmeenWarehouseStockRowExpired -CreatedAt $row.created_at -CutoffText $CutoffText)) {
-      continue
-    }
-    [void]$chosen.Add([pscustomobject]@{
-      id = $id
-      created = (ConvertTo-AmeenWarehouseStockUtc $row.created_at)
-    })
-  }
-  $ordered = @($chosen.ToArray() | Sort-Object created, id)
-  if ($BatchSize -ge 0 -and $ordered.Count -gt $BatchSize) {
-    $ordered = @($ordered | Select-Object -First $BatchSize)
-  }
-  $ids = New-Object System.Collections.Generic.List[string]
-  foreach ($item in $ordered) {
-    if ($null -eq $item) { continue }
-    [void]$ids.Add([string]$item.id)
-  }
-  return [pscustomobject]@{ Ids = $ids.ToArray() }
-}
-
-function Get-AmeenWarehouseStockCleanupIdList {
-  param($Selection)
-  if ($null -eq $Selection -or $null -eq $Selection.Ids) { return }
-  foreach ($id in $Selection.Ids) {
-    if ([string]::IsNullOrWhiteSpace([string]$id)) { continue }
-    Write-Output ([string]$id)
-  }
-}
-
 function Invoke-AmeenWarehouseStockReportCleanup {
   [CmdletBinding()]
   param(
     [Parameter(Mandatory = $true)][string]$CutoffText,
-    [Parameter(Mandatory = $true)][scriptblock]$FetchPage,
-    [Parameter(Mandatory = $true)][scriptblock]$DeleteIds,
+    [Parameter(Mandatory = $true)][scriptblock]$PruneBatch,
     [int]$BatchSize = 40,
     [int]$MaxBatches = 150
   )
-  if ($BatchSize -lt 1) { throw "BatchSize must be at least 1." }
+  if ($BatchSize -lt 1 -or $BatchSize -gt 40) { throw "BatchSize must be between 1 and 40." }
   if ($MaxBatches -lt 1) { throw "MaxBatches must be at least 1." }
 
   $removed = 0
   $batches = 0
-  $seen = @{}
-  $stalled = $false
 
   while ($batches -lt $MaxBatches) {
-    $page = & $FetchPage -CutoffText $CutoffText -BatchSize $BatchSize
-    $ids = @(Get-AmeenWarehouseStockCleanupIdList (Select-AmeenWarehouseStockCleanupIds -Rows $page -CutoffText $CutoffText -BatchSize $BatchSize))
-    if ($ids.Count -eq 0) {
+    $raw = @(& $PruneBatch -CutoffText $CutoffText -BatchSize $BatchSize)
+    if ($raw.Count -ne 1 -or $null -eq $raw[0]) {
+      throw "نداء تنظيف تقارير المخزون لم يُرجع عدداً واحداً."
+    }
+    $count = 0
+    if (-not [int]::TryParse([string]$raw[0], [ref]$count)) {
+      throw "نداء تنظيف تقارير المخزون أرجع قيمة غير رقمية."
+    }
+    if ($count -lt 0 -or $count -gt $BatchSize) {
+      throw "نداء تنظيف تقارير المخزون أرجع عدداً خارج الدفعة."
+    }
+    if ($count -eq 0) {
       return [pscustomobject]@{
         Removed = $removed
         Batches = $batches
@@ -137,27 +90,10 @@ function Invoke-AmeenWarehouseStockReportCleanup {
       }
     }
 
-    $pending = New-Object System.Collections.Generic.List[string]
-    foreach ($id in $ids) {
-      if (-not $seen.ContainsKey($id)) { [void]$pending.Add($id) }
-    }
-    if ($pending.Count -eq 0) {
-      $stalled = $true
-      break
-    }
-
-    & $DeleteIds -Ids ($pending.ToArray())
-    foreach ($id in $pending) { $seen[$id] = $true }
-    $removed += $pending.Count
+    $removed += $count
     $batches += 1
-    Write-Host ("تنظيف تقارير المخزون: دفعة {0}، حُذف {1}." -f $batches, $pending.Count)
-  }
-
-  if (-not $stalled) {
-    $peek = & $FetchPage -CutoffText $CutoffText -BatchSize $BatchSize
-    $peekIds = @(Get-AmeenWarehouseStockCleanupIdList (Select-AmeenWarehouseStockCleanupIds -Rows $peek -CutoffText $CutoffText -BatchSize $BatchSize))
-    $unseen = @($peekIds | Where-Object { -not $seen.ContainsKey($_) })
-    if ($unseen.Count -eq 0) {
+    Write-Host ("تنظيف تقارير المخزون: دفعة {0}، حُذف {1}." -f $batches, $count)
+    if ($count -lt $BatchSize) {
       return [pscustomobject]@{
         Removed = $removed
         Batches = $batches
@@ -171,6 +107,6 @@ function Invoke-AmeenWarehouseStockReportCleanup {
     Removed = $removed
     Batches = $batches
     Exhausted = $false
-    Stalled = [bool]$stalled
+    Stalled = $false
   }
 }

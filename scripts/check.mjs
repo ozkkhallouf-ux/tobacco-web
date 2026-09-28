@@ -2391,27 +2391,29 @@ for (const contract of [
     failed = true;
   }
 
-  // تنظيف تقارير المخزون: حد اليومين كما هو، لكن الحذف على دفعات بمعرّف الصف.
-  // طلب DELETE واحد على created_at=lt يصطدم بمهلة البيان (8 ثوانٍ) ولا يحذف شيئاً.
+  // تنظيف تقارير المخزون: حد اليومين كما هو. الحذف عبر دالة SQL تدفع
+  // دفعات وتتجاوز التقارير المرتبطة بجلسة جرد. طلب DELETE على created_at
+  // يصطدم بمهلة البيان وبالمفتاح الأجنبي لجلسة الجرد الذكي.
   const warehouseRetention = readFileSync("tools/ameen-warehouse-stock-retention.ps1", "utf8");
   if (!warehouseStockScript.includes("ameen-warehouse-stock-retention.ps1")
       || !warehouseStockScript.includes("Invoke-AmeenWarehouseStockReportCleanup")
+      || !warehouseStockScript.includes("rpc/prune_ameen_warehouse_stock_reports")
+      || !warehouseStockScript.includes("p_before")
+      || !warehouseStockScript.includes("p_limit")
       || /AddDays\(/.test(warehouseStockScript)
-      || /Method Delete[\s\S]{0,400}created_at=lt\./.test(warehouseStockScript)) {
-    console.error("push-ameen-warehouse-stock.ps1 must batch-delete aged warehouse stock rows via ameen-warehouse-stock-retention.ps1 and must not issue one unbounded created_at delete.");
-    failed = true;
-  }
-  if (!warehouseStockScript.includes('select=id,created_at&created_at=lt.')
-      || !warehouseStockScript.includes('id=in.($filter)')
-      || !warehouseStockScript.includes('Prefer = "return=minimal"')) {
-    console.error("warehouse stock cleanup must page ids with created_at=lt and delete those ids with return=minimal.");
+      || /Method Delete/.test(warehouseStockScript)
+      || /created_at=lt\./.test(warehouseStockScript)
+      || /id=in\./.test(warehouseStockScript)) {
+    console.error("push-ameen-warehouse-stock.ps1 must prune aged warehouse stock rows via prune_ameen_warehouse_stock_reports and must not delete them directly.");
     failed = true;
   }
   if (!warehouseRetention.includes("AddDays(-2)")
       || !warehouseRetention.includes("[int]$BatchSize = 40")
       || !warehouseRetention.includes("[int]$MaxBatches = 150")
-      || !warehouseRetention.includes("created -lt $cutoff")) {
-    console.error("ameen-warehouse-stock-retention.ps1 must keep the strict two-day cutoff and the small batch defaults.");
+      || !warehouseRetention.includes("[scriptblock]$PruneBatch")
+      || !warehouseRetention.includes("created -lt $cutoff")
+      || /\$FetchPage|\$DeleteIds/.test(warehouseRetention)) {
+    console.error("ameen-warehouse-stock-retention.ps1 must keep the strict two-day cutoff and repeat a bounded prune callback.");
     failed = true;
   }
 

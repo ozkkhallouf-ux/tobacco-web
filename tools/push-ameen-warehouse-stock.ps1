@@ -9,7 +9,9 @@
 # قراءة فقط من الأمين (SELECT فقط، بلا أي INSERT/UPDATE/DELETE). يكتب في
 # Supabase على ameen_warehouse_stock_reports فقط (جدول مستقل محصور الكتابة
 # بحساب المزامنة هذا عبر RLS — مراجعة Codex على PR #40) — لا يمسّ أي جدول
-# أو رصيد أو سعر بالأمين.
+# أو رصيد أو سعر بالأمين. تنظيف التقارير الأقدم من يومين يتم عبر الدالة
+# prune_ameen_warehouse_stock_reports فقط. الدالة تتجاوز التقرير المرتبط
+# بجلسة جرد، ولا يمس هذا السكربت جداول smart_inventory_* ولا مفاتيحها.
 #
 # التشغيل التجريبي (بلا كتابة، يطبع أسماء المستودعات وعدد الأصناف والمجموع فقط):
 #   .\tools\push-ameen-warehouse-stock.ps1 -WhatIf
@@ -190,31 +192,29 @@ foreach ($s in $stores) {
 }
 
 # الإبقاء على حد اليومين عبر Get-AmeenWarehouseStockRetentionCutoffText.
-# الحذف السابق كان طلباً واحداً لكل الصفوف المطابقة، فينتهي بيان دور
-# authenticated (8 ثوانٍ) ويتراجع الحذف. الفهرس على created_at موجود؛
-# الصفحة المحدودة تستخدمه، والحذف هنا بمعرّفات الدفعة فقط بلا جسم items.
+# الحذف داخل prune_ameen_warehouse_stock_reports: دفعة محدودة، وأقدم من
+# يومين، وغير مشار إليها من جلسة جرد. لا حذف REST مباشر. لو الدالة غير
+# مطبَّقة بعد، يفشل النداء ويُكتفى بتحذير — الرفع نفسه يبقى ناجحاً.
 $cutoff = Get-AmeenWarehouseStockRetentionCutoffText
 try {
-  $fetchPage = {
+  $pruneBatch = {
     param([string]$CutoffText, [int]$BatchSize)
-    $pageUri = "$url/rest/v1/ameen_warehouse_stock_reports?select=id,created_at&created_at=lt.$CutoffText&order=created_at.asc&limit=$BatchSize"
-    return Invoke-RestMethod -Method Get -Uri $pageUri -Headers $hdr
+    $payload = @{ p_before = $CutoffText; p_limit = $BatchSize } | ConvertTo-Json -Compress
+    $count = Invoke-RestMethod -Method Post `
+      -Uri "$url/rest/v1/rpc/prune_ameen_warehouse_stock_reports" `
+      -Headers $hdr `
+      -ContentType "application/json; charset=utf-8" `
+      -Body ([Text.Encoding]::UTF8.GetBytes($payload)) `
+      -TimeoutSec 20
+    return [int]$count
   }.GetNewClosure()
-  $deleteIds = {
-    param($Ids)
-    # اسم مختلف عن $Ids: PowerShell لا يفرّق حالة الأحرف.
-    $batchIds = @($Ids | Where-Object { $_ })
-    if ($batchIds.Count -eq 0) { return }
-    $filter = ($batchIds -join ",")
-    Invoke-RestMethod -Method Delete -Uri "$url/rest/v1/ameen_warehouse_stock_reports?id=in.($filter)" -Headers ($hdr + @{ Prefer = "return=minimal" }) | Out-Null
-  }.GetNewClosure()
-  $cleanup = Invoke-AmeenWarehouseStockReportCleanup -CutoffText $cutoff -FetchPage $fetchPage -DeleteIds $deleteIds
+  $cleanup = Invoke-AmeenWarehouseStockReportCleanup -CutoffText $cutoff -PruneBatch $pruneBatch
   if ($cleanup.Stalled) {
     Write-Warning "توقف تنظيف تقارير المخزون: دفعة لم تُحذف، ستُعاد في الجولة التالية."
   } elseif (-not $cleanup.Exhausted) {
     Write-Warning "تنظيف تقارير المخزون لم يكتمل في هذه الجولة ($($cleanup.Removed) صفاً). تكمل الجولة التالية."
   } elseif ($cleanup.Removed -gt 0) {
-    Write-Host "نُظّف $($cleanup.Removed) تقرير مخزون أقدم من يومين، على دفعات." -ForegroundColor Green
+    Write-Host "نُظّف $($cleanup.Removed) تقرير مخزون أقدم من يومين وغير مرتبط بجرد، على دفعات." -ForegroundColor Green
   }
 } catch { Write-Warning "تعذّر تنظيف تقارير المخزون القديمة: $($_.Exception.Message)" }
 

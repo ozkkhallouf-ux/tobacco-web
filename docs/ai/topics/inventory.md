@@ -2,7 +2,7 @@
 
 آخر تحديث: 2026-09-28
 
-تنظيف `ameen_warehouse_stock_reports`: مهمة Windows «TOBACCO Ameen Warehouse Reports» (كل ساعة عبر `tools/sync-ameen-warehouse-reports.ps1`) كانت تحذف الصفوف الأقدم من يومين بطلب DELETE واحد في `tools/push-ameen-warehouse-stock.ps1`. دور `authenticated` مهلته 8 ثوانٍ، والبيان يُلغى (57014) فلا يُحذف شيء. الفهرس `ameen_warehouse_stock_reports_created_at_idx` على `created_at` موجود في الإنتاج ولا حاجة لهجرة جديدة؛ الصفحة المحدودة تستخدمه. صار الحذف على دفعات (40 معرّفاً) مع الإبقاء على حد اليومين الصارم (`created_at` أقدم تماماً من الآن−يومين). الفحص: `tools/tests/Test-WarehouseStockRetentionBatch.ps1` داخل وظيفة `ps51-compat`. بعد الدمج يحتاج جهاز Windows سحب السكربت؛ لا تطبيق SQL على القاعدة الحية.
+تنظيف `ameen_warehouse_stock_reports`: مهمة Windows «TOBACCO Ameen Warehouse Reports» (كل ساعة عبر `tools/sync-ameen-warehouse-reports.ps1`) كانت تحذف الصفوف الأقدم من يومين بطلب DELETE واحد في `tools/push-ameen-warehouse-stock.ps1`. دور `authenticated` مهلته 8 ثوانٍ، والبيان يُلغى (57014) فلا يُحذف شيء. الفهرس `ameen_warehouse_stock_reports_created_at_idx` موجود ولا حاجة لفهرس جديد. بالإضافة، `smart_inventory_sessions.source_report_id` بلا ON DELETE، فحذف تقرير مرتبط بجلسة يفشل بخرق المفتاح حتى على دفعة واحدة. لا يُحوَّل المفتاح إلى CASCADE. الدالة `prune_ameen_warehouse_stock_reports` (هجرة `20260928140000`، لا تُطبَّق من المستودع) تحذف دفعة بحد 40 من الصفوف الأقدم تماماً من يومين وغير المشار إليها من `smart_inventory_sessions` أو `inventory_recon_sessions`، بلا كتابة على جداول الجرد. السكربت يناديها في حلقة. الفحوص: `tools/tests/Test-WarehouseStockRetentionBatch.ps1` و`supabase/tests/prune-ameen-warehouse-stock-reports.sql`. بعد الدمج: تطبيق الهجرة يدوياً في محرر SQL ثم سحب السكربت على Windows، بلا إعادة تسجيل المهمة وبلا مسّ لبيانات `smart_inventory_*`.
 
 ## الحالة الحالية
 
@@ -22,7 +22,7 @@
 
 ## نطاق الملفات
 
-`src/business-snapshot.js`, `src/inventory-recon-calc.js`, `src/smart-inventory.js`, `src/supabase-client.js`, `src/app.js`, `src/styles.css`, `tools/ameen-stock-query.sql`, `tools/ameen-sync-agent.ps1`, `tools/push-ameen-warehouse-stock.ps1`, `scripts/item-snapshot-*.mjs`, `scripts/check-smart-inventory.mjs`, `supabase/inventory-reconciliation-table.sql`, `supabase/smart-inventory.sql`, `supabase/migrations/*smart_inventory_counter_isolation.sql`, `supabase/functions/inventory-auth/index.ts`, `supabase/tests/smart-inventory-security.sql`.
+`src/business-snapshot.js`, `src/inventory-recon-calc.js`, `src/smart-inventory.js`, `src/supabase-client.js`, `src/app.js`, `src/styles.css`, `tools/ameen-stock-query.sql`, `tools/ameen-sync-agent.ps1`, `tools/push-ameen-warehouse-stock.ps1`, `tools/ameen-warehouse-stock-retention.ps1`, `scripts/item-snapshot-*.mjs`, `scripts/check-smart-inventory.mjs`, `scripts/check-warehouse-stock-prune.mjs`, `supabase/inventory-reconciliation-table.sql`, `supabase/smart-inventory.sql`, `supabase/migrations/20260928140000_prune_ameen_warehouse_stock_reports.sql`, `supabase/migrations/*smart_inventory_counter_isolation.sql`, `supabase/functions/inventory-auth/index.ts`, `supabase/tests/smart-inventory-security.sql`, `supabase/tests/prune-ameen-warehouse-stock-reports.sql`.
 
 ## قيود ثابتة
 
