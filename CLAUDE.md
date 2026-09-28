@@ -94,6 +94,15 @@ npm run dev
 الـworkflow يعمل عند كل push إلى `main`، وعند `workflow_dispatch`، وبعد اكتمال
 workflow «توليد نشرات الأسعار».
 
+### 1.1 نشر Windows منفصل عن main (منذ 2026-09-28)
+
+الدمج إلى `main` ينشر **الويب وحده**. مهمة «TOBACCO Daily Git Pull» على OZK2026
+**معطّلة** بقرار المالك، فلا يصل أي تعديل على `tools/*.ps1` أو `*.sql` إلى الجهاز تلقائياً.
+المسار المعتمد هو بوابة نشر Windows: فرع `windows-production` يتقدّم Fast-Forward بموافقة
+المالك عبر `.github/workflows/windows-release.yml`، والبوابة في ProgramData تحدّث الجهاز
+بـ`merge --ff-only` فقط. لا تعيد تفعيل المهمة، ولا تسحب يدوياً على الجهاز بلا أمر صريح.
+راجع `docs/ai/topics/windows-deploy-gate.md`.
+
 ### 2. Supabase REST API
 يجب إرسال هذا الـ header في كل طلب وإلا يعطي 404:
 ```

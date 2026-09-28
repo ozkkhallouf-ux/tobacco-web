@@ -105,6 +105,7 @@ export const CHECKS = [
   'check-stock-qty-net-calc.mjs',
   'check-telegram-delivery-observability.mjs',
   'check-telegram-grok-ask.mjs',
+  'check-windows-deploy-gate.mjs',
 ];
 
 // ----------------------------------------------------------------------------

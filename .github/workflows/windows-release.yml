@@ -1,0 +1,127 @@
+name: إصدار Windows (windows-production)
+
+# الغرض: فصل نشر سكربتات الإنتاج على OZK2026 عن الدمج إلى main.
+#
+# الدمج إلى main ينشر الويب وحده (pages.yml). جهاز Windows يتبع فرع
+# windows-production فقط، ولا يتقدّم هذا الفرع إلا بتشغيل يدوي لهذا الـworkflow
+# ثم موافقة المالك في بيئة windows-production (Required reviewer). بعدها يُدفع
+# الـSHA Fast-Forward (بلا --force) ويُسجَّل GitHub Deployment مرتبط به، وهو ما
+# تتحقق منه بوابة Windows المثبّتة في ProgramData قبل أي تحديث.
+#
+# إعدادات لازمة (خطوة مالك منفصلة، ليست جزءاً من هذا الملف):
+#   - Environment «windows-production» بمراجع مطلوب واحد (المالك).
+#   - فرع windows-production يُنشأ مرة واحدة من الـSHA المنشور حالياً على OZK2026.
+#   - Ruleset للفرع: منع force push والحذف، والتحديث من GitHub Actions فقط.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "SHA كامل (40 حرفاً) لـcommit على main"
+        required: true
+        type: string
+      write_scripts_approved:
+        description: "موافقة صريحة على تغيير سكربتات الكتابة إلى الأمين (writerScripts)"
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-release
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: فحص الإصدار
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+      pull-requests: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # كل قيمة من المدخلات تمرّ عبر env لا عبر ${{ }} داخل run.
+      - name: Verify release candidate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          INPUT_SHA: ${{ inputs.sha }}
+          INPUT_WRITE: ${{ inputs.write_scripts_approved }}
+        run: |
+          git fetch --no-tags origin main
+          git fetch --no-tags origin windows-production || true
+          node scripts/windows-release-verify.mjs --sha "$INPUT_SHA" --write-approved "$INPUT_WRITE" --out windows-release.json
+
+      - name: Upload verification
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: windows-release.json
+          retention-days: 90
+
+  release:
+    name: موافقة المالك ثم التقديم
+    needs: verify
+    runs-on: ubuntu-latest
+    environment: windows-production
+    permissions:
+      contents: write
+      deployments: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download verification
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-release
+
+      # لا --force: GitHub يرفض الدفع إن لم يكن Fast-Forward، والفحص أدناه يرفض
+      # إن تحرّك الفرع منذ خطوة التحقق.
+      - name: Fast-forward windows-production
+        env:
+          INPUT_SHA: ${{ inputs.sha }}
+        run: |
+          set -euo pipefail
+          base=$(node -e "process.stdout.write(require('./windows-release.json').base)")
+          sha=$(node -e "process.stdout.write(require('./windows-release.json').sha)")
+          test "$sha" = "$(echo "$INPUT_SHA" | tr 'A-F' 'a-f')"
+          git fetch --no-tags origin windows-production
+          current=$(git rev-parse origin/windows-production)
+          if [ "$current" != "$base" ]; then echo "windows-production moved since verification ($base -> $current)"; exit 1; fi
+          git merge-base --is-ancestor "$current" "$sha"
+          git push origin "$sha:refs/heads/windows-production"
+
+      - name: Record deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APPROVER: ${{ github.actor }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          node -e "
+            const v = require('./windows-release.json');
+            const body = { ref: v.sha, environment: 'windows-production', auto_merge: false, required_contexts: [],
+              production_environment: true, description: 'OZK Windows release ' + v.sha.slice(0, 7),
+              payload: { kind: v.kind, sha: v.sha, base: v.base, windowsRef: v.windowsRef, approver: process.env.APPROVER,
+                runId: process.env.RUN_ID, writeScriptsApproved: v.writeScriptsApproved, writerBlobs: v.writerBlobs,
+                changedFiles: v.changedFiles.length, ps1Changed: v.ps1Changed, sqlChanged: v.sqlChanged } };
+            require('fs').writeFileSync('deployment.json', JSON.stringify(body));
+          "
+          id=$(gh api -X POST "repos/$GITHUB_REPOSITORY/deployments" --input deployment.json --jq .id)
+          gh api -X POST "repos/$GITHUB_REPOSITORY/deployments/$id/statuses" -f state=success -f description="approved and fast-forwarded" --jq .state
+          echo "deployment $id recorded" >> "$GITHUB_STEP_SUMMARY"
