@@ -2323,32 +2323,45 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
 {
   // ملاحظة Codex على PR #205 (discussion_r4018343653): «مبيعات 2026-09-01»
   // و«مبيعات يوم 1/9/2026» لم تطابق أي فرع فترة، فكانت تُجاب بأرقام اليوم.
-  const target = "2026-09-01";
-  const today = new Date(Date.now() + 180 * 60_000).toISOString().slice(0, 10);
+  // «يوم 1 سبتمبر» بلا سنة يأخذ سنة دمشق الحالية (collectCalendarDays).
+  // تثبيت المبيع على 2026-09-01 يجعل السؤال يبحث عن 2027-09-01 فما بعد
+  // فيفشل كل يوم من 2027. السنة المصرَّحة تبقى 2026؛ والسنة المحذوفة تتبع الساعة.
+  const explicitTarget = "2026-09-01";
+  const today = damascusDate(0);
+  const yearlessTarget = `${today.slice(0, 4)}-09-01`;
+  const onTarget = new Set([explicitTarget, yearlessTarget]);
+  const distractorDate = onTarget.has(today) ? damascusDate(-1) : today;
+  const sale = (date, bill, total) => ({
+    sale_date: date, bill_no: bill, bill_type: "retail", item_name: "أ",
+    qty: 1, line_total: total, net_profit: 21, unit_cost: 300, customer_name: "س"
+  });
   const fixtures = defaultFixtures();
   fixtures.sales_line_items = [
-    { sale_date: target, bill_no: "t1", bill_type: "retail", item_name: "أ", qty: 1, line_total: 321, net_profit: 21, unit_cost: 300, customer_name: "س" },
-    { sale_date: today, bill_no: "t0", bill_type: "retail", item_name: "أ", qty: 1, line_total: 999, net_profit: 9, unit_cost: 990, customer_name: "س" }
+    sale(explicitTarget, "t1", 321),
+    sale(distractorDate, "t0", 999)
   ];
+  if (yearlessTarget !== explicitTarget) fixtures.sales_line_items.push(sale(yearlessTarget, "ty", 321));
+  const covered = [explicitTarget, yearlessTarget, distractorDate].sort();
   fixtures.sales_line_items_sync_state = [{
     source: "ameen_sales_line_items",
-    window_start: "2026-01-01",
-    window_end: today,
-    row_count: 2,
+    window_start: covered[0],
+    window_end: covered[covered.length - 1],
+    row_count: fixtures.sales_line_items.length,
     completed_at: new Date().toISOString()
   }];
 
   const isoAsk = await (await loadAssistant({ fixtures })).ask(TOKENS.owner, "مبيعات 2026-09-01");
   const isoText = String(isoAsk.body.reply);
   assert.equal(isoAsk.body.answered, true, `ISO صريح رُفض:\n${isoText}`);
-  assert.ok(isoText.includes("321"), `لم يقرأ مبيعات ${target}:\n${isoText}`);
+  assert.ok(isoText.includes("321"), `لم يقرأ مبيعات ${explicitTarget}:\n${isoText}`);
   assert.ok(!isoText.includes("999"), `سقط على مبيعات اليوم بدل التاريخ الصريح:\n${isoText}`);
-  assert.ok(isoText.includes(target) || /2026-09-01/.test(isoText), `لم يذكر التاريخ المطلوب في الجواب:\n${isoText}`);
+  assert.ok(isoText.includes(explicitTarget), `لم يذكر التاريخ المطلوب في الجواب:\n${isoText}`);
 
   const dmyAsk = await (await loadAssistant({ fixtures })).ask(TOKENS.owner, "مبيعات يوم 1/9/2026");
   const dmyText = String(dmyAsk.body.reply);
   assert.equal(dmyAsk.body.answered, true, `يوم/شهر/سنة رُفض:\n${dmyText}`);
-  assert.ok(dmyText.includes("321"), `صيغة 1/9/2026 لم تُقرأ كمبيعات ${target}:\n${dmyText}`);
+  assert.ok(dmyText.includes("321"), `صيغة 1/9/2026 لم تُقرأ كمبيعات ${explicitTarget}:\n${dmyText}`);
+  assert.ok(dmyText.includes(explicitTarget), `صيغة 1/9/2026 لم تذكر ${explicitTarget}:\n${dmyText}`);
   assert.ok(!dmyText.includes("999"), `صيغة يوم/شهر/سنة سقطت على اليوم:\n${dmyText}`);
 
   const bad = await (await loadAssistant({ fixtures })).ask(TOKENS.owner, "مبيعات يوم 99/99/2026");
@@ -2362,14 +2375,19 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   const namedAsk = await (await loadAssistant({ fixtures })).ask(TOKENS.owner, "مبيعات 1 سبتمبر 2026");
   const namedText = String(namedAsk.body.reply);
   assert.equal(namedAsk.body.answered, true, `اسم شهر عربي رُفض:\n${namedText}`);
-  assert.ok(namedText.includes("321"), `«1 سبتمبر 2026» لم تُقرأ كمبيعات ${target}:\n${namedText}`);
+  assert.ok(namedText.includes("321"), `«1 سبتمبر 2026» لم تُقرأ كمبيعات ${explicitTarget}:\n${namedText}`);
+  assert.ok(namedText.includes(explicitTarget), `«1 سبتمبر 2026» لم يبقَ على السنة المصرَّحة:\n${namedText}`);
   assert.ok(!namedText.includes("999"), `اسم شهر عربي سقط على مبيعات اليوم:\n${namedText}`);
 
   const namedDay = await (await loadAssistant({ fixtures })).ask(TOKENS.owner, "مبيعات يوم 1 سبتمبر");
   const namedDayText = String(namedDay.body.reply);
   assert.equal(namedDay.body.answered, true, `«يوم 1 سبتمبر» رُفض:\n${namedDayText}`);
-  assert.ok(namedDayText.includes("321"), `«يوم 1 سبتمبر» لم يُحلّ إلى ${target}:\n${namedDayText}`);
+  assert.ok(namedDayText.includes(yearlessTarget), `«يوم 1 سبتمبر» لم يُحلّ إلى 1 سبتمبر ${today.slice(0, 4)}:\n${namedDayText}`);
+  assert.ok(namedDayText.includes("321"), `«يوم 1 سبتمبر» لم يقرأ مبيعات ${yearlessTarget}:\n${namedDayText}`);
   assert.ok(!namedDayText.includes("999"), `«يوم 1 سبتمبر» سقط على اليوم:\n${namedDayText}`);
+  if (yearlessTarget !== explicitTarget) {
+    assert.ok(!namedDayText.includes(explicitTarget), `«يوم 1 سبتمبر» ثبت على 2026 بدل سنة الساعة:\n${namedDayText}`);
+  }
 
   const badMonth = await (await loadAssistant({ fixtures })).ask(TOKENS.owner, "مبيعات 99 سبتمبر");
   assert.equal(badMonth.body.answered, false, `يوم خارج الشهر يجب أن يُرفض:\n${badMonth.body.reply}`);
