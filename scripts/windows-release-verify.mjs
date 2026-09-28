@@ -87,56 +87,76 @@ async function gh(repo, rel) {
   return res.json();
 }
 
-async function main() {
-  const args = Object.fromEntries(process.argv.slice(2).reduce((acc, v, i, all) => (v.startsWith("--") ? [...acc, [v.slice(2), all[i + 1]]] : acc), []));
-  const sha = String(args.sha || "").trim().toLowerCase();
-  const writeApproved = String(args["write-approved"]) === "true";
-  const out = args.out || "windows-release.json";
-  const repo = process.env.GITHUB_REPOSITORY || "ozkkhallouf-ux/tobacco-web";
-  const config = loadGateConfig();
-  const fail = (msg) => { console.error(`FAIL: ${msg}`); process.exit(1); };
+function parseArgs(argv) {
+  const args = {};
+  for (let i = 0; i < argv.length; i += 1) if (argv[i].startsWith("--")) args[argv[i].slice(2)] = argv[i + 1];
+  return {
+    sha: String(args.sha || "").trim().toLowerCase(),
+    writeApproved: String(args["write-approved"]) === "true",
+    out: args.out || "windows-release.json"
+  };
+}
 
-  if (!/^[0-9a-f]{40}$/.test(sha)) fail("sha must be a full 40-character commit SHA");
-  if (!gitOk(["cat-file", "-e", `${sha}^{commit}`])) fail(`commit ${sha} not found`);
-  if (!gitOk(["merge-base", "--is-ancestor", sha, `origin/${config.mainBranch}`])) fail("commit is not on main");
+// شروط git: SHA كامل وموجود وعلى main، والفرع موجود، والتقدّم Fast-Forward. يُرجع base.
+function verifyGitPreconditions(sha, config) {
+  if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error("sha must be a full 40-character commit SHA");
+  if (!gitOk(["cat-file", "-e", `${sha}^{commit}`])) throw new Error(`commit ${sha} not found`);
+  if (!gitOk(["merge-base", "--is-ancestor", sha, `origin/${config.mainBranch}`])) throw new Error("commit is not on main");
   if (!gitOk(["rev-parse", "--verify", `origin/${config.windowsBranch}`])) {
-    fail(`origin/${config.windowsBranch} does not exist; the owner creates it once from the SHA currently deployed on OZK2026`);
+    throw new Error(`origin/${config.windowsBranch} does not exist; the owner creates it once from the SHA currently deployed on OZK2026`);
   }
   const base = git(["rev-parse", `origin/${config.windowsBranch}`]);
-  if (base === sha) fail("already released");
-  if (!gitOk(["merge-base", "--is-ancestor", base, sha])) fail(`${sha} is not a fast-forward of ${config.windowsBranch} (${base})`);
+  if (base === sha) throw new Error("already released");
+  if (!gitOk(["merge-base", "--is-ancestor", base, sha])) throw new Error(`${sha} is not a fast-forward of ${config.windowsBranch} (${base})`);
+  return base;
+}
 
-  const change = classifyChanges(git(["diff", "--name-status", "--no-renames", base, sha]), config.writerScripts);
-  if (change.writerScriptsChanged.length && !writeApproved) {
-    fail(`writer scripts changed and write_scripts_approved is false: ${change.writerScriptsChanged.join(", ")}`);
-  }
-  const writerBlobs = {};
+function writerBlobsFor(change, sha) {
+  const blobs = {};
   for (const p of change.writerScriptsChanged) {
     const f = change.files.find((x) => x.path === p);
-    writerBlobs[p] = f.status === "D" ? "deleted" : git(["rev-parse", `${sha}:${p}`]);
+    blobs[p] = f.status === "D" ? "deleted" : git(["rev-parse", `${sha}:${p}`]);
   }
+  return blobs;
+}
 
+async function fetchCi(repo, sha, config) {
   const runs = (await gh(repo, `actions/runs?head_sha=${sha}&per_page=100`)).workflow_runs || [];
   const pulls = await gh(repo, `commits/${sha}/pulls`);
   const pullRequest = pulls.find((p) => p.merge_commit_sha === sha && p.merged_at) || null;
   const prCheckRuns = pullRequest ? ((await gh(repo, `commits/${pullRequest.head.sha}/check-runs?per_page=100`)).check_runs || []) : [];
-  const ci = evaluateCi({ runs, requiredMainWorkflows: config.requiredMainWorkflows, pullRequest, prCheckRuns, requiredPrChecks: config.requiredPrChecks });
+  return evaluateCi({ runs, requiredMainWorkflows: config.requiredMainWorkflows, pullRequest, prCheckRuns, requiredPrChecks: config.requiredPrChecks });
+}
 
+function writeStepSummary(summary) {
+  if (!process.env.GITHUB_STEP_SUMMARY) return;
+  appendFileSync(process.env.GITHUB_STEP_SUMMARY, [
+    `## إصدار Windows: \`${summary.base.slice(0, 7)}\` → \`${summary.sha.slice(0, 7)}\``,
+    `- ملفات متغيّرة: ${summary.changedFiles.length} — PS1: ${summary.ps1Changed} — SQL: ${summary.sqlChanged} — كتّاب: ${summary.writerScriptsChanged.join(", ") || "لا"}`,
+    ...Object.entries(summary.ci).map(([k, v]) => `- CI ${k}: ${v}`),
+    "", "```", ...summary.changedFiles, "```"
+  ].join("\n") + "\n");
+}
+
+async function main() {
+  const { sha, writeApproved, out } = parseArgs(process.argv.slice(2));
+  const repo = process.env.GITHUB_REPOSITORY || "ozkkhallouf-ux/tobacco-web";
+  const config = loadGateConfig();
+  const base = verifyGitPreconditions(sha, config);
+
+  const change = classifyChanges(git(["diff", "--name-status", "--no-renames", base, sha]), config.writerScripts);
+  if (change.writerScriptsChanged.length && !writeApproved) {
+    throw new Error(`writer scripts changed and write_scripts_approved is false: ${change.writerScriptsChanged.join(", ")}`);
+  }
+  const ci = await fetchCi(repo, sha, config);
   const summary = {
-    kind: RELEASE_KIND, sha, base, windowsRef: config.windowsBranch, writeScriptsApproved: writeApproved, writerBlobs,
+    kind: RELEASE_KIND, sha, base, windowsRef: config.windowsBranch, writeScriptsApproved: writeApproved, writerBlobs: writerBlobsFor(change, sha),
     changedFiles: change.files.map((f) => `${f.status} ${f.path}`), ps1Changed: change.ps1Changed, sqlChanged: change.sqlChanged,
     mjsChanged: change.mjsChanged, writerScriptsChanged: change.writerScriptsChanged, ci: ci.results
   };
   writeFileSync(out, JSON.stringify(summary, null, 2));
-  if (process.env.GITHUB_STEP_SUMMARY) {
-    appendFileSync(process.env.GITHUB_STEP_SUMMARY, [
-      `## إصدار Windows: \`${base.slice(0, 7)}\` → \`${sha.slice(0, 7)}\``,
-      `- ملفات متغيّرة: ${change.files.length} — PS1: ${change.ps1Changed} — SQL: ${change.sqlChanged} — كتّاب: ${change.writerScriptsChanged.join(", ") || "لا"}`,
-      ...Object.entries(ci.results).map(([k, v]) => `- CI ${k}: ${v}`),
-      "", "```", ...summary.changedFiles, "```"
-    ].join("\n") + "\n");
-  }
-  if (!ci.ok) fail(`CI not green on ${sha}: ${ci.failing.join(", ")}`);
+  writeStepSummary(summary);
+  if (!ci.ok) throw new Error(`CI not green on ${sha}: ${ci.failing.join(", ")}`);
   console.log(`OK: ${base.slice(0, 7)} -> ${sha.slice(0, 7)} (${change.files.length} files)`);
 }
 
