@@ -156,6 +156,11 @@ assert.doesNotMatch(preSrc, /Win32_Service -ErrorAction SilentlyContinue|Get-Sch
 assert.ok(preSrc.includes("service inventory is empty"), "قائمة خدمات فارغة = حجب");
 for (const needle of ["function Test-ExactGateAction", "interpreter is not the approved PowerShell", "disallowed PowerShell argument", "arguments cannot be parsed unambiguously", "script path is not an absolute canonical path", "disallowed script argument", "expected exactly one action"]) assert.ok(preSrc.includes(needle), `Action البوابة الحرفي: ${needle}`);
 assert.doesNotMatch(preSrc, /'-command'|'-encodedcommand'|'-c'|'-enc'/i, "لا مفتاح تنفيذ مضمَّن ضمن القائمة المسموحة");
+// مكان المهمة لا يمنح استثناء: لا إعادة لاستثناء \Microsoft\ (أو أي TaskPath) من جرد الهويات.
+const preCode = preSrc.split("\n").filter((l) => !l.trim().startsWith("#")).join("\n");
+assert.doesNotMatch(preCode, /TaskPath\s+-(not)?(like|match|eq)|\.TaskPath\s*-(not)?(like|match)|\\\\?Microsoft\\\\?\*/i, "لا استثناء لمهام حسب TaskPath (ومنها \\Microsoft\\)");
+assert.match(preCode, /Get-ScheduledTask -ErrorAction Stop\)\)/, "جرد كل المهام بلا ترشيح");
+for (const needle of ["function Resolve-WorkloadReach", "cannot determine whether this", "function Expand-UserProfileVariables", "function Expand-MachineVariables", "$depth -ge 3"]) assert.ok(preSrc.includes(needle), `تتبّع الأغلفة: ${needle}`);
 for (const needle of ["function Test-GateTrustAcl", "function Get-PreflightAcl", "Get-Acl -LiteralPath $Path -ErrorAction Stop", "cannot read ACL", "owner is ", "rights cannot be interpreted", "write-granting ACE with an unresolvable identity", "required trust file is missing"]) assert.ok(preSrc.includes(needle), `ACL الفعلية: ${needle}`);
 assert.match(preSrc, /\$c = Test-GateTrustAcl \$Config/, "فحص التثبيت يشمل ACL الفعلية");
 assert.equal(cfg0.trust.gateInterpreter, "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");

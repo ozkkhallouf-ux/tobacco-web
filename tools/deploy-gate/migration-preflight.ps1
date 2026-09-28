@@ -38,16 +38,17 @@ function Get-PreflightTaskState([string]$TaskName) {
     return [string]$task.State
 }
 
-# جرد الهويات: كل مهمة (غير تابعة لـMicrosoft) باسمها وحسابها ونص الـAction، وكل خدمة
+# جرد الهويات: كل مهمة (أياً كان مكانها، ومنها \Microsoft\) باسمها وحسابها ونص الـAction، وكل خدمة
 # بحسابها ومسار تنفيذها. هوية غير مقروءة تبقى فارغة ⇒ يحكم الفحص عليها fail-closed.
 function Get-PreflightTaskInventory {
     $out = @()
     # ErrorAction Stop: تعذّر الجرد يصل إلى المستدعي فيحجب (لا قائمة فارغة صامتة).
-    foreach ($t in @(Get-ScheduledTask -ErrorAction Stop | Where-Object { $_.TaskPath -notlike '\Microsoft\*' })) {
+    # كل المهام بلا استثناء لمكانها (TaskPath): مهمة تحت \Microsoft\ تشغّل كود مستودع تُفحص كغيرها.
+    foreach ($t in @(Get-ScheduledTask -ErrorAction Stop)) {
         $id = [string]$t.Principal.UserId
         if (-not $id) { $id = [string]$t.Principal.GroupId }
-        $acts = @($t.Actions | ForEach-Object { [pscustomobject]@{ execute = [string]$_.Execute; arguments = [string]$_.Arguments } })
-        $out += [pscustomobject]@{ name = [string]$t.TaskName; identity = $id; action = (@($acts | ForEach-Object { $_.execute + ' ' + $_.arguments }) -join "`n"); actions = $acts }
+        $acts = @($t.Actions | ForEach-Object { [pscustomobject]@{ execute = [string]$_.Execute; arguments = [string]$_.Arguments; workingDirectory = [string]$_.WorkingDirectory } })
+        $out += [pscustomobject]@{ name = [string]$t.TaskName; path = [string]$t.TaskPath; identity = $id; action = (@($acts | ForEach-Object { $_.execute + ' ' + $_.arguments + ' ' + $_.workingDirectory }) -join "`n"); actions = $acts }
     }
     return $out
 }
@@ -73,6 +74,7 @@ function Get-PreflightAcl([string]$Path) {
     }
 }
 
+# نص غلاف: '' إن لم يوجد؛ يرمي إن وُجد وتعذّرت قراءته (⇒ «غير محدد» لدى المستدعي).
 function Read-PreflightWrapperText([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path)) { return '' }
     return [System.IO.File]::ReadAllText($Path)
@@ -206,17 +208,77 @@ function ConvertTo-IdentityKey([string]$Identity) {
     }
 }
 
-# هل تشغّل هذه المهمة/الخدمة كوداً من مستودع؟ (مستوى واحد من الأغلفة)
-function Test-RepoWorkload($Config, [string]$ActionText) {
-    $roots = @(@($Config.repoPath) + @($Config.trust.repositoryRoots) | Where-Object { $_ } | ForEach-Object { ConvertTo-PreflightPath ([string]$_) })
-    $refs = @(Get-TaskScriptReferences $ActionText)
-    $refs += @([regex]::Matches([string]$ActionText, '(?:[A-Za-z]:\\|/)[^"''\r\n<>|]+?\.(exe|bat|cmd|js|mjs|ps1|vbs)\b') | ForEach-Object { $_.Value })
-    foreach ($r in $refs) {
-        $n = ConvertTo-PreflightPath $r
-        foreach ($root in $roots) { if ($n -eq $root -or $n.StartsWith($root + '\')) { return $true } }
-    }
-    return $false
+# هل يصل هذا الـAction إلى كود مستودع؟ يتتبّع الأغلفة (vbs/cmd/bat/ps1/psm1) خارج المستودع
+# حتى 3 مستويات. «undetermined» حين لا يمكن الإثبات: غلاف موجود لا يُقرأ، أو عمق أكبر، أو
+# متغيّر بيئة خاص بالمستخدم أو غير معروف في المسار.
+function Expand-UserProfileVariables([string]$Text, [string]$Identity) {
+    $key = ConvertTo-IdentityKey $Identity
+    if (-not $key) { return $null }
+    $userProfile = 'C:\Users\' + $key
+    if ($key -eq 'system') { $userProfile = 'C:\Windows\System32\config\systemprofile' }
+    $map = @{ 'userprofile' = $userProfile; 'homedrive' = 'C:'; 'homepath' = $userProfile.Substring(2); 'appdata' = ($userProfile + '\AppData\Roaming'); 'localappdata' = ($userProfile + '\AppData\Local'); 'temp' = ($userProfile + '\AppData\Local\Temp'); 'tmp' = ($userProfile + '\AppData\Local\Temp'); 'username' = $key; 'onedrive' = ($userProfile + '\OneDrive') }
+    return [regex]::Replace($Text, '%(userprofile|homepath|homedrive|appdata|localappdata|temp|tmp|username|onedrive)%', { param($m) $map[$m.Groups[1].Value.ToLowerInvariant()] }, 'IgnoreCase')
 }
+
+# متغيّرات النظام المعروفة: قيمة العملية إن وُجدت، وإلا المسار القياسي (ثابتة لكل المستخدمين).
+function Expand-MachineVariables([string]$Text) {
+    $defaults = @{ 'windir' = 'C:\Windows'; 'systemroot' = 'C:\Windows'; 'systemdrive' = 'C:'; 'programfiles' = 'C:\Program Files'; 'programfiles(x86)' = 'C:\Program Files (x86)'; 'programw6432' = 'C:\Program Files'; 'programdata' = 'C:\ProgramData'; 'allusersprofile' = 'C:\ProgramData'; 'commonprogramfiles' = 'C:\Program Files\Common Files'; 'commonprogramfiles(x86)' = 'C:\Program Files (x86)\Common Files'; 'public' = 'C:\Users\Public' }
+    return [regex]::Replace($Text, '%(windir|systemroot|systemdrive|programfiles\(x86\)|programfiles|programw6432|programdata|allusersprofile|commonprogramfiles\(x86\)|commonprogramfiles|public)%', {
+        param($m)
+        $name = $m.Groups[1].Value
+        $value = [Environment]::GetEnvironmentVariable($name)
+        if ($value) { return $value }
+        return $defaults[$name.ToLowerInvariant()]
+    }, 'IgnoreCase')
+}
+
+function Resolve-WorkloadReach($Config, [string]$ActionText, [string]$Identity = '') {
+    $roots = @(@($Config.repoPath) + @($Config.trust.repositoryRoots) | Where-Object { $_ } | ForEach-Object { ConvertTo-PreflightPath ([string]$_) })
+    $inRoot = {
+        param([string]$Candidate)
+        $n = ConvertTo-PreflightPath $Candidate
+        foreach ($root in $roots) { if ($n -eq $root -or $n.StartsWith($root + '\')) { return $true } }
+        return $false
+    }
+    $undetermined = $false
+    $text = [string]$ActionText
+    # متغيّرات المستخدم تُوسَّع بملف تعريف هوية المهمة نفسها (لا بحساب من يشغّل الفحص)؛ هوية مجهولة ⇒ غير محدد.
+    if ($text -match '%(userprofile|homepath|homedrive|appdata|localappdata|temp|tmp|username|onedrive)%') {
+        $expanded = Expand-UserProfileVariables $text $Identity
+        if ($null -eq $expanded) { $undetermined = $true } else { $text = $expanded }
+    }
+    $text = Expand-MachineVariables $text
+    if ($text -match '%[A-Za-z_][A-Za-z0-9_()]*%') { $undetermined = $true }
+    $rx = '(?:[A-Za-z]:\\|/)[^"''\r\n<>|]+?\.(exe|bat|cmd|js|mjs|cjs|ps1|psm1|vbs|py)\b'
+    $dirRx = '(?:[A-Za-z]:\\|/)[^"''\r\n<>|]+'
+    foreach ($m in [regex]::Matches($text, $dirRx)) { if (& $inRoot ($m.Value.Trim())) { return [pscustomobject]@{ repo = $true; undetermined = $false } } }
+    $queue = New-Object System.Collections.Queue
+    foreach ($m in [regex]::Matches($text, $rx)) { $queue.Enqueue(@($m.Value, 0)) }
+    $seen = @{}
+    while ($queue.Count -gt 0) {
+        $entry = $queue.Dequeue()
+        $path = [string]$entry[0]
+        $depth = [int]$entry[1]
+        $k = ConvertTo-PreflightPath $path
+        if ($seen.ContainsKey($k)) { continue }
+        $seen[$k] = $true
+        if (& $inRoot $path) { return [pscustomobject]@{ repo = $true; undetermined = $false } }
+        if ($path -notmatch '\.(vbs|cmd|bat|ps1|psm1)$') { continue }
+        if ($depth -ge 3) { $undetermined = $true; continue }
+        try { $inner = Read-PreflightWrapperText $path } catch { $undetermined = $true; continue }
+        if ($null -eq $inner) { $undetermined = $true; continue }
+        if ($inner -match '%(userprofile|homepath|homedrive|appdata|localappdata|temp|tmp|username|onedrive)%') {
+            $expandedInner = Expand-UserProfileVariables $inner $Identity
+            if ($null -eq $expandedInner) { $undetermined = $true } else { $inner = $expandedInner }
+        }
+        $inner = Expand-MachineVariables ([string]$inner)
+        foreach ($m in [regex]::Matches($inner, $dirRx)) { if (& $inRoot ($m.Value.Trim())) { return [pscustomobject]@{ repo = $true; undetermined = $false } } }
+        foreach ($m in [regex]::Matches($inner, $rx)) { $queue.Enqueue(@($m.Value, $depth + 1)) }
+    }
+    return [pscustomobject]@{ repo = $false; undetermined = $undetermined }
+}
+
+function Test-RepoWorkload($Config, [string]$ActionText) { return (Resolve-WorkloadReach $Config $ActionText).repo }
 
 # تقسيم وسائط سطر الأوامر مع علامات الاقتباس؛ $null إن لم يمكن تفسيرها بلا لبس.
 function Split-GateArguments([string]$Text) {
@@ -369,9 +431,16 @@ function Invoke-GateIdentityPreflight($Config) {
     if ($null -ne $adminMembers) { $adminKeys = @(@($adminMembers) | ForEach-Object { ConvertTo-IdentityKey ([string]$_) } | Where-Object { $_ }) }
 
     foreach ($item in $inventory) {
-        $subject = $item.kind + ' ' + $item.name
+        $subject = $item.kind + ' ' + ([string]$item.path) + $item.name
         $key = ConvertTo-IdentityKey ([string]$item.identity)
-        $isRepo = Test-RepoWorkload $Config ([string]$item.action)
+        $reach = Resolve-WorkloadReach $Config ([string]$item.action) ([string]$item.identity)
+        $isRepo = [bool]$reach.repo
+        # لا يمكن إثبات أن الـAction لا يصل إلى المستودع، والهوية ذات صلاحية (أو غير معروفة) ⇒ حجب.
+        $maybePrivileged = (-not $key) -or $key -eq 'system' -or $key -eq 'administrators' -or $key -eq $gate -or ($null -eq $adminKeys) -or ($adminKeys -contains $key)
+        if (-not $isRepo -and $reach.undetermined -and $maybePrivileged) {
+            $results += & $block $subject ('cannot determine whether this ' + $item.kind + ' reaches a repository workload (identity ' + $item.identity + ')')
+            continue
+        }
         if ($isRepo -and $key) {
             if ($key -eq 'system' -or $key -eq 'administrators') {
                 $results += & $block $subject ('privileged repository workload: runs repo code as ' + $item.identity + ' (can override the gate trust files regardless of ACL)')
@@ -382,8 +451,9 @@ function Invoke-GateIdentityPreflight($Config) {
             }
         }
         if (-not $key) {
-            # هوية غير مقروءة: لمهمة دائماً حجب؛ لخدمة فقط إن كانت تشغّل كود مستودع.
-            if ($item.kind -eq 'task' -or $isRepo) { $results += & $block $subject 'identity not verifiable' }
+            # هوية غير مقروءة: حجب إن كان العمل يشغّل كود مستودع أو كان مهمة البوابة. مهام Windows
+            # الأصلية بلا مرجع مستودع لا تُحجب لمجرد وجودها أو مكانها.
+            if ($isRepo -or ($item.kind -eq 'task' -and $item.name -eq $gateTask)) { $results += & $block $subject 'identity not verifiable' }
             continue
         }
         if ($key -eq $gate) {

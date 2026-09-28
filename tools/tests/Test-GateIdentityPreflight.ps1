@@ -193,6 +193,45 @@ try {
     Assert-True (-not $r.ok -and (Test-BlockLike $r '*cannot enumerate tasks/services*')) 'inability to enumerate services => FAIL CLOSED'
     function Get-PreflightServiceInventory { return @($script:Services) }
 
+    Write-Host '== \Microsoft\ task path grants no exemption'
+    function New-MsTask([string]$Name, [string]$Identity, [string]$Action) { $t = New-Task $Name $Identity $Action; $t | Add-Member -NotePropertyName path -NotePropertyValue '\Microsoft\Windows\Maintenance\' -Force; return $t }
+    $msWrapper = 'C:\Windows\System32\Tasks\ms-maintenance.cmd'
+    $msWrapper2 = 'C:\ProgramData\Microsoft\Helpers\stage2.vbs'
+    $script:Wrappers[$msWrapper] = ('call "' + $msWrapper2 + '"')
+    $script:Wrappers[$msWrapper2] = ('shell.Run """' + $repo + '\tools\push-item-costs.ps1""", 0, True')
+    $msCases = @(
+        @{ label = 'Microsoft-path + SYSTEM + direct repo script => BLOCK'; t = (New-MsTask 'Ms Repo System' 'SYSTEM' ($ps + ' -File "' + $repo + '\tools\x.ps1"')); ok = $false; pattern = '*Ms Repo System*privileged*' },
+        @{ label = 'Microsoft-path + admin + direct repo script => BLOCK'; t = (New-MsTask 'Ms Repo Admin' 'OZK2026\Administrator' ($ps + ' -File "' + $repo + '\tools\x.ps1"')); ok = $false; pattern = '*Ms Repo Admin*member of local Administrators*' },
+        @{ label = 'Microsoft-path + SYSTEM + wrapper chain -> repo script => BLOCK'; t = (New-MsTask 'Ms Wrapper' 'SYSTEM' ('cmd.exe /c "' + $msWrapper + '"')); ok = $false; pattern = '*Ms Wrapper*privileged*' },
+        @{ label = 'Microsoft-path + SYSTEM + working directory in the repo => BLOCK'; t = (New-MsTask 'Ms WorkDir' 'SYSTEM' ('node.exe serve.mjs ' + $repo)); ok = $false; pattern = '*Ms WorkDir*privileged*' },
+        @{ label = 'Microsoft-path + LOQ + %USERPROFILE% path into repo roots => BLOCK'; t = (New-MsTask 'Ms EnvVar' 'LOQ' ($ps + ' -File "%USERPROFILE%\Documents\OZK-TOBACCO\tobacco-web\tools\x.ps1"')); ok = $false; pattern = '*Ms EnvVar*member of local Administrators*' },
+        @{ label = 'Microsoft-path + ordinary non-admin repo workload => evaluated normally (not skipped, not blocked for privilege)'; t = (New-MsTask 'Ms Ordinary' 'OZKSync' ($ps + ' -File "' + $repo + '\tools\x.ps1"')); ok = $true; pattern = '' },
+        @{ label = 'Microsoft-path + unrelated native Windows task (SYSTEM) => ignored by the repo privilege guard'; t = (New-MsTask 'Ms Native' 'SYSTEM' '%windir%\system32\sc.exe start w32time task_started'); ok = $true; pattern = '' }
+    )
+    foreach ($c in $msCases) {
+        $script:Tasks = @(Get-CleanLayout) + @($c.t)
+        $r = Invoke-GateIdentityPreflight (New-Config 'OZK-DeployGate' @())
+        if ($c.ok) { Assert-True ($r.ok) $c.label } else { Assert-True (-not $r.ok -and (Test-BlockLike $r $c.pattern)) $c.label }
+    }
+    $script:Tasks = @(Get-CleanLayout) + @(New-MsTask 'Ms Ordinary As Gate Writer' 'OZKSync' ($ps + ' -File "' + $repo + '\tools\x.ps1"'))
+    $r = Invoke-GateIdentityPreflight (New-Config 'OZK-DeployGate' @('OZK-DeployGate', 'OZKSync'))
+    Assert-True (-not $r.ok -and (Test-BlockLike $r '*Ms Ordinary As Gate Writer*may write the gate trust files*')) 'Microsoft-path ordinary repo workload is still evaluated by the other rules (writer check)'
+    $script:Tasks = @(Get-CleanLayout) + @(New-MsTask 'Ms Unknown Identity' '' '%windir%\system32\defrag.exe -c')
+    $r = Invoke-GateIdentityPreflight (New-Config 'OZK-DeployGate' @())
+    Assert-True ($r.ok) 'native Microsoft task with no repository reference and no identity => not blocked just for existing'
+    function Read-PreflightWrapperText([string]$Path) { if ($Path -eq $msWrapper) { throw 'Access is denied' } if ($script:Wrappers.ContainsKey($Path)) { return $script:Wrappers[$Path] } return '' }
+    $script:Tasks = @(Get-CleanLayout) + @(New-MsTask 'Ms Unreadable Wrapper' 'SYSTEM' ('cmd.exe /c "' + $msWrapper + '"'))
+    $r = Invoke-GateIdentityPreflight (New-Config 'OZK-DeployGate' @())
+    Assert-True (-not $r.ok -and (Test-BlockLike $r '*Ms Unreadable Wrapper*cannot determine whether*')) 'privileged Microsoft-path task whose wrapper cannot be read => FAIL CLOSED'
+    $script:Tasks = @(Get-CleanLayout) + @(New-MsTask 'Ms Unreadable Wrapper NonAdmin' 'OZKSync' ('cmd.exe /c "' + $msWrapper + '"'))
+    Assert-True ((Invoke-GateIdentityPreflight (New-Config 'OZK-DeployGate' @())).ok) 'non-privileged task with an unreadable wrapper is not a privilege risk'
+    function Read-PreflightWrapperText([string]$Path) { if ($script:Wrappers.ContainsKey($Path)) { return $script:Wrappers[$Path] } return '' }
+    $script:Tasks = @(Get-CleanLayout) + @(New-MsTask 'Ms Unknown Var' 'SYSTEM' ($ps + ' -File "%OZK_SECRET_ROOT%\tools\x.ps1"'))
+    $r = Invoke-GateIdentityPreflight (New-Config 'OZK-DeployGate' @())
+    Assert-True (-not $r.ok -and (Test-BlockLike $r '*Ms Unknown Var*cannot determine whether*')) 'privileged task with an unknown environment variable path => FAIL CLOSED'
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Non-Microsoft Repo System' 'SYSTEM' ($ps + ' -File "' + $repo + '\tools\x.ps1"'))
+    Assert-True (-not (Invoke-GateIdentityPreflight (New-Config 'OZK-DeployGate' @())).ok) 'non-Microsoft privileged repo workload remains BLOCK'
+
     Write-Host '== Service enumeration fails closed (Codex P1)'
     $script:Tasks = Get-CleanLayout
     $script:Services = @(Get-BaselineServices)
