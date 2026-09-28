@@ -2600,10 +2600,38 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   assert.equal(rc77.customers.find((c) => c.customerGuid === gid(92)).autoCredit.paidInOverdueSpan, 0, "test 91: purchase ليس دفعة زبون");
   assert.equal(rc77.customers.find((c) => c.customerGuid === gid(91)).autoCredit.paidInOverdueSpan, 0, "test 91: discount ليس دفعة زبون");
 
+  // 92) تعريف واحد للمورد (ملاحظة Codex P1): مع accountClasses:v1 صنف الشجرة هو المصدر في كل
+  //     المحرك (الفوج، المعايرة، الحقل isSupplier، العدّادات)؛ بلا العلامة isSupplier القديم كما هو.
+  const trade92 = () => regular({ from: 58, every: 6, amount: 3000, lag: 4 }).map((m) => tag(m, m.credit > 0 ? "payment" : "sale"));
+  const sup92 = [
+    { id: 151, name: "مورد بالشجرة وعلامته القديمة false", accountClass: "supplier", isSupplier: false, movements: trade92() },
+    { id: 152, name: "مورد بالشجرة والعلامة", accountClass: "supplier", isSupplier: true, movements: trade92() },
+    { id: 153, name: "زبون بالشجرة وعلامته القديمة مورد", accountClass: "customer", isSupplier: true, movements: trade92() }
+  ];
+  const rc92 = build89(sup92, { classes: true });
+  const legacy92 = build89(sup92, { classes: false });
+  const base92 = build89([], { classes: true });
+  const treeSupplier = at89(rc92, 151);
+  assert.equal(treeSupplier.isSupplier, true, "test 92: الشجرة supplier + isSupplier=false ⇒ مورد");
+  assert.equal(treeSupplier.autoCredit, null, "test 92: المورد بالشجرة بلا حد آلي");
+  assert.ok(treeSupplier.flags.includes("supplier_account"), "test 92: وسم المورد من الشجرة");
+  assert.equal(at89(rc92, 152).isSupplier, true, "test 92: supplier + isSupplier=true يبقى مورداً");
+  const treeCustomer = at89(rc92, 153);
+  assert.equal(treeCustomer.isSupplier, false, "test 92: الشجرة customer تسبق العلامة القديمة المتعارضة");
+  assert.ok(treeCustomer.autoCredit, "test 92: الزبون بالشجرة يُحسب له الائتمان");
+  assert.equal(rc92.summary.totalCustomers, base92.summary.totalCustomers + 1, "test 92: المورد بالشجرة خارج عدّادات الزبائن");
+  assert.deepEqual(rc92.dataAvailability.creditCycle, build89([sup92[2]], { classes: true }).dataAvailability.creditCycle,
+    "test 92: المورد بالشجرة خارج معايرة المحفظة");
+  // بلا العلامة: السلوك القديم حرفياً (العلامة القديمة وحدها).
+  assert.equal(at89(legacy92, 151).isSupplier, false, "test 92: بلا v1 لا يُقرأ الصنف");
+  assert.ok(at89(legacy92, 151).autoCredit, "test 92: بلا v1 يبقى زبوناً كما في الإنتاج");
+  assert.equal(at89(legacy92, 152).isSupplier, true);
+  assert.equal(at89(legacy92, 153).isSupplier, true, "test 92: بلا v1 العلامة القديمة وحدها");
+
   // 66) عدّادات الملخص؛ وتنبيه الحد يبقى مسودة داخلية: لا مسار تيليغرام في هذه المرحلة.
   assert.ok(rc.summary.delinquentCreditCount >= 2 && rc.summary.inactiveCreditCount >= 2 && rc.summary.lowDataCreditCount >= 1);
   assert.equal(rc.summary.nonCustomerCreditCount, 0, "test 66: لا «ليس زبوناً» بالسلوك");
   assert.equal(rc.summary.needsReviewCreditCount, 1, "test 66: الشذوذ يُعدّ «يحتاج مراجعة» منفصلاً");
 }
 
-console.log(`ذكاء الزبائن: 91 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
+console.log(`ذكاء الزبائن: 92 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);

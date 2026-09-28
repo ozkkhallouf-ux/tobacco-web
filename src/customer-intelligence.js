@@ -1460,10 +1460,25 @@
 
     // ── دفتر الحساب وحدود الدورة الحية للمحفظة ─────────────────────────────
     const ledger = ledgerIndex(movementsReport);
+    // تعريف واحد للمورد في كل المحرك: مع accountClasses:v1 الموثوقة صنف الشجرة هو المصدر
+    // (supplier وحده مورد، ولا تقلب العلامة القديمة زبوناً إلى مورد)؛ بلا العلامة أو بلا صنف
+    // للبطاقة يبقى isSupplier القديم كما هو.
+    const accountClassesTrusted = text(balancesReport?.summary?.accountClasses) === ACCOUNT_CLASSES_MARKER;
+    const accountClassByGuid = new Map();
+    if (accountClassesTrusted) {
+      for (const item of balanceItems) {
+        const guid = normalizeGuid(item?.customerGuid ?? item?.customer_guid);
+        if (guid) accountClassByGuid.set(guid, text(item?.accountClass ?? item?.account_class).toLowerCase());
+      }
+    }
+    const isSupplierAccount = (guid, legacyFlag) => {
+      const cls = guid ? accountClassByGuid.get(guid) : "";
+      return cls ? cls === "supplier" : legacyFlag === true;
+    };
     const supplierGuids = new Set(balanceItems
-      .filter((item) => item?.isSupplier === true)
-      .map((item) => normalizeGuid(item?.customerGuid ?? item?.customer_guid))
-      .filter(Boolean));
+      .map((item) => [normalizeGuid(item?.customerGuid ?? item?.customer_guid), item?.isSupplier])
+      .filter(([guid, legacyFlag]) => guid && isSupplierAccount(guid, legacyFlag))
+      .map(([guid]) => guid));
     const factsByGuid = new Map();
     for (const [guid, entry] of ledger.byGuid) {
       if (supplierGuids.has(guid)) continue;
@@ -1497,16 +1512,13 @@
     // شجرة الحسابات (قرار المالك 2026-09-28): بطاقة الزبون وحدها ليست دليلاً. حساب تحت شجرة
     // غير تجارية ⇒ «ليس زبون مبيعات»، ومسار غامض أو غائب مع العلامة ⇒ «يحتاج مراجعة». بلا
     // العلامة لا شيء يتغير (القوائم الصريحة وحدها). قائمتا المالك تسبقان.
-    const accountClassesTrusted = text(balancesReport?.summary?.accountClasses) === ACCOUNT_CLASSES_MARKER;
-    const accountClassByGuid = new Map();
     const treeListedGuids = new Set();
     if (accountClassesTrusted) {
       for (const item of balanceItems) {
         const guid = normalizeGuid(item?.customerGuid ?? item?.customer_guid);
         if (!guid) continue;
-        const cls = text(item?.accountClass ?? item?.account_class).toLowerCase();
-        accountClassByGuid.set(guid, cls);
-        if (item?.isSupplier === true || cls === "customer" || cls === "supplier") continue;
+        const cls = accountClassByGuid.get(guid);
+        if (isSupplierAccount(guid, item?.isSupplier) || cls === "customer") continue;
         if (nonCustomerByGuid.has(guid) || needsReviewByGuid.has(guid)) continue;
         treeListedGuids.add(guid);
         if (NON_CUSTOMER_ACCOUNT_CLASSES[cls]) {
@@ -1698,8 +1710,7 @@
       const legacyCreditLimit = record.customerGuid
         ? (legacyLimitByGuid.get(record.customerGuid) ?? legacyLimitByKey.get(record.nameKey) ?? null)
         : (legacyLimitByKey.get(record.nameKey) ?? null);
-      const isSupplierRecord = record.balanceRow?.isSupplier === true
-        || (accountClassesTrusted && accountClassByGuid.get(record.customerGuid) === "supplier");
+      const isSupplierRecord = isSupplierAccount(record.customerGuid, record.balanceRow?.isSupplier);
       const display = accountDisplay(record.balanceRow, record.customerGuid);
       let auto = null;
       // قائمتا المالك (بالمعرّف) لا تحتاجان بيانات حديثة، فتسبقان مسار المصدر القديم:
@@ -1798,7 +1809,7 @@
         cadence,
         credit,
         items,
-        isSupplier: record.balanceRow?.isSupplier === true
+        isSupplier: isSupplierRecord
       });
     }
 
