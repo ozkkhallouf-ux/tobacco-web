@@ -62,10 +62,9 @@ function Get-PreflightTaskInventory {
 function Get-PreflightComHandlerPath([string]$ClassId) {
     foreach ($root in @('HKLM:\SOFTWARE\Classes\CLSID', 'HKLM:\SOFTWARE\WOW6432Node\Classes\CLSID')) {
         foreach ($server in @('InprocServer32', 'LocalServer32')) {
-            try {
-                $v = (Get-Item -LiteralPath ($root + '\' + $ClassId + '\' + $server) -ErrorAction Stop).GetValue('')
-                if ($v) { return ([Environment]::ExpandEnvironmentVariables([string]$v)).Trim('"') }
-            } catch { }
+            $key = Get-Item -LiteralPath ($root + '\' + $ClassId + '\' + $server) -ErrorAction SilentlyContinue
+            $v = if ($key) { $key.GetValue('') } else { $null }
+            if ($v) { return ([Environment]::ExpandEnvironmentVariables([string]$v)).Trim('"') }
         }
     }
     return ''
