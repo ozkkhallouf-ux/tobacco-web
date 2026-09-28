@@ -11965,7 +11965,7 @@ function render() {
     window.SmartInventory?.bind(app, state.session, {
       render,
       notice(type, text) { setNotice(type, text); render(); },
-      clearNotice() { state.notice = null; render(); }
+      clearNotice() { if (!state.notice) return; state.notice = null; render(); }
     });
   }
 

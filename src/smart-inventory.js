@@ -111,8 +111,34 @@
     return { ...parseCountInput("zero", "", "", ""), expectedVersion: item?.rowVersion ?? null };
   }
 
+  // 1 مفرد، 2 مثنى، 3–10 جمع، 11+ تمييز منصوب.
+  function arabicCountPhrase(count, forms) {
+    const n = Number(count) || 0;
+    if (n === 1) return forms.one;
+    if (n === 2) return forms.two;
+    if (n >= 3 && n <= 10) return forms.few(n);
+    return forms.many(n);
+  }
+
   function finishZeroConfirmText(count) {
-    return `${count} صنفاً بلا كمية وسيُحتسب صفراً فعلياً. المتابعة وإغلاق الجرد؟`;
+    const head = arabicCountPhrase(count, {
+      one: "صنف واحد بلا كمية وسيُحتسب صفراً فعلياً",
+      two: "صنفان بلا كمية وسيُحتسبان صفراً فعلياً",
+      few: (n) => `${n} أصناف بلا كمية وستُحتسب صفراً فعلياً`,
+      many: (n) => `${n} صنفاً بلا كمية وسيُحتسب صفراً فعلياً`
+    });
+    return `${head}. المتابعة وإغلاق الجرد؟`;
+  }
+
+  function finishZeroSuccessText(count) {
+    if (!count) return "تم إغلاق الجرد. لا يمكن للموظفين تعديله الآن.";
+    const head = arabicCountPhrase(count, {
+      one: "صنف واحد فارغ حُسب صفراً فعلياً",
+      two: "صنفان فارغان حُسبا صفراً فعلياً",
+      few: (n) => `${n} أصناف فارغة حُسبت صفراً فعلياً`,
+      many: (n) => `${n} صنفاً فارغاً حُسب صفراً فعلياً`
+    });
+    return `تم إغلاق الجرد. ${head}.`;
   }
 
   function finishBlockedMessage(blockers) {
@@ -121,10 +147,49 @@
     const claimed = list.filter((row) => row.reason === "claimed").length;
     const recount = list.filter((row) => row.reason === "recount").length;
     const parts = [];
-    if (unsaved) parts.push(`${unsaved} صنفاً كُتبت كميته أو حالته ولم يُحفظ`);
-    if (claimed) parts.push(`${claimed} صنفاً يحجزه موظف آخر`);
-    if (recount) parts.push(`${recount} صنفاً بانتظار إعادة عد`);
+    if (unsaved) parts.push(arabicCountPhrase(unsaved, {
+      one: "صنف واحد كُتبت كميته أو حالته ولم يُحفظ",
+      two: "صنفان كُتبت كميتهما أو حالتهما ولم يُحفظا",
+      few: (n) => `${n} أصناف كُتبت كمياتها أو حالاتها ولم تُحفظ`,
+      many: (n) => `${n} صنفاً كُتبت كميته أو حالته ولم يُحفظ`
+    }));
+    if (claimed) parts.push(arabicCountPhrase(claimed, {
+      one: "صنف واحد يحجزه موظف آخر",
+      two: "صنفان يحجزهما موظف آخر",
+      few: (n) => `${n} أصناف يحجزها موظف آخر`,
+      many: (n) => `${n} صنفاً يحجزه موظف آخر`
+    }));
+    if (recount) parts.push(arabicCountPhrase(recount, {
+      one: "صنف واحد بانتظار إعادة عد",
+      two: "صنفان بانتظار إعادة عد",
+      few: (n) => `${n} أصناف بانتظار إعادة عد`,
+      many: (n) => `${n} صنفاً بانتظار إعادة عد`
+    }));
     return `لا يمكن الإغلاق قبل إنهاء: ${parts.join("، ")}. لم يُحتسب أي صنف فارغ صفراً.`;
+  }
+
+  function storedZeroText(items) {
+    const rows = Array.isArray(items) ? items : [];
+    if (!rows.length) return "لم يُحفظ أي صنف فارغ صفراً قبل التوقف.";
+    const names = rows.map((item) => item?.itemName || item?.id || "صنف").join("، ");
+    const head = arabicCountPhrase(rows.length, {
+      one: "صنف واحد حُفظ صفراً قبل التوقف",
+      two: "صنفان حُفظا صفراً قبل التوقف",
+      few: (n) => `${n} أصناف حُفظت صفراً قبل التوقف`,
+      many: (n) => `${n} صنفاً حُفظ صفراً قبل التوقف`
+    });
+    return `${head}: ${names}.`;
+  }
+
+  function linesStoredAsZero(planned, acked, sessionItems) {
+    const live = new Map((sessionItems || []).map((item) => [item.id, item]));
+    const chosen = new Map();
+    for (const item of acked || []) chosen.set(item.id, live.get(item.id) || item);
+    for (const item of planned || []) {
+      const row = live.get(item.id);
+      if (row?.countState === "zero") chosen.set(item.id, row);
+    }
+    return [...chosen.values()];
   }
 
   function drafts() { return jsonRead(DRAFT_KEY, {}); }
@@ -164,13 +229,13 @@
     finally { state.loading = false; callbacks.render(); }
   }
 
-  async function refreshCurrent(session) {
+  async function refreshCurrent(session, options = {}) {
     if (!state.session?.id) return load(session, true);
     try {
       state.session = await store.getSmartInventoryCounterSession(state.session.id);
       if (isOwner(session) && state.ownerReport) state.ownerReport = await store.getSmartInventoryOwnerReport(state.session.id);
       callbacks.render();
-    } catch (error) { callbacks.notice("error", error.message); }
+    } catch (error) { if (!options.keepNotice) callbacks.notice("error", error.message); }
   }
 
   async function startOrJoin(warehouseKey, session) {
@@ -220,7 +285,7 @@
     const unit2 = draft.unit2Qty ?? (item.unit2Qty ?? "");
     const damaged = draft.damagedUnit1Qty ?? (item.damagedUnit1Qty ?? "");
     const countState = draft.countState || (item.recountRequested ? "counted" : item.countState);
-    const disabled = saved || lockedByOther || state.session?.status === "completed";
+    const disabled = saved || lockedByOther || state.session?.status === "completed" || state.finishing;
     let lockText = "";
     if (saved) lockText = `تم جرد هذا الصنف بواسطة ${esc(item.countedByDisplayName || "موظف")}${item.countedAt ? ` — ${esc(fmtDate(item.countedAt))}` : ""}`;
     else if (lockedByOther) lockText = `يقوم ${esc(item.claimedByDisplayName)} بجرده الآن`;
@@ -332,6 +397,7 @@
   }
 
   async function saveItem(itemId, root, session, queued = null) {
+    if (state.finishing) return;
     const item = state.session.items.find((row) => row.id === itemId);
     if (!item) return;
     let input;
@@ -469,54 +535,88 @@
     return "لم يُحفظ الصنف الفارغ صفراً.";
   }
 
-  async function finishSession(root, session) {
-    if (state.finishing || !state.session || state.session.status === "completed") return;
-    const items = Array.isArray(state.session.items) ? state.session.items : [];
+  function readFinishPlan(root) {
+    const items = Array.isArray(state.session?.items) ? state.session.items : [];
     const quantitiesById = {};
     for (const item of items) quantitiesById[item.id] = quantitiesForItem(item, root);
-    const plan = planSessionFinish(items, quantitiesById, { pendingItemIds: outbox().map((row) => row.itemId) });
+    return planSessionFinish(items, quantitiesById, { pendingItemIds: outbox().map((row) => row.itemId) });
+  }
+
+  function offlineZeroWarning() {
+    callbacks.notice("warning", "لا يمكن احتساب الأصناف الفارغة صفراً دون اتصال. أعد الإغلاق عند عودة الإنترنت.");
+  }
+
+  function isNetworkError(error) {
+    return !navigator.onLine || /network|fetch|الاتصال/i.test(error?.message || "");
+  }
+
+  function unfinishedCloseText(count) {
+    return arabicCountPhrase(count, {
+      one: "بقي صنف واحد غير معدود أو بانتظار إعادة عد.",
+      two: "بقي صنفان غير معدودين أو بانتظار إعادة عد.",
+      few: (n) => `بقيت ${n} أصناف غير معدودة أو بانتظار إعادة عد.`,
+      many: (n) => `بقي ${n} صنفاً غير معدود أو بانتظار إعادة عد.`
+    });
+  }
+
+  async function finishSession(root, session) {
+    if (state.finishing || !state.session || state.session.status === "completed") return;
     callbacks.clearNotice?.();
+    let plan = readFinishPlan(root);
     if (plan.blockers.length) {
       callbacks.notice("error", finishBlockedMessage(plan.blockers));
       return;
     }
-    if (plan.zeros.length && !window.confirm(finishZeroConfirmText(plan.zeros.length))) return;
     if (plan.zeros.length && !navigator.onLine) {
-      callbacks.notice("warning", "لا يمكن احتساب الأصناف الفارغة صفراً دون اتصال. أعد الإغلاق عند عودة الإنترنت.");
+      offlineZeroWarning();
+      return;
+    }
+    if (plan.zeros.length && !window.confirm(finishZeroConfirmText(plan.zeros.length))) return;
+    plan = readFinishPlan(root);
+    if (plan.blockers.length) {
+      callbacks.notice("error", finishBlockedMessage(plan.blockers));
+      return;
+    }
+    if (plan.zeros.length && !navigator.onLine) {
+      offlineZeroWarning();
       return;
     }
     state.finishing = true;
     state.finishProgress = plan.zeros.length ? { done: 0, total: plan.zeros.length } : null;
     callbacks.render();
+    const zeroedByUs = [];
     try {
       for (const item of plan.zeros) {
         const entry = { itemId: item.id, requestId: uuid(), ...zeroCountPayload(item) };
-        let result;
-        try {
-          result = await store.saveSmartInventoryItem(entry);
-        } catch (error) {
-          if (!navigator.onLine || /network|fetch|الاتصال/i.test(error.message || "")) {
-            callbacks.notice("warning", "انقطع الاتصال أثناء احتساب الأصفار. أعد إغلاق الجرد عند عودة الإنترنت؛ ما حُفظ لن يُكرَّر.");
-            return;
-          }
-          throw error;
-        }
+        const result = await store.saveSmartInventoryItem(entry);
         if (!result?.ok) {
           if (result?.code === "already_counted") clearDraft(item.id);
-          else throw new Error(saveFailureText(result));
-        } else clearDraft(item.id);
+          else throw new Error(`${saveFailureText(result)} ${storedZeroText(zeroedByUs)}`);
+        } else {
+          clearDraft(item.id);
+          item.countState = "zero";
+          item.unit1Qty = 0;
+          item.unit2Qty = 0;
+          item.damagedUnit1Qty = 0;
+          zeroedByUs.push(item);
+        }
         if (state.finishProgress) state.finishProgress.done += 1;
         callbacks.render();
       }
       const result = await store.completeSmartInventorySession(state.session.id);
-      if (!result?.ok) throw new Error(`بقي ${result.remaining} صنفاً غير معدود أو بانتظار إعادة عد.`);
-      callbacks.notice("success", plan.zeros.length
-        ? `تم إغلاق الجرد. ${plan.zeros.length} صنفاً فارغاً حُسب صفراً فعلياً.`
-        : "تم إغلاق الجرد. لا يمكن للموظفين تعديله الآن.");
-      await refreshCurrent(session);
+      if (!result?.ok) throw new Error(`${unfinishedCloseText(result?.remaining)} ${storedZeroText(zeroedByUs)}`);
+      if (state.session) state.session.status = "completed";
+      callbacks.notice("success", finishZeroSuccessText(zeroedByUs.length));
+      await refreshCurrent(session, { keepNotice: true });
     } catch (error) {
-      callbacks.notice("error", error.message);
-      await refreshCurrent(session).catch(() => {});
+      if (isNetworkError(error)) {
+        await refreshCurrent(session, { keepNotice: true }).catch(() => {});
+        const saved = linesStoredAsZero(plan.zeros, zeroedByUs, state.session?.items);
+        callbacks.notice("warning", `انقطع الاتصال أثناء احتساب الأصفار. ${storedZeroText(saved)} أعد إغلاق الجرد عند عودة الإنترنت؛ ما حُحفظ لن يُكرَّر.`);
+      } else {
+        callbacks.notice("error", error.message);
+        await refreshCurrent(session, { keepNotice: true }).catch(() => {});
+      }
     } finally {
       state.finishing = false;
       state.finishProgress = null;
@@ -527,7 +627,8 @@
   window.addEventListener("online", () => { state.localNotice = "عاد الاتصال"; flushOutbox(window.__ozkSession).then(() => refreshCurrent(window.__ozkSession)); });
   window.SmartInventory = {
     state, load, render, bind, deviceId,
-    parseCountInput, planSessionFinish, zeroCountPayload, finishZeroConfirmText, finishBlockedMessage,
+    parseCountInput, planSessionFinish, zeroCountPayload, finishZeroConfirmText, finishZeroSuccessText, finishBlockedMessage,
+    finishSession, saveItem,
     reset() { state.loadedForRole = ""; state.session = null; state.ownerReport = null; state.warehouses = []; state.dashboard = []; state.finishing = false; state.finishProgress = null; }
   };
 })();

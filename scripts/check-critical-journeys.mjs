@@ -832,7 +832,7 @@ await journey("smart-inventory-blank-zero", "إغلاق الجرد يحتسب ا
 
   await page.locator('[data-smart-item-card="typed-1"] [data-smart-qty="unit1Qty"]').fill("");
   await page.locator("[data-smart-complete]").click();
-  assert(dialogs.length === 1 && dialogs[0].includes("3 صنفاً بلا كمية") && dialogs[0].includes("صفراً"), `نص التأكيد غير المتوقع: ${dialogs.join(" | ")}`);
+  assert(dialogs.length === 1 && dialogs[0].includes("3 أصناف بلا كمية") && dialogs[0].includes("ستُحتسب") && dialogs[0].includes("صفراً") && !dialogs[0].includes("3 صنفاً"), `نص التأكيد غير المتوقع: ${dialogs.join(" | ")}`);
   const afterDismiss = await page.evaluate(() => ({ saves: window.__smartSaves.length, completed: window.__smartCompleted }));
   assert(afterDismiss.saves === 0 && afterDismiss.completed === 0, "إلغاء التأكيد حفظ أصفاراً أو أغلق الجرد");
 
@@ -849,7 +849,7 @@ await journey("smart-inventory-blank-zero", "إغلاق الجرد يحتسب ا
   assert(!outcome.saves.some((row) => row.itemId === "saved-1"), "صنف محفوظ بكمية تغيّر عند الإغلاق");
   const versions = Object.fromEntries(outcome.saves.map((row) => [row.itemId, row.expectedVersion]));
   assert(versions["blank-1"] === 1 && versions["blank-2"] === 5 && versions["typed-1"] === 7, `نسخ الصفوف المرسلة غير مطابقة: ${JSON.stringify(versions)}`);
-  assert(outcome.notice.includes("3") && outcome.notice.includes("صفراً"), `رسالة النجاح لا تذكر الأصفار: ${outcome.notice}`);
+  assert(outcome.notice.includes("3 أصناف") && outcome.notice.includes("حُسبت") && outcome.notice.includes("صفراً") && !outcome.notice.includes("3 صنفاً"), `رسالة النجاح لا تذكر الأصفار: ${outcome.notice}`);
   assert((await page.locator("[data-smart-complete]").innerText()).includes("الجرد مكتمل"), "الجلسة لم تظهر مكتملة بعد الإغلاق");
   assertClean("إغلاق الجرد", collected);
 });
