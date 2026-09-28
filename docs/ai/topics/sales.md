@@ -1,10 +1,12 @@
 # تقرير موضوع المبيعات
 
-آخر تحديث: 2026-09-15
+آخر تحديث: 2026-09-28
 
 ## الحالة الحالية
 
 المبيعات جزء من PWA مع مسارات مزامنة منفصلة لتفاصيل أسطر الفواتير. توجد فحوص ذرية وأمنية وتسجيل مهمة ضمن `npm run check`. المساعد المالي يفصل تواريخ المقارنة عن الفترة الأساسية، ولا يوجّه «علينا» لذمم الزبائن المدينة (PR #205).
+
+فحص `scripts/check-assistant-routing.mjs` يحسب توقعات فترات «هذا الأسبوع» و«آخر 7 أيام» و«هذا الشهر» من الساعة نفسها التي يراها المساعد (أو من `CHECK_ASSISTANT_ROUTING_NOW=YYYY-MM-DD`). الأسبوع السوري يبدأ السبت؛ يوم الجمعة يطابق «هذا الأسبوع» آخر 7 أيام، وأول أيام الأسبوع والشهر لا تُفترض فيها فجوة تقارير. منطق المساعد في `financial-assistant/index.ts` لم يتغيّر.
 
 ## المصدر الموثوق
 
@@ -12,7 +14,7 @@
 
 ## نطاق الملفات
 
-`src/app.js`, `src/number-normalizer.js`, `tools/push-customer-invoices.ps1`, `tools/push-sales-line-items.ps1`, `tools/ameen-sync-agent.ps1`, `tools/verify-customer-invoice-sync.ps1`, `supabase/sales-line-items-atomic-refresh.sql`, `supabase/functions/financial-assistant/index.ts`, `scripts/check-sales-line-items-*.mjs`, `scripts/check-assistant-routing.mjs`.
+`src/app.js`, `src/number-normalizer.js`, `tools/push-customer-invoices.ps1`, `tools/push-sales-line-items.ps1`, `tools/ameen-sync-agent.ps1`, `tools/verify-customer-invoice-sync.ps1`, `supabase/sales-line-items-atomic-refresh.sql`, `supabase/functions/financial-assistant/index.ts`, `scripts/check-sales-line-items-*.mjs`, `scripts/check-assistant-routing.mjs`, `scripts/lib/assistant-routing-clock.mjs`.
 
 ## قيود ثابتة
 

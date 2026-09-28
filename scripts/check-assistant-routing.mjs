@@ -4,6 +4,14 @@
 // أعرف» صراحةً بدل أن يملأ الفراغ برقم. أخطر عطل ممكن هنا ليس رسالة خطأ، بل
 // **رقم مالي يبدو صحيحاً ومصدره خاطئ أو مفقود** — فالمالك يتخذ قراراً عليه.
 import assert from "node:assert/strict";
+// قبل حمولة المساعد: يثبّت الساعة إن وُجد CHECK_ASSISTANT_ROUTING_NOW،
+// لأن assistant-harness يحسب «اليوم» لحظة الاستيراد.
+import {
+  damascusDate,
+  datesInInclusiveRange,
+  isoAddDays,
+  syrianWeekWindows
+} from "./lib/assistant-routing-clock.mjs";
 import { loadAssistant, defaultFixtures, TOKENS } from "./lib/assistant-harness.mjs";
 
 let passed = 0;
@@ -553,25 +561,35 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   });
 
   const fixtures = defaultFixtures();
-  const first = `${day(0).slice(0, 7)}-01`;
-  // ثلاثة أيام من الشهر الحالي: 1 و2 واليوم. المجموع الصحيح 111+222+333=666.
-  fixtures.daily_movement_reports = [
-    report(day(0), 333, "زبون اليوم"),
-    report(`${first.slice(0, 8)}02`, 222, "زبون الثاني"),
-    report(first, 111, "زبون الأول")
-  ];
+  const today = day(0);
+  const first = `${today.slice(0, 7)}-01`;
+  const second = `${first.slice(0, 8)}02`;
+  const dom = Number(today.slice(8, 10));
+  // لقطة واحدة لكل تاريخ. اليوم 1 من الشهر لا يتسع إلا ليوم واحد، واليوم 2
+  // ليومين بلا فجوة، واليوم 3 يغطي 1 و2 واليوم بالكامل. اشتراط المجموع 666
+  // مع إعلان فجوة كان يسقط الفحص في أول ثلاثة أيام من كل شهر.
+  const seeded = [{ date: today, amount: 333, name: "زبون اليوم" }];
+  if (dom >= 2) seeded.push({ date: first, amount: 111, name: "زبون الأول" });
+  if (dom >= 3) seeded.push({ date: second, amount: 222, name: "زبون الثاني" });
+  const expectedSum = seeded.reduce((sum, row) => sum + row.amount, 0);
+  const missingInMonth = dom - seeded.length;
+  fixtures.daily_movement_reports = seeded.map((row) => report(row.date, row.amount, row.name));
 
   const a = await loadAssistant({ fixtures });
   const monthly = await a.ask(TOKENS.owner, "كم قبضنا هذا الشهر؟");
   const monthText = String(monthly.body.reply);
   assert.equal(monthly.body.tool, "collections");
-  assert.ok(/666/.test(monthText), `لم يجمع مقبوضات أيام الشهر:\n${monthText}`);
-  for (const mark of ["111", "222", "333"]) {
-    assert.ok(monthText.includes(mark), `أسقط دفعة ${mark} من مجموع الشهر`);
+  assert.ok(monthText.includes(String(expectedSum)), `لم يجمع مقبوضات أيام الشهر (المتوقع ${expectedSum}):\n${monthText}`);
+  for (const row of seeded) {
+    assert.ok(monthText.includes(String(row.amount)), `أسقط دفعة ${row.amount} من مجموع الشهر:\n${monthText}`);
   }
 
-  // الأيام الغائبة تُعلَن: غيابها يبخس المجموع بلا أي أثر ظاهر لولا التصريح.
-  assert.ok(/داخل الفترة بلا تقرير حركة/.test(monthText), `لم يُعلن أيام الفترة الغائبة:\n${monthText}`);
+  // الأيام الغائبة تُعلَن حين توجد فعلاً، ولا يُختلق تحذير حين يغطي التقرير الشهر كله.
+  if (missingInMonth > 0) {
+    assert.ok(/داخل الفترة بلا تقرير حركة/.test(monthText), `لم يُعلن أيام الفترة الغائبة:\n${monthText}`);
+  } else {
+    assert.ok(!/داخل الفترة بلا تقرير حركة/.test(monthText), `أعلن أياماً غائبة والشهر حتى اليوم مغطى (${today}):\n${monthText}`);
+  }
 
   // ويوم واحد يبقى بصيغته المفردة بلا حشو المدى
   const b = await loadAssistant({ fixtures });
@@ -583,8 +601,10 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   const c = await loadAssistant({ fixtures });
   const boxText = String((await c.ask(TOKENS.owner, "كم صار بالصندوق هذا الشهر؟")).body.reply);
   assert.ok(boxText.includes("333"), "لم يأخذ أحدث رصيد داخل الفترة");
-  assert.ok(!/666/.test(boxText), "جمع الأرصدة اللحظية عبر الأيام");
-  assert.ok(boxText.includes(day(0)), "لم يذكر اليوم الذي يمثّله الرصيد");
+  if (expectedSum !== 333) {
+    assert.ok(!boxText.includes(String(expectedSum)), `جمع الأرصدة اللحظية عبر الأيام (ظهر مجموع الشهر ${expectedSum}):\n${boxText}`);
+  }
+  assert.ok(boxText.includes(today), "لم يذكر اليوم الذي يمثّله الرصيد");
   ok("المقبوضات تُجمع عبر كل أيام المدى وتُعلن الأيام الغائبة، والرصيد لا يُجمع");
 }
 
@@ -1345,33 +1365,16 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   // دائماً أحدث تقرير `ameen_daily_profit` بصرف النظر عن اليوم/الفترة
   // المطلوبة — فسؤال «كم كان الربح أمس؟» كان يُجاب برقم **اليوم**.
   //
-  // هذه الكتلة وحدها (حتى نهاية القسم) تحقن تاريخاً مرجعياً ثابتاً بدل
-  // الاعتماد على تاريخ التشغيل الفعلي — كان الفحص يفشل في بداية الأسبوع
-  // (السبت/الأحد) لأن «هذا الأسبوع» حينها يوم أو يومان فقط، وهما بالضبط
-  // اليومان اللذان لهما تقرير، فلا تبقى فجوة يُعلَن عنها. loadAssistant()
-  // يُنفّذ الوحدة الحقيقية financial-assistant/index.ts بنفس عملية Node
-  // (تحويل TS إلى ملف مؤقت ثم import)، فتجاوز Date العام هنا يطال حساب
-  // الفترة داخل المساعد أيضاً لا الاختبار وحده. مرجع الأربعاء عمداً: ليس
-  // بداية الأسبوع (سبت) ولا نهايته القريبة (أحد)، فتبقى الفجوة (سبت-اثنين)
-  // ثابتة أياً كان يوم التشغيل الحقيقي. للتحقق من عدم الاعتماد على تاريخ
-  // بعينه: CHECK_ASSISTANT_ROUTING_NOW=2026-09-19 (سبت، بداية الأسبوع) أو
-  // 2026-09-22 (ثلاثاء، وسطه) node scripts/check-assistant-routing.mjs
-  const referenceIso = process.env.CHECK_ASSISTANT_ROUTING_NOW || "2026-09-23"; // أربعاء
-  const RealDate = globalThis.Date;
-  class FixedDate extends RealDate {
-    constructor(...args) {
-      if (args.length === 0) super(`${referenceIso}T12:00:00.000Z`);
-      else super(...args);
-    }
-    static now() {
-      return new RealDate(`${referenceIso}T12:00:00.000Z`).getTime();
-    }
-  }
-  globalThis.Date = FixedDate;
-  try {
-  const today = new Date(Date.now() + 180 * 60_000).toISOString().slice(0, 10);
-  const yesterday = new Date(Date.now() + 180 * 60_000 - 86_400_000).toISOString().slice(0, 10);
-  const dayBefore = new Date(Date.now() + 180 * 60_000 - 2 * 86_400_000).toISOString().slice(0, 10);
+  // «هذا الأسبوع» أسبوع تقويمي يبدأ السبت. توقّع «مجموع 333 + فجوة» كان
+  // يفترض أن اليوم وأمس داخل الأسبوع وأن أياماً قبلهما بلا تقرير — وهذا
+  // يصح من الاثنين إلى الجمعة فقط. السبت: الفترة اليوم وحده وأمس خارجها.
+  // الأحد: السبت واليوم كلاهما بتقرير فلا فجوة. (فشل CI في 2026-09-20،
+  // run 35514188168، حين كان اليوم أحداً.) الساعة هنا هي ساعة العملية،
+  // أو CHECK_ASSISTANT_ROUTING_NOW إن وُجد.
+  const today = damascusDate(0);
+  const yesterday = damascusDate(-1);
+  const dayBefore = damascusDate(-2);
+  const week = syrianWeekWindows();
   const profitDay = (date, net) => ({
     report_date: date,
     created_at: new Date(Date.parse(`${date}T12:00:00Z`)).toISOString(),
@@ -1398,15 +1401,26 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
 
   // «هذا الاسبوع» أسبوع تقويمي يبدأ السبت (financial-assistant/index.ts:
   // parsePeriod، فرع «هذا الاسبوع|الاسبوع الحالي|هالاسبوع» — يُفحص قبل النمط
-  // العام «أسبوع» الذي يعني آخر 7 أيام فقط؛ إصلاح Codex على PR #205). التاريخ
-  // المرجعي أربعاء، فالفترة (سبت-أربعاء) خمسة أيام، لدينا تقريران فقط داخلها
-  // (اليوم وأمس)، فتجميعهما يثبت أن الفترة تُحسب لا يوماً واحداً، وبقية
-  // أيام الأسبوع (سبت-اثنين) فجوة حقيقية يجب الإعلان عنها لا تجاهلها صامتاً.
+  // العام «أسبوع» الذي يعني آخر 7 أيام فقط؛ إصلاح Codex على PR #205).
+  // التقريران هما اليوم (111) وأمس (222). المتوقع مجموع ما يقع منهما داخل
+  // الأسبوع، وإعلان الفجوة فقط إن بقي يوم داخل الأسبوع بلا تقرير.
+  const covered = new Set([today, yesterday].filter((d) => d >= week.thisFrom && d <= week.thisTo));
+  const gapDays = datesInInclusiveRange(week.thisFrom, week.thisTo).filter((d) => !covered.has(d));
+  const expectedNet = (covered.has(today) ? 111 : 0) + (covered.has(yesterday) ? 222 : 0);
   const b = await loadAssistant({ fixtures });
   const range = await b.ask(TOKENS.owner, "كم الربح هذا الاسبوع؟");
   const rangeText = String(range.body.reply);
-  assert.ok(rangeText.includes("333"), `لم يجمع صافي الربح عبر يومي الفترة:\n${rangeText}`);
-  assert.ok(/بلا تقرير حركة/.test(rangeText), `لم يُعلن الأيام الغائبة داخل الفترة:\n${rangeText}`);
+  assert.ok(rangeText.includes(String(expectedNet)), `لم يجمع صافي الربح المتوقع (${expectedNet}) لأسبوع ${week.thisWeek}:\n${rangeText}`);
+  if (gapDays.length) {
+    assert.ok(/بلا تقرير حركة/.test(rangeText), `لم يُعلن الأيام الغائبة داخل ${week.thisWeek}:\n${rangeText}`);
+  } else {
+    assert.ok(!/بلا تقرير حركة/.test(rangeText), `أعلن فجوة ولا يوم غائب داخل ${week.thisWeek}:\n${rangeText}`);
+  }
+  if (week.thisFrom === week.thisTo) {
+    assert.ok(!rangeText.includes("222"), `السبت أدخل ربح أمس وهو خارج الأسبوع:\n${rangeText}`);
+  } else {
+    assert.ok(rangeText.includes(week.thisFrom) && rangeText.includes(week.thisTo), `لم يذكر حدود الأسبوع ${week.thisWeek}:\n${rangeText}`);
+  }
 
   // وفترة صريحة بلا أي تقرير مطابق على الإطلاق ⇒ امتناع صريح، لا استبدال بتقرير من فترة أخرى
   const oldFixtures = defaultFixtures();
@@ -1428,9 +1442,6 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   const latest = await e.ask(TOKENS.owner, "ما الأرباح؟");
   assert.ok(String(latest.body.reply).includes("111"), "سؤال بلا فترة لم يأخذ أحدث تقرير ربح");
   ok("أداة الأرباح تحترم الفترة المطلوبة: يوم محدد، تجميع مدى، وامتناع صريح عند الغياب");
-  } finally {
-    globalThis.Date = RealDate;
-  }
 }
 
 // ── ث) مرتجعات الشراء وحدها في الفترة لا تُقرأ «لا توجد فواتير» ─────────────
@@ -1704,7 +1715,10 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   // «هذا الأسبوع» و«الأسبوع الماضي» كانتا تقعان كلتاهما ضمن النمط العام لآخر
   // 7 أيام المتدحرجة (لا صلة له ببداية الأسبوع السوري=السبت)، فتُحسب فترتان
   // مختلفتان فعلياً بنفس الحساب الخاطئ. اللقطة فارغة عمداً كي يظهر النص
-  // الرافض بتفاصيل الفترة (label/from/to) لكل صياغة، فتُقارَن الفترات الثلاث.
+  // الرافض بتفاصيل الفترة (label/from/to) لكل صياغة، فتُقارَن الفترات الثلاث
+  // بالمواصفة لا ببعضها بلا شرط: يوم الجمعة الأسبوع السبت→الجمعة يطابق
+  // آخر 7 أيام حرفياً، واشتراط اختلافهما أسقط CI في 2026-09-25
+  // (run 36187155057).
   const emptyBalances = defaultFixtures();
   emptyBalances["inventory_reports:ameen_customer_balances"] = [];
 
@@ -1737,12 +1751,20 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   const rollingWeekWindow = extractWindow(rollingWeekText);
   assert.ok(rollingWeekWindow, `لم يظهر مدى تاريخ في رد «اخر سبعه ايام»:\n${rollingWeekText}`);
 
-  // الثلاث فترات يجب أن تختلف فعلياً — لو تعطّل الفصل رجعت جميعها لنفس مدى
-  // «آخر 7 أيام» المتدحرج كما كان الخلل قبل الإصلاح.
-  assert.notEqual(thisWeekWindow, rollingWeekWindow, `«هذا الاسبوع» و«اخر سبعه ايام» أعطتا نفس المدى (${thisWeekWindow}) — لم تُفصلا فعلياً`);
-  assert.notEqual(lastWeekWindow, rollingWeekWindow, `«الاسبوع الماضي» و«اخر سبعه ايام» أعطتا نفس المدى (${lastWeekWindow}) — لم تُفصلا فعلياً`);
+  const expected = syrianWeekWindows();
+  assert.equal(thisWeekWindow, expected.thisWeek, `«هذا الاسبوع» لم يطابق الأسبوع السبت→اليوم (المتوقع ${expected.thisWeek})`);
+  assert.equal(lastWeekWindow, expected.lastWeek, `«الاسبوع الماضي» لم يطابق السبت→الجمعة السابقين (المتوقع ${expected.lastWeek})`);
+  assert.equal(rollingWeekWindow, expected.rolling, `«اخر سبعه ايام» لم يطابق آخر 7 أيام (المتوقع ${expected.rolling})`);
+  // الجمعة (sinceSaturday === 6): التطابق بين «هذا الأسبوع» و«آخر 7 أيام» صحيح.
+  // في بقية الأيام تطابقهما يعني أن الأسبوع التقويمي لم يُفصل عن النافذة المتدحرجة.
+  if (expected.sinceSaturday === 6) {
+    assert.equal(thisWeekWindow, rollingWeekWindow, `الجمعة: الأسبوع التقويمي يجب أن يطابق آخر 7 أيام (${expected.thisWeek})`);
+  } else {
+    assert.notEqual(thisWeekWindow, rollingWeekWindow, `«هذا الاسبوع» و«اخر سبعه ايام» أعطتا نفس المدى (${thisWeekWindow}) قبل نهاية الأسبوع — لم تُفصلا`);
+  }
+  assert.notEqual(lastWeekWindow, rollingWeekWindow, `«الاسبوع الماضي» و«اخر سبعه ايام» أعطتا نفس المدى (${lastWeekWindow})`);
   assert.notEqual(thisWeekWindow, lastWeekWindow, `«هذا الاسبوع» و«الاسبوع الماضي» أعطتا نفس المدى (${thisWeekWindow})`);
-  ok("«هذا الاسبوع» و«الاسبوع الماضي» و«اخر سبعه ايام» تُحسب بثلاث فترات منفصلة فعلياً لا فترة متدحرجة واحدة مكررة");
+  ok("«هذا الاسبوع» و«الاسبوع الماضي» و«اخر سبعه ايام» تطابق مواصفة الأسبوع السوري، وتتطابق الأولى مع آخر 7 أيام يوم الجمعة فقط");
 }
 
 {
@@ -1784,11 +1806,15 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
   assert.ok(yestText.includes(yesterday), `سؤال «امس» لم يستخدم لقطة الأمس (report_date):\n${yestText}`);
   assert.ok(/2,000/.test(yestText), `سؤال «امس» لم يعرض إجمالي لقطة الأمس (2000) — استُخدمت لقطة اليوم بالخطأ:\n${yestText}`);
 
+  // «الشهر الماضي» يغطي لقطة الأمس حين يكون اليوم هو الأول من الشهر
+  // (أمس = آخر يوم من الشهر السابق)، فيُجاب السؤال وهذا صحيح. تاريخ صريح
+  // بعيد لا يصادف اليوم ولا أمس في أي يوم تشغيل.
   const noCover = await loadAssistant({ fixtures: twoSnapshots });
-  const noCoverAnswer = await noCover.ask(TOKENS.owner, "كم ديون الزبائن الشهر الماضي؟");
+  const noCoverAnswer = await noCover.ask(TOKENS.owner, "كم ديون الزبائن 2020-06-15؟");
   const noCoverText = String(noCoverAnswer.body.reply);
   assert.equal(noCoverAnswer.body.answered, false, `فترة صريحة بلا أي لقطة تغطيها يجب أن تُرفض لا أن تعرض أحدث لقطة كأنها تاريخية:\n${noCoverText}`);
-  assert.ok(/الشهر الماضي/.test(noCoverText), `نص الرفض لم يذكر تسمية الفترة المطلوبة:\n${noCoverText}`);
+  assert.ok(/2020-06-15/.test(noCoverText), `نص الرفض لم يذكر التاريخ المطلوب:\n${noCoverText}`);
+  assert.ok(!/2,000/.test(noCoverText) && !/1,000/.test(noCoverText), `استبدل الفترة الغائبة بلقطة اليوم أو الأمس:\n${noCoverText}`);
   ok("reportForPeriod يختار اللقطة المطابقة لـreport_date عند فترة صريحة (لا الأحدث بالإنشاء)، ويرفض صراحة عند غياب لقطة تغطي الفترة");
 }
 
@@ -2108,10 +2134,8 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
 {
   // «كم كان رصيد الزبون سامر الشهر الماضي؟» كان يحمل أحدث لقطة ويسمّيها
   // «الرصيد الحالي». يجب reportForPeriod كالذمم، أو رفض صريح. (discussion_r4017651314)
-  const today = new Date(Date.now() + 180 * 60_000).toISOString().slice(0, 10);
-  const now = new Date();
-  const lastMonthDate = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 15));
-  const lastMonth = lastMonthDate.toISOString().slice(0, 10);
+  const today = damascusDate(0);
+  const lastMonth = `${isoAddDays(`${today.slice(0, 7)}-01`, -1).slice(0, 7)}-15`;
   const fixtures = defaultFixtures();
   fixtures["inventory_reports:ameen_customer_balances"] = [
     {
@@ -2250,10 +2274,8 @@ ok(`${ROUTES.length} سؤالاً وصل كلٌّ منها لأداته ومصد
 {
   // «رصيد حساب شام كاش الشهر الماضي» كان يحمل أحدث لقطة دوماً.
   // (discussion_r4017908937)
-  const today = new Date(Date.now() + 180 * 60_000).toISOString().slice(0, 10);
-  const now = new Date();
-  const lastMonthDate = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 15));
-  const lastMonth = lastMonthDate.toISOString().slice(0, 10);
+  const today = damascusDate(0);
+  const lastMonth = `${isoAddDays(`${today.slice(0, 7)}-01`, -1).slice(0, 7)}-15`;
   const fixtures = defaultFixtures();
   fixtures.ameen_account_balance_reports = [
     {
