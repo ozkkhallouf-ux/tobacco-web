@@ -150,6 +150,11 @@ assert.match(read("tools/ameen-autoprint/install-service.bat"), /\/ru SYSTEM/, "
 const preSrc = read("tools/deploy-gate/migration-preflight.ps1");
 for (const needle of ["function Invoke-GateIdentityPreflight", "forbidden gate identity", "dedicated gate identity is reused", "identity not verifiable", "writable by the dedicated gate identity only", "which may write the gate trust files", "function Invoke-InstallPreflight"]) assert.ok(preSrc.includes(needle), `حارس الهوية: ${needle}`);
 assert.match(gateSrc, /\$pre = Invoke-InstallPreflight \$Config/, "Initialize يشغّل فحص التثبيت الكامل (الهوية + نشرات الأسعار)");
+for (const needle of ["function Get-PreflightAdminMembers", "privileged repository workload", "member of local Administrators", "cannot determine whether", "cannot enumerate tasks/services"]) assert.ok(preSrc.includes(needle), `حارس الصلاحيات: ${needle}`);
+assert.match(preSrc, /if \(\$key -eq 'system' -or \$key -eq 'administrators'\)/, "repo workload بحساب SYSTEM/Administrators يحجب بغض النظر عن الكتّاب");
+assert.match(read("docs/ai/topics/windows-deploy-gate.md"), /لا يجوز لأي repo workload مؤتمت أن يعمل بحساب\s+SYSTEM أو Local Administrator/);
+assert.match(read("docs/ai/topics/windows-deploy-gate.md"), /التثبيت BLOCKED/);
+assert.match(read("docs/ai/topics/windows-deploy-gate.md"), /least-privilege/);
 assert.match(checkWfRaw(), /tools\\tests\\Test-GateIdentityPreflight\.ps1/);
 // لا توصية بـSYSTEM هويةً للبوابة في أي مرجع إنتاجي.
 for (const f of ["docs/ai/topics/windows-deploy-gate.md", "tools/deploy-gate/README.md", "tools/deploy-gate/gate-config.example.json", "tools/deploy-gate/deploy-gate.ps1"]) {

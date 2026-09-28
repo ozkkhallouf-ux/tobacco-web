@@ -31,6 +31,9 @@ function Assert-True([bool]$Condition, [string]$Message) { if ($Condition) { Add
 
 $script:Tasks = @()
 $script:Services = @()
+# أعضاء Administrators المحليين على OZK2026 (LOQ عضو). $null = تعذّر التحديد.
+$script:Admins = @('OZK2026\LOQ', 'OZK2026\Administrator')
+function Get-PreflightAdminMembers { if ($null -eq $script:Admins) { return $null } return @($script:Admins) }
 function Get-PreflightTaskInventory { return @($script:Tasks) }
 function Get-PreflightServiceInventory { return @($script:Services) }
 function Read-PreflightWrapperText([string]$Path) { if ($script:Wrappers.ContainsKey($Path)) { return $script:Wrappers[$Path] } return '' }
@@ -50,6 +53,16 @@ function Get-CurrentLayout {
         (New-Task 'TOBACCO Khalil Audit Sync' 'LOQ' ('powershell.exe -File "' + $repo + '\tools\push-khalil-audit-log.ps1"')),
         (New-Task 'TOBACCO Customer Movements Push' 'OZKSync' ($ps + ' -File "' + $repo + '\tools\push-customer-movements.ps1"')),
         (New-Task 'TOBACCO Approved Prices Pull' 'OZKSync' ('powershell.exe -File "' + $repo + '\tools\sync-approved-prices-to-ameen.ps1" -Apply')),
+        (New-Task 'TOBACCO Ameen Backup Monitor' 'SYSTEM' ('wscript.exe "C:\ProgramData\OZK-TOBACCO\TaskWrappers\tobacco-ameen-backup-monitor-hidden.vbs"'))
+    )
+}
+
+# تخطيط مستقبلي «نظيف»: كل repo workloads بهويات عادية غير إدارية (للتحقق من حالة eligible).
+function Get-CleanLayout {
+    return @(
+        (New-Task 'OZK-AmeenAutoPrint' 'OZK-AutoPrint' ('wscript.exe "' + $autoprintVbs + '"')),
+        (New-Task 'TOBACCO Ameen Read Worker' 'OZK-ReadWorker' ($ps + ' -File "' + $repo + '\tools\ameen-read-worker.ps1"')),
+        (New-Task 'TOBACCO Customer Movements Push' 'OZKSync' ($ps + ' -File "' + $repo + '\tools\push-customer-movements.ps1"')),
         (New-Task 'TOBACCO Ameen Backup Monitor' 'SYSTEM' ('wscript.exe "C:\ProgramData\OZK-TOBACCO\TaskWrappers\tobacco-ameen-backup-monitor-hidden.vbs"'))
     )
 }
@@ -86,41 +99,88 @@ try {
     $r = Invoke-GateIdentityPreflight (New-Config '' @())
     Assert-True (-not $r.ok) 'no gate identity configured => BLOCK'
 
-    Write-Host '== Dedicated identity'
+    Write-Host '== Privileged repository workloads block installation (regardless of ACL writers)'
+    $script:Tasks = Get-CurrentLayout
     $r = Invoke-GateIdentityPreflight (New-Config 'OZK-DeployGate' @())
-    Assert-True ($r.ok) 'dedicated identity unused by any repo workload => eligible'
-    $script:Tasks = @(Get-CurrentLayout) + @(New-Task 'TOBACCO Windows Deploy Gate' 'OZK-DeployGate' ($ps + ' -File "' + $gateDir + '\deploy-gate.ps1"'))
+    Assert-True (-not $r.ok) 'current modeled OZK2026 layout with the dedicated identity => BLOCKED'
+    Assert-True (Test-BlockLike $r '*OZK-AmeenAutoPrint*privileged repository workload*SYSTEM*') 'blocking workload: OZK-AmeenAutoPrint -> SYSTEM -> repo code'
+    Assert-True ((Test-BlockLike $r '*Read Worker*member of local Administrators*') -and (Test-BlockLike $r '*Khalil Audit*member of local Administrators*')) 'blocking workloads: LOQ (Administrators member) repo tasks'
+    Assert-True (-not (Test-BlockLike $r '*Customer Movements*privileged*')) 'ordinary non-admin OZKSync repo workload is not blocked for privilege'
+    Assert-True (-not (Test-BlockLike $r '*Backup Monitor*')) 'privileged task unrelated to any repo is not blocked just for being privileged'
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Repo As SYSTEM' 'NT AUTHORITY\SYSTEM' ($ps + ' -File "' + $repo + '\tools\x.ps1"'))
+    $r = Invoke-GateIdentityPreflight (New-Config 'OZK-DeployGate' @())
+    Assert-True (-not $r.ok -and (Test-BlockLike $r '*Repo As SYSTEM*privileged*')) 'SYSTEM repo workload, even with no trust-file write ACL => BLOCK'
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Repo As Admin' 'OZK2026\Administrator' ($ps + ' -File "' + $repo + '\tools\x.ps1"'))
+    $r = Invoke-GateIdentityPreflight (New-Config 'OZK-DeployGate' @())
+    Assert-True (-not $r.ok -and (Test-BlockLike $r '*Repo As Admin*member of local Administrators*')) 'Administrator repo workload, even with no trust-file write ACL => BLOCK'
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Repo As LOQ' 'LOQ' ($ps + ' -File "' + $repo + '\tools\x.ps1"'))
+    $r = Invoke-GateIdentityPreflight (New-Config 'OZK-DeployGate' @())
+    Assert-True (-not $r.ok -and (Test-BlockLike $r '*Repo As LOQ*member of local Administrators*')) 'LOQ as Administrators member running a repo workload => BLOCK'
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Repo As Group' 'BUILTIN\Administrators' ($ps + ' -File "' + $repo + '\tools\x.ps1"'))
+    $r = Invoke-GateIdentityPreflight (New-Config 'OZK-DeployGate' @())
+    Assert-True (-not $r.ok -and (Test-BlockLike $r '*Repo As Group*privileged*')) 'repo workload running as the Administrators group => BLOCK'
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Repo As Gate' 'OZK-DeployGate' ($ps + ' -File "' + $repo + '\tools\x.ps1"'))
+    $r = Invoke-GateIdentityPreflight (New-Config 'OZK-DeployGate' @())
+    Assert-True (-not $r.ok -and (Test-BlockLike $r '*Repo As Gate*reused*')) 'dedicated gate identity used by a repo workload => BLOCK'
+    $script:Tasks = Get-CleanLayout
+    $script:Admins = $null
+    $r = Invoke-GateIdentityPreflight (New-Config 'OZK-DeployGate' @())
+    Assert-True (-not $r.ok -and (Test-BlockLike $r '*cannot determine whether*local administrator*')) 'cannot determine whether a repo workload identity is admin => FAIL CLOSED'
+    $script:Admins = @('OZK2026\LOQ', 'OZK2026\Administrator')
+    $script:Services = @([pscustomobject]@{ name = 'ozk-print-svc'; identity = 'LocalSystem'; action = ('"C:\Program Files\nodejs\node.exe" "' + $repo + '\tools\ameen-autoprint\watcher.js"') })
+    $r = Invoke-GateIdentityPreflight (New-Config 'OZK-DeployGate' @())
+    Assert-True (-not $r.ok -and (Test-BlockLike $r '*service ozk-print-svc*privileged*')) 'a service running repo code as LocalSystem => BLOCK'
+    $script:Services = @()
+
+    Write-Host '== Dedicated identity (clean future layout: no privileged repo workloads)'
+    $script:Tasks = Get-CleanLayout
+    $r = Invoke-GateIdentityPreflight (New-Config 'OZK-DeployGate' @())
+    Assert-True ($r.ok) 'ordinary non-admin repo workloads only + dedicated identity unused => eligible'
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'TOBACCO Windows Deploy Gate' 'OZK-DeployGate' ($ps + ' -File "' + $gateDir + '\deploy-gate.ps1"'))
     $r = Invoke-GateIdentityPreflight (New-Config 'OZK-DeployGate' @())
     Assert-True ($r.ok) 'the gate task itself under the dedicated identity running only gateDir scripts => eligible'
-    $script:Tasks = @(Get-CurrentLayout) + @(New-Task 'TOBACCO Windows Deploy Gate' 'OZK-DeployGate' ($ps + ' -File "' + $repo + '\tools\deploy-gate\deploy-gate.ps1"'))
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'TOBACCO Windows Deploy Gate' 'OZK-DeployGate' ($ps + ' -File "' + $repo + '\tools\deploy-gate\deploy-gate.ps1"'))
     $r = Invoke-GateIdentityPreflight (New-Config 'OZK-DeployGate' @())
     Assert-True (-not $r.ok -and (Test-BlockLike $r '*gate task must run only*')) 'the gate task running the repository copy of the gate => BLOCK'
-    $script:Tasks = @(Get-CurrentLayout) + @(New-Task 'TOBACCO Item Costs Push' 'OZK-DeployGate' ($ps + ' -File "' + $repo + '\tools\push-item-costs.ps1"'))
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'TOBACCO Item Costs Push' 'OZK-DeployGate' ($ps + ' -File "' + $repo + '\tools\push-item-costs.ps1"'))
     $r = Invoke-GateIdentityPreflight (New-Config 'OZK-DeployGate' @())
     Assert-True (-not $r.ok -and (Test-BlockLike $r '*Item Costs*reused*')) 'dedicated identity also assigned to one repo task => BLOCK'
-    $script:Tasks = @(Get-CurrentLayout) + @(New-Task 'Some Maintenance' 'OZK2026\OZK-DeployGate' 'C:\Tools\cleanup.exe')
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Some Maintenance' 'OZK2026\OZK-DeployGate' 'C:\Tools\cleanup.exe')
     $r = Invoke-GateIdentityPreflight (New-Config 'OZK-DeployGate' @())
     Assert-True (-not $r.ok -and (Test-BlockLike $r '*reused*')) 'dedicated identity reused by any other task (even non-repo) => BLOCK'
-    $script:Tasks = Get-CurrentLayout
+    $script:Tasks = Get-CleanLayout
     $script:Services = @([pscustomobject]@{ name = 'ozk-repo-svc'; identity = '.\OZK-DeployGate'; action = ('"C:\Program Files\nodejs\node.exe" "' + $repo + '\scripts\serve.mjs"') })
     $r = Invoke-GateIdentityPreflight (New-Config 'OZK-DeployGate' @())
     Assert-True (-not $r.ok -and (Test-BlockLike $r '*service ozk-repo-svc*')) 'a service running repo code under the dedicated identity => BLOCK'
     $script:Services = @()
 
     Write-Host '== Trust file writers and unverifiable identities'
+    $script:Tasks = Get-CleanLayout
     $r = Invoke-GateIdentityPreflight (New-Config 'OZK-DeployGate' @('OZK-DeployGate', 'BUILTIN\Administrators'))
     Assert-True (-not $r.ok -and (Test-BlockLike $r '*writable by the dedicated gate identity only*')) 'Administrators as a trust-file writer is not an accepted boundary => BLOCK'
     $r = Invoke-GateIdentityPreflight (New-Config 'OZK-DeployGate' @('OZK-DeployGate', 'OZKSync'))
     Assert-True (-not $r.ok -and (Test-BlockLike $r '*Customer Movements*may write the gate trust files*')) 'a repo workload identity among trust-file writers => BLOCK'
-    $script:Tasks = @(Get-CurrentLayout) + @(New-Task 'Unknown Principal' '' ($ps + ' -File "' + $repo + '\tools\x.ps1"'))
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Unknown Principal' '' ($ps + ' -File "' + $repo + '\tools\x.ps1"'))
     $r = Invoke-GateIdentityPreflight (New-Config 'OZK-DeployGate' @())
     Assert-True (-not $r.ok -and (Test-BlockLike $r '*identity not verifiable*')) 'unknown/unverifiable task identity => fail closed'
     $script:Tasks = @()
     $r = Invoke-GateIdentityPreflight (New-Config 'OZK-DeployGate' @())
     Assert-True (-not $r.ok -and (Test-BlockLike $r '*no scheduled tasks visible*')) 'no visible tasks (not run as administrator) => fail closed'
 
+    Write-Host '== Enumeration failure fails closed'
+    $script:ThrowTasks = $true
+    function Get-PreflightTaskInventory { if ($script:ThrowTasks) { throw 'Access is denied' } return @($script:Tasks) }
+    $r = Invoke-GateIdentityPreflight (New-Config 'OZK-DeployGate' @())
+    Assert-True (-not $r.ok -and (Test-BlockLike $r '*cannot enumerate tasks/services*')) 'inability to enumerate tasks => FAIL CLOSED'
+    $script:ThrowTasks = $false
+    function Get-PreflightServiceInventory { throw 'RPC server unavailable' }
+    $script:Tasks = Get-CleanLayout
+    $r = Invoke-GateIdentityPreflight (New-Config 'OZK-DeployGate' @())
+    Assert-True (-not $r.ok -and (Test-BlockLike $r '*cannot enumerate tasks/services*')) 'inability to enumerate services => FAIL CLOSED'
+    function Get-PreflightServiceInventory { return @($script:Services) }
+
     Write-Host '== Install preflight combines price-list and identity checks'
-    $script:Tasks = Get-CurrentLayout
+    $script:Tasks = Get-CleanLayout
     function Get-PreflightTaskActionText([string]$TaskName) { return $null }
     function Get-PreflightTaskState([string]$TaskName) { if ($TaskName -eq 'OZK-PriceListSync') { return 'Disabled' } return $null }
     function Get-PreflightTaskNames { return @() }
@@ -128,6 +188,9 @@ try {
     Assert-True ($r.ok -and @($r.results | Where-Object { $_.verdict -eq 'OUT_OF_SCOPE_DISABLED' }).Count -eq 1) 'dedicated identity + disabled price-list task => install preflight PASS'
     $r = Invoke-InstallPreflight (New-Config 'SYSTEM' @())
     Assert-True (-not $r.ok) 'SYSTEM identity blocks the whole install preflight'
+    $script:Tasks = Get-CurrentLayout
+    $r = Invoke-InstallPreflight (New-Config 'OZK-DeployGate' @())
+    Assert-True (-not $r.ok) 'current modeled OZK2026 layout => install preflight (Initialize) BLOCKED'
 
     Write-Host '== Configuration contract'
     Assert-True ($base.trust.gateAccount -eq 'OZK-DeployGate' -and @($base.trust.gateDirWriters).Count -eq 1 -and $base.trust.gateDirWriters[0] -eq 'OZK-DeployGate') 'example config: dedicated identity is the only trust-file writer'

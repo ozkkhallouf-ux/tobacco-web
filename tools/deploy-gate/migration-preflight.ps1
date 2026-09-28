@@ -50,6 +50,12 @@ function Get-PreflightTaskInventory {
     return $out
 }
 
+# أعضاء مجموعة Administrators المحلية (S-1-5-32-544) كأسماء. $null إن تعذّر التحديد ⇒ fail-closed.
+function Get-PreflightAdminMembers {
+    try { return @(Get-LocalGroupMember -SID 'S-1-5-32-544' -ErrorAction Stop | ForEach-Object { [string]$_.Name }) }
+    catch { return $null }
+}
+
 function Get-PreflightServiceInventory {
     return @(Get-CimInstance Win32_Service -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject]@{ name = [string]$_.Name; identity = [string]$_.StartName; action = [string]$_.PathName } })
 }
@@ -221,10 +227,25 @@ function Invoke-GateIdentityPreflight($Config) {
     }
     if (@($inventory | Where-Object { $_.kind -eq 'task' }).Count -eq 0) { $results += & $block 'inventory' 'no scheduled tasks visible; run the preflight as an administrator' }
 
+    # قرار أمني: repo workload مؤتمت بصلاحية تتجاوز ACL (SYSTEM، أو حساب مدير محلي، أو عضو
+    # Administrators، أو هوية البوابة نفسها) يحجب التثبيت بغض النظر عن قائمة كتّاب ملفات الثقة.
+    $adminMembers = Get-PreflightAdminMembers
+    $adminKeys = $null
+    if ($null -ne $adminMembers) { $adminKeys = @(@($adminMembers) | ForEach-Object { ConvertTo-IdentityKey ([string]$_) } | Where-Object { $_ }) }
+
     foreach ($item in $inventory) {
         $subject = $item.kind + ' ' + $item.name
         $key = ConvertTo-IdentityKey ([string]$item.identity)
         $isRepo = Test-RepoWorkload $Config ([string]$item.action)
+        if ($isRepo -and $key) {
+            if ($key -eq 'system' -or $key -eq 'administrators') {
+                $results += & $block $subject ('privileged repository workload: runs repo code as ' + $item.identity + ' (can override the gate trust files regardless of ACL)')
+            } elseif ($null -eq $adminKeys) {
+                $results += & $block $subject ('cannot determine whether ' + $item.identity + ' is a local administrator (repository workload)')
+            } elseif ($adminKeys -contains $key) {
+                $results += & $block $subject ('privileged repository workload: runs repo code as ' + $item.identity + ', a member of local Administrators')
+            }
+        }
         if (-not $key) {
             # هوية غير مقروءة: لمهمة دائماً حجب؛ لخدمة فقط إن كانت تشغّل كود مستودع.
             if ($item.kind -eq 'task' -or $isRepo) { $results += & $block $subject 'identity not verifiable' }
