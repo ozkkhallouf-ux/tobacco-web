@@ -11964,7 +11964,8 @@ function render() {
   if (state.route === "smartInventory" && state.session) {
     window.SmartInventory?.bind(app, state.session, {
       render,
-      notice(type, text) { setNotice(type, text); render(); }
+      notice(type, text) { setNotice(type, text); render(); },
+      clearNotice() { state.notice = null; render(); }
     });
   }
 

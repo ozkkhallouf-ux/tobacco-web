@@ -121,5 +121,61 @@ const context = vm.createContext({
 vm.runInContext(moduleSource, context);
 assert(typeof context.window.SmartInventory?.render === "function", "Smart inventory browser module failed to initialize.");
 
+// إغلاق الجرد: الفراغ يُحفظ صفراً فعلياً بنفس حمولة «صفر فعلي» اليدوية.
+// الكمية المكتوبة، والصنف المحفوظ، والحجز، وإعادة العد لا تُمس.
+const api = context.window.SmartInventory;
+const now = Date.parse("2026-09-28T12:00:00Z");
+const blank = { id: "blank", countState: "uncounted", recountRequested: false, rowVersion: 4 };
+const typed = { id: "typed", countState: "uncounted", recountRequested: false, rowVersion: 2 };
+const explicitZeroTyped = { id: "typed-zero", countState: "uncounted", recountRequested: false, rowVersion: 6 };
+const saved = { id: "saved", countState: "counted", unit1Qty: 5, rowVersion: 9 };
+const savedZero = { id: "saved-zero", countState: "zero", unit1Qty: 0, unit2Qty: 0, damagedUnit1Qty: 0, rowVersion: 3 };
+const claimed = { id: "claimed", countState: "uncounted", claimedByDisplayName: "عثمان", claimedByMe: false, claimExpiresAt: "2026-09-28T12:05:00Z", rowVersion: 1 };
+const expiredClaim = { id: "expired", countState: "uncounted", claimedByDisplayName: "عثمان", claimedByMe: false, claimExpiresAt: "2026-09-28T11:00:00Z", rowVersion: 8 };
+const recount = { id: "recount", countState: "counted", recountRequested: true, rowVersion: 2 };
+const notFound = { id: "missing", countState: "uncounted", rowVersion: 1 };
+const damaged = { id: "damaged", countState: "uncounted", rowVersion: 1 };
+const chosenZero = { id: "chosen-zero", countState: "uncounted", rowVersion: 11 };
+const emptyQty = { unit1Qty: "", unit2Qty: "", damagedUnit1Qty: "", countState: "" };
+const plan = api.planSessionFinish([
+  blank, typed, explicitZeroTyped, saved, savedZero, claimed, expiredClaim, recount, notFound, damaged, chosenZero
+], {
+  blank: emptyQty,
+  typed: { unit1Qty: "5", unit2Qty: "", damagedUnit1Qty: "", countState: "counted" },
+  "typed-zero": { unit1Qty: "0", unit2Qty: "", damagedUnit1Qty: "", countState: "counted" },
+  saved: emptyQty,
+  "saved-zero": emptyQty,
+  claimed: emptyQty,
+  expired: emptyQty,
+  recount: emptyQty,
+  missing: { unit1Qty: "", unit2Qty: "", damagedUnit1Qty: "", countState: "not_found" },
+  damaged: { unit1Qty: "", unit2Qty: "1", damagedUnit1Qty: "", countState: "damaged" },
+  "chosen-zero": { unit1Qty: "", unit2Qty: "", damagedUnit1Qty: "", countState: "zero" }
+}, { now, pendingItemIds: ["blank"] });
+const zeroIds = plan.zeros.map((item) => item.id).sort();
+assert(JSON.stringify(zeroIds) === JSON.stringify(["chosen-zero", "expired"]), `Blank lines eligible for zero were ${zeroIds.join(",")}`);
+assert(plan.zeros.every((item) => item.id !== "typed" && item.id !== "typed-zero" && item.id !== "saved" && item.id !== "saved-zero"), "Typed or already saved quantities must stay out of the auto-zero list.");
+const blocked = Object.fromEntries(plan.blockers.map((row) => [row.itemId, row.reason]));
+assert(blocked.blank === "unsaved", "A line with a pending offline save must not be zeroed.");
+assert(blocked.typed === "unsaved" && blocked["typed-zero"] === "unsaved", "A typed quantity, including an explicit 0, must block close instead of being rewritten.");
+assert(blocked.claimed === "claimed", "A line claimed by another counter must not be zeroed.");
+assert(blocked.recount === "recount", "A recount request must not be auto-zeroed.");
+assert(blocked.missing === "unsaved" && blocked.damaged === "unsaved", "An explicit not-found or damaged line must not be collapsed to zero.");
+assert(!("saved" in blocked) && !("saved-zero" in blocked), "Saved lines are untouched and are not blockers.");
+const manualZero = api.parseCountInput("zero", "", "", "");
+const autoZero = api.zeroCountPayload(expiredClaim);
+assert(autoZero.countState === "zero" && autoZero.unit1Qty === 0 && autoZero.unit2Qty === 0 && autoZero.damagedUnit1Qty === 0, "Auto-zero payload must be an actual zero count.");
+assert(autoZero.countState === manualZero.countState && autoZero.unit1Qty === manualZero.unit1Qty && autoZero.unit2Qty === manualZero.unit2Qty && autoZero.damagedUnit1Qty === manualZero.damagedUnit1Qty, "Auto-zero must match a manual «صفر فعلي» save.");
+assert(autoZero.expectedVersion === 8, "Auto-zero must send the row version a manual save would send.");
+let blankSaveRejected = false;
+try { api.parseCountInput("counted", "", "", ""); } catch (error) { blankSaveRejected = /إغلاق الجرد/.test(error.message); }
+assert(blankSaveRejected, "Saving one blank line from its own button must still refuse to treat that blank as zero.");
+const confirmText = api.finishZeroConfirmText(12);
+assert(confirmText.includes("12") && confirmText.includes("صفراً") && confirmText.includes("؟"), `Confirm text missing the count: ${confirmText}`);
+const blockedText = api.finishBlockedMessage(plan.blockers);
+assert(blockedText.includes("لم يُحتسب أي صنف فارغ صفراً") && blockedText.includes("يحجزه") && blockedText.includes("إعادة عد"), `Blocked close text incomplete: ${blockedText}`);
+const openPlan = api.planSessionFinish([blank, saved], { blank: emptyQty, saved: { unit1Qty: "5", unit2Qty: "", damagedUnit1Qty: "", countState: "counted" } }, { now });
+assert(openPlan.blockers.length === 0 && openPlan.zeros.length === 1 && openPlan.zeros[0].id === "blank", "A truly empty uncounted line is the only finish-time zero.");
+
 if (failed) process.exit(1);
 console.log("Smart inventory security, route isolation, concurrency and cache contracts passed.");
