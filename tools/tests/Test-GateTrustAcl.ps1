@@ -29,6 +29,18 @@ function Assert-True([bool]$Condition, [string]$Message) { if ($Condition) { Add
 
 . $preflight
 
+# جدول SID وهمي (ترجمة NTAccount → SID) واسم الجهاز: المقارنة بالـSID لا بالاسم.
+$script:SidTable = @{
+    'ozk2026\ozk-deploygate' = 'S-1-5-21-111-1001'; 'domain\ozk-deploygate' = 'S-1-5-21-999-1001'
+    'ozk2026\loq' = 'S-1-5-21-111-1002'; 'loq' = 'S-1-5-21-111-1002'
+    'ozk2026\ozksync' = 'S-1-5-21-111-1003'; 'ozksync' = 'S-1-5-21-111-1003'
+    'ozk2026\administrator' = 'S-1-5-21-111-500'
+    'ozk-autoprint' = 'S-1-5-21-111-1004'; 'ozk2026\ozk-autoprint' = 'S-1-5-21-111-1004'
+    'ozk-readworker' = 'S-1-5-21-111-1005'; 'ozk2026\ozk-readworker' = 'S-1-5-21-111-1005'
+}
+function Invoke-NtAccountTranslate([string]$Name) { $k = $Name.ToLowerInvariant(); if ($script:SidTable.ContainsKey($k)) { return $script:SidTable[$k] } return $null }
+function Get-PreflightMachineName { return 'OZK2026' }
+
 $gateDir = Join-Path ([System.IO.Path]::GetTempPath()) ('ozk-gate-acl-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
 New-Item -ItemType Directory -Force -Path $gateDir | Out-Null
 $config = [System.IO.File]::ReadAllText($exampleConfig) | ConvertFrom-Json
@@ -130,6 +142,28 @@ try {
     [System.IO.File]::WriteAllText((Join-Gate 'notify.ps1'), 'x')
     Remove-Item -LiteralPath (Join-Gate 'state.json')
     Assert-True ((Test-GateTrustAcl $config).ok) 'state files not created yet (before Initialize) => governed by the gateDir ACL'
+
+    Write-Host '== SID comparison, not account names (Codex P1)'
+    Reset-Acls
+    $a = New-SafeAcl; $a.owner = 'DOMAIN\OZK-DeployGate'; Set-DirAcl $a
+    Assert-True (Test-Blocked (Test-GateTrustAcl $config) '*owner is DOMAIN\OZK-DeployGate*S-1-5-21-999-1001*') 'owner DOMAIN\OZK-DeployGate (different SID from OZK2026\OZK-DeployGate) => BLOCK'
+    Reset-Acls
+    Add-DirAce (New-Ace 'DOMAIN\OZK-DeployGate' 'Modify')
+    Assert-True (Test-Blocked (Test-GateTrustAcl $config) '*write access for DOMAIN\OZK-DeployGate*') 'write ACE for DOMAIN\OZK-DeployGate (same basename, different SID) => BLOCK'
+    Reset-Acls
+    $a = New-SafeAcl; $a.owner = 'S-1-5-21-111-1001'; $a.access = @((New-Ace 'ozk2026\ozk-deploygate' 'FullControl'), (New-Ace 'OZK2026\OZKSync' 'ReadAndExecute, Synchronize' 'Allow' $true)); Set-DirAcl $a
+    Assert-True ((Test-GateTrustAcl $config).ok) 'same gate SID in different forms (SID owner, lowercase qualified ACE) => PASS'
+    Reset-Acls
+    Add-DirAce (New-Ace 'GHOST\nobody' 'Write')
+    Assert-True (Test-Blocked (Test-GateTrustAcl $config) '*cannot be resolved to a SID: GHOST\nobody*') 'write ACE whose principal cannot be resolved to a SID => BLOCK'
+    Reset-Acls
+    $a = New-SafeAcl; $a.owner = 'GHOST\nobody'; Set-DirAcl $a
+    Assert-True (Test-Blocked (Test-GateTrustAcl $config) '*owner cannot be resolved to a SID*') 'owner that cannot be resolved to a SID => BLOCK'
+    Reset-Acls
+    $saved = $config.trust.gateAccount
+    $config.trust.gateAccount = 'OZK2026\missing-gate'
+    Assert-True (Test-Blocked (Test-GateTrustAcl $config) '*gate identity cannot be resolved to a SID*') 'gate identity that cannot be resolved to a SID => BLOCK'
+    $config.trust.gateAccount = $saved
 
     Write-Host '== Install preflight includes the ACL check'
     function Invoke-MigrationPreflight($Config) { return [pscustomobject]@{ ok = $true; results = @() } }

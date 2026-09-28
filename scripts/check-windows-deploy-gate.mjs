@@ -161,13 +161,27 @@ const preCode = preSrc.split("\n").filter((l) => !l.trim().startsWith("#")).join
 assert.doesNotMatch(preCode, /TaskPath\s+-(not)?(like|match|eq)|\.TaskPath\s*-(not)?(like|match)|\\\\?Microsoft\\\\?\*/i, "لا استثناء لمهام حسب TaskPath (ومنها \\Microsoft\\)");
 assert.match(preCode, /Get-ScheduledTask -ErrorAction Stop\)\)/, "جرد كل المهام بلا ترشيح");
 for (const needle of ["function Resolve-WorkloadReach", "cannot determine whether this", "function Expand-UserProfileVariables", "function Expand-MachineVariables", "$depth -ge 3"]) assert.ok(preSrc.includes(needle), `تتبّع الأغلفة: ${needle}`);
+// Codex P1: قرارات الثقة بالـSID حصراً — لا عودة لمقارنة الاسم بعد حذف بادئة الجهاز/المجال.
+assert.ok(!preSrc.includes("ConvertTo-IdentityKey"), "مفتاح الهوية بالاسم محذوف نهائياً");
+const fnBody = (name) => { const i = preSrc.indexOf(`function ${name}`); assert.ok(i >= 0, name); const j = preSrc.indexOf("\nfunction ", i + 10); return preSrc.slice(i, j < 0 ? undefined : j); };
+for (const fn of ["Test-GateTrustAcl", "Invoke-GateIdentityPreflight"]) {
+  const body = fnBody(fn);
+  assert.match(body, /Resolve-PrincipalSid/, `${fn} يحلّ الهويات إلى SID`);
+  assert.doesNotMatch(body, /LastIndexOf\(|Get-AccountLeafName|\.Split\(|-split\s*'\\\\'|ToLowerInvariant\(\)\s*-(eq|ne)/, `${fn} لا يقارن أسماء الحسابات`);
+}
+assert.match(fnBody("Resolve-PrincipalSid"), /Invoke-NtAccountTranslate/);
+assert.match(fnBody("Get-PreflightAcl"), /GetOwner\(\$sidType\)[\s\S]*GetAccessRules\(\$true, \$true, \$sidType\)/, "ACL تُقرأ بالـSID مباشرة");
+const leafUsers = [...preSrc.matchAll(/Get-AccountLeafName \$/g)].length;
+assert.equal(leafUsers, 1, "اسم الحساب الأخير لمسار ملف التعريف فقط");
+assert.ok(cfg0.trust.gateAccount.includes("\\") || /^S-1-/i.test(cfg0.trust.gateAccount), "هوية البوابة مؤهَّلة بالجهاز أو SID");
+assert.ok(preSrc.includes("gate identity must be machine-qualified"), "اسم بلا بادئة مرفوض");
 for (const needle of ["function Test-GateTrustAcl", "function Get-PreflightAcl", "Get-Acl -LiteralPath $Path -ErrorAction Stop", "cannot read ACL", "owner is ", "rights cannot be interpreted", "write-granting ACE with an unresolvable identity", "required trust file is missing"]) assert.ok(preSrc.includes(needle), `ACL الفعلية: ${needle}`);
 assert.match(preSrc, /\$c = Test-GateTrustAcl \$Config/, "فحص التثبيت يشمل ACL الفعلية");
 assert.equal(cfg0.trust.gateInterpreter, "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
 assert.equal(cfg0.trust.gateScript, "deploy-gate.ps1");
 for (const f of ["tools\\tests\\Test-GateTrustAcl.ps1"]) assert.ok(checkWfRaw().includes(f), `مسجّل في CI: ${f}`);
 for (const needle of ["function Get-PreflightAdminMembers", "privileged repository workload", "member of local Administrators", "cannot determine whether", "cannot enumerate tasks/services"]) assert.ok(preSrc.includes(needle), `حارس الصلاحيات: ${needle}`);
-assert.match(preSrc, /if \(\$key -eq 'system' -or \$key -eq 'administrators'\)/, "repo workload بحساب SYSTEM/Administrators يحجب بغض النظر عن الكتّاب");
+assert.match(preSrc, /if \(\$key -eq 'S-1-5-18' -or \$key -eq 'S-1-5-32-544'\)/, "repo workload بحساب SYSTEM/Administrators يحجب بغض النظر عن الكتّاب");
 assert.match(read("docs/ai/topics/windows-deploy-gate.md"), /لا يجوز لأي repo workload مؤتمت أن يعمل بحساب\s+SYSTEM أو Local Administrator/);
 assert.match(read("docs/ai/topics/windows-deploy-gate.md"), /التثبيت BLOCKED/);
 assert.match(read("docs/ai/topics/windows-deploy-gate.md"), /least-privilege/);

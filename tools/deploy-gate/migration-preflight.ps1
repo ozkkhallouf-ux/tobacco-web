@@ -53,9 +53,21 @@ function Get-PreflightTaskInventory {
     return $out
 }
 
-# أعضاء مجموعة Administrators المحلية (S-1-5-32-544) كأسماء. $null إن تعذّر التحديد ⇒ fail-closed.
+# أعضاء مجموعة Administrators المحلية (S-1-5-32-544) كـSIDs. $null إن تعذّر التحديد ⇒ fail-closed،
+# ومنه وجود مجموعة متداخلة (لا يمكن تقييم عضويتها المتداخلة هنا).
 function Get-PreflightAdminMembers {
-    try { return @(Get-LocalGroupMember -SID 'S-1-5-32-544' -ErrorAction Stop | ForEach-Object { [string]$_.Name }) }
+    try {
+        $members = @(Get-LocalGroupMember -SID 'S-1-5-32-544' -ErrorAction Stop)
+        if (@($members | Where-Object { [string]$_.ObjectClass -eq 'Group' }).Count -gt 0) { return $null }
+        return @($members | ForEach-Object { [string]$_.SID.Value })
+    } catch { return $null }
+}
+
+function Get-PreflightMachineName { return [Environment]::MachineName }
+
+# ترجمة اسم حساب إلى SID عبر Windows (نقطة تماس تُستبدل في الاختبارات). $null عند الفشل.
+function Invoke-NtAccountTranslate([string]$Name) {
+    try { return (New-Object System.Security.Principal.NTAccount($Name)).Translate([System.Security.Principal.SecurityIdentifier]).Value }
     catch { return $null }
 }
 
@@ -68,9 +80,11 @@ function Get-PreflightServiceInventory {
 # ACL الفعلية لمسار (قراءة فقط). ترمي عند الفشل ⇒ يحجب المستدعي.
 function Get-PreflightAcl([string]$Path) {
     $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    # المالك وكل ACE بالـSID كما في الـACL نفسها (لا أسماء تُطابَق).
+    $sidType = [System.Security.Principal.SecurityIdentifier]
     return [pscustomobject]@{
-        owner  = [string]$acl.Owner
-        access = @($acl.Access | ForEach-Object { [pscustomobject]@{ identity = [string]$_.IdentityReference; rights = [string]$_.FileSystemRights; type = [string]$_.AccessControlType; inherited = [bool]$_.IsInherited } })
+        owner  = [string]$acl.GetOwner($sidType).Value
+        access = @($acl.GetAccessRules($true, $true, $sidType) | ForEach-Object { [pscustomobject]@{ identity = [string]$_.IdentityReference.Value; rights = [string]$_.FileSystemRights; type = [string]$_.AccessControlType; inherited = [bool]$_.IsInherited } })
     }
 }
 
@@ -194,28 +208,46 @@ function Invoke-MigrationPreflight($Config) {
 # ------------------------------------------------------------
 # هوية البوابة (Codex P1 على #285): حساب مخصّص لا يشغّل أي كود من أي مستودع.
 # ------------------------------------------------------------
-# مفتاح موحّد للهوية: بلا بادئة الجهاز/المجال، وأسماء SYSTEM وAdministrators بصيغة واحدة.
-function ConvertTo-IdentityKey([string]$Identity) {
-    $k = ([string]$Identity).Trim().ToLowerInvariant()
-    if (-not $k) { return '' }
+# مقارنة الهويات بالـSID حصراً (Codex P1): الاسم بعد حذف بادئة الجهاز/المجال يخلط بين
+# OZK2026\OZK-DeployGate وDOMAIN\OZK-DeployGate. كل اسم يُحلّ إلى SID قبل أي قرار ثقة،
+# وما لا يُحلّ ⇒ $null ⇒ حجب لدى المستدعي.
+$script:WellKnownSids = @{
+    'system' = 'S-1-5-18'; 'localsystem' = 'S-1-5-18'; 'nt authority\system' = 'S-1-5-18'
+    'administrators' = 'S-1-5-32-544'; 'builtin\administrators' = 'S-1-5-32-544'
+    'users' = 'S-1-5-32-545'; 'builtin\users' = 'S-1-5-32-545'; 'everyone' = 'S-1-1-0'; 'creator owner' = 'S-1-3-0'
+    'local service' = 'S-1-5-19'; 'localservice' = 'S-1-5-19'; 'nt authority\local service' = 'S-1-5-19'; 'nt authority\localservice' = 'S-1-5-19'
+    'network service' = 'S-1-5-20'; 'networkservice' = 'S-1-5-20'; 'nt authority\network service' = 'S-1-5-20'; 'nt authority\networkservice' = 'S-1-5-20'
+    'authenticated users' = 'S-1-5-11'; 'nt authority\authenticated users' = 'S-1-5-11'; 'interactive' = 'S-1-5-4'; 'nt authority\interactive' = 'S-1-5-4'
+}
+
+function Resolve-PrincipalSid([string]$Principal) {
+    $p = ([string]$Principal).Trim()
+    if (-not $p) { return $null }
+    if ($p -match '^[Ss]-1(-\d+)+$') { return $p.ToUpperInvariant() }
+    $k = $p.ToLowerInvariant()
+    if ($script:WellKnownSids.ContainsKey($k)) { return $script:WellKnownSids[$k] }
+    # «.\name» (حساب محلي في StartName للخدمات) = MACHINE\name.
+    if ($p.StartsWith('.\')) { $p = (Get-PreflightMachineName) + $p.Substring(1) }
+    $sid = Invoke-NtAccountTranslate $p
+    if ($sid -and ([string]$sid) -match '^[Ss]-1(-\d+)+$') { return ([string]$sid).ToUpperInvariant() }
+    return $null
+}
+
+# اسم الحساب الأخير — لمسار ملف التعريف فقط (توسيع متغيّرات البيئة)، لا لأي قرار ثقة.
+function Get-AccountLeafName([string]$Identity) {
+    $k = ([string]$Identity).Trim()
     if ($k.Contains('\')) { $k = $k.Substring($k.LastIndexOf('\') + 1) }
-    if ($k.StartsWith('.\')) { $k = $k.Substring(2) }
-    switch ($k) {
-        'localsystem' { return 'system' }
-        's-1-5-18' { return 'system' }
-        's-1-5-32-544' { return 'administrators' }
-        default { return $k }
-    }
+    return $k
 }
 
 # هل يصل هذا الـAction إلى كود مستودع؟ يتتبّع الأغلفة (vbs/cmd/bat/ps1/psm1) خارج المستودع
 # حتى 3 مستويات. «undetermined» حين لا يمكن الإثبات: غلاف موجود لا يُقرأ، أو عمق أكبر، أو
 # متغيّر بيئة خاص بالمستخدم أو غير معروف في المسار.
 function Expand-UserProfileVariables([string]$Text, [string]$Identity) {
-    $key = ConvertTo-IdentityKey $Identity
+    $key = Get-AccountLeafName $Identity
     if (-not $key) { return $null }
     $userProfile = 'C:\Users\' + $key
-    if ($key -eq 'system') { $userProfile = 'C:\Windows\System32\config\systemprofile' }
+    if ((Resolve-PrincipalSid $Identity) -eq 'S-1-5-18') { $userProfile = 'C:\Windows\System32\config\systemprofile' }
     $map = @{ 'userprofile' = $userProfile; 'homedrive' = 'C:'; 'homepath' = $userProfile.Substring(2); 'appdata' = ($userProfile + '\AppData\Roaming'); 'localappdata' = ($userProfile + '\AppData\Local'); 'temp' = ($userProfile + '\AppData\Local\Temp'); 'tmp' = ($userProfile + '\AppData\Local\Temp'); 'username' = $key; 'onedrive' = ($userProfile + '\OneDrive') }
     return [regex]::Replace($Text, '%(userprofile|homepath|homedrive|appdata|localappdata|temp|tmp|username|onedrive)%', { param($m) $map[$m.Groups[1].Value.ToLowerInvariant()] }, 'IgnoreCase')
 }
@@ -360,7 +392,8 @@ function Test-RightsGrantWrite([long]$Value) {
 function Test-GateTrustAcl($Config) {
     $results = @()
     $block = { param([string]$Subject, [string]$Reason) [pscustomobject]@{ task = $Subject; verdict = 'BLOCK'; reason = $Reason } }
-    $gate = ConvertTo-IdentityKey ([string]$Config.trust.gateAccount)
+    $gateSid = Resolve-PrincipalSid ([string]$Config.trust.gateAccount)
+    if (-not $gateSid) { return [pscustomobject]@{ ok = $false; results = @(& $block 'gate identity' ('gate identity cannot be resolved to a SID: ' + $Config.trust.gateAccount)) } }
     $dir = ([string]$Config.gateDir).TrimEnd('\', '/')
     $sep = '\'
     if ($dir.StartsWith('/')) { $sep = '/' }
@@ -374,9 +407,10 @@ function Test-GateTrustAcl($Config) {
         $subject = 'acl ' + $path
         try { $acl = Get-PreflightAcl $path } catch { $results += & $block $subject ('cannot read ACL: ' + $_.Exception.Message); continue }
         if (-not $acl) { $results += & $block $subject 'ACL is empty or unreadable'; continue }
-        $ownerKey = ConvertTo-IdentityKey ([string]$acl.owner)
-        if (-not $ownerKey) { $results += & $block $subject 'owner cannot be determined' }
-        elseif ($ownerKey -ne $gate) { $results += & $block $subject ('owner is ' + $acl.owner + ' (implicit permission rights); only the dedicated gate identity may own trust state') }
+        $ownerSid = Resolve-PrincipalSid ([string]$acl.owner)
+        if (-not ([string]$acl.owner).Trim()) { $results += & $block $subject 'owner cannot be determined' }
+        elseif (-not $ownerSid) { $results += & $block $subject ('owner cannot be resolved to a SID: ' + $acl.owner) }
+        elseif ($ownerSid -ne $gateSid) { $results += & $block $subject ('owner is ' + $acl.owner + ' (' + $ownerSid + ', implicit permission rights); only the dedicated gate identity SID may own trust state') }
         foreach ($ace in @($acl.access)) {
             $type = ([string]$ace.type).Trim()
             if ($type -eq 'Deny') { continue }
@@ -384,9 +418,10 @@ function Test-GateTrustAcl($Config) {
             $value = ConvertTo-RightsValue ([string]$ace.rights)
             if ($null -eq $value) { $results += & $block $subject ('rights cannot be interpreted for ' + $ace.identity + ': ' + $ace.rights); continue }
             if (-not (Test-RightsGrantWrite $value)) { continue }
-            $key = ConvertTo-IdentityKey ([string]$ace.identity)
-            if (-not $key) { $results += & $block $subject 'write-granting ACE with an unresolvable identity'; continue }
-            if ($key -ne $gate) {
+            if (-not ([string]$ace.identity).Trim()) { $results += & $block $subject 'write-granting ACE with an unresolvable identity'; continue }
+            $aceSid = Resolve-PrincipalSid ([string]$ace.identity)
+            if (-not $aceSid) { $results += & $block $subject ('write-granting ACE whose identity cannot be resolved to a SID: ' + $ace.identity); continue }
+            if ($aceSid -ne $gateSid) {
                 $origin = 'explicit'
                 if ([bool]$ace.inherited) { $origin = 'inherited' }
                 $results += & $block $subject ($origin + ' write access for ' + $ace.identity + ' (' + $ace.rights + ')')
@@ -402,11 +437,26 @@ function Invoke-GateIdentityPreflight($Config) {
     $results = @()
     $block = { param([string]$Subject, [string]$Reason) [pscustomobject]@{ task = $Subject; verdict = 'BLOCK'; reason = $Reason } }
     $trust = $Config.trust
-    $gate = ConvertTo-IdentityKey ([string]$trust.gateAccount)
-    if (-not $gate) { return [pscustomobject]@{ ok = $false; results = @(& $block 'gate identity' 'no dedicated gate identity configured') } }
-    $forbidden = @(@($trust.forbiddenGateIdentities) + @('system', 'administrators', 'ozksync', 'loq') | ForEach-Object { ConvertTo-IdentityKey ([string]$_) } | Select-Object -Unique)
-    if ($forbidden -contains $gate) { $results += & $block 'gate identity' ('forbidden gate identity: ' + $trust.gateAccount + ' (repository code runs as or can override this identity)') }
-    $writers = @(@($trust.gateDirWriters) | ForEach-Object { ConvertTo-IdentityKey ([string]$_) } | Where-Object { $_ } | Select-Object -Unique)
+    $gateName = ([string]$trust.gateAccount).Trim()
+    if (-not $gateName) { return [pscustomobject]@{ ok = $false; results = @(& $block 'gate identity' 'no dedicated gate identity configured') } }
+    # اسم بلا بادئة يُحلّ حسب ترتيب البحث (محلي/مجال) فلا يُقبل: MACHINE\name أو SID فقط.
+    if ($gateName -notmatch '^[Ss]-1(-\d+)+$' -and -not $gateName.Contains('\') -and -not $script:WellKnownSids.ContainsKey($gateName.ToLowerInvariant())) { return [pscustomobject]@{ ok = $false; results = @(& $block 'gate identity' ('gate identity must be machine-qualified (MACHINE\name) or a SID: ' + $gateName)) } }
+    $gate = Resolve-PrincipalSid $gateName
+    if (-not $gate) { return [pscustomobject]@{ ok = $false; results = @(& $block 'gate identity' ('gate identity cannot be resolved to a SID: ' + $gateName)) } }
+    $forbidden = @()
+    foreach ($f in @(@($trust.forbiddenGateIdentities) + @('SYSTEM', 'Administrators'))) {
+        $fs = Resolve-PrincipalSid ([string]$f)
+        if (-not $fs) { $results += & $block 'gate identity' ('forbidden identity cannot be resolved to a SID for comparison: ' + $f); continue }
+        $forbidden += $fs
+    }
+    if ($forbidden -contains $gate) { $results += & $block 'gate identity' ('forbidden gate identity: ' + $gateName + ' (' + $gate + '; repository code runs as or can override this identity)') }
+    $writers = @()
+    foreach ($w in @($trust.gateDirWriters)) {
+        $ws = Resolve-PrincipalSid ([string]$w)
+        if (-not $ws) { $results += & $block 'gate trust files' ('configured trust-file writer cannot be resolved to a SID: ' + $w); continue }
+        $writers += $ws
+    }
+    $writers = @($writers | Select-Object -Unique)
     if ($writers.Count -ne 1 -or $writers[0] -ne $gate) { $results += & $block 'gate trust files' ('trust files must be writable by the dedicated gate identity only; configured writers: ' + (@($trust.gateDirWriters) -join ', ')) }
     $gateTask = [string]$trust.gateTaskName
 
@@ -428,21 +478,35 @@ function Invoke-GateIdentityPreflight($Config) {
     # Administrators، أو هوية البوابة نفسها) يحجب التثبيت بغض النظر عن قائمة كتّاب ملفات الثقة.
     $adminMembers = Get-PreflightAdminMembers
     $adminKeys = $null
-    if ($null -ne $adminMembers) { $adminKeys = @(@($adminMembers) | ForEach-Object { ConvertTo-IdentityKey ([string]$_) } | Where-Object { $_ }) }
+    if ($null -ne $adminMembers) {
+        $adminKeys = @()
+        foreach ($m in @($adminMembers)) {
+            $ms = Resolve-PrincipalSid ([string]$m)
+            if (-not $ms) { $adminKeys = $null; break }
+            $adminKeys += $ms
+        }
+    }
+    if ($adminKeys -and ($adminKeys -contains $gate)) { $results += & $block 'gate identity' ('dedicated gate identity is a member of local Administrators: ' + $gateName) }
 
     foreach ($item in $inventory) {
         $subject = $item.kind + ' ' + ([string]$item.path) + $item.name
-        $key = ConvertTo-IdentityKey ([string]$item.identity)
+        $identityText = ([string]$item.identity).Trim()
+        $key = Resolve-PrincipalSid $identityText
+        if ($identityText -and -not $key) {
+            # هوية مذكورة لا تُحلّ إلى SID: لا يمكن إثبات أنها ليست هوية البوابة أو حساباً ذا صلاحية.
+            $results += & $block $subject ('identity cannot be resolved to a SID: ' + $identityText)
+            continue
+        }
         $reach = Resolve-WorkloadReach $Config ([string]$item.action) ([string]$item.identity)
         $isRepo = [bool]$reach.repo
         # لا يمكن إثبات أن الـAction لا يصل إلى المستودع، والهوية ذات صلاحية (أو غير معروفة) ⇒ حجب.
-        $maybePrivileged = (-not $key) -or $key -eq 'system' -or $key -eq 'administrators' -or $key -eq $gate -or ($null -eq $adminKeys) -or ($adminKeys -contains $key)
+        $maybePrivileged = (-not $key) -or $key -eq 'S-1-5-18' -or $key -eq 'S-1-5-32-544' -or $key -eq $gate -or ($null -eq $adminKeys) -or ($adminKeys -contains $key)
         if (-not $isRepo -and $reach.undetermined -and $maybePrivileged) {
             $results += & $block $subject ('cannot determine whether this ' + $item.kind + ' reaches a repository workload (identity ' + $item.identity + ')')
             continue
         }
         if ($isRepo -and $key) {
-            if ($key -eq 'system' -or $key -eq 'administrators') {
+            if ($key -eq 'S-1-5-18' -or $key -eq 'S-1-5-32-544') {
                 $results += & $block $subject ('privileged repository workload: runs repo code as ' + $item.identity + ' (can override the gate trust files regardless of ACL)')
             } elseif ($null -eq $adminKeys) {
                 $results += & $block $subject ('cannot determine whether ' + $item.identity + ' is a local administrator (repository workload)')
