@@ -21,6 +21,7 @@
 export const CHECKS = [
   // يبقى الأول دائماً — يفرضه scripts/check-checks-manifest.mjs
   'check.mjs',
+  'check-account-class-tree.mjs',
   'check-alert-on-automation-failure.mjs',
   'check-ameen-autoprint-regression.mjs',
   'check-ameen-read-connection-preference.mjs',

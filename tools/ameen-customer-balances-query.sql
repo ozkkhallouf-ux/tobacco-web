@@ -47,6 +47,36 @@ payment_lines as (
     )
 )
 -- payment-rule:end
+-- account-class:begin
+-- تصنيف حساب البطاقة من شجرة دليل الحسابات (قرار المالك 2026-09-28): بطاقة cu000 وحدها ليست
+-- دليلاً أن الحساب زبون. الانتماء الشجري بمعرّفات جذور الدليل (مُثبتة قراءةً على OZK2026)
+-- لا بالاسم ولا ببادئة الرمز، والأولوية بالرقم الأصغر عند تعدد الجذور في السلسلة:
+--   1 customer 121 الزبائن | 2 supplier 221 الموردون | 3 employee 125 سلف الموظفين، 501 رواتب وأجور
+--   4 asset 11 الموجودات الثابتة، 13 الأموال الجاهزة | 5 expense 5 المصاريف
+--   6 revenue 6 الإيرادات، 4 صافي المبيعات | 7 cost 3 صافي تكلفة المبيعات | 8 goods 7 البضاعة
+--   وما سوى ذلك other (غامض ⇒ «يحتاج مراجعة» في الموقع).
+, account_class_root as (
+  select 'e30187a7-eccc-4ff8-8a7d-f2df5e660b53' as root_guid, 1 as pri
+  union all select '85448bf9-74f1-4276-afcc-587f7d7a5534', 2
+  union all select 'd2f225d2-d7ce-4a03-b711-dc81b2841caf', 3
+  union all select 'afe7ebb4-0210-4671-98e1-5621b8cadf1e', 3
+  union all select 'ce6e936a-3840-4f80-bf28-274aea4a3614', 4
+  union all select 'c0dc3c06-b2ac-4e57-beae-19d7da3f514c', 4
+  union all select '6ae0066f-d39e-4805-83d5-b8da92f7d7f1', 5
+  union all select '32292636-198d-4ebb-9ada-9a21d24750b2', 6
+  union all select '6d845c95-a40f-48e6-b875-e27c21477862', 6
+  union all select 'eb3c0ebb-ca78-473e-9c16-f545c85ef1fe', 7
+  union all select 'ef1db462-bda5-4946-a865-59ea22b7c4e9', 8
+),
+account_class_chain as (
+  select cu.AccountGUID as acct, a.ParentGUID as anc, 1 as depth
+  from dbo.cu000 cu join dbo.ac000 a on a.GUID = cu.AccountGUID
+  union all
+  select c.acct, p.ParentGUID, c.depth + 1
+  from account_class_chain c join dbo.ac000 p on p.GUID = c.anc
+  where c.depth < 32
+)
+-- account-class:end
 select
   cu.CustomerName as customer_name,
   cast(coalesce(ac.Debit, 0) - coalesce(ac.Credit, 0) as decimal(18, 3)) as balance,
@@ -55,6 +85,11 @@ select
   cu.GUID as customer_guid,
   cu.AccountGUID as customer_account_guid,
   case when acp.Name = N'الموردون' then 1 else 0 end as is_supplier,
+  -- account-class-column:begin
+  case (select min(r.pri) from account_class_chain x join account_class_root r on r.root_guid = x.anc where x.acct = cu.AccountGUID)
+    when 1 then 'customer' when 2 then 'supplier' when 3 then 'employee' when 4 then 'asset'
+    when 5 then 'expense' when 6 then 'revenue' when 7 then 'cost' when 8 then 'goods' else 'other' end as account_class,
+  -- account-class-column:end
   cast(coalesce(last_payment.last_payment_amount, 0) as decimal(18, 3)) as last_payment_amount,
   last_payment.last_payment_date,
   last_payment.last_payment_notes,

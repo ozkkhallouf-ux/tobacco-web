@@ -393,6 +393,9 @@ function Build-CustomerBalanceReport($Rows) {
       customerGuid = [string]$row.customer_guid
       customerAccountGuid = [string]$row.customer_account_guid
       isSupplier = ((To-Number $row.is_supplier) -eq 1)
+      # تصنيف الحساب من شجرة دليل الحسابات (account-class في ameen-customer-balances-query.sql).
+      # فراغ حين لا يحمله الاستعلام؛ والعلامة accountClasses أدناه لا تُرفع إلا إن حمله كل صف.
+      accountClass = [string]$row.account_class
       # رصيد الحساب بعملته الأصلية، ولا يمسّ balance أعلاه. null يعني «غير معروف»
       # فيرجع المستهلك إلى balance؛ لذلك لا يُحوَّل الغياب إلى صفر.
       accountCurrency = [string]$row.account_currency
@@ -419,9 +422,14 @@ function Build-CustomerBalanceReport($Rows) {
     }
   }
 
+  # العلامة تعني: كل بطاقة تحمل accountClass من شجرة الحسابات (لا من الاسم). بلاها يبقى
+  # الموقع على قوائمه الصريحة (src/customer-intelligence.js: ACCOUNT_CLASSES_MARKER).
+  $accountClassesComplete = (@($items | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.accountClass) }).Count -eq 0)
+
   $summary = [ordered]@{
     reportDate = (Get-Date).ToString("yyyy-MM-dd")
     source = "ameen_customer_balances"
+    accountClasses = $(if ($accountClassesComplete) { "v1" } else { $null })
     totalCustomers = $items.Count
     customersWithBalance = @($items | Where-Object { $_.balance -ne 0 }).Count
     customersWithDebitBalance = @($items | Where-Object { $_.balance -gt 0 }).Count
