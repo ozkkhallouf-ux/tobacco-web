@@ -338,6 +338,7 @@ function rowControlsLocked(html, id) {
   assert(api.state.finishing === true, "The zeroing loop must set finishing before the first save resolves.");
   assert(saves.length === 1 && saves[0].itemId === "a" && saves[0].countState === "zero" && saves[0].expectedVersion === 3, "The first blank line was not saved as zero.");
   assert(rowControlsLocked(harness.hooks.html, "a") && rowControlsLocked(harness.hooks.html, "b"), `Row controls stayed editable during finish: ${harness.hooks.html.slice(0, 500)}`);
+  assert(/data-smart-back[^>]*disabled/.test(harness.hooks.html), "Back stayed enabled during the zeroing loop.");
   await api.saveItem("b", harness.root, counterUser);
   assert(saves.length === 1, "حفظ الصنف ran while the zeroing loop was in progress.");
   releaseFirst();
@@ -461,6 +462,59 @@ function rowControlsLocked(html, id) {
   assert(success?.text === api.finishZeroSuccessText(1), `Post-close refresh replaced the success notice: ${harness.hooks.notices.map((row) => row.text).join(" | ")}`);
   assert(!harness.hooks.notices.some((row) => row.text.includes("تعذر تحديث الجلسة")), "A failed refresh after close showed its own error.");
   assert(api.state.session.status === "completed", "The closed session flipped back to open when refresh failed.");
+}
+
+{
+  const harness = finishHarness([
+    { id: "a", itemName: "أول" },
+    { id: "b", itemName: "ثان" }
+  ]);
+  const original = api.state.session;
+  let completedId = null;
+  let releaseFirst;
+  store.saveSmartInventoryItem = () => {
+    if (!releaseFirst) return new Promise((resolve) => { releaseFirst = () => resolve({ ok: true, code: "saved" }); });
+    return Promise.resolve({ ok: true, code: "saved" });
+  };
+  store.completeSmartInventorySession = async (sessionId) => {
+    completedId = sessionId;
+    return { ok: true, code: "completed" };
+  };
+  store.getSmartInventoryCounterSession = async (sessionId) => ({
+    id: sessionId,
+    status: sessionId === original.id ? "completed" : "in_progress",
+    warehouseName: sessionId === original.id ? "مستودع الاختبار" : "مستودع آخر",
+    items: []
+  });
+  store.listSmartInventoryWarehouses = async () => [];
+  context.window.confirm = () => true;
+  const pending = api.finishSession(harness.root, counterUser);
+  api.state.session = { id: "sess-other", status: "in_progress", warehouseName: "مستودع آخر", items: [] };
+  releaseFirst();
+  await pending;
+  assert(completedId === "sess-finish", `Finish followed the UI session instead of the pinned one: ${completedId}`);
+  assert(original.status === "completed", "The original session was not marked completed after a mid-loop warehouse switch.");
+}
+
+{
+  const harness = finishHarness([{ id: "a", itemName: "أول" }]);
+  const original = api.state.session;
+  let completedId = null;
+  let releaseFirst;
+  store.saveSmartInventoryItem = () => new Promise((resolve) => { releaseFirst = () => resolve({ ok: true, code: "saved" }); });
+  store.completeSmartInventorySession = async (sessionId) => {
+    completedId = sessionId;
+    return { ok: true, code: "completed" };
+  };
+  store.getSmartInventoryCounterSession = async (sessionId) => ({ id: sessionId, status: "completed", items: [] });
+  store.listSmartInventoryWarehouses = async () => [];
+  context.window.confirm = () => true;
+  const pending = api.finishSession(harness.root, counterUser);
+  api.state.session = null;
+  releaseFirst();
+  await pending;
+  assert(completedId === "sess-finish", `Finish threw or skipped complete after Back cleared the session: ${completedId}`);
+  assert(original.status === "completed", "The original session was not marked completed after Back during zeroing.");
 }
 
 if (failed) process.exit(1);
