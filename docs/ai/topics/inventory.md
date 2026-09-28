@@ -1,6 +1,8 @@
 # تقرير موضوع المخزون والجرد
 
-آخر تحديث: 2026-08-23
+آخر تحديث: 2026-09-28
+
+تنظيف `ameen_warehouse_stock_reports`: مهمة Windows «TOBACCO Ameen Warehouse Reports» (كل ساعة عبر `tools/sync-ameen-warehouse-reports.ps1`، حد التنفيذ 15 دقيقة و`RestartCount` 3 في `tools/register-ameen-warehouse-reports-task.ps1`) كانت تحذف الصفوف الأقدم من يومين بطلب DELETE واحد. دور `authenticated` مهلته 8 ثوانٍ. الفهرس `ameen_warehouse_stock_reports_created_at_idx` موجود. `smart_inventory_sessions_source_report_id_fkey` على `source_report_id` بلا ON DELETE (`confdeltype` a)، و`inventory_recon_sessions_source_report_id_fkey` على نفس العمود بـ`ON DELETE SET NULL` (`confdeltype` n). لا يُحوَّل أي منهما إلى CASCADE. الدالة `prune_ameen_warehouse_stock_reports` (هجرة `20260928140000`، لا تُطبَّق من المستودع، وتتوقف إذا غاب `inventory_recon_sessions` لأنه ليس ضمن `supabase/migrations`) تقفل حتى 40 تقريراً بـ`FOR UPDATE SKIP LOCKED` ثم تعيد فحص الإشارتين وتحذف والقفلة ما زالت ممسوكة، حتى لا يُفرَّغ `source_report_id` في المطابقة ولا تفشل الدفعة على مفتاح الجرد الذكي. السكربت يناديها حتى 24 دفعة (حوالي 8 دقائق مع مهلة الطلب 20 ثانية) كي تبقى الجولة داخل حد الـ15 دقيقة. مهلة البيان 57014 تُعاد بحد 3 ثم تتوقف الجولة؛ مفتاح أجنبي غير متوقع يوقفها فوراً. بلا كتابة على `smart_inventory_*` أو `inventory_recon_*`. الفحوص: `tools/tests/Test-WarehouseStockRetentionBatch.ps1` و`supabase/tests/prune-ameen-warehouse-stock-reports.sql`. فحص CI يشغّل ملف SQL على Postgres 16: وظيفة `check` بمقبس محلي، ووظيفتا `validate` و`pages` عبر `PGHOST` إلى خدمة `postgres:16`. ملف الاختبار يرفض شكل الإنتاج، ويرفض أي قاعدة غير `ozk_prune_warehouse_stock_test` إذا كان عنوان الخادم خارج الحلقة المحلية. بعد الدمج: طبّق الهجرة يدوياً ثم اسحب السكربت، بلا إعادة تسجيل المهمة وبلا مسّ لبيانات الجرد.
 
 ## الحالة الحالية
 
@@ -20,7 +22,7 @@
 
 ## نطاق الملفات
 
-`src/business-snapshot.js`, `src/inventory-recon-calc.js`, `src/smart-inventory.js`, `src/supabase-client.js`, `src/app.js`, `src/styles.css`, `tools/ameen-stock-query.sql`, `tools/ameen-sync-agent.ps1`, `tools/push-ameen-warehouse-stock.ps1`, `scripts/item-snapshot-*.mjs`, `scripts/check-smart-inventory.mjs`, `supabase/inventory-reconciliation-table.sql`, `supabase/smart-inventory.sql`, `supabase/migrations/*smart_inventory_counter_isolation.sql`, `supabase/functions/inventory-auth/index.ts`, `supabase/tests/smart-inventory-security.sql`.
+`src/business-snapshot.js`, `src/inventory-recon-calc.js`, `src/smart-inventory.js`, `src/supabase-client.js`, `src/app.js`, `src/styles.css`, `tools/ameen-stock-query.sql`, `tools/ameen-sync-agent.ps1`, `tools/push-ameen-warehouse-stock.ps1`, `tools/ameen-warehouse-stock-retention.ps1`, `scripts/item-snapshot-*.mjs`, `scripts/check-smart-inventory.mjs`, `scripts/check-warehouse-stock-prune.mjs`, `supabase/inventory-reconciliation-table.sql`, `supabase/smart-inventory.sql`, `supabase/migrations/20260928140000_prune_ameen_warehouse_stock_reports.sql`, `supabase/migrations/*smart_inventory_counter_isolation.sql`, `supabase/functions/inventory-auth/index.ts`, `supabase/tests/smart-inventory-security.sql`, `supabase/tests/prune-ameen-warehouse-stock-reports.sql`.
 
 ## قيود ثابتة
 

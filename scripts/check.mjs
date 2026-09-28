@@ -2391,6 +2391,39 @@ for (const contract of [
     failed = true;
   }
 
+  // تنظيف تقارير المخزون: حد اليومين كما هو. الحذف عبر دالة SQL تدفع
+  // دفعات وتتجاوز التقارير المرتبطة بجلسة جرد. طلب DELETE على created_at
+  // يصطدم بمهلة البيان وبالمفتاح الأجنبي لجلسة الجرد الذكي.
+  const warehouseRetention = readFileSync("tools/ameen-warehouse-stock-retention.ps1", "utf8");
+  if (!warehouseStockScript.includes("ameen-warehouse-stock-retention.ps1")
+      || !warehouseStockScript.includes("Invoke-AmeenWarehouseStockReportCleanup")
+      || !warehouseStockScript.includes("rpc/prune_ameen_warehouse_stock_reports")
+      || !warehouseStockScript.includes("p_before")
+      || !warehouseStockScript.includes("p_limit")
+      || /AddDays\(/.test(warehouseStockScript)
+      || /Method Delete/.test(warehouseStockScript)
+      || /created_at=lt\./.test(warehouseStockScript)
+      || /id=in\./.test(warehouseStockScript)) {
+    console.error("push-ameen-warehouse-stock.ps1 must prune aged warehouse stock rows via prune_ameen_warehouse_stock_reports and must not delete them directly.");
+    failed = true;
+  }
+  if (!warehouseRetention.includes("AddDays(-2)")
+      || !warehouseRetention.includes("[int]$BatchSize = 40")
+      || !warehouseRetention.includes("[int]$MaxBatches = 24")
+      || !warehouseRetention.includes("[int]$MaxTimeouts = 3")
+      || !warehouseRetention.includes("[scriptblock]$PruneBatch")
+      || !warehouseRetention.includes("created -lt $cutoff")
+      || !warehouseRetention.includes("57014")
+      || !warehouseRetention.includes("unexpected foreign key")
+      || /\$FetchPage|\$DeleteIds|Stalled/.test(warehouseRetention)) {
+    console.error("ameen-warehouse-stock-retention.ps1 must keep the two-day cutoff, 24-batch cap, and continue only on statement timeout.");
+    failed = true;
+  }
+  if (!warehouseStockScript.includes("ErrorDetails.Message") || /Stalled/.test(warehouseStockScript)) {
+    console.error("push-ameen-warehouse-stock.ps1 must print the Postgres error body and must not keep a stalled flag.");
+    failed = true;
+  }
+
   // ملف push-inventory-reconciliation-to-ameen.ps1 يجب أن يبقى مقفلاً — لا كتابة فعلية على الأمين
   const pushToAmeenPath = "tools/push-inventory-reconciliation-to-ameen.ps1";
   if (existsSync(pushToAmeenPath)) {

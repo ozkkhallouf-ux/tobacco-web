@@ -22,6 +22,18 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Postgres محلي لهذه الوظيفة: فحص التنظيف يتصل بمقبس peer عبر sudo
+      # عندما لا يُضبط PGHOST. وظيفتا validate وpages تستخدمان خدمة postgres:16.
+      - name: Start throwaway Postgres for the warehouse prune test
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql postgresql-client postgresql-contrib
+          if ! pg_isready -q; then
+            ver="$(pg_lsclusters --no-header | awk 'NR==1 { print $1 }')"
+            sudo pg_ctlcluster "$ver" main start
+          fi
+          sudo -u postgres psql -d postgres -c 'select 1'
+
       - name: Install Playwright Chromium browser
         run: npx playwright install --with-deps chromium
 
@@ -197,3 +209,12 @@ jobs:
       - name: Purchase item snapshot - native stderr alert-path test
         shell: powershell
         run: .\tools\tests\Test-SnapshotProducerNativeStderr.ps1
+
+      # عطل إنتاجي (2026-09-28): حذف تقارير ameen_warehouse_stock_reports الأقدم
+      # من يومين كان طلباً واحداً فيصطدم بمهلة البيان 8 ثوانٍ ويتراجع الحذف.
+      # بعدها: المفتاح الأجنبي لجلسة الجرد الذكي بلا ON DELETE، فالحذف بمعرّف
+      # يفشل أيضاً. الاختبار يشغّل حلقة الإنتاج: نفس حد اليومين، والدفعات
+      # لا تحذف تقريراً ما زال مرتبطاً بجلسة.
+      - name: Warehouse stock retention - batched cleanup regression test
+        shell: powershell
+        run: .\tools\tests\Test-WarehouseStockRetentionBatch.ps1
