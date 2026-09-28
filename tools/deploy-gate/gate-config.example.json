@@ -133,6 +133,8 @@
     "_comment": "Future installation design only (nothing installed, no account created). The gate runs under a dedicated local identity that runs no code from tobacco-web or any other repository. SYSTEM, OZKSync, LOQ and Administrators are rejected: repository code already runs as SYSTEM (OZK-AmeenAutoPrint -> tools/ameen-autoprint/run-watcher.bat via install-service.bat), as LOQ (a member of Administrators) and as OZKSync, and SYSTEM/Administrators can override ACLs. The trust files are writable only by the dedicated identity; repository workload identities get read-only access. A local administrator can still technically take ownership: this separates automation trust domains so repository code cannot change the gate's trust state; it is not a defence against a malicious human administrator.",
     "gateAccount": "OZK-DeployGate",
     "gateTaskName": "TOBACCO Windows Deploy Gate",
+    "gateInterpreter": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    "gateScript": "deploy-gate.ps1",
     "forbiddenGateIdentities": [
       "SYSTEM",
       "LocalSystem",
@@ -170,6 +172,13 @@
       "deploying.flag",
       "deploy-gate.log",
       "deploy-gate.lock"
+    ],
+    "requiredTrustFiles": [
+      "gate-config.json",
+      "deploy-gate.ps1",
+      "run-repo-task.ps1",
+      "notify.ps1",
+      "migration-preflight.ps1"
     ],
     "taskWritable": [
       "logDir"

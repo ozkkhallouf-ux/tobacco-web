@@ -44,7 +44,21 @@ $ps = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
 $autoprintVbs = 'C:\ProgramData\OZK-TOBACCO\TaskWrappers\ozk-ameen-autoprint-hidden.vbs'
 $script:Wrappers = @{ $autoprintVbs = ('shell.Run """' + $repo + '\tools\ameen-autoprint\run-watcher.bat""", 0, True') }
 
-function New-Task([string]$Name, [string]$Identity, [string]$Action) { return [pscustomobject]@{ name = $Name; identity = $Identity; action = $Action } }
+function New-Task([string]$Name, [string]$Identity, [string]$Action, $Actions = $null) {
+    if ($null -eq $Actions) {
+        $m = [regex]::Match($Action, '^\s*("[^"]+"|\S+)\s*(.*)$')
+        $Actions = @([pscustomobject]@{ execute = $m.Groups[1].Value.Trim('"'); arguments = $m.Groups[2].Value })
+    }
+    return [pscustomobject]@{ name = $Name; identity = $Identity; action = $Action; actions = @($Actions) }
+}
+# مهمة البوابة بـAction منظَّم (المفسّر + الوسائط كما في Task Scheduler).
+$approvedPs = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
+function New-GateTask([string]$Execute, [string]$Arguments, [string]$Identity = 'OZK-DeployGate') {
+    return New-Task 'TOBACCO Windows Deploy Gate' $Identity ($Execute + ' ' + $Arguments) @([pscustomobject]@{ execute = $Execute; arguments = $Arguments })
+}
+# خدمات Windows عادية (غير مستودع) — الجرد الفارغ يحجب، فالتخطيطات تحمل خدمات حقيقية الشكل.
+function Get-BaselineServices { return @([pscustomobject]@{ name = 'Winmgmt'; identity = 'LocalSystem'; action = 'C:\Windows\system32\svchost.exe -k netsvcs' }, [pscustomobject]@{ name = 'sshd'; identity = 'LocalSystem'; action = 'C:\Windows\System32\OpenSSH\sshd.exe' }) }
+$script:Services = @(Get-BaselineServices)
 # التخطيط الحالي على OZK2026 (من جرد قراءة فقط).
 function Get-CurrentLayout {
     return @(
@@ -127,19 +141,19 @@ try {
     $r = Invoke-GateIdentityPreflight (New-Config 'OZK-DeployGate' @())
     Assert-True (-not $r.ok -and (Test-BlockLike $r '*cannot determine whether*local administrator*')) 'cannot determine whether a repo workload identity is admin => FAIL CLOSED'
     $script:Admins = @('OZK2026\LOQ', 'OZK2026\Administrator')
-    $script:Services = @([pscustomobject]@{ name = 'ozk-print-svc'; identity = 'LocalSystem'; action = ('"C:\Program Files\nodejs\node.exe" "' + $repo + '\tools\ameen-autoprint\watcher.js"') })
+    $script:Services = @(Get-BaselineServices) + @([pscustomobject]@{ name = 'ozk-print-svc'; identity = 'LocalSystem'; action = ('"C:\Program Files\nodejs\node.exe" "' + $repo + '\tools\ameen-autoprint\watcher.js"') })
     $r = Invoke-GateIdentityPreflight (New-Config 'OZK-DeployGate' @())
     Assert-True (-not $r.ok -and (Test-BlockLike $r '*service ozk-print-svc*privileged*')) 'a service running repo code as LocalSystem => BLOCK'
-    $script:Services = @()
+    $script:Services = @(Get-BaselineServices)
 
     Write-Host '== Dedicated identity (clean future layout: no privileged repo workloads)'
     $script:Tasks = Get-CleanLayout
     $r = Invoke-GateIdentityPreflight (New-Config 'OZK-DeployGate' @())
     Assert-True ($r.ok) 'ordinary non-admin repo workloads only + dedicated identity unused => eligible'
-    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'TOBACCO Windows Deploy Gate' 'OZK-DeployGate' ($ps + ' -File "' + $gateDir + '\deploy-gate.ps1"'))
+    $script:Tasks = @(Get-CleanLayout) + @(New-GateTask $approvedPs ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $gateDir + '\deploy-gate.ps1"'))
     $r = Invoke-GateIdentityPreflight (New-Config 'OZK-DeployGate' @())
     Assert-True ($r.ok) 'the gate task itself under the dedicated identity running only gateDir scripts => eligible'
-    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'TOBACCO Windows Deploy Gate' 'OZK-DeployGate' ($ps + ' -File "' + $repo + '\tools\deploy-gate\deploy-gate.ps1"'))
+    $script:Tasks = @(Get-CleanLayout) + @(New-GateTask $approvedPs ('-File "' + $repo + '\tools\deploy-gate\deploy-gate.ps1"'))
     $r = Invoke-GateIdentityPreflight (New-Config 'OZK-DeployGate' @())
     Assert-True (-not $r.ok -and (Test-BlockLike $r '*gate task must run only*')) 'the gate task running the repository copy of the gate => BLOCK'
     $script:Tasks = @(Get-CleanLayout) + @(New-Task 'TOBACCO Item Costs Push' 'OZK-DeployGate' ($ps + ' -File "' + $repo + '\tools\push-item-costs.ps1"'))
@@ -149,10 +163,10 @@ try {
     $r = Invoke-GateIdentityPreflight (New-Config 'OZK-DeployGate' @())
     Assert-True (-not $r.ok -and (Test-BlockLike $r '*reused*')) 'dedicated identity reused by any other task (even non-repo) => BLOCK'
     $script:Tasks = Get-CleanLayout
-    $script:Services = @([pscustomobject]@{ name = 'ozk-repo-svc'; identity = '.\OZK-DeployGate'; action = ('"C:\Program Files\nodejs\node.exe" "' + $repo + '\scripts\serve.mjs"') })
+    $script:Services = @(Get-BaselineServices) + @([pscustomobject]@{ name = 'ozk-repo-svc'; identity = '.\OZK-DeployGate'; action = ('"C:\Program Files\nodejs\node.exe" "' + $repo + '\scripts\serve.mjs"') })
     $r = Invoke-GateIdentityPreflight (New-Config 'OZK-DeployGate' @())
     Assert-True (-not $r.ok -and (Test-BlockLike $r '*service ozk-repo-svc*')) 'a service running repo code under the dedicated identity => BLOCK'
-    $script:Services = @()
+    $script:Services = @(Get-BaselineServices)
 
     Write-Host '== Trust file writers and unverifiable identities'
     $script:Tasks = Get-CleanLayout
@@ -179,7 +193,60 @@ try {
     Assert-True (-not $r.ok -and (Test-BlockLike $r '*cannot enumerate tasks/services*')) 'inability to enumerate services => FAIL CLOSED'
     function Get-PreflightServiceInventory { return @($script:Services) }
 
+    Write-Host '== Service enumeration fails closed (Codex P1)'
+    $script:Tasks = Get-CleanLayout
+    $script:Services = @(Get-BaselineServices)
+    $r = Invoke-GateIdentityPreflight (New-Config 'OZK-DeployGate' @())
+    Assert-True ($r.ok) 'service enumeration succeeds + valid non-repo services => evaluation continues (eligible)'
+    $script:Services = @()
+    $r = Invoke-GateIdentityPreflight (New-Config 'OZK-DeployGate' @())
+    Assert-True (-not $r.ok -and (Test-BlockLike $r '*service inventory is empty*')) 'empty service enumeration => BLOCK (not evidence of no services)'
+    foreach ($err in @('Invalid class "Win32_Service" (WMI repository error)', 'Access is denied. (Exception from HRESULT: 0x80070005)', 'The RPC server is unavailable')) {
+        $script:ServiceError = $err
+        function Get-PreflightServiceInventory { throw $script:ServiceError }
+        $r = Invoke-GateIdentityPreflight (New-Config 'OZK-DeployGate' @())
+        Assert-True (-not $r.ok -and (Test-BlockLike $r ('*cannot enumerate tasks/services: services*'))) ('service enumeration throws (' + $err.Substring(0, 20) + '...) => BLOCK')
+    }
+    function Get-PreflightServiceInventory { return @($script:Services) }
+    $script:Services = @(Get-BaselineServices) + @([pscustomobject]@{ name = 'ozk-repo-system'; identity = 'LocalSystem'; action = ('"C:\Program Files\nodejs\node.exe" "' + $repo + '\scripts\serve.mjs"') })
+    $r = Invoke-GateIdentityPreflight (New-Config 'OZK-DeployGate' @())
+    Assert-True (-not $r.ok -and (Test-BlockLike $r '*service ozk-repo-system*privileged*')) 'SYSTEM repo service present => BLOCK (as before)'
+    $script:Services = @(Get-BaselineServices)
+
+    Write-Host '== Gate task action must be exact (Codex P1)'
+    $gatePath = $gateDir + '\deploy-gate.ps1'
+    $cases = @(
+        @{ ok = $true;  label = 'approved PowerShell + -File gateDir\deploy-gate.ps1 => PASS'; exe = $approvedPs; args = ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $gatePath + '"') },
+        @{ ok = $true;  label = 'approved form with -WindowStyle Hidden and -Mode DryRun => PASS'; exe = $approvedPs; args = ('-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $gatePath + '" -Mode DryRun') },
+        @{ ok = $false; label = 'PowerShell -Command => BLOCK'; exe = $approvedPs; args = ('-NoProfile -Command "& ''' + $gatePath + '''"') },
+        @{ ok = $false; label = 'PowerShell -EncodedCommand => BLOCK'; exe = $approvedPs; args = '-NoProfile -EncodedCommand SQBFAFgAIAAoACcAaAAnACkA' },
+        @{ ok = $false; label = 'PowerShell -enc abbreviation => BLOCK'; exe = $approvedPs; args = '-enc SQBFAFgA' },
+        @{ ok = $false; label = 'another ps1 in gateDir => BLOCK'; exe = $approvedPs; args = ('-File "' + $gateDir + '\run-repo-task.ps1"') },
+        @{ ok = $false; label = 'cmd wrapper => BLOCK'; exe = 'C:\Windows\System32\cmd.exe'; args = ('/c "' + $gateDir + '\deploy-gate.cmd"') },
+        @{ ok = $false; label = 'bat wrapper => BLOCK'; exe = ($gateDir + '\deploy-gate.bat'); args = '' },
+        @{ ok = $false; label = 'arbitrary exe => BLOCK'; exe = 'C:\Tools\anything.exe'; args = ('-File "' + $gatePath + '"') },
+        @{ ok = $false; label = 'pwsh (not the approved interpreter) => BLOCK'; exe = 'C:\Program Files\PowerShell\7\pwsh.exe'; args = ('-File "' + $gatePath + '"') },
+        @{ ok = $false; label = 'relative script path => BLOCK'; exe = $approvedPs; args = '-File deploy-gate.ps1' },
+        @{ ok = $false; label = 'path traversal out of gateDir => BLOCK'; exe = $approvedPs; args = ('-File "' + $gateDir + '\..\DeployGate\deploy-gate.ps1"') },
+        @{ ok = $false; label = 'deploy-gate.ps1 outside gateDir => BLOCK'; exe = $approvedPs; args = '-File "C:\Users\Public\deploy-gate.ps1"' },
+        @{ ok = $false; label = 'environment-variable path => BLOCK'; exe = $approvedPs; args = '-File "%ProgramData%\OZK-TOBACCO\DeployGate\deploy-gate.ps1"' },
+        @{ ok = $false; label = 'extra command after the script => BLOCK'; exe = $approvedPs; args = ('-File "' + $gatePath + '" -Mode Deploy; calc.exe') },
+        @{ ok = $false; label = 'disallowed script parameter => BLOCK'; exe = $approvedPs; args = ('-File "' + $gatePath + '" -ConfigPath C:\evil.json') },
+        @{ ok = $false; label = 'ambiguous/unparseable action (unbalanced quotes) => BLOCK'; exe = $approvedPs; args = ('-File "' + $gatePath) },
+        @{ ok = $false; label = 'no -File at all => BLOCK'; exe = $approvedPs; args = '-NoProfile' }
+    )
+    foreach ($c in $cases) {
+        $script:Tasks = @(Get-CleanLayout) + @(New-GateTask $c.exe $c.args)
+        $r = Invoke-GateIdentityPreflight (New-Config 'OZK-DeployGate' @())
+        Assert-True ($r.ok -eq $c.ok) $c.label
+    }
+    $twoActions = New-Task 'TOBACCO Windows Deploy Gate' 'OZK-DeployGate' 'x' @([pscustomobject]@{ execute = $approvedPs; arguments = ('-File "' + $gatePath + '"') }, [pscustomobject]@{ execute = 'C:\Tools\anything.exe'; arguments = '' })
+    $script:Tasks = @(Get-CleanLayout) + @($twoActions)
+    Assert-True (-not (Invoke-GateIdentityPreflight (New-Config 'OZK-DeployGate' @())).ok) 'a second action on the gate task => BLOCK'
+
     Write-Host '== Install preflight combines price-list and identity checks'
+    # فحص ACL الفعلية مُختبَر في Test-GateTrustAcl.ps1؛ هنا نتيجته ناجحة لعزل الهوية ونشرات الأسعار.
+    function Test-GateTrustAcl($Config) { return [pscustomobject]@{ ok = $true; results = @() } }
     $script:Tasks = Get-CleanLayout
     function Get-PreflightTaskActionText([string]$TaskName) { return $null }
     function Get-PreflightTaskState([string]$TaskName) { if ($TaskName -eq 'OZK-PriceListSync') { return 'Disabled' } return $null }

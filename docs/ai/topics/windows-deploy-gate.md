@@ -111,6 +111,31 @@
   - كانت هوية مهمة غير مقروءة، أو لم تكن المهام مرئية.
 
   على التخطيط الحالي لـOZK2026 يثبت الحارس أن SYSTEM غير صالحة.
+- **فحوص تثبيت إضافية (Codex P1، جميعها fail-closed):**
+  - **جرد الخدمات:** `Get-CimInstance Win32_Service -ErrorAction Stop`. أي استثناء (WMI/CIM، رفض
+    وصول، RPC) أو قائمة فارغة يعني حجباً، فالقائمة الفارغة ليست دليلاً على غياب الخدمات.
+  - **Action مهمة البوابة حرفياً:**
+    - Action واحد فقط.
+    - المفسّر `trust.gateInterpreter`، أي Windows PowerShell 5.1 بالمسار الكامل.
+    - مفاتيح محددة فقط: `-NoProfile`، `-NonInteractive`، `-NoLogo`، `-ExecutionPolicy`، `-WindowStyle Hidden`.
+    - ثم `-File <gateDir>\deploy-gate.ps1` بمسار مطلق قانوني. لا `..`، ولا متغيرات بيئة، ولا
+      مسار نسبي.
+    - ثم `-Mode Deploy|DryRun` فقط.
+    - يُرفض: `-Command`، `-EncodedCommand`، الاختصارات، أغلفة cmd/bat، ملف تنفيذي آخر، سكربت آخر،
+      وسائط إضافية، وأي سطر لا يمكن تفسيره بلا لبس.
+  - **ACL الفعلية لا الإعداد المعلن** (`Test-GateTrustAcl`، يقرأ بـ`Get-Acl` قراءة فقط):
+    - تُفحص `gateDir` وكل ملف ثقة موجود، والملفات التنفيذية والإعداد إلزامية الوجود.
+    - الشروط: المالك هو الهوية المخصّصة، ولا ACE من نوع Allow يمنح أي حق كتابة لغيرها، صريحاً
+      كان أو موروثاً.
+    - حقوق الكتابة المقصودة: WriteData/CreateFiles، AppendData، Write*Attributes،
+      DeleteSubdirectoriesAndFiles، Delete، ChangePermissions، TakeOwnership، Modify،
+      FullControl، GENERIC_WRITE، GENERIC_ALL.
+    - لا يُعدّ Users، ولا OZKSync، ولا LOQ، ولا SYSTEM، ولا Administrators كاتباً مسموحاً.
+    - يعني حجباً: فشل `Get-Acl`، أو حقوق لا تُفسَّر، أو نوع ACE غير معروف، أو هوية أو SID غير
+      محلولَين مع حق كتابة، أو غياب ملف إلزامي.
+    - لا تُحتسب ACEs من نوع Deny منحاً، ولا تُعدّ مُلغية لـAllow (تحفّظاً).
+    - هذا الفحص يثبت أن ACL لا تمنح أتمتة المستودع كتابة مباشرة. لا يدّعي منع مدير بشري من
+      الاستيلاء.
 - **شرط تثبيت إضافي (قرار المالك 2026-09-28): لا يجوز لأي repo workload مؤتمت أن يعمل بحساب
   SYSTEM أو Local Administrator.**
   - أي مهمة أو خدمة تشغّل ملفاً تنفيذياً أو سكربتاً من المستودع التشغيلي، أو من جذور

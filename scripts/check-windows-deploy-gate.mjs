@@ -150,6 +150,17 @@ assert.match(read("tools/ameen-autoprint/install-service.bat"), /\/ru SYSTEM/, "
 const preSrc = read("tools/deploy-gate/migration-preflight.ps1");
 for (const needle of ["function Invoke-GateIdentityPreflight", "forbidden gate identity", "dedicated gate identity is reused", "identity not verifiable", "writable by the dedicated gate identity only", "which may write the gate trust files", "function Invoke-InstallPreflight"]) assert.ok(preSrc.includes(needle), `حارس الهوية: ${needle}`);
 assert.match(gateSrc, /\$pre = Invoke-InstallPreflight \$Config/, "Initialize يشغّل فحص التثبيت الكامل (الهوية + نشرات الأسعار)");
+// Codex P1 (#285): جرد الخدمات بـStop وقائمة فارغة تحجب؛ Action مهمة البوابة مطابق حرفياً؛ ACL فعلية.
+assert.match(preSrc, /Get-CimInstance -ClassName Win32_Service -ErrorAction Stop/);
+assert.doesNotMatch(preSrc, /Win32_Service -ErrorAction SilentlyContinue|Get-ScheduledTask -ErrorAction SilentlyContinue \| Where-Object \{ \$_\.TaskPath/, "لا جرد صامت الفشل");
+assert.ok(preSrc.includes("service inventory is empty"), "قائمة خدمات فارغة = حجب");
+for (const needle of ["function Test-ExactGateAction", "interpreter is not the approved PowerShell", "disallowed PowerShell argument", "arguments cannot be parsed unambiguously", "script path is not an absolute canonical path", "disallowed script argument", "expected exactly one action"]) assert.ok(preSrc.includes(needle), `Action البوابة الحرفي: ${needle}`);
+assert.doesNotMatch(preSrc, /'-command'|'-encodedcommand'|'-c'|'-enc'/i, "لا مفتاح تنفيذ مضمَّن ضمن القائمة المسموحة");
+for (const needle of ["function Test-GateTrustAcl", "function Get-PreflightAcl", "Get-Acl -LiteralPath $Path -ErrorAction Stop", "cannot read ACL", "owner is ", "rights cannot be interpreted", "write-granting ACE with an unresolvable identity", "required trust file is missing"]) assert.ok(preSrc.includes(needle), `ACL الفعلية: ${needle}`);
+assert.match(preSrc, /\$c = Test-GateTrustAcl \$Config/, "فحص التثبيت يشمل ACL الفعلية");
+assert.equal(cfg0.trust.gateInterpreter, "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+assert.equal(cfg0.trust.gateScript, "deploy-gate.ps1");
+for (const f of ["tools\\tests\\Test-GateTrustAcl.ps1"]) assert.ok(checkWfRaw().includes(f), `مسجّل في CI: ${f}`);
 for (const needle of ["function Get-PreflightAdminMembers", "privileged repository workload", "member of local Administrators", "cannot determine whether", "cannot enumerate tasks/services"]) assert.ok(preSrc.includes(needle), `حارس الصلاحيات: ${needle}`);
 assert.match(preSrc, /if \(\$key -eq 'system' -or \$key -eq 'administrators'\)/, "repo workload بحساب SYSTEM/Administrators يحجب بغض النظر عن الكتّاب");
 assert.match(read("docs/ai/topics/windows-deploy-gate.md"), /لا يجوز لأي repo workload مؤتمت أن يعمل بحساب\s+SYSTEM أو Local Administrator/);
@@ -259,7 +270,7 @@ ok(`writerScripts تغطي كل مسار كتابة الأسعار (${seen.size}
 const checkWf = read(".github/workflows/check.yml");
 assert.match(checkWf, /tools\\tests\\Test-DeployGate\.ps1/);
 assert.match(checkWf, /tools\\tests\\Test-RunRepoTask\.ps1/);
-for (const f of ["tools/deploy-gate/deploy-gate.ps1", "tools/deploy-gate/run-repo-task.ps1", "tools/deploy-gate/notify.ps1", "tools/deploy-gate/migration-preflight.ps1", "tools/tests/Test-DeployGate.ps1", "tools/tests/Test-RunRepoTask.ps1", "tools/tests/Test-MigrationPreflight.ps1", "tools/tests/Test-GateIdentityPreflight.ps1"]) {
+for (const f of ["tools/deploy-gate/deploy-gate.ps1", "tools/deploy-gate/run-repo-task.ps1", "tools/deploy-gate/notify.ps1", "tools/deploy-gate/migration-preflight.ps1", "tools/tests/Test-DeployGate.ps1", "tools/tests/Test-RunRepoTask.ps1", "tools/tests/Test-MigrationPreflight.ps1", "tools/tests/Test-GateIdentityPreflight.ps1", "tools/tests/Test-GateTrustAcl.ps1"]) {
   const bytes = readFileSync(path.join(root, f));
   assert.ok(bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf, `${f} يحمل BOM (5.1 يقرأ غيره ANSI)`);
 }
