@@ -14,7 +14,7 @@
 // tools/tests/Test-DeployGate.ps1 وTest-RunRepoTask.ps1 على عدّاء Windows 5.1.
 // ============================================================================
 import assert from "node:assert/strict";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { classifyChanges, evaluateCi, loadGateConfig, RELEASE_KIND, inWriteScanScope, writeIndicators, affectedLongRunning, newestByName } from "./windows-release-verify.mjs";
@@ -22,6 +22,7 @@ import { classifyChanges, evaluateCi, loadGateConfig, RELEASE_KIND, inWriteScanS
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const read = (rel) => readFileSync(path.join(root, rel), "utf8");
 let passed = 0;
+const checkWfRaw = () => readFileSync(path.join(root, ".github/workflows/check.yml"), "utf8");
 const ok = (msg) => { passed += 1; console.log(`  ✓ ${msg}`); };
 
 // 1) الوحدات
@@ -110,6 +111,33 @@ for (const forbidden of ["Stop-ScheduledTask", "Start-ScheduledTask", "Enable-Sc
 assert.match(gateSrc, /DEPLOYED_PENDING_RESTART/);
 ok("عمليات طويلة: خريطة تبعيات تغطي الاستدعاءات الفعلية، والبوابة تسجّل DEPLOYED_PENDING_RESTART بلا أي إعادة تشغيل (Codex P1 #3)");
 
+// Codex P1 #5: المهام التي تحتاج main تنتقل إلى worktree مخصّص قبل تحويل المستودع التشغيلي.
+const mw = cfg0.mainWorktree;
+assert.equal(mw.branch, "main");
+assert.match(mw.remote, /github\.com[/:]ozkkhallouf-ux\/tobacco-web(\.git)?$/);
+assert.notEqual(mw.path.toLowerCase(), cfg0.repoPath.toLowerCase(), "الـworktree المخصّص ليس المستودع التشغيلي");
+assert.deepEqual(mw.allowedScripts, ["tools/auto-sync-price-lists.ps1"], "الـworktree المخصّص لنشرات الأسعار وحدها");
+assert.deepEqual(cfg0.mainDependentTasks.map((t) => [t.task, t.script]), [["OZK-PriceListSync", "tools/auto-sync-price-lists.ps1"]]);
+const sync = read("tools/auto-sync-price-lists.ps1");
+assert.match(sync, /rev-parse --abbrev-ref HEAD/);
+assert.match(sync, /\$currentBranch -ne "main"/, "حارس main في مزامنة النشرات لم يُخفَّف");
+// أي سكربت يشترط الفرع main يجب أن يكون مهمة معلنة (أو أداة يدوية مستثناة بتعليل).
+const manualMainTools = { "tools/ai-work-coordination.ps1": "أداة يدوية لقفل AI على main، ليست مهمة مجدولة" };
+const declared = new Set(cfg0.mainDependentTasks.map((t) => t.script));
+for (const f of readdirSync(path.join(root, "tools")).filter((n) => n.endsWith(".ps1")).map((n) => `tools/${n}`)) {
+  const src = read(f);
+  if (/(abbrev-ref HEAD|branch --show-current)/.test(src) && /-ne\s+["']main["']/.test(src)) {
+    assert.ok(declared.has(f) || manualMainTools[f], `${f} يشترط main وليس معلناً في mainDependentTasks`);
+  }
+}
+const pre = read("tools/deploy-gate/migration-preflight.ps1");
+assert.match(pre, /task definition not visible/, "مهمة غير مرئية ⇒ حجب");
+assert.match(pre, /outside its allow-list/, "لا باب خلفي عبر worktree الـmain");
+assert.match(pre, /main worktree must not be the operational repository/);
+assert.match(gateSrc, /\$pre = Invoke-MigrationPreflight \$Config[\s\S]{0,400}migration preflight blocked/, "Initialize يرفض ما لم ينجح الفحص");
+assert.match(checkWfRaw(), /tools\\tests\\Test-MigrationPreflight\.ps1/);
+ok("مزامنة النشرات تبقى على main عبر worktree مخصّص، والتحويل محجوب حتى ينجح الفحص (Codex P1 #5)");
+
 // 2) الـworkflow
 const wf = read(".github/workflows/windows-release.yml").split("\n").filter((l) => !l.trim().startsWith("#")).join("\n");
 const onBlock = wf.slice(wf.indexOf("\non:"), wf.indexOf("\npermissions:"));
@@ -119,9 +147,11 @@ const releaseJob = wf.slice(wf.indexOf("\n  release:"));
 assert.match(releaseJob, /environment: windows-production/);
 assert.match(releaseJob, /needs: verify/);
 assert.doesNotMatch(wf, /--force|push -f\b|\+refs\/heads|:\+/);
-assert.match(releaseJob, /git merge-base --is-ancestor "\$current" "\$sha"/);
-assert.match(releaseJob, /windows-production moved since verification/);
-assert.match(releaseJob, /kind: v\.kind/);
+assert.match(releaseJob, /node scripts\/windows-release-apply\.mjs --verification windows-release\.json/);
+const applySrc = read("scripts/windows-release-apply.mjs").split("\n").filter((l) => !l.trim().startsWith("//")).map((l) => l.replace(/\s\/\/ .*$/, "")).join("\n");
+assert.doesNotMatch(applySrc, /--force|"-f"|\+refs|reset|rebase/, "التقديم بلا force ولا reset ولا rebase");
+assert.match(applySrc, /planPush\(/);
+assert.match(applySrc, /neither the verified base/);
 assert.doesNotMatch(wf, /run:[^\n]*\$\{\{\s*inputs\./, "المدخلات عبر env لا داخل run");
 ok("الـworkflow يدوي، الموافقة تسبق الدفع، Fast-Forward بلا --force، والمدخلات عبر env");
 
@@ -163,7 +193,7 @@ ok(`writerScripts تغطي كل مسار كتابة الأسعار (${seen.size}
 const checkWf = read(".github/workflows/check.yml");
 assert.match(checkWf, /tools\\tests\\Test-DeployGate\.ps1/);
 assert.match(checkWf, /tools\\tests\\Test-RunRepoTask\.ps1/);
-for (const f of ["tools/deploy-gate/deploy-gate.ps1", "tools/deploy-gate/run-repo-task.ps1", "tools/deploy-gate/notify.ps1", "tools/tests/Test-DeployGate.ps1", "tools/tests/Test-RunRepoTask.ps1"]) {
+for (const f of ["tools/deploy-gate/deploy-gate.ps1", "tools/deploy-gate/run-repo-task.ps1", "tools/deploy-gate/notify.ps1", "tools/deploy-gate/migration-preflight.ps1", "tools/tests/Test-DeployGate.ps1", "tools/tests/Test-RunRepoTask.ps1", "tools/tests/Test-MigrationPreflight.ps1"]) {
   const bytes = readFileSync(path.join(root, f));
   assert.ok(bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf, `${f} يحمل BOM (5.1 يقرأ غيره ANSI)`);
 }

@@ -94,23 +94,30 @@ export function affectedLongRunning(changedPaths, components) {
   return components.filter((c) => c.files.some((f) => changed.has(normalize(f)))).map((c) => c.name);
 }
 
-function git(args) {
-  return execFileSync("git", args, { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
-}
-function gitOk(args) {
-  try { execFileSync("git", args, { cwd: root, stdio: "ignore" }); return true; } catch { return false; }
+// سياق قابل للحقن: git في مجلد محدد وواجهة GitHub (حقيقية أو وهمية في الاختبارات).
+export function makeGitContext(cwd = root) {
+  return {
+    git: (args) => execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim(),
+    gitOk: (args) => { try { execFileSync("git", args, { cwd, stdio: "ignore" }); return true; } catch { return false; } }
+  };
 }
 
-async function gh(repo, rel) {
-  const res = await fetch(`https://api.github.com/repos/${repo}/${rel}`, {
-    headers: {
-      accept: "application/vnd.github+json",
-      "user-agent": "ozk-windows-release",
-      ...(process.env.GITHUB_TOKEN ? { authorization: `Bearer ${process.env.GITHUB_TOKEN}` } : {})
-    }
-  });
-  if (!res.ok) throw new Error(`GitHub API ${rel}: ${res.status}`);
-  return res.json();
+export function makeGitHubApi(repo, token = process.env.GITHUB_TOKEN) {
+  const call = async (method, rel, body) => {
+    const res = await fetch(`https://api.github.com/repos/${repo}/${rel}`, {
+      method,
+      headers: {
+        accept: "application/vnd.github+json",
+        "user-agent": "ozk-windows-release",
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+        ...(body ? { "content-type": "application/json" } : {})
+      },
+      body: body ? JSON.stringify(body) : undefined
+    });
+    if (!res.ok) throw new Error(`GitHub API ${method} ${rel}: ${res.status}`);
+    return res.json();
+  };
+  return { get: (rel) => call("GET", rel), post: (rel, body) => call("POST", rel, body) };
 }
 
 function parseArgs(argv) {
@@ -123,41 +130,88 @@ function parseArgs(argv) {
   };
 }
 
-// شروط git: SHA كامل وموجود وعلى main، والفرع موجود، والتقدّم Fast-Forward. يُرجع base.
-function verifyGitPreconditions(sha, config) {
-  if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error("sha must be a full 40-character commit SHA");
-  if (!gitOk(["cat-file", "-e", `${sha}^{commit}`])) throw new Error(`commit ${sha} not found`);
-  if (!gitOk(["merge-base", "--is-ancestor", sha, `origin/${config.mainBranch}`])) throw new Error("commit is not on main");
-  if (!gitOk(["rev-parse", "--verify", `origin/${config.windowsBranch}`])) {
-    throw new Error(`origin/${config.windowsBranch} does not exist; the owner creates it once from the SHA currently deployed on OZK2026`);
+// سجلات الإصدار الناجحة (حمولة الإصدار نفسها + منشئ الـworkflow + آخر حالة success).
+export async function recordedReleases(ctx, config, sha = "") {
+  const query = `deployments?environment=${encodeURIComponent(config.deploymentEnvironment)}${sha ? `&sha=${sha}` : ""}&per_page=100`;
+  const out = [];
+  for (const dep of await ctx.api.get(query)) {
+    const payload = typeof dep.payload === "string" && dep.payload ? JSON.parse(dep.payload) : dep.payload;
+    if (!payload || payload.kind !== RELEASE_KIND || payload.sha !== dep.sha) continue;
+    if (config.deploymentCreator && dep.creator?.login !== config.deploymentCreator) continue;
+    const statuses = await ctx.api.get(`deployments/${dep.id}/statuses?per_page=5`);
+    out.push({ id: dep.id, sha: dep.sha, created_at: dep.created_at, payload, succeeded: statuses[0]?.state === "success" });
   }
-  const base = git(["rev-parse", `origin/${config.windowsBranch}`]);
-  if (base === sha) throw new Error("already released");
-  if (!gitOk(["merge-base", "--is-ancestor", base, sha])) throw new Error(`${sha} is not a fast-forward of ${config.windowsBranch} (${base})`);
-  return base;
+  return out;
 }
 
-function writerBlobsFor(change, sha) {
+// شروط git ثم الأساس (base). حالة الاستكمال (Codex P1 #4): الفرع يساوي الهدف بالضبط لأن
+// الدفع نجح ثم فشل تسجيل الـDeployment — الأساس عندها آخر إصدار مسجَّل ناجح قبله، ولا دفع.
+// أي حالة أخرى لا تساوي الأساس ولا الهدف = رفض.
+export async function resolveReleaseBase(ctx, sha, config) {
+  if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error("sha must be a full 40-character commit SHA");
+  if (!ctx.gitOk(["cat-file", "-e", `${sha}^{commit}`])) throw new Error(`commit ${sha} not found`);
+  if (!ctx.gitOk(["merge-base", "--is-ancestor", sha, `origin/${config.mainBranch}`])) throw new Error("commit is not on main");
+  if (!ctx.gitOk(["rev-parse", "--verify", `origin/${config.windowsBranch}`])) {
+    throw new Error(`origin/${config.windowsBranch} does not exist; the owner creates it once from the SHA currently deployed on OZK2026`);
+  }
+  const current = ctx.git(["rev-parse", `origin/${config.windowsBranch}`]);
+  if (current !== sha) {
+    if (!ctx.gitOk(["merge-base", "--is-ancestor", current, sha])) throw new Error(`${sha} is not a fast-forward of ${config.windowsBranch} (${current})`);
+    return { base: current, resume: false };
+  }
+  const releases = await recordedReleases(ctx, config);
+  if (releases.some((r) => r.sha === sha && r.succeeded)) throw new Error("already released and recorded");
+  const earlier = releases
+    .filter((r) => r.succeeded && r.sha !== sha && ctx.gitOk(["merge-base", "--is-ancestor", r.sha, sha]))
+    .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0];
+  if (!earlier) throw new Error(`${config.windowsBranch} already equals ${sha} but no earlier recorded release exists to derive the base; re-run the failed jobs of the original release run`);
+  return { base: earlier.sha, resume: true };
+}
+
+function writerBlobsFor(ctx, change, sha) {
   const blobs = {};
   for (const p of change.writerScriptsChanged) {
     const f = change.files.find((x) => x.path === p);
-    blobs[p] = f.status === "D" ? "deleted" : git(["rev-parse", `${sha}:${p}`]);
+    blobs[p] = f.status === "D" ? "deleted" : ctx.git(["rev-parse", `${sha}:${p}`]);
   }
   return blobs;
 }
 
-async function fetchCi(repo, sha, config) {
-  const runs = (await gh(repo, `actions/runs?head_sha=${sha}&per_page=100`)).workflow_runs || [];
-  const pulls = await gh(repo, `commits/${sha}/pulls`);
+export async function fetchCi(ctx, sha, config) {
+  const runs = (await ctx.api.get(`actions/runs?head_sha=${sha}&per_page=100`)).workflow_runs || [];
+  const pulls = await ctx.api.get(`commits/${sha}/pulls`);
   const pullRequest = pulls.find((p) => p.merge_commit_sha === sha && p.merged_at) || null;
-  const prCheckRuns = pullRequest ? ((await gh(repo, `commits/${pullRequest.head.sha}/check-runs?per_page=100`)).check_runs || []) : [];
+  const prCheckRuns = pullRequest ? ((await ctx.api.get(`commits/${pullRequest.head.sha}/check-runs?per_page=100`)).check_runs || []) : [];
   return evaluateCi({ runs, requiredMainWorkflows: config.requiredMainWorkflows, pullRequest, prCheckRuns, requiredPrChecks: config.requiredPrChecks });
+}
+
+// التحقق الكامل: يُستدعى من خطوة الفحص، ويُعاد حرفياً قبل التطبيق (لا ثقة بنتيجة قديمة).
+export async function verifyRelease(ctx, { sha, writeApproved, config }) {
+  const { base, resume } = await resolveReleaseBase(ctx, sha, config);
+  const change = classifyChanges(ctx.git(["diff", "--name-status", "--no-renames", base, sha]), config.writerScripts);
+  const detected = change.files
+    .filter((f) => f.status !== "D" && inWriteScanScope(f.path, config.writeScan))
+    .filter((f) => writeIndicators(ctx.git(["show", `${sha}:${f.path}`]), config.writeScan).length > 0)
+    .map((f) => f.path);
+  change.writerScriptsChanged = [...new Set([...change.writerScriptsChanged, ...detected])].sort();
+  if (change.writerScriptsChanged.length && !writeApproved) {
+    throw new Error(`writer scripts changed and write_scripts_approved is false: ${change.writerScriptsChanged.join(", ")}`);
+  }
+  const ci = await fetchCi(ctx, sha, config);
+  const summary = {
+    kind: RELEASE_KIND, sha, base, resume, windowsRef: config.windowsBranch, writeScriptsApproved: writeApproved, writerBlobs: writerBlobsFor(ctx, change, sha),
+    changedFiles: change.files.map((f) => `${f.status} ${f.path}`), ps1Changed: change.ps1Changed, sqlChanged: change.sqlChanged,
+    mjsChanged: change.mjsChanged, writerScriptsChanged: change.writerScriptsChanged, ci: ci.results,
+    pendingRestart: affectedLongRunning(change.files.map((f) => f.path), config.longRunningComponents)
+  };
+  if (!ci.ok) { const err = new Error(`CI not green on ${sha}: ${ci.failing.join(", ")}`); err.summary = summary; throw err; }
+  return summary;
 }
 
 function writeStepSummary(summary) {
   if (!process.env.GITHUB_STEP_SUMMARY) return;
   appendFileSync(process.env.GITHUB_STEP_SUMMARY, [
-    `## إصدار Windows: \`${summary.base.slice(0, 7)}\` → \`${summary.sha.slice(0, 7)}\``,
+    `## إصدار Windows: \`${summary.base.slice(0, 7)}\` → \`${summary.sha.slice(0, 7)}\`${summary.resume ? " (استكمال تسجيل: الفرع مُقدَّم أصلاً)" : ""}`,
     `- ملفات متغيّرة: ${summary.changedFiles.length} — PS1: ${summary.ps1Changed} — SQL: ${summary.sqlChanged} — قادرة على الكتابة: ${summary.writerScriptsChanged.join(", ") || "لا"}`,
     `- عمليات طويلة تحتاج إعادة تشغيل يدوية بعد النشر: ${summary.pendingRestart.join(", ") || "لا"}`,
     ...Object.entries(summary.ci).map(([k, v]) => `- CI ${k}: ${v}`),
@@ -167,30 +221,16 @@ function writeStepSummary(summary) {
 
 async function main() {
   const { sha, writeApproved, out } = parseArgs(process.argv.slice(2));
-  const repo = process.env.GITHUB_REPOSITORY || "ozkkhallouf-ux/tobacco-web";
-  const config = loadGateConfig();
-  const base = verifyGitPreconditions(sha, config);
-
-  const change = classifyChanges(git(["diff", "--name-status", "--no-renames", base, sha]), config.writerScripts);
-  const detected = change.files
-    .filter((f) => f.status !== "D" && inWriteScanScope(f.path, config.writeScan))
-    .filter((f) => writeIndicators(git(["show", `${sha}:${f.path}`]), config.writeScan).length > 0)
-    .map((f) => f.path);
-  change.writerScriptsChanged = [...new Set([...change.writerScriptsChanged, ...detected])].sort();
-  if (change.writerScriptsChanged.length && !writeApproved) {
-    throw new Error(`writer scripts changed and write_scripts_approved is false: ${change.writerScriptsChanged.join(", ")}`);
+  const ctx = { ...makeGitContext(), api: makeGitHubApi(process.env.GITHUB_REPOSITORY || "ozkkhallouf-ux/tobacco-web") };
+  try {
+    const summary = await verifyRelease(ctx, { sha, writeApproved, config: loadGateConfig() });
+    writeFileSync(out, JSON.stringify(summary, null, 2));
+    writeStepSummary(summary);
+    console.log(`OK: ${summary.base.slice(0, 7)} -> ${sha.slice(0, 7)} (${summary.changedFiles.length} files${summary.resume ? ", resume registration" : ""})`);
+  } catch (err) {
+    if (err.summary) { writeFileSync(out, JSON.stringify(err.summary, null, 2)); writeStepSummary(err.summary); }
+    throw err;
   }
-  const ci = await fetchCi(repo, sha, config);
-  const summary = {
-    kind: RELEASE_KIND, sha, base, windowsRef: config.windowsBranch, writeScriptsApproved: writeApproved, writerBlobs: writerBlobsFor(change, sha),
-    changedFiles: change.files.map((f) => `${f.status} ${f.path}`), ps1Changed: change.ps1Changed, sqlChanged: change.sqlChanged,
-    mjsChanged: change.mjsChanged, writerScriptsChanged: change.writerScriptsChanged, ci: ci.results,
-    pendingRestart: affectedLongRunning(change.files.map((f) => f.path), config.longRunningComponents)
-  };
-  writeFileSync(out, JSON.stringify(summary, null, 2));
-  writeStepSummary(summary);
-  if (!ci.ok) throw new Error(`CI not green on ${sha}: ${ci.failing.join(", ")}`);
-  console.log(`OK: ${base.slice(0, 7)} -> ${sha.slice(0, 7)} (${change.files.length} files)`);
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

@@ -79,6 +79,9 @@ jobs:
     permissions:
       contents: write
       deployments: write
+      actions: read
+      checks: read
+      pull-requests: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -90,38 +93,19 @@ jobs:
         with:
           name: windows-release
 
-      # لا --force: GitHub يرفض الدفع إن لم يكن Fast-Forward، والفحص أدناه يرفض
-      # إن تحرّك الفرع منذ خطوة التحقق.
-      - name: Fast-forward windows-production
-        env:
-          INPUT_SHA: ${{ inputs.sha }}
-        run: |
-          set -euo pipefail
-          base=$(node -e "process.stdout.write(require('./windows-release.json').base)")
-          sha=$(node -e "process.stdout.write(require('./windows-release.json').sha)")
-          test "$sha" = "$(echo "$INPUT_SHA" | tr 'A-F' 'a-f')"
-          git fetch --no-tags origin windows-production
-          current=$(git rev-parse origin/windows-production)
-          if [ "$current" != "$base" ]; then echo "windows-production moved since verification ($base -> $current)"; exit 1; fi
-          git merge-base --is-ancestor "$current" "$sha"
-          git push origin "$sha:refs/heads/windows-production"
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
 
-      - name: Record deployment
+      # قابل للاستكمال بأمان (Codex P1 #4): يعيد التحقق من الـSHA وmain وCI وموافقة الكتابة،
+      # ثم يدفع Fast-Forward فقط إن كان الفرع على الأساس المتحقَّق (بلا --force)، أو يتخطى الدفع
+      # إن كان الفرع يساوي الهدف بالضبط (دفعٌ سابق نجح وفشل تسجيله)، ثم يسجّل الإصدار بلا تكرار.
+      # أي موضع آخر للفرع = رفض.
+      - name: Fast-forward windows-production and record the release
         env:
-          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
+          INPUT_SHA: ${{ inputs.sha }}
           APPROVER: ${{ github.actor }}
           RUN_ID: ${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          node -e "
-            const v = require('./windows-release.json');
-            const body = { ref: v.sha, environment: 'windows-production', auto_merge: false, required_contexts: [],
-              production_environment: true, description: 'OZK Windows release ' + v.sha.slice(0, 7),
-              payload: { kind: v.kind, sha: v.sha, base: v.base, windowsRef: v.windowsRef, approver: process.env.APPROVER,
-                runId: process.env.RUN_ID, writeScriptsApproved: v.writeScriptsApproved, writerBlobs: v.writerBlobs,
-                changedFiles: v.changedFiles.length, ps1Changed: v.ps1Changed, sqlChanged: v.sqlChanged } };
-            require('fs').writeFileSync('deployment.json', JSON.stringify(body));
-          "
-          id=$(gh api -X POST "repos/$GITHUB_REPOSITORY/deployments" --input deployment.json --jq .id)
-          gh api -X POST "repos/$GITHUB_REPOSITORY/deployments/$id/statuses" -f state=success -f description="approved and fast-forwarded" --jq .state
-          echo "deployment $id recorded" >> "$GITHUB_STEP_SUMMARY"
+        run: node scripts/windows-release-apply.mjs --verification windows-release.json --sha "$INPUT_SHA"

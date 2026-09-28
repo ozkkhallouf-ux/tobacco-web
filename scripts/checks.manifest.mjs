@@ -106,6 +106,7 @@ export const CHECKS = [
   'check-telegram-delivery-observability.mjs',
   'check-telegram-grok-ask.mjs',
   'check-windows-deploy-gate.mjs',
+  'check-windows-release-resume.mjs',
 ];
 
 // ----------------------------------------------------------------------------

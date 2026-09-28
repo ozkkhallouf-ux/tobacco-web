@@ -80,6 +80,10 @@ function Write-AuditRecord($Paths, $Record) {
     [System.IO.File]::AppendAllText($Paths.Audit, $line + "`n", (New-Object System.Text.UTF8Encoding($false)))
 }
 
+# فحص ما قبل التحويل (Codex P1 #5): مهام تحتاج main يجب أن تعمل من worktree مخصّص قبل تحويل
+# المستودع التشغيلي. -Mode Initialize يرفض التسجيل ما لم ينجح.
+. (Join-Path $PSScriptRoot 'migration-preflight.ps1')
+
 # ------------------------------------------------------------
 # نقاط تماس خارجية — تُستبدل في الاختبارات
 # ------------------------------------------------------------
@@ -362,7 +366,7 @@ function New-GateRecord($Config, [string]$GateMode) {
         deployment_id = $null; approver = $null; run_id = $null
         ci = $null; changed_files = @(); ps1_changed = $false; sql_changed = $false; mjs_changed = $false
         writer_scripts_changed = @(); write_capable_detected = @(); writer_hashes_before = $null; writer_hashes_after = $null
-        pending_restart = @()
+        pending_restart = @(); preflight = @()
         pause_ms = 0; stash_count_before = $null; stash_count_after = $null
         result = $null; reason = $null
     }
@@ -399,6 +403,11 @@ function Invoke-DeployGate {
 
     if ($GateMode -eq 'Initialize') {
         if ($state) { return Complete-Gate $paths $record 'STOP' 'already initialized' $false }
+        $pre = Invoke-MigrationPreflight $Config
+        $record.preflight = @($pre.results | ForEach-Object { $_.verdict + ' ' + $_.task + ': ' + $_.reason })
+        if (-not $pre.ok) {
+            return Complete-Gate $paths $record 'STOP' ('migration preflight blocked: ' + (@($pre.results | Where-Object { $_.verdict -ne 'PASS' } | ForEach-Object { $_.task + ' (' + $_.reason + ')' }) -join '; ')) $true
+        }
         if ($branch -ne [string]$Config.windowsBranch) { return Complete-Gate $paths $record 'STOP' ('expected branch ' + $Config.windowsBranch + ', found ' + $branch) $true }
         if (@(Get-DirtyEntries $Config).Count -gt 0) { return Complete-Gate $paths $record 'STOP' 'worktree not clean' $true }
         $fetch = Invoke-GateGit $Config @('fetch', 'origin', $Config.windowsBranch)

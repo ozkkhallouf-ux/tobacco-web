@@ -11,6 +11,7 @@
 | `deploy-gate.ps1` | يحدّث المستودع على OZK2026 إلى `origin/windows-production` بـ`merge --ff-only` بعد كل الفحوص. أوضاعه: `Deploy` و`DryRun` و`Initialize` و`Rollback -To <sha>` و`Unpin` |
 | `run-repo-task.ps1` | مشغّل موحّد لكل Scheduled Task تشغّل سكربتاً من المستودع. يتخطى أثناء النشر، ويتحقق من بصمات سكربتات الكتابة |
 | `notify.ps1` | تنبيه تيليغرام مستقل عن سكربتات المستودع |
+| `migration-preflight.ps1` | فحص قراءة فقط قبل تحويل المستودع التشغيلي إلى `windows-production`: المهام التي تحتاج main يجب أن تعمل من worktree مخصّص صحيح. يستدعيه `-Mode Initialize` أيضاً |
 | `gate-config.example.json` | الإعداد المرجعي: المسارات، الفحوص المطلوبة، `pauseTasks`، `writerScripts` |
 
 ## التشغيل على الجهاز (بعد التثبيت)

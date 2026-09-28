@@ -56,6 +56,9 @@ $script:Running = @()
 $script:Alerts = New-Object System.Collections.ArrayList
 
 function Get-HostName { return 'TESTHOST' }
+# منطق الفحص نفسه مُختبَر في Test-MigrationPreflight.ps1؛ هنا نتيجته فقط.
+$script:Preflight = [pscustomobject]@{ ok = $true; results = @([pscustomobject]@{ task = 'OZK-PriceListSync'; verdict = 'PASS'; reason = 'stub' }) }
+function Invoke-MigrationPreflight($Config) { return $script:Preflight }
 function Send-GateAlert([string]$Message, [string]$DedupeKey) { [void]$script:Alerts.Add($Message) }
 function Get-RunningTaskNames([string[]]$TaskNames) { return @($script:Running) }
 function Start-GateSleep([int]$Seconds) { Start-Sleep -Milliseconds 50 }
@@ -167,6 +170,16 @@ function New-InitializedEnv {
 }
 
 try {
+    Write-Host '== Migration preflight guards Initialize (Codex P1 #5)'
+    $ep = New-GateTestEnv; [void]$environments.Add($ep)
+    $script:Preflight = [pscustomobject]@{ ok = $false; results = @([pscustomobject]@{ task = 'OZK-PriceListSync'; verdict = 'BLOCK'; reason = 'still runs from the operational repository (needs main)' }) }
+    $r = Invoke-DeployGate -Config $ep.Config -GateMode 'Initialize'
+    Assert-True ($r.result -eq 'STOP' -and $r.reason -like 'migration preflight blocked*OZK-PriceListSync*') 'Initialize refused while a main-dependent task runs from the operational repo'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $ep.Gate 'state.json'))) 'no gate state recorded when the preflight blocks'
+    $script:Preflight = [pscustomobject]@{ ok = $true; results = @([pscustomobject]@{ task = 'OZK-PriceListSync'; verdict = 'PASS'; reason = 'runs from the dedicated main worktree' }) }
+    $r = Invoke-DeployGate -Config $ep.Config -GateMode 'Initialize'
+    Assert-True ($r.result -eq 'OK' -and @($r.preflight).Count -eq 1) 'Initialize proceeds and records the preflight once it passes'
+
     Write-Host '== Initialize'
     $e = New-GateTestEnv; [void]$environments.Add($e)
     $r = Invoke-DeployGate -Config $e.Config -GateMode 'Deploy'

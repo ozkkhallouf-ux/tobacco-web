@@ -111,5 +111,21 @@
       ],
       "untrackedFiles": []
     }
+  ],
+  "mainWorktree": {
+    "_comment": "Dedicated main checkout ONLY for tasks that must run on main (Codex P1 #5). Never a path to update operational Windows scripts: the gate never touches it and run-repo-task.ps1 refuses scripts outside repoPath. It must be a separate worktree/clone on main with the official remote before the operational repo is switched to windows-production.",
+    "path": "C:\\Users\\LOQ\\Documents\\OZK-TOBACCO\\tobacco-web-main",
+    "branch": "main",
+    "remote": "https://github.com/ozkkhallouf-ux/tobacco-web.git",
+    "allowedScripts": [
+      "tools/auto-sync-price-lists.ps1"
+    ]
+  },
+  "mainDependentTasks": [
+    {
+      "task": "OZK-PriceListSync",
+      "script": "tools/auto-sync-price-lists.ps1",
+      "reason": "commits price-data.json and pushes to main; exits unless its own worktree is on main"
+    }
   ]
 }
