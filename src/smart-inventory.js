@@ -15,6 +15,8 @@
     filter: "all",
     busyItemId: "",
     accountBusy: false,
+    finishing: false,
+    finishProgress: null,
     lastError: "",
     localNotice: ""
   };
@@ -41,6 +43,154 @@
   function statusLabel(status) { return ({ not_started: "لم يبدأ", in_progress: "قيد الجرد", completed: "مكتمل", late: "متأخر" })[status] || status || "لم يبدأ"; }
   function itemStatusLabel(status) { return ({ uncounted: "غير معدود", counted: "معدود", zero: "صفر فعلي", not_found: "غير موجود في موقعه", damaged: "تالف" })[status] || status; }
   function classificationLabel(value) { return ({ matched: "مطابق", shortage: "نقص", increase: "زيادة", uncounted: "غير معدود", unknown: "غير معروف" })[value] || value; }
+
+  function quantityTextBlank(value) {
+    return String(value ?? "").trim() === "";
+  }
+
+  function claimedByOther(item, now) {
+    if (!item || item.claimedByMe || !item.claimedByDisplayName) return false;
+    const expires = new Date(item.claimExpiresAt || 0).getTime();
+    return Number.isFinite(expires) && expires > now;
+  }
+
+  function lineHasTypedQuantity(quantities) {
+    const row = quantities || {};
+    return !quantityTextBlank(row.unit1Qty) || !quantityTextBlank(row.unit2Qty) || !quantityTextBlank(row.damagedUnit1Qty);
+  }
+
+  // فراغ يُغلق صفراً: غير معدود، بلا أي كمية مكتوبة، وبلا حالة «غير موجود» أو «تالف».
+  // اختيار «صفر فعلي» مع خانات فارغة هو نفس الحفظ اليدوي فيُدرَج.
+  function blankLineForZero(item, quantities, now) {
+    if (!item || item.recountRequested || item.countState !== "uncounted") return false;
+    if (claimedByOther(item, now)) return false;
+    if (lineHasTypedQuantity(quantities)) return false;
+    const status = quantities?.countState || "";
+    if (status === "not_found" || status === "damaged") return false;
+    return true;
+  }
+
+  function planSessionFinish(items, quantitiesById, options = {}) {
+    const now = Number.isFinite(options.now) ? options.now : Date.now();
+    const pending = new Set(options.pendingItemIds || []);
+    const zeros = [];
+    const blockers = [];
+    for (const item of items || []) {
+      if (!item) continue;
+      if (item.recountRequested) {
+        blockers.push({ itemId: item.id, reason: "recount" });
+        continue;
+      }
+      if (item.countState !== "uncounted") continue;
+      if (pending.has(item.id)) {
+        blockers.push({ itemId: item.id, reason: "unsaved" });
+        continue;
+      }
+      if (claimedByOther(item, now)) {
+        blockers.push({ itemId: item.id, reason: "claimed" });
+        continue;
+      }
+      const quantities = quantitiesById?.[item.id] || {};
+      if (blankLineForZero(item, quantities, now)) zeros.push(item);
+      else blockers.push({ itemId: item.id, reason: "unsaved" });
+    }
+    return { zeros, blockers };
+  }
+
+  function parseCountInput(countState, unit1Raw, unit2Raw, damagedRaw) {
+    if (countState === "counted" && unit1Raw === "" && unit2Raw === "") {
+      throw new Error("لحفظ هذا الصنف الآن أدخل كمية أو اختر «صفر فعلي». الخانة الفارغة تُحتسب صفراً فقط عند إغلاق الجرد.");
+    }
+    const unit1Qty = Number(unit1Raw || 0), unit2Qty = Number(unit2Raw || 0), damagedUnit1Qty = Number(damagedRaw || 0);
+    if (![unit1Qty, unit2Qty, damagedUnit1Qty].every((n) => Number.isFinite(n) && n >= 0)) throw new Error("الكميات يجب أن تكون أرقاماً موجبة أو صفراً.");
+    if (["zero", "not_found"].includes(countState) && (unit1Qty !== 0 || unit2Qty !== 0)) throw new Error("حالة الصفر أو غير الموجود يجب أن تكون كميتها صفراً.");
+    return { countState, unit1Qty, unit2Qty, damagedUnit1Qty };
+  }
+
+  function zeroCountPayload(item) {
+    return { ...parseCountInput("zero", "", "", ""), expectedVersion: item?.rowVersion ?? null };
+  }
+
+  // 1 مفرد، 2 مثنى، 3–10 جمع، 11+ تمييز منصوب.
+  function arabicCountPhrase(count, forms) {
+    const n = Number(count) || 0;
+    if (n === 1) return forms.one;
+    if (n === 2) return forms.two;
+    if (n >= 3 && n <= 10) return forms.few(n);
+    return forms.many(n);
+  }
+
+  function finishZeroConfirmText(count) {
+    const head = arabicCountPhrase(count, {
+      one: "صنف واحد بلا كمية وسيُحتسب صفراً فعلياً",
+      two: "صنفان بلا كمية وسيُحتسبان صفراً فعلياً",
+      few: (n) => `${n} أصناف بلا كمية وستُحتسب صفراً فعلياً`,
+      many: (n) => `${n} صنفاً بلا كمية وسيُحتسب صفراً فعلياً`
+    });
+    return `${head}. المتابعة وإغلاق الجرد؟`;
+  }
+
+  function finishZeroSuccessText(count) {
+    if (!count) return "تم إغلاق الجرد. لا يمكن للموظفين تعديله الآن.";
+    const head = arabicCountPhrase(count, {
+      one: "صنف واحد فارغ حُسب صفراً فعلياً",
+      two: "صنفان فارغان حُسبا صفراً فعلياً",
+      few: (n) => `${n} أصناف فارغة حُسبت صفراً فعلياً`,
+      many: (n) => `${n} صنفاً فارغاً حُسب صفراً فعلياً`
+    });
+    return `تم إغلاق الجرد. ${head}.`;
+  }
+
+  function finishBlockedMessage(blockers) {
+    const list = Array.isArray(blockers) ? blockers : [];
+    const unsaved = list.filter((row) => row.reason === "unsaved").length;
+    const claimed = list.filter((row) => row.reason === "claimed").length;
+    const recount = list.filter((row) => row.reason === "recount").length;
+    const parts = [];
+    if (unsaved) parts.push(arabicCountPhrase(unsaved, {
+      one: "صنف واحد كُتبت كميته أو حالته ولم يُحفظ",
+      two: "صنفان كُتبت كميتهما أو حالتهما ولم يُحفظا",
+      few: (n) => `${n} أصناف كُتبت كمياتها أو حالاتها ولم تُحفظ`,
+      many: (n) => `${n} صنفاً كُتبت كميته أو حالته ولم يُحفظ`
+    }));
+    if (claimed) parts.push(arabicCountPhrase(claimed, {
+      one: "صنف واحد يحجزه موظف آخر",
+      two: "صنفان يحجزهما موظف آخر",
+      few: (n) => `${n} أصناف يحجزها موظف آخر`,
+      many: (n) => `${n} صنفاً يحجزه موظف آخر`
+    }));
+    if (recount) parts.push(arabicCountPhrase(recount, {
+      one: "صنف واحد بانتظار إعادة عد",
+      two: "صنفان بانتظار إعادة عد",
+      few: (n) => `${n} أصناف بانتظار إعادة عد`,
+      many: (n) => `${n} صنفاً بانتظار إعادة عد`
+    }));
+    return `لا يمكن الإغلاق قبل إنهاء: ${parts.join("، ")}. لم يُحتسب أي صنف فارغ صفراً.`;
+  }
+
+  function storedZeroText(items) {
+    const rows = Array.isArray(items) ? items : [];
+    if (!rows.length) return "لم يُحفظ أي صنف فارغ صفراً قبل التوقف.";
+    const names = rows.map((item) => item?.itemName || item?.id || "صنف").join("، ");
+    const head = arabicCountPhrase(rows.length, {
+      one: "صنف واحد حُفظ صفراً قبل التوقف",
+      two: "صنفان حُفظا صفراً قبل التوقف",
+      few: (n) => `${n} أصناف حُفظت صفراً قبل التوقف`,
+      many: (n) => `${n} صنفاً حُفظ صفراً قبل التوقف`
+    });
+    return `${head}: ${names}.`;
+  }
+
+  function linesStoredAsZero(planned, acked, sessionItems) {
+    const live = new Map((sessionItems || []).map((item) => [item.id, item]));
+    const chosen = new Map();
+    for (const item of acked || []) chosen.set(item.id, live.get(item.id) || item);
+    for (const item of planned || []) {
+      const row = live.get(item.id);
+      if (row?.countState === "zero") chosen.set(item.id, row);
+    }
+    return [...chosen.values()];
+  }
 
   function drafts() { return jsonRead(DRAFT_KEY, {}); }
   function saveDraft(itemId, patch) {
@@ -79,13 +229,13 @@
     finally { state.loading = false; callbacks.render(); }
   }
 
-  async function refreshCurrent(session) {
+  async function refreshCurrent(session, options = {}) {
     if (!state.session?.id) return load(session, true);
     try {
       state.session = await store.getSmartInventoryCounterSession(state.session.id);
       if (isOwner(session) && state.ownerReport) state.ownerReport = await store.getSmartInventoryOwnerReport(state.session.id);
       callbacks.render();
-    } catch (error) { callbacks.notice("error", error.message); }
+    } catch (error) { if (!options.keepNotice) callbacks.notice("error", error.message); }
   }
 
   async function startOrJoin(warehouseKey, session) {
@@ -135,7 +285,7 @@
     const unit2 = draft.unit2Qty ?? (item.unit2Qty ?? "");
     const damaged = draft.damagedUnit1Qty ?? (item.damagedUnit1Qty ?? "");
     const countState = draft.countState || (item.recountRequested ? "counted" : item.countState);
-    const disabled = saved || lockedByOther || state.session?.status === "completed";
+    const disabled = saved || lockedByOther || state.session?.status === "completed" || state.finishing;
     let lockText = "";
     if (saved) lockText = `تم جرد هذا الصنف بواسطة ${esc(item.countedByDisplayName || "موظف")}${item.countedAt ? ` — ${esc(fmtDate(item.countedAt))}` : ""}`;
     else if (lockedByOther) lockText = `يقوم ${esc(item.claimedByDisplayName)} بجرده الآن`;
@@ -154,7 +304,7 @@
         <label class="smart-damaged">تالف (${esc(item.unit1Name || "الوحدة الأولى")})<input type="number" min="0" step="0.001" inputmode="decimal" data-smart-qty="damagedUnit1Qty" data-item-id="${esc(item.id)}" value="${esc(damaged)}" ${disabled ? "disabled" : ""}></label>
       </div>
       <div class="button-row"><button class="button primary" type="button" data-smart-save="${esc(item.id)}" ${disabled || state.busyItemId === item.id ? "disabled" : ""}>${state.busyItemId === item.id ? "جاري الحفظ…" : "حفظ الصنف"}</button></div>
-      ${lockText ? `<p class="smart-lock-note">${lockText}</p>` : '<p class="muted">الخانة الفارغة ليست صفراً. اختر «صفر فعلي» عند التأكد.</p>'}
+      ${lockText ? `<p class="smart-lock-note">${lockText}</p>` : '<p class="muted">الخانة الفارغة تبقى غير معدودة. عند إغلاق الجرد تُحتسب صفراً بعد التأكيد.</p>'}
     </article>`;
   }
 
@@ -169,7 +319,7 @@
     const counted = items.filter((item) => item.countState !== "uncounted").length;
     const progress = items.length ? Math.round(counted / items.length * 100) : 0;
     return `<section class="panel wide smart-session-head">
-      <div><button class="button secondary" data-smart-back type="button">← المستودعات</button><h2>${esc(state.session.warehouseName)}</h2>
+      <div><button class="button secondary" data-smart-back type="button"${state.finishing ? " disabled" : ""}>← المستودعات</button><h2>${esc(state.session.warehouseName)}</h2>
       <p class="muted">وقت القطع المرجعي: ${esc(fmtDate(state.session.cutoffAt))} · ${onlineLabel()}</p></div>
       <div class="smart-session-progress"><strong dir="ltr">${counted} / ${items.length}</strong><div class="smart-progress"><span style="width:${progress}%"></span></div></div>
     </section>
@@ -180,8 +330,8 @@
       <button class="button secondary" data-smart-refresh>تحديث</button>
     </div></section>
     <section class="smart-items-grid">${filtered.map(counterRow).join("") || '<article class="panel"><p class="muted">لا توجد نتائج.</p></article>'}</section>
-    <section class="panel wide smart-finalize"><p>بعد حفظ كل الأصناف اضغط الإغلاق النهائي. بعد الإغلاق لا يستطيع الموظف تعديل الجرد.</p>
-      <button class="button success" data-smart-complete ${state.session.status === "completed" ? "disabled" : ""}>${state.session.status === "completed" ? "الجرد مكتمل" : "حفظ الجرد وإغلاقه"}</button></section>`;
+    <section class="panel wide smart-finalize"><p>الأصناف التي تركت كميتها فارغة تُحتسب صفراً عند الإغلاق بعد تأكيدك. بعد الإغلاق لا يستطيع الموظف تعديل الجرد.</p>
+      <button class="button success" data-smart-complete ${state.session.status === "completed" || state.finishing ? "disabled" : ""}>${finishButtonLabel()}</button></section>`;
   }
 
   function ownerReport() {
@@ -212,19 +362,42 @@
     return `<section class="panel wide"><div class="panel-title-row"><div><h2>اختر المستودع</h2><p class="muted">يمكنك بدء أو متابعة أي مستودع. لا تظهر كمية الأمين أو الفروقات في حسابك.</p></div><span>${onlineLabel()}</span></div></section>${warehouseCards(state.warehouses, session)}`;
   }
 
+  function finishButtonLabel() {
+    if (state.session?.status === "completed") return "الجرد مكتمل";
+    if (state.finishing && state.finishProgress) return `جاري احتساب الفراغ صفراً… ${state.finishProgress.done} / ${state.finishProgress.total}`;
+    if (state.finishing) return "جاري الإغلاق…";
+    return "حفظ الجرد وإغلاقه";
+  }
+
+  function quantitiesForItem(item, root) {
+    const card = root?.querySelector?.(`[data-smart-item-card="${CSS.escape(String(item.id))}"]`);
+    if (card) {
+      const get = (name) => card.querySelector(`[data-smart-qty="${name}"]`)?.value ?? "";
+      return {
+        unit1Qty: get("unit1Qty"),
+        unit2Qty: get("unit2Qty"),
+        damagedUnit1Qty: get("damagedUnit1Qty"),
+        countState: card.querySelector("[data-smart-state]")?.value || ""
+      };
+    }
+    const draft = drafts()[item.id] || {};
+    return {
+      unit1Qty: draft.unit1Qty ?? "",
+      unit2Qty: draft.unit2Qty ?? "",
+      damagedUnit1Qty: draft.damagedUnit1Qty ?? "",
+      countState: draft.countState || ""
+    };
+  }
+
   function readRow(itemId, root) {
     const card = root.querySelector(`[data-smart-item-card="${CSS.escape(itemId)}"]`);
     const get = (name) => card?.querySelector(`[data-smart-qty="${name}"]`)?.value ?? "";
     const countState = card?.querySelector("[data-smart-state]")?.value || "counted";
-    const unit1Raw = get("unit1Qty"), unit2Raw = get("unit2Qty"), damagedRaw = get("damagedUnit1Qty");
-    if (countState === "counted" && unit1Raw === "" && unit2Raw === "") throw new Error("أدخل كمية فعلية أو اختر «صفر فعلي». الخانة الفارغة ليست صفراً.");
-    const unit1Qty = Number(unit1Raw || 0), unit2Qty = Number(unit2Raw || 0), damagedUnit1Qty = Number(damagedRaw || 0);
-    if (![unit1Qty, unit2Qty, damagedUnit1Qty].every((n) => Number.isFinite(n) && n >= 0)) throw new Error("الكميات يجب أن تكون أرقاماً موجبة أو صفراً.");
-    if (["zero", "not_found"].includes(countState) && (unit1Qty !== 0 || unit2Qty !== 0)) throw new Error("حالة الصفر أو غير الموجود يجب أن تكون كميتها صفراً.");
-    return { countState, unit1Qty, unit2Qty, damagedUnit1Qty };
+    return parseCountInput(countState, get("unit1Qty"), get("unit2Qty"), get("damagedUnit1Qty"));
   }
 
   async function saveItem(itemId, root, session, queued = null) {
+    if (state.finishing) return;
     const item = state.session.items.find((row) => row.id === itemId);
     if (!item) return;
     let input;
@@ -298,8 +471,14 @@
   function bind(root, session, api) {
     callbacks = api || callbacks;
     root.querySelector("[data-smart-retry]")?.addEventListener("click", () => { state.loadedForRole = ""; load(session, true); });
-    root.querySelectorAll("[data-smart-warehouse]").forEach((button) => button.addEventListener("click", () => button.dataset.smartSession ? openSession(button.dataset.smartSession, session) : startOrJoin(button.dataset.smartWarehouse, session)));
-    root.querySelector("[data-smart-back]")?.addEventListener("click", () => { state.session = null; state.ownerReport = null; state.loadedForRole = ""; load(session, true); });
+    root.querySelectorAll("[data-smart-warehouse]").forEach((button) => button.addEventListener("click", () => {
+      if (state.finishing) return;
+      button.dataset.smartSession ? openSession(button.dataset.smartSession, session) : startOrJoin(button.dataset.smartWarehouse, session);
+    }));
+    root.querySelector("[data-smart-back]")?.addEventListener("click", () => {
+      if (state.finishing) return;
+      state.session = null; state.ownerReport = null; state.loadedForRole = ""; load(session, true);
+    });
     root.querySelector("[data-smart-owner-back]")?.addEventListener("click", () => { state.session = null; state.ownerReport = null; state.loadedForRole = ""; load(session, true); });
     root.querySelector("[data-smart-search]")?.addEventListener("input", (event) => { state.query = event.currentTarget.value; callbacks.render(); });
     root.querySelectorAll("[data-smart-filter]").forEach((button) => button.addEventListener("click", () => { state.filter = button.dataset.smartFilter; callbacks.render(); }));
@@ -320,10 +499,7 @@
       });
     });
     root.querySelectorAll("[data-smart-save]").forEach((button) => button.addEventListener("click", () => saveItem(button.dataset.smartSave, root, session)));
-    root.querySelector("[data-smart-complete]")?.addEventListener("click", async () => {
-      try { const result = await store.completeSmartInventorySession(state.session.id); if (!result.ok) throw new Error(`بقي ${result.remaining} صنفاً غير معدود أو بانتظار إعادة عد.`); callbacks.notice("success", "تم إغلاق الجرد. لا يمكن للموظفين تعديله الآن."); await refreshCurrent(session); }
-      catch (error) { callbacks.notice("error", error.message); }
-    });
+    root.querySelector("[data-smart-complete]")?.addEventListener("click", () => finishSession(root, session));
     root.querySelectorAll("[data-smart-recount]").forEach((button) => button.addEventListener("click", async () => {
       const reason = prompt("سبب إعادة العد (إلزامي):"); if (!reason) return;
       try { await store.openSmartInventoryRecount(button.dataset.smartRecount, reason); state.ownerReport = await store.getSmartInventoryOwnerReport(state.session.id); callbacks.notice("success", "فُتحت إعادة عد عمياء لموظف آخر."); callbacks.render(); } catch (error) { callbacks.notice("error", error.message); }
@@ -354,9 +530,111 @@
       try { await store.updateInventoryCounterAccount(action, { userId: button.dataset.smartAccountToggle, reason: action === "disable" ? "تعطيل بواسطة المالك" : "إعادة تفعيل بواسطة المالك" }); callbacks.notice("success", action === "disable" ? "عُطل الحساب وأُلغيت جلساته." : "أُعيد تفعيل الحساب."); state.loadedForRole = ""; await load(session, true); } catch (error) { callbacks.notice("error", error.message); }
     }));
     if (autoRefreshTimer) clearInterval(autoRefreshTimer);
-    autoRefreshTimer = setInterval(() => { if (document.visibilityState === "visible" && state.session) refreshCurrent(session); }, 30000);
+    autoRefreshTimer = setInterval(() => { if (document.visibilityState === "visible" && state.session && !state.finishing) refreshCurrent(session); }, 30000);
+  }
+
+  function saveFailureText(result) {
+    if (result?.code === "claimed") return `يقوم ${result.claimedByDisplayName || "موظف آخر"} بجرد صنف الآن. لم يُغلق الجرد.`;
+    if (result?.code === "version_conflict") return "تغيّر صنف على جهاز آخر. حدّث الصفحة ثم أعد الإغلاق.";
+    if (result?.code === "session_closed") return "أُغلق الجرد من جهاز آخر.";
+    if (result?.code === "recount_requires_other_counter") return "إعادة العد يجب أن ينفذها موظف آخر.";
+    return "لم يُحفظ الصنف الفارغ صفراً.";
+  }
+
+  function readFinishPlan(root) {
+    const items = Array.isArray(state.session?.items) ? state.session.items : [];
+    const quantitiesById = {};
+    for (const item of items) quantitiesById[item.id] = quantitiesForItem(item, root);
+    return planSessionFinish(items, quantitiesById, { pendingItemIds: outbox().map((row) => row.itemId) });
+  }
+
+  function offlineZeroWarning() {
+    callbacks.notice("warning", "لا يمكن احتساب الأصناف الفارغة صفراً دون اتصال. أعد الإغلاق عند عودة الإنترنت.");
+  }
+
+  function isNetworkError(error) {
+    return !navigator.onLine || /network|fetch|الاتصال/i.test(error?.message || "");
+  }
+
+  function unfinishedCloseText(count) {
+    return arabicCountPhrase(count, {
+      one: "بقي صنف واحد غير معدود أو بانتظار إعادة عد.",
+      two: "بقي صنفان غير معدودين أو بانتظار إعادة عد.",
+      few: (n) => `بقيت ${n} أصناف غير معدودة أو بانتظار إعادة عد.`,
+      many: (n) => `بقي ${n} صنفاً غير معدود أو بانتظار إعادة عد.`
+    });
+  }
+
+  function shouldAbortFinish(plan) {
+    if (plan.blockers.length) {
+      callbacks.notice("error", finishBlockedMessage(plan.blockers));
+      return true;
+    }
+    if (plan.zeros.length && !navigator.onLine) {
+      offlineZeroWarning();
+      return true;
+    }
+    return false;
+  }
+
+  async function finishSession(root, session) {
+    if (state.finishing || !state.session || state.session.status === "completed") return;
+    callbacks.clearNotice?.();
+    let plan = readFinishPlan(root);
+    if (shouldAbortFinish(plan)) return;
+    if (plan.zeros.length && !window.confirm(finishZeroConfirmText(plan.zeros.length))) return;
+    plan = readFinishPlan(root);
+    if (shouldAbortFinish(plan)) return;
+    state.finishing = true;
+    state.finishProgress = plan.zeros.length ? { done: 0, total: plan.zeros.length } : null;
+    callbacks.render();
+    const activeSession = state.session;
+    const sessionId = activeSession.id;
+    const zeroedByUs = [];
+    try {
+      for (const item of plan.zeros) {
+        const entry = { itemId: item.id, requestId: uuid(), ...zeroCountPayload(item) };
+        const result = await store.saveSmartInventoryItem(entry);
+        if (!result?.ok) {
+          if (result?.code === "already_counted") clearDraft(item.id);
+          else throw new Error(`${saveFailureText(result)} ${storedZeroText(zeroedByUs)}`);
+        } else {
+          clearDraft(item.id);
+          item.countState = "zero";
+          item.unit1Qty = 0;
+          item.unit2Qty = 0;
+          item.damagedUnit1Qty = 0;
+          zeroedByUs.push(item);
+        }
+        if (state.finishProgress) state.finishProgress.done += 1;
+        callbacks.render();
+      }
+      const result = await store.completeSmartInventorySession(sessionId);
+      if (!result?.ok) throw new Error(`${unfinishedCloseText(result?.remaining)} ${storedZeroText(zeroedByUs)}`);
+      activeSession.status = "completed";
+      callbacks.notice("success", finishZeroSuccessText(zeroedByUs.length));
+      await refreshCurrent(session, { keepNotice: true });
+    } catch (error) {
+      if (isNetworkError(error)) {
+        await refreshCurrent(session, { keepNotice: true }).catch(() => {});
+        const saved = linesStoredAsZero(plan.zeros, zeroedByUs, state.session?.id === sessionId ? state.session.items : activeSession.items);
+        callbacks.notice("warning", `انقطع الاتصال أثناء احتساب الأصفار. ${storedZeroText(saved)} أعد إغلاق الجرد عند عودة الإنترنت؛ ما حُحفظ لن يُكرَّر.`);
+      } else {
+        callbacks.notice("error", error.message);
+        await refreshCurrent(session, { keepNotice: true }).catch(() => {});
+      }
+    } finally {
+      state.finishing = false;
+      state.finishProgress = null;
+      callbacks.render();
+    }
   }
 
   window.addEventListener("online", () => { state.localNotice = "عاد الاتصال"; flushOutbox(window.__ozkSession).then(() => refreshCurrent(window.__ozkSession)); });
-  window.SmartInventory = { state, load, render, bind, deviceId, reset() { state.loadedForRole = ""; state.session = null; state.ownerReport = null; state.warehouses = []; state.dashboard = []; } };
+  window.SmartInventory = {
+    state, load, render, bind, deviceId,
+    parseCountInput, planSessionFinish, zeroCountPayload, finishZeroConfirmText, finishZeroSuccessText, finishBlockedMessage,
+    finishSession, saveItem,
+    reset() { state.loadedForRole = ""; state.session = null; state.ownerReport = null; state.warehouses = []; state.dashboard = []; state.finishing = false; state.finishProgress = null; }
+  };
 })();
