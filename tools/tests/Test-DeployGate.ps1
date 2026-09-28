@@ -89,8 +89,10 @@ function New-GateTestEnv {
     $repo = Join-Path $base 'repo'
     $gate = Join-Path $base 'gate'
     New-Item -ItemType Directory -Force -Path $gate | Out-Null
-    & git init -q --bare $origin 2>&1 | Out-Null
-    & git clone -q $origin $seed 2>&1 | Out-Null
+    # git يكتب تحذيرات عادية على stderr (مثل «cloned an empty repository») تصير في 5.1
+    # أخطاء منهية مع Stop — كل النداءات عبر Invoke-TestGit الذي يحكم برمز الخروج وحده.
+    Invoke-TestGit $base @('init', '-q', '--bare', $origin) | Out-Null
+    Invoke-TestGit $base @('clone', '-q', $origin, $seed) | Out-Null
     Invoke-TestGit $seed @('checkout', '-q', '-b', 'main') | Out-Null
     Write-TestFile (Join-Path $seed 'tools/sync-approved-prices-to-ameen.ps1') "'writer v1'`n"
     Write-TestFile (Join-Path $seed 'tools/reader.ps1') "'reader v1'`n"
@@ -99,7 +101,7 @@ function New-GateTestEnv {
     Invoke-TestGit $seed @('commit', '-q', '-m', 'initial') | Out-Null
     Invoke-TestGit $seed @('push', '-q', 'origin', 'main') | Out-Null
     Invoke-TestGit $seed @('push', '-q', 'origin', 'main:refs/heads/windows-production') | Out-Null
-    & git clone -q $origin $repo 2>&1 | Out-Null
+    Invoke-TestGit $base @('clone', '-q', $origin, $repo) | Out-Null
     Invoke-TestGit $repo @('checkout', '-q', '-B', 'windows-production', 'origin/windows-production') | Out-Null
     Invoke-TestGit $repo @('branch', '-q', '--set-upstream-to=origin/windows-production') | Out-Null
     $config = [pscustomobject]@{
