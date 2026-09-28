@@ -25,7 +25,7 @@ jobs:
       - name: Start throwaway Postgres for the warehouse prune test
         run: |
           sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql postgresql-client
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql postgresql-client postgresql-contrib
           if ! pg_isready -q; then
             ver="$(pg_lsclusters --no-header | awk 'NR==1 { print $1 }')"
             sudo pg_ctlcluster "$ver" main start

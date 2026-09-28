@@ -109,6 +109,16 @@ if ($migrationText -notmatch "least\(p_before, pg_catalog\.now\(\) - interval '2
 } else {
   Add-Pass "cutoff stays two days and the batch cap stays 40"
 }
+if ($migrationCode -notmatch 'for update of r skip locked' -or $migrationCode -notmatch 'smart_inventory_sessions_source_report_id_fkey' -or $migrationCode -notmatch 'inventory_recon_sessions_source_report_id_fkey' -or $migrationCode -notmatch "confdeltype in \('a', 'r'\)" -or $migrationCode -notmatch "confdeltype in \('n', 'a', 'r'\)") {
+  Add-Failure "prune function must lock rows before the delete and accept only the live foreign-key actions"
+} else {
+  Add-Pass "prune locks candidates and checks the live foreign-key shape"
+}
+if ($migrationText -notmatch 'توقفت الهجرة: جدول public.inventory_recon_sessions غير موجود') {
+  Add-Failure "migration must refuse to run when inventory_recon_sessions is missing"
+} else {
+  Add-Pass "migration states the recon-table precondition"
+}
 
 if (-not (Test-Path -LiteralPath $retentionPath)) {
   Add-Failure "missing $retentionPath"
@@ -128,10 +138,20 @@ if ($retentionText -notmatch 'AddDays\(-2\)') {
 if ($retentionText -match 'AddDays\(-(1|3|7|14|30)\)') {
   Add-Failure "retention window drifted away from two days"
 }
-if ($retentionText -notmatch '\[int\]\$BatchSize = 40' -or $retentionText -notmatch '\[int\]\$MaxBatches = 150' -or $retentionText -notmatch '\[scriptblock\]\$PruneBatch') {
-  Add-Failure "production cleanup must take a prune callback with BatchSize=40 and MaxBatches=150"
+if ($retentionText -notmatch '\[int\]\$BatchSize = 40' -or $retentionText -notmatch '\[int\]\$MaxBatches = 24' -or $retentionText -notmatch '\[int\]\$MaxTimeouts = 3' -or $retentionText -notmatch '\[scriptblock\]\$PruneBatch') {
+  Add-Failure "production cleanup must take a prune callback with BatchSize=40, MaxBatches=24 and MaxTimeouts=3"
 } else {
-  Add-Pass "production batch defaults are 40 rows and 150 rounds"
+  Add-Pass "production batch defaults are 40 rows, 24 rounds, and 3 timeouts"
+}
+if ($retentionText -match 'Stalled' -or $pushText -match 'Stalled') {
+  Add-Failure "Stalled was removed; cleanup stops on foreign-key or the timeout cap instead"
+} else {
+  Add-Pass "there is no unused stalled flag"
+}
+if ($pushText -notmatch 'ErrorDetails\.Message') {
+  Add-Failure "push script must print the Postgres response body"
+} else {
+  Add-Pass "push script prints the server body"
 }
 if ($retentionText -match '\$FetchPage' -or $retentionText -match '\$DeleteIds' -or $retentionText -match 'id=in') {
   Add-Failure "retention module must not select or delete report ids itself"
@@ -344,6 +364,58 @@ if ($onlyResult.Removed -ne 0 -or -not $onlyResult.Exhausted -or $onlyCalls -ne 
   Add-Failure "a referenced-only backlog must return 0 and keep the report (removed=$($onlyResult.Removed) calls=$onlyCalls rows=$(@($onlyRefs).Count))"
 } else {
   Add-Pass "when every old report is still referenced, nothing is deleted"
+}
+
+function New-PruneError([string]$Message, [string]$Body) {
+  $record = New-Object System.Management.Automation.ErrorRecord(
+    (New-Object System.Exception $Message),
+    "PruneTest",
+    ([System.Management.Automation.ErrorCategory]::NotSpecified),
+    $null
+  )
+  $record.ErrorDetails = New-Object System.Management.Automation.ErrorDetails $Body
+  return $record
+}
+
+$timeoutCalls = 0
+$timeoutResult = Invoke-AmeenWarehouseStockReportCleanup -CutoffText $cutoff -MaxTimeouts 3 -WarningVariable timeoutWarnings -WarningAction Continue -PruneBatch {
+  param([string]$CutoffText, [int]$BatchSize)
+  $script:timeoutCalls += 1
+  if ($script:timeoutCalls -le 1) {
+    throw (New-PruneError "canceling statement due to statement timeout" '{"code":"57014","message":"SERVER-BODY-57014"}')
+  }
+  return 4
+}
+$timeoutText = @($timeoutWarnings) -join " "
+if ($timeoutResult.Removed -ne 4 -or $timeoutResult.Stopped -or $timeoutCalls -ne 2 -or $timeoutText -notmatch 'SERVER-BODY-57014') {
+  Add-Failure "a statement timeout must be printed and the next batch must continue (removed=$($timeoutResult.Removed) calls=$timeoutCalls stopped=$($timeoutResult.Stopped))"
+} else {
+  Add-Pass "statement timeout prints the server body and the loop continues"
+}
+
+$capCalls = 0
+$capResult = Invoke-AmeenWarehouseStockReportCleanup -CutoffText $cutoff -MaxTimeouts 2 -WarningAction SilentlyContinue -PruneBatch {
+  param([string]$CutoffText, [int]$BatchSize)
+  $script:capCalls += 1
+  throw (New-PruneError "canceling statement due to statement timeout" "57014")
+}
+if ($capResult.Stopped -ne "timeout" -or $capCalls -ne 2 -or $capResult.Removed -ne 0) {
+  Add-Failure "timeouts must stop at the cap (stopped=$($capResult.Stopped) calls=$capCalls removed=$($capResult.Removed))"
+} else {
+  Add-Pass "repeated statement timeouts stop after the cap"
+}
+
+$fkCalls = 0
+$fkResult = Invoke-AmeenWarehouseStockReportCleanup -CutoffText $cutoff -WarningAction SilentlyContinue -PruneBatch {
+  param([string]$CutoffText, [int]$BatchSize)
+  $script:fkCalls += 1
+  if ($script:fkCalls -eq 1) { return 40 }
+  throw (New-PruneError "prune_ameen_warehouse_stock_reports: unexpected foreign key; refusing to delete" "unexpected foreign key")
+}
+if ($fkResult.Stopped -ne "foreign-key" -or $fkCalls -ne 2 -or $fkResult.Removed -ne 40) {
+  Add-Failure "an unexpected foreign key must stop the loop (stopped=$($fkResult.Stopped) calls=$fkCalls removed=$($fkResult.Removed))"
+} else {
+  Add-Pass "an unexpected foreign key stops the loop after the rows already deleted"
 }
 
 if ($failures.Count -gt 0) {

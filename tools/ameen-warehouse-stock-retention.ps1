@@ -7,13 +7,15 @@
 # في نفس تشغيل المهمة.
 #
 # الحذف نفسه ليس هنا. الدالة prune_ameen_warehouse_stock_reports على
-# Supabase تحذف دفعة محدودة وتتجاوز أي تقرير ما زال source_report_id
-# لجلسة جرد ذكي أو جلسة مطابقة. هذا الملف يكرر النداء حتى ترجع الدالة
-# صفراً أو أصغر من حجم الدفعة، أو حتى حد الجولات. كل نداء معاملة مستقلة،
-# فتقدّم الجولة يبقى لو انتهت مهلة بيان لاحقة.
+# Supabase تقفل دفعة ثم تحذف ما بقي غير مرتبط بجلسة جرد. هذا الملف يكرر
+# النداء حتى ترجع الدالة صفراً أو أصغر من حجم الدفعة، أو حتى حد الجولات.
+# كل نداء معاملة مستقلة.
 #
-# لماذا الدفعات: دور authenticated على Supabase مهلته 8 ثوانٍ. حذف كل
-# الصفوف المطابقة ببيان واحد كان يُلغى (57014) فيتراجع ولا يُحذف شيء.
+# لماذا الدفعات: دور authenticated مهلته 8 ثوانٍ. الحذف الواحد كان يُلغى
+# (57014). مهمة ويندوز حدها 15 دقيقة وRestartCount 3، لذلك الحد 24 دفعة:
+# 24 × مهلة الطلب 20 ثانية = 8 دقائق، ويبقى وقت لقراءة الأمين والرفع.
+# مهلة البيان 57014 تُعاد المحاولة بحد MaxTimeouts ثم تتوقف الجولة.
+# «unexpected foreign key» يوقف الجولة فوراً.
 
 function ConvertTo-AmeenWarehouseStockUtc {
   param([Parameter(Mandatory = $true)]$Value)
@@ -61,16 +63,54 @@ function Invoke-AmeenWarehouseStockReportCleanup {
     [Parameter(Mandatory = $true)][string]$CutoffText,
     [Parameter(Mandatory = $true)][scriptblock]$PruneBatch,
     [int]$BatchSize = 40,
-    [int]$MaxBatches = 150
+    [int]$MaxBatches = 24,
+    [int]$MaxTimeouts = 3
   )
   if ($BatchSize -lt 1 -or $BatchSize -gt 40) { throw "BatchSize must be between 1 and 40." }
   if ($MaxBatches -lt 1) { throw "MaxBatches must be at least 1." }
+  if ($MaxTimeouts -lt 1) { throw "MaxTimeouts must be at least 1." }
 
   $removed = 0
   $batches = 0
+  $timeouts = 0
 
   while ($batches -lt $MaxBatches) {
-    $raw = @(& $PruneBatch -CutoffText $CutoffText -BatchSize $BatchSize)
+    $raw = $null
+    try {
+      $raw = @(& $PruneBatch -CutoffText $CutoffText -BatchSize $BatchSize)
+    } catch {
+      $serverBody = ""
+      if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
+        $serverBody = [string]$_.ErrorDetails.Message
+      }
+      $blob = ([string]$_.Exception.Message) + " " + $serverBody
+      if ($serverBody) { Write-Warning ("رد الخادم: " + $serverBody) }
+      if ($blob -match '57014' -or $blob -match 'statement timeout') {
+        $timeouts += 1
+        Write-Warning ("مهلة بيان أثناء تنظيف تقارير المخزون ({0}/{1})." -f $timeouts, $MaxTimeouts)
+        if ($timeouts -ge $MaxTimeouts) {
+          return [pscustomobject]@{
+            Removed = $removed
+            Batches = $batches
+            Exhausted = $false
+            Stopped = "timeout"
+          }
+        }
+        continue
+      }
+      if ($blob -match 'unexpected foreign key') {
+        Write-Warning "توقف تنظيف تقارير المخزون: مفتاح أجنبي غير متوقع."
+        return [pscustomobject]@{
+          Removed = $removed
+          Batches = $batches
+          Exhausted = $false
+          Stopped = "foreign-key"
+        }
+      }
+      Write-Warning ("تعذّر تنظيف تقارير المخزون: " + $_.Exception.Message)
+      throw
+    }
+
     if ($raw.Count -ne 1 -or $null -eq $raw[0]) {
       throw "نداء تنظيف تقارير المخزون لم يُرجع عدداً واحداً."
     }
@@ -86,7 +126,7 @@ function Invoke-AmeenWarehouseStockReportCleanup {
         Removed = $removed
         Batches = $batches
         Exhausted = $true
-        Stalled = $false
+        Stopped = ""
       }
     }
 
@@ -98,7 +138,7 @@ function Invoke-AmeenWarehouseStockReportCleanup {
         Removed = $removed
         Batches = $batches
         Exhausted = $true
-        Stalled = $false
+        Stopped = ""
       }
     }
   }
@@ -107,6 +147,6 @@ function Invoke-AmeenWarehouseStockReportCleanup {
     Removed = $removed
     Batches = $batches
     Exhausted = $false
-    Stalled = $false
+    Stopped = ""
   }
 }

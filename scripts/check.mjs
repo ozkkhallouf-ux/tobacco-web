@@ -2409,11 +2409,18 @@ for (const contract of [
   }
   if (!warehouseRetention.includes("AddDays(-2)")
       || !warehouseRetention.includes("[int]$BatchSize = 40")
-      || !warehouseRetention.includes("[int]$MaxBatches = 150")
+      || !warehouseRetention.includes("[int]$MaxBatches = 24")
+      || !warehouseRetention.includes("[int]$MaxTimeouts = 3")
       || !warehouseRetention.includes("[scriptblock]$PruneBatch")
       || !warehouseRetention.includes("created -lt $cutoff")
-      || /\$FetchPage|\$DeleteIds/.test(warehouseRetention)) {
-    console.error("ameen-warehouse-stock-retention.ps1 must keep the strict two-day cutoff and repeat a bounded prune callback.");
+      || !warehouseRetention.includes("57014")
+      || !warehouseRetention.includes("unexpected foreign key")
+      || /\$FetchPage|\$DeleteIds|Stalled/.test(warehouseRetention)) {
+    console.error("ameen-warehouse-stock-retention.ps1 must keep the two-day cutoff, 24-batch cap, and continue only on statement timeout.");
+    failed = true;
+  }
+  if (!warehouseStockScript.includes("ErrorDetails.Message") || /Stalled/.test(warehouseStockScript)) {
+    console.error("push-ameen-warehouse-stock.ps1 must print the Postgres error body and must not keep a stalled flag.");
     failed = true;
   }
 

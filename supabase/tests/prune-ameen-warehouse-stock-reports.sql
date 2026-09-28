@@ -72,15 +72,19 @@ create table public.ameen_warehouse_stock_reports (
   created_at timestamptz not null
 );
 
--- نفس شكل المفتاح في الإنتاج: بلا ON DELETE، أي NO ACTION.
+-- نفس اسم المفتاح وفعله على الحي: NO ACTION، والعمود source_report_id.
 create table public.smart_inventory_sessions (
   id uuid primary key,
-  source_report_id uuid not null references public.ameen_warehouse_stock_reports (id)
+  source_report_id uuid not null,
+  constraint smart_inventory_sessions_source_report_id_fkey
+    foreign key (source_report_id) references public.ameen_warehouse_stock_reports (id)
 );
 
 create table public.inventory_recon_sessions (
   id uuid primary key,
-  source_report_id uuid references public.ameen_warehouse_stock_reports (id) on delete set null
+  source_report_id uuid,
+  constraint inventory_recon_sessions_source_report_id_fkey
+    foreign key (source_report_id) references public.ameen_warehouse_stock_reports (id) on delete set null
 );
 
 \ir ../migrations/20260928140000_prune_ameen_warehouse_stock_reports.sql
@@ -88,7 +92,9 @@ create table public.inventory_recon_sessions (
 alter function public.prune_ameen_warehouse_stock_reports(timestamptz, integer) owner to prune_fn_owner;
 grant usage on schema auth to prune_fn_owner;
 grant execute on function auth.uid() to prune_fn_owner;
-grant select, delete on public.ameen_warehouse_stock_reports to prune_fn_owner;
+-- FOR UPDATE يحتاج صلاحية UPDATE. على الحي المالك هو مالك الجدول.
+-- دور الاختبار ليس المالك، فيُمنح القفل هنا فقط ولا يُمنح لـauthenticated في الهجرة.
+grant select, update, delete on public.ameen_warehouse_stock_reports to prune_fn_owner;
 grant select on public.smart_inventory_sessions to prune_fn_owner;
 grant select on public.inventory_recon_sessions to prune_fn_owner;
 
@@ -344,6 +350,139 @@ begin
 end
 $$;
 
+do $$
+declare
+  before_count integer;
+  smart_before integer;
+  recon_before integer;
+begin
+  select count(*) into before_count from public.ameen_warehouse_stock_reports;
+  select count(*) into smart_before from public.smart_inventory_sessions;
+  select count(*) into recon_before from public.inventory_recon_sessions;
+  alter table public.smart_inventory_sessions
+    drop constraint smart_inventory_sessions_source_report_id_fkey;
+  alter table public.smart_inventory_sessions
+    add constraint smart_inventory_sessions_source_report_id_fkey
+    foreign key (source_report_id)
+    references public.ameen_warehouse_stock_reports (id)
+    on delete cascade;
+  begin
+    perform public.prune_ameen_warehouse_stock_reports(pg_catalog.now(), 40);
+    raise exception 'cascade fk must be refused';
+  exception
+    when object_not_in_prerequisite_state then
+      if sqlerrm not like '%unexpected foreign key%' then
+        raise;
+      end if;
+  end;
+  if (select count(*) from public.ameen_warehouse_stock_reports) <> before_count then
+    raise exception 'cascade guard deleted reports';
+  end if;
+  if (select count(*) from public.smart_inventory_sessions) <> smart_before
+     or (select count(*) from public.inventory_recon_sessions) <> recon_before then
+    raise exception 'cascade guard wrote inventory rows';
+  end if;
+  alter table public.smart_inventory_sessions
+    drop constraint smart_inventory_sessions_source_report_id_fkey;
+  alter table public.smart_inventory_sessions
+    add constraint smart_inventory_sessions_source_report_id_fkey
+    foreign key (source_report_id)
+    references public.ameen_warehouse_stock_reports (id);
+end
+$$;
+
 commit;
+
+-- سباق جلستين: جلسة بعيدة تمسك KEY SHARE على تقرير قديم (كما يفعل إدراج
+-- مفتاح أجنبي) ثم تنتظر. التنظيف يجب أن يتجاوز ذلك الصف عبر SKIP LOCKED
+-- ويحذف تقريراً قديماً غيره، بلا كتابة على جدولي الجلسات.
+create extension if not exists dblink;
+
+insert into public.ameen_warehouse_stock_reports (id, created_at) values
+  ('10000000-0000-4000-8000-0000000000a1', pg_catalog.now() - interval '16 days'),
+  ('10000000-0000-4000-8000-0000000000a2', pg_catalog.now() - interval '15 days');
+
+select pg_catalog.pg_advisory_lock(824283);
+
+select dblink_connect(
+  'holder',
+  'host=/var/run/postgresql dbname=' || current_database() || ' user=postgres'
+);
+
+select dblink_send_query('holder', $holder$
+do $body$
+begin
+  perform id
+  from public.ameen_warehouse_stock_reports
+  where id = '10000000-0000-4000-8000-0000000000a1'
+  for key share;
+  perform pg_catalog.pg_advisory_lock(824282);
+  perform pg_catalog.pg_advisory_lock(824283);
+end
+$body$;
+$holder$);
+
+do $$
+declare
+  i integer := 0;
+  held boolean;
+begin
+  loop
+    select exists (
+      select 1
+      from pg_catalog.pg_locks
+      where locktype = 'advisory'
+        and classid = 0
+        and objid = 824282
+        and granted
+    ) into held;
+    exit when held;
+    i := i + 1;
+    if i > 50 then
+      raise exception 'race holder did not take the key-share signal lock';
+    end if;
+    perform pg_catalog.pg_sleep(0.1);
+  end loop;
+end
+$$;
+
+select set_config('request.jwt.claim.sub', '9724dbe4-ecb0-49f7-a6b4-12f7f73c68f3', false);
+set statement_timeout = '5s';
+
+do $$
+declare
+  removed integer;
+  smart_before integer;
+  recon_before integer;
+begin
+  select count(*) into smart_before from public.smart_inventory_sessions;
+  select count(*) into recon_before from public.inventory_recon_sessions;
+  removed := public.prune_ameen_warehouse_stock_reports(pg_catalog.now(), 40);
+  if removed < 1 then
+    raise exception 'locked-path prune deleted nothing';
+  end if;
+  if not exists (
+    select 1 from public.ameen_warehouse_stock_reports
+    where id = '10000000-0000-4000-8000-0000000000a1'
+  ) then
+    raise exception 'the KEY SHARE row was deleted or waited past skip locked';
+  end if;
+  if exists (
+    select 1 from public.ameen_warehouse_stock_reports
+    where id = '10000000-0000-4000-8000-0000000000a2'
+  ) then
+    raise exception 'the unlocked old row survived the locking prune';
+  end if;
+  if (select count(*) from public.smart_inventory_sessions) <> smart_before
+     or (select count(*) from public.inventory_recon_sessions) <> recon_before then
+    raise exception 'locking prune wrote inventory rows';
+  end if;
+end
+$$;
+
+set statement_timeout = 0;
+select pg_catalog.pg_advisory_unlock(824283);
+select * from dblink_get_result('holder') as holder_done(ignored text);
+select dblink_disconnect('holder');
 
 select 'PRUNE_TEST_OK' as result;

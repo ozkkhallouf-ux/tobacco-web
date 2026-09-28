@@ -25,6 +25,12 @@ for (const contract of [
   "smart_inventory_sessions",
   "inventory_recon_sessions",
   "unexpected foreign key",
+  "for update of r skip locked",
+  "smart_inventory_sessions_source_report_id_fkey",
+  "inventory_recon_sessions_source_report_id_fkey",
+  "confdeltype in ('a', 'r')",
+  "confdeltype in ('n', 'a', 'r')",
+  "توقفت الهجرة: جدول public.inventory_recon_sessions غير موجود",
   "revoke all on function public.prune_ameen_warehouse_stock_reports(timestamptz, integer) from public, anon, authenticated",
   "grant execute on function public.prune_ameen_warehouse_stock_reports(timestamptz, integer) to authenticated",
 ]) {
@@ -46,6 +52,10 @@ for (const contract of [
   "force row level security",
   "foreign_key_violation",
   "unexpected foreign key",
+  "cascade guard deleted reports",
+  "on delete cascade",
+  "for key share",
+  "the KEY SHARE row was deleted",
   "refusing: ameen_warehouse_stock_reports has the production shape",
   "refusing: smart_inventory_sessions has the production shape",
 ]) {
@@ -70,12 +80,30 @@ function runSql() {
   const exec = spawnSync("sudo", ["-n", "-u", "postgres", "psql", "-d", db, "-v", "ON_ERROR_STOP=1", "-f", testPath], { encoding: "utf8" });
   spawnSync("sudo", ["-n", "-u", "postgres", "psql", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", `drop database if exists ${db}`], { encoding: "utf8" });
   const output = `${drop.stdout || ""}${drop.stderr || ""}${create.stdout || ""}${create.stderr || ""}${exec.stdout || ""}${exec.stderr || ""}`;
+  spawnSync("sudo", ["-n", "-u", "postgres", "psql", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", `drop database if exists ${db}`], { encoding: "utf8" });
   if (drop.status !== 0 || create.status !== 0 || exec.status !== 0 || !output.includes("PRUNE_TEST_OK")) {
     console.error(output);
     console.error("prune SQL test failed");
     process.exit(exec.status || 1);
   }
-  console.log("check-warehouse-stock-prune: referenced reports survived a live SQL run.");
+
+  const missing = "ozk_prune_missing_recon_test";
+  const missingSql = [
+    "create table public.ameen_warehouse_stock_reports (id uuid primary key, created_at timestamptz not null);",
+    "create table public.smart_inventory_sessions (id uuid primary key, source_report_id uuid);",
+    `\\i ${migrationPath}`,
+  ].join("\n");
+  spawnSync("sudo", ["-n", "-u", "postgres", "psql", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", `drop database if exists ${missing}`], { encoding: "utf8" });
+  const missingCreate = spawnSync("sudo", ["-n", "-u", "postgres", "psql", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", `create database ${missing}`], { encoding: "utf8" });
+  const missingRun = spawnSync("sudo", ["-n", "-u", "postgres", "psql", "-d", missing, "-v", "ON_ERROR_STOP=1"], { encoding: "utf8", input: missingSql });
+  spawnSync("sudo", ["-n", "-u", "postgres", "psql", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", `drop database if exists ${missing}`], { encoding: "utf8" });
+  const missingOutput = `${missingCreate.stdout || ""}${missingCreate.stderr || ""}${missingRun.stdout || ""}${missingRun.stderr || ""}`;
+  if (missingCreate.status !== 0 || missingRun.status === 0 || !missingOutput.includes("inventory_recon_sessions")) {
+    console.error(missingOutput);
+    console.error("migration must stop when inventory_recon_sessions is absent");
+    process.exit(1);
+  }
+  console.log("check-warehouse-stock-prune: referenced reports survived a live SQL run, including the lock race and the cascade refusal.");
 }
 
 if (failed) process.exit(1);

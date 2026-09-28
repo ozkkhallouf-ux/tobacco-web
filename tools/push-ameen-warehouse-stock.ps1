@@ -209,13 +209,20 @@ try {
     return [int]$count
   }.GetNewClosure()
   $cleanup = Invoke-AmeenWarehouseStockReportCleanup -CutoffText $cutoff -PruneBatch $pruneBatch
-  if ($cleanup.Stalled) {
-    Write-Warning "توقف تنظيف تقارير المخزون: دفعة لم تُحذف، ستُعاد في الجولة التالية."
+  if ($cleanup.Stopped -eq "foreign-key") {
+    Write-Warning "توقف تنظيف تقارير المخزون: مفتاح أجنبي غير متوقع، ولن تكمل هذه الجولة."
+  } elseif ($cleanup.Stopped -eq "timeout") {
+    Write-Warning "توقف تنظيف تقارير المخزون بعد تكرار مهلة البيان ($($cleanup.Removed) صفاً). تكمل الجولة التالية."
   } elseif (-not $cleanup.Exhausted) {
     Write-Warning "تنظيف تقارير المخزون لم يكتمل في هذه الجولة ($($cleanup.Removed) صفاً). تكمل الجولة التالية."
   } elseif ($cleanup.Removed -gt 0) {
     Write-Host "نُظّف $($cleanup.Removed) تقرير مخزون أقدم من يومين وغير مرتبط بجرد، على دفعات." -ForegroundColor Green
   }
-} catch { Write-Warning "تعذّر تنظيف تقارير المخزون القديمة: $($_.Exception.Message)" }
+} catch {
+  Write-Warning "تعذّر تنظيف تقارير المخزون القديمة: $($_.Exception.Message)"
+  if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
+    Write-Warning ("رد الخادم: " + $_.ErrorDetails.Message)
+  }
+}
 
 Write-Host "تم رفع $($stores.Count) تقرير مستودع مستقل إلى ameen_warehouse_stock_reports." -ForegroundColor Green

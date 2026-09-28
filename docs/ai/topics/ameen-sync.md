@@ -1,10 +1,12 @@
 # تقرير موضوع مزامنة الأمين
 
-آخر تحديث: 2026-09-15
+آخر تحديث: 2026-09-28
 
 ## الحالة الحالية
 
 توجد مهام Windows منفصلة للأسعار والمخزون والأرصدة والفواتير والحركات والتكاليف. قاعدة التشغيل المعتمدة هي `AmnDb002`. لا يثبت هذا التقرير أن كل مهمة تعمل الآن؛ يلزم دليل حديث لكل مسار عند تشخيصه.
+
+تنظيف تقارير `ameen_warehouse_stock_reports` في مهمة «TOBACCO Ameen Warehouse Reports» يمر الآن عبر الدالة `prune_ameen_warehouse_stock_reports` من `tools/push-ameen-warehouse-stock.ps1`، وليس عبر DELETE مباشر ولا عبر pg_cron. القفل وحد الدفعات (24 داخل مهلة التنفيذ 15 دقيقة) في `docs/ai/topics/inventory.md`.
 
 `Build-InventoryReport` في `tools/ameen-sync-agent.ps1` يحفظ `itemGuid` بأحرف صغيرة (من `item_guid` / `mt000.GUID` في `ameen-stock-query.sql`) على كل صف مخزون في تقرير `ameen_sql_agent`، كي يربط المساعد المالي سطور المبيعات (`sales_line_items.item_key` = MatGUID) بالمخزون دون دمج بطاقات تتصادم بعد تطبيع الاسم (PR #205).
 
