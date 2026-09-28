@@ -167,6 +167,20 @@ assert.match(doc, /88ae841c6696bef2cbe75579039b215396972a6e/);
 assert.match(doc, /مصدره غير متحقَّق/);
 assert.match(doc, /windows-production-integrity/);
 assert.match(read("tools/deploy-gate/migration-preflight.ps1"), /\$taskState -ceq 'Disabled'/, "Disabled حرفياً من Task Scheduler وحده");
+// وجود الـSHA على windows-production ليس موافقة: البوابة تشترط Deployment للهدف نفسه وCI قبل الدمج.
+const deployFlow = gateSrc.slice(gateSrc.indexOf("function Invoke-DeployGate"), gateSrc.indexOf("function Invoke-GateRollback"));
+const idx = (needle) => { const i = deployFlow.indexOf(needle); assert.ok(i >= 0, `مفقود في مسار النشر: ${needle}`); return i; };
+assert.ok(idx("Get-ReleaseApproval $Config $target") < idx("'merge', '--ff-only'"), "الموافقة تُفحص قبل الدمج");
+assert.ok(idx("Get-CiVerdict $Config $target") < idx("'merge', '--ff-only'"), "CI يُفحص قبل الدمج");
+assert.ok(idx("if (-not $ci.ok)") < idx("'merge', '--ff-only'") && idx("if (-not $approval.ok)") < idx("'merge', '--ff-only'"));
+assert.match(gateSrc, /\[string\]\$payload\.sha -ne \$Sha\) \{ continue \}/, "الموافقة للـSHA الهدف نفسه بالضبط");
+assert.match(doc, /ليست ضماناً كافياً وحدها/);
+assert.match(doc, /VERSION ID DRIFT/);
+assert.match(doc, /20260928140000/);
+assert.match(doc, /20260928145121/);
+assert.match(doc, /ACTION TAKEN: NONE/);
+assert.match(doc, /خط الأساس الحالي على الجهاز `88ae841`/);
+assert.doesNotMatch(doc, /متجمّد على `1812c08`/, "الحالة الحالية لا تدّعي 1812c08");
 ok("حدود الثقة: البوابة (SYSTEM) وحدها تكتب ملفات الثقة، والمشغّل يكتب سجله في logDir فقط؛ والتوثيق يسجّل خط الأساس وحماية الفرع وDryRun 24 ساعة");
 
 // 2) الـworkflow
