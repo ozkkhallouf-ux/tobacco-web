@@ -430,6 +430,35 @@ try {
     $r = Invoke-DeployGate -Config $em.Config -GateMode 'AckRestart' -AckComponents @('OZK-AmeenAutoPrint', 'OZK-Tobacco-Server (scripts/serve.mjs)')
     Assert-True ($r.result -eq 'OK' -and (Get-TestState $em).status -eq 'ok') 'state returns to ok once every restart is acknowledged'
 
+    Write-Host '== Rollback after DEPLOYED_PENDING_RESTART and result filtering (Codex P1 #6)'
+    $er = New-InitializedEnv
+    $v1 = Get-TestHead $er
+    $v2 = Publish-TestRelease $er @{ 'tools/ameen-read-worker.ps1' = "'bad worker release'`n" } -Approve
+    $r = Invoke-DeployGate -Config $er.Config -GateMode 'Deploy'
+    Assert-True ($r.result -eq 'DEPLOYED_PENDING_RESTART' -and (Get-TestHead $er) -eq $v2) 'bad release deployed with pending restart'
+    $r = Invoke-DeployGate -Config $er.Config -GateMode 'Rollback' -RollbackTo $v1
+    $st = Get-TestState $er
+    Assert-True ($r.result -eq 'OK' -and (Get-TestHead $er) -eq $v1 -and $st.status -eq 'ROLLED_BACK_PINNED') 'rollback from a previous DEPLOYED_PENDING_RESTART deployment => allowed and pinned'
+    Assert-True (@($st.pendingRestart) -contains 'TOBACCO Ameen Read Worker') 'rollback keeps the long-running restart pending (no automatic restart)'
+    $eo = New-InitializedEnv
+    $o1 = Get-TestHead $eo
+    [void](Publish-TestRelease $eo @{ 'tools/reader.ps1' = "'ok release'`n" } -Approve)
+    $r = Invoke-DeployGate -Config $eo.Config -GateMode 'Deploy'
+    Assert-True ($r.result -eq 'OK') 'release deployed OK'
+    $auditPath = Join-Path $eo.Gate 'audit.jsonl'
+    $original = [System.IO.File]::ReadAllText($auditPath)
+    foreach ($bad in @('STOP', 'SKIP', 'FAIL', 'FAILED', 'DRYRUN', 'ok', 'WHATEVER', '')) {
+        [System.IO.File]::WriteAllText($auditPath, ($original -replace '"result":"OK"', ('"result":"' + $bad + '"')))
+        $r = Invoke-DeployGate -Config $eo.Config -GateMode 'Rollback' -RollbackTo $o1
+        Assert-True ($r.result -eq 'STOP' -and $r.reason -like '*not a previously deployed SHA*' -and (Get-TestHead $eo) -ne $o1) ("previous result '" + $bad + "' => rollback rejected")
+    }
+    [System.IO.File]::WriteAllText($auditPath, ('{not json' + "`n" + ($original -replace '"result":"OK"', '"result":"STOP"')))
+    $r = Invoke-DeployGate -Config $eo.Config -GateMode 'Rollback' -RollbackTo $o1
+    Assert-True ($r.result -eq 'STOP' -and (Get-TestHead $eo) -ne $o1) 'malformed audit line is skipped and does not authorise a rollback (fail closed)'
+    [System.IO.File]::WriteAllText($auditPath, ('{not json' + "`n" + $original))
+    $r = Invoke-DeployGate -Config $eo.Config -GateMode 'Rollback' -RollbackTo $o1
+    Assert-True ($r.result -eq 'OK' -and (Get-TestHead $eo) -eq $o1) 'rollback from a previous OK deployment => allowed (a malformed line elsewhere is ignored)'
+
     Write-Host '== Safety invariants in the source'
     $src = [System.IO.File]::ReadAllText($gateScript)
     Assert-True ($src -notmatch "'pull'" -and $src -notmatch "'rebase'" -and $src -notmatch "'--hard'") 'gate never passes pull, rebase or --hard to git'

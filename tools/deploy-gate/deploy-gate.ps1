@@ -548,12 +548,17 @@ function Invoke-GateRollback($Config, $Paths, $Record, $State, [string]$Head, [s
     $resolved = Invoke-GateGit $Config @('rev-parse', '--verify', '--quiet', ($RollbackTo + '^{commit}'))
     if ($resolved.Code -ne 0 -or -not $resolved.Text) { return Complete-Gate $Paths $Record 'STOP' ('unknown rollback target: ' + $RollbackTo) $true }
     $toSha = $resolved.Text
+    # الهدف يجب أن يكون الإصدار السابق لنشر ناجح مسجَّل (Codex P1 #6): OK أو
+    # DEPLOYED_PENDING_RESTART (الملفات نُشرت فعلاً وعملية طويلة لم يُعَد تشغيلها بعد).
+    # STOP/SKIP/FAIL/DRYRUN أو أي نتيجة غير معروفة أو سطر تالف = لا يُحتسب (fail-closed).
     $known = $false
+    $deployedResults = @('OK', 'DEPLOYED_PENDING_RESTART')
     if (Test-Path -LiteralPath $Paths.Audit) {
         foreach ($line in [System.IO.File]::ReadAllLines($Paths.Audit)) {
             if (-not $line) { continue }
-            $entry = $line | ConvertFrom-Json
-            if ([string]$entry.result -eq 'OK' -and [string]$entry.mode -eq 'Deploy' -and [string]$entry.old_sha -eq $toSha) { $known = $true }
+            try { $entry = $line | ConvertFrom-Json } catch { continue }
+            if (-not $entry) { continue }
+            if ($deployedResults -ccontains [string]$entry.result -and [string]$entry.mode -ceq 'Deploy' -and [string]$entry.old_sha -eq $toSha) { $known = $true }
         }
     }
     if (-not $known) { return Complete-Gate $Paths $Record 'STOP' 'rollback target is not a previously deployed SHA in the audit log' $true }

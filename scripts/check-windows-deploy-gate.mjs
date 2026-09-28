@@ -160,6 +160,8 @@ const gate = read("tools/deploy-gate/deploy-gate.ps1");
 for (const token of ["'pull'", "'rebase'", "'--hard'"]) assert.ok(!gate.includes(token), `البوابة لا تمرّر ${token}`);
 assert.ok(gate.includes("'merge', '--ff-only'"));
 assert.ok(gate.includes("'reset', '--keep'"), "الرجوع اليدوي بـreset --keep");
+assert.match(gate, /\$deployedResults = @\('OK', 'DEPLOYED_PENDING_RESTART'\)/, "الرجوع يقبل OK وDEPLOYED_PENDING_RESTART فقط (Codex P1 #6)");
+assert.match(gate, /try \{ \$entry = \$line \| ConvertFrom-Json \} catch \{ continue \}/, "سطر تدقيق تالف لا يُسقط الرجوع ولا يُحتسب");
 assert.ok(gate.includes(`'${RELEASE_KIND}'`), "حمولة الإصدار نفسها شرط للموافقة");
 assert.match(gate, /HEAD drift/);
 assert.match(gate, /target is not on main/);
