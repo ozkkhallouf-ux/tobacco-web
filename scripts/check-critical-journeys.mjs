@@ -465,6 +465,116 @@ await journey("inventory", "صفحات المخزون والجرد (الأمين
   assertClean("المخزون والجرد", collected);
 });
 
+// ===== ٦ب) بحث أصناف الجرد الذكي على الهاتف =====
+// العطل: أول حرف كان يستدعي render() على الصفحة كلها، فيُستبدل مربع البحث
+// وتُهدم قائمة النتائج. يسقط التركيز وتُقفل لوحة مفاتيح الجوال، ويتوقف تشكيل
+// العربية بعد الحرف الأول. الحارس يكتب عدة أحرف متتالية ثم يمرّر تشكيلاً
+// (composition) ويطلب بقاء عقدة الإدخال والقائمة والتركيز كما هي.
+async function readSmartSearch(page) {
+  return page.evaluate(() => {
+    const input = document.querySelector("[data-smart-search]");
+    const list = document.querySelector("[data-smart-results], .smart-items-grid");
+    return {
+      focused: !!input && document.activeElement === input,
+      sameInput: input?.dataset.smartSearchGeneration === "1",
+      sameList: list?.dataset.smartListGeneration === "1",
+      open: !!list && list.isConnected && !list.hidden && list.getClientRects().length > 0 && list.getAttribute("data-smart-results-open") === "true",
+      value: input?.value ?? null,
+      names: list ? [...list.querySelectorAll("h3")].map((node) => node.textContent.trim()) : [],
+    };
+  });
+}
+
+await journey("smart-inventory-search-focus", "بحث الجرد الذكي: القائمة تبقى مفتوحة والتركيز يبقى في المربع مع كل حرف وتشكيل العربية", async (page) => {
+  const collected = await openApp(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.evaluate((payload) => {
+    const appState = (0, eval)("state");
+    appState.session = payload.user;
+    window.__ozkSession = payload.user;
+    const smart = window.SmartInventory;
+    smart.state.loading = false;
+    smart.state.loadedForRole = "inventory_counter";
+    smart.state.lastError = "";
+    smart.state.query = "";
+    smart.state.filter = "all";
+    smart.state.session = payload.inventory;
+    (0, eval)("setRoute")("smartInventory");
+  }, {
+    user: {
+      id: "critical-counter",
+      name: "موظف جرد اختبار",
+      role: "موظف جرد",
+      email: "",
+      accessRole: "inventory_counter",
+    },
+    inventory: {
+      id: "critical-smart-session",
+      warehouseName: "مستودع الاختبار",
+      cutoffAt: "2026-09-28T08:00:00.000Z",
+      status: "in_progress",
+      items: [
+        { id: "i1", itemKey: "k1", itemCode: "1001", itemName: "مارلبورو أحمر", unit1Name: "كروز", unit2Name: "كرتونة", unit2Factor: 10, countState: "uncounted", rowVersion: 1 },
+        { id: "i2", itemKey: "k2", itemCode: "1002", itemName: "ونستون أزرق", unit1Name: "كروز", unit2Name: "كرتونة", unit2Factor: 10, countState: "uncounted", rowVersion: 1 },
+        { id: "i3", itemKey: "k3", itemCode: "1003", itemName: "كنت", unit1Name: "كروز", unit2Name: "كرتونة", unit2Factor: 10, countState: "uncounted", rowVersion: 1 },
+      ],
+    },
+  });
+
+  const search = page.locator("[data-smart-search]");
+  await search.waitFor({ state: "visible", timeout: 10000 });
+  assert(await page.locator(".smart-items-grid .smart-item").count() === 3, "قائمة أصناف الجرد لم تُفتح قبل الكتابة");
+  await search.click();
+  await page.evaluate(() => {
+    const input = document.querySelector("[data-smart-search]");
+    const list = document.querySelector("[data-smart-results], .smart-items-grid");
+    input.dataset.smartSearchGeneration = "1";
+    list.dataset.smartListGeneration = "1";
+  });
+
+  let typed = "";
+  for (const ch of "مار") {
+    typed += ch;
+    await page.keyboard.type(ch);
+    const snapshot = await readSmartSearch(page);
+    assert(snapshot.sameInput && snapshot.focused,
+      `بعد «${typed}» خرج التركيز من مربع البحث أو استُبدل المربع: ${JSON.stringify(snapshot)}`);
+    assert(snapshot.sameList && snapshot.open,
+      `بعد «${typed}» أُغلقت قائمة النتائج أو استُبدلت: ${JSON.stringify(snapshot)}`);
+    assert(snapshot.value === typed,
+      `بعد «${typed}» قيمة المربع صارت «${snapshot.value}» — الحروف لم تتراكم في نفس الحقل`);
+    assert(snapshot.names.includes("مارلبورو أحمر") && !snapshot.names.includes("ونستون أزرق"),
+      `بعد «${typed}» النتائج لم تتحدّث مع الإبقاء على القائمة: ${snapshot.names.join(" | ")}`);
+  }
+  await page.screenshot({ path: join(ARTIFACTS, "smart-inventory-search-typing.png") });
+
+  await page.evaluate(() => {
+    const input = document.querySelector("[data-smart-search]");
+    input.focus();
+    input.value = "";
+    input.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward", data: null }));
+    input.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true, data: "" }));
+    input.dispatchEvent(new CompositionEvent("compositionupdate", { bubbles: true, data: "و" }));
+    input.value = "و";
+    input.dispatchEvent(new InputEvent("input", { bubbles: true, data: "و", isComposing: true, inputType: "insertCompositionText" }));
+    input.dispatchEvent(new CompositionEvent("compositionupdate", { bubbles: true, data: "ون" }));
+    input.value = "ون";
+    input.dispatchEvent(new InputEvent("input", { bubbles: true, data: "ن", isComposing: true, inputType: "insertCompositionText" }));
+    input.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, data: "ون" }));
+    input.dispatchEvent(new InputEvent("input", { bubbles: true, data: "ون", isComposing: false, inputType: "insertCompositionText" }));
+  });
+  const composed = await readSmartSearch(page);
+  assert(composed.sameInput && composed.focused,
+    `تشكيل العربية أسقط التركيز أو استبدل المربع: ${JSON.stringify(composed)}`);
+  assert(composed.sameList && composed.open,
+    `تشكيل العربية أغلق قائمة النتائج: ${JSON.stringify(composed)}`);
+  assert(composed.value === "ون", `نص التشكيل لم يبقَ في المربع: «${composed.value}»`);
+  assert(composed.names.includes("ونستون أزرق") && !composed.names.includes("مارلبورو أحمر"),
+    `النتائج بعد التشكيل لا تطابق «ون»: ${composed.names.join(" | ")}`);
+  await page.screenshot({ path: join(ARTIFACTS, "smart-inventory-search-composition.png") });
+  assertClean("بحث الجرد الذكي", collected);
+});
+
 // ===== ٧) الذمم =====
 await journey("balances", "صفحة الذمم تعرض أرصدة الزبائن المزروعة بلا أخطاء", async (page) => {
   const collected = await openApp(page);
@@ -758,6 +868,100 @@ await journey("owner-only-deep-link", "الرابط العميق إلى مسار
     }
   }
   assert(problems.length === 0, problems.join("\n     "));
+});
+
+// ===== إغلاق الجرد الذكي: الفراغ يُحفظ صفراً بعد التأكيد =====
+await journey("smart-inventory-blank-zero", "إغلاق الجرد يحتسب الخانة الفارغة صفراً بعد التأكيد ولا يمس الكمية المكتوبة", async (page) => {
+  const collected = await openApp(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+  const dialogs = [];
+  let dialogMode = "dismiss";
+  page.on("dialog", async (dialog) => {
+    dialogs.push(dialog.message());
+    if (dialogMode === "accept") await dialog.accept();
+    else await dialog.dismiss();
+  });
+
+  await page.evaluate(() => {
+    const items = [
+      { id: "saved-1", itemKey: "k1", itemCode: "101", itemName: "صنف محفوظ", unit1Name: "كروز", unit2Name: "", unit2Factor: 1, countState: "counted", unit1Qty: 4, unit2Qty: 0, damagedUnit1Qty: 0, rowVersion: 2, countedByDisplayName: "أمين", countedAt: "2026-09-28T08:00:00Z", recountRequested: false, claimedByMe: false },
+      { id: "blank-1", itemKey: "k2", itemCode: "102", itemName: "صنف فارغ أول", unit1Name: "كروز", unit2Name: "", unit2Factor: 1, countState: "uncounted", rowVersion: 1, recountRequested: false, claimedByMe: false },
+      { id: "blank-2", itemKey: "k3", itemCode: "103", itemName: "صنف فارغ ثان", unit1Name: "كروز", unit2Name: "", unit2Factor: 1, countState: "uncounted", rowVersion: 5, recountRequested: false, claimedByMe: false },
+      { id: "typed-1", itemKey: "k4", itemCode: "104", itemName: "صنف بكمية", unit1Name: "كروز", unit2Name: "", unit2Factor: 1, countState: "uncounted", rowVersion: 7, recountRequested: false, claimedByMe: false }
+    ];
+    const inventorySession = { id: "sess-1", warehouseName: "مستودع الاختبار", status: "in_progress", cutoffAt: "2026-09-28T05:00:00Z", items };
+    window.__smartSaves = [];
+    window.__smartCompleted = 0;
+    const store = window.tobaccoData;
+    store.listSmartInventoryWarehouses = async () => [{ warehouseKey: "w1", warehouseName: "مستودع الاختبار", totalItems: 4, countedItems: 1, status: "in_progress", sessionId: "sess-1" }];
+    store.getSmartInventoryCounterSession = async () => JSON.parse(JSON.stringify(inventorySession));
+    store.startOrJoinSmartInventory = async () => JSON.parse(JSON.stringify(inventorySession));
+    store.claimSmartInventoryItem = async () => ({ ok: true, code: "claimed" });
+    store.saveSmartInventoryItem = async (input) => {
+      window.__smartSaves.push(input);
+      const item = inventorySession.items.find((row) => row.id === input.itemId);
+      if (item && item.countState === "uncounted") {
+        item.countState = input.countState;
+        item.unit1Qty = input.unit1Qty;
+        item.unit2Qty = input.unit2Qty;
+        item.damagedUnit1Qty = input.damagedUnit1Qty;
+        item.rowVersion = Number(item.rowVersion || 0) + 1;
+        item.countedByDisplayName = "موظف جرد اختبار";
+        item.countedAt = "2026-09-28T09:00:00Z";
+      }
+      return { ok: true, code: "saved" };
+    };
+    store.completeSmartInventorySession = async () => {
+      window.__smartCompleted += 1;
+      inventorySession.status = "completed";
+      return { ok: true, code: "completed" };
+    };
+    window.SmartInventory.reset();
+    const state = (0, eval)("state");
+    state.session = { id: "counter-1", name: "موظف جرد اختبار", role: "موظف جرد", email: "", accessRole: "inventory_counter" };
+    window.__ozkSession = state.session;
+    (0, eval)("setRoute")("smartInventory");
+  });
+
+  await pollUntil(page, () => !!document.querySelector("[data-smart-warehouse]"), { message: "قائمة مستودعات الجرد لم تظهر" });
+  await page.locator("[data-smart-warehouse]").click();
+  await pollUntil(page, () => !!document.querySelector("[data-smart-complete]"), { message: "جلسة الجرد لم تُفتح" });
+  assert((await page.locator("body").innerText()).includes("عند إغلاق الجرد تُحتسب صفراً بعد التأكيد"), "نص الخانة الفارغة لا يشرح أن الصفر يتم عند الإغلاق");
+  const finishBox = await page.locator("[data-smart-complete]").boundingBox();
+  assert(finishBox && finishBox.x >= 0 && finishBox.x + finishBox.width <= 390, "زر الإغلاق يخرج عن عرض شاشة الجوال");
+
+  await page.locator('[data-smart-item-card="typed-1"] [data-smart-qty="unit1Qty"]').fill("3");
+  await page.locator("[data-smart-complete]").click();
+  await pollUntil(page, () => {
+    const panel = document.querySelector(".message-panel.error");
+    return !!(panel && panel.textContent.includes("لم يُحتسب أي صنف فارغ صفراً"));
+  }, { message: "كتابة كمية لم تمنع تصفير بقية الأصناف" });
+  assert(dialogs.length === 0, "ظهر تأكيد التصفير رغم وجود كمية مكتوبة لم تُحفظ");
+  const blockedSaves = await page.evaluate(() => window.__smartSaves.length);
+  assert(blockedSaves === 0, "حُفظت أصفار رغم وجود كمية مكتوبة");
+
+  await page.locator('[data-smart-item-card="typed-1"] [data-smart-qty="unit1Qty"]').fill("");
+  await page.locator("[data-smart-complete]").click();
+  assert(dialogs.length === 1 && dialogs[0].includes("3 أصناف بلا كمية") && dialogs[0].includes("ستُحتسب") && dialogs[0].includes("صفراً") && !dialogs[0].includes("3 صنفاً"), `نص التأكيد غير المتوقع: ${dialogs.join(" | ")}`);
+  const afterDismiss = await page.evaluate(() => ({ saves: window.__smartSaves.length, completed: window.__smartCompleted }));
+  assert(afterDismiss.saves === 0 && afterDismiss.completed === 0, "إلغاء التأكيد حفظ أصفاراً أو أغلق الجرد");
+
+  dialogMode = "accept";
+  await page.locator("[data-smart-complete]").click();
+  await pollUntil(page, () => window.__smartCompleted === 1, { message: "لم يُغلق الجرد بعد قبول التأكيد" });
+  const outcome = await page.evaluate(() => ({
+    saves: window.__smartSaves,
+    completed: window.__smartCompleted,
+    notice: document.querySelector(".message-panel.success")?.textContent || ""
+  }));
+  assert(outcome.saves.length === 3, `عدد الأصناف المصفَّرة ${outcome.saves.length} والمتوقع 3`);
+  assert(outcome.saves.every((row) => row.countState === "zero" && row.unit1Qty === 0 && row.unit2Qty === 0 && row.damagedUnit1Qty === 0 && row.requestId), "حفظ الفراغ لم يطابق صفر فعلي");
+  assert(!outcome.saves.some((row) => row.itemId === "saved-1"), "صنف محفوظ بكمية تغيّر عند الإغلاق");
+  const versions = Object.fromEntries(outcome.saves.map((row) => [row.itemId, row.expectedVersion]));
+  assert(versions["blank-1"] === 1 && versions["blank-2"] === 5 && versions["typed-1"] === 7, `نسخ الصفوف المرسلة غير مطابقة: ${JSON.stringify(versions)}`);
+  assert(outcome.notice.includes("3 أصناف") && outcome.notice.includes("حُسبت") && outcome.notice.includes("صفراً") && !outcome.notice.includes("3 صنفاً"), `رسالة النجاح لا تذكر الأصفار: ${outcome.notice}`);
+  assert((await page.locator("[data-smart-complete]").innerText()).includes("الجرد مكتمل"), "الجلسة لم تظهر مكتملة بعد الإغلاق");
+  assertClean("إغلاق الجرد", collected);
 });
 
 // ===== شهادة العزل الشبكي =====
