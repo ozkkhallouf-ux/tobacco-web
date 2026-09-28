@@ -94,45 +94,58 @@ const COUNTER_RPCS = [
   "smart_inventory_complete_session",
 ];
 
+function skipLineComment(source, i) {
+  let end = i;
+  while (end < source.length && source[end] !== "\n") end += 1;
+  return { i: end, text: "\n" };
+}
+
+function skipBlockComment(source, i) {
+  const end = source.indexOf("*/", i + 2);
+  if (end < 0) throw new Error("unclosed block comment");
+  return { i: end + 2, text: " " };
+}
+
+function skipQuoted(source, i) {
+  let out = source[i];
+  let j = i + 1;
+  while (j < source.length) {
+    if (source[j] === "'" && source[j + 1] === "'") { out += "''"; j += 2; continue; }
+    out += source[j];
+    if (source[j] === "'") return { i: j + 1, text: out };
+    j += 1;
+  }
+  return { i: j, text: out };
+}
+
+function skipDollarQuote(source, i) {
+  const tag = source.slice(i).match(/^\$[A-Za-z0-9_]*\$/);
+  if (!tag) return null;
+  const close = source.indexOf(tag[0], i + tag[0].length);
+  if (close < 0) throw new Error("unclosed dollar quote");
+  return { i: close + tag[0].length, text: " " };
+}
+
+function skipSqlToken(source, i) {
+  const c = source[i];
+  if (c === "-" && source[i + 1] === "-") return skipLineComment(source, i);
+  if (c === "/" && source[i + 1] === "*") return skipBlockComment(source, i);
+  if (c === "'") return skipQuoted(source, i);
+  if (c === "$") return skipDollarQuote(source, i);
+  return null;
+}
+
 function stripSqlNoise(source) {
   let out = "";
   let i = 0;
   while (i < source.length) {
-    const c = source[i];
-    if (c === "-" && source[i + 1] === "-") {
-      while (i < source.length && source[i] !== "\n") i += 1;
-      out += "\n";
+    const skipped = skipSqlToken(source, i);
+    if (skipped) {
+      out += skipped.text;
+      i = skipped.i;
       continue;
     }
-    if (c === "/" && source[i + 1] === "*") {
-      const end = source.indexOf("*/", i + 2);
-      if (end < 0) throw new Error("unclosed block comment");
-      i = end + 2;
-      out += " ";
-      continue;
-    }
-    if (c === "'") {
-      out += c;
-      i += 1;
-      while (i < source.length) {
-        if (source[i] === "'" && source[i + 1] === "'") { out += "''"; i += 2; continue; }
-        out += source[i];
-        if (source[i] === "'") { i += 1; break; }
-        i += 1;
-      }
-      continue;
-    }
-    if (c === "$") {
-      const tag = source.slice(i).match(/^\$[A-Za-z0-9_]*\$/);
-      if (tag) {
-        const close = source.indexOf(tag[0], i + tag[0].length);
-        if (close < 0) throw new Error("unclosed dollar quote");
-        i = close + tag[0].length;
-        out += " ";
-        continue;
-      }
-    }
-    out += c;
+    out += source[i];
     i += 1;
   }
   return out;
@@ -225,40 +238,52 @@ function roleTokens(list) {
 // allowed only when a later statement in the same file grants them back.
 // Any grant of smart_inventory_owner_* to anon (or PUBLIC, which includes
 // anon) is rejected even if a later revoke tries to undo it.
+function noteUnparsedGrant(statement, unparsed) {
+  const mentionsAnon = /\banon\b/.test(statement);
+  const mentionsInventory = /smart_inventory_(available_warehouses|start_or_join|counter_session|claim_item|save_item|complete_session|owner_)/.test(statement);
+  if (mentionsAnon && mentionsInventory) unparsed.push(statement.slice(0, 160));
+}
+
+function recordRevokedCounters(names, targetsAnon, counterState) {
+  if (!targetsAnon) return;
+  for (const name of names) {
+    if (COUNTER_RPCS.includes(name)) counterState.set(name, "revoked");
+  }
+}
+
+function recordGrantedNames(names, roles, targetsAnon, counterState, ownerGranted) {
+  if (!targetsAnon && !roles.includes("public")) return;
+  for (const name of names) {
+    if (targetsAnon && COUNTER_RPCS.includes(name)) counterState.set(name, "granted");
+    if (name.startsWith("smart_inventory_owner_")) ownerGranted.add(name);
+  }
+}
+
+function applyGrantStatement(statement, counterState, ownerGranted, unparsed) {
+  const kind = statement.match(/^(grant|revoke)\s+(execute|all)(?:\s+privileges)?\s+on\s+function\b/);
+  if (!kind) return;
+  const verb = kind[1];
+  const marker = statement.indexOf("on function");
+  const after = marker + "on function".length;
+  const roleWord = verb === "grant" ? "to" : "from";
+  const roleAt = depth0Index(statement.slice(after), roleWord);
+  if (roleAt < 0) {
+    noteUnparsedGrant(statement, unparsed);
+    return;
+  }
+  const names = functionNames(statement.slice(after, after + roleAt));
+  const roles = roleTokens(statement.slice(after + roleAt + roleWord.length));
+  const targetsAnon = roles.includes("anon");
+  if (verb === "revoke") recordRevokedCounters(names, targetsAnon, counterState);
+  if (verb === "grant") recordGrantedNames(names, roles, targetsAnon, counterState, ownerGranted);
+}
+
 export function auditSmartInventoryAnonGrants(source) {
   const statements = splitStatements(stripSqlNoise(source).toLowerCase());
   const counterState = new Map();
   const ownerGranted = new Set();
   const unparsed = [];
-  for (const statement of statements) {
-    const kind = statement.match(/^(grant|revoke)\s+(execute|all)(?:\s+privileges)?\s+on\s+function\b/);
-    if (!kind) continue;
-    const verb = kind[1];
-    const marker = statement.indexOf("on function");
-    const after = marker + "on function".length;
-    const roleWord = verb === "grant" ? "to" : "from";
-    const roleAt = depth0Index(statement.slice(after), roleWord);
-    if (roleAt < 0) {
-      if (/\banon\b/.test(statement) && /smart_inventory_(available_warehouses|start_or_join|counter_session|claim_item|save_item|complete_session|owner_)/.test(statement)) {
-        unparsed.push(statement.slice(0, 160));
-      }
-      continue;
-    }
-    const names = functionNames(statement.slice(after, after + roleAt));
-    const roles = roleTokens(statement.slice(after + roleAt + roleWord.length));
-    const targetsAnon = roles.includes("anon");
-    if (verb === "revoke" && targetsAnon) {
-      for (const name of names) {
-        if (COUNTER_RPCS.includes(name)) counterState.set(name, "revoked");
-      }
-    }
-    if (verb === "grant" && (targetsAnon || roles.includes("public"))) {
-      for (const name of names) {
-        if (targetsAnon && COUNTER_RPCS.includes(name)) counterState.set(name, "granted");
-        if (name.startsWith("smart_inventory_owner_")) ownerGranted.add(name);
-      }
-    }
-  }
+  for (const statement of statements) applyGrantStatement(statement, counterState, ownerGranted, unparsed);
   return {
     counterLeftRevoked: [...counterState.entries()].filter(([, state]) => state === "revoked").map(([name]) => name),
     ownerGrantedToAnon: [...ownerGranted],
