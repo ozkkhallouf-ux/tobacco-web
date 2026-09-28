@@ -21,6 +21,7 @@ param(
 )
 $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+. (Join-Path $PSScriptRoot "ameen-warehouse-stock-retention.ps1")
 
 if ($EnvFile -and (Test-Path -LiteralPath $EnvFile -PathType Leaf)) {
   Get-Content -LiteralPath $EnvFile | Where-Object { $_ -match '^\s*[^#].+=.+' } | ForEach-Object {
@@ -188,10 +189,33 @@ foreach ($s in $stores) {
   Write-Host "رُفع تقرير مستودع: $($s.name) ($($s.items.Count) صنف)." -ForegroundColor Green
 }
 
-$cutoff = (Get-Date).ToUniversalTime().AddDays(-2).ToString("yyyy-MM-ddTHH:mm:ssZ")
+# الإبقاء على حد اليومين عبر Get-AmeenWarehouseStockRetentionCutoffText.
+# الحذف السابق كان طلباً واحداً لكل الصفوف المطابقة، فينتهي بيان دور
+# authenticated (8 ثوانٍ) ويتراجع الحذف. الفهرس على created_at موجود؛
+# الصفحة المحدودة تستخدمه، والحذف هنا بمعرّفات الدفعة فقط بلا جسم items.
+$cutoff = Get-AmeenWarehouseStockRetentionCutoffText
 try {
-  Invoke-RestMethod -Method Delete -Uri "$url/rest/v1/ameen_warehouse_stock_reports?created_at=lt.$cutoff" `
-    -Headers $hdr | Out-Null
+  $fetchPage = {
+    param([string]$CutoffText, [int]$BatchSize)
+    $pageUri = "$url/rest/v1/ameen_warehouse_stock_reports?select=id,created_at&created_at=lt.$CutoffText&order=created_at.asc&limit=$BatchSize"
+    return Invoke-RestMethod -Method Get -Uri $pageUri -Headers $hdr
+  }.GetNewClosure()
+  $deleteIds = {
+    param($Ids)
+    # اسم مختلف عن $Ids: PowerShell لا يفرّق حالة الأحرف.
+    $batchIds = @($Ids | Where-Object { $_ })
+    if ($batchIds.Count -eq 0) { return }
+    $filter = ($batchIds -join ",")
+    Invoke-RestMethod -Method Delete -Uri "$url/rest/v1/ameen_warehouse_stock_reports?id=in.($filter)" -Headers ($hdr + @{ Prefer = "return=minimal" }) | Out-Null
+  }.GetNewClosure()
+  $cleanup = Invoke-AmeenWarehouseStockReportCleanup -CutoffText $cutoff -FetchPage $fetchPage -DeleteIds $deleteIds
+  if ($cleanup.Stalled) {
+    Write-Warning "توقف تنظيف تقارير المخزون: دفعة لم تُحذف، ستُعاد في الجولة التالية."
+  } elseif (-not $cleanup.Exhausted) {
+    Write-Warning "تنظيف تقارير المخزون لم يكتمل في هذه الجولة ($($cleanup.Removed) صفاً). تكمل الجولة التالية."
+  } elseif ($cleanup.Removed -gt 0) {
+    Write-Host "نُظّف $($cleanup.Removed) تقرير مخزون أقدم من يومين، على دفعات." -ForegroundColor Green
+  }
 } catch { Write-Warning "تعذّر تنظيف تقارير المخزون القديمة: $($_.Exception.Message)" }
 
 Write-Host "تم رفع $($stores.Count) تقرير مستودع مستقل إلى ameen_warehouse_stock_reports." -ForegroundColor Green

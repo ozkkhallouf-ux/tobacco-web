@@ -176,3 +176,11 @@ jobs:
       - name: Purchase item snapshot - native stderr alert-path test
         shell: powershell
         run: .\tools\tests\Test-SnapshotProducerNativeStderr.ps1
+
+      # عطل إنتاجي (2026-09-28): حذف تقارير ameen_warehouse_stock_reports الأقدم
+      # من يومين كان طلباً واحداً فيصطدم بمهلة البيان 8 ثوانٍ ويتراجع الحذف.
+      # الاختبار يشغّل دوال الاحتفاظ الإنتاجية على جدول في الذاكرة: نفس حد
+      # اليومين، والدفعات تحذف القديم فقط، والحذف دفعة واحدة فوق الحد يرمي المهلة.
+      - name: Warehouse stock retention - batched cleanup regression test
+        shell: powershell
+        run: .\tools\tests\Test-WarehouseStockRetentionBatch.ps1

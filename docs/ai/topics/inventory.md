@@ -1,6 +1,8 @@
 # تقرير موضوع المخزون والجرد
 
-آخر تحديث: 2026-08-23
+آخر تحديث: 2026-09-28
+
+تنظيف `ameen_warehouse_stock_reports`: مهمة Windows «TOBACCO Ameen Warehouse Reports» (كل ساعة عبر `tools/sync-ameen-warehouse-reports.ps1`) كانت تحذف الصفوف الأقدم من يومين بطلب DELETE واحد في `tools/push-ameen-warehouse-stock.ps1`. دور `authenticated` مهلته 8 ثوانٍ، والبيان يُلغى (57014) فلا يُحذف شيء. الفهرس `ameen_warehouse_stock_reports_created_at_idx` على `created_at` موجود في الإنتاج ولا حاجة لهجرة جديدة؛ الصفحة المحدودة تستخدمه. صار الحذف على دفعات (40 معرّفاً) مع الإبقاء على حد اليومين الصارم (`created_at` أقدم تماماً من الآن−يومين). الفحص: `tools/tests/Test-WarehouseStockRetentionBatch.ps1` داخل وظيفة `ps51-compat`. بعد الدمج يحتاج جهاز Windows سحب السكربت؛ لا تطبيق SQL على القاعدة الحية.
 
 ## الحالة الحالية
 
