@@ -104,16 +104,17 @@ export function makeGitContext(cwd = root) {
 
 export function makeGitHubApi(repo, token = process.env.GITHUB_TOKEN) {
   const call = async (method, rel, body) => {
-    const res = await fetch(`https://api.github.com/repos/${repo}/${rel}`, {
+    const init = {
       method,
       headers: {
         accept: "application/vnd.github+json",
         "user-agent": "ozk-windows-release",
         ...(token ? { authorization: `Bearer ${token}` } : {}),
         ...(body ? { "content-type": "application/json" } : {})
-      },
-      body: body ? JSON.stringify(body) : undefined
-    });
+      }
+    };
+    if (body) init.body = JSON.stringify(body);
+    const res = await fetch(`https://api.github.com/repos/${repo}/${rel}`, init);
     if (!res.ok) throw new Error(`GitHub API ${method} ${rel}: ${res.status}`);
     return res.json();
   };
