@@ -582,6 +582,8 @@
     state.finishing = true;
     state.finishProgress = plan.zeros.length ? { done: 0, total: plan.zeros.length } : null;
     callbacks.render();
+    const activeSession = state.session;
+    const sessionId = activeSession.id;
     const zeroedByUs = [];
     try {
       for (const item of plan.zeros) {
@@ -601,9 +603,9 @@
         if (state.finishProgress) state.finishProgress.done += 1;
         callbacks.render();
       }
-      const result = await store.completeSmartInventorySession(state.session.id);
+      const result = await store.completeSmartInventorySession(sessionId);
       if (!result?.ok) throw new Error(`${unfinishedCloseText(result?.remaining)} ${storedZeroText(zeroedByUs)}`);
-      if (state.session) state.session.status = "completed";
+      activeSession.status = "completed";
       callbacks.notice("success", finishZeroSuccessText(zeroedByUs.length));
       await refreshCurrent(session, { keepNotice: true });
     } catch (error) {
