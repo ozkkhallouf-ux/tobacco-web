@@ -308,14 +308,23 @@
     </article>`;
   }
 
-  function counterSession(session) {
+  function filteredCounterItems() {
     const items = Array.isArray(state.session?.items) ? state.session.items : [];
     const q = normalizeSearch(state.query);
-    const filtered = items.filter((item) => {
+    return items.filter((item) => {
       if (state.filter === "uncounted" && item.countState !== "uncounted") return false;
       if (state.filter === "counted" && item.countState === "uncounted") return false;
       return !q || normalizeSearch(`${item.itemName} ${item.itemCode || ""} ${item.itemKey || ""}`).includes(q);
     });
+  }
+
+  function counterResultsMarkup() {
+    const filtered = filteredCounterItems();
+    return filtered.map(counterRow).join("") || '<article class="panel"><p class="muted">لا توجد نتائج.</p></article>';
+  }
+
+  function counterSession(session) {
+    const items = Array.isArray(state.session?.items) ? state.session.items : [];
     const counted = items.filter((item) => item.countState !== "uncounted").length;
     const progress = items.length ? Math.round(counted / items.length * 100) : 0;
     return `<section class="panel wide smart-session-head">
@@ -323,13 +332,13 @@
       <p class="muted">وقت القطع المرجعي: ${esc(fmtDate(state.session.cutoffAt))} · ${onlineLabel()}</p></div>
       <div class="smart-session-progress"><strong dir="ltr">${counted} / ${items.length}</strong><div class="smart-progress"><span style="width:${progress}%"></span></div></div>
     </section>
-    <section class="panel wide smart-toolbar"><input data-smart-search placeholder="ابحث بالاسم أو الكود" value="${esc(state.query)}" autocomplete="off"><div class="button-row">
+    <section class="panel wide smart-toolbar"><input id="smart-counter-search" data-smart-search placeholder="ابحث بالاسم أو الكود" value="${esc(state.query)}" autocomplete="off" aria-controls="smart-counter-results" aria-expanded="true"><div class="button-row">
       <button class="button ${state.filter === "all" ? "primary" : "secondary"}" data-smart-filter="all">الكل</button>
       <button class="button ${state.filter === "uncounted" ? "primary" : "secondary"}" data-smart-filter="uncounted">غير المعدود</button>
       <button class="button ${state.filter === "counted" ? "primary" : "secondary"}" data-smart-filter="counted">المعدود</button>
       <button class="button secondary" data-smart-refresh>تحديث</button>
     </div></section>
-    <section class="smart-items-grid">${filtered.map(counterRow).join("") || '<article class="panel"><p class="muted">لا توجد نتائج.</p></article>'}</section>
+    <section id="smart-counter-results" class="smart-items-grid" data-smart-results data-smart-results-open="true">${counterResultsMarkup()}</section>
     <section class="panel wide smart-finalize"><p>الأصناف التي تركت كميتها فارغة تُحتسب صفراً عند الإغلاق بعد تأكيدك. بعد الإغلاق لا يستطيع الموظف تعديل الجرد.</p>
       <button class="button success" data-smart-complete ${state.session.status === "completed" || state.finishing ? "disabled" : ""}>${finishButtonLabel()}</button></section>`;
   }
@@ -468,22 +477,8 @@
     popup.document.close(); popup.focus(); popup.print();
   }
 
-  function bind(root, session, api) {
-    callbacks = api || callbacks;
-    root.querySelector("[data-smart-retry]")?.addEventListener("click", () => { state.loadedForRole = ""; load(session, true); });
-    root.querySelectorAll("[data-smart-warehouse]").forEach((button) => button.addEventListener("click", () => {
-      if (state.finishing) return;
-      button.dataset.smartSession ? openSession(button.dataset.smartSession, session) : startOrJoin(button.dataset.smartWarehouse, session);
-    }));
-    root.querySelector("[data-smart-back]")?.addEventListener("click", () => {
-      if (state.finishing) return;
-      state.session = null; state.ownerReport = null; state.loadedForRole = ""; load(session, true);
-    });
-    root.querySelector("[data-smart-owner-back]")?.addEventListener("click", () => { state.session = null; state.ownerReport = null; state.loadedForRole = ""; load(session, true); });
-    root.querySelector("[data-smart-search]")?.addEventListener("input", (event) => { state.query = event.currentTarget.value; callbacks.render(); });
-    root.querySelectorAll("[data-smart-filter]").forEach((button) => button.addEventListener("click", () => { state.filter = button.dataset.smartFilter; callbacks.render(); }));
-    root.querySelector("[data-smart-refresh]")?.addEventListener("click", () => refreshCurrent(session));
-    root.querySelectorAll("[data-smart-qty],[data-smart-state]").forEach((input) => {
+  function bindResultControls(scope, root, session) {
+    scope.querySelectorAll("[data-smart-qty],[data-smart-state]").forEach((input) => {
       const claim = () => store.claimSmartInventoryItem(input.dataset.itemId).then((result) => {
         if (!result?.ok && result?.code === "claimed") callbacks.notice("warning", `يقوم ${result.claimedByDisplayName} بجرده الآن.`);
         if (!result?.ok && result?.code === "already_counted") refreshCurrent(session);
@@ -498,7 +493,55 @@
         saveDraft(itemId, patch);
       });
     });
-    root.querySelectorAll("[data-smart-save]").forEach((button) => button.addEventListener("click", () => saveItem(button.dataset.smartSave, root, session)));
+    scope.querySelectorAll("[data-smart-save]").forEach((button) => button.addEventListener("click", () => saveItem(button.dataset.smartSave, root, session)));
+  }
+
+  // قيمة البحث الحية. سفاري قد يُطلق compositionupdate قبل كتابة القيمة في
+  // الحقل؛ إن كان نص التشكيل أطول من قيمة الحقل فهو النص المؤقت الكامل.
+  function liveSearchValue(event) {
+    const live = event.currentTarget?.value ?? "";
+    if (event.type !== "compositionupdate") return live;
+    const data = typeof event.data === "string" ? event.data : "";
+    if (data.length > live.length) return data;
+    return live || data;
+  }
+
+  function applyCounterSearch(root, session, value) {
+    state.query = value;
+    const search = root.querySelector("[data-smart-search]");
+    if (search) search.setAttribute("aria-expanded", "true");
+    const grid = root.querySelector("[data-smart-results]");
+    if (!grid) return;
+    grid.hidden = false;
+    grid.setAttribute("data-smart-results-open", "true");
+    grid.innerHTML = counterResultsMarkup();
+    bindResultControls(grid, root, session);
+  }
+
+  function bind(root, session, api) {
+    callbacks = api || callbacks;
+    root.querySelector("[data-smart-retry]")?.addEventListener("click", () => { state.loadedForRole = ""; load(session, true); });
+    root.querySelectorAll("[data-smart-warehouse]").forEach((button) => button.addEventListener("click", () => {
+      if (state.finishing) return;
+      button.dataset.smartSession ? openSession(button.dataset.smartSession, session) : startOrJoin(button.dataset.smartWarehouse, session);
+    }));
+    root.querySelector("[data-smart-back]")?.addEventListener("click", () => {
+      if (state.finishing) return;
+      state.session = null; state.ownerReport = null; state.loadedForRole = ""; load(session, true);
+    });
+    root.querySelector("[data-smart-owner-back]")?.addEventListener("click", () => { state.session = null; state.ownerReport = null; state.loadedForRole = ""; load(session, true); });
+    const search = root.querySelector("[data-smart-search]");
+    if (search) {
+      // إعادة رسم الصفحة كلها تستبدل عقدة الإدخال: يسقط التركيز، تُقفل لوحة
+      // مفاتيح الجوال، وينقطع تشكيل العربية بعد أول حرف. القائمة تُحدَّث وحدها.
+      const onSearch = (event) => applyCounterSearch(root, session, liveSearchValue(event));
+      search.addEventListener("input", onSearch);
+      search.addEventListener("compositionupdate", onSearch);
+      search.addEventListener("compositionend", onSearch);
+    }
+    root.querySelectorAll("[data-smart-filter]").forEach((button) => button.addEventListener("click", () => { state.filter = button.dataset.smartFilter; callbacks.render(); }));
+    root.querySelector("[data-smart-refresh]")?.addEventListener("click", () => refreshCurrent(session));
+    bindResultControls(root, root, session);
     root.querySelector("[data-smart-complete]")?.addEventListener("click", () => finishSession(root, session));
     root.querySelectorAll("[data-smart-recount]").forEach((button) => button.addEventListener("click", async () => {
       const reason = prompt("سبب إعادة العد (إلزامي):"); if (!reason) return;
