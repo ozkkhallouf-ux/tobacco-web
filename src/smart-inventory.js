@@ -559,28 +559,26 @@
     });
   }
 
+  function shouldAbortFinish(plan) {
+    if (plan.blockers.length) {
+      callbacks.notice("error", finishBlockedMessage(plan.blockers));
+      return true;
+    }
+    if (plan.zeros.length && !navigator.onLine) {
+      offlineZeroWarning();
+      return true;
+    }
+    return false;
+  }
+
   async function finishSession(root, session) {
     if (state.finishing || !state.session || state.session.status === "completed") return;
     callbacks.clearNotice?.();
     let plan = readFinishPlan(root);
-    if (plan.blockers.length) {
-      callbacks.notice("error", finishBlockedMessage(plan.blockers));
-      return;
-    }
-    if (plan.zeros.length && !navigator.onLine) {
-      offlineZeroWarning();
-      return;
-    }
+    if (shouldAbortFinish(plan)) return;
     if (plan.zeros.length && !window.confirm(finishZeroConfirmText(plan.zeros.length))) return;
     plan = readFinishPlan(root);
-    if (plan.blockers.length) {
-      callbacks.notice("error", finishBlockedMessage(plan.blockers));
-      return;
-    }
-    if (plan.zeros.length && !navigator.onLine) {
-      offlineZeroWarning();
-      return;
-    }
+    if (shouldAbortFinish(plan)) return;
     state.finishing = true;
     state.finishProgress = plan.zeros.length ? { done: 0, total: plan.zeros.length } : null;
     callbacks.render();
