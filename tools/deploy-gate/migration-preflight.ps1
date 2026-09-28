@@ -264,23 +264,61 @@ function Expand-MachineVariables([string]$Text) {
     }, 'IgnoreCase')
 }
 
+# تطبيع مسار بلا نظام ملفات: شرطات، '.' و'..'، حالة الأحرف — كي لا يُفلت '..' من فحص الجذر.
+function ConvertTo-CanonicalTracePath([string]$Path) {
+    $n = ConvertTo-PreflightPath $Path
+    if (-not $n) { return '' }
+    $out = New-Object System.Collections.ArrayList
+    foreach ($seg in ($n -split '\\')) {
+        if ($seg -eq '.' -or ($seg -eq '' -and $out.Count -gt 0)) { continue }
+        if ($seg -eq '..') { if ($out.Count -gt 1) { $out.RemoveAt($out.Count - 1) }; continue }
+        [void]$out.Add($seg)
+    }
+    return ($out -join '\')
+}
+
+# توسيع مراجع البيئة في نص (Action أو جسم غلاف) بصيغ CMD وPowerShell وVBS، بلا تنفيذ.
+# يُحلّ فقط ما يمكن إثباته: متغيّرات ملف تعريف هوية المهمة، ومتغيّرات النظام القياسية، ومجلد الغلاف
+# نفسه (%~dp0 و$PSScriptRoot). أي مرجع بيئي أو ديناميكي آخر يبقى ⇒ undetermined (fail closed)،
+# ولا يُعامل أبداً على أنه «ليس مستودعاً». يُطبَّق على الـAction وعلى كل غلاف في السلسلة بالتساوي.
+function Expand-TraceText([string]$Text, [string]$Identity, [string]$SelfPath = '') {
+    $undetermined = $false
+    $t = [string]$Text
+    if ($SelfPath) {
+        $selfDir = ([string]$SelfPath -replace '/', '\')
+        $selfDir = $selfDir.Substring(0, [Math]::Max(0, $selfDir.LastIndexOf('\')))
+        $t = [regex]::Replace($t, '%~dp0', { param($m) $selfDir + '\' }, 'IgnoreCase')
+        $t = [regex]::Replace($t, '\$PSScriptRoot\b', { param($m) $selfDir }, 'IgnoreCase')
+    }
+    # صيغ المرجع البيئي المختلفة ⇒ %NAME% موحّد (أسماء البيئة في Windows غير حسّاسة لحالة الأحرف).
+    $t = [regex]::Replace($t, '\$\{env:([A-Za-z_][A-Za-z0-9_()]*)\}', '%$1%', 'IgnoreCase')
+    $t = [regex]::Replace($t, '\$env:([A-Za-z_][A-Za-z0-9_]*(?:\(x86\))?)', '%$1%', 'IgnoreCase')
+    $t = [regex]::Replace($t, '!([A-Za-z_][A-Za-z0-9_()]*)!', '%$1%')
+    $t = [regex]::Replace($t, '\[(?:System\.)?Environment\]::GetEnvironmentVariable\(\s*[''"]([A-Za-z_][A-Za-z0-9_()]*)[''"]\s*(?:,[^)]*)?\)', '%$1%', 'IgnoreCase')
+    # مراجع ديناميكية لا يمكن إثبات قيمتها ساكناً.
+    if ($t -match '(?i)\[(?:System\.)?Environment\]::GetEnvironmentVariables?\(|\.Environment\s*\(|(?<![A-Za-z0-9_])env:') { $undetermined = $true }
+    if ($t -match '(?i)%(userprofile|homepath|homedrive|appdata|localappdata|temp|tmp|username|onedrive)%') {
+        $expanded = Expand-UserProfileVariables $t $Identity
+        if ($null -eq $expanded) { $undetermined = $true } else { $t = $expanded }
+    }
+    $t = Expand-MachineVariables $t
+    if ($t -match '%[A-Za-z_][A-Za-z0-9_()]*%') { $undetermined = $true }
+    return [pscustomobject]@{ text = $t; undetermined = $undetermined }
+}
+
 function Resolve-WorkloadReach($Config, [string]$ActionText, [string]$Identity = '') {
-    $roots = @(@($Config.repoPath) + @($Config.trust.repositoryRoots) | Where-Object { $_ } | ForEach-Object { ConvertTo-PreflightPath ([string]$_) })
+    $roots = @(@($Config.repoPath) + @($Config.trust.repositoryRoots) | Where-Object { $_ } | ForEach-Object { ConvertTo-CanonicalTracePath ([string]$_) })
     $inRoot = {
         param([string]$Candidate)
-        $n = ConvertTo-PreflightPath $Candidate
+        $n = ConvertTo-CanonicalTracePath $Candidate
         foreach ($root in $roots) { if ($n -eq $root -or $n.StartsWith($root + '\')) { return $true } }
         return $false
     }
     $undetermined = $false
-    $text = [string]$ActionText
-    # متغيّرات المستخدم تُوسَّع بملف تعريف هوية المهمة نفسها (لا بحساب من يشغّل الفحص)؛ هوية مجهولة ⇒ غير محدد.
-    if ($text -match '%(userprofile|homepath|homedrive|appdata|localappdata|temp|tmp|username|onedrive)%') {
-        $expanded = Expand-UserProfileVariables $text $Identity
-        if ($null -eq $expanded) { $undetermined = $true } else { $text = $expanded }
-    }
-    $text = Expand-MachineVariables $text
-    if ($text -match '%[A-Za-z_][A-Za-z0-9_()]*%') { $undetermined = $true }
+    # الـAction وكل غلاف يمرّان بالمسار نفسه: Expand-TraceText ثم فحص الجذور ثم الطابور.
+    $x = Expand-TraceText ([string]$ActionText) $Identity
+    if ($x.undetermined) { $undetermined = $true }
+    $text = $x.text
     $rx = '(?:[A-Za-z]:\\|/)[^"''\r\n<>|]+?\.(exe|bat|cmd|js|mjs|cjs|ps1|psm1|vbs|py)\b'
     $dirRx = '(?:[A-Za-z]:\\|/)[^"''\r\n<>|]+'
     foreach ($m in [regex]::Matches($text, $dirRx)) { if (& $inRoot ($m.Value.Trim())) { return [pscustomobject]@{ repo = $true; undetermined = $false } } }
@@ -291,7 +329,7 @@ function Resolve-WorkloadReach($Config, [string]$ActionText, [string]$Identity =
         $entry = $queue.Dequeue()
         $path = [string]$entry[0]
         $depth = [int]$entry[1]
-        $k = ConvertTo-PreflightPath $path
+        $k = ConvertTo-CanonicalTracePath $path
         if ($seen.ContainsKey($k)) { continue }
         $seen[$k] = $true
         if (& $inRoot $path) { return [pscustomobject]@{ repo = $true; undetermined = $false } }
@@ -299,11 +337,9 @@ function Resolve-WorkloadReach($Config, [string]$ActionText, [string]$Identity =
         if ($depth -ge 3) { $undetermined = $true; continue }
         try { $inner = Read-PreflightWrapperText $path } catch { $undetermined = $true; continue }
         if ($null -eq $inner) { $undetermined = $true; continue }
-        if ($inner -match '%(userprofile|homepath|homedrive|appdata|localappdata|temp|tmp|username|onedrive)%') {
-            $expandedInner = Expand-UserProfileVariables $inner $Identity
-            if ($null -eq $expandedInner) { $undetermined = $true } else { $inner = $expandedInner }
-        }
-        $inner = Expand-MachineVariables ([string]$inner)
+        $xi = Expand-TraceText ([string]$inner) $Identity $path
+        if ($xi.undetermined) { $undetermined = $true }
+        $inner = $xi.text
         foreach ($m in [regex]::Matches($inner, $dirRx)) { if (& $inRoot ($m.Value.Trim())) { return [pscustomobject]@{ repo = $true; undetermined = $false } } }
         foreach ($m in [regex]::Matches($inner, $rx)) { $queue.Enqueue(@($m.Value, $depth + 1)) }
     }

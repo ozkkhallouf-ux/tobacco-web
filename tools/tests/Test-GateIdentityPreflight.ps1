@@ -246,6 +246,52 @@ try {
     $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Non-Microsoft Repo System' 'SYSTEM' ($ps + ' -File "' + $repo + '\tools\x.ps1"'))
     Assert-True (-not (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())).ok) 'non-Microsoft privileged repo workload remains BLOCK'
 
+    Write-Host '== environment references inside wrapper bodies fail closed (Codex P1)'
+    $wd = 'C:\ProgramData\OZK-TOBACCO\TaskWrappers'
+    $envCases = @(
+        @{ label = 'SYSTEM cmd wrapper with unresolved %OZK_ROOT% => BLOCK'; path = "$wd\env-pct.cmd"; body = '@echo off' + "`r`n" + 'powershell.exe -File "%OZK_ROOT%\tools\x.ps1"'; ok = $false },
+        @{ label = 'SYSTEM cmd wrapper with unresolved !OZK_ROOT! => BLOCK'; path = "$wd\env-bang.cmd"; body = 'setlocal EnableDelayedExpansion' + "`r`n" + 'call "!OZK_ROOT!\tools\x.bat"'; ok = $false },
+        @{ label = 'SYSTEM PS1 wrapper with unresolved $env:OZK_ROOT => BLOCK'; path = "$wd\env-ps.ps1"; body = '& "$env:OZK_ROOT\tools\x.ps1"'; ok = $false },
+        @{ label = 'SYSTEM PS1 wrapper with unresolved ${env:OZK_ROOT} => BLOCK'; path = "$wd\env-brace.ps1"; body = '& "${env:OZK_ROOT}\tools\x.ps1"'; ok = $false },
+        @{ label = 'SYSTEM PS1 wrapper, case-insensitive $ENV:ozk_root => BLOCK'; path = "$wd\env-case.ps1"; body = '& ($ENV:ozk_root + ''\tools\x.ps1'')'; ok = $false },
+        @{ label = 'SYSTEM PS1 wrapper with [Environment]::GetEnvironmentVariable(''OZK_ROOT'') => BLOCK'; path = "$wd\env-api.ps1"; body = '$r = [Environment]::GetEnvironmentVariable(''OZK_ROOT'', ''Machine''); & "$r\tools\x.ps1"'; ok = $false },
+        @{ label = 'SYSTEM VBS wrapper reading shell.Environment => BLOCK'; path = "$wd\env-vbs.vbs"; body = 'r = shell.Environment("SYSTEM")("OZK_ROOT")' + "`r`n" + 'shell.Run r & "\tools\x.bat", 0, True'; ok = $false },
+        @{ label = 'mixed literal + unresolved variable path %OZK_ROOT%\tools\x.ps1 => BLOCK'; path = "$wd\env-mixed.bat"; body = '"C:\Tools\runner.exe" "%OZK_ROOT%\tools\x.ps1" --log "C:\Logs\run.log"'; ok = $false },
+        @{ label = 'resolvable variable into the repo (${env:SystemDrive}\Users\LOQ\...) => repo workload, SYSTEM => BLOCK privileged'; path = "$wd\env-resolved.ps1"; body = '& "${env:SystemDrive}\Users\LOQ\Documents\OZK-TOBACCO\tobacco-web\tools\x.ps1"'; ok = $false; pattern = '*privileged repository workload*' },
+        @{ label = 'resolvable %ProgramData%\..\ traversal into the repo => canonicalized, repo workload => BLOCK privileged'; path = "$wd\env-dots.cmd"; body = 'call "%ProgramData%\..\Users\LOQ\Documents\OZK-TOBACCO\tobacco-web\tools\x.bat"'; ok = $false; pattern = '*privileged repository workload*' },
+        @{ label = '%~dp0 resolves to the wrapper folder (outside the repo) => existing behaviour, not blocked'; path = "$wd\env-self.cmd"; body = 'call "%~dp0helper.cmd"'; ok = $true },
+        @{ label = 'ordinary literal wrapper to a non-repo tool => unchanged (not blocked)'; path = "$wd\literal.cmd"; body = 'call "C:\Tools\backup\run-backup.exe" /quiet'; ok = $true },
+        @{ label = 'ordinary literal wrapper into the repo as SYSTEM => unchanged (BLOCK privileged)'; path = "$wd\literal-repo.cmd"; body = ('call "' + $repo + '\tools\x.bat"'); ok = $false; pattern = '*privileged repository workload*' },
+        @{ label = 'unrelated wrapper with only standard variables (%windir%) => unchanged (not blocked)'; path = "$wd\native.cmd"; body = '%windir%\system32\defrag.exe -c'; ok = $true }
+    )
+    foreach ($c in $envCases) {
+        $script:Wrappers[$c.path] = $c.body
+        $name = 'EnvWrap ' + [IO.Path]::GetFileName($c.path)
+        $script:Tasks = @(Get-CleanLayout) + @(New-Task $name 'SYSTEM' ('cmd.exe /c "' + $c.path + '"'))
+        $r = Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())
+        if ($c.ok) { Assert-True ($r.ok) $c.label }
+        else {
+            $p = if ($c.pattern) { '*' + $name + $c.pattern } else { '*' + $name + '*cannot determine whether*' }
+            Assert-True (-not $r.ok -and (Test-BlockLike $r $p)) $c.label
+        }
+    }
+    # سلسلة متداخلة: Task -> A -> B، والمتغيّر غير المحلول في الطبقة الثانية فقط.
+    $wA = "$wd\nested-a.cmd"; $wB = 'C:\ProgramData\OZK-TOBACCO\Helpers\nested-b.ps1'
+    $script:Wrappers[$wA] = ('call powershell.exe -File "' + $wB + '"')
+    $script:Wrappers[$wB] = '& "$env:OZK_ROOT\tools\x.ps1"'
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'EnvWrap Nested' 'SYSTEM' ('cmd.exe /c "' + $wA + '"'))
+    $r = Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())
+    Assert-True (-not $r.ok -and (Test-BlockLike $r '*EnvWrap Nested*cannot determine whether*')) 'unresolved variable in the nested second wrapper => BLOCK'
+    $script:Wrappers[$wB] = '& "C:\Tools\report.exe"'
+    $r = Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())
+    Assert-True ($r.ok) 'same nested chain with literal non-repo paths => not blocked'
+    # غير ذي صلاحية: المتغيّر غير المحلول لا يحجب (القاعدة كما هي للهويات غير المميّزة).
+    $script:Wrappers[$wB] = '& "$env:OZK_ROOT\tools\x.ps1"'
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'EnvWrap NonAdmin' 'OZKSync' ('cmd.exe /c "' + $wA + '"'))
+    Assert-True ((Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())).ok) 'non-privileged task with an unresolved wrapper variable is not a privilege risk'
+    $x = Resolve-WorkloadReach (New-Config 'OZK2026\OZK-DeployGate' @()) ('cmd.exe /c "' + $wA + '"') 'SYSTEM'
+    Assert-True (-not $x.repo -and $x.undetermined) 'unresolved wrapper variable is undetermined, never "not repository workload"'
+
     Write-Host '== SID comparison, not account names (Codex P1)'
     $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Domain Twin' 'DOMAIN\OZK-DeployGate' 'C:\Tools\cleanup.exe')
     $r = Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())

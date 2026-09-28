@@ -161,6 +161,19 @@ const preCode = preSrc.split("\n").filter((l) => !l.trim().startsWith("#")).join
 assert.doesNotMatch(preCode, /TaskPath\s+-(not)?(like|match|eq)|\.TaskPath\s*-(not)?(like|match)|\\\\?Microsoft\\\\?\*/i, "لا استثناء لمهام حسب TaskPath (ومنها \\Microsoft\\)");
 assert.match(preCode, /Get-ScheduledTask -ErrorAction Stop\)\)/, "جرد كل المهام بلا ترشيح");
 for (const needle of ["function Resolve-WorkloadReach", "cannot determine whether this", "function Expand-UserProfileVariables", "function Expand-MachineVariables", "$depth -ge 3"]) assert.ok(preSrc.includes(needle), `تتبّع الأغلفة: ${needle}`);
+// Codex P1: مراجع البيئة تُفحص في الـAction وفي كل غلاف بالمسار نفسه — لا تقتصر على الـAction.
+{
+  const i = preSrc.indexOf("function Resolve-WorkloadReach"); const j = preSrc.indexOf("\nfunction ", i + 10);
+  const reach = preSrc.slice(i, j);
+  const calls = [...reach.matchAll(/Expand-TraceText /g)].length;
+  assert.ok(calls >= 2, "Expand-TraceText على الـAction وعلى جسم كل غلاف");
+  assert.match(reach, /Expand-TraceText \(\[string\]\$inner\) \$Identity \$path/, "جسم الغلاف يمرّ بفحص البيئة");
+  assert.match(reach, /if \(\$xi\.undetermined\) \{ \$undetermined = \$true \}/, "مرجع غلاف غير محلول ⇒ undetermined");
+  assert.doesNotMatch(reach, /Expand-UserProfileVariables|Expand-MachineVariables|%\[A-Za-z_\]/, "لا توسيع/فحص بيئة مباشر خارج Expand-TraceText");
+  const i2 = preSrc.indexOf("function Expand-TraceText"); const tx = preSrc.slice(i2, preSrc.indexOf("\nfunction ", i2 + 10));
+  for (const needle of ["\\$\\{env:", "\\$env:", "!([A-Za-z_]", "GetEnvironmentVariable", "\\.Environment\\s*\\(", "%~dp0", "$undetermined = $true }\n    return"]) assert.ok(tx.includes(needle), `صيغة بيئة مغطّاة: ${needle}`);
+  assert.match(preSrc, /function ConvertTo-CanonicalTracePath/, "تطبيع '..' قبل فحص الجذر");
+}
 // Codex P1: قرارات الثقة بالـSID حصراً — لا عودة لمقارنة الاسم بعد حذف بادئة الجهاز/المجال.
 assert.ok(!preSrc.includes("ConvertTo-IdentityKey"), "مفتاح الهوية بالاسم محذوف نهائياً");
 const fnBody = (name) => { const i = preSrc.indexOf(`function ${name}`); assert.ok(i >= 0, name); const j = preSrc.indexOf("\nfunction ", i + 10); return preSrc.slice(i, j < 0 ? undefined : j); };
