@@ -9,7 +9,9 @@
 # قراءة فقط من الأمين (SELECT فقط، بلا أي INSERT/UPDATE/DELETE). يكتب في
 # Supabase على ameen_warehouse_stock_reports فقط (جدول مستقل محصور الكتابة
 # بحساب المزامنة هذا عبر RLS — مراجعة Codex على PR #40) — لا يمسّ أي جدول
-# أو رصيد أو سعر بالأمين.
+# أو رصيد أو سعر بالأمين. تنظيف التقارير الأقدم من يومين يتم عبر الدالة
+# prune_ameen_warehouse_stock_reports فقط. الدالة تتجاوز التقرير المرتبط
+# بجلسة جرد، ولا يمس هذا السكربت جداول smart_inventory_* ولا مفاتيحها.
 #
 # التشغيل التجريبي (بلا كتابة، يطبع أسماء المستودعات وعدد الأصناف والمجموع فقط):
 #   .\tools\push-ameen-warehouse-stock.ps1 -WhatIf
@@ -21,6 +23,7 @@ param(
 )
 $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+. (Join-Path $PSScriptRoot "ameen-warehouse-stock-retention.ps1")
 
 if ($EnvFile -and (Test-Path -LiteralPath $EnvFile -PathType Leaf)) {
   Get-Content -LiteralPath $EnvFile | Where-Object { $_ -match '^\s*[^#].+=.+' } | ForEach-Object {
@@ -188,10 +191,38 @@ foreach ($s in $stores) {
   Write-Host "رُفع تقرير مستودع: $($s.name) ($($s.items.Count) صنف)." -ForegroundColor Green
 }
 
-$cutoff = (Get-Date).ToUniversalTime().AddDays(-2).ToString("yyyy-MM-ddTHH:mm:ssZ")
+# الإبقاء على حد اليومين عبر Get-AmeenWarehouseStockRetentionCutoffText.
+# الحذف داخل prune_ameen_warehouse_stock_reports: دفعة محدودة، وأقدم من
+# يومين، وغير مشار إليها من جلسة جرد. لا حذف REST مباشر. لو الدالة غير
+# مطبَّقة بعد، يفشل النداء ويُكتفى بتحذير — الرفع نفسه يبقى ناجحاً.
+$cutoff = Get-AmeenWarehouseStockRetentionCutoffText
 try {
-  Invoke-RestMethod -Method Delete -Uri "$url/rest/v1/ameen_warehouse_stock_reports?created_at=lt.$cutoff" `
-    -Headers $hdr | Out-Null
-} catch { Write-Warning "تعذّر تنظيف تقارير المخزون القديمة: $($_.Exception.Message)" }
+  $pruneBatch = {
+    param([string]$CutoffText, [int]$BatchSize)
+    $payload = @{ p_before = $CutoffText; p_limit = $BatchSize } | ConvertTo-Json -Compress
+    $count = Invoke-RestMethod -Method Post `
+      -Uri "$url/rest/v1/rpc/prune_ameen_warehouse_stock_reports" `
+      -Headers $hdr `
+      -ContentType "application/json; charset=utf-8" `
+      -Body ([Text.Encoding]::UTF8.GetBytes($payload)) `
+      -TimeoutSec 20
+    return [int]$count
+  }.GetNewClosure()
+  $cleanup = Invoke-AmeenWarehouseStockReportCleanup -CutoffText $cutoff -PruneBatch $pruneBatch
+  if ($cleanup.Stopped -eq "foreign-key") {
+    Write-Warning "توقف تنظيف تقارير المخزون: مفتاح أجنبي غير متوقع، ولن تكمل هذه الجولة."
+  } elseif ($cleanup.Stopped -eq "timeout") {
+    Write-Warning "توقف تنظيف تقارير المخزون بعد تكرار مهلة البيان ($($cleanup.Removed) صفاً). تكمل الجولة التالية."
+  } elseif (-not $cleanup.Exhausted) {
+    Write-Warning "تنظيف تقارير المخزون لم يكتمل في هذه الجولة ($($cleanup.Removed) صفاً). تكمل الجولة التالية."
+  } elseif ($cleanup.Removed -gt 0) {
+    Write-Host "نُظّف $($cleanup.Removed) تقرير مخزون أقدم من يومين وغير مرتبط بجرد، على دفعات." -ForegroundColor Green
+  }
+} catch {
+  Write-Warning "تعذّر تنظيف تقارير المخزون القديمة: $($_.Exception.Message)"
+  if ($_.ErrorDetails -and $_.ErrorDetails.Message) {
+    Write-Warning ("رد الخادم: " + $_.ErrorDetails.Message)
+  }
+}
 
 Write-Host "تم رفع $($stores.Count) تقرير مستودع مستقل إلى ameen_warehouse_stock_reports." -ForegroundColor Green
