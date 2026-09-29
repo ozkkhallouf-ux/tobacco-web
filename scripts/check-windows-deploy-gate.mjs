@@ -247,6 +247,30 @@ for (const needle of ["function Resolve-WorkloadReach", "cannot determine whethe
   assert.match(acl, /catch \{ \$results \+= & \$block \$subject \('cannot read ACL: '/, "تعذّر قراءة ACL (ومنها الأب) ⇒ حجب");
   assert.match(read("docs/ai/topics/windows-deploy-gate.md"), /المجلد الأب المباشر/);
 }
+// Codex P1 (#285): سلسلة الأسلاف حتى مرسى الثقة — لا اكتفاء بـgateDir والأب المباشر.
+{
+  const body = (n) => { const i = preSrc.indexOf(`function ${n}`); assert.ok(i >= 0, n); const j = preSrc.indexOf("\nfunction ", i + 10); return preSrc.slice(i, j < 0 ? undefined : j); };
+  const acl = body("Test-GateTrustAcl"), anc = body("Get-AncestorReplacementFindings"), lv = body("Get-GateAncestorLevels");
+  assert.match(acl, /if \(-not \$anchor\) \{ \$results \+= & \$block 'acl ancestors' 'no trust anchor configured/, "مرسى الثقة إلزامي");
+  assert.match(acl, /\$levels = Get-GateAncestorLevels \$parent \$anchor \$sep\s+if \(\$null -eq \$levels\) \{ \$results \+= & \$block/, "مرسى غير سلف ⇒ حجب");
+  assert.match(acl, /foreach \(\$lv in @\(\$levels\)\) \{\s+try \{ \$lacl = Get-PreflightAcl \$lv \} catch \{ \$results \+= & \$block [^\n]*'cannot read ACL: '/, "كل مستوى سلف يُقرأ، والفشل ⇒ حجب");
+  assert.match(acl, /Get-AncestorReplacementFindings \$lv \$lacl \$approved/);
+  assert.match(acl, /\$approved = @\(\$gateSid, 'S-1-5-18', 'S-1-5-32-544', \$script:TrustedInstallerSid\)/, "ثقة إدارة النظام محددة صراحة");
+  assert.match(acl, /if \(@\(\$memberSids \| Where-Object \{ -not \$_ \}\)\.Count -eq 0\) \{ \$approved \+= \$memberSids \}/, "عضوية غير محسومة لا تعتمد أحداً");
+  assert.match(preSrc, /\$script:ReplaceRightsMask = 64 -bor 65536 -bor 262144 -bor 524288/, "حقوق الاستبدال: حذف الأبناء، Delete، WRITE_DAC، WRITE_OWNER");
+  assert.match(anc, /0x10000000/, "GENERIC_ALL قدرة استبدال");
+  assert.match(anc, /if \(\$ace\.PSObject\.Properties\['inheritOnly'\] -and \[bool\]\$ace\.inheritOnly\) \{ continue \}/);
+  assert.match(anc, /if \(\$type -eq 'Deny'\) \{ continue \}\s+if \(\$type -ne 'Allow'\) \{ \$out \+= /, "Deny لا يُحتسب حماية، ونوع غير معروف ⇒ حجب");
+  for (const needle of ["ACL is empty or unreadable", "owner cannot be resolved to a SID", "implicit WRITE_DAC", "rights cannot be interpreted", "cannot be resolved to a SID"]) assert.ok(anc.includes(needle), `سلف: ${needle}`);
+  assert.doesNotMatch(anc + lv, /ToLowerInvariant\(\)\s*-(eq|ne)\s*\$gate|Get-AccountLeafName/, "لا مقارنة أسماء حسابات");
+  assert.match(body("Get-PreflightAcl"), /inheritOnly = \(\(\$_\.PropagationFlags -band \[System\.Security\.AccessControl\.PropagationFlags\]::InheritOnly\) -ne 0\)/);
+  assert.equal(cfg0.trust.trustAnchor, "C:\\ProgramData", "مرسى الثقة الحالي");
+  assert.ok(cfg0.gateDir.toLowerCase().startsWith(cfg0.trust.trustAnchor.toLowerCase() + "\\"), "gateDir تحت مرسى الثقة");
+  // الحارس المستقل الذي يبرّر ثقة إدارة النظام على الأسلاف يبقى قائماً.
+  assert.match(preSrc, /privileged repository workload: runs repo code as/);
+  const doc = read("docs/ai/topics/windows-deploy-gate.md");
+  for (const needle of ["مرسى الثقة", "ثقة إدارة النظام", "ثقة repo workloads المؤتمتة", "أب مخصّص"]) assert.ok(doc.includes(needle), `توثيق الأسلاف: ${needle}`);
+}
 // Codex P1: قرارات الثقة بالـSID حصراً — لا عودة لمقارنة الاسم بعد حذف بادئة الجهاز/المجال.
 assert.ok(!preSrc.includes("ConvertTo-IdentityKey"), "مفتاح الهوية بالاسم محذوف نهائياً");
 const fnBody = (name) => { const i = preSrc.indexOf(`function ${name}`); assert.ok(i >= 0, name); const j = preSrc.indexOf("\nfunction ", i + 10); return preSrc.slice(i, j < 0 ? undefined : j); };

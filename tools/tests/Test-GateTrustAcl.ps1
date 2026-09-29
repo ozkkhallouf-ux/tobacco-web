@@ -47,10 +47,18 @@ $config = [System.IO.File]::ReadAllText($exampleConfig) | ConvertFrom-Json
 $config.gateDir = $gateDir
 $sep = [IO.Path]::DirectorySeparatorChar
 function Join-Gate([string]$Name) { return ($gateDir.TrimEnd('\', '/') + $sep + $Name) }
+# مرسى الثقة في الاختبار: جد gateDir المؤقت (الأب المباشر مستوى صارم، والجد مستوى أسلاف).
+$gdTrim = $gateDir.TrimEnd('\', '/')
+$parentPath = $gdTrim.Substring(0, $gdTrim.LastIndexOf($sep))
+$grandPath = $parentPath.Substring(0, $parentPath.LastIndexOf($sep))
+$config.trust | Add-Member -NotePropertyName trustAnchor -NotePropertyValue $grandPath -Force
+# أعضاء Administrators المحليين (SID): LOQ وAdministrator. $null = تعذّر التحديد.
+$script:Admins = @('S-1-5-21-111-1002', 'S-1-5-21-111-500')
+function Get-PreflightAdminMembers { if ($null -eq $script:Admins) { return $null } return @($script:Admins) }
 foreach ($f in @($config.trust.requiredTrustFiles) + @('state.json', 'writer-allowlist.json')) { [System.IO.File]::WriteAllText((Join-Gate $f), 'x') }
 
 # ACL وهمية لكل مسار: الافتراضي آمن (الهوية المخصّصة مالكةً وكاتبةً وحيدة، والقرّاء قراءة فقط).
-function New-Ace([string]$Identity, [string]$Rights, [string]$Type = 'Allow', [bool]$Inherited = $false) { return [pscustomobject]@{ identity = $Identity; rights = $Rights; type = $Type; inherited = $Inherited } }
+function New-Ace([string]$Identity, [string]$Rights, [string]$Type = 'Allow', [bool]$Inherited = $false, [bool]$InheritOnly = $false) { return [pscustomobject]@{ identity = $Identity; rights = $Rights; type = $Type; inherited = $Inherited; inheritOnly = $InheritOnly } }
 function New-SafeAcl { return [pscustomobject]@{ owner = 'OZK2026\OZK-DeployGate'; access = @(
     (New-Ace 'OZK2026\OZK-DeployGate' 'FullControl'),
     (New-Ace 'OZK2026\OZKSync' 'ReadAndExecute, Synchronize' 'Allow' $true),
@@ -158,6 +166,91 @@ try {
     $cRoot = $config | ConvertTo-Json -Depth 10 | ConvertFrom-Json
     $cRoot.gateDir = 'DeployGate'
     Assert-True (Test-Blocked (Test-GateTrustAcl $cRoot) '*no parent container*') 'gateDir without a verifiable parent container => BLOCK'
+    Reset-Acls
+
+    Write-Host '== Ancestor chain up to the trust anchor: replacement capability, not exclusivity (Codex P1)'
+    # ACL الافتراضية لـC:\ProgramData في Windows: SYSTEM وAdministrators تحكم كامل، CREATOR OWNER للأبناء فقط
+    # (InheritOnly)، وUsers قراءة وإنشاء ملفات/مجلدات. المالك SYSTEM.
+    function New-ProgramDataAcl { return [pscustomobject]@{ owner = 'S-1-5-18'; access = @(
+        (New-Ace 'S-1-5-18' 'FullControl'),
+        (New-Ace 'S-1-5-32-544' 'FullControl'),
+        (New-Ace 'S-1-3-0' 'FullControl' 'Allow' $false $true),
+        (New-Ace 'S-1-5-32-545' 'ReadAndExecute, Synchronize'),
+        (New-Ace 'S-1-5-32-545' 'CreateFiles, CreateDirectories, Synchronize')) } }
+    function Set-AncestorAcl($Acl) { $script:Acls[$grandPath] = $Acl }
+    function Add-AncestorAce($Ace) { $a = New-ProgramDataAcl; $a.access = @($a.access) + @($Ace); Set-AncestorAcl $a }
+    Reset-Acls; Set-AncestorAcl (New-ProgramDataAcl)
+    $r = Test-GateTrustAcl $config
+    Assert-True ($r.ok -and (@($r.results | Where-Object { $_.verdict -eq 'PASS' -and $_.reason -like '*trust anchor*' }).Count -eq 1)) 'normal ProgramData ancestor ACL + protected OZK parent + gateDir => PASS'
+    Reset-Acls; Add-AncestorAce (New-Ace 'S-1-5-18' 'FullControl' 'Allow' $true)
+    Assert-True ((Test-GateTrustAcl $config).ok) 'normal SYSTEM rights on ProgramData alone => not automatically BLOCK'
+    Reset-Acls; Add-AncestorAce (New-Ace 'BUILTIN\Administrators' 'FullControl' 'Allow' $true)
+    Assert-True ((Test-GateTrustAcl $config).ok) 'normal Administrators rights alone => not automatically BLOCK (privileged-workload guard stays independent)'
+    Reset-Acls; Add-AncestorAce (New-Ace $script:TrustedInstallerSid 'FullControl')
+    Assert-True ((Test-GateTrustAcl $config).ok) 'TrustedInstaller rights on the anchor => OS-administrative trust'
+    Reset-Acls; Add-AncestorAce (New-Ace 'OZK2026\LOQ' 'FullControl')
+    Assert-True ((Test-GateTrustAcl $config).ok) 'a local Administrators member (by SID) on the anchor => OS-administrative trust (its repo workloads are blocked separately)'
+    $script:Admins = $null
+    Assert-True (Test-Blocked (Test-GateTrustAcl $config) '*acl ancestor*replacement capability for OZK2026\LOQ*') 'Administrators membership undetermined => a member-looking account is not trusted => BLOCK'
+    $script:Admins = @('S-1-5-21-111-1002', 'S-1-5-21-111-500')
+    Reset-Acls; Add-AncestorAce (New-Ace 'S-1-5-32-545' 'DeleteSubdirectoriesAndFiles')
+    Assert-True (Test-Blocked (Test-GateTrustAcl $config) '*acl ancestor*replacement capability for S-1-5-32-545*') 'Users can delete/rename children of ProgramData (replace OZK-TOBACCO) => BLOCK'
+    $ancCases = @(
+        @{ label = 'OZKSync DeleteSubdirectoriesAndFiles on the ancestor => BLOCK'; ace = (New-Ace 'OZK2026\OZKSync' 'DeleteSubdirectoriesAndFiles, Synchronize') },
+        @{ label = 'OZKSync Modify on the ancestor (includes Delete: the level itself can be renamed away) => BLOCK'; ace = (New-Ace 'OZK2026\OZKSync' 'Modify, Synchronize') },
+        @{ label = 'ordinary non-admin (OZK-ReadWorker) Delete => BLOCK'; ace = (New-Ace 'OZK-ReadWorker' 'Delete') },
+        @{ label = 'ordinary non-admin ChangePermissions (WRITE_DAC) => BLOCK'; ace = (New-Ace 'OZK-ReadWorker' 'ChangePermissions') },
+        @{ label = 'ordinary non-admin TakeOwnership (WRITE_OWNER) => BLOCK'; ace = (New-Ace 'OZK-ReadWorker' 'TakeOwnership') },
+        @{ label = 'ordinary non-admin FullControl => BLOCK'; ace = (New-Ace 'OZK2026\OZKSync' 'FullControl') },
+        @{ label = 'GENERIC_ALL (numeric) for Everyone => BLOCK'; ace = (New-Ace 'S-1-1-0' '268435456') },
+        @{ label = 'inherited unsafe ancestor ACE => BLOCK'; ace = (New-Ace 'S-1-5-11' 'DeleteSubdirectoriesAndFiles' 'Allow' $true) },
+        @{ label = 'effective (not inherit-only) CREATOR OWNER FullControl => BLOCK (fail closed)'; ace = (New-Ace 'S-1-3-0' 'FullControl') }
+    )
+    foreach ($c in $ancCases) {
+        Reset-Acls; Add-AncestorAce $c.ace
+        Assert-True (Test-Blocked (Test-GateTrustAcl $config) ('*acl ancestor*' + $c.ace.identity + '*')) $c.label
+    }
+    Reset-Acls; Add-AncestorAce (New-Ace 'S-1-5-32-545' 'CreateDirectories, CreateFiles, WriteAttributes, Synchronize')
+    Assert-True ((Test-GateTrustAcl $config).ok) 'create-only / WriteAttributes on the ancestor cannot replace an existing non-empty container => not a replacement capability'
+    Reset-Acls; Add-AncestorAce (New-Ace 'S-1-5-32-545' '1073741824')
+    Assert-True ((Test-GateTrustAcl $config).ok) 'GENERIC_WRITE (maps to create/write data, no delete/WRITE_DAC) on the ancestor => not a replacement capability'
+    Reset-Acls; Add-AncestorAce (New-Ace 'OZK2026\OZKSync' 'FullControl' 'Allow' $true $true)
+    Assert-True ((Test-GateTrustAcl $config).ok) 'inherit-only ACE does not apply to the ancestor itself (its children are checked with their own actual ACLs)'
+    Reset-Acls; Add-AncestorAce (New-Ace 'OZK2026\OZKSync' 'DeleteSubdirectoriesAndFiles' 'Deny')
+    Assert-True ((Test-GateTrustAcl $config).ok) 'a Deny ACE is not a grant'
+    Reset-Acls; $a = New-ProgramDataAcl; $a.owner = 'OZK2026\OZKSync'; Set-AncestorAcl $a
+    Assert-True (Test-Blocked (Test-GateTrustAcl $config) '*acl ancestor*owner is OZK2026\OZKSync*') 'ancestor owned by an untrusted principal (implicit WRITE_DAC) => BLOCK'
+    Reset-Acls; $a = New-ProgramDataAcl; $a.owner = 'GHOST\owner'; Set-AncestorAcl $a
+    Assert-True (Test-Blocked (Test-GateTrustAcl $config) '*acl ancestor*owner cannot be resolved*') 'ancestor owner that cannot be resolved => BLOCK'
+    Reset-Acls; $script:AclErrors[$grandPath] = 'Attempted to perform an unauthorized operation.'
+    Assert-True (Test-Blocked (Test-GateTrustAcl $config) '*acl ancestor*cannot read ACL*') 'unreadable ancestor ACL => BLOCK'
+    Reset-Acls; $script:Acls[$grandPath] = $null
+    Assert-True (Test-Blocked (Test-GateTrustAcl $config) '*acl ancestor*empty or unreadable*') 'empty ancestor ACL => BLOCK'
+    Reset-Acls; Add-AncestorAce (New-Ace 'GHOST\someone' 'DeleteSubdirectoriesAndFiles')
+    Assert-True (Test-Blocked (Test-GateTrustAcl $config) '*acl ancestor*cannot be resolved to a SID*') 'replacement-capable ACE with an unresolvable identity => BLOCK'
+    Reset-Acls; Add-AncestorAce (New-Ace 'GHOST\someone' 'ReadAndExecute')
+    Assert-True ((Test-GateTrustAcl $config).ok) 'unresolvable identity with read-only rights is irrelevant to replacement'
+    Reset-Acls; Add-AncestorAce (New-Ace 'S-1-5-32-545' 'NotARight')
+    Assert-True (Test-Blocked (Test-GateTrustAcl $config) '*acl ancestor*rights cannot be interpreted*') 'malformed ancestor rights => BLOCK'
+    Reset-Acls; Add-AncestorAce (New-Ace 'S-1-5-32-545' 'FullControl' 'Audit')
+    Assert-True (Test-Blocked (Test-GateTrustAcl $config) '*acl ancestor*unrecognised ACE type*') 'ambiguous ancestor ACE type => BLOCK'
+    # سلسلة من مستويين: المرسى جدّ الجد، والمستوى الوسيط يُفحص أيضاً.
+    $greatPath = $grandPath.Substring(0, $grandPath.LastIndexOf($sep))
+    $c2 = $config | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+    $c2.trust.trustAnchor = $greatPath
+    Reset-Acls; $script:Acls[$greatPath] = New-ProgramDataAcl
+    Assert-True ((Test-GateTrustAcl $c2).ok) 'two ancestor levels, both safe => PASS'
+    Reset-Acls; $a = New-ProgramDataAcl; $a.access = @($a.access) + @(New-Ace 'OZK2026\OZKSync' 'DeleteSubdirectoriesAndFiles'); $script:Acls[$greatPath] = $a
+    Assert-True (Test-Blocked (Test-GateTrustAcl $c2) ('*acl ancestor ' + $greatPath + '*OZKSync*')) 'unsafe ACE on the upper ancestor (anchor) => BLOCK'
+    Reset-Acls; $a = New-ProgramDataAcl; $a.access = @($a.access) + @(New-Ace 'OZK2026\OZKSync' 'Delete'); $script:Acls[$grandPath] = $a
+    Assert-True (Test-Blocked (Test-GateTrustAcl $c2) ('*acl ancestor ' + $grandPath + '*OZKSync*')) 'unsafe ACE on the intermediate ancestor => BLOCK'
+    # حدود المرسى.
+    $c3 = $config | ConvertTo-Json -Depth 10 | ConvertFrom-Json; $c3.trust.trustAnchor = ''
+    Assert-True (Test-Blocked (Test-GateTrustAcl $c3) '*no trust anchor configured*') 'no trust anchor configured => BLOCK'
+    $c3.trust.trustAnchor = ($sep + 'elsewhere' + $sep + 'root')
+    Assert-True (Test-Blocked (Test-GateTrustAcl $c3) '*is not an ancestor above the immediate parent*') 'trust anchor that is not an ancestor => BLOCK'
+    $c3.trust.trustAnchor = $parentPath
+    Assert-True (Test-Blocked (Test-GateTrustAcl $c3) '*is not an ancestor above the immediate parent*') 'trust anchor equal to the immediate parent => BLOCK (the parent stays exclusive)'
     Reset-Acls
 
     Write-Host '== Owner, unreadable and malformed ACLs fail closed'

@@ -655,6 +655,15 @@ try {
     function Get-PreflightServiceInventory { return @($script:Services) }
     function Get-PreflightStartupInventory { return @($script:Startup) }
 
+    Write-Host '== OS-administrative trust on ancestors relies on the privileged-workload guard (Codex P1)'
+    # SYSTEM/Administrators مقبولون على الأسلاف (مثل ProgramData) فقط لأن أي repo workload مؤتمت بهم يحجب هنا.
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Anc System Repo' 'SYSTEM' ($ps + ' -File "' + $repo + '\tools\x.ps1"'))
+    $r = Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())
+    Assert-True (-not $r.ok -and (Test-BlockLike $r '*Anc System Repo*privileged repository workload*')) 'SYSTEM repo workload => still BLOCK through the workload guard'
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Anc Admin Repo' 'OZK2026\Administrator' ($ps + ' -File "' + $repo + '\tools\x.ps1"'))
+    $r = Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())
+    Assert-True (-not $r.ok -and (Test-BlockLike $r '*Anc Admin Repo*member of local Administrators*')) 'Administrator repo workload => still BLOCK through the workload guard'
+
     Write-Host '== Install preflight combines price-list and identity checks'
     # فحص ACL الفعلية مُختبَر في Test-GateTrustAcl.ps1؛ هنا نتيجته ناجحة لعزل الهوية ونشرات الأسعار.
     function Test-GateTrustAcl($Config) { return [pscustomobject]@{ ok = $true; results = @() } }

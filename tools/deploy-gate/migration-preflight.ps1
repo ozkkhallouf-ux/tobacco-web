@@ -189,7 +189,7 @@ function Get-PreflightAcl([string]$Path) {
     $sidType = [System.Security.Principal.SecurityIdentifier]
     return [pscustomobject]@{
         owner  = [string]$acl.GetOwner($sidType).Value
-        access = @($acl.GetAccessRules($true, $true, $sidType) | ForEach-Object { [pscustomobject]@{ identity = [string]$_.IdentityReference.Value; rights = [string]$_.FileSystemRights; type = [string]$_.AccessControlType; inherited = [bool]$_.IsInherited } })
+        access = @($acl.GetAccessRules($true, $true, $sidType) | ForEach-Object { [pscustomobject]@{ identity = [string]$_.IdentityReference.Value; rights = [string]$_.FileSystemRights; type = [string]$_.AccessControlType; inherited = [bool]$_.IsInherited; inheritOnly = (($_.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0) } })
     }
 }
 
@@ -845,6 +845,70 @@ function Test-RightsGrantWrite([long]$Value) {
     return ((($Value -band $script:WriteRightsMask) -ne 0) -or (($Value -band 0x10000000) -ne 0) -or (($Value -band 0x40000000) -ne 0))
 }
 
+# ------------------------------------------------------------
+# سلسلة الأسلاف حتى مرسى الثقة (Codex P1): فوق الأب المباشر لا يُشترط أن تكون المجلدات حصرية
+# للبوابة (مثل C:\ProgramData)، بل تُحلَّل قدرة الاستبدال الفعلية وفق دلالات ACL في Windows:
+#   - حذف/إعادة تسمية ابن: DeleteSubdirectoriesAndFiles على المستوى، أو Delete على الابن نفسه
+#     (والابن مستوى في السلسلة أيضاً، فـDelete على أي مستوى يعني أنه قابل للإزاحة).
+#   - السيطرة: ChangePermissions (WRITE_DAC)، أو TakeOwnership (WRITE_OWNER)، أو GENERIC_ALL، أو الملكية
+#     (للمالك WRITE_DAC ضمنياً).
+#   - الإنشاء وحده (CreateDirectories/CreateFiles/WriteData، أو GENERIC_WRITE)، وWriteAttributes، لا تستبدل
+#     مجلداً قائماً غير فارغ ⇒ لا تُعد قدرة استبدال.
+#   - ACE بعلَم InheritOnly لا تنطبق على المستوى نفسه (تُقرأ على الأبناء، وهم مستويات مفحوصة بـACL الفعلية).
+#   - Deny لا يُحتسب حماية (تحفّظاً).
+# الموثوق على هذه المستويات: هوية البوابة، وثقة إدارة النظام (SYSTEM، Administrators، TrustedInstaller،
+# وأعضاء Administrators المحليين بالـSID). هذه الثقة مقبولة لأن أي repo workload مؤتمت بإحداها
+# يحجبه حارس الصلاحيات مستقلاً. أي principal آخر بقدرة استبدال ⇒ حجب؛ ACL لازمة لا تُقرأ/تُفسَّر ⇒ حجب.
+# ------------------------------------------------------------
+$script:TrustedInstallerSid = 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
+$script:ReplaceRightsMask = 64 -bor 65536 -bor 262144 -bor 524288
+
+function Get-AncestorReplacementFindings([string]$Level, $Acl, [string[]]$Approved) {
+    $out = @()
+    $subject = 'acl ancestor ' + $Level + ' (replacement of the protected chain)'
+    if (-not $Acl) { return @(@{ subject = $subject; reason = 'ACL is empty or unreadable' }) }
+    $ownerText = ([string]$Acl.owner).Trim()
+    $ownerSid = Resolve-PrincipalSid $ownerText
+    if (-not $ownerText) { $out += @{ subject = $subject; reason = 'owner cannot be determined' } }
+    elseif (-not $ownerSid) { $out += @{ subject = $subject; reason = ('owner cannot be resolved to a SID: ' + $ownerText) } }
+    elseif ($Approved -notcontains $ownerSid) { $out += @{ subject = $subject; reason = ('owner is ' + $ownerText + ' (' + $ownerSid + '): an owner holds implicit WRITE_DAC and can grant itself delete/rename rights') } }
+    foreach ($ace in @($Acl.access)) {
+        $type = ([string]$ace.type).Trim()
+        if ($type -eq 'Deny') { continue }
+        if ($type -ne 'Allow') { $out += @{ subject = $subject; reason = ('unrecognised ACE type: ' + $ace.type) }; continue }
+        if ($ace.PSObject.Properties['inheritOnly'] -and [bool]$ace.inheritOnly) { continue }
+        $value = ConvertTo-RightsValue ([string]$ace.rights)
+        if ($null -eq $value) { $out += @{ subject = $subject; reason = ('rights cannot be interpreted for ' + $ace.identity + ': ' + $ace.rights) }; continue }
+        if ((($value -band $script:ReplaceRightsMask) -eq 0) -and (($value -band 0x10000000) -eq 0)) { continue }
+        $aceText = ([string]$ace.identity).Trim()
+        if (-not $aceText) { $out += @{ subject = $subject; reason = 'replacement-capable ACE with an unresolvable identity' }; continue }
+        $aceSid = Resolve-PrincipalSid $aceText
+        if (-not $aceSid) { $out += @{ subject = $subject; reason = ('replacement-capable ACE whose identity cannot be resolved to a SID: ' + $aceText) }; continue }
+        if ($Approved -contains $aceSid) { continue }
+        $origin = 'explicit'
+        if ([bool]$ace.inherited) { $origin = 'inherited' }
+        $out += @{ subject = $subject; reason = ($origin + ' replacement capability for ' + $aceText + ' (' + $ace.rights + '): can delete/rename or take control of a container in the protected chain') }
+    }
+    return $out
+}
+
+# مستويات الأسلاف فوق الأب المباشر حتى مرسى الثقة (شاملاً). $null إن لم يكن المرسى سلفاً صالحاً.
+function Get-GateAncestorLevels([string]$Parent, [string]$Anchor, [string]$Sep) {
+    $key = { param([string]$p) (([string]$p).TrimEnd('\', '/')).ToLowerInvariant() }
+    $anchorKey = & $key $Anchor
+    if (-not $anchorKey -or (& $key $Parent) -eq $anchorKey) { return $null }
+    $levels = @()
+    $cur = $Parent
+    for ($i = 0; $i -lt 32; $i++) {
+        $up = Get-GateParentPath (([string]$cur).TrimEnd('\', '/')) $Sep
+        if (-not $up) { return $null }
+        $levels += $up
+        if ((& $key $up) -eq $anchorKey) { return , $levels }
+        $cur = $up
+    }
+    return $null
+}
+
 # المجلد الأب المباشر لمسار (مسار لا اسم حساب)؛ '' إن لم يوجد أب قابل للفحص.
 function Get-GateParentPath([string]$Dir, [string]$Sep) {
     $cut = $Dir.LastIndexOf($Sep)
@@ -901,7 +965,28 @@ function Test-GateTrustAcl($Config) {
             }
         }
     }
-    if (@($results).Count -eq 0) { $results += [pscustomobject]@{ task = 'gate trust ACL'; verdict = 'PASS'; reason = 'only the dedicated gate identity owns and can write the parent container, gateDir and the trust files' } }
+    # الأسلاف فوق الأب المباشر حتى مرسى الثقة: تحليل قدرة الاستبدال (لا حصرية).
+    $anchor = ''
+    if ($Config.trust.PSObject.Properties['trustAnchor']) { $anchor = ([string]$Config.trust.trustAnchor).Trim() }
+    if (-not $anchor) { $results += & $block 'acl ancestors' 'no trust anchor configured (trust.trustAnchor); the ancestor chain cannot be bounded' }
+    elseif ($parent) {
+        $levels = Get-GateAncestorLevels $parent $anchor $sep
+        if ($null -eq $levels) { $results += & $block 'acl ancestors' ('trust anchor ' + $anchor + ' is not an ancestor above the immediate parent ' + $parent) }
+        else {
+            $approved = @($gateSid, 'S-1-5-18', 'S-1-5-32-544', $script:TrustedInstallerSid)
+            $members = Get-PreflightAdminMembers
+            if ($null -ne $members) {
+                $memberSids = @(@($members) | ForEach-Object { Resolve-PrincipalSid ([string]$_) })
+                # عضو لا يُحلّ ⇒ لا يُعتمد أحد بالعضوية (تحفّظاً)؛ المجموعات المبنية تبقى معتمدة.
+                if (@($memberSids | Where-Object { -not $_ }).Count -eq 0) { $approved += $memberSids }
+            }
+            foreach ($lv in @($levels)) {
+                try { $lacl = Get-PreflightAcl $lv } catch { $results += & $block ('acl ancestor ' + $lv) ('cannot read ACL: ' + $_.Exception.Message); continue }
+                foreach ($f in @(Get-AncestorReplacementFindings $lv $lacl $approved)) { $results += & $block $f.subject $f.reason }
+            }
+        }
+    }
+    if (@($results).Count -eq 0) { $results += [pscustomobject]@{ task = 'gate trust ACL'; verdict = 'PASS'; reason = 'only the dedicated gate identity owns and can write the parent container, gateDir and the trust files; no untrusted principal can replace a container up to the trust anchor' } }
     $blocked = @($results | Where-Object { $_.verdict -ne 'PASS' })
     return [pscustomobject]@{ ok = ($blocked.Count -eq 0); results = $results }
 }

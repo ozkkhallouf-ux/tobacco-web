@@ -162,6 +162,8 @@
       "C:\\Users\\LOQ\\Documents\\OZK-TOBACCO",
       "C:\\Users\\LOQ\\.copilot\\repos"
     ],
+    "trustAnchor": "C:\\ProgramData",
+    "_trustAnchorComment": "Highest ancestor of gateDir whose ACL is analysed for container-replacement capability (delete/rename child, take control). Levels between the immediate parent and the anchor need not be exclusive to the gate; SYSTEM, Administrators, TrustedInstaller and local Administrators members are OS-administrative trust there, because any automated repository workload running as one of them already blocks Initialize. The anchor itself is OS-managed; its own replaceability depends on its parent (C:\\), where only OS-administrative principals hold delete rights by default.",
     "trustFiles": [
       "gate-config.json",
       "deploy-gate.ps1",
