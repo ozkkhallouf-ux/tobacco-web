@@ -238,7 +238,7 @@ for (const needle of ["function Resolve-WorkloadReach", "cannot determine whethe
   const reader = body("Read-PreflightWrapperText"), wrap = body("Get-WrapperReach"), acl = body("Test-GateTrustAcl");
   assert.match(reader, /if \(-not \(Test-Path -LiteralPath \$Path -PathType Leaf\)\) \{ return \$null \}/, "غلاف مفقود ⇒ $null لا نص فارغ");
   assert.doesNotMatch(reader, /return ''|catch/, "فشل القراءة لا يتحول إلى نص فارغ صالح");
-  assert.match(wrap, /try \{ \$inner = Read-PreflightWrapperText \$Path \} catch \{ return \(New-Reach 'UNKNOWN'/, "فشل القراءة ⇒ UNKNOWN");
+  assert.match(wrap, /try \{ \$inner = Read-PreflightWrapperText \(\[string\]\$pc\.final\) \} catch \{ return \(New-Reach 'UNKNOWN'/, "فشل القراءة ⇒ UNKNOWN");
   assert.match(wrap, /if \(\$null -eq \$inner\) \{ return \(New-Reach 'UNKNOWN' \('wrapper is missing/, "غلاف مفقود ⇒ UNKNOWN");
   assert.match(wrap, /if \(\$inner\.Length -eq 0\) \{ return \(New-Reach 'UNKNOWN' \('wrapper is empty \(zero bytes\)/, "غلاف بطول صفر ⇒ UNKNOWN");
   assert.match(body("Get-GateParentPath"), /LastIndexOf\(\$Sep\)/);
@@ -289,6 +289,33 @@ for (const needle of ["function Resolve-WorkloadReach", "cannot determine whethe
   assert.match(idp, /workloads = @\(\$workloads\)/, "سجل تدقيق لكل عنصر");
   assert.match(gateSrc, /\$record\['preflight_workloads'\] = Format-PreflightWorkloads \$pre/, "Initialize يدقّق نتائج الجرد");
   assert.match(read("docs/ai/topics/windows-deploy-gate.md"), /GroupId/);
+}
+// Codex P1 (#285): الاحتواء بهوية المسار في نظام الملفات (junction/symlink/8.3)، لا بالنص وحده.
+{
+  const body = (n) => { const i = preSrc.indexOf(`function ${n}`); assert.ok(i >= 0, n); const j = preSrc.indexOf("\nfunction ", i + 10); return preSrc.slice(i, j < 0 ? undefined : j); };
+  assert.ok(!preSrc.includes("function Test-InRepoRoot") && !preSrc.includes("Test-FieldReachesRepo"), "لا مقارنة احتواء نصية وحدها");
+  const callers = [...preSrc.matchAll(/^function ([\w-]+)[\s\S]*?(?=^function |(?![\s\S]))/gm)].filter((m) => /Test-KeyInRoots /.test(m[0])).map((m) => m[1]).sort();
+  assert.deepEqual(callers, ["Get-FieldReach", "Get-PathContainment"], "Test-KeyInRoots يُستدعى من قرار الاحتواء المركزي والفحص النصي الإيجابي فقط");
+  assert.match(body("Test-KeyInRoots"), /\$Key -eq \$root -or \$Key\.StartsWith\(\$root \+ '\\'\)/, "حدود المسار: C:\\repo2 ليس داخل C:\\repo");
+  const ctx = body("New-ReachContext"), pc = body("Get-PathContainment"), res = body("Resolve-PreflightFinalPath");
+  assert.match(ctx, /\$rr = Resolve-PreflightFinalPath \(\[string\]\$root\)[\s\S]*else \{ \$rootErrors \+= /, "جذور المستودع تُحلّ في نظام الملفات ولا تسقط بصمت");
+  assert.match(pc, /if \(@\(\$Ctx\.rootErrors\)\.Count -gt 0\) \{ return \[pscustomobject\]@\{ state = 'UNKNOWN'/, "جذر غير محلول ⇒ UNKNOWN");
+  assert.match(pc, /if \(\$MustExist\) \{ return \[pscustomobject\]@\{ state = 'UNKNOWN'/, "هدف مفقود ⇒ UNKNOWN");
+  assert.match(pc, /return \[pscustomobject\]@\{ state = 'UNKNOWN'; final = ''; reason = \('filesystem identity cannot be resolved: '/, "فشل الحل ⇒ UNKNOWN لا OUT");
+  assert.match(pc, /Test-KeyInRoots \(ConvertTo-CanonicalTracePath \(\[string\]\$r\.path\)\) \$all/, "المرشّح بمساره النهائي مقابل الجذور النهائية");
+  assert.match(res, /\[OzkGateFs\.FinalPath\]::Resolve\(\$cur, \[ref\]\$e2\)/);
+  assert.match(res, /return \(New-PathResolution 'ERROR' '' \('the final path of ' \+ \$kind/, "reparse مكسور ⇒ ERROR");
+  assert.match(preSrc, /CreateFileW\(path, 0, 7, IntPtr\.Zero, 3, 0x02000000, IntPtr\.Zero\)/, "يتبع reparse points (بلا FILE_FLAG_OPEN_REPARSE_POINT)");
+  const fpCalls = [...preSrc.matchAll(/GetFinalPathNameByHandleW\(h, sb, \(uint\)sb\.Capacity, (\w+)\)/g)].map((m) => m[1]);
+  assert.ok(fpCalls.length === 2 && fpCalls.every((f) => f === "0"), "كل استدعاء بـFILE_NAME_NORMALIZED: أسماء طويلة لا 8.3");
+  assert.match(body("Get-ActionReach"), /\$pc = Get-PathContainment \$Ctx \$wd \$true[\s\S]*else \{ \$wd = ConvertTo-CanonicalTracePath \(\[string\]\$pc\.final\) \}/, "مجلد العمل يُحلّ قبل الأهداف النسبية");
+  assert.match(body("Get-WrapperReach"), /\$pc = Get-PathContainment \$Ctx \$Path \$true[\s\S]*Read-PreflightWrapperText \(\[string\]\$pc\.final\)/, "الغلاف يُحلّ قبل قراءته واحتوائه");
+  assert.match(body("Get-TargetReach"), /\$pc = Get-PathContainment \$Ctx \$p \$true/);
+  assert.match(body("Invoke-GateIdentityPreflight"), /\('repository root ' \+ \$root\) \('cannot be canonicalized to an existing final filesystem path/, "جذر لا يُحلّ ⇒ حجب");
+  assert.match(checkWfRaw(), /tools\\tests\\Test-GatePathIdentity\.ps1/, "اختبار junctions حقيقية مسجّل في CI (5.1)");
+  const pid = read("tools/tests/Test-GatePathIdentity.ps1");
+  for (const needle of ["New-Item -ItemType Junction", "Add-Skip", "ShortPath", "SymbolicLink", "[IO.Directory]::Delete($l)"]) assert.ok(pid.includes(needle), `اختبار الهوية: ${needle}`);
+  assert.match(read("docs/ai/topics/windows-deploy-gate.md"), /GetFinalPathNameByHandleW/);
 }
 // Codex P1: قرارات الثقة بالـSID حصراً — لا عودة لمقارنة الاسم بعد حذف بادئة الجهاز/المجال.
 assert.ok(!preSrc.includes("ConvertTo-IdentityKey"), "مفتاح الهوية بالاسم محذوف نهائياً");
@@ -418,7 +445,7 @@ ok(`writerScripts تغطي كل مسار كتابة الأسعار (${seen.size}
 const checkWf = read(".github/workflows/check.yml");
 assert.match(checkWf, /tools\\tests\\Test-DeployGate\.ps1/);
 assert.match(checkWf, /tools\\tests\\Test-RunRepoTask\.ps1/);
-for (const f of ["tools/deploy-gate/deploy-gate.ps1", "tools/deploy-gate/run-repo-task.ps1", "tools/deploy-gate/notify.ps1", "tools/deploy-gate/migration-preflight.ps1", "tools/tests/Test-DeployGate.ps1", "tools/tests/Test-RunRepoTask.ps1", "tools/tests/Test-MigrationPreflight.ps1", "tools/tests/Test-GateIdentityPreflight.ps1", "tools/tests/Test-GateTrustAcl.ps1"]) {
+for (const f of ["tools/deploy-gate/deploy-gate.ps1", "tools/deploy-gate/run-repo-task.ps1", "tools/deploy-gate/notify.ps1", "tools/deploy-gate/migration-preflight.ps1", "tools/tests/Test-DeployGate.ps1", "tools/tests/Test-RunRepoTask.ps1", "tools/tests/Test-MigrationPreflight.ps1", "tools/tests/Test-GateIdentityPreflight.ps1", "tools/tests/Test-GateTrustAcl.ps1", "tools/tests/Test-GatePathIdentity.ps1"]) {
   const bytes = readFileSync(path.join(root, f));
   assert.ok(bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf, `${f} يحمل BOM (5.1 يقرأ غيره ANSI)`);
 }

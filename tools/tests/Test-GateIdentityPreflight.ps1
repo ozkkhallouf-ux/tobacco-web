@@ -41,6 +41,21 @@ $script:SidTable = @{
 function Invoke-NtAccountTranslate([string]$Name) { $k = $Name.ToLowerInvariant(); if ($script:SidTable.ContainsKey($k)) { return $script:SidTable[$k] } return $null }
 function Get-PreflightMachineName { return 'OZK2026' }
 
+# هوية المسار في نظام الملفات: الاختبارات هنا تستعمل مسارات Windows وهمية، فالمحلّل الأصلي (native) يُستبدل
+# بنموذج: الافتراضي = المسار نفسه موجود (OK)، وجداول لـjunction/alias، والمفقود، وفشل الحل. سلوك المحلّل
+# الحقيقي مع junction فعلية يُختبر في Test-GatePathIdentity.ps1 على Windows.
+$script:FsAliases = [ordered]@{}
+$script:FsMissing = @{}
+$script:FsErrors = @{}
+function Resolve-PreflightFinalPath([string]$Path) {
+    $k = ConvertTo-CanonicalTracePath $Path
+    foreach ($e in @($script:FsErrors.Keys)) { if ($k -eq $e -or $k.StartsWith($e + '\')) { return (New-PathResolution 'ERROR' '' $script:FsErrors[$e]) } }
+    for ($hop = 0; $hop -lt 8; $hop++) { $moved = $false; foreach ($a in @($script:FsAliases.Keys)) { if ($k -eq $a -or $k.StartsWith($a + '\')) { $k = ([string]$script:FsAliases[$a]).ToLowerInvariant() + $k.Substring($a.Length); $moved = $true; break } }; if (-not $moved) { break } }
+    if ($script:FsMissing.ContainsKey($k)) { return (New-PathResolution 'MISSING' $k ('does not exist: ' + $Path)) }
+    if ($k -eq (ConvertTo-CanonicalTracePath $Path)) { return (New-PathResolution 'OK' $Path) }
+    return (New-PathResolution 'OK' $k)
+}
+
 $script:Tasks = @()
 $script:Services = @()
 # أعضاء Administrators المحليين على OZK2026 (LOQ عضو). $null = تعذّر التحديد.
@@ -642,6 +657,14 @@ try {
     . $preflight
     function Invoke-NtAccountTranslate([string]$Name) { $k = $Name.ToLowerInvariant(); if ($script:SidTable.ContainsKey($k)) { return $script:SidTable[$k] } return $null }
     function Get-PreflightMachineName { return 'OZK2026' }
+    function Resolve-PreflightFinalPath([string]$Path) {
+        $k = ConvertTo-CanonicalTracePath $Path
+        foreach ($e in @($script:FsErrors.Keys)) { if ($k -eq $e -or $k.StartsWith($e + '\')) { return (New-PathResolution 'ERROR' '' $script:FsErrors[$e]) } }
+        for ($hop = 0; $hop -lt 8; $hop++) { $moved = $false; foreach ($a in @($script:FsAliases.Keys)) { if ($k -eq $a -or $k.StartsWith($a + '\')) { $k = ([string]$script:FsAliases[$a]).ToLowerInvariant() + $k.Substring($a.Length); $moved = $true; break } }; if (-not $moved) { break } }
+        if ($script:FsMissing.ContainsKey($k)) { return (New-PathResolution 'MISSING' $k ('does not exist: ' + $Path)) }
+        if ($k -eq (ConvertTo-CanonicalTracePath $Path)) { return (New-PathResolution 'OK' $Path) }
+        return (New-PathResolution 'OK' $k)
+    }
     $tmpW = Join-Path ([IO.Path]::GetTempPath()) ('ozk-wrap-' + [guid]::NewGuid().ToString('N'))
     [void](New-Item -ItemType Directory -Path $tmpW)
     try {
@@ -732,6 +755,67 @@ try {
     $r = Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())
     $gw = @($r.workloads | Where-Object { $_.name -like '*TOBACCO Windows Deploy Gate' })[0]
     Assert-True ($r.ok -and $gw.principalType -eq 'USER' -and $gw.workload -like 'GATE_TASK*' -and $gw.decision -eq 'OK') 'valid gate task (USER) => eligible and audited as the validated gate task'
+
+    Write-Host '== Filesystem identity: junction / symlink / 8.3 aliases decide containment (Codex P1, model)'
+    $cfgF = New-Config 'OZK2026\OZK-DeployGate' @()
+    function Reach-Of($Actions) { return (Resolve-TaskReach $cfgF @($Actions) 'SYSTEM') }
+    function FsAct([string]$E, [string]$A = '', [string]$W = '') { return [pscustomobject]@{ execute = $E; arguments = $A; workingDirectory = $W } }
+    $script:FsAliases['c:\runner'] = $repo
+    $script:FsAliases['c:\progra~9\tobacc~1'] = $repo
+    $script:FsAliases['c:\hop1'] = 'c:\hop2'
+    $script:FsAliases['c:\hop2'] = $repo
+    $script:FsAliases['c:\elsewhere'] = 'c:\tools\unrelated'
+    $script:FsErrors['c:\broken'] = 'the final path of reparse point (junction/symlink) c:\broken cannot be resolved (Win32 error 2)'
+    $script:FsErrors['c:\denied'] = 'cannot read c:\denied (Win32 error 5)'
+    $script:Wrappers['c:\tools\unrelated\x.ps1'] = 'Get-Date'
+    $fsCases = @(
+        @{ label = 'junction -> repo: powershell -File C:\runner\tools\job.ps1 => REPO'; a = (FsAct $ps '-File "C:\runner\tools\job.ps1"'); want = 'REPO' },
+        @{ label = 'junction -> repo: node C:\runner\scripts\serve.mjs => REPO'; a = (FsAct 'node.exe' 'C:\runner\scripts\serve.mjs'); want = 'REPO' },
+        @{ label = 'WorkingDirectory junction -> repo + relative scripts\serve.mjs => REPO'; a = (FsAct 'node.exe' 'scripts\serve.mjs' 'C:\runner'); want = 'REPO' },
+        @{ label = '8.3 alias of the repo => REPO'; a = (FsAct $ps '-File "C:\PROGRA~9\TOBACC~1\tools\job.ps1"'); want = 'REPO' },
+        @{ label = 'nested junction chain hop1 -> hop2 -> repo => REPO'; a = (FsAct $ps '-File "C:\hop1\tools\job.ps1"'); want = 'REPO' },
+        @{ label = 'junction to an unrelated directory (resolved) => NOT_REPO'; a = (FsAct $ps '-File "C:\elsewhere\x.ps1"'); want = 'NOT_REPO' },
+        @{ label = 'broken junction / unresolved reparse target => UNKNOWN'; a = (FsAct $ps '-File "C:\broken\tools\job.ps1"'); want = 'UNKNOWN' },
+        @{ label = 'inaccessible resolution (access denied) => UNKNOWN'; a = (FsAct $ps '-File "C:\denied\job.ps1"'); want = 'UNKNOWN' },
+        @{ label = 'prefix collision: C:\...\OZK-TOBACCO2\job.exe vs root C:\...\OZK-TOBACCO => NOT_REPO'; a = (FsAct 'C:\Windows\System32\cmd.exe' '/c "C:\Users\LOQ\Documents\OZK-TOBACCO2\job.exe"'); want = 'NOT_REPO' },
+        @{ label = 'case variation of the same Windows path => REPO'; a = (FsAct $ps ('-File "' + $repo.ToUpperInvariant() + '\TOOLS\JOB.PS1"')); want = 'REPO' },
+        @{ label = 'data argument through a junction into the repo => REPO'; a = (FsAct 'C:\Tools\runner.exe' '--root C:\runner'); want = 'REPO' },
+        @{ label = 'data argument through a broken junction => UNKNOWN (never NOT_REPO)'; a = (FsAct 'C:\Tools\runner.exe' '--root C:\broken\x'); want = 'UNKNOWN' }
+    )
+    foreach ($c in $fsCases) { $got = Reach-Of $c.a; Assert-True ($got.status -eq $c.want) ($c.label + ' (got ' + $got.status + ')') }
+    $script:FsMissing['c:\tools\gone.exe'] = $true
+    Assert-True ((Reach-Of (FsAct 'C:\Tools\gone.exe' '/run')).status -eq 'UNKNOWN') 'missing executable target (may appear later at this path) => UNKNOWN'
+    $script:FsMissing['c:\logs\new.log'] = $true
+    Assert-True ((Reach-Of (FsAct 'C:\Tools\backup.exe' '/log C:\Logs\new.log')).status -eq 'NOT_REPO') 'missing data-argument path outside the repo (ancestor resolved) => not a target, NOT_REPO'
+    $script:FsMissing[$repo.ToLowerInvariant() + '\tools\new.ps1'] = $true
+    Assert-True ((Reach-Of (FsAct $ps ('-File "' + $repo + '\tools\new.ps1"'))).status -eq 'REPO') 'missing target inside the repo => REPO'
+    $script:Wrappers['c:\outside\a.cmd'] = 'call "C:\runner\tools\b.cmd"'
+    Assert-True ((Reach-Of (FsAct 'cmd.exe' '/c "C:\outside\a.cmd"')).status -eq 'REPO') 'wrapper outside the repo -> target through a junction into the repo => REPO'
+    $script:Wrappers['c:\outside\c.vbs'] = 'Set sh = CreateObject("WScript.Shell")' + "`r`n" + 'sh.CurrentDirectory = "C:\runner"' + "`r`n" + 'sh.Run "node scripts\serve.mjs", 0'
+    Assert-True ((Reach-Of (FsAct 'wscript.exe' '"C:\outside\c.vbs"')).status -eq 'REPO') 'wrapper whose working directory is a junction into the repo => REPO'
+    $script:Wrappers['c:\outside\d.cmd'] = 'call "C:\broken\b.cmd"'
+    Assert-True ((Reach-Of (FsAct 'cmd.exe' '/c "C:\outside\d.cmd"')).status -eq 'UNKNOWN') 'resolution failure inside the wrapper chain => UNKNOWN'
+    $script:FsAliases['c:\alias\wrap.cmd'] = 'c:\real\wrap.cmd'
+    $script:Wrappers['c:\real\wrap.cmd'] = ('call "' + $repo + '\tools\x.bat"')
+    Assert-True ((Reach-Of (FsAct 'cmd.exe' '/c "C:\alias\wrap.cmd"')).status -eq 'REPO') 'wrapper read through its canonical final path (file alias) => REPO'
+    # جذر المستودع عبر alias: الجذر نفسه يُحلّ، فالمسار الحقيقي للمرشّح يُطابق.
+    $cfgA = New-Config 'OZK2026\OZK-DeployGate' @()
+    $cfgA.repoPath = 'C:\RepoLink'
+    $script:FsAliases['c:\repolink'] = $repo
+    Assert-True ((Resolve-TaskReach $cfgA @(FsAct $ps ('-File "' + $repo + '\tools\job.ps1"')) 'SYSTEM').status -eq 'REPO') 'repository root configured through a junction/alias is canonicalized (real path => REPO)'
+    $cfgB = New-Config 'OZK2026\OZK-DeployGate' @()
+    $cfgB.repoPath = 'C:\broken\repo'
+    Assert-True ((Resolve-TaskReach $cfgB @(FsAct $ps '-File "C:\Tools\report.ps1"') 'SYSTEM').status -eq 'UNKNOWN') 'repository root that cannot be canonicalized => every containment decision UNKNOWN'
+    $script:Tasks = @(Get-CleanLayout)
+    Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight $cfgB) '*repository root C:\broken\repo*cannot be canonicalized*') 'repository root that cannot be canonicalized => BLOCK (never dropped silently)'
+    $script:FsMissing[$repo.ToLowerInvariant()] = $true
+    Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) ('*repository root ' + $repo + '*MISSING*')) 'missing repository root => BLOCK'
+    $script:FsMissing.Remove($repo.ToLowerInvariant())
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Fs Junction System' 'SYSTEM' 'x' @(FsAct $ps '-File "C:\runner\tools\job.ps1"'))
+    Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) '*Fs Junction System*privileged repository workload*') 'SYSTEM task through a junction into the repo => privileged BLOCK'
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Fs Broken System' 'SYSTEM' 'x' @(FsAct $ps '-File "C:\broken\tools\job.ps1"'))
+    Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) '*Fs Broken System*cannot determine whether*') 'SYSTEM task through a broken junction => UNKNOWN => BLOCK'
+    $script:FsAliases = [ordered]@{}; $script:FsMissing = @{}; $script:FsErrors = @{}
 
     Write-Host '== Install preflight combines price-list and identity checks'
     # فحص ACL الفعلية مُختبَر في Test-GateTrustAcl.ps1؛ هنا نتيجته ناجحة لعزل الهوية ونشرات الأسعار.

@@ -155,6 +155,100 @@ function Get-PreflightStartupInventory {
     return $out
 }
 
+# ------------------------------------------------------------
+# هوية المسار في نظام الملفات (Codex P1): قرار REPO/NOT_REPO لا يُتخذ بالنص وحده. junction وsymlink
+# واسم 8.3 القصير قد تجعل C:\runner هو جذر المستودع فعلياً. نقطة تماس واحدة تحلّ المسار إلى مساره
+# النهائي عبر Windows نفسه: CreateFileW (بلا FILE_FLAG_OPEN_REPARSE_POINT، فيتبع كل reparse point) ثم
+# GetFinalPathNameByHandleW (FILE_NAME_NORMALIZED: أسماء طويلة وحالة أحرف فعلية). .NET Framework في
+# PowerShell 5.1 لا يوفّر ذلك، فالاستدعاء native محدود ومركزي هنا فقط. قراءة فقط: لا يُفتح الملف
+# للقراءة أو الكتابة (access = 0) ولا يُمشى أي مجلد.
+# النتيجة: OK (موجود؛ path نهائي)، أو MISSING (غير موجود؛ path = المسار النهائي لأقرب سلف موجود + الباقي)،
+# أو ERROR (reparse لا يُحلّ، رفض وصول، خطأ آخر) ⇒ UNKNOWN عند المستدعي، لا NOT_REPO أبداً.
+# ------------------------------------------------------------
+$script:GateFsSource = @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
+namespace OzkGateFs {
+    public static class FinalPath {
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern uint GetFinalPathNameByHandleW(SafeFileHandle handle, StringBuilder buffer, uint length, uint flags);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        static extern uint GetFileAttributesW(string name);
+        public const uint Invalid = 0xFFFFFFFF;
+        public static uint Attributes(string path, out int error) {
+            uint a = GetFileAttributesW(path);
+            error = (a == Invalid) ? Marshal.GetLastWin32Error() : 0;
+            return a;
+        }
+        public static string Resolve(string path, out int error) {
+            error = 0;
+            // 0 = بلا حق قراءة/كتابة؛ مشاركة كاملة؛ OPEN_EXISTING؛ FILE_FLAG_BACKUP_SEMANTICS (للمجلدات).
+            using (SafeFileHandle h = CreateFileW(path, 0, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero)) {
+                if (h.IsInvalid) { error = Marshal.GetLastWin32Error(); return null; }
+                StringBuilder sb = new StringBuilder(1024);
+                uint n = GetFinalPathNameByHandleW(h, sb, (uint)sb.Capacity, 0);
+                if (n == 0) { error = Marshal.GetLastWin32Error(); return null; }
+                if (n >= sb.Capacity) {
+                    sb = new StringBuilder((int)n + 2);
+                    n = GetFinalPathNameByHandleW(h, sb, (uint)sb.Capacity, 0);
+                    if (n == 0 || n >= sb.Capacity) { error = (n == 0) ? Marshal.GetLastWin32Error() : 122; return null; }
+                }
+                return sb.ToString();
+            }
+        }
+    }
+}
+'@
+
+function New-PathResolution([string]$Status, [string]$Path, [string]$Reason = '') { return [pscustomobject]@{ status = $Status; path = $Path; reason = $Reason } }
+
+# \\?\C:\x ⇒ C:\x، و\\?\UNC\srv\share ⇒ \\srv\share؛ غير ذلك (مثل \\?\Volume{...}) يبقى كما هو.
+function ConvertFrom-Win32FinalPath([string]$Path) {
+    if ($Path.StartsWith('\\?\UNC\')) { return '\\' + $Path.Substring(8) }
+    if ($Path -match '^\\\\\?\\[A-Za-z]:\\') { return $Path.Substring(4) }
+    return $Path
+}
+
+function Resolve-PreflightFinalPath([string]$Path) {
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { return (New-PathResolution 'ERROR' '' 'filesystem identity can only be resolved on Windows') }
+    if (-not ('OzkGateFs.FinalPath' -as [type])) {
+        try { Add-Type -TypeDefinition $script:GateFsSource -Language CSharp -ErrorAction Stop } catch { return (New-PathResolution 'ERROR' '' ('native path resolver unavailable: ' + $_.Exception.Message)) }
+    }
+    $p = (([string]$Path).Trim() -replace '/', '\')
+    if (-not (Test-AbsoluteTracePath $p)) { return (New-PathResolution 'ERROR' '' ('not an absolute path: ' + $Path)) }
+    $cur = $p.TrimEnd('\')
+    if ($cur -match '^[A-Za-z]:$') { $cur += '\' }
+    $rest = @()
+    for ($i = 0; $i -lt 64; $i++) {
+        $e = 0
+        $attrs = [OzkGateFs.FinalPath]::Attributes($cur, [ref]$e)
+        if ($attrs -ne [OzkGateFs.FinalPath]::Invalid) {
+            # المدخل موجود (قد يكون reparse point): مساره النهائي عبر Windows، وإلا ERROR (مكسور/مرفوض).
+            $e2 = 0
+            $final = [OzkGateFs.FinalPath]::Resolve($cur, [ref]$e2)
+            if (-not $final) {
+                $kind = 'entry'
+                if (($attrs -band 0x400) -ne 0) { $kind = 'reparse point (junction/symlink)' }
+                return (New-PathResolution 'ERROR' '' ('the final path of ' + $kind + ' ' + $cur + ' cannot be resolved (Win32 error ' + $e2 + ')'))
+            }
+            $final = ConvertFrom-Win32FinalPath $final
+            if ($rest.Count -eq 0) { return (New-PathResolution 'OK' $final) }
+            return (New-PathResolution 'MISSING' ($final.TrimEnd('\') + '\' + ($rest -join '\')) ('does not exist: ' + $p))
+        }
+        if ($e -ne 2 -and $e -ne 3) { return (New-PathResolution 'ERROR' '' ('cannot read ' + $cur + ' (Win32 error ' + $e + ')')) }
+        $cut = $cur.TrimEnd('\').LastIndexOf('\')
+        if ($cut -le 1) { return (New-PathResolution 'ERROR' '' ('no existing ancestor for ' + $p)) }
+        $rest = @($cur.TrimEnd('\').Substring($cut + 1)) + $rest
+        $cur = $cur.Substring(0, $cut)
+        if ($cur -match '^[A-Za-z]:$') { $cur += '\' }
+    }
+    return (New-PathResolution 'ERROR' '' ('path too deep to resolve: ' + $p))
+}
+
 # ملف COM handler المسجَّل (InprocServer32/LocalServer32) قراءةً من السجل؛ '' إن تعذّر ⇒ UNKNOWN.
 function Get-PreflightComHandlerPath([string]$ClassId) {
     foreach ($root in @('HKLM:\SOFTWARE\Classes\CLSID', 'HKLM:\SOFTWARE\WOW6432Node\Classes\CLSID')) {
@@ -475,36 +569,85 @@ function Resolve-TracePath([string]$Value, [string]$WorkDir) {
     return (ConvertTo-CanonicalTracePath ($WorkDir + '\' + $v))
 }
 
+# جذور المستودع بصيغتيها: النصية والنهائية في نظام الملفات. جذر لا يُحلّ إلى مسار نهائي موجود ⇒
+# rootErrors (لا يسقط بصمت)، وكل قرار احتواء بعدها UNKNOWN.
 function New-ReachContext($Config, [string]$Identity) {
-    $roots = @(@($Config.repoPath) + @($Config.trust.repositoryRoots) | Where-Object { $_ } | ForEach-Object { ConvertTo-CanonicalTracePath ([string]$_) })
-    return [pscustomobject]@{ roots = $roots; identity = $Identity; seen = @{} }
-}
-
-function Test-InRepoRoot($Ctx, [string]$Candidate) {
-    $n = ConvertTo-CanonicalTracePath $Candidate
-    if (-not $n) { return $false }
-    foreach ($root in $Ctx.roots) { if ($n -eq $root -or $n.StartsWith($root + '\')) { return $true } }
-    return $false
-}
-
-# أي مسار مطلق داخل حقل واحد (لا عبر الحقول) يقع في جذر مستودع.
-function Test-FieldReachesRepo($Ctx, [string]$Field) {
-    foreach ($m in [regex]::Matches([string]$Field, '(?:[A-Za-z]:\\|\\\\[^\\"\s]+\\)[^"''\r\n<>|]*')) {
-        if (Test-InRepoRoot $Ctx ($m.Value.Trim())) { return $true }
+    $roots = @()
+    $finalRoots = @()
+    $rootErrors = @()
+    foreach ($root in @(@($Config.repoPath) + @($Config.trust.repositoryRoots) | Where-Object { $_ })) {
+        $roots += ConvertTo-CanonicalTracePath ([string]$root)
+        $rr = Resolve-PreflightFinalPath ([string]$root)
+        if ($rr.status -eq 'OK') { $finalRoots += ConvertTo-CanonicalTracePath ([string]$rr.path) }
+        else { $rootErrors += ([string]$root + ' (' + $rr.status + ': ' + $rr.reason + ')') }
     }
-    foreach ($tk in @(Split-CommandTokens $Field)) { if ($tk -and (Test-AbsoluteTracePath $tk.value) -and (Test-InRepoRoot $Ctx $tk.value)) { return $true } }
+    return [pscustomobject]@{ roots = $roots; finalRoots = $finalRoots; rootErrors = $rootErrors; identity = $Identity; seen = @{} }
+}
+
+# احتواء مسار مطبَّع في قائمة جذور بحدود المسار (C:\repo2 ليس داخل C:\repo)، بلا حساسية حالة الأحرف.
+function Test-KeyInRoots([string]$Key, [string[]]$Roots) {
+    if (-not $Key) { return $false }
+    foreach ($root in @($Roots)) { if ($root -and ($Key -eq $root -or $Key.StartsWith($root + '\'))) { return $true } }
     return $false
+}
+
+# قرار الاحتواء الوحيد: IN / OUT / UNKNOWN بعد حلّ المسار في نظام الملفات (المرشّح والجذور معاً).
+# تطابق نصي مع جذر = IN (دليل إيجابي). غير ذلك يُحلّ المسار النهائي: OK ⇒ IN/OUT؛ MISSING ⇒ IN إن وقع
+# سلفه النهائي داخل جذر، وإلا UNKNOWN حين يلزم الوجود (قد يظهر لاحقاً في المسار نفسه) أو OUT لمسار بيانات؛
+# ERROR (reparse مكسور/وصول مرفوض) ⇒ UNKNOWN. الفشل لا يصير OUT أبداً.
+function Get-PathContainment($Ctx, [string]$Path, [bool]$MustExist) {
+    $t = ConvertTo-CanonicalTracePath $Path
+    if (-not $t) { return [pscustomobject]@{ state = 'UNKNOWN'; final = ''; reason = 'empty path' } }
+    if (Test-KeyInRoots $t $Ctx.roots) { return [pscustomobject]@{ state = 'IN'; final = $Path; reason = '' } }
+    if (@($Ctx.rootErrors).Count -gt 0) { return [pscustomobject]@{ state = 'UNKNOWN'; final = ''; reason = ('repository root cannot be canonicalized: ' + (@($Ctx.rootErrors) -join '; ')) } }
+    $r = Resolve-PreflightFinalPath $Path
+    $all = @(@($Ctx.roots) + @($Ctx.finalRoots))
+    if ($r.status -eq 'OK') {
+        if (Test-KeyInRoots (ConvertTo-CanonicalTracePath ([string]$r.path)) $all) { return [pscustomobject]@{ state = 'IN'; final = [string]$r.path; reason = '' } }
+        return [pscustomobject]@{ state = 'OUT'; final = [string]$r.path; reason = '' }
+    }
+    if ($r.status -eq 'MISSING') {
+        if (Test-KeyInRoots (ConvertTo-CanonicalTracePath ([string]$r.path)) $all) { return [pscustomobject]@{ state = 'IN'; final = [string]$r.path; reason = '' } }
+        if ($MustExist) { return [pscustomobject]@{ state = 'UNKNOWN'; final = ''; reason = ('does not exist: ' + $Path + ' (it may appear later at this path)') } }
+        return [pscustomobject]@{ state = 'OUT'; final = [string]$r.path; reason = '' }
+    }
+    return [pscustomobject]@{ state = 'UNKNOWN'; final = ''; reason = ('filesystem identity cannot be resolved: ' + $r.reason) }
+}
+
+# مسارات مطلقة داخل حقل واحد (وسائط، أو سطر غلاف): تطابق نصي مع جذر ⇒ REPO، ثم كل مسار مطلق (رمزاً أو
+# نصاً مقتبساً) يُحلّ في نظام الملفات: داخل جذر ⇒ REPO، وتعذّر الحل ⇒ UNKNOWN.
+function Get-FieldReach($Ctx, [string]$Field) {
+    foreach ($m in [regex]::Matches([string]$Field, '(?:[A-Za-z]:\\|\\\\[^\\"\s]+\\)[^"''\r\n<>|]*')) {
+        if (Test-KeyInRoots (ConvertTo-CanonicalTracePath ($m.Value.Trim())) $Ctx.roots) { return (New-Reach 'REPO' 'repository path in field') }
+    }
+    $cands = @()
+    foreach ($tk in @(Split-CommandTokens $Field)) { if ($tk -and (Test-AbsoluteTracePath $tk.value)) { $cands += [string]$tk.value } }
+    foreach ($m in [regex]::Matches([string]$Field, '"((?:[A-Za-z]:\\|\\\\)[^"]*)"')) { $cands += $m.Groups[1].Value }
+    foreach ($m in [regex]::Matches([string]$Field, '(?<![\w"''])[A-Za-z]:\\[^\s"''<>|]*')) { $cands += $m.Value }
+    $r = New-Reach 'NOT_REPO'
+    foreach ($c in @($cands | Select-Object -Unique)) {
+        $pc = Get-PathContainment $Ctx $c $false
+        if ($pc.state -eq 'IN') { return (New-Reach 'REPO' ('path resolves into a repository root: ' + $c)) }
+        if ($pc.state -eq 'UNKNOWN') { $r = Join-Reach $r (New-Reach 'UNKNOWN' ($c + ': ' + $pc.reason)) }
+    }
+    return $r
 }
 
 # غلاف (vbs/cmd/bat/ps1/psm1، أو هدف مضيف سكربت) خارج المستودع: يُقرأ نصه ولا يُنفَّذ، حتى 3 مستويات.
 function Get-WrapperReach($Ctx, [string]$Path, [int]$depth) {
-    $k = ConvertTo-CanonicalTracePath $Path
+    # الغلاف يُحلّ في نظام الملفات قبل قراءته وقبل قرار احتوائه (alias/junction إلى المستودع ⇒ REPO).
+    $pc = Get-PathContainment $Ctx $Path $true
+    if ($pc.state -eq 'IN') { return (New-Reach 'REPO' ('script inside a repository root: ' + $Path)) }
+    if ($pc.state -ne 'OUT') {
+        if ($pc.reason -like 'does not exist*') { return (New-Reach 'UNKNOWN' ('wrapper is missing: ' + $Path + ' (it may appear later and run repository code)')) }
+        return (New-Reach 'UNKNOWN' ('wrapper path cannot be resolved: ' + $Path + ' (' + $pc.reason + ')'))
+    }
+    $k = ConvertTo-CanonicalTracePath ([string]$pc.final)
     if ($Ctx.seen.ContainsKey($k)) { return (New-Reach 'NOT_REPO') }
     $Ctx.seen[$k] = $true
-    if (Test-InRepoRoot $Ctx $Path) { return (New-Reach 'REPO' ('script inside a repository root: ' + $Path)) }
     if ($depth -ge 3) { return (New-Reach 'UNKNOWN' ('wrapper chain deeper than 3 levels at ' + $Path)) }
     # غلاف مفقود أو غير مقروء أو فارغ: لا يُثبت ما سيشغّله لاحقاً ⇒ UNKNOWN، لا NOT_REPO (Codex P1).
-    try { $inner = Read-PreflightWrapperText $Path } catch { return (New-Reach 'UNKNOWN' ('wrapper cannot be read: ' + $Path + ' (' + $_.Exception.Message + ')')) }
+    try { $inner = Read-PreflightWrapperText ([string]$pc.final) } catch { return (New-Reach 'UNKNOWN' ('wrapper cannot be read: ' + $Path + ' (' + $_.Exception.Message + ')')) }
     if ($null -eq $inner) { return (New-Reach 'UNKNOWN' ('wrapper is missing: ' + $Path + ' (it may appear later and run repository code)')) }
     if ($inner.Length -eq 0) { return (New-Reach 'UNKNOWN' ('wrapper is empty (zero bytes): ' + $Path + ' (what it will run cannot be proven)')) }
     $r = New-Reach 'NOT_REPO'
@@ -516,7 +659,9 @@ function Get-WrapperReach($Ctx, [string]$Path, [int]$depth) {
         $r = Join-Reach $r (New-Reach 'UNKNOWN' ('opaque/dynamic command in wrapper ' + $Path))
     }
     foreach ($line in ($inner -split "`r?`n")) {
-        if (Test-FieldReachesRepo $Ctx $line) { return (New-Reach 'REPO' ('wrapper ' + $Path + ' references a repository path')) }
+        $lr = Get-FieldReach $Ctx $line
+        if ($lr.status -eq 'REPO') { return (New-Reach 'REPO' ('wrapper ' + $Path + ' references a repository path: ' + $lr.why)) }
+        if ($lr.status -eq 'UNKNOWN') { $r = Join-Reach $r (New-Reach 'UNKNOWN' ('wrapper ' + $Path + ': ' + $lr.why)) }
     }
     # مرجع سكربت نسبي داخل الغلاف (مثل node scripts/serve.mjs): مجلد العمل وقت التشغيل غير مثبت ⇒ UNKNOWN.
     if ($inner -match '(?<![\w\\/:.%~$-])(?:\.{1,2}[\\/])?[\w-]+(?:[\\/][\w.-]+)+\.(?:ps1|psm1|mjs|cjs|js|py|bat|cmd|vbs)\b' -or $inner -match '(?i)\b(node|python\d*|py|pwsh|powershell|wscript|cscript|deno|bun)(\.exe)?"?\s+(?:-\S+\s+)*"?[\w.-]+\.(?:ps1|mjs|cjs|js|py|vbs|ts)\b') {
@@ -533,8 +678,10 @@ function Get-WrapperReach($Ctx, [string]$Path, [int]$depth) {
 function Get-TargetReach($Ctx, [string]$Target, [string]$WorkDir, [int]$Depth, [string]$Kind) {
     $p = Resolve-TracePath $Target $WorkDir
     if (-not $p) { return (New-Reach 'UNKNOWN' ($Kind + ' target cannot be resolved statically: ' + $Target)) }
-    if (Test-InRepoRoot $Ctx $p) { return (New-Reach 'REPO' ($Kind + ' target inside a repository root: ' + $p)) }
-    if ($p -match '\.(vbs|cmd|bat|ps1|psm1|js|wsf|jse|vbe)$') { return (Get-WrapperReach $Ctx $p $Depth) }
+    $pc = Get-PathContainment $Ctx $p $true
+    if ($pc.state -eq 'IN') { return (New-Reach 'REPO' ($Kind + ' target inside a repository root: ' + $p)) }
+    if ($pc.state -ne 'OUT') { return (New-Reach 'UNKNOWN' ($Kind + ' target ' + $p + ': ' + $pc.reason)) }
+    if (([string]$pc.final) -match '\.(vbs|cmd|bat|ps1|psm1|js|wsf|jse|vbe)$' -or $p -match '\.(vbs|cmd|bat|ps1|psm1|js|wsf|jse|vbe)$') { return (Get-WrapperReach $Ctx $p $Depth) }
     return (New-Reach 'NOT_REPO')
 }
 
@@ -584,8 +731,10 @@ function Get-PowerShellReach($Ctx, $Tokens, [string]$WorkDir, [int]$Depth, [bool
             if ($name -eq 'workingdirectory') {
                 $wdp = Resolve-TracePath $value $wd
                 if (-not $wdp) { return (New-Reach 'UNKNOWN' ('PowerShell -WorkingDirectory cannot be resolved: ' + $value)) }
-                if (Test-InRepoRoot $Ctx $wdp) { return (New-Reach 'REPO' ('PowerShell working directory inside a repository root: ' + $wdp)) }
-                $wd = $wdp
+                $pc = Get-PathContainment $Ctx $wdp $true
+                if ($pc.state -eq 'IN') { return (New-Reach 'REPO' ('PowerShell working directory inside a repository root: ' + $wdp)) }
+                if ($pc.state -ne 'OUT') { return (New-Reach 'UNKNOWN' ('PowerShell -WorkingDirectory ' + $wdp + ': ' + $pc.reason)) }
+                $wd = ConvertTo-CanonicalTracePath ([string]$pc.final)
             }
             $i += $step
             continue
@@ -636,8 +785,10 @@ function Get-CmdLineReach($Ctx, [string]$Line, [string]$WorkDir, [int]$Depth) {
                 if ($args2.Count -ne 1) { return (Join-Reach $r (New-Reach 'UNKNOWN' 'cmd directory change cannot be resolved')) }
                 $wdp = Resolve-TracePath $args2[0].value $wd
                 if (-not $wdp) { return (Join-Reach $r (New-Reach 'UNKNOWN' ('cmd directory change cannot be resolved: ' + $args2[0].value))) }
-                if (Test-InRepoRoot $Ctx $wdp) { return (New-Reach 'REPO' ('cmd changes directory into a repository root: ' + $wdp)) }
-                $wd = $wdp
+                $pc = Get-PathContainment $Ctx $wdp $true
+                if ($pc.state -eq 'IN') { return (New-Reach 'REPO' ('cmd changes directory into a repository root: ' + $wdp)) }
+                if ($pc.state -ne 'OUT') { return (Join-Reach $r (New-Reach 'UNKNOWN' ('cmd directory change ' + $wdp + ': ' + $pc.reason))) }
+                $wd = ConvertTo-CanonicalTracePath ([string]$pc.final)
                 continue
             }
             if ($head -eq 'call') { $tokens = @($tokens | Select-Object -Skip 1) }
@@ -647,8 +798,10 @@ function Get-CmdLineReach($Ctx, [string]$Line, [string]$WorkDir, [int]$Depth) {
                     if ($tokens[0].value -match '^/[dD]$' -and $tokens.Count -gt 1) {
                         $wdp = Resolve-TracePath $tokens[1].value $wd
                         if (-not $wdp) { return (Join-Reach $r (New-Reach 'UNKNOWN' 'start /D cannot be resolved')) }
-                        if (Test-InRepoRoot $Ctx $wdp) { return (New-Reach 'REPO' ('start /D inside a repository root: ' + $wdp)) }
-                        $wd = $wdp
+                        $pc = Get-PathContainment $Ctx $wdp $true
+                        if ($pc.state -eq 'IN') { return (New-Reach 'REPO' ('start /D inside a repository root: ' + $wdp)) }
+                        if ($pc.state -ne 'OUT') { return (Join-Reach $r (New-Reach 'UNKNOWN' ('start /D ' + $wdp + ': ' + $pc.reason))) }
+                        $wd = ConvertTo-CanonicalTracePath ([string]$pc.final)
                         $tokens = @($tokens | Select-Object -Skip 2)
                         continue
                     }
@@ -681,11 +834,18 @@ function Get-ActionReach($Ctx, [string]$Execute, [string]$Arguments, [string]$Wo
     if ($wd.StartsWith('"')) { if ($wd -notmatch '^"[^"]+"$') { return (Join-Reach $r (New-Reach 'UNKNOWN' 'malformed quoting in working directory')) }; $wd = $wd.Trim('"') }
     if ($wd) {
         if (-not (Test-AbsoluteTracePath $wd) -or $wd.Contains('"')) { $r = Join-Reach $r (New-Reach 'UNKNOWN' ('working directory is not an absolute path: ' + $wd)); $wd = '' }
-        elseif (Test-InRepoRoot $Ctx $wd) { return (New-Reach 'REPO' ('working directory inside a repository root: ' + $wd)) }
-        else { $wd = ConvertTo-CanonicalTracePath $wd }
+        else {
+            # مجلد العمل يُحلّ في نظام الملفات قبل حلّ الأهداف النسبية بالنسبة إليه (junction ⇒ المستودع).
+            $pc = Get-PathContainment $Ctx $wd $true
+            if ($pc.state -eq 'IN') { return (New-Reach 'REPO' ('working directory inside a repository root: ' + $wd)) }
+            if ($pc.state -ne 'OUT') { $r = Join-Reach $r (New-Reach 'UNKNOWN' ('working directory ' + $wd + ': ' + $pc.reason)); $wd = '' }
+            else { $wd = ConvertTo-CanonicalTracePath ([string]$pc.final) }
+        }
     }
     foreach ($f in @('execute', 'arguments')) {
-        if (Test-FieldReachesRepo $Ctx $fx[$f]) { return (New-Reach 'REPO' ('repository path in action ' + $f)) }
+        $fr = Get-FieldReach $Ctx $fx[$f]
+        if ($fr.status -eq 'REPO') { return (New-Reach 'REPO' ('repository path in action ' + $f + ': ' + $fr.why)) }
+        if ($fr.status -eq 'UNKNOWN') { $r = Join-Reach $r (New-Reach 'UNKNOWN' ('action ' + $f + ': ' + $fr.why)) }
     }
     # البرنامج.
     $exe = $fx['execute'].Trim()
@@ -749,8 +909,10 @@ function Resolve-TaskReach($Config, $Actions, [string]$Identity = '') {
             # COM handler: يُقيَّم ملفه المسجَّل؛ غير محلول ⇒ UNKNOWN.
             if (-not $a.execute) { $r = Join-Reach $r (New-Reach 'UNKNOWN' ('COM handler ' + $classId + ' cannot be resolved to a binary')); continue }
             $p = [string]$a.execute
-            if (Test-InRepoRoot $ctx $p) { return (New-Reach 'REPO' ('COM handler binary inside a repository root: ' + $p)) }
-            if (-not (Test-AbsoluteTracePath $p)) { $r = Join-Reach $r (New-Reach 'UNKNOWN' ('COM handler binary path is not absolute: ' + $p)) }
+            if (-not (Test-AbsoluteTracePath $p)) { $r = Join-Reach $r (New-Reach 'UNKNOWN' ('COM handler binary path is not absolute: ' + $p)); continue }
+            $pc = Get-PathContainment $ctx $p $true
+            if ($pc.state -eq 'IN') { return (New-Reach 'REPO' ('COM handler binary inside a repository root: ' + $p)) }
+            if ($pc.state -ne 'OUT') { $r = Join-Reach $r (New-Reach 'UNKNOWN' ('COM handler binary ' + $p + ': ' + $pc.reason)) }
             continue
         }
         $r = Join-Reach $r (Get-ActionReach $ctx ([string]$a.execute) ([string]$a.arguments) ([string]$a.workingDirectory) 0)
@@ -1038,6 +1200,11 @@ function Invoke-GateIdentityPreflight($Config) {
         $inventory += @(Get-PreflightServiceInventory | ForEach-Object { $_ | Add-Member -NotePropertyName kind -NotePropertyValue 'service' -PassThru -Force })
     } catch {
         return [pscustomobject]@{ ok = $false; results = @($results + (& $block 'inventory' ('cannot enumerate tasks/services: services: ' + $_.Exception.Message))) }
+    }
+    # جذور المستودع نفسها تُحلّ إلى مسار نهائي موجود في نظام الملفات؛ جذر لا يُحلّ لا يسقط بصمت ⇒ حجب.
+    foreach ($root in @(@($Config.repoPath) + @($Config.trust.repositoryRoots) | Where-Object { $_ })) {
+        $rr = Resolve-PreflightFinalPath ([string]$root)
+        if ($rr.status -ne 'OK') { $results += & $block ('repository root ' + $root) ('cannot be canonicalized to an existing final filesystem path (' + $rr.status + ': ' + $rr.reason + '); containment decisions would not be provable') }
     }
     # Startup/Logon جزء من الجرد نفسه (Codex P1): لا يقتصر على المهام والخدمات.
     try {
