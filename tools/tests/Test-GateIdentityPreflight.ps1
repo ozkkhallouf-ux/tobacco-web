@@ -1023,6 +1023,35 @@ try {
     $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Node Bootstrap User' 'OZKSync' 'x' @([pscustomobject]@{ execute = 'node.exe'; arguments = ($sd + '\bootstrap.mjs'); workingDirectory = '' }))
     Assert-True ((Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())).ok) 'same node task under a non-privileged identity => not a privilege risk'
 
+    Write-Host '== PowerShell alias definitions change command semantics (Codex P1)'
+    $aliasDyn = @(
+        @{ label = 'Set-Alias launch Start-Process; launch powershell.exe -ArgumentList (Get-Content ...) => UNKNOWN'; n = 'al1.ps1'; b = ('Set-Alias launch Start-Process' + "`r`n" + 'launch powershell.exe -ArgumentList (Get-Content C:\ProgramData\target.txt)') },
+        @{ label = 'New-Alias -Name launch -Value Start-Process => UNKNOWN'; n = 'al2.ps1'; b = ('New-Alias -Name launch -Value Start-Process' + "`r`n" + 'launch C:\Tools\x.exe') },
+        @{ label = 'sal (alias of Set-Alias) => UNKNOWN'; n = 'al3.ps1'; b = 'sal launch Start-Process' },
+        @{ label = 'nal (alias of New-Alias) => UNKNOWN'; n = 'al4.ps1'; b = 'nal launch Start-Process' },
+        @{ label = 'Import-Alias from a file => UNKNOWN'; n = 'al5.ps1'; b = 'Import-Alias C:\ProgramData\aliases.csv' },
+        @{ label = 'Set-Item alias:launch Start-Process (alias: drive) => UNKNOWN'; n = 'al6.ps1'; b = 'Set-Item alias:launch Start-Process' },
+        @{ label = 'New-Item -Path Alias:launch -Value Start-Process => UNKNOWN'; n = 'al7.ps1'; b = 'New-Item -Path Alias:launch -Value Start-Process' },
+        @{ label = '${alias:launch} = ''Start-Process'' (assignment) => UNKNOWN'; n = 'al8.ps1'; b = '${alias:launch} = ''Start-Process''' },
+        @{ label = '$alias:launch = ''Start-Process'' (assignment) => UNKNOWN'; n = 'al9.ps1'; b = '$alias:launch = ''Start-Process''' },
+        @{ label = 'Remove-Item alias:start (changes what start resolves to) => UNKNOWN'; n = 'al10.ps1'; b = 'Remove-Item alias:start' }
+    )
+    foreach ($c in $aliasDyn) { $got = Dyn-Reach $c.n $c.b; Assert-True ($got.status -eq 'UNKNOWN') ($c.label + ' (got ' + $got.status + ')') }
+    $aliasSafe = @(
+        @{ label = 'Get-Alias (read-only) => unchanged (NOT_REPO)'; n = 'als1.ps1'; b = 'Get-Alias | Out-File C:\Logs\aliases.txt' },
+        @{ label = 'Get-ChildItem alias: / Test-Path alias:ls (read-only) => unchanged (NOT_REPO)'; n = 'als2.ps1'; b = ('Get-ChildItem alias:' + "`r`n" + 'Test-Path alias:ls') },
+        @{ label = 'wrapper without alias definitions (literal Start-Process) => unchanged (NOT_REPO)'; n = 'als3.ps1'; b = 'Start-Process -FilePath ''C:\Tools\backup\run-backup.exe'' -Wait' }
+    )
+    foreach ($c in $aliasSafe) { $got = Dyn-Reach $c.n $c.b; Assert-True ($got.status -eq 'NOT_REPO') ($c.label + ' (got ' + $got.status + ': ' + $got.why + ')') }
+    $aw = $dw + '\alias-witness.ps1'
+    $script:Wrappers[$aw] = ('Set-Alias launch Start-Process' + "`r`n" + 'launch powershell.exe -ArgumentList (Get-Content C:\ProgramData\target.txt)')
+    foreach ($ident in @('SYSTEM', 'OZK2026\Administrator')) {
+        $script:Tasks = @(Get-CleanLayout) + @(New-Task ('Alias Witness ' + $ident) $ident ($ps + ' -NoProfile -File "' + $aw + '"'))
+        Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) ('*Alias Witness*alias definition changes command semantics*')) ('Codex witness under ' + $ident + ' => BLOCK')
+    }
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Alias Witness User' 'OZKSync' ($ps + ' -NoProfile -File "' + $aw + '"'))
+    Assert-True ((Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())).ok) 'same wrapper under a non-privileged identity => not a privilege risk'
+
     Write-Host '== Install preflight combines price-list and identity checks'
     # فحص ACL الفعلية مُختبَر في Test-GateTrustAcl.ps1؛ هنا نتيجته ناجحة لعزل الهوية ونشرات الأسعار.
     function Test-GateTrustAcl($Config) { return [pscustomobject]@{ ok = $true; results = @() } }; function Test-GitHookSafety($Config) { return [pscustomobject]@{ ok = $true; results = @() } }

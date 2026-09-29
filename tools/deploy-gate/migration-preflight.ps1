@@ -735,6 +735,14 @@ function Get-PsDynamicExecution([string]$Text) {
         if ($n.Contains('\')) { $n = $n.Substring($n.LastIndexOf('\') + 1) }
         if ($n -eq 'iwmi') { $n = 'invoke-wmimethod' }
         if ($n -eq 'icim') { $n = 'invoke-cimmethod' }
+        # تعريف/تعديل alias يغيّر دلالة الأوامر بعده (Set-Alias launch Start-Process ثم launch ...): لا يُحلّ
+        # ديناميكياً ⇒ UNKNOWN. ومثله الكتابة عبر محرك alias: (قراءة Get-*/Test-Path لا تُحتسب).
+        if (@('set-alias', 'sal', 'new-alias', 'nal', 'import-alias', 'ipal') -contains $n) { return ('alias definition changes command semantics: ' + $c.Extent.Text) }
+        if ($n -notmatch '^(get-|test-path$|gal$|gci$|gi$|ls$|dir$)') {
+            foreach ($el in @($c.CommandElements | Select-Object -Skip 1)) {
+                if ($el -is [System.Management.Automation.Language.StringConstantExpressionAst] -and ([string]$el.Value) -match '^(?i)(microsoft\.powershell\.core\\)?alias::?') { return ('alias drive modified: ' + $c.Extent.Text) }
+            }
+        }
         $bound = $null
         if (@('start-process', 'saps', 'start', 'invoke-command', 'icm', 'invoke-item', 'ii', 'start-job', 'sajb', 'start-threadjob', 'invoke-wmimethod', 'invoke-cimmethod', 'import-module', 'ipmo', 'add-type', 'new-module', 'nmo') -contains $n) {
             try { $bound = [System.Management.Automation.Language.StaticParameterBinder]::BindCommand($c, $true).BoundParameters } catch { return ('parameters of ' + $name + ' cannot be bound statically') }
@@ -782,6 +790,12 @@ function Get-PsDynamicExecution([string]$Text) {
                 foreach ($k in @('ArgumentList', 'Arguments')) { if ($bound.ContainsKey($k) -and -not (Test-PsLiteralAst $bound[$k].Value)) { return ($name + ' with computed arguments (process creation from data): ' + $bound[$k].Value.Extent.Text) } }
             }
         }
+    }
+    # $alias:launch = 'Start-Process' / ${alias:launch} = ... : تعريف alias بالإسناد ⇒ UNKNOWN.
+    foreach ($as in @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true))) {
+        $lv = $as.Left
+        if ($lv -is [System.Management.Automation.Language.ConvertExpressionAst]) { $lv = $lv.Child }
+        if ($lv -is [System.Management.Automation.Language.VariableExpressionAst] -and ([string]$lv.VariablePath.DriveName) -ieq 'alias') { return ('alias assigned through the alias: drive: ' + $as.Extent.Text) }
     }
     foreach ($m in @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true))) {
         # $p.$m($cmd) / $p."$m"(...) : اسم الطريقة غير ثابت، فقد يكون Create/Run ⇒ UNKNOWN.

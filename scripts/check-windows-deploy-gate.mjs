@@ -329,6 +329,11 @@ for (const needle of ["function Resolve-WorkloadReach", "cannot determine whethe
   assert.match(ps, /if \(-not \(Test-PsLiteralAst \$fp\)\) \{ return \(\$name \+ ' with a dynamic target: '/, "Start-Process بهدف محسوب ⇒ UNKNOWN");
   assert.match(ps, /-not \(\$bound\['ScriptBlock'\]\.Value -is \[System\.Management\.Automation\.Language\.ScriptBlockExpressionAst\]\)\) \{ return /, "Invoke-Command بكتلة محسوبة ⇒ UNKNOWN");
   assert.match(ps, /'invoke', 'invokereturnasis', 'invokescript', 'newscriptblock'/, "استدعاءات .Invoke/InvokeScript ⇒ UNKNOWN");
+  // Codex P1: aliases تغيّر دلالة الأوامر (Set-Alias launch Start-Process) ⇒ UNKNOWN.
+  assert.match(ps, /if \(@\('set-alias', 'sal', 'new-alias', 'nal', 'import-alias', 'ipal'\) -contains \$n\) \{ return \('alias definition changes command semantics: '/, "تعريف alias ⇒ UNKNOWN");
+  assert.match(ps, /alias::\?'\) \{ return \('alias drive modified: '/, "الكتابة عبر alias: ⇒ UNKNOWN");
+  assert.match(ps, /\(\[string\]\$lv\.VariablePath\.DriveName\) -ieq 'alias'\) \{ return \('alias assigned through the alias: drive: '/, "الإسناد \$alias:x ⇒ UNKNOWN");
+  assert.ok(ps.indexOf("'set-alias', 'sal', 'new-alias'") < ps.indexOf("$bound = $null"), "قاعدة alias تسبق قائمة الأوامر المعروفة");
   assert.match(ps, /'run', 'exec', 'shellexecute', 'shellexecuteex', 'executeshellcommand', 'createprocess'\) -contains \$member\) \{\s+if \(\$margs\.Count -eq 0 -or -not \(Test-PsLiteralAst \$margs\[0\]\)\) \{ return /, "COM Run/Exec/ShellExecute بأمر محسوب ⇒ UNKNOWN");
   assert.match(ps, /if \(\$member -eq 'invokemethod' -and @\(\$margs \| Where-Object \{ -not \(Test-PsLiteralAst \$_\) \}\)\.Count -gt 0\) \{ return /, "WMI InvokeMethod بوسائط محسوبة ⇒ UNKNOWN");
   assert.match(ps, /if \(-not \$staticSafe -and @\(\$margs \| Where-Object \{ -not \(Test-PsLiteralAst \$_\) \}\)\.Count -gt 0\) \{ return \('process creation \(WMI\/COM \.Create\)/, "Win32_Process.Create بوسيط محسوب ⇒ UNKNOWN");

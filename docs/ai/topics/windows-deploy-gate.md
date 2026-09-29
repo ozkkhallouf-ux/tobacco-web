@@ -177,6 +177,10 @@
       بوسيط متغير تبقى كما هي.
     - `Invoke-Command`/`Start-Job` بكتلة غير حرفية أو ملف محسوب ⇒ UNKNOWN.
     - `Invoke-Item` بمسار محسوب ⇒ UNKNOWN.
+    - تعريف أو تعديل alias يغيّر دلالة ما بعده (مثل `Set-Alias launch Start-Process` ثم `launch …`) ⇒ UNKNOWN، ولا يُحلّ
+      ديناميكياً (Codex P1): `Set-Alias`/`New-Alias`/`sal`/`nal`/`Import-Alias`/`ipal`، والكتابة عبر محرك `alias:`
+      (`Set-Item`/`New-Item`/`Remove-Item` …)، والإسناد `$alias:x = …`. القراءة (`Get-Alias`، `Get-ChildItem alias:`،
+      `Test-Path`) لا تُحتسب.
     - تحميل وحدة أو كود من هدف محسوب ⇒ UNKNOWN (Codex P1):
       - `Import-Module`/`ipmo` بهدف غير حرفي، أو بمسار نسبي، أو بكائن وحدة (`-ModuleInfo`)، أو من الأنبوب.
       - `Add-Type` بـ`-Path`/`-AssemblyName`/`-TypeDefinition`/`-MemberDefinition` محسوب.
