@@ -679,10 +679,11 @@ function Get-PsDynamicExecution([string]$Text) {
                 if (-not (Test-PsLiteralAst $v)) { return ('interpreter ' + $leafName + ' with a computed argument: ' + $el.Extent.Text) }
             }
         }
-        # & Invoke-WmiMethod / iwmi / Module\Invoke-WmiMethod لا تُتخطى: الوسائط تُفحص كالأمر المباشر.
+        # & Invoke-WmiMethod / iwmi / icim / Module\Invoke-WmiMethod لا تُتخطى: الوسائط تُفحص كالأمر المباشر.
         $n = $name.ToLowerInvariant()
         if ($n.Contains('\')) { $n = $n.Substring($n.LastIndexOf('\') + 1) }
         if ($n -eq 'iwmi') { $n = 'invoke-wmimethod' }
+        if ($n -eq 'icim') { $n = 'invoke-cimmethod' }
         $bound = $null
         if (@('start-process', 'saps', 'start', 'invoke-command', 'icm', 'invoke-item', 'ii', 'start-job', 'sajb', 'start-threadjob', 'invoke-wmimethod', 'invoke-cimmethod', 'import-module', 'ipmo', 'add-type', 'new-module', 'nmo') -contains $n) {
             try { $bound = [System.Management.Automation.Language.StaticParameterBinder]::BindCommand($c, $true).BoundParameters } catch { return ('parameters of ' + $name + ' cannot be bound statically') }

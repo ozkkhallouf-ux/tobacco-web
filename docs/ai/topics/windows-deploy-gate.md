@@ -184,7 +184,7 @@
       - المسار الحرفي المطلق يُتتبَّع (بما فيه `.psd1`). اسم الوحدة المجرّد يُحلّ من PSModulePath للنظام.
     - إنشاء عملية عبر WMI/CIM/COM بوسيط محسوب ⇒ UNKNOWN:
       - `Invoke-WmiMethod`/`Invoke-CimMethod` باسم طريقة أو وسائط غير حرفية (ومنها `@{ CommandLine = $cmd }`).
-        `& Invoke-WmiMethod` و`iwmi` والاسم المؤهّل بالوحدة (`Microsoft.PowerShell.Management\Invoke-WmiMethod`)
+        `& Invoke-WmiMethod` و`iwmi` و`icim` والاسم المؤهّل بالوحدة (`Microsoft.PowerShell.Management\Invoke-WmiMethod`)
         تُفحص كالأمر المباشر ولا يتخطاها عامل الاستدعاء `&`.
       - `Win32_Process.Create` عبر `[wmiclass]` أو كائن WMI، و`ManagementClass.InvokeMethod`.
       - اسم طريقة محسوب (`$p.$m($cmd)` أو `$p."$m"(...)`) ⇒ UNKNOWN، فقد يكون Create/Run.
