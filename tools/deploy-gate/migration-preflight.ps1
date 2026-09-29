@@ -53,7 +53,95 @@ function Get-PreflightTaskInventory {
             if ($cls) { [pscustomobject]@{ execute = (Get-PreflightComHandlerPath $cls); arguments = ''; workingDirectory = ''; classId = $cls } }
             else { [pscustomobject]@{ execute = [string]$_.Execute; arguments = [string]$_.Arguments; workingDirectory = [string]$_.WorkingDirectory } }
         })
-        $out += [pscustomobject]@{ name = [string]$t.TaskName; path = [string]$t.TaskPath; identity = $id; actions = $acts }
+        $out += [pscustomobject]@{ name = [string]$t.TaskName; path = [string]$t.TaskPath; identity = $id; state = [string]$t.State; actions = $acts }
+    }
+    return $out
+}
+
+# ------------------------------------------------------------
+# جرد Startup/Logon (Codex P1): مجلدات Startup ومفاتيح Run/RunOnce للجهاز ولكل ملف تعريف مستخدم.
+# كل عنصر يُصنَّف بحقول Action منظّمة وبالهوية التي سيعمل تحتها فعلياً:
+#   - مصادر الجهاز (Startup العام، HKLM Run/RunOnce) تعمل عند دخول أي مستخدم، ومنهم المدراء ⇒
+#     هوية Administrators (S-1-5-32-544) لقرار الصلاحية.
+#   - مصادر المستخدم (Startup الخاص، HKU\<SID> Run/RunOnce) تعمل بهوية ذلك المستخدم (SID).
+# مصدر مطلوب لا يُقرأ يصير عنصراً بلا Actions ⇒ UNKNOWN (لا «لا شيء»)؛ فشل الجرد كله ⇒ حجب.
+# قراءة فقط: لا تحميل hive ولا تعديل سجل ولا تشغيل أي عنصر.
+# ------------------------------------------------------------
+$script:AnyLogonSid = 'S-1-5-32-544'
+$script:AnyLogonIdentity = 'any interactive user at logon (incl. Administrators)'
+
+function New-StartupItem([string]$Source, [string]$Name, [string]$Sid, [string]$Identity, $Actions, [string]$Unreadable = '') {
+    return [pscustomobject]@{ kind = 'startup'; name = $Name; path = ($Source + ': '); identity = $Identity; sid = $Sid; actions = @($Actions); unreadable = $Unreadable }
+}
+
+# سطر أوامر (قيمة Run أو مسار خدمة) ⇒ Action منظّم: البرنامج (مقتبس، أو حتى .exe، أو أول رمز) ثم الوسائط.
+function ConvertTo-CommandAction([string]$Line) {
+    $t = ([string]$Line).Trim()
+    $m = [regex]::Match($t, '^"([^"]+)"\s*(.*)$', 'Singleline')
+    if (-not $m.Success) { $m = [regex]::Match($t, '^(.+?\.(?:exe|com))(?:\s+(.*))?$', 'IgnoreCase, Singleline') }
+    if (-not $m.Success) { $m = [regex]::Match($t, '^(\S+)(?:\s+(.*))?$', 'Singleline') }
+    return [pscustomobject]@{ execute = $m.Groups[1].Value; arguments = $m.Groups[2].Value; workingDirectory = '' }
+}
+
+# عناصر مجلد Startup: .lnk بهدفه ووسائطه ومجلد عمله (قراءة فقط عبر WScript.Shell)، وغيره كملف يُفتح.
+function Get-StartupFolderItems([string]$Folder, [string]$Source, [string]$Sid, [string]$Identity) {
+    if (-not (Test-Path -LiteralPath $Folder)) { return @() }
+    try { $files = @(Get-ChildItem -LiteralPath $Folder -Force -File -ErrorAction Stop) } catch { return @(New-StartupItem $Source $Folder $Sid $Identity @() ('startup folder cannot be read: ' + $_.Exception.Message)) }
+    $items = @()
+    foreach ($f in $files) {
+        if ($f.Name -ieq 'desktop.ini') { continue }
+        if ($f.Extension -ieq '.lnk') {
+            try {
+                $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($f.FullName)
+                $act = [pscustomobject]@{ execute = [string]$sc.TargetPath; arguments = [string]$sc.Arguments; workingDirectory = [string]$sc.WorkingDirectory }
+                if (-not $act.execute) { $items += New-StartupItem $Source $f.Name $Sid $Identity @() 'shortcut target cannot be resolved'; continue }
+                $items += New-StartupItem $Source $f.Name $Sid $Identity @($act)
+            } catch { $items += New-StartupItem $Source $f.Name $Sid $Identity @() ('shortcut cannot be read: ' + $_.Exception.Message) }
+        } elseif ($f.Extension -match '^\.(exe|com|bat|cmd|vbs|vbe|js|jse|wsf|ps1)$') {
+            $items += New-StartupItem $Source $f.Name $Sid $Identity @([pscustomobject]@{ execute = $f.FullName; arguments = ''; workingDirectory = $Folder })
+        } else {
+            # يُفتح عبر ارتباط نوع الملف (مثل .url أو .jar): البرنامج الفعلي غير مثبت ساكناً.
+            $items += New-StartupItem $Source $f.Name $Sid $Identity @() ('startup file is opened via a file association that cannot be resolved statically: ' + $f.Name)
+        }
+    }
+    return $items
+}
+
+function Get-RunKeyItems([string]$Key, [string]$Source, [string]$Sid, [string]$Identity) {
+    if (-not (Test-Path -LiteralPath $Key)) { return @() }
+    try { $k = Get-Item -LiteralPath $Key -ErrorAction Stop } catch { return @(New-StartupItem $Source $Key $Sid $Identity @() ('Run key cannot be read: ' + $_.Exception.Message)) }
+    $items = @()
+    foreach ($n in @($k.GetValueNames())) {
+        $v = [string]$k.GetValue($n, $null, 'DoNotExpandEnvironmentNames')
+        if (-not $v) { $items += New-StartupItem $Source $n $Sid $Identity @() 'Run value is empty or unreadable'; continue }
+        $items += New-StartupItem $Source $n $Sid $Identity @(ConvertTo-CommandAction $v)
+    }
+    return $items
+}
+
+function Get-PreflightStartupInventory {
+    $out = @()
+    $runKeys = @('Microsoft\Windows\CurrentVersion\Run', 'Microsoft\Windows\CurrentVersion\RunOnce')
+    $common = [Environment]::GetFolderPath('CommonStartup')
+    if (-not $common) { throw 'the all-users Startup folder path is not available' }
+    $out += @(Get-StartupFolderItems $common 'Startup (all users)' $script:AnyLogonSid $script:AnyLogonIdentity)
+    foreach ($rk in $runKeys) {
+        foreach ($hive in @('HKLM:\SOFTWARE\', 'HKLM:\SOFTWARE\WOW6432Node\')) { $out += @(Get-RunKeyItems ($hive + $rk) ('HKLM ' + $rk) $script:AnyLogonSid $script:AnyLogonIdentity) }
+    }
+    # ملفات تعريف المستخدمين المحليين/المجال (S-1-5-21-*): مجلد Startup الخاص وRun/RunOnce من HKU.
+    foreach ($p in @(Get-ChildItem -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList' -ErrorAction Stop)) {
+        $sid = [string]$p.PSChildName
+        if ($sid -notmatch '^S-1-5-21-\d+-\d+-\d+-\d+$') { continue }
+        $img = [Environment]::ExpandEnvironmentVariables([string]$p.GetValue('ProfileImagePath'))
+        if (-not $img) { $out += New-StartupItem ('profile ' + $sid) $sid $sid $sid @() 'profile path cannot be read'; continue }
+        $out += @(Get-StartupFolderItems (Join-Path $img 'AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup') ('Startup (' + $sid + ')') $sid $sid)
+        $hku = 'Registry::HKEY_USERS\' + $sid
+        if (-not (Test-Path -LiteralPath $hku)) {
+            # الـhive غير محمّل (المستخدم غير متصل): لا نحمّله (تعديل)، ولا نفترض أنه فارغ.
+            $out += New-StartupItem ('HKU ' + $sid) 'Run/RunOnce' $sid $sid @() 'user registry hive is not loaded; per-user Run/RunOnce cannot be inventoried'
+            continue
+        }
+        foreach ($rk in $runKeys) { $out += @(Get-RunKeyItems ($hku + '\Software\' + $rk) ('HKU ' + $sid + ' ' + $rk) $sid $sid) }
     }
     return $out
 }
@@ -261,6 +349,8 @@ function Get-AccountLeafName([string]$Identity) {
 # حتى 3 مستويات. «undetermined» حين لا يمكن الإثبات: غلاف موجود لا يُقرأ، أو عمق أكبر، أو
 # متغيّر بيئة خاص بالمستخدم أو غير معروف في المسار.
 function Expand-UserProfileVariables([string]$Text, [string]$Identity) {
+    # هوية بلا اسم حساب (SID غير SYSTEM، أو «أي مستخدم عند الدخول») ⇒ ملف التعريف غير مثبت ⇒ غير محدد.
+    if ($Identity -eq $script:AnyLogonIdentity -or ($Identity -match '^[Ss]-1(-\d+)+$' -and $Identity -ne 'S-1-5-18')) { return $null }
     $key = Get-AccountLeafName $Identity
     if (-not $key) { return $null }
     $userProfile = 'C:\Users\' + $key
@@ -414,6 +504,10 @@ function Get-WrapperReach($Ctx, [string]$Path, [int]$depth) {
     }
     foreach ($line in ($inner -split "`r?`n")) {
         if (Test-FieldReachesRepo $Ctx $line) { return (New-Reach 'REPO' ('wrapper ' + $Path + ' references a repository path')) }
+    }
+    # مرجع سكربت نسبي داخل الغلاف (مثل node scripts/serve.mjs): مجلد العمل وقت التشغيل غير مثبت ⇒ UNKNOWN.
+    if ($inner -match '(?<![\w\\/:.%~$-])(?:\.{1,2}[\\/])?[\w-]+(?:[\\/][\w.-]+)+\.(?:ps1|psm1|mjs|cjs|js|py|bat|cmd|vbs)\b' -or $inner -match '(?i)\b(node|python\d*|py|pwsh|powershell|wscript|cscript|deno|bun)(\.exe)?"?\s+(?:-\S+\s+)*"?[\w.-]+\.(?:ps1|mjs|cjs|js|py|vbs|ts)\b') {
+        $r = Join-Reach $r (New-Reach 'UNKNOWN' ('relative script reference in wrapper ' + $Path + ' cannot be resolved statically'))
     }
     foreach ($m in [regex]::Matches($inner, '(?:[A-Za-z]:\\|/)[^"''\r\n<>|]+?\.(vbs|cmd|bat|ps1|psm1)\b')) {
         $r = Join-Reach $r (Get-WrapperReach $Ctx $m.Value ($depth + 1))
@@ -654,12 +748,9 @@ function Resolve-TaskReach($Config, $Actions, [string]$Identity = '') {
 
 # سطر أوامر واحد (مسار خدمة): البرنامج أولاً (مقتبس، أو حتى .exe، أو أول رمز) ثم الوسائط.
 function Resolve-WorkloadReach($Config, [string]$ActionText, [string]$Identity = '') {
-    $t = ([string]$ActionText).Trim()
-    if (-not $t) { return (New-Reach 'UNKNOWN' 'empty command line') }
-    $m = [regex]::Match($t, '^"([^"]+)"\s*(.*)$', 'Singleline')
-    if (-not $m.Success) { $m = [regex]::Match($t, '^(.+?\.(?:exe|com))(?:\s+(.*))?$', 'IgnoreCase, Singleline') }
-    if (-not $m.Success) { $m = [regex]::Match($t, '^(\S+)(?:\s+(.*))?$', 'Singleline') }
-    return (Get-ActionReach (New-ReachContext $Config $Identity) $m.Groups[1].Value $m.Groups[2].Value '' 0)
+    if (-not ([string]$ActionText).Trim()) { return (New-Reach 'UNKNOWN' 'empty command line') }
+    $a = ConvertTo-CommandAction $ActionText
+    return (Get-ActionReach (New-ReachContext $Config $Identity) $a.execute $a.arguments '' 0)
 }
 
 function Test-RepoWorkload($Config, [string]$ActionText) { return (Resolve-WorkloadReach $Config $ActionText).repo }
@@ -703,11 +794,17 @@ function Test-ExactGateAction($Config, $Task) {
     if (-not $file) { return 'no -File <gateDir>\deploy-gate.ps1' }
     if ($file -notmatch '^[A-Za-z]:\\' -or $file -match '(^|[\\/])\.{1,2}([\\/]|$)|[%$`]') { return ('script path is not an absolute canonical path: ' + $file) }
     if ((ConvertTo-PreflightPath $file) -ne $expected) { return ('script is not ' + $expected + ': ' + $file) }
+    # أثناء bootstrap/Initialize: -Mode DryRun حرفياً ومرة واحدة (Codex P1). غياب Mode يعني Deploy
+    # (القيمة الافتراضية للسكربت)، وDeploy لا يُقبل إلا بانتقال منفصل مثبت بعد 24 ساعة DryRun.
+    $modes = @()
     while ($i -lt $tokens.Count) {
         $tk = ([string]$tokens[$i]).ToLowerInvariant()
-        if ($tk -eq '-mode' -and $i + 1 -lt $tokens.Count -and @('deploy', 'dryrun') -contains ([string]$tokens[$i + 1]).ToLowerInvariant()) { $i += 2; continue }
+        if ($tk -eq '-mode' -and $i + 1 -lt $tokens.Count) { $modes += ([string]$tokens[$i + 1]); $i += 2; continue }
         return ('disallowed script argument: ' + $tokens[$i])
     }
+    if ($modes.Count -eq 0) { return 'missing -Mode (script default is Deploy); the gate task must be registered with exactly -Mode DryRun' }
+    if ($modes.Count -gt 1) { return ('-Mode given more than once: ' + ($modes -join ', ')) }
+    if ($modes[0] -cne 'DryRun' -and $modes[0].ToLowerInvariant() -ne 'dryrun') { return ('the gate task must be registered with exactly -Mode DryRun, found -Mode ' + $modes[0]) }
     return $null
 }
 
@@ -827,6 +924,12 @@ function Invoke-GateIdentityPreflight($Config) {
     } catch {
         return [pscustomobject]@{ ok = $false; results = @($results + (& $block 'inventory' ('cannot enumerate tasks/services: services: ' + $_.Exception.Message))) }
     }
+    # Startup/Logon جزء من الجرد نفسه (Codex P1): لا يقتصر على المهام والخدمات.
+    try {
+        $inventory += @(Get-PreflightStartupInventory | ForEach-Object { $_ | Add-Member -NotePropertyName kind -NotePropertyValue 'startup' -PassThru -Force })
+    } catch {
+        return [pscustomobject]@{ ok = $false; results = @($results + (& $block 'inventory' ('cannot enumerate startup/logon sources: ' + $_.Exception.Message))) }
+    }
     if (@($inventory | Where-Object { $_.kind -eq 'task' }).Count -eq 0) { $results += & $block 'inventory' 'no scheduled tasks visible; run the preflight as an administrator' }
     if (@($inventory | Where-Object { $_.kind -eq 'service' }).Count -eq 0) { $results += & $block 'inventory' 'service inventory is empty; an empty list is not evidence that no services exist' }
 
@@ -848,6 +951,10 @@ function Invoke-GateIdentityPreflight($Config) {
             elseif ($gidSid -ne $gate) { $results += & $block $gsub ('gate task must run as the dedicated gate identity ' + $gateName + '; found ' + $gid) }
             $why = Test-ExactGateAction $Config $gateTaskItem
             if ($why) { $results += & $block $gsub ('the gate task must run only the gate scripts in gateDir: ' + $why) }
+            # bootstrap ⇒ Initialize: المهمة معطّلة؛ تُفعَّل (DryRun) بعد نجاح Initialize فقط.
+            $gstate = if ($gateTaskItem.PSObject.Properties['state']) { ([string]$gateTaskItem.state).Trim() } else { '' }
+            if (-not $gstate) { $results += & $block $gsub 'gate task enabled/disabled state cannot be read' }
+            elseif ($gstate -ne 'Disabled') { $results += & $block $gsub ('gate task must be Disabled during Initialize (bootstrap state); found ' + $gstate) }
         }
     }
     # أي مهمة أخرى تشبه البوابة (اسماً أو تشغّل سكربتاتها) تتعارض معها.
@@ -875,14 +982,17 @@ function Invoke-GateIdentityPreflight($Config) {
     foreach ($item in $inventory) {
         $subject = $item.kind + ' ' + ([string]$item.path) + $item.name
         $identityText = ([string]$item.identity).Trim()
-        $key = Resolve-PrincipalSid $identityText
+        $key = if ($item.PSObject.Properties['sid'] -and $item.sid) { [string]$item.sid } else { Resolve-PrincipalSid $identityText }
         if ($identityText -and -not $key) {
             # هوية مذكورة لا تُحلّ إلى SID: لا يمكن إثبات أنها ليست هوية البوابة أو حساباً ذا صلاحية.
             $results += & $block $subject ('identity cannot be resolved to a SID: ' + $identityText)
             continue
         }
         # المهام بحقولها المنظّمة؛ الخدمات بسطر أوامرها (PathName). ثلاثي الحالة، وUNKNOWN لا يصير NOT_REPO.
-        if ($item.kind -eq 'task') { $reach = Resolve-TaskReach $Config $item.actions ([string]$item.identity) }
+        if ($item.kind -eq 'task' -or $item.kind -eq 'startup') {
+            $reach = Resolve-TaskReach $Config $item.actions ([string]$item.identity)
+            if ($item.PSObject.Properties['unreadable'] -and $item.unreadable) { $reach = New-Reach 'UNKNOWN' ([string]$item.unreadable) }
+        }
         else { $reach = Resolve-WorkloadReach $Config ([string]$item.action) ([string]$item.identity) }
         $isRepo = $reach.status -eq 'REPO'
         # لا يمكن إثبات أن الـAction لا يصل إلى المستودع، والهوية ذات صلاحية (أو غير معروفة) ⇒ حجب.

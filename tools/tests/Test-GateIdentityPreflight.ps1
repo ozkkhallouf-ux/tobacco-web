@@ -48,6 +48,9 @@ $script:Admins = @('OZK2026\LOQ', 'OZK2026\Administrator')
 function Get-PreflightAdminMembers { if ($null -eq $script:Admins) { return $null } return @($script:Admins) }
 function Get-PreflightTaskInventory { return @($script:Tasks) }
 function Get-PreflightServiceInventory { return @($script:Services) }
+# جرد Startup/Logon (مجلدات Startup وRun/RunOnce) — فارغ افتراضياً، وتضبطه الاختبارات.
+$script:Startup = @()
+function Get-PreflightStartupInventory { return @($script:Startup) }
 function Read-PreflightWrapperText([string]$Path) { if ($script:Wrappers.ContainsKey($Path)) { return $script:Wrappers[$Path] } return '' }
 
 $repo = 'C:\Users\LOQ\Documents\OZK-TOBACCO\tobacco-web'
@@ -61,12 +64,14 @@ function New-Task([string]$Name, [string]$Identity, [string]$Action, $Actions = 
         $m = [regex]::Match($Action, '^\s*("[^"]+"|\S+)\s*(.*)$')
         $Actions = @([pscustomobject]@{ execute = $m.Groups[1].Value.Trim('"'); arguments = $m.Groups[2].Value })
     }
-    return [pscustomobject]@{ name = $Name; path = '\'; identity = $Identity; action = $Action; actions = @($Actions) }
+    return [pscustomobject]@{ name = $Name; path = '\'; identity = $Identity; state = 'Ready'; action = $Action; actions = @($Actions) }
 }
 # مهمة البوابة بـAction منظَّم (المفسّر + الوسائط كما في Task Scheduler).
 $approvedPs = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
-function New-GateTask([string]$Execute, [string]$Arguments, [string]$Identity = 'OZK2026\OZK-DeployGate') {
-    return New-Task 'TOBACCO Windows Deploy Gate' $Identity ($Execute + ' ' + $Arguments) @([pscustomobject]@{ execute = $Execute; arguments = $Arguments })
+function New-GateTask([string]$Execute, [string]$Arguments, [string]$Identity = 'OZK2026\OZK-DeployGate', [string]$State = 'Disabled') {
+    $t = New-Task 'TOBACCO Windows Deploy Gate' $Identity ($Execute + ' ' + $Arguments) @([pscustomobject]@{ execute = $Execute; arguments = $Arguments })
+    $t.state = $State
+    return $t
 }
 # خدمات Windows عادية (غير مستودع) — الجرد الفارغ يحجب، فالتخطيطات تحمل خدمات حقيقية الشكل.
 function Get-BaselineServices { return @([pscustomobject]@{ name = 'Winmgmt'; identity = 'LocalSystem'; action = 'C:\Windows\system32\svchost.exe -k netsvcs' }, [pscustomobject]@{ name = 'sshd'; identity = 'LocalSystem'; action = 'C:\Windows\System32\OpenSSH\sshd.exe' }) }
@@ -167,7 +172,7 @@ try {
     $script:Tasks = Get-CleanLayout
     $r = Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())
     Assert-True ($r.ok) 'ordinary non-admin repo workloads only + dedicated identity unused => eligible'
-    $script:Tasks = @(Get-CleanLayout -NoGate) + @(New-GateTask $approvedPs ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $gateDir + '\deploy-gate.ps1"'))
+    $script:Tasks = @(Get-CleanLayout -NoGate) + @(New-GateTask $approvedPs ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $gateDir + '\deploy-gate.ps1" -Mode DryRun'))
     $r = Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())
     Assert-True ($r.ok) 'the gate task itself under the dedicated identity running only gateDir scripts => eligible'
     $script:Tasks = @(Get-CleanLayout -NoGate) + @(New-GateTask $approvedPs ('-File "' + $repo + '\tools\deploy-gate\deploy-gate.ps1"'))
@@ -356,7 +361,7 @@ try {
     Write-Host '== Gate task action must be exact (Codex P1)'
     $gatePath = $gateDir + '\deploy-gate.ps1'
     $cases = @(
-        @{ ok = $true;  label = 'approved PowerShell + -File gateDir\deploy-gate.ps1 => PASS'; exe = $approvedPs; args = ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $gatePath + '"') },
+        @{ ok = $false; label = 'approved PowerShell + -File gateDir\deploy-gate.ps1 without -Mode (defaults to Deploy) => BLOCK'; exe = $approvedPs; args = ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $gatePath + '"') },
         @{ ok = $true;  label = 'approved form with -WindowStyle Hidden and -Mode DryRun => PASS'; exe = $approvedPs; args = ('-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $gatePath + '" -Mode DryRun') },
         @{ ok = $false; label = 'PowerShell -Command => BLOCK'; exe = $approvedPs; args = ('-NoProfile -Command "& ''' + $gatePath + '''"') },
         @{ ok = $false; label = 'PowerShell -EncodedCommand => BLOCK'; exe = $approvedPs; args = '-NoProfile -EncodedCommand SQBFAFgAIAAoACcAaAAnACkA' },
@@ -469,7 +474,7 @@ try {
         @{ label = 'wrong identity (SYSTEM) => BLOCK'; tasks = (@(Get-CleanLayout -NoGate) + @(New-GateTask $approvedPs ('-File "' + $gateDir + '\deploy-gate.ps1"') 'SYSTEM')); pattern = '*must run as the dedicated gate identity*' },
         @{ label = 'wrong identity (OZKSync) => BLOCK'; tasks = (@(Get-CleanLayout -NoGate) + @(New-GateTask $approvedPs ('-File "' + $gateDir + '\deploy-gate.ps1"') 'OZKSync')); pattern = '*must run as the dedicated gate identity*' },
         @{ label = 'wrong action (wrapper) => BLOCK'; tasks = (@(Get-CleanLayout -NoGate) + @(New-GateTask 'C:\Windows\System32\cmd.exe' ('/c "' + $gateDir + '\deploy-gate.cmd"'))); pattern = '*gate task must run only*' },
-        @{ label = 'wrong action (disallowed mode) => BLOCK'; tasks = (@(Get-CleanLayout -NoGate) + @(New-GateTask $approvedPs ('-File "' + $gateDir + '\deploy-gate.ps1" -Mode Initialize'))); pattern = '*disallowed script argument*' },
+        @{ label = 'wrong action (disallowed mode) => BLOCK'; tasks = (@(Get-CleanLayout -NoGate) + @(New-GateTask $approvedPs ('-File "' + $gateDir + '\deploy-gate.ps1" -Mode Initialize'))); pattern = '*exactly -Mode DryRun*' },
         @{ label = 'gate task working directory outside gateDir => BLOCK'; tasks = (@(Get-CleanLayout -NoGate) + @(New-Task 'TOBACCO Windows Deploy Gate' 'OZK2026\OZK-DeployGate' 'x' @(Act $approvedPs ('-File "' + $gateDir + '\deploy-gate.ps1"') $repo))); pattern = '*working directory must be empty or gateDir*' }
     )
     foreach ($c in $gateCases) {
@@ -485,6 +490,103 @@ try {
     Assert-True (-not (Invoke-InstallPreflight (New-Config 'OZK2026\OZK-DeployGate' @())).ok) 'install preflight (Initialize) with no registered gate task => BLOCKED'
     $script:Tasks = @(Get-CleanLayout)
     Assert-True ((Invoke-InstallPreflight (New-Config 'OZK2026\OZK-DeployGate' @())).ok) 'install preflight (Initialize) with exactly one validated gate task => PASS'
+
+    Write-Host '== Startup / logon repository workloads are inventoried (Codex P1)'
+    $loqSid = 'S-1-5-21-111-1002'; $syncSid = 'S-1-5-21-111-1003'; $anySid = 'S-1-5-32-544'
+    $loqStartup = 'C:\Users\LOQ\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup'
+    $allStartup = 'C:\ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp'
+    $serverVbs = $loqStartup + '\OZK-Tobacco-Server.vbs'
+    $script:Wrappers[$serverVbs] = ('Set sh = CreateObject("WScript.Shell")' + "`r`n" + 'sh.CurrentDirectory = "' + $repo + '"' + "`r`n" + 'sh.Run "node scripts/serve.mjs", 0, False')
+    function File-Item([string]$Folder, [string]$File, [string]$Sid, [string]$Identity) { return New-StartupItem ('Startup (' + $Identity + ')') $File $Sid $Identity @([pscustomobject]@{ execute = ($Folder + '\' + $File); arguments = ''; workingDirectory = $Folder }) }
+    function Run-Item([string]$Name, [string]$Line, [string]$Sid, [string]$Identity) { return New-StartupItem ('Run (' + $Identity + ')') $Name $Sid $Identity @(ConvertTo-CommandAction $Line) }
+    $loqServer = File-Item $loqStartup 'OZK-Tobacco-Server.vbs' $loqSid $loqSid
+    function Test-Startup($Items, [string]$Label, [string]$Pattern) {
+        $script:Tasks = @(Get-CleanLayout)
+        $script:Startup = @($Items)
+        $r = Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())
+        $script:Startup = @()
+        if (-not $Pattern) { Assert-True ($r.ok) $Label } else { Assert-True (-not $r.ok -and (Test-BlockLike $r $Pattern)) $Label }
+    }
+    Test-Startup @($loqServer) 'LOQ startup OZK-Tobacco-Server.vbs -> node scripts/serve.mjs (repo) -> LOQ is Administrator => BLOCK' '*OZK-Tobacco-Server.vbs*member of local Administrators*'
+    $script:Wrappers[($loqStartup + '\server-rel.vbs')] = 'CreateObject("WScript.Shell").Run "node scripts/serve.mjs", 0, False'
+    Test-Startup @(New-StartupItem 'Startup (LOQ)' 'server-rel.vbs' $loqSid $loqSid @([pscustomobject]@{ execute = ($loqStartup + '\server-rel.vbs'); arguments = ''; workingDirectory = $loqStartup })) 'LOQ startup wrapper with only a relative node scripts/serve.mjs (cwd not provable) => UNKNOWN => BLOCK' '*server-rel.vbs*cannot determine whether*'
+    Test-Startup @(File-Item $allStartup 'x.ps1' $anySid $script:AnyLogonIdentity | ForEach-Object { $_.actions = @([pscustomobject]@{ execute = ($repo + '\tools\x.ps1'); arguments = ''; workingDirectory = '' }); $_ }) 'all-users Startup folder -> direct repo script (runs for administrators at logon) => BLOCK' '*x.ps1*privileged repository workload*'
+    $allWrap = $allStartup + '\ozk-launch.cmd'
+    $script:Wrappers[$allWrap] = ('@echo off' + "`r`n" + 'call "' + $repo + '\tools\run.bat"')
+    Test-Startup @(File-Item $allStartup 'ozk-launch.cmd' $anySid $script:AnyLogonIdentity) 'all-users Startup folder wrapper -> repo => BLOCK' '*ozk-launch.cmd*privileged repository workload*'
+    Test-Startup @(Run-Item 'OzkServer' ('"C:\Program Files\nodejs\node.exe" "' + $repo + '\scripts\serve.mjs"') $anySid $script:AnyLogonIdentity) 'HKLM Run -> repo workload (runs at every logon, incl. administrators) => BLOCK' '*OzkServer*privileged repository workload*'
+    Test-Startup @(Run-Item 'LoqTray' ('"C:\Program Files\nodejs\node.exe" scripts\serve.mjs') $loqSid $loqSid | ForEach-Object { $_.actions[0].workingDirectory = $repo; $_ }) 'per-user (LOQ) Run entry + admin user + repo workload => BLOCK' '*LoqTray*member of local Administrators*'
+    Test-Startup @(Run-Item 'LoqRepo' ('powershell.exe -File "' + $repo + '\tools\x.ps1"') $loqSid $loqSid) 'per-user (LOQ) Run entry with an absolute repo script => BLOCK' '*LoqRepo*member of local Administrators*'
+    Test-Startup @(Run-Item 'SyncRepo' ('powershell.exe -File "' + $repo + '\tools\x.ps1"') $syncSid $syncSid) 'ordinary non-admin (OZKSync) startup repo workload => evaluated normally, not blocked just for being startup' ''
+    Test-Startup @(Run-Item 'SyncRepoWriter' ('powershell.exe -File "' + $repo + '\tools\x.ps1"') $syncSid $syncSid) 'non-admin startup repo workload still goes through the other rules' ''
+    $script:Tasks = @(Get-CleanLayout); $script:Startup = @(Run-Item 'SyncRepoWriter' ('powershell.exe -File "' + $repo + '\tools\x.ps1"') $syncSid $syncSid)
+    $r = Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @('OZK2026\OZK-DeployGate', 'OZKSync')); $script:Startup = @()
+    Assert-True (-not $r.ok -and (Test-BlockLike $r '*SyncRepoWriter*may write the gate trust files*')) 'non-admin startup repo workload whose identity may write trust files => BLOCK (writer rule applies to startup too)'
+    Test-Startup @(Run-Item 'VendorTray' '"C:\Program Files\Vendor\tray.exe" /min' $anySid $script:AnyLogonIdentity) 'unrelated static startup entry => NOT_REPO (not blocked)' ''
+    Assert-True ((Resolve-TaskReach (New-Config 'OZK2026\OZK-DeployGate' @()) @(ConvertTo-CommandAction '"C:\Program Files\Vendor\tray.exe" /min') $script:AnyLogonIdentity).status -eq 'NOT_REPO') 'unrelated static startup command classifies NOT_REPO'
+    Test-Startup @(Run-Item 'Opaque' 'powershell.exe -NoProfile -EncodedCommand SQBFAFgAIAAoAGcAYwApAA==' $anySid $script:AnyLogonIdentity) 'ambiguous startup command (EncodedCommand, runs for administrators) => UNKNOWN => BLOCK' '*Opaque*cannot determine whether*'
+    Assert-True ((Resolve-TaskReach (New-Config 'OZK2026\OZK-DeployGate' @()) @(ConvertTo-CommandAction 'cmd.exe /c for %i in (*) do %i') $script:AnyLogonIdentity).status -eq 'UNKNOWN') 'ambiguous startup command classifies UNKNOWN'
+    $envVbs = $allStartup + '\env.vbs'
+    $script:Wrappers[$envVbs] = 'CreateObject("WScript.Shell").Run "%OZK_ROOT%\tools\x.bat", 0'
+    Test-Startup @(File-Item $allStartup 'env.vbs' $anySid $script:AnyLogonIdentity) 'startup wrapper with an unresolved environment reference => BLOCK (env fail-closed unchanged)' '*env.vbs*cannot determine whether*'
+    Test-Startup @(Run-Item 'UserProfileVar' 'powershell.exe -File "%USERPROFILE%\tools\x.ps1"' $anySid $script:AnyLogonIdentity) 'machine-wide startup with %USERPROFILE% (profile of whoever logs on) => UNKNOWN => BLOCK' '*UserProfileVar*cannot determine whether*'
+    Test-Startup @(New-StartupItem 'HKU S-1-5-21-111-1002' 'Run/RunOnce' $loqSid $loqSid @() 'user registry hive is not loaded; per-user Run/RunOnce cannot be inventoried') 'unreadable per-user Run of an administrator (hive not loaded) => BLOCK, not "nothing"' '*Run/RunOnce*cannot determine whether*'
+    Test-Startup @(New-StartupItem 'Startup (all users)' $allStartup $anySid $script:AnyLogonIdentity @() 'startup folder cannot be read: Access is denied') 'unreadable all-users Startup folder => BLOCK' '*cannot determine whether*Access is denied*'
+    Test-Startup @(New-StartupItem 'HKU S-1-5-21-111-1003' 'Run/RunOnce' $syncSid $syncSid @() 'user registry hive is not loaded; per-user Run/RunOnce cannot be inventoried') 'unreadable per-user Run of a non-admin user => not a privilege risk' ''
+    function Get-PreflightStartupInventory { throw 'Access is denied' }
+    $script:Tasks = @(Get-CleanLayout)
+    $r = Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())
+    Assert-True (-not $r.ok -and (Test-BlockLike $r '*cannot enumerate startup/logon sources*')) 'startup/logon inventory that cannot be enumerated => BLOCK'
+    function Get-PreflightStartupInventory { return @($script:Startup) }
+    # الحالة المعروفة: حتى بعد نقل كل المهام (التخطيط النظيف) يبقى عنصر Startup الخاص بـLOQ حاجباً.
+    $script:Tasks = @(Get-CleanLayout); $script:Startup = @($loqServer)
+    Assert-True (-not (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())).ok) 'clean task layout but LOQ startup serve.mjs remains => Initialize BLOCKED'
+    $script:Tasks = Get-CurrentLayout
+    $r = Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @()); $script:Startup = @()
+    Assert-True (-not $r.ok -and (Test-BlockLike $r '*OZK-Tobacco-Server.vbs*member of local Administrators*')) 'current modeled OZK2026 (tasks + LOQ startup) => BLOCKED, including the startup serve.mjs workload'
+
+    # قارئ مجلد Startup الفعلي (نظام ملفات مؤقت؛ اختصارات .lnk تحتاج COM على Windows فلا تُختبر هنا).
+    $tmpStart = Join-Path ([IO.Path]::GetTempPath()) ('ozk-startup-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $tmpStart)
+    try {
+        Set-Content -LiteralPath (Join-Path $tmpStart 'desktop.ini') -Value '[.ShellClassInfo]'
+        Set-Content -LiteralPath (Join-Path $tmpStart 'server.vbs') -Value 'x'
+        Set-Content -LiteralPath (Join-Path $tmpStart 'site.url') -Value '[InternetShortcut]'
+        $fi = @(Get-StartupFolderItems $tmpStart 'Startup (test)' $loqSid $loqSid)
+        Assert-True ($fi.Count -eq 2) 'startup folder reader: desktop.ini skipped, every other entry inventoried'
+        $vbsItem = @($fi | Where-Object { $_.name -eq 'server.vbs' })[0]
+        Assert-True ($vbsItem.kind -eq 'startup' -and $vbsItem.sid -eq $loqSid -and $vbsItem.actions[0].execute -like '*server.vbs' -and $vbsItem.actions[0].workingDirectory -eq $tmpStart) 'startup script entry => structured action (execute = the file, working directory = the Startup folder) under the owner SID'
+        $urlItem = @($fi | Where-Object { $_.name -eq 'site.url' })[0]
+        Assert-True ($urlItem.unreadable -like '*file association*' -and @($urlItem.actions).Count -eq 0) 'startup entry opened via a file association => UNKNOWN (not NOT_REPO)'
+        Assert-True (@(Get-StartupFolderItems (Join-Path $tmpStart 'missing') 'x' $loqSid $loqSid).Count -eq 0) 'a Startup folder that does not exist has no entries'
+    } finally { Remove-Item -LiteralPath $tmpStart -Recurse -Force -ErrorAction SilentlyContinue }
+    $ca = ConvertTo-CommandAction '"C:\Program Files\nodejs\node.exe" "C:\x\serve.mjs" --port 5173'
+    Assert-True ($ca.execute -eq 'C:\Program Files\nodejs\node.exe' -and $ca.arguments -eq '"C:\x\serve.mjs" --port 5173' -and $ca.workingDirectory -eq '') 'Run value => structured action (quoted executable, then arguments)'
+    $ca = ConvertTo-CommandAction 'C:\Program Files\Vendor\tray.exe /min'
+    Assert-True ($ca.execute -eq 'C:\Program Files\Vendor\tray.exe' -and $ca.arguments -eq '/min') 'Run value with an unquoted path containing spaces => executable ends at .exe'
+    Write-Host '== Initialize requires the gate task Disabled with exactly -Mode DryRun (Codex P1)'
+    $gp = $gateDir + '\deploy-gate.ps1'
+    $modeCases = @(
+        @{ label = 'exactly one Disabled -Mode DryRun gate task => PASS'; t = (New-GateTask $approvedPs ('-NoProfile -File "' + $gp + '" -Mode DryRun') 'OZK2026\OZK-DeployGate' 'Disabled'); pattern = '' },
+        @{ label = 'Enabled (Ready) + DryRun => BLOCK'; t = (New-GateTask $approvedPs ('-File "' + $gp + '" -Mode DryRun') 'OZK2026\OZK-DeployGate' 'Ready'); pattern = '*must be Disabled during Initialize*Ready*' },
+        @{ label = 'Running + DryRun => BLOCK'; t = (New-GateTask $approvedPs ('-File "' + $gp + '" -Mode DryRun') 'OZK2026\OZK-DeployGate' 'Running'); pattern = '*must be Disabled during Initialize*' },
+        @{ label = 'Disabled + Deploy => BLOCK'; t = (New-GateTask $approvedPs ('-File "' + $gp + '" -Mode Deploy') 'OZK2026\OZK-DeployGate' 'Disabled'); pattern = '*exactly -Mode DryRun, found -Mode Deploy*' },
+        @{ label = 'Enabled + Deploy => BLOCK'; t = (New-GateTask $approvedPs ('-File "' + $gp + '" -Mode Deploy') 'OZK2026\OZK-DeployGate' 'Ready'); pattern = '*exactly -Mode DryRun*' },
+        @{ label = 'Disabled + missing Mode (defaults to Deploy) => BLOCK'; t = (New-GateTask $approvedPs ('-File "' + $gp + '"') 'OZK2026\OZK-DeployGate' 'Disabled'); pattern = '*missing -Mode*' },
+        @{ label = 'Disabled + -Mode DryRun given twice => BLOCK'; t = (New-GateTask $approvedPs ('-File "' + $gp + '" -Mode DryRun -Mode DryRun') 'OZK2026\OZK-DeployGate' 'Disabled'); pattern = '*-Mode given more than once*' },
+        @{ label = 'unreadable enabled/disabled state => BLOCK'; t = (New-GateTask $approvedPs ('-File "' + $gp + '" -Mode DryRun') 'OZK2026\OZK-DeployGate' ''); pattern = '*state cannot be read*' },
+        @{ label = 'unreadable arguments (unbalanced quotes) => BLOCK'; t = (New-GateTask $approvedPs ('-File "' + $gp + ' -Mode DryRun') 'OZK2026\OZK-DeployGate' 'Disabled'); pattern = '*cannot be parsed unambiguously*' },
+        @{ label = 'wrong identity => BLOCK'; t = (New-GateTask $approvedPs ('-File "' + $gp + '" -Mode DryRun') 'OZK2026\LOQ' 'Disabled'); pattern = '*must run as the dedicated gate identity*' },
+        @{ label = 'wrong interpreter => BLOCK'; t = (New-GateTask 'C:\Program Files\PowerShell\7\pwsh.exe' ('-File "' + $gp + '" -Mode DryRun') 'OZK2026\OZK-DeployGate' 'Disabled'); pattern = '*interpreter is not the approved PowerShell*' },
+        @{ label = 'wrong action (wrapper) => BLOCK'; t = (New-GateTask 'C:\Windows\System32\cmd.exe' ('/c "' + $gateDir + '\deploy-gate.cmd" -Mode DryRun') 'OZK2026\OZK-DeployGate' 'Disabled'); pattern = '*gate task must run only*' }
+    )
+    foreach ($c in $modeCases) {
+        $script:Tasks = @(Get-CleanLayout -NoGate) + @($c.t)
+        $r = Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())
+        if (-not $c.pattern) { Assert-True ($r.ok) $c.label } else { Assert-True (-not $r.ok -and (Test-BlockLike $r $c.pattern)) $c.label }
+    }
+    $script:Tasks = @(Get-CleanLayout) + @(New-GateTask $approvedPs ('-File "' + $gp + '" -Mode DryRun') 'OZK2026\OZK-DeployGate' 'Disabled')
+    Assert-True (-not (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())).ok) 'duplicate (two valid Disabled DryRun) gate tasks => BLOCK'
 
     Write-Host '== Install preflight combines price-list and identity checks'
     # فحص ACL الفعلية مُختبَر في Test-GateTrustAcl.ps1؛ هنا نتيجته ناجحة لعزل الهوية ونشرات الأسعار.

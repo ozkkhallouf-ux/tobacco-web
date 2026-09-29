@@ -1,6 +1,7 @@
 {
   "_comment": "Reference only. The authoritative copy lives in C:\\ProgramData\\OZK-TOBACCO\\DeployGate\\gate-config.json, writable only by the dedicated gate identity (trust.gateAccount). A merge to main never changes the installed copy.",
   "expectedHost": "OZK2026",
+  "dryRunSoak": { "_comment": "Deploy requires a separate, proven transition after a FULL DryRun soak: hours is floored at 24; every gap between successful DryRun runs must be <= maxGapMinutes (task runs every 10 minutes).", "hours": 24, "maxGapMinutes": 30 },
   "repoPath": "C:\\Users\\LOQ\\Documents\\OZK-TOBACCO\\tobacco-web",
   "gateDir": "C:\\ProgramData\\OZK-TOBACCO\\DeployGate",
   "logDir": "C:\\ProgramData\\OZK-TOBACCO\\DeployGateLogs",
@@ -171,6 +172,7 @@
       "audit.jsonl",
       "writer-allowlist.json",
       "deploying.flag",
+      "deploy-transition.json",
       "deploy-gate.log",
       "deploy-gate.lock"
     ],

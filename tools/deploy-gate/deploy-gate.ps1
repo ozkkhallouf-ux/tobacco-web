@@ -68,7 +68,63 @@ function Get-GatePaths($Config) {
         Allowlist = Join-Path $Config.gateDir 'writer-allowlist.json'
         Log       = Join-Path $Config.gateDir 'deploy-gate.log'
         Lock      = Join-Path $Config.gateDir 'deploy-gate.lock'
+        Transition = Join-Path $Config.gateDir 'deploy-transition.json'
     }
+}
+
+# ------------------------------------------------------------
+# انتقال Deploy (Codex P1): Initialize لا يسمح بـDeploy. Deploy يتطلب انتقالاً منفصلاً مثبتاً بعد
+# DryRun كامل لـ24 ساعة على الأقل. الإثبات من ملف الثقة deploy-transition.json (يكتبه الانتقال
+# المنفصل في المرحلة التالية، بموافقة المالك) ومن سجل التدقيق نفسه: تشغيلات DryRun ناجحة ومتصلة
+# تغطي النافذة كلها، بلا أي نتيجة أخرى داخلها. مرور الوقت وحده لا يكفي. أي نقص ⇒ STOP (fail-closed).
+# هذا الـPR لا ينشئ الملف ولا ينفّذ الانتقال.
+# ------------------------------------------------------------
+# وقت UTC من JSON: PowerShell 7 يحوّل نصوص ISO إلى DateTime تلقائياً و5.1 يتركها نصاً. $null إن تعذّر.
+function ConvertTo-GateUtc($Value) {
+    if ($Value -is [datetime]) { return $Value.ToUniversalTime() }
+    $d = [datetime]::MinValue
+    $styles = [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal
+    if ([datetime]::TryParse([string]$Value, [System.Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$d)) { return $d }
+    return $null
+}
+
+function Test-DeployTransition($Config, $Paths) {
+    if (-not (Test-Path -LiteralPath $Paths.Transition)) { return 'deploy transition not established: Deploy requires a completed FULL 24-hour DryRun soak recorded by the separate transition step (deploy-transition.json)' }
+    try { $t = [System.IO.File]::ReadAllText($Paths.Transition) | ConvertFrom-Json } catch { return 'deploy-transition.json cannot be read' }
+    if ([string]$t.kind -ne 'ozk-deploy-transition') { return 'deploy-transition.json has an unexpected kind' }
+    if (-not ([string]$t.approvedBy).Trim()) { return 'deploy transition has no recorded owner approval' }
+    $hours = 24
+    $gap = 30
+    if ($Config.PSObject.Properties['dryRunSoak'] -and $Config.dryRunSoak) {
+        if ($Config.dryRunSoak.hours) { $hours = [Math]::Max(24, [double]$Config.dryRunSoak.hours) }
+        if ($Config.dryRunSoak.maxGapMinutes) { $gap = [double]$Config.dryRunSoak.maxGapMinutes }
+    }
+    $start = ConvertTo-GateUtc $t.soakStartUtc
+    $end = ConvertTo-GateUtc $t.soakEndUtc
+    if ($null -eq $start -or $null -eq $end) { return 'deploy transition soak window cannot be parsed' }
+    if ($end -gt (Get-Date).ToUniversalTime()) { return 'deploy transition soak window ends in the future' }
+    if (($end - $start).TotalHours -lt $hours) { return ('DryRun soak shorter than ' + $hours + ' hours: ' + [Math]::Round(($end - $start).TotalHours, 2)) }
+    if (-not (Test-Path -LiteralPath $Paths.Audit)) { return 'no audit log to prove the DryRun soak' }
+    $records = @()
+    foreach ($line in [System.IO.File]::ReadAllLines($Paths.Audit)) {
+        if (-not $line.Trim()) { continue }
+        try { $rec = $line | ConvertFrom-Json } catch { return 'audit log cannot be parsed; DryRun soak not provable' }
+        $ts = ConvertTo-GateUtc $rec.ts_utc
+        if ($null -eq $ts) { return 'audit record without a parsable timestamp; DryRun soak not provable' }
+        $records += [pscustomobject]@{ ts = $ts; mode = [string]$rec.mode; result = [string]$rec.result }
+    }
+    $init = @($records | Where-Object { $_.mode -eq 'Initialize' -and $_.result -eq 'OK' })
+    if ($init.Count -eq 0 -or $init[0].ts -gt $start) { return 'DryRun soak must start after a successful Initialize' }
+    $window = @($records | Where-Object { $_.ts -ge $start -and $_.ts -le $end } | Sort-Object ts)
+    $bad = @($window | Where-Object { -not ($_.mode -eq 'DryRun' -and ($_.result -eq 'DRYRUN' -or $_.result -eq 'NOOP')) })
+    if ($bad.Count -gt 0) { return ('DryRun soak window contains ' + $bad.Count + ' non-successful or non-DryRun gate run(s) (first: ' + $bad[0].mode + ' ' + $bad[0].result + ')') }
+    if ($window.Count -eq 0) { return 'no successful DryRun runs inside the soak window' }
+    $prev = $start
+    foreach ($w in @($window) + @([pscustomobject]@{ ts = $end })) {
+        if (($w.ts - $prev).TotalMinutes -gt $gap) { return ('DryRun soak has a gap of ' + [Math]::Round(($w.ts - $prev).TotalMinutes) + ' minutes (max ' + $gap + ') at ' + $prev.ToString('o')) }
+        $prev = $w.ts
+    }
+    return $null
 }
 
 function Write-GateLog($Paths, [string]$Message) {
@@ -376,8 +432,9 @@ function New-GateRecord($Config, [string]$GateMode) {
 function Complete-Gate($Paths, $Record, [string]$Result, [string]$Reason, [bool]$Alert) {
     $Record.result = $Result
     $Record.reason = $Reason
-    # NOOP (لا إصدار جديد) يُسجَّل في السجل التشغيلي فقط كي يبقى سجل التدقيق للقرارات الفعلية.
-    if ($Result -ne 'NOOP') { Write-AuditRecord $Paths ([pscustomobject]$Record) }
+    # NOOP (لا إصدار جديد) يُسجَّل في السجل التشغيلي فقط كي يبقى سجل التدقيق للقرارات الفعلية،
+    # إلا في DryRun: كل تشغيل DryRun (ومنه NOOP) يُدقَّق لأنه دليل اكتمال نافذة الـ24 ساعة.
+    if ($Result -ne 'NOOP' -or $Record.mode -eq 'DryRun') { Write-AuditRecord $Paths ([pscustomobject]$Record) }
     Write-GateLog $Paths ($Result + ': ' + $Reason)
     if ($Alert) { Send-GateAlert ('بوابة نشر Windows: ' + $Result + ' — ' + $Reason) ('deploy-gate-' + $Result.ToLowerInvariant()) }
     return [pscustomobject]$Record
@@ -429,6 +486,10 @@ function Invoke-DeployGate {
     if ($GateMode -eq 'Rollback') { return Invoke-GateRollback $Config $paths $record $state $head $RollbackTo }
     if ($GateMode -eq 'Unpin') { return Invoke-GateUnpin $Config $paths $record $state $head }
     if ($GateMode -eq 'AckRestart') { return Invoke-GateAckRestart $paths $record $state $head $AckComponents }
+    if ($GateMode -eq 'Deploy') {
+        $notReady = Test-DeployTransition $Config $paths
+        if ($notReady) { return Complete-Gate $paths $record 'STOP' ('deploy not permitted: ' + $notReady) $true }
+    }
 
     if ([string]$state.status -eq 'ROLLED_BACK_PINNED') { return Complete-Gate $paths $record 'STOP' ('pinned after rollback at ' + $state.pinnedSha) $true }
     if ($head -ne [string]$state.lastDeployedSha) { return Complete-Gate $paths $record 'STOP' ('HEAD drift: expected ' + $state.lastDeployedSha + ', found ' + $head) $true }

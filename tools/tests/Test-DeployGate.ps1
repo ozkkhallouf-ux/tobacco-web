@@ -160,12 +160,32 @@ function Get-AuditLines($T) {
 }
 function Get-TestState($T) { return ([System.IO.File]::ReadAllText((Join-Path $T.Gate 'state.json')) | ConvertFrom-Json) }
 
+# انتقال Deploy مكتمل (يمثّل الخطوة المنفصلة للمرحلة التالية): Initialize قديم، ثم DryRun ناجح كل
+# 10 دقائق لـ24 ساعة كاملة، ثم deploy-transition.json بموافقة المالك.
+function Set-CompletedSoak($T, [double]$Hours = 24.2, [int]$StepMinutes = 10, [string]$BadResultAt = '') {
+    $now = (Get-Date).ToUniversalTime()
+    $end = $now.AddMinutes(-5)
+    $start = $end.AddHours(-$Hours)
+    $audit = Join-Path $T.Gate 'audit.jsonl'
+    $lines = New-Object System.Collections.ArrayList
+    [void]$lines.Add((@{ ts_utc = $start.AddMinutes(-30).ToString('o'); mode = 'Initialize'; result = 'OK' } | ConvertTo-Json -Compress))
+    for ($ts = $start.AddMinutes(2); $ts -le $end; $ts = $ts.AddMinutes($StepMinutes)) {
+        $res = 'DRYRUN'; if ($BadResultAt -and $lines.Count -eq 10) { $res = $BadResultAt }
+        [void]$lines.Add((@{ ts_utc = $ts.ToString('o'); mode = 'DryRun'; result = $res } | ConvertTo-Json -Compress))
+    }
+    $existing = @(); if (Test-Path -LiteralPath $audit) { $existing = @([System.IO.File]::ReadAllLines($audit) | Where-Object { $_ }) }
+    [System.IO.File]::WriteAllText($audit, ((@($lines) + $existing) -join "`n") + "`n")
+    $tr = @{ kind = 'ozk-deploy-transition'; soakStartUtc = $start.ToString('o'); soakEndUtc = $end.ToString('o'); approvedBy = 'owner' } | ConvertTo-Json
+    [System.IO.File]::WriteAllText((Join-Path $T.Gate 'deploy-transition.json'), $tr)
+}
+
 $environments = New-Object System.Collections.ArrayList
-function New-InitializedEnv {
+function New-InitializedEnv([switch]$NoSoak) {
     $e = New-GateTestEnv
     [void]$environments.Add($e)
     $r = Invoke-DeployGate -Config $e.Config -GateMode 'Initialize'
     if ($r.result -ne 'OK') { throw ('initialize failed: ' + $r.reason) }
+    if (-not $NoSoak) { Set-CompletedSoak $e }
     return $e
 }
 
@@ -185,6 +205,52 @@ try {
     Assert-True ($r.result -eq 'OK' -and (@($r.preflight) -join ' ') -like '*OUT_OF_SCOPE_DISABLED OZK-PriceListSync*') 'Initialize proceeds with a Disabled price-list task and records OUT_OF_SCOPE_DISABLED'
     $script:Preflight = [pscustomobject]@{ ok = $true; results = @([pscustomobject]@{ task = 'OZK-PriceListSync'; verdict = 'PASS'; reason = 'stub' }) }
 
+    Write-Host '== Deploy requires a separate proven transition after a FULL 24h DryRun (Codex P1)'
+    $s0 = New-InitializedEnv -NoSoak
+    $r = Invoke-DeployGate -Config $s0.Config -GateMode 'Deploy'
+    Assert-True ($r.result -eq 'STOP' -and $r.reason -like '*deploy transition not established*24-hour DryRun*') 'right after Initialize: Deploy => STOP (Initialize alone never permits Deploy)'
+    $r = Invoke-DeployGate -Config $s0.Config -GateMode 'DryRun'
+    Assert-True ($r.result -eq 'NOOP' -and $r.mode -eq 'DryRun') 'right after Initialize: DryRun runs (no release yet => NOOP)'
+    $dl = @(Get-AuditLines $s0 | Where-Object { $_.mode -eq 'DryRun' })
+    Assert-True ($dl.Count -eq 1 -and $dl[0].result -eq 'NOOP') 'every DryRun run is audited, NOOP included (evidence for the 24h soak)'
+    $soakCases = @(
+        @{ label = 'soak shorter than 24 hours => STOP'; hours = 23.5; step = 10; bad = ''; pattern = '*shorter than 24 hours*' },
+        @{ label = '24 hours elapsed but DryRun runs have a gap (monitoring incomplete) => STOP'; hours = 24.2; step = 45; bad = ''; pattern = '*gap of*' },
+        @{ label = 'a failed/stopped DryRun inside the soak window => STOP'; hours = 24.2; step = 10; bad = 'STOP'; pattern = '*non-successful or non-DryRun*' }
+    )
+    foreach ($c in $soakCases) {
+        $sx = New-InitializedEnv -NoSoak
+        Set-CompletedSoak $sx $c.hours $c.step $c.bad
+        $r = Invoke-DeployGate -Config $sx.Config -GateMode 'Deploy'
+        Assert-True ($r.result -eq 'STOP' -and $r.reason -like $c.pattern) $c.label
+    }
+    $sn = New-InitializedEnv -NoSoak
+    Set-CompletedSoak $sn 24.2 10 'NOOP'
+    $r = Invoke-DeployGate -Config $sn.Config -GateMode 'Deploy'
+    Assert-True (-not ($r.reason -like 'deploy not permitted*')) 'DryRun NOOP runs (no release during the soak) count as successful soak evidence'
+    $sy = New-InitializedEnv
+    $tp = Join-Path $sy.Gate 'deploy-transition.json'
+    $tr = [System.IO.File]::ReadAllText($tp) | ConvertFrom-Json
+    $orig = [System.IO.File]::ReadAllText($tp)
+    $tr.approvedBy = ''; [System.IO.File]::WriteAllText($tp, ($tr | ConvertTo-Json))
+    Assert-True ((Invoke-DeployGate -Config $sy.Config -GateMode 'Deploy').reason -like '*no recorded owner approval*') 'transition without owner approval => STOP'
+    $tr = $orig | ConvertFrom-Json; $tr.soakEndUtc = (Get-Date).ToUniversalTime().AddHours(2).ToString('o'); [System.IO.File]::WriteAllText($tp, ($tr | ConvertTo-Json))
+    Assert-True ((Invoke-DeployGate -Config $sy.Config -GateMode 'Deploy').reason -like '*ends in the future*') 'soak window ending in the future => STOP'
+    $tr = $orig | ConvertFrom-Json; $tr.soakStartUtc = (ConvertTo-GateUtc $tr.soakStartUtc).AddHours(-1).ToString('o'); [System.IO.File]::WriteAllText($tp, ($tr | ConvertTo-Json))
+    Assert-True ((Invoke-DeployGate -Config $sy.Config -GateMode 'Deploy').reason -like '*must start after a successful Initialize*') 'soak that starts before Initialize => STOP'
+    $tr = $orig | ConvertFrom-Json; $tr.kind = 'other'; [System.IO.File]::WriteAllText($tp, ($tr | ConvertTo-Json))
+    Assert-True ((Invoke-DeployGate -Config $sy.Config -GateMode 'Deploy').reason -like '*unexpected kind*') 'transition of an unexpected kind => STOP'
+    [System.IO.File]::WriteAllText($tp, '{ not json')
+    Assert-True ((Invoke-DeployGate -Config $sy.Config -GateMode 'Deploy').reason -like '*cannot be read*') 'unreadable transition file => STOP'
+    $c2 = $sy.Config | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+    $c2 | Add-Member -NotePropertyName dryRunSoak -NotePropertyValue ([pscustomobject]@{ hours = 1; maxGapMinutes = 30 }) -Force
+    $sz = New-InitializedEnv -NoSoak
+    Set-CompletedSoak $sz 12 10
+    $c3 = $sz.Config | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+    $c3 | Add-Member -NotePropertyName dryRunSoak -NotePropertyValue ([pscustomobject]@{ hours = 1; maxGapMinutes = 30 }) -Force
+    Assert-True ((Invoke-DeployGate -Config $c3 -GateMode 'Deploy').reason -like '*shorter than 24 hours*') 'configured soak below 24 hours is floored at 24 (policy unchanged)'
+    Assert-True ([string](Get-Content -Raw -LiteralPath (Join-Path $sy.Gate 'audit.jsonl')) -like '*deploy not permitted*') 'refused Deploy attempts are audited'
+
     Write-Host '== Initialize'
     $e = New-GateTestEnv; [void]$environments.Add($e)
     $r = Invoke-DeployGate -Config $e.Config -GateMode 'Deploy'
@@ -198,6 +264,7 @@ try {
     Assert-True ($allow.files.'tools/sync-approved-prices-to-ameen.ps1' -eq $diskHash) 'writer allowlist holds on-disk SHA256'
     $r = Invoke-DeployGate -Config $e.Config -GateMode 'Initialize'
     Assert-True ($r.result -eq 'STOP') 'second initialize refused'
+    Set-CompletedSoak $e
 
     Write-Host '== NOOP'
     $r = Invoke-DeployGate -Config $e.Config -GateMode 'Deploy'

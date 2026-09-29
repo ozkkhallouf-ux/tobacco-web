@@ -180,7 +180,7 @@ for (const needle of ["function Resolve-WorkloadReach", "cannot determine whethe
   // 1) لا دمج لحقول الـAction في نص واحد للتحليل الأمني.
   assert.doesNotMatch(inv, /\+ ' ' \+|-join "`n"|action = \(/, "الجرد لا يدمج Execute/Arguments/WorkingDirectory");
   assert.match(inv, /execute = \[string\]\$_\.Execute; arguments = \[string\]\$_\.Arguments; workingDirectory = \[string\]\$_\.WorkingDirectory/);
-  assert.match(idp, /if \(\$item\.kind -eq 'task'\) \{ \$reach = Resolve-TaskReach \$Config \$item\.actions/, "المهام تُصنَّف بحقولها المنظّمة");
+  assert.match(idp, /if \(\$item\.kind -eq 'task' -or \$item\.kind -eq 'startup'\) \{\s+\$reach = Resolve-TaskReach \$Config \$item\.actions/, "المهام تُصنَّف بحقولها المنظّمة");
   assert.doesNotMatch(idp, /Resolve-WorkloadReach \$Config \(\[string\]\$item\.action\) \(\[string\]\$item\.identity\)\s*\n\s*\$isRepo/, "لا تصنيف مهمة من نص مدموج");
   assert.match(act, /Get-TargetReach \$Ctx \$exe \$wd/, "البرنامج يُحلّ بالنسبة لمجلد العمل");
   assert.match(body("Get-TargetReach"), /Resolve-TracePath \$Target \$WorkDir/, "الهدف النسبي يُحلّ بالنسبة لمجلد العمل");
@@ -198,6 +198,39 @@ for (const needle of ["function Resolve-WorkloadReach", "cannot determine whethe
   assert.match(body("Invoke-InstallPreflight"), /Invoke-GateIdentityPreflight \$Config/);
   assert.equal(cfg0.trust.gateTaskPath, "\\", "مسار مهمة البوابة المتوقع");
   assert.match(read("docs/ai/topics/windows-deploy-gate.md"), /bootstrap/, "ترتيب التثبيت: مرحلة bootstrap قبل Initialize");
+}
+// Codex P1 (#285): جرد Startup/Logon ضمن تحليل الثقة، ومهمة البوابة Disabled + DryRun، وDeploy بانتقال مثبت.
+{
+  const body = (n) => { const i = preSrc.indexOf(`function ${n}`); assert.ok(i >= 0, n); const j = preSrc.indexOf("\nfunction ", i + 10); return preSrc.slice(i, j < 0 ? undefined : j); };
+  const idp = body("Invoke-GateIdentityPreflight"), inv = body("Get-PreflightStartupInventory");
+  // الجرد لا يرجع إلى Tasks+Services فقط.
+  assert.match(idp, /\$inventory \+= @\(Get-PreflightStartupInventory \| ForEach-Object \{ \$_ \| Add-Member -NotePropertyName kind -NotePropertyValue 'startup'/, "Startup/Logon ضمن الجرد");
+  assert.match(idp, /cannot enumerate startup\/logon sources/, "فشل جرد Startup ⇒ حجب");
+  assert.match(idp, /if \(\$item\.kind -eq 'task' -or \$item\.kind -eq 'startup'\) \{\s+\$reach = Resolve-TaskReach/, "عناصر Startup بالنموذج الثلاثي نفسه");
+  assert.match(idp, /\$item\.unreadable\) \{ \$reach = New-Reach 'UNKNOWN'/, "مصدر Startup غير مقروء ⇒ UNKNOWN");
+  for (const needle of ["CommonStartup", "Microsoft\\Windows\\CurrentVersion\\Run", "RunOnce", "WOW6432Node", "ProfileList", "HKEY_USERS", "user registry hive is not loaded", "AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup"]) assert.ok(inv.includes(needle), `مصدر Startup/Logon: ${needle}`);
+  assert.doesNotMatch(inv, /reg(\.exe)? load|Set-ItemProperty|New-ItemProperty|Remove-Item/i, "جرد Startup قراءة فقط");
+  assert.match(body("Get-StartupFolderItems"), /catch \{ return @\(New-StartupItem [^\n]*startup folder cannot be read/, "مجلد Startup غير مقروء ⇒ عنصر UNKNOWN");
+  assert.match(preSrc, /\$script:AnyLogonSid = 'S-1-5-32-544'/, "مصادر الجهاز تعمل لأي مستخدم منهم المدراء");
+  // مهمة البوابة أثناء Initialize: Disabled و-Mode DryRun حرفياً.
+  assert.match(idp, /if \(-not \$gstate\) \{ \$results \+= & \$block \$gsub 'gate task enabled\/disabled state cannot be read' \}\s+elseif \(\$gstate -ne 'Disabled'\) \{ \$results \+= & \$block \$gsub \('gate task must be Disabled during Initialize/, "مهمة غير Disabled أو حالة غير مقروءة ⇒ حجب");
+  assert.match(idp, /gate task enabled\/disabled state cannot be read/);
+  const exact = body("Test-ExactGateAction");
+  assert.match(exact, /if \(\$modes\.Count -eq 0\) \{ return 'missing -Mode \(script default is Deploy\)/, "غياب Mode ⇒ رفض");
+  assert.match(exact, /if \(\$modes\.Count -gt 1\) \{ return \('-Mode given more than once/, "Mode مكرر ⇒ رفض");
+  assert.match(exact, /if \(\$modes\[0\] -cne 'DryRun' -and \$modes\[0\]\.ToLowerInvariant\(\) -ne 'dryrun'\) \{ return/, "Mode غير DryRun ⇒ رفض");
+  assert.match(exact, /the gate task must be registered with exactly -Mode DryRun/);
+  assert.doesNotMatch(exact, /@\('deploy', 'dryrun'\)/, "لا قبول لـDeploy أثناء Initialize");
+  assert.match(body("Get-PreflightTaskInventory"), /state = \[string\]\$t\.State/, "الجرد يحمل حالة المهمة");
+  // Deploy لا يُسمح بمجرد Initialize: انتقال مثبت بـ24 ساعة DryRun كاملة من سجل التدقيق.
+  const gt = gateSrc.slice(gateSrc.indexOf("function Test-DeployTransition"), gateSrc.indexOf("\nfunction ", gateSrc.indexOf("function Test-DeployTransition") + 10));
+  assert.match(gateSrc, /if \(\$GateMode -eq 'Deploy'\) \{\s+\$notReady = Test-DeployTransition \$Config \$paths\s+if \(\$notReady\) \{ return Complete-Gate \$paths \$record 'STOP'/, "Deploy بلا انتقال مثبت ⇒ STOP");
+  for (const needle of ["deploy transition not established", "[Math]::Max(24,", "must start after a successful Initialize", "non-successful or non-DryRun", "gap of", "ends in the future", "no recorded owner approval"]) assert.ok(gt.includes(needle), `إثبات DryRun: ${needle}`);
+  assert.match(gateSrc, /if \(\$Result -ne 'NOOP' -or \$Record\.mode -eq 'DryRun'\) \{ Write-AuditRecord/, "كل تشغيل DryRun يُدقَّق");
+  assert.ok(cfg0.trust.trustFiles.includes("deploy-transition.json") && !cfg0.trust.requiredTrustFiles.includes("deploy-transition.json"), "ملف الانتقال ملف ثقة وليس شرطاً لـInitialize");
+  assert.ok(cfg0.dryRunSoak && cfg0.dryRunSoak.hours >= 24, "سياسة 24 ساعة كاملة");
+  const doc = read("docs/ai/topics/windows-deploy-gate.md");
+  for (const needle of ["**BOOTSTRAP**", "**INITIALIZE**", "**DRYRUN**", "**DEPLOY**", "حالة الانتقال: غير منفَّذ", "OZK-Tobacco-Server.vbs"]) assert.ok(doc.includes(needle), `توثيق: ${needle}`);
 }
 // Codex P1: قرارات الثقة بالـSID حصراً — لا عودة لمقارنة الاسم بعد حذف بادئة الجهاز/المجال.
 assert.ok(!preSrc.includes("ConvertTo-IdentityKey"), "مفتاح الهوية بالاسم محذوف نهائياً");
