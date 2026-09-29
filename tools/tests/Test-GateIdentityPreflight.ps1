@@ -70,7 +70,9 @@ function New-Task([string]$Name, [string]$Identity, [string]$Action, $Actions = 
         $m = [regex]::Match($Action, '^\s*("[^"]+"|\S+)\s*(.*)$')
         $Actions = @([pscustomobject]@{ execute = $m.Groups[1].Value.Trim('"'); arguments = $m.Groups[2].Value })
     }
-    return [pscustomobject]@{ name = $Name; path = '\'; identity = $Identity; state = 'Ready'; action = $Action; actions = @($Actions) }
+    # كما في الجرد الفعلي: UserId ⇒ USER، ولا هوية ⇒ UNKNOWN؛ RunLevel افتراضي LeastPrivilege.
+    $pt = 'USER'; if (-not $Identity) { $pt = 'UNKNOWN' }
+    return [pscustomobject]@{ name = $Name; path = '\'; identity = $Identity; principalType = $pt; userId = $Identity; groupId = ''; runLevel = 'LeastPrivilege'; state = 'Ready'; action = $Action; actions = @($Actions) }
 }
 # مهمة البوابة بـAction منظَّم (المفسّر + الوسائط كما في Task Scheduler).
 $approvedPs = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
@@ -204,7 +206,7 @@ try {
     Assert-True (-not $r.ok -and (Test-BlockLike $r '*Customer Movements*may write the gate trust files*')) 'a repo workload identity among trust-file writers => BLOCK'
     $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Unknown Principal' '' ($ps + ' -File "' + $repo + '\tools\x.ps1"'))
     $r = Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())
-    Assert-True (-not $r.ok -and (Test-BlockLike $r '*identity not verifiable*')) 'unknown/unverifiable task identity => fail closed'
+    Assert-True (-not $r.ok -and ((Test-BlockLike $r '*identity not verifiable*') -or (Test-BlockLike $r '*Unknown Principal*principal type cannot be determined*'))) 'unknown/unverifiable task identity => fail closed'
     $script:Tasks = @()
     $r = Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())
     Assert-True (-not $r.ok -and (Test-BlockLike $r '*no scheduled tasks visible*')) 'no visible tasks (not run as administrator) => fail closed'
@@ -663,6 +665,73 @@ try {
     $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Anc Admin Repo' 'OZK2026\Administrator' ($ps + ' -File "' + $repo + '\tools\x.ps1"'))
     $r = Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())
     Assert-True (-not $r.ok -and (Test-BlockLike $r '*Anc Admin Repo*member of local Administrators*')) 'Administrator repo workload => still BLOCK through the workload guard'
+
+    Write-Host '== Group-assigned scheduled task principals (Codex P1)'
+    $script:SidTable['ozk2026\ozk-operators'] = 'S-1-5-21-111-2002'
+    $script:SidTable['domain\ozk operators'] = 'S-1-5-21-999-2001'
+    function New-GroupTask([string]$Name, [string]$Group, [string]$Action, [string]$RunLevel = 'LeastPrivilege') {
+        $t = New-Task $Name 'x' $Action
+        $t.identity = $Group; $t.principalType = 'GROUP'; $t.userId = ''; $t.groupId = $Group; $t.runLevel = $RunLevel
+        return $t
+    }
+    $repoAct = $ps + ' -File "' + $repo + '\tools\x.ps1"'
+    $grpCases = @(
+        @{ label = 'Users GroupId + repo action + LeastPrivilege => BLOCK'; t = (New-GroupTask 'Grp Users Least' 'BUILTIN\Users' $repoAct 'LeastPrivilege'); pattern = '*Grp Users Least*group principal*repository workload*RunLevel LeastPrivilege*' },
+        @{ label = 'Users GroupId + repo action + HighestAvailable => BLOCK (reported explicitly)'; t = (New-GroupTask 'Grp Users High' 'S-1-5-32-545' $repoAct 'HighestAvailable'); pattern = '*Grp Users High*RunLevel HighestAvailable: a member administrator runs elevated*' },
+        @{ label = 'Users GroupId + UNKNOWN action (EncodedCommand) => BLOCK'; t = (New-GroupTask 'Grp Users Unknown' 'BUILTIN\Users' ($ps + ' -EncodedCommand SQBFAFgA')); pattern = '*Grp Users Unknown*cannot prove the task does not reach*' },
+        @{ label = 'Administrators GroupId + repo action => BLOCK'; t = (New-GroupTask 'Grp Admins' 'BUILTIN\Administrators' $repoAct 'HighestAvailable'); pattern = '*Grp Admins*group principal*' },
+        @{ label = 'arbitrary local GroupId + repo action => BLOCK'; t = (New-GroupTask 'Grp Local' 'OZK2026\OZK-Operators' $repoAct); pattern = '*Grp Local*group principal*' },
+        @{ label = 'domain GroupId + repo action => BLOCK'; t = (New-GroupTask 'Grp Domain' 'DOMAIN\OZK Operators' $repoAct); pattern = '*Grp Domain*group principal*' },
+        @{ label = 'GroupId + unreadable RunLevel => FAIL CLOSED'; t = (New-GroupTask 'Grp NoRunLevel' 'BUILTIN\Users' 'C:\Windows\system32\sc.exe start w32time' 'UNKNOWN'); pattern = '*Grp NoRunLevel*unreadable RunLevel*' },
+        @{ label = 'GroupId + malformed RunLevel => FAIL CLOSED'; t = (New-GroupTask 'Grp BadRunLevel' 'BUILTIN\Users' $repoAct 'Sometimes'); pattern = '*Grp BadRunLevel*unreadable RunLevel*' },
+        @{ label = 'unreadable/malformed GroupId + repo action => BLOCK'; t = (New-GroupTask 'Grp Ghost' 'GHOST\nobody-group' $repoAct); pattern = '*Grp Ghost*cannot be resolved to a SID*' }
+    )
+    foreach ($c in $grpCases) {
+        $script:Tasks = @(Get-CleanLayout) + @($c.t)
+        $r = Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())
+        Assert-True (-not $r.ok -and (Test-BlockLike $r $c.pattern)) $c.label
+    }
+    $script:Tasks = @(Get-CleanLayout) + @(New-GroupTask 'Grp Static' 'BUILTIN\Users' 'C:\Windows\system32\sc.exe start w32time' 'HighestAvailable')
+    $r = Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())
+    Assert-True ($r.ok) 'GroupId + NOT_REPO static action => not blocked by this rule alone'
+    $w = @($r.workloads | Where-Object { $_.name -like '*Grp Static' })[0]
+    Assert-True ($w.principalType -eq 'GROUP' -and $w.groupId -eq 'BUILTIN\Users' -and $w.sid -eq 'S-1-5-32-545' -and $w.runLevel -eq 'HighestAvailable' -and $w.workload -eq 'NOT_REPO' -and $w.decision -eq 'OK') 'audit record: principal type, GroupId, SID, RunLevel, workload and decision'
+    # نوع principal غير محسوم.
+    function New-UnknownTask([string]$Name, [string]$Action) { $t = New-Task $Name 'x' $Action; $t.principalType = 'UNKNOWN'; $t.userId = 'OZK2026\OZKSync'; $t.groupId = 'BUILTIN\Users'; $t.identity = 'OZK2026\OZKSync'; return $t }
+    $script:Tasks = @(Get-CleanLayout) + @(New-UnknownTask 'Ptype Repo' $repoAct)
+    Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) '*Ptype Repo*principal type cannot be determined*REPO*') 'unknown principal type + REPO => BLOCK'
+    $script:Tasks = @(Get-CleanLayout) + @(New-UnknownTask 'Ptype Unknown' ($ps + ' -EncodedCommand SQBFAFgA'))
+    Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) '*Ptype Unknown*principal type cannot be determined*UNKNOWN*') 'unknown principal type + UNKNOWN => BLOCK'
+    $script:Tasks = @(Get-CleanLayout) + @(New-UnknownTask 'Ptype Static' 'C:\Windows\system32\sc.exe start w32time')
+    Assert-True ((Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())).ok) 'unknown principal type + NOT_REPO => not blocked by this rule alone'
+    $t = New-Task 'Ptype Missing' 'OZK2026\OZKSync' $repoAct; $t.PSObject.Properties.Remove('principalType')
+    $script:Tasks = @(Get-CleanLayout) + @($t)
+    Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) '*Ptype Missing*principal type cannot be determined*') 'task record without a principal type => UNKNOWN (fail closed, never assumed USER)'
+    # USER principals: السلوك القائم دون تغيير.
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'User Static' 'OZK2026\OZKSync' 'C:\Windows\system32\sc.exe start w32time')
+    Assert-True ((Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())).ok) 'normal non-admin UserId + known NOT_REPO => unchanged (not blocked)'
+    $t = New-Task 'User Repo High' 'OZK2026\OZKSync' $repoAct; $t.runLevel = 'HighestAvailable'
+    $script:Tasks = @(Get-CleanLayout) + @($t)
+    $r = Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())
+    Assert-True ($r.ok) 'normal non-admin UserId + repo workload (even HighestAvailable) => not privileged automatically'
+    $t = New-Task 'User Repo NoRL' 'OZK2026\OZKSync' $repoAct; $t.runLevel = 'UNKNOWN'
+    $script:Tasks = @(Get-CleanLayout) + @($t)
+    Assert-True ((Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())).ok) 'USER principal: RunLevel does not change a non-admin identity (not needed for the decision)'
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'User System Repo' 'SYSTEM' $repoAct)
+    Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) '*User System Repo*privileged repository workload*') 'SYSTEM repo task => still BLOCK'
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'User Admin Repo' 'OZK2026\Administrator' $repoAct)
+    Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) '*User Admin Repo*member of local Administrators*') 'Administrator repo task => still BLOCK'
+    # مهمة البوابة: GroupId غير مقبول إطلاقاً.
+    $gt = Get-ValidGateTask; $gt.principalType = 'GROUP'; $gt.groupId = 'OZK2026\OZK-DeployGate'; $gt.userId = ''
+    $script:Tasks = @(Get-CleanLayout -NoGate) + @($gt)
+    Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) '*gate task principal must be the dedicated USER identity; principal type is GROUP*') 'gate task with a GroupId principal => BLOCK (never valid for the gate)'
+    $gt = Get-ValidGateTask; $gt.principalType = 'UNKNOWN'
+    $script:Tasks = @(Get-CleanLayout -NoGate) + @($gt)
+    Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) '*gate task principal must be the dedicated USER identity; principal type is UNKNOWN*') 'gate task with an undetermined principal type => BLOCK'
+    $script:Tasks = @(Get-CleanLayout)
+    $r = Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())
+    $gw = @($r.workloads | Where-Object { $_.name -like '*TOBACCO Windows Deploy Gate' })[0]
+    Assert-True ($r.ok -and $gw.principalType -eq 'USER' -and $gw.workload -like 'GATE_TASK*' -and $gw.decision -eq 'OK') 'valid gate task (USER) => eligible and audited as the validated gate task'
 
     Write-Host '== Install preflight combines price-list and identity checks'
     # فحص ACL الفعلية مُختبَر في Test-GateTrustAcl.ps1؛ هنا نتيجته ناجحة لعزل الهوية ونشرات الأسعار.

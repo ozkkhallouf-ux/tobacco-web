@@ -271,6 +271,25 @@ for (const needle of ["function Resolve-WorkloadReach", "cannot determine whethe
   const doc = read("docs/ai/topics/windows-deploy-gate.md");
   for (const needle of ["مرسى الثقة", "ثقة إدارة النظام", "ثقة repo workloads المؤتمتة", "أب مخصّص"]) assert.ok(doc.includes(needle), `توثيق الأسلاف: ${needle}`);
 }
+// Codex P1 (#285): مهام GroupId ليست هوية تنفيذ — GROUP + REPO/UNKNOWN ⇒ حجب، وRunLevel ضمن الجرد.
+{
+  const body = (n) => { const i = preSrc.indexOf(`function ${n}`); assert.ok(i >= 0, n); const j = preSrc.indexOf("\nfunction ", i + 10); return preSrc.slice(i, j < 0 ? undefined : j); };
+  const inv = body("Get-PreflightTaskInventory"), idp = body("Invoke-GateIdentityPreflight");
+  assert.doesNotMatch(inv, /if \(-not \$id\) \{ \$id = \[string\]\$t\.Principal\.GroupId \}/, "GroupId لا يُعامل كـUserId");
+  assert.match(inv, /if \(\$uid -and -not \$gid -and \(\[string\]\$t\.Principal\.LogonType\) -ne 'Group'\) \{ \$ptype = 'USER' \}\s+elseif \(\$gid -and -not \$uid\) \{ \$ptype = 'GROUP' \}/, "نوع الـprincipal صريح من تعريف المهمة");
+  assert.match(inv, /'Limited' \{ \$rl = 'LeastPrivilege' \} 'Highest' \{ \$rl = 'HighestAvailable' \}/, "RunLevel مُلتقط");
+  assert.match(inv, /principalType = \$ptype; userId = \$uid; groupId = \$gid; runLevel = \$rl/, "RunLevel لا يسقط من الجرد");
+  assert.match(idp, /if \(\$item\.kind -eq 'task' -and \$ptype -eq 'GROUP'\) \{[\s\S]*?elseif \(\$reach\.status -eq 'REPO'\) \{ \$results \+= & \$block[\s\S]*?elseif \(\$reach\.status -eq 'UNKNOWN'\) \{ \$results \+= & \$block[\s\S]*?continue\s+\}/, "GROUP + REPO/UNKNOWN ⇒ حجب قبل أي حكم بامتياز SID المجموعة");
+  assert.ok(idp.indexOf("$ptype -eq 'GROUP'") < idp.indexOf("$maybePrivileged ="), "قاعدة المجموعة تسبق تقييم امتياز الـSID");
+  assert.match(idp, /if \(\$runLevel -ne 'LeastPrivilege' -and \$runLevel -ne 'HighestAvailable'\) \{ \$results \+= & \$block [^\n]*unreadable RunLevel/, "RunLevel غير مقروء مع مجموعة ⇒ حجب");
+  assert.match(idp, /HighestAvailable'\) \{ ': a member administrator runs elevated' \}/, "HighestAvailable يظهر صراحة في السبب");
+  assert.match(idp, /if \(\$item\.kind -eq 'task' -and \$ptype -ne 'USER'\) \{\s+if \(\$reach\.status -ne 'NOT_REPO'\) \{ \$results \+= & \$block/, "نوع principal غير محسوم + REPO/UNKNOWN ⇒ حجب");
+  assert.match(idp, /\$ptype = if \(\$item\.PSObject\.Properties\['principalType'\] -and \$item\.principalType\) \{ \[string\]\$item\.principalType \} else \{ 'UNKNOWN' \}/, "مهمة بلا نوع ⇒ UNKNOWN لا USER");
+  assert.match(idp, /if \(\$gptype -ne 'USER'\) \{ \$results \+= & \$block \$gsub \('gate task principal must be the dedicated USER identity/, "GroupId غير مقبول لمهمة البوابة");
+  assert.match(idp, /workloads = @\(\$workloads\)/, "سجل تدقيق لكل عنصر");
+  assert.match(gateSrc, /\$record\['preflight_workloads'\] = Format-PreflightWorkloads \$pre/, "Initialize يدقّق نتائج الجرد");
+  assert.match(read("docs/ai/topics/windows-deploy-gate.md"), /GroupId/);
+}
 // Codex P1: قرارات الثقة بالـSID حصراً — لا عودة لمقارنة الاسم بعد حذف بادئة الجهاز/المجال.
 assert.ok(!preSrc.includes("ConvertTo-IdentityKey"), "مفتاح الهوية بالاسم محذوف نهائياً");
 const fnBody = (name) => { const i = preSrc.indexOf(`function ${name}`); assert.ok(i >= 0, name); const j = preSrc.indexOf("\nfunction ", i + 10); return preSrc.slice(i, j < 0 ? undefined : j); };

@@ -45,15 +45,24 @@ function Get-PreflightTaskInventory {
     # ErrorAction Stop: تعذّر الجرد يصل إلى المستدعي فيحجب (لا قائمة فارغة صامتة).
     # كل المهام بلا استثناء لمكانها (TaskPath): مهمة تحت \Microsoft\ تشغّل كود مستودع تُفحص كغيرها.
     foreach ($t in @(Get-ScheduledTask -ErrorAction Stop)) {
-        $id = [string]$t.Principal.UserId
-        if (-not $id) { $id = [string]$t.Principal.GroupId }
+        # نوع الـprincipal صراحة من تعريف المهمة (Codex P1): UserId ⇒ USER، GroupId ⇒ GROUP (تعمل ضمن جلسة أي
+        # عضو، وقد يكون مديراً)، وغير ذلك (كلاهما أو لا شيء أو LogonType=Group مع UserId) ⇒ UNKNOWN.
+        $uid = ([string]$t.Principal.UserId).Trim()
+        $gid = ([string]$t.Principal.GroupId).Trim()
+        $ptype = 'UNKNOWN'
+        if ($uid -and -not $gid -and ([string]$t.Principal.LogonType) -ne 'Group') { $ptype = 'USER' }
+        elseif ($gid -and -not $uid) { $ptype = 'GROUP' }
+        $id = $uid
+        if ($ptype -eq 'GROUP') { $id = $gid }
+        $rl = 'UNKNOWN'
+        switch ([string]$t.Principal.RunLevel) { 'Limited' { $rl = 'LeastPrivilege' } 'Highest' { $rl = 'HighestAvailable' } }
         # الحقول تبقى منفصلة (Codex P1): لا دمج Execute/Arguments/WorkingDirectory في سطر واحد.
         $acts = @($t.Actions | ForEach-Object {
             $cls = if ($_.PSObject.Properties['ClassId']) { [string]$_.ClassId } else { '' }
             if ($cls) { [pscustomobject]@{ execute = (Get-PreflightComHandlerPath $cls); arguments = ''; workingDirectory = ''; classId = $cls } }
             else { [pscustomobject]@{ execute = [string]$_.Execute; arguments = [string]$_.Arguments; workingDirectory = [string]$_.WorkingDirectory } }
         })
-        $out += [pscustomobject]@{ name = [string]$t.TaskName; path = [string]$t.TaskPath; identity = $id; state = [string]$t.State; actions = $acts }
+        $out += [pscustomobject]@{ name = [string]$t.TaskName; path = [string]$t.TaskPath; identity = $id; principalType = $ptype; userId = $uid; groupId = $gid; runLevel = $rl; state = [string]$t.State; actions = $acts }
     }
     return $out
 }
@@ -1051,6 +1060,9 @@ function Invoke-GateIdentityPreflight($Config) {
             $gateTaskItem = $named[0]
             $gsub = 'task ' + ([string]$gateTaskItem.path) + $gateTask
             if (([string]$gateTaskItem.path) -ne $gateTaskPath) { $results += & $block $gsub ('gate task path is ' + $gateTaskItem.path + ', expected ' + $gateTaskPath) }
+            # مهمة البوابة: هوية USER مخصّصة حصراً؛ GroupId (أو نوع غير محسوم) غير مقبول إطلاقاً.
+            $gptype = if ($gateTaskItem.PSObject.Properties['principalType']) { [string]$gateTaskItem.principalType } else { '' }
+            if ($gptype -ne 'USER') { $results += & $block $gsub ('gate task principal must be the dedicated USER identity; principal type is ' + $(if ($gptype) { $gptype } else { 'UNKNOWN' }) + ' (GroupId is never accepted for the gate)') }
             $gid = ([string]$gateTaskItem.identity).Trim()
             $gidSid = Resolve-PrincipalSid $gid
             if (-not $gid -or -not $gidSid) { $results += & $block $gsub ('gate task identity not verifiable: ' + $gid) }
@@ -1085,7 +1097,16 @@ function Invoke-GateIdentityPreflight($Config) {
     }
     if ($adminKeys -and ($adminKeys -contains $gate)) { $results += & $block 'gate identity' ('dedicated gate identity is a member of local Administrators: ' + $gateName) }
 
+    # سجل تدقيق لكل عنصر: نوع الـprincipal، والـSID، وUserId/GroupId، وRunLevel، والتصنيف، والنتيجة.
+    $workloads = New-Object System.Collections.ArrayList
     foreach ($item in $inventory) {
+      $before = @($results).Count
+      $key = $null
+      $reach = $null
+      $ptype = 'USER'
+      if ($item.kind -eq 'task') { $ptype = if ($item.PSObject.Properties['principalType'] -and $item.principalType) { [string]$item.principalType } else { 'UNKNOWN' } }
+      $runLevel = if ($item.PSObject.Properties['runLevel'] -and $item.runLevel) { [string]$item.runLevel } else { 'UNKNOWN' }
+      try {
         $subject = $item.kind + ' ' + ([string]$item.path) + $item.name
         $identityText = ([string]$item.identity).Trim()
         $key = if ($item.PSObject.Properties['sid'] -and $item.sid) { [string]$item.sid } else { Resolve-PrincipalSid $identityText }
@@ -1104,6 +1125,21 @@ function Invoke-GateIdentityPreflight($Config) {
         }
         else { $reach = Resolve-WorkloadReach $Config ([string]$item.action) ([string]$item.identity) }
         $isRepo = $reach.status -eq 'REPO'
+        # GROUP principal (Codex P1): SID المجموعة ليس هوية التنفيذ؛ المهمة تعمل ضمن جلسة أي عضو، وقد يكون
+        # مديراً (خصوصاً مع HighestAvailable). لا يُختار عضو افتراضي ولا يُحكم بامتياز المجموعة نفسها:
+        # REPO أو UNKNOWN ⇒ حجب، حتى مع LeastPrivilege. NOT_REPO ⇒ لا حجب بهذه القاعدة وحدها.
+        if ($item.kind -eq 'task' -and $ptype -eq 'GROUP') {
+            $rlText = ' (RunLevel ' + $runLevel + $(if ($runLevel -eq 'HighestAvailable') { ': a member administrator runs elevated' } else { '' }) + ')'
+            if ($runLevel -ne 'LeastPrivilege' -and $runLevel -ne 'HighestAvailable') { $results += & $block $subject ('group principal ' + $identityText + ' with an unreadable RunLevel: the execution context cannot be bounded') }
+            elseif ($reach.status -eq 'REPO') { $results += & $block $subject ('group principal ' + $identityText + ' runs a repository workload as whichever member is logged on, possibly an administrator' + $rlText) }
+            elseif ($reach.status -eq 'UNKNOWN') { $results += & $block $subject ('group principal ' + $identityText + ': cannot prove the task does not reach a repository workload' + $rlText + ': ' + $reach.why) }
+            continue
+        }
+        # نوع principal غير محسوم (UserId وGroupId معاً، أو لا شيء، أو غير مقروء): REPO/UNKNOWN ⇒ حجب.
+        if ($item.kind -eq 'task' -and $ptype -ne 'USER') {
+            if ($reach.status -ne 'NOT_REPO') { $results += & $block $subject ('principal type cannot be determined (UserId ' + $item.userId + ', GroupId ' + $item.groupId + ') and the workload is ' + $reach.status + ': ' + $reach.why) }
+            continue
+        }
         # لا يمكن إثبات أن الـAction لا يصل إلى المستودع، والهوية ذات صلاحية (أو غير معروفة) ⇒ حجب.
         $maybePrivileged = (-not $key) -or $key -eq 'S-1-5-18' -or $key -eq 'S-1-5-32-544' -or $key -eq $gate -or ($null -eq $adminKeys) -or ($adminKeys -contains $key)
         if ($reach.status -eq 'UNKNOWN' -and $maybePrivileged) {
@@ -1134,10 +1170,23 @@ function Invoke-GateIdentityPreflight($Config) {
             continue
         }
         if ($isRepo -and $writers -contains $key) { $results += & $block $subject ('repository workload runs as ' + $item.identity + ', which may write the gate trust files') }
+      } finally {
+        $added = @(@($results) | Select-Object -Skip $before)
+        $decision = 'OK'
+        if ($added.Count -gt 0) { $decision = 'BLOCK: ' + (@($added | ForEach-Object { $_.reason }) -join '; ') }
+        $wl = $null
+        if ($reach) { $wl = $reach.status }
+        if ([object]::ReferenceEquals($item, $gateTaskItem)) { $wl = 'GATE_TASK (validated exactly)' }
+        [void]$workloads.Add([pscustomobject]@{
+            kind = [string]$item.kind; name = ([string]$item.path) + [string]$item.name; principalType = $ptype
+            userId = $(if ($item.PSObject.Properties['userId']) { [string]$item.userId } else { '' })
+            groupId = $(if ($item.PSObject.Properties['groupId']) { [string]$item.groupId } else { '' })
+            identity = [string]$item.identity; sid = [string]$key; runLevel = $runLevel; workload = [string]$wl; decision = $decision })
+      }
     }
     $blocked = @($results | Where-Object { $_.verdict -ne 'PASS' })
     if ($blocked.Count -eq 0) { $results += [pscustomobject]@{ task = 'gate identity'; verdict = 'PASS'; reason = ('dedicated identity ' + $trust.gateAccount + ' is not used by any repository workload') } }
-    return [pscustomobject]@{ ok = ($blocked.Count -eq 0); results = $results }
+    return [pscustomobject]@{ ok = ($blocked.Count -eq 0); results = $results; workloads = @($workloads) }
 }
 
 # فحص التثبيت الكامل: نشرات الأسعار (main) + هوية البوابة + ACL الفعلية. يستدعيه -Mode Initialize.
@@ -1145,13 +1194,14 @@ function Invoke-InstallPreflight($Config) {
     $a = Invoke-MigrationPreflight $Config
     $b = Invoke-GateIdentityPreflight $Config
     $c = Test-GateTrustAcl $Config
-    return [pscustomobject]@{ ok = ($a.ok -and $b.ok -and $c.ok); results = @(@($a.results) + @($b.results) + @($c.results)) }
+    return [pscustomobject]@{ ok = ($a.ok -and $b.ok -and $c.ok); results = @(@($a.results) + @($b.results) + @($c.results)); workloads = @($b.workloads) }
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
     if ([string]::IsNullOrWhiteSpace($PreflightConfigPath)) { $PreflightConfigPath = Join-Path $PSScriptRoot 'gate-config.json' }
     $config = [System.IO.File]::ReadAllText($PreflightConfigPath) | ConvertFrom-Json
     $report = Invoke-InstallPreflight $config
+    foreach ($w in @($report.workloads)) { Write-Host ('AUDIT ' + $w.kind + ' ' + $w.name + ' | principal=' + $w.principalType + ' userId=' + $w.userId + ' groupId=' + $w.groupId + ' sid=' + $w.sid + ' runLevel=' + $w.runLevel + ' | workload=' + $w.workload + ' | ' + $w.decision) }
     foreach ($r in $report.results) { Write-Host ($r.verdict + ' ' + $r.task + ': ' + $r.reason) }
     if ($report.ok) { Write-Host 'PREFLIGHT PASS'; exit 0 }
     Write-Host 'PREFLIGHT BLOCKED: do not switch the operational repository to windows-production'

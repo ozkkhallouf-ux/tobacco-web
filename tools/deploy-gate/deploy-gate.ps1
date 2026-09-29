@@ -440,6 +440,11 @@ function Complete-Gate($Paths, $Record, [string]$Result, [string]$Reason, [bool]
     return [pscustomobject]$Record
 }
 
+# تدقيق كل عنصر مُجرَد: نوع الـprincipal، والـSID، وRunLevel، والتصنيف، والنتيجة (بلا أسرار).
+function Format-PreflightWorkloads($Pre) {
+    return @(@($Pre.workloads) | Where-Object { $_ } | ForEach-Object { $_.kind + ' ' + $_.name + ' | principal=' + $_.principalType + ' sid=' + $_.sid + ' runLevel=' + $_.runLevel + ' | workload=' + $_.workload + ' | ' + $_.decision })
+}
+
 function Invoke-DeployGate {
     param($Config, [string]$GateMode = 'Deploy', [string]$RollbackTo = '', [string[]]$AckComponents = @())
 
@@ -463,6 +468,7 @@ function Invoke-DeployGate {
         if ($state) { return Complete-Gate $paths $record 'STOP' 'already initialized' $false }
         $pre = Invoke-InstallPreflight $Config
         $record.preflight = @($pre.results | ForEach-Object { $_.verdict + ' ' + $_.task + ': ' + $_.reason })
+        $record['preflight_workloads'] = Format-PreflightWorkloads $pre
         if (-not $pre.ok) {
             return Complete-Gate $paths $record 'STOP' ('migration preflight blocked: ' + (@($pre.results | Where-Object { $_.verdict -ne 'PASS' -and $_.verdict -ne 'OUT_OF_SCOPE_DISABLED' } | ForEach-Object { $_.task + ' (' + $_.reason + ')' }) -join '; ')) $true
         }

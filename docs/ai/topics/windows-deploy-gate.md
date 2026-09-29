@@ -166,6 +166,27 @@
     - لم يتغيّر المسار الحي، ولم تُنقل `TaskWrappers`، ولم تُعدَّل ProgramData. تغيير `gateDir` في الإعداد قرار
       bootstrap بموافقة المالك.
   - لا يُدّعى أي حماية من مدير محلي بشري خبيث.
+- **مهام بـGroupId ونوع الـprincipal (Codex P1):**
+  - الجرد يسجّل لكل مهمة نوع الـprincipal صراحة من تعريفها:
+    - `USER`: فيها UserId وحده.
+    - `GROUP`: فيها GroupId وحده.
+    - `UNKNOWN`: فيها الاثنان، أو لا شيء، أو LogonType=Group مع UserId، أو السجل بلا نوع.
+  - ويسجّل RunLevel: `LeastPrivilege` أو `HighestAvailable` أو `UNKNOWN`.
+  - SID المجموعة ليس هوية التنفيذ: المهمة تعمل ضمن جلسة أي عضو، وقد يكون مديراً، مرفوعاً مع
+    `HighestAvailable`. لا يُختار عضو افتراضي، ولا يُحكم بامتياز المجموعة نفسها (Users أو
+    Administrators أو محلية أو مجال).
+  - القاعدة:
+    - GROUP + REPO ⇒ حجب، وGROUP + UNKNOWN ⇒ حجب، حتى مع `LeastPrivilege`. `HighestAvailable` يُذكر
+      صراحة في السبب.
+    - GROUP + NOT_REPO ⇒ لا حجب بهذه القاعدة وحدها.
+    - GROUP مع RunLevel غير مقروء ⇒ حجب (fail-closed).
+  - نوع principal غير محسوم + REPO/UNKNOWN ⇒ حجب.
+  - USER بلا تغيير: SYSTEM والمدراء وأعضاء Administrators مميّزون، وغيرهم حسب القواعد القائمة. RunLevel
+    لا يرفع مستخدماً غير مدير.
+  - مهمة البوابة: هوية USER المخصّصة حصراً، وGroupId أو نوع غير محسوم ⇒ حجب.
+  - التدقيق: كل عنصر مُجرَد يُعاد في `workloads`، ويُسجَّل في `preflight_workloads` بسجل Initialize ويُطبع
+    `AUDIT` من سطر الأوامر: النوع، وUserId/GroupId، والـSID، وRunLevel، وREPO/NOT_REPO/UNKNOWN، والنتيجة
+    وسببها. بلا أسرار.
 - **آلة حالات التثبيت والنشر (Codex P1):**
   1. **BOOTSTRAP** (مرحلة منفصلة بموافقة المالك، لم تُنفَّذ):
      - تنشئ المتطلبات: الحساب المخصّص، و`gateDir` بـACL صريحة، ومهمة البوابة.

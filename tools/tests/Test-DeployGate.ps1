@@ -203,6 +203,11 @@ try {
     $script:Preflight = [pscustomobject]@{ ok = $true; results = @([pscustomobject]@{ task = 'OZK-PriceListSync'; verdict = 'OUT_OF_SCOPE_DISABLED'; reason = 'task is Disabled in Task Scheduler' }) }
     $r = Invoke-DeployGate -Config $eq.Config -GateMode 'Initialize'
     Assert-True ($r.result -eq 'OK' -and (@($r.preflight) -join ' ') -like '*OUT_OF_SCOPE_DISABLED OZK-PriceListSync*') 'Initialize proceeds with a Disabled price-list task and records OUT_OF_SCOPE_DISABLED'
+    $ew = New-GateTestEnv; [void]$environments.Add($ew)
+    $script:Preflight = [pscustomobject]@{ ok = $true; results = @([pscustomobject]@{ task = 'gate identity'; verdict = 'PASS'; reason = 'stub' }); workloads = @([pscustomobject]@{ kind = 'task'; name = '\Ops Report'; principalType = 'GROUP'; sid = 'S-1-5-32-545'; runLevel = 'HighestAvailable'; workload = 'NOT_REPO'; decision = 'OK' }) }
+    $r = Invoke-DeployGate -Config $ew.Config -GateMode 'Initialize'
+    $ia = @(Get-AuditLines $ew | Where-Object { $_.mode -eq 'Initialize' -and $_.result -eq 'OK' })[-1]
+    Assert-True ($r.result -eq 'OK' -and (@($ia.preflight_workloads) -join ' ') -like '*Ops Report | principal=GROUP sid=S-1-5-32-545 runLevel=HighestAvailable | workload=NOT_REPO | OK*') 'Initialize audit records principal type, SID, RunLevel, workload class and decision per workload'
     $script:Preflight = [pscustomobject]@{ ok = $true; results = @([pscustomobject]@{ task = 'OZK-PriceListSync'; verdict = 'PASS'; reason = 'stub' }) }
 
     Write-Host '== Deploy requires a separate proven transition after a FULL 24h DryRun (Codex P1)'
