@@ -890,6 +890,33 @@ try {
     $script:Tasks = @(Get-CleanLayout) + @((New-Task 'Dyn Group' 'x' 'x' @([pscustomobject]@{ execute = $ps; arguments = ('-File "' + $wp + '"'); workingDirectory = '' })) | ForEach-Object { $_.principalType = 'GROUP'; $_.identity = 'BUILTIN\Users'; $_.groupId = 'BUILTIN\Users'; $_.userId = ''; $_ })
     Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) '*Dyn Group*group principal*cannot prove*') 'same wrapper under a GROUP principal => BLOCK'
 
+    Write-Host '== Static interpreter with a computed argument inside wrappers'
+    $interpDyn = @(
+        @{ label = 'PowerShell wrapper: powershell.exe -File $p => UNKNOWN'; n = 'ip1.ps1'; b = 'powershell.exe -NoProfile -File $p' },
+        @{ label = 'PowerShell wrapper: & ''...\powershell.exe'' -File $t (literal call target, computed script) => UNKNOWN'; n = 'ip2.ps1'; b = '& ''C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'' -NoProfile -File $t' },
+        @{ label = 'PowerShell wrapper: powershell -File:$p (inline parameter value) => UNKNOWN'; n = 'ip3.ps1'; b = 'powershell -File:$p' },
+        @{ label = 'PowerShell wrapper: node $script => UNKNOWN'; n = 'ip4.ps1'; b = 'node $script --port 5173' },
+        @{ label = 'PowerShell wrapper: cmd.exe /c $cmd => UNKNOWN'; n = 'ip5.ps1'; b = 'cmd.exe /c $cmd' },
+        @{ label = 'PowerShell wrapper: wscript.exe "$dir\x.vbs" (expandable string) => UNKNOWN'; n = 'ip6.ps1'; b = 'wscript.exe "$dir\x.vbs"' },
+        @{ label = 'PowerShell wrapper: python (Get-Content C:\x.txt) => UNKNOWN'; n = 'ip7.ps1'; b = 'python (Get-Content C:\ProgramData\target.txt)' },
+        @{ label = 'PowerShell wrapper: & ''pwsh.exe'' -File @($a) (array with a variable) => UNKNOWN'; n = 'ip8.ps1'; b = '& ''C:\Program Files\PowerShell\7\pwsh.exe'' -File @($a)' },
+        @{ label = 'CMD wrapper: for /f ... do node %%i => UNKNOWN'; n = 'ip9.cmd'; b = 'for /f "delims=" %%i in (C:\ProgramData\target.txt) do node %%i' },
+        @{ label = 'CMD wrapper: powershell -File %1 => UNKNOWN'; n = 'ip10.cmd'; b = 'powershell -NoProfile -File %1' }
+    )
+    foreach ($c in $interpDyn) { $got = Dyn-Reach $c.n $c.b; Assert-True ($got.status -eq 'UNKNOWN') ($c.label + ' (got ' + $got.status + ')') }
+    $interpStatic = @(
+        @{ label = 'PowerShell wrapper: powershell.exe -File ''C:\safe\tool.ps1'' (all literal) => NOT_REPO'; n = 'is1.ps1'; b = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File ''C:\safe\tool.ps1''' },
+        @{ label = 'PowerShell wrapper: & ''...\powershell.exe'' -File ''C:\safe\tool.ps1'' => NOT_REPO'; n = 'is2.ps1'; b = '& ''C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'' -NoProfile -File ''C:\safe\tool.ps1''' },
+        @{ label = 'PowerShell wrapper: non-interpreter tool with a variable argument => unchanged (NOT_REPO)'; n = 'is3.ps1'; b = ('$log = ''C:\Logs\x.log''' + "`r`n" + '& ''C:\Tools\backup\run-backup.exe'' /log $log') },
+        @{ label = 'CMD wrapper: static interpreter call => unchanged (NOT_REPO)'; n = 'is4.cmd'; b = 'powershell.exe -NoProfile -File "C:\safe\tool.ps1"' }
+    )
+    foreach ($c in $interpStatic) { $got = Dyn-Reach $c.n $c.b; Assert-True ($got.status -eq 'NOT_REPO') ($c.label + ' (got ' + $got.status + ': ' + $got.why + ')') }
+    Assert-True ((Dyn-Reach 'is5.ps1' ('powershell.exe -File ''' + $repo + '\tools\x.ps1''')).status -eq 'REPO') 'PowerShell wrapper: literal interpreter call into the repo => REPO (unchanged)'
+    $ipw = $dw + '\interp-witness.ps1'
+    $script:Wrappers[$ipw] = ('$t = Get-Content C:\ProgramData\target.txt' + "`r`n" + 'powershell.exe -NoProfile -File $t')
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Interp Witness' 'SYSTEM' ($ps + ' -NoProfile -File "' + $ipw + '"'))
+    Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) '*Interp Witness*interpreter powershell.exe with a computed argument*') 'privileged task -> wrapper -> powershell.exe -File (Get-Content ...) => BLOCK'
+
     Write-Host '== Install preflight combines price-list and identity checks'
     # فحص ACL الفعلية مُختبَر في Test-GateTrustAcl.ps1؛ هنا نتيجته ناجحة لعزل الهوية ونشرات الأسعار.
     function Test-GateTrustAcl($Config) { return [pscustomobject]@{ ok = $true; results = @() } }

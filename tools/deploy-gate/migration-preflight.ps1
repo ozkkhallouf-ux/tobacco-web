@@ -657,10 +657,19 @@ function Get-PsDynamicExecution([string]$Text) {
         $op = [string]$c.InvocationOperator
         if ($op -eq 'Ampersand' -or $op -eq 'Dot') {
             if (-not (Test-PsLiteralAst $first)) { return ('dynamic ' + $(if ($op -eq 'Dot') { 'dot-source' } else { 'call operator' }) + ' target: ' + $first.Extent.Text) }
-            continue
         }
         $name = $c.GetCommandName()
         if (-not $name) { return ('dynamic command name: ' + $first.Extent.Text) }
+        # مفسّر ثابت (powershell/node/cmd/wscript/...) بوسيط محسوب: الهدف الذي سيشغّله غير ثابت ⇒ UNKNOWN.
+        $leafName = (([string]$name) -replace '/', '\' -split '\\')[-1]
+        if ($leafName -match $script:InterpreterLeaves) {
+            foreach ($el in @($c.CommandElements | Select-Object -Skip 1)) {
+                $v = $el
+                if ($el -is [System.Management.Automation.Language.CommandParameterAst]) { if ($null -eq $el.Argument) { continue }; $v = $el.Argument }
+                if (-not (Test-PsLiteralAst $v)) { return ('interpreter ' + $leafName + ' with a computed argument: ' + $el.Extent.Text) }
+            }
+        }
+        if ($op -eq 'Ampersand' -or $op -eq 'Dot') { continue }
         $n = $name.ToLowerInvariant()
         $bound = $null
         if (@('start-process', 'saps', 'start', 'invoke-command', 'icm', 'invoke-item', 'ii', 'start-job', 'sajb', 'start-threadjob', 'invoke-wmimethod', 'invoke-cimmethod') -contains $n) {
@@ -736,6 +745,7 @@ function Get-ScriptDynamicExecution([string]$Ext, [string]$Text) {
             if ($l -match '(?im)^@?\s*(call\s+|start\s+(?:"[^"]*"\s+)?(?:/\w+(?::\S+)?\s+)*)?"?(%%~?[a-z]|%[0-9*~]|[%!][A-Za-z_])') { return ('command taken from a variable/argument: ' + $l) }
             if ($l -match '(?i)\bdo\s+\(?\s*@?(call\s+|start\s+(?:"[^"]*"\s+)?(?:/\w+(?::\S+)?\s+)*)?"?(%%~?[a-z]|%[0-9*~]|[%!][A-Za-z_])') { return ('for-loop runs a command taken from data: ' + $l) }
             if ($l -match '(?i)\b(call|start)\s+(?:"[^"]*"\s+)?(?:/\w+(?::\S+)?\s+)*"?(%%~?[a-z]|%[0-9*~]|[%!][A-Za-z_])') { return ('call/start with a variable target: ' + $l) }
+            if ($l -match '(?i)\b(powershell|pwsh|cmd|wscript|cscript|mshta|node|python\d*|pythonw|py|bash|rundll32|regsvr32)(\.exe)?"?\s[^\r\n]*(%%~?[a-z]|%[0-9*])') { return ('interpreter with an argument taken from a loop variable or batch argument: ' + $l) }
         }
         return $null
     }

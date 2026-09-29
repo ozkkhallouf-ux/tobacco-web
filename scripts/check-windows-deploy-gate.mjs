@@ -329,6 +329,10 @@ for (const needle of ["function Resolve-WorkloadReach", "cannot determine whethe
   assert.match(ps, /if \(-not \(Test-PsLiteralAst \$fp\)\) \{ return \(\$name \+ ' with a dynamic target: '/, "Start-Process بهدف محسوب ⇒ UNKNOWN");
   assert.match(ps, /-not \(\$bound\['ScriptBlock'\]\.Value -is \[System\.Management\.Automation\.Language\.ScriptBlockExpressionAst\]\)\) \{ return /, "Invoke-Command بكتلة محسوبة ⇒ UNKNOWN");
   assert.match(ps, /'invoke', 'invokereturnasis', 'invokescript', 'newscriptblock'/, "استدعاءات .Invoke/InvokeScript ⇒ UNKNOWN");
+  assert.match(ps, /if \(\$leafName -match \$script:InterpreterLeaves\) \{[\s\S]*?if \(-not \(Test-PsLiteralAst \$v\)\) \{ return \('interpreter ' \+ \$leafName \+ ' with a computed argument: '/, "مفسّر ثابت بوسيط محسوب ⇒ UNKNOWN");
+  assert.match(ps, /if \(\$op -eq 'Ampersand' -or \$op -eq 'Dot'\) \{\s+if \(-not \(Test-PsLiteralAst \$first\)\) \{ return [^\n]*\n\s+\}\s+\$name = \$c\.GetCommandName\(\)/, "& بهدف حرفي لا يتخطى فحص وسائط المفسّر");
+  assert.ok(ps.indexOf("$leafName -match $script:InterpreterLeaves") < ps.indexOf("if ($op -eq 'Ampersand' -or $op -eq 'Dot') { continue }"), "فحص وسائط المفسّر يسري على & بهدف حرفي أيضاً");
+  assert.match(sc, /if \(\$l -match '\(\?i\)\\b\(powershell\|pwsh\|cmd\|[^\n]*%%~\?\[a-z\]\|%\[0-9\*\]\)'\) \{ return \('interpreter with an argument taken from a loop variable or batch argument: '/, "cmd: مفسّر بوسيط من متغير حلقة أو وسيط دفعة ⇒ UNKNOWN");
   assert.match(sc, /if \(\$arg -notmatch \$lit\) \{ return \('\.' \+ \$m\.Groups\[1\]\.Value \+ ' with a computed command: '/, "VBS Run/Exec بهدف غير حرفي ⇒ UNKNOWN");
   assert.match(sc, /\\\.\(Run\|Exec\|ShellExecute\)/, "Run/Exec/ShellExecute مغطاة");
   assert.match(sc, /\(call\|start\)\\s\+[^\n]*return \('call\/start with a variable target: '/, "cmd call/start بمتغير ⇒ UNKNOWN");

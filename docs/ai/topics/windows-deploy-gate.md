@@ -172,6 +172,9 @@
   - **PowerShell** يُحلَّل بشجرته: `Parser::ParseInput` و`StaticParameterBinder`.
     - `&` أو `.` بهدف غير حرفي (متغير، أو تعبير، أو نص فيه متغير) ⇒ UNKNOWN.
     - `Start-Process` بـ`-FilePath` غير حرفي، أو مفسّر بوسائط محسوبة ⇒ UNKNOWN.
+    - مفسّر ثابت (powershell/pwsh/cmd/wscript/cscript/node/python/...) باسمه أو عبر `&` بهدف حرفي، وأي
+      من وسائطه محسوب (متغير، أو تعبير، أو نص فيه متغير، أو `-File:$p`) ⇒ UNKNOWN. الأداة غير المفسّرة
+      بوسيط متغير تبقى كما هي.
     - `Invoke-Command`/`Start-Job` بكتلة غير حرفية أو ملف محسوب ⇒ UNKNOWN.
     - `Invoke-Item` بمسار محسوب، و`Invoke-WmiMethod`/`Invoke-CimMethod` ⇒ UNKNOWN.
     - `[scriptblock]::Create`، و`.Invoke`/`.InvokeScript`، و`[Process]::Start` بوسيط محسوب ⇒ UNKNOWN.
@@ -181,7 +184,7 @@
     - `Execute`/`ExecuteGlobal`/`Eval`/`new Function` ⇒ UNKNOWN. و`.vbe`/`.jse` المشفّرة ⇒ UNKNOWN.
   - **CMD/BAT**:
     - `call`/`start` أو سطر يبدأ بمتغير (`%VAR%`، `!VAR!`، `%%i`، `%1`) ⇒ UNKNOWN.
-    - `for ... do call %%i`، و`call set` ⇒ UNKNOWN.
+    - `for ... do call %%i`، و`call set`، ومفسّر بوسيط من متغير حلقة أو وسيط دفعة (`node %%i`، `-File %1`) ⇒ UNKNOWN.
     - `powershell -Command` داخل الغلاف يخضع لقاعدة `-Command` نفسها في الـAction.
   - المتغير العادي الذي لا يصير هدف تنفيذ لا يُحتسب.
   - السلسلة: UNKNOWN في أي غلاف متداخل يبقى UNKNOWN للسلسلة كلها، ولا يُطوى إلى NOT_REPO.
