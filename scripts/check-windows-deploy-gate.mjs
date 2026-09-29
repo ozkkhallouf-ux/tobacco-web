@@ -334,6 +334,16 @@ for (const needle of ["function Resolve-WorkloadReach", "cannot determine whethe
   assert.match(ps, /if \(-not \$staticSafe -and @\(\$margs \| Where-Object \{ -not \(Test-PsLiteralAst \$_\) \}\)\.Count -gt 0\) \{ return \('process creation \(WMI\/COM \.Create\)/, "Win32_Process.Create بوسيط محسوب ⇒ UNKNOWN");
   assert.match(ps, /foreach \(\$k in @\('ArgumentList', 'Arguments'\)\) \{ if \(\$bound\.ContainsKey\(\$k\) -and -not \(Test-PsLiteralAst \$bound\[\$k\]\.Value\)\) \{ return /, "Invoke-WmiMethod/CimMethod بوسائط محسوبة ⇒ UNKNOWN");
   assert.match(sc, /if \(\$l -match '\(\?i\)\\\.ExecMethod_\\b'\) \{ return /, "VBS ExecMethod_ ⇒ UNKNOWN");
+  // Codex P1: تحميل الوحدات/الكود من هدف محسوب، وأنواع السكربت التي لا محلّل لها.
+  assert.match(ps, /'\^\(import-module\|ipmo\)\$' \{[\s\S]*?if \(-not \(Test-PsLiteralAst \$mv\)\) \{ return \(\$name \+ ' with a computed module target: '/, "Import-Module بهدف محسوب ⇒ UNKNOWN");
+  assert.match(ps, /if \(\$mods\.Count -eq 0\) \{ return \(\$name \+ ' without a static module target'\) \}/, "Import-Module بلا هدف ثابت (ومنه الأنبوب) ⇒ UNKNOWN");
+  assert.match(ps, /-not \(Test-AbsoluteTracePath \$mn\)\) \{ return \(\$name \+ ' with a relative module path/, "مسار وحدة نسبي ⇒ UNKNOWN");
+  assert.match(ps, /foreach \(\$k in @\('Path', 'LiteralPath', 'AssemblyName', 'TypeDefinition', 'MemberDefinition'\)\) \{ if \(\$bound\.ContainsKey\(\$k\) -and -not \(Test-PsLiteralAst \$bound\[\$k\]\.Value\)\) \{ return /, "Add-Type بكود/تجميعة محسوبة ⇒ UNKNOWN");
+  assert.match(ps, /'loadfile', 'loadfrom', 'load', 'unsafeloadfrom', 'loadwithpartialname'\) -contains \$member -and \$target -match '\(\?i\)assembly'\) \{\s+if \(@\(\$margs \| Where-Object \{ -not \(Test-PsLiteralAst \$_\) \}\)\.Count -gt 0\) \{ return /, "Assembly::Load بهدف محسوب ⇒ UNKNOWN");
+  const tr = body("Get-TargetReach");
+  assert.match(tr, /if \(\$final -match \$script:UninspectableScriptExt -or \$p -match \$script:UninspectableScriptExt -or \(\$nodeHost -and [^\n]*\) \{\s+return \(New-Reach 'UNKNOWN'/, "سكربت بلا محلّل (Node/Python/...) ⇒ UNKNOWN لا NOT_REPO");
+  assert.match(preSrc, /\$script:UninspectableScriptExt = '\\\.\(mjs\|cjs\|ts\|mts\|cts\|py\|pyw\|pyc\|rb\|pl\|pm\|php\|sh\|bash/, "قائمة الأنواع غير المحلَّلة تشمل mjs/cjs/py");
+  assert.match(wrap, /\(psd1\|mjs\|cjs\|ts\|mts\|cts\|py\|pyw\|rb\|pl\|pm\|php\|sh\|bash\|hta\|jar\)\\b'\)\) \{\s+\$r = Join-Reach \$r \(Get-TargetReach /, "مراجع الأغلفة لكل أنواع السكربت تمرّ بقاعدة الهدف");
   assert.match(sc, /Run\|Exec\|ShellExecute\|ExecuteShellCommand\|Create\)/, "VBS/JS .Create/ExecuteShellCommand مغطاة");
   assert.match(ps, /if \(\$leafName -match \$script:InterpreterLeaves\) \{[\s\S]*?if \(-not \(Test-PsLiteralAst \$v\)\) \{ return \('interpreter ' \+ \$leafName \+ ' with a computed argument: '/, "مفسّر ثابت بوسيط محسوب ⇒ UNKNOWN");
   assert.match(ps, /if \(\$op -eq 'Ampersand' -or \$op -eq 'Dot'\) \{\s+if \(-not \(Test-PsLiteralAst \$first\)\) \{ return [^\n]*\n\s+\}\s+\$name = \$c\.GetCommandName\(\)/, "& بهدف حرفي لا يتخطى فحص وسائط المفسّر");

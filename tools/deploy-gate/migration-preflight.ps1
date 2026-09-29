@@ -684,7 +684,7 @@ function Get-PsDynamicExecution([string]$Text) {
         if ($n.Contains('\')) { $n = $n.Substring($n.LastIndexOf('\') + 1) }
         if ($n -eq 'iwmi') { $n = 'invoke-wmimethod' }
         $bound = $null
-        if (@('start-process', 'saps', 'start', 'invoke-command', 'icm', 'invoke-item', 'ii', 'start-job', 'sajb', 'start-threadjob', 'invoke-wmimethod', 'invoke-cimmethod') -contains $n) {
+        if (@('start-process', 'saps', 'start', 'invoke-command', 'icm', 'invoke-item', 'ii', 'start-job', 'sajb', 'start-threadjob', 'invoke-wmimethod', 'invoke-cimmethod', 'import-module', 'ipmo', 'add-type', 'new-module', 'nmo') -contains $n) {
             try { $bound = [System.Management.Automation.Language.StaticParameterBinder]::BindCommand($c, $true).BoundParameters } catch { return ('parameters of ' + $name + ' cannot be bound statically') }
         }
         switch -regex ($n) {
@@ -702,6 +702,26 @@ function Get-PsDynamicExecution([string]$Text) {
             }
             '^(invoke-item|ii)$' {
                 foreach ($k in @('Path', 'LiteralPath')) { if ($bound.ContainsKey($k) -and -not (Test-PsLiteralAst $bound[$k].Value)) { return ($name + ' with a dynamic path: ' + $bound[$k].Value.Extent.Text) } }
+            }
+            '^(import-module|ipmo)$' {
+                # تحميل وحدة يشغّل كودها: الهدف حرفي مطلق (يُتتبَّع بمساره)، أو اسم وحدة مجرّد؛ غير ذلك ⇒ UNKNOWN.
+                foreach ($k in @('ModuleInfo', 'Assembly', 'PSSession', 'CimSession')) { if ($bound.ContainsKey($k)) { return ($name + ' loads a computed module object (-' + $k + ')') } }
+                $mods = @()
+                foreach ($k in @('Name', 'FullyQualifiedName')) { if ($bound.ContainsKey($k)) { $mods += $bound[$k].Value } }
+                if ($mods.Count -eq 0) { return ($name + ' without a static module target') }
+                foreach ($mv in $mods) {
+                    if (-not (Test-PsLiteralAst $mv)) { return ($name + ' with a computed module target: ' + $mv.Extent.Text) }
+                    foreach ($lit in @($mv.FindAll({ param($x) $x -is [System.Management.Automation.Language.StringConstantExpressionAst] }, $true))) {
+                        $mn = ([string]$lit.Value) -replace '/', '\'
+                        if ($mn -match '[\\]|\.(psm1|psd1|ps1|dll)$' -and -not (Test-AbsoluteTracePath $mn)) { return ($name + ' with a relative module path (resolved against an unproven location): ' + $mn) }
+                    }
+                }
+            }
+            '^add-type$' {
+                foreach ($k in @('Path', 'LiteralPath', 'AssemblyName', 'TypeDefinition', 'MemberDefinition')) { if ($bound.ContainsKey($k) -and -not (Test-PsLiteralAst $bound[$k].Value)) { return ($name + ' with computed code or assembly (-' + $k + '): ' + $bound[$k].Value.Extent.Text) } }
+            }
+            '^(new-module|nmo)$' {
+                if ($bound.ContainsKey('ScriptBlock') -and -not ($bound['ScriptBlock'].Value -is [System.Management.Automation.Language.ScriptBlockExpressionAst])) { return ($name + ' with a computed script block: ' + $bound['ScriptBlock'].Value.Extent.Text) }
             }
             '^(invoke-wmimethod|invoke-cimmethod)$' {
                 # WMI/CIM (مثل Win32_Process.Create): اسم الطريقة ووسائطها حرفية وإلا ⇒ UNKNOWN.
@@ -729,6 +749,10 @@ function Get-PsDynamicExecution([string]$Text) {
             # [IO.File]::Create وأمثاله (نوع ساكن لا علاقة له بالعمليات) لا يُحتسب؛ أي مستقبِل آخر قد يكون Win32_Process.
             $staticSafe = ($m.Expression -is [System.Management.Automation.Language.TypeExpressionAst]) -and ($target -notmatch '(?i)wmi|cim|management|process|activator')
             if (-not $staticSafe -and @($margs | Where-Object { -not (Test-PsLiteralAst $_) }).Count -gt 0) { return ('process creation (WMI/COM .Create) with a computed argument: ' + $m.Extent.Text) }
+        }
+        # تحميل تجميعة .NET من هدف محسوب ([Reflection.Assembly]::LoadFile/LoadFrom/Load/UnsafeLoadFrom) ⇒ UNKNOWN.
+        if (@('loadfile', 'loadfrom', 'load', 'unsafeloadfrom', 'loadwithpartialname') -contains $member -and $target -match '(?i)assembly') {
+            if (@($margs | Where-Object { -not (Test-PsLiteralAst $_) }).Count -gt 0) { return ('assembly loaded from a computed target: ' + $m.Extent.Text) }
         }
         if ($member -eq 'start' -and $target -match '(?i)process') {
             if (@($m.Arguments | Where-Object { -not (Test-PsLiteralAst $_) }).Count -gt 0) { return ('process started with a computed target: ' + $m.Extent.Text) }
@@ -845,8 +869,17 @@ function Get-WrapperReach($Ctx, [string]$Path, [int]$depth) {
         $r = Join-Reach $r (Get-WrapperReach $Ctx $m.Value ($depth + 1))
         if ($r.status -eq 'REPO') { return $r }
     }
+    # مراجع مطلقة لبقية أنواع السكربت (psd1، وsكربتات Node/Python/...): نفس قاعدة الهدف (تتبّع أو UNKNOWN).
+    foreach ($m in [regex]::Matches($inner, '(?:[A-Za-z]:\\|\\\\)[^"''\r\n<>|]+?\.(psd1|mjs|cjs|ts|mts|cts|py|pyw|rb|pl|pm|php|sh|bash|hta|jar)\b')) {
+        $r = Join-Reach $r (Get-TargetReach $Ctx $m.Value '' ($depth + 1) ('reference in wrapper ' + $Path))
+        if ($r.status -eq 'REPO') { return $r }
+    }
     return $r
 }
+
+# أنواع السكربت: ما له محلّل هنا يُتتبَّع كغلاف؛ وما لا محلّل له ⇒ UNKNOWN (Codex P1).
+$script:InspectableScriptExt = '\.(vbs|vbe|cmd|bat|ps1|psm1|psd1|js|jse|wsf)$'
+$script:UninspectableScriptExt = '\.(mjs|cjs|ts|mts|cts|py|pyw|pyc|rb|pl|pm|php|sh|bash|zsh|hta|jar|lua|r|tcl|awk|groovy)$'
 
 # هدف ثابت لمفسّر: يُحلّ ويُفحص ويُتتبَّع إن كان غلافاً. $null/غير قابل للحل ⇒ UNKNOWN.
 function Get-TargetReach($Ctx, [string]$Target, [string]$WorkDir, [int]$Depth, [string]$Kind) {
@@ -855,7 +888,14 @@ function Get-TargetReach($Ctx, [string]$Target, [string]$WorkDir, [int]$Depth, [
     $pc = Get-PathContainment $Ctx $p $true
     if ($pc.state -eq 'IN') { return (New-Reach 'REPO' ($Kind + ' target inside a repository root: ' + $p)) }
     if ($pc.state -ne 'OUT') { return (New-Reach 'UNKNOWN' ($Kind + ' target ' + $p + ': ' + $pc.reason)) }
-    if (([string]$pc.final) -match '\.(vbs|cmd|bat|ps1|psm1|js|wsf|jse|vbe)$' -or $p -match '\.(vbs|cmd|bat|ps1|psm1|js|wsf|jse|vbe)$') { return (Get-WrapperReach $Ctx $p $Depth) }
+    $final = ([string]$pc.final).ToLowerInvariant()
+    # سكربت لمفسّر لا يُحلَّل ساكناً هنا (Node/Python/Ruby/Perl/PHP/sh/HTA/JAR، و.js تحت node): قد يستورد
+    # كود المستودع ديناميكياً ⇒ UNKNOWN (لا NOT_REPO لمجرد أنه خارج المستودع). يُتتبَّع فقط ما له محلّل.
+    $nodeHost = $Kind -match '^(node|nodejs|deno|bun)$'
+    if ($final -match $script:UninspectableScriptExt -or $p -match $script:UninspectableScriptExt -or ($nodeHost -and ($final -match '\.(js|ts)$' -or $p -match '\.(js|ts)$'))) {
+        return (New-Reach 'UNKNOWN' ($Kind + ' target ' + $p + ': script language is not statically inspected (imports/dynamic loading cannot be proven)'))
+    }
+    if ($final -match $script:InspectableScriptExt -or $p -match $script:InspectableScriptExt) { return (Get-WrapperReach $Ctx $p $Depth) }
     return (New-Reach 'NOT_REPO')
 }
 

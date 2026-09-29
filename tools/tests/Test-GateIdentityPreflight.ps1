@@ -422,7 +422,8 @@ try {
         @{ label = 'relative target resolved against a repo sub-folder WorkingDirectory => REPO'; a = (Act 'node.exe' 'serve.mjs' ($repo + '\scripts')); want = 'REPO' },
         @{ label = 'absolute executable inside the repo => REPO'; a = (Act ($repo + '\tools\bin\helper.exe')); want = 'REPO' },
         @{ label = 'absolute script inside the repo => REPO'; a = (Act $ps ('-File "' + $repo + '\tools\x.ps1"')); want = 'REPO' },
-        @{ label = 'relative target + unrelated trusted WorkingDirectory => NOT_REPO'; a = (Act $node 'server.js' 'C:\Tools\svc'); want = 'NOT_REPO' },
+        @{ label = 'relative target + unrelated trusted WorkingDirectory => NOT_REPO'; a = (Act $ps '-File report.ps1' 'C:\Tools'); want = 'NOT_REPO' },
+        @{ label = 'node script outside the repo (not statically inspected) => UNKNOWN, never NOT_REPO'; a = (Act $node 'server.js' 'C:\Tools\svc'); want = 'UNKNOWN' },
         @{ label = 'relative target traversing from an unrelated WorkingDirectory into the repo => REPO'; a = (Act $node '..\..\Users\LOQ\Documents\OZK-TOBACCO\tobacco-web\scripts\serve.mjs' 'C:\Tools\svc'); want = 'REPO' },
         @{ label = 'interpreter path does not swallow arguments/working directory (C:\Windows path first)'; a = (Act 'C:\Windows\System32\cmd.exe' '/c run.bat' $repo); want = 'REPO' },
         @{ label = 'relative script with no WorkingDirectory => UNKNOWN'; a = (Act $node 'scripts\serve.mjs'); want = 'UNKNOWN' },
@@ -962,6 +963,58 @@ try {
     $script:Wrappers[$wmw3] = ('$p = [wmiclass]''Win32_Process''' + "`r`n" + '$p.$m((Get-Content C:\ProgramData\target.txt))')
     $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Wmi Member' 'SYSTEM' ($ps + ' -NoProfile -File "' + $wmw3 + '"'))
     Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) '*Wmi Member*dynamic member invocation*') 'privileged task -> wrapper -> $p.$m(Get-Content ...) => BLOCK'
+
+    Write-Host '== Dynamic module / code loading inside PowerShell wrappers (Codex P1)'
+    $script:Wrappers['C:\safe\mod.psm1'] = 'function Get-Safe { Get-Date }'
+    $script:Wrappers['c:\safe\mod.psm1'] = 'function Get-Safe { Get-Date }'
+    $modDyn = @(
+        @{ label = 'Import-Module $p (from a data file) => UNKNOWN'; n = 'm1.ps1'; b = ('$p = Get-Content C:\ProgramData\target.txt' + "`r`n" + 'Import-Module $p') },
+        @{ label = 'ipmo alias with a computed target => UNKNOWN'; n = 'm2.ps1'; b = 'ipmo $mod' },
+        @{ label = 'Import-Module -Name (expression) => UNKNOWN'; n = 'm3.ps1'; b = 'Import-Module -Name (Join-Path $root ''x.psm1'')' },
+        @{ label = 'Import-Module "$dir\x.psm1" (expandable string) => UNKNOWN'; n = 'm4.ps1'; b = 'Import-Module "$dir\x.psm1" -Force' },
+        @{ label = 'Import-Module relative path .\mods\x.psm1 => UNKNOWN'; n = 'm5.ps1'; b = 'Import-Module .\mods\x.psm1' },
+        @{ label = 'Import-Module -ModuleInfo $m (computed module object) => UNKNOWN'; n = 'm6.ps1'; b = 'Import-Module -ModuleInfo $m' },
+        @{ label = 'Add-Type -Path $dll => UNKNOWN'; n = 'm7.ps1'; b = 'Add-Type -Path $dll' },
+        @{ label = 'Add-Type -TypeDefinition (Get-Content ... -Raw) => UNKNOWN'; n = 'm8.ps1'; b = 'Add-Type -TypeDefinition (Get-Content C:\ProgramData\code.cs -Raw)' },
+        @{ label = '[Reflection.Assembly]::LoadFile($p) => UNKNOWN'; n = 'm9.ps1'; b = '[System.Reflection.Assembly]::LoadFile($p)' },
+        @{ label = 'New-Module -ScriptBlock $sb => UNKNOWN'; n = 'm10.ps1'; b = 'New-Module -ScriptBlock $sb | Import-Module' },
+        @{ label = 'Import-Module fed from the pipeline (module object not static) => UNKNOWN'; n = 'm11.ps1'; b = 'Get-Content C:\ProgramData\mods.txt | Import-Module' }
+    )
+    foreach ($c in $modDyn) { $got = Dyn-Reach $c.n $c.b; Assert-True ($got.status -eq 'UNKNOWN') ($c.label + ' (got ' + $got.status + ')') }
+    $modStatic = @(
+        @{ label = 'Import-Module ''C:\safe\mod.psm1'' (literal absolute, traced) => NOT_REPO'; n = 'ms1.ps1'; b = 'Import-Module ''C:\safe\mod.psm1'' -Force' },
+        @{ label = 'Import-Module by bare module name (resolved from PSModulePath) => NOT_REPO'; n = 'ms2.ps1'; b = 'Import-Module ScheduledTasks' },
+        @{ label = 'Add-Type with a literal type definition => NOT_REPO'; n = 'ms3.ps1'; b = 'Add-Type -TypeDefinition ''public static class Ozk { public static int One() { return 1; } }''' },
+        @{ label = 'New-Module with a literal script block => NOT_REPO'; n = 'ms4.ps1'; b = '$m = New-Module -ScriptBlock { function Get-X { 1 } }' }
+    )
+    foreach ($c in $modStatic) { $got = Dyn-Reach $c.n $c.b; Assert-True ($got.status -eq 'NOT_REPO') ($c.label + ' (got ' + $got.status + ': ' + $got.why + ')') }
+    Assert-True ((Dyn-Reach 'ms5.ps1' ('Import-Module ''' + $repo + '\tools\ozk.psm1''')).status -eq 'REPO') 'Import-Module of a literal repository module => REPO'
+    $mw = $dw + '\module-witness.ps1'
+    $script:Wrappers[$mw] = ('$p = Get-Content C:\ProgramData\target.txt' + "`r`n" + 'Import-Module $p')
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Module Witness' 'SYSTEM' ($ps + ' -NoProfile -File "' + $mw + '"'))
+    Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) '*Module Witness*computed module target*') 'Codex witness: privileged task -> wrapper -> Import-Module (Get-Content ...) => BLOCK'
+
+    Write-Host '== Every interpreter-supported script type is traced or UNKNOWN (Codex P1)'
+    $sd = 'C:\outside'
+    $script:Wrappers[$sd + '\bootstrap.mjs'] = 'import "C:/Users/LOQ/Documents/OZK-TOBACCO/tobacco-web/scripts/serve.mjs"'
+    $script:Wrappers[$sd + '\job.py'] = 'import runpy'
+    $scriptCases = @(
+        @{ label = 'node.exe C:\outside\bootstrap.mjs (outside the repo) => UNKNOWN, never NOT_REPO'; a = [pscustomobject]@{ execute = 'node.exe'; arguments = ($sd + '\bootstrap.mjs'); workingDirectory = '' }; want = 'UNKNOWN' },
+        @{ label = 'node.exe C:\outside\app.cjs => UNKNOWN'; a = [pscustomobject]@{ execute = 'C:\Program Files\nodejs\node.exe'; arguments = ('"' + $sd + '\app.cjs"'); workingDirectory = '' }; want = 'UNKNOWN' },
+        @{ label = 'node.exe C:\outside\server.js (node module semantics) => UNKNOWN'; a = [pscustomobject]@{ execute = 'node.exe'; arguments = ($sd + '\server.js'); workingDirectory = '' }; want = 'UNKNOWN' },
+        @{ label = 'python.exe C:\outside\job.py => UNKNOWN'; a = [pscustomobject]@{ execute = 'python.exe'; arguments = ($sd + '\job.py'); workingDirectory = '' }; want = 'UNKNOWN' },
+        @{ label = 'script opened by file association (execute = C:\outside\job.py) => UNKNOWN'; a = [pscustomobject]@{ execute = ($sd + '\job.py'); arguments = ''; workingDirectory = '' }; want = 'UNKNOWN' },
+        @{ label = 'node script inside the repo => REPO (unchanged)'; a = [pscustomobject]@{ execute = 'node.exe'; arguments = ($repo + '\scripts\serve.mjs'); workingDirectory = '' }; want = 'REPO' },
+        @{ label = 'wscript C:\outside\x.js (JScript, inspected) => NOT_REPO'; a = [pscustomobject]@{ execute = 'wscript.exe'; arguments = ('"' + $sd + '\x.js"'); workingDirectory = '' }; want = 'NOT_REPO' }
+    )
+    $script:Wrappers[$sd + '\x.js'] = 'var sh = new ActiveXObject("WScript.Shell"); sh.Run("\"C:\\Tools\\backup\\run-backup.exe\"", 0, true);'
+    foreach ($c in $scriptCases) { $got = Resolve-TaskReach $cfgD @($c.a) 'SYSTEM'; Assert-True ($got.status -eq $c.want) ($c.label + ' (got ' + $got.status + ')') }
+    Assert-True ((Dyn-Reach 'callpy.cmd' ('python "' + $sd + '\job.py"')).status -eq 'UNKNOWN') 'cmd wrapper referencing a Python script outside the repo => UNKNOWN'
+    Assert-True ((Dyn-Reach 'callpsd.ps1' ('Import-Module ''' + $repo + '\tools\ozk.psd1''')).status -eq 'REPO') 'module manifest (.psd1) inside the repo => REPO'
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Node Bootstrap System' 'SYSTEM' 'x' @([pscustomobject]@{ execute = 'node.exe'; arguments = ($sd + '\bootstrap.mjs'); workingDirectory = '' }))
+    Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) '*Node Bootstrap System*not statically inspected*') 'Codex witness: SYSTEM node.exe C:\outside\bootstrap.mjs => BLOCK'
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Node Bootstrap User' 'OZKSync' 'x' @([pscustomobject]@{ execute = 'node.exe'; arguments = ($sd + '\bootstrap.mjs'); workingDirectory = '' }))
+    Assert-True ((Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())).ok) 'same node task under a non-privileged identity => not a privilege risk'
 
     Write-Host '== Install preflight combines price-list and identity checks'
     # فحص ACL الفعلية مُختبَر في Test-GateTrustAcl.ps1؛ هنا نتيجته ناجحة لعزل الهوية ونشرات الأسعار.

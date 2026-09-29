@@ -177,6 +177,11 @@
       بوسيط متغير تبقى كما هي.
     - `Invoke-Command`/`Start-Job` بكتلة غير حرفية أو ملف محسوب ⇒ UNKNOWN.
     - `Invoke-Item` بمسار محسوب ⇒ UNKNOWN.
+    - تحميل وحدة أو كود من هدف محسوب ⇒ UNKNOWN (Codex P1):
+      - `Import-Module`/`ipmo` بهدف غير حرفي، أو بمسار نسبي، أو بكائن وحدة (`-ModuleInfo`)، أو من الأنبوب.
+      - `Add-Type` بـ`-Path`/`-AssemblyName`/`-TypeDefinition`/`-MemberDefinition` محسوب.
+      - `[Reflection.Assembly]::LoadFile`/`LoadFrom`/`Load` بوسيط محسوب، و`New-Module` بكتلة محسوبة.
+      - المسار الحرفي المطلق يُتتبَّع (بما فيه `.psd1`). اسم الوحدة المجرّد يُحلّ من PSModulePath للنظام.
     - إنشاء عملية عبر WMI/CIM/COM بوسيط محسوب ⇒ UNKNOWN:
       - `Invoke-WmiMethod`/`Invoke-CimMethod` باسم طريقة أو وسائط غير حرفية (ومنها `@{ CommandLine = $cmd }`).
         `& Invoke-WmiMethod` و`iwmi` والاسم المؤهّل بالوحدة (`Microsoft.PowerShell.Management\Invoke-WmiMethod`)
@@ -197,6 +202,12 @@
       `wmic process call create "%%i"`) ⇒ UNKNOWN.
     - `powershell -Command` داخل الغلاف يخضع لقاعدة `-Command` نفسها في الـAction.
   - المتغير العادي الذي لا يصير هدف تنفيذ لا يُحتسب.
+  - **كل نوع سكربت يدعمه المفسّر يُتتبَّع أو يصير UNKNOWN (Codex P1):**
+    - يُتتبَّع كغلاف ما له محلّل هنا: PowerShell (ومنه `.psd1`)، وCMD/BAT، وVBS/JScript تحت WSH.
+    - Node (`.mjs`/`.cjs`/`.ts`، و`.js` تحت node/deno/bun)، وPython، وRuby، وPerl، وPHP، وsh، وHTA، وJAR:
+      لا تُحلَّل استيراداتها وتحميلها الديناميكي ساكناً. هدف منها خارج المستودع ⇒ UNKNOWN لا NOT_REPO، وداخله ⇒ REPO.
+    - يشمل ذلك الهدف المفتوح بارتباط نوع الملف، ومراجعها المطلقة داخل الأغلفة.
+    - النتيجة: هذه المهام بهوية مميّزة تُحجب؛ تشغيلها بهوية غير مميّزة (least privilege) لا يُعد خطر صلاحيات.
   - السلسلة: UNKNOWN في أي غلاف متداخل يبقى UNKNOWN للسلسلة كلها، ولا يُطوى إلى NOT_REPO.
 - **هوية المسار في نظام الملفات (Codex P1):**
   - قرار REPO/NOT_REPO لا يُتخذ بالنص وحده: junction أو symlink أو اسم 8.3 قد يجعل `C:\runner` هو
