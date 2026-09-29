@@ -36,13 +36,18 @@
    لـ`supabase.co` (بيانات عملاء/أرصدة/أسعار حساسة تمرّ كـGET) — تبقى على جهاز العميل بلا
    مسح عند تسجيل الخروج. أُضيف قيد same-origin + `STATIC_ASSET_PATH` قبل `cache.put` (نفس
    القيد المستخدم أصلاً في `offlineFallback`، لكن هنا قبل التخزين لا داخل مسار fallback وحده).
-3. **صلاحيات `smart_inventory_*` — انحراف حي في Supabase (تغيير قاعدة بيانات، ليس ملف
-   مستودع).** رغم أن `supabase/smart-inventory.sql` يتتبَّع `revoke ... from public,anon`،
-   استعلام مباشر على `information_schema.routine_privileges` أظهر أن دور `anon` يملك فعلياً
-   EXECUTE على 11 دالة من دوال smart_inventory. نُفِّذ migration
-   `fix_smart_inventory_anon_grant_drift` (revoke من public/anon ثم grant لـ authenticated
-   فقط) بعد موافقة صريحة منفصلة من المستخدم، وتحقّق لاحق بنفس الاستعلام رجع نتيجة فارغة
-   (لا صلاحيات anon متبقية).
+3. **صلاحيات `smart_inventory_*` — تصحيح لاحق (2026-09-28): EXECUTE لـ anon على دوال
+   العدّ ليس انحرافاً.** ملاحظة 2026-09-14 وصفت منح `anon` على دوال الجرد كانحراف،
+   ونُفِّذت هجرة `20260914061335` / `fix_smart_inventory_anon_grant_drift` (revoke من
+   public/anon ثم grant لـ authenticated فقط). ذلك الوصف خاطئ: حسابات الموظفين تعمل
+   بدور `anon` عن قصد عبر `smart_inventory_set_counter_auth_role`، وكل دالة عدّ تتحقق
+   من `smart_inventory_is_counter()`. سحب EXECUTE عطّل كل دخول موظف بـ 401. نفس السحب
+   وقع في `20260826081831` وأُصلح بـ `20260831134213`، ثم عاد في 2026-09-14. أُعيد
+   المنح على الإنتاج في 2026-09-28 بهجرة `20260928170206_restore_counter_rpc_grants_to_anon_again`
+   (موافقة عمر): GRANT EXECUTE لـ anon على دوال العدّ الست، وREVOKE من anon على كل
+   `smart_inventory_owner_*`. الملف المرجعي `supabase/smart-inventory.sql` يطابق ذلك.
+   الحارس في `scripts/check-smart-inventory.mjs` يرفض أي SQL متتبَّع يسحب الدوال الست
+   من anon بلا إعادة منح، أو يمنح دوال المالك لـ anon.
 
 **مؤجَّل من نفس المراجعة:** فحوص صحة pg_cron في CI (`scripts/check-cron-job-health-classifier.mjs`)
 static-only — تطابق نص SQL بالـregex ولا تنفّذ شيئاً على قاعدة حية. بناء فحص حي حقيقي
