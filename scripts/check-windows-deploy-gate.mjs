@@ -317,6 +317,25 @@ for (const needle of ["function Resolve-WorkloadReach", "cannot determine whethe
   for (const needle of ["New-Item -ItemType Junction", "Add-Skip", "ShortPath", "SymbolicLink", "[IO.Directory]::Delete($l)"]) assert.ok(pid.includes(needle), `اختبار الهوية: ${needle}`);
   assert.match(read("docs/ai/topics/windows-deploy-gate.md"), /GetFinalPathNameByHandleW/);
 }
+// Codex P1 (#285): أهداف تنفيذ محسوبة داخل الأغلفة ⇒ UNKNOWN (تحليل ساكن، بلا تقييم ولا تنفيذ).
+{
+  const body = (n) => { const i = preSrc.indexOf(`function ${n}`); assert.ok(i >= 0, n); const j = preSrc.indexOf("\nfunction ", i + 10); return preSrc.slice(i, j < 0 ? undefined : j); };
+  const wrap = body("Get-WrapperReach"), wd = body("Get-WrapperDynamicReach"), ps = body("Get-PsDynamicExecution"), sc = body("Get-ScriptDynamicExecution");
+  assert.match(wrap, /\$dr = Get-WrapperDynamicReach \$Ctx \(\[string\]\$pc\.final\) \$inner \$depth\s+if \(\$dr\.status -eq 'REPO'\) \{ return \$dr \}\s+\$r = Join-Reach \$r \$dr/, "كل غلاف يمرّ بكاشف التنفيذ الديناميكي، وUNKNOWN لا يُطوى");
+  assert.match(wd, /if \(\$why\) \{ return \(New-Reach 'UNKNOWN'/, "سبب ديناميكي ⇒ UNKNOWN");
+  assert.match(ps, /\[System\.Management\.Automation\.Language\.Parser\]::ParseInput/, "PowerShell يُحلَّل بشجرته (بلا تنفيذ)");
+  assert.match(ps, /if \(@\(\$errs\)\.Count -gt 0\) \{ return /, "نص PowerShell غير قابل للتحليل ⇒ UNKNOWN");
+  assert.match(ps, /if \(\$op -eq 'Ampersand' -or \$op -eq 'Dot'\) \{\s+if \(-not \(Test-PsLiteralAst \$first\)\) \{ return /, "& و. بهدف غير حرفي ⇒ UNKNOWN");
+  assert.match(ps, /if \(-not \(Test-PsLiteralAst \$fp\)\) \{ return \(\$name \+ ' with a dynamic target: '/, "Start-Process بهدف محسوب ⇒ UNKNOWN");
+  assert.match(ps, /-not \(\$bound\['ScriptBlock'\]\.Value -is \[System\.Management\.Automation\.Language\.ScriptBlockExpressionAst\]\)\) \{ return /, "Invoke-Command بكتلة محسوبة ⇒ UNKNOWN");
+  assert.match(ps, /'invoke', 'invokereturnasis', 'invokescript', 'newscriptblock'/, "استدعاءات .Invoke/InvokeScript ⇒ UNKNOWN");
+  assert.match(sc, /if \(\$arg -notmatch \$lit\) \{ return \('\.' \+ \$m\.Groups\[1\]\.Value \+ ' with a computed command: '/, "VBS Run/Exec بهدف غير حرفي ⇒ UNKNOWN");
+  assert.match(sc, /\\\.\(Run\|Exec\|ShellExecute\)/, "Run/Exec/ShellExecute مغطاة");
+  assert.match(sc, /\(call\|start\)\\s\+[^\n]*return \('call\/start with a variable target: '/, "cmd call/start بمتغير ⇒ UNKNOWN");
+  assert.match(sc, /call set \(double expansion/);
+  assert.match(sc, /for-loop runs a command taken from data/);
+  assert.match(read("docs/ai/topics/windows-deploy-gate.md"), /StaticParameterBinder/);
+}
 // Codex P1: قرارات الثقة بالـSID حصراً — لا عودة لمقارنة الاسم بعد حذف بادئة الجهاز/المجال.
 assert.ok(!preSrc.includes("ConvertTo-IdentityKey"), "مفتاح الهوية بالاسم محذوف نهائياً");
 const fnBody = (name) => { const i = preSrc.indexOf(`function ${name}`); assert.ok(i >= 0, name); const j = preSrc.indexOf("\nfunction ", i + 10); return preSrc.slice(i, j < 0 ? undefined : j); };

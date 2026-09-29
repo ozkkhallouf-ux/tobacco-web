@@ -633,6 +633,134 @@ function Get-FieldReach($Ctx, [string]$Field) {
     return $r
 }
 
+# ------------------------------------------------------------
+# أهداف تنفيذ ديناميكية داخل الأغلفة (Codex P1): أي أداة تنفيذ لا يُثبَت هدفها نصاً ثابتاً ⇒ UNKNOWN.
+# تحليل ساكن فقط: شجرة PowerShell (Parser::ParseInput وStaticParameterBinder، بلا تنفيذ) وقواعد VBS/JS
+# وCMD/BAT. لا تُقيَّم المتغيرات ولا تُقرأ ملفات البيانات؛ المتغير العادي لا يُحتسب إلا إذا صار هدف تنفيذ.
+# ------------------------------------------------------------
+$script:InterpreterLeaves = '^(powershell|pwsh|cmd|wscript|cscript|mshta|node|nodejs|python\d*(\.\d+)?|pythonw|py|pyw|bash|sh|rundll32|regsvr32|msbuild)(\.exe|\.com)?$'
+
+function Test-PsLiteralAst($Ast) {
+    if ($Ast -is [System.Management.Automation.Language.StringConstantExpressionAst]) { return $true }
+    if ($Ast -is [System.Management.Automation.Language.ArrayLiteralAst]) { return (@($Ast.Elements | Where-Object { -not (Test-PsLiteralAst $_) }).Count -eq 0) }
+    return $false
+}
+
+# سبب الديناميكية في نص PowerShell، أو $null إن كانت كل أهداف التنفيذ ثابتة.
+function Get-PsDynamicExecution([string]$Text) {
+    $tokens = $null
+    $errs = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput([string]$Text, [ref]$tokens, [ref]$errs)
+    if (@($errs).Count -gt 0) { return ('PowerShell cannot be parsed statically: ' + $errs[0].Message) }
+    foreach ($c in @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true))) {
+        $first = $c.CommandElements[0]
+        $op = [string]$c.InvocationOperator
+        if ($op -eq 'Ampersand' -or $op -eq 'Dot') {
+            if (-not (Test-PsLiteralAst $first)) { return ('dynamic ' + $(if ($op -eq 'Dot') { 'dot-source' } else { 'call operator' }) + ' target: ' + $first.Extent.Text) }
+            continue
+        }
+        $name = $c.GetCommandName()
+        if (-not $name) { return ('dynamic command name: ' + $first.Extent.Text) }
+        $n = $name.ToLowerInvariant()
+        $bound = $null
+        if (@('start-process', 'saps', 'start', 'invoke-command', 'icm', 'invoke-item', 'ii', 'start-job', 'sajb', 'start-threadjob', 'invoke-wmimethod', 'invoke-cimmethod') -contains $n) {
+            try { $bound = [System.Management.Automation.Language.StaticParameterBinder]::BindCommand($c, $true).BoundParameters } catch { return ('parameters of ' + $name + ' cannot be bound statically') }
+        }
+        switch -regex ($n) {
+            '^(start-process|saps|start)$' {
+                if (-not $bound.ContainsKey('FilePath')) { return ($name + ' without a static -FilePath') }
+                $fp = $bound['FilePath'].Value
+                if (-not (Test-PsLiteralAst $fp)) { return ($name + ' with a dynamic target: ' + $fp.Extent.Text) }
+                $leaf = (([string]$fp.Value) -replace '/', '\' -split '\\')[-1]
+                if ($bound.ContainsKey('ArgumentList') -and -not (Test-PsLiteralAst $bound['ArgumentList'].Value) -and $leaf -match $script:InterpreterLeaves) { return ($name + ' runs interpreter ' + $leaf + ' with dynamic arguments: ' + $bound['ArgumentList'].Value.Extent.Text) }
+            }
+            '^(invoke-command|icm|start-job|sajb|start-threadjob)$' {
+                if ($bound.ContainsKey('FilePath') -and -not (Test-PsLiteralAst $bound['FilePath'].Value)) { return ($name + ' with a dynamic -FilePath: ' + $bound['FilePath'].Value.Extent.Text) }
+                if ($bound.ContainsKey('ScriptBlock') -and -not ($bound['ScriptBlock'].Value -is [System.Management.Automation.Language.ScriptBlockExpressionAst])) { return ($name + ' with a computed script block: ' + $bound['ScriptBlock'].Value.Extent.Text) }
+                if (-not $bound.ContainsKey('FilePath') -and -not $bound.ContainsKey('ScriptBlock')) { return ($name + ' without a static script block or file') }
+            }
+            '^(invoke-item|ii)$' {
+                foreach ($k in @('Path', 'LiteralPath')) { if ($bound.ContainsKey($k) -and -not (Test-PsLiteralAst $bound[$k].Value)) { return ($name + ' with a dynamic path: ' + $bound[$k].Value.Extent.Text) } }
+            }
+            '^(invoke-wmimethod|invoke-cimmethod)$' { return ($name + ' can create processes from computed arguments') }
+        }
+    }
+    foreach ($m in @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true))) {
+        $member = ([string]$m.Member.Extent.Text).Trim("'", '"').ToLowerInvariant()
+        $target = [string]$m.Expression.Extent.Text
+        if (@('invoke', 'invokereturnasis', 'invokescript', 'newscriptblock', 'invokeasync', 'begininvoke') -contains $member) { return ('dynamic invocation: ' + $m.Extent.Text) }
+        if ($member -eq 'create' -and $target -match '(?i)scriptblock') { return ('script block created from a computed string: ' + $m.Extent.Text) }
+        if ($member -eq 'start' -and $target -match '(?i)process') {
+            if (@($m.Arguments | Where-Object { -not (Test-PsLiteralAst $_) }).Count -gt 0) { return ('process started with a computed target: ' + $m.Extent.Text) }
+        }
+    }
+    return $null
+}
+
+# أول وسيط لاستدعاء VBS/JS (حتى أول فاصلة أو قوس إغلاق على المستوى الأعلى خارج النصوص).
+function Get-ScriptFirstArgument([string]$Text) {
+    $depth = 0; $q = [char]0
+    for ($i = 0; $i -lt $Text.Length; $i++) {
+        $ch = $Text[$i]
+        if ($q -ne [char]0) { if ($ch -eq $q) { $q = [char]0 }; continue }
+        if ($ch -eq '"' -or $ch -eq "'") { $q = $ch; continue }
+        if ($ch -eq '(') { $depth++; continue }
+        if ($ch -eq ')') { if ($depth -eq 0) { return $Text.Substring(0, $i) }; $depth--; continue }
+        if ($ch -eq ',' -and $depth -eq 0) { return $Text.Substring(0, $i) }
+    }
+    return $Text
+}
+
+# سبب الديناميكية في غلاف VBS/JS/CMD/BAT، أو $null.
+function Get-ScriptDynamicExecution([string]$Ext, [string]$Text) {
+    $e = $Ext.ToLowerInvariant()
+    if ($e -eq '.vbe' -or $e -eq '.jse') { return ('encoded script host file (' + $e + ') cannot be inspected') }
+    if ($e -eq '.vbs' -or $e -eq '.js' -or $e -eq '.wsf') {
+        $lit = if ($e -eq '.vbs') { '^\s*(("(?:[^"]|"")*"|Chr\(\s*\d+\s*\)|vbCrLf|vbTab)\s*(&\s*(?=\S)|$))+\s*$' } else { '^\s*(("(?:[^"\\]|\\.)*"|''(?:[^''\\]|\\.)*'')\s*(\+\s*(?=\S)|$))+\s*$' }
+        foreach ($line in ($Text -split "`r?`n")) {
+            $l = $line.Trim()
+            if (-not $l -or $l.StartsWith("'") -or $l -match '^(?i)rem\s' -or $l.StartsWith('//')) { continue }
+            if ($l -match '(?i)(^|:)\s*(Execute|ExecuteGlobal)\b|\b(Execute|ExecuteGlobal|Eval)\s*\(|\bnew\s+Function\s*\(') { return ('dynamic code execution: ' + $l) }
+            foreach ($m in [regex]::Matches($l, '(?i)\.(Run|Exec|ShellExecute)\b[ \t]*\(?[ \t]*(.*)$')) {
+                $arg = Get-ScriptFirstArgument $m.Groups[2].Value
+                if ($arg -notmatch $lit) { return ('.' + $m.Groups[1].Value + ' with a computed command: ' + $arg.Trim()) }
+            }
+        }
+        return $null
+    }
+    if ($e -eq '.cmd' -or $e -eq '.bat') {
+        foreach ($line in ($Text -split "`r?`n")) {
+            $l = $line.Trim()
+            if (-not $l -or $l -match '^(?i)(@?rem\b|::)') { continue }
+            if ($l -match '(?i)\bcall\s+set\b') { return ('call set (double expansion builds the command at run time): ' + $l) }
+            if ($l -match '(?im)^@?\s*(call\s+|start\s+(?:"[^"]*"\s+)?(?:/\w+(?::\S+)?\s+)*)?"?(%%~?[a-z]|%[0-9*~]|[%!][A-Za-z_])') { return ('command taken from a variable/argument: ' + $l) }
+            if ($l -match '(?i)\bdo\s+\(?\s*@?(call\s+|start\s+(?:"[^"]*"\s+)?(?:/\w+(?::\S+)?\s+)*)?"?(%%~?[a-z]|%[0-9*~]|[%!][A-Za-z_])') { return ('for-loop runs a command taken from data: ' + $l) }
+            if ($l -match '(?i)\b(call|start)\s+(?:"[^"]*"\s+)?(?:/\w+(?::\S+)?\s+)*"?(%%~?[a-z]|%[0-9*~]|[%!][A-Za-z_])') { return ('call/start with a variable target: ' + $l) }
+        }
+        return $null
+    }
+    return $null
+}
+
+# أدوات التنفيذ في جسم غلاف حسب نوعه؛ PowerShell -Command داخل غلاف CMD يخضع لقاعدة الـAction نفسها.
+function Get-WrapperDynamicReach($Ctx, [string]$Path, [string]$Text, [int]$depth) {
+    $slashPath = ([string]$Path) -replace '\\', '/'
+    $ext = [IO.Path]::GetExtension($slashPath)
+    $why = $null
+    if ($ext -match '^\.(ps1|psm1)$') { $why = Get-PsDynamicExecution $Text }
+    else { $why = Get-ScriptDynamicExecution $ext $Text }
+    if ($why) { return (New-Reach 'UNKNOWN' ('dynamic execution target in wrapper ' + $Path + ': ' + $why)) }
+    $r = New-Reach 'NOT_REPO'
+    if ($ext -match '^\.(cmd|bat)$') {
+        foreach ($m in [regex]::Matches($Text, '(?im)\b(?:powershell|pwsh)(?:\.exe)?"?\s+(?:-\S+\s+)*?-(?:c|command)\s+("([^"]*)"|([^\r\n]+))')) {
+            $cmd = if ($m.Groups[2].Success) { $m.Groups[2].Value } else { $m.Groups[3].Value }
+            $r = Join-Reach $r (Get-PsCommandReach $Ctx $cmd '' ($depth + 1))
+            if ($r.status -eq 'REPO') { return $r }
+        }
+    }
+    return $r
+}
+
 # غلاف (vbs/cmd/bat/ps1/psm1، أو هدف مضيف سكربت) خارج المستودع: يُقرأ نصه ولا يُنفَّذ، حتى 3 مستويات.
 function Get-WrapperReach($Ctx, [string]$Path, [int]$depth) {
     # الغلاف يُحلّ في نظام الملفات قبل قراءته وقبل قرار احتوائه (alias/junction إلى المستودع ⇒ REPO).
@@ -658,6 +786,10 @@ function Get-WrapperReach($Ctx, [string]$Path, [int]$depth) {
     if ($inner -match '(?i)\s[-/](e|ec|en|enc|enco|encod|encode|encoded|encodedc\w*)\s+[A-Za-z0-9+/=]{8,}|FromBase64String|Invoke-Expression|(?<![\w-])iex(?![\w-])') {
         $r = Join-Reach $r (New-Reach 'UNKNOWN' ('opaque/dynamic command in wrapper ' + $Path))
     }
+    # هدف تنفيذ محسوب (متغير، أو ملف بيانات، أو تعبير) ⇒ UNKNOWN؛ لا يُقيَّم ولا يُنفَّذ (Codex P1).
+    $dr = Get-WrapperDynamicReach $Ctx ([string]$pc.final) $inner $depth
+    if ($dr.status -eq 'REPO') { return $dr }
+    $r = Join-Reach $r $dr
     foreach ($line in ($inner -split "`r?`n")) {
         $lr = Get-FieldReach $Ctx $line
         if ($lr.status -eq 'REPO') { return (New-Reach 'REPO' ('wrapper ' + $Path + ' references a repository path: ' + $lr.why)) }

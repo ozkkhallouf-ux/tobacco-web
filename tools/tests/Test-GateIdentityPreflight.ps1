@@ -74,7 +74,7 @@ $ps = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
 $autoprintVbs = 'C:\ProgramData\OZK-TOBACCO\TaskWrappers\ozk-ameen-autoprint-hidden.vbs'
 $script:Wrappers = @{ $autoprintVbs = ('shell.Run """' + $repo + '\tools\ameen-autoprint\run-watcher.bat""", 0, True') }
 # أغلفة/أهداف موجودة بمحتوى معروف غير مستودعي. أي مسار غير مدرج هنا = ملف مفقود ($null) ⇒ UNKNOWN.
-$script:Wrappers['C:\ProgramData\OZK-TOBACCO\TaskWrappers\tobacco-ameen-backup-monitor-hidden.vbs'] = 'CreateObject("WScript.Shell").Run C:\Tools\backup\monitor.exe, 0, True'
+$script:Wrappers['C:\ProgramData\OZK-TOBACCO\TaskWrappers\tobacco-ameen-backup-monitor-hidden.vbs'] = 'CreateObject("WScript.Shell").Run """C:\Tools\backup\monitor.exe""", 0, True'
 $script:Wrappers['C:\ProgramData\OZK-TOBACCO\TaskWrappers\helper.cmd'] = '@echo off' + "`r`n" + '"C:\Tools\backup\run-backup.exe" /quiet'
 $script:Wrappers['c:\tools\svc\server.js'] = 'require("http").createServer(() => {}).listen(8080)'
 $script:Wrappers['C:\Tools\report.ps1'] = 'Get-Date | Out-File C:\Logs\report.txt'
@@ -816,6 +816,79 @@ try {
     $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Fs Broken System' 'SYSTEM' 'x' @(FsAct $ps '-File "C:\broken\tools\job.ps1"'))
     Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) '*Fs Broken System*cannot determine whether*') 'SYSTEM task through a broken junction => UNKNOWN => BLOCK'
     $script:FsAliases = [ordered]@{}; $script:FsMissing = @{}; $script:FsErrors = @{}
+
+    Write-Host '== Dynamic / non-literal execution targets inside wrappers (Codex P1)'
+    $dw = 'C:\ProgramData\OZK-TOBACCO\Dyn'
+    $cfgD = New-Config 'OZK2026\OZK-DeployGate' @()
+    $script:Wrappers['C:\safe\tool.ps1'] = 'Get-Date'
+    $script:Wrappers['c:\safe\tool.ps1'] = 'Get-Date'
+    $script:Wrappers['C:\Tools\static.cmd'] = '@echo static'
+    $script:Wrappers['c:\tools\static.cmd'] = '@echo static'
+    function Dyn-Reach([string]$Name, [string]$Body) {
+        $p = $dw + '\' + $Name
+        $script:Wrappers[$p] = $Body
+        $ext = [IO.Path]::GetExtension($Name).ToLowerInvariant()
+        $act = if ($ext -eq '.ps1') { [pscustomobject]@{ execute = $ps; arguments = ('-NoProfile -File "' + $p + '"'); workingDirectory = '' } }
+               elseif ($ext -eq '.vbs') { [pscustomobject]@{ execute = 'wscript.exe'; arguments = ('"' + $p + '"'); workingDirectory = '' } }
+               else { [pscustomobject]@{ execute = 'cmd.exe'; arguments = ('/c "' + $p + '"'); workingDirectory = '' } }
+        return (Resolve-TaskReach $cfgD @($act) 'SYSTEM')
+    }
+    $dynCases = @(
+        @{ label = 'PowerShell: $p = Get-Content ...; & $p => UNKNOWN'; n = 'witness.ps1'; b = ('$p = Get-Content C:\ProgramData\target.txt' + "`r`n" + '& $p') },
+        @{ label = 'PowerShell: & $variable => UNKNOWN'; n = 'amp.ps1'; b = '& $script' },
+        @{ label = 'PowerShell: & (expression) => UNKNOWN'; n = 'ampexpr.ps1'; b = '& (Join-Path $root "tools\x.ps1")' },
+        @{ label = 'PowerShell: & "$dir\x.ps1" (expandable string) => UNKNOWN'; n = 'ampexp.ps1'; b = '& "$dir\x.ps1"' },
+        @{ label = 'PowerShell: . $variable (dot-source) => UNKNOWN'; n = 'dot.ps1'; b = '. $lib' },
+        @{ label = 'PowerShell: Start-Process $variable => UNKNOWN'; n = 'sp.ps1'; b = 'Start-Process $exe' },
+        @{ label = 'PowerShell: Start-Process -FilePath (expression) => UNKNOWN'; n = 'spexpr.ps1'; b = 'Start-Process -FilePath (Get-Content C:\x.txt) -Wait' },
+        @{ label = 'PowerShell: Start-Process powershell with computed arguments => UNKNOWN'; n = 'sparg.ps1'; b = 'Start-Process powershell.exe -ArgumentList "-File $target"' },
+        @{ label = 'PowerShell: Invoke-Command -ScriptBlock $sb => UNKNOWN'; n = 'icmsb.ps1'; b = 'Invoke-Command -ScriptBlock $sb' },
+        @{ label = 'PowerShell: Invoke-Command -FilePath $f => UNKNOWN'; n = 'icmfp.ps1'; b = 'Invoke-Command -ComputerName . -FilePath $f' },
+        @{ label = 'PowerShell: [scriptblock]::Create(...) => UNKNOWN'; n = 'sbcreate.ps1'; b = '$sb = [scriptblock]::Create((Get-Content C:\x.txt -Raw)); $sb.Invoke()' },
+        @{ label = 'PowerShell: [Diagnostics.Process]::Start($x) => UNKNOWN'; n = 'procstart.ps1'; b = '[System.Diagnostics.Process]::Start($x)' },
+        @{ label = 'PowerShell: $ExecutionContext.InvokeCommand.InvokeScript(...) => UNKNOWN'; n = 'invokescript.ps1'; b = '$ExecutionContext.InvokeCommand.InvokeScript($code)' },
+        @{ label = 'PowerShell: Invoke-WmiMethod Win32_Process Create => UNKNOWN'; n = 'wmi.ps1'; b = 'Invoke-WmiMethod -Class Win32_Process -Name Create -ArgumentList $cmd' },
+        @{ label = 'PowerShell: unparsable wrapper => UNKNOWN'; n = 'broken.ps1'; b = 'if ($x { & "C:\safe\tool.ps1"' },
+        @{ label = 'VBS: WshShell.Run variable => UNKNOWN'; n = 'run.vbs'; b = ('Set sh = CreateObject("WScript.Shell")' + "`r`n" + 'cmd = ReadAll()' + "`r`n" + 'sh.Run cmd, 0, True') },
+        @{ label = 'VBS: WshShell.Exec variable => UNKNOWN'; n = 'exec.vbs'; b = ('Set sh = CreateObject("WScript.Shell")' + "`r`n" + 'Set p = sh.Exec(target)') },
+        @{ label = 'VBS: concatenated/computed Run target => UNKNOWN'; n = 'concat.vbs'; b = ('Set sh = CreateObject("WScript.Shell")' + "`r`n" + 'sh.Run """" & root & "\tools\x.bat""", 0, True') },
+        @{ label = 'VBS: Execute of computed code => UNKNOWN'; n = 'execute.vbs'; b = 'Execute ReadCode()' },
+        @{ label = 'CMD: call %VAR% => UNKNOWN'; n = 'callvar.cmd'; b = 'call %TARGET%' },
+        @{ label = 'CMD: start %VAR% => UNKNOWN'; n = 'startvar.cmd'; b = 'start "" %TARGET%' },
+        @{ label = 'CMD: delayed expansion target !VAR! => UNKNOWN'; n = 'delayed.cmd'; b = ('setlocal EnableDelayedExpansion' + "`r`n" + 'call !TARGET!') },
+        @{ label = 'CMD: for /f ... do call %%i (command from data file) => UNKNOWN'; n = 'forcall.cmd'; b = 'for /f "delims=" %%i in (C:\ProgramData\target.txt) do call %%i' },
+        @{ label = 'CMD: call %1 (batch argument as command) => UNKNOWN'; n = 'callarg.cmd'; b = 'call %1' },
+        @{ label = 'CMD: call set (double expansion) => UNKNOWN'; n = 'callset.cmd'; b = 'call set T=%%%NAME%%%' },
+        @{ label = 'CMD: powershell -Command "& $p" inside a cmd wrapper => UNKNOWN'; n = 'pscmd.cmd'; b = 'powershell -NoProfile -Command "& $p"' }
+    )
+    foreach ($c in $dynCases) { $got = Dyn-Reach $c.n $c.b; Assert-True ($got.status -eq 'UNKNOWN') ($c.label + ' (got ' + $got.status + ')') }
+    $staticCases = @(
+        @{ label = 'PowerShell: static literal & ''C:\safe\tool.ps1'' => analyzed normally (NOT_REPO)'; n = 'lit.ps1'; b = '& ''C:\safe\tool.ps1'' -Verbose' },
+        @{ label = 'PowerShell: static literal Start-Process => analyzed normally (NOT_REPO)'; n = 'litsp.ps1'; b = 'Start-Process -FilePath ''C:\Tools\backup\run-backup.exe'' -ArgumentList ''/quiet'' -Wait' },
+        @{ label = 'PowerShell: Invoke-Command with a literal script block => analyzed normally (NOT_REPO)'; n = 'liticm.ps1'; b = 'Invoke-Command -ScriptBlock { Get-Date }' },
+        @{ label = 'PowerShell: ordinary non-execution variables => not UNKNOWN just for existing'; n = 'vars.ps1'; b = ('$d = Get-Date' + "`r`n" + '$log = ''C:\Logs\x.log''' + "`r`n" + 'Write-Output $d | Out-File $log') },
+        @{ label = 'VBS: literal static Run => analyzed normally (NOT_REPO)'; n = 'litrun.vbs'; b = ('Set sh = CreateObject("WScript.Shell")' + "`r`n" + 'sh.Run """C:\Tools\backup\run-backup.exe"" /quiet", 0, True') },
+        @{ label = 'VBS: literal static Exec with Chr(34) => analyzed normally (NOT_REPO)'; n = 'litexec.vbs'; b = ('Set sh = CreateObject("WScript.Shell")' + "`r`n" + 'Set p = sh.Exec(Chr(34) & "C:\Tools\backup\run-backup.exe" & Chr(34))') },
+        @{ label = 'CMD: static call target => analyzed normally (NOT_REPO)'; n = 'litcall.cmd'; b = 'call "C:\Tools\static.cmd"' },
+        @{ label = 'CMD: static start target => analyzed normally (NOT_REPO)'; n = 'litstart.cmd'; b = 'start "" "C:\Tools\backup\run-backup.exe" /quiet' }
+    )
+    foreach ($c in $staticCases) { $got = Dyn-Reach $c.n $c.b; Assert-True ($got.status -eq 'NOT_REPO') ($c.label + ' (got ' + $got.status + ': ' + $got.why + ')') }
+    $got = Dyn-Reach 'litrepo.ps1' ('& ''' + $repo + '\tools\x.ps1''')
+    Assert-True ($got.status -eq 'REPO') 'PowerShell: static literal call into the repo => REPO (unchanged)'
+    # سلسلة متداخلة: A ثابت ⇒ B فيه هدف ديناميكي ⇒ UNKNOWN للسلسلة (لا يصير NOT_REPO في الأعلى).
+    $script:Wrappers[$dw + '\inner-dyn.ps1'] = '& $p'
+    $got = Dyn-Reach 'outer-static.cmd' ('call powershell.exe -NoProfile -File "' + $dw + '\inner-dyn.ps1"')
+    Assert-True ($got.status -eq 'UNKNOWN') 'nested: static wrapper A -> wrapper B with a dynamic execution target => UNKNOWN for the chain'
+    # شاهد Codex: غلاف خارجي، $p = Get-Content ...; & $p، مهمة SYSTEM ⇒ BLOCK.
+    $wp = $dw + '\codex-witness.ps1'
+    $script:Wrappers[$wp] = ('$p = Get-Content C:\ProgramData\target.txt' + "`r`n" + '& $p')
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Dyn Witness' 'SYSTEM' ($ps + ' -NoProfile -File "' + $wp + '"'))
+    $r = Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())
+    Assert-True (-not $r.ok -and (Test-BlockLike $r '*Dyn Witness*dynamic execution target*call operator*')) 'Codex witness: privileged task -> external wrapper -> & (Get-Content ...) => BLOCK'
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Dyn Witness NonAdmin' 'OZKSync' ($ps + ' -NoProfile -File "' + $wp + '"'))
+    Assert-True ((Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())).ok) 'same wrapper under a non-privileged identity => not a privilege risk (UNKNOWN only blocks privileged contexts)'
+    $script:Tasks = @(Get-CleanLayout) + @((New-Task 'Dyn Group' 'x' 'x' @([pscustomobject]@{ execute = $ps; arguments = ('-File "' + $wp + '"'); workingDirectory = '' })) | ForEach-Object { $_.principalType = 'GROUP'; $_.identity = 'BUILTIN\Users'; $_.groupId = 'BUILTIN\Users'; $_.userId = ''; $_ })
+    Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) '*Dyn Group*group principal*cannot prove*') 'same wrapper under a GROUP principal => BLOCK'
 
     Write-Host '== Install preflight combines price-list and identity checks'
     # فحص ACL الفعلية مُختبَر في Test-GateTrustAcl.ps1؛ هنا نتيجته ناجحة لعزل الهوية ونشرات الأسعار.

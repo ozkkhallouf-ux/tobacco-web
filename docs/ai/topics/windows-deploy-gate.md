@@ -166,6 +166,25 @@
     - لم يتغيّر المسار الحي، ولم تُنقل `TaskWrappers`، ولم تُعدَّل ProgramData. تغيير `gateDir` في الإعداد قرار
       bootstrap بموافقة المالك.
   - لا يُدّعى أي حماية من مدير محلي بشري خبيث.
+- **أهداف تنفيذ محسوبة داخل الأغلفة (Codex P1):**
+  - أي أداة تنفيذ داخل غلاف لا يُثبَت هدفها نصاً ثابتاً ⇒ UNKNOWN، ومع هوية مميّزة أو مجموعة أو نوع
+    principal غير محسوم ⇒ حجب. التحليل ساكن: لا تُقيَّم المتغيرات، ولا تُقرأ ملفات البيانات، ولا يُنفَّذ شيء.
+  - **PowerShell** يُحلَّل بشجرته: `Parser::ParseInput` و`StaticParameterBinder`.
+    - `&` أو `.` بهدف غير حرفي (متغير، أو تعبير، أو نص فيه متغير) ⇒ UNKNOWN.
+    - `Start-Process` بـ`-FilePath` غير حرفي، أو مفسّر بوسائط محسوبة ⇒ UNKNOWN.
+    - `Invoke-Command`/`Start-Job` بكتلة غير حرفية أو ملف محسوب ⇒ UNKNOWN.
+    - `Invoke-Item` بمسار محسوب، و`Invoke-WmiMethod`/`Invoke-CimMethod` ⇒ UNKNOWN.
+    - `[scriptblock]::Create`، و`.Invoke`/`.InvokeScript`، و`[Process]::Start` بوسيط محسوب ⇒ UNKNOWN.
+    - نص لا يُحلَّل ⇒ UNKNOWN.
+  - **VBS/JS**:
+    - `.Run`/`.Exec`/`.ShellExecute` بوسيط أول ليس نصاً حرفياً (مسموح الوصل بين نصوص حرفية و`Chr(n)`) ⇒ UNKNOWN.
+    - `Execute`/`ExecuteGlobal`/`Eval`/`new Function` ⇒ UNKNOWN. و`.vbe`/`.jse` المشفّرة ⇒ UNKNOWN.
+  - **CMD/BAT**:
+    - `call`/`start` أو سطر يبدأ بمتغير (`%VAR%`، `!VAR!`، `%%i`، `%1`) ⇒ UNKNOWN.
+    - `for ... do call %%i`، و`call set` ⇒ UNKNOWN.
+    - `powershell -Command` داخل الغلاف يخضع لقاعدة `-Command` نفسها في الـAction.
+  - المتغير العادي الذي لا يصير هدف تنفيذ لا يُحتسب.
+  - السلسلة: UNKNOWN في أي غلاف متداخل يبقى UNKNOWN للسلسلة كلها، ولا يُطوى إلى NOT_REPO.
 - **هوية المسار في نظام الملفات (Codex P1):**
   - قرار REPO/NOT_REPO لا يُتخذ بالنص وحده: junction أو symlink أو اسم 8.3 قد يجعل `C:\runner` هو
     جذر المستودع فعلياً.
