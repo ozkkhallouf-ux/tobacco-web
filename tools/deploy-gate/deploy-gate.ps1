@@ -181,7 +181,8 @@ function Invoke-GateGit($Config, [string[]]$GitArgs) {
     if (-not (Test-Path -LiteralPath $git)) { $git = 'git' }
     $env:GIT_TERMINAL_PROMPT = '0'
     $env:GCM_INTERACTIVE = 'Never'
-    $allArgs = @('-C', $Config.repoPath, '-c', 'credential.helper=', '-c', ('safe.directory=' + $Config.repoPath)) + $GitArgs
+    # Codex P1: لا hooks ولا برامج من إعداد المستودع المحلي تحت هوية البوابة (Get-GateGitHardening).
+    $allArgs = @('-C', $Config.repoPath, '-c', 'credential.helper=', '-c', ('safe.directory=' + $Config.repoPath)) + @(Get-GateGitHardening) + $GitArgs
     $old = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
@@ -457,6 +458,9 @@ function Invoke-DeployGate {
     if (-not (Test-Path -LiteralPath (Join-Path $Config.repoPath '.git'))) {
         return Complete-Gate $paths $record 'STOP' 'repository not found' $true
     }
+    # .git قد يتغيّر بعد Initialize: hooks أو إعداد محلي خطر ⇒ توقف قبل أي نداء git (Codex P1).
+    $gitSafety = Test-GitHookSafety $Config
+    if (-not $gitSafety.ok) { return Complete-Gate $paths $record 'STOP' ('git hooks/config not safe: ' + (@($gitSafety.results | Where-Object { $_.verdict -ne 'PASS' } | ForEach-Object { $_.reason }) -join '; ')) $true }
 
     $state = Read-JsonFile $paths.State
     $head = Get-GitValue $Config @('rev-parse', 'HEAD')

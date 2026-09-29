@@ -256,6 +256,95 @@ try {
     Assert-True ((Invoke-DeployGate -Config $c3 -GateMode 'Deploy').reason -like '*shorter than 24 hours*') 'configured soak below 24 hours is floored at 24 (policy unchanged)'
     Assert-True ([string](Get-Content -Raw -LiteralPath (Join-Path $sy.Gate 'audit.jsonl')) -like '*deploy not permitted*') 'refused Deploy attempts are audited'
 
+    Write-Host '== Git hooks / local git configuration cannot run under the gate identity (Codex P1)'
+    function New-TestHook([string]$Repo, [string]$Name, [string]$Marker) {
+        $h = Join-Path (Join-Path (Join-Path $Repo '.git') 'hooks') $Name
+        [System.IO.File]::WriteAllText($h, ("#!/bin/sh`necho ran > '" + ($Marker -replace '\\', '/') + "'`n"))
+        if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { & chmod +x $h }
+        return $h
+    }
+    $eh = New-InitializedEnv
+    [void](Publish-TestRelease $eh @{ 'tools/reader.ps1' = "'reader v2'`n" } -Approve)
+    [void](Invoke-GateGit $eh.Config @('fetch', 'origin', 'windows-production'))
+    $before = Get-TestHead $eh
+    $marker = Join-Path $eh.Base 'post-merge-ran.txt'
+    $hook = New-TestHook $eh.Repo 'post-merge' $marker
+    # 1) الطبقة الأولى: merge --ff-only عبر Invoke-GateGit (نداء البوابة نفسه) لا يشغّل post-merge المزروع.
+    $m = Invoke-GateGit $eh.Config @('merge', '--ff-only', 'origin/windows-production')
+    Assert-True ($m.Code -eq 0 -and (Get-TestHead $eh) -ne $before) 'gate git merge --ff-only fast-forwards'
+    Assert-True (-not (Test-Path -LiteralPath $marker)) 'planted .git/hooks/post-merge does NOT run under the gate git invocation (core.hooksPath disabled)'
+    # ضابط: git عادي بلا تحصين يشغّل الـhook فعلاً — الاختبار له أسنان.
+    Invoke-TestGit $eh.Repo @('reset', '-q', '--hard', $before) | Out-Null
+    Invoke-TestGit $eh.Repo @('merge', '-q', '--ff-only', 'origin/windows-production') | Out-Null
+    Assert-True (Test-Path -LiteralPath $marker) 'control: plain git merge --ff-only DOES run the planted post-merge hook'
+    Remove-Item -LiteralPath $marker -Force
+    Invoke-TestGit $eh.Repo @('reset', '-q', '--hard', $before) | Out-Null
+    # 2) الطبقة الثانية: Deploy يتوقف قبل أي نداء git إذا وُجد hook، والـhook لا يعمل.
+    $r = Invoke-DeployGate -Config $eh.Config -GateMode 'Deploy'
+    Assert-True ($r.result -eq 'STOP' -and $r.reason -like '*git hooks/config not safe*git hook present*post-merge*') 'Deploy with a planted hook => STOP (not silently accepted)'
+    Assert-True ((Get-TestHead $eh) -eq $before -and -not (Test-Path -LiteralPath $marker)) 'Deploy with a planted hook: no merge, hook never ran'
+    $s = Test-GitHookSafety $eh.Config
+    Assert-True (-not $s.ok -and @($s.results | Where-Object { $_.reason -like '*git hook present*post-merge*' }).Count -eq 1) 'preflight: executable hook detected => BLOCK'
+    Remove-Item -LiteralPath $hook -Force
+    $s = Test-GitHookSafety $eh.Config
+    Assert-True ($s.ok) 'preflight: clean repository (only *.sample hooks) => PASS'
+    # 3) إعداد محلي خطر ⇒ BLOCK، وكل مفتاح يُكتشف.
+    $bad = @(
+        @('core.hooksPath', (Join-Path $eh.Base 'evil-hooks')),
+        @('core.fsmonitor', (Join-Path $eh.Base 'fsmon.sh')),
+        @('core.sshCommand', 'C:\evil\ssh.exe'),
+        @('core.askPass', 'C:\evil\askpass.exe'),
+        @('core.gitProxy', 'C:\evil\proxy.exe'),
+        @('core.worktree', (Join-Path $eh.Base 'elsewhere')),
+        @('filter.evil.smudge', 'C:\evil\smudge.exe %f'),
+        @('merge.evil.driver', 'C:\evil\merge.exe %O %A %B'),
+        @('diff.evil.textconv', 'C:\evil\conv.exe'),
+        @('include.path', (Join-Path $eh.Base 'extra.gitconfig')),
+        @('credential.helper', 'C:\evil\cred.exe'),
+        @('url.https://evil.invalid/.insteadOf', 'https://github.com/'),
+        @('protocol.ext.allow', 'always'),
+        @('submodule.recurse', 'true')
+    )
+    foreach ($kv in $bad) {
+        Invoke-TestGit $eh.Repo @('config', '--local', $kv[0], $kv[1]) | Out-Null
+        $s = Test-GitHookSafety $eh.Config
+        Assert-True (-not $s.ok -and @($s.results | Where-Object { $_.reason -like ('*sets ' + $kv[0].ToLowerInvariant() + '*') -or $_.reason -like ('*sets ' + $kv[0] + '*') }).Count -ge 1) ('preflight: local git config ' + $kv[0] + ' => BLOCK')
+        Invoke-TestGit $eh.Repo @('config', '--local', '--unset-all', $kv[0]) | Out-Null
+    }
+    Assert-True ((Test-GitHookSafety $eh.Config).ok) 'preflight: repository back to safe configuration => PASS'
+    # core.hooksPath محلي يشير إلى hooks فعلية: التحصين يتجاهله، والفحص يحجبه.
+    $evil = Join-Path $eh.Base 'evil-hooks'
+    [void](New-Item -ItemType Directory -Force -Path $evil)
+    $marker2 = Join-Path $eh.Base 'hookspath-ran.txt'
+    $h2 = Join-Path $evil 'post-merge'
+    [System.IO.File]::WriteAllText($h2, ("#!/bin/sh`necho ran > '" + ($marker2 -replace '\\', '/') + "'`n"))
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { & chmod +x $h2 }
+    Invoke-TestGit $eh.Repo @('config', '--local', 'core.hooksPath', $evil) | Out-Null
+    $m = Invoke-GateGit $eh.Config @('merge', '--ff-only', 'origin/windows-production')
+    Assert-True ($m.Code -eq 0 -and -not (Test-Path -LiteralPath $marker2)) 'local core.hooksPath pointing to a real hook is overridden by the gate (hook not run)'
+    $r = Invoke-DeployGate -Config $eh.Config -GateMode 'DryRun'
+    Assert-True ($r.result -eq 'STOP' -and $r.reason -like '*sets core.hookspath*') 'DryRun with a dangerous local core.hooksPath => STOP'
+    Invoke-TestGit $eh.Repo @('reset', '-q', '--hard', $before) | Out-Null
+    Invoke-TestGit $eh.Repo @('config', '--local', '--unset-all', 'core.hooksPath') | Out-Null
+    # fsmonitor محلي: التحصين يطفئه (لا يُستدعى في status).
+    $marker3 = Join-Path $eh.Base 'fsmonitor-ran.txt'
+    $fsm = Join-Path $eh.Base 'fsmon.sh'
+    [System.IO.File]::WriteAllText($fsm, ("#!/bin/sh`necho ran > '" + ($marker3 -replace '\\', '/') + "'`n"))
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { & chmod +x $fsm }
+    Invoke-TestGit $eh.Repo @('config', '--local', 'core.fsmonitor', ($fsm -replace '\\', '/')) | Out-Null
+    [void](Invoke-GateGit $eh.Config @('status', '--porcelain'))
+    Assert-True (-not (Test-Path -LiteralPath $marker3)) 'local core.fsmonitor command is not invoked by the gate git status'
+    Invoke-TestGit $eh.Repo @('config', '--local', '--unset-all', 'core.fsmonitor') | Out-Null
+    # الحالة الآمنة تستمر: Deploy معتمد يتقدّم عادياً بعد إزالة الخطر.
+    $r = Invoke-DeployGate -Config $eh.Config -GateMode 'Deploy'
+    Assert-True ($r.result -eq 'OK' -and (Get-TestHead $eh) -ne $before) 'clean repository: approved Deploy still fast-forwards (existing behaviour unchanged)'
+    # تعذّر قراءة الحالة ⇒ BLOCK.
+    $cfgX = $eh.Config | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+    $cfgX.repoPath = Join-Path $eh.Base 'not-a-repo'
+    [void](New-Item -ItemType Directory -Force -Path $cfgX.repoPath)
+    $s = Test-GitHookSafety $cfgX
+    Assert-True (-not $s.ok -and $s.results[0].reason -like '*cannot resolve the git directory*') 'preflight: git state that cannot be read => BLOCK'
+
     Write-Host '== Initialize'
     $e = New-GateTestEnv; [void]$environments.Add($e)
     $r = Invoke-DeployGate -Config $e.Config -GateMode 'Deploy'

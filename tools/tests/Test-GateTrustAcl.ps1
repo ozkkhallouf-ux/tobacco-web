@@ -320,7 +320,7 @@ try {
 
     Write-Host '== Install preflight includes the ACL check'
     function Invoke-MigrationPreflight($Config) { return [pscustomobject]@{ ok = $true; results = @() } }
-    function Invoke-GateIdentityPreflight($Config) { return [pscustomobject]@{ ok = $true; results = @() } }
+    function Invoke-GateIdentityPreflight($Config) { return [pscustomobject]@{ ok = $true; results = @() } }; function Test-GitHookSafety($Config) { return [pscustomobject]@{ ok = $true; results = @() } }
     Reset-Acls
     Assert-True ((Invoke-InstallPreflight $config).ok) 'install preflight passes with a safe ACL'
     Add-DirAce (New-Ace 'OZK2026\OZKSync' 'Modify' 'Allow' $true)

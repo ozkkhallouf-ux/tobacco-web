@@ -360,6 +360,25 @@ for (const needle of ["function Resolve-WorkloadReach", "cannot determine whethe
   assert.match(sc, /for-loop runs a command taken from data/);
   assert.match(read("docs/ai/topics/windows-deploy-gate.md"), /StaticParameterBinder/);
 }
+// Codex P1 (#285): لا Git hooks ولا برامج من إعداد المستودع المحلي تحت هوية البوابة.
+{
+  const body = (n) => { const i = preSrc.indexOf(`function ${n}`); assert.ok(i >= 0, n); const j = preSrc.indexOf("\nfunction ", i + 10); return preSrc.slice(i, j < 0 ? undefined : j); };
+  const hard = body("Get-GateGitHardening"), safe = body("Test-GitHookSafety");
+  for (const needle of ["'core.hooksPath=' + $nullHooks", "$nullHooks = 'NUL'", "'core.fsmonitor=false'", "'core.sshCommand=ssh'", "'core.askPass='", "'core.gitProxy='", "'credential.helper='", "'protocol.ext.allow=never'", "'submodule.recurse=false'"]) assert.ok(hard.includes(needle), `تحصين git: ${needle}`);
+  const gg = gateSrc.slice(gateSrc.indexOf("function Invoke-GateGit"), gateSrc.indexOf("\nfunction ", gateSrc.indexOf("function Invoke-GateGit") + 10));
+  assert.match(gg, /\+ @\(Get-GateGitHardening\) \+ \$GitArgs/, "كل نداء git من البوابة محصّن");
+  assert.match(body("Invoke-PreflightGit"), /\$hard = Get-GateGitHardening[\s\S]*@hard @GitArgs/, "نداءات git في الفحص محصّنة");
+  assert.match(body("Invoke-InstallPreflight"), /\$d = Test-GitHookSafety \$Config[\s\S]*-and \$d\.ok/, "Initialize يفحص hooks والإعداد المحلي");
+  assert.match(gateSrc, /\$gitSafety = Test-GitHookSafety \$Config\s+if \(-not \$gitSafety\.ok\) \{ return Complete-Gate \$paths \$record 'STOP'/, "كل تشغيل للبوابة يفحص .git قبل أي نداء git");
+  assert.ok(gateSrc.indexOf("$gitSafety = Test-GitHookSafety $Config") < gateSrc.indexOf("$head = Get-GitValue $Config @('rev-parse', 'HEAD')"), "الفحص يسبق أول نداء git في التشغيل");
+  assert.match(safe, /if \(\$f\.Name -notlike '\*\.sample'\) \{ \$results \+= & \$block \('git hook present: /, "hook فعلي ⇒ حجب");
+  assert.match(safe, /if \(\$names\.Code -ne 0\) \{ \$results \+= & \$block \('cannot read local git config /, "تعذّر قراءة الإعداد ⇒ حجب");
+  assert.match(safe, /catch \{ \$results \+= & \$block \('cannot list git hooks/, "تعذّر قراءة hooks ⇒ حجب");
+  assert.match(safe, /if \(\$g\.Code -ne 0 -or -not \$g\.Text\) \{ return \[pscustomobject\]@\{ ok = \$false/, "تعذّر تحديد .git ⇒ حجب");
+  for (const k of ["hookspath", "fsmonitor", "sshcommand", "gitproxy", "askpass", "worktree", "include\\.", "filter\\.", "credential\\.", "protocol\\.", "submodule\\.", "insteadof", "merge\\..+\\.driver", "diff\\..+\\.(command|textconv)"]) assert.ok(preSrc.includes(k), `إعداد git خطر مغطى: ${k}`);
+  assert.match(read("tools/tests/Test-DeployGate.ps1"), /control: plain git merge --ff-only DOES run the planted post-merge hook/, "اختبار hooks له أسنان");
+  assert.match(read("docs/ai/topics/windows-deploy-gate.md"), /core\.hooksPath=NUL/);
+}
 // Codex P1: قرارات الثقة بالـSID حصراً — لا عودة لمقارنة الاسم بعد حذف بادئة الجهاز/المجال.
 assert.ok(!preSrc.includes("ConvertTo-IdentityKey"), "مفتاح الهوية بالاسم محذوف نهائياً");
 const fnBody = (name) => { const i = preSrc.indexOf(`function ${name}`); assert.ok(i >= 0, name); const j = preSrc.indexOf("\nfunction ", i + 10); return preSrc.slice(i, j < 0 ? undefined : j); };

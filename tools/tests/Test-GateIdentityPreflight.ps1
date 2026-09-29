@@ -507,7 +507,7 @@ try {
         if (-not $c.pattern) { Assert-True ($r.ok) $c.label } else { Assert-True (-not $r.ok -and (Test-BlockLike $r $c.pattern)) $c.label }
     }
     $script:Tasks = @(Get-CleanLayout -NoGate)
-    function Test-GateTrustAcl($Config) { return [pscustomobject]@{ ok = $true; results = @() } }
+    function Test-GateTrustAcl($Config) { return [pscustomobject]@{ ok = $true; results = @() } }; function Test-GitHookSafety($Config) { return [pscustomobject]@{ ok = $true; results = @() } }
     function Get-PreflightTaskActionText([string]$TaskName) { return $null }
     function Get-PreflightTaskState([string]$TaskName) { if ($TaskName -eq 'OZK-PriceListSync') { return 'Disabled' } return $null }
     function Get-PreflightTaskNames { return @() }
@@ -1025,7 +1025,7 @@ try {
 
     Write-Host '== Install preflight combines price-list and identity checks'
     # فحص ACL الفعلية مُختبَر في Test-GateTrustAcl.ps1؛ هنا نتيجته ناجحة لعزل الهوية ونشرات الأسعار.
-    function Test-GateTrustAcl($Config) { return [pscustomobject]@{ ok = $true; results = @() } }
+    function Test-GateTrustAcl($Config) { return [pscustomobject]@{ ok = $true; results = @() } }; function Test-GitHookSafety($Config) { return [pscustomobject]@{ ok = $true; results = @() } }
     $script:Tasks = Get-CleanLayout
     function Get-PreflightTaskActionText([string]$TaskName) { return $null }
     function Get-PreflightTaskState([string]$TaskName) { if ($TaskName -eq 'OZK-PriceListSync') { return 'Disabled' } return $null }

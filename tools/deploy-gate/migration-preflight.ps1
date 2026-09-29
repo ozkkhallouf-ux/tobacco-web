@@ -304,11 +304,62 @@ function Read-PreflightWrapperText([string]$Path) {
     return [System.IO.File]::ReadAllText($Path)
 }
 
+# ------------------------------------------------------------
+# تحصين Git (Codex P1): البوابة تشغّل git بهوية البوابة، الكاتب الوحيد لملفات الثقة. hook مزروع في .git
+# (مثل post-merge بعد merge --ff-only) أو إعداد محلي يشغّل برنامجاً كان سينفَّذ بتلك الهوية. لا يُعتمد على
+# نظافة الشجرة ولا بصمات الملفات المتتبّعة (لا تغطي .git). طبقتان:
+#   1) كل نداء git من البوابة والفحص يمرّر -c تتقدّم على إعداد المستودع: لا hooks، ولا fsmonitor، ولا
+#      sshCommand/askPass/gitProxy/credential helper مخصّص، ولا ext::، ولا submodules.
+#   2) Test-GitHookSafety يحجب أي hook فعلي أو إعداد محلي خطر (ومنه ما لا تُبطله -c: core.worktree،
+#      filter.*، merge/diff drivers، include.*)، وأي تعذّر في القراءة ⇒ حجب.
+# ------------------------------------------------------------
+function Get-GateGitHardening {
+    $nullHooks = '/dev/null'
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { $nullHooks = 'NUL' }
+    return @('-c', ('core.hooksPath=' + $nullHooks), '-c', 'core.fsmonitor=false', '-c', 'core.sshCommand=ssh', '-c', 'core.askPass=', '-c', 'core.gitProxy=', '-c', 'credential.helper=', '-c', 'protocol.ext.allow=never', '-c', 'submodule.recurse=false')
+}
+
+# مفاتيح إعداد محلي تشغّل برنامجاً أو توجّه git خارج المستودع تحت هوية البوابة.
+$script:DangerousGitConfig = '^(core\.(hookspath|fsmonitor|sshcommand|gitproxy|askpass|worktree|alternaterefscommand|pager|editor)|sequence\.editor|include\.|includeif\.|filter\.|credential\.|protocol\.|submodule\.|fetch\.recursesubmodules|extensions\.worktreeconfig|remote\..+\.(uploadpack|receivepack|vcs|proxy)|url\..+\.(insteadof|pushinsteadof)|merge\..+\.driver|diff\..+\.(command|textconv)|gpg\.|uploadpack\.)'
+
+function Test-GitHookSafety($Config) {
+    $results = @()
+    $block = { param([string]$Reason) [pscustomobject]@{ task = 'git hooks/config'; verdict = 'BLOCK'; reason = $Reason } }
+    $repo = [string]$Config.repoPath
+    $dirs = @()
+    foreach ($q in @('--git-dir', '--git-common-dir')) {
+        $g = Invoke-PreflightGit $repo @('rev-parse', '--path-format=absolute', $q)
+        if ($g.Code -ne 0 -or -not $g.Text) { return [pscustomobject]@{ ok = $false; results = @(& $block ('cannot resolve the git directory of ' + $repo + ': ' + $g.Text)) } }
+        $d = [string]$g.Text
+        if (-not ([IO.Path]::IsPathRooted($d))) { $d = Join-Path $repo $d }
+        $dirs += $d
+    }
+    foreach ($d in @($dirs | Select-Object -Unique)) {
+        foreach ($cf in @('config', 'config.worktree')) {
+            $cp = Join-Path $d $cf
+            if ($cf -eq 'config.worktree' -and -not (Test-Path -LiteralPath $cp)) { continue }
+            $names = Invoke-PreflightGit $repo @('config', '--file', $cp, '--name-only', '--list')
+            if ($names.Code -ne 0) { $results += & $block ('cannot read local git config ' + $cp + ': ' + $names.Text); continue }
+            foreach ($n in @(([string]$names.Text) -split "`r?`n" | Where-Object { $_ })) {
+                if ($n.Trim().ToLowerInvariant() -match $script:DangerousGitConfig) { $results += & $block ('local git config ' + $cp + ' sets ' + $n.Trim() + ': it can run a program or redirect git under the gate identity') }
+            }
+        }
+        $hooks = Join-Path $d 'hooks'
+        if (Test-Path -LiteralPath $hooks) {
+            try { $files = @(Get-ChildItem -LiteralPath $hooks -Force -ErrorAction Stop | Where-Object { -not $_.PSIsContainer }) } catch { $results += & $block ('cannot list git hooks in ' + $hooks + ': ' + $_.Exception.Message); continue }
+            foreach ($f in $files) { if ($f.Name -notlike '*.sample') { $results += & $block ('git hook present: ' + $f.FullName + ' (would run under the gate identity)') } }
+        }
+    }
+    if (@($results).Count -eq 0) { $results += [pscustomobject]@{ task = 'git hooks/config'; verdict = 'PASS'; reason = 'no git hooks and no local git configuration that can run programs' } }
+    return [pscustomobject]@{ ok = (@($results | Where-Object { $_.verdict -ne 'PASS' }).Count -eq 0); results = $results }
+}
+
 function Invoke-PreflightGit([string]$Dir, [string[]]$GitArgs) {
     $old = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
+    $hard = Get-GateGitHardening
     try {
-        $out = & git -C $Dir -c ('safe.directory=' + $Dir) @GitArgs 2>&1 | ForEach-Object { "$_" }
+        $out = & git -C $Dir -c ('safe.directory=' + $Dir) @hard @GitArgs 2>&1 | ForEach-Object { "$_" }
         $code = $LASTEXITCODE
     } finally { $ErrorActionPreference = $old }
     return [pscustomobject]@{ Code = $code; Text = ((@($out) -join "`n").Trim()) }
@@ -1576,7 +1627,8 @@ function Invoke-InstallPreflight($Config) {
     $a = Invoke-MigrationPreflight $Config
     $b = Invoke-GateIdentityPreflight $Config
     $c = Test-GateTrustAcl $Config
-    return [pscustomobject]@{ ok = ($a.ok -and $b.ok -and $c.ok); results = @(@($a.results) + @($b.results) + @($c.results)); workloads = @($b.workloads) }
+    $d = Test-GitHookSafety $Config
+    return [pscustomobject]@{ ok = ($a.ok -and $b.ok -and $c.ok -and $d.ok); results = @(@($a.results) + @($b.results) + @($c.results) + @($d.results)); workloads = @($b.workloads) }
 }
 
 if ($MyInvocation.InvocationName -ne '.') {

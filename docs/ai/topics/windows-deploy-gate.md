@@ -256,6 +256,27 @@
   - التدقيق: كل عنصر مُجرَد يُعاد في `workloads`، ويُسجَّل في `preflight_workloads` بسجل Initialize ويُطبع
     `AUDIT` من سطر الأوامر: النوع، وUserId/GroupId، والـSID، وRunLevel، وREPO/NOT_REPO/UNKNOWN، والنتيجة
     وسببها. بلا أسرار.
+- **Git hooks والإعداد المحلي تحت هوية البوابة (Codex P1):**
+  - البوابة تشغّل git (ومنه `merge --ff-only`) بهوية البوابة، الكاتب الوحيد لملفات الثقة. hook مزروع في
+    `.git/hooks` (مثل `post-merge`، ويعمل بعد fast-forward) أو إعداد محلي يشغّل برنامجاً كان سيعمل بتلك الهوية.
+  - نظافة الشجرة وبصمات الملفات المتتبّعة لا تغطي `.git`، فلا يُعتمد عليها هنا.
+  - **الطبقة 1، التحصين:** كل نداء git من البوابة والفحص يمرّر `-c` تتقدّم على إعداد المستودع:
+    - `core.hooksPath=NUL` (و`/dev/null` خارج Windows).
+    - `core.fsmonitor=false`، و`core.sshCommand=ssh`.
+    - `core.askPass=`، و`core.gitProxy=`، و`credential.helper=`.
+    - `protocol.ext.allow=never`، و`submodule.recurse=false`.
+  - **الطبقة 2، الفحص** (`Test-GitHookSafety`، في Initialize وفي بداية كل تشغيل قبل أي نداء git)، على `.git`
+    ومجلده المشترك:
+    - أي hook ليس `*.sample` ⇒ حجب.
+    - إعداد محلي في `config`/`config.worktree` قد يشغّل برنامجاً أو يوجّه git خارج المستودع ⇒ حجب:
+      - `core.hooksPath`، و`fsmonitor`، و`sshCommand`، و`gitProxy`، و`askPass`، و`worktree`، و`pager`، و`editor`.
+      - `include*`، و`filter.*`، و`merge.*.driver`، و`diff.*.command`/`textconv`، و`credential.*`، و`protocol.*`.
+      - `submodule.*`، و`url.*.insteadOf`، و`remote.*.uploadpack`/`receivepack`/`vcs`/`proxy`، و`gpg.*`.
+    - ومنها ما لا يبطله `-c` (`core.worktree`، والـfilters والـdrivers، و`include`).
+    - تعذّر تحديد `.git` أو قراءة الإعداد أو hooks ⇒ حجب.
+  - الاختبار على مستودعات git حقيقية:
+    - `post-merge` مزروع لا يعمل عبر نداء البوابة، والضابط يثبت أنه يعمل بـgit عادي.
+    - Deploy/DryRun يتوقفان، وكل مفتاح خطر يُكتشف، والمستودع النظيف يستمر بالنشر.
 - **آلة حالات التثبيت والنشر (Codex P1):**
   1. **BOOTSTRAP** (مرحلة منفصلة بموافقة المالك، لم تُنفَّذ):
      - تنشئ المتطلبات: الحساب المخصّص، و`gateDir` بـACL صريحة، ومهمة البوابة.
