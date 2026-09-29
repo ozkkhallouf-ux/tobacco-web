@@ -642,7 +642,17 @@ $script:InterpreterLeaves = '^(powershell|pwsh|cmd|wscript|cscript|mshta|node|no
 
 function Test-PsLiteralAst($Ast) {
     if ($Ast -is [System.Management.Automation.Language.StringConstantExpressionAst]) { return $true }
+    if ($Ast -is [System.Management.Automation.Language.ConstantExpressionAst]) { return $true }
     if ($Ast -is [System.Management.Automation.Language.ArrayLiteralAst]) { return (@($Ast.Elements | Where-Object { -not (Test-PsLiteralAst $_) }).Count -eq 0) }
+    if ($Ast -is [System.Management.Automation.Language.ArrayExpressionAst]) {
+        foreach ($st in @($Ast.SubExpression.Statements)) { $e = $null; if ($st -is [System.Management.Automation.Language.PipelineAst]) { $e = $st.GetPureExpression() }; if (-not $e -or -not (Test-PsLiteralAst $e)) { return $false } }
+        return $true
+    }
+    if ($Ast -is [System.Management.Automation.Language.HashtableAst]) {
+        # @{ CommandLine = '...' }: كل قيمة حرفية.
+        foreach ($kv in @($Ast.KeyValuePairs)) { $e = $null; if ($kv.Item2 -is [System.Management.Automation.Language.PipelineAst]) { $e = $kv.Item2.GetPureExpression() }; if (-not $e -or -not (Test-PsLiteralAst $e)) { return $false } }
+        return $true
+    }
     return $false
 }
 
@@ -691,7 +701,12 @@ function Get-PsDynamicExecution([string]$Text) {
             '^(invoke-item|ii)$' {
                 foreach ($k in @('Path', 'LiteralPath')) { if ($bound.ContainsKey($k) -and -not (Test-PsLiteralAst $bound[$k].Value)) { return ($name + ' with a dynamic path: ' + $bound[$k].Value.Extent.Text) } }
             }
-            '^(invoke-wmimethod|invoke-cimmethod)$' { return ($name + ' can create processes from computed arguments') }
+            '^(invoke-wmimethod|invoke-cimmethod)$' {
+                # WMI/CIM (مثل Win32_Process.Create): اسم الطريقة ووسائطها حرفية وإلا ⇒ UNKNOWN.
+                foreach ($k in @('Name', 'MethodName')) { if ($bound.ContainsKey($k) -and -not (Test-PsLiteralAst $bound[$k].Value)) { return ($name + ' with a computed method name: ' + $bound[$k].Value.Extent.Text) } }
+                if (-not $bound.ContainsKey('Name') -and -not $bound.ContainsKey('MethodName')) { return ($name + ' without a static method name') }
+                foreach ($k in @('ArgumentList', 'Arguments')) { if ($bound.ContainsKey($k) -and -not (Test-PsLiteralAst $bound[$k].Value)) { return ($name + ' with computed arguments (process creation from data): ' + $bound[$k].Value.Extent.Text) } }
+            }
         }
     }
     foreach ($m in @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true))) {
@@ -699,6 +714,18 @@ function Get-PsDynamicExecution([string]$Text) {
         $target = [string]$m.Expression.Extent.Text
         if (@('invoke', 'invokereturnasis', 'invokescript', 'newscriptblock', 'invokeasync', 'begininvoke') -contains $member) { return ('dynamic invocation: ' + $m.Extent.Text) }
         if ($member -eq 'create' -and $target -match '(?i)scriptblock') { return ('script block created from a computed string: ' + $m.Extent.Text) }
+        # إنشاء عملية عبر COM/WMI/.NET بأمر محسوب (WScript.Shell.Run/Exec، Shell.Application.ShellExecute،
+        # MMC20 ExecuteShellCommand، Win32_Process.Create، ManagementClass.InvokeMethod) ⇒ UNKNOWN.
+        $margs = @($m.Arguments)
+        if (@('run', 'exec', 'shellexecute', 'shellexecuteex', 'executeshellcommand', 'createprocess') -contains $member) {
+            if ($margs.Count -eq 0 -or -not (Test-PsLiteralAst $margs[0])) { return ('COM process launch .' + $m.Member.Extent.Text + ' with a computed command: ' + $m.Extent.Text) }
+        }
+        if ($member -eq 'invokemethod' -and @($margs | Where-Object { -not (Test-PsLiteralAst $_) }).Count -gt 0) { return ('WMI InvokeMethod with computed arguments: ' + $m.Extent.Text) }
+        if ($member -eq 'create' -and $target -notmatch '(?i)scriptblock') {
+            # [IO.File]::Create وأمثاله (نوع ساكن لا علاقة له بالعمليات) لا يُحتسب؛ أي مستقبِل آخر قد يكون Win32_Process.
+            $staticSafe = ($m.Expression -is [System.Management.Automation.Language.TypeExpressionAst]) -and ($target -notmatch '(?i)wmi|cim|management|process|activator')
+            if (-not $staticSafe -and @($margs | Where-Object { -not (Test-PsLiteralAst $_) }).Count -gt 0) { return ('process creation (WMI/COM .Create) with a computed argument: ' + $m.Extent.Text) }
+        }
         if ($member -eq 'start' -and $target -match '(?i)process') {
             if (@($m.Arguments | Where-Object { -not (Test-PsLiteralAst $_) }).Count -gt 0) { return ('process started with a computed target: ' + $m.Extent.Text) }
         }
@@ -730,7 +757,8 @@ function Get-ScriptDynamicExecution([string]$Ext, [string]$Text) {
             $l = $line.Trim()
             if (-not $l -or $l.StartsWith("'") -or $l -match '^(?i)rem\s' -or $l.StartsWith('//')) { continue }
             if ($l -match '(?i)(^|:)\s*(Execute|ExecuteGlobal)\b|\b(Execute|ExecuteGlobal|Eval)\s*\(|\bnew\s+Function\s*\(') { return ('dynamic code execution: ' + $l) }
-            foreach ($m in [regex]::Matches($l, '(?i)\.(Run|Exec|ShellExecute)\b[ \t]*\(?[ \t]*(.*)$')) {
+            if ($l -match '(?i)\.ExecMethod_\b') { return ('WMI ExecMethod_ with a computed parameters object: ' + $l) }
+            foreach ($m in [regex]::Matches($l, '(?i)\.(Run|Exec|ShellExecute|ExecuteShellCommand|Create)\b[ \t]*\(?[ \t]*(.*)$')) {
                 $arg = Get-ScriptFirstArgument $m.Groups[2].Value
                 if ($arg -notmatch $lit) { return ('.' + $m.Groups[1].Value + ' with a computed command: ' + $arg.Trim()) }
             }
@@ -745,7 +773,7 @@ function Get-ScriptDynamicExecution([string]$Ext, [string]$Text) {
             if ($l -match '(?im)^@?\s*(call\s+|start\s+(?:"[^"]*"\s+)?(?:/\w+(?::\S+)?\s+)*)?"?(%%~?[a-z]|%[0-9*~]|[%!][A-Za-z_])') { return ('command taken from a variable/argument: ' + $l) }
             if ($l -match '(?i)\bdo\s+\(?\s*@?(call\s+|start\s+(?:"[^"]*"\s+)?(?:/\w+(?::\S+)?\s+)*)?"?(%%~?[a-z]|%[0-9*~]|[%!][A-Za-z_])') { return ('for-loop runs a command taken from data: ' + $l) }
             if ($l -match '(?i)\b(call|start)\s+(?:"[^"]*"\s+)?(?:/\w+(?::\S+)?\s+)*"?(%%~?[a-z]|%[0-9*~]|[%!][A-Za-z_])') { return ('call/start with a variable target: ' + $l) }
-            if ($l -match '(?i)\b(powershell|pwsh|cmd|wscript|cscript|mshta|node|python\d*|pythonw|py|bash|rundll32|regsvr32)(\.exe)?"?\s[^\r\n]*(%%~?[a-z]|%[0-9*])') { return ('interpreter with an argument taken from a loop variable or batch argument: ' + $l) }
+            if ($l -match '(?i)\b(powershell|pwsh|cmd|wscript|cscript|mshta|node|python\d*|pythonw|py|bash|rundll32|regsvr32|wmic)(\.exe)?"?\s[^\r\n]*(%%~?[a-z]|%[0-9*])') { return ('interpreter with an argument taken from a loop variable or batch argument: ' + $l) }
         }
         return $null
     }

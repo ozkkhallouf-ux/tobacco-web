@@ -176,15 +176,22 @@
       من وسائطه محسوب (متغير، أو تعبير، أو نص فيه متغير، أو `-File:$p`) ⇒ UNKNOWN. الأداة غير المفسّرة
       بوسيط متغير تبقى كما هي.
     - `Invoke-Command`/`Start-Job` بكتلة غير حرفية أو ملف محسوب ⇒ UNKNOWN.
-    - `Invoke-Item` بمسار محسوب، و`Invoke-WmiMethod`/`Invoke-CimMethod` ⇒ UNKNOWN.
+    - `Invoke-Item` بمسار محسوب ⇒ UNKNOWN.
+    - إنشاء عملية عبر WMI/CIM/COM بوسيط محسوب ⇒ UNKNOWN:
+      - `Invoke-WmiMethod`/`Invoke-CimMethod` باسم طريقة أو وسائط غير حرفية (ومنها `@{ CommandLine = $cmd }`).
+      - `Win32_Process.Create` عبر `[wmiclass]` أو كائن WMI، و`ManagementClass.InvokeMethod`.
+      - COM: `WScript.Shell.Run`/`Exec`، و`Shell.Application.ShellExecute`، و`MMC20 ExecuteShellCommand`.
+      - الصيغ الحرفية تُحلَّل كالمعتاد. `[IO.File]::Create` وأمثاله على أنواع لا علاقة لها بالعمليات لا تُحتسب.
     - `[scriptblock]::Create`، و`.Invoke`/`.InvokeScript`، و`[Process]::Start` بوسيط محسوب ⇒ UNKNOWN.
     - نص لا يُحلَّل ⇒ UNKNOWN.
   - **VBS/JS**:
     - `.Run`/`.Exec`/`.ShellExecute` بوسيط أول ليس نصاً حرفياً (مسموح الوصل بين نصوص حرفية و`Chr(n)`) ⇒ UNKNOWN.
     - `Execute`/`ExecuteGlobal`/`Eval`/`new Function` ⇒ UNKNOWN. و`.vbe`/`.jse` المشفّرة ⇒ UNKNOWN.
+    - WMI في VBS: `Win32_Process.Create` بوسيط غير حرفي، و`ExecMethod_` ⇒ UNKNOWN.
   - **CMD/BAT**:
     - `call`/`start` أو سطر يبدأ بمتغير (`%VAR%`، `!VAR!`، `%%i`، `%1`) ⇒ UNKNOWN.
-    - `for ... do call %%i`، و`call set`، ومفسّر بوسيط من متغير حلقة أو وسيط دفعة (`node %%i`، `-File %1`) ⇒ UNKNOWN.
+    - `for ... do call %%i`، و`call set`، ومفسّر أو `wmic` بوسيط من متغير حلقة أو وسيط دفعة (`node %%i`، `-File %1`،
+      `wmic process call create "%%i"`) ⇒ UNKNOWN.
     - `powershell -Command` داخل الغلاف يخضع لقاعدة `-Command` نفسها في الـAction.
   - المتغير العادي الذي لا يصير هدف تنفيذ لا يُحتسب.
   - السلسلة: UNKNOWN في أي غلاف متداخل يبقى UNKNOWN للسلسلة كلها، ولا يُطوى إلى NOT_REPO.
