@@ -100,6 +100,66 @@ try {
     Add-DirAce (New-Ace 'OZK2026\OZKSync' 'ReadAndExecute, Synchronize' 'Allow' $true)
     Assert-True ((Test-GateTrustAcl $config).ok) 'read-only access for a repo workload identity => allowed'
 
+    Write-Host '== Parent container ACL is part of the trust boundary (Codex P1)'
+    $gd = $gateDir.TrimEnd('\', '/')
+    $parentPath = $gd.Substring(0, $gd.LastIndexOf($sep))
+    function Set-ParentAcl($Acl) { $script:Acls[$parentPath] = $Acl }
+    function Add-ParentAce($Ace) { $a = New-SafeAcl; $a.access = @($a.access) + @($Ace); Set-ParentAcl $a }
+    Reset-Acls
+    $r = Test-GateTrustAcl $config
+    Assert-True ($r.ok -and (@($r.results | Where-Object { $_.verdict -eq 'PASS' -and $_.reason -like '*parent container*' }).Count -eq 1)) 'safe parent + safe gateDir + safe trust files => PASS'
+    $parentCases = @(
+        @{ label = 'parent grants OZKSync Modify => BLOCK'; ace = (New-Ace 'OZK2026\OZKSync' 'Modify, Synchronize') },
+        @{ label = 'parent grants LOQ Modify => BLOCK'; ace = (New-Ace 'OZK2026\LOQ' 'Modify, Synchronize') },
+        @{ label = 'parent grants Users Modify => BLOCK'; ace = (New-Ace 'BUILTIN\Users' 'Modify') },
+        @{ label = 'parent grants create-child (CreateDirectories) => BLOCK'; ace = (New-Ace 'BUILTIN\Users' 'CreateDirectories, Synchronize') },
+        @{ label = 'parent grants create-child (CreateFiles/WriteData) => BLOCK'; ace = (New-Ace 'OZK2026\OZKSync' 'CreateFiles') },
+        @{ label = 'parent grants delete-child (DeleteSubdirectoriesAndFiles) => BLOCK'; ace = (New-Ace 'OZK2026\OZKSync' 'DeleteSubdirectoriesAndFiles') },
+        @{ label = 'parent grants Delete (rename/replace the container) => BLOCK'; ace = (New-Ace 'OZK2026\OZKSync' 'Delete') },
+        @{ label = 'parent grants ChangePermissions => BLOCK'; ace = (New-Ace 'OZK2026\OZKSync' 'ChangePermissions') },
+        @{ label = 'parent grants TakeOwnership => BLOCK'; ace = (New-Ace 'OZK2026\OZKSync' 'TakeOwnership') },
+        @{ label = 'parent grants FullControl => BLOCK'; ace = (New-Ace 'OZK2026\OZKSync' 'FullControl') },
+        @{ label = 'parent grants GENERIC_WRITE (numeric) => BLOCK'; ace = (New-Ace 'BUILTIN\Users' '1073741824') },
+        @{ label = 'unsafe inherited parent ACE (e.g. from ProgramData) => BLOCK'; ace = (New-Ace 'BUILTIN\Users' 'Write, Synchronize' 'Allow' $true) }
+    )
+    foreach ($c in $parentCases) {
+        Reset-Acls
+        Add-ParentAce $c.ace
+        Assert-True (Test-Blocked (Test-GateTrustAcl $config) ('*acl parent *' + $c.ace.identity + '*')) $c.label
+    }
+    Reset-Acls
+    Add-ParentAce (New-Ace 'OZK2026\OZKSync' 'ReadAndExecute, Synchronize' 'Allow' $true)
+    Assert-True ((Test-GateTrustAcl $config).ok) 'parent read-only access for a repo identity => allowed'
+    Reset-Acls
+    $a = New-SafeAcl; $a.owner = 'BUILTIN\Administrators'; Set-ParentAcl $a
+    Assert-True (Test-Blocked (Test-GateTrustAcl $config) '*acl parent *owner is BUILTIN\Administrators*') 'parent owned by another principal (implicit WRITE_DAC) => BLOCK'
+    Reset-Acls
+    $script:AclErrors[$parentPath] = 'Attempted to perform an unauthorized operation.'
+    Assert-True (Test-Blocked (Test-GateTrustAcl $config) '*acl parent *cannot read ACL*') 'parent Get-Acl failure => BLOCK'
+    Reset-Acls
+    $script:Acls[$parentPath] = $null
+    Assert-True (Test-Blocked (Test-GateTrustAcl $config) '*acl parent *empty or unreadable*') 'parent ACL empty/unreadable => BLOCK'
+    Reset-Acls
+    Add-ParentAce (New-Ace 'GHOST\unknown' 'Modify')
+    Assert-True (Test-Blocked (Test-GateTrustAcl $config) '*acl parent *cannot be resolved to a SID*') 'parent write ACE whose identity cannot be resolved => BLOCK'
+    Reset-Acls
+    Add-ParentAce (New-Ace 'OZK2026\OZKSync' 'NotARight')
+    Assert-True (Test-Blocked (Test-GateTrustAcl $config) '*acl parent *rights cannot be interpreted*') 'parent ACE with uninterpretable rights => BLOCK'
+    Reset-Acls
+    Add-ParentAce (New-Ace 'OZK2026\OZKSync' 'Modify' 'Audit')
+    Assert-True (Test-Blocked (Test-GateTrustAcl $config) '*acl parent *unrecognised ACE type*') 'parent ACE of an ambiguous type => BLOCK'
+    Reset-Acls
+    Add-ParentAce (New-Ace 'OZK2026\OZKSync' 'Modify, Synchronize')
+    $r = Test-GateTrustAcl $config
+    Assert-True (-not $r.ok -and @($r.results | Where-Object { $_.verdict -eq 'BLOCK' -and $_.task -notlike 'acl parent*' }).Count -eq 0) 'safe gateDir and trust files but unsafe parent => BLOCK (inner ACL is not enough)'
+    Reset-Acls
+    $script:Acls[(Join-Gate 'writer-allowlist.json')] = & { $a = New-SafeAcl; $a.access = @($a.access) + @(New-Ace 'OZK2026\OZKSync' 'Modify'); $a }
+    Assert-True (Test-Blocked (Test-GateTrustAcl $config) '*writer-allowlist.json*OZKSync*') 'unsafe trust file with a safe parent => still BLOCK'
+    $cRoot = $config | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+    $cRoot.gateDir = 'DeployGate'
+    Assert-True (Test-Blocked (Test-GateTrustAcl $cRoot) '*no parent container*') 'gateDir without a verifiable parent container => BLOCK'
+    Reset-Acls
+
     Write-Host '== Owner, unreadable and malformed ACLs fail closed'
     Reset-Acls
     $a = New-SafeAcl; $a.owner = 'BUILTIN\Administrators'; Set-DirAcl $a

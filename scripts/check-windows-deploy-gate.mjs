@@ -232,6 +232,21 @@ for (const needle of ["function Resolve-WorkloadReach", "cannot determine whethe
   const doc = read("docs/ai/topics/windows-deploy-gate.md");
   for (const needle of ["**BOOTSTRAP**", "**INITIALIZE**", "**DRYRUN**", "**DEPLOY**", "حالة الانتقال: غير منفَّذ", "OZK-Tobacco-Server.vbs"]) assert.ok(doc.includes(needle), `توثيق: ${needle}`);
 }
+// Codex P1 (#285): الغلاف المفقود/غير المقروء/الفارغ ⇒ UNKNOWN، وACL المجلد الأب جزء إلزامي من الثقة.
+{
+  const body = (n) => { const i = preSrc.indexOf(`function ${n}`); assert.ok(i >= 0, n); const j = preSrc.indexOf("\nfunction ", i + 10); return preSrc.slice(i, j < 0 ? undefined : j); };
+  const reader = body("Read-PreflightWrapperText"), wrap = body("Get-WrapperReach"), acl = body("Test-GateTrustAcl");
+  assert.match(reader, /if \(-not \(Test-Path -LiteralPath \$Path -PathType Leaf\)\) \{ return \$null \}/, "غلاف مفقود ⇒ $null لا نص فارغ");
+  assert.doesNotMatch(reader, /return ''|catch/, "فشل القراءة لا يتحول إلى نص فارغ صالح");
+  assert.match(wrap, /try \{ \$inner = Read-PreflightWrapperText \$Path \} catch \{ return \(New-Reach 'UNKNOWN'/, "فشل القراءة ⇒ UNKNOWN");
+  assert.match(wrap, /if \(\$null -eq \$inner\) \{ return \(New-Reach 'UNKNOWN' \('wrapper is missing/, "غلاف مفقود ⇒ UNKNOWN");
+  assert.match(wrap, /if \(\$inner\.Length -eq 0\) \{ return \(New-Reach 'UNKNOWN' \('wrapper is empty \(zero bytes\)/, "غلاف بطول صفر ⇒ UNKNOWN");
+  assert.match(body("Get-GateParentPath"), /LastIndexOf\(\$Sep\)/);
+  assert.match(acl, /\$parent = Get-GateParentPath \$dir \$sep[\s\S]*if \(-not \$parent\) \{ \$results \+= & \$block [^\n]*'gateDir has no parent container whose ACL can be verified' \}\s+else \{ \$targets \+= \$parent \}\s+\$targets \+= \$dir/, "ACL المجلد الأب ضمن الأهداف إلزامياً");
+  assert.match(acl, /if \(\$path -eq \$parent\) \{ \$subject = 'acl parent '/);
+  assert.match(acl, /catch \{ \$results \+= & \$block \$subject \('cannot read ACL: '/, "تعذّر قراءة ACL (ومنها الأب) ⇒ حجب");
+  assert.match(read("docs/ai/topics/windows-deploy-gate.md"), /المجلد الأب المباشر/);
+}
 // Codex P1: قرارات الثقة بالـSID حصراً — لا عودة لمقارنة الاسم بعد حذف بادئة الجهاز/المجال.
 assert.ok(!preSrc.includes("ConvertTo-IdentityKey"), "مفتاح الهوية بالاسم محذوف نهائياً");
 const fnBody = (name) => { const i = preSrc.indexOf(`function ${name}`); assert.ok(i >= 0, name); const j = preSrc.indexOf("\nfunction ", i + 10); return preSrc.slice(i, j < 0 ? undefined : j); };

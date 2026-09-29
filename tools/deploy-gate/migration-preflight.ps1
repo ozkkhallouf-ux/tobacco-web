@@ -194,8 +194,10 @@ function Get-PreflightAcl([string]$Path) {
 }
 
 # نص غلاف: '' إن لم يوجد؛ يرمي إن وُجد وتعذّرت قراءته (⇒ «غير محدد» لدى المستدعي).
+# نص غلاف: $null إن لم يوجد كملف (مفقود، أو مجلد، أو اختفى)، ويرمي عند فشل القراءة. فشل القراءة لا
+# يتحوّل أبداً إلى نص فارغ صالح (Codex P1)؛ النص الفارغ يعني ملفاً موجوداً طوله صفر فعلاً.
 function Read-PreflightWrapperText([string]$Path) {
-    if (-not (Test-Path -LiteralPath $Path)) { return '' }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
     return [System.IO.File]::ReadAllText($Path)
 }
 
@@ -492,8 +494,10 @@ function Get-WrapperReach($Ctx, [string]$Path, [int]$depth) {
     $Ctx.seen[$k] = $true
     if (Test-InRepoRoot $Ctx $Path) { return (New-Reach 'REPO' ('script inside a repository root: ' + $Path)) }
     if ($depth -ge 3) { return (New-Reach 'UNKNOWN' ('wrapper chain deeper than 3 levels at ' + $Path)) }
-    try { $inner = Read-PreflightWrapperText $Path } catch { return (New-Reach 'UNKNOWN' ('wrapper cannot be read: ' + $Path)) }
-    if ($null -eq $inner) { return (New-Reach 'UNKNOWN' ('wrapper cannot be read: ' + $Path)) }
+    # غلاف مفقود أو غير مقروء أو فارغ: لا يُثبت ما سيشغّله لاحقاً ⇒ UNKNOWN، لا NOT_REPO (Codex P1).
+    try { $inner = Read-PreflightWrapperText $Path } catch { return (New-Reach 'UNKNOWN' ('wrapper cannot be read: ' + $Path + ' (' + $_.Exception.Message + ')')) }
+    if ($null -eq $inner) { return (New-Reach 'UNKNOWN' ('wrapper is missing: ' + $Path + ' (it may appear later and run repository code)')) }
+    if ($inner.Length -eq 0) { return (New-Reach 'UNKNOWN' ('wrapper is empty (zero bytes): ' + $Path + ' (what it will run cannot be proven)')) }
     $r = New-Reach 'NOT_REPO'
     $xi = Expand-TraceText ([string]$inner) $Ctx.identity $Path
     if ($xi.undetermined) { $r = Join-Reach $r (New-Reach 'UNKNOWN' ('unresolved environment reference in wrapper ' + $Path)) }
@@ -841,6 +845,15 @@ function Test-RightsGrantWrite([long]$Value) {
     return ((($Value -band $script:WriteRightsMask) -ne 0) -or (($Value -band 0x10000000) -ne 0) -or (($Value -band 0x40000000) -ne 0))
 }
 
+# المجلد الأب المباشر لمسار (مسار لا اسم حساب)؛ '' إن لم يوجد أب قابل للفحص.
+function Get-GateParentPath([string]$Dir, [string]$Sep) {
+    $cut = $Dir.LastIndexOf($Sep)
+    if ($cut -le 0) { return '' }
+    $parent = $Dir.Substring(0, $cut)
+    if ($parent -match '^[A-Za-z]:$') { $parent += '\' }
+    return $parent
+}
+
 function Test-GateTrustAcl($Config) {
     $results = @()
     $block = { param([string]$Subject, [string]$Reason) [pscustomobject]@{ task = $Subject; verdict = 'BLOCK'; reason = $Reason } }
@@ -849,7 +862,14 @@ function Test-GateTrustAcl($Config) {
     $dir = ([string]$Config.gateDir).TrimEnd('\', '/')
     $sep = '\'
     if ($dir.StartsWith('/')) { $sep = '/' }
-    $targets = @($dir)
+    # المجلد الأب المباشر جزء إلزامي من حدود الثقة (Codex P1): من يملك عليه حذف/إنشاء/إعادة تسمية
+    # الأبناء (DeleteSubdirectoriesAndFiles، CreateDirectories/Write، Modify/FullControl) أو تغيير
+    # الصلاحيات/الملكية يستطيع استبدال gateDir كله مهما كانت ACL الداخلية سليمة.
+    $parent = Get-GateParentPath $dir $sep
+    $targets = @()
+    if (-not $parent) { $results += & $block ('acl parent of ' + $dir) 'gateDir has no parent container whose ACL can be verified' }
+    else { $targets += $parent }
+    $targets += $dir
     foreach ($f in @($Config.trust.trustFiles)) {
         $p = $dir + $sep + [string]$f
         if (Test-Path -LiteralPath $p) { $targets += $p }
@@ -857,6 +877,7 @@ function Test-GateTrustAcl($Config) {
     }
     foreach ($path in $targets) {
         $subject = 'acl ' + $path
+        if ($path -eq $parent) { $subject = 'acl parent ' + $path + ' (replacement of gateDir)' }
         try { $acl = Get-PreflightAcl $path } catch { $results += & $block $subject ('cannot read ACL: ' + $_.Exception.Message); continue }
         if (-not $acl) { $results += & $block $subject 'ACL is empty or unreadable'; continue }
         $ownerSid = Resolve-PrincipalSid ([string]$acl.owner)
@@ -880,7 +901,7 @@ function Test-GateTrustAcl($Config) {
             }
         }
     }
-    if (@($results).Count -eq 0) { $results += [pscustomobject]@{ task = 'gate trust ACL'; verdict = 'PASS'; reason = 'only the dedicated gate identity owns and can write gateDir and the trust files' } }
+    if (@($results).Count -eq 0) { $results += [pscustomobject]@{ task = 'gate trust ACL'; verdict = 'PASS'; reason = 'only the dedicated gate identity owns and can write the parent container, gateDir and the trust files' } }
     $blocked = @($results | Where-Object { $_.verdict -ne 'PASS' })
     return [pscustomobject]@{ ok = ($blocked.Count -eq 0); results = $results }
 }
@@ -988,6 +1009,9 @@ function Invoke-GateIdentityPreflight($Config) {
             $results += & $block $subject ('identity cannot be resolved to a SID: ' + $identityText)
             continue
         }
+        # مهمة البوابة الوحيدة لا تُصنَّف بالوصول: تشغّل سكربت البوابة من gateDir (يعمل على المستودع بالتصميم)
+        # وقد تحقق منها أعلاه Test-ExactGateAction حرفياً، وسكربتاتها ملفات ثقة تحميها ACL.
+        if ([object]::ReferenceEquals($item, $gateTaskItem)) { continue }
         # المهام بحقولها المنظّمة؛ الخدمات بسطر أوامرها (PathName). ثلاثي الحالة، وUNKNOWN لا يصير NOT_REPO.
         if ($item.kind -eq 'task' -or $item.kind -eq 'startup') {
             $reach = Resolve-TaskReach $Config $item.actions ([string]$item.identity)

@@ -51,13 +51,19 @@ function Get-PreflightServiceInventory { return @($script:Services) }
 # جرد Startup/Logon (مجلدات Startup وRun/RunOnce) — فارغ افتراضياً، وتضبطه الاختبارات.
 $script:Startup = @()
 function Get-PreflightStartupInventory { return @($script:Startup) }
-function Read-PreflightWrapperText([string]$Path) { if ($script:Wrappers.ContainsKey($Path)) { return $script:Wrappers[$Path] } return '' }
+function Read-PreflightWrapperText([string]$Path) { if ($script:Wrappers.ContainsKey($Path)) { return $script:Wrappers[$Path] } return $null }
 
 $repo = 'C:\Users\LOQ\Documents\OZK-TOBACCO\tobacco-web'
 $gateDir = 'C:\ProgramData\OZK-TOBACCO\DeployGate'
 $ps = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
 $autoprintVbs = 'C:\ProgramData\OZK-TOBACCO\TaskWrappers\ozk-ameen-autoprint-hidden.vbs'
 $script:Wrappers = @{ $autoprintVbs = ('shell.Run """' + $repo + '\tools\ameen-autoprint\run-watcher.bat""", 0, True') }
+# أغلفة/أهداف موجودة بمحتوى معروف غير مستودعي. أي مسار غير مدرج هنا = ملف مفقود ($null) ⇒ UNKNOWN.
+$script:Wrappers['C:\ProgramData\OZK-TOBACCO\TaskWrappers\tobacco-ameen-backup-monitor-hidden.vbs'] = 'CreateObject("WScript.Shell").Run C:\Tools\backup\monitor.exe, 0, True'
+$script:Wrappers['C:\ProgramData\OZK-TOBACCO\TaskWrappers\helper.cmd'] = '@echo off' + "`r`n" + '"C:\Tools\backup\run-backup.exe" /quiet'
+$script:Wrappers['c:\tools\svc\server.js'] = 'require("http").createServer(() => {}).listen(8080)'
+$script:Wrappers['C:\Tools\report.ps1'] = 'Get-Date | Out-File C:\Logs\report.txt'
+$script:Wrappers['c:\tools\report.ps1'] = 'Get-Date | Out-File C:\Logs\report.txt'
 
 function New-Task([string]$Name, [string]$Identity, [string]$Action, $Actions = $null) {
     if ($null -eq $Actions) {
@@ -241,13 +247,13 @@ try {
     $script:Tasks = @(Get-CleanLayout) + @(New-MsTask 'Ms Unknown Identity' '' '%windir%\system32\defrag.exe -c')
     $r = Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())
     Assert-True ($r.ok) 'native Microsoft task with no repository reference and no identity => not blocked just for existing'
-    function Read-PreflightWrapperText([string]$Path) { if ($Path -eq $msWrapper) { throw 'Access is denied' } if ($script:Wrappers.ContainsKey($Path)) { return $script:Wrappers[$Path] } return '' }
+    function Read-PreflightWrapperText([string]$Path) { if ($Path -eq $msWrapper) { throw 'Access is denied' } if ($script:Wrappers.ContainsKey($Path)) { return $script:Wrappers[$Path] } return $null }
     $script:Tasks = @(Get-CleanLayout) + @(New-MsTask 'Ms Unreadable Wrapper' 'SYSTEM' ('cmd.exe /c "' + $msWrapper + '"'))
     $r = Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())
     Assert-True (-not $r.ok -and (Test-BlockLike $r '*Ms Unreadable Wrapper*cannot determine whether*')) 'privileged Microsoft-path task whose wrapper cannot be read => FAIL CLOSED'
     $script:Tasks = @(Get-CleanLayout) + @(New-MsTask 'Ms Unreadable Wrapper NonAdmin' 'OZKSync' ('cmd.exe /c "' + $msWrapper + '"'))
     Assert-True ((Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())).ok) 'non-privileged task with an unreadable wrapper is not a privilege risk'
-    function Read-PreflightWrapperText([string]$Path) { if ($script:Wrappers.ContainsKey($Path)) { return $script:Wrappers[$Path] } return '' }
+    function Read-PreflightWrapperText([string]$Path) { if ($script:Wrappers.ContainsKey($Path)) { return $script:Wrappers[$Path] } return $null }
     $script:Tasks = @(Get-CleanLayout) + @(New-MsTask 'Ms Unknown Var' 'SYSTEM' ($ps + ' -File "%OZK_SECRET_ROOT%\tools\x.ps1"'))
     $r = Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())
     Assert-True (-not $r.ok -and (Test-BlockLike $r '*Ms Unknown Var*cannot determine whether*')) 'privileged task with an unknown environment variable path => FAIL CLOSED'
@@ -587,6 +593,67 @@ try {
     }
     $script:Tasks = @(Get-CleanLayout) + @(New-GateTask $approvedPs ('-File "' + $gp + '" -Mode DryRun') 'OZK2026\OZK-DeployGate' 'Disabled')
     Assert-True (-not (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())).ok) 'duplicate (two valid Disabled DryRun) gate tasks => BLOCK'
+
+    Write-Host '== Missing / unreadable / empty wrappers are UNKNOWN, never NOT_REPO (Codex P1)'
+    $mw = 'C:\ProgramData\OZK-TOBACCO\Missing'
+    $missCases = @(
+        @{ label = 'SYSTEM task -> missing .vbs wrapper => BLOCK'; t = (New-Task 'Miss Vbs' 'SYSTEM' ('wscript.exe "' + $mw + '\gone.vbs"')); pattern = '*Miss Vbs*wrapper is missing*' },
+        @{ label = 'SYSTEM task -> missing .cmd wrapper => BLOCK'; t = (New-Task 'Miss Cmd' 'SYSTEM' ('cmd.exe /c "' + $mw + '\gone.cmd"')); pattern = '*Miss Cmd*wrapper is missing*' },
+        @{ label = 'SYSTEM task -> missing .bat wrapper => BLOCK'; t = (New-Task 'Miss Bat' 'SYSTEM' ($mw + '\gone.bat')); pattern = '*Miss Bat*wrapper is missing*' },
+        @{ label = 'SYSTEM task -> missing .ps1 wrapper => BLOCK'; t = (New-Task 'Miss Ps1' 'SYSTEM' ($ps + ' -NoProfile -File "' + $mw + '\gone.ps1"')); pattern = '*Miss Ps1*wrapper is missing*' },
+        @{ label = 'admin (LOQ) task -> missing wrapper => BLOCK'; t = (New-Task 'Miss Admin' 'LOQ' ('wscript.exe "' + $mw + '\gone.vbs"')); pattern = '*Miss Admin*wrapper is missing*' }
+    )
+    foreach ($c in $missCases) {
+        $script:Tasks = @(Get-CleanLayout) + @($c.t)
+        $r = Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())
+        Assert-True (-not $r.ok -and (Test-BlockLike $r $c.pattern)) $c.label
+    }
+    $script:Tasks = @(Get-CleanLayout); $script:Startup = @(New-StartupItem 'Startup (all users)' 'launch.lnk' 'S-1-5-32-544' $script:AnyLogonIdentity @([pscustomobject]@{ execute = ($mw + '\gone.cmd'); arguments = ''; workingDirectory = '' }))
+    $r = Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @()); $script:Startup = @()
+    Assert-True (-not $r.ok -and (Test-BlockLike $r '*launch.lnk*wrapper is missing*')) 'admin startup (all users) -> missing wrapper => BLOCK'
+    $wa = $mw + '\present-a.cmd'
+    $script:Wrappers[$wa] = ('call "' + $mw + '\gone-b.ps1"')
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Miss Nested' 'SYSTEM' ('cmd.exe /c "' + $wa + '"'))
+    $r = Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())
+    Assert-True (-not $r.ok -and (Test-BlockLike $r '*Miss Nested*gone-b.ps1*')) 'nested wrapper A (present) -> missing wrapper B => BLOCK'
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Miss NonAdmin' 'OZKSync' ('wscript.exe "' + $mw + '\gone.vbs"'))
+    Assert-True ((Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())).ok) 'non-privileged task -> missing wrapper is not a privilege risk (UNKNOWN only blocks privileged identities)'
+    $cfgW = New-Config 'OZK2026\OZK-DeployGate' @()
+    function Read-PreflightWrapperText([string]$Path) { if ($Path -like '*denied*') { throw 'Access to the path is denied.' } if ($Path -like '*vanish*') { throw [System.IO.FileNotFoundException]'Could not find file (removed during inspection)' } if ($script:Wrappers.ContainsKey($Path)) { return $script:Wrappers[$Path] } return $null }
+    $x = Resolve-TaskReach $cfgW @([pscustomobject]@{ execute = 'wscript.exe'; arguments = ('"' + $mw + '\denied.vbs"'); workingDirectory = '' }) 'SYSTEM'
+    Assert-True ($x.status -eq 'UNKNOWN' -and $x.why -like '*cannot be read*denied*') 'access denied reading a wrapper => UNKNOWN'
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Miss Denied' 'SYSTEM' ('wscript.exe "' + $mw + '\denied.vbs"'))
+    Assert-True (-not (Invoke-GateIdentityPreflight $cfgW).ok) 'SYSTEM task whose wrapper read is denied => BLOCK'
+    $x = Resolve-TaskReach $cfgW @([pscustomobject]@{ execute = 'cmd.exe'; arguments = ('/c "' + $mw + '\vanish.cmd"'); workingDirectory = '' }) 'SYSTEM'
+    Assert-True ($x.status -eq 'UNKNOWN') 'wrapper that disappears during inspection (read throws) => UNKNOWN'
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Miss Vanish' 'SYSTEM' ('cmd.exe /c "' + $mw + '\vanish.cmd"'))
+    Assert-True (-not (Invoke-GateIdentityPreflight $cfgW).ok) 'SYSTEM task whose wrapper disappears during inspection => BLOCK'
+    function Read-PreflightWrapperText([string]$Path) { if ($script:Wrappers.ContainsKey($Path)) { return $script:Wrappers[$Path] } return $null }
+    $script:Wrappers[$mw + '\zero.cmd'] = ''
+    $x = Resolve-TaskReach $cfgW @([pscustomobject]@{ execute = 'cmd.exe'; arguments = ('/c "' + $mw + '\zero.cmd"'); workingDirectory = '' }) 'SYSTEM'
+    Assert-True ($x.status -eq 'UNKNOWN' -and $x.why -like '*empty (zero bytes)*') 'explicit zero-byte wrapper (exists, empty) => UNKNOWN: what it will run cannot be proven'
+    $script:Wrappers[$mw + '\repo.cmd'] = ('call "' + $repo + '\tools\x.bat"')
+    Assert-True ((Resolve-TaskReach $cfgW @([pscustomobject]@{ execute = 'cmd.exe'; arguments = ('/c "' + $mw + '\repo.cmd"'); workingDirectory = '' }) 'SYSTEM').status -eq 'REPO') 'readable wrapper reaching the repo => REPO'
+    $script:Wrappers[$mw + '\static.cmd'] = '"C:\Tools\backup\run-backup.exe" /quiet'
+    Assert-True ((Resolve-TaskReach $cfgW @([pscustomobject]@{ execute = 'cmd.exe'; arguments = ('/c "' + $mw + '\static.cmd"'); workingDirectory = '' }) 'SYSTEM').status -eq 'NOT_REPO') 'readable unrelated static wrapper => NOT_REPO (unchanged)'
+    # قارئ الأغلفة الفعلي: مفقود ⇒ $null، مجلد ⇒ $null، ملف بطول صفر ⇒ '' (لا تحويل للفشل إلى نص فارغ).
+    . $preflight
+    function Invoke-NtAccountTranslate([string]$Name) { $k = $Name.ToLowerInvariant(); if ($script:SidTable.ContainsKey($k)) { return $script:SidTable[$k] } return $null }
+    function Get-PreflightMachineName { return 'OZK2026' }
+    $tmpW = Join-Path ([IO.Path]::GetTempPath()) ('ozk-wrap-' + [guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $tmpW)
+    try {
+        $zero = Join-Path $tmpW 'zero.cmd'; [IO.File]::WriteAllText($zero, '')
+        Assert-True ($null -eq (Read-PreflightWrapperText (Join-Path $tmpW 'missing.cmd'))) 'real reader: missing file => $null (not an empty valid body)'
+        Assert-True ($null -eq (Read-PreflightWrapperText $tmpW)) 'real reader: a directory at the wrapper path => $null'
+        $z = Read-PreflightWrapperText $zero
+        Assert-True ($null -ne $z -and $z.Length -eq 0) 'real reader: explicit zero-byte file => empty string (distinct from missing)'
+    } finally { Remove-Item -LiteralPath $tmpW -Recurse -Force -ErrorAction SilentlyContinue }
+    function Read-PreflightWrapperText([string]$Path) { if ($script:Wrappers.ContainsKey($Path)) { return $script:Wrappers[$Path] } return $null }
+    function Get-PreflightAdminMembers { if ($null -eq $script:Admins) { return $null } return @($script:Admins) }
+    function Get-PreflightTaskInventory { return @($script:Tasks) }
+    function Get-PreflightServiceInventory { return @($script:Services) }
+    function Get-PreflightStartupInventory { return @($script:Startup) }
 
     Write-Host '== Install preflight combines price-list and identity checks'
     # فحص ACL الفعلية مُختبَر في Test-GateTrustAcl.ps1؛ هنا نتيجته ناجحة لعزل الهوية ونشرات الأسعار.
