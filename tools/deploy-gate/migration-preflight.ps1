@@ -713,6 +713,18 @@ function Get-PsDynamicExecution([string]$Text) {
     $errs = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseInput([string]$Text, [ref]$tokens, [ref]$errs)
     if (@($errs).Count -gt 0) { return ('PowerShell cannot be parsed statically: ' + $errs[0].Message) }
+    # موقع محسوب (Set-Location $x) يجعل المسارات النسبية بعده غير مثبتة المزوّد.
+    $computedLocation = $false
+    foreach ($lc in @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true))) {
+        $ln = [string]$lc.GetCommandName()
+        if ($ln -match '^(?i)(set-location|sl|cd|chdir|push-location|pushd)$') {
+            foreach ($el in @($lc.CommandElements | Select-Object -Skip 1)) {
+                $v = $el
+                if ($el -is [System.Management.Automation.Language.CommandParameterAst]) { $v = $el.Argument }
+                if ($null -ne $v -and -not (Test-PsLiteralAst $v)) { $computedLocation = $true }
+            }
+        }
+    }
     foreach ($c in @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true))) {
         $first = $c.CommandElements[0]
         $op = [string]$c.InvocationOperator
@@ -740,7 +752,28 @@ function Get-PsDynamicExecution([string]$Text) {
         if (@('set-alias', 'sal', 'new-alias', 'nal', 'import-alias', 'ipal') -contains $n) { return ('alias definition changes command semantics: ' + $c.Extent.Text) }
         if ($n -notmatch '^(get-|test-path$|gal$|gci$|gi$|ls$|dir$)') {
             foreach ($el in @($c.CommandElements | Select-Object -Skip 1)) {
-                if ($el -is [System.Management.Automation.Language.StringConstantExpressionAst] -and ([string]$el.Value) -match '^(?i)(microsoft\.powershell\.core\\)?alias::?') { return ('alias drive modified: ' + $c.Extent.Text) }
+                # الوسيط المستقل، أو المضمّن في المعامل نفسه (-Path:alias:launch)، نصاً ثابتاً أو قابلاً للتوسيع.
+                $v = $el
+                if ($el -is [System.Management.Automation.Language.CommandParameterAst]) { $v = $el.Argument }
+                $vt = $null
+                if ($v -is [System.Management.Automation.Language.StringConstantExpressionAst] -or $v -is [System.Management.Automation.Language.ExpandableStringExpressionAst]) { $vt = [string]$v.Value }
+                if ($null -ne $vt -and $vt -match '^(?i)(microsoft\.powershell\.core\\)?alias::?') { return ('alias drive modified: ' + $c.Extent.Text) }
+            }
+        }
+        # أوامر تعديل العناصر قد تعدّل مزوّد alias:. هدف محسوب (أو من الأنبوب)، أو مسار نسبي بعد موقع محسوب،
+        # لا يُثبت ساكناً أنه ليس alias: ⇒ UNKNOWN.
+        if ($n -match '^(set-item|si|new-item|ni|remove-item|ri|rm|rmdir|del|erase|rd|rename-item|rni|ren|copy-item|copy|cp|cpi|move-item|mi|move|mv|clear-item|cli)$') {
+            try { $ib = [System.Management.Automation.Language.StaticParameterBinder]::BindCommand($c, $true).BoundParameters } catch { return ('item mutation whose target cannot be bound statically: ' + $c.Extent.Text) }
+            if (-not $ib.ContainsKey('Path') -and -not $ib.ContainsKey('LiteralPath')) { return ('item mutation without a static target (the alias: provider cannot be ruled out): ' + $c.Extent.Text) }
+            foreach ($k in @('Path', 'LiteralPath', 'Destination')) {
+                if (-not $ib.ContainsKey($k)) { continue }
+                $tv = $ib[$k].Value
+                if (-not (Test-PsLiteralAst $tv)) { return ('item mutation with a computed ' + $k + ' (the alias: provider cannot be ruled out): ' + $c.Extent.Text) }
+                if ($computedLocation) {
+                    foreach ($lit in @($tv.FindAll({ param($x) $x -is [System.Management.Automation.Language.StringConstantExpressionAst] }, $true))) {
+                        if (([string]$lit.Value) -notmatch '^([A-Za-z]:|\\\\|[\\/]|[\w.]+::?)') { return ('item mutation with a relative path after a computed location: ' + $c.Extent.Text) }
+                    }
+                }
             }
         }
         $bound = $null

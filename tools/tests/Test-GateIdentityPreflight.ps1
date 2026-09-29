@@ -1052,6 +1052,31 @@ try {
     $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Alias Witness User' 'OZKSync' ($ps + ' -NoProfile -File "' + $aw + '"'))
     Assert-True ((Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())).ok) 'same wrapper under a non-privileged identity => not a privilege risk'
 
+    Write-Host '== Alias edge cases: inline parameter argument and computed item-mutation targets'
+    $aliasEdge = @(
+        @{ label = 'Set-Item -Path:alias:launch Start-Process (alias: inside the parameter token) => UNKNOWN'; n = 'ae1.ps1'; b = 'Set-Item -Path:alias:launch Start-Process' },
+        @{ label = 'New-Item -Path:''alias:launch'' -Value Start-Process => UNKNOWN'; n = 'ae2.ps1'; b = 'New-Item -Path:''alias:launch'' -Value Start-Process' },
+        @{ label = 'Set-Item "alias:$n" Start-Process (expandable string) => UNKNOWN'; n = 'ae3.ps1'; b = 'Set-Item "alias:$n" Start-Process' },
+        @{ label = 'Set-Item (''ali''+''as:launch'') Start-Process (computed target) => UNKNOWN'; n = 'ae4.ps1'; b = 'Set-Item (''ali''+''as:launch'') Start-Process' },
+        @{ label = '$p = ''ali'' + ''as:launch''; New-Item -Path $p ... => UNKNOWN'; n = 'ae5.ps1'; b = ('$p = ''ali'' + ''as:launch''' + "`r`n" + 'New-Item -Path $p -Value Start-Process') },
+        @{ label = 'Remove-Item -LiteralPath $x (computed) => UNKNOWN'; n = 'ae6.ps1'; b = 'Remove-Item -LiteralPath $x' },
+        @{ label = '$x | Remove-Item (target from the pipeline) => UNKNOWN'; n = 'ae7.ps1'; b = '$x | Remove-Item' },
+        @{ label = 'Copy-Item ... -Destination $d (computed destination) => UNKNOWN'; n = 'ae8.ps1'; b = 'Copy-Item ''C:\Tools\a.txt'' -Destination $d' },
+        @{ label = 'Set-Location $d; Set-Item launch Start-Process (relative path after a computed location) => UNKNOWN'; n = 'ae9.ps1'; b = ('Set-Location $d' + "`r`n" + 'Set-Item launch Start-Process') }
+    )
+    foreach ($c in $aliasEdge) { $got = Dyn-Reach $c.n $c.b; Assert-True ($got.status -eq 'UNKNOWN') ($c.label + ' (got ' + $got.status + ')') }
+    $aliasEdgeSafe = @(
+        @{ label = 'Remove-Item -Path ''C:\Logs\old.log'' (literal filesystem path) => unchanged (NOT_REPO)'; n = 'aes1.ps1'; b = 'Remove-Item -Path ''C:\Logs\old.log''' },
+        @{ label = 'New-Item -ItemType Directory -Path ''C:\Logs\x'' => unchanged (NOT_REPO)'; n = 'aes2.ps1'; b = 'New-Item -ItemType Directory -Path ''C:\Logs\x'' -Force' },
+        @{ label = 'Set-Content -Path $log -Value $x (content, not the alias provider) => unchanged (NOT_REPO)'; n = 'aes3.ps1'; b = ('$log = ''C:\Logs\x.log''' + "`r`n" + 'Set-Content -Path $log -Value (Get-Date)') },
+        @{ label = 'Set-Location ''C:\Tools''; Remove-Item ''old.log'' (literal location) => unchanged (NOT_REPO)'; n = 'aes4.ps1'; b = ('Set-Location ''C:\Tools''' + "`r`n" + 'Remove-Item ''old.log''') }
+    )
+    foreach ($c in $aliasEdgeSafe) { $got = Dyn-Reach $c.n $c.b; Assert-True ($got.status -eq 'NOT_REPO') ($c.label + ' (got ' + $got.status + ': ' + $got.why + ')') }
+    $aew = $dw + '\alias-edge-witness.ps1'
+    $script:Wrappers[$aew] = ('Set-Item (''ali''+''as:launch'') Start-Process' + "`r`n" + 'launch powershell.exe -ArgumentList (Get-Content C:\ProgramData\target.txt)')
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Alias Edge Witness' 'SYSTEM' ($ps + ' -NoProfile -File "' + $aew + '"'))
+    Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) '*Alias Edge Witness*alias: provider cannot be ruled out*') 'privileged task -> Set-Item (computed alias path) + launch => BLOCK'
+
     Write-Host '== Install preflight combines price-list and identity checks'
     # فحص ACL الفعلية مُختبَر في Test-GateTrustAcl.ps1؛ هنا نتيجته ناجحة لعزل الهوية ونشرات الأسعار.
     function Test-GateTrustAcl($Config) { return [pscustomobject]@{ ok = $true; results = @() } }; function Test-GitHookSafety($Config) { return [pscustomobject]@{ ok = $true; results = @() } }

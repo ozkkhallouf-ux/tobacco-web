@@ -181,6 +181,9 @@
       ديناميكياً (Codex P1): `Set-Alias`/`New-Alias`/`sal`/`nal`/`Import-Alias`/`ipal`، والكتابة عبر محرك `alias:`
       (`Set-Item`/`New-Item`/`Remove-Item` …)، والإسناد `$alias:x = …`. القراءة (`Get-Alias`، `Get-ChildItem alias:`،
       `Test-Path`) لا تُحتسب.
+      يشمل ذلك `alias:` المضمّن في المعامل نفسه (`-Path:alias:launch`) أو في نص قابل للتوسيع. أوامر تعديل العناصر
+      (Set/New/Remove/Rename/Copy/Move/Clear-Item وأسماؤها المستعارة) بهدف محسوب أو من الأنبوب، أو بمسار نسبي بعد
+      موقع محسوب (`Set-Location $x`) ⇒ UNKNOWN، لأن مزوّد `alias:` لا يمكن استبعاده ساكناً.
     - تحميل وحدة أو كود من هدف محسوب ⇒ UNKNOWN (Codex P1):
       - `Import-Module`/`ipmo` بهدف غير حرفي، أو بمسار نسبي، أو بكائن وحدة (`-ModuleInfo`)، أو من الأنبوب.
       - `Add-Type` بـ`-Path`/`-AssemblyName`/`-TypeDefinition`/`-MemberDefinition` محسوب.

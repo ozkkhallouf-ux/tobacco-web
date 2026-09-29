@@ -332,6 +332,13 @@ for (const needle of ["function Resolve-WorkloadReach", "cannot determine whethe
   // Codex P1: aliases تغيّر دلالة الأوامر (Set-Alias launch Start-Process) ⇒ UNKNOWN.
   assert.match(ps, /if \(@\('set-alias', 'sal', 'new-alias', 'nal', 'import-alias', 'ipal'\) -contains \$n\) \{ return \('alias definition changes command semantics: '/, "تعريف alias ⇒ UNKNOWN");
   assert.match(ps, /alias::\?'\) \{ return \('alias drive modified: '/, "الكتابة عبر alias: ⇒ UNKNOWN");
+  assert.match(ps, /if \(\$el -is \[System\.Management\.Automation\.Language\.CommandParameterAst\]\) \{ \$v = \$el\.Argument \}\s+\$vt = \$null/, "alias: المضمّن في المعامل (-Path:alias:x) يُفحص");
+  assert.match(ps, /ExpandableStringExpressionAst\]\) \{ \$vt = \[string\]\$v\.Value \}/, "alias: داخل نص قابل للتوسيع يُفحص");
+  assert.match(ps, /if \(-not \(Test-PsLiteralAst \$tv\)\) \{ return \('item mutation with a computed ' \+ \$k/, "هدف تعديل عنصر محسوب ⇒ UNKNOWN");
+  assert.match(ps, /if \(-not \$ib\.ContainsKey\('Path'\) -and -not \$ib\.ContainsKey\('LiteralPath'\)\) \{ return /, "تعديل عنصر بلا هدف ثابت (الأنبوب) ⇒ UNKNOWN");
+  assert.match(ps, /return \('item mutation with a relative path after a computed location: '/, "مسار نسبي بعد موقع محسوب ⇒ UNKNOWN");
+  assert.match(ps, /if \(\$null -ne \$v -and -not \(Test-PsLiteralAst \$v\)\) \{ \$computedLocation = \$true \}/, "Set-Location بهدف محسوب يُسجَّل موقعاً محسوباً");
+  assert.match(ps, /'\^\(set-item\|si\|new-item\|ni\|remove-item\|ri\|rm\|rmdir\|del\|erase\|rd\|rename-item\|rni\|ren\|copy-item\|copy\|cp\|cpi\|move-item\|mi\|move\|mv\|clear-item\|cli\)\$'/, "أوامر تعديل العناصر وأسماؤها المستعارة مغطاة");
   assert.match(ps, /\(\[string\]\$lv\.VariablePath\.DriveName\) -ieq 'alias'\) \{ return \('alias assigned through the alias: drive: '/, "الإسناد \$alias:x ⇒ UNKNOWN");
   assert.ok(ps.indexOf("'set-alias', 'sal', 'new-alias'") < ps.indexOf("$bound = $null"), "قاعدة alias تسبق قائمة الأوامر المعروفة");
   assert.match(ps, /'run', 'exec', 'shellexecute', 'shellexecuteex', 'executeshellcommand', 'createprocess'\) -contains \$member\) \{\s+if \(\$margs\.Count -eq 0 -or -not \(Test-PsLiteralAst \$margs\[0\]\)\) \{ return /, "COM Run/Exec/ShellExecute بأمر محسوب ⇒ UNKNOWN");
