@@ -931,7 +931,12 @@ try {
         @{ label = 'PS: MMC20.Application ExecuteShellCommand($c, ...) => UNKNOWN'; n = 'w10.ps1'; b = '[Activator]::CreateInstance([type]::GetTypeFromProgID(''MMC20.Application'')).Document.ActiveView.ExecuteShellCommand($c, $null, $null, ''7'')' },
         @{ label = 'VBS: GetObject("winmgmts:").Get("Win32_Process").Create cmd => UNKNOWN'; n = 'w11.vbs'; b = ('Set p = GetObject("winmgmts:\\.\root\cimv2").Get("Win32_Process")' + "`r`n" + 'r = p.Create(cmd, Null, Null, pid)') },
         @{ label = 'VBS: WMI ExecMethod_ => UNKNOWN'; n = 'w12.vbs'; b = ('Set inParams = p.Methods_("Create").InParameters.SpawnInstance_()' + "`r`n" + 'inParams.CommandLine = cmd' + "`r`n" + 'Set outParams = p.ExecMethod_("Create", inParams)') },
-        @{ label = 'CMD: for /f ... do wmic process call create %%i => UNKNOWN'; n = 'w13.cmd'; b = 'for /f "delims=" %%i in (C:\ProgramData\target.txt) do wmic process call create "%%i"' }
+        @{ label = 'CMD: for /f ... do wmic process call create %%i => UNKNOWN'; n = 'w13.cmd'; b = 'for /f "delims=" %%i in (C:\ProgramData\target.txt) do wmic process call create "%%i"' },
+        @{ label = 'PS: $p.$m($cmd) (computed member name) => UNKNOWN'; n = 'w14.ps1'; b = ('$p = [wmiclass]''Win32_Process''' + "`r`n" + '$p.$m($cmd)') },
+        @{ label = 'PS: $p."$m"($cmd) (expandable member name) => UNKNOWN'; n = 'w15.ps1'; b = ('$p = [wmiclass]''Win32_Process''' + "`r`n" + '$p."$m"($cmd)') },
+        @{ label = 'PS: & Invoke-WmiMethod ... -ArgumentList $cmd => UNKNOWN'; n = 'w16.ps1'; b = '& Invoke-WmiMethod -Class Win32_Process -Name Create -ArgumentList $cmd' },
+        @{ label = 'PS: iwmi alias ... -ArgumentList $cmd => UNKNOWN'; n = 'w17.ps1'; b = 'iwmi -Class Win32_Process -Name Create -ArgumentList $cmd' },
+        @{ label = 'PS: module-qualified Invoke-WmiMethod ... $cmd => UNKNOWN'; n = 'w18.ps1'; b = 'Microsoft.PowerShell.Management\Invoke-WmiMethod -Class Win32_Process -Name Create -ArgumentList $cmd' }
     )
     foreach ($c in $wmiDyn) { $got = Dyn-Reach $c.n $c.b; Assert-True ($got.status -eq 'UNKNOWN') ($c.label + ' (got ' + $got.status + ')') }
     $wmiStatic = @(
@@ -940,7 +945,8 @@ try {
         @{ label = 'PS: literal WScript.Shell .Run(''...'', 0, $true) => analyzed normally (NOT_REPO)'; n = 'ws3.ps1'; b = '(New-Object -ComObject WScript.Shell).Run(''C:\Tools\backup\run-backup.exe'', 0, $true)' },
         @{ label = 'PS: literal ([wmiclass]''Win32_Process'').Create(''...'') => analyzed normally (NOT_REPO)'; n = 'ws4.ps1'; b = '([wmiclass]''Win32_Process'').Create(''C:\Tools\backup\run-backup.exe'')' },
         @{ label = 'PS: [IO.File]::Create($path) (not a process) => unchanged (NOT_REPO)'; n = 'ws5.ps1'; b = ('$path = ''C:\Logs\x.log''' + "`r`n" + '[IO.File]::Create($path).Dispose()') },
-        @{ label = 'VBS: literal Win32_Process.Create => analyzed normally (NOT_REPO)'; n = 'ws6.vbs'; b = ('Set p = GetObject("winmgmts:\\.\root\cimv2").Get("Win32_Process")' + "`r`n" + 'r = p.Create("C:\Tools\backup\run-backup.exe", Null, Null, pid)') }
+        @{ label = 'VBS: literal Win32_Process.Create => analyzed normally (NOT_REPO)'; n = 'ws6.vbs'; b = ('Set p = GetObject("winmgmts:\\.\root\cimv2").Get("Win32_Process")' + "`r`n" + 'r = p.Create("C:\Tools\backup\run-backup.exe", Null, Null, pid)') },
+        @{ label = 'PS: & Invoke-WmiMethod with a literal ArgumentList => analyzed normally (NOT_REPO)'; n = 'ws8.ps1'; b = '& Invoke-WmiMethod -Class Win32_Process -Name Create -ArgumentList ''C:\Tools\backup\run-backup.exe''' }
     )
     foreach ($c in $wmiStatic) { $got = Dyn-Reach $c.n $c.b; Assert-True ($got.status -eq 'NOT_REPO') ($c.label + ' (got ' + $got.status + ': ' + $got.why + ')') }
     Assert-True ((Dyn-Reach 'ws7.ps1' ('Invoke-WmiMethod -Class Win32_Process -Name Create -ArgumentList ''' + $repo + '\tools\x.bat''')).status -eq 'REPO') 'PS: literal WMI process creation of a repo script => REPO'
@@ -948,6 +954,14 @@ try {
     $script:Wrappers[$wmw] = ('$cmd = Get-Content C:\ProgramData\target.txt' + "`r`n" + '([wmiclass]''Win32_Process'').Create($cmd)')
     $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Wmi Witness' 'SYSTEM' ($ps + ' -NoProfile -File "' + $wmw + '"'))
     Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) '*Wmi Witness*WMI/COM .Create*') 'privileged task -> wrapper -> Win32_Process.Create(Get-Content ...) => BLOCK'
+    $wmw2 = $dw + '\wmi-callop.ps1'
+    $script:Wrappers[$wmw2] = '& Invoke-WmiMethod -Class Win32_Process -Name Create -ArgumentList $cmd'
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Wmi CallOp' 'SYSTEM' ($ps + ' -NoProfile -File "' + $wmw2 + '"'))
+    Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) '*Wmi CallOp*computed arguments*') 'privileged task -> wrapper -> & Invoke-WmiMethod -ArgumentList $cmd => BLOCK'
+    $wmw3 = $dw + '\wmi-member.ps1'
+    $script:Wrappers[$wmw3] = ('$p = [wmiclass]''Win32_Process''' + "`r`n" + '$p.$m((Get-Content C:\ProgramData\target.txt))')
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Wmi Member' 'SYSTEM' ($ps + ' -NoProfile -File "' + $wmw3 + '"'))
+    Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) '*Wmi Member*dynamic member invocation*') 'privileged task -> wrapper -> $p.$m(Get-Content ...) => BLOCK'
 
     Write-Host '== Install preflight combines price-list and identity checks'
     # فحص ACL الفعلية مُختبَر في Test-GateTrustAcl.ps1؛ هنا نتيجته ناجحة لعزل الهوية ونشرات الأسعار.

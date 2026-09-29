@@ -679,8 +679,10 @@ function Get-PsDynamicExecution([string]$Text) {
                 if (-not (Test-PsLiteralAst $v)) { return ('interpreter ' + $leafName + ' with a computed argument: ' + $el.Extent.Text) }
             }
         }
-        if ($op -eq 'Ampersand' -or $op -eq 'Dot') { continue }
+        # & Invoke-WmiMethod / iwmi / Module\Invoke-WmiMethod لا تُتخطى: الوسائط تُفحص كالأمر المباشر.
         $n = $name.ToLowerInvariant()
+        if ($n.Contains('\')) { $n = $n.Substring($n.LastIndexOf('\') + 1) }
+        if ($n -eq 'iwmi') { $n = 'invoke-wmimethod' }
         $bound = $null
         if (@('start-process', 'saps', 'start', 'invoke-command', 'icm', 'invoke-item', 'ii', 'start-job', 'sajb', 'start-threadjob', 'invoke-wmimethod', 'invoke-cimmethod') -contains $n) {
             try { $bound = [System.Management.Automation.Language.StaticParameterBinder]::BindCommand($c, $true).BoundParameters } catch { return ('parameters of ' + $name + ' cannot be bound statically') }
@@ -710,6 +712,8 @@ function Get-PsDynamicExecution([string]$Text) {
         }
     }
     foreach ($m in @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true))) {
+        # $p.$m($cmd) / $p."$m"(...) : اسم الطريقة غير ثابت، فقد يكون Create/Run ⇒ UNKNOWN.
+        if (-not (Test-PsLiteralAst $m.Member)) { return ('dynamic member invocation: ' + $m.Extent.Text) }
         $member = ([string]$m.Member.Extent.Text).Trim("'", '"').ToLowerInvariant()
         $target = [string]$m.Expression.Extent.Text
         if (@('invoke', 'invokereturnasis', 'invokescript', 'newscriptblock', 'invokeasync', 'begininvoke') -contains $member) { return ('dynamic invocation: ' + $m.Extent.Text) }

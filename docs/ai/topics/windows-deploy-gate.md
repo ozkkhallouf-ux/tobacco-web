@@ -179,7 +179,10 @@
     - `Invoke-Item` بمسار محسوب ⇒ UNKNOWN.
     - إنشاء عملية عبر WMI/CIM/COM بوسيط محسوب ⇒ UNKNOWN:
       - `Invoke-WmiMethod`/`Invoke-CimMethod` باسم طريقة أو وسائط غير حرفية (ومنها `@{ CommandLine = $cmd }`).
+        `& Invoke-WmiMethod` و`iwmi` والاسم المؤهّل بالوحدة (`Microsoft.PowerShell.Management\Invoke-WmiMethod`)
+        تُفحص كالأمر المباشر ولا يتخطاها عامل الاستدعاء `&`.
       - `Win32_Process.Create` عبر `[wmiclass]` أو كائن WMI، و`ManagementClass.InvokeMethod`.
+      - اسم طريقة محسوب (`$p.$m($cmd)` أو `$p."$m"(...)`) ⇒ UNKNOWN، فقد يكون Create/Run.
       - COM: `WScript.Shell.Run`/`Exec`، و`Shell.Application.ShellExecute`، و`MMC20 ExecuteShellCommand`.
       - الصيغ الحرفية تُحلَّل كالمعتاد. `[IO.File]::Create` وأمثاله على أنواع لا علاقة لها بالعمليات لا تُحتسب.
     - `[scriptblock]::Create`، و`.Invoke`/`.InvokeScript`، و`[Process]::Start` بوسيط محسوب ⇒ UNKNOWN.

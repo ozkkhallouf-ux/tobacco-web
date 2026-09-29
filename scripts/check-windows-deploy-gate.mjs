@@ -337,7 +337,10 @@ for (const needle of ["function Resolve-WorkloadReach", "cannot determine whethe
   assert.match(sc, /Run\|Exec\|ShellExecute\|ExecuteShellCommand\|Create\)/, "VBS/JS .Create/ExecuteShellCommand مغطاة");
   assert.match(ps, /if \(\$leafName -match \$script:InterpreterLeaves\) \{[\s\S]*?if \(-not \(Test-PsLiteralAst \$v\)\) \{ return \('interpreter ' \+ \$leafName \+ ' with a computed argument: '/, "مفسّر ثابت بوسيط محسوب ⇒ UNKNOWN");
   assert.match(ps, /if \(\$op -eq 'Ampersand' -or \$op -eq 'Dot'\) \{\s+if \(-not \(Test-PsLiteralAst \$first\)\) \{ return [^\n]*\n\s+\}\s+\$name = \$c\.GetCommandName\(\)/, "& بهدف حرفي لا يتخطى فحص وسائط المفسّر");
-  assert.ok(ps.indexOf("$leafName -match $script:InterpreterLeaves") < ps.indexOf("if ($op -eq 'Ampersand' -or $op -eq 'Dot') { continue }"), "فحص وسائط المفسّر يسري على & بهدف حرفي أيضاً");
+  assert.ok(ps.indexOf("$leafName -match $script:InterpreterLeaves") >= 0 && ps.indexOf("if ($op -eq 'Ampersand' -or $op -eq 'Dot') { continue }") < 0, "& لا يتخطى تحليل Invoke-WmiMethod/CimMethod بعد فحص المفسّر");
+  assert.match(ps, /if \(-not \(Test-PsLiteralAst \$m\.Member\)\) \{ return \('dynamic member invocation:/, "اسم طريقة محسوب ($p.$m($cmd)) ⇒ UNKNOWN");
+  assert.match(ps, /\$n = \$n\.Substring\(\$n\.LastIndexOf\('\\'\) \+ 1\)/, "اسم الأمر بعد بادئة الوحدة");
+  assert.match(ps, /if \(\$n -eq 'iwmi'\) \{ \$n = 'invoke-wmimethod' \}/, "الاسم المستعار iwmi يُحلّ إلى Invoke-WmiMethod");
   assert.match(sc, /if \(\$l -match '\(\?i\)\\b\(powershell\|pwsh\|cmd\|[^\n]*%%~\?\[a-z\]\|%\[0-9\*\]\)'\) \{ return \('interpreter with an argument taken from a loop variable or batch argument: '/, "cmd: مفسّر بوسيط من متغير حلقة أو وسيط دفعة ⇒ UNKNOWN");
   assert.match(sc, /if \(\$arg -notmatch \$lit\) \{ return \('\.' \+ \$m\.Groups\[1\]\.Value \+ ' with a computed command: '/, "VBS Run/Exec بهدف غير حرفي ⇒ UNKNOWN");
   assert.match(sc, /\\\.\(Run\|Exec\|ShellExecute\|ExecuteShellCommand\|Create\)/, "Run/Exec/ShellExecute مغطاة");
