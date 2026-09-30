@@ -59,6 +59,15 @@ function Get-PreflightAcl([string]$Path) {
         [pscustomobject]@{ identity = 'S-1-3-0'; rights = 'FullControl'; type = 'Allow'; inherited = $true; inheritOnly = $true },
         [pscustomobject]@{ identity = 'S-1-5-32-545'; rights = 'ReadAndExecute, Synchronize'; type = 'Allow'; inherited = $true; inheritOnly = $false }) }
 }
+# بحث الملفات التنفيذية بالاسم المجرّد: PATH النظام والمستخدم ومجلد Windows نماذج قابلة للضبط.
+$script:SysPath = 'C:\Windows\system32;C:\Windows;C:\Program Files\nodejs;'
+$script:SysPathError = $null
+$script:UserPaths = @{}
+$script:UserPathErrors = @{}
+function Get-PreflightWindowsDirectory { return 'C:\Windows' }
+function Get-PreflightSystemPath { if ($script:SysPathError) { throw $script:SysPathError }; return $script:SysPath }
+function Get-PreflightUserPath([string]$Sid) { if ($script:UserPathErrors.ContainsKey($Sid)) { throw $script:UserPathErrors[$Sid] }; if ($script:UserPaths.ContainsKey($Sid)) { return $script:UserPaths[$Sid] }; return '' }
+$script:FsExistOnly = $null
 $script:FsAliases = [ordered]@{}
 $script:FsMissing = @{}
 $script:FsErrors = @{}
@@ -67,6 +76,7 @@ function Resolve-PreflightFinalPath([string]$Path) {
     foreach ($e in @($script:FsErrors.Keys)) { if ($k -eq $e -or $k.StartsWith($e + '\')) { return (New-PathResolution 'ERROR' '' $script:FsErrors[$e]) } }
     for ($hop = 0; $hop -lt 8; $hop++) { $moved = $false; foreach ($a in @($script:FsAliases.Keys)) { if ($k -eq $a -or $k.StartsWith($a + '\')) { $k = ([string]$script:FsAliases[$a]).ToLowerInvariant() + $k.Substring($a.Length); $moved = $true; break } }; if (-not $moved) { break } }
     if ($script:FsMissing.ContainsKey($k)) { return (New-PathResolution 'MISSING' $k ('does not exist: ' + $Path)) }
+    if ($null -ne $script:FsExistOnly) { if (-not ($script:FsExistOnly.ContainsKey($k) -or $k -match '^[a-z]:$' -or @($script:FsExistOnly.Keys | Where-Object { $_.StartsWith($k + '\') -or ($_.EndsWith('\*') -and ($k + '\').StartsWith($_.Substring(0, $_.Length - 1))) }).Count -gt 0)) { return (New-PathResolution 'MISSING' $k ('does not exist: ' + $Path)) } }
     if ($k -eq (ConvertTo-CanonicalTracePath $Path)) { return (New-PathResolution 'OK' $Path) }
     return (New-PathResolution 'OK' $k)
 }
@@ -682,11 +692,15 @@ try {
             [pscustomobject]@{ identity = 'S-1-5-32-544'; rights = 'FullControl'; type = 'Allow'; inherited = $true; inheritOnly = $false },
             [pscustomobject]@{ identity = 'S-1-5-32-545'; rights = 'ReadAndExecute, Synchronize'; type = 'Allow'; inherited = $true; inheritOnly = $false }) }
     }
+    function Get-PreflightWindowsDirectory { return 'C:\Windows' }
+    function Get-PreflightSystemPath { if ($script:SysPathError) { throw $script:SysPathError }; return $script:SysPath }
+    function Get-PreflightUserPath([string]$Sid) { if ($script:UserPathErrors.ContainsKey($Sid)) { throw $script:UserPathErrors[$Sid] }; if ($script:UserPaths.ContainsKey($Sid)) { return $script:UserPaths[$Sid] }; return '' }
     function Resolve-PreflightFinalPath([string]$Path) {
         $k = ConvertTo-CanonicalTracePath $Path
         foreach ($e in @($script:FsErrors.Keys)) { if ($k -eq $e -or $k.StartsWith($e + '\')) { return (New-PathResolution 'ERROR' '' $script:FsErrors[$e]) } }
         for ($hop = 0; $hop -lt 8; $hop++) { $moved = $false; foreach ($a in @($script:FsAliases.Keys)) { if ($k -eq $a -or $k.StartsWith($a + '\')) { $k = ([string]$script:FsAliases[$a]).ToLowerInvariant() + $k.Substring($a.Length); $moved = $true; break } }; if (-not $moved) { break } }
         if ($script:FsMissing.ContainsKey($k)) { return (New-PathResolution 'MISSING' $k ('does not exist: ' + $Path)) }
+    if ($null -ne $script:FsExistOnly) { if (-not ($script:FsExistOnly.ContainsKey($k) -or $k -match '^[a-z]:$' -or @($script:FsExistOnly.Keys | Where-Object { $_.StartsWith($k + '\') -or ($_.EndsWith('\*') -and ($k + '\').StartsWith($_.Substring(0, $_.Length - 1))) }).Count -gt 0)) { return (New-PathResolution 'MISSING' $k ('does not exist: ' + $Path)) } }
         if ($k -eq (ConvertTo-CanonicalTracePath $Path)) { return (New-PathResolution 'OK' $Path) }
         return (New-PathResolution 'OK' $k)
     }
@@ -1249,6 +1263,83 @@ try {
     Reset-TrustAcls; $script:FsAcls[(Resolve-TestAclKey 'C:\Tools\Svc\handler.dll')] = New-TestAcl 'S-1-5-18' @(Ace 'S-1-5-32-545' 'Write')
     Assert-True ((Resolve-TaskReach $cfgD @([pscustomobject]@{ execute = 'C:\Tools\Svc\handler.dll'; arguments = ''; workingDirectory = ''; classId = '{00000000-0000-0000-0000-00000000C0DE}' }) 'SYSTEM').status -eq 'UNKNOWN') 'COM handler binary writable by Users => UNKNOWN'
     Reset-TrustAcls
+
+    Write-Host '== Bare executable names resolve through the provable Windows search order (owner decision A)'
+    Reset-TrustAcls
+    $savedSysPath = $script:SysPath
+    $script:SysPath = 'C:\Windows\system32;C:\Windows;C:\Windows\System32\WindowsPowerShell\v1.0;C:\Program Files\nodejs;'
+    $script:FsExistOnly = @{ 'c:\windows\system32\cmd.exe' = 1; 'c:\windows\system32\wscript.exe' = 1; 'c:\windows\system32\cscript.exe' = 1; 'c:\windows\system32\windowspowershell\v1.0\powershell.exe' = 1; 'c:\program files\nodejs\node.exe' = 1; 'c:\tools\earlybin' = 1; 'c:\tools\svc\app.js' = 1; 'c:\tools\svc' = 1 }
+    $script:Wrappers['c:\tools\svc\app.js'] = 'x'
+    foreach ($rt in @($repo, 'C:\Users\LOQ\Documents\OZK-TOBACCO', 'C:\Users\LOQ\.copilot\repos')) { $script:FsExistOnly[(ConvertTo-CanonicalTracePath $rt)] = 1 }
+    # بقية التخطيط النظيف موجود فعلاً (أشجار كاملة بـ\*، وملفات محددة في System32 كي لا يوجد node.exe هناك).
+    foreach ($tree in @(($repo + '\*'), 'C:\ProgramData\OZK-TOBACCO\*', 'C:\ProgramData\OZK-Trust\*', 'C:\safe\*', 'C:\Logs\*')) { $script:FsExistOnly[(ConvertTo-CanonicalTracePath ($tree.TrimEnd('*').TrimEnd('\'))) + '\*'] = 1 }
+    foreach ($f in @('C:\Windows\system32\svchost.exe', 'C:\Windows\System32\OpenSSH\sshd.exe', 'C:\Windows\system32\sc.exe')) { $script:FsExistOnly[(ConvertTo-CanonicalTracePath $f)] = 1 }
+    function Bare-Reach([string]$Exe, [string]$Ident = 'SYSTEM', [string]$ArgText = '-v', [string]$Wd = '') { return (Resolve-TaskReach $cfgD @([pscustomobject]@{ execute = $Exe; arguments = $ArgText; workingDirectory = $Wd }) $Ident) }
+    $got = Bare-Reach 'node.exe'
+    Assert-True ($got.status -eq 'UNKNOWN' -and $got.why -like 'node invocation without a static target*') 'SYSTEM bare node.exe resolves uniquely to the trusted C:\Program Files\nodejs\node.exe (only the node rule applies: no static target)'
+    $got = Bare-Reach 'node.exe' 'SYSTEM' 'C:\Tools\svc\app.js'
+    Assert-True ($got.status -eq 'UNKNOWN' -and $got.why -like '*not statically inspected*') 'SYSTEM bare node.exe with a script: resolution is trusted; only the uninspectable-script rule applies'
+    $got = Bare-Reach 'cmd.exe' 'SYSTEM' '/c echo ok'
+    Assert-True ($got.status -eq 'NOT_REPO') 'bare cmd.exe => resolves to trusted System32 cmd.exe (NOT_REPO)'
+    $got = Bare-Reach 'wscript.exe' 'SYSTEM' '//B'
+    Assert-True ($got.status -eq 'UNKNOWN' -and $got.why -like '*without a script target*') 'bare wscript.exe => resolves to trusted System32 wscript.exe (only the script-target rule applies)'
+    $got = Bare-Reach 'powershell.exe' 'SYSTEM' '-NoProfile -File "C:\safe\tool.ps1"'
+    Assert-True ($got.status -eq 'NOT_REPO') 'bare powershell.exe => resolves through PATH to trusted WindowsPowerShell\v1.0 (NOT_REPO)'
+    $got = Bare-Reach 'cscript' 'SYSTEM' '//Nologo "C:\safe\tool.vbs"'
+    $script:Wrappers['c:\safe\tool.vbs'] = 'WScript.Echo 1'
+    $script:FsExistOnly['c:\safe\tool.vbs'] = 1
+    $got = Bare-Reach 'cscript' 'SYSTEM' '//Nologo "C:\safe\tool.vbs"'
+    Assert-True ($got.status -eq 'NOT_REPO') 'bare cscript without extension => PATHEXT (.exe) resolves in System32 (NOT_REPO)'
+    # مرشّح أسبق يكتبه كيان غير موثوق.
+    $script:SysPath = 'C:\Tools\EarlyBin;C:\Windows\system32;C:\Windows;C:\Program Files\nodejs'
+    $script:FsAcls[(Resolve-TestAclKey 'C:\Tools\EarlyBin')] = New-TestAcl 'S-1-5-18' @(Ace 'S-1-5-32-545' 'CreateFiles, Synchronize')
+    $got = Bare-Reach 'node.exe' 'SYSTEM' 'C:\Tools\svc\app.js'
+    Assert-True ($got.status -eq 'UNKNOWN' -and $got.why -like '*can plant it in C:\Tools\EarlyBin*') 'untrusted-writable earlier PATH directory (Users CreateFiles) => UNKNOWN even though a trusted node.exe exists later'
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Bare Early Plant' 'SYSTEM' 'x' @([pscustomobject]@{ execute = 'node.exe'; arguments = 'C:\Tools\svc\app.js'; workingDirectory = '' }))
+    Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) '*Bare Early Plant*can plant it in*') 'privileged task with a plantable earlier PATH candidate => BLOCK'
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Bare Early Plant User' 'OZKSync' 'x' @([pscustomobject]@{ execute = 'node.exe'; arguments = 'C:\Tools\svc\app.js'; workingDirectory = '' }))
+    Assert-True ((Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())).ok) 'the same under a non-privileged identity => not blocked by this rule alone'
+    Reset-TrustAcls
+    $script:FsExistOnly['c:\tools\earlybin\node.exe'] = 1
+    $script:FsAcls[(Resolve-TestAclKey 'C:\Tools\EarlyBin\node.exe')] = New-TestAcl 'S-1-5-18' @(Ace 'OZK2026\OZKSync' 'Modify')
+    $got = Bare-Reach 'node.exe' 'SYSTEM' 'C:\Tools\svc\app.js'
+    Assert-True ($got.status -eq 'UNKNOWN' -and $got.why -like '*untrusted principal*') 'earlier candidate exists and is writable by OZKSync (trusted one later in PATH) => UNKNOWN'
+    $script:FsExistOnly.Remove('c:\tools\earlybin\node.exe')
+    # مجلد PATH مفقود يستطيع كيان غير موثوق إنشاءه.
+    Reset-TrustAcls
+    $script:SysPath = 'C:\Windows\system32;C:\Windows;C:\NewTool\bin;C:\Program Files\nodejs'
+    $script:FsAcls[(Resolve-TestAclKey 'C:\')] = New-TestAcl 'S-1-5-18' @(Ace 'S-1-5-11' 'CreateDirectories, Synchronize')
+    $got = Bare-Reach 'node.exe' 'SYSTEM' 'C:\Tools\svc\app.js'
+    Assert-True ($got.status -eq 'UNKNOWN' -and $got.why -like '*C:\NewTool\bin*') 'missing PATH directory whose ancestor lets Authenticated Users create folders => UNKNOWN'
+    Reset-TrustAcls
+    # PATH غير مقروء/غامض/ديناميكي/نسبي.
+    $pathCases = @(
+        @{ label = 'unreadable system PATH => UNKNOWN'; set = { $script:SysPathError = 'Requested registry access is not allowed.' } },
+        @{ label = 'quoted PATH entry (ambiguous) => UNKNOWN'; set = { $script:SysPath = 'C:\Windows\system32;"C:\Program Files\nodejs"' } },
+        @{ label = 'PATH entry with an unresolved variable (dynamic) => UNKNOWN'; set = { $script:SysPath = 'C:\Windows\system32;%NODE_HOME%\bin' } },
+        @{ label = 'relative PATH entry => UNKNOWN'; set = { $script:SysPath = 'C:\Windows\system32;bin;C:\Program Files\nodejs' } },
+        @{ label = 'whitespace-only PATH entry => UNKNOWN'; set = { $script:SysPath = 'C:\Windows\system32; ;C:\Program Files\nodejs' } },
+        @{ label = 'user PATH hive not loaded => UNKNOWN'; set = { $script:UserPathErrors['S-1-5-18'] = 'user registry hive is not loaded' } },
+        @{ label = 'relative user PATH entry => UNKNOWN'; set = { $script:UserPaths['S-1-5-18'] = '.\tools' } }
+    )
+    foreach ($c in $pathCases) {
+        $script:SysPath = 'C:\Windows\system32;C:\Windows;C:\Program Files\nodejs;'; $script:SysPathError = $null; $script:UserPaths = @{}; $script:UserPathErrors = @{}
+        & $c.set
+        $got = Bare-Reach 'cmd.exe' 'SYSTEM' '/c echo ok'
+        Assert-True ($got.status -eq 'UNKNOWN' -and $got.why -like '*search path cannot be proven*') ($c.label + ' (got ' + $got.status + ')')
+    }
+    $script:SysPath = 'C:\Windows\system32;C:\Windows;C:\Program Files\nodejs;'; $script:SysPathError = $null; $script:UserPaths = @{}; $script:UserPathErrors = @{}
+    Assert-True ((Bare-Reach 'cmd.exe' 'SYSTEM' '/c echo ok').status -eq 'NOT_REPO') 'a trailing ";" (zero-length entry, skipped by Windows search) is not ambiguity'
+    Assert-True ((Bare-Reach 'nosuch.exe' 'SYSTEM' '').status -eq 'UNKNOWN') 'bare executable not found anywhere on the provable search path => UNKNOWN'
+    Assert-True ((Bare-Reach 'cmd.exe' 'BUILTIN\Users' '/c echo ok').status -eq 'UNKNOWN') 'execution identity whose user PATH cannot be determined (group) => UNKNOWN'
+    # داخل cmd /c: المجلد الحالي أولاً (بحث cmd)؛ مجلد عمل يكتبه غير موثوق ⇒ UNKNOWN حتى لـcmd.exe.
+    $script:FsExistOnly['c:\work'] = 1
+    $script:FsAcls[(Resolve-TestAclKey 'C:\Work')] = New-TestAcl 'S-1-5-18' @(Ace 'S-1-5-32-545' 'CreateFiles, Synchronize')
+    $got = Bare-Reach 'cmd.exe' 'SYSTEM' '/c node.exe C:\Tools\svc\app.js' 'C:\Work'
+    Assert-True ($got.status -eq 'UNKNOWN' -and $got.why -like '*C:\Work*') 'inside cmd /c, a Users-writable current directory is searched first => UNKNOWN'
+    Reset-TrustAcls
+    Assert-True ((Bare-Reach 'C:\Windows\system32\cmd.exe' 'SYSTEM' '/c echo ok').status -eq 'NOT_REPO') 'explicit absolute trusted executable => unchanged (NOT_REPO)'
+    $script:FsExistOnly = $null; $script:SysPath = $savedSysPath
 
     Write-Host '== Install preflight combines price-list and identity checks'
     # فحص ACL الفعلية مُختبَر في Test-GateTrustAcl.ps1؛ هنا نتيجته ناجحة لعزل الهوية ونشرات الأسعار.

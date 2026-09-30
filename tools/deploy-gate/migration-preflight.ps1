@@ -967,13 +967,39 @@ function Get-WrapperDynamicReach($Ctx, [string]$Path, [string]$Text, [int]$depth
     return $r
 }
 
-# ثقة نظام الملفات بالغلاف (Codex P1): محتوى غلاف قابل للتعديل أو الاستبدال من هوية غير موثوقة لا يُثبت
-# شيئاً (تستبدله لاحقاً بكود يستدعي المستودع). الموثوق: ثقة إدارة النظام فقط (SYSTEM، Administrators،
-# TrustedInstaller، أعضاء Administrators بالـSID؛ عضوية غير محسومة لا تعتمد أحداً)، ولا نحمي من مدير بشري.
-#   - الملف: المالك، وأي Allow يمنح تعديلاً (كتابة، إلحاق، حذف، WRITE_DAC/OWNER، GENERIC).
-#   - كل مجلد فوقه حتى جذر القرص: قدرة الاستبدال الفعلية (Get-AncestorReplacementFindings).
-# تعذّر قراءة/تفسير ACL أو SID لا يُحلّ ⇒ سبب (UNKNOWN). Deny لا يُحتسب إثباتاً. قراءة فقط.
-function Get-WrapperTrustReason($Ctx, [string]$Path) {
+# ------------------------------------------------------------
+# ملف تنفيذي باسم مجرّد (node.exe، cmd.exe، wscript.exe ...) (قرار المالك A): يُحلّ ساكناً وفق ترتيب بحث
+# Windows الذي يمكن إثباته، وfail-closed. نموذج اتحادي محافظ لأن المصدر قد يكون CreateProcess (Task
+# Scheduler) أو بحث cmd (المجلد الحالي أولاً ثم PATH مع PATHEXT)، وPATH قد يكون للخدمة أو لبيئة المستخدم:
+#   مجلد المضيف (System32) ⇒ مجلد العمل ⇒ System32 ⇒ System ⇒ Windows ⇒ PATH النظام ⇒ PATH المستخدم.
+# كل مجلد قبل المجلد الذي يوجد فيه الملف يجب أن يثبت أنه لا يُزرَع فيه اسم مطابق من كيان غير موثوق (إنشاء
+# ملف، أو إنشاء المجلد المفقود، أو استبداله)، والملف الموجود يمر بفحص الثقة نفسه. لا تنفيذ ولا تشغيل.
+# ------------------------------------------------------------
+$script:PathExtDefault = @('.com', '.exe', '.bat', '.cmd', '.vbs', '.vbe', '.js', '.jse', '.wsf', '.wsh', '.msc')
+
+function Get-PreflightWindowsDirectory {
+    $w = [Environment]::GetEnvironmentVariable('SystemRoot')
+    if (-not $w) { $w = 'C:\Windows' }
+    return $w
+}
+
+# PATH الخام (قبل التوسيع) من السجل، قراءة فقط. يرمي عند التعذّر.
+function Get-PreflightSystemPath {
+    $k = Get-Item -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment' -ErrorAction Stop
+    return [string]$k.GetValue('Path', '', 'DoNotExpandEnvironmentNames')
+}
+
+# PATH المستخدم لـSID من HKU (لا تحميل hive). '' إن لم يوجد؛ يرمي إن كان الـhive غير محمّل أو غير مقروء.
+function Get-PreflightUserPath([string]$Sid) {
+    $root = 'Registry::HKEY_USERS\' + $Sid
+    if (-not (Test-Path -LiteralPath $root)) { throw ('user registry hive is not loaded for ' + $Sid) }
+    $env = $root + '\Environment'
+    if (-not (Test-Path -LiteralPath $env)) { return '' }
+    $k = Get-Item -LiteralPath $env -ErrorAction Stop
+    return [string]$k.GetValue('Path', '', 'DoNotExpandEnvironmentNames')
+}
+
+function Get-TrustApprovedSids($Ctx) {
     if ($null -eq $Ctx.trustApproved) {
         $approved = @('S-1-5-18', 'S-1-5-32-544', $script:TrustedInstallerSid)
         $members = Get-PreflightAdminMembers
@@ -983,7 +1009,147 @@ function Get-WrapperTrustReason($Ctx, [string]$Path) {
         }
         $Ctx.trustApproved = $approved
     }
-    $approvedSids = @($Ctx.trustApproved)
+    return @($Ctx.trustApproved)
+}
+
+# مدخلات PATH: تُتجاهل الفارغة تماماً (يتخطاها بحث Windows)؛ المقتبسة أو النسبية أو بمتغير غير محلول ⇒ $null (UNKNOWN).
+function ConvertFrom-SearchPathText([string]$Raw, [string]$Label) {
+    $out = @()
+    foreach ($e in ([string]$Raw -split ';')) {
+        if ($e.Length -eq 0) { continue }
+        $t = $e.Trim()
+        if (-not $t) { return [pscustomobject]@{ ok = $false; reason = ($Label + ' contains a whitespace-only entry') } }
+        if ($t.Contains('"')) { return [pscustomobject]@{ ok = $false; reason = ($Label + ' contains a quoted entry: ' + $t) } }
+        $x = Expand-MachineVariables $t
+        if ($x -match '%') { return [pscustomobject]@{ ok = $false; reason = ($Label + ' entry has an unresolved variable: ' + $t) } }
+        if (-not (Test-AbsoluteTracePath $x)) { return [pscustomobject]@{ ok = $false; reason = ($Label + ' has a relative entry: ' + $t) } }
+        $out += $x.TrimEnd('\')
+    }
+    return [pscustomobject]@{ ok = $true; dirs = $out }
+}
+
+function Get-BareSearchPlan($Ctx, [string]$WorkDir, [int]$Depth = 0) {
+    $win = ([string](Get-PreflightWindowsDirectory)).TrimEnd('\')
+    if ($Depth -gt 0) {
+        # داخل cmd /c: بحث cmd يبدأ بالمجلد الحالي (مجلد العمل، أو System32 افتراضي Task Scheduler حين يكون فارغاً).
+        $cwd = $WorkDir
+        if (-not $cwd) { $cwd = $win + '\System32' }
+        $dirs = @($cwd.TrimEnd('\'))
+    } else {
+        # CreateProcess: مجلد المضيف (System32) ثم المجلد الحالي (يُضاف مجلد العمل تحفّظاً).
+        $dirs = @(($win + '\System32'))
+        if ($WorkDir) { $dirs += $WorkDir.TrimEnd('\') }
+    }
+    $dirs += @(($win + '\System32'), ($win + '\System'), $win)
+    try { $sp = ConvertFrom-SearchPathText (Get-PreflightSystemPath) 'system PATH' } catch { return [pscustomobject]@{ ok = $false; reason = ('system PATH cannot be read: ' + $_.Exception.Message) } }
+    if (-not $sp.ok) { return $sp }
+    $dirs += $sp.dirs
+    $sid = Resolve-PrincipalSid ([string]$Ctx.identity)
+    if (-not $sid -or $sid -notmatch '^S-1-5-(18|19|20|21(-\d+)+)$') { return [pscustomobject]@{ ok = $false; reason = ('the user PATH of the execution identity cannot be determined (' + $Ctx.identity + ')') } }
+    try { $up = ConvertFrom-SearchPathText (Get-PreflightUserPath $sid) 'user PATH' } catch { return [pscustomobject]@{ ok = $false; reason = ('user PATH cannot be read: ' + $_.Exception.Message) } }
+    if (-not $up.ok) { return $up }
+    $dirs += $up.dirs
+    $seen = @{}
+    $ordered = @()
+    foreach ($d in $dirs) { $k = ConvertTo-CanonicalTracePath $d; if (-not $seen.ContainsKey($k)) { $seen[$k] = $true; $ordered += $d } }
+    return [pscustomobject]@{ ok = $true; dirs = $ordered }
+}
+
+# هل يستطيع كيان غير موثوق أن يزرع ملفاً (أو المجلد المفقود نفسه) في مجلد بحث، أو يستبدله؟ سبب أو $null.
+function Get-DirPlantReason($Ctx, [string]$Dir) {
+    if (-not $script:DirPlantCache) { $script:DirPlantCache = @{} }
+    $key = ConvertTo-CanonicalTracePath $Dir
+    if ($script:DirPlantCache.ContainsKey($key)) { return $script:DirPlantCache[$key] }
+    $approved = Get-TrustApprovedSids $Ctx
+    $reason = $null
+    $cur = $Dir.TrimEnd('\')
+    if ($cur -match '^[A-Za-z]:$') { $cur += '\' }
+    $createMask = 2
+    $r = Resolve-PreflightFinalPath $cur
+    if ($r.status -eq 'ERROR') { $reason = ('search directory ' + $cur + ' cannot be resolved: ' + $r.reason) }
+    else {
+        if ($r.status -eq 'MISSING') {
+            # المجلد مفقود: من يستطيع إنشاءه في أقرب سلف موجود يزرع فيه ما يشاء.
+            $createMask = 4
+            for ($i = 0; $i -lt 64; $i++) {
+                $up = Get-GateParentPath ($cur.TrimEnd('\')) '\'
+                if (-not $up) { $reason = ('no existing ancestor for search directory ' + $Dir); break }
+                $cur = $up
+                $ur = Resolve-PreflightFinalPath $cur
+                if ($ur.status -eq 'OK') { break }
+                if ($ur.status -eq 'ERROR') { $reason = ('search directory ancestor ' + $cur + ' cannot be resolved: ' + $ur.reason); break }
+            }
+        }
+        if (-not $reason) {
+            try { $acl = Get-PreflightAcl $cur } catch { $acl = $null; $reason = ('ACL of search directory ' + $cur + ' cannot be read: ' + $_.Exception.Message) }
+            if (-not $reason) {
+                $f = @(Get-AncestorReplacementFindings $cur $acl $approved)
+                if ($f.Count -gt 0) { $reason = $f[0].reason }
+            }
+            if (-not $reason) {
+                foreach ($ace in @($acl.access)) {
+                    if (([string]$ace.type).Trim() -ne 'Allow') { continue }
+                    if ($ace.PSObject.Properties['inheritOnly'] -and [bool]$ace.inheritOnly) { continue }
+                    $v = ConvertTo-RightsValue ([string]$ace.rights)
+                    if ($null -eq $v) { $reason = ('rights on ' + $cur + ' cannot be interpreted: ' + $ace.rights); break }
+                    if ((($v -band $createMask) -eq 0) -and (($v -band 0x40000000) -eq 0) -and (($v -band 0x10000000) -eq 0)) { continue }
+                    $s = Resolve-PrincipalSid ([string]$ace.identity)
+                    if (-not $s) { $reason = ('create-capable ACE on ' + $cur + ' whose identity cannot be resolved: ' + $ace.identity); break }
+                    if ($approved -notcontains $s) { $reason = ($ace.identity + ' can create entries in ' + $cur + ' (' + $ace.rights + ')'); break }
+                }
+            }
+            if (-not $reason) {
+                $up = Get-GateParentPath ($cur.TrimEnd('\')) '\'
+                for ($i = 0; $up -and $i -lt 64; $i++) {
+                    try { $pacl = Get-PreflightAcl $up } catch { $reason = ('ACL of ' + $up + ' cannot be read: ' + $_.Exception.Message); break }
+                    $pf = @(Get-AncestorReplacementFindings $up $pacl $approved)
+                    if ($pf.Count -gt 0) { $reason = $pf[0].reason; break }
+                    $up = Get-GateParentPath ($up.TrimEnd('\')) '\'
+                }
+            }
+        }
+    }
+    $script:DirPlantCache[$key] = $reason
+    return $reason
+}
+
+function Get-BareExecutableReach($Ctx, [string]$Name, [string]$WorkDir, [int]$Depth) {
+    $plan = Get-BareSearchPlan $Ctx $WorkDir $Depth
+    if (-not $plan.ok) { return (New-Reach 'UNKNOWN' ('bare executable ' + $Name + ': search path cannot be proven: ' + $plan.reason)) }
+    $hasExt = $Name -match '\.[A-Za-z0-9]{1,5}$'
+    $names = @($Name)
+    if (-not $hasExt) { $names = @($script:PathExtDefault | ForEach-Object { $Name + $_ }) }
+    foreach ($d in @($plan.dirs)) {
+        $foundPath = $null
+        foreach ($nm in $names) {
+            $cand = $d.TrimEnd('\') + '\' + $nm
+            $rr = Resolve-PreflightFinalPath $cand
+            if ($rr.status -eq 'ERROR') { return (New-Reach 'UNKNOWN' ('bare executable ' + $Name + ': candidate ' + $cand + ' cannot be resolved: ' + $rr.reason)) }
+            if ($rr.status -eq 'OK') { $foundPath = $cand; break }
+        }
+        if ($foundPath) {
+            if (-not $hasExt) { $pr = Get-DirPlantReason $Ctx $d; if ($pr) { return (New-Reach 'UNKNOWN' ('bare executable ' + $Name + ': an untrusted principal can plant an earlier extension in ' + $d + ': ' + $pr)) } }
+            $tr = Get-TargetReach $Ctx $foundPath '' $Depth ('bare executable ' + $Name + ' resolved to')
+            if ($tr.status -eq 'NOT_REPO') {
+                $ft = Get-WrapperTrustReason $Ctx $foundPath
+                if ($ft) { return (New-Reach 'UNKNOWN' ('bare executable ' + $Name + ' resolved to ' + $foundPath + ', which can be modified or replaced by an untrusted principal: ' + $ft)) }
+            }
+            return $tr
+        }
+        $pr2 = Get-DirPlantReason $Ctx $d
+        if ($pr2) { return (New-Reach 'UNKNOWN' ('bare executable ' + $Name + ': an untrusted principal can plant it in ' + $d + ', searched before the real target: ' + $pr2)) }
+    }
+    return (New-Reach 'UNKNOWN' ('bare executable ' + $Name + ' is not found on the provable search path'))
+}
+
+# ثقة نظام الملفات بالغلاف (Codex P1): محتوى غلاف قابل للتعديل أو الاستبدال من هوية غير موثوقة لا يُثبت
+# شيئاً (تستبدله لاحقاً بكود يستدعي المستودع). الموثوق: ثقة إدارة النظام فقط (SYSTEM، Administrators،
+# TrustedInstaller، أعضاء Administrators بالـSID؛ عضوية غير محسومة لا تعتمد أحداً)، ولا نحمي من مدير بشري.
+#   - الملف: المالك، وأي Allow يمنح تعديلاً (كتابة، إلحاق، حذف، WRITE_DAC/OWNER، GENERIC).
+#   - كل مجلد فوقه حتى جذر القرص: قدرة الاستبدال الفعلية (Get-AncestorReplacementFindings).
+# تعذّر قراءة/تفسير ACL أو SID لا يُحلّ ⇒ سبب (UNKNOWN). Deny لا يُحتسب إثباتاً. قراءة فقط.
+function Get-WrapperTrustReason($Ctx, [string]$Path) {
+    $approvedSids = Get-TrustApprovedSids $Ctx
     try { $acl = Get-PreflightAcl $Path } catch { return ('ACL of ' + $Path + ' cannot be read: ' + $_.Exception.Message) }
     if (-not $acl) { return ('ACL of ' + $Path + ' is empty or unreadable') }
     $ownerSid = Resolve-PrincipalSid ([string]$acl.owner)
@@ -1261,6 +1427,10 @@ function Get-ActionReach($Ctx, [string]$Execute, [string]$Arguments, [string]$Wo
     $leaf = (($exe -replace '/', '\') -split '\\')[-1].ToLowerInvariant()
     if ($exe -match '[\\/]' -or $leaf -match ('\.(' + $script:ScriptExtensions + ')$')) {
         $r = Join-Reach $r (Get-TargetReach $Ctx $exe $wd $Depth 'executable')
+        if ($r.status -eq 'REPO') { return $r }
+    } else {
+        # اسم مجرّد يُحلّ عبر ترتيب بحث Windows المثبت (قرار المالك A)، fail-closed.
+        $r = Join-Reach $r (Get-BareExecutableReach $Ctx $exe $wd $Depth)
         if ($r.status -eq 'REPO') { return $r }
     }
     $tokens = Split-CommandTokens $fx['arguments']
@@ -1670,6 +1840,7 @@ function Invoke-GateIdentityPreflight($Config) {
     }
     if ($adminKeys -and ($adminKeys -contains $gate)) { $results += & $block 'gate identity' ('dedicated gate identity is a member of local Administrators: ' + $gateName) }
 
+    $script:DirPlantCache = @{}
     # سجل تدقيق لكل عنصر: نوع الـprincipal، والـSID، وUserId/GroupId، وRunLevel، والتصنيف، والنتيجة.
     $workloads = New-Object System.Collections.ArrayList
     foreach ($item in $inventory) {

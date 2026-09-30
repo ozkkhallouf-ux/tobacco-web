@@ -99,6 +99,29 @@ try {
     Assert-True ((Reach (Act $ps ('-File "' + $hop1 + '\tools\job.ps1"'))).status -eq 'REPO') 'N: nested junction chain (hop1 -> hop2 -> repo) => REPO'
     Write-Host '  note: J (access denied during resolution) cannot be created here without changing ACLs; it is covered by the model test in Test-GateIdentityPreflight.ps1'
 
+    Write-Host '== Bare executable names through the real search order (controlled PATH, real ACLs)'
+    # PATH مضبوط بمجلدات حقيقية (fixtures في TEMP) مع System32/Windows الحقيقيين؛ الحل والـACL حقيقيان، ولا شيء يُنفَّذ.
+    $binA = New-TestDir (Join-Path $base 'binA')
+    $binB = New-TestDir (Join-Path $base 'binB')
+    [void](New-TestFile (Join-Path $binB 'node.exe') 'not executed')
+    $winDir = $env:SystemRoot
+    $script:TestSysPath = ($winDir + '\System32;' + $winDir + ';' + $winDir + '\System32\WindowsPowerShell\v1.0;' + $binA + ';' + $binB + ';')
+    function Get-PreflightSystemPath { return $script:TestSysPath }
+    function Get-PreflightUserPath([string]$Sid) { return '' }
+    function BareReach([string]$Exe, [string]$ArgText) { return (Resolve-TaskReach $cfg @((Act $Exe $ArgText)) 'SYSTEM') }
+    $x = BareReach 'node.exe' '-v'
+    Assert-True ($x.status -eq 'UNKNOWN' -and $x.why -like 'node invocation without a static target*') ('bare node.exe resolves uniquely to the trusted ' + $binB + '\node.exe (got ' + $x.status + ': ' + $x.why + ')')
+    $x = BareReach 'cmd.exe' '/c echo ok'
+    Assert-True ($x.status -eq 'NOT_REPO') ('bare cmd.exe resolves to the real System32 cmd.exe and passes the real ACL trust check (got ' + $x.status + ': ' + $x.why + ')')
+    $x = BareReach 'powershell.exe' ('-NoProfile -File "' + $outside + '\x.ps1"')
+    Assert-True ($x.status -eq 'NOT_REPO') ('bare powershell.exe resolves through PATH to the real WindowsPowerShell\v1.0 (got ' + $x.status + ': ' + $x.why + ')')
+    $x = BareReach 'wscript.exe' '//B'
+    Assert-True ($x.status -eq 'UNKNOWN' -and $x.why -like '*without a script target*') ('bare wscript.exe resolves to the real System32 wscript.exe (got ' + $x.status + ': ' + $x.why + ')')
+    $script:TestSysPath = ($winDir + '\System32;' + $winDir + ';tools\bin;' + $binB)
+    Assert-True ((BareReach 'node.exe' '-v').why -like '*relative entry*') 'relative PATH entry => UNKNOWN'
+    $script:TestSysPath = ($winDir + '\System32;' + $winDir + ';' + $binA)
+    Assert-True ((BareReach 'node.exe' '-v').why -like '*not found on the provable search path*') 'bare node.exe not on the search path => UNKNOWN'
+
     Write-Host '== Symbolic links (need SeCreateSymbolicLinkPrivilege or Developer Mode)'
     $dirLink = Join-Path $base 'symdir'
     $fileLink = Join-Path $base 'symjob.ps1'

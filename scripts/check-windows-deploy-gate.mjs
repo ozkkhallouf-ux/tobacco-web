@@ -409,7 +409,8 @@ for (const needle of ["function Resolve-WorkloadReach", "cannot determine whethe
   assert.match(wt, /if \(\$approvedSids -notcontains \$ownerSid\) \{ return /, "مالك غير موثوق ⇒ UNKNOWN");
   assert.match(wt, /if \(-not \(Test-RightsGrantWrite \$value\)\) \{ continue \}[\s\S]*if \(\$approvedSids -notcontains \$aceSid\) \{ return /, "ACE تعديل لغير موثوق ⇒ UNKNOWN");
   assert.match(wt, /\$f = @\(Get-AncestorReplacementFindings \$dir \$dacl \$approvedSids\)/, "المجلدات فوق الغلاف حتى الجذر: قدرة الاستبدال");
-  assert.match(wt, /if \(@\(\$ms \| Where-Object \{ -not \$_ \}\)\.Count -eq 0\) \{ \$approved \+= \$ms \}/, "عضوية غير محسومة لا تعتمد أحداً");
+  assert.match(wt, /^function Get-WrapperTrustReason\(\$Ctx, \[string\]\$Path\) \{\s+\$approvedSids = Get-TrustApprovedSids \$Ctx\s/, "الثقة من مجموعة المعتمدين الموحدة");
+  assert.match(body("Get-TrustApprovedSids"), /\$approved = @\('S-1-5-18', 'S-1-5-32-544', \$script:TrustedInstallerSid\)[\s\S]*if \(@\(\$ms \| Where-Object \{ -not \$_ \}\)\.Count -eq 0\) \{ \$approved \+= \$ms \}/, "عضوية غير محسومة لا تعتمد أحداً");
   // 3) الكتل المحسوبة.
   const ps = body("Get-PsDynamicExecution");
   assert.match(ps, /\^\(foreach-object\|%\|foreach\|where-object\|\\\?\|where\)\$/, "ForEach-Object/%/Where-Object/? مغطاة");
@@ -432,6 +433,29 @@ for (const needle of ["function Resolve-WorkloadReach", "cannot determine whethe
   assert.match(doc, /KNOWN BOOTSTRAP BLOCKER/, "عائق .git معلن");
   assert.match(doc, /السباق غير مغلق في الكود/, "لا ادعاء بإغلاق السباق");
   assert.match(doc, /لا تُعد البوابة جاهزة للإنتاج قبل أن تحمي مرحلة bootstrap `\.git`/, "البوابة غير جاهزة للإنتاج قبل حماية .git");
+}
+// قرار المالك A: الملف التنفيذي باسم مجرّد يُحلّ بترتيب بحث Windows المثبت، fail-closed.
+{
+  const body = (n) => { const i = preSrc.indexOf(`function ${n}`); assert.ok(i >= 0, n); const j = preSrc.indexOf("\nfunction ", i + 10); return preSrc.slice(i, j < 0 ? undefined : j); };
+  const act = body("Get-ActionReach"), plan = body("Get-BareSearchPlan"), bare = body("Get-BareExecutableReach"), plant = body("Get-DirPlantReason"), parse = body("ConvertFrom-SearchPathText");
+  assert.match(act, /\} else \{\s+# [^\n]*\n\s+\$r = Join-Reach \$r \(Get-BareExecutableReach \$Ctx \$exe \$wd \$Depth\)/, "الاسم المجرّد لا يُترك بلا حل");
+  assert.match(plan, /if \(\$Depth -gt 0\) \{[\s\S]*?\$dirs = @\(\$cwd\.TrimEnd/, "داخل cmd: المجلد الحالي أولاً");
+  assert.match(plan, /\$dirs = @\(\(\$win \+ '\\System32'\)\)\s+if \(\$WorkDir\) \{ \$dirs \+= /, "CreateProcess: مجلد المضيف ثم مجلد العمل");
+  assert.match(plan, /try \{ \$sp = ConvertFrom-SearchPathText \(Get-PreflightSystemPath\) 'system PATH' \} catch \{ return /, "PATH النظام غير مقروء ⇒ UNKNOWN");
+  assert.match(plan, /try \{ \$up = ConvertFrom-SearchPathText \(Get-PreflightUserPath \$sid\) 'user PATH' \} catch \{ return /, "PATH المستخدم غير مقروء ⇒ UNKNOWN");
+  assert.match(plan, /the user PATH of the execution identity cannot be determined/, "هوية تنفيذ بلا PATH مستخدم محسوم ⇒ UNKNOWN");
+  for (const needle of ["whitespace-only entry", "quoted entry", "unresolved variable", "relative entry"]) assert.ok(parse.includes(needle), `مدخل PATH غامض ⇒ UNKNOWN: ${needle}`);
+  assert.match(parse, /if \(-not \$t\) \{ return \[pscustomobject\]@\{ ok = \$false/, "مدخل فراغات فقط ⇒ UNKNOWN");
+  assert.match(parse, /if \(\$t\.Contains\('"'\)\) \{ return \[pscustomobject\]@\{ ok = \$false/, "مدخل مقتبس ⇒ UNKNOWN");
+  assert.match(parse, /if \(\$x -match '%'\) \{ return \[pscustomobject\]@\{ ok = \$false/, "متغير غير محلول ⇒ UNKNOWN");
+  assert.match(parse, /if \(-not \(Test-AbsoluteTracePath \$x\)\) \{ return \[pscustomobject\]@\{ ok = \$false/, "مدخل نسبي ⇒ UNKNOWN");
+  assert.match(bare, /\$pr2 = Get-DirPlantReason \$Ctx \$d\s+if \(\$pr2\) \{ return \(New-Reach 'UNKNOWN'/, "مجلد أسبق قابل للزرع ⇒ UNKNOWN");
+  assert.match(bare, /\$ft = Get-WrapperTrustReason \$Ctx \$foundPath\s+if \(\$ft\) \{ return \(New-Reach 'UNKNOWN'/, "الملف المحلول يمر بفحص الثقة");
+  assert.match(bare, /is not found on the provable search path/, "غير موجود ⇒ UNKNOWN");
+  assert.match(bare, /if \(\$rr\.status -eq 'ERROR'\) \{ return \(New-Reach 'UNKNOWN'/, "مرشّح لا يُحلّ ⇒ UNKNOWN");
+  assert.match(plant, /\$createMask = 4/, "مجلد مفقود: إنشاء المجلد في السلف يُعد زرعاً");
+  assert.match(plant, /can create entries in /, "إنشاء ملف لغير موثوق ⇒ زرع");
+  assert.match(read("docs/ai/topics/windows-deploy-gate.md"), /Get-BareExecutableReach/);
 }
 // Codex P1: قرارات الثقة بالـSID حصراً — لا عودة لمقارنة الاسم بعد حذف بادئة الجهاز/المجال.
 assert.ok(!preSrc.includes("ConvertTo-IdentityKey"), "مفتاح الهوية بالاسم محذوف نهائياً");
