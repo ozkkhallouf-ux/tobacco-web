@@ -391,6 +391,34 @@ for (const needle of ["function Resolve-WorkloadReach", "cannot determine whethe
   assert.match(read("tools/tests/Test-DeployGate.ps1"), /control: plain git merge --ff-only DOES run the planted post-merge hook/, "اختبار hooks له أسنان");
   assert.match(read("docs/ai/topics/windows-deploy-gate.md"), /core\.hooksPath=NUL/);
 }
+// Codex P1 ×3 (#285): فحص .git ثانٍ قبل merge/reset، وثقة نظام الملفات بالأغلفة، والكتل المحسوبة.
+{
+  const body = (n) => { const i = preSrc.indexOf(`function ${n}`); assert.ok(i >= 0, n); const j = preSrc.indexOf("\nfunction ", i + 10); return preSrc.slice(i, j < 0 ? undefined : j); };
+  // 1) الفحص الثاني بعد توقف المهام ومباشرة قبل أي تغيير للشجرة.
+  const dep = gateSrc.slice(gateSrc.indexOf("$stillRunning = @(Wait-TasksIdle $Config)"), gateSrc.indexOf("$merge = Invoke-GateGit $Config @('merge', '--ff-only', $target)"));
+  assert.match(dep, /\$recheck = Get-GitSafetyStopReason \$Config\s+if \(\$null -ne \$recheck\) \{ Clear-DeployFlag \$paths; return Complete-Gate \$paths \$record 'STOP'/, "Deploy: فحص .git ثانٍ قبل merge");
+  const rb = gateSrc.slice(gateSrc.indexOf("function Invoke-GateRollback"), gateSrc.indexOf("$reset = Invoke-GateGit $Config @('reset', '--keep', $toSha)"));
+  assert.match(rb, /Wait-TasksIdle[\s\S]*\$recheck = Get-GitSafetyStopReason \$Config\s+if \(\$null -ne \$recheck\) \{ Clear-DeployFlag \$Paths; return Complete-Gate \$Paths \$Record 'STOP'/, "Rollback: فحص .git ثانٍ قبل reset");
+  const gs = gateSrc.slice(gateSrc.indexOf("function Get-GitSafetyStopReason"), gateSrc.indexOf("function Wait-TasksIdle"));
+  assert.match(gs, /try \{ \$s = Test-GitHookSafety \$Config \} catch \{ return /, "تعذّر الفحص الثاني ⇒ توقف");
+  // 2) ثقة نظام الملفات بالغلاف قبل الوثوق بمحتواه.
+  const wrap = body("Get-WrapperReach"), wt = body("Get-WrapperTrustReason");
+  assert.match(wrap, /\$trust = Get-WrapperTrustReason \$Ctx \(\[string\]\$pc\.final\)\s+if \(\$trust\) \{ return \(New-Reach 'UNKNOWN'/, "غلاف قابل للتعديل/الاستبدال ⇒ UNKNOWN");
+  assert.ok(wrap.indexOf("$trust = Get-WrapperTrustReason") < wrap.indexOf("Read-PreflightWrapperText"), "الثقة تُفحص قبل قراءة المحتوى");
+  assert.match(wt, /try \{ \$acl = Get-PreflightAcl \$Path \} catch \{ return /, "ACL غلاف غير مقروءة ⇒ UNKNOWN");
+  assert.match(wt, /if \(\$approvedSids -notcontains \$ownerSid\) \{ return /, "مالك غير موثوق ⇒ UNKNOWN");
+  assert.match(wt, /if \(-not \(Test-RightsGrantWrite \$value\)\) \{ continue \}[\s\S]*if \(\$approvedSids -notcontains \$aceSid\) \{ return /, "ACE تعديل لغير موثوق ⇒ UNKNOWN");
+  assert.match(wt, /\$f = @\(Get-AncestorReplacementFindings \$dir \$dacl \$approvedSids\)/, "المجلدات فوق الغلاف حتى الجذر: قدرة الاستبدال");
+  assert.match(wt, /if \(@\(\$ms \| Where-Object \{ -not \$_ \}\)\.Count -eq 0\) \{ \$approved \+= \$ms \}/, "عضوية غير محسومة لا تعتمد أحداً");
+  // 3) الكتل المحسوبة.
+  const ps = body("Get-PsDynamicExecution");
+  assert.match(ps, /\^\(foreach-object\|%\|foreach\|where-object\|\\\?\|where\)\$/, "ForEach-Object/%/Where-Object/? مغطاة");
+  assert.match(ps, /if \(-not \(\$one -is \[System\.Management\.Automation\.Language\.ScriptBlockExpressionAst\]\)\) \{ return /, "كتلة غير حرفية لـ-Process/-FilterScript ⇒ UNKNOWN");
+  assert.match(ps, /foreach \(\$k in @\('Property', 'MemberName'\)\)[\s\S]*?if \(-not \(Test-PsLiteralAst \$pv\)\) \{ return /, "Where-Object \$sb (Property محسوب) ⇒ UNKNOWN");
+  assert.match(ps, /return \('script block created from computed content: '/, "[scriptblock] من محتوى محسوب ⇒ UNKNOWN");
+  assert.match(ps, /\$inner = Get-PsDynamicExecution \(\[string\]\$child\.Value\)/, "نص الكتلة الحرفي يُحلَّل هو نفسه");
+  assert.match(read("docs/ai/topics/windows-deploy-gate.md"), /Get-WrapperTrustReason/);
+}
 // Codex P1: قرارات الثقة بالـSID حصراً — لا عودة لمقارنة الاسم بعد حذف بادئة الجهاز/المجال.
 assert.ok(!preSrc.includes("ConvertTo-IdentityKey"), "مفتاح الهوية بالاسم محذوف نهائياً");
 const fnBody = (name) => { const i = preSrc.indexOf(`function ${name}`); assert.ok(i >= 0, name); const j = preSrc.indexOf("\nfunction ", i + 10); return preSrc.slice(i, j < 0 ? undefined : j); };

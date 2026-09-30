@@ -38,6 +38,10 @@ if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
 }
 
 . $preflight
+# fixtures المؤقتة ينشئها مستخدم الاختبار نفسه (مالكها): يُعدّ ضمن ثقة إدارة النظام هنا كي يقيس الاختبار هوية
+# المسار وحدها. فحص ثقة الأغلفة يعمل مع ذلك بـGet-Acl الحقيقي على هذه الملفات والمجلدات فوقها.
+$testUserSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+function Get-PreflightAdminMembers { return @($testUserSid) }
 $base = Join-Path ([IO.Path]::GetTempPath()) ('ozk-fsid-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
 $links = New-Object System.Collections.ArrayList
 function New-TestDir([string]$Path) { [void](New-Item -ItemType Directory -Force -Path $Path); return $Path }

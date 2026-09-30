@@ -401,6 +401,14 @@ function Clear-DeployFlag($Paths) {
     if (Test-Path -LiteralPath $Paths.Flag) { Remove-Item -LiteralPath $Paths.Flag -Force }
 }
 
+# Codex P1: .git قد يتغيّر بين فحص بداية التشغيل وتوقّف المهام (مثل filter.*.smudge مع info/attributes، ولا
+# يلمس الشجرة المتتبّعة). فحص ثانٍ بعد التوقف مباشرة قبل أي عملية تغيّر الشجرة؛ أي خطر أو تعذّر ⇒ سبب التوقف.
+function Get-GitSafetyStopReason($Config) {
+    try { $s = Test-GitHookSafety $Config } catch { return ('git safety recheck failed: ' + $_.Exception.Message) }
+    if ($s -and $s.ok) { return $null }
+    return ((@(@($s.results) | Where-Object { $_.verdict -ne 'PASS' } | ForEach-Object { $_.reason }) -join '; '))
+}
+
 function Wait-TasksIdle($Config) {
     $deadline = (Get-Date).AddSeconds([int]$Config.drainTimeoutSeconds)
     while ($true) {
@@ -583,6 +591,8 @@ function Invoke-DeployGate {
         Clear-DeployFlag $paths
         return Complete-Gate $paths $record 'SKIP' ('tasks still running: ' + ($stillRunning -join ', ')) $true
     }
+    $recheck = Get-GitSafetyStopReason $Config
+    if ($null -ne $recheck) { Clear-DeployFlag $paths; return Complete-Gate $paths $record 'STOP' ('git hooks/config changed before merge; no merge made: ' + $recheck) $true }
     $merge = Invoke-GateGit $Config @('merge', '--ff-only', $target)
     $record.pause_ms = [int]((Get-Date) - $started).TotalMilliseconds
     $newHead = Get-GitValue $Config @('rev-parse', 'HEAD')
@@ -644,6 +654,8 @@ function Invoke-GateRollback($Config, $Paths, $Record, $State, [string]$Head, [s
     $stillRunning = @(Wait-TasksIdle $Config)
     if ($stillRunning.Count -gt 0) { Clear-DeployFlag $Paths; return Complete-Gate $Paths $Record 'SKIP' ('tasks still running: ' + ($stillRunning -join ', ')) $true }
     $Record.writer_hashes_before = Get-WriterDiskHashes $Config
+    $recheck = Get-GitSafetyStopReason $Config
+    if ($null -ne $recheck) { Clear-DeployFlag $Paths; return Complete-Gate $Paths $Record 'STOP' ('git hooks/config changed before rollback; no reset made: ' + $recheck) $true }
     # reset --keep يرفض إن كان سيُضيع تعديلاً محلياً — ليس --hard
     $reset = Invoke-GateGit $Config @('reset', '--keep', $toSha)
     $Record.pause_ms = [int]((Get-Date) - $started).TotalMilliseconds

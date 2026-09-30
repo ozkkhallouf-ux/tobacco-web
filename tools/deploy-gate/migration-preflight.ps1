@@ -632,7 +632,7 @@ function New-ReachContext($Config, [string]$Identity) {
         if ($rr.status -eq 'OK') { $finalRoots += ConvertTo-CanonicalTracePath ([string]$rr.path) }
         else { $rootErrors += ([string]$root + ' (' + $rr.status + ': ' + $rr.reason + ')') }
     }
-    return [pscustomobject]@{ roots = $roots; finalRoots = $finalRoots; rootErrors = $rootErrors; identity = $Identity; seen = @{} }
+    return [pscustomobject]@{ roots = $roots; finalRoots = $finalRoots; rootErrors = $rootErrors; identity = $Identity; seen = @{}; trustApproved = $null }
 }
 
 # احتواء مسار مطبَّع في قائمة جذور بحدود المسار (C:\repo2 ليس داخل C:\repo)، بلا حساسية حالة الأحرف.
@@ -760,6 +760,24 @@ function Get-PsDynamicExecution([string]$Text) {
                 if ($null -ne $vt -and $vt -match '^(?i)(microsoft\.powershell\.core\\)?alias::?') { return ('alias drive modified: ' + $c.Extent.Text) }
             }
         }
+        # ForEach-Object/% وWhere-Object/? تنفّذ كتلاً: كتلة غير حرفية (متغير، أو تعبير، أو من الأنبوب) ⇒ UNKNOWN (Codex P1).
+        if ($n -match '^(foreach-object|%|foreach|where-object|\?|where)$') {
+            try { $fb = [System.Management.Automation.Language.StaticParameterBinder]::BindCommand($c, $true).BoundParameters } catch { return ('parameters of ' + $name + ' cannot be bound statically') }
+            foreach ($k in @('Process', 'Begin', 'End', 'RemainingScripts', 'FilterScript')) {
+                if (-not $fb.ContainsKey($k)) { continue }
+                $sv = $fb[$k].Value
+                $svs = @($sv)
+                if ($sv -is [System.Management.Automation.Language.ArrayLiteralAst]) { $svs = @($sv.Elements) }
+                foreach ($one in $svs) { if (-not ($one -is [System.Management.Automation.Language.ScriptBlockExpressionAst])) { return ($name + ' runs a computed script block (-' + $k + '): ' + $one.Extent.Text) } }
+            }
+            # Where-Object $sb يرتبط بـProperty؛ اسم محسوب قد يكون كتلة ⇒ UNKNOWN. و% Invoke ينفّذ كتلاً من الأنبوب.
+            foreach ($k in @('Property', 'MemberName')) {
+                if (-not $fb.ContainsKey($k)) { continue }
+                $pv = $fb[$k].Value
+                if (-not (Test-PsLiteralAst $pv)) { return ($name + ' with a computed -' + $k + ' (may be a script block or method): ' + $pv.Extent.Text) }
+                if ($k -eq 'MemberName' -and @('invoke', 'invokereturnasis', 'invokescript', 'begininvoke', 'invokeasync') -contains ([string]$pv.Value).ToLowerInvariant()) { return ($name + ' invokes pipeline objects (-MemberName ' + $pv.Value + ')') }
+            }
+        }
         # أوامر تعديل العناصر قد تعدّل مزوّد alias:. هدف محسوب (أو من الأنبوب)، أو مسار نسبي بعد موقع محسوب،
         # لا يُثبت ساكناً أنه ليس alias: ⇒ UNKNOWN.
         if ($n -match '^(set-item|si|new-item|ni|remove-item|ri|rm|rmdir|del|erase|rd|rename-item|rni|ren|copy-item|copy|cp|cpi|move-item|mi|move|mv|clear-item|cli)$') {
@@ -823,6 +841,20 @@ function Get-PsDynamicExecution([string]$Text) {
                 foreach ($k in @('ArgumentList', 'Arguments')) { if ($bound.ContainsKey($k) -and -not (Test-PsLiteralAst $bound[$k].Value)) { return ($name + ' with computed arguments (process creation from data): ' + $bound[$k].Value.Extent.Text) } }
             }
         }
+    }
+    # [scriptblock]$x أو $x -as [scriptblock]: كتلة من محتوى محسوب ⇒ UNKNOWN؛ النص الحرفي يُحلَّل هو نفسه.
+    $isSbType = { param($tn) ([string]$tn) -match '^(?i)(system\.management\.automation\.)?scriptblock$' }
+    foreach ($cv in @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.ConvertExpressionAst] -or ($n -is [System.Management.Automation.Language.BinaryExpressionAst] -and [string]$n.Operator -eq 'As') }, $true))) {
+        $child = $null
+        if ($cv -is [System.Management.Automation.Language.ConvertExpressionAst]) { if (& $isSbType $cv.Type.TypeName.FullName) { $child = $cv.Child } }
+        elseif ($cv.Right -is [System.Management.Automation.Language.TypeExpressionAst] -and (& $isSbType $cv.Right.TypeName.FullName)) { $child = $cv.Left }
+        if ($null -eq $child) { continue }
+        if ($child -is [System.Management.Automation.Language.StringConstantExpressionAst]) {
+            $inner = Get-PsDynamicExecution ([string]$child.Value)
+            if ($inner) { return ('script block from literal text: ' + $inner) }
+            continue
+        }
+        return ('script block created from computed content: ' + $cv.Extent.Text)
     }
     # $alias:launch = 'Start-Process' / ${alias:launch} = ... : تعريف alias بالإسناد ⇒ UNKNOWN.
     foreach ($as in @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true))) {
@@ -926,6 +958,50 @@ function Get-WrapperDynamicReach($Ctx, [string]$Path, [string]$Text, [int]$depth
     return $r
 }
 
+# ثقة نظام الملفات بالغلاف (Codex P1): محتوى غلاف قابل للتعديل أو الاستبدال من هوية غير موثوقة لا يُثبت
+# شيئاً (تستبدله لاحقاً بكود يستدعي المستودع). الموثوق: ثقة إدارة النظام فقط (SYSTEM، Administrators،
+# TrustedInstaller، أعضاء Administrators بالـSID؛ عضوية غير محسومة لا تعتمد أحداً)، ولا نحمي من مدير بشري.
+#   - الملف: المالك، وأي Allow يمنح تعديلاً (كتابة، إلحاق، حذف، WRITE_DAC/OWNER، GENERIC).
+#   - كل مجلد فوقه حتى جذر القرص: قدرة الاستبدال الفعلية (Get-AncestorReplacementFindings).
+# تعذّر قراءة/تفسير ACL أو SID لا يُحلّ ⇒ سبب (UNKNOWN). Deny لا يُحتسب إثباتاً. قراءة فقط.
+function Get-WrapperTrustReason($Ctx, [string]$Path) {
+    if ($null -eq $Ctx.trustApproved) {
+        $approved = @('S-1-5-18', 'S-1-5-32-544', $script:TrustedInstallerSid)
+        $members = Get-PreflightAdminMembers
+        if ($null -ne $members) {
+            $ms = @(@($members) | ForEach-Object { Resolve-PrincipalSid ([string]$_) })
+            if (@($ms | Where-Object { -not $_ }).Count -eq 0) { $approved += $ms }
+        }
+        $Ctx.trustApproved = $approved
+    }
+    $approvedSids = @($Ctx.trustApproved)
+    try { $acl = Get-PreflightAcl $Path } catch { return ('ACL of ' + $Path + ' cannot be read: ' + $_.Exception.Message) }
+    if (-not $acl) { return ('ACL of ' + $Path + ' is empty or unreadable') }
+    $ownerSid = Resolve-PrincipalSid ([string]$acl.owner)
+    if (-not $ownerSid) { return ('owner of ' + $Path + ' cannot be resolved to a SID: ' + $acl.owner) }
+    if ($approvedSids -notcontains $ownerSid) { return ($Path + ' is owned by ' + $acl.owner + ' (implicit WRITE_DAC)') }
+    foreach ($ace in @($acl.access)) {
+        $type = ([string]$ace.type).Trim()
+        if ($type -eq 'Deny') { continue }
+        if ($type -ne 'Allow') { return ('unrecognised ACE type on ' + $Path + ': ' + $ace.type) }
+        if ($ace.PSObject.Properties['inheritOnly'] -and [bool]$ace.inheritOnly) { continue }
+        $value = ConvertTo-RightsValue ([string]$ace.rights)
+        if ($null -eq $value) { return ('rights on ' + $Path + ' cannot be interpreted for ' + $ace.identity + ': ' + $ace.rights) }
+        if (-not (Test-RightsGrantWrite $value)) { continue }
+        $aceSid = Resolve-PrincipalSid ([string]$ace.identity)
+        if (-not $aceSid) { return ('write-capable ACE on ' + $Path + ' whose identity cannot be resolved to a SID: ' + $ace.identity) }
+        if ($approvedSids -notcontains $aceSid) { return ($ace.identity + ' can modify ' + $Path + ' (' + $ace.rights + ')') }
+    }
+    $dir = Get-GateParentPath (([string]$Path).TrimEnd('\')) '\'
+    for ($i = 0; $dir -and $i -lt 64; $i++) {
+        try { $dacl = Get-PreflightAcl $dir } catch { return ('ACL of ' + $dir + ' cannot be read: ' + $_.Exception.Message) }
+        $f = @(Get-AncestorReplacementFindings $dir $dacl $approvedSids)
+        if ($f.Count -gt 0) { return ($f[0].reason + ' [' + $dir + ']') }
+        $dir = Get-GateParentPath ($dir.TrimEnd('\')) '\'
+    }
+    return $null
+}
+
 # غلاف (vbs/cmd/bat/ps1/psm1، أو هدف مضيف سكربت) خارج المستودع: يُقرأ نصه ولا يُنفَّذ، حتى 3 مستويات.
 function Get-WrapperReach($Ctx, [string]$Path, [int]$depth) {
     # الغلاف يُحلّ في نظام الملفات قبل قراءته وقبل قرار احتوائه (alias/junction إلى المستودع ⇒ REPO).
@@ -939,6 +1015,8 @@ function Get-WrapperReach($Ctx, [string]$Path, [int]$depth) {
     if ($Ctx.seen.ContainsKey($k)) { return (New-Reach 'NOT_REPO') }
     $Ctx.seen[$k] = $true
     if ($depth -ge 3) { return (New-Reach 'UNKNOWN' ('wrapper chain deeper than 3 levels at ' + $Path)) }
+    $trust = Get-WrapperTrustReason $Ctx ([string]$pc.final)
+    if ($trust) { return (New-Reach 'UNKNOWN' ('wrapper ' + $Path + ' can be modified or replaced by an untrusted principal, so its content proves nothing: ' + $trust)) }
     # غلاف مفقود أو غير مقروء أو فارغ: لا يُثبت ما سيشغّله لاحقاً ⇒ UNKNOWN، لا NOT_REPO (Codex P1).
     try { $inner = Read-PreflightWrapperText ([string]$pc.final) } catch { return (New-Reach 'UNKNOWN' ('wrapper cannot be read: ' + $Path + ' (' + $_.Exception.Message + ')')) }
     if ($null -eq $inner) { return (New-Reach 'UNKNOWN' ('wrapper is missing: ' + $Path + ' (it may appear later and run repository code)')) }

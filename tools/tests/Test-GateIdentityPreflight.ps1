@@ -44,6 +44,21 @@ function Get-PreflightMachineName { return 'OZK2026' }
 # هوية المسار في نظام الملفات: الاختبارات هنا تستعمل مسارات Windows وهمية، فالمحلّل الأصلي (native) يُستبدل
 # بنموذج: الافتراضي = المسار نفسه موجود (OK)، وجداول لـjunction/alias، والمفقود، وفشل الحل. سلوك المحلّل
 # الحقيقي مع junction فعلية يُختبر في Test-GatePathIdentity.ps1 على Windows.
+# ACL الأغلفة (ثقة نظام الملفات): الافتراضي ACL موثوقة (المالك SYSTEM، وSYSTEM/Administrators تحكم كامل،
+# وUsers قراءة)، مع جداول لتجاوزها في اختبارات الثقة.
+$script:FsAcls = @{}
+$script:FsAclErrors = @{}
+function Resolve-TestAclKey([string]$Path) { return (ConvertTo-CanonicalTracePath $Path) }
+function Get-PreflightAcl([string]$Path) {
+    $k = Resolve-TestAclKey $Path
+    if ($script:FsAclErrors.ContainsKey($k)) { throw $script:FsAclErrors[$k] }
+    if ($script:FsAcls.ContainsKey($k)) { return $script:FsAcls[$k] }
+    return [pscustomobject]@{ owner = 'S-1-5-18'; access = @(
+        [pscustomobject]@{ identity = 'S-1-5-18'; rights = 'FullControl'; type = 'Allow'; inherited = $true; inheritOnly = $false },
+        [pscustomobject]@{ identity = 'S-1-5-32-544'; rights = 'FullControl'; type = 'Allow'; inherited = $true; inheritOnly = $false },
+        [pscustomobject]@{ identity = 'S-1-3-0'; rights = 'FullControl'; type = 'Allow'; inherited = $true; inheritOnly = $true },
+        [pscustomobject]@{ identity = 'S-1-5-32-545'; rights = 'ReadAndExecute, Synchronize'; type = 'Allow'; inherited = $true; inheritOnly = $false }) }
+}
 $script:FsAliases = [ordered]@{}
 $script:FsMissing = @{}
 $script:FsErrors = @{}
@@ -658,6 +673,15 @@ try {
     . $preflight
     function Invoke-NtAccountTranslate([string]$Name) { $k = $Name.ToLowerInvariant(); if ($script:SidTable.ContainsKey($k)) { return $script:SidTable[$k] } return $null }
     function Get-PreflightMachineName { return 'OZK2026' }
+    function Get-PreflightAcl([string]$Path) {
+        $k = Resolve-TestAclKey $Path
+        if ($script:FsAclErrors.ContainsKey($k)) { throw $script:FsAclErrors[$k] }
+        if ($script:FsAcls.ContainsKey($k)) { return $script:FsAcls[$k] }
+        return [pscustomobject]@{ owner = 'S-1-5-18'; access = @(
+            [pscustomobject]@{ identity = 'S-1-5-18'; rights = 'FullControl'; type = 'Allow'; inherited = $true; inheritOnly = $false },
+            [pscustomobject]@{ identity = 'S-1-5-32-544'; rights = 'FullControl'; type = 'Allow'; inherited = $true; inheritOnly = $false },
+            [pscustomobject]@{ identity = 'S-1-5-32-545'; rights = 'ReadAndExecute, Synchronize'; type = 'Allow'; inherited = $true; inheritOnly = $false }) }
+    }
     function Resolve-PreflightFinalPath([string]$Path) {
         $k = ConvertTo-CanonicalTracePath $Path
         foreach ($e in @($script:FsErrors.Keys)) { if ($k -eq $e -or $k.StartsWith($e + '\')) { return (New-PathResolution 'ERROR' '' $script:FsErrors[$e]) } }
@@ -1076,6 +1100,93 @@ try {
     $script:Wrappers[$aew] = ('Set-Item (''ali''+''as:launch'') Start-Process' + "`r`n" + 'launch powershell.exe -ArgumentList (Get-Content C:\ProgramData\target.txt)')
     $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Alias Edge Witness' 'SYSTEM' ($ps + ' -NoProfile -File "' + $aew + '"'))
     Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) '*Alias Edge Witness*alias: provider cannot be ruled out*') 'privileged task -> Set-Item (computed alias path) + launch => BLOCK'
+
+    Write-Host '== Computed script blocks via ForEach-Object / Where-Object / [scriptblock] casts (Codex P1)'
+    $sbDyn = @(
+        @{ label = 'Codex witness: $sb = [scriptblock](Get-Content ...); 1 | ForEach-Object -Process $sb => UNKNOWN'; n = 'sb1.ps1'; b = ('$sb = [scriptblock](Get-Content C:\ProgramData\target.txt -Raw)' + "`r`n" + '1 | ForEach-Object -Process $sb') },
+        @{ label = 'ForEach-Object -Process $sb => UNKNOWN'; n = 'sb2.ps1'; b = '1 | ForEach-Object -Process $sb' },
+        @{ label = '% $sb => UNKNOWN'; n = 'sb3.ps1'; b = '1 | % $sb' },
+        @{ label = 'Where-Object $sb => UNKNOWN'; n = 'sb4.ps1'; b = '1 | Where-Object $sb' },
+        @{ label = '? $sb => UNKNOWN'; n = 'sb5.ps1'; b = '1 | ? $sb' },
+        @{ label = '[scriptblock](Get-Content ...) alone => UNKNOWN'; n = 'sb6.ps1'; b = '$x = [scriptblock](Get-Content C:\ProgramData\code.txt -Raw)' },
+        @{ label = '[scriptblock]$variable => UNKNOWN'; n = 'sb7.ps1'; b = '$x = [scriptblock]$code' },
+        @{ label = '$code -as [scriptblock] (computed) => UNKNOWN'; n = 'sb8.ps1'; b = '$x = $code -as [scriptblock]' },
+        @{ label = 'composed: ForEach-Object -Begin {..} -Process $sb -End {..} => UNKNOWN'; n = 'sb9.ps1'; b = '1 | % -Begin { 1 } -Process $sb -End { 2 }' },
+        @{ label = 'composed: -Process { literal }, $sb (array) => UNKNOWN'; n = 'sb10.ps1'; b = '1 | ForEach-Object -Process { 1 }, $sb' },
+        @{ label = '$sbs | % Invoke (invokes pipeline script blocks) => UNKNOWN'; n = 'sb11.ps1'; b = '$sbs | % Invoke' },
+        @{ label = '% -MemberName $m (computed member) => UNKNOWN'; n = 'sb12.ps1'; b = '1 | % -MemberName $m' },
+        @{ label = '[scriptblock]''& $p'' (literal text with a dynamic call) => UNKNOWN'; n = 'sb13.ps1'; b = '$x = [scriptblock]''& $p''' }
+    )
+    foreach ($c in $sbDyn) { $got = Dyn-Reach $c.n $c.b; Assert-True ($got.status -eq 'UNKNOWN') ($c.label + ' (got ' + $got.status + ')') }
+    $sbSafe = @(
+        @{ label = '1..3 | ForEach-Object { $_ * 2 } (literal block) => unchanged (NOT_REPO)'; n = 'sbs1.ps1'; b = '1..3 | ForEach-Object { $_ * 2 }' },
+        @{ label = 'Where-Object { $_.Status -eq ''Running'' } (literal block) => unchanged (NOT_REPO)'; n = 'sbs2.ps1'; b = 'Get-Service | Where-Object { $_.Status -eq ''Running'' }' },
+        @{ label = 'Where-Object Status -eq $v (simplified syntax, literal property) => unchanged (NOT_REPO)'; n = 'sbs3.ps1'; b = 'Get-Service | ? Status -eq $v' },
+        @{ label = 'ForEach-Object Name (literal member) => unchanged (NOT_REPO)'; n = 'sbs4.ps1'; b = 'Get-Process | % Name' },
+        @{ label = '[scriptblock]''Get-Date'' (benign literal text) => unchanged (NOT_REPO)'; n = 'sbs5.ps1'; b = '$x = [scriptblock]''Get-Date''' }
+    )
+    foreach ($c in $sbSafe) { $got = Dyn-Reach $c.n $c.b; Assert-True ($got.status -eq 'NOT_REPO') ($c.label + ' (got ' + $got.status + ': ' + $got.why + ')') }
+    $sbw = $dw + '\sb-witness.ps1'
+    $script:Wrappers[$sbw] = ('$sb = [scriptblock](Get-Content C:\ProgramData\target.txt -Raw)' + "`r`n" + '1 | ForEach-Object -Process $sb')
+    foreach ($ident in @('SYSTEM', 'OZK2026\Administrator')) {
+        $script:Tasks = @(Get-CleanLayout) + @(New-Task ('SB Witness ' + $ident) $ident ($ps + ' -NoProfile -File "' + $sbw + '"'))
+        Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) '*SB Witness*computed script block*') ('Codex witness under ' + $ident + ' => BLOCK')
+    }
+
+    Write-Host '== Wrapper filesystem trust: modifiable/replaceable wrappers prove nothing (Codex P1)'
+    function New-TestAcl([string]$Owner, $Extra = @()) { return [pscustomobject]@{ owner = $Owner; access = @(
+        [pscustomobject]@{ identity = 'S-1-5-18'; rights = 'FullControl'; type = 'Allow'; inherited = $true; inheritOnly = $false },
+        [pscustomobject]@{ identity = 'S-1-5-32-544'; rights = 'FullControl'; type = 'Allow'; inherited = $true; inheritOnly = $false },
+        [pscustomobject]@{ identity = 'S-1-5-32-545'; rights = 'ReadAndExecute, Synchronize'; type = 'Allow'; inherited = $true; inheritOnly = $false }) + @($Extra) } }
+    function Ace([string]$Id, [string]$Rights, [string]$Type = 'Allow', [bool]$InheritOnly = $false) { return [pscustomobject]@{ identity = $Id; rights = $Rights; type = $Type; inherited = $false; inheritOnly = $InheritOnly } }
+    $tw = 'C:\ProgramData\OZK-Trust\Wrappers'
+    $tf = $tw + '\job.ps1'
+    $script:Wrappers[$tf] = 'Get-Date | Out-File C:\Logs\job.txt'
+    function Trust-Reach { return (Resolve-TaskReach $cfgD @([pscustomobject]@{ execute = $ps; arguments = ('-File "' + $tf + '"'); workingDirectory = '' }) 'SYSTEM') }
+    function Reset-TrustAcls { $script:FsAcls = @{}; $script:FsAclErrors = @{} }
+    Reset-TrustAcls
+    Assert-True ((Trust-Reach).status -eq 'NOT_REPO') 'privileged task + benign wrapper in a trusted path => NOT_REPO (unchanged)'
+    $trustCases = @(
+        @{ label = 'wrapper writable by OZKSync (Modify on the file) => UNKNOWN'; set = { $script:FsAcls[(Resolve-TestAclKey $tf)] = New-TestAcl 'S-1-5-18' @(Ace 'OZK2026\OZKSync' 'Modify, Synchronize') } },
+        @{ label = 'wrapper writable by Users (WriteData on the file) => UNKNOWN'; set = { $script:FsAcls[(Resolve-TestAclKey $tf)] = New-TestAcl 'S-1-5-18' @(Ace 'S-1-5-32-545' 'WriteData') } },
+        @{ label = 'wrapper owned by an untrusted user (implicit WRITE_DAC) => UNKNOWN'; set = { $script:FsAcls[(Resolve-TestAclKey $tf)] = New-TestAcl 'OZK2026\OZKSync' } },
+        @{ label = 'wrapper not writable, but its folder lets Users delete/replace children => UNKNOWN'; set = { $script:FsAcls[(Resolve-TestAclKey $tw)] = New-TestAcl 'S-1-5-18' @(Ace 'S-1-5-32-545' 'DeleteSubdirectoriesAndFiles, CreateFiles') } },
+        @{ label = 'folder grants OZKSync ChangePermissions (WRITE_DAC) => UNKNOWN'; set = { $script:FsAcls[(Resolve-TestAclKey $tw)] = New-TestAcl 'S-1-5-18' @(Ace 'OZK2026\OZKSync' 'ChangePermissions') } },
+        @{ label = 'an ancestor (C:\ProgramData\OZK-Trust) lets OZKSync rename/replace the folder (Delete) => UNKNOWN'; set = { $script:FsAcls[(Resolve-TestAclKey 'C:\ProgramData\OZK-Trust')] = New-TestAcl 'S-1-5-18' @(Ace 'OZK2026\OZKSync' 'Delete') } },
+        @{ label = 'unreadable wrapper ACL => UNKNOWN'; set = { $script:FsAclErrors[(Resolve-TestAclKey $tf)] = 'Attempted to perform an unauthorized operation.' } },
+        @{ label = 'unreadable ancestor ACL => UNKNOWN'; set = { $script:FsAclErrors[(Resolve-TestAclKey 'C:\ProgramData')] = 'Access is denied.' } },
+        @{ label = 'malformed rights on the wrapper => UNKNOWN'; set = { $script:FsAcls[(Resolve-TestAclKey $tf)] = New-TestAcl 'S-1-5-18' @(Ace 'S-1-5-32-545' 'NotARight') } },
+        @{ label = 'write-capable ACE with an unresolvable SID => UNKNOWN'; set = { $script:FsAcls[(Resolve-TestAclKey $tf)] = New-TestAcl 'S-1-5-18' @(Ace 'GHOST\writer' 'Write') } },
+        @{ label = 'unknown ACE type on the wrapper => UNKNOWN'; set = { $script:FsAcls[(Resolve-TestAclKey $tf)] = New-TestAcl 'S-1-5-18' @(Ace 'S-1-5-32-545' 'Modify' 'Audit') } }
+    )
+    foreach ($c in $trustCases) { Reset-TrustAcls; & $c.set; $got = Trust-Reach; Assert-True ($got.status -eq 'UNKNOWN' -and $got.why -like '*untrusted principal*') ($c.label + ' (got ' + $got.status + ')') }
+    $trustSafe = @(
+        @{ label = 'folder grants Users create-only (cannot replace the existing wrapper) => NOT_REPO'; set = { $script:FsAcls[(Resolve-TestAclKey $tw)] = New-TestAcl 'S-1-5-18' @(Ace 'S-1-5-32-545' 'CreateFiles, CreateDirectories, Synchronize') } },
+        @{ label = 'inherit-only CREATOR OWNER on the folder => NOT_REPO'; set = { $script:FsAcls[(Resolve-TestAclKey $tw)] = New-TestAcl 'S-1-5-18' @(Ace 'S-1-3-0' 'FullControl' 'Allow' $true) } },
+        @{ label = 'wrapper owned and writable by a local Administrators member (OS-administrative trust) => NOT_REPO'; set = { $script:FsAcls[(Resolve-TestAclKey $tf)] = New-TestAcl 'OZK2026\LOQ' @(Ace 'OZK2026\LOQ' 'FullControl') } },
+        @{ label = 'a Deny ACE is not a grant => NOT_REPO'; set = { $script:FsAcls[(Resolve-TestAclKey $tf)] = New-TestAcl 'S-1-5-18' @(Ace 'OZK2026\OZKSync' 'Write' 'Deny') } }
+    )
+    foreach ($c in $trustSafe) { Reset-TrustAcls; & $c.set; $got = Trust-Reach; Assert-True ($got.status -eq 'NOT_REPO') ($c.label + ' (got ' + $got.status + ': ' + $got.why + ')') }
+    Reset-TrustAcls; $savedAdmins = $script:Admins; $script:Admins = $null
+    $script:FsAcls[(Resolve-TestAclKey $tf)] = New-TestAcl 'OZK2026\LOQ' @(Ace 'OZK2026\LOQ' 'FullControl')
+    Assert-True ((Trust-Reach).status -eq 'UNKNOWN') 'Administrators membership undetermined => an admin-looking writer is not trusted => UNKNOWN'
+    $script:Admins = $savedAdmins
+    # سلسلة متداخلة: A موثوق ⇒ B في مجلد يستبدله OZKSync ⇒ UNKNOWN للسلسلة.
+    Reset-TrustAcls
+    $na = 'C:\ProgramData\OZK-Trust\Wrappers\outer.cmd'; $nb = 'C:\ProgramData\OZK-Loose\inner.ps1'
+    $script:Wrappers[$na] = ('call powershell.exe -NoProfile -File "' + $nb + '"')
+    $script:Wrappers[$nb] = 'Get-Date'
+    $script:FsAcls[(Resolve-TestAclKey 'C:\ProgramData\OZK-Loose')] = New-TestAcl 'S-1-5-18' @(Ace 'S-1-5-32-545' 'Modify, Synchronize')
+    $got = Resolve-TaskReach $cfgD @([pscustomobject]@{ execute = 'cmd.exe'; arguments = ('/c "' + $na + '"'); workingDirectory = '' }) 'SYSTEM'
+    Assert-True ($got.status -eq 'UNKNOWN' -and $got.why -like '*inner.ps1*untrusted principal*') 'nested chain: trusted A -> B in a Users-replaceable folder => UNKNOWN'
+    # شاهد Codex: SYSTEM ⇒ غلاف بريء ⇒ مجلد يكتبه OZKSync ⇒ BLOCK.
+    Reset-TrustAcls
+    $script:FsAcls[(Resolve-TestAclKey $tw)] = New-TestAcl 'S-1-5-18' @(Ace 'OZK2026\OZKSync' 'Modify, Synchronize')
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Trust Witness' 'SYSTEM' ($ps + ' -NoProfile -File "' + $tf + '"'))
+    Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) '*Trust Witness*untrusted principal*') 'Codex witness: SYSTEM task -> benign wrapper in an OZKSync-writable folder => BLOCK'
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Trust Witness User' 'OZKSync' ($ps + ' -NoProfile -File "' + $tf + '"'))
+    Assert-True ((Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())).ok) 'same wrapper under a non-privileged identity => not a privilege risk'
+    Reset-TrustAcls
 
     Write-Host '== Install preflight combines price-list and identity checks'
     # فحص ACL الفعلية مُختبَر في Test-GateTrustAcl.ps1؛ هنا نتيجته ناجحة لعزل الهوية ونشرات الأسعار.

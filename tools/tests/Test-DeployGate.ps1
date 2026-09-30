@@ -345,6 +345,56 @@ try {
     $s = Test-GitHookSafety $cfgX
     Assert-True (-not $s.ok -and $s.results[0].reason -like '*cannot resolve the git directory*') 'preflight: git state that cannot be read => BLOCK'
 
+    Write-Host '== .git is rechecked after tasks are idle, immediately before merge/rollback (Codex P1)'
+    # الحقن يحدث داخل Wait-TasksIdle (بعد فحص البداية وقبل merge): كما لو أن workload كتب في .git أثناء النافذة.
+    $script:InjectDuringIdle = $null
+    function Get-RunningTaskNames([string[]]$TaskNames) { if ($script:InjectDuringIdle) { $j = $script:InjectDuringIdle; $script:InjectDuringIdle = $null; & $j }; return @($script:Running) }
+    function Set-SmudgeFilter([string]$Repo, [string]$Marker) {
+        $sm = Join-Path (Split-Path -Parent $Marker) 'smudge.sh'
+        [System.IO.File]::WriteAllText($sm, ("#!/bin/sh`necho ran > '" + ($Marker -replace '\\', '/') + "'`ncat`n"))
+        if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { & chmod +x $sm }
+        Invoke-TestGit $Repo @('config', '--local', 'filter.evil.smudge', ('sh ''' + ($sm -replace '\\', '/') + '''')) | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path (Join-Path (Join-Path $Repo '.git') 'info') 'attributes'), "* filter=evil`n")
+    }
+    function Clear-SmudgeFilter([string]$Repo) {
+        Invoke-TestGit $Repo @('config', '--local', '--unset-all', 'filter.evil.smudge') | Out-Null
+        Remove-Item -LiteralPath (Join-Path (Join-Path (Join-Path $Repo '.git') 'info') 'attributes') -Force -ErrorAction SilentlyContinue
+    }
+    $ew = New-InitializedEnv
+    $w0 = Get-TestHead $ew
+    $w1 = Publish-TestRelease $ew @{ 'tools/reader.ps1' = "'reader v2'`n" } -Approve
+    $wm = Join-Path $ew.Base 'smudge-ran.txt'
+    Assert-True ((Test-GitHookSafety $ew.Config).ok) 'state is clean when the gate run starts'
+    $script:InjectDuringIdle = { Set-SmudgeFilter $ew.Repo $wm }
+    $r = Invoke-DeployGate -Config $ew.Config -GateMode 'Deploy'
+    Assert-True ($r.result -eq 'STOP' -and $r.reason -like '*changed before merge; no merge made*filter.evil.smudge*') 'filter.*.smudge planted after the first check and before merge => Deploy STOP'
+    Assert-True ((Get-TestHead $ew) -eq $w0 -and -not (Test-Path -LiteralPath $wm)) 'no merge happened and the smudge payload never ran'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $ew.Gate 'deploying.flag'))) 'deploy flag cleared after the recheck STOP (nothing changed)'
+    # ضابط: الفلتر نفسه يعمل فعلاً لو لم يُفحص (checkout بـgit عادي).
+    Invoke-TestGit $ew.Repo @('fetch', '-q', 'origin') | Out-Null
+    Invoke-TestGit $ew.Repo @('merge', '-q', '--ff-only', 'origin/windows-production') | Out-Null
+    Assert-True (Test-Path -LiteralPath $wm) 'control: without the recheck, the planted smudge filter DOES run on the fast-forward checkout'
+    Invoke-TestGit $ew.Repo @('reset', '-q', '--hard', $w0) | Out-Null
+    Remove-Item -LiteralPath $wm -Force
+    Clear-SmudgeFilter $ew.Repo
+    $r = Invoke-DeployGate -Config $ew.Config -GateMode 'Deploy'
+    Assert-True ($r.result -eq 'OK' -and (Get-TestHead $ew) -eq $w1) 'clean approved Deploy still fast-forwards'
+    # Rollback: نفس السيناريو قبل reset.
+    $script:InjectDuringIdle = { Set-SmudgeFilter $ew.Repo $wm }
+    $r = Invoke-DeployGate -Config $ew.Config -GateMode 'Rollback' -RollbackTo $w0
+    Assert-True ($r.result -eq 'STOP' -and $r.reason -like '*changed before rollback; no reset made*') 'dangerous config planted before rollback reset => Rollback STOP'
+    Assert-True ((Get-TestHead $ew) -eq $w1 -and -not (Test-Path -LiteralPath $wm)) 'no reset happened and the payload never ran'
+    Clear-SmudgeFilter $ew.Repo
+    # تعذّر الفحص الثاني نفسه ⇒ STOP.
+    $script:SafetyCalls = 0
+    $origSafety = ${function:Test-GitHookSafety}
+    function Test-GitHookSafety($Config) { $script:SafetyCalls++; if ($script:SafetyCalls -ge 2) { throw 'cannot read .git/config (sharing violation)' }; return [pscustomobject]@{ ok = $true; results = @() } }
+    $w2 = Publish-TestRelease $ew @{ 'tools/reader.ps1' = "'reader v3'`n" } -Approve
+    $r = Invoke-DeployGate -Config $ew.Config -GateMode 'Deploy'
+    Assert-True ($r.result -eq 'STOP' -and $r.reason -like '*git safety recheck failed*' -and (Get-TestHead $ew) -eq $w1) 'recheck failure (unreadable state) => STOP before merge'
+    Set-Item -Path function:Test-GitHookSafety -Value $origSafety
+    function Get-RunningTaskNames([string[]]$TaskNames) { return @($script:Running) }
+
     Write-Host '== Initialize'
     $e = New-GateTestEnv; [void]$environments.Add($e)
     $r = Invoke-DeployGate -Config $e.Config -GateMode 'Deploy'
