@@ -358,6 +358,9 @@ for (const needle of ["function Resolve-WorkloadReach", "cannot determine whethe
   assert.match(wrap, /\(psd1\|mjs\|cjs\|ts\|mts\|cts\|py\|pyw\|rb\|pl\|pm\|php\|sh\|bash\|hta\|jar\)\\b'\)\) \{\s+\$r = Join-Reach \$r \(Get-TargetReach /, "مراجع الأغلفة لكل أنواع السكربت تمرّ بقاعدة الهدف");
   assert.match(sc, /Run\|Exec\|ShellExecute\|ExecuteShellCommand\|Create\)/, "VBS/JS .Create/ExecuteShellCommand مغطاة");
   assert.match(ps, /if \(\$leafName -match \$script:InterpreterLeaves\) \{[\s\S]*?if \(-not \(Test-PsLiteralAst \$v\)\) \{ return \('interpreter ' \+ \$leafName \+ ' with a computed argument: '/, "مفسّر ثابت بوسيط محسوب ⇒ UNKNOWN");
+  assert.match(preSrc, /\|wmic\)\(\\\.exe\|\\\.com\)\?\$'/, "wmic ضمن InterpreterLeaves: process call create بوسيط محسوب ⇒ UNKNOWN");
+  assert.match(read("tools/tests/Test-GateIdentityPreflight.ps1"), /wmic\.exe process call create \$cmd/, "اختبار شاهد Codex: wmic.exe process call create \$cmd");
+  assert.match(read("docs/ai/topics/windows-deploy-gate.md"), /wmic\.exe process call create \$cmd/, "التوثيق يذكر إنشاء عملية WMIC من غلاف PowerShell");
   assert.match(ps, /if \(\$op -eq 'Ampersand' -or \$op -eq 'Dot'\) \{\s+if \(-not \(Test-PsLiteralAst \$first\)\) \{ return [^\n]*\n\s+\}\s+\$name = \$c\.GetCommandName\(\)/, "& بهدف حرفي لا يتخطى فحص وسائط المفسّر");
   assert.ok(ps.indexOf("$leafName -match $script:InterpreterLeaves") >= 0 && ps.indexOf("if ($op -eq 'Ampersand' -or $op -eq 'Dot') { continue }") < 0, "& لا يتخطى تحليل Invoke-WmiMethod/CimMethod بعد فحص المفسّر");
   assert.match(ps, /if \(-not \(Test-PsLiteralAst \$m\.Member\)\) \{ return \('dynamic member invocation:/, "اسم طريقة محسوب ($p.$m($cmd)) ⇒ UNKNOWN");

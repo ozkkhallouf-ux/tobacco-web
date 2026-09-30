@@ -689,7 +689,7 @@ function Get-FieldReach($Ctx, [string]$Field) {
 # تحليل ساكن فقط: شجرة PowerShell (Parser::ParseInput وStaticParameterBinder، بلا تنفيذ) وقواعد VBS/JS
 # وCMD/BAT. لا تُقيَّم المتغيرات ولا تُقرأ ملفات البيانات؛ المتغير العادي لا يُحتسب إلا إذا صار هدف تنفيذ.
 # ------------------------------------------------------------
-$script:InterpreterLeaves = '^(powershell|pwsh|cmd|wscript|cscript|mshta|node|nodejs|python\d*(\.\d+)?|pythonw|py|pyw|bash|sh|rundll32|regsvr32|msbuild)(\.exe|\.com)?$'
+$script:InterpreterLeaves = '^(powershell|pwsh|cmd|wscript|cscript|mshta|node|nodejs|python\d*(\.\d+)?|pythonw|py|pyw|bash|sh|rundll32|regsvr32|msbuild|wmic)(\.exe|\.com)?$'
 
 function Test-PsLiteralAst($Ast) {
     if ($Ast -is [System.Management.Automation.Language.StringConstantExpressionAst]) { return $true }

@@ -172,9 +172,10 @@
   - **PowerShell** يُحلَّل بشجرته: `Parser::ParseInput` و`StaticParameterBinder`.
     - `&` أو `.` بهدف غير حرفي (متغير، أو تعبير، أو نص فيه متغير) ⇒ UNKNOWN.
     - `Start-Process` بـ`-FilePath` غير حرفي، أو مفسّر بوسائط محسوبة ⇒ UNKNOWN.
-    - مفسّر ثابت (powershell/pwsh/cmd/wscript/cscript/node/python/...) باسمه أو عبر `&` بهدف حرفي، وأي
+    - مفسّر ثابت (powershell/pwsh/cmd/wscript/cscript/node/python/.../`wmic`) باسمه أو عبر `&` بهدف حرفي، وأي
       من وسائطه محسوب (متغير، أو تعبير، أو نص فيه متغير، أو `-File:$p`) ⇒ UNKNOWN. الأداة غير المفسّرة
-      بوسيط متغير تبقى كما هي.
+      بوسيط متغير تبقى كما هي. `wmic.exe process call create $cmd` (ومنها شاهد Codex
+      `$cmd = Get-Content …; wmic.exe process call create $cmd`) ⇒ UNKNOWN كمحلّل CMD.
     - `Invoke-Command`/`Start-Job` بكتلة غير حرفية أو ملف محسوب ⇒ UNKNOWN.
     - `Invoke-Item` بمسار محسوب ⇒ UNKNOWN.
     - تعريف أو تعديل alias يغيّر دلالة ما بعده (مثل `Set-Alias launch Start-Process` ثم `launch …`) ⇒ UNKNOWN، ولا يُحلّ
@@ -193,6 +194,8 @@
       - `Invoke-WmiMethod`/`Invoke-CimMethod` باسم طريقة أو وسائط غير حرفية (ومنها `@{ CommandLine = $cmd }`).
         `& Invoke-WmiMethod` و`iwmi` و`icim` والاسم المؤهّل بالوحدة (`Microsoft.PowerShell.Management\Invoke-WmiMethod`)
         تُفحص كالأمر المباشر ولا يتخطاها عامل الاستدعاء `&`.
+      - أداة سطر الأوامر `wmic`/`wmic.exe` (ميزة اختيارية) بوسيط محسوب، بما فيها `process call create $cmd`
+        و`Start-Process wmic.exe -ArgumentList $cmd` ⇒ UNKNOWN. الصيغة الحرفية تُحلَّل كالمعتاد.
       - `Win32_Process.Create` عبر `[wmiclass]` أو كائن WMI، و`ManagementClass.InvokeMethod`.
       - اسم طريقة محسوب (`$p.$m($cmd)` أو `$p."$m"(...)`) ⇒ UNKNOWN، فقد يكون Create/Run.
       - COM: `WScript.Shell.Run`/`Exec`، و`Shell.Application.ShellExecute`، و`MMC20 ExecuteShellCommand`.
