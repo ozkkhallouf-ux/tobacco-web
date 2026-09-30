@@ -439,8 +439,15 @@ for (const needle of ["function Resolve-WorkloadReach", "cannot determine whethe
   const body = (n) => { const i = preSrc.indexOf(`function ${n}`); assert.ok(i >= 0, n); const j = preSrc.indexOf("\nfunction ", i + 10); return preSrc.slice(i, j < 0 ? undefined : j); };
   const act = body("Get-ActionReach"), plan = body("Get-BareSearchPlan"), bare = body("Get-BareExecutableReach"), plant = body("Get-DirPlantReason"), parse = body("ConvertFrom-SearchPathText");
   assert.match(act, /\} else \{\s+# [^\n]*\n\s+\$r = Join-Reach \$r \(Get-BareExecutableReach \$Ctx \$exe \$wd \$Depth\)/, "الاسم المجرّد لا يُترك بلا حل");
-  assert.match(plan, /if \(\$Depth -gt 0\) \{[\s\S]*?\$dirs = @\(\$cwd\.TrimEnd/, "داخل cmd: المجلد الحالي أولاً");
-  assert.match(plan, /\$dirs = @\(\(\$win \+ '\\System32'\)\)\s+if \(\$WorkDir\) \{ \$dirs \+= /, "CreateProcess: مجلد المضيف ثم مجلد العمل");
+  // ترتيب cmd: المجلد الحالي ثم PATH بترتيبه الفعلي فقط — System32/System/Windows الضمنية لـCreateProcess وحدها.
+  const cmdBranch = plan.slice(plan.indexOf("if ($Depth -gt 0) {"), plan.indexOf("} else {", plan.indexOf("if ($Depth -gt 0) {")));
+  const cpBranch = plan.slice(plan.indexOf("} else {", plan.indexOf("if ($Depth -gt 0) {")), plan.indexOf("try { $sp = ConvertFrom-SearchPathText"));
+  assert.match(cmdBranch, /\$dirs = @\(\$cwd\.TrimEnd\('\\'\)\)\s+\$optional = 1\s*$/, "داخل cmd: المجلد الحالي أولاً (اختياري) ولا شيء غيره قبل PATH");
+  assert.doesNotMatch(cmdBranch, /\\System'|\$dirs \+= @\(\(\$win/, "داخل cmd: لا System32/System/Windows ضمنية قبل PATH");
+  assert.match(cpBranch, /\$dirs = @\(\(\$win \+ '\\System32'\)\)\s+if \(\$WorkDir\) \{ \$dirs \+= [^\n]*\n\s+\$dirs \+= @\(\(\$win \+ '\\System32'\), \(\$win \+ '\\System'\), \$win\)/, "CreateProcess: مجلد المضيف ثم مجلد العمل ثم مجلدات النظام");
+  assert.ok(plan.indexOf("try { $sp = ConvertFrom-SearchPathText") > plan.indexOf("$dirs += @(($win + '\\System32'), ($win + '\\System'), $win)"), "PATH بعد مجلدات النظام في CreateProcess فقط");
+  assert.match(plan, /\$ordered = @\(\$dirs \| Select-Object -First \$optional\)/, "إزالة التكرار لا تحذف موضع PATH اللاحق للمجلد الاختياري");
+  assert.match(bare, /if \(\$idx -lt \[int\]\$plan\.optional -and \$tr\.status -eq 'NOT_REPO'\) \{ continue \}\s+return \$tr/, "هدف في مجلد اختياري لا يُنهي البحث");
   assert.match(plan, /try \{ \$sp = ConvertFrom-SearchPathText \(Get-PreflightSystemPath\) 'system PATH' \} catch \{ return /, "PATH النظام غير مقروء ⇒ UNKNOWN");
   assert.match(plan, /try \{ \$up = ConvertFrom-SearchPathText \(Get-PreflightUserPath \$sid\) 'user PATH' \} catch \{ return /, "PATH المستخدم غير مقروء ⇒ UNKNOWN");
   assert.match(plan, /the user PATH of the execution identity cannot be determined/, "هوية تنفيذ بلا PATH مستخدم محسوم ⇒ UNKNOWN");

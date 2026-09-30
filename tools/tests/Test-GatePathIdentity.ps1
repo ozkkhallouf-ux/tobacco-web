@@ -122,6 +122,29 @@ try {
     $script:TestSysPath = ($winDir + '\System32;' + $winDir + ';' + $binA)
     Assert-True ((BareReach 'node.exe' '-v').why -like '*not found on the provable search path*') 'bare node.exe not on the search path => UNKNOWN'
 
+    Write-Host '== cmd /c search order on real directories: current directory, then PATH in its real order'
+    # fixture في TEMP يمنح Users إنشاء ملفات (AddFile) — داخل مجلد الاختبار فقط، لا شيء على النظام.
+    $binW = New-TestDir (Join-Path $base 'binW')
+    $wAcl = Get-Acl -LiteralPath $binW
+    $wAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule((New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-545')), 'CreateFiles', 'None', 'None', 'Allow')))
+    Set-Acl -LiteralPath $binW -AclObject $wAcl
+    $script:DirPlantCache = @{}
+    $cmdExe = $winDir + '\System32\cmd.exe'
+    function CmdReach([string]$Inner, [string]$Wd = '') { return (Resolve-TaskReach $cfg @([pscustomobject]@{ execute = $cmdExe; arguments = ('/c ' + $Inner); workingDirectory = $Wd }) 'SYSTEM') }
+    $script:TestSysPath = ($winDir + '\System32;' + $winDir + ';' + $binW)
+    $x = CmdReach 'whoami.exe'
+    Assert-True ($x.status -eq 'NOT_REPO') ('SYSTEM cmd /c whoami.exe with System32 first in PATH => real System32 whoami.exe, NOT_REPO (got ' + $x.status + ': ' + $x.why + ')')
+    $script:TestSysPath = ($binW + ';' + $winDir + '\System32;' + $winDir)
+    $x = CmdReach 'whoami.exe'
+    Assert-True ($x.status -eq 'UNKNOWN' -and $x.why -like '*can plant it in*binW*') ('Users-writable real PATH entry before System32 => UNKNOWN (got ' + $x.status + ': ' + $x.why + ')')
+    $x = BareReach 'whoami.exe' ''
+    Assert-True ($x.status -eq 'NOT_REPO') ('task Action (CreateProcess) keeps System32 before PATH => NOT_REPO (got ' + $x.status + ': ' + $x.why + ')')
+    $x = CmdReach ($winDir + '\System32\whoami.exe')
+    Assert-True ($x.status -eq 'NOT_REPO') ('explicit absolute target inside cmd /c => NOT_REPO (got ' + $x.status + ': ' + $x.why + ')')
+    $script:TestSysPath = ($winDir + '\System32;' + $winDir)
+    $x = CmdReach 'whoami.exe' $binW
+    Assert-True ($x.status -eq 'UNKNOWN' -and $x.why -like '*can plant it in*binW*') ('Users-writable real working directory searched first by cmd => UNKNOWN (got ' + $x.status + ': ' + $x.why + ')')
+
     Write-Host '== Symbolic links (need SeCreateSymbolicLinkPrivilege or Developer Mode)'
     $dirLink = Join-Path $base 'symdir'
     $fileLink = Join-Path $base 'symjob.ps1'

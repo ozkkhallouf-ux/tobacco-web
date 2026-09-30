@@ -1157,7 +1157,7 @@ try {
     $tf = $tw + '\job.ps1'
     $script:Wrappers[$tf] = 'Get-Date | Out-File C:\Logs\job.txt'
     function Trust-Reach { return (Resolve-TaskReach $cfgD @([pscustomobject]@{ execute = $ps; arguments = ('-File "' + $tf + '"'); workingDirectory = '' }) 'SYSTEM') }
-    function Reset-TrustAcls { $script:FsAcls = @{}; $script:FsAclErrors = @{} }
+    function Reset-TrustAcls { $script:FsAcls = @{}; $script:FsAclErrors = @{}; $script:DirPlantCache = @{} }
     Reset-TrustAcls
     Assert-True ((Trust-Reach).status -eq 'NOT_REPO') 'privileged task + benign wrapper in a trusted path => NOT_REPO (unchanged)'
     $trustCases = @(
@@ -1339,6 +1339,56 @@ try {
     Assert-True ($got.status -eq 'UNKNOWN' -and $got.why -like '*C:\Work*') 'inside cmd /c, a Users-writable current directory is searched first => UNKNOWN'
     Reset-TrustAcls
     Assert-True ((Bare-Reach 'C:\Windows\system32\cmd.exe' 'SYSTEM' '/c echo ok').status -eq 'NOT_REPO') 'explicit absolute trusted executable => unchanged (NOT_REPO)'
+    Write-Host '== cmd /c search order: current directory, then PATH entries in their real order (no implicit System32)'
+    $cmdAbs = 'C:\Windows\system32\cmd.exe'
+    $script:FsExistOnly['c:\windows\system32\whoami.exe'] = 1
+    $script:FsExistOnly['c:\tools\trustedbin'] = 1
+    $sysNormal = 'C:\Windows\system32;C:\Windows;C:\Program Files\nodejs;'
+    $sysEarly = 'C:\Tools\EarlyBin;C:\Windows\system32;C:\Windows'
+    $script:SysPath = $sysNormal
+    Assert-True ((Bare-Reach $cmdAbs 'SYSTEM' '/c whoami.exe').status -eq 'NOT_REPO') 'SYSTEM cmd /c whoami.exe, normal PATH, trusted System32 target => NOT_REPO'
+    $script:SysPath = $sysEarly
+    $script:FsAcls[(Resolve-TestAclKey 'C:\Tools\EarlyBin')] = New-TestAcl 'S-1-5-18' @(Ace 'S-1-5-32-545' 'CreateFiles, Synchronize')
+    $got = Bare-Reach $cmdAbs 'SYSTEM' '/c whoami.exe'
+    Assert-True ($got.status -eq 'UNKNOWN' -and $got.why -like '*can plant it in C:\Tools\EarlyBin*') ('Users-writable PATH entry before System32 => UNKNOWN; System32 later in PATH does not cancel it (got ' + $got.status + ': ' + $got.why + ')')
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Cmd Early Plant' 'SYSTEM' 'x' @([pscustomobject]@{ execute = $cmdAbs; arguments = '/c whoami.exe'; workingDirectory = '' }))
+    Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) '*Cmd Early Plant*can plant it in*') 'SYSTEM task cmd /c whoami.exe with a plantable PATH entry before System32 => BLOCK'
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Cmd Early Plant User' 'OZKSync' 'x' @([pscustomobject]@{ execute = $cmdAbs; arguments = '/c whoami.exe'; workingDirectory = '' }))
+    Assert-True ((Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())).ok) 'the same under a non-privileged identity => not blocked by this rule alone'
+    Reset-TrustAcls
+    $script:FsAcls[(Resolve-TestAclKey 'C:\Tools\EarlyBin')] = New-TestAcl 'S-1-5-18' @(Ace 'OZK2026\OZKSync' 'Modify')
+    $got = Bare-Reach $cmdAbs 'SYSTEM' '/c whoami.exe'
+    Assert-True ($got.status -eq 'UNKNOWN' -and $got.why -like '*can plant it in C:\Tools\EarlyBin*') 'OZKSync-writable PATH entry before System32 => UNKNOWN'
+    # الترتيب القديم الخاطئ (System32 قبل PATH داخل cmd) كان سيحلّها من System32؛ Action المهمة (CreateProcess) تبقى كما هي.
+    Assert-True ((Bare-Reach 'whoami.exe' 'SYSTEM' '').status -eq 'NOT_REPO') 'task Action (CreateProcess) keeps its own order: System32 before PATH => NOT_REPO for the same PATH'
+    Assert-True ((Bare-Reach $cmdAbs 'SYSTEM' '/c C:\Windows\System32\whoami.exe').status -eq 'NOT_REPO') 'explicit absolute target inside cmd /c => unaffected by a plantable PATH entry'
+    Reset-TrustAcls
+    # الترتيب الموثوق: PATH يبدأ بـSystem32 ثم مجلد قابل للزرع لاحقاً ⇒ الهدف يُحلّ قبله.
+    $script:SysPath = 'C:\Windows\system32;C:\Tools\EarlyBin'
+    $script:FsAcls[(Resolve-TestAclKey 'C:\Tools\EarlyBin')] = New-TestAcl 'S-1-5-18' @(Ace 'S-1-5-32-545' 'CreateFiles, Synchronize')
+    Assert-True ((Bare-Reach $cmdAbs 'SYSTEM' '/c whoami.exe').status -eq 'NOT_REPO') 'trusted PATH ordering (System32 first, plantable entry later) => NOT_REPO'
+    # مجلد العمل قابل للكتابة ويأتي أولاً.
+    $script:FsExistOnly['c:\work'] = 1
+    $script:FsAcls[(Resolve-TestAclKey 'C:\Work')] = New-TestAcl 'S-1-5-18' @(Ace 'S-1-5-32-545' 'CreateFiles, Synchronize')
+    $got = Bare-Reach $cmdAbs 'SYSTEM' '/c whoami.exe' 'C:\Work'
+    Assert-True ($got.status -eq 'UNKNOWN' -and $got.why -like '*can plant it in C:\Work*') 'Users-writable working directory searched first by cmd => UNKNOWN'
+    Reset-TrustAcls
+    # المجلد الحالي اختياري (NoDefaultCurrentDirectoryInExePath): هدف موثوق فيه لا يُنهي البحث.
+    $script:SysPath = $sysEarly
+    $script:FsAcls[(Resolve-TestAclKey 'C:\Tools\EarlyBin')] = New-TestAcl 'S-1-5-18' @(Ace 'S-1-5-32-545' 'CreateFiles, Synchronize')
+    $got = Bare-Reach $cmdAbs 'SYSTEM' '/c whoami.exe' 'C:\Windows\System32'
+    Assert-True ($got.status -eq 'UNKNOWN' -and $got.why -like '*C:\Tools\EarlyBin*') 'trusted target in the current directory does not end the search (cmd may skip it) => plantable PATH entry still UNKNOWN'
+    Reset-TrustAcls
+    # امتداد PATHEXT أسبق قابل للزرع في مجلد الهدف نفسه.
+    $script:SysPath = 'C:\Tools\TrustedBin;C:\Windows\system32'
+    $script:FsExistOnly['c:\tools\trustedbin\whoami.exe'] = 1
+    $script:FsAcls[(Resolve-TestAclKey 'C:\Tools\TrustedBin')] = New-TestAcl 'S-1-5-18' @(Ace 'S-1-5-32-545' 'CreateFiles, Synchronize')
+    $got = Bare-Reach $cmdAbs 'SYSTEM' '/c whoami' 'C:\safe'
+    Assert-True ($got.status -eq 'UNKNOWN' -and $got.why -like '*plant an earlier extension in C:\Tools\TrustedBin*') ('PATHEXT: plantable .com before the found whoami.exe => UNKNOWN (got ' + $got.status + ': ' + $got.why + ')')
+    Reset-TrustAcls
+    Assert-True ((Bare-Reach $cmdAbs 'SYSTEM' '/c whoami' 'C:\safe').status -eq 'NOT_REPO') 'PATHEXT with a trusted target directory => NOT_REPO'
+    $script:FsExistOnly.Remove('c:\tools\trustedbin\whoami.exe')
+    $script:SysPath = 'C:\Windows\system32;C:\Windows;C:\Program Files\nodejs;'
     $script:FsExistOnly = $null; $script:SysPath = $savedSysPath
 
     Write-Host '== Install preflight combines price-list and identity checks'

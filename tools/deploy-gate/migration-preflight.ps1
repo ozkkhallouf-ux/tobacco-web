@@ -1030,17 +1030,22 @@ function ConvertFrom-SearchPathText([string]$Raw, [string]$Label) {
 
 function Get-BareSearchPlan($Ctx, [string]$WorkDir, [int]$Depth = 0) {
     $win = ([string](Get-PreflightWindowsDirectory)).TrimEnd('\')
+    $optional = 0
     if ($Depth -gt 0) {
-        # داخل cmd /c: بحث cmd يبدأ بالمجلد الحالي (مجلد العمل، أو System32 افتراضي Task Scheduler حين يكون فارغاً).
+        # داخل cmd /c (Depth>0 لا يأتي إلا من Get-CmdLineReach): بحث cmd = المجلد الحالي ثم مدخلات PATH بترتيبها
+        # الفعلي فقط، بلا System32/System/Windows ضمنياً. المجلد الحالي (مجلد العمل، أو System32 افتراضي Task
+        # Scheduler) اختياري: NoDefaultCurrentDirectoryInExePath قد يتخطاه، فالنتيجتان تُفحصان معاً.
         $cwd = $WorkDir
         if (-not $cwd) { $cwd = $win + '\System32' }
         $dirs = @($cwd.TrimEnd('\'))
+        $optional = 1
     } else {
-        # CreateProcess: مجلد المضيف (System32) ثم المجلد الحالي (يُضاف مجلد العمل تحفّظاً).
+        # CreateProcess (Action المهمة): مجلد المضيف (System32) ثم المجلد الحالي (يُضاف مجلد العمل تحفّظاً)،
+        # ثم System32 وSystem وWindows، ثم PATH.
         $dirs = @(($win + '\System32'))
         if ($WorkDir) { $dirs += $WorkDir.TrimEnd('\') }
+        $dirs += @(($win + '\System32'), ($win + '\System'), $win)
     }
-    $dirs += @(($win + '\System32'), ($win + '\System'), $win)
     try { $sp = ConvertFrom-SearchPathText (Get-PreflightSystemPath) 'system PATH' } catch { return [pscustomobject]@{ ok = $false; reason = ('system PATH cannot be read: ' + $_.Exception.Message) } }
     if (-not $sp.ok) { return $sp }
     $dirs += $sp.dirs
@@ -1049,10 +1054,11 @@ function Get-BareSearchPlan($Ctx, [string]$WorkDir, [int]$Depth = 0) {
     try { $up = ConvertFrom-SearchPathText (Get-PreflightUserPath $sid) 'user PATH' } catch { return [pscustomobject]@{ ok = $false; reason = ('user PATH cannot be read: ' + $_.Exception.Message) } }
     if (-not $up.ok) { return $up }
     $dirs += $up.dirs
+    # إزالة التكرار لا تمس المجلد الاختياري: إن تُخطّي يبقى موضعه اللاحق في PATH مبحوثاً.
     $seen = @{}
-    $ordered = @()
-    foreach ($d in $dirs) { $k = ConvertTo-CanonicalTracePath $d; if (-not $seen.ContainsKey($k)) { $seen[$k] = $true; $ordered += $d } }
-    return [pscustomobject]@{ ok = $true; dirs = $ordered }
+    $ordered = @($dirs | Select-Object -First $optional)
+    foreach ($d in @($dirs | Select-Object -Skip $optional)) { $k = ConvertTo-CanonicalTracePath $d; if (-not $seen.ContainsKey($k)) { $seen[$k] = $true; $ordered += $d } }
+    return [pscustomobject]@{ ok = $true; dirs = $ordered; optional = $optional }
 }
 
 # هل يستطيع كيان غير موثوق أن يزرع ملفاً (أو المجلد المفقود نفسه) في مجلد بحث، أو يستبدله؟ سبب أو $null.
@@ -1119,7 +1125,9 @@ function Get-BareExecutableReach($Ctx, [string]$Name, [string]$WorkDir, [int]$De
     $hasExt = $Name -match '\.[A-Za-z0-9]{1,5}$'
     $names = @($Name)
     if (-not $hasExt) { $names = @($script:PathExtDefault | ForEach-Object { $Name + $_ }) }
+    $idx = -1
     foreach ($d in @($plan.dirs)) {
+        $idx++
         $foundPath = $null
         foreach ($nm in $names) {
             $cand = $d.TrimEnd('\') + '\' + $nm
@@ -1134,6 +1142,8 @@ function Get-BareExecutableReach($Ctx, [string]$Name, [string]$WorkDir, [int]$De
                 $ft = Get-WrapperTrustReason $Ctx $foundPath
                 if ($ft) { return (New-Reach 'UNKNOWN' ('bare executable ' + $Name + ' resolved to ' + $foundPath + ', which can be modified or replaced by an untrusted principal: ' + $ft)) }
             }
+            # مجلد اختياري (قد يُتخطى): هذه نتيجة محتملة واحدة؛ تُقبل فقط إن كانت آمنة ثم يُكمل البحث للنتيجة الأخرى.
+            if ($idx -lt [int]$plan.optional -and $tr.status -eq 'NOT_REPO') { continue }
             return $tr
         }
         $pr2 = Get-DirPlantReason $Ctx $d
