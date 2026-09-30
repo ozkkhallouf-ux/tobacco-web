@@ -52,6 +52,7 @@ export const CHECKS = [
   'check-expense-entries-security.mjs',
   'check-health-check-logic.mjs',
   'check-icloud-archive-console-silence.mjs',
+  'check-inventory-excluded-stores.mjs',
   'check-inventory-recon-cost-fallbacks.mjs',
   'check-inventory-report-page-packing.mjs',
   'check-inventory-report-print-pages.mjs',
