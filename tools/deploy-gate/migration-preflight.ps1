@@ -868,7 +868,16 @@ function Get-PsDynamicExecution([string]$Text) {
         $member = ([string]$m.Member.Extent.Text).Trim("'", '"').ToLowerInvariant()
         $target = [string]$m.Expression.Extent.Text
         if (@('invoke', 'invokereturnasis', 'invokescript', 'newscriptblock', 'invokeasync', 'begininvoke') -contains $member) { return ('dynamic invocation: ' + $m.Extent.Text) }
-        if ($member -eq 'create' -and $target -match '(?i)scriptblock') { return ('script block created from a computed string: ' + $m.Extent.Text) }
+        # .ForEach(...) / .Where(...) (أساليب المجموعات الضمنية) تنفّذ كتلة: الوسيط الأول كتلة حرفية (يُحلَّل محتواها
+        # ضمن الشجرة نفسها)، أو اسم عضو/نوع حرفي؛ غير ذلك، أو اسم عضو تنفيذي (Invoke) ⇒ UNKNOWN.
+        if ($member -eq 'foreach' -or $member -eq 'where') {
+            $a0 = $null
+            $ma = @($m.Arguments)
+            if ($ma.Count -gt 0) { $a0 = $ma[0] }
+            $okArg = ($a0 -is [System.Management.Automation.Language.ScriptBlockExpressionAst]) -or ($a0 -is [System.Management.Automation.Language.TypeExpressionAst]) -or (($member -eq 'foreach') -and ($a0 -is [System.Management.Automation.Language.StringConstantExpressionAst]) -and (@('invoke', 'invokereturnasis', 'invokescript', 'begininvoke', 'invokeasync') -notcontains ([string]$a0.Value).ToLowerInvariant()))
+            if (-not $okArg) { return ('collection .' + $m.Member.Extent.Text + '() with a computed or executable argument: ' + $m.Extent.Text) }
+        }
+        if (($member -eq 'create' -or $member -eq 'new') -and $target -match '(?i)scriptblock') { return ('script block created from a computed string: ' + $m.Extent.Text) }
         # إنشاء عملية عبر COM/WMI/.NET بأمر محسوب (WScript.Shell.Run/Exec، Shell.Application.ShellExecute،
         # MMC20 ExecuteShellCommand، Win32_Process.Create، ManagementClass.InvokeMethod) ⇒ UNKNOWN.
         $margs = @($m.Arguments)
@@ -1073,6 +1082,10 @@ function Get-TargetReach($Ctx, [string]$Target, [string]$WorkDir, [int]$Depth, [
         return (New-Reach 'UNKNOWN' ($Kind + ' target ' + $p + ': script language is not statically inspected (imports/dynamic loading cannot be proven)'))
     }
     if ($final -match $script:InspectableScriptExt -or $p -match $script:InspectableScriptExt) { return (Get-WrapperReach $Ctx $p $Depth) }
+    # هدف تنفيذ مباشر (exe/dll/...) خارج المستودع: نفس ثقة نظام الملفات بالأغلفة؛ ملف أو مسار استبداله يكتبه
+    # كيان غير موثوق لا يثبت شيئاً ⇒ UNKNOWN (يُفحص فقط الهدف المكتشَف من الـworkload، لا مسح عام).
+    $trustT = Get-WrapperTrustReason $Ctx ([string]$pc.final)
+    if ($trustT) { return (New-Reach 'UNKNOWN' ($Kind + ' target ' + $p + ' can be modified or replaced by an untrusted principal, so it proves nothing: ' + $trustT)) }
     return (New-Reach 'NOT_REPO')
 }
 
@@ -1303,7 +1316,9 @@ function Resolve-TaskReach($Config, $Actions, [string]$Identity = '') {
             if (-not (Test-AbsoluteTracePath $p)) { $r = Join-Reach $r (New-Reach 'UNKNOWN' ('COM handler binary path is not absolute: ' + $p)); continue }
             $pc = Get-PathContainment $ctx $p $true
             if ($pc.state -eq 'IN') { return (New-Reach 'REPO' ('COM handler binary inside a repository root: ' + $p)) }
-            if ($pc.state -ne 'OUT') { $r = Join-Reach $r (New-Reach 'UNKNOWN' ('COM handler binary ' + $p + ': ' + $pc.reason)) }
+            if ($pc.state -ne 'OUT') { $r = Join-Reach $r (New-Reach 'UNKNOWN' ('COM handler binary ' + $p + ': ' + $pc.reason)); continue }
+            $trustC = Get-WrapperTrustReason $ctx ([string]$pc.final)
+            if ($trustC) { $r = Join-Reach $r (New-Reach 'UNKNOWN' ('COM handler binary ' + $p + ' can be modified or replaced by an untrusted principal: ' + $trustC)) }
             continue
         }
         $r = Join-Reach $r (Get-ActionReach $ctx ([string]$a.execute) ([string]$a.arguments) ([string]$a.workingDirectory) 0)

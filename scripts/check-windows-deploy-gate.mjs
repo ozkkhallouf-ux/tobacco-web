@@ -419,6 +419,20 @@ for (const needle of ["function Resolve-WorkloadReach", "cannot determine whethe
   assert.match(ps, /\$inner = Get-PsDynamicExecution \(\[string\]\$child\.Value\)/, "نص الكتلة الحرفي يُحلَّل هو نفسه");
   assert.match(read("docs/ai/topics/windows-deploy-gate.md"), /Get-WrapperTrustReason/);
 }
+// تحصين إضافي بعد b5e232f: .ForEach()/.Where()، والأهداف التنفيذية المباشرة، وعائق bootstrap المعلن لـ.git.
+{
+  const body = (n) => { const i = preSrc.indexOf(`function ${n}`); assert.ok(i >= 0, n); const j = preSrc.indexOf("\nfunction ", i + 10); return preSrc.slice(i, j < 0 ? undefined : j); };
+  const ps = body("Get-PsDynamicExecution"), tr = body("Get-TargetReach"), rt = body("Resolve-TaskReach");
+  assert.match(ps, /if \(\$member -eq 'foreach' -or \$member -eq 'where'\) \{[\s\S]*?if \(-not \$okArg\) \{ return \('collection \.'/, ".ForEach()/.Where() بوسيط غير حرفي ⇒ UNKNOWN");
+  assert.match(ps, /\(\$member -eq 'create' -or \$member -eq 'new'\) -and \$target -match '\(\?i\)scriptblock'/, "[scriptblock]::new مثل ::Create");
+  assert.match(tr, /\$trustT = Get-WrapperTrustReason \$Ctx \(\[string\]\$pc\.final\)\s+if \(\$trustT\) \{ return \(New-Reach 'UNKNOWN'/, "هدف تنفيذ مباشر غير موثوق ⇒ UNKNOWN");
+  assert.ok(tr.indexOf("$trustT = Get-WrapperTrustReason") < tr.lastIndexOf("return (New-Reach 'NOT_REPO')"), "الثقة تسبق NOT_REPO للهدف المباشر");
+  assert.match(rt, /\$trustC = Get-WrapperTrustReason \$ctx \(\[string\]\$pc\.final\)/, "ملف COM handler: الثقة نفسها");
+  const doc = read("docs/ai/topics/windows-deploy-gate.md");
+  assert.match(doc, /KNOWN BOOTSTRAP BLOCKER/, "عائق .git معلن");
+  assert.match(doc, /السباق غير مغلق في الكود/, "لا ادعاء بإغلاق السباق");
+  assert.match(doc, /لا تُعد البوابة جاهزة للإنتاج قبل أن تحمي مرحلة bootstrap `\.git`/, "البوابة غير جاهزة للإنتاج قبل حماية .git");
+}
 // Codex P1: قرارات الثقة بالـSID حصراً — لا عودة لمقارنة الاسم بعد حذف بادئة الجهاز/المجال.
 assert.ok(!preSrc.includes("ConvertTo-IdentityKey"), "مفتاح الهوية بالاسم محذوف نهائياً");
 const fnBody = (name) => { const i = preSrc.indexOf(`function ${name}`); assert.ok(i >= 0, name); const j = preSrc.indexOf("\nfunction ", i + 10); return preSrc.slice(i, j < 0 ? undefined : j); };

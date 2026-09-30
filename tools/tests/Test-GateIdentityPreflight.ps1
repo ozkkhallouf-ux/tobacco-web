@@ -1188,6 +1188,68 @@ try {
     Assert-True ((Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())).ok) 'same wrapper under a non-privileged identity => not a privilege risk'
     Reset-TrustAcls
 
+    Write-Host '== Collection intrinsic methods .ForEach() / .Where()'
+    $colDyn = @(
+        @{ label = '$items.ForEach($sb) => UNKNOWN'; n = 'co1.ps1'; b = '$items.ForEach($sb)' },
+        @{ label = '$items.Where($sb) => UNKNOWN'; n = 'co2.ps1'; b = '$items.Where($sb)' },
+        @{ label = 'case variation $items.foreach($sb) / .WHERE($sb, ''First'') => UNKNOWN'; n = 'co3.ps1'; b = ('$items.foreach($sb)' + "`r`n" + '$items.WHERE($sb, ''First'')') },
+        @{ label = 'computed/nested block argument (.ScriptBlock of an item) => UNKNOWN'; n = 'co4.ps1'; b = '$items.ForEach((Get-Item function:x).ScriptBlock)' },
+        @{ label = 'chained (1..3).Where({ literal }).ForEach($x) => UNKNOWN'; n = 'co5.ps1'; b = '(1..3).Where({ $_ -gt 1 }).ForEach($x)' },
+        @{ label = '$sb = [scriptblock](Get-Content ...); @(1).ForEach($sb) => UNKNOWN'; n = 'co6.ps1'; b = ('$sb = [scriptblock](Get-Content C:\ProgramData\target.txt -Raw)' + "`r`n" + '@(1).ForEach($sb)') },
+        @{ label = '@($sbs).ForEach(''Invoke'') (invokes pipeline items) => UNKNOWN'; n = 'co7.ps1'; b = '@($sbs).ForEach(''Invoke'')' },
+        @{ label = 'literal block whose content is dynamic ({ & $_ }) => UNKNOWN'; n = 'co8.ps1'; b = '$items.ForEach({ & $_ })' },
+        @{ label = '[scriptblock]::new((Get-Content ...)) alone (same family as ::Create) => UNKNOWN'; n = 'co9.ps1'; b = '$sb = [scriptblock]::new((Get-Content C:\ProgramData\target.txt -Raw))' }
+    )
+    foreach ($c in $colDyn) { $got = Dyn-Reach $c.n $c.b; Assert-True ($got.status -eq 'UNKNOWN') ($c.label + ' (got ' + $got.status + ')') }
+    $colSafe = @(
+        @{ label = '$items.ForEach({ $_ * 2 }) (literal block) => unchanged (NOT_REPO)'; n = 'cos1.ps1'; b = '$items = 1..3' + "`r`n" + '$items.ForEach({ $_ * 2 })' },
+        @{ label = '$items.Where({ $_ -gt 1 }, ''First'') => unchanged (NOT_REPO)'; n = 'cos2.ps1'; b = '(1..3).Where({ $_ -gt 1 }, ''First'')' },
+        @{ label = '$items.ForEach(''Name'') / .ForEach([int]) (literal member / type) => unchanged (NOT_REPO)'; n = 'cos3.ps1'; b = ('(Get-Process).ForEach(''Name'')' + "`r`n" + '(''1'',''2'').ForEach([int])') }
+    )
+    foreach ($c in $colSafe) { $got = Dyn-Reach $c.n $c.b; Assert-True ($got.status -eq 'NOT_REPO') ($c.label + ' (got ' + $got.status + ': ' + $got.why + ')') }
+    $cow = $dw + '\collection-witness.ps1'
+    $script:Wrappers[$cow] = ('$sb = [scriptblock]::new((Get-Content C:\ProgramData\target.txt -Raw))' + "`r`n" + '@(1).ForEach($sb)')
+    foreach ($ident in @('SYSTEM', 'OZK2026\Administrator')) {
+        $script:Tasks = @(Get-CleanLayout) + @(New-Task ('Collection Witness ' + $ident) $ident ($ps + ' -NoProfile -File "' + $cow + '"'))
+        Assert-True (-not (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())).ok) ('collection .ForEach($sb) witness under ' + $ident + ' => BLOCK')
+    }
+
+    Write-Host '== Direct executable targets need filesystem trust too'
+    Reset-TrustAcls
+    $xd = 'C:\Tools\Svc'; $xe = $xd + '\x.exe'
+    function Exe-Reach([string]$Ident = 'SYSTEM') { return (Resolve-TaskReach $cfgD @([pscustomobject]@{ execute = $xe; arguments = '/run'; workingDirectory = '' }) $Ident) }
+    Assert-True ((Exe-Reach).status -eq 'NOT_REPO') 'SYSTEM direct exe in a trusted path => NOT_REPO (unchanged)'
+    $exeCases = @(
+        @{ label = 'SYSTEM direct exe writable by OZKSync => UNKNOWN'; set = { $script:FsAcls[(Resolve-TestAclKey $xe)] = New-TestAcl 'S-1-5-18' @(Ace 'OZK2026\OZKSync' 'Modify, Synchronize') } },
+        @{ label = 'exe itself safe, but its folder lets Users replace children => UNKNOWN'; set = { $script:FsAcls[(Resolve-TestAclKey $xd)] = New-TestAcl 'S-1-5-18' @(Ace 'S-1-5-32-545' 'DeleteSubdirectoriesAndFiles') } },
+        @{ label = 'relevant ancestor (C:\Tools) lets OZKSync rename/replace (Delete) => UNKNOWN'; set = { $script:FsAcls[(Resolve-TestAclKey 'C:\Tools')] = New-TestAcl 'S-1-5-18' @(Ace 'OZK2026\OZKSync' 'Delete') } },
+        @{ label = 'unreadable exe ACL => UNKNOWN'; set = { $script:FsAclErrors[(Resolve-TestAclKey $xe)] = 'Access is denied.' } },
+        @{ label = 'malformed rights on the exe => UNKNOWN'; set = { $script:FsAcls[(Resolve-TestAclKey $xe)] = New-TestAcl 'S-1-5-18' @(Ace 'S-1-5-32-545' 'NotARight') } },
+        @{ label = 'exe owned by an untrusted user => UNKNOWN'; set = { $script:FsAcls[(Resolve-TestAclKey $xe)] = New-TestAcl 'OZK2026\OZKSync' } }
+    )
+    foreach ($c in $exeCases) { Reset-TrustAcls; & $c.set; $got = Exe-Reach; Assert-True ($got.status -eq 'UNKNOWN' -and $got.why -like '*untrusted principal*') ($c.label + ' (got ' + $got.status + ')') }
+    Reset-TrustAcls; $script:FsAcls[(Resolve-TestAclKey $xe)] = New-TestAcl 'S-1-5-18' @(Ace 'OZK2026\OZKSync' 'Modify')
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Exe Trust System' 'SYSTEM' 'x' @([pscustomobject]@{ execute = $xe; arguments = '/run'; workingDirectory = '' }))
+    Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) '*Exe Trust System*untrusted principal*') 'SYSTEM task -> exe writable by OZKSync => BLOCK'
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Exe Trust User' 'OZKSync' 'x' @([pscustomobject]@{ execute = $xe; arguments = '/run'; workingDirectory = '' }))
+    Assert-True ((Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())).ok) 'same exe under a non-privileged identity => not blocked by this rule'
+    # ملف Microsoft/Windows موثوق (المالك TrustedInstaller، وكتابة لـTrustedInstaller فقط) ⇒ لا حجب.
+    Reset-TrustAcls
+    $sysExe = 'C:\Windows\System32\defrag.exe'
+    $script:FsAcls[(Resolve-TestAclKey $sysExe)] = [pscustomobject]@{ owner = $script:TrustedInstallerSid; access = @(
+        (Ace $script:TrustedInstallerSid 'FullControl'), (Ace 'S-1-5-18' 'ReadAndExecute, Synchronize'), (Ace 'S-1-5-32-544' 'ReadAndExecute, Synchronize'),
+        (Ace 'S-1-5-32-545' 'ReadAndExecute, Synchronize'), (Ace 'S-1-15-2-1' 'ReadAndExecute, Synchronize')) }
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Native Trusted' 'SYSTEM' 'x' @([pscustomobject]@{ execute = $sysExe; arguments = '-c'; workingDirectory = '' }))
+    Assert-True ((Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())).ok) 'native trusted executable (TrustedInstaller-owned, read-only for others) => not blocked'
+    # لا توسّع: وسيط بيانات (ملف سجل) لا يُفحص ACL له.
+    Reset-TrustAcls
+    $script:FsAclErrors[(Resolve-TestAclKey 'C:\Logs\run.log')] = 'should never be read'
+    Assert-True ((Resolve-TaskReach $cfgD @([pscustomobject]@{ execute = $xe; arguments = '/log C:\Logs\run.log'; workingDirectory = '' }) 'SYSTEM').status -eq 'NOT_REPO') 'unrelated data file in the arguments is not ACL-checked (no sweep)'
+    # COM handler binary: نفس القاعدة.
+    Reset-TrustAcls; $script:FsAcls[(Resolve-TestAclKey 'C:\Tools\Svc\handler.dll')] = New-TestAcl 'S-1-5-18' @(Ace 'S-1-5-32-545' 'Write')
+    Assert-True ((Resolve-TaskReach $cfgD @([pscustomobject]@{ execute = 'C:\Tools\Svc\handler.dll'; arguments = ''; workingDirectory = ''; classId = '{00000000-0000-0000-0000-00000000C0DE}' }) 'SYSTEM').status -eq 'UNKNOWN') 'COM handler binary writable by Users => UNKNOWN'
+    Reset-TrustAcls
+
     Write-Host '== Install preflight combines price-list and identity checks'
     # فحص ACL الفعلية مُختبَر في Test-GateTrustAcl.ps1؛ هنا نتيجته ناجحة لعزل الهوية ونشرات الأسعار.
     function Test-GateTrustAcl($Config) { return [pscustomobject]@{ ok = $true; results = @() } }; function Test-GitHookSafety($Config) { return [pscustomobject]@{ ok = $true; results = @() } }
