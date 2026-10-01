@@ -713,6 +713,17 @@ function Test-PsLiteralAst($Ast) {
     return $false
 }
 
+# الأمر الفرعي لـsc.exe من وسائطه (بعد بادئة خادم \\server حرفية إن وُجدت)، أو $null إن لم يُثبت حرفياً.
+function Get-ScSubcommand($Elements) {
+    $els = @($Elements)
+    $i = 0
+    if ($els.Count -gt $i -and $els[$i] -is [System.Management.Automation.Language.StringConstantExpressionAst] -and ([string]$els[$i].Value) -match '^\\\\[^\\\s]+$') { $i++ }
+    if ($els.Count -le $i -or -not ($els[$i] -is [System.Management.Automation.Language.StringConstantExpressionAst])) { return $null }
+    $w = @((([string]$els[$i].Value).Trim()) -split '\s+')
+    if ($w.Count -gt 1 -and $w[0] -match '^\\\\[^\\\s]+$') { return $w[1].ToLowerInvariant() }
+    return $w[0].ToLowerInvariant()
+}
+
 # سبب الديناميكية في نص PowerShell، أو $null إن كانت كل أهداف التنفيذ ثابتة.
 function Get-PsDynamicExecution([string]$Text) {
     $tokens = $null
@@ -782,8 +793,7 @@ function Get-PsDynamicExecution([string]$Text) {
         # وسيط محسوب/splat مع create/config ⇒ UNKNOWN. الحرفي يكمل تحليل المسارات العادي.
         if ($leafName -match '^sc\.exe$') {
             $scEls = @($c.CommandElements | Select-Object -Skip 1)
-            $scSub = $null
-            if ($scEls.Count -gt 0 -and $scEls[0] -is [System.Management.Automation.Language.StringConstantExpressionAst]) { $scSub = ([string]$scEls[0].Value).ToLowerInvariant() }
+            $scSub = Get-ScSubcommand $scEls
             if ($null -eq $scSub -or $scSub -eq 'create' -or $scSub -eq 'config') {
                 foreach ($el in $scEls) {
                     $v = $el
@@ -838,6 +848,14 @@ function Get-PsDynamicExecution([string]$Text) {
                 $fp = $bound['FilePath'].Value
                 if (-not (Test-PsLiteralAst $fp)) { return ($name + ' with a dynamic target: ' + $fp.Extent.Text) }
                 $leaf = (([string]$fp.Value) -replace '/', '\' -split '\\')[-1]
+                # Start-Process sc/sc.exe: وسائط محسوبة مع create/config (أو أمر فرعي غير مثبت) ⇒ UNKNOWN؛ الحرفي يكمل.
+                if ($leaf -match '^sc(\.exe)?$' -and $bound.ContainsKey('ArgumentList') -and -not (Test-PsLiteralAst $bound['ArgumentList'].Value)) {
+                    $sav = $bound['ArgumentList'].Value
+                    $sItems = @($sav)
+                    if ($sav -is [System.Management.Automation.Language.ArrayLiteralAst]) { $sItems = @($sav.Elements) }
+                    $sSub = Get-ScSubcommand $sItems
+                    if ($null -eq $sSub -or $sSub -eq 'create' -or $sSub -eq 'config') { return ($name + ' runs sc.exe service create/config with computed arguments (binPath cannot be proven): ' + $bound['ArgumentList'].Value.Extent.Text) }
+                }
                 if ($bound.ContainsKey('ArgumentList') -and -not (Test-PsLiteralAst $bound['ArgumentList'].Value) -and $leaf -match $script:InterpreterLeaves) { return ($name + ' runs interpreter ' + $leaf + ' with dynamic arguments: ' + $bound['ArgumentList'].Value.Extent.Text) }
             }
             '^(invoke-command|icm|start-job|sajb|start-threadjob)$' {

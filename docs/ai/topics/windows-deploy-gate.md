@@ -347,6 +347,8 @@
     و`@fdate`، و`@ftime`) أو ترميز `0xHH` ⇒ UNKNOWN في PowerShell وCMD والـAction، لأن الهدف يُحسب لكل ملف وقت التشغيل.
   - `sc.exe create`/`config` في PowerShell بوسيط محسوب أو splat، أو بأمر فرعي محسوب ⇒ UNKNOWN. الحرفي يمر بتحليل
     المسارات العادي. (`sc` وحدها في PowerShell هي Set-Content ولا تتأثر.)
+    بادئة الخادم الحرفية (`sc.exe \\server create …`) تُتخطى قبل تحديد الأمر الفرعي، و`Start-Process sc`/`sc.exe`
+    بـ`-ArgumentList` محسوب مع create/config، أو بأمر فرعي غير مثبت ⇒ UNKNOWN. الوسائط الحرفية تكمل التحليل العادي.
   - `conhost`: NEEDS MORE EVIDENCE، لم يُعدَّل.
 - **عائق تثبيت معروف (KNOWN BOOTSTRAP BLOCKER) — `.git` قابل للكتابة من هويات غير موثوقة:**
   - بين فحص `.git` الأول و`Set-DeployFlag` تشغّل البوابة `git status`/`diff` للتحقق من نظافة الشجرة. فلتر `filter.*`

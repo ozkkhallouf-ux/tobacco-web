@@ -371,6 +371,11 @@ for (const needle of ["function Resolve-WorkloadReach", "cannot determine whethe
   assert.match(sc, /if \(\$lw -match '\^forfiles\(\\\.exe\)\?\$' -and \$lm\.Value -match \$script:ForfilesSubstitution\) \{ return /, "CMD: forfiles @path ⇒ UNKNOWN");
   assert.match(preSrc, /if \(\$name -eq 'forfiles' -and \$fx\['arguments'\] -match \$script:ForfilesSubstitution\) \{ return \(Join-Reach \$r \(New-Reach 'UNKNOWN'/, "Action/cmd: forfiles @path ⇒ UNKNOWN");
   assert.match(ps, /if \(\$leafName -match '\^sc\\\.exe\$'\) \{[\s\S]*?if \(\$null -eq \$scSub -or \$scSub -eq 'create' -or \$scSub -eq 'config'\) \{[\s\S]*?if \(-not \(Test-PsLiteralAst \$v\)\) \{ return /, "sc.exe create/config بوسيط محسوب أو أمر فرعي محسوب ⇒ UNKNOWN");
+  // sc.exe: بادئة خادم \\server لا تُخفي create/config، وStart-Process sc/sc.exe يمر بنفس القاعدة.
+  const scSub = preSrc.slice(preSrc.indexOf("function Get-ScSubcommand"), preSrc.indexOf("function Get-PsDynamicExecution"));
+  assert.ok(scSub.includes(String.raw`-match '^\\\\[^\\\s]+$') { $i++ }`), "بادئة \\\\server تُتخطى قبل الأمر الفرعي");
+  assert.match(ps, /\$scEls = @\(\$c\.CommandElements \| Select-Object -Skip 1\)\s+\$scSub = Get-ScSubcommand \$scEls/, "sc.exe المباشر يستعمل Get-ScSubcommand");
+  assert.match(ps, /if \(\$leaf -match '\^sc\(\\\.exe\)\?\$' -and \$bound\.ContainsKey\('ArgumentList'\) -and -not \(Test-PsLiteralAst \$bound\['ArgumentList'\]\.Value\)\) \{[\s\S]*?\$sSub = Get-ScSubcommand \$sItems\s+if \(\$null -eq \$sSub -or \$sSub -eq 'create' -or \$sSub -eq 'config'\) \{ return /, "Start-Process sc/sc.exe بوسائط محسوبة مع create/config ⇒ UNKNOWN");
   assert.match(read("tools/tests/Test-GateIdentityPreflight.ps1"), /wmic\.exe process call create \$cmd/, "اختبار شاهد Codex: wmic.exe process call create \$cmd");
   assert.match(read("docs/ai/topics/windows-deploy-gate.md"), /wmic\.exe process call create \$cmd/, "التوثيق يذكر إنشاء عملية WMIC من غلاف PowerShell");
   assert.match(ps, /if \(\$op -eq 'Ampersand' -or \$op -eq 'Dot'\) \{\s+if \(-not \(Test-PsLiteralAst \$first\)\) \{ return [^\n]*\n\s+\}\s+\$name = \$c\.GetCommandName\(\)/, "& بهدف حرفي لا يتخطى فحص وسائط المفسّر");

@@ -1121,6 +1121,34 @@ try {
         Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) ('*ScConfig ' + $ident + '*binPath cannot be proven*')) ($ident + ' task -> wrapper -> sc.exe config binPath= (Get-Content ...) => BLOCK')
     }
 
+    Write-Host '== sc.exe with a \\server prefix and Start-Process sc.exe (static fixtures only)'
+    $scMore = @(
+        @{ label = 'PS: sc.exe \\localhost create X binPath= $b => UNKNOWN'; n = 'sp1.ps1'; b = 'sc.exe \\localhost create X binPath= $b' },
+        @{ label = 'PS: sc.exe \\server config X binPath= $b => UNKNOWN'; n = 'sp2.ps1'; b = 'sc.exe \\server config X binPath= $b' },
+        @{ label = 'PS: Start-Process sc.exe -ArgumentList create, X, binPath=, $b => UNKNOWN'; n = 'sp3.ps1'; b = 'Start-Process sc.exe -ArgumentList ''create'', ''X'', ''binPath='', $b' },
+        @{ label = 'PS: Start-Process sc -ArgumentList "config X binPath= $b" => UNKNOWN'; n = 'sp4.ps1'; b = 'Start-Process sc -ArgumentList "config X binPath= $b"' },
+        @{ label = 'PS: Start-Process sc.exe -ArgumentList \\server, config, ..., $b => UNKNOWN'; n = 'sp5.ps1'; b = 'Start-Process -FilePath sc.exe -ArgumentList ''\\server'', ''config'', ''X'', ''binPath='', $b' },
+        @{ label = 'PS: Start-Process sc.exe -ArgumentList $a (subcommand not provable) => UNKNOWN'; n = 'sp6.ps1'; b = 'Start-Process sc.exe -ArgumentList $a' }
+    )
+    foreach ($c in $scMore) { $got = Dyn-Reach $c.n $c.b; Assert-True ($got.status -eq 'UNKNOWN') ($c.label + ' (got ' + $got.status + ')') }
+    $scMoreStatic = @(
+        @{ label = 'PS: literal sc.exe \\localhost create with a binPath outside the repo => NOT_REPO'; n = 'sps1.ps1'; b = 'sc.exe \\localhost create X binPath= C:\Tools\backup\svc.exe' },
+        @{ label = 'PS: literal Start-Process sc.exe -ArgumentList ''config X binPath= C:\Tools\svc.exe'' => NOT_REPO'; n = 'sps2.ps1'; b = 'Start-Process sc.exe -ArgumentList ''config X binPath= C:\Tools\backup\svc.exe''' },
+        @{ label = 'PS: Start-Process sc.exe -ArgumentList query, $name (not create/config) => NOT_REPO'; n = 'sps3.ps1'; b = 'Start-Process sc.exe -ArgumentList ''query'', $name' }
+    )
+    foreach ($c in $scMoreStatic) { $got = Dyn-Reach $c.n $c.b; Assert-True ($got.status -eq 'NOT_REPO') ($c.label + ' (got ' + $got.status + ': ' + $got.why + ')') }
+    Assert-True ((Dyn-Reach 'sps4.ps1' ('Start-Process sc.exe -ArgumentList ''config X binPath= ' + $repo + '\tools\svc.exe''')).status -eq 'REPO') 'PS: literal Start-Process sc.exe with a binPath inside the repo => REPO'
+    foreach ($ident in @('SYSTEM', 'LOQ')) {
+        $rw = $dw + '\sc-remote-' + $ident + '.ps1'
+        $script:Wrappers[$rw] = ('$b = Get-Content C:\ProgramData\target.txt' + "`r`n" + 'sc.exe \\localhost create X binPath= $b')
+        $script:Tasks = @(Get-CleanLayout) + @(New-Task ('ScRemote ' + $ident) $ident ($ps + ' -NoProfile -File "' + $rw + '"'))
+        Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) ('*ScRemote ' + $ident + '*binPath cannot be proven*')) ($ident + ' task -> wrapper -> sc.exe \\localhost create binPath= (Get-Content ...) => BLOCK')
+        $spw = $dw + '\sc-start-' + $ident + '.ps1'
+        $script:Wrappers[$spw] = ('$b = Get-Content C:\ProgramData\target.txt' + "`r`n" + 'Start-Process sc.exe -ArgumentList ''config'', ''X'', ''binPath='', $b')
+        $script:Tasks = @(Get-CleanLayout) + @(New-Task ('ScStart ' + $ident) $ident ($ps + ' -NoProfile -File "' + $spw + '"'))
+        Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) ('*ScStart ' + $ident + '*binPath cannot be proven*')) ($ident + ' task -> wrapper -> Start-Process sc.exe config binPath= (Get-Content ...) => BLOCK')
+    }
+
     Write-Host '== Dynamic module / code loading inside PowerShell wrappers (Codex P1)'
     $script:Wrappers['C:\safe\mod.psm1'] = 'function Get-Safe { Get-Date }'
     $script:Wrappers['c:\safe\mod.psm1'] = 'function Get-Safe { Get-Date }'
