@@ -23,6 +23,7 @@ export const CHECKS = [
   'check.mjs',
   'check-account-class-tree.mjs',
   'check-alert-on-automation-failure.mjs',
+  'check-amanat-price-bulletin-isolation.mjs',
   'check-amanat-warehouse-page.mjs',
   'check-ameen-autoprint-regression.mjs',
   'check-ameen-read-connection-preference.mjs',
