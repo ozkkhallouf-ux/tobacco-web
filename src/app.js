@@ -1294,10 +1294,12 @@ function fillReceiptVoucherBalance(opts, item, storedDocNew) {
 
 function exportMovementReceipt(base, item, amount, storedDocNew, voucherType) {
   const disbursement = voucherType === "payment";
+  // دفتر الحركات بالدولار (en000). عملة عرض الزبون لا تُعيد تسمية هذه الأرقام.
   exportVoucherPdf(fillReceiptVoucherBalance(
     {
       ...base,
       type: disbursement ? "payment" : "receipt",
+      cur: disbursement ? "$" : base.cur,
       amount,
       no: docNumber(disbursement ? "PV" : "R")
     },

@@ -139,6 +139,7 @@ test("زر الحركة: payment_out يُصدَّر سند صرف قبل الب�
   assert.equal((exportFn[0].match(/fillReceiptVoucherBalance\(/g) || []).length, 1);
   assert.ok(exportFn[0].includes('voucherType === "payment"'), "payment_out لا يختار سند الصرف");
   assert.ok(exportFn[0].includes('docNumber(disbursement ? "PV" : "R")'), "رقم سند الصرف ليس PV");
+  assert.ok(exportFn[0].includes('cur: disbursement ? "$" : base.cur'), "سند الصرف يأخذ عملة عرض الزبون بدل دولار الدفتر");
   assert.equal(handler.split("exportMovementReceipt(").length - 1, 2);
   assert.ok(handler.includes('exportMovementReceipt(base, item, debit, storedDocNew, "payment")'), "فرع المدين لا يمرّر نوع الصرف");
 });
