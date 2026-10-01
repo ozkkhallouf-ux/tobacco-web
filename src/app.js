@@ -1271,6 +1271,53 @@ function customerPaymentRowAmount(row) {
   return row && row._payKind === "payment-out" ? Number(row.debit || 0) : Number(row?.credit || 0);
 }
 
+// رصيد سند القبض من القيد المخزَّن. مسار الدفعة الدائنة ومسار payment_out يستخدمانه معاً.
+// عند وجود الرصيد المخزَّن يُطبع «بعد الدفعة»، ومعه الرصيد الحالي إن وُجد تقرير محمَّل:
+// الدفعة قد تكون تلتها فواتير، فيقارن الزبون السند برصيده اليوم. وقت التقرير يُطبع مع
+// الرقم حتى لا يُقرأ رصيد صفحة قديمة على أنه رصيد اللحظة.
+function fillReceiptVoucherBalance(opts, item, storedDocNew) {
+  if (storedDocNew !== null && Number.isFinite(storedDocNew)) {
+    opts.balance = roundPrice(storedDocNew);
+    opts.balanceLabel = "الرصيد بعد الدفعة";
+    const current = customerBalance(item);
+    if (Number.isFinite(current)) {
+      opts.currentBalance = roundPrice(current);
+      opts.currentBalanceAt = reportSyncedAt(state.customerBalanceReports[0]);
+    }
+    return opts;
+  }
+  opts.balance = customerBalance(item);
+  opts.balanceLabel = "الرصيد الحالي";
+  return opts;
+}
+
+function exportMovementReceipt(base, item, amount, storedDocNew) {
+  exportVoucherPdf(fillReceiptVoucherBalance(
+    { ...base, type: "receipt", amount, no: docNumber("R") },
+    item,
+    storedDocNew
+  ));
+}
+
+function customerReceiptDocButton(row, rowsLinked) {
+  const cashOut = !!(row && row._payKind === "payment-out");
+  const amount = escapeHtml(String(customerPaymentRowAmount(row)));
+  const attrs = [
+    `data-line-kind="${cashOut ? "payment_out" : ""}"`,
+    `data-debit="${cashOut ? amount : "0"}"`,
+    `data-credit="${cashOut ? "0" : amount}"`,
+    `data-date="${escapeHtml(row?.date || "")}"`,
+    `data-notes="${escapeHtml(row?.notes || "")}"`,
+    `data-balance="${optionalDataValue(row?.balance)}"`,
+    `data-balance-chrono="${optionalDataValue(row?.balanceChrono)}"`,
+    `data-doc-new="${optionalDataValue(row?.docNew)}"`,
+    `data-doc-prev="${optionalDataValue(row?.docPrev)}"`,
+    `data-ledger-linked="${rowsLinked ? "1" : ""}"`
+  ];
+  const open = '<button class="button secondary mini-button" type="button" data-action="gen-movement-doc"';
+  return `${open} ${attrs.join(" ")} style="margin-top:6px">📄 سند قبض PDF</button>`;
+}
+
 // سندات القبض الدائنة + حركات الصندوق الخارجة، الأحدث أولاً. بلا علامة النوع لا تُضاف
 // الحركة الخارجة: تبقى في الفواتير كما كان كي لا يختفي مدين تقرير قديم.
 function customerCashPaymentRows(receiptMoves, movements, typedLedger) {
@@ -7750,7 +7797,7 @@ function customerDetailsPanel(item) {
                     <strong class="payment-amount">دفعة: ${escapeHtml(formatMoney(customerPaymentRowAmount(m)))}</strong>
                     <span class="payment-date">${escapeHtml(m?.date ? formatDate(m.date) : "بلا تاريخ")}</span>
                     ${m?.notes ? `<small class="payment-note">${escapeHtml(m.notes)}</small>` : ""}
-                    <button class="button secondary mini-button" type="button" data-action="gen-movement-doc" data-line-kind="${m._payKind === "payment-out" ? "payment_out" : ""}" data-debit="${m._payKind === "payment-out" ? escapeHtml(String(customerPaymentRowAmount(m))) : "0"}" data-credit="${m._payKind === "payment-out" ? "0" : escapeHtml(String(customerPaymentRowAmount(m)))}" data-date="${escapeHtml(m?.date || "")}" data-notes="${escapeHtml(m?.notes || "")}" data-balance="${m?.balance !== undefined && m?.balance !== null ? escapeHtml(String(m.balance)) : ""}" data-balance-chrono="${m?.balanceChrono !== undefined && m?.balanceChrono !== null ? escapeHtml(String(m.balanceChrono)) : ""}" data-doc-new="${m?.docNew !== undefined && m?.docNew !== null ? escapeHtml(String(m.docNew)) : ""}" data-doc-prev="${m?.docPrev !== undefined && m?.docPrev !== null ? escapeHtml(String(m.docPrev)) : ""}" data-ledger-linked="${rowsLinked ? "1" : ""}" style="margin-top:6px">📄 سند قبض PDF</button>
+                    ${customerReceiptDocButton(m, rowsLinked)}
                   </div>
                 </div>`).join("")
               : '<p class="muted" style="padding:12px 0">لا توجد دفعات مسجلة.</p>'}
@@ -12837,20 +12884,7 @@ function render() {
           return;
         }
         if (movementDocTypeFromButton(el.dataset.lineKind, debit, credit) === "receipt") {
-          const opts = { ...base, type: "receipt", amount: debit, no: docNumber("R") };
-          if (storedDocNew !== null && Number.isFinite(storedDocNew)) {
-            opts.balance = roundPrice(storedDocNew);
-            opts.balanceLabel = "الرصيد بعد الدفعة";
-            const current = customerBalance(item);
-            if (Number.isFinite(current)) {
-              opts.currentBalance = roundPrice(current);
-              opts.currentBalanceAt = reportSyncedAt(state.customerBalanceReports[0]);
-            }
-          } else {
-            opts.balance = customerBalance(item);
-            opts.balanceLabel = "الرصيد الحالي";
-          }
-          exportVoucherPdf(opts);
+          exportMovementReceipt(base, item, debit, storedDocNew);
           return;
         }
         // الزبون يُمرَّر كعنصر (يحمل customerGuid) لا كاسم — الاسم في تقرير الفواتير
@@ -12923,25 +12957,7 @@ function render() {
             ? "هذا القيد مرتجع مبيعات، وتفاصيله لم تُزامَن بعد — لا مستند له حتى المزامنة التالية."
             : "لا يمكن الحكم على هذا القيد: يطابق مرتجعاً ولا ربط قطعياً له — لم يُطبع سند قبض ولا مرتجع.");
         } else {
-          const opts = { ...base, type: "receipt", amount: credit, no: docNumber("R") };
-          if (storedDocNew !== null && Number.isFinite(storedDocNew)) {
-            opts.balance = roundPrice(storedDocNew);
-            opts.balanceLabel = "الرصيد بعد الدفعة";
-            // سطر ثانٍ للرصيد الحالي عند اختلافه: الدفعة قد تكون تلتها فواتير،
-            // فيقارن الزبون السند برصيده اليوم ويظنّ الفرق خطأً. لا يُعرض إلا من
-            // تقرير محمَّل فعلاً (لا نطبع رقماً لا نعرف حداثته على مستند رسمي).
-            const current = customerBalance(item);
-            if (Number.isFinite(current)) {
-              opts.currentBalance = roundPrice(current);
-              // وقت التقرير يُطبع مع الرقم: لا ندّعي أنه رصيد اللحظة إن كانت
-              // الصفحة محمَّلة منذ ساعات.
-              opts.currentBalanceAt = reportSyncedAt(state.customerBalanceReports[0]);
-            }
-          } else {
-            opts.balance = customerBalance(item);
-            opts.balanceLabel = "الرصيد الحالي";
-          }
-          exportVoucherPdf(opts);
+          exportMovementReceipt(base, item, credit, storedDocNew);
         }
       } else {
         showNoticeNow("error", "لا يمكن تصدير هذا القيد.");

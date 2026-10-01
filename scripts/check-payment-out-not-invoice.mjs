@@ -130,6 +130,13 @@ test("زر الحركة: payment_out يُصدَّر سند قبض قبل الب�
   const receiptBranch = handler.indexOf("movementDocTypeFromButton");
   const invoiceSearch = handler.indexOf("customerInvoicesFor(item)");
   assert.ok(receiptBranch > 0 && invoiceSearch > receiptBranch, "فرع سند القبض يجب أن يسبق البحث عن فاتورة البيع");
+  const balanceFn = appJs.match(/function fillReceiptVoucherBalance\(opts, item, storedDocNew\) \{[\s\S]*?\n\}\n/);
+  assert.ok(balanceFn, "دالة رصيد سند القبض غائبة");
+  assert.equal((balanceFn[0].match(/الرصيد بعد الدفعة/g) || []).length, 1);
+  const exportFn = appJs.match(/function exportMovementReceipt\(base, item, amount, storedDocNew\) \{[\s\S]*?\n\}\n/);
+  assert.ok(exportFn, "دالة تصدير سند القبض غائبة");
+  assert.equal((exportFn[0].match(/fillReceiptVoucherBalance\(/g) || []).length, 1);
+  assert.equal(handler.split("exportMovementReceipt(").length - 1, 2);
 });
 
 test("عمود الدفعات يجمع سند القبض مع payment_out والمبلغ من المدين", () => {
@@ -146,7 +153,8 @@ test("لوحة الزبون: الفواتير من نوع sale وحده، وpaym
   const invoiceLine = "const invoiceMoves = movements.filter((m) => debitMovementKind(m, typedLedger).kind === \"sale\");";
   assert.ok(appJs.includes(invoiceLine), "فلتر الفواتير لا يستخدم debitMovementKind");
   assert.ok(appJs.includes("customerCashPaymentRows(paymentMoves, movements, typedLedger)"), "عمود الدفعات لا يضم payment_out");
-  assert.ok(appJs.includes("customerPaymentRowAmount(m)"), "مبلغ الدفعة لا يُقرأ من الصف");
+  assert.ok(appJs.includes("customerPaymentRowAmount(m)") || appJs.includes("customerPaymentRowAmount(row)"), "مبلغ الدفعة لا يُقرأ من الصف");
+  assert.ok(appJs.includes('data-line-kind="${cashOut ? "payment_out" : ""}"'), "زر الدفعة لا يعلّم payment_out");
   const panelAt = appJs.indexOf("function customerDetailsPanel");
   const panelEnd = appJs.indexOf("function customerBalanceSection");
   const panel = appJs.slice(panelAt, panelEnd > panelAt ? panelEnd : panelAt + 12000);
