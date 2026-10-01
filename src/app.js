@@ -1300,6 +1300,7 @@ function exportMovementReceipt(base, item, amount, storedDocNew, voucherType) {
       ...base,
       type: disbursement ? "payment" : "receipt",
       cur: disbursement ? "$" : base.cur,
+      customerLedger: disbursement,
       amount,
       no: docNumber(disbursement ? "PV" : "R")
     },
@@ -6513,16 +6514,18 @@ function pushInvoiceRoundingDrift(rows, v, cur, balCur, isRet) {
     : { label: "فرق تقريب", value: `− ${formatInvoiceMoney(-drift / 100)} ${cur}`, tone: "cred" });
 }
 
-// شقّ الرصيد المفرد (السندات وما لا رصيد جديد له). خرج من `voucherLedgerRows`
-// كما هو: لا شرط ولا صياغة ولا ترتيب تغيّر فيه.
+// شقّ الرصيد المفرد (السندات وما لا رصيد جديد له). سند الصرف العام يبقى
+// على الصيغة الخام. سند دفتر الزبون (قبض، أو payment_out المعلَّم customerLedger)
+// يصوغ الاتجاه «عليكم/لكم» ويعرض الرصيد اللاحق إن اختلف.
 function voucherSingleBalanceRows(rows, v, cur, balCur, isInv, isRet, balLabel) {
   const lbl = v.balanceLabel || balLabel;
-  const balTxt = (isInv || isRet || v.type === "receipt") ? balanceText(v.balance, balCur, isInv ? formatInvoiceMoney : formatMoney) : `${formatMoney(v.balance)} ${cur}`;
+  const asCustomer = isInv || isRet || v.type === "receipt" || v.customerLedger === true;
+  const balTxt = asCustomer ? balanceText(v.balance, balCur, isInv ? formatInvoiceMoney : formatMoney) : `${formatMoney(v.balance)} ${cur}`;
   rows.push({ label: lbl, value: balTxt });
   // إن تحرّك الحساب بعد هذا القيد (فواتير لاحقة مثلاً) نعرض الرصيد الحالي أيضاً:
   // سطر واحد لا يكفي — الزبون يقارن السند برصيده اليوم فيظنّ الفرق خطأً.
-  // محصور بسند القبض وحده: الفاتورة والمرتجع لهما سطرا «السابق/الجديد».
-  if (v.type === "receipt"
+  // الفاتورة والمرتجع لهما سطرا «السابق/الجديد»، فلا يدخلان هنا.
+  if ((v.type === "receipt" || v.customerLedger === true)
     && v.currentBalance !== undefined && v.currentBalance !== null && v.currentBalance !== ""
     && Math.abs(Number(v.currentBalance) - Number(v.balance)) > 0.009) {
     const asOf = shortDateTime(v.currentBalanceAt);

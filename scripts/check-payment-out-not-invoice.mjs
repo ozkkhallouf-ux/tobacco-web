@@ -51,7 +51,10 @@ const PATTERNS = {
   debitMovementDocumentType: /function debitMovementDocumentType\(movement, typedLedger\) \{[\s\S]*?\n\}\n/,
   movementDocTypeFromButton: /function movementDocTypeFromButton\(lineKind, debit, credit\) \{[\s\S]*?\n\}\n/,
   customerCashPaymentRows: /function customerCashPaymentRows\(receiptMoves, movements, typedLedger\) \{[\s\S]*?\n\}\n/,
-  customerPaymentRowAmount: /function customerPaymentRowAmount\(row\) \{[\s\S]*?\n\}\n/
+  customerPaymentRowAmount: /function customerPaymentRowAmount\(row\) \{[\s\S]*?\n\}\n/,
+  shortDateTime: /function shortDateTime\(value\) \{[\s\S]*?\n\}\n/,
+  balanceText: /function balanceText\(bal, cur, money = formatMoney\) \{[\s\S]*?\n\}\n/,
+  voucherSingleBalanceRows: /function voucherSingleBalanceRows\(rows, v, cur, balCur, isInv, isRet, balLabel\) \{[\s\S]*?\n\}\n/
 };
 
 const source = [];
@@ -77,7 +80,8 @@ const {
   movementDocTypeFromButton,
   customerCashPaymentRows,
   customerPaymentRowAmount,
-  movementReturnLink
+  movementReturnLink,
+  voucherSingleBalanceRows
 } = sandbox;
 
 const CASH = { date: "2026-10-01", debit: 2500, credit: 0, notes: "", billGuid: "", lineKind: "payment_out", docPrev: 6668.002, docNew: 9168.002 };
@@ -140,6 +144,7 @@ test("زر الحركة: payment_out يُصدَّر سند صرف قبل الب�
   assert.ok(exportFn[0].includes('voucherType === "payment"'), "payment_out لا يختار سند الصرف");
   assert.ok(exportFn[0].includes('docNumber(disbursement ? "PV" : "R")'), "رقم سند الصرف ليس PV");
   assert.ok(exportFn[0].includes('cur: disbursement ? "$" : base.cur'), "سند الصرف يأخذ عملة عرض الزبون بدل دولار الدفتر");
+  assert.ok(exportFn[0].includes("customerLedger: disbursement"), "سند الصرف من الدفتر لا يُعلَّم كرصيد زبون");
   assert.equal(handler.split("exportMovementReceipt(").length - 1, 2);
   assert.ok(handler.includes('exportMovementReceipt(base, item, debit, storedDocNew, "payment")'), "فرع المدين لا يمرّر نوع الصرف");
 });
@@ -152,6 +157,22 @@ test("عمود الدفعات يجمع سند القبض مع payment_out وال
   assert.equal(customerPaymentRowAmount(rows[0]), 2500);
   assert.equal(customerPaymentRowAmount(rows[1]), 38730);
   assert.equal(customerCashPaymentRows([RECEIPT], [CASH], false).some((r) => r._payKind === "payment-out"), false);
+});
+
+test("رصيد سند الصرف من الدفتر: اتجاه الذمة والرصيد اللاحق، وسند الصرف العام يبقى خاماً", () => {
+  const ledger = [];
+  voucherSingleBalanceRows(ledger, {
+    type: "payment", customerLedger: true, balance: -200, currentBalance: 50, cur: "$"
+  }, "$", "$", false, false, "الرصيد بعد الصرف");
+  assert.equal(ledger[0].value, "200 $ (لكم)");
+  assert.equal(ledger[1].label, "الرصيد الحالي");
+  assert.equal(ledger[1].value, "50 $ (عليكم)");
+  const generic = [];
+  voucherSingleBalanceRows(generic, {
+    type: "payment", balance: -200, currentBalance: 50, cur: "$"
+  }, "$", "$", false, false, "الرصيد بعد الصرف");
+  assert.equal(generic.length, 1);
+  assert.equal(generic[0].value, "-200 $");
 });
 
 test("لوحة الزبون: الفواتير من نوع sale وحده، وpayment_out يُرسم «دفعة» لا «فاتورة»", () => {
