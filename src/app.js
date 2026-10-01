@@ -1250,10 +1250,11 @@ function debitMovementKind(movement, typedLedger) {
   return { kind: "sale" };
 }
 
-// مستند زر السطر المدين. payment-out سند قبض لا فاتورة بيع: لا أصناف ولا بحث بالمبلغ.
+// مستند زر السطر المدين. payment_out صرف من الصندوق (مدين على الزبون، والرصيد يرتفع):
+// سند صرف، لا فاتورة بيع ولا سند قبض. لا أصناف ولا بحث بالمبلغ. الملاحظة لا تُصنِّف.
 function debitMovementDocumentType(movement, typedLedger) {
   const kind = debitMovementKind(movement, typedLedger).kind;
-  if (kind === "payment-out") return "receipt";
+  if (kind === "payment-out") return "payment";
   if (kind === "sale") return "invoice";
   return null;
 }
@@ -1271,14 +1272,14 @@ function customerPaymentRowAmount(row) {
   return row && row._payKind === "payment-out" ? Number(row.debit || 0) : Number(row?.credit || 0);
 }
 
-// رصيد سند القبض من القيد المخزَّن. مسار الدفعة الدائنة ومسار payment_out يستخدمانه معاً.
-// عند وجود الرصيد المخزَّن يُطبع «بعد الدفعة»، ومعه الرصيد الحالي إن وُجد تقرير محمَّل:
-// الدفعة قد تكون تلتها فواتير، فيقارن الزبون السند برصيده اليوم. وقت التقرير يُطبع مع
-// الرقم حتى لا يُقرأ رصيد صفحة قديمة على أنه رصيد اللحظة.
+// رصيد السند من القيد المخزَّن. سند القبض يسمّي السطر «بعد الدفعة». سند الصرف
+// (payment_out) يترك التسمية لقالب السند: «الرصيد بعد الصرف». ومع الرصيد المخزَّن
+// يُطبع الرصيد الحالي إن وُجد تقرير محمَّل، حتى لا يُقرأ رصيد صفحة قديمة على أنه
+// رصيد اللحظة.
 function fillReceiptVoucherBalance(opts, item, storedDocNew) {
   if (storedDocNew !== null && Number.isFinite(storedDocNew)) {
     opts.balance = roundPrice(storedDocNew);
-    opts.balanceLabel = "الرصيد بعد الدفعة";
+    if (opts.type !== "payment") opts.balanceLabel = "الرصيد بعد الدفعة";
     const current = customerBalance(item);
     if (Number.isFinite(current)) {
       opts.currentBalance = roundPrice(current);
@@ -1291,9 +1292,15 @@ function fillReceiptVoucherBalance(opts, item, storedDocNew) {
   return opts;
 }
 
-function exportMovementReceipt(base, item, amount, storedDocNew) {
+function exportMovementReceipt(base, item, amount, storedDocNew, voucherType) {
+  const disbursement = voucherType === "payment";
   exportVoucherPdf(fillReceiptVoucherBalance(
-    { ...base, type: "receipt", amount, no: docNumber("R") },
+    {
+      ...base,
+      type: disbursement ? "payment" : "receipt",
+      amount,
+      no: docNumber(disbursement ? "PV" : "R")
+    },
     item,
     storedDocNew
   ));
@@ -1315,7 +1322,8 @@ function customerReceiptDocButton(row, rowsLinked) {
     `data-ledger-linked="${rowsLinked ? "1" : ""}"`
   ];
   const open = '<button class="button secondary mini-button" type="button" data-action="gen-movement-doc"';
-  return `${open} ${attrs.join(" ")} style="margin-top:6px">📄 سند قبض PDF</button>`;
+  const label = cashOut ? "سند صرف PDF" : "سند قبض PDF";
+  return `${open} ${attrs.join(" ")} style="margin-top:6px">📄 ${label}</button>`;
 }
 
 // سندات القبض الدائنة + حركات الصندوق الخارجة، الأحدث أولاً. بلا علامة النوع لا تُضاف
@@ -12878,13 +12886,13 @@ function render() {
       const storedDocPrev = el.dataset.docPrev !== undefined && el.dataset.docPrev !== ""
         ? Number(el.dataset.docPrev) : null;
       if (debit > 0 && credit <= 0) {
-        // سطر حسم المرتجع ليس فاتورة. payment_out دفعة نقدية: سند قبض، بلا بحث عن أصناف.
+        // سطر حسم المرتجع ليس فاتورة. payment_out صرف من الصندوق: سند صرف، بلا بحث عن أصناف.
         if (movementReturnLink({ billGuid: el.dataset.billGuid })) {
           showNoticeNow("error", "هذا السطر جزء من قيد مرتجع (حسم المرتجع)، وليس فاتورة بيع — صدّره من قائمة المرتجعات.");
           return;
         }
-        if (movementDocTypeFromButton(el.dataset.lineKind, debit, credit) === "receipt") {
-          exportMovementReceipt(base, item, debit, storedDocNew);
+        if (movementDocTypeFromButton(el.dataset.lineKind, debit, credit) === "payment") {
+          exportMovementReceipt(base, item, debit, storedDocNew, "payment");
           return;
         }
         // الزبون يُمرَّر كعنصر (يحمل customerGuid) لا كاسم — الاسم في تقرير الفواتير

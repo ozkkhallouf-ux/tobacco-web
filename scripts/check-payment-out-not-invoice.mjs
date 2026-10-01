@@ -4,7 +4,8 @@
 // العطل (2026-10-01، تقرير الإنتاج ameen_customer_movements، lineKinds v1):
 // لوحة الزبون كانت تعرض كل سطر مدين «فاتورة». سطر مدين 2500 على الصندوق
 // (lineKind = payment_out، الرصيد يرتفع بقيمته) ظهر في «الفواتير» وزرّه
-// «فاتورة PDF» يبحث عن فاتورة بيع بالمبلغ أو بتاريخ اليوم. الملاحظة لا تُصنِّف:
+// «فاتورة PDF» يبحث عن فاتورة بيع بالمبلغ أو بتاريخ اليوم. المستند سند صرف
+// لا سند قبض: القيد صرف من الصندوق. الملاحظة لا تُصنِّف:
 // النوع يأتي من push-customer-movements.ps1. بلا العلامة lineKinds:v1 يبقى
 // السلوك السابق (كل مدين غير مربوط بمرتجع فاتورة) لأن الصف لا يحمل نوعاً.
 //
@@ -97,7 +98,7 @@ test("تقرير موسوم: payment_out دفعة نقدية وليست فاتو
   for (const notes of ["", "دفعة نقدية", "بيع بضاعة"]) {
     const kind = debitMovementKind({ ...CASH, notes }, true);
     assert.equal(kind.kind, "payment-out", notes);
-    assert.equal(debitMovementDocumentType({ ...CASH, notes }, true), "receipt", notes);
+    assert.equal(debitMovementDocumentType({ ...CASH, notes }, true), "payment", notes);
   }
 });
 
@@ -120,8 +121,8 @@ test("قبض دائن ليس سطر مدين", () => {
   assert.equal(debitMovementKind(RECEIPT, true).kind, "none");
 });
 
-test("زر الحركة: payment_out يُصدَّر سند قبض قبل البحث عن فاتورة بيع", () => {
-  assert.equal(movementDocTypeFromButton("payment_out", 2500, 0), "receipt");
+test("زر الحركة: payment_out يُصدَّر سند صرف قبل البحث عن فاتورة بيع", () => {
+  assert.equal(movementDocTypeFromButton("payment_out", 2500, 0), "payment");
   assert.equal(movementDocTypeFromButton("", 7332.1, 0), "invoice");
   assert.equal(movementDocTypeFromButton("sale", 7332.1, 0), "invoice");
   const handlerAt = appJs.indexOf("app.querySelectorAll(\"[data-action='gen-movement-doc']\")");
@@ -133,10 +134,13 @@ test("زر الحركة: payment_out يُصدَّر سند قبض قبل الب�
   const balanceFn = appJs.match(/function fillReceiptVoucherBalance\(opts, item, storedDocNew\) \{[\s\S]*?\n\}\n/);
   assert.ok(balanceFn, "دالة رصيد سند القبض غائبة");
   assert.equal((balanceFn[0].match(/الرصيد بعد الدفعة/g) || []).length, 1);
-  const exportFn = appJs.match(/function exportMovementReceipt\(base, item, amount, storedDocNew\) \{[\s\S]*?\n\}\n/);
-  assert.ok(exportFn, "دالة تصدير سند القبض غائبة");
+  const exportFn = appJs.match(/function exportMovementReceipt\(base, item, amount, storedDocNew, voucherType\) \{[\s\S]*?\n\}\n/);
+  assert.ok(exportFn, "دالة تصدير السند غائبة");
   assert.equal((exportFn[0].match(/fillReceiptVoucherBalance\(/g) || []).length, 1);
+  assert.ok(exportFn[0].includes('voucherType === "payment"'), "payment_out لا يختار سند الصرف");
+  assert.ok(exportFn[0].includes('docNumber(disbursement ? "PV" : "R")'), "رقم سند الصرف ليس PV");
   assert.equal(handler.split("exportMovementReceipt(").length - 1, 2);
+  assert.ok(handler.includes('exportMovementReceipt(base, item, debit, storedDocNew, "payment")'), "فرع المدين لا يمرّر نوع الصرف");
 });
 
 test("عمود الدفعات يجمع سند القبض مع payment_out والمبلغ من المدين", () => {
@@ -155,6 +159,7 @@ test("لوحة الزبون: الفواتير من نوع sale وحده، وpaym
   assert.ok(appJs.includes("customerCashPaymentRows(paymentMoves, movements, typedLedger)"), "عمود الدفعات لا يضم payment_out");
   assert.ok(appJs.includes("customerPaymentRowAmount(m)") || appJs.includes("customerPaymentRowAmount(row)"), "مبلغ الدفعة لا يُقرأ من الصف");
   assert.ok(appJs.includes('data-line-kind="${cashOut ? "payment_out" : ""}"'), "زر الدفعة لا يعلّم payment_out");
+  assert.ok(appJs.includes('cashOut ? "سند صرف PDF" : "سند قبض PDF"'), "زر payment_out ليس سند صرف");
   const panelAt = appJs.indexOf("function customerDetailsPanel");
   const panelEnd = appJs.indexOf("function customerBalanceSection");
   const panel = appJs.slice(panelAt, panelEnd > panelAt ? panelEnd : panelAt + 12000);

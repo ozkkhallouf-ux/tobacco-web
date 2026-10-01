@@ -611,7 +611,9 @@ await journey("balances", "صفحة الذمم تعرض أرصدة الزبائ�
   assert(invoiceText.includes("فاتورة: 100"), `فاتورة البيع لم تظهر في الفواتير: ${invoiceText}`);
   assert(!invoiceText.includes("2,500"), `حركة الصندوق 2500 ما زالت ضمن الفواتير: ${invoiceText}`);
   assert(paymentText.includes("دفعة: 2,500"), `الدفعة النقدية 2500 ليست في سندات القبض: ${paymentText}`);
+  assert(paymentText.includes("سند صرف PDF"), `حركة الصندوق 2500 لا تُصدَّر سند صرف: ${paymentText}`);
   assert(paymentText.includes("دفعة: 40"), `سند القبض 40 سقط من العمود: ${paymentText}`);
+  assert(paymentText.includes("سند قبض PDF"), `سند القبض الدائن لم يبقَ سند قبض: ${paymentText}`);
   await page.locator(".customer-detail-grid").scrollIntoViewIfNeeded();
   await page.locator(".customer-detail-grid").screenshot({ path: join(ARTIFACTS, "balances-payment-out-not-invoice.png") });
   assertClean("الذمم", collected);
