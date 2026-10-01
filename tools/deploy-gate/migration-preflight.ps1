@@ -690,6 +690,10 @@ function Get-FieldReach($Ctx, [string]$Field) {
 # وCMD/BAT. لا تُقيَّم المتغيرات ولا تُقرأ ملفات البيانات؛ المتغير العادي لا يُحتسب إلا إذا صار هدف تنفيذ.
 # ------------------------------------------------------------
 $script:InterpreterLeaves = '^(powershell|pwsh|cmd|wscript|cscript|mshta|node|nodejs|python\d*(\.\d+)?|pythonw|py|pyw|bash|sh|rundll32|regsvr32|msbuild|wmic)(\.exe|\.com)?$'
+# أدوات إطلاق معروفة تحدد أمراً يُشغَّل (فوراً أو لاحقاً): وسيط محسوب في أي محلل ⇒ UNKNOWN (تعريف مشترك).
+$script:LauncherLeaves = '^(wmic|forfiles|schtasks|pcalua)(\.exe)?$'
+# تسجيل/تعديل مهمة مجدولة أو خدمة يحدد ما سيُشغَّل لاحقاً خارج جرد التثبيت (Codex P1).
+$script:RegistrationCommands = '^(new-scheduledtaskaction|new-scheduledtask|register-scheduledtask|set-scheduledtask|new-service|set-service)$'
 
 function Test-PsLiteralAst($Ast) {
     if ($Ast -is [System.Management.Automation.Language.StringConstantExpressionAst]) { return $true }
@@ -760,8 +764,21 @@ function Get-PsDynamicExecution([string]$Text) {
                 if ($null -ne $vt -and $vt -match '^(?i)(microsoft\.powershell\.core\\)?alias::?') { return ('alias drive modified: ' + $c.Extent.Text) }
             }
         }
+        # تسجيل مهمة/خدمة أو أداة إطلاق معروفة: كل وسيط حرفي (لا متغير، ولا splat، ولا تعبير)، ولا إدخال من
+        # الأنبوب؛ غير ذلك لا يُثبت ما سيُشغَّل ⇒ UNKNOWN. الحرفي يكمل التحليل العادي.
+        if ($n -match $script:RegistrationCommands -or $leafName -match $script:LauncherLeaves) {
+            $pp = $c.Parent
+            if ($pp -is [System.Management.Automation.Language.PipelineAst] -and @($pp.PipelineElements).Count -gt 1 -and -not [object]::ReferenceEquals($pp.PipelineElements[0], $c)) { return ($name + ' takes its definition from the pipeline (not provable statically): ' + $c.Extent.Text) }
+            foreach ($el in @($c.CommandElements | Select-Object -Skip 1)) {
+                $v = $el
+                if ($el -is [System.Management.Automation.Language.CommandParameterAst]) { if ($null -eq $el.Argument) { continue }; $v = $el.Argument }
+                if (-not (Test-PsLiteralAst $v)) { return ($name + ' with a computed or splatted argument (what it will run cannot be proven): ' + $el.Extent.Text) }
+            }
+        }
         # ForEach-Object/% وWhere-Object/? تنفّذ كتلاً: كتلة غير حرفية (متغير، أو تعبير، أو من الأنبوب) ⇒ UNKNOWN (Codex P1).
         if ($n -match '^(foreach-object|%|foreach|where-object|\?|where)$') {
+            # splat (@p) لا يربطه الربط الساكن، فقد يحمل -Process/-FilterScript محسوباً ⇒ UNKNOWN.
+            foreach ($el in @($c.CommandElements | Select-Object -Skip 1)) { if ($el -is [System.Management.Automation.Language.VariableExpressionAst] -and $el.Splatted) { return ($name + ' with a splatted parameter set (script block not provable statically): ' + $el.Extent.Text) } }
             try { $fb = [System.Management.Automation.Language.StaticParameterBinder]::BindCommand($c, $true).BoundParameters } catch { return ('parameters of ' + $name + ' cannot be bound statically') }
             foreach ($k in @('Process', 'Begin', 'End', 'RemainingScripts', 'FilterScript')) {
                 if (-not $fb.ContainsKey($k)) { continue }
@@ -942,6 +959,10 @@ function Get-ScriptDynamicExecution([string]$Ext, [string]$Text) {
             if ($l -match '(?i)\bdo\s+\(?\s*@?(call\s+|start\s+(?:"[^"]*"\s+)?(?:/\w+(?::\S+)?\s+)*)?"?(%%~?[a-z]|%[0-9*~]|[%!][A-Za-z_])') { return ('for-loop runs a command taken from data: ' + $l) }
             if ($l -match '(?i)\b(call|start)\s+(?:"[^"]*"\s+)?(?:/\w+(?::\S+)?\s+)*"?(%%~?[a-z]|%[0-9*~]|[%!][A-Za-z_])') { return ('call/start with a variable target: ' + $l) }
             if ($l -match '(?i)\b(powershell|pwsh|cmd|wscript|cscript|mshta|node|python\d*|pythonw|py|bash|rundll32|regsvr32|wmic)(\.exe)?"?\s[^\r\n]*(%%~?[a-z]|%[0-9*])') { return ('interpreter with an argument taken from a loop variable or batch argument: ' + $l) }
+            foreach ($lm in [regex]::Matches($l, '(?i)(?<![\w.-])(wmic|forfiles|schtasks|pcalua)(\.exe)?"?\s[^\r\n]*')) {
+                $lw = (([string]$lm.Groups[1].Value) + ([string]$lm.Groups[2].Value))
+                if ($lw -match $script:LauncherLeaves -and $lm.Value -match '%%~?[a-z]|%[0-9*~]|%[A-Za-z_][^%\s]*%|![A-Za-z_][^!\s]*!') { return ('command launcher with a computed argument: ' + $l) }
+            }
         }
         return $null
     }

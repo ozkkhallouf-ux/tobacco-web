@@ -1019,6 +1019,66 @@ try {
     $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Wmic Witness' 'SYSTEM' ($ps + ' -NoProfile -File "' + $wmw5 + '"'))
     Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) '*Wmic Witness*interpreter wmic.exe with a computed argument*') 'Codex witness: privileged task -> wrapper -> wmic.exe process call create (Get-Content ...) => BLOCK'
 
+    Write-Host '== Task/service registration, known launchers and splatting with computed content (static fixtures only)'
+    # تحليل نصوص فقط: لا تُنشأ مهام أو خدمات ولا يُنفَّذ شيء.
+    $regDyn = @(
+        @{ label = 'PS: New-ScheduledTaskAction -Argument (Get-Content ...) => UNKNOWN'; n = 'r1.ps1'; b = 'New-ScheduledTaskAction -Execute powershell.exe -Argument (Get-Content C:\ProgramData\target.txt)' },
+        @{ label = 'PS: Register-ScheduledTask -Action $a => UNKNOWN'; n = 'r2.ps1'; b = 'Register-ScheduledTask -TaskName X -Action $a -User SYSTEM' },
+        @{ label = 'PS: Set-ScheduledTask -Action $a => UNKNOWN'; n = 'r3.ps1'; b = 'Set-ScheduledTask -TaskName X -Action $a' },
+        @{ label = 'PS: Register-ScheduledTask @p (splat) => UNKNOWN'; n = 'r4.ps1'; b = 'Register-ScheduledTask @p' },
+        @{ label = 'PS: $t | Register-ScheduledTask (definition from the pipeline) => UNKNOWN'; n = 'r5.ps1'; b = '$t | Register-ScheduledTask -TaskName X' },
+        @{ label = 'PS: New-Service -BinaryPathName $bin => UNKNOWN'; n = 'r6.ps1'; b = 'New-Service -Name X -BinaryPathName $bin' },
+        @{ label = 'PS: Set-Service @p (splat) => UNKNOWN'; n = 'r7.ps1'; b = 'Set-Service @p' },
+        @{ label = 'PS: forfiles /c $cmd => UNKNOWN'; n = 'r8.ps1'; b = 'forfiles /p C:\Logs /c $cmd' },
+        @{ label = 'PS: schtasks /create /tr $cmd => UNKNOWN'; n = 'r9.ps1'; b = 'schtasks.exe /create /tn X /tr $cmd /sc once /st 00:00' },
+        @{ label = 'PS: pcalua -a $target => UNKNOWN'; n = 'r10.ps1'; b = 'pcalua.exe -a $target' },
+        @{ label = 'PS: wmic @p (splat) => UNKNOWN'; n = 'r11.ps1'; b = 'wmic @p' },
+        @{ label = 'PS: ForEach-Object @p => UNKNOWN'; n = 'r12.ps1'; b = '1 | ForEach-Object @p' },
+        @{ label = 'PS: % @p => UNKNOWN'; n = 'r13.ps1'; b = '1 | % @p' },
+        @{ label = 'PS: Where-Object @p => UNKNOWN'; n = 'r14.ps1'; b = '1 | Where-Object @p' },
+        @{ label = 'PS: ? @p => UNKNOWN'; n = 'r15.ps1'; b = '1 | ? @p' },
+        @{ label = 'CMD: wmic process call create %c% => UNKNOWN'; n = 'r16.cmd'; b = 'wmic process call create "%c%"' },
+        @{ label = 'CMD: wmic process call create !c! => UNKNOWN'; n = 'r17.cmd'; b = 'wmic process call create "!c!"' },
+        @{ label = 'CMD: forfiles /c %1 => UNKNOWN'; n = 'r18.cmd'; b = 'forfiles /p C:\Logs /c %1' },
+        @{ label = 'CMD: schtasks /create /tr !c! => UNKNOWN'; n = 'r19.cmd'; b = 'schtasks /create /tn X /tr "!c!" /sc once /st 00:00' },
+        @{ label = 'CMD: pcalua -a %%f => UNKNOWN'; n = 'r20.cmd'; b = 'for %%f in (C:\Logs\*.txt) do pcalua -a "%%f"' }
+    )
+    foreach ($c in $regDyn) { $got = Dyn-Reach $c.n $c.b; Assert-True ($got.status -eq 'UNKNOWN') ($c.label + ' (got ' + $got.status + ')') }
+    $regStatic = @(
+        @{ label = 'PS: literal New-ScheduledTaskAction outside the repo => analyzed normally (NOT_REPO)'; n = 'rs1.ps1'; b = 'New-ScheduledTaskAction -Execute ''C:\Tools\backup\run-backup.exe'' -Argument ''/quiet''' },
+        @{ label = 'PS: literal New-Service outside the repo => analyzed normally (NOT_REPO)'; n = 'rs2.ps1'; b = 'New-Service -Name X -BinaryPathName ''C:\Tools\backup\svc.exe''' },
+        @{ label = 'PS: literal forfiles /c => analyzed normally (NOT_REPO)'; n = 'rs3.ps1'; b = 'forfiles /p C:\Logs /m *.log /d -30 /c ''cmd /c echo old''' },
+        @{ label = 'PS: literal schtasks /query (no computed argument) => NOT_REPO'; n = 'rs4.ps1'; b = 'schtasks.exe /query /tn X' },
+        @{ label = 'PS: literal ForEach-Object { } => NOT_REPO'; n = 'rs5.ps1'; b = '1..3 | ForEach-Object { $_ * 2 }' },
+        @{ label = 'PS: literal Where-Object -FilterScript { } => NOT_REPO'; n = 'rs6.ps1'; b = 'Get-ChildItem C:\Logs | Where-Object -FilterScript { $_.Length -gt 0 }' },
+        @{ label = 'PS: ordinary cmdlet splat (Get-ChildItem @p) => unchanged (NOT_REPO)'; n = 'rs7.ps1'; b = ('$p = @{ Path = ''C:\Logs'' }' + "`r`n" + 'Get-ChildItem @p') },
+        @{ label = 'CMD: literal wmic process call create => analyzed normally (NOT_REPO)'; n = 'rs8.cmd'; b = 'wmic process call create "C:\Tools\backup\run-backup.exe"' },
+        @{ label = 'PS: Set-Service -Status literal => NOT_REPO'; n = 'rs9.ps1'; b = 'Set-Service -Name Spooler -StartupType Manual' }
+    )
+    foreach ($c in $regStatic) { $got = Dyn-Reach $c.n $c.b; Assert-True ($got.status -eq 'NOT_REPO') ($c.label + ' (got ' + $got.status + ': ' + $got.why + ')') }
+    Assert-True ((Dyn-Reach 'rs10.ps1' ('New-ScheduledTaskAction -Execute ''node.exe'' -Argument ''' + $repo + '\scripts\serve.mjs''')).status -eq 'REPO') 'PS: literal task action pointing into the repo => REPO'
+    # شاهد Codex: الإجراء من ملف بيانات خارجي ثم تسجيله — تحت SYSTEM وتحت مدير محلي (LOQ) ⇒ BLOCK.
+    $regw = $dw + '\task-reg-witness.ps1'
+    $script:Wrappers[$regw] = ('$a = New-ScheduledTaskAction -Execute powershell.exe -Argument (Get-Content C:\ProgramData\target.txt)' + "`r`n" + 'Register-ScheduledTask -TaskName X -Action $a -User SYSTEM')
+    foreach ($ident in @('SYSTEM', 'LOQ')) {
+        $script:Tasks = @(Get-CleanLayout) + @(New-Task ('Task Reg ' + $ident) $ident ($ps + ' -NoProfile -File "' + $regw + '"'))
+        Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) ('*Task Reg ' + $ident + '*computed or splatted argument*')) ('Codex witness: ' + $ident + ' task -> wrapper -> New-ScheduledTaskAction (Get-Content ...) + Register-ScheduledTask => BLOCK')
+    }
+    # نفس شاهد WMIC تحت مدير محلي (LOQ)، لا SYSTEM فقط.
+    $script:Tasks = @(Get-CleanLayout) + @(New-Task 'Wmic Witness Admin' 'LOQ' ($ps + ' -NoProfile -File "' + $wmw5 + '"'))
+    Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) '*Wmic Witness Admin*wmic.exe*computed*') 'Administrator (LOQ) task -> wrapper -> wmic.exe process call create (Get-Content ...) => BLOCK'
+    foreach ($ident in @('SYSTEM', 'LOQ')) {
+        $sw = $dw + '\splat-' + $ident + '.ps1'
+        $script:Wrappers[$sw] = ('$p = Get-Content C:\ProgramData\p.json | ConvertFrom-Json' + "`r`n" + 'Get-ChildItem C:\Logs | ForEach-Object @p')
+        $script:Tasks = @(Get-CleanLayout) + @(New-Task ('Splat ' + $ident) $ident ($ps + ' -NoProfile -File "' + $sw + '"'))
+        Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) ('*Splat ' + $ident + '*splatted parameter set*')) ($ident + ' task -> wrapper -> ForEach-Object @p => BLOCK')
+    }
+    # Action مباشرة وcmd /c: المرجع غير المحلول (!c!) UNKNOWN بقاعدة التوسيع القائمة؛ الحرفي يبقى كما هو.
+    $got = Resolve-TaskReach $cfgD @([pscustomobject]@{ execute = 'C:\Windows\system32\cmd.exe'; arguments = '/v:on /c wmic process call create "!c!"'; workingDirectory = '' }) 'SYSTEM'
+    Assert-True ($got.status -eq 'UNKNOWN') ('Action: cmd /c wmic ... !c! => UNKNOWN through the existing unresolved-reference rule (got ' + $got.status + ': ' + $got.why + ')')
+    $got = Resolve-TaskReach $cfgD @([pscustomobject]@{ execute = 'C:\Windows\system32\schtasks.exe'; arguments = '/query /tn X'; workingDirectory = '' }) 'SYSTEM'
+    Assert-True ($got.status -eq 'NOT_REPO') ('Action: literal schtasks /query => NOT_REPO (got ' + $got.status + ': ' + $got.why + ')')
+
     Write-Host '== Dynamic module / code loading inside PowerShell wrappers (Codex P1)'
     $script:Wrappers['C:\safe\mod.psm1'] = 'function Get-Safe { Get-Date }'
     $script:Wrappers['c:\safe\mod.psm1'] = 'function Get-Safe { Get-Date }'

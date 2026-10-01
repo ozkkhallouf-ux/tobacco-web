@@ -336,6 +336,14 @@
       Windows فلا يُعد غموضاً.
     - هوية تنفيذ بلا PATH مستخدم محسوم.
     - مرشّح لا يُحلّ، أو ملف غير موجود، أو مرشّح أسبق قابل للزرع، أو ملف محلول غير موثوق.
+- **تسجيل مهام/خدمات وأدوات الإطلاق المعروفة (Codex P1، تحليل ساكن فقط):**
+  - داخل أغلفة PowerShell، `New-ScheduledTaskAction` و`New-ScheduledTask` و`Register-ScheduledTask` و`Set-ScheduledTask`
+    و`New-Service` و`Set-Service` تحدد ما سيُشغَّل لاحقاً خارج جرد التثبيت. أي وسيط غير حرفي، أو splat، أو تعريف من
+    الأنبوب ⇒ UNKNOWN، ومع هوية مميّزة (SYSTEM أو مدير محلي) ⇒ BLOCK. الحرفي يكمل التحليل العادي.
+  - أدوات الإطلاق المعروفة (`wmic`، و`forfiles`، و`schtasks`، و`pcalua`) لها تعريف مشترك `$script:LauncherLeaves`:
+    وسيط محسوب في PowerShell، أو `%x%`/`!x!`/`%%x`/`%1` في CMD ⇒ UNKNOWN.
+  - `ForEach-Object`/`%`/`Where-Object`/`?` مع splat (`@p`) ⇒ UNKNOWN، لأن الربط الساكن لا يرى ما يحمله.
+  - `conhost`: NEEDS MORE EVIDENCE، لم يُعدَّل.
 - **عائق تثبيت معروف (KNOWN BOOTSTRAP BLOCKER) — `.git` قابل للكتابة من هويات غير موثوقة:**
   - بين فحص `.git` الأول و`Set-DeployFlag` تشغّل البوابة `git status`/`diff` للتحقق من نظافة الشجرة. فلتر `filter.*`
     مع `info/attributes` يُضاف في تلك اللحظة قد يعمل بهوية البوابة.
