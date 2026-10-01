@@ -379,6 +379,10 @@ for (const needle of ["function Resolve-WorkloadReach", "cannot determine whethe
   assert.match(ps, /if \(\$leafName -match '\^\(powershell\|pwsh\)\(\\\.exe\)\?\$'\) \{\s+\$nested = Get-PsNestedCommandText \$c [^\n]*\n\s+if \(\$nested\.reason\) \{ return [^\n]*\n\s+if \(\$null -ne \$nested\.text\) \{\s+\$inner = Get-PsDynamicExecution \(\[string\]\$nested\.text\) \(\$Depth \+ 1\)\s+if \(\$inner\) \{ return /, "-Command الحرفي يمر بنفس تحليل PowerShell");
   const nct = preSrc.slice(preSrc.indexOf("function Get-PsNestedCommandText"), preSrc.indexOf("function Get-PsDynamicExecution"));
   assert.match(nct, /if \(\$pn -eq 'command' -or \$pn -eq 'commandwithargs'\) \{/, "-Command و-CommandWithArgs");
+  assert.ok(!nct.includes("else { [string]$e.Extent.Text }"), "لا Extent.Text لمصفوفة/تعبير مركّب كنص أمر");
+  assert.match(nct, /if \(\$e -is \[System\.Management\.Automation\.Language\.StringConstantExpressionAst\]\) \{ return \[string\]\$e\.Value \}[\s\S]*?return \$null\s+\}/, "نص الأمر من StringConstant واحد فقط، وغيره \$null");
+  assert.equal((nct.match(/if \(\$null -eq \$t\) \{ return \(& \$notText \$r\) \}/g) || []).length, 2, "-Command والموضعي: عنصر غير نصي ⇒ UNKNOWN");
+  assert.match(nct, /\$attached = & \$txt \$e\.Argument; if \(\$null -eq \$attached\) \{ return \(& \$notText \$e\.Argument\) \}/, "-Command:<مصفوفة> ⇒ UNKNOWN");
   assert.match(nct, /if \(-not \$pn\) \{ return [^\n]*reason = /, "معامل غير معروف ⇒ سبب (UNKNOWN)");
   assert.match(nct, /if \(\$IsPwsh\) \{ return [^\n]*\n\s+\$parts = @\(\)\s+foreach \(\$r in @\(\$els \| Select-Object -Skip \$k\)\)/, "powershell.exe: الوسيط الموضعي أمر");
   assert.match(ps, /\$scEls = @\(\$c\.CommandElements \| Select-Object -Skip 1\)\s+\$scSub = Get-ScSubcommand \$scEls/, "sc.exe المباشر يستعمل Get-ScSubcommand");

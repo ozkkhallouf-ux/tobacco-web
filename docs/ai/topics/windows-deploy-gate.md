@@ -352,6 +352,8 @@
   - `powershell`/`pwsh` داخل غلاف PowerShell بوسائط حرفية: نص `-Command`/`-CommandWithArgs` (أو الوسيط الموضعي
     لـ`powershell.exe`) يُحلَّل هو نفسه بنفس قواعد PowerShell (`Get-PsNestedCommandText`). تنفيذ محسوب داخله ⇒ UNKNOWN،
     ومعامل غير معروف أو أمر مشفّر ⇒ UNKNOWN، وأكثر من 3 مستويات تداخل ⇒ UNKNOWN. تحليل ساكن فقط.
+    نص الأمر يُقبل من StringConstant واحد فقط (أو كلمات/معاملات حرفية منفصلة)؛ مصفوفة حرفية (`'a', 'b'` أو `@(...)`) أو
+    تعبير مركّب لا يُعامَل نصاً عبر `Extent.Text` ⇒ UNKNOWN.
   - `conhost`: NEEDS MORE EVIDENCE، لم يُعدَّل.
 - **عائق تثبيت معروف (KNOWN BOOTSTRAP BLOCKER) — `.git` قابل للكتابة من هويات غير موثوقة:**
   - بين فحص `.git` الأول و`Set-DeployFlag` تشغّل البوابة `git status`/`diff` للتحقق من نظافة الشجرة. فلتر `filter.*`

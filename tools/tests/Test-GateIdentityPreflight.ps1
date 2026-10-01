@@ -1178,6 +1178,21 @@ try {
         $script:Tasks = @(Get-CleanLayout) + @(New-Task ('Nested ' + $ident) $ident ($ps + ' -NoProfile -File "' + $nw + '"'))
         Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) ('*Nested ' + $ident + '*nested powershell.exe -Command*')) ('Codex witness under ' + $ident + ': wrapper -> powershell.exe -Command ''$p = Get-Content ...; & $p'' => BLOCK')
     }
+    # -Command بمصفوفة حرفية أو @(...): النص الذي يصل إلى powershell.exe غير مثبت ⇒ UNKNOWN (لا Extent.Text).
+    $arrCases = @(
+        @{ label = 'powershell.exe -Command ''$p = Get-Content C:\x.txt;'', ''& $p'' (literal array) => UNKNOWN'; n = 'na1.ps1'; b = 'powershell.exe -Command ''$p = Get-Content C:\x.txt;'', ''& $p''' },
+        @{ label = 'powershell.exe -Command @(''$p = Get-Content C:\x.txt;'', ''& $p'') => UNKNOWN'; n = 'na2.ps1'; b = 'powershell.exe -Command @(''$p = Get-Content C:\x.txt;'', ''& $p'')' },
+        @{ label = 'powershell.exe ''Get-Date'', ''-Format'' (positional array) => UNKNOWN'; n = 'na3.ps1'; b = 'powershell.exe ''Get-Date'', ''-Format''' },
+        @{ label = 'powershell.exe -Command:@(''Get-Date'') (attached array) => UNKNOWN'; n = 'na4.ps1'; b = 'powershell.exe -Command:@(''Get-Date'')' }
+    )
+    foreach ($c in $arrCases) { $got = Dyn-Reach $c.n $c.b; Assert-True ($got.status -eq 'UNKNOWN' -and $got.why -like '*not a single literal string*') ($c.label + ' (got ' + $got.status + ': ' + $got.why + ')') }
+    foreach ($ident in @('SYSTEM', 'LOQ')) {
+        $aw = $dw + '\nested-array-' + $ident + '.ps1'
+        $script:Wrappers[$aw] = 'powershell.exe -Command ''$p = Get-Content C:\x.txt;'', ''& $p'''
+        $script:Tasks = @(Get-CleanLayout) + @(New-Task ('NestedArray ' + $ident) $ident ($ps + ' -NoProfile -File "' + $aw + '"'))
+        Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) ('*NestedArray ' + $ident + '*not a single literal string*')) ($ident + ' task -> wrapper -> powershell.exe -Command (literal array) => BLOCK')
+    }
+    Assert-True ((Dyn-Reach 'na5.ps1' 'powershell.exe -NoProfile -Command Get-Date -Format o').status -eq 'NOT_REPO') 'unquoted barewords and parameters after -Command (single literal tokens) => NOT_REPO'
 
     Write-Host '== Dynamic module / code loading inside PowerShell wrappers (Codex P1)'
     $script:Wrappers['C:\safe\mod.psm1'] = 'function Get-Safe { Get-Date }'

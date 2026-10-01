@@ -728,13 +728,24 @@ function Get-ScSubcommand($Elements) {
 # هناك أمر (مثل -File)، وreason لمعامل غير معروف أو مشفّر. powershell.exe يعامل أول وسيط موضعي كأمر، وpwsh كملف.
 function Get-PsNestedCommandText($CommandAst, [bool]$IsPwsh) {
     $els = @($CommandAst.CommandElements | Select-Object -Skip 1)
-    $txt = { param($e) if ($e -is [System.Management.Automation.Language.StringConstantExpressionAst]) { [string]$e.Value } else { [string]$e.Extent.Text } }
+    # نص الأمر يُقبل فقط من StringConstant واحد (أو معامل باسم، وقيمته الملحقة StringConstant)؛ مصفوفة أو تعبير مركّب
+    # قد يصل إلى powershell.exe بنص مختلف عن Extent.Text ⇒ $null (UNKNOWN). لا إعادة بناء من عناصر المصفوفة.
+    $txt = {
+        param($e)
+        if ($e -is [System.Management.Automation.Language.StringConstantExpressionAst]) { return [string]$e.Value }
+        if ($e -is [System.Management.Automation.Language.CommandParameterAst]) {
+            if ($null -eq $e.Argument) { return [string]$e.Extent.Text }
+            if ($e.Argument -is [System.Management.Automation.Language.StringConstantExpressionAst]) { return ('-' + [string]$e.ParameterName + ':' + [string]$e.Argument.Value) }
+        }
+        return $null
+    }
+    $notText = { param($e) [pscustomobject]@{ text = $null; reason = ('command argument is not a single literal string (array or compound expression): ' + $e.Extent.Text) } }
     for ($k = 0; $k -lt $els.Count; $k++) {
         $e = $els[$k]
         $pn = $null; $attached = $null; $isParam = $false
         if ($e -is [System.Management.Automation.Language.CommandParameterAst]) {
             $isParam = $true; $pn = Resolve-PsParamName ([string]$e.ParameterName)
-            if ($null -ne $e.Argument) { $attached = & $txt $e.Argument }
+            if ($null -ne $e.Argument) { $attached = & $txt $e.Argument; if ($null -eq $attached) { return (& $notText $e.Argument) } }
         } elseif ($e -is [System.Management.Automation.Language.StringConstantExpressionAst] -and ([string]$e.Value) -match '^[-/]([A-Za-z]+)(?::(.*))?$') {
             $isParam = $true; $pn = Resolve-PsParamName $Matches[1]
             if ($Matches[2]) { $attached = $Matches[2] }
@@ -746,7 +757,7 @@ function Get-PsNestedCommandText($CommandAst, [bool]$IsPwsh) {
             if ($pn -eq 'command' -or $pn -eq 'commandwithargs') {
                 $parts = @()
                 if ($null -ne $attached) { $parts += $attached }
-                foreach ($r in @($els | Select-Object -Skip ($k + 1))) { $parts += (& $txt $r) }
+                foreach ($r in @($els | Select-Object -Skip ($k + 1))) { $t = & $txt $r; if ($null -eq $t) { return (& $notText $r) }; $parts += $t }
                 return [pscustomobject]@{ text = ($parts -join ' '); reason = $null }
             }
             if ($script:PsFlagParams -contains $pn) { continue }
@@ -755,7 +766,7 @@ function Get-PsNestedCommandText($CommandAst, [bool]$IsPwsh) {
         }
         if ($IsPwsh) { return [pscustomobject]@{ text = $null; reason = $null } }
         $parts = @()
-        foreach ($r in @($els | Select-Object -Skip $k)) { $parts += (& $txt $r) }
+        foreach ($r in @($els | Select-Object -Skip $k)) { $t = & $txt $r; if ($null -eq $t) { return (& $notText $r) }; $parts += $t }
         return [pscustomobject]@{ text = ($parts -join ' '); reason = $null }
     }
     return [pscustomobject]@{ text = $null; reason = $null }
