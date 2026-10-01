@@ -1596,6 +1596,18 @@ try {
     Assert-True ((Proc-Run @(P 1004 'sc.exe' 'C:\Windows\system32\sc.exe' 'sc.exe query X' '' 'S-1-5-18')).ok) 'SYSTEM trusted external literal process => no block (NOT_REPO)'
     Assert-True (Test-BlockLike (Proc-Run @(P 1005 'node.exe' 'C:\Program Files\nodejs\node.exe' 'node.exe scripts\serve.mjs' '' 'S-1-5-18')) '*1005*cannot prove*') 'SYSTEM interpreter with a relative script (no provable working directory) => BLOCK (UNKNOWN)'
     Assert-True (Test-BlockLike (Proc-Run @(P 1006 'node.exe' 'C:\Program Files\nodejs\node.exe' '' '' 'S-1-5-18')) '*1006*without a readable command line*') 'SYSTEM interpreter without a readable command line => BLOCK (UNKNOWN)'
+    # مسار تنفيذي موثوق خارج المستودع بلا سطر أوامر مقروء ⇒ UNKNOWN/BLOCK (لا NOT_REPO من المسار وحده).
+    $noCmd = P 1050 'svchost.exe' 'C:\Windows\system32\svchost.exe' 'x' '' 'S-1-5-18'; $noCmd.PSObject.Properties.Remove('commandLine')
+    Assert-True (Test-BlockLike (Proc-Run @($noCmd)) '*1050*command line unavailable*') 'SYSTEM trusted executable with the CommandLine field missing => BLOCK (UNKNOWN)'
+    Assert-True (Test-BlockLike (Proc-Run @(P 1051 'svchost.exe' 'C:\Windows\system32\svchost.exe' '' '' 'S-1-5-18')) '*1051*command line unavailable*') 'SYSTEM trusted executable with an empty CommandLine => BLOCK (UNKNOWN)'
+    $nullCmd = P 1052 'svchost.exe' 'C:\Windows\system32\svchost.exe' 'x' '' 'S-1-5-18'; $nullCmd.commandLine = $null
+    Assert-True (Test-BlockLike (Proc-Run @($nullCmd)) '*1052*command line unavailable*') 'SYSTEM trusted executable with an unreadable (null) CommandLine => BLOCK (UNKNOWN)'
+    Assert-True (Test-BlockLike (Proc-Run @(P 1053 'svchost.exe' 'C:\Windows\system32\svchost.exe' '   ' 'OZK2026\LOQ')) '*1053*command line unavailable*') 'Administrators member, trusted executable, whitespace-only CommandLine => BLOCK (UNKNOWN)'
+    Assert-True ((Proc-Run @(P 1054 'svchost.exe' 'C:\Windows\system32\svchost.exe' '' 'OZK2026\OZKSync')).ok) 'non-privileged user with a missing CommandLine => not blocked by this rule alone'
+    $script:ProcStates = @{ 1055 = 'GONE' }
+    $got = Proc-Run @(P 1055 'svchost.exe' 'C:\Windows\system32\svchost.exe' '' '' 'S-1-5-18')
+    Assert-True ($got.ok -and @($got.processes | Where-Object { $_.pid -eq 1055 -and $_.workload -eq 'GONE' }).Count -eq 1) 'missing CommandLine with a proven exit (PID + CreationDate) => ignored'
+    $script:ProcStates = @{}
     Assert-True (Test-BlockLike (Proc-Run @(P 1007 'unknown.exe' '' '' '' 'S-1-5-18')) '*1007*executable path unavailable*') 'SYSTEM process with no readable executable path (still present) => BLOCK (UNKNOWN)'
     Reset-TrustAcls
     $script:FsAcls[(Resolve-TestAclKey 'C:\Users\Public\tool.exe')] = New-TestAcl 'S-1-5-18' @(Ace 'S-1-5-32-545' 'Modify')

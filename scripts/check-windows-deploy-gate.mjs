@@ -382,6 +382,11 @@ for (const needle of ["function Resolve-WorkloadReach", "cannot determine whethe
   assert.match(pinv, /if \(\$st -eq 'GONE'\) \{[^\n]*continue \}/, "الاختفاء يُتجاهل فقط إن ثبت (GONE)");
   assert.match(pinv, /elseif \(\$privileged -and \$reach\.status -ne 'NOT_REPO'\) \{ \$results \+= & \$block/, "مميّز + UNKNOWN ⇒ BLOCK");
   assert.match(pinv, /if \(\$gate -and \$sid -eq \$gate\) \{ \$results \+= & \$block/, "عملية بهوية البوابة ⇒ BLOCK");
+  // سطر أوامر مفقود: لا NOT_REPO من المسار التنفيذي وحده.
+  const noCmd = pinv.slice(pinv.indexOf("elseif (-not $cmd) {"), pinv.indexOf("} else {", pinv.indexOf("elseif (-not $cmd) {")));
+  assert.ok(noCmd.length > 0 && !noCmd.includes("Resolve-WorkloadReach"), "سطر أوامر مفقود لا يُحلَّل بالمسار التنفيذي وحده");
+  assert.match(noCmd, /else \{ \$reach = New-Reach 'UNKNOWN' \('command line unavailable for '/, "سطر أوامر مفقود لملف عادي ⇒ UNKNOWN");
+  assert.match(pinv, /if \(-not \$sid -or -not \$exe -or -not \$cmd\) \{\s+\$st = Get-PreflightProcessState/, "سطر أوامر مفقود يُتجاهل فقط إن ثبت الاختفاء");
   assert.ok(!preSrc.slice(preSrc.indexOf("function Invoke-InstallPreflight")).includes("Invoke-ProcessInventoryPreflight"), "المرحلة 1: الجرد غير موصول بـInitialize");
   const tgi = read("tools/tests/Test-GateIdentityPreflight.ps1");
   const firstUse = tgi.indexOf("Invoke-ProcessInventoryPreflight");

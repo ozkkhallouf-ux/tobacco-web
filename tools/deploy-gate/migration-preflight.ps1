@@ -2112,7 +2112,7 @@ function Invoke-ProcessInventoryPreflight($Config) {
         $exe = ([string]$r.executablePath).Trim()
         $cmd = ([string]$r.commandLine).Trim()
         # بيانات ناقصة: تُتجاهل العملية فقط إن ثبت أنها انتهت (PID غائب أو CreationDate مختلف).
-        if (-not $sid -or -not $exe) {
+        if (-not $sid -or -not $exe -or -not $cmd) {
             $st = Get-PreflightProcessState $procId $r.creationDate
             if ($st -eq 'GONE') { $audit += [pscustomobject]@{ pid = $procId; name = [string]$r.name; sid = [string]$sid; workload = 'GONE'; decision = 'IGNORED (exit proven by PID + CreationDate)' }; continue }
         }
@@ -2120,9 +2120,11 @@ function Invoke-ProcessInventoryPreflight($Config) {
         $reach = $null
         if (-not $exe) { $reach = New-Reach 'UNKNOWN' 'executable path unavailable' }
         elseif (-not $cmd) {
+            # سطر أوامر مفقود/فارغ/غير مقروء: وسائط خفية قد تشير إلى المستودع، فلا يُستنتج NOT_REPO من المسار التنفيذي
+            # وحده حتى لو كان موثوقاً وخارج المستودع ⇒ UNKNOWN.
             $leaf = (($exe -replace '/', '\') -split '\\')[-1]
             if ($leaf -match $script:InterpreterLeaves -or $leaf -match $script:LauncherLeaves) { $reach = New-Reach 'UNKNOWN' ('interpreter/launcher ' + $leaf + ' without a readable command line') }
-            else { $reach = Resolve-WorkloadReach $Config ('"' + $exe + '"') ([string]$sid) }
+            else { $reach = New-Reach 'UNKNOWN' ('command line unavailable for ' + $leaf + ' (arguments cannot be proven from the executable path alone)') }
         } else {
             # الوسائط من سطر الأوامر بعد أول رمز (البرنامج)؛ البرنامج نفسه من المسار التنفيذي الفعلي.
             $rest = $null
