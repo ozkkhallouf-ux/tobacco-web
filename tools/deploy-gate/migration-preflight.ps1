@@ -692,6 +692,8 @@ function Get-FieldReach($Ctx, [string]$Field) {
 $script:InterpreterLeaves = '^(powershell|pwsh|cmd|wscript|cscript|mshta|node|nodejs|python\d*(\.\d+)?|pythonw|py|pyw|bash|sh|rundll32|regsvr32|msbuild|wmic)(\.exe|\.com)?$'
 # أدوات إطلاق معروفة تحدد أمراً يُشغَّل (فوراً أو لاحقاً): وسيط محسوب في أي محلل ⇒ UNKNOWN (تعريف مشترك).
 $script:LauncherLeaves = '^(wmic|forfiles|schtasks|pcalua)(\.exe)?$'
+# متغيرات استبدال forfiles (وترميز 0xHH) تُحسب لكل ملف وقت التشغيل: الهدف النهائي غير ثابت ⇒ UNKNOWN.
+$script:ForfilesSubstitution = '(?i)@(path|file|fname|ext|relpath|isdir|fsize|fdate|ftime)\b|\b0x[0-9a-f]{2}'
 # تسجيل/تعديل مهمة مجدولة أو خدمة يحدد ما سيُشغَّل لاحقاً خارج جرد التثبيت (Codex P1).
 $script:RegistrationCommands = '^(new-scheduledtaskaction|new-scheduledtask|register-scheduledtask|set-scheduledtask|new-service|set-service)$'
 
@@ -773,6 +775,21 @@ function Get-PsDynamicExecution([string]$Text) {
                 $v = $el
                 if ($el -is [System.Management.Automation.Language.CommandParameterAst]) { if ($null -eq $el.Argument) { continue }; $v = $el.Argument }
                 if (-not (Test-PsLiteralAst $v)) { return ($name + ' with a computed or splatted argument (what it will run cannot be proven): ' + $el.Extent.Text) }
+            }
+        }
+        if ($leafName -match '^forfiles(\.exe)?$' -and $c.Extent.Text -match $script:ForfilesSubstitution) { return ($name + ' runs a command built from per-file substitution variables: ' + $c.Extent.Text) }
+        # sc.exe create/config يحدد binPath خدمة (sc وحدها في PowerShell هي Set-Content): أمر فرعي محسوب، أو
+        # وسيط محسوب/splat مع create/config ⇒ UNKNOWN. الحرفي يكمل تحليل المسارات العادي.
+        if ($leafName -match '^sc\.exe$') {
+            $scEls = @($c.CommandElements | Select-Object -Skip 1)
+            $scSub = $null
+            if ($scEls.Count -gt 0 -and $scEls[0] -is [System.Management.Automation.Language.StringConstantExpressionAst]) { $scSub = ([string]$scEls[0].Value).ToLowerInvariant() }
+            if ($null -eq $scSub -or $scSub -eq 'create' -or $scSub -eq 'config') {
+                foreach ($el in $scEls) {
+                    $v = $el
+                    if ($el -is [System.Management.Automation.Language.CommandParameterAst]) { if ($null -eq $el.Argument) { continue }; $v = $el.Argument }
+                    if (-not (Test-PsLiteralAst $v)) { return ($name + ' service create/config with a computed or splatted argument (binPath cannot be proven): ' + $el.Extent.Text) }
+                }
             }
         }
         # ForEach-Object/% وWhere-Object/? تنفّذ كتلاً: كتلة غير حرفية (متغير، أو تعبير، أو من الأنبوب) ⇒ UNKNOWN (Codex P1).
@@ -962,6 +979,7 @@ function Get-ScriptDynamicExecution([string]$Ext, [string]$Text) {
             foreach ($lm in [regex]::Matches($l, '(?i)(?<![\w.-])(wmic|forfiles|schtasks|pcalua)(\.exe)?"?\s[^\r\n]*')) {
                 $lw = (([string]$lm.Groups[1].Value) + ([string]$lm.Groups[2].Value))
                 if ($lw -match $script:LauncherLeaves -and $lm.Value -match '%%~?[a-z]|%[0-9*~]|%[A-Za-z_][^%\s]*%|![A-Za-z_][^!\s]*!') { return ('command launcher with a computed argument: ' + $l) }
+                if ($lw -match '^forfiles(\.exe)?$' -and $lm.Value -match $script:ForfilesSubstitution) { return ('forfiles runs a command built from per-file substitution variables: ' + $l) }
             }
         }
         return $null
@@ -1468,6 +1486,7 @@ function Get-ActionReach($Ctx, [string]$Execute, [string]$Arguments, [string]$Wo
     if ($null -eq $tokens) { return (Join-Reach $r (New-Reach 'UNKNOWN' 'arguments cannot be parsed unambiguously')) }
     $tokens = @($tokens)
     $name = $leaf -replace '\.(exe|com)$', ''
+    if ($name -eq 'forfiles' -and $fx['arguments'] -match $script:ForfilesSubstitution) { return (Join-Reach $r (New-Reach 'UNKNOWN' 'forfiles runs a command built from per-file substitution variables (target not provable)')) }
     switch -regex ($name) {
         '^(powershell|pwsh)$' { return (Join-Reach $r (Get-PowerShellReach $Ctx $tokens $wd $Depth ($name -eq 'pwsh'))) }
         '^cmd$' {

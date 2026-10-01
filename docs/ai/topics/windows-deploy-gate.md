@@ -343,6 +343,10 @@
   - أدوات الإطلاق المعروفة (`wmic`، و`forfiles`، و`schtasks`، و`pcalua`) لها تعريف مشترك `$script:LauncherLeaves`:
     وسيط محسوب في PowerShell، أو `%x%`/`!x!`/`%%x`/`%1` في CMD ⇒ UNKNOWN.
   - `ForEach-Object`/`%`/`Where-Object`/`?` مع splat (`@p`) ⇒ UNKNOWN، لأن الربط الساكن لا يرى ما يحمله.
+  - `forfiles /c` بأمر يعتمد متغيرات الاستبدال (`@path`، و`@file`، و`@fname`، و`@ext`، و`@relpath`، و`@isdir`، و`@fsize`،
+    و`@fdate`، و`@ftime`) أو ترميز `0xHH` ⇒ UNKNOWN في PowerShell وCMD والـAction، لأن الهدف يُحسب لكل ملف وقت التشغيل.
+  - `sc.exe create`/`config` في PowerShell بوسيط محسوب أو splat، أو بأمر فرعي محسوب ⇒ UNKNOWN. الحرفي يمر بتحليل
+    المسارات العادي. (`sc` وحدها في PowerShell هي Set-Content ولا تتأثر.)
   - `conhost`: NEEDS MORE EVIDENCE، لم يُعدَّل.
 - **عائق تثبيت معروف (KNOWN BOOTSTRAP BLOCKER) — `.git` قابل للكتابة من هويات غير موثوقة:**
   - بين فحص `.git` الأول و`Set-DeployFlag` تشغّل البوابة `git status`/`diff` للتحقق من نظافة الشجرة. فلتر `filter.*`

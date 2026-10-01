@@ -1079,6 +1079,48 @@ try {
     $got = Resolve-TaskReach $cfgD @([pscustomobject]@{ execute = 'C:\Windows\system32\schtasks.exe'; arguments = '/query /tn X'; workingDirectory = '' }) 'SYSTEM'
     Assert-True ($got.status -eq 'NOT_REPO') ('Action: literal schtasks /query => NOT_REPO (got ' + $got.status + ': ' + $got.why + ')')
 
+    Write-Host '== forfiles substitution variables and sc.exe create/config (static fixtures only)'
+    # تحليل نصوص فقط: لا يُشغَّل forfiles ولا تُنشأ أو تُعدَّل خدمات.
+    $ffsc = @(
+        @{ label = 'PS: forfiles /c "cmd /c @path" => UNKNOWN'; n = 'f1.ps1'; b = 'forfiles /p C:\Logs /c "cmd /c @path"' },
+        @{ label = 'PS: forfiles /c with @file in a literal string => UNKNOWN'; n = 'f2.ps1'; b = 'forfiles.exe /p C:\Logs /m *.cmd /c ''cmd /c @file''' },
+        @{ label = 'PS: forfiles /c with @relpath => UNKNOWN'; n = 'f3.ps1'; b = 'forfiles /s /c "cmd /c @relpath"' },
+        @{ label = 'PS: forfiles /c with a 0xHH escape => UNKNOWN'; n = 'f4.ps1'; b = 'forfiles /c "cmd /c 0x22x0x22"' },
+        @{ label = 'CMD: forfiles /c "cmd /c @path" => UNKNOWN'; n = 'f5.cmd'; b = 'forfiles /p C:\Logs /c "cmd /c @path"' },
+        @{ label = 'CMD: forfiles /c "cmd /c @fname@ext" => UNKNOWN'; n = 'f6.cmd'; b = 'forfiles /p C:\Logs /c "cmd /c @fname@ext"' },
+        @{ label = 'PS: sc.exe create X binPath= $b => UNKNOWN'; n = 's1.ps1'; b = 'sc.exe create X binPath= $b' },
+        @{ label = 'PS: sc.exe config X binPath= (expression) => UNKNOWN'; n = 's2.ps1'; b = 'sc.exe config X binPath= (Get-Content C:\ProgramData\target.txt)' },
+        @{ label = 'PS: sc.exe config X binPath= "$dir\svc.exe" (expandable) => UNKNOWN'; n = 's3.ps1'; b = 'sc.exe config X binPath= "$dir\svc.exe"' },
+        @{ label = 'PS: sc.exe @p (splat) => UNKNOWN'; n = 's4.ps1'; b = 'sc.exe @p' },
+        @{ label = 'PS: sc.exe $op X binPath= ... (computed subcommand) => UNKNOWN'; n = 's5.ps1'; b = 'sc.exe $op X binPath= C:\Tools\svc.exe' },
+        @{ label = 'PS: & sc.exe create X binPath= $b => UNKNOWN'; n = 's6.ps1'; b = '& sc.exe create X binPath= $b' }
+    )
+    foreach ($c in $ffsc) { $got = Dyn-Reach $c.n $c.b; Assert-True ($got.status -eq 'UNKNOWN') ($c.label + ' (got ' + $got.status + ')') }
+    $ffscStatic = @(
+        @{ label = 'PS: literal forfiles without substitution variables => NOT_REPO'; n = 'fs1.ps1'; b = 'forfiles /p C:\Logs /m *.log /d -30 /c "cmd /c echo old"' },
+        @{ label = 'PS: literal sc.exe create with a binPath outside the repo => NOT_REPO'; n = 'ss1.ps1'; b = 'sc.exe create X binPath= C:\Tools\backup\svc.exe start= auto' },
+        @{ label = 'PS: sc.exe query $name (not create/config) => NOT_REPO'; n = 'ss2.ps1'; b = 'sc.exe query $name' },
+        @{ label = 'PS: sc (Set-Content alias) with a variable => unchanged (NOT_REPO)'; n = 'ss3.ps1'; b = 'sc C:\Logs\out.txt $value' }
+    )
+    foreach ($c in $ffscStatic) { $got = Dyn-Reach $c.n $c.b; Assert-True ($got.status -eq 'NOT_REPO') ($c.label + ' (got ' + $got.status + ': ' + $got.why + ')') }
+    Assert-True ((Dyn-Reach 'ss4.ps1' ('sc.exe config X binPath= ' + $repo + '\tools\svc.exe')).status -eq 'REPO') 'PS: literal sc.exe config with a binPath inside the repo => REPO'
+    $got = Resolve-TaskReach $cfgD @([pscustomobject]@{ execute = 'C:\Windows\system32\forfiles.exe'; arguments = '/p C:\Logs /c "cmd /c @path"'; workingDirectory = '' }) 'SYSTEM'
+    Assert-True ($got.status -eq 'UNKNOWN' -and $got.why -like '*substitution variables*') ('Action: forfiles /c "cmd /c @path" => UNKNOWN (got ' + $got.status + ': ' + $got.why + ')')
+    $got = Resolve-TaskReach $cfgD @([pscustomobject]@{ execute = 'C:\Windows\system32\cmd.exe'; arguments = '/c forfiles /p C:\Logs /c "cmd /c @file"'; workingDirectory = '' }) 'SYSTEM'
+    Assert-True ($got.status -eq 'UNKNOWN' -and $got.why -like '*substitution variables*') ('Action: cmd /c forfiles ... @file => UNKNOWN (got ' + $got.status + ': ' + $got.why + ')')
+    $got = Resolve-TaskReach $cfgD @([pscustomobject]@{ execute = 'C:\Windows\system32\forfiles.exe'; arguments = '/p C:\Logs /m *.log /d -30 /c "cmd /c echo old"'; workingDirectory = '' }) 'SYSTEM'
+    Assert-True ($got.status -eq 'NOT_REPO') ('Action: literal forfiles without substitution variables => NOT_REPO (got ' + $got.status + ': ' + $got.why + ')')
+    foreach ($ident in @('SYSTEM', 'LOQ')) {
+        $fw = $dw + '\ff-' + $ident + '.ps1'
+        $script:Wrappers[$fw] = 'forfiles /p C:\ProgramData\Drop /c "cmd /c @path"'
+        $sw = $dw + '\sc-' + $ident + '.ps1'
+        $script:Wrappers[$sw] = ('$b = Get-Content C:\ProgramData\target.txt' + "`r`n" + 'sc.exe config X binPath= $b')
+        $script:Tasks = @(Get-CleanLayout) + @(New-Task ('Forfiles ' + $ident) $ident ($ps + ' -NoProfile -File "' + $fw + '"'))
+        Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) ('*Forfiles ' + $ident + '*substitution variables*')) ($ident + ' task -> wrapper -> forfiles /c "cmd /c @path" => BLOCK')
+        $script:Tasks = @(Get-CleanLayout) + @(New-Task ('ScConfig ' + $ident) $ident ($ps + ' -NoProfile -File "' + $sw + '"'))
+        Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) ('*ScConfig ' + $ident + '*binPath cannot be proven*')) ($ident + ' task -> wrapper -> sc.exe config binPath= (Get-Content ...) => BLOCK')
+    }
+
     Write-Host '== Dynamic module / code loading inside PowerShell wrappers (Codex P1)'
     $script:Wrappers['C:\safe\mod.psm1'] = 'function Get-Safe { Get-Date }'
     $script:Wrappers['c:\safe\mod.psm1'] = 'function Get-Safe { Get-Date }'
