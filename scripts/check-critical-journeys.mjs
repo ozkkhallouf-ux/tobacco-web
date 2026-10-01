@@ -306,6 +306,19 @@ const TEST_BALANCE_REPORT = [{
   summary: { syncedAt: "2026-01-02T00:00:00.000Z" },
 }];
 
+// دفتر اصطناعي: بيع 100، قبض 40، وحركة صندوق خارجة 2500. لا أسماء ولا أرقام إنتاج.
+const TEST_CASH_LEDGER = {
+  summary: { lineKinds: "v1", billLinks: "er000-return-v1", fromDate: "2026-01-01" },
+  items: [{
+    name: "زبون اختبار أول",
+    movements: [
+      { date: "2026-10-01", debit: 2500, credit: 0, notes: "دفعة نقدية", lineKind: "payment_out", docPrev: 100, docNew: 2600, balance: 2600 },
+      { date: "2026-09-30", debit: 100, credit: 0, notes: "", lineKind: "sale", docPrev: 0, docNew: 100, balance: 100 },
+      { date: "2026-09-23", debit: 0, credit: 40, notes: "", lineKind: "payment", docPrev: 140, docNew: 100, balance: 100 }
+    ]
+  }]
+};
+
 // المسارات التي يفتحها رابط عميق بلا جلسة. المسارات المحصورة بالمالك
 // (decision / command) خارج القائمة لأنها تُردّ عمداً بلا صلاحية.
 const PUBLIC_DEEP_LINK_ROUTES = [
@@ -578,13 +591,29 @@ await journey("smart-inventory-search-focus", "بحث الجرد الذكي: ا�
 // ===== ٧) الذمم =====
 await journey("balances", "صفحة الذمم تعرض أرصدة الزبائن المزروعة بلا أخطاء", async (page) => {
   const collected = await openApp(page);
-  await seedSession(page, { customerBalanceReports: TEST_BALANCE_REPORT });
+  await seedSession(page, {
+    customerBalanceReports: TEST_BALANCE_REPORT,
+    customerMovementsReport: TEST_CASH_LEDGER
+  });
   await gotoRoute(page, "balances");
 
   assert(await currentRoute(page) === "balances", "صفحة الذمم لم تُفتح");
   const text = await page.locator("body").innerText();
   assert(text.includes("زبون اختبار أول"), "اسم الزبون المزروع لا يظهر — انكسر عرض تقرير الأرصدة");
   assert(await page.locator(".customer-balances").count() > 0, "لوحة أرصدة الزبائن غير موجودة");
+
+  await page.locator("details.acc-group[data-acc='balances'] > summary").click();
+  await page.locator("[data-customer-details='c1']").click();
+  const columns = page.locator(".customer-detail-grid article");
+  await columns.nth(0).waitFor({ state: "visible", timeout: 10000 });
+  const invoiceText = await columns.nth(0).innerText();
+  const paymentText = await columns.nth(2).innerText();
+  assert(invoiceText.includes("فاتورة: 100"), `فاتورة البيع لم تظهر في الفواتير: ${invoiceText}`);
+  assert(!invoiceText.includes("2,500"), `حركة الصندوق 2500 ما زالت ضمن الفواتير: ${invoiceText}`);
+  assert(paymentText.includes("دفعة: 2,500"), `الدفعة النقدية 2500 ليست في سندات القبض: ${paymentText}`);
+  assert(paymentText.includes("دفعة: 40"), `سند القبض 40 سقط من العمود: ${paymentText}`);
+  await page.locator(".customer-detail-grid").scrollIntoViewIfNeeded();
+  await page.locator(".customer-detail-grid").screenshot({ path: join(ARTIFACTS, "balances-payment-out-not-invoice.png") });
   assertClean("الذمم", collected);
 });
 
