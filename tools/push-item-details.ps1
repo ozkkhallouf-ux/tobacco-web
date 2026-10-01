@@ -39,8 +39,14 @@ function Get-EnvVar($name) {
 # ── قراءة الأمين ──────────────────────────────────────────────────────────────
 # المخزون حسب المستودع: نفس منطق ameen-stock-query.sql (v2 من الفواتير بأعلام
 #   bIsInput/bIsOutput) — لا يُقرأ من ms000 بعد تدوير السنة.
+# مستودع الامانة مستبعد كما في ameen-stock-query.sql (بـGUID لا بالاسم): لا يظهر
+#   سطراً في بطاقة الصنف ولا يدخل «مجموع المستودعات». قراءة فقط.
 $sql = @'
-with per_store as (
+with excluded_stores as (
+  -- مستودع الامانة — dbo.st000.GUID
+  select 'CA3BACBB-87FE-4826-B051-CAC335CDB670' as StoreGUID
+),
+per_store as (
   select bi.MatGUID, bi.StoreGUID,
     sum(case when bt.bIsInput = 1 then coalesce(bi.Qty, 0)
              when bt.bIsOutput = 1 then -coalesce(bi.Qty, 0)
@@ -48,6 +54,9 @@ with per_store as (
   from dbo.bi000 bi
   join dbo.bu000 u on u.GUID = bi.ParentGUID
   join dbo.bt000 bt on bt.GUID = u.TypeGUID
+  left join excluded_stores xs
+    on xs.StoreGUID = coalesce(nullif(bi.StoreGUID, '00000000-0000-0000-0000-000000000000'), u.StoreGUID)
+  where xs.StoreGUID is null
   group by bi.MatGUID, bi.StoreGUID
 )
 select

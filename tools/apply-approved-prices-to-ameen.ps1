@@ -52,13 +52,85 @@ function Resolve-AmeenItemName($ItemName) {
     }
 }
 
+# نفس تطبيع verify-prices.ps1 حرفياً: طي الهمزات والتاء المربوطة، حذف الترقيم
+# (ومنها النقطة ASCII في آخر اسم بطاقة الأمين)، ثم اسما كابتن بلاك.
+# اختلاف هذه الدالة عن التحقق يعيد إنذار «مواد ناقصة» والبطاقة موجودة.
+function Normalize-PriceItemName($Value) {
+    $text = ([string]$Value).Trim()
+    $text = $text.Replace("أ", "ا").Replace("إ", "ا").Replace("آ", "ا").Replace("ى", "ي").Replace("ة", "ه")
+    $text = [regex]::Replace($text, "[^\p{L}\p{N}]+", " ")
+    $text = [regex]::Replace($text, "\s+", " ").Trim().ToLowerInvariant()
+    switch ($text) {
+        "كابتن بلاك كوين ازرق" { return "كابتن بلاك كور ازرق جديد" }
+        "كابتن بلاك كوين اسود" { return "كابتن بلاك كور اسود جديد" }
+        default { return $text }
+    }
+}
+
+# يعيد اسم الأمين الخام الوحيد الذي يساوي اسم الموقع بعد التطبيع.
+# صفر نتيجة، أو أكثر من اسم خام واحد، = $null. لا تخمين بين بطاقتين.
+function Select-UniqueNormalizedAmeenName($SiteName, $Candidates) {
+    $target = Normalize-PriceItemName $SiteName
+    if (-not $target) { return $null }
+    $hits = New-Object System.Collections.Generic.List[string]
+    foreach ($candidate in @($Candidates)) {
+        if (-not $candidate) { continue }
+        $raw = [string]$candidate
+        if ((Normalize-PriceItemName $raw) -eq $target) { [void]$hits.Add($raw) }
+    }
+    $distinct = @($hits | Sort-Object -Unique)
+    if ($distinct.Count -eq 1) { return [string]$distinct[0] }
+    return $null
+}
+
+# أقواس SQL LIKE: [ أولاً حتى لا تُعاد معالجة الأقواس التي نُدخلها لـ % و _.
+function Escape-SqlLikeLiteral($Value) {
+    return ([string]$Value).Replace('[', '[[]').Replace('%', '[%]').Replace('_', '[_]')
+}
+
+# بعد فشل المطابقة الحرفية: بطاقات تبدأ باسم الموقع ولا تزيد عنه بأكثر من
+# 4 محارف. الاختيار بالدالة النقية أعلاه، ومعرّف واحد فقط لذلك الاسم.
+function Find-UniqueNormalizedAmeenCard($conn, $siteName) {
+    $exact = ([string]$siteName).Trim()
+    if (-not $exact) { return $null }
+    $cmd = $conn.CreateCommand()
+    $cmd.CommandTimeout = 30
+    $cmd.CommandText = @"
+SELECT LTRIM(RTRIM(m.Name)) AS name,
+       LOWER(CAST(m.GUID AS varchar(36))) AS guid
+FROM dbo.mt000 m
+WHERE LTRIM(RTRIM(m.Name)) LIKE @prefix
+  AND LEN(LTRIM(RTRIM(m.Name))) <= LEN(@exact) + 4;
+"@
+    [void]$cmd.Parameters.AddWithValue("@prefix", (Escape-SqlLikeLiteral $exact) + "%")
+    [void]$cmd.Parameters.AddWithValue("@exact", $exact)
+    $reader = $cmd.ExecuteReader()
+    $rows = New-Object System.Collections.Generic.List[object]
+    try {
+        while ($reader.Read()) {
+            [void]$rows.Add([pscustomobject]@{
+                Name = [string]$reader.GetValue(0)
+                Guid = [string]$reader.GetValue(1)
+            })
+        }
+    } finally { $reader.Close() }
+    $candidateNames = @($rows | ForEach-Object { $_.Name })
+    $chosen = Select-UniqueNormalizedAmeenName $exact $candidateNames
+    if (-not $chosen) { return $null }
+    $guids = @($rows | Where-Object { $_.Name -eq $chosen } | ForEach-Object { $_.Guid } | Sort-Object -Unique)
+    if ($guids.Count -ne 1) { return $null }
+    # الفاصلة تمنع تفكيك الـPSCustomObject في المخرج، فيبقى .Name و .Guid كما هما.
+    return ,([pscustomobject]@{ Name = [string]$chosen; Guid = [string]$guids[0] })
+}
+
 # ---------------------------------------------------------------------------
 # A-lite — الدفاع الثاني لهوية السعر (الأول في src/price-guid-conflict.js).
 #
 # يجمّع صفوف الـCSV حسب **بطاقة الأمين** لا حسب الاسم. سبب حلّ الهوية من
 # mt000 بدل الـCSV: النافذة approved_price_sync_feed لا تكشف item_guid بعد،
-# فلا سبيل لحمله في الملف اليوم. المطابقة هنا مطابقة الكاتب نفسها حرفياً
-# (LTRIM/RTRIM تحت ترتيب Arabic_CI_AI) — فما يراه الحارس هو ما سيكتبه الكاتب.
+# فلا سبيل لحمله في الملف اليوم. المطابقة هنا مطابقة الكاتب نفسها: حرفية
+# أولاً (LTRIM/RTRIM تحت ترتيب Arabic_CI_AI)، ثم احتياط الترقيم الفريد الذي
+# يُدمَج في $guidByName قبل هذا الحارس — فما يراه الحارس هو ما سيكتبه الكاتب.
 #
 # القاعدة (قرار المالك): تعارض ⟺ حقل مُدار واحد يحمل أكثر من قيمة موجبة
 # مميّزة داخل صفوف نفس البطاقة. القيمة 0 = «غير مسعّر» ولا تعارض قيمة موجبة.
@@ -192,6 +264,17 @@ try {
     # A-lite: يُحسب قبل الحلقة وعلى الصفوف الخام. الهوية من بطاقة الأمين نفسها.
     $distinctNames = @($rawPrices | ForEach-Object { Resolve-AmeenItemName $_.item_name } | Where-Object { $_ } | Sort-Object -Unique)
     $guidByName = Get-AmeenGuidByName $conn $distinctNames
+    # احتياط الترقيم قبل الحارس. المفتاح يبقى اسم الموقع بعد Resolve حتى يرى
+    # التعارض البطاقة نفسها، واسم الكتابة هو Name الخام في الأمين (قد ينتهي بنقطة).
+    $ameenWriteName = @{}
+    foreach ($name in $distinctNames) {
+        if ($guidByName.ContainsKey([string]$name)) { continue }
+        $card = Find-UniqueNormalizedAmeenCard $conn $name
+        if (-not $card) { continue }
+        $guidByName[[string]$name] = [string]$card.Guid
+        $ameenWriteName[[string]$name] = [string]$card.Name
+        Write-Host "  مطابقة ترقيم: $name → $($card.Name)" -ForegroundColor DarkCyan
+    }
     $conflictGuids = Find-ConflictingGuids $rawPrices $guidByName $toNum
     if ($conflictGuids.Count -gt 0) {
         Write-Host "تعارض هوية سعر على $($conflictGuids.Count) بطاقة — لن تُكتب أسعارها إطلاقاً:" -ForegroundColor Red
@@ -208,6 +291,8 @@ try {
         $itemName = $price.item_name
         if (-not $itemName) { $skipped++; continue }
         $ameenItemName = Resolve-AmeenItemName $itemName
+        $priceListName = $ameenItemName
+        if ($ameenWriteName.ContainsKey($ameenItemName)) { $priceListName = $ameenWriteName[$ameenItemName] }
 
         # صفر كتابة لبطاقة متعارضة — في القائمتين معاً. لا اختيار ولا ترجيح.
         # بقية المواد السليمة تستمر طبيعياً بلا تأثر.
@@ -231,13 +316,13 @@ try {
 
         # الجملة → قائمة "جملة الجملة"
         if ($jumlaCarton -gt 0) {
-            $found = Apply-ListPrice $conn $jumlaListGuid $ameenItemName $jumlaUnit1 $jumlaCarton
+            $found = Apply-ListPrice $conn $jumlaListGuid $priceListName $jumlaUnit1 $jumlaCarton
             if ($found -gt 0) { $jumlaApplied++; $matched = $true }
         }
 
         # المفرق → قائمة "كروزات مركز"
         if ($retailCarton -gt 0) {
-            $found = Apply-ListPrice $conn $retailListGuid $ameenItemName $retailUnit1 $retailCarton
+            $found = Apply-ListPrice $conn $retailListGuid $priceListName $retailUnit1 $retailCarton
             if ($found -gt 0) { $retailApplied++; $matched = $true }
         }
 

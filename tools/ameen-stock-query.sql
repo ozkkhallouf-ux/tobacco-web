@@ -17,13 +17,29 @@
 -- can be positive in one store and negative in another (uncleared transfer),
 -- and summing only the positive side inflates the reported total. stock_qty_net
 -- and stock_qty_positive stay separate diagnostic fields — do not remove them.
+--
+-- مستودع الامانة مستبعد من تقرير المخزون (قرار عمر 2026-09-30): بضاعة الأمانة
+-- ليست مخزوناً متاحاً، فكل سطر فاتورة مستودعه الفعلي هو مستودع الامانة يُحسب
+-- صفراً — لا يدخل stock_qty ولا stock_qty_net ولا stock_qty_positive ولا أي
+-- تجميع مبني عليها (الأصناف المتوفرة، قيمة المخزون، النشرة، تنبيهات النفاد).
+-- المطابقة بـGUID المستودع في dbo.st000 لا بالاسم. المستودع الفعلي للسطر هو
+-- bi000.StoreGUID، وإن كان فارغاً فمستودع رأس الفاتورة bu000.StoreGUID.
+-- الاستبعاد يصفّر السطر ولا يحذفه عمداً: لو حُذف لبقي الصنف الموجود في الأمانة
+-- وحدها بلا حركات فيسقط إلى mt.Qty (رصيد بطاقة المادة الشامل لكل المستودعات).
+-- قراءة فقط: لا يُغيَّر شيء في الأمين، ومخزون الأمانة يبقى في مصدره كما هو.
+-- الحارس: scripts/check-inventory-excluded-stores.mjs.
 
-with per_store as (
+with excluded_stores as (
+  -- مستودع الامانة — dbo.st000.GUID
+  select 'CA3BACBB-87FE-4826-B051-CAC335CDB670' as StoreGUID
+),
+per_store as (
   select
     bi.MatGUID,
     bi.StoreGUID,
     sum(
       case
+        when xs.StoreGUID is not null then 0
         when bt.bIsInput = 1 then coalesce(bi.Qty, 0)
         when bt.bIsOutput = 1 then -coalesce(bi.Qty, 0)
         else 0
@@ -32,6 +48,8 @@ with per_store as (
   from dbo.bi000 bi
   join dbo.bu000 u on u.GUID = bi.ParentGUID
   join dbo.bt000 bt on bt.GUID = u.TypeGUID
+  left join excluded_stores xs
+    on xs.StoreGUID = coalesce(nullif(bi.StoreGUID, '00000000-0000-0000-0000-000000000000'), u.StoreGUID)
   group by bi.MatGUID, bi.StoreGUID
 ),
 stock_by_material as (
