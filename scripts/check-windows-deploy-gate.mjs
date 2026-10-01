@@ -374,6 +374,18 @@ for (const needle of ["function Resolve-WorkloadReach", "cannot determine whethe
   // sc.exe: بادئة خادم \\server لا تُخفي create/config، وStart-Process sc/sc.exe يمر بنفس القاعدة.
   const scSub = preSrc.slice(preSrc.indexOf("function Get-ScSubcommand"), preSrc.indexOf("function Get-PsDynamicExecution"));
   assert.ok(scSub.includes(String.raw`-match '^\\\\[^\\\s]+$') { $i++ }`), "بادئة \\\\server تُتخطى قبل الأمر الفرعي");
+  // Running-Process P1 — المرحلة 1: تصنيف جرد العمليات (غير موصول بـInitialize بعد)، واختبارات ببيانات اصطناعية فقط.
+  const pinv = preSrc.slice(preSrc.indexOf("function Invoke-ProcessInventoryPreflight"), preSrc.indexOf("function Invoke-InstallPreflight"));
+  assert.match(pinv, /try \{ \$records = Get-PreflightProcessInventory \} catch \{ return \[pscustomobject\]@\{ ok = \$false/, "فشل جرد العمليات ⇒ BLOCK");
+  assert.match(pinv, /if \(\$records\.Count -eq 0\) \{ return \[pscustomobject\]@\{ ok = \$false/, "جرد فارغ ⇒ BLOCK");
+  assert.match(pinv, /\$privileged = \(-not \$sid\) -or \$sid -eq 'S-1-5-18' -or \$sid -eq 'S-1-5-32-544' -or \(\$gate -and \$sid -eq \$gate\) -or \(\$null -eq \$adminKeys\) -or \(\$adminKeys -contains \$sid\)/, "نطاق الهوية المميّزة، والمالك المجهول مميّز");
+  assert.match(pinv, /if \(\$st -eq 'GONE'\) \{[^\n]*continue \}/, "الاختفاء يُتجاهل فقط إن ثبت (GONE)");
+  assert.match(pinv, /elseif \(\$privileged -and \$reach\.status -ne 'NOT_REPO'\) \{ \$results \+= & \$block/, "مميّز + UNKNOWN ⇒ BLOCK");
+  assert.match(pinv, /if \(\$gate -and \$sid -eq \$gate\) \{ \$results \+= & \$block/, "عملية بهوية البوابة ⇒ BLOCK");
+  assert.ok(!preSrc.slice(preSrc.indexOf("function Invoke-InstallPreflight")).includes("Invoke-ProcessInventoryPreflight"), "المرحلة 1: الجرد غير موصول بـInitialize");
+  const tgi = read("tools/tests/Test-GateIdentityPreflight.ps1");
+  const firstUse = tgi.indexOf("Invoke-ProcessInventoryPreflight");
+  assert.ok(firstUse > 0 && tgi.indexOf("function Get-PreflightProcessInventory {") > 0 && tgi.indexOf("function Get-PreflightProcessInventory {") < firstUse && tgi.indexOf("function Get-PreflightProcessState(") < firstUse, "الاختبارات تستبدل مصدري العمليات قبل أي استعمال (لا جرد حقيقي في CI)");
   // نص -Command/-CommandWithArgs الحرفي لـpowershell/pwsh يُحلَّل هو نفسه، بعمق محدود (Codex P1).
   assert.match(preSrc, /function Get-PsDynamicExecution\(\[string\]\$Text, \[int\]\$Depth = 0\) \{\s+if \(\$Depth -gt 3\) \{ return /, "حدّ عمق للتحليل المتداخل");
   assert.match(ps, /if \(\$leafName -match '\^\(powershell\|pwsh\)\(\\\.exe\)\?\$'\) \{\s+\$nested = Get-PsNestedCommandText \$c [^\n]*\n\s+if \(\$nested\.reason\) \{ return [^\n]*\n\s+if \(\$null -ne \$nested\.text\) \{\s+\$inner = Get-PsDynamicExecution \(\[string\]\$nested\.text\) \(\$Depth \+ 1\)\s+if \(\$inner\) \{ return /, "-Command الحرفي يمر بنفس تحليل PowerShell");

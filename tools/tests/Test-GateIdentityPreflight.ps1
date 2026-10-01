@@ -1576,6 +1576,56 @@ try {
     $script:SysPath = 'C:\Windows\system32;C:\Windows;C:\Program Files\nodejs;'
     $script:FsExistOnly = $null; $script:SysPath = $savedSysPath
 
+    Write-Host '== Running-Process P1 phase 1: process inventory classification (synthetic records only)'
+    # بيانات اصطناعية حصراً: المصدران مستبدلان، فلا يُقرأ جرد عمليات الـrunner الحقيقي ولا تُنشأ عمليات.
+    $script:ProcRecords = @(); $script:ProcError = $null; $script:ProcStates = @{}; $script:RealProcCalls = 0
+    function Get-PreflightProcessInventory { if ($script:ProcError) { throw $script:ProcError }; return $script:ProcRecords }
+    function Get-PreflightProcessState([int]$ProcessId, $CreationDate) { if ($script:ProcStates.ContainsKey($ProcessId)) { return $script:ProcStates[$ProcessId] }; return 'PRESENT' }
+    $t0 = [datetime]'2026-10-01T08:00:00Z'
+    function P([int]$Id, [string]$Name, [string]$Exe, [string]$Cmd, [string]$Owner, [string]$Sid = '') { return [pscustomobject]@{ pid = $Id; creationDate = $t0.AddSeconds($Id); name = $Name; sessionId = 0; executablePath = $Exe; commandLine = $Cmd; owner = $Owner; sid = $Sid } }
+    $baseline = @(
+        (P 700 'svchost.exe' 'C:\Windows\system32\svchost.exe' 'C:\Windows\system32\svchost.exe -k netsvcs -p' '' 'S-1-5-18'),
+        (P 900 'explorer.exe' 'C:\Windows\explorer.exe' 'C:\Windows\explorer.exe' 'OZK2026\OZKSync')
+    )
+    function Proc-Run($Extra) { $script:ProcRecords = @($baseline) + @($Extra); return (Invoke-ProcessInventoryPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) }
+    $got = Proc-Run @()
+    Assert-True ($got.ok) ('baseline: SYSTEM trusted system binary + ordinary user process => no block (got ' + (@($got.results | ForEach-Object { $_.reason }) -join '; ') + ')')
+    Assert-True (Test-BlockLike (Proc-Run @(P 1001 'node.exe' 'C:\Program Files\nodejs\node.exe' ('"C:\Program Files\nodejs\node.exe" "' + $repo + '\scripts\serve.mjs"') '' 'S-1-5-18')) '*1001*runs repository code*') 'SYSTEM interpreter with a repository script => BLOCK (REPO)'
+    Assert-True (Test-BlockLike (Proc-Run @(P 1002 'powershell.exe' $ps ($ps + ' -NoProfile -File "' + $repo + '\tools\x.ps1"') 'OZK2026\LOQ')) '*1002*runs repository code*') 'local Administrators member (LOQ) PowerShell with a repository script => BLOCK'
+    Assert-True (Test-BlockLike (Proc-Run @(P 1003 'app.exe' ($repo + '\bin\app.exe') ('"' + $repo + '\bin\app.exe"') 'OZK2026\Administrator')) '*1003*runs repository code*') 'local Administrator running an executable inside the repository => BLOCK'
+    Assert-True ((Proc-Run @(P 1004 'sc.exe' 'C:\Windows\system32\sc.exe' 'sc.exe query X' '' 'S-1-5-18')).ok) 'SYSTEM trusted external literal process => no block (NOT_REPO)'
+    Assert-True (Test-BlockLike (Proc-Run @(P 1005 'node.exe' 'C:\Program Files\nodejs\node.exe' 'node.exe scripts\serve.mjs' '' 'S-1-5-18')) '*1005*cannot prove*') 'SYSTEM interpreter with a relative script (no provable working directory) => BLOCK (UNKNOWN)'
+    Assert-True (Test-BlockLike (Proc-Run @(P 1006 'node.exe' 'C:\Program Files\nodejs\node.exe' '' '' 'S-1-5-18')) '*1006*without a readable command line*') 'SYSTEM interpreter without a readable command line => BLOCK (UNKNOWN)'
+    Assert-True (Test-BlockLike (Proc-Run @(P 1007 'unknown.exe' '' '' '' 'S-1-5-18')) '*1007*executable path unavailable*') 'SYSTEM process with no readable executable path (still present) => BLOCK (UNKNOWN)'
+    Reset-TrustAcls
+    $script:FsAcls[(Resolve-TestAclKey 'C:\Users\Public\tool.exe')] = New-TestAcl 'S-1-5-18' @(Ace 'S-1-5-32-545' 'Modify')
+    Assert-True (Test-BlockLike (Proc-Run @(P 1008 'tool.exe' 'C:\Users\Public\tool.exe' '"C:\Users\Public\tool.exe"' '' 'S-1-5-18')) '*1008*cannot prove*') 'SYSTEM executable outside the repo writable by Users (untrusted) => BLOCK (UNKNOWN)'
+    Reset-TrustAcls
+    Assert-True (Test-BlockLike (Proc-Run @(P 1009 'node.exe' 'C:\Program Files\nodejs\node.exe' ('node.exe "' + $repo + '\scripts\serve.mjs"') '' '')) '*1009*owner unresolved*') 'unknown owner is treated as privileged: repository script => BLOCK'
+    Assert-True (Test-BlockLike (Proc-Run @(P 1010 'node.exe' 'C:\Program Files\nodejs\node.exe' 'node.exe scripts\serve.mjs' '' '')) '*1010*owner unresolved*') 'unknown owner + relative script => BLOCK'
+    Assert-True ((Proc-Run @(P 1011 'node.exe' 'C:\Program Files\nodejs\node.exe' ('node.exe "' + $repo + '\scripts\serve.mjs"') 'OZK2026\OZKSync')).ok) 'non-privileged user with a repository script => not blocked by this rule alone'
+    Assert-True (Test-BlockLike (Proc-Run @(P 1012 'powershell.exe' $ps ($ps + ' -NoProfile -Command Get-Date') 'OZK2026\OZK-DeployGate')) '*1012*dedicated gate identity*') 'process running as OZK-DeployGate is represented and blocked (no self/console exemption in phase 1)'
+    # اختفاء العملية: يُتجاهل السجل الناقص فقط إن ثبت الاختفاء بـPID + CreationDate.
+    $script:ProcStates = @{ 1020 = 'GONE' }
+    $got = Proc-Run @(P 1020 'gone.exe' '' '' '' '')
+    Assert-True ($got.ok -and @($got.processes | Where-Object { $_.pid -eq 1020 -and $_.workload -eq 'GONE' }).Count -eq 1) 'process with missing data whose exit is proven (PID + CreationDate) => ignored'
+    $script:ProcStates = @{ 1021 = 'UNKNOWN' }
+    Assert-True (Test-BlockLike (Proc-Run @(P 1021 'vanish.exe' '' '' '' '')) '*1021*') 'process with missing data whose exit cannot be verified => BLOCK'
+    $script:ProcStates = @{ 1022 = 'PRESENT' }
+    Assert-True (Test-BlockLike (Proc-Run @(P 1022 'still.exe' '' '' '' '')) '*1022*') 'process with missing data still present (same PID + CreationDate) => BLOCK'
+    $script:ProcStates = @{}
+    # فشل الجرد أو مدخل غير صالح ⇒ BLOCK.
+    $script:ProcError = 'Access is denied.'
+    Assert-True (Test-BlockLike (Invoke-ProcessInventoryPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) '*cannot enumerate processes*') 'process inventory failure => BLOCK'
+    $script:ProcError = $null; $script:ProcRecords = @()
+    Assert-True (Test-BlockLike (Invoke-ProcessInventoryPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) '*process inventory is empty*') 'empty process inventory => BLOCK'
+    $bad = P 1030 'x.exe' 'C:\Windows\system32\svchost.exe' 'svchost.exe' '' 'S-1-5-18'; $bad.creationDate = $null
+    Assert-True (Test-BlockLike (Proc-Run @($bad)) '*invalid process record*') 'record without CreationDate => BLOCK'
+    $savedAdmins = $script:Admins; $script:Admins = $null
+    Assert-True (Test-BlockLike (Proc-Run @(P 1040 'node.exe' 'C:\Program Files\nodejs\node.exe' 'node.exe scripts\serve.mjs' 'OZK2026\OZKSync')) '*1040*cannot prove*') 'Administrators membership unknown => every owner treated as privileged (relative script => BLOCK)'
+    $script:Admins = $savedAdmins
+    $script:ProcRecords = @()
+
     Write-Host '== Install preflight combines price-list and identity checks'
     # فحص ACL الفعلية مُختبَر في Test-GateTrustAcl.ps1؛ هنا نتيجته ناجحة لعزل الهوية ونشرات الأسعار.
     function Test-GateTrustAcl($Config) { return [pscustomobject]@{ ok = $true; results = @() } }; function Test-GitHookSafety($Config) { return [pscustomobject]@{ ok = $true; results = @() } }

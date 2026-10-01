@@ -2060,6 +2060,86 @@ function Invoke-GateIdentityPreflight($Config) {
     return [pscustomobject]@{ ok = ($blocked.Count -eq 0); results = $results; workloads = @($workloads) }
 }
 
+# ------------------------------------------------------------
+# Running-Process P1 — المرحلة 1: نموذج جرد العمليات وتصنيفها (قراءة فقط، غير موصول بـInitialize بعد).
+# كل سجل: pid، وcreationDate، وname، وsessionId، وexecutablePath، وcommandLine، وowner/sid. تصنيف ثلاثي الحالة
+# بنفس دلالات الهوية المميّزة ومحلل الوصول القائمين؛ أي شك مع هوية مميّزة ⇒ BLOCK. لا تُنشأ ولا تُعدَّل عمليات.
+# ------------------------------------------------------------
+# مصدر الجرد (قراءة فقط). يرمي عند الفشل ⇒ يحجب المستدعي. الاختبارات تستبدله ببيانات اصطناعية.
+function Get-PreflightProcessInventory {
+    $out = @()
+    foreach ($p in @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)) {
+        $sid = ''
+        try { $o = Invoke-CimMethod -InputObject $p -MethodName GetOwnerSid -ErrorAction Stop; if ($o.ReturnValue -eq 0) { $sid = [string]$o.Sid } } catch { $sid = '' }
+        $out += [pscustomobject]@{ pid = [int]$p.ProcessId; creationDate = $p.CreationDate; name = [string]$p.Name; sessionId = $p.SessionId; executablePath = [string]$p.ExecutablePath; commandLine = [string]$p.CommandLine; owner = ''; sid = $sid }
+    }
+    return $out
+}
+
+# حالة عملية بعينها الآن: GONE (لا عملية بهذا الـPID، أو بـCreationDate مختلف)، PRESENT، أو UNKNOWN عند تعذّر التحقق.
+function Get-PreflightProcessState([int]$ProcessId, $CreationDate) {
+    try { $p = @(Get-CimInstance -ClassName Win32_Process -Filter ('ProcessId = ' + [int]$ProcessId) -ErrorAction Stop) } catch { return 'UNKNOWN' }
+    if ($p.Count -eq 0) { return 'GONE' }
+    if ($null -eq $p[0].CreationDate -or $null -eq $CreationDate) { return 'UNKNOWN' }
+    if (([datetime]$p[0].CreationDate).ToUniversalTime() -ne ([datetime]$CreationDate).ToUniversalTime()) { return 'GONE' }
+    return 'PRESENT'
+}
+
+# تصنيف جرد العمليات: { ok; results; processes }. الهوية المميّزة: SYSTEM، وAdministrators، وأعضاؤها بالـSID،
+# وهوية البوابة؛ مالك لا يُحلّ أو عضوية غير محسومة ⇒ مميّز. الوصول من المسار التنفيذي وسطر الأوامر عبر
+# Resolve-WorkloadReach (بلا مجلد عمل: النسبي ⇒ UNKNOWN). العملية المختفية تُتجاهل فقط إن ثبت اختفاؤها بـPID+CreationDate.
+function Invoke-ProcessInventoryPreflight($Config) {
+    $results = @()
+    $block = { param([string]$Subject, [string]$Reason) [pscustomobject]@{ task = $Subject; verdict = 'BLOCK'; reason = $Reason } }
+    try { $records = Get-PreflightProcessInventory } catch { return [pscustomobject]@{ ok = $false; results = @(& $block 'process inventory' ('cannot enumerate processes: ' + $_.Exception.Message)); processes = @() } }
+    $records = @($records | Where-Object { $null -ne $_ })
+    if ($records.Count -eq 0) { return [pscustomobject]@{ ok = $false; results = @(& $block 'process inventory' 'process inventory is empty; an empty list is not evidence that no privileged process runs'); processes = @() } }
+    $gate = Resolve-PrincipalSid ([string]$Config.trust.gateAccount)
+    if (-not $gate) { $results += & $block 'process inventory' ('gate identity cannot be resolved to a SID: ' + $Config.trust.gateAccount) }
+    $adminKeys = $null
+    $adminMembers = Get-PreflightAdminMembers
+    if ($null -ne $adminMembers) {
+        $adminKeys = @()
+        foreach ($m in @($adminMembers)) { $ms = Resolve-PrincipalSid ([string]$m); if (-not $ms) { $adminKeys = $null; break }; $adminKeys += $ms }
+    }
+    $audit = @()
+    foreach ($r in $records) {
+        $procId = $null
+        try { $procId = [int]$r.pid } catch { $procId = $null }
+        $subject = 'process ' + $(if ($null -ne $procId) { [string]$procId } else { '?' }) + ' ' + [string]$r.name
+        if ($null -eq $procId -or $procId -lt 0 -or $null -eq $r.creationDate) { $results += & $block $subject 'invalid process record (PID or CreationDate missing)'; $audit += [pscustomobject]@{ pid = $procId; name = [string]$r.name; sid = ''; workload = 'INVALID'; decision = 'BLOCK' }; continue }
+        $sid = if ($r.PSObject.Properties['sid'] -and $r.sid) { [string]$r.sid } else { Resolve-PrincipalSid ([string]$r.owner) }
+        $exe = ([string]$r.executablePath).Trim()
+        $cmd = ([string]$r.commandLine).Trim()
+        # بيانات ناقصة: تُتجاهل العملية فقط إن ثبت أنها انتهت (PID غائب أو CreationDate مختلف).
+        if (-not $sid -or -not $exe) {
+            $st = Get-PreflightProcessState $procId $r.creationDate
+            if ($st -eq 'GONE') { $audit += [pscustomobject]@{ pid = $procId; name = [string]$r.name; sid = [string]$sid; workload = 'GONE'; decision = 'IGNORED (exit proven by PID + CreationDate)' }; continue }
+        }
+        $privileged = (-not $sid) -or $sid -eq 'S-1-5-18' -or $sid -eq 'S-1-5-32-544' -or ($gate -and $sid -eq $gate) -or ($null -eq $adminKeys) -or ($adminKeys -contains $sid)
+        $reach = $null
+        if (-not $exe) { $reach = New-Reach 'UNKNOWN' 'executable path unavailable' }
+        elseif (-not $cmd) {
+            $leaf = (($exe -replace '/', '\') -split '\\')[-1]
+            if ($leaf -match $script:InterpreterLeaves -or $leaf -match $script:LauncherLeaves) { $reach = New-Reach 'UNKNOWN' ('interpreter/launcher ' + $leaf + ' without a readable command line') }
+            else { $reach = Resolve-WorkloadReach $Config ('"' + $exe + '"') ([string]$sid) }
+        } else {
+            # الوسائط من سطر الأوامر بعد أول رمز (البرنامج)؛ البرنامج نفسه من المسار التنفيذي الفعلي.
+            $rest = $null
+            if ($cmd.StartsWith('"')) { $q = $cmd.IndexOf('"', 1); if ($q -gt 0) { $rest = $cmd.Substring($q + 1) } }
+            else { $sp = $cmd.IndexOf(' '); $rest = if ($sp -gt 0) { $cmd.Substring($sp) } else { '' } }
+            if ($null -eq $rest) { $reach = New-Reach 'UNKNOWN' 'command line cannot be parsed unambiguously' }
+            else { $reach = Resolve-WorkloadReach $Config ('"' + $exe + '"' + $rest) ([string]$sid) }
+        }
+        $decision = 'OK'
+        if ($gate -and $sid -eq $gate) { $results += & $block $subject ('process runs as the dedicated gate identity ' + $Config.trust.gateAccount); $decision = 'BLOCK' }
+        elseif ($privileged -and $reach.status -eq 'REPO') { $results += & $block $subject ('privileged process runs repository code (owner ' + $(if ($sid) { $sid } else { 'unresolved' }) + '): ' + $reach.why); $decision = 'BLOCK' }
+        elseif ($privileged -and $reach.status -ne 'NOT_REPO') { $results += & $block $subject ('cannot prove this privileged process does not run repository code (owner ' + $(if ($sid) { $sid } else { 'unresolved' }) + '): ' + $reach.why); $decision = 'BLOCK' }
+        $audit += [pscustomobject]@{ pid = $procId; name = [string]$r.name; sid = [string]$sid; workload = [string]$reach.status; decision = $decision }
+    }
+    return [pscustomobject]@{ ok = (@($results).Count -eq 0); results = $results; processes = $audit }
+}
+
 # فحص التثبيت الكامل: نشرات الأسعار (main) + هوية البوابة + ACL الفعلية. يستدعيه -Mode Initialize.
 function Invoke-InstallPreflight($Config) {
     $a = Invoke-MigrationPreflight $Config
