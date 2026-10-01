@@ -1149,6 +1149,36 @@ try {
         Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) ('*ScStart ' + $ident + '*binPath cannot be proven*')) ($ident + ' task -> wrapper -> Start-Process sc.exe config binPath= (Get-Content ...) => BLOCK')
     }
 
+    Write-Host '== Nested PowerShell -Command payloads inside PowerShell wrappers (Codex P1, static only)'
+    $nestDyn = @(
+        @{ label = 'Codex witness: powershell.exe -Command ''$p = Get-Content ...; & $p'' => UNKNOWN'; n = 'nc1.ps1'; b = 'powershell.exe -Command ''$p = Get-Content C:\ProgramData\target.txt; & $p''' },
+        @{ label = 'powershell -NoProfile -c ''& $p'' (abbreviated) => UNKNOWN'; n = 'nc2.ps1'; b = 'powershell -NoProfile -c ''& $p''' },
+        @{ label = 'pwsh.exe -CommandWithArgs ''& $p'' => UNKNOWN'; n = 'nc3.ps1'; b = 'pwsh.exe -CommandWithArgs ''& $p''' },
+        @{ label = 'powershell.exe -ExecutionPolicy Bypass -Command ''iex $x'' => UNKNOWN'; n = 'nc4.ps1'; b = 'powershell.exe -ExecutionPolicy Bypass -Command ''Invoke-Expression $x''' },
+        @{ label = 'powershell.exe ''& $p'' (positional command) => UNKNOWN'; n = 'nc5.ps1'; b = 'powershell.exe ''& $p''' },
+        @{ label = 'two nested levels: powershell -Command "powershell -Command ''& $p''" => UNKNOWN'; n = 'nc6.ps1'; b = 'powershell.exe -Command "powershell.exe -Command ''& `$p''"' },
+        @{ label = 'computed -Command $cmd => UNKNOWN (unchanged rule)'; n = 'nc7.ps1'; b = 'powershell.exe -Command $cmd' },
+        @{ label = 'powershell.exe -Command ''-'' (stdin) => UNKNOWN'; n = 'nc8.ps1'; b = 'powershell.exe -Command ''-''' }
+    )
+    foreach ($c in $nestDyn) { $got = Dyn-Reach $c.n $c.b; Assert-True ($got.status -eq 'UNKNOWN') ($c.label + ' (got ' + $got.status + ': ' + $got.why + ')') }
+    $nestStatic = @(
+        @{ label = 'nested safe literal: powershell.exe -NoProfile -Command ''Get-Date'' => NOT_REPO'; n = 'ncs1.ps1'; b = 'powershell.exe -NoProfile -Command ''Get-Date -Format o''' },
+        @{ label = 'nested safe literal with a static call: -Command ''& C:\safe\tool.ps1'' => NOT_REPO'; n = 'ncs2.ps1'; b = 'powershell.exe -NoProfile -Command ''& C:\safe\tool.ps1''' },
+        @{ label = 'pwsh positional is a file, not a command: pwsh C:\safe\tool.ps1 => NOT_REPO'; n = 'ncs3.ps1'; b = 'pwsh C:\safe\tool.ps1' }
+    )
+    foreach ($c in $nestStatic) { $got = Dyn-Reach $c.n $c.b; Assert-True ($got.status -eq 'NOT_REPO') ($c.label + ' (got ' + $got.status + ': ' + $got.why + ')') }
+    Assert-True ((Dyn-Reach 'ncs4.ps1' ('powershell.exe -NoProfile -Command ''& ''''' + $repo + '\tools\x.ps1''''''')).status -eq 'REPO') 'nested literal -Command calling a repository script => REPO'
+    $deep = 'Get-Date'
+    for ($d = 0; $d -lt 6; $d++) { $deep = 'powershell.exe -Command ''' + ($deep -replace "'", "''") + '''' }
+    $got = Get-PsDynamicExecution $deep
+    Assert-True ($got -like '*deeper than 3 levels*') ('recursion guard: 6 nested -Command levels => UNKNOWN (got ' + $got + ')')
+    foreach ($ident in @('SYSTEM', 'LOQ')) {
+        $nw = $dw + '\nested-' + $ident + '.ps1'
+        $script:Wrappers[$nw] = 'powershell.exe -Command ''$p = Get-Content C:\ProgramData\target.txt; & $p'''
+        $script:Tasks = @(Get-CleanLayout) + @(New-Task ('Nested ' + $ident) $ident ($ps + ' -NoProfile -File "' + $nw + '"'))
+        Assert-True (Test-BlockLike (Invoke-GateIdentityPreflight (New-Config 'OZK2026\OZK-DeployGate' @())) ('*Nested ' + $ident + '*nested powershell.exe -Command*')) ('Codex witness under ' + $ident + ': wrapper -> powershell.exe -Command ''$p = Get-Content ...; & $p'' => BLOCK')
+    }
+
     Write-Host '== Dynamic module / code loading inside PowerShell wrappers (Codex P1)'
     $script:Wrappers['C:\safe\mod.psm1'] = 'function Get-Safe { Get-Date }'
     $script:Wrappers['c:\safe\mod.psm1'] = 'function Get-Safe { Get-Date }'

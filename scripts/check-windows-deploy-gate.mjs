@@ -374,6 +374,13 @@ for (const needle of ["function Resolve-WorkloadReach", "cannot determine whethe
   // sc.exe: بادئة خادم \\server لا تُخفي create/config، وStart-Process sc/sc.exe يمر بنفس القاعدة.
   const scSub = preSrc.slice(preSrc.indexOf("function Get-ScSubcommand"), preSrc.indexOf("function Get-PsDynamicExecution"));
   assert.ok(scSub.includes(String.raw`-match '^\\\\[^\\\s]+$') { $i++ }`), "بادئة \\\\server تُتخطى قبل الأمر الفرعي");
+  // نص -Command/-CommandWithArgs الحرفي لـpowershell/pwsh يُحلَّل هو نفسه، بعمق محدود (Codex P1).
+  assert.match(preSrc, /function Get-PsDynamicExecution\(\[string\]\$Text, \[int\]\$Depth = 0\) \{\s+if \(\$Depth -gt 3\) \{ return /, "حدّ عمق للتحليل المتداخل");
+  assert.match(ps, /if \(\$leafName -match '\^\(powershell\|pwsh\)\(\\\.exe\)\?\$'\) \{\s+\$nested = Get-PsNestedCommandText \$c [^\n]*\n\s+if \(\$nested\.reason\) \{ return [^\n]*\n\s+if \(\$null -ne \$nested\.text\) \{\s+\$inner = Get-PsDynamicExecution \(\[string\]\$nested\.text\) \(\$Depth \+ 1\)\s+if \(\$inner\) \{ return /, "-Command الحرفي يمر بنفس تحليل PowerShell");
+  const nct = preSrc.slice(preSrc.indexOf("function Get-PsNestedCommandText"), preSrc.indexOf("function Get-PsDynamicExecution"));
+  assert.match(nct, /if \(\$pn -eq 'command' -or \$pn -eq 'commandwithargs'\) \{/, "-Command و-CommandWithArgs");
+  assert.match(nct, /if \(-not \$pn\) \{ return [^\n]*reason = /, "معامل غير معروف ⇒ سبب (UNKNOWN)");
+  assert.match(nct, /if \(\$IsPwsh\) \{ return [^\n]*\n\s+\$parts = @\(\)\s+foreach \(\$r in @\(\$els \| Select-Object -Skip \$k\)\)/, "powershell.exe: الوسيط الموضعي أمر");
   assert.match(ps, /\$scEls = @\(\$c\.CommandElements \| Select-Object -Skip 1\)\s+\$scSub = Get-ScSubcommand \$scEls/, "sc.exe المباشر يستعمل Get-ScSubcommand");
   assert.match(ps, /if \(\$leaf -match '\^sc\(\\\.exe\)\?\$' -and \$bound\.ContainsKey\('ArgumentList'\) -and -not \(Test-PsLiteralAst \$bound\['ArgumentList'\]\.Value\)\) \{[\s\S]*?\$sSub = Get-ScSubcommand \$sItems\s+if \(\$null -eq \$sSub -or \$sSub -eq 'create' -or \$sSub -eq 'config'\) \{ return /, "Start-Process sc/sc.exe بوسائط محسوبة مع create/config ⇒ UNKNOWN");
   assert.match(read("tools/tests/Test-GateIdentityPreflight.ps1"), /wmic\.exe process call create \$cmd/, "اختبار شاهد Codex: wmic.exe process call create \$cmd");

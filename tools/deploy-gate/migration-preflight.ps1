@@ -724,8 +724,46 @@ function Get-ScSubcommand($Elements) {
     return $w[0].ToLowerInvariant()
 }
 
+# نص -Command/-CommandWithArgs لاستدعاء powershell/pwsh حرفي الوسائط: { text; reason }. text=$null إن لم يكن
+# هناك أمر (مثل -File)، وreason لمعامل غير معروف أو مشفّر. powershell.exe يعامل أول وسيط موضعي كأمر، وpwsh كملف.
+function Get-PsNestedCommandText($CommandAst, [bool]$IsPwsh) {
+    $els = @($CommandAst.CommandElements | Select-Object -Skip 1)
+    $txt = { param($e) if ($e -is [System.Management.Automation.Language.StringConstantExpressionAst]) { [string]$e.Value } else { [string]$e.Extent.Text } }
+    for ($k = 0; $k -lt $els.Count; $k++) {
+        $e = $els[$k]
+        $pn = $null; $attached = $null; $isParam = $false
+        if ($e -is [System.Management.Automation.Language.CommandParameterAst]) {
+            $isParam = $true; $pn = Resolve-PsParamName ([string]$e.ParameterName)
+            if ($null -ne $e.Argument) { $attached = & $txt $e.Argument }
+        } elseif ($e -is [System.Management.Automation.Language.StringConstantExpressionAst] -and ([string]$e.Value) -match '^[-/]([A-Za-z]+)(?::(.*))?$') {
+            $isParam = $true; $pn = Resolve-PsParamName $Matches[1]
+            if ($Matches[2]) { $attached = $Matches[2] }
+        }
+        if ($isParam) {
+            if (-not $pn) { return [pscustomobject]@{ text = $null; reason = ('unrecognised or ambiguous PowerShell parameter: ' + $e.Extent.Text) } }
+            if ($pn -eq 'encodedcommand' -or $pn -eq 'encodedarguments') { return [pscustomobject]@{ text = $null; reason = 'encoded command payload cannot be inspected' } }
+            if ($pn -eq 'file') { return [pscustomobject]@{ text = $null; reason = $null } }
+            if ($pn -eq 'command' -or $pn -eq 'commandwithargs') {
+                $parts = @()
+                if ($null -ne $attached) { $parts += $attached }
+                foreach ($r in @($els | Select-Object -Skip ($k + 1))) { $parts += (& $txt $r) }
+                return [pscustomobject]@{ text = ($parts -join ' '); reason = $null }
+            }
+            if ($script:PsFlagParams -contains $pn) { continue }
+            if ($null -eq $attached) { $k++ }
+            continue
+        }
+        if ($IsPwsh) { return [pscustomobject]@{ text = $null; reason = $null } }
+        $parts = @()
+        foreach ($r in @($els | Select-Object -Skip $k)) { $parts += (& $txt $r) }
+        return [pscustomobject]@{ text = ($parts -join ' '); reason = $null }
+    }
+    return [pscustomobject]@{ text = $null; reason = $null }
+}
+
 # سبب الديناميكية في نص PowerShell، أو $null إن كانت كل أهداف التنفيذ ثابتة.
-function Get-PsDynamicExecution([string]$Text) {
+function Get-PsDynamicExecution([string]$Text, [int]$Depth = 0) {
+    if ($Depth -gt 3) { return 'nested PowerShell -Command deeper than 3 levels' }
     $tokens = $null
     $errs = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseInput([string]$Text, [ref]$tokens, [ref]$errs)
@@ -757,6 +795,16 @@ function Get-PsDynamicExecution([string]$Text) {
                 $v = $el
                 if ($el -is [System.Management.Automation.Language.CommandParameterAst]) { if ($null -eq $el.Argument) { continue }; $v = $el.Argument }
                 if (-not (Test-PsLiteralAst $v)) { return ('interpreter ' + $leafName + ' with a computed argument: ' + $el.Extent.Text) }
+            }
+            # powershell/pwsh بوسائط حرفية: نص -Command/-CommandWithArgs (أو الموضعي لـpowershell.exe) يُحلَّل هو نفسه
+            # كـPowerShell بنفس القواعد (Codex P1). تحليل ساكن فقط، وبعمق محدود.
+            if ($leafName -match '^(powershell|pwsh)(\.exe)?$') {
+                $nested = Get-PsNestedCommandText $c ($leafName -match '^pwsh')
+                if ($nested.reason) { return ('nested ' + $leafName + ': ' + $nested.reason) }
+                if ($null -ne $nested.text) {
+                    $inner = Get-PsDynamicExecution ([string]$nested.text) ($Depth + 1)
+                    if ($inner) { return ('nested ' + $leafName + ' -Command: ' + $inner) }
+                }
             }
         }
         # & Invoke-WmiMethod / iwmi / icim / Module\Invoke-WmiMethod لا تُتخطى: الوسائط تُفحص كالأمر المباشر.

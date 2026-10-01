@@ -349,6 +349,9 @@
     المسارات العادي. (`sc` وحدها في PowerShell هي Set-Content ولا تتأثر.)
     بادئة الخادم الحرفية (`sc.exe \\server create …`) تُتخطى قبل تحديد الأمر الفرعي، و`Start-Process sc`/`sc.exe`
     بـ`-ArgumentList` محسوب مع create/config، أو بأمر فرعي غير مثبت ⇒ UNKNOWN. الوسائط الحرفية تكمل التحليل العادي.
+  - `powershell`/`pwsh` داخل غلاف PowerShell بوسائط حرفية: نص `-Command`/`-CommandWithArgs` (أو الوسيط الموضعي
+    لـ`powershell.exe`) يُحلَّل هو نفسه بنفس قواعد PowerShell (`Get-PsNestedCommandText`). تنفيذ محسوب داخله ⇒ UNKNOWN،
+    ومعامل غير معروف أو أمر مشفّر ⇒ UNKNOWN، وأكثر من 3 مستويات تداخل ⇒ UNKNOWN. تحليل ساكن فقط.
   - `conhost`: NEEDS MORE EVIDENCE، لم يُعدَّل.
 - **عائق تثبيت معروف (KNOWN BOOTSTRAP BLOCKER) — `.git` قابل للكتابة من هويات غير موثوقة:**
   - بين فحص `.git` الأول و`Set-DeployFlag` تشغّل البوابة `git status`/`diff` للتحقق من نظافة الشجرة. فلتر `filter.*`
