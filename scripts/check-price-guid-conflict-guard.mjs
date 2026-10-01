@@ -560,6 +560,101 @@ test("12ب) التعارض يظهر في المخرَج الآلي والسجل"
   assert.match(applySource, /conflict \(zero writes\)/, "السجل يوثّق البطاقات المتعارضة");
 });
 
+function slicePsFunction(source, signature) {
+  const start = source.indexOf(signature);
+  assert.notEqual(start, -1, `تعذّر عزل ${signature}`);
+  const brace = source.indexOf("{", start);
+  let depth = 0;
+  for (let i = brace; i < source.length; i++) {
+    if (source[i] === "{") depth++;
+    else if (source[i] === "}") {
+      depth--;
+      if (depth === 0) return source.slice(start, i + 1).trim();
+    }
+  }
+  throw new Error(`أقواس غير متوازنة في ${signature}`);
+}
+
+test("11) احتياط الترقيم يُدمَج قبل حارس التعارض، والكتابة باسم الأمين الخام", () => {
+  const callAt = applySource.indexOf("$card = Find-UniqueNormalizedAmeenCard $conn $name");
+  const guidAt = applySource.indexOf("$guidByName[[string]$name] = [string]$card.Guid");
+  const writeMapAt = applySource.indexOf("$ameenWriteName[[string]$name] = [string]$card.Name");
+  const findAt = applySource.indexOf("Find-ConflictingGuids $rawPrices");
+  const loopAt = applySource.indexOf("foreach ($price in $prices)");
+  assert.notEqual(callAt, -1, "نداء الاحتياط");
+  assert.notEqual(guidAt, -1, "تخزين المعرّف تحت مفتاح اسم الموقع");
+  assert.notEqual(writeMapAt, -1, "تخزين اسم الكتابة الخام");
+  assert.ok(callAt < findAt && guidAt < findAt && writeMapAt < findAt, "الاحتياط قبل Find-ConflictingGuids");
+  assert.ok(findAt < loopAt, "الحارس يبقى قبل حلقة الكتابة");
+  assert.match(applySource, /\$priceListName = \$ameenItemName/);
+  assert.match(
+    applySource,
+    /if \(\$ameenWriteName\.ContainsKey\(\$ameenItemName\)\) \{ \$priceListName = \$ameenWriteName\[\$ameenItemName\] \}/
+  );
+  assert.match(applySource, /Apply-ListPrice \$conn \$jumlaListGuid \$priceListName/);
+  assert.match(applySource, /Apply-ListPrice \$conn \$retailListGuid \$priceListName/);
+  assert.ok(applySource.includes("LIKE @prefix"), "مرشّح SQL يبدأ باسم الموقع");
+  assert.ok(
+    applySource.includes("LEN(LTRIM(RTRIM(m.Name))) <= LEN(@exact) + 4"),
+    "سقف الطول يمنع سحب أسماء أطول"
+  );
+  assert.ok(
+    applySource.includes("Replace('[', '[[]').Replace('%', '[%]').Replace('_', '[_]')"),
+    "تهريب محارف LIKE"
+  );
+  assert.doesNotMatch(applySource, /INSERT INTO (?:dbo\.)?mt000/i, "لا إنشاء بطاقة مادة");
+  assert.doesNotMatch(applySource, /DELETE FROM MaterialPriceListItem000/i, "حذف الموقع لا يحذف سعر الأمين");
+  const verifySource = readFileSync(new URL("../tools/verify-prices.ps1", import.meta.url), "utf8");
+  assert.equal(
+    slicePsFunction(applySource, "function Normalize-PriceItemName($Value)"),
+    slicePsFunction(verifySource, "function Normalize-PriceItemName($Value)"),
+    "تطبيع التطبيق يطابق تطبيع التحقق حرفياً"
+  );
+});
+
+test("11ب) سلوكي: الاسم المنقّط الوحيد يُختار، والالتباس والاسم الأطول يُرفضان", () => {
+  const probe = spawnSync("pwsh", ["-NoProfile", "-Command", "$PSVersionTable.PSVersion.Major"], {
+    encoding: "utf8"
+  });
+  if (probe.status !== 0) {
+    console.log("  ⚠ 11ب: pwsh غير متاح — اكتُفي بالتأكيد الثابت (11)");
+    return;
+  }
+  const normStart = applySource.indexOf("function Normalize-PriceItemName");
+  const selectEnd = applySource.indexOf("function Escape-SqlLikeLiteral");
+  assert.ok(normStart !== -1 && selectEnd > normStart, "تعذّر عزل دالتي التطبيع والاختيار");
+  const harness = [
+    applySource.slice(normStart, selectEnd),
+    "$oscar = Select-UniqueNormalizedAmeenName 'اوسكار سليم طقة نعنع' @('اوسكار سليم طقة نعنع.', 'اوسكار سليم طقة نعنع اكسترا')",
+    "$marl = Select-UniqueNormalizedAmeenName 'مالبورو سيلفر بلو حرة بوكسات' @('مالبورو سيلفر بلو حرة بوكسات.')",
+    "$nakhla = Select-UniqueNormalizedAmeenName 'نخلة صلاحية سطل 5كغ' @('نخلة صلاحية سطل 5كغ.')",
+    "$ambig = Select-UniqueNormalizedAmeenName 'اسم' @('اسم.', 'اسم..')",
+    "$alef = Select-UniqueNormalizedAmeenName 'احمد' @('أحمد.', 'إحمد.')",
+    "$longer = Select-UniqueNormalizedAmeenName 'اوسكار سليم طقة نعنع' @('اوسكار سليم طقة نعنع اكسترا')",
+    "$empty = Select-UniqueNormalizedAmeenName 'اوسكار سليم طقة نعنع' @()",
+    "$captain = Select-UniqueNormalizedAmeenName 'كابتن بلاك كوين ازرق' @('كابتن بلاك كور ازرق جديد')",
+    "$out = [ordered]@{",
+    "  oscar = [string]$oscar; marl = [string]$marl; nakhla = [string]$nakhla; captain = [string]$captain;",
+    "  ambigNull = ($null -eq $ambig); alefNull = ($null -eq $alef); longerNull = ($null -eq $longer); emptyNull = ($null -eq $empty)",
+    "}",
+    "$out | ConvertTo-Json -Compress"
+  ].join("\n");
+  const dir = mkdtempSync(path.join(tmpdir(), "price-norm-"));
+  const file = path.join(dir, "harness.ps1");
+  writeFileSync(file, harness, "utf8");
+  const run = spawnSync("pwsh", ["-NoProfile", "-File", file], { encoding: "utf8" });
+  assert.equal(run.status, 0, `فشل اختيار الاسم في pwsh: ${run.stderr}`);
+  const parsed = JSON.parse(run.stdout.trim().split("\n").pop());
+  assert.equal(parsed.oscar, "اوسكار سليم طقة نعنع.");
+  assert.equal(parsed.marl, "مالبورو سيلفر بلو حرة بوكسات.");
+  assert.equal(parsed.nakhla, "نخلة صلاحية سطل 5كغ.");
+  assert.equal(parsed.captain, "كابتن بلاك كور ازرق جديد");
+  assert.equal(parsed.ambigNull, true, "نقطتان مختلفتان لنفس الاسم ليستا بطاقة واحدة");
+  assert.equal(parsed.alefNull, true, "همزتان مختلفتان بعد التطبيع ليستا تخميناً");
+  assert.equal(parsed.longerNull, true, "اسم أطول مختلف لا يُطابق");
+  assert.equal(parsed.emptyNull, true);
+});
+
 // ---------------------------------------------------------------------------
 // عقود لا تُمَس في هذا الـPR
 // ---------------------------------------------------------------------------
