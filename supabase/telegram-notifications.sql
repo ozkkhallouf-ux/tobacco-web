@@ -1148,7 +1148,7 @@ revoke execute on function public.tg_notify_price_changes() from authenticated;
 -- + قوائم تفصيلية (كل قسم مقسّم كل 20 صف على رسالة منفصلة)
 -- ============================================================
 -- مشتريات الموردين (القسم 2ج) من فواتير شراء الأمين الفعلية لا من recentPayments —
--- المرجع: supabase/migrations/20260926140000_evening_report_supplier_purchases_from_bills.sql
+-- المرجع: supabase/migrations/20260926234241_evening_report_supplier_purchases_from_bills.sql
 -- هذه الكتلة (من الدالة المساعدة حتى evening-report:end) نسخة حرفية منه، يفرضها
 -- scripts/check-evening-supplier-purchases.mjs.
 create or replace function public.evening_supplier_purchases_digest(

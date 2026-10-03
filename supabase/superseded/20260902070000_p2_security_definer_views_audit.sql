@@ -1,3 +1,18 @@
+-- ╔══════════════════════════════════════════════════════════════════════════╗
+-- ║ ⛔ لا تُشغَّل هذه الهجرة أبداً، ولا تُعَد إلى supabase/migrations/          ║
+-- ╚══════════════════════════════════════════════════════════════════════════╝
+-- لم تُطبَّق على الإنتاج قط، وتقادمت بعد 20260929235655_price_feeds_security_invoker
+-- (PR #291). الخطوة 3 أدناه تنفّذ:
+--   grant select on public.approved_price_sync_feed to anon;
+--   grant select on public.approved_price_sync_feed to authenticated;
+-- وتكتب تعليقاً يصف الـView بأنه SECURITY DEFINER. على الإنتاج اليوم الـView
+-- security_invoker=on وصلاحياته postgres وservice_role فقط (قراءة 2026-10-03).
+-- تشغيل هذا الملف يعيد فتح قراءة anon التي أغلقها #291، ويكتب فوق التعليقات
+-- الصحيحة لـavailable_price_sync_feed وbot_health_alerts بتعليقات قديمة.
+-- الجزءان الآخران (bot_health_alerts=invoker، available=SELECT فقط) قائمان أصلاً
+-- على الإنتاج بفعل هجرات لاحقة. محفوظ هنا للتاريخ وحده. راجع README.md.
+--
+
 -- P2-2: Security Definer Views — Audit & Fix
 -- 2026-09-02
 --

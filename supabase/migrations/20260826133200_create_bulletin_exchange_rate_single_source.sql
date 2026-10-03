@@ -1,3 +1,10 @@
+-- تصحيح الاسم (2026-10-03، تدقيق قراءة على supabase_migrations.schema_migrations):
+-- الإنتاج يسجّل هذا الإصدار باسم `create_bulletin_exchange_rate_single_source`، لا `fix_ameen_read_requests_initplan_followup` كما افترض
+-- هذا الملف سابقاً. أُعيدت تسمية جزء الاسم فقط والرقم كما هو. المحتوى أدناه
+-- placeholder تحقق-أو-تخطٍّ كتبناه نحن، لا SQL الإنتاج الأصلي، ووصفه للميزة
+-- المرتبطة بالرقم غير دقيق. إصلاح initplan الحقيقي لـameen_read_requests مسجّل
+-- بالإصدار 20260826093547. لا أثر وظيفي: CLI يطابق بالرقم وحده، والملف NOTICE فقط.
+--
 -- History reconciliation for remote-only production version 20260826133200.
 --
 -- Production records this version as a second stamp related to the same local
