@@ -18,6 +18,9 @@
   let intel = null;
   let loading = false;
   let lastError = null;
+  // تاريخ الحد اختياري: فشل قراءته (مثلاً قبل تطبيق الـmigration) لا يُسقط الشاشة،
+  // فيعمل المحرك بسلوك STEP 1 ويُعرض السبب.
+  let historyError = null;
   let lastUpdatedAt = null;
   let refreshTimer = null;
 
@@ -80,6 +83,7 @@
     credit_delinquent: "متعثّر: الائتمان موقوف",
     credit_inactive: "غير نشط: بلا حد",
     credit_low_data: "حد محافظ: بيانات قليلة",
+    credit_smoothed: "حد منعَّم أسبوعياً",
     credit_not_customer: "ليس زبون مبيعات: بلا حد",
     credit_needs_review: "حد الائتمان غير متاح: يحتاج مراجعة",
     credit_mixed_role: "دور مختلط (زبون ومورد)",
@@ -137,6 +141,7 @@
     { key: "daysSinceLastPurchase", label: "أيام منذ آخر شراء", type: "number" },
     { key: "currentBalance", label: "الرصيد", type: "number" },
     { key: "creditUsagePercent", label: "الائتمان", type: "number" },
+    { key: "riskScore", label: "الخطر", type: "number" },
     { key: "flags", label: "التنبيهات", type: "none" }
   ];
 
@@ -153,18 +158,28 @@
       const engine = window.ozkCustomerIntelligence;
       if (!engine) throw new Error("طبقة ذكاء الزبائن غير محمّلة.");
 
-      const [invoicesReport, balanceReports, movementsReport, creditLimits] = await Promise.all([
+      // نافذة جلب أوسع قليلاً من lookbackDays؛ المحرك يقصّها بدقة على يوم المرجع.
+      const sinceDate = new Date(Date.now() - (engine.CONFIG.creditHistory.lookbackDays + 2) * 86400000).toISOString().slice(0, 10);
+      historyError = null;
+      const [invoicesReport, balanceReports, movementsReport, creditLimits, historyRows] = await Promise.all([
         data.getCustomerInvoicesReport ? data.getCustomerInvoicesReport() : null,
         data.listCustomerBalanceReports ? data.listCustomerBalanceReports() : [],
         data.getCustomerMovementsReport ? data.getCustomerMovementsReport() : null,
-        data.listCustomerCreditLimits ? data.listCustomerCreditLimits() : []
+        data.listCustomerCreditLimits ? data.listCustomerCreditLimits() : [],
+        data.listCustomerCreditHistory
+          ? data.listCustomerCreditHistory({ sinceDate }).catch((error) => {
+            historyError = String(error?.message || error || "تعذّر قراءة تاريخ الحد.");
+            return undefined;
+          })
+          : undefined
       ]);
 
       intel = engine.build({
         invoicesReport,
         balancesReport: Array.isArray(balanceReports) ? balanceReports[0] : balanceReports,
         movementsReport,
-        creditLimits
+        creditLimits,
+        creditHistory: historyRows
       });
       lastUpdatedAt = new Date();
     } catch (error) {
@@ -272,6 +287,24 @@
     }).join("");
   }
 
+  // اتجاه الخطر كما حسبه المحرك من آخر 7 لقطات — عرض فقط.
+  const RISK_TREND = {
+    up: { arrow: "↑", tone: "bad", label: "الخطر صاعد" },
+    down: { arrow: "↓", tone: "good", label: "الخطر نازل" },
+    flat: { arrow: "→", tone: "", label: "الخطر ثابت" }
+  };
+  function riskTrendBadge(row) {
+    const trend = RISK_TREND[row.creditHistory?.riskTrend?.direction];
+    if (!trend) return "";
+    const delta = row.creditHistory.riskTrend.delta;
+    return `<span class="ci-trend ${trend.tone}" title="${escape(`${trend.label}: ${delta > 0 ? "+" : ""}${delta} درجة على ${row.creditHistory.riskTrend.points} لقطات`)}">${trend.arrow}</span>`;
+  }
+
+  function changeLine(row) {
+    const change = row.creditHistory?.change;
+    return change ? `<div class="ci-change ${change.direction === "down" ? "bad" : change.direction === "up" ? "good" : ""}">${escape(change.text)}</div>` : "";
+  }
+
   function tableRow(row) {
     const trend = row.purchaseTrend?.percent;
     const trendClass = isNumber(trend) ? (trend < 0 ? "bad" : trend > 0 ? "good" : "") : "";
@@ -283,7 +316,7 @@
       : (CREDIT_STATUS_TEXT[row.creditStatus] || "—");
     return `
       <tr class="ci-row ${view.selectedId === row.customerId ? "selected" : ""}" data-ci-customer="${escape(row.customerId)}" tabindex="0">
-        <td class="ci-name">${escape(row.customerName)}</td>
+        <td class="ci-name">${escape(row.customerName)}${changeLine(row)}</td>
         <td><span class="ci-segment ${escape(row.primarySegment)}">${escape(SEGMENT_LABELS[row.primarySegment] || row.primarySegment)}</span></td>
         <td dir="ltr">${money(row.netSales30d, row.currency)}</td>
         <td dir="ltr">${money(row.netSalesPrevious30d, row.currency)}</td>
@@ -292,6 +325,7 @@
         <td dir="ltr">${count(row.daysSinceLastPurchase)}</td>
         <td dir="ltr">${money(row.balanceDisplay ?? row.currentBalance, row.balanceCurrency || row.creditCurrency || "USD")}</td>
         <td dir="ltr">${escape(creditText)}</td>
+        <td dir="ltr">${count(row.riskScore)} ${riskTrendBadge(row)}</td>
         <td class="ci-flags">${flagChips(row.flags, 3)}</td>
       </tr>`;
   }
@@ -362,6 +396,39 @@
     return facts;
   }
 
+  const SMOOTHING_TEXT = {
+    no_history: "لا لقطة سابقة بعد: الحد المحسوب كما هو.",
+    no_numeric_baseline: "اللقطة المرجعية بلا حد رقمي (متعثّر أو غير نشط): الحد المحسوب كما هو.",
+    within_bounds: "التغيير ضمن حدود التنعيم الأسبوعي.",
+    capped_increase: "الحد محصور بسقف الارتفاع الأسبوعي.",
+    capped_decrease: "الحد محصور بسقف النزول الأسبوعي."
+  };
+
+  // تاريخ الحد كما حسبه المحرك: آخر لقطة، وسبب التغيير، والتنعيم، واتجاه الخطر — عرض فقط.
+  function historySection(row) {
+    const history = row.creditHistory;
+    if (!history) {
+      return historyError ? `<p class="muted ci-note">تاريخ الحد غير متاح: ${escape(historyError)}</p>` : "";
+    }
+    const lines = [];
+    if (history.change) lines.push(`<p class="ci-change ${history.change.direction === "down" ? "bad" : history.change.direction === "up" ? "good" : ""}">${escape(history.change.text)}</p>`);
+    if (history.previous) {
+      lines.push(`<p class="muted">آخر لقطة: ${day(history.previous.date)} · الحد ${money(history.previous.creditLimitDisplay, history.previous.creditCurrency || "USD")}</p>`);
+    } else {
+      lines.push(`<p class="muted">لا لقطة سابقة لهذا الزبون بعد.</p>`);
+    }
+    const smoothing = history.smoothing;
+    if (smoothing && SMOOTHING_TEXT[smoothing.reason]) {
+      const baseline = smoothing.baselineDate ? ` (المرجع ${escape(smoothing.baselineDate)}${isNumber(smoothing.minLimitBase) ? `: بين ${money(smoothing.minLimitBase)} و${money(smoothing.maxLimitBase)}` : ""})` : "";
+      lines.push(`<p class="muted">التنعيم الأسبوعي: ${escape(SMOOTHING_TEXT[smoothing.reason])}${baseline}${isNumber(row.autoCredit?.limitBaseRaw) && smoothing.applied ? ` — الحد المحسوب قبل التنعيم ${money(row.autoCredit.limitBaseRaw)}` : ""}</p>`);
+    }
+    const trend = history.riskTrend;
+    if (trend && RISK_TREND[trend.direction]) {
+      lines.push(`<p class="muted">اتجاه الخطر: ${riskTrendBadge(row)} ${escape(RISK_TREND[trend.direction].label)} (${trend.delta > 0 ? "+" : ""}${escape(trend.delta)} درجة من ${escape(trend.fromDate)} إلى ${escape(trend.toDate)}، ${count(trend.points)} لقطات)</p>`);
+    }
+    return `<div class="ci-history"><h4>تاريخ الحد</h4>${lines.join("")}</div>`;
+  }
+
   function detailPanel() {
     const row = intel.customers.find((entry) => entry.customerId === view.selectedId);
     if (!row) return `<section class="panel ci-detail"><h3>تفاصيل الزبون</h3><p class="muted">اختر زبوناً من الجدول لعرض تحليله.</p></section>`;
@@ -393,7 +460,7 @@
       ["حد اعتبار التوقف", `${row.inactiveThresholdDays} يوماً`],
       ["درجة النشاط", count(row.activityScore)],
       ["درجة القيمة", count(row.valueScore)],
-      ["درجة الخطر", count(row.riskScore)]
+      ["درجة الخطر", `${count(row.riskScore)} ${riskTrendBadge(row)}`]
     ];
 
     return `
@@ -407,6 +474,7 @@
         </div>
         <div class="ci-flag-row">${flagChips(row.flags)}</div>
         <ul class="ci-why">${row.explanation.map((line) => `<li>${escape(line)}</li>`).join("")}</ul>
+        ${historySection(row)}
         <dl class="ci-facts">${facts.map(([label, value]) => `<div><dt>${escape(label)}</dt><dd dir="auto">${value}</dd></div>`).join("")}</dl>
         <h4>أهم الأصناف (${escape(intel.window.previousStartDate)} → ${escape(intel.window.referenceDate)})</h4>
         ${items}
