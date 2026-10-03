@@ -2,8 +2,8 @@
 // ============================================================================
 // تنبيهات النفاد حسب أولوية المبيعات — المُشغِّل (.github/workflows/stock-priority-alerts.yml).
 //
-// يقرأ من Supabase فقط: آخر تقرير مخزون (ameen_sql_agent)، وآخر تقرير فواتير
-// (ameen_customer_invoices)، وbot_config.low_stock_threshold. يحسب بـ
+// يقرأ من Supabase فقط: آخر تقرير مخزون (ameen_sql_agent)، وآخر تقرير مبيعات
+// الأصناف (ameen_item_sales، كل فواتير البيع مع الكاشير)، وbot_config.low_stock_threshold. يحسب بـ
 // src/stock-alert-priority.js (منطق نقي)، ثم يضع الرسائل في telegram_outbox عبر
 // notify_telegram — ومنع التكرار (dedupe_key + نافذة الدقائق) هناك.
 //
@@ -67,12 +67,12 @@ export async function run({ env = process.env, argv = process.argv.slice(2), fet
     throw new Error("SUPABASE_URL أو SUPABASE_SERVICE_ROLE_KEY غير مضبوط.");
   }
 
-  const [stockReport, invoicesReport, threshold] = await Promise.all([
+  const [stockReport, salesReport, threshold] = await Promise.all([
     latestReport(fetchImpl, base, serviceKey, engine.CONFIG.stockSource),
-    latestReport(fetchImpl, base, serviceKey, engine.CONFIG.invoicesSource),
+    latestReport(fetchImpl, base, serviceKey, engine.CONFIG.salesSource),
     lowStockThreshold(fetchImpl, base, serviceKey)
   ]);
-  const result = engine.buildStockAlerts({ stockReport, invoicesReport, now, lowStockThreshold: threshold });
+  const result = engine.buildStockAlerts({ stockReport, salesReport, now, lowStockThreshold: threshold });
 
   log(`الحالة: ${result.status} | أصناف مباعة: ${result.priority?.soldCount ?? "-"} | مؤهلة: ${result.priority?.eligible?.length ?? "-"}`
     + ` | تنبيهات: ${result.alerts.length} | رسائل: ${result.messages.length}`

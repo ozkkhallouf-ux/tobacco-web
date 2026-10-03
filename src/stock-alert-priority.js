@@ -2,13 +2,17 @@
 // أولوية تنبيهات النفاد حسب المبيعات — منطق نقي (Pure) بلا شبكة ولا DOM ولا كتابة.
 //
 // القرار (طلب المالك 2026-10-03): تنبيه تيليغرام «قاربت النفاد» يخص الأصناف
-// المهمة وحدها. الأهمية = صافي الكمية المبيعة في آخر 30 يوماً من فواتير البيع
-// (`inventory_reports.source = 'ameen_customer_invoices'`): البيع ناقص المرتجع،
-// بالكروز (bi000.Qty بالوحدة الأولى دائماً)، وتُعرض بالكرتونة.
+// المهمة وحدها. الأهمية = صافي الكمية المبيعة في آخر 30 يوماً من فواتير البيع:
+// البيع ناقص المرتجع، بالكروز (bi000.Qty بالوحدة الأولى دائماً)، وتُعرض بالكرتونة.
+//
+// المصدر `ameen_item_sales` (tools/push-item-sales.ps1) يجمع **كل** فواتير البيع
+// والمرتجع (BillType 1/3) لكل صنف، ومنها «مبيعات مركز» بلا اسم زبون. تقرير
+// ameen_customer_invoices لا يصلح هنا لأنه يُسقط كل فاتورة بلا اسم زبون، فيُنقص
+// مبيع أصناف الكاشير أو يصفّره (مراجعة Codex على PR #298).
 //
 // المدخلات صفوف `inventory_reports` كما هي (source/report_date/created_at/summary/items):
-//   • تقرير الفواتير  ameen_customer_invoices (tools/push-customer-invoices.ps1)
-//   • تقرير المخزون   ameen_sql_agent         (tools/ameen-sync-agent.ps1) — الرصيد الحي
+//   • تقرير المبيعات  ameen_item_sales  — صنف واحد لكل صف: saleQty، returnQty، saleInvoiceCount
+//   • تقرير المخزون   ameen_sql_agent   (tools/ameen-sync-agent.ps1) — الرصيد الحي
 //     المستبعِد لمستودع الامانة. لا يُقرأ approved_price_items.stock_qty لأنه لا
 //     يتحدّث إلا عند عبور وحدة ثانية كاملة.
 //
@@ -24,8 +28,9 @@
   // كل العتبات هنا. تغييرها يغيّر من يُنبَّه عليه — وثّق أي تعديل في الوثيقة.
   const CONFIG = Object.freeze({
     stockSource: "ameen_sql_agent",
-    invoicesSource: "ameen_customer_invoices",
-    // نافذة المبيعات: يوم المرجع (report_date المحلي لتقرير الفواتير) و29 يوماً قبله.
+    salesSource: "ameen_item_sales",
+    // نافذة المبيعات: يوم المرجع (report_date المحلي لتقرير المبيعات) و29 يوماً قبله.
+    // التقرير مجمَّع سلفاً، فنافذته (summary.windowDays/fromDate) يجب أن تطابقها بالضبط.
     windowDays: 30,
     // الأصناف المؤهلة: أعلى 20% من الأصناف المباعة (سقف للأعلى، وتُضم التعادلات
     // على الحد)، أو صافي مبيع أعلى من متوسط كل الأصناف المباعة — أيهما أوسع (اتحاد).
@@ -35,8 +40,9 @@
     // «قارب النفاد»: نفد (رصيد ≤ 0)، أو يكفي ≤ 7 أيام بمعدل البيع اليومي،
     // أو رصيده ≤ حد bot_config.low_stock_threshold (بالكروز، أمر «حد التنبيه» في البوت).
     lowCoverageDays: 7,
-    // عتبات الحداثة نفسها في private.project_task_monitors (ameen-main 10، customer-invoices 90).
-    maxAgeMinutes: Object.freeze({ stock: 10, invoices: 90 }),
+    // المخزون: عتبة private.project_task_monitors نفسها (ameen-main 10).
+    // المبيعات: المهمة كل 30 دقيقة (register-item-sales-task.ps1)، فثلاث دورات فائتة = قديم.
+    maxAgeMinutes: Object.freeze({ stock: 10, sales: 90 }),
     // منع التكرار: نفس مجموعة الأصناف وحالاتها لا تُرسل مرتين خلال 6 ساعات.
     cooldownMinutes: 360,
     staleCooldownMinutes: 360,
@@ -126,9 +132,9 @@
   }
 
   // ── الهوية: itemGuid أولاً، والاسم المطبَّع احتياط فقط ─────────────────────
-  // اسم مطبَّع يقابل معرّفاً واحداً بالضبط (في المخزون أو الفواتير) يُربط به؛
+  // اسم مطبَّع يقابل معرّفاً واحداً بالضبط (في المخزون أو المبيعات) يُربط به؛
   // اسم يقابل أكثر من معرّف يبقى مفتاح اسم مستقلاً ولا يُدمج بأي منها.
-  function buildIdentity(stockReport, invoicesReport) {
+  function buildIdentity(stockReport, salesReport) {
     const guidsByName = new Map();
     const remember = (guid, name) => {
       const g = normalizeGuid(guid);
@@ -137,11 +143,8 @@
       if (!guidsByName.has(n)) guidsByName.set(n, new Set());
       guidsByName.get(n).add(g);
     };
-    for (const item of Array.isArray(stockReport?.items) ? stockReport.items : []) remember(item?.itemGuid, item?.name);
-    for (const customer of Array.isArray(invoicesReport?.items) ? invoicesReport.items : []) {
-      for (const invoice of Array.isArray(customer?.invoices) ? customer.invoices : []) {
-        for (const line of Array.isArray(invoice?.lines) ? invoice.lines : []) remember(line?.itemGuid, line?.material);
-      }
+    for (const report of [stockReport, salesReport]) {
+      for (const item of Array.isArray(report?.items) ? report.items : []) remember(item?.itemGuid, item?.name);
     }
     const ambiguousNames = new Set([...guidsByName].filter(([, set]) => set.size > 1).map(([name]) => name));
     function resolve(guid, name) {
@@ -164,13 +167,13 @@
     return ageMinutes > maxAge ? "stale" : "fresh";
   }
 
-  function evaluateSources({ stockReport, invoicesReport, now, config }) {
+  function evaluateSources({ stockReport, salesReport, now, config }) {
     const nowMs = timestampMs(now) ?? Date.now();
     const problems = [];
     const sources = {};
     for (const [kind, report, source, maxAge] of [
       ["stock", stockReport, config.stockSource, config.maxAgeMinutes.stock],
-      ["invoices", invoicesReport, config.invoicesSource, config.maxAgeMinutes.invoices]
+      ["sales", salesReport, config.salesSource, config.maxAgeMinutes.sales]
     ]) {
       const syncedMs = report ? reportSyncedMs(report) : null;
       const ageMinutes = syncedMs === null ? null : Math.max(0, (nowMs - syncedMs) / 60000);
@@ -181,78 +184,63 @@
     return { sources, problems };
   }
 
-  function invoiceWindow(invoicesReport, config) {
-    const referenceDay = dayNumber(invoicesReport?.report_date) ?? dayNumber(invoicesReport?.summary?.reportDate)
-      ?? (reportSyncedMs(invoicesReport) === null ? null : Math.floor(reportSyncedMs(invoicesReport) / DAY_MS));
+  // التقرير مجمَّع على نافذة ثابتة في SQL، فلا يُعاد تقطيعه هنا: نافذته يجب أن
+  // تساوي windowDays وتنتهي بيوم المرجع بالضبط، وإلا فالترتيب على فترة أخرى.
+  function salesWindow(salesReport, config) {
+    const referenceDay = dayNumber(salesReport?.report_date) ?? dayNumber(salesReport?.summary?.toDate);
     if (referenceDay === null) return { ok: false, code: "no_reference_day" };
     const startDay = referenceDay - (config.windowDays - 1);
-    const fromDay = dayNumber(invoicesReport?.summary?.fromDate);
-    const periodDays = finite(invoicesReport?.summary?.periodDays);
-    const covered = fromDay !== null ? fromDay <= startDay : periodDays !== null && periodDays >= config.windowDays;
-    return { ok: covered, code: covered ? null : "window_not_covered", referenceDay, startDay };
+    const fromDay = dayNumber(salesReport?.summary?.fromDate);
+    const windowDays = finite(salesReport?.summary?.windowDays);
+    const matches = windowDays === config.windowDays && fromDay === startDay;
+    return { ok: matches, code: matches ? null : "window_mismatch", referenceDay, startDay };
   }
 
-  // ── تجميع فواتير زبون واحد داخل النافذة ───────────────────────────────────
-  function addLine(byKey, resolved, line, invoiceId, isReturn, qty) {
+  // ── صف مبيعات صنف واحد ────────────────────────────────────────────────────
+  function addSalesRow(byKey, resolved, row, counts) {
     let entry = byKey.get(resolved.key);
     if (!entry) {
-      entry = { key: resolved.key, itemGuid: resolved.key.startsWith("g:") ? resolved.key.slice(2) : null, name: "", soldQty: 0, returnedQty: 0, saleInvoices: new Set(), unit2Factor: null, unit2Name: "" };
+      entry = { key: resolved.key, itemGuid: resolved.key.startsWith("g:") ? resolved.key.slice(2) : null, name: "", soldQty: 0, returnedQty: 0, saleInvoiceCount: 0, unit2Factor: null, unit2Name: "" };
       byKey.set(resolved.key, entry);
     }
-    if (!entry.name) entry.name = text(line?.material);
-    const factor = finite(line?.unit2Fact);
+    if (!entry.name) entry.name = text(row?.name);
+    const factor = finite(row?.unit2Factor);
     if (factor !== null && factor > 0 && entry.unit2Factor === null) entry.unit2Factor = factor;
-    if (!entry.unit2Name) entry.unit2Name = text(line?.unit2);
-    if (isReturn) entry.returnedQty += qty;
-    else { entry.soldQty += qty; entry.saleInvoices.add(invoiceId); }
+    if (!entry.unit2Name) entry.unit2Name = text(row?.unit2Name);
+    entry.soldQty += counts.saleQty;
+    entry.returnedQty += counts.returnQty;
+    entry.saleInvoiceCount += counts.saleInvoiceCount;
   }
 
-  // الاقتطاع يُبقي الأحدث (ORDER BY Date DESC)؛ إن كان أقدم المُبقى داخل النافذة
-  // فقد تكون فواتير من النافذة نفسها حُذفت ⇒ النافذة غير مكتملة.
-  function truncatedWithinWindow(customer, invoices, window) {
-    if (customer?.truncated !== true) return false;
-    const days = invoices.map((inv) => dayNumber(inv?.date)).filter((d) => d !== null);
-    return !days.length || Math.min(...days) >= window.startDay;
-  }
-
-  function accumulateCustomer(customer, customerIndex, window, identity, byKey, counters) {
-    const invoices = Array.isArray(customer?.invoices) ? customer.invoices : [];
-    if (truncatedWithinWindow(customer, invoices, window)) counters.truncatedInWindow += 1;
-    for (const invoice of invoices) {
-      const day = dayNumber(invoice?.date);
-      if (day === null || day < window.startDay || day > window.referenceDay) continue;
-      const invoiceId = normalizeGuid(invoice?.guid) || `${customerIndex}:${text(invoice?.number)}:${text(invoice?.date)}`;
-      const isReturn = invoice?.isReturn === true;
-      for (const line of Array.isArray(invoice?.lines) ? invoice.lines : []) {
-        const qty = finite(line?.qty);
-        if (qty === null || qty <= 0) { counters.invalidLines += 1; continue; }
-        const resolved = identity.resolve(line?.itemGuid, line?.material);
-        if (!resolved) { counters.unidentifiedLines += 1; continue; }
-        addLine(byKey, resolved, line, invoiceId, isReturn, qty);
-      }
-    }
+  function rowCounts(row) {
+    const saleQty = finite(row?.saleQty);
+    const returnQty = finite(row?.returnQty) ?? 0;
+    const saleInvoiceCount = finite(row?.saleInvoiceCount) ?? 0;
+    if (saleQty === null || saleQty < 0 || returnQty < 0 || saleInvoiceCount < 0) return null;
+    return { saleQty, returnQty, saleInvoiceCount: Math.floor(saleInvoiceCount) };
   }
 
   // ── 1+2+3+4: صافي المبيع، الترتيب، الأهلية ─────────────────────────────────
-  function computeSalesPriority({ invoicesReport, stockReport = null, config: overrides } = {}) {
+  function computeSalesPriority({ salesReport, stockReport = null, config: overrides } = {}) {
     const config = mergeConfig(overrides);
-    const window = invoiceWindow(invoicesReport, config);
+    const window = salesWindow(salesReport, config);
     const warnings = [];
     if (!window.ok) {
       return { ok: false, code: window.code, window, items: [], ranked: [], eligible: [], soldCount: 0, topCount: 0, averageNetQty: null, warnings };
     }
-    const identity = buildIdentity(stockReport, invoicesReport);
+    const identity = buildIdentity(stockReport, salesReport);
     const byKey = new Map();
-    const counters = { invalidLines: 0, unidentifiedLines: 0, truncatedInWindow: 0 };
-    const customers = Array.isArray(invoicesReport?.items) ? invoicesReport.items : [];
-    customers.forEach((customer, customerIndex) => accumulateCustomer(customer, customerIndex, window, identity, byKey, counters));
-    const { invalidLines, unidentifiedLines, truncatedInWindow } = counters;
-
-    if (truncatedInWindow > 0) {
-      return { ok: false, code: "window_truncated", window, items: [], ranked: [], eligible: [], soldCount: 0, topCount: 0, averageNetQty: null, warnings: [`truncated_customers:${truncatedInWindow}`] };
+    let invalidRows = 0;
+    let unidentifiedRows = 0;
+    for (const row of Array.isArray(salesReport?.items) ? salesReport.items : []) {
+      const counts = rowCounts(row);
+      if (!counts) { invalidRows += 1; continue; }
+      const resolved = identity.resolve(row?.itemGuid, row?.name);
+      if (!resolved) { unidentifiedRows += 1; continue; }
+      addSalesRow(byKey, resolved, row, counts);
     }
-    if (invalidLines) warnings.push(`invalid_lines:${invalidLines}`);
-    if (unidentifiedLines) warnings.push(`unidentified_lines:${unidentifiedLines}`);
+    if (invalidRows) warnings.push(`invalid_rows:${invalidRows}`);
+    if (unidentifiedRows) warnings.push(`unidentified_rows:${unidentifiedRows}`);
     if (identity.ambiguousNames.size) warnings.push(`ambiguous_names:${identity.ambiguousNames.size}`);
 
     const items = [...byKey.values()].map((entry) => ({
@@ -262,7 +250,7 @@
       soldQty: round(entry.soldQty, 3),
       returnedQty: round(entry.returnedQty, 3),
       netQty: round(entry.soldQty - entry.returnedQty, 3),
-      saleInvoiceCount: entry.saleInvoices.size,
+      saleInvoiceCount: entry.saleInvoiceCount,
       unit2Factor: entry.unit2Factor,
       unit2Name: entry.unit2Name
     }));
@@ -330,15 +318,14 @@
   }
 
   function staleMessage(problems, sources, config) {
-    const label = { stock: "أرصدة المخزون", invoices: "فواتير البيع" };
+    const label = { stock: "أرصدة المخزون", sales: "مبيعات الأصناف" };
     const reason = {
       missing: "غير متوفرة",
       wrong_source: "من مصدر غير متوقع",
       missing_as_of: "بلا وقت مزامنة",
       stale: null,
       no_reference_day: "بلا يوم مرجع",
-      window_not_covered: `لا تغطي آخر ${config.windowDays} يوماً`,
-      window_truncated: `مقتطعة داخل نافذة ${config.windowDays} يوماً`
+      window_mismatch: `لا تطابق نافذة آخر ${config.windowDays} يوماً`
     };
     const lines = problems.map((problem) => {
       const source = sources?.[problem.kind];
@@ -423,19 +410,19 @@
 
   // ── المدخل الرئيسي ────────────────────────────────────────────────────────
   // status: "alert" (رسائل أصناف)، "none" (لا صنف مهم قارب النفاد)، "stale" (رسالة تقادم فقط).
-  function buildStockAlerts({ stockReport, invoicesReport, now = new Date(), lowStockThreshold = null, config: overrides } = {}) {
+  function buildStockAlerts({ stockReport, salesReport, now = new Date(), lowStockThreshold = null, config: overrides } = {}) {
     const config = mergeConfig(overrides);
-    const { sources, problems } = evaluateSources({ stockReport, invoicesReport, now, config });
+    const { sources, problems } = evaluateSources({ stockReport, salesReport, now, config });
     if (problems.length) {
       return { version: VERSION, status: "stale", sources, problems, priority: null, alerts: [], messages: [staleMessage(problems, sources, config)], warnings: [] };
     }
-    const priority = computeSalesPriority({ invoicesReport, stockReport, config });
+    const priority = computeSalesPriority({ salesReport, stockReport, config });
     if (!priority.ok) {
-      const windowProblems = [{ kind: "invoices", code: priority.code }];
+      const windowProblems = [{ kind: "sales", code: priority.code }];
       return { version: VERSION, status: "stale", sources, problems: windowProblems, priority, alerts: [], messages: [staleMessage(windowProblems, sources, config)], warnings: priority.warnings };
     }
 
-    const identity = buildIdentity(stockReport, invoicesReport);
+    const identity = buildIdentity(stockReport, salesReport);
     const stockByKey = indexStock(stockReport, identity);
     const threshold = finite(lowStockThreshold);
     const warnings = [...priority.warnings];
