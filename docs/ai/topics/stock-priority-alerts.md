@@ -57,7 +57,7 @@
 5. التحقق من 3 تشغيلات متتالية في `cron.job_run_details` وردود `net._http_response` بـ200، ثم جعل الـworkflow `workflow_dispatch` وحده.
 
 الرجوع: `select cron.unschedule('stock-priority-alert');` والـworkflow ما زال يعمل يدوياً.
-فشل الدالة (رد 500) لا يُطلق تنبيه «فشل الأتمتة» كما كان فشل الـworkflow؛ رسالة التقادم تبقى الحماية من البيانات القديمة.
+**المراقبة (طلب المالك):** الدالة تسجّل نتيجة كل تشغيل مجدول في `private.stock_priority_alert_runs` عبر `record_stock_priority_alert_run` (service_role وحده؛ dryRun والرمز الخاطئ لا يُسجَّلان). مهمة pg_cron ‏`stock-priority-alert-watch` كل 5 دقائق تشغّل `public.watch_stock_priority_alert()`: فشلان متتاليان، أو لا نجاح منذ أكثر من 45 دقيقة (ومنه دالة غير منشورة أو رمز لا يطابق) ⇒ «🚨 فشل الأتمتة» عبر `notify_telegram` بالمفتاح الثابت `automation-failure:stock-priority-alert` ونافذة 360 دقيقة، أي مرة كل 6 ساعات على الأكثر. علامة `monitor_started` عند التطبيق تمنع إنذاراً فورياً وصمتاً دائماً معاً. بلا رمز في `app_secrets` لا مراقبة. السجل يُقلَّم بعد 3 أيام. الرجوع: `cron.unschedule('stock-priority-alert-watch')`.
 
 ## الفحوص الإلزامية
 

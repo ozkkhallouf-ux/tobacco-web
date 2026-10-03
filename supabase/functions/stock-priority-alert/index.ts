@@ -9,7 +9,8 @@
 //
 // تستدعيها pg_cron (public.dispatch_stock_priority_alert) برأس
 // X-OZK-Stock-Alert-Token مطابق لـapp_secrets.stock_priority_alert_token.
-// جسم {"dryRun": true} يحسب ويُرجع الأعداد فقط بلا إرسال (للتحقق اليدوي).
+// جسم {"dryRun": true} يحسب ويُرجع الأعداد فقط بلا إرسال ولا تسجيل (للتحقق اليدوي).
+// نتيجة كل تشغيل مجدول تُسجَّل (record_stock_priority_alert_run) لمراقب الهجرة نفسها.
 // لا وصول لقاعدة الأمين: المصادر تقارير Supabase المزامَنة. ولا أسماء أصناف في الرد.
 // ============================================================================
 import "../_shared/stock-alert-priority.js";
@@ -57,11 +58,22 @@ export default {
       return json({ error: "unauthorized" }, 401);
     }
 
-    const engine = (globalThis as unknown as { ozkStockAlertPriority?: Engine }).ozkStockAlertPriority;
-    if (!engine?.buildStockAlerts) return json({ error: "engine_unavailable" }, 500);
-
     let dryRun = false;
     try { dryRun = (await req.json())?.dryRun === true; } catch { dryRun = false; }
+
+    // نتيجة كل تشغيل مجدول تُسجَّل لمراقب public.watch_stock_priority_alert (فشلان متتاليان
+    // أو لا نجاح 45 دقيقة ⇒ «فشل الأتمتة»). dryRun لا يُسجَّل. فشل التسجيل لا يغيّر الرد.
+    const finish = async (body: Record<string, unknown>, status = 200) => {
+      if (!dryRun) {
+        try {
+          await admin.rpc("record_stock_priority_alert_run", { p_ok: status < 300, p_detail: String(body.error || body.status || "") });
+        } catch { /* المراقب يرى غياب النجاح */ }
+      }
+      return json(body, status);
+    };
+
+    const engine = (globalThis as unknown as { ozkStockAlertPriority?: Engine }).ozkStockAlertPriority;
+    if (!engine?.buildStockAlerts) return finish({ error: "engine_unavailable" }, 500);
 
     // نفس قراءات scripts/stock-priority-alerts.mjs: آخر تقرير لكل مصدر، والحد اليدوي.
     const latestReport = async (source: string) => {
@@ -91,7 +103,7 @@ export default {
         lowStockThreshold: Number.isFinite(parsed) ? parsed : 50
       });
     } catch (error) {
-      return json({ error: String((error as Error)?.message || "build_failed") }, 500);
+      return finish({ error: String((error as Error)?.message || "build_failed") }, 500);
     }
 
     const summary = {
@@ -114,9 +126,9 @@ export default {
         p_dedupe_key: message.dedupeKey,
         p_dedupe_minutes: message.cooldownMinutes
       });
-      if (error) return json({ error: "notify_failed", sent, ...summary }, 500);
+      if (error) return finish({ error: "notify_failed", sent, ...summary }, 500);
       sent += 1;
     }
-    return json({ mode: "live", sent, ...summary });
+    return finish({ mode: "live", sent, ...summary });
   },
 };
