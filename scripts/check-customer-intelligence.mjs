@@ -2634,4 +2634,813 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   assert.equal(rc.summary.needsReviewCreditCount, 1, "test 66: الشذوذ يُعدّ «يحتاج مراجعة» منفصلاً");
 }
 
-console.log(`ذكاء الزبائن: 92 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
+// ---------------------------------------------------------------------------
+// 93–107) تاريخ الحد (STEP 2): التنعيم الأسبوعي، تفسير التغيير، اتجاه الخطر، وصفوف اللقطة.
+// كل الأرقام تركيبية. يوم المرجع 2026-09-02، وd(n) = قبله بـn يوماً.
+// ---------------------------------------------------------------------------
+{
+  const REF_DAY = Date.UTC(2026, 8, 2);
+  const d = (n) => new Date(REF_DAY - n * 86400000).toISOString().slice(0, 10);
+  const debit = (n, amount) => ({ date: d(n), debit: amount, credit: 0, notes: "", billGuid: "" });
+  const pay = (n, amount) => ({ date: d(n), debit: 0, credit: amount, notes: "", billGuid: "" });
+  const gid = (n) => `00000000-0000-4000-a000-${String(n).padStart(12, "0")}`;
+  const regular = ({ from, to = 1, every, amount, lag }) => {
+    const rows = [];
+    for (let n = from; n >= to; n -= every) {
+      rows.push(debit(n, amount));
+      if (lag !== null && n - lag >= 0) rows.push(pay(n - lag, amount));
+    }
+    return rows.sort((a, b) => a.date.localeCompare(b.date));
+  };
+  const accounts = [
+    { guid: gid(1), name: "تاريخ منتظم", movements: regular({ from: 59, every: 6, amount: 600, lag: 6 }) },
+    { guid: gid(2), name: "تاريخ منتظم ثانٍ", movements: regular({ from: 58, every: 5, amount: 500, lag: 5 }) },
+    { guid: gid(3), name: "تاريخ متعثّر", movements: [debit(85, 1500), debit(80, 1500), pay(75, 200), debit(10, 300)] },
+    { guid: gid(4), name: "تاريخ بطيء", movements: regular({ from: 59, every: 5, amount: 400, lag: 40 }) },
+    { guid: gid(5), name: "تاريخ منتظم ثالث", movements: regular({ from: 57, every: 4, amount: 300, lag: 3 }) },
+    { guid: gid(6), name: "تاريخ مورد", movements: regular({ from: 57, every: 4, amount: 300, lag: 3 }), isSupplier: true }
+  ].map((a) => ({ ...a, balance: a.movements.reduce((sum, m) => sum + m.debit - m.credit, 0) }));
+  const [G_STEADY, G_STEADY2, G_DELINQ, , , G_SUPPLIER] = accounts.map((a) => a.guid);
+  const reports = {
+    invoicesReport: {
+      source: "ameen_customer_invoices", created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
+      summary: { periodDays: 60, fromDate: FROM_DATE, customers: accounts.length, syncedAt: REFERENCE_ISO },
+      items: accounts.map((a) => ({
+        name: a.name, customerGuid: a.guid, truncated: false,
+        invoices: a.movements.filter((m) => m.debit > 0 && m.date >= FROM_DATE).map((m, i) => invoice(m.date, m.debit, { guid: `hist-${a.guid}-${i}` }))
+      }))
+    },
+    balancesReport: {
+      source: "ameen_customer_balances", created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
+      summary: { source: "ameen_customer_balances", syncedAt: REFERENCE_ISO, totalCustomers: accounts.length },
+      items: accounts.map((a) => ({
+        key: engine.normalizeName(a.name), name: a.name, balance: a.balance, creditLimit: 0, remainingLimit: 0, status: "clear",
+        customerGuid: a.guid, customerAccountGuid: a.guid, isSupplier: a.isSupplier === true, recentPayments: [], recentMovements: [],
+        accountCurrencyIsBase: true, accountCurrency: "$", balanceAccountCcy: a.balance
+      }))
+    },
+    movementsReport: {
+      source: "ameen_customer_movements", created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
+      summary: { syncedAt: REFERENCE_ISO, periodDays: 92 },
+      items: accounts.map((a) => ({ customerGuid: a.guid, name: a.name, truncated: false, movements: a.movements }))
+    },
+    creditLimits: [],
+    now: NOW
+  };
+  const at = (result, guid) => {
+    const found = result.customers.find((entry) => entry.customerGuid === guid);
+    assert.ok(found, `سجل التاريخ مفقود: ${guid}`);
+    return found;
+  };
+  // صف لقطة سابقة كما يقرؤه المالك من customer_credit_history (snake_case).
+  const snap = (guid, daysAgo, fields = {}) => ({
+    customer_guid: guid, snapshot_date: d(daysAgo), auto_status: "normal", credit_status: "normal",
+    limit_base: 1000, credit_limit_display: 1000, credit_currency: "USD", risk_score: 0, factors: {}, ...fields
+  });
+  const withHistory = (creditHistory) => engine.build({ ...reports, creditHistory });
+
+  // 93) بلا تاريخ = STEP 1 حرفياً؛ تاريخ فارغ = الحد نفسه بلا تنعيم ولا تفسير ولا اتجاه.
+  const plain = engine.build(reports);
+  const empty = withHistory([]);
+  const steadyPlain = at(plain, G_STEADY);
+  const raw = steadyPlain.autoCredit.limitBase;
+  assert.equal(steadyPlain.autoCredit.status, "normal", "test 93: التركيبة تحتاج حداً رقمياً");
+  assert.ok(raw > 0, "test 93: حد محسوب موجب");
+  assert.ok(plain.customers.every((row) => row.creditHistory === null), "test 93: بلا مدخل تاريخ لا حقل تاريخ");
+  assert.equal(steadyPlain.autoCredit.smoothing, undefined, "test 93: بلا تاريخ لا تنعيم");
+  for (const row of plain.customers) {
+    const twin = at(empty, row.customerGuid);
+    assert.equal(twin.creditLimit, row.creditLimit, `test 93: تاريخ فارغ لا يغيّر الحد (${row.customerName})`);
+    assert.equal(twin.creditStatus, row.creditStatus, "test 93: ولا الحالة");
+    assert.equal(twin.riskScore, row.riskScore, "test 93: ولا درجة الخطر");
+  }
+  const steadyEmpty = at(empty, G_STEADY);
+  assert.deepEqual({ ...steadyEmpty.autoCredit.smoothing }, { applied: false, reason: "no_history" }, "test 93: لا لقطات ⇒ لا أساس");
+  assert.equal(steadyEmpty.creditHistory.change, null);
+  assert.equal(steadyEmpty.creditHistory.riskTrend, null);
+  assert.equal(steadyEmpty.creditHistory.previous, null);
+
+  // 94) التنعيم صعوداً: الحد لا يرتفع أكثر من +25% عن لقطة عمرها أسبوع.
+  const up = at(withHistory([snap(G_STEADY, 7, { limit_base: raw / 2, credit_limit_display: engine.commercialRound(raw / 2, "USD") })]), G_STEADY);
+  assert.equal(up.autoCredit.smoothing.applied, true, "test 94: التنعيم مطبَّق");
+  assert.equal(up.autoCredit.smoothing.reason, "capped_increase");
+  assert.ok(Math.abs(up.autoCredit.limitBase - (raw / 2) * 1.25) < 1e-6, "test 94: الحد = الأساس × 1.25");
+  assert.equal(up.autoCredit.limitBaseRaw, Math.round(raw * 1000) / 1000, "test 94: الحد المحسوب محفوظ كما هو");
+  assert.equal(up.creditLimit, engine.commercialRound((raw / 2) * 1.25, "USD"), "test 94: المعروض هو المنعَّم بعد التقريب");
+  assert.ok(up.flags.includes("credit_smoothed"), "test 94: وسم التنعيم");
+  assert.equal(up.creditHistory.change.kind, "limit");
+  assert.equal(up.creditHistory.change.direction, "up");
+  assert.ok(up.creditHistory.change.text.startsWith("ارتفع الحد من "), "test 94: نص الارتفاع");
+  assert.match(up.creditHistory.change.text, /التنعيم الأسبوعي/u, "test 94: التفسير يذكر حصر التنعيم");
+
+  // 95) التنعيم نزولاً: الحد لا ينزل أكثر من −40% بالأسبوع.
+  const down = at(withHistory([snap(G_STEADY, 7, { limit_base: raw * 3, credit_limit_display: engine.commercialRound(raw * 3, "USD") })]), G_STEADY);
+  assert.equal(down.autoCredit.smoothing.reason, "capped_decrease", "test 95: حصر النزول");
+  assert.ok(Math.abs(down.autoCredit.limitBase - raw * 3 * 0.6) < 1e-6, "test 95: الحد = الأساس × 0.6");
+  assert.equal(down.creditLimit, engine.commercialRound(raw * 3 * 0.6, "USD"));
+  assert.equal(down.creditHistory.change.direction, "down");
+  assert.ok(down.creditHistory.change.text.startsWith("نزل الحد من "), "test 95: نص النزول");
+
+  // 96) ضمن الحدود: لا تغيير.
+  const within = at(withHistory([snap(G_STEADY, 7, { limit_base: raw * 1.1 })]), G_STEADY);
+  assert.equal(within.autoCredit.smoothing.applied, false);
+  assert.equal(within.autoCredit.smoothing.reason, "within_bounds");
+  assert.equal(within.creditLimit, steadyPlain.creditLimit, "test 96: ضمن +25%/−40% الحد المحسوب كما هو");
+  assert.ok(!within.flags.includes("credit_smoothed"));
+
+  // 97) اختيار الأساس: أحدث لقطة عمرها ≥ 7 أيام؛ وإلا أقدم لقطة. لقطة فجوة بيانات، ولقطة
+  //     اليوم أو المستقبل، وما قبل نافذة الـ21 يوماً — لا تدخل.
+  const baselineOf = (history) => at(withHistory(history), G_STEADY).autoCredit.smoothing;
+  assert.equal(baselineOf([snap(G_STEADY, 3, { limit_base: raw * 0.5 }), snap(G_STEADY, 9, { limit_base: raw })]).baselineDate, d(9),
+    "test 97: الأساس أحدث لقطة عمرها ≥ 7 أيام لا الأحدث مطلقاً");
+  assert.equal(baselineOf([snap(G_STEADY, 3, { limit_base: raw }), snap(G_STEADY, 5, { limit_base: raw * 0.5 })]).baselineDate, d(5),
+    "test 97: بلا لقطة عمرها أسبوع ⇒ أقدم لقطة (حصر أشد)");
+  assert.equal(baselineOf([snap(G_STEADY, 8, { limit_base: 1, credit_status: "stale_balance" }), snap(G_STEADY, 10, { limit_base: raw })]).baselineDate, d(10),
+    "test 97: لقطة فجوة بيانات لا تصلح أساساً");
+  assert.equal(baselineOf([snap(G_STEADY, 8, { limit_base: 1, auto_status: "unavailable" }), snap(G_STEADY, 10, { limit_base: raw })]).baselineDate, d(10),
+    "test 97: حالة unavailable ليست أساساً");
+  assert.deepEqual({ ...baselineOf([snap(G_STEADY, 0, { limit_base: 1 }), snap(G_STEADY, -1, { limit_base: 1 }), snap(G_STEADY, 30, { limit_base: 1 })]) },
+    { applied: false, reason: "no_history" }, "test 97: لقطة اليوم والمستقبل وما قبل 21 يوماً خارج الحساب");
+  assert.equal(baselineOf([snap(G_STEADY.toUpperCase(), 7, { limit_base: raw / 2 })]).applied, true, "test 97: المعرّف يُطبَّع قبل الربط");
+  assert.deepEqual({ ...baselineOf([snap(G_STEADY2, 7, { limit_base: raw / 2 })]) }, { applied: false, reason: "no_history" },
+    "test 97: لقطة زبون آخر لا تمسّ هذا الزبون (الربط بـcustomerGuid وحده)");
+
+  // 98) التعثّر يصفّر الحد فوراً ويتجاوز التنعيم، والتفسير من أرقام التعثّر نفسها.
+  const delinquent = at(withHistory([snap(G_DELINQ, 7, { limit_base: 5000, credit_limit_display: 5000 })]), G_DELINQ);
+  assert.equal(delinquent.creditStatus, "delinquent", "test 98: متعثّر");
+  assert.equal(delinquent.creditLimit, 0, "test 98: الحد صفر رغم أساس 5,000");
+  assert.equal(delinquent.autoCredit.smoothing, undefined, "test 98: التعثّر لا يمرّ بالتنعيم");
+  assert.equal(delinquent.creditHistory.change.kind, "status");
+  assert.equal(delinquent.creditHistory.change.direction, "down");
+  assert.ok(delinquent.creditHistory.change.text.startsWith("صار متعثّراً، فنزل الحد من 5,000$ إلى 0$"), `test 98: ${delinquent.creditHistory.change.text}`);
+  assert.ok(delinquent.creditHistory.change.text.includes(`${Math.round(delinquent.autoCredit.overdueAmount).toLocaleString("en-US")}$`),
+    "test 98: قيمة الدين المتأخر من المحرك");
+
+  // 99) أساس غير رقمي (متعثّر الأسبوع الماضي) ⇒ لا تنعيم، والتفسير «خرج من التعثّر».
+  const recovered = at(withHistory([snap(G_STEADY, 7, { auto_status: "delinquent", credit_status: "delinquent", limit_base: 0, credit_limit_display: 0, factors: { overdueAmount: 2800 } })]), G_STEADY);
+  assert.equal(recovered.autoCredit.smoothing.reason, "no_numeric_baseline", "test 99: لا صعود تدريجي من صفر لا يُكسر");
+  assert.equal(recovered.creditLimit, steadyPlain.creditLimit, "test 99: الحد المحسوب كما هو");
+  assert.equal(recovered.creditHistory.change.kind, "status");
+  assert.match(recovered.creditHistory.change.text, /^خرج من التعثّر فصار الحد .* بدل 0\$: الدين المتأخر صار .* بدل 2,800\$\.$/u, `test 99: ${recovered.creditHistory.change.text}`);
+
+  // 100) تفسير تغيّر الحد: العامل الأكبر في الصيغة (وعامل ثانٍ إن كان معتبراً) بقيمتيه.
+  const cur = at(empty, G_STEADY).autoCredit;
+  const curFactors = { ...cur, limitBaseRaw: cur.limitBase };
+  const higher = steadyPlain.creditLimitDisplay + 500;
+  const prevQuality = at(withHistory([snap(G_STEADY, 1, {
+    limit_base: raw, credit_limit_display: higher,
+    factors: { ...curFactors, punctuality: curFactors.punctuality + 0.4, oldestOpenDays: 2, coverageScore: curFactors.coverageScore + 0.2, coverage: 0.99 }
+  })]), G_STEADY).creditHistory.change;
+  assert.equal(prevQuality.kind, "limit");
+  assert.deepEqual([...prevQuality.factors], ["punctuality", "coverage"], "test 100: الانضباط أولاً ثم التغطية");
+  assert.ok(prevQuality.text.startsWith(`نزل الحد من ${higher.toLocaleString("en-US")}$ إلى ${steadyPlain.creditLimitDisplay.toLocaleString("en-US")}$ لأن أقدم دين صار عمره `), `test 100: ${prevQuality.text}`);
+  assert.ok(prevQuality.text.includes(`عمره ${curFactors.oldestOpenDays} يوماً بدل 2 يوماً، وتغطية الدفع نزلت من 99% إلى `), `test 100: ${prevQuality.text}`);
+  const prevVelocity = at(withHistory([snap(G_STEADY, 1, {
+    limit_base: raw, credit_limit_display: higher, factors: { ...curFactors, velocity: curFactors.velocity * 1.5, cycleDays: curFactors.cycleDays }
+  })]), G_STEADY).creditHistory.change;
+  assert.deepEqual([...prevVelocity.factors], ["velocity"], "test 100: السرعة وحدها حين لا عامل غيرها");
+  assert.ok(prevVelocity.text.includes(`متوسط السحب الشهري صار ${Math.round(curFactors.velocity * 30).toLocaleString("en-US")}$ بدل ${Math.round(curFactors.velocity * 45).toLocaleString("en-US")}$`), `test 100: ${prevVelocity.text}`);
+  // زوال سقف البيانات القليلة يرفع الحد فيُذكر سبباً للارتفاع، ولا يُذكر سبباً لنزول.
+  const lower = steadyPlain.creditLimitDisplay - 100;
+  const uncapUp = at(withHistory([snap(G_STEADY, 1, {
+    limit_base: raw, credit_limit_display: lower, factors: { ...curFactors, cappedBy: "low_data" }
+  })]), G_STEADY).creditHistory.change;
+  assert.equal(uncapUp.direction, "up");
+  assert.ok(uncapUp.factors.includes("uncap_low_data"), "test 100: زوال السقف سبب الارتفاع");
+  assert.match(uncapUp.text, /صارت بياناته كافية فزال الحد المحافظ/u);
+  const uncapDown = at(withHistory([snap(G_STEADY, 1, {
+    limit_base: raw, credit_limit_display: higher, factors: { ...curFactors, cappedBy: "low_data" }
+  })]), G_STEADY).creditHistory.change;
+  assert.equal(uncapDown.direction, "down");
+  assert.ok(!uncapDown.factors.includes("uncap_low_data"), "test 100: زوال السقف لا يفسّر نزولاً");
+
+  // 101) لا تغيّر في الحد ولا الحالة ⇒ لا تفسير.
+  const same = at(withHistory([snap(G_STEADY, 1, { limit_base: raw, credit_limit_display: steadyPlain.creditLimitDisplay, factors: curFactors })]), G_STEADY);
+  assert.equal(same.creditHistory.change, null, "test 101: لا نص بلا تغيير");
+  assert.equal(same.creditHistory.previous.date, d(1), "test 101: آخر لقطة معروضة");
+
+  // 102) تغيّر الحالة إلى حالة بلا حد رقمي: النص من ملاحظة المحرك نفسها، لا صياغة جديدة.
+  const toPrepaidLike = at(withHistory([snap(G_DELINQ, 1, { auto_status: "needs_review", credit_status: "needs_review", limit_base: null, credit_limit_display: null })]), G_DELINQ);
+  assert.equal(toPrepaidLike.creditHistory.change.kind, "status");
+  assert.ok(toPrepaidLike.creditHistory.change.text.startsWith("صار متعثّراً"), "test 102: التعثّر يُفسَّر بأرقامه أياً كانت الحالة السابقة");
+
+  // 103) اتجاه الخطر من آخر 7 لقطات (اليوم + 6 سابقة).
+  const riskOf = (guid, scores) => at(withHistory(scores.map((score, i) => snap(guid, scores.length - i, { risk_score: score }))), guid).creditHistory.riskTrend;
+  const delinqRisk = at(plain, G_DELINQ).riskScore;
+  assert.equal(delinqRisk, 100);
+  const rising = riskOf(G_DELINQ, [10, 20, 30, 40, 50, 60]);
+  assert.equal(rising.direction, "up", "test 103: خطر صاعد");
+  assert.equal(rising.points, 7, "test 103: سبع نقاط");
+  assert.equal(rising.fromDate, d(6));
+  assert.equal(riskOf(G_DELINQ, [100, 100, 100, 100, 100, 100]).direction, "flat", "test 103: ثابت");
+  const steadyRisk = steadyPlain.riskScore;
+  assert.equal(riskOf(G_STEADY, [steadyRisk + 60, steadyRisk + 50, steadyRisk + 40, steadyRisk + 30, steadyRisk + 20, steadyRisk + 10]).direction, "down", "test 103: نازل");
+  assert.equal(riskOf(G_DELINQ, [10, 20, 30, 40, 50, 60, 70, 80, 90]).points, 7, "test 103: الأقدم من آخر 7 لقطات لا يدخل");
+  assert.equal(riskOf(G_DELINQ, [50]), null, "test 103: أقل من 3 نقاط ⇒ لا اتجاه");
+  // اختبار مستقل للميل: نقاط على خط مستقيم y = 10x ⇒ التغيّر = 10 × 6 أيام = 60.
+  assert.equal(riskOf(G_DELINQ, [40, 50, 60, 70, 80, 90]).delta, 60, "test 103: الميل بالمربعات الصغرى");
+
+  // 104) صفوف اللقطة اليومية: من الدالة نفسها التي يقرأ منها المتصفح، بلا مورد ولا فجوة بيانات.
+  const historyRun = withHistory([snap(G_STEADY, 7, { limit_base: raw / 2 })]);
+  const batch = engine.buildCreditSnapshots(historyRun);
+  assert.equal(batch.eligible, true, "test 104: بيانات حديثة موسومة ⇒ لقطة");
+  assert.equal(batch.snapshotDate, REFERENCE_LOCAL_DAY, "test 104: تاريخ اللقطة يوم المحاسبة المحلي");
+  assert.ok(batch.rows.every((row) => row.snapshot_date === REFERENCE_LOCAL_DAY));
+  assert.ok(!batch.rows.some((row) => row.customer_guid === G_SUPPLIER), "test 104: لا لقطة لمورد");
+  assert.ok(batch.rows.every((row) => /^[0-9a-f-]{36}$/.test(row.customer_guid)), "test 104: الربط بالمعرّف وحده");
+  assert.equal(new Set(batch.rows.map((row) => row.customer_guid)).size, batch.rows.length, "test 104: صف واحد لكل زبون");
+  const steadyRow = batch.rows.find((row) => row.customer_guid === G_STEADY);
+  const steadyNow = at(historyRun, G_STEADY);
+  assert.equal(steadyRow.credit_limit, steadyNow.creditLimit, "test 104: الحد المكتوب = المعروض (المنعَّم)");
+  assert.equal(steadyRow.limit_base_raw, Math.round(raw * 1000) / 1000, "test 104: والمحسوب قبل التنعيم محفوظ");
+  assert.equal(steadyRow.auto_status, "normal");
+  assert.equal(steadyRow.utilization_percent, steadyNow.creditUsagePercent);
+  assert.equal(steadyRow.risk_score, steadyNow.riskScore);
+  assert.equal(steadyRow.coverage, steadyNow.autoCredit.coverage);
+  assert.equal(steadyRow.punctuality, steadyNow.autoCredit.punctuality);
+  assert.equal(steadyRow.balance, steadyNow.currentBalance);
+  assert.ok(Number.isFinite(steadyRow.oldest_overdue_days), "test 104: أقدم دين متأخر بالأيام");
+  assert.equal(steadyRow.factors.smoothing.applied, true, "test 104: تفاصيل التنعيم محفوظة");
+  const delinqRow = batch.rows.find((row) => row.customer_guid === G_DELINQ);
+  assert.equal(delinqRow.auto_status, "delinquent");
+  assert.equal(delinqRow.credit_limit, 0);
+  assert.ok(delinqRow.oldest_overdue_days > 0, "test 104: المتعثّر عليه دين متأخر");
+  // اللقطة تعود فتصير تاريخاً يقرؤه المحرك غداً بلا فقد: صف الكاتب = صف القارئ.
+  const tomorrow = engine.build({ ...reports, now: new Date(NOW.getTime()), creditHistory: batch.rows.map((row) => ({ ...row, snapshot_date: d(1) })) });
+  assert.equal(at(tomorrow, G_STEADY).creditHistory.previous.date, d(1), "test 104: صف الكاتب يُقرأ تاريخاً");
+
+  // 105) لا لقطة من بيانات لا تصف الزبون: مصدر قديم، أو بلا lineKinds:v1، أو يومان محاسبيان.
+  const staleBatch = engine.buildCreditSnapshots(engine.build({ ...reports, now: new Date(NOW.getTime() + 86400000) }));
+  assert.equal(staleBatch.eligible, false);
+  assert.equal(staleBatch.reason, "stale_sources");
+  assert.equal(staleBatch.rows.length, 0);
+  const untypedBatch = engine.buildCreditSnapshots(engine.build({ ...reports, untyped: true }));
+  assert.equal(untypedBatch.reason, "auto_credit_disabled", "test 105: بلا مصدر موسوم لا لقطة");
+  const mismatchBatch = engine.buildCreditSnapshots(engine.build({ ...reports, movementsReport: { ...reports.movementsReport, report_date: d(1) } }));
+  assert.equal(mismatchBatch.reason, "accounting_day_mismatch", "test 105: يومان محاسبيان ⇒ لا لقطة");
+  assert.equal(engine.buildCreditSnapshots(null).reason, "no_result");
+
+  // 106) حتمية: نفس المدخلات ⇒ نفس النتيجة، ولقطة اليوم نفسه (إعادة التشغيل) لا تغيّر شيئاً.
+  const again = withHistory([snap(G_STEADY, 7, { limit_base: raw / 2 })]);
+  assert.deepEqual(JSON.parse(JSON.stringify(engine.buildCreditSnapshots(again).rows)), JSON.parse(JSON.stringify(batch.rows)), "test 106: حتمي");
+  const rerun = withHistory([snap(G_STEADY, 7, { limit_base: raw / 2 }), ...batch.rows]);
+  assert.deepEqual(JSON.parse(JSON.stringify(engine.buildCreditSnapshots(rerun).rows)), JSON.parse(JSON.stringify(batch.rows)),
+    "test 106: إعادة الكتابة في اليوم نفسه لا تعتمد على لقطة اليوم");
+
+  // 107) المعمارية: الكاتب على الخادم يحمّل الملف نفسه، والجدول للمالك قراءةً وللخادم كتابةً،
+  //      والواجهة تعرض ولا تحسب، ولا كتابة على الأمين.
+  const readText = (path) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
+  assert.equal(readText("supabase/functions/_shared/customer-intelligence.js"), readText("src/customer-intelligence.js"),
+    "test 107: نسخة الخادم يجب أن تطابق src/customer-intelligence.js بايتاً ببايت — شغّل: cp src/customer-intelligence.js supabase/functions/_shared/");
+  const fn = readText("supabase/functions/customer-credit-snapshot/index.ts");
+  assert.match(fn, /import "\.\.\/_shared\/customer-intelligence\.js";/, "test 107: الدالة تحمّل المحرك نفسه");
+  assert.match(fn, /buildCreditSnapshots\(/, "test 107: الصفوف من المحرك لا من حساب ثانٍ");
+  assert.match(fn, /x-ozk-credit-snapshot-token/i, "test 107: الدالة محمية برمز الجدولة");
+  assert.ok((fn.match(/\.upsert\(/g) || []).length === 1 && /from\("customer_credit_history"\)\s*\.upsert\(/.test(fn), "test 107: كتابة واحدة على جدول التاريخ وحده");
+  assert.doesNotMatch(fn, /\.(insert|update|delete)\(/, "test 107: لا كتابة أخرى");
+  assert.doesNotMatch(fn, /AmnDb00|AMEEN_SQL|mssql|tedious|sqlcmd/i, "test 107: لا وصول للأمين");
+  const migrationName = "supabase/migrations/20261003030000_customer_credit_history.sql";
+  const migration = readText(migrationName).toLowerCase();
+  assert.match(migration, /alter table public\.customer_credit_history enable row level security/, "test 107: RLS مفعّل");
+  assert.match(migration, /alter table public\.customer_credit_history force row level security/, "test 107: RLS مفروض");
+  assert.match(migration, /primary key \(customer_guid, snapshot_date\)/, "test 107: لقطة واحدة لكل زبون باليوم");
+  assert.match(migration, /for select\s+to authenticated\s+using \(\(select public\.is_owner\(\)\)\)/, "test 107: القراءة للمالك وحده");
+  assert.doesNotMatch(migration, /for (insert|update|delete|all)/, "test 107: لا سياسة كتابة لأي دور من المتصفح");
+  assert.match(migration, /revoke all on table public\.customer_credit_history from public, anon, authenticated/, "test 107: سحب صلاحيات المتصفح");
+  assert.match(migration, /grant select on table public\.customer_credit_history to authenticated/, "test 107: قراءة فقط (تحت RLS)");
+  assert.doesNotMatch(migration, /grant (insert|update|delete|all)[^;]*to (anon|authenticated)/, "test 107: لا كتابة للمتصفح");
+  assert.doesNotMatch(migration, /amndb00/, "test 107: لا علاقة للمigration بالأمين");
+  const view = readText("src/customer-intelligence-view.js");
+  assert.ok(view.includes("row.creditHistory"), "test 107: الواجهة تعرض التاريخ من المحرك");
+  assert.doesNotMatch(view, /\.(creditHistory|riskTrend|smoothing|change|limitBase|limitBaseRaw)\s*=(?!=)/, "test 107: الواجهة لا تُسنِد حقول التاريخ");
+  assert.doesNotMatch(view, /Math\.log|least|slope/, "test 107: لا حساب اتجاه في الواجهة");
+  assert.doesNotMatch(view, /\.upsert\(|\.insert\(/, "test 107: الواجهة لا تكتب");
+  const client = readText("src/supabase-client.js");
+  assert.match(client, /async listCustomerCreditHistory\(/, "test 107: قراءة التاريخ عبر دالة وصول");
+  assert.doesNotMatch(client.slice(client.indexOf("async listCustomerCreditHistory(")).split(/\n    async /)[0], /\.(upsert|insert|update|delete)\(/, "test 107: دالة الوصول قراءة فقط");
+
+  // 107ب) الواجهة ترسم التاريخ كما حسبه المحرك، وفشل قراءة الجدول (قبل تطبيق الـmigration)
+  //       لا يُسقط الشاشة بل يعيد سلوك STEP 1.
+  const renderView = async (listCustomerCreditHistory) => {
+    const appNode = { innerHTML: "", querySelectorAll: () => [], querySelector: () => null };
+    const sandbox = {
+      console, Date, Math, JSON, Number, String, Object, Array, Map, Set, Promise, Infinity, isNaN, URLSearchParams,
+      location: { search: "?route=customerIntel" },
+      state: { session: { user: {} }, route: "customerIntel" },
+      app: appNode,
+      shell: (html) => html,
+      render: () => {},
+      allowedRoutes: new Set(),
+      setRoute: () => {}, applyTheme: () => {}, installApp: () => {}, logout: () => {},
+      document: { querySelectorAll: () => [], querySelector: () => null },
+      setTimeout: () => 0, setInterval: () => 0, clearInterval: () => {}, queueMicrotask: () => {},
+      ozkCanAccessRoute: () => true,
+      tobaccoData: {
+        getCustomerInvoicesReport: async () => reports.invoicesReport,
+        listCustomerBalanceReports: async () => [reports.balancesReport],
+        getCustomerMovementsReport: async () => typedMovements(reports.movementsReport),
+        listCustomerCreditLimits: async () => [],
+        listCustomerCreditHistory
+      }
+    };
+    sandbox.window = sandbox;
+    const viewContext = vm.createContext(sandbox);
+    // الواجهة تحسب «الآن» من ساعة الجهاز؛ نثبّتها على لحظة التركيبة كي تبقى المصادر حديثة.
+    vm.runInContext(`Date = class extends Date { constructor(...a) { if (a.length) super(...a); else super(${NOW.getTime()}); } static now() { return ${NOW.getTime()}; } };`, viewContext);
+    vm.runInContext(readText("src/customer-intelligence.js"), viewContext, { filename: "src/customer-intelligence.js" });
+    vm.runInContext(readText("src/customer-intelligence-view.js"), viewContext, { filename: "src/customer-intelligence-view.js" });
+    await sandbox.ozkCustomerIntelligenceView.refresh();
+    return { html: appNode.innerHTML, intel: sandbox.ozkCustomerIntelligenceView.snapshot() };
+  };
+  const viewHistory = [snap(G_DELINQ, 7, { limit_base: 5000, credit_limit_display: 5000 }),
+    ...[10, 20, 30, 40, 50, 60].map((score, i) => snap(G_DELINQ, 6 - i, { risk_score: score, limit_base: 5000, credit_limit_display: 5000 }))];
+  let askedSince = null;
+  const rendered = await renderView(async ({ sinceDate } = {}) => { askedSince = sinceDate; return viewHistory; });
+  assert.equal(askedSince, new Date(NOW.getTime() - (21 + 2) * 86400000).toISOString().slice(0, 10), "test 107ب: نافذة الجلب من إعداد المحرك");
+  const viewRow = rendered.intel.customers.find((row) => row.customerGuid === G_DELINQ);
+  assert.ok(viewRow.creditHistory.change, "test 107ب: المحرك في المتصفح استلم التاريخ");
+  assert.ok(rendered.html.includes(viewRow.creditHistory.change.text.replace(/&/g, "&amp;")), "test 107ب: نص السبب بجانب الزبون كما حسبه المحرك");
+  assert.match(rendered.html, /class="ci-trend bad"[^>]*>↑</u, "test 107ب: سهم الخطر الصاعد");
+  const broken = await renderView(async () => { throw new Error('relation "public.customer_credit_history" does not exist'); });
+  assert.ok(broken.intel, "test 107ب: فشل التاريخ لا يُسقط الشاشة");
+  assert.ok(broken.intel.customers.every((row) => row.creditHistory === null), "test 107ب: بلا تاريخ = سلوك STEP 1");
+  assert.equal(broken.intel.customers.find((row) => row.customerGuid === G_STEADY).creditLimit, steadyPlain.creditLimit, "test 107ب: الحد المحسوب كما هو");
+  assert.doesNotMatch(broken.html, /ci-change/, "test 107ب: لا نص تغيير بلا تاريخ");
+}
+
+// ---------------------------------------------------------------------------
+// 108) سلوك كاتب اللقطة على الخادم (supabase/functions/customer-credit-snapshot) تحت عميل
+//      Supabase وهمي: الرمز شرط، والصفوف المكتوبة هي صفوف المحرك حرفياً، ولا كتابة من
+//      بيانات قديمة، والتاريخ يُقرأ صفحات.
+// ---------------------------------------------------------------------------
+{
+  const ts = (await import("typescript")).default;
+  const readText = (path) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
+  const { outputText, diagnostics } = ts.transpileModule(readText("supabase/functions/customer-credit-snapshot/index.ts"), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+    reportDiagnostics: true,
+    fileName: "customer-credit-snapshot.ts"
+  });
+  assert.equal(diagnostics.length, 0, "test 108: الدالة تُترجم بلا أخطاء صياغة");
+  const engineSource = readText("supabase/functions/_shared/customer-intelligence.js");
+
+  const REF_DAY = Date.UTC(2026, 8, 2);
+  const d = (n) => new Date(REF_DAY - n * 86400000).toISOString().slice(0, 10);
+  const debit = (n, amount) => ({ date: d(n), debit: amount, credit: 0, notes: "", billGuid: "" });
+  const pay = (n, amount) => ({ date: d(n), debit: 0, credit: amount, notes: "", billGuid: "" });
+  const guid = (n) => `00000000-0000-4000-b000-${String(n).padStart(12, "0")}`;
+  const movements = [];
+  for (let n = 59; n >= 1; n -= 6) { movements.push(debit(n, 600)); if (n - 6 >= 0) movements.push(pay(n - 6, 600)); }
+  movements.sort((a, b) => a.date.localeCompare(b.date));
+  const accountsList = [1, 2, 3, 4, 5].map((n) => ({ guid: guid(n), name: `كاتب ${n}`, movements, balance: movements.reduce((s, m) => s + m.debit - m.credit, 0) }));
+  const reportsFor = () => ({
+    ameen_customer_invoices: {
+      id: 1, source: "ameen_customer_invoices", created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
+      summary: { periodDays: 60, fromDate: FROM_DATE, syncedAt: REFERENCE_ISO },
+      items: accountsList.map((a) => ({ name: a.name, customerGuid: a.guid, truncated: false,
+        invoices: a.movements.filter((m) => m.debit > 0 && m.date >= FROM_DATE).map((m, i) => invoice(m.date, m.debit, { guid: `w-${a.guid}-${i}` })) }))
+    },
+    ameen_customer_balances: {
+      id: 2, source: "ameen_customer_balances", created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
+      summary: { syncedAt: REFERENCE_ISO },
+      items: accountsList.map((a) => ({ key: coreEngine.normalizeName(a.name), name: a.name, balance: a.balance, creditLimit: 0, customerGuid: a.guid,
+        customerAccountGuid: a.guid, isSupplier: false, accountCurrencyIsBase: true, accountCurrency: "$", balanceAccountCcy: a.balance }))
+    },
+    ameen_customer_movements: typedMovements({
+      id: 3, source: "ameen_customer_movements", created_at: REFERENCE_ISO, report_date: REFERENCE_LOCAL_DAY,
+      summary: { syncedAt: REFERENCE_ISO, periodDays: 92 },
+      items: accountsList.map((a) => ({ customerGuid: a.guid, name: a.name, truncated: false, movements: a.movements }))
+    })
+  });
+  const filler = Array.from({ length: 1000 }, (_, i) => ({
+    customer_guid: `00000000-0000-4000-c000-${String(i).padStart(12, "0")}`, snapshot_date: d(3), auto_status: "normal", credit_status: "normal",
+    limit_base: 100, credit_limit_display: 100, credit_currency: "USD", risk_score: 0, factors: {}
+  }));
+  const ownHistory = [{ customer_guid: guid(1), snapshot_date: d(7), auto_status: "normal", credit_status: "normal",
+    limit_base: 100, credit_limit_display: 100, credit_currency: "USD", risk_score: 40, factors: {} }];
+
+  async function runFunction({ header = "tok-108", stored = "tok-108", now = NOW, method = "POST" } = {}) {
+    const calls = { upserts: [], ranges: [], historyFilters: [], tables: [] };
+    const reports = reportsFor();
+    const history = [...ownHistory, ...filler];
+    const from = (table) => {
+      calls.tables.push(table);
+      const state = { filters: {}, range: null };
+      const result = () => {
+        if (table === "app_secrets") return { data: stored === null ? null : { value: stored }, error: null };
+        if (table === "inventory_reports") return { data: [reports[state.filters.source]].filter(Boolean), error: null };
+        if (table === "customer_credit_history") {
+          const [start, end] = state.range;
+          calls.ranges.push([start, end]);
+          return { data: history.slice(start, end + 1), error: null };
+        }
+        throw new Error(`test 108: جدول غير متوقع ${table}`);
+      };
+      const builder = {
+        select: () => builder,
+        eq: (column, value) => { state.filters[column] = value; return builder; },
+        gte: (column, value) => { calls.historyFilters.push([column, value]); return builder; },
+        order: () => builder,
+        limit: () => builder,
+        range: (start, end) => { state.range = [start, end]; return builder; },
+        maybeSingle: async () => result(),
+        upsert: async (rows, options) => { calls.upserts.push({ table, rows, options }); return { error: null }; },
+        then: (resolve, reject) => Promise.resolve(result()).then(resolve, reject)
+      };
+      return builder;
+    };
+    const HostDate = Date;
+    class FixedDate extends HostDate {
+      constructor(...args) { if (args.length) super(...args); else super(now.getTime()); }
+      static now() { return now.getTime(); }
+    }
+    const context = vm.createContext({
+      Response, Request, Headers, console, Promise, JSON, Math, Number, String, Object, Array, Map, Set, Infinity, isNaN,
+      Date: FixedDate,
+      Deno: { env: { get: (name) => ({ SUPABASE_URL: "https://local.test", SUPABASE_SERVICE_ROLE_KEY: "service-test" }[name] || "") } },
+      exports: {}
+    });
+    context.require = (specifier) => {
+      if (specifier === "../_shared/customer-intelligence.js") { vm.runInContext(engineSource, context); return {}; }
+      if (specifier.startsWith("npm:@supabase/supabase-js")) return { createClient: () => ({ from }) };
+      throw new Error(`test 108: استيراد غير متوقع ${specifier}`);
+    };
+    context.module = { exports: context.exports };
+    vm.runInContext(outputText, context, { filename: "customer-credit-snapshot.js" });
+    const handler = context.exports.default;
+    const headers = { "content-type": "application/json" };
+    if (header !== null) headers["x-ozk-credit-snapshot-token"] = header;
+    const response = await handler.fetch(new Request("https://local.test/functions/v1/customer-credit-snapshot", {
+      method, headers, ...(method === "POST" ? { body: JSON.stringify({ action: "snapshot" }) } : {})
+    }));
+    return { status: response.status, body: await response.json(), calls, context };
+  }
+
+  const wrong = await runFunction({ header: "tok-other" });
+  assert.equal(wrong.status, 401, "test 108: رمز خاطئ ⇒ 401");
+  assert.equal(wrong.calls.upserts.length, 0, "test 108: لا كتابة برمز خاطئ");
+  assert.deepEqual(wrong.calls.tables, ["app_secrets"], "test 108: لا قراءة تقارير قبل التحقق من الرمز");
+  assert.equal((await runFunction({ header: null })).status, 401, "test 108: بلا رمز ⇒ 401");
+  assert.equal((await runFunction({ stored: null, header: "" })).status, 401, "test 108: رمز غير مضبوط على الخادم ⇒ لا شيء");
+  assert.equal((await runFunction({ method: "GET" })).status, 405);
+
+  const ok = await runFunction();
+  assert.equal(ok.status, 200, `test 108: ${JSON.stringify(ok.body)}`);
+  assert.equal(ok.body.snapshotDate, REFERENCE_LOCAL_DAY);
+  assert.equal(ok.calls.upserts.length, 1, "test 108: كتابة واحدة");
+  const [write] = ok.calls.upserts;
+  assert.equal(write.table, "customer_credit_history");
+  assert.equal(write.options.onConflict, "customer_guid,snapshot_date", "test 108: upsert بمفتاح الزبون واليوم");
+  assert.equal(ok.body.written, accountsList.length);
+  assert.deepEqual(ok.calls.ranges, [[0, 999], [1000, 1999]], "test 108: التاريخ يُقرأ صفحات من 1000");
+  assert.equal(ok.calls.historyFilters[0][0], "snapshot_date");
+  // الصفوف المكتوبة = صفوف المحرك نفسه على المدخلات نفسها (عدا وقت الكتابة).
+  const expected = coreEngine.buildCreditSnapshots(rawBuild({
+    invoicesReport: reportsFor().ameen_customer_invoices,
+    balancesReport: reportsFor().ameen_customer_balances,
+    movementsReport: reportsFor().ameen_customer_movements,
+    creditLimits: [],
+    creditHistory: [...ownHistory, ...filler],
+    now: NOW
+  })).rows;
+  const written = JSON.parse(JSON.stringify(write.rows)).map(({ written_at: writtenAt, ...row }) => { assert.ok(writtenAt); return row; });
+  assert.deepEqual(written, JSON.parse(JSON.stringify(expected)), "test 108: الخادم يكتب صفوف المحرك حرفياً");
+  const smoothed = written.find((row) => row.customer_guid === guid(1));
+  assert.equal(smoothed.factors.smoothing.applied, true, "test 108: الخادم ينعّم من التاريخ نفسه");
+  assert.ok(smoothed.limit_base <= 125 + 1e-6, "test 108: +25% من أساس 100");
+
+  const stale = await runFunction({ now: new Date(NOW.getTime() + 86400000) });
+  assert.equal(stale.status, 200);
+  assert.equal(stale.body.skipped, "stale_sources", "test 108: مصادر قديمة ⇒ تخطٍّ صريح");
+  assert.equal(stale.calls.upserts.length, 0, "test 108: لا كتابة من بيانات قديمة");
+}
+
+// ---------------------------------------------------------------------------
+// 109–117) تنبيه غياب الزبون المهم (CUSTOMER_INACTIVE_5D).
+// تركيبة مستقلة: 15 زبون دولار في عيّنة القيمة (أعلى 20% = 3 مقاعد) + زبون منتظم صغير
+// + مورد ضخم. يوم المرجع 2026-09-02، وk(n) = قبله بـn يوماً.
+// ---------------------------------------------------------------------------
+const KEY_REF = Date.UTC(2026, 8, 2);
+const k = (n) => new Date(KEY_REF - n * 86400000).toISOString().slice(0, 10);
+const kGuid = (n) => `00000000-0000-4000-d000-${String(n).padStart(12, "0")}`;
+const KEY_ACCOUNTS = [
+  // الأكبر قيمة: آخر بيع قبل 10 أيام، وبعده مرتجع فقط (المرتجع ليس شراء).
+  { n: 1, name: "كبير بمرتجع", invoices: [invoice(k(30), 9000, { guid: "kb-1" }), invoice(k(10), 9000, { guid: "kb-2" }), invoice(k(1), 500, { guid: "kb-3", isReturn: true })] },
+  // الثاني قيمة: غياب 5 أيام بالضبط.
+  { n: 2, name: "كبير خمسة أيام", invoices: [invoice(k(40), 7000, { guid: "kc-1" }), invoice(k(5), 7000, { guid: "kc-2" })] },
+  // الثالث قيمة: غياب 4 أيام — مهم لكن لم يبلغ العتبة.
+  { n: 3, name: "كبير أربعة أيام", invoices: [invoice(k(35), 6000, { guid: "kd-1" }), invoice(k(4), 6000, { guid: "kd-2" })] },
+  // منتظم صغير: 5 أيام شراء في آخر 30 يوماً، آخرها قبل 6 أيام.
+  { n: 4, name: "منتظم صغير", invoices: series([k(22), k(18), k(14), k(10), k(6)], 40, "صنف منتظم").map((inv, i) => ({ ...inv, guid: `ke-${i}` })) },
+  // مورد ضخم غائب: خارج «المهمين» كلياً.
+  { n: 5, name: "مورد ضخم غائب", isSupplier: true, invoices: [invoice(k(50), 90000, { guid: "kf-1" }), invoice(k(20), 90000, { guid: "kf-2" })] },
+  // صغار نشطون يملؤون العيّنة (2 فاتورتان، آخرها قريب).
+  ...Array.from({ length: 11 }, (_, i) => ({
+    n: 10 + i,
+    name: `صغير ${i + 1}`,
+    invoices: [invoice(k(25), 100 + i, { guid: `kg-${i}-1` }), invoice(k(2 + (i % 2)), 100 + i, { guid: `kg-${i}-2` })]
+  }))
+];
+function keyReports({ syncedAt = REFERENCE_ISO, accounts = KEY_ACCOUNTS } = {}) {
+  return {
+    invoicesReport: {
+      id: 91, source: "ameen_customer_invoices", created_at: syncedAt, report_date: REFERENCE_LOCAL_DAY,
+      summary: { periodDays: 60, fromDate: FROM_DATE, syncedAt },
+      items: accounts.map((a) => ({ name: a.name, customerGuid: kGuid(a.n), truncated: false, invoices: a.invoices }))
+    },
+    balancesReport: {
+      id: 92, source: "ameen_customer_balances", created_at: syncedAt, report_date: REFERENCE_LOCAL_DAY,
+      summary: { syncedAt },
+      items: accounts.map((a) => ({ key: coreEngine.normalizeName(a.name), name: a.name, balance: 0, creditLimit: 0, customerGuid: kGuid(a.n),
+        customerAccountGuid: kGuid(a.n), isSupplier: Boolean(a.isSupplier), accountCurrencyIsBase: true, accountCurrency: "$", balanceAccountCcy: 0 }))
+    }
+  };
+}
+const inactivityPlan = (...args) => JSON.parse(JSON.stringify(coreEngine.buildInactivityAlert(...args)));
+const keyResult = engine.build({ ...keyReports(), creditLimits: [], now: NOW });
+const keyRow = (n) => keyResult.customers.find((row) => row.customerGuid === kGuid(n));
+
+// 109) من هو «المهم»: أعلى 20% بالقيمة لكل عملة، أو منتظم (≥ 4 أيام شراء في 30 يوماً).
+{
+  assert.equal(keyResult.dataAvailability.vipPopulation, 15, "test 109: العيّنة 15 زبوناً بلا المورد");
+  for (const n of [1, 2, 3]) {
+    assert.equal(keyRow(n).keyCustomer?.byValue, true, `test 109: الزبون ${n} ضمن أعلى 20% بالقيمة`);
+    assert.ok(keyRow(n).flags.includes("key_customer"));
+  }
+  assert.deepEqual([1, 2, 3].map((n) => keyRow(n).keyCustomer.valueRank), [1, 2, 3], "test 109: ترتيب القيمة بصافي المشتريات");
+  assert.equal(keyRow(4).keyCustomer?.byValue, false, "test 109: المنتظم الصغير ليس بالقيمة");
+  assert.equal(keyRow(4).keyCustomer?.byRegularity, true, "test 109: لكنه منتظم");
+  assert.equal(keyRow(4).keyCustomer.purchaseDays30, 5);
+  for (let n = 10; n <= 20; n += 1) assert.equal(keyRow(n).keyCustomer, null, `test 109: الصغير ${n} ليس مهماً`);
+  assert.equal(coreEngine.CONFIG.keyCustomerAlert.inactiveDays, 5, "test 109: العتبة 5 أيام في CONFIG");
+}
+
+// 110) المورد خارج «المهمين» وخارج التنبيه مهما كبرت مبيعاته وطال غيابه.
+{
+  const supplier = keyRow(5);
+  assert.ok(supplier.isSupplier);
+  assert.equal(supplier.keyCustomer, null, "test 110: مورد ⇒ ليس زبوناً مهماً");
+  assert.ok(!supplier.flags.includes("key_customer_absent"));
+}
+
+// 111) 5 أيام بالضبط ⇒ غائب؛ 4 أيام ⇒ لا.
+{
+  assert.equal(keyRow(2).daysSinceLastPurchase, 5);
+  assert.equal(keyRow(2).keyCustomer.absent, true, "test 111: 5 أيام بالضبط ⇒ تنبيه");
+  assert.ok(keyRow(2).flags.includes("key_customer_absent"));
+  assert.equal(keyRow(3).daysSinceLastPurchase, 4);
+  assert.equal(keyRow(3).keyCustomer.absent, false, "test 111: 4 أيام ⇒ لا تنبيه");
+}
+
+// 112) المرتجع ليس شراء: مرتجع أمس لا يقطع غياب 10 أيام.
+{
+  assert.equal(keyRow(1).lastPurchaseAt, k(10), "test 112: آخر فاتورة بيع لا آخر مرتجع");
+  assert.equal(keyRow(1).daysSinceLastPurchase, 10);
+  assert.equal(keyRow(1).keyCustomer.absent, true, "test 112: مرتجع فقط ⇒ ما زال غائباً");
+}
+
+// 113) الرسالة اليومية: كل الغائبين في رسالة واحدة، من الأهم للأقل، بالحقول المطلوبة.
+{
+  const plan = inactivityPlan(keyResult, []);
+  assert.equal(plan.status, "ok");
+  assert.equal(plan.code, "CUSTOMER_INACTIVE_5D");
+  assert.deepEqual(plan.absent.map((entry) => entry.customerGuid), [kGuid(1), kGuid(2), kGuid(4)], "test 113: الأهم أولاً، بلا المورد ولا من غاب 4 أيام");
+  assert.equal(plan.messages.length, 1, "test 113: رسالة واحدة");
+  const [message] = plan.messages;
+  const lines = message.text.split("\n").slice(1);
+  assert.equal(lines.length, 3);
+  assert.ok(lines[0].startsWith("1. كبير بمرتجع"), "test 113: الترتيب");
+  const [y, m, dd] = k(10).split("-");
+  assert.ok(lines[0].includes(`آخر فاتورة ${dd}-${m}-${y}`), "test 113: التاريخ DD-MM-YYYY");
+  assert.ok(lines[0].includes("10 يوماً بلا فاتورة"), "test 113: عدد أيام الغياب");
+  assert.ok(lines[0].includes("مشترياته الشهرية 8,750$"), `test 113: المعدل الشهري = صافي 60 يوماً (بعد المرتجع) ÷ 2 (${lines[0]})`);
+  assert.match(lines[0], /فجوته المعتادة (غير محسوبة|\d+ يوماً)/u, "test 113: الفجوة المعتادة");
+  assert.ok(lines[2].includes("فجوته المعتادة 4 يوماً"), `test 113: فجوة المنتظم من نمطه (${lines[2]})`);
+  assert.deepEqual(plan.insertRows.map((row) => row.dedupe_key), [
+    `CUSTOMER_INACTIVE_5D:${kGuid(1)}:${k(10)}`,
+    `CUSTOMER_INACTIVE_5D:${kGuid(2)}:${k(5)}`,
+    `CUSTOMER_INACTIVE_5D:${kGuid(4)}:${k(6)}`
+  ], "test 113: مفتاح منع التكرار = الزبون + تاريخ آخر فاتورة");
+  assert.deepEqual(plan.deleteKeys, []);
+  assert.deepEqual(inactivityPlan(keyResult, []), plan, "test 113: حتمي");
+  // أكثر من 20 غائباً ⇒ رسائل من 20 زبوناً بالترتيب، ولكل رسالة زبائنها ومفتاحها.
+  const many = {
+    ...keyResult,
+    customers: Array.from({ length: 25 }, (_, i) => ({
+      customerId: `m${i}`, customerGuid: kGuid(100 + i), customerKey: `m${i}`, customerName: `غائب ${i + 1}`, currency: "USD",
+      lastPurchaseAt: k(6), daysSinceLastPurchase: 6, typicalGapDays: 3, cadenceTrusted: true, netSales60d: 1000 - i, isSupplier: false,
+      keyCustomer: { absent: true, valueRank: i + 1, monthlyPurchases: 500, byValue: true, byRegularity: false }
+    }))
+  };
+  const split = inactivityPlan(many, []);
+  assert.equal(split.messages.length, 2, "test 113: تقسيم كل 20 زبوناً");
+  assert.deepEqual(split.messages.map((message) => message.customerKeys.length), [20, 5]);
+  assert.match(split.messages[1].text, /\(2\/2\)\n21\. غائب 21 /u, "test 113: الترقيم يكمل في الرسالة الثانية");
+  assert.notEqual(split.messages[0].dedupeKey, split.messages[1].dedupeKey);
+}
+
+// 114) عدم التكرار: من نُبِّه عنه لغيابه الحالي لا يُعاد في اليوم التالي.
+{
+  const first = inactivityPlan(keyResult, []);
+  const again = inactivityPlan(keyResult, first.insertRows);
+  assert.equal(again.status, "ok");
+  assert.equal(again.messages.length, 0, "test 114: لا رسالة لغياب نُبِّه عنه");
+  assert.equal(again.insertRows.length, 0);
+  assert.deepEqual(again.deleteKeys, [], "test 114: الحالة تبقى ما دام الغياب مستمراً");
+  const partial = inactivityPlan(keyResult, first.insertRows.slice(0, 1));
+  assert.deepEqual(partial.insertRows.map((row) => row.customer_guid), [kGuid(2), kGuid(4)], "test 114: الجدد وحدهم");
+  assert.ok(!partial.messages[0].text.includes("كبير بمرتجع"));
+}
+
+// 115) رجع واشترى ⇒ يخرج من القائمة وتُنظَّف حالته؛ وغيابه التالي مفتاح جديد.
+{
+  const accounts = KEY_ACCOUNTS.map((a) => a.n === 2 ? { ...a, invoices: [...a.invoices, invoice(k(1), 7000, { guid: "kc-3" })] } : a);
+  const back = engine.build({ ...keyReports({ accounts }), creditLimits: [], now: NOW });
+  const before = inactivityPlan(keyResult, []).insertRows;
+  const aged = { dedupe_key: `CUSTOMER_INACTIVE_5D:${kGuid(30)}:${k(70)}`, customer_guid: kGuid(30), customer_key: null, last_purchase_date: k(70) };
+  const plan = inactivityPlan(back, [...before, aged]);
+  assert.ok(!plan.absent.some((entry) => entry.customerGuid === kGuid(2)), "test 115: من اشترى لا يظهر");
+  assert.deepEqual(plan.deleteKeys, [`CUSTOMER_INACTIVE_5D:${kGuid(2)}:${k(5)}`, aged.dedupe_key].sort(), "test 115: حذف صف العائد وصف خرج من النافذة");
+  assert.equal(plan.messages.length, 0, "test 115: لا رسالة جديدة");
+}
+
+// 116) تقرير فواتير قديم (> 90 دقيقة) ⇒ لا تنبيهات غياب، بلاغ «البيانات قديمة»، والحالة لا تُمسّ.
+{
+  const late = engine.build({ ...keyReports(), creditLimits: [], now: new Date(new Date(REFERENCE_ISO).getTime() + 91 * 60000) });
+  const plan = inactivityPlan(late, inactivityPlan(keyResult, []).insertRows);
+  assert.equal(plan.status, "stale_invoices", "test 116: فواتير عمرها 91 دقيقة ⇒ قديمة");
+  assert.equal(plan.messages.length, 1);
+  assert.match(plan.messages[0].text, /عمره 91 دقيقة/u);
+  assert.match(plan.messages[0].text, /لا تنبيهات/u);
+  assert.equal(plan.insertRows.length, 0);
+  assert.equal(plan.deleteKeys.length, 0, "test 116: لا تنظيف من بيانات قديمة");
+  const atLimit = engine.build({ ...keyReports(), creditLimits: [], now: new Date(new Date(REFERENCE_ISO).getTime() + 90 * 60000) });
+  assert.equal(inactivityPlan(atLimit, []).status, "ok", "test 116: 90 دقيقة بالضبط ما زالت حديثة");
+  const none = inactivityPlan(engine.build({ creditLimits: [], now: NOW }), []);
+  assert.equal(none.status, "stale_invoices", "test 116: بلا تقرير فواتير ⇒ لا تنبيهات");
+}
+
+// 117) التنبيهات القائمة لم تتغيّر: لا كود جديد في buildAlertDrafts، والعقود 1..108 أعلاه خضراء.
+{
+  const codes = new Set(coreEngine.buildAlertDrafts(keyResult).map((draft) => draft.code));
+  assert.ok(!codes.has("CUSTOMER_INACTIVE_5D"), "test 117: التنبيه الجديد بمسار الخادم وحده");
+  const mainCodes = coreEngine.buildAlertDrafts(result).map((draft) => draft.code);
+  assert.ok(mainCodes.includes("VIP_DECLINING"), "test 117: VIP_DECLINING باقٍ");
+}
+
+// ---------------------------------------------------------------------------
+// 118) الدالة الطرفية customer-inactivity-alert تحت عميل Supabase وهمي: الرمز شرط، والإرسال
+//      عبر notify_telegram بنص المحرك، والحالة تُكتب بعد الإرسال فقط، والبيانات القديمة بلاغ لا حالة.
+// ---------------------------------------------------------------------------
+{
+  const ts = (await import("typescript")).default;
+  const readText = (path) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
+  const { outputText, diagnostics } = ts.transpileModule(readText("supabase/functions/customer-inactivity-alert/index.ts"), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+    reportDiagnostics: true,
+    fileName: "customer-inactivity-alert.ts"
+  });
+  assert.equal(diagnostics.length, 0, "test 118: الدالة تُترجم بلا أخطاء صياغة");
+  const engineSource = readText("supabase/functions/_shared/customer-intelligence.js");
+  const reports = keyReports();
+  const bySource = { ameen_customer_invoices: reports.invoicesReport, ameen_customer_balances: reports.balancesReport };
+
+  async function runAlert({ header = "tok-118", stored = "tok-118", now = NOW, state = [], notifyError = null, mode = "live" } = {}) {
+    const calls = { rpc: [], upserts: [], deletes: [], tables: [] };
+    const from = (table) => {
+      calls.tables.push(table);
+      const filters = {};
+      let range = null;
+      const result = () => {
+        if (table === "app_secrets") return { data: stored === null ? null : { value: stored }, error: null };
+        if (table === "inventory_reports") return { data: [bySource[filters.source]].filter(Boolean), error: null };
+        if (table === "customer_inactivity_alerts") return { data: state.slice(range[0], range[1] + 1), error: null };
+        if (table === "bot_config") return { data: mode === null ? null : { value: mode }, error: null };
+        throw new Error(`test 118: جدول غير متوقع ${table}`);
+      };
+      const builder = {
+        select: () => builder,
+        eq: (column, value) => { filters[column] = value; return builder; },
+        order: () => builder,
+        limit: () => builder,
+        range: (start, end) => { range = [start, end]; return builder; },
+        maybeSingle: async () => result(),
+        upsert: async (rows, options) => { calls.upserts.push({ table, rows, options }); return { error: null }; },
+        delete: () => ({ in: async (column, values) => { calls.deletes.push({ table, column, values }); return { error: null }; } }),
+        then: (resolve, reject) => Promise.resolve(result()).then(resolve, reject)
+      };
+      return builder;
+    };
+    const rpc = async (name, args) => { calls.rpc.push({ name, args }); return { error: notifyError }; };
+    const HostDate = Date;
+    class FixedDate extends HostDate {
+      constructor(...args) { if (args.length) super(...args); else super(now.getTime()); }
+      static now() { return now.getTime(); }
+    }
+    const context = vm.createContext({
+      Response, Request, Headers, console, Promise, JSON, Math, Number, String, Object, Array, Map, Set, Infinity, isNaN,
+      Date: FixedDate,
+      Deno: { env: { get: (name) => ({ SUPABASE_URL: "https://local.test", SUPABASE_SERVICE_ROLE_KEY: "service-test" }[name] || "") } },
+      exports: {}
+    });
+    context.require = (specifier) => {
+      if (specifier === "../_shared/customer-intelligence.js") { vm.runInContext(engineSource, context); return {}; }
+      if (specifier.startsWith("npm:@supabase/supabase-js")) return { createClient: () => ({ from, rpc }) };
+      throw new Error(`test 118: استيراد غير متوقع ${specifier}`);
+    };
+    context.module = { exports: context.exports };
+    vm.runInContext(outputText, context, { filename: "customer-inactivity-alert.js" });
+    const headers = { "content-type": "application/json" };
+    if (header !== null) headers["x-ozk-inactivity-alert-token"] = header;
+    const response = await context.exports.default.fetch(new Request("https://local.test/functions/v1/customer-inactivity-alert", {
+      method: "POST", headers, body: JSON.stringify({ action: "daily_check" })
+    }));
+    return { status: response.status, body: await response.json(), calls };
+  }
+
+  // الوضع التجريبي هو الافتراضي: بلا قيمة 'live' لا إرسال ولا كتابة حالة، والأعداد وحدها.
+  for (const mode of [null, "", "dry_run", "LIVE "]) {
+    const dry = await runAlert({ mode });
+    assert.equal(dry.status, 200, `test 118: ${JSON.stringify(dry.body)}`);
+    assert.equal(dry.body.mode, "dry_run", `test 118: الوضع ${JSON.stringify(mode)} تجريبي`);
+    assert.equal(dry.body.wouldAlert, 3, "test 118: العدد الذي كان سيُنبَّه عنه");
+    assert.equal(dry.body.wouldSendMessages, 1);
+    assert.equal(dry.calls.rpc.length + dry.calls.upserts.length + dry.calls.deletes.length, 0, "test 118: تجريبي ⇒ لا إرسال ولا حالة");
+  }
+  const dryStale = await runAlert({ mode: null, now: new Date(new Date(REFERENCE_ISO).getTime() + 3 * 3600000) });
+  assert.equal(dryStale.body.status, "stale_invoices");
+  assert.equal(dryStale.calls.rpc.length, 0, "test 118: لا بلاغ تيليغرام في الوضع التجريبي");
+
+  const wrong = await runAlert({ header: "tok-x" });
+  assert.equal(wrong.status, 401, "test 118: رمز خاطئ ⇒ 401");
+  assert.deepEqual(wrong.calls.tables, ["app_secrets"], "test 118: لا قراءة قبل التحقق من الرمز");
+  assert.equal(wrong.calls.rpc.length, 0);
+  assert.equal((await runAlert({ stored: null, header: "" })).status, 401, "test 118: رمز غير مضبوط ⇒ لا شيء");
+
+  const expected = inactivityPlan(keyResult, []);
+  const ok = await runAlert();
+  assert.equal(ok.status, 200, `test 118: ${JSON.stringify(ok.body)}`);
+  assert.deepEqual(JSON.parse(JSON.stringify(ok.calls.rpc)), expected.messages.map((message) => ({
+    name: "notify_telegram",
+    args: { p_event_type: "CUSTOMER_INACTIVE_5D", p_message: message.text, p_dedupe_key: message.dedupeKey, p_dedupe_minutes: 1440 }
+  })), "test 118: نص المحرك ومفتاحه حرفياً عبر notify_telegram");
+  assert.equal(ok.calls.upserts.length, 1);
+  assert.equal(ok.calls.upserts[0].table, "customer_inactivity_alerts");
+  assert.equal(ok.calls.upserts[0].options.onConflict, "dedupe_key");
+  assert.deepEqual(JSON.parse(JSON.stringify(ok.calls.upserts[0].rows)).map(({ alerted_at: at, ...row }) => { assert.ok(at); return row; }), JSON.parse(JSON.stringify(expected.insertRows)));
+  assert.equal(ok.body.alerted, 3);
+
+  const repeat = await runAlert({ state: expected.insertRows });
+  assert.equal(repeat.calls.rpc.length, 0, "test 118: لا إرسال ثانٍ للغياب نفسه");
+  assert.equal(repeat.calls.upserts.length, 0);
+
+  const failed = await runAlert({ notifyError: { message: "boom" } });
+  assert.equal(failed.status, 500);
+  assert.equal(failed.calls.upserts.length, 0, "test 118: فشل الإرسال ⇒ لا تسجيل حالة");
+
+  const stale = await runAlert({ now: new Date(new Date(REFERENCE_ISO).getTime() + 3 * 3600000), state: expected.insertRows });
+  assert.equal(stale.status, 200);
+  assert.equal(stale.body.status, "stale_invoices");
+  assert.equal(stale.calls.rpc.length, 1, "test 118: بلاغ واحد بأن البيانات قديمة");
+  assert.match(stale.calls.rpc[0].args.p_message, /تقرير الفواتير عمره 180 دقيقة/u);
+  assert.equal(stale.calls.upserts.length + stale.calls.deletes.length, 0, "test 118: لا مساس بالحالة من بيانات قديمة");
+
+  const cleared = await runAlert({ state: [{ dedupe_key: `CUSTOMER_INACTIVE_5D:${kGuid(3)}:${k(20)}`, customer_guid: kGuid(3), customer_key: null, last_purchase_date: k(20) }] });
+  assert.deepEqual(JSON.parse(JSON.stringify(cleared.calls.deletes)), [{ table: "customer_inactivity_alerts", column: "dedupe_key", values: [`CUSTOMER_INACTIVE_5D:${kGuid(3)}:${k(20)}`] }], "test 118: من عاد واشترى يُحذف صفّه");
+
+  // البنية الثابتة: لا وصول للأمين، والجدول محمي، ولا تعديل على نظام تيليغرام القائم.
+  const fn = readText("supabase/functions/customer-inactivity-alert/index.ts");
+  assert.match(fn, /import "\.\.\/_shared\/customer-intelligence\.js";/, "test 118: الدالة تحمّل المحرك نفسه");
+  assert.match(fn, /buildInactivityAlert\(/, "test 118: الخطة من المحرك لا من حساب ثانٍ");
+  assert.ok(fn.indexOf('!== "live"') < fn.indexOf('admin.rpc("notify_telegram"'), "test 118: بوابة الوضع قبل أي إرسال");
+  assert.doesNotMatch(fn, /AmnDb00|AMEEN_SQL|mssql|tedious|sqlcmd/i, "test 118: لا وصول للأمين");
+  assert.doesNotMatch(fn, /from\("(?!app_secrets|inventory_reports|customer_inactivity_alerts|bot_config)/, "test 118: لا جداول أخرى");
+  const migration = readText("supabase/migrations/20261003030100_customer_inactivity_alerts.sql").toLowerCase();
+  // رقم الإصدار هو مفتاح سجل الهجرات في Supabase: لا يتكرر بين ملفين.
+  const { readdirSync } = await import("node:fs");
+  const versions = readdirSync(new URL("../supabase/migrations/", import.meta.url)).filter((name) => /^\d{14}_.+\.sql$/.test(name)).map((name) => name.slice(0, 14));
+  assert.deepEqual(versions.filter((version, index) => versions.indexOf(version) !== index), [], "test 118: أرقام إصدارات الهجرات فريدة");
+  // قاعدة بلا pg_cron (فرع معاينة/إعادة تشغيل محلية) لا تُسقط سلسلة الهجرات.
+  for (const name of ["20261003030000_customer_credit_history.sql", "20261003030100_customer_inactivity_alerts.sql"]) {
+    const sql = readText(`supabase/migrations/${name}`);
+    assert.ok(sql.indexOf("from pg_extension where extname = 'pg_cron'") > 0 && sql.indexOf("from pg_extension where extname = 'pg_cron'") < sql.indexOf("from cron.job"), `test 118: ${name} يتحقق من pg_cron قبل cron.job`);
+  }
+  assert.match(migration, /alter table public\.customer_inactivity_alerts enable row level security/, "test 118: RLS مفعّل");
+  assert.match(migration, /alter table public\.customer_inactivity_alerts force row level security/, "test 118: RLS مفروض");
+  assert.match(migration, /for select\s+to authenticated\s+using \(\(select public\.is_owner\(\)\)\)/, "test 118: القراءة للمالك وحده");
+  assert.doesNotMatch(migration, /for (insert|update|delete|all)/, "test 118: لا سياسة كتابة من المتصفح");
+  assert.match(migration, /revoke all on table public\.customer_inactivity_alerts from public, anon, authenticated/);
+  assert.doesNotMatch(migration, /grant (insert|update|delete|all)[^;]*to (anon|authenticated)/, "test 118: لا كتابة للمتصفح");
+  assert.doesNotMatch(migration, /amndb00|create or replace function public\.notify_telegram|telegram_outbox/, "test 118: لا أمين ولا تعديل لنظام تيليغرام");
+  assert.match(migration, /cron\.schedule\('customer-inactivity-alert', '0 7 \* \* \*'/, "test 118: فحص يومي واحد");
+  // pg_net لا يرسل JWT: الدالتان المجدولتان تتجاوزان تحقق البوابة، وحمايتهما الرمز في الكود.
+  const supabaseConfig = readText("supabase/config.toml");
+  // والدوال القائمة ذات الرمز الخاص تبقى كما هي منشورة، كي لا يقلبها نشر جماعي إلى JWT.
+  for (const slug of ["customer-credit-snapshot", "customer-inactivity-alert", "web-push", "telegram-webhook", "inventory-auth"]) {
+    assert.match(supabaseConfig, new RegExp(`\\[functions\\.${slug}\\]\\s*\\nverify_jwt = false`), `test 118: ${slug} بلا تحقق JWT من البوابة`);
+  }
+  assert.match(readText("supabase/functions/customer-credit-snapshot/index.ts"), /sameToken\(req\.headers\.get\("x-ozk-credit-snapshot-token"\)/, "test 118: الرمز شرط في كاتب اللقطة");
+  assert.match(fn, /sameToken\(req\.headers\.get\("x-ozk-inactivity-alert-token"\)/, "test 118: الرمز شرط في التنبيه");
+}
+
+console.log(`ذكاء الزبائن: 118 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);

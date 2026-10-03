@@ -84,6 +84,7 @@
   const warehouseStockReportsTable = config.warehouseStockReportsTable || "ameen_warehouse_stock_reports";
   const warehouseTransferReportsTable = config.warehouseTransferReportsTable || "ameen_warehouse_transfer_reports";
   const creditLimitsTable = config.creditLimitsTable || "customer_credit_limits";
+  const creditHistoryTable = config.creditHistoryTable || "customer_credit_history";
   const approvedPricesTable = config.approvedPricesTable || "approved_price_items";
   const paymentRecordsTable = config.paymentRecordsTable || "payment_records";
   const customerProfilesTable = config.customerProfilesTable || "customer_profiles";
@@ -1050,6 +1051,31 @@
 
       if (error) throw new Error(translateDbError(error.message));
       return (data || []).map(normalizeDbCustomerLimit);
+    },
+
+    async listCustomerCreditHistory({ sinceDate } = {}) {
+      // لقطات حد الائتمان الآلي (customer_credit_history): قراءة للمالك وحده عند القاعدة
+      // (RLS بـis_owner())، والكتابة من الخادم وحده. صفحات من 1000 صف: سقف PostgREST.
+      if (!client) return [];
+
+      const session = await getSupabaseSession();
+      if (!session) return [];
+
+      const columns = "customer_guid, snapshot_date, auto_status, credit_status, limit_base, credit_limit_display, credit_currency, risk_score, factors";
+      const rows = [];
+      for (let from = 0; ; from += 1000) {
+        let query = client
+          .from(creditHistoryTable)
+          .select(columns)
+          .order("snapshot_date", { ascending: true })
+          .order("customer_guid", { ascending: true })
+          .range(from, from + 999);
+        if (sinceDate) query = query.gte("snapshot_date", sinceDate);
+        const { data, error } = await query;
+        if (error) throw new Error(translateDbError(error.message));
+        rows.push(...(data || []));
+        if (!data || data.length < 1000) return rows;
+      }
     },
 
     async upsertCustomerCreditLimit(input) {

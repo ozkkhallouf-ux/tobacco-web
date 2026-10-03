@@ -134,6 +134,22 @@
 .customer-intel .ci-row:focus-visible { background: rgba(176, 140, 79, 0.1); outline: none; }
 .customer-intel .ci-row.selected { background: rgba(176, 140, 79, 0.18); }
 
+.customer-intel .ci-change {
+  margin-top: 3px;
+  font-size: 0.74rem;
+  font-weight: 500;
+  line-height: 1.6;
+  opacity: 0.88;
+}
+.ci-change.good { color: #4caf7d; }
+.ci-change.bad { color: #e2725b; }
+.ci-trend { font-weight: 700; }
+.ci-trend.good { color: #4caf7d; }
+.ci-trend.bad { color: #e2725b; }
+.ci-detail .ci-history { margin: 0 0 14px; font-size: 0.86rem; line-height: 1.8; }
+.ci-detail .ci-history h4 { margin: 0 0 4px; }
+.ci-detail .ci-history p { margin: 2px 0; }
+
 .customer-intel .ci-table td.good { color: #4caf7d; }
 .customer-intel .ci-table td.bad { color: #e2725b; }
 
