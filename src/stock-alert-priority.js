@@ -37,9 +37,9 @@
     topShare: 0.2,
     // أقل من 3 فواتير بيع مستقلة في النافذة ⇒ لا تنبيه أبداً.
     minSaleInvoices: 3,
-    // «قارب النفاد»: نفد (رصيد ≤ 0)، أو يكفي ≤ 7 أيام بمعدل البيع اليومي،
+    // «قارب النفاد»: نفد (رصيد ≤ 0)، أو يكفي ≤ 3 أيام بمعدل البيع اليومي (قرار عمر 2026-10-03؛ 7 أنبأت بأغلب الأصناف السريعة)،
     // أو رصيده ≤ حد bot_config.low_stock_threshold (بالكروز، أمر «حد التنبيه» في البوت).
-    lowCoverageDays: 7,
+    lowCoverageDays: 3,
     // المخزون: عتبة private.project_task_monitors نفسها (ameen-main 10).
     // المبيعات: المهمة كل 30 دقيقة (register-item-sales-task.ps1)، فثلاث دورات فائتة = قديم.
     maxAgeMinutes: Object.freeze({ stock: 10, sales: 90 }),

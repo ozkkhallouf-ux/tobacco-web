@@ -192,9 +192,9 @@ await test("4) صنف لم يُبع في 30 يوماً لا يُنبَّه عل�
 });
 
 await test("5) الرسالة: الاسم والرصيد بالكرتونة وكم يوم يكفي والأولوية، مرتبة من الأهم", () => {
-  // صنف 3 صافيه 800 كروز/30 يوماً ⇒ 26.67 يومياً؛ رصيد 100 ⇒ 3.75 يوم.
+  // صنف 3 صافيه 800 كروز/30 يوماً ⇒ 26.67 يومياً؛ رصيد 75 ⇒ 2.8 يوم.
   // صنف 1 نفد. صنف 5 رصيده يكفي 30 يوماً ⇒ لا تنبيه.
-  const r = engine.buildStockAlerts({ stockReport: tenStock({ 1: 0, 3: 100, 5: 600 }), salesReport: salesReport(tenItems()), now: NOW, lowStockThreshold: 50 });
+  const r = engine.buildStockAlerts({ stockReport: tenStock({ 1: 0, 3: 75, 5: 600 }), salesReport: salesReport(tenItems()), now: NOW, lowStockThreshold: 50 });
   assert.equal(r.status, "alert");
   assert.equal(r.alerts.length, 2);
   assert.deepEqual(r.alerts.map((a) => a.priorityRank), [1, 3]);
@@ -202,7 +202,16 @@ await test("5) الرسالة: الاسم والرصيد بالكرتونة وك
   assert.match(text, /أصناف مهمة قاربت النفاد: 2 من 5/);
   const lines = text.split("\n").filter((l) => l.startsWith("•"));
   assert.equal(lines[0], "• أولوية 1 من 5 — صنف 1 — الرصيد 0 كرتونة (0 كروز) — يكفي 0 يوم (نفد)");
-  assert.equal(lines[1], "• أولوية 3 من 5 — صنف 3 — الرصيد 2 كرتونة (100 كروز) — يكفي 3.8 يوم");
+  assert.equal(lines[1], "• أولوية 3 من 5 — صنف 3 — الرصيد 1.5 كرتونة (75 كروز) — يكفي 2.8 يوم");
+});
+
+await test("5) حد «يكفي» 3 أيام: 3 أيام بالضبط تُنبَّه، 3.75 يوم لا", () => {
+  assert.equal(engine.CONFIG.lowCoverageDays, 3);
+  // صنف 3: 26.67 كروز يومياً ⇒ رصيد 80 = 3 أيام بالضبط، ورصيد 100 = 3.75 يوم.
+  const atLimit = engine.buildStockAlerts({ stockReport: tenStock({ 3: 80 }), salesReport: salesReport(tenItems()), now: NOW, lowStockThreshold: 50 });
+  assert.deepEqual(atLimit.alerts.map((a) => a.priorityRank), [3]);
+  const above = engine.buildStockAlerts({ stockReport: tenStock({ 3: 100 }), salesReport: salesReport(tenItems()), now: NOW, lowStockThreshold: 50 });
+  assert.equal(above.status, "none");
 });
 
 await test("5) حد bot_config.low_stock_threshold يبقى فعّالاً للأصناف المهمة", () => {
@@ -257,8 +266,8 @@ await test("صف مبيعات تالف لا يُحسب ويُبلَّغ تحذي
 
 await test("7) منع التكرار: نفس المجموعة ⇒ نفس المفتاح، وتغيّر حالة صنف ⇒ مفتاح جديد", () => {
   const inv = salesReport(tenItems());
-  const a = engine.buildStockAlerts({ stockReport: tenStock({ 3: 100 }), salesReport: inv, now: NOW });
-  const b = engine.buildStockAlerts({ stockReport: tenStock({ 3: 90 }), salesReport: inv, now: NOW });
+  const a = engine.buildStockAlerts({ stockReport: tenStock({ 3: 70 }), salesReport: inv, now: NOW });
+  const b = engine.buildStockAlerts({ stockReport: tenStock({ 3: 60 }), salesReport: inv, now: NOW });
   const c = engine.buildStockAlerts({ stockReport: tenStock({ 3: 0 }), salesReport: inv, now: NOW });
   assert.equal(a.messages[0].dedupeKey, b.messages[0].dedupeKey, "تغيّر الكمية وحده لا يعيد الإرسال");
   assert.notEqual(a.messages[0].dedupeKey, c.messages[0].dedupeKey, "low → out يعيد الإرسال");
