@@ -157,6 +157,13 @@
   }
 
   // ── الحداثة واكتمال النافذة ───────────────────────────────────────────────
+  function sourceState(report, source, syncedMs, ageMinutes, maxAge) {
+    if (!report || !Array.isArray(report.items)) return "missing";
+    if (report.source && report.source !== source) return "wrong_source";
+    if (syncedMs === null) return "missing_as_of";
+    return ageMinutes > maxAge ? "stale" : "fresh";
+  }
+
   function evaluateSources({ stockReport, invoicesReport, now, config }) {
     const nowMs = timestampMs(now) ?? Date.now();
     const problems = [];
@@ -167,11 +174,7 @@
     ]) {
       const syncedMs = report ? reportSyncedMs(report) : null;
       const ageMinutes = syncedMs === null ? null : Math.max(0, (nowMs - syncedMs) / 60000);
-      let state = "fresh";
-      if (!report || !Array.isArray(report.items)) state = "missing";
-      else if (report.source && report.source !== source) state = "wrong_source";
-      else if (syncedMs === null) state = "missing_as_of";
-      else if (ageMinutes > maxAge) state = "stale";
+      const state = sourceState(report, source, syncedMs, ageMinutes, maxAge);
       sources[kind] = { state, asOf: syncedMs === null ? null : new Date(syncedMs).toISOString(), ageMinutes: ageMinutes === null ? null : round(ageMinutes, 1), maxAgeMinutes: maxAge };
       if (state !== "fresh") problems.push({ kind, code: state });
     }
@@ -189,6 +192,47 @@
     return { ok: covered, code: covered ? null : "window_not_covered", referenceDay, startDay };
   }
 
+  // ── تجميع فواتير زبون واحد داخل النافذة ───────────────────────────────────
+  function addLine(byKey, resolved, line, invoiceId, isReturn, qty) {
+    let entry = byKey.get(resolved.key);
+    if (!entry) {
+      entry = { key: resolved.key, itemGuid: resolved.key.startsWith("g:") ? resolved.key.slice(2) : null, name: "", soldQty: 0, returnedQty: 0, saleInvoices: new Set(), unit2Factor: null, unit2Name: "" };
+      byKey.set(resolved.key, entry);
+    }
+    if (!entry.name) entry.name = text(line?.material);
+    const factor = finite(line?.unit2Fact);
+    if (factor !== null && factor > 0 && entry.unit2Factor === null) entry.unit2Factor = factor;
+    if (!entry.unit2Name) entry.unit2Name = text(line?.unit2);
+    if (isReturn) entry.returnedQty += qty;
+    else { entry.soldQty += qty; entry.saleInvoices.add(invoiceId); }
+  }
+
+  // الاقتطاع يُبقي الأحدث (ORDER BY Date DESC)؛ إن كان أقدم المُبقى داخل النافذة
+  // فقد تكون فواتير من النافذة نفسها حُذفت ⇒ النافذة غير مكتملة.
+  function truncatedWithinWindow(customer, invoices, window) {
+    if (customer?.truncated !== true) return false;
+    const days = invoices.map((inv) => dayNumber(inv?.date)).filter((d) => d !== null);
+    return !days.length || Math.min(...days) >= window.startDay;
+  }
+
+  function accumulateCustomer(customer, customerIndex, window, identity, byKey, counters) {
+    const invoices = Array.isArray(customer?.invoices) ? customer.invoices : [];
+    if (truncatedWithinWindow(customer, invoices, window)) counters.truncatedInWindow += 1;
+    for (const invoice of invoices) {
+      const day = dayNumber(invoice?.date);
+      if (day === null || day < window.startDay || day > window.referenceDay) continue;
+      const invoiceId = normalizeGuid(invoice?.guid) || `${customerIndex}:${text(invoice?.number)}:${text(invoice?.date)}`;
+      const isReturn = invoice?.isReturn === true;
+      for (const line of Array.isArray(invoice?.lines) ? invoice.lines : []) {
+        const qty = finite(line?.qty);
+        if (qty === null || qty <= 0) { counters.invalidLines += 1; continue; }
+        const resolved = identity.resolve(line?.itemGuid, line?.material);
+        if (!resolved) { counters.unidentifiedLines += 1; continue; }
+        addLine(byKey, resolved, line, invoiceId, isReturn, qty);
+      }
+    }
+  }
+
   // ── 1+2+3+4: صافي المبيع، الترتيب، الأهلية ─────────────────────────────────
   function computeSalesPriority({ invoicesReport, stockReport = null, config: overrides } = {}) {
     const config = mergeConfig(overrides);
@@ -199,43 +243,10 @@
     }
     const identity = buildIdentity(stockReport, invoicesReport);
     const byKey = new Map();
-    let invalidLines = 0;
-    let unidentifiedLines = 0;
-    let truncatedInWindow = 0;
-
+    const counters = { invalidLines: 0, unidentifiedLines: 0, truncatedInWindow: 0 };
     const customers = Array.isArray(invoicesReport?.items) ? invoicesReport.items : [];
-    customers.forEach((customer, customerIndex) => {
-      const invoices = Array.isArray(customer?.invoices) ? customer.invoices : [];
-      if (customer?.truncated === true) {
-        // الاقتطاع يُبقي الأحدث (ORDER BY Date DESC)؛ إن كان أقدم المُبقى داخل النافذة
-        // فقد تكون فواتير من النافذة نفسها حُذفت ⇒ النافذة غير مكتملة.
-        const days = invoices.map((inv) => dayNumber(inv?.date)).filter((d) => d !== null);
-        if (!days.length || Math.min(...days) >= window.startDay) truncatedInWindow += 1;
-      }
-      for (const invoice of invoices) {
-        const day = dayNumber(invoice?.date);
-        if (day === null || day < window.startDay || day > window.referenceDay) continue;
-        const invoiceId = normalizeGuid(invoice?.guid) || `${customerIndex}:${text(invoice?.number)}:${text(invoice?.date)}`;
-        const isReturn = invoice?.isReturn === true;
-        for (const line of Array.isArray(invoice?.lines) ? invoice.lines : []) {
-          const qty = finite(line?.qty);
-          if (qty === null || qty <= 0) { invalidLines += 1; continue; }
-          const resolved = identity.resolve(line?.itemGuid, line?.material);
-          if (!resolved) { unidentifiedLines += 1; continue; }
-          let entry = byKey.get(resolved.key);
-          if (!entry) {
-            entry = { key: resolved.key, itemGuid: resolved.key.startsWith("g:") ? resolved.key.slice(2) : null, name: text(line?.material), soldQty: 0, returnedQty: 0, saleInvoices: new Set(), unit2Factor: null, unit2Name: "" };
-            byKey.set(resolved.key, entry);
-          }
-          if (!entry.name) entry.name = text(line?.material);
-          const factor = finite(line?.unit2Fact);
-          if (factor !== null && factor > 0 && entry.unit2Factor === null) entry.unit2Factor = factor;
-          if (!entry.unit2Name && text(line?.unit2)) entry.unit2Name = text(line?.unit2);
-          if (isReturn) entry.returnedQty += qty;
-          else { entry.soldQty += qty; entry.saleInvoices.add(invoiceId); }
-        }
-      }
-    });
+    customers.forEach((customer, customerIndex) => accumulateCustomer(customer, customerIndex, window, identity, byKey, counters));
+    const { invalidLines, unidentifiedLines, truncatedInWindow } = counters;
 
     if (truncatedInWindow > 0) {
       return { ok: false, code: "window_truncated", window, items: [], ranked: [], eligible: [], soldCount: 0, topCount: 0, averageNetQty: null, warnings: [`truncated_customers:${truncatedInWindow}`] };
@@ -366,6 +377,50 @@
     });
   }
 
+  function classifyItem(item, stock, threshold, config) {
+    const dailyRate = item.netQty / config.windowDays;
+    const coverageDays = stock.stockQty <= 0 ? 0 : stock.stockQty / dailyRate;
+    let status = null;
+    if (stock.stockQty <= 0) status = "out";
+    else if (coverageDays <= config.lowCoverageDays) status = "low";
+    else if (threshold !== null && stock.stockQty <= threshold) status = "low";
+    if (!status) return null;
+    const factor = stock.unit2Factor ?? item.unit2Factor;
+    const unit2Name = stock.unit2Name || item.unit2Name;
+    return {
+      key: item.key,
+      itemGuid: item.itemGuid,
+      name: stock.name || item.name,
+      status,
+      stockQty: round(stock.stockQty, 3),
+      unit2Factor: factor,
+      netQty: item.netQty,
+      dailyRate: round(dailyRate, 3),
+      coverageDays: round(coverageDays, 1),
+      priorityRank: item.priorityRank,
+      priorityTotal: item.priorityTotal,
+      stockLabel: stockLabel(stock.stockQty, factor, stock.unit1Name, unit2Name),
+      soldLabel: stockLabel(item.netQty, factor, stock.unit1Name, unit2Name)
+    };
+  }
+
+  function alertMessages(alerts, total, missingStock, config) {
+    const header = `⚠️ أصناف مهمة قاربت النفاد: ${alerts.length} من ${total} صنفاً مهماً\nالأهمية = صافي مبيع آخر ${config.windowDays} يوماً`;
+    const lines = alerts.map((alert) => {
+      const days = alert.status === "out" ? "يكفي 0 يوم (نفد)" : `يكفي ${formatNumber(alert.coverageDays)} يوم`;
+      return `• أولوية ${alert.priorityRank} من ${alert.priorityTotal} — ${alert.name} — الرصيد ${alert.stockLabel} — ${days}`;
+    });
+    const footer = missingStock ? `ℹ️ ${missingStock} صنف مهم بلا رصيد مطابق في تقرير المخزون` : "";
+    const texts = chunkMessages(header, lines, footer, config.maxMessageChars);
+    const signature = fingerprint(alerts.map((alert) => `${alert.key}=${alert.status}`).sort().join("|"));
+    return texts.map((message, index) => ({
+      eventType: "stock_low",
+      message,
+      dedupeKey: texts.length > 1 ? `stock-priority:${signature}:p${index + 1}of${texts.length}` : `stock-priority:${signature}`,
+      cooldownMinutes: config.cooldownMinutes
+    }));
+  }
+
   // ── المدخل الرئيسي ────────────────────────────────────────────────────────
   // status: "alert" (رسائل أصناف)، "none" (لا صنف مهم قارب النفاد)، "stale" (رسالة تقادم فقط).
   function buildStockAlerts({ stockReport, invoicesReport, now = new Date(), lowStockThreshold = null, config: overrides } = {}) {
@@ -390,29 +445,8 @@
     for (const item of priority.eligible) {
       const stock = stockByKey.get(item.key);
       if (!stock) { missingStock += 1; continue; }
-      const dailyRate = item.netQty / config.windowDays;
-      const coverageDays = stock.stockQty <= 0 ? 0 : stock.stockQty / dailyRate;
-      let status = null;
-      if (stock.stockQty <= 0) status = "out";
-      else if (coverageDays <= config.lowCoverageDays) status = "low";
-      else if (threshold !== null && stock.stockQty <= threshold) status = "low";
-      if (!status) continue;
-      const factor = stock.unit2Factor ?? item.unit2Factor;
-      alerts.push({
-        key: item.key,
-        itemGuid: item.itemGuid,
-        name: stock.name || item.name,
-        status,
-        stockQty: round(stock.stockQty, 3),
-        unit2Factor: factor,
-        netQty: item.netQty,
-        dailyRate: round(dailyRate, 3),
-        coverageDays: round(coverageDays, 1),
-        priorityRank: item.priorityRank,
-        priorityTotal: item.priorityTotal,
-        stockLabel: stockLabel(stock.stockQty, factor, stock.unit1Name, stock.unit2Name || item.unit2Name),
-        soldLabel: stockLabel(item.netQty, factor, stock.unit1Name, stock.unit2Name || item.unit2Name)
-      });
+      const alert = classifyItem(item, stock, threshold, config);
+      if (alert) alerts.push(alert);
     }
     if (missingStock) warnings.push(`eligible_without_stock:${missingStock}`);
     alerts.sort((a, b) => a.priorityRank - b.priorityRank);
@@ -421,21 +455,7 @@
       return { version: VERSION, status: "none", sources, problems: [], priority, alerts, messages: [], warnings };
     }
 
-    const total = priority.eligible.length;
-    const header = `⚠️ أصناف مهمة قاربت النفاد: ${alerts.length} من ${total} صنفاً مهماً\nالأهمية = صافي مبيع آخر ${config.windowDays} يوماً`;
-    const lines = alerts.map((alert) => {
-      const days = alert.status === "out" ? "يكفي 0 يوم (نفد)" : `يكفي ${formatNumber(alert.coverageDays)} يوم`;
-      return `• أولوية ${alert.priorityRank} من ${alert.priorityTotal} — ${alert.name} — الرصيد ${alert.stockLabel} — ${days}`;
-    });
-    const footer = missingStock ? `ℹ️ ${missingStock} صنف مهم بلا رصيد مطابق في تقرير المخزون` : "";
-    const texts = chunkMessages(header, lines, footer, config.maxMessageChars);
-    const signature = fingerprint(alerts.map((alert) => `${alert.key}=${alert.status}`).sort().join("|"));
-    const messages = texts.map((message, index) => ({
-      eventType: "stock_low",
-      message,
-      dedupeKey: texts.length > 1 ? `stock-priority:${signature}:p${index + 1}of${texts.length}` : `stock-priority:${signature}`,
-      cooldownMinutes: config.cooldownMinutes
-    }));
+    const messages = alertMessages(alerts, priority.eligible.length, missingStock, config);
     return { version: VERSION, status: "alert", sources, problems: [], priority, alerts, messages, warnings };
   }
 
