@@ -3115,4 +3115,300 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   assert.equal(stale.calls.upserts.length, 0, "test 108: لا كتابة من بيانات قديمة");
 }
 
-console.log(`ذكاء الزبائن: 108 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
+// ---------------------------------------------------------------------------
+// 109–117) تنبيه غياب الزبون المهم (CUSTOMER_INACTIVE_5D).
+// تركيبة مستقلة: 15 زبون دولار في عيّنة القيمة (أعلى 20% = 3 مقاعد) + زبون منتظم صغير
+// + مورد ضخم. يوم المرجع 2026-09-02، وk(n) = قبله بـn يوماً.
+// ---------------------------------------------------------------------------
+const KEY_REF = Date.UTC(2026, 8, 2);
+const k = (n) => new Date(KEY_REF - n * 86400000).toISOString().slice(0, 10);
+const kGuid = (n) => `00000000-0000-4000-d000-${String(n).padStart(12, "0")}`;
+const KEY_ACCOUNTS = [
+  // الأكبر قيمة: آخر بيع قبل 10 أيام، وبعده مرتجع فقط (المرتجع ليس شراء).
+  { n: 1, name: "كبير بمرتجع", invoices: [invoice(k(30), 9000, { guid: "kb-1" }), invoice(k(10), 9000, { guid: "kb-2" }), invoice(k(1), 500, { guid: "kb-3", isReturn: true })] },
+  // الثاني قيمة: غياب 5 أيام بالضبط.
+  { n: 2, name: "كبير خمسة أيام", invoices: [invoice(k(40), 7000, { guid: "kc-1" }), invoice(k(5), 7000, { guid: "kc-2" })] },
+  // الثالث قيمة: غياب 4 أيام — مهم لكن لم يبلغ العتبة.
+  { n: 3, name: "كبير أربعة أيام", invoices: [invoice(k(35), 6000, { guid: "kd-1" }), invoice(k(4), 6000, { guid: "kd-2" })] },
+  // منتظم صغير: 5 أيام شراء في آخر 30 يوماً، آخرها قبل 6 أيام.
+  { n: 4, name: "منتظم صغير", invoices: series([k(22), k(18), k(14), k(10), k(6)], 40, "صنف منتظم").map((inv, i) => ({ ...inv, guid: `ke-${i}` })) },
+  // مورد ضخم غائب: خارج «المهمين» كلياً.
+  { n: 5, name: "مورد ضخم غائب", isSupplier: true, invoices: [invoice(k(50), 90000, { guid: "kf-1" }), invoice(k(20), 90000, { guid: "kf-2" })] },
+  // صغار نشطون يملؤون العيّنة (2 فاتورتان، آخرها قريب).
+  ...Array.from({ length: 11 }, (_, i) => ({
+    n: 10 + i,
+    name: `صغير ${i + 1}`,
+    invoices: [invoice(k(25), 100 + i, { guid: `kg-${i}-1` }), invoice(k(2 + (i % 2)), 100 + i, { guid: `kg-${i}-2` })]
+  }))
+];
+function keyReports({ syncedAt = REFERENCE_ISO, accounts = KEY_ACCOUNTS } = {}) {
+  return {
+    invoicesReport: {
+      id: 91, source: "ameen_customer_invoices", created_at: syncedAt, report_date: REFERENCE_LOCAL_DAY,
+      summary: { periodDays: 60, fromDate: FROM_DATE, syncedAt },
+      items: accounts.map((a) => ({ name: a.name, customerGuid: kGuid(a.n), truncated: false, invoices: a.invoices }))
+    },
+    balancesReport: {
+      id: 92, source: "ameen_customer_balances", created_at: syncedAt, report_date: REFERENCE_LOCAL_DAY,
+      summary: { syncedAt },
+      items: accounts.map((a) => ({ key: coreEngine.normalizeName(a.name), name: a.name, balance: 0, creditLimit: 0, customerGuid: kGuid(a.n),
+        customerAccountGuid: kGuid(a.n), isSupplier: Boolean(a.isSupplier), accountCurrencyIsBase: true, accountCurrency: "$", balanceAccountCcy: 0 }))
+    }
+  };
+}
+const inactivityPlan = (...args) => JSON.parse(JSON.stringify(coreEngine.buildInactivityAlert(...args)));
+const keyResult = engine.build({ ...keyReports(), creditLimits: [], now: NOW });
+const keyRow = (n) => keyResult.customers.find((row) => row.customerGuid === kGuid(n));
+
+// 109) من هو «المهم»: أعلى 20% بالقيمة لكل عملة، أو منتظم (≥ 4 أيام شراء في 30 يوماً).
+{
+  assert.equal(keyResult.dataAvailability.vipPopulation, 15, "test 109: العيّنة 15 زبوناً بلا المورد");
+  for (const n of [1, 2, 3]) {
+    assert.equal(keyRow(n).keyCustomer?.byValue, true, `test 109: الزبون ${n} ضمن أعلى 20% بالقيمة`);
+    assert.ok(keyRow(n).flags.includes("key_customer"));
+  }
+  assert.deepEqual([1, 2, 3].map((n) => keyRow(n).keyCustomer.valueRank), [1, 2, 3], "test 109: ترتيب القيمة بصافي المشتريات");
+  assert.equal(keyRow(4).keyCustomer?.byValue, false, "test 109: المنتظم الصغير ليس بالقيمة");
+  assert.equal(keyRow(4).keyCustomer?.byRegularity, true, "test 109: لكنه منتظم");
+  assert.equal(keyRow(4).keyCustomer.purchaseDays30, 5);
+  for (let n = 10; n <= 20; n += 1) assert.equal(keyRow(n).keyCustomer, null, `test 109: الصغير ${n} ليس مهماً`);
+  assert.equal(coreEngine.CONFIG.keyCustomerAlert.inactiveDays, 5, "test 109: العتبة 5 أيام في CONFIG");
+}
+
+// 110) المورد خارج «المهمين» وخارج التنبيه مهما كبرت مبيعاته وطال غيابه.
+{
+  const supplier = keyRow(5);
+  assert.ok(supplier.isSupplier);
+  assert.equal(supplier.keyCustomer, null, "test 110: مورد ⇒ ليس زبوناً مهماً");
+  assert.ok(!supplier.flags.includes("key_customer_absent"));
+}
+
+// 111) 5 أيام بالضبط ⇒ غائب؛ 4 أيام ⇒ لا.
+{
+  assert.equal(keyRow(2).daysSinceLastPurchase, 5);
+  assert.equal(keyRow(2).keyCustomer.absent, true, "test 111: 5 أيام بالضبط ⇒ تنبيه");
+  assert.ok(keyRow(2).flags.includes("key_customer_absent"));
+  assert.equal(keyRow(3).daysSinceLastPurchase, 4);
+  assert.equal(keyRow(3).keyCustomer.absent, false, "test 111: 4 أيام ⇒ لا تنبيه");
+}
+
+// 112) المرتجع ليس شراء: مرتجع أمس لا يقطع غياب 10 أيام.
+{
+  assert.equal(keyRow(1).lastPurchaseAt, k(10), "test 112: آخر فاتورة بيع لا آخر مرتجع");
+  assert.equal(keyRow(1).daysSinceLastPurchase, 10);
+  assert.equal(keyRow(1).keyCustomer.absent, true, "test 112: مرتجع فقط ⇒ ما زال غائباً");
+}
+
+// 113) الرسالة اليومية: كل الغائبين في رسالة واحدة، من الأهم للأقل، بالحقول المطلوبة.
+{
+  const plan = inactivityPlan(keyResult, []);
+  assert.equal(plan.status, "ok");
+  assert.equal(plan.code, "CUSTOMER_INACTIVE_5D");
+  assert.deepEqual(plan.absent.map((entry) => entry.customerGuid), [kGuid(1), kGuid(2), kGuid(4)], "test 113: الأهم أولاً، بلا المورد ولا من غاب 4 أيام");
+  assert.equal(plan.messages.length, 1, "test 113: رسالة واحدة");
+  const [message] = plan.messages;
+  const lines = message.text.split("\n").slice(1);
+  assert.equal(lines.length, 3);
+  assert.ok(lines[0].startsWith("1. كبير بمرتجع"), "test 113: الترتيب");
+  const [y, m, dd] = k(10).split("-");
+  assert.ok(lines[0].includes(`آخر فاتورة ${dd}-${m}-${y}`), "test 113: التاريخ DD-MM-YYYY");
+  assert.ok(lines[0].includes("10 يوماً بلا فاتورة"), "test 113: عدد أيام الغياب");
+  assert.ok(lines[0].includes("مشترياته الشهرية 8,750$"), `test 113: المعدل الشهري = صافي 60 يوماً (بعد المرتجع) ÷ 2 (${lines[0]})`);
+  assert.match(lines[0], /فجوته المعتادة (غير محسوبة|\d+ يوماً)/u, "test 113: الفجوة المعتادة");
+  assert.ok(lines[2].includes("فجوته المعتادة 4 يوماً"), `test 113: فجوة المنتظم من نمطه (${lines[2]})`);
+  assert.deepEqual(plan.insertRows.map((row) => row.dedupe_key), [
+    `CUSTOMER_INACTIVE_5D:${kGuid(1)}:${k(10)}`,
+    `CUSTOMER_INACTIVE_5D:${kGuid(2)}:${k(5)}`,
+    `CUSTOMER_INACTIVE_5D:${kGuid(4)}:${k(6)}`
+  ], "test 113: مفتاح منع التكرار = الزبون + تاريخ آخر فاتورة");
+  assert.deepEqual(plan.deleteKeys, []);
+  assert.deepEqual(inactivityPlan(keyResult, []), plan, "test 113: حتمي");
+  // أكثر من 20 غائباً ⇒ رسائل من 20 زبوناً بالترتيب، ولكل رسالة زبائنها ومفتاحها.
+  const many = {
+    ...keyResult,
+    customers: Array.from({ length: 25 }, (_, i) => ({
+      customerId: `m${i}`, customerGuid: kGuid(100 + i), customerKey: `m${i}`, customerName: `غائب ${i + 1}`, currency: "USD",
+      lastPurchaseAt: k(6), daysSinceLastPurchase: 6, typicalGapDays: 3, cadenceTrusted: true, netSales60d: 1000 - i, isSupplier: false,
+      keyCustomer: { absent: true, valueRank: i + 1, monthlyPurchases: 500, byValue: true, byRegularity: false }
+    }))
+  };
+  const split = inactivityPlan(many, []);
+  assert.equal(split.messages.length, 2, "test 113: تقسيم كل 20 زبوناً");
+  assert.deepEqual(split.messages.map((message) => message.customerKeys.length), [20, 5]);
+  assert.match(split.messages[1].text, /\(2\/2\)\n21\. غائب 21 /u, "test 113: الترقيم يكمل في الرسالة الثانية");
+  assert.notEqual(split.messages[0].dedupeKey, split.messages[1].dedupeKey);
+}
+
+// 114) عدم التكرار: من نُبِّه عنه لغيابه الحالي لا يُعاد في اليوم التالي.
+{
+  const first = inactivityPlan(keyResult, []);
+  const again = inactivityPlan(keyResult, first.insertRows);
+  assert.equal(again.status, "ok");
+  assert.equal(again.messages.length, 0, "test 114: لا رسالة لغياب نُبِّه عنه");
+  assert.equal(again.insertRows.length, 0);
+  assert.deepEqual(again.deleteKeys, [], "test 114: الحالة تبقى ما دام الغياب مستمراً");
+  const partial = inactivityPlan(keyResult, first.insertRows.slice(0, 1));
+  assert.deepEqual(partial.insertRows.map((row) => row.customer_guid), [kGuid(2), kGuid(4)], "test 114: الجدد وحدهم");
+  assert.ok(!partial.messages[0].text.includes("كبير بمرتجع"));
+}
+
+// 115) رجع واشترى ⇒ يخرج من القائمة وتُنظَّف حالته؛ وغيابه التالي مفتاح جديد.
+{
+  const accounts = KEY_ACCOUNTS.map((a) => a.n === 2 ? { ...a, invoices: [...a.invoices, invoice(k(1), 7000, { guid: "kc-3" })] } : a);
+  const back = engine.build({ ...keyReports({ accounts }), creditLimits: [], now: NOW });
+  const before = inactivityPlan(keyResult, []).insertRows;
+  const aged = { dedupe_key: `CUSTOMER_INACTIVE_5D:${kGuid(30)}:${k(70)}`, customer_guid: kGuid(30), customer_key: null, last_purchase_date: k(70) };
+  const plan = inactivityPlan(back, [...before, aged]);
+  assert.ok(!plan.absent.some((entry) => entry.customerGuid === kGuid(2)), "test 115: من اشترى لا يظهر");
+  assert.deepEqual(plan.deleteKeys, [`CUSTOMER_INACTIVE_5D:${kGuid(2)}:${k(5)}`, aged.dedupe_key].sort(), "test 115: حذف صف العائد وصف خرج من النافذة");
+  assert.equal(plan.messages.length, 0, "test 115: لا رسالة جديدة");
+}
+
+// 116) تقرير فواتير قديم (> 90 دقيقة) ⇒ لا تنبيهات غياب، بلاغ «البيانات قديمة»، والحالة لا تُمسّ.
+{
+  const late = engine.build({ ...keyReports(), creditLimits: [], now: new Date(new Date(REFERENCE_ISO).getTime() + 91 * 60000) });
+  const plan = inactivityPlan(late, inactivityPlan(keyResult, []).insertRows);
+  assert.equal(plan.status, "stale_invoices", "test 116: فواتير عمرها 91 دقيقة ⇒ قديمة");
+  assert.equal(plan.messages.length, 1);
+  assert.match(plan.messages[0].text, /عمره 91 دقيقة/u);
+  assert.match(plan.messages[0].text, /لا تنبيهات/u);
+  assert.equal(plan.insertRows.length, 0);
+  assert.equal(plan.deleteKeys.length, 0, "test 116: لا تنظيف من بيانات قديمة");
+  const atLimit = engine.build({ ...keyReports(), creditLimits: [], now: new Date(new Date(REFERENCE_ISO).getTime() + 90 * 60000) });
+  assert.equal(inactivityPlan(atLimit, []).status, "ok", "test 116: 90 دقيقة بالضبط ما زالت حديثة");
+  const none = inactivityPlan(engine.build({ creditLimits: [], now: NOW }), []);
+  assert.equal(none.status, "stale_invoices", "test 116: بلا تقرير فواتير ⇒ لا تنبيهات");
+}
+
+// 117) التنبيهات القائمة لم تتغيّر: لا كود جديد في buildAlertDrafts، والعقود 1..108 أعلاه خضراء.
+{
+  const codes = new Set(coreEngine.buildAlertDrafts(keyResult).map((draft) => draft.code));
+  assert.ok(!codes.has("CUSTOMER_INACTIVE_5D"), "test 117: التنبيه الجديد بمسار الخادم وحده");
+  const mainCodes = coreEngine.buildAlertDrafts(result).map((draft) => draft.code);
+  assert.ok(mainCodes.includes("VIP_DECLINING"), "test 117: VIP_DECLINING باقٍ");
+}
+
+// ---------------------------------------------------------------------------
+// 118) الدالة الطرفية customer-inactivity-alert تحت عميل Supabase وهمي: الرمز شرط، والإرسال
+//      عبر notify_telegram بنص المحرك، والحالة تُكتب بعد الإرسال فقط، والبيانات القديمة بلاغ لا حالة.
+// ---------------------------------------------------------------------------
+{
+  const ts = (await import("typescript")).default;
+  const readText = (path) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
+  const { outputText, diagnostics } = ts.transpileModule(readText("supabase/functions/customer-inactivity-alert/index.ts"), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+    reportDiagnostics: true,
+    fileName: "customer-inactivity-alert.ts"
+  });
+  assert.equal(diagnostics.length, 0, "test 118: الدالة تُترجم بلا أخطاء صياغة");
+  const engineSource = readText("supabase/functions/_shared/customer-intelligence.js");
+  const reports = keyReports();
+  const bySource = { ameen_customer_invoices: reports.invoicesReport, ameen_customer_balances: reports.balancesReport };
+
+  async function runAlert({ header = "tok-118", stored = "tok-118", now = NOW, state = [], notifyError = null } = {}) {
+    const calls = { rpc: [], upserts: [], deletes: [], tables: [] };
+    const from = (table) => {
+      calls.tables.push(table);
+      const filters = {};
+      let range = null;
+      const result = () => {
+        if (table === "app_secrets") return { data: stored === null ? null : { value: stored }, error: null };
+        if (table === "inventory_reports") return { data: [bySource[filters.source]].filter(Boolean), error: null };
+        if (table === "customer_inactivity_alerts") return { data: state.slice(range[0], range[1] + 1), error: null };
+        throw new Error(`test 118: جدول غير متوقع ${table}`);
+      };
+      const builder = {
+        select: () => builder,
+        eq: (column, value) => { filters[column] = value; return builder; },
+        order: () => builder,
+        limit: () => builder,
+        range: (start, end) => { range = [start, end]; return builder; },
+        maybeSingle: async () => result(),
+        upsert: async (rows, options) => { calls.upserts.push({ table, rows, options }); return { error: null }; },
+        delete: () => ({ in: async (column, values) => { calls.deletes.push({ table, column, values }); return { error: null }; } }),
+        then: (resolve, reject) => Promise.resolve(result()).then(resolve, reject)
+      };
+      return builder;
+    };
+    const rpc = async (name, args) => { calls.rpc.push({ name, args }); return { error: notifyError }; };
+    const HostDate = Date;
+    class FixedDate extends HostDate {
+      constructor(...args) { if (args.length) super(...args); else super(now.getTime()); }
+      static now() { return now.getTime(); }
+    }
+    const context = vm.createContext({
+      Response, Request, Headers, console, Promise, JSON, Math, Number, String, Object, Array, Map, Set, Infinity, isNaN,
+      Date: FixedDate,
+      Deno: { env: { get: (name) => ({ SUPABASE_URL: "https://local.test", SUPABASE_SERVICE_ROLE_KEY: "service-test" }[name] || "") } },
+      exports: {}
+    });
+    context.require = (specifier) => {
+      if (specifier === "../_shared/customer-intelligence.js") { vm.runInContext(engineSource, context); return {}; }
+      if (specifier.startsWith("npm:@supabase/supabase-js")) return { createClient: () => ({ from, rpc }) };
+      throw new Error(`test 118: استيراد غير متوقع ${specifier}`);
+    };
+    context.module = { exports: context.exports };
+    vm.runInContext(outputText, context, { filename: "customer-inactivity-alert.js" });
+    const headers = { "content-type": "application/json" };
+    if (header !== null) headers["x-ozk-inactivity-alert-token"] = header;
+    const response = await context.exports.default.fetch(new Request("https://local.test/functions/v1/customer-inactivity-alert", {
+      method: "POST", headers, body: JSON.stringify({ action: "daily_check" })
+    }));
+    return { status: response.status, body: await response.json(), calls };
+  }
+
+  const wrong = await runAlert({ header: "tok-x" });
+  assert.equal(wrong.status, 401, "test 118: رمز خاطئ ⇒ 401");
+  assert.deepEqual(wrong.calls.tables, ["app_secrets"], "test 118: لا قراءة قبل التحقق من الرمز");
+  assert.equal(wrong.calls.rpc.length, 0);
+  assert.equal((await runAlert({ stored: null, header: "" })).status, 401, "test 118: رمز غير مضبوط ⇒ لا شيء");
+
+  const expected = inactivityPlan(keyResult, []);
+  const ok = await runAlert();
+  assert.equal(ok.status, 200, `test 118: ${JSON.stringify(ok.body)}`);
+  assert.deepEqual(JSON.parse(JSON.stringify(ok.calls.rpc)), expected.messages.map((message) => ({
+    name: "notify_telegram",
+    args: { p_event_type: "CUSTOMER_INACTIVE_5D", p_message: message.text, p_dedupe_key: message.dedupeKey, p_dedupe_minutes: 1440 }
+  })), "test 118: نص المحرك ومفتاحه حرفياً عبر notify_telegram");
+  assert.equal(ok.calls.upserts.length, 1);
+  assert.equal(ok.calls.upserts[0].table, "customer_inactivity_alerts");
+  assert.equal(ok.calls.upserts[0].options.onConflict, "dedupe_key");
+  assert.deepEqual(JSON.parse(JSON.stringify(ok.calls.upserts[0].rows)).map(({ alerted_at: at, ...row }) => { assert.ok(at); return row; }), JSON.parse(JSON.stringify(expected.insertRows)));
+  assert.equal(ok.body.alerted, 3);
+
+  const repeat = await runAlert({ state: expected.insertRows });
+  assert.equal(repeat.calls.rpc.length, 0, "test 118: لا إرسال ثانٍ للغياب نفسه");
+  assert.equal(repeat.calls.upserts.length, 0);
+
+  const failed = await runAlert({ notifyError: { message: "boom" } });
+  assert.equal(failed.status, 500);
+  assert.equal(failed.calls.upserts.length, 0, "test 118: فشل الإرسال ⇒ لا تسجيل حالة");
+
+  const stale = await runAlert({ now: new Date(new Date(REFERENCE_ISO).getTime() + 3 * 3600000), state: expected.insertRows });
+  assert.equal(stale.status, 200);
+  assert.equal(stale.body.status, "stale_invoices");
+  assert.equal(stale.calls.rpc.length, 1, "test 118: بلاغ واحد بأن البيانات قديمة");
+  assert.match(stale.calls.rpc[0].args.p_message, /تقرير الفواتير عمره 180 دقيقة/u);
+  assert.equal(stale.calls.upserts.length + stale.calls.deletes.length, 0, "test 118: لا مساس بالحالة من بيانات قديمة");
+
+  const cleared = await runAlert({ state: [{ dedupe_key: `CUSTOMER_INACTIVE_5D:${kGuid(3)}:${k(20)}`, customer_guid: kGuid(3), customer_key: null, last_purchase_date: k(20) }] });
+  assert.deepEqual(JSON.parse(JSON.stringify(cleared.calls.deletes)), [{ table: "customer_inactivity_alerts", column: "dedupe_key", values: [`CUSTOMER_INACTIVE_5D:${kGuid(3)}:${k(20)}`] }], "test 118: من عاد واشترى يُحذف صفّه");
+
+  // البنية الثابتة: لا وصول للأمين، والجدول محمي، ولا تعديل على نظام تيليغرام القائم.
+  const fn = readText("supabase/functions/customer-inactivity-alert/index.ts");
+  assert.match(fn, /import "\.\.\/_shared\/customer-intelligence\.js";/, "test 118: الدالة تحمّل المحرك نفسه");
+  assert.match(fn, /buildInactivityAlert\(/, "test 118: الخطة من المحرك لا من حساب ثانٍ");
+  assert.doesNotMatch(fn, /AmnDb00|AMEEN_SQL|mssql|tedious|sqlcmd/i, "test 118: لا وصول للأمين");
+  assert.doesNotMatch(fn, /from\("(?!app_secrets|inventory_reports|customer_inactivity_alerts)/, "test 118: لا جداول أخرى");
+  const migration = readText("supabase/migrations/20261003020000_customer_inactivity_alerts.sql").toLowerCase();
+  assert.match(migration, /alter table public\.customer_inactivity_alerts enable row level security/, "test 118: RLS مفعّل");
+  assert.match(migration, /alter table public\.customer_inactivity_alerts force row level security/, "test 118: RLS مفروض");
+  assert.match(migration, /for select\s+to authenticated\s+using \(\(select public\.is_owner\(\)\)\)/, "test 118: القراءة للمالك وحده");
+  assert.doesNotMatch(migration, /for (insert|update|delete|all)/, "test 118: لا سياسة كتابة من المتصفح");
+  assert.match(migration, /revoke all on table public\.customer_inactivity_alerts from public, anon, authenticated/);
+  assert.doesNotMatch(migration, /grant (insert|update|delete|all)[^;]*to (anon|authenticated)/, "test 118: لا كتابة للمتصفح");
+  assert.doesNotMatch(migration, /amndb00|create or replace function public\.notify_telegram|telegram_outbox/, "test 118: لا أمين ولا تعديل لنظام تيليغرام");
+  assert.match(migration, /cron\.schedule\('customer-inactivity-alert', '0 7 \* \* \*'/, "test 118: فحص يومي واحد");
+}
+
+console.log(`ذكاء الزبائن: 118 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);

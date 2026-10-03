@@ -156,6 +156,18 @@
       secondaryFactorShare: 0.3        // عامل ثانٍ يُذكر في التفسير إن بلغ 30% من أثر الأول
     }),
 
+    // ── تنبيه غياب الزبون المهم (CUSTOMER_INACTIVE_5D) ──────────────────────
+    // «مهم» = أعلى 20% بصافي مشتريات 60 يوماً داخل عملته (عيّنة VIP نفسها وشرط
+    // موثوقيتها: ≥ 5 مرشحين) أو شراء منتظم (≥ 4 أيام شراء في آخر 30 يوماً).
+    // الموردون و«ليس زبون مبيعات» خارجه. المرتجع ليس شراءً.
+    keyCustomerAlert: Object.freeze({
+      inactiveDays: 5,                 // غياب ≥ 5 أيام بلا فاتورة بيع ⇒ تنبيه
+      valueTopShare: 0.2,              // أعلى 20% بصافي المشتريات لكل عملة
+      regularMinPurchaseDays: 4,       // أيام شراء متمايزة في آخر periodDays
+      customersPerMessage: 20,         // رسالة يومية واحدة، تُقسَّم كل 20 زبوناً (حد تيليغرام)
+      messageDedupeMinutes: 1440       // إعادة التشغيل في اليوم نفسه لا تكرّر الرسالة
+    }),
+
     // ── جديد ────────────────────────────────────────────────────────────────
     // هامش أمان بعد بداية نافذة التقرير: من ظهر أول مرة داخل الأيام الأولى قد
     // يكون قديماً وسبقت مشترياتُه النافذة، فلا ندّعي أنه جديد.
@@ -2247,7 +2259,13 @@
           || a.record.recordKey.localeCompare(b.record.recordKey);
       });
       const vipCutoff = vipRankingReliable ? Math.max(1, Math.ceil(CONFIG.vipTopShare * vipPopulation)) : 0;
+      // الزبون المهم بالقيمة: العيّنة وشرط موثوقيتها نفسهما، مرتبة بصافي المشتريات وحده.
+      const valueRanked = vipCandidates.slice().sort((a, b) => b.combined.netSales - a.combined.netSales
+        || a.record.recordKey.localeCompare(b.record.recordKey));
+      const valueCutoff = vipRankingReliable ? Math.max(1, Math.ceil(CONFIG.keyCustomerAlert.valueTopShare * vipPopulation)) : 0;
       return {
+        valueTopKeys: new Set(valueRanked.slice(0, valueCutoff).map((draft) => draft.record.recordKey)),
+        valueRankByRecord: new Map(valueRanked.map((draft, index) => [draft.record.recordKey, index + 1])),
         declineFloor,
         vipPopulation,
         vipRankingReliable,
@@ -2271,6 +2289,8 @@
     const rankByRecord = new Map();
     const declineFloorByRecord = new Map();
     const rankingReliableByRecord = new Map();
+    const valueTopKeys = new Set();
+    const valueRankByRecord = new Map();
     const rankedByCurrency = new Map();
     for (const [code, cohort] of draftsByCurrency) {
       const rankedCohort = rankCohort(cohort);
@@ -2278,6 +2298,8 @@
       for (const [key, value] of rankedCohort.compositeByRecord) compositeByRecord.set(key, value);
       for (const key of rankedCohort.vipKeys) vipKeys.add(key);
       for (const [key, rank] of rankedCohort.rankByRecord) rankByRecord.set(key, rank);
+      for (const key of rankedCohort.valueTopKeys) valueTopKeys.add(key);
+      for (const [key, rank] of rankedCohort.valueRankByRecord) valueRankByRecord.set(key, rank);
       for (const draft of cohort) {
         declineFloorByRecord.set(draft.record.recordKey, rankedCohort.declineFloor);
         rankingReliableByRecord.set(draft.record.recordKey, rankedCohort.vipRankingReliable);
@@ -2394,6 +2416,26 @@
       if (draft.credit.autoCredit?.oldDebtCollection) flags.push("old_debt_collection");
       if (draft.credit.autoCredit?.status === "low_data") flags.push("credit_low_data");
       if (draft.credit.autoCredit?.smoothing?.applied) flags.push("credit_smoothed");
+
+      // الزبون المهم وغيابه (CUSTOMER_INACTIVE_5D): بلا مورد ولا «ليس زبون مبيعات» ولا مبيعات غير صالحة.
+      const K = CONFIG.keyCustomerAlert;
+      const keyEligible = draft.usableSales && !draft.isSupplier && draft.credit.creditStatus !== "not_customer";
+      const purchaseDays30 = new Set(draft.current.purchaseDays).size;
+      const keyByValue = keyEligible && valueTopKeys.has(draft.record.recordKey);
+      const keyByRegularity = keyEligible && purchaseDays30 >= K.regularMinPurchaseDays;
+      const keyCustomer = keyByValue || keyByRegularity
+        ? {
+          byValue: keyByValue,
+          byRegularity: keyByRegularity,
+          valueRank: valueRankByRecord.get(draft.record.recordKey) ?? null,
+          purchaseDays30,
+          // معدل المشتريات الشهرية = صافي 60 يوماً ÷ شهرين، بعملة الزبون.
+          monthlyPurchases: round(draft.combined.netSales / 2, 3),
+          absent: draft.daysSinceLastPurchase !== null && draft.daysSinceLastPurchase >= K.inactiveDays
+        }
+        : null;
+      if (keyCustomer) flags.push("key_customer");
+      if (keyCustomer?.absent) flags.push("key_customer_absent");
 
       // ترتيب أولوية التصنيف الأساسي (موثّق في docs/ai/topics/customer-intelligence.md).
       // ملاحظة مقصودة: VIP يسبق التراجع، فزبون VIP متراجع يبقى VIP مع flag تراجع.
@@ -2540,6 +2582,7 @@
         riskScore,
 
         explanation: reasons,
+        keyCustomer,
         isSupplier: draft.isSupplier
       };
       out.creditHistory = historyIndex ? creditHistoryView(out, historyIndex.get(out.customerGuid) || [], window.referenceDay) : null;
@@ -2693,6 +2736,125 @@
     };
   }
 
+  // --------------------------------------------------------------------------
+  // تنبيه غياب الزبون المهم (CUSTOMER_INACTIVE_5D) — خطة يومية حتمية يرسلها الخادم.
+  // alertedRows: صفوف customer_inactivity_alerts (من نُبِّه عنه لغيابه الحالي).
+  // المخرج: الرسائل الجديدة، وصفوف الحالة للإضافة، ومفاتيح الحالة للحذف (من عاد واشترى أو
+  // لم يعد مهماً). لا يرسل ولا يكتب شيئاً بنفسه.
+  // --------------------------------------------------------------------------
+  const ddmmyyyy = (key) => {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(key || ""));
+    return match ? `${match[3]}-${match[2]}-${match[1]}` : "—";
+  };
+  // بصمة قصيرة حتمية (FNV-1a 32bit) لمفتاح منع التكرار — ليست أماناً.
+  const fingerprint = (value) => {
+    let hash = 0x811c9dc5;
+    for (const char of String(value)) {
+      hash ^= char.codePointAt(0);
+      hash = Math.imul(hash, 0x01000193) >>> 0;
+    }
+    return hash.toString(16).padStart(8, "0");
+  };
+  const inactivityAlertKey = (row) => `CUSTOMER_INACTIVE_5D:${row.customerGuid || row.customerKey}:${row.lastPurchaseAt}`;
+
+  function buildInactivityAlert(result, alertedRows = []) {
+    const K = CONFIG.keyCustomerAlert;
+    const code = "CUSTOMER_INACTIVE_5D";
+    if (!result) return { status: "no_result", code, messages: [], absent: [], insertRows: [], deleteKeys: [] };
+    const checkDay = dayKey(result.generatedAt);
+    const invoices = result.sourcesFreshness?.invoices;
+    // تقرير فواتير قديم أو غائب: لا تنبيه غياب من نافذة قديمة (قد يكون الزبون اشترى بعدها).
+    // بلاغ «البيانات قديمة» مرة واحدة باليوم، والحالة لا تُمسّ.
+    if (!result.dataAvailability?.invoicesAvailable || !invoices || invoices.stale) {
+      const age = invoices?.ageMinutes;
+      return {
+        status: "stale_invoices",
+        code,
+        absent: [],
+        insertRows: [],
+        deleteKeys: [],
+        messages: [{
+          text: `⚠️ فحص غياب الزبائن المهمين لم يُنفَّذ اليوم: تقرير الفواتير ${age === null || age === undefined ? "غير متاح" : `عمره ${age} دقيقة`} (الحد ${CONFIG.freshnessMinutes.invoices} دقيقة). لا تنبيهات حتى تتحدّث المزامنة.`,
+          dedupeKey: `${code}:stale:${checkDay}`
+        }]
+      };
+    }
+
+    const absent = result.customers
+      .filter((row) => row.keyCustomer?.absent && !row.isSupplier && row.lastPurchaseAt)
+      .sort((a, b) => (a.keyCustomer.valueRank ?? Infinity) - (b.keyCustomer.valueRank ?? Infinity)
+        || (b.netSales60d ?? 0) - (a.netSales60d ?? 0)
+        || String(a.customerId).localeCompare(String(b.customerId)))
+      .map((row) => ({
+        dedupeKey: inactivityAlertKey(row),
+        customerGuid: row.customerGuid || null,
+        customerKey: row.customerKey,
+        customerName: row.customerName,
+        lastPurchaseAt: row.lastPurchaseAt,
+        daysSinceLastPurchase: row.daysSinceLastPurchase,
+        typicalGapDays: row.cadenceTrusted ? row.typicalGapDays : null,
+        monthlyPurchases: row.keyCustomer.monthlyPurchases,
+        currency: row.currency,
+        byValue: row.keyCustomer.byValue,
+        byRegularity: row.keyCustomer.byRegularity
+      }));
+
+    const alertedKeys = new Set(alertedRows.map((row) => text(row?.dedupe_key ?? row?.dedupeKey)).filter(Boolean));
+    const fresh = absent.filter((entry) => !alertedKeys.has(entry.dedupeKey));
+    // تنظيف الحالة: يُحذف صف من عاد واشترى (آخر فاتورة بيع له تغيّرت)، وصف خرج غيابه من نافذة
+    // الستين يوماً (لا يعود «مهماً» قبل شراء جديد، فلا خطر تكرار). من بقي غائباً يبقى صفّه
+    // حتى لو خرج مؤقتاً من «المهمين»، كي لا يُنبَّه عنه مرة ثانية للغياب نفسه.
+    const lastPurchaseByGuid = new Map();
+    const lastPurchaseByKey = new Map();
+    for (const row of result.customers) {
+      if (row.customerGuid) lastPurchaseByGuid.set(normalizeGuid(row.customerGuid), row.lastPurchaseAt);
+      else if (row.customerKey) lastPurchaseByKey.set(row.customerKey, row.lastPurchaseAt);
+    }
+    const deleteKeys = alertedRows
+      .filter((row) => {
+        const key = text(row?.dedupe_key ?? row?.dedupeKey);
+        const stored = text(row?.last_purchase_date ?? row?.lastPurchaseAt);
+        if (!key || !stored) return Boolean(key);
+        const guid = normalizeGuid(row?.customer_guid ?? row?.customerGuid);
+        const latest = guid ? lastPurchaseByGuid.get(guid) : lastPurchaseByKey.get(text(row?.customer_key ?? row?.customerKey));
+        if (latest && latest !== stored) return true;
+        return stored < result.window.previousStartDate;
+      })
+      .map((row) => text(row?.dedupe_key ?? row?.dedupeKey))
+      .sort();
+
+    const messages = [];
+    for (let start = 0; start < fresh.length; start += K.customersPerMessage) {
+      const chunk = fresh.slice(start, start + K.customersPerMessage);
+      const part = fresh.length > K.customersPerMessage ? ` (${start / K.customersPerMessage + 1}/${Math.ceil(fresh.length / K.customersPerMessage)})` : "";
+      const lines = chunk.map((entry, index) => {
+        const gap = entry.typicalGapDays === null ? "غير محسوبة" : `${entry.typicalGapDays} يوماً`;
+        return `${start + index + 1}. ${entry.customerName} — ${entry.daysSinceLastPurchase} يوماً بلا فاتورة (آخر فاتورة ${ddmmyyyy(entry.lastPurchaseAt)}) — فجوته المعتادة ${gap} — مشترياته الشهرية ${formatAmount(entry.monthlyPurchases, entry.currency || CONFIG.baseCurrency)}`;
+      });
+      messages.push({
+        text: `🔕 زبائن مهمون بلا شراء منذ ${K.inactiveDays} أيام أو أكثر${part}\n${lines.join("\n")}`,
+        // مفتاح الرسالة من محتواها (يوم المرجع + بصمة الزبائن): إعادة التشغيل بنفس القائمة لا
+        // تكرّرها، وقائمة مختلفة في اليوم نفسه لا تُبتلَع بمفتاح رسالة سابقة.
+        dedupeKey: `${code}:${result.window.referenceDate}:${fingerprint(chunk.map((entry) => entry.dedupeKey).join("|"))}`,
+        customerKeys: chunk.map((entry) => entry.dedupeKey)
+      });
+    }
+    return {
+      status: "ok",
+      code,
+      referenceDate: result.window.referenceDate,
+      absent,
+      messages,
+      insertRows: fresh.map((entry) => ({
+        dedupe_key: entry.dedupeKey,
+        customer_guid: entry.customerGuid,
+        customer_key: entry.customerKey,
+        last_purchase_date: entry.lastPurchaseAt
+      })),
+      deleteKeys
+    };
+  }
+
   // تنبيهات جاهزة للتوصيل لاحقاً بالبنية القائمة (telegram_outbox / web_push).
   // تُرجع أوصافاً فقط مع `dedupeKey` و`cooldownMinutes` — لا ترسل شيئاً بنفسها،
   // ولا تُستدعى من أي مسار إرسال حالياً (منعاً لأي spam أثناء التطوير).
@@ -2762,6 +2924,7 @@
     buildCoworkPayload,
     buildAlertDrafts,
     buildCreditSnapshots,
+    buildInactivityAlert,
     normalizeName,
     commercialRound
   });

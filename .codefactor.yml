@@ -1,0 +1,4 @@
+# نسخة الخادم من محرك ذكاء الزبائن مطابقة بايتاً ببايت لـ src/customer-intelligence.js
+# (يفرضها scripts/check-customer-intelligence.mjs)، فتُحلَّل مرة واحدة في مصدرها.
+exclude_patterns:
+  - 'supabase/functions/_shared/customer-intelligence.js'

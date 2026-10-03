@@ -84,6 +84,8 @@
     credit_inactive: "غير نشط: بلا حد",
     credit_low_data: "حد محافظ: بيانات قليلة",
     credit_smoothed: "حد منعَّم أسبوعياً",
+    key_customer: "زبون مهم",
+    key_customer_absent: "زبون مهم غائب",
     credit_not_customer: "ليس زبون مبيعات: بلا حد",
     credit_needs_review: "حد الائتمان غير متاح: يحتاج مراجعة",
     credit_mixed_role: "دور مختلط (زبون ومورد)",
