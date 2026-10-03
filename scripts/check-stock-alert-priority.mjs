@@ -575,6 +575,12 @@ await test("مراقبة pg_cron: فشلان متتاليان أو لا نجاح
   assert.ok(watchGuard > 0 && watchGuard < code.indexOf("'stock-priority-alert-watch'"), "يتحقق من pg_cron قبل جدولة المراقب");
 });
 
+await test("pg_cron هو الجدولة الوحيدة: الـworkflow تشغيل يدوي فقط بلا schedule", () => {
+  const wf = readFileSync(".github/workflows/stock-priority-alerts.yml", "utf8").replace(/#.*$/gm, "");
+  assert.doesNotMatch(wf, /^\s*schedule:/m, "جدولة GitHub عادت؛ الجدولة في pg_cron");
+  assert.match(wf, /^\s*workflow_dispatch:/m);
+});
+
 console.log("check-stock-alert-priority:");
 console.log(results.join("\n"));
 if (failed) {

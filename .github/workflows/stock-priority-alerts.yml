@@ -8,9 +8,10 @@ name: تنبيهات النفاد حسب أولوية المبيعات
 # (Settings → Secrets and variables → Actions → Variables). بدونه يعمل تجريبياً ويطبع أعداداً فقط.
 # يعتمد على سرّ SUPABASE_SERVICE_ROLE_KEY نفسه المستعمل في alert-on-automation-failure.yml.
 
+# الجدولة انتقلت إلى pg_cron (الدالة stock-priority-alert، الهجرة
+# 20261003113851_stock_priority_alert_cron) بعد 3 تشغيلات ناجحة متتالية في 2026-10-03.
+# cron الـGitHub غير مضمون؛ هذا الـworkflow صار تشغيلاً يدوياً احتياطياً فقط.
 on:
-  schedule:
-    - cron: '*/15 * * * *'
   workflow_dispatch: {}
 
 permissions:
