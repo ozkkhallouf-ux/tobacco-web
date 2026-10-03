@@ -200,6 +200,6 @@ ORDER BY sale_qty DESC
             $bodyText = $reader.ReadToEnd()
             if ($bodyText) { Write-Log ("رد الخادم: " + $bodyText) }
         }
-    } catch { }
+    } catch { Write-Log "تعذّرت قراءة رد الخادم: $($_.Exception.Message)" }
     exit 1
 }
