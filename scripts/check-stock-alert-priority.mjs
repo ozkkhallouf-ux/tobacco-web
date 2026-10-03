@@ -421,6 +421,160 @@ await test("فشل workflow التنبيهات مراقَب في alert-on-automa
   assert.ok(watcher.includes(`- "${name}"`), `${name} غير مدرج في قائمة المراقبة`);
 });
 
+// ── الدالة الطرفية stock-priority-alert (جدولة pg_cron) تحت عميل Supabase وهمي ─────────
+async function runEdge({ header = "tok-stock", stored = "tok-stock", stock = tenStock({ 1: 0 }), sales = salesReport(tenItems()), threshold = "50", body = { action: "scheduled_check" }, notifyError = null, now = NOW } = {}) {
+  const ts = (await import("typescript")).default;
+  const vm = await import("node:vm");
+  const { outputText, diagnostics } = ts.transpileModule(readFileSync("supabase/functions/stock-priority-alert/index.ts", "utf8"), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+    reportDiagnostics: true,
+    fileName: "stock-priority-alert.ts"
+  });
+  assert.equal(diagnostics.length, 0, "الدالة تُترجم بلا أخطاء صياغة");
+  const engineSource = readFileSync("supabase/functions/_shared/stock-alert-priority.js", "utf8");
+  const bySource = { ameen_sql_agent: stock, ameen_item_sales: sales };
+  const calls = { rpc: [], runs: [], tables: [] };
+  const from = (table) => {
+    calls.tables.push(table);
+    const filters = {};
+    const result = () => {
+      if (table === "app_secrets") return { data: stored === null ? null : { value: stored }, error: null };
+      if (table === "inventory_reports") return { data: [bySource[filters.source]].filter(Boolean), error: null };
+      if (table === "bot_config") return { data: threshold === null ? null : { value: threshold }, error: null };
+      throw new Error(`جدول غير متوقع ${table}`);
+    };
+    const builder = {
+      select: () => builder,
+      eq: (column, value) => { filters[column] = value; return builder; },
+      order: () => builder,
+      limit: async () => result(),
+      maybeSingle: async () => result()
+    };
+    return builder;
+  };
+  const rpc = async (name, args) => {
+    if (name === "record_stock_priority_alert_run") { calls.runs.push(JSON.parse(JSON.stringify(args))); return { error: null }; }
+    calls.rpc.push({ name, args });
+    return { error: notifyError };
+  };
+  const HostDate = Date;
+  class FixedDate extends HostDate {
+    constructor(...args) { if (args.length) super(...args); else super(now.getTime()); }
+    static now() { return now.getTime(); }
+  }
+  const context = vm.createContext({
+    Response, Request, Headers, console, Promise, JSON, Math, Number, String, Object, Array, Map, Set, Infinity, isNaN,
+    Date: FixedDate,
+    Deno: { env: { get: (name) => ({ SUPABASE_URL: "https://local.test", SUPABASE_SERVICE_ROLE_KEY: "service-test" }[name] || "") } },
+    exports: {}
+  });
+  context.globalThis = context;
+  context.require = (specifier) => {
+    if (specifier === "../_shared/stock-alert-priority.js") { vm.runInContext(engineSource, context); return {}; }
+    if (specifier.startsWith("npm:@supabase/supabase-js")) return { createClient: () => ({ from, rpc }) };
+    throw new Error(`استيراد غير متوقع ${specifier}`);
+  };
+  context.module = { exports: context.exports };
+  vm.runInContext(outputText, context, { filename: "stock-priority-alert.js" });
+  const headers = { "content-type": "application/json" };
+  if (header !== null) headers["x-ozk-stock-alert-token"] = header;
+  const response = await context.exports.default.fetch(new Request("https://local.test/functions/v1/stock-priority-alert", {
+    method: "POST", headers, body: JSON.stringify(body)
+  }));
+  return { status: response.status, body: await response.json(), calls };
+}
+
+await test("pg_cron: نسخة الخادم من المحرك تطابق src/stock-alert-priority.js بايتاً ببايت", () => {
+  assert.equal(readFileSync("supabase/functions/_shared/stock-alert-priority.js", "utf8"), readFileSync("src/stock-alert-priority.js", "utf8"),
+    "شغّل: cp src/stock-alert-priority.js supabase/functions/_shared/");
+  const fn = readFileSync("supabase/functions/stock-priority-alert/index.ts", "utf8");
+  assert.match(fn, /import "\.\.\/_shared\/stock-alert-priority\.js";/);
+  assert.match(fn, /buildStockAlerts\(/, "الخطة من المحرك لا من حساب ثانٍ");
+  assert.match(fn, /sameToken\(req\.headers\.get\("x-ozk-stock-alert-token"\)/);
+  assert.doesNotMatch(fn, /AmnDb00|AMEEN_SQL|mssql|tedious|sqlcmd|ameen_warehouse_stock_reports/i, "لا وصول للأمين ولا لتقارير المستودعات");
+  assert.doesNotMatch(fn, /from\("(?!app_secrets|inventory_reports|bot_config)/, "لا جداول أخرى");
+  assert.doesNotMatch(fn, /\.(insert|update|upsert|delete)\(/, "لا كتابة غير notify_telegram");
+});
+
+await test("pg_cron: الرمز شرط قبل أي قراءة، ورمز غير مضبوط ⇒ لا شيء", async () => {
+  const wrong = await runEdge({ header: "tok-x" });
+  assert.equal(wrong.status, 401);
+  assert.deepEqual(wrong.calls.tables, ["app_secrets"], "لا قراءة قبل التحقق من الرمز");
+  assert.equal(wrong.calls.rpc.length, 0);
+  assert.equal((await runEdge({ stored: null, header: "" })).status, 401);
+  assert.equal((await runEdge({ header: null })).status, 401);
+});
+
+await test("pg_cron: التشغيل المجدول يرسل نفس رسالة المُشغِّل ومفتاحها ونافذة 360 دقيقة", async () => {
+  const out = await runEdge();
+  assert.equal(out.status, 200, JSON.stringify(out.body));
+  assert.equal(out.body.mode, "live");
+  assert.equal(out.body.sent, 1);
+  assert.equal(out.calls.rpc.length, 1);
+  const expected = engine.buildStockAlerts({ stockReport: tenStock({ 1: 0 }), salesReport: salesReport(tenItems()), now: NOW, lowStockThreshold: 50 }).messages[0];
+  assert.deepEqual(JSON.parse(JSON.stringify(out.calls.rpc[0])), { name: "notify_telegram", args: { p_event_type: "stock_low", p_message: expected.message, p_dedupe_key: expected.dedupeKey, p_dedupe_minutes: 360 } });
+  assert.ok(!JSON.stringify(out.body).includes("صنف 1"), "لا أسماء أصناف في الرد");
+});
+
+await test("pg_cron: dryRun لا يرسل، ومصدر قديم ⇒ رسالة التقادم وحدها، وفشل الإرسال ظاهر", async () => {
+  const dry = await runEdge({ body: { dryRun: true } });
+  assert.equal(dry.body.mode, "dry_run");
+  assert.equal(dry.body.messages, 1);
+  assert.equal(dry.calls.rpc.length, 0);
+  const stale = await runEdge({ stock: null });
+  assert.equal(stale.body.status, "stale");
+  assert.match(stale.calls.rpc[0].args.p_message, /أرصدة المخزون: غير متوفرة/);
+  const failed = await runEdge({ notifyError: { message: "x" } });
+  assert.equal(failed.status, 500);
+  assert.equal(failed.body.error, "notify_failed");
+  const noThreshold = await runEdge({ threshold: null, stock: tenStock({ 5: 590 }) });
+  assert.equal(noThreshold.body.alerts, 0, "بلا حد مضبوط يُستعمل 50 كما في المُشغِّل");
+});
+
+await test("pg_cron: الهجرة تجدول كل 15 دقيقة برمز app_secrets، وتتخطى بلا pg_cron، والدالة بلا JWT", () => {
+  const name = readdirSync("supabase/migrations").find((f) => f.endsWith("_stock_priority_alert_cron.sql"));
+  assert.ok(name);
+  const sql = readFileSync(`supabase/migrations/${name}`, "utf8");
+  assert.match(sql, /cron\.schedule\('stock-priority-alert', '\*\/15 \* \* \* \*', 'select public\.dispatch_stock_priority_alert\(\);'\)/);
+  assert.match(sql, /from public\.app_secrets where name = 'stock_priority_alert_token'/);
+  assert.match(sql, /if alert_token is null or alert_token = '' then return; end if;/, "بلا رمز ⇒ عملية فارغة");
+  assert.match(sql, /'X-OZK-Stock-Alert-Token', alert_token/);
+  assert.match(sql, /revoke all on function public\.dispatch_stock_priority_alert\(\) from public, anon, authenticated;/);
+  assert.ok(sql.indexOf("from pg_extension where extname = 'pg_cron'") > 0 && sql.indexOf("from pg_extension where extname = 'pg_cron'") < sql.indexOf("from cron.job"), "يتحقق من pg_cron قبل cron.job");
+  const code = sql.replace(/--.*$/gm, "").toLowerCase();
+  assert.doesNotMatch(code, /amndb00|create or replace function public\.notify_telegram|telegram_outbox|insert into public\.app_secrets/, "لا أمين ولا تعديل لتيليغرام ولا رمز مكتوب");
+  assert.match(readFileSync("supabase/config.toml", "utf8"), /\[functions\.stock-priority-alert\]\s*\nverify_jwt = false/);
+});
+
+await test("مراقبة pg_cron: كل تشغيل مجدول يُسجَّل بنتيجته، وdryRun والرمز الخاطئ لا يُسجَّلان", async () => {
+  const ok = await runEdge();
+  assert.deepEqual(ok.calls.runs, [{ p_ok: true, p_detail: "alert" }]);
+  const failed = await runEdge({ notifyError: { message: "x" } });
+  assert.deepEqual(failed.calls.runs, [{ p_ok: false, p_detail: "notify_failed" }]);
+  const stale = await runEdge({ stock: null });
+  assert.deepEqual(stale.calls.runs, [{ p_ok: true, p_detail: "stale" }], "رسالة التقادم أُرسلت: الدالة نفسها سليمة");
+  assert.equal((await runEdge({ body: { dryRun: true } })).calls.runs.length, 0);
+  assert.equal((await runEdge({ header: "tok-x" })).calls.runs.length, 0);
+});
+
+await test("مراقبة pg_cron: فشلان متتاليان أو لا نجاح 45 دقيقة ⇒ «فشل الأتمتة» مرة كل 6 ساعات", () => {
+  const name = readdirSync("supabase/migrations").find((f) => f.endsWith("_stock_priority_alert_cron.sql"));
+  const sql = readFileSync(`supabase/migrations/${name}`, "utf8");
+  const code = sql.replace(/--.*$/gm, "");
+  assert.match(code, /cron\.schedule\('stock-priority-alert-watch', '\*\/5 \* \* \* \*', 'select public\.watch_stock_priority_alert\(\);'\)/);
+  assert.match(code, /last_two\[1\] = false and last_two\[2\] = false/, "فشلان متتاليان");
+  assert.match(code, /last_ok < now\(\) - interval '45 minutes'/, "45 دقيقة بلا نجاح");
+  assert.match(code, /'automation_failure',\s*format\(E'🚨 فشل الأتمتة/);
+  assert.match(code, /'automation-failure:stock-priority-alert',\s*360\s*\)/, "مفتاح ثابت ونافذة 6 ساعات");
+  assert.match(code, /insert into private\.stock_priority_alert_runs \(ok, detail\)\s*select null, 'monitor_started'/, "علامة بدء فلا إنذار فوري ولا صمت دائم");
+  assert.match(code, /revoke all on table private\.stock_priority_alert_runs from public, anon, authenticated;/);
+  assert.match(code, /revoke all on function public\.record_stock_priority_alert_run\(boolean, text\) from public, anon, authenticated;\s*grant execute on function public\.record_stock_priority_alert_run\(boolean, text\) to service_role;/);
+  assert.match(code, /revoke all on function public\.watch_stock_priority_alert\(\) from public, anon, authenticated;/);
+  assert.ok(code.indexOf("stock_priority_alert_token") < code.indexOf("array_agg(ok"), "بلا رمز ⇒ لا مراقبة");
+  const watchGuard = code.lastIndexOf("from pg_extension where extname = 'pg_cron'");
+  assert.ok(watchGuard > 0 && watchGuard < code.indexOf("'stock-priority-alert-watch'"), "يتحقق من pg_cron قبل جدولة المراقب");
+});
+
 console.log("check-stock-alert-priority:");
 console.log(results.join("\n"));
 if (failed) {
