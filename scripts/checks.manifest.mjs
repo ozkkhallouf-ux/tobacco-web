@@ -106,6 +106,7 @@ export const CHECKS = [
   'check-sales-return-master-invoice.mjs',
   'check-service-worker-update-cycle.mjs',
   'check-smart-inventory.mjs',
+  'check-stock-alert-priority.mjs',
   'check-stock-qty-net-calc.mjs',
   'check-telegram-delivery-observability.mjs',
   'check-telegram-grok-ask.mjs',

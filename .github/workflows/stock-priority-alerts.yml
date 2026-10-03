@@ -1,0 +1,46 @@
+name: تنبيهات النفاد حسب أولوية المبيعات
+
+# يحسب الأصناف المهمة (صافي مبيع آخر 30 يوماً) التي قاربت النفاد، ويضع رسالة واحدة
+# مرتبة بالأولوية في telegram_outbox عبر notify_telegram. المنطق: src/stock-alert-priority.js،
+# والتوثيق: docs/ai/topics/stock-priority-alerts.md.
+#
+# التفعيل صريح: لا يُرسل شيء إلا إذا كان متغيّر المستودع STOCK_PRIORITY_ALERTS_ENABLED = 'true'
+# (Settings → Secrets and variables → Actions → Variables). بدونه يعمل تجريبياً ويطبع أعداداً فقط.
+# يعتمد على سرّ SUPABASE_SERVICE_ROLE_KEY نفسه المستعمل في alert-on-automation-failure.yml.
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stock-priority-alerts
+  cancel-in-progress: false
+
+jobs:
+  stock-priority-alerts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build and enqueue stock alerts
+        env:
+          SUPABASE_URL: https://dyxbirfpxeocqffnfdeb.supabase.co
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          ALERTS_ENABLED: ${{ vars.STOCK_PRIORITY_ALERTS_ENABLED }}
+        run: |
+          if [ "$ALERTS_ENABLED" = "true" ]; then
+            node scripts/stock-priority-alerts.mjs --send
+          else
+            node scripts/stock-priority-alerts.mjs
+          fi

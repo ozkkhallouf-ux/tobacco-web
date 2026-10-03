@@ -41,6 +41,8 @@ const EXECUTED_UNDER_PS51 = [
   "tools/register-purchase-item-snapshot-task.ps1",
   "tools/auto-sync-price-lists.ps1",
   "tools/ameen-sync-agent.ps1",
+  "tools/push-item-sales.ps1",
+  "tools/register-item-sales-task.ps1",
 ];
 
 const ARABIC = /[؀-ۿ]/;

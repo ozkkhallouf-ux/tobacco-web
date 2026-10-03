@@ -7,6 +7,7 @@
 | المبيعات | [sales.md](sales.md) |
 | نشرات الأسعار | [price-bulletins.md](price-bulletins.md) |
 | المخزون والجرد | [inventory.md](inventory.md) |
+| تنبيهات النفاد حسب أولوية المبيعات | [stock-priority-alerts.md](stock-priority-alerts.md) |
 | أرصدة الزبائن والدفعات | [customer-balances.md](customer-balances.md) |
 | ذكاء الزبائن | [customer-intelligence.md](customer-intelligence.md) |
 | المشتريات والموردون | [purchases-suppliers.md](purchases-suppliers.md) |
