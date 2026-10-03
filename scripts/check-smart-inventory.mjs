@@ -10,7 +10,7 @@ function section(source, start, end) {
 }
 
 const sql = readFileSync("supabase/smart-inventory.sql", "utf8");
-const selfCorrectionMigration = readFileSync("supabase/migrations/20260928183000_smart_inventory_counter_self_correction.sql", "utf8");
+const selfCorrectionMigration = readFileSync("supabase/migrations/20261003014153_smart_inventory_counter_self_correction.sql", "utf8");
 const isolationSql = readFileSync("supabase/migrations/superseded/20260823084956_smart_inventory_counter_isolation.sql", "utf8");
 const app = readFileSync("src/app.js", "utf8");
 const client = readFileSync("src/supabase-client.js", "utf8");
