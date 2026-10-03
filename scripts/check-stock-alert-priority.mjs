@@ -328,7 +328,7 @@ await test("9) لا كتابة على الأمين ولا ذكر لتقارير 
     assert.ok(!/\b(INSERT|UPDATE|DELETE|MERGE|EXEC|EXECUTE|DROP|ALTER|CREATE|TRUNCATE)\b/i.test(sql), "أمر كتابة في استعلام الأمين");
   }
   assert.ok(!/ExecuteNonQuery/.test(ps));
-  for (const path of ["src/stock-alert-priority.js", "scripts/stock-priority-alerts.mjs", ".github/workflows/stock-priority-alerts.yml"]) {
+  for (const path of ["src/stock-alert-priority.js", "scripts/stock-priority-alerts.mjs", ".github/workflows/stock-priority-alerts.yml", "supabase/functions/stock-priority-alerts/index.ts", "supabase/migrations/20261003103000_stock_priority_alerts_cron.sql"]) {
     const source = readFileSync(path, "utf8");
     assert.ok(!/AMEEN_SQL_(WRITE_)?CONNECTION|SqlConnection|AmnDb00|Invoke-Sqlcmd/i.test(source), `${path} يلمس الأمين`);
     assert.ok(!/ameen_warehouse_stock_reports|الامانة/.test(source.replace(/المستبعِد لمستودع الامانة/g, "")), `${path} يقرأ تقارير المستودعات`);
@@ -352,6 +352,33 @@ await test("الـtrigger القديم لكل الأصناف متوقف في ا�
     "drop trigger if exists trg_notify_stock_alerts on public.approved_price_items",
     "drop function if exists public.tg_notify_stock_alerts()"
   ]);
+});
+
+await test("الدالة الطرفية: نسخة المحرك مطابقة بايتاً ببايت، والرمز من app_secrets، والكتابة notify_telegram وحدها", () => {
+  assert.equal(readFileSync("supabase/functions/_shared/stock-alert-priority.js", "utf8"), readFileSync("src/stock-alert-priority.js", "utf8"),
+    "نسخة الخادم يجب أن تطابق src/stock-alert-priority.js — شغّل: cp src/stock-alert-priority.js supabase/functions/_shared/");
+  const fn = readFileSync("supabase/functions/stock-priority-alerts/index.ts", "utf8");
+  assert.match(fn, /import "\.\.\/_shared\/stock-alert-priority\.js";/);
+  assert.match(fn, /\.from\("app_secrets"\)\.select\("value"\)\.eq\("name", "stock_priority_alert_token"\)/);
+  assert.match(fn, /x-ozk-stock-alert-token/);
+  assert.match(fn, /sameToken\(/);
+  assert.ok(!/\.(insert|update|upsert|delete)\(/.test(fn), "الدالة لا تكتب على أي جدول");
+  assert.deepEqual([...fn.matchAll(/\.rpc\("([^"]+)"/g)].map((m) => m[1]), ["notify_telegram"]);
+  assert.match(fn, /p_dedupe_minutes: message\.cooldownMinutes/);
+  assert.match(readFileSync("supabase/config.toml", "utf8"), /\[functions\.stock-priority-alerts\]\s*\nverify_jwt = false/);
+});
+
+await test("جدولة pg_cron كل 15 دقيقة برمز app_secrets، وتتخطى بلا pg_cron أو بلا رمز", () => {
+  const migration = readdirSync("supabase/migrations").find((f) => f.endsWith("_stock_priority_alerts_cron.sql"));
+  assert.ok(migration);
+  const sql = readFileSync(`supabase/migrations/${migration}`, "utf8");
+  assert.ok(sql.includes("cron.schedule('stock-priority-alerts', '*/15 * * * *', 'select public.dispatch_stock_priority_alerts();')"));
+  assert.ok(sql.includes("where name = 'stock_priority_alert_token'"));
+  assert.ok(sql.includes("if alert_token is null or alert_token = '' then return; end if;"));
+  assert.ok(sql.includes("'X-OZK-Stock-Alert-Token', alert_token"));
+  assert.ok(sql.includes("/functions/v1/stock-priority-alerts"));
+  assert.ok(sql.includes("where extname = 'pg_cron'"));
+  assert.ok(sql.includes("revoke all on function public.dispatch_stock_priority_alerts() from public, anon, authenticated;"));
 });
 
 // ── المُشغِّل بـfetch مزيّف ───────────────────────────────────────────────────

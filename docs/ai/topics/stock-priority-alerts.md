@@ -15,6 +15,8 @@
 | `src/stock-alert-priority.js` | المنطق النقي: صافي المبيع، الترتيب، الأهلية، الحداثة، نص الرسالة، مفتاح منع التكرار. بلا شبكة ولا كتابة |
 | `scripts/stock-priority-alerts.mjs` | المُشغِّل: يقرأ من Supabase ويستدعي `notify_telegram`. بلا `--send` تجريبي يطبع أعداداً فقط |
 | `.github/workflows/stock-priority-alerts.yml` | كل 15 دقيقة. يرسل فقط إذا كان متغيّر المستودع `STOCK_PRIORITY_ALERTS_ENABLED = true`. فشله مراقَب في `alert-on-automation-failure.yml` |
+| `supabase/functions/stock-priority-alerts/index.ts` | الدالة الطرفية: نفس قراءات المُشغِّل ونفس المحرك (`supabase/functions/_shared/stock-alert-priority.js` نسخة مطابقة بايتاً ببايت يفرضها الفحص)، ثم `notify_telegram`. تتحقق من رأس `X-OZK-Stock-Alert-Token` مقابل `app_secrets.stock_priority_alert_token`؛ الرد أعداد فقط. `verify_jwt = false` في `supabase/config.toml` لأن pg_net لا يرسل JWT |
+| `supabase/migrations/20261003103000_stock_priority_alerts_cron.sql` | `public.dispatch_stock_priority_alerts()` وجدولة pg_cron `stock-priority-alerts` كل 15 دقيقة، بنمط `dispatch_customer_inactivity_alert`. غياب الرمز ⇒ عملية فارغة |
 | `scripts/check-stock-alert-priority.mjs` | فحوص كل حالة (ضمن `npm run check`) |
 
 ## المصدر الموثوق
@@ -49,7 +51,7 @@
 
 ## الفحوص الإلزامية
 
-- `node scripts/check-stock-alert-priority.mjs` (31 حالة: الصافي، الربط، النافذة، شمول مبيعات الكاشير بلا شرط زبون، الترتيب، الأهلية، أقل من 3 فواتير، غير المباع، نص السطر، الحد اليدوي، التقادم، نافذة غير مطابقة، صف تالف، منع التكرار، التقسيم، الحتمية، تطابق عتبات الحداثة، لا كتابة على الأمين، إيقاف الـtrigger القديم، المُشغِّل بـfetch مزيّف، غياب السرّ، ومراقبة فشل الـworkflow).
+- `node scripts/check-stock-alert-priority.mjs` (34 حالة: الصافي، الربط، النافذة، شمول مبيعات الكاشير بلا شرط زبون، الترتيب، الأهلية، أقل من 3 فواتير، غير المباع، نص السطر، الحد اليدوي، التقادم، نافذة غير مطابقة، صف تالف، منع التكرار، التقسيم، الحتمية، تطابق عتبات الحداثة، لا كتابة على الأمين، إيقاف الـtrigger القديم، المُشغِّل بـfetch مزيّف، غياب السرّ، ومراقبة فشل الـworkflow، وتطابق نسخة الدالة الطرفية ورمزها وجدولة pg_cron).
 
 ## التفعيل (منفّذ في 2026-10-03 بموافقة المالك)
 
@@ -65,6 +67,19 @@
 - فشل «Unable to connect» في مهام OZK2026 نحو Supabase كان من نفق NordVPN (NordLynx هو المسار الافتراضي)، لا من المهمة ولا من البروكسي أو TLS.
 
 الرجوع: حذف المتغيّر، وإعادة تعريف `tg_notify_stock_alerts` من تاريخ `supabase/telegram-notifications.sql` قبل هذا التعديل.
+
+## الانتقال إلى pg_cron (طلب المالك 2026-10-03)
+
+جدولة GitHub (`*/15`) غير مضمونة: في أول 6 ساعات بعد التفعيل شغّلت التنبيه تلقائياً مرة واحدة بدل نحو 25. الجدولة تنتقل إلى pg_cron على Supabase بالدالة الطرفية أعلاه. منع التكرار لم يتغيّر (`notify_telegram`، 360 دقيقة)، ومفتاح الرسالة نفسه من المحرك نفسه، فتشغيل المسارين معاً أثناء الانتقال لا يكرّر الرسالة.
+
+خطوات الإنتاج، كل منها بموافقة المالك:
+1. نشر الدالة `stock-priority-alerts` (`verify_jwt = false`).
+2. توليد الرمز داخل القاعدة دون أن يمرّ بالمستودع: `insert into public.app_secrets(name, value) values ('stock_priority_alert_token', encode(gen_random_bytes(32), 'hex'));`
+3. تطبيق الترحيل، ثم إعادة تسمية ملفه ليطابق الإصدار المسجَّل (كما في `20261003034544`).
+4. التحقق من 3 تشغيلات متتالية ناجحة (`cron.job_run_details` و`net._http_response` بحالة 200).
+5. بعدها فقط: جدولة GitHub تصير `workflow_dispatch` وحده (PR منفصل).
+
+الرجوع: `select cron.unschedule('stock-priority-alerts');` أو حذف صف الرمز، وجدولة GitHub ما زالت قائمة حتى الخطوة 5.
 
 ## القيود الثابتة
 
