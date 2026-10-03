@@ -290,7 +290,7 @@ test("#32: سطر الحسم المدين 0.02 جزء من المرتجع، لا
   const discRow = movesOf(CUST_C)[1];
   assert.ok(movementReturnLink(discRow), "سطر حسم المرتجع لم يُعرف كجزء من المرتجع");
   // لائحة الفواتير في لوحة الزبون تستثنيه بهذا الربط نفسه، وزر مستندها يرفضه.
-  assert.match(appJs, /const invoiceMoves = movements\.filter\(\(m\) => Number\(m\?\.debit \|\| 0\) > 0 && !movementReturnLink\(m\)\);/);
+  assert.ok(appJs.includes("const invoiceMoves = movements.filter((m) => debitMovementKind(m, typedLedger).kind === \"sale\");"), "لائحة الفواتير لم تعد تستثني غير البيع عبر debitMovementKind");
   assert.match(appJs, /if \(movementReturnLink\(\{ billGuid: el\.dataset\.billGuid \}\)\) \{/);
 });
 
