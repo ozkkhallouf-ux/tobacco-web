@@ -220,6 +220,20 @@
     return { saleQty, returnQty, saleInvoiceCount: Math.floor(saleInvoiceCount) };
   }
 
+  function aggregateSales(salesReport, identity) {
+    const byKey = new Map();
+    let invalidRows = 0;
+    let unidentifiedRows = 0;
+    for (const row of Array.isArray(salesReport?.items) ? salesReport.items : []) {
+      const counts = rowCounts(row);
+      const resolved = counts && identity.resolve(row?.itemGuid, row?.name);
+      if (!counts) invalidRows += 1;
+      else if (!resolved) unidentifiedRows += 1;
+      else addSalesRow(byKey, resolved, row, counts);
+    }
+    return { byKey, invalidRows, unidentifiedRows };
+  }
+
   // ── 1+2+3+4: صافي المبيع، الترتيب، الأهلية ─────────────────────────────────
   function computeSalesPriority({ salesReport, stockReport = null, config: overrides } = {}) {
     const config = mergeConfig(overrides);
@@ -229,16 +243,7 @@
       return { ok: false, code: window.code, window, items: [], ranked: [], eligible: [], soldCount: 0, topCount: 0, averageNetQty: null, warnings };
     }
     const identity = buildIdentity(stockReport, salesReport);
-    const byKey = new Map();
-    let invalidRows = 0;
-    let unidentifiedRows = 0;
-    for (const row of Array.isArray(salesReport?.items) ? salesReport.items : []) {
-      const counts = rowCounts(row);
-      if (!counts) { invalidRows += 1; continue; }
-      const resolved = identity.resolve(row?.itemGuid, row?.name);
-      if (!resolved) { unidentifiedRows += 1; continue; }
-      addSalesRow(byKey, resolved, row, counts);
-    }
+    const { byKey, invalidRows, unidentifiedRows } = aggregateSales(salesReport, identity);
     if (invalidRows) warnings.push(`invalid_rows:${invalidRows}`);
     if (unidentifiedRows) warnings.push(`unidentified_rows:${unidentifiedRows}`);
     if (identity.ambiguousNames.size) warnings.push(`ambiguous_names:${identity.ambiguousNames.size}`);
