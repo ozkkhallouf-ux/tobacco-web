@@ -167,3 +167,29 @@ operators must either:
    سجل الإنتاج البعيد.
 
 هذا التوثيق لا يصرّح بتطبيق أي شيء على الإنتاج — الدفع يبقى يدوياً وبإذن منفصل.
+
+
+## تسوية 2026-10-03: ملفات بلا سجل في `schema_migrations`
+
+تدقيق قراءة فقط على الإنتاج (2026-10-03) وجد 11 ملفاً في `supabase/migrations/` أرقامها غير مسجّلة. Supabase CLI يطابق بالرقم وحده، فالملف غير المسجَّل يبدو «معلّقاً» وقد يُعاد تطبيقه. لم يُكتب شيء على الإنتاج ولا `migration repair`.
+
+**أُعيدت تسميتها إلى الإصدار المسجَّل** (نفس الاسم في السجل؛ نمط #300 و#302):
+
+| كان | صار | التحقق |
+|---|---|---|
+| `20260914120000_telegram_delivery_confirmation_retry.sql` | `20260914121528_…` | السجل يحمل نسخة أقدم؛ الدالة الحية `dispatch_telegram_outbox` تطابق الملف (إحياء failed بعد ساعة، مهلة 15 دقيقة، شرط `message_id`) — طُبّقت المراجعات اللاحقة خارج السجل |
+| `20260921120000_business_audit_log_item_identity_changes.sql` | `20260921104828_…` | النص المسجَّل مطابق (بعد حذف التعليقات والمسافات) |
+| `20260926140000_evening_report_supplier_purchases_from_bills.sql` | `20260926234241_…` | مطابق |
+| `20260928140000_prune_ameen_warehouse_stock_reports.sql` | `20260928145121_…` | مطابق |
+
+**نُقلت إلى هنا** (لا تُطبَّق من المسار الفعّال):
+
+| الملف | السبب |
+|---|---|
+| `20260921073000_approved_price_items_item_guid_unique.sql` | الفهرس `approved_price_items_item_guid_unique` موجود على الإنتاج بلا سجل |
+| `20260914130000_bot_health_alerts_dispatched_and_failed_windows.sql` | الـview الحية تغطي dispatched و`security_invoker=on`، بلا سجل |
+| `20260902070000_p2_security_definer_views_audit.sql` | الـviews الحية عليها `security_invoker=on`؛ كتلة تدقيق verify-or-skip بلا سجل (طلب المالك إخراجها من المسار الفعّال) |
+| `20260902090000_p2_pg_net_schema_analysis.sql` | تحليل وNOTICE فقط بلا تعديل؛ pg_net ما زال في `public` |
+| `20260915140000_khalil_audit_migration_history_reconciliation.sql` | ملاحظة تتبّع لا هجرة وظيفية |
+
+**باقيان في المسار الفعّال بانتظار قرار المالك** (غير مطبّقين فعلاً): `20260902050000_khalil_audit_tables_explicit_deny.sql` (RLS مفعّل على الجدولين بلا سياسات، فالوصول ممنوع أصلاً؛ الأثر شكلي لـAdvisor) و`20260902080000_p2_heartbeat_rls_initplan.sql` (تحسين أداء فقط).

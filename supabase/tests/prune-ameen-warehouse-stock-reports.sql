@@ -92,7 +92,7 @@ create table public.inventory_recon_sessions (
     foreign key (source_report_id) references public.ameen_warehouse_stock_reports (id) on delete set null
 );
 
-\ir ../migrations/20260928140000_prune_ameen_warehouse_stock_reports.sql
+\ir ../migrations/20260928145121_prune_ameen_warehouse_stock_reports.sql
 
 alter function public.prune_ameen_warehouse_stock_reports(timestamptz, integer) owner to prune_fn_owner;
 grant usage on schema auth to prune_fn_owner;
