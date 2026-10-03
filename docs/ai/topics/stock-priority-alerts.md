@@ -14,7 +14,8 @@
 | `tools/register-item-sales-task.ps1` | مهمة Windows «TOBACCO Item Sales Push» كل 30 دقيقة |
 | `src/stock-alert-priority.js` | المنطق النقي: صافي المبيع، الترتيب، الأهلية، الحداثة، نص الرسالة، مفتاح منع التكرار. بلا شبكة ولا كتابة |
 | `scripts/stock-priority-alerts.mjs` | المُشغِّل: يقرأ من Supabase ويستدعي `notify_telegram`. بلا `--send` تجريبي يطبع أعداداً فقط |
-| `.github/workflows/stock-priority-alerts.yml` | كل 15 دقيقة. يرسل فقط إذا كان متغيّر المستودع `STOCK_PRIORITY_ALERTS_ENABLED = true`. فشله مراقَب في `alert-on-automation-failure.yml` |
+| `supabase/functions/stock-priority-alert/index.ts` + `supabase/functions/_shared/stock-alert-priority.js` | **الجدولة الأساسية** (قرار المالك 2026-10-03): pg_cron كل 15 دقيقة ← `public.dispatch_stock_priority_alert()` ← pg_net برأس `X-OZK-Stock-Alert-Token` = `app_secrets.stock_priority_alert_token` (نفس حماية `customer-inactivity-alert`). نسخة المحرك بايتاً ببايت من `src/`، والقراءات والإرسال كالمُشغِّل. `{"dryRun": true}` أعداد فقط. الهجرة `supabase/migrations/20261003110000_stock_priority_alert_cron.sql` |
+| `.github/workflows/stock-priority-alerts.yml` | الجدولة القديمة: cron الـGitHub غير مضمون (مرة واحدة في 6 ساعات يوم 2026-10-03). تبقى حتى يثبت pg_cron 3 تشغيلات متتالية، ثم تصير `workflow_dispatch` وحده. حتى ذلك الحين التشغيلان معاً لا يكرّران الرسالة لأن المفتاح نفسه ونافذة 360 دقيقة داخل `notify_telegram`. كل 15 دقيقة. يرسل فقط إذا كان متغيّر المستودع `STOCK_PRIORITY_ALERTS_ENABLED = true`. فشله مراقَب في `alert-on-automation-failure.yml` |
 | `scripts/check-stock-alert-priority.mjs` | فحوص كل حالة (ضمن `npm run check`) |
 
 ## المصدر الموثوق
@@ -46,6 +47,17 @@
 - رسالة الأصناف: `dedupeKey = stock-priority:<بصمة FNV لمجموعة (صنف=حالة)>`، `cooldownMinutes = 360`. تغيّر الكمية وحده لا يعيد الإرسال؛ دخول صنف جديد أو انتقاله من low إلى out يعيده. الرسالة الطويلة تُقسم دون 3500 حرف بمفاتيح `…:pXofY`.
 - رسالة التقادم: `stock-priority:stale:<المصادر>`، `staleCooldownMinutes = 360`.
 - `notify_telegram` يطبّق المفتاح والنافذة كما في باقي التنبيهات.
+
+## نشر جدولة pg_cron (بموافقة المالك، بالترتيب)
+
+1. دمج الـPR.
+2. نشر الدالة: `supabase functions deploy stock-priority-alert` (أو MCP `deploy_edge_function`) بـ`verify_jwt = false` كما في `supabase/config.toml`.
+3. إنشاء الرمز في `app_secrets` بقيمة عشوائية تُولَّد على القاعدة ولا تُكتب في المستودع: `insert into public.app_secrets(name, value) values ('stock_priority_alert_token', encode(gen_random_bytes(32), 'hex'))`.
+4. تطبيق الهجرة، ثم إعادة تسمية الملف ليطابق الإصدار المسجَّل (نمط #300 و#302).
+5. التحقق من 3 تشغيلات متتالية في `cron.job_run_details` وردود `net._http_response` بـ200، ثم جعل الـworkflow `workflow_dispatch` وحده.
+
+الرجوع: `select cron.unschedule('stock-priority-alert');` والـworkflow ما زال يعمل يدوياً.
+فشل الدالة (رد 500) لا يُطلق تنبيه «فشل الأتمتة» كما كان فشل الـworkflow؛ رسالة التقادم تبقى الحماية من البيانات القديمة.
 
 ## الفحوص الإلزامية
 
