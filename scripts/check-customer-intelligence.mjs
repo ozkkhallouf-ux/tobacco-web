@@ -3415,7 +3415,11 @@ const keyRow = (n) => keyResult.customers.find((row) => row.customerGuid === kGu
   assert.ok(fn.indexOf('!== "live"') < fn.indexOf('admin.rpc("notify_telegram"'), "test 118: بوابة الوضع قبل أي إرسال");
   assert.doesNotMatch(fn, /AmnDb00|AMEEN_SQL|mssql|tedious|sqlcmd/i, "test 118: لا وصول للأمين");
   assert.doesNotMatch(fn, /from\("(?!app_secrets|inventory_reports|customer_inactivity_alerts|bot_config)/, "test 118: لا جداول أخرى");
-  const migration = readText("supabase/migrations/20261003020000_customer_inactivity_alerts.sql").toLowerCase();
+  const migration = readText("supabase/migrations/20261003030000_customer_inactivity_alerts.sql").toLowerCase();
+  // رقم الإصدار هو مفتاح سجل الهجرات في Supabase: لا يتكرر بين ملفين.
+  const { readdirSync } = await import("node:fs");
+  const versions = readdirSync(new URL("../supabase/migrations/", import.meta.url)).filter((name) => /^\d{14}_.+\.sql$/.test(name)).map((name) => name.slice(0, 14));
+  assert.deepEqual(versions.filter((version, index) => versions.indexOf(version) !== index), [], "test 118: أرقام إصدارات الهجرات فريدة");
   assert.match(migration, /alter table public\.customer_inactivity_alerts enable row level security/, "test 118: RLS مفعّل");
   assert.match(migration, /alter table public\.customer_inactivity_alerts force row level security/, "test 118: RLS مفروض");
   assert.match(migration, /for select\s+to authenticated\s+using \(\(select public\.is_owner\(\)\)\)/, "test 118: القراءة للمالك وحده");
