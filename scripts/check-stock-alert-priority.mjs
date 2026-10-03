@@ -1,0 +1,369 @@
+// ============================================================================
+// فحص تنبيهات النفاد حسب أولوية المبيعات (src/stock-alert-priority.js) ومُشغِّلها.
+// كل الأسماء والكميات والمعرّفات مصطنعة؛ لا بيانات إنتاج.
+// ============================================================================
+import assert from "node:assert/strict";
+import { readFileSync, readdirSync } from "node:fs";
+import "../src/stock-alert-priority.js";
+import { run } from "./stock-priority-alerts.mjs";
+
+const engine = globalThis.ozkStockAlertPriority;
+assert.ok(engine, "src/stock-alert-priority.js لم يعرّف ozkStockAlertPriority");
+
+const results = [];
+let failed = 0;
+async function test(name, fn) {
+  try { await fn(); results.push(`  ✅ ${name}`); }
+  catch (error) { failed += 1; results.push(`  ❌ ${name}\n     ${error?.stack || error}`); }
+}
+
+const NOW = new Date("2026-10-03T09:00:00.000Z");
+const fresh = (minutesAgo) => new Date(NOW.getTime() - minutesAgo * 60000).toISOString();
+const guid = (n) => `00000000-0000-0000-0000-${String(n).padStart(12, "0")}`;
+const date = (daysAgo) => new Date(Date.UTC(2026, 9, 3) - daysAgo * 86400000).toISOString().slice(0, 10);
+
+// sales: [{ g, name, qty, daysAgo, isReturn, invoices? }] — كل عنصر فاتورة مستقلة.
+function invoicesReport(sales, overrides = {}) {
+  let n = 0;
+  const invoices = sales.map((sale) => ({
+    number: String(++n),
+    guid: `aaaaaaaa-0000-0000-0000-${String(n).padStart(12, "0")}`,
+    date: date(sale.daysAgo ?? 1),
+    isReturn: sale.isReturn === true,
+    lines: [{ itemGuid: sale.g === undefined ? "" : sale.g, material: sale.name, qty: sale.qty, unit2Fact: sale.factor ?? 50, unit2: "كرتونة" }]
+  }));
+  return {
+    source: "ameen_customer_invoices",
+    report_date: "2026-10-03",
+    created_at: fresh(20),
+    summary: { payloadVersion: 2, periodDays: 60, fromDate: date(59), syncedAt: fresh(20) },
+    items: [{ name: "زبون تجريبي", customerGuid: guid(900), invoices, truncated: false }],
+    ...overrides
+  };
+}
+
+function stockReport(items, overrides = {}) {
+  return {
+    source: "ameen_sql_agent",
+    report_date: "2026-10-03",
+    created_at: fresh(3),
+    summary: { syncedAt: fresh(3) },
+    items: items.map((item) => ({ itemGuid: item.g ?? null, name: item.name, stockQty: item.stock, unit2Factor: item.factor ?? 50, unit1Name: "كروز", unit2Name: "كرتونة" })),
+    ...overrides
+  };
+}
+
+// صنف يُباع n فاتورة بكمية q لكل فاتورة
+const sold = (g, name, invoices, qtyEach, extra = {}) => Array.from({ length: invoices }, (_, i) => ({ g, name, qty: qtyEach, daysAgo: 1 + i, ...extra }));
+
+// عشرة أصناف: الصافي 1000..100 بخطوة 100، كل منها 5 فواتير.
+function tenItems() {
+  const sales = [];
+  for (let i = 1; i <= 10; i += 1) sales.push(...sold(guid(i), `صنف ${i}`, 5, (11 - i) * 20));
+  return sales;
+}
+
+await test("1) الصافي = البيع ناقص المرتجع بالكروز، والربط بـitemGuid", () => {
+  const report = invoicesReport([
+    ...sold(guid(1), "مادة أ", 3, 100),
+    { g: guid(1), name: "مادة أ", qty: 50, isReturn: true }
+  ]);
+  const p = engine.computeSalesPriority({ invoicesReport: report });
+  const item = p.ranked.find((r) => r.key === `g:${guid(1)}`);
+  assert.equal(item.soldQty, 300);
+  assert.equal(item.returnedQty, 50);
+  assert.equal(item.netQty, 250);
+  assert.equal(item.saleInvoiceCount, 3, "المرتجع لا يُعدّ فاتورة بيع");
+});
+
+await test("1) الاسم المطبَّع احتياط: سطر بلا itemGuid يُربط بمعرّف الاسم الوحيد", () => {
+  const report = invoicesReport([
+    ...sold(guid(1), "مادة أ", 2, 100),
+    { g: "", name: "مادة  ا", qty: 100, daysAgo: 4 }
+  ]);
+  const p = engine.computeSalesPriority({ invoicesReport: report });
+  assert.equal(p.ranked.length, 1);
+  assert.equal(p.ranked[0].netQty, 300);
+  assert.equal(p.ranked[0].saleInvoiceCount, 3);
+});
+
+await test("1) اسم يقابل معرّفين لا يُدمج بأي منهما", () => {
+  const report = invoicesReport([
+    ...sold(guid(1), "مادة مكررة", 3, 100),
+    ...sold(guid(2), "مادة مكررة", 3, 100),
+    { g: "", name: "مادة مكررة", qty: 999, daysAgo: 2 }
+  ]);
+  const p = engine.computeSalesPriority({ invoicesReport: report });
+  assert.equal(p.ranked.find((r) => r.key === `g:${guid(1)}`).netQty, 300);
+  assert.equal(p.ranked.find((r) => r.key === `g:${guid(2)}`).netQty, 300);
+  assert.ok(p.ranked.some((r) => r.key === "n:ماده مكرره"));
+  assert.ok(p.warnings.some((w) => w.startsWith("ambiguous_names:")));
+});
+
+await test("1) نافذة 30 يوماً بالضبط: اليوم 29 داخل، اليوم 30 خارج", () => {
+  const report = invoicesReport([
+    { g: guid(1), name: "م", qty: 10, daysAgo: 29 },
+    { g: guid(1), name: "م", qty: 1000, daysAgo: 30 }
+  ]);
+  const p = engine.computeSalesPriority({ invoicesReport: report });
+  assert.equal(p.ranked[0].netQty, 10);
+  assert.equal(p.window.startDate, "2026-09-04");
+});
+
+await test("2+3) الترتيب تنازلي، وأعلى 20% أو فوق المتوسط أيهما أوسع", () => {
+  const p = engine.computeSalesPriority({ invoicesReport: invoicesReport(tenItems()) });
+  assert.deepEqual(p.ranked.map((r) => r.netQty), [1000, 900, 800, 700, 600, 500, 400, 300, 200, 100]);
+  assert.equal(p.topCount, 2);
+  assert.equal(p.averageNetQty, 550);
+  // فوق المتوسط (550): 1000..600 = خمسة أصناف، أوسع من أعلى 20% (اثنان)
+  assert.equal(p.eligible.length, 5);
+  assert.deepEqual(p.eligible.map((r) => r.priorityRank), [1, 2, 3, 4, 5]);
+  assert.ok(p.eligible.every((r) => r.priorityTotal === 5));
+});
+
+await test("3) أعلى 20% أوسع من المتوسط حين يشدّ صنف شاذ المتوسط", () => {
+  const sales = [...sold(guid(1), "ضخم", 5, 2000)];
+  for (let i = 2; i <= 10; i += 1) sales.push(...sold(guid(i), `صنف ${i}`, 5, 10 + i));
+  const p = engine.computeSalesPriority({ invoicesReport: invoicesReport(sales) });
+  // المتوسط ≈ 1076: فوقه صنف واحد؛ أعلى 20% = اثنان
+  assert.equal(p.topCount, 2);
+  assert.equal(p.eligible.length, 2);
+});
+
+await test("3) التعادل على حد أعلى 20% يُضم", () => {
+  const sales = [];
+  for (let i = 1; i <= 5; i += 1) sales.push(...sold(guid(i), `ص${i}`, 3, 100));
+  const p = engine.computeSalesPriority({ invoicesReport: invoicesReport(sales) });
+  assert.equal(p.topCount, 1);
+  assert.equal(p.eligible.length, 5, "كلها متعادلة على الحد");
+});
+
+await test("4) أقل من 3 فواتير بيع ⇒ لا أهلية مهما كانت الكمية", () => {
+  const sales = [...sold(guid(1), "فاتورتان", 2, 5000), ...tenItems().filter((s) => s.g !== guid(1))];
+  const p = engine.computeSalesPriority({ invoicesReport: invoicesReport(sales) });
+  assert.equal(p.ranked[0].key, `g:${guid(1)}`, "يبقى في الترتيب");
+  assert.ok(!p.eligible.some((r) => r.key === `g:${guid(1)}`));
+  assert.equal(p.eligible[0].priorityRank, 1);
+});
+
+await test("4) صنف صافيه صفر أو سالب (مرتجعات) خارج الترتيب", () => {
+  const report = invoicesReport([
+    ...sold(guid(1), "مرتجع كامل", 3, 100),
+    { g: guid(1), name: "مرتجع كامل", qty: 300, isReturn: true },
+    ...sold(guid(2), "عادي", 3, 100)
+  ]);
+  const p = engine.computeSalesPriority({ invoicesReport: report });
+  assert.deepEqual(p.ranked.map((r) => r.key), [`g:${guid(2)}`]);
+});
+
+const tenStock = (overrides = {}) => stockReport(Array.from({ length: 10 }, (_, i) => ({ g: guid(i + 1), name: `صنف ${i + 1}`, stock: overrides[i + 1] ?? 100000 })));
+
+await test("4) صنف لم يُبع في 30 يوماً لا يُنبَّه عليه ولو نفد", () => {
+  const stock = stockReport([
+    ...Array.from({ length: 10 }, (_, i) => ({ g: guid(i + 1), name: `صنف ${i + 1}`, stock: 100000 })),
+    { g: guid(77), name: "راكد", stock: 0 }
+  ]);
+  const r = engine.buildStockAlerts({ stockReport: stock, invoicesReport: invoicesReport(tenItems()), now: NOW });
+  assert.equal(r.status, "none");
+  assert.equal(r.messages.length, 0);
+});
+
+await test("5) الرسالة: الاسم والرصيد بالكرتونة وكم يوم يكفي والأولوية، مرتبة من الأهم", () => {
+  // صنف 3 صافيه 800 كروز/30 يوماً ⇒ 26.67 يومياً؛ رصيد 100 ⇒ 3.75 يوم.
+  // صنف 1 نفد. صنف 5 رصيده يكفي 30 يوماً ⇒ لا تنبيه.
+  const r = engine.buildStockAlerts({ stockReport: tenStock({ 1: 0, 3: 100, 5: 600 }), invoicesReport: invoicesReport(tenItems()), now: NOW, lowStockThreshold: 50 });
+  assert.equal(r.status, "alert");
+  assert.equal(r.alerts.length, 2);
+  assert.deepEqual(r.alerts.map((a) => a.priorityRank), [1, 3]);
+  const text = r.messages[0].message;
+  assert.match(text, /أصناف مهمة قاربت النفاد: 2 من 5/);
+  const lines = text.split("\n").filter((l) => l.startsWith("•"));
+  assert.equal(lines[0], "• أولوية 1 من 5 — صنف 1 — الرصيد 0 كرتونة (0 كروز) — يكفي 0 يوم (نفد)");
+  assert.equal(lines[1], "• أولوية 3 من 5 — صنف 3 — الرصيد 2 كرتونة (100 كروز) — يكفي 3.8 يوم");
+});
+
+await test("5) حد bot_config.low_stock_threshold يبقى فعّالاً للأصناف المهمة", () => {
+  const r = engine.buildStockAlerts({ stockReport: tenStock({ 5: 590 }), invoicesReport: invoicesReport(tenItems()), now: NOW, lowStockThreshold: 600 });
+  assert.equal(r.alerts.length, 1);
+  assert.equal(r.alerts[0].priorityRank, 5);
+});
+
+await test("1) الرصيد يُربط بالاسم حين يغيب itemGuid من تقرير المخزون", () => {
+  const stock = stockReport(Array.from({ length: 10 }, (_, i) => ({ g: null, name: `صنف ${i + 1}`, stock: i === 1 ? 0 : 100000 })));
+  const r = engine.buildStockAlerts({ stockReport: stock, invoicesReport: invoicesReport(tenItems()), now: NOW });
+  assert.deepEqual(r.alerts.map((a) => a.priorityRank), [2]);
+});
+
+await test("6) مخزون قديم ⇒ لا تنبيه أصناف، رسالة تقادم فقط", () => {
+  const stale = stockReport([{ g: guid(1), name: "صنف 1", stock: 0 }], { created_at: fresh(30), summary: { syncedAt: fresh(30) } });
+  const r = engine.buildStockAlerts({ stockReport: stale, invoicesReport: invoicesReport(tenItems()), now: NOW });
+  assert.equal(r.status, "stale");
+  assert.equal(r.alerts.length, 0);
+  assert.equal(r.messages.length, 1);
+  assert.match(r.messages[0].message, /أرصدة المخزون: قديمة \(عمرها 30 دقيقة، الحد 10\)/);
+  assert.ok(!/صنف 1/.test(r.messages[0].message));
+  assert.equal(r.messages[0].dedupeKey, "stock-priority:stale:stock-stale");
+});
+
+await test("6) فواتير قديمة أو مفقودة ⇒ تبليغ بالتقادم", () => {
+  const old = invoicesReport(tenItems(), { created_at: fresh(200), summary: { periodDays: 60, fromDate: date(59), syncedAt: fresh(200) } });
+  let r = engine.buildStockAlerts({ stockReport: tenStock({ 1: 0 }), invoicesReport: old, now: NOW });
+  assert.equal(r.status, "stale");
+  assert.match(r.messages[0].message, /فواتير البيع: قديمة/);
+  r = engine.buildStockAlerts({ stockReport: tenStock({ 1: 0 }), invoicesReport: null, now: NOW });
+  assert.equal(r.status, "stale");
+  assert.match(r.messages[0].message, /فواتير البيع: غير متوفرة/);
+});
+
+await test("6) نافذة الفواتير لا تغطي 30 يوماً أو مقتطعة داخلها ⇒ لا تنبيه ناقص", () => {
+  const short = invoicesReport(tenItems(), { summary: { periodDays: 14, fromDate: date(13), syncedAt: fresh(20) } });
+  let r = engine.buildStockAlerts({ stockReport: tenStock({ 1: 0 }), invoicesReport: short, now: NOW });
+  assert.equal(r.status, "stale");
+  assert.match(r.messages[0].message, /لا تغطي آخر 30 يوماً/);
+  const truncated = invoicesReport(tenItems());
+  truncated.items[0].truncated = true;
+  r = engine.buildStockAlerts({ stockReport: tenStock({ 1: 0 }), invoicesReport: truncated, now: NOW });
+  assert.equal(r.status, "stale");
+  assert.match(r.messages[0].message, /مقتطعة/);
+});
+
+await test("7) منع التكرار: نفس المجموعة ⇒ نفس المفتاح، وتغيّر حالة صنف ⇒ مفتاح جديد", () => {
+  const inv = invoicesReport(tenItems());
+  const a = engine.buildStockAlerts({ stockReport: tenStock({ 3: 100 }), invoicesReport: inv, now: NOW });
+  const b = engine.buildStockAlerts({ stockReport: tenStock({ 3: 90 }), invoicesReport: inv, now: NOW });
+  const c = engine.buildStockAlerts({ stockReport: tenStock({ 3: 0 }), invoicesReport: inv, now: NOW });
+  assert.equal(a.messages[0].dedupeKey, b.messages[0].dedupeKey, "تغيّر الكمية وحده لا يعيد الإرسال");
+  assert.notEqual(a.messages[0].dedupeKey, c.messages[0].dedupeKey, "low → out يعيد الإرسال");
+  assert.equal(a.messages[0].cooldownMinutes, 360);
+  assert.equal(a.messages[0].eventType, "stock_low");
+  assert.match(a.messages[0].dedupeKey, /^stock-priority:[0-9a-f]{8}$/);
+});
+
+await test("7) رسالة طويلة تُقسم تحت حد notify_telegram بمفاتيح أجزاء مستقلة", () => {
+  const sales = [];
+  for (let i = 1; i <= 200; i += 1) sales.push(...sold(guid(i), `صنف طويل الاسم جداً رقم ${i} للتجربة`, 3, 100));
+  const stock = stockReport(Array.from({ length: 200 }, (_, i) => ({ g: guid(i + 1), name: `صنف طويل الاسم جداً رقم ${i + 1} للتجربة`, stock: 0 })));
+  const r = engine.buildStockAlerts({ stockReport: stock, invoicesReport: invoicesReport(sales), now: NOW });
+  assert.equal(r.alerts.length, 200);
+  assert.ok(r.messages.length > 1);
+  assert.ok(r.messages.every((m) => m.message.length <= engine.CONFIG.maxMessageChars));
+  assert.equal(new Set(r.messages.map((m) => m.dedupeKey)).size, r.messages.length);
+  const allLines = r.messages.flatMap((m) => m.message.split("\n").filter((l) => l.startsWith("•")));
+  assert.equal(allLines.length, 200);
+  assert.ok(allLines[0].startsWith("• أولوية 1 من 200"));
+});
+
+await test("الحتمية: نفس المدخلات بترتيب مختلف ⇒ نفس الناتج", () => {
+  const sales = tenItems();
+  const a = engine.buildStockAlerts({ stockReport: tenStock({ 2: 0, 4: 10 }), invoicesReport: invoicesReport(sales), now: NOW });
+  const b = engine.buildStockAlerts({ stockReport: tenStock({ 2: 0, 4: 10 }), invoicesReport: invoicesReport([...sales].reverse()), now: NOW });
+  assert.deepEqual(a.messages, b.messages);
+});
+
+await test("CONFIG موثّق ومجمَّد بالعتبات المطلوبة", () => {
+  const c = engine.CONFIG;
+  assert.ok(Object.isFrozen(c));
+  assert.equal(c.windowDays, 30);
+  assert.equal(c.topShare, 0.2);
+  assert.equal(c.minSaleInvoices, 3);
+  const doc = readFileSync("docs/ai/topics/stock-priority-alerts.md", "utf8");
+  for (const token of ["windowDays", "topShare", "minSaleInvoices", "lowCoverageDays", "cooldownMinutes", "maxAgeMinutes"]) {
+    assert.ok(doc.includes(token), `الوثيقة لا تذكر ${token}`);
+  }
+});
+
+await test("عتبات الحداثة مطابقة لمراقب المهام (ameen-main 10، customer-invoices 90)", () => {
+  const sql = readFileSync("supabase/project-task-health-monitor.sql", "utf8");
+  assert.match(sql, /\('ameen-main','[^']+','ameen_sql_agent',10,/);
+  assert.match(sql, /\('customer-invoices','[^']+','ameen_customer_invoices',90,/);
+  assert.equal(engine.CONFIG.maxAgeMinutes.stock, 10);
+  assert.equal(engine.CONFIG.maxAgeMinutes.invoices, 90);
+});
+
+await test("9) لا كتابة على الأمين ولا ذكر لتقارير المستودعات في المسار الجديد", () => {
+  for (const path of ["src/stock-alert-priority.js", "scripts/stock-priority-alerts.mjs", ".github/workflows/stock-priority-alerts.yml"]) {
+    const source = readFileSync(path, "utf8");
+    assert.ok(!/AMEEN_SQL_(WRITE_)?CONNECTION|SqlConnection|AmnDb00|Invoke-Sqlcmd/i.test(source), `${path} يلمس الأمين`);
+    assert.ok(!/ameen_warehouse_stock_reports|الامانة/.test(source.replace(/المستبعِد لمستودع الامانة/g, "")), `${path} يقرأ تقارير المستودعات`);
+  }
+  const runner = readFileSync("scripts/stock-priority-alerts.mjs", "utf8");
+  const writes = [...runner.matchAll(/method:\s*"(POST|PATCH|PUT|DELETE)"/g)];
+  assert.equal(writes.length, 1, "كتابة واحدة فقط");
+  assert.ok(runner.includes("/rest/v1/rpc/notify_telegram"));
+});
+
+await test("الـtrigger القديم لكل الأصناف متوقف في المرجع والترحيل، والتنبيهات الأخرى باقية", () => {
+  const ref = readFileSync("supabase/telegram-notifications.sql", "utf8");
+  assert.ok(!/create trigger trg_notify_stock_alerts/.test(ref));
+  assert.ok(ref.includes("drop trigger if exists trg_notify_stock_alerts on public.approved_price_items;"));
+  for (const keep of ["trg_notify_new_price_items", "create or replace function public.notify_telegram("]) assert.ok(ref.includes(keep), `${keep} اختفى`);
+  const migration = readdirSync("supabase/migrations").find((f) => f.endsWith("_retire_all_items_stock_alert_trigger.sql"));
+  assert.ok(migration);
+  const sql = readFileSync(`supabase/migrations/${migration}`, "utf8").replace(/--.*$/gm, "");
+  const statements = sql.split(";").map((s) => s.trim()).filter(Boolean);
+  assert.deepEqual(statements, [
+    "drop trigger if exists trg_notify_stock_alerts on public.approved_price_items",
+    "drop function if exists public.tg_notify_stock_alerts()"
+  ]);
+});
+
+// ── المُشغِّل بـfetch مزيّف ───────────────────────────────────────────────────
+function fakeFetch({ stock, invoices, threshold = "50", rpcStatus = 204 }) {
+  const calls = [];
+  const impl = async (url, init = {}) => {
+    calls.push({ url, init });
+    const json = (body, status = 200) => ({ ok: status < 300, status, json: async () => body });
+    if (url.includes("/rpc/notify_telegram")) return json(null, rpcStatus);
+    if (url.includes("source=eq.ameen_sql_agent")) return json(stock ? [stock] : []);
+    if (url.includes("source=eq.ameen_customer_invoices")) return json(invoices ? [invoices] : []);
+    if (url.includes("/bot_config")) return json([{ value: threshold }]);
+    return json({}, 404);
+  };
+  return { impl, calls };
+}
+const env = { SUPABASE_URL: "https://example.invalid/", SUPABASE_SERVICE_ROLE_KEY: "test-key" };
+
+await test("المُشغِّل: تجريبي بلا --send لا يرسل، ولا يطبع أسماء", async () => {
+  const fake = fakeFetch({ stock: tenStock({ 1: 0 }), invoices: invoicesReport(tenItems()) });
+  const logs = [];
+  const out = await run({ env, argv: [], fetchImpl: fake.impl, now: NOW, log: (l) => logs.push(l) });
+  assert.equal(out.sent, 0);
+  assert.equal(out.result.status, "alert");
+  assert.ok(!fake.calls.some((c) => c.url.includes("/rpc/")));
+  assert.ok(!logs.join("\n").includes("صنف 1"));
+  for (const c of fake.calls) assert.equal(c.init.headers["Accept-Profile"], "public");
+});
+
+await test("المُشغِّل: --send يستدعي notify_telegram بمفتاح التكرار ونافذته وContent-Profile", async () => {
+  const fake = fakeFetch({ stock: tenStock({ 1: 0 }), invoices: invoicesReport(tenItems()) });
+  const out = await run({ env, argv: ["--send"], fetchImpl: fake.impl, now: NOW, log: () => {} });
+  assert.equal(out.sent, 1);
+  const rpc = fake.calls.find((c) => c.url === "https://example.invalid/rest/v1/rpc/notify_telegram");
+  assert.equal(rpc.init.headers["Content-Profile"], "public");
+  const body = JSON.parse(rpc.init.body);
+  assert.equal(body.p_event_type, "stock_low");
+  assert.match(body.p_dedupe_key, /^stock-priority:/);
+  assert.equal(body.p_dedupe_minutes, 360);
+  assert.match(body.p_message, /أولوية 1 من 5/);
+});
+
+await test("المُشغِّل: مصدر قديم ⇒ يرسل رسالة التقادم وحدها", async () => {
+  const fake = fakeFetch({ stock: null, invoices: invoicesReport(tenItems()) });
+  const out = await run({ env, argv: ["--send"], fetchImpl: fake.impl, now: NOW, log: () => {} });
+  assert.equal(out.result.status, "stale");
+  const body = JSON.parse(fake.calls.find((c) => c.url.includes("/rpc/")).init.body);
+  assert.match(body.p_message, /أرصدة المخزون: غير متوفرة/);
+});
+
+await test("المُشغِّل: فشل notify_telegram يُسقط التشغيل بخطأ ظاهر", async () => {
+  const fake = fakeFetch({ stock: tenStock({ 1: 0 }), invoices: invoicesReport(tenItems()), rpcStatus: 500 });
+  await assert.rejects(run({ env, argv: ["--send"], fetchImpl: fake.impl, now: NOW, log: () => {} }), /HTTP 500/);
+});
+
+console.log("check-stock-alert-priority:");
+console.log(results.join("\n"));
+if (failed) {
+  console.error(`❌ ${failed} فحصاً فشل.`);
+  process.exit(1);
+}
+console.log(`✅ ${results.length} فحصاً ناجحاً.`);
