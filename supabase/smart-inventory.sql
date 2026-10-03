@@ -736,10 +736,18 @@ grant execute on function public.smart_inventory_auth_preflight(text,text), publ
   public.smart_inventory_has_session_for_service(uuid,uuid),
   public.smart_inventory_enqueue_daily_summary() to service_role;
 
--- Counter JWT role is set to anon by smart_inventory_set_counter_auth_role
--- (inventory-auth). Expose only the six blind-counting RPCs to anon — same
--- narrow grant as superseded/20260823084956_… — not owner dashboards/reports.
--- Owners keep authenticated EXECUTE on both counter and owner RPCs.
+-- Counter accounts run as Postgres role anon by design.
+-- smart_inventory_set_counter_auth_role sets auth.users.role = 'anon', so
+-- PostgREST calls these RPCs as anon. Each of the six checks
+-- smart_inventory_is_counter() (app_metadata role, live auth.sessions row,
+-- enabled account) before any work. EXECUTE for anon is therefore required
+-- and is not privilege drift. Revoking it makes every staff login fail with
+-- PostgREST 401 «ليس لديك صلاحية لتنفيذ هذه العملية». That revoke already
+-- shipped twice (20260826081831, then 20260914061335
+-- fix_smart_inventory_anon_grant_drift) and was restored by 20260831134213
+-- and 20260928170206. The revoke-all below only clears default PUBLIC/anon
+-- grants; the next statement must grant the six counter RPCs back to anon.
+-- Owner RPCs (smart_inventory_owner_*) stay authenticated-only — never anon.
 revoke all on function public.smart_inventory_available_warehouses(date),public.smart_inventory_start_or_join(text),
  public.smart_inventory_counter_session(uuid),public.smart_inventory_claim_item(uuid),
  public.smart_inventory_save_item(uuid,uuid,text,numeric,numeric,numeric,bigint),public.smart_inventory_complete_session(uuid),

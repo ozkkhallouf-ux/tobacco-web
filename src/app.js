@@ -4257,7 +4257,7 @@ async function savePricingItem(form) {
   }
 }
 
-function downloadLatestInventoryReport() {
+async function downloadLatestInventoryReport() {
   const latest = latestStockReport();
   const items = reportItems(latest);
   if (!latest || !items.length) {
@@ -4274,18 +4274,17 @@ function downloadLatestInventoryReport() {
     item.lowThreshold || latest.summary?.threshold || "",
     item.priceListed ? "نعم" : "لا"
   ]);
-  const worksheet = window.XLSX.utils.aoa_to_sheet([
-    ["المادة", "الكمية", "الحالة", "حد التنبيه", "ضمن لائحة الأسعار"],
-    ...rows
-  ]);
-  const workbook = window.XLSX.utils.book_new();
-  window.XLSX.utils.book_append_sheet(workbook, worksheet, "live-inventory");
-  window.XLSX.writeFile(workbook, `tobacco-live-inventory-${todayIsoDate()}.xlsx`);
+  const mainSheet = {
+    name: "live-inventory",
+    rows: [["المادة", "الكمية", "الحالة", "حد التنبيه", "ضمن لائحة الأسعار"], ...rows]
+  };
+  const amanat = await loadAmanatWarehouseSheet(items);
+  writeInventoryWorkbook(inventoryWorkbookSheets(mainSheet, amanat), `tobacco-live-inventory-${todayIsoDate()}.xlsx`);
   setNotice("success", "تم تنزيل تقرير الجرد الحي من آخر مزامنة.");
   render();
 }
 
-function downloadFilteredInventoryReport() {
+async function downloadFilteredInventoryReport() {
   const latest = latestStockReport();
   const items = ameenFilteredItems(reportItems(latest));
   if (!latest || !items.length) {
@@ -4302,13 +4301,13 @@ function downloadFilteredInventoryReport() {
     item.lowThreshold || latest.summary?.threshold || "",
     item.priceListed ? "نعم" : "لا"
   ]);
-  const worksheet = window.XLSX.utils.aoa_to_sheet([
-    ["المادة", "الكمية", "الحالة", "حد التنبيه", "ضمن لائحة الأسعار"],
-    ...rows
-  ]);
-  const workbook = window.XLSX.utils.book_new();
-  window.XLSX.utils.book_append_sheet(workbook, worksheet, "filtered-inventory");
-  window.XLSX.writeFile(workbook, `tobacco-filtered-inventory-${todayIsoDate()}.xlsx`);
+  const mainSheet = {
+    name: "filtered-inventory",
+    rows: [["المادة", "الكمية", "الحالة", "حد التنبيه", "ضمن لائحة الأسعار"], ...rows]
+  };
+  // ورقة الامانة كاملة دائماً: البحث والفلتر يخصّان أصناف التقرير الرئيسي وحده.
+  const amanat = await loadAmanatWarehouseSheet(reportItems(latest));
+  writeInventoryWorkbook(inventoryWorkbookSheets(mainSheet, amanat), `tobacco-filtered-inventory-${todayIsoDate()}.xlsx`);
   setNotice("success", "تم تنزيل المواد المعروضة حسب البحث والفلتر الحالي.");
   render();
 }
@@ -6857,6 +6856,7 @@ const INVENTORY_REPORT_STYLE = `<style>
 .ozk-rpt.inventory-rpt .inventory-group-row td{background:#6b4309!important;color:#f4ca62!important;border-color:#b8892a!important;font-weight:900;padding:4px 6px;font-size:10px}
 .ozk-rpt.inventory-rpt .inventory-group-row .group-count{float:left;background:#f4ca62;color:#4d2d04;border-radius:999px;padding:1px 7px;font-size:10px}
 .ozk-rpt.inventory-rpt .inventory-group-row .group-part{background:#b8892a;color:#fff5dd;border-radius:999px;padding:1px 6px;font-size:9px;font-weight:700}
+.ozk-rpt.inventory-rpt .amanat-table{width:100%;direction:rtl}.ozk-rpt.inventory-rpt .amanat-table tr{break-inside:avoid;page-break-inside:avoid}
 .ozk-rpt.inventory-rpt .status-low{color:#9a6100!important;font-weight:800}.ozk-rpt.inventory-rpt .status-active{color:#16794f!important;font-weight:800}
 @media print{html,body,.ozk-rpt.inventory-rpt,.ozk-rpt.inventory-rpt .inventory-page{background:#fffdf8!important;color:#221808!important}.ozk-rpt.inventory-rpt{padding:0!important}}
 </style>`;
@@ -7231,7 +7231,136 @@ function inventoryReportPages(parts, mode) {
   return pages;
 }
 
-function inventoryReportPdfMarkup() {
+// ===== صفحة «مستودع الامانة» المستقلة داخل تقرير المخزون =====
+//
+// «مستودع الامانة» مستبعد من تقرير المخزون الرئيسي ومن كل ما يُشتق منه منذ PR #292
+// (tools/ameen-stock-query.sql وtools/push-item-details.ps1)، ولا يتغيّر ذلك هنا.
+// هذه الصفحة/الورقة عرض وجرد منفصل فقط: أرقامها من تقرير المستودع نفسه
+// (ameen_warehouse_stock_reports) مختاراً بالـGUID لا بالاسم، ولا تدخل أي ملخص أو
+// إجمالي أو بطاقة أو ورقة للتقرير الرئيسي. من التقرير الرئيسي نقرأ اسم المجموعة
+// ووحدة الكرتونة للعرض فقط — لا كمية.
+const AMANAT_WAREHOUSE_GUID = "CA3BACBB-87FE-4826-B051-CAC335CDB670";
+const AMANAT_WAREHOUSE_TITLE = "مستودع الامانة";
+const AMANAT_SHEET_HEADERS = ["رقم الصنف", "اسم الصنف", "المجموعة", "الكمية", "الوحدة"];
+
+function isAmanatWarehouseKey(key) {
+  return String(key || "").trim().toUpperCase() === AMANAT_WAREHOUSE_GUID;
+}
+
+// يختار تقرير الامانة من تقارير المستودعات ويرجع أصنافه ذات الكمية غير الصفرية،
+// مرتبة بترتيب مجموعات تقرير المخزون. null = لم يصل تقرير لهذا المستودع (لا نخترع صفراً).
+function amanatWarehouseSheet(warehouseReports, mainItems = []) {
+  const report = (Array.isArray(warehouseReports) ? warehouseReports : [])
+    .find((r) => isAmanatWarehouseKey(r?.summary?.warehouseKey));
+  if (!report) return null;
+  const metaByGuid = new Map();
+  const metaByName = new Map();
+  for (const it of Array.isArray(mainItems) ? mainItems : []) {
+    const meta = {
+      groupName: String(it?.groupName || "").trim(),
+      unit2Name: String(it?.unit2Name || "").trim(),
+      unit2Factor: Number(it?.unit2Factor || 0)
+    };
+    const guid = String(it?.itemGuid || "").trim().toUpperCase();
+    if (guid) metaByGuid.set(guid, meta);
+    const nameKey = normalizeItemName(it?.name || "");
+    if (nameKey && !metaByName.has(nameKey)) metaByName.set(nameKey, meta);
+  }
+  const items = (Array.isArray(report.items) ? report.items : [])
+    .map((it) => {
+      const name = String(it?.itemName || it?.item_name || "").trim();
+      const qty = Number(it?.qty ?? 0);
+      const meta = metaByGuid.get(String(it?.itemGuid || "").trim().toUpperCase())
+        || metaByName.get(normalizeItemName(name))
+        || {};
+      const group = inventoryGroupInfo({ groupName: meta.groupName });
+      return {
+        itemNumber: String(it?.itemNumber ?? it?.item_number ?? "").trim(),
+        name,
+        groupLabel: group.label,
+        groupRank: group.rank,
+        qty: Number.isFinite(qty) ? qty : 0,
+        unit1Name: String(it?.unitName || it?.unit_name || "").trim(),
+        unit2Name: meta.unit2Name || "",
+        unit2Factor: meta.unit2Factor || 0
+      };
+    })
+    .filter((it) => it.name && it.qty !== 0)
+    .sort((a, b) =>
+      a.groupRank - b.groupRank ||
+      String(a.groupLabel).localeCompare(String(b.groupLabel), "ar") ||
+      a.name.localeCompare(b.name, "ar")
+    );
+  return {
+    warehouseName: String(report.summary?.warehouseName || AMANAT_WAREHOUSE_TITLE),
+    generatedAt: report.summary?.generated_at || report.created_at || null,
+    items
+  };
+}
+
+// صفوف ورقة Excel المستقلة. `result` = { sheet, error } من loadAmanatWarehouseSheet.
+function amanatSheetRows(result) {
+  const sheet = result?.sheet || null;
+  if (!sheet) {
+    return [[result?.error
+      ? `تعذّر جلب تقرير ${AMANAT_WAREHOUSE_TITLE}: ${result.error}`
+      : `لم يصل تقرير ${AMANAT_WAREHOUSE_TITLE} بعد.`]];
+  }
+  if (!sheet.items.length) return [AMANAT_SHEET_HEADERS, [`لا يوجد مخزون في ${AMANAT_WAREHOUSE_TITLE} حالياً.`]];
+  return [
+    AMANAT_SHEET_HEADERS,
+    ...sheet.items.map((it) => [it.itemNumber, it.name, it.groupLabel, it.qty, it.unit1Name])
+  ];
+}
+
+// الورقة الرئيسية كما هي حرفياً، ثم ورقة الامانة منفصلة بعدها.
+function inventoryWorkbookSheets(mainSheet, amanatResult) {
+  return [mainSheet, { name: AMANAT_WAREHOUSE_TITLE, rows: amanatSheetRows(amanatResult) }];
+}
+
+function writeInventoryWorkbook(sheets, filename) {
+  assertExcelSupport();
+  const workbook = window.XLSX.utils.book_new();
+  for (const sheet of sheets) {
+    window.XLSX.utils.book_append_sheet(workbook, window.XLSX.utils.aoa_to_sheet(sheet.rows), sheet.name);
+  }
+  window.XLSX.writeFile(workbook, filename);
+}
+
+async function loadAmanatWarehouseSheet(mainItems) {
+  if (!dataStore.listLatestWarehouseStockReports) return { sheet: null, error: "" };
+  try {
+    const reports = await dataStore.listLatestWarehouseStockReports();
+    return { sheet: amanatWarehouseSheet(reports, mainItems), error: "" };
+  } catch (error) {
+    return { sheet: null, error: safeErrorMessage(error) };
+  }
+}
+
+// قسم PDF مستقل يبدأ بصفحة جديدة (.inventory-page تحمل break-after:page، فتنتهي
+// آخر صفحة رئيسية قبله). لا بطاقات ولا ترقيم مشترك مع التقرير الرئيسي.
+function amanatWarehousePageMarkup(result) {
+  const sheet = result?.sheet || null;
+  const head = `<div class="rhead"><div class="brand">OZK TOBACCO<small>تقرير المخزون التشغيلي</small></div>
+      <div class="rtitle"><h2>${escapeHtml(pdfAr(AMANAT_WAREHOUSE_TITLE))}</h2><span>${escapeHtml(pdfAr("صفحة جرد مستقلة — كمياتها لا تدخل أي رقم في التقرير الرئيسي"))}</span></div></div>`;
+  let body;
+  if (!sheet) {
+    body = `<p class="muted">${escapeHtml(pdfAr(result?.error ? `تعذّر جلب تقرير ${AMANAT_WAREHOUSE_TITLE}: ${result.error}` : `لم يصل تقرير ${AMANAT_WAREHOUSE_TITLE} بعد.`))}</p>`;
+  } else if (!sheet.items.length) {
+    body = `<p class="muted">${escapeHtml(pdfAr(`لا يوجد مخزون في ${AMANAT_WAREHOUSE_TITLE} حالياً.`))}</p>`;
+  } else {
+    const qtyText = (it) => formatQtyCartons({ stockQty: it.qty, unit1Name: it.unit1Name, unit2Name: it.unit2Name, unit2Factor: it.unit2Factor });
+    body = `<table class="amanat-table"><thead><tr>
+        <th style="width:11%">${escapeHtml(pdfAr("رقم الصنف"))}</th><th style="width:33%">${escapeHtml(pdfAr("اسم الصنف"))}</th><th style="width:20%">${escapeHtml(pdfAr("المجموعة"))}</th><th style="width:12%">${escapeHtml(pdfAr("الكمية"))}</th><th style="width:9%">${escapeHtml(pdfAr("الوحدة"))}</th><th style="width:15%">${escapeHtml(pdfAr("بالكرتونة"))}</th>
+      </tr></thead><tbody>
+      ${sheet.items.map((it) => `<tr><td>${escapeHtml(it.itemNumber)}</td><td>${escapeHtml(pdfAr(it.name))}</td><td>${escapeHtml(pdfAr(it.groupLabel))}</td><td>${escapeHtml(formatMoney(roundPrice(it.qty)))}</td><td>${escapeHtml(pdfAr(it.unit1Name))}</td><td>${escapeHtml(pdfAr(qtyText(it)))}</td></tr>`).join("")}
+      </tbody></table>
+      <p class="muted" style="margin-top:6px">${escapeHtml(pdfAr(`عدد الأصناف: ${sheet.items.length} · آخر تحديث للمستودع: ${formatDateTime(sheet.generatedAt)}`))}</p>`;
+  }
+  return `<section class="inventory-page amanat-page">${head}${body}</section>`;
+}
+
+function inventoryReportPdfMarkup(amanatResult = null) {
   // كل كمية موجبة تظهر. الصنف النافد لا يظهر إلا إذا كان عليه مبيع حقيقي حديث؛
   // التسعير القديم وحده ليس دليلاً كافياً (مثل أصناف بلاتينوم القديمة).
   const allRaw = reportItems(latestStockReport());
@@ -7303,7 +7432,7 @@ function inventoryReportPdfMarkup() {
     </div>
     ${pageIndex === pages.length - 1 ? footMarkup : ""}
   </section>`).join("");
-  return `${REPORT_STYLE}${INVENTORY_REPORT_STYLE}<div class="ozk-rpt inventory-rpt">${pagesMarkup}</div>`;
+  return `${REPORT_STYLE}${INVENTORY_REPORT_STYLE}<div class="ozk-rpt inventory-rpt">${pagesMarkup}${amanatResult ? amanatWarehousePageMarkup(amanatResult) : ""}</div>`;
 }
 
 async function exportInventoryReportPdf() {
@@ -7313,8 +7442,9 @@ async function exportInventoryReportPdf() {
     render();
     return;
   }
+  const amanat = await loadAmanatWarehouseSheet(items);
   const exported = await exportReportPdf(
-    inventoryReportPdfMarkup(),
+    inventoryReportPdfMarkup(amanat),
     { docType: "stock_report", meta: { date: todayIsoDate() } }
   );
   if (exported) setNotice("success", "تم تجهيز تقرير المخزون PDF.");
