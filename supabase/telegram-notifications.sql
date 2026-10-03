@@ -415,71 +415,16 @@ referencing new table as new_rows
 for each statement execute function public.tg_notify_new_price_items();
 
 -- ============================================================
--- Triggers — مجال: المخزون (انخفاض/نفاد — تجميع عند الدفعات)
+-- مجال: المخزون (انخفاض/نفاد)
 -- ============================================================
-create or replace function public.tg_notify_stock_alerts()
-returns trigger language plpgsql security definer set search_path = public
-as $$
-declare
-  thr numeric := 50;
-  n_low int;
-  n_out int;
-  r record;
-begin
-  begin
-    select value::numeric into thr from public.bot_config where key = 'low_stock_threshold' limit 1;
-  exception when others then thr := 50;
-  end;
-  thr := coalesce(thr, 50);
-
-  -- مواد نفدت (عبرت الصفر نزولاً)
-  select count(*) into n_out
-  from new_rows nw join old_rows ow using (id)
-  where coalesce(nw.stock_qty, 0) <= 0 and coalesce(ow.stock_qty, 0) > 0;
-
-  -- مواد قاربت النفاد (عبرت الحد نزولاً وما زالت فوق الصفر)
-  select count(*) into n_low
-  from new_rows nw join old_rows ow using (id)
-  where nw.stock_qty is not null and nw.stock_qty > 0 and nw.stock_qty <= thr
-    and (ow.stock_qty is null or ow.stock_qty > thr);
-
-  if n_out > 5 then
-    perform public.notify_telegram('stock_out', '⛔ نفدت ' || n_out || ' مادة من المخزون', 'stock-out:bulk', 60);
-  elsif n_out > 0 then
-    for r in
-      select coalesce(nw.item_name, nw.item_key) as item_name, nw.item_key
-      from new_rows nw join old_rows ow using (id)
-      where coalesce(nw.stock_qty, 0) <= 0 and coalesce(ow.stock_qty, 0) > 0
-    loop
-      perform public.notify_telegram('stock_out', '⛔ نفدت المادة: ' || r.item_name, 'out:' || r.item_key, 360);
-    end loop;
-  end if;
-
-  if n_low > 5 then
-    perform public.notify_telegram('stock_low', '⚠️ ' || n_low || ' مادة قاربت النفاد (الحد: ' || thr || ')', 'stock-low:bulk', 60);
-  elsif n_low > 0 then
-    for r in
-      select coalesce(nw.item_name, nw.item_key) as item_name, nw.item_key, nw.stock_qty
-      from new_rows nw join old_rows ow using (id)
-      where nw.stock_qty is not null and nw.stock_qty > 0 and nw.stock_qty <= thr
-        and (ow.stock_qty is null or ow.stock_qty > thr)
-    loop
-      perform public.notify_telegram('stock_low',
-        '⚠️ مادة قاربت النفاد: ' || r.item_name || chr(10) || 'المتبقي: ' || to_char(r.stock_qty, 'FM999,999,990.##'),
-        'low:' || r.item_key, 360);
-    end loop;
-  end if;
-  return null;
-end;
-$$;
-revoke execute on function public.tg_notify_stock_alerts() from public;
-revoke execute on function public.tg_notify_stock_alerts() from anon;
-revoke execute on function public.tg_notify_stock_alerts() from authenticated;
+-- 2026-10-03: أُوقف trg_notify_stock_alerts (كان ينبّه على كل صنف يعبر
+-- low_stock_threshold أو الصفر). قرار المالك: التنبيه للأصناف المهمة حسب صافي
+-- مبيع آخر 30 يوماً وحدها، برسالة مرتبة بالأولوية. البديل خارج SQL:
+--   src/stock-alert-priority.js + scripts/stock-priority-alerts.mjs
+--   + .github/workflows/stock-priority-alerts.yml — ويكتب عبر notify_telegram.
+-- الترحيل: supabase/migrations/20261003020000_retire_all_items_stock_alert_trigger.sql
 drop trigger if exists trg_notify_stock_alerts on public.approved_price_items;
-create trigger trg_notify_stock_alerts
-after update on public.approved_price_items
-referencing old table as old_rows new table as new_rows
-for each statement execute function public.tg_notify_stock_alerts();
+drop function if exists public.tg_notify_stock_alerts();
 
 -- ============================================================
 -- Triggers — مجال: حدود الائتمان
