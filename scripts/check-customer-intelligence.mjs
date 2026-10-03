@@ -3409,6 +3409,13 @@ const keyRow = (n) => keyResult.customers.find((row) => row.customerGuid === kGu
   assert.doesNotMatch(migration, /grant (insert|update|delete|all)[^;]*to (anon|authenticated)/, "test 118: لا كتابة للمتصفح");
   assert.doesNotMatch(migration, /amndb00|create or replace function public\.notify_telegram|telegram_outbox/, "test 118: لا أمين ولا تعديل لنظام تيليغرام");
   assert.match(migration, /cron\.schedule\('customer-inactivity-alert', '0 7 \* \* \*'/, "test 118: فحص يومي واحد");
+  // pg_net لا يرسل JWT: الدالتان المجدولتان تتجاوزان تحقق البوابة، وحمايتهما الرمز في الكود.
+  const supabaseConfig = readText("supabase/config.toml");
+  for (const slug of ["customer-credit-snapshot", "customer-inactivity-alert"]) {
+    assert.match(supabaseConfig, new RegExp(`\\[functions\\.${slug}\\]\\s*\\nverify_jwt = false`), `test 118: ${slug} بلا تحقق JWT من البوابة`);
+  }
+  assert.match(readText("supabase/functions/customer-credit-snapshot/index.ts"), /sameToken\(req\.headers\.get\("x-ozk-credit-snapshot-token"\)/, "test 118: الرمز شرط في كاتب اللقطة");
+  assert.match(fn, /sameToken\(req\.headers\.get\("x-ozk-inactivity-alert-token"\)/, "test 118: الرمز شرط في التنبيه");
 }
 
 console.log(`ذكاء الزبائن: 118 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
