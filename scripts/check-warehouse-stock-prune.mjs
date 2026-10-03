@@ -9,7 +9,7 @@ function assert(condition, message) {
   }
 }
 
-const migrationPath = "supabase/migrations/20260928140000_prune_ameen_warehouse_stock_reports.sql";
+const migrationPath = "supabase/migrations/20260928145121_prune_ameen_warehouse_stock_reports.sql";
 const testPath = "supabase/tests/prune-ameen-warehouse-stock-reports.sql";
 const migration = readFileSync(migrationPath, "utf8");
 const sqlTest = readFileSync(testPath, "utf8");

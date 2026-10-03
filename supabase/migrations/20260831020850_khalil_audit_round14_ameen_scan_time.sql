@@ -1,3 +1,9 @@
+-- تصحيح الاسم (2026-10-03، تدقيق قراءة على supabase_migrations.schema_migrations):
+-- الإنتاج يسجّل هذا الإصدار باسم `khalil_audit_round14_ameen_scan_time`، لا `fix_inventory_recon_match_key_fallbacks` كما افترض
+-- هذا الملف سابقاً. أُعيدت تسمية جزء الاسم فقط والرقم كما هو. المحتوى أدناه
+-- placeholder تحقق-أو-تخطٍّ كتبناه نحن، لا SQL الإنتاج الأصلي، ووصفه للميزة
+-- المرتبطة بالرقم غير دقيق. لا أثر وظيفي: CLI يطابق بالرقم وحده، والملف NOTICE فقط.
+--
 -- History reconciliation for remote-only production version 20260831020850.
 --
 -- Production records this version (applied before the local commit timestamp;

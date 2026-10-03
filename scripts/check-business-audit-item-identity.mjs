@@ -26,7 +26,7 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
-const MIGRATION = 'supabase/migrations/20260921120000_business_audit_log_item_identity_changes.sql';
+const MIGRATION = 'supabase/migrations/20260921104828_business_audit_log_item_identity_changes.sql';
 const SQL_TEST = 'supabase/tests/business-audit-item-identity.sql';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');

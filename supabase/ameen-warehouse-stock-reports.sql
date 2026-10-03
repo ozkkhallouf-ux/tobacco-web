@@ -88,7 +88,7 @@ create policy "sync writer can insert ameen_warehouse_stock_reports"
 
 -- لا سياسة UPDATE: السكربت يُدرج تقريراً جديداً ولا يعدّل صفاً موجوداً.
 -- DELETE محصور بحساب المزامنة. التنظيف الدوري لا يستخدم REST مباشرة؛
--- الهجرة 20260928140000_prune_ameen_warehouse_stock_reports تعرّف دالة
+-- الهجرة 20260928145121_prune_ameen_warehouse_stock_reports تعرّف دالة
 -- تحذف دفعة من الصفوف غير المرتبطة بجلسة جرد. لا تُطبَّق تلقائياً.
 drop policy if exists "sync writer can delete ameen_warehouse_stock_reports" on public.ameen_warehouse_stock_reports;
 create policy "sync writer can delete ameen_warehouse_stock_reports"
