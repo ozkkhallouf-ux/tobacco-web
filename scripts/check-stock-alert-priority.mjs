@@ -360,6 +360,20 @@ await test("المُشغِّل: فشل notify_telegram يُسقط التشغيل
   await assert.rejects(run({ env, argv: ["--send"], fetchImpl: fake.impl, now: NOW, log: () => {} }), /HTTP 500/);
 });
 
+await test("المُشغِّل: بلا سرّ — التجريبي يتخطى بلا فشل، و--send يفشل صراحة", async () => {
+  const fake = fakeFetch({ stock: null, invoices: null });
+  const out = await run({ env: { SUPABASE_URL: "https://example.invalid" }, argv: [], fetchImpl: fake.impl, now: NOW, log: () => {} });
+  assert.equal(out.sent, 0);
+  assert.equal(fake.calls.length, 0);
+  await assert.rejects(run({ env: { SUPABASE_URL: "https://example.invalid" }, argv: ["--send"], fetchImpl: fake.impl, now: NOW, log: () => {} }), /SUPABASE_SERVICE_ROLE_KEY/);
+});
+
+await test("فشل workflow التنبيهات مراقَب في alert-on-automation-failure.yml", () => {
+  const name = readFileSync(".github/workflows/stock-priority-alerts.yml", "utf8").match(/^name:\s*(.+)$/m)[1].trim();
+  const watcher = readFileSync(".github/workflows/alert-on-automation-failure.yml", "utf8");
+  assert.ok(watcher.includes(`- "${name}"`), `${name} غير مدرج في قائمة المراقبة`);
+});
+
 console.log("check-stock-alert-priority:");
 console.log(results.join("\n"));
 if (failed) {

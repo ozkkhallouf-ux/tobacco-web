@@ -12,7 +12,7 @@
 |---|---|
 | `src/stock-alert-priority.js` | المنطق النقي: صافي المبيع، الترتيب، الأهلية، الحداثة، نص الرسالة، مفتاح منع التكرار. بلا شبكة ولا كتابة |
 | `scripts/stock-priority-alerts.mjs` | المُشغِّل: يقرأ من Supabase ويستدعي `notify_telegram`. بلا `--send` تجريبي يطبع أعداداً فقط |
-| `.github/workflows/stock-priority-alerts.yml` | كل 15 دقيقة. يرسل فقط إذا كان متغيّر المستودع `STOCK_PRIORITY_ALERTS_ENABLED = true` |
+| `.github/workflows/stock-priority-alerts.yml` | كل 15 دقيقة. يرسل فقط إذا كان متغيّر المستودع `STOCK_PRIORITY_ALERTS_ENABLED = true`. فشله مراقَب في `alert-on-automation-failure.yml` |
 | `scripts/check-stock-alert-priority.mjs` | فحوص كل حالة (ضمن `npm run check`) |
 
 ## المصدر الموثوق
@@ -46,7 +46,7 @@
 
 ## الفحوص الإلزامية
 
-- `node scripts/check-stock-alert-priority.mjs` (27 حالة: الصافي، الربط، النافذة، الترتيب، الأهلية، أقل من 3 فواتير، غير المباع، نص السطر، الحد اليدوي، التقادم، النافذة الناقصة، الاقتطاع، منع التكرار، التقسيم، الحتمية، تطابق عتبات الحداثة، لا كتابة على الأمين، إيقاف الـtrigger القديم، المُشغِّل بـfetch مزيّف).
+- `node scripts/check-stock-alert-priority.mjs` (29 حالة: الصافي، الربط، النافذة، الترتيب، الأهلية، أقل من 3 فواتير، غير المباع، نص السطر، الحد اليدوي، التقادم، النافذة الناقصة، الاقتطاع، منع التكرار، التقسيم، الحتمية، تطابق عتبات الحداثة، لا كتابة على الأمين، إيقاف الـtrigger القديم، المُشغِّل بـfetch مزيّف، غياب السرّ، ومراقبة فشل الـworkflow).
 
 ## الخطوة التالية (التفعيل بموافقة المالك)
 

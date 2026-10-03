@@ -60,7 +60,12 @@ export async function run({ env = process.env, argv = process.argv.slice(2), fet
   const send = argv.includes("--send");
   const base = String(env.SUPABASE_URL || "").replace(/\/+$/, "");
   const serviceKey = env.SUPABASE_SERVICE_ROLE_KEY || "";
-  if (!base || !serviceKey) throw new Error("SUPABASE_URL أو SUPABASE_SERVICE_ROLE_KEY غير مضبوط.");
+  if (!base || !serviceKey) {
+    // قبل التفعيل قد لا يكون السرّ مضبوطاً: التشغيل التجريبي يتخطى بلا فشل كي لا
+    // يُطلق تنبيه «فشل الأتمتة» كل ربع ساعة. مع --send غيابه فشل صريح.
+    if (!send) { log("وضع تجريبي: SUPABASE_URL أو SUPABASE_SERVICE_ROLE_KEY غير مضبوط — تخطٍّ."); return { result: null, sent: 0 }; }
+    throw new Error("SUPABASE_URL أو SUPABASE_SERVICE_ROLE_KEY غير مضبوط.");
+  }
 
   const [stockReport, invoicesReport, threshold] = await Promise.all([
     latestReport(fetchImpl, base, serviceKey, engine.CONFIG.stockSource),
