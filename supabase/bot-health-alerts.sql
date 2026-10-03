@@ -5,8 +5,9 @@
 -- security_invoker=on مفعّل على الإنتاج (كان مقرّراً في هجرة 20260902070000 التي لم
 -- تُطبَّق قط ونُقلت إلى supabase/superseded/؛ لا تُشغَّل — انظر README هناك).
 -- تحديث 2026-10-03 (قراءة pg_get_viewdef): التعريف الحي اليوم يطابق
--- supabase/superseded/20260914130000_bot_health_alerts_dispatched_and_failed_windows.sql
--- (نافذة "failed" بـsent_at وفحص dispatched العالقة)؛ طُبّق خارج سجل الهجرات.
+-- supabase/migrations/20260914130000_bot_health_alerts_dispatched_and_failed_windows.sql
+-- (نافذة "failed" بـsent_at وفحص dispatched العالقة)؛ طُبّق خارج سجل الهجرات،
+-- ويبقى في السلسلة الفعّالة لأنه الهجرة الوحيدة التي تعرّف هذه الـview (Codex P1 على #305).
 -- الكتلة أدناه هي التعريف الأقدم السابق لذلك التعديل، محفوظة للتاريخ.
 --
 -- الغرض: ترجع تنبيهات صحية مُجمَّعة لبوت المراقبة:

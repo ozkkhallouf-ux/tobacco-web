@@ -4,7 +4,8 @@
 //    إلى supabase/migrations/ — خصوصاً 20260902070000 الذي يمنح anon قراءة
 //    approved_price_sync_feed فيكسر #291.
 // ٢) لا هجرة فعّالة تمنح anon أو authenticated أي صلاحية على approved_price_sync_feed.
-// ٣) الفهرس الفريد 20260921073000 يبقى في السلسلة الفعّالة.
+// ٣) الفهرس الفريد 20260921073000 وإصلاح bot_health_alerts 20260914130000 يبقيان في
+//    السلسلة الفعّالة (التعريف الوحيد لكلٍّ منهما فيها).
 // ٤) أرقام الإصدارات التي أعيدت تسميتها لتطابق الإنتاج لا ترجع لأرقامها القديمة.
 import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -49,6 +50,17 @@ assert.match(
   readFileSync(`${MIGRATIONS}/${guidIndex}`, "utf8").replace(/--.*$/gm, "").replace(/\s+/g, " "),
   /create unique index if not exists approved_price_items_item_guid_unique on public\.approved_price_items \(upper\(item_guid\)\) where item_guid is not null/i,
   `${guidIndex}: الفهرس الفريد على upper(item_guid) غير موجود`
+);
+
+// إصلاح bot_health_alerts هو الهجرة الفعّالة الوحيدة التي تعرّف الـview (Codex P1 الثانية
+// على #305): يبقى في السلسلة كي تحصل قاعدة تُبنى من الهجرات على التعريف الحالي بـsecurity_invoker.
+const botHealth = "20260914130000_bot_health_alerts_dispatched_and_failed_windows.sql";
+assert.ok(active.includes(botHealth), `${botHealth}: يجب أن يبقى في supabase/migrations/`);
+assert.ok(!parked.includes(botHealth), `${botHealth}: لا نسخة منه في supabase/superseded/`);
+assert.match(
+  readFileSync(`${MIGRATIONS}/${botHealth}`, "utf8").replace(/--.*$/gm, "").replace(/\s+/g, " "),
+  /create or replace view public\.bot_health_alerts with \(security_invoker = on\) as/i,
+  `${botHealth}: تعريف bot_health_alerts بـsecurity_invoker=on غير موجود`
 );
 
 assert.ok(existsSync(`${SUPERSEDED}/README.md`), "supabase/superseded/README.md موجود");

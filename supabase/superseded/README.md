@@ -10,24 +10,35 @@
 |---|---|---|
 | `20260902070000_p2_security_definer_views_audit.sql` | ⛔ **لم يُطبَّق، وتشغيله خطير.** | خطوته الثالثة تنفّذ `grant select on public.approved_price_sync_feed to anon, authenticated` (التفصيل بعد الجدول). |
 | `20260902090000_p2_pg_net_schema_analysis.sql` | تحقق فقط بلا DDL. شروطه متحققة على الإنتاج: pg_net بلا كائنات في `public`، والدوال الثلاث `dispatch_*` تستخدم `net.http_post`. | لا يغيّر شيئاً، فلا داعي لإبقائه معلّقاً بلا تسجيل. |
-| `20260914130000_bot_health_alerts_dispatched_and_failed_windows.sql` | مطبّق خارج السجل. `pg_get_viewdef` الحي يطابقه، والتعليق مطابق حرفياً. | أثره موجود بلا رقم مسجّل. |
 | `20260915140000_khalil_audit_migration_history_reconciliation.sql` | ملاحظة تسوية للتاريخ، بلا DDL. الكائنات التي يتحقق منها موجودة. | توثيقي فقط. |
 
-تفصيل `20260902070000`: لو شُغّلت خطوته الثالثة لأعادت فتح قراءة anon التي أغلقتها `20260929235655_price_feeds_security_invoker` (#291). على الإنتاج اليوم الـView `security_invoker=on` وصلاحياته لـ`postgres` و`service_role` فقط. الجزءان الآخران قائمان أصلاً بهجرات لاحقة:
-- `bot_health_alerts` صار `security_invoker=on`.
-- `available_price_sync_feed` صلاحيته SELECT فقط.
+تفصيل `20260902070000`: لو شُغّلت خطوته الثالثة لأعادت فتح قراءة anon التي أغلقتها `20260929235655_price_feeds_security_invoker` (#291). على الإنتاج اليوم الـView `security_invoker=on` وصلاحياته لـ`postgres` و`service_role` فقط. الجزءان الآخران معرَّفان في السلسلة الفعّالة نفسها، لا في هذا الملف وحده:
+- `available_price_sync_feed` بصلاحية SELECT فقط: في `20260929235655_price_feeds_security_invoker`.
+- `bot_health_alerts` بـ`security_invoker=on`: في `20260914130000_bot_health_alerts_dispatched_and_failed_windows`.
 
 الحارس `scripts/check-migration-drift-guard.mjs` يرفض:
 - عودة أي من هذه الملفات إلى `supabase/migrations/`.
 - أي هجرة فعّالة تمنح anon أو authenticated صلاحية على `approved_price_sync_feed`.
 
-## باقٍ عمداً في `supabase/migrations/` رغم أنه غير مسجّل
+## باقيان عمداً في `supabase/migrations/` رغم أنهما غير مسجّلين
 
 - `20260921073000_approved_price_items_item_guid_unique.sql`: الفهرس الفريد `approved_price_items_item_guid_unique` على `upper(item_guid)`.
   - على الإنتاج: موجود بتعريف مطابق حرفياً، لكنه طُبّق خارج السجل. لا يوجد إصدار مسجّل بهذا الرقم ولا بغيره (قراءة 2026-10-03).
   - يبقى في السلسلة لأنه خط الدفاع الأخير ضد تكرار `item_guid`. أي قاعدة تُبنى من الهجرات (Preview، reset، استرجاع) يجب أن تحصل عليه (ملاحظة Codex P1 على #305).
   - الملف `create unique index if not exists`، فهو no-op على الإنتاج.
   - `check-migration-drift-guard.mjs` يفشل إذا خرج من `supabase/migrations/`.
+
+- `20260914130000_bot_health_alerts_dispatched_and_failed_windows.sql`: يعيد إنشاء `bot_health_alerts` بـ`security_invoker=on`، مع نافذة `failed` بـ`sent_at` وفحص صفوف `dispatched` العالقة.
+  - على الإنتاج: مطبّق خارج السجل. `pg_get_viewdef` الحي يطابقه، والتعليق مطابق حرفياً (قراءة 2026-10-03).
+  - يبقى في السلسلة لأنه الهجرة الفعّالة الوحيدة التي تعرّف هذه الـview. بدونه تحصل أي قاعدة تُبنى من الهجرات على تعريف أقدم أو لا شيء (ملاحظة Codex P1 الثانية على #305).
+  - `create or replace view` بنفس التعريف، فهو بلا أثر على الإنتاج.
+  - `check-migration-drift-guard.mjs` يفشل إذا خرج من `supabase/migrations/`.
+
+## لا ملف هنا هو التعريف الوحيد لشيء يُنفَّذ (مراجعة 2026-10-03)
+
+- `20260902070000`: خطوته ١ معرّفة في `20260929235655`، وخطوته ٢ في `20260914130000`. أما خطوته ٣ فهي المنحة الخطرة المقصود حجبها.
+- `20260902090000`: فحص قراءة فقط (`raise notice`/`raise exception`)، بلا DDL ولا تغيير حالة.
+- `20260915140000`: فحص وجود كائنات بالقراءة فقط، بلا DDL ولا تغيير حالة.
 
 ## ما بقي معلّقاً عمداً في `supabase/migrations/`
 
