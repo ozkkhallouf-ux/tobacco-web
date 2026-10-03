@@ -1792,6 +1792,25 @@
     return { eligible: true, reason: null, snapshotDate: referenceDate, rows };
   }
 
+  // الزبون المهم وغيابه (CUSTOMER_INACTIVE_5D): بلا مورد ولا «ليس زبون مبيعات» ولا مبيعات غير صالحة.
+  function keyCustomerOf(draft, valueTopKeys, valueRankByRecord) {
+    const K = CONFIG.keyCustomerAlert;
+    if (!draft.usableSales || draft.isSupplier || draft.credit.creditStatus === "not_customer") return null;
+    const purchaseDays30 = new Set(draft.current.purchaseDays).size;
+    const byValue = valueTopKeys.has(draft.record.recordKey);
+    const byRegularity = purchaseDays30 >= K.regularMinPurchaseDays;
+    if (!byValue && !byRegularity) return null;
+    return {
+      byValue,
+      byRegularity,
+      valueRank: valueRankByRecord.get(draft.record.recordKey) ?? null,
+      purchaseDays30,
+      // معدل المشتريات الشهرية = صافي 60 يوماً ÷ شهرين، بعملة الزبون.
+      monthlyPurchases: round(draft.combined.netSales / 2, 3),
+      absent: draft.daysSinceLastPurchase !== null && draft.daysSinceLastPurchase >= K.inactiveDays
+    };
+  }
+
   function build(input = {}) {
     const now = input.now instanceof Date ? new Date(input.now.getTime()) : new Date(input.now || Date.now());
     const invoicesReport = input.invoicesReport || null;
@@ -2417,23 +2436,7 @@
       if (draft.credit.autoCredit?.status === "low_data") flags.push("credit_low_data");
       if (draft.credit.autoCredit?.smoothing?.applied) flags.push("credit_smoothed");
 
-      // الزبون المهم وغيابه (CUSTOMER_INACTIVE_5D): بلا مورد ولا «ليس زبون مبيعات» ولا مبيعات غير صالحة.
-      const K = CONFIG.keyCustomerAlert;
-      const keyEligible = draft.usableSales && !draft.isSupplier && draft.credit.creditStatus !== "not_customer";
-      const purchaseDays30 = new Set(draft.current.purchaseDays).size;
-      const keyByValue = keyEligible && valueTopKeys.has(draft.record.recordKey);
-      const keyByRegularity = keyEligible && purchaseDays30 >= K.regularMinPurchaseDays;
-      const keyCustomer = keyByValue || keyByRegularity
-        ? {
-          byValue: keyByValue,
-          byRegularity: keyByRegularity,
-          valueRank: valueRankByRecord.get(draft.record.recordKey) ?? null,
-          purchaseDays30,
-          // معدل المشتريات الشهرية = صافي 60 يوماً ÷ شهرين، بعملة الزبون.
-          monthlyPurchases: round(draft.combined.netSales / 2, 3),
-          absent: draft.daysSinceLastPurchase !== null && draft.daysSinceLastPurchase >= K.inactiveDays
-        }
-        : null;
+      const keyCustomer = keyCustomerOf(draft, valueTopKeys, valueRankByRecord);
       if (keyCustomer) flags.push("key_customer");
       if (keyCustomer?.absent) flags.push("key_customer_absent");
 
