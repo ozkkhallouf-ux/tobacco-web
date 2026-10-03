@@ -1,9 +1,19 @@
-# إعداد Supabase CLI — مقصور على ما يحتاجه نشر الدوال الطرفية المجدولة.
+# إعداد Supabase CLI — مقصور على تحقق JWT للدوال الطرفية ذات الرمز الخاص.
 #
-# الدالتان تُستدعيان من pg_cron عبر pg_net بلا JWT، وحمايتهما رمز من app_secrets
-# يتحقق منه الكود نفسه (X-OZK-Credit-Snapshot-Token / X-OZK-Inactivity-Alert-Token)
-# بمقارنة زمن ثابت. مع verify_jwt الافتراضي (true) ترفض البوابة الاستدعاء قبل الكود.
-# النمط نفسه المنشور على الإنتاج لـ web-push (verify_jwt = false).
+# هذه الدوال تُستدعى بلا JWT (pg_cron عبر pg_net، أو webhook تيليغرام، أو دخول موظف
+# الجرد)، وحماية كل منها رمز يتحقق منه الكود نفسه. مع verify_jwt الافتراضي (true)
+# ترفض البوابة الاستدعاء قبل الكود. القيم تطابق الإنتاج المنشور (verify_jwt = false
+# على web-push وtelegram-webhook وinventory-auth)، فـ`supabase functions deploy` لا يقلبها.
+# الدوال غير المذكورة هنا تبقى على الافتراضي (JWT مطلوب).
+
+[functions.web-push]
+verify_jwt = false
+
+[functions.telegram-webhook]
+verify_jwt = false
+
+[functions.inventory-auth]
+verify_jwt = false
 
 [functions.customer-credit-snapshot]
 verify_jwt = false

@@ -73,6 +73,11 @@ revoke all on function public.dispatch_customer_inactivity_alert() from public, 
 
 do $$
 begin
+  -- قاعدة بلا pg_cron (إعادة تشغيل محلية أو فرع معاينة): الجدول والدالة يُنشآن، والجدولة تُتخطّى.
+  if not exists (select 1 from pg_extension where extname = 'pg_cron') then
+    raise notice 'customer-inactivity-alert: pg_cron absent, skipping schedule';
+    return;
+  end if;
   if exists (select 1 from cron.job where jobname = 'customer-inactivity-alert') then
     perform cron.unschedule('customer-inactivity-alert');
   end if;

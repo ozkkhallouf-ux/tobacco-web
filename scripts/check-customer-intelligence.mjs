@@ -2899,7 +2899,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   assert.ok((fn.match(/\.upsert\(/g) || []).length === 1 && /from\("customer_credit_history"\)\s*\.upsert\(/.test(fn), "test 107: كتابة واحدة على جدول التاريخ وحده");
   assert.doesNotMatch(fn, /\.(insert|update|delete)\(/, "test 107: لا كتابة أخرى");
   assert.doesNotMatch(fn, /AmnDb00|AMEEN_SQL|mssql|tedious|sqlcmd/i, "test 107: لا وصول للأمين");
-  const migrationName = "supabase/migrations/20261003010000_customer_credit_history.sql";
+  const migrationName = "supabase/migrations/20261003030000_customer_credit_history.sql";
   const migration = readText(migrationName).toLowerCase();
   assert.match(migration, /alter table public\.customer_credit_history enable row level security/, "test 107: RLS مفعّل");
   assert.match(migration, /alter table public\.customer_credit_history force row level security/, "test 107: RLS مفروض");
@@ -3415,11 +3415,16 @@ const keyRow = (n) => keyResult.customers.find((row) => row.customerGuid === kGu
   assert.ok(fn.indexOf('!== "live"') < fn.indexOf('admin.rpc("notify_telegram"'), "test 118: بوابة الوضع قبل أي إرسال");
   assert.doesNotMatch(fn, /AmnDb00|AMEEN_SQL|mssql|tedious|sqlcmd/i, "test 118: لا وصول للأمين");
   assert.doesNotMatch(fn, /from\("(?!app_secrets|inventory_reports|customer_inactivity_alerts|bot_config)/, "test 118: لا جداول أخرى");
-  const migration = readText("supabase/migrations/20261003030000_customer_inactivity_alerts.sql").toLowerCase();
+  const migration = readText("supabase/migrations/20261003030100_customer_inactivity_alerts.sql").toLowerCase();
   // رقم الإصدار هو مفتاح سجل الهجرات في Supabase: لا يتكرر بين ملفين.
   const { readdirSync } = await import("node:fs");
   const versions = readdirSync(new URL("../supabase/migrations/", import.meta.url)).filter((name) => /^\d{14}_.+\.sql$/.test(name)).map((name) => name.slice(0, 14));
   assert.deepEqual(versions.filter((version, index) => versions.indexOf(version) !== index), [], "test 118: أرقام إصدارات الهجرات فريدة");
+  // قاعدة بلا pg_cron (فرع معاينة/إعادة تشغيل محلية) لا تُسقط سلسلة الهجرات.
+  for (const name of ["20261003030000_customer_credit_history.sql", "20261003030100_customer_inactivity_alerts.sql"]) {
+    const sql = readText(`supabase/migrations/${name}`);
+    assert.ok(sql.indexOf("from pg_extension where extname = 'pg_cron'") > 0 && sql.indexOf("from pg_extension where extname = 'pg_cron'") < sql.indexOf("from cron.job"), `test 118: ${name} يتحقق من pg_cron قبل cron.job`);
+  }
   assert.match(migration, /alter table public\.customer_inactivity_alerts enable row level security/, "test 118: RLS مفعّل");
   assert.match(migration, /alter table public\.customer_inactivity_alerts force row level security/, "test 118: RLS مفروض");
   assert.match(migration, /for select\s+to authenticated\s+using \(\(select public\.is_owner\(\)\)\)/, "test 118: القراءة للمالك وحده");
@@ -3430,7 +3435,8 @@ const keyRow = (n) => keyResult.customers.find((row) => row.customerGuid === kGu
   assert.match(migration, /cron\.schedule\('customer-inactivity-alert', '0 7 \* \* \*'/, "test 118: فحص يومي واحد");
   // pg_net لا يرسل JWT: الدالتان المجدولتان تتجاوزان تحقق البوابة، وحمايتهما الرمز في الكود.
   const supabaseConfig = readText("supabase/config.toml");
-  for (const slug of ["customer-credit-snapshot", "customer-inactivity-alert"]) {
+  // والدوال القائمة ذات الرمز الخاص تبقى كما هي منشورة، كي لا يقلبها نشر جماعي إلى JWT.
+  for (const slug of ["customer-credit-snapshot", "customer-inactivity-alert", "web-push", "telegram-webhook", "inventory-auth"]) {
     assert.match(supabaseConfig, new RegExp(`\\[functions\\.${slug}\\]\\s*\\nverify_jwt = false`), `test 118: ${slug} بلا تحقق JWT من البوابة`);
   }
   assert.match(readText("supabase/functions/customer-credit-snapshot/index.ts"), /sameToken\(req\.headers\.get\("x-ozk-credit-snapshot-token"\)/, "test 118: الرمز شرط في كاتب اللقطة");

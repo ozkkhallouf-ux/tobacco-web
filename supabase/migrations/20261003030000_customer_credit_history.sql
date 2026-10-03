@@ -104,6 +104,11 @@ revoke all on function public.dispatch_customer_credit_snapshot() from public, a
 
 do $$
 begin
+  -- قاعدة بلا pg_cron (إعادة تشغيل محلية أو فرع معاينة): الجدول والدالة يُنشآن، والجدولة تُتخطّى.
+  if not exists (select 1 from pg_extension where extname = 'pg_cron') then
+    raise notice 'customer-credit-snapshot: pg_cron absent, skipping schedule';
+    return;
+  end if;
   if exists (select 1 from cron.job where jobname = 'customer-credit-snapshot') then
     perform cron.unschedule('customer-credit-snapshot');
   end if;
