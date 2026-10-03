@@ -447,9 +447,8 @@ async function runEdge({ header = "tok-stock", stored = "tok-stock", stock = ten
       select: () => builder,
       eq: (column, value) => { filters[column] = value; return builder; },
       order: () => builder,
-      limit: () => builder,
-      maybeSingle: async () => result(),
-      then: (resolve, reject) => Promise.resolve(result()).then(resolve, reject)
+      limit: async () => result(),
+      maybeSingle: async () => result()
     };
     return builder;
   };
