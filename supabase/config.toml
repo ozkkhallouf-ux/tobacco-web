@@ -20,3 +20,6 @@ verify_jwt = false
 
 [functions.customer-inactivity-alert]
 verify_jwt = false
+
+[functions.stock-priority-alert]
+verify_jwt = false
