@@ -422,7 +422,7 @@ for each statement execute function public.tg_notify_new_price_items();
 -- مبيع آخر 30 يوماً وحدها، برسالة مرتبة بالأولوية. البديل خارج SQL:
 --   src/stock-alert-priority.js + scripts/stock-priority-alerts.mjs
 --   + .github/workflows/stock-priority-alerts.yml — ويكتب عبر notify_telegram.
--- الترحيل: supabase/migrations/20261003020000_retire_all_items_stock_alert_trigger.sql
+-- الترحيل: supabase/migrations/20261003034544_retire_all_items_stock_alert_trigger.sql (مطبّق على الإنتاج 2026-10-03)
 drop trigger if exists trg_notify_stock_alerts on public.approved_price_items;
 drop function if exists public.tg_notify_stock_alerts();
 
