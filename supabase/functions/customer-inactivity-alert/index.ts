@@ -7,6 +7,9 @@
 // هذه الدالة تجلب المدخلات، وترسل عبر notify_telegram (→ telegram_outbox)، وتحدّث
 // جدول الحالة customer_inactivity_alerts: إضافة من نُبِّه عنه، وحذف من عاد واشترى.
 //
+// الوضع الافتراضي تجريبي: تحسب وتُرجع الأعداد فقط، ولا ترسل ولا تكتب حالة، حتى يضبط المالك
+// bot_config.customer_inactivity_alert_mode = 'live'.
+//
 // تستدعيها pg_cron (public.dispatch_customer_inactivity_alert) برأس
 // X-OZK-Inactivity-Alert-Token مطابق لـapp_secrets.customer_inactivity_alert_token.
 // لا وصول لقاعدة الأمين من هنا إطلاقاً: المصادر تقارير Supabase المزامَنة.
@@ -100,6 +103,21 @@ export default {
       return json({ error: String((error as Error)?.message || "build_failed") }, 500);
     }
 
+    // الوضع التجريبي هو الافتراضي: بلا bot_config.customer_inactivity_alert_mode = 'live'
+    // لا إرسال ولا كتابة حالة، فقط الأعداد. التفعيل قرار المالك.
+    const { data: modeRow, error: modeError } = await admin
+      .from("bot_config").select("value").eq("key", "customer_inactivity_alert_mode").maybeSingle();
+    if (modeError) return json({ error: "mode_unavailable" }, 500);
+    if (String(modeRow?.value || "").trim() !== "live") {
+      return json({
+        mode: "dry_run",
+        status: plan.status,
+        wouldAlert: plan.insertRows.length,
+        wouldSendMessages: plan.messages.length,
+        wouldClear: plan.deleteKeys.length
+      });
+    }
+
     // الإرسال أولاً ثم حالة زبائن تلك الرسالة: فشل إرسال لا يسجّل زبوناً كأنه نُبِّه عنه،
     // ورسالة نجحت قبل فشل تاليتها تُسجَّل فلا تتكرر غداً.
     const rowsByKey = new Map(plan.insertRows.map((row) => [String(row.dedupe_key), row]));
@@ -121,12 +139,12 @@ export default {
       if (stateError) return json({ error: "state_write_failed", alerted }, 500);
       alerted += rows.length;
     }
-    if (plan.status !== "ok") return json({ status: plan.status, notified: plan.messages.length });
+    if (plan.status !== "ok") return json({ mode: "live", status: plan.status, notified: plan.messages.length });
 
     if (plan.deleteKeys.length) {
       const { error } = await admin.from("customer_inactivity_alerts").delete().in("dedupe_key", plan.deleteKeys);
       if (error) return json({ error: "state_cleanup_failed" }, 500);
     }
-    return json({ status: plan.status, notified: plan.messages.length, alerted, cleared: plan.deleteKeys.length });
+    return json({ mode: "live", status: plan.status, notified: plan.messages.length, alerted, cleared: plan.deleteKeys.length });
   },
 };

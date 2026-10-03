@@ -3305,7 +3305,7 @@ const keyRow = (n) => keyResult.customers.find((row) => row.customerGuid === kGu
   const reports = keyReports();
   const bySource = { ameen_customer_invoices: reports.invoicesReport, ameen_customer_balances: reports.balancesReport };
 
-  async function runAlert({ header = "tok-118", stored = "tok-118", now = NOW, state = [], notifyError = null } = {}) {
+  async function runAlert({ header = "tok-118", stored = "tok-118", now = NOW, state = [], notifyError = null, mode = "live" } = {}) {
     const calls = { rpc: [], upserts: [], deletes: [], tables: [] };
     const from = (table) => {
       calls.tables.push(table);
@@ -3315,6 +3315,7 @@ const keyRow = (n) => keyResult.customers.find((row) => row.customerGuid === kGu
         if (table === "app_secrets") return { data: stored === null ? null : { value: stored }, error: null };
         if (table === "inventory_reports") return { data: [bySource[filters.source]].filter(Boolean), error: null };
         if (table === "customer_inactivity_alerts") return { data: state.slice(range[0], range[1] + 1), error: null };
+        if (table === "bot_config") return { data: mode === null ? null : { value: mode }, error: null };
         throw new Error(`test 118: جدول غير متوقع ${table}`);
       };
       const builder = {
@@ -3357,6 +3358,19 @@ const keyRow = (n) => keyResult.customers.find((row) => row.customerGuid === kGu
     return { status: response.status, body: await response.json(), calls };
   }
 
+  // الوضع التجريبي هو الافتراضي: بلا قيمة 'live' لا إرسال ولا كتابة حالة، والأعداد وحدها.
+  for (const mode of [null, "", "dry_run", "LIVE "]) {
+    const dry = await runAlert({ mode });
+    assert.equal(dry.status, 200, `test 118: ${JSON.stringify(dry.body)}`);
+    assert.equal(dry.body.mode, "dry_run", `test 118: الوضع ${JSON.stringify(mode)} تجريبي`);
+    assert.equal(dry.body.wouldAlert, 3, "test 118: العدد الذي كان سيُنبَّه عنه");
+    assert.equal(dry.body.wouldSendMessages, 1);
+    assert.equal(dry.calls.rpc.length + dry.calls.upserts.length + dry.calls.deletes.length, 0, "test 118: تجريبي ⇒ لا إرسال ولا حالة");
+  }
+  const dryStale = await runAlert({ mode: null, now: new Date(new Date(REFERENCE_ISO).getTime() + 3 * 3600000) });
+  assert.equal(dryStale.body.status, "stale_invoices");
+  assert.equal(dryStale.calls.rpc.length, 0, "test 118: لا بلاغ تيليغرام في الوضع التجريبي");
+
   const wrong = await runAlert({ header: "tok-x" });
   assert.equal(wrong.status, 401, "test 118: رمز خاطئ ⇒ 401");
   assert.deepEqual(wrong.calls.tables, ["app_secrets"], "test 118: لا قراءة قبل التحقق من الرمز");
@@ -3398,8 +3412,9 @@ const keyRow = (n) => keyResult.customers.find((row) => row.customerGuid === kGu
   const fn = readText("supabase/functions/customer-inactivity-alert/index.ts");
   assert.match(fn, /import "\.\.\/_shared\/customer-intelligence\.js";/, "test 118: الدالة تحمّل المحرك نفسه");
   assert.match(fn, /buildInactivityAlert\(/, "test 118: الخطة من المحرك لا من حساب ثانٍ");
+  assert.ok(fn.indexOf('!== "live"') < fn.indexOf('admin.rpc("notify_telegram"'), "test 118: بوابة الوضع قبل أي إرسال");
   assert.doesNotMatch(fn, /AmnDb00|AMEEN_SQL|mssql|tedious|sqlcmd/i, "test 118: لا وصول للأمين");
-  assert.doesNotMatch(fn, /from\("(?!app_secrets|inventory_reports|customer_inactivity_alerts)/, "test 118: لا جداول أخرى");
+  assert.doesNotMatch(fn, /from\("(?!app_secrets|inventory_reports|customer_inactivity_alerts|bot_config)/, "test 118: لا جداول أخرى");
   const migration = readText("supabase/migrations/20261003020000_customer_inactivity_alerts.sql").toLowerCase();
   assert.match(migration, /alter table public\.customer_inactivity_alerts enable row level security/, "test 118: RLS مفعّل");
   assert.match(migration, /alter table public\.customer_inactivity_alerts force row level security/, "test 118: RLS مفروض");
