@@ -4,7 +4,8 @@
 //    إلى supabase/migrations/ — خصوصاً 20260902070000 الذي يمنح anon قراءة
 //    approved_price_sync_feed فيكسر #291.
 // ٢) لا هجرة فعّالة تمنح anon أو authenticated أي صلاحية على approved_price_sync_feed.
-// ٣) أرقام الإصدارات التي أعيدت تسميتها لتطابق الإنتاج لا ترجع لأرقامها القديمة.
+// ٣) الفهرس الفريد 20260921073000 يبقى في السلسلة الفعّالة.
+// ٤) أرقام الإصدارات التي أعيدت تسميتها لتطابق الإنتاج لا ترجع لأرقامها القديمة.
 import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 
@@ -39,6 +40,17 @@ for (const [oldV, newV] of [
   assert.ok(!activeVersions.has(oldV), `${oldV}: الرقم القديم عاد؛ الإنتاج يسجّل ${newV}`);
   assert.ok(activeVersions.has(newV), `${newV}: ملف الهجرة المسجّلة على الإنتاج مفقود`);
 }
+// الفهرس الفريد لهوية البطاقة خط الدفاع الأخير ضد تكرار item_guid (Codex P1 على #305):
+// يبقى في السلسلة الفعّالة كي تحصل عليه أي قاعدة تُبنى من الهجرات، لا في الأرشيف.
+const guidIndex = "20260921073000_approved_price_items_item_guid_unique.sql";
+assert.ok(active.includes(guidIndex), `${guidIndex}: يجب أن يبقى في supabase/migrations/`);
+assert.ok(!parked.includes(guidIndex), `${guidIndex}: لا نسخة منه في supabase/superseded/`);
+assert.match(
+  readFileSync(`${MIGRATIONS}/${guidIndex}`, "utf8").replace(/--.*$/gm, "").replace(/\s+/g, " "),
+  /create unique index if not exists approved_price_items_item_guid_unique on public\.approved_price_items \(upper\(item_guid\)\) where item_guid is not null/i,
+  `${guidIndex}: الفهرس الفريد على upper(item_guid) غير موجود`
+);
+
 assert.ok(existsSync(`${SUPERSEDED}/README.md`), "supabase/superseded/README.md موجود");
 
 console.log("check-migration-drift-guard: OK");

@@ -671,7 +671,7 @@ test("K2) الخطأ يُرمى ولا يُبتلع: الحفظ يفشل ظاه�
 
 test("K3) الترحيل يطابق القيد المنشأ في الإنتاج حرفياً وهو idempotent", () => {
   const sql = readFileSync(
-    new URL("../supabase/superseded/20260921073000_approved_price_items_item_guid_unique.sql", import.meta.url),
+    new URL("../supabase/migrations/20260921073000_approved_price_items_item_guid_unique.sql", import.meta.url),
     "utf8"
   );
   const ddl = sql.split("\n").filter((l) => !l.trim().startsWith("--")).join(" ").replace(/\s+/g, " ").trim();

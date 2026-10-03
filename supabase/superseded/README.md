@@ -12,7 +12,6 @@
 | `20260902090000_p2_pg_net_schema_analysis.sql` | تحقق فقط بلا DDL. شروطه متحققة على الإنتاج: pg_net بلا كائنات في `public`، والدوال الثلاث `dispatch_*` تستخدم `net.http_post`. | لا يغيّر شيئاً، فلا داعي لإبقائه معلّقاً بلا تسجيل. |
 | `20260914130000_bot_health_alerts_dispatched_and_failed_windows.sql` | مطبّق خارج السجل. `pg_get_viewdef` الحي يطابقه، والتعليق مطابق حرفياً. | أثره موجود بلا رقم مسجّل. |
 | `20260915140000_khalil_audit_migration_history_reconciliation.sql` | ملاحظة تسوية للتاريخ، بلا DDL. الكائنات التي يتحقق منها موجودة. | توثيقي فقط. |
-| `20260921073000_approved_price_items_item_guid_unique.sql` | مطبّق خارج السجل. الفهرس `approved_price_items_item_guid_unique` موجود بتعريف مطابق حرفياً. | أثره موجود بلا رقم مسجّل. `scripts/check-new-duplicate-guid-guard.mjs` يقرؤه من هنا. |
 
 تفصيل `20260902070000`: لو شُغّلت خطوته الثالثة لأعادت فتح قراءة anon التي أغلقتها `20260929235655_price_feeds_security_invoker` (#291). على الإنتاج اليوم الـView `security_invoker=on` وصلاحياته لـ`postgres` و`service_role` فقط. الجزءان الآخران قائمان أصلاً بهجرات لاحقة:
 - `bot_health_alerts` صار `security_invoker=on`.
@@ -21,6 +20,14 @@
 الحارس `scripts/check-migration-drift-guard.mjs` يرفض:
 - عودة أي من هذه الملفات إلى `supabase/migrations/`.
 - أي هجرة فعّالة تمنح anon أو authenticated صلاحية على `approved_price_sync_feed`.
+
+## باقٍ عمداً في `supabase/migrations/` رغم أنه غير مسجّل
+
+- `20260921073000_approved_price_items_item_guid_unique.sql`: الفهرس الفريد `approved_price_items_item_guid_unique` على `upper(item_guid)`.
+  - على الإنتاج: موجود بتعريف مطابق حرفياً، لكنه طُبّق خارج السجل. لا يوجد إصدار مسجّل بهذا الرقم ولا بغيره (قراءة 2026-10-03).
+  - يبقى في السلسلة لأنه خط الدفاع الأخير ضد تكرار `item_guid`. أي قاعدة تُبنى من الهجرات (Preview، reset، استرجاع) يجب أن تحصل عليه (ملاحظة Codex P1 على #305).
+  - الملف `create unique index if not exists`، فهو no-op على الإنتاج.
+  - `check-migration-drift-guard.mjs` يفشل إذا خرج من `supabase/migrations/`.
 
 ## ما بقي معلّقاً عمداً في `supabase/migrations/`
 
