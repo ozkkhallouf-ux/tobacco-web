@@ -1,5 +1,16 @@
 # Superseded Migrations
 
+> **تحديث 2026-10-03 (تدقيق قراءة فقط على `supabase_migrations.schema_migrations`):**
+> - أسماء الطوابع الثلاثة صُحّحت لتطابق الإنتاج:
+>   - `20260826104745` = `add_smart_inventory_count_attempts_session_id_index`
+>   - `20260826133200` = `create_bulletin_exchange_rate_single_source`
+>   - `20260831020850` = `khalil_audit_round14_ameen_scan_time`
+>
+>   فربطها بمسودتي initplan وinventory_recon في الجدول أدناه **غير صحيح**. إصلاح initplan الحقيقي مسجّل بالإصدار `20260826093547`، وليس له ملف محلي.
+> - ملفات `20260902070000` و`20260902090000` و`20260914130000` و`20260915140000` و`20260921073000` نُقلت إلى `supabase/superseded/`، **خارج** مجلد الهجرات. التفاصيل في `supabase/superseded/README.md`.
+> - `20260914120000` صار `20260914121528`، وهو الرقم المسجّل على الإنتاج.
+> - تعليمات `--include-all` في الأقسام أدناه تاريخية. لا يُشغَّل `db push` ولا `--include-all` ولا `migration repair` على الإنتاج بلا موافقة المالك الصريحة.
+
 هذه الملفات مسوَّدات كُتبت محلياً ولم تُطبَّق أبداً على قاعدة البيانات الحية.
 كلٌّ منها استُبدل بنسخة مُحدَّثة طُبِّقت مباشرةً عبر SQL Editor بـtimestamp مختلف.
 
@@ -14,7 +25,7 @@
 | `20260826094640_fix_ameen_read_requests_initplan_current_setting.sql` | `20260826104745` + `20260826133200` | `../20260826104745_...sql` + `../20260826133200_...sql` † | تحسين أداء الاستعلام بفصل إصلاح initplan |
 | `20260830140000_khalil_audit_log.sql` | `20260830141802` (`khalil_audit_log`) | `../20260830141802_khalil_audit_log.sql` †† | مسودة محلية لإنشاء جداول الـaudit وتعريف الدوال؛ لم يُثبت تطابقها مع محتوى الـmigration المطبَّق فعلياً على production |
 | `20260830144330_expense_entries_owner_only_rls.sql` | `20260830172655` (`expense_entries_owner_only_rls`) | `../20260830172655_expense_entries_owner_only_rls.sql` † | تعديل في تعريف سياسة RLS للمصروفات |
-| `20260831051500_fix_inventory_recon_match_key_fallbacks.sql` | `20260831020850` | `../20260831020850_fix_inventory_recon_match_key_fallbacks.sql` † | تطبيق على الإنتاج قبل الـcommit المحلي |
+| `20260831051500_fix_inventory_recon_match_key_fallbacks.sql` | `20260831020850` | `../20260831020850_khalil_audit_round14_ameen_scan_time.sql` † | تطبيق على الإنتاج قبل الـcommit المحلي |
 | `20260831120000_telegram_delivery_observability.sql` | `20260831185634` | `../20260831185634_telegram_delivery_observability.sql` † | إضافة `net_request_id` بنسخة مُصحَّحة |
 
 \* **تصحيح (2026-09-14):** الإدخال السابق لسطر khalil audit كان خاطئاً — كان يشير إلى
@@ -124,11 +135,11 @@ above now has a matching local file under `../`:
 | version | local file | kind |
 |---|---|---|
 | `20260823085423` | `20260823085423_smart_inventory_counter_isolation.sql` | function-only baseline `smart_inventory_set_counter_auth_role(uuid)` (fresh); Stage 2 skip |
-| `20260826104745` | `20260826104745_fix_ameen_read_requests_initplan_current_setting.sql` | landmark verify-or-skip (fresh no-op) |
-| `20260826133200` | `20260826133200_fix_ameen_read_requests_initplan_followup.sql` | landmark verify-or-skip (name unconfirmed) |
+| `20260826104745` | `20260826104745_add_smart_inventory_count_attempts_session_id_index.sql` | landmark verify-or-skip (fresh no-op) |
+| `20260826133200` | `20260826133200_create_bulletin_exchange_rate_single_source.sql` | landmark verify-or-skip (name confirmed 2026-10-03) |
 | `20260830141802` | `20260830141802_khalil_audit_log.sql` | fresh-DB bootstrap + refuse-if-present |
 | `20260830172655` | `20260830172655_expense_entries_owner_only_rls.sql` | landmark verify-or-skip (fresh no-op) |
-| `20260831020850` | `20260831020850_fix_inventory_recon_match_key_fallbacks.sql` | landmark verify-or-skip (fresh no-op) |
+| `20260831020850` | `20260831020850_khalil_audit_round14_ameen_scan_time.sql` | landmark verify-or-skip (fresh no-op) |
 | `20260831185634` | `20260831185634_telegram_delivery_observability.sql` | landmark verify-or-skip (fresh no-op) |
 
 Re-check with `supabase migration list` before Stage 2. If a **name** mismatch

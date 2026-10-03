@@ -30,7 +30,7 @@ try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $retentionPath = Join-Path (Join-Path $repoRoot 'tools') 'ameen-warehouse-stock-retention.ps1'
 $pushPath = Join-Path (Join-Path $repoRoot 'tools') 'push-ameen-warehouse-stock.ps1'
-$migrationPath = Join-Path (Join-Path (Join-Path $repoRoot 'supabase') 'migrations') '20260928140000_prune_ameen_warehouse_stock_reports.sql'
+$migrationPath = Join-Path (Join-Path (Join-Path $repoRoot 'supabase') 'migrations') '20260928145121_prune_ameen_warehouse_stock_reports.sql'
 $failures = New-Object System.Collections.ArrayList
 
 function Add-Failure([string]$Message) {

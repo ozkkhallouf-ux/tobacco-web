@@ -22,7 +22,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import assert from "node:assert/strict";
 
-const migrationPath = new URL("../supabase/migrations/20260926140000_evening_report_supplier_purchases_from_bills.sql", import.meta.url);
+const migrationPath = new URL("../supabase/migrations/20260926234241_evening_report_supplier_purchases_from_bills.sql", import.meta.url);
 const referencePath = new URL("../supabase/telegram-notifications.sql", import.meta.url);
 const migration = readFileSync(migrationPath, "utf8").replace(/\r\n/g, "\n");
 const reference = readFileSync(referencePath, "utf8").replace(/\r\n/g, "\n");
