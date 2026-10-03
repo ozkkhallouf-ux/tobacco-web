@@ -1224,6 +1224,122 @@ function creditMovementKind(customer, movement, fromLinkedLedger) {
   return { kind: candidate ? "unclassified" : "receipt" };
 }
 
+// نفس علامة push-customer-movements.ps1 / محرك الحد. بلاها لا نُخفي مديناً: الصف لا يحمل نوعاً.
+const LINE_KINDS_MARKER = "v1";
+
+function movementsReportHasLineKinds() {
+  return state.customerMovementsReport?.summary?.lineKinds === LINE_KINDS_MARKER;
+}
+
+// تصنيف سطر مدين في لوحة الزبون. العطل (2026-10-01): كل مدين كان «فاتورة»، فظهرت
+// حركة صندوق خارجة (lineKind payment_out — مدين على الزبون مقابل صندوق، والرصيد
+// يرتفع) داخل الفواتير وزرّها يبحث عن فاتورة بيع. الملاحظة لا تُصنِّف. تقرير بلا
+// lineKinds:v1 يُبقي السلوك السابق لأن النوع غير معروف.
+//   sale         — فاتورة بيع.
+//   payment-out  — دفعة نقدية من الصندوق، ليست بيعاً. تُعرض مع سندات القبض.
+//   return-part  — سطر مدين من قيد مرتجع.
+//   none         — ليس مديناً.
+function debitMovementKind(movement, typedLedger) {
+  const debit = Number(movement?.debit || 0);
+  if (!(debit > 0)) return { kind: "none" };
+  if (movementReturnLink(movement)) return { kind: "return-part" };
+  const lineKind = String(movement?.lineKind || movement?.line_kind || "");
+  if (typedLedger === true && lineKind === "payment_out" && !(Number(movement?.credit || 0) > 0)) {
+    return { kind: "payment-out" };
+  }
+  return { kind: "sale" };
+}
+
+// مستند زر السطر المدين. payment_out صرف من الصندوق (مدين على الزبون، والرصيد يرتفع):
+// سند صرف، لا فاتورة بيع ولا سند قبض. لا أصناف ولا بحث بالمبلغ. الملاحظة لا تُصنِّف.
+function debitMovementDocumentType(movement, typedLedger) {
+  const kind = debitMovementKind(movement, typedLedger).kind;
+  if (kind === "payment-out") return "payment";
+  if (kind === "sale") return "invoice";
+  return null;
+}
+
+function movementDocTypeFromButton(lineKind, debit, credit) {
+  return debitMovementDocumentType({
+    debit,
+    credit,
+    lineKind: lineKind || "",
+    billGuid: ""
+  }, lineKind === "payment_out");
+}
+
+function customerPaymentRowAmount(row) {
+  return row && row._payKind === "payment-out" ? Number(row.debit || 0) : Number(row?.credit || 0);
+}
+
+// رصيد السند من القيد المخزَّن. سند القبض يسمّي السطر «بعد الدفعة». سند الصرف
+// (payment_out) يترك التسمية لقالب السند: «الرصيد بعد الصرف». ومع الرصيد المخزَّن
+// يُطبع الرصيد الحالي إن وُجد تقرير محمَّل، حتى لا يُقرأ رصيد صفحة قديمة على أنه
+// رصيد اللحظة.
+function fillReceiptVoucherBalance(opts, item, storedDocNew) {
+  if (storedDocNew !== null && Number.isFinite(storedDocNew)) {
+    opts.balance = roundPrice(storedDocNew);
+    if (opts.type !== "payment") opts.balanceLabel = "الرصيد بعد الدفعة";
+    const current = customerBalance(item);
+    if (Number.isFinite(current)) {
+      opts.currentBalance = roundPrice(current);
+      opts.currentBalanceAt = reportSyncedAt(state.customerBalanceReports[0]);
+    }
+    return opts;
+  }
+  opts.balance = customerBalance(item);
+  opts.balanceLabel = "الرصيد الحالي";
+  return opts;
+}
+
+function exportMovementReceipt(base, item, amount, storedDocNew, voucherType) {
+  const disbursement = voucherType === "payment";
+  // دفتر الحركات بالدولار (en000). عملة عرض الزبون لا تُعيد تسمية هذه الأرقام.
+  exportVoucherPdf(fillReceiptVoucherBalance(
+    {
+      ...base,
+      type: disbursement ? "payment" : "receipt",
+      cur: disbursement ? "$" : base.cur,
+      customerLedger: disbursement,
+      amount,
+      no: docNumber(disbursement ? "PV" : "R")
+    },
+    item,
+    storedDocNew
+  ));
+}
+
+function customerReceiptDocButton(row, rowsLinked) {
+  const cashOut = !!(row && row._payKind === "payment-out");
+  const amount = escapeHtml(String(customerPaymentRowAmount(row)));
+  const attrs = [
+    `data-line-kind="${cashOut ? "payment_out" : ""}"`,
+    `data-debit="${cashOut ? amount : "0"}"`,
+    `data-credit="${cashOut ? "0" : amount}"`,
+    `data-date="${escapeHtml(row?.date || "")}"`,
+    `data-notes="${escapeHtml(row?.notes || "")}"`,
+    `data-balance="${optionalDataValue(row?.balance)}"`,
+    `data-balance-chrono="${optionalDataValue(row?.balanceChrono)}"`,
+    `data-doc-new="${optionalDataValue(row?.docNew)}"`,
+    `data-doc-prev="${optionalDataValue(row?.docPrev)}"`,
+    `data-ledger-linked="${rowsLinked ? "1" : ""}"`
+  ];
+  const open = '<button class="button secondary mini-button" type="button" data-action="gen-movement-doc"';
+  const label = cashOut ? "سند صرف PDF" : "سند قبض PDF";
+  return `${open} ${attrs.join(" ")} style="margin-top:6px">📄 ${label}</button>`;
+}
+
+// سندات القبض الدائنة + حركات الصندوق الخارجة، الأحدث أولاً. بلا علامة النوع لا تُضاف
+// الحركة الخارجة: تبقى في الفواتير كما كان كي لا يختفي مدين تقرير قديم.
+function customerCashPaymentRows(receiptMoves, movements, typedLedger) {
+  const cashOut = (Array.isArray(movements) ? movements : [])
+    .filter((m) => debitMovementKind(m, typedLedger).kind === "payment-out")
+    .map((m) => ({ ...m, _payKind: "payment-out" }));
+  const receipts = (Array.isArray(receiptMoves) ? receiptMoves : [])
+    .map((m) => ({ ...m, _payKind: "receipt" }));
+  return [...receipts, ...cashOut].sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
+}
+
 // سطر الحسم الدائن لفاتورة بيع. الأمين يقيّد حسم الفاتورة (TotalDisc) دائناً على الزبون
 // **داخل سند قيد الفاتورة نفسه**، فهو ليس سند قبض. شاهد 2026-09-23 (فاتورة 830): مدين
 // 34,360.328 ودائن 0.33 على سند واحد (docPrev 0 ← docNew 34,359.998) وبلا billGuid، لأن
@@ -6398,16 +6514,18 @@ function pushInvoiceRoundingDrift(rows, v, cur, balCur, isRet) {
     : { label: "فرق تقريب", value: `− ${formatInvoiceMoney(-drift / 100)} ${cur}`, tone: "cred" });
 }
 
-// شقّ الرصيد المفرد (السندات وما لا رصيد جديد له). خرج من `voucherLedgerRows`
-// كما هو: لا شرط ولا صياغة ولا ترتيب تغيّر فيه.
+// شقّ الرصيد المفرد (السندات وما لا رصيد جديد له). سند الصرف العام يبقى
+// على الصيغة الخام. سند دفتر الزبون (قبض، أو payment_out المعلَّم customerLedger)
+// يصوغ الاتجاه «عليكم/لكم» ويعرض الرصيد اللاحق إن اختلف.
 function voucherSingleBalanceRows(rows, v, cur, balCur, isInv, isRet, balLabel) {
   const lbl = v.balanceLabel || balLabel;
-  const balTxt = (isInv || isRet || v.type === "receipt") ? balanceText(v.balance, balCur, isInv ? formatInvoiceMoney : formatMoney) : `${formatMoney(v.balance)} ${cur}`;
+  const asCustomer = isInv || isRet || v.type === "receipt" || v.customerLedger === true;
+  const balTxt = asCustomer ? balanceText(v.balance, balCur, isInv ? formatInvoiceMoney : formatMoney) : `${formatMoney(v.balance)} ${cur}`;
   rows.push({ label: lbl, value: balTxt });
   // إن تحرّك الحساب بعد هذا القيد (فواتير لاحقة مثلاً) نعرض الرصيد الحالي أيضاً:
   // سطر واحد لا يكفي — الزبون يقارن السند برصيده اليوم فيظنّ الفرق خطأً.
-  // محصور بسند القبض وحده: الفاتورة والمرتجع لهما سطرا «السابق/الجديد».
-  if (v.type === "receipt"
+  // الفاتورة والمرتجع لهما سطرا «السابق/الجديد»، فلا يدخلان هنا.
+  if ((v.type === "receipt" || v.customerLedger === true)
     && v.currentBalance !== undefined && v.currentBalance !== null && v.currentBalance !== ""
     && Math.abs(Number(v.currentBalance) - Number(v.balance)) > 0.009) {
     const asOf = shortDateTime(v.currentBalanceAt);
@@ -7578,8 +7696,10 @@ function customerDetailsPanel(item) {
     : (Array.isArray(item.recentMovements)
         ? [...item.recentMovements].sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0))
         : []);
-  // سطر مدين من قيد مرتجع (حسم المرتجع، #32: مدين 0.02) جزء من المرتجع لا فاتورة بيع.
-  const invoiceMoves = movements.filter((m) => Number(m?.debit || 0) > 0 && !movementReturnLink(m));
+  // نوع السطر من تقرير الحركات الموسوم فقط. صفوف recentMovements بلا lineKind.
+  const typedLedger = fromFullLedger && movementsReportHasLineKinds();
+  // سطر مدين من قيد مرتجع، أو payment_out، ليس فاتورة بيع.
+  const invoiceMoves = movements.filter((m) => debitMovementKind(m, typedLedger).kind === "sale");
   const creditMoves = movements.filter((m) => Number(m?.credit || 0) > 0);
   // مرتجع المبيعات يُقيَّد دائناً على حساب الزبون تماماً كالدفعة — نفرزه بربطه القطعي
   // بفاتورة المرتجع (creditMovementKind)، لا بالتاريخ والمبلغ. ما لا يجوز الحكم عليه
@@ -7589,6 +7709,7 @@ function customerDetailsPanel(item) {
   const discountMoves = classifiedCredits.filter((m) => m._retKind === "invoice-discount");
   const returnMoves = classifiedCredits.filter((m) => m._retKind !== "receipt" && m._retKind !== "invoice-discount");
   const paymentMoves = classifiedCredits.filter((m) => m._retKind === "receipt");
+  const paymentRows = customerCashPaymentRows(paymentMoves, movements, typedLedger);
   const invoiceDiscountOf = (m) => discountMoves.find((x) => String(x.date || "").slice(0, 10) === String(m?.date || "").slice(0, 10)
     && Number(x.docPrev) === Number(m?.docPrev) && Number(x.docNew) === Number(m?.docNew));
   const invoiceDiscountNote = (m) => {
@@ -7678,18 +7799,18 @@ function customerDetailsPanel(item) {
         <article>
           <div class="detail-section-head">
             <h4>💵 سندات القبض</h4>
-            <span class="status-chip">${paymentMoves.length} دفعة</span>
+            <span class="status-chip">${paymentRows.length} دفعة</span>
           </div>
           <div class="detail-list payment-timeline">
-            ${paymentMoves.length
-              ? paymentMoves.map((m) => `
+            ${paymentRows.length
+              ? paymentRows.map((m) => `
                 <div class="payment-entry">
                   <div class="payment-entry-dot"></div>
                   <div class="payment-entry-body">
-                    <strong class="payment-amount">دفعة: ${escapeHtml(formatMoney(Number(m?.credit || 0)))}</strong>
+                    <strong class="payment-amount">دفعة: ${escapeHtml(formatMoney(customerPaymentRowAmount(m)))}</strong>
                     <span class="payment-date">${escapeHtml(m?.date ? formatDate(m.date) : "بلا تاريخ")}</span>
                     ${m?.notes ? `<small class="payment-note">${escapeHtml(m.notes)}</small>` : ""}
-                    <button class="button secondary mini-button" type="button" data-action="gen-movement-doc" data-debit="0" data-credit="${escapeHtml(String(m?.credit || 0))}" data-date="${escapeHtml(m?.date || "")}" data-notes="${escapeHtml(m?.notes || "")}" data-balance="${m?.balance !== undefined && m?.balance !== null ? escapeHtml(String(m.balance)) : ""}" data-balance-chrono="${m?.balanceChrono !== undefined && m?.balanceChrono !== null ? escapeHtml(String(m.balanceChrono)) : ""}" data-doc-new="${m?.docNew !== undefined && m?.docNew !== null ? escapeHtml(String(m.docNew)) : ""}" data-doc-prev="${m?.docPrev !== undefined && m?.docPrev !== null ? escapeHtml(String(m.docPrev)) : ""}" data-ledger-linked="${rowsLinked ? "1" : ""}" style="margin-top:6px">📄 سند قبض PDF</button>
+                    ${customerReceiptDocButton(m, rowsLinked)}
                   </div>
                 </div>`).join("")
               : '<p class="muted" style="padding:12px 0">لا توجد دفعات مسجلة.</p>'}
@@ -12770,6 +12891,15 @@ function render() {
       const storedDocPrev = el.dataset.docPrev !== undefined && el.dataset.docPrev !== ""
         ? Number(el.dataset.docPrev) : null;
       if (debit > 0 && credit <= 0) {
+        // سطر حسم المرتجع ليس فاتورة. payment_out صرف من الصندوق: سند صرف، بلا بحث عن أصناف.
+        if (movementReturnLink({ billGuid: el.dataset.billGuid })) {
+          showNoticeNow("error", "هذا السطر جزء من قيد مرتجع (حسم المرتجع)، وليس فاتورة بيع — صدّره من قائمة المرتجعات.");
+          return;
+        }
+        if (movementDocTypeFromButton(el.dataset.lineKind, debit, credit) === "payment") {
+          exportMovementReceipt(base, item, debit, storedDocNew, "payment");
+          return;
+        }
         // الزبون يُمرَّر كعنصر (يحمل customerGuid) لا كاسم — الاسم في تقرير الفواتير
         // مصدره حقل نصّي آخر في الأمين وقد يتخلّف عن اسم الحساب بعد أي تعديل.
         const invs = customerInvoicesFor(item).filter((x) => !x.isReturn);
@@ -12780,12 +12910,6 @@ function render() {
         const dOnly = String(el.dataset.date || "").slice(0, 10);
         const amtMatch = (x) => Math.abs(Number(x.total || 0) - debit) < 1;
         const dateMatch = (x) => String(x.date || "").slice(0, 10) === dOnly;
-        // سطر مدين من قيد مرتجع (حسمه) ليس فاتورة بيع: احتياط التاريخ أدناه كان سيطبع
-        // عليه أي فاتورة بيع من اليوم نفسه بأرصدة المرتجع.
-        if (movementReturnLink({ billGuid: el.dataset.billGuid })) {
-          showNoticeNow("error", "هذا السطر جزء من قيد مرتجع (حسم المرتجع)، وليس فاتورة بيع — صدّره من قائمة المرتجعات.");
-          return;
-        }
         const byGuid = bg ? invoiceByGuid(bg) : null;
         const match = (byGuid && !byGuid.invoice.isReturn ? byGuid.invoice : null)
           || invs.find((x) => dateMatch(x) && amtMatch(x)) || invs.find((x) => amtMatch(x)) || invs.find((x) => dateMatch(x));
@@ -12846,25 +12970,7 @@ function render() {
             ? "هذا القيد مرتجع مبيعات، وتفاصيله لم تُزامَن بعد — لا مستند له حتى المزامنة التالية."
             : "لا يمكن الحكم على هذا القيد: يطابق مرتجعاً ولا ربط قطعياً له — لم يُطبع سند قبض ولا مرتجع.");
         } else {
-          const opts = { ...base, type: "receipt", amount: credit, no: docNumber("R") };
-          if (storedDocNew !== null && Number.isFinite(storedDocNew)) {
-            opts.balance = roundPrice(storedDocNew);
-            opts.balanceLabel = "الرصيد بعد الدفعة";
-            // سطر ثانٍ للرصيد الحالي عند اختلافه: الدفعة قد تكون تلتها فواتير،
-            // فيقارن الزبون السند برصيده اليوم ويظنّ الفرق خطأً. لا يُعرض إلا من
-            // تقرير محمَّل فعلاً (لا نطبع رقماً لا نعرف حداثته على مستند رسمي).
-            const current = customerBalance(item);
-            if (Number.isFinite(current)) {
-              opts.currentBalance = roundPrice(current);
-              // وقت التقرير يُطبع مع الرقم: لا ندّعي أنه رصيد اللحظة إن كانت
-              // الصفحة محمَّلة منذ ساعات.
-              opts.currentBalanceAt = reportSyncedAt(state.customerBalanceReports[0]);
-            }
-          } else {
-            opts.balance = customerBalance(item);
-            opts.balanceLabel = "الرصيد الحالي";
-          }
-          exportVoucherPdf(opts);
+          exportMovementReceipt(base, item, credit, storedDocNew);
         }
       } else {
         showNoticeNow("error", "لا يمكن تصدير هذا القيد.");
