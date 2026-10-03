@@ -56,4 +56,7 @@ end $$;
 --     (including not_found and damaged), and keeps the first attempt. Counter B still
 --     receives already_counted. After the session is completed both receive session_closed.
 --     A is not a participant of another session's row. Owner RPCs stay revoked from anon.
+-- 12. A counts an item, the owner opens a recount and B completes it (or the owner
+--     corrects the item). A's next claim/save returns already_counted, countedByMe is
+--     false for A, and the recount/owner_correction attempt stays the latest one.
 rollback;

@@ -44,10 +44,12 @@ assert(/v_session\.status<>'in_progress'/.test(saveRpc) && /v_session\.status<>'
 assert(saveRpc.includes("self_correction") && /v_kind in \('primary','self_correction'\)/.test(saveRpc), "Own correction must update the stored quantity as attempt_kind self_correction.");
 assert(/item_self_corrected/.test(saveRpc), "Own correction must keep an audit row distinct from the first count.");
 assert(/smart_inventory_participants/.test(saveRpc) && /p\.user_id=auth\.uid\(\)/.test(saveRpc), "Own correction requires the counter to be a participant of that session.");
-assert(counterPayload.includes("'countedByMe',coalesce(i.counted_by = auth.uid(), false)"), "Counter payload must expose countedByMe without another user's id.");
+const supersededGuard = "a.item_id=v_item.id and a.attempt_kind in ('recount','owner_correction')";
+assert(saveRpc.includes(supersededGuard) && claimRpc.includes(supersededGuard), "After an owner recount or owner correction the original counter must not self-correct (it would supersede that attempt).");
+assert(counterPayload.includes("'countedByMe',coalesce(i.counted_by = auth.uid() and not exists (select 1 from public.smart_inventory_count_attempts a where a.item_id=i.id and a.attempt_kind in ('recount','owner_correction')), false)"), "Counter payload must expose countedByMe without another user's id, and hide it once a recount or owner correction exists.");
 assert(!/'countedBy'\s*,\s*i\.counted_by/.test(counterPayload), "Counter payload must not return the counted_by uuid.");
 assert(sql.includes("'primary','recount','owner_correction','self_correction'"), "attempt_kind check must include self_correction.");
-assert(selfCorrectionMigration.includes(ownOpenGuard) && selfCorrectionMigration.includes("self_correction"), "Pending migration must carry the same own-correction guard.");
+assert(selfCorrectionMigration.includes(ownOpenGuard) && selfCorrectionMigration.split(supersededGuard).length === 3 && selfCorrectionMigration.includes("self_correction"), "Pending migration must carry the same own-correction guard.");
 assert(!/grant execute on function public\.smart_inventory_owner_/i.test(selfCorrectionMigration), "Self-correction migration must not grant owner RPCs.");
 assert(/revoke all on function public\.smart_inventory_owner_dashboard\(date\)/i.test(selfCorrectionMigration), "Self-correction migration must keep owner RPCs revoked from anon.");
 assert(/to anon,\s*authenticated/.test(selfCorrectionMigration) && /smart_inventory_save_item\(uuid,uuid,text,numeric,numeric,numeric,bigint\)/.test(selfCorrectionMigration), "Counter save RPC stays executable by anon.");

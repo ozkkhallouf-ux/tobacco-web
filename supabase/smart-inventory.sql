@@ -363,7 +363,7 @@ begin
     'id',i.id,'itemKey',i.item_key,'itemGuid',i.item_guid,'itemCode',i.item_code,'itemName',i.item_name,
     'shelfLocation',i.shelf_location,'unit1Name',i.unit1_name,'unit2Name',i.unit2_name,'unit2Factor',i.unit2_factor,
     'countState',i.count_state,
-    'countedByMe',coalesce(i.counted_by = auth.uid(), false),
+    'countedByMe',coalesce(i.counted_by = auth.uid() and not exists (select 1 from public.smart_inventory_count_attempts a where a.item_id=i.id and a.attempt_kind in ('recount','owner_correction')), false),
     'unit1Qty',case when i.recount_requested and i.counted_by<>auth.uid() and not public.smart_inventory_is_owner() then null else i.unit1_qty end,
     'unit2Qty',case when i.recount_requested and i.counted_by<>auth.uid() and not public.smart_inventory_is_owner() then null else i.unit2_qty end,
     'damagedUnit1Qty',case when i.recount_requested and i.counted_by<>auth.uid() and not public.smart_inventory_is_owner() then null else i.damaged_unit1_qty end,
@@ -399,6 +399,11 @@ begin
   end if;
   if v_item.count_state<>'uncounted' and not v_item.recount_requested and v_item.counted_by=auth.uid()
      and not exists (select 1 from public.smart_inventory_participants p where p.session_id=v_item.session_id and p.user_id=auth.uid()) then
+    return jsonb_build_object('ok',false,'code','already_counted','countedByDisplayName',v_item.counted_by_display_name,'countedAt',v_item.counted_at);
+  end if;
+  -- After an owner recount or owner correction the original counter may not self-correct: it would supersede that attempt.
+  if v_item.count_state<>'uncounted' and not v_item.recount_requested and v_item.counted_by=auth.uid()
+     and exists (select 1 from public.smart_inventory_count_attempts a where a.item_id=v_item.id and a.attempt_kind in ('recount','owner_correction')) then
     return jsonb_build_object('ok',false,'code','already_counted','countedByDisplayName',v_item.counted_by_display_name,'countedAt',v_item.counted_at);
   end if;
   if v_item.recount_requested and v_item.counted_by=auth.uid() then
@@ -443,6 +448,11 @@ begin
   end if;
   if v_item.count_state<>'uncounted' and not v_item.recount_requested and v_item.counted_by=auth.uid()
      and not exists (select 1 from public.smart_inventory_participants p where p.session_id=v_item.session_id and p.user_id=auth.uid()) then
+    return jsonb_build_object('ok',false,'code','already_counted','countedByDisplayName',v_item.counted_by_display_name,'countedAt',v_item.counted_at);
+  end if;
+  -- After an owner recount or owner correction the original counter may not self-correct: it would supersede that attempt.
+  if v_item.count_state<>'uncounted' and not v_item.recount_requested and v_item.counted_by=auth.uid()
+     and exists (select 1 from public.smart_inventory_count_attempts a where a.item_id=v_item.id and a.attempt_kind in ('recount','owner_correction')) then
     return jsonb_build_object('ok',false,'code','already_counted','countedByDisplayName',v_item.counted_by_display_name,'countedAt',v_item.counted_at);
   end if;
   if p_expected_version is not null and v_item.row_version<>p_expected_version then
