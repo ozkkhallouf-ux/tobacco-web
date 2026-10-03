@@ -121,7 +121,7 @@
     return Object.freeze({
       ...CONFIG,
       ...overrides,
-      maxAgeMinutes: Object.freeze({ ...CONFIG.maxAgeMinutes, ...(overrides.maxAgeMinutes || {}) })
+      maxAgeMinutes: Object.freeze({ ...CONFIG.maxAgeMinutes, ...overrides.maxAgeMinutes })
     });
   }
 
