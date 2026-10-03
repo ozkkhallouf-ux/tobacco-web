@@ -50,3 +50,5 @@
 | `20260921120000_business_audit_log_item_identity_changes` | `20260921104828_…` |
 | `20260926140000_evening_report_supplier_purchases_from_bills` | `20260926234241_…` |
 | `20260928140000_prune_ameen_warehouse_stock_reports` | `20260928145121_…` |
+
+ملاحظة على `20260914121528`: نص `statements` المسجّل في `supabase_migrations.schema_migrations` لهذا الإصدار نسخة أقدم من الملف (بلا إحياء `failed` بعد ساعة، وبلا مهلة 15 دقيقة لـ`no_response`، وبلا شرط `result.message_id`). الدالة الحية `dispatch_telegram_outbox` تطابق الملف، لأن المراجعات اللاحقة طُبّقت خارج السجل (قراءة 2026-10-03). المرجع هو الملف والدالة الحية، لا نص السجل.
