@@ -4,7 +4,7 @@
 
 ## الحالة الحالية
 
-طلب المالك (2026-10-03): تنبيه تيليغرام «قاربت النفاد» يخص **الأصناف المهمة حسب المبيعات** وحدها، برسالة واحدة مرتبة من الأهم للأقل. التنبيه القديم `trg_notify_stock_alerts` (كل صنف في `approved_price_items` يعبر `low_stock_threshold` أو الصفر) يتوقف بالترحيل `supabase/migrations/20261003020000_retire_all_items_stock_alert_trigger.sql`.
+طلب المالك (2026-10-03): تنبيه تيليغرام «قاربت النفاد» يخص **الأصناف المهمة حسب المبيعات** وحدها، برسالة واحدة مرتبة من الأهم للأقل. التنبيه القديم `trg_notify_stock_alerts` (كل صنف في `approved_price_items` يعبر `low_stock_threshold` أو الصفر) توقف على الإنتاج في 2026-10-03 بالترحيل `supabase/migrations/20261003034544_retire_all_items_stock_alert_trigger.sql` (الإصدار المسجَّل `20261003034544`؛ اسم الملف كان `20261003020000_…` وأُعيدت تسميته ليطابقه، لأن Supabase CLI يطابق بالرقم وحده). لا يُعاد.
 
 ## نطاق الملفات
 
@@ -51,13 +51,18 @@
 
 - `node scripts/check-stock-alert-priority.mjs` (31 حالة: الصافي، الربط، النافذة، شمول مبيعات الكاشير بلا شرط زبون، الترتيب، الأهلية، أقل من 3 فواتير، غير المباع، نص السطر، الحد اليدوي، التقادم، نافذة غير مطابقة، صف تالف، منع التكرار، التقسيم، الحتمية، تطابق عتبات الحداثة، لا كتابة على الأمين، إيقاف الـtrigger القديم، المُشغِّل بـfetch مزيّف، غياب السرّ، ومراقبة فشل الـworkflow).
 
-## الخطوة التالية (التفعيل بموافقة المالك)
+## التفعيل (منفّذ في 2026-10-03 بموافقة المالك)
 
 1. دمج الـPR (يبدأ الـworkflow تجريبياً بلا إرسال؛ رسالته «مبيعات الأصناف: غير متوفرة» حتى الخطوة 2).
 2. نشر `tools/push-item-sales.ps1` على OZK2026 عبر بوابة `windows-production`، ثم `.\tools\push-item-sales.ps1 -Discover` (بلا رفع) ومراجعة الأعداد، ثم `.\tools\register-item-sales-task.ps1` كمسؤول.
 3. التأكد من وجود سرّ `SUPABASE_SERVICE_ROLE_KEY` ومراجعة سجل تشغيل تجريبي (أعداد فقط).
 4. ضبط متغيّر المستودع `STOCK_PRIORITY_ALERTS_ENABLED = true`.
-5. تطبيق الترحيل `20261003020000_retire_all_items_stock_alert_trigger.sql` على الإنتاج.
+5. تطبيق الترحيل `20261003034544_retire_all_items_stock_alert_trigger.sql` على الإنتاج.
+
+ما نُفِّذ فعلاً:
+- الخطوة 2 بنسخة معزولة لا عبر `windows-production` (قرار المالك): السكربت من `9d38653` في `C:\ProgramData\OZK-TOBACCO\ItemSales\push-item-sales.ps1` (لا يلمس مستودع الجهاز). المهمة «TOBACCO Item Sales Push» مسجّلة يدوياً لا بـ`register-item-sales-task.ps1`، لأنها تمرّر `-EnvFile` (ملف `tools\.env` في مستودع الجهاز) و`-LogFile C:\Users\LOQ\OZK-Export\item-sales-push.log`. الحساب LOQ بنوع دخول S4U («سواء المستخدم داخل أو لا»، بلا كلمة مرور)، كل 30 دقيقة، ومهلة 10 دقائق.
+- الخطوة 4: المتغيّر مضبوط، وأول رسالة مرتبة بالأولوية وصلت تيليغرام قبل الخطوة 5.
+- فشل «Unable to connect» في مهام OZK2026 نحو Supabase كان من نفق NordVPN (NordLynx هو المسار الافتراضي)، لا من المهمة ولا من البروكسي أو TLS.
 
 الرجوع: حذف المتغيّر، وإعادة تعريف `tg_notify_stock_alerts` من تاريخ `supabase/telegram-notifications.sql` قبل هذا التعديل.
 
