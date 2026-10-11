@@ -317,11 +317,13 @@ console.log("\n— تنقية الأسرار —");
 {
   const live = boot({ meta: LIVE_META });
   const scrub = live.context.ozkErrorMonitoring.scrub;
+  // قيمة مصطنعة بالكامل: أصفار + نصّ صريح «NOT_REAL». تُبنى وقت التشغيل من نصفين كي لا يظهر في المصدر شكل رمز بوت.
+  const FAKE_TELEGRAM_TOKEN = ["000000000", "FAKE_TELEGRAM_TOKEN_NOT_REAL_000000"].join(":");
   const cases = [
     ["مفتاح Supabase", "failed with sb_publishable_FAKEKEY0000TESTONLY0000000000", "sb_publishable_FAKEKEY"],
     ["رمز JWT", "Authorization: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9abcdef", "eyJhbGciOiJIUzI1NiI"],
     ["رمز GitHub", "token ghp_0123456789abcdefghijABCDEFGHIJ012345", "ghp_0123456789abcdef"],
-    ["رمز بوت تيليغرام", "bot123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw", "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw"],
+    ["رمز بوت تيليغرام", "failed with bot" + FAKE_TELEGRAM_TOKEN, FAKE_TELEGRAM_TOKEN],
     ["password= صريحة", "login failed password=Hunter2Hunter2", "Hunter2Hunter2"],
     ["استعلام داخل عنوان", "GET https://x.example/api?apikey=abcdef123456 failed", "apikey=abcdef123456"],
   ];
