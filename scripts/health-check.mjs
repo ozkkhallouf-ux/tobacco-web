@@ -300,23 +300,6 @@ export const IMMEDIATE_HEALTH_KEYS = Object.freeze(["site-down", "health-check-c
 export const isImmediateHealthKey = (problemKey) => IMMEDIATE_HEALTH_KEYS.includes(problemKey);
 const validIssueNumber = (n) => Number.isInteger(n) && n > 0;
 
-// إشارة التعافي: تُمتصّ في قاعدة البيانات (resolve_ops_event) ولا تُرسَل لتيليغرام.
-// المفتاح = health-recovered:<نفس لاحقة مفتاح العطل>. الرقم هوية الحادثة، فلا تُغلق حادثة أخرى لنفس النوع.
-// لا إشارة بلا هوية حادثة (رقم Issue): عطل -noissue-<ساعة> (فشل إنشاء Issue) يُغلق يدوياً بـresolve_ops_event؛
-// بثّ إشارة كل دورة لكل مفتاح سليم كان سيغرق أي تراجع لـ13 برسائل.
-export function recoverySignalKey(problemKey, issueNumber) {
-  if (typeof problemKey !== "string" || !problemKey || isImmediateHealthKey(problemKey)) return null;
-  if (!validIssueNumber(issueNumber)) return null;
-  return `health-recovered:${problemKey}-issue-${issueNumber}`;
-}
-
-// تجديد حضور عطل غير حرج مستمر: نفس مفتاح الإنشاء تماماً (health-<key>-issue-N) كي يجدّد last_seen_at
-// للحدث نفسه دون حدث جديد. null للحرجين أو لرقم Issue غير صالح.
-export function renewalSignalKey(problemKey, issueNumber) {
-  if (isImmediateHealthKey(problemKey) || !validIssueNumber(issueNumber)) return null;
-  return telegramDedupeKey(problemKey, issueNumber);
-}
-
 async function notifyTelegram(problem, issueUrl, dedupeMinutes = 180) {
   const supabaseUrl = process.env.SUPABASE_URL;
   const serviceKey = process.env.SUPABASE_SERVICE_KEY;
@@ -355,46 +338,104 @@ async function notifyTelegram(problem, issueUrl, dedupeMinutes = 180) {
   }
 }
 
-// مفتاح تفعيل صريح (متغيّر مستودع HEALTH_LIFECYCLE_SIGNALS=on) لا يُضبط إلا بعد تطبيق proposed/13 على الإنتاج:
-// قبله يُسلَّم التجديد رسالة فورية يومية وتُسلَّم إشارة التعافي كرسالة. افتراضياً مطفأ ⇒ السلوك القديم تماماً.
-export const lifecycleSignalsEnabled = () => process.env.HEALTH_LIFECYCLE_SIGNALS === "on";
+// ═══ دورة حياة أعطال الصحة عبر RPC بإقرار صريح: public.health_lifecycle (داخل proposed/13) ═══
+// لا notify_telegram هنا إطلاقاً: 2xx منه لا يثبت الامتصاص (عند خطأ داخلي يُرسَل النصّ رسالة فعلية)، أما الـRPC فتُقرّ
+// العملية نفسها (ok:true) أو ترمي خطأ صريحاً. وجودها في قاعدة البيانات = 13 مطبَّق (تُنشأ معه وتسقط بتراجعه).
+//
+// HEALTH_LIFECYCLE_SIGNALS=off ⇒ مفتاح إيقاف طوارئ فقط (ليس دليلاً على تطبيق 13 ولا على غيابه): لا استدعاء RPC إطلاقاً
+// (لا تجديد ولا حلّ ولا probe)، فلا يُغلَق أي Issue غير حرج (وإلا بقي حدث يتيم إن كان 13 مطبَّقاً)، وتبقى التنبيهات
+// الحرجة والإنشاء كما هي. أي قيمة أخرى/غير مضبوطة = الاكتشاف التلقائي.
+export const lifecycleSwitchOff = (env = process.env) => String(env.HEALTH_LIFECYCLE_SIGNALS || "").trim().toLowerCase() === "off";
 
-// إشارة تعافٍ إلى notify_telegram (يمتصّها التوجيه ولا ترسل شيئاً). الإرجاع:
-//   "sent"    = قبلها الخادم؛  "failed" = تعذّر (لا يُغلق الـIssue ويُعاد المحاولة في الدورة التالية)؛
-//   "skipped" = مطفأ أو لا أسرار Supabase (سلوك الإغلاق القديم محفوظ).
-async function sendRecoverySignal(problemKey, issueNumber) {
-  if (!lifecycleSignalsEnabled()) return "skipped";
-  const supabaseUrl = process.env.SUPABASE_URL;
-  const serviceKey = process.env.SUPABASE_SERVICE_KEY;
-  if (!supabaseUrl || !serviceKey) return "skipped";
-  const key = recoverySignalKey(problemKey, issueNumber);
-  if (!key) return "skipped";
+const RPC_TIMEOUT_MS = 15000;
+// فاصل التأكيد قبل اعتبار الغياب مؤكَّداً، وعمر أقصى للملاحظة الأولى (أقدم منها لا يُعتمد: قد يسبق تطبيق 13)
+export const LEGACY_CONFIRM_MIN_MS = 20 * 60 * 1000;
+export const LEGACY_CONFIRM_MAX_MS = 6 * 60 * 60 * 1000;
+const ABSENT_MARKER_RE = /<!-- health-probe-absent:[^>]*-->/;
+
+// استدعاء health_lifecycle. الإرجاع:
+//   { kind: "ok", body }      = إقرار صالح للعملية المطلوبة بعينها؛
+//   { kind: "absent" }        = HTTP 404 + PGRST202 (دالة غير موجودة **أو** schema cache قديم — غير حاسم وحده)؛
+//   { kind: "error", detail } = أي شيء آخر (شبكة، 5xx، 401/403، 400، جسم غير متوقع…) ⇒ غير معروف.
+export async function callLifecycle(op, args = {}, { env = process.env, fetchImpl = fetch } = {}) {
+  const supabaseUrl = env.SUPABASE_URL;
+  const serviceKey = env.SUPABASE_SERVICE_KEY;
+  if (!supabaseUrl || !serviceKey) return { kind: "error", detail: "no-supabase-secrets" };
+  let res;
+  let text;
   try {
-    const res = await fetch(`${supabaseUrl}/rest/v1/rpc/notify_telegram`, {
+    res = await fetchImpl(`${supabaseUrl}/rest/v1/rpc/health_lifecycle`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         apikey: serviceKey,
         Authorization: `Bearer ${serviceKey}`,
         "Content-Profile": "public",
-        Prefer: "return=minimal",
       },
-      body: JSON.stringify({
-        p_event_type: "health_check",
-        p_message: `✅ إشارة تعافٍ (داخلية): ${problemKey}`,
-        p_dedupe_key: key,
-        p_dedupe_minutes: 60,
-      }),
+      body: JSON.stringify({ p_op: op, p_key: args.key ?? null, p_issue: args.issue ?? null, p_label: args.label ?? null }),
+      signal: AbortSignal.timeout(RPC_TIMEOUT_MS),
     });
-    if (!res.ok) {
-      console.log(`⚠️ فشل إرسال إشارة التعافي: HTTP ${res.status} ${await res.text()}`);
-      return "failed";
-    }
-    return "sent";
+    text = await res.text();
   } catch (err) {
-    console.log(`⚠️ فشل إرسال إشارة التعافي: ${err}`);
-    return "failed";
+    return { kind: "error", detail: `network: ${err}` };
   }
+  let body = null;
+  try { body = JSON.parse(text); } catch { /* جسم غير JSON */ }
+  if (res.status === 404 && body && body.code === "PGRST202") return { kind: "absent" };
+  if (!res.ok) return { kind: "error", detail: `HTTP ${res.status} ${String(text).slice(0, 200)}` };
+  const valid = body && body.ok === true && body.op === op && (
+    op === "probe" ? typeof body.ready === "boolean"
+    : op === "renew" ? Number.isInteger(body.renewed) && typeof body.created === "boolean"
+    : Number.isInteger(body.resolved));
+  if (!valid) return { kind: "error", detail: "unexpected-ack" };
+  return { kind: "ok", body };
+}
+
+// حالة الجاهزية (مرة واحدة لكل تشغيل):
+//   "off"     = إيقاف طوارئ؛   "ready" = 13 مطبَّق والتوجيه فعّال (probe ok وready=true)؛
+//   "absent"  = PGRST202 (يحتاج تأكيداً قبل اعتباره قديماً مؤكَّداً)؛  "unknown" = أي شيء آخر ⇒ لا إغلاق ولا افتراض تعافٍ.
+export async function detectLifecycleMode(deps = {}) {
+  const env = deps.env || process.env;
+  if (lifecycleSwitchOff(env)) return "off";
+  const r = await callLifecycle("probe", {}, deps);
+  if (r.kind === "absent") return "absent";
+  if (r.kind === "ok" && r.body.ready === true) return "ready";
+  return "unknown";
+}
+
+// تأكيد الغياب بملاحظتين منفصلتين زمنياً على نفس الـIssue (PGRST202 وحدها قد تكون تأخّر schema cache بعد تطبيق 13):
+// الأولى تُسجَّل كتعليق بوسم <!-- health-probe-absent:… --> (تاريخ GitHub createdAt هو المرجع لا الوسم)، والثانية
+// تُعتمد فقط إن مرّ ≥ 20 د و≤ 6 س. ملاحظة أقدم من 6 س تُستبدل بأخرى جديدة. أي فشل في gh ⇒ false (لا تأكيد).
+export function confirmLegacyAbsence(number, { readComments, postComment, nowMs = Date.now() }) {
+  try {
+    const marked = (readComments(number) || []).filter((c) => c && ABSENT_MARKER_RE.test(c.body || "") && c.createdAt);
+    const latest = marked.map((c) => Date.parse(c.createdAt)).filter(Number.isFinite).sort((a, b) => b - a)[0];
+    const age = latest === undefined ? Infinity : nowMs - latest;
+    if (age >= LEGACY_CONFIRM_MIN_MS && age <= LEGACY_CONFIRM_MAX_MS) return true;
+    if (age > LEGACY_CONFIRM_MAX_MS) {
+      postComment(number, `<!-- health-probe-absent:${new Date(nowMs).toISOString()} -->\nℹ️ rpc/health_lifecycle غير موجودة (PGRST202) — ملاحظة أولى؛ يلزم تأكيد ثانٍ بعد ≥ 20 د قبل اعتبار proposed/13 غير مطبَّق.`);
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+// قرار إغلاق Issue لعطل غير حرج (الحرجان بلا حدث ⇒ يُغلقان مباشرة في processClosures):
+//   "resolved" = الـRPC أقرّت إغلاق الحدث (يُغلَق الـIssue)؛  "legacy" = 13 غير مطبَّق **مؤكَّداً** (لا حدث يتيم ممكن) ⇒ يُغلَق؛
+//   "hold"     = طوارئ/غير معروف/غياب غير مؤكَّد/فشل أو إقرار غير صالح ⇒ لا يُغلَق ويُعاد في الدورة التالية.
+export async function resolveForClosure(key, number, { mode, call, confirm, log = () => {} }) {
+  if (mode === "off") { log(`⏸ إيقاف الطوارئ (HEALTH_LIFECYCLE_SIGNALS=off): يبقى Issue #${number} ("${key}") مفتوحاً — لا حلّ ولا إغلاق.`); return "hold"; }
+  if (mode === "absent") {
+    if (confirm(number)) return "legacy";
+    log(`⏳ rpc/health_lifecycle غير موجودة (PGRST202) — لم يُؤكَّد غياب 13 بعد؛ يبقى Issue #${number} مفتوحاً.`);
+    return "hold";
+  }
+  if (mode !== "ready") { log(`? حالة قاعدة البيانات غير معروفة — يبقى Issue #${number} ("${key}") مفتوحاً وتُعاد المحاولة.`); return "hold"; }
+  const r = await call("resolve", { key, issue: number });
+  if (r.kind === "ok") return "resolved";
+  log(`✗ تعذّر حلّ حدث "${key}" (#${number}): ${r.kind === "absent" ? "PGRST202" : r.detail} — يبقى مفتوحاً وتُعاد المحاولة.`);
+  return "hold";
 }
 
 // ترجع true إن وصلت الحادثة عبر أي قناة (Issue قائم أو جديد، أو تيليغرام).
@@ -402,11 +443,13 @@ async function reportProblem(problem) {
   const existing = findOpenIssueForKey(problem.key);
   if (existing) {
     console.log(`= مشكلة "${problem.key}" مفتوحة أصلاً بالـIssue #${existing.number} — لا تكرار.`);
-    // عطل غير حرج ما زال قائماً (تأكّد هذه الدورة): نجدّد حضوره في سجلّ الملخص بنفس مفتاح الإنشاء
-    // فيمتصّه التوجيه بلا رسالة، وإلا ظهر «يلزم إعادة التحقق» بعد 30 ساعة. الحرجان لا يُجدَّدان.
-    // فشل التجديد لا يُفشل الدورة (الـIssue موجود)؛ لا Telegram جديد ما دام 13 مطبَّقاً.
-    if (lifecycleSignalsEnabled() && renewalSignalKey(problem.key, existing.number)) {
-      await notifyTelegram(problem, `https://github.com/${REPO}/issues/${existing.number}`, 1440);
+    // عطل غير حرج ما زال قائماً (تأكّد هذه الدورة): تجديد حضوره في سجلّ الملخص عبر RPC بإقرار صريح (لا Telegram إطلاقاً)،
+    // وإلا ظهر «يلزم إعادة التحقق» بعد 30 ساعة. لا تجديد إلا في حالة "ready"؛ فشله لا يُفشل الدورة (الـIssue موجود).
+    if (!isImmediateHealthKey(problem.key) && validIssueNumber(existing.number)) {
+      if ((await getLifecycleMode()) === "ready") {
+        const r = await callLifecycle("renew", { key: problem.key, issue: existing.number, label: problem.title });
+        if (r.kind !== "ok") console.log(`⚠️ تعذّر تجديد حضور "${problem.key}" (#${existing.number}): ${r.kind === "absent" ? "PGRST202" : r.detail}`);
+      }
     }
     return true;
   }
@@ -523,21 +566,20 @@ function verifyWorkflowIncidentResolved(key) {
   return isRecoveryConclusion(lastCompleted.conclusion);
 }
 
-// ينفّذ الإغلاق على قائمة قرّرتها decideIssuesToClose (دليل إيجابي فقط). الترتيب: إشارة التعافي أولاً ثم الإغلاق:
-//   * "failed"  → لا نغلق الـIssue؛ تُعاد المحاولة الدورة التالية (إشارة التعافي idempotent) فلا يبقى الحدث
-//                  مفتوحاً في الملخص بعد إغلاق الـIssue؛
-//   * "sent"/"skipped" → نغلق.
-// الإشارة تحمل رقم الـIssue المغلق نفسه، فلا تُغلَق حادثة أخرى لنفس النوع.
-export async function processClosures(toClose, { sendSignal, closeIssue, log = () => {} }) {
+// ينفّذ الإغلاق على قائمة قرّرتها decideIssuesToClose (دليل إيجابي فقط). الترتيب: حلّ الحدث في قاعدة البيانات أولاً ثم الإغلاق:
+//   * الحرجان (لا حدث لهما) ⇒ يُغلقان مباشرة؛
+//   * غيرهما ⇒ resolveLifecycle(key, number) يرجع "resolved" (إقرار الـRPC) أو "legacy" (غياب 13 مؤكَّد) ⇒ يُغلَق،
+//     أو "hold" ⇒ لا يُغلَق (طوارئ/غير معروف/فشل) وتُعاد المحاولة الدورة التالية (الحلّ idempotent فلا يبقى حدث يتيم).
+// الحلّ يحمل رقم الـIssue المغلق نفسه ومفتاحه، فلا تُغلَق حادثة أخرى.
+export async function processClosures(toClose, { resolveLifecycle, closeIssue, log = () => {} }) {
   const results = [];
   for (const { number, key } of toClose) {
-    let signal = "skipped";
-    if (!isImmediateHealthKey(key) && validIssueNumber(number)) {
-      signal = await sendSignal(key, number);
+    let lifecycle = "none";
+    if (!isImmediateHealthKey(key)) {
+      lifecycle = validIssueNumber(number) ? await resolveLifecycle(key, number) : "hold";
     }
-    if (signal === "failed") {
-      log(`↻ تعذّرت إشارة التعافي لـ"${key}" (#${number}) — يبقى الـIssue مفتوحاً وتُعاد المحاولة.`);
-      results.push({ number, key, signal, closed: false });
+    if (lifecycle === "hold") {
+      results.push({ number, key, lifecycle, closed: false });
       continue;
     }
     let closed = false;
@@ -546,10 +588,15 @@ export async function processClosures(toClose, { sendSignal, closeIssue, log = (
     } catch (err) {
       log(`✗ فشل إغلاق Issue #${number}: ${err}`);
     }
-    results.push({ number, key, signal, closed });
+    results.push({ number, key, lifecycle, closed });
   }
   return results;
 }
+
+let _lifecycleModePromise = null;
+const getLifecycleMode = () => (_lifecycleModePromise ??= detectLifecycleMode());
+const readIssueComments = (n) => ghJSON(["issue", "view", String(n), "--repo", REPO, "--json", "comments"]).comments || [];
+const postIssueComment = (n, body) => gh(["issue", "comment", String(n), "--repo", REPO, "--body", body]);
 
 async function closeResolvedIssues({ activeKeys, healthyKeys, scanOk }) {
   const openIssues = listAllOpenHealthIssues();
@@ -562,7 +609,12 @@ async function closeResolvedIssues({ activeKeys, healthyKeys, scanOk }) {
     verifyKey: scanOk ? verifyWorkflowIncidentResolved : undefined,
   });
   await processClosures(toClose, {
-    sendSignal: sendRecoverySignal,
+    resolveLifecycle: async (key, number) => resolveForClosure(key, number, {
+      mode: await getLifecycleMode(),
+      call: (op, args) => callLifecycle(op, args),
+      confirm: (n) => confirmLegacyAbsence(n, { readComments: readIssueComments, postComment: postIssueComment }),
+      log: (m) => console.log(m),
+    }),
     log: (m) => console.log(m),
     closeIssue: (issueNumber, key) => {
       try {

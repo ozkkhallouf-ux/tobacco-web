@@ -39,6 +39,7 @@ jobs:
           # سرّ اختياري — إن لم يُضبط، يُسجَّل تحذير ويُتخطى إشعار تيليغرام فقط (لا يوقف الفحص).
           # يضبطه المستخدم بنفسه عبر: gh secret set SUPABASE_SERVICE_KEY
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          # تجديد الأعطال وإشارة التعافي: لا يُفعَّل (on) إلا بعد تطبيق supabase/proposed/13 على الإنتاج.
+          # إيقاف طوارئ فقط: القيمة off توقف عمليات دورة الحياة (public.health_lifecycle) كلياً. أي قيمة أخرى أو عدم الضبط = اكتشاف تلقائي لجاهزية 13.
+          # ليس دليلاً على تطبيق 13 ولا يلزم ضبطه لتفعيل شيء.
           HEALTH_LIFECYCLE_SIGNALS: ${{ vars.HEALTH_LIFECYCLE_SIGNALS }}
         run: node scripts/health-check.mjs
