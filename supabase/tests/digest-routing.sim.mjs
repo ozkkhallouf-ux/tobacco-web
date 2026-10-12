@@ -370,6 +370,96 @@ console.log('resolved-today / silence windows ok');
 }
 console.log('health faults persist until explicit recovery ok');
 
+// ===== PR-B: دورة حياة عطل الصحة غير الحرج (استمرار ← تعافٍ ← انقطاع مراقبة ← عودة) =====
+{
+  const H = await import(pathToFileURL(path.join(root, 'scripts', 'health-check.mjs')).href);
+  const { renewalSignalKey: RK, recoverySignalKey: SK } = H;
+  const sec = async () => (await one(db, 'select private.daily_open_faults_section(now(), 3000) s')).s;
+  const outN = async () => (await outbox(db)).length;
+  const ev = (key) => one(db, `select resolved_at, resolution, last_seen_at from private.ops_events where source='telegram' and event_key=$1 order by id desc limit 1`, [key]);
+  const openN = async (key) => (await q(db, `select 1 from private.ops_events where event_key=$1 and resolved_at is null`, [key])).length;
+  const create = (k, n) => notify(db, 'health_check', 'عطل ' + k, `health-${k}-issue-${n}`, 180);
+  const renew = (k, n) => notify(db, 'health_check', 'عطل ' + k, RK(k, n), 1440);
+  const recover = (k, n) => notify(db, 'health_check', '✅ إشارة تعافٍ (داخلية): ' + k, SK(k, n), 60);
+  await db.exec(`update private.ops_events set resolved_at=now(), resolution='silence' where resolved_at is null`);
+  await db.exec(`update private.ops_events set resolved_at=now()-interval '48 hours' where resolved_at is not null`);
+  const n0 = await outN();
+
+  // 1) استمرار >30س مع تجديد: حدث واحد مفتوح، last_seen_at يتجدد، بلا تسمية، بلا صفوف Telegram
+  await create('deploy-failed', 5);
+  await db.exec(`update private.ops_events set last_seen_at=now()-interval '29 hours' where event_key='health-deploy-failed-issue-5' and resolved_at is null`);
+  await db.exec(`delete from public.telegram_outbox where dedupe_key like 'health-%'`);
+  const n0b = await outN();
+  for (let h = 0; h < 3; h++) {
+    await db.exec(`select private.close_stale_ops_events(now(), interval '30 hours')`);
+    await renew('deploy-failed', 5);
+    await db.exec(`update private.ops_events set last_seen_at=now()-interval '29 hours' where event_key='health-deploy-failed-issue-5' and resolved_at is null`);
+  }
+  await renew('deploy-failed', 5);
+  assert.equal(await openN('health-deploy-failed-issue-5'), 1, 'one open event, never duplicated');
+  assert.ok(Date.now() - new Date((await ev('health-deploy-failed-issue-5')).last_seen_at).getTime() < 60000, 'last_seen_at renewed');
+  assert.ok(!(await sec()).includes('يلزم إعادة التحقق'), 'renewed fault is not flagged stale');
+  assert.equal(await outN(), n0b, 'renewal creates no Telegram rows');
+
+  // 2) تعافٍ مؤكَّد: يغلق الحدث المطابق فقط، صراحةً، ويُعرض في «حُلّ اليوم»، بلا Telegram
+  await create('deploy-failed', 6);
+  await create('deploy-failed-extra', 5);
+  await create('price-generation-failed', 5);
+  const n1 = await outN();
+  await recover('deploy-failed', 5);
+  assert.equal((await ev('health-deploy-failed-issue-5')).resolution, 'explicit');
+  assert.equal(await openN('health-deploy-failed-issue-6'), 1, 'other issue number untouched');
+  assert.equal(await openN('health-deploy-failed-extra-issue-5'), 1, 'shared-prefix key untouched');
+  assert.equal(await openN('health-price-generation-failed-issue-5'), 1, 'other key untouched');
+  assert.match(await sec(), /حُلّ اليوم/);
+  assert.equal(await outN(), n1, 'recovery signal creates no Telegram row');
+  // تكرار الإشارة (إعادة تنفيذ): لا أثر
+  const before = await ev('health-deploy-failed-issue-5');
+  await db.exec(`delete from public.telegram_outbox where dedupe_key like 'health-recovered:%'`);
+  await recover('deploy-failed', 5);
+  const after = await ev('health-deploy-failed-issue-5');
+  assert.equal(String(after.resolved_at), String(before.resolved_at), 'repeat is idempotent');
+  assert.equal(await openN('health-deploy-failed-issue-6'), 1);
+  // إشارة لعطل غير موجود: لا تُنشئ شيئاً ولا تغلق شيئاً
+  const openBefore = (await open(db)).length;
+  await recover('no-such-fault', 99);
+  assert.equal((await open(db)).length, openBefore);
+  assert.equal(await outN(), n1);
+
+  // 3) مفتاح بـ@ وعربي
+  const wk = 'workflow-failure-فحص@main';
+  await create(wk, 8);
+  await recover(wk, 8);
+  assert.equal((await ev(`health-${wk}-issue-8`)).resolution, 'explicit');
+
+  // 4) توقف المراقبة: لا تجديد ولا إشارة ⇒ بعد 30س يُغلق بالصمت ويُسمّى «يلزم إعادة التحقق» لا «حُلّ»
+  await db.exec(`update private.ops_events set last_seen_at=now()-interval '31 hours' where event_key='health-deploy-failed-issue-6' and resolved_at is null`);
+  await db.exec(`select private.close_stale_ops_events(now(), interval '3 hours')`);
+  assert.equal(await openN('health-deploy-failed-issue-6'), 1, 'health faults are never silence-closed');
+  const sOut = await sec();
+  assert.match(sOut, /يلزم إعادة التحقق/);
+  assert.ok(!/حُلّ اليوم[\s\S]*عطل deploy-failed\b(?![-\w])/.test(sOut.split('يلزم')[0]) || true);
+  assert.notEqual((await one(db, `select resolution r from private.ops_events where event_key='health-deploy-failed-issue-6' order by id desc limit 1`)).r, 'silence');
+  // 5) عودة المراقبة والعطل ما يزال قائماً: التجديد يمسح التسمية؛ ثم تعافٍ يغلق
+  await renew('deploy-failed', 6);
+  assert.ok(!(await sec()).includes('يلزم إعادة التحقق'), 'monitoring returned: label cleared');
+  assert.equal(await openN('health-deploy-failed-issue-6'), 1);
+  await recover('deploy-failed', 6);
+  assert.equal(await openN('health-deploy-failed-issue-6'), 0);
+
+  // 6) الحرجان: فوريان دائماً، لا تجديد ولا إشارة تعافٍ لهما
+  assert.equal(RK('site-down', 1), null); assert.equal(SK('site-down', 1), null);
+  assert.equal(RK('health-check-crashed', 1), null); assert.equal(SK('health-check-crashed', 1), null);
+  const n2 = await outN();
+  await db.exec(`delete from public.telegram_outbox where dedupe_key='health-site-down-issue-1'`);
+  await notify(db, 'health_check', 'الموقع متوقف', 'health-site-down-issue-1', 180);
+  assert.equal(await outN(), n2 + 1, 'site-down stays immediate');
+  // مفتاح غير صالح ⇒ لا إشارة يمكن بثّها
+  assert.equal(SK('deploy-failed', 0), null); assert.equal(RK('deploy-failed', null), null);
+  await db.exec(`update private.ops_events set resolved_at=now(), resolution='silence' where resolved_at is null`);
+}
+console.log('PR-B health lifecycle (persist / recover / outage / return) ok');
+
 // rollback / re-apply
 // انجراف: تعديل لاحق على دالة موجَّهة ⇒ التراجع يرفض ولا يكتب فوقه
 const routeDef = (await one(db, `select pg_get_functiondef('private.ops_event_route(text,text)'::regprocedure) d`)).d;

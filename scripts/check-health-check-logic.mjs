@@ -305,4 +305,80 @@ assert.match(
   'عودة الثغرة: فشل كل قنوات التبليغ يجب أن يُفشل التشغيل لا أن يمرّ بنجاح.',
 );
 
+// ═══════════ دورة حياة العطل غير الحرج (PR-B): تجديد + تعافٍ صريح ═══════════
+{
+  const H = await import(pathToFileURL(SCRIPT).href);
+  const { renewalSignalKey, recoverySignalKey, isImmediateHealthKey, IMMEDIATE_HEALTH_KEYS, processClosures } = H;
+
+  // الحرجان فقط فوريان، وتطابق التوجيه في proposed/13 حرفياً (لا انجراف بين الطرفين)
+  assert.deepEqual([...IMMEDIATE_HEALTH_KEYS], ['site-down', 'health-check-crashed']);
+  const p13 = await readFile(path.join(repoRoot, 'supabase', 'proposed', '13-digest-routing-for-noncritical-alerts.sql'), 'utf8');
+  assert.ok(p13.includes("^health-(site-down|health-check-crashed)"), 'قائمة الحرجين في health-check.mjs يجب أن تطابق توجيه 13');
+
+  // مفتاح التجديد = مفتاح الإنشاء نفسه (يجدّد الحدث نفسه لا حدثاً جديداً)
+  assert.equal(renewalSignalKey('price-generation-failed', 7), telegramDedupeKey('price-generation-failed', 7));
+  assert.equal(renewalSignalKey('site-down', 7), null, 'الحرج لا يُجدَّد');
+  assert.equal(renewalSignalKey('health-check-crashed', 7), null);
+  for (const bad of [0, -1, 1.5, NaN, null, undefined, '7']) assert.equal(renewalSignalKey('deploy-failed', bad), null, `رقم غير صالح ${bad}`);
+
+  // مفتاح التعافي يحمل رقم الـIssue؛ لا مفتاح بلا هوية ولا للحرجين
+  assert.equal(recoverySignalKey('deploy-failed', 12), 'health-recovered:deploy-failed-issue-12');
+  assert.equal(recoverySignalKey('workflow-failure-CI@main', 3), 'health-recovered:workflow-failure-CI@main-issue-3');
+  for (const bad of [0, null, undefined, NaN, '12']) assert.equal(recoverySignalKey('deploy-failed', bad), null);
+  assert.equal(recoverySignalKey('site-down', 12), null);
+  assert.equal(recoverySignalKey('', 12), null);
+  // تماثل: لاحقة التعافي = لاحقة الإنشاء بعد البادئة (هذا ما تعتمد عليه absorb للإغلاق)
+  assert.equal(recoverySignalKey('deploy-failed', 12).slice('health-recovered:'.length), telegramDedupeKey('deploy-failed', 12).slice('health-'.length));
+
+  // الإغلاق: الإشارة قبل الإغلاق؛ الفشل يمنع الإغلاق (إعادة محاولة)؛ "skipped" (لا أسرار) يغلق كالسابق
+  const mk = (signalFor) => {
+    const calls = [];
+    return {
+      calls,
+      deps: {
+        sendSignal: async (key, n) => { calls.push(['signal', key, n]); return signalFor(key, n); },
+        closeIssue: async (n) => { calls.push(['close', n]); return true; },
+      },
+    };
+  };
+  let t = mk(() => 'sent');
+  let r = await processClosures([{ number: 5, key: 'deploy-failed' }], t.deps);
+  assert.deepEqual(t.calls, [['signal', 'deploy-failed', 5], ['close', 5]], 'الإشارة أولاً ثم الإغلاق');
+  assert.equal(r[0].closed, true);
+  t = mk(() => 'failed');
+  r = await processClosures([{ number: 5, key: 'deploy-failed' }], t.deps);
+  assert.deepEqual(t.calls, [['signal', 'deploy-failed', 5]], 'فشل الإشارة ⇒ لا إغلاق');
+  assert.equal(r[0].closed, false);
+  t = mk(() => 'skipped');
+  r = await processClosures([{ number: 5, key: 'deploy-failed' }], t.deps);
+  assert.equal(r[0].closed, true, 'بلا أسرار Supabase يبقى سلوك الإغلاق القديم');
+  // حرج: لا إشارة أصلاً، ويُغلق الـIssue
+  t = mk(() => 'sent');
+  r = await processClosures([{ number: 9, key: 'site-down' }], t.deps);
+  assert.deepEqual(t.calls, [['close', 9]]);
+  // فشل الإغلاق بعد الإشارة لا يكسر بقية القائمة، وتكرار التنفيذ يعيد الإشارة نفسها (idempotent)
+  const calls2 = [];
+  r = await processClosures(
+    [{ number: 1, key: 'a' }, { number: 2, key: 'b' }],
+    { sendSignal: async (k, n) => { calls2.push(`${k}#${n}`); return 'sent'; }, closeIssue: async (n) => { if (n === 1) throw new Error('gh down'); return true; } },
+  );
+  assert.deepEqual(r.map((x) => x.closed), [false, true]);
+  assert.deepEqual(calls2, ['a#1', 'b#2']);
+
+  // عدم اعتبار الغياب/الفشل تعافياً: decideIssuesToClose هي الباب الوحيد؛ لا دليل ⇒ لا قائمة ⇒ لا إشارات
+  const issues = [{ number: 5, body: '<!-- health:deploy-failed -->' }, { number: 6, body: '<!-- health:price-generation-failed -->' }];
+  assert.deepEqual(decideIssuesToClose({ openIssues: issues, activeKeys: [], healthyKeys: [], verifyKey: undefined }), [], 'غياب النتيجة ليس تعافياً');
+  assert.deepEqual(decideIssuesToClose({ openIssues: issues, activeKeys: [], healthyKeys: [], verifyKey: () => false }), [], 'تحقق فاشل/مجهول ليس تعافياً');
+  assert.deepEqual(decideIssuesToClose({ openIssues: issues, activeKeys: ['deploy-failed'], healthyKeys: ['deploy-failed'], verifyKey: undefined }), [], 'عطل ما يزال قائماً لا يُغلق');
+  assert.deepEqual(decideIssuesToClose({ openIssues: issues, activeKeys: [], healthyKeys: ['deploy-failed'] }).map((x) => x.number), [5], 'يُغلق المفتاح السليم فقط لا غيره');
+}
+
+// عقد نصّي: التجديد للعطل غير الحرج فقط، والإشارة تسبق الإغلاق، والإغلاق ينتظر (await)
+{
+  const rb = codeOnly.slice(codeOnly.indexOf('async function reportProblem'), codeOnly.indexOf('export function parseWorkflowIncidentKey'));
+  assert.match(rb, /if \(renewalSignalKey\(problem\.key, existing\.number\)\) \{[\s\S]{0,200}notifyTelegram\(problem, `https:\/\/github\.com\/\$\{REPO\}\/issues\/\$\{existing\.number\}`, 1440\)/, 'تجديد العطل المستمر غير الحرج');
+  assert.match(codeOnly, /await closeResolvedIssues\(\{/, 'main ينتظر الإغلاق');
+  assert.match(codeOnly, /sendSignal: sendRecoverySignal/, 'الإغلاق يمرّ عبر إشارة التعافي');
+}
+
 console.log('check-health-check-logic: OK — مسح بلا قيد فرع وبقائمة سماح، مفاتيح متطابقة، تمييز التعافي، منع تكرار بهوية الحادثة، انهيار المراقب مرئي، وفشل كل قنوات التبليغ يُفشل التشغيل.');

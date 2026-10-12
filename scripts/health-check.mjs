@@ -293,7 +293,31 @@ export function issueNumberFromUrl(issueUrl) {
   return m ? Number(m[1]) : null;
 }
 
-async function notifyTelegram(problem, issueUrl) {
+// ═══ دورة حياة العطل في سجلّ الملخص (private.ops_events) — يتطلب proposed/12 و13 ═══
+// الحرجان فقط فوريان ومستقلان عن السجلّ؛ كل ما عداهما غير حرج: يُجدَّد حضوره ما دام قائماً
+// ويُغلق بإشارة تعافٍ صريحة. (يطابق التوجيه: ^health-(site-down|health-check-crashed) في proposed/13.)
+export const IMMEDIATE_HEALTH_KEYS = Object.freeze(["site-down", "health-check-crashed"]);
+export const isImmediateHealthKey = (problemKey) => IMMEDIATE_HEALTH_KEYS.includes(problemKey);
+const validIssueNumber = (n) => Number.isInteger(n) && n > 0;
+
+// إشارة التعافي: تُمتصّ في قاعدة البيانات (resolve_ops_event) ولا تُرسَل لتيليغرام.
+// المفتاح = health-recovered:<نفس لاحقة مفتاح العطل>. الرقم هوية الحادثة، فلا تُغلق حادثة أخرى لنفس النوع.
+// لا إشارة بلا هوية حادثة (رقم Issue): عطل -noissue-<ساعة> (فشل إنشاء Issue) يُغلق يدوياً بـresolve_ops_event؛
+// بثّ إشارة كل دورة لكل مفتاح سليم كان سيغرق أي تراجع لـ13 برسائل.
+export function recoverySignalKey(problemKey, issueNumber) {
+  if (typeof problemKey !== "string" || !problemKey || isImmediateHealthKey(problemKey)) return null;
+  if (!validIssueNumber(issueNumber)) return null;
+  return `health-recovered:${problemKey}-issue-${issueNumber}`;
+}
+
+// تجديد حضور عطل غير حرج مستمر: نفس مفتاح الإنشاء تماماً (health-<key>-issue-N) كي يجدّد last_seen_at
+// للحدث نفسه دون حدث جديد. null للحرجين أو لرقم Issue غير صالح.
+export function renewalSignalKey(problemKey, issueNumber) {
+  if (isImmediateHealthKey(problemKey) || !validIssueNumber(issueNumber)) return null;
+  return telegramDedupeKey(problemKey, issueNumber);
+}
+
+async function notifyTelegram(problem, issueUrl, dedupeMinutes = 180) {
   const supabaseUrl = process.env.SUPABASE_URL;
   const serviceKey = process.env.SUPABASE_SERVICE_KEY;
   if (!supabaseUrl || !serviceKey) {
@@ -317,7 +341,7 @@ async function notifyTelegram(problem, issueUrl) {
         p_event_type: "health_check",
         p_message: message,
         p_dedupe_key: telegramDedupeKey(problem.key, issueNumber),
-        p_dedupe_minutes: 180,
+        p_dedupe_minutes: dedupeMinutes,
       }),
     });
     if (!res.ok) {
@@ -331,11 +355,54 @@ async function notifyTelegram(problem, issueUrl) {
   }
 }
 
+// إشارة تعافٍ إلى notify_telegram (يمتصّها التوجيه ولا ترسل شيئاً). الإرجاع:
+//   "sent"    = قبلها الخادم؛  "failed" = تعذّر (لا يُغلق الـIssue ويُعاد المحاولة في الدورة التالية)؛
+//   "skipped" = لا أسرار Supabase (لا قناة للإشارة؛ سلوك الإغلاق القديم محفوظ).
+async function sendRecoverySignal(problemKey, issueNumber) {
+  const supabaseUrl = process.env.SUPABASE_URL;
+  const serviceKey = process.env.SUPABASE_SERVICE_KEY;
+  if (!supabaseUrl || !serviceKey) return "skipped";
+  const key = recoverySignalKey(problemKey, issueNumber);
+  if (!key) return "skipped";
+  try {
+    const res = await fetch(`${supabaseUrl}/rest/v1/rpc/notify_telegram`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        apikey: serviceKey,
+        Authorization: `Bearer ${serviceKey}`,
+        "Content-Profile": "public",
+        Prefer: "return=minimal",
+      },
+      body: JSON.stringify({
+        p_event_type: "health_check",
+        p_message: `✅ إشارة تعافٍ (داخلية): ${problemKey}`,
+        p_dedupe_key: key,
+        p_dedupe_minutes: 60,
+      }),
+    });
+    if (!res.ok) {
+      console.log(`⚠️ فشل إرسال إشارة التعافي: HTTP ${res.status} ${await res.text()}`);
+      return "failed";
+    }
+    return "sent";
+  } catch (err) {
+    console.log(`⚠️ فشل إرسال إشارة التعافي: ${err}`);
+    return "failed";
+  }
+}
+
 // ترجع true إن وصلت الحادثة عبر أي قناة (Issue قائم أو جديد، أو تيليغرام).
 async function reportProblem(problem) {
   const existing = findOpenIssueForKey(problem.key);
   if (existing) {
     console.log(`= مشكلة "${problem.key}" مفتوحة أصلاً بالـIssue #${existing.number} — لا تكرار.`);
+    // عطل غير حرج ما زال قائماً (تأكّد هذه الدورة): نجدّد حضوره في سجلّ الملخص بنفس مفتاح الإنشاء
+    // فيمتصّه التوجيه بلا رسالة، وإلا ظهر «يلزم إعادة التحقق» بعد 30 ساعة. الحرجان لا يُجدَّدان.
+    // فشل التجديد لا يُفشل الدورة (الـIssue موجود)؛ لا Telegram جديد ما دام 13 مطبَّقاً.
+    if (renewalSignalKey(problem.key, existing.number)) {
+      await notifyTelegram(problem, `https://github.com/${REPO}/issues/${existing.number}`, 1440);
+    }
     return true;
   }
   const marker = `<!-- health:${problem.key} -->`;
@@ -451,7 +518,35 @@ function verifyWorkflowIncidentResolved(key) {
   return isRecoveryConclusion(lastCompleted.conclusion);
 }
 
-function closeResolvedIssues({ activeKeys, healthyKeys, scanOk }) {
+// ينفّذ الإغلاق على قائمة قرّرتها decideIssuesToClose (دليل إيجابي فقط). الترتيب: إشارة التعافي أولاً ثم الإغلاق:
+//   * "failed"  → لا نغلق الـIssue؛ تُعاد المحاولة الدورة التالية (إشارة التعافي idempotent) فلا يبقى الحدث
+//                  مفتوحاً في الملخص بعد إغلاق الـIssue؛
+//   * "sent"/"skipped" → نغلق.
+// الإشارة تحمل رقم الـIssue المغلق نفسه، فلا تُغلَق حادثة أخرى لنفس النوع.
+export async function processClosures(toClose, { sendSignal, closeIssue, log = () => {} }) {
+  const results = [];
+  for (const { number, key } of toClose) {
+    let signal = "skipped";
+    if (!isImmediateHealthKey(key) && validIssueNumber(number)) {
+      signal = await sendSignal(key, number);
+    }
+    if (signal === "failed") {
+      log(`↻ تعذّرت إشارة التعافي لـ"${key}" (#${number}) — يبقى الـIssue مفتوحاً وتُعاد المحاولة.`);
+      results.push({ number, key, signal, closed: false });
+      continue;
+    }
+    let closed = false;
+    try {
+      closed = (await closeIssue(number, key)) !== false;
+    } catch (err) {
+      log(`✗ فشل إغلاق Issue #${number}: ${err}`);
+    }
+    results.push({ number, key, signal, closed });
+  }
+  return results;
+}
+
+async function closeResolvedIssues({ activeKeys, healthyKeys, scanOk }) {
   const openIssues = listAllOpenHealthIssues();
   const toClose = decideIssuesToClose({
     openIssues,
@@ -461,20 +556,25 @@ function closeResolvedIssues({ activeKeys, healthyKeys, scanOk }) {
     // وحتى حينها بنجاح مرصود فعلاً لا بمجرد غياب الحادثة عن النافذة.
     verifyKey: scanOk ? verifyWorkflowIncidentResolved : undefined,
   });
-  for (const { number: issueNumber, key } of toClose) {
-    const issue = { number: issueNumber };
-    try {
-      gh([
-        "issue", "comment", String(issue.number),
-        "--repo", REPO,
-        "--body", "✅ تم التحقق بنتيجة إيجابية صريحة (تشغيل مكتمل ناجح أو مسح ناجح لم يجد الحادثة) — يُغلق الـIssue تلقائياً.",
-      ]);
-      gh(["issue", "close", String(issue.number), "--repo", REPO]);
-      console.log(`✓ أُغلق Issue #${issue.number} (مشكلة "${key}" تأكّد زوالها).`);
-    } catch (err) {
-      console.log(`✗ فشل إغلاق Issue #${issue.number}: ${err}`);
-    }
-  }
+  await processClosures(toClose, {
+    sendSignal: sendRecoverySignal,
+    log: (m) => console.log(m),
+    closeIssue: (issueNumber, key) => {
+      try {
+        gh([
+          "issue", "comment", String(issueNumber),
+          "--repo", REPO,
+          "--body", "✅ تم التحقق بنتيجة إيجابية صريحة (تشغيل مكتمل ناجح أو مسح ناجح لم يجد الحادثة) — يُغلق الـIssue تلقائياً.",
+        ]);
+        gh(["issue", "close", String(issueNumber), "--repo", REPO]);
+        console.log(`✓ أُغلق Issue #${issueNumber} (مشكلة "${key}" تأكّد زوالها).`);
+        return true;
+      } catch (err) {
+        console.log(`✗ فشل إغلاق Issue #${issueNumber}: ${err}`);
+        return false;
+      }
+    },
+  });
 }
 
 async function main() {
@@ -512,7 +612,7 @@ async function main() {
     process.exitCode = 1;
   }
 
-  closeResolvedIssues({
+  await closeResolvedIssues({
     activeKeys: new Set(problems.map((p) => p.key)),
     healthyKeys,
     scanOk: recent.scanOk,
