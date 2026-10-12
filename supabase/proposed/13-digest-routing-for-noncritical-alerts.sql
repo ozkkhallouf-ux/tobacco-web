@@ -44,17 +44,21 @@ begin
   select prosrc into disp from pg_proc where oid = to_regprocedure('private.notify_telegram_dispatch(text,text,text,integer,jsonb)');
   if disp is null then raise exception 'proposed/13: private.notify_telegram_dispatch not found'; end if;
   -- بصمتان فقط: جسم الإنتاج الحالي، أو جسم 13 نفسه (إعادة التشغيل). وجود الوسم وحده لا يكفي.
-  if md5(disp) not in ('60bbae6f1fed8ba5e66c9a9a91daed40', '881a513175ec93b3e9b9185c4c5948a7') then
+  if md5(disp) not in ('60bbae6f1fed8ba5e66c9a9a91daed40', 'b70434ef47f13e3ca282d548cbd59a44') then
     raise exception 'proposed/13: private.notify_telegram_dispatch drifted from the known body (md5 %); refusing to overwrite', md5(disp);
   end if;
 end $pre$;
 -- مساعدا التوجيه يُستبدلان أدناه: يجب أن يكونا بجسم 12 (أول تطبيق) أو جسم 13 (إعادة)، وإلا تعديل لاحق يُفقَد بصمت
 do $pre2$ begin
-  if md5((select prosrc from pg_proc where oid = to_regprocedure('private.ops_event_route(text,text)'))) not in ('8c55e7855fd285e956506f7d0ebd10b2', 'c3f0c0040c5fd1c1adeb58aff182d5ba')
-     or md5((select prosrc from pg_proc where oid = to_regprocedure('private.close_stale_ops_events(timestamptz,interval)'))) not in ('1fec3b9e3a5413284865ce330275cb9e', '6845c03a0c640aba8caddc333ac593be') then
+  if md5((select prosrc from pg_proc where oid = to_regprocedure('private.ops_event_route(text,text)'))) not in ('8c55e7855fd285e956506f7d0ebd10b2', 'f34f129268ee375c10006f004de2d00e')
+     or md5((select prosrc from pg_proc where oid = to_regprocedure('private.close_stale_ops_events(timestamptz,interval)'))) not in ('a9519e09e396dbc5b99eb1872bd118b4', '24a5fcd5b080d461813a04940a02af17') then
     raise exception 'proposed/13: ops_event_route/close_stale_ops_events drifted from the known 12/13 bodies; refusing to overwrite later changes';
   end if;
   -- المساعدان الجديدان (يُنشآن هنا): إن وُجدا مسبقاً فيجب أن يطابقا جسم 13 بالضبط وإلا فُقد تعديل لاحق عليهما
+  if to_regprocedure('private.refine_immediate_alert(text,text,text)') is not null
+     and md5((select prosrc from pg_proc where oid = to_regprocedure('private.refine_immediate_alert(text,text,text)'))) is distinct from '471ba23cf208a6e6d04aadf43e015d7d' then
+    raise exception 'proposed/13: refine_immediate_alert drifted from the proposed/13 body; refusing to overwrite later changes';
+  end if;
   if (to_regprocedure('private.ops_event_silence(text)') is not null or to_regprocedure('private.absorb_digest_alert(text,text,text)') is not null)
      and (md5((select prosrc from pg_proc where oid = to_regprocedure('private.ops_event_silence(text)'))) is distinct from '2796ac5d112c557951d8fd3c837de6f7'
      or md5((select prosrc from pg_proc where oid = to_regprocedure('private.absorb_digest_alert(text,text,text)'))) is distinct from '88c6e3d972aa11368de77a7c7a2b52e0') then
@@ -96,8 +100,18 @@ returns text language sql immutable as $$
   -- فشل GitHub Actions: دخان ما بعد النشر (الموقع الحي منهار) وانهيار فحص الصحة فوريان؛ الباقي ملخص
   when p_kind = 'github_actions_failure' then
    case when coalesce(p_dedupe_key,'') ~ '^gha-fail:(دخان ما بعد النشر|فحص صحة المشروع)' then 'immediate' else 'digest' end
-  when p_kind in ('sync_failure','price_sync_failure','price_sync_mismatch','windows','automation_failure') then 'digest'
-  when coalesce(p_dedupe_key,'') ~ '^(price-sync:|winfail:|project-cron-failure:|automation-failure:)' then 'digest'
+  -- الأسعار (قرار المالك): أي فروقات/مواد ناقصة في مزامنة الأسعار وفشل التحقق ⇒ فوري دائماً
+  -- (يُصاغ نص الاختلاف مقابل التأثير المؤكَّد في private.refine_immediate_alert، ويُمنع التكرار لنفس الحالة)
+  when p_kind in ('price_sync_failure','price_sync_mismatch') then 'immediate'
+  when coalesce(p_dedupe_key,'') ~ '^price-sync:' then 'immediate'
+  -- فشل إحياء الخادم المحلي: يُرسَل بعد محاولة الإنعاش والتحقق الفعلي فقط (ensure-local-server.ps1)،
+  -- تذكير كل 60 دقيقة (dedupe السكربت) ما دامت الخدمة متوقفة ⇒ فوري
+  when coalesce(p_dedupe_key,'') = 'local-server-revive-fail' then 'immediate'
+  -- sync_failure بحسب الأثر الفعلي: سلسلة الأسعار (تطبيق الأسعار على الأمين، سحب المعتمَد) تمسّ أسعار البيع
+  -- فعلياً ⇒ فوري؛ بقية دفعات البيانات (ربح، مصاريف، تدقيق، بنود مبيعات) تتأخر بياناتها فقط وتُعاد كل دورة ⇒ ملخص
+  when coalesce(p_dedupe_key,'') ~ '^winfail:(apply-to-ameen|pull-approved-prices)$' then 'immediate'
+  when p_kind in ('sync_failure','windows','automation_failure') then 'digest'
+  when coalesce(p_dedupe_key,'') ~ '^(winfail:|project-cron-failure:|automation-failure:)' then 'digest'
   else 'immediate'
  end
 $$;
@@ -119,7 +133,7 @@ revoke all on function private.ops_event_silence(text) from public, anon, authen
 create or replace function private.close_stale_ops_events(
   p_now timestamptz default now(), p_silence interval default interval '6 hours')
 returns void language sql security definer set search_path=private,pg_temp as $$
- update private.ops_events set resolved_at=p_now
+ update private.ops_events set resolved_at=p_now, resolution='silence'
   where resolved_at is null and source<>'cron'
     and last_seen_at < p_now - (case when source='telegram' then private.ops_event_silence(event_key) else p_silence end)
 $$;
@@ -149,6 +163,37 @@ exception when others then
 end $$;
 revoke all on function private.absorb_digest_alert(text,text,text) from public, anon, authenticated;
 
+-- يُحسّن نص/مفتاح التنبيه الفوري لمزامنة الأسعار (المعيار: اكتشاف اختلاف ≠ تأثير مؤكَّد):
+--   فروقات > 0  ⇒ «تأثير مؤكَّد»: الفحص المستقل بعد الكتابة وجد في الأمين سعراً يخالف المعتمَد فعلاً.
+--   فروقات = 0 ومواد ناقصة > 0 ⇒ «اكتُشف اختلاف»: مواد معتمدة غير موجودة للمقارنة؛ لم يثبت أن سعراً خاطئاً يُباع.
+-- المفتاح يحمل الشدة والأعداد، والمقارنة مع **آخر** تنبيه سعري فقط: نفس الحالة المتتالية لا تتكرر (يومياً كحد أقصى)،
+-- وأي تغيّر في الشدة أو الأعداد يمرّ فوراً حتى لو عاد إلى حالة سبق إرسالها قبل ساعات (لا إخفاء لتبدّل الشدة).
+-- أي نص غير مفهوم ⇒ يعيد null ⇒ يُرسَل الأصلي كما هو (لا رسالة تضيع).
+create or replace function private.refine_immediate_alert(p_kind text, p_message text, p_key text)
+returns table(msg text, dkey text, mins int, skip boolean) language plpgsql stable as $$
+declare d int; m int; sev text; head text; why text; nk text; lk text; lt timestamptz;
+begin
+ if p_kind is distinct from 'price_sync_mismatch' then return; end if;
+ d := substring(p_message from 'فروقات:\s*([0-9]+)')::int;
+ m := substring(p_message from 'مواد ناقصة:\s*([0-9]+)')::int;
+ if d is null or m is null or (d = 0 and m = 0) then return; end if;
+ if d > 0 then
+  sev := 'impact';
+  head := '🚨 مزامنة الأسعار: تأثير مؤكَّد على الأسعار الفعلية';
+  why := 'الفحص بعد الكتابة وجد في الأمين أسعاراً تخالف المعتمَد.';
+ else
+  sev := 'detected';
+  head := '⚠️ مزامنة الأسعار: اكتُشف اختلاف (التأثير على الأسعار الفعلية غير مؤكَّد)';
+  why := 'مواد معتمدة غير موجودة في الأمين للمقارنة؛ لم يثبت وجود سعر خاطئ.';
+ end if;
+ nk := 'price-sync:mismatch:' || sev || ':' || d || ':' || m;
+ select o.dedupe_key, o.created_at into lk, lt from public.telegram_outbox o
+  where o.dedupe_key like 'price-sync:mismatch:%' order by o.id desc limit 1;
+ return query select head || chr(10) || why || chr(10) || 'فروقات: ' || d || ' — مواد ناقصة: ' || m, nk, 1440,
+                     (lk = nk and lt > now() - interval '1440 minutes');
+end $$;
+revoke all on function private.refine_immediate_alert(text,text,text) from public, anon, authenticated;
+
 create or replace function private.notify_telegram_dispatch(
   p_event_type     text,
   p_message        text,
@@ -158,14 +203,27 @@ create or replace function private.notify_telegram_dispatch(
 ) returns void
 language plpgsql security definer set search_path = public
 as $$
+declare rf record; refined boolean := false;
 begin
   -- digest-routing:v1  (proposed/13) — غير الحرج يذهب للسجلّ الموحَّد؛ أي فشل ⇒ يُرسَل كالمعتاد
-  if p_message is not null and length(trim(p_message)) > 0 and p_reply_markup is null
-     and private.absorb_digest_alert(p_event_type, p_message, p_dedupe_key) then
-    return;
+  if p_message is not null and length(trim(p_message)) > 0 and p_reply_markup is null then
+    begin
+      if private.absorb_digest_alert(p_event_type, p_message, p_dedupe_key) then return; end if;
+    exception when others then null;  -- عطل في آلية الملخص لا يمنع التنبيه (أمن/فشل التقرير المسائي مستقلان)
+    end;
   end if;
   if p_message is null or length(trim(p_message)) = 0 then return; end if;
-  if p_dedupe_key is not null and exists (
+  if p_reply_markup is null and p_event_type = 'price_sync_mismatch' then
+    begin
+      select * into rf from private.refine_immediate_alert(p_event_type, p_message, p_dedupe_key);
+      if rf.msg is not null and rf.skip then return; end if;
+      if rf.msg is not null then
+        p_message := rf.msg; p_dedupe_key := rf.dkey; refined := true; -- التكرار حُسم في refine (skip)؛ لا يحجب تبدّلَ الشدة صفٌّ أقدم
+      end if;
+    exception when others then null;  -- يفشل مفتوحاً: يُرسَل النص الأصلي
+    end;
+  end if;
+  if not refined and p_dedupe_key is not null and exists (
     select 1 from public.telegram_outbox
     where dedupe_key = p_dedupe_key
       and created_at > now() - make_interval(mins => greatest(p_dedupe_minutes, 1))

@@ -37,13 +37,13 @@ begin
       ('private.core_outage_verified()', '3ab0d7f01cf01c94c66d65befa4bd505'),
       ('private.ops_event_route(text,text)', '8c55e7855fd285e956506f7d0ebd10b2'),
       ('private.record_ops_event(text,text,text,text,text,timestamptz)', 'c458b8e65af376284e93854951899fee'),
-      ('private.resolve_ops_event(text,text,timestamptz)', '2d116df0e06b7fd250b784e9595e577f'),
+      ('private.resolve_ops_event(text,text,timestamptz)', '00499134bf9d65205bcb4d76424559e5'),
       ('private.observe_ops_event(text,text,text,text,timestamptz,text)', '5002b6744446d5cae5b70dd25dc900d4'),
-      ('private.close_stale_ops_events(timestamptz,interval)', '1fec3b9e3a5413284865ce330275cb9e'),
+      ('private.close_stale_ops_events(timestamptz,interval)', 'a9519e09e396dbc5b99eb1872bd118b4'),
       ('private.project_task_alert_decision(boolean,numeric,boolean,numeric,integer,integer,boolean,boolean,boolean)', '9d9760d4274a4329a7bafba3cf4990d1'),
       ('private.check_evening_report_delivered(timestamptz)', '34af8681ef4081da5d3ecc753dbf76d1'),
       ('private.seed_open_faults()', '1ba77cdbdeac4161bfeddfe5148f4a08'),
-      ('private.daily_open_faults_section(timestamptz,integer)', '69fb8a26d32b6d2363800a21fd90159f')
+      ('private.daily_open_faults_section(timestamptz,integer)', '9f6cfab147c1baa281b02ba2ac4f1421')
     ) v(fn, pin) loop
       if to_regprocedure(r.fn) is not null
          and md5((select prosrc from pg_proc where oid = to_regprocedure(r.fn))) <> r.pin then
@@ -170,8 +170,18 @@ create table if not exists private.ops_events (
   last_seen_at timestamptz not null default now(),
   occurrences integer not null default 1,
   resolved_at timestamptz,
-  detail text
+  detail text,
+  -- كيف أُغلق: 'explicit' = إشارة تعافٍ صريحة (مراقب رأى السليم / رسالة تعافٍ)، 'silence' = انتهت نافذة الصمت
+  -- فقط (لا دليل على التعافي). NULL = إغلاق قديم/غير مصنَّف ⇒ لا يُعرض كمُتعافٍ أبداً.
+  resolution text check (resolution in ('explicit','silence'))
 );
+alter table private.ops_events add column if not exists resolution text;
+do $c$ begin
+  if not exists (select 1 from pg_constraint where conrelid='private.ops_events'::regclass and contype='c'
+                 and pg_get_constraintdef(oid) like '%resolution%') then
+    alter table private.ops_events add constraint ops_events_resolution_chk check (resolution in ('explicit','silence'));
+  end if;
+end $c$;
 create unique index if not exists ops_events_one_open
   on private.ops_events(source,event_key) where resolved_at is null;
 alter table private.ops_events enable row level security;
@@ -216,7 +226,7 @@ revoke all on function private.record_ops_event(text,text,text,text,text,timesta
 
 create or replace function private.resolve_ops_event(p_source text, p_event_key text, p_now timestamptz default now())
 returns void language sql security definer set search_path=private,pg_temp as $$
- update private.ops_events set resolved_at=p_now
+ update private.ops_events set resolved_at=p_now, resolution='explicit'
   where source=p_source and event_key=p_event_key and resolved_at is null
 $$;
 revoke all on function private.resolve_ops_event(text,text,timestamptz) from public,anon,authenticated;
@@ -244,7 +254,7 @@ revoke all on function private.observe_ops_event(text,text,text,text,timestamptz
 create or replace function private.close_stale_ops_events(
   p_now timestamptz default now(), p_silence interval default interval '6 hours')
 returns void language sql security definer set search_path=private,pg_temp as $$
- update private.ops_events set resolved_at=p_now
+ update private.ops_events set resolved_at=p_now, resolution='silence'
   where resolved_at is null and source<>'cron' and last_seen_at<p_now-p_silence
 $$;
 revoke all on function private.close_stale_ops_events(timestamptz,interval) from public,anon,authenticated;
@@ -712,6 +722,7 @@ as $$
 declare last_obs timestamptz; r record; n int:=0; mins numeric; dur text; full_t text; short_t text;
  hdr text; guard text:=''; body text:=''; hidden int:=0; compact boolean:=false;
  budget int:=greatest(coalesce(p_max_chars,1500),200); reserve int:=90;
+ rr record; rb text:=''; rn int:=0; rshown int:=0; ub text:=''; un int:=0; tail_t text;
 begin
  select max(s.last_observed_at) into last_obs
   from private.project_task_health_state s
@@ -724,8 +735,48 @@ begin
   select 1 from private.project_task_incidents where ended_at is null and confirmed_at is not null
   union all select 1 from private.ops_events where resolved_at is null) c;
  hdr:='🛠 حالة الأنظمة والأعطال'||case when n>0 then ' ('||n||')' else '' end||guard;
+ -- «حُلّ اليوم»: آخر 24 ساعة، تعافٍ **مؤكَّد** فقط (إغلاق صريح بإشارة تعافٍ أو مراقب رأى السليم).
+ -- إغلاق نافذة الصمت وحده لا يكفي (لا دليل أن العطل زال) فلا يُعرض كمُتعافٍ بل يُحصى في سطر منفصل.
+ -- وأي مفتاح له حادثة/حدث مفتوح الآن لا يظهر هنا إطلاقاً (لا «حُلّ» مع عطل قائم لنفس المفتاح).
+ for rr in
+  select q.label, q.at_ from (
+   select * from (
+    select distinct on (e.source,e.event_key) e.label, e.resolved_at as at_
+    from private.ops_events e
+    where e.resolution='explicit' and e.resolved_at is not null
+      and e.resolved_at>p_now-interval '24 hours' and e.resolved_at<=p_now
+      and not exists (select 1 from private.ops_events o
+        where o.source=e.source and o.event_key=e.event_key and o.resolved_at is null)
+    order by e.source,e.event_key,e.resolved_at desc) a
+   union all
+   select * from (
+    select distinct on (i.task_key) coalesce(m.task_label,i.task_key), i.ended_at
+    from private.project_task_incidents i
+    left join private.project_task_monitors m on m.task_key=i.task_key
+    where i.confirmed_at is not null and i.ended_at is not null
+      and i.ended_at>p_now-interval '24 hours' and i.ended_at<=p_now
+      and not exists (select 1 from private.project_task_incidents o
+        where o.task_key=i.task_key and o.ended_at is null)
+    order by i.task_key,i.ended_at desc) b
+  ) q order by q.at_ desc
+ loop
+  rn:=rn+1;
+  if rshown<5 and length(rb)<600 then
+   rb:=rb||chr(10)||'• '||rr.label||' — '||to_char(rr.at_ at time zone 'Asia/Damascus','HH24:MI');
+   rshown:=rshown+1;
+  end if;
+ end loop;
+ select count(*) into un from (
+  select distinct e.source,e.event_key from private.ops_events e
+  where e.resolution='silence' and e.resolved_at>p_now-interval '24 hours' and e.resolved_at<=p_now
+    and not exists (select 1 from private.ops_events o
+      where o.source=e.source and o.event_key=e.event_key and o.resolved_at is null)) u;
+ tail_t:=case when rn>0 then chr(10)||chr(10)||'✅ حُلّ اليوم ('||rn||')'||rb
+              ||case when rn>rshown then chr(10)||'… و'||(rn-rshown)||' أخرى' else '' end else '' end
+  ||case when un>0 then chr(10)||'ℹ️ '||un||' أعطال توقفت تنبيهاتها دون إشارة تعافٍ مؤكَّدة (لم تُعدّ محلولة)' else '' end;
+ if length(hdr)+length(tail_t)>budget-reserve then tail_t:=''; end if;
  if n=0 then
-  return case when guard<>'' then hdr else hdr||chr(10)||'✅ لا توجد أعطال تشغيلية مستمرة' end;
+  return case when guard<>'' then hdr else hdr||chr(10)||'✅ لا توجد أعطال تشغيلية مستمرة' end||tail_t;
  end if;
  for r in
   select * from (
@@ -763,7 +814,8 @@ begin
    else hidden:=hidden+1; end if;
   end if;
  end loop;
- return hdr||body||case when hidden>0 then chr(10)||'… و'||hidden||' أعطال أخرى غير معروضة (راجع سجل الأعطال)' else '' end;
+ hdr:=hdr||body||case when hidden>0 then chr(10)||'… و'||hidden||' أعطال أخرى غير معروضة (راجع سجل الأعطال)' else '' end;
+ return case when length(hdr)+length(tail_t)<=budget then hdr||tail_t else hdr end;
 end;
 $$;
 revoke all on function private.daily_open_faults_section(timestamptz,integer) from public,anon,authenticated;

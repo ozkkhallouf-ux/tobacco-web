@@ -434,4 +434,30 @@ const exists = async (db, rel) => (await one(db, `select to_regclass('${rel}') r
   console.log('EVENING MISSING DETECTOR OK');
 }
 
+// ───────────── «حُلّ اليوم»: عمود resolution + حوادث المهام المؤكَّدة ─────────────
+{
+  const db = await liveDb();
+  await db.exec(bundle);
+  await db.exec(bundle); // إعادة التطبيق (العمود والقيد موجودان) لا تفشل
+  await db.exec(`select private.observe_ops_event('telegram','kbad','x','d')`);
+  await assert.rejects(db.exec(`update private.ops_events set resolution='bogus' where event_key='kbad'`), /check|constraint/i);
+  const sec = async () => (await one(db, 'select private.daily_open_faults_section(now(), 3000) s')).s;
+  await db.exec(`select private.observe_ops_event('telegram','k1','عطل ألف','d')`);
+  await db.exec(`select private.resolve_ops_event('telegram','k1')`);
+  assert.equal((await one(db, `select resolution r from private.ops_events where event_key='k1'`)).r, 'explicit');
+  assert.match(await sec(), /✅ حُلّ اليوم \(1\)[\s\S]*عطل ألف/);
+  // أُغلق بالصمت: لا يُعدّ محلولاً
+  await db.exec(`select private.observe_ops_event('telegram','k2','عطل باء','d')`);
+  await db.exec(`update private.ops_events set last_seen_at=now()-interval '10 hours' where event_key='k2'`);
+  await db.exec(`select private.close_stale_ops_events(now(), interval '3 hours')`);
+  assert.equal((await one(db, `select resolution r from private.ops_events where event_key='k2'`)).r, 'silence');
+  assert.ok(!(await sec()).includes('عطل باء'));
+  // حادثة مهمة مؤكَّدة ومنتهية تظهر؛ وبوجود حادثة مفتوحة لنفس المهمة لا تظهر
+  await db.exec(`insert into private.project_task_incidents(task_key,started_at,confirmed_at,ended_at) values ('zz-task', now()-interval '5 hours', now()-interval '4 hours', now()-interval '1 hour')`);
+  assert.match(await sec(), /✅ حُلّ اليوم \(2\)/);
+  await db.exec(`insert into private.project_task_incidents(task_key,started_at,confirmed_at) values ('zz-task', now()-interval '20 minutes', now()-interval '10 minutes')`);
+  assert.match(await sec(), /✅ حُلّ اليوم \(1\)/);
+  console.log('RESOLVED-TODAY OK');
+}
+
 console.log('DIGEST BUNDLE SIM OK');

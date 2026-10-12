@@ -69,7 +69,19 @@ delete-then-insert صار `03` شرطاً لتشغيلها. هذا مقصود �
 | `health_check` انقطاع الموقع، انهيار المراقب نفسه | `health-site-down`, `health-health-check-crashed` | فوري | الموقع واقع أو المراقبة عمياء |
 | `github_actions_failure` دخان ما بعد النشر / فحص صحة المشروع | `gha-fail:…` | فوري | الموقع الحي قد يكون منهاراً |
 | `github_actions_failure` الباقي، `health_check` الباقي | | ملخص | فشل CI/نشرة لا يوقف الموقع |
-| `sync_failure`, `price_sync_failure`, `price_sync_mismatch`, `windows` (`winfail:`), `automation_failure` | | ملخص | تأخير بيانات لا يوقف البيع؛ يظهر كل يوم حتى يُحل |
+| `price_sync_mismatch`, `price_sync_failure`, مفاتيح `price-sync:*` | | **فوري** (قرار المالك) | أي فروقات أو مواد ناقصة فورية. النص يميّز «اكتُشف اختلاف (التأثير غير مؤكَّد)» حين الفروقات 0 والناقص > 0، عن «تأثير مؤكَّد على الأسعار الفعلية» حين الفروقات > 0 (فحص ما بعد الكتابة وجد سعراً مخالفاً في الأمين). لا تكرار لنفس الحالة خلال 24 س، وتبدّل الشدة/الأعداد يُرسَل فوراً (المقارنة مع آخر رسالة أسعار فقط). نص غير مفهوم ⇒ يُرسَل الأصلي كما هو |
+| `sync_failure` `winfail:apply-to-ameen` و`winfail:pull-approved-prices` | | **فوري** | سلسلة الأسعار: يؤثر على أسعار البيع الفعلية |
+| `sync_failure`/`windows` (`winfail:push-*`: daily-profit, expense-entries, khalil-audit-log, sales-line-items) | | ملخص | تأخير بيانات يُعاد كل دورة؛ لا أثر على أسعار البيع |
+| `windows` `local-server-revive-fail` | | **فوري** | يُرسله السكربت فقط بعد محاولة إنعاش + تحقق منفذ، وتذكير كل 60 د (dedupe السكربت) ما دامت الخدمة متوقفة. **لا رسالة تعافٍ:** لا نبضة/جدول في قاعدة البيانات يثبت عودة الخادم المحلي، ولا تعديل لسكربتات Windows مسموح؛ يُوثَّق كقيد |
+| `sync_failure`, `windows` (`winfail:` الأخرى), `automation_failure` | | ملخص | تأخير بيانات لا يوقف البيع؛ يظهر كل يوم حتى يُحل |
+
+**«✅ حُلّ اليوم» (12):** عمود `private.ops_events.resolution` (`explicit`/`silence`). يُعرض في التقرير المسائي (حتى 5 أسطر) فقط ما أُغلق **صراحةً** (إشارة تعافٍ مؤكَّدة: `resolve_ops_event`، أو حادثة مهمة `confirmed_at`+`ended_at`) خلال 24 س، ولا يُعرض أي مفتاح له حدث/حادثة مفتوحة. ما أُغلق بانتهاء نافذة الصمت (`silence`) لا يُعدّ محلولاً ويُحصى في سطر «ℹ️ N أعطال توقفت تنبيهاتها دون إشارة تعافٍ مؤكَّدة». مسارات الإغلاق الأخرى (غياب التقرير المسائي، cron) تترك `resolution` فارغاً فلا تُعرض محلولة.
+
+**نوافذ الصمت (مراجعة الإيقاعات الأطول من 3 س):** `daily-git-pull-fail` (360 د) و`daily-git-pull-stuck` (1440 د) و`ameen-read-worker-*` (1440 د) و`health-*` و`gha-fail:*` و`automation-failure:*` ⇒ 30 س. `winfail:*` (2–30 د) و`ameen-sync-watchdog` و`snapshot-*` و`auto-sync-*` ⇒ 3 س كافية. `ameen-backup-*` فورية ولا تدخل `ops_events`. مغطّاة باختبارات الحدود (2س59/3س01، 29س/31س) وعطل مستمر 48 س.
+
+**استقلال الحرج:** الأمن/المصادقة/النسخ الاحتياطي وفشل التقرير المسائي لا تمرّ عبر آلية الملخص؛ وعطل `absorb_digest_alert` نفسه لا يمنع الإرسال (الخطّاف داخل `begin…exception`).
+
+**التفعيل/التراجع:** 12 ثم 13 (بموافقة صريحة)؛ التراجع 13 ثم 12 (13-rollback يتحقق من بصمات: dispatch `b70434ef…`, route `f34f1292…`, close_stale `24a5fcd5…`, refine `471ba23c…`, silence `2796ac5d…`, absorb `88c6e3d9…` ويرفض عند أي انجراف). بصمات 12: resolve_ops_event `00499134…`, close_stale `a9519e09…`, daily_open_faults_section `9f6cfab1…`.
 
 **ملاحظة حرجة حول 08 (تحقُّق مباشر من المالك على الإنتاج، 2026-09-14):**
 ملف `08-cron-health-transition-incident-dedupe.sql` على هذا الفرع اليوم عُدِّل

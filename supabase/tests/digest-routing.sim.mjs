@@ -101,7 +101,14 @@ for (const [k, key, want] of [
   ['health_check', 'health-workflow-x', 'digest'],
   ['github_actions_failure', 'gha-fail:دخان ما بعد النشر', 'immediate'], ['github_actions_failure', 'gha-fail:فحص صحة المشروع', 'immediate'],
   ['github_actions_failure', 'gha-fail:CI', 'digest'],
-  ['sync_failure', 'x', 'digest'], ['price_sync_mismatch', 'price-sync:1', 'digest'], ['windows', 'winfail:t', 'digest'],
+  ['sync_failure', 'x', 'digest'], ['price_sync_mismatch', 'price-sync:mismatch', 'immediate'], ['price_sync_failure', 'price-sync:verify-failed', 'immediate'],
+  ['windows', 'price-sync:anything', 'immediate'],
+  ['sync_failure', 'winfail:apply-to-ameen', 'immediate'], ['sync_failure', 'winfail:pull-approved-prices', 'immediate'],
+  ['sync_failure', 'winfail:push-daily-profit', 'digest'], ['sync_failure', 'winfail:push-expense-entries', 'digest'],
+  ['sync_failure', 'winfail:push-khalil-audit-log', 'digest'], ['sync_failure', 'winfail:push-sales-line-items', 'digest'],
+  ['windows', 'local-server-revive-fail', 'immediate'],
+  ['windows', 'ameen-backup-empty', 'immediate'], ['windows', 'ameen-backup-copy-fail', 'immediate'],
+  ['windows', 'ameen-sync-watchdog', 'digest'], ['windows', 'snapshot-producer-missing', 'digest'], ['windows', 'winfail:t', 'digest'],
   ['evening_report', 'evening:2026-01-01', 'immediate'], ['project_task_failure', 'k', 'immediate'],
   ['weird_unknown', null, 'immediate'], ['', '', 'immediate'], ['order_new', 'o1', 'immediate'],
   ['sync_failure', 'project-cron-failure:send-evening-report:20260101:x', 'immediate'], ['report', 'evening-missing:2026-01-01', 'immediate'],
@@ -176,6 +183,125 @@ assert.ok((await open(db)).some((r) => r.event_key === 'ameen-read-worker-degrad
 await notify(db, 'windows', 'تعافى', 'ameen-read-worker-recovered:9');
 console.log('recovery ok');
 
+
+// ===== قرارات المالك: الأسعار، إحياء الخادم، حُلّ اليوم، نوافذ الصمت =====
+const lastOut = async () => (await q(db, 'select event_type,dedupe_key,message from public.telegram_outbox order by id desc limit 1'))[0];
+const cnt = async () => (await outbox(db)).length;
+const MM = (d, m) => `⚠️ مزامنة الأسعار ليست مكتملة\nفروقات: ${d} — مواد ناقصة: ${m}`;
+{
+  let n0 = await cnt();
+  await notify(db, 'price_sync_mismatch', MM(3, 0), 'price-sync:mismatch', 30);
+  assert.equal(await cnt(), n0 + 1, 'any price difference is immediate');
+  let o = await lastOut();
+  assert.match(o.message, /تأثير مؤكَّد على الأسعار الفعلية/);
+  assert.match(o.message, /فروقات: 3 — مواد ناقصة: 0/);
+  assert.equal(o.dedupe_key, 'price-sync:mismatch:impact:3:0');
+  await notify(db, 'price_sync_mismatch', MM(3, 0), 'price-sync:mismatch', 30);
+  assert.equal(await cnt(), n0 + 1, 'same state is not repeated');
+  await notify(db, 'price_sync_mismatch', MM(0, 2), 'price-sync:mismatch', 30);
+  assert.equal(await cnt(), n0 + 2);
+  o = await lastOut();
+  assert.match(o.message, /اكتُشف اختلاف/);
+  assert.doesNotMatch(o.message, /تأثير مؤكَّد على/);
+  assert.equal(o.dedupe_key, 'price-sync:mismatch:detected:0:2');
+  await notify(db, 'price_sync_mismatch', MM(3, 0), 'price-sync:mismatch', 30);
+  assert.equal(await cnt(), n0 + 3, 'severity change back to a previously-sent state must still alert');
+  await db.exec(`update public.telegram_outbox set created_at=now()-interval '25 hours' where dedupe_key like 'price-sync:mismatch:%'`);
+  await notify(db, 'price_sync_mismatch', MM(3, 0), 'price-sync:mismatch', 30);
+  assert.equal(await cnt(), n0 + 4, 'daily reminder for persisting state');
+  await notify(db, 'price_sync_mismatch', 'نص مختلف تماماً', 'price-sync:mismatch', 30);
+  assert.equal(await cnt(), n0 + 5);
+  assert.equal((await lastOut()).message, 'نص مختلف تماماً');
+  await notify(db, 'price_sync_failure', '🚨 تعذر التحقق من مزامنة الأسعار مع الأمين', 'price-sync:verify-failed', 60);
+  await notify(db, 'price_sync_failure', '🚨 تعذر التحقق من مزامنة الأسعار مع الأمين', 'price-sync:verify-failed', 60);
+  assert.equal(await cnt(), n0 + 6);
+  assert.equal((await lastOut()).dedupe_key, 'price-sync:verify-failed');
+  await notify(db, 'sync_failure', '🚨 فشل تطبيق الأسعار على قاعدة الأمين', 'winfail:apply-to-ameen', 60);
+  await notify(db, 'sync_failure', '🚨 فشل سحب الأسعار', 'winfail:pull-approved-prices', 60);
+  assert.equal(await cnt(), n0 + 8, 'price-chain sync failures are immediate');
+  await notify(db, 'sync_failure', '🚨 فشل دفع الربح', 'winfail:push-daily-profit', 60);
+  assert.equal(await cnt(), n0 + 8, 'non-price data push failure stays in the digest');
+  assert.ok((await open(db)).some((r) => r.event_key === 'winfail:push-daily-profit'));
+  await notify(db, 'windows', 'تعذّر إنعاش سيرفر الموقع المحلي على المنفذ 3000', 'local-server-revive-fail', 60);
+  assert.equal(await cnt(), n0 + 9);
+  await notify(db, 'windows', 'تعذّر إنعاش سيرفر الموقع المحلي على المنفذ 3000', 'local-server-revive-fail', 60);
+  assert.equal(await cnt(), n0 + 9, 'no repeat within 60 minutes');
+  await db.exec(`update public.telegram_outbox set created_at=now()-interval '61 minutes' where dedupe_key='local-server-revive-fail'`);
+  await notify(db, 'windows', 'تعذّر إنعاش سيرفر الموقع المحلي على المنفذ 3000', 'local-server-revive-fail', 60);
+  assert.equal(await cnt(), n0 + 10, 'hourly reminder while the outage continues');
+  assert.ok(!(await open(db)).some((r) => r.event_key === 'local-server-revive-fail'), 'revive failure must not be digest-only');
+  // الأمن وفشل التقرير المسائي مستقلان حتى لو تعطّل الامتصاص بالكامل
+  const savedAbs = await one(db, `select pg_get_functiondef('private.absorb_digest_alert(text,text,text)'::regprocedure) d`);
+  await db.exec(`drop function private.absorb_digest_alert(text,text,text)`); await db.exec(`create function private.absorb_digest_alert(a text,b text,c text) returns boolean language plpgsql as $$ begin raise exception 'boom'; end $$`);
+  const n1 = await cnt();
+  await notify(db, 'security_alert', 'اختراق', 'sec-indep');
+  await notify(db, 'report', 'التقرير المسائي لم يُسلَّم', 'evening-missing:2026-01-01');
+  assert.equal(await cnt(), n1 + 2, 'security / evening-report failure stay immediate regardless of digest machinery');
+  await db.exec(`drop function private.absorb_digest_alert(text,text,text)`); await db.exec(savedAbs.d);
+}
+console.log('prices/revive/independence ok');
+
+{
+  const sec = async () => (await one(db, 'select private.daily_open_faults_section(now(), 3000) s')).s;
+  const fresh = () => db.exec(`update private.ops_events set resolved_at=now(), resolution='silence' where resolved_at is null`);
+  await db.exec('delete from private.ops_events');
+  await notify(db, 'windows', 'عامل أمين عالق T21', 'ameen-read-worker-stuck:21');
+  assert.ok((await sec()).includes('عامل أمين عالق T21'));
+  assert.ok(!(await sec()).includes('حُلّ اليوم'));
+  await db.exec(`select private.resolve_ops_event('telegram','ameen-read-worker-stuck:21')`);
+  const s1 = await sec();
+  assert.match(s1, /✅ حُلّ اليوم \(1\)/);
+  assert.match(s1, /عامل أمين عالق T21/);
+  // إغلاق بالصمت: لا يُعرض كمتعافٍ
+  await notify(db, 'sync_failure', 'دوري صامت T22', 'winfail:push-expense-entries');
+  await db.exec(`update private.ops_events set last_seen_at=now()-interval '3 hours 1 minute' where event_key='winfail:push-expense-entries'`);
+  await db.exec(`select private.close_stale_ops_events(now(), interval '3 hours')`);
+  assert.equal((await one(db, `select resolution r from private.ops_events where event_key='winfail:push-expense-entries'`)).r, 'silence');
+  const s2 = await sec();
+  assert.ok(!s2.includes('دوري صامت T22'), 'silence closure must not be listed as recovered: ' + s2);
+  assert.match(s2, /دون إشارة تعافٍ مؤكَّدة/);
+  // عاد العطل ⇒ لا يُعرض متعافياً
+  await notify(db, 'windows', 'عالق من جديد', 'ameen-read-worker-stuck:21');
+  const s3 = await sec();
+  assert.ok(!/✅ حُلّ اليوم[\s\S]*عامل أمين عالق T21/.test(s3), s3);
+  assert.match(s3, /عالق من جديد/);
+  await fresh();
+  // أقدم من 24 ساعة لا يظهر
+  await notify(db, 'windows', 'قديم', 'ameen-read-worker-stuck:old');
+  await db.exec(`select private.resolve_ops_event('telegram','ameen-read-worker-stuck:old')`);
+  await db.exec(`update private.ops_events set resolved_at=now()-interval '25 hours' where event_key='ameen-read-worker-stuck:old'`);
+  { const sx = await sec(); assert.ok(!sx.includes('ameen-read-worker-stuck:old') && !sx.includes('• قديم'), sx); }
+  // نوافذ الصمت
+  const T = async (key, kind, ago, wantOpen) => {
+    await notify(db, kind, 'x ' + key, key);
+    await db.exec(`update private.ops_events set last_seen_at=now()-interval '${ago}' where event_key='${key}' and resolved_at is null`);
+    await db.exec(`select private.close_stale_ops_events(now(), interval '3 hours')`);
+    const isOpen = (await open(db)).some((r) => r.event_key === key);
+    assert.equal(isOpen, wantOpen, `${key} @ ${ago}`);
+    await fresh();
+  };
+  await T('winfail:push-daily-profit', 'sync_failure', '2 hours 59 minutes', true);
+  await T('winfail:push-daily-profit', 'sync_failure', '3 hours 1 minute', false);
+  await T('ameen-sync-watchdog', 'windows', '2 hours 59 minutes', true);
+  await T('ameen-sync-watchdog', 'windows', '3 hours 1 minute', false);
+  for (const k of ['daily-git-pull-fail', 'daily-git-pull-stuck', 'ameen-read-worker-stuck:3', 'health-workflow-x', 'automation-failure:x', 'gha-fail:CI']) {
+    const kind = k.startsWith('gha-') ? 'github_actions_failure' : k.startsWith('automation') ? 'automation_failure' : 'windows';
+    await T(k, kind, '29 hours', true);
+    await T(k, kind, '31 hours', false);
+  }
+  // عطل مستمر 48س يتكرر: صف مفتوح واحد
+  await notify(db, 'sync_failure', 'مستمر 48س', 'winfail:push-sales-line-items');
+  await db.exec(`update private.ops_events set first_seen_at=now()-interval '48 hours', last_seen_at=now()-interval '30 minutes' where event_key='winfail:push-sales-line-items' and resolved_at is null`);
+  for (let i = 0; i < 3; i++) { await db.exec(`select private.close_stale_ops_events(now(), interval '3 hours')`); await notify(db, 'sync_failure', 'مستمر 48س', 'winfail:push-sales-line-items'); }
+  assert.equal((await q(db, `select 1 from private.ops_events where event_key='winfail:push-sales-line-items' and resolved_at is null`)).length, 1);
+  assert.match(await sec(), /مستمر 48س/);
+  for (let i = 0; i < 12; i++) { await notify(db, 'windows', 'عطل ' + i, 'ameen-read-worker-stuck:b' + i); await db.exec(`select private.resolve_ops_event('telegram','ameen-read-worker-stuck:b${i}')`); }
+  const sb = (await one(db, 'select private.daily_open_faults_section(now(), 700) s')).s;
+  assert.ok(sb.length <= 700, 'section exceeded budget: ' + sb.length);
+  await fresh();
+}
+console.log('resolved-today / silence windows ok');
+
 // rollback / re-apply
 // انجراف: تعديل لاحق على دالة موجَّهة ⇒ التراجع يرفض ولا يكتب فوقه
 const routeDef = (await one(db, `select pg_get_functiondef('private.ops_event_route(text,text)'::regprocedure) d`)).d;
@@ -221,7 +347,7 @@ await assert.rejects(db.exec(rb12), /13 is active/);
 }
 // تعديل لاحق على ops_event_silence أو absorb_digest_alert بعد تطبيق 13: إعادة تطبيق 13 ترفض ولا تكتب فوقه
 {
-  for (const fn of ['private.ops_event_silence(text)', 'private.absorb_digest_alert(text,text,text)']) {
+  for (const fn of ['private.ops_event_silence(text)', 'private.absorb_digest_alert(text,text,text)', 'private.refine_immediate_alert(text,text,text)']) {
     const d = await liveDb();
     await d.exec(bundle);
     await d.exec(p13);
