@@ -17,6 +17,7 @@ begin
   for r in select fn, def from private.digest_bundle_snapshot order by fn loop
     execute r.def;
   end loop;
+  drop function if exists private.check_evening_report_delivered(timestamptz);
   -- أثناء الحزمة تتقدّم حقول «أُنذر» لأعطال cron دون إرسال Telegram؛ لو بقيت لظلّ مراقب 09
   -- المستعاد صامتاً عن عطل قائم. تُصفَّر لتُنذَر الأعطال القائمة مرة واحدة بعد التراجع.
   -- سقف 5 أعطال لكل تراجع (الأحدث رصداً أولاً) كي لا يتدفّق سيل رسائل دفعة واحدة؛ والباقي

@@ -57,6 +57,19 @@ const monitorBody = canonical.slice(
 );
 assert.match(monitorBody, /if job_record\.jobname='send-evening-report'\s+and \(previous_alerted_health is distinct from job_health\s+or \(job_health='failed' and previous_alerted_terminal_at is distinct from terminal_at\)\) then[\s\S]*?perform public\.notify_telegram\(/, 'استثناء مهمة التقرير المسائي مفقود');
 assert.equal(monitorBody.split('public.notify_telegram(').length - 1, 3, 'المراقب يجب ألا يرسل إلا إنذار الحرج المتحقَّق وتعافيه');
+// كاشف غياب التقرير المسائي: دالة مستقلة عن مهمة الإرسال، يستدعيها المراقب، برسالة واحدة يومياً
+const detector = canonical.slice(
+  canonical.indexOf('create or replace function private.check_evening_report_delivered('),
+  canonical.indexOf('revoke all on function private.check_evening_report_delivered('),
+);
+assert.ok(detector.length > 200, 'كاشف التقرير المسائي مفقود');
+assert.ok(monitorBody.includes('perform private.check_evening_report_delivered();'), 'المراقب لا يستدعي كاشف التقرير المسائي');
+assert.equal(detector.split('public.notify_telegram(').length - 1, 1, 'الكاشف يرسل رسالة واحدة فقط');
+assert.match(detector, /'evening-missing:'\|\|to_char\(dam,'YYYY-MM-DD'\)/, 'مفتاح اليوم');
+assert.match(detector, /day_key,1440\)/, 'تنبيه واحد في اليوم');
+assert.ok(detector.includes("'Asia/Damascus'") && detector.includes("time '20:15'"), 'موعد 20:15 دمشق');
+assert.ok(detector.includes("event_type='evening_report'") && detector.includes("status in ('dispatched','sent')"), 'الدليل هو إرسال فعلي لا نجاح cron');
+assert.ok(!detector.includes('cron.'), 'الكاشف يجب ألا يعتمد على cron');
 // بلا ربط بـnotify_telegram (يتطلب موافقة المالك)
 assert.ok(!/create (or replace )?function public\.notify_telegram/.test(canonical), 'الملف القانوني يعدّل notify_telegram الإنتاجي');
 assert.ok(!/create (or replace )?function public\.notify_telegram/.test(p10), 'proposed/10 يعدّل notify_telegram الإنتاجي');
@@ -92,6 +105,7 @@ for (const [from, to] of [
   ['create or replace function private.monitor_project_tasks()', 'revoke all on function private.monitor_project_tasks()'],
   ['create or replace function private.project_task_alert_decision(', 'revoke all on function private.project_task_alert_decision'],
   ['create or replace function private.daily_open_faults_section(', 'revoke all on function private.daily_open_faults_section'],
+  ['create or replace function private.check_evening_report_delivered(', 'revoke all on function private.check_evening_report_delivered'],
 ]) {
   assert.equal(slice(p10, from, to), slice(canonical, from, to), `proposed/10 يخالف القانوني: ${from}`);
 }
