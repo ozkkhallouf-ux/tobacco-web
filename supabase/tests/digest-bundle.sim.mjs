@@ -110,6 +110,16 @@ const exists = async (db, rel) => (await one(db, `select to_regclass('${rel}') r
   await assert.rejects(d4.exec(canonicalSql), /only through proposed\/12/);
   assert.equal(await md5(d4, 'private.monitor_project_tasks()'), P09_MD5, 'المراقب لم يتغيّر');
   assert.equal(await exists(d4, 'private.ops_events'), false);
+  // تنفيذ الحزمة أمراً بأمر (autocommit): الحارس داخلها يرفض قبل أي تعديل
+  {
+    const d6 = await liveDb();
+    await d6.exec("select set_config('app.digest_bundle', 'on', true)");
+    const guard = bundle.slice(bundle.indexOf('do $guard12$'), bundle.indexOf('end $guard12$') + 'end $guard12$;'.length);
+    assert.ok(guard.length > 20);
+    await assert.rejects(d6.exec(guard), /single transaction/);
+    assert.equal(await exists(d6, 'private.ops_events'), false);
+    assert.equal(await md5(d6, 'private.monitor_project_tasks()'), P09_MD5);
+  }
   // وكذلك proposed/10 و11 منفردين
   for (const f of ['10-telegram-task-alert-noise-fix.sql', '11-evening-report-open-faults-section.sql']) {
     const d5 = await liveDb();

@@ -15,6 +15,12 @@
 -- حارس: لو نُفِّذ كل أمر بمعاملته (autocommit) يضيع الإعداد المحلي أدناه فيرفض proposed/10 التطبيق
 -- قبل تغيير أي دالة. التراجع: proposed/12-digest-only-rollback.sql.
 select set_config('app.digest_bundle', 'on', true);
+-- الحارس داخل الحزمة نفسها قبل أي تعديل: تنفيذ أمر بأمر (autocommit) يُسقط الإعداد المحلي أعلاه فيتوقف هنا
+do $guard12$ begin
+  if coalesce(current_setting('app.digest_bundle', true), '') <> 'on' then
+    raise exception 'proposed/12 must run as a single transaction (one request or psql --single-transaction); refusing to apply statement-by-statement';
+  end if;
+end $guard12$;
 
 -- (1) تحقق قبلي ------------------------------------------------------------------
 do $pre$
