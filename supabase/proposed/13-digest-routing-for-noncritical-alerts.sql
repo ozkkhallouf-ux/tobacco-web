@@ -74,6 +74,9 @@ returns text language sql immutable as $$
   when coalesce(p_dedupe_key,'') ~* '(backup|secur|auth|breach)' then 'immediate'
   -- ناقل الملخص نفسه: فشل مهمة التقرير المسائي وغياب التقرير لا يظهران في ملخص لا يُرسَل ⇒ فوريان دائماً
   when coalesce(p_dedupe_key,'') ~ '^(project-cron-failure:send-evening-report|evening-missing:|evening:)' then 'immediate'
+  -- بوابة نشر Windows ومشغّل المهام: رفض سكربت كتابة (بصمة غير معتمدة/قائمة مفقودة)، علامة نشر عالقة، انهيار البوابة
+  -- أحداث سلامة لا تُحجَب في ملخص ⇒ فورية دائماً (kind='windows' عام لكل رسائل البوابة)
+  when coalesce(p_dedupe_key,'') ~ '^(deploy-gate-|launcher-)' then 'immediate'
   -- فحص الصحة الآلي: انقطاع الموقع وانهيار المراقب نفسه فوريان؛ بقية المشاكل (workflow فاشل، نشرة، بحث) ملخص
   when p_kind = 'health_check' then
    case when coalesce(p_dedupe_key,'') ~ '^health-(site-down|health-check-crashed)' then 'immediate' else 'digest' end

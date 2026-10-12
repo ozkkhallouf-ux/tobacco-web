@@ -96,7 +96,7 @@ assert.equal((await one(db, 'select count(*)::int c from private.digest_routing_
 
 const R = async (k, key) => (await one(db, 'select private.ops_event_route($1,$2) r', [k, key])).r;
 for (const [k, key, want] of [
-  ['security_alert', 'x', 'immediate'], ['windows', 'backup-failed', 'immediate'], ['sync_failure', 'auth-x', 'immediate'],
+  ['security_alert', 'x', 'immediate'], ['windows', 'backup-failed', 'immediate'], ['windows', 'launcher-writer-hash-abc', 'immediate'], ['windows', 'launcher-writer-no-allowlist', 'immediate'], ['windows', 'deploy-gate-crash', 'immediate'], ['sync_failure', 'auth-x', 'immediate'],
   ['health_check', 'health-site-down', 'immediate'], ['health_check', 'health-health-check-crashed', 'immediate'],
   ['health_check', 'health-workflow-x', 'digest'],
   ['github_actions_failure', 'gha-fail:دخان ما بعد النشر', 'immediate'], ['github_actions_failure', 'gha-fail:فحص صحة المشروع', 'immediate'],
