@@ -177,13 +177,26 @@ await notify(db, 'windows', 'تعافى', 'ameen-read-worker-recovered:9');
 console.log('recovery ok');
 
 // rollback / re-apply
+// انجراف: تعديل لاحق على دالة موجَّهة ⇒ التراجع يرفض ولا يكتب فوقه
+const routeDef = (await one(db, `select pg_get_functiondef('private.ops_event_route(text,text)'::regprocedure) d`)).d;
+await db.exec(routeDef.replace("else 'immediate'", "else 'immediate' /* later fix */"));
+await assert.rejects(db.exec(rb13), /drifted/);
+await db.exec(routeDef);
+// حادثة إنذار واحد مفتوحة وقت التراجع ⇒ تُرسَل مرة واحدة في رسالة موحَّدة (لا تضيع، لا فيضان)
+await notify(db, 'windows', 'متدهور وحيد', 'ameen-read-worker-degraded:55');
 const outBefore = (await outbox(db)).length;
 await db.exec(rb13);
+{
+  const ob = await outbox(db);
+  assert.equal(ob.length, outBefore + 1, 'exactly one drain message');
+  assert.equal(ob[ob.length - 1].event_type, 'ops_rollback_drain');
+  assert.match((await one(db, `select message m from public.telegram_outbox order by id desc limit 1`)).m, /متدهور وحيد/);
+}
 assert.equal(await md5(db), PROD, 'rollback restores exact production body');
 assert.equal((await one(db, `select to_regprocedure('private.absorb_digest_alert(text,text,text)') r`)).r, null);
 assert.equal((await one(db, `select to_regclass('private.digest_routing_snapshot') r`)).r, null);
 await notify(db, 'windows', 'بعد التراجع', 'winfail:after');
-assert.equal((await outbox(db)).length, outBefore + 1, 'after rollback, alert is immediate again');
+assert.equal((await outbox(db)).length, outBefore + 2, 'after rollback, alert is immediate again');
 await assert.rejects(db.exec(rb13), /no snapshot/);
 await db.exec(p13);
 assert.notEqual(await md5(db), PROD);

@@ -145,6 +145,9 @@ assert.ok(p13.includes('patched constant text') && p13.includes('exact open-faul
 assert.ok(p13.includes('881a513175ec93b3e9b9185c4c5948a7') && !p13.includes("position('digest-routing:v1' in disp)"), '13 يقبل بصمتين فقط (الإنتاج وجسم 13) ولا يكتفي بالوسم');
 assert.ok(p13.includes('automation-failure:|ameen-read-worker-)'), 'حوادث عامل أمين تُنذَر مرة واحدة ⇒ نافذة 30 ساعة');
 assert.ok((await read('supabase/proposed/12-digest-only-rollback.sql')).includes('digest_routing_snapshot'), 'تراجع 12 يجب أن يرفض عند فعالية 13');
+const rb13s = await read('supabase/proposed/13-digest-routing-rollback.sql');
+assert.ok(rb13s.includes('881a513175ec93b3e9b9185c4c5948a7') && rb13s.includes('drifted') && rb13s.includes('ops_rollback_drain'), 'تراجع 13 يتحقق من الانجراف ويفرّغ الأعطال المفتوحة مرة واحدة');
+assert.ok((await read('supabase/proposed/12-digest-only-rollback.sql')).includes('ops_rollback_drain'), 'تراجع 12 يفرّغ الأعطال المفتوحة مرة واحدة');
 assert.ok(p13.includes('send-evening-report') && p13.includes('evening-missing:'), 'ناقل الملخص (فشل/غياب التقرير المسائي) يبقى فورياً');
 assert.ok(rb13.includes('digest_routing_snapshot'), 'تراجع 13 بلا لقطة');
 console.log('Project task alert policy checks passed.');

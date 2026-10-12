@@ -175,8 +175,21 @@ const exists = async (db, rel) => (await one(db, `select to_regclass('${rel}') r
   assert.equal(await defOf(d, 'public.send_evening_report()'), evDef);
 
   // (هـ) تراجع: يعيد 09 والتقرير الأصلي حرفياً، ثم يمكن التفعيل ثانية
+  // الأعطال المسجَّلة المفتوحة وقت التراجع تُرسَل مرة واحدة موحَّدة (القسم القارئ سيُزال)
+  await d.exec(`create table if not exists public.telegram_outbox(id serial primary key, event_type text, message text, dedupe_key text)`);
+  await d.exec(`select private.observe_ops_event('telegram','winfail:drain-test','عطل مفتوح للتفريغ')`);
+  await d.exec(`select private.observe_ops_event('cron','job:x','عطل cron لا يُفرَّغ')`);
+  await d.exec(rollback);
+  {
+    const ob = (await d.query(`select event_type, message from public.telegram_outbox`)).rows;
+    assert.equal(ob.length, 1, 'one drain message');
+    assert.equal(ob[0].event_type, 'ops_rollback_drain');
+    assert.ok(ob[0].message.includes('عطل مفتوح للتفريغ') && !ob[0].message.includes('عطل cron'));
+  }
+  await d.exec(bundle);
   await d.exec(rollback);
   assert.equal(await md5(d, 'private.monitor_project_tasks()'), P09_MD5);
+  await d.exec(`drop table public.telegram_outbox`);
   assert.equal(await defOf(d, 'public.send_evening_report()'), origEv);
   await assert.rejects(d.exec(rollback), /snapshot is empty/);
   await d.exec(bundle);

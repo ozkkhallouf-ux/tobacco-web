@@ -6,7 +6,7 @@
 -- وتُترك الجداول/الدوال الجديدة (غير ضارة). لا يلمس notify_telegram ولا أي بيانات.
 -- يُشغَّل كطلب واحد (معاملة ضمنية) أو psql --single-transaction.
 do $rb$
-declare r record;
+declare r record; n int; body text;
 begin
   -- 13 يمتصّ التنبيهات في ops_events ويعتمد على قسم الأعطال؛ إزالة القسم قبل 13 تُصمت الأعطال
   if to_regclass('private.digest_routing_snapshot') is not null then
@@ -17,6 +17,15 @@ begin
   end if;
   if (select count(*) from private.digest_bundle_snapshot) = 0 then
     raise exception 'rollback: snapshot is empty; nothing to restore';
+  end if;
+  -- القسم الذي سيُزال هو القارئ الوحيد للأعطال المسجَّلة: ما بقي مفتوحاً منها يُرسَل مرة واحدة موحَّداً
+  select count(*), string_agg('• ' || left(label, 120), chr(10) order by first_seen_at)
+    into n, body from private.ops_events where resolved_at is null and source <> 'cron';
+  if n > 0 then
+    insert into public.telegram_outbox (event_type, message, dedupe_key)
+    values ('ops_rollback_drain',
+            left('⚠️ أعطال مفتوحة عند إلغاء الملخص اليومي (' || n || ') — تُرسَل هذه المرة فقط:' || chr(10) || body, 3900),
+            'rollback12-drain:' || to_char(now(), 'YYYY-MM-DD"T"HH24'));
   end if;
   for r in select fn, def from private.digest_bundle_snapshot order by fn loop
     execute r.def;
