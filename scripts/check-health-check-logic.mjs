@@ -356,6 +356,7 @@ assert.match(
   t = mk(() => 'sent');
   r = await processClosures([{ number: 9, key: 'site-down' }], t.deps);
   assert.deepEqual(t.calls, [['close', 9]]);
+  assert.deepEqual(r.map((x) => [x.signal, x.closed]), [['skipped', true]]);
   // فشل الإغلاق بعد الإشارة لا يكسر بقية القائمة، وتكرار التنفيذ يعيد الإشارة نفسها (idempotent)
   const calls2 = [];
   r = await processClosures(
