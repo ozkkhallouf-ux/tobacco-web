@@ -208,6 +208,7 @@ await db.exec(p13.replace(/^do \$pre\$[\s\S]*?end \$pre\$;/m, 'select 1;')); // 
 await db.exec(`create or replace function private.notify_telegram_dispatch(p_event_type text,p_message text,p_dedupe_key text default null,p_dedupe_minutes int default 60,p_reply_markup jsonb default null) returns void language sql security definer as $$ select 1 /* digest-routing:v1 edited */ $$`);
 await assert.rejects(db.exec(p13), /drifted/);
 // تراجع 12 مرفوض ما دام 13 فعّالاً
+await assert.rejects(db.exec(bundle), /13 is active/);
 await assert.rejects(db.exec(rb12), /13 is active/);
 // تقرير يذكر القسم في تعليق فقط ⇒ 13 يرفض (لا يمتص تنبيهات بلا عرض)
 {

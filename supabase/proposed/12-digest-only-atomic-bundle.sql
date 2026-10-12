@@ -21,6 +21,12 @@ do $guard12$ begin
     raise exception 'proposed/12 must run as a single transaction (one request or psql --single-transaction); refusing to apply statement-by-statement';
   end if;
 end $guard12$;
+-- لا إعادة تشغيل للحزمة 12 بعد 13: كانت ستعيد توجيه ما قبل 13 فوق خطّاف 13 (ناقل الملخص يُمتصّ، وبصمات تراجع 13 تنكسر)
+do $order12$ begin
+  if to_regclass('private.digest_routing_snapshot') is not null then
+    raise exception 'proposed/12 refused: proposed/13 is active; run 13-digest-routing-rollback.sql first (order: apply 12 then 13; roll back 13 then 12)';
+  end if;
+end $order12$;
 
 -- (1) تحقق قبلي ------------------------------------------------------------------
 do $pre$
