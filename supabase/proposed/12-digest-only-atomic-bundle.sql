@@ -259,24 +259,28 @@ revoke all on function private.project_task_alert_decision(boolean,numeric,boole
   from public,anon,authenticated;
 
 -- كشف غياب التقرير المسائي (مستقل عن مهمته send-evening-report).
--- الدليل هو الإرسال الفعلي: صف public.telegram_outbox بنوع evening_report أُنشئ اليوم (بتوقيت
+-- موعد التقرير الفعلي: cron '0 20 * * *' بتوقيت UTC = 23:00 بتوقيت دمشق (مؤكَّد من التقارير الفعلية
+-- في telegram_outbox)، لذا الحدّ 23:15 دمشق (15 د سماح) لا 20:15.
+-- الدليل هو الإرسال الفعلي: صف public.telegram_outbox بنوع evening_report أُنشئ في يوم التقرير (بتوقيت
 -- دمشق) وحالته dispatched/sent (أو pending حديث < 10 د بانتظار المُرسِل) — لا نجاح cron ولا غيابه.
 -- يعمل من المراقب كل 5 دقائق، فيكشف توقف المهمة نفسها بلا سجل تشغيل (cron لم يطلقها أصلاً).
---   • قبل 20:15 دمشق: لا شيء (غياب التقرير قبل موعده ليس عطلاً). 20:15 = 15 د سماح بعد الموعد.
---   • بعد 20:15 ولا دليل: تنبيه واحد في اليوم (dedupe 1440 د) + حدث ops_events لقسم الملخص.
+--   • يوم التقرير = تاريخ دمشق مطروحاً منه ساعتان (حتى 02:00 فجراً ما زال يخص تقرير الأمس).
+--   • قبل 23:15 دمشق: لا شيء (غياب التقرير قبل موعده ليس عطلاً).
+--   • بعد 23:15 ولا دليل: تنبيه واحد في اليوم (dedupe 1440 د) + حدث ops_events لقسم الملخص.
 --   • وصل التقرير (ولو متأخراً/بإعادة محاولة): يُغلق الحدث داخلياً بلا رسالة.
---   • تغيّر اليوم: مفتاح اليوم الجديد؛ حدث الأمس المفتوح يبقى ظاهراً في تقرير الغد ثم يُغلق عند وصوله.
 -- p_now للاختبار فقط؛ أي خطأ هنا لا يُسقط المراقب.
 create or replace function private.check_evening_report_delivered(p_now timestamptz default now())
 returns void language plpgsql security definer
 set search_path=private,public,pg_temp
 as $$
-declare dam timestamp; day_start timestamptz; day_key text; delivered boolean;
+declare dam timestamp; rep_day date; deadline timestamptz; day_start timestamptz; day_key text; delivered boolean;
 begin
  dam:=p_now at time zone 'Asia/Damascus';
- if dam::time < time '20:15' then return; end if;
- day_start:=date_trunc('day',dam) at time zone 'Asia/Damascus';
- day_key:='evening-missing:'||to_char(dam,'YYYY-MM-DD');
+ rep_day:=(dam-interval '2 hours')::date;
+ deadline:=(rep_day+time '23:15') at time zone 'Asia/Damascus';
+ if p_now<deadline then return; end if;
+ day_start:=rep_day::timestamp at time zone 'Asia/Damascus';
+ day_key:='evening-missing:'||to_char(rep_day,'YYYY-MM-DD');
  select exists(select 1 from public.telegram_outbox
    where event_type='evening_report' and created_at>=day_start and created_at<=p_now
      and (status in ('dispatched','sent') or (status='pending' and created_at>p_now-interval '10 minutes')))
@@ -287,9 +291,9 @@ begin
   return;
  end if;
  perform private.observe_ops_event('report',day_key,'التقرير المسائي اليومي لم يصل',
-  'لم يُسجَّل إرسال التقرير بعد 20:15 بتوقيت دمشق',(date_trunc('day',dam)+interval '20 hours') at time zone 'Asia/Damascus');
+  'لم يُسجَّل إرسال التقرير بعد 23:15 بتوقيت دمشق',(rep_day+time '23:00') at time zone 'Asia/Damascus');
  perform public.notify_telegram('project_task_failure',
-  format('🚨 التقرير المسائي اليومي لم يصل%1$s• الموعد: 20:00 بتوقيت دمشق%1$s• لا دليل على إرساله بعد 20:15%1$s• لن تصلك قائمة الأعطال حتى يُصلَح.',chr(10)),
+  format('🚨 التقرير المسائي اليومي لم يصل%1$s• الموعد: 23:00 بتوقيت دمشق%1$s• لا دليل على إرساله بعد 23:15%1$s• لن تصلك قائمة الأعطال حتى يُصلَح.',chr(10)),
   day_key,1440);
 exception when others then
  raise warning 'check_evening_report_delivered: %',sqlerrm;

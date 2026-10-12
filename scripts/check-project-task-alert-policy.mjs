@@ -65,9 +65,9 @@ const detector = canonical.slice(
 assert.ok(detector.length > 200, 'كاشف التقرير المسائي مفقود');
 assert.ok(monitorBody.includes('perform private.check_evening_report_delivered();'), 'المراقب لا يستدعي كاشف التقرير المسائي');
 assert.equal(detector.split('public.notify_telegram(').length - 1, 1, 'الكاشف يرسل رسالة واحدة فقط');
-assert.match(detector, /'evening-missing:'\|\|to_char\(dam,'YYYY-MM-DD'\)/, 'مفتاح اليوم');
+assert.match(detector, /'evening-missing:'\|\|to_char\(rep_day,'YYYY-MM-DD'\)/, 'مفتاح اليوم');
 assert.match(detector, /day_key,1440\)/, 'تنبيه واحد في اليوم');
-assert.ok(detector.includes("'Asia/Damascus'") && detector.includes("time '20:15'"), 'موعد 20:15 دمشق');
+assert.ok(detector.includes("'Asia/Damascus'") && detector.includes("time '23:15'") && !detector.includes("time '20:15'"), 'الحدّ 23:15 دمشق (التقرير 20:00 UTC = 23:00 دمشق)');
 assert.ok(detector.includes("event_type='evening_report'") && detector.includes("status in ('dispatched','sent')"), 'الدليل هو إرسال فعلي لا نجاح cron');
 assert.ok(!detector.includes('cron.'), 'الكاشف يجب ألا يعتمد على cron');
 // بلا ربط بـnotify_telegram (يتطلب موافقة المالك)

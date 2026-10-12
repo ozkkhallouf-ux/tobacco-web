@@ -324,54 +324,60 @@ const exists = async (db, rel) => (await one(db, `select to_regclass('${rel}') r
   const alerts = async () => (await sent(db)).filter((r) => (r.key || '').startsWith('evening-missing:'));
   const rep = (t, st) => db.exec(`insert into public.telegram_outbox(event_type,message,dedupe_key,status,created_at) values('evening_report','R','evening:x','${st}','${t}')`);
   const openEv = async () => (await one(db, `select count(*)::int c from private.ops_events where source='report' and resolved_at is null`)).c;
-  // دمشق = UTC+3: 20:10 = 17:10Z، 20:16 = 17:16Z
-  // قبل الموعد المسموح (20:10): غياب التقرير ليس عطلاً
-  await chk('2026-10-12T17:10:00Z');
-  assert.equal((await alerts()).length, 0, 'قبل 20:15 لا تنبيه');
+  // دمشق = UTC+3: التقرير 23:00 = 20:00Z؛ الحدّ 23:15 = 20:15Z
+  // قبل الحدّ (23:10 دمشق): غياب التقرير ليس عطلاً
+  await chk('2026-10-12T20:10:00Z');
+  assert.equal((await alerts()).length, 0, 'قبل 23:15 لا تنبيه');
   // انقطاع cron: لا تشغيل ولا سجل ولا تقرير ⇒ تنبيه واحد فقط مهما تكرر الفحص
-  for (const t of ['17:16', '17:21', '17:26', '18:30', '20:55']) await chk(`2026-10-12T${t}:00Z`);
+  for (const t of ['20:16', '20:21', '20:26', '21:30', '21:55']) await chk(`2026-10-12T${t}:00Z`);
   assert.equal((await alerts()).length, 1, 'تنبيه واحد لكل تقرير غائب');
   assert.equal((await alerts())[0].key, 'evening-missing:2026-10-12');
   assert.equal(await openEv(), 1);
   // إعادة محاولة ناجحة متأخرة: يُغلق الحدث بلا رسالة جديدة
-  await rep('2026-10-12T18:40:00Z', 'sent');
-  await chk('2026-10-12T18:45:00Z');
+  await rep('2026-10-12T21:40:00Z', 'sent');
+  await chk('2026-10-12T21:45:00Z');
   assert.equal(await openEv(), 0, 'وصول التقرير يغلق الحدث داخلياً');
   assert.equal((await alerts()).length, 1, 'لا رسالة تعافٍ');
-  // يوم جديد: تأخر داخل السماح (20:12) فلا إنذار كاذب
-  await rep('2026-10-13T17:12:00Z', 'sent');
-  await chk('2026-10-13T17:16:00Z');
+  // يوم جديد: تأخر داخل السماح (23:12 دمشق) فلا إنذار كاذب
+  await rep('2026-10-13T20:12:00Z', 'sent');
+  await chk('2026-10-13T20:16:00Z');
   assert.equal((await alerts()).length, 1, 'تقرير داخل مهلة السماح: لا إنذار');
   // يوم ثالث: فشل إرسال (failed فقط) ⇒ يُعدّ غائباً، ثم إعادة المحاولة تنجح
-  await rep('2026-10-14T17:00:00Z', 'failed');
-  await chk('2026-10-14T17:16:00Z');
+  await rep('2026-10-14T20:00:00Z', 'failed');
+  await chk('2026-10-14T20:16:00Z');
   assert.equal((await alerts()).length, 2, 'فشل الإرسال = غياب فعلي');
   assert.equal((await alerts())[1].key, 'evening-missing:2026-10-14');
-  await chk('2026-10-14T17:30:00Z');
+  await chk('2026-10-14T20:30:00Z');
   assert.equal((await alerts()).length, 2, 'لا تكرار في اليوم نفسه');
-  await rep('2026-10-14T17:35:00Z', 'dispatched');
-  await chk('2026-10-14T17:40:00Z');
+  await rep('2026-10-14T20:35:00Z', 'dispatched');
+  await chk('2026-10-14T20:40:00Z');
   assert.equal(await openEv(), 0);
   // pending عالق أكثر من 10 دقائق ليس دليل إرسال؛ pending حديث دليل (بانتظار المُرسِل)
-  await rep('2026-10-15T17:05:00Z', 'pending');
-  await chk('2026-10-15T17:12:00Z');
+  await rep('2026-10-15T20:05:00Z', 'pending');
+  await chk('2026-10-15T20:12:00Z');
   assert.equal((await alerts()).length, 2, 'pending حديث: لا إنذار');
-  await chk('2026-10-15T17:30:00Z');
+  await chk('2026-10-15T20:30:00Z');
   assert.equal((await alerts()).length, 3, 'pending عالق > 10 د = غياب');
   // يوم لاحق بلا تقرير: حدث الأمس يبقى مفتوحاً (يظهر في ملخص الغد) ثم يُغلق بوصول التقرير
-  await chk('2026-10-16T17:16:00Z');
+  await chk('2026-10-16T20:16:00Z');
   assert.equal((await alerts()).length, 4, 'يوم جديد = مفتاح جديد');
   assert.equal(await openEv(), 2);
   await rep('2026-10-17T06:00:00Z', 'sent'); // إرسال يدوي مبكر في يوم 17 (09:00 دمشق) يُحسب دليلاً لذلك اليوم
-  await chk('2026-10-17T17:20:00Z');
+  await chk('2026-10-17T20:20:00Z');
   assert.equal(await openEv(), 0);
   assert.equal((await alerts()).length, 4);
+  // بعد منتصف الليل (00:30 دمشق = 21:30Z) ما زال غياب تقرير الأمس يُكشف؛ بعد 02:00 دمشق يبدأ يوم جديد
+  await chk('2026-10-18T21:30:00Z');
+  assert.equal((await alerts()).length, 5, 'اكتشاف بعد منتصف الليل لتقرير اليوم السابق');
+  assert.equal((await alerts())[4].key, 'evening-missing:2026-10-18');
+  await chk('2026-10-19T00:00:00Z'); // 03:00 دمشق: يوم 19 قبل حدّه
+  assert.equal((await alerts()).length, 5);
   // مستقل عن cron: لا صفوف في cron.job ومع ذلك يُكشف الغياب؛ والمراقب يستدعيه
   assert.equal((await one(db, `select count(*)::int c from cron.job where jobname='send-evening-report'`)).c, 0);
   assert.ok((await one(db, `select position('check_evening_report_delivered' in prosrc) p from pg_proc where oid=to_regprocedure('private.monitor_project_tasks()')`)).p > 0, 'المراقب يستدعي الكاشف');
   // خطأ داخل الكاشف لا يُسقط المراقب
   await db.exec('alter table public.telegram_outbox rename to telegram_outbox_x');
-  await chk('2026-10-18T17:20:00Z');
+  await chk('2026-10-18T20:20:00Z');
   await db.exec('select private.monitor_project_tasks()');
   console.log('EVENING MISSING DETECTOR OK');
 }
