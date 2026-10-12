@@ -23,8 +23,8 @@ declare mon_src text; ev text;
 begin
   select prosrc into mon_src from pg_proc where oid = to_regprocedure('private.monitor_project_tasks()');
   if mon_src is null then raise exception 'preflight: private.monitor_project_tasks() missing'; end if;
-  if md5(mon_src) <> '2c762f38b56ea5a683061529bd5e5d7f' and position('observe_ops_event' in mon_src) = 0 then
-    raise exception 'preflight: live monitor_project_tasks differs from proposed/09 (md5 %), refusing to overwrite unknown drift', md5(mon_src);
+  if md5(mon_src) not in ('2c762f38b56ea5a683061529bd5e5d7f', 'a301b12b6f186a94cf589729e8426b7b') then
+    raise exception 'preflight: live monitor_project_tasks differs from proposed/09 (md5 %), refusing to overwrite unknown drift (accepted: live=09 or already-applied bundle)', md5(mon_src);
   end if;
   if to_regprocedure('public.send_evening_report()') is null then raise exception 'preflight: public.send_evening_report() missing'; end if;
   select pg_get_functiondef(to_regprocedure('public.send_evening_report()')) into ev;
@@ -44,7 +44,7 @@ alter table private.digest_bundle_snapshot enable row level security;
 revoke all on private.digest_bundle_snapshot from public, anon, authenticated;
 insert into private.digest_bundle_snapshot(fn, def)
 select 'private.monitor_project_tasks()', pg_get_functiondef(to_regprocedure('private.monitor_project_tasks()'))
-where position('observe_ops_event' in (select prosrc from pg_proc where oid = to_regprocedure('private.monitor_project_tasks()'))) = 0
+where md5((select prosrc from pg_proc where oid = to_regprocedure('private.monitor_project_tasks()'))) = '2c762f38b56ea5a683061529bd5e5d7f'
 on conflict (fn) do nothing;
 insert into private.digest_bundle_snapshot(fn, def)
 select 'public.send_evening_report()', pg_get_functiondef(to_regprocedure('public.send_evening_report()'))
@@ -694,7 +694,7 @@ do $post$
 declare mon text; ev text; sec text;
 begin
   select prosrc into mon from pg_proc where oid = to_regprocedure('private.monitor_project_tasks()');
-  if position('observe_ops_event' in mon) = 0 then raise exception 'postflight: monitor not updated'; end if;
+  if md5(mon) <> 'a301b12b6f186a94cf589729e8426b7b' then raise exception 'postflight: monitor body differs from the bundled definition (md5 %)', md5(mon); end if;
   if (length(mon) - length(replace(mon, 'public.notify_telegram(', ''))) / length('public.notify_telegram(') <> 2 then
     raise exception 'postflight: monitor must contain exactly 2 critical-only notify_telegram calls';
   end if;

@@ -1,5 +1,14 @@
 -- Central health monitoring for OZK project sync sources and Supabase cron jobs.
 -- Applied live on 2026-08-23. Safe to rerun.
+-- سياسة «الملخص اليومي فقط» (PR #312): هذا الملف المرجعي يُصدر الآن سلوكاً يُسكت الإنذارات
+-- المستقلة، فلا يُطبَّق منفرداً أبداً؛ التفعيل الإنتاجي الوحيد هو supabase/proposed/12-digest-only-atomic-bundle.sql
+-- (يضبط app.digest_bundle داخل معاملته ويرقّع تقرير المساء معاً). تشغيله خارج الحزمة يفشل
+-- قبل تغيير أي شيء كي لا تنشأ مرحلة صامتة بلا قسم في التقرير المسائي.
+do $guard$ begin
+  if coalesce(current_setting('app.digest_bundle', true), '') <> 'on' then
+    raise exception 'project-task-health-monitor.sql must be applied only through proposed/12 (atomic bundle)';
+  end if;
+end $guard$;
 create schema if not exists private;
 
 create table if not exists private.project_task_monitors (

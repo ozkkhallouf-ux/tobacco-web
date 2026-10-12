@@ -95,6 +95,27 @@ const exists = async (db, rel) => (await one(db, `select to_regclass('${rel}') r
   const before = await md5(db2, 'public.notify_telegram(text,text,text,integer,jsonb)');
   await db2.exec(bundle);
   assert.equal(await md5(db2, 'public.notify_telegram(text,text,text,integer,jsonb)'), before);
+  // انجراف لاحق يُبقي observe_ops_event: لا يُقبل بمجرد وجود اسم الدالة (بصمات دقيقة فقط)
+  const d3 = await liveDb();
+  await d3.exec(bundle);
+  await d3.exec(`do $x$ declare d text; begin
+     select replace(pg_get_functiondef('private.monitor_project_tasks()'::regprocedure),'begin','begin /*later-edit*/') into d; execute d; end $x$;`);
+  const edited = await md5(d3, 'private.monitor_project_tasks()');
+  assert.match((await defOf(d3, 'private.monitor_project_tasks()')), /observe_ops_event/);
+  await assert.rejects(d3.exec(bundle), /refusing to overwrite unknown drift/);
+  assert.equal(await md5(d3, 'private.monitor_project_tasks()'), edited, 'التعديل اللاحق لم يُستبدل');
+  // الملف القانوني لا يُشغَّل خارج الحزمة (يمنع مرحلة صامتة بلا قسم في التقرير)
+  const d4 = await liveDb();
+  const canonicalSql = readFileSync(path.join(root, 'supabase/project-task-health-monitor.sql'), 'utf8');
+  await assert.rejects(d4.exec(canonicalSql), /only through proposed\/12/);
+  assert.equal(await md5(d4, 'private.monitor_project_tasks()'), P09_MD5, 'المراقب لم يتغيّر');
+  assert.equal(await exists(d4, 'private.ops_events'), false);
+  // وكذلك proposed/10 و11 منفردين
+  for (const f of ['10-telegram-task-alert-noise-fix.sql', '11-evening-report-open-faults-section.sql']) {
+    const d5 = await liveDb();
+    await assert.rejects(d5.exec(readFileSync(path.join(root, 'supabase/proposed', f), 'utf8')), /only through proposed\/12/);
+    assert.equal(await md5(d5, 'private.monitor_project_tasks()'), P09_MD5);
+  }
   console.log('P1#1 OK');
 }
 
