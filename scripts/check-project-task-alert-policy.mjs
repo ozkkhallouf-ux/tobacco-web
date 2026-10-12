@@ -68,7 +68,7 @@ assert.equal(detector.split('public.notify_telegram(').length - 1, 1, 'الكا�
 assert.match(detector, /'evening-missing:'\|\|to_char\(rep_day,'YYYY-MM-DD'\)/, 'مفتاح اليوم');
 assert.match(detector, /day_key,1440\)/, 'تنبيه واحد في اليوم');
 assert.ok(detector.includes("'Asia/Damascus'") && detector.includes("time '23:15'") && !detector.includes("time '20:15'"), 'الحدّ 23:15 دمشق (التقرير 20:00 UTC = 23:00 دمشق)');
-assert.ok(detector.includes("event_type='evening_report'") && detector.includes("status in ('dispatched','sent')"), 'الدليل هو إرسال فعلي لا نجاح cron');
+assert.ok(detector.includes("event_type='evening_report'") && detector.includes("status='sent'") && !detector.includes("status in ('dispatched','sent')"), 'الدليل sent المؤكَّد لا dispatched ولا نجاح cron');
 assert.ok(!detector.includes('cron.'), 'الكاشف يجب ألا يعتمد على cron');
 // بلا ربط بـnotify_telegram (يتطلب موافقة المالك)
 assert.ok(!/create (or replace )?function public\.notify_telegram/.test(canonical), 'الملف القانوني يعدّل notify_telegram الإنتاجي');

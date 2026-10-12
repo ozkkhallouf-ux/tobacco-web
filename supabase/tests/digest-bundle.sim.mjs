@@ -358,8 +358,14 @@ const exists = async (db, rel) => (await one(db, `select to_regclass('${rel}') r
   await chk('2026-10-14T20:30:00Z');
   assert.equal((await alerts()).length, 2, 'لا تكرار في اليوم نفسه');
   await rep('2026-10-14T20:35:00Z', 'dispatched');
-  await chk('2026-10-14T20:40:00Z');
-  assert.equal(await openEv(), 0);
+  await chk('2026-10-14T20:40:00Z'); // قيد الإرسال: لا إغلاق ولا إنذار جديد
+  assert.equal(await openEv(), 1, 'dispatched غير مؤكَّد ليس تسليماً');
+  await chk('2026-10-14T21:00:00Z'); // dispatched عالق > 10 د: ما زال غياباً (والإنذار مُنع بالمفتاح)
+  assert.equal(await openEv(), 1);
+  assert.equal((await alerts()).length, 2);
+  await rep('2026-10-14T21:05:00Z', 'sent');
+  await chk('2026-10-14T21:10:00Z');
+  assert.equal(await openEv(), 0, 'sent المؤكَّد يغلق الحدث');
   // pending عالق أكثر من 10 دقائق ليس دليل إرسال؛ pending حديث دليل (بانتظار المُرسِل)
   await rep('2026-10-15T20:05:00Z', 'pending');
   await chk('2026-10-15T20:12:00Z');
