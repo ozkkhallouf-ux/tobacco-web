@@ -66,7 +66,10 @@ async function liveDb() {
    create function public.notify_telegram(p_event_type text, p_message text, p_dedupe_key text default null, p_dedupe_minutes int default 60, p_reply_markup jsonb default null)
      returns void language sql security definer set search_path=public as $$ select private.notify_telegram_dispatch(p_event_type,p_message,p_dedupe_key,p_dedupe_minutes,p_reply_markup) $$;
   `);
+  // main يحوي حارس «الحزمة الذرية»؛ الإنتاج طُبّق قبله، فنحاكي حالته الحية بتجاوز الحارس لهذه الخطوة فقط
+  await db.exec(`select set_config('app.digest_bundle','on',false)`);
   await db.exec(baseMain); await db.exec(p09); await db.exec(EVENING);
+  await db.exec(`select set_config('app.digest_bundle','',false)`);
   await db.exec(`update private.project_task_monitors set enabled=false where task_key not in ('customer-balances','price-sync')`);
   return db;
 }
@@ -81,7 +84,7 @@ const PROD = '60bbae6f1fed8ba5e66c9a9a91daed40';
 
 const db = await liveDb();
 assert.equal(await md5(db), PROD, 'fixture != production body');
-await assert.rejects(db.exec(p13), /requires proposed\/12/);
+await assert.rejects(db.exec(p13), /requires proposed\/12|lacks the exact open-faults block from proposed\/12/); // بعد دمج PR-A صارت دوال ops_events في main، فيرفض 13 عند غياب كتلة التقرير المسائي من 12
 assert.equal(await md5(db), PROD);
 await db.exec(bundle);
 await db.exec(p13);
@@ -369,6 +372,177 @@ console.log('resolved-today / silence windows ok');
   await db.exec(`update private.ops_events set resolved_at=now(), resolution='silence' where resolved_at is null`);
 }
 console.log('health faults persist until explicit recovery ok');
+
+// ===== PR-B: دورة حياة عطل الصحة غير الحرج عبر health-check.mjs الحقيقي ⇄ public.health_lifecycle (استمرار ← تعافٍ ← انقطاع مراقبة ← عودة) =====
+{
+  const H = await import(pathToFileURL(path.join(root, 'scripts', 'health-check.mjs')).href);
+  const { callLifecycle, detectLifecycleMode, resolveForClosure, processClosures } = H;
+  const sec = async () => (await one(db, 'select private.daily_open_faults_section(now(), 3000) s')).s;
+  const outN = async () => (await outbox(db)).length;
+  const ev = (key) => one(db, `select resolved_at, resolution, last_seen_at from private.ops_events where source='telegram' and event_key=$1 order by id desc limit 1`, [key]);
+  const openN = async (key) => (await q(db, `select 1 from private.ops_events where event_key=$1 and resolved_at is null`, [key])).length;
+  const create = (k, n) => notify(db, 'health_check', 'عطل ' + k, `health-${k}-issue-${n}`, 180);
+
+  // fetch وهمي يحمل طلبات السكربت الحقيقية إلى الدالة الفعلية في قاعدة الاختبار (أو يحاكي PGRST202 أثناء تأخّر schema cache)
+  const SECRETS = { SUPABASE_URL: 'https://db.example.test', SUPABASE_SERVICE_KEY: 'k' };
+  const ENV = { ...SECRETS, HEALTH_LIFECYCLE_MODE: 'managed' }; // الانتقال صريح: لا اكتشاف تلقائي ولا استدلال زمني
+  const state = { lag: false, down: false, urls: [] };
+  const fetchImpl = async (url, init) => {
+    state.urls.push(url);
+    if (state.down) throw new Error('connection refused');
+    const reply = (status, body) => ({ ok: status >= 200 && status < 300, status, text: async () => JSON.stringify(body) });
+    if (state.lag) return reply(404, { code: 'PGRST202', message: 'Could not find the function public.health_lifecycle' });
+    const b = JSON.parse(init.body);
+    try {
+      const r = await one(db, 'select public.health_lifecycle($1,$2,$3,$4) r', [b.p_op, b.p_key, b.p_issue, b.p_label]);
+      return reply(200, r.r);
+    } catch (e) { return reply(400, { code: '22023', message: String(e.message) }); }
+  };
+  const life = (op, args) => callLifecycle(op, args, { env: ENV, fetchImpl });
+  const renew = (k, n) => life('renew', { key: k, issue: n, label: 'عطل ' + k });
+  const flow = async (toClose, { env = ENV } = {}) => {
+    const closed = [];
+    const mode = await detectLifecycleMode({ env, fetchImpl });
+    await processClosures(toClose, {
+      resolveLifecycle: (key, number) => resolveForClosure(key, number, { mode, log: () => {}, call: (op, args) => callLifecycle(op, args, { env, fetchImpl }) }),
+      closeIssue: async (n) => { closed.push(n); return true; },
+      log: () => {},
+    });
+    return { mode, closed };
+  };
+  await db.exec(`update private.ops_events set resolved_at=now(), resolution='silence' where resolved_at is not null and resolution is null`);
+  await db.exec(`update private.ops_events set resolved_at=now(), resolution='silence' where resolved_at is null`);
+  await db.exec(`update private.ops_events set resolved_at=now()-interval '48 hours' where resolved_at is not null`);
+
+  assert.equal(await detectLifecycleMode({ env: ENV, fetchImpl }), 'ready', 'بعد تطبيق 13 + إعلان managed: ready');
+
+  // 1) استمرار >30س مع تجديد عبر RPC: حدث واحد مفتوح، last_seen_at يتجدد، بلا تسمية، بلا صفوف Telegram
+  await create('deploy-failed', 5);
+  await db.exec(`update private.ops_events set last_seen_at=now()-interval '29 hours' where event_key='health-deploy-failed-issue-5' and resolved_at is null`);
+  await db.exec(`delete from public.telegram_outbox where dedupe_key like 'health-%'`);
+  const n0b = await outN();
+  for (let h = 0; h < 3; h++) {
+    await db.exec(`select private.close_stale_ops_events(now(), interval '30 hours')`);
+    const r = await renew('deploy-failed', 5);
+    assert.equal(r.kind, 'ok'); assert.equal(r.body.renewed, 1);
+    await db.exec(`update private.ops_events set last_seen_at=now()-interval '29 hours' where event_key='health-deploy-failed-issue-5' and resolved_at is null`);
+  }
+  await renew('deploy-failed', 5);
+  assert.equal(await openN('health-deploy-failed-issue-5'), 1, 'one open event, never duplicated');
+  assert.ok(Date.now() - new Date((await ev('health-deploy-failed-issue-5')).last_seen_at).getTime() < 60000, 'last_seen_at renewed');
+  assert.ok(!(await sec()).includes('يلزم إعادة التحقق'), 'renewed fault is not flagged stale');
+  assert.equal(await outN(), n0b, 'renewal creates no Telegram rows');
+
+  // 2) تعافٍ مؤكَّد عبر مسار الإغلاق الحقيقي: يحلّ الحدث المطابق فقط (مفتاح+Issue)، صراحةً، بلا Telegram
+  await create('deploy-failed', 6);
+  await create('deploy-failed-extra', 5);
+  await create('price-generation-failed', 5);
+  const n1 = await outN();
+  let f = await flow([{ number: 5, key: 'deploy-failed' }]);
+  assert.deepEqual([f.mode, f.closed], ['ready', [5]]);
+  assert.equal((await ev('health-deploy-failed-issue-5')).resolution, 'explicit');
+  assert.equal(await openN('health-deploy-failed-issue-6'), 1, 'other issue number untouched');
+  assert.equal(await openN('health-deploy-failed-extra-issue-5'), 1, 'shared-prefix key untouched');
+  assert.equal(await openN('health-price-generation-failed-issue-5'), 1, 'other key untouched');
+  assert.match(await sec(), /حُلّ اليوم/);
+  assert.equal(await outN(), n1, 'recovery creates no Telegram row');
+  // تكرار الطلب: idempotent
+  const before = await ev('health-deploy-failed-issue-5');
+  f = await flow([{ number: 5, key: 'deploy-failed' }]);
+  assert.deepEqual(f.closed, [5]);
+  assert.equal(String((await ev('health-deploy-failed-issue-5')).resolved_at), String(before.resolved_at), 'repeat is idempotent');
+  assert.equal(await openN('health-deploy-failed-issue-6'), 1);
+  // عطل غير موجود: resolved:0، لا يُنشئ شيئاً ولا يغلق شيئاً
+  const openBefore = (await open(db)).length;
+  const none = await life('resolve', { key: 'no-such-fault', issue: 99 });
+  assert.deepEqual([none.kind, none.body.resolved], ['ok', 0]);
+  assert.equal((await open(db)).length, openBefore);
+  assert.equal(await outN(), n1);
+
+  // 3) مفتاح بـ@ وعربي
+  const wk = 'workflow-failure-فحص@main';
+  await create(wk, 8);
+  f = await flow([{ number: 8, key: wk }]);
+  assert.deepEqual(f.closed, [8]);
+  assert.equal((await ev(`health-${wk}-issue-8`)).resolution, 'explicit');
+
+  // 4) توقف المراقبة: لا تجديد ولا حلّ ⇒ لا إغلاق بالصمت، ويُسمّى «يلزم إعادة التحقق» لا «حُلّ»
+  await db.exec(`update private.ops_events set last_seen_at=now()-interval '31 hours' where event_key='health-deploy-failed-issue-6' and resolved_at is null`);
+  await db.exec(`select private.close_stale_ops_events(now(), interval '3 hours')`);
+  assert.equal(await openN('health-deploy-failed-issue-6'), 1, 'health faults are never silence-closed');
+  assert.match(await sec(), /يلزم إعادة التحقق/);
+  assert.notEqual((await one(db, `select resolution r from private.ops_events where event_key='health-deploy-failed-issue-6' order by id desc limit 1`)).r, 'silence');
+  // 5) عودة المراقبة والعطل قائم: التجديد يمسح التسمية؛ ثم تعافٍ يغلق
+  await renew('deploy-failed', 6);
+  assert.ok(!(await sec()).includes('يلزم إعادة التحقق'), 'monitoring returned: label cleared');
+  assert.equal(await openN('health-deploy-failed-issue-6'), 1);
+  f = await flow([{ number: 6, key: 'deploy-failed' }]);
+  assert.deepEqual(f.closed, [6]);
+  assert.equal(await openN('health-deploy-failed-issue-6'), 0);
+
+  // 6) الحرجان: فوريان دائماً، يُغلقان بلا RPC، والـRPC ترفضهما صراحةً
+  const urlsBefore = state.urls.length;
+  state.lag = false;
+  const probeOnly = await flow([{ number: 1, key: 'site-down' }, { number: 2, key: 'health-check-crashed' }]);
+  assert.deepEqual(probeOnly.closed, [1, 2]);
+  assert.equal(state.urls.length, urlsBefore + 1, 'probe فقط؛ لا resolve للحرجين');
+  for (const k of ['site-down', 'health-check-crashed']) {
+    assert.equal((await life('renew', { key: k, issue: 1 })).kind, 'error');
+    assert.equal((await life('resolve', { key: k, issue: 1 })).kind, 'error');
+  }
+  const n2 = await outN();
+  await db.exec(`delete from public.telegram_outbox where dedupe_key='health-site-down-issue-1'`);
+  await notify(db, 'health_check', 'الموقع متوقف', 'health-site-down-issue-1', 180);
+  assert.equal(await outN(), n2 + 1, 'site-down stays immediate');
+
+  // 7) تأخّر schema cache / تراجع 13 / فشل اتصال تحت managed: لا إغلاق ولا افتراض تعافٍ مهما تكرّر (لا رجوع تلقائي إلى legacy)؛ الحدث يبقى ويُحلّ عند العودة
+  await create('deploy-failed', 7);
+  state.lag = true;
+  for (let i = 0; i < 6; i++) {
+    f = await flow([{ number: 7, key: 'deploy-failed' }]);
+    assert.deepEqual([f.mode, f.closed], ['unavailable', []], 'PGRST202 المتكرر لا يُغلق');
+  }
+  state.lag = false; state.down = true;
+  f = await flow([{ number: 7, key: 'deploy-failed' }]);
+  assert.deepEqual([f.mode, f.closed], ['unavailable', []], 'فشل الاتصال ⇒ لا إغلاق');
+  assert.equal(await openN('health-deploy-failed-issue-7'), 1);
+  state.down = false;
+  // 8) مفتاح الطوارئ: لا طلبات DB إطلاقاً، لا حلّ، لا إغلاق لغير الحرج، والحدث لا يُمسّ
+  const urlsOff = state.urls.length;
+  f = await flow([{ number: 7, key: 'deploy-failed' }, { number: 3, key: 'site-down' }], { env: { ...ENV, HEALTH_LIFECYCLE_SIGNALS: 'off' } });
+  assert.deepEqual([f.mode, f.closed], ['off', [3]]);
+  assert.equal(state.urls.length, urlsOff, 'emergency off ⇒ zero DB calls');
+  assert.equal(await openN('health-deploy-failed-issue-7'), 1);
+  // عودة: يُحلّ ثم يُغلق
+  f = await flow([{ number: 7, key: 'deploy-failed' }]);
+  assert.deepEqual(f.closed, [7]);
+  assert.equal(await openN('health-deploy-failed-issue-7'), 0);
+
+  // 9) فقدان الأسرار بعد إعلان managed (والحدث مفتوح فعلاً): hold، صفر طلبات، لا حدث يتيم، ثم يُحلّ عند استعادة المفتاح
+  const urlsNoSecret = state.urls.length;
+  await create('deploy-failed', 11);
+  f = await flow([{ number: 11, key: 'deploy-failed' }], { env: { HEALTH_LIFECYCLE_MODE: 'managed' } });
+  assert.deepEqual([f.mode, f.closed], ['unavailable', []], 'فُقد المفتاح ⇒ يبقى مفتوحاً');
+  assert.equal(state.urls.length, urlsNoSecret);
+  assert.equal(await openN('health-deploy-failed-issue-11'), 1, 'الحدث لم يُمسّ ولم يُغلق الـIssue');
+  f = await flow([{ number: 11, key: 'deploy-failed' }]);
+  assert.deepEqual([f.mode, f.closed], ['ready', [11]], 'استعادة المفتاح ⇒ يُحلّ ثم يُغلق');
+  assert.equal(await openN('health-deploy-failed-issue-11'), 0);
+  // غير مُعلَن (unknown): hold بلا طلبات
+  await create('deploy-failed', 12);
+  f = await flow([{ number: 12, key: 'deploy-failed' }], { env: SECRETS });
+  assert.deepEqual([f.mode, f.closed], ['unknown', []]);
+  // 10) legacy مُعلَن صراحةً (بعد تراجع 13 وحلّ أحداثه): الوحيد الذي يُغلق بلا RPC؛ لا طلبات DB
+  const urlsLegacy = state.urls.length;
+  f = await flow([{ number: 12, key: 'deploy-failed' }], { env: { ...SECRETS, HEALTH_LIFECYCLE_MODE: 'legacy' } });
+  assert.deepEqual([f.mode, f.closed], ['legacy', [12]]);
+  assert.equal(state.urls.length, urlsLegacy);
+  await db.exec(`select public.health_lifecycle('resolve','deploy-failed',12,null)`);
+
+  assert.ok(!state.urls.some((u) => !u.endsWith('/rpc/health_lifecycle')), 'لا طلب غير RPC الحياة');
+  await db.exec(`update private.ops_events set resolved_at=now(), resolution='silence' where resolved_at is null`);
+}
+console.log('PR-B health lifecycle (persist / recover / outage / return) ok');
 
 // rollback / re-apply
 // انجراف: تعديل لاحق على دالة موجَّهة ⇒ التراجع يرفض ولا يكتب فوقه

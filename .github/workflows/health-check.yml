@@ -39,4 +39,12 @@ jobs:
           # سرّ اختياري — إن لم يُضبط، يُسجَّل تحذير ويُتخطى إشعار تيليغرام فقط (لا يوقف الفحص).
           # يضبطه المستخدم بنفسه عبر: gh secret set SUPABASE_SERVICE_KEY
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          # الانتقال بين النظامين **صريح** يعلنه المشغّل، ولا يُستنتج أبداً من PGRST202 ولا من الزمن ولا من غياب المفتاح:
+          #   legacy (الافتراضي = سلوك الإنتاج اليوم): إغلاق الـIssue بالطريقة القديمة بلا أي طلب لقاعدة البيانات.
+          #   managed: يُستعمل public.health_lifecycle (SQL 13) بعد probe جاهز؛ إن لم يكن جاهزاً (تأخّر schema cache/انقطاع/فقدان المفتاح/تراجع 13) تبقى الـIssues مفتوحة ولا رجوع تلقائي إلى legacy.
+          #   أي قيمة أخرى = unknown: الـIssues غير الحرجة تبقى مفتوحة.
+          # ذرّية الانتقال: يُعلَن managed **قبل** تطبيق SQL 13 مباشرةً (لا يعمل 13 أبداً مع legacy وإلا بقي حدث يتيم)؛ راجع supabase/proposed/README.md. لا يُضبط شيء الآن.
+          HEALTH_LIFECYCLE_MODE: ${{ vars.HEALTH_LIFECYCLE_MODE || 'legacy' }}
+          # إيقاف طوارئ فقط: القيمة off توقف عمليات دورة الحياة كلياً (صفر طلبات DB) وتسبق أي إعلان؛ غير الحرجة تبقى مفتوحة والحرجة تُغلق.
+          HEALTH_LIFECYCLE_SIGNALS: ${{ vars.HEALTH_LIFECYCLE_SIGNALS }}
         run: node scripts/health-check.mjs

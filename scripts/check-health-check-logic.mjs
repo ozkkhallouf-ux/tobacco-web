@@ -305,4 +305,257 @@ assert.match(
   'عودة الثغرة: فشل كل قنوات التبليغ يجب أن يُفشل التشغيل لا أن يمرّ بنجاح.',
 );
 
+// ═══════════ دورة حياة العطل غير الحرج (PR-B): RPC بإقرار صريح (public.health_lifecycle في proposed/13) ═══════════
+{
+  const H = await import(pathToFileURL(SCRIPT).href);
+  const { IMMEDIATE_HEALTH_KEYS, processClosures, callLifecycle, detectLifecycleMode, resolveForClosure, lifecycleSwitchOff, declaredLifecycleMode } = H;
+  const ENV = { SUPABASE_URL: 'https://db.example.test', SUPABASE_SERVICE_KEY: 'k' };
+
+  // الحرجان فقط فوريان، وتطابق التوجيه والـRPC في proposed/13 حرفياً (لا انجراف بين الطرفين)
+  assert.deepEqual([...IMMEDIATE_HEALTH_KEYS], ['site-down', 'health-check-crashed']);
+  const p13 = await readFile(path.join(repoRoot, 'supabase', 'proposed', '13-digest-routing-for-noncritical-alerts.sql'), 'utf8');
+  assert.ok(p13.includes("^health-(site-down|health-check-crashed)"), 'قائمة الحرجين في health-check.mjs يجب أن تطابق توجيه 13');
+  assert.ok(p13.includes("p_key in ('site-down', 'health-check-crashed')"), 'الـRPC ترفض الحرجين نفسيهما');
+  assert.ok(p13.includes('create or replace function public.health_lifecycle('), 'الـRPC موجودة في 13');
+
+  // مفتاح الإيقاف: طوارئ فقط (off)، أي قيمة أخرى = اكتشاف تلقائي
+  assert.equal(lifecycleSwitchOff({}), false);
+  for (const v of ['off', 'OFF', ' off ']) assert.equal(lifecycleSwitchOff({ HEALTH_LIFECYCLE_SIGNALS: v }), true, v);
+  for (const v of ['on', 'yes', '', '0', 'false']) assert.equal(lifecycleSwitchOff({ HEALTH_LIFECYCLE_SIGNALS: v }), false, v);
+
+  // fetch وهمي يسجّل الطلبات (لا شبكة)
+  const mkFetch = (handler) => {
+    const reqs = [];
+    const fetchImpl = async (url, init) => {
+      reqs.push({ url, init, body: JSON.parse(init.body) });
+      return handler(reqs[reqs.length - 1]);
+    };
+    return { reqs, fetchImpl };
+  };
+  const reply = (status, body) => ({ ok: status >= 200 && status < 300, status, text: async () => (typeof body === 'string' ? body : JSON.stringify(body)) });
+  const PGRST202 = { code: 'PGRST202', message: 'Could not find the function public.health_lifecycle' };
+
+  // callLifecycle: الطلب إلى rpc/health_lifecycle فقط (لا notify_telegram) بهوية العملية كاملة
+  {
+    const f = mkFetch(() => reply(200, { ok: true, op: 'resolve', resolved: 1 }));
+    const r = await callLifecycle('resolve', { key: 'deploy-failed', issue: 12 }, { env: ENV, fetchImpl: f.fetchImpl });
+    assert.equal(r.kind, 'ok');
+    assert.equal(f.reqs[0].url, 'https://db.example.test/rest/v1/rpc/health_lifecycle');
+    assert.deepEqual(f.reqs[0].body, { p_op: 'resolve', p_key: 'deploy-failed', p_issue: 12, p_label: null });
+    assert.equal(f.reqs[0].init.headers['Content-Profile'], 'public');
+  }
+  // أنواع الفشل ⇒ error/absent لا ok
+  const outcomes = [
+    ['PGRST202', () => reply(404, PGRST202), 'absent'],
+    ['404 آخر (ليس PGRST202)', () => reply(404, { code: 'PGRST125' }), 'error'],
+    ['404 بجسم غير JSON', () => reply(404, '<html>nginx</html>'), 'error'],
+    ['500', () => reply(500, { message: 'boom' }), 'error'],
+    ['503', () => reply(503, 'unavailable'), 'error'],
+    ['401', () => reply(401, { message: 'bad key' }), 'error'],
+    ['403', () => reply(403, { message: 'permission denied' }), 'error'],
+    ['400 (خطأ صريح من الـRPC)', () => reply(400, { code: '22023', message: 'health_lifecycle: invalid key' }), 'error'],
+    ['2xx بلا إقرار', () => reply(200, {}), 'error'],
+    ['2xx ok=false', () => reply(200, { ok: false, op: 'resolve', resolved: 1 }), 'error'],
+    ['2xx عملية مختلفة', () => reply(200, { ok: true, op: 'renew', renewed: 1, created: false }), 'error'],
+    ['2xx بلا resolved', () => reply(200, { ok: true, op: 'resolve' }), 'error'],
+    ['2xx null', () => reply(200, 'null'), 'error'],
+  ];
+  for (const [name, h, want] of outcomes) {
+    const f = mkFetch(h);
+    assert.equal((await callLifecycle('resolve', { key: 'k', issue: 1 }, { env: ENV, fetchImpl: f.fetchImpl })).kind, want, name);
+  }
+  assert.equal((await callLifecycle('resolve', { key: 'k', issue: 1 }, { env: ENV, fetchImpl: async () => { throw new Error('ECONNRESET'); } })).kind, 'error', 'شبكة');
+  assert.equal((await callLifecycle('probe', {}, { env: {}, fetchImpl: async () => { throw new Error('must not call'); } })).kind, 'error', 'بلا أسرار');
+  assert.equal((await callLifecycle('renew', { key: 'k', issue: 1 }, { env: ENV, fetchImpl: mkFetch(() => reply(200, { ok: true, op: 'renew', renewed: 0, created: true })).fetchImpl })).kind, 'ok');
+
+  // الإعلان الصريح: لا استنتاج من PGRST202 ولا من الزمن ولا من غياب الأسرار
+  const MANAGED = { ...ENV, HEALTH_LIFECYCLE_MODE: 'managed' };
+  const LEGACY = { ...ENV, HEALTH_LIFECYCLE_MODE: 'legacy' };
+  assert.equal(declaredLifecycleMode({}), 'unknown');
+  assert.equal(declaredLifecycleMode({ HEALTH_LIFECYCLE_MODE: ' Managed ' }), 'managed');
+  assert.equal(declaredLifecycleMode({ HEALTH_LIFECYCLE_MODE: 'LEGACY' }), 'legacy');
+  for (const v of ['', 'auto', 'on', 'true', 'managed2']) assert.equal(declaredLifecycleMode({ HEALTH_LIFECYCLE_MODE: v }), 'unknown', `قيمة غير معروفة «${v}»`);
+  const mode = async (h, env = MANAGED) => { const f = mkFetch(h); return { m: await detectLifecycleMode({ env, fetchImpl: f.fetchImpl }), f }; };
+  assert.equal((await mode(() => reply(200, { ok: true, op: 'probe', v: 1, ready: true }))).m, 'ready');
+  // managed: أي إخفاق ⇒ unavailable (hold) وليس legacy أبداً
+  assert.equal((await mode(() => reply(200, { ok: true, op: 'probe', v: 1, ready: false }))).m, 'unavailable', '13 موجود لكن التوجيه غير فعّال');
+  assert.equal((await mode(() => reply(404, PGRST202))).m, 'unavailable', 'PGRST202 وحده ليس دليلاً على legacy');
+  assert.equal((await mode(() => reply(503, 'x'))).m, 'unavailable');
+  assert.equal((await mode(() => reply(401, 'x'))).m, 'unavailable');
+  assert.equal((await mode(() => { throw new Error('db down'); })).m, 'unavailable', 'انقطاع الاتصال');
+  for (const env of [{ HEALTH_LIFECYCLE_MODE: 'managed' }, { HEALTH_LIFECYCLE_MODE: 'managed', SUPABASE_URL: ENV.SUPABASE_URL }, { HEALTH_LIFECYCLE_MODE: 'managed', SUPABASE_SERVICE_KEY: 'k' }]) {
+    const u = await mode(() => reply(200, { ok: true, op: 'probe', v: 1, ready: true }), env);
+    assert.equal(u.m, 'unavailable', 'فقدان الأسرار بعد إعلان managed ⇒ لا legacy'); assert.equal(u.f.reqs.length, 0);
+  }
+  // legacy / unknown: صفر استدعاء DB مهما كانت الحال
+  for (const [env, want] of [[LEGACY, 'legacy'], [{ ...LEGACY, SUPABASE_URL: '', SUPABASE_SERVICE_KEY: '' }, 'legacy'], [ENV, 'unknown'], [{}, 'unknown'], [{ ...ENV, HEALTH_LIFECYCLE_MODE: 'auto' }, 'unknown']]) {
+    const x = await mode(() => reply(200, { ok: true, op: 'probe', v: 1, ready: true }), env);
+    assert.equal(x.m, want); assert.equal(x.f.reqs.length, 0, `${want}: لا طلبات DB`);
+  }
+  // الطوارئ تسبق كل إعلان
+  for (const decl of ['managed', 'legacy', '']) {
+    const off = await mode(() => reply(200, { ok: true, op: 'probe', v: 1, ready: true }), { ...ENV, HEALTH_LIFECYCLE_MODE: decl, HEALTH_LIFECYCLE_SIGNALS: 'off' });
+    assert.equal(off.m, 'off'); assert.equal(off.f.reqs.length, 0, 'إيقاف الطوارئ: لا أي طلب لقاعدة البيانات');
+  }
+  assert.ok(!/confirmLegacyAbsence|health-probe-absent|health-lifecycle-managed|LEGACY_CONFIRM/.test(codeOnly), 'لا استدلال زمني ولا وسوم GitHub في قرار legacy');
+
+  // resolveForClosure: القرارات
+  {
+    const logs = [];
+    const log = (m) => logs.push(m);
+    const never = () => { throw new Error('must not be called'); };
+    assert.equal(await resolveForClosure('deploy-failed', 5, { mode: 'legacy', call: never, log }), 'legacy');
+    for (const m of ['off', 'unknown', 'unavailable', 'absent', 'unconfigured', undefined]) {
+      assert.equal(await resolveForClosure('deploy-failed', 5, { mode: m, call: never, log }), 'hold', `${m} ⇒ hold بلا RPC`);
+    }
+    const calls = [];
+    assert.equal(await resolveForClosure('deploy-failed', 5, { mode: 'ready', log, call: async (op, a) => { calls.push([op, a]); return { kind: 'ok', body: { ok: true, op: 'resolve', resolved: 1 } }; } }), 'resolved');
+    assert.deepEqual(calls, [['resolve', { key: 'deploy-failed', issue: 5 }]]);
+    for (const bad of [{ kind: 'error', detail: 'HTTP 500' }, { kind: 'absent' }]) {
+      assert.equal(await resolveForClosure('deploy-failed', 5, { mode: 'ready', log, call: async () => bad }), 'hold', JSON.stringify(bad));
+    }
+    assert.ok(logs.some((m) => m.startsWith('::warning::')), 'managed غير متاح ⇒ تحذير مرئي في Actions');
+    assert.ok(logs.length >= 5, 'كل تعليق حالة يُسجَّل بوضوح');
+  }
+
+  // قاعدة بيانات وهمية تطبّق دلالة الـRPC (مطابقة المفتاح+رقم الـIssue بالضبط) لاختبار التدفق كاملاً بلا Telegram
+  const mkDb = (state) => {
+    const events = new Set(state.events || []);
+    const urls = [];
+    const fetchImpl = async (url, init) => {
+      urls.push(url);
+      if (state.down) throw new Error('connection refused');
+      if (state.lag) return reply(404, PGRST202);
+      const b = JSON.parse(init.body);
+      const ek = `health-${b.p_key}-issue-${b.p_issue}`;
+      if (b.p_op === 'probe') return reply(200, { ok: true, op: 'probe', v: 1, ready: true });
+      if (b.p_op === 'renew') { const had = events.has(ek); events.add(ek); return reply(200, { ok: true, op: 'renew', renewed: had ? 1 : 0, created: !had }); }
+      const had = events.delete(ek);
+      return reply(200, { ok: true, op: 'resolve', resolved: had ? 1 : 0 });
+    };
+    return { events, urls, fetchImpl, state };
+  };
+  const closeFlow = async (db, toClose, { env = MANAGED } = {}) => {
+    const closed = [];
+    const mode = await detectLifecycleMode({ env, fetchImpl: db.fetchImpl });
+    const logs = [];
+    const res = await processClosures(toClose, {
+      resolveLifecycle: (key, number) => resolveForClosure(key, number, { mode, log: (m) => logs.push(m), call: (op, args) => callLifecycle(op, args, { env, fetchImpl: db.fetchImpl }) }),
+      closeIssue: async (n) => { closed.push(n); return true; },
+      log: (m) => logs.push(m),
+    });
+    return { res, closed, mode, logs };
+  };
+
+  // managed + جاهز: يحلّ الحدث المطابق وحده (مفاتيح وأرقام مختلفة) ثم يغلق؛ تكرار التنفيذ idempotent
+  {
+    const db = mkDb({ events: ['health-deploy-failed-issue-5', 'health-deploy-failed-issue-6', 'health-price-generation-failed-issue-5'] });
+    let f = await closeFlow(db, [{ number: 5, key: 'deploy-failed' }]);
+    assert.deepEqual(f.closed, [5]);
+    assert.deepEqual([...db.events].sort(), ['health-deploy-failed-issue-6', 'health-price-generation-failed-issue-5'], 'لا يُغلَق حدث بمفتاح أو رقم Issue آخر');
+    f = await closeFlow(db, [{ number: 5, key: 'deploy-failed' }]);
+    assert.deepEqual(f.closed, [5], 'تكرار الطلب لا يفشل (idempotent)');
+    assert.equal(db.events.size, 2);
+    assert.ok(db.urls.every((u) => u.endsWith('/rpc/health_lifecycle')), 'لا استدعاء لـnotify_telegram إطلاقاً');
+  }
+  // managed + تأخّر schema cache أو تراجع 13 (PGRST202) مهما طال: لا إغلاق أبداً (لا زمن ولا تكرار يحوّلانه إلى legacy)، ثم يعود ready فيُحلّ الحدث
+  {
+    const db = mkDb({ events: ['health-deploy-failed-issue-5'], lag: true });
+    for (let i = 0; i < 12; i++) {
+      const f = await closeFlow(db, [{ number: 5, key: 'deploy-failed' }]);
+      assert.deepEqual([f.mode, f.closed], ['unavailable', []], `الدورة ${i}: PGRST202 لا يُغلق`);
+    }
+    assert.equal(db.events.size, 1);
+    delete db.state.lag;
+    const f = await closeFlow(db, [{ number: 5, key: 'deploy-failed' }]);
+    assert.deepEqual([f.mode, f.closed], ['ready', [5]]);
+    assert.equal(db.events.size, 0, 'لا حدث يتيم بعد الإغلاق');
+  }
+  // managed + فقدان المفتاح بعد التشغيل (من البداية أو بعد 13): لا طلبات، لا إغلاق لغير الحرج، الحدث لا يُمسّ
+  for (const env of [{ HEALTH_LIFECYCLE_MODE: 'managed' }, { HEALTH_LIFECYCLE_MODE: 'managed', SUPABASE_URL: ENV.SUPABASE_URL }]) {
+    const db = mkDb({ events: ['health-deploy-failed-issue-5'] });
+    const f = await closeFlow(db, [{ number: 5, key: 'deploy-failed' }, { number: 9, key: 'site-down' }], { env });
+    assert.deepEqual([f.mode, f.closed, db.urls.length], ['unavailable', [9], 0]);
+    assert.equal(db.events.size, 1, 'لا حدث يتيم ولا كتم: الـIssue يبقى مفتوحاً حتى استعادة المفتاح');
+    assert.ok(f.logs.some((m) => m.startsWith('::warning::')));
+  }
+  // legacy مُعلَن (قبل 13 أو بعد تراجعه): يُغلق بالسلوك القديم بلا أي استدعاء DB، حتى بلا أسرار أو مع قاعدة معطّلة
+  for (const [name, st, env] of [['قبل 13', { lag: true }, LEGACY], ['بلا أسرار', {}, { HEALTH_LIFECYCLE_MODE: 'legacy' }], ['اتصال معطّل', { down: true }, LEGACY]]) {
+    const db = mkDb(st);
+    const f = await closeFlow(db, [{ number: 5, key: 'deploy-failed' }, { number: 9, key: 'site-down' }], { env });
+    assert.deepEqual([f.mode, f.closed, db.urls.length], ['legacy', [5, 9], 0], name);
+  }
+  // غير مُعلَن (unknown): لا إغلاق لغير الحرج ولا طلبات (الـworkflow يضبط legacy افتراضياً فلا يحدث هذا في الإنتاج)
+  {
+    const db = mkDb({ events: ['health-deploy-failed-issue-5'] });
+    const f = await closeFlow(db, [{ number: 5, key: 'deploy-failed' }, { number: 9, key: 'site-down' }], { env: ENV });
+    assert.deepEqual([f.mode, f.closed, db.urls.length], ['unknown', [9], 0]);
+  }
+  // managed + فشل اتصال: لا إغلاق ولا افتراض تعافٍ؛ يُعاد لاحقاً
+  {
+    const db = mkDb({ events: ['health-deploy-failed-issue-5'], down: true });
+    let f = await closeFlow(db, [{ number: 5, key: 'deploy-failed' }, { number: 9, key: 'site-down' }]);
+    assert.equal(f.mode, 'unavailable');
+    assert.deepEqual(f.closed, [9], 'الحرج بلا حدث يُغلق؛ غير الحرج يبقى');
+    delete db.state.down;
+    f = await closeFlow(db, [{ number: 5, key: 'deploy-failed' }]);
+    assert.deepEqual(f.closed, [5], 'عودة الاتصال ⇒ يكتمل الإغلاق');
+    assert.equal(db.events.size, 0);
+  }
+  // managed + فشل resolve بعد probe ناجح (5xx): لا إغلاق
+  {
+    const calls = [];
+    const fetchImpl = async (url, init) => {
+      const b = JSON.parse(init.body); calls.push(b.p_op);
+      return b.p_op === 'probe' ? reply(200, { ok: true, op: 'probe', v: 1, ready: true }) : reply(500, { message: 'boom' });
+    };
+    const f = await closeFlow({ fetchImpl }, [{ number: 5, key: 'deploy-failed' }]);
+    assert.deepEqual([f.mode, f.closed], ['ready', []]);
+    assert.deepEqual(calls, ['probe', 'resolve']);
+  }
+  // إيقاف الطوارئ في كل حال (managed/legacy، قبل 13 وبعده وعند انقطاع الاتصال): لا طلبات، لا إغلاق لغير الحرج، الحرج يُغلق
+  for (const decl of ['managed', 'legacy']) {
+    for (const [name, st] of [['قبل 13', { lag: true }], ['بعد 13', { events: ['health-deploy-failed-issue-5'] }], ['اتصال معطّل', { down: true }]]) {
+      const db = mkDb(st);
+      const f = await closeFlow(db, [{ number: 5, key: 'deploy-failed' }, { number: 9, key: 'health-check-crashed' }], { env: { ...ENV, HEALTH_LIFECYCLE_MODE: decl, HEALTH_LIFECYCLE_SIGNALS: 'off' } });
+      assert.deepEqual([f.mode, f.closed, db.urls.length], ['off', [9], 0], `${decl}/${name}`);
+      assert.equal(db.events.size, st.events ? 1 : 0, `${decl}/${name}: لا حدث يتيم ولا حلّ`);
+    }
+  }
+  // فشل الإغلاق لا يكسر بقية القائمة؛ وحرج بلا استدعاء lifecycle
+  {
+    const seen = [];
+    const r = await processClosures(
+      [{ number: 1, key: 'a' }, { number: 2, key: 'b' }, { number: 3, key: 'site-down' }],
+      { resolveLifecycle: async (k, n) => { seen.push(`${k}#${n}`); return 'resolved'; }, closeIssue: async (n) => { if (n === 1) throw new Error('gh down'); return true; } },
+    );
+    assert.deepEqual(r.map((x) => x.closed), [false, true, true]);
+    assert.deepEqual(seen, ['a#1', 'b#2'], 'الحرج لا يمرّ بالـRPC');
+  }
+
+  // عدم اعتبار الغياب/الفشل تعافياً: decideIssuesToClose هي الباب الوحيد؛ لا دليل ⇒ لا قائمة ⇒ لا حلّ
+  const issues = [{ number: 5, body: '<!-- health:deploy-failed -->' }, { number: 6, body: '<!-- health:price-generation-failed -->' }];
+  assert.deepEqual(decideIssuesToClose({ openIssues: issues, activeKeys: [], healthyKeys: [], verifyKey: undefined }), [], 'غياب النتيجة ليس تعافياً');
+  assert.deepEqual(decideIssuesToClose({ openIssues: issues, activeKeys: [], healthyKeys: [], verifyKey: () => false }), [], 'تحقق فاشل/مجهول ليس تعافياً');
+  assert.deepEqual(decideIssuesToClose({ openIssues: issues, activeKeys: ['deploy-failed'], healthyKeys: ['deploy-failed'], verifyKey: undefined }), [], 'عطل ما يزال قائماً لا يُغلق');
+  assert.deepEqual(decideIssuesToClose({ openIssues: issues, activeKeys: [], healthyKeys: ['deploy-failed'] }).map((x) => x.number), [5], 'يُغلق المفتاح السليم فقط لا غيره');
+}
+
+// عقد نصّي: لا Telegram في دورة الحياة، التجديد غير الحرج عبر RPC فقط وبحالة ready، والإغلاق ينتظر
+{
+  const lifecycleCode = codeOnly.slice(codeOnly.indexOf('export const lifecycleSwitchOff'), codeOnly.indexOf('async function reportProblem'));
+  assert.ok(!/notify_telegram|notifyTelegram|telegram_outbox/.test(lifecycleCode), 'عمليات دورة الحياة لا تمرّ بتيليغرام');
+  assert.match(lifecycleCode, /rest\/v1\/rpc\/health_lifecycle/);
+  const rb = codeOnly.slice(codeOnly.indexOf('async function reportProblem'), codeOnly.indexOf('export function parseWorkflowIncidentKey'));
+  assert.match(rb, /isImmediateHealthKey\(problem\.key\)[\s\S]{0,200}getLifecycleMode\(\)\) === "ready"[\s\S]{0,200}callLifecycle\("renew"/, 'التجديد: غير حرج + ready + RPC');
+  assert.ok(!/notifyTelegram\(problem, `https:\/\/github\.com\/\$\{REPO\}\/issues\/\$\{existing\.number\}`/.test(rb), 'لا إشعار تيليغرام عند التجديد');
+  assert.ok(!/lifecycleSignalsEnabled|sendRecoverySignal|recoverySignalKey|renewalSignalKey/.test(codeOnly), 'لا بقايا مسار الإشارات عبر notify_telegram');
+  assert.match(codeOnly, /await closeResolvedIssues\(\{/, 'main ينتظر الإغلاق');
+  assert.match(codeOnly, /resolveLifecycle: async \(key, number\) => resolveForClosure\(/, 'الإغلاق يمرّ عبر حلّ الحدث بإقرار');
+  // مفتاح الطوارئ يمرّ عبر نقطة واحدة (detectLifecycleMode) لا فحوص متفرقة
+  assert.match(codeOnly, /if \(lifecycleSwitchOff\(env\)\) return "off";\s*const declared = declaredLifecycleMode\(env\);\s*if \(declared !== "managed"\) return declared;\s*const r = await callLifecycle\("probe"/, 'off ثم الإعلان الصريح قبل أي طلب');
+  // الإغلاق القديم مسار واحد فقط: الإعلان legacy
+  assert.equal((codeOnly.match(/mode === "legacy"/g) || []).length, 1, 'قرار الإغلاق القديم في موضع واحد فقط (resolveForClosure) وبشرط الإعلان');
+}
+
 console.log('check-health-check-logic: OK — مسح بلا قيد فرع وبقائمة سماح، مفاتيح متطابقة، تمييز التعافي، منع تكرار بهوية الحادثة، انهيار المراقب مرئي، وفشل كل قنوات التبليغ يُفشل التشغيل.');

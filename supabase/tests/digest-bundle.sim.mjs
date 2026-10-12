@@ -56,7 +56,9 @@ async function liveDb() {
    create function public.notify_telegram(k text, m text, dk text default null, dm int default 0, rm jsonb default null) returns void language sql as
     $$ insert into sent values(k,m,dk) $$;
   `);
+  await db.exec(`select set_config('app.digest_bundle','on',false)`); // main يحوي حارس الحزمة؛ نحاكي حالة الإنتاج الحية السابقة
   await db.exec(baseMain);
+  await db.exec(`select set_config('app.digest_bundle','',false)`);
   await db.exec(p09);
   await db.exec(EVENING(true));
   await db.exec(`update private.project_task_monitors set enabled=false where task_key not in ('customer-balances','price-sync')`);
@@ -77,9 +79,10 @@ const exists = async (db, rel) => (await one(db, `select to_regclass('${rel}') r
      select replace(pg_get_functiondef('private.monitor_project_tasks()'::regprocedure),'begin','begin /*drift*/') into d; execute d; end $x$;`);
   const drifted = await md5(db, 'private.monitor_project_tasks()');
   assert.notEqual(drifted, P09_MD5);
+  const hadOps = await exists(db, 'private.ops_events'); // بعد دمج PR-A قد تكون الجداول موجودة أصلاً من main
   await assert.rejects(db.exec(bundle), /refusing to overwrite unknown drift/);
   assert.equal(await md5(db, 'private.monitor_project_tasks()'), drifted, 'الفشل لا يغيّر شيئاً');
-  assert.equal(await exists(db, 'private.ops_events'), false, 'تراجع كامل بما فيه الجداول الجديدة');
+  assert.equal(await exists(db, 'private.ops_events'), hadOps, 'تراجع كامل: لا جداول جديدة بعد الفشل');
   assert.equal(await exists(db, 'private.digest_bundle_snapshot'), false);
   // الفرق السلوكي الوحيد عن الحي هو سياسة التنبيه: نفس العطل، 09 يرسل و«الجديد» لا يرسل
   const live = await liveDb();
@@ -109,7 +112,7 @@ const exists = async (db, rel) => (await one(db, `select to_regclass('${rel}') r
   const canonicalSql = readFileSync(path.join(root, 'supabase/project-task-health-monitor.sql'), 'utf8');
   await assert.rejects(d4.exec(canonicalSql), /only through proposed\/12/);
   assert.equal(await md5(d4, 'private.monitor_project_tasks()'), P09_MD5, 'المراقب لم يتغيّر');
-  assert.equal(await exists(d4, 'private.ops_events'), false);
+  assert.equal(await exists(d4, 'private.ops_events'), true);
   // تنفيذ الحزمة أمراً بأمر (autocommit): الحارس داخلها يرفض قبل أي تعديل
   {
     const d6 = await liveDb();
@@ -117,7 +120,7 @@ const exists = async (db, rel) => (await one(db, `select to_regclass('${rel}') r
     const guard = bundle.slice(bundle.indexOf('do $guard12$'), bundle.indexOf('end $guard12$') + 'end $guard12$;'.length);
     assert.ok(guard.length > 20);
     await assert.rejects(d6.exec(guard), /single transaction/);
-    assert.equal(await exists(d6, 'private.ops_events'), false);
+    assert.equal(await exists(d6, 'private.ops_events'), true);
     assert.equal(await md5(d6, 'private.monitor_project_tasks()'), P09_MD5);
   }
   // إعادة تشغيل 12 بعد تعديل لاحق على core_outage_verified (مسبار معتمد): يرفض ولا يعيدها إلى false
@@ -144,12 +147,12 @@ const exists = async (db, rel) => (await one(db, `select to_regclass('${rel}') r
   await a.exec(EVENING(false));
   await assert.rejects(a.exec(bundle), /anchor not found exactly once/);
   assert.equal(await md5(a, 'private.monitor_project_tasks()'), P09_MD5, 'المراقب لم يتغيّر');
-  assert.equal(await exists(a, 'private.ops_events'), false);
+  assert.equal(await exists(a, 'private.ops_events'), true);
 
   // (ب) فشل في منتصف الحزمة (جدول متعارض) ⇒ تراجع كامل، لا حالة نصفية
   const b = await liveDb();
   const evBefore = await defOf(b, 'public.send_evening_report()');
-  await b.exec('create table private.ops_events(id int)');
+  await b.exec('drop table private.ops_events cascade; create table private.ops_events(id int)'); // main يحوي الجدول أصلاً بعد PR-A؛ نستبدله بتعريف متعارض
   await assert.rejects(b.exec(bundle));
   await b.exec('rollback').catch(() => {});
   assert.equal(await md5(b, 'private.monitor_project_tasks()'), P09_MD5, 'فشل جزئي: المراقب الأصلي سليم');

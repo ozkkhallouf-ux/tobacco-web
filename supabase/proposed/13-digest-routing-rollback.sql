@@ -39,7 +39,7 @@ begin
             left('⚠️ أعطال مفتوحة عند إلغاء التوجيه إلى الملخص (' || n || ') — تُرسَل هذه المرة فقط:' || chr(10) || body, 3900),
             'rollback13-drain:' || to_char(now(), 'YYYY-MM-DD"T"HH24'));
   end if;
-  -- أُسقطت الـRPC أولاً: السكربت يعود تلقائياً إلى الوضع القديم (PGRST202 مؤكَّداً) بلا فيضان ولا إطفاء متغيّر
+  -- إسقاط الـRPC: لا رجوع تلقائي لـlegacy في health-check.mjs؛ يبقى HEALTH_LIFECYCLE_MODE=managed في وضع unavailable (الـIssues مفتوحة، لا إغلاق ولا تيليغرام) حتى يُعلَن legacy صراحةً
   drop function if exists public.health_lifecycle(text, text, integer, text);
   drop function if exists private.absorb_digest_alert(text,text,text);
   drop function if exists private.refine_immediate_alert(text,text,text);

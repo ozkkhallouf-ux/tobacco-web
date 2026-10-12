@@ -293,7 +293,14 @@ export function issueNumberFromUrl(issueUrl) {
   return m ? Number(m[1]) : null;
 }
 
-async function notifyTelegram(problem, issueUrl) {
+// ═══ دورة حياة العطل في سجلّ الملخص (private.ops_events) — يتطلب proposed/12 و13 ═══
+// الحرجان فقط فوريان ومستقلان عن السجلّ؛ كل ما عداهما غير حرج: يُجدَّد حضوره ما دام قائماً
+// ويُغلق بإشارة تعافٍ صريحة. (يطابق التوجيه: ^health-(site-down|health-check-crashed) في proposed/13.)
+export const IMMEDIATE_HEALTH_KEYS = Object.freeze(["site-down", "health-check-crashed"]);
+export const isImmediateHealthKey = (problemKey) => IMMEDIATE_HEALTH_KEYS.includes(problemKey);
+const validIssueNumber = (n) => Number.isInteger(n) && n > 0;
+
+async function notifyTelegram(problem, issueUrl, dedupeMinutes = 180) {
   const supabaseUrl = process.env.SUPABASE_URL;
   const serviceKey = process.env.SUPABASE_SERVICE_KEY;
   if (!supabaseUrl || !serviceKey) {
@@ -317,7 +324,7 @@ async function notifyTelegram(problem, issueUrl) {
         p_event_type: "health_check",
         p_message: message,
         p_dedupe_key: telegramDedupeKey(problem.key, issueNumber),
-        p_dedupe_minutes: 180,
+        p_dedupe_minutes: dedupeMinutes,
       }),
     });
     if (!res.ok) {
@@ -331,11 +338,100 @@ async function notifyTelegram(problem, issueUrl) {
   }
 }
 
+// ═══ دورة حياة أعطال الصحة عبر RPC بإقرار صريح: public.health_lifecycle (داخل proposed/13) ═══
+// لا notify_telegram هنا إطلاقاً: 2xx منه لا يثبت الامتصاص (عند خطأ داخلي يُرسَل النصّ رسالة فعلية)، أما الـRPC فتُقرّ
+// العملية نفسها (ok:true) أو ترمي خطأ صريحاً.
+//
+// آلية الانتقال **صريحة** عبر HEALTH_LIFECYCLE_MODE (يضبطها المشغّل، لا يستنتجها السكربت من PGRST202 ولا من الزمن ولا من غياب الأسرار):
+//   legacy  = 13 غير مطبَّق (أو سُحب بتراجعه): صفر استدعاء DB؛ يُغلَق الـIssue بالسلوك القديم عند دليل التعافي. **المسار الوحيد للإغلاق القديم.**
+//   managed = 13 مطبَّق: probe ثم renew/resolve بإقرار صريح؛ أي إخفاق (PGRST202، تأخّر schema cache، انقطاع، فقدان الأسرار، إقرار غير صالح)
+//             ⇒ hold (لا إغلاق، تُعاد المحاولة)، **لا رجوع تلقائي إلى legacy** مهما طال الإخفاق.
+//   غير مضبوط/قيمة غير معروفة = unknown ⇒ hold بلا استدعاء DB (الـworkflow يضبط legacy افتراضياً فيبقى الإنتاج الحالي كما هو).
+// HEALTH_LIFECYCLE_SIGNALS=off ⇒ إيقاف طوارئ يسبق كل شيء: صفر استدعاء DB، الـIssues غير الحرجة تبقى مفتوحة، الحرجة كالمعتاد.
+export const lifecycleSwitchOff = (env = process.env) => String(env.HEALTH_LIFECYCLE_SIGNALS || "").trim().toLowerCase() === "off";
+export const declaredLifecycleMode = (env = process.env) => {
+  const v = String(env.HEALTH_LIFECYCLE_MODE || "").trim().toLowerCase();
+  return v === "legacy" || v === "managed" ? v : "unknown";
+};
+
+const RPC_TIMEOUT_MS = 15000;
+// استدعاء health_lifecycle. الإرجاع:
+//   { kind: "ok", body }      = إقرار صالح للعملية المطلوبة بعينها؛
+//   { kind: "absent" }        = HTTP 404 + PGRST202 (دالة غير موجودة **أو** schema cache قديم — غير حاسم وحده)؛
+//   { kind: "error", detail } = أي شيء آخر (شبكة، 5xx، 401/403، 400، جسم غير متوقع…) ⇒ غير معروف.
+export async function callLifecycle(op, args = {}, { env = process.env, fetchImpl = fetch } = {}) {
+  const supabaseUrl = env.SUPABASE_URL;
+  const serviceKey = env.SUPABASE_SERVICE_KEY;
+  if (!supabaseUrl || !serviceKey) return { kind: "error", detail: "no-supabase-secrets" };
+  let res;
+  let text;
+  try {
+    res = await fetchImpl(`${supabaseUrl}/rest/v1/rpc/health_lifecycle`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        apikey: serviceKey,
+        Authorization: `Bearer ${serviceKey}`,
+        "Content-Profile": "public",
+      },
+      body: JSON.stringify({ p_op: op, p_key: args.key ?? null, p_issue: args.issue ?? null, p_label: args.label ?? null }),
+      signal: AbortSignal.timeout(RPC_TIMEOUT_MS),
+    });
+    text = await res.text();
+  } catch (err) {
+    return { kind: "error", detail: `network: ${err}` };
+  }
+  let body = null;
+  try { body = JSON.parse(text); } catch { /* جسم غير JSON */ }
+  if (res.status === 404 && body && body.code === "PGRST202") return { kind: "absent" };
+  if (!res.ok) return { kind: "error", detail: `HTTP ${res.status} ${String(text).slice(0, 200)}` };
+  const valid = body && body.ok === true && body.op === op && (
+    op === "probe" ? typeof body.ready === "boolean"
+    : op === "renew" ? Number.isInteger(body.renewed) && typeof body.created === "boolean"
+    : Number.isInteger(body.resolved));
+  if (!valid) return { kind: "error", detail: "unexpected-ack" };
+  return { kind: "ok", body };
+}
+
+// حالة التشغيل (مرة واحدة لكل تشغيل):
+//   "off" طوارئ؛ "legacy" مُعلَن؛ "unknown" غير مُعلَن؛ "ready" = managed + probe ok و ready=true؛
+//   "unavailable" = managed لكن الـprobe لم ينجح (PGRST202/شبكة/أسرار ناقصة/…) ⇒ hold، وليس legacy أبداً.
+export async function detectLifecycleMode(deps = {}) {
+  const env = deps.env || process.env;
+  if (lifecycleSwitchOff(env)) return "off";
+  const declared = declaredLifecycleMode(env);
+  if (declared !== "managed") return declared;
+  const r = await callLifecycle("probe", {}, deps);
+  return r.kind === "ok" && r.body.ready === true ? "ready" : "unavailable";
+}
+
+// قرار إغلاق Issue لعطل غير حرج (الحرجان بلا حدث ⇒ يُغلقان مباشرة في processClosures):
+//   "resolved" = الـRPC أقرّت إغلاق الحدث؛  "legacy" = المشغّل أعلن legacy صراحةً؛
+//   "hold"     = طوارئ/unknown/unavailable/فشل أو إقرار غير صالح ⇒ لا يُغلَق وتُعاد المحاولة الدورة التالية.
+export async function resolveForClosure(key, number, { mode, call, log = () => {} }) {
+  if (mode === "legacy") return "legacy";
+  if (mode === "off") { log(`⏸ إيقاف الطوارئ (HEALTH_LIFECYCLE_SIGNALS=off): يبقى Issue #${number} ("${key}") مفتوحاً — لا حلّ ولا إغلاق.`); return "hold"; }
+  if (mode === "unknown") { log(`⏸ HEALTH_LIFECYCLE_MODE غير مضبوط (legacy|managed) — يبقى Issue #${number} ("${key}") مفتوحاً.`); return "hold"; }
+  if (mode !== "ready") { log(`::warning::HEALTH_LIFECYCLE_MODE=managed لكن 13/الأسرار غير متاحة — يبقى Issue #${number} ("${key}") مفتوحاً ولا رجوع تلقائياً إلى legacy.`); return "hold"; }
+  const r = await call("resolve", { key, issue: number });
+  if (r.kind === "ok") return "resolved";
+  log(`✗ تعذّر حلّ حدث "${key}" (#${number}): ${r.kind === "absent" ? "PGRST202" : r.detail} — يبقى مفتوحاً وتُعاد المحاولة.`);
+  return "hold";
+}
+
 // ترجع true إن وصلت الحادثة عبر أي قناة (Issue قائم أو جديد، أو تيليغرام).
 async function reportProblem(problem) {
   const existing = findOpenIssueForKey(problem.key);
   if (existing) {
     console.log(`= مشكلة "${problem.key}" مفتوحة أصلاً بالـIssue #${existing.number} — لا تكرار.`);
+    // عطل غير حرج ما زال قائماً (تأكّد هذه الدورة): تجديد حضوره في سجلّ الملخص عبر RPC بإقرار صريح (لا Telegram إطلاقاً)،
+    // وإلا ظهر «يلزم إعادة التحقق» بعد 30 ساعة. لا تجديد إلا في حالة "ready"؛ فشله لا يُفشل الدورة (الـIssue موجود).
+    if (!isImmediateHealthKey(problem.key) && validIssueNumber(existing.number)) {
+      if ((await getLifecycleMode()) === "ready") {
+        const r = await callLifecycle("renew", { key: problem.key, issue: existing.number, label: problem.title });
+        if (r.kind !== "ok") console.log(`⚠️ تعذّر تجديد حضور "${problem.key}" (#${existing.number}): ${r.kind === "absent" ? "PGRST202" : r.detail}`);
+      }
+    }
     return true;
   }
   const marker = `<!-- health:${problem.key} -->`;
@@ -451,7 +547,36 @@ function verifyWorkflowIncidentResolved(key) {
   return isRecoveryConclusion(lastCompleted.conclusion);
 }
 
-function closeResolvedIssues({ activeKeys, healthyKeys, scanOk }) {
+// ينفّذ الإغلاق على قائمة قرّرتها decideIssuesToClose (دليل إيجابي فقط). الترتيب: حلّ الحدث في قاعدة البيانات أولاً ثم الإغلاق:
+//   * الحرجان (لا حدث لهما) ⇒ يُغلقان مباشرة؛
+//   * غيرهما ⇒ resolveLifecycle(key, number) يرجع "resolved" (إقرار الـRPC) أو "legacy" (مُعلَن) ⇒ يُغلَق،
+//     أو "hold" ⇒ لا يُغلَق (طوارئ/غير معروف/فشل) وتُعاد المحاولة الدورة التالية (الحلّ idempotent فلا يبقى حدث يتيم).
+// الحلّ يحمل رقم الـIssue المغلق نفسه ومفتاحه، فلا تُغلَق حادثة أخرى.
+export async function processClosures(toClose, { resolveLifecycle, closeIssue, log = () => {} }) {
+  const results = [];
+  for (const { number, key } of toClose) {
+    let lifecycle = "none";
+    if (!isImmediateHealthKey(key)) {
+      lifecycle = validIssueNumber(number) ? await resolveLifecycle(key, number) : "hold";
+    }
+    if (lifecycle === "hold") {
+      results.push({ number, key, lifecycle, closed: false });
+      continue;
+    }
+    let closed = false;
+    try {
+      closed = (await closeIssue(number, key)) !== false;
+    } catch (err) {
+      log(`✗ فشل إغلاق Issue #${number}: ${err}`);
+    }
+    results.push({ number, key, lifecycle, closed });
+  }
+  return results;
+}
+
+let _lifecycleModePromise = null;
+const getLifecycleMode = () => (_lifecycleModePromise ??= detectLifecycleMode());
+async function closeResolvedIssues({ activeKeys, healthyKeys, scanOk }) {
   const openIssues = listAllOpenHealthIssues();
   const toClose = decideIssuesToClose({
     openIssues,
@@ -461,20 +586,29 @@ function closeResolvedIssues({ activeKeys, healthyKeys, scanOk }) {
     // وحتى حينها بنجاح مرصود فعلاً لا بمجرد غياب الحادثة عن النافذة.
     verifyKey: scanOk ? verifyWorkflowIncidentResolved : undefined,
   });
-  for (const { number: issueNumber, key } of toClose) {
-    const issue = { number: issueNumber };
-    try {
-      gh([
-        "issue", "comment", String(issue.number),
-        "--repo", REPO,
-        "--body", "✅ تم التحقق بنتيجة إيجابية صريحة (تشغيل مكتمل ناجح أو مسح ناجح لم يجد الحادثة) — يُغلق الـIssue تلقائياً.",
-      ]);
-      gh(["issue", "close", String(issue.number), "--repo", REPO]);
-      console.log(`✓ أُغلق Issue #${issue.number} (مشكلة "${key}" تأكّد زوالها).`);
-    } catch (err) {
-      console.log(`✗ فشل إغلاق Issue #${issue.number}: ${err}`);
-    }
-  }
+  await processClosures(toClose, {
+    resolveLifecycle: async (key, number) => resolveForClosure(key, number, {
+      mode: await getLifecycleMode(),
+      call: (op, args) => callLifecycle(op, args),
+      log: (m) => console.log(m),
+    }),
+    log: (m) => console.log(m),
+    closeIssue: (issueNumber, key) => {
+      try {
+        gh([
+          "issue", "comment", String(issueNumber),
+          "--repo", REPO,
+          "--body", "✅ تم التحقق بنتيجة إيجابية صريحة (تشغيل مكتمل ناجح أو مسح ناجح لم يجد الحادثة) — يُغلق الـIssue تلقائياً.",
+        ]);
+        gh(["issue", "close", String(issueNumber), "--repo", REPO]);
+        console.log(`✓ أُغلق Issue #${issueNumber} (مشكلة "${key}" تأكّد زوالها).`);
+        return true;
+      } catch (err) {
+        console.log(`✗ فشل إغلاق Issue #${issueNumber}: ${err}`);
+        return false;
+      }
+    },
+  });
 }
 
 async function main() {
@@ -512,7 +646,7 @@ async function main() {
     process.exitCode = 1;
   }
 
-  closeResolvedIssues({
+  await closeResolvedIssues({
     activeKeys: new Set(problems.map((p) => p.key)),
     healthyKeys,
     scanOk: recent.scanOk,
