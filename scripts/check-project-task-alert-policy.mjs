@@ -142,7 +142,7 @@ assert.match(p13, /else 'immediate'\s+end/, 'المجهول يجب أن يبقى
 assert.ok(/security|secur\|auth/.test(p13) && p13.includes('backup'), 'الأمن والنسخ الاحتياطي فوريان');
 assert.ok(p13.includes('site-down') && p13.includes('دخان ما بعد النشر'), 'انقطاع الموقع فوري');
 assert.ok(p13.includes('patched constant text') && p13.includes('exact open-faults block'), '13 يتحقق من كتلة القسم الدقيقة في التقرير لا من وجود الاسم');
-assert.ok(p13.includes('b70434ef47f13e3ca282d548cbd59a44') && !p13.includes("position('digest-routing:v1' in disp)"), '13 يقبل بصمتين فقط (الإنتاج وجسم 13) ولا يكتفي بالوسم');
+assert.ok(p13.includes('f7bee114d77cecea3bf9fceceb24425a') && !p13.includes("position('digest-routing:v1' in disp)"), '13 يقبل بصمتين فقط (الإنتاج وجسم 13) ولا يكتفي بالوسم');
 assert.ok(p13.includes('automation-failure:|ameen-read-worker-)'), 'حوادث عامل أمين تُنذَر مرة واحدة ⇒ نافذة 30 ساعة');
 assert.ok((await read('supabase/proposed/12-digest-only-rollback.sql')).includes('digest_routing_snapshot'), 'تراجع 12 يجب أن يرفض عند فعالية 13');
 const rb13s = await read('supabase/proposed/13-digest-routing-rollback.sql');
@@ -151,14 +151,14 @@ assert.ok((await read('supabase/proposed/12-digest-only-atomic-bundle.sql')).inc
 assert.ok((await read('supabase/proposed/13-digest-routing-for-noncritical-alerts.sql')).includes('$pre2$'), 'الحزمة 13 تتحقق من انجراف ops_event_route وclose_stale قبل التطبيق');
 assert.ok((await read('supabase/proposed/13-digest-routing-for-noncritical-alerts.sql')).includes('2796ac5d112c557951d8fd3c837de6f7') && (await read('supabase/proposed/13-digest-routing-for-noncritical-alerts.sql')).includes('88c6e3d972aa11368de77a7c7a2b52e0'), 'الحزمة 13 تثبّت بصمة ops_event_silence وabsorb_digest_alert');
 assert.ok(p13.includes('^(deploy-gate-|launcher-)') && rb13s.includes('f34f129268ee375c10006f004de2d00e'), 'أحداث بوابة النشر/المشغّل فورية وبصمة التوجيه محدَّثة');
-assert.ok(rb13s.includes('b70434ef47f13e3ca282d548cbd59a44') && rb13s.includes('drifted') && rb13s.includes('ops_rollback_drain'), 'تراجع 13 يتحقق من الانجراف ويفرّغ الأعطال المفتوحة مرة واحدة');
+assert.ok(rb13s.includes('f7bee114d77cecea3bf9fceceb24425a') && rb13s.includes('drifted') && rb13s.includes('ops_rollback_drain'), 'تراجع 13 يتحقق من الانجراف ويفرّغ الأعطال المفتوحة مرة واحدة');
 assert.ok((await read('supabase/proposed/12-digest-only-rollback.sql')).includes('d695a9aea9c75bdd302e40ddd8b16204') && (await read('supabase/proposed/12-digest-only-rollback.sql')).includes('drifted'), 'تراجع 12 يتحقق من الانجراف');
 assert.ok((await read('supabase/proposed/12-digest-only-rollback.sql')).includes('ops_rollback_drain'), 'تراجع 12 يفرّغ الأعطال المفتوحة مرة واحدة');
 assert.ok(p13.includes('send-evening-report') && p13.includes('evening-missing:'), 'ناقل الملخص (فشل/غياب التقرير المسائي) يبقى فورياً');
 assert.ok(rb13.includes('digest_routing_snapshot'), 'تراجع 13 بلا لقطة');
 // قرارات المالك (PR #312): الأسعار فورية بنص يميّز الاختلاف عن الأثر المؤكَّد، إحياء الخادم فوري، «حُلّ اليوم» للتعافي المؤكَّد فقط
 assert.ok(p13.includes("~ '^price-sync:' then 'immediate'") && p13.includes("p_kind in ('price_sync_failure','price_sync_mismatch') then 'immediate'"), 'مزامنة الأسعار يجب أن تبقى فورية');
-assert.ok(p13.includes('تأثير مؤكَّد على الأسعار الفعلية') && p13.includes('اكتُشف اختلاف') && p13.includes('refine_immediate_alert'), 'نص الأسعار يميّز الاختلاف عن التأثير المؤكَّد');
+assert.ok(!p13.includes('🚨 مزامنة الأسعار: تأثير مؤكَّد') && p13.includes('غير مؤكَّد') && p13.includes('اكتُشف اختلاف') && p13.includes('refine_immediate_alert'), 'نص الأسعار يميّز الاختلاف عن التأثير المؤكَّد');
 assert.ok(p13.includes("= 'local-server-revive-fail' then 'immediate'"), 'فشل إحياء الخادم فوري');
 assert.ok(p13.includes('winfail:(apply-to-ameen|pull-approved-prices)$'), 'فشل سلسلة الأسعار فوري وباقي دفعات البيانات في الملخص');
 assert.ok(p13.includes('refined boolean') && p13.includes('exception when others then null;  -- عطل في آلية الملخص'), 'عطل الامتصاص لا يمنع التنبيه (الأمن مستقل)');

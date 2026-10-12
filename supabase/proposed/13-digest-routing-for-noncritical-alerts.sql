@@ -44,7 +44,7 @@ begin
   select prosrc into disp from pg_proc where oid = to_regprocedure('private.notify_telegram_dispatch(text,text,text,integer,jsonb)');
   if disp is null then raise exception 'proposed/13: private.notify_telegram_dispatch not found'; end if;
   -- بصمتان فقط: جسم الإنتاج الحالي، أو جسم 13 نفسه (إعادة التشغيل). وجود الوسم وحده لا يكفي.
-  if md5(disp) not in ('60bbae6f1fed8ba5e66c9a9a91daed40', 'b70434ef47f13e3ca282d548cbd59a44') then
+  if md5(disp) not in ('60bbae6f1fed8ba5e66c9a9a91daed40', 'f7bee114d77cecea3bf9fceceb24425a') then
     raise exception 'proposed/13: private.notify_telegram_dispatch drifted from the known body (md5 %); refusing to overwrite', md5(disp);
   end if;
 end $pre$;
@@ -56,7 +56,7 @@ do $pre2$ begin
   end if;
   -- المساعدان الجديدان (يُنشآن هنا): إن وُجدا مسبقاً فيجب أن يطابقا جسم 13 بالضبط وإلا فُقد تعديل لاحق عليهما
   if to_regprocedure('private.refine_immediate_alert(text,text,text)') is not null
-     and md5((select prosrc from pg_proc where oid = to_regprocedure('private.refine_immediate_alert(text,text,text)'))) is distinct from '471ba23cf208a6e6d04aadf43e015d7d' then
+     and md5((select prosrc from pg_proc where oid = to_regprocedure('private.refine_immediate_alert(text,text,text)'))) is distinct from 'b62dddfef4aff64199722e5e1e5d57be' then
     raise exception 'proposed/13: refine_immediate_alert drifted from the proposed/13 body; refusing to overwrite later changes';
   end if;
   if (to_regprocedure('private.ops_event_silence(text)') is not null or to_regprocedure('private.absorb_digest_alert(text,text,text)') is not null)
@@ -171,25 +171,29 @@ revoke all on function private.absorb_digest_alert(text,text,text) from public, 
 -- أي نص غير مفهوم ⇒ يعيد null ⇒ يُرسَل الأصلي كما هو (لا رسالة تضيع).
 create or replace function private.refine_immediate_alert(p_kind text, p_message text, p_key text)
 returns table(msg text, dkey text, mins int, skip boolean) language plpgsql stable as $$
-declare d int; m int; sev text; head text; why text; nk text; lk text; lt timestamptz;
+declare d int; m int; nk text; lk text; lt timestamptz;
 begin
+ -- فشل التحقق: فوري مع توضيح أن الحالة غير مؤكَّدة؛ التكرار بنفس مفتاح السكربت خلال 60 دقيقة يُحجب
+ if p_kind = 'price_sync_failure' then
+  nk := coalesce(nullif(p_key,''), 'price-sync:verify-failed');
+  select o.created_at into lt from public.telegram_outbox o where o.dedupe_key = nk order by o.id desc limit 1;
+  return query select '🚨 مزامنة الأسعار: تعذّر التحقق من نتيجتها مع الأمين' || chr(10)
+                      || 'الحالة غير مؤكَّدة: لا يُعرف إن كانت الأسعار الفعلية في الأمين سليمة أم لا؛ يلزم فحص يدوي.',
+                      nk, 60, (lt is not null and lt > now() - interval '60 minutes');
+  return;
+ end if;
  if p_kind is distinct from 'price_sync_mismatch' then return; end if;
  d := substring(p_message from 'فروقات:\s*([0-9]+)')::int;
  m := substring(p_message from 'مواد ناقصة:\s*([0-9]+)')::int;
  if d is null or m is null or (d = 0 and m = 0) then return; end if;
- if d > 0 then
-  sev := 'impact';
-  head := '🚨 مزامنة الأسعار: تأثير مؤكَّد على الأسعار الفعلية';
-  why := 'الفحص بعد الكتابة وجد في الأمين أسعاراً تخالف المعتمَد.';
- else
-  sev := 'detected';
-  head := '⚠️ مزامنة الأسعار: اكتُشف اختلاف (التأثير على الأسعار الفعلية غير مؤكَّد)';
-  why := 'مواد معتمدة غير موجودة في الأمين للمقارنة؛ لم يثبت وجود سعر خاطئ.';
- end if;
- nk := 'price-sync:mismatch:' || sev || ':' || d || ':' || m;
+ -- وجود فروقات أو نواقص لا يثبت وحده أن سعراً خاطئاً طُبِّق فعلاً (الرسالة تحمل أعداداً فقط، لا دليل على السعر الفعلي)
+ -- ⇒ لا نصف أي حالة بأنها «تأثير مؤكَّد»؛ التأثير المؤكَّد يتطلب دليلاً موثوقاً غير متوفر في هذا المصدر.
+ nk := 'price-sync:mismatch:detected:' || d || ':' || m;
  select o.dedupe_key, o.created_at into lk, lt from public.telegram_outbox o
   where o.dedupe_key like 'price-sync:mismatch:%' order by o.id desc limit 1;
- return query select head || chr(10) || why || chr(10) || 'فروقات: ' || d || ' — مواد ناقصة: ' || m, nk, 1440,
+ return query select '⚠️ مزامنة الأسعار: اكتُشف اختلاف (التأثير على الأسعار الفعلية غير مؤكَّد)' || chr(10)
+                     || 'فروقات: ' || d || ' — مواد ناقصة: ' || m || chr(10)
+                     || 'لم يثبت أن سعراً خاطئاً طُبِّق في الأمين؛ يلزم تحقق.', nk, 1440,
                      (lk = nk and lt > now() - interval '1440 minutes');
 end $$;
 revoke all on function private.refine_immediate_alert(text,text,text) from public, anon, authenticated;
@@ -213,7 +217,7 @@ begin
     end;
   end if;
   if p_message is null or length(trim(p_message)) = 0 then return; end if;
-  if p_reply_markup is null and p_event_type = 'price_sync_mismatch' then
+  if p_reply_markup is null and p_event_type in ('price_sync_mismatch','price_sync_failure') then
     begin
       select * into rf from private.refine_immediate_alert(p_event_type, p_message, p_dedupe_key);
       if rf.msg is not null and rf.skip then return; end if;

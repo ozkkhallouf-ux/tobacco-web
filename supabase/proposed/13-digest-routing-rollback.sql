@@ -8,12 +8,12 @@ begin
     raise exception 'rollback 13: no snapshot table; nothing to restore (13 not applied?)';
   end if;
   -- لا نكتب فوق تعديل لاحق: الدوال الثلاث يجب أن تطابق جسم 13 بالضبط (وإلا يُوقَف التراجع ويُراجَع يدوياً)
-  if md5((select prosrc from pg_proc where oid = to_regprocedure('private.notify_telegram_dispatch(text,text,text,integer,jsonb)'))) <> 'b70434ef47f13e3ca282d548cbd59a44'
+  if md5((select prosrc from pg_proc where oid = to_regprocedure('private.notify_telegram_dispatch(text,text,text,integer,jsonb)'))) <> 'f7bee114d77cecea3bf9fceceb24425a'
      or md5((select prosrc from pg_proc where oid = to_regprocedure('private.ops_event_route(text,text)'))) <> 'f34f129268ee375c10006f004de2d00e'
      or md5((select prosrc from pg_proc where oid = to_regprocedure('private.close_stale_ops_events(timestamptz,interval)'))) <> '24a5fcd5b080d461813a04940a02af17'
      or md5((select prosrc from pg_proc where oid = to_regprocedure('private.ops_event_silence(text)'))) is distinct from '2796ac5d112c557951d8fd3c837de6f7'
      or md5((select prosrc from pg_proc where oid = to_regprocedure('private.absorb_digest_alert(text,text,text)'))) is distinct from '88c6e3d972aa11368de77a7c7a2b52e0'
-     or md5((select prosrc from pg_proc where oid = to_regprocedure('private.refine_immediate_alert(text,text,text)'))) is distinct from '471ba23cf208a6e6d04aadf43e015d7d' then
+     or md5((select prosrc from pg_proc where oid = to_regprocedure('private.refine_immediate_alert(text,text,text)'))) is distinct from 'b62dddfef4aff64199722e5e1e5d57be' then
     raise exception 'rollback 13: a routed function drifted from the proposed/13 body; refusing to overwrite later changes';
   end if;
   for r in select fn, def from private.digest_routing_snapshot loop
