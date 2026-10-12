@@ -27,6 +27,31 @@ do $order12$ begin
     raise exception 'proposed/12 refused: proposed/13 is active; run 13-digest-routing-rollback.sql first (order: apply 12 then 13; roll back 13 then 12)';
   end if;
 end $order12$;
+-- إعادة تشغيل على حزمة مطبَّقة: كل دالة مساعدة تستبدلها الحزمة يجب أن تطابق جسمها المعروف بالضبط؛ تعديل إنتاجي
+-- لاحق (مثل مسبار انقطاع مستقل معتمد في core_outage_verified) لا يُكتب فوقه بصمت ولا تستعيده اللقطة
+do $drift12$
+declare r record;
+begin
+  if to_regclass('private.digest_bundle_snapshot') is not null then
+    for r in select * from (values
+      ('private.core_outage_verified()', '3ab0d7f01cf01c94c66d65befa4bd505'),
+      ('private.ops_event_route(text,text)', '8c55e7855fd285e956506f7d0ebd10b2'),
+      ('private.record_ops_event(text,text,text,text,text,timestamptz)', 'c458b8e65af376284e93854951899fee'),
+      ('private.resolve_ops_event(text,text,timestamptz)', '2d116df0e06b7fd250b784e9595e577f'),
+      ('private.observe_ops_event(text,text,text,text,timestamptz,text)', '5002b6744446d5cae5b70dd25dc900d4'),
+      ('private.close_stale_ops_events(timestamptz,interval)', '1fec3b9e3a5413284865ce330275cb9e'),
+      ('private.project_task_alert_decision(boolean,numeric,boolean,numeric,integer,integer,boolean,boolean,boolean)', '9d9760d4274a4329a7bafba3cf4990d1'),
+      ('private.check_evening_report_delivered(timestamptz)', '34af8681ef4081da5d3ecc753dbf76d1'),
+      ('private.seed_open_faults()', '1ba77cdbdeac4161bfeddfe5148f4a08'),
+      ('private.daily_open_faults_section(timestamptz,integer)', '69fb8a26d32b6d2363800a21fd90159f')
+    ) v(fn, pin) loop
+      if to_regprocedure(r.fn) is not null
+         and md5((select prosrc from pg_proc where oid = to_regprocedure(r.fn))) <> r.pin then
+        raise exception 'proposed/12 rerun refused: % drifted from the bundle-12 body; refusing to overwrite later changes', r.fn;
+      end if;
+    end loop;
+  end if;
+end $drift12$;
 
 -- (1) تحقق قبلي ------------------------------------------------------------------
 do $pre$

@@ -120,6 +120,14 @@ const exists = async (db, rel) => (await one(db, `select to_regclass('${rel}') r
     assert.equal(await exists(d6, 'private.ops_events'), false);
     assert.equal(await md5(d6, 'private.monitor_project_tasks()'), P09_MD5);
   }
+  // إعادة تشغيل 12 بعد تعديل لاحق على core_outage_verified (مسبار معتمد): يرفض ولا يعيدها إلى false
+  {
+    const d7 = await liveDb();
+    await d7.exec(bundle);
+    await d7.exec('create or replace function private.core_outage_verified() returns boolean language sql stable as $$ select true $$');
+    await assert.rejects(d7.exec(bundle), /drifted/);
+    assert.equal((await d7.query('select private.core_outage_verified() v')).rows[0].v, true);
+  }
   // وكذلك proposed/10 و11 منفردين
   for (const f of ['10-telegram-task-alert-noise-fix.sql', '11-evening-report-open-faults-section.sql']) {
     const d5 = await liveDb();

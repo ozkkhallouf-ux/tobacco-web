@@ -219,6 +219,17 @@ await assert.rejects(db.exec(rb12), /13 is active/);
   await assert.rejects(db.exec(p13), /exact open-faults block/);
   await db.exec(rep); // يعيد التقرير المرقَّع
 }
+// تعديل إنتاجي لاحق على ops_event_route أو close_stale بعد 12: 13 يرفض ولا يكتب فوقه
+{
+  for (const fn of ['private.ops_event_route(text,text)', 'private.close_stale_ops_events(timestamptz,interval)']) {
+    const d = await liveDb();
+    await d.exec(bundle);
+    const def = (await one(d, `select pg_get_functiondef('${fn}'::regprocedure) d`)).d;
+    await d.exec(def.replace(/(as \$\w*\$\s)/i, '$1 /* later approved fix */ '));
+    await assert.rejects(d.exec(p13), /drifted/);
+    assert.equal((await one(d, `select count(*)::int n from pg_proc where proname='absorb_digest_alert'`)).n, 0);
+  }
+}
 console.log('rollback/reapply/drift ok');
 console.log('anon exec route:', (await one(db, `select has_function_privilege('anon','private.ops_event_route(text,text)','execute') a`)).a);
 console.log('ALL P13 CHECKS PASSED');

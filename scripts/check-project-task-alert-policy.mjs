@@ -147,6 +147,8 @@ assert.ok(p13.includes('automation-failure:|ameen-read-worker-)'), 'حوادث �
 assert.ok((await read('supabase/proposed/12-digest-only-rollback.sql')).includes('digest_routing_snapshot'), 'تراجع 12 يجب أن يرفض عند فعالية 13');
 const rb13s = await read('supabase/proposed/13-digest-routing-rollback.sql');
 assert.ok((await read('supabase/proposed/12-digest-only-atomic-bundle.sql')).includes('$order12$') && (await read('supabase/proposed/12-digest-only-atomic-bundle.sql')).includes('$guard12$'), 'الحزمة 12 تحرس الترتيب والمعاملة');
+assert.ok((await read('supabase/proposed/12-digest-only-atomic-bundle.sql')).includes('$drift12$'), 'الحزمة 12 ترفض الكتابة فوق دوال مساعدة عُدّلت لاحقاً');
+assert.ok((await read('supabase/proposed/13-digest-routing-for-noncritical-alerts.sql')).includes('$pre2$'), 'الحزمة 13 تتحقق من انجراف ops_event_route وclose_stale قبل التطبيق');
 assert.ok(p13.includes('^(deploy-gate-|launcher-)') && rb13s.includes('c3f0c0040c5fd1c1adeb58aff182d5ba'), 'أحداث بوابة النشر/المشغّل فورية وبصمة التوجيه محدَّثة');
 assert.ok(rb13s.includes('881a513175ec93b3e9b9185c4c5948a7') && rb13s.includes('drifted') && rb13s.includes('ops_rollback_drain'), 'تراجع 13 يتحقق من الانجراف ويفرّغ الأعطال المفتوحة مرة واحدة');
 assert.ok((await read('supabase/proposed/12-digest-only-rollback.sql')).includes('d695a9aea9c75bdd302e40ddd8b16204') && (await read('supabase/proposed/12-digest-only-rollback.sql')).includes('drifted'), 'تراجع 12 يتحقق من الانجراف');

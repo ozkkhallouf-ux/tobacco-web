@@ -48,6 +48,13 @@ begin
     raise exception 'proposed/13: private.notify_telegram_dispatch drifted from the known body (md5 %); refusing to overwrite', md5(disp);
   end if;
 end $pre$;
+-- مساعدا التوجيه يُستبدلان أدناه: يجب أن يكونا بجسم 12 (أول تطبيق) أو جسم 13 (إعادة)، وإلا تعديل لاحق يُفقَد بصمت
+do $pre2$ begin
+  if md5((select prosrc from pg_proc where oid = to_regprocedure('private.ops_event_route(text,text)'))) not in ('8c55e7855fd285e956506f7d0ebd10b2', 'c3f0c0040c5fd1c1adeb58aff182d5ba')
+     or md5((select prosrc from pg_proc where oid = to_regprocedure('private.close_stale_ops_events(timestamptz,interval)'))) not in ('1fec3b9e3a5413284865ce330275cb9e', '6845c03a0c640aba8caddc333ac593be') then
+    raise exception 'proposed/13: ops_event_route/close_stale_ops_events drifted from the known 12/13 bodies; refusing to overwrite later changes';
+  end if;
+end $pre2$;
 
 -- لقطة قبل التعديل (مرة واحدة فقط: إعادة التطبيق لا تُسجّل النسخة المعدَّلة كأصل)
 create table if not exists private.digest_routing_snapshot(
