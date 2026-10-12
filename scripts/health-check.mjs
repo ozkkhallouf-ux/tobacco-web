@@ -340,23 +340,21 @@ async function notifyTelegram(problem, issueUrl, dedupeMinutes = 180) {
 
 // ═══ دورة حياة أعطال الصحة عبر RPC بإقرار صريح: public.health_lifecycle (داخل proposed/13) ═══
 // لا notify_telegram هنا إطلاقاً: 2xx منه لا يثبت الامتصاص (عند خطأ داخلي يُرسَل النصّ رسالة فعلية)، أما الـRPC فتُقرّ
-// العملية نفسها (ok:true) أو ترمي خطأ صريحاً. وجودها في قاعدة البيانات = 13 مطبَّق (تُنشأ معه وتسقط بتراجعه).
+// العملية نفسها (ok:true) أو ترمي خطأ صريحاً.
 //
-// HEALTH_LIFECYCLE_SIGNALS=off ⇒ مفتاح إيقاف طوارئ فقط (ليس دليلاً على تطبيق 13 ولا على غيابه): لا استدعاء RPC إطلاقاً
-// (لا تجديد ولا حلّ ولا probe)، فلا يُغلَق أي Issue غير حرج (وإلا بقي حدث يتيم إن كان 13 مطبَّقاً)، وتبقى التنبيهات
-// الحرجة والإنشاء كما هي. أي قيمة أخرى/غير مضبوطة = الاكتشاف التلقائي.
+// آلية الانتقال **صريحة** عبر HEALTH_LIFECYCLE_MODE (يضبطها المشغّل، لا يستنتجها السكربت من PGRST202 ولا من الزمن ولا من غياب الأسرار):
+//   legacy  = 13 غير مطبَّق (أو سُحب بتراجعه): صفر استدعاء DB؛ يُغلَق الـIssue بالسلوك القديم عند دليل التعافي. **المسار الوحيد للإغلاق القديم.**
+//   managed = 13 مطبَّق: probe ثم renew/resolve بإقرار صريح؛ أي إخفاق (PGRST202، تأخّر schema cache، انقطاع، فقدان الأسرار، إقرار غير صالح)
+//             ⇒ hold (لا إغلاق، تُعاد المحاولة)، **لا رجوع تلقائي إلى legacy** مهما طال الإخفاق.
+//   غير مضبوط/قيمة غير معروفة = unknown ⇒ hold بلا استدعاء DB (الـworkflow يضبط legacy افتراضياً فيبقى الإنتاج الحالي كما هو).
+// HEALTH_LIFECYCLE_SIGNALS=off ⇒ إيقاف طوارئ يسبق كل شيء: صفر استدعاء DB، الـIssues غير الحرجة تبقى مفتوحة، الحرجة كالمعتاد.
 export const lifecycleSwitchOff = (env = process.env) => String(env.HEALTH_LIFECYCLE_SIGNALS || "").trim().toLowerCase() === "off";
+export const declaredLifecycleMode = (env = process.env) => {
+  const v = String(env.HEALTH_LIFECYCLE_MODE || "").trim().toLowerCase();
+  return v === "legacy" || v === "managed" ? v : "unknown";
+};
 
 const RPC_TIMEOUT_MS = 15000;
-// فاصل التأكيد قبل اعتبار الغياب مؤكَّداً، وعمر أقصى للملاحظة الأولى (أقدم منها لا يُعتمد: قد يسبق تطبيق 13)
-export const LEGACY_CONFIRM_MIN_MS = 20 * 60 * 1000;
-export const LEGACY_CONFIRM_MAX_MS = 6 * 60 * 60 * 1000;
-const ABSENT_MARKER_RE = /<!-- health-probe-absent:[^>]*-->/;
-// وسم على الـIssue يُسجَّل حين شوهد 13 جاهزاً (ready) أثناء حياته: قد يكون لعطله حدث في ops_events. يُستعمل حين تُفقَد الأسرار لاحقاً
-// (حذف/انتهاء المفتاح) كي لا يُغلَق الـIssue بالسلوك القديم فيبقى حدث يتيم؛ أما Issue بلا الوسم فلم يُشاهَد مُدارًا قط.
-const MANAGED_MARKER = "<!-- health-lifecycle-managed -->";
-const MANAGED_MARKER_RE = /<!-- health-lifecycle-managed -->/;
-
 // استدعاء health_lifecycle. الإرجاع:
 //   { kind: "ok", body }      = إقرار صالح للعملية المطلوبة بعينها؛
 //   { kind: "absent" }        = HTTP 404 + PGRST202 (دالة غير موجودة **أو** schema cache قديم — غير حاسم وحده)؛
@@ -395,59 +393,26 @@ export async function callLifecycle(op, args = {}, { env = process.env, fetchImp
   return { kind: "ok", body };
 }
 
-// حالة الجاهزية (مرة واحدة لكل تشغيل):
-//   "off"     = إيقاف طوارئ؛   "ready" = 13 مطبَّق والتوجيه فعّال (probe ok وready=true)؛
-//   "absent"  = PGRST202 (يحتاج تأكيداً قبل اعتباره قديماً مؤكَّداً)؛  "unknown" = أي شيء آخر ⇒ لا إغلاق ولا افتراض تعافٍ؛
-//   "unconfigured" = SUPABASE_URL/SUPABASE_SERVICE_KEY لم يُضبطا أصلاً (السرّ اختياري في الـworkflow): لا يستطيع هذا السكربت
-//   إرسال أي تنبيه إلى قاعدة البيانات فلا حدث يتيم يصنعه ⇒ إغلاق قديم آمن (وإلا بقي الـIssue مفتوحاً للأبد وكُتم تكرار العطل).
+// حالة التشغيل (مرة واحدة لكل تشغيل):
+//   "off" طوارئ؛ "legacy" مُعلَن؛ "unknown" غير مُعلَن؛ "ready" = managed + probe ok و ready=true؛
+//   "unavailable" = managed لكن الـprobe لم ينجح (PGRST202/شبكة/أسرار ناقصة/…) ⇒ hold، وليس legacy أبداً.
 export async function detectLifecycleMode(deps = {}) {
   const env = deps.env || process.env;
   if (lifecycleSwitchOff(env)) return "off";
-  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_KEY) return "unconfigured";
+  const declared = declaredLifecycleMode(env);
+  if (declared !== "managed") return declared;
   const r = await callLifecycle("probe", {}, deps);
-  if (r.kind === "absent") return "absent";
-  if (r.kind === "ok" && r.body.ready === true) return "ready";
-  return "unknown";
-}
-
-// تأكيد الغياب بملاحظتين منفصلتين زمنياً على نفس الـIssue (PGRST202 وحدها قد تكون تأخّر schema cache بعد تطبيق 13):
-// الأولى تُسجَّل كتعليق بوسم <!-- health-probe-absent:… --> (تاريخ GitHub createdAt هو المرجع لا الوسم)، والثانية
-// تُعتمد فقط إن مرّ ≥ 20 د و≤ 6 س. ملاحظة أقدم من 6 س تُستبدل بأخرى جديدة. أي فشل في gh ⇒ false (لا تأكيد).
-export function confirmLegacyAbsence(number, { readComments, postComment, nowMs = Date.now() }) {
-  try {
-    const marked = (readComments(number) || []).filter((c) => c && ABSENT_MARKER_RE.test(c.body || "") && c.createdAt);
-    const latest = marked.map((c) => Date.parse(c.createdAt)).filter(Number.isFinite).sort((a, b) => b - a)[0];
-    const age = latest === undefined ? Infinity : nowMs - latest;
-    if (age >= LEGACY_CONFIRM_MIN_MS && age <= LEGACY_CONFIRM_MAX_MS) return true;
-    if (age > LEGACY_CONFIRM_MAX_MS) {
-      postComment(number, `<!-- health-probe-absent:${new Date(nowMs).toISOString()} -->\nℹ️ rpc/health_lifecycle غير موجودة (PGRST202) — ملاحظة أولى؛ يلزم تأكيد ثانٍ بعد ≥ 20 د قبل اعتبار proposed/13 غير مطبَّق.`);
-    }
-    return false;
-  } catch {
-    return false;
-  }
+  return r.kind === "ok" && r.body.ready === true ? "ready" : "unavailable";
 }
 
 // قرار إغلاق Issue لعطل غير حرج (الحرجان بلا حدث ⇒ يُغلقان مباشرة في processClosures):
-//   "resolved" = الـRPC أقرّت إغلاق الحدث (يُغلَق الـIssue)؛  "legacy" = 13 غير مطبَّق **مؤكَّداً** (لا حدث يتيم ممكن) ⇒ يُغلَق؛
-//   "hold"     = طوارئ/غير معروف/غياب غير مؤكَّد/فشل أو إقرار غير صالح ⇒ لا يُغلَق ويُعاد في الدورة التالية.
-export async function resolveForClosure(key, number, { mode, call, confirm, managed = () => true, log = () => {} }) {
+//   "resolved" = الـRPC أقرّت إغلاق الحدث؛  "legacy" = المشغّل أعلن legacy صراحةً؛
+//   "hold"     = طوارئ/unknown/unavailable/فشل أو إقرار غير صالح ⇒ لا يُغلَق وتُعاد المحاولة الدورة التالية.
+export async function resolveForClosure(key, number, { mode, call, log = () => {} }) {
+  if (mode === "legacy") return "legacy";
   if (mode === "off") { log(`⏸ إيقاف الطوارئ (HEALTH_LIFECYCLE_SIGNALS=off): يبقى Issue #${number} ("${key}") مفتوحاً — لا حلّ ولا إغلاق.`); return "hold"; }
-  if (mode === "unconfigured") {
-    // الأسرار اختيارية في الـworkflow: بدونها لا يصنع السكربت أحداثاً ⇒ إغلاق قديم آمن، **إلا** إن سبق أن شوهد 13 جاهزاً لهذا الـIssue
-    // (وسم managed) فقد يكون له حدث ثم فُقد المفتاح ⇒ نُبقيه مفتوحاً حتى يُستعاد المفتاح. تعذّر فحص الوسم ⇒ محافظة (hold).
-    let managedIssue = true;
-    try { managedIssue = managed(number); } catch { managedIssue = true; }
-    if (managedIssue) { log(`⏸ أسرار Supabase غير متاحة لكن Issue #${number} ("${key}") أُدير سابقاً عبر 13 — يبقى مفتوحاً حتى استعادة SUPABASE_SERVICE_KEY.`); return "hold"; }
-    log(`ℹ️ أسرار Supabase غير مضبوطة ولم يُدَر Issue #${number} ("${key}") عبر 13 — إغلاق بالسلوك القديم.`);
-    return "legacy";
-  }
-  if (mode === "absent") {
-    if (confirm(number)) return "legacy";
-    log(`⏳ rpc/health_lifecycle غير موجودة (PGRST202) — لم يُؤكَّد غياب 13 بعد؛ يبقى Issue #${number} مفتوحاً.`);
-    return "hold";
-  }
-  if (mode !== "ready") { log(`? حالة قاعدة البيانات غير معروفة — يبقى Issue #${number} ("${key}") مفتوحاً وتُعاد المحاولة.`); return "hold"; }
+  if (mode === "unknown") { log(`⏸ HEALTH_LIFECYCLE_MODE غير مضبوط (legacy|managed) — يبقى Issue #${number} ("${key}") مفتوحاً.`); return "hold"; }
+  if (mode !== "ready") { log(`::warning::HEALTH_LIFECYCLE_MODE=managed لكن 13/الأسرار غير متاحة — يبقى Issue #${number} ("${key}") مفتوحاً ولا رجوع تلقائياً إلى legacy.`); return "hold"; }
   const r = await call("resolve", { key, issue: number });
   if (r.kind === "ok") return "resolved";
   log(`✗ تعذّر حلّ حدث "${key}" (#${number}): ${r.kind === "absent" ? "PGRST202" : r.detail} — يبقى مفتوحاً وتُعاد المحاولة.`);
@@ -465,7 +430,6 @@ async function reportProblem(problem) {
       if ((await getLifecycleMode()) === "ready") {
         const r = await callLifecycle("renew", { key: problem.key, issue: existing.number, label: problem.title });
         if (r.kind !== "ok") console.log(`⚠️ تعذّر تجديد حضور "${problem.key}" (#${existing.number}): ${r.kind === "absent" ? "PGRST202" : r.detail}`);
-        else markManaged(existing.number);
       }
     }
     return true;
@@ -510,8 +474,6 @@ async function reportProblem(problem) {
     _openHealthIssuesCache.push({ number: 0, title: problem.title, body: `<!-- health:${problem.key} -->` });
   }
   await notifyTelegram(problem, issueUrl);
-  const createdNumber = issueNumberFromUrl(issueUrl);
-  if (!isImmediateHealthKey(problem.key) && validIssueNumber(createdNumber) && (await getLifecycleMode()) === "ready") markManaged(createdNumber);
   // الـIssue أُنشئ بنجاح، فالحادثة موثّقة حتى لو تعثّر تيليغرام.
   return true;
 }
@@ -587,7 +549,7 @@ function verifyWorkflowIncidentResolved(key) {
 
 // ينفّذ الإغلاق على قائمة قرّرتها decideIssuesToClose (دليل إيجابي فقط). الترتيب: حلّ الحدث في قاعدة البيانات أولاً ثم الإغلاق:
 //   * الحرجان (لا حدث لهما) ⇒ يُغلقان مباشرة؛
-//   * غيرهما ⇒ resolveLifecycle(key, number) يرجع "resolved" (إقرار الـRPC) أو "legacy" (غياب 13 مؤكَّد) ⇒ يُغلَق،
+//   * غيرهما ⇒ resolveLifecycle(key, number) يرجع "resolved" (إقرار الـRPC) أو "legacy" (مُعلَن) ⇒ يُغلَق،
 //     أو "hold" ⇒ لا يُغلَق (طوارئ/غير معروف/فشل) وتُعاد المحاولة الدورة التالية (الحلّ idempotent فلا يبقى حدث يتيم).
 // الحلّ يحمل رقم الـIssue المغلق نفسه ومفتاحه، فلا تُغلَق حادثة أخرى.
 export async function processClosures(toClose, { resolveLifecycle, closeIssue, log = () => {} }) {
@@ -614,19 +576,6 @@ export async function processClosures(toClose, { resolveLifecycle, closeIssue, l
 
 let _lifecycleModePromise = null;
 const getLifecycleMode = () => (_lifecycleModePromise ??= detectLifecycleMode());
-const readIssueComments = (n) => ghJSON(["issue", "view", String(n), "--repo", REPO, "--json", "comments"]).comments || [];
-const postIssueComment = (n, body) => gh(["issue", "comment", String(n), "--repo", REPO, "--body", body]);
-// هل سُجّل وسم managed على الـIssue؟ (رمي الخطأ عند تعذّر القراءة ⇒ resolveForClosure يتصرف محافظاً)
-const isManagedIssue = (n) => readIssueComments(n).some((c) => MANAGED_MARKER_RE.test((c && c.body) || ""));
-// يسجّل الوسم مرة واحدة؛ أي فشل لا يؤثر على الدورة (يُعاد في الدورة التالية).
-function markManaged(n) {
-  try {
-    if (!isManagedIssue(n)) postIssueComment(n, `${MANAGED_MARKER}\nℹ️ هذا العطل مُدار عبر public.health_lifecycle (proposed/13): لا يُغلق Issue بالسلوك القديم إن فُقدت أسرار Supabase.`);
-  } catch (err) {
-    console.log(`⚠️ تعذّر تسجيل وسم الإدارة على #${n}: ${err}`);
-  }
-}
-
 async function closeResolvedIssues({ activeKeys, healthyKeys, scanOk }) {
   const openIssues = listAllOpenHealthIssues();
   const toClose = decideIssuesToClose({
@@ -641,8 +590,6 @@ async function closeResolvedIssues({ activeKeys, healthyKeys, scanOk }) {
     resolveLifecycle: async (key, number) => resolveForClosure(key, number, {
       mode: await getLifecycleMode(),
       call: (op, args) => callLifecycle(op, args),
-      confirm: (n) => confirmLegacyAbsence(n, { readComments: readIssueComments, postComment: postIssueComment }),
-      managed: isManagedIssue,
       log: (m) => console.log(m),
     }),
     log: (m) => console.log(m),
