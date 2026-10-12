@@ -134,7 +134,13 @@ assert.ok(rollback.includes('private.digest_bundle_snapshot') || rollback.includ
 // ── proposed/13: توجيه التنبيهات غير الحرجة للملخص — يفشل مفتوحاً ولا يمسّ public.notify_telegram ──
 const p13 = await read('supabase/proposed/13-digest-routing-for-noncritical-alerts.sql');
 const rb13 = await read('supabase/proposed/13-digest-routing-rollback.sql');
-assert.ok(!/create (or replace )?function public\./.test(p13 + rb13), 'proposed/13 يجب ألا يعدّل أي دالة في public');
+// الدالة العامة الوحيدة المسموحة هي RPC دورة حياة أعطال الصحة (service_role فقط)؛ أي دالة public أخرى (خصوصاً notify_telegram) ممنوعة
+const p13PublicFns = [...(p13 + rb13).matchAll(/create (?:or replace )?function public\.(\w+)/gi)].map((m) => m[1]);
+assert.deepEqual(p13PublicFns, ['health_lifecycle'], 'proposed/13 يجب ألا يعدّل أي دالة في public سوى health_lifecycle');
+assert.ok(!/create (or replace )?function public\.notify_telegram/i.test(p13 + rb13), 'proposed/13 يجب ألا يعدّل public.notify_telegram');
+assert.ok(/security definer\s+set search_path = pg_catalog, pg_temp/i.test(p13), 'health_lifecycle: SECURITY DEFINER بلا search_path مثبّت');
+assert.ok(p13.includes('revoke all on function public.health_lifecycle(text, text, integer, text) from public, anon, authenticated') && p13.includes('grant execute on function public.health_lifecycle(text, text, integer, text) to service_role'), 'health_lifecycle: الصلاحيات يجب أن تُحصر في service_role');
+assert.ok(rb13.includes('drop function if exists public.health_lifecycle(text, text, integer, text)'), 'تراجع 13 يجب أن يُسقط health_lifecycle');
 assert.ok(p13.includes('60bbae6f1fed8ba5e66c9a9a91daed40'), 'proposed/13 لا يثبّت بصمة الإنتاج لدالة الإرسال');
 assert.ok(p13.includes("exception when others") && p13.includes('return false'), 'الامتصاص يجب أن يفشل مفتوحاً (يعيد false فيُرسَل التنبيه)');
 assert.ok(p13.includes('p_reply_markup is null'), 'الرسائل ذات الأزرار تبقى فورية');

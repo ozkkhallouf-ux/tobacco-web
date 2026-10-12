@@ -121,6 +121,8 @@ revoke all on function private.ops_event_route(text,text) from public, anon, aut
 -- فيها ⇒ ثلاث ساعات تكفي؛ أحداث يومية أو مدفوعة بالأحداث (لا تكرار بلا فشل جديد) ⇒ 30 ساعة،
 -- فيراها تقرير المساء التالي حتماً حتى لو لم تتكرر. (عامل أمين يُنذر مرة واحدة لكل حادثة ثم يصمت؛
 -- يُغلق فقط برسالة التعافي، فلا تُغلقه نافذة الصمت قبل التقرير.)
+-- ملاحظة: أحداث health-* (30 س هنا) **لا تُغلق بالصمت إطلاقاً**: close_stale_ops_events يستثنيها (source='telegram' and
+-- event_key ~ '^health-') فتبقى مفتوحة حتى public.health_lifecycle('resolve') أو resolve_ops_event؛ والنافذة هنا لا تُستعمل إلا للتسمية.
 create or replace function private.ops_event_silence(p_event_key text)
 returns interval language sql immutable as $$
  select case
