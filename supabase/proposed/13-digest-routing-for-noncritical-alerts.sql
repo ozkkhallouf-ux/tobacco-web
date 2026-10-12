@@ -208,6 +208,66 @@ begin
 end $$;
 revoke all on function private.refine_immediate_alert(text,text,text) from public, anon, authenticated;
 
+-- ═══ public.health_lifecycle: دورة حياة أعطال health-check بإقرار صريح (تُنشأ مع 13 ذرّياً) ═══
+-- scripts/health-check.mjs يستدعيها مباشرة (لا عبر notify_telegram ⇒ لا مسار لرسالة Telegram أصلاً):
+--   probe   : جاهزية (وجودها = 13 مطبَّق؛ ready=true فقط إن كان خطّاف التوجيه فعلاً في dispatch وabsorb موجودة).
+--   renew   : يجدّد last_seen_at لحدث العطل غير الحرج (health-<key>-issue-<N>)؛ يفتحه إن لم يوجد. بلا إرسال.
+--   resolve : يغلق ذلك الحدث وحده؛ idempotent (لا حدث مفتوح ⇒ resolved=0 وok=true).
+-- كل خطأ ⇒ استثناء صريح (HTTP 4xx/5xx) لا قيمة false صامتة؛ الإقرار ok=true يعني أن العملية تمّت فعلاً.
+-- الحرجان (site-down, health-check-crashed) مرفوضان: فوريان ومستقلان عن السجلّ. لا تمس public.notify_telegram.
+create or replace function public.health_lifecycle(p_op text, p_key text default null, p_issue integer default null, p_label text default null)
+returns jsonb language plpgsql security definer set search_path = pg_catalog, pg_temp as $$
+declare ek text; n integer; routed boolean; lbl text;
+begin
+ if p_op is null or p_op not in ('probe','renew','resolve') then
+  raise exception 'health_lifecycle: unknown op %', coalesce(p_op,'<null>') using errcode = '22023';
+ end if;
+ if p_op = 'probe' then
+  routed := position('digest-routing:v1' in coalesce((select prosrc from pg_catalog.pg_proc
+              where oid = to_regprocedure('private.notify_telegram_dispatch(text,text,text,integer,jsonb)')), '')) > 0
+            and to_regprocedure('private.absorb_digest_alert(text,text,text)') is not null
+            and to_regprocedure('private.observe_ops_event(text,text,text,text,timestamptz,text)') is not null;
+  return jsonb_build_object('ok', true, 'op', 'probe', 'v', 1, 'ready', routed);
+ end if;
+ if p_key is null or length(p_key) not between 1 and 200 or p_key ~ '[[:cntrl:]]' or p_key ~ '^health-' then
+  raise exception 'health_lifecycle: invalid key' using errcode = '22023';
+ end if;
+ if p_key in ('site-down', 'health-check-crashed') then
+  raise exception 'health_lifecycle: immediate key % has no lifecycle', p_key using errcode = '22023';
+ end if;
+ if p_issue is null or p_issue < 1 then
+  raise exception 'health_lifecycle: issue number required' using errcode = '22023';
+ end if;
+ ek := 'health-' || p_key || '-issue-' || p_issue;
+ if p_op = 'renew' then
+  update private.ops_events set last_seen_at = now()
+   where source = 'telegram' and event_key = ek and resolved_at is null;
+  get diagnostics n = row_count;
+  if n > 0 then
+   return jsonb_build_object('ok', true, 'op', 'renew', 'renewed', n, 'created', false);
+  end if;
+  lbl := left(btrim(coalesce(nullif(p_label, ''), p_key)), 120);
+  perform private.observe_ops_event('telegram', ek, lbl, left('🩺 ' || lbl, 300));
+  if not exists (select 1 from private.ops_events where source = 'telegram' and event_key = ek and resolved_at is null) then
+   raise exception 'health_lifecycle: renew did not persist %', ek;
+  end if;
+  return jsonb_build_object('ok', true, 'op', 'renew', 'renewed', 0, 'created', true);
+ end if;
+ -- resolve
+ perform pg_advisory_xact_lock(hashtextextended('ops_event:telegram:' || ek, 0));
+ update private.ops_events set resolved_at = now(), resolution = 'explicit'
+  where source = 'telegram' and event_key = ek and resolved_at is null;
+ get diagnostics n = row_count;
+ if exists (select 1 from private.ops_events where source = 'telegram' and event_key = ek and resolved_at is null) then
+  raise exception 'health_lifecycle: event % still open after resolve', ek;
+ end if;
+ return jsonb_build_object('ok', true, 'op', 'resolve', 'resolved', n);
+end $$;
+revoke all on function public.health_lifecycle(text, text, integer, text) from public, anon, authenticated;
+grant execute on function public.health_lifecycle(text, text, integer, text) to service_role;
+-- PostgREST يلتقط الدالة الجديدة فوراً (يُرسَل عند الإيداع)؛ تأخّر التحديث تتحمّله شروط الاكتشاف في السكربت لا هذا السطر
+notify pgrst, 'reload schema';
+
 create or replace function private.notify_telegram_dispatch(
   p_event_type     text,
   p_message        text,

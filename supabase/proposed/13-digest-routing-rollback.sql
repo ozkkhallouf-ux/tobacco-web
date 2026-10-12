@@ -16,6 +16,11 @@ begin
      or md5((select prosrc from pg_proc where oid = to_regprocedure('private.refine_immediate_alert(text,text,text)'))) is distinct from 'b62dddfef4aff64199722e5e1e5d57be' then
     raise exception 'rollback 13: a routed function drifted from the proposed/13 body; refusing to overwrite later changes';
   end if;
+  -- RPC دورة الحياة: إن تغيّر جسمها بعد 13 يُوقَف التراجع (لا إسقاط عمل لاحق بصمت)
+  if to_regprocedure('public.health_lifecycle(text,text,integer,text)') is not null
+     and md5((select prosrc from pg_proc where oid = to_regprocedure('public.health_lifecycle(text,text,integer,text)'))) is distinct from '1cd6b62f9474327d3d32e0b993c548c4' then
+    raise exception 'rollback 13: public.health_lifecycle drifted from the proposed/13 body; refusing to drop later changes';
+  end if;
   for r in select fn, def from private.digest_routing_snapshot loop
     execute r.def;
   end loop;
@@ -34,6 +39,8 @@ begin
             left('⚠️ أعطال مفتوحة عند إلغاء التوجيه إلى الملخص (' || n || ') — تُرسَل هذه المرة فقط:' || chr(10) || body, 3900),
             'rollback13-drain:' || to_char(now(), 'YYYY-MM-DD"T"HH24'));
   end if;
+  -- أُسقطت الـRPC أولاً: السكربت يعود تلقائياً إلى الوضع القديم (PGRST202 مؤكَّداً) بلا فيضان ولا إطفاء متغيّر
+  drop function if exists public.health_lifecycle(text, text, integer, text);
   drop function if exists private.absorb_digest_alert(text,text,text);
   drop function if exists private.refine_immediate_alert(text,text,text);
   drop function if exists private.ops_event_silence(text);
