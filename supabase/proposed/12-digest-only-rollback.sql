@@ -8,6 +8,10 @@
 do $rb$
 declare r record;
 begin
+  -- 13 يمتصّ التنبيهات في ops_events ويعتمد على قسم الأعطال؛ إزالة القسم قبل 13 تُصمت الأعطال
+  if to_regclass('private.digest_routing_snapshot') is not null then
+    raise exception 'rollback 12 refused: proposed/13 is active; run 13-digest-routing-rollback.sql first';
+  end if;
   if to_regclass('private.digest_bundle_snapshot') is null then
     raise exception 'rollback: no snapshot table; apply proposed/09 and migration 20260926234241 manually';
   end if;

@@ -79,11 +79,12 @@ revoke all on function private.ops_event_route(text,text) from public, anon, aut
 
 -- نافذة الصمت (= قرينة التعافي) لكل حدث: سكربتات تعمل كل دقائق وتعيد الإبلاغ كل مرة تفشل
 -- فيها ⇒ ثلاث ساعات تكفي؛ أحداث يومية أو مدفوعة بالأحداث (لا تكرار بلا فشل جديد) ⇒ 30 ساعة،
--- فيراها تقرير المساء التالي حتماً حتى لو لم تتكرر.
+-- فيراها تقرير المساء التالي حتماً حتى لو لم تتكرر. (عامل أمين يُنذر مرة واحدة لكل حادثة ثم يصمت؛
+-- يُغلق فقط برسالة التعافي، فلا تُغلقه نافذة الصمت قبل التقرير.)
 create or replace function private.ops_event_silence(p_event_key text)
 returns interval language sql immutable as $$
  select case
-  when coalesce(p_event_key,'') ~ '^(daily-git-pull|gha-fail:|health-|automation-failure:)' then interval '30 hours'
+  when coalesce(p_event_key,'') ~ '^(daily-git-pull|gha-fail:|health-|automation-failure:|ameen-read-worker-)' then interval '30 hours'
   else interval '3 hours'
  end
 $$;

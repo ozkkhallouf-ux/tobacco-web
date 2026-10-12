@@ -23,6 +23,7 @@ const baseMain = execFileSync('git', ['show', 'origin/main:supabase/project-task
 const p09 = sql('supabase/proposed/09-cron-reenabled-failed-alert-fix.sql');
 const bundle = sql('supabase/proposed/12-digest-only-atomic-bundle.sql');
 const p13 = sql('supabase/proposed/13-digest-routing-for-noncritical-alerts.sql');
+const rb12 = sql('supabase/proposed/12-digest-only-rollback.sql');
 const rb13 = sql('supabase/proposed/13-digest-routing-rollback.sql');
 const PROD_DISPATCH = `CREATE OR REPLACE FUNCTION private.notify_telegram_dispatch(p_event_type text, p_message text, p_dedupe_key text DEFAULT NULL::text, p_dedupe_minutes integer DEFAULT 60, p_reply_markup jsonb DEFAULT NULL::jsonb)
  RETURNS void
@@ -167,6 +168,12 @@ await notify(db, 'windows', 'متدهور', 'ameen-read-worker-degraded:7');
 assert.ok((await open(db)).some((r) => r.event_key === 'ameen-read-worker-stuck:7'));
 await notify(db, 'windows', 'تعافى', 'ameen-read-worker-recovered:7');
 assert.ok(!(await open(db)).some((r) => r.event_key.startsWith('ameen-read-worker')), 'recovered still open');
+// حادثة عامل أمين تُنذَر مرة واحدة: لا تُغلق بنافذة الصمت (3س) قبل التقرير
+await notify(db, 'windows', 'متدهور', 'ameen-read-worker-degraded:9');
+await db.exec(`update private.ops_events set last_seen_at = now() - interval '10 hours' where event_key = 'ameen-read-worker-degraded:9'`);
+await db.exec(`select private.close_stale_ops_events(now())`);
+assert.ok((await open(db)).some((r) => r.event_key === 'ameen-read-worker-degraded:9'), 'one-shot ameen incident closed too early');
+await notify(db, 'windows', 'تعافى', 'ameen-read-worker-recovered:9');
 console.log('recovery ok');
 
 // rollback / re-apply
@@ -187,6 +194,8 @@ await assert.rejects(db.exec(p13), /drifted/);
 await db.exec(p13.replace(/^do \$pre\$[\s\S]*?end \$pre\$;/m, 'select 1;')); // يثبّت جسم 13 (تجاوز الفحص للتحضير فقط)
 await db.exec(`create or replace function private.notify_telegram_dispatch(p_event_type text,p_message text,p_dedupe_key text default null,p_dedupe_minutes int default 60,p_reply_markup jsonb default null) returns void language sql security definer as $$ select 1 /* digest-routing:v1 edited */ $$`);
 await assert.rejects(db.exec(p13), /drifted/);
+// تراجع 12 مرفوض ما دام 13 فعّالاً
+await assert.rejects(db.exec(rb12), /13 is active/);
 console.log('rollback/reapply/drift ok');
 console.log('anon exec route:', (await one(db, `select has_function_privilege('anon','private.ops_event_route(text,text)','execute') a`)).a);
 console.log('ALL P13 CHECKS PASSED');
