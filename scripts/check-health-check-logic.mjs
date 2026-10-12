@@ -308,7 +308,7 @@ assert.match(
 // ═══════════ دورة حياة العطل غير الحرج (PR-B): تجديد + تعافٍ صريح ═══════════
 {
   const H = await import(pathToFileURL(SCRIPT).href);
-  const { renewalSignalKey, recoverySignalKey, isImmediateHealthKey, IMMEDIATE_HEALTH_KEYS, processClosures } = H;
+  const { renewalSignalKey, recoverySignalKey, IMMEDIATE_HEALTH_KEYS, processClosures } = H;
 
   // الحرجان فقط فوريان، وتطابق التوجيه في proposed/13 حرفياً (لا انجراف بين الطرفين)
   assert.deepEqual([...IMMEDIATE_HEALTH_KEYS], ['site-down', 'health-check-crashed']);

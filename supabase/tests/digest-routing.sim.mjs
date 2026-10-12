@@ -383,7 +383,6 @@ console.log('health faults persist until explicit recovery ok');
   const recover = (k, n) => notify(db, 'health_check', '✅ إشارة تعافٍ (داخلية): ' + k, SK(k, n), 60);
   await db.exec(`update private.ops_events set resolved_at=now(), resolution='silence' where resolved_at is null`);
   await db.exec(`update private.ops_events set resolved_at=now()-interval '48 hours' where resolved_at is not null`);
-  const n0 = await outN();
 
   // 1) استمرار >30س مع تجديد: حدث واحد مفتوح، last_seen_at يتجدد، بلا تسمية، بلا صفوف Telegram
   await create('deploy-failed', 5);

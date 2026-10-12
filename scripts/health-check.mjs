@@ -355,13 +355,13 @@ async function notifyTelegram(problem, issueUrl, dedupeMinutes = 180) {
   }
 }
 
-// إشارة تعافٍ إلى notify_telegram (يمتصّها التوجيه ولا ترسل شيئاً). الإرجاع:
-//   "sent"    = قبلها الخادم؛  "failed" = تعذّر (لا يُغلق الـIssue ويُعاد المحاولة في الدورة التالية)؛
-//   "skipped" = لا أسرار Supabase (لا قناة للإشارة؛ سلوك الإغلاق القديم محفوظ).
 // مفتاح تفعيل صريح (متغيّر مستودع HEALTH_LIFECYCLE_SIGNALS=on) لا يُضبط إلا بعد تطبيق proposed/13 على الإنتاج:
 // قبله يُسلَّم التجديد رسالة فورية يومية وتُسلَّم إشارة التعافي كرسالة. افتراضياً مطفأ ⇒ السلوك القديم تماماً.
 export const lifecycleSignalsEnabled = () => process.env.HEALTH_LIFECYCLE_SIGNALS === "on";
 
+// إشارة تعافٍ إلى notify_telegram (يمتصّها التوجيه ولا ترسل شيئاً). الإرجاع:
+//   "sent"    = قبلها الخادم؛  "failed" = تعذّر (لا يُغلق الـIssue ويُعاد المحاولة في الدورة التالية)؛
+//   "skipped" = مطفأ أو لا أسرار Supabase (سلوك الإغلاق القديم محفوظ).
 async function sendRecoverySignal(problemKey, issueNumber) {
   if (!lifecycleSignalsEnabled()) return "skipped";
   const supabaseUrl = process.env.SUPABASE_URL;
