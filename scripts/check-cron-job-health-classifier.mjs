@@ -162,9 +162,9 @@ assert.ok(
   `${MONITOR_SQL}: observe_ops_event يجب أن يقع خارج أي شرط should_alert`,
 );
 assert.equal(failBranch.split('notify_telegram(').length - 1, 1, 'فرع الفشل: استثناء مهمة التقرير المسائي فقط');
-assert.match(failBranch, /if job_record\.jobname='send-evening-report' then\s+perform public\.notify_telegram\(/);
+assert.match(failBranch, /if job_record\.jobname='send-evening-report'\s+and \(previous_alerted_health is distinct from job_health\s+or \(job_health='failed' and previous_alerted_terminal_at is distinct from terminal_at\)\) then[\s\S]*?perform public\.notify_telegram\(/);
 // ملاحظة: لا Telegram مستقل لغيرها
-assert.doesNotMatch(failBranch.replace(/if job_record\.jobname='send-evening-report' then[\s\S]*?end if;/, ''), /notify_telegram/, `${MONITOR_SQL}: فرع فشل cron يرسل Telegram مستقلاً`);
+assert.doesNotMatch(failBranch.replace(/if job_record\.jobname='send-evening-report'\s+and[\s\S]*?end if;/, ''), /notify_telegram/, `${MONITOR_SQL}: فرع فشل cron يرسل Telegram مستقلاً`);
 assert.match(okBranch, /resolve_ops_event\('cron'/, `${MONITOR_SQL}: التعافي ليس في فرع 'ok'`);
 assert.doesNotMatch(okBranch, /notify_telegram/, `${MONITOR_SQL}: تعافي cron يرسل Telegram مستقلاً`);
 assert.doesNotMatch(

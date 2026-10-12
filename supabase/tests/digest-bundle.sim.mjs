@@ -278,12 +278,31 @@ const exists = async (db, rel) => (await one(db, `select to_regclass('${rel}') r
   assert.match(out[0].msg, /send-evening-report/);
   await db.exec('select private.monitor_project_tasks()');
   assert.equal((await sent(db)).length, 1, 'لا تكرار للتنبيه لنفس الحادثة');
+  // لا تذكير ساعي: حتى لو مرّت ساعتان على آخر تنبيه يبقى تنبيه واحد
+  await db.exec(`update private.project_task_health_state set last_alert_at=now()-interval '3 hours' where task_key='cron:send-evening-report'`);
+  await db.exec('select private.monitor_project_tasks()');
+  assert.equal((await sent(db)).length, 1, 'لا تذكير ساعي');
+  // التعافي: يُغلق الحدث داخلياً بلا رسالة
+  await db.exec(`insert into cron.job_run_details(jobid,status,start_time) values(1,'succeeded',now())`);
+  await db.exec('select private.monitor_project_tasks()');
+  assert.equal((await sent(db)).length, 1, 'لا رسالة تعافٍ');
+  assert.equal((await one(db, `select count(*)::int c from private.ops_events where resolved_at is null and event_key='send-evening-report'`)).c, 0);
+  // مهمة التقرير بلا أي تشغيل بعد (قبل الموعد) ليست عطلاً
+  await db.exec(`insert into cron.job(jobname) values('send-evening-report-pre')`);
+  await db.exec('select private.monitor_project_tasks()');
+  assert.equal((await sent(db)).length, 1, 'غياب التشغيل قبل الموعد ليس عطلاً');
+  // سقف سيل التراجع: 7 مهام فاشلة ⇒ تُصفَّر 5 فقط
+  for (let k = 0; k < 7; k++) {
+    await db.exec(`insert into private.project_task_health_state(task_key,is_healthy,last_observed_at,last_alert_at,last_alerted_health) values('cron:flood-${k}',false,now()-interval '${k} minutes',now(),'failed')`);
+  }
   // التراجع بعد فشل cron قائم: المراقب 09 المستعاد يُنذر عن العطل القائم مرة واحدة
   await db.exec(rollback);
   await db.exec('delete from sent');
   await db.exec('select private.monitor_project_tasks()');
   out = await sent(db);
   assert.ok(out.some((o) => /other-job/.test(o.msg)), 'بعد التراجع يُنذر 09 عن عطل cron القائم');
+  const reset = (await one(db, `select count(*)::int c from private.project_task_health_state where task_key like 'cron:flood-%' and last_alert_at is null`)).c;
+  assert.ok(reset >= 3 && reset <= 5, `سقف إعادة الإنذار 5 بالمجموع (flood=${reset})`);
   console.log('P1 round4 OK');
 }
 
