@@ -124,6 +124,6 @@ definition لهذا المراقب، وقد جرى تعديله (PR #220) بإص
 1. دمج PR-A (يغيّر `main` ⇒ `pages.yml` ينشر تلقائياً).
 2. تطبيق `12-digest-only-atomic-bundle.sql`.
 3. تطبيق `13-digest-routing-for-noncritical-alerts.sql`.
-4. إعادة توجيه PR-B إلى `main` ثم دمجه. السلوك الجديد **مطفأ افتراضياً** (آمن الدمج في أي وقت)؛ لا تُفعّله إلا بعد 13: `gh variable set HEALTH_LIFECYCLE_SIGNALS --body on`. قبل 13 يرسل التجديد رسالة فورية يومياً وتُرسل إشارة التعافي كرسالة.
+4. إعادة توجيه PR-B إلى `main` ثم دمجه. السلوك الجديد **مطفأ افتراضياً** (آمن الدمج في أي وقت)؛ لا تُفعّله إلا بعد 13: `gh variable set HEALTH_LIFECYCLE_SIGNALS --body on`. وهو مطفأ: لا تجديد ولا إشارة تعافٍ، و**لا يُغلَق Issue عطل غير حرج تلقائياً** (يبقى مفتوحاً حتى التفعيل ثم يُغلق بدليل إيجابي وإشارة) كي لا يبقى حدث ممتصّ في الملخص بلا نهاية؛ الأعطال الحرجة (`site-down`، `health-check-crashed`) تُغلَق كالمعتاد.
 5. التحقق: لا صفوف `health-*` جديدة في `telegram_outbox` لعطل مستمر، `last_seen_at` يتجدد، والتقرير المسائي يعرض العطل دون «يلزم إعادة التحقق».
 6. التراجع: أطفئ المتغيّر (`gh variable delete HEALTH_LIFECYCLE_SIGNALS`) **أولاً**، ثم `13-digest-routing-rollback.sql`، ثم `12-digest-only-rollback.sql`.

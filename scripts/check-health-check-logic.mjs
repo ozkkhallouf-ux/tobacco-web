@@ -352,6 +352,10 @@ assert.match(
   t = mk(() => 'skipped');
   r = await processClosures([{ number: 5, key: 'deploy-failed' }], t.deps);
   assert.equal(r[0].closed, true, 'بلا أسرار Supabase يبقى سلوك الإغلاق القديم');
+  t = mk(() => 'disabled');
+  r = await processClosures([{ number: 5, key: 'deploy-failed' }], t.deps);
+  assert.deepEqual(t.calls, [['signal', 'deploy-failed', 5]], 'مطفأ ⇒ لا إغلاق');
+  assert.equal(r[0].closed, false);
   // حرج: لا إشارة أصلاً، ويُغلق الـIssue
   t = mk(() => 'sent');
   r = await processClosures([{ number: 9, key: 'site-down' }], t.deps);
@@ -382,7 +386,7 @@ assert.match(
   assert.equal(H.lifecycleSignalsEnabled(), false, 'مطفأ افتراضياً');
   process.env.HEALTH_LIFECYCLE_SIGNALS = 'on'; assert.equal(H.lifecycleSignalsEnabled(), true);
   process.env.HEALTH_LIFECYCLE_SIGNALS = 'yes'; assert.equal(H.lifecycleSignalsEnabled(), false); delete process.env.HEALTH_LIFECYCLE_SIGNALS;
-  assert.match(codeOnly, /async function sendRecoverySignal\(problemKey, issueNumber\) \{\s*if \(!lifecycleSignalsEnabled\(\)\) return "skipped"/, 'بلا تفعيل لا إشارة تعافٍ');
+  assert.match(codeOnly, /async function sendRecoverySignal\(problemKey, issueNumber\) \{\s*if \(!lifecycleSignalsEnabled\(\)\) return "disabled"/, 'بلا تفعيل لا إشارة تعافٍ');
   assert.match(codeOnly, /await closeResolvedIssues\(\{/, 'main ينتظر الإغلاق');
   assert.match(codeOnly, /sendSignal: sendRecoverySignal/, 'الإغلاق يمرّ عبر إشارة التعافي');
 }

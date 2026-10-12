@@ -361,9 +361,10 @@ export const lifecycleSignalsEnabled = () => process.env.HEALTH_LIFECYCLE_SIGNAL
 
 // إشارة تعافٍ إلى notify_telegram (يمتصّها التوجيه ولا ترسل شيئاً). الإرجاع:
 //   "sent"    = قبلها الخادم؛  "failed" = تعذّر (لا يُغلق الـIssue ويُعاد المحاولة في الدورة التالية)؛
-//   "skipped" = مطفأ أو لا أسرار Supabase (سلوك الإغلاق القديم محفوظ).
+//   "disabled" = المفتاح مطفأ: لا يُغلق الـIssue (قد يكون الحدث ممتصّاً في الملخص ولا إشارة تعافٍ تغلقه؛ يُغلق بعد التفعيل بدليل إيجابي)؛
+//   "skipped" = لا أسرار Supabase أو لا مفتاح صالح (يُغلق كالسابق).
 async function sendRecoverySignal(problemKey, issueNumber) {
-  if (!lifecycleSignalsEnabled()) return "skipped";
+  if (!lifecycleSignalsEnabled()) return "disabled";
   const supabaseUrl = process.env.SUPABASE_URL;
   const serviceKey = process.env.SUPABASE_SERVICE_KEY;
   if (!supabaseUrl || !serviceKey) return "skipped";
@@ -526,6 +527,7 @@ function verifyWorkflowIncidentResolved(key) {
 // ينفّذ الإغلاق على قائمة قرّرتها decideIssuesToClose (دليل إيجابي فقط). الترتيب: إشارة التعافي أولاً ثم الإغلاق:
 //   * "failed"  → لا نغلق الـIssue؛ تُعاد المحاولة الدورة التالية (إشارة التعافي idempotent) فلا يبقى الحدث
 //                  مفتوحاً في الملخص بعد إغلاق الـIssue؛
+//   * "disabled" → لا نغلق أيضاً (المفتاح مطفأ والتوجيه قد يكون فعّالاً: إغلاق الـIssue بلا إشارة يُبقي الحدث مفتوحاً في الملخص بلا نهاية)؛
 //   * "sent"/"skipped" → نغلق.
 // الإشارة تحمل رقم الـIssue المغلق نفسه، فلا تُغلَق حادثة أخرى لنفس النوع.
 export async function processClosures(toClose, { sendSignal, closeIssue, log = () => {} }) {
@@ -534,6 +536,11 @@ export async function processClosures(toClose, { sendSignal, closeIssue, log = (
     let signal = "skipped";
     if (!isImmediateHealthKey(key) && validIssueNumber(number)) {
       signal = await sendSignal(key, number);
+    }
+    if (signal === "disabled") {
+      log(`⏸ إشارات دورة الحياة مطفأة — يبقى Issue #${number} ("${key}") مفتوحاً حتى التفعيل.`);
+      results.push({ number, key, signal, closed: false });
+      continue;
     }
     if (signal === "failed") {
       log(`↻ تعذّرت إشارة التعافي لـ"${key}" (#${number}) — يبقى الـIssue مفتوحاً وتُعاد المحاولة.`);
