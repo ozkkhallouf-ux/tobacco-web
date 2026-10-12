@@ -439,7 +439,10 @@ assert.match(
     assert.equal(await resolveForClosure('deploy-failed', 5, { mode: 'unknown', call: never, confirm: never, log }), 'hold');
     assert.equal(await resolveForClosure('deploy-failed', 5, { mode: 'absent', call: never, confirm: () => false, log }), 'hold');
     assert.equal(await resolveForClosure('deploy-failed', 5, { mode: 'absent', call: never, confirm: () => true, log }), 'legacy');
-    assert.equal(await resolveForClosure('deploy-failed', 5, { mode: 'unconfigured', call: never, confirm: never, log }), 'legacy', 'بلا أسرار ⇒ إغلاق قديم بلا RPC ولا تأكيد');
+    assert.equal(await resolveForClosure('deploy-failed', 5, { mode: 'unconfigured', call: never, confirm: never, managed: () => false, log }), 'legacy', 'بلا أسرار ولم يُدَر قط ⇒ إغلاق قديم بلا RPC ولا تأكيد');
+    assert.equal(await resolveForClosure('deploy-failed', 5, { mode: 'unconfigured', call: never, confirm: never, managed: () => true, log }), 'hold', 'أُدير عبر 13 ثم فُقد المفتاح ⇒ لا إغلاق (لا حدث يتيم)');
+    assert.equal(await resolveForClosure('deploy-failed', 5, { mode: 'unconfigured', call: never, confirm: never, managed: () => { throw new Error('gh'); }, log }), 'hold', 'تعذّر فحص الوسم ⇒ محافظة');
+    assert.equal(await resolveForClosure('deploy-failed', 5, { mode: 'unconfigured', call: never, confirm: never, log }), 'hold', 'الافتراضي محافظ');
     const calls = [];
     assert.equal(await resolveForClosure('deploy-failed', 5, { mode: 'ready', confirm: never, log, call: async (op, a) => { calls.push([op, a]); return { kind: 'ok', body: { ok: true, op: 'resolve', resolved: 1 } }; } }), 'resolved');
     assert.deepEqual(calls, [['resolve', { key: 'deploy-failed', issue: 5 }]]);
@@ -565,6 +568,10 @@ assert.match(
   assert.ok(!/notifyTelegram\(problem, `https:\/\/github\.com\/\$\{REPO\}\/issues\/\$\{existing\.number\}`/.test(rb), 'لا إشعار تيليغرام عند التجديد');
   assert.ok(!/lifecycleSignalsEnabled|sendRecoverySignal|recoverySignalKey|renewalSignalKey/.test(codeOnly), 'لا بقايا مسار الإشارات عبر notify_telegram');
   assert.match(codeOnly, /await closeResolvedIssues\(\{/, 'main ينتظر الإغلاق');
+  // وسم الإدارة: يُسجَّل بعد تجديد ناجح وبعد إنشاء Issue في حالة ready فقط، ويُقرأ عند فقدان الأسرار
+  assert.match(codeOnly, /else markManaged\(existing\.number\)/, 'وسم بعد تجديد ناجح');
+  assert.match(codeOnly, /getLifecycleMode\(\)\) === "ready"\) markManaged\(createdNumber\)/, 'وسم عند الإنشاء في ready');
+  assert.match(codeOnly, /managed: isManagedIssue/, 'الإغلاق يقرأ وسم الإدارة');
   assert.match(codeOnly, /resolveLifecycle: async \(key, number\) => resolveForClosure\(/, 'الإغلاق يمرّ عبر حلّ الحدث بإقرار');
   // مفتاح الطوارئ يمرّ عبر نقطة واحدة (detectLifecycleMode) لا فحوص متفرقة
   assert.match(codeOnly, /if \(lifecycleSwitchOff\(env\)\) return "off";\s*if \(!env\.SUPABASE_URL \|\| !env\.SUPABASE_SERVICE_KEY\) return "unconfigured";\s*const r = await callLifecycle\("probe"/, 'off ثم unconfigured قبل أي طلب');

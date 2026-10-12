@@ -352,6 +352,10 @@ const RPC_TIMEOUT_MS = 15000;
 export const LEGACY_CONFIRM_MIN_MS = 20 * 60 * 1000;
 export const LEGACY_CONFIRM_MAX_MS = 6 * 60 * 60 * 1000;
 const ABSENT_MARKER_RE = /<!-- health-probe-absent:[^>]*-->/;
+// وسم على الـIssue يُسجَّل حين شوهد 13 جاهزاً (ready) أثناء حياته: قد يكون لعطله حدث في ops_events. يُستعمل حين تُفقَد الأسرار لاحقاً
+// (حذف/انتهاء المفتاح) كي لا يُغلَق الـIssue بالسلوك القديم فيبقى حدث يتيم؛ أما Issue بلا الوسم فلم يُشاهَد مُدارًا قط.
+const MANAGED_MARKER = "<!-- health-lifecycle-managed -->";
+const MANAGED_MARKER_RE = /<!-- health-lifecycle-managed -->/;
 
 // استدعاء health_lifecycle. الإرجاع:
 //   { kind: "ok", body }      = إقرار صالح للعملية المطلوبة بعينها؛
@@ -427,9 +431,17 @@ export function confirmLegacyAbsence(number, { readComments, postComment, nowMs 
 // قرار إغلاق Issue لعطل غير حرج (الحرجان بلا حدث ⇒ يُغلقان مباشرة في processClosures):
 //   "resolved" = الـRPC أقرّت إغلاق الحدث (يُغلَق الـIssue)؛  "legacy" = 13 غير مطبَّق **مؤكَّداً** (لا حدث يتيم ممكن) ⇒ يُغلَق؛
 //   "hold"     = طوارئ/غير معروف/غياب غير مؤكَّد/فشل أو إقرار غير صالح ⇒ لا يُغلَق ويُعاد في الدورة التالية.
-export async function resolveForClosure(key, number, { mode, call, confirm, log = () => {} }) {
+export async function resolveForClosure(key, number, { mode, call, confirm, managed = () => true, log = () => {} }) {
   if (mode === "off") { log(`⏸ إيقاف الطوارئ (HEALTH_LIFECYCLE_SIGNALS=off): يبقى Issue #${number} ("${key}") مفتوحاً — لا حلّ ولا إغلاق.`); return "hold"; }
-  if (mode === "unconfigured") { log(`ℹ️ أسرار Supabase غير مضبوطة — لا أحداث تنبيه من هذا السكربت؛ إغلاق Issue #${number} ("${key}") بالسلوك القديم.`); return "legacy"; }
+  if (mode === "unconfigured") {
+    // الأسرار اختيارية في الـworkflow: بدونها لا يصنع السكربت أحداثاً ⇒ إغلاق قديم آمن، **إلا** إن سبق أن شوهد 13 جاهزاً لهذا الـIssue
+    // (وسم managed) فقد يكون له حدث ثم فُقد المفتاح ⇒ نُبقيه مفتوحاً حتى يُستعاد المفتاح. تعذّر فحص الوسم ⇒ محافظة (hold).
+    let managedIssue = true;
+    try { managedIssue = managed(number); } catch { managedIssue = true; }
+    if (managedIssue) { log(`⏸ أسرار Supabase غير متاحة لكن Issue #${number} ("${key}") أُدير سابقاً عبر 13 — يبقى مفتوحاً حتى استعادة SUPABASE_SERVICE_KEY.`); return "hold"; }
+    log(`ℹ️ أسرار Supabase غير مضبوطة ولم يُدَر Issue #${number} ("${key}") عبر 13 — إغلاق بالسلوك القديم.`);
+    return "legacy";
+  }
   if (mode === "absent") {
     if (confirm(number)) return "legacy";
     log(`⏳ rpc/health_lifecycle غير موجودة (PGRST202) — لم يُؤكَّد غياب 13 بعد؛ يبقى Issue #${number} مفتوحاً.`);
@@ -453,6 +465,7 @@ async function reportProblem(problem) {
       if ((await getLifecycleMode()) === "ready") {
         const r = await callLifecycle("renew", { key: problem.key, issue: existing.number, label: problem.title });
         if (r.kind !== "ok") console.log(`⚠️ تعذّر تجديد حضور "${problem.key}" (#${existing.number}): ${r.kind === "absent" ? "PGRST202" : r.detail}`);
+        else markManaged(existing.number);
       }
     }
     return true;
@@ -497,6 +510,8 @@ async function reportProblem(problem) {
     _openHealthIssuesCache.push({ number: 0, title: problem.title, body: `<!-- health:${problem.key} -->` });
   }
   await notifyTelegram(problem, issueUrl);
+  const createdNumber = issueNumberFromUrl(issueUrl);
+  if (!isImmediateHealthKey(problem.key) && validIssueNumber(createdNumber) && (await getLifecycleMode()) === "ready") markManaged(createdNumber);
   // الـIssue أُنشئ بنجاح، فالحادثة موثّقة حتى لو تعثّر تيليغرام.
   return true;
 }
@@ -601,6 +616,16 @@ let _lifecycleModePromise = null;
 const getLifecycleMode = () => (_lifecycleModePromise ??= detectLifecycleMode());
 const readIssueComments = (n) => ghJSON(["issue", "view", String(n), "--repo", REPO, "--json", "comments"]).comments || [];
 const postIssueComment = (n, body) => gh(["issue", "comment", String(n), "--repo", REPO, "--body", body]);
+// هل سُجّل وسم managed على الـIssue؟ (رمي الخطأ عند تعذّر القراءة ⇒ resolveForClosure يتصرف محافظاً)
+const isManagedIssue = (n) => readIssueComments(n).some((c) => MANAGED_MARKER_RE.test((c && c.body) || ""));
+// يسجّل الوسم مرة واحدة؛ أي فشل لا يؤثر على الدورة (يُعاد في الدورة التالية).
+function markManaged(n) {
+  try {
+    if (!isManagedIssue(n)) postIssueComment(n, `${MANAGED_MARKER}\nℹ️ هذا العطل مُدار عبر public.health_lifecycle (proposed/13): لا يُغلق Issue بالسلوك القديم إن فُقدت أسرار Supabase.`);
+  } catch (err) {
+    console.log(`⚠️ تعذّر تسجيل وسم الإدارة على #${n}: ${err}`);
+  }
+}
 
 async function closeResolvedIssues({ activeKeys, healthyKeys, scanOk }) {
   const openIssues = listAllOpenHealthIssues();
@@ -617,6 +642,7 @@ async function closeResolvedIssues({ activeKeys, healthyKeys, scanOk }) {
       mode: await getLifecycleMode(),
       call: (op, args) => callLifecycle(op, args),
       confirm: (n) => confirmLegacyAbsence(n, { readComments: readIssueComments, postComment: postIssueComment }),
+      managed: isManagedIssue,
       log: (m) => console.log(m),
     }),
     log: (m) => console.log(m),

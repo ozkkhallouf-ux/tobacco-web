@@ -514,8 +514,20 @@ console.log('health faults persist until explicit recovery ok');
 
   // 9) بلا أسرار Supabase (اختيارية في الـworkflow): إغلاق قديم، صفر طلبات، لا يبقى Issue مفتوحاً للأبد
   const urlsNoSecret = state.urls.length;
-  f = await flow([{ number: 11, key: 'deploy-failed' }], { env: {} });
-  assert.deepEqual([f.mode, f.closed], ['unconfigured', [11]]);
+  const flowNoSecret = async (managed) => {
+    const closed = [];
+    const mode = await detectLifecycleMode({ env: {}, fetchImpl });
+    await processClosures([{ number: 11, key: 'deploy-failed' }], {
+      resolveLifecycle: (key, number) => resolveForClosure(key, number, { mode, managed: () => managed, confirm: () => false, log: () => {}, call: () => { throw new Error('no calls'); } }),
+      closeIssue: async (n) => { closed.push(n); return true; },
+      log: () => {},
+    });
+    return { mode, closed };
+  };
+  f = await flowNoSecret(false);
+  assert.deepEqual([f.mode, f.closed], ['unconfigured', [11]], 'لم يُدَر عبر 13 ⇒ إغلاق قديم');
+  f = await flowNoSecret(true);
+  assert.deepEqual([f.mode, f.closed], ['unconfigured', []], 'أُدير عبر 13 ثم فُقد المفتاح ⇒ يبقى مفتوحاً (لا حدث يتيم)');
   assert.equal(state.urls.length, urlsNoSecret);
 
   assert.ok(!state.urls.some((u) => !u.endsWith('/rpc/health_lifecycle')), 'لا طلب غير RPC الحياة');
