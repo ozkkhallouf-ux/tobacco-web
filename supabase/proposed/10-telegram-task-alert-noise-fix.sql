@@ -1,30 +1,34 @@
--- proposed/10-telegram-task-alert-noise-fix.sql
+-- proposed/10-telegram-task-alert-noise-fix.sql  (سياسة: الملخص اليومي فقط)
 --
 -- **مقترح — غير مطبَّق على الإنتاج.** يُطبَّق فقط بتفويض صريح من المالك.
+-- يجب تطبيقه قبل proposed/11 (الذي يضيف القسم إلى التقرير المسائي).
 --
 -- المشكلة (مثبتة بالكود وببيانات الإنتاج لـ14 يوماً: 148 حادثة، 936 رسالة):
 -- حدّ «الحداثة» max_age_minutes (10/15/30 دقيقة) كان هو نفسه حدّ إرسال
 -- «🚨 توقفت مهمة بالمشروع»، فيُرسَل إنذار عند أول عيّنة متأخرة، ثم يتكرر كل
 -- ساعة. نحو نصف الحوادث تنتهي خلال 60 دقيقة (تأخر عابر / إطفاء جهاز /
--- انقطاع إنترنت) والوسيط 57 دقيقة.
+-- انقطاع إنترنت).
 --
--- الإصلاح (تعديل دالة + عمودين، بلا مساس ببيانات التقارير ولا جدولة cron):
---   • alert_after_minutes لكل مهمة: لا Telegram قبله — يُسجَّل التأخر داخلياً
---     في project_task_health_state.last_detail فقط. max_age_minutes لا يتغيّر
---     (واجهة التطبيق تعكسه وscripts/check-customer-intelligence-wiring.mjs يثبّته).
---   • fault_since: بداية العطل الحالي — تُقاس بها مدّة التراكم (status≠ok).
---   • رسالة واحدة لكل عطل، تذكير كل 6 ساعات فقط، ورسالة تعافٍ واحدة فقط
---     لمهمة أُنذر عنها فعلاً.
---   • حلقة cron.job («توقفت مهمة داخل الموقع») وتنبيهات Windows sync_failure
---     والتنبيهات الأمنية: لا تغيير إطلاقاً.
+-- قرار المالك: DAILY DIGEST ONLY للأعطال التشغيلية غير الحرجة.
+--   • المراقبة تعمل كما هي كل 5 دقائق (لا إيقاف لأي مهمة مجدولة).
+--   • لا Telegram مستقل لأي عطل غير حرج ولا لتعافيه ولا تذكيرات؛ كل شيء يُسجَّل
+--     في private.project_task_incidents (تدقيق داخلي).
+--   • العطل المؤكَّد (مستمر ≥ alert_after_minutes) غير المحلول يظهر في قسم
+--     «حالة الأنظمة والأعطال» بآخر التقرير المسائي، مرة واحدة لكل مهمة في كل تقرير،
+--     ويتكرر يومياً حتى يُحلّ. لا أعطال ⇒ «لا توجد أعطال تشغيلية مستمرة».
+--   • التنبيه الفوري الوحيد في هذه الدالة: ameen-main (severity=critical) بعد
+--     التحقق من صمت كل inventory_reports معاً طوال 45 دقيقة؛ مع رسالة تعافٍ واحدة.
+--   • حلقة cron.job («توقفت مهمة داخل الموقع»: مهمة معطّلة/فاشلة نهائياً) وتنبيهات
+--     Windows sync_failure والتنبيهات الأمنية: لا تغيير إطلاقاً.
 -- الدالة الكاملة مطابقة للملف القانوني supabase/project-task-health-monitor.sql.
--- التراجع: أعد تطبيق proposed/09 (الدالة السابقة)؛ العمودان الجديدان غير ضارّين.
+-- التراجع: أعد تطبيق proposed/09 (الدالة السابقة)؛ الأعمدة والجدول الجديدان
+-- غير ضارّين ويمكن تركهما.
 
--- proposed/10 (تنبيهات تيليجرام المزعجة): حدّ التنبيه منفصل عن max_age_minutes.
--- max_age_minutes يبقى حدّ «الحداثة» الذي تعكسه واجهة التطبيق
--- (CONFIG.freshnessMinutes في customer-intelligence) ويُسجَّل داخلياً فقط؛
--- أما إرسال Telegram فلا يحدث قبل alert_after_minutes (استمرار مثبت).
--- fault_since يحفظ بداية العطل الحالي كي تُقاس مدّته بين الدورات.
+-- proposed/10 (سياسة الملخص اليومي فقط): الأعطال التشغيلية غير الحرجة لا ترسل
+-- Telegram مستقلاً؛ تُسجَّل داخلياً وتُعرض في قسم «حالة الأنظمة والأعطال» بآخر
+-- التقرير المسائي. alert_after_minutes = حدّ «التأكيد» (استمرار مثبت) لا حدّ
+-- إرسال. max_age_minutes لا يتغيّر (الواجهة تعكسه وscripts/check-customer-
+-- intelligence-wiring.mjs يثبّته). severity='critical' فقط يُنبَّه فوراً بعد التحقق.
 do $$ begin
   if not exists (
     select 1 from information_schema.columns
@@ -35,46 +39,97 @@ do $$ begin
   end if;
   if not exists (
     select 1 from information_schema.columns
+    where table_schema='private' and table_name='project_task_monitors' and column_name='severity'
+  ) then
+    alter table private.project_task_monitors add column severity text not null default 'digest'
+      check (severity in ('digest','critical'));
+  end if;
+  if not exists (
+    select 1 from information_schema.columns
+    where table_schema='private' and table_name='project_task_monitors' and column_name='impact_note'
+  ) then
+    alter table private.project_task_monitors add column impact_note text;
+  end if;
+  if not exists (
+    select 1 from information_schema.columns
     where table_schema='private' and table_name='project_task_health_state' and column_name='fault_since'
   ) then
     alter table private.project_task_health_state add column fault_since timestamptz;
   end if;
 end $$;
 
--- proposed/10: حدود التنبيه لكل مهمة (دقائق) من إيقاعها الفعلي، لا مدة موحّدة:
--- كلها ≥ 4× دورة المهمة، لتحمّل إطفاء/انقطاع إنترنت مؤقتاً على أجهزة OZK.
--- ameen-main هو المؤشر الأسرع (دورته دقيقة واحدة وكل المصادر تعتمد عليه).
+-- سجلّ الأعطال (تدقيق داخلي + المصدر الوحيد لقسم التقرير اليومي). صف مفتوح واحد
+-- فقط لكل مهمة (فهرس فريد جزئي) ⇒ لا يتكرر العطل نفسه داخل التقرير. confirmed_at
+-- يُملأ حين يثبت استمرار العطل؛ الأعطال العابرة تُغلق دون أن تظهر في التقرير.
+-- يُحفظ الصف مفتوحاً حتى لو لم يُرسل أي تنبيه إطلاقاً.
+create table if not exists private.project_task_incidents (
+  id bigserial primary key,
+  task_key text not null,
+  started_at timestamptz not null,
+  confirmed_at timestamptz,
+  ended_at timestamptz,
+  last_success_at timestamptz,
+  last_seen_at timestamptz not null default now(),
+  detail text,
+  alerted boolean not null default false
+);
+create unique index if not exists project_task_incidents_one_open
+  on private.project_task_incidents(task_key) where ended_at is null;
+alter table private.project_task_incidents enable row level security;
+revoke all on table private.project_task_incidents from public,anon,authenticated;
+
+-- proposed/10: حدّ تأكيد العطل لكل مهمة (دقائق) من إيقاعها الفعلي، لا مدة موحّدة:
+-- كلها ≥ 4× دورة المهمة، فلا يُعدّ إطفاء/انقطاع إنترنت قصير عطلاً مؤكداً.
 update private.project_task_monitors m set alert_after_minutes=v.mins
 from (values ('ameen-main',45),('customer-balances',120),('customer-movements',180),
  ('customer-invoices',240),('daily-profit',120),('price-sync',180),('invoice-series',120),
  ('item-details',720),('khalil-audit',120),('expense-entries',360)) as v(task_key,mins)
 where m.task_key=v.task_key and m.alert_after_minutes is distinct from v.mins;
 
--- proposed/10: قرار التنبيه كدالة نقية قابلة للاختبار الحتمي.
---   'ok'      سليم ولا إنذار سابق ⇒ لا رسالة
---   'recover' سليم بعد إنذار أُرسل فعلاً ⇒ رسالة تعافٍ واحدة
---   'log'     متأخر لكن دون حدّ التنبيه (أو تراكم غير مستمر) ⇒ تسجيل داخلي فقط
---   'alert'   عطل مستمر تجاوز alert_after ولم يُنذَر عنه ⇒ رسالة واحدة
---   'hold'    عطل مُنذَر عنه ولم يحن التذكير ⇒ صمت
---   'remind'  عطل مُنذَر عنه ومرّ p_reminder_minutes منذ آخر رسالة ⇒ تذكير
+-- الحرج الوحيد: ameen-main (توقف مزامنة أمين كلها). لا ينبَّه عنه إلا بعد التحقق
+-- من صمت كل تقارير inventory_reports معاً (انظر المراقب).
+update private.project_task_monitors set severity='critical' where task_key='ameen-main' and severity<>'critical';
+
+-- أثر العطل على الموقع/البيانات كما يظهر في التقرير اليومي (نص قابل للمراجعة).
+update private.project_task_monitors m set impact_note=v.note
+from (values
+ ('ameen-main','توقف مزامنة أمين كلياً: كل بيانات الموقع (أرصدة، فواتير، أسعار) لا تتحدّث'),
+ ('customer-balances','أرصدة الزبائن في الموقع قد تكون قديمة'),
+ ('customer-movements','كشوف حركات الزبائن في الموقع غير محدّثة'),
+ ('customer-invoices','فواتير الزبائن الجديدة قد لا تظهر في الموقع'),
+ ('daily-profit','رقم الربح اليومي في الموقع غير محدّث'),
+ ('price-sync','تغييرات الأسعار من أمين قد لا تصل للموقع'),
+ ('invoice-series','أرقام/سلاسل الفواتير في الموقع غير محدّثة'),
+ ('item-details','تفاصيل المواد والمخزون في الموقع قد تكون قديمة'),
+ ('khalil-audit','سجل تدقيق خليل لا يُرفع'),
+ ('expense-entries','حركات المصاريف الجديدة لا تظهر في الموقع ولا في التقرير المسائي')
+) as v(task_key,note)
+where m.task_key=v.task_key and m.impact_note is distinct from v.note;
+
+-- proposed/10: قرار الإبلاغ كدالة نقية قابلة للاختبار الحتمي (الملخص اليومي فقط).
+--   'ok'      سليم ولا إنذار فوري سابق ⇒ لا شيء
+--   'recover' سليم بعد إنذار فوري أُرسل فعلاً (حرج فقط) ⇒ رسالة تعافٍ واحدة
+--   'track'   متأخر دون حدّ التأكيد ⇒ تسجيل داخلي فقط
+--   'open'    عطل مؤكّد غير حرج ⇒ يُسجَّل ويظهر في التقرير اليومي (بلا Telegram)
+--   'alert'   عطل مؤكّد حرج ومُتحقَّق منه ولم يُنذَر عنه ⇒ إنذار فوري واحد
+--   'hold'    عطل مؤكّد حرج سبق الإنذار عنه ⇒ صمت
 create or replace function private.project_task_alert_decision(
   p_has_report boolean, p_age_minutes numeric, p_backlogged boolean,
   p_fault_minutes numeric, p_max_age integer, p_alert_after integer,
-  p_alerted boolean, p_minutes_since_alert numeric, p_reminder_minutes integer default 360)
+  p_critical boolean, p_verified boolean, p_alerted boolean)
 returns text language sql immutable
 as $$
  select case
   when not (not p_has_report or p_age_minutes>p_max_age or p_backlogged) then
    case when p_alerted then 'recover' else 'ok' end
   when not (not p_has_report or p_age_minutes>=p_alert_after
-            or (p_backlogged and p_fault_minutes>=p_alert_after)) then
-   case when p_alerted then 'hold' else 'log' end
-  when not p_alerted then 'alert'
-  when p_minutes_since_alert>=p_reminder_minutes then 'remind'
-  else 'hold'
+            or (p_backlogged and p_fault_minutes>=p_alert_after)) then 'track'
+  when p_alerted then 'hold'
+  when p_critical and p_verified then 'alert'
+  else 'open'
  end
 $$;
-revoke all on function private.project_task_alert_decision(boolean,numeric,boolean,numeric,integer,integer,boolean,numeric,integer)
+revoke all on function private.project_task_alert_decision(boolean,numeric,boolean,numeric,integer,integer,boolean,boolean,boolean)
   from public,anon,authenticated;
 
 create or replace function private.monitor_project_tasks()
@@ -91,8 +146,11 @@ declare cfg record; last_at timestamptz; age_minutes numeric; last_status text; 
  -- proposed/08: هوية incident لكل حادثة انتقال فعلي بين تصنيفَي stuck/disabled
  -- (راجع تعليق عمود last_alerted_health_since أعلاه).
  previous_alerted_health_since timestamptz; health_incident_since timestamptz;
- previous_fault_since timestamptz; fault_start timestamptz; alert_after integer; is_alerted boolean; decision text;
+ previous_fault_since timestamptz; fault_start timestamptz; fault_origin timestamptz; alert_after integer;
+ is_alerted boolean; decision text; is_critical boolean; is_verified boolean; any_recent timestamptz;
 begin
+ -- سجلّ التدقيق يُحتفظ به 180 يوماً ثم يُقلَّم.
+ delete from private.project_task_incidents where ended_at < now()-interval '180 days';
  for cfg in select * from private.project_task_monitors where enabled order by task_key loop
   -- جولة ٤: source_table='inventory_reports' (الافتراضي) يبقي السلوك
   -- القديم كما هو (فلترة بعمود source داخل الجدول المشترك). أي قيمة أخرى
@@ -115,17 +173,27 @@ begin
   select is_healthy,last_alert_at,fault_since into previous_healthy,previous_alert_at,previous_fault_since
     from private.project_task_health_state where task_key=cfg.task_key;
   alert_after:=coalesce(cfg.alert_after_minutes,greatest(cfg.max_age_minutes*4,120));
-  -- is_alerted: أُرسل إنذار فعلاً لهذا العطل. previous_alert_at لا يُسجَّل إلا
-  -- بعد نجاح notify_telegram (راجع الحارس أدناه) وتُصفَّر عند التعافي.
+  is_critical:=cfg.severity='critical';
+  -- is_alerted: أُرسل إنذار فوري فعلاً (حرج فقط). last_alert_at لا يُسجَّل إلا بعد
+  -- نجاح notify_telegram، وتُصفَّر عند التعافي.
   is_alerted:=previous_healthy=false and previous_alert_at is not null;
-  fault_start:=case when previous_healthy=false then coalesce(previous_fault_since,now()) else now() end;
+  -- بداية العطل = لحظة تجاوز الحداثة (آخر نجاح + max_age) لا لحظة أول رصد، فلا
+  -- تُزاح البداية عند أول تشغيل بعد التفعيل. الاستمرار يحتفظ بالقيمة المحفوظة.
+  fault_origin:=case when last_at is null then now() else least(now(),last_at+make_interval(mins=>cfg.max_age_minutes)) end;
+  fault_start:=case when previous_healthy=false then coalesce(previous_fault_since,fault_origin) else fault_origin end;
+  -- تحقق من الحرج: لا ينبَّه فوراً إلا إذا صمتت كل تقارير inventory_reports معاً
+  -- طوال alert_after (توقف كامل حقيقي) لا مهمة واحدة متأخرة.
+  is_verified:=false;
+  if is_critical then
+   select max(created_at) into any_recent from public.inventory_reports;
+   is_verified:=any_recent is null or any_recent<now()-make_interval(mins=>alert_after);
+  end if;
   decision:=private.project_task_alert_decision(
    last_at is not null, age_minutes, is_backlogged,
    round(extract(epoch from(now()-fault_start))/60.0,1),
-   cfg.max_age_minutes, alert_after, is_alerted,
-   case when previous_alert_at is null then null else extract(epoch from(now()-previous_alert_at))/60.0 end);
+   cfg.max_age_minutes, alert_after, is_critical, is_verified, is_alerted);
 
-  if decision in ('log','alert','hold','remind') then
+  if decision in ('track','open','alert','hold') then
    detail_text:=case
     when last_at is null then 'لم يصل أي تقرير حتى الآن'
     when last_at<now()-make_interval(mins=>cfg.max_age_minutes) then
@@ -133,39 +201,45 @@ begin
     else
      format('تراكم محتمل (status=%s) — آخر دفعة كاملة عند %s',last_status,to_char(last_at at time zone 'Asia/Riyadh','YYYY-MM-DD HH24:MI'))
     end;
-   if decision='log' then
-    detail_text:='تأخر دون حدّ التنبيه (تسجيل داخلي فقط) — '||detail_text;
+   if decision='track' then
+    detail_text:='تأخر دون حدّ التأكيد (تسجيل داخلي فقط) — '||detail_text;
    end if;
-   if decision in ('alert','remind') then
-    -- Codex P1 (PR #220): previous_alert_at لا يُسجَّل إلا بعد قبول الإدراج في
-    -- telegram_outbox دون استثناء؛ عند فشله تُعاد المحاولة تلقائياً بالدورة التالية.
-    -- مفتاح dedupe = هوية العطل (fault_start) ثم طابع التذكير، فلا يُكتم عطل جديد
-    -- بعد تعافٍ سريع ولا تتكرر الرسالة نفسها.
+   if decision='alert' then
+    -- إنذار فوري واحد للحرج المتحقَّق منه فقط. previous_alert_at لا يُسجَّل إلا
+    -- بعد قبول الإدراج في telegram_outbox دون استثناء؛ عند فشله تُعاد المحاولة.
+    -- مفتاح dedupe = هوية العطل (fault_start) فلا تتكرر الرسالة.
     begin
      perform public.notify_telegram('project_task_failure',
-      format('%6$s%1$s• المهمة: %2$s%1$s• المصدر: %3$s%1$s• الحالة: %4$s%1$s• حدّ التنبيه: %5$s دقيقة',
-       chr(10),cfg.task_label,cfg.report_source,detail_text,alert_after,
-       case when decision='alert' then '🚨 انقطاع مستمر في مهمة بالمشروع' else '⏰ تذكير: الانقطاع ما زال قائماً' end),
-      'project-task-failure:'||cfg.task_key||':'||to_char(fault_start,'YYYYMMDDHH24MISSMS')
-       ||case when decision='remind' then ':r'||to_char(now(),'YYYYMMDDHH24MI') else '' end,
-      1);
+      format('🚨 توقف كامل مؤكَّد: %2$s%1$s• المصدر: %3$s%1$s• الحالة: %4$s%1$s• الأثر: %5$s',
+       chr(10),cfg.task_label,cfg.report_source,detail_text,coalesce(cfg.impact_note,'—')),
+      'project-task-failure:'||cfg.task_key||':'||to_char(fault_start,'YYYYMMDDHH24MISSMS'),1);
      previous_alert_at:=now();
     exception when others then
      raise warning 'monitor_project_tasks: notify_telegram failed for %: %',cfg.task_key,sqlerrm;
     end;
    end if;
+   -- سجلّ العطل المفتوح (يُكتب دائماً، حتى بلا أي تنبيه).
+   insert into private.project_task_incidents(task_key,started_at,confirmed_at,last_success_at,last_seen_at,detail,alerted)
+    values(cfg.task_key,fault_start,case when decision='track' then null else now() end,last_at,now(),detail_text,previous_alert_at is not null)
+    on conflict(task_key) where ended_at is null do update set
+     confirmed_at=coalesce(private.project_task_incidents.confirmed_at,excluded.confirmed_at),
+     last_success_at=excluded.last_success_at,last_seen_at=now(),detail=excluded.detail,
+     alerted=private.project_task_incidents.alerted or excluded.alerted;
    insert into private.project_task_health_state(task_key,is_healthy,last_observed_at,last_success_at,last_alert_at,last_detail,fault_since)
     values(cfg.task_key,false,now(),last_at,previous_alert_at,detail_text,fault_start)
     on conflict(task_key) do update set is_healthy=false,last_observed_at=now(),last_success_at=excluded.last_success_at,
      last_alert_at=excluded.last_alert_at,last_detail=excluded.last_detail,fault_since=excluded.fault_since;
   else
-   -- رسالة التعافي مرة واحدة وفقط لمهمة أُنذر عنها فعلاً (decision='recover').
+   -- تعافٍ: لا رسالة مستقلة للأعطال غير الحرجة (تُسجَّل داخلياً فقط)؛ رسالة تعافٍ
+   -- واحدة فقط لحرج أُنذر عنه فعلاً (decision='recover').
    if decision='recover' then
     perform public.notify_telegram('project_task_recovered',
      format('✅ عادت المهمة للعمل%1$s• المهمة: %2$s%1$s• المصدر: %3$s%1$s• آخر نجاح: %4$s',
       chr(10),cfg.task_label,cfg.report_source,to_char(last_at at time zone 'Asia/Riyadh','YYYY-MM-DD HH24:MI')),
      'project-task-recovered:'||cfg.task_key||':'||to_char(now(),'YYYYMMDDHH24MI'),1);
    end if;
+   update private.project_task_incidents set ended_at=now(),last_seen_at=now()
+    where task_key=cfg.task_key and ended_at is null;
    insert into private.project_task_health_state(task_key,is_healthy,last_observed_at,last_success_at,last_alert_at,last_detail,fault_since)
     values(cfg.task_key,true,now(),last_at,null,'يعمل',null)
     on conflict(task_key) do update set is_healthy=true,last_observed_at=now(),last_success_at=excluded.last_success_at,last_alert_at=null,last_detail='يعمل',fault_since=null;
@@ -362,3 +436,48 @@ begin
 end $$;
 
 revoke all on function private.monitor_project_tasks() from public,anon,authenticated;
+
+-- proposed/10: قسم «حالة الأنظمة والأعطال» في آخر التقرير المسائي.
+-- يقرأ سجلّ الأعطال المفتوحة المؤكَّدة فقط (لا يعتمد على أي تنبيه سابق): كل مهمة
+-- مرة واحدة، ويستمر ظهورها في كل تقرير يومي حتى تُحلّ. لا قسم فارغ: عند عدم وجود
+-- أعطال تُعاد عبارة موجزة. وإن لم تعمل المراقبة نفسها مؤخراً يُصرَّح بذلك بدل
+-- ادّعاء السلامة. p_now وسيط صريح كي تبقى الاختبارات حتمية.
+create or replace function private.daily_open_faults_section(p_now timestamptz default now())
+returns text language plpgsql stable security definer
+set search_path=private,public,pg_temp
+as $$
+declare last_obs timestamptz; r record; out_text text:=''; n int:=0; mins numeric; dur text;
+begin
+ select max(s.last_observed_at) into last_obs
+  from private.project_task_health_state s
+  join private.project_task_monitors m on m.task_key=s.task_key and m.enabled;
+ if last_obs is null or last_obs<p_now-interval '30 minutes' then
+  return '🛠 حالة الأنظمة والأعطال'||chr(10)
+   ||'⚠️ تعذّر التحقق من حالة الأنظمة: آخر فحص للمراقبة '
+   ||coalesce(to_char(last_obs at time zone 'Asia/Damascus','YYYY-MM-DD HH24:MI'),'غير معروف')||' بتوقيت دمشق.';
+ end if;
+ for r in
+  select m.task_label,m.impact_note,i.started_at,i.last_success_at
+  from private.project_task_incidents i
+  join private.project_task_monitors m on m.task_key=i.task_key and m.enabled
+  where i.ended_at is null and i.confirmed_at is not null
+  order by i.started_at, m.task_key
+ loop
+  n:=n+1;
+  mins:=greatest(0,floor(extract(epoch from(p_now-r.started_at))/60.0));
+  dur:=case
+   when mins>=1440 then format('%s يوم و%s ساعة',floor(mins/1440),floor((mins-floor(mins/1440)*1440)/60))
+   when mins>=60 then format('%s ساعة و%s دقيقة',floor(mins/60),mins-floor(mins/60)*60)
+   else format('%s دقيقة',mins) end;
+  out_text:=out_text||chr(10)||'• '||r.task_label||chr(10)
+   ||'  بدأ: '||to_char(r.started_at at time zone 'Asia/Damascus','YYYY-MM-DD HH24:MI')||' — مستمر منذ '||dur||chr(10)
+   ||'  آخر نجاح: '||coalesce(to_char(r.last_success_at at time zone 'Asia/Damascus','YYYY-MM-DD HH24:MI'),'غير معروف')||chr(10)
+   ||'  الأثر: '||coalesce(r.impact_note,'—');
+ end loop;
+ if n=0 then
+  return '🛠 حالة الأنظمة والأعطال'||chr(10)||'✅ لا توجد أعطال تشغيلية مستمرة';
+ end if;
+ return '🛠 حالة الأنظمة والأعطال ('||n||')'||out_text;
+end;
+$$;
+revoke all on function private.daily_open_faults_section(timestamptz) from public,anon,authenticated;
