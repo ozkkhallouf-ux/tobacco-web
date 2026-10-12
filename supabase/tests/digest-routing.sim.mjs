@@ -103,6 +103,8 @@ for (const [k, key, want] of [
   ['sync_failure', 'x', 'digest'], ['price_sync_mismatch', 'price-sync:1', 'digest'], ['windows', 'winfail:t', 'digest'],
   ['evening_report', 'evening:2026-01-01', 'immediate'], ['project_task_failure', 'k', 'immediate'],
   ['weird_unknown', null, 'immediate'], ['', '', 'immediate'], ['order_new', 'o1', 'immediate'],
+  ['sync_failure', 'project-cron-failure:send-evening-report:20260101:x', 'immediate'], ['report', 'evening-missing:2026-01-01', 'immediate'],
+  ['sync_failure', 'project-cron-failure:other-job:1', 'digest'],
 ]) assert.equal(await R(k, key), want, `${k}/${key}`);
 console.log('route matrix ok');
 
@@ -180,6 +182,10 @@ await db.exec(p13);
 assert.notEqual(await md5(db), PROD);
 await db.exec(rb13);
 await db.exec(`create or replace function private.notify_telegram_dispatch(p_event_type text,p_message text,p_dedupe_key text default null,p_dedupe_minutes int default 60,p_reply_markup jsonb default null) returns void language sql as $$ select 1 $$`);
+await assert.rejects(db.exec(p13), /drifted/);
+// تعديل لاحق يحتفظ بالوسم ⇒ يُرفض عند إعادة التشغيل ولا يُكتب فوقه
+await db.exec(p13.replace(/^do \$pre\$[\s\S]*?end \$pre\$;/m, 'select 1;')); // يثبّت جسم 13 (تجاوز الفحص للتحضير فقط)
+await db.exec(`create or replace function private.notify_telegram_dispatch(p_event_type text,p_message text,p_dedupe_key text default null,p_dedupe_minutes int default 60,p_reply_markup jsonb default null) returns void language sql security definer as $$ select 1 /* digest-routing:v1 edited */ $$`);
 await assert.rejects(db.exec(p13), /drifted/);
 console.log('rollback/reapply/drift ok');
 console.log('anon exec route:', (await one(db, `select has_function_privilege('anon','private.ops_event_route(text,text)','execute') a`)).a);

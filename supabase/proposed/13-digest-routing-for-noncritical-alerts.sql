@@ -33,7 +33,8 @@ begin
   end if;
   select prosrc into disp from pg_proc where oid = to_regprocedure('private.notify_telegram_dispatch(text,text,text,integer,jsonb)');
   if disp is null then raise exception 'proposed/13: private.notify_telegram_dispatch not found'; end if;
-  if md5(disp) not in ('60bbae6f1fed8ba5e66c9a9a91daed40') and position('digest-routing:v1' in disp) = 0 then
+  -- بصمتان فقط: جسم الإنتاج الحالي، أو جسم 13 نفسه (إعادة التشغيل). وجود الوسم وحده لا يكفي.
+  if md5(disp) not in ('60bbae6f1fed8ba5e66c9a9a91daed40', '881a513175ec93b3e9b9185c4c5948a7') then
     raise exception 'proposed/13: private.notify_telegram_dispatch drifted from the known body (md5 %); refusing to overwrite', md5(disp);
   end if;
 end $pre$;
@@ -61,6 +62,8 @@ returns text language sql immutable as $$
  select case
   when coalesce(p_kind,'')       ~* '(secur|auth|breach)'  then 'immediate'
   when coalesce(p_dedupe_key,'') ~* '(backup|secur|auth|breach)' then 'immediate'
+  -- ناقل الملخص نفسه: فشل مهمة التقرير المسائي وغياب التقرير لا يظهران في ملخص لا يُرسَل ⇒ فوريان دائماً
+  when coalesce(p_dedupe_key,'') ~ '^(project-cron-failure:send-evening-report|evening-missing:|evening:)' then 'immediate'
   -- فحص الصحة الآلي: انقطاع الموقع وانهيار المراقب نفسه فوريان؛ بقية المشاكل (workflow فاشل، نشرة، بحث) ملخص
   when p_kind = 'health_check' then
    case when coalesce(p_dedupe_key,'') ~ '^health-(site-down|health-check-crashed)' then 'immediate' else 'digest' end
