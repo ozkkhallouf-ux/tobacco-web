@@ -131,4 +131,16 @@ assert.ok(bundle.includes('seed_open_faults'), 'الحزمة لا تبذر ال�
 assert.ok(bundle.includes('2c762f38b56ea5a683061529bd5e5d7f'), 'الحزمة لا تتحقق من بصمة المراقب الحي (= 09)');
 assert.ok(!/create (or replace )?function public\.notify_telegram/.test(bundle + rollback), 'الحزمة/التراجع يعدّلان notify_telegram');
 assert.ok(rollback.includes('private.digest_bundle_snapshot') || rollback.includes('snapshot'), 'التراجع بلا لقطة');
+// ── proposed/13: توجيه التنبيهات غير الحرجة للملخص — يفشل مفتوحاً ولا يمسّ public.notify_telegram ──
+const p13 = await read('supabase/proposed/13-digest-routing-for-noncritical-alerts.sql');
+const rb13 = await read('supabase/proposed/13-digest-routing-rollback.sql');
+assert.ok(!/create (or replace )?function public\./.test(p13 + rb13), 'proposed/13 يجب ألا يعدّل أي دالة في public');
+assert.ok(p13.includes('60bbae6f1fed8ba5e66c9a9a91daed40'), 'proposed/13 لا يثبّت بصمة الإنتاج لدالة الإرسال');
+assert.ok(p13.includes("exception when others") && p13.includes('return false'), 'الامتصاص يجب أن يفشل مفتوحاً (يعيد false فيُرسَل التنبيه)');
+assert.ok(p13.includes('p_reply_markup is null'), 'الرسائل ذات الأزرار تبقى فورية');
+assert.match(p13, /else 'immediate'\s+end/, 'المجهول يجب أن يبقى فورياً');
+assert.ok(/security|secur\|auth/.test(p13) && p13.includes('backup'), 'الأمن والنسخ الاحتياطي فوريان');
+assert.ok(p13.includes('site-down') && p13.includes('دخان ما بعد النشر'), 'انقطاع الموقع فوري');
+assert.ok(p13.includes('daily_open_faults_section'), '13 يتحقق من اتصال قسم الأعطال بالتقرير');
+assert.ok(rb13.includes('digest_routing_snapshot'), 'تراجع 13 بلا لقطة');
 console.log('Project task alert policy checks passed.');
