@@ -51,7 +51,7 @@ end $pre$;
 -- مساعدا التوجيه يُستبدلان أدناه: يجب أن يكونا بجسم 12 (أول تطبيق) أو جسم 13 (إعادة)، وإلا تعديل لاحق يُفقَد بصمت
 do $pre2$ begin
   if md5((select prosrc from pg_proc where oid = to_regprocedure('private.ops_event_route(text,text)'))) not in ('8c55e7855fd285e956506f7d0ebd10b2', 'f34f129268ee375c10006f004de2d00e')
-     or md5((select prosrc from pg_proc where oid = to_regprocedure('private.close_stale_ops_events(timestamptz,interval)'))) not in ('a9519e09e396dbc5b99eb1872bd118b4', '24a5fcd5b080d461813a04940a02af17') then
+     or md5((select prosrc from pg_proc where oid = to_regprocedure('private.close_stale_ops_events(timestamptz,interval)'))) not in ('a9519e09e396dbc5b99eb1872bd118b4', '2c92ab4fdc95ce1696cb4d69920569c7') then
     raise exception 'proposed/13: ops_event_route/close_stale_ops_events drifted from the known 12/13 bodies; refusing to overwrite later changes';
   end if;
   -- المساعدان الجديدان (يُنشآن هنا): إن وُجدا مسبقاً فيجب أن يطابقا جسم 13 بالضبط وإلا فُقد تعديل لاحق عليهما
@@ -61,7 +61,7 @@ do $pre2$ begin
   end if;
   if (to_regprocedure('private.ops_event_silence(text)') is not null or to_regprocedure('private.absorb_digest_alert(text,text,text)') is not null)
      and (md5((select prosrc from pg_proc where oid = to_regprocedure('private.ops_event_silence(text)'))) is distinct from '2796ac5d112c557951d8fd3c837de6f7'
-     or md5((select prosrc from pg_proc where oid = to_regprocedure('private.absorb_digest_alert(text,text,text)'))) is distinct from '88c6e3d972aa11368de77a7c7a2b52e0') then
+     or md5((select prosrc from pg_proc where oid = to_regprocedure('private.absorb_digest_alert(text,text,text)'))) is distinct from 'b5b3a7d5f34083664813d25e96a043e8') then
     raise exception 'proposed/13: ops_event_silence/absorb_digest_alert drifted from the proposed/13 bodies; refusing to overwrite later changes';
   end if;
 end $pre2$;
@@ -135,6 +135,10 @@ create or replace function private.close_stale_ops_events(
 returns void language sql security definer set search_path=private,pg_temp as $$
  update private.ops_events set resolved_at=p_now, resolution='silence'
   where resolved_at is null and source<>'cron'
+    -- أعطال فحص الصحة (health-*) لا يُغلقها الصمت أبداً: الصمت قد يعني توقف المراقبة لا تعافي العطل.
+    -- تُغلَق فقط بإشارة تعافٍ صريحة (health-recovered:… في absorb_digest_alert) أو يدوياً عبر resolve_ops_event،
+    -- وإن مرّت 30 س دون تحديث يعرضها القسم المسائي «يلزم إعادة التحقق» (لا محلولة ولا مؤكَّدة الاستمرار).
+    and not (source='telegram' and event_key ~ '^health-')
     and last_seen_at < p_now - (case when source='telegram' then private.ops_event_silence(event_key) else p_silence end)
 $$;
 revoke all on function private.close_stale_ops_events(timestamptz,interval) from public, anon, authenticated;
@@ -151,6 +155,12 @@ begin
   rid := substr(p_key, length('ameen-read-worker-recovered:') + 1);
   perform private.resolve_ops_event('telegram', 'ameen-read-worker-stuck:' || rid);
   perform private.resolve_ops_event('telegram', 'ameen-read-worker-degraded:' || rid);
+  return true;
+ end if;
+ -- إشارة تعافٍ صريحة لعطل فحص الصحة (health-recovered:<مفتاح العطل بلا بادئة health->): تُغلق العطل ولا تُرسَل
+ if p_key ~ '^health-recovered:.' then
+  perform private.resolve_ops_event('telegram',
+    'health-' || regexp_replace(substr(p_key, length('health-recovered:') + 1), '-noissue-[0-9]+$', '-noissue'));
   return true;
  end if;
  ek := regexp_replace(coalesce(nullif(p_key,''), p_kind), '-noissue-[0-9]+$', '-noissue');

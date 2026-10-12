@@ -294,7 +294,7 @@ console.log('prices/revive/independence ok');
   await T('winfail:push-daily-profit', 'sync_failure', '3 hours 1 minute', false);
   await T('ameen-sync-watchdog', 'windows', '2 hours 59 minutes', true);
   await T('ameen-sync-watchdog', 'windows', '3 hours 1 minute', false);
-  for (const k of ['daily-git-pull-fail', 'daily-git-pull-stuck', 'ameen-read-worker-stuck:3', 'health-workflow-x', 'automation-failure:x', 'gha-fail:CI']) {
+  for (const k of ['daily-git-pull-fail', 'daily-git-pull-stuck', 'ameen-read-worker-stuck:3', 'automation-failure:x', 'gha-fail:CI']) {
     const kind = k.startsWith('gha-') ? 'github_actions_failure' : k.startsWith('automation') ? 'automation_failure' : 'windows';
     await T(k, kind, '29 hours', true);
     await T(k, kind, '31 hours', false);
@@ -311,6 +311,64 @@ console.log('prices/revive/independence ok');
   await fresh();
 }
 console.log('resolved-today / silence windows ok');
+
+// ===== أعطال فحص الصحة (health-*): لا يُغلقها الصمت، تُغلق بإشارة تعافٍ صريحة فقط =====
+{
+  const sec = async () => (await one(db, 'select private.daily_open_faults_section(now(), 3000) s')).s;
+  const isOpen = async (k) => (await open(db)).some((r) => r.event_key === k);
+  const closeNow = () => db.exec(`select private.close_stale_ops_events(now(), interval '3 hours')`);
+  await db.exec(`update private.ops_events set resolved_at=now(), resolution='silence' where resolved_at is null`);
+  await db.exec(`update private.ops_events set resolved_at=now()-interval '48 hours' where resolved_at is not null`);
+  const outN = async () => (await outbox(db)).length;
+  const n0 = await outN();
+  // (1) عطل مستمر > 30 س دون تحديث: لا يُغلَق ولا يُعدّ محلولاً، ويُعرض «يلزم إعادة التحقق»
+  await notify(db, 'health_check', 'فشل Workflow CI', 'health-workflow-ci-issue-7');
+  await db.exec(`update private.ops_events set first_seen_at=now()-interval '60 hours', last_seen_at=now()-interval '55 hours' where event_key='health-workflow-ci-issue-7'`);
+  for (let i = 0; i < 3; i++) await closeNow();
+  assert.ok(await isOpen('health-workflow-ci-issue-7'), 'health fault must survive silence closure');
+  const s1 = await sec();
+  assert.match(s1, /فشل Workflow CI/);
+  assert.match(s1, /يلزم إعادة التحقق/);
+  assert.ok(!/حُلّ اليوم[\s\S]*فشل Workflow CI/.test(s1), 'stale health fault must not be listed as recovered');
+  // (2) عودة المراقبة بعد انقطاع: التحديث يجدّد last_seen_at فيزول وسم إعادة التحقق دون تكرار الحدث
+  await notify(db, 'health_check', 'فشل Workflow CI', 'health-workflow-ci-issue-7');
+  assert.equal((await q(db, `select 1 from private.ops_events where event_key='health-workflow-ci-issue-7' and resolved_at is null`)).length, 1);
+  assert.ok(!(await sec()).includes('يلزم إعادة التحقق'), 'fresh again after monitoring returns');
+  // (3) أقل من 30 س: ظاهر بلا وسم
+  await db.exec(`update private.ops_events set last_seen_at=now()-interval '29 hours' where event_key='health-workflow-ci-issue-7'`);
+  assert.ok(!(await sec()).includes('يلزم إعادة التحقق'));
+  await db.exec(`update private.ops_events set last_seen_at=now()-interval '31 hours' where event_key='health-workflow-ci-issue-7'`);
+  assert.match(await sec(), /يلزم إعادة التحقق/);
+  // (4) تعافٍ صريح: يغلق العطل (explicit) ويظهر «حُلّ اليوم» دون أي رسالة تيليغرام
+  const n1 = await outN();
+  await notify(db, 'health_check', 'تعافى', 'health-recovered:workflow-ci-issue-7');
+  assert.equal(await outN(), n1, 'recovery signal is absorbed, no Telegram');
+  assert.ok(!(await isOpen('health-workflow-ci-issue-7')));
+  assert.equal((await one(db, `select resolution r from private.ops_events where event_key='health-workflow-ci-issue-7' order by id desc limit 1`)).r, 'explicit');
+  assert.match(await sec(), /✅ حُلّ اليوم \(1\)[\s\S]*فشل Workflow CI/);
+  // (5) مفتاح بلا Issue (noissue-<ساعة>) يُطبَّع، ويُغلق بالتعافي نفسه
+  await notify(db, 'health_check', 'مسح فاشل', 'health-scan-noissue-482001');
+  assert.ok(await isOpen('health-scan-noissue'));
+  await db.exec(`update private.ops_events set last_seen_at=now()-interval '40 hours' where event_key='health-scan-noissue'`);
+  await closeNow();
+  assert.ok(await isOpen('health-scan-noissue'), 'noissue health fault also survives silence');
+  await notify(db, 'health_check', 'تعافى', 'health-recovered:scan-noissue-482050');
+  assert.ok(!(await isOpen('health-scan-noissue')));
+  // (6) لا يمسّ غيره: بقية الأعطال تُغلق بالصمت كما كانت، والحرجان فوريان
+  await notify(db, 'windows', 'x', 'ameen-sync-watchdog');
+  await db.exec(`update private.ops_events set last_seen_at=now()-interval '3 hours 1 minute' where event_key='ameen-sync-watchdog' and resolved_at is null`);
+  await closeNow();
+  assert.ok(!(await isOpen('ameen-sync-watchdog')), 'non-health faults still closed by silence');
+  await db.exec(`delete from public.telegram_outbox where dedupe_key in ('health-site-down','health-health-check-crashed')`);
+  const n2 = await outN();
+  await notify(db, 'health_check', 'الموقع واقع', 'health-site-down');
+  await notify(db, 'health_check', 'انهيار الفحص', 'health-health-check-crashed');
+  assert.equal(await outN(), n2 + 2, 'critical health alerts stay immediate');
+  assert.ok(!(await isOpen('health-site-down')) && !(await isOpen('health-health-check-crashed')));
+  assert.equal(n1, n0, 'no Telegram rows from absorbed health faults / recovery');
+  await db.exec(`update private.ops_events set resolved_at=now(), resolution='silence' where resolved_at is null`);
+}
+console.log('health faults persist until explicit recovery ok');
 
 // rollback / re-apply
 // انجراف: تعديل لاحق على دالة موجَّهة ⇒ التراجع يرفض ولا يكتب فوقه

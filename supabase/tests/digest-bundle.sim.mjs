@@ -457,6 +457,23 @@ const exists = async (db, rel) => (await one(db, `select to_regclass('${rel}') r
   assert.match(await sec(), /✅ حُلّ اليوم \(2\)/);
   await db.exec(`insert into private.project_task_incidents(task_key,started_at,confirmed_at) values ('zz-task', now()-interval '20 minutes', now()-interval '10 minutes')`);
   assert.match(await sec(), /✅ حُلّ اليوم \(1\)/);
+  // عطل فحص الصحة المفتوح بلا تحديث > 30 س: «يلزم إعادة التحقق» (ليس محلولاً ولا مؤكَّد الاستمرار)
+  await db.exec(`select private.observe_ops_event('telegram','health-ci-issue-9','فشل CI صحي','d')`);
+  assert.ok(!(await sec()).includes('يلزم إعادة التحقق'));
+  await db.exec(`update private.ops_events set last_seen_at=now()-interval '31 hours' where event_key='health-ci-issue-9'`);
+  const sh = await sec();
+  assert.match(sh, /فشل CI صحي/);
+  assert.match(sh, /يلزم إعادة التحقق/);
+  assert.ok(!/✅ حُلّ اليوم[\s\S]*فشل CI صحي/.test(sh));
+  // عطل غير health قديم يحمل وسم «المراقبة معطّلة» لا «إعادة التحقق» (سلوك 12 الأصلي)
+  await db.exec(`select private.observe_ops_event('telegram','ameen-read-worker-stuck:5','عامل عالق','d')`);
+  await db.exec(`update private.ops_events set last_seen_at=now()-interval '31 hours' where event_key='ameen-read-worker-stuck:5'`);
+  const so = await sec();
+  assert.match(so, /عامل عالق/);
+  assert.equal(so.split('يلزم إعادة التحقق').length - 1, 1, 'only the health row carries the re-verify label');
+  // عودة المراقبة تجدّد العطل فيزول وسم إعادة التحقق
+  await db.exec(`select private.observe_ops_event('telegram','health-ci-issue-9','فشل CI صحي','d')`);
+  assert.equal((await sec()).split('يلزم إعادة التحقق').length - 1, 0);
   console.log('RESOLVED-TODAY OK');
 }
 

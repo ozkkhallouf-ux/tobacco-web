@@ -10,9 +10,9 @@ begin
   -- لا نكتب فوق تعديل لاحق: الدوال الثلاث يجب أن تطابق جسم 13 بالضبط (وإلا يُوقَف التراجع ويُراجَع يدوياً)
   if md5((select prosrc from pg_proc where oid = to_regprocedure('private.notify_telegram_dispatch(text,text,text,integer,jsonb)'))) <> 'f7bee114d77cecea3bf9fceceb24425a'
      or md5((select prosrc from pg_proc where oid = to_regprocedure('private.ops_event_route(text,text)'))) <> 'f34f129268ee375c10006f004de2d00e'
-     or md5((select prosrc from pg_proc where oid = to_regprocedure('private.close_stale_ops_events(timestamptz,interval)'))) <> '24a5fcd5b080d461813a04940a02af17'
+     or md5((select prosrc from pg_proc where oid = to_regprocedure('private.close_stale_ops_events(timestamptz,interval)'))) <> '2c92ab4fdc95ce1696cb4d69920569c7'
      or md5((select prosrc from pg_proc where oid = to_regprocedure('private.ops_event_silence(text)'))) is distinct from '2796ac5d112c557951d8fd3c837de6f7'
-     or md5((select prosrc from pg_proc where oid = to_regprocedure('private.absorb_digest_alert(text,text,text)'))) is distinct from '88c6e3d972aa11368de77a7c7a2b52e0'
+     or md5((select prosrc from pg_proc where oid = to_regprocedure('private.absorb_digest_alert(text,text,text)'))) is distinct from 'b5b3a7d5f34083664813d25e96a043e8'
      or md5((select prosrc from pg_proc where oid = to_regprocedure('private.refine_immediate_alert(text,text,text)'))) is distinct from 'b62dddfef4aff64199722e5e1e5d57be' then
     raise exception 'rollback 13: a routed function drifted from the proposed/13 body; refusing to overwrite later changes';
   end if;

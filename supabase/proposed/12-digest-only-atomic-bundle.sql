@@ -43,7 +43,7 @@ begin
       ('private.project_task_alert_decision(boolean,numeric,boolean,numeric,integer,integer,boolean,boolean,boolean)', '9d9760d4274a4329a7bafba3cf4990d1'),
       ('private.check_evening_report_delivered(timestamptz)', '34af8681ef4081da5d3ecc753dbf76d1'),
       ('private.seed_open_faults()', '1ba77cdbdeac4161bfeddfe5148f4a08'),
-      ('private.daily_open_faults_section(timestamptz,integer)', '9f6cfab147c1baa281b02ba2ac4f1421')
+      ('private.daily_open_faults_section(timestamptz,integer)', 'dc646928b3f107fcfe5c210d67543d44')
     ) v(fn, pin) loop
       if to_regprocedure(r.fn) is not null
          and md5((select prosrc from pg_proc where oid = to_regprocedure(r.fn))) <> r.pin then
@@ -789,7 +789,9 @@ begin
    where i.ended_at is null and i.confirmed_at is not null
    union all
    select case when e.severity='critical' then 0 when e.source='cron' then 2 else 3 end,
-    e.label, e.first_seen_at, null::timestamptz, coalesce(left(e.detail,140),'—'), e.occurrences, false,
+    e.label, e.first_seen_at, null::timestamptz, coalesce(left(e.detail,140),'—'), e.occurrences,
+    -- عطل فحص الصحة لا يُغلقه الصمت: إن لم يصل تحديث منذ 30 س فالمراقبة نفسها قد تكون متوقفة ⇒ «يلزم إعادة التحقق»
+    (e.source='telegram' and e.event_key ~ '^health-' and e.last_seen_at<p_now-interval '30 hours'),
     true, e.source||':'||e.event_key
    from private.ops_events e where e.resolved_at is null
   ) q order by rnk, started, k
@@ -804,8 +806,9 @@ begin
    ||case when r.is_ops then case when r.occ>1 then '  تكرر: '||r.occ||' مرة'||chr(10) else '' end
           else '  آخر نجاح: '||coalesce(to_char(r.last_ok at time zone 'Asia/Damascus','YYYY-MM-DD HH24:MI'),'غير معروف')||chr(10) end
    ||case when r.is_ops then '  التفاصيل: ' else '  الأثر: ' end||r.note
-   ||case when r.off then chr(10)||'  ⚠️ المراقبة معطّلة — حالة هذا العطل غير محدّثة' else '' end;
-  short_t:=chr(10)||'• '||r.label||' — منذ '||dur||case when r.off then ' (المراقبة معطّلة)' else '' end;
+   ||case when r.off and r.is_ops then chr(10)||'  ⚠️ لم يصل تحديث منذ أكثر من 30 ساعة — يلزم إعادة التحقق (لا يُعدّ محلولاً ولا مؤكَّد الاستمرار)'
+          when r.off then chr(10)||'  ⚠️ المراقبة معطّلة — حالة هذا العطل غير محدّثة' else '' end;
+  short_t:=chr(10)||'• '||r.label||' — منذ '||dur||case when r.off and r.is_ops then ' (يلزم إعادة التحقق)' when r.off then ' (المراقبة معطّلة)' else '' end;
   if not compact and length(hdr)+length(body)+length(full_t)<=budget-reserve then
    body:=body||full_t;
   else
