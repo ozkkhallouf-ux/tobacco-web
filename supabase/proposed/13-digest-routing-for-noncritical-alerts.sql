@@ -18,7 +18,15 @@
 --
 -- يُشغَّل كطلب واحد (معاملة ضمنية). التراجع: 13-digest-routing-rollback.sql.
 do $pre$
-declare disp text; mon text;
+declare disp text; mon text; ev text;
+  anchor constant text := $a$perform public.notify_telegram('evening_report', msg, 'evening:' || today, 720);$a$;
+  addition constant text := $b$begin
+    msg := msg || chr(10) || chr(10) || coalesce(private.daily_open_faults_section(now(), greatest(3900 - length(msg) - 2, 200)), '');
+  exception when others then
+    msg := msg || chr(10) || chr(10) || '🛠 حالة الأنظمة والأعطال' || chr(10) || '⚠️ تعذّر إعداد هذا القسم.';
+  end;
+  $b$;
+  patched constant text := addition || anchor;
 begin
   if to_regclass('private.ops_events') is null
      or to_regprocedure('private.observe_ops_event(text,text,text,text,timestamptz,text)') is null
@@ -28,8 +36,10 @@ begin
     raise exception 'proposed/13 requires proposed/12 (digest bundle) to be applied first';
   end if;
   -- قسم الأعطال يجب أن يكون موصولاً بالتقرير المسائي، وإلا فالتسجيل بلا عرض = أعطال صامتة
-  if position('daily_open_faults_section' in pg_get_functiondef(to_regprocedure('public.send_evening_report()'))) = 0 then
-    raise exception 'proposed/13: send_evening_report does not include the open-faults section; refusing (would silence faults)';
+  -- كتلة الاستدعاء الفعلية بالنص الدقيق (وجود الاسم في تعليق أو كتلة ميتة لا يكفي) مرة واحدة بالضبط
+  ev := pg_get_functiondef(to_regprocedure('public.send_evening_report()'));
+  if (length(ev) - length(replace(ev, patched, ''))) / length(patched) <> 1 then
+    raise exception 'proposed/13: send_evening_report lacks the exact open-faults block from proposed/12; refusing (would silence faults)';
   end if;
   select prosrc into disp from pg_proc where oid = to_regprocedure('private.notify_telegram_dispatch(text,text,text,integer,jsonb)');
   if disp is null then raise exception 'proposed/13: private.notify_telegram_dispatch not found'; end if;

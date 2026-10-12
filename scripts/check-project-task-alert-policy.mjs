@@ -141,7 +141,7 @@ assert.ok(p13.includes('p_reply_markup is null'), 'الرسائل ذات الأ�
 assert.match(p13, /else 'immediate'\s+end/, 'المجهول يجب أن يبقى فورياً');
 assert.ok(/security|secur\|auth/.test(p13) && p13.includes('backup'), 'الأمن والنسخ الاحتياطي فوريان');
 assert.ok(p13.includes('site-down') && p13.includes('دخان ما بعد النشر'), 'انقطاع الموقع فوري');
-assert.ok(p13.includes('daily_open_faults_section'), '13 يتحقق من اتصال قسم الأعطال بالتقرير');
+assert.ok(p13.includes('patched constant text') && p13.includes('exact open-faults block'), '13 يتحقق من كتلة القسم الدقيقة في التقرير لا من وجود الاسم');
 assert.ok(p13.includes('881a513175ec93b3e9b9185c4c5948a7') && !p13.includes("position('digest-routing:v1' in disp)"), '13 يقبل بصمتين فقط (الإنتاج وجسم 13) ولا يكتفي بالوسم');
 assert.ok(p13.includes('automation-failure:|ameen-read-worker-)'), 'حوادث عامل أمين تُنذَر مرة واحدة ⇒ نافذة 30 ساعة');
 assert.ok((await read('supabase/proposed/12-digest-only-rollback.sql')).includes('digest_routing_snapshot'), 'تراجع 12 يجب أن يرفض عند فعالية 13');

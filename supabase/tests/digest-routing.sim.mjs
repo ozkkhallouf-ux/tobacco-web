@@ -196,6 +196,15 @@ await db.exec(`create or replace function private.notify_telegram_dispatch(p_eve
 await assert.rejects(db.exec(p13), /drifted/);
 // تراجع 12 مرفوض ما دام 13 فعّالاً
 await assert.rejects(db.exec(rb12), /13 is active/);
+// تقرير يذكر القسم في تعليق فقط ⇒ 13 يرفض (لا يمتص تنبيهات بلا عرض)
+{
+  const rep = (await one(db, `select pg_get_functiondef('public.send_evening_report()'::regprocedure) d`)).d;
+  const start = rep.lastIndexOf('begin', rep.indexOf('coalesce(private.daily_open_faults_section'));
+  const end = rep.indexOf('end;', start) + 4;
+  await db.exec(rep.slice(0, start) + '/* daily_open_faults_section */' + rep.slice(end));
+  await assert.rejects(db.exec(p13), /exact open-faults block/);
+  await db.exec(rep); // يعيد التقرير المرقَّع
+}
 console.log('rollback/reapply/drift ok');
 console.log('anon exec route:', (await one(db, `select has_function_privilege('anon','private.ops_event_route(text,text)','execute') a`)).a);
 console.log('ALL P13 CHECKS PASSED');
