@@ -98,6 +98,27 @@ do $$ begin
   end if;
 end $$;
 
+-- proposed/10 (تنبيهات تيليجرام المزعجة): حدّ التنبيه منفصل عن max_age_minutes.
+-- max_age_minutes يبقى حدّ «الحداثة» الذي تعكسه واجهة التطبيق
+-- (CONFIG.freshnessMinutes في customer-intelligence) ويُسجَّل داخلياً فقط؛
+-- أما إرسال Telegram فلا يحدث قبل alert_after_minutes (استمرار مثبت).
+-- fault_since يحفظ بداية العطل الحالي كي تُقاس مدّته بين الدورات.
+do $$ begin
+  if not exists (
+    select 1 from information_schema.columns
+    where table_schema='private' and table_name='project_task_monitors' and column_name='alert_after_minutes'
+  ) then
+    alter table private.project_task_monitors add column alert_after_minutes integer
+      check (alert_after_minutes is null or alert_after_minutes between 5 and 10080);
+  end if;
+  if not exists (
+    select 1 from information_schema.columns
+    where table_schema='private' and table_name='project_task_health_state' and column_name='fault_since'
+  ) then
+    alter table private.project_task_health_state add column fault_since timestamptz;
+  end if;
+end $$;
+
 insert into private.project_task_monitors(task_key,task_label,report_source,max_age_minutes,enabled,source_table) values
  ('ameen-main','مزامنة أمين الرئيسية','ameen_sql_agent',10,true,'inventory_reports'),
  ('customer-balances','أرصدة الزبائن','ameen_customer_balances',10,true,'inventory_reports'),
@@ -151,6 +172,15 @@ on conflict(task_key) do update set task_label=excluded.task_label,report_source
 -- بقية الصفوف check_status=false في كل إعادة تشغيل (وهي بالفعل القيمة
 -- الافتراضية الصحيحة لها، لكن الوضوح أفضل من الاعتماد الضمني).
 update private.project_task_monitors set check_status=true where task_key='khalil-audit';
+
+-- proposed/10: حدود التنبيه لكل مهمة (دقائق) من إيقاعها الفعلي، لا مدة موحّدة:
+-- كلها ≥ 4× دورة المهمة، لتحمّل إطفاء/انقطاع إنترنت مؤقتاً على أجهزة OZK.
+-- ameen-main هو المؤشر الأسرع (دورته دقيقة واحدة وكل المصادر تعتمد عليه).
+update private.project_task_monitors m set alert_after_minutes=v.mins
+from (values ('ameen-main',45),('customer-balances',120),('customer-movements',180),
+ ('customer-invoices',240),('daily-profit',120),('price-sync',180),('invoice-series',120),
+ ('item-details',720),('khalil-audit',120),('expense-entries',360)) as v(task_key,mins)
+where m.task_key=v.task_key and m.alert_after_minutes is distinct from v.mins;
 
 -- ============================================================================
 -- مصنِّف حالة مهام pg_cron — دالة نقية، مستخرجة عمداً كي يصبح المنطق مختبَراً.
@@ -254,6 +284,33 @@ $fn$;
 revoke all on function private.cron_job_health(boolean,text,timestamptz,text,timestamptz,interval,timestamptz)
   from public,anon,authenticated;
 
+-- proposed/10: قرار التنبيه كدالة نقية قابلة للاختبار الحتمي.
+--   'ok'      سليم ولا إنذار سابق ⇒ لا رسالة
+--   'recover' سليم بعد إنذار أُرسل فعلاً ⇒ رسالة تعافٍ واحدة
+--   'log'     متأخر لكن دون حدّ التنبيه (أو تراكم غير مستمر) ⇒ تسجيل داخلي فقط
+--   'alert'   عطل مستمر تجاوز alert_after ولم يُنذَر عنه ⇒ رسالة واحدة
+--   'hold'    عطل مُنذَر عنه ولم يحن التذكير ⇒ صمت
+--   'remind'  عطل مُنذَر عنه ومرّ p_reminder_minutes منذ آخر رسالة ⇒ تذكير
+create or replace function private.project_task_alert_decision(
+  p_has_report boolean, p_age_minutes numeric, p_backlogged boolean,
+  p_fault_minutes numeric, p_max_age integer, p_alert_after integer,
+  p_alerted boolean, p_minutes_since_alert numeric, p_reminder_minutes integer default 360)
+returns text language sql immutable
+as $$
+ select case
+  when not (not p_has_report or p_age_minutes>p_max_age or p_backlogged) then
+   case when p_alerted then 'recover' else 'ok' end
+  when not (not p_has_report or p_age_minutes>=p_alert_after
+            or (p_backlogged and p_fault_minutes>=p_alert_after)) then
+   case when p_alerted then 'hold' else 'log' end
+  when not p_alerted then 'alert'
+  when p_minutes_since_alert>=p_reminder_minutes then 'remind'
+  else 'hold'
+ end
+$$;
+revoke all on function private.project_task_alert_decision(boolean,numeric,boolean,numeric,integer,integer,boolean,numeric,integer)
+  from public,anon,authenticated;
+
 -- Codex/Copilot، proposed/05-pgcron-failure-event-dedupe-fix.sql (PR #220):
 -- فرع 'failed' في حلقة cron.job أدناه يستخدم مفتاح dedupe ومنطق should_alert
 -- مرتبطَين بهوية الحادثة (terminal_at) لا باسم المهمة وحده — راجع تعليق 05
@@ -273,6 +330,7 @@ declare cfg record; last_at timestamptz; age_minutes numeric; last_status text; 
  -- proposed/08: هوية incident لكل حادثة انتقال فعلي بين تصنيفَي stuck/disabled
  -- (راجع تعليق عمود last_alerted_health_since أعلاه).
  previous_alerted_health_since timestamptz; health_incident_since timestamptz;
+ previous_fault_since timestamptz; fault_start timestamptz; alert_after integer; is_alerted boolean; decision text;
 begin
  for cfg in select * from private.project_task_monitors where enabled order by task_key loop
   -- جولة ٤: source_table='inventory_reports' (الافتراضي) يبقي السلوك
@@ -293,10 +351,20 @@ begin
   end if;
   age_minutes:=case when last_at is null then null else round(extract(epoch from(now()-last_at))/60.0,1) end;
   is_backlogged:=last_status is not null and last_status<>'ok';
-  select is_healthy,last_alert_at into previous_healthy,previous_alert_at
+  select is_healthy,last_alert_at,fault_since into previous_healthy,previous_alert_at,previous_fault_since
     from private.project_task_health_state where task_key=cfg.task_key;
+  alert_after:=coalesce(cfg.alert_after_minutes,greatest(cfg.max_age_minutes*4,120));
+  -- is_alerted: أُرسل إنذار فعلاً لهذا العطل. previous_alert_at لا يُسجَّل إلا
+  -- بعد نجاح notify_telegram (راجع الحارس أدناه) وتُصفَّر عند التعافي.
+  is_alerted:=previous_healthy=false and previous_alert_at is not null;
+  fault_start:=case when previous_healthy=false then coalesce(previous_fault_since,now()) else now() end;
+  decision:=private.project_task_alert_decision(
+   last_at is not null, age_minutes, is_backlogged,
+   round(extract(epoch from(now()-fault_start))/60.0,1),
+   cfg.max_age_minutes, alert_after, is_alerted,
+   case when previous_alert_at is null then null else extract(epoch from(now()-previous_alert_at))/60.0 end);
 
-  if last_at is null or last_at<now()-make_interval(mins=>cfg.max_age_minutes) or is_backlogged then
+  if decision in ('log','alert','hold','remind') then
    detail_text:=case
     when last_at is null then 'لم يصل أي تقرير حتى الآن'
     when last_at<now()-make_interval(mins=>cfg.max_age_minutes) then
@@ -304,40 +372,42 @@ begin
     else
      format('تراكم محتمل (status=%s) — آخر دفعة كاملة عند %s',last_status,to_char(last_at at time zone 'Asia/Riyadh','YYYY-MM-DD HH24:MI'))
     end;
-   if previous_healthy is distinct from false or previous_alert_at is null or previous_alert_at<now()-interval '60 minutes' then
-    -- Codex P1 (PR #220، الملاحظة الثالثة): previous_alert_at:=now() كان يُسجَّل
-    -- بلا شرط بعد استدعاء notify_telegram، فأي استثناء أثناء الإرسال (رفض
-    -- تفويض، خطأ اتصال بقاعدة البيانات) كان يُحسب "تم التنبيه" رغم عدم قبول
-    -- الرسالة للإرسال أصلاً. notify_telegram/notify_telegram_dispatch عقدهما
-    -- الفعلي إدراج غير متزامن بطابور telegram_outbox (التسليم الحقيقي إلى
-    -- Telegram يجري لاحقاً وبشكل غير متزامن عبر dispatch_telegram_outbox،
-    -- ولا يمكن تأكيده مزامنةً هنا) — فـ"القبول الفعلي للإرسال وفق العقد
-    -- الحالي" هو نجاح هذا الإدراج بلا استثناء. عند فشله نُبقي previous_alert_at
-    -- كما كان (null أو قديم) فتُعاد المحاولة بالدورة التالية تلقائياً.
+   if decision='log' then
+    detail_text:='تأخر دون حدّ التنبيه (تسجيل داخلي فقط) — '||detail_text;
+   end if;
+   if decision in ('alert','remind') then
+    -- Codex P1 (PR #220): previous_alert_at لا يُسجَّل إلا بعد قبول الإدراج في
+    -- telegram_outbox دون استثناء؛ عند فشله تُعاد المحاولة تلقائياً بالدورة التالية.
+    -- مفتاح dedupe = هوية العطل (fault_start) ثم طابع التذكير، فلا يُكتم عطل جديد
+    -- بعد تعافٍ سريع ولا تتكرر الرسالة نفسها.
     begin
      perform public.notify_telegram('project_task_failure',
-      format('🚨 توقفت مهمة بالمشروع%1$s• المهمة: %2$s%1$s• المصدر: %3$s%1$s• الحالة: %4$s%1$s• الحد المسموح: %5$s دقيقة',
-       chr(10),cfg.task_label,cfg.report_source,detail_text,cfg.max_age_minutes),
-      'project-task-failure:'||cfg.task_key,60);
+      format('%6$s%1$s• المهمة: %2$s%1$s• المصدر: %3$s%1$s• الحالة: %4$s%1$s• حدّ التنبيه: %5$s دقيقة',
+       chr(10),cfg.task_label,cfg.report_source,detail_text,alert_after,
+       case when decision='alert' then '🚨 انقطاع مستمر في مهمة بالمشروع' else '⏰ تذكير: الانقطاع ما زال قائماً' end),
+      'project-task-failure:'||cfg.task_key||':'||to_char(fault_start,'YYYYMMDDHH24MISSMS')
+       ||case when decision='remind' then ':r'||to_char(now(),'YYYYMMDDHH24MI') else '' end,
+      1);
      previous_alert_at:=now();
     exception when others then
      raise warning 'monitor_project_tasks: notify_telegram failed for %: %',cfg.task_key,sqlerrm;
     end;
    end if;
-   insert into private.project_task_health_state(task_key,is_healthy,last_observed_at,last_success_at,last_alert_at,last_detail)
-    values(cfg.task_key,false,now(),last_at,previous_alert_at,detail_text)
+   insert into private.project_task_health_state(task_key,is_healthy,last_observed_at,last_success_at,last_alert_at,last_detail,fault_since)
+    values(cfg.task_key,false,now(),last_at,previous_alert_at,detail_text,fault_start)
     on conflict(task_key) do update set is_healthy=false,last_observed_at=now(),last_success_at=excluded.last_success_at,
-     last_alert_at=excluded.last_alert_at,last_detail=excluded.last_detail;
+     last_alert_at=excluded.last_alert_at,last_detail=excluded.last_detail,fault_since=excluded.fault_since;
   else
-   if previous_healthy=false then
+   -- رسالة التعافي مرة واحدة وفقط لمهمة أُنذر عنها فعلاً (decision='recover').
+   if decision='recover' then
     perform public.notify_telegram('project_task_recovered',
      format('✅ عادت المهمة للعمل%1$s• المهمة: %2$s%1$s• المصدر: %3$s%1$s• آخر نجاح: %4$s',
       chr(10),cfg.task_label,cfg.report_source,to_char(last_at at time zone 'Asia/Riyadh','YYYY-MM-DD HH24:MI')),
      'project-task-recovered:'||cfg.task_key||':'||to_char(now(),'YYYYMMDDHH24MI'),1);
    end if;
-   insert into private.project_task_health_state(task_key,is_healthy,last_observed_at,last_success_at,last_alert_at,last_detail)
-    values(cfg.task_key,true,now(),last_at,null,'يعمل')
-    on conflict(task_key) do update set is_healthy=true,last_observed_at=now(),last_success_at=excluded.last_success_at,last_alert_at=null,last_detail='يعمل';
+   insert into private.project_task_health_state(task_key,is_healthy,last_observed_at,last_success_at,last_alert_at,last_detail,fault_since)
+    values(cfg.task_key,true,now(),last_at,null,'يعمل',null)
+    on conflict(task_key) do update set is_healthy=true,last_observed_at=now(),last_success_at=excluded.last_success_at,last_alert_at=null,last_detail='يعمل',fault_since=null;
   end if;
  end loop;
 
