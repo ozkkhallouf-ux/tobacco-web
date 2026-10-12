@@ -135,8 +135,9 @@ definition لهذا المراقب، وقد جرى تعديله (PR #220) بإص
 - **حدّ معروف**: أعطال `-noissue` (فشل إنشاء الـIssue) لا حلّ لها؛ تُغلق يدوياً بـ`private.resolve_ops_event('telegram', '<key>')`.
 
 ### ترتيب التفعيل المقترح (لا شيء منه مُنفَّذ)
-1. (تمّ) دمج PR-A. تطبيق `12-digest-only-atomic-bundle.sql` ثم `13-digest-routing-for-noncritical-alerts.sql` (ينشئ `public.health_lifecycle` ويُرسل `notify pgrst, 'reload schema'`).
-2. التحقق: `select public.health_lifecycle('probe')` بـservice_role يعيد `ready:true`.
-3. دمج PR-B: **لا أثر إنتاجي** — الافتراضي `legacy` فيبقى الإغلاق القديم وحتى لو طُبّق 13.
-4. إعلان الانتقال بعد التحقق فقط: ضبط متغيّر المستودع `HEALTH_LIFECYCLE_MODE=managed`. ثم راقب: لا صفوف `health-*` جديدة في `telegram_outbox` لعطل مستمر؛ `last_seen_at` يتجدد؛ التقرير المسائي يعرض العطل دون «يلزم إعادة التحقق».
+**قاعدة ذرّية الانتقال**: لا يجوز أن يعمل 13 (الذي يمتصّ أعطال الصحة في `ops_events`) بينما السكربت `legacy` (يغلق الـIssue دون حلّ الحدث ⇒ حدث يتيم يبقى في الملخص). لذلك يُعلَن `managed` **قبل** تطبيق 13: في `managed` ما دام 13 غير جاهز تبقى الـIssues غير الحرجة مفتوحة (لا إغلاق ولا تيليغرام)، وما إن يصير `probe` جاهزاً يبدأ الحلّ عبر RPC تلقائياً. فلا توجد لحظة يعمل فيها 13 مع `legacy`.
+1. (تمّ) دمج PR-A. دمج PR-B: **لا أثر إنتاجي** — الافتراضي `legacy`.
+2. ضبط متغيّر المستودع `HEALTH_LIFECYCLE_MODE=managed` ثم تطبيق `12-digest-only-atomic-bundle.sql` و`13-digest-routing-for-noncritical-alerts.sql` مباشرةً بعده (يُبقي هذا الفاصل قصيراً: الـIssues غير الحرجة مفتوحة وتنبيه تكرار العطل نفسه مكتوم مؤقتاً حتى جاهزية 13). 13 ينشئ `public.health_lifecycle` ويُرسل `notify pgrst, 'reload schema'`.
+3. التحقق: `select public.health_lifecycle('probe')` بـservice_role يعيد `ready:true`؛ وسجل الـworkflow يخلو من `::warning::` الخاص بـmanaged غير الجاهز.
+4. ثم راقب: لا صفوف `health-*` جديدة في `telegram_outbox` لعطل مستمر؛ `last_seen_at` يتجدد؛ التقرير المسائي يعرض العطل دون «يلزم إعادة التحقق».
 5. **التراجع بهذا الترتيب بالضبط**: (أ) `13-digest-routing-rollback.sql` (يُسقط الـRPC، ويُرسل مرة واحدة رسالة تصريف موحّدة بالأعطال المفتوحة `ops_rollback_drain` — سلوك مصمَّم وليس تيليغراماً غير مقصود؛ وتُغلق أحداثها بعدها بنافذة الصمت العادية أو يدوياً)؛ (ب) ثم `HEALTH_LIFECYCLE_MODE=legacy`؛ (ج) ثم `12-digest-only-rollback.sql`. لا تعلن `legacy` قبل (أ) وإلا بقيت أحداث مفتوحة بلا من يحلّها. بين (أ) و(ب) يبقى `managed` في `unavailable` (الـIssues مفتوحة، لا إغلاق ولا تيليغرام) ويمكن استعمال `HEALTH_LIFECYCLE_SIGNALS=off` كإيقاف طوارئ فوري في أي لحظة.

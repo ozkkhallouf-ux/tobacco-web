@@ -43,7 +43,7 @@ jobs:
           #   legacy (الافتراضي = سلوك الإنتاج اليوم): إغلاق الـIssue بالطريقة القديمة بلا أي طلب لقاعدة البيانات.
           #   managed: يُستعمل public.health_lifecycle (SQL 13) بعد probe جاهز؛ إن لم يكن جاهزاً (تأخّر schema cache/انقطاع/فقدان المفتاح/تراجع 13) تبقى الـIssues مفتوحة ولا رجوع تلقائي إلى legacy.
           #   أي قيمة أخرى = unknown: الـIssues غير الحرجة تبقى مفتوحة.
-          # لا يُضبط أي متغيّر على الإنتاج قبل تطبيق 12 ثم 13 والتحقق من probe (راجع supabase/proposed/README.md).
+          # ذرّية الانتقال: يُعلَن managed **قبل** تطبيق SQL 13 مباشرةً (لا يعمل 13 أبداً مع legacy وإلا بقي حدث يتيم)؛ راجع supabase/proposed/README.md. لا يُضبط شيء الآن.
           HEALTH_LIFECYCLE_MODE: ${{ vars.HEALTH_LIFECYCLE_MODE || 'legacy' }}
           # إيقاف طوارئ فقط: القيمة off توقف عمليات دورة الحياة كلياً (صفر طلبات DB) وتسبق أي إعلان؛ غير الحرجة تبقى مفتوحة والحرجة تُغلق.
           HEALTH_LIFECYCLE_SIGNALS: ${{ vars.HEALTH_LIFECYCLE_SIGNALS }}
