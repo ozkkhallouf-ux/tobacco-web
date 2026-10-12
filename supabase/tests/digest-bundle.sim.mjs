@@ -291,7 +291,7 @@ const exists = async (db, rel) => (await one(db, `select to_regclass('${rel}') r
   await db.exec(`insert into cron.job(jobname) values('send-evening-report-pre')`);
   await db.exec('select private.monitor_project_tasks()');
   assert.equal((await sent(db)).length, 1, 'غياب التشغيل قبل الموعد ليس عطلاً');
-  // سقف سيل التراجع: 7 مهام فاشلة ⇒ تُصفَّر 5 فقط
+  // 7 مهام فاشلة ⇒ تُصفَّر كلها (لا عطل صامت بعد التراجع)
   for (let k = 0; k < 7; k++) {
     await db.exec(`insert into private.project_task_health_state(task_key,is_healthy,last_observed_at,last_alert_at,last_alerted_health) values('cron:flood-${k}',false,now()-interval '${k} minutes',now(),'failed')`);
   }
@@ -302,7 +302,7 @@ const exists = async (db, rel) => (await one(db, `select to_regclass('${rel}') r
   out = await sent(db);
   assert.ok(out.some((o) => /other-job/.test(o.msg)), 'بعد التراجع يُنذر 09 عن عطل cron القائم');
   const reset = (await one(db, `select count(*)::int c from private.project_task_health_state where task_key like 'cron:flood-%' and last_alert_at is null`)).c;
-  assert.ok(reset >= 3 && reset <= 5, `سقف إعادة الإنذار 5 بالمجموع (flood=${reset})`);
+  assert.equal(reset, 7, `كل أعطال cron القائمة تُنذَر بعد التراجع (flood=${reset})`);
   console.log('P1 round4 OK');
 }
 

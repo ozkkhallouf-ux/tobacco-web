@@ -20,16 +20,11 @@ begin
   drop function if exists private.check_evening_report_delivered(timestamptz);
   -- أثناء الحزمة تتقدّم حقول «أُنذر» لأعطال cron دون إرسال Telegram؛ لو بقيت لظلّ مراقب 09
   -- المستعاد صامتاً عن عطل قائم. تُصفَّر لتُنذَر الأعطال القائمة مرة واحدة بعد التراجع.
-  -- سقف 5 أعطال لكل تراجع (الأحدث رصداً أولاً) كي لا يتدفّق سيل رسائل دفعة واحدة؛ والباقي
-  -- يُبلَّغ عنه بتحذير ويُعالَج يدوياً.
+  -- كل عطل cron قائم يُنذَر مرة واحدة (رسالة لكل مهمة فاشلة فعلاً، مفتاح dedupe ثابت)؛ لا سقف،
+  -- لأن أي عطل متروك بلا تصفير يصير صامتاً تماماً بعد التراجع (التقرير بلا قسم الأعطال).
   update private.project_task_health_state
      set last_alert_at = null, last_alerted_terminal_at = null,
          last_alerted_health = null, last_alerted_health_since = null
-   where task_key in (select task_key from private.project_task_health_state
-                       where task_key like 'cron:%' and is_healthy = false
-                       order by last_observed_at desc nulls last limit 5);
-  if (select count(*) from private.project_task_health_state where task_key like 'cron:%' and is_healthy = false) > 5 then
-    raise warning 'rollback: more than 5 unhealthy cron jobs; only the 5 most recent will be re-alerted';
-  end if;
+   where task_key like 'cron:%' and is_healthy = false;
   delete from private.digest_bundle_snapshot;
 end $rb$;
