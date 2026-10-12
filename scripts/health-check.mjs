@@ -293,7 +293,7 @@ export function issueNumberFromUrl(issueUrl) {
   return m ? Number(m[1]) : null;
 }
 
-async function notifyTelegram(problem, issueUrl) {
+async function notifyTelegram(problem, issueUrl, dedupeMinutes = 180) {
   const supabaseUrl = process.env.SUPABASE_URL;
   const serviceKey = process.env.SUPABASE_SERVICE_KEY;
   if (!supabaseUrl || !serviceKey) {
@@ -317,7 +317,7 @@ async function notifyTelegram(problem, issueUrl) {
         p_event_type: "health_check",
         p_message: message,
         p_dedupe_key: telegramDedupeKey(problem.key, issueNumber),
-        p_dedupe_minutes: 180,
+        p_dedupe_minutes: dedupeMinutes,
       }),
     });
     if (!res.ok) {
@@ -336,6 +336,11 @@ async function reportProblem(problem) {
   const existing = findOpenIssueForKey(problem.key);
   if (existing) {
     console.log(`= مشكلة "${problem.key}" مفتوحة أصلاً بالـIssue #${existing.number} — لا تكرار.`);
+    // عطل غير حرج مستمر: نجدّد حضوره في سجلّ الملخص اليومي (يمتصّه التوجيه بلا رسالة)، وإلا أُغلق بصمت الصمت
+    // بعد 30 ساعة وغاب عن تقارير الأيام التالية. قبل التوجيه: تذكير واحد كل 24 ساعة كحد أقصى. الحرجان لا يُكرَّران.
+    if (!["site-down", "health-check-crashed"].includes(problem.key)) {
+      await notifyTelegram(problem, `https://github.com/${REPO}/issues/${existing.number}`, 1440);
+    }
     return true;
   }
   const marker = `<!-- health:${problem.key} -->`;

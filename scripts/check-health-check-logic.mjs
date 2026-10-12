@@ -306,3 +306,7 @@ assert.match(
 );
 
 console.log('check-health-check-logic: OK — مسح بلا قيد فرع وبقائمة سماح، مفاتيح متطابقة، تمييز التعافي، منع تكرار بهوية الحادثة، انهيار المراقب مرئي، وفشل كل قنوات التبليغ يُفشل التشغيل.');
+
+// عطل غير حرج مستمر يُجدَّد في الملخص اليومي، والحرجان (site-down/health-check-crashed) لا يُكرَّران
+assert.match(reportBlock2, /notifyTelegram\(problem, `https:\/\/github\.com\/\$\{REPO\}\/issues\/\$\{existing\.number\}`, 1440\)/, 'تجديد حضور العطل المستمر في الملخص');
+assert.match(reportBlock2, /"site-down", "health-check-crashed"/, 'الحرجان مستثنيان من التجديد');
