@@ -20,6 +20,13 @@ select set_config('app.digest_bundle', 'on', true);
 do $pre$
 declare mon_src text; ev text;
   anchor constant text := $a$perform public.notify_telegram('evening_report', msg, 'evening:' || today, 720);$a$;
+  addition constant text := $b$begin
+    msg := msg || chr(10) || chr(10) || coalesce(private.daily_open_faults_section(now(), greatest(3900 - length(msg) - 2, 200)), '');
+  exception when others then
+    msg := msg || chr(10) || chr(10) || '🛠 حالة الأنظمة والأعطال' || chr(10) || '⚠️ تعذّر إعداد هذا القسم.';
+  end;
+  $b$;
+  patched constant text := addition || anchor;
 begin
   select prosrc into mon_src from pg_proc where oid = to_regprocedure('private.monitor_project_tasks()');
   if mon_src is null then raise exception 'preflight: private.monitor_project_tasks() missing'; end if;
@@ -28,9 +35,12 @@ begin
   end if;
   if to_regprocedure('public.send_evening_report()') is null then raise exception 'preflight: public.send_evening_report() missing'; end if;
   select pg_get_functiondef(to_regprocedure('public.send_evening_report()')) into ev;
-  if position('daily_open_faults_section' in ev) = 0
-     and (length(ev) - length(replace(ev, anchor, ''))) / length(anchor) <> 1 then
+  if (length(ev) - length(replace(ev, anchor, ''))) / length(anchor) <> 1 then
     raise exception 'preflight: send_evening_report anchor not found exactly once';
+  end if;
+  if position('daily_open_faults_section' in ev) > 0
+     and (length(ev) - length(replace(ev, patched, ''))) / length(patched) <> 1 then
+    raise exception 'preflight: send_evening_report mentions daily_open_faults_section but not as the exact patched block';
   end if;
   if not exists (select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' and p.proname = 'notify_telegram') then
     raise exception 'preflight: public.notify_telegram missing';
@@ -731,11 +741,15 @@ declare
     msg := msg || chr(10) || chr(10) || '🛠 حالة الأنظمة والأعطال' || chr(10) || '⚠️ تعذّر إعداد هذا القسم.';
   end;
   $b$;
+  patched constant text := addition || anchor;
 begin
   select pg_get_functiondef('public.send_evening_report()'::regprocedure) into def;
-  if position('daily_open_faults_section' in def) > 0 then
+  if (length(def) - length(replace(def, patched, ''))) / length(patched) = 1 then
     raise notice 'send_evening_report: already patched, skipping';
     return;
+  end if;
+  if position('daily_open_faults_section' in def) > 0 then
+    raise exception 'send_evening_report: mentions daily_open_faults_section but not the exact patched block; aborting without change';
   end if;
   if (length(def) - length(replace(def, anchor, ''))) / length(anchor) <> 1 then
     raise exception 'send_evening_report: anchor not found exactly once; aborting without change';
@@ -747,6 +761,14 @@ $patch$;
 -- (6) تحقق بعدي (أي فشل يتراجع بكل شيء) ----------------------------------------------
 do $post$
 declare mon text; ev text; sec text;
+  anchor constant text := $a$perform public.notify_telegram('evening_report', msg, 'evening:' || today, 720);$a$;
+  addition constant text := $b$begin
+    msg := msg || chr(10) || chr(10) || coalesce(private.daily_open_faults_section(now(), greatest(3900 - length(msg) - 2, 200)), '');
+  exception when others then
+    msg := msg || chr(10) || chr(10) || '🛠 حالة الأنظمة والأعطال' || chr(10) || '⚠️ تعذّر إعداد هذا القسم.';
+  end;
+  $b$;
+  patched constant text := addition || anchor;
 begin
   select prosrc into mon from pg_proc where oid = to_regprocedure('private.monitor_project_tasks()');
   if md5(mon) <> 'd695a9aea9c75bdd302e40ddd8b16204' then raise exception 'postflight: monitor body differs from the bundled definition (md5 %)', md5(mon); end if;
@@ -754,7 +776,7 @@ begin
     raise exception 'postflight: monitor must contain exactly 3 notify_telegram calls (critical, recovery, evening-report job failure)';
   end if;
   select pg_get_functiondef(to_regprocedure('public.send_evening_report()')) into ev;
-  if position('daily_open_faults_section' in ev) = 0 then raise exception 'postflight: evening report not patched'; end if;
+  if (length(ev) - length(replace(ev, patched, ''))) / length(patched) <> 1 then raise exception 'postflight: evening report not patched with the exact block'; end if;
   sec := private.daily_open_faults_section(now(), 1500);
   if sec is null or position('حالة الأنظمة والأعطال' in sec) = 0 then raise exception 'postflight: section builder failed'; end if;
 end $post$;

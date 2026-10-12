@@ -31,11 +31,15 @@ declare
     msg := msg || chr(10) || chr(10) || '🛠 حالة الأنظمة والأعطال' || chr(10) || '⚠️ تعذّر إعداد هذا القسم.';
   end;
   $b$;
+  patched constant text := addition || anchor;
 begin
   select pg_get_functiondef('public.send_evening_report()'::regprocedure) into def;
-  if position('daily_open_faults_section' in def) > 0 then
+  if (length(def) - length(replace(def, patched, ''))) / length(patched) = 1 then
     raise notice 'send_evening_report: already patched, skipping';
     return;
+  end if;
+  if position('daily_open_faults_section' in def) > 0 then
+    raise exception 'send_evening_report: mentions daily_open_faults_section but not the exact patched block; aborting without change';
   end if;
   if (length(def) - length(replace(def, anchor, ''))) / length(anchor) <> 1 then
     raise exception 'send_evening_report: anchor not found exactly once; aborting without change';

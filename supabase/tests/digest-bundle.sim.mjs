@@ -138,6 +138,14 @@ const exists = async (db, rel) => (await one(db, `select to_regclass('${rel}') r
   assert.equal(await defOf(b, 'public.send_evening_report()'), evBefore, 'فشل جزئي: التقرير الأصلي سليم');
   assert.equal(await exists(b, 'private.digest_bundle_snapshot'), false, 'اللقطة تراجعت أيضاً');
 
+  // (ب2) ذكر اسم الدالة في تعليق فقط ≠ مُرقَّع ⇒ رفض قبلي، لا تغيير
+  const b2 = await liveDb();
+  await b2.exec(EVENING(true).replace('perform public.notify_telegram', '/* daily_open_faults_section */ perform public.notify_telegram'));
+  const ev2 = await defOf(b2, 'public.send_evening_report()');
+  await assert.rejects(b2.exec(bundle), /not as the exact patched block/);
+  assert.equal(await md5(b2, 'private.monitor_project_tasks()'), P09_MD5, 'رفض: المراقب لم يتغيّر');
+  assert.equal(await defOf(b2, 'public.send_evening_report()'), ev2);
+
   // (ج) فشل في الرقعة نفسها بعد تحديث المراقب ⇒ المراقب يعود (لا صمت بلا تقرير)
   const c = await liveDb();
   await c.exec(`create or replace function public.send_evening_report() returns void language plpgsql as $f$
