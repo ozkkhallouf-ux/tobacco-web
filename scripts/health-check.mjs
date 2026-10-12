@@ -358,7 +358,12 @@ async function notifyTelegram(problem, issueUrl, dedupeMinutes = 180) {
 // إشارة تعافٍ إلى notify_telegram (يمتصّها التوجيه ولا ترسل شيئاً). الإرجاع:
 //   "sent"    = قبلها الخادم؛  "failed" = تعذّر (لا يُغلق الـIssue ويُعاد المحاولة في الدورة التالية)؛
 //   "skipped" = لا أسرار Supabase (لا قناة للإشارة؛ سلوك الإغلاق القديم محفوظ).
+// مفتاح تفعيل صريح (متغيّر مستودع HEALTH_LIFECYCLE_SIGNALS=on) لا يُضبط إلا بعد تطبيق proposed/13 على الإنتاج:
+// قبله يُسلَّم التجديد رسالة فورية يومية وتُسلَّم إشارة التعافي كرسالة. افتراضياً مطفأ ⇒ السلوك القديم تماماً.
+export const lifecycleSignalsEnabled = () => process.env.HEALTH_LIFECYCLE_SIGNALS === "on";
+
 async function sendRecoverySignal(problemKey, issueNumber) {
+  if (!lifecycleSignalsEnabled()) return "skipped";
   const supabaseUrl = process.env.SUPABASE_URL;
   const serviceKey = process.env.SUPABASE_SERVICE_KEY;
   if (!supabaseUrl || !serviceKey) return "skipped";
@@ -400,7 +405,7 @@ async function reportProblem(problem) {
     // عطل غير حرج ما زال قائماً (تأكّد هذه الدورة): نجدّد حضوره في سجلّ الملخص بنفس مفتاح الإنشاء
     // فيمتصّه التوجيه بلا رسالة، وإلا ظهر «يلزم إعادة التحقق» بعد 30 ساعة. الحرجان لا يُجدَّدان.
     // فشل التجديد لا يُفشل الدورة (الـIssue موجود)؛ لا Telegram جديد ما دام 13 مطبَّقاً.
-    if (renewalSignalKey(problem.key, existing.number)) {
+    if (lifecycleSignalsEnabled() && renewalSignalKey(problem.key, existing.number)) {
       await notifyTelegram(problem, `https://github.com/${REPO}/issues/${existing.number}`, 1440);
     }
     return true;

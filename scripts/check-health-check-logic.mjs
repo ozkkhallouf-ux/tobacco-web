@@ -376,7 +376,12 @@ assert.match(
 // عقد نصّي: التجديد للعطل غير الحرج فقط، والإشارة تسبق الإغلاق، والإغلاق ينتظر (await)
 {
   const rb = codeOnly.slice(codeOnly.indexOf('async function reportProblem'), codeOnly.indexOf('export function parseWorkflowIncidentKey'));
-  assert.match(rb, /if \(renewalSignalKey\(problem\.key, existing\.number\)\) \{[\s\S]{0,200}notifyTelegram\(problem, `https:\/\/github\.com\/\$\{REPO\}\/issues\/\$\{existing\.number\}`, 1440\)/, 'تجديد العطل المستمر غير الحرج');
+  assert.match(rb, /if \(lifecycleSignalsEnabled\(\) && renewalSignalKey\(problem\.key, existing\.number\)\) \{[\s\S]{0,200}notifyTelegram\(problem, `https:\/\/github\.com\/\$\{REPO\}\/issues\/\$\{existing\.number\}`, 1440\)/, 'تجديد العطل المستمر غير الحرج');
+  const H = await import(pathToFileURL(SCRIPT).href);
+  assert.equal(H.lifecycleSignalsEnabled(), false, 'مطفأ افتراضياً');
+  process.env.HEALTH_LIFECYCLE_SIGNALS = 'on'; assert.equal(H.lifecycleSignalsEnabled(), true);
+  process.env.HEALTH_LIFECYCLE_SIGNALS = 'yes'; assert.equal(H.lifecycleSignalsEnabled(), false); delete process.env.HEALTH_LIFECYCLE_SIGNALS;
+  assert.match(codeOnly, /async function sendRecoverySignal\(problemKey, issueNumber\) \{\s*if \(!lifecycleSignalsEnabled\(\)\) return "skipped"/, 'بلا تفعيل لا إشارة تعافٍ');
   assert.match(codeOnly, /await closeResolvedIssues\(\{/, 'main ينتظر الإغلاق');
   assert.match(codeOnly, /sendSignal: sendRecoverySignal/, 'الإغلاق يمرّ عبر إشارة التعافي');
 }
