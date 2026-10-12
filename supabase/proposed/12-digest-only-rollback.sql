@@ -6,7 +6,15 @@
 -- وتُترك الجداول/الدوال الجديدة (غير ضارة). لا يلمس notify_telegram ولا أي بيانات.
 -- يُشغَّل كطلب واحد (معاملة ضمنية) أو psql --single-transaction.
 do $rb$
-declare r record; n int; body text;
+declare r record; n int; body text; ev text;
+  anchor constant text := $a$perform public.notify_telegram('evening_report', msg, 'evening:' || today, 720);$a$;
+  addition constant text := $b$begin
+    msg := msg || chr(10) || chr(10) || coalesce(private.daily_open_faults_section(now(), greatest(3900 - length(msg) - 2, 200)), '');
+  exception when others then
+    msg := msg || chr(10) || chr(10) || '🛠 حالة الأنظمة والأعطال' || chr(10) || '⚠️ تعذّر إعداد هذا القسم.';
+  end;
+  $b$;
+  patched constant text := addition || anchor;
 begin
   -- 13 يمتصّ التنبيهات في ops_events ويعتمد على قسم الأعطال؛ إزالة القسم قبل 13 تُصمت الأعطال
   if to_regclass('private.digest_routing_snapshot') is not null then
@@ -17,6 +25,12 @@ begin
   end if;
   if (select count(*) from private.digest_bundle_snapshot) = 0 then
     raise exception 'rollback: snapshot is empty; nothing to restore';
+  end if;
+  -- لا نكتب فوق تعديل إنتاجي لاحق: المراقب والتقرير يجب أن يطابقا نسخة الحزمة 12 بالضبط
+  ev := pg_get_functiondef(to_regprocedure('public.send_evening_report()'));
+  if md5((select prosrc from pg_proc where oid = to_regprocedure('private.monitor_project_tasks()'))) <> 'd695a9aea9c75bdd302e40ddd8b16204'
+     or (length(ev) - length(replace(ev, patched, ''))) / length(patched) <> 1 then
+    raise exception 'rollback 12: monitor_project_tasks/send_evening_report drifted from the bundle-12 definitions; refusing to overwrite later changes';
   end if;
   -- القسم الذي سيُزال هو القارئ الوحيد للأعطال المسجَّلة: ما بقي مفتوحاً منها يُرسَل مرة واحدة موحَّداً
   select count(*), string_agg('• ' || left(label, 120), chr(10) order by first_seen_at)

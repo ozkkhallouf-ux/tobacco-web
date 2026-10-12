@@ -175,6 +175,13 @@ const exists = async (db, rel) => (await one(db, `select to_regclass('${rel}') r
   assert.equal(await defOf(d, 'public.send_evening_report()'), evDef);
 
   // (هـ) تراجع: يعيد 09 والتقرير الأصلي حرفياً، ثم يمكن التفعيل ثانية
+  // انجراف: تعديل لاحق على المراقب ⇒ التراجع يرفض ولا يكتب فوقه
+  {
+    const mdef = await defOf(d, 'private.monitor_project_tasks()');
+    await d.exec(mdef.replace('begin', 'begin /* later fix */'));
+    await assert.rejects(d.exec(rollback), /drifted/);
+    await d.exec(mdef);
+  }
   // الأعطال المسجَّلة المفتوحة وقت التراجع تُرسَل مرة واحدة موحَّدة (القسم القارئ سيُزال)
   await d.exec(`create table if not exists public.telegram_outbox(id serial primary key, event_type text, message text, dedupe_key text)`);
   await d.exec(`select private.observe_ops_event('telegram','winfail:drain-test','عطل مفتوح للتفريغ')`);
