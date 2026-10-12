@@ -154,8 +154,11 @@ const failBranch = cronLoop.slice(iFail, iOkBranch);
 const okBranch = cronLoop.slice(iOkBranch, iNeutral);
 const neutralBranch = cronLoop.slice(iNeutral, iEnd);
 
-assert.match(failBranch, /notify_telegram\('project_task_failure'/, `${MONITOR_SQL}: فرع الفشل لا يُشعر`);
-assert.match(okBranch, /notify_telegram\('project_task_recovered'/, `${MONITOR_SQL}: التعافي ليس في فرع 'ok'`);
+// سياسة الملخص اليومي: فرع الفشل يسجّل في السجلّ الموحَّد (لا Telegram مستقل)
+assert.match(failBranch, /record_ops_event\('cron'/, `${MONITOR_SQL}: فرع الفشل لا يسجّل الحادثة`);
+assert.doesNotMatch(failBranch, /notify_telegram/, `${MONITOR_SQL}: فرع فشل cron يرسل Telegram مستقلاً`);
+assert.match(okBranch, /resolve_ops_event\('cron'/, `${MONITOR_SQL}: التعافي ليس في فرع 'ok'`);
+assert.doesNotMatch(okBranch, /notify_telegram/, `${MONITOR_SQL}: تعافي cron يرسل Telegram مستقلاً`);
 assert.doesNotMatch(
   neutralBranch, /notify_telegram/,
   `${MONITOR_SQL}: الفرع المحايد يُصدر إشعاراً — inflight/never_run يجب أن يصمتا تماماً`,

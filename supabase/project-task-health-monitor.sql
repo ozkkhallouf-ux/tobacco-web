@@ -152,6 +152,84 @@ create unique index if not exists project_task_incidents_one_open
 alter table private.project_task_incidents enable row level security;
 revoke all on table private.project_task_incidents from public,anon,authenticated;
 
+-- ============================================================================
+-- سجلّ الحوادث التشغيلية الموحَّد (private.ops_events) — مصدر واحد لكل ما لا يستحق
+-- رسالة Telegram مستقلة: مهام cron، وأحداث Windows/GitHub حين يُوصَل مسارها
+-- (الربط عبر notify_telegram **غير مطبَّق** ويتطلب موافقة صريحة، انظر README).
+-- صف مفتوح واحد لكل (source,event_key)؛ التكرار يزيد occurrences فقط.
+-- ============================================================================
+create table if not exists private.ops_events (
+  id bigserial primary key,
+  source text not null,
+  event_key text not null,
+  label text not null,
+  severity text not null default 'digest' check (severity in ('digest','critical')),
+  first_seen_at timestamptz not null default now(),
+  last_seen_at timestamptz not null default now(),
+  occurrences integer not null default 1,
+  resolved_at timestamptz,
+  detail text
+);
+create unique index if not exists ops_events_one_open
+  on private.ops_events(source,event_key) where resolved_at is null;
+alter table private.ops_events enable row level security;
+revoke all on table private.ops_events from public,anon,authenticated;
+
+-- دليل مستقل على فشل خدمة الموقع/المبيعات الجوهرية. لا يوجد حتى الآن مسبار مستقل
+-- معتمد، لذا تُرجع false دائماً ⇒ لا إنذار فوري «توقف كامل» من هذا المراقب مهما صمت
+-- وكيل أمين (صمت الوكيل ليس دليلاً على توقف الموقع). إنذار الموقع الحقيقي يبقى فورياً
+-- عبر health-check.yml الخارجي. تُستبدل بمسبار مستقل فقط بعد موافقة المالك.
+create or replace function private.core_outage_verified()
+returns boolean language sql stable as $$ select false $$;
+revoke all on function private.core_outage_verified() from public,anon,authenticated;
+
+-- توجيه حدث إلى 'digest' (سجلّ + تقرير مسائي) أو 'immediate' (Telegram فوري).
+-- القاعدة الآمنة: كل ما لا نعرفه صراحةً فهو immediate (لا كتم أعمى). الأمن، وفشل
+-- النسخ الاحتياطي، وتنبيه الموقع (health_check) تبقى فورية.
+create or replace function private.ops_event_route(p_kind text, p_dedupe_key text)
+returns text language sql immutable as $$
+ select case
+  when coalesce(p_kind,'') ~* '(secur|auth|breach|health_check)' then 'immediate'
+  when coalesce(p_dedupe_key,'') ~* '(backup|secur|auth)' then 'immediate'
+  when p_kind in ('sync_failure','price_sync_failure','price_sync_mismatch','windows') then 'digest'
+  when coalesce(p_dedupe_key,'') ~ '^(price-sync:|winfail:|project-cron-failure:)' then 'digest'
+  else 'immediate'
+ end
+$$;
+revoke all on function private.ops_event_route(text,text) from public,anon,authenticated;
+
+create or replace function private.record_ops_event(
+  p_source text, p_event_key text, p_label text, p_detail text default null,
+  p_severity text default 'digest', p_now timestamptz default now())
+returns void language plpgsql security definer set search_path=private,pg_temp as $$
+begin
+ perform pg_advisory_xact_lock(hashtextextended('ops_event:'||p_source||':'||p_event_key,0));
+ insert into private.ops_events(source,event_key,label,severity,first_seen_at,last_seen_at,detail)
+  values(p_source,p_event_key,p_label,p_severity,p_now,p_now,p_detail)
+  on conflict(source,event_key) where resolved_at is null do update set
+   occurrences=private.ops_events.occurrences+1,last_seen_at=excluded.last_seen_at,
+   detail=excluded.detail,label=excluded.label,severity=excluded.severity;
+end $$;
+revoke all on function private.record_ops_event(text,text,text,text,text,timestamptz) from public,anon,authenticated;
+
+create or replace function private.resolve_ops_event(p_source text, p_event_key text, p_now timestamptz default now())
+returns void language sql security definer set search_path=private,pg_temp as $$
+ update private.ops_events set resolved_at=p_now
+  where source=p_source and event_key=p_event_key and resolved_at is null
+$$;
+revoke all on function private.resolve_ops_event(text,text,timestamptz) from public,anon,authenticated;
+
+-- أحداث المصادر الخارجية (Windows/GitHub) لا تحمل إشارة تعافٍ؛ تتكرر ما دام العطل
+-- قائماً (dedupe 60 د)، فصمتها p_silence يعني زوال العطل ⇒ تُغلق داخلياً.
+-- مهام cron (source='cron') تُغلق صراحةً عند عودتها ولا يشملها هذا الإغلاق.
+create or replace function private.close_stale_ops_events(
+  p_now timestamptz default now(), p_silence interval default interval '6 hours')
+returns void language sql security definer set search_path=private,pg_temp as $$
+ update private.ops_events set resolved_at=p_now
+  where resolved_at is null and source<>'cron' and last_seen_at<p_now-p_silence
+$$;
+revoke all on function private.close_stale_ops_events(timestamptz,interval) from public,anon,authenticated;
+
 insert into private.project_task_monitors(task_key,task_label,report_source,max_age_minutes,enabled,source_table) values
  ('ameen-main','مزامنة أمين الرئيسية','ameen_sql_agent',10,true,'inventory_reports'),
  ('customer-balances','أرصدة الزبائن','ameen_customer_balances',10,true,'inventory_reports'),
@@ -208,20 +286,22 @@ update private.project_task_monitors set check_status=true where task_key='khali
 
 -- proposed/10: حدّ تأكيد العطل لكل مهمة (دقائق) من إيقاعها الفعلي، لا مدة موحّدة:
 -- كلها ≥ 4× دورة المهمة، فلا يُعدّ إطفاء/انقطاع إنترنت قصير عطلاً مؤكداً.
+-- ameen-main = 720 د (12 ساعة): ساعات العمل الرسمية غير مثبتة فلا تُفترض؛ إطفاء الأجهزة
+-- الليلي المعتاد لا يتحوّل إلى عطل مؤكَّد، وإطفاء أطول (عطلة/عطل فعلي) يظهر في التقرير.
 update private.project_task_monitors m set alert_after_minutes=v.mins
-from (values ('ameen-main',45),('customer-balances',120),('customer-movements',180),
+from (values ('ameen-main',720),('customer-balances',120),('customer-movements',180),
  ('customer-invoices',240),('daily-profit',120),('price-sync',180),('invoice-series',120),
  ('item-details',720),('khalil-audit',120),('expense-entries',360)) as v(task_key,mins)
 where m.task_key=v.task_key and m.alert_after_minutes is distinct from v.mins;
 
--- الحرج الوحيد: ameen-main (توقف مزامنة أمين كلها). لا ينبَّه عنه إلا بعد التحقق
--- من صمت كل تقارير inventory_reports معاً (انظر المراقب).
-update private.project_task_monitors set severity='critical' where task_key='ameen-main' and severity<>'critical';
+-- لا مهمة حرجة افتراضياً: توقف وكيل أمين ليس توقفاً للموقع أو المبيعات. آلية 'critical'
+-- باقية، لكن الإنذار الفوري يتطلب دليلاً مستقلاً (private.core_outage_verified()).
+update private.project_task_monitors set severity='digest' where task_key='ameen-main' and severity<>'digest';
 
 -- أثر العطل على الموقع/البيانات كما يظهر في التقرير اليومي (نص قابل للمراجعة).
 update private.project_task_monitors m set impact_note=v.note
 from (values
- ('ameen-main','توقف مزامنة أمين كلياً: كل بيانات الموقع (أرصدة، فواتير، أسعار) لا تتحدّث'),
+ ('ameen-main','وكيل مزامنة أمين غير متصل: تتوقف تحديثات بيانات أمين على الموقع فقط؛ الموقع والمبيعات لا يتأثران بذلك وحده (قد يكون الجهاز مطفأً)'),
  ('customer-balances','أرصدة الزبائن في الموقع قد تكون قديمة'),
  ('customer-movements','كشوف حركات الزبائن في الموقع غير محدّثة'),
  ('customer-invoices','فواتير الزبائن الجديدة قد لا تظهر في الموقع'),
@@ -382,8 +462,12 @@ declare cfg record; last_at timestamptz; age_minutes numeric; last_status text; 
  -- (راجع تعليق عمود last_alerted_health_since أعلاه).
  previous_alerted_health_since timestamptz; health_incident_since timestamptz;
  previous_fault_since timestamptz; fault_start timestamptz; fault_origin timestamptz; alert_after integer;
- is_alerted boolean; decision text; is_critical boolean; is_verified boolean; any_recent timestamptz;
+ is_alerted boolean; decision text; is_critical boolean; is_verified boolean;
 begin
+ -- دورتان متداخلتان (تأخر دورة سابقة) لا تعملان معاً: الثانية تخرج بلا أثر.
+ if not pg_try_advisory_xact_lock(hashtextextended('monitor_project_tasks',0)) then
+  return;
+ end if;
  -- سجلّ التدقيق يُحتفظ به 180 يوماً ثم يُقلَّم.
  delete from private.project_task_incidents where ended_at < now()-interval '180 days';
  for cfg in select * from private.project_task_monitors where enabled order by task_key loop
@@ -416,13 +500,9 @@ begin
   -- تُزاح البداية عند أول تشغيل بعد التفعيل. الاستمرار يحتفظ بالقيمة المحفوظة.
   fault_origin:=case when last_at is null then now() else least(now(),last_at+make_interval(mins=>cfg.max_age_minutes)) end;
   fault_start:=case when previous_healthy=false then coalesce(previous_fault_since,fault_origin) else fault_origin end;
-  -- تحقق من الحرج: لا ينبَّه فوراً إلا إذا صمتت كل تقارير inventory_reports معاً
-  -- طوال alert_after (توقف كامل حقيقي) لا مهمة واحدة متأخرة.
-  is_verified:=false;
-  if is_critical then
-   select max(created_at) into any_recent from public.inventory_reports;
-   is_verified:=any_recent is null or any_recent<now()-make_interval(mins=>alert_after);
-  end if;
+  -- تحقق من الحرج: صمت تقارير أمين نفسها ليس دليلاً مستقلاً على توقف الموقع/المبيعات
+  -- (قناة وكيل أمين هي المعطوبة نفسها). الدليل المستقل = core_outage_verified() فقط.
+  is_verified:=is_critical and private.core_outage_verified();
   decision:=private.project_task_alert_decision(
    last_at is not null, age_minutes, is_backlogged,
    round(extract(epoch from(now()-fault_start))/60.0,1),
@@ -614,10 +694,11 @@ begin
     -- هو نجاح إدراج notify_telegram بلا استثناء؛ عند الفشل نُبقي القيمتين
     -- كما وردتا من الحالة المحفوظة (previous_healthy/select أعلاه) فيبقى
     -- should_alert صحيحاً بالدورة التالية ويُعاد الإرسال.
+    -- سياسة الملخص اليومي: فشل مهمة cron يُسجَّل في سجلّ الحوادث الموحَّد ويظهر في
+    -- قسم «حالة الأنظمة والأعطال» بالتقرير المسائي، بلا Telegram مستقل ولا تكرار ساعي.
+    -- previous_alert_at يعني الآن «سُجِّل» (آلة الحالة محفوظة كما هي لاختبارات PR #220).
     begin
-     perform public.notify_telegram('project_task_failure',
-      format('🚨 توقفت مهمة داخل الموقع%1$s• المهمة: %2$s%1$s• الحالة: %3$s',chr(10),job_record.jobname,detail_text),
-      failure_dedupe_key,60);
+     perform private.record_ops_event('cron',job_record.jobname,'مهمة مجدولة: '||job_record.jobname,detail_text);
      previous_alert_at:=now();
      if job_health='failed' then
       previous_alerted_terminal_at:=terminal_at;
@@ -627,7 +708,7 @@ begin
      end if;
      previous_alerted_health:=job_health;
     exception when others then
-     raise warning 'monitor_project_tasks: notify_telegram failed for cron:%: %',job_record.jobname,sqlerrm;
+     raise warning 'monitor_project_tasks: record_ops_event failed for cron:%: %',job_record.jobname,sqlerrm;
     end;
    end if;
    insert into private.project_task_health_state(task_key,is_healthy,last_observed_at,last_alert_at,last_alerted_terminal_at,last_alerted_health,last_alerted_health_since,last_detail)
@@ -640,9 +721,7 @@ begin
    -- 'ok' وحدها تمنح شهادة النجاح. لا محاولة قيد التنفيذ، ولا مهمة لم تُشغَّل.
    select is_healthy into previous_healthy from private.project_task_health_state where task_key='cron:'||job_record.jobname;
    if previous_healthy=false then
-    perform public.notify_telegram('project_task_recovered',
-     format('✅ عادت مهمة الموقع للعمل%1$s• المهمة: %2$s',chr(10),job_record.jobname),
-     'project-cron-recovered:'||job_record.jobname||':'||to_char(now(),'YYYYMMDDHH24MI'),1);
+    perform private.resolve_ops_event('cron',job_record.jobname);
    end if;
    -- proposed/05: تعافٍ فعلي يُصفِّر last_alerted_terminal_at أيضاً، كي يُنذَر
    -- فشلٌ مقبل بصرف النظر عن terminal_at القديم الذي كان مؤنذَراً عنه قبل هذا
@@ -668,54 +747,81 @@ begin
     on conflict(task_key) do update set last_observed_at=now();
   end if;
  end loop;
+ perform private.close_stale_ops_events();
 end $$;
 
 revoke all on function private.monitor_project_tasks() from public,anon,authenticated;
 
 -- proposed/10: قسم «حالة الأنظمة والأعطال» في آخر التقرير المسائي.
--- يقرأ سجلّ الأعطال المفتوحة المؤكَّدة فقط (لا يعتمد على أي تنبيه سابق): كل مهمة
--- مرة واحدة، ويستمر ظهورها في كل تقرير يومي حتى تُحلّ. لا قسم فارغ: عند عدم وجود
--- أعطال تُعاد عبارة موجزة. وإن لم تعمل المراقبة نفسها مؤخراً يُصرَّح بذلك بدل
--- ادّعاء السلامة. p_now وسيط صريح كي تبقى الاختبارات حتمية.
-create or replace function private.daily_open_faults_section(p_now timestamptz default now())
+-- يقرأ الأعطال المفتوحة المؤكَّدة من مصدرين فقط: project_task_incidents وops_events
+-- (لا يعتمد على أي تنبيه سابق): كل عطل مرة واحدة، ويستمر ظهوره في كل تقرير يومي
+-- حتى يُحلّ. أعطال المراقبات المعطّلة تبقى ظاهرة مع وسم صريح (لا تختفي صامتةً).
+-- الحدّ الآمن للطول p_max_chars: الأعطال مرتّبة بالأهمية (حرج، ثم مهام المزامنة،
+-- ثم cron، ثم أحداث Windows/GitHub، ثم الأقدم)؛ إن ضاقت الميزانية تُختصر الأسطر
+-- ثم يُذكر عدد ما لم يُعرض. p_now وسيط صريح كي تبقى الاختبارات حتمية.
+drop function if exists private.daily_open_faults_section(timestamptz);
+create or replace function private.daily_open_faults_section(p_now timestamptz default now(), p_max_chars integer default 1500)
 returns text language plpgsql stable security definer
 set search_path=private,public,pg_temp
 as $$
-declare last_obs timestamptz; r record; out_text text:=''; n int:=0; mins numeric; dur text;
+declare last_obs timestamptz; r record; n int:=0; mins numeric; dur text; full_t text; short_t text;
+ hdr text; guard text:=''; body text:=''; hidden int:=0; compact boolean:=false;
+ budget int:=greatest(coalesce(p_max_chars,1500),200); reserve int:=90;
 begin
  select max(s.last_observed_at) into last_obs
   from private.project_task_health_state s
   join private.project_task_monitors m on m.task_key=s.task_key and m.enabled;
  if last_obs is null or last_obs<p_now-interval '30 minutes' then
-  return '🛠 حالة الأنظمة والأعطال'||chr(10)
-   ||'⚠️ تعذّر التحقق من حالة الأنظمة: آخر فحص للمراقبة '
+  guard:=chr(10)||'⚠️ تعذّر التحقق من حالة الأنظمة: آخر فحص للمراقبة '
    ||coalesce(to_char(last_obs at time zone 'Asia/Damascus','YYYY-MM-DD HH24:MI'),'غير معروف')||' بتوقيت دمشق.';
  end if;
+ select count(*) into n from (
+  select 1 from private.project_task_incidents where ended_at is null and confirmed_at is not null
+  union all select 1 from private.ops_events where resolved_at is null) c;
+ hdr:='🛠 حالة الأنظمة والأعطال'||case when n>0 then ' ('||n||')' else '' end||guard;
+ if n=0 then
+  return case when guard<>'' then hdr else hdr||chr(10)||'✅ لا توجد أعطال تشغيلية مستمرة' end;
+ end if;
  for r in
-  select m.task_label,m.impact_note,i.started_at,i.last_success_at
-  from private.project_task_incidents i
-  join private.project_task_monitors m on m.task_key=i.task_key and m.enabled
-  where i.ended_at is null and i.confirmed_at is not null
-  order by i.started_at, m.task_key
+  select * from (
+   select case when m.severity='critical' then 0 else 1 end as rnk,
+    coalesce(m.task_label,i.task_key) as label, i.started_at as started, i.last_success_at as last_ok,
+    coalesce(m.impact_note,'—') as note, 1 as occ, (m.task_key is null or not m.enabled) as off,
+    false as is_ops, i.task_key as k
+   from private.project_task_incidents i
+   left join private.project_task_monitors m on m.task_key=i.task_key
+   where i.ended_at is null and i.confirmed_at is not null
+   union all
+   select case when e.severity='critical' then 0 when e.source='cron' then 2 else 3 end,
+    e.label, e.first_seen_at, null::timestamptz, coalesce(left(e.detail,140),'—'), e.occurrences, false,
+    true, e.source||':'||e.event_key
+   from private.ops_events e where e.resolved_at is null
+  ) q order by rnk, started, k
  loop
-  n:=n+1;
-  mins:=greatest(0,floor(extract(epoch from(p_now-r.started_at))/60.0));
+  mins:=greatest(0,floor(extract(epoch from(p_now-r.started))/60.0));
   dur:=case
    when mins>=1440 then format('%s يوم و%s ساعة',floor(mins/1440),floor((mins-floor(mins/1440)*1440)/60))
    when mins>=60 then format('%s ساعة و%s دقيقة',floor(mins/60),mins-floor(mins/60)*60)
    else format('%s دقيقة',mins) end;
-  out_text:=out_text||chr(10)||'• '||r.task_label||chr(10)
-   ||'  بدأ: '||to_char(r.started_at at time zone 'Asia/Damascus','YYYY-MM-DD HH24:MI')||' — مستمر منذ '||dur||chr(10)
-   ||'  آخر نجاح: '||coalesce(to_char(r.last_success_at at time zone 'Asia/Damascus','YYYY-MM-DD HH24:MI'),'غير معروف')||chr(10)
-   ||'  الأثر: '||coalesce(r.impact_note,'—');
+  full_t:=chr(10)||'• '||r.label||chr(10)
+   ||'  بدأ: '||to_char(r.started at time zone 'Asia/Damascus','YYYY-MM-DD HH24:MI')||' — مستمر منذ '||dur||chr(10)
+   ||case when r.is_ops then case when r.occ>1 then '  تكرر: '||r.occ||' مرة'||chr(10) else '' end
+          else '  آخر نجاح: '||coalesce(to_char(r.last_ok at time zone 'Asia/Damascus','YYYY-MM-DD HH24:MI'),'غير معروف')||chr(10) end
+   ||case when r.is_ops then '  التفاصيل: ' else '  الأثر: ' end||r.note
+   ||case when r.off then chr(10)||'  ⚠️ المراقبة معطّلة — حالة هذا العطل غير محدّثة' else '' end;
+  short_t:=chr(10)||'• '||r.label||' — منذ '||dur||case when r.off then ' (المراقبة معطّلة)' else '' end;
+  if not compact and length(hdr)+length(body)+length(full_t)<=budget-reserve then
+   body:=body||full_t;
+  else
+   compact:=true;
+   if length(hdr)+length(body)+length(short_t)<=budget-reserve then body:=body||short_t;
+   else hidden:=hidden+1; end if;
+  end if;
  end loop;
- if n=0 then
-  return '🛠 حالة الأنظمة والأعطال'||chr(10)||'✅ لا توجد أعطال تشغيلية مستمرة';
- end if;
- return '🛠 حالة الأنظمة والأعطال ('||n||')'||out_text;
+ return hdr||body||case when hidden>0 then chr(10)||'… و'||hidden||' أعطال أخرى غير معروضة (راجع سجل الأعطال)' else '' end;
 end;
 $$;
-revoke all on function private.daily_open_faults_section(timestamptz) from public,anon,authenticated;
+revoke all on function private.daily_open_faults_section(timestamptz,integer) from public,anon,authenticated;
 revoke all on table private.project_task_monitors from public,anon,authenticated;
 revoke all on table private.project_task_health_state from public,anon,authenticated;
 

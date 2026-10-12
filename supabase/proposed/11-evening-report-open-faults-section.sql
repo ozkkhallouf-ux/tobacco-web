@@ -19,7 +19,7 @@ declare
   def text;
   anchor constant text := $a$perform public.notify_telegram('evening_report', msg, 'evening:' || today, 720);$a$;
   addition constant text := $b$begin
-    msg := msg || chr(10) || chr(10) || coalesce(private.daily_open_faults_section(), '');
+    msg := msg || chr(10) || chr(10) || coalesce(private.daily_open_faults_section(now(), greatest(3900 - length(msg) - 2, 200)), '');
   exception when others then
     msg := msg || chr(10) || chr(10) || '🛠 حالة الأنظمة والأعطال' || chr(10) || '⚠️ تعذّر إعداد هذا القسم.';
   end;
