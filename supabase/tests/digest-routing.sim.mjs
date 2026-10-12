@@ -512,6 +512,12 @@ console.log('health faults persist until explicit recovery ok');
   assert.deepEqual(f.closed, [7]);
   assert.equal(await openN('health-deploy-failed-issue-7'), 0);
 
+  // 9) بلا أسرار Supabase (اختيارية في الـworkflow): إغلاق قديم، صفر طلبات، لا يبقى Issue مفتوحاً للأبد
+  const urlsNoSecret = state.urls.length;
+  f = await flow([{ number: 11, key: 'deploy-failed' }], { env: {} });
+  assert.deepEqual([f.mode, f.closed], ['unconfigured', [11]]);
+  assert.equal(state.urls.length, urlsNoSecret);
+
   assert.ok(!state.urls.some((u) => !u.endsWith('/rpc/health_lifecycle')), 'لا طلب غير RPC الحياة');
   await db.exec(`update private.ops_events set resolved_at=now(), resolution='silence' where resolved_at is null`);
 }

@@ -373,6 +373,12 @@ assert.match(
   assert.equal((await mode(() => reply(200, { ok: true, op: 'probe', v: 1, ready: true }))).m, 'ready');
   assert.equal((await mode(() => reply(200, { ok: true, op: 'probe', v: 1, ready: false }))).m, 'unknown', '13 موجود لكن التوجيه غير فعّال ⇒ لا افتراض');
   assert.equal((await mode(() => reply(404, PGRST202))).m, 'absent');
+  // السرّ اختياري في الـworkflow: بدونه لا يصنع السكربت أي حدث ⇒ unconfigured (لا طلبات) وليس unknown (وإلا بقيت الـIssues مفتوحة للأبد)
+  for (const env of [{}, { SUPABASE_URL: ENV.SUPABASE_URL }, { SUPABASE_SERVICE_KEY: 'k' }]) {
+    const u = await mode(() => reply(200, { ok: true, op: 'probe', v: 1, ready: true }), env);
+    assert.equal(u.m, 'unconfigured'); assert.equal(u.f.reqs.length, 0);
+  }
+  assert.equal((await mode(() => reply(200, {}), { HEALTH_LIFECYCLE_SIGNALS: 'off' })).m, 'off', 'الطوارئ تسبق unconfigured');
   assert.equal((await mode(() => reply(503, 'x'))).m, 'unknown');
   assert.equal((await mode(() => reply(401, 'x'))).m, 'unknown');
   assert.equal((await mode(() => { throw new Error('db down'); })).m, 'unknown', 'فشل اتصال قاعدة البيانات ⇒ غير معروف لا قديم');
@@ -433,6 +439,7 @@ assert.match(
     assert.equal(await resolveForClosure('deploy-failed', 5, { mode: 'unknown', call: never, confirm: never, log }), 'hold');
     assert.equal(await resolveForClosure('deploy-failed', 5, { mode: 'absent', call: never, confirm: () => false, log }), 'hold');
     assert.equal(await resolveForClosure('deploy-failed', 5, { mode: 'absent', call: never, confirm: () => true, log }), 'legacy');
+    assert.equal(await resolveForClosure('deploy-failed', 5, { mode: 'unconfigured', call: never, confirm: never, log }), 'legacy', 'بلا أسرار ⇒ إغلاق قديم بلا RPC ولا تأكيد');
     const calls = [];
     assert.equal(await resolveForClosure('deploy-failed', 5, { mode: 'ready', confirm: never, log, call: async (op, a) => { calls.push([op, a]); return { kind: 'ok', body: { ok: true, op: 'resolve', resolved: 1 } }; } }), 'resolved');
     assert.deepEqual(calls, [['resolve', { key: 'deploy-failed', issue: 5 }]]);
@@ -560,7 +567,7 @@ assert.match(
   assert.match(codeOnly, /await closeResolvedIssues\(\{/, 'main ينتظر الإغلاق');
   assert.match(codeOnly, /resolveLifecycle: async \(key, number\) => resolveForClosure\(/, 'الإغلاق يمرّ عبر حلّ الحدث بإقرار');
   // مفتاح الطوارئ يمرّ عبر نقطة واحدة (detectLifecycleMode) لا فحوص متفرقة
-  assert.match(codeOnly, /if \(lifecycleSwitchOff\(env\)\) return "off";\s*const r = await callLifecycle\("probe"/, 'off قبل أي طلب');
+  assert.match(codeOnly, /if \(lifecycleSwitchOff\(env\)\) return "off";\s*if \(!env\.SUPABASE_URL \|\| !env\.SUPABASE_SERVICE_KEY\) return "unconfigured";\s*const r = await callLifecycle\("probe"/, 'off ثم unconfigured قبل أي طلب');
 }
 
 console.log('check-health-check-logic: OK — مسح بلا قيد فرع وبقائمة سماح، مفاتيح متطابقة، تمييز التعافي، منع تكرار بهوية الحادثة، انهيار المراقب مرئي، وفشل كل قنوات التبليغ يُفشل التشغيل.');

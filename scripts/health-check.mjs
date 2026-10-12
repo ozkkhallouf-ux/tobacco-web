@@ -393,10 +393,13 @@ export async function callLifecycle(op, args = {}, { env = process.env, fetchImp
 
 // حالة الجاهزية (مرة واحدة لكل تشغيل):
 //   "off"     = إيقاف طوارئ؛   "ready" = 13 مطبَّق والتوجيه فعّال (probe ok وready=true)؛
-//   "absent"  = PGRST202 (يحتاج تأكيداً قبل اعتباره قديماً مؤكَّداً)؛  "unknown" = أي شيء آخر ⇒ لا إغلاق ولا افتراض تعافٍ.
+//   "absent"  = PGRST202 (يحتاج تأكيداً قبل اعتباره قديماً مؤكَّداً)؛  "unknown" = أي شيء آخر ⇒ لا إغلاق ولا افتراض تعافٍ؛
+//   "unconfigured" = SUPABASE_URL/SUPABASE_SERVICE_KEY لم يُضبطا أصلاً (السرّ اختياري في الـworkflow): لا يستطيع هذا السكربت
+//   إرسال أي تنبيه إلى قاعدة البيانات فلا حدث يتيم يصنعه ⇒ إغلاق قديم آمن (وإلا بقي الـIssue مفتوحاً للأبد وكُتم تكرار العطل).
 export async function detectLifecycleMode(deps = {}) {
   const env = deps.env || process.env;
   if (lifecycleSwitchOff(env)) return "off";
+  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_KEY) return "unconfigured";
   const r = await callLifecycle("probe", {}, deps);
   if (r.kind === "absent") return "absent";
   if (r.kind === "ok" && r.body.ready === true) return "ready";
@@ -426,6 +429,7 @@ export function confirmLegacyAbsence(number, { readComments, postComment, nowMs 
 //   "hold"     = طوارئ/غير معروف/غياب غير مؤكَّد/فشل أو إقرار غير صالح ⇒ لا يُغلَق ويُعاد في الدورة التالية.
 export async function resolveForClosure(key, number, { mode, call, confirm, log = () => {} }) {
   if (mode === "off") { log(`⏸ إيقاف الطوارئ (HEALTH_LIFECYCLE_SIGNALS=off): يبقى Issue #${number} ("${key}") مفتوحاً — لا حلّ ولا إغلاق.`); return "hold"; }
+  if (mode === "unconfigured") { log(`ℹ️ أسرار Supabase غير مضبوطة — لا أحداث تنبيه من هذا السكربت؛ إغلاق Issue #${number} ("${key}") بالسلوك القديم.`); return "legacy"; }
   if (mode === "absent") {
     if (confirm(number)) return "legacy";
     log(`⏳ rpc/health_lifecycle غير موجودة (PGRST202) — لم يُؤكَّد غياب 13 بعد؛ يبقى Issue #${number} مفتوحاً.`);
