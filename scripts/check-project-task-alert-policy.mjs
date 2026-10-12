@@ -48,7 +48,7 @@ assert.match(canonical, /if decision='recover' then\s+perform public\.notify_tel
 // حلقة cron.job: سجلّ موحَّد لا Telegram
 assert.ok(!canonical.includes('🚨 توقفت مهمة داخل الموقع'), 'تنبيه cron الفوري ما زال موجوداً');
 assert.ok(!canonical.includes('✅ عادت مهمة الموقع للعمل'), 'تعافي cron المستقل ما زال موجوداً');
-assert.match(canonical, /private\.record_ops_event\('cron',job_record\.jobname/);
+assert.match(canonical, /private\.observe_ops_event\('cron',job_record\.jobname/);
 assert.match(canonical, /private\.resolve_ops_event\('cron',job_record\.jobname\)/);
 // المراقب كله لا يحتوي إلا رسالتين ممكنتين: الحرج المتحقَّق منه وتعافيه
 const monitorBody = canonical.slice(
@@ -102,4 +102,15 @@ assert.equal(eveningMigration.split(anchor).length - 1, 1, 'المرساة لي�
 assert.ok(p11.includes('exception when others'), 'القسم يجب ألا يُسقط التقرير عند خطأ');
 const body = p11.slice(p11.indexOf('do $patch$')).replace(anchor, '');
 assert.ok(!body.includes('notify_telegram('), 'proposed/11 يجب ألا يضيف رسالة Telegram جديدة');
+
+// ── الحزمة الذرّية (proposed/12): لا مرحلة صامتة، وبذر الأعطال القائمة، وبلا لمس notify_telegram ──
+const bundle = await read('supabase/proposed/12-digest-only-atomic-bundle.sql');
+const rollback = await read('supabase/proposed/12-digest-only-rollback.sql');
+assert.ok(!/^\s*(begin|commit);/mi.test(bundle), 'الحزمة طلب واحد ضمني: لا begin/commit داخلها');
+assert.ok(bundle.includes("set_config('app.digest_bundle'"), 'الحزمة لا تضبط حارس التطبيق');
+assert.ok(p10.includes("current_setting('app.digest_bundle'") && p11.includes("current_setting('app.digest_bundle'"), '10/11 بلا حارس يمنع التطبيق المنفرد');
+assert.ok(bundle.includes('seed_open_faults'), 'الحزمة لا تبذر الأعطال المفتوحة');
+assert.ok(bundle.includes('2c762f38b56ea5a683061529bd5e5d7f'), 'الحزمة لا تتحقق من بصمة المراقب الحي (= 09)');
+assert.ok(!/create (or replace )?function public\.notify_telegram/.test(bundle + rollback), 'الحزمة/التراجع يعدّلان notify_telegram');
+assert.ok(rollback.includes('private.digest_bundle_snapshot') || rollback.includes('snapshot'), 'التراجع بلا لقطة');
 console.log('Project task alert policy checks passed.');

@@ -219,6 +219,23 @@ returns void language sql security definer set search_path=private,pg_temp as $$
 $$;
 revoke all on function private.resolve_ops_event(text,text,timestamptz) from public,anon,authenticated;
 
+-- رصد حالة قائمة (مهام cron): يفتح الحدث إن لم يوجد، وإلا يحدّث last_seen_at والتفاصيل
+-- فقط (بلا زيادة occurrences لأن الرصد كل 5 دقائق ليس «تكراراً» للعطل). p_since هي
+-- أفضل تقدير لبداية العطل ويُستعمل عند الإنشاء فقط. مستقلة عن أي تنبيه سابق: عطل cron
+-- قائم قبل التفعيل يُسجَّل في أول دورة ولا يختفي لمجرد أنه أُنذر عنه بالنظام القديم.
+create or replace function private.observe_ops_event(
+  p_source text, p_event_key text, p_label text, p_detail text default null,
+  p_since timestamptz default null, p_severity text default 'digest')
+returns void language plpgsql security definer set search_path=private,pg_temp as $$
+begin
+ perform pg_advisory_xact_lock(hashtextextended('ops_event:'||p_source||':'||p_event_key,0));
+ insert into private.ops_events(source,event_key,label,severity,first_seen_at,last_seen_at,detail)
+  values(p_source,p_event_key,p_label,p_severity,least(coalesce(p_since,now()),now()),now(),p_detail)
+  on conflict(source,event_key) where resolved_at is null do update set
+   last_seen_at=now(),detail=excluded.detail,label=excluded.label;
+end $$;
+revoke all on function private.observe_ops_event(text,text,text,text,timestamptz,text) from public,anon,authenticated;
+
 -- أحداث المصادر الخارجية (Windows/GitHub) لا تحمل إشارة تعافٍ؛ تتكرر ما دام العطل
 -- قائماً (dedupe 60 د)، فصمتها p_silence يعني زوال العطل ⇒ تُغلق داخلياً.
 -- مهام cron (source='cron') تُغلق صراحةً عند عودتها ولا يشملها هذا الإغلاق.
@@ -697,8 +714,10 @@ begin
     -- سياسة الملخص اليومي: فشل مهمة cron يُسجَّل في سجلّ الحوادث الموحَّد ويظهر في
     -- قسم «حالة الأنظمة والأعطال» بالتقرير المسائي، بلا Telegram مستقل ولا تكرار ساعي.
     -- previous_alert_at يعني الآن «سُجِّل» (آلة الحالة محفوظة كما هي لاختبارات PR #220).
+    -- التسجيل الفعلي في ops_events يجري بلا شرط أدناه (observe_ops_event) كل دورة، لا هنا:
+    -- حارس should_alert يُخفي العطل القائم قبل التفعيل (previous_alert_at حديث أو فشل
+    -- أُنذر عنه بالنظام القديم) فيغيب عن التقرير اليومي.
     begin
-     perform private.record_ops_event('cron',job_record.jobname,'مهمة مجدولة: '||job_record.jobname,detail_text);
      previous_alert_at:=now();
      if job_health='failed' then
       previous_alerted_terminal_at:=terminal_at;
@@ -708,9 +727,17 @@ begin
      end if;
      previous_alerted_health:=job_health;
     exception when others then
-     raise warning 'monitor_project_tasks: record_ops_event failed for cron:%: %',job_record.jobname,sqlerrm;
+     raise warning 'monitor_project_tasks: state update failed for cron:%: %',job_record.jobname,sqlerrm;
     end;
    end if;
+   -- رصد بلا شرط: كل دورة يبقى العطل القائم مفتوحاً في السجلّ الموحَّد (يظهر في التقرير
+   -- المسائي) سواء أُنذر عنه سابقاً أم لا. بداية العطل = آخر تشغيل نهائي/جارٍ إن عُرف.
+   begin
+    perform private.observe_ops_event('cron',job_record.jobname,'مهمة مجدولة: '||job_record.jobname,detail_text,
+     coalesce(terminal_at,last_job_at));
+   exception when others then
+    raise warning 'monitor_project_tasks: observe_ops_event failed for cron:%: %',job_record.jobname,sqlerrm;
+   end;
    insert into private.project_task_health_state(task_key,is_healthy,last_observed_at,last_alert_at,last_alerted_terminal_at,last_alerted_health,last_alerted_health_since,last_detail)
     values('cron:'||job_record.jobname,false,now(),previous_alert_at,previous_alerted_terminal_at,previous_alerted_health,previous_alerted_health_since,detail_text)
     on conflict(task_key) do update set is_healthy=false,last_observed_at=now(),last_alert_at=excluded.last_alert_at,
@@ -745,12 +772,30 @@ begin
     values('cron:'||job_record.jobname,null,now(),
      case when job_health='never_run' then 'لم تُشغَّل بعد' else 'قيد التنفيذ' end)
     on conflict(task_key) do update set last_observed_at=now();
+   -- حكم سابق غير سليم يبقى قائماً أثناء محاولة جارية: لا يُعتبر الحدث يتيماً.
+   update private.ops_events set last_seen_at=now()
+    where source='cron' and event_key=job_record.jobname and resolved_at is null;
   end if;
  end loop;
+ -- أحداث cron اليتيمة (مهمة حُذفت من cron.job فلا تُرصد ولا تعود «سليمة»): تُغلق بعد ساعة صمت.
+ update private.ops_events set resolved_at=now()
+  where source='cron' and resolved_at is null and last_seen_at<now()-interval '1 hour';
  perform private.close_stale_ops_events();
 end $$;
 
 revoke all on function private.monitor_project_tasks() from public,anon,authenticated;
+
+-- تهيئة الأعطال المفتوحة قبل/عند التفعيل: تنتظر دورة المراقب الجارية (قفل صريح، وهو
+-- يُعاد دخوله داخل المراقب) ثم تشغّل دورة كاملة فتُسجَّل الأعطال القائمة فوراً —
+-- مهام المشروع من آخر نجاح فعلي، ومهام cron الفاشلة حالياً بلا اشتراط تنبيه سابق.
+-- idempotent: الفهارس الفريدة (حادثة مفتوحة واحدة لكل مهمة/حدث) تمنع التكرار.
+create or replace function private.seed_open_faults()
+returns void language plpgsql security definer set search_path=private,public,cron,pg_temp as $$
+begin
+ perform pg_advisory_xact_lock(hashtextextended('monitor_project_tasks',0));
+ perform private.monitor_project_tasks();
+end $$;
+revoke all on function private.seed_open_faults() from public,anon,authenticated;
 
 -- proposed/10: قسم «حالة الأنظمة والأعطال» في آخر التقرير المسائي.
 -- يقرأ الأعطال المفتوحة المؤكَّدة من مصدرين فقط: project_task_incidents وops_events

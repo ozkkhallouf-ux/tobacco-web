@@ -155,7 +155,12 @@ const okBranch = cronLoop.slice(iOkBranch, iNeutral);
 const neutralBranch = cronLoop.slice(iNeutral, iEnd);
 
 // سياسة الملخص اليومي: فرع الفشل يسجّل في السجلّ الموحَّد (لا Telegram مستقل)
-assert.match(failBranch, /record_ops_event\('cron'/, `${MONITOR_SQL}: فرع الفشل لا يسجّل الحادثة`);
+// التسجيل بلا شرط (observe_ops_event) بعد حارس should_alert: عطل قائم قبل التفعيل لا يُخفى
+assert.match(failBranch, /observe_ops_event\('cron'/, `${MONITOR_SQL}: فرع الفشل لا يرصد الحادثة`);
+assert.ok(
+  failBranch.indexOf('observe_ops_event') > failBranch.lastIndexOf('end if;', failBranch.indexOf('observe_ops_event')),
+  `${MONITOR_SQL}: observe_ops_event يجب أن يقع خارج أي شرط should_alert`,
+);
 assert.doesNotMatch(failBranch, /notify_telegram/, `${MONITOR_SQL}: فرع فشل cron يرسل Telegram مستقلاً`);
 assert.match(okBranch, /resolve_ops_event\('cron'/, `${MONITOR_SQL}: التعافي ليس في فرع 'ok'`);
 assert.doesNotMatch(okBranch, /notify_telegram/, `${MONITOR_SQL}: تعافي cron يرسل Telegram مستقلاً`);

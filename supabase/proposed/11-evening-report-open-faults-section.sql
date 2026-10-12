@@ -1,6 +1,7 @@
 -- proposed/11-evening-report-open-faults-section.sql
 --
--- **مقترح — غير مطبَّق على الإنتاج.** يتطلب تطبيق proposed/10 أولاً، وتفويضاً صريحاً.
+-- **مقترح — غير مطبَّق على الإنتاج.** **لا يُطبَّق منفرداً**: يتطلب proposed/10 ويُطبَّق
+-- فقط داخل الحزمة الذرّية proposed/12 (الحارس أدناه يرفض غير ذلك).
 --
 -- يضيف قسم «حالة الأنظمة والأعطال» إلى نهاية الرسالة الرئيسية للتقرير المسائي
 -- القائم (send_evening_report، cron 20:00) — بلا تقرير جديد ولا رسالة Telegram
@@ -12,8 +13,14 @@
 --   • تفشل بوضوح إن لم تجد المرساة (لا تغيير صامت)،
 --   • idempotent: تتخطى إن كانت مطبَّقة،
 --   • تحيط استدعاء القسم بمعالج استثناء كي لا يُسقط خطأ فيه التقرير المسائي.
--- التراجع: أعد تطبيق آخر ترحيل يعرّف send_evening_report
---   (20260926234241_evening_report_supplier_purchases_from_bills.sql).
+-- التراجع: proposed/12-digest-only-rollback.sql (من لقطة الحزمة)، أو إعادة تطبيق
+--   20260926234241_evening_report_supplier_purchases_from_bills.sql.
+do $guard$ begin
+  if coalesce(current_setting('app.digest_bundle', true), '') <> 'on' then
+    raise exception 'proposed/11 must be applied only through proposed/12 (atomic bundle)';
+  end if;
+end $guard$;
+
 do $patch$
 declare
   def text;
