@@ -23,7 +23,7 @@ declare mon_src text; ev text;
 begin
   select prosrc into mon_src from pg_proc where oid = to_regprocedure('private.monitor_project_tasks()');
   if mon_src is null then raise exception 'preflight: private.monitor_project_tasks() missing'; end if;
-  if md5(mon_src) not in ('2c762f38b56ea5a683061529bd5e5d7f', 'dbcd00f22735d1daaf8a2ae2a79cdfd5') then
+  if md5(mon_src) not in ('2c762f38b56ea5a683061529bd5e5d7f', '816c7b39f56c768951f04fb2d7f7b222') then
     raise exception 'preflight: live monitor_project_tasks differs from proposed/09 (md5 %), refusing to overwrite unknown drift (accepted: live=09 or already-applied bundle)', md5(mon_src);
   end if;
   if to_regprocedure('public.send_evening_report()') is null then raise exception 'preflight: public.send_evening_report() missing'; end if;
@@ -512,6 +512,14 @@ begin
     -- حارس should_alert يُخفي العطل القائم قبل التفعيل (previous_alert_at حديث أو فشل
     -- أُنذر عنه بالنظام القديم) فيغيب عن التقرير اليومي.
     begin
+     -- استثناء وحيد من «ملخص يومي فقط»: مهمة التقرير المسائي نفسها هي ناقل الملخص، فعطلها
+     -- لا يمكن أن يظهر في الملخص. تُنبَّه فوراً (مفتاح dedupe نفسه، مرة لكل حادثة ثم ساعياً
+     -- لحالتي stuck/disabled)، وإن فشل الإرسال لا تتقدّم حالة التنبيه فيُعاد بالدورة التالية.
+     if job_record.jobname='send-evening-report' then
+      perform public.notify_telegram('project_task_failure',
+       format('🚨 تقرير المساء اليومي لا يعمل%1$s• المهمة: %2$s%1$s• الحالة: %3$s%1$s• لن تصلك قائمة الأعطال حتى يُصلَح.',chr(10),job_record.jobname,detail_text),
+       failure_dedupe_key,60);
+     end if;
      previous_alert_at:=now();
      if job_health='failed' then
       previous_alerted_terminal_at:=terminal_at;
@@ -693,9 +701,9 @@ do $post$
 declare mon text; ev text; sec text;
 begin
   select prosrc into mon from pg_proc where oid = to_regprocedure('private.monitor_project_tasks()');
-  if md5(mon) <> 'dbcd00f22735d1daaf8a2ae2a79cdfd5' then raise exception 'postflight: monitor body differs from the bundled definition (md5 %)', md5(mon); end if;
-  if (length(mon) - length(replace(mon, 'public.notify_telegram(', ''))) / length('public.notify_telegram(') <> 2 then
-    raise exception 'postflight: monitor must contain exactly 2 critical-only notify_telegram calls';
+  if md5(mon) <> '816c7b39f56c768951f04fb2d7f7b222' then raise exception 'postflight: monitor body differs from the bundled definition (md5 %)', md5(mon); end if;
+  if (length(mon) - length(replace(mon, 'public.notify_telegram(', ''))) / length('public.notify_telegram(') <> 3 then
+    raise exception 'postflight: monitor must contain exactly 3 notify_telegram calls (critical, recovery, evening-report job failure)';
   end if;
   select pg_get_functiondef(to_regprocedure('public.send_evening_report()')) into ev;
   if position('daily_open_faults_section' in ev) = 0 then raise exception 'postflight: evening report not patched'; end if;

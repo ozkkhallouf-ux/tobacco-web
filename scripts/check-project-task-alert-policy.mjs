@@ -50,12 +50,13 @@ assert.ok(!canonical.includes('🚨 توقفت مهمة داخل الموقع'),
 assert.ok(!canonical.includes('✅ عادت مهمة الموقع للعمل'), 'تعافي cron المستقل ما زال موجوداً');
 assert.match(canonical, /private\.observe_ops_event\('cron',job_record\.jobname/);
 assert.match(canonical, /private\.resolve_ops_event\('cron',job_record\.jobname\)/);
-// المراقب كله لا يحتوي إلا رسالتين ممكنتين: الحرج المتحقَّق منه وتعافيه
+// المراقب كله لا يحتوي إلا ثلاث رسائل ممكنة: الحرج المتحقَّق وتعافيه، وعطل مهمة التقرير المسائي نفسها (ناقل الملخص)
 const monitorBody = canonical.slice(
   canonical.indexOf('create or replace function private.monitor_project_tasks()'),
   canonical.indexOf('revoke all on function private.monitor_project_tasks()'),
 );
-assert.equal(monitorBody.split('public.notify_telegram(').length - 1, 2, 'المراقب يجب ألا يرسل إلا إنذار الحرج المتحقَّق وتعافيه');
+assert.match(monitorBody, /if job_record\.jobname='send-evening-report' then\s+perform public\.notify_telegram\(/, 'استثناء مهمة التقرير المسائي مفقود');
+assert.equal(monitorBody.split('public.notify_telegram(').length - 1, 3, 'المراقب يجب ألا يرسل إلا إنذار الحرج المتحقَّق وتعافيه');
 // بلا ربط بـnotify_telegram (يتطلب موافقة المالك)
 assert.ok(!/create (or replace )?function public\.notify_telegram/.test(canonical), 'الملف القانوني يعدّل notify_telegram الإنتاجي');
 assert.ok(!/create (or replace )?function public\.notify_telegram/.test(p10), 'proposed/10 يعدّل notify_telegram الإنتاجي');

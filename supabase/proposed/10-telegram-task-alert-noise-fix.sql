@@ -504,6 +504,14 @@ begin
     -- حارس should_alert يُخفي العطل القائم قبل التفعيل (previous_alert_at حديث أو فشل
     -- أُنذر عنه بالنظام القديم) فيغيب عن التقرير اليومي.
     begin
+     -- استثناء وحيد من «ملخص يومي فقط»: مهمة التقرير المسائي نفسها هي ناقل الملخص، فعطلها
+     -- لا يمكن أن يظهر في الملخص. تُنبَّه فوراً (مفتاح dedupe نفسه، مرة لكل حادثة ثم ساعياً
+     -- لحالتي stuck/disabled)، وإن فشل الإرسال لا تتقدّم حالة التنبيه فيُعاد بالدورة التالية.
+     if job_record.jobname='send-evening-report' then
+      perform public.notify_telegram('project_task_failure',
+       format('🚨 تقرير المساء اليومي لا يعمل%1$s• المهمة: %2$s%1$s• الحالة: %3$s%1$s• لن تصلك قائمة الأعطال حتى يُصلَح.',chr(10),job_record.jobname,detail_text),
+       failure_dedupe_key,60);
+     end if;
      previous_alert_at:=now();
      if job_health='failed' then
       previous_alerted_terminal_at:=terminal_at;

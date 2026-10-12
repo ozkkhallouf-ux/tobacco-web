@@ -263,4 +263,28 @@ const exists = async (db, rel) => (await one(db, `select to_regclass('${rel}') r
   assert.match(r[0].msg, /^REPORT\n\n🛠 حالة الأنظمة والأعطال\n✅ لا توجد أعطال تشغيلية مستمرة/);
   console.log('SECURITY/CRITICAL/REPORT OK');
 }
+// ───────────── Codex جولة 4: مهمة التقرير المسائي المعطّلة + تراجع بعد فشل cron قائم ─────────────
+{
+  const db = await liveDb();
+  await db.exec(bundle);
+  await db.exec(`insert into cron.job(jobname) values('send-evening-report'),('other-job')`);
+  await db.exec(`insert into cron.job_run_details(jobid,status,start_time) values
+    (1,'failed',now()-interval '2 hours'),(2,'failed',now()-interval '2 hours')`);
+  await db.exec('delete from sent');
+  await db.exec('select private.monitor_project_tasks()');
+  let out = await sent(db);
+  assert.equal(out.length, 1, 'فقط مهمة التقرير المسائي تُنبَّه فوراً؛ غيرها ملخص');
+  assert.equal(out[0].kind, 'project_task_failure');
+  assert.match(out[0].msg, /send-evening-report/);
+  await db.exec('select private.monitor_project_tasks()');
+  assert.equal((await sent(db)).length, 1, 'لا تكرار للتنبيه لنفس الحادثة');
+  // التراجع بعد فشل cron قائم: المراقب 09 المستعاد يُنذر عن العطل القائم مرة واحدة
+  await db.exec(rollback);
+  await db.exec('delete from sent');
+  await db.exec('select private.monitor_project_tasks()');
+  out = await sent(db);
+  assert.ok(out.some((o) => /other-job/.test(o.msg)), 'بعد التراجع يُنذر 09 عن عطل cron القائم');
+  console.log('P1 round4 OK');
+}
+
 console.log('DIGEST BUNDLE SIM OK');

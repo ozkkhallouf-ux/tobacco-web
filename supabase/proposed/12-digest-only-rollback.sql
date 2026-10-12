@@ -17,5 +17,11 @@ begin
   for r in select fn, def from private.digest_bundle_snapshot order by fn loop
     execute r.def;
   end loop;
+  -- أثناء الحزمة تتقدّم حقول «أُنذر» لأعطال cron دون إرسال Telegram؛ لو بقيت لظلّ مراقب 09
+  -- المستعاد صامتاً عن عطل قائم. تُصفَّر لتُنذَر الأعطال القائمة مرة واحدة بعد التراجع.
+  update private.project_task_health_state
+     set last_alert_at = null, last_alerted_terminal_at = null,
+         last_alerted_health = null, last_alerted_health_since = null
+   where task_key like 'cron:%' and is_healthy = false;
   delete from private.digest_bundle_snapshot;
 end $rb$;

@@ -161,7 +161,10 @@ assert.ok(
   failBranch.indexOf('observe_ops_event') > failBranch.lastIndexOf('end if;', failBranch.indexOf('observe_ops_event')),
   `${MONITOR_SQL}: observe_ops_event يجب أن يقع خارج أي شرط should_alert`,
 );
-assert.doesNotMatch(failBranch, /notify_telegram/, `${MONITOR_SQL}: فرع فشل cron يرسل Telegram مستقلاً`);
+assert.equal(failBranch.split('notify_telegram(').length - 1, 1, 'فرع الفشل: استثناء مهمة التقرير المسائي فقط');
+assert.match(failBranch, /if job_record\.jobname='send-evening-report' then\s+perform public\.notify_telegram\(/);
+// ملاحظة: لا Telegram مستقل لغيرها
+assert.doesNotMatch(failBranch.replace(/if job_record\.jobname='send-evening-report' then[\s\S]*?end if;/, ''), /notify_telegram/, `${MONITOR_SQL}: فرع فشل cron يرسل Telegram مستقلاً`);
 assert.match(okBranch, /resolve_ops_event\('cron'/, `${MONITOR_SQL}: التعافي ليس في فرع 'ok'`);
 assert.doesNotMatch(okBranch, /notify_telegram/, `${MONITOR_SQL}: تعافي cron يرسل Telegram مستقلاً`);
 assert.doesNotMatch(
