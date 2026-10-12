@@ -227,6 +227,12 @@ const exists = async (db, rel) => (await one(db, `select to_regclass('${rel}') r
   await db.exec(`update private.ops_events set last_seen_at=now()-interval '2 hours' where event_key='gone-job'`);
   await db.exec('select private.monitor_project_tasks()');
   assert.equal((await one(db, `select count(*)::int c from private.ops_events where resolved_at is null`)).c, 0);
+  // Codex جولة 3: حدث cron مفتوح بقي بعد تراجع بينما حالة الصحة true ⇒ يُغلق عند أول نجاح مُشاهَد
+  await db.exec(`insert into cron.job_run_details(jobid,status,start_time) values(2,'succeeded',now())`);
+  await db.exec(`insert into private.ops_events(source,event_key,label) values('cron','healthy-job','stale-after-rollback')`);
+  await db.exec(`insert into private.project_task_health_state(task_key,is_healthy,last_observed_at) values('cron:healthy-job',true,now()) on conflict(task_key) do update set is_healthy=true`);
+  await db.exec('select private.monitor_project_tasks()');
+  assert.equal((await one(db, `select count(*)::int c from private.ops_events where resolved_at is null and event_key='healthy-job'`)).c, 0);
   console.log('P1#3 OK');
 }
 

@@ -23,7 +23,7 @@ declare mon_src text; ev text;
 begin
   select prosrc into mon_src from pg_proc where oid = to_regprocedure('private.monitor_project_tasks()');
   if mon_src is null then raise exception 'preflight: private.monitor_project_tasks() missing'; end if;
-  if md5(mon_src) not in ('2c762f38b56ea5a683061529bd5e5d7f', 'a301b12b6f186a94cf589729e8426b7b') then
+  if md5(mon_src) not in ('2c762f38b56ea5a683061529bd5e5d7f', 'dbcd00f22735d1daaf8a2ae2a79cdfd5') then
     raise exception 'preflight: live monitor_project_tasks differs from proposed/09 (md5 %), refusing to overwrite unknown drift (accepted: live=09 or already-applied bundle)', md5(mon_src);
   end if;
   if to_regprocedure('public.send_evening_report()') is null then raise exception 'preflight: public.send_evening_report() missing'; end if;
@@ -540,10 +540,9 @@ begin
      last_detail=excluded.last_detail;
   elsif job_health = 'ok' then
    -- 'ok' وحدها تمنح شهادة النجاح. لا محاولة قيد التنفيذ، ولا مهمة لم تُشغَّل.
-   select is_healthy into previous_healthy from private.project_task_health_state where task_key='cron:'||job_record.jobname;
-   if previous_healthy=false then
-    perform private.resolve_ops_event('cron',job_record.jobname);
-   end if;
+   -- يُغلَق أي حدث مفتوح عند كل نجاح مُشاهَد (idempotent) دون شرط على is_healthy:
+   -- بعد تراجع/إعادة تطبيق قد يبقى حدث مفتوح وحالة صحية true.
+   perform private.resolve_ops_event('cron',job_record.jobname);
    -- proposed/05: تعافٍ فعلي يُصفِّر last_alerted_terminal_at أيضاً، كي يُنذَر
    -- فشلٌ مقبل بصرف النظر عن terminal_at القديم الذي كان مؤنذَراً عنه قبل هذا
    -- التعافي.
@@ -694,7 +693,7 @@ do $post$
 declare mon text; ev text; sec text;
 begin
   select prosrc into mon from pg_proc where oid = to_regprocedure('private.monitor_project_tasks()');
-  if md5(mon) <> 'a301b12b6f186a94cf589729e8426b7b' then raise exception 'postflight: monitor body differs from the bundled definition (md5 %)', md5(mon); end if;
+  if md5(mon) <> 'dbcd00f22735d1daaf8a2ae2a79cdfd5' then raise exception 'postflight: monitor body differs from the bundled definition (md5 %)', md5(mon); end if;
   if (length(mon) - length(replace(mon, 'public.notify_telegram(', ''))) / length('public.notify_telegram(') <> 2 then
     raise exception 'postflight: monitor must contain exactly 2 critical-only notify_telegram calls';
   end if;

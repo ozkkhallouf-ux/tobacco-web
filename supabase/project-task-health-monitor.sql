@@ -755,10 +755,9 @@ begin
      last_detail=excluded.last_detail;
   elsif job_health = 'ok' then
    -- 'ok' وحدها تمنح شهادة النجاح. لا محاولة قيد التنفيذ، ولا مهمة لم تُشغَّل.
-   select is_healthy into previous_healthy from private.project_task_health_state where task_key='cron:'||job_record.jobname;
-   if previous_healthy=false then
-    perform private.resolve_ops_event('cron',job_record.jobname);
-   end if;
+   -- يُغلَق أي حدث مفتوح عند كل نجاح مُشاهَد (idempotent) دون شرط على is_healthy:
+   -- بعد تراجع/إعادة تطبيق قد يبقى حدث مفتوح وحالة صحية true.
+   perform private.resolve_ops_event('cron',job_record.jobname);
    -- proposed/05: تعافٍ فعلي يُصفِّر last_alerted_terminal_at أيضاً، كي يُنذَر
    -- فشلٌ مقبل بصرف النظر عن terminal_at القديم الذي كان مؤنذَراً عنه قبل هذا
    -- التعافي.
