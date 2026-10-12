@@ -10,7 +10,9 @@ begin
   -- لا نكتب فوق تعديل لاحق: الدوال الثلاث يجب أن تطابق جسم 13 بالضبط (وإلا يُوقَف التراجع ويُراجَع يدوياً)
   if md5((select prosrc from pg_proc where oid = to_regprocedure('private.notify_telegram_dispatch(text,text,text,integer,jsonb)'))) <> '881a513175ec93b3e9b9185c4c5948a7'
      or md5((select prosrc from pg_proc where oid = to_regprocedure('private.ops_event_route(text,text)'))) <> 'c3f0c0040c5fd1c1adeb58aff182d5ba'
-     or md5((select prosrc from pg_proc where oid = to_regprocedure('private.close_stale_ops_events(timestamptz,interval)'))) <> '6845c03a0c640aba8caddc333ac593be' then
+     or md5((select prosrc from pg_proc where oid = to_regprocedure('private.close_stale_ops_events(timestamptz,interval)'))) <> '6845c03a0c640aba8caddc333ac593be'
+     or md5((select prosrc from pg_proc where oid = to_regprocedure('private.ops_event_silence(text)'))) is distinct from '2796ac5d112c557951d8fd3c837de6f7'
+     or md5((select prosrc from pg_proc where oid = to_regprocedure('private.absorb_digest_alert(text,text,text)'))) is distinct from '88c6e3d972aa11368de77a7c7a2b52e0' then
     raise exception 'rollback 13: a routed function drifted from the proposed/13 body; refusing to overwrite later changes';
   end if;
   for r in select fn, def from private.digest_routing_snapshot loop

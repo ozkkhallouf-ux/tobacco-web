@@ -54,6 +54,12 @@ do $pre2$ begin
      or md5((select prosrc from pg_proc where oid = to_regprocedure('private.close_stale_ops_events(timestamptz,interval)'))) not in ('1fec3b9e3a5413284865ce330275cb9e', '6845c03a0c640aba8caddc333ac593be') then
     raise exception 'proposed/13: ops_event_route/close_stale_ops_events drifted from the known 12/13 bodies; refusing to overwrite later changes';
   end if;
+  -- المساعدان الجديدان (يُنشآن هنا): إن وُجدا مسبقاً فيجب أن يطابقا جسم 13 بالضبط وإلا فُقد تعديل لاحق عليهما
+  if (to_regprocedure('private.ops_event_silence(text)') is not null or to_regprocedure('private.absorb_digest_alert(text,text,text)') is not null)
+     and (md5((select prosrc from pg_proc where oid = to_regprocedure('private.ops_event_silence(text)'))) is distinct from '2796ac5d112c557951d8fd3c837de6f7'
+     or md5((select prosrc from pg_proc where oid = to_regprocedure('private.absorb_digest_alert(text,text,text)'))) is distinct from '88c6e3d972aa11368de77a7c7a2b52e0') then
+    raise exception 'proposed/13: ops_event_silence/absorb_digest_alert drifted from the proposed/13 bodies; refusing to overwrite later changes';
+  end if;
 end $pre2$;
 
 -- لقطة قبل التعديل (مرة واحدة فقط: إعادة التطبيق لا تُسجّل النسخة المعدَّلة كأصل)

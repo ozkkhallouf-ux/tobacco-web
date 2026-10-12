@@ -219,6 +219,19 @@ await assert.rejects(db.exec(rb12), /13 is active/);
   await assert.rejects(db.exec(p13), /exact open-faults block/);
   await db.exec(rep); // يعيد التقرير المرقَّع
 }
+// تعديل لاحق على ops_event_silence أو absorb_digest_alert بعد تطبيق 13: إعادة تطبيق 13 ترفض ولا تكتب فوقه
+{
+  for (const fn of ['private.ops_event_silence(text)', 'private.absorb_digest_alert(text,text,text)']) {
+    const d = await liveDb();
+    await d.exec(bundle);
+    await d.exec(p13);
+    const def = (await one(d, `select pg_get_functiondef('${fn}'::regprocedure) d`)).d;
+    const tweaked = def.replace(/(as \$\w*\$)/i, '$1 /* later approved fix */ ');
+    await d.exec(tweaked);
+    await assert.rejects(d.exec(p13), /drifted/);
+    assert.match((await one(d, `select pg_get_functiondef('${fn}'::regprocedure) d`)).d, /later approved fix/);
+  }
+}
 // تعديل إنتاجي لاحق على ops_event_route أو close_stale بعد 12: 13 يرفض ولا يكتب فوقه
 {
   for (const fn of ['private.ops_event_route(text,text)', 'private.close_stale_ops_events(timestamptz,interval)']) {
