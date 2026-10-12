@@ -437,6 +437,81 @@ await assert.rejects(db.exec(rb12), /13 is active/);
     assert.equal((await one(d, `select count(*)::int n from pg_proc where proname='absorb_digest_alert'`)).n, 0);
   }
 }
+// ═══ public.health_lifecycle (RPC دورة حياة أعطال health-check بإقرار صريح) ═══
+{
+  const rpc = async (d, op, key = null, issue = null, label = null) =>
+    (await one(d, `select public.health_lifecycle($1,$2,$3,$4) r`.replace(/\$(\d)/g, (_, i) => [`'${op}'`, key == null ? 'null' : `'${key}'`, issue == null ? 'null' : issue, label == null ? 'null' : `'${label}'`][i - 1]))).r;
+  const open = async (d) => (await one(d, `select count(*)::int n from private.ops_events where source='telegram' and resolved_at is null`)).n;
+  const d = await liveDb();
+  await d.exec(bundle);
+  // قبل 13: لا RPC (هذا ما يراه السكربت كـPGRST202 ⇒ وضع قديم بعد تأكيد)
+  assert.equal((await one(d, `select to_regprocedure('public.health_lifecycle(text,text,integer,text)') r`)).r, null);
+  await d.exec(p13);
+  const ob0 = (await outbox(d)).length;
+  // probe
+  assert.deepEqual(await rpc(d, 'probe'), { ok: true, op: 'probe', v: 1, ready: true });
+  // renew: يفتح ثم يجدّد (idempotent)؛ لا Telegram
+  assert.deepEqual(await rpc(d, 'renew', 'ameen-sync', 7, 'مزامنة'), { ok: true, op: 'renew', renewed: 0, created: true });
+  assert.deepEqual(await rpc(d, 'renew', 'ameen-sync', 7, 'مزامنة'), { ok: true, op: 'renew', renewed: 1, created: false });
+  assert.equal(await open(d), 1);
+  assert.equal((await one(d, `select event_key k from private.ops_events where source='telegram' and resolved_at is null`)).k, 'health-ameen-sync-issue-7');
+  // مفاتيح/أرقام Issue مختلفة ⇒ أحداث منفصلة
+  await rpc(d, 'renew', 'ameen-sync', 8);
+  await rpc(d, 'renew', 'other-fault', 7);
+  assert.equal(await open(d), 3);
+  // resolve يغلق المطابق وحده؛ ويكرَّر بلا خطأ
+  assert.deepEqual(await rpc(d, 'resolve', 'ameen-sync', 7), { ok: true, op: 'resolve', resolved: 1 });
+  assert.deepEqual(await rpc(d, 'resolve', 'ameen-sync', 7), { ok: true, op: 'resolve', resolved: 0 });
+  assert.equal(await open(d), 2);
+  assert.deepEqual((await d.query(`select event_key k from private.ops_events where source='telegram' and resolved_at is null order by 1`)).rows.map((x) => x.k), ['health-ameen-sync-issue-8', 'health-other-fault-issue-7']);
+  assert.equal((await one(d, `select resolution r from private.ops_events where event_key='health-ameen-sync-issue-7'`)).r, 'explicit');
+  // resolve لمفتاح/Issue غير موجود لا يمس غيره
+  assert.equal((await rpc(d, 'resolve', 'ameen-sync', 99)).resolved, 0);
+  assert.equal(await open(d), 2);
+  // التجديد بعد الإغلاق يفتح حدثاً جديداً (عطل عاد)
+  assert.equal((await rpc(d, 'renew', 'ameen-sync', 7)).created, true);
+  assert.equal(await open(d), 3);
+  // أخطاء صريحة (لا false صامت)
+  for (const [op, k, i] of [['bogus', 'x', 1], ['renew', null, 1], ['renew', '', 1], ['renew', 'health-x', 1], ['resolve', 'site-down', 1], ['renew', 'health-check-crashed', 1], ['renew', 'x', null], ['resolve', 'x', 0], ['renew', 'x', -3], [null, null, null]]) {
+    await assert.rejects(rpc(d, op, k, i), /health_lifecycle/, `${op}/${k}/${i}`);
+  }
+  assert.equal(await open(d), 3, 'rejected calls change nothing');
+  // لا رسالة Telegram من أي عملية
+  assert.equal((await outbox(d)).length, ob0, 'RPC never queues Telegram');
+  // أمان SECURITY DEFINER والصلاحيات
+  const meta = await one(d, `select prosecdef sd, proconfig cfg from pg_proc where oid='public.health_lifecycle(text,text,integer,text)'::regprocedure`);
+  assert.equal(meta.sd, true);
+  assert.deepEqual(meta.cfg, ['search_path=pg_catalog, pg_temp']);
+  for (const [r, want] of [['anon', false], ['authenticated', false], ['public', false], ['service_role', true]]) {
+    assert.equal((await one(d, `select has_function_privilege('${r}','public.health_lifecycle(text,text,integer,text)','execute') x`)).x, want, r);
+  }
+  // الاستدعاء الفعلي بدور service_role يعمل، وبدور anon مرفوض
+  await d.exec(`set role service_role`);
+  assert.equal((await rpc(d, 'probe')).ready, true);
+  await d.exec(`reset role`);
+  await d.exec(`set role anon`);
+  await assert.rejects(rpc(d, 'probe'), /permission denied/);
+  await d.exec(`reset role`);
+  // probe لا يعلن الجاهزية إن غاب خطّاف التوجيه من dispatch (RPC موجودة لكن التوجيه غير فعّال)
+  {
+    const d2 = await liveDb();
+    await d2.exec(bundle);
+    await d2.exec(p13);
+    await d2.exec(`create or replace function private.notify_telegram_dispatch(p_event_type text,p_message text,p_dedupe_key text default null,p_dedupe_minutes int default 60,p_reply_markup jsonb default null) returns void language sql security definer as $$ select 1 $$`);
+    assert.equal((await rpc(d2, 'probe')).ready, false);
+  }
+  // التراجع: يُسقط الـRPC ولا يترك صلاحية ولا يلمس أحداث الأعطال، وإعادة التطبيق تعيدها
+  await d.exec(rb13);
+  assert.equal((await one(d, `select to_regprocedure('public.health_lifecycle(text,text,integer,text)') r`)).r, null);
+  assert.equal((await one(d, `select count(*)::int n from pg_proc where proname='health_lifecycle'`)).n, 0);
+  await d.exec(p13);
+  assert.equal((await rpc(d, 'probe')).ready, true);
+  // تعديل لاحق على جسم الـRPC ⇒ التراجع يرفض ولا يسقطها
+  await d.exec((await one(d, `select pg_get_functiondef('public.health_lifecycle(text,text,integer,text)'::regprocedure) d`)).d.replace(/(as \$\w*\$)/i, '$1 /* later approved fix */ '));
+  await assert.rejects(d.exec(rb13), /health_lifecycle drifted/);
+  assert.notEqual((await one(d, `select to_regprocedure('public.health_lifecycle(text,text,integer,text)') r`)).r, null);
+  console.log('health_lifecycle RPC ok');
+}
 console.log('rollback/reapply/drift ok');
 console.log('anon exec route:', (await one(db, `select has_function_privilege('anon','private.ops_event_route(text,text)','execute') a`)).a);
 console.log('ALL P13 CHECKS PASSED');
