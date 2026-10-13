@@ -1,0 +1,16 @@
+# ozk-uptime — محلي فقط حتى موافقة المالك. لا تنشر قبل الموافقة.
+name = "ozk-uptime"
+main = "src/index.mjs"
+compatibility_date = "2026-10-01"
+workers_dev = false
+
+[triggers]
+crons = ["*/5 * * * *"]
+
+[vars]
+DRY_RUN = "1"
+
+# التخزين (المرحلة 2، بعد الموافقة): أنشئ KV من جهاز Mac ثم ضع المعرّف الحقيقي.
+# [[kv_namespaces]]
+# binding = "UPTIME_STATE"
+# id = "REPLACE_ME_AFTER_OWNER_APPROVAL"

@@ -1,0 +1,31 @@
+name: فحص ozk-uptime Worker
+
+# فحوص فقط: لا نشر ولا أسرار ولا اتصال بـCloudflare/Supabase/Telegram.
+on:
+  pull_request:
+    paths:
+      - 'workers/uptime/**'
+      - '.github/workflows/uptime-worker-check.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: uptime-worker-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  worker-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # بلا npm install: الـWorker بلا اعتمادات، والاختبارات تعتمد node:test المدمج
+      - name: Worker tests (simulated network/storage, DRY_RUN)
+        run: node --test workers/uptime/test/*.test.mjs
+      - name: Syntax check
+        run: |
+          for f in workers/uptime/src/*.mjs; do node --check "$f"; done
