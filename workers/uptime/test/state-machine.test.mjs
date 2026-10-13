@@ -42,7 +42,7 @@ test('تشغيل مكرر أو قديم يُتجاهل', () => {
 test('إعادة تشغيل نفس الخطوة من حالة قديمة لا تُكرّر الحدث (معرّف حتمي)', () => {
   const pre = run([BAD, BAD]).s;
   const a = step(pre, T0 + 2 * M, BAD);
-  s_events_persisted: {
+  {
     const stale = structuredClone(a.state); stale.events = a.events; // الحدث سُجّل
     stale.lastRunAt = T0 + M; // قراءة قديمة لـ lastRunAt فقط
     assert.equal(step(stale, T0 + 2 * M, BAD).events.length, 0);
