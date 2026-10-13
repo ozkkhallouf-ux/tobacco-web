@@ -10,7 +10,7 @@ crons = ["*/5 * * * *"]
 [vars]
 DRY_RUN = "1"
 
-# التخزين (المرحلة 2، بعد الموافقة): أنشئ KV من جهاز Mac ثم ضع المعرّف الحقيقي.
-# [[kv_namespaces]]
-# binding = "UPTIME_STATE"
-# id = "REPLACE_ME_AFTER_OWNER_APPROVAL"
+# التخزين: Namespace واحد `ozk-uptime-state` في حساب المالك A (Free). الربط وحده لا ينشر شيئاً؛ النشر والـcron الفعلي بموافقة منفصلة.
+[[kv_namespaces]]
+binding = "UPTIME_STATE"
+id = "f64f49cc48b54d23adfff9923be09dad"

@@ -18,16 +18,29 @@ test('wrangler.toml: الاسم والمدخل والـcron والوضع الا�
 });
 test('wrangler.toml: لا نشر عرضي ولا مسارات ولا حساب ولا أسرار', () => {
   assert.doesNotMatch(active, /^\s*(account_id|route|routes|zone_id)\b/m);
-  assert.doesNotMatch(active, /\[\[routes\]\]|\[\[kv_namespaces\]\]|\[\[d1_databases\]\]|\[\[durable_objects/);
+  assert.doesNotMatch(active, /\[\[routes\]\]|\[\[d1_databases\]\]|\[\[durable_objects|\[\[services\]\]|\[\[queues|\[\[r2_buckets\]\]|\[\[analytics_engine|\[\[hyperdrive|\[ai\]|\[triggers\.|custom_domain|pattern\s*=/);
   assert.match(active, /^workers_dev\s*=\s*false/m);
   const vars = active.split('[vars]')[1]?.split('\n[')[0] || '';
   const keys = [...vars.matchAll(/^([A-Z_]+)\s*=/gm)].map((m) => m[1]);
   assert.deepEqual(keys, ['DRY_RUN'], 'المتغير الوحيد DRY_RUN (لا أسرار في [vars])');
 });
+test('wrangler.toml: ربط KV واحد صحيح (UPTIME_STATE → ozk-uptime-state)', () => {
+  const blocks = active.split('[[kv_namespaces]]').slice(1);
+  assert.equal(blocks.length, 1, 'Namespace واحد فقط');
+  const b = blocks[0].split(/\r?\n\[/)[0];
+  assert.deepEqual([...b.matchAll(/^(\w+)\s*=/gm)].map((m) => m[1]), ['binding', 'id'], 'مفاتيح الربط المسموحة فقط');
+  assert.match(b, /^binding\s*=\s*"UPTIME_STATE"\s*$/m);
+  assert.match(b, /^id\s*=\s*"f64f49cc48b54d23adfff9923be09dad"\s*$/m, 'معرّف ozk-uptime-state الحقيقي');
+  assert.ok(!/REPLACE_ME/.test(active), 'لا معرّف وهمي');
+  assert.ok(/UPTIME_STATE/.test(read('../src/core.mjs')), 'الكود يقرأ نفس اسم الربط');
+  assert.ok(toml.includes('ozk-uptime-state'), 'اسم الـNamespace موثّق في التعليق');
+});
 test('لا أسرار ولا رموز حساب في ملفات الـWorker', () => {
+  // المعرّف الوحيد المسموح بصيغة 32-hex هو معرّف KV في wrangler.toml (ليس سراً)؛ يُفحص أعلاه بدقة.
+  const kvId = 'f64f49cc48b54d23adfff9923be09dad';
   const files = ['../wrangler.toml', '../README.md', '../src/index.mjs', '../src/core.mjs', '../src/state-machine.mjs'];
   const bad = /(eyJ[\w-]{20,}\.|\bsb_secret_|\bsbp_|\d{8,10}:AA[\w-]{30,}|\bghp_[\w]{20,}|github_pat_|-----BEGIN|\b[0-9a-f]{32}\b)/;
-  for (const f of files) assert.doesNotMatch(read(f), bad, f);
+  for (const f of files) assert.doesNotMatch(read(f).replaceAll(kvId, 'KV_ID'), bad, f);
 });
 test('الشيفرة بلا Telegram/Supabase/service_role وبلا قراءة أسرار', () => {
   for (const f of readdirSync(here('../src/'))) {
