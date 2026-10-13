@@ -37,8 +37,8 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           SUPABASE_URL: https://dyxbirfpxeocqffnfdeb.supabase.co
           # سرّ اختياري — إن لم يُضبط، يُسجَّل تحذير ويُتخطى إشعار تيليغرام فقط (لا يوقف الفحص).
-          # يضبطه المستخدم بنفسه عبر: gh secret set SUPABASE_SERVICE_KEY
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          # يضبطه المستخدم بنفسه عبر: gh secret set SUPABASE_SERVICE_ROLE_KEY (الاسم الذي تستعمله باقي الـworkflows)
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           # الانتقال بين النظامين **صريح** يعلنه المشغّل، ولا يُستنتج أبداً من PGRST202 ولا من الزمن ولا من غياب المفتاح:
           #   legacy (الافتراضي = سلوك الإنتاج اليوم): إغلاق الـIssue بالطريقة القديمة بلا أي طلب لقاعدة البيانات.
           #   managed: يُستعمل public.health_lifecycle (SQL 13) بعد probe جاهز؛ إن لم يكن جاهزاً (تأخّر schema cache/انقطاع/فقدان المفتاح/تراجع 13) تبقى الـIssues مفتوحة ولا رجوع تلقائي إلى legacy.
