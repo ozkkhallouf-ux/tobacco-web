@@ -17,6 +17,35 @@ const emptyTarget = () => ({ status: 'UP', window: [], okStreak: 0, incident: nu
 
 const slot = (t) => Math.floor(t / SLOT_MS) * SLOT_MS;
 
+// كل معالج يعدّل حالة الهدف t مباشرةً ويستدعي ctx.emit للأحداث؛ نفس منطق الانتقالات دون تغيير.
+const HANDLERS = {
+  UP(t, r, ctx) {
+    if (!r.ok) { t.status = 'SUSPECT'; t.firstFailAt = ctx.now; }
+  },
+  SUSPECT(t, r, ctx) {
+    if (r.ok) { t.status = 'UP'; delete t.firstFailAt; return; }
+    if (t.window.filter((x) => !x).length < CONFIRM_FAILS) return;
+    t.status = 'DOWN';
+    t.incident = { id: `${ctx.name}:${slot(t.firstFailAt)}`, downAt: ctx.now, reminders: [] };
+    ctx.emit(ctx.mk('down', 'down', `${ctx.name} down (${r.detail || 'fail'})`));
+  },
+  DOWN(t, r, ctx) {
+    if (r.ok) { t.status = 'RECOVERING'; t.okStreak = 1; return; }
+    for (const [label, ms] of REMINDERS) {
+      if (ctx.now - t.incident.downAt >= ms && !t.incident.reminders.includes(label)) {
+        t.incident.reminders.push(label);
+        ctx.emit(ctx.mk(`reminder:${label}`, 'reminder', `${ctx.name} still down (${label})`));
+      }
+    }
+  },
+  RECOVERING(t, r, ctx) {
+    if (!r.ok) { t.status = 'DOWN'; t.okStreak = 0; return; }
+    if (++t.okStreak < RECOVER_OK) return;
+    ctx.emit(ctx.mk('recovered', 'recovered', `${ctx.name} recovered after ${Math.round((ctx.now - t.incident.downAt) / 60000)}m`));
+    t.status = 'UP'; t.okStreak = 0; t.incident = null; delete t.firstFailAt;
+  },
+};
+
 export function step(prev, now, results, targets = TARGETS) {
   const state = structuredClone(prev && prev.v === 1 ? prev : emptyState());
   // تشغيل مكرر أو غير مرتّب: لا أثر
@@ -34,33 +63,7 @@ export function step(prev, now, results, targets = TARGETS) {
       id: `${t.incident.id}:${suffix}`, type, target: name, incident: t.incident.id,
       severity: cfg.critical ? 'critical' : 'medium', alertable: !!cfg.critical, at: now, text,
     });
-
-    if (t.status === 'UP') {
-      if (!r.ok) { t.status = 'SUSPECT'; t.firstFailAt = now; }
-    } else if (t.status === 'SUSPECT') {
-      if (r.ok) { t.status = 'UP'; delete t.firstFailAt; }
-      else if (t.window.filter((x) => !x).length >= CONFIRM_FAILS) {
-        t.status = 'DOWN';
-        t.incident = { id: `${name}:${slot(t.firstFailAt)}`, downAt: now, reminders: [] };
-        emit(mk('down', 'down', `${name} down (${r.detail || 'fail'})`));
-      }
-    } else if (t.status === 'DOWN') {
-      if (r.ok) { t.status = 'RECOVERING'; t.okStreak = 1; }
-      else {
-        for (const [label, ms] of REMINDERS) {
-          if (now - t.incident.downAt >= ms && !t.incident.reminders.includes(label)) {
-            t.incident.reminders.push(label);
-            emit(mk(`reminder:${label}`, 'reminder', `${name} still down (${label})`));
-          }
-        }
-      }
-    } else if (t.status === 'RECOVERING') {
-      if (!r.ok) { t.status = 'DOWN'; t.okStreak = 0; }
-      else if (++t.okStreak >= RECOVER_OK) {
-        emit(mk('recovered', 'recovered', `${name} recovered after ${Math.round((now - t.incident.downAt) / 60000)}m`));
-        t.status = 'UP'; t.okStreak = 0; t.incident = null; delete t.firstFailAt;
-      }
-    }
+    HANDLERS[t.status](t, r, { name, now, emit, mk });
     if (t.status === 'UP') t.okStreak = 0;
   }
   state.lastRunAt = now;
