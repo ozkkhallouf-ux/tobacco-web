@@ -1019,10 +1019,17 @@ const stripComments = (source) =>
     .split('\n')
     .filter((line) => !line.trimStart().startsWith('#'))
     .join('\n');
+// تقطيع بالأسطر لا بتعبير نمطي: كتلة on: هي الأسطر بعد "on:" حتى أول سطر غير فارغ بلا إزاحة.
 const onBlock = (source) => {
-  const m = stripComments(source).match(/^on:\n((?:[ \t]+.*\n|\n)+?)(?=^\S)/m);
-  assert.ok(m, 'كتلة on: مفقودة');
-  return m[1];
+  const lines = stripComments(source).split('\n');
+  const start = lines.indexOf('on:');
+  assert.ok(start !== -1, 'كتلة on: مفقودة');
+  const body = [];
+  for (const line of lines.slice(start + 1)) {
+    if (line !== '' && !/^\s/.test(line)) break;
+    body.push(line);
+  }
+  return `${body.join('\n')}\n`;
 };
 const gateOn = onBlock(yml);
 assert.match(gateOn, /^ {2}pull_request_target:\n {4}types: \[opened, synchronize\]$/m, 'الـGate على head_sha عند opened/synchronize فقط');
