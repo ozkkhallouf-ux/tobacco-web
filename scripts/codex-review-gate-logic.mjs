@@ -421,6 +421,9 @@ export function planReconciliation({
 
 export const GATE_WORKFLOW = 'codex-review-gate.yml';
 export const GATE_DISPATCH_WORKFLOW = 'codex-review-gate-dispatch.yml';
+// pull_request_review* تُنفَّذ بنسخة merge ref الـPR، فتذهب إلى ملف بلا صلاحيات يُطلق المصالح
+// (بنسخة main) بـworkflow_run — لا إلى المُرسِل الحامل لـactions: write (Codex P1 على #321).
+export const GATE_REVIEW_SIGNAL_WORKFLOW = 'codex-review-gate-review-signal.yml';
 // سير عمل pull_request عادي (check.yml وغيره): أنواعه الافتراضية opened/synchronize/reopened.
 export const OTHER_PR_WORKFLOW = 'pull_request-workflow';
 
@@ -429,6 +432,8 @@ const OTHER_PR_ACTIONS = new Set(['opened', 'synchronize', 'reopened']);
 const GATE_ON_HEAD = Object.freeze({ workflow: GATE_WORKFLOW, onHeadSha: true, dispatchesGate: false });
 const GATE_OFF_HEAD = Object.freeze({ workflow: GATE_WORKFLOW, onHeadSha: false, dispatchesGate: false });
 const VIA_DISPATCH = Object.freeze({ workflow: GATE_DISPATCH_WORKFLOW, onHeadSha: true, dispatchesGate: true });
+// المصالح يحدّث الـcheck-run الكانوني في مكانه (PATCH) ولا يُنشئ suite للـGate على head_sha.
+const VIA_SIGNAL = Object.freeze({ workflow: GATE_REVIEW_SIGNAL_WORKFLOW, onHeadSha: true, dispatchesGate: false });
 
 // جدول التوجيه: المفتاح "event/action" (أو "event/*" لأي action). يطابق on: في الملفين.
 const ROUTES = Object.freeze({
@@ -447,8 +452,8 @@ const ROUTES = Object.freeze({
     'pull_request_target/synchronize': GATE_ON_HEAD,
     'pull_request_target/reopened': VIA_DISPATCH,
     'pull_request_target/ready_for_review': VIA_DISPATCH,
-    'pull_request_review/submitted': VIA_DISPATCH,
-    'pull_request_review_comment/created': VIA_DISPATCH,
+    'pull_request_review/submitted': VIA_SIGNAL,
+    'pull_request_review_comment/created': VIA_SIGNAL,
     'issue_comment/created': GATE_OFF_HEAD,
     'workflow_dispatch/*': GATE_OFF_HEAD,
   },

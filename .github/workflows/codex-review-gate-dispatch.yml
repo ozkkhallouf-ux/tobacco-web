@@ -2,8 +2,7 @@ name: Codex Review Gate — إعادة تقييم على نفس الـHEAD
 
 # ⚠️ إصلاح جوهري ثاني عشر بتاريخ 2026-10-14 — انظر التعليق المقابل في codex-review-gate.yml.
 #
-#   الأحداث هنا لا تغيّر head_sha للـPR: تحويل Draft إلى Ready، إعادة فتح، مراجعة رسمية،
-#   تعليق مراجعة. لو شغّلت codex-review-gate.yml مباشرة لأنشأت له suite ثانية على نفس الـsha
+#   الأحداث هنا لا تغيّر head_sha للـPR: تحويل Draft إلى Ready، وإعادة فتح. لو شغّلت codex-review-gate.yml مباشرة لأنشأت له suite ثانية على نفس الـsha
 #   تستبدل الأولى، فيختفي الـcheck-run الكانوني "Codex Review Gate" إن كان يسكنها (حالة
 #   PR #319). لذلك هذا الملف لا يقيّم شيئاً ولا يكتب أي check-run: يطلق الـGate فقط بـ
 #   workflow_dispatch على main، فيعمل الـGate بنسخة main وعلى sha الفرع الافتراضي، ويقيّم
@@ -13,18 +12,18 @@ name: Codex Review Gate — إعادة تقييم على نفس الـHEAD
 #   فيوضع في أقدم suite على الـsha، وكل أحداث هذا الملف تأتي بعدها فتُنشئ suites أحدث منها.
 #
 #   الصلاحية الوحيدة actions: write (لازمة لـworkflow_dispatch). لا checks: write ولا
-#   contents: write ولا pull-requests — فنسخة يعدّلها PR (pull_request_review* تُنفّذ نسخة
-#   merge ref) لا تستطيع كتابة نتيجة الـGate. ولا actions/checkout ولا تنفيذ أي كود من الفرع.
+#   contents: write ولا pull-requests، ولا actions/checkout ولا تنفيذ أي كود من الفرع.
+#   مقصور على pull_request_target عمداً (Codex P1 على #321): pull_request_target يُنفَّذ دوماً
+#   بنسخة الفرع الافتراضي، أما pull_request_review* فتُنفَّذ بنسخة merge ref الـPR — فلو
+#   استقبلها هذا الملف لصارت actions: write بيد نسخة يعدّلها الـPR (إطلاق pages.yml على فرعه،
+#   أو تعطيل الـGate والمصالح). أحداث المراجعة تذهب إلى codex-review-gate-review-signal.yml
+#   بلا أي صلاحية، والتقييم يجريه المصالح بـworkflow_run بنسخة main.
 #   PR من fork يحصل على GITHUB_TOKEN للقراءة فقط فيفشل الإطلاق بوضوح، والـGate يبقى pending
 #   حتى تشغيل لاحق (نفس حدود السلوك السابق).
 
 on:
   pull_request_target:
     types: [reopened, ready_for_review]
-  pull_request_review:
-    types: [submitted]
-  pull_request_review_comment:
-    types: [created]
 
 permissions:
   actions: write

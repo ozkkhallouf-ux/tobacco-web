@@ -19,6 +19,7 @@ import {
   simulateGateOnHead,
   GATE_WORKFLOW,
   GATE_DISPATCH_WORKFLOW,
+  GATE_REVIEW_SIGNAL_WORKFLOW,
 } from './codex-review-gate-logic.mjs';
 
 // Contract + regression checks for .github/workflows/codex-review-gate.yml —
@@ -33,6 +34,8 @@ const reconcileYamlPath = path.join(repoRoot, '.github', 'workflows', 'codex-rev
 const reconcileYml = await readFile(reconcileYamlPath, 'utf8');
 const dispatchYamlPath = path.join(repoRoot, '.github', 'workflows', 'codex-review-gate-dispatch.yml');
 const dispatchYml = await readFile(dispatchYamlPath, 'utf8');
+const signalYamlPath = path.join(repoRoot, '.github', 'workflows', 'codex-review-gate-review-signal.yml');
+const signalYml = await readFile(signalYamlPath, 'utf8');
 
 // 1) فحص العقد الثابت على نص الـworkflow نفسه: مطابقة pulls/comments يجب أن تعتمد على
 //    original_commit_id (الحقل الثابت أبداً)، ويُمنع تماماً استخدام commit_id القابل
@@ -1001,10 +1004,16 @@ assert.equal(
 );
 
 // 13-ح) التوجيه: الأحداث التي لا تغيّر الـsha لا تشغّل الـGate على الـHEAD إطلاقاً.
-for (const event of [READY, REOPENED, REVIEW, REVIEW_COMMENT]) {
+for (const event of [READY, REOPENED]) {
   const route = routeGateEvent({ ...event, design: 'current' });
   assert.equal(route.workflow, GATE_DISPATCH_WORKFLOW, `${event.eventName}/${event.action} يمرّ عبر المُرسِل`);
   assert.equal(route.dispatchesGate, true);
+}
+// أحداث المراجعة تُنفَّذ بنسخة الـPR: إلى ملف الإشارة بلا صلاحيات، لا إلى المُرسِل (Codex P1 على #321).
+for (const event of [REVIEW, REVIEW_COMMENT]) {
+  const route = routeGateEvent({ ...event, design: 'current' });
+  assert.equal(route.workflow, GATE_REVIEW_SIGNAL_WORKFLOW, `${event.eventName}/${event.action} يمرّ عبر ملف الإشارة`);
+  assert.equal(route.dispatchesGate, false, `${event.eventName} لا يطلق شيئاً بصلاحية`);
 }
 for (const event of [OPENED, SYNCHRONIZE]) {
   assert.deepEqual(routeGateEvent({ ...event }), { workflow: GATE_WORKFLOW, onHeadSha: true, dispatchesGate: false });
@@ -1037,10 +1046,15 @@ assert.doesNotMatch(gateOn, /pull_request_review|ready_for_review|reopened/, 'م
 assert.match(gateOn, /^ {2}issue_comment:\n {4}types: \[created\]$/m);
 assert.match(gateOn, /^ {2}workflow_dispatch:\n {4}inputs:\n {6}pr_number:/m, 'المُرسِل يعتمد على مدخل pr_number');
 const dispatchOn = onBlock(dispatchYml);
-assert.match(dispatchOn, /^ {2}pull_request_target:\n {4}types: \[reopened, ready_for_review\]$/m);
-assert.match(dispatchOn, /^ {2}pull_request_review:\n {4}types: \[submitted\]$/m);
-assert.match(dispatchOn, /^ {2}pull_request_review_comment:\n {4}types: \[created\]$/m);
-assert.doesNotMatch(dispatchOn, /opened, synchronize|synchronize|issue_comment|workflow_dispatch/, 'المُرسِل لا يكرر أحداث الـGate');
+assert.equal(
+  dispatchOn,
+  '  pull_request_target:\n    types: [reopened, ready_for_review]\n\n',
+  'المُرسِل (actions: write) على pull_request_target وحده — حدث يُنفَّذ دوماً بنسخة main',
+);
+const signalOn = onBlock(signalYml);
+assert.match(signalOn, /^ {2}pull_request_review:\n {4}types: \[submitted\]$/m);
+assert.match(signalOn, /^ {2}pull_request_review_comment:\n {4}types: \[created\]$/m);
+assert.doesNotMatch(signalOn, /pull_request_target|issue_comment|workflow_dispatch|workflow_run|schedule|push/, 'ملف الإشارة لأحداث المراجعة وحدها');
 
 // 13-ي) عقد أمان المُرسِل: صلاحية actions: write وحدها، لا checkout، لا كتابة check-runs،
 //       والإطلاق إلى codex-review-gate.yml على main برقم PR رقمي فقط.
@@ -1057,6 +1071,31 @@ assert.match(
 assert.match(dispatchCode, /''\|\*\[!0-9\]\*\) echo "رقم PR غير صالح/, 'رقم الـPR يُتحقق أنه أرقام فقط قبل الإطلاق');
 assert.match(dispatchCode, /if: github\.event\.pull_request\.base\.ref == 'main'/);
 
+// 13-ك) عقد أمان ملف الإشارة (Codex P1 على #321): يُنفَّذ بنسخة merge ref الـPR، فلا يطلب أي
+//       صلاحية ولا يستدعي أي API ولا يقرأ كود الفرع ولا أسراراً. المصالح (workflow_run، بنسخة
+//       main) يستمع لاسمه حرفياً ويعيد التقييم من الحالة الحية.
+const signalCode = stripComments(signalYml);
+assert.match(signalCode, /^permissions: \{\}$/m, 'ملف الإشارة: permissions: {} — بلا أي صلاحية');
+assert.equal((signalCode.match(/permissions:/g) || []).length, 1, 'لا كتلة permissions على مستوى الـjob');
+assert.doesNotMatch(
+  signalCode,
+  /actions\/checkout|uses:|gh api|curl|GH_TOKEN|GITHUB_TOKEN|secrets\.|github\.token|\$\{\{\s*github\.event\.(?!pull_request\.base\.ref)/,
+  'ملف الإشارة لا ينفّذ action ولا يستدعي API ولا يلمس رمزاً أو سراً ولا يمرّر بيانات الحدث',
+);
+const signalName = signalYml.match(/^name: (.+)$/m)?.[1];
+assert.equal(signalName, 'Codex Review Gate — إشارة مراجعة');
+const reconcileCode = stripComments(reconcileYml);
+assert.match(
+  reconcileCode,
+  /^ {2}workflow_run:\n {4}workflows: \["Codex Review Gate", "Codex Review Gate — إشارة مراجعة"\]\n {4}types: \[completed\]$/m,
+  'المصالح يستمع لاسم ملف الإشارة حرفياً — إعادة تسمية أحدهما وحده تقطع إعادة التقييم بعد المراجعة',
+);
+assert.doesNotMatch(reconcileCode, /actions\/checkout|github\.event\.workflow_run/, 'المصالح لا يقرأ كوداً ولا بيانات من تشغيل الإشارة');
+// لا ملف workflow آخر يستقبل pull_request_review* بصلاحية كتابة.
+for (const [label, source] of [['codex-review-gate.yml', yml], ['codex-review-gate-dispatch.yml', dispatchYml], ['codex-review-gate-reconcile.yml', reconcileYml]]) {
+  assert.doesNotMatch(onBlock(source), /pull_request_review/, `${label} لا يستقبل pull_request_review*`);
+}
+
 // 12) أمان: يُمنع حقن أي تعبير ${{ ... }} داخل كتلة `run:` في الـworkflowين.
 //     GitHub يستبدل التعبير نصياً قبل تسليم الـscript للـshell، فأي قيمة يتحكم بها
 //     مُشغِّل أو مُعلِّق (خصوصاً inputs.pr_number من workflow_dispatch، وbadges/summary
@@ -1067,6 +1106,7 @@ for (const [label, source] of [
   ['codex-review-gate.yml', yml],
   ['codex-review-gate-reconcile.yml', reconcileYml],
   ['codex-review-gate-dispatch.yml', dispatchYml],
+  ['codex-review-gate-review-signal.yml', signalYml],
 ]) {
   const lines = source.split('\n');
   const offenders = [];

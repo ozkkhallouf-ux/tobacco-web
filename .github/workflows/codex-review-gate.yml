@@ -238,13 +238,16 @@ name: Codex Review Gate
 #        pull_request_review_comment) يُنشئ suite أحدث تستبدل القديمة، فيختفي الـcheck-run
 #        الكانوني إن كان يسكنها — والتشغيل اللاحق يجده ويُحدّثه في مكانه (PATCH) فيبقى محبوساً.
 #   الحل: هذا الـworkflow لا يعمل على head_sha للـPR إلا مرة واحدة لكل sha (opened أو
-#   synchronize، وكلاهما sha جديد). كل إعادة تقييم على نفس الـHEAD تمرّ عبر
-#   codex-review-gate-dispatch.yml الذي يطلق هذا الـworkflow بـworkflow_dispatch على main،
+#   synchronize، وكلاهما sha جديد). إعادة التقييم على نفس الـHEAD: reopened/ready_for_review
+#   عبر codex-review-gate-dispatch.yml (pull_request_target بنسخة main) الذي يطلق هذا
+#   الـworkflow بـworkflow_dispatch على main؛ pull_request_review* عبر
+#   codex-review-gate-review-signal.yml (بلا أي صلاحية) ثم المصالح بـworkflow_run بنسخة main؛
 #   وissue_comment يعمل أصلاً على sha الفرع الافتراضي — فلا suite ثانية لهذا الـworkflow على
 #   الـsha نفسه أبداً. منطق الكتابة والحراس (isStaleHead/isStaleWrite) ومعيار success لم يتغيّر.
 #   فائدة أمنية جانبية: pull_request_review* تُنفّذ نسخة الـworkflow من merge ref الـPR (لا من
 #   main)، فكانت تمنح نسخة يتحكم بها الـPR صلاحية checks: write. بعد الفصل لا يعمل هذا
-#   الـworkflow إلا بنسخة main (pull_request_target/issue_comment/workflow_dispatch على main).
+#   الـworkflow إلا بنسخة main (pull_request_target/issue_comment/workflow_dispatch على main)،
+#   والملف الوحيد الذي يستقبل pull_request_review* لا يطلب أي صلاحية (Codex P1 على #321).
 #   النموذج والسيناريوهات في codex-review-gate-logic.mjs (routeGateEvent/simulateGateOnHead).
 on:
   pull_request_target:

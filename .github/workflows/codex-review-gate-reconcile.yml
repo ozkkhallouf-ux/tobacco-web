@@ -36,8 +36,15 @@ on:
   # completes (any conclusion), so any stale state is repaired within seconds — not 5 minutes.
   # Combined with the cron backstop above, this satisfies both P1 #1 (concurrent POST race) and
   # P1 #2 (PATCH ordering race): whatever stale state either race leaves, this run corrects it.
+  #
+  # إصلاح جوهري ثاني عشر (2026-10-14، Codex P1 على #321): مراجعة Codex الرسمية وتعليقات المراجعة
+  # على نفس الـHEAD لا تشغّل الـGate مباشرة (كانت تُنشئ له suite ثانية تحبس الـcheck-run
+  # الكانوني)، ولا تمرّ عبر ملف يحمل صلاحية لأن pull_request_review* تُنفَّذ بنسخة merge ref
+  # الـPR. codex-review-gate-review-signal.yml يستقبلها بلا أي صلاحية ولا يفعل شيئاً؛ اكتماله
+  # يشغّل هذا المصالح بنسخة main فيعيد اشتقاق الحالة من الـHEAD الحيّ ومراجعاته فقط — لا يقرأ
+  # أي شيء من تشغيل الإشارة.
   workflow_run:
-    workflows: ["Codex Review Gate"]
+    workflows: ["Codex Review Gate", "Codex Review Gate — إشارة مراجعة"]
     types: [completed]
 
 permissions:
