@@ -34,6 +34,7 @@ const EXECUTED_UNDER_PS51 = [
   "tools/tests/Test-SupplierObligationsReplacement.ps1",
   "tools/tests/Test-SnapshotProducerNativeStderr.ps1",
   "tools/tests/Test-EnsureAmeenSyncWorkerAccessDenied.ps1",
+  "tools/tests/Test-OzkAmeenBackup.ps1",
   // منتجات وسكربتات تسجيل تشغّلها مهام Windows المجدولة
   "tools/push-supplier-obligations.ps1",
   "tools/push-purchase-item-snapshot.ps1",
@@ -43,6 +44,7 @@ const EXECUTED_UNDER_PS51 = [
   "tools/ameen-sync-agent.ps1",
   "tools/push-item-sales.ps1",
   "tools/register-item-sales-task.ps1",
+  "tools/backup/ozk-ameen-backup.ps1",
 ];
 
 const ARABIC = /[؀-ۿ]/;
