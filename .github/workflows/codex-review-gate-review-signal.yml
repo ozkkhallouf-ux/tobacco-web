@@ -1,0 +1,33 @@
+name: Codex Review Gate — إشارة مراجعة
+
+# ⚠️ إصلاح جوهري ثاني عشر بتاريخ 2026-10-14 (Codex P1 على PR #321) — انظر رأس
+#   codex-review-gate.yml وcodex-review-gate-dispatch.yml.
+#
+#   pull_request_review وpull_request_review_comment تُنفَّذ بنسخة الـworkflow من merge ref
+#   الـPR لا من main، فأي صلاحية يحملها ملف يستقبلها تصير بيد نسخة يعدّلها الـPR. لذلك هذا
+#   الملف لا يطلب أي صلاحية (permissions: {}) ولا يستدعي أي API ولا يقرأ كود الفرع ولا يمرّر
+#   أي بيانات: وجوده إشارة فقط. اكتماله يشغّل codex-review-gate-reconcile.yml بـworkflow_run،
+#   وworkflow_run يُنفَّذ دوماً بنسخة الفرع الافتراضي، فيعيد المصالح تقييم كل PR مفتوح من
+#   الـHEAD الحيّ ومراجعات Codex عليه (نفس معيار الـGate)، ويحدّث الـcheck-run الكانوني في
+#   مكانه بلا إنشاء suite جديدة لـ"Codex Review Gate" على head_sha.
+#
+#   suite هذا الملف على head_sha تخصّ workflow آخر فلا تستبدل suite الـGate. وإن عُطّلت
+#   الإشارة أو عُدّلت في PR فالمصالح الدوري (كل ٥ دقائق) يبقى شبكة الأمان.
+#   ⚠️ اسم هذا الـworkflow (name:) مذكور حرفياً في workflow_run للمصالح — لا تغيّره وحده.
+
+on:
+  pull_request_review:
+    types: [submitted]
+  pull_request_review_comment:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  signal:
+    name: إشارة مراجعة على نفس الـHEAD (بلا صلاحيات — لا يحدد نتيجة الـGate)
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.base.ref == 'main'
+    steps:
+      - name: لا شيء — اكتمال هذا التشغيل يطلق المصالح على main
+        run: echo "إشارة مراجعة؛ المصالح على main يعيد تقييم الـGate من الحالة الحية."

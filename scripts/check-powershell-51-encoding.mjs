@@ -45,6 +45,7 @@ const EXECUTED_UNDER_PS51 = [
   "tools/push-item-sales.ps1",
   "tools/register-item-sales-task.ps1",
   "tools/backup/ozk-ameen-backup.ps1",
+  "tools/backup/register-ozk-ameen-backup-task.ps1",
 ];
 
 const ARABIC = /[؀-ۿ]/;
