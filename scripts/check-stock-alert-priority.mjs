@@ -4,11 +4,16 @@
 // ============================================================================
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
+import "../src/telegram-format.js";
 import "../src/stock-alert-priority.js";
 import { run } from "./stock-priority-alerts.mjs";
 
 const engine = globalThis.ozkStockAlertPriority;
 assert.ok(engine, "src/stock-alert-priority.js لم يعرّف ozkStockAlertPriority");
+// نص الرسالة بلا محارف الاتجاه غير المرئية (RLM/LRI/FSI/PDI) — للمطابقة النصية.
+const plain = (message) => globalThis.ozkTelegramFormat.stripBidi(message);
+// بطاقات الأصناف: كل كتلة تبدأ بسطر «🔴/🟠 اسم» وتنتهي قبل الفاصل التالي.
+const cards = (message) => plain(message).split("\n┈┈┈┈┈┈┈┈┈┈┈┈\n").slice(1).filter((block) => /^[🔴🟠] /u.test(block));
 
 const results = [];
 let failed = 0;
@@ -191,18 +196,23 @@ await test("4) صنف لم يُبع في 30 يوماً لا يُنبَّه عل�
   assert.equal(r.messages.length, 0);
 });
 
-await test("5) الرسالة: الاسم والرصيد بالكرتونة وكم يوم يكفي والأولوية، مرتبة من الأهم", () => {
+await test("5) الرسالة: بطاقة لكل صنف — العنوان ثم الحالة والأولوية والرصيد والمكافئ والتغطية بأسطر منفصلة", () => {
   // صنف 3 صافيه 800 كروز/30 يوماً ⇒ 26.67 يومياً؛ رصيد 75 ⇒ 2.8 يوم.
   // صنف 1 نفد. صنف 5 رصيده يكفي 30 يوماً ⇒ لا تنبيه.
   const r = engine.buildStockAlerts({ stockReport: tenStock({ 1: 0, 3: 75, 5: 600 }), salesReport: salesReport(tenItems()), now: NOW, lowStockThreshold: 50 });
   assert.equal(r.status, "alert");
   assert.equal(r.alerts.length, 2);
   assert.deepEqual(r.alerts.map((a) => a.priorityRank), [1, 3]);
-  const text = r.messages[0].message;
-  assert.match(text, /أصناف مهمة قاربت النفاد: 2 من 5/);
-  const lines = text.split("\n").filter((l) => l.startsWith("•"));
-  assert.equal(lines[0], "• أولوية 1 من 5 — صنف 1 — الرصيد 0 كرتونة (0 كروز) — يكفي 0 يوم (نفد)");
-  assert.equal(lines[1], "• أولوية 3 من 5 — صنف 3 — الرصيد 1.5 كرتونة (75 كروز) — يكفي 2.8 يوم");
+  const text = plain(r.messages[0].message);
+  assert.ok(text.startsWith("⚠️ أصناف مهمة قاربت النفاد\n"));
+  assert.match(text, /^العدد: 2 من 5 صنفاً مهماً$/m);
+  assert.match(text, /^🔴 نافد: 1 {2}· {2}🟠 قريب: 1$/m);
+  assert.deepEqual(cards(r.messages[0].message), [
+    "🔴 صنف 1\nالحالة: نافد\nالأولوية: 1 من 5\nالرصيد: 0 كروز\nيعادل: 0 كرتونة\nيكفي: 0 يوم",
+    "🟠 صنف 3\nالحالة: قريب من النفاد\nالأولوية: 3 من 5\nالرصيد: 75 كروز\nيعادل: 1.5 كرتونة\nيكفي: 2.8 يوم"
+  ]);
+  // كل سطر يبدأ بـRLM فيبقى عربي الاتجاه مهما كان أول حرف في الاسم.
+  for (const line of r.messages[0].message.split("\n")) assert.ok(line.startsWith("\u200F"), JSON.stringify(line));
 });
 
 await test("5) حد «يكفي» 3 أيام: 3 أيام بالضبط تُنبَّه، 3.75 يوم لا", () => {
@@ -232,7 +242,8 @@ await test("6) مخزون قديم ⇒ لا تنبيه أصناف، رسالة �
   assert.equal(r.status, "stale");
   assert.equal(r.alerts.length, 0);
   assert.equal(r.messages.length, 1);
-  assert.match(r.messages[0].message, /أرصدة المخزون: قديمة \(عمرها 30 دقيقة، الحد 10\)/);
+  assert.match(plain(r.messages[0].message), /أرصدة المخزون: قديمة \(عمرها 30 دقيقة، الحد 10\)/);
+  assert.ok(plain(r.messages[0].message).startsWith("⏳ تنبيهات النفاد متوقفة\nالسبب: البيانات قديمة أو ناقصة\n"));
   assert.ok(!/صنف 1/.test(r.messages[0].message));
   assert.equal(r.messages[0].dedupeKey, "stock-priority:stale:stock-stale");
 });
@@ -241,10 +252,10 @@ await test("6) مبيعات قديمة أو مفقودة ⇒ تبليغ بالت
   const old = salesReport(tenItems(), { created_at: fresh(200), summary: { windowDays: 30, fromDate: date(29), syncedAt: fresh(200) } });
   let r = engine.buildStockAlerts({ stockReport: tenStock({ 1: 0 }), salesReport: old, now: NOW });
   assert.equal(r.status, "stale");
-  assert.match(r.messages[0].message, /مبيعات الأصناف: قديمة/);
+  assert.match(plain(r.messages[0].message), /مبيعات الأصناف: قديمة/);
   r = engine.buildStockAlerts({ stockReport: tenStock({ 1: 0 }), salesReport: null, now: NOW });
   assert.equal(r.status, "stale");
-  assert.match(r.messages[0].message, /مبيعات الأصناف: غير متوفرة/);
+  assert.match(plain(r.messages[0].message), /مبيعات الأصناف: غير متوفرة/);
 });
 
 await test("6) نافذة المبيعات لا تطابق آخر 30 يوماً ⇒ لا تنبيه ناقص", () => {
@@ -252,7 +263,7 @@ await test("6) نافذة المبيعات لا تطابق آخر 30 يوماً 
   const r = engine.buildStockAlerts({ stockReport: tenStock({ 1: 0 }), salesReport: short, now: NOW });
   assert.equal(r.status, "stale");
   assert.equal(r.alerts.length, 0);
-  assert.match(r.messages[0].message, /مبيعات الأصناف: لا تطابق نافذة آخر 30 يوماً/);
+  assert.match(plain(r.messages[0].message), /مبيعات الأصناف: لا تطابق نافذة آخر 30 يوماً/);
   assert.equal(r.messages[0].dedupeKey, "stock-priority:stale:sales-window_mismatch");
 });
 
@@ -285,9 +296,12 @@ await test("7) رسالة طويلة تُقسم تحت حد notify_telegram بم
   assert.ok(r.messages.length > 1);
   assert.ok(r.messages.every((m) => m.message.length <= engine.CONFIG.maxMessageChars));
   assert.equal(new Set(r.messages.map((m) => m.dedupeKey)).size, r.messages.length);
-  const allLines = r.messages.flatMap((m) => m.message.split("\n").filter((l) => l.startsWith("•")));
-  assert.equal(allLines.length, 200);
-  assert.ok(allLines[0].startsWith("• أولوية 1 من 200"));
+  // لا تُشطر بطاقة صنف بين رسالتين: 200 بطاقة كاملة بستة أسطر، بالترتيب.
+  const allCards = r.messages.flatMap((m) => cards(m.message));
+  assert.equal(allCards.length, 200);
+  assert.ok(allCards.every((card) => card.split("\n").length === 6));
+  assert.deepEqual(allCards.map((card) => Number(card.match(/^الأولوية: (\d+) من 200$/m)[1])), Array.from({ length: 200 }, (_, i) => i + 1));
+  r.messages.forEach((m, i) => assert.ok(plain(m.message).startsWith(`⚠️ أصناف مهمة قاربت النفاد (${i + 1}/${r.messages.length})\n`)));
 });
 
 await test("الحتمية: نفس المدخلات بترتيب مختلف ⇒ نفس الناتج", () => {
@@ -391,7 +405,7 @@ await test("المُشغِّل: --send يستدعي notify_telegram بمفتاح
   assert.equal(body.p_event_type, "stock_low");
   assert.match(body.p_dedupe_key, /^stock-priority:/);
   assert.equal(body.p_dedupe_minutes, 360);
-  assert.match(body.p_message, /أولوية 1 من 5/);
+  assert.match(plain(body.p_message), /^الأولوية: 1 من 5$/m);
 });
 
 await test("المُشغِّل: مصدر قديم ⇒ يرسل رسالة التقادم وحدها", async () => {
@@ -399,7 +413,7 @@ await test("المُشغِّل: مصدر قديم ⇒ يرسل رسالة الت
   const out = await run({ env, argv: ["--send"], fetchImpl: fake.impl, now: NOW, log: () => {} });
   assert.equal(out.result.status, "stale");
   const body = JSON.parse(fake.calls.find((c) => c.url.includes("/rpc/")).init.body);
-  assert.match(body.p_message, /أرصدة المخزون: غير متوفرة/);
+  assert.match(plain(body.p_message), /أرصدة المخزون: غير متوفرة/);
 });
 
 await test("المُشغِّل: فشل notify_telegram يُسقط التشغيل بخطأ ظاهر", async () => {
@@ -432,6 +446,7 @@ async function runEdge({ header = "tok-stock", stored = "tok-stock", stock = ten
   });
   assert.equal(diagnostics.length, 0, "الدالة تُترجم بلا أخطاء صياغة");
   const engineSource = readFileSync("supabase/functions/_shared/stock-alert-priority.js", "utf8");
+  const formatSource = readFileSync("supabase/functions/_shared/telegram-format.js", "utf8");
   const bySource = { ameen_sql_agent: stock, ameen_item_sales: sales };
   const calls = { rpc: [], runs: [], tables: [] };
   const from = (table) => {
@@ -470,6 +485,7 @@ async function runEdge({ header = "tok-stock", stored = "tok-stock", stock = ten
   });
   context.globalThis = context;
   context.require = (specifier) => {
+    if (specifier === "../_shared/telegram-format.js") { vm.runInContext(formatSource, context); return {}; }
     if (specifier === "../_shared/stock-alert-priority.js") { vm.runInContext(engineSource, context); return {}; }
     if (specifier.startsWith("npm:@supabase/supabase-js")) return { createClient: () => ({ from, rpc }) };
     throw new Error(`استيراد غير متوقع ${specifier}`);
@@ -488,7 +504,7 @@ await test("pg_cron: نسخة الخادم من المحرك تطابق src/stoc
   assert.equal(readFileSync("supabase/functions/_shared/stock-alert-priority.js", "utf8"), readFileSync("src/stock-alert-priority.js", "utf8"),
     "شغّل: cp src/stock-alert-priority.js supabase/functions/_shared/");
   const fn = readFileSync("supabase/functions/stock-priority-alert/index.ts", "utf8");
-  assert.match(fn, /import "\.\.\/_shared\/stock-alert-priority\.js";/);
+  assert.match(fn, /import "\.\.\/_shared\/telegram-format\.js";\nimport "\.\.\/_shared\/stock-alert-priority\.js";/, "المنسِّق يُحمَّل قبل المحرك");
   assert.match(fn, /buildStockAlerts\(/, "الخطة من المحرك لا من حساب ثانٍ");
   assert.match(fn, /sameToken\(req\.headers\.get\("x-ozk-stock-alert-token"\)/);
   assert.doesNotMatch(fn, /AmnDb00|AMEEN_SQL|mssql|tedious|sqlcmd|ameen_warehouse_stock_reports/i, "لا وصول للأمين ولا لتقارير المستودعات");
@@ -523,7 +539,7 @@ await test("pg_cron: dryRun لا يرسل، ومصدر قديم ⇒ رسالة �
   assert.equal(dry.calls.rpc.length, 0);
   const stale = await runEdge({ stock: null });
   assert.equal(stale.body.status, "stale");
-  assert.match(stale.calls.rpc[0].args.p_message, /أرصدة المخزون: غير متوفرة/);
+  assert.match(plain(stale.calls.rpc[0].args.p_message), /أرصدة المخزون: غير متوفرة/);
   const failed = await runEdge({ notifyError: { message: "x" } });
   assert.equal(failed.status, 500);
   assert.equal(failed.body.error, "notify_failed");

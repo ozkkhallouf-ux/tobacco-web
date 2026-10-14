@@ -10,6 +10,7 @@
 // لا يقرأ الأمين ولا يكتب فيه، ولا يكتب على أي جدول غير telegram_outbox (عبر الدالة).
 // بلا --send يعمل تجريبياً: يطبع أعداداً فقط (لا أسماء أصناف في سجل CI).
 // ============================================================================
+import "../src/telegram-format.js";
 import "../src/stock-alert-priority.js";
 
 const engine = globalThis.ozkStockAlertPriority;

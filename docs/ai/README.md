@@ -38,6 +38,7 @@
 - [مزامنة الأمين](topics/ameen-sync.md)
 - [الطباعة والفواتير](topics/printing.md)
 - [الإشعارات والنشر](topics/notifications-deployment.md)
+- [تنسيق تنبيهات تيليغرام](topics/telegram-alert-format.md)
 - [بوابة نشر Windows](topics/windows-deploy-gate.md)
 - [تعاون Slack وGitHub والوكلاء](topics/collaboration-workflow.md)
 
