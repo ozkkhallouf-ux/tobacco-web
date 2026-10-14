@@ -426,6 +426,34 @@ export const OTHER_PR_WORKFLOW = 'pull_request-workflow';
 
 const OTHER_PR_ACTIONS = new Set(['opened', 'synchronize', 'reopened']);
 
+const GATE_ON_HEAD = Object.freeze({ workflow: GATE_WORKFLOW, onHeadSha: true, dispatchesGate: false });
+const GATE_OFF_HEAD = Object.freeze({ workflow: GATE_WORKFLOW, onHeadSha: false, dispatchesGate: false });
+const VIA_DISPATCH = Object.freeze({ workflow: GATE_DISPATCH_WORKFLOW, onHeadSha: true, dispatchesGate: true });
+
+// جدول التوجيه: المفتاح "event/action" (أو "event/*" لأي action). يطابق on: في الملفين.
+const ROUTES = Object.freeze({
+  legacy: {
+    'pull_request_target/opened': GATE_ON_HEAD,
+    'pull_request_target/synchronize': GATE_ON_HEAD,
+    'pull_request_target/reopened': GATE_ON_HEAD,
+    'pull_request_target/ready_for_review': GATE_ON_HEAD,
+    'pull_request_review/submitted': GATE_ON_HEAD,
+    'pull_request_review_comment/created': GATE_ON_HEAD,
+    'issue_comment/created': GATE_OFF_HEAD,
+    'workflow_dispatch/*': GATE_OFF_HEAD,
+  },
+  current: {
+    'pull_request_target/opened': GATE_ON_HEAD,
+    'pull_request_target/synchronize': GATE_ON_HEAD,
+    'pull_request_target/reopened': VIA_DISPATCH,
+    'pull_request_target/ready_for_review': VIA_DISPATCH,
+    'pull_request_review/submitted': VIA_DISPATCH,
+    'pull_request_review_comment/created': VIA_DISPATCH,
+    'issue_comment/created': GATE_OFF_HEAD,
+    'workflow_dispatch/*': GATE_OFF_HEAD,
+  },
+});
+
 /**
  * أي workflow يستقبل الحدث، وهل ينشئ suite على head_sha للـPR.
  * design='legacy' ⇒ التوزيع قبل الإصلاح؛ 'current' ⇒ بعده (يطابق on: في الملفين، ويفرضه
@@ -434,26 +462,30 @@ const OTHER_PR_ACTIONS = new Set(['opened', 'synchronize', 'reopened']);
  * @returns {{ workflow: string, onHeadSha: boolean, dispatchesGate: boolean } | null}
  */
 export function routeGateEvent({ eventName, action = null, design = 'current' }) {
-  const gateOnHead = { workflow: GATE_WORKFLOW, onHeadSha: true, dispatchesGate: false };
-  const gateOffHead = { workflow: GATE_WORKFLOW, onHeadSha: false, dispatchesGate: false };
-  const viaDispatch = { workflow: GATE_DISPATCH_WORKFLOW, onHeadSha: true, dispatchesGate: true };
-  const isReview =
-    (eventName === 'pull_request_review' && action === 'submitted') ||
-    (eventName === 'pull_request_review_comment' && action === 'created');
+  const table = ROUTES[design];
+  if (!table) throw new Error(`design غير معروف: ${design}`);
+  return table[`${eventName}/${action}`] || table[`${eventName}/*`] || null;
+}
 
-  if (eventName === 'issue_comment') return action === 'created' ? gateOffHead : null;
-  if (eventName === 'workflow_dispatch') return gateOffHead;
-
-  if (design === 'legacy') {
-    if (eventName === 'pull_request_target' && ['opened', 'synchronize', 'reopened', 'ready_for_review'].includes(action)) {
-      return gateOnHead;
-    }
-    return isReview ? gateOnHead : null;
+// suites التي ينشئها حدث واحد على head_sha، بترتيب إنشائها (السباق يحدده firstOnHead).
+function suitesCreatedBy(event, route, firstOnHead) {
+  const created = [];
+  if (route?.onHeadSha) created.push(route.workflow);
+  if (event.eventName === 'pull_request_target' && OTHER_PR_ACTIONS.has(event.action)) {
+    if (firstOnHead === 'other') created.unshift(OTHER_PR_WORKFLOW);
+    else created.push(OTHER_PR_WORKFLOW);
   }
+  return created;
+}
 
-  if (eventName === 'pull_request_target' && (action === 'opened' || action === 'synchronize')) return gateOnHead;
-  if (eventName === 'pull_request_target' && (action === 'reopened' || action === 'ready_for_review')) return viaDispatch;
-  return isReview ? viaDispatch : null;
+function isFreshShaEvent(event) {
+  return event?.eventName === 'pull_request_target' && (event.action === 'opened' || event.action === 'synchronize');
+}
+
+// الـcheck-run يُحتسب فقط إن كانت suite التي يسكنها هي الأحدث لنفس الـworkflow (ب).
+function isLatestSuiteOfItsWorkflow(suites, suite) {
+  if (!suite) return false;
+  return suites.every((s) => s.workflow !== suite.workflow || s.id <= suite.id);
 }
 
 /**
@@ -464,47 +496,25 @@ export function routeGateEvent({ eventName, action = null, design = 'current' })
  * @param {{ design?: 'legacy' | 'current', firstOnHead?: 'gate' | 'other', events: Array<{ eventName: string, action?: string }> }} input
  */
 export function simulateGateOnHead({ design = 'current', firstOnHead = 'gate', events = [] }) {
-  const first = events[0];
-  if (!first || first.eventName !== 'pull_request_target' || !['opened', 'synchronize'].includes(first.action)) {
+  if (!isFreshShaEvent(events[0])) {
     throw new Error('أول حدث على sha جديد يجب أن يكون pull_request_target opened/synchronize');
   }
   const suites = [];
-  let nextId = 1;
   let canonicalSuiteId = null;
-  const addSuite = (workflow) => {
-    suites.push({ id: nextId, workflow });
-    nextId += 1;
-  };
-  const evaluateGate = () => {
-    // أول كتابة POST توضع في أقدم suite على الـsha (أ)؛ كل كتابة لاحقة PATCH في مكانها.
-    if (canonicalSuiteId === null) canonicalSuiteId = Math.min(...suites.map((s) => s.id));
-  };
 
   for (const event of events) {
     if (event.eventName === 'rerun') {
       if (canonicalSuiteId === null) throw new Error('لا تشغيل سابق لإعادته');
-      evaluateGate();
-      continue;
+      continue; // نفس الـsuite ونفس الـcheck-run (PATCH في مكانه).
     }
     const route = routeGateEvent({ ...event, design });
-    const othersRun = event.eventName === 'pull_request_target' && OTHER_PR_ACTIONS.has(event.action);
-    const onHead = [];
-    if (route?.onHeadSha) onHead.push(route.workflow);
-    if (othersRun) onHead.push(OTHER_PR_WORKFLOW);
-    // ترتيب إنشاء suites الحدث الواحد يحدده السباق: الطرف المسمّى firstOnHead أولاً.
-    onHead.sort((a, b) => Number(b === OTHER_PR_WORKFLOW) - Number(a === OTHER_PR_WORKFLOW));
-    if (firstOnHead === 'gate') onHead.reverse();
-    for (const workflow of onHead) addSuite(workflow);
-    if (route && (route.workflow === GATE_WORKFLOW || route.dispatchesGate)) evaluateGate();
+    for (const workflow of suitesCreatedBy(event, route, firstOnHead)) {
+      suites.push({ id: suites.length + 1, workflow });
+    }
+    // أول تقييم للـGate على هذا الـsha يُنشئ الـcheck-run في أقدم suite (أ)؛ ما بعده PATCH.
+    if (route && canonicalSuiteId === null) canonicalSuiteId = suites[0].id;
   }
 
   const canonicalSuite = suites.find((s) => s.id === canonicalSuiteId) || null;
-  const latestOfWorkflow = canonicalSuite
-    ? Math.max(...suites.filter((s) => s.workflow === canonicalSuite.workflow).map((s) => s.id))
-    : null;
-  return {
-    suites,
-    canonicalSuite,
-    visible: Boolean(canonicalSuite) && canonicalSuite.id === latestOfWorkflow,
-  };
+  return { suites, canonicalSuite, visible: isLatestSuiteOfItsWorkflow(suites, canonicalSuite) };
 }
