@@ -23,7 +23,8 @@ const RLM = "\u200F";
 const LRI = "\u2066";
 const FSI = "\u2068";
 const PDI = "\u2069";
-const BIDI_RE = /[\u200E\u200F\u202A-\u202E\u2066-\u2069]/gu;
+// بلا العلم g: يُستعمل مع .test() وحده، والعلم g يجعل lastIndex حالة بين الاستدعاءات.
+const BIDI_RE = /[\u200E\u200F\u202A-\u202E\u2066-\u2069]/u;
 
 // عزل متوازن: كل LRI/FSI يُغلق بـPDI في السطر نفسه.
 function assertBalancedIsolates(message) {
