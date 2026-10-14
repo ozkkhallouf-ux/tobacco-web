@@ -18,6 +18,7 @@
 //
 // المخرجات أوصاف رسائل فقط: { eventType, message, dedupeKey, cooldownMinutes }.
 // الإرسال في scripts/stock-priority-alerts.mjs عبر notify_telegram (منع التكرار هناك).
+// نص الرسالة بالتنسيق الموحّد src/telegram-format.js (يُحمَّل قبل هذا الملف).
 // التوثيق: docs/ai/topics/stock-priority-alerts.md
 // ============================================================================
 (function () {
@@ -322,7 +323,16 @@
     return `${formatNumber(stockQty)} ${unit1}`;
   }
 
+  // التنسيق الموحّد (src/telegram-format.js): نص عادي آمن، RTL، أرقام معزولة.
+  // يُحمَّل قبل هذا الملف في كل مستهلك؛ غيابه خطأ صريح لا رسالة بتنسيق آخر.
+  function tg() {
+    const format = typeof globalThis !== "undefined" ? globalThis.ozkTelegramFormat : null;
+    if (!format) throw new Error("telegram_format_unavailable");
+    return format;
+  }
+
   function staleMessage(problems, sources, config) {
+    const f = tg();
     const label = { stock: "أرصدة المخزون", sales: "مبيعات الأصناف" };
     const reason = {
       missing: "غير متوفرة",
@@ -330,43 +340,28 @@
       missing_as_of: "بلا وقت مزامنة",
       stale: null,
       no_reference_day: "بلا يوم مرجع",
-      window_mismatch: `لا تطابق نافذة آخر ${config.windowDays} يوماً`
+      window_mismatch: `لا تطابق نافذة آخر ${f.num(config.windowDays, 0)} يوماً`
     };
     const lines = problems.map((problem) => {
       const source = sources?.[problem.kind];
       const why = reason[problem.code] ?? (source && source.ageMinutes !== null
-        ? `قديمة (عمرها ${formatNumber(source.ageMinutes, 0)} دقيقة، الحد ${source.maxAgeMinutes})`
+        ? `قديمة (عمرها ${f.num(source.ageMinutes, 0)} دقيقة، الحد ${f.num(source.maxAgeMinutes, 0)})`
         : "قديمة");
-      return `• ${label[problem.kind]}: ${why}`;
+      return f.line(`• ${label[problem.kind]}: ${why}`);
     });
     const code = problems.map((p) => `${p.kind}-${p.code}`).sort().join("+");
+    const [message] = f.composeMessages({
+      title: "⏳ تنبيهات النفاد متوقفة",
+      intro: [f.field("السبب", "البيانات قديمة أو ناقصة"), ...lines],
+      footer: [f.line("لن يُرسل تنبيه ناقص حتى تتحدث المزامنة.")],
+      maxChars: config.maxMessageChars
+    });
     return {
       eventType: "stock_low",
-      message: ["⏳ تنبيهات النفاد متوقفة: البيانات قديمة أو ناقصة", ...lines, "لن يُرسل تنبيه ناقص حتى تتحدث المزامنة."].join("\n"),
+      message,
       dedupeKey: `stock-priority:stale:${code}`,
       cooldownMinutes: config.staleCooldownMinutes
     };
-  }
-
-  function chunkMessages(header, lines, footer, maxChars) {
-    const parts = [];
-    let current = [];
-    let size = 0;
-    for (const line of lines) {
-      if (current.length && size + line.length + 1 > maxChars - header.length - 40) {
-        parts.push(current);
-        current = [];
-        size = 0;
-      }
-      current.push(line);
-      size += line.length + 1;
-    }
-    if (current.length) parts.push(current);
-    return parts.map((part, index) => {
-      const head = parts.length > 1 ? `${header} (${index + 1}/${parts.length})` : header;
-      const tail = index === parts.length - 1 && footer ? [footer] : [];
-      return [head, ...part, ...tail].join("\n");
-    });
   }
 
   function classifyItem(item, stock, threshold, config) {
@@ -391,19 +386,50 @@
       coverageDays: round(coverageDays, 1),
       priorityRank: item.priorityRank,
       priorityTotal: item.priorityTotal,
+      unit1Name: stock.unit1Name || "كروز",
+      unit2Name: unit2Name || "كرتونة",
       stockLabel: stockLabel(stock.stockQty, factor, stock.unit1Name, unit2Name),
       soldLabel: stockLabel(item.netQty, factor, stock.unit1Name, unit2Name)
     };
   }
 
+  // بطاقة صنف: عنوان (الحالة + الاسم)، ثم الأولوية والرصيد بوحدته والكمية المكافئة
+  // وأيام التغطية كلٌّ بسطر. لا حساب هنا — القيم كما أخرجها classifyItem.
+  const STATUS = Object.freeze({
+    out: Object.freeze({ icon: "🔴", label: "نافد" }),
+    low: Object.freeze({ icon: "🟠", label: "قريب من النفاد" })
+  });
+
+  function alertCard(alert, f) {
+    const status = STATUS[alert.status];
+    const factor = alert.unit2Factor;
+    const hasCarton = Boolean(factor && factor > 1);
+    const unit1 = f.clean(alert.unit1Name, 24);
+    const unit2 = f.clean(alert.unit2Name, 24);
+    return [
+      f.line(`${status.icon} ${f.name(alert.name)}`),
+      f.field("الحالة", status.label),
+      f.field("الأولوية", `${f.num(alert.priorityRank, 0)} من ${f.num(alert.priorityTotal, 0)}`),
+      f.field("الرصيد", `${f.num(alert.stockQty, hasCarton ? 0 : 1)} ${unit1}`),
+      hasCarton ? f.field("يعادل", `${f.num(alert.stockQty / factor)} ${unit2}`) : null,
+      f.field("يكفي", alert.status === "out" ? `${f.num(0, 0)} يوم` : `${f.num(alert.coverageDays)} يوم`)
+    ].filter(Boolean);
+  }
+
   function alertMessages(alerts, total, missingStock, config) {
-    const header = `⚠️ أصناف مهمة قاربت النفاد: ${alerts.length} من ${total} صنفاً مهماً\nالأهمية = صافي مبيع آخر ${config.windowDays} يوماً`;
-    const lines = alerts.map((alert) => {
-      const days = alert.status === "out" ? "يكفي 0 يوم (نفد)" : `يكفي ${formatNumber(alert.coverageDays)} يوم`;
-      return `• أولوية ${alert.priorityRank} من ${alert.priorityTotal} — ${alert.name} — الرصيد ${alert.stockLabel} — ${days}`;
+    const f = tg();
+    const outCount = alerts.filter((alert) => alert.status === "out").length;
+    const texts = f.composeMessages({
+      title: "⚠️ أصناف مهمة قاربت النفاد",
+      intro: [
+        f.field("العدد", `${f.num(alerts.length, 0)} من ${f.num(total, 0)} صنفاً مهماً`),
+        f.line(`🔴 نافد: ${f.num(outCount, 0)}  ·  🟠 قريب: ${f.num(alerts.length - outCount, 0)}`),
+        f.line(`الترتيب حسب الأولوية (صافي مبيع آخر ${f.num(config.windowDays, 0)} يوماً)`)
+      ],
+      blocks: alerts.map((alert) => alertCard(alert, f)),
+      footer: missingStock ? [f.line(`ℹ️ ${f.num(missingStock, 0)} صنف مهم بلا رصيد مطابق في تقرير المخزون`)] : [],
+      maxChars: config.maxMessageChars
     });
-    const footer = missingStock ? `ℹ️ ${missingStock} صنف مهم بلا رصيد مطابق في تقرير المخزون` : "";
-    const texts = chunkMessages(header, lines, footer, config.maxMessageChars);
     const signature = fingerprint(alerts.map((alert) => `${alert.key}=${alert.status}`).sort().join("|"));
     return texts.map((message, index) => ({
       eventType: "stock_low",

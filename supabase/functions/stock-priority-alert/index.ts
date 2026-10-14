@@ -13,6 +13,7 @@
 // نتيجة كل تشغيل مجدول تُسجَّل (record_stock_priority_alert_run) لمراقب الهجرة نفسها.
 // لا وصول لقاعدة الأمين: المصادر تقارير Supabase المزامَنة. ولا أسماء أصناف في الرد.
 // ============================================================================
+import "../_shared/telegram-format.js";
 import "../_shared/stock-alert-priority.js";
 import { createClient } from "npm:@supabase/supabase-js@2.57.4";
 

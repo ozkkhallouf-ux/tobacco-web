@@ -111,6 +111,7 @@ export const CHECKS = [
   'check-stock-alert-priority.mjs',
   'check-stock-qty-net-calc.mjs',
   'check-telegram-delivery-observability.mjs',
+  'check-telegram-format.mjs',
   'check-telegram-grok-ask.mjs',
   'check-warehouse-stock-prune.mjs',
   'check-windows-deploy-gate.mjs',

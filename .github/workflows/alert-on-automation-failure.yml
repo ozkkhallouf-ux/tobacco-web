@@ -72,8 +72,11 @@ jobs:
             exit 1
           fi
 
-          MESSAGE=$(printf '🚨 عطل GitHub Actions (%s): %s\nالفرع: %s\nالمحاولة: %s\nالرابط: %s' \
-            "$CONCLUSION" "$WF_NAME" "$BRANCH" "$RUN_ATTEMPT" "$RUN_URL")
+          # التنسيق الموحّد (docs/ai/topics/telegram-alert-format.md): عنوان ثم سطر لكل حقل
+          # يبدأ بتسمية عربية، فيبقى اتجاه كل سطر من اليمين ولو كانت القيمة لاتينية.
+          # نص عادي بلا parse_mode، فلا تهريب لازم لاسم سير العمل أو الفرع.
+          MESSAGE=$(printf '🚨 فشل أتمتة GitHub Actions\nسير العمل: %s\nالنتيجة: %s\nالفرع: %s\nالمحاولة: %s\nالرابط: %s' \
+            "$WF_NAME" "$CONCLUSION" "$BRANCH" "$RUN_ATTEMPT" "$RUN_URL")
 
           PAYLOAD=$(jq -n \
             --arg event_type "github_actions_failure" \
