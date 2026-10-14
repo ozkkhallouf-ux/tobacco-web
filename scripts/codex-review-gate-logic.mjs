@@ -410,3 +410,116 @@ export function planReconciliation({
   const idsToPatch = matching.filter((cr) => !checkRunMatchesTarget(cr, target)).map((cr) => cr.id);
   return { target, matchingIds: matching.map((cr) => cr.id), idsToPatch };
 }
+
+// ⚠️ إصلاح جوهري ثاني عشر بتاريخ 2026-10-14 (check-run كانوني محبوس داخل suite مُستبدَلة —
+//   PR #319). التفاصيل في رأس codex-review-gate.yml وcodex-review-gate-dispatch.yml.
+//   ما يلي نموذج قابل للاختبار لسلوك GitHub كما رُصد عبر الـAPI، لا توثيق رسمي منه:
+//     (أ) POST /check-runs بـGITHUB_TOKEN يضع الـcheck-run في أقدم suite لتطبيق github-actions
+//         على ذلك الـsha (أصغر id) — رُصد على #315 و#318 و#319.
+//     (ب) صفحة الـPR والـruleset يعتمدان أحدث suite لكل workflow على الـsha؛ suite أقدم لنفس
+//         الـworkflow مُستبدَلة وما فيها لا يُحتسب ("Waiting for status to be reported").
+
+export const GATE_WORKFLOW = 'codex-review-gate.yml';
+export const GATE_DISPATCH_WORKFLOW = 'codex-review-gate-dispatch.yml';
+// pull_request_review* تُنفَّذ بنسخة merge ref الـPR، فتذهب إلى ملف بلا صلاحيات يُطلق المصالح
+// (بنسخة main) بـworkflow_run — لا إلى المُرسِل الحامل لـactions: write (Codex P1 على #321).
+export const GATE_REVIEW_SIGNAL_WORKFLOW = 'codex-review-gate-review-signal.yml';
+// سير عمل pull_request عادي (check.yml وغيره): أنواعه الافتراضية opened/synchronize/reopened.
+export const OTHER_PR_WORKFLOW = 'pull_request-workflow';
+
+const OTHER_PR_ACTIONS = new Set(['opened', 'synchronize', 'reopened']);
+
+const GATE_ON_HEAD = Object.freeze({ workflow: GATE_WORKFLOW, onHeadSha: true, dispatchesGate: false });
+const GATE_OFF_HEAD = Object.freeze({ workflow: GATE_WORKFLOW, onHeadSha: false, dispatchesGate: false });
+const VIA_DISPATCH = Object.freeze({ workflow: GATE_DISPATCH_WORKFLOW, onHeadSha: true, dispatchesGate: true });
+// المصالح يحدّث الـcheck-run الكانوني في مكانه (PATCH) ولا يُنشئ suite للـGate على head_sha.
+const VIA_SIGNAL = Object.freeze({ workflow: GATE_REVIEW_SIGNAL_WORKFLOW, onHeadSha: true, dispatchesGate: false });
+
+// جدول التوجيه: المفتاح "event/action" (أو "event/*" لأي action). يطابق on: في الملفين.
+const ROUTES = Object.freeze({
+  legacy: {
+    'pull_request_target/opened': GATE_ON_HEAD,
+    'pull_request_target/synchronize': GATE_ON_HEAD,
+    'pull_request_target/reopened': GATE_ON_HEAD,
+    'pull_request_target/ready_for_review': GATE_ON_HEAD,
+    'pull_request_review/submitted': GATE_ON_HEAD,
+    'pull_request_review_comment/created': GATE_ON_HEAD,
+    'issue_comment/created': GATE_OFF_HEAD,
+    'workflow_dispatch/*': GATE_OFF_HEAD,
+  },
+  current: {
+    'pull_request_target/opened': GATE_ON_HEAD,
+    'pull_request_target/synchronize': GATE_ON_HEAD,
+    'pull_request_target/reopened': VIA_DISPATCH,
+    'pull_request_target/ready_for_review': VIA_DISPATCH,
+    'pull_request_review/submitted': VIA_SIGNAL,
+    'pull_request_review_comment/created': VIA_SIGNAL,
+    'issue_comment/created': GATE_OFF_HEAD,
+    'workflow_dispatch/*': GATE_OFF_HEAD,
+  },
+});
+
+/**
+ * أي workflow يستقبل الحدث، وهل ينشئ suite على head_sha للـPR.
+ * design='legacy' ⇒ التوزيع قبل الإصلاح؛ 'current' ⇒ بعده (يطابق on: في الملفين، ويفرضه
+ * فحص العقد في check-codex-review-gate-logic.mjs).
+ * @param {{ eventName: string, action?: string | null, design?: 'legacy' | 'current' }} input
+ * @returns {{ workflow: string, onHeadSha: boolean, dispatchesGate: boolean } | null}
+ */
+export function routeGateEvent({ eventName, action = null, design = 'current' }) {
+  const table = ROUTES[design];
+  if (!table) throw new Error(`design غير معروف: ${design}`);
+  return table[`${eventName}/${action}`] || table[`${eventName}/*`] || null;
+}
+
+// suites التي ينشئها حدث واحد على head_sha، بترتيب إنشائها (السباق يحدده firstOnHead).
+function suitesCreatedBy(event, route, firstOnHead) {
+  const created = [];
+  if (route?.onHeadSha) created.push(route.workflow);
+  if (event.eventName === 'pull_request_target' && OTHER_PR_ACTIONS.has(event.action)) {
+    if (firstOnHead === 'other') created.unshift(OTHER_PR_WORKFLOW);
+    else created.push(OTHER_PR_WORKFLOW);
+  }
+  return created;
+}
+
+function isFreshShaEvent(event) {
+  return event?.eventName === 'pull_request_target' && (event.action === 'opened' || event.action === 'synchronize');
+}
+
+// الـcheck-run يُحتسب فقط إن كانت suite التي يسكنها هي الأحدث لنفس الـworkflow (ب).
+function isLatestSuiteOfItsWorkflow(suites, suite) {
+  if (!suite) return false;
+  return suites.every((s) => s.workflow !== suite.workflow || s.id <= suite.id);
+}
+
+/**
+ * يحاكي suites الـsha الواحد عبر سلسلة أحداث، ويحدد أين يسكن الـcheck-run الكانوني وهل
+ * يُحتسب. أول حدث يجب أن يكون opened أو synchronize (sha جديد).
+ * firstOnHead: من ينشئ suite أولاً عند ذلك الحدث (سباق): 'gate' (حالة #319) أو 'other' (#318).
+ * الحدث 'rerun' = إعادة تشغيل محاولة لنفس تشغيل الـGate الأول: نفس الـsuite، لا suite جديدة.
+ * @param {{ design?: 'legacy' | 'current', firstOnHead?: 'gate' | 'other', events: Array<{ eventName: string, action?: string }> }} input
+ */
+export function simulateGateOnHead({ design = 'current', firstOnHead = 'gate', events = [] }) {
+  if (!isFreshShaEvent(events[0])) {
+    throw new Error('أول حدث على sha جديد يجب أن يكون pull_request_target opened/synchronize');
+  }
+  const suites = [];
+  let canonicalSuiteId = null;
+
+  for (const event of events) {
+    if (event.eventName === 'rerun') {
+      if (canonicalSuiteId === null) throw new Error('لا تشغيل سابق لإعادته');
+      continue; // نفس الـsuite ونفس الـcheck-run (PATCH في مكانه).
+    }
+    const route = routeGateEvent({ ...event, design });
+    for (const workflow of suitesCreatedBy(event, route, firstOnHead)) {
+      suites.push({ id: suites.length + 1, workflow });
+    }
+    // أول تقييم للـGate على هذا الـsha يُنشئ الـcheck-run في أقدم suite (أ)؛ ما بعده PATCH.
+    if (route && canonicalSuiteId === null) canonicalSuiteId = suites[0].id;
+  }
+
+  const canonicalSuite = suites.find((s) => s.id === canonicalSuiteId) || null;
+  return { suites, canonicalSuite, visible: isLatestSuiteOfItsWorkflow(suites, canonicalSuite) };
+}
