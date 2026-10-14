@@ -195,9 +195,8 @@ try {
     $r = Invoke-OzkAmeenBackup -Execute -NoSlack -LocalRoot $t.Local -ExternalRoot $t.External -StateDir $t.State -Now $fixedNow
     Assert-True ($r.status -eq 'failed' -and $r.external -eq 'failed') 'الحالة failed عند وجود الوجهة'
     Assert-True ([System.IO.File]::ReadAllText($existing) -eq 'ORIGINAL') 'الملف الموجود لم يُمسّ'
-    $again = $null
-    try { $again = Invoke-OzkAmeenBackup -Execute -NoSlack -LocalRoot $t.Local -ExternalRoot $t.External -StateDir $t.State -Now $fixedNow } catch { $again = 'threw' }
-    Assert-True ($again -eq 'threw') 'إعادة التشغيل بنفس الطابع الزمني ترفض مجلد التشغيل الموجود'
+    $again = Invoke-OzkAmeenBackup -Execute -NoSlack -LocalRoot $t.Local -ExternalRoot $t.External -StateDir $t.State -Now $fixedNow
+    Assert-True ($again.status -eq 'failed' -and ((@($again.errors) -join ' ') -match 'مجلد التشغيل موجود')) 'إعادة التشغيل بنفس الطابع الزمني ترفض مجلد التشغيل الموجود (failed لا استثناء صامت)'
     Assert-Throws { New-OzkVerifiedZip $existing @() $t.Local } 'إنشاء zip فوق ملف موجود مرفوض'
 
     Write-Host '== 8) اختلاف SHA256 بعد النقل = فشل =='
@@ -306,6 +305,88 @@ try {
     Assert-True (-not (Test-Path -LiteralPath $t.Local)) 'لا ملفات عند رفض الجهاز'
     $script:HostNameReader = { return 'OZK2026' }
     Assert-Throws { Invoke-OzkAmeenBackup -Cloud -LocalRoot $t.Local -StateDir $t.State } '-Cloud مرفوض في هذا الإصدار'
+
+    Write-Host '== 17ب) لا فشل صامت: كل عطل غير متوقع = failed + تنبيه Telegram + خروج 1 =='
+    $script:Secrets.Clear()
+    function Get-TelegramKeys { if (Test-Path -LiteralPath $notifyLog) { return @(Get-Content -LiteralPath $notifyLog) } return @() }
+    function Reset-Telegram { if (Test-Path -LiteralPath $notifyLog) { Remove-Item -LiteralPath $notifyLog -Force } }
+    $realJsonWriter = $script:JsonWriter
+    $realSpace = $script:FreeSpaceReader
+
+    # (أ) فشل قارئ المساحة نفسه (استثناء، لا نقص مساحة)
+    $t = New-TestRoots 'fault-space'
+    Reset-Telegram; $script:SqlLog.Clear()
+    $script:FreeSpaceReader = { param([string]$Path) throw 'mock: DriveInfo failed' }
+    $r = Invoke-OzkAmeenBackup -Execute -LocalRoot $t.Local -ExternalRoot $t.External -StateDir $t.State -NotifyScript $fakeNotify -Now $fixedNow
+    $script:FreeSpaceReader = $realSpace
+    Assert-True ($r.status -eq 'failed' -and ((@($r.errors) -join ' ') -match 'DriveInfo failed')) 'فشل فحص المساحة ⇒ failed مع الخطأ'
+    Assert-True ($r.notify -eq 'telegram' -and ((Get-TelegramKeys) -contains 'ozk-ameen-backup-failed')) 'فشل فحص المساحة ⇒ تنبيه Telegram'
+    Assert-True ($script:SqlLog.Count -eq 0) 'فشل فحص المساحة ⇒ لا BACKUP'
+    Assert-True (Test-Path -LiteralPath (Join-Path $t.State 'status.json')) 'فشل فحص المساحة ⇒ status.json مكتوب'
+    Assert-True ($script:LockReleased -ge 1) 'القفل يُحرَّر بعد العطل'
+
+    # (ب) فشل كتابة manifest.json
+    $t = New-TestRoots 'fault-manifest'
+    Reset-Telegram
+    $script:JsonWriter = { param([string]$Path, $Object) if ($Path -like '*manifest.json') { throw 'mock: disk full writing manifest' }; & $realJsonWriter $Path $Object }
+    $r = Invoke-OzkAmeenBackup -Execute -LocalRoot $t.Local -ExternalRoot $t.External -StateDir $t.State -NotifyScript $fakeNotify -Now $fixedNow
+    $script:JsonWriter = $realJsonWriter
+    Assert-True ($r.status -eq 'failed' -and ((@($r.errors) -join ' ') -match 'manifest')) 'فشل manifest.json ⇒ failed مع الخطأ'
+    Assert-True ($r.notify -eq 'telegram' -and ((Get-TelegramKeys) -contains 'ozk-ameen-backup-failed')) 'فشل manifest.json ⇒ تنبيه Telegram'
+    Assert-True ((Get-FileCount $t.External) -eq 0) 'فشل manifest.json ⇒ لا نقل للخارجي'
+
+    # (ج) فشل كتابة status.json بعد نسخ ناجح
+    $t = New-TestRoots 'fault-status'
+    Reset-Telegram
+    $script:JsonWriter = { param([string]$Path, $Object) if ($Path -like '*status.json') { throw 'mock: access denied status.json' }; & $realJsonWriter $Path $Object }
+    $r = Invoke-OzkAmeenBackup -Execute -LocalRoot $t.Local -ExternalRoot $t.External -StateDir $t.State -NotifyScript $fakeNotify -Now $fixedNow
+    $script:JsonWriter = $realJsonWriter
+    Assert-True ($r.status -eq 'failed' -and ((@($r.errors) -join ' ') -match 'status\.json')) 'فشل status.json ⇒ failed (المراقبة عمياء)'
+    Assert-True ($r.notify -eq 'telegram' -and ((Get-TelegramKeys) -contains 'ozk-ameen-backup-failed')) 'فشل status.json ⇒ تنبيه Telegram رغم ذلك'
+    Assert-True ($r.external -eq 'ok') 'فشل status.json لا يُلغي نسخة خارجية ناجحة'
+
+    # (د) مجلد الحالة والسجل غير قابل للكتابة إطلاقاً (مسار ملف لا مجلد)
+    $t = New-TestRoots 'fault-statedir'
+    Reset-Telegram
+    $blocker = Join-Path $base 'state-is-a-file'
+    [System.IO.File]::WriteAllText($blocker, 'x')
+    $r = Invoke-OzkAmeenBackup -Execute -LocalRoot $t.Local -ExternalRoot $t.External -StateDir $blocker -NotifyScript $fakeNotify -Now $fixedNow
+    Assert-True ($r.status -eq 'failed' -and $r.notify -eq 'telegram' -and ((Get-TelegramKeys) -contains 'ozk-ameen-backup-failed')) 'السجل وstatus.json غير قابلين للكتابة ⇒ failed + Telegram'
+
+    # (هـ) فشل التنبيه نفسه لا يكسر الإرجاع
+    $t = New-TestRoots 'fault-alert'
+    $badNotify = Join-Path $base 'bad-notify.ps1'
+    [System.IO.File]::WriteAllText($badNotify, 'throw "mock: telegram down"')
+    $script:FreeSpaceReader = { param([string]$Path) throw 'mock: DriveInfo failed' }
+    $r = Invoke-OzkAmeenBackup -Execute -NoSlack -LocalRoot $t.Local -StateDir $t.State -NotifyScript $badNotify -Now $fixedNow
+    $script:FreeSpaceReader = $realSpace
+    Assert-True ($r.status -eq 'failed' -and $r.notify -eq 'none') 'فشل Telegram نفسه ⇒ النتيجة failed تُعاد بلا انهيار'
+
+    Write-Host '== 17ج) رمز الخروج من نقطة الدخول =='
+    $base17 = Join-Path $base 'main'
+    $a = @{ Execute = $true; LocalRoot = (Join-Path $base17 'l1'); StateDir = (Join-Path $base17 's1'); NotifyScript = $fakeNotify; NoSlack = $true }
+    $script:FreeSpaceReader = { param([string]$Path) throw 'mock: DriveInfo failed' }
+    Reset-Telegram
+    $code = Invoke-OzkBackupMain $a
+    $script:FreeSpaceReader = $realSpace
+    Assert-True ($code -eq 1 -and ((Get-TelegramKeys) -contains 'ozk-ameen-backup-failed')) 'عطل داخلي ⇒ خروج 1 مع تنبيه'
+    $a = @{ Execute = $true; LocalRoot = (Join-Path $base17 'l2'); StateDir = (Join-Path $base17 's2'); NotifyScript = $fakeNotify; NoSlack = $true }
+    $code = Invoke-OzkBackupMain $a
+    Assert-True ($code -eq 2) 'نجاح محلي بلا خارجي ⇒ خروج 2'
+    $script:LockHeld = $true
+    $code = Invoke-OzkBackupMain @{ Execute = $true; LocalRoot = (Join-Path $base17 'l3'); StateDir = (Join-Path $base17 's3'); NoSlack = $true }
+    $script:LockHeld = $false
+    Assert-True ($code -eq 3) 'تداخل ⇒ خروج 3'
+    Reset-Telegram
+    $script:HostNameReader = { return 'MacBook-Air-Omar' }
+    $code = Invoke-OzkBackupMain @{ Execute = $true; LocalRoot = (Join-Path $base17 'l4'); StateDir = (Join-Path $base17 's4'); NotifyScript = $fakeNotify; NoSlack = $true }
+    $script:HostNameReader = { return 'OZK2026' }
+    Assert-True ($code -eq 1 -and ((Get-TelegramKeys) -contains 'ozk-ameen-backup-precheck-failed')) 'رفض الجهاز مع -Execute ⇒ خروج 1 وتنبيه precheck'
+    Reset-Telegram
+    $code = Invoke-OzkBackupMain @{ Execute = $false; Databases = @('master'); NotifyScript = $fakeNotify; NoSlack = $true }
+    Assert-True ($code -eq 1 -and (Get-TelegramKeys).Count -eq 0) 'خطأ إعداد في DryRun ⇒ خروج 1 بلا أي رسالة'
+    $code = Invoke-OzkBackupMain @{ LocalRoot = (Join-Path $base17 'l5'); StateDir = (Join-Path $base17 's5') }
+    Assert-True ($code -eq 0) 'DryRun ⇒ خروج 0'
 
     Write-Host '== 18) فحص ساكن: لا حذف ولا استبدال ولا كشف أسرار في السكربتين =='
     foreach ($p in @($scriptPath, $registerPath)) {

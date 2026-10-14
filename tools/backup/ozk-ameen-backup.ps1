@@ -141,6 +141,15 @@ $script:SecretReader = {
     return $v
 }
 
+# يكتب JSON إلى ملف (manifest.json وstatus.json).
+$script:JsonWriter = {
+    param([string]$Path, $Object)
+    $dir = Split-Path -Parent $Path
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+    $json = $Object | ConvertTo-Json -Depth 6
+    [System.IO.File]::WriteAllText($Path, $json, (New-Object System.Text.UTF8Encoding($false)))
+}
+
 # ---------- دوال صرفة ----------
 
 # Join-Path يتحقق من وجود حرف القرص؛ Combine لا، فيعمل DryRun على أي جهاز.
@@ -255,16 +264,18 @@ function Write-OzkLog([string]$StateDir, [string]$Message) {
     $line = '{0} {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Message
     Write-Host $line
     if (-not $StateDir) { return }
-    $logDir = Join-OzkPath $StateDir 'logs'
-    if (-not (Test-Path -LiteralPath $logDir)) { New-Item -ItemType Directory -Force -Path $logDir | Out-Null }
-    Add-Content -LiteralPath (Join-OzkPath $logDir ('backup-' + (Get-Date -Format 'yyyy-MM') + '.log')) -Value $line -Encoding UTF8
+    # best-effort: فشل كتابة السجل لا يوقف النسخ ولا يكتم التنبيه.
+    try {
+        $logDir = Join-OzkPath $StateDir 'logs'
+        if (-not (Test-Path -LiteralPath $logDir)) { New-Item -ItemType Directory -Force -Path $logDir | Out-Null }
+        Add-Content -LiteralPath (Join-OzkPath $logDir ('backup-' + (Get-Date -Format 'yyyy-MM') + '.log')) -Value $line -Encoding UTF8
+    } catch {
+        Write-Host ('LOG WRITE FAIL: ' + $_.Exception.Message)
+    }
 }
 
 function Write-OzkJson([string]$Path, $Object) {
-    $dir = Split-Path -Parent $Path
-    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
-    $json = $Object | ConvertTo-Json -Depth 6
-    [System.IO.File]::WriteAllText($Path, $json, (New-Object System.Text.UTF8Encoding($false)))
+    & $script:JsonWriter $Path $Object
 }
 
 # ---------- التنبيهات ----------
@@ -335,6 +346,50 @@ function Copy-OzkRunVerified([string]$RunDir, [string]$DestinationDir, $Files) {
     if ($mismatch.Count -gt 0) {
         throw ('SHA256 لا يطابق الأصل بعد النقل: ' + ($mismatch -join ', '))
     }
+}
+
+# ---------- الإنهاء: الحالة والتنبيه دائماً ----------
+
+# يُنهي التشغيل: يحسب الحالة، ويكتب status.json، ويرسل التنبيه، ويسجّل.
+# كل خطوة best-effort مستقلة: فشل كتابة status.json لا يمنع التنبيه، وفشل
+# التنبيه لا يمنع السجل، ولا شيء هنا يرمي استثناءً.
+function Complete-OzkRun($Result, $Errors, [bool]$ForceFailed, [string]$StateDir, [string]$SlackChannel, [string]$SlackTokenEnvVar, [bool]$NoSlack, [string]$NotifyScript) {
+    if ($ForceFailed -or $Result.local -ne 'ok' -or $Result.external -eq 'failed') {
+        $Result.status = 'failed'
+        if ($Result.local -eq 'pending') { $Result.local = 'failed' }
+        if ($Result.external -eq 'pending') { $Result.external = 'skipped' }
+    } elseif ($Result.external -eq 'missing') {
+        $Result.status = 'local-only'
+    } else {
+        $Result.status = 'ok'
+    }
+    $Result.finishedAt = (Get-Date).ToString('o')
+    $Result.errors = @($Errors)
+
+    try {
+        Write-OzkJson (Join-OzkPath $StateDir 'status.json') $Result
+    } catch {
+        [void]$Errors.Add('status.json: ' + $_.Exception.Message)
+        $Result.errors = @($Errors)
+        $Result.status = 'failed'
+        Write-Host ('STATUS WRITE FAIL: ' + $_.Exception.Message)
+    }
+
+    $text = $null
+    try {
+        $text = Format-OzkAlert ([pscustomobject]$Result)
+    } catch {
+        $text = ('🚨 نسخ الأمين الاحتياطي {0}: {1} — {2}' -f $Result.stamp, $Result.status, (@($Errors) -join ' | '))
+    }
+    $key = 'ozk-ameen-backup-' + $Result.status
+    $minutes = $(if ($Result.status -eq 'ok') { 600 } elseif ($Result.status -eq 'local-only') { 1440 } else { 180 })
+    try {
+        $Result.notify = Send-OzkAlert $text $key $minutes $SlackChannel $SlackTokenEnvVar -NoSlack:$NoSlack $NotifyScript
+    } catch {
+        $Result.notify = 'none'
+        Write-Host ('ALERT FAIL: ' + $_.Exception.Message)
+    }
+    Write-OzkLog $StateDir ('RUN ' + $Result.status + ' ' + $Result.stamp + ' notify=' + $Result.notify)
 }
 
 # ---------- التشغيل ----------
@@ -519,43 +574,55 @@ function Invoke-OzkAmeenBackup {
             }
         }
 
-        $result.errors = @($errors)
-        if ($result.local -ne 'ok' -or $result.external -eq 'failed') {
-            $result.status = 'failed'
-        } elseif ($result.external -eq 'missing') {
-            $result.status = 'local-only'
-        } else {
-            $result.status = 'ok'
-        }
-        $result.finishedAt = (Get-Date).ToString('o')
-
-        $text = Format-OzkAlert ([pscustomobject]$result)
-        $key = 'ozk-ameen-backup-' + $result.status
-        $minutes = $(if ($result.status -eq 'ok') { 600 } elseif ($result.status -eq 'local-only') { 1440 } else { 180 })
-        $result.notify = Send-OzkAlert $text $key $minutes $SlackChannel $SlackTokenEnvVar -NoSlack:$NoSlack $NotifyScript
-        Write-OzkJson (Join-OzkPath $StateDir 'status.json') $result
-        Write-OzkLog $StateDir ('RUN ' + $result.status + ' ' + $layout.Stamp + ' notify=' + $result.notify)
+        Complete-OzkRun $result $errors $false $StateDir $SlackChannel $SlackTokenEnvVar ([bool]$NoSlack) $NotifyScript
+    } catch {
+        # أي استثناء غير متوقع (فحص المساحة، إنشاء المجلد، manifest.json، ...) يصبح
+        # نتيجة failed مع status.json وتنبيه، بدل أن يقفز صامتاً إلى المستوى الأعلى.
+        [void]$errors.Add('unexpected: ' + $_.Exception.Message)
+        Write-Host ('UNEXPECTED: ' + $_.Exception.Message)
+        Complete-OzkRun $result $errors $true $StateDir $SlackChannel $SlackTokenEnvVar ([bool]$NoSlack) $NotifyScript
     } finally {
-        & $script:LockReleaser $lock
+        try { & $script:LockReleaser $lock } catch { Write-Host ('LOCK RELEASE FAIL: ' + $_.Exception.Message) }
     }
     return [pscustomobject]$result
 }
 
-if ($MyInvocation.InvocationName -ne '.') {
+# نقطة الدخول: تعيد رمز الخروج. أي فشل قبل القفل (الجهاز، القواعد، -Cloud) مع
+# -Execute يُرسل تنبيهاً best-effort بدل أن ينتهي بطباعة FAIL وحدها.
+function Invoke-OzkBackupMain {
+    param([hashtable]$Arguments)
+    $isExecute = [bool]$Arguments['Execute']
     try {
-        $r = Invoke-OzkAmeenBackup -Execute:$Execute -Databases $Databases -Instance $Instance -LocalRoot $LocalRoot `
-            -ExternalRoot $ExternalRoot -StateDir $StateDir -ExpectedHost $ExpectedHost -NotifyScript $NotifyScript `
-            -LocalMinFreeGB $LocalMinFreeGB -ExternalMinFreeGB $ExternalMinFreeGB -NoCompress:$NoCompress `
-            -SlackChannel $SlackChannel -SlackTokenEnvVar $SlackTokenEnvVar -NoSlack:$NoSlack -Cloud:$Cloud
+        $r = Invoke-OzkAmeenBackup @Arguments
         switch ($r.status) {
-            'dry-run' { exit 0 }
-            'ok' { exit 0 }
-            'local-only' { exit 2 }
-            'skipped-concurrent' { exit 3 }
-            default { exit 1 }
+            'dry-run' { return 0 }
+            'ok' { return 0 }
+            'local-only' { return 2 }
+            'skipped-concurrent' { return 3 }
+            default { return 1 }
         }
     } catch {
         Write-Host ('FAIL: ' + $_.Exception.Message)
-        exit 1
+        if ($isExecute) {
+            try {
+                $text = '🚨 نسخ الأمين الاحتياطي لم يبدأ: ' + $_.Exception.Message
+                $channel = $Arguments['SlackChannel']; if (-not $channel) { $channel = 'C0C1X2E58MT' }
+                $tokenVar = $Arguments['SlackTokenEnvVar']; if (-not $tokenVar) { $tokenVar = 'SLACK_BOT_TOKEN' }
+                [void](Send-OzkAlert $text 'ozk-ameen-backup-precheck-failed' 180 $channel $tokenVar -NoSlack:([bool]$Arguments['NoSlack']) ([string]$Arguments['NotifyScript']))
+            } catch {
+                Write-Host ('ALERT FAIL: ' + $_.Exception.Message)
+            }
+        }
+        return 1
     }
+}
+
+if ($MyInvocation.InvocationName -ne '.') {
+    $code = Invoke-OzkBackupMain @{
+        Execute = [bool]$Execute; Databases = $Databases; Instance = $Instance; LocalRoot = $LocalRoot
+        ExternalRoot = $ExternalRoot; StateDir = $StateDir; ExpectedHost = $ExpectedHost; NotifyScript = $NotifyScript
+        LocalMinFreeGB = $LocalMinFreeGB; ExternalMinFreeGB = $ExternalMinFreeGB; NoCompress = [bool]$NoCompress
+        SlackChannel = $SlackChannel; SlackTokenEnvVar = $SlackTokenEnvVar; NoSlack = [bool]$NoSlack; Cloud = [bool]$Cloud
+    }
+    exit $code
 }
