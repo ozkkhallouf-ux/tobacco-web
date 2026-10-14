@@ -1,0 +1,50 @@
+name: Codex Review Gate — إعادة تقييم على نفس الـHEAD
+
+# ⚠️ إصلاح جوهري ثاني عشر بتاريخ 2026-10-14 — انظر التعليق المقابل في codex-review-gate.yml.
+#
+#   الأحداث هنا لا تغيّر head_sha للـPR: تحويل Draft إلى Ready، إعادة فتح، مراجعة رسمية،
+#   تعليق مراجعة. لو شغّلت codex-review-gate.yml مباشرة لأنشأت له suite ثانية على نفس الـsha
+#   تستبدل الأولى، فيختفي الـcheck-run الكانوني "Codex Review Gate" إن كان يسكنها (حالة
+#   PR #319). لذلك هذا الملف لا يقيّم شيئاً ولا يكتب أي check-run: يطلق الـGate فقط بـ
+#   workflow_dispatch على main، فيعمل الـGate بنسخة main وعلى sha الفرع الافتراضي، ويقيّم
+#   الـHEAD الحيّ للـPR بنفس المنطق والحراس.
+#
+#   suites هذا الملف على head_sha لا تضرّ: الـcheck-run الكانوني يُنشأ عند opened/synchronize
+#   فيوضع في أقدم suite على الـsha، وكل أحداث هذا الملف تأتي بعدها فتُنشئ suites أحدث منها.
+#
+#   الصلاحية الوحيدة actions: write (لازمة لـworkflow_dispatch). لا checks: write ولا
+#   contents: write ولا pull-requests — فنسخة يعدّلها PR (pull_request_review* تُنفّذ نسخة
+#   merge ref) لا تستطيع كتابة نتيجة الـGate. ولا actions/checkout ولا تنفيذ أي كود من الفرع.
+#   PR من fork يحصل على GITHUB_TOKEN للقراءة فقط فيفشل الإطلاق بوضوح، والـGate يبقى pending
+#   حتى تشغيل لاحق (نفس حدود السلوك السابق).
+
+on:
+  pull_request_target:
+    types: [reopened, ready_for_review]
+  pull_request_review:
+    types: [submitted]
+  pull_request_review_comment:
+    types: [created]
+
+permissions:
+  actions: write
+
+jobs:
+  dispatch:
+    name: إطلاق Codex Review Gate على main (لا يحدد نتيجة الـGate)
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.base.ref == 'main'
+    steps:
+      - name: إطلاق الـGate بـworkflow_dispatch على main لرقم هذا الـPR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          case "$PR_NUMBER" in
+            ''|*[!0-9]*) echo "رقم PR غير صالح: $PR_NUMBER" >&2; exit 1 ;;
+          esac
+          gh api --method POST "repos/$REPO/actions/workflows/codex-review-gate.yml/dispatches" \
+            -f ref=main -f "inputs[pr_number]=$PR_NUMBER"
+          echo "أُطلق Codex Review Gate على main للـPR #$PR_NUMBER."

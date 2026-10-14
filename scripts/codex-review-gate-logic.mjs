@@ -410,3 +410,101 @@ export function planReconciliation({
   const idsToPatch = matching.filter((cr) => !checkRunMatchesTarget(cr, target)).map((cr) => cr.id);
   return { target, matchingIds: matching.map((cr) => cr.id), idsToPatch };
 }
+
+// ⚠️ إصلاح جوهري ثاني عشر بتاريخ 2026-10-14 (check-run كانوني محبوس داخل suite مُستبدَلة —
+//   PR #319). التفاصيل في رأس codex-review-gate.yml وcodex-review-gate-dispatch.yml.
+//   ما يلي نموذج قابل للاختبار لسلوك GitHub كما رُصد عبر الـAPI، لا توثيق رسمي منه:
+//     (أ) POST /check-runs بـGITHUB_TOKEN يضع الـcheck-run في أقدم suite لتطبيق github-actions
+//         على ذلك الـsha (أصغر id) — رُصد على #315 و#318 و#319.
+//     (ب) صفحة الـPR والـruleset يعتمدان أحدث suite لكل workflow على الـsha؛ suite أقدم لنفس
+//         الـworkflow مُستبدَلة وما فيها لا يُحتسب ("Waiting for status to be reported").
+
+export const GATE_WORKFLOW = 'codex-review-gate.yml';
+export const GATE_DISPATCH_WORKFLOW = 'codex-review-gate-dispatch.yml';
+// سير عمل pull_request عادي (check.yml وغيره): أنواعه الافتراضية opened/synchronize/reopened.
+export const OTHER_PR_WORKFLOW = 'pull_request-workflow';
+
+const OTHER_PR_ACTIONS = new Set(['opened', 'synchronize', 'reopened']);
+
+/**
+ * أي workflow يستقبل الحدث، وهل ينشئ suite على head_sha للـPR.
+ * design='legacy' ⇒ التوزيع قبل الإصلاح؛ 'current' ⇒ بعده (يطابق on: في الملفين، ويفرضه
+ * فحص العقد في check-codex-review-gate-logic.mjs).
+ * @param {{ eventName: string, action?: string | null, design?: 'legacy' | 'current' }} input
+ * @returns {{ workflow: string, onHeadSha: boolean, dispatchesGate: boolean } | null}
+ */
+export function routeGateEvent({ eventName, action = null, design = 'current' }) {
+  const gateOnHead = { workflow: GATE_WORKFLOW, onHeadSha: true, dispatchesGate: false };
+  const gateOffHead = { workflow: GATE_WORKFLOW, onHeadSha: false, dispatchesGate: false };
+  const viaDispatch = { workflow: GATE_DISPATCH_WORKFLOW, onHeadSha: true, dispatchesGate: true };
+  const isReview =
+    (eventName === 'pull_request_review' && action === 'submitted') ||
+    (eventName === 'pull_request_review_comment' && action === 'created');
+
+  if (eventName === 'issue_comment') return action === 'created' ? gateOffHead : null;
+  if (eventName === 'workflow_dispatch') return gateOffHead;
+
+  if (design === 'legacy') {
+    if (eventName === 'pull_request_target' && ['opened', 'synchronize', 'reopened', 'ready_for_review'].includes(action)) {
+      return gateOnHead;
+    }
+    return isReview ? gateOnHead : null;
+  }
+
+  if (eventName === 'pull_request_target' && (action === 'opened' || action === 'synchronize')) return gateOnHead;
+  if (eventName === 'pull_request_target' && (action === 'reopened' || action === 'ready_for_review')) return viaDispatch;
+  return isReview ? viaDispatch : null;
+}
+
+/**
+ * يحاكي suites الـsha الواحد عبر سلسلة أحداث، ويحدد أين يسكن الـcheck-run الكانوني وهل
+ * يُحتسب. أول حدث يجب أن يكون opened أو synchronize (sha جديد).
+ * firstOnHead: من ينشئ suite أولاً عند ذلك الحدث (سباق): 'gate' (حالة #319) أو 'other' (#318).
+ * الحدث 'rerun' = إعادة تشغيل محاولة لنفس تشغيل الـGate الأول: نفس الـsuite، لا suite جديدة.
+ * @param {{ design?: 'legacy' | 'current', firstOnHead?: 'gate' | 'other', events: Array<{ eventName: string, action?: string }> }} input
+ */
+export function simulateGateOnHead({ design = 'current', firstOnHead = 'gate', events = [] }) {
+  const first = events[0];
+  if (!first || first.eventName !== 'pull_request_target' || !['opened', 'synchronize'].includes(first.action)) {
+    throw new Error('أول حدث على sha جديد يجب أن يكون pull_request_target opened/synchronize');
+  }
+  const suites = [];
+  let nextId = 1;
+  let canonicalSuiteId = null;
+  const addSuite = (workflow) => {
+    suites.push({ id: nextId, workflow });
+    nextId += 1;
+  };
+  const evaluateGate = () => {
+    // أول كتابة POST توضع في أقدم suite على الـsha (أ)؛ كل كتابة لاحقة PATCH في مكانها.
+    if (canonicalSuiteId === null) canonicalSuiteId = Math.min(...suites.map((s) => s.id));
+  };
+
+  for (const event of events) {
+    if (event.eventName === 'rerun') {
+      if (canonicalSuiteId === null) throw new Error('لا تشغيل سابق لإعادته');
+      evaluateGate();
+      continue;
+    }
+    const route = routeGateEvent({ ...event, design });
+    const othersRun = event.eventName === 'pull_request_target' && OTHER_PR_ACTIONS.has(event.action);
+    const onHead = [];
+    if (route?.onHeadSha) onHead.push(route.workflow);
+    if (othersRun) onHead.push(OTHER_PR_WORKFLOW);
+    // ترتيب إنشاء suites الحدث الواحد يحدده السباق: الطرف المسمّى firstOnHead أولاً.
+    onHead.sort((a, b) => Number(b === OTHER_PR_WORKFLOW) - Number(a === OTHER_PR_WORKFLOW));
+    if (firstOnHead === 'gate') onHead.reverse();
+    for (const workflow of onHead) addSuite(workflow);
+    if (route && (route.workflow === GATE_WORKFLOW || route.dispatchesGate)) evaluateGate();
+  }
+
+  const canonicalSuite = suites.find((s) => s.id === canonicalSuiteId) || null;
+  const latestOfWorkflow = canonicalSuite
+    ? Math.max(...suites.filter((s) => s.workflow === canonicalSuite.workflow).map((s) => s.id))
+    : null;
+  return {
+    suites,
+    canonicalSuite,
+    visible: Boolean(canonicalSuite) && canonicalSuite.id === latestOfWorkflow,
+  };
+}

@@ -15,6 +15,10 @@ import {
   deriveCanonicalTarget,
   checkRunMatchesTarget,
   planReconciliation,
+  routeGateEvent,
+  simulateGateOnHead,
+  GATE_WORKFLOW,
+  GATE_DISPATCH_WORKFLOW,
 } from './codex-review-gate-logic.mjs';
 
 // Contract + regression checks for .github/workflows/codex-review-gate.yml —
@@ -27,6 +31,8 @@ const yamlPath = path.join(repoRoot, '.github', 'workflows', 'codex-review-gate.
 const yml = await readFile(yamlPath, 'utf8');
 const reconcileYamlPath = path.join(repoRoot, '.github', 'workflows', 'codex-review-gate-reconcile.yml');
 const reconcileYml = await readFile(reconcileYamlPath, 'utf8');
+const dispatchYamlPath = path.join(repoRoot, '.github', 'workflows', 'codex-review-gate-dispatch.yml');
+const dispatchYml = await readFile(dispatchYamlPath, 'utf8');
 
 // 1) فحص العقد الثابت على نص الـworkflow نفسه: مطابقة pulls/comments يجب أن تعتمد على
 //    original_commit_id (الحقل الثابت أبداً)، ويُمنع تماماً استخدام commit_id القابل
@@ -863,13 +869,198 @@ assert.match(
   'P1 #1 & #2: يجب إضافة workflow_run trigger على "Codex Review Gate" completed — يضمن تصحيح أي حالة خاطئة بعد كل تشغيل للمسار السريع فوراً',
 );
 
+// 13) إصلاح جوهري ثاني عشر (2026-10-14، PR #319): check-run كانوني ناجح محبوس داخل suite
+//     مُستبدَلة ⇒ "Required · Waiting for status to be reported". النموذج في
+//     simulateGateOnHead: POST يوضع في أقدم suite على الـsha، والمحتسَب أحدث suite لكل workflow.
+const OPENED = { eventName: 'pull_request_target', action: 'opened' };
+const SYNCHRONIZE = { eventName: 'pull_request_target', action: 'synchronize' };
+const READY = { eventName: 'pull_request_target', action: 'ready_for_review' };
+const REOPENED = { eventName: 'pull_request_target', action: 'reopened' };
+const REVIEW = { eventName: 'pull_request_review', action: 'submitted' };
+const REVIEW_COMMENT = { eventName: 'pull_request_review_comment', action: 'created' };
+const ISSUE_COMMENT = { eventName: 'issue_comment', action: 'created' };
+const DISPATCH = { eventName: 'workflow_dispatch' };
+const RERUN = { eventName: 'rerun' };
+
+// 13-أ) opened وحده: الـcheck-run يُحتسب في التصميمين وبأي ترتيب سباق.
+for (const design of ['legacy', 'current']) {
+  for (const firstOnHead of ['gate', 'other']) {
+    assert.equal(
+      simulateGateOnHead({ design, firstOnHead, events: [OPENED] }).visible,
+      true,
+      `opened وحده يجب أن يُحتسب (${design}/${firstOnHead})`,
+    );
+  }
+}
+
+// 13-ب) ready_for_review: النموذج يعيد إنتاج #319 (legacy + الـGate فاز بالسباق ⇒ محبوس)
+//       و#318 (legacy + suite أخرى أقدم ⇒ يُحتسب)، والتصميم الحالي يُحتسب في الحالتين.
+const legacyReady = simulateGateOnHead({ design: 'legacy', firstOnHead: 'gate', events: [OPENED, READY] });
+assert.equal(legacyReady.visible, false, 'legacy: opened ثم ready_for_review يجب أن يعيد إنتاج حبس #319');
+assert.equal(legacyReady.canonicalSuite.workflow, GATE_WORKFLOW);
+assert.equal(
+  legacyReady.suites.filter((x) => x.workflow === GATE_WORKFLOW).length,
+  2,
+  'legacy: suiteان للـGate على نفس الـsha — الثانية تستبدل الأولى',
+);
+assert.equal(
+  simulateGateOnHead({ design: 'legacy', firstOnHead: 'other', events: [OPENED, READY] }).visible,
+  true,
+  'legacy: حالة #318 (الـcheck-run في suite سير عمل آخر) تُحتسب — مطابق لما رُصد',
+);
+for (const firstOnHead of ['gate', 'other']) {
+  const fixed = simulateGateOnHead({ design: 'current', firstOnHead, events: [OPENED, READY] });
+  assert.equal(fixed.visible, true, `current: opened ثم ready_for_review يجب أن يُحتسب (${firstOnHead})`);
+  assert.equal(
+    fixed.suites.filter((x) => x.workflow === GATE_WORKFLOW).length,
+    1,
+    'current: suite واحدة فقط للـGate على head_sha مهما تعددت الأحداث',
+  );
+}
+
+// 13-ج) مراجعات Codex الرسمية وتعليقات المراجعة وتعليقات issue وworkflow_dispatch على نفس الـHEAD.
+const busyEvents = [OPENED, REVIEW, REVIEW_COMMENT, REVIEW_COMMENT, ISSUE_COMMENT, READY, DISPATCH];
+assert.equal(
+  simulateGateOnHead({ design: 'legacy', firstOnHead: 'gate', events: busyEvents }).visible,
+  false,
+  'legacy: مراجعة رسمية على نفس الـHEAD تحبس الـcheck-run أيضاً',
+);
+for (const firstOnHead of ['gate', 'other']) {
+  const busy = simulateGateOnHead({ design: 'current', firstOnHead, events: busyEvents });
+  assert.equal(busy.visible, true, `current: سلسلة أحداث كاملة على نفس الـHEAD يجب أن تبقى محتسَبة (${firstOnHead})`);
+  assert.equal(busy.suites.filter((x) => x.workflow === GATE_WORKFLOW).length, 1);
+}
+
+// 13-د) إعادة التشغيل: محاولة ثانية لنفس التشغيل تبقى في نفس الـsuite، وworkflow_dispatch
+//       وissue_comment يعملان على sha الفرع الافتراضي — لا suite جديدة للـGate على الـHEAD.
+assert.equal(
+  simulateGateOnHead({ design: 'current', firstOnHead: 'gate', events: [OPENED, RERUN, DISPATCH, ISSUE_COMMENT] }).visible,
+  true,
+  'current: إعادة التشغيل وdispatch وissue_comment لا تحبس الـcheck-run',
+);
+const attempt1 = runGeneration({ runId: 5001, runAttempt: 1 });
+const attempt2 = runGeneration({ runId: 5001, runAttempt: 2 });
+assert.equal(isStaleWrite({ existingGeneration: attempt1, candidateGeneration: attempt2 }), false, 'محاولة أحدث تكتب');
+assert.equal(isStaleWrite({ existingGeneration: attempt2, candidateGeneration: attempt1 }), true, 'محاولة أقدم ممنوعة');
+// تشغيل dispatch يُنشأ بعد تشغيل opened فـrun_id أكبر ⇒ ليس قديماً، ويكتب فوقه.
+assert.equal(
+  isStaleWrite({ existingGeneration: runGeneration({ runId: 5001 }), candidateGeneration: runGeneration({ runId: 5009 }) }),
+  false,
+);
+
+// 13-هـ) تغيّر الـHEAD: check-run قديم على sha سابق لا يُعاد استعماله ولا تُحتسب مراجعته.
+const PRE_SHA = '6'.repeat(40);
+const POST_SHA = '7'.repeat(40);
+const afterPush = reconcileCanonicalCheckRuns({
+  checkRuns: [{ id: 901, name: 'Codex Review Gate', head_sha: PRE_SHA, external_id: '5001.1' }],
+  headSha: POST_SHA,
+});
+assert.equal(afterPush.winnerId, null, 'check-run الـsha السابق لا يُختار هدفاً للكتابة على الـsha الجديد');
+const dispatchedEval = evaluateCodexReview({
+  headSha: POST_SHA,
+  issueComments: [{ user: { login: BOT }, body: `**Reviewed commit:** \`${PRE_SHA.slice(0, 10)}\`` }],
+});
+assert.equal(dispatchedEval.reviewedCount, 0, 'مراجعة الـsha السابق لا تُحتسب للـHEAD الجديد في المسار المُطلَق بـdispatch');
+assert.equal(
+  buildCanonicalCheckRunPayload({ headSha: POST_SHA, reviewedCount: 0, summary: 's', generation: '5010.1' }).payload.status,
+  'in_progress',
+  'بلا مراجعة على الـHEAD الحالي ⇒ in_progress لا success',
+);
+assert.equal(
+  simulateGateOnHead({ design: 'current', firstOnHead: 'gate', events: [SYNCHRONIZE, READY] }).visible,
+  true,
+  'current: synchronize يبدأ sha جديداً بـsuite جديدة ويُحتسب',
+);
+
+// 13-و) check-run قديم محبوس أصلاً (حالة #319 الحالية): الإصلاح لا يحرّره بأثر رجعي —
+//       إعادة التقييم على نفس الـsha تُحدّثه في مكانه. الخروج الصحيح sha جديد (تحديث الفرع من
+//       main، والـruleset يفرضه أصلاً بـstrict)؛ ومراجعة الـsha السابق تُحتسب فقط إن كان الفارق
+//       merge commits بلا كود جديد.
+const stuck = simulateGateOnHead({ design: 'legacy', firstOnHead: 'gate', events: [OPENED, READY] });
+assert.equal(stuck.visible, false);
+assert.equal(
+  simulateGateOnHead({ design: 'current', firstOnHead: 'gate', events: [SYNCHRONIZE] }).visible,
+  true,
+  'بعد الإصلاح: sha جديد بتحديث الفرع ينشئ check-run محتسَباً',
+);
+assert.equal(isAncestorWithMergesOnly({ compareStatus: 'ahead', nonMergeCount: 0 }), true, 'merge-only يحتفظ بالمراجعة');
+assert.equal(isAncestorWithMergesOnly({ compareStatus: 'ahead', nonMergeCount: 1 }), false, 'أي commit كود جديد يُبطلها');
+
+// 13-ز) حد معروف وموثَّق: إعادة فتح PR على نفس الـsha تعيد تشغيل سير عمل pull_request العادية،
+//       فإن كان الـcheck-run في suite أحدها (حالة #318) يُحبس — في التصميمين. ليس مما يحله هذا
+//       الإصلاح؛ الخروج sha جديد. الاختبار يمنع ادّعاء غير ذلك.
+assert.equal(
+  simulateGateOnHead({ design: 'current', firstOnHead: 'other', events: [OPENED, REOPENED] }).visible,
+  false,
+  'حد موثَّق: reopened على نفس الـsha مع check-run في suite سير عمل pull_request آخر',
+);
+assert.equal(
+  simulateGateOnHead({ design: 'current', firstOnHead: 'gate', events: [OPENED, REOPENED] }).visible,
+  true,
+  'current: reopened لا يُنشئ suite للـGate على الـHEAD',
+);
+
+// 13-ح) التوجيه: الأحداث التي لا تغيّر الـsha لا تشغّل الـGate على الـHEAD إطلاقاً.
+for (const event of [READY, REOPENED, REVIEW, REVIEW_COMMENT]) {
+  const route = routeGateEvent({ ...event, design: 'current' });
+  assert.equal(route.workflow, GATE_DISPATCH_WORKFLOW, `${event.eventName}/${event.action} يمرّ عبر المُرسِل`);
+  assert.equal(route.dispatchesGate, true);
+}
+for (const event of [OPENED, SYNCHRONIZE]) {
+  assert.deepEqual(routeGateEvent({ ...event }), { workflow: GATE_WORKFLOW, onHeadSha: true, dispatchesGate: false });
+}
+for (const event of [ISSUE_COMMENT, DISPATCH]) {
+  assert.equal(routeGateEvent({ ...event }).onHeadSha, false, `${event.eventName} يعمل على sha الفرع الافتراضي`);
+}
+
+// 13-ط) عقد نصّي: on: في الملفين يطابق routeGateEvent حرفياً.
+const stripComments = (source) =>
+  source
+    .split('\n')
+    .filter((line) => !line.trimStart().startsWith('#'))
+    .join('\n');
+const onBlock = (source) => {
+  const m = stripComments(source).match(/^on:\n((?:[ \t]+.*\n|\n)+?)(?=^\S)/m);
+  assert.ok(m, 'كتلة on: مفقودة');
+  return m[1];
+};
+const gateOn = onBlock(yml);
+assert.match(gateOn, /^ {2}pull_request_target:\n {4}types: \[opened, synchronize\]$/m, 'الـGate على head_sha عند opened/synchronize فقط');
+assert.doesNotMatch(gateOn, /pull_request_review|ready_for_review|reopened/, 'ممنوع أي حدث لا يغيّر الـsha في الـGate مباشرة');
+assert.match(gateOn, /^ {2}issue_comment:\n {4}types: \[created\]$/m);
+assert.match(gateOn, /^ {2}workflow_dispatch:\n {4}inputs:\n {6}pr_number:/m, 'المُرسِل يعتمد على مدخل pr_number');
+const dispatchOn = onBlock(dispatchYml);
+assert.match(dispatchOn, /^ {2}pull_request_target:\n {4}types: \[reopened, ready_for_review\]$/m);
+assert.match(dispatchOn, /^ {2}pull_request_review:\n {4}types: \[submitted\]$/m);
+assert.match(dispatchOn, /^ {2}pull_request_review_comment:\n {4}types: \[created\]$/m);
+assert.doesNotMatch(dispatchOn, /opened, synchronize|synchronize|issue_comment|workflow_dispatch/, 'المُرسِل لا يكرر أحداث الـGate');
+
+// 13-ي) عقد أمان المُرسِل: صلاحية actions: write وحدها، لا checkout، لا كتابة check-runs،
+//       والإطلاق إلى codex-review-gate.yml على main برقم PR رقمي فقط.
+const dispatchCode = stripComments(dispatchYml);
+const dispatchPermissions = dispatchCode.match(/^permissions:\n(?:[ \t]+.*\n)+/m);
+assert.ok(dispatchPermissions, 'كتلة permissions مفقودة من المُرسِل');
+assert.equal(dispatchPermissions[0].trimEnd(), 'permissions:\n  actions: write', 'المُرسِل: actions: write وحدها');
+assert.doesNotMatch(dispatchCode, /actions\/checkout|checks:|contents:\s*write|check-runs/, 'المُرسِل لا يقرأ كود الفرع ولا يكتب نتيجة الـGate');
+assert.match(
+  dispatchCode,
+  /repos\/\$REPO\/actions\/workflows\/codex-review-gate\.yml\/dispatches"[\s\S]{0,40}-f ref=main -f "inputs\[pr_number\]=\$PR_NUMBER"/,
+  'المُرسِل يطلق codex-review-gate.yml على main بمدخل pr_number',
+);
+assert.match(dispatchCode, /''\|\*\[!0-9\]\*\) echo "رقم PR غير صالح/, 'رقم الـPR يُتحقق أنه أرقام فقط قبل الإطلاق');
+assert.match(dispatchCode, /if: github\.event\.pull_request\.base\.ref == 'main'/);
+
 // 12) أمان: يُمنع حقن أي تعبير ${{ ... }} داخل كتلة `run:` في الـworkflowين.
 //     GitHub يستبدل التعبير نصياً قبل تسليم الـscript للـshell، فأي قيمة يتحكم بها
 //     مُشغِّل أو مُعلِّق (خصوصاً inputs.pr_number من workflow_dispatch، وbadges/summary
 //     المبنيّة من نص تعليقات المراجعة) تُنفَّذ كشيفرة على الـrunner. المسار الآمن الوحيد:
 //     تمرير القيمة عبر `env:` ثم قراءتها كمتغيّر shell مُقتبَس. مصدر النمط:
 //     Codacy — "Using variable interpolation ${{...}} with github context data in a run: step".
-for (const [label, source] of [['codex-review-gate.yml', yml], ['codex-review-gate-reconcile.yml', reconcileYml]]) {
+for (const [label, source] of [
+  ['codex-review-gate.yml', yml],
+  ['codex-review-gate-reconcile.yml', reconcileYml],
+  ['codex-review-gate-dispatch.yml', dispatchYml],
+]) {
   const lines = source.split('\n');
   const offenders = [];
   // موضع الكلمة `run:` نفسها (لا موضع شرطة القائمة) هو محاذاة الكتلة المرجعية.
