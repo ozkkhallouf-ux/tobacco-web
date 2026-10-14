@@ -3,7 +3,10 @@
 // كل الأسماء والكميات مصطنعة؛ لا بيانات إنتاج، لا شبكة، لا إرسال.
 // ============================================================================
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import "../src/telegram-format.js";
 import "../src/stock-alert-priority.js";
 import { sampleInput } from "./telegram-alert-samples.mjs";
@@ -198,11 +201,200 @@ test("نسخة الخادم من المنسِّق تطابق src بايتاً ب
   assert.match(readFileSync("scripts/stock-priority-alerts.mjs", "utf8"), /import "\.\.\/src\/telegram-format\.js";\nimport "\.\.\/src\/stock-alert-priority\.js";/);
 });
 
-test("تنبيه فشل GitHub Actions: سطر لكل حقل، عنوان أولاً، والقيم الديناميكية في أسطر بتسمية عربية", () => {
-  const wf = readFileSync(".github/workflows/alert-on-automation-failure.yml", "utf8");
-  const fmt = wf.match(/MESSAGE=\$\(printf '([^']+)'/)[1];
-  assert.equal(fmt.split("\\n")[0], "🚨 فشل أتمتة GitHub Actions");
-  for (const label of ["سير العمل", "النتيجة", "الفرع", "المحاولة", "الرابط"]) assert.ok(fmt.includes(`\\n${label}: `), `${label} ناقص`);
+// ── المرحلة A: العملة والوقت والأهمية والتقريب والقصّ الآمن ─────────────────
+
+test("التقريب بعيداً عن الصفر عند النصف وبالتمثيل العشري (يطابق round() في Postgres)", () => {
+  assert.equal(f.num(-2.25), `${LRI}-2.3${PDI}`, "Math.round كان يعطي -2.2");
+  assert.equal(f.num(2.25), `${LRI}2.3${PDI}`);
+  assert.equal(f.num(1.005, 2), `${LRI}1.01${PDI}`, "الفاصلة العائمة كانت تعطي 1");
+  assert.equal(f.num(0.15), `${LRI}0.2${PDI}`);
+  assert.equal(f.num(-0.05), `${LRI}-0.1${PDI}`);
+  assert.equal(f.num(-0.04), `${LRI}0${PDI}`, "لا «-0»");
+  assert.equal(f.num(1e-7, 2), `${LRI}0${PDI}`, "الأس العلمي لا يكسر التقريب");
+  assert.equal(f.num(2.5, 0), `${LRI}3${PDI}`);
+  assert.equal(f.num(-2.5, 0), `${LRI}-3${PDI}`);
+  assert.equal(f.num(1234567890123.456, 2), `${LRI}1,234,567,890,123.46${PDI}`, "لا ### للمبالغ الكبيرة");
+});
+
+test("العملة: الرقم معزولاً ثم الرمز بعده، والسالب لا ينقلب، والرموز المعروفة موحّدة", () => {
+  assert.equal(f.money(1234.5), `${LRI}1,234.5${PDI} $`);
+  assert.equal(f.money(-350000, "SYP", 0), `${LRI}-350,000${PDI} ل.س`);
+  assert.equal(f.money(12.75, "usd"), `${LRI}12.75${PDI} $`);
+  assert.equal(f.money(2.5, "ل.س"), `${LRI}2.5${PDI} ل.س`);
+  assert.equal(f.money(10, "EUR‮"), `${LRI}10${PDI} EUR`, "رمز مجهول يُنظَّف ويُعرض كما هو");
+  assert.equal(f.money(10, ""), `${LRI}10${PDI}`);
+  assert.equal(f.money("x"), `${LRI}—${PDI} $`);
+  assert.equal(f.stripBidi(f.line(`الرصيد: ${f.money(-1250.5)}`)), "الرصيد: -1,250.5 $");
+});
+
+test("الوقت بتوقيت دمشق ومعزول LTR كي لا ينقلب «التاريخ الوقت»", () => {
+  assert.equal(f.time("2026-10-14T20:00:00Z"), `${LRI}2026-10-14 23:00${PDI} (دمشق)`);
+  assert.equal(f.time(new Date("2026-01-01T21:30:00Z")), `${LRI}2026-01-02 00:30${PDI} (دمشق)`, "منتصف الليل وتجاوز اليوم");
+  assert.equal(f.time(Date.UTC(2026, 6, 1, 5, 0)), `${LRI}2026-07-01 08:00${PDI} (دمشق)`, "ms رقمية؛ دمشق UTC+3 صيفاً وشتاءً");
+  assert.equal(f.time("2026-10-14T20:00:00Z", { withZone: false }), `${LRI}2026-10-14 23:00${PDI}`);
+  assert.equal(f.time("2026-10-14T22:30:00Z", { dateOnly: true }), `${LRI}2026-10-15${PDI}`);
+  for (const bad of [null, undefined, "", "غير تاريخ", NaN]) assert.equal(f.time(bad), `${LRI}—${PDI}`);
+  assert.equal(f.TIME_ZONE, "Asia/Damascus");
+});
+
+test("مستوى الأهمية: رمز + تسمية عربية من المفتاح أو التسمية، والمجهول نص منظّف", () => {
+  assert.equal(f.severity("critical"), "🔴 حرج");
+  assert.equal(f.severity("حرج"), "🔴 حرج");
+  assert.equal(f.severity("عالٍ"), "🟠 عالٍ");
+  assert.equal(f.severity("عالي"), "🟠 عالٍ");
+  assert.equal(f.severity("متوسط"), "🟡 متوسط");
+  assert.equal(f.severity("منخفض"), "🔵 منخفض");
+  assert.equal(f.severity("ok"), "🟢 سليم");
+  assert.equal(f.severity("info"), "ℹ️ معلومة");
+  assert.equal(f.severity("طارئ‮"), "طارئ");
+  assert.equal(f.severity(null), "—");
+  assert.ok(Object.isFrozen(f.SEVERITY) && Object.isFrozen(f.SEVERITY.critical));
+});
+
+test("name: حد قصّ اختياري أطول للعناوين، والافتراضي 120 كما هو", () => {
+  const long = "أ".repeat(200);
+  assert.equal(Array.from(f.stripBidi(f.name(long))).length, f.MAX_NAME_CHARS);
+  assert.equal(Array.from(f.stripBidi(f.name(long, "—", 300))).length, 200);
+  assert.equal(Array.from(f.stripBidi(f.name("ب".repeat(400), "—", 300))).length, 300);
+});
+
+test("التقسيم الآمن: كتلة ضخمة تُقصّ بأسطر كاملة، وسطر واحد ضخم بلا عزل مفتوح ولا نصف محرف", () => {
+  const manyLines = [Array.from({ length: 200 }, (_, i) => f.field(`بند ${i}`, f.num(-i * 1000.5)))];
+  const parts = f.composeMessages({ title: "عنوان", blocks: manyLines, maxChars: 500 });
+  for (const part of parts) {
+    assert.ok(part.length <= 500);
+    assertBalancedIsolates(part);
+    for (const l of part.split("\n")) assert.ok(l.startsWith(RLM), `سطر بلا RLM: ${JSON.stringify(l)}`);
+  }
+  const oneLine = [[f.line(`🔴 ${f.name("🟢".repeat(110))} ${f.num(-5)} ${"x".repeat(900)}`)]];
+  const [cut] = f.composeMessages({ title: "عنوان", blocks: oneLine, maxChars: 300 });
+  assert.ok(cut.length <= 300);
+  assertBalancedIsolates(cut);
+  assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(cut), "لا نصف زوج بديل");
+  assert.ok(cut.endsWith(`${RLM}…`));
+});
+
+test("المنسِّق لا يحوي parse_mode ولا وسوم HTML في المخرجات", () => {
+  const sample = [f.money(-1, "SYP"), f.time("2026-10-14T20:00:00Z"), f.severity("حرج"), f.name("<b>x</b>")].join(" ");
+  assert.ok(sample.includes("<b>x</b>"), "النص الحرفي يبقى حرفياً");
+  assert.doesNotMatch(readFileSync("src/telegram-format.js", "utf8").replace(/^\s*\/\/.*$/gm, ""), /parse_mode/);
+});
+
+// ── فحص صحة الموقع (scripts/health-check.mjs) ───────────────────────────────
+
+const { buildHealthTelegramMessage, telegramDedupeKey } = await import("./health-check.mjs");
+const AT = new Date("2026-10-14T20:00:00Z");
+
+test("فحص الصحة: عنوان ثابت، وقت دمشق، أهمية برمز، فاصل، المشكلة معزولة والرابط آخر سطره", () => {
+  const message = buildHealthTelegramMessage(
+    { key: "site-down", title: "الموقع لا يستجيب (https://example.test/)", severity: "حرج" },
+    "https://github.com/example/repo/issues/41", AT);
+  assertBalancedIsolates(message);
+  for (const l of message.split("\n")) assert.ok(l.startsWith(RLM));
+  assert.equal(f.stripBidi(message), [
+    "🩺 مشكلة اكتشفتها المراقبة الآلية",
+    "الوقت: 2026-10-14 23:00 (دمشق)",
+    "الخطورة: 🔴 حرج",
+    f.SEPARATOR,
+    "المشكلة: الموقع لا يستجيب (https://example.test/)",
+    "الرابط: https://github.com/example/repo/issues/41"
+  ].join("\n"));
+  assert.ok(message.endsWith("https://github.com/example/repo/issues/41"), "لا محرف خفي بعد الرابط فيبقى قابلاً للنقر");
+  assert.ok(message.includes(`${FSI}الموقع لا يستجيب (https://example.test/)${PDI}`));
+});
+
+test("فحص الصحة: بلا Issue، وأهمية مجهولة، وعنوان بحقن اتجاه وأسطر، وعنوان طويل", () => {
+  const noIssue = f.stripBidi(buildHealthTelegramMessage({ title: "انهار الفحص", severity: "عالٍ" }, null, AT));
+  assert.ok(noIssue.endsWith("الرابط: تعذّر إنشاء Issue، راجع سجل health-check.yml"));
+  assert.ok(noIssue.includes("الخطورة: 🟠 عالٍ"));
+  const evil = buildHealthTelegramMessage({ title: "سير ‮عمل\nسطر \"CI\" على الفرع \"main\"", severity: "غريب" }, "https://x.test/issues/1", AT);
+  assertBalancedIsolates(evil);
+  assert.equal(evil.split("\n").length, 6, "لا أسطر محقونة");
+  assert.ok(f.stripBidi(evil).includes("المشكلة: سير عمل سطر \"CI\" على الفرع \"main\""));
+  assert.ok(f.stripBidi(evil).includes("الخطورة: غريب"));
+  const long = buildHealthTelegramMessage({ title: "ت".repeat(500), severity: "متوسط" }, null, AT);
+  assert.ok(long.length < f.DEFAULT_MAX_CHARS);
+  assert.ok(f.stripBidi(long).includes(`${"ت".repeat(299)}…`));
+});
+
+test("فحص الصحة: مفاتيح منع التكرار ونوع الحدث ونافذته بلا تغيير", () => {
+  assert.equal(telegramDedupeKey("site-down", 42), "health-site-down-issue-42");
+  assert.equal(telegramDedupeKey("site-down", null, 5 * 3600000 + 1), "health-site-down-noissue-5");
+  const src = readFileSync("scripts/health-check.mjs", "utf8");
+  assert.match(src, /p_event_type: "health_check"/);
+  assert.match(src, /p_dedupe_key: telegramDedupeKey\(problem\.key, issueNumber\)/);
+  assert.match(src, /async function notifyTelegram\(problem, issueUrl, dedupeMinutes = 180\)/);
+  assert.match(src, /import "\.\.\/src\/telegram-format\.js";/);
+  assert.match(src, /catch \(err\) \{\n\s*\/\/ التنسيق لا يجوز أن يُسقط التنبيه نفسه/, "تعذّر التنسيق يرسل نصاً احتياطياً بدل إسقاط التنبيه");
+});
+
+// ── تنبيه فشل GitHub Actions: تنفيذ خطوة الـworkflow فعلياً مع curl وهمي ─────
+
+const wfText = readFileSync(".github/workflows/alert-on-automation-failure.yml", "utf8");
+const runStart = wfText.indexOf("        run: |\n");
+const runScript = wfText.slice(runStart + "        run: |\n".length)
+  .split("\n").map((l) => l.replace(/^ {10}/, "")).join("\n");
+const haveTools = ["bash", "jq"].every((bin) => spawnSync("sh", ["-c", `command -v ${bin}`]).status === 0);
+
+function runAlertStep(env, { breakFormatting = false } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), "gha-alert-"));
+  const capture = join(dir, "payload.json");
+  writeFileSync(join(dir, "curl"), `#!/bin/bash\nwhile [ $# -gt 0 ]; do case "$1" in -d) printf '%s' "$2" > "${capture}"; shift;; -o) echo '""' > "$2"; shift;; esac; shift; done\nprintf 204\n`, { mode: 0o755 });
+  if (breakFormatting) {
+    const realJq = spawnSync("sh", ["-c", "command -v jq"], { encoding: "utf8" }).stdout.trim();
+    writeFileSync(join(dir, "jq"), `#!/bin/bash\nif [ "$1" = "-nr" ]; then exit 3; fi\nexec "${realJq}" "$@"\n`, { mode: 0o755 });
+  }
+  writeFileSync(join(dir, "run.sh"), runScript);
+  const result = spawnSync("bash", ["-e", join(dir, "run.sh")], {
+    encoding: "utf8",
+    env: { PATH: `${dir}:${process.env.PATH}`, SUPABASE_URL: "https://example.test", SUPABASE_SERVICE_ROLE_KEY: "fake-key", RUN_URL: "https://github.com/example/repo/actions/runs/1", BRANCH: "main", RUN_ATTEMPT: "2", CONCLUSION: "failure", WF_NAME: "Deploy TOBACCO Web", ...env }
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const payload = JSON.parse(readFileSync(capture, "utf8"));
+  rmSync(dir, { recursive: true, force: true });
+  return payload;
+}
+
+test("فشل GitHub Actions: الرسالة الفعلية من خطوة الـworkflow بالتنسيق الموحّد", () => {
+  if (!haveTools) { assert.ok(!process.env.CI, "bash/jq مطلوبان في CI"); return; }
+  const payload = runAlertStep({});
+  const message = payload.p_message;
+  assertBalancedIsolates(message);
+  for (const l of message.split("\n")) assert.ok(l.startsWith(RLM), `سطر بلا RLM: ${JSON.stringify(l)}`);
+  const plain = f.stripBidi(message).split("\n");
+  assert.equal(plain[0], "🚨 فشل أتمتة");
+  assert.match(plain[1], /^الوقت: \d{4}-\d{2}-\d{2} \d{2}:\d{2} \(دمشق\)$/);
+  assert.deepEqual(plain.slice(2), ["المنصة: GitHub Actions", f.SEPARATOR, "سير العمل: Deploy TOBACCO Web", "النتيجة: فشل", "الفرع: main", "المحاولة: 2", "الرابط: https://github.com/example/repo/actions/runs/1"]);
+  assert.ok(message.includes(`${FSI}Deploy TOBACCO Web${PDI}`) && message.includes(`المحاولة: ${LRI}2${PDI}`));
+  assert.ok(message.endsWith("https://github.com/example/repo/actions/runs/1"));
+});
+
+test("فشل GitHub Actions: كل نتيجة معروفة معرّبة، والمجهولة معزولة كما هي", () => {
+  if (!haveTools) return;
+  const expected = { failure: "فشل", timed_out: "تجاوز المهلة", cancelled: "أُلغي", startup_failure: "تعذّر بدء التشغيل", action_required: "ينتظر إجراءً يدوياً", neutral: "انتهى بلا نتيجة", stale: "تقادم قبل الاكتمال" };
+  for (const [conclusion, label] of Object.entries(expected)) {
+    assert.ok(f.stripBidi(runAlertStep({ CONCLUSION: conclusion }).p_message).includes(`\nالنتيجة: ${label}\n`), conclusion);
+  }
+  assert.ok(runAlertStep({ CONCLUSION: "brand_new" }).p_message.includes(`النتيجة: ${FSI}brand_new${PDI}`));
+});
+
+test("فشل GitHub Actions: اسم بحقن اتجاه وأسطر لا يكسر الرسالة، ومفتاح منع التكرار والنافذة كما هما", () => {
+  if (!haveTools) return;
+  const name = "سير ‮عمل\nخبيث";
+  const payload = runAlertStep({ WF_NAME: name });
+  assert.equal(payload.p_event_type, "github_actions_failure");
+  assert.equal(payload.p_dedupe_key, `gha-fail:${name}`, "المفتاح من الاسم الخام كما كان");
+  assert.equal(payload.p_dedupe_minutes, 60);
+  assertBalancedIsolates(payload.p_message);
+  assert.equal(payload.p_message.split("\n").length, 9);
+  assert.ok(f.stripBidi(payload.p_message).includes("سير العمل: سير عمل خبيث"));
+});
+
+test("فشل GitHub Actions: تعذّر التنسيق يرسل نصاً احتياطياً بالمعلومات ذاتها بدل إسقاط التنبيه", () => {
+  if (!haveTools) return;
+  const payload = runAlertStep({ CONCLUSION: "timed_out" }, { breakFormatting: true });
+  assert.equal(payload.p_message, "🚨 فشل أتمتة\nسير العمل: Deploy TOBACCO Web\nالنتيجة: timed_out\nالفرع: main\nالمحاولة: 2\nالرابط: https://github.com/example/repo/actions/runs/1");
+  assert.equal(payload.p_dedupe_key, "gha-fail:Deploy TOBACCO Web");
 });
 
 console.log("check-telegram-format:");

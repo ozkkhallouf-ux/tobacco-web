@@ -25,6 +25,7 @@
 
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import "../src/telegram-format.js";
 
 const REPO = process.env.GITHUB_REPOSITORY || "ozkkhallouf-ux/tobacco-web";
 const SITE_URL = "https://ozktobacco.com/";
@@ -300,6 +301,25 @@ export const IMMEDIATE_HEALTH_KEYS = Object.freeze(["site-down", "health-check-c
 export const isImmediateHealthKey = (problemKey) => IMMEDIATE_HEALTH_KEYS.includes(problemKey);
 const validIssueNumber = (n) => Number.isInteger(n) && n > 0;
 
+// نص التنبيه بالتنسيق الموحّد (src/telegram-format.js): نص عادي بلا parse_mode،
+// كل سطر يبدأ بـRLM، والعنوان الديناميكي معزول FSI…PDI (قد يحوي اسم سير عمل أو
+// رابطاً لاتينياً). الرابط في آخر سطره بلا عزل كي يبقى قابلاً للنقر في تيليغرام.
+// المعلومات نفسها التي كانت تُرسل (الاسم، الخطورة، الرابط) + سطر الوقت فقط.
+const HEALTH_TITLE_MAX_CHARS = 300;
+export function buildHealthTelegramMessage(problem, issueUrl, now = new Date()) {
+  const f = globalThis.ozkTelegramFormat;
+  if (!f) throw new Error("telegram_format_unavailable");
+  const link = issueUrl
+    ? f.field("الرابط", f.clean(issueUrl, HEALTH_TITLE_MAX_CHARS))
+    : f.field("الرابط", "تعذّر إنشاء Issue، راجع سجل health-check.yml");
+  const [message] = f.composeMessages({
+    title: "🩺 مشكلة اكتشفتها المراقبة الآلية",
+    intro: [f.field("الوقت", f.time(now)), f.field("الخطورة", f.severity(problem.severity))],
+    blocks: [[f.field("المشكلة", f.name(problem.title, "—", HEALTH_TITLE_MAX_CHARS)), link]],
+  });
+  return message;
+}
+
 async function notifyTelegram(problem, issueUrl, dedupeMinutes = 180) {
   const supabaseUrl = process.env.SUPABASE_URL;
   const serviceKey = process.env.SUPABASE_SERVICE_KEY;
@@ -308,8 +328,14 @@ async function notifyTelegram(problem, issueUrl, dedupeMinutes = 180) {
     return false;
   }
   const issueNumber = issueNumberFromUrl(issueUrl);
-  const link = issueUrl || "(تعذّر إنشاء Issue — راجع سجل health-check.yml)";
-  const message = `🩺 مشكلة اكتشفتها المراقبة الآلية\nالاسم: ${problem.title}\nالخطورة: ${problem.severity}\nرابط: ${link}`;
+  let message;
+  try {
+    message = buildHealthTelegramMessage(problem, issueUrl);
+  } catch (err) {
+    // التنسيق لا يجوز أن يُسقط التنبيه نفسه: نص احتياطي بسيط بالمعلومات ذاتها.
+    console.log(`⚠️ تعذّر تنسيق رسالة تيليغرام (${err}) — يُرسل نص احتياطي.`);
+    message = `🩺 مشكلة اكتشفتها المراقبة الآلية\nالمشكلة: ${problem.title}\nالخطورة: ${problem.severity}\nالرابط: ${issueUrl || "تعذّر إنشاء Issue، راجع سجل health-check.yml"}`;
+  }
   try {
     const res = await fetch(`${supabaseUrl}/rest/v1/rpc/notify_telegram`, {
       method: "POST",
