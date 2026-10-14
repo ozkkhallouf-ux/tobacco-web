@@ -83,7 +83,8 @@ $script:HttpPoster = {
 
 $notifyLog = Join-Path $base 'telegram-calls.txt'
 $fakeNotify = Join-Path $base 'fake-notify.ps1'
-[System.IO.File]::WriteAllText($fakeNotify, ('param([string]$Message,[string]$EventType,[string]$DedupeKey,[int]$DedupeMinutes) Add-Content -LiteralPath ''' + $notifyLog + ''' -Value $DedupeKey'))
+# البديل الوهمي يحاكي عقد send-telegram-notification.ps1: يطبع «TELEGRAM-NOTIFY OK» عند الوصول.
+[System.IO.File]::WriteAllText($fakeNotify, ('param([string]$Message,[string]$EventType,[string]$DedupeKey,[int]$DedupeMinutes) Add-Content -LiteralPath ''' + $notifyLog + ''' -Value $DedupeKey; Write-Host "TELEGRAM-NOTIFY OK ($EventType)"'))
 
 function New-TestRoots([string]$Name) {
     $r = Join-Path $base $Name
@@ -361,6 +362,25 @@ try {
     $r = Invoke-OzkAmeenBackup -Execute -NoSlack -LocalRoot $t.Local -StateDir $t.State -NotifyScript $badNotify -Now $fixedNow
     $script:FreeSpaceReader = $realSpace
     Assert-True ($r.status -eq 'failed' -and $r.notify -eq 'none') 'فشل Telegram نفسه ⇒ النتيجة failed تُعاد بلا انهيار'
+
+    # (و) Telegram لا يؤكّد (SKIPPED/FAILED بخروج 0) ⇒ لا يُسجَّل وصولاً كاذباً
+    foreach ($kind in @('SKIPPED: authentication failed', 'FAILED: The remote name could not be resolved')) {
+        $t = New-TestRoots ('tg-' + $kind.Substring(0, 6))
+        $quiet = Join-Path $base ('quiet-notify-' + $kind.Substring(0, 6) + '.ps1')
+        [System.IO.File]::WriteAllText($quiet, ('param([string]$Message,[string]$EventType,[string]$DedupeKey,[int]$DedupeMinutes) Write-Host "TELEGRAM-NOTIFY ' + $kind + '"; exit 0'))
+        $script:FailVerifyFor = 'AmnDb002'
+        $r = Invoke-OzkAmeenBackup -Execute -NoSlack -LocalRoot $t.Local -StateDir $t.State -NotifyScript $quiet -Now $fixedNow
+        $script:FailVerifyFor = ''
+        Assert-True ($r.status -eq 'failed' -and $r.notify -eq 'none') ('Telegram ' + $kind.Substring(0, 7) + ' بخروج 0 ⇒ notify=none لا telegram')
+        $logRaw = (Get-ChildItem -LiteralPath (Join-Path $t.State 'logs') -File | ForEach-Object { [System.IO.File]::ReadAllText($_.FullName) }) -join ''
+        Assert-True ($logRaw -match 'notify=none' -and $logRaw -notmatch 'notify=telegram') 'السجل لا يدّعي وصول التنبيه'
+    }
+    # (ز) Slack محجوب + Telegram لا يؤكّد ⇒ none
+    $t = New-TestRoots 'tg-slack-both'
+    $script:Secrets['SLACK_BOT_TOKEN'] = 'xoxb-test-not-real'; $script:SlackMode = 'http451'
+    $r = Invoke-OzkAmeenBackup -Execute -LocalRoot $t.Local -StateDir $t.State -NotifyScript (Join-Path $base 'quiet-notify-SKIPPE.ps1') -Now $fixedNow
+    $script:Secrets.Clear(); $script:SlackMode = 'ok'
+    Assert-True ($r.notify -eq 'none') 'Slack 451 + Telegram SKIPPED ⇒ notify=none'
 
     Write-Host '== 17ج) رمز الخروج من نقطة الدخول =='
     $base17 = Join-Path $base 'main'

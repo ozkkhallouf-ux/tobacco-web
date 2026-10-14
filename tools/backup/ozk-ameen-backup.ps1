@@ -316,10 +316,14 @@ function Send-OzkAlert([string]$Text, [string]$Key, [int]$DedupeMinutes, [string
     }
     if ($NotifyScript -and (Test-Path -LiteralPath $NotifyScript)) {
         try {
-            & $NotifyScript -Message $Text -EventType 'windows' -DedupeKey $Key -DedupeMinutes $DedupeMinutes | Out-Null
-            return 'telegram'
+            # send-telegram-notification.ps1 لا يرمي ولا يخرج بغير الصفر بالتصميم (SKIPPED/FAILED
+            # تُطبع فقط)، فالدليل الوحيد على الوصول هو سطر «TELEGRAM-NOTIFY OK» في مخرجاته،
+            # كما في tools/ensure-ameen-sync.ps1.
+            $out = (& $NotifyScript -Message $Text -EventType 'windows' -DedupeKey $Key -DedupeMinutes $DedupeMinutes 2>&1 6>&1 | Out-String)
+            if ($out -match 'TELEGRAM-NOTIFY OK') { return 'telegram' }
+            Write-Host ('ALERT NOT CONFIRMED (telegram): ' + ($out.Trim() -replace '\s+', ' '))
         } catch {
-            Write-Verbose 'telegram failed (best-effort)'
+            Write-Host ('ALERT FAIL (telegram): ' + $_.Exception.Message)
         }
     }
     return 'none'
