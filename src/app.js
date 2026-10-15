@@ -6210,10 +6210,39 @@ function movementForBill(custName, billGuid) {
   ) || null;
 }
 
+// فاتورة بيع واحدة في تاريخ واحد بمبلغ قريب من مدين القيد. أكثر من فاتورة أو
+// صفر ⇒ null. السقوط إلى المبلغ وحده أو التاريخ وحده كان يلصق أصناف فاتورة
+// أخرى على PDF القيد (فاتورتان في نفس اليوم، أو قيد افتتاحي/تحويل بجانب فاتورة).
+function uniqueInvoiceByDateAmount(invs, dateStr, debit) {
+  const sales = (Array.isArray(invs) ? invs : []).filter((x) => x && !x.isReturn);
+  const d = String(dateStr || "").slice(0, 10);
+  const amt = Number(debit || 0);
+  if (!d || !Number.isFinite(amt)) return null;
+  const dated = sales.filter((x) =>
+    String(x.date || "").slice(0, 10) === d
+    && Math.abs(Number(x.total || 0) - amt) < 1
+  );
+  return dated.length === 1 ? dated[0] : null;
+}
+
+// قيد مدين واحد في تاريخ واحد بمبلغ قريب. أكثر من قيد أو صفر ⇒ null، حتى لا
+// يُطبع رصيد فاتورة أخرى على مستند هذه الفاتورة.
+function uniqueDebitMovementOnDate(movements, dateStr, amount) {
+  const d = String(dateStr || "").slice(0, 10);
+  const amt = Number(amount || 0);
+  if (!d || !Number.isFinite(amt)) return null;
+  const matches = (Array.isArray(movements) ? movements : []).filter((m) => {
+    if (String(m?.date || "").slice(0, 10) !== d) return false;
+    return Number(m?.debit || 0) > 0 && Math.abs(Number(m?.debit || 0) - amt) <= 0.5;
+  });
+  return matches.length === 1 ? matches[0] : null;
+}
+
 // حركة الفاتورة في تقرير الحركات: نطابق بمعرّف القيد (GUID) إن وُجد وغير صفري، وإلا بالتاريخ
-// والمبلغ على جهة المدين. سبب الاحتياط: قيود السنة الجديدة (AmnDb002 بعد التدوير) تأتي أحياناً
-// بمعرّف صفري (00000000-...) فيفشل الربط بالمعرّف وحده — وقياس 2026-09-05 على بيانات
-// الإنتاج: **كل** الـ1830 قيداً في التقرير تحمل الصفري، فالربط بالمعرّف لا يعمل عملياً اليوم.
+// والمبلغ على جهة المدين بشرط نتيجة واحدة. سبب الاحتياط: قيود السنة الجديدة (AmnDb002 بعد
+// التدوير) تأتي أحياناً بمعرّف صفري (00000000-...) فيفشل الربط بالمعرّف وحده — وقياس
+// 2026-09-05 على بيانات الإنتاج: **كل** الـ1830 قيداً في التقرير تحمل الصفري، فالربط
+// بالمعرّف لا يعمل عملياً اليوم. أكثر من قيد بنفس اليوم والمبلغ ⇒ لا رصيد مُخمَّن.
 function invoiceMovement(custName, inv) {
   const report = state.customerMovementsReport;
   const items = report && Array.isArray(report.items) ? report.items : [];
@@ -6225,14 +6254,7 @@ function invoiceMovement(custName, inv) {
     const byGuid = movements.find((m) => normGuid(m?.billGuid) === g);
     if (byGuid) return byGuid;
   }
-  const d = String(inv?.date || "").slice(0, 10);
-  const total = Number(inv?.total || 0);
-  for (let i = movements.length - 1; i >= 0; i--) {
-    const m = movements[i];
-    if (d && String(m?.date || "").slice(0, 10) !== d) continue;
-    if (Number(m?.debit || 0) > 0 && Math.abs(Number(m?.debit || 0) - total) <= 0.5) return m;
-  }
-  return null;
+  return uniqueDebitMovementOnDate(movements, inv?.date, inv?.total);
 }
 
 // هل يغطّي دفتر الحركات المحمَّل تاريخ هذا المستند فعلاً؟
@@ -12905,14 +12927,12 @@ function render() {
         const invs = customerInvoicesFor(item).filter((x) => !x.isReturn);
         // نطابق الفاتورة التفصيلية بمعرّف القيد (قطعي) أولاً — وعلى كامل التقرير،
         // لا داخل مجموعة الزبون: معرّف الفاتورة فريد فلا يحتاج معرفة الزبون.
-        // ثم بالتاريخ/المبلغ داخل مجموعة الزبون كاحتياط.
+        // ثم بتاريخ+مبلغ معاً داخل مجموعة الزبون إن كانت النتيجة واحدة فقط.
         const bg = normGuid(el.dataset.billGuid);
         const dOnly = String(el.dataset.date || "").slice(0, 10);
-        const amtMatch = (x) => Math.abs(Number(x.total || 0) - debit) < 1;
-        const dateMatch = (x) => String(x.date || "").slice(0, 10) === dOnly;
         const byGuid = bg ? invoiceByGuid(bg) : null;
         const match = (byGuid && !byGuid.invoice.isReturn ? byGuid.invoice : null)
-          || invs.find((x) => dateMatch(x) && amtMatch(x)) || invs.find((x) => amtMatch(x)) || invs.find((x) => dateMatch(x));
+          || uniqueInvoiceByDateAmount(invs, dOnly, debit);
         if (match) {
           const total = match.total || debit;
           const opts = { ...base, cur: "$", type: "invoice", amount: total, no: match.number ? String(match.number) : docNumber("INV"), lines: match.lines || [] };
