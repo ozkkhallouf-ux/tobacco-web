@@ -169,6 +169,12 @@ try {
     Assert-True ((Invoke-OzkBackupMonitorMain @{ StateDir = $f.State; Now = $check2330 }) -eq 0) 'PENDING ⇒ خروج 0'
     $r = Invoke-OzkBackupMonitor -StateDir $f.State -NotifyScript $okNotify -Now ([datetime]'2026-10-16T00:45:00')
     Assert-True ($r.level -eq 'FAILURE' -and ((@($r.health.failures) -join ' ') -match 'المهلة')) 'ما زال يعمل بعد 90 دقيقة ⇒ FAILURE'
+    $f = New-Fixture 'hang' $night.AddDays(-1)
+    Set-TaskRan $night 'Running'
+    Reset-Notify
+    $null = Invoke-OzkBackupMonitor -StateDir $f.State -NotifyScript $okNotify -Now $check2330
+    $r = Invoke-OzkBackupMonitor -StateDir $f.State -NotifyScript $okNotify -Now ([datetime]'2026-10-16T00:45:00')
+    Assert-True ($r.level -eq 'FAILURE' -and $r.alertReason -and $r.delivery.delivered) 'فحص 00:45 بعد PENDING 23:30 ونسخ عالق ⇒ FAILURE مُبلَّغ ليلاً'
 
     Write-Host '== 8) تلف ZIP أو عدم تطابق SHA256 أو manifest =='
     $f = New-Fixture 'zipD' $night; Set-TaskRan $night
@@ -279,7 +285,11 @@ try {
     $script:HostNameReader = { return 'OZK2026' }
     $rr = Invoke-OzkRegisterMonitorTask -AppRoot 'C:\ProgramData\OZK-TOBACCO\Backup\app\abc1234'
     Assert-True ($rr.status -eq 'dry-run' -and $script:RegCalls -eq 0) 'DryRun افتراضي لا يسجّل'
-    Assert-True ((@($rr.spec.At) -join ',') -eq '23:30,08:00' -and $rr.spec.LogonType -eq 'S4U' -and $rr.spec.UserId -eq 'OZK2026\LOQ') 'المواعيد 23:30 و08:00 باسم LOQ بنوع S4U'
+    Assert-True ((@($rr.spec.At) -join ',') -eq '23:30,00:45,08:00' -and $rr.spec.LogonType -eq 'S4U' -and $rr.spec.UserId -eq 'OZK2026\LOQ') 'المواعيد 23:30 و00:45 و08:00 باسم LOQ بنوع S4U'
+    # Codex P1: يجب أن يوجد فحص بعد نهاية المهلة الآمنة (23:00 + GraceMinutes) وقبل الصباح.
+    $graceEnd = ([datetime]'2026-10-15T23:00:00').AddMinutes(90)
+    $afterGrace = @($rr.spec.At | Where-Object { $t = [datetime]('2026-10-16T' + $_ + ':00'); $t -ge $graceEnd -and $t -lt [datetime]'2026-10-16T08:00:00' })
+    Assert-True ($afterGrace.Count -ge 1) 'يوجد فحص بين نهاية المهلة الآمنة (00:30) والصباح'
     Assert-True ($rr.spec.Arguments -match 'app\\abc1234[\\/]tools[\\/]backup[\\/]ozk-ameen-backup-monitor\.ps1' -and $rr.spec.Arguments -match 'send-telegram-notification') 'الأمر يشغّل المراقب من مجلد الإصدار مع Telegram'
     Assert-Throws { Invoke-OzkRegisterMonitorTask -Apply } '-Apply بلا مجلد إصدار حقيقي مرفوض'
     Assert-Throws { Invoke-OzkRegisterMonitorTask -Apply -TaskName 'TOBACCO Ameen Backup Monitor' -AppRoot 'C:\x\app\abc1234' } 'لا تسجيل فوق مهمة قائمة'

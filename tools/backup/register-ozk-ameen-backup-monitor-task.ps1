@@ -5,8 +5,10 @@
 # الوضع الافتراضي DryRun: يطبع تعريف المهمة فقط ولا يلمس Task Scheduler.
 # التسجيل الفعلي يحتاج -Apply صراحةً، وعلى OZK2026 وحده، وبموافقة المالك.
 #
-# المهمة: «OZK Ameen Backup Health Monitor» يومياً 23:30 و08:00، باسم OZK2026\LOQ
+# المهمة: «OZK Ameen Backup Health Monitor» يومياً 23:30 و00:45 و08:00، باسم OZK2026\LOQ
 # بنوع S4U، وتشغيل واحد في كل لحظة (IgnoreNew)، ومهلة 15 دقيقة.
+# 00:45 يقع بعد نهاية المهلة الآمنة للنسخ (23:00 + 90 دقيقة = 00:30): إن وجد فحص 23:30
+# النسخ ما زال يعمل (PENDING)، يُحسم الحكم في 00:45 لا في الصباح.
 #
 # لا يعدّل ولا يحذف أي مهمة موجودة: إن وُجدت مهمة بنفس الاسم يرفض.
 # لا يلمس «TOBACCO Ameen Backup Pull» ولا «TOBACCO Ameen Backup Monitor» (قرار منفصل).
@@ -15,7 +17,7 @@
 param(
     [switch]$Apply,
     [string]$TaskName = 'OZK Ameen Backup Health Monitor',
-    [string[]]$At = @('23:30', '08:00'),
+    [string[]]$At = @('23:30', '00:45', '08:00'),
     [string]$UserId = 'OZK2026\LOQ',
     [ValidateSet('S4U', 'Password', 'Interactive')][string]$LogonType = 'S4U',
     [string]$AppRoot = 'C:\ProgramData\OZK-TOBACCO\Backup\app\CURRENT',
@@ -61,7 +63,7 @@ function Invoke-OzkRegisterMonitorTask {
     param(
         [switch]$Apply,
         [string]$TaskName = 'OZK Ameen Backup Health Monitor',
-        [string[]]$At = @('23:30', '08:00'),
+        [string[]]$At = @('23:30', '00:45', '08:00'),
         [string]$UserId = 'OZK2026\LOQ',
         [string]$LogonType = 'S4U',
         [string]$AppRoot = 'C:\ProgramData\OZK-TOBACCO\Backup\app\CURRENT',
