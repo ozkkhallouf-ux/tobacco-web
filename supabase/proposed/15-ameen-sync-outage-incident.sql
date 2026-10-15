@@ -7,7 +7,8 @@
 -- الحزمة 12 تُسكت رسائل المهام المنفردة (ملخص مسائي فقط) لكنها لا تُرسل أي إنذار فوري حتى لو
 -- طال الانقطاع الكامل ساعات (core_outage_verified() = false). هذه الحزمة تسدّ الفجوة:
 --
---   * حادثة واحدة لكل جهاز (private.sync_outage_incidents): تُفتح حين تتقادم ≥ 3 مهام مزامنة
+--   * حادثة واحدة لكل جهاز (private.sync_outage_incidents): تُفتح حين تصمت ≥ 3 مهام مزامنة (أكثر من
+--     0.6 × max_age، فيُسجَّل انقطاع 10 دقائق أيضاً)
 --     «مترابطة» (آخر نجاح لكل منها ضمن 60 دقيقة من أحدثها، فالمهمة المعطوبة منذ أيام لا تُحسب
 --     سبباً مشتركاً). بدايتها = أحدث آخر نجاح بين المهام المتقادمة (لحظة توقف المزامنة فعلاً).
 --   * إنذار فوري **واحد** فقط حين تبلغ مدة الانقطاع داخل ساعات الدوام (09:00–23:00 دمشق) 60 دقيقة.
@@ -92,6 +93,11 @@ create table if not exists private.sync_outage_config (
   enabled boolean not null default true,
   min_stale_tasks integer not null default 3 check (min_stale_tasks >= 2),
   correlation_minutes integer not null default 60 check (correlation_minutes between 5 and 1440),
+  -- رصد الصمت للتسجيل: المهمة «صامتة» بعد هذا الكسر من max_age (0.6 × 10 = 6 د لأسرع المهام)، فيُسجَّل
+  -- انقطاع 10 دقائق أيضاً. لا أثر على الإنذار نفسه (يبقى 60 دقيقة دوام).
+  detect_fraction numeric not null default 0.6 check (detect_fraction between 0.2 and 1),
+  -- رسالة التعافي تنتظر عودة كل مهام الحادثة حتى هذه المدة؛ بعدها تُرسل «تعافٍ جزئي» بأسماء المتأخرة
+  recovery_full_wait_minutes integer not null default 60 check (recovery_full_wait_minutes between 0 and 1440),
   alert_after_business_minutes integer not null default 60 check (alert_after_business_minutes between 5 and 1440),
   business_start time not null default '09:00',
   business_end time not null default '23:00',
@@ -194,11 +200,13 @@ revoke all on function private.ops_fmt_time(timestamptz,timestamptz) from public
 -- حالة كل مهمة عضو الآن، بنفس مصدر monitor_project_tasks (inventory_reports بالمصدر أو جدول مخصّص).
 -- قراءة فقط. التراكم (status<>'ok') ليس انقطاعاً فلا يُحسب هنا.
 create or replace function private.sync_outage_observe(p_device text, p_now timestamptz default now())
-returns table(task_key text, task_label text, last_at timestamptz, max_age integer, stale boolean)
+returns table(task_key text, task_label text, last_at timestamptz, max_age integer, stale boolean, late boolean)
 language plpgsql stable security definer set search_path = private, public, pg_temp as $$
 #variable_conflict use_column
-declare m record; la timestamptz;
+declare m record; la timestamptz; frac numeric;
 begin
+ select c.detect_fraction into frac from private.sync_outage_config c where c.device = p_device;
+ frac := coalesce(frac, 1);
  for m in
   select t.task_key as k, t.task_label as lbl, t.report_source as src, t.source_table as tbl, t.max_age_minutes as age
   from private.sync_outage_members s
@@ -211,7 +219,9 @@ begin
    execute format('select max(created_at) from public.%I where created_at <= $1', m.tbl) into la using p_now;
   end if;
   task_key := m.k; task_label := m.lbl; last_at := la; max_age := m.age;
-  stale := la is null or la < p_now - make_interval(mins => m.age);
+  -- stale: صامتة لأغراض الرصد والتسجيل؛ late: تجاوزت max_age فعلاً (حدّ التأخر الرسمي)
+  stale := la is null or la < p_now - make_interval(secs => m.age * 60 * frac);
+  late := la is null or la < p_now - make_interval(mins => m.age);
   return next;
  end loop;
 end $$;
@@ -237,8 +247,8 @@ begin
 end $$;
 revoke all on function private.sync_outage_message(bigint,timestamptz) from public, anon, authenticated;
 
--- نص رسالة التعافي الوحيدة. p_obs = الرصد الحالي: أي مهمة من مهام الحادثة ما زالت متأخرة تُسمّى صراحةً
--- (لا «عادت كل المهام» إلا إن كانت عادت فعلاً).
+-- نص رسالة التعافي الوحيدة. p_obs = الرصد الحالي: أي مهمة من مهام الحادثة ما زالت متأخرة (تجاوزت max_age)
+-- تُسمّى صراحةً والعنوان يصير «⚠️ تعافٍ جزئي» (لا «✅ عادت» إلا إن عادت كل المهام فعلاً).
 create or replace function private.sync_outage_recovery_message(p_id bigint, p_obs jsonb)
 returns text language plpgsql stable security definer set search_path = private, public, pg_temp as $$
 declare i record; c record; still text; nl constant text := chr(10); rlm constant text := chr(8207);
@@ -247,8 +257,9 @@ begin
  select * into c from private.sync_outage_config where device = i.device;
  select string_agg(e->>'label', '، ' order by e->>'task') into still
   from jsonb_array_elements(coalesce(p_obs, '[]'::jsonb)) e
-  where (e->>'stale')::boolean and (e->>'task') = any(i.affected_tasks);
- return '✅ عادت مزامنة الأمين — ' || private.ops_fmt_iso(i.device) || nl
+  where (e->>'late')::boolean and (e->>'task') = any(i.affected_tasks);
+ return case when still is not null then '⚠️ تعافٍ جزئي لمزامنة الأمين — ' else '✅ عادت مزامنة الأمين — ' end
+  || private.ops_fmt_iso(i.device) || nl
   || rlm || '• الانقطاع: من ' || private.ops_fmt_iso(to_char(i.started_at at time zone c.business_tz, 'YYYY-MM-DD HH24:MI'))
          || ' إلى ' || private.ops_fmt_iso(to_char(i.ended_at at time zone c.business_tz, 'YYYY-MM-DD HH24:MI')) || ' بتوقيت دمشق' || nl
   || rlm || '• المدة: ' || private.ops_fmt_duration(extract(epoch from (i.ended_at - i.started_at)) / 60)
@@ -275,7 +286,7 @@ begin
  with o as (select * from private.sync_outage_observe(p_device, p_now)),
       nw as (select max(o.last_at) as newest from o where o.stale)
  select coalesce(jsonb_agg(jsonb_build_object('task', o.task_key, 'label', o.task_label, 'last_ok', o.last_at,
-                    'max_age', o.max_age, 'stale', o.stale) order by o.task_key), '[]'::jsonb),
+                    'max_age', o.max_age, 'stale', o.stale, 'late', o.late) order by o.task_key), '[]'::jsonb),
         max(nw.newest),
         coalesce(array_agg(o.task_key order by o.task_key) filter (where o.stale and o.last_at >= nw.newest - make_interval(mins => cfg.correlation_minutes)), '{}')
    into obs, newest, stale_keys
@@ -291,6 +302,13 @@ begin
     where i.device = p_device and i.ended_at is not null and i.alerted_at is not null and i.recovery_sent_at is null
       and i.ended_at < p_now - make_interval(mins => cfg.merge_gap_minutes)
     order by i.ended_at limit 1;
+   -- تعافٍ جزئي: ننتظر عودة كل مهام الحادثة حتى recovery_full_wait_minutes، ثم رسالة واحدة تسمّي المتأخرة
+   if prev.id is not null and exists (
+       select 1 from jsonb_array_elements(obs) e
+       where (e->>'late')::boolean and (e->>'task') = any(prev.affected_tasks))
+      and prev.ended_at > p_now - make_interval(mins => cfg.recovery_full_wait_minutes) then
+    prev := null;
+   end if;
    if prev.id is not null then
     perform public.notify_telegram('ameen_sync_outage_recovered', private.sync_outage_recovery_message(prev.id, obs),
       'ameen-sync-outage-recovered:' || p_device || ':' || prev.id, 1440);
