@@ -15,7 +15,9 @@ const here = fileURLToPath(import.meta.url);
 
 function loadEngine() {
   const source = readFileSync(new URL("../src/customer-intelligence.js", import.meta.url), "utf8");
-  const context = vm.createContext({ window: {}, Date, Number, String, Math, Object, Array, Map, Set, JSON, Infinity, isNaN, console });
+  const context = vm.createContext({ window: {}, Date, Number, String, Math, Object, Array, Map, Set, JSON, Infinity, isNaN, console, Intl });
+  // تنبيه الغياب يبني نصه بالمنسِّق الموحّد، فيُحمَّل قبله كما في الدالة الطرفية.
+  vm.runInContext(readFileSync(new URL("../src/telegram-format.js", import.meta.url), "utf8"), context, { filename: "src/telegram-format.js" });
   vm.runInContext(source, context, { filename: "src/customer-intelligence.js" });
   const engine = context.window.ozkCustomerIntelligence;
   assert.ok(engine, "customer-intelligence.js did not expose window.ozkCustomerIntelligence");
@@ -23,6 +25,10 @@ function loadEngine() {
 }
 
 const coreEngine = loadEngine();
+const tf = await (async () => {
+  await import("../src/telegram-format.js");
+  return globalThis.ozkTelegramFormat;
+})();
 
 // قرار المالك (2026-09-27): بلا lineKinds:v1 الحد الآلي مغلق. عقود المحرك السابقة (1..76)
 // تُبنى على دفتر موسوم يطابق تصنيفها القديم حرفياً: مدين = sale (والافتتاحي opening)،
@@ -3207,15 +3213,17 @@ const keyRow = (n) => keyResult.customers.find((row) => row.customerGuid === kGu
   assert.deepEqual(plan.absent.map((entry) => entry.customerGuid), [kGuid(1), kGuid(2), kGuid(4)], "test 113: الأهم أولاً، بلا المورد ولا من غاب 4 أيام");
   assert.equal(plan.messages.length, 1, "test 113: رسالة واحدة");
   const [message] = plan.messages;
-  const lines = message.text.split("\n").slice(1);
-  assert.equal(lines.length, 3);
-  assert.ok(lines[0].startsWith("1. كبير بمرتجع"), "test 113: الترتيب");
-  const [y, m, dd] = k(10).split("-");
-  assert.ok(lines[0].includes(`آخر فاتورة ${dd}-${m}-${y}`), "test 113: التاريخ DD-MM-YYYY");
-  assert.ok(lines[0].includes("10 يوماً بلا فاتورة"), "test 113: عدد أيام الغياب");
-  assert.ok(lines[0].includes("مشترياته الشهرية 8,750$"), `test 113: المعدل الشهري = صافي 60 يوماً (بعد المرتجع) ÷ 2 (${lines[0]})`);
-  assert.match(lines[0], /فجوته المعتادة (غير محسوبة|\d+ يوماً)/u, "test 113: الفجوة المعتادة");
-  assert.ok(lines[2].includes("فجوته المعتادة 4 يوماً"), `test 113: فجوة المنتظم من نمطه (${lines[2]})`);
+  // بطاقة كل زبون ثلاثة أسطر بعد العنوان والعدد والفاصل، وسطر فارغ بين البطاقات.
+  const plain = tf.stripBidi(message.text);
+  const cards = plain.split(`\n${tf.SEPARATOR}\n`)[1].split("\n\n").map((card) => card.split("\n"));
+  assert.equal(cards.length, 3);
+  assert.ok(plain.startsWith("🔕 زبائن مهمون بلا شراء منذ 5 أيام أو أكثر\nالعدد: 3 زبائن · الأهم أولاً\n"), `test 113: العنوان والعدد (${plain})`);
+  assert.equal(cards[0][0], "1. كبير بمرتجع", "test 113: الترتيب");
+  assert.ok(cards[0][1].includes(`آخر فاتورة: ${k(10)}`), "test 113: التاريخ YYYY-MM-DD كما في المنسِّق");
+  assert.ok(cards[0][1].startsWith("الغياب: 10 أيام"), "test 113: عدد أيام الغياب");
+  assert.ok(cards[0][2].endsWith("يشتري شهرياً: 8,750 $"), `test 113: المعدل الشهري = صافي 60 يوماً (بعد المرتجع) ÷ 2 (${cards[0][2]})`);
+  assert.match(cards[0][2], /^الفجوة المعتادة: (غير محسوبة|.+) · /u, "test 113: الفجوة المعتادة");
+  assert.ok(cards[2][2].startsWith("الفجوة المعتادة: 4 أيام · "), `test 113: فجوة المنتظم من نمطه (${cards[2][2]})`);
   assert.deepEqual(plan.insertRows.map((row) => row.dedupe_key), [
     `CUSTOMER_INACTIVE_5D:${kGuid(1)}:${k(10)}`,
     `CUSTOMER_INACTIVE_5D:${kGuid(2)}:${k(5)}`,
@@ -3235,7 +3243,8 @@ const keyRow = (n) => keyResult.customers.find((row) => row.customerGuid === kGu
   const split = inactivityPlan(many, []);
   assert.equal(split.messages.length, 2, "test 113: تقسيم كل 20 زبوناً");
   assert.deepEqual(split.messages.map((message) => message.customerKeys.length), [20, 5]);
-  assert.match(split.messages[1].text, /\(2\/2\)\n21\. غائب 21 /u, "test 113: الترقيم يكمل في الرسالة الثانية");
+  assert.ok(tf.stripBidi(split.messages[1].text).includes(`(2/2)\n${tf.SEPARATOR}\n21. غائب 21\n`), "test 113: الترقيم يكمل في الرسالة الثانية");
+  assert.ok(!tf.stripBidi(split.messages[1].text).includes("العدد:"), "test 113: العدد في الجزء الأول وحده");
   assert.notEqual(split.messages[0].dedupeKey, split.messages[1].dedupeKey);
 }
 
@@ -3270,7 +3279,7 @@ const keyRow = (n) => keyResult.customers.find((row) => row.customerGuid === kGu
   const plan = inactivityPlan(late, inactivityPlan(keyResult, []).insertRows);
   assert.equal(plan.status, "stale_invoices", "test 116: فواتير عمرها 91 دقيقة ⇒ قديمة");
   assert.equal(plan.messages.length, 1);
-  assert.match(plan.messages[0].text, /عمره 91 دقيقة/u);
+  assert.match(tf.stripBidi(plan.messages[0].text), /عمره 91 دقيقة \(الحد 90 دقيقة\)/u);
   assert.match(plan.messages[0].text, /لا تنبيهات/u);
   assert.equal(plan.insertRows.length, 0);
   assert.equal(plan.deleteKeys.length, 0, "test 116: لا تنظيف من بيانات قديمة");
@@ -3278,6 +3287,99 @@ const keyRow = (n) => keyResult.customers.find((row) => row.customerGuid === kGu
   assert.equal(inactivityPlan(atLimit, []).status, "ok", "test 116: 90 دقيقة بالضبط ما زالت حديثة");
   const none = inactivityPlan(engine.build({ creditLimits: [], now: NOW }), []);
   assert.equal(none.status, "stale_invoices", "test 116: بلا تقرير فواتير ⇒ لا تنبيهات");
+}
+
+// 116ب) تنسيق رسالة الغياب (المنسِّق الموحّد): RTL، أرقام وتواريخ معزولة، أسماء آمنة، وحدّ الطول.
+//       الحسابات ومفاتيح منع التكرار وحدود الأجزاء كما كانت حرفياً.
+{
+  const { RLM, LRI, FSI, PDI } = tf;
+  const fnv = (value) => {
+    let hash = 0x811c9dc5;
+    for (const char of String(value)) { hash ^= char.codePointAt(0); hash = Math.imul(hash, 0x01000193) >>> 0; }
+    return hash.toString(16).padStart(8, "0");
+  };
+  const balanced = (text) => {
+    let depth = 0;
+    for (const char of text) {
+      if (char === LRI || char === FSI) depth += 1;
+      if (char === PDI) { depth -= 1; if (depth < 0) return false; }
+    }
+    return depth === 0;
+  };
+  const synthetic = (count, overrides = () => ({})) => ({
+    ...keyResult,
+    customers: Array.from({ length: count }, (_, i) => ({
+      customerId: `s${i}`, customerGuid: kGuid(200 + i), customerKey: `s${i}`, customerName: `زبون ${i + 1}`, currency: "USD",
+      lastPurchaseAt: k(7), daysSinceLastPurchase: 7, typicalGapDays: 3, cadenceTrusted: true, netSales60d: 5000 - i, isSupplier: false,
+      keyCustomer: { absent: true, valueRank: i + 1, monthlyPurchases: 1234.5, byValue: true, byRegularity: false },
+      ...overrides(i)
+    }))
+  });
+
+  // مفاتيح الرسائل وحدود الأجزاء (20 زبوناً) لم تتغيّر: نفس صيغة ما قبل التنسيق.
+  const many = inactivityPlan(synthetic(45), []);
+  assert.deepEqual(many.messages.map((m) => m.customerKeys.length), [20, 20, 5], "test 116ب: الأجزاء كل 20 زبوناً كما كانت");
+  many.messages.forEach((m) => {
+    assert.equal(m.dedupeKey, `CUSTOMER_INACTIVE_5D:${keyResult.window.referenceDate}:${fnv(m.customerKeys.join("|"))}`, "test 116ب: مفتاح الرسالة بالصيغة نفسها");
+  });
+  assert.deepEqual(many.insertRows.map((r) => r.dedupe_key), many.messages.flatMap((m) => m.customerKeys), "test 116ب: صفوف الحالة لزبائن الرسائل نفسها");
+
+  // كل سطر غير فارغ يبدأ بـRLM، والعزل متوازن، والترقيم (n/3) في العنوان.
+  for (const [index, m] of many.messages.entries()) {
+    for (const line of m.text.split("\n")) if (line) assert.ok(line.startsWith(RLM), `test 116ب: سطر بلا RLM: ${JSON.stringify(line)}`);
+    assert.ok(balanced(m.text), "test 116ب: عزل متوازن");
+    assert.ok(tf.stripBidi(m.text.split("\n")[0]).endsWith(`(${index + 1}/3)`), "test 116ب: ترقيم الأجزاء");
+  }
+  // الأرقام والتاريخ داخل LRI…PDI، والاسم داخل FSI…PDI.
+  const first = many.messages[0].text;
+  assert.ok(first.includes(`${RLM}الغياب: ${LRI}7${PDI} أيام · آخر فاتورة: ${LRI}${k(7)}${PDI}`), "test 116ب: الغياب والتاريخ معزولان");
+  assert.ok(first.includes(`${RLM}الفجوة المعتادة: ${LRI}3${PDI} أيام · يشتري شهرياً: ${LRI}1,235${PDI} $`), "test 116ب: الفجوة والمبلغ (تقريب لعدد صحيح كما كان)");
+  assert.ok(first.includes(`${RLM}${LRI}1${PDI}. ${FSI}زبون 1${PDI}`), "test 116ب: الاسم معزول");
+
+  // تمييز العدد العربي، والفجوة الكسرية، وغير المحسوبة، والليرة، والسالب.
+  const variety = inactivityPlan(synthetic(5, (i) => [
+    { daysSinceLastPurchase: 11, typicalGapDays: 2.75 },
+    { typicalGapDays: null, cadenceTrusted: false, currency: "SYP", keyCustomer: { absent: true, valueRank: 2, monthlyPurchases: 3500000, byValue: true, byRegularity: false } },
+    { typicalGapDays: 1 },
+    { typicalGapDays: 2 },
+    { keyCustomer: { absent: true, valueRank: 5, monthlyPurchases: -250.5, byValue: true, byRegularity: false } }
+  ][i]), []);
+  const plainCards = tf.stripBidi(variety.messages[0].text).split(`\n${tf.SEPARATOR}\n`)[1].split("\n\n");
+  assert.ok(plainCards[0].includes("الغياب: 11 يوماً"), "test 116ب: 11 ⇒ يوماً");
+  assert.ok(plainCards[0].includes("الفجوة المعتادة: 2.8 يوماً"), "test 116ب: الفجوة الكسرية بخانة عشرية");
+  assert.ok(plainCards[1].includes("الفجوة المعتادة: غير محسوبة · يشتري شهرياً: 3,500,000 ل.س"), `test 116ب: الليرة (${plainCards[1]})`);
+  assert.ok(plainCards[2].includes("الفجوة المعتادة: يوم واحد"), "test 116ب: 1 ⇒ يوم واحد");
+  assert.ok(plainCards[3].includes("الفجوة المعتادة: يومان"), "test 116ب: 2 ⇒ يومان");
+  assert.ok(variety.messages[0].text.includes(`${LRI}-251${PDI} $`), "test 116ب: السالب يبقى «-251» معزولاً");
+  assert.ok(tf.stripBidi(inactivityPlan(synthetic(1), []).messages[0].text).includes("العدد: زبون واحد"), "test 116ب: زبون واحد");
+
+  // اسم لاتيني أو فيه محارف اتجاه وأسطر جديدة لا يكسر السطر ولا ما بعده.
+  const hostile = inactivityPlan(synthetic(1, () => ({ customerName: "ABC\u202E Trading\n2. حقن\u2066" })), []).messages[0].text;
+  assert.ok(balanced(hostile), "test 116ب: العزل متوازن مع اسم عدائي");
+  assert.ok(hostile.includes(`${FSI}ABC Trading 2. حقن${PDI}`), `test 116ب: الاسم منظّف في سطر واحد (${JSON.stringify(hostile)})`);
+
+  // الحالة القصوى: 20 زبوناً بأسماء 120 حرفاً ومبالغ ضخمة بالليرة تبقى تحت حد التقسيم.
+  const worst = inactivityPlan(synthetic(20, (i) => ({
+    customerName: "اسم طويل جداً ".repeat(12), currency: "SYP", daysSinceLastPurchase: 999, typicalGapDays: 123.45,
+    keyCustomer: { absent: true, valueRank: i + 1, monthlyPurchases: -987654321098.7, byValue: true, byRegularity: false }
+  })), []);
+  assert.equal(worst.messages.length, 1);
+  assert.ok(worst.messages[0].text.length <= 3500, `test 116ب: أطول رسالة ${worst.messages[0].text.length} حرفاً`);
+  assert.ok(tf.stripBidi(worst.messages[0].text).includes("…"), "test 116ب: الاسم الطويل مقصوص بعلامة");
+
+  // البلاغ «البيانات قديمة»: نفس المفتاح، وأسطر RTL.
+  const late = inactivityPlan(engine.build({ ...keyReports(), creditLimits: [], now: new Date(new Date(REFERENCE_ISO).getTime() + 91 * 60000) }), []);
+  assert.match(late.messages[0].dedupeKey, /^CUSTOMER_INACTIVE_5D:stale:\d{4}-\d{2}-\d{2}$/u, "test 116ب: مفتاح البلاغ كما كان");
+  for (const line of late.messages[0].text.split("\n")) assert.ok(line.startsWith(RLM));
+  const missing = tf.stripBidi(inactivityPlan(engine.build({ creditLimits: [], now: NOW }), []).messages[0].text);
+  assert.ok(missing.includes("السبب: تقرير الفواتير غير متاح"), "test 116ب: تقرير غائب");
+
+  // المنسِّق شرط لبناء الرسالة فقط: بلا غائبين جدد لا يُطلب، وبوجودهم غيابه خطأ صريح.
+  const bare = vm.createContext({ window: {}, Date, Number, String, Math, Object, Array, Map, Set, JSON, Infinity, isNaN, console });
+  vm.runInContext(readFileSync(new URL("../src/customer-intelligence.js", import.meta.url), "utf8"), bare);
+  const bareEngine = bare.window.ozkCustomerIntelligence;
+  assert.equal(bareEngine.buildInactivityAlert(keyResult, inactivityPlan(keyResult, []).insertRows).messages.length, 0, "test 116ب: الواجهة بلا منسِّق لا تتأثر");
+  assert.throws(() => bareEngine.buildInactivityAlert(keyResult, []), /telegram_format_unavailable/, "test 116ب: بلا منسِّق ⇒ خطأ صريح");
 }
 
 // 117) التنبيهات القائمة لم تتغيّر: لا كود جديد في buildAlertDrafts، والعقود 1..108 أعلاه خضراء.
@@ -3302,6 +3404,7 @@ const keyRow = (n) => keyResult.customers.find((row) => row.customerGuid === kGu
   });
   assert.equal(diagnostics.length, 0, "test 118: الدالة تُترجم بلا أخطاء صياغة");
   const engineSource = readText("supabase/functions/_shared/customer-intelligence.js");
+  const formatSource = readText("supabase/functions/_shared/telegram-format.js");
   const reports = keyReports();
   const bySource = { ameen_customer_invoices: reports.invoicesReport, ameen_customer_balances: reports.balancesReport };
 
@@ -3338,12 +3441,13 @@ const keyRow = (n) => keyResult.customers.find((row) => row.customerGuid === kGu
       static now() { return now.getTime(); }
     }
     const context = vm.createContext({
-      Response, Request, Headers, console, Promise, JSON, Math, Number, String, Object, Array, Map, Set, Infinity, isNaN,
+      Response, Request, Headers, console, Promise, JSON, Math, Number, String, Object, Array, Map, Set, Infinity, isNaN, Intl,
       Date: FixedDate,
       Deno: { env: { get: (name) => ({ SUPABASE_URL: "https://local.test", SUPABASE_SERVICE_ROLE_KEY: "service-test" }[name] || "") } },
       exports: {}
     });
     context.require = (specifier) => {
+      if (specifier === "../_shared/telegram-format.js") { vm.runInContext(formatSource, context); return {}; }
       if (specifier === "../_shared/customer-intelligence.js") { vm.runInContext(engineSource, context); return {}; }
       if (specifier.startsWith("npm:@supabase/supabase-js")) return { createClient: () => ({ from, rpc }) };
       throw new Error(`test 118: استيراد غير متوقع ${specifier}`);
@@ -3402,7 +3506,7 @@ const keyRow = (n) => keyResult.customers.find((row) => row.customerGuid === kGu
   assert.equal(stale.status, 200);
   assert.equal(stale.body.status, "stale_invoices");
   assert.equal(stale.calls.rpc.length, 1, "test 118: بلاغ واحد بأن البيانات قديمة");
-  assert.match(stale.calls.rpc[0].args.p_message, /تقرير الفواتير عمره 180 دقيقة/u);
+  assert.match(tf.stripBidi(stale.calls.rpc[0].args.p_message), /تقرير الفواتير عمره 180 دقيقة/u);
   assert.equal(stale.calls.upserts.length + stale.calls.deletes.length, 0, "test 118: لا مساس بالحالة من بيانات قديمة");
 
   const cleared = await runAlert({ state: [{ dedupe_key: `CUSTOMER_INACTIVE_5D:${kGuid(3)}:${k(20)}`, customer_guid: kGuid(3), customer_key: null, last_purchase_date: k(20) }] });
@@ -3410,7 +3514,7 @@ const keyRow = (n) => keyResult.customers.find((row) => row.customerGuid === kGu
 
   // البنية الثابتة: لا وصول للأمين، والجدول محمي، ولا تعديل على نظام تيليغرام القائم.
   const fn = readText("supabase/functions/customer-inactivity-alert/index.ts");
-  assert.match(fn, /import "\.\.\/_shared\/customer-intelligence\.js";/, "test 118: الدالة تحمّل المحرك نفسه");
+  assert.match(fn, /import "\.\.\/_shared\/telegram-format\.js";\nimport "\.\.\/_shared\/customer-intelligence\.js";/, "test 118: الدالة تحمّل المنسِّق ثم المحرك نفسه");
   assert.match(fn, /buildInactivityAlert\(/, "test 118: الخطة من المحرك لا من حساب ثانٍ");
   assert.ok(fn.indexOf('!== "live"') < fn.indexOf('admin.rpc("notify_telegram"'), "test 118: بوابة الوضع قبل أي إرسال");
   assert.doesNotMatch(fn, /AmnDb00|AMEEN_SQL|mssql|tedious|sqlcmd/i, "test 118: لا وصول للأمين");

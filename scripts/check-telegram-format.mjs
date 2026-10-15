@@ -195,7 +195,7 @@ test("غياب المنسِّق خطأ صريح لا رسالة بتنسيق آ�
 test("نسخة الخادم من المنسِّق تطابق src بايتاً ببايت، ولا parse_mode في أي مسار", () => {
   assert.equal(readFileSync("supabase/functions/_shared/telegram-format.js", "utf8"), readFileSync("src/telegram-format.js", "utf8"),
     "شغّل: cp src/telegram-format.js supabase/functions/_shared/");
-  for (const path of ["src/telegram-format.js", "src/stock-alert-priority.js", "supabase/functions/stock-priority-alert/index.ts", "scripts/stock-priority-alerts.mjs"]) {
+  for (const path of ["src/telegram-format.js", "src/stock-alert-priority.js", "supabase/functions/stock-priority-alert/index.ts", "scripts/stock-priority-alerts.mjs", "supabase/functions/customer-inactivity-alert/index.ts"]) {
     assert.doesNotMatch(readFileSync(path, "utf8").replace(/^\s*\/\/.*$/gm, ""), /parse_mode/, `${path}: الموزّع يرسل بلا parse_mode`);
   }
   assert.match(readFileSync("scripts/stock-priority-alerts.mjs", "utf8"), /import "\.\.\/src\/telegram-format\.js";\nimport "\.\.\/src\/stock-alert-priority\.js";/);
