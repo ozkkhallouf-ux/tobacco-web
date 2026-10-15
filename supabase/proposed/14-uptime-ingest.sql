@@ -280,7 +280,9 @@ begin
        or v_inc is null or v_inc !~ ('^' || v_target || ':[0-9]{1,15}$')
        or v_id is null or v_id !~ ('^' || v_inc || ':(down|recovered|reminder:(1h|6h|24h))$')
        or split_part(v_id, ':', 3) <> v_type
-       or jsonb_typeof(e -> 'at') is distinct from 'number' then
+       or jsonb_typeof(e -> 'at') is distinct from 'number'
+       or ((e -> 'upTicks') is not null and (v_type <> 'down' or jsonb_typeof(e -> 'upTicks') is distinct from 'number'
+           or (e ->> 'upTicks') !~ '^[0-9]{1,6}$')) then
       raise exception 'uptime_ingest: bad event %', left(coalesce(v_id, '?'), 80) using errcode = '22023';
     end if;
     v_label  := nullif(split_part(v_id, ':', 4), '');
@@ -307,12 +309,14 @@ begin
       else
         select * into v_row from private.uptime_incidents where target = v_target and closed_at is null for update;
         if v_row.recover_event is not null and v_at > v_row.recover_at
-           and to_timestamp(split_part(v_inc, ':', 2)::numeric / 1000) >= v_row.recover_at + interval '25 minutes' then
-          -- انقطاع ثانٍ مستقل بعد تعافٍ سجّله الـWorker صراحةً (طابور أُعيد بعد تعذّر Supabase: down A, recovered A, down B).
-          -- معرّف B = بداية أول فشل في انقطاعه. بين التعافي وتلك البداية فحوص كلها UP أو SUSPECT عاد UP،
-          -- وأقلها 4 دورات (25 دقيقة على دورة 5 دقائق) تضم دورتي UP على الأقل (3 إخفاقات متتالية = DOWN)
-          -- = نفس دليل التأكيد على دورتين في ٤أ. فتُختم A عند وقت تعافيها برسالتها، ويُفتح B بتنبيه مستقل.
-          -- أقرب من ذلك (تأرجح خلال نافذة التأكيد) يبقى اسماً بديلاً يلغي التعافي كما في الأسفل.
+           and to_timestamp(split_part(v_inc, ':', 2)::numeric / 1000) > v_row.recover_at
+           and coalesce((e ->> 'upTicks')::int, 0) >= 2 then
+          -- انقطاع ثانٍ مستقل بعد تعافٍ سجّله الـWorker صراحةً (مثلاً طابور أُعيد بعد تعذّر Supabase:
+          -- down A, recovered A, down B). upTicks = دورات فحص فعلية انتهت بحالة UP بين التعافي وبداية B،
+          -- يعدّها الـWorker مرة واحدة لكل دورة (التشغيل المكرر أو الأقدم مُتجاهَل). دورتان فأكثر = نفس دليل
+          -- التأكيد الحي في ٤أ (مرشّحة ثم مؤكِّدة)، فيتطابق الطابور مع المسار الحي: تُختم A عند وقت تعافيها
+          -- برسالتها ويُفتح B بتنبيه مستقل. أقل من دورتين (تأرجح، أو سباق رأى فيه تشغيل الموقع شغالاً وآخر
+          -- واقفاً) يبقى اسماً بديلاً يلغي التعافي كما في الأسفل: لا ✅ كاذبة، والتذكيرات مستمرة.
           update private.uptime_incidents set closed_at = v_row.recover_at where id = v_row.id and closed_at is null;
           if v_alertable and v_cfg.notify_enabled and v_row.down_notified then
             v_key := private.uptime_close_key(v_row.incident_key, 'recovered', v_row.recover_at);

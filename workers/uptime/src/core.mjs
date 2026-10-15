@@ -148,7 +148,8 @@ function replayDowns(st, fresh) {
     const id = `${inc.id}:down`;
     if (known.has(id)) continue;
     out.push({ id, type: 'down', target: name, incident: inc.id, severity: TARGETS[name].critical ? 'critical' : 'medium',
-      alertable: !!TARGETS[name].critical, at: inc.downAt, text: `${name} down (${inc.detail || 'fail'})`, detail: inc.detail || 'fail', replay: true });
+      alertable: !!TARGETS[name].critical, at: inc.downAt, text: `${name} down (${inc.detail || 'fail'})`, detail: inc.detail || 'fail',
+      upTicks: inc.upTicks || 0, replay: true });
   }
   return out;
 }

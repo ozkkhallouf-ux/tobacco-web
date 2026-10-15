@@ -659,49 +659,129 @@ $function$`;
     assert.equal(openCount(), 0);
   });
 
-  test('طابور بعد تعذّر Supabase: down A ثم recovered A ثم down B مستقل ⇒ تعافي A وتنبيه B، والتأرجح القريب يبقى انقطاعاً واحداً', () => {
-    const S = 1_900_000_000_000; const R = S + 20 * M; const MIN = 60_000;
-    // B بدأ بعد التعافي بـ 25 دقيقة على الأقل (دورتا UP مضمونتان) ⇒ انقطاعان، في طلب واحد أو طلبات متتالية
-    for (const split of [false, true]) {
+  // ── انقطاع ثانٍ مستقل بعد تعافٍ مسجّل (ملاحظتا Codex P1 على 9dd3efd و5de7624) ──
+  // upTicks مع down = دورات UP الفعلية بين التعافي وبداية الانقطاع الجديد. دورتان فأكثر ⇒ انقطاعان
+  // (نفس شرط التأكيد الحي)؛ أقل ⇒ انقطاع واحد مستمر. فالطابور بعد تعذّر Supabase يطابق المسار الحي.
+  test('down B بعد recovered A: upTicks ≥ 2 ⇒ تعافي A وتنبيه B بمعرّف مستقل؛ أقل أو غائب ⇒ انقطاع واحد', () => {
+    const S = 1_900_000_000_000; const R = S + 20 * M; const B = R + 5 * M;
+    const downB = (up) => ({ ...ev('site', B, 'down', B + 10 * M), ...(up === undefined ? {} : { upTicks: up }) });
+    for (const [up, split] of [[2, false], [3, true], [2, true]]) {
       reset(); setNotify(true);
-      const B = R + 25 * MIN;
-      const evs = [ev('site', S, 'down', S + 15 * M), ev('site', S, 'recovered', R), ev('site', B, 'down', B + 10 * M)];
-      // متتالية: كل حدث بطلب تشغيله (الـUP بين التعافي وB ضاعت طلباتها)
+      const evs = [ev('site', S, 'down', S + 15 * M), ev('site', S, 'recovered', R), downB(up)];
       const sched = [S + 15 * M, R, B + 10 * M]; const st = ['DOWN', 'UP', 'DOWN'];
       const outs = split
         ? evs.map((e, i) => ingest({ events: [e], scheduledTime: sched[i], targets: { site: st[i] } }).results[0].outcome)
         : ingest({ events: evs, scheduledTime: B + 11 * M, targets: { site: 'DOWN' } }).results.map((x) => x.outcome);
-      assert.deepEqual(outs, ['notified', 'recovery-pending', 'notified'], `split=${split}`);
-      assert.equal(count(`select count(*) from private.uptime_incidents`), 2, 'حادثتان');
+      const label = `upTicks=${up} split=${split}`;
+      assert.deepEqual(outs, ['notified', 'recovery-pending', 'notified'], label);
+      assert.equal(one(`select string_agg(incident_key || ':' || (closed_at is null), ',' order by id) from private.uptime_incidents`),
+        `site:${S}:false,site:${B}:true`, `${label}: حادثتان بمعرّفين مستقلين`);
       assert.equal(one(`select (extract(epoch from closed_at) * 1000)::bigint from private.uptime_incidents where incident_key = 'site:${S}'`), String(R));
-      assert.equal(one(`select incident_key from private.uptime_incidents where closed_at is null`), `site:${B}`);
-      assert.equal(recovered(), 1, 'رسالة تعافٍ واحدة لـ A');
-      assert.equal(outbox(), 3, 'down A + تعافي A + down B');
+      assert.equal(recovered(), 1); assert.equal(outbox(), 3, `${label}: down A + تعافي A + down B`);
       assert.equal(one(`select outcome || ',' || outbox_dedupe_key from private.uptime_events where type = 'recovered'`), `notified,uptime:site:${S}:recovered:${R}`);
-      ingest({ events: [ev('site', B, 'reminder:1h', B + 70 * M)], scheduledTime: B + 70 * M, targets: { site: 'DOWN' } });
-      assert.equal(outbox(), 4, 'تذكيرات B تعمل');
-      ingest({ events: [ev('site', B, 'recovered', B + 80 * M)], scheduledTime: B + 80 * M, targets: { site: 'UP' } });
-      ingest({ scheduledTime: B + 85 * M, targets: { site: 'UP' } }); ingest({ scheduledTime: B + 90 * M, targets: { site: 'UP' } });
-      assert.equal(recovered(), 2); assert.equal(openCount(), 0);
     }
-    // أقل من 25 دقيقة (قد تكون دورة UP واحدة فقط) ⇒ اسم بديل يلغي التعافي: لا ✅ ولا تنبيه ثانٍ
-    for (const gap of [5, 20, 24]) {
+    for (const up of [undefined, 0, 1]) {
       reset(); setNotify(true);
-      const B = R + gap * MIN;
-      const outs = ingest({ events: [ev('site', S, 'down', S + 15 * M), ev('site', S, 'recovered', R), ev('site', B, 'down', B + 10 * M)],
+      const outs = ingest({ events: [ev('site', S, 'down', S + 15 * M), ev('site', S, 'recovered', R), downB(up)],
         scheduledTime: B + 11 * M, targets: { site: 'DOWN' } }).results.map((x) => x.outcome);
-      assert.deepEqual(outs, ['notified', 'recovery-pending', 'suppressed:same-outage'], `gap=${gap}`);
+      assert.deepEqual(outs, ['notified', 'recovery-pending', 'suppressed:same-outage'], `upTicks=${up}`);
       assert.equal(count(`select count(*) from private.uptime_incidents`), 1);
-      assert.equal(one(`select recover_at is null from private.uptime_incidents`), 't');
-      assert.equal(outbox(), 1); assert.equal(recovered(), 0);
+      assert.equal(one(`select recover_at is null from private.uptime_incidents`), 't', 'التعافي أُلغي');
+      assert.equal(outbox(), 1); assert.equal(recovered(), 0, 'لا ✅ كاذبة');
     }
-    // تعافٍ من النبض وحده (ضياع KV، بلا حدث recovered) لا يُختم بهذا المسار: يبقى الاعتراض كما هو
-    reset(); setNotify(true);
-    ingest({ events: [ev('site', S, 'down', S + 15 * M)], scheduledTime: S + 15 * M, targets: { site: 'DOWN' } });
-    ingest({ scheduledTime: R, targets: { site: 'UP' } });
-    ingest({ events: [ev('site', R + 60 * M, 'down', R + 70 * M)], scheduledTime: R + 70 * M, targets: { site: 'DOWN' } });
-    assert.equal(count(`select count(*) from private.uptime_incidents`), 1); assert.equal(recovered(), 0);
+    // upTicks في غير down أو بقيمة غير صالحة ⇒ رفض الطلب كاملاً
+    reset();
+    for (const bad of [{ ...ev('site', S, 'recovered', R), upTicks: 2 }, downB(-1), downB(2.5), downB('2'), downB(10_000_000)]) {
+      rejects(() => ingest({ events: [bad] }), /bad event/);
+    }
   });
+
+  // سيناريو حقيقي عبر runOnce: انقطاع A، ثم الموقع شغال D دقيقة، ثم انقطاع جديد، ثم 13 دورة واقفة (تذكير 1h).
+  // queued: Supabase متعذّر من أول دورة UP حتى ثبوت الانقطاع الجديد ⇒ كل شيء يصل طابوراً.
+  // dup: كل دورة UP تشغيلان متزامنان (تكرار Cron). skip: دورة UP لم يشغّلها Cron (تأخر).
+  const flap = async (D, { queued = false, dup = false, skip = [] } = {}) => {
+    reset(); setNotify(true);
+    const h0 = raceHarness();
+    // فشل الإرسال يرمي بعد حفظ الحالة والطابور (ليظهر في سجل Cloudflare)؛ هنا هو المقصود
+    const h = { ...h0, run: (n, ok, o = {}) => h0.run(n, ok, o).catch((err) => {
+      if (!(o.rpcFail && /ingest failed/.test(err.message))) throw err;
+    }) };
+    let i = 0;
+    for (; i < 3; i++) await h.run(i, false);                              // DOWN A (تنبيه)
+    const upEnd = i + D / 5;
+    for (; i < upEnd; i++) {
+      if (skip.includes(i)) continue;
+      const o = { rpcFail: queued };
+      if (dup) await Promise.all([h.run(i, true, { ...o, putDelay: 50 }), h.run(i, true, o)]);
+      else await h.run(i, true, o);
+    }
+    for (const k = i + 3; i < k; i++) await h.run(i, false, { rpcFail: queued });   // انقطاع جديد يثبت
+    for (const k = i + 13; i < k; i++) await h.run(i, false);                      // Supabase عاد؛ الطابور يُفرَّغ
+    assertConsistent(h, `D=${D}`);
+    assert.equal(h.state().pending.length, 0, `D=${D}: الطابور فُرّغ`);
+    return h;
+  };
+  const reminders = () => count(`select count(*) from private.uptime_events where type = 'reminder' and outcome = 'notified'`);
+
+  test('تعافٍ لمدة 5/10/15/20/25 دقيقة ثم انقطاع جديد، حياً ومن الطابور ⇒ نفس النتيجة: فصل عند دورتي UP بعد التعافي فقط', async () => {
+    // D=5: نجاح واحد لا يُصدر recovered. D=10: recovered بلا دورة UP بعده. D=15: دورة واحدة. D≥20: دورتان ⇒ انقطاعان.
+    for (const D of [5, 10, 15, 20, 25]) {
+      const results = [];
+      for (const queued of [false, true]) {
+        await flap(D, { queued });
+        const separate = D >= 20;
+        const label = `D=${D} ${queued ? 'طابور' : 'حي'}`;
+        assert.equal(count(`select count(*) from private.uptime_incidents`), separate ? 2 : 1, `${label}: عدد الحوادث`);
+        assert.equal(openCount(), 1, `${label}: الانقطاع الحالي مفتوح`);
+        assert.equal(recovered(), separate ? 1 : 0, `${label}: ✅ فقط لتعافٍ مؤكد`);
+        assert.equal(count(`select count(*) from private.uptime_events where type = 'down' and outcome = 'notified'`), separate ? 2 : 1,
+          `${label}: تنبيه لكل انقطاع مستقل`);
+        if (separate) assert.equal(count(`select count(distinct canonical_incident) from private.uptime_events where type = 'down' and outcome = 'notified'`), 2);
+        assert.equal(reminders(), 1, `${label}: تذكير 1h للانقطاع المستمر لم يُكتم`);
+        results.push(one(`select string_agg(type || ':' || outcome, ',' order by at, event_id) from private.uptime_events`));
+      }
+      assert.equal(results[0], results[1], `D=${D}: الطابور يطابق المسار الحي حدثاً بحدث`);
+    }
+  });
+
+  test('تكرار Cron وتأخره في الطابور: كل دورة فعلية تُعدّ مرة واحدة، ولا تعافٍ كاذب ولا تذكير مكتوم', async () => {
+    for (const [D, opts, separate, label] of [
+      [15, { queued: true, dup: true }, false, 'تكرار كل دورة UP (15 دقيقة) لا يضاعف العدّ'],
+      [20, { queued: true, dup: true }, true, 'تكرار كل دورة UP (20 دقيقة) يبقى دورتين'],
+      [20, { queued: true, skip: [6] }, false, 'Cron فوّت دورة UP ⇒ دورة فعلية واحدة بعد التعافي'],
+      [25, { queued: true, skip: [6] }, true, 'Cron فوّت دورة من ثلاث ⇒ دورتان فعليتان'],
+      [20, { dup: true }, true, 'حي مع تكرار'],
+    ]) {
+      await flap(D, opts);
+      assert.equal(count(`select count(*) from private.uptime_incidents`), separate ? 2 : 1, label);
+      assert.equal(recovered(), separate ? 1 : 0, `${label}: ✅`);
+      assert.equal(openCount(), 1, `${label}: الانقطاع الحالي مفتوح`);
+      assert.equal(reminders(), 1, `${label}: التذكير`);
+    }
+  });
+
+  test('نبضات متأخرة أو مكررة لا تُحتسب في تأكيد التعافي، وطلب down متأخر يعترض', async () => {
+    reset(); setNotify(true);
+    const S = 1_900_000_000_000; const R = S + 20 * M;
+    ingest({ events: [ev('site', S, 'down', S + 15 * M)], scheduledTime: S + 15 * M, targets: { site: 'DOWN' } });
+    ingest({ events: [ev('site', S, 'recovered', R)], scheduledTime: R, targets: { site: 'UP' } });
+    const upR1 = body({ scheduledTime: R + M, targets: { site: 'UP' } });
+    psql(ingestAs('anon', upR1, sign(upR1)));                                  // مرشّحة
+    // نفس النبضة مرتين (replay) تُرفض؛ ونبضة UP أقدم أو مساوية تصل متأخرة لا تؤكد
+    rejects(() => psql(ingestAs('anon', upR1, sign(upR1))), /replayed/);
+    ingest({ scheduledTime: R + M, targets: { site: 'UP' } });
+    ingest({ scheduledTime: R, targets: { site: 'UP' } });
+    ingest({ scheduledTime: R - M, targets: { site: 'UP' } });
+    assert.equal(openCount(), 1, 'لا تأكيد من نبضة مكررة أو قديمة'); assert.equal(recovered(), 0);
+    // نبضة DOWN متأخرة (أحدث من التعافي) تعترض حتى لو وصلت بعد المرشّحة
+    ingest({ scheduledTime: R + M / 2, targets: { site: 'DOWN' } });
+    assert.equal(one(`select recover_at is null from private.uptime_incidents`), 't');
+    ingest({ scheduledTime: R + 2 * M, targets: { site: 'UP' } });
+    ingest({ scheduledTime: R + 3 * M, targets: { site: 'UP' } });
+    assert.equal(recovered(), 0, 'بعد الإلغاء يبدأ التعافي من جديد: تعليق ثم مرشّحة، ولم تأتِ المؤكِّدة بعد');
+    assert.equal(openCount(), 1);
+  });
+
 
   // ── دورة تأكيد التعافي (ملاحظة Codex P1 على 600878e) ──
   // ترتيبات الوصول إلى Supabase × الكتابة في KV لزوج تشغيلات واحد

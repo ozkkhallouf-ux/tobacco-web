@@ -22,7 +22,8 @@ export async function hmacHex(secret, text) {
 }
 
 // الحقول التي يقبلها الخادم فقط (قرار «قابل للتنبيه» على الخادم، لا يُرسل من هنا)
-export const toWire = (e) => ({ id: e.id, type: e.type, target: e.target, incident: e.incident, at: e.at, detail: e.detail ?? null });
+export const toWire = (e) => ({ id: e.id, type: e.type, target: e.target, incident: e.incident, at: e.at, detail: e.detail ?? null,
+  ...(e.type === 'down' && Number.isInteger(e.upTicks) ? { upTicks: e.upTicks } : {}) });
 
 // نص الطلب الحرفي يُوقَّع كما هو، والخادم يتحقق من التوقيع على النص نفسه قبل تحليله.
 // targets (اختياري): حالة كل هدف الآن في آلة الحالة؛ الخادم يُغلق بها حادثة مفتوحة لم يصله تعافيها (ضياع KV).

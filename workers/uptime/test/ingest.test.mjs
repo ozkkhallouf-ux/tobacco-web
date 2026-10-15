@@ -77,7 +77,8 @@ test('الطلب: المفتاح العام فقط في الترويسات، ل�
   assert.equal(init.headers.apikey, 'sb_publishable_x');
   assert.equal(init.headers.authorization, undefined);
   const ev = JSON.parse(JSON.parse(init.body).p_payload).events[0];
-  assert.deepEqual(Object.keys(ev).sort(), ['at', 'detail', 'id', 'incident', 'target', 'type']);
+  assert.deepEqual(Object.keys(ev).sort(), ['at', 'detail', 'id', 'incident', 'target', 'type', 'upTicks']);
+  assert.equal(ev.upTicks, 0, 'down: دورات UP منذ آخر تعافٍ (لا تعافٍ سابق)');
   assert.equal(ev.detail, 'http-503');
 });
 test('نبض حياة في كل تشغيل حتى بلا أحداث، وscheduledTime الحقيقي (تأخر Cron لا يغيّر شيئاً)', async () => {
