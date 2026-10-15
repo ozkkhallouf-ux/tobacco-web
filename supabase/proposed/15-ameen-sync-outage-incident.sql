@@ -385,9 +385,16 @@ revoke all on function private.sync_outage_step(text,timestamptz,boolean) from p
 -- لكل جهاز، مفتاح لا يمرّ بالملخص). نجاح دورة يصفّر العدّاد.
 create or replace function private.sync_outage_tick(p_now timestamptz default now())
 returns text language plpgsql security definer set search_path = private, public, pg_temp as $$
-declare d record; res text := ''; r text; err text; cnt int;
+declare d record; res text := ''; r text; err text; cnt int; last_ok timestamptz;
 begin
- delete from private.sync_outage_incidents where ended_at < p_now - interval '180 days';
+ -- التنظيف ثانوي: فشله (قفل/مهلة/انحراف مخطط) لا يوقف الكشف.
+ begin
+  delete from private.sync_outage_incidents where ended_at < p_now - interval '180 days';
+ exception when others then
+  raise warning 'sync_outage_tick: cleanup failed: %', sqlerrm;
+ end;
+ -- أي فشل خارج معالج الجهاز (قراءة الإعداد، أو معالج الخطأ نفسه) يُبلَّغ هنا، فلا يصمت الكاشف.
+ begin
  for d in select device, label from private.sync_outage_config where enabled order by device loop
   begin
    r := private.sync_outage_step(d.device, p_now, true);
@@ -413,6 +420,27 @@ begin
   end;
   res := res || case when res = '' then '' else ',' end || d.device || '=' || r;
  end loop;
+ exception when others then
+  err := sqlerrm;
+  raise warning 'sync_outage_tick: tick failed: %', err;
+  -- نفس عتبة الأجهزة (3 دورات = لا دورة ناجحة خلال 15 دقيقة). تعذّر قراءة الإعداد نفسه ⇒ تبليغ فوري.
+  begin
+   select max(c.last_tick_ok_at) into last_ok from private.sync_outage_config c where c.enabled;
+  exception when others then last_ok := null;
+  end;
+  if last_ok is null or last_ok < now() - interval '15 minutes' then
+   begin
+    perform public.notify_telegram('sync_outage_detector_failed',
+      '🚨 كاشف انقطاع مزامنة الأمين معطّل' || chr(10)
+      || chr(8207) || '• الدورة نفسها تفشل؛ إنذار الانقطاع لن يصل حتى يُصلَح.' || chr(10)
+      || chr(8207) || '• الخطأ: ' || left(err, 200),
+      'sync-outage-detector-failed:tick', 360);
+   exception when others then
+    raise warning 'sync_outage_tick: tick-failure notify failed: %', sqlerrm;
+   end;
+  end if;
+  res := 'tick=error';
+ end;
  return res;
 end $$;
 revoke all on function private.sync_outage_tick(timestamptz) from public, anon, authenticated;

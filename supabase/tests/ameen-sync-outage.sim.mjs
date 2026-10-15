@@ -418,6 +418,32 @@ await scenario('عطل الكاشف نفسه: 3 دورات فاشلة ⇒ تنب
   await tick(addMin(S, 35));
   assert.equal((await one(db, `select consecutive_errors c from private.sync_outage_config where device='OZK2026'`)).c, 0);
 });
+await scenario('فشل خارج معالج الجهاز: التنظيف يُتجاوز، وفشل قراءة الإعداد يُبلَّغ بعد 15 دقيقة بلا نجاح', async () => {
+  await reset();
+  const S = L('2026-11-02 10:00');
+  await seedAll(db, S);
+  // التنظيف يفشل ⇒ الكشف يكمل والدورة تنجح
+  await db.exec(`create or replace function private.sim_block_delete() returns trigger language plpgsql as $f$ begin raise exception 'locked'; end $f$;
+    create trigger sim_block_delete before delete on private.sync_outage_incidents for each statement execute function private.sim_block_delete();`);
+  try {
+    assert.match(await tick(S), /^OZK2026=(?!error)/);
+  } finally { await db.exec(`drop trigger sim_block_delete on private.sync_outage_incidents; drop function private.sim_block_delete();`); }
+  const failed = () => q(db, `select dedupe_key, message from public.telegram_outbox where event_type='sync_outage_detector_failed'`);
+  // قراءة الإعداد تفشل: دورة ناجحة حديثة ⇒ لا تبليغ بعد؛ بلا نجاح منذ 15 دقيقة ⇒ تبليغ واحد
+  await db.exec(`alter table private.sync_outage_config rename column label to label_x`);
+  try {
+    assert.equal(await tick(addMin(S, 5)), 'tick=error');
+    assert.equal((await failed()).length, 0);
+    await db.exec(`update private.sync_outage_config set last_tick_ok_at = now() - interval '16 minutes'`);
+    assert.equal(await tick(addMin(S, 10)), 'tick=error');
+    assert.equal(await tick(addMin(S, 15)), 'tick=error');
+  } finally { await db.exec(`alter table private.sync_outage_config rename column label_x to label`); }
+  const rows = await failed();
+  assert.equal(rows.length, 1, JSON.stringify(rows));
+  assert.equal(rows[0].dedupe_key, 'sync-outage-detector-failed:tick');
+  assert.match(rows[0].message, /كاشف انقطاع مزامنة الأمين معطّل/);
+  assert.match(await tick(addMin(S, 20)), /^OZK2026=(?!error)/);
+});
 await scenario('انقطاعان منفصلان بفارق ساعتين ⇒ تنبيهان (لكل حادثة واحد)', async () => {
   const S = L('2026-11-02 10:00');
   await reset(); await seedAll(db, S);
