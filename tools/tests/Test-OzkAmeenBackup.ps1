@@ -413,7 +413,16 @@ try {
         $src = Get-Content -LiteralPath $p -Raw -Encoding UTF8
         $code = ($src -split "`n" | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
         $leaf = Split-Path -Leaf $p
-        Assert-True ($code -notmatch '(?i)Remove-Item|\bdel\b|rmdir|\[System\.IO\.File\]::Delete|Directory\]::Delete|Unregister-ScheduledTask|Set-ScheduledTask|Disable-ScheduledTask') ($leaf + ': لا حذف ولا تعديل مهام موجودة')
+        Assert-True ($code -notmatch '(?i)Remove-Item|\bdel\b|rmdir|Directory\]::Delete|Unregister-ScheduledTask|Set-ScheduledTask|Disable-ScheduledTask') ($leaf + ': لا Remove-Item ولا حذف مجلدات ولا تعديل مهام موجودة')
+        $deletes = @([regex]::Matches($code, '\[System\.IO\.File\]::Delete')).Count
+        if ($leaf -eq 'ozk-ameen-backup.ps1') {
+            Assert-True ($deletes -eq 1) ($leaf + ': موضع حذف ملف واحد فقط (FileRemover)')
+            $removerCalls = @([regex]::Matches($code, '& \$script:FileRemover')).Count
+            $removeFn = [regex]::Match($code, '(?s)function Remove-OzkOwnRawFiles.*?\n}').Value
+            Assert-True ($removerCalls -eq 1 -and $removeFn -match '& \$script:FileRemover') ($leaf + ': FileRemover يُستدعى من Remove-OzkOwnRawFiles وحدها')
+        } else {
+            Assert-True ($deletes -eq 0) ($leaf + ': لا حذف ملفات إطلاقاً')
+        }
         Assert-True ($code -notmatch '(?i)Copy-Item[^\r\n]*-Force|Move-Item') ($leaf + ': لا Copy-Item -Force ولا Move-Item')
         Assert-True ($code -notmatch '(?i)RESTORE\s+DATABASE') ($leaf + ': لا RESTORE DATABASE')
         Assert-True ($code -notmatch 'xox[bpa]-[A-Za-z0-9]') ($leaf + ': لا توكن Slack مكتوب')
@@ -421,6 +430,113 @@ try {
     }
     $code = (Get-Content -LiteralPath $scriptPath -Raw -Encoding UTF8)
     Assert-True ($code -match '\[System\.IO\.File\]::Copy\(\$Source, \$Destination, \$false\)') 'النسخ الافتراضي يرفض الاستبدال (overwrite=false)'
+
+    Write-Host '== 20) K1-A: إزالة الخام لهذا التشغيل فقط، بعد تحقق مزدوج، ومعطّلة افتراضياً =='
+    $script:Secrets.Clear(); $script:SlackMode = 'ok'
+    $realCopier = $script:FileCopier; $realZip = $script:ZipCreator; $realSql = $script:SqlInvoker
+    function Get-RawCount([string]$Dir) { if (-not (Test-Path -LiteralPath $Dir)) { return 0 } return @(Get-ChildItem -LiteralPath $Dir -Filter '*.bak' -File).Count }
+    function Read-Status([string]$State) { return (Get-Content -LiteralPath (Join-Path $State 'status.json') -Raw -Encoding UTF8 | ConvertFrom-Json) }
+
+    # (أ) نجاح كامل + -PruneOwnRaw ⇒ تُزال الخام الثلاث فقط، ويبقى zip وmanifest على C: وD:
+    $t = New-TestRoots 'k1-ok'
+    # بقايا تشغيل سابق منقطع + ملف غريب داخل مجلد التشغيل الحالي ⇒ يجب ألا تُلمس
+    $oldRun = Join-Path (Join-Path $t.Local '2026') '2026-10-01_230000'
+    New-Item -ItemType Directory -Force -Path $oldRun | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $oldRun ('AmnDb002_2026-10-01_230000.bak')), 'OLD-INTERRUPTED')
+    [System.IO.File]::WriteAllText((Join-Path $t.Local 'stray.bak'), 'STRAY')
+    Reset-Telegram
+    $r = Invoke-OzkAmeenBackup -Execute -PruneOwnRaw -NoSlack -LocalRoot $t.Local -ExternalRoot $t.External -StateDir $t.State -NotifyScript $fakeNotify -Now $fixedNow
+    Assert-True ($r.status -eq 'ok' -and $r.prune -eq 'done' -and @($r.pruned).Count -eq 3) 'K1-A: status ok، prune=done، 3 ملفات خام'
+    Assert-True ((Get-RawCount $r.runDir) -eq 0) 'K1-A: لا ملفات .bak في مجلد التشغيل بعد الإزالة'
+    Assert-True ((Test-Path -LiteralPath (Join-Path $r.runDir $r.zip.zip)) -and (Test-Path -LiteralPath (Join-Path $r.runDir 'manifest.json'))) 'K1-A: zip وmanifest باقيان على C:'
+    Assert-True ((Test-Path -LiteralPath (Join-Path $r.externalDir $r.zip.zip)) -and (Test-Path -LiteralPath (Join-Path $r.externalDir 'manifest.json'))) 'K1-A: zip وmanifest باقيان على الخارجي'
+    Assert-True ((Get-OzkSha256 (Join-Path $r.runDir $r.zip.zip)) -eq $r.zip.sha256) 'K1-A: zip على C: سليم بعد الإزالة'
+    Assert-True ([System.IO.File]::ReadAllText((Join-Path $oldRun 'AmnDb002_2026-10-01_230000.bak')) -eq 'OLD-INTERRUPTED') 'K1-A: ملفات تشغيل سابق منقطع لم تُلمس'
+    Assert-True ([System.IO.File]::ReadAllText((Join-Path $t.Local 'stray.bak')) -eq 'STRAY') 'K1-A: ملف خارج مجلد التشغيل لم يُلمس'
+    $st = Read-Status $t.State
+    Assert-True ($st.prune -eq 'done' -and @($st.pruned).Count -eq 3) 'K1-A: status.json يسجّل الإزالة'
+    Assert-True ($st.notify -eq 'telegram' -and $r.notify -eq 'telegram') 'إصلاح notify: status.json يسجّل telegram بعد نجاح الإرسال'
+
+    # (ب) الافتراضي بلا -PruneOwnRaw ⇒ لا إزالة إطلاقاً
+    $t = New-TestRoots 'k1-default'
+    $r = Invoke-OzkAmeenBackup -Execute -NoSlack -LocalRoot $t.Local -ExternalRoot $t.External -StateDir $t.State -Now $fixedNow
+    Assert-True ($r.status -eq 'ok' -and $r.prune -eq 'disabled' -and (Get-RawCount $r.runDir) -eq 3) 'الافتراضي: prune=disabled والخام الثلاث باقية'
+
+    # (ج) فشل VERIFYONLY ⇒ لا إزالة
+    $t = New-TestRoots 'k1-verify'
+    $script:FailVerifyFor = 'AmnDb001'
+    $r = Invoke-OzkAmeenBackup -Execute -PruneOwnRaw -NoSlack -LocalRoot $t.Local -ExternalRoot $t.External -StateDir $t.State -Now $fixedNow
+    $script:FailVerifyFor = ''
+    Assert-True ($r.status -eq 'failed' -and $r.prune -like 'skipped*' -and (Get-RawCount $r.runDir) -eq 3) 'فشل VERIFYONLY ⇒ لا إزالة، والخام باقية'
+
+    # (د) فشل الضغط ⇒ لا إزالة
+    $t = New-TestRoots 'k1-zip'
+    $script:ZipCreator = { param([string]$ZipPath, $Files, [string]$SourceDir) throw 'mock: compression failed' }
+    $r = Invoke-OzkAmeenBackup -Execute -PruneOwnRaw -NoSlack -LocalRoot $t.Local -ExternalRoot $t.External -StateDir $t.State -Now $fixedNow
+    $script:ZipCreator = $realZip
+    Assert-True ($r.status -eq 'failed' -and ((@($r.errors) -join ' ') -match 'compression failed') -and $r.prune -like 'skipped*' -and (Get-RawCount $r.runDir) -eq 3) 'فشل الضغط ⇒ failed ولا إزالة'
+
+    # (هـ) فشل النسخ إلى الخارجي ⇒ لا إزالة
+    $t = New-TestRoots 'k1-extfail'
+    $script:FileCopier = { param([string]$Source, [string]$Destination) throw 'mock: USB write error' }
+    $r = Invoke-OzkAmeenBackup -Execute -PruneOwnRaw -NoSlack -LocalRoot $t.Local -ExternalRoot $t.External -StateDir $t.State -Now $fixedNow
+    $script:FileCopier = $realCopier
+    Assert-True ($r.status -eq 'failed' -and $r.external -eq 'failed' -and $r.prune -like 'skipped*' -and (Get-RawCount $r.runDir) -eq 3) 'فشل النسخ للخارجي ⇒ لا إزالة'
+
+    # (و) عدم تطابق SHA256 على الخارجي ⇒ لا إزالة
+    $t = New-TestRoots 'k1-sha'
+    $script:FileCopier = { param([string]$Source, [string]$Destination) [System.IO.File]::Copy($Source, $Destination, $false); if ($Destination -like '*.zip') { [System.IO.File]::AppendAllText($Destination, 'x') } }
+    $r = Invoke-OzkAmeenBackup -Execute -PruneOwnRaw -NoSlack -LocalRoot $t.Local -ExternalRoot $t.External -StateDir $t.State -Now $fixedNow
+    $script:FileCopier = $realCopier
+    Assert-True ($r.status -eq 'failed' -and $r.prune -like 'skipped*' -and (Get-RawCount $r.runDir) -eq 3) 'SHA256 لا يطابق ⇒ لا إزالة'
+
+    # (ز) تغيّر الـzip على C: بعد النقل ⇒ إعادة التحقق تمنع الإزالة
+    $t = New-TestRoots 'k1-zipC'
+    $script:FileCopier = { param([string]$Source, [string]$Destination) [System.IO.File]::Copy($Source, $Destination, $false); if ($Source -like '*.zip') { [System.IO.File]::AppendAllText($Source, 'x') } }
+    $r = Invoke-OzkAmeenBackup -Execute -PruneOwnRaw -NoSlack -LocalRoot $t.Local -ExternalRoot $t.External -StateDir $t.State -Now $fixedNow
+    $script:FileCopier = $realCopier
+    Assert-True ($r.prune -match 'skipped' -and $r.prune -match 'C:' -and (Get-RawCount $r.runDir) -eq 3) 'zip على C: تغيّر ⇒ skipped ولا إزالة'
+
+    # (ح) ملف خام عُدِّل بعد التسجيل ⇒ الإزالة تتوقف قبل حذف أي ملف
+    $t = New-TestRoots 'k1-tamper'
+    $script:FileCopier = { param([string]$Source, [string]$Destination) [System.IO.File]::Copy($Source, $Destination, $false); $dir = Split-Path -Parent $Source; $raw = Join-Path $dir ('AmnConfig_' + (Split-Path -Leaf $dir) + '.bak'); if (Test-Path -LiteralPath $raw) { [System.IO.File]::AppendAllText($raw, 'T') } }
+    $r = Invoke-OzkAmeenBackup -Execute -PruneOwnRaw -NoSlack -LocalRoot $t.Local -ExternalRoot $t.External -StateDir $t.State -Now $fixedNow
+    $script:FileCopier = $realCopier
+    Assert-True ($r.status -eq 'ok' -and $r.prune -like 'failed*' -and (Get-RawCount $r.runDir) -eq 3) 'بصمة خام تغيّرت ⇒ prune failed، ولا ملف حُذف (الكل أو لا شيء)'
+
+    # (ط) فشل Telegram على نسخة ناجحة ⇒ الإزالة تمضي، وstatus.json يسجّل notify=none بصدق
+    $t = New-TestRoots 'k1-tgfail'
+    $quietFail = Join-Path $base 'quiet-notify-k1.ps1'
+    [System.IO.File]::WriteAllText($quietFail, 'param([string]$Message,[string]$EventType,[string]$DedupeKey,[int]$DedupeMinutes) Write-Host "TELEGRAM-NOTIFY FAILED: mock"; exit 0')
+    $r = Invoke-OzkAmeenBackup -Execute -PruneOwnRaw -NoSlack -LocalRoot $t.Local -ExternalRoot $t.External -StateDir $t.State -NotifyScript $quietFail -Now $fixedNow
+    $st = Read-Status $t.State
+    Assert-True ($r.status -eq 'ok' -and $r.prune -eq 'done' -and $r.notify -eq 'none' -and $st.notify -eq 'none') 'فشل Telegram ⇒ notify=none في النتيجة وstatus.json، والنسخ ناجح'
+
+    # (ي) انقطاع أثناء التشغيل (استثناء غير متوقع في manifest) ⇒ failed، ولا إزالة، والخام باقية
+    $t = New-TestRoots 'k1-interrupt'
+    $realJW = $script:JsonWriter
+    $script:JsonWriter = { param([string]$Path, $Object) if ($Path -like '*manifest.json') { throw 'mock: interrupted' }; & $realJW $Path $Object }
+    $r = Invoke-OzkAmeenBackup -Execute -PruneOwnRaw -NoSlack -LocalRoot $t.Local -ExternalRoot $t.External -StateDir $t.State -Now $fixedNow
+    $script:JsonWriter = $realJW
+    Assert-True ($r.status -eq 'failed' -and $r.prune -ne 'done' -and (Get-RawCount $r.runDir) -eq 3) 'انقطاع قبل الاكتمال ⇒ failed ولا إزالة'
+
+    # (ك) بلا قرص خارجي ⇒ local-only ولا إزالة
+    $t = New-TestRoots 'k1-noext'
+    $r = Invoke-OzkAmeenBackup -Execute -PruneOwnRaw -NoSlack -LocalRoot $t.Local -StateDir $t.State -Now $fixedNow
+    Assert-True ($r.status -eq 'local-only' -and $r.prune -like 'skipped*' -and (Get-RawCount $r.runDir) -eq 3) 'بلا خارجي ⇒ local-only ولا إزالة'
+
+    # (ل) Remove-OzkOwnRawFiles ترفض اسماً أو مساراً غير متوقع ولا تحذف شيئاً
+    $t = New-TestRoots 'k1-guard'
+    $gd = Join-Path $t.Local 'g'; New-Item -ItemType Directory -Force -Path $gd | Out-Null
+    $good = Join-Path $gd 'AmnDb002_s1.bak'; [System.IO.File]::WriteAllText($good, 'G')
+    $outside = Join-Path $t.Local 'AmnDb001_s1.bak'; [System.IO.File]::WriteAllText($outside, 'O')
+    $fake = [pscustomobject]@{ runDir = $gd; stamp = 's1'; files = @(
+        [pscustomobject]@{ database = 'AmnDb002'; file = 'AmnDb002_s1.bak'; sha256 = (Get-OzkSha256 $good) },
+        [pscustomobject]@{ database = 'AmnDb001'; file = '../AmnDb001_s1.bak'; sha256 = (Get-OzkSha256 $outside) }) }
+    Assert-Throws { Remove-OzkOwnRawFiles $fake } 'مسار خارج مجلد التشغيل مرفوض'
+    Assert-True ((Test-Path -LiteralPath $good) -and (Test-Path -LiteralPath $outside)) 'رفض أي ملف ⇒ لا حذف لأي ملف'
+    $fake2 = [pscustomobject]@{ runDir = $gd; stamp = 's1'; files = @([pscustomobject]@{ database = 'master'; file = 'master_s1.bak'; sha256 = 'x' }) }
+    Assert-Throws { Remove-OzkOwnRawFiles $fake2 } 'قاعدة خارج القائمة مرفوضة'
 
     Write-Host '== 19) سكربت إعداد المهمة: DryRun افتراضي ولا تعديل لمهام موجودة =='
     . $registerPath
