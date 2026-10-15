@@ -380,6 +380,23 @@ await scenario('التعافي ثم عودة الانقطاع خلال 15 دقي
   assert.equal(inc[0].reopened, 1);
   assert.equal((await alerts()).length, 1);
 });
+await scenario('عطل الكاشف نفسه: 3 دورات فاشلة ⇒ تنبيه فوري واحد، ونجاح دورة يصفّر العدّاد', async () => {
+  await reset();
+  const S = L('2026-11-02 10:00');
+  await seedAll(db, S);
+  await db.exec(`alter table public.khalil_audit_sync_heartbeat rename to khalil_x`);
+  const res = [];
+  try {
+    for (let m = 0; m <= 30; m += 5) res.push(await tick(addMin(S, m)));
+  } finally { await db.exec(`alter table public.khalil_x rename to khalil_audit_sync_heartbeat`); }
+  assert.ok(res.every((r) => r === 'OZK2026=error'), res.join(','));
+  const rows = await q(db, `select dedupe_key, message from public.telegram_outbox where event_type='sync_outage_detector_failed'`);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].dedupe_key, 'sync-outage-detector-failed:OZK2026');
+  assert.match(rows[0].message, /كاشف انقطاع مزامنة الأمين معطّل/);
+  await tick(addMin(S, 35));
+  assert.equal((await one(db, `select consecutive_errors c from private.sync_outage_config where device='OZK2026'`)).c, 0);
+});
 await scenario('انقطاعان منفصلان بفارق ساعتين ⇒ تنبيهان (لكل حادثة واحد)', async () => {
   const S = L('2026-11-02 10:00');
   await reset(); await seedAll(db, S);

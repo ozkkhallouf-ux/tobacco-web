@@ -106,6 +106,9 @@ create table if not exists private.sync_outage_config (
   alert_grace_minutes integer not null default 10 check (alert_grace_minutes between 0 and 60),
   merge_gap_minutes integer not null default 15 check (merge_gap_minutes between 0 and 240),
   send_recovery boolean not null default true,
+  -- صحة الكاشف نفسه (تُحدَّث في sync_outage_tick)
+  consecutive_errors integer not null default 0,
+  last_error text,
   check (business_end > business_start)
 );
 alter table private.sync_outage_config enable row level security;
@@ -364,17 +367,35 @@ begin
 end $$;
 revoke all on function private.sync_outage_step(text,timestamptz,boolean) from public, anon, authenticated;
 
--- دورة pg_cron: كل جهاز مفعَّل. فشل جهاز لا يوقف غيره (ويُسجَّل تحذيراً).
+-- دورة pg_cron: كل جهاز مفعَّل. فشل جهاز لا يوقف غيره، **ولا يبقى صامتاً**: الكاشف المعطوب يعني أن
+-- إنذار الانقطاع نفسه معطّل، فبعد 3 دورات فاشلة متتالية (15 د) يُرسل تنبيه فوري مستقل (مرة كل 6 ساعات
+-- لكل جهاز، مفتاح لا يمرّ بالملخص). نجاح دورة يصفّر العدّاد.
 create or replace function private.sync_outage_tick(p_now timestamptz default now())
 returns text language plpgsql security definer set search_path = private, public, pg_temp as $$
-declare d record; res text := ''; r text;
+declare d record; res text := ''; r text; err text; cnt int;
 begin
  delete from private.sync_outage_incidents where ended_at < p_now - interval '180 days';
- for d in select device from private.sync_outage_config where enabled order by device loop
+ for d in select device, label from private.sync_outage_config where enabled order by device loop
   begin
    r := private.sync_outage_step(d.device, p_now, true);
+   update private.sync_outage_config set consecutive_errors = 0, last_error = null
+    where device = d.device and consecutive_errors <> 0;
   exception when others then
-   raise warning 'sync_outage_tick: % failed: %', d.device, sqlerrm;
+   err := sqlerrm;
+   raise warning 'sync_outage_tick: % failed: %', d.device, err;
+   update private.sync_outage_config set consecutive_errors = consecutive_errors + 1, last_error = left(err, 300)
+    where device = d.device returning consecutive_errors into cnt;
+   if cnt >= 3 then
+    begin
+     perform public.notify_telegram('sync_outage_detector_failed',
+       '🚨 كاشف انقطاع مزامنة الأمين معطّل — ' || private.ops_fmt_iso(d.device) || chr(10)
+       || chr(8207) || '• فشل ' || private.ops_fmt_iso(cnt::text) || ' دورات متتالية؛ إنذار الانقطاع لن يصل حتى يُصلَح.' || chr(10)
+       || chr(8207) || '• الخطأ: ' || left(err, 200),
+       'sync-outage-detector-failed:' || d.device, 360);
+    exception when others then
+     raise warning 'sync_outage_tick: detector-failure notify failed for %: %', d.device, sqlerrm;
+    end;
+   end if;
    r := 'error';
   end;
   res := res || case when res = '' then '' else ',' end || d.device || '=' || r;
