@@ -1,11 +1,15 @@
-// ozk-uptime — مراقبة الموقع كل 5 دقائق. المرحلة 1: DRY_RUN فقط، بلا أسرار ولا Telegram ولا service_role.
-import { step, emptyState, EVENTS_KEEP } from './state-machine.mjs';
+// ozk-uptime — مراقبة الموقع كل 5 دقائق. DRY_RUN افتراضياً: لا طلب إلا فحصي ozktobacco.com.
+// DRY_RUN="0" مع إعداد كامل ⇒ الأحداث ونبض الحياة تُرسل موقَّعة إلى Supabase (ingest.mjs)؛ لا Telegram ولا service_role هنا.
+import { step, emptyState, EVENTS_KEEP, TARGETS } from './state-machine.mjs';
+import { ingestConfig, sendBatch } from './ingest.mjs';
 
 export const SITE_URL = 'https://ozktobacco.com/';
 export const BULLETIN_URL = 'https://ozktobacco.com/public/downloads/price-list-usd.html';
 const STATE_KEY = 'state:v1';
 const TIMEOUT_MS = 10_000;
 const MAX_BODY = 64 * 1024;
+export const PENDING_MAX = 100; // حدّ أمان فقط (حدثان لكل انقطاع عادةً)؛ القابل للتنبيه لا يُسقط قبل غيره
+export const INGEST_BATCH_MAX = 50; // = حدّ الخادم لكل طلب؛ الباقي يبقى معلّقاً للتشغيل التالي (لا رفض للدفعة كلها)
 
 // DRY_RUN مفعّل ما لم يُضبط صراحةً على "0"
 export const isDryRun = (env) => String(env?.DRY_RUN ?? '1') !== '0';
@@ -39,7 +43,10 @@ async function loadState(kv, log) {
   if (raw == null) return { state: emptyState(), lost: true };
   try {
     const s = typeof raw === 'string' ? JSON.parse(raw) : raw;
-    if (s && s.v === 1 && s.targets && Array.isArray(s.events)) return { state: s, lost: false };
+    if (s && s.v === 1 && s.targets && Array.isArray(s.events)) {
+      if (!Array.isArray(s.pending)) s.pending = []; // حالة أقدم من قائمة المعلّق
+      return { state: s, lost: false };
+    }
   } catch {}
   log(JSON.stringify({ t: 'ozk-uptime', warn: 'state-corrupt-reset' }));
   return { state: emptyState(), lost: true };
@@ -69,18 +76,107 @@ export async function runOnce({ env = {}, now, fetchImpl = fetch, kv = env.UPTIM
   }
   const out = step(loaded.state, now, { site, bulletin });
   if (out.ignored) { log(JSON.stringify({ t: 'ozk-uptime', ignored: true, now })); return out; }
-  // المرحلة 1: لا مرسِل في الكود إطلاقاً؛ الأحداث تُسجَّل فقط. (لا Telegram/Supabase ولا أي fetch غير الفحصين)
-  // التسليم قبل الحفظ: إن فشل الحفظ يُعاد توليد نفس المعرّفات الحتمية في التشغيل التالي (at-least-once، والمستلم يزيل التكرار بالمعرّف)
-  const delivered = out.events.map((e) => ({ ...e, status: dry ? 'delivered' : 'pending', dryRun: dry }));
-  out.state.events = [...out.state.events, ...delivered].slice(-EVENTS_KEEP);
-  for (const e of delivered) log(JSON.stringify({ t: 'ozk-uptime-event', ...e }));
+  const st = out.state;
+  let ingest = null;
+  let events;
+  if (dry) {
+    // DRY_RUN: تسجيل فقط، بلا أي طلب. المعلّق (إن وُجد من وضع سابق) يبقى كما هو ولا يُسقط.
+    // لكن حدث الحادثة الحية المعلّقة نفسها (تعافيها أو تذكيرها) يلحق بها في المعلّق، وإلا عاد الوضع الحي
+    // فأرسل down قديماً بلا تعافيه وبقيت الحادثة مفتوحة على الخادم.
+    const liveIncidents = new Set(st.pending.map((e) => e.incident));
+    events = out.events.map((e) => (liveIncidents.has(e.incident)
+      ? { ...e, status: 'pending', dryRun: false }
+      : { ...e, status: 'dry-run', dryRun: true }));
+    st.pending = capPending(mergePending(st.pending, events.filter((e) => !e.dryRun)), log);
+    st.events = [...st.events, ...events.filter((e) => e.dryRun)].slice(-EVENTS_KEEP);
+  } else {
+    ({ events, ingest } = await deliverLive(st, out.events, { env, fetchImpl, now, log }));
+  }
+  for (const e of events) log(JSON.stringify({ t: 'ozk-uptime-event', ...e }));
+  // الحفظ بعد الإرسال وفي كتابة واحدة: فشل الحفظ يُبقي الحالة القديمة فتتكرر الانتقالات بالمعرّفات نفسها
+  // (الخادم يرجع duplicate)، ونجاحه يحفظ الانتقال والمعلّق معاً.
   let saved = true;
-  if (kv) saved = await saveState(kv, out.state, log);
-  log(JSON.stringify({ t: 'ozk-uptime', dry, stateLost: loaded.lost, saved,
+  if (kv) saved = await saveState(kv, st, log);
+  log(JSON.stringify({ t: 'ozk-uptime', dry, stateLost: loaded.lost, saved, pending: st.pending.length,
+    ingest: ingest && (ingest.ok ? 'ok' : ingest.reason),
     site: { ok: site.ok, detail: site.detail, ms: site.ms }, bulletin: { ok: bulletin.ok, detail: bulletin.detail, ms: bulletin.ms },
-    status: out.state.targets.site?.status }));
+    status: st.targets.site?.status }));
   if (!saved) throw new Error('ozk-uptime: storage write failed');
-  return { ...out, events: delivered };
+  // بعد الحفظ: فشل الإرسال (أو DRY_RUN=0 بلا إعداد كامل) يظهر خطأً في سجلات Cloudflare، والحدث محفوظ معلّقاً
+  if (ingest && !ingest.ok) throw new Error(`ozk-uptime: ingest failed (${ingest.reason})`);
+  return { ...out, events, ingest };
+}
+
+// at-least-once: الجديد يُضاف إلى المعلّق، ولا يخرج حدث من المعلّق إلا بإقرار صريح من الخادم.
+// يعدّل st.pending وst.events، ويرجع أحداث هذا التشغيل بحالاتها ونتيجة الإرسال.
+async function deliverLive(st, fresh, { env, fetchImpl, now, log }) {
+  const batch = mergePending(st.pending, [...fresh, ...replayDowns(st, fresh)]);
+  const cfg = ingestConfig(env);
+  // يُرسل حتى بلا أحداث: هذا هو نبض الحياة الذي يراقبه الخادم (توقف > 20 دقيقة ⇒ تنبيه)
+  const sent = batch.slice(0, INGEST_BATCH_MAX);
+  const ingest = cfg
+    ? await sendBatch(cfg, { fetchImpl, events: sent, scheduledTime: now, targets: targetStatuses(st, batch.slice(INGEST_BATCH_MAX)) })
+    : { ok: false, reason: 'not-configured' };
+  const acked = [];
+  st.pending = [];
+  for (const e of batch) {
+    const outcome = ingest.ok ? ingest.outcomes.get(e.id) : undefined; // ما لم يُرسل أو لم يُقرّ به يبقى معلّقاً
+    if (outcome) acked.push({ ...e, status: outcome === 'duplicate' ? 'duplicate' : 'accepted', outcome, dryRun: false });
+    else st.pending.push({ ...e, status: 'pending', dryRun: false });
+  }
+  for (const e of acked) {
+    const inc = e.type === 'down' && st.targets[e.target]?.incident;
+    if (inc && inc.id === e.incident) inc.delivered = true; // الخادم يعرف هذا الانقطاع
+  }
+  st.pending = capPending(st.pending, log);
+  st.events = [...st.events, ...acked].slice(-EVENTS_KEEP);
+  const byId = new Map([...acked, ...st.pending].map((e) => [e.id, e]));
+  const events = fresh.map((e) => byId.get(e.id) || { ...e, status: 'pending', dryRun: false });
+  if (!ingest.ok) log(JSON.stringify({ t: 'ozk-uptime', error: 'ingest-failed', reason: ingest.reason, pending: st.pending.length }));
+  return { events, ingest };
+}
+
+// انقطاع جارٍ لم يُقرّ الخادم بحدث down له (بدأ في DRY_RUN ثم فُعّل الإرسال والهدف ما زال واقفاً، أو حالة
+// أقدم بلا علامة): يُعاد حدث down بمعرّفه ووقته الأصليين، وإلا كُتمت تذكيراته وتعافيه (لا حادثة مفتوحة على
+// الخادم). التكرار آمن: الخادم يرجع duplicate لمعرّف معروف.
+function replayDowns(st, fresh) {
+  const known = new Set([...st.pending, ...fresh].map((e) => e.id));
+  const out = [];
+  for (const [name, t] of Object.entries(st.targets)) {
+    const inc = t.incident;
+    if (!inc || inc.delivered || !TARGETS[name]) continue;
+    const id = `${inc.id}:down`;
+    if (known.has(id)) continue;
+    out.push({ id, type: 'down', target: name, incident: inc.id, severity: TARGETS[name].critical ? 'critical' : 'medium',
+      alertable: !!TARGETS[name].critical, at: inc.downAt, text: `${name} down (${inc.detail || 'fail'})`, detail: inc.detail || 'fail',
+      upTicks: inc.upTicks || 0, replay: true });
+  }
+  return out;
+}
+
+// حالة كل هدف الآن، تُرسل مع النبض ليُغلق الخادم حادثة مفتوحة لم يصله تعافيها (ضياع حالة KV).
+// هدف بقي له حدث لم يُرسل في هذه الدفعة (> 50) تُحجب حالته حتى يصل كل ما قبله.
+function targetStatuses(st, unsent) {
+  const held = new Set(unsent.map((e) => e.target));
+  const out = {};
+  for (const [name, t] of Object.entries(st.targets)) if (!held.has(name)) out[name] = t.status;
+  return out;
+}
+
+// دمج بلا تكرار بالمعرّف، مرتباً زمنياً (down قبل recovered)
+export function mergePending(pending, fresh) {
+  const m = new Map();
+  for (const e of [...(pending || []), ...(fresh || [])]) if (!m.has(e.id)) m.set(e.id, e);
+  return [...m.values()].sort((a, b) => a.at - b.at);
+}
+
+// تجاوز الحدّ (انقطاع Supabase طويل جداً): يُسقط الأقدم من غير القابل للتنبيه أولاً، مع سجل خطأ ظاهر
+export function capPending(pending, log = () => {}) {
+  if (pending.length <= PENDING_MAX) return pending;
+  const keep = [...pending].sort((a, b) => (b.alertable - a.alertable) || (b.at - a.at)).slice(0, PENDING_MAX);
+  const ids = new Set(keep.map((e) => e.id));
+  log(JSON.stringify({ t: 'ozk-uptime', error: 'pending-overflow', dropped: pending.filter((e) => !ids.has(e.id)).map((e) => e.id) }));
+  return pending.filter((e) => ids.has(e.id));
 }
 
 export const handler = {

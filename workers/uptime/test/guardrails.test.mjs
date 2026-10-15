@@ -38,14 +38,23 @@ test('wrangler.toml: ربط KV واحد صحيح (UPTIME_STATE → ozk-uptime-st
 test('لا أسرار ولا رموز حساب في ملفات الـWorker', () => {
   // المعرّف الوحيد المسموح بصيغة 32-hex هو معرّف KV في wrangler.toml (ليس سراً)؛ يُفحص أعلاه بدقة.
   const kvId = 'f64f49cc48b54d23adfff9923be09dad';
-  const files = ['../wrangler.toml', '../README.md', '../src/index.mjs', '../src/core.mjs', '../src/state-machine.mjs'];
+  const files = ['../wrangler.toml', '../README.md', '../src/index.mjs', '../src/core.mjs', '../src/state-machine.mjs', '../src/ingest.mjs'];
   const bad = /(eyJ[\w-]{20,}\.|\bsb_secret_|\bsbp_|\d{8,10}:AA[\w-]{30,}|\bghp_[\w]{20,}|github_pat_|-----BEGIN|\b[0-9a-f]{32}\b)/;
   for (const f of files) assert.doesNotMatch(read(f).replaceAll(kvId, 'KV_ID'), bad, f);
 });
-test('الشيفرة بلا Telegram/Supabase/service_role وبلا قراءة أسرار', () => {
+test('الشيفرة بلا Telegram/service_role؛ Supabase وسرّ التوقيع محصوران في ingest.mjs', () => {
   for (const f of readdirSync(here('../src/'))) {
     const code = read(`../src/${f}`).split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
-    assert.doesNotMatch(code, /telegram|supabase|sendMessage|service_role|notify_telegram|env\.[A-Z_]*(TOKEN|KEY|SECRET)/i, f);
+    assert.doesNotMatch(code, /telegram|sendMessage|service_role|notify_telegram|outbox/i, f);
+    const secrets = [...code.matchAll(/env\??\.([A-Z_]*(TOKEN|KEY|SECRET)[A-Z_]*)/g)].map((m) => m[1]);
+    if (f === 'ingest.mjs') {
+      assert.deepEqual([...new Set(secrets)].sort(), ['SUPABASE_PUBLISHABLE_KEY', 'UPTIME_HMAC_SECRET'], 'المفتاح العام وسرّ التوقيع فقط');
+      assert.match(code, /\/rest\/v1\/rpc\/uptime_ingest'/, 'نقطة واحدة فقط: public.uptime_ingest');
+      assert.equal((code.match(/fetchImpl\(/g) || []).length, 1, 'طلب صادر واحد فقط');
+    } else {
+      assert.doesNotMatch(code, /supabase/i, f);
+      assert.deepEqual(secrets, [], f);
+    }
   }
 });
 test('لا نشر تلقائي لـCloudflare في أي workflow بالمستودع', () => {
@@ -54,4 +63,10 @@ test('لا نشر تلقائي لـCloudflare في أي workflow بالمستو�
     const y = readFileSync(new URL(f, dir), 'utf8').split('\n').filter((l) => !l.trim().startsWith('#')).join('\n');
     assert.doesNotMatch(y, /wrangler-action|wrangler(@[\w.]+)?\s+(deploy|publish|versions\s+upload)|CLOUDFLARE_(API_TOKEN|ACCOUNT_ID)|cloudflare\/(pages|wrangler)/i, f);
   }
+});
+test('عقد الدفعة: حدّ الـWorker لكل طلب يساوي حدّ الخادم في proposed/14', async () => {
+  const { INGEST_BATCH_MAX } = await import('../src/core.mjs');
+  const sql = readFileSync(here('../../../supabase/proposed/14-uptime-ingest.sql'), 'utf8');
+  const limit = Number(sql.match(/jsonb_array_length\(j -> 'events'\) > (\d+)/)?.[1]);
+  assert.equal(INGEST_BATCH_MAX, limit);
 });

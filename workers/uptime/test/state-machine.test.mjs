@@ -58,3 +58,30 @@ test('فجوة طويلة بين التشغيلات لا تُنشئ حدثاً �
   const s = run([OK]).s;
   assert.equal(step(s, T0 + 3 * 3_600_000, OK).events.length, 0);
 });
+
+test('upTicks: دورات UP بعد التعافي تُعدّ مرة واحدة لكل دورة، ويحملها down التالي', () => {
+  const ups = (n) => Array(n).fill(OK);
+  // recovered عند ثاني نجاح؛ بعده n دورات UP ثم انقطاع جديد
+  for (const n of [0, 1, 2, 3]) {
+    const { all } = run([BAD, BAD, BAD, OK, OK, ...ups(n), BAD, BAD, BAD]);
+    const downs = all.filter((e) => e.type === 'down');
+    assert.equal(downs.length, 2, `n=${n}`);
+    assert.equal(downs[0].upTicks, 0);
+    assert.equal(downs[1].upTicks, n, `n=${n}: دورات UP بين التعافي والانقطاع الجديد`);
+    assert.notEqual(downs[0].incident, downs[1].incident);
+  }
+  // SUSPECT عاد UP يُعدّ دورة UP؛ الإخفاق لا يُعدّ
+  const blip = run([BAD, BAD, BAD, OK, OK, OK, BAD, OK, BAD, BAD, BAD]).all.filter((e) => e.type === 'down');
+  assert.equal(blip[1].upTicks, 2);
+});
+test('upTicks: تشغيل مكرر لنفس الموعد أو أقدم لا يزيد العدّ', () => {
+  let s = emptyState();
+  const at = (i, r) => { const o = step(s, T0 + i * M, r); if (!o.ignored) s = o.state; return o; };
+  [BAD, BAD, BAD, OK, OK].forEach((r, i) => at(i, r));       // تعافٍ عند الدورة 4
+  at(5, OK);
+  assert.equal(at(5, OK).ignored, true, 'تكرار Cron');
+  assert.equal(at(3, OK).ignored, true, 'نبضة أقدم');
+  assert.equal(s.targets.site.upTicks, 1);
+  at(7, OK);                                                     // تأخر Cron: دورة فعلية واحدة
+  assert.equal(s.targets.site.upTicks, 2);
+});
