@@ -953,6 +953,97 @@ $function$`;
     assert.equal(count(`select count(*) from private.uptime_incidents`), 1);
   });
 
+  test('إيقاف الإرسال مؤقتاً: تعافٍ أو إعادة فتح أثناءه ⇒ رسالة واحدة تسوّي الحالة عند إعادة التفعيل', () => {
+    const last = () => one(`select message from public.telegram_outbox order by id desc limit 1`);
+    const fixes = () => count(`select count(*) from public.telegram_outbox where message like '⚠️ تصحيح%'`);
+    const confirm = (t) => { ingest({ scheduledTime: t, targets: { site: 'UP' } }); ingest({ scheduledTime: t + M, targets: { site: 'UP' } }); };
+
+    // ١) انقطاع مُبلَّغ، ثم تعافٍ مؤكَّد والإرسال مقفل ⇒ ✅ واحدة عند إعادة التفعيل بمفتاح الإغلاق نفسه
+    reset(); setNotify(true);
+    let { S, R } = pendingIncident();
+    assert.equal(outbox(), 1);
+    setNotify(false);
+    confirm(R + M);
+    assert.equal(openCount(), 0, 'أُغلقت بصمت');
+    assert.equal(outbox(), 1, 'لا رسالة والإرسال مقفل');
+    ingest({ scheduledTime: R + 3 * M, targets: { site: 'UP' } });
+    assert.equal(outbox(), 1);
+    setNotify(true);
+    ingest({ scheduledTime: R + 4 * M, targets: { site: 'UP' } });
+    assert.equal(recovered(), 1, 'التعافي لم يضِع');
+    assert.equal(count(`select count(*) from public.telegram_outbox where dedupe_key = 'uptime:site:${S}:recovered:${R}'`), 1);
+    assert.equal(one(`select outcome from private.uptime_events where type = 'recovered'`), 'notified');
+    ingest({ scheduledTime: R + 5 * M, targets: { site: 'UP' } });
+    assert.equal(outbox(), 2, 'لا تكرار');
+    const r = ingest({ events: [ev('site', R + 6 * M, 'down', R + 8 * M)], scheduledTime: R + 8 * M, targets: { site: 'DOWN' } });
+    assert.equal(r.results[0].outcome, 'notified', 'الانقطاع التالي مستقل');
+
+    // ٢) ✅ أُرسلت، ثم أُعيد فتح الحادثة والإرسال مقفل ⇒ تصحيح واحد عند إعادة التفعيل، والتذكيرات والتعافي الحقيقي تستمر
+    reset(); setNotify(true);
+    ({ S, R } = pendingIncident());
+    confirm(R + M);
+    assert.equal(recovered(), 1);
+    setNotify(false);
+    ingest({ scheduledTime: R + 3 * M, targets: { site: 'DOWN' } });
+    assert.equal(openCount(), 1, 'أُعيد فتحها');
+    assert.equal(fixes(), 0, 'لا تصحيح والإرسال مقفل');
+    setNotify(true);
+    ingest({ scheduledTime: R + 4 * M, targets: { site: 'DOWN' } });
+    assert.equal(fixes(), 1, 'تصحيح واحد عند إعادة التفعيل');
+    assert.match(last(), /^⚠️ تصحيح/);
+    ingest({ scheduledTime: R + 5 * M, targets: { site: 'DOWN' } });
+    assert.equal(fixes(), 1, 'لا تكرار');
+    assert.equal(ingest({ events: [ev('site', S, 'reminder:1h', S + 62 * M)], scheduledTime: S + 62 * M, targets: { site: 'DOWN' } }).results[0].outcome, 'notified');
+    ingest({ scheduledTime: S + 70 * M, targets: { site: 'UP' } });
+    confirm(S + 71 * M);
+    assert.equal(recovered(), 2, 'تعافٍ حقيقي واحد بمفتاح جديد');
+
+    // ٣) أُغلقت ثم أُعيد فتحها، كلاهما والإرسال مقفل ⇒ لا شيء عند التفعيل (آخر ما بلغ المالك 🔴 وما زال صحيحاً)
+    reset(); setNotify(true);
+    ({ S, R } = pendingIncident());
+    setNotify(false);
+    confirm(R + M);
+    ingest({ scheduledTime: R + 3 * M, targets: { site: 'DOWN' } });
+    setNotify(true);
+    ingest({ scheduledTime: R + 4 * M, targets: { site: 'DOWN' } });
+    assert.equal(outbox(), 1, 'لا ✅ ولا تصحيح');
+    assert.equal(ingest({ events: [ev('site', S, 'reminder:1h', S + 62 * M)], scheduledTime: S + 62 * M, targets: { site: 'DOWN' } }).results[0].outcome, 'notified');
+
+    // ٤) ✅ أُرسلت، ثم أُعيد فتحها وأُغلقت ثانيةً والإرسال مقفل ⇒ لا شيء (آخر ما بلغ المالك ✅ وما زال صحيحاً)
+    reset(); setNotify(true);
+    ({ S, R } = pendingIncident());
+    confirm(R + M);
+    setNotify(false);
+    ingest({ scheduledTime: R + 3 * M, targets: { site: 'DOWN' } });
+    ingest({ scheduledTime: R + 4 * M, targets: { site: 'UP' } });
+    confirm(R + 5 * M);
+    assert.equal(openCount(), 0);
+    setNotify(true);
+    ingest({ scheduledTime: R + 7 * M, targets: { site: 'UP' } });
+    assert.equal(outbox(), 2, 'لا ✅ مكررة ولا تصحيح');
+
+    // ٥) down B مستقل بعد recovered A (upTicks ≥ 2) والإرسال مقفل ⇒ عند التفعيل: ✅ لـA ثم 🔴 لـB بالترتيب
+    reset(); setNotify(true);
+    ({ S, R } = pendingIncident());
+    setNotify(false);
+    const B = R + 3 * M;
+    ingest({ events: [{ ...ev('site', B, 'down', B + 2 * M), upTicks: 2 }], scheduledTime: B + 2 * M, targets: { site: 'DOWN' } });
+    assert.equal(count(`select count(*) from private.uptime_incidents`), 2);
+    assert.equal(outbox(), 1);
+    setNotify(true);
+    ingest({ scheduledTime: B + 3 * M, targets: { site: 'DOWN' } });
+    assert.deepEqual(psql(`select left(message, 1) from public.telegram_outbox order by id`).split('\n'), ['🔴', '✅', '🔴']);
+    assert.equal(count(`select count(*) from public.telegram_outbox where dedupe_key = 'uptime:site:${S}:recovered:${R}'`), 1);
+
+    // ٦) حادثة لم يُبلَّغ انقطاعها (ظل) وانتهت والإرسال مقفل ⇒ لا ✅ عند التفعيل
+    reset();
+    ({ S, R } = pendingIncident());
+    confirm(R + M);
+    setNotify(true);
+    ingest({ scheduledTime: R + 3 * M, targets: { site: 'UP' } });
+    assert.equal(outbox(), 0);
+  });
+
   test('التراجع: يزيل كل كائنات 14 ولا يمسّ telegram_outbox، ويرفض إن كان المراقب مجدولاً', () => {
     const rowsBefore = count(`select count(*) from public.telegram_outbox`);
     psql(`create schema cron; create table cron.job(jobid serial, jobname text, command text);

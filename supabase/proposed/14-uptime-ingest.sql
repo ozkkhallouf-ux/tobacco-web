@@ -66,6 +66,9 @@ create table if not exists private.uptime_incidents (
   opened_at     timestamptz not null default now(),
   closed_at     timestamptz,
   down_notified boolean not null default false,
+  -- آخر ما بلغ المالك عن هذه الحادثة رسالة تعافٍ ✅. إغلاق والإرسال مقفل يتركها false فيُرسل ✅ عند إعادة التفعيل (٤ب)،
+  -- وإعادة فتح والإرسال مقفل تُبقيها true فيُرسل التصحيح عند إعادة التفعيل (٤ب): لا تبقى رسالة قديمة مضلِّلة.
+  recovery_notified boolean not null default false,
   reminders     text[] not null default '{}',     -- تذكيرات أُرسلت (1h/6h/24h)
   -- تعافٍ مُعلَّق: إشارة تعافٍ وصلت (حدث recovered أو نبض بحالة UP) ولم تُؤكَّد بعد. التأكيد على دورتين:
   -- دورة مرشّحة أحدث من التعافي قال فيها الـWorker UP، ثم دورة أحدث منها تقول UP. وأي تشغيل يقول DOWN/RECOVERING
@@ -127,6 +130,11 @@ as $$
       '✅ عاد الموقع للعمل' || chr(10) ||
       'مدة الانقطاع: نحو ' || greatest(1, round(extract(epoch from (p_at - p_opened)) / 60))::int || ' دقيقة' || chr(10) ||
       'الوقت: ' || to_char(p_at at time zone 'Asia/Damascus', 'YYYY-MM-DD HH24:MI') || ' (دمشق)' || chr(10) ||
+      'المصدر: مراقب Cloudflare (ozk-uptime)'
+    when 'corrected' then
+      '⚠️ تصحيح: الموقع ما زال لا يستجيب' || chr(10) ||
+      'رسالة التعافي السابقة لم تتأكد؛ الانقطاع مستمر' || chr(10) ||
+      'منذ: ' || to_char(p_opened at time zone 'Asia/Damascus', 'YYYY-MM-DD HH24:MI') || ' (دمشق)' || chr(10) ||
       'المصدر: مراقب Cloudflare (ozk-uptime)'
   end
 $$;
@@ -324,6 +332,7 @@ begin
               private.uptime_message('recovered', null, null, v_row.recover_at, v_row.opened_at), v_key);
             update private.uptime_events set outcome = 'notified', outbox_dedupe_key = v_key
              where event_id = v_row.recover_event;
+            update private.uptime_incidents set recovery_notified = true where id = v_row.id;
             v_key := null;
           else
             update private.uptime_events set outcome = 'recorded' where event_id = v_row.recover_event;
@@ -422,12 +431,11 @@ begin
             update private.uptime_incidents
                set closed_at = null, recover_at = null, recover_event = null, confirm_tick = null, reopened = reopened + 1
              where id = v_row.id;
-            if v_target = 'site' and v_cfg.notify_enabled and v_row.down_notified then
+            -- التصحيح فقط لتعافٍ بلغ المالك؛ والإرسال مقفل ⇒ يبقى recovery_notified ويُرسل عند إعادة التفعيل (٤ب)
+            if v_target = 'site' and v_cfg.notify_enabled and v_row.recovery_notified then
+              update private.uptime_incidents set recovery_notified = false where id = v_row.id;
               perform private.uptime_enqueue(
-                '⚠️ تصحيح: الموقع ما زال لا يستجيب' || chr(10) ||
-                'رسالة التعافي السابقة لم تتأكد؛ الانقطاع مستمر' || chr(10) ||
-                'منذ: ' || to_char(v_row.opened_at at time zone 'Asia/Damascus', 'YYYY-MM-DD HH24:MI') || ' (دمشق)' || chr(10) ||
-                'المصدر: مراقب Cloudflare (ozk-uptime)',
+                private.uptime_message('corrected', null, null, null, v_row.opened_at),
                 private.uptime_close_key(v_row.incident_key, 'reopened', v_row.closed_at));
             end if;
           end if;
@@ -451,6 +459,7 @@ begin
             private.uptime_message('recovered', null, null, v_row.recover_at, v_row.opened_at), v_key);
           update private.uptime_events set outcome = 'notified', outbox_dedupe_key = v_key
            where event_id = v_row.recover_event;
+          update private.uptime_incidents set recovery_notified = true where id = v_row.id;
         else
           update private.uptime_events set outcome = 'recorded' where event_id = v_row.recover_event;
         end if;
@@ -460,8 +469,33 @@ begin
 
   -- ٤ب) ترقية حادثة فُتحت أثناء الظل: إن فُعّل الإرسال والحادثة ما زالت مفتوحة بلا تنبيه، يُرسل تنبيه
   --     الانقطاع الآن (مرة واحدة، بنفس مفتاح down الأصلي)؛ وإلا تُكتم تذكيراتها وتعافيها فيضيع أول انقطاع بعد التفعيل.
+  --     وتسوية ما تغيّر والإرسال مقفل (تراجع طارئ) لحادثة بلغ المالكَ انقطاعُها: إغلاق ⇒ ✅ واحدة بمفتاح الإغلاق
+  --     نفسه (closed_at = وقت التعافي)، وإعادة فتح بعد ✅ مُرسلة ⇒ تصحيح واحد. فلا يبقى «🔴» أو «✅» قديم مضلِّل.
   if v_cfg.notify_enabled then
     perform pg_advisory_xact_lock(hashtext('ozk-uptime:site'));
+    for v_row in
+      select * from private.uptime_incidents
+       where target = 'site' and closed_at is not null and down_notified and not recovery_notified
+       order by closed_at
+       for update
+    loop
+      v_key := private.uptime_close_key(v_row.incident_key, 'recovered', v_row.closed_at);
+      perform private.uptime_enqueue(
+        private.uptime_message('recovered', null, null, v_row.closed_at, v_row.opened_at), v_key);
+      update private.uptime_incidents set recovery_notified = true where id = v_row.id;
+      update private.uptime_events set outcome = 'notified', outbox_dedupe_key = v_key
+       where event_id = v_row.recover_event;
+    end loop;
+    for v_row in
+      select * from private.uptime_incidents
+       where target = 'site' and closed_at is null and recovery_notified
+       for update
+    loop
+      perform private.uptime_enqueue(
+        private.uptime_message('corrected', null, null, null, v_row.opened_at),
+        'uptime:' || v_row.incident_key || ':reopened:r' || v_row.reopened);
+      update private.uptime_incidents set recovery_notified = false where id = v_row.id;
+    end loop;
     for v_row in
       select * from private.uptime_incidents
        where target = 'site' and closed_at is null and not down_notified and recover_at is null
