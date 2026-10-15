@@ -224,6 +224,8 @@ begin
   end if;
 
   select * into v_cfg from private.uptime_config where id = 1;
+  -- قفل الطلب: طلبان متزامنان يُسلسلان هنا (حتى قبل أول نبض)، فيقرأ الثاني ما ثبّته الأول
+  perform pg_advisory_xact_lock(hashtext('ozk-uptime:request'));
   select last_scheduled_at into v_prev_sched from private.uptime_heartbeat where id = 1;
 
   -- ٣) نبض الحياة: ساعة الخادم، رتيب (لا يعيده طلب متأخر إلى الوراء)
@@ -325,8 +327,9 @@ begin
 
   -- ٤أ) مطابقة الحالة: الـWorker يقول إن الهدف UP والخادم عنده حادثة مفتوحة له ⇒ تعافٍ لم يصل
   --     (ضياع حالة KV قبل إرسال recovered). تُغلق، وإلا عُدّ الانقطاع التالي اسماً بديلاً لها فكُتم تنبيهه.
-  --     طلب أقدم من آخر طلب مقبول (cron متأخر) لا يُطابِق، كي لا يُغلق حادثة أحدث منه.
-  if v_sched is not null and (v_prev_sched is null or v_sched >= v_prev_sched) then
+  --     يُطابِق فقط طلب أحدث تماماً من آخر طلب مقبول: لا cron متأخر، ولا تشغيل مكرر لنفس الدقيقة
+  --     اختلف فحصه (وإلا أغلق حادثة فتحها التشغيل الآخر برسالة تعافٍ كاذبة).
+  if v_sched is not null and (v_prev_sched is null or v_sched > v_prev_sched) then
     for v_target in select t.key from jsonb_each_text(coalesce(j -> 'targets', '{}'::jsonb)) t where t.value = 'UP' loop
       perform pg_advisory_xact_lock(hashtext('ozk-uptime:' || v_target));
       select * into v_row from private.uptime_incidents

@@ -288,6 +288,24 @@ $function$`;
     assert.equal(outbox(), 0);
   });
 
+  test('تشغيلان لنفس الدقيقة اختلف فحصهما: UP لا يُغلق حادثة فتحها DOWN (لا تعافٍ كاذب)', async () => {
+    reset(); setNotify(true);
+    const tick = Date.now();
+    ingest({ events: [ev('site', tick - 600_000, 'down', tick)], scheduledTime: tick, targets: { site: 'DOWN' } });
+    ingest({ scheduledTime: tick, targets: { site: 'UP' } });
+    assert.equal(count(`select count(*) from private.uptime_incidents where closed_at is null`), 1, 'ما زالت مفتوحة');
+    assert.equal(outbox(), 1, 'لا رسالة تعافٍ');
+    // متزامنان فعلاً: الثاني ينتظر قفل النبض ويقرأ ما ثبّته الأول
+    reset(); setNotify(true);
+    const t2 = Date.now() + 1;
+    const pd = body({ events: [ev('site', t2 - 600_000, 'down', t2)], scheduledTime: t2, targets: { site: 'DOWN' } });
+    const pu = body({ scheduledTime: t2, targets: { site: 'UP' } });
+    await Promise.all([psqlAsync(ingestAs('anon', pd, sign(pd))), psqlAsync(ingestAs('anon', pu, sign(pu)))]);
+    const open = count(`select count(*) from private.uptime_incidents where closed_at is null`);
+    assert.equal(open, 1, 'أيّاً كان الترتيب تبقى الحادثة مفتوحة');
+    assert.equal(outbox(), 1);
+  });
+
   test('حقل targets غير صالح يُرفض', () => {
     reset();
     for (const targets of [[], { site: 'up' }, { other: 'UP' }, { site: 1 }]) {
