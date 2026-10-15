@@ -97,3 +97,22 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\tests\Test-OzkAmee
 ```
 
 بلا SQL حقيقي وبلا Task Scheduler وبلا رسائل: كل الاستدعاءات بدائل وهمية في مجلد مؤقت. يعمل في وظيفة `ps51-compat` على Windows PowerShell 5.1.
+
+## مراقب الصحة — `ozk-ameen-backup-monitor.ps1` (M2)
+
+مراقب **قراءة فقط** يحلّ محل `TOBACCO Ameen Backup Pull` و`TOBACCO Ameen Backup Monitor`. القديمان يراقبان `C:\ProgramData\OZK-TOBACCO\AmeenBackups` الذي لم يعد النظام الجديد يكتب فيه.
+
+| المستوى | متى |
+|---|---|
+| `SUCCESS` | آخر تشغيل **للموعد المتوقع** (أمس/اليوم 23:00) نجح: `status/local/external=ok`، والقواعد الثلاث مُتحقَّقة، وZIP وmanifest على C: سليمان، وSHA256 على القرص الخارجي يطابق، والقرص هو `34AD-2E92` بملف العلامة، والمساحة ≥ 40 GB |
+| `WARNING` | `local-only`، أو القرص الخارجي غير موصول الآن، أو مساحة بين 20 و40 GB |
+| `FAILURE` | لم تعمل المهمة في موعدها (حتى لو كانت نسخة الأمس أحدث من 26 ساعة)، أو نسخة أقدم من 26 ساعة، أو حالة failed، أو قاعدة مفقودة، أو ZIP/manifest مفقود أو لا يطابق، أو قرص خاطئ، أو علامة مفقودة، أو مساحة أقل من 20 GB، أو مهمة غير مسجّلة/معطّلة، أو تشغيل تجاوز المهلة الآمنة (90 دقيقة)، أو status.json تالف |
+| `PENDING` | المهمة ما زالت تعمل ضمن المهلة، أو لم يمضِ 15 دقيقة على الموعد: لا حكم ولا تنبيه |
+
+- **التنبيه** عبر `-NotifyScript`، ولا يُعدّ واصلاً إلا بسطر `TELEGRAM-NOTIFY OK`. إن لم يصل تُحفظ الحادثة في `monitor-state.json` (`pending`) ويُعاد الإرسال في الفحص التالي.
+- **منع التكرار:** تنبيه عند أول تشغيل، أو تغيّر المستوى (ومنه «عادت سليمة»)، أو تغيّر الأسباب، أو استمرار WARNING/FAILURE أكثر من 12 ساعة (`-RepeatHours`).
+- **بلا `-NotifyScript`:** تقييم وسجل فقط، ولا تُمسّ حالة التنبيهات.
+- يكتب فقط `monitor-state.json` و`logs\monitor-<yyyy-MM>.log` في `-StateDir`. لا يحذف ولا ينقل ولا ينسخ ملفات، ولا SQL (يفحصه الاختبار).
+- رموز الخروج: `0` SUCCESS/PENDING، `1` FAILURE، `2` WARNING، `3` عطل في المراقب.
+
+**المهمة:** `register-ozk-ameen-backup-monitor-task.ps1`، DryRun افتراضياً. مع `-Apply -AppRoot <app\commit>` يسجّل مهمة جديدة `OZK Ameen Backup Health Monitor` يومياً **23:30 و00:45 و08:00** باسم LOQ (00:45 بعد نهاية المهلة الآمنة 00:30 كي لا يبقى نسخ عالق بلا حكم حتى الصباح) بنوع S4U، وIgnoreNew، ومهلة 15 دقيقة. يرفض الكتابة فوق أي مهمة موجودة. تعطيل Pull/Monitor القديمين قرار منفصل بعد ثبات المراقب الجديد.
