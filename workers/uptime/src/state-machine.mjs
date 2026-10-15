@@ -26,7 +26,7 @@ const HANDLERS = {
     if (r.ok) { t.status = 'UP'; delete t.firstFailAt; return; }
     if (t.window.filter((x) => !x).length < CONFIRM_FAILS) return;
     t.status = 'DOWN';
-    t.incident = { id: `${ctx.name}:${slot(t.firstFailAt)}`, downAt: ctx.now, reminders: [] };
+    t.incident = { id: `${ctx.name}:${slot(t.firstFailAt)}`, downAt: ctx.now, reminders: [], detail: r.detail || 'fail' };
     ctx.emit(ctx.mk('down', 'down', `${ctx.name} down (${r.detail || 'fail'})`, r.detail || 'fail'));
   },
   DOWN(t, r, ctx) {

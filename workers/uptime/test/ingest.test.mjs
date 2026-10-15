@@ -201,8 +201,9 @@ test('mergePending: بلا تكرار بالمعرّف ومرتب زمنياً',
 test('حالة KV أقدم (بلا pending) تُقرأ بأمان، والانتقال من DRY_RUN إلى الإرسال لا يعيد أحداث الظل', async () => {
   const srv = fakeServer(); const kv = memKV();
   for (let i = 0; i < 3; i++) await go(srv, kv, i, {});                 // DRY_RUN: down في الظل
+  srv.siteMode = 'up'; await go(srv, kv, 3, {}); await go(srv, kv, 4, {}); // ويتعافى في الظل
   const st = kv.state(); delete st.pending; await kv.put('state:v1', JSON.stringify(st));
-  await go(srv, kv, 3);
+  await go(srv, kv, 5);
   assert.equal(srv.notified.length, 0, 'حدث الظل لا يتحول تنبيهاً متأخراً');
   assert.deepEqual(kv.state().pending, []);
 });
@@ -253,11 +254,12 @@ test('DRY_RUN: انقطاع جديد كامل في الظل لا يلحق بال
   await go(srv, kv, 3, {}); await go(srv, kv, 4, {});                             // يتعافى في الظل (يلحق)
   srv.siteMode = 'down';
   for (let i = 30; i < 33; i++) await go(srv, kv, i, {});                         // انقطاع جديد كامل في الظل
+  srv.siteMode = 'up'; await go(srv, kv, 33, {}); await go(srv, kv, 34, {});      // ويتعافى في الظل
   const st = kv.state();
   assert.deepEqual(st.pending.map((e) => e.type), ['down', 'recovered']);
   assert.equal(new Set(st.pending.map((e) => e.incident)).size, 1, 'الحادثة الأصلية وحدها');
   assert.ok(st.events.some((e) => e.type === 'down' && e.dryRun), 'الانقطاع الجديد سجل ظل');
-  await go(srv, kv, 33);
+  await go(srv, kv, 35);
   const sent = JSON.parse(JSON.parse(srv.requests.at(-1).body).p_payload).events;
   assert.equal(sent.length, 2);
   assert.ok(sent.every((e) => e.incident === st.pending[0].incident));
@@ -276,4 +278,30 @@ test('النبض يحمل حالة كل هدف، وتُحجب حالة هدف ب
   await go(srv, kv, 2);
   p = JSON.parse(JSON.parse(srv.requests.at(-1).body).p_payload);
   assert.deepEqual(p.targets, { site: 'UP', bulletin: 'UP' });
+});
+test('تفعيل الإرسال والموقع واقف منذ الظل: يُعاد down الجاري بمعرّفه ووقته الأصليين مرة واحدة', async () => {
+  const srv = fakeServer(); const kv = memKV();
+  for (let i = 0; i < 4; i++) await go(srv, kv, i, {});                 // DOWN في الظل
+  const inc = kv.state().targets.site.incident;
+  assert.equal(srv.requests.length, 0);
+  await go(srv, kv, 4);                                                  // أول تشغيل حي
+  const sent = JSON.parse(JSON.parse(srv.requests.at(-1).body).p_payload).events;
+  assert.deepEqual(sent.map((e) => [e.id, e.type, e.at, e.detail]), [[`${inc.id}:down`, 'down', inc.downAt, 'http-503']]);
+  assert.deepEqual(srv.notified, [`${inc.id}:down`]);
+  assert.equal(kv.state().targets.site.incident.delivered, true);
+  await go(srv, kv, 5);
+  assert.deepEqual(JSON.parse(JSON.parse(srv.requests.at(-1).body).p_payload).events, [], 'لا إعادة بعد الإقرار');
+  srv.siteMode = 'up'; await go(srv, kv, 6); await go(srv, kv, 7);
+  assert.deepEqual(srv.notified, [`${inc.id}:down`, `${inc.id}:recovered`], 'التعافي يصل');
+});
+test('إعادة down الجاري: فشل الإرسال يُبقيه للتشغيل التالي، وحالة قديمة بلا علامة تعيده مرة فيُقرّ duplicate', async () => {
+  const srv = fakeServer(); const kv = memKV();
+  for (let i = 0; i < 3; i++) await go(srv, kv, i);                      // down حي ومُقرّ
+  const st = kv.state(); delete st.targets.site.incident.delivered; await kv.put('state:v1', JSON.stringify(st));
+  srv.mode = 'http500'; await assert.rejects(go(srv, kv, 3), /ingest failed/);
+  srv.mode = 'ok'; await go(srv, kv, 4);
+  const r = JSON.parse(JSON.parse(srv.requests.at(-1).body).p_payload).events;
+  assert.equal(r.length, 1);
+  assert.equal(kv.state().targets.site.incident.delivered, true);
+  assert.equal(srv.notified.length, 1, 'لا تنبيه ثانٍ');
 });

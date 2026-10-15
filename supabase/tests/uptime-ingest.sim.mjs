@@ -391,6 +391,35 @@ $function$`;
     assert.ok(rpcCalls.length >= 3);
   });
 
+  test('تكامل: انقطاع بدأ في DRY_RUN ثم فُعّل الإرسال والموقع واقف ⇒ تنبيه واحد ثم تعافٍ واحد', async () => {
+    reset(); setNotify(true);
+    const live = { DRY_RUN: '0', SUPABASE_URL: 'https://example.supabase.co', SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_test', UPTIME_HMAC_SECRET: SECRET };
+    let siteUp = false;
+    const fetchImpl = async (url, init) => {
+      const u = String(url);
+      if (u.startsWith('https://ozktobacco.com/')) {
+        if (u.includes('price-list')) return new Response('x', { status: 200 });
+        return siteUp ? new Response('OZK TOBACCO', { status: 200 }) : new Response('', { status: 503 });
+      }
+      const { p_payload, p_signature } = JSON.parse(init.body);
+      try { return new Response(await psqlAsync(ingestAs('anon', p_payload, p_signature)), { status: 200 }); }
+      catch { return new Response('{"message":"rejected"}', { status: 400 }); }
+    };
+    let v = null;
+    const kv = { get: async () => v, put: async (_, s2) => { v = s2; } };
+    const T = Date.now() - 6 * M;
+    const step = (i, env) => runOnce({ env, now: T + i * M, fetchImpl, kv, log: () => {} });
+    for (let i = 0; i < 4; i++) await step(i, {});                      // DOWN في الظل
+    assert.equal(outbox(), 0);
+    await step(4, live);
+    assert.equal(outbox(), 1, 'تنبيه الانقطاع الجاري');
+    await step(5, live);
+    assert.equal(outbox(), 1);
+    siteUp = true; await step(6, live); await step(7, live);
+    assert.equal(outbox(), 2, 'تعافٍ واحد');
+    assert.equal(count(`select count(*) from private.uptime_incidents where closed_at is null`), 0);
+  });
+
   test('التراجع: يزيل كل كائنات 14 ولا يمسّ telegram_outbox، ويرفض إن كان المراقب مجدولاً', () => {
     const rowsBefore = count(`select count(*) from public.telegram_outbox`);
     psql(`create schema cron; create table cron.job(jobid serial, jobname text, command text);

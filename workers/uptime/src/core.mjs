@@ -1,6 +1,6 @@
 // ozk-uptime — مراقبة الموقع كل 5 دقائق. DRY_RUN افتراضياً: لا طلب إلا فحصي ozktobacco.com.
 // DRY_RUN="0" مع إعداد كامل ⇒ الأحداث ونبض الحياة تُرسل موقَّعة إلى Supabase (ingest.mjs)؛ لا Telegram ولا service_role هنا.
-import { step, emptyState, EVENTS_KEEP } from './state-machine.mjs';
+import { step, emptyState, EVENTS_KEEP, TARGETS } from './state-machine.mjs';
 import { ingestConfig, sendBatch } from './ingest.mjs';
 
 export const SITE_URL = 'https://ozktobacco.com/';
@@ -110,7 +110,7 @@ export async function runOnce({ env = {}, now, fetchImpl = fetch, kv = env.UPTIM
 // at-least-once: الجديد يُضاف إلى المعلّق، ولا يخرج حدث من المعلّق إلا بإقرار صريح من الخادم.
 // يعدّل st.pending وst.events، ويرجع أحداث هذا التشغيل بحالاتها ونتيجة الإرسال.
 async function deliverLive(st, fresh, { env, fetchImpl, now, log }) {
-  const batch = mergePending(st.pending, fresh);
+  const batch = mergePending(st.pending, [...fresh, ...replayDowns(st, fresh)]);
   const cfg = ingestConfig(env);
   // يُرسل حتى بلا أحداث: هذا هو نبض الحياة الذي يراقبه الخادم (توقف > 20 دقيقة ⇒ تنبيه)
   const sent = batch.slice(0, INGEST_BATCH_MAX);
@@ -124,12 +124,33 @@ async function deliverLive(st, fresh, { env, fetchImpl, now, log }) {
     if (outcome) acked.push({ ...e, status: outcome === 'duplicate' ? 'duplicate' : 'accepted', outcome, dryRun: false });
     else st.pending.push({ ...e, status: 'pending', dryRun: false });
   }
+  for (const e of acked) {
+    const inc = e.type === 'down' && st.targets[e.target]?.incident;
+    if (inc && inc.id === e.incident) inc.delivered = true; // الخادم يعرف هذا الانقطاع
+  }
   st.pending = capPending(st.pending, log);
   st.events = [...st.events, ...acked].slice(-EVENTS_KEEP);
   const byId = new Map([...acked, ...st.pending].map((e) => [e.id, e]));
   const events = fresh.map((e) => byId.get(e.id) || { ...e, status: 'pending', dryRun: false });
   if (!ingest.ok) log(JSON.stringify({ t: 'ozk-uptime', error: 'ingest-failed', reason: ingest.reason, pending: st.pending.length }));
   return { events, ingest };
+}
+
+// انقطاع جارٍ لم يُقرّ الخادم بحدث down له (بدأ في DRY_RUN ثم فُعّل الإرسال والهدف ما زال واقفاً، أو حالة
+// أقدم بلا علامة): يُعاد حدث down بمعرّفه ووقته الأصليين، وإلا كُتمت تذكيراته وتعافيه (لا حادثة مفتوحة على
+// الخادم). التكرار آمن: الخادم يرجع duplicate لمعرّف معروف.
+function replayDowns(st, fresh) {
+  const known = new Set([...st.pending, ...fresh].map((e) => e.id));
+  const out = [];
+  for (const [name, t] of Object.entries(st.targets)) {
+    const inc = t.incident;
+    if (!inc || inc.delivered || !TARGETS[name]) continue;
+    const id = `${inc.id}:down`;
+    if (known.has(id)) continue;
+    out.push({ id, type: 'down', target: name, incident: inc.id, severity: TARGETS[name].critical ? 'critical' : 'medium',
+      alertable: !!TARGETS[name].critical, at: inc.downAt, text: `${name} down (${inc.detail || 'fail'})`, detail: inc.detail || 'fail', replay: true });
+  }
+  return out;
 }
 
 // حالة كل هدف الآن، تُرسل مع النبض ليُغلق الخادم حادثة مفتوحة لم يصله تعافيها (ضياع حالة KV).
