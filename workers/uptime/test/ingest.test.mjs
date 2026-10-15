@@ -221,3 +221,27 @@ test('معلّق أكبر من حدّ الطلب (50): يُرسل على دفع�
   assert.equal(kv.state().pending.length, 0);
   assert.equal(srv.ledger.size, 70);
 });
+test('تراجع طارئ إلى DRY_RUN وحادثة حية معلّقة: التعافي في الظل يلحق بها ويُرسل معها عند العودة', async () => {
+  const srv = fakeServer(); const kv = memKV();
+  await go(srv, kv, 0); await go(srv, kv, 1);
+  srv.mode = 'http500';
+  await assert.rejects(go(srv, kv, 2), /ingest failed/);            // down حي معلّق
+  srv.mode = 'ok'; srv.siteMode = 'up'; const reqs = srv.requests.length;
+  await go(srv, kv, 3, {}); await go(srv, kv, 4, {});               // DRY_RUN: الموقع يتعافى
+  const st = kv.state();
+  assert.deepEqual(st.pending.map((e) => e.type), ['down', 'recovered'], 'التعافي محفوظ مع الحادثة المعلّقة');
+  assert.ok(st.pending.every((e) => e.status === 'pending' && e.dryRun === false));
+  assert.ok(!st.events.some((e) => e.type === 'recovered'), 'ليس حدث ظل');
+  assert.equal(srv.requests.length, reqs, 'لا طلب في DRY_RUN');
+  await go(srv, kv, 5);                                              // عودة الوضع الحي
+  const sent = JSON.parse(JSON.parse(srv.requests.at(-1).body).p_payload).events.map((e) => e.type);
+  assert.deepEqual(sent, ['down', 'recovered']);
+  assert.deepEqual(kv.state().pending, []);
+});
+test('DRY_RUN بلا معلّق حي: أحداث الظل لا تدخل المعلّق', async () => {
+  const srv = fakeServer(); const kv = memKV();
+  for (let i = 0; i < 3; i++) await go(srv, kv, i, {});
+  srv.siteMode = 'up'; await go(srv, kv, 3, {}); await go(srv, kv, 4, {});
+  assert.deepEqual(kv.state().pending, []);
+  assert.deepEqual(kv.state().events.map((e) => e.status), ['dry-run', 'dry-run']);
+});

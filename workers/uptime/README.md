@@ -70,6 +70,7 @@ UPTIME_PG_URL=postgresql://postgres@localhost:5432/postgres node --test supabase
 2. كود فقط (هذه المرحلة): `ingest.mjs` + `proposed/14` + الاختبارات. لا نشر ولا تطبيق.
 3. تطبيق `proposed/14` على الإنتاج: خاملة (بلا سرّ `uptime_ingest_hmac` ترفض كل طلب، والإرسال والمراقب مقفلان).
 4. ظل مع Supabase: سرّ في `app_secrets` وسرّ Worker و`DRY_RUN=0` مع `notify_enabled=false` ⇒ نبض وتسجيل بلا رسائل، ~24 ساعة.
-5. اختبار مضبوط برسالة واحدة، ثم `notify_enabled=true` وجدولة `watch_uptime_heartbeat` كل 5 دقائق.
+5. اختبار مضبوط برسالة واحدة، ثم `notify_enabled=true` وجدولة `watch_uptime_heartbeat` كل 5 دقائق. حادثة الموقع التي فُتحت في الظل وما زالت مفتوحة يُرسل تنبيهها مع أول نبض بعد التفعيل (مرة واحدة)، ثم تذكيراتها وتعافيها كالمعتاد.
+   في `DRY_RUN=1` يبقى المعلّق الحي محفوظاً، وتعافي أو تذكير الهدف نفسه يلحق به ليُرسلا معاً عند العودة.
 
 التراجع: `DRY_RUN=1` (لا طلبات لـSupabase إطلاقاً)، أو `notify_enabled=false` (تسجيل فقط)، أو حذف السرّ (رفض كل طلب، والحدث يبقى معلّقاً عند الـWorker بلا ضياع)، ثم `14-uptime-ingest-rollback.sql`. حذف الـcron أو `wrangler delete` يبقيان متاحين.

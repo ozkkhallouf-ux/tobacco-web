@@ -313,6 +313,25 @@ begin
     v_results := v_results || jsonb_build_object('id', v_id, 'outcome', v_outcome);
   end loop;
 
+  -- ٤ب) ترقية حادثة فُتحت أثناء الظل: إن فُعّل الإرسال والحادثة ما زالت مفتوحة بلا تنبيه، يُرسل تنبيه
+  --     الانقطاع الآن (مرة واحدة، بنفس مفتاح down الأصلي)؛ وإلا تُكتم تذكيراتها وتعافيها فيضيع أول انقطاع بعد التفعيل.
+  if v_cfg.notify_enabled then
+    perform pg_advisory_xact_lock(hashtext('ozk-uptime:site'));
+    for v_row in
+      select * from private.uptime_incidents
+       where target = 'site' and closed_at is null and not down_notified
+       for update
+    loop
+      v_key := 'uptime:' || v_row.incident_key || ':down';
+      select ev.detail into v_detail from private.uptime_events ev
+       where ev.event_id = v_row.incident_key || ':down';
+      perform private.uptime_enqueue(private.uptime_message('down', null, v_detail, v_row.opened_at, v_row.opened_at), v_key);
+      update private.uptime_incidents set down_notified = true where id = v_row.id;
+      update private.uptime_events set outbox_dedupe_key = v_key
+       where event_id = v_row.incident_key || ':down' and outbox_dedupe_key is null;
+    end loop;
+  end if;
+
   -- ٥) تنظيف محدود (nonce يكفيه يوم لأن النافذة 300 ثانية؛ السجل 90 يوماً > تنظيف outbox 14 يوماً)
   delete from private.uptime_ingest_nonces where received_at < now() - interval '1 day';
   delete from private.uptime_events where received_at < now() - interval '90 days';

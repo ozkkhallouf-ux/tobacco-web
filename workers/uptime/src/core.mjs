@@ -81,8 +81,14 @@ export async function runOnce({ env = {}, now, fetchImpl = fetch, kv = env.UPTIM
   let events;
   if (dry) {
     // DRY_RUN: تسجيل فقط، بلا أي طلب. المعلّق (إن وُجد من وضع سابق) يبقى كما هو ولا يُسقط.
-    events = out.events.map((e) => ({ ...e, status: 'dry-run', dryRun: true }));
-    st.events = [...st.events, ...events].slice(-EVENTS_KEEP);
+    // لكن حدث هدفٍ له حادثة حية معلّقة (تعافيها أو تذكيرها) يلحق بها في المعلّق، وإلا عاد الوضع الحي
+    // فأرسل down قديماً بلا تعافيه وبقيت الحادثة مفتوحة على الخادم.
+    const liveTargets = new Set(st.pending.map((e) => e.target));
+    events = out.events.map((e) => (liveTargets.has(e.target)
+      ? { ...e, status: 'pending', dryRun: false }
+      : { ...e, status: 'dry-run', dryRun: true }));
+    st.pending = capPending(mergePending(st.pending, events.filter((e) => !e.dryRun)), log);
+    st.events = [...st.events, ...events.filter((e) => e.dryRun)].slice(-EVENTS_KEEP);
   } else {
     ({ events, ingest } = await deliverLive(st, out.events, { env, fetchImpl, now, log }));
   }

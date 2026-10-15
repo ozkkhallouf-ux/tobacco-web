@@ -227,6 +227,34 @@ $function$`;
     assert.equal(one(`select array_length(aliases, 1) from private.uptime_incidents`), '1');
   });
 
+  test('تفعيل الإرسال وحادثة فُتحت في الظل ما زالت مفتوحة ⇒ تنبيه انقطاع واحد، ثم تذكير وتعافٍ', () => {
+    reset();
+    const S = 1_800_000_000_000;
+    ingest({ events: [ev('site', S, 'down'), ev('bulletin', S, 'down')] });   // الظل: تسجيل فقط
+    assert.equal(outbox(), 0);
+    setNotify(true);
+    let r = ingest();                                                           // نبض حي بعد التفعيل
+    assert.deepEqual(r.results, []);
+    assert.equal(outbox(), 1, 'ترقية الحادثة المفتوحة');
+    assert.equal(count(`select count(*) from public.telegram_outbox where dedupe_key = 'uptime:site:${S}:down'`), 1);
+    assert.match(one(`select message from public.telegram_outbox`), /🔴/);
+    ingest(); assert.equal(outbox(), 1, 'لا تكرار في النبض التالي');
+    r = ingest({ events: [ev('site', S, 'reminder:1h', S + 3_600_000)] });
+    assert.equal(r.results[0].outcome, 'notified');
+    r = ingest({ events: [ev('site', S, 'recovered', S + 4_000_000)] });
+    assert.equal(r.results[0].outcome, 'notified');
+    assert.equal(outbox(), 3, 'انقطاع + تذكير + تعافٍ، والنشرة بلا رسالة');
+  });
+
+  test('حادثة الظل التي تعافت في الطلب نفسه لا تُرقّى', () => {
+    reset();
+    const S = 1_800_000_000_000;
+    ingest({ events: [ev('site', S, 'down')] });
+    setNotify(true);
+    ingest({ events: [ev('site', S, 'recovered', S + 3_000_000)] });
+    assert.equal(outbox(), 0, 'لا تنبيه لانقطاع لم يُبلَّغ وانتهى');
+  });
+
   test('النشرة تسجيل فقط حتى مع تفعيل الإرسال (قرار الخادم)', () => {
     reset(); setNotify(true);
     const r = ingest({ events: [ev('bulletin', 1, 'down', 10, 'http-404'), ev('bulletin', 1, 'recovered', 20)] });
