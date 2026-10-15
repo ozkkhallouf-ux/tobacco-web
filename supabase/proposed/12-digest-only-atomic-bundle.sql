@@ -67,7 +67,7 @@ declare mon_src text; ev text;
 begin
   select prosrc into mon_src from pg_proc where oid = to_regprocedure('private.monitor_project_tasks()');
   if mon_src is null then raise exception 'preflight: private.monitor_project_tasks() missing'; end if;
-  if md5(mon_src) not in ('2c762f38b56ea5a683061529bd5e5d7f', 'd695a9aea9c75bdd302e40ddd8b16204') then
+  if md5(mon_src) not in ('2c762f38b56ea5a683061529bd5e5d7f', '831b3473263dcddc9341736562900ab5') then
     raise exception 'preflight: live monitor_project_tasks differs from proposed/09 (md5 %), refusing to overwrite unknown drift (accepted: live=09 or already-applied bundle)', md5(mon_src);
   end if;
   if to_regprocedure('public.send_evening_report()') is null then raise exception 'preflight: public.send_evening_report() missing'; end if;
@@ -482,11 +482,11 @@ begin
   -- التشغيل التالي يختفي الفشل المكتمل من النظر (حادثة 2026-08-30 09:14).
   --   (١) أحدث تشغيل مطلقاً — هل هناك محاولة جارية الآن؟
   select status,start_time into last_job_status,last_job_at from cron.job_run_details
-   where jobid=job_record.jobid order by start_time desc limit 1;
+   where jobid=job_record.jobid order by start_time desc nulls last limit 1;
   --   (٢) أحدث تشغيل نهائي — آخر نتيجة مكتملة، مهما علاها من محاولات.
   select status,start_time into terminal_status,terminal_at from cron.job_run_details
    where jobid=job_record.jobid and status in ('succeeded','failed')
-   order by start_time desc limit 1;
+   order by start_time desc nulls last limit 1;
   retry_running:=last_job_status is not null and last_job_status not in ('succeeded','failed');
   -- التصنيف كله في الدالة النقية أعلاه؛ هنا قرار الحالة فقط، بثلاثة فروع
   -- صريحة لا فرعين. الفرعان وحدهما كانا هما العطل (ملاحظة Codex P1 على
@@ -867,7 +867,7 @@ declare mon text; ev text; sec text;
   patched constant text := addition || anchor;
 begin
   select prosrc into mon from pg_proc where oid = to_regprocedure('private.monitor_project_tasks()');
-  if md5(mon) <> 'd695a9aea9c75bdd302e40ddd8b16204' then raise exception 'postflight: monitor body differs from the bundled definition (md5 %)', md5(mon); end if;
+  if md5(mon) <> '831b3473263dcddc9341736562900ab5' then raise exception 'postflight: monitor body differs from the bundled definition (md5 %)', md5(mon); end if;
   if (length(mon) - length(replace(mon, 'public.notify_telegram(', ''))) / length('public.notify_telegram(') <> 3 then
     raise exception 'postflight: monitor must contain exactly 3 notify_telegram calls (critical, recovery, evening-report job failure)';
   end if;
