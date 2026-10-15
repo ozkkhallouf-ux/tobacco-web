@@ -193,6 +193,7 @@ function Get-OzkBackupHealth {
             }
         }
 
+        # status.notify (نجاح إرسال تنبيه النسخ) لا يدخل في الحكم إطلاقاً: وصول الرسالة ليس دليلاً على سلامة النسخة.
         switch ([string]$status.status) {
             'ok' { }
             'local-only' { [void]$warnings.Add('النسخة محفوظة على C: فقط؛ القرص الخارجي لم يكن موصولاً') }
@@ -224,6 +225,12 @@ function Get-OzkBackupHealth {
                     try {
                         $m = Read-OzkJsonFile $manC
                         if (-not $m.zip -or ([string]$m.zip.sha256).ToLowerInvariant() -ne ([string]$status.zip.sha256).ToLowerInvariant()) { [void]$failures.Add('manifest.json لا يطابق ZIP في status.json') }
+                        foreach ($db in $script:RequiredDatabases) {
+                            $mf = @($m.files | Where-Object { $_.database -ceq $db })
+                            $sf = @($status.files | Where-Object { $_.database -ceq $db })
+                            if ($mf.Count -ne 1) { [void]$failures.Add('manifest.json بلا القاعدة: ' + $db) }
+                            elseif ($sf.Count -eq 1 -and ([string]$mf[0].sha256).ToLowerInvariant() -ne ([string]$sf[0].sha256).ToLowerInvariant()) { [void]$failures.Add('بصمة ' + $db + ' في manifest.json تختلف عن status.json') }
+                        }
                     } catch { [void]$failures.Add('manifest.json غير صالح على C:') }
                 }
             } elseif (-not $status.compressed) {
@@ -294,7 +301,9 @@ function Get-OzkBackupHealth {
 # ---------- التنبيه ومنع التكرار ----------
 
 function Get-OzkFingerprint($Health) {
-    $text = $Health.level + '|' + ((@($Health.reasons) | Sort-Object) -join '|')
+    # لغير SUCCESS تدخل الدورة المتوقعة في البصمة: فشل دورة جديدة لا يُكتم أبداً بتنبيه دورة سابقة.
+    $cycle = $(if ($Health.level -ne 'SUCCESS' -and $Health.info -and $Health.info.expectedRun) { [string]$Health.info.expectedRun } else { '' })
+    $text = $Health.level + '|' + $cycle + '|' + ((@($Health.reasons) | Sort-Object) -join '|')
     $sha = [System.Security.Cryptography.SHA256]::Create()
     try { $h = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($text)) } finally { $sha.Dispose() }
     return ((($h | ForEach-Object { $_.ToString('x2') }) -join '').Substring(0, 16))

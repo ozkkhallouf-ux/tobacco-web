@@ -234,6 +234,57 @@ try {
     $r = Invoke-OzkBackupMonitor -StateDir $f.State -NotifyScript $okNotify -Now $check2330
     Assert-True ($r.level -eq 'FAILURE') 'مضغوطة ببصمة ZIP فارغة ⇒ FAILURE'
 
+    Write-Host '== 8د) manifest ناقص قاعدة أو ببصمة مختلفة ⇒ FAILURE =='
+    $f = New-Fixture 'manDb' $night; Set-TaskRan $night
+    foreach ($dir in @($f.RunDir, $f.ExtDir)) {
+        $mp = Join-Path $dir 'manifest.json'
+        $mo = Get-Content -LiteralPath $mp -Raw -Encoding UTF8 | ConvertFrom-Json
+        $mo.files = @($mo.files | Where-Object { $_.database -ne 'AmnConfig' })
+        [System.IO.File]::WriteAllText($mp, ($mo | ConvertTo-Json -Depth 5))
+    }
+    $r = Invoke-OzkBackupMonitor -StateDir $f.State -NotifyScript $okNotify -Now $check2330
+    Assert-True ($r.level -eq 'FAILURE' -and ((@($r.health.failures) -join ' ') -match 'manifest.json بلا القاعدة: AmnConfig')) 'manifest بلا AmnConfig ⇒ FAILURE'
+
+    Write-Host '== 8هـ) نجاح Telegram ليس دليلاً على سلامة النسخة (D) =='
+    $f = New-Fixture 'notifyNotHealth' $night; Set-TaskRan $night
+    [System.IO.File]::AppendAllText((Join-Path $f.ExtDir $f.Zip), 'x')
+    $r = Invoke-OzkBackupMonitor -StateDir $f.State -NotifyScript $okNotify -Now $check2330
+    Assert-True ($r.level -eq 'FAILURE') 'status.notify=telegram مع ZIP تالف ⇒ FAILURE'
+    $f = New-Fixture 'notifyNone' $night; Set-TaskRan $night
+    $sp = Join-Path $f.State 'status.json'
+    $obj = Get-Content -LiteralPath $sp -Raw -Encoding UTF8 | ConvertFrom-Json; $obj.notify = 'none'
+    [System.IO.File]::WriteAllText($sp, ($obj | ConvertTo-Json -Depth 6))
+    $r = Invoke-OzkBackupMonitor -StateDir $f.State -NotifyScript $okNotify -Now $check2330
+    Assert-True ($r.level -eq 'SUCCESS') 'status.notify=none ونسخة سليمة ⇒ SUCCESS (الحكم على النسخة لا على الرسالة)'
+
+    Write-Host '== 8و) دورة ليلة كاملة: 23:30 ثم 00:45 ثم 08:00 (B وC وF) =='
+    $f = New-Fixture 'cycle' $night
+    Reset-Notify
+    Set-TaskRan $night 'Running'
+    $r1 = Invoke-OzkBackupMonitor -StateDir $f.State -NotifyScript $okNotify -Now $check2330
+    # النسخ بدأ 23:00 وما زال يعمل 23:30 ⇒ PENDING. لكن status.json هنا من دورة 23:00 نفسها (اكتمل للتو بعد الفحص)
+    Assert-True ($r1.level -eq 'PENDING' -and (Get-NotifyCount) -eq 0) '23:30 والمهمة ما زالت تعمل ⇒ PENDING بلا رسالة'
+    Set-TaskRan $night
+    $r2 = Invoke-OzkBackupMonitor -StateDir $f.State -NotifyScript $okNotify -Now ([datetime]'2026-10-16T00:45:00')
+    Assert-True ($r2.level -eq 'SUCCESS' -and $r2.health.info.expectedRun -eq '2026-10-15 23:00') '00:45 يحكم على دورة 23:00 السابقة (لا ينتظر نسخة بتاريخ اليوم الجديد) ⇒ SUCCESS'
+    $r3 = Invoke-OzkBackupMonitor -StateDir $f.State -NotifyScript $okNotify -Now $check0800
+    Assert-True ($r3.level -eq 'SUCCESS' -and -not $r3.alertReason) '08:00 SUCCESS للدورة نفسها ⇒ لا تكرار'
+    Assert-True ((Get-NotifyCount) -eq 1) 'رسالة SUCCESS واحدة فقط عبر 23:30 و00:45 و08:00'
+    $r4 = Invoke-OzkBackupMonitor -StateDir $f.State -NotifyScript $okNotify -Now ([datetime]'2026-10-16T23:30:00')
+    Assert-True ($r4.level -eq 'FAILURE' -and ((@($r4.health.failures) -join ' ') -match 'لم يعمل')) 'الليلة التالية بلا تشغيل جديد و status.json القديم ok ⇒ FAILURE (A)'
+
+    Write-Host '== 8ز) FAILURE جديد لا يُكتم بتنبيه FAILURE سابق (G) =='
+    $f = New-Fixture 'gNew' $night 'failed' 'skipped'; Set-TaskRan $night
+    Reset-Notify
+    $null = Invoke-OzkBackupMonitor -StateDir $f.State -NotifyScript $okNotify -Now ([datetime]'2026-10-16T08:00:00')
+    # الليلة التالية فشل بنفس نص السبب تماماً، بعد أقل من 12 ساعة من آخر تنبيه
+    $g2 = New-Fixture 'gNew2' $night.AddDays(1) 'failed' 'skipped'; Set-TaskRan $night.AddDays(1)
+    Copy-Item -LiteralPath (Join-Path $f.State 'monitor-state.json') -Destination (Join-Path $g2.State 'monitor-state.json')
+    $r = Invoke-OzkBackupMonitor -StateDir $g2.State -NotifyScript $okNotify -Now ([datetime]'2026-10-16T23:30:00')
+    Assert-True ($r.level -eq 'FAILURE' -and $r.alertReason -eq 'reasons-changed' -and (Get-NotifyCount) -eq 2) 'فشل دورة جديدة بنفس السبب بعد 15.5 ساعة ⇒ تنبيه (البصمة تحمل الدورة)'
+    $r = Invoke-OzkBackupMonitor -StateDir $g2.State -NotifyScript $okNotify -Now ([datetime]'2026-10-17T00:45:00')
+    Assert-True (-not $r.alertReason -and (Get-NotifyCount) -eq 2) 'نفس فشل الدورة نفسها بعد ساعة ⇒ لا تكرار'
+
     Write-Host '== 9) المساحة =='
     $f = New-Fixture 'space' $night; Set-TaskRan $night
     $script:Free = [int64](30GB)
