@@ -174,6 +174,9 @@ function Get-OzkBackupHealth {
         $info.lastStatus = [string]$status.status
         if (-not $runAt) {
             [void]$failures.Add('طابع التشغيل في status.json غير صالح')
+        } elseif ($runAt -gt $Now.AddMinutes(10)) {
+            # ساعة الجهاز كانت متقدمة ثم صُحّحت: طابع «من المستقبل» لا يُعدّ تشغيلاً لهذه الدورة، وإلا بقي SUCCESS لكل ليلة فائتة.
+            [void]$failures.Add('طابع آخر نسخة في المستقبل (' + $status.stamp + ') — ساعة الجهاز غير موثوقة؛ لا يُعتدّ به لدورة ' + $expected.ToString('yyyy-MM-dd HH:mm'))
         } else {
             $ranThisWindow = ($runAt -ge $windowStart)
             if (-not $ranThisWindow) {

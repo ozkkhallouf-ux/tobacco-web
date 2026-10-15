@@ -286,6 +286,14 @@ try {
     $r = Invoke-OzkBackupMonitor -StateDir $g2.State -NotifyScript $okNotify -Now ([datetime]'2026-10-17T00:45:00')
     Assert-True (-not $r.alertReason -and (Get-NotifyCount) -eq 2) 'نفس فشل الدورة نفسها بعد ساعة ⇒ لا تكرار'
 
+    Write-Host '== 8ح) طابع نسخة في المستقبل ⇒ FAILURE (Codex P1) =='
+    $f = New-Fixture 'future' $night.AddDays(3); Set-TaskRan $night.AddDays(3)
+    $r = Invoke-OzkBackupMonitor -StateDir $f.State -NotifyScript $okNotify -Now $check2330
+    Assert-True ($r.level -eq 'FAILURE' -and ((@($r.health.failures) -join ' ') -match 'في المستقبل')) 'نسخة بطابع بعد 3 أيام ⇒ FAILURE لا SUCCESS'
+    $f = New-Fixture 'nearFuture' $night.AddMinutes(5); Set-TaskRan $night.AddMinutes(5)
+    $r = Invoke-OzkBackupMonitor -StateDir $f.State -NotifyScript $okNotify -Now $night.AddMinutes(1).AddSeconds(30)
+    Assert-True ($r.level -ne 'FAILURE' -or ((@($r.health.failures) -join ' ') -notmatch 'في المستقبل')) 'فرق دقائق قليلة (< 10) لا يُعدّ مستقبلاً'
+
     Write-Host '== 9) المساحة =='
     $f = New-Fixture 'space' $night; Set-TaskRan $night
     $script:Free = [int64](30GB)
