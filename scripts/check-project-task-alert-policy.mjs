@@ -160,7 +160,7 @@ assert.ok(p13.includes('^(deploy-gate-|launcher-)') && rb13s.includes('f34f12926
 assert.ok(p13.includes("not (source='telegram' and event_key ~ '^health-')") && p13.includes("^health-recovered:."), '13: أعطال health-* لا تُغلق بالصمت وتُغلق بإشارة health-recovered: فقط');
 assert.ok((await read('supabase/proposed/12-digest-only-atomic-bundle.sql')).includes('يلزم إعادة التحقق') && (await read('supabase/proposed/12-digest-only-atomic-bundle.sql')).includes('dc646928b3f107fcfe5c210d67543d44'), '12: وسم «يلزم إعادة التحقق» لأعطال health القديمة وبصمة القسم');
 assert.ok(rb13s.includes('f7bee114d77cecea3bf9fceceb24425a') && rb13s.includes('drifted') && rb13s.includes('ops_rollback_drain'), 'تراجع 13 يتحقق من الانجراف ويفرّغ الأعطال المفتوحة مرة واحدة');
-assert.ok((await read('supabase/proposed/12-digest-only-rollback.sql')).includes('831b3473263dcddc9341736562900ab5') && (await read('supabase/proposed/12-digest-only-rollback.sql')).includes('drifted'), 'تراجع 12 يتحقق من الانجراف');
+assert.ok((await read('supabase/proposed/12-digest-only-rollback.sql')).includes('fcaf57ebe99fd132762a426ffd4873e9') && (await read('supabase/proposed/12-digest-only-rollback.sql')).includes('drifted'), 'تراجع 12 يتحقق من الانجراف');
 assert.ok((await read('supabase/proposed/12-digest-only-rollback.sql')).includes('ops_rollback_drain'), 'تراجع 12 يفرّغ الأعطال المفتوحة مرة واحدة');
 assert.ok(p13.includes('send-evening-report') && p13.includes('evening-missing:'), 'ناقل الملخص (فشل/غياب التقرير المسائي) يبقى فورياً');
 assert.ok(rb13.includes('digest_routing_snapshot'), 'تراجع 13 بلا لقطة');

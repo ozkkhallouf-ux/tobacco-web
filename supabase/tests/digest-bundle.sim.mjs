@@ -297,6 +297,11 @@ const exists = async (db, rel) => (await one(db, `select to_regclass('${rel}') r
   assert.equal((await one(db, `select count(*)::int c from private.ops_events where resolved_at is null`)).c, 0, 'السطر اليتيم لا يصنع عطلاً');
   assert.equal((await one(db, `select is_healthy h from private.project_task_health_state where task_key='cron:dispatch-web-push-outbox'`)).h, true);
   assert.equal((await sent(db)).length, 0);
+  // تشغيل عالق في starting بلا start_time فوق السطر اليتيم والنجاحات: يُكشف 'stuck' (لا يُدفن تحت nulls last)
+  await db.exec(`insert into cron.job_run_details(jobid,status,start_time) values (1,'starting',null)`);
+  await db.exec('select private.monitor_project_tasks()');
+  assert.equal((await one(db, `select is_healthy h from private.project_task_health_state where task_key='cron:dispatch-web-push-outbox'`)).h, false, 'stuck starting run must be detected');
+  assert.match((await one(db, `select last_detail d from private.project_task_health_state where task_key='cron:dispatch-web-push-outbox'`)).d, /عالقة/);
   console.log('orphan cron row OK');
 }
 
