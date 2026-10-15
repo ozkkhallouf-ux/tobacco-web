@@ -154,6 +154,14 @@ jobs:
         shell: powershell
         run: .\tools\tests\Test-OzkAmeenBackup.ps1
 
+      # M2: مراقب قراءة فقط لنظام النسخ الجديد يحلّ محل Pull/Monitor القديمين (يراقبان مساراً
+      # لم يعد يُكتب فيه). يثبت على 5.1: SUCCESS/WARNING/FAILURE/PENDING، فخّ «نسخة الأمس
+      # أحدث من 26 ساعة»، النسخ الطويل ضمن المهلة، تلف ZIP/SHA256، رقم الفلاشة، فشل Telegram
+      # وإعادة المحاولة، ومنع التكرار — بلا SQL ولا مهام حقيقية.
+      - name: Ameen backup monitor - read-only health monitor regression test
+        shell: powershell
+        run: .\tools\tests\Test-OzkAmeenBackupMonitor.ps1
+
       # عطل إنتاجي حيّ (2026-08-29 → 2026-09-05): auto-sync-price-lists كان
       # ينادي git push بلا فحص رمز خروج ويطبع سطر نجاح بلا شرط. وgit يكتب
       # نتيجة الرفع على stderr حتى عند النجاح، فمع ErrorActionPreference=Stop
