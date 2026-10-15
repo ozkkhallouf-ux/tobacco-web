@@ -1311,6 +1311,55 @@ if (!Array.isArray(mergeNames) || mergeNames.some((name) => typeof name !== "str
     );
     assertEqual("poAmeenItemMatches empty query returns all items", poCalc.poAmeenItemMatches("", ameenSampleItems).length, 2);
 
+    const cartonRow = {
+      itemNumber: "1111",
+      itemName: "غلواز كوين أحمر",
+      qty: 2500,
+      unit: "كرتونة",
+      lastPrice: 8.04,
+      avgPrice: 8.08
+    };
+    const cartonDisplay = poCalc.poAmeenCartonDisplay(cartonRow, 50);
+    assertEqual("poAmeenCartonDisplay converts 2500 كروز to 50 cartons", cartonDisplay.qtyText, "50");
+    assertEqual("poAmeenCartonDisplay keeps كروز qty as hint", cartonDisplay.qtyHint, "2500 كروز");
+    assertEqual("poAmeenCartonDisplay last cost per carton", cartonDisplay.lastPriceText, "402.00");
+    assertEqual("poAmeenCartonDisplay avg cost per carton", cartonDisplay.avgPriceText, "404.00");
+    assertEqual("poAmeenCartonDisplay converted flag", cartonDisplay.converted, true);
+    const rawDisplay = poCalc.poAmeenCartonDisplay(cartonRow, 1);
+    assertEqual("poAmeenCartonDisplay without factor keeps qty", rawDisplay.qtyText, "2500");
+    assertEqual("poAmeenCartonDisplay without factor keeps avg", rawDisplay.avgPriceText, "8.08");
+    assertEqual("poAmeenCartonDisplay without factor has no hint", rawDisplay.qtyHint, "");
+    assertEqual(
+      "poAmeenCartonDisplay missing prices stay empty",
+      poCalc.poAmeenCartonDisplay({ qty: 2500, unit: "كرتونة" }, 50),
+      { converted: true, qtyText: "50", qtyHint: "2500 كروز", unit: "كرتونة", lastPriceText: "—", avgPriceText: "—" }
+    );
+    assertEqual(
+      "poAmeenResolveUnit2Factor uses item.unit2Factor first",
+      poCalc.poAmeenResolveUnit2Factor({ unit2Factor: 50, itemNumber: "1111" }, [{ itemNumber: "1111", unit2Factor: 10 }]),
+      50
+    );
+    assertEqual(
+      "poAmeenResolveUnit2Factor matches catalog itemCode",
+      poCalc.poAmeenResolveUnit2Factor({ itemNumber: "1111" }, [{ itemCode: "1111", unit2Factor: 50 }]),
+      50
+    );
+    assertEqual(
+      "poAmeenResolveUnit2Factor matches stock-report name",
+      poCalc.poAmeenResolveUnit2Factor({ itemName: "غلواز كوين أحمر" }, [{ name: "غلواز كوين أحمر", unit2Factor: 50 }]),
+      50
+    );
+    assertEqual(
+      "poAmeenResolveUnit2Factor does not guess 50",
+      poCalc.poAmeenResolveUnit2Factor({ itemNumber: "1111", qty: 2500 }, []),
+      1
+    );
+    assertEqual(
+      "poAmeenResolveUnit2Factor ignores conflicting catalog factors",
+      poCalc.poAmeenResolveUnit2Factor({ itemName: "س" }, [{ itemName: "س", unit2Factor: 50 }, { itemName: "س", unit2Factor: 10 }]),
+      1
+    );
+
     // كشف الأصناف المكررة
     assertEqual(
       "poDedupeLines detects duplicate item_key",
@@ -1341,6 +1390,8 @@ for (const contract of [
   "poCalc.poValidatePayment",
   "poCalc.poDedupeLines",
   "poCalc.poCanTransitionStatus",
+  "poCalc.poAmeenCartonDisplay",
+  "poCalc.poAmeenResolveUnit2Factor",
   "dataStore.setPurchaseInvoiceStatus(id, nextStatus)",
   "dataStore.correctPurchaseInvoice(id, note)",
   "dataStore.listItemSnapshots"
@@ -1384,6 +1435,18 @@ if (/rest\/v1\/inventory_reports/.test(pullPurchaseInvoicesScript)) {
 }
 if (!pullPurchaseInvoicesScript.includes("rest/v1/ameen_purchase_invoice_reports")) {
   console.error("tools/pull-purchase-invoices-from-ameen.ps1 is missing its protected-table target ameen_purchase_invoice_reports.");
+  failed = true;
+}
+if (!pullPurchaseInvoicesScript.includes("$unit2FactSel") || !pullPurchaseInvoicesScript.includes("unit2Factor = $it.unit2Factor")) {
+  console.error("tools/pull-purchase-invoices-from-ameen.ps1 must read mt000.Unit2Fact and store unit2Factor on each invoice line so carton display does not guess the factor.");
+  failed = true;
+}
+if (appJs.includes("متوسط تكلفة الوحدة الأساسية للفترة") || appJs.includes("آخر تكلفة للوحدة الأساسية")) {
+  console.error("poAmeenPanelHtml must label last/average cost as carton cost, not base-unit cost.");
+  failed = true;
+}
+if (!appJs.includes("متوسط تكلفة الكرتونة للفترة") || !/poAmeenItemsRowsHtml[\s\S]{0,800}poAmeenCartonDisplay/.test(appJs)) {
+  console.error("poAmeenItemsRowsHtml must render carton qty/cost through poCalc.poAmeenCartonDisplay.");
   failed = true;
 }
 if (!appJs.includes('.from(purchaseInvoiceReportsTable)') && !readFileSync("src/supabase-client.js", "utf8").includes(".from(purchaseInvoiceReportsTable)")) {
