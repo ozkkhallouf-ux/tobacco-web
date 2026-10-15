@@ -40,7 +40,7 @@ test('دورة كاملة: عطل ثم تعافٍ، حدثان فقط، لا ط�
     evs.push(...o.events);
   }
   assert.deepEqual(evs.map((e) => e.type), ['down', 'recovered']);
-  assert.ok(evs.every((e) => e.dryRun && e.status === 'delivered'));
+  assert.ok(evs.every((e) => e.dryRun && e.status === 'dry-run'));
   assert.ok(calls.every((u) => u.startsWith('https://ozktobacco.com/')), 'لا اتصال بأي جهة أخرى (لا Telegram/Supabase)');
   assert.equal(kv.puts.length, modes.length);
 });
