@@ -64,16 +64,27 @@ test('تشغيلان متداخلان يقرآن حالة قديمة: نفس م�
   const ids = new Set([...a.events, ...b.events].filter((e) => e.target === 'site').map((e) => e.id));
   assert.equal(ids.size, 1, 'معرّف واحد مهما تداخلت التشغيلات');
 });
-test('DRY_RUN وغير DRY_RUN: لا اتصال إلا بفحصي ozktobacco.com حتى مع وجود أسرار وهمية وعطل', async () => {
+test('DRY_RUN وغير DRY_RUN: لا اتصال إلا بفحصي ozktobacco.com حتى مع أسرار وهمية ناقصة وعطل', async () => {
   for (const env of [{}, { DRY_RUN: '1' }, { DRY_RUN: '0' }]) {
     const calls = [];
     const f = async (u) => { calls.push(String(u)); throw new TypeError('x'); };
+    // إعداد ناقص عمداً (لا SUPABASE_PUBLISHABLE_KEY ولا UPTIME_HMAC_SECRET) ⇒ لا طلب لـSupabase حتى مع DRY_RUN=0
     const fakeEnv = { ...env, TELEGRAM_BOT_TOKEN: 't', SUPABASE_URL: 'https://x.supabase.co', SUPABASE_SERVICE_KEY: 'k' };
     const kv = mem(); let evs = [];
-    for (let i = 0; i < 4; i++) evs.push(...(await runOnce({ env: fakeEnv, now: T0 + i * M, fetchImpl: f, kv, log })).events);
-    assert.ok(evs.length >= 1);
+    for (let i = 0; i < 4; i++) {
+      const p = runOnce({ env: fakeEnv, now: T0 + i * M, fetchImpl: f, kv, log });
+      if (env.DRY_RUN === '0') await assert.rejects(p, /ingest failed \(not-configured\)/);
+      else evs.push(...(await p).events);
+    }
     assert.ok(calls.every((u) => u.startsWith('https://ozktobacco.com/')), JSON.stringify(calls));
-    assert.ok(evs.every((e) => (env.DRY_RUN === '0') ? e.status === 'pending' && !e.dryRun : e.status === 'delivered' && e.dryRun));
+    if (env.DRY_RUN === '0') {
+      const st = JSON.parse(kv.peek());
+      assert.ok(st.pending.length >= 1 && st.pending.every((e) => e.status === 'pending' && !e.dryRun), 'محفوظ معلّقاً لا «مُسلَّماً»');
+      assert.equal(st.events.length, 0, 'لا شيء في السجل قبل إقرار الخادم');
+    } else {
+      assert.ok(evs.length >= 1);
+      assert.ok(evs.every((e) => e.status === 'dry-run' && e.dryRun));
+    }
   }
 });
 test('ثابت ساكن: الشيفرة لا تحوي أي مرسِل (Telegram/Supabase/sendMessage/service_role)', () => {
