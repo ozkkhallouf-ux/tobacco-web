@@ -284,19 +284,26 @@ begin
  if cfg is null or not cfg.enabled then return 'disabled'; end if;
  perform pg_advisory_xact_lock(hashtextextended('sync_outage:' || p_device, 0));
 
- -- «مترابطة»: متقادمة وآخر نجاح لها ضمن correlation_minutes من أحدث آخر نجاح بين المتقادمات.
+ select * into inc from private.sync_outage_incidents i where i.device = p_device and i.ended_at is null;
+
+ -- «مترابطة»: متقادمة وآخر نجاح لها ضمن correlation_minutes من مرساة العنقود الأكبر (لا الأحدث دائماً:
+ -- نبضة عابرة من مهمة واحدة أثناء انقطاع طويل لا تُزيح المهام الميتة خارج النافذة).
  -- المهمة المعطوبة منذ زمن (أو بلا أي تقرير) لا تصنع انقطاعاً مع عطل منفرد آخر.
+ -- وأثناء حادثة مفتوحة تبقى مهامها المتقادمة ضمنها مهما ابتعد آخر نجاح لها.
  with o as (select * from private.sync_outage_observe(p_device, p_now)),
-      nw as (select max(o.last_at) as newest from o where o.stale)
+      s as (select o.last_at from o where o.stale and o.last_at is not null),
+      a as (select s1.last_at as anchor, count(*) as c from s s1 join s s2
+              on s2.last_at <= s1.last_at and s2.last_at >= s1.last_at - make_interval(mins => cfg.correlation_minutes)
+             group by s1.last_at order by count(*) desc, s1.last_at desc limit 1)
  select coalesce(jsonb_agg(jsonb_build_object('task', o.task_key, 'label', o.task_label, 'last_ok', o.last_at,
                     'max_age', o.max_age, 'stale', o.stale, 'late', o.late) order by o.task_key), '[]'::jsonb),
-        max(nw.newest),
-        coalesce(array_agg(o.task_key order by o.task_key) filter (where o.stale and o.last_at >= nw.newest - make_interval(mins => cfg.correlation_minutes)), '{}')
+        (select a.anchor from a),
+        coalesce(array_agg(o.task_key order by o.task_key) filter (where o.stale and (
+            (o.last_at <= (select a.anchor from a) and o.last_at >= (select a.anchor from a) - make_interval(mins => cfg.correlation_minutes))
+            or o.task_key = any(coalesce(inc.affected_tasks, '{}'::text[])))), '{}')
    into obs, newest, stale_keys
-   from o cross join nw;
+   from o;
  n := cardinality(stale_keys);
-
- select * into inc from private.sync_outage_incidents i where i.device = p_device and i.ended_at is null;
  if inc.id is null then
   -- رسالة التعافي المؤجّلة: حادثة أُنذر عنها وانتهت منذ أكثر من مهلة الدمج دون أن تعود ⇒ رسالة واحدة.
   -- (المساواة مع المهلة تبقى لإعادة الفتح أدناه، فلا تتعارض الحالتان في الدورة نفسها.)

@@ -231,6 +231,25 @@ await scenario('تعافٍ كاذب: عودة البيانات لحظياً بع
   assert.equal((await alerts()).length, 2);
   assert.equal((await incidents())[0].reopened, 1);
 });
+await scenario('نبضة عابرة من مهمة واحدة أثناء انقطاع طويل: الحادثة تبقى مفتوحة ولا تُزيحها المرساة الأحدث', async () => {
+  const S = L('2026-11-02 10:00');
+  await reset(); await seedAll(db, S);
+  const acts = [];
+  for (let m = 0; m <= 330; m += 5) {
+    const t = addMin(S, m);
+    acts.push([m, await tick(t)]);
+    // مهمة واحدة تنبض مرة عند 150 ثم تصمت؛ بقية المهام ميتة منذ 10:00 (أبعد من 60 د عن النبضة)
+    if (m === 150) await db.query(`insert into public.khalil_audit_sync_heartbeat(created_at,status) values ($1,'ok')`, [iso(t)]);
+    if (m >= 300) await seedAll(db, t); // التعافي الحقيقي
+  }
+  assert.ok(!acts.some(([m, r]) => m < 300 && /=recover/.test(r)), JSON.stringify(acts.filter(([m]) => m >= 150 && m < 300)));
+  assert.deepEqual(alertMinute(acts), [60]);
+  assert.equal(recoveryMinute(acts).length, 1);
+  const inc = await incidents();
+  assert.equal(inc.length, 1);
+  assert.equal(inc[0].reopened, 0);
+  assert.equal(iso(inc[0].ended_at), iso(addMin(S, 305))); // البيانات تعود بعد دورة 300
+});
 await scenario('إعادة تشغيل المراقب أثناء انتظار التعافي: دورات مكررة ⇒ رسالة تعافٍ واحدة', async () => {
   const S = L('2026-11-02 10:00');
   await outage(S, 90, { step: 1, until: 140, beforeTick: async (m, t) => { if (m >= 106 && m <= 108) { await tick(t); await tick(t); } } });
