@@ -150,13 +150,14 @@ assert.ok(p13.includes('site-down') && p13.includes('دخان ما بعد الن
 assert.ok(p13.includes('patched constant text') && p13.includes('exact open-faults block'), '13 يتحقق من كتلة القسم الدقيقة في التقرير لا من وجود الاسم');
 assert.ok(p13.includes('f7bee114d77cecea3bf9fceceb24425a') && !p13.includes("position('digest-routing:v1' in disp)"), '13 يقبل بصمتين فقط (الإنتاج وجسم 13) ولا يكتفي بالوسم');
 assert.ok(p13.includes('automation-failure:|ameen-read-worker-)'), 'حوادث عامل أمين تُنذَر مرة واحدة ⇒ نافذة 30 ساعة');
+assert.ok(p13.includes("when coalesce(p_dedupe_key,'') ~ '^ameen-read-worker-(stuck|degraded|recovered):' then 'immediate'"), 'قرار المالك: توقّف/تدهور/عودة عامل قراءة الأمين فورية لا ملخص');
 assert.ok((await read('supabase/proposed/12-digest-only-rollback.sql')).includes('digest_routing_snapshot'), 'تراجع 12 يجب أن يرفض عند فعالية 13');
 const rb13s = await read('supabase/proposed/13-digest-routing-rollback.sql');
 assert.ok((await read('supabase/proposed/12-digest-only-atomic-bundle.sql')).includes('$order12$') && (await read('supabase/proposed/12-digest-only-atomic-bundle.sql')).includes('$guard12$'), 'الحزمة 12 تحرس الترتيب والمعاملة');
 assert.ok((await read('supabase/proposed/12-digest-only-atomic-bundle.sql')).includes('$drift12$'), 'الحزمة 12 ترفض الكتابة فوق دوال مساعدة عُدّلت لاحقاً');
 assert.ok((await read('supabase/proposed/13-digest-routing-for-noncritical-alerts.sql')).includes('$pre2$'), 'الحزمة 13 تتحقق من انجراف ops_event_route وclose_stale قبل التطبيق');
 assert.ok((await read('supabase/proposed/13-digest-routing-for-noncritical-alerts.sql')).includes('2796ac5d112c557951d8fd3c837de6f7') && (await read('supabase/proposed/13-digest-routing-for-noncritical-alerts.sql')).includes('b5b3a7d5f34083664813d25e96a043e8'), 'الحزمة 13 تثبّت بصمة ops_event_silence وabsorb_digest_alert');
-assert.ok(p13.includes('^(deploy-gate-|launcher-)') && rb13s.includes('f34f129268ee375c10006f004de2d00e'), 'أحداث بوابة النشر/المشغّل فورية وبصمة التوجيه محدَّثة');
+assert.ok(p13.includes('^(deploy-gate-|launcher-)') && rb13s.includes('9fecbd0c30707eafdf845d56800e54d3'), 'أحداث بوابة النشر/المشغّل فورية وبصمة التوجيه محدَّثة');
 assert.ok(p13.includes("not (source='telegram' and event_key ~ '^health-')") && p13.includes("^health-recovered:."), '13: أعطال health-* لا تُغلق بالصمت وتُغلق بإشارة health-recovered: فقط');
 assert.ok((await read('supabase/proposed/12-digest-only-atomic-bundle.sql')).includes('يلزم إعادة التحقق') && (await read('supabase/proposed/12-digest-only-atomic-bundle.sql')).includes('dc646928b3f107fcfe5c210d67543d44'), '12: وسم «يلزم إعادة التحقق» لأعطال health القديمة وبصمة القسم');
 assert.ok(rb13s.includes('f7bee114d77cecea3bf9fceceb24425a') && rb13s.includes('drifted') && rb13s.includes('ops_rollback_drain'), 'تراجع 13 يتحقق من الانجراف ويفرّغ الأعطال المفتوحة مرة واحدة');

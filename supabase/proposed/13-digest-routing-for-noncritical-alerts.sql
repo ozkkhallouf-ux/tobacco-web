@@ -50,7 +50,7 @@ begin
 end $pre$;
 -- مساعدا التوجيه يُستبدلان أدناه: يجب أن يكونا بجسم 12 (أول تطبيق) أو جسم 13 (إعادة)، وإلا تعديل لاحق يُفقَد بصمت
 do $pre2$ begin
-  if md5((select prosrc from pg_proc where oid = to_regprocedure('private.ops_event_route(text,text)'))) not in ('8c55e7855fd285e956506f7d0ebd10b2', 'f34f129268ee375c10006f004de2d00e')
+  if md5((select prosrc from pg_proc where oid = to_regprocedure('private.ops_event_route(text,text)'))) not in ('8c55e7855fd285e956506f7d0ebd10b2', '9fecbd0c30707eafdf845d56800e54d3')
      or md5((select prosrc from pg_proc where oid = to_regprocedure('private.close_stale_ops_events(timestamptz,interval)'))) not in ('a9519e09e396dbc5b99eb1872bd118b4', '2c92ab4fdc95ce1696cb4d69920569c7') then
     raise exception 'proposed/13: ops_event_route/close_stale_ops_events drifted from the known 12/13 bodies; refusing to overwrite later changes';
   end if;
@@ -110,6 +110,10 @@ returns text language sql immutable as $$
   -- sync_failure بحسب الأثر الفعلي: سلسلة الأسعار (تطبيق الأسعار على الأمين، سحب المعتمَد) تمسّ أسعار البيع
   -- فعلياً ⇒ فوري؛ بقية دفعات البيانات (ربح، مصاريف، تدقيق، بنود مبيعات) تتأخر بياناتها فقط وتُعاد كل دورة ⇒ ملخص
   when coalesce(p_dedupe_key,'') ~ '^winfail:(apply-to-ameen|pull-approved-prices)$' then 'immediate'
+  -- عامل قراءة الأمين (قرار المالك 2026-10-15): توقّفه أو تدهوره يعطّل القراءة الحيّة من الأمين ⇒ فوري،
+  -- ورسالة عودته فورية لتُغلق الحادثة نفسها. ensure-ameen-sync.ps1 يرسل كلاً منها مرة واحدة لكل حادثة
+  -- (هوية الحادثة في المفتاح). سطره داخل الرسالة المجمّعة ameen-sync-watchdog يبقى ملخصاً فلا يتكرر فوراً.
+  when coalesce(p_dedupe_key,'') ~ '^ameen-read-worker-(stuck|degraded|recovered):' then 'immediate'
   when p_kind in ('sync_failure','windows','automation_failure') then 'digest'
   when coalesce(p_dedupe_key,'') ~ '^(winfail:|project-cron-failure:|automation-failure:)' then 'digest'
   else 'immediate'

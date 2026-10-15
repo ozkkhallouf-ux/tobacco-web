@@ -111,7 +111,9 @@ for (const [k, key, want] of [
   ['sync_failure', 'winfail:push-khalil-audit-log', 'digest'], ['sync_failure', 'winfail:push-sales-line-items', 'digest'],
   ['windows', 'local-server-revive-fail', 'immediate'],
   ['windows', 'ameen-backup-empty', 'immediate'], ['windows', 'ameen-backup-copy-fail', 'immediate'],
-  ['windows', 'ameen-sync-watchdog', 'digest'], ['windows', 'snapshot-producer-missing', 'digest'], ['windows', 'winfail:t', 'digest'],
+  ['windows', 'ameen-sync-watchdog', 'digest'],
+  ['windows', 'ameen-read-worker-stuck:1', 'immediate'], ['windows', 'ameen-read-worker-degraded:1', 'immediate'], ['windows', 'ameen-read-worker-recovered:1', 'immediate'],
+  ['windows', 'ameen-read-worker-other', 'digest'], ['windows', 'snapshot-producer-missing', 'digest'], ['windows', 'winfail:t', 'digest'],
   ['evening_report', 'evening:2026-01-01', 'immediate'], ['project_task_failure', 'k', 'immediate'],
   ['weird_unknown', null, 'immediate'], ['', '', 'immediate'], ['order_new', 'o1', 'immediate'],
   ['sync_failure', 'project-cron-failure:send-evening-report:20260101:x', 'immediate'], ['report', 'evening-missing:2026-01-01', 'immediate'],
@@ -172,19 +174,46 @@ await notify(db, 'windows', 'يومي', 'daily-git-pull');
 assert.deepEqual((await open(db)).map((r) => r.event_key), ['daily-git-pull']);
 console.log('multi-day ok');
 
-// ameen recovery
-await notify(db, 'windows', 'عالق', 'ameen-read-worker-stuck:7');
-await notify(db, 'windows', 'متدهور', 'ameen-read-worker-degraded:7');
-assert.ok((await open(db)).some((r) => r.event_key === 'ameen-read-worker-stuck:7'));
-await notify(db, 'windows', 'تعافى', 'ameen-read-worker-recovered:7');
-assert.ok(!(await open(db)).some((r) => r.event_key.startsWith('ameen-read-worker')), 'recovered still open');
-// حادثة عامل أمين تُنذَر مرة واحدة: لا تُغلق بنافذة الصمت (3س) قبل التقرير
-await notify(db, 'windows', 'متدهور', 'ameen-read-worker-degraded:9');
-await db.exec(`update private.ops_events set last_seen_at = now() - interval '10 hours' where event_key = 'ameen-read-worker-degraded:9'`);
-await db.exec(`select private.close_stale_ops_events(now())`);
-assert.ok((await open(db)).some((r) => r.event_key === 'ameen-read-worker-degraded:9'), 'one-shot ameen incident closed too early');
-await notify(db, 'windows', 'تعافى', 'ameen-read-worker-recovered:9');
-console.log('recovery ok');
+// عامل قراءة الأمين (قرار المالك 2026-10-15): فوري لكل حادثة، بلا تكرار، والسطر المجمّع ملخص.
+// المحاكاة تتبع تسلسل ensure-ameen-sync.ps1 الفعلي: انقطاع ⇒ stuck:<id> + المجمّع؛ دورات لاحقة لنفس
+// الحادثة لا ترسل stuck مجدداً (stuckAlerted) لكن المجمّع يتكرر؛ تعافٍ ⇒ recovered:<id>؛ إعادة تشغيل
+// لاحقة تنقطع من جديد ⇒ هوية حادثة جديدة ⇒ تنبيه جديد.
+{
+  const AGG = '🚨 مزامنة الأمين متعثّرة على جهاز Windows:\r\n• Ameen Read Worker متوقفة/عالقة — heartbeat غير موجود';
+  const keysSince = async (n) => (await outbox(db)).slice(n).map((r) => r.dedupe_key);
+  let n0 = (await outbox(db)).length;
+  // انقطاع (الدورة الأولى): رسالة الحادثة فورية، والمجمّع يذهب للسجلّ
+  await notify(db, 'windows', '🚨 توقف/تعليق Ameen Read Worker — heartbeat غير موجود.', 'ameen-read-worker-stuck:100', 1440);
+  await notify(db, 'windows', AGG, 'ameen-sync-watchdog', 60);
+  assert.deepEqual(await keysSince(n0), ['ameen-read-worker-stuck:100'], 'outage: exactly one immediate alert');
+  assert.ok((await open(db)).some((r) => r.event_key === 'ameen-sync-watchdog'), 'aggregate line must reach the digest');
+  assert.ok(!(await open(db)).some((r) => r.event_key.startsWith('ameen-read-worker')), 'immediate incident must not also sit in the digest');
+  // دورات لاحقة لنفس الحادثة (فشل إعادة التشغيل): المجمّع وحده يتكرر، وإن أُعيد stuck بالمفتاح نفسه يحجبه dedupe
+  for (let i = 0; i < 3; i++) await notify(db, 'windows', AGG, 'ameen-sync-watchdog', 60);
+  await notify(db, 'windows', '🚨 توقف/تعليق Ameen Read Worker — آخر heartbeat منذ 9 دقيقة.', 'ameen-read-worker-stuck:100', 1440);
+  assert.deepEqual(await keysSince(n0), ['ameen-read-worker-stuck:100'], 'same incident must not alert twice');
+  // تعافٍ: رسالة العودة فورية ومرة واحدة
+  await notify(db, 'windows', '✅ عاد Ameen Read Worker للعمل.', 'ameen-read-worker-recovered:100', 60);
+  await notify(db, 'windows', '✅ عاد Ameen Read Worker للعمل.', 'ameen-read-worker-recovered:100', 60);
+  assert.deepEqual(await keysSince(n0), ['ameen-read-worker-stuck:100', 'ameen-read-worker-recovered:100'], 'recovery: exactly one immediate message');
+  // إعادة تشغيل ثم انقطاع جديد خلال نافذة الحادثة الأولى ⇒ هوية جديدة ⇒ تنبيه جديد وعودة جديدة
+  await notify(db, 'windows', '🚨 توقف/تعليق Ameen Read Worker — آخر heartbeat منذ 6.9 دقيقة.', 'ameen-read-worker-stuck:101', 1440);
+  await notify(db, 'windows', AGG, 'ameen-sync-watchdog', 60);
+  await notify(db, 'windows', '✅ عاد Ameen Read Worker للعمل.', 'ameen-read-worker-recovered:101', 60);
+  assert.deepEqual(await keysSince(n0), ['ameen-read-worker-stuck:100', 'ameen-read-worker-recovered:100', 'ameen-read-worker-stuck:101', 'ameen-read-worker-recovered:101'], 'second incident after restart must alert again');
+  // تدهور (auth_retry): فوري ومرة واحدة، وعودته فورية
+  await notify(db, 'windows', '⚠️ Ameen Read Worker حيّة لكنها تعيد محاولة تسجيل الدخول بلا نجاح — لا مزامنة تحدث الآن.', 'ameen-read-worker-degraded:102', 60);
+  await notify(db, 'windows', '⚠️ Ameen Read Worker حيّة لكنها تعيد محاولة تسجيل الدخول بلا نجاح — لا مزامنة تحدث الآن.', 'ameen-read-worker-degraded:102', 60);
+  await notify(db, 'windows', '✅ عاد Ameen Read Worker لتسجيل الدخول بنجاح.', 'ameen-read-worker-recovered:102', 60);
+  assert.deepEqual((await keysSince(n0)).slice(4), ['ameen-read-worker-degraded:102', 'ameen-read-worker-recovered:102']);
+  // نص الرسالة يصل كما كتبه السكربت (لا إعادة صياغة)
+  assert.match((await q(db, `select message from public.telegram_outbox where dedupe_key='ameen-read-worker-stuck:100'`))[0].message, /توقف\/تعليق Ameen Read Worker/);
+  // بقية أعطال Windows غير الحرجة تبقى ملخصاً
+  await notify(db, 'sync_failure', 'فشل دفعة المصاريف', 'winfail:push-expense-entries');
+  assert.equal((await outbox(db)).length, n0 + 6, 'non-critical windows faults stay in the digest');
+  await db.exec(`update private.ops_events set resolved_at=now(), resolution='silence' where resolved_at is null`);
+}
+console.log('ameen read worker immediate ok');
 
 
 // ===== قرارات المالك: الأسعار، إحياء الخادم، حُلّ اليوم، نوافذ الصمت =====
@@ -258,13 +287,13 @@ console.log('prices/revive/independence ok');
   const sec = async () => (await one(db, 'select private.daily_open_faults_section(now(), 3000) s')).s;
   const fresh = () => db.exec(`update private.ops_events set resolved_at=now(), resolution='silence' where resolved_at is null`);
   await db.exec('delete from private.ops_events');
-  await notify(db, 'windows', 'عامل أمين عالق T21', 'ameen-read-worker-stuck:21');
-  assert.ok((await sec()).includes('عامل أمين عالق T21'));
+  await notify(db, 'windows', 'عطل يومي T21', 'daily-git-pull-t21');
+  assert.ok((await sec()).includes('عطل يومي T21'));
   assert.ok(!(await sec()).includes('حُلّ اليوم'));
-  await db.exec(`select private.resolve_ops_event('telegram','ameen-read-worker-stuck:21')`);
+  await db.exec(`select private.resolve_ops_event('telegram','daily-git-pull-t21')`);
   const s1 = await sec();
   assert.match(s1, /✅ حُلّ اليوم \(1\)/);
-  assert.match(s1, /عامل أمين عالق T21/);
+  assert.match(s1, /عطل يومي T21/);
   // إغلاق بالصمت: لا يُعرض كمتعافٍ
   await notify(db, 'sync_failure', 'دوري صامت T22', 'winfail:push-expense-entries');
   await db.exec(`update private.ops_events set last_seen_at=now()-interval '3 hours 1 minute' where event_key='winfail:push-expense-entries'`);
@@ -274,16 +303,16 @@ console.log('prices/revive/independence ok');
   assert.ok(!s2.includes('دوري صامت T22'), 'silence closure must not be listed as recovered: ' + s2);
   assert.match(s2, /دون إشارة تعافٍ مؤكَّدة/);
   // عاد العطل ⇒ لا يُعرض متعافياً
-  await notify(db, 'windows', 'عالق من جديد', 'ameen-read-worker-stuck:21');
+  await notify(db, 'windows', 'عالق من جديد', 'daily-git-pull-t21');
   const s3 = await sec();
-  assert.ok(!/✅ حُلّ اليوم[\s\S]*عامل أمين عالق T21/.test(s3), s3);
+  assert.ok(!/✅ حُلّ اليوم[\s\S]*عطل يومي T21/.test(s3), s3);
   assert.match(s3, /عالق من جديد/);
   await fresh();
   // أقدم من 24 ساعة لا يظهر
-  await notify(db, 'windows', 'قديم', 'ameen-read-worker-stuck:old');
-  await db.exec(`select private.resolve_ops_event('telegram','ameen-read-worker-stuck:old')`);
-  await db.exec(`update private.ops_events set resolved_at=now()-interval '25 hours' where event_key='ameen-read-worker-stuck:old'`);
-  { const sx = await sec(); assert.ok(!sx.includes('ameen-read-worker-stuck:old') && !sx.includes('• قديم'), sx); }
+  await notify(db, 'windows', 'قديم', 'daily-git-pull-old');
+  await db.exec(`select private.resolve_ops_event('telegram','daily-git-pull-old')`);
+  await db.exec(`update private.ops_events set resolved_at=now()-interval '25 hours' where event_key='daily-git-pull-old'`);
+  { const sx = await sec(); assert.ok(!sx.includes('daily-git-pull-old') && !sx.includes('• قديم'), sx); }
   // نوافذ الصمت
   const T = async (key, kind, ago, wantOpen) => {
     await notify(db, kind, 'x ' + key, key);
@@ -297,7 +326,7 @@ console.log('prices/revive/independence ok');
   await T('winfail:push-daily-profit', 'sync_failure', '3 hours 1 minute', false);
   await T('ameen-sync-watchdog', 'windows', '2 hours 59 minutes', true);
   await T('ameen-sync-watchdog', 'windows', '3 hours 1 minute', false);
-  for (const k of ['daily-git-pull-fail', 'daily-git-pull-stuck', 'ameen-read-worker-stuck:3', 'automation-failure:x', 'gha-fail:CI']) {
+  for (const k of ['daily-git-pull-fail', 'daily-git-pull-stuck', 'automation-failure:x', 'gha-fail:CI']) {
     const kind = k.startsWith('gha-') ? 'github_actions_failure' : k.startsWith('automation') ? 'automation_failure' : 'windows';
     await T(k, kind, '29 hours', true);
     await T(k, kind, '31 hours', false);
@@ -308,7 +337,7 @@ console.log('prices/revive/independence ok');
   for (let i = 0; i < 3; i++) { await db.exec(`select private.close_stale_ops_events(now(), interval '3 hours')`); await notify(db, 'sync_failure', 'مستمر 48س', 'winfail:push-sales-line-items'); }
   assert.equal((await q(db, `select 1 from private.ops_events where event_key='winfail:push-sales-line-items' and resolved_at is null`)).length, 1);
   assert.match(await sec(), /مستمر 48س/);
-  for (let i = 0; i < 12; i++) { await notify(db, 'windows', 'عطل ' + i, 'ameen-read-worker-stuck:b' + i); await db.exec(`select private.resolve_ops_event('telegram','ameen-read-worker-stuck:b${i}')`); }
+  for (let i = 0; i < 12; i++) { await notify(db, 'windows', 'عطل ' + i, 'daily-git-pull-b' + i); await db.exec(`select private.resolve_ops_event('telegram','daily-git-pull-b${i}')`); }
   const sb = (await one(db, 'select private.daily_open_faults_section(now(), 700) s')).s;
   assert.ok(sb.length <= 700, 'section exceeded budget: ' + sb.length);
   await fresh();
@@ -551,7 +580,7 @@ await db.exec(routeDef.replace("else 'immediate'", "else 'immediate' /* later fi
 await assert.rejects(db.exec(rb13), /drifted/);
 await db.exec(routeDef);
 // حادثة إنذار واحد مفتوحة وقت التراجع ⇒ تُرسَل مرة واحدة في رسالة موحَّدة (لا تضيع، لا فيضان)
-await notify(db, 'windows', 'متدهور وحيد', 'ameen-read-worker-degraded:55');
+await notify(db, 'windows', 'متدهور وحيد', 'daily-git-pull-d55');
 const outBefore = (await outbox(db)).length;
 await db.exec(rb13);
 {
