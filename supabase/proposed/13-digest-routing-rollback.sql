@@ -4,6 +4,10 @@
 do $rb$
 declare r record; n int; body text;
 begin
+  -- 15 يضيف خطّافه إلى dispatch ويبني قسم الأعطال على جداوله؛ يُتراجع عنه أولاً
+  if to_regclass('private.sync_outage_snapshot') is not null then
+    raise exception 'rollback 13 refused: proposed/15 is active; run 15-ameen-sync-outage-rollback.sql first';
+  end if;
   if to_regclass('private.digest_routing_snapshot') is null then
     raise exception 'rollback 13: no snapshot table; nothing to restore (13 not applied?)';
   end if;

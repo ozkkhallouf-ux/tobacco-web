@@ -28,7 +28,7 @@ begin
   end if;
   -- لا نكتب فوق تعديل إنتاجي لاحق: المراقب والتقرير يجب أن يطابقا نسخة الحزمة 12 بالضبط
   ev := pg_get_functiondef(to_regprocedure('public.send_evening_report()'));
-  if md5((select prosrc from pg_proc where oid = to_regprocedure('private.monitor_project_tasks()'))) <> 'd695a9aea9c75bdd302e40ddd8b16204'
+  if md5((select prosrc from pg_proc where oid = to_regprocedure('private.monitor_project_tasks()'))) <> 'fcaf57ebe99fd132762a426ffd4873e9'
      or (length(ev) - length(replace(ev, patched, ''))) / length(patched) <> 1 then
     raise exception 'rollback 12: monitor_project_tasks/send_evening_report drifted from the bundle-12 definitions; refusing to overwrite later changes';
   end if;
