@@ -366,7 +366,7 @@ end $$;
 revoke all on function private.sync_outage_tick(timestamptz) from public, anon, authenticated;
 
 -- يدمج تنبيه تقادم المخزون في حادثة انقطاع مفتوحة (السبب مشترك: البيانات نفسها تأتي من الجهاز المنقطع).
--- إن لم تكن الحادثة مفتوحة بعد لكن الرصد الحي يُظهر الانقطاع، تُفتح (تسجيلاً فقط، بلا إرسال).
+-- القرار دائماً على الرصد الحي لحظة التنبيه: الحادثة تُفتح أو تُغلق حسبه (تسجيلاً فقط، بلا إرسال).
 -- أي خطأ ⇒ false ⇒ يُرسَل التنبيه كما كان (يفشل مفتوحاً).
 create or replace function private.sync_outage_absorb_stock_stale(p_message text, p_key text)
 returns boolean language plpgsql security definer set search_path = private, public, pg_temp as $$
@@ -374,11 +374,10 @@ declare d record; inc_id bigint;
 begin
  if coalesce(p_key, '') not like 'stock-priority:stale:%' then return false; end if;
  for d in select device from private.sync_outage_config where enabled order by device loop
+  -- إعادة تحقق حيّة دائماً (لا ثقة بحادثة مفتوحة قديمة: إن توقفت sync-outage-tick تبقى مفتوحة بلا نهاية):
+  -- الخطوة تغلقها إن عاد الجهاز، أو تفتحها إن كان منقطعاً فعلاً — تسجيلاً فقط، بلا إرسال.
+  perform private.sync_outage_step(d.device, now(), false);
   select id into inc_id from private.sync_outage_incidents where device = d.device and ended_at is null;
-  if inc_id is null then
-   perform private.sync_outage_step(d.device, now(), false);
-   select id into inc_id from private.sync_outage_incidents where device = d.device and ended_at is null;
-  end if;
   if inc_id is not null then
    update private.sync_outage_incidents
       set stock_stale_absorbed = stock_stale_absorbed + 1, stock_stale_last_at = now(),

@@ -369,8 +369,14 @@ await scenario('send_recovery=false (مفتاح إيقاف): لا رسالة ت�
 // ── دمج تقادم المخزون ──
 const stockStale = () => db.query(`select public.notify_telegram('stock_low', $1, 'stock-priority:stale:stock-stale', 360)`,
   ['⏳ تنبيهات النفاد متوقفة\nالسبب: البيانات قديمة أو ناقصة']);
-await scenario('تقادم المخزون أثناء حادثة مفتوحة ⇒ يُدمج ولا يُرسل منفصلاً، ويظهر في التنبيه الوحيد', async () => {
-  const S = L('2026-11-02 10:00');
+// الدمج يعيد التحقق على الوقت الحقيقي now()، فهذه السيناريوهات تبدأ قبل 30 دقيقة حقيقية، بدوام كامل اليوم لتكون حتمية
+const nowAnchored = () => new Date(Math.floor((Date.now() - 30 * 60000) / 60000) * 60000);
+async function allDay(fn) {
+  await db.exec(`update private.sync_outage_config set business_start='00:00', business_end='23:59:59'`);
+  try { await fn(); } finally { await db.exec(`update private.sync_outage_config set business_start='09:00', business_end='23:00'`); }
+}
+await scenario('تقادم المخزون أثناء حادثة مفتوحة ⇒ يُدمج ولا يُرسل منفصلاً، ويظهر في التنبيه الوحيد', () => allDay(async () => {
+  const S = nowAnchored();
   await outage(S, 100, { step: 5, until: 105, beforeTick: async (m) => { if (m === 30) await stockStale(); } });
   assert.equal((await one(db, `select count(*)::int c from public.telegram_outbox where event_type='stock_low'`)).c, 0);
   const inc = (await incidents())[0];
@@ -378,6 +384,17 @@ await scenario('تقادم المخزون أثناء حادثة مفتوحة ⇒
   const al = await alerts();
   assert.equal(al.length, 1);
   assert.match(al[0].message, /تنبيهات النفاد متوقفة أيضاً/);
+}));
+await scenario('حادثة مفتوحة قديمة (المراقب متوقف) والجهاز عاد ⇒ تقادم المخزون فوري، والحادثة تُغلق', async () => {
+  await reset();
+  const S = new Date(Date.now() - 3 * 3600000);
+  await seedAll(db, S);
+  await tick(addMin(S, 30)); // حادثة مفتوحة، ثم توقفت sync-outage-tick
+  assert.equal((await incidents()).filter((i) => !i.ended_at).length, 1);
+  await seedAll(db, new Date()); // الجهاز عاد
+  await stockStale();
+  assert.equal((await one(db, `select count(*)::int c from public.telegram_outbox where dedupe_key='stock-priority:stale:stock-stale'`)).c, 1);
+  assert.equal((await incidents()).filter((i) => !i.ended_at).length, 0);
 });
 await scenario('تقادم المخزون بلا انقطاع ⇒ فوري كما اليوم', async () => {
   await reset(); await seedAll(db, new Date());
@@ -416,8 +433,8 @@ await scenario('غير الحرج يبقى ملخصاً (13 كما هو): winfai
   assert.equal((await one(db, `select count(*)::int c from private.ops_events where resolved_at is null`)).c, 1);
 });
 
-await scenario('تزامن أعطال: انقطاع + فشل أسعار فوري + عطل دفعة غير حرج + تقادم مخزون ⇒ كلٌّ في مساره', async () => {
-  const S = L('2026-11-02 10:00');
+await scenario('تزامن أعطال: انقطاع + فشل أسعار فوري + عطل دفعة غير حرج + تقادم مخزون ⇒ كلٌّ في مساره', () => allDay(async () => {
+  const S = nowAnchored();
   await outage(S, 100, { step: 5, until: 100, beforeTick: async (m) => {
     if (m === 30) {
       await db.query(`select public.notify_telegram('price_sync_failure','فشل التحقق','price-sync:verify-failed',60)`);
@@ -432,7 +449,7 @@ await scenario('تزامن أعطال: انقطاع + فشل أسعار فوري
   const sec = (await one(db, `select private.daily_open_faults_section($1::timestamptz, 3000) s`, [iso(addMin(S, 100))])).s;
   assert.match(sec, /مزامنة الأمين على OZK2026/);
   assert.match(sec, /فشل رفع الربح/);
-});
+}));
 
 // ── التقرير المسائي ──
 await scenario('فشل بناء القسم ⇒ التقرير المسائي يُرسل مع سطر تعذّر الإعداد', async () => {
