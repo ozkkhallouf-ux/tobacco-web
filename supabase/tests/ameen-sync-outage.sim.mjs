@@ -251,6 +251,8 @@ await scenario('تعافٍ جزئي مستمر: انتظار 60 د ثم رسال
       await db.query(`insert into public.expense_entries(created_at) values ($1)`, [iso(t)]);
     }
   }
+  assert.deepEqual(alertMinute(acts), [60]);
+  assert.equal(recoveryMinute(acts).length, 1);
   const recs = (await alerts()).filter((r) => r.dedupe_key.startsWith('ameen-sync-outage-recovered:'));
   assert.equal(recs.length, 1);
   assert.match(recs[0].message, /^⚠️ تعافٍ جزئي لمزامنة الأمين/);
