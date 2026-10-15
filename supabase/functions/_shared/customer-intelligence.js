@@ -2745,9 +2745,32 @@
   // المخرج: الرسائل الجديدة، وصفوف الحالة للإضافة، ومفاتيح الحالة للحذف (من عاد واشترى أو
   // لم يعد مهماً). لا يرسل ولا يكتب شيئاً بنفسه.
   // --------------------------------------------------------------------------
-  const ddmmyyyy = (key) => {
-    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(key || ""));
-    return match ? `${match[3]}-${match[2]}-${match[1]}` : "—";
+  // نص الرسالة بالتنسيق الموحّد src/telegram-format.js (نص عادي، RTL، أرقام معزولة).
+  // يُحمَّل قبل هذا الملف في الدالة الطرفية وحدها؛ الواجهة لا تبني هذه الرسالة، فلا
+  // يُطلب المنسِّق إلا هنا، وغيابه خطأ صريح لا رسالة بتنسيق آخر.
+  const tg = () => {
+    const format = typeof globalThis !== "undefined" ? globalThis.ozkTelegramFormat : null;
+    if (!format) throw new Error("telegram_format_unavailable");
+    return format;
+  };
+  // اسم الزبون في الرسالة: 40 حرفاً تكفي أي اسم فعلي، وتضمن أن رسالة الـ20 زبوناً
+  // تبقى تحت 3500 حرف مهما طالت الأسماء (يفرضها فحص الحالة القصوى).
+  const INACTIVITY_NAME_CHARS = 40;
+  // تمييز العدد العربي: 1 يوم واحد، 2 يومان، 3–10 أيام، وما فوقها يوماً. الكسر «يوماً».
+  const countWord = (f, value, [one, two, few, many]) => {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return `${f.num(value, 0)} ${many}`;
+    if (Number.isInteger(n) && Math.abs(n) === 1) return one;
+    if (Number.isInteger(n) && Math.abs(n) === 2) return two;
+    const unit = Number.isInteger(n) && Math.abs(n) >= 3 && Math.abs(n) <= 10 ? few : many;
+    return `${f.num(n, Number.isInteger(n) ? 0 : 1)} ${unit}`;
+  };
+  const DAYS = ["يوم واحد", "يومان", "أيام", "يوماً"];
+  const CUSTOMERS = ["زبون واحد", "زبونان", "زبائن", "زبوناً"];
+  // يوم محاسبي «YYYY-MM-DD» كما هو (لا تحويل منطقة زمنية)، معزولاً LTR كي لا ينقلب.
+  const isolatedDay = (f, key) => {
+    const match = /^\d{4}-\d{2}-\d{2}$/.exec(String(key || ""));
+    return `${f.LRI}${match ? match[0] : "—"}${f.PDI}`;
   };
   // بصمة قصيرة حتمية (FNV-1a 32bit) لمفتاح منع التكرار — ليست أماناً.
   const fingerprint = (value) => {
@@ -2770,6 +2793,10 @@
     // بلاغ «البيانات قديمة» مرة واحدة باليوم، والحالة لا تُمسّ.
     if (!result.dataAvailability?.invoicesAvailable || !invoices || invoices.stale) {
       const age = invoices?.ageMinutes;
+      const f = tg();
+      const why = age === null || age === undefined
+        ? "تقرير الفواتير غير متاح"
+        : `تقرير الفواتير عمره ${f.num(age, 0)} دقيقة (الحد ${f.num(CONFIG.freshnessMinutes.invoices, 0)} دقيقة)`;
       return {
         status: "stale_invoices",
         code,
@@ -2777,7 +2804,11 @@
         insertRows: [],
         deleteKeys: [],
         messages: [{
-          text: `⚠️ فحص غياب الزبائن المهمين لم يُنفَّذ اليوم: تقرير الفواتير ${age === null || age === undefined ? "غير متاح" : `عمره ${age} دقيقة`} (الحد ${CONFIG.freshnessMinutes.invoices} دقيقة). لا تنبيهات حتى تتحدّث المزامنة.`,
+          text: [
+            f.line("⚠️ فحص غياب الزبائن المهمين لم يُنفَّذ اليوم"),
+            f.field("السبب", why),
+            f.line("لا تنبيهات حتى تتحدّث المزامنة.")
+          ].join("\n"),
           dedupeKey: `${code}:stale:${checkDay}`
         }]
       };
@@ -2826,16 +2857,29 @@
       .map((row) => text(row?.dedupe_key ?? row?.dedupeKey))
       .sort();
 
+    // التقسيم كل customersPerMessage زبوناً كما هو، لأن مفتاح الرسالة مبني من زبائن كل جزء:
+    // تغيير الحدود يغيّر المفاتيح فيعيد إرسال ما أُرسل. التنسيق وحده يتغيّر هنا.
     const messages = [];
+    const f = fresh.length ? tg() : null;
+    const totalParts = Math.ceil(fresh.length / K.customersPerMessage);
     for (let start = 0; start < fresh.length; start += K.customersPerMessage) {
       const chunk = fresh.slice(start, start + K.customersPerMessage);
-      const part = fresh.length > K.customersPerMessage ? ` (${start / K.customersPerMessage + 1}/${Math.ceil(fresh.length / K.customersPerMessage)})` : "";
-      const lines = chunk.map((entry, index) => {
-        const gap = entry.typicalGapDays === null ? "غير محسوبة" : `${entry.typicalGapDays} يوماً`;
-        return `${start + index + 1}. ${entry.customerName} — ${entry.daysSinceLastPurchase} يوماً بلا فاتورة (آخر فاتورة ${ddmmyyyy(entry.lastPurchaseAt)}) — فجوته المعتادة ${gap} — مشترياته الشهرية ${formatAmount(entry.monthlyPurchases, entry.currency || CONFIG.baseCurrency)}`;
+      const part = totalParts > 1 ? ` (${start / K.customersPerMessage + 1}/${totalParts})` : "";
+      const lines = [f.line(`🔕 زبائن مهمون بلا شراء منذ ${countWord(f, K.inactiveDays, DAYS)} أو أكثر${part}`)];
+      if (start === 0) lines.push(f.field("العدد", `${countWord(f, fresh.length, CUSTOMERS)} · الأهم أولاً`));
+      lines.push(f.line(f.SEPARATOR));
+      chunk.forEach((entry, index) => {
+        const gap = entry.typicalGapDays === null ? "غير محسوبة" : countWord(f, entry.typicalGapDays, DAYS);
+        const monthly = f.money(entry.monthlyPurchases, entry.currency || CONFIG.baseCurrency, 0);
+        if (index) lines.push("");
+        lines.push(
+          f.line(`${f.num(start + index + 1, 0)}. ${f.name(entry.customerName, "—", INACTIVITY_NAME_CHARS)}`),
+          f.line(`الغياب: ${countWord(f, entry.daysSinceLastPurchase, DAYS)} · آخر فاتورة: ${isolatedDay(f, entry.lastPurchaseAt)}`),
+          f.line(`الفجوة المعتادة: ${gap} · يشتري شهرياً: ${monthly}`)
+        );
       });
       messages.push({
-        text: `🔕 زبائن مهمون بلا شراء منذ ${K.inactiveDays} أيام أو أكثر${part}\n${lines.join("\n")}`,
+        text: lines.join("\n"),
         // مفتاح الرسالة من محتواها (يوم المرجع + بصمة الزبائن): إعادة التشغيل بنفس القائمة لا
         // تكرّرها، وقائمة مختلفة في اليوم نفسه لا تُبتلَع بمفتاح رسالة سابقة.
         dedupeKey: `${code}:${result.window.referenceDate}:${fingerprint(chunk.map((entry) => entry.dedupeKey).join("|"))}`,
