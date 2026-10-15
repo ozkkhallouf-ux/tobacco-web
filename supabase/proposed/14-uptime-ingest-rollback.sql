@@ -23,7 +23,8 @@ $guard$;
 
 drop function if exists public.watch_uptime_heartbeat();
 drop function if exists public.uptime_ingest(text, text);
-drop function if exists private.uptime_recovery_cancelled(text);
+drop function if exists private.uptime_cancel_recovery(bigint);
+drop function if exists private.uptime_close_key(text, text, timestamptz);
 drop function if exists private.uptime_enqueue(text, text);
 drop function if exists private.uptime_message(text, text, text, timestamptz, timestamptz);
 

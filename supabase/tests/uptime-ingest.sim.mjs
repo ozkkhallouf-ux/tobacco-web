@@ -222,9 +222,11 @@ $function$`;
     assert.equal(ingest({ events: [ev('site', a, 'reminder:1h', a + 3_600_000)] }).results[0].outcome, 'suppressed:reminder-sent');
     assert.equal(ingest({ events: [ev('site', b, 'recovered', b + 4_000_000)], scheduledTime: b + 4_000_000 }).results[0].outcome, 'recovery-pending');
     assert.equal(ingest({ events: [ev('site', a, 'recovered', a + 4_100_000)], scheduledTime: b + 4_100_000 }).results[0].outcome, 'suppressed:recovery-pending');
-    ingest({ scheduledTime: b + 4_300_000, targets: { site: 'UP' } });               // تأكيد التشغيل التالي
+    ingest({ scheduledTime: b + 4_300_000, targets: { site: 'UP' } });               // دورة مرشّحة
+    assert.equal(outbox(), 2, 'لا تعافٍ قبل دورتين');
+    ingest({ scheduledTime: b + 4_600_000, targets: { site: 'UP' } });               // تأكيد
     assert.equal(outbox(), 3, 'down + تذكير 1h + recovered');
-    assert.equal(count(`select count(*) from public.telegram_outbox where dedupe_key = 'uptime:site:${b}:recovered'`), 1);
+    assert.equal(count(`select count(*) from public.telegram_outbox where dedupe_key = 'uptime:site:${a}:recovered:${b + 4_000_000}'`), 1);
     assert.equal(count(`select count(*) from private.uptime_incidents`), 1);
     assert.equal(one(`select array_length(aliases, 1) from private.uptime_incidents`), '1');
   });
@@ -247,6 +249,7 @@ $function$`;
     assert.equal(r.results[0].outcome, 'recovery-pending');
     assert.equal(outbox(), 2, 'لا رسالة تعافٍ قبل التأكيد');
     ingest({ scheduledTime: S + 4_300_000, targets: { site: 'UP', bulletin: 'DOWN' } });
+    ingest({ scheduledTime: S + 4_600_000, targets: { site: 'UP', bulletin: 'DOWN' } });
     assert.equal(outbox(), 3, 'انقطاع + تذكير + تعافٍ، والنشرة بلا رسالة');
   });
 
@@ -258,6 +261,7 @@ $function$`;
     ingest({ events: [ev('site', S, 'recovered', S + 3_000_000)], scheduledTime: S + 3_000_000, targets: { site: 'UP' } });
     assert.equal(outbox(), 0, 'تعافٍ معلّق: لا ترقية');
     ingest({ scheduledTime: S + 3_300_000, targets: { site: 'UP' } });
+    ingest({ scheduledTime: S + 3_600_000, targets: { site: 'UP' } });
     assert.equal(outbox(), 0, 'لا تنبيه لانقطاع لم يُبلَّغ وانتهى');
     assert.equal(count(`select count(*) from private.uptime_incidents where closed_at is null`), 0);
   });
@@ -272,7 +276,9 @@ $function$`;
     ingest({ scheduledTime: now - 30_000, targets: { site: 'UP', bulletin: 'UP' } });  // Worker بحالة جديدة: الموقع شغّال
     assert.equal(count(`select count(*) from private.uptime_incidents where closed_at is null`), 1, 'تعافٍ معلّق لا إغلاق');
     assert.equal(outbox(), 1);
-    ingest({ scheduledTime: now, targets: { site: 'UP', bulletin: 'UP' } });              // التشغيل التالي يؤكد
+    ingest({ scheduledTime: now - 20_000, targets: { site: 'UP', bulletin: 'UP' } });     // دورة مرشّحة
+    assert.equal(outbox(), 1);
+    ingest({ scheduledTime: now, targets: { site: 'UP', bulletin: 'UP' } });              // تأكيد
     assert.equal(count(`select count(*) from private.uptime_incidents where closed_at is null`), 0, 'أُغلقت');
     assert.equal(outbox(), 2, 'رسالة تعافٍ واحدة');
     assert.match(one(`select message from public.telegram_outbox order by id desc limit 1`), /✅/);
@@ -294,6 +300,7 @@ $function$`;
     reset();
     ingest({ events: [ev('site', S, 'down', now - 120_000)], scheduledTime: now - 120_000 });
     ingest({ scheduledTime: now - 60_000, targets: { site: 'UP' } });
+    ingest({ scheduledTime: now - 30_000, targets: { site: 'UP' } });
     ingest({ scheduledTime: now, targets: { site: 'UP' } });                   // الإرسال مقفل
     assert.equal(count(`select count(*) from private.uptime_incidents where closed_at is null`), 0);
     assert.equal(outbox(), 0);
@@ -329,6 +336,7 @@ $function$`;
     const r = ingest({ events: [ev('bulletin', 1, 'down', 10, 'http-404'), ev('bulletin', 1, 'recovered', 20)] });
     assert.deepEqual(r.results.map((x) => x.outcome), ['recorded', 'recovery-pending']);
     ingest({ scheduledTime: Date.now(), targets: { bulletin: 'UP' } });
+    ingest({ scheduledTime: Date.now() + 1, targets: { bulletin: 'UP' } });
     assert.equal(count(`select count(*) from private.uptime_incidents where closed_at is null`), 0);
     assert.equal(one(`select outcome from private.uptime_events where type = 'recovered'`), 'recorded');
     assert.equal(outbox(), 0);
@@ -448,8 +456,10 @@ $function$`;
     await step(5, live);
     assert.equal(outbox(), 1);
     siteUp = true; await step(6, live); await step(7, live);
-    assert.equal(outbox(), 1, 'التعافي معلّق حتى يؤكده التشغيل التالي');
+    assert.equal(outbox(), 1, 'التعافي معلّق حتى يؤكده تشغيلان تاليان');
     await step(8, live);
+    assert.equal(outbox(), 1);
+    await step(9, live);
     assert.equal(outbox(), 2, 'تعافٍ واحد');
     assert.equal(count(`select count(*) from private.uptime_incidents where closed_at is null`), 0);
   });
@@ -466,11 +476,13 @@ $function$`;
     assert.equal(openCount(), 1, 'نفس الطلب لا يؤكد نفسه');
     assert.equal(recovered(), 0);
     ingest({ scheduledTime: R + M, targets: { site: 'UP' } });
+    assert.equal(openCount(), 1, 'دورة مرشّحة فقط');
+    ingest({ scheduledTime: R + 2 * M, targets: { site: 'UP' } });
     assert.equal(openCount(), 0);
     assert.equal(recovered(), 1);
     assert.equal(one(`select (extract(epoch from closed_at) * 1000)::bigint from private.uptime_incidents`), String(R), 'closed_at = وقت التعافي لا وقت التأكيد');
-    assert.equal(one(`select outcome || ',' || outbox_dedupe_key from private.uptime_events where type = 'recovered'`), `notified,uptime:site:${S}:recovered`);
-    ingest({ scheduledTime: R + 2 * M, targets: { site: 'UP' } });
+    assert.equal(one(`select outcome || ',' || outbox_dedupe_key from private.uptime_events where type = 'recovered'`), `notified,uptime:site:${S}:recovered:${R}`);
+    ingest({ scheduledTime: R + 3 * M, targets: { site: 'UP' } });
     assert.equal(recovered(), 1, 'لا تكرار');
   });
 
@@ -479,7 +491,8 @@ $function$`;
     const S1 = 1_900_000_000_000; const S2 = S1 + 60 * M;
     ingest({ events: [ev('site', S1, 'down', S1 + 2 * M)], scheduledTime: S1 + 2 * M });
     ingest({ scheduledTime: S1 + 10 * M, targets: { site: 'UP' } });          // ضياع KV: تعافٍ من النبض
-    ingest({ scheduledTime: S1 + 11 * M, targets: { site: 'UP' } });          // مؤكد ⇒ S1 مغلقة
+    ingest({ scheduledTime: S1 + 11 * M, targets: { site: 'UP' } });          // مرشّحة
+    ingest({ scheduledTime: S1 + 12 * M, targets: { site: 'UP' } });          // مؤكد ⇒ S1 مغلقة
     ingest({ events: [ev('site', S2, 'down', S2 + 2 * M)], scheduledTime: S2 + 2 * M, targets: { site: 'DOWN' } });
     assert.equal(outbox(), 3, 'down S1 + تعافيها + down S2');
     const late = ingest({ events: [ev('site', S1, 'recovered', S1 + 9 * M)], scheduledTime: S2 + 3 * M, targets: { site: 'DOWN' } });
@@ -538,6 +551,7 @@ $function$`;
       assert.equal(openCount(), 1);
       assert.equal(recovered(), 0, 'لا تعافٍ قبل الحسم');
       ingest({ scheduledTime: T + M, targets: { site: nextStatus } });
+      ingest({ scheduledTime: T + 2 * M, targets: { site: nextStatus } });
       assert.equal(openCount(), nextStatus === 'UP' ? 0 : 1);
       assert.equal(recovered(), nextStatus === 'UP' ? 1 : 0);
     }
@@ -549,9 +563,13 @@ $function$`;
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     let v = null;
     const T = Date.now() - 30 * M;
-    const run = (i, siteOk, { rpcDelay = 0, putDelay = 0 } = {}) => runOnce({
+    const history = [];                                    // قيمة KV بعد كل دورة (لمحاكاة قراءة قديمة)
+    const run = (i, siteOk, { rpcDelay = 0, putDelay = 0, readStale, rpcFail = false } = {}) => runOnce({
       env: live, now: T + i * M, log: () => {},
-      kv: { get: async () => v, put: async (_, s2) => { if (putDelay) await sleep(putDelay); v = s2; } },
+      kv: {
+        get: async () => (readStale === undefined ? v : history[readStale]),
+        put: async (_, s2) => { if (putDelay) await sleep(putDelay); v = s2; },
+      },
       fetchImpl: async (url, init) => {
         const u = String(url);
         if (u.startsWith('https://ozktobacco.com/')) {
@@ -559,17 +577,19 @@ $function$`;
           return siteOk ? new Response('OZK TOBACCO', { status: 200 }) : new Response('', { status: 503 });
         }
         if (rpcDelay) await sleep(rpcDelay);
+        if (rpcFail) return new Response('{"message":"upstream"}', { status: 503 });
         const { p_payload, p_signature } = JSON.parse(init.body);
         try { return new Response(await psqlAsync(ingestAs('anon', p_payload, p_signature)), { status: 200 }); }
         catch { return new Response('{"message":"rejected"}', { status: 400 }); }
       },
     });
     const state = () => JSON.parse(v);
-    return { run, state };
+    const snap = (i) => { history[i] = v; };
+    return { run, state, snap };
   };
   const toRecovering = async (h) => {
-    for (let i = 0; i < 3; i++) await h.run(i, false);    // UP → SUSPECT → … → DOWN (تنبيه)
-    await h.run(3, true);                                  // RECOVERING (okStreak = 1)
+    for (let i = 0; i < 3; i++) { await h.run(i, false); h.snap(i); } // UP → SUSPECT → … → DOWN (تنبيه)
+    await h.run(3, true); h.snap(3);                       // RECOVERING (okStreak = 1)
     assert.equal(h.state().targets.site.status, 'RECOVERING');
     assert.equal(outbox(), 1);
   };
@@ -608,8 +628,9 @@ $function$`;
     assert.match(one(`select message from public.telegram_outbox order by id desc limit 1`), /⏳/);
     assert.equal(one(`select incident_key from private.uptime_incidents`), incident);
     await h.run(15, true); await h.run(16, true);          // تعافٍ حقيقي (معرّف recovered مكرر ⇒ تعافٍ من النبض)
-    assert.equal(recovered(), 0, 'معلّق');
     await h.run(17, true);
+    assert.equal(recovered(), 0, 'معلّق: مرشّحة');
+    await h.run(18, true);
     assert.equal(recovered(), 1);
     assert.equal(openCount(), 0);
     assert.equal(outbox(), 3, 'انقطاع + تذكير + تعافٍ');
@@ -631,11 +652,180 @@ $function$`;
     assert.equal(one(`select recover_at is null and array_length(aliases, 1) = 1 from private.uptime_incidents`), 't');
     for (let i = 8; i <= 11; i++) await h.run(i, i % 2 === 0);             // تأرجح أثناء الانقطاع: RECOVERING/DOWN
     assert.equal(outbox(), 1, 'لا تنبيه انقطاع ثانٍ ولا تعافٍ');
-    await h.run(12, true); await h.run(13, true);
+    await h.run(12, true); await h.run(13, true); await h.run(14, true);
     assert.equal(recovered(), 0, 'التعافي معلّق');
-    await h.run(14, true);
+    await h.run(15, true);
     assert.equal(recovered(), 1);
     assert.equal(openCount(), 0);
+  });
+
+  // ── دورة تأكيد التعافي (ملاحظة Codex P1 على 600878e) ──
+  // ترتيبات الوصول إلى Supabase × الكتابة في KV لزوج تشغيلات واحد
+  const PAIR_ORDERS = [
+    { name: 'الأول يصل أولاً ويكسب KV', a: { putDelay: 400 }, b: { rpcDelay: 120 } },
+    { name: 'الأول يصل أولاً والثاني يكسب KV', a: { putDelay: 250 }, b: { rpcDelay: 120, putDelay: 400 } },
+    { name: 'الثاني يصل أولاً والأول يكسب KV', a: { rpcDelay: 120, putDelay: 400 }, b: {} },
+    { name: 'الثاني يصل أولاً ويكسب KV', a: { rpcDelay: 120 }, b: { putDelay: 400 } },
+  ];
+  const siteStatus = (h) => h.state().targets.site.status;
+  // الانقطاع الحقيقي = حالة الـWorker الفائزة في KV. الثوابت المطلوبة:
+  //  ١) ما دام الـWorker يحمل حادثة، فحادثتها على الخادم (بمعرّفها أو اسم بديل) مفتوحة ⇒ لا إغلاق ولا تعافٍ كاذب
+  //     والتذكيرات تجد حادثة مفتوحة.
+  //  ٢) رسالة تعافٍ واحدة على الأكثر لكل حادثة، ولا رسالة تعافٍ لحادثة مفتوحة.
+  //  ٣) حادثة مفتوحة واحدة على الأكثر.
+  const assertConsistent = (h, label, { corrected = 0 } = {}) => {
+    const inc = h.state().targets.site.incident;
+    if (inc) {
+      const st = one(`select coalesce((select case when closed_at is null then 'open' else 'closed' end
+        from private.uptime_incidents where incident_key = '${inc.id}' or '${inc.id}' = any (aliases)), 'missing')`);
+      assert.equal(st, 'open', `${label}: الـWorker ما زال يحمل ${inc.id} ⇒ يجب أن تبقى حادثته مفتوحة`);
+    }
+    assert.equal(count(`select count(*) from (select dedupe_key from public.telegram_outbox where message like '✅%'
+      group by 1 having count(*) > 1) d`), 0, `${label}: لا تكرار لرسالة التعافي`);
+    // رسالة تعافٍ لحادثة أُعيد فتحها تُحسب فقط إن تبعها تصحيح (corrected)
+    assert.ok(recovered() <= count(`select count(*) from private.uptime_incidents where closed_at is not null`) + corrected,
+      `${label}: كل رسالة تعافٍ لحادثة مغلقة`);
+    assert.ok(openCount() <= 1, `${label}: حادثة مفتوحة واحدة`);
+  };
+
+  test('دورة التأكيد بتشغيلين متزامنين، كل ترتيبات الوصول وKV، وكل الحالات (UP/SUSPECT/DOWN/RECOVERING) ⇒ متسقة مع الـWorker', async () => {
+    // السباق الأول يحدد الحالة الفائزة (متعافٍ أو واقف)، ثم دورة التأكيد بتشغيلين اختلف فحصهما
+    const firstRace = { recoveredWins: PAIR_ORDERS[0], downWins: PAIR_ORDERS[1] };
+    for (const [winner, o1] of Object.entries(firstRace)) {
+      for (const o2 of PAIR_ORDERS) {
+        const label = `${winner} / ${o2.name}`;
+        reset(); setNotify(true);
+        const h = raceHarness();
+        await toRecovering(h);
+        await Promise.all([h.run(4, true, o1.a), h.run(4, false, o1.b)]);
+        h.snap(4);
+        const before = siteStatus(h);
+        assert.equal(before, winner === 'recoveredWins' ? 'UP' : 'DOWN');
+        await Promise.all([h.run(5, true, o2.a), h.run(5, false, o2.b)]);   // UP/SUSPECT أو RECOVERING/DOWN
+        h.snap(5);
+        assertConsistent(h, `${label} بعد دورة التأكيد`);
+        for (let i = 6; i <= 22; i++) { await h.run(i, false); h.snap(i); assertConsistent(h, `${label} دورة ${i}`); }
+        // الانقطاع مستمر: إما حادثته مفتوحة بتذكيرها، أو أُغلقت عن تعافٍ رآه الـWorker وانقطاع جديد نُبِّه عنه
+        const reminders = count(`select count(*) from public.telegram_outbox where message like '⏳%'`);
+        const downs = count(`select count(*) from public.telegram_outbox where message like '🔴%'`);
+        if (recovered() === 0) {
+          assert.equal(reminders, 1, `${label}: التذكير لم يتوقف`);
+          assert.equal(count(`select count(*) from private.uptime_incidents`), 1, `${label}: حادثة واحدة`);
+        } else {
+          assert.equal(downs, 2, `${label}: بعد تعافٍ رآه الـWorker يُنبَّه الانقطاع الجديد (لا صمت)`);
+        }
+      }
+    }
+  });
+
+  test('نبضة قديمة تصل بعد نبضة أحدث: UP القديم لا يرشّح ولا يؤكد، وDOWN القديم يعترض', () => {
+    reset(); setNotify(true);
+    const S = 1_900_000_000_000; const R = S + 20 * M;
+    ingest({ events: [ev('site', S, 'down', S + 2 * M)], scheduledTime: S + 2 * M });
+    ingest({ events: [ev('site', S, 'recovered', R)], scheduledTime: R, targets: { site: 'UP' } });
+    ingest({ scheduledTime: R + 2 * M, targets: { site: 'SUSPECT' } });
+    ingest({ scheduledTime: R + M, targets: { site: 'UP' } });            // متأخرة: أقدم من آخر مقبول
+    assert.equal(openCount(), 1);
+    assert.equal(recovered(), 0);
+    assert.equal(one(`select confirm_tick is null from private.uptime_incidents`), 't', 'UP متأخر لا يرشّح');
+    ingest({ scheduledTime: R + M + 1, targets: { site: 'DOWN' } });      // DOWN متأخر يعترض (آمن: يؤخر فقط)
+    assert.equal(one(`select recover_at is null from private.uptime_incidents`), 't');
+    assert.equal(openCount(), 1);
+  });
+
+  test('قراءة KV متأخرة أكثر من 5 دقائق بلا تشغيل مكرر ⇒ الكاتب القديم يصبح الحقيقة ولا تناقض', async () => {
+    reset(); setNotify(true);
+    const h = raceHarness();
+    await toRecovering(h);
+    await h.run(4, false); h.snap(4);                                       // DOWN
+    await h.run(5, true, { readStale: 3 }); h.snap(5);                      // يقرأ حالة دورة 3 (RECOVERING) ⇒ recovered
+    assertConsistent(h, 'بعد القراءة القديمة');
+    for (let i = 6; i <= 8; i++) { await h.run(i, false); h.snap(i); assertConsistent(h, `دورة ${i}`); }
+  });
+
+  test('سباق ثانٍ مع قراءة KV متأخرة أكثر من 5 دقائق يخسر كتابتها ⇒ اعتراض الشقيق يمنع الإغلاق', async () => {
+    reset(); setNotify(true);
+    const h = raceHarness();
+    await toRecovering(h);
+    await Promise.all([h.run(4, true, { putDelay: 250 }), h.run(4, false, { rpcDelay: 120, putDelay: 400 })]); // DOWN يكسب
+    h.snap(4);
+    assert.equal(siteStatus(h), 'DOWN');
+    // دورة 5 مكررة: تشغيل يقرأ قيمة دورة 3 القديمة (> 5 دقائق) وفحصه ناجح، يصل أولاً ويخسر KV
+    await Promise.all([h.run(5, true, { readStale: 3, putDelay: 250 }), h.run(5, false, { rpcDelay: 120, putDelay: 400 })]);
+    h.snap(5);
+    for (let i = 6; i <= 16; i++) { await h.run(i, false); h.snap(i); }
+    assertConsistent(h, 'سباق مزدوج مع قراءة قديمة');
+  });
+
+  // ── اعتراض الشقيق: UP وDOWN لنفس الدقيقة بكل الترتيبات، في الدورة المرشّحة ودورة التأكيد ──
+  const pendingIncident = () => {
+    const S = 1_900_000_000_000; const R = S + 20 * M;
+    ingest({ events: [ev('site', S, 'down', S + 2 * M)], scheduledTime: S + 2 * M, targets: { site: 'DOWN' } });
+    ingest({ events: [ev('site', S, 'recovered', R)], scheduledTime: R, targets: { site: 'UP' } });
+    return { S, R };
+  };
+  const signed = (opts) => { const p = body(opts); return () => psqlAsync(ingestAs('anon', p, sign(p))); };
+
+  test('الدورة المرشّحة: UP وDOWN لنفس الدقيقة (متتاليان بالترتيبين، ومتزامنان) ⇒ الاعتراض يلغي دائماً', async () => {
+    for (const mode of ['UP ثم DOWN', 'DOWN ثم UP', 'متزامنان']) {
+      reset(); setNotify(true);
+      const { R } = pendingIncident();
+      const up = signed({ scheduledTime: R + M, targets: { site: 'UP' } });
+      const down = signed({ scheduledTime: R + M, targets: { site: 'DOWN' } });
+      if (mode === 'UP ثم DOWN') { await up(); await down(); }
+      else if (mode === 'DOWN ثم UP') { await down(); await up(); }
+      else await Promise.all([up(), down()]);
+      assert.equal(one(`select recover_at is null and confirm_tick is null from private.uptime_incidents`), 't', `${mode}: أُلغي`);
+      ingest({ scheduledTime: R + 2 * M, targets: { site: 'UP' } });       // لا تأكيد من دورة بلا مرشّحة
+      assert.equal(openCount(), 1, `${mode}: ما زالت مفتوحة`);
+      assert.equal(recovered(), 0, `${mode}: لا تعافٍ`);
+    }
+  });
+
+  test('دورة التأكيد: UP يؤكد ثم يصل DOWN لنفس الدقيقة ⇒ إعادة فتح برسالة تصحيح، والتذكيرات تستمر', async () => {
+    for (const mode of ['UP ثم DOWN', 'DOWN ثم UP', 'متزامنان']) {
+      reset(); setNotify(true);
+      const { S, R } = pendingIncident();
+      ingest({ scheduledTime: R + M, targets: { site: 'UP' } });          // مرشّحة
+      const up = signed({ scheduledTime: R + 2 * M, targets: { site: 'UP' } });
+      const down = signed({ scheduledTime: R + 2 * M, targets: { site: 'DOWN' } });
+      if (mode === 'UP ثم DOWN') { await up(); assert.equal(recovered(), 1); await down(); }
+      else if (mode === 'DOWN ثم UP') { await down(); await up(); }
+      else await Promise.all([up(), down()]);
+      assert.equal(openCount(), 1, `${mode}: الحادثة مفتوحة في النهاية`);
+      const fixes = count(`select count(*) from public.telegram_outbox where message like '⚠️ تصحيح%'`);
+      if (mode === 'DOWN ثم UP') assert.equal(recovered() + fixes, 0, `${mode}: الاعتراض سبق ⇒ لا تعافٍ ولا تصحيح`);
+      else assert.equal(recovered(), fixes, `${mode}: كل تعافٍ أُرسل يتبعه تصحيح`);
+      const r = ingest({ events: [ev('site', S, 'reminder:1h', S + 62 * M)], scheduledTime: S + 62 * M, targets: { site: 'DOWN' } });
+      assert.equal(r.results[0].outcome, 'notified', `${mode}: التذكير لم يُكتم`);
+      assert.equal(count(`select count(*) from private.uptime_incidents`), 1, `${mode}: حادثة واحدة`);
+      // التعافي الحقيقي لاحقاً: رسالة واحدة بمفتاح جديد (لا يتصادم مع الأولى)
+      ingest({ scheduledTime: S + 70 * M, targets: { site: 'UP' } });
+      ingest({ scheduledTime: S + 71 * M, targets: { site: 'UP' } });
+      ingest({ scheduledTime: S + 72 * M, targets: { site: 'UP' } });
+      assert.equal(openCount(), 0, `${mode}: أُغلقت بعد التعافي الحقيقي`);
+      assert.equal(count(`select count(*) from public.telegram_outbox where message like '✅%'`), (mode === 'DOWN ثم UP' ? 0 : 1) + 1);
+    }
+  });
+
+  test('القيد المتبقي: شقيق فشل طلبه وكسب KV + قراءة متأخرة في دورة التأكيد ⇒ تعافٍ كاذب يتبعه تصحيح ولا صمت', async () => {
+    reset(); setNotify(true);
+    const h = raceHarness();
+    await toRecovering(h);
+    await Promise.all([h.run(4, true, { putDelay: 250 }), h.run(4, false, { rpcDelay: 120, putDelay: 400 })]); // DOWN يكسب
+    h.snap(4);
+    // دورة 5: تشغيل قديم القراءة (دورة 3) يقول UP ويصل؛ شقيقه الحديث DOWN فشل طلبه وكسب KV ⇒ مرشّحة بلا اعتراض
+    await Promise.allSettled([h.run(5, true, { readStale: 3, putDelay: 250 }), h.run(5, false, { rpcFail: true, putDelay: 400 })]);
+    h.snap(5);
+    assert.equal(h.state().targets.site.status, 'DOWN');
+    // دورة 6: قراءة قديمة ثانية (> 10 دقائق) تقول UP وتصل أولاً ⇒ تأكيد كاذب؛ الشقيق الحديث DOWN يصل بعده
+    await Promise.all([h.run(6, true, { readStale: 3, putDelay: 250 }), h.run(6, false, { rpcDelay: 120, putDelay: 400 })]);
+    h.snap(6);
+    assert.equal(recovered(), 1, 'القيد: رسالة تعافٍ كاذبة ممكنة بثلاثة شذوذات معاً');
+    assert.equal(count(`select count(*) from public.telegram_outbox where message like '⚠️ تصحيح%'`), 1, 'يتبعها تصحيح فوراً');
+    for (let i = 7; i <= 16; i++) { await h.run(i, false); h.snap(i); assertConsistent(h, `دورة ${i}`, { corrected: 1 }); }
+    assert.equal(count(`select count(*) from public.telegram_outbox where message like '⏳%'`), 1, 'التذكير لم يتوقف');
+    assert.equal(count(`select count(*) from private.uptime_incidents`), 1);
   });
 
   test('التراجع: يزيل كل كائنات 14 ولا يمسّ telegram_outbox، ويرفض إن كان المراقب مجدولاً', () => {
@@ -645,7 +835,7 @@ $function$`;
     rejects(() => psql(ROLLBACK), /unschedule the uptime watchdog/);
     psql(`delete from cron.job`);
     psql(ROLLBACK);
-    assert.equal(count(`select count(*) from pg_proc where proname in ('uptime_ingest','watch_uptime_heartbeat','uptime_enqueue','uptime_message','uptime_recovery_cancelled')`), 0);
+    assert.equal(count(`select count(*) from pg_proc where proname in ('uptime_ingest','watch_uptime_heartbeat','uptime_enqueue','uptime_message','uptime_cancel_recovery','uptime_close_key')`), 0);
     assert.equal(count(`select count(*) from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'private' and c.relname like 'uptime_%'`), 0);
     assert.equal(count(`select count(*) from public.telegram_outbox`), rowsBefore);
     assert.equal(one(`select md5(prosrc) from pg_proc where proname = 'notify_telegram_dispatch'`), '60bbae6f1fed8ba5e66c9a9a91daed40', 'dispatch لم تُمس');
