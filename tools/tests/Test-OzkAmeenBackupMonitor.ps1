@@ -218,6 +218,22 @@ try {
     $r = Invoke-OzkBackupMonitor -StateDir $f.State -NotifyScript $okNotify -Now $check2330
     Assert-True ($r.level -eq 'FAILURE' -and ((@($r.health.failures) -join ' ') -match 'لا يطابق على C:')) 'بلا ضغط وملف خام تالف على C: ⇒ FAILURE'
 
+    Write-Host '== 8ج) compressed=true بلا بيانات ZIP ⇒ FAILURE (Codex P1) =='
+    $f = New-Fixture 'nozipmeta' $night; Set-TaskRan $night
+    $sp = Join-Path $f.State 'status.json'
+    $obj = Get-Content -LiteralPath $sp -Raw -Encoding UTF8 | ConvertFrom-Json
+    $obj.zip = $null
+    [System.IO.File]::WriteAllText($sp, ($obj | ConvertTo-Json -Depth 6))
+    $r = Invoke-OzkBackupMonitor -StateDir $f.State -NotifyScript $okNotify -Now $check2330
+    Assert-True ($r.level -eq 'FAILURE' -and ((@($r.health.failures) -join ' ') -match 'بلا بيانات ZIP')) 'مضغوطة بلا zip في status.json ⇒ FAILURE لا SUCCESS'
+    $f = New-Fixture 'nozipsha' $night; Set-TaskRan $night
+    $sp = Join-Path $f.State 'status.json'
+    $obj = Get-Content -LiteralPath $sp -Raw -Encoding UTF8 | ConvertFrom-Json
+    $obj.zip.sha256 = ''
+    [System.IO.File]::WriteAllText($sp, ($obj | ConvertTo-Json -Depth 6))
+    $r = Invoke-OzkBackupMonitor -StateDir $f.State -NotifyScript $okNotify -Now $check2330
+    Assert-True ($r.level -eq 'FAILURE') 'مضغوطة ببصمة ZIP فارغة ⇒ FAILURE'
+
     Write-Host '== 9) المساحة =='
     $f = New-Fixture 'space' $night; Set-TaskRan $night
     $script:Free = [int64](30GB)
@@ -303,6 +319,8 @@ try {
     $script:RegCalls = 0
     $script:TaskRegistrar = { param($Spec) $script:RegCalls++ }
     $script:TaskExists = { param([string]$Name) return ($Name -eq 'TOBACCO Ameen Backup Monitor') }
+    $script:Paths = @('C:\x\app\abc1234\tools\backup\ozk-ameen-backup-monitor.ps1', 'C:\x\app\abc1234/tools/backup/ozk-ameen-backup-monitor.ps1', 'C:\x\app\abc1234\install-manifest.json', 'C:\x\app\abc1234/install-manifest.json', 'C:\Users\LOQ\Documents\OZK-TOBACCO\tobacco-web\tools\send-telegram-notification.ps1')
+    $script:PathExists = { param([string]$Path) return ($script:Paths -contains $Path) }
     $script:HostNameReader = { return 'OZK2026' }
     $rr = Invoke-OzkRegisterMonitorTask -AppRoot 'C:\ProgramData\OZK-TOBACCO\Backup\app\abc1234'
     Assert-True ($rr.status -eq 'dry-run' -and $script:RegCalls -eq 0) 'DryRun افتراضي لا يسجّل'
@@ -318,8 +336,16 @@ try {
     Assert-Throws { Invoke-OzkRegisterMonitorTask -Apply -AppRoot 'C:\x\app\abc1234' } 'لا تسجيل على جهاز غير OZK2026'
     $script:HostNameReader = { return 'OZK2026' }
     Assert-Throws { Invoke-OzkRegisterMonitorTask -At @('24:00') -AppRoot 'C:\x\app\abc1234' } 'وقت غير صالح مرفوض'
+    Assert-Throws { Invoke-OzkRegisterMonitorTask -Apply -AppRoot 'C:\x\app\typo999' } 'مجلد إصدار غير موجود (خطأ مطبعي) ⇒ رفض قبل التسجيل (Codex P1)'
+    Assert-True ($script:RegCalls -eq 0) 'لا تسجيل عند مسار إصدار غير موجود'
+    $saved = $script:Paths
+    $script:Paths = @($saved | Where-Object { $_ -notmatch 'install-manifest' })
+    Assert-Throws { Invoke-OzkRegisterMonitorTask -Apply -AppRoot 'C:\x\app\abc1234' } 'إصدار بلا install-manifest.json ⇒ رفض'
+    $script:Paths = @($saved | Where-Object { $_ -notmatch 'send-telegram' })
+    Assert-Throws { Invoke-OzkRegisterMonitorTask -Apply -AppRoot 'C:\x\app\abc1234' } 'سكربت Telegram مفقود ⇒ رفض'
+    $script:Paths = $saved
     $rr = Invoke-OzkRegisterMonitorTask -Apply -AppRoot 'C:\x\app\abc1234'
-    Assert-True ($rr.status -eq 'registered' -and $script:RegCalls -eq 1) '-Apply على OZK2026 يستدعي المسجّل مرة واحدة (بديل وهمي)'
+    Assert-True ($rr.status -eq 'registered' -and $script:RegCalls -eq 1) '-Apply على OZK2026 بإصدار مثبّت يستدعي المسجّل مرة واحدة (بديل وهمي)'
 } finally {
     if (Test-Path -LiteralPath $base) { Remove-Item -LiteralPath $base -Recurse -Force -ErrorAction SilentlyContinue }
 }

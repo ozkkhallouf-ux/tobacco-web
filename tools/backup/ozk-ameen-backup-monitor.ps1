@@ -213,7 +213,10 @@ function Get-OzkBackupHealth {
         if ($status.runDir) {
             $manC = Join-OzkMonPath ([string]$status.runDir) 'manifest.json'
             if (-not (Test-Path -LiteralPath $manC -PathType Leaf)) { [void]$failures.Add('manifest.json مفقود على C:'); $manC = $null }
-            if ($status.compressed -and $status.zip) {
+            if ($status.compressed -and (-not $status.zip -or -not $status.zip.zip -or -not $status.zip.sha256)) {
+                # مضغوطة بلا بيانات ZIP: الحمولة الوحيدة غير قابلة للتحقق، فلا يُعدّ ذلك نجاحاً.
+                [void]$failures.Add('status.json يقول compressed=true بلا بيانات ZIP (اسم/بصمة)')
+            } elseif ($status.compressed -and $status.zip) {
                 $zipC = Join-OzkMonPath ([string]$status.runDir) ([string]$status.zip.zip)
                 if (-not (Test-Path -LiteralPath $zipC -PathType Leaf)) { [void]$failures.Add('ZIP مفقود على C:'); $zipC = $null }
                 elseif ((Get-OzkMonSha256 $zipC) -ne ([string]$status.zip.sha256).ToLowerInvariant()) { [void]$failures.Add('SHA256 للـZIP على C: لا يطابق status.json') }
@@ -254,7 +257,7 @@ function Get-OzkBackupHealth {
                         elseif ((Get-OzkMonSha256 $rawD) -ne ([string]$f.sha256).ToLowerInvariant()) { [void]$failures.Add('SHA256 لا يطابق على القرص الخارجي: ' + $f.file) }
                     }
                 }
-                if ($status.compressed -and $status.zip) {
+                if ($status.compressed -and $status.zip -and $status.zip.zip -and $status.zip.sha256) {
                     $zipD = Join-OzkMonPath ([string]$status.externalDir) ([string]$status.zip.zip)
                     if (-not (Test-Path -LiteralPath $zipD -PathType Leaf)) { [void]$failures.Add('ZIP مفقود على القرص الخارجي') }
                     elseif ((Get-OzkMonSha256 $zipD) -ne ([string]$status.zip.sha256).ToLowerInvariant()) { [void]$failures.Add('SHA256 للـZIP على القرص الخارجي لا يطابق') }

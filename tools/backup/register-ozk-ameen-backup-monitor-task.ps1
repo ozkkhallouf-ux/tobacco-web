@@ -30,6 +30,7 @@ $ErrorActionPreference = 'Stop'
 
 $script:HostNameReader = { return $env:COMPUTERNAME }
 $script:TaskExists = { param([string]$Name) return [bool](Get-ScheduledTask -TaskName $Name -ErrorAction SilentlyContinue) }
+$script:PathExists = { param([string]$Path) return (Test-Path -LiteralPath $Path -PathType Leaf) }
 $script:TaskRegistrar = {
     param($Spec)
     $action = New-ScheduledTaskAction -Execute $Spec.Execute -Argument $Spec.Arguments -WorkingDirectory $Spec.WorkingDirectory
@@ -82,6 +83,12 @@ function Invoke-OzkRegisterMonitorTask {
     $h = & $script:HostNameReader
     if ($h -ne $ExpectedHost) { throw ("الجهاز الحالي '{0}' ليس '{1}'. لا تسجيل." -f $h, $ExpectedHost) }
     if ($AppRoot -match 'CURRENT$') { throw 'مرّر -AppRoot لمجلد إصدار مثبّت فعلياً (مثل app\<commit>).' }
+    # المهمة لا تُسجَّل إلا لإصدار مثبّت فعلاً: مسار خاطئ يعني مراقباً يفشل كل ليلة بصمت.
+    $monScript = [System.IO.Path]::Combine([System.IO.Path]::Combine([System.IO.Path]::Combine($AppRoot, 'tools'), 'backup'), 'ozk-ameen-backup-monitor.ps1')
+    $manifest = [System.IO.Path]::Combine($AppRoot, 'install-manifest.json')
+    if (-not (& $script:PathExists $monScript)) { throw ('سكربت المراقب غير موجود في الإصدار: ' + $monScript) }
+    if (-not (& $script:PathExists $manifest)) { throw ('install-manifest.json غير موجود في الإصدار: ' + $manifest) }
+    if (-not (& $script:PathExists $NotifyScript)) { throw ('سكربت Telegram غير موجود: ' + $NotifyScript) }
     if (& $script:TaskExists $spec.TaskName) { throw ('مهمة بنفس الاسم موجودة، لن تُعدَّل: ' + $spec.TaskName) }
     & $script:TaskRegistrar $spec
     Write-Host ('سُجّلت المهمة: ' + $spec.TaskName)
