@@ -306,6 +306,26 @@ begin
         v_outcome := case when v_row.closed_at is null then 'suppressed:incident-open' else 'suppressed:incident-closed' end;
       else
         select * into v_row from private.uptime_incidents where target = v_target and closed_at is null for update;
+        if v_row.recover_event is not null and v_at > v_row.recover_at
+           and to_timestamp(split_part(v_inc, ':', 2)::numeric / 1000) >= v_row.recover_at + interval '25 minutes' then
+          -- انقطاع ثانٍ مستقل بعد تعافٍ سجّله الـWorker صراحةً (طابور أُعيد بعد تعذّر Supabase: down A, recovered A, down B).
+          -- معرّف B = بداية أول فشل في انقطاعه. بين التعافي وتلك البداية فحوص كلها UP أو SUSPECT عاد UP،
+          -- وأقلها 4 دورات (25 دقيقة على دورة 5 دقائق) تضم دورتي UP على الأقل (3 إخفاقات متتالية = DOWN)
+          -- = نفس دليل التأكيد على دورتين في ٤أ. فتُختم A عند وقت تعافيها برسالتها، ويُفتح B بتنبيه مستقل.
+          -- أقرب من ذلك (تأرجح خلال نافذة التأكيد) يبقى اسماً بديلاً يلغي التعافي كما في الأسفل.
+          update private.uptime_incidents set closed_at = v_row.recover_at where id = v_row.id and closed_at is null;
+          if v_alertable and v_cfg.notify_enabled and v_row.down_notified then
+            v_key := private.uptime_close_key(v_row.incident_key, 'recovered', v_row.recover_at);
+            perform private.uptime_enqueue(
+              private.uptime_message('recovered', null, null, v_row.recover_at, v_row.opened_at), v_key);
+            update private.uptime_events set outcome = 'notified', outbox_dedupe_key = v_key
+             where event_id = v_row.recover_event;
+            v_key := null;
+          else
+            update private.uptime_events set outcome = 'recorded' where event_id = v_row.recover_event;
+          end if;
+          v_row := null;
+        end if;
         if v_row.id is not null then
           -- معرّف جديد لنفس الانقطاع. وإن جاء بعد تعافٍ لم يُؤكَّد فهو دليل أن الهدف ما زال/عاد واقفاً:
           -- يُلغى التعافي المعلّق ويستمر الانقطاع نفسه (لا حادثة ثانية ولا تنبيه ثانٍ ولا تعافٍ كاذب).

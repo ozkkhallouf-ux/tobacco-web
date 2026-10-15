@@ -659,6 +659,50 @@ $function$`;
     assert.equal(openCount(), 0);
   });
 
+  test('طابور بعد تعذّر Supabase: down A ثم recovered A ثم down B مستقل ⇒ تعافي A وتنبيه B، والتأرجح القريب يبقى انقطاعاً واحداً', () => {
+    const S = 1_900_000_000_000; const R = S + 20 * M; const MIN = 60_000;
+    // B بدأ بعد التعافي بـ 25 دقيقة على الأقل (دورتا UP مضمونتان) ⇒ انقطاعان، في طلب واحد أو طلبات متتالية
+    for (const split of [false, true]) {
+      reset(); setNotify(true);
+      const B = R + 25 * MIN;
+      const evs = [ev('site', S, 'down', S + 15 * M), ev('site', S, 'recovered', R), ev('site', B, 'down', B + 10 * M)];
+      // متتالية: كل حدث بطلب تشغيله (الـUP بين التعافي وB ضاعت طلباتها)
+      const sched = [S + 15 * M, R, B + 10 * M]; const st = ['DOWN', 'UP', 'DOWN'];
+      const outs = split
+        ? evs.map((e, i) => ingest({ events: [e], scheduledTime: sched[i], targets: { site: st[i] } }).results[0].outcome)
+        : ingest({ events: evs, scheduledTime: B + 11 * M, targets: { site: 'DOWN' } }).results.map((x) => x.outcome);
+      assert.deepEqual(outs, ['notified', 'recovery-pending', 'notified'], `split=${split}`);
+      assert.equal(count(`select count(*) from private.uptime_incidents`), 2, 'حادثتان');
+      assert.equal(one(`select (extract(epoch from closed_at) * 1000)::bigint from private.uptime_incidents where incident_key = 'site:${S}'`), String(R));
+      assert.equal(one(`select incident_key from private.uptime_incidents where closed_at is null`), `site:${B}`);
+      assert.equal(recovered(), 1, 'رسالة تعافٍ واحدة لـ A');
+      assert.equal(outbox(), 3, 'down A + تعافي A + down B');
+      assert.equal(one(`select outcome || ',' || outbox_dedupe_key from private.uptime_events where type = 'recovered'`), `notified,uptime:site:${S}:recovered:${R}`);
+      ingest({ events: [ev('site', B, 'reminder:1h', B + 70 * M)], scheduledTime: B + 70 * M, targets: { site: 'DOWN' } });
+      assert.equal(outbox(), 4, 'تذكيرات B تعمل');
+      ingest({ events: [ev('site', B, 'recovered', B + 80 * M)], scheduledTime: B + 80 * M, targets: { site: 'UP' } });
+      ingest({ scheduledTime: B + 85 * M, targets: { site: 'UP' } }); ingest({ scheduledTime: B + 90 * M, targets: { site: 'UP' } });
+      assert.equal(recovered(), 2); assert.equal(openCount(), 0);
+    }
+    // أقل من 25 دقيقة (قد تكون دورة UP واحدة فقط) ⇒ اسم بديل يلغي التعافي: لا ✅ ولا تنبيه ثانٍ
+    for (const gap of [5, 20, 24]) {
+      reset(); setNotify(true);
+      const B = R + gap * MIN;
+      const outs = ingest({ events: [ev('site', S, 'down', S + 15 * M), ev('site', S, 'recovered', R), ev('site', B, 'down', B + 10 * M)],
+        scheduledTime: B + 11 * M, targets: { site: 'DOWN' } }).results.map((x) => x.outcome);
+      assert.deepEqual(outs, ['notified', 'recovery-pending', 'suppressed:same-outage'], `gap=${gap}`);
+      assert.equal(count(`select count(*) from private.uptime_incidents`), 1);
+      assert.equal(one(`select recover_at is null from private.uptime_incidents`), 't');
+      assert.equal(outbox(), 1); assert.equal(recovered(), 0);
+    }
+    // تعافٍ من النبض وحده (ضياع KV، بلا حدث recovered) لا يُختم بهذا المسار: يبقى الاعتراض كما هو
+    reset(); setNotify(true);
+    ingest({ events: [ev('site', S, 'down', S + 15 * M)], scheduledTime: S + 15 * M, targets: { site: 'DOWN' } });
+    ingest({ scheduledTime: R, targets: { site: 'UP' } });
+    ingest({ events: [ev('site', R + 60 * M, 'down', R + 70 * M)], scheduledTime: R + 70 * M, targets: { site: 'DOWN' } });
+    assert.equal(count(`select count(*) from private.uptime_incidents`), 1); assert.equal(recovered(), 0);
+  });
+
   // ── دورة تأكيد التعافي (ملاحظة Codex P1 على 600878e) ──
   // ترتيبات الوصول إلى Supabase × الكتابة في KV لزوج تشغيلات واحد
   const PAIR_ORDERS = [
@@ -796,6 +840,7 @@ $function$`;
       const fixes = count(`select count(*) from public.telegram_outbox where message like '⚠️ تصحيح%'`);
       if (mode === 'DOWN ثم UP') assert.equal(recovered() + fixes, 0, `${mode}: الاعتراض سبق ⇒ لا تعافٍ ولا تصحيح`);
       else assert.equal(recovered(), fixes, `${mode}: كل تعافٍ أُرسل يتبعه تصحيح`);
+      const sentBefore = recovered();   // المتزامنان: أيّهما سبق يحدده الخادم (0 أو 1)
       const r = ingest({ events: [ev('site', S, 'reminder:1h', S + 62 * M)], scheduledTime: S + 62 * M, targets: { site: 'DOWN' } });
       assert.equal(r.results[0].outcome, 'notified', `${mode}: التذكير لم يُكتم`);
       assert.equal(count(`select count(*) from private.uptime_incidents`), 1, `${mode}: حادثة واحدة`);
@@ -804,7 +849,7 @@ $function$`;
       ingest({ scheduledTime: S + 71 * M, targets: { site: 'UP' } });
       ingest({ scheduledTime: S + 72 * M, targets: { site: 'UP' } });
       assert.equal(openCount(), 0, `${mode}: أُغلقت بعد التعافي الحقيقي`);
-      assert.equal(count(`select count(*) from public.telegram_outbox where message like '✅%'`), (mode === 'DOWN ثم UP' ? 0 : 1) + 1);
+      assert.equal(recovered(), sentBefore + 1, `${mode}: رسالة تعافٍ حقيقية واحدة`);
     }
   });
 
