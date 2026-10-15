@@ -109,8 +109,14 @@ create table if not exists private.sync_outage_config (
   -- صحة الكاشف نفسه (تُحدَّث في sync_outage_tick)
   consecutive_errors integer not null default 0,
   last_error text,
+  -- آخر دورة ناجحة لـsync-outage-tick (بساعة الخادم): بدونها لا يُدمج تنبيه تقادم المخزون (فتح آمن)
+  last_tick_ok_at timestamptz,
   check (business_end > business_start)
 );
+-- إعادة تطبيق بعد تراجع (الجداول تبقى): أعمدة أُضيفت لاحقاً
+alter table private.sync_outage_config add column if not exists consecutive_errors integer not null default 0;
+alter table private.sync_outage_config add column if not exists last_error text;
+alter table private.sync_outage_config add column if not exists last_tick_ok_at timestamptz;
 alter table private.sync_outage_config enable row level security;
 revoke all on private.sync_outage_config from public, anon, authenticated;
 insert into private.sync_outage_config(device, label) values ('OZK2026', 'مزامنة الأمين على OZK2026')
@@ -385,8 +391,8 @@ begin
  for d in select device, label from private.sync_outage_config where enabled order by device loop
   begin
    r := private.sync_outage_step(d.device, p_now, true);
-   update private.sync_outage_config set consecutive_errors = 0, last_error = null
-    where device = d.device and consecutive_errors <> 0;
+   update private.sync_outage_config set consecutive_errors = 0, last_error = null, last_tick_ok_at = now()
+    where device = d.device;
   exception when others then
    err := sqlerrm;
    raise warning 'sync_outage_tick: % failed: %', d.device, err;
@@ -416,10 +422,15 @@ revoke all on function private.sync_outage_tick(timestamptz) from public, anon, 
 -- أي خطأ ⇒ false ⇒ يُرسَل التنبيه كما كان (يفشل مفتوحاً).
 create or replace function private.sync_outage_absorb_stock_stale(p_message text, p_key text)
 returns boolean language plpgsql security definer set search_path = private, public, pg_temp as $$
-declare d record; inc_id bigint;
+declare d record; inc_id bigint; last_ok timestamptz;
 begin
  if coalesce(p_key, '') not like 'stock-priority:stale:%' then return false; end if;
  for d in select device from private.sync_outage_config where enabled order by device loop
+  -- الدمج يفترض أن الدورة المجدولة حيّة لتُرسل إنذار الانقطاع لاحقاً. إن عُطّلت أو حُذفت أو توقفت
+  -- (لا دورة ناجحة خلال 15 دقيقة) فلا دمج: يُرسل تنبيه المخزون فوراً كما قبل 15 (فتح آمن).
+  select c.last_tick_ok_at into last_ok from private.sync_outage_config c where c.device = d.device;
+  continue when last_ok is null or last_ok < now() - interval '15 minutes'
+             or not exists (select 1 from cron.job j where j.jobname = 'sync-outage-tick' and j.active);
   -- إعادة تحقق حيّة دائماً (لا ثقة بحادثة مفتوحة قديمة: إن توقفت sync-outage-tick تبقى مفتوحة بلا نهاية):
   -- الخطوة تغلقها إن عاد الجهاز، أو تفتحها إن كان منقطعاً فعلاً — تسجيلاً فقط، بلا إرسال.
   perform private.sync_outage_step(d.device, now(), false);

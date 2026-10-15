@@ -127,7 +127,7 @@ assert.equal((await one(db, `select count(*)::int c from cron.job where jobname=
 const reset = async () => {
   await db.exec(`delete from public.telegram_outbox; delete from public.inventory_reports; delete from public.khalil_audit_sync_heartbeat;
     delete from public.expense_entries; delete from private.sync_outage_incidents; delete from private.project_task_incidents;
-    delete from private.ops_events;`);
+    delete from private.ops_events; update private.sync_outage_config set last_tick_ok_at = null;`);
 };
 const tick = async (t) => (await one(db, `select private.sync_outage_tick($1::timestamptz) r`, [iso(t)])).r;
 const alerts = () => q(db, `select dedupe_key, message from public.telegram_outbox where event_type like 'ameen_sync_outage%' order by id`);
@@ -474,14 +474,35 @@ await scenario('تقادم المخزون بلا انقطاع ⇒ فوري كم�
   await stockStale();
   assert.equal((await one(db, `select count(*)::int c from public.telegram_outbox where dedupe_key='stock-priority:stale:stock-stale'`)).c, 1);
 });
-await scenario('تقادم المخزون قبل أول دورة لكن الانقطاع قائم فعلاً ⇒ تُفتح الحادثة (بلا إرسال) ويُدمج', async () => {
+await scenario('دورة حيّة والانقطاع قائم فعلاً قبل أن تفتح الدورة الحادثة ⇒ تُفتح (بلا إرسال) ويُدمج', async () => {
   await reset(); await seedAll(db, new Date(Date.now() - 20 * 60000));
+  await db.exec(`update private.sync_outage_config set last_tick_ok_at = now()`);
   await stockStale();
   assert.equal((await one(db, `select count(*)::int c from public.telegram_outbox`)).c, 0);
   const inc = await incidents();
   assert.equal(inc.length, 1);
   assert.equal(inc[0].stock_stale_absorbed, 1);
   assert.equal(inc[0].alerted_at, null);
+});
+await scenario('الدورة المجدولة غير متاحة (لم تعمل قط / متوقفة / معطّلة) والانقطاع قائم ⇒ تقادم المخزون فوري (فتح آمن)', async () => {
+  const sent = async () => (await one(db, `select count(*)::int c from public.telegram_outbox where dedupe_key='stock-priority:stale:stock-stale'`)).c;
+  // لم تعمل قط
+  await reset(); await seedAll(db, new Date(Date.now() - 20 * 60000));
+  await stockStale();
+  assert.equal(await sent(), 1);
+  // آخر دورة ناجحة قبل 20 دقيقة (متوقفة)
+  await reset(); await seedAll(db, new Date(Date.now() - 20 * 60000));
+  await db.exec(`update private.sync_outage_config set last_tick_ok_at = now() - interval '20 minutes'`);
+  await stockStale();
+  assert.equal(await sent(), 1);
+  // دورة حديثة لكن المهمة معطّلة في cron
+  await reset(); await seedAll(db, new Date(Date.now() - 20 * 60000));
+  await db.exec(`update private.sync_outage_config set last_tick_ok_at = now(); update cron.job set active = false where jobname = 'sync-outage-tick'`);
+  try {
+    await stockStale();
+    assert.equal(await sent(), 1);
+    assert.equal((await one(db, `select coalesce(sum(stock_stale_absorbed),0)::int c from private.sync_outage_incidents`)).c, 0);
+  } finally { await db.exec(`update cron.job set active = true where jobname = 'sync-outage-tick'`); }
 });
 
 // ── الفوري المستقل لا يُمس ──
