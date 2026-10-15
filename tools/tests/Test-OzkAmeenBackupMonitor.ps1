@@ -45,7 +45,8 @@ $script:HostNameReader = { return 'OZK2026' }
 $okNotify = Join-Path $base 'notify-ok.ps1'
 $failNotify = Join-Path $base 'notify-fail.ps1'
 $notifyLog = Join-Path $base 'notify.log'
-[System.IO.File]::WriteAllText($okNotify, ('param([string]$Message,[string]$EventType,[string]$DedupeKey,[int]$DedupeMinutes) Add-Content -LiteralPath ''' + $notifyLog + ''' -Value $DedupeKey; Write-Host "TELEGRAM-NOTIFY OK ($EventType)"'))
+$lastMsg = Join-Path $base 'notify-last.txt'
+[System.IO.File]::WriteAllText($okNotify, ('param([string]$Message,[string]$EventType,[string]$DedupeKey,[int]$DedupeMinutes) Add-Content -LiteralPath ''' + $notifyLog + ''' -Value $DedupeKey; [System.IO.File]::WriteAllText(''' + $lastMsg + ''', $Message); Write-Host "TELEGRAM-NOTIFY OK ($EventType)"'))
 [System.IO.File]::WriteAllText($failNotify, 'param([string]$Message,[string]$EventType,[string]$DedupeKey,[int]$DedupeMinutes) Write-Host "TELEGRAM-NOTIFY FAILED: The remote name could not be resolved"; exit 0')
 function Get-NotifyCount { if (Test-Path -LiteralPath $notifyLog) { return @(Get-Content -LiteralPath $notifyLog).Count } return 0 }
 function Reset-Notify { if (Test-Path -LiteralPath $notifyLog) { Remove-Item -LiteralPath $notifyLog -Force } }
@@ -309,6 +310,35 @@ try {
     $st = Get-Content -LiteralPath (Join-Path $f.State 'monitor-state.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     Assert-True ($r.alertReason -eq 'retry-undelivered' -and $r.delivery.delivered -and -not $st.pending -and $st.lastAlertAt) 'بعد عودة Telegram: يصل وتُمسح الحادثة'
     Assert-True ((Get-NotifyCount) -eq 1) 'رسالة واحدة وصلت'
+
+    Write-Host '== 10ب) FAILURE لم يصل ثم تعافت النسخة قبل الفحص التالي ⇒ الحادثة الفائتة تُرسل مع التعافي =='
+    $f = New-Fixture 'tgRecover' $night 'failed' 'skipped'; Set-TaskRan $night
+    $r = Invoke-OzkBackupMonitor -StateDir $f.State -NotifyScript $failNotify -Now $check2330
+    Assert-True ($r.level -eq 'FAILURE' -and -not $r.delivery.delivered) 'FAILURE الساعة 23:30 لم يصل'
+    # تشغيل يدوي ناجح قبل 00:45: status.json سليم الآن، مع إبقاء monitor-state.json
+    $ok = New-Fixture 'tgRecoverOk' $night.AddMinutes(50)
+    Copy-Item -LiteralPath (Join-Path $f.State 'monitor-state.json') -Destination (Join-Path $ok.State 'monitor-state.json')
+    Set-TaskRan $night.AddMinutes(50)
+    Reset-Notify
+    $r = Invoke-OzkBackupMonitor -StateDir $ok.State -NotifyScript $okNotify -Now ([datetime]'2026-10-16T00:45:00')
+    $msg = [System.IO.File]::ReadAllText($lastMsg)
+    Assert-True ($r.level -eq 'SUCCESS' -and $r.alertReason -eq 'retry-undelivered' -and $r.delivery.delivered) 'إعادة المحاولة تصل'
+    Assert-True ($msg -match 'تنبيه سابق لم يصل' -and $msg -match 'FAILURE' -and $msg -match 'الحالة الآن' -and $msg -match 'SUCCESS') 'الرسالة تحمل حادثة FAILURE الفائتة بنصها ثم حالة SUCCESS الحالية'
+    $st = Get-Content -LiteralPath (Join-Path $ok.State 'monitor-state.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    Assert-True (-not $st.pending -and $st.lastLevel -eq 'SUCCESS') 'بعد الوصول تُمسح الحادثة'
+    Reset-Notify
+    $null = Invoke-OzkBackupMonitor -StateDir $ok.State -NotifyScript $okNotify -Now $check0800
+    Assert-True ((Get-NotifyCount) -eq 0) '08:00 لا يكرر شيئاً'
+
+    Write-Host '== 10ج) فشل متكرر بنفس الحادثة لا يضاعف النص =='
+    $f = New-Fixture 'tgSame' $night 'failed' 'skipped'; Set-TaskRan $night
+    $null = Invoke-OzkBackupMonitor -StateDir $f.State -NotifyScript $failNotify -Now $check2330
+    $null = Invoke-OzkBackupMonitor -StateDir $f.State -NotifyScript $failNotify -Now $check2330.AddMinutes(75)
+    $st = Get-Content -LiteralPath (Join-Path $f.State 'monitor-state.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    Assert-True (@($st.pending.missed).Count -eq 1 -and $st.pending.attempts -eq 2) 'حادثة واحدة محفوظة مع attempts=2'
+    $null = Invoke-OzkBackupMonitor -StateDir $f.State -NotifyScript $okNotify -Now $check0800
+    $msg = [System.IO.File]::ReadAllText($lastMsg)
+    Assert-True ($msg -notmatch 'تنبيه سابق لم يصل') 'الحادثة نفسها ما زالت قائمة ⇒ رسالة واحدة بلا تكرار القسم'
 
     Write-Host '== 11) منع التكرار مع عدم كتم تغيّر الحالة أو الاستمرار الطويل =='
     $f = New-Fixture 'dedupe' $night 'failed' 'skipped'; Set-TaskRan $night

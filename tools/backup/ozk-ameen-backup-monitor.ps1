@@ -326,6 +326,43 @@ function Get-OzkAlertDecision($Health, $State, [datetime]$Now, [int]$RepeatHours
     return 'no-previous-alert'
 }
 
+# التنبيهات التي لم تصل محفوظة بنصها الأصلي: إعادة المحاولة ترسل الحادثة الفائتة نفسها، لا حالة اللحظة وحدها.
+function Get-OzkMissedAlerts($State) {
+    if (-not $State -or -not $State.pending -or $State.pending.delivered -ne $false) { return @() }
+    $list = @($State.pending.missed | Where-Object { $_ -and $_.text })
+    if ($list.Count -eq 0) {
+        # حالة محفوظة بصيغة أقدم بلا نص: لا يضيع الخبر على الأقل.
+        return @([pscustomobject]@{ at = [string]$State.pending.firstAttemptAt; level = [string]$State.pending.level; fingerprint = ''; text = ('تنبيه ' + [string]$State.pending.level + ' سابق لم يصل (' + [string]$State.pending.reason + ')') })
+    }
+    return $list
+}
+
+function Add-OzkMissedAlert($Missed, [datetime]$Now, [string]$Level, [string]$Fingerprint, [string]$Text) {
+    $list = New-Object System.Collections.ArrayList
+    foreach ($m in @($Missed)) { [void]$list.Add($m) }
+    if (-not (@($list | Where-Object { $_.fingerprint -eq $Fingerprint }).Count)) {
+        [void]$list.Add([ordered]@{ at = $Now.ToString('o'); level = $Level; fingerprint = $Fingerprint; text = $Text })
+    }
+    # حدّ أعلى 5: الأولى (بداية الحادثة) تبقى دائماً، ثم الأحدث.
+    if ($list.Count -gt 5) { $list = @($list[0]) + @($list[($list.Count - 4)..($list.Count - 1)]) }
+    return @($list)
+}
+
+function Join-OzkAlertWithMissed($Missed, [string]$CurrentText, [string]$CurrentFingerprint) {
+    $prior = @($Missed | Where-Object { $_.fingerprint -ne $CurrentFingerprint })
+    if ($prior.Count -eq 0) { return $CurrentText }
+    $parts = New-Object System.Collections.ArrayList
+    foreach ($m in $prior) {
+        $at = ConvertTo-OzkDate $m.at
+        [void]$parts.Add(('📨 تنبيه سابق لم يصل في وقته ({0}):' -f $(if ($at) { $at.ToString('yyyy-MM-dd HH:mm') } else { [string]$m.at })))
+        [void]$parts.Add([string]$m.text)
+        [void]$parts.Add('')
+    }
+    [void]$parts.Add('— الحالة الآن:')
+    [void]$parts.Add($CurrentText)
+    return ($parts -join "`n")
+}
+
 function Format-OzkMonitorAlert($Health, [string]$Reason) {
     $icon = switch ($Health.level) { 'SUCCESS' { '✅' } 'WARNING' { '⚠️' } default { '🚨' } }
     $lines = New-Object System.Collections.ArrayList
@@ -397,9 +434,13 @@ function Invoke-OzkBackupMonitor {
     $fp = Get-OzkFingerprint $health
     $delivery = $null
     $evaluateOnly = (-not $NotifyScript)
+    $currentText = $null
+    $missed = @()
     if ($reason -and -not $evaluateOnly) {
-        $text = Format-OzkMonitorAlert $health $reason
-        $delivery = Send-OzkMonitorTelegram $NotifyScript $text ('ozk-backup-monitor-' + $health.level.ToLowerInvariant() + '-' + $fp)
+        $currentText = Format-OzkMonitorAlert $health $reason
+        $missed = @(Get-OzkMissedAlerts $state)
+        $text = Join-OzkAlertWithMissed $missed $currentText $fp
+        $delivery = Send-OzkMonitorTelegram $NotifyScript $text ('ozk-backup-monitor-' + $health.level.ToLowerInvariant() + '-' + $fp + $(if ($missed.Count) { '-r' + $missed.Count } else { '' }))
     }
     if ($evaluateOnly) {
         # بلا -NotifyScript: تقييم وسجل فقط. لا تُحدَّث حالة التنبيهات كي لا يبتلع فحصٌ يدوي تنبيهاً.
@@ -424,7 +465,7 @@ function Invoke-OzkBackupMonitor {
             $newState.pending = $null
         } else {
             # التنبيه لم يصل: تُحفظ الحادثة، ويُعاد الإرسال في الفحص القادم مهما كانت الحالة.
-            $newState.pending = [ordered]@{ level = $health.level; reason = $reason; firstAttemptAt = $(if ($state -and $state.pending -and $state.pending.firstAttemptAt) { $state.pending.firstAttemptAt } else { $Now.ToString('o') }); lastAttemptAt = $Now.ToString('o'); attempts = $(if ($state -and $state.pending -and $state.pending.attempts) { [int]$state.pending.attempts + 1 } else { 1 }); delivered = $false; detail = $delivery.detail }
+            $newState.pending = [ordered]@{ level = $health.level; reason = $reason; missed = @(Add-OzkMissedAlert $missed $Now $health.level $fp $currentText); firstAttemptAt = $(if ($state -and $state.pending -and $state.pending.firstAttemptAt) { $state.pending.firstAttemptAt } else { $Now.ToString('o') }); lastAttemptAt = $Now.ToString('o'); attempts = $(if ($state -and $state.pending -and $state.pending.attempts) { [int]$state.pending.attempts + 1 } else { 1 }); delivered = $false; detail = $delivery.detail }
         }
     }
     try { & $script:JsonWriter $statePath $newState } catch { Write-Host ('STATE WRITE FAIL: ' + $_.Exception.Message) }
