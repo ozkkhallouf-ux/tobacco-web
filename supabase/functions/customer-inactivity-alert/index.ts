@@ -13,7 +13,9 @@
 // تستدعيها pg_cron (public.dispatch_customer_inactivity_alert) برأس
 // X-OZK-Inactivity-Alert-Token مطابق لـapp_secrets.customer_inactivity_alert_token.
 // لا وصول لقاعدة الأمين من هنا إطلاقاً: المصادر تقارير Supabase المزامَنة.
+// نص الرسالة بالتنسيق الموحّد ../_shared/telegram-format.js، فيُحمَّل قبل المحرك.
 // ============================================================================
+import "../_shared/telegram-format.js";
 import "../_shared/customer-intelligence.js";
 import { createClient } from "npm:@supabase/supabase-js@2.57.4";
 
