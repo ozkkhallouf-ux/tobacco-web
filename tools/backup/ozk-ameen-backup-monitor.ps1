@@ -224,7 +224,13 @@ function Get-OzkBackupHealth {
                     } catch { [void]$failures.Add('manifest.json غير صالح على C:') }
                 }
             } elseif (-not $status.compressed) {
+                # بلا ضغط: الملفات الخام هي النسخة نفسها، فيُتحقَّق من كل واحد ببصمته.
                 [void]$warnings.Add('النسخة غير مضغوطة (-NoCompress)')
+                foreach ($f in @($status.files)) {
+                    $raw = Join-OzkMonPath ([string]$status.runDir) ([string]$f.file)
+                    if (-not (Test-Path -LiteralPath $raw -PathType Leaf)) { [void]$failures.Add('ملف خام مفقود على C: ' + $f.file) }
+                    elseif ((Get-OzkMonSha256 $raw) -ne ([string]$f.sha256).ToLowerInvariant()) { [void]$failures.Add('SHA256 لا يطابق على C: ' + $f.file) }
+                }
             }
         } else {
             [void]$failures.Add('runDir غير محدد في status.json')
@@ -241,7 +247,14 @@ function Get-OzkBackupHealth {
                 [void]$failures.Add(('القرص الخارجي {0} رقمه {1} وليس {2}' -f $root, $serial, $ExpectedDriveSerial))
             } else {
                 if (-not (& $script:MarkerChecker $root)) { [void]$failures.Add('ملف العلامة مفقود على القرص الخارجي') }
-                if ($status.zip) {
+                if (-not $status.compressed) {
+                    foreach ($f in @($status.files)) {
+                        $rawD = Join-OzkMonPath ([string]$status.externalDir) ([string]$f.file)
+                        if (-not (Test-Path -LiteralPath $rawD -PathType Leaf)) { [void]$failures.Add('ملف خام مفقود على القرص الخارجي: ' + $f.file) }
+                        elseif ((Get-OzkMonSha256 $rawD) -ne ([string]$f.sha256).ToLowerInvariant()) { [void]$failures.Add('SHA256 لا يطابق على القرص الخارجي: ' + $f.file) }
+                    }
+                }
+                if ($status.compressed -and $status.zip) {
                     $zipD = Join-OzkMonPath ([string]$status.externalDir) ([string]$status.zip.zip)
                     if (-not (Test-Path -LiteralPath $zipD -PathType Leaf)) { [void]$failures.Add('ZIP مفقود على القرص الخارجي') }
                     elseif ((Get-OzkMonSha256 $zipD) -ne ([string]$status.zip.sha256).ToLowerInvariant()) { [void]$failures.Add('SHA256 للـZIP على القرص الخارجي لا يطابق') }

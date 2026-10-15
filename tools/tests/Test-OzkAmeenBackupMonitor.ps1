@@ -53,7 +53,7 @@ function Reset-Notify { if (Test-Path -LiteralPath $notifyLog) { Remove-Item -Li
 function Get-TestSha([string]$Path) { return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
 
 # يبني status.json وملفاته كما يكتبها ozk-ameen-backup.ps1.
-function New-Fixture([string]$Name, [datetime]$RunAt, [string]$Status = 'ok', [string]$External = 'ok', [string[]]$Dbs = @('AmnDb002', 'AmnDb001', 'AmnConfig')) {
+function New-Fixture([string]$Name, [datetime]$RunAt, [string]$Status = 'ok', [string]$External = 'ok', [string[]]$Dbs = @('AmnDb002', 'AmnDb001', 'AmnConfig'), [switch]$NoCompress) {
     $root = Join-Path $base $Name
     $stamp = $RunAt.ToString('yyyy-MM-dd_HHmmss')
     $state = Join-Path $root 'state'
@@ -63,17 +63,21 @@ function New-Fixture([string]$Name, [datetime]$RunAt, [string]$Status = 'ok', [s
     $zipName = 'OZK-Ameen-' + $stamp + '.zip'
     [System.IO.File]::WriteAllText((Join-Path $runDir $zipName), ('ZIP-' + $stamp))
     $zipSha = Get-TestSha (Join-Path $runDir $zipName)
-    $files = @($Dbs | ForEach-Object { [pscustomobject]@{ database = $_; file = ($_ + '_' + $stamp + '.bak'); bytes = 10; sha256 = 'x'; verified = 'RESTORE VERIFYONLY WITH CHECKSUM' } })
+    $files = @($Dbs | ForEach-Object {
+        $fn = $_ + '_' + $stamp + '.bak'
+        [System.IO.File]::WriteAllText((Join-Path $runDir $fn), ('RAW-' + $fn))
+        [pscustomobject]@{ database = $_; file = $fn; bytes = 10; sha256 = (Get-TestSha (Join-Path $runDir $fn)); verified = 'RESTORE VERIFYONLY WITH CHECKSUM' } })
     $manifest = [ordered]@{ stamp = $stamp; files = $files; zip = [ordered]@{ zip = $zipName; sha256 = $zipSha } }
     [System.IO.File]::WriteAllText((Join-Path $runDir 'manifest.json'), ($manifest | ConvertTo-Json -Depth 5))
     if ($External -eq 'ok') {
         New-Item -ItemType Directory -Force -Path $extDir | Out-Null
         [System.IO.File]::Copy((Join-Path $runDir $zipName), (Join-Path $extDir $zipName))
         [System.IO.File]::Copy((Join-Path $runDir 'manifest.json'), (Join-Path $extDir 'manifest.json'))
+        if ($NoCompress) { foreach ($x in $files) { [System.IO.File]::Copy((Join-Path $runDir $x.file), (Join-Path $extDir $x.file)) } }
     }
     $st = [ordered]@{
-        mode = 'execute'; host = 'OZK2026'; stamp = $stamp; runDir = $runDir; databases = $Dbs; files = $files; compressed = $true
-        zip = [ordered]@{ zip = $zipName; bytes = 10; sha256 = $zipSha }; local = $(if ($Status -eq 'failed') { 'failed' } else { 'ok' }); external = $External
+        mode = 'execute'; host = 'OZK2026'; stamp = $stamp; runDir = $runDir; databases = $Dbs; files = $files; compressed = (-not $NoCompress)
+        zip = $(if ($NoCompress) { $null } else { [ordered]@{ zip = $zipName; bytes = 10; sha256 = $zipSha } }); local = $(if ($Status -eq 'failed') { 'failed' } else { 'ok' }); external = $External
         externalDir = $(if ($External -eq 'ok') { $extDir } else { '' }); status = $Status; errors = $(if ($Status -eq 'failed') { @('AmnDb001: verify failed') } else { @() })
         notify = 'telegram'; finishedAt = $RunAt.AddMinutes(4).ToString('o')
     }
@@ -196,6 +200,23 @@ try {
     $f = New-Fixture 'missingDb' $night 'ok' 'ok' @('AmnDb002', 'AmnConfig'); Set-TaskRan $night
     $r = Invoke-OzkBackupMonitor -StateDir $f.State -NotifyScript $okNotify -Now $check2330
     Assert-True ($r.level -eq 'FAILURE' -and ((@($r.health.failures) -join ' ') -match 'AmnDb001')) 'قاعدة مفقودة من النسخة ⇒ FAILURE'
+
+    Write-Host '== 8ب) -NoCompress: التحقق من الملفات الخام على C: وD: (Codex P1) =='
+    $f = New-Fixture 'nocomp' $night -NoCompress; Set-TaskRan $night
+    $r = Invoke-OzkBackupMonitor -StateDir $f.State -NotifyScript $okNotify -Now $check2330
+    Assert-True ($r.level -eq 'WARNING' -and @($r.health.failures).Count -eq 0) 'بلا ضغط وملفات سليمة ⇒ WARNING فقط (غير مضغوطة)'
+    $f = New-Fixture 'nocompC' $night -NoCompress; Set-TaskRan $night
+    [System.IO.File]::Move((Join-Path $f.RunDir ('AmnDb001_' + $f.Stamp + '.bak')), (Join-Path $f.RunDir 'gone.bin'))
+    $r = Invoke-OzkBackupMonitor -StateDir $f.State -NotifyScript $okNotify -Now $check2330
+    Assert-True ($r.level -eq 'FAILURE' -and ((@($r.health.failures) -join ' ') -match 'خام مفقود على C:')) 'بلا ضغط وملف خام مفقود على C: ⇒ FAILURE'
+    $f = New-Fixture 'nocompD' $night -NoCompress; Set-TaskRan $night
+    [System.IO.File]::AppendAllText((Join-Path $f.ExtDir ('AmnDb002_' + $f.Stamp + '.bak')), 'x')
+    $r = Invoke-OzkBackupMonitor -StateDir $f.State -NotifyScript $okNotify -Now $check2330
+    Assert-True ($r.level -eq 'FAILURE' -and ((@($r.health.failures) -join ' ') -match 'لا يطابق على القرص الخارجي')) 'بلا ضغط وملف خام تالف على D: ⇒ FAILURE'
+    $f = New-Fixture 'nocompC2' $night -NoCompress; Set-TaskRan $night
+    [System.IO.File]::AppendAllText((Join-Path $f.RunDir ('AmnConfig_' + $f.Stamp + '.bak')), 'x')
+    $r = Invoke-OzkBackupMonitor -StateDir $f.State -NotifyScript $okNotify -Now $check2330
+    Assert-True ($r.level -eq 'FAILURE' -and ((@($r.health.failures) -join ' ') -match 'لا يطابق على C:')) 'بلا ضغط وملف خام تالف على C: ⇒ FAILURE'
 
     Write-Host '== 9) المساحة =='
     $f = New-Fixture 'space' $night; Set-TaskRan $night
