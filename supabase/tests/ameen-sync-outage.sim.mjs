@@ -146,6 +146,7 @@ async function outage(S, D, { step = 1, until = D + 20, beforeTick } = {}) {
   return actions;
 }
 const alertMinute = (actions) => actions.filter(([, a]) => a.endsWith('=alert')).map(([m]) => m);
+const recoveryMinute = (actions) => actions.filter(([, a]) => a.endsWith('=recovered')).map(([m]) => m);
 
 await scenario('انقطاع 10 دقائق (دوام): لا حادثة ولا تنبيه', async () => {
   const a = await outage(L('2026-11-02 10:00'), 10);
@@ -176,21 +177,80 @@ await scenario('انقطاع 59 دقيقة (دوام): لا تنبيه', async (
 await scenario('انقطاع 60 دقيقة (دوام): تنبيه واحد عند الدقيقة 60', async () => {
   const a = await outage(L('2026-11-02 10:00'), 60);
   assert.deepEqual(alertMinute(a), [60]);
-  const al = await alerts();
+  assert.deepEqual(recoveryMinute(a), [77]); // انتهت 61 ⇒ رسالة تعافٍ واحدة بعد ثبات 15 د
+  const al = (await alerts()).filter((r) => r.dedupe_key.startsWith('ameen-sync-outage:'));
   assert.equal(al.length, 1);
   assert.match(al[0].dedupe_key, /^ameen-sync-outage:OZK2026:\d+$/);
   assert.match(al[0].message, /انقطاع مزامنة الأمين/);
 });
-await scenario('انقطاع 90 دقيقة (دوام): تنبيه واحد فقط، لا رسالة عند التعافي، 7 مهام في حادثة واحدة', async () => {
-  const a = await outage(L('2026-11-02 10:00'), 90, { until: 130 });
+await scenario('انقطاع 90 دقيقة (دوام): تنبيه واحد + رسالة تعافٍ واحدة بعد ثبات 15 د، 7 مهام في حادثة واحدة', async () => {
+  const a = await outage(L('2026-11-02 10:00'), 90, { until: 180 });
   assert.deepEqual(alertMinute(a), [60]);
-  assert.equal((await alerts()).length, 1);
+  assert.deepEqual(recoveryMinute(a), [107]); // انتهت عند 91 (أول دورة بعد عودة البيانات)، والتعافي يُثبَّت بعد 15 د
+  const al = await alerts();
+  assert.equal(al.length, 2);
+  assert.match(al[1].dedupe_key, /^ameen-sync-outage-recovered:OZK2026:\d+$/);
+  assert.match(al[1].message, /عادت مزامنة الأمين/);
+  assert.match(al[1].message, /كل المهام عادت للعمل/);
   const inc = await incidents();
   assert.equal(inc.length, 1);
   assert.ok(inc[0].ended_at);
-  assert.equal(inc[0].recovery_sent_at, null);
+  assert.ok(inc[0].recovery_sent_at);
   assert.equal(inc[0].affected_tasks.length, 7, inc[0].affected_tasks.join(','));
-  assert.equal((await one(db, `select count(*)::int c from public.telegram_outbox`)).c, 1, 'no other message at all');
+  assert.equal((await one(db, `select count(*)::int c from public.telegram_outbox`)).c, 2, 'no other message at all');
+});
+await scenario('انقطاع 35 و59 دقيقة: لا رسالة تعافٍ لانقطاع لم يُنذر عنه', async () => {
+  for (const d of [35, 59]) {
+    const a = await outage(L('2026-11-02 10:00'), d, { step: 1, until: d + 60 });
+    assert.deepEqual(recoveryMinute(a), []);
+    assert.equal((await alerts()).length, 0);
+  }
+});
+await scenario('تعافٍ كاذب: عودة البيانات لحظياً بعد الإنذار ثم انقطاع جديد خلال المهلة ⇒ لا رسالة تعافٍ، ثم واحدة عند التعافي الحقيقي', async () => {
+  const S = L('2026-11-02 10:00');
+  await reset(); await seedAll(db, S);
+  const acts = [];
+  for (let m = 0; m <= 260; m += 5) {
+    const t = addMin(S, m);
+    acts.push([m, await tick(t)]);
+    if (m === 70) await seedAll(db, t); // نبضة واحدة (إعادة تشغيل) ثم صمت
+    if (m >= 200) await seedAll(db, t); // التعافي الحقيقي
+  }
+  assert.deepEqual(alertMinute(acts), [60]);
+  assert.deepEqual(recoveryMinute(acts), [225]); // انتهت عند 205، والتعافي يُثبَّت بعد أكثر من 15 د
+  assert.equal((await alerts()).length, 2);
+  assert.equal((await incidents())[0].reopened, 1);
+});
+await scenario('إعادة تشغيل المراقب أثناء انتظار التعافي: دورات مكررة ⇒ رسالة تعافٍ واحدة', async () => {
+  const S = L('2026-11-02 10:00');
+  await outage(S, 90, { step: 1, until: 140, beforeTick: async (m, t) => { if (m >= 106 && m <= 108) { await tick(t); await tick(t); } } });
+  assert.equal((await alerts()).filter((r) => r.dedupe_key.startsWith('ameen-sync-outage-recovered:')).length, 1);
+});
+await scenario('تعافٍ جزئي: مهمتان ما زالتا متأخرتين ⇒ رسالة التعافي تسمّيهما صراحةً', async () => {
+  const S = L('2026-11-02 10:00');
+  await reset(); await seedAll(db, S);
+  for (let m = 0; m <= 130; m += 5) {
+    const t = addMin(S, m);
+    await tick(t);
+    if (m >= 90) {
+      await db.query(`insert into public.inventory_reports(source,created_at)
+        select report_source,$1::timestamptz from private.project_task_monitors
+        where source_table='inventory_reports' and task_key not in ('customer-balances','daily-profit')`, [iso(t)]);
+      await db.query(`insert into public.khalil_audit_sync_heartbeat(created_at,status) values ($1,'ok')`, [iso(t)]);
+      await db.query(`insert into public.expense_entries(created_at) values ($1)`, [iso(t)]);
+    }
+  }
+  const rec = (await alerts()).find((r) => r.dedupe_key.startsWith('ameen-sync-outage-recovered:'));
+  assert.ok(rec, 'recovery sent');
+  assert.match(rec.message, /ما زالت متأخرة: أرصدة الزبائن، الربح اليومي/);
+});
+await scenario('انقطاع بين يومي دوام: 22:30 → 08:30 ⇒ 30 دقيقة دوام فقط، لا إنذار ولا تعافٍ، مسجّل', async () => {
+  const a = await outage(L('2026-11-02 22:30'), 600, { step: 5, until: 660 });
+  assert.deepEqual(alertMinute(a), []);
+  assert.deepEqual(recoveryMinute(a), []);
+  const inc = await incidents();
+  assert.equal(inc.length, 1);
+  assert.equal(Number(inc[0].business_minutes), 30);
 });
 await scenario('حدود الدوام: انقطاع الليلة 03:35–04:10 ⇒ لا تنبيه، مسجّل بمدته', async () => {
   const a = await outage(L('2026-10-15 03:35'), 35);
@@ -294,18 +354,16 @@ await scenario('انقطاعان منفصلان بفارق ساعتين ⇒ تن
     await tick(t);
   }
   assert.equal((await incidents()).length, 2);
-  assert.equal((await alerts()).length, 2);
+  const keys = (await alerts()).map((r) => r.dedupe_key);
+  assert.equal(keys.filter((k) => k.startsWith('ameen-sync-outage:')).length, 2);
+  assert.equal(keys.filter((k) => k.startsWith('ameen-sync-outage-recovered:')).length, 1); // الأولى تعافت؛ الثانية مستمرة
 });
-await scenario('send_recovery=true: رسالة تعافٍ واحدة لحادثة أُنذر عنها فقط', async () => {
-  await db.exec(`update private.sync_outage_config set send_recovery=true`);
+await scenario('send_recovery=false (مفتاح إيقاف): لا رسالة تعافٍ إطلاقاً', async () => {
+  await db.exec(`update private.sync_outage_config set send_recovery=false`);
   try {
-    await outage(L('2026-11-02 10:00'), 90, { step: 5, until: 120 });
-    const al = await alerts();
-    assert.equal(al.length, 2);
-    assert.match(al[1].dedupe_key, /^ameen-sync-outage-recovered:/);
-    await outage(L('2026-11-02 10:00'), 35, { step: 5 });
-    assert.equal((await alerts()).length, 0, 'no recovery message for an outage that never alerted');
-  } finally { await db.exec(`update private.sync_outage_config set send_recovery=false`); }
+    await outage(L('2026-11-02 10:00'), 90, { step: 5, until: 140 });
+    assert.equal((await alerts()).length, 1);
+  } finally { await db.exec(`update private.sync_outage_config set send_recovery=true`); }
 });
 
 // ── دمج تقادم المخزون ──
@@ -356,6 +414,24 @@ await scenario('غير الحرج يبقى ملخصاً (13 كما هو): winfai
   await db.query(`select public.notify_telegram('sync_failure','فشل رفع الربح','winfail:push-daily-profit',60)`);
   assert.equal((await one(db, `select count(*)::int c from public.telegram_outbox`)).c, 0);
   assert.equal((await one(db, `select count(*)::int c from private.ops_events where resolved_at is null`)).c, 1);
+});
+
+await scenario('تزامن أعطال: انقطاع + فشل أسعار فوري + عطل دفعة غير حرج + تقادم مخزون ⇒ كلٌّ في مساره', async () => {
+  const S = L('2026-11-02 10:00');
+  await outage(S, 100, { step: 5, until: 100, beforeTick: async (m) => {
+    if (m === 30) {
+      await db.query(`select public.notify_telegram('price_sync_failure','فشل التحقق','price-sync:verify-failed',60)`);
+      await db.query(`select public.notify_telegram('sync_failure','فشل رفع الربح','winfail:push-daily-profit',60)`);
+      await stockStale();
+    }
+  } });
+  const rows = await q(db, `select event_type, dedupe_key from public.telegram_outbox order by id`);
+  assert.deepEqual(rows.map((r) => r.event_type), ['price_sync_failure', 'ameen_sync_outage'], JSON.stringify(rows));
+  assert.equal((await one(db, `select count(*)::int c from private.ops_events where resolved_at is null and event_key='winfail:push-daily-profit'`)).c, 1);
+  assert.equal((await incidents())[0].stock_stale_absorbed, 1);
+  const sec = (await one(db, `select private.daily_open_faults_section($1::timestamptz, 3000) s`, [iso(addMin(S, 100))])).s;
+  assert.match(sec, /مزامنة الأمين على OZK2026/);
+  assert.match(sec, /فشل رفع الربح/);
 });
 
 // ── التقرير المسائي ──

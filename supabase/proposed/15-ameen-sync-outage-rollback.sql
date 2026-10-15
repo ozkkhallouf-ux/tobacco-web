@@ -42,10 +42,23 @@ begin
   if exists (select 1 from cron.job where jobname = 'sync-outage-tick') then
     perform cron.unschedule('sync-outage-tick');
   end if;
+  -- حوادث أُنذر عنها وانتهت دون إرسال رسالة تعافيها بعد: لا شيء سيرسلها بعد التراجع ⇒ سطر واحد الآن
+  select count(*), string_agg('• ' || c.label || ' انتهى ' || to_char(o.ended_at at time zone 'Asia/Damascus', 'YYYY-MM-DD HH24:MI'), chr(10))
+    into n, body
+    from private.sync_outage_incidents o join private.sync_outage_config c on c.device = o.device
+   where o.ended_at is not null and o.alerted_at is not null and o.recovery_sent_at is null;
+  if n > 0 then
+    insert into public.telegram_outbox (event_type, message, dedupe_key)
+    values ('ops_rollback_drain', left('✅ تعافٍ لم تُرسل رسالته عند إلغاء تجميع الانقطاع (' || n || '):' || chr(10) || body, 3900),
+            'rollback15-recovery-drain:' || to_char(now(), 'YYYY-MM-DD"T"HH24'));
+    update private.sync_outage_incidents set recovery_sent_at = now()
+     where ended_at is not null and alerted_at is not null and recovery_sent_at is null;
+  end if;
   drop function if exists private.sync_outage_absorb_stock_stale(text,text);
   drop function if exists private.sync_outage_tick(timestamptz);
   drop function if exists private.sync_outage_step(text,timestamptz,boolean);
   drop function if exists private.sync_outage_message(bigint,timestamptz);
+  drop function if exists private.sync_outage_recovery_message(bigint,jsonb);
   drop function if exists private.sync_outage_observe(text,timestamptz);
   drop function if exists private.sync_outage_in_business(timestamptz,time,time,text);
   drop function if exists private.sync_outage_business_minutes(timestamptz,timestamptz,time,time,text);

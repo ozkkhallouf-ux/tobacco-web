@@ -13,8 +13,10 @@
 --   * إنذار فوري **واحد** فقط حين تبلغ مدة الانقطاع داخل ساعات الدوام (09:00–23:00 دمشق) 60 دقيقة.
 --     العدّاد تراكمي داخل الانقطاع المتصل نفسه. لا تكرار: alerted_at يُكتب في معاملة الإرسال نفسها،
 --     ومفتاح منع التكرار = هوية الحادثة، والقفل الاستشاري يمنع دورتين متزامنتين.
---   * لا رسالة عند التعافي افتراضياً (send_recovery=false بقرار «تنبيه واحد فقط»)، ولا إعادة إرسال
---     عند إعادة التشغيل: عودة الانقطاع خلال 15 دقيقة من انتهائه تعيد فتح الحادثة نفسها (merge_gap).
+--   * رسالة تعافٍ واحدة فقط (قرار عمر 2026-10-15) ولحادثة أُرسل عنها إنذار فقط، وبعد ثبات التعافي
+--     مهلة الدمج (15 د) كي لا يكون تعافياً كاذباً: عودة الانقطاع خلال المهلة تعيد فتح الحادثة نفسها
+--     بلا إنذار ثانٍ ولا رسالة تعافٍ. إن بقيت مهام متأخرة عند الإرسال تُسمّى صراحةً في الرسالة.
+--     recovery_sent_at يُسجَّل في معاملة الإرسال نفسها ⇒ لا تكرار عند إعادة تشغيل المراقب.
 --   * تقادم المخزون (stock-priority:stale:*) أثناء حادثة مفتوحة يُدمج فيها ولا يُرسل منفصلاً.
 --     دون حادثة مفتوحة يمرّ فورياً كما هو اليوم (لا تغيير).
 --   * قسم «🛠 حالة الأنظمة والأعطال» المسائي يُعاد بناؤه بتنسيق موحَّد: المستمر بتفاصيله، ثم كل عطل
@@ -97,7 +99,7 @@ create table if not exists private.sync_outage_config (
   -- دورة متأخرة بعد نهاية الدوام بقليل ما زالت تُنذر عن عبور حدّ حصل داخل الدوام
   alert_grace_minutes integer not null default 10 check (alert_grace_minutes between 0 and 60),
   merge_gap_minutes integer not null default 15 check (merge_gap_minutes between 0 and 240),
-  send_recovery boolean not null default false,
+  send_recovery boolean not null default true,
   check (business_end > business_start)
 );
 alter table private.sync_outage_config enable row level security;
@@ -231,16 +233,38 @@ begin
   || rlm || '• المهام المتوقفة (' || private.ops_fmt_iso(cardinality(i.affected_tasks)::text) || '): ' || coalesce(names, '—') || nl
   || case when i.stock_stale_absorbed > 0 then rlm || '• تنبيهات النفاد متوقفة أيضاً (بيانات المخزون قديمة) — مُدمجة هنا' || nl else '' end
   || rlm || '• الأثر: أرصدة المخزون والزبائن والفواتير على الموقع وفي البوت لا تتحدّث.' || nl
-  || rlm || 'لن يُرسَل تنبيه آخر لهذا الانقطاع؛ مدته وتعافيه في التقرير المسائي.';
+  || rlm || 'لن يُرسَل تنبيه آخر لهذا الانقطاع؛ ستصلك رسالة واحدة عند ثبات التعافي.';
 end $$;
 revoke all on function private.sync_outage_message(bigint,timestamptz) from public, anon, authenticated;
 
--- خطوة واحدة لجهاز واحد. تُرجع: disabled | none | open | reopen | track | alert | recover.
+-- نص رسالة التعافي الوحيدة. p_obs = الرصد الحالي: أي مهمة من مهام الحادثة ما زالت متأخرة تُسمّى صراحةً
+-- (لا «عادت كل المهام» إلا إن كانت عادت فعلاً).
+create or replace function private.sync_outage_recovery_message(p_id bigint, p_obs jsonb)
+returns text language plpgsql stable security definer set search_path = private, public, pg_temp as $$
+declare i record; c record; still text; nl constant text := chr(10); rlm constant text := chr(8207);
+begin
+ select * into i from private.sync_outage_incidents where id = p_id;
+ select * into c from private.sync_outage_config where device = i.device;
+ select string_agg(e->>'label', '، ' order by e->>'task') into still
+  from jsonb_array_elements(coalesce(p_obs, '[]'::jsonb)) e
+  where (e->>'stale')::boolean and (e->>'task') = any(i.affected_tasks);
+ return '✅ عادت مزامنة الأمين — ' || private.ops_fmt_iso(i.device) || nl
+  || rlm || '• الانقطاع: من ' || private.ops_fmt_iso(to_char(i.started_at at time zone c.business_tz, 'YYYY-MM-DD HH24:MI'))
+         || ' إلى ' || private.ops_fmt_iso(to_char(i.ended_at at time zone c.business_tz, 'YYYY-MM-DD HH24:MI')) || ' بتوقيت دمشق' || nl
+  || rlm || '• المدة: ' || private.ops_fmt_duration(extract(epoch from (i.ended_at - i.started_at)) / 60)
+         || ' (منها ' || private.ops_fmt_duration(i.business_minutes) || ' ضمن الدوام)' || nl
+  || rlm || '• المهام التي توقفت: ' || private.ops_fmt_iso(cardinality(i.affected_tasks)::text) || nl
+  || case when still is not null then rlm || '⚠️ ما زالت متأخرة: ' || still || ' (تُتابَع في التقرير المسائي)'
+          else rlm || '• كل المهام عادت للعمل.' end;
+end $$;
+revoke all on function private.sync_outage_recovery_message(bigint,jsonb) from public, anon, authenticated;
+
+-- خطوة واحدة لجهاز واحد. تُرجع: disabled | none | recovered (أُرسلت رسالة التعافي) | open | reopen | track | alert | recover.
 -- p_alert=false: تسجيل فقط (يُستعمل من خطّاف الدمج داخل dispatch، فلا إرسال متداخل).
 create or replace function private.sync_outage_step(p_device text, p_now timestamptz default now(), p_alert boolean default true)
 returns text language plpgsql security definer set search_path = private, public, pg_temp as $$
 declare cfg record; inc record; prev record; obs jsonb; n int; newest timestamptz; stale_keys text[];
- bm numeric; act text; k text;
+ bm numeric; act text; k text; rec boolean := false;
 begin
  select * into cfg from private.sync_outage_config c where c.device = p_device;
  if cfg is null or not cfg.enabled then return 'disabled'; end if;
@@ -260,8 +284,22 @@ begin
 
  select * into inc from private.sync_outage_incidents i where i.device = p_device and i.ended_at is null;
  if inc.id is null then
-  if n < cfg.min_stale_tasks then return 'none'; end if;
-  -- عودة الانقطاع بعد تعافٍ قصير (إعادة تشغيل/تذبذب) = الحادثة نفسها: لا إنذار جديد
+  -- رسالة التعافي المؤجّلة: حادثة أُنذر عنها وانتهت منذ أكثر من مهلة الدمج دون أن تعود ⇒ رسالة واحدة.
+  -- (المساواة مع المهلة تبقى لإعادة الفتح أدناه، فلا تتعارض الحالتان في الدورة نفسها.)
+  if p_alert and cfg.send_recovery then
+   select * into prev from private.sync_outage_incidents i
+    where i.device = p_device and i.ended_at is not null and i.alerted_at is not null and i.recovery_sent_at is null
+      and i.ended_at < p_now - make_interval(mins => cfg.merge_gap_minutes)
+    order by i.ended_at limit 1;
+   if prev.id is not null then
+    perform public.notify_telegram('ameen_sync_outage_recovered', private.sync_outage_recovery_message(prev.id, obs),
+      'ameen-sync-outage-recovered:' || p_device || ':' || prev.id, 1440);
+    update private.sync_outage_incidents set recovery_sent_at = p_now where id = prev.id;
+    rec := true;
+   end if;
+  end if;
+  if n < cfg.min_stale_tasks then return case when rec then 'recovered' else 'none' end; end if;
+  -- عودة الانقطاع بعد تعافٍ قصير (إعادة تشغيل/تذبذب) = الحادثة نفسها: لا إنذار جديد ولا رسالة تعافٍ
   select * into prev from private.sync_outage_incidents i
    where i.device = p_device and i.ended_at is not null and i.ended_at >= p_now - make_interval(mins => cfg.merge_gap_minutes)
    order by i.ended_at desc limit 1;
@@ -279,17 +317,10 @@ begin
   end if;
  else
   if n < cfg.min_stale_tasks then
+   -- انتهاء الحادثة فقط؛ رسالة التعافي (إن لزمت) تُرسل بعد ثبات التعافي مهلة الدمج (أعلاه)
    update private.sync_outage_incidents set ended_at = p_now, last_seen_at = p_now, task_details = obs,
      business_minutes = private.sync_outage_business_minutes(started_at, p_now, cfg.business_start, cfg.business_end, cfg.business_tz)
     where id = inc.id;
-   -- رسالة تعافٍ واحدة فقط إن فُعّلت صراحةً ولحادثة أُنذر عنها فعلاً
-   if p_alert and cfg.send_recovery and inc.alerted_at is not null and inc.recovery_sent_at is null then
-    perform public.notify_telegram('ameen_sync_outage_recovered',
-      '✅ عادت مزامنة الأمين — ' || private.ops_fmt_iso(p_device) || chr(10) || chr(8207) || '• مدة الانقطاع: '
-      || private.ops_fmt_duration(extract(epoch from (p_now - inc.started_at)) / 60),
-      'ameen-sync-outage-recovered:' || p_device || ':' || inc.id, 1440);
-    update private.sync_outage_incidents set recovery_sent_at = p_now where id = inc.id;
-   end if;
    return 'recover';
   end if;
   update private.sync_outage_incidents set last_seen_at = p_now, peak_stale = greatest(peak_stale, n),
