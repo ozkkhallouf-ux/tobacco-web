@@ -79,9 +79,32 @@
     return true;
   }
 
+  function sameCountNumber(raw, saved) {
+    if (quantityTextBlank(raw)) return true;
+    return Number(raw) === Number(saved || 0);
+  }
+
+  // Counted row whose draft/DOM no longer matches the saved count. Empty
+  // fields are not a conflict: the existing finish plan uses blanks for
+  // already-saved lines that are not being edited.
+  function correctionDraftDiffers(item, quantities) {
+    const row = quantities || {};
+    if (row.countState && row.countState !== item.countState) return true;
+    return !sameCountNumber(row.unit1Qty, item.unit1Qty)
+      || !sameCountNumber(row.unit2Qty, item.unit2Qty)
+      || !sameCountNumber(row.damagedUnit1Qty, item.damagedUnit1Qty);
+  }
+
+  function countedCorrectionBlocks(item, quantities, pending, editingItemId) {
+    if (pending.has(item.id)) return true;
+    if (editingItemId && item.id === editingItemId) return true;
+    return item.countedByMe === true && correctionDraftDiffers(item, quantities);
+  }
+
   function planSessionFinish(items, quantitiesById, options = {}) {
     const now = Number.isFinite(options.now) ? options.now : Date.now();
     const pending = new Set(options.pendingItemIds || []);
+    const editingItemId = options.editingItemId || "";
     const zeros = [];
     const blockers = [];
     for (const item of items || []) {
@@ -90,7 +113,13 @@
         blockers.push({ itemId: item.id, reason: "recount" });
         continue;
       }
-      if (item.countState !== "uncounted") continue;
+      const quantities = quantitiesById?.[item.id] || {};
+      if (item.countState !== "uncounted") {
+        if (countedCorrectionBlocks(item, quantities, pending, editingItemId)) {
+          blockers.push({ itemId: item.id, reason: "unsaved" });
+        }
+        continue;
+      }
       if (pending.has(item.id)) {
         blockers.push({ itemId: item.id, reason: "unsaved" });
         continue;
@@ -99,7 +128,6 @@
         blockers.push({ itemId: item.id, reason: "claimed" });
         continue;
       }
-      const quantities = quantitiesById?.[item.id] || {};
       if (blankLineForZero(item, quantities, now)) zeros.push(item);
       else blockers.push({ itemId: item.id, reason: "unsaved" });
     }
@@ -740,7 +768,12 @@
     const items = Array.isArray(state.session?.items) ? state.session.items : [];
     const quantitiesById = {};
     for (const item of items) quantitiesById[item.id] = quantitiesForItem(item, root);
-    return planSessionFinish(items, quantitiesById, { pendingItemIds: outbox().map((row) => row.itemId) });
+    const pendingItemIds = outbox().map((row) => row.itemId);
+    if (state.busyItemId) pendingItemIds.push(state.busyItemId);
+    return planSessionFinish(items, quantitiesById, {
+      pendingItemIds,
+      editingItemId: state.editingItemId
+    });
   }
 
   function offlineZeroWarning() {
