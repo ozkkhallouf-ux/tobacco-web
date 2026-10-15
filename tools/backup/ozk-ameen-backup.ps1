@@ -21,10 +21,14 @@
 #   5) حارس مساحة على القرص الخارجي، ثم نسخ الـzip وmanifest.json إليه وإعادة
 #      حساب SHA256 في الوجهة.
 #   6) status.json + سجل شهري + تنبيه Slack (#تنبيهات-ozk)، وTelegram بديلاً
-#      إن تعذّر Slack.
+#      إن تعذّر Slack. status.json يُكتب مرتين: قبل التنبيه ثم بعده بنتيجته الفعلية.
+#   7) (اختياري، معطّل افتراضياً) K1-A بـ-PruneOwnRaw: بعد status=ok فقط، وبعد
+#      إعادة مطابقة SHA256 للـzip على C: وD: وللـmanifest، تُزال ملفات .bak الخام
+#      التي أنشأها هذا التشغيل نفسه داخل مجلده فقط. الـzip وmanifest يبقيان دائماً.
 #
 # ما لا يفعله إطلاقاً:
-#   - لا يحذف ولا يستبدل أي ملف نسخ (لا Remove-Item، والنسخ يرفض وجهة موجودة).
+#   - لا يستبدل أي ملف، والنسخ يرفض وجهة موجودة.
+#   - لا يحذف شيئاً افتراضياً. الحذف الوحيد الممكن هو K1-A أعلاه، عند -PruneOwnRaw فقط.
 #   - لا RESTORE DATABASE، ولا REPLACE، ولا أي تعديل على القواعد أو إعدادات SQL.
 #   - لا رفع للسحابة (-Cloud مرفوض في هذا الإصدار).
 #   - لا يلمس المهام المجدولة (راجع register-ozk-ameen-backup-task.ps1).
@@ -52,6 +56,7 @@ param(
     [string]$SlackChannel = 'C0C1X2E58MT',
     [string]$SlackTokenEnvVar = 'SLACK_BOT_TOKEN',
     [switch]$NoSlack,
+    [switch]$PruneOwnRaw,
     [switch]$Cloud
 )
 
@@ -148,6 +153,18 @@ $script:JsonWriter = {
     if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
     $json = $Object | ConvertTo-Json -Depth 6
     [System.IO.File]::WriteAllText($Path, $json, (New-Object System.Text.UTF8Encoding($false)))
+}
+
+# ينشئ zip مُتحقَّقاً (نقطة حقن لاختبار فشل الضغط).
+$script:ZipCreator = {
+    param([string]$ZipPath, $Files, [string]$SourceDir)
+    return New-OzkVerifiedZip $ZipPath $Files $SourceDir
+}
+
+# يزيل ملفاً واحداً بعينه. يُستدعى من Remove-OzkOwnRawFiles وحدها.
+$script:FileRemover = {
+    param([string]$Path)
+    [System.IO.File]::Delete($Path)
 }
 
 # ---------- دوال صرفة ----------
@@ -294,6 +311,7 @@ function Format-OzkAlert($Result) {
     if ($Result.space) {
         foreach ($s in $Result.space) { [void]$lines.Add(('مساحة {0}: {1} GB متاحة' -f $s.Path, $s.FreeGB)) }
     }
+    if ($Result.prune -and $Result.prune -ne 'disabled') { [void]$lines.Add(('K1-A: ' + $Result.prune)) }
     foreach ($e in @($Result.errors)) { [void]$lines.Add(('خطأ: ' + $e)) }
     return ($lines -join "`n")
 }
@@ -352,6 +370,50 @@ function Copy-OzkRunVerified([string]$RunDir, [string]$DestinationDir, $Files) {
     }
 }
 
+# ---------- K1-A: إزالة الملفات الخام لهذا التشغيل فقط ----------
+
+# تعيد سبب الرفض، أو '' إن كان كل شرط متحققاً. لا تحذف شيئاً.
+function Test-OzkPruneEligible($Result, [string]$ManifestPath) {
+    if ($Result.status -ne 'ok') { return ('status=' + $Result.status) }
+    if ($Result.local -ne 'ok' -or $Result.external -ne 'ok') { return 'local/external ليسا ok' }
+    if (-not $Result.zip -or -not $Result.zip.sha256) { return 'لا zip مُتحقَّق' }
+    if (-not $Result.externalDir) { return 'لا مجلد خارجي' }
+    $zipC = Join-OzkPath $Result.runDir $Result.zip.zip
+    $zipD = Join-OzkPath $Result.externalDir $Result.zip.zip
+    $manD = Join-OzkPath $Result.externalDir 'manifest.json'
+    foreach ($p in @($zipC, $zipD, $ManifestPath, $manD)) {
+        if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { return ('مفقود: ' + $p) }
+    }
+    if ((Get-OzkSha256 $zipC) -ne $Result.zip.sha256) { return 'SHA256 الـzip على C: تغيّر' }
+    if ((Get-OzkSha256 $zipD) -ne $Result.zip.sha256) { return 'SHA256 الـzip على D: لا يطابق' }
+    if ((Get-OzkSha256 $manD) -ne (Get-OzkSha256 $ManifestPath)) { return 'manifest على D: لا يطابق C:' }
+    return ''
+}
+
+# تزيل فقط ملفات .bak الخام لهذا التشغيل: داخل runDir نفسه، بالاسم المتوقع
+# <قاعدة مسموحة>_<stamp>.bak، وبالبصمة المسجّلة في النتيجة. أي شذوذ يوقفها كلها.
+function Remove-OzkOwnRawFiles($Result) {
+    $runFull = [System.IO.Path]::GetFullPath($Result.runDir).TrimEnd([char[]]@([char]92, [char]47))
+    $plan = New-Object System.Collections.ArrayList
+    foreach ($f in @($Result.files)) {
+        $expected = '{0}_{1}.bak' -f $f.database, $Result.stamp
+        if ($script:AllowedDatabases -cnotcontains $f.database) { throw ('قاعدة غير متوقعة: ' + $f.database) }
+        if ($f.file -cne $expected) { throw ('اسم غير متوقع: ' + $f.file) }
+        $full = [System.IO.Path]::GetFullPath((Join-OzkPath $Result.runDir $f.file))
+        $parent = [System.IO.Path]::GetDirectoryName($full).TrimEnd([char[]]@([char]92, [char]47))
+        if ($parent -ne $runFull) { throw ('خارج مجلد التشغيل: ' + $full) }
+        if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { throw ('مفقود: ' + $full) }
+        if ((Get-OzkSha256 $full) -ne $f.sha256) { throw ('البصمة تغيّرت: ' + $f.file) }
+        [void]$plan.Add($full)
+    }
+    $removed = New-Object System.Collections.ArrayList
+    foreach ($full in $plan) {
+        & $script:FileRemover $full
+        [void]$removed.Add([System.IO.Path]::GetFileName($full))
+    }
+    return @($removed)
+}
+
 # ---------- الإنهاء: الحالة والتنبيه دائماً ----------
 
 # يُنهي التشغيل: يحسب الحالة، ويكتب status.json، ويرسل التنبيه، ويسجّل.
@@ -369,6 +431,7 @@ function Complete-OzkRun($Result, $Errors, [bool]$ForceFailed, [string]$StateDir
     }
     $Result.finishedAt = (Get-Date).ToString('o')
     $Result.errors = @($Errors)
+    $Result.notify = 'pending'
 
     try {
         Write-OzkJson (Join-OzkPath $StateDir 'status.json') $Result
@@ -393,6 +456,12 @@ function Complete-OzkRun($Result, $Errors, [bool]$ForceFailed, [string]$StateDir
         $Result.notify = 'none'
         Write-Host ('ALERT FAIL: ' + $_.Exception.Message)
     }
+    # الكتابة الثانية تسجّل نتيجة التنبيه الفعلية (كانت الأولى تحمل 'pending').
+    try {
+        Write-OzkJson (Join-OzkPath $StateDir 'status.json') $Result
+    } catch {
+        Write-Host ('STATUS REWRITE FAIL: ' + $_.Exception.Message)
+    }
     Write-OzkLog $StateDir ('RUN ' + $Result.status + ' ' + $Result.stamp + ' notify=' + $Result.notify)
 }
 
@@ -415,6 +484,7 @@ function Invoke-OzkAmeenBackup {
         [string]$SlackChannel = 'C0C1X2E58MT',
         [string]$SlackTokenEnvVar = 'SLACK_BOT_TOKEN',
         [switch]$NoSlack,
+        [switch]$PruneOwnRaw,
         [switch]$Cloud,
         [datetime]$Now = (Get-Date)
     )
@@ -439,6 +509,8 @@ function Invoke-OzkAmeenBackup {
         cloud       = 'disabled'
         space       = @()
         notify      = 'none'
+        prune       = $(if ($PruneOwnRaw) { 'pending' } else { 'disabled' })
+        pruned      = @()
         status      = 'pending'
         errors      = @()
         finishedAt  = ''
@@ -458,6 +530,7 @@ function Invoke-OzkAmeenBackup {
         Write-Host ('القرص الخارجي: ' + $(if ($ExternalRoot) { $ExternalRoot } else { 'بحث عن ' + $script:ExternalMarker }))
         Write-Host ('التنبيه: ' + $(if ($NoSlack) { 'Telegram فقط' } else { 'Slack ' + $SlackChannel + ' ثم Telegram بديلاً' }) + ' (لا إرسال في DryRun)')
         Write-Host ('القفل: ' + $script:LockName)
+        Write-Host ('K1-A (إزالة الخام بعد التحقق المزدوج): ' + $(if ($PruneOwnRaw) { 'مفعّل' } else { 'معطّل' }))
         Write-Host 'السحابة: معطّلة'
         $result.local = 'skipped'
         $result.external = 'skipped'
@@ -520,7 +593,7 @@ function Invoke-OzkAmeenBackup {
             $transfer = @($files)
             if ($errors.Count -eq 0 -and $files.Count -eq $Databases.Count -and -not $NoCompress) {
                 try {
-                    $z = New-OzkVerifiedZip (Join-OzkPath $layout.RunDir $layout.ZipName) @($files) $layout.RunDir
+                    $z = & $script:ZipCreator (Join-OzkPath $layout.RunDir $layout.ZipName) @($files) $layout.RunDir
                     $result.zip = $z
                     $transfer = @([pscustomobject]@{ file = $z.zip; sha256 = $z.sha256 })
                     Write-OzkLog $StateDir ('ZIP ok {0} {1} bytes, entries match SHA256' -f $z.zip, $z.bytes)
@@ -578,6 +651,26 @@ function Invoke-OzkAmeenBackup {
             }
         }
 
+        if ($PruneOwnRaw) {
+            $provisional = $(if ($errors.Count -eq 0 -and $result.local -eq 'ok' -and $result.external -eq 'ok') { 'ok' } else { 'not-ok' })
+            $result.status = $provisional
+            $reason = Test-OzkPruneEligible $result (Join-OzkPath $layout.RunDir 'manifest.json')
+            if ($reason) {
+                $result.prune = 'skipped: ' + $reason
+                Write-OzkLog $StateDir ('PRUNE skipped: ' + $reason)
+            } else {
+                try {
+                    $result.pruned = @(Remove-OzkOwnRawFiles $result)
+                    $result.prune = 'done'
+                    Write-OzkLog $StateDir ('PRUNE done: ' + (@($result.pruned) -join ', '))
+                } catch {
+                    # فشل الإزالة لا يُفشل نسخة ناجحة: الخام يبقى، ويُسجَّل السبب.
+                    $result.prune = 'failed: ' + $_.Exception.Message
+                    Write-OzkLog $StateDir ('PRUNE FAIL: ' + $_.Exception.Message)
+                }
+            }
+            $result.status = 'pending'
+        }
         Complete-OzkRun $result $errors $false $StateDir $SlackChannel $SlackTokenEnvVar ([bool]$NoSlack) $NotifyScript
     } catch {
         # أي استثناء غير متوقع (فحص المساحة، إنشاء المجلد، manifest.json، ...) يصبح
@@ -626,7 +719,7 @@ if ($MyInvocation.InvocationName -ne '.') {
         Execute = [bool]$Execute; Databases = $Databases; Instance = $Instance; LocalRoot = $LocalRoot
         ExternalRoot = $ExternalRoot; StateDir = $StateDir; ExpectedHost = $ExpectedHost; NotifyScript = $NotifyScript
         LocalMinFreeGB = $LocalMinFreeGB; ExternalMinFreeGB = $ExternalMinFreeGB; NoCompress = [bool]$NoCompress
-        SlackChannel = $SlackChannel; SlackTokenEnvVar = $SlackTokenEnvVar; NoSlack = [bool]$NoSlack; Cloud = [bool]$Cloud
+        SlackChannel = $SlackChannel; SlackTokenEnvVar = $SlackTokenEnvVar; NoSlack = [bool]$NoSlack; PruneOwnRaw = [bool]$PruneOwnRaw; Cloud = [bool]$Cloud
     }
     exit $code
 }
