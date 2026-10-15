@@ -66,7 +66,11 @@ create table if not exists private.uptime_incidents (
   opened_at     timestamptz not null default now(),
   closed_at     timestamptz,
   down_notified boolean not null default false,
-  reminders     text[] not null default '{}'      -- تذكيرات أُرسلت (1h/6h/24h)
+  reminders     text[] not null default '{}',     -- تذكيرات أُرسلت (1h/6h/24h)
+  -- تعافٍ مُعلَّق: إشارة تعافٍ وصلت (حدث recovered أو نبض بحالة UP) ولم يؤكدها بعدُ تشغيل أحدث تماماً.
+  -- الإغلاق ورسالة التعافي لا يحدثان إلا بالتأكيد؛ تشغيل أحدث يقول DOWN/RECOVERING (أو تذكير أحدث) يلغيه.
+  recover_at    timestamptz,                      -- وقت التعافي المُعلَّق (= closed_at عند التأكيد)
+  recover_event text                              -- event_id لحدث recovered (null ⇒ من مطابقة النبض)
 );
 create unique index if not exists uptime_incidents_one_open
   on private.uptime_incidents (target) where closed_at is null;
@@ -143,6 +147,15 @@ begin
 end;
 $$;
 revoke all on function private.uptime_enqueue(text, text) from public, anon, authenticated;
+
+-- تعافٍ معلّق أُلغي: يبقى أثره في سجل الحدث (للتشخيص)، ولا رسالة.
+create or replace function private.uptime_recovery_cancelled(p_event_id text)
+returns void
+language sql security definer set search_path = pg_catalog
+as $$
+  update private.uptime_events set outcome = 'suppressed:recovery-cancelled' where event_id = p_event_id;
+$$;
+revoke all on function private.uptime_recovery_cancelled(text) from public, anon, authenticated;
 
 -- ── نقطة الاستقبال ──────────────────────────────────────────────────────────────────────────
 -- p_payload: نص JSON الحرفي كما وقّعه الـWorker (التوقيع على النص لا على JSON معاد تسلسله).
@@ -275,7 +288,16 @@ begin
       else
         select * into v_row from private.uptime_incidents where target = v_target and closed_at is null for update;
         if v_row.id is not null then
-          update private.uptime_incidents set aliases = array_append(aliases, v_inc) where id = v_row.id;
+          -- معرّف جديد لنفس الانقطاع. وإن جاء بعد تعافٍ لم يُؤكَّد فهو دليل أن الهدف ما زال/عاد واقفاً:
+          -- يُلغى التعافي المعلّق ويستمر الانقطاع نفسه (لا حادثة ثانية ولا تنبيه ثانٍ ولا تعافٍ كاذب).
+          update private.uptime_incidents
+             set aliases = array_append(aliases, v_inc),
+                 recover_at    = case when v_at > recover_at then null else recover_at end,
+                 recover_event = case when v_at > recover_at then null else recover_event end
+           where id = v_row.id;
+          if v_row.recover_at is not null and v_at > v_row.recover_at then
+            perform private.uptime_recovery_cancelled(v_row.recover_event);
+          end if;
           v_outcome := 'suppressed:same-outage';
         else
           insert into private.uptime_incidents (target, incident_key, opened_at)
@@ -292,6 +314,11 @@ begin
     elsif v_type = 'reminder' then
       select * into v_row from private.uptime_incidents
        where (incident_key = v_inc or v_inc = any (aliases)) and closed_at is null for update;
+      if v_row.id is not null and v_row.recover_at is not null and v_at > v_row.recover_at then
+        -- تذكير أحدث من التعافي المعلّق: الـWorker ما زال يرى الانقطاع نفسه ⇒ التعافي لم يحدث
+        update private.uptime_incidents set recover_at = null, recover_event = null where id = v_row.id;
+        perform private.uptime_recovery_cancelled(v_row.recover_event);
+      end if;
       if v_row.id is null then
         v_outcome := 'suppressed:no-open-incident';
       elsif v_label = any (v_row.reminders) then
@@ -305,17 +332,23 @@ begin
         end if;
       end if;
 
-    else -- recovered: يُغلق الحادثة المفتوحة للهدف أيّاً كان معرّفها (الانقطاع واحد)
+    else -- recovered: يخصّ الحادثة المفتوحة للهدف أيّاً كان معرّفها (الانقطاع واحد)، لكنه لا يُغلقها فوراً.
+      -- تشغيلان متداخلان لنفس الدقيقة قد يختلف فحصهما: أحدهما يرسل recovered والآخر يبقى DOWN، وKV يحفظ
+      -- آخر كاتب. فالحدث يُسجَّل تعافياً معلّقاً، ويُغلق ويُبلَّغ فقط حين يؤكده تشغيل أحدث تماماً (٤أ).
       select * into v_row from private.uptime_incidents where target = v_target and closed_at is null for update;
       if v_row.id is null then
         v_outcome := 'suppressed:no-open-incident';
+      elsif v_at < v_row.opened_at
+         or (v_inc <> v_row.incident_key and not v_inc = any (v_row.aliases)
+             and exists (select 1 from private.uptime_incidents x where x.incident_key = v_inc or v_inc = any (x.aliases))) then
+        -- تعافٍ قديم لانقطاع سابق (إعادة إرسال متأخرة) لا يمسّ حادثة أحدث
+        v_row := null;
+        v_outcome := 'suppressed:stale-recovery';
+      elsif v_row.recover_at is not null then
+        v_outcome := 'suppressed:recovery-pending';
       else
-        update private.uptime_incidents set closed_at = v_at where id = v_row.id;
-        if v_alertable and v_cfg.notify_enabled and v_row.down_notified then
-          v_key := 'uptime:' || v_id;
-          perform private.uptime_enqueue(private.uptime_message('recovered', null, null, v_at, v_row.opened_at), v_key);
-          v_outcome := 'notified';
-        end if;
+        update private.uptime_incidents set recover_at = v_at, recover_event = v_id where id = v_row.id;
+        v_outcome := 'recovery-pending';
       end if;
     end if;
 
@@ -325,20 +358,41 @@ begin
     v_results := v_results || jsonb_build_object('id', v_id, 'outcome', v_outcome);
   end loop;
 
-  -- ٤أ) مطابقة الحالة: الـWorker يقول إن الهدف UP والخادم عنده حادثة مفتوحة له ⇒ تعافٍ لم يصل
-  --     (ضياع حالة KV قبل إرسال recovered). تُغلق، وإلا عُدّ الانقطاع التالي اسماً بديلاً لها فكُتم تنبيهه.
-  --     يُطابِق فقط طلب أحدث تماماً من آخر طلب مقبول: لا cron متأخر، ولا تشغيل مكرر لنفس الدقيقة
-  --     اختلف فحصه (وإلا أغلق حادثة فتحها التشغيل الآخر برسالة تعافٍ كاذبة).
+  -- ٤أ) تأكيد التعافي وإلغاؤه ومطابقة الحالة — فقط من طلب أحدث تماماً من آخر طلب مقبول (لا cron متأخر ولا
+  --     تشغيل مكرر لنفس الدقيقة)، ولحالة رصدها الـWorker بعد إشارة التعافي (scheduledTime > recover_at):
+  --     * تعافٍ معلّق + UP        ⇒ إغلاق ذرّي مشروط (closed_at = recover_at) ورسالة تعافٍ واحدة.
+  --     * تعافٍ معلّق + DOWN/RECOVERING ⇒ إلغاؤه: الـWorker ما زال يحمل الحادثة نفسها (سباق KV)، فتستمر بمعرّفها
+  --       وتذكيراتها ولا تُرسل رسالة تعافٍ كاذبة.
+  --     * تعافٍ معلّق + SUSPECT   ⇒ لا قرار بعد (يُحسم بالتشغيل التالي أو بحدث down/تذكير).
+  --     * لا تعافٍ معلّق + UP      ⇒ الـWorker بلا حادثة والخادم عنده واحدة (ضياع حالة KV قبل إرسال recovered):
+  --       تعافٍ معلّق من النبض، يؤكده التشغيل التالي بالقاعدة نفسها، وإلا عُدّ الانقطاع التالي اسماً بديلاً فكُتم.
   if v_sched is not null and (v_prev_sched is null or v_sched > v_prev_sched) then
-    for v_target in select t.key from jsonb_each_text(coalesce(j -> 'targets', '{}'::jsonb)) t where t.value = 'UP' loop
+    for v_target, v_tstatus in select t.key, t.value from jsonb_each_text(coalesce(j -> 'targets', '{}'::jsonb)) t loop
       perform pg_advisory_xact_lock(hashtext('ozk-uptime:' || v_target));
       select * into v_row from private.uptime_incidents
        where target = v_target and closed_at is null and opened_at <= v_sched for update;
       continue when v_row.id is null;
-      update private.uptime_incidents set closed_at = v_sched where id = v_row.id;
-      if v_target = 'site' and v_cfg.notify_enabled and v_row.down_notified then
-        perform private.uptime_enqueue(private.uptime_message('recovered', null, null, v_sched, v_row.opened_at),
-                                       'uptime:' || v_row.incident_key || ':reconciled');
+      if v_row.recover_at is not null then
+        continue when v_sched <= v_row.recover_at;
+        if v_tstatus = 'UP' then
+          update private.uptime_incidents set closed_at = v_row.recover_at
+           where id = v_row.id and closed_at is null and recover_at = v_row.recover_at;
+          if v_target = 'site' and v_cfg.notify_enabled and v_row.down_notified then
+            v_key := 'uptime:' || coalesce(v_row.recover_event, v_row.incident_key || ':reconciled');
+            perform private.uptime_enqueue(
+              private.uptime_message('recovered', null, null, v_row.recover_at, v_row.opened_at), v_key);
+            update private.uptime_events set outcome = 'notified', outbox_dedupe_key = v_key
+             where event_id = v_row.recover_event;
+          else
+            update private.uptime_events set outcome = 'recorded' where event_id = v_row.recover_event;
+          end if;
+        elsif v_tstatus in ('DOWN', 'RECOVERING') then
+          update private.uptime_incidents set recover_at = null, recover_event = null
+           where id = v_row.id and closed_at is null;
+          perform private.uptime_recovery_cancelled(v_row.recover_event);
+        end if;
+      elsif v_tstatus = 'UP' then
+        update private.uptime_incidents set recover_at = v_sched, recover_event = null where id = v_row.id;
       end if;
     end loop;
   end if;
@@ -349,7 +403,7 @@ begin
     perform pg_advisory_xact_lock(hashtext('ozk-uptime:site'));
     for v_row in
       select * from private.uptime_incidents
-       where target = 'site' and closed_at is null and not down_notified
+       where target = 'site' and closed_at is null and not down_notified and recover_at is null
        for update
     loop
       v_key := 'uptime:' || v_row.incident_key || ':down';
