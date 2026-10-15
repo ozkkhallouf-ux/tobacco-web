@@ -25,14 +25,15 @@ export async function hmacHex(secret, text) {
 export const toWire = (e) => ({ id: e.id, type: e.type, target: e.target, incident: e.incident, at: e.at, detail: e.detail ?? null });
 
 // نص الطلب الحرفي يُوقَّع كما هو، والخادم يتحقق من التوقيع على النص نفسه قبل تحليله.
-export async function buildRequest(cfg, { events, scheduledTime, now = Date.now(), nonce = crypto.randomUUID() }) {
-  const payload = JSON.stringify({ v: 1, ts: now, nonce, scheduledTime, events: events.map(toWire) });
+// targets (اختياري): حالة كل هدف الآن في آلة الحالة؛ الخادم يُغلق بها حادثة مفتوحة لم يصله تعافيها (ضياع KV).
+export async function buildRequest(cfg, { events, scheduledTime, targets, now = Date.now(), nonce = crypto.randomUUID() }) {
+  const payload = JSON.stringify({ v: 1, ts: now, nonce, scheduledTime, events: events.map(toWire), targets });
   return { payload, signature: await hmacHex(cfg.secret, payload) };
 }
 
 // النتيجة: { ok:true, outcomes: Map(id → outcome) } فقط عند إقرار صريح {ok:true, results:[…]}؛ أي شيء آخر فشل.
-export async function sendBatch(cfg, { fetchImpl, events, scheduledTime, now, nonce, timeoutMs = TIMEOUT_MS }) {
-  const { payload, signature } = await buildRequest(cfg, { events, scheduledTime, now, nonce });
+export async function sendBatch(cfg, { fetchImpl, events, scheduledTime, targets, now, nonce, timeoutMs = TIMEOUT_MS }) {
+  const { payload, signature } = await buildRequest(cfg, { events, scheduledTime, targets, now, nonce });
   const ac = new AbortController();
   let timedOut = false;
   const timer = setTimeout(() => { timedOut = true; ac.abort(); }, timeoutMs);

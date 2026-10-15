@@ -245,3 +245,35 @@ test('DRY_RUN بلا معلّق حي: أحداث الظل لا تدخل المع
   assert.deepEqual(kv.state().pending, []);
   assert.deepEqual(kv.state().events.map((e) => e.status), ['dry-run', 'dry-run']);
 });
+test('DRY_RUN: انقطاع جديد كامل في الظل لا يلحق بالمعلّق الحي ولا يُرسل عند العودة', async () => {
+  const srv = fakeServer(); const kv = memKV();
+  await go(srv, kv, 0); await go(srv, kv, 1);
+  srv.mode = 'http500'; await assert.rejects(go(srv, kv, 2), /ingest failed/);   // down حي معلّق
+  srv.mode = 'ok'; srv.siteMode = 'up';
+  await go(srv, kv, 3, {}); await go(srv, kv, 4, {});                             // يتعافى في الظل (يلحق)
+  srv.siteMode = 'down';
+  for (let i = 30; i < 33; i++) await go(srv, kv, i, {});                         // انقطاع جديد كامل في الظل
+  const st = kv.state();
+  assert.deepEqual(st.pending.map((e) => e.type), ['down', 'recovered']);
+  assert.equal(new Set(st.pending.map((e) => e.incident)).size, 1, 'الحادثة الأصلية وحدها');
+  assert.ok(st.events.some((e) => e.type === 'down' && e.dryRun), 'الانقطاع الجديد سجل ظل');
+  await go(srv, kv, 33);
+  const sent = JSON.parse(JSON.parse(srv.requests.at(-1).body).p_payload).events;
+  assert.equal(sent.length, 2);
+  assert.ok(sent.every((e) => e.incident === st.pending[0].incident));
+});
+test('النبض يحمل حالة كل هدف، وتُحجب حالة هدف بقيت له أحداث خارج الدفعة', async () => {
+  const srv = fakeServer(); srv.siteMode = 'up'; const kv = memKV();
+  await go(srv, kv, 0);
+  let p = JSON.parse(JSON.parse(srv.requests.at(-1).body).p_payload);
+  assert.deepEqual(p.targets, { site: 'UP', bulletin: 'UP' });
+  const st = kv.state();
+  st.pending = Array.from({ length: 60 }, (_, i) => ({ id: `bulletin:${i}:down`, type: 'down', target: 'bulletin', incident: `bulletin:${i}`, at: i, alertable: false, detail: 'x' }));
+  await kv.put('state:v1', JSON.stringify(st));
+  await go(srv, kv, 1);
+  p = JSON.parse(JSON.parse(srv.requests.at(-1).body).p_payload);
+  assert.deepEqual(p.targets, { site: 'UP' }, 'النشرة محجوبة حتى يصل كل معلّقها');
+  await go(srv, kv, 2);
+  p = JSON.parse(JSON.parse(srv.requests.at(-1).body).p_payload);
+  assert.deepEqual(p.targets, { site: 'UP', bulletin: 'UP' });
+});

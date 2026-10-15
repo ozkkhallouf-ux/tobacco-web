@@ -158,6 +158,8 @@ declare
   v_ts       timestamptz;
   v_nonce    text;
   v_sched    timestamptz;
+  v_prev_sched timestamptz;
+  v_tstatus  text;
   v_cfg      private.uptime_config;
   e          jsonb;
   v_id text; v_type text; v_target text; v_inc text; v_label text; v_detail text; v_at timestamptz;
@@ -214,7 +216,15 @@ begin
     v_sched := to_timestamp((j ->> 'scheduledTime')::numeric / 1000);
   end if;
 
+  if (j -> 'targets') is not null and (jsonb_typeof(j -> 'targets') is distinct from 'object'
+      or exists (select 1 from jsonb_each(j -> 'targets') t
+                  where t.key not in ('site', 'bulletin') or jsonb_typeof(t.value) is distinct from 'string'
+                     or (t.value #>> '{}') not in ('UP', 'SUSPECT', 'DOWN', 'RECOVERING'))) then
+    raise exception 'uptime_ingest: bad targets' using errcode = '22023';
+  end if;
+
   select * into v_cfg from private.uptime_config where id = 1;
+  select last_scheduled_at into v_prev_sched from private.uptime_heartbeat where id = 1;
 
   -- ٣) نبض الحياة: ساعة الخادم، رتيب (لا يعيده طلب متأخر إلى الوراء)
   insert into private.uptime_heartbeat as h (id, last_received_at, last_scheduled_at, runs)
@@ -312,6 +322,23 @@ begin
      where event_id = v_id;
     v_results := v_results || jsonb_build_object('id', v_id, 'outcome', v_outcome);
   end loop;
+
+  -- ٤أ) مطابقة الحالة: الـWorker يقول إن الهدف UP والخادم عنده حادثة مفتوحة له ⇒ تعافٍ لم يصل
+  --     (ضياع حالة KV قبل إرسال recovered). تُغلق، وإلا عُدّ الانقطاع التالي اسماً بديلاً لها فكُتم تنبيهه.
+  --     طلب أقدم من آخر طلب مقبول (cron متأخر) لا يُطابِق، كي لا يُغلق حادثة أحدث منه.
+  if v_sched is not null and (v_prev_sched is null or v_sched >= v_prev_sched) then
+    for v_target in select t.key from jsonb_each_text(coalesce(j -> 'targets', '{}'::jsonb)) t where t.value = 'UP' loop
+      perform pg_advisory_xact_lock(hashtext('ozk-uptime:' || v_target));
+      select * into v_row from private.uptime_incidents
+       where target = v_target and closed_at is null and opened_at <= v_sched for update;
+      continue when v_row.id is null;
+      update private.uptime_incidents set closed_at = v_sched where id = v_row.id;
+      if v_target = 'site' and v_cfg.notify_enabled and v_row.down_notified then
+        perform private.uptime_enqueue(private.uptime_message('recovered', null, null, v_sched, v_row.opened_at),
+                                       'uptime:' || v_row.incident_key || ':reconciled');
+      end if;
+    end loop;
+  end if;
 
   -- ٤ب) ترقية حادثة فُتحت أثناء الظل: إن فُعّل الإرسال والحادثة ما زالت مفتوحة بلا تنبيه، يُرسل تنبيه
   --     الانقطاع الآن (مرة واحدة، بنفس مفتاح down الأصلي)؛ وإلا تُكتم تذكيراتها وتعافيها فيضيع أول انقطاع بعد التفعيل.

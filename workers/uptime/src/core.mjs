@@ -81,10 +81,10 @@ export async function runOnce({ env = {}, now, fetchImpl = fetch, kv = env.UPTIM
   let events;
   if (dry) {
     // DRY_RUN: تسجيل فقط، بلا أي طلب. المعلّق (إن وُجد من وضع سابق) يبقى كما هو ولا يُسقط.
-    // لكن حدث هدفٍ له حادثة حية معلّقة (تعافيها أو تذكيرها) يلحق بها في المعلّق، وإلا عاد الوضع الحي
+    // لكن حدث الحادثة الحية المعلّقة نفسها (تعافيها أو تذكيرها) يلحق بها في المعلّق، وإلا عاد الوضع الحي
     // فأرسل down قديماً بلا تعافيه وبقيت الحادثة مفتوحة على الخادم.
-    const liveTargets = new Set(st.pending.map((e) => e.target));
-    events = out.events.map((e) => (liveTargets.has(e.target)
+    const liveIncidents = new Set(st.pending.map((e) => e.incident));
+    events = out.events.map((e) => (liveIncidents.has(e.incident)
       ? { ...e, status: 'pending', dryRun: false }
       : { ...e, status: 'dry-run', dryRun: true }));
     st.pending = capPending(mergePending(st.pending, events.filter((e) => !e.dryRun)), log);
@@ -113,8 +113,9 @@ async function deliverLive(st, fresh, { env, fetchImpl, now, log }) {
   const batch = mergePending(st.pending, fresh);
   const cfg = ingestConfig(env);
   // يُرسل حتى بلا أحداث: هذا هو نبض الحياة الذي يراقبه الخادم (توقف > 20 دقيقة ⇒ تنبيه)
+  const sent = batch.slice(0, INGEST_BATCH_MAX);
   const ingest = cfg
-    ? await sendBatch(cfg, { fetchImpl, events: batch.slice(0, INGEST_BATCH_MAX), scheduledTime: now })
+    ? await sendBatch(cfg, { fetchImpl, events: sent, scheduledTime: now, targets: targetStatuses(st, batch.slice(INGEST_BATCH_MAX)) })
     : { ok: false, reason: 'not-configured' };
   const acked = [];
   st.pending = [];
@@ -129,6 +130,15 @@ async function deliverLive(st, fresh, { env, fetchImpl, now, log }) {
   const events = fresh.map((e) => byId.get(e.id) || { ...e, status: 'pending', dryRun: false });
   if (!ingest.ok) log(JSON.stringify({ t: 'ozk-uptime', error: 'ingest-failed', reason: ingest.reason, pending: st.pending.length }));
   return { events, ingest };
+}
+
+// حالة كل هدف الآن، تُرسل مع النبض ليُغلق الخادم حادثة مفتوحة لم يصله تعافيها (ضياع حالة KV).
+// هدف بقي له حدث لم يُرسل في هذه الدفعة (> 50) تُحجب حالته حتى يصل كل ما قبله.
+function targetStatuses(st, unsent) {
+  const held = new Set(unsent.map((e) => e.target));
+  const out = {};
+  for (const [name, t] of Object.entries(st.targets)) if (!held.has(name)) out[name] = t.status;
+  return out;
 }
 
 // دمج بلا تكرار بالمعرّف، مرتباً زمنياً (down قبل recovered)

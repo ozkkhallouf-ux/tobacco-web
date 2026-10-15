@@ -59,8 +59,8 @@ $function$`;
   const ingestAs = (role, payload, sig) =>
     `set role ${role}; select public.uptime_ingest(${lit(payload)}, ${lit(sig)})::text;`;
   const sign = (payload, secret = SECRET) => createHmac('sha256', secret).update(payload, 'utf8').digest('hex');
-  const body = ({ events = [], ts = Date.now(), nonce = randomUUID(), scheduledTime = Date.now() } = {}) =>
-    JSON.stringify({ v: 1, ts, nonce, scheduledTime, events });
+  const body = ({ events = [], ts = Date.now(), nonce = randomUUID(), scheduledTime = Date.now(), targets } = {}) =>
+    JSON.stringify({ v: 1, ts, nonce, scheduledTime, events, targets });
   const ingest = (opts = {}, { role = 'anon', secret = SECRET } = {}) => {
     const p = body(opts);
     return JSON.parse(psql(ingestAs(role, p, sign(p, secret))));
@@ -253,6 +253,46 @@ $function$`;
     setNotify(true);
     ingest({ events: [ev('site', S, 'recovered', S + 3_000_000)] });
     assert.equal(outbox(), 0, 'لا تنبيه لانقطاع لم يُبلَّغ وانتهى');
+  });
+
+  test('ضياع حالة KV بعد انقطاع مُبلَّغ: نبض بحالة UP يُغلق الحادثة برسالة تعافٍ، والانقطاع التالي يُنبَّه', () => {
+    reset(); setNotify(true);
+    const now = Date.now(); const S1 = now - 3_600_000;
+    ingest({ events: [ev('site', S1, 'down', now - 3_000_000)], scheduledTime: now - 3_000_000 });
+    assert.equal(outbox(), 1);
+    ingest({ scheduledTime: now - 60_000, targets: { site: 'SUSPECT' } });   // ليس UP ⇒ لا مطابقة
+    assert.equal(count(`select count(*) from private.uptime_incidents where closed_at is null`), 1);
+    ingest({ scheduledTime: now, targets: { site: 'UP', bulletin: 'UP' } });  // Worker بحالة جديدة: الموقع شغّال
+    assert.equal(count(`select count(*) from private.uptime_incidents where closed_at is null`), 0, 'أُغلقت');
+    assert.equal(outbox(), 2, 'رسالة تعافٍ واحدة');
+    assert.match(one(`select message from public.telegram_outbox order by id desc limit 1`), /✅/);
+    ingest({ scheduledTime: now + 1, targets: { site: 'UP' } });
+    assert.equal(outbox(), 2, 'لا تكرار');
+    const r = ingest({ events: [ev('site', now, 'down', now + 2)], scheduledTime: now + 2 });
+    assert.equal(r.results[0].outcome, 'notified', 'الانقطاع التالي لا يُكتم كاسم بديل');
+  });
+
+  test('مطابقة الحالة: طلب أقدم من آخر طلب مقبول لا يُغلق، والحادثة غير المُبلَّغة تُغلق بصمت', () => {
+    reset();
+    const now = Date.now(); const S = now - 600_000;
+    ingest({ events: [ev('site', S, 'down', now - 120_000)], scheduledTime: now - 120_000 });  // ظل: بلا تنبيه
+    setNotify(true);
+    ingest({ scheduledTime: now - 60_000, targets: { site: 'DOWN' } });       // ترقية: تنبيه انقطاع
+    assert.equal(outbox(), 1);
+    ingest({ scheduledTime: now - 90_000, targets: { site: 'UP' } });          // طلب متأخر أقدم
+    assert.equal(count(`select count(*) from private.uptime_incidents where closed_at is null`), 1, 'لم يُغلق');
+    reset();
+    ingest({ events: [ev('site', S, 'down', now - 120_000)], scheduledTime: now - 120_000 });
+    ingest({ scheduledTime: now, targets: { site: 'UP' } });                   // الإرسال مقفل
+    assert.equal(count(`select count(*) from private.uptime_incidents where closed_at is null`), 0);
+    assert.equal(outbox(), 0);
+  });
+
+  test('حقل targets غير صالح يُرفض', () => {
+    reset();
+    for (const targets of [[], { site: 'up' }, { other: 'UP' }, { site: 1 }]) {
+      rejects(() => ingest({ targets }), /bad targets/);
+    }
   });
 
   test('النشرة تسجيل فقط حتى مع تفعيل الإرسال (قرار الخادم)', () => {
