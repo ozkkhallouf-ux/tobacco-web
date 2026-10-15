@@ -84,27 +84,7 @@ export async function runOnce({ env = {}, now, fetchImpl = fetch, kv = env.UPTIM
     events = out.events.map((e) => ({ ...e, status: 'dry-run', dryRun: true }));
     st.events = [...st.events, ...events].slice(-EVENTS_KEEP);
   } else {
-    // at-least-once: الجديد يُضاف إلى المعلّق، ولا يخرج حدث من المعلّق إلا بإقرار صريح من الخادم.
-    const batch = mergePending(st.pending, out.events);
-    const cfg = ingestConfig(env);
-    if (!cfg) {
-      ingest = { ok: false, reason: 'not-configured' };
-    } else {
-      // يُرسل حتى بلا أحداث: هذا هو نبض الحياة الذي يراقبه الخادم (توقف > 20 دقيقة ⇒ تنبيه)
-      ingest = await sendBatch(cfg, { fetchImpl, events: batch.slice(0, INGEST_BATCH_MAX), scheduledTime: now });
-    }
-    const acked = [];
-    st.pending = [];
-    for (const e of batch) {
-      const outcome = ingest.ok ? ingest.outcomes.get(e.id) : undefined; // ما لم يُرسل أو لم يُقرّ به يبقى معلّقاً
-      if (outcome) acked.push({ ...e, status: outcome === 'duplicate' ? 'duplicate' : 'accepted', outcome, dryRun: false });
-      else st.pending.push({ ...e, status: 'pending', dryRun: false });
-    }
-    st.pending = capPending(st.pending, log);
-    st.events = [...st.events, ...acked].slice(-EVENTS_KEEP);
-    const byId = new Map([...acked, ...st.pending].map((e) => [e.id, e]));
-    events = out.events.map((e) => byId.get(e.id) || { ...e, status: 'pending', dryRun: false });
-    if (!ingest.ok) log(JSON.stringify({ t: 'ozk-uptime', error: 'ingest-failed', reason: ingest.reason, pending: st.pending.length }));
+    ({ events, ingest } = await deliverLive(st, out.events, { env, fetchImpl, now, log }));
   }
   for (const e of events) log(JSON.stringify({ t: 'ozk-uptime-event', ...e }));
   // الحفظ بعد الإرسال وفي كتابة واحدة: فشل الحفظ يُبقي الحالة القديمة فتتكرر الانتقالات بالمعرّفات نفسها
@@ -119,6 +99,30 @@ export async function runOnce({ env = {}, now, fetchImpl = fetch, kv = env.UPTIM
   // بعد الحفظ: فشل الإرسال (أو DRY_RUN=0 بلا إعداد كامل) يظهر خطأً في سجلات Cloudflare، والحدث محفوظ معلّقاً
   if (ingest && !ingest.ok) throw new Error(`ozk-uptime: ingest failed (${ingest.reason})`);
   return { ...out, events, ingest };
+}
+
+// at-least-once: الجديد يُضاف إلى المعلّق، ولا يخرج حدث من المعلّق إلا بإقرار صريح من الخادم.
+// يعدّل st.pending وst.events، ويرجع أحداث هذا التشغيل بحالاتها ونتيجة الإرسال.
+async function deliverLive(st, fresh, { env, fetchImpl, now, log }) {
+  const batch = mergePending(st.pending, fresh);
+  const cfg = ingestConfig(env);
+  // يُرسل حتى بلا أحداث: هذا هو نبض الحياة الذي يراقبه الخادم (توقف > 20 دقيقة ⇒ تنبيه)
+  const ingest = cfg
+    ? await sendBatch(cfg, { fetchImpl, events: batch.slice(0, INGEST_BATCH_MAX), scheduledTime: now })
+    : { ok: false, reason: 'not-configured' };
+  const acked = [];
+  st.pending = [];
+  for (const e of batch) {
+    const outcome = ingest.ok ? ingest.outcomes.get(e.id) : undefined; // ما لم يُرسل أو لم يُقرّ به يبقى معلّقاً
+    if (outcome) acked.push({ ...e, status: outcome === 'duplicate' ? 'duplicate' : 'accepted', outcome, dryRun: false });
+    else st.pending.push({ ...e, status: 'pending', dryRun: false });
+  }
+  st.pending = capPending(st.pending, log);
+  st.events = [...st.events, ...acked].slice(-EVENTS_KEEP);
+  const byId = new Map([...acked, ...st.pending].map((e) => [e.id, e]));
+  const events = fresh.map((e) => byId.get(e.id) || { ...e, status: 'pending', dryRun: false });
+  if (!ingest.ok) log(JSON.stringify({ t: 'ozk-uptime', error: 'ingest-failed', reason: ingest.reason, pending: st.pending.length }));
+  return { events, ingest };
 }
 
 // دمج بلا تكرار بالمعرّف، مرتباً زمنياً (down قبل recovered)

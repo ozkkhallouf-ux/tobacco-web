@@ -301,7 +301,7 @@ $function$`;
       if (!supabaseUp) return new Response('{"message":"upstream"}', { status: 503 });
       const { p_payload, p_signature } = JSON.parse(init.body);
       try { return new Response(await psqlAsync(ingestAs('anon', p_payload, p_signature)), { status: 200 }); }
-      catch (e) { return new Response(String(e.stderr || e), { status: 400 }); }
+      catch { return new Response('{"message":"rejected"}', { status: 400 }); }
     };
     let v = null; let failPut = false;
     const kv = { get: async () => v, put: async (_, s) => { if (failPut) throw new Error('kv 503'); v = s; } };
