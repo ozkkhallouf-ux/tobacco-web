@@ -33,7 +33,6 @@ if (!ADMIN_URL) {
   const psqlAsync = async (sql) => (await run('psql', psqlArgs(dbUrl, sql), { encoding: 'utf8' })).stdout.trim();
   const lit = (s) => `$ozkq$${s}$ozkq$`;
   const one = (sql) => psql(sql);
-  const json = (sql) => JSON.parse(psql(sql));
   const count = (sql) => Number(psql(sql));
 
   const PROD_DISPATCH = `CREATE OR REPLACE FUNCTION private.notify_telegram_dispatch(p_event_type text, p_message text, p_dedupe_key text DEFAULT NULL::text, p_dedupe_minutes integer DEFAULT 60, p_reply_markup jsonb DEFAULT NULL::jsonb)
