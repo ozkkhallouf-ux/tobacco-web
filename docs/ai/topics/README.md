@@ -12,6 +12,7 @@
 | ذكاء الزبائن | [customer-intelligence.md](customer-intelligence.md) |
 | المشتريات والموردون | [purchases-suppliers.md](purchases-suppliers.md) |
 | مزامنة الأمين | [ameen-sync.md](ameen-sync.md) |
+| نبض مزامنة الأسعار (الموقع ← الأمين) | [price-sync-heartbeat.md](price-sync-heartbeat.md) |
 | الطباعة والفواتير | [printing.md](printing.md) |
 | الإشعارات والنشر | [notifications-deployment.md](notifications-deployment.md) |
 | تنسيق تنبيهات تيليغرام (المنسِّق الموحّد، جرد المصادر) | [telegram-alert-format.md](telegram-alert-format.md) |

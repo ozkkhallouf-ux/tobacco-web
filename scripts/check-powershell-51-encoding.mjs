@@ -36,6 +36,8 @@ const EXECUTED_UNDER_PS51 = [
   "tools/tests/Test-EnsureAmeenSyncWorkerAccessDenied.ps1",
   "tools/tests/Test-OzkAmeenBackup.ps1",
   "tools/tests/Test-OzkAmeenBackupMonitor.ps1",
+  "tools/tests/Test-PriceSyncHeartbeat.ps1",
+  "tools/tests/Test-PriceSyncOrchestratorHeartbeat.ps1",
   // منتجات وسكربتات تسجيل تشغّلها مهام Windows المجدولة
   "tools/push-supplier-obligations.ps1",
   "tools/push-purchase-item-snapshot.ps1",
@@ -49,6 +51,10 @@ const EXECUTED_UNDER_PS51 = [
   "tools/backup/register-ozk-ameen-backup-task.ps1",
   "tools/backup/ozk-ameen-backup-monitor.ps1",
   "tools/backup/register-ozk-ameen-backup-monitor-task.ps1",
+  // نبض مزامنة الأسعار (2026-10-18): المنسِّق ومهمة Sync Watchdog والناشر
+  "tools/sync-approved-prices-to-ameen.ps1",
+  "tools/ensure-ameen-sync.ps1",
+  "tools/publish-price-sync-heartbeat.ps1",
 ];
 
 const ARABIC = /[؀-ۿ]/;
