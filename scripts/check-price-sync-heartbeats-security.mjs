@@ -71,6 +71,15 @@ function psql(args, options = {}) {
 }
 const output = (r) => `${r.stdout || ""}${r.stderr || ""}`;
 
+// حارس المضيف قبل أي اتصال: لا تشغيل إلا على PostgreSQL محلي (socket أو loopback)، فلا يُعقل أن
+// يصل الاختبار — وهو ينشئ أدواراً ويُسقط قاعدة — إلى Supabase أو أي خادم بعيد.
+const LOCAL_HOSTS = new Set(["", "localhost", "127.0.0.1", "::1"]);
+// (PGDATABASE لا يهم: كل استدعاء يمرّر -d صراحةً.)
+if (!LOCAL_HOSTS.has(String(process.env.PGHOST || "").trim().toLowerCase())) {
+  console.error("check-price-sync-heartbeats-security: refusing non-local PGHOST");
+  process.exit(1);
+}
+
 const probe = psql(["-d", "postgres", "-tAc", "select 1"]);
 if (probe.status !== 0) {
   if (process.env.CI === "true" || process.env.PGHOST) {

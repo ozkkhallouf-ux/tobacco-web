@@ -5,11 +5,13 @@
 \set ON_ERROR_STOP 1
 \set QUIET 1
 
--- حارس: لا يعمل إلا على خادم محلي (loopback أو socket) وقاعدة فارغة بلا جداول الإنتاج.
+-- حارس: لا يعمل إلا في القاعدة المؤقتة المخصصة وبلا جداول الإنتاج. حارس المضيف (PGHOST محلي فقط)
+-- في scripts/check-price-sync-heartbeats-security.mjs قبل أي اتصال؛ عنوان الخادم هنا لا يصلح معياراً
+-- لأن خدمة postgres في CI حاوية Docker يرى فيها الخادم عنوانه الداخلي لا 127.0.0.1.
 do $guard$
 begin
-  if inet_server_addr() is not null and not (inet_server_addr() << '127.0.0.0/8'::inet or inet_server_addr() = '::1'::inet) then
-    raise exception 'price sync heartbeat security test refuses a non-loopback server';
+  if current_database() is distinct from 'ozk_price_sync_heartbeats_test' then
+    raise exception 'price sync heartbeat security test runs only in ozk_price_sync_heartbeats_test';
   end if;
   if to_regclass('public.inventory_reports') is not null or to_regclass('public.approved_price_items') is not null then
     raise exception 'refusing: database has production tables';
