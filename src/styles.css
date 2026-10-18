@@ -307,6 +307,53 @@ code {
   color: var(--danger);
 }
 
+.message-panel.warning {
+  border-color: #8c6427;
+  background: #23180c;
+  color: #f7df9c;
+}
+
+/* شريط حالة مزامنة الأسعار مع الأمين (src/price-sync-status.js) */
+.price-sync-status {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-inline-start-width: 5px;
+  border-radius: 8px;
+  background: var(--surface);
+  line-height: 1.7;
+}
+.price-sync-head { display: flex; gap: 10px; align-items: flex-start; }
+.price-sync-icon { font-size: 1.35rem; line-height: 1.3; }
+.price-sync-text { display: grid; gap: 2px; min-width: 0; }
+.price-sync-text strong { font-size: 1rem; }
+.price-sync-title { font-weight: 800; overflow-wrap: anywhere; }
+.price-sync-detail { opacity: 0.85; overflow-wrap: anywhere; }
+.price-sync-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 6px 14px;
+  margin: 0;
+}
+.price-sync-fact { min-width: 0; }
+.price-sync-fact dt { font-size: 0.8rem; opacity: 0.75; }
+.price-sync-fact dd { margin: 0; font-weight: 700; overflow-wrap: anywhere; }
+.price-sync-status.is-healthy { border-color: #2f7a46; background: #0f1d14; color: #b9e8c6; }
+.price-sync-status.is-stale { border-color: #8c6427; background: #23180c; color: #f7df9c; }
+.price-sync-status.is-failed { border-color: #8c3b35; background: #25100e; color: #f4b9b2; }
+.price-sync-status.is-unknown { border-color: #5b5b5b; background: #1a1a1a; color: #d6d6d6; }
+[data-theme="light"] .message-panel.warning { background: #fdf0d8; border-color: #c8a060; color: #5c3a08; }
+[data-theme="light"] .price-sync-status.is-healthy { border-color: #2e6b3f; background: #e7f1e6; color: #1f4d2c; }
+[data-theme="light"] .price-sync-status.is-stale { border-color: #c8a060; background: #fdf0d8; color: #5c3a08; }
+[data-theme="light"] .price-sync-status.is-failed { border-color: #b4483f; background: #f8e5e2; color: #7a1f17; }
+[data-theme="light"] .price-sync-status.is-unknown { border-color: #9a9a9a; background: #f1f1f1; color: #3a3a3a; }
+@media (max-width: 640px) {
+  .price-sync-status { padding: 12px; }
+  .price-sync-facts { grid-template-columns: 1fr 1fr; }
+}
+
 .hero-panel {
   display: grid;
   grid-template-columns: minmax(0, 1.05fr) minmax(280px, 0.95fr);
