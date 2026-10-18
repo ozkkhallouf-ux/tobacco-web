@@ -262,6 +262,23 @@ const MM = (d, m) => `⚠️ مزامنة الأسعار ليست مكتملة\n
   await notify(db, 'windows', 'تعذّر إنعاش سيرفر الموقع المحلي على المنفذ 3000', 'local-server-revive-fail', 60);
   assert.equal(await cnt(), n0 + 12, 'hourly reminder while the outage continues');
   assert.ok(!(await open(db)).some((r) => r.event_key === 'local-server-revive-fail'), 'revive failure must not be digest-only');
+  // فشل أتمتة تنبيه النفاد (watch_stock_priority_alert، قرار المالك 2026-10-18): فوري بمفتاحه الثابت ونافذته 360 د،
+  // بلا تكرار داخل النافذة ولا أثر في الملخص؛ بقية automation-failure:* تبقى ملخصاً
+  const sk = 'automation-failure:stock-priority-alert';
+  const n2 = await cnt();
+  await notify(db, 'automation_failure', '🚨 فشل الأتمتة: تنبيه النفاد حسب الأولوية (pg_cron)', sk, 360);
+  assert.equal(await cnt(), n2 + 1, 'stock-alert automation failure is sent immediately');
+  assert.ok(!(await open(db)).some((r) => r.event_key === sk), 'stock-alert automation failure must not enter the digest');
+  await notify(db, 'automation_failure', '🚨 فشل الأتمتة: تنبيه النفاد حسب الأولوية (pg_cron)', sk, 360);
+  assert.equal(await cnt(), n2 + 1, 'no repeat within the 360-minute window');
+  await db.exec(`update public.telegram_outbox set created_at=now()-interval '361 minutes' where dedupe_key='${sk}'`);
+  await notify(db, 'automation_failure', '🚨 فشل الأتمتة: تنبيه النفاد حسب الأولوية (pg_cron)', sk, 360);
+  assert.equal(await cnt(), n2 + 2, 'reminder after the window while the failure continues');
+  await notify(db, 'automation_failure', 'أتمتة أخرى', 'automation-failure:other-job');
+  assert.equal(await cnt(), n2 + 2, 'other automation failures stay digest-only');
+  assert.ok((await open(db)).some((r) => r.event_key === 'automation-failure:other-job'));
+  await notify(db, 'automation_failure', 'مشتق', 'automation-failure:stock-priority-alert:x');
+  assert.equal(await cnt(), n2 + 2, 'exact key only: a derived key stays digest-only');
   // الأمن وفشل التقرير المسائي مستقلان حتى لو تعطّل الامتصاص بالكامل
   const savedAbs = await one(db, `select pg_get_functiondef('private.absorb_digest_alert(text,text,text)'::regprocedure) d`);
   await db.exec(`drop function private.absorb_digest_alert(text,text,text)`); await db.exec(`create function private.absorb_digest_alert(a text,b text,c text) returns boolean language plpgsql as $$ begin raise exception 'boom'; end $$`);

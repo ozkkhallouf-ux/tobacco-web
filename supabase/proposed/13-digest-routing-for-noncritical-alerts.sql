@@ -50,7 +50,7 @@ begin
 end $pre$;
 -- مساعدا التوجيه يُستبدلان أدناه: يجب أن يكونا بجسم 12 (أول تطبيق) أو جسم 13 (إعادة)، وإلا تعديل لاحق يُفقَد بصمت
 do $pre2$ begin
-  if md5((select prosrc from pg_proc where oid = to_regprocedure('private.ops_event_route(text,text)'))) not in ('8c55e7855fd285e956506f7d0ebd10b2', '57298c1dec447106f7d6f5e3c4959b79')
+  if md5((select prosrc from pg_proc where oid = to_regprocedure('private.ops_event_route(text,text)'))) not in ('8c55e7855fd285e956506f7d0ebd10b2', '7228700c82cfc2948563abfc3d2025d1')
      or md5((select prosrc from pg_proc where oid = to_regprocedure('private.close_stale_ops_events(timestamptz,interval)'))) not in ('a9519e09e396dbc5b99eb1872bd118b4', '2c92ab4fdc95ce1696cb4d69920569c7') then
     raise exception 'proposed/13: ops_event_route/close_stale_ops_events drifted from the known 12/13 bodies; refusing to overwrite later changes';
   end if;
@@ -115,6 +115,10 @@ returns text language sql immutable as $$
   -- والمفتاح يحمل هوية الحادثة (dedupe 1440/60 د) فلا تكرار عبر الدورات أو إعادة تشغيل الحارس.
   -- المجموع العام «ameen-sync-watchdog» يبقى ملخصاً (أدناه).
   when coalesce(p_dedupe_key,'') ~ '^ameen-read-worker-(stuck|degraded|recovered):' then 'immediate'
+  -- مراقب تنبيه النفاد حسب الأولوية (قرار المالك 2026-10-18): watch_stock_priority_alert يرسل هذا المفتاح الثابت
+  -- (نافذة 360 د) حين يتعطل pg_cron/الدالة؛ في الملخص لن يُعرف تعطّل تنبيهات النفاد قبل 23:00 ⇒ فوري.
+  -- مطابقة حرفية: بقية automation-failure:* تبقى ملخصاً.
+  when coalesce(p_dedupe_key,'') = 'automation-failure:stock-priority-alert' then 'immediate'
   when p_kind in ('sync_failure','windows','automation_failure') then 'digest'
   when coalesce(p_dedupe_key,'') ~ '^(winfail:|project-cron-failure:|automation-failure:)' then 'digest'
   else 'immediate'
