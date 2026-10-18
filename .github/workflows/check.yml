@@ -180,6 +180,12 @@ jobs:
         shell: powershell
         run: .\tools\test-ameen-read-worker-auth-retry.ps1
 
+      # حادثة 2026-10-18: مهمة الأسعار توقفت 76 دقيقة بلا أثر لأن الحالة تُنشر بعد النجاح وحده.
+      # الاختبار يشغّل المنسّق والناشر الحقيقيين ببدائل وهمية ويثبت نبضة لكل محاولة ورموز خروج كما هي.
+      - name: Price sync heartbeat - every attempt publishes its outcome
+        shell: powershell
+        run: .\tools\tests\Test-PriceSyncHeartbeat.ps1
+
       # Codex P1 (PR #220): كان فرع degraded بensure-ameen-sync.ps1 يسجّل degraded=true
       # (يُعتبر "تم التنبيه") حتى لو فشل TELEGRAM-NOTIFY فعلياً، فيضيع التنبيه ولا تُعاد
       # المحاولة أبداً. الاختبار يستخرج جسم الفرع فعلياً من المصدر وينفّذه بسكريبت إشعار
