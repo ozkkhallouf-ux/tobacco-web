@@ -493,6 +493,24 @@ if ($isMainComputer) {
     Write-Log "FAIL: local web server not listening on port $localWebServerPort"
   }
 }
+# ---------- 3ج) نبض مهمة مزامنة الأسعار (قراءة فقط) ----------
+# المهمة المعطّلة لا تكتب نبضها، فيُنشر فحص حالتها من هنا كي يميّز الموقع DISABLED عن STALE
+# (حادثة 2026-10-18). best-effort: لا يضيف مشكلة ولا يغيّر رمز الخروج ولا يرسل تنبيهاً.
+# التوثيق: docs/ai/topics/price-sync-heartbeat.md
+if ($isMainComputer) {
+  $priceHeartbeatPath = Join-Path $PSScriptRoot "publish-price-sync-heartbeat.ps1"
+  if (Test-Path -LiteralPath $priceHeartbeatPath) {
+    try {
+      $priceProbeOutput = (& $priceHeartbeatPath -Mode TaskProbe 2>&1 | Out-String)
+      if ($priceProbeOutput -notmatch "PRICE-SYNC-HEARTBEAT (OK|SKIPPED)") {
+        Write-Log ("WARN: price sync task probe — " + ($priceProbeOutput.Trim() -replace "\s+", " "))
+      }
+    } catch {
+      Write-Log "WARN: price sync task probe threw — $($_.Exception.Message)"
+    }
+  }
+}
+
 # ---------- 4) التنبيه ----------
 if ($problems.Count -eq 0) {
   exit 0

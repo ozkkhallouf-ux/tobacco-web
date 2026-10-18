@@ -45,6 +45,7 @@
     "tools/pull-approved-prices.ps1",
     "tools/verify-prices.ps1",
     "tools/publish-price-sync-status.ps1",
+    "tools/publish-price-sync-heartbeat.ps1",
     "tools/send-telegram-notification.ps1",
     "tools/sync-purchase-invoices-to-ameen.ps1",
     "tools/setup-ameen-retail-pricelist.ps1",

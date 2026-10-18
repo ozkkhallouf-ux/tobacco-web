@@ -94,6 +94,8 @@ export const CHECKS = [
   'check-price-bulletin-print-content.mjs',
   'check-price-bulletin-print-ux.mjs',
   'check-price-guid-conflict-guard.mjs',
+  'check-price-sync-health.mjs',
+  'check-price-sync-heartbeats-security.mjs',
   'check-project-task-alert-policy.mjs',
   'check-project-task-monitors.mjs',
   'check-purchase-recommendation.mjs',

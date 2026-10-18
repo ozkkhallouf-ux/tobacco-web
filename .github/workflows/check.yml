@@ -235,3 +235,14 @@ jobs:
       - name: Warehouse stock retention - batched cleanup regression test
         shell: powershell
         run: .\tools\tests\Test-WarehouseStockRetentionBatch.ps1
+
+      # نبض مزامنة الأسعار (حادثة 2026-10-18): الناشر يكتب حمولة صحيحة ويخنق فحص
+      # المهمة ويخرج دائماً بصفر، والمنسِّق ينشر نبضاً في كل مسار خروج دون تغيير
+      # رموز خروجه ولا تنبيهاته القديمة. كله بوضع -DryRun وبدائل وهمية.
+      - name: Price sync heartbeat - publisher test
+        shell: powershell
+        run: .\tools\tests\Test-PriceSyncHeartbeat.ps1
+
+      - name: Price sync heartbeat - orchestrator exit paths test
+        shell: powershell
+        run: .\tools\tests\Test-PriceSyncOrchestratorHeartbeat.ps1
