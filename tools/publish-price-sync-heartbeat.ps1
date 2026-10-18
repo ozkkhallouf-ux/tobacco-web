@@ -1,13 +1,19 @@
 ﻿# ============================================================================
 # publish-price-sync-heartbeat.ps1 — نبض مزامنة الأسعار (الموقع ← الأمين)
 #
-# يكتب صفاً في inventory_reports بالمصدر ameen_price_sync_heartbeat بنوعين:
+# يسجّل النبض في الجدول المستقل public.price_sync_heartbeats عبر الدالة
+# public.record_price_sync_heartbeat (supabase/proposed/16-price-sync-heartbeats.sql) بنوعين:
 #   -Mode Attempt    من sync-approved-prices-to-ameen.ps1 في **كل** تشغيل، ناجحاً أو فاشلاً
 #                    (ameen_price_sync_status القديم لا يُكتب إلا بعد فحص الأسعار، فيتقادم
 #                    آخر «ok» بصمت عند الفشل أو التعطيل — حادثة 2026-10-18).
 #   -Mode TaskProbe  من ensure-ameen-sync.ps1 (Sync Watchdog): حالة المهمة المجدولة نفسها،
 #                    لأن المهمة المعطّلة لا تكتب شيئاً فلا يُكتشف التعطيل إلا من خارجها.
 #                    يُنشر فوراً إن كانت المهمة معطّلة أو مفقودة، وإلا مرة كل 30 دقيقة.
+#
+# لا inventory_reports (قرار المالك، خيار B): ذلك الجدول يكتبه أي موظف فيُزوَّر النبض، وعليه
+# trigger «تقرير الجرد اليومي» الذي كان سيُطلق إشعاراً كاذباً (Codex P1 على #332).
+# الدالة تقبل هوية المزامنة المعتمدة (TOBACCO_SYNC_EMAIL) أو service_role فقط، وترفض أي «نجاح»
+# بلا إثبات وصول الأسعار للأمين.
 #
 # قراءة فقط على Windows Task Scheduler (Get-ScheduledTask). لا اتصال بالأمين هنا إطلاقاً.
 # Best-effort: يخرج دائماً بالرمز 0 كي لا يكسر سلسلة المزامنة؛ النتيجة في سطر
@@ -46,7 +52,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$source = "ameen_price_sync_heartbeat"
+$rpcName = "record_price_sync_heartbeat"
 $schema = "price-sync-heartbeat/v1"
 
 function Get-NowUtc {
@@ -133,9 +139,9 @@ function Get-SupabaseAuth {
         }
     }
     $url = if ($env:SUPABASE_URL) { $env:SUPABASE_URL.TrimEnd('/') } else { "https://dyxbirfpxeocqffnfdeb.supabase.co" }
-    # نفس منطق publish-price-sync-status.ps1: inventory_reports.created_by يحتاج هوية مستخدم،
-    # فنفضّل حساب المزامنة؛ ومفتاح الخدمة احتياط فقط.
-    $apiKey = $null; $token = $null; $createdBy = $null
+    # هوية المزامنة المعتمدة أولاً (الدالة تتحقق منها على الخادم)؛ ومفتاح الخدمة احتياط فقط
+    # كما في publish-price-sync-status.ps1. أي حساب آخر ترفضه الدالة بـ 42501.
+    $apiKey = $null; $token = $null
     if (-not ($env:TOBACCO_SUPABASE_PUBLIC_KEY -and $env:TOBACCO_SYNC_EMAIL -and $env:TOBACCO_SYNC_PASSWORD)) {
         $apiKey = $env:SUPABASE_SERVICE_KEY
         $token = $apiKey
@@ -150,32 +156,24 @@ function Get-SupabaseAuth {
             -Headers @{ apikey = $apiKey } -ContentType "application/json; charset=utf-8" `
             -Body ([Text.Encoding]::UTF8.GetBytes($authBody)) -TimeoutSec 20
         $token = $auth.access_token
-        $createdBy = $auth.user.id
         if (-not $token) { throw "authentication_failed" }
     }
-    return @{ Url = $url; ApiKey = $apiKey; Token = $token; CreatedBy = $createdBy }
+    return @{ Url = $url; ApiKey = $apiKey; Token = $token }
 }
 
 function Publish-Summary($Summary, $NowUtc) {
-    $damascusDate = $NowUtc.AddHours(3).ToString("yyyy-MM-dd")   # دمشق UTC+3 ثابت منذ 2022
+    $payload = [ordered]@{ p_summary = $Summary }
     if ($DryRun) {
-        $json = [ordered]@{ report_date = $damascusDate; source = $source; summary = $Summary; items = @() } | ConvertTo-Json -Depth 8 -Compress
+        $json = [ordered]@{ rpc = $rpcName; p_summary = $Summary } | ConvertTo-Json -Depth 8 -Compress
         if ($ResultFile) { [IO.File]::WriteAllText($ResultFile, $json, (New-Object Text.UTF8Encoding($false))) }
         return "DRYRUN"
     }
     $auth = Get-SupabaseAuth
-    $body = [ordered]@{
-        report_date = $damascusDate
-        source = $source
-        summary = $Summary
-        items = @()
-        created_by = $auth.CreatedBy
-    } | ConvertTo-Json -Depth 8 -Compress
-    Invoke-RestMethod -Method Post -Uri "$($auth.Url)/rest/v1/inventory_reports" -Headers @{
+    $body = $payload | ConvertTo-Json -Depth 8 -Compress
+    Invoke-RestMethod -Method Post -Uri "$($auth.Url)/rest/v1/rpc/$rpcName" -Headers @{
         apikey = $auth.ApiKey
         Authorization = "Bearer $($auth.Token)"
         "Content-Profile" = "public"
-        Prefer = "return=minimal"
     } -ContentType "application/json; charset=utf-8" -Body ([Text.Encoding]::UTF8.GetBytes($body)) -TimeoutSec 20 | Out-Null
     return "OK"
 }
@@ -220,8 +218,18 @@ try {
     if ($PricesFingerprint -and $state.last_success_fingerprint) {
         $pricesChanged = ([string]$state.last_success_fingerprint -ne $PricesFingerprint)
     }
+    # النجاح يعني وصول الأسعار فعلياً: نفس شرط الدالة على الخادم. بلا إثبات كامل لا نعلن نجاحاً
+    # (الدالة كانت سترفضه فيضيع النبض)، بل verify_failed صريحاً.
+    $message = $Message
+    if ($Outcome -eq "applied") {
+        $proven = $AmeenContact -and ($Mismatches -eq 0) -and ($Missing -eq 0) -and ($AppliedWholesale -ge 1) -and ($ConflictCount -le 0) -and ($NotInAmeen -le 0)
+        if (-not $proven) {
+            $finalOutcome = "verify_failed"
+            $message = ("unproven success: contact={0} mismatches={1} missing={2} applied={3} conflicts={4} notin={5}" -f [bool]$AmeenContact, $Mismatches, $Missing, $AppliedWholesale, $ConflictCount, $NotInAmeen)
+        }
+    }
     # «لا أسعار جديدة»: نجاح كامل مثبت بالفحص، والبصمة السعرية مطابقة لآخر نجاح.
-    if ($Outcome -eq "applied" -and $pricesChanged -eq $false) { $finalOutcome = "no_changes" }
+    if ($finalOutcome -eq "applied" -and $pricesChanged -eq $false) { $finalOutcome = "no_changes" }
 
     $success = @("applied", "no_changes") -contains $finalOutcome
     if ($success) {
@@ -260,7 +268,7 @@ try {
         last_success_at = $state.last_success_at
         last_failure_at = $state.last_failure_at
         task = $task
-        message = $Message
+        message = $message
     }
     $result = Publish-Summary $summary $nowUtc
     Write-Output "PRICE-SYNC-HEARTBEAT $result (attempt outcome=$finalOutcome)"

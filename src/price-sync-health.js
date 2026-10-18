@@ -6,8 +6,9 @@
 // في الموقع لم تصل للأمين، وصدرت فواتير بالأسعار القديمة. آخر نجاح قديم ليس دليلاً
 // على أن المزامنة تعمل الآن.
 //
-// المدخلات صفوف `inventory_reports` بالمصدر `ameen_price_sync_heartbeat` كما هي
-// (created_at + summary). يكتبها tools/publish-price-sync-heartbeat.ps1 بنوعين:
+// المدخلات صفوف الجدول المستقل `public.price_sync_heartbeats` (supabase/proposed/16) كما هي
+// (received_at بساعة الخادم + summary). لا يكتبها إلا هوية المزامنة المعتمدة عبر الدالة
+// record_price_sync_heartbeat، من tools/publish-price-sync-heartbeat.ps1 بنوعين:
 //   • kind="attempt"     — نتيجة كل تشغيل لـ sync-approved-prices-to-ameen.ps1
 //   • kind="task_probe"  — حالة المهمة المجدولة نفسها كما يراها Sync Watchdog
 //                          (الطريق الوحيد لاكتشاف DISABLED، لأن المهمة المعطّلة لا تكتب شيئاً)
@@ -59,7 +60,8 @@
     verify_failed: "تعذّر التحقق من الأسعار في الأمين",
     verify_mismatch: "أسعار الأمين لا تطابق الموقع",
     applied_with_conflicts: "طُبّقت الأسعار مع تعارض أو أصناف غير موجودة",
-    preview_only: "المهمة تعمل بوضع المعاينة ولا تكتب في الأمين"
+    preview_only: "المهمة تعمل بوضع المعاينة ولا تكتب في الأمين",
+    unproven_success: "أُعلن نجاح بلا إثبات وصول الأسعار للأمين"
   });
 
   function toDate(value) {
@@ -93,16 +95,41 @@
     return summary;
   }
 
-  // يحوّل صف inventory_reports (أو summary مباشرة) إلى محاولة موحّدة، أو null إن تلف.
+  // زمن الصف: received_at (ساعة الخادم في price_sync_heartbeats) هو المرجع حين يوجد، فلا يستطيع
+  // العميل تقديم حداثة بطابع زمني يرسله؛ وإلا (summary مباشرة في الاختبارات) أحدث طابع متاح.
+  function rowTime(row, ...summaryTimes) {
+    const received = toDate(row && row.received_at);
+    return received || maxDate(...summaryTimes, row && row.created_at);
+  }
+
+  // لا تتقدّم طوابع العميل على زمن الصف نفسه.
+  function capAt(value, at) {
+    const date = toDate(value);
+    return date && date > at ? at : date;
+  }
+
+  // النجاح يعني وصول الأسعار للأمين: نفس شرط record_price_sync_heartbeat على الخادم.
+  function provenSuccess(summary, verify) {
+    const isZero = (value) => typeof value === "number" && value === 0;
+    const zeroOrAbsent = (value) => value === undefined || value === null || isZero(value);
+    return Boolean(summary.ameen_contact_at)
+      && isZero(verify.mismatches) && isZero(verify.missing)
+      && typeof summary.applied_wholesale === "number" && summary.applied_wholesale >= 1
+      && zeroOrAbsent(summary.conflict_count) && zeroOrAbsent(summary.not_in_ameen);
+  }
+
+  // يحوّل صف price_sync_heartbeats (أو summary مباشرة) إلى محاولة موحّدة، أو null إن تلف.
   function normalizeAttempt(row) {
     const summary = summaryOf(row);
     if (!summary || summary.kind !== "attempt") return null;
-    const at = maxDate(summary.attempt_finished_at, summary.attempt_started_at, row && row.created_at);
+    const at = rowTime(row, summary.attempt_finished_at, summary.attempt_started_at);
     if (!at || typeof summary.outcome !== "string" || !summary.outcome) return null;
     const verify = summary.verify && typeof summary.verify === "object" ? summary.verify : {};
+    // «نجاح» بلا إثبات لا يُصدَّق أبداً: يُعامل فشلاً صريحاً.
+    const unproven = SUCCESS_OUTCOMES.includes(summary.outcome) && !provenSuccess(summary, verify);
     return {
       at,
-      outcome: summary.outcome,
+      outcome: unproven ? "unproven_success" : summary.outcome,
       stageFailed: summary.stage_failed || null,
       ameenContactAt: toDate(summary.ameen_contact_at),
       sentCount: toInt(summary.sent_count),
@@ -113,8 +140,8 @@
       mismatches: toInt(verify.mismatches),
       missing: toInt(verify.missing),
       pricesChanged: typeof summary.prices_changed === "boolean" ? summary.prices_changed : null,
-      lastSuccessAt: toDate(summary.last_success_at),
-      lastFailureAt: toDate(summary.last_failure_at),
+      lastSuccessAt: unproven ? null : capAt(summary.last_success_at, at),
+      lastFailureAt: capAt(summary.last_failure_at, at),
       message: typeof summary.message === "string" ? summary.message : "",
       host: typeof summary.host === "string" ? summary.host : ""
     };
@@ -123,7 +150,7 @@
   function normalizeProbe(row) {
     const summary = summaryOf(row);
     if (!summary || summary.kind !== "task_probe") return null;
-    const at = maxDate(summary.probed_at, row && row.created_at);
+    const at = rowTime(row, summary.probed_at);
     const task = summary.task && typeof summary.task === "object" ? summary.task : null;
     if (!at || !task) return null;
     const state = typeof task.state === "string" ? task.state : "";
@@ -161,7 +188,7 @@
     };
   }
 
-  // rows: صفوف inventory_reports بالمصدر ameen_price_sync_heartbeat (أي ترتيب، أي خليط من النوعين).
+  // rows: صفوف public.price_sync_heartbeats (proposed/16) بأي ترتيب وأي خليط من النوعين.
   function classifyPriceSyncHealth(rows, options = {}) {
     const now = toDate(options.now) || new Date();
     const thresholds = Object.assign({}, THRESHOLDS, options.thresholds || {});

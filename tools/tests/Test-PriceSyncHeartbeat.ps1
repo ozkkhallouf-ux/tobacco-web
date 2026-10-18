@@ -1,5 +1,5 @@
 ﻿# اختبار publish-price-sync-heartbeat.ps1 تحت Windows PowerShell 5.1 (وظيفة ps51-compat).
-# كل التشغيلات بوضع -DryRun: الحمولة تُكتب لملف مؤقت بدل النشر. حالة المهمة مصطنعة عبر
+# كل التشغيلات بوضع -DryRun: حمولة الدالة record_price_sync_heartbeat تُكتب لملف مؤقت بدل النشر. حالة المهمة مصطنعة عبر
 # -TaskInfoJson. لا اتصال بالأمين، لا Supabase، لا Task Scheduler حقيقي، لا Telegram.
 
 $ErrorActionPreference = "Stop"
@@ -33,7 +33,11 @@ function Invoke-Publisher([hashtable]$Arguments) {
   $output = (& $publisher -DryRun -ResultFile $resultFile -StateFile $stateFile @Arguments | Out-String)
   $code = $LASTEXITCODE
   $payload = $null
-  if (Test-Path -LiteralPath $resultFile) { $payload = Get-Content -Raw -LiteralPath $resultFile -Encoding UTF8 | ConvertFrom-Json }
+  if (Test-Path -LiteralPath $resultFile) {
+    $payload = Get-Content -Raw -LiteralPath $resultFile -Encoding UTF8 | ConvertFrom-Json
+    # الحمولة {rpc, p_summary}؛ نكشف summary باسم مختصر للتأكيدات.
+    $payload | Add-Member -NotePropertyName summary -NotePropertyValue $payload.p_summary -Force
+  }
   return @{ Output = $output; Code = $code; Payload = $payload }
 }
 
@@ -42,8 +46,8 @@ try {
   $r = Invoke-Publisher @{ Mode = "Attempt"; Outcome = "applied"; Now = "2026-10-18T08:30:00Z"; AmeenContact = $true; SentCount = 321; AppliedWholesale = 321; AppliedRetail = 317; NotInAmeen = 0; ConflictCount = 0; WholesaleMatched = 321; RetailMatched = 317; Mismatches = 0; Missing = 0; PricesFingerprint = "aaa"; TaskInfoJson = $enabledTask }
   Assert 'أول نجاح: رمز الخروج 0' ($r.Code -eq 0)
   Assert 'أول نجاح: سطر DRYRUN' ($r.Output -match 'PRICE-SYNC-HEARTBEAT DRYRUN \(attempt outcome=applied\)')
-  Assert 'أول نجاح: المصدر والمخطط' ($r.Payload.source -eq 'ameen_price_sync_heartbeat' -and $r.Payload.summary.schema -eq 'price-sync-heartbeat/v1' -and $r.Payload.summary.kind -eq 'attempt')
-  Assert 'أول نجاح: تاريخ التقرير بتوقيت دمشق' ($r.Payload.report_date -eq '2026-10-18')
+  Assert 'أول نجاح: الدالة والمخطط' ($r.Payload.rpc -eq 'record_price_sync_heartbeat' -and $r.Payload.summary.schema -eq 'price-sync-heartbeat/v1' -and $r.Payload.summary.kind -eq 'attempt')
+  Assert 'أول نجاح: لا حقول inventory_reports' ($null -eq $r.Payload.report_date -and $null -eq $r.Payload.source -and $null -eq $r.Payload.created_by)
   Assert 'أول نجاح: الأعداد' ($r.Payload.summary.sent_count -eq 321 -and $r.Payload.summary.applied_wholesale -eq 321 -and $r.Payload.summary.applied_retail -eq 317 -and $r.Payload.summary.conflict_count -eq 0)
   Assert 'أول نجاح: نتيجة الفحص' ($r.Payload.summary.verify.mismatches -eq 0 -and $r.Payload.summary.verify.wholesale_matched -eq 321)
   Assert 'أول نجاح: وقت الاتصال بالأمين' ((IsoOf $r.Payload.summary.ameen_contact_at) -eq '2026-10-18T08:30:00')
@@ -52,14 +56,21 @@ try {
   Assert 'أول نجاح: حالة المهمة مضمّنة' ($r.Payload.summary.task.enabled -eq $true -and $r.Payload.summary.task.state -eq 'Ready')
 
   # ٢) نفس البصمة ⇒ no_changes (المهمة تعمل ولا أسعار جديدة)
-  $r = Invoke-Publisher @{ Mode = "Attempt"; Outcome = "applied"; Now = "2026-10-18T08:35:00Z"; AmeenContact = $true; PricesFingerprint = "aaa"; TaskInfoJson = $enabledTask }
+  $r = Invoke-Publisher @{ Mode = "Attempt"; Outcome = "applied"; Now = "2026-10-18T08:35:00Z"; AmeenContact = $true; AppliedWholesale = 321; ConflictCount = 0; NotInAmeen = 0; Mismatches = 0; Missing = 0; PricesFingerprint = "aaa"; TaskInfoJson = $enabledTask }
   Assert 'بلا أسعار جديدة: outcome=no_changes' ($r.Payload.summary.outcome -eq 'no_changes')
   Assert 'بلا أسعار جديدة: prices_changed=false' ($r.Payload.summary.prices_changed -eq $false)
 
   # ٣) بصمة مختلفة ⇒ applied و prices_changed=true
-  $r = Invoke-Publisher @{ Mode = "Attempt"; Outcome = "applied"; Now = "2026-10-18T08:40:00Z"; AmeenContact = $true; PricesFingerprint = "bbb"; TaskInfoJson = $enabledTask }
+  $r = Invoke-Publisher @{ Mode = "Attempt"; Outcome = "applied"; Now = "2026-10-18T08:40:00Z"; AmeenContact = $true; AppliedWholesale = 321; ConflictCount = 0; NotInAmeen = 0; Mismatches = 0; Missing = 0; PricesFingerprint = "bbb"; TaskInfoJson = $enabledTask }
   Assert 'أسعار جديدة: outcome=applied' ($r.Payload.summary.outcome -eq 'applied')
   Assert 'أسعار جديدة: prices_changed=true' ($r.Payload.summary.prices_changed -eq $true)
+
+  # ٣ب) «نجاح» بلا إثبات كامل ⇒ verify_failed، ولا يُحسب نجاحاً ولا يغيّر بصمة آخر نجاح
+  $r = Invoke-Publisher @{ Mode = "Attempt"; Outcome = "applied"; Now = "2026-10-18T08:42:00Z"; AppliedWholesale = 321; Mismatches = 0; Missing = 0; PricesFingerprint = "ccc"; TaskInfoJson = $enabledTask }
+  Assert 'نجاح بلا اتصال مثبت ⇒ verify_failed' ($r.Payload.summary.outcome -eq 'verify_failed' -and $r.Payload.summary.message -like 'unproven success*')
+  Assert 'نجاح بلا إثبات لا يغيّر آخر نجاح' ((IsoOf $r.Payload.summary.last_success_at) -eq '2026-10-18T08:40:00')
+  $r = Invoke-Publisher @{ Mode = "Attempt"; Outcome = "applied"; Now = "2026-10-18T08:43:00Z"; AmeenContact = $true; AppliedWholesale = 321; Mismatches = 0; PricesFingerprint = "ccc"; TaskInfoJson = $enabledTask }
+  Assert 'نجاح بلا نتيجة فحص ⇒ verify_failed' ($r.Payload.summary.outcome -eq 'verify_failed')
 
   # ٤) فشل الاتصال: آخر نجاح يبقى، وآخر فشل يُسجّل، ولا وقت اتصال
   $r = Invoke-Publisher @{ Mode = "Attempt"; Outcome = "ameen_unreachable"; StageFailed = "connect"; Now = "2026-10-18T08:45:00Z"; PricesFingerprint = "bbb"; Message = "A network-related error"; TaskInfoJson = $enabledTask }

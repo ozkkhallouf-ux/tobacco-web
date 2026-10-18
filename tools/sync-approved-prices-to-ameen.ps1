@@ -2,7 +2,7 @@
 # sync-approved-prices-to-ameen.ps1
 # يسحب الأسعار من Supabase ويطبّقها على قاعدة بيانات الأمين
 #
-# نبض المزامنة (2026-10-18): كل تشغيل ينشر صفاً ameen_price_sync_heartbeat عبر
+# نبض المزامنة (2026-10-18): كل تشغيل ينشر صفاً في price_sync_heartbeats (proposed/16) عبر
 # publish-price-sync-heartbeat.ps1 — نجاحاً أو فشلاً — كي لا يتقادم آخر «ok» بصمت.
 # النبض best-effort: لا يغيّر رموز الخروج ولا تنبيهات تيليغرام ولا ameen_price_sync_status.
 # التوثيق: docs/ai/topics/price-sync-heartbeat.md
@@ -126,7 +126,8 @@ if ($machineResult.Success) {
     $heartbeat.Mismatches = $mismatchCount
     $heartbeat.Missing = $missingCount
     $partial = ([int]$heartbeat['ConflictCount'] -gt 0) -or ([int]$heartbeat['NotInAmeen'] -gt 0)
-    $heartbeatOutcome = if ($status -ne "ok") { "verify_mismatch" } elseif ($partial) { "applied_with_conflicts" } else { "applied" }
+    # تطبيق بلا سطر PRICE_APPLY مقروء لا يُعدّ وصولاً مثبتاً للأسعار.
+    $heartbeatOutcome = if ($status -ne "ok") { "verify_mismatch" } elseif (-not $applyResult.Success) { "apply_failed" } elseif ($partial) { "applied_with_conflicts" } else { "applied" }
     Send-PriceSyncHeartbeat @{ Outcome = $heartbeatOutcome }
     & "$PSScriptRoot\publish-price-sync-status.ps1" -Status $status `
         -WholesaleMatched $wholesaleMatched -RetailMatched $retailMatched `

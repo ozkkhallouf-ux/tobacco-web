@@ -229,6 +229,37 @@ test("التوقيت بتوقيت دمشق (UTC+3)، والتاريخ يظهر �
   assert.equal(formatDamascusTime(null, NOW), "—");
 });
 
+test("received_at (ساعة الخادم) يتقدّم على طوابع العميل: طابع مزوَّر حديث لا يُخفي التقادم", () => {
+  const row = attempt(1, "applied");
+  row.received_at = ago(60);
+  const health = classify([row, probe(1, {})], { now: NOW });
+  assert.equal(health.state, STATES.STALE);
+  assert.equal(health.lastAttemptAt.toISOString(), ago(60));
+});
+
+test("last_success_at المعلن لا يتقدّم على زمن الصف نفسه", () => {
+  const row = attempt(30, "verify_mismatch", { last_success_at: ago(-120), verify: { mismatches: 2, missing: 0 } });
+  row.received_at = ago(30);
+  const health = classify([row], { now: NOW });
+  assert.ok(health.lastSuccessAt <= new Date(ago(30)), `lastSuccessAt=${health.lastSuccessAt?.toISOString()}`);
+});
+
+for (const [name, extra] of [
+  ["بلا اتصال مثبت بالأمين", { ameen_contact_at: null }],
+  ["بلا نتيجة فحص", { verify: {} }],
+  ["فحص بفروق", { verify: { mismatches: 3, missing: 0 } }],
+  ["بلا تطبيق فعلي", { applied_wholesale: 0 }],
+  ["أرقام فحص نصية", { verify: { mismatches: "0", missing: "0" } }],
+  ["مع تعارض", { conflict_count: 2 }]
+]) {
+  test(`نجاح ${name} ⇒ FAILED (unproven_success) لا HEALTHY`, () => {
+    const health = classify([attempt(2, "applied", extra), probe(1, {})], { now: NOW });
+    assert.equal(health.state, STATES.FAILED);
+    assert.equal(health.reason, "unproven_success");
+    assert.equal(health.lastSuccessAt, null);
+  });
+}
+
 test("لا اعتماد على قاعدة الأمين: المصنِّف لا يحوي SQL ولا كتابة ولا شبكة", () => {
   const source = readFileSync("src/price-sync-health.js", "utf8").replace(/\/\/.*$/gm, "");
   assert.doesNotMatch(source, /\b(fetch|XMLHttpRequest|insert|update|delete)\s*\(/i);
@@ -240,7 +271,8 @@ test("الناشر على Windows: قراءة Task Scheduler فقط ولا ات�
   const code = ps.replace(/#.*$/gm, "");
   assert.doesNotMatch(code, /SqlConnection|SqlCommand|AMEEN_SQL|Enable-ScheduledTask|Disable-ScheduledTask|Start-ScheduledTask|Stop-ScheduledTask/);
   assert.match(code, /Get-ScheduledTask -TaskName \$TaskName/);
-  assert.match(code, /source = "ameen_price_sync_heartbeat"|\$source = "ameen_price_sync_heartbeat"/);
+  assert.match(code, /\$rpcName = "record_price_sync_heartbeat"/);
+  assert.doesNotMatch(code, /inventory_reports/, "النبض لا يُكتب في inventory_reports (Codex P1)");
   assert.match(code, /schema = "price-sync-heartbeat\/v1"|\$schema = "price-sync-heartbeat\/v1"/);
   const exits = [...code.matchAll(/\bexit\s+(\d+)/g)].map((m) => m[1]);
   assert.ok(exits.length > 0 && exits.every((value) => value === "0"), `رموز خروج غير الصفر: ${exits.join(",")}`);
