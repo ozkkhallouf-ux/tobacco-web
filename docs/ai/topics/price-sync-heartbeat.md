@@ -26,9 +26,9 @@
 | `tools/sync-approved-prices-to-ameen.ps1` | ينشر نبض `Attempt` في **كل** مسار خروج. رموز الخروج (1/0/1/2/3) و`ameen_price_sync_status` وتنبيهات تيليغرام القديمة **بلا تغيير** |
 | `tools/ensure-ameen-sync.ps1` (Sync Watchdog) | كتلة best-effort جديدة (3ج) تنشر `TaskProbe`. لا تضيف مشكلة، ولا تغيّر رمز الخروج، ولا ترسل تنبيهاً |
 | `supabase/proposed/16-price-sync-heartbeats.sql` (+ rollback) | الجدول المستقل ودالة الكتابة الوحيدة `record_price_sync_heartbeat(jsonb)`. **غير مطبَّق** |
-| `supabase/tests/price-sync-heartbeats-security.sql` + `scripts/check-price-sync-heartbeats-security.mjs` | اختبار أمني حي على PostgreSQL في CI (55 تأكيداً): منع التزوير، رفض النجاح بلا إثبات، الصلاحيات، والتراجع |
+| `supabase/tests/price-sync-heartbeats-security.sql` + `scripts/check-price-sync-heartbeats-security.mjs` | اختبار أمني حي على PostgreSQL في CI (62 تأكيداً، وحارس يرفض أي خادم غير محلي): منع التزوير، رفض النجاح بلا إثبات، الصلاحيات، والتراجع |
 | `src/price-sync-health.js` | مصنِّف نقي: يأخذ صفوف النبض ويعيد الحالة الخماسية والتوقيتات والأعداد ووصفاً عربياً. يُعرَّف كـ `globalThis.ozkPriceSyncHealth`، وغير محمَّل في `index.html` بعد (المرحلة الثانية) |
-| `scripts/check-price-sync-health.mjs` | 34 فحصاً للمصنِّف، وحرّاس على السكربتات (لا SQL، رموز خروج ثابتة، BOM) |
+| `scripts/check-price-sync-health.mjs` | 35 فحصاً للمصنِّف، وحرّاس على السكربتات (لا SQL، رموز خروج ثابتة، BOM) |
 | `tools/tests/Test-PriceSyncHeartbeat.ps1` | 31 فحصاً للناشر تحت PowerShell 5.1، بوضع `-DryRun` |
 | `tools/tests/Test-PriceSyncOrchestratorHeartbeat.ps1` | 14 فحصاً للمنسِّق الحقيقي مع بدائل وهمية، لكل مسار خروج |
 
@@ -40,10 +40,15 @@
 
 ### الأمن (منع تزوير HEALTHY)
 - **لا كتابة مباشرة لأي دور:** `revoke all` من `public` و`anon` و`authenticated` و`service_role`. RLS مفعّلة ومفروضة، وبلا أي سياسة INSERT أو UPDATE أو DELETE.
-- **الكتابة الوحيدة** عبر `record_price_sync_heartbeat` (SECURITY DEFINER، `search_path` مثبَّت). تقبل فقط:
-  - هوية المزامنة المعتمدة، أي `auth.uid()` = حساب المزامنة `9724dbe4-…` الذي يكتب `ameen_price_sync_status`.
-  - أو `service_role`، وهو احتياط سكربتات Windows الحالي.
-  - أي موظف أو مالك أو مستخدم آخر يُرفض بـ`42501`. `anon` لا يملك EXECUTE أصلاً.
+- **الكتابة الوحيدة** عبر `record_price_sync_heartbeat`:
+  - SECURITY DEFINER بمسار بحث فارغ `search_path = ''` وأسماء مؤهَّلة.
+  - تقبل **هوية المزامنة المعتمدة وحدها**: `auth.uid()` = حساب المزامنة `9724dbe4-…` الذي يكتب `ameen_price_sync_status` وتدقيق خليل.
+  - لا احتياط بمفتاح `service_role` (أقل الصلاحيات). والناشر لم يعد يقرأ `SUPABASE_SERVICE_KEY`.
+  - أي موظف أو مالك أو مستخدم آخر، أو توكن بلا هوية، يُرفض بـ`42501`. `anon` و`service_role` لا يملكان EXECUTE.
+- **آخر نجاح وآخر اتصال بالأمين يحسبهما الخادم:**
+  - العمودان `last_success_at` و`last_ameen_contact_at` على ساعة الخادم.
+  - يُحملان من صف المحاولة السابق تحت `pg_advisory_xact_lock`.
+  - ادعاء العميل `last_success_at` في الحمولة لا يُقدّم شيئاً، والمصنِّف يقدّم العمودين على ذاكرة الناشر.
 - **النجاح يحتاج إثباتاً على الخادم:** `applied` أو `no_changes` يُرفض (`22023`) ما لم يحمل كل ما يلي:
   - `ameen_contact_at`
   - `verify.mismatches = 0` و`verify.missing = 0` كأرقام JSON

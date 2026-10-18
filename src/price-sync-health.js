@@ -131,7 +131,7 @@
       at,
       outcome: unproven ? "unproven_success" : summary.outcome,
       stageFailed: summary.stage_failed || null,
-      ameenContactAt: toDate(summary.ameen_contact_at),
+      ameenContactAt: capAt(summary.ameen_contact_at, at),
       sentCount: toInt(summary.sent_count),
       appliedWholesale: toInt(summary.applied_wholesale),
       appliedRetail: toInt(summary.applied_retail),
@@ -140,7 +140,9 @@
       mismatches: toInt(verify.mismatches),
       missing: toInt(verify.missing),
       pricesChanged: typeof summary.prices_changed === "boolean" ? summary.prices_changed : null,
-      lastSuccessAt: unproven ? null : capAt(summary.last_success_at, at),
+      // الأعمدة المحسوبة على الخادم (proposed/16) تتقدّم على ذاكرة الناشر المحلية.
+      lastSuccessAt: unproven ? null : capAt(row && row.last_success_at !== undefined ? row.last_success_at : summary.last_success_at, at),
+      serverContactAt: capAt(row && row.last_ameen_contact_at, at),
       lastFailureAt: capAt(summary.last_failure_at, at),
       message: typeof summary.message === "string" ? summary.message : "",
       host: typeof summary.host === "string" ? summary.host : ""
@@ -219,7 +221,7 @@
       lastSuccessAt = maxDate(lastSuccessAt, attempt.lastSuccessAt);
       lastFailureAt = maxDate(lastFailureAt, attempt.lastFailureAt);
     }
-    const lastAmeenContactAt = maxDate(...attempts.map((attempt) => attempt.ameenContactAt));
+    const lastAmeenContactAt = maxDate(...attempts.map((attempt) => attempt.ameenContactAt), ...attempts.map((attempt) => attempt.serverContactAt));
 
     const health = emptyHealth(STATES.UNKNOWN, "", now);
     health.warnings = warnings;

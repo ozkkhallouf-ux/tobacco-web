@@ -15,11 +15,13 @@
 -- الضمانات:
 --   * لا كتابة مباشرة لأي دور: revoke all من public وanon وauthenticated وservice_role، وRLS مفعّلة
 --     ومفروضة (force) بلا أي سياسة INSERT/UPDATE/DELETE.
---   * الكتابة الوحيدة عبر public.record_price_sync_heartbeat(jsonb) — SECURITY DEFINER — ولا تقبل إلا:
---       - هوية المزامنة المعتمدة (auth.uid() = حساب المزامنة نفسه الذي يكتب ameen_price_sync_status
---         ومعظم مصادر الأمين: 9724dbe4-…، بنمط *_is_sync_writer القائم)، أو
---       - service_role (الاحتياط الحالي في سكربتات Windows حين لا تتوفر بيانات حساب المزامنة).
---     أي مستخدم آخر للموقع، ولو كان موظفاً أو مالكاً، يُرفض بـ 42501.
+--   * الكتابة الوحيدة عبر public.record_price_sync_heartbeat(jsonb) — SECURITY DEFINER بمسار بحث
+--     فارغ (search_path = '') وأسماء مؤهَّلة بالكامل — ولا تقبل إلا هوية المزامنة المعتمدة:
+--     auth.uid() = حساب المزامنة نفسه الذي يكتب ameen_price_sync_status وتدقيق خليل (9724dbe4-…).
+--     لا احتياط بمفتاح service_role (أقل الصلاحيات)، وأي مستخدم آخر للموقع — ولو موظفاً أو مالكاً —
+--     يُرفض بـ 42501.
+--   * آخر نجاح مثبت وآخر اتصال بالأمين يحسبهما الخادم على ساعته (last_success_at / last_ameen_contact_at)
+--     ويحملهما من الصف السابق تحت قفل استشاري، فلا يعتمد المصنِّف على ذاكرة محلية يرسلها العميل.
 --   * «النجاح» يحتاج إثباتاً على الخادم: outcome ∈ {applied, no_changes} يُرفض ما لم يحمل اتصالاً
 --     مثبتاً بالأمين (ameen_contact_at)، وفحصاً مستقلاً بلا فروق (verify.mismatches = 0 و
 --     verify.missing = 0)، وتطبيقاً فعلياً (applied_wholesale ≥ 1)، وصفر تعارض وصفر صنف مفقود.
@@ -49,14 +51,17 @@ $pre$;
 create table if not exists public.price_sync_heartbeats (
   id          bigint generated always as identity primary key,
   received_at timestamptz not null default now(),          -- ساعة الخادم؛ مصدر الحداثة الوحيد
-  writer_id   uuid,                                          -- auth.uid() لهوية المزامنة؛ null = service_role
+  writer_id   uuid not null,                                 -- auth.uid() لهوية المزامنة
   kind        text not null check (kind in ('attempt', 'task_probe')),
   host        text not null check (char_length(host) between 1 and 120),
   occurred_at timestamptz not null,                          -- ما يعلنه العميل (للعرض فقط)
   outcome     text check (outcome is null or outcome in (
                 'applied', 'no_changes', 'pull_failed', 'ameen_unreachable', 'apply_failed',
                 'verify_failed', 'verify_mismatch', 'applied_with_conflicts', 'preview_only')),
-  summary     jsonb not null check (jsonb_typeof(summary) = 'object'),
+  summary     jsonb not null check (pg_catalog.jsonb_typeof(summary) = 'object'),
+  -- محسوبان في الدالة على ساعة الخادم، ويُحملان من صف المحاولة السابق عند غياب الحدث:
+  last_success_at       timestamptz,                       -- آخر نجاح مثبت (applied/no_changes بإثبات)
+  last_ameen_contact_at timestamptz,                       -- آخر اتصال مثبت بالأمين
   constraint price_sync_heartbeats_outcome_matches_kind check ((kind = 'attempt') = (outcome is not null)),
   constraint price_sync_heartbeats_summary_size check (pg_column_size(summary) <= 16384)
 );
@@ -88,11 +93,11 @@ language sql
 stable
 set search_path = ''
 as $$
-  select (select auth.uid()) = '9724dbe4-ecb0-49f7-a6b4-12f7f73c68f3'::uuid;
+  select coalesce((select auth.uid()) = '9724dbe4-ecb0-49f7-a6b4-12f7f73c68f3'::uuid, false);
 $$;
 
-revoke all on function public.price_sync_is_sync_writer() from public, anon;
-grant execute on function public.price_sync_is_sync_writer() to authenticated, service_role;
+revoke all on function public.price_sync_is_sync_writer() from public, anon, service_role;
+grant execute on function public.price_sync_is_sync_writer() to authenticated;
 
 -- ── دالة الكتابة الوحيدة ──────────────────────────────────────────────────────────────────────
 
@@ -100,11 +105,14 @@ create or replace function public.record_price_sync_heartbeat(p_summary jsonb)
 returns bigint
 language plpgsql
 security definer
-set search_path = public, pg_temp
+set search_path = ''
 as $$
 declare
-  v_is_service boolean := coalesce((select auth.jwt()) ->> 'role', '') = 'service_role';
   v_writer     uuid    := (select auth.uid());
+  v_now        timestamptz := pg_catalog.now();
+  v_prev       record;
+  v_success    boolean := false;
+  v_contact    boolean := false;
   v_kind       text;
   v_outcome    text;
   v_host       text;
@@ -113,15 +121,15 @@ declare
   v_task       jsonb;
   v_id         bigint;
 begin
-  if not v_is_service and not public.price_sync_is_sync_writer() then
+  if not public.price_sync_is_sync_writer() then
     raise exception 'record_price_sync_heartbeat is restricted to the trusted sync identity'
       using errcode = '42501';
   end if;
 
-  if p_summary is null or jsonb_typeof(p_summary) <> 'object' then
+  if p_summary is null or pg_catalog.jsonb_typeof(p_summary) <> 'object' then
     raise exception 'heartbeat summary must be a JSON object' using errcode = '22023';
   end if;
-  if pg_column_size(p_summary) > 16384 then
+  if pg_catalog.pg_column_size(p_summary) > 16384 then
     raise exception 'heartbeat summary too large' using errcode = '22023';
   end if;
   if coalesce(p_summary ->> 'schema', '') <> 'price-sync-heartbeat/v1' then
@@ -129,11 +137,11 @@ begin
   end if;
 
   v_kind := p_summary ->> 'kind';
-  v_host := nullif(btrim(coalesce(p_summary ->> 'host', '')), '');
+  v_host := nullif(pg_catalog.btrim(coalesce(p_summary ->> 'host', '')), '');
   if v_kind not in ('attempt', 'task_probe') then
     raise exception 'unsupported heartbeat kind' using errcode = '22023';
   end if;
-  if v_host is null or char_length(v_host) > 120 then
+  if v_host is null or pg_catalog.char_length(v_host) > 120 then
     raise exception 'heartbeat host is required' using errcode = '22023';
   end if;
 
@@ -148,7 +156,7 @@ begin
   if v_occurred is null then
     raise exception 'heartbeat timestamp is required' using errcode = '22023';
   end if;
-  if v_occurred > now() + interval '5 minutes' then
+  if v_occurred > v_now + interval '5 minutes' then
     raise exception 'heartbeat timestamp is in the future' using errcode = '22023';
   end if;
 
@@ -165,41 +173,54 @@ begin
     if v_outcome in ('applied', 'no_changes') then
       v_verify := p_summary -> 'verify';
       if nullif(p_summary ->> 'ameen_contact_at', '') is null
-         or jsonb_typeof(v_verify) is distinct from 'object'
-         or (case when jsonb_typeof(v_verify -> 'mismatches') = 'number' then (v_verify ->> 'mismatches')::numeric end) is distinct from 0
-         or (case when jsonb_typeof(v_verify -> 'missing') = 'number' then (v_verify ->> 'missing')::numeric end) is distinct from 0
-         or coalesce((case when jsonb_typeof(p_summary -> 'applied_wholesale') = 'number' then (p_summary ->> 'applied_wholesale')::numeric end), 0) < 1
-         or coalesce(jsonb_typeof(p_summary -> 'conflict_count'), 'null') not in ('number', 'null')
-         or coalesce(jsonb_typeof(p_summary -> 'not_in_ameen'), 'null') not in ('number', 'null')
-         or (case when jsonb_typeof(p_summary -> 'conflict_count') = 'number' then (p_summary ->> 'conflict_count')::numeric else 0 end) <> 0
-         or (case when jsonb_typeof(p_summary -> 'not_in_ameen') = 'number' then (p_summary ->> 'not_in_ameen')::numeric else 0 end) <> 0 then
+         or pg_catalog.jsonb_typeof(v_verify) is distinct from 'object'
+         or (case when pg_catalog.jsonb_typeof(v_verify -> 'mismatches') = 'number' then (v_verify ->> 'mismatches')::numeric end) is distinct from 0
+         or (case when pg_catalog.jsonb_typeof(v_verify -> 'missing') = 'number' then (v_verify ->> 'missing')::numeric end) is distinct from 0
+         or coalesce((case when pg_catalog.jsonb_typeof(p_summary -> 'applied_wholesale') = 'number' then (p_summary ->> 'applied_wholesale')::numeric end), 0) < 1
+         or coalesce(pg_catalog.jsonb_typeof(p_summary -> 'conflict_count'), 'null') not in ('number', 'null')
+         or coalesce(pg_catalog.jsonb_typeof(p_summary -> 'not_in_ameen'), 'null') not in ('number', 'null')
+         or (case when pg_catalog.jsonb_typeof(p_summary -> 'conflict_count') = 'number' then (p_summary ->> 'conflict_count')::numeric else 0 end) <> 0
+         or (case when pg_catalog.jsonb_typeof(p_summary -> 'not_in_ameen') = 'number' then (p_summary ->> 'not_in_ameen')::numeric else 0 end) <> 0 then
         raise exception 'success outcome requires proof that prices reached Ameen'
           using errcode = '22023';
       end if;
+      v_success := true;
     end if;
+    v_contact := nullif(p_summary ->> 'ameen_contact_at', '') is not null;
   else
     v_task := p_summary -> 'task';
-    if jsonb_typeof(v_task) is distinct from 'object'
-       or jsonb_typeof(v_task -> 'enabled') is distinct from 'boolean'
-       or jsonb_typeof(v_task -> 'exists') is distinct from 'boolean' then
+    if pg_catalog.jsonb_typeof(v_task) is distinct from 'object'
+       or pg_catalog.jsonb_typeof(v_task -> 'enabled') is distinct from 'boolean'
+       or pg_catalog.jsonb_typeof(v_task -> 'exists') is distinct from 'boolean' then
       raise exception 'task probe requires task.exists and task.enabled' using errcode = '22023';
     end if;
   end if;
 
-  insert into public.price_sync_heartbeats (writer_id, kind, host, occurred_at, outcome, summary)
-  values (case when v_is_service then null else v_writer end, v_kind, v_host, v_occurred, v_outcome, p_summary)
+  -- تسلسل الكتّاب: الحمل من الصف السابق يجب ألا يتسابق.
+  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext('public.price_sync_heartbeats'));
+  select h.last_success_at, h.last_ameen_contact_at into v_prev
+    from public.price_sync_heartbeats h
+   where h.kind = 'attempt'
+   order by h.received_at desc, h.id desc
+   limit 1;
+
+  insert into public.price_sync_heartbeats
+    (writer_id, kind, host, occurred_at, outcome, summary, last_success_at, last_ameen_contact_at)
+  values (v_writer, v_kind, v_host, v_occurred, v_outcome, p_summary,
+          case when v_success then v_now else v_prev.last_success_at end,
+          case when v_contact then v_now else v_prev.last_ameen_contact_at end)
   returning id into v_id;
 
-  delete from public.price_sync_heartbeats where received_at < now() - interval '30 days';
+  delete from public.price_sync_heartbeats where received_at < v_now - interval '30 days';
 
   return v_id;
 end;
 $$;
 
-revoke all on function public.record_price_sync_heartbeat(jsonb) from public, anon;
-grant execute on function public.record_price_sync_heartbeat(jsonb) to authenticated, service_role;
+revoke all on function public.record_price_sync_heartbeat(jsonb) from public, anon, service_role;
+grant execute on function public.record_price_sync_heartbeat(jsonb) to authenticated;
 
 comment on function public.record_price_sync_heartbeat(jsonb) is
-  'proposed/16: يسجّل نبض مزامنة الأسعار. هوية المزامنة أو service_role فقط؛ النجاح يحتاج إثبات وصول الأسعار للأمين.';
+  'proposed/16: يسجّل نبض مزامنة الأسعار. هوية المزامنة فقط؛ النجاح يحتاج إثبات وصول الأسعار للأمين.';
 
 notify pgrst, 'reload schema';

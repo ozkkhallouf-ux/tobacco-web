@@ -12,7 +12,7 @@
 #
 # لا inventory_reports (قرار المالك، خيار B): ذلك الجدول يكتبه أي موظف فيُزوَّر النبض، وعليه
 # trigger «تقرير الجرد اليومي» الذي كان سيُطلق إشعاراً كاذباً (Codex P1 على #332).
-# الدالة تقبل هوية المزامنة المعتمدة (TOBACCO_SYNC_EMAIL) أو service_role فقط، وترفض أي «نجاح»
+# الدالة تقبل هوية المزامنة المعتمدة (TOBACCO_SYNC_EMAIL) وحدها، وترفض أي «نجاح»
 # بلا إثبات وصول الأسعار للأمين.
 #
 # قراءة فقط على Windows Task Scheduler (Get-ScheduledTask). لا اتصال بالأمين هنا إطلاقاً.
@@ -139,25 +139,18 @@ function Get-SupabaseAuth {
         }
     }
     $url = if ($env:SUPABASE_URL) { $env:SUPABASE_URL.TrimEnd('/') } else { "https://dyxbirfpxeocqffnfdeb.supabase.co" }
-    # هوية المزامنة المعتمدة أولاً (الدالة تتحقق منها على الخادم)؛ ومفتاح الخدمة احتياط فقط
-    # كما في publish-price-sync-status.ps1. أي حساب آخر ترفضه الدالة بـ 42501.
-    $apiKey = $null; $token = $null
-    if (-not ($env:TOBACCO_SUPABASE_PUBLIC_KEY -and $env:TOBACCO_SYNC_EMAIL -and $env:TOBACCO_SYNC_PASSWORD)) {
-        $apiKey = $env:SUPABASE_SERVICE_KEY
-        $token = $apiKey
-    }
-    if (-not $apiKey) {
-        $apiKey = $env:TOBACCO_SUPABASE_PUBLIC_KEY
-        $email = $env:TOBACCO_SYNC_EMAIL
-        $pass = $env:TOBACCO_SYNC_PASSWORD
-        if (-not ($apiKey -and $email -and $pass)) { throw "missing_supabase_credentials" }
-        $authBody = @{ email = $email; password = $pass } | ConvertTo-Json
-        $auth = Invoke-RestMethod -Method Post -Uri "$url/auth/v1/token?grant_type=password" `
-            -Headers @{ apikey = $apiKey } -ContentType "application/json; charset=utf-8" `
-            -Body ([Text.Encoding]::UTF8.GetBytes($authBody)) -TimeoutSec 20
-        $token = $auth.access_token
-        if (-not $token) { throw "authentication_failed" }
-    }
+    # هوية المزامنة المعتمدة وحدها (أقل الصلاحيات): الدالة على الخادم لا تقبل غيرها، ولا احتياط
+    # بمفتاح الخدمة. غياب بيانات الحساب = فشل نشر صريح (best-effort، لا يكسر المزامنة).
+    $apiKey = $env:TOBACCO_SUPABASE_PUBLIC_KEY
+    $email = $env:TOBACCO_SYNC_EMAIL
+    $pass = $env:TOBACCO_SYNC_PASSWORD
+    if (-not ($apiKey -and $email -and $pass)) { throw "missing_sync_identity_credentials" }
+    $authBody = @{ email = $email; password = $pass } | ConvertTo-Json
+    $auth = Invoke-RestMethod -Method Post -Uri "$url/auth/v1/token?grant_type=password" `
+        -Headers @{ apikey = $apiKey } -ContentType "application/json; charset=utf-8" `
+        -Body ([Text.Encoding]::UTF8.GetBytes($authBody)) -TimeoutSec 20
+    $token = $auth.access_token
+    if (-not $token) { throw "authentication_failed" }
     return @{ Url = $url; ApiKey = $apiKey; Token = $token }
 }
 

@@ -5,6 +5,18 @@
 \set ON_ERROR_STOP 1
 \set QUIET 1
 
+-- حارس: لا يعمل إلا على خادم محلي (loopback أو socket) وقاعدة فارغة بلا جداول الإنتاج.
+do $guard$
+begin
+  if inet_server_addr() is not null and not (inet_server_addr() << '127.0.0.0/8'::inet or inet_server_addr() = '::1'::inet) then
+    raise exception 'price sync heartbeat security test refuses a non-loopback server';
+  end if;
+  if to_regclass('public.inventory_reports') is not null or to_regclass('public.approved_price_items') is not null then
+    raise exception 'refusing: database has production tables';
+  end if;
+end
+$guard$;
+
 -- ── بيئة Supabase المصغّرة ─────────────────────────────────────────────────────────────────────
 do $roles$
 begin
@@ -45,7 +57,8 @@ insert into pg_temp.ids values
   ('owner',   '{"sub":"22222222-2222-2222-2222-222222222222","role":"authenticated","email":"owner@example.test","app_metadata":{"role":"owner"}}', 'authenticated'),
   ('user',    '{"sub":"33333333-3333-3333-3333-333333333333","role":"authenticated","email":"customer@example.test"}', 'authenticated'),
   ('anon',    '{"role":"anon"}', 'anon'),
-  ('service', '{"role":"service_role"}', 'service_role');
+  ('service', '{"role":"service_role"}', 'service_role'),
+  ('nosub',   '{"role":"authenticated"}', 'authenticated');
 
 -- ── تطبيق الهجرة المقترحة ─────────────────────────────────────────────────────────────────────
 \i :migration
@@ -143,10 +156,29 @@ begin
   perform pg_temp.expect('success with not_in_ameen rejected', pg_temp.try_as('sync', pg_temp.rpc(jsonb_set(good, '{not_in_ameen}', '1'))), '22023');
   perform pg_temp.expect('success with string conflicts rejected', pg_temp.try_as('sync', pg_temp.rpc(jsonb_set(good, '{conflict_count}', '"x"'))), '22023');
 
-  -- ٥) نتائج الفشل تُقبل بلا إثبات (هي نفسها دليل العطل)
+  -- ٤ب) آخر نجاح وآخر اتصال بالأمين يحسبهما الخادم: نجاح مثبت يضبطهما على ساعة الخادم
+  perform pg_temp.expect('server sets last_success_at on proven success',
+    (select (last_success_at = now())::text from public.price_sync_heartbeats order by id desc limit 1), 'true');
+  perform pg_temp.expect('server sets last_ameen_contact_at on proven success',
+    (select (last_ameen_contact_at = now())::text from public.price_sync_heartbeats order by id desc limit 1), 'true');
+  -- نقل الصفوف للماضي لمحاكاة مرور الوقت (superuser)
+  update public.price_sync_heartbeats set received_at = received_at - interval '2 hours',
+    last_success_at = last_success_at - interval '2 hours', last_ameen_contact_at = last_ameen_contact_at - interval '2 hours';
+
+  -- ٥) نتائج الفشل تُقبل بلا إثبات (هي نفسها دليل العطل)، ولا تقدّم آخر نجاح ولو ادّعاه العميل
   perform pg_temp.expect('failure outcome accepted without proof',
     pg_temp.try_as('sync', pg_temp.rpc(jsonb_build_object('schema','price-sync-heartbeat/v1','kind','attempt','host','OZK2026',
-      'attempt_finished_at', now()::text, 'outcome','ameen_unreachable','stage_failed','connect'))), 'OK');
+      'attempt_finished_at', now()::text, 'outcome','ameen_unreachable','stage_failed','connect',
+      'last_success_at', now()::text))), 'OK');
+  perform pg_temp.expect('failure carries last_success_at forward (client claim ignored)',
+    (select (last_success_at = now() - interval '2 hours')::text from public.price_sync_heartbeats order by id desc limit 1), 'true');
+  perform pg_temp.expect('failure without contact carries last_ameen_contact_at forward',
+    (select (last_ameen_contact_at = now() - interval '2 hours')::text from public.price_sync_heartbeats order by id desc limit 1), 'true');
+  perform pg_temp.expect('verify_mismatch with contact accepted',
+    pg_temp.try_as('sync', pg_temp.rpc(jsonb_set(jsonb_set(good, '{outcome}', '"verify_mismatch"'), '{verify,mismatches}', '3'))), 'OK');
+  perform pg_temp.expect('mismatch updates contact but not success',
+    (select (last_ameen_contact_at = now() and last_success_at = now() - interval '2 hours')::text
+       from public.price_sync_heartbeats order by id desc limit 1), 'true');
 
   -- ٦) مدخلات غير صالحة
   perform pg_temp.expect('future timestamp rejected', pg_temp.try_as('sync', pg_temp.rpc(jsonb_set(good, '{attempt_finished_at}', to_jsonb((now() + interval '1 hour')::text)))), '22023');
@@ -166,10 +198,9 @@ begin
   perform pg_temp.expect('staff cannot forge task probe', pg_temp.try_as('staff', pg_temp.rpc(jsonb_build_object('schema','price-sync-heartbeat/v1','kind','task_probe','host','OZK2026',
       'probed_at', now()::text, 'task', jsonb_build_object('exists', true, 'enabled', true, 'state', 'Ready')))), '42501');
 
-  -- ٨) service_role (احتياط سكربتات Windows): مسموح عبر الدالة، وwriter_id = null
-  perform pg_temp.expect('service_role rpc accepted', pg_temp.try_as('service', pg_temp.rpc(good)), 'OK');
-  perform pg_temp.expect('service_role writer_id is null',
-    (select coalesce(writer_id::text, 'null') from public.price_sync_heartbeats order by id desc limit 1), 'null');
+  -- ٨) أقل الصلاحيات: لا احتياط بـ service_role، وحتى توكن «authenticated» بلا هوية مرفوض
+  perform pg_temp.expect('service_role rpc denied', pg_temp.try_as('service', pg_temp.rpc(good)), '42501');
+  perform pg_temp.expect('authenticated without sub denied', pg_temp.try_as('nosub', pg_temp.rpc(good)), '42501');
 
   -- ٩) لا تعديل ولا حذف لأحد
   perform pg_temp.expect('staff update denied',  pg_temp.try_as('staff', 'update public.price_sync_heartbeats set outcome = ''applied'''), '42501');
@@ -194,7 +225,7 @@ do $$ begin perform pg_temp.expect('anon cannot read', pg_temp.try_as('anon', 's
 
 -- ١١) الاحتفاظ 30 يوماً
 insert into public.price_sync_heartbeats (received_at, writer_id, kind, host, occurred_at, outcome, summary)
-values (now() - interval '40 days', null, 'attempt', 'old', now() - interval '40 days', 'applied', '{}'::jsonb);
+values (now() - interval '40 days', '9724dbe4-ecb0-49f7-a6b4-12f7f73c68f3', 'attempt', 'old', now() - interval '40 days', 'applied', '{}'::jsonb);
 do $$ begin
   perform pg_temp.expect('retention trigger call', pg_temp.try_as('sync', pg_temp.rpc((select summary from pg_temp.fx where name = 'good'))), 'OK');
   perform pg_temp.expect('rows older than 30 days pruned', (select count(*) from public.price_sync_heartbeats where host = 'old')::text, '0');
@@ -206,7 +237,8 @@ declare v_conf text[]; v_def boolean;
 begin
   select proconfig, prosecdef into v_conf, v_def from pg_proc where oid = 'public.record_price_sync_heartbeat(jsonb)'::regprocedure;
   perform pg_temp.expect('rpc is security definer', v_def::text, 'true');
-  perform pg_temp.expect('rpc has fixed search_path', (v_conf @> array['search_path=public, pg_temp'])::text, 'true');
+  perform pg_temp.expect('rpc has fixed search_path', (v_conf @> array['search_path=""'])::text, 'true');
+  perform pg_temp.expect('service_role has no execute privilege', has_function_privilege('service_role', 'public.record_price_sync_heartbeat(jsonb)', 'execute')::text, 'false');
   perform pg_temp.expect('anon has no execute privilege', has_function_privilege('anon', 'public.record_price_sync_heartbeat(jsonb)', 'execute')::text, 'false');
   perform pg_temp.expect('rls forced', (select relforcerowsecurity::text from pg_class where oid = 'public.price_sync_heartbeats'::regclass), 'true');
   perform pg_temp.expect('no insert policy exists', (select count(*)::text from pg_policies where tablename = 'price_sync_heartbeats' and cmd <> 'SELECT'), '0');

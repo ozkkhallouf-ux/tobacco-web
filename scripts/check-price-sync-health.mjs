@@ -260,6 +260,17 @@ for (const [name, extra] of [
   });
 }
 
+test("أعمدة الخادم last_success_at/last_ameen_contact_at تتقدّم على ذاكرة الناشر", () => {
+  const row = attempt(3, "ameen_unreachable", { last_success_at: ago(4) });
+  row.received_at = ago(3);
+  row.last_success_at = ago(200);
+  row.last_ameen_contact_at = ago(150);
+  const health = classify([row, probe(1, {})], { now: NOW });
+  assert.equal(health.state, STATES.FAILED);
+  assert.equal(health.lastSuccessAt.toISOString(), ago(200));
+  assert.equal(health.lastAmeenContactAt.toISOString(), ago(150));
+});
+
 test("لا اعتماد على قاعدة الأمين: المصنِّف لا يحوي SQL ولا كتابة ولا شبكة", () => {
   const source = readFileSync("src/price-sync-health.js", "utf8").replace(/\/\/.*$/gm, "");
   assert.doesNotMatch(source, /\b(fetch|XMLHttpRequest|insert|update|delete)\s*\(/i);
