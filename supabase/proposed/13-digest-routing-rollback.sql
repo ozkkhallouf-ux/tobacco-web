@@ -13,7 +13,7 @@ begin
   end if;
   -- لا نكتب فوق تعديل لاحق: الدوال الثلاث يجب أن تطابق جسم 13 بالضبط (وإلا يُوقَف التراجع ويُراجَع يدوياً)
   if md5((select prosrc from pg_proc where oid = to_regprocedure('private.notify_telegram_dispatch(text,text,text,integer,jsonb)'))) <> 'f7bee114d77cecea3bf9fceceb24425a'
-     or md5((select prosrc from pg_proc where oid = to_regprocedure('private.ops_event_route(text,text)'))) <> 'f34f129268ee375c10006f004de2d00e'
+     or md5((select prosrc from pg_proc where oid = to_regprocedure('private.ops_event_route(text,text)'))) <> '7228700c82cfc2948563abfc3d2025d1'
      or md5((select prosrc from pg_proc where oid = to_regprocedure('private.close_stale_ops_events(timestamptz,interval)'))) <> '2c92ab4fdc95ce1696cb4d69920569c7'
      or md5((select prosrc from pg_proc where oid = to_regprocedure('private.ops_event_silence(text)'))) is distinct from '2796ac5d112c557951d8fd3c837de6f7'
      or md5((select prosrc from pg_proc where oid = to_regprocedure('private.absorb_digest_alert(text,text,text)'))) is distinct from 'b5b3a7d5f34083664813d25e96a043e8'
