@@ -156,12 +156,26 @@ for (const [name, options] of [
 
 await test("الشريط يهرّب كل النصوص (لا حقن HTML)", () => {
   const html = ui.renderHtml({ state: "FAILED", level: "error", icon: "❌", title: "<img src=x onerror=alert(1)>", detail: "\"'&", facts: [{ label: "<b>", value: "<script>x</script>" }] });
-  assert.doesNotMatch(html, /<img|<script|<b>/);
+  // فحص بلا تعبير نمطي لوسوم HTML: نخفض الحالة ونبحث عن الوسم الخام (CodeQL js/bad-tag-filter).
+  const lower = html.toLowerCase();
+  for (const tag of ["<img", "<script", "<b>"]) assert.ok(!lower.includes(tag), `وسم خام ${tag} في الشريط`);
   assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;/);
   assert.match(html, /role="status"/);
   assert.match(html, /data-state="FAILED"/);
   assert.match(html, /class="price-sync-status is-failed"/);
 });
+
+for (const payload of ["<script>alert(1)</script>", "<SCRIPT>alert(1)</SCRIPT>", "<ScRiPt>alert(1)</sCrIpT>"]) {
+  await test(`تهريب ${payload.slice(0, 8)} بأي حالة أحرف في كل حقول الشريط`, () => {
+    const html = ui.renderHtml({ state: payload, level: "error", icon: payload, title: payload, detail: payload, facts: [{ label: payload, value: payload }] });
+    const lower = html.toLowerCase();
+    assert.ok(!lower.includes("<script"), "وسم script خام بعد خفض الحالة");
+    assert.ok(!lower.includes("</script"), "وسم إغلاق script خام بعد خفض الحالة");
+    const escaped = payload.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const occurrences = html.split(escaped).length - 1;
+    assert.ok(occurrences >= 5, `النص المهرّب يظهر ${occurrences} مرات فقط`);
+  });
+}
 
 await test("كل حالة تأخذ صنفها البصري", () => {
   const map = { ok: "is-healthy", warn: "is-stale", error: "is-failed", unknown: "is-unknown" };

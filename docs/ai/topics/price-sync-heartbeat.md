@@ -151,7 +151,7 @@
 | `src/app.js` (`savePricingItem`) | بعد الحفظ الفعلي: إن لم تكن الحالة HEALTHY يُلحق تحذير برسالة الحفظ (`warning`). لا منع للحفظ |
 | `src/styles.css` | `.price-sync-status` بأربعة أصناف (`is-healthy`/`is-stale`/`is-failed`/`is-unknown`) للوضعين الداكن والفاتح، و`.message-panel.warning` |
 | `index.html` و`public/service-worker.js` | تحميل `price-sync-health.js` قبل `app.js` و`price-sync-status.js` بعده، وتخزينهما في الكاش |
-| `scripts/check-price-sync-status.mjs` | 20 فحصاً وظيفياً وأمنياً بلا متصفح |
+| `scripts/check-price-sync-status.mjs` | 23 فحصاً وظيفياً وأمنياً بلا متصفح، منها تهريب `<script>` بكل حالات الأحرف |
 | `scripts/check-price-sync-status-ui.mjs` | Playwright على الصفحة الحقيقية: 1280 و390، داكن وفاتح (40 تأكيداً) |
 
 **القراءة:**
