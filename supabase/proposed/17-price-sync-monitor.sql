@@ -31,7 +31,8 @@
 --   * فشل إدراج رسالة تيليغرام يُفشل الدورة كلها (لا تُلتقط الاستثناءات)، فتُرجَع الحالة وتُعاد المحاولة
 --     في الدقيقة التالية دون ضياع التنبيه. وتكرار فشل الدورة تكشفه مراقبة cron القائمة في
 --     private.monitor_project_tasks (cron:price-sync-monitor) — فشل المراقب منفصل عن فشل المزامنة.
---   * مفتاح dedupe لكل حادثة: «price-sync-outage:<id>:open|recovered» بنافذة أسبوع (حماية ثانية).
+--   * مفتاح dedupe لكل حادثة: «price-sync-outage:<incident_key UUID>:open|recovered» بنافذة أسبوع (حماية
+--     ثانية). UUID لا معرّف تسلسلي، فلا يصطدم بمفتاح حادثة سابقة بعد تراجع وإعادة تطبيق.
 --
 -- منع التكرار مع المراقب القائم:
 --   private.monitor_project_tasks يراقب «price-sync» من ameen_price_sync_status (يُكتب بعد النجاح فقط)
@@ -85,6 +86,9 @@ create table if not exists private.price_sync_monitor_state (
 
 create table if not exists private.price_sync_incidents (
   id               bigint generated always as identity primary key,
+  -- مفتاح الحادثة في dedupe: UUID لا يتكرر بعد تراجع وإعادة تطبيق (الهوية id تبدأ من 1 من جديد
+  -- بينما يبقى telegram_outbox، فيصطدم «price-sync-outage:1:open» القديم ويُكتم التنبيه — Codex P1).
+  incident_key     uuid not null default gen_random_uuid() unique,
   opened_at        timestamptz not null,
   opened_state     text not null,
   opened_reason    text,
@@ -330,7 +334,7 @@ begin
       -- بلا التقاط استثناء: فشل الإدراج يُرجع الدورة كلها فتُعاد المحاولة في الدقيقة التالية.
       perform public.notify_telegram('price_sync_outage',
         private.price_sync_monitor_alert_text(a.state, a.reason, a.last_success_at, p_now, p_now, coalesce(a.host, cfg.device_label)),
-        'price-sync-outage:' || inc.id || ':open', 10080, null);
+        'price-sync-outage:' || inc.incident_key || ':open', 10080, null);
       v_result := 'alert_sent';
     else
       v_result := 'healthy';
@@ -344,7 +348,7 @@ begin
       update private.price_sync_incidents set alert_sent_at = p_now where id = inc.id;
       perform public.notify_telegram('price_sync_outage',
         private.price_sync_monitor_alert_text(a.state, a.reason, a.last_success_at, inc.opened_at, p_now, coalesce(a.host, cfg.device_label)),
-        'price-sync-outage:' || inc.id || ':open', 10080, null);
+        'price-sync-outage:' || inc.incident_key || ':open', 10080, null);
       v_result := 'baseline_escalated';
     else
       v_result := 'incident_ongoing';
@@ -357,7 +361,7 @@ begin
     if inc.alert_sent_at is not null then
       perform public.notify_telegram('price_sync_recovered',
         private.price_sync_monitor_recovery_text(a.last_success_at, a.applied_wholesale, a.applied_retail, a.conflicts, inc.opened_at, p_now),
-        'price-sync-outage:' || inc.id || ':recovered', 10080, null);
+        'price-sync-outage:' || inc.incident_key || ':recovered', 10080, null);
       v_result := 'recovery_sent';
     else
       v_result := 'closed_silent';

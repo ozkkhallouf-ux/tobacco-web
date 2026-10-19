@@ -195,7 +195,7 @@ begin
   perform pg_temp.expect_like('alert state', msg, '%الحالة: STALE%');
   perform pg_temp.expect_like('alert monitor and device', msg, '%المراقبة: Supabase%الجهاز: OZK2026');
   perform pg_temp.expect('alert has no HTML', (msg ~ '<[a-zA-Z/]')::text, 'false');
-  perform pg_temp.expect('alert dedupe key per incident', ((select dedupe_key from public.telegram_outbox where event_type = 'price_sync_outage') ~ '^price-sync-outage:[0-9]+:open$')::text, 'true');
+  perform pg_temp.expect('alert dedupe key per incident', ((select dedupe_key from public.telegram_outbox where event_type = 'price_sync_outage') ~ '^price-sync-outage:[0-9a-f-]{36}:open$')::text, 'true');
   -- نبضة فاشلة متأخرة لا تعلن تعافياً.
   perform pg_temp.attempt(121, 'pull_failed');
   perform pg_temp.expect('late failed heartbeat keeps incident', pg_temp.tick(122), 'incident_ongoing');
@@ -339,5 +339,23 @@ do $$ begin
   perform pg_temp.expect('rollback keeps heartbeats table', (to_regclass('public.price_sync_heartbeats') is not null)::text, 'true');
 end $$;
 \i :migration
+
+-- ── ١٢) تراجع ثم إعادة تطبيق مع بقاء telegram_outbox (Codex P1): الحادثة الجديدة تُنبَّه فعلاً ─────
+do $$ begin
+  perform pg_temp.expect('outbox kept across rollback/reapply', (select (count(*) > 0)::text from public.telegram_outbox where dedupe_key like 'price-sync-outage:%'), 'true');
+  delete from public.price_sync_heartbeats;
+  -- مفتاح تثبيت سابق بمعرّف تسلسلي (كما كان قبل الإصلاح) ما زال داخل نافذة الأسبوع.
+  insert into public.telegram_outbox (event_type, message, dedupe_key) values ('price_sync_outage', 'old', 'price-sync-outage:1:open');
+  perform pg_temp.attempt(0, 'applied');
+  perform pg_temp.expect('reapplied: baseline', pg_temp.tick(0.5), 'baseline');
+  perform pg_temp.expect('reapplied: new outage alerts', pg_temp.tick(16), 'alert_sent');
+  perform pg_temp.expect('new incident message really queued (no dedupe collision)',
+    (select count(*)::text from public.telegram_outbox o join private.price_sync_incidents i
+       on o.dedupe_key = 'price-sync-outage:' || i.incident_key || ':open'
+     where i.closed_at is null and o.message like '🔴 OZK |%'), '1');
+  perform pg_temp.expect('a real outage message was queued after reapply',
+    (select count(*)::text from public.telegram_outbox where event_type = 'price_sync_outage' and message like '🔴 OZK |%' and created_at = now()
+       and dedupe_key <> 'price-sync-outage:1:open'), '1');
+end $$;
 
 select 'PRICE_SYNC_MONITOR_OK';

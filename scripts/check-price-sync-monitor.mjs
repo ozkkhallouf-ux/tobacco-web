@@ -33,6 +33,8 @@ assert.doesNotMatch(code, /<[a-z\/][^>]*>/i, "لا HTML في الرسائل");
 assert.doesNotMatch(code, /telegram_bot_token|api\.telegram\.org|vault\.|net\.http_post/i, "لا أسرار ولا إرسال مباشر: notify_telegram فقط");
 assert.match(code, /public\.notify_telegram\('price_sync_outage'/);
 assert.match(code, /public\.notify_telegram\('price_sync_recovered'/);
+assert.match(code, /incident_key\s+uuid not null default gen_random_uuid\(\) unique/, "مفتاح حادثة لا يتكرر بعد تراجع وإعادة تطبيق");
+assert.doesNotMatch(code, /'price-sync-outage:' \|\| inc\.id/, "لا معرّف تسلسلي في مفتاح dedupe");
 assert.doesNotMatch(code, /exception\s+when/i, "فشل إدراج الرسالة يُرجع الدورة كلها (لا التقاط)");
 assert.match(code, /revoke all on function private\.price_sync_monitor_tick\(timestamptz\) from public, anon, authenticated, service_role;/);
 assert.doesNotMatch(code, /grant\s+(execute|select|insert|update|delete|all)[^;]*price_sync_(monitor|incidents)/i, "لا منح لأي دور");
@@ -44,7 +46,7 @@ assert.match(rollback, /set enabled = true where task_key = 'price-sync'/);
 assert.doesNotMatch(rollback.replace(/--.*$/gm, ""), /price_sync_heartbeats|notify_telegram/);
 
 // التوجيه في الحزم 12/13 (غير مطبَّقة): نوع الحدث ومفتاحه لا يقعان تحت قواعد «الملخص».
-const dedupeOpen = "price-sync-outage:1:open";
+const dedupeOpen = "price-sync-outage:3f0c2a1e-7b9d-4c1e-9a55-0d6b2c8e4f10:open";
 for (const rule of [/^price-sync:/, /^winfail:/, /^project-cron-failure:/, /^(price-sync:|winfail:|project-cron-failure:)/]) {
   assert.ok(!rule.test(dedupeOpen), `مفتاح الحادثة يطابق قاعدة ملخص ${rule}`);
 }
