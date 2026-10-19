@@ -4362,7 +4362,10 @@ async function savePricingItem(form) {
     const belowCostLabel = (savedCostUnit2 > 0 && wholesaleProvided && enteredWholesale < savedCostUnit2)
       ? ` · ℹ️ تحت التكلفة (${formatMoney(savedCostUnit2)}$ لل${unit2Name || "كرتونة"}) — حُفظ كما هو`
       : "";
-    setNotice("success", `✓ تم حفظ سعر ${savedLabel}: ${itemName}${mergedLabel}${skippedLabel}${belowCostLabel}`);
+    // تحذير لا يمنع الحفظ: مزامنة الأسعار مع الأمين ليست سليمة الآن (src/price-sync-status.js).
+    const syncWarning = window.ozkPriceSyncStatus?.saveWarning?.() || "";
+    const syncWarningLabel = syncWarning ? ` · ${syncWarning}` : "";
+    setNotice(syncWarning ? "warning" : "success", `✓ تم حفظ سعر ${savedLabel}: ${itemName}${mergedLabel}${skippedLabel}${belowCostLabel}${syncWarningLabel}`);
     scheduleBulletinPublish();
     render();
     return true;
