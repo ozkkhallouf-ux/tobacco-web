@@ -134,6 +134,22 @@ function Get-AmeenBillObservation([string]$Guid, $Ops, [string]$DetectedAtUtc, [
     return @{ guid = $Guid; snapshot = $snapshot; ops = @($Ops); detected_at_utc = $DetectedAtUtc; source = $Source; source_create_utc = $createUtc; source_update_utc = $updateUtc }
 }
 
+# قارئ طابور Resnapshot: الفاتورة بمعرّفها مباشرة (قراءة فقط)، أيّاً كان تاريخها — لا نافذة المطابقة.
+# missing لا يُعلَن إلا حين ينجح الاستعلام ولا يجد الصف؛ أي خطأ = error ويبقى الطلب.
+$resnapshotReader = {
+    param($Guid)
+    try {
+        $nowSrvR = [datetime](Invoke-AmeenRead "SELECT GETDATE() t").Rows[0].t
+        $o = Get-AmeenBillObservation ([string]$Guid) @() (ConvertTo-AmeenUtcIso $nowSrvR) "resnapshot"
+        if ($null -ne $o.snapshot) { return @{ status = "found"; observation = $o } }
+        return @{ status = "missing"; observation = $o }
+    } catch {
+        $ex = $_.Exception; $code = $ex.GetType().Name
+        while ($null -ne $ex) { if ($ex -is [System.Data.SqlClient.SqlException]) { $code = "SqlException " + $ex.Number; break }; $ex = $ex.InnerException }
+        return @{ status = "error"; error = $code }
+    }
+}
+
 # ---------------------------------------------------------------- الإرسال
 $session = $null
 function Get-SupabaseSession {
@@ -246,6 +262,13 @@ try {
             Write-AgentLog ("تحذير SQL (لا تقدّم للعلامة المائية): " + $ex.Message)
         }
         $fp = $null
+
+        # طابور Resnapshot الدائم (Codex P1-1): بعد الرصد وقبل الإرسال، فيلحق الحدث البديل بالدفعة.
+        try {
+            $rq = Invoke-AmeenResnapshotQueue -Dir $OutboxDir -State $state -Reader $resnapshotReader
+            if ($rq.emitted -gt 0) { Write-AgentLog ("Resnapshot: صدر {0} حدث بديل وأُغلق طلبه" -f $rq.emitted) }
+            if ($rq.failed -gt 0) { Write-AgentLog ("Resnapshot: تعذّرت قراءة {0} فاتورة — يبقى الطلب ويُعاد لاحقاً" -f $rq.failed) }
+        } catch { Write-AgentLog ("Resnapshot: خطأ في معالجة الطابور (الطلبات باقية): " + $_.Exception.GetType().Name) }
 
         if ($sendOn) {
             $r = Send-AmeenInvoiceOutbox -Dir $OutboxDir -State $state -Transport $transport

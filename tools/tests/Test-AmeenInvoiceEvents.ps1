@@ -164,7 +164,7 @@ try {
   $ev2 = Resolve-AmeenInvoiceChanges -State $st -Observations @((& $obs $s2 @(@{ op = 3; at_utc = "2026-10-20T16:01:00.000Z" }) "2026-10-20T16:01:01.000Z"))
   Add-AmeenOutboxEvents -Dir $box -Events $ev2
   Save-AmeenInvoiceState -Dir $box -State $st
-  $p = Get-AmeenOutboxPending -Dir $box
+  $p = @(Get-AmeenOutboxPending -Dir $box)
   Assert 'outbox: two pending in seq order' ($p.Count -eq 2 -and [long]$p[0].event.source_seq -eq ($b0 + 1) -and [long]$p[1].event.source_seq -eq ($b0 + 2))
   Assert 'outbox: event survives JSON round trip (bill guid, version)' ($p[1].event.bill_guid -eq $G1.ToLowerInvariant() -and $p[1].event.version_hash -eq $ev2[0].version_hash)
   Assert 'outbox: no temp files left' (@(Get-ChildItem -LiteralPath (Join-Path $box "pending") -Filter "*.tmp-*").Count -eq 0)
@@ -185,7 +185,7 @@ try {
   $now = [datetime]::SpecifyKind([datetime]"2026-10-20T16:05:00", [DateTimeKind]::Utc)
   $r = Send-AmeenInvoiceOutbox -Dir $box -State $st -Transport $failTransport -NowUtc $now
   Assert 'offline: error reported' ($r.error -match "network down")
-  Assert 'offline: nothing removed' ((Get-AmeenOutboxPending -Dir $box).Count -eq 2)
+  Assert 'offline: nothing removed' (@(Get-AmeenOutboxPending -Dir $box).Count -eq 2)
   Assert 'offline: backoff 2s after first failure' ($st.send.failures -eq 1 -and $st.send.next_at -eq "2026-10-20T16:05:02Z")
   $r = Send-AmeenInvoiceOutbox -Dir $box -State $st -Transport $failTransport -NowUtc $now.AddSeconds(1)
   Assert 'offline: retry waits for backoff' ($r.skipped_backoff)
@@ -200,10 +200,10 @@ try {
   # رد ناقص أو نتيجة غير معروفة ⇒ فشل بلا حذف
   $partial = { param($Events) return @(@{ event_id = $Events[0].event_id; outcome = "applied" }) }
   $r = Send-AmeenInvoiceOutbox -Dir $box -State $st -Transport $partial -NowUtc $now.AddMinutes(10)
-  Assert 'partial server reply: treated as failure, nothing removed' ($r.error -match "missing" -and (Get-AmeenOutboxPending -Dir $box).Count -eq 3)
+  Assert 'partial server reply: treated as failure, nothing removed' ($r.error -match "missing" -and @(Get-AmeenOutboxPending -Dir $box).Count -eq 3)
   $weird = { param($Events) return @($Events | ForEach-Object { @{ event_id = $_.event_id; outcome = "exploded" } }) }
   $r = Send-AmeenInvoiceOutbox -Dir $box -State $st -Transport $weird -NowUtc $now.AddMinutes(20)
-  Assert 'unknown outcome: treated as failure' ($r.error -match "unexpected outcome" -and (Get-AmeenOutboxPending -Dir $box).Count -eq 3)
+  Assert 'unknown outcome: treated as failure' ($r.error -match "unexpected outcome" -and @(Get-AmeenOutboxPending -Dir $box).Count -eq 3)
 
   # عودة الإنترنت ⇒ الكل يُرسل مرة واحدة بالترتيب
   $script:seenSeqs = @()
@@ -211,7 +211,7 @@ try {
   $r = Send-AmeenInvoiceOutbox -Dir $box -State $st -Transport $ok -NowUtc $now.AddMinutes(30)
   Assert 'online again: all 3 acked' ($r.acked -eq 3 -and -not $r.error)
   Assert 'online again: sent strictly in seq order' (($script:seenSeqs -join ",") -eq ((@(1, 2, 3) | ForEach-Object { $b0 + $_ }) -join ","))
-  Assert 'online again: outbox empty' ((Get-AmeenOutboxPending -Dir $box).Count -eq 0)
+  Assert 'online again: outbox empty' (@(Get-AmeenOutboxPending -Dir $box).Count -eq 0)
   Assert 'online again: backoff cleared' ($st.send.failures -eq 0 -and $null -eq $st.send.next_at)
   Assert 'acked log has 3 lines' (@(Get-Content -LiteralPath (Join-Path $box "acked.log")).Count -eq 3)
   $r = Send-AmeenInvoiceOutbox -Dir $box -State $st -Transport $ok -NowUtc $now.AddMinutes(31)
@@ -221,7 +221,7 @@ try {
   Add-AmeenOutboxEvents -Dir $box -Events (Resolve-AmeenInvoiceChanges -State $st -Observations @((& $obs $s1 @(@{ op = 3; at_utc = "2026-10-20T16:40:00.000Z" }) "2026-10-20T16:40:01.000Z")))
   $dup = { param($Events) return @($Events | ForEach-Object { @{ event_id = $_.event_id; outcome = "duplicate" } }) }
   $r = Send-AmeenInvoiceOutbox -Dir $box -State $st -Transport $dup -NowUtc $now.AddMinutes(40)
-  Assert 'duplicate reply acknowledged' ($r.acked -eq 1 -and (Get-AmeenOutboxPending -Dir $box).Count -eq 0)
+  Assert 'duplicate reply acknowledged' ($r.acked -eq 1 -and @(Get-AmeenOutboxPending -Dir $box).Count -eq 0)
 
   # ── ٥ب) مراجعة المالك P1: عزل الأحداث المعطوبة (Dead Letter) دون إفشال الدفعة ────────────────
   $dbox = Join-Path $tempDir "outbox-deadletter"
@@ -257,7 +257,7 @@ try {
   Assert 'mixed batch: valid event acked' ($r.acked -eq 1)
   Assert 'mixed batch: 3 dead-lettered (future + tampered locally, 1 by server)' ($r.deadlettered -eq 3)
   Assert 'mixed batch: locally invalid events never sent' (-not ($script:dlSent -contains [long]$future[0].source_seq) -and -not ($script:dlSent -contains [long]$tampered[0].source_seq))
-  Assert 'mixed batch: outbox empty, nothing lost' ((Get-AmeenOutboxPending -Dir $dbox).Count -eq 0 -and (@(Get-AmeenDeadLetters -Dir $dbox).Count + $r.acked) -eq 4)
+  Assert 'mixed batch: outbox empty, nothing lost' (@(Get-AmeenOutboxPending -Dir $dbox).Count -eq 0 -and (@(Get-AmeenDeadLetters -Dir $dbox).Count + $r.acked) -eq 4)
   $dl = @(Get-AmeenDeadLetters -Dir $dbox)
   Assert 'dead letter: reason and id recorded' (@($dl | Where-Object { $_.reason_code -eq "future" -and $_.event_id -eq $future[0].event_id -and $_.source -eq "local" }).Count -eq 1)
   Assert 'dead letter: server reason recorded' (@($dl | Where-Object { $_.reason_code -eq "22023" -and $_.source -eq "server" }).Count -eq 1)
@@ -272,12 +272,12 @@ try {
   Write-AmeenAtomicFile -Path (@($dl | Where-Object { $_.reason_code -eq "future" })[0].file) -Content (ConvertTo-AmeenCanonicalJson $fe)
   $futureSeq = [long]$future[0].source_seq
   Assert 'repair requeue: accepted' ((Repair-AmeenDeadLetter -Dir $dbox -State $ds -Seq $futureSeq -Mode Requeue -NowUtc $nowD) -eq "Requeue")
-  $rq = Get-AmeenOutboxPending -Dir $dbox
+  $rq = @(Get-AmeenOutboxPending -Dir $dbox)
   Assert 'repair requeue: back in pending with ORIGINAL seq' ($rq.Count -eq 1 -and [long]$rq[0].event.source_seq -eq $futureSeq)
   Assert 'repair requeue: key recomputed and valid' ($null -eq (Test-AmeenInvoiceEvent -Event $rq[0].event -NowUtc $nowD) -and $rq[0].event.event_id -ne $future[0].event_id)
   Assert 'repair requeue: removed from dead letter, kept in resolved' (@(Get-AmeenDeadLetters -Dir $dbox | Where-Object { [long]$_.source_seq -eq $futureSeq }).Count -eq 0 -and @(Get-ChildItem -LiteralPath (Join-Path $dbox "deadletter\resolved") -Filter "*requeue*").Count -eq 2)
   $r = Send-AmeenInvoiceOutbox -Dir $dbox -State $ds -Transport $mixed -NowUtc $nowD
-  Assert 'repair requeue: sent and acked' ($r.acked -eq 1 -and (Get-AmeenOutboxPending -Dir $dbox).Count -eq 0)
+  Assert 'repair requeue: sent and acked' ($r.acked -eq 1 -and @(Get-AmeenOutboxPending -Dir $dbox).Count -eq 0)
 
   # إصلاح يبقى معطوباً ⇒ يُرفض ويبقى معزولاً (لا يضيع)
   $tamperSeq = [long]$tampered[0].source_seq
@@ -286,15 +286,125 @@ try {
   $te.bill.bill_type = 7
   Write-AmeenAtomicFile -Path $tdl.file -Content (ConvertTo-AmeenCanonicalJson $te)
   Assert 'repair requeue of still-broken event refused' (Throws { Repair-AmeenDeadLetter -Dir $dbox -State $ds -Seq $tamperSeq -Mode Requeue -NowUtc $nowD })
-  Assert 'refused repair stays in dead letter (not lost, not queued)' (@(Get-AmeenDeadLetters -Dir $dbox | Where-Object { [long]$_.source_seq -eq $tamperSeq }).Count -eq 1 -and (Get-AmeenOutboxPending -Dir $dbox).Count -eq 0)
+  Assert 'refused repair stays in dead letter (not lost, not queued)' (@(Get-AmeenDeadLetters -Dir $dbox | Where-Object { [long]$_.source_seq -eq $tamperSeq }).Count -eq 1 -and @(Get-AmeenOutboxPending -Dir $dbox).Count -eq 0)
 
-  # إصلاح ٢: Resnapshot — يُعلَّم أن الفاتورة تحتاج لقطة جديدة؛ اللقطة التالية تصدر بتسلسل أحدث
-  $g3l = $G3.ToLowerInvariant()
-  $srvSeq = [long](@(Get-AmeenDeadLetters -Dir $dbox | Where-Object { $_.source -eq "server" })[0].source_seq)
-  Assert 'repair resnapshot: accepted' ((Repair-AmeenDeadLetter -Dir $dbox -State $ds -Seq $srvSeq -Mode Resnapshot -NowUtc $nowD) -eq "Resnapshot")
-  Assert 'repair resnapshot: bill marked for fresh snapshot' ($ds.bills[$g3l].v -eq "resnapshot")
-  $again = Resolve-AmeenInvoiceChanges -State $ds -Observations @((& $obsG $G3 (ConvertTo-AmeenInvoiceSnapshot -Header (New-Header -Guid $G3) -Lines @($L2)) "2026-10-20T17:06:00.000Z"))
-  Assert 'repair resnapshot: same content re-emitted with a newer seq' ($again.Count -eq 1 -and [long]$again[0].source_seq -gt $srvSeq)
+  # ── ٥ج) Codex P1-1: طابور Resnapshot دائم لفاتورة أقدم من 60 يوماً، بقراءة مباشرة بالـGUID ─────
+  $G9 = "C0000000-0000-0000-0000-000000000009"; $g9l = $G9.ToLowerInvariant()
+  $oldHeader = New-Header -Guid $G9 -Total 410
+  $oldHeader.Date = [datetime]"2026-06-15"                          # أقدم من نافذة المطابقة (60 يوماً)
+  $oldSnap = ConvertTo-AmeenInvoiceSnapshot -Header $oldHeader -Lines @($L1)
+  # حدث للفاتورة القديمة رفضه الخادم ⇒ معزول
+  $oldEvt = Resolve-AmeenInvoiceChanges -State $ds -Observations @((& $obsG $G9 $oldSnap "2026-10-20T17:10:00.000Z"))
+  Add-AmeenOutboxEvents -Dir $dbox -Events $oldEvt
+  $rejectAll = { param($Events) $i = 0; return @($Events | ForEach-Object { $i++; @{ event_id = $_.event_id; index = $i; outcome = "rejected"; reason_code = "22023"; reason = "bill snapshot too large" } }) }
+  $r = Send-AmeenInvoiceOutbox -Dir $dbox -State $ds -Transport $rejectAll -NowUtc $nowD
+  $oldSeq = [long]$oldEvt[0].source_seq
+  Assert 'old invoice: rejected event isolated' ($r.deadlettered -eq 1 -and @(Get-AmeenDeadLetters -Dir $dbox | Where-Object { [long]$_.source_seq -eq $oldSeq }).Count -eq 1)
+  # الحالة لا تعرف الفاتورة بعد الآن (خرجت من نافذة المطابقة) — لا يجوز أن يعتمد الإصلاح على النافذة
+  $ds.bills.Remove($g9l)
+  $seqBefore = [long]$ds.last_seq
+  Assert 'resnapshot request: queued' ((Repair-AmeenDeadLetter -Dir $dbox -State $ds -Seq $oldSeq -Mode Resnapshot -NowUtc $nowD) -eq "ResnapshotQueued")
+  $second = $null; try { $second = Repair-AmeenDeadLetter -Dir $dbox -State $ds -Seq $oldSeq -Mode Resnapshot -NowUtc $nowD } catch { $second = "threw" }
+  Assert 'resnapshot request: second request does not duplicate it' ($second -eq "ResnapshotQueued" -and @(Get-AmeenDeadLetters -Dir $dbox | Where-Object { $_.status -eq "resnapshot_pending" }).Count -eq 1)
+  Assert 'resnapshot request: NOT closed early (still in dead letter, not in resolved)' (@(Get-AmeenDeadLetters -Dir $dbox | Where-Object { [long]$_.source_seq -eq $oldSeq -and $_.status -eq "resnapshot_pending" }).Count -eq 1 -and @(Get-ChildItem -LiteralPath (Join-Path $dbox "deadletter\resolved") -Filter ("{0:D12}.resnapshot*" -f $oldSeq) -ErrorAction SilentlyContinue).Count -eq 0)
+  Assert 'resnapshot request: survives losing state.json (stored with the dead letter)' (@(Get-AmeenDeadLetters -Dir $dbox | Where-Object { $_.status -eq "resnapshot_pending" -and $_.bill_guid -eq $g9l }).Count -eq 1)
+
+  # قراءة الأمين تفشل ⇒ الطلب يبقى ولا حدث
+  $script:readerCalls = @()
+  $failReader = { param($Guid) $script:readerCalls += $Guid; return @{ status = "error"; error = "SqlException 1222" } }
+  $q = Invoke-AmeenResnapshotQueue -Dir $dbox -State $ds -Reader $failReader -NowUtc $nowD
+  Assert 'resnapshot read failure: request kept, no event' ($q.failed -eq 1 -and $q.emitted -eq 0 -and @(Get-AmeenOutboxPending -Dir $dbox).Count -eq 0 -and @(Get-AmeenDeadLetters -Dir $dbox | Where-Object { $_.status -eq "resnapshot_pending" -and [int]$_.attempts -eq 1 -and $_.last_error -eq "SqlException 1222" }).Count -eq 1)
+  $q = Invoke-AmeenResnapshotQueue -Dir $dbox -State $ds -Reader $failReader -NowUtc $nowD.AddSeconds(10)
+  Assert 'resnapshot read failure: retry waits (no hammering Ameen)' ($q.waiting -eq 1 -and $script:readerCalls.Count -eq 1)
+  # استثناء من القارئ نفسه ⇒ لا يُسقط الوكيل، والطلب يبقى
+  $q = Invoke-AmeenResnapshotQueue -Dir $dbox -State $ds -Reader { param($Guid) throw "connection reset" } -NowUtc $nowD.AddMinutes(2)
+  Assert 'resnapshot reader exception: contained, request kept' ($q.failed -eq 1 -and @(Get-AmeenDeadLetters -Dir $dbox | Where-Object { $_.status -eq "resnapshot_pending" }).Count -eq 1)
+
+  # قراءة مباشرة بالـGUID تنجح (فاتورة 2026-06-15، خارج النافذة) ⇒ حدث بتسلسل أحدث، ثم يُغلق الطلب
+  $okReader = { param($Guid) $script:readerCalls += $Guid
+    $h = New-Header -Guid $Guid -Total 410; $h.Date = [datetime]"2026-06-15"
+    return @{ status = "found"; observation = @{ guid = $Guid; snapshot = (ConvertTo-AmeenInvoiceSnapshot -Header $h -Lines @($L1)); ops = @(); detected_at_utc = "2026-10-20T17:20:00.000Z"; source = "resnapshot" } } }
+  $q = Invoke-AmeenResnapshotQueue -Dir $dbox -State $ds -Reader $okReader -NowUtc $nowD.AddMinutes(4)
+  Assert 'resnapshot: reader called with the exact bill GUID (direct read, no date window)' ($script:readerCalls[-1] -eq $g9l)
+  $pq = @(Get-AmeenOutboxPending -Dir $dbox | Where-Object { $_.event.bill_guid -eq $g9l })
+  Assert 'resnapshot: exactly one new event in outbox' ($q.emitted -eq 1 -and $pq.Count -eq 1)
+  Assert 'resnapshot: new seq is newer than the isolated event and every earlier seq' ([long]$pq[0].event.source_seq -gt $oldSeq -and [long]$pq[0].event.source_seq -gt $seqBefore)
+  Assert 'resnapshot: event carries the old bill (date outside the 60-day window)' ($pq[0].event.bill.bill_date -eq "2026-06-15" -and $pq[0].event.kind -eq "upsert")
+  Assert 'resnapshot: new event is valid' ($null -eq (Test-AmeenInvoiceEvent -Event $pq[0].event -NowUtc $nowD.AddMinutes(30)))
+  Assert 'resnapshot: request closed only after the event was written' (@(Get-AmeenDeadLetters -Dir $dbox | Where-Object { [long]$_.source_seq -eq $oldSeq }).Count -eq 0 -and @(Get-ChildItem -LiteralPath (Join-Path $dbox "deadletter\resolved") -Filter ("{0:D12}.resnapshot*" -f $oldSeq)).Count -eq 2)
+  $q = Invoke-AmeenResnapshotQueue -Dir $dbox -State $ds -Reader $okReader -NowUtc $nowD.AddMinutes(6)
+  Assert 'resnapshot: running the queue again creates no duplicate event' ($q.emitted -eq 0 -and @(Get-AmeenOutboxPending -Dir $dbox | Where-Object { $_.event.bill_guid -eq $g9l }).Count -eq 1)
+  [void](Send-AmeenInvoiceOutbox -Dir $dbox -State $ds -Transport $mixed -NowUtc $nowD.AddMinutes(7))
+
+  # انقطاع بعد كتابة الحدث وقبل إغلاق الطلب ⇒ يُغلق الطلب بلا حدث ثانٍ
+  $G8 = "C0000000-0000-0000-0000-000000000008"; $g8l = $G8.ToLowerInvariant()
+  $e8 = Resolve-AmeenInvoiceChanges -State $ds -Observations @((& $obsG $G8 (ConvertTo-AmeenInvoiceSnapshot -Header (New-Header -Guid $G8) -Lines @($L1)) "2026-10-20T17:30:00.000Z"))
+  Add-AmeenOutboxEvents -Dir $dbox -Events $e8
+  [void](Send-AmeenInvoiceOutbox -Dir $dbox -State $ds -Transport $rejectAll -NowUtc $nowD.AddMinutes(8))
+  $s8 = [long]$e8[0].source_seq
+  [void](Repair-AmeenDeadLetter -Dir $dbox -State $ds -Seq $s8 -Mode Resnapshot -NowUtc $nowD.AddMinutes(8))
+  $crashEvt = Resolve-AmeenInvoiceChanges -State $ds -Observations @(@{ guid = $G8; snapshot = (ConvertTo-AmeenInvoiceSnapshot -Header (New-Header -Guid $G8 -Total 5) -Lines @($L1)); ops = @(); detected_at_utc = "2026-10-20T17:31:00.000Z" })
+  Add-AmeenOutboxEvents -Dir $dbox -Events $crashEvt                # كُتب الحدث ثم «انقطع التيار» قبل الإغلاق
+  $script:readerCalls = @()
+  $q = Invoke-AmeenResnapshotQueue -Dir $dbox -State $ds -Reader $okReader -NowUtc $nowD.AddMinutes(9)
+  Assert 'resnapshot after crash: closed using the event already in outbox' ($q.completed -eq 1 -and $q.emitted -eq 0 -and $script:readerCalls.Count -eq 0)
+  Assert 'resnapshot after crash: no duplicate event' (@(Get-AmeenOutboxPending -Dir $dbox | Where-Object { $_.event.bill_guid -eq $g8l }).Count -eq 1)
+
+  # الفاتورة لم تعد موجودة في الأمين ⇒ حدث delete، ويُغلق الطلب
+  [void](Send-AmeenInvoiceOutbox -Dir $dbox -State $ds -Transport $rejectAll -NowUtc $nowD.AddMinutes(10))
+  $s8b = [long]$crashEvt[0].source_seq
+  [void](Repair-AmeenDeadLetter -Dir $dbox -State $ds -Seq $s8b -Mode Resnapshot -NowUtc $nowD.AddMinutes(10))
+  $q = Invoke-AmeenResnapshotQueue -Dir $dbox -State $ds -Reader { param($Guid) @{ status = "missing"; observation = @{ guid = $Guid; snapshot = $null; ops = @(); detected_at_utc = "2026-10-20T17:40:00.000Z" } } } -NowUtc $nowD.AddMinutes(11)
+  $del = @(Get-AmeenOutboxPending -Dir $dbox | Where-Object { $_.event.bill_guid -eq $g8l })
+  Assert 'resnapshot of a bill gone from Ameen: delete event, request closed' ($q.emitted -eq 1 -and $del.Count -eq 1 -and $del[0].event.kind -eq "delete" -and [long]$del[0].event.source_seq -gt $s8b)
+  [void](Send-AmeenInvoiceOutbox -Dir $dbox -State $ds -Transport $mixed -NowUtc $nowD.AddMinutes(12))
+
+  # ── ٥د) Codex P1-2: ملف JSON مقطوع في pending لا يوقف الوكيل ──────────────────────────────────
+  $nowC = [datetime]::SpecifyKind([datetime]"2026-10-20T18:05:00", [DateTimeKind]::Utc)
+  $cbox = Join-Path $tempDir "outbox-corrupt"
+  Initialize-AmeenInvoiceOutbox -Dir $cbox
+  $cs = New-AmeenInvoiceState
+  $cGood = Resolve-AmeenInvoiceChanges -State $cs -Observations @((& $obsG $G1 (ConvertTo-AmeenInvoiceSnapshot -Header (New-Header -Guid $G1) -Lines @($L1)) "2026-10-20T18:00:00.000Z"))
+  $cGood2 = Resolve-AmeenInvoiceChanges -State $cs -Observations @((& $obsG $G2 (ConvertTo-AmeenInvoiceSnapshot -Header (New-Header -Guid $G2) -Lines @($L1)) "2026-10-20T18:00:01.000Z"))
+  Add-AmeenOutboxEvents -Dir $cbox -Events @($cGood + $cGood2)
+  # ملف مقطوع بتسلسل أصغر من السليمين (أول ما يُقرأ) — كتابة انقطعت في منتصفها
+  $goodText = ConvertTo-AmeenCanonicalJson $cGood[0]
+  $truncName = ([long]$cGood[0].source_seq - 1).ToString("D12") + ".json"
+  $truncPath = Join-Path (Join-Path $cbox "pending") $truncName
+  $truncBytes = [Text.Encoding]::UTF8.GetBytes($goodText.Substring(0, [int]($goodText.Length / 2)))
+  [IO.File]::WriteAllBytes($truncPath, $truncBytes)
+  [IO.File]::WriteAllText((Join-Path (Join-Path $cbox "pending") (([long]$cGood[0].source_seq - 2).ToString("D12") + ".json")), "   ")
+  $script:cSent = @()
+  $okT = { param($Events) $script:cSent += @($Events | ForEach-Object { [long]$_.source_seq }); return @($Events | ForEach-Object { @{ event_id = $_.event_id; outcome = "applied" } }) }
+  $r = $null
+  Assert 'corrupt json: send does not throw' (-not (Throws { $script:cr = Send-AmeenInvoiceOutbox -Dir $cbox -State $cs -Transport $okT -NowUtc $nowC }))
+  $r = $script:cr
+  Assert 'corrupt json: valid events sent and acked' ($r.acked -eq 2 -and -not $r.error)
+  Assert 'corrupt json: valid events still sent in seq order' (($script:cSent -join ",") -eq ("{0},{1}" -f $cGood[0].source_seq, $cGood2[0].source_seq))
+  Assert 'corrupt json: truncated and empty files isolated' ($r.deadlettered -eq 2 -and @(Get-AmeenOutboxPending -Dir $cbox).Count -eq 0)
+  $cdl = @(Get-AmeenDeadLetters -Dir $cbox)
+  $tdlc = @($cdl | Where-Object { $_.file_name -eq $truncName })[0]
+  Assert 'corrupt json: reason, file name and safe id recorded' ($tdlc.reason_code -eq "unreadable_json" -and $tdlc.source_seq -eq ([string]([long]$cGood[0].source_seq - 1)) -and $tdlc.bill_guid -eq $G1.ToLowerInvariant())
+  Assert 'corrupt json: isolated file preserved byte-for-byte (not deleted)' ([Convert]::ToBase64String([IO.File]::ReadAllBytes($tdlc.file)) -eq [Convert]::ToBase64String($truncBytes))
+  $cReason = Get-Content -Raw -LiteralPath $tdlc.reason_file; $cLog = Get-Content -Raw -LiteralPath (Join-Path $cbox "deadletter.log")
+  Assert 'corrupt json: no file content or bill data in reason or log' ($cReason -notmatch 'زبون|customer_name|"total"|lines|schema' -and $cLog -notmatch 'زبون|customer_name|"total"|lines')
+  # الوكيل يستمر: حدث جديد بعد العزل يُرسل عادياً
+  Add-AmeenOutboxEvents -Dir $cbox -Events (Resolve-AmeenInvoiceChanges -State $cs -Observations @((& $obsG $G3 (ConvertTo-AmeenInvoiceSnapshot -Header (New-Header -Guid $G3) -Lines @($L2)) "2026-10-20T18:01:00.000Z")))
+  $r = Send-AmeenInvoiceOutbox -Dir $cbox -State $cs -Transport $okT -NowUtc $nowC.AddMinutes(1)
+  Assert 'corrupt json: agent keeps working (next event acked)' ($r.acked -eq 1 -and $r.deadlettered -eq 0)
+  Assert 'corrupt json: requeue of still-unreadable file refused, kept isolated' ((Throws { Repair-AmeenDeadLetter -Dir $cbox -State $cs -Seq ([long]$cGood[0].source_seq - 1) -Mode Requeue -NowUtc $nowC }) -and @(Get-AmeenDeadLetters -Dir $cbox | Where-Object { $_.file_name -eq $truncName }).Count -eq 1)
+  # ملف JSON صالح لكنه ليس كائناً ⇒ يُعزل كذلك
+  [IO.File]::WriteAllText((Join-Path (Join-Path $cbox "pending") "999999999999999.json"), "[1,2,3]")
+  $r = Send-AmeenInvoiceOutbox -Dir $cbox -State $cs -Transport $okT -NowUtc $nowC.AddMinutes(2)
+  Assert 'non-object json isolated' ($r.deadlettered -eq 1 -and @(Get-AmeenOutboxPending -Dir $cbox).Count -eq 0)
+  # state.json تالف لا يوقف الوكيل: يُنقل جانباً ويبدأ تسلسل أعلى من كل سابق
+  $maxSeen = [long]$cs.last_seq
+  Save-AmeenInvoiceState -Dir $cbox -State $cs
+  [IO.File]::WriteAllText((Join-Path $cbox "state.json"), '{"schema":"ameen-invoice-agent-st')
+  $rec = $null
+  Assert 'corrupt state.json: read does not throw' (-not (Throws { $script:rec = Read-AmeenInvoiceState -Dir $cbox }))
+  Assert 'corrupt state.json: moved aside, not deleted' (@(Get-ChildItem -LiteralPath $cbox -Filter "state.corrupt-*.json").Count -eq 1)
+  Assert 'corrupt state.json: new seq above every earlier seq' ([long]$script:rec.last_seq -gt $maxSeen)
 
   # ── ٦) الوكيل: يُحلَّل بلا أخطاء، ولا يسجّل مهمة، ولا يرسل افتراضياً ───────────────────────────
   $tokens = $null; $errors = $null

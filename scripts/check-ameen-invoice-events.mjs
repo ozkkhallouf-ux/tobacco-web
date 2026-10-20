@@ -128,7 +128,26 @@ for (const name of [
   "repair requeue: back in pending with ORIGINAL seq",
   "repair requeue of still-broken event refused",
   "refused repair stays in dead letter (not lost, not queued)",
-  "repair resnapshot: same content re-emitted with a newer seq",
+  // Codex P1-1 (a35c6e86): طابور Resnapshot دائم بقراءة مباشرة بالـGUID
+  "resnapshot request: NOT closed early (still in dead letter, not in resolved)",
+  "resnapshot request: survives losing state.json (stored with the dead letter)",
+  "resnapshot read failure: request kept, no event",
+  "resnapshot: reader called with the exact bill GUID (direct read, no date window)",
+  "resnapshot: new seq is newer than the isolated event and every earlier seq",
+  "resnapshot: event carries the old bill (date outside the 60-day window)",
+  "resnapshot: request closed only after the event was written",
+  "resnapshot: running the queue again creates no duplicate event",
+  "resnapshot after crash: no duplicate event",
+  "resnapshot of a bill gone from Ameen: delete event, request closed",
+  // Codex P1-2 (a35c6e86): ملف JSON تالف لا يوقف الوكيل
+  "corrupt json: send does not throw",
+  "corrupt json: valid events sent and acked",
+  "corrupt json: valid events still sent in seq order",
+  "corrupt json: truncated and empty files isolated",
+  "corrupt json: isolated file preserved byte-for-byte (not deleted)",
+  "corrupt json: no file content or bill data in reason or log",
+  "corrupt json: agent keeps working (next event acked)",
+  "corrupt state.json: read does not throw",
 ]) assert.ok(psTest.includes(`'${name}'`), `اختبار PowerShell إلزامي مفقود: ${name}`);
 
 const rollback = read(rollbackRel).replace(/--.*$/gm, "");
@@ -159,6 +178,15 @@ assert.match(agentCode, /SET LOCK_TIMEOUT 3000; /);
 assert.match(agentCode, /\$ExpectedDatabase = "AmnDb002"/);
 assert.match(agentCode, /if \(\$ListDeadLetter -or \$RepairDeadLetterSeq -gt 0\) \{/, "طريقة واضحة لعرض الأحداث المعزولة وإصلاحها");
 assert.match(libCode, /Move-AmeenEventToDeadLetter -Dir \$Dir -File \$p\.file -Event \$p\.event -Code \$why\.code/, "التحقق المحلي يعزل قبل الإرسال");
+// Codex P1-2: كل ملف يُقرأ ويُحلَّل منفرداً، والتالف يُعزل ولا يرمي.
+assert.match(libCode, /\$read = Read-AmeenJsonFileSafe -Path \$f\.FullName/, "قراءة محمية لكل ملف معلّق");
+assert.match(libCode, /-Code "unreadable_json"/);
+assert.match(libCode, /\$batch = Get-AmeenOutboxBatch -Dir \$Dir -Max \$BatchSize -NowUtc \$NowUtc/, "الإرسال يمرّ عبر الدفعة المحمية");
+assert.doesNotMatch(libCode, /Get-Content -Raw -LiteralPath \$f\.FullName -Encoding UTF8 \| ConvertFrom-Json/, "لا تحليل غير محمي لملفات الصندوق");
+// Codex P1-1: طابور Resnapshot دائم يُعالج في كل دورة بقراءة مباشرة بالـGUID.
+assert.match(agentCode, /Invoke-AmeenResnapshotQueue -Dir \$OutboxDir -State \$state -Reader \$resnapshotReader/);
+assert.match(agentCode, /\$o = Get-AmeenBillObservation \(\[string\]\$Guid\) @\(\)/, "القارئ بالـGUID مباشرة (لا نافذة تاريخ)");
+assert.match(libCode, /status = "resnapshot_pending"/, "الطلب محفوظ مع الحدث المعزول (دائم)");
 for (const [name, text] of [["agent", agent], ["lib", lib]]) {
   assert.doesNotMatch(text, /AMEEN_SQL_WRITE_CONNECTION_STRING|WRITE_CONNECTION/, `${name}: لا سلسلة اتصال الكتابة`);
   assert.doesNotMatch(text, /Register-ScheduledTask|schtasks/i, `${name}: لا تسجيل مهمة مجدولة`);
@@ -246,7 +274,7 @@ if (pwshProbe.status !== 0) {
     process.exit(ps.status || 1);
   }
   const m = psText.match(/Ameen invoice events: (\d+) PASS, (\d+) FAIL/);
-  assert.ok(m && Number(m[2]) === 0 && Number(m[1]) >= 115, "نتيجة اختبار PowerShell غير متوقعة");
+  assert.ok(m && Number(m[2]) === 0 && Number(m[1]) >= 145, "نتيجة اختبار PowerShell غير متوقعة");
   console.log(`  ✓ اختبار PowerShell (${pwshProbe.stdout.trim()}): ${m[1]} تأكيداً`);
 }
 console.log("check-ameen-invoice-events: اجتاز الفحص.");

@@ -358,15 +358,51 @@ function Initialize-AmeenInvoiceOutbox {
     Get-ChildItem -LiteralPath (Join-Path $Dir "pending") -Filter "*.tmp-*" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 }
 
+function Read-AmeenJsonFileSafe {
+    # قراءة وتحليل ملف JSON واحد بلا رمي: { ok; value } أو { ok = $false; error } — الخطأ نوعه فقط،
+    # لا محتوى الملف (قد يحوي بيانات فاتورة).
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $raw = $null
+    try {
+        $raw = [IO.File]::ReadAllText($Path, [Text.Encoding]::UTF8)
+        if ([string]::IsNullOrWhiteSpace($raw)) { return @{ ok = $false; error = "empty file"; raw = $raw } }
+        $obj = $raw | ConvertFrom-Json -ErrorAction Stop
+        return @{ ok = $true; value = (ConvertTo-AmeenHashtable $obj); raw = $raw }
+    } catch {
+        return @{ ok = $false; error = ("unreadable json (" + $_.Exception.GetType().Name + ")"); raw = $raw }
+    }
+}
+
+function Get-AmeenSafeEventIds {
+    # معرّفات آمنة من نص ملف تالف — أنماط ثابتة الشكل فقط (sha256، GUID، أرقام)، لا أي نص حر.
+    param([AllowNull()][string]$Raw, [string]$FileName)
+    $ids = @{ event_id = ""; bill_guid = ""; source_seq = ""; kind = "" }
+    $n = [long]0
+    if ([long]::TryParse([IO.Path]::GetFileNameWithoutExtension([string]$FileName), [ref]$n)) { $ids.source_seq = $n.ToString($script:Invariant) }
+    if ($Raw) {
+        if ($Raw -match '"event_id"\s*:\s*"([0-9a-f]{64})"') { $ids.event_id = $Matches[1] }
+        if ($Raw -match '"bill_guid"\s*:\s*"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"') { $ids.bill_guid = $Matches[1] }
+        if ($Raw -match '"kind"\s*:\s*"(upsert|delete)"') { $ids.kind = $Matches[1] }
+    }
+    return $ids
+}
+
 function Read-AmeenInvoiceState {
     param([Parameter(Mandatory = $true)][string]$Dir)
     $p = Join-Path $Dir "state.json"
+    $h = $null
     if (Test-Path -LiteralPath $p) {
-        $h = ConvertTo-AmeenHashtable (Get-Content -Raw -LiteralPath $p -Encoding UTF8 | ConvertFrom-Json)
-        if ($h.schema -ne "ameen-invoice-agent-state/v1") { throw "unsupported agent state schema" }
-    } else {
-        $h = New-AmeenInvoiceState
+        $read = Read-AmeenJsonFileSafe -Path $p
+        if ($read.ok -and $read.value -is [System.Collections.IDictionary] -and $read.value.schema -eq "ameen-invoice-agent-state/v1") {
+            $h = $read.value
+        } else {
+            # حالة تالفة لا توقف الوكيل: تُنقل جانباً كما هي (لا حذف) ونبدأ حالة جديدة. التسلسل يبدأ من
+            # الساعة وفوق كل معلّق، والنسخ المعروفة تُعاد معرفتها بالمطابقة (الخادم يعيد noop للمطابق).
+            $aside = Join-Path $Dir ("state.corrupt-" + [datetime]::UtcNow.ToString("yyyyMMddTHHmmssfffZ", $script:Invariant) + ".json")
+            Move-Item -LiteralPath $p -Destination $aside -Force
+        }
     }
+    if ($null -eq $h) { $h = New-AmeenInvoiceState }
     if ($null -eq $h.bills) { $h.bills = @{} }
     if ($null -eq $h.send) { $h.send = @{ failures = 0; next_at = $null } }
     $h.last_seq = [long]$h.last_seq
@@ -405,16 +441,32 @@ function Add-AmeenOutboxEvents {
     }
 }
 
-function Get-AmeenOutboxPending {
-    param([Parameter(Mandatory = $true)][string]$Dir, [int]$Max = 50)
+function Get-AmeenOutboxBatch {
+    # أول $Max ملفاً معلّقاً بترتيب الاسم (= التسلسل). كل ملف يُقرأ ويُحلَّل منفرداً: الملف التالف أو
+    # المقطوع يُعزل في deadletter\ (سبب + اسم الملف + معرّفات آمنة، بلا محتواه) ولا يوقف بقية الملفات.
+    # لا يُحذف شيء: العزل نقلٌ للملف كما هو بعد كتابة سببه؛ إن تعذّر النقل يبقى مكانه ويُتخطى.
+    param([Parameter(Mandatory = $true)][string]$Dir, [int]$Max = 50, [datetime]$NowUtc = [datetime]::UtcNow)
     $pd = Join-Path $Dir "pending"
     $files = @(Get-ChildItem -LiteralPath $pd -Filter "*.json" -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -First $Max)
     $list = New-Object System.Collections.Generic.List[object]
+    $isolated = 0; $skipped = 0
     foreach ($f in $files) {
-        $evt = ConvertTo-AmeenHashtable (Get-Content -Raw -LiteralPath $f.FullName -Encoding UTF8 | ConvertFrom-Json)
-        $list.Add(@{ file = $f.FullName; event = $evt })
+        $read = Read-AmeenJsonFileSafe -Path $f.FullName
+        if ($read.ok -and $read.value -is [System.Collections.IDictionary]) { $list.Add(@{ file = $f.FullName; event = $read.value }); continue }
+        $why = $read.error; if ($read.ok) { $why = "event must be an object" }
+        try {
+            Move-AmeenEventToDeadLetter -Dir $Dir -File $f.FullName -Event $null -SafeIds (Get-AmeenSafeEventIds -Raw $read.raw -FileName $f.Name) -Code "unreadable_json" -Reason $why -Source "local" -NowUtc $NowUtc
+            $isolated++
+        } catch { $skipped++ }
     }
-    return ,$list.ToArray()
+    return @{ items = $list.ToArray(); isolated = $isolated; skipped = $skipped }
+}
+
+function Get-AmeenOutboxPending {
+    # العناصر تُعاد عبر خط الأنابيب (لا مصفوفة ملفوفة) كي يرى Where-Object كل حدث على حدة؛
+    # المستدعي يلفّ النتيجة بـ @() قبل .Count أو الفهرسة.
+    param([Parameter(Mandatory = $true)][string]$Dir, [int]$Max = 50)
+    return (Get-AmeenOutboxBatch -Dir $Dir -Max $Max).items
 }
 
 function Get-AmeenBackoffSeconds {
@@ -462,23 +514,33 @@ function Test-AmeenInvoiceEvent {
 
 function Move-AmeenEventToDeadLetter {
     # ينقل ملف الحدث إلى deadletter\ ويكتب بجانبه سبباً مختصراً. السبب والسجل بلا محتوى الفاتورة
-    # (لا اسم زبون ولا مبالغ): المعرّف والتسلسل وGUID الفاتورة والنوع والرمز فقط.
-    param([Parameter(Mandatory = $true)][string]$Dir, [Parameter(Mandatory = $true)][string]$File, [Parameter(Mandatory = $true)]$Event,
-          [Parameter(Mandatory = $true)][string]$Code, [Parameter(Mandatory = $true)][string]$Reason, [Parameter(Mandatory = $true)][string]$Source,
-          [datetime]$NowUtc = [datetime]::UtcNow)
+    # (لا اسم زبون ولا مبالغ): المعرّف والتسلسل وGUID الفاتورة والنوع والرمز واسم الملف فقط.
+    # الترتيب: السبب أولاً ثم نقل الملف (rename) — فالملف لا يغيب أبداً قبل أن يُحفظ في العزل،
+    # ولا يُكتب فوق ملف معزول سابق بالاسم نفسه.
+    param([Parameter(Mandatory = $true)][string]$Dir, [Parameter(Mandatory = $true)][string]$File, [AllowNull()]$Event,
+          [hashtable]$SafeIds, [Parameter(Mandatory = $true)][string]$Code, [Parameter(Mandatory = $true)][string]$Reason,
+          [Parameter(Mandatory = $true)][string]$Source, [datetime]$NowUtc = [datetime]::UtcNow)
     $dl = Join-Path $Dir "deadletter"
     if (-not (Test-Path -LiteralPath $dl)) { New-Item -ItemType Directory -Path $dl -Force | Out-Null }
     $name = [IO.Path]::GetFileNameWithoutExtension($File)
+    if ((Test-Path -LiteralPath (Join-Path $dl ($name + ".json"))) -or (Test-Path -LiteralPath (Join-Path $dl ($name + ".reason.json")))) {
+        $name = $name + ".dup-" + [guid]::NewGuid().ToString("N").Substring(0, 8)
+    }
     $safeReason = ($Reason -replace '[\r\n\t]', ' ')
     if ($safeReason.Length -gt 200) { $safeReason = $safeReason.Substring(0, 200) }
+    $ids = @{ event_id = ""; source_seq = ""; bill_guid = ""; kind = "" }
+    if ($Event -is [System.Collections.IDictionary]) {
+        $ids = @{ event_id = [string]$Event.event_id; source_seq = [string]$Event.source_seq; bill_guid = [string]$Event.bill_guid; kind = [string]$Event.kind }
+    } elseif ($null -ne $SafeIds) { $ids = $SafeIds }
     $info = [ordered]@{
-        event_id = [string]$Event.event_id; source_seq = [string]$Event.source_seq; bill_guid = [string]$Event.bill_guid
-        kind = [string]$Event.kind; reason_code = $Code; reason = $safeReason; source = $Source
+        event_id = [string]$ids.event_id; source_seq = [string]$ids.source_seq; bill_guid = [string]$ids.bill_guid
+        kind = [string]$ids.kind; reason_code = $Code; reason = $safeReason; source = $Source
+        file_name = [IO.Path]::GetFileName($File); status = "isolated"
         at = $NowUtc.ToString("yyyy-MM-ddTHH:mm:ssZ", $script:Invariant)
     }
     Write-AmeenAtomicFile -Path (Join-Path $dl ($name + ".reason.json")) -Content (ConvertTo-AmeenCanonicalJson $info)
-    Move-Item -LiteralPath $File -Destination (Join-Path $dl ($name + ".json")) -Force
-    Add-Content -LiteralPath (Join-Path $Dir "deadletter.log") -Value ("{0}`t{1}`t{2}`t{3}`t{4}`t{5}`t{6}" -f $info.at, $info.source_seq, $info.event_id, $info.bill_guid, $info.kind, $Source, $Code) -Encoding UTF8
+    Move-Item -LiteralPath $File -Destination (Join-Path $dl ($name + ".json"))
+    Add-Content -LiteralPath (Join-Path $Dir "deadletter.log") -Value ("{0}`t{1}`t{2}`t{3}`t{4}`t{5}`t{6}`t{7}" -f $info.at, $info.source_seq, $info.event_id, $info.bill_guid, $info.kind, $Source, $Code, $info.file_name) -Encoding UTF8
 }
 
 function Get-AmeenDeadLetters {
@@ -488,7 +550,9 @@ function Get-AmeenDeadLetters {
     $list = New-Object System.Collections.Generic.List[object]
     if (-not (Test-Path -LiteralPath $dl)) { return }
     foreach ($f in @(Get-ChildItem -LiteralPath $dl -Filter "*.reason.json" | Sort-Object Name)) {
-        $info = ConvertTo-AmeenHashtable (Get-Content -Raw -LiteralPath $f.FullName -Encoding UTF8 | ConvertFrom-Json)
+        $read = Read-AmeenJsonFileSafe -Path $f.FullName
+        if (-not $read.ok -or -not ($read.value -is [System.Collections.IDictionary])) { continue }
+        $info = $read.value
         $info.file = Join-Path $dl ($f.Name -replace '\.reason\.json$', '.json')
         $info.reason_file = $f.FullName
         $list.Add($info)
@@ -496,38 +560,126 @@ function Get-AmeenDeadLetters {
     return $list.ToArray()
 }
 
+function Complete-AmeenDeadLetter {
+    # ينقل الحدث المعزول وسببه إلى deadletter\resolved\ (للتدقيق) بعد اكتمال إصلاحه فعلاً.
+    param([Parameter(Mandatory = $true)][string]$Dir, [Parameter(Mandatory = $true)]$Item, [Parameter(Mandatory = $true)][string]$Mode,
+          [string]$Note = "", [datetime]$NowUtc = [datetime]::UtcNow)
+    $resolved = Join-Path (Join-Path $Dir "deadletter") "resolved"
+    if (-not (Test-Path -LiteralPath $resolved)) { New-Item -ItemType Directory -Path $resolved -Force | Out-Null }
+    $stamp = $NowUtc.ToString("yyyyMMddTHHmmssZ", $script:Invariant)
+    $base = [IO.Path]::GetFileNameWithoutExtension([string]$Item.file)
+    if (Test-Path -LiteralPath $Item.file) { Move-Item -LiteralPath $Item.file -Destination (Join-Path $resolved ("{0}.{1}.{2}.json" -f $base, $Mode.ToLowerInvariant(), $stamp)) -Force }
+    if (Test-Path -LiteralPath $Item.reason_file) { Move-Item -LiteralPath $Item.reason_file -Destination (Join-Path $resolved ("{0}.{1}.{2}.reason.json" -f $base, $Mode.ToLowerInvariant(), $stamp)) -Force }
+    Add-Content -LiteralPath (Join-Path $Dir "deadletter.log") -Value ("{0}`t{1}`t{2}`t{3}`trepaired`t{4}`t{5}" -f $NowUtc.ToString("yyyy-MM-ddTHH:mm:ssZ", $script:Invariant), $Item.source_seq, $Item.event_id, $Item.bill_guid, $Mode, $Note) -Encoding UTF8
+}
+
+function Update-AmeenDeadLetterReason {
+    param([Parameter(Mandatory = $true)]$Item, [Parameter(Mandatory = $true)][hashtable]$Changes)
+    $read = Read-AmeenJsonFileSafe -Path $Item.reason_file
+    $info = @{}; if ($read.ok -and $read.value -is [System.Collections.IDictionary]) { $info = $read.value }
+    foreach ($k in $Changes.Keys) { $info[$k] = $Changes[$k] }
+    $info.Remove("file"); $info.Remove("reason_file")
+    Write-AmeenAtomicFile -Path $Item.reason_file -Content (ConvertTo-AmeenCanonicalJson $info)
+}
+
 function Repair-AmeenDeadLetter {
     # طريقتان آمنتان لإصلاح حدث معزول دون فقدانه ودون كسر الترتيب:
-    #   Resnapshot: يُعلَّم أن الفاتورة تحتاج لقطة جديدة؛ المطابقة التالية تقرأ حالتها الحالية من الأمين
-    #               وتُصدر حدثاً بتسلسل أحدث (الحالة الحالية هي الحقيقة، لا المحتوى القديم المعطوب).
+    #   Resnapshot: يُضاف طلب دائم إلى طابور اللقطات (status = resnapshot_pending في ملف السبب نفسه،
+    #               فلا يضيع ولو ضاعت state.json). الوكيل يقرأ الفاتورة مباشرة بالـGUID من الأمين — أيّاً
+    #               كان تاريخها، لا ضمن نافذة المطابقة — ويُصدر حدثاً بتسلسل أحدث. الطلب لا يُغلق إلا
+    #               بعد كتابة الحدث الجديد في الصندوق (Invoke-AmeenResnapshotQueue).
     #   Requeue:    الحدث نفسه بعد تصحيح ملفه يدوياً: تُعاد البصمة والمفتاح بتسلسله الأصلي، ويُتحقق منه،
     #               ثم يعود إلى pending\ في موضعه. إن سبقه حدث أحدث للفاتورة نفسها فالخادم يعدّه stale.
     param([Parameter(Mandatory = $true)][string]$Dir, [Parameter(Mandatory = $true)][hashtable]$State,
           [Parameter(Mandatory = $true)][long]$Seq, [ValidateSet("Resnapshot", "Requeue")][string]$Mode = "Resnapshot",
           [datetime]$NowUtc = [datetime]::UtcNow)
-    $item = @(Get-AmeenDeadLetters -Dir $Dir | Where-Object { [long]$_.source_seq -eq $Seq }) | Select-Object -First 1
+    $item = @(Get-AmeenDeadLetters -Dir $Dir | Where-Object { [string]$_.source_seq -eq ([string]$Seq) }) | Select-Object -First 1
     if ($null -eq $item) { throw "dead letter seq $Seq not found" }
-    $resolved = Join-Path (Join-Path $Dir "deadletter") "resolved"
-    if (-not (Test-Path -LiteralPath $resolved)) { New-Item -ItemType Directory -Path $resolved -Force | Out-Null }
-    $stamp = $NowUtc.ToString("yyyyMMddTHHmmssZ", $script:Invariant)
     if ($Mode -eq "Resnapshot") {
-        $State.bills[[string]$item.bill_guid] = @{ v = "resnapshot"; fp = $null; seen = $NowUtc.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", $script:Invariant) }
-    } else {
-        $evt = ConvertTo-AmeenHashtable (Get-Content -Raw -LiteralPath $item.file -Encoding UTF8 | ConvertFrom-Json)
-        if ($evt.kind -eq "upsert" -and $evt.bill -is [System.Collections.IDictionary]) { $evt.version_hash = Get-AmeenInvoiceVersionHash $evt.bill }
-        $evt.source_seq = $Seq
-        $evt.event_id = Get-AmeenInvoiceEventId -BillGuid ([string]$evt.bill_guid) -Seq $Seq -Kind ([string]$evt.kind) -VersionHash ([string]$evt.version_hash) -SourceEventAt ([string]$evt.source_event_at)
-        $why = Test-AmeenInvoiceEvent -Event $evt -NowUtc $NowUtc
-        if ($null -ne $why) { throw ("requeue refused (" + $why.code + "): " + $why.reason) }
-        $target = Join-Path (Join-Path $Dir "pending") (([long]$Seq).ToString("D12", $script:Invariant) + ".json")
-        if (Test-Path -LiteralPath $target) { throw "requeue refused: pending already has seq $Seq" }
-        Write-AmeenAtomicFile -Path $target -Content (ConvertTo-AmeenCanonicalJson $evt)
+        if ([string]$item.bill_guid -notmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') {
+            throw "resnapshot refused: bill_guid unknown for this dead letter (fix the file, then use Requeue)"
+        }
+        if ([string]$item.status -eq "resnapshot_pending") { return "ResnapshotQueued" }
+        Update-AmeenDeadLetterReason -Item $item -Changes @{
+            status = "resnapshot_pending"; requested_at = $NowUtc.ToString("yyyy-MM-ddTHH:mm:ssZ", $script:Invariant)
+            after_seq = ([long]$State.last_seq).ToString($script:Invariant); attempts = 0; last_error = ""; last_attempt_at = ""
+        }
+        Add-Content -LiteralPath (Join-Path $Dir "deadletter.log") -Value ("{0}`t{1}`t{2}`t{3}`tresnapshot-queued" -f $NowUtc.ToString("yyyy-MM-ddTHH:mm:ssZ", $script:Invariant), $item.source_seq, $item.event_id, $item.bill_guid) -Encoding UTF8
+        return "ResnapshotQueued"
     }
-    $base = [IO.Path]::GetFileNameWithoutExtension($item.file)
-    Move-Item -LiteralPath $item.file -Destination (Join-Path $resolved ("{0}.{1}.{2}.json" -f $base, $Mode.ToLowerInvariant(), $stamp)) -Force
-    Move-Item -LiteralPath $item.reason_file -Destination (Join-Path $resolved ("{0}.{1}.{2}.reason.json" -f $base, $Mode.ToLowerInvariant(), $stamp)) -Force
-    Add-Content -LiteralPath (Join-Path $Dir "deadletter.log") -Value ("{0}`t{1}`t{2}`t{3}`trepaired`t{4}" -f $NowUtc.ToString("yyyy-MM-ddTHH:mm:ssZ", $script:Invariant), $Seq, $item.event_id, $item.bill_guid, $Mode) -Encoding UTF8
-    return $Mode
+    $read = Read-AmeenJsonFileSafe -Path $item.file
+    if (-not $read.ok -or -not ($read.value -is [System.Collections.IDictionary])) { throw ("requeue refused: dead letter file is still unreadable (" + $read.error + ")") }
+    $evt = $read.value
+    if ($evt.kind -eq "upsert" -and $evt.bill -is [System.Collections.IDictionary]) { $evt.version_hash = Get-AmeenInvoiceVersionHash $evt.bill }
+    $evt.source_seq = $Seq
+    $evt.event_id = Get-AmeenInvoiceEventId -BillGuid ([string]$evt.bill_guid) -Seq $Seq -Kind ([string]$evt.kind) -VersionHash ([string]$evt.version_hash) -SourceEventAt ([string]$evt.source_event_at)
+    $why = Test-AmeenInvoiceEvent -Event $evt -NowUtc $NowUtc
+    if ($null -ne $why) { throw ("requeue refused (" + $why.code + "): " + $why.reason) }
+    $target = Join-Path (Join-Path $Dir "pending") (([long]$Seq).ToString("D12", $script:Invariant) + ".json")
+    if (Test-Path -LiteralPath $target) { throw "requeue refused: pending already has seq $Seq" }
+    Write-AmeenAtomicFile -Path $target -Content (ConvertTo-AmeenCanonicalJson $evt)
+    Complete-AmeenDeadLetter -Dir $Dir -Item $item -Mode "Requeue" -NowUtc $NowUtc
+    return "Requeue"
+}
+
+function Invoke-AmeenResnapshotQueue {
+    # يعالج طلبات Resnapshot الدائمة. Reader: scriptblock يستقبل GUID ويعيد
+    #   @{ status = 'found'|'missing'|'error'; observation = <ملاحظة كما في Resolve>; error = <رمز بلا محتوى> }
+    # ويقرأ الفاتورة مباشرة بمعرّفها من الأمين (قراءة فقط) بغض النظر عن تاريخها.
+    # القواعد:
+    #   * الطلب لا يُغلق إلا بعد كتابة حدثه الجديد في pending\ وحفظ الحالة (والحدث تسلسله أحدث من كل سابق).
+    #   * found ⇒ upsert بالمحتوى الحالي، missing ⇒ delete (الفاتورة لم تعد موجودة في الأمين).
+    #   * error ⇒ الطلب يبقى، attempts++ وسبب مختصر، وإعادة المحاولة بعد MinRetrySeconds.
+    #   * لا تكرار: إن كان للطلب حدث مسجَّل (emitted_seq) أو وُجد في pending\ حدث للفاتورة نفسها بتسلسل
+    #     بعد الطلب (انقطاع بين الكتابة والإغلاق)، يُغلق الطلب بلا حدث جديد.
+    param([Parameter(Mandatory = $true)][string]$Dir, [Parameter(Mandatory = $true)][hashtable]$State,
+          [Parameter(Mandatory = $true)][scriptblock]$Reader, [datetime]$NowUtc = [datetime]::UtcNow, [int]$MinRetrySeconds = 60)
+    $summary = @{ emitted = 0; completed = 0; failed = 0; waiting = 0; events = @() }
+    $requests = @(Get-AmeenDeadLetters -Dir $Dir | Where-Object { [string]$_.status -eq "resnapshot_pending" -or [string]$_.status -eq "resnapshot_emitted" })
+    foreach ($req in $requests) {
+        $guid = [string]$req.bill_guid
+        $after = [long]0; [void][long]::TryParse([string]$req.after_seq, [ref]$after)
+        if ([string]$req.status -eq "resnapshot_emitted" -and $req.emitted_seq) {
+            Complete-AmeenDeadLetter -Dir $Dir -Item $req -Mode "Resnapshot" -Note ("new_seq=" + $req.emitted_seq) -NowUtc $NowUtc
+            $summary.completed++; continue
+        }
+        $already = @(Get-AmeenOutboxPending -Dir $Dir -Max 100000 | Where-Object { [string]$_.event.bill_guid -eq $guid -and [long]$_.event.source_seq -gt $after }) | Select-Object -First 1
+        if ($null -ne $already) {
+            Update-AmeenDeadLetterReason -Item $req -Changes @{ status = "resnapshot_emitted"; emitted_seq = ([long]$already.event.source_seq).ToString($script:Invariant); emitted_event_id = [string]$already.event.event_id }
+            Complete-AmeenDeadLetter -Dir $Dir -Item $req -Mode "Resnapshot" -Note ("new_seq=" + $already.event.source_seq) -NowUtc $NowUtc
+            $summary.completed++; continue
+        }
+        if ($req.last_attempt_at) {
+            $last = [datetime]::Parse([string]$req.last_attempt_at, $script:Invariant, [Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal)
+            if (($NowUtc - $last).TotalSeconds -lt $MinRetrySeconds) { $summary.waiting++; continue }
+        }
+        $res = $null
+        try { $res = & $Reader $guid } catch { $res = @{ status = "error"; error = ("reader failed (" + $_.Exception.GetType().Name + ")") } }
+        if ($null -eq $res -or @("found", "missing") -notcontains [string]$res.status) {
+            $err = "reader error"; if ($null -ne $res -and $res.error) { $err = ([string]$res.error -replace '[\r\n\t]', ' ') }
+            if ($err.Length -gt 120) { $err = $err.Substring(0, 120) }
+            Update-AmeenDeadLetterReason -Item $req -Changes @{ attempts = ([int]$req.attempts + 1); last_error = $err; last_attempt_at = $NowUtc.ToString("yyyy-MM-ddTHH:mm:ssZ", $script:Invariant) }
+            $summary.failed++; continue
+        }
+        $obs = $res.observation
+        if ($null -eq $obs) { $obs = @{ guid = $guid; snapshot = $null; ops = @(); detected_at_utc = $NowUtc.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", $script:Invariant) } }
+        if ([string]$res.status -eq "missing") { $obs.snapshot = $null }
+        # يُفرض الإصدار: الحالة الحالية في الأمين هي ما يجب أن يصل، ولو طابقت آخر نسخة معروفة محلياً.
+        $State.bills[$guid] = @{ v = "resnapshot"; fp = $null; seen = [string]$obs.detected_at_utc }
+        $events = Resolve-AmeenInvoiceChanges -State $State -Observations @($obs)
+        if ($events.Count -ne 1) {
+            Update-AmeenDeadLetterReason -Item $req -Changes @{ attempts = ([int]$req.attempts + 1); last_error = "no event produced"; last_attempt_at = $NowUtc.ToString("yyyy-MM-ddTHH:mm:ssZ", $script:Invariant) }
+            $summary.failed++; continue
+        }
+        # ترتيب يحمي من الانقطاع: الحدث في الصندوق ← الحالة ← تسجيل emitted في الطلب ← الإغلاق.
+        Add-AmeenOutboxEvents -Dir $Dir -Events $events
+        Save-AmeenInvoiceState -Dir $Dir -State $State
+        Update-AmeenDeadLetterReason -Item $req -Changes @{ status = "resnapshot_emitted"; emitted_seq = ([long]$events[0].source_seq).ToString($script:Invariant); emitted_event_id = [string]$events[0].event_id }
+        Complete-AmeenDeadLetter -Dir $Dir -Item $req -Mode "Resnapshot" -Note ("new_seq=" + $events[0].source_seq) -NowUtc $NowUtc
+        $summary.emitted++; $summary.completed++
+        $summary.events += $events[0]
+    }
+    return $summary
 }
 
 function Send-AmeenInvoiceOutbox {
@@ -543,7 +695,9 @@ function Send-AmeenInvoiceOutbox {
         $next = [datetime]::Parse([string]$State.send.next_at, $script:Invariant, [Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal)
         if ($NowUtc -lt $next) { $result.skipped_backoff = $true; return $result }
     }
-    $pending = Get-AmeenOutboxPending -Dir $Dir -Max $BatchSize
+    $batch = Get-AmeenOutboxBatch -Dir $Dir -Max $BatchSize -NowUtc $NowUtc
+    $result.deadlettered += [int]$batch.isolated
+    $pending = $batch.items
     if ($pending.Count -eq 0) { return $result }
     $valid = New-Object System.Collections.Generic.List[object]
     foreach ($p in $pending) {
