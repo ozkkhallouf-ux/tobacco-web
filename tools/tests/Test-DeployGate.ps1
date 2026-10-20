@@ -63,7 +63,14 @@ function Send-GateAlert([string]$Message, [string]$DedupeKey) { [void]$script:Al
 function Get-RunningTaskNames([string[]]$TaskNames) { return @($script:Running) }
 # المهام كما يراها حساب البوابة: افتراضياً مرئية وموجَّهة عبر run-repo-task.ps1 وبلا موعد قريب.
 $script:TaskInfoOverride = $null
+$script:TaskInfoSequence = $null
 function Get-GateTaskInfo($Config, [string[]]$TaskNames) {
+    # تسلسل يتغيّر من نداء لآخر: يحاكي تغيّر حالة المهمة بين الفحص الأول وإعادة الفحص بعد الانتظار.
+    if ($null -ne $script:TaskInfoSequence -and $script:TaskInfoSequence.Count -gt 0) {
+        $next = $script:TaskInfoSequence[0]
+        if ($script:TaskInfoSequence.Count -gt 1) { $script:TaskInfoSequence = @($script:TaskInfoSequence | Select-Object -Skip 1) }
+        return @(& $next $Config $TaskNames)
+    }
     if ($null -ne $script:TaskInfoOverride) { return @($script:TaskInfoOverride) }
     $launcher = Join-Path $Config.gateDir 'run-repo-task.ps1'
     return @($TaskNames | ForEach-Object { [pscustomobject]@{ name = $_; visible = $true; state = 'Ready'; nextRunUtc = $null; actionText = ('powershell.exe -File "' + $launcher + '" -Script "tools/reader.ps1"') } })
@@ -138,7 +145,7 @@ function New-GateTestEnv {
     $config.requiredMainWorkflows = @('Deploy TOBACCO Web'); $config.requiredPrChecks = @('check')
     $config.drainTimeoutSeconds = 1; $config.pauseTasks = @('T1'); $config.routingExempt = @(); $config.deviceBaselineSha = ''
     $script:Approved = @{}; $script:PrChecks = @{}; $script:RedCi = @{}; $script:UnkindOnly = @{}; $script:Running = @(); $script:Alerts.Clear()
-    $script:TaskInfoOverride = $null; $script:MergeOverride = $null; $script:ResetOverride = $null
+    $script:TaskInfoOverride = $null; $script:MergeOverride = $null; $script:ResetOverride = $null; $script:TaskInfoSequence = $null
     return [pscustomobject]@{ Base = $base; Seed = $seed; Repo = $repo; Gate = $gate; Config = $config }
 }
 
@@ -797,6 +804,66 @@ try {
     Assert-True ($r.result -eq 'OK' -and (Get-TestHead $rg) -eq $g1) 'rollback proceeds once every task is visible and routed'
     $gateSrcText = [System.IO.File]::ReadAllText($gateScript)
     Assert-True ($gateSrcText -match "if \(-not \`$task\) \{ \`$running \+= \(\`$name \+ ' \(not visible\)'\)") 'Wait-TasksIdle never treats an invisible task as idle (real Get-RunningTaskNames)'
+
+    Write-Host '== Rollback: active task, task starting during the wait, failed re-check'
+    $ra = New-InitializedEnv
+    $a1 = Get-TestHead $ra
+    $a2 = Publish-TestRelease $ra @{ 'tools/reader.ps1' = "'active-task v2'`n" } -Approve
+    [void](Invoke-DeployGate -Config $ra.Config -GateMode 'Deploy')
+    $routed = { param($Config, $Names) @($Names | ForEach-Object { [pscustomobject]@{ name = $_; visible = $true; state = 'Ready'; nextRunUtc = $null; actionText = ('powershell.exe -File "' + (Join-Path $Config.gateDir 'run-repo-task.ps1') + '" -Script "tools/reader.ps1"') } }) }
+    $hidden = { param($Config, $Names) @($Names | ForEach-Object { [pscustomobject]@{ name = $_; visible = ($_ -ne 'T1'); state = 'Ready'; nextRunUtc = $null; actionText = ('powershell.exe -File "' + (Join-Path $Config.gateDir 'run-repo-task.ps1') + '" -Script "tools/reader.ps1"') } }) }
+    $direct = 'powershell.exe -File "' + (Join-Path (Join-Path $ra.Repo 'tools') 'reader.ps1') + '"'
+    $dueSoon = { param($Config, $Names) @($Names | ForEach-Object { [pscustomobject]@{ name = $_; visible = $true; state = 'Ready'; nextRunUtc = (Get-Date).ToUniversalTime().AddSeconds(15); actionText = $direct } }) }
+    $later = { param($Config, $Names) @($Names | ForEach-Object { [pscustomobject]@{ name = $_; visible = $true; state = 'Ready'; nextRunUtc = (Get-Date).ToUniversalTime().AddHours(1); actionText = $direct } }) }
+
+    # مهمة إنتاجية نشطة (أو بدأت أثناء الانتظار ولم تنتهِ قبل المهلة) ⇒ لا reset.
+    $script:Running = @('T1')
+    $snap = Get-TreeSnapshot $ra
+    $r = Invoke-DeployGate -Config $ra.Config -GateMode 'Rollback' -RollbackTo $a1
+    Assert-True ($r.result -eq 'SKIP' -and $r.reason -like '*tasks still running*T1*' -and (Get-TestHead $ra) -eq $a2) 'rollback while a production task is running (or starts during the wait) => SKIP, no reset'
+    Assert-True ((Get-TreeSnapshot $ra) -eq $snap) 'active task => no file, flag, inflight or state change'
+    # مهمة لا يمكن إثبات خمولها (غير مرئية لـGet-ScheduledTask) ⇒ «مشغولة» في الانتظار الحقيقي.
+    $script:Running = @('T1 (not visible)')
+    $r = Invoke-DeployGate -Config $ra.Config -GateMode 'Rollback' -RollbackTo $a1
+    Assert-True ($r.result -eq 'SKIP' -and $r.reason -like '*T1 (not visible)*' -and (Get-TreeSnapshot $ra) -eq $snap) 'idleness cannot be proven (invisible during the wait) => SKIP, nothing changed'
+    $script:Running = @()
+
+    # تغيّر الحالة أثناء الانتظار: الفحص الأول سليم، وإعادة الفحص بعد الانتظار تفشل ⇒ لا reset.
+    $script:TaskInfoSequence = @($routed, $hidden)
+    $r = Invoke-DeployGate -Config $ra.Config -GateMode 'Rollback' -RollbackTo $a1
+    Assert-True ($r.result -eq 'SKIP' -and $r.reason -like '*not rolling back*tasks became invisible*T1*' -and (Get-TestHead $ra) -eq $a2) 'task becomes invisible during the wait => re-check fails, SKIP before reset'
+    Assert-True ((Get-TreeSnapshot $ra) -eq $snap -and -not (Test-Path -LiteralPath (Join-Path $ra.Gate 'deploying.flag'))) 'failed re-check => no file or state change, flag cleared, no inflight'
+    $ra.Config.routingExempt = @('T1')
+    $script:TaskInfoSequence = @($later, $dueSoon)
+    $r = Invoke-DeployGate -Config $ra.Config -GateMode 'Rollback' -RollbackTo $a1
+    Assert-True ($r.result -eq 'SKIP' -and $r.reason -like '*not rolling back*about to start*' -and (Get-TreeSnapshot $ra) -eq $snap) 'exempt task becomes due during the wait => re-check fails, nothing changed'
+    $ra.Config.routingExempt = @()
+    $script:TaskInfoSequence = @($routed, { param($Config, $Names) Write-TestFile (Join-Path $Config.repoPath 'tools/late-edit.txt') 'x'; return @(& $routed $Config $Names) })
+    $r = Invoke-DeployGate -Config $ra.Config -GateMode 'Rollback' -RollbackTo $a1
+    Assert-True ($r.result -eq 'SKIP' -and $r.reason -like '*worktree changed during the pause*' -and (Get-TestHead $ra) -eq $a2) 'worktree changed during the wait => re-check fails, no reset'
+    Remove-Item -LiteralPath (Join-Path $ra.Repo 'tools/late-edit.txt') -Force
+    $script:TaskInfoSequence = $null
+
+    # Deploy يستعمل إعادة الفحص نفسها.
+    $a3 = Publish-TestRelease $ra @{ 'tools/reader.ps1' = "'active-task v3'`n" } -Approve
+    $script:TaskInfoSequence = @($routed, $hidden)
+    $r = Invoke-DeployGate -Config $ra.Config -GateMode 'Deploy'
+    Assert-True ($r.result -eq 'SKIP' -and $r.reason -like '*tasks became invisible*' -and (Get-TestHead $ra) -eq $a2) 'deploy shares the same post-wait re-check'
+    $script:TaskInfoSequence = $null
+
+    # بعد زوال كل الموانع: تراجع منقطع (inflight قبل reset) ثم Recover ثم تراجع ناجح.
+    $script:ResetOverride = {
+        param($Config, $Target)
+        [System.IO.File]::WriteAllText((Join-Path $Config.repoPath 'tools/reader.ps1'), "'half rollback'`n")
+        return [pscustomobject]@{ Code = 128; Out = @('interrupted'); Text = 'interrupted' }
+    }
+    $r = Invoke-DeployGate -Config $ra.Config -GateMode 'Rollback' -RollbackTo $a1
+    $script:ResetOverride = $null
+    Assert-True ($r.result -eq 'FAIL' -and (Test-Path -LiteralPath (Join-Path $ra.Gate 'inflight.json'))) 'guarded rollback interrupted mid reset => inflight.json kept'
+    $r = Invoke-DeployGate -Config $ra.Config -GateMode 'Recover'
+    Assert-True ($r.result -eq 'RECOVERED' -and (Get-TreeSnapshot $ra) -eq $snap) 'Recover returns the device exactly to its pre-rollback snapshot (files, flag, state)'
+    $r = Invoke-DeployGate -Config $ra.Config -GateMode 'Rollback' -RollbackTo $a1
+    Assert-True ($r.result -eq 'OK' -and (Get-TestHead $ra) -eq $a1) 'rollback succeeds once every guard passes'
 
     Write-Host '== Safety invariants in the source'
     $src = [System.IO.File]::ReadAllText($gateScript)
