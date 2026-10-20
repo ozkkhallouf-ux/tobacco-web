@@ -246,3 +246,10 @@ jobs:
       - name: Price sync heartbeat - orchestrator exit paths test
         shell: powershell
         run: .\tools\tests\Test-PriceSyncOrchestratorHeartbeat.ps1
+
+      # أحداث فواتير الأمين (المرحلة 2، غير مفعَّلة): الوكيل يعمل على 5.1 تحديداً، فبصمة
+      # المحتوى يجب أن تتطابق تحت كل ثقافة، وصندوق الإرسال المحلي لا يُفقد ولا يكرر ويرسل
+      # بالترتيب عند انقطاع الإنترنت ثم عودته — بلا SQL ولا Supabase حقيقيين.
+      - name: Ameen invoice events - detection and offline outbox test
+        shell: powershell
+        run: .\tools\tests\Test-AmeenInvoiceEvents.ps1
