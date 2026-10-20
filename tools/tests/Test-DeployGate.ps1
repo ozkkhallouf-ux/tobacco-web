@@ -769,6 +769,35 @@ try {
     $r = Invoke-DeployGate -Config $fc.Config -GateMode 'Recover'
     Assert-True ($r.result -eq 'RECOVERED' -and (Get-TestHead $fc) -eq $f2 -and @(Get-DirtyEntries $fc.Config).Count -eq 0) 'with the original inflight.json restored, Recover succeeds (fail-closed paths destroyed nothing)'
 
+    Write-Host '== Rollback obeys the task guard (Codex P1 on #337, second finding)'
+    $rg = New-InitializedEnv
+    $g1 = Get-TestHead $rg
+    $g2 = Publish-TestRelease $rg @{ 'tools/reader.ps1' = "'guarded rollback v2'`n" } -Approve
+    [void](Invoke-DeployGate -Config $rg.Config -GateMode 'Deploy')
+    $direct = 'powershell.exe -File "' + (Join-Path (Join-Path $rg.Repo 'tools') 'reader.ps1') + '"'
+    $guardCases = @(
+        @{ name = 'invisible task'; infos = @([pscustomobject]@{ name = 'T1'; visible = $false; state = ''; nextRunUtc = $null; actionText = '' }); result = 'STOP'; reason = '*not visible*SYSTEM*'; exempt = @() },
+        @{ name = 'unrouted task'; infos = @([pscustomobject]@{ name = 'T1'; visible = $true; state = 'Ready'; nextRunUtc = $null; actionText = $direct }); result = 'STOP'; reason = '*not routed through run-repo-task*'; exempt = @() },
+        @{ name = 'exempt task about to start'; infos = @([pscustomobject]@{ name = 'T1'; visible = $true; state = 'Ready'; nextRunUtc = (Get-Date).ToUniversalTime().AddSeconds(20); actionText = $direct }); result = 'SKIP'; reason = '*not rolling back*about to start*'; exempt = @('T1') })
+    foreach ($c in $guardCases) {
+        $rg.Config.routingExempt = $c.exempt
+        $script:TaskInfoOverride = $c.infos
+        $snap = Get-TreeSnapshot $rg
+        $r = Invoke-DeployGate -Config $rg.Config -GateMode 'Rollback' -RollbackTo $g1
+        Assert-True ($r.result -eq $c.result -and $r.reason -like $c.reason -and (Get-TestHead $rg) -eq $g2) ('rollback with ' + $c.name + ' => ' + $c.result + ', no reset')
+        Assert-True ((Get-TreeSnapshot $rg) -eq $snap) ('rollback with ' + $c.name + ' => no file, flag, inflight or state change')
+    }
+    $rg.Config.routingExempt = @()
+    $script:TaskInfoOverride = $null
+    Write-TestFile (Join-Path $rg.Repo '.git/index.lock') ''
+    $r = Invoke-DeployGate -Config $rg.Config -GateMode 'Rollback' -RollbackTo $g1
+    Assert-True ($r.result -eq 'STOP' -and $r.reason -like '*git operation in progress*' -and (Get-TestHead $rg) -eq $g2) 'rollback during another git operation => STOP'
+    Remove-Item -LiteralPath (Join-Path $rg.Repo '.git/index.lock') -Force
+    $r = Invoke-DeployGate -Config $rg.Config -GateMode 'Rollback' -RollbackTo $g1
+    Assert-True ($r.result -eq 'OK' -and (Get-TestHead $rg) -eq $g1) 'rollback proceeds once every task is visible and routed'
+    $gateSrcText = [System.IO.File]::ReadAllText($gateScript)
+    Assert-True ($gateSrcText -match "if \(-not \`$task\) \{ \`$running \+= \(\`$name \+ ' \(not visible\)'\)") 'Wait-TasksIdle never treats an invisible task as idle (real Get-RunningTaskNames)'
+
     Write-Host '== Safety invariants in the source'
     $src = [System.IO.File]::ReadAllText($gateScript)
     Assert-True ($src -notmatch "'pull'" -and $src -notmatch "'rebase'" -and $src -notmatch "'--hard'") 'gate never passes pull, rebase or --hard to git'

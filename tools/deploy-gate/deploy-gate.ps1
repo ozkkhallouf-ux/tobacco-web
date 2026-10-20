@@ -137,7 +137,9 @@ function Get-RunningTaskNames([string[]]$TaskNames) {
     $running = @()
     foreach ($name in $TaskNames) {
         $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
-        if ($task -and [string]$task.State -eq 'Running') { $running += $name }
+        # مهمة لا يراها الحساب لا تُعدّ خاملة أبداً (Codex P1 على #337): تبقى «مشغولة» فينتهي الانتظار بـSKIP.
+        if (-not $task) { $running += ($name + ' (not visible)'); continue }
+        if ([string]$task.State -eq 'Running') { $running += $name }
     }
     return $running
 }
@@ -548,6 +550,19 @@ function Read-InflightRecord($Config, $Paths) {
     return $r
 }
 
+# فحوص ما قبل التبديل مباشرة، مشتركة بين النشر والتراجع: بعد انتظار الخمول قد تتغيّر الشروط.
+function Get-SwitchBlockers($Config, [string]$Head) {
+    $late = Get-TaskGuard $Config @(Get-GateTaskInfo $Config (Get-GateTaskNames $Config)) ((Get-Date).ToUniversalTime())
+    $reasons = @()
+    if (@($late.invisible).Count -gt 0) { $reasons += ('tasks became invisible: ' + (@($late.invisible) -join ', ')) }
+    if (@($late.imminent).Count -gt 0) { $reasons += ('unrouted tasks about to start: ' + (@($late.imminent) -join ', ')) }
+    $markers = @(Get-GitOperationMarkers $Config)
+    if ($markers.Count -gt 0) { $reasons += ('git operation in progress: ' + ($markers -join ', ')) }
+    if ((Get-GitValue $Config @('rev-parse', 'HEAD')) -ne $Head) { $reasons += 'HEAD moved during the pause' }
+    if (@(Get-DirtyEntries $Config).Count -gt 0) { $reasons += 'worktree changed during the pause' }
+    return $reasons
+}
+
 function Wait-TasksIdle($Config) {
     $deadline = (Get-Date).AddSeconds([int]$Config.drainTimeoutSeconds)
     while ($true) {
@@ -770,14 +785,7 @@ function Invoke-DeployGate {
         return Complete-Gate $paths $record 'SKIP' ('tasks still running: ' + ($stillRunning -join ', ')) $true
     }
     # الشروط قد تتغيّر أثناء الانتظار: نعيد فحصها قبل التبديل مباشرة (لا TOCTOU).
-    $late = Get-TaskGuard $Config @(Get-GateTaskInfo $Config (Get-GateTaskNames $Config)) ((Get-Date).ToUniversalTime())
-    $reasons = @()
-    if (@($late.invisible).Count -gt 0) { $reasons += ('tasks became invisible: ' + (@($late.invisible) -join ', ')) }
-    if (@($late.imminent).Count -gt 0) { $reasons += ('unrouted tasks about to start: ' + (@($late.imminent) -join ', ')) }
-    $markers = @(Get-GitOperationMarkers $Config)
-    if ($markers.Count -gt 0) { $reasons += ('git operation in progress: ' + ($markers -join ', ')) }
-    if ((Get-GitValue $Config @('rev-parse', 'HEAD')) -ne $head) { $reasons += 'HEAD moved during the pause' }
-    if (@(Get-DirtyEntries $Config).Count -gt 0) { $reasons += 'worktree changed during the pause' }
+    $reasons = @(Get-SwitchBlockers $Config $head)
     if ($reasons.Count -gt 0) {
         Clear-DeployFlag $paths
         return Complete-Gate $paths $record 'SKIP' ('not switching: ' + ($reasons -join '; ')) $true
@@ -850,6 +858,13 @@ function Invoke-GateRollback($Config, $Paths, $Record, $State, [string]$Head, [s
     $Record.rollback_sha = $Head
     $markers = @(Get-GitOperationMarkers $Config)
     if ($markers.Count -gt 0) { return Complete-Gate $Paths $Record 'STOP' ('git operation in progress: ' + ($markers -join ', ')) $true }
+    # Codex P1 على #337: التراجع يبدّل ملفات الإنتاج مثل النشر تماماً، فيخضع لنفس حارس المهام:
+    # غير مرئية = STOP، غير موجَّهة = STOP، ويُعاد الفحص (والمواعيد القريبة) بعد الانتظار مباشرة.
+    $guard = Get-TaskGuard $Config @(Get-GateTaskInfo $Config (Get-GateTaskNames $Config)) ((Get-Date).ToUniversalTime())
+    $Record.tasks_invisible = @($guard.invisible)
+    $Record.tasks_unrouted = @($guard.unrouted)
+    if (@($guard.invisible).Count -gt 0) { return Complete-Gate $Paths $Record 'STOP' ('tasks not visible to the gate account (run as SYSTEM): ' + (@($guard.invisible) -join ', ')) $true }
+    if (@($guard.unrouted).Count -gt 0) { return Complete-Gate $Paths $Record 'STOP' ('tasks not routed through run-repo-task.ps1 (they would ignore deploying.flag): ' + (@($guard.unrouted) -join ', ')) $true }
     try { $backup = New-DeployBackup $Config $Paths $Head $toSha @(Get-ChangedFiles $Config $Head $toSha) }
     catch { return Complete-Gate $Paths $Record 'FAIL' ('backup failed before any change: ' + $_.Exception.Message) $true }
     $Record.backup_dir = $backup.dir
@@ -857,6 +872,8 @@ function Invoke-GateRollback($Config, $Paths, $Record, $State, [string]$Head, [s
     Set-DeployFlag $Paths $toSha
     $stillRunning = @(Wait-TasksIdle $Config)
     if ($stillRunning.Count -gt 0) { Clear-DeployFlag $Paths; return Complete-Gate $Paths $Record 'SKIP' ('tasks still running: ' + ($stillRunning -join ', ')) $true }
+    $reasons = @(Get-SwitchBlockers $Config $Head)
+    if ($reasons.Count -gt 0) { Clear-DeployFlag $Paths; return Complete-Gate $Paths $Record 'SKIP' ('not rolling back: ' + ($reasons -join '; ')) $true }
     $Record.writer_hashes_before = Get-WriterDiskHashes $Config
     # Codex P1 (#337): يُسجَّل التراجع في inflight.json قبل reset --keep، فانقطاعه في منتصفه
     # (HEAD بقي والشجرة متّسخة، أو HEAD تحرّك قبل التحقق) يُستعاد بـ-Mode Recover لا بالتخمين.

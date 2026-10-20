@@ -190,6 +190,10 @@ assert.match(recover, /interrupted rollback completed/);
 assert.match(recover, /refusing to guess the state/, "سجل مفقود مع علم أو شجرة متّسخة = توقف");
 assert.match(gateSrc, /outside the gate backups folder/);
 assert.match(gateSrc, /backup manifest does not match inflight\.json/);
+const rollbackSrc = gateSrc.slice(gateSrc.indexOf("function Invoke-GateRollback"), gateSrc.indexOf("function Complete-RollbackState"));
+assert.match(rollbackSrc, /Get-TaskGuard[\s\S]{0,1200}New-DeployBackup/, "التراجع يمرّ بحارس المهام قبل أي نسخ أو reset");
+assert.match(rollbackSrc, /Get-SwitchBlockers \$Config \$Head[\s\S]{0,2000}Invoke-GateReset/, "وإعادة الفحص بعد الانتظار قبل reset --keep");
+assert.match(gateSrc, /\$running \+= \(\$name \+ ' \(not visible\)'\)/, "مهمة غير مرئية ليست خاملة في Wait-TasksIdle");
 ok("تدقيق 2026-10-20: لا إصدار أقدم من الجهاز، الثغرات الست (a–f)، قفل، نسخة احتياطية بـSHA256، تحقق بعد التبديل، واستعادة آمنة");
 
 // 2) الـworkflow
