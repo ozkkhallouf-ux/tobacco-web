@@ -98,12 +98,14 @@ try {
 
   # ── ٤) محلّل التغييرات: لا تكرار، نفس الفاتورة عند التعديل ─────────────────────────────────────
   $state = New-AmeenInvoiceState
+  $seq0 = [long]$state.last_seq
+  Assert 'new state: sequence seeded from the clock (never restarts at 1)' ($seq0 -gt 1700000000000)
   $obs = { param($snap, $ops, $at) @{ guid = $G1; snapshot = $snap; ops = @($ops); detected_at_utc = $at; source = "incremental"; source_create_utc = "2026-10-20T15:25:06.000Z" } }
   $e = Resolve-AmeenInvoiceChanges -State $state -Observations @((& $obs $s1 @(@{ op = 1; at_utc = "2026-10-20T15:25:07.000Z" }) "2026-10-20T15:25:08.000Z"))
   Assert 'create: one upsert event' ($e.Count -eq 1 -and $e[0].kind -eq "upsert" -and $e[0].change -eq "created")
   Assert 'create: source time = log time' ($e[0].source_event_at -eq "2026-10-20T15:25:07.000Z")
-  Assert 'create: event_id = sha256(guid|kind|version|at) (same formula as the server)' ($e[0].event_id -eq (Get-AmeenSha256Hex ("{0}|upsert|{1}|2026-10-20T15:25:07.000Z" -f $G1.ToLowerInvariant(), $e[0].version_hash)))
-  Assert 'create: seq 1' ($e[0].source_seq -eq 1)
+  Assert 'create: event_id = sha256(guid|seq|kind|version|at) (same formula as the server)' ($e[0].event_id -eq (Get-AmeenSha256Hex ("{0}|{1}|upsert|{2}|2026-10-20T15:25:07.000Z" -f $G1.ToLowerInvariant(), ($seq0 + 1), $e[0].version_hash)))
+  Assert 'create: seq = seed + 1' ($e[0].source_seq -eq ($seq0 + 1))
   $createId = $e[0].event_id
 
   $e = Resolve-AmeenInvoiceChanges -State $state -Observations @((& $obs $s1 @() "2026-10-20T15:25:10.000Z"), (& $obs $s1r @() "2026-10-20T15:25:12.000Z"))
@@ -114,11 +116,22 @@ try {
   Assert 'edit: one updated event for the SAME bill_guid' ($e.Count -eq 1 -and $e[0].change -eq "updated" -and $e[0].bill_guid -eq $G1.ToLowerInvariant())
   Assert 'edit: new version, new event id' ($e[0].version_hash -ne (Get-AmeenInvoiceVersionHash $s1) -and $e[0].event_id -ne $createId)
   Assert 'edit: source time = latest op' ($e[0].source_event_at -eq "2026-10-20T15:30:00.500Z")
-  Assert 'edit: seq 2' ($e[0].source_seq -eq 2)
+  Assert 'edit: seq increases' ($e[0].source_seq -eq ($seq0 + 2))
   Assert 'state: still one bill tracked' ($state.bills.Count -eq 1)
 
   $e = Resolve-AmeenInvoiceChanges -State $state -Observations @((& $obs $s1 @(@{ op = 3; at_utc = "2026-10-20T15:31:00.000Z" }) "2026-10-20T15:31:01.000Z"))
   Assert 'revert to earlier content: emitted (not treated as duplicate)' ($e.Count -eq 1 -and $e[0].event_id -ne $createId -and $e[0].version_hash -eq (Get-AmeenInvoiceVersionHash $s1))
+
+  # ملاحظة المالك (2): A ← B ← A بنفس وقت المصدر تماماً — المفتاح يحمل التسلسل فلا يتطابق مع A الأول.
+  $abaState = New-AmeenInvoiceState
+  $sameAt = "2026-10-20T15:35:00.000Z"
+  $aba = @()
+  foreach ($snap in @($s1, $s2, $s1)) { $aba += Resolve-AmeenInvoiceChanges -State $abaState -Observations @((& $obs $snap @(@{ op = 3; at_utc = $sameAt }) "2026-10-20T15:35:01.000Z")) }
+  Assert 'A->B->A same timestamp: three events' ($aba.Count -eq 3)
+  Assert 'A->B->A same timestamp: last A key differs from first A key' ($aba[0].version_hash -eq $aba[2].version_hash -and $aba[0].event_id -ne $aba[2].event_id)
+  Assert 'A->B->A same timestamp: all keys distinct' (@($aba | ForEach-Object { $_.event_id } | Sort-Object -Unique).Count -eq 3)
+  Assert 'A->B->A same timestamp: strictly increasing seq' ($aba[0].source_seq -lt $aba[1].source_seq -and $aba[1].source_seq -lt $aba[2].source_seq)
+  Assert 'event key contains the bill guid and seq, not content alone' ((Get-AmeenInvoiceEventId -BillGuid "x" -Seq 5 -Kind "upsert" -VersionHash "h" -SourceEventAt "t") -ne (Get-AmeenInvoiceEventId -BillGuid "x" -Seq 6 -Kind "upsert" -VersionHash "h" -SourceEventAt "t") -and (Get-AmeenInvoiceEventId -BillGuid "x" -Seq 5 -Kind "upsert" -VersionHash "h" -SourceEventAt "t") -ne (Get-AmeenInvoiceEventId -BillGuid "y" -Seq 5 -Kind "upsert" -VersionHash "h" -SourceEventAt "t"))
 
   $unposted = ConvertTo-AmeenInvoiceSnapshot -Header (New-Header -Posted 0) -Lines @($L1, $L2)
   $e = Resolve-AmeenInvoiceChanges -State $state -Observations @((& $obs $unposted @(@{ op = 9; at_utc = "2026-10-20T15:32:00.000Z" }) "2026-10-20T15:32:01.000Z"))
@@ -126,7 +139,7 @@ try {
 
   $e = Resolve-AmeenInvoiceChanges -State $state -Observations @((& $obs $null @(@{ op = 2; at_utc = "2026-10-20T15:40:00.000Z" }) "2026-10-20T15:40:01.000Z"))
   Assert 'delete: one delete event' ($e.Count -eq 1 -and $e[0].kind -eq "delete" -and $e[0].version_hash -eq "deleted")
-  Assert 'delete: event id formula' ($e[0].event_id -eq (Get-AmeenSha256Hex ("{0}|delete|deleted|2026-10-20T15:40:00.000Z" -f $G1.ToLowerInvariant())))
+  Assert 'delete: event id formula' ($e[0].event_id -eq (Get-AmeenSha256Hex ("{0}|{1}|delete|deleted|2026-10-20T15:40:00.000Z" -f $G1.ToLowerInvariant(), $e[0].source_seq)))
   $e = Resolve-AmeenInvoiceChanges -State $state -Observations @((& $obs $null @() "2026-10-20T15:41:00.000Z"))
   Assert 'delete: not repeated' ($e.Count -eq 0)
   $e = Resolve-AmeenInvoiceChanges -State $state -Observations @((& $obs $s2 @(@{ op = 1; at_utc = "2026-10-20T15:50:00.000Z" }) "2026-10-20T15:50:01.000Z"))
@@ -144,6 +157,7 @@ try {
   $box = Join-Path $tempDir "outbox"
   Initialize-AmeenInvoiceOutbox -Dir $box
   $st = New-AmeenInvoiceState
+  $b0 = [long]$st.last_seq
   $ev1 = Resolve-AmeenInvoiceChanges -State $st -Observations @((& $obs $s1 @(@{ op = 1; at_utc = "2026-10-20T16:00:00.000Z" }) "2026-10-20T16:00:01.000Z"))
   Add-AmeenOutboxEvents -Dir $box -Events $ev1
   Save-AmeenInvoiceState -Dir $box -State $st
@@ -151,18 +165,20 @@ try {
   Add-AmeenOutboxEvents -Dir $box -Events $ev2
   Save-AmeenInvoiceState -Dir $box -State $st
   $p = Get-AmeenOutboxPending -Dir $box
-  Assert 'outbox: two pending in seq order' ($p.Count -eq 2 -and [long]$p[0].event.source_seq -eq 1 -and [long]$p[1].event.source_seq -eq 2)
+  Assert 'outbox: two pending in seq order' ($p.Count -eq 2 -and [long]$p[0].event.source_seq -eq ($b0 + 1) -and [long]$p[1].event.source_seq -eq ($b0 + 2))
   Assert 'outbox: event survives JSON round trip (bill guid, version)' ($p[1].event.bill_guid -eq $G1.ToLowerInvariant() -and $p[1].event.version_hash -eq $ev2[0].version_hash)
   Assert 'outbox: no temp files left' (@(Get-ChildItem -LiteralPath (Join-Path $box "pending") -Filter "*.tmp-*").Count -eq 0)
 
   $reloaded = Read-AmeenInvoiceState -Dir $box
-  Assert 'state: last_seq persisted' ($reloaded.last_seq -eq 2)
+  Assert 'state: last_seq persisted' ($reloaded.last_seq -eq ($b0 + 2))
   Assert 'state: bill version persisted' ($reloaded.bills[$G1.ToLowerInvariant()].v -eq $ev2[0].version_hash)
   $e = Resolve-AmeenInvoiceChanges -State $reloaded -Observations @((& $obs $s2 @() "2026-10-20T16:02:00.000Z"))
   Assert 'restart: same content after restart = no duplicate event' ($e.Count -eq 0)
   Remove-Item -LiteralPath (Join-Path $box "state.json") -Force
   $lost = Read-AmeenInvoiceState -Dir $box
-  Assert 'state lost: seq never goes back below pending events' ($lost.last_seq -ge 2)
+  Assert 'state lost: seq never goes back below pending events' ($lost.last_seq -ge ($b0 + 2))
+  $later = New-AmeenInvoiceState -NowUtc ([datetime]::UtcNow.AddSeconds(5))
+  Assert 'state lost with empty outbox: clock seed is above every earlier seq' ($later.last_seq -gt ($b0 + 2))
 
   # النقل يفشل (انقطاع إنترنت) ⇒ لا شيء يُحذف، وتأجيل تراجعي
   $failTransport = { param($Events) throw "network down" }
@@ -194,7 +210,7 @@ try {
   $ok = { param($Events) $script:seenSeqs += @($Events | ForEach-Object { [long]$_.source_seq }); return @($Events | ForEach-Object { @{ event_id = $_.event_id; outcome = "applied" } }) }
   $r = Send-AmeenInvoiceOutbox -Dir $box -State $st -Transport $ok -NowUtc $now.AddMinutes(30)
   Assert 'online again: all 3 acked' ($r.acked -eq 3 -and -not $r.error)
-  Assert 'online again: sent strictly in seq order' (($script:seenSeqs -join ",") -eq "1,2,3")
+  Assert 'online again: sent strictly in seq order' (($script:seenSeqs -join ",") -eq ((@(1, 2, 3) | ForEach-Object { $b0 + $_ }) -join ","))
   Assert 'online again: outbox empty' ((Get-AmeenOutboxPending -Dir $box).Count -eq 0)
   Assert 'online again: backoff cleared' ($st.send.failures -eq 0 -and $null -eq $st.send.next_at)
   Assert 'acked log has 3 lines' (@(Get-Content -LiteralPath (Join-Path $box "acked.log")).Count -eq 3)

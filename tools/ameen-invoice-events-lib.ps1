@@ -17,6 +17,8 @@
 #   * لا كتابة على الأمين: كل SQL يمرّ عبر Assert-AmeenReadOnlySql قبل التنفيذ.
 #   * لا تكرار: نسخة الفاتورة = بصمة SHA-256 لمحتواها القانوني؛ لا يُصدر حدث لنسخة
 #     مطابقة لآخر نسخة صدرت، والخادم يرفض الحدث المكرر بمفتاحه.
+#   * مفتاح الحدث = sha256(bill_guid|source_seq|kind|version_hash|source_event_at): GUID الفاتورة
+#     وتسلسل متزايد لا بصمة المحتوى وحدها، فالعودة لمحتوى سابق (A ← B ← A) حدث جديد.
 #   * الترتيب: تسلسل محلي متزايد لا يتراجع، والإرسال بترتيبه حصراً؛ فشل حدث يوقف ما بعده.
 # ============================================================
 
@@ -222,8 +224,24 @@ function Get-AmeenInvoiceVersionHash {
 }
 
 # ---------------------------------------------------------------- الحالة
+function Get-AmeenSeqSeed {
+    # بذرة التسلسل من الساعة (ميلي ثانية UTC): حالة جديدة أو ضائعة تبدأ فوق كل تسلسل سابق،
+    # فلا يتكرر (bill_guid, source_seq) أبداً ولا يُرفض حدث جديد كأنه قديم.
+    param([datetime]$NowUtc = [datetime]::UtcNow)
+    $epoch = New-Object DateTime 1970, 1, 1, 0, 0, 0, ([DateTimeKind]::Utc)
+    return [long][math]::Floor(($NowUtc.ToUniversalTime() - $epoch).TotalMilliseconds)
+}
+
 function New-AmeenInvoiceState {
-    return @{ schema = "ameen-invoice-agent-state/v1"; last_seq = [long]0; watermark = $null; bills = @{}; send = @{ failures = 0; next_at = $null } }
+    param([datetime]$NowUtc = [datetime]::UtcNow)
+    return @{ schema = "ameen-invoice-agent-state/v1"; last_seq = (Get-AmeenSeqSeed $NowUtc); watermark = $null; bills = @{}; send = @{ failures = 0; next_at = $null } }
+}
+
+function Get-AmeenInvoiceEventId {
+    param([Parameter(Mandatory = $true)][string]$BillGuid, [Parameter(Mandatory = $true)][long]$Seq,
+          [Parameter(Mandatory = $true)][string]$Kind, [Parameter(Mandatory = $true)][string]$VersionHash,
+          [Parameter(Mandatory = $true)][string]$SourceEventAt)
+    return Get-AmeenSha256Hex ("{0}|{1}|{2}|{3}|{4}" -f $BillGuid, $Seq.ToString($script:Invariant), $Kind, $VersionHash, $SourceEventAt)
 }
 
 function ConvertTo-AmeenHashtable {
@@ -271,7 +289,7 @@ function Resolve-AmeenInvoiceChanges {
             if (-not $at) { $at = [string]$o.detected_at_utc }
             $State.last_seq = [long]$State.last_seq + 1
             $kind = "upsert"
-            $eventId = Get-AmeenSha256Hex ("{0}|{1}|{2}|{3}" -f $guid, $kind, $version, $at)
+            $eventId = Get-AmeenInvoiceEventId -BillGuid $guid -Seq ([long]$State.last_seq) -Kind $kind -VersionHash $version -SourceEventAt $at
             $events.Add([ordered]@{
                 schema          = $script:AmeenInvoiceEventSchema
                 event_id        = $eventId
@@ -293,7 +311,7 @@ function Resolve-AmeenInvoiceChanges {
             if (-not $at) { $at = [string]$o.detected_at_utc }
             $State.last_seq = [long]$State.last_seq + 1
             $kind = "delete"
-            $eventId = Get-AmeenSha256Hex ("{0}|{1}|{2}|{3}" -f $guid, $kind, "deleted", $at)
+            $eventId = Get-AmeenInvoiceEventId -BillGuid $guid -Seq ([long]$State.last_seq) -Kind $kind -VersionHash "deleted" -SourceEventAt $at
             $events.Add([ordered]@{
                 schema          = $script:AmeenInvoiceEventSchema
                 event_id        = $eventId
@@ -369,8 +387,8 @@ function Get-AmeenOutboxMaxSeq {
 }
 
 function Add-AmeenOutboxEvents {
-    # يُكتب كل حدث قبل حفظ الحالة: إن انقطع التيار بينهما يُعاد رصد الفاتورة ويصدر الحدث
-    # بنفس event_id (نفس النسخة ونفس وقت المصدر)، فيرفضه الخادم كمكرر — لا فقدان ولا تكرار.
+    # يُكتب كل حدث قبل حفظ الحالة: إن انقطع التيار بينهما يُعاد رصد الفاتورة ويصدر الحدث بتسلسل
+    # أحدث؛ الخادم يجد النسخة نفسها فيعيد noop (أو stale إن سبقه الأحدث) — لا فقدان ولا صف مكرر.
     param([Parameter(Mandatory = $true)][string]$Dir, $Events)
     foreach ($e in @($Events)) {
         if ($null -eq $e) { continue }

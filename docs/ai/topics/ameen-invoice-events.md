@@ -43,10 +43,10 @@
 | `tools/ameen-invoice-events-lib.ps1` | دوال نقية: حارس القراءة، SQL الرصد، اللقطة القانونية، بصمة SHA-256، محلّل التغييرات، صندوق الإرسال والإرسال |
 | `tools/ameen-invoice-event-agent.ps1` | الوكيل: الرصد كل ثانيتين، مطابقة كاملة كل 10 دقائق، كتابة الصندوق، والإرسال المشروط |
 | `tools/tests/Test-AmeenInvoiceEvents.ps1` | اختبار 5.1/7: الحارس، ثبات البصمة تحت كل ثقافة، الإنشاء/التعديل/الرجوع/الحذف/الإحياء/إلغاء الترحيل/المرتجع، الانقطاع والترتيب |
-| `supabase/proposed/18-ameen-invoice-events.sql` | جدولا `ameen_invoices` و`ameen_invoice_events` ودالة `apply_ameen_invoice_events` |
+| `supabase/proposed/18-ameen-invoice-events.sql` | جداول `ameen_invoices` و`ameen_invoice_events` و`ameen_invoice_dirty_days`، والعرض `ameen_invoice_daily_totals`، ودالة `apply_ameen_invoice_events` |
 | `supabase/proposed/18-ameen-invoice-events-rollback.sql` | التراجع |
-| `supabase/tests/ameen-invoice-events.sql` | اختبار SQL حي (أمن، ترتيب، تكرار، شاهد قبر) |
-| `scripts/check-ameen-invoice-events.mjs` | فحص البوابة: عقود ساكنة + SQL حي + اختبار PowerShell |
+| `supabase/tests/ameen-invoice-events.sql` | اختبار SQL حي (126 تأكيداً: أمن، ترتيب، تكرار، شاهد قبر، الأيام المتأثرة، A ← B ← A، إعادة المحاولة، الوصول خارج الترتيب) |
+| `scripts/check-ameen-invoice-events.mjs` | فحص البوابة: عقود ساكنة + SQL حي + اختبار PowerShell، وقائمة اختبارات إلزامية بأسمائها (حذف أيٍّ منها يُسقط الفحص) |
 
 ### التصميم
 
@@ -64,7 +64,9 @@ AmnDb002 (قراءة فقط، LOCK_TIMEOUT 3000، بلا NOLOCK)
   ameen_invoices: صف لكل bill_guid، revision++ عند كل تغيير، الحذف شاهد قبر
 ```
 
-- **عدم التكرار ثلاث طبقات:** الوكيل لا يُصدر نسخة مطابقة لآخر ما صدر؛ `event_id = sha256(bill_guid|kind|version_hash|source_event_at)` يُعاد حسابه على الخادم فيرفض المكرر؛ والصف مفتاحه `bill_guid`.
+- **عدم التكرار ثلاث طبقات:** الوكيل لا يُصدر نسخة مطابقة لآخر ما صدر؛ `event_id = sha256(bill_guid|source_seq|kind|version_hash|source_event_at)` يُعاد حسابه على الخادم فيرفض المكرر؛ والصف مفتاحه `bill_guid`.
+- **المفتاح يحمل GUID الفاتورة وتسلسلاً متزايداً، لا بصمة المحتوى وحدها** (ملاحظة المالك 2026-10-20): A ← B ← A — حتى بنفس وقت المصدر — ثلاثة أحداث مختلفة، والأخير يُطبَّق ولا يُعامل كمكرر. بذرة التسلسل من الساعة (ميلي ثانية UTC)، فضياع `state.json` مع صندوق فارغ لا يعيده إلى 1.
+- **الأيام المتأثرة وإعادة احتساب التقارير** (ملاحظة المالك 2026-10-20): كل حدث مطبَّق يعلّم يوم الفاتورة القديم والجديد في `ameen_invoice_dirty_days`. تعديل بلا تغيير التاريخ يعطي اليوم نفسه مرتين، وعدة أحداث في الطلب نفسه قد تعطيه أكثر؛ تُزال المكررات بـ`DISTINCT` قبل `insert … on conflict (day) do update` واحد في نهاية الطلب (بدونه: `ON CONFLICT DO UPDATE command cannot affect row a second time` — ثبت باختبار طفرة). `mark_count` يزيد مرة لكل طلب لمس اليوم. المجاميع في العرض `ameen_invoice_daily_totals` (security_invoker) تُحسب من الفواتير الفعّالة مباشرة، فتبقى صحيحة بعد التعديل والنقل والحذف بلا عدّ مزدوج.
 - **الترتيب:** تسلسل محلي لا يتراجع (حتى لو ضاع `state.json` يبدأ بعد أكبر حدث معلّق)، والإرسال بالترتيب حصراً، وفشل الدفعة يوقف ما بعدها؛ والخادم يرفض الأقدم.
 - **الانقطاع:** الأحداث على القرص قبل حفظ الحالة؛ تراجع أسّي 2←300 ث؛ رد ناقص أو نتيجة غير معروفة = فشل بلا حذف.
 - **الرجوع لمحتوى سابق (A ← B ← A)** حدث جديد لأن وقت المصدر جزء من المفتاح.

@@ -22,8 +22,14 @@
 --     آخر — ولو موظفاً أو مالكاً — يُرفض بـ 42501. لا احتياط بمفتاح service_role.
 --   * الترتيب: يُطبَّق الحدث فقط إن كان (source_event_at, source_seq) أحدث مما في الصف؛ الأقدم «stale»
 --     ولا يغيّر شيئاً. داخل الدفعة تُعالج الأحداث بترتيب source_seq، مع قفل استشاري لكل فاتورة.
---   * سلامة المفتاح: event_id يُعاد حسابه على الخادم = sha256(bill_guid|kind|version_hash|source_event_at)
---     كما يبنيه الوكيل، فلا يُقبل مفتاح مختلَق.
+--   * مفتاح الحدث = sha256(bill_guid|source_seq|kind|version_hash|source_event_at): يحمل GUID الفاتورة
+--     وتسلسلاً متزايداً، لا بصمة المحتوى وحدها — فعودة الفاتورة لمحتوى سابق (A ← B ← A) حدث جديد لا
+--     «مكرر» (ملاحظة المالك 2026-10-20). يُعاد حسابه على الخادم، فلا يُقبل مفتاح مختلَق.
+--   * الأيام المتأثرة: كل حدث مطبَّق يعلّم يوم الفاتورة القديم والجديد في ameen_invoice_dirty_days
+--     لإعادة احتساب التقارير. التعديل بلا تغيير التاريخ يعطي اليوم نفسه مرتين، فتُزال الأيام المكررة
+--     (DISTINCT) قبل إدخال واحد في نهاية الطلب — لا خطأ «ON CONFLICT … a second time» ولا عدّ مزدوج.
+--   * المجاميع اليومية تُحسب من المصدر نفسه (عرض ameen_invoice_daily_totals) فتبقى صحيحة بعد أي
+--     تعديل أو حذف بلا تراكم.
 --   * القراءة: الموظفون فقط (is_staff()).
 --   * حدود: ≤ 200 حدث و≤ 4MB لكل طلب، ≤ 256KB لكل فاتورة، ولا طابع زمني مستقبلي بأكثر من 5 دقائق.
 --
@@ -87,8 +93,34 @@ create table if not exists public.ameen_invoice_events (
 create index if not exists ameen_invoice_events_bill_idx
   on public.ameen_invoice_events (bill_guid, received_at desc);
 
+-- أيام تحتاج إعادة احتساب التقارير المرتبطة. صف واحد لكل يوم؛ mark_count يزيد مرة واحدة لكل طلب
+-- لمس اليوم (لا لكل حدث)، فيعرف المستهلك أن اليوم تغيّر منذ آخر احتساب عبر last_marked_at.
+create table if not exists public.ameen_invoice_dirty_days (
+  day            date primary key,
+  first_marked_at timestamptz not null default now(),
+  last_marked_at  timestamptz not null default now(),
+  mark_count      integer not null default 1 check (mark_count >= 1)
+);
+
+-- مجاميع يومية محسوبة من الفواتير الفعّالة مباشرة (لا تخزين، فلا انحراف بعد التعديل أو الحذف).
+create or replace view public.ameen_invoice_daily_totals
+with (security_invoker = true) as
+select i.bill_date as day,
+       i.bill_type,
+       count(*)::integer as bills,
+       coalesce(sum(case when pg_catalog.jsonb_typeof(i.payload -> 'total') = 'number' then (i.payload ->> 'total')::numeric end), 0) as total,
+       coalesce(sum(case when pg_catalog.jsonb_typeof(i.payload -> 'total_disc') = 'number' then (i.payload ->> 'total_disc')::numeric end), 0) as total_disc,
+       coalesce(sum(case when pg_catalog.jsonb_typeof(i.payload -> 'first_pay') = 'number' then (i.payload ->> 'first_pay')::numeric end), 0) as first_pay
+  from public.ameen_invoices i
+ where i.status = 'active'
+ group by i.bill_date, i.bill_type;
+
 comment on table public.ameen_invoices is
   'فواتير الأمين (proposed/18): صف لكل bu000.GUID. الكتابة عبر apply_ameen_invoice_events فقط؛ القراءة للموظفين.';
+comment on table public.ameen_invoice_dirty_days is
+  'أيام فواتير الأمين التي تغيّرت وتحتاج إعادة احتساب تقاريرها (proposed/18). الكتابة عبر الدالة فقط.';
+comment on view public.ameen_invoice_daily_totals is
+  'مجاميع يومية من ameen_invoices الفعّالة (proposed/18). security_invoker: تخضع لسياسة القراءة نفسها.';
 comment on table public.ameen_invoice_events is
   'سجل أحداث فواتير الأمين (proposed/18): مفتاح event_id يمنع التكرار. الكتابة عبر الدالة فقط.';
 
@@ -96,11 +128,17 @@ alter table public.ameen_invoices enable row level security;
 alter table public.ameen_invoices force row level security;
 alter table public.ameen_invoice_events enable row level security;
 alter table public.ameen_invoice_events force row level security;
+alter table public.ameen_invoice_dirty_days enable row level security;
+alter table public.ameen_invoice_dirty_days force row level security;
 
 revoke all on table public.ameen_invoices from public, anon, authenticated, service_role;
 revoke all on table public.ameen_invoice_events from public, anon, authenticated, service_role;
+revoke all on table public.ameen_invoice_dirty_days from public, anon, authenticated, service_role;
+revoke all on table public.ameen_invoice_daily_totals from public, anon, authenticated, service_role;
 grant select on table public.ameen_invoices to authenticated;
 grant select on table public.ameen_invoice_events to authenticated;
+grant select on table public.ameen_invoice_dirty_days to authenticated;
+grant select on table public.ameen_invoice_daily_totals to authenticated;
 
 drop policy if exists "staff can read ameen invoices" on public.ameen_invoices;
 create policy "staff can read ameen invoices"
@@ -112,6 +150,13 @@ create policy "staff can read ameen invoices"
 drop policy if exists "staff can read ameen invoice events" on public.ameen_invoice_events;
 create policy "staff can read ameen invoice events"
   on public.ameen_invoice_events
+  for select
+  to authenticated
+  using ((select public.is_staff()));
+
+drop policy if exists "staff can read ameen invoice dirty days" on public.ameen_invoice_dirty_days;
+create policy "staff can read ameen invoice dirty days"
+  on public.ameen_invoice_dirty_days
   for select
   to authenticated
   using ((select public.is_staff()));
@@ -159,6 +204,10 @@ declare
   v_dupes    integer := 0;
   v_stale    integer := 0;
   v_noop     integer := 0;
+  v_old_day  date;
+  v_new_day  date;
+  v_days     date[] := '{}'::date[];
+  v_marked   integer := 0;
 begin
   if not public.ameen_invoice_is_sync_writer() then
     raise exception 'apply_ameen_invoice_events is restricted to the trusted sync identity'
@@ -227,7 +276,7 @@ begin
     end if;
     -- المفتاح مشتقّ لا مختلَق: نفس صيغة الوكيل حرفياً.
     if v_id <> pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(
-         (v_evt ->> 'bill_guid') || '|' || v_kind || '|' || v_hash || '|' || v_at_text, 'UTF8')), 'hex') then
+         (v_evt ->> 'bill_guid') || '|' || (v_evt ->> 'source_seq') || '|' || v_kind || '|' || v_hash || '|' || v_at_text, 'UTF8')), 'hex') then
       raise exception 'event_id does not match event content' using errcode = '22023';
     end if;
     if v_kind = 'upsert' then
@@ -254,9 +303,11 @@ begin
 
     -- ── الترتيب لكل فاتورة ──
     perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('ameen_invoice:' || v_guid::text, 0));
-    select i.status, i.version_hash, i.source_event_at, i.source_seq into v_cur
+    select i.status, i.version_hash, i.source_event_at, i.source_seq, i.bill_date into v_cur
       from public.ameen_invoices i where i.bill_guid = v_guid for update;
     v_found := found;
+    v_old_day := case when v_found and v_cur.status = 'active' then v_cur.bill_date end;
+    v_new_day := case when v_kind = 'upsert' and (v_bill ->> 'bill_date') ~ '^\d{4}-\d{2}-\d{2}$' then (v_bill ->> 'bill_date')::date end;
 
     if v_found and (v_at, v_seq) <= (v_cur.source_event_at, v_cur.source_seq) then
       v_outcome := 'stale';
@@ -310,6 +361,11 @@ begin
       (event_id, bill_guid, kind, version_hash, source_event_at, source_seq, detected_at, outcome, writer_id, received_at)
     values (v_id, v_guid, v_kind, v_hash, v_at, v_seq, v_detected, v_outcome, v_writer, v_now);
 
+    -- اليوم القديم والجديد للتقارير؛ قد يتكرران (تعديل بلا تغيير التاريخ) — يُزال التكرار لاحقاً.
+    if v_outcome = 'applied' then
+      v_days := v_days || v_old_day || v_new_day;
+    end if;
+
     if v_outcome = 'applied' then v_applied := v_applied + 1;
     elsif v_outcome = 'stale' then v_stale := v_stale + 1;
     else v_noop := v_noop + 1;
@@ -317,8 +373,19 @@ begin
     v_results := v_results || pg_catalog.jsonb_build_array(pg_catalog.jsonb_build_object('event_id', v_id, 'outcome', v_outcome));
   end loop;
 
+  -- إدخال واحد للأيام المتأثرة بعد إزالة التكرار: ON CONFLICT DO UPDATE لا يقبل الصف نفسه مرتين
+  -- في أمر واحد، والعدّ يزيد مرة واحدة لكل يوم لكل طلب.
+  insert into public.ameen_invoice_dirty_days as d (day, first_marked_at, last_marked_at, mark_count)
+  select distinct x.day, v_now, v_now, 1
+    from pg_catalog.unnest(v_days) as x(day)
+   where x.day is not null
+  on conflict (day) do update
+    set last_marked_at = excluded.last_marked_at, mark_count = d.mark_count + 1;
+  get diagnostics v_marked = row_count;
+
   return pg_catalog.jsonb_build_object(
-    'results', v_results, 'applied', v_applied, 'duplicate', v_dupes, 'stale', v_stale, 'noop', v_noop);
+    'results', v_results, 'applied', v_applied, 'duplicate', v_dupes, 'stale', v_stale, 'noop', v_noop,
+    'dirty_days', v_marked);
 end;
 $$;
 

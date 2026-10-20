@@ -103,7 +103,7 @@ begin
 end;
 $$;
 
--- حدث كما يبنيه الوكيل حرفياً (event_id = sha256(guid|kind|hash|at))
+-- حدث كما يبنيه الوكيل حرفياً (event_id = sha256(guid|seq|kind|hash|at))
 create or replace function pg_temp.hx(p text) returns text language sql as $$
   select encode(sha256(convert_to(p, 'UTF8')), 'hex')
 $$;
@@ -111,14 +111,14 @@ create or replace function pg_temp.ev(p_guid text, p_kind text, p_ver text, p_at
 language sql as $$
   select jsonb_strip_nulls(jsonb_build_object(
     'schema', 'ameen-invoice-event/v1',
-    'event_id', pg_temp.hx(p_guid || '|' || p_kind || '|' || p_ver || '|' || p_at),
+    'event_id', pg_temp.hx(p_guid || '|' || p_seq::text || '|' || p_kind || '|' || p_ver || '|' || p_at),
     'kind', p_kind, 'bill_guid', p_guid, 'version_hash', p_ver,
     'source_event_at', p_at, 'source_seq', p_seq, 'detected_at', p_at,
     'bill', p_bill))
 $$;
-create or replace function pg_temp.bill(p_guid text, p_type int, p_total numeric, p_named boolean default true, p_posted boolean default true) returns jsonb
+create or replace function pg_temp.bill(p_guid text, p_type int, p_total numeric, p_named boolean default true, p_posted boolean default true, p_date text default '2026-10-20') returns jsonb
 language sql as $$
-  select jsonb_build_object('bill_guid', p_guid, 'bill_type', p_type, 'number', 1001, 'bill_date', '2026-10-20',
+  select jsonb_build_object('bill_guid', p_guid, 'bill_type', p_type, 'number', 1001, 'bill_date', p_date,
     'is_named', p_named, 'is_posted', p_posted, 'customer_guid', case when p_named then 'aaaaaaaa-0000-0000-0000-000000000001' end,
     'total', p_total, 'lines', jsonb_build_array(jsonb_build_object('line_guid', 'bbbbbbbb-0000-0000-0000-000000000001', 'qty', 10, 'price', p_total / 10)))
 $$;
@@ -282,6 +282,109 @@ begin
 end
 $tests$;
 
+-- ١٥ب) ملاحظات المالك (2026-10-20) — اختبارات إلزامية
+do $owner$
+declare
+  g text := 'd0000000-0000-0000-0000-000000000001';
+  h text := 'd0000000-0000-0000-0000-000000000002';
+  vA text := pg_temp.hx('owner-A');
+  vB text := pg_temp.hx('owner-B');
+  vC text := pg_temp.hx('owner-C');
+  vX text := pg_temp.hx('owner-A-second-round');   -- محتوى A جديد (يختلف عن الحالي) لاختبار A ← B ← A
+  vY text := pg_temp.hx('owner-B-second-round');
+  day1 date := '2026-09-01';
+  batch jsonb;
+  r jsonb;
+  mc integer;
+begin
+  -- (1) تعديل فاتورة دون تغيير تاريخها: اليوم القديم = الجديد ⇒ يُزال التكرار قبل الإدخال (لا خطأ ON CONFLICT)
+  r := pg_temp.apply_as('sync', jsonb_build_array(pg_temp.ev(g, 'upsert', vA, '2026-10-20T16:00:00.000Z', 1000, pg_temp.bill(g, 1, 100, true, true, '2026-09-01'))));
+  perform pg_temp.expect('same-day: create marks the day once', (select mark_count from public.ameen_invoice_dirty_days where day = day1)::text, '1');
+  perform pg_temp.expect('same-day: daily total after create', (select total::text from public.ameen_invoice_daily_totals where day = day1 and bill_type = 1), '100');
+  r := pg_temp.apply_as('sync', jsonb_build_array(pg_temp.ev(g, 'upsert', vB, '2026-10-20T16:01:00.000Z', 1001, pg_temp.bill(g, 1, 130, true, true, '2026-09-01'))));
+  perform pg_temp.expect('same-day edit: applied without error', r -> 'results' -> 0 ->> 'outcome', 'applied');
+  perform pg_temp.expect('same-day edit: day counted once in this request', r ->> 'dirty_days', '1');
+  perform pg_temp.expect('same-day edit: still one dirty row for the day', (select count(*) from public.ameen_invoice_dirty_days where day = day1)::text, '1');
+  perform pg_temp.expect('same-day edit: mark_count +1 (not +2)', (select mark_count from public.ameen_invoice_dirty_days where day = day1)::text, '2');
+  perform pg_temp.expect('same-day edit: daily total recomputed (no double count)', (select total::text from public.ameen_invoice_daily_totals where day = day1 and bill_type = 1), '130');
+  perform pg_temp.expect('same-day edit: bill count unchanged', (select bills::text from public.ameen_invoice_daily_totals where day = day1 and bill_type = 1), '1');
+
+  -- (1ب) عدة تعديلات لنفس الفاتورة في الطلب نفسه، ومعها فاتورة ثانية في اليوم نفسه ⇒ اليوم مرة واحدة
+  batch := jsonb_build_array(
+    pg_temp.ev(g, 'upsert', vC, '2026-10-20T16:02:00.000Z', 1002, pg_temp.bill(g, 1, 140, true, true, '2026-09-01')),
+    pg_temp.ev(g, 'upsert', vA, '2026-10-20T16:03:00.000Z', 1003, pg_temp.bill(g, 1, 150, true, true, '2026-09-01')),
+    pg_temp.ev(h, 'upsert', vA, '2026-10-20T16:03:00.000Z', 1004, pg_temp.bill(h, 1, 50, true, true, '2026-09-01')));
+  r := pg_temp.apply_as('sync', batch);
+  perform pg_temp.expect('batch same day: three applied', r ->> 'applied', '3');
+  perform pg_temp.expect('batch same day: one dirty day in the request', r ->> 'dirty_days', '1');
+  perform pg_temp.expect('batch same day: mark_count +1 for the whole request', (select mark_count from public.ameen_invoice_dirty_days where day = day1)::text, '3');
+  perform pg_temp.expect('batch same day: totals = latest content of each bill', (select total::text from public.ameen_invoice_daily_totals where day = day1 and bill_type = 1), '200');
+  perform pg_temp.expect('batch same day: two bills that day', (select bills::text from public.ameen_invoice_daily_totals where day = day1 and bill_type = 1), '2');
+
+  -- (1ج) تعديل ينقل التاريخ ⇒ اليومان كلاهما للإعادة، والمجاميع تنتقل بلا بقايا
+  r := pg_temp.apply_as('sync', jsonb_build_array(pg_temp.ev(h, 'upsert', vB, '2026-10-20T16:04:00.000Z', 1005, pg_temp.bill(h, 1, 50, true, true, '2026-09-02'))));
+  perform pg_temp.expect('date move: both days marked', r ->> 'dirty_days', '2');
+  perform pg_temp.expect('date move: old day total drops', (select total::text from public.ameen_invoice_daily_totals where day = day1 and bill_type = 1), '150');
+  perform pg_temp.expect('date move: new day total', (select total::text from public.ameen_invoice_daily_totals where day = '2026-09-02' and bill_type = 1), '50');
+
+  -- (1د) حذف ⇒ يومه للإعادة، ويخرج من المجاميع
+  r := pg_temp.apply_as('sync', jsonb_build_array(pg_temp.ev(h, 'delete', 'deleted', '2026-10-20T16:05:00.000Z', 1006)));
+  perform pg_temp.expect('delete: its day marked', r ->> 'dirty_days', '1');
+  perform pg_temp.expect('delete: day leaves totals', (select count(*)::text from public.ameen_invoice_daily_totals where day = '2026-09-02'), '0');
+
+  -- (2) A ← B ← A بنفس وقت المصدر: المفتاح يحمل GUID والتسلسل فلا يُرفض الأخير كمكرر
+  r := pg_temp.apply_as('sync', jsonb_build_array(
+         pg_temp.ev(g, 'upsert', vX, '2026-10-20T16:10:00.000Z', 1010, pg_temp.bill(g, 1, 10, true, true, '2026-09-01')),
+         pg_temp.ev(g, 'upsert', vY, '2026-10-20T16:10:00.000Z', 1011, pg_temp.bill(g, 1, 20, true, true, '2026-09-01')),
+         pg_temp.ev(g, 'upsert', vX, '2026-10-20T16:10:00.000Z', 1012, pg_temp.bill(g, 1, 10, true, true, '2026-09-01'))));
+  perform pg_temp.expect('A-B-A same time: none treated as duplicate', r ->> 'duplicate', '0');
+  perform pg_temp.expect('A-B-A same time: all three applied', r ->> 'applied', '3');
+  perform pg_temp.expect('A-B-A same time: final content is A', (select payload ->> 'total' from public.ameen_invoices where bill_guid = g::uuid), '10');
+  perform pg_temp.expect('A-B-A same time: final version is A', (select version_hash from public.ameen_invoices where bill_guid = g::uuid), vX);
+  perform pg_temp.expect('A-B-A: three distinct event rows', (select count(*)::text from public.ameen_invoice_events where bill_guid = g::uuid and source_seq between 1010 and 1012), '3');
+
+  -- (3) إعادة المحاولة بعد انقطاع الاتصال: الدفعة نفسها مرة أخرى ⇒ كلها duplicate ولا شيء يتغيّر
+  select mark_count into mc from public.ameen_invoice_dirty_days where day = day1;
+  r := pg_temp.apply_as('sync', jsonb_build_array(
+         pg_temp.ev(g, 'upsert', vX, '2026-10-20T16:10:00.000Z', 1010, pg_temp.bill(g, 1, 10, true, true, '2026-09-01')),
+         pg_temp.ev(g, 'upsert', vY, '2026-10-20T16:10:00.000Z', 1011, pg_temp.bill(g, 1, 20, true, true, '2026-09-01')),
+         pg_temp.ev(g, 'upsert', vX, '2026-10-20T16:10:00.000Z', 1012, pg_temp.bill(g, 1, 10, true, true, '2026-09-01'))));
+  perform pg_temp.expect('retry after disconnect: all duplicate', r ->> 'duplicate', '3');
+  perform pg_temp.expect('retry after disconnect: nothing applied', r ->> 'applied', '0');
+  perform pg_temp.expect('retry after disconnect: no day re-marked', (select mark_count from public.ameen_invoice_dirty_days where day = day1)::text, mc::text);
+  perform pg_temp.expect('retry after disconnect: content unchanged', (select payload ->> 'total' from public.ameen_invoices where bill_guid = g::uuid), '10');
+
+  -- (4) وصول خارج الترتيب عبر طلبين: الأحدث وصل أولاً ثم الأقدم ⇒ الأقدم stale ولا يكتب فوق الأحدث
+  r := pg_temp.apply_as('sync', jsonb_build_array(pg_temp.ev(g, 'upsert', vC, '2026-10-20T16:20:00.000Z', 1021, pg_temp.bill(g, 1, 99, true, true, '2026-09-01'))));
+  perform pg_temp.expect('out-of-order: newer applied first', r -> 'results' -> 0 ->> 'outcome', 'applied');
+  r := pg_temp.apply_as('sync', jsonb_build_array(pg_temp.ev(g, 'upsert', vB, '2026-10-20T16:15:00.000Z', 1020, pg_temp.bill(g, 1, 20, true, true, '2026-09-01'))));
+  perform pg_temp.expect('out-of-order: older arrives later = stale', r -> 'results' -> 0 ->> 'outcome', 'stale');
+  perform pg_temp.expect('out-of-order: newest content kept', (select payload ->> 'total' from public.ameen_invoices where bill_guid = g::uuid), '99');
+  perform pg_temp.expect('out-of-order: stale did not mark a day', r ->> 'dirty_days', '0');
+  -- نفس وقت المصدر لكن تسلسل أقدم ⇒ stale أيضاً (التسلسل يحسم التعادل)
+  r := pg_temp.apply_as('sync', jsonb_build_array(pg_temp.ev(g, 'upsert', vA, '2026-10-20T16:20:00.000Z', 1019, pg_temp.bill(g, 1, 1, true, true, '2026-09-01'))));
+  perform pg_temp.expect('tie on time, lower seq = stale', r -> 'results' -> 0 ->> 'outcome', 'stale');
+  perform pg_temp.expect('tie on time: newest content kept', (select payload ->> 'total' from public.ameen_invoices where bill_guid = g::uuid), '99');
+
+  -- القراءة: الأيام والمجاميع للموظفين فقط
+  perform pg_temp.expect('staff can read dirty days', pg_temp.try_as('staff', 'select 1 from public.ameen_invoice_dirty_days limit 1'), 'OK');
+  perform pg_temp.expect('staff can read daily totals', pg_temp.try_as('staff', 'select 1 from public.ameen_invoice_daily_totals limit 1'), 'OK');
+  perform pg_temp.expect('anon cannot read daily totals', pg_temp.try_as('anon', 'select 1 from public.ameen_invoice_daily_totals'), '42501');
+  perform pg_temp.expect('direct write to dirty days denied (sync)', pg_temp.try_as('sync', 'insert into public.ameen_invoice_dirty_days (day) values (''2026-01-01'')'), '42501');
+end
+$owner$;
+
+do $$
+declare n bigint;
+begin
+  perform set_config('request.jwt.claims', (select claims::text from pg_temp.ids where name = 'user'), true);
+  set local role authenticated;
+  select count(*) into n from public.ameen_invoice_daily_totals;
+  reset role;
+  perform set_config('request.jwt.claims', '', true);
+  perform pg_temp.expect('non-staff user sees no daily totals', n::text, '0');
+end $$;
+
 -- ١٦) الدالة SECURITY DEFINER بمسار بحث ثابت، والجداول بلا سياسات كتابة
 do $$
 declare v_conf text[]; v_def boolean;
@@ -293,7 +396,9 @@ begin
   perform pg_temp.expect('anon has no execute privilege', has_function_privilege('anon', 'public.apply_ameen_invoice_events(jsonb)', 'execute')::text, 'false');
   perform pg_temp.expect('rls forced on invoices', (select relforcerowsecurity::text from pg_class where oid = 'public.ameen_invoices'::regclass), 'true');
   perform pg_temp.expect('rls forced on events', (select relforcerowsecurity::text from pg_class where oid = 'public.ameen_invoice_events'::regclass), 'true');
-  perform pg_temp.expect('no write policy exists', (select count(*)::text from pg_policies where tablename in ('ameen_invoices', 'ameen_invoice_events') and cmd <> 'SELECT'), '0');
+  perform pg_temp.expect('rls forced on dirty days', (select relforcerowsecurity::text from pg_class where oid = 'public.ameen_invoice_dirty_days'::regclass), 'true');
+  perform pg_temp.expect('daily totals view is security_invoker', (select (reloptions @> array['security_invoker=true'])::text from pg_class where oid = 'public.ameen_invoice_daily_totals'::regclass), 'true');
+  perform pg_temp.expect('no write policy exists', (select count(*)::text from pg_policies where tablename in ('ameen_invoices', 'ameen_invoice_events', 'ameen_invoice_dirty_days') and cmd <> 'SELECT'), '0');
 end $$;
 
 -- ١٧) التراجع يُسقط كائنات 18 فقط
@@ -301,6 +406,8 @@ end $$;
 do $$ begin
   perform pg_temp.expect('rollback dropped invoices', (to_regclass('public.ameen_invoices') is null)::text, 'true');
   perform pg_temp.expect('rollback dropped events', (to_regclass('public.ameen_invoice_events') is null)::text, 'true');
+  perform pg_temp.expect('rollback dropped dirty days', (to_regclass('public.ameen_invoice_dirty_days') is null)::text, 'true');
+  perform pg_temp.expect('rollback dropped daily totals view', (to_regclass('public.ameen_invoice_daily_totals') is null)::text, 'true');
   perform pg_temp.expect('rollback dropped rpc', (to_regprocedure('public.apply_ameen_invoice_events(jsonb)') is null)::text, 'true');
   perform pg_temp.expect('rollback kept is_staff', (to_regprocedure('public.is_staff()') is not null)::text, 'true');
 end $$;

@@ -53,17 +53,63 @@ assert.match(code, /order by \(e ->> 'source_seq'\)::bigint/, "الدفعة تُ
 assert.match(code, /pg_advisory_xact_lock/, "قفل لكل فاتورة");
 assert.match(code, /on conflict \(bill_guid\) do update/, "التعديل يحدّث الصف نفسه");
 assert.match(code, /revision = t\.revision \+ 1/);
-assert.match(code, /\(v_evt ->> 'bill_guid'\) \|\| '\|' \|\| v_kind \|\| '\|' \|\| v_hash \|\| '\|' \|\| v_at_text/,
-  "مفتاح الحدث يُعاد حسابه على الخادم بنفس صيغة الوكيل");
+assert.match(code, /\(v_evt ->> 'bill_guid'\) \|\| '\|' \|\| \(v_evt ->> 'source_seq'\) \|\| '\|' \|\| v_kind \|\| '\|' \|\| v_hash \|\| '\|' \|\| v_at_text/,
+  "مفتاح الحدث = GUID + تسلسل متزايد (+ النوع والنسخة والوقت)، لا بصمة المحتوى وحدها؛ يُعاد حسابه على الخادم");
+// ملاحظة المالك (1): الأيام المتأثرة تُزال مكرراتها قبل إدخال واحد، والمجاميع تُحسب من المصدر.
+assert.match(code, /create table if not exists public\.ameen_invoice_dirty_days \(/);
+assert.match(code, /select distinct x\.day, v_now, v_now, 1\s+from pg_catalog\.unnest\(v_days\)/,
+  "إزالة تكرار اليوم قبل الإدخال (تعديل بلا تغيير التاريخ = اليوم نفسه مرتين)");
+assert.match(code, /on conflict \(day\) do update/);
+assert.match(code, /create or replace view public\.ameen_invoice_daily_totals\s+with \(security_invoker = true\)/,
+  "المجاميع اليومية من المصدر وبصلاحيات القارئ");
+assert.match(code, /alter table public\.ameen_invoice_dirty_days force row level security;/);
 assert.match(code, /revoke all on function public\.apply_ameen_invoice_events\(jsonb\) from public, anon, service_role;/);
 assert.match(code, /grant execute on function public\.apply_ameen_invoice_events\(jsonb\) to authenticated;/);
 assert.doesNotMatch(code, /inventory_reports|ameen_customer_invoices/, "مستقل تماماً عن تقرير الفواتير القائم");
 assert.doesNotMatch(code, /notify_telegram|cron\.schedule|net\.http/, "لا تنبيه ولا جدولة ولا اتصال خارجي");
 assert.doesNotMatch(code, /\bdelete\s+from\s+public\.ameen_invoices\b/i, "الحذف شاهد قبر لا حذف فعلي");
 
+// الوكيل يبني المفتاح نفسه، وبذرة التسلسل من الساعة فلا يعود إلى 1 بعد ضياع الحالة.
+const libSrc = read(libRel);
+assert.match(libSrc, /"\{0\}\|\{1\}\|\{2\}\|\{3\}\|\{4\}" -f \$BillGuid, \$Seq\.ToString\(\$script:Invariant\), \$Kind, \$VersionHash, \$SourceEventAt/,
+  "مفتاح الوكيل = guid|seq|kind|version|at بنفس ترتيب الخادم");
+assert.match(libSrc, /last_seq = \(Get-AmeenSeqSeed \$NowUtc\)/, "التسلسل يبدأ من الساعة");
+
+// اختبارات إلزامية بطلب المالك (2026-10-20): حذف أيٍّ منها يُسقط الفحص.
+const sqlTest = read(testRel);
+for (const name of [
+  "same-day edit: applied without error",
+  "same-day edit: mark_count +1 (not +2)",
+  "same-day edit: daily total recomputed (no double count)",
+  "batch same day: one dirty day in the request",
+  "date move: both days marked",
+  "A-B-A same time: none treated as duplicate",
+  "A-B-A same time: final content is A",
+  "retry after disconnect: all duplicate",
+  "retry after disconnect: no day re-marked",
+  "out-of-order: older arrives later = stale",
+  "out-of-order: newest content kept",
+  "tie on time, lower seq = stale",
+  "unordered batch: final content is newest",
+  "late older event: stale",
+  "edit: still exactly one row for the bill",
+]) assert.ok(sqlTest.includes(`'${name}'`), `اختبار SQL إلزامي مفقود: ${name}`);
+const psTest = read("tools/tests/Test-AmeenInvoiceEvents.ps1");
+for (const name of [
+  "A->B->A same timestamp: last A key differs from first A key",
+  "A->B->A same timestamp: strictly increasing seq",
+  "event key contains the bill guid and seq, not content alone",
+  "state lost with empty outbox: clock seed is above every earlier seq",
+  "offline: nothing removed",
+  "online again: sent strictly in seq order",
+  "edit: one updated event for the SAME bill_guid",
+]) assert.ok(psTest.includes(`'${name}'`), `اختبار PowerShell إلزامي مفقود: ${name}`);
+
 const rollback = read(rollbackRel).replace(/--.*$/gm, "");
 assert.match(rollback, /drop table if exists public\.ameen_invoices;/);
 assert.match(rollback, /drop table if exists public\.ameen_invoice_events;/);
+assert.match(rollback, /drop table if exists public\.ameen_invoice_dirty_days;/);
+assert.match(rollback, /drop view if exists public\.ameen_invoice_daily_totals;/);
 assert.match(rollback, /drop function if exists public\.apply_ameen_invoice_events\(jsonb\);/);
 assert.doesNotMatch(rollback, /inventory_reports|is_staff|ameen_price_sync_status/);
 
@@ -154,7 +200,7 @@ if (probe.status !== 0) {
     process.exit(run.status || 1);
   }
   if (drop.status !== 0) console.error(output(drop));
-  assert.ok(passes >= 80, `عدد التأكيدات الحية أقل من المتوقع (${passes})`);
+  assert.ok(passes >= 120, `عدد التأكيدات الحية أقل من المتوقع (${passes})`);
   console.log(`  ✓ اختبار SQL حي على PostgreSQL: ${passes} تأكيداً`);
 }
 
@@ -172,7 +218,7 @@ if (pwshProbe.status !== 0) {
     process.exit(ps.status || 1);
   }
   const m = psText.match(/Ameen invoice events: (\d+) PASS, (\d+) FAIL/);
-  assert.ok(m && Number(m[2]) === 0 && Number(m[1]) >= 85, "نتيجة اختبار PowerShell غير متوقعة");
+  assert.ok(m && Number(m[2]) === 0 && Number(m[1]) >= 95, "نتيجة اختبار PowerShell غير متوقعة");
   console.log(`  ✓ اختبار PowerShell (${pwshProbe.stdout.trim()}): ${m[1]} تأكيداً`);
 }
 console.log("check-ameen-invoice-events: اجتاز الفحص.");
