@@ -36,6 +36,7 @@ assert.match(code, /public\.notify_telegram\('price_sync_recovered'/);
 assert.match(code, /public\.notify_telegram\('price_sync_partial'/);
 assert.match(code, /and not probe_superseded then/, "محاولة أحدث من فحص «معطّلة» تُسقطه");
 assert.match(code, /when 'ameen_unreachable' then '\^winfail:apply-to-ameen\$'/, "امتصاص تنبيه Windows المطابق");
+assert.match(code, /and o\.created_at > coalesce\(p_since, '-infinity'::timestamptz\)/, "الامتصاص محصور بسلسلة الفشل الحالية (Codex P1)");
 assert.match(code, /incident_key\s+uuid not null default gen_random_uuid\(\) unique/, "مفتاح حادثة لا يتكرر بعد تراجع وإعادة تطبيق");
 assert.doesNotMatch(code, /'price-sync-outage:' \|\| inc\.id/, "لا معرّف تسلسلي في مفتاح dedupe");
 assert.doesNotMatch(code, /exception\s+when/i, "فشل إدراج الرسالة يُرجع الدورة كلها (لا التقاط)");

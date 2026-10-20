@@ -53,7 +53,7 @@
 --     بعد النجاح فقط) بحد 30 د ويعيد التنبيه كل 60 د. هذا الملف يعطّل ذلك الصف (enabled=false) لأن المراقب
 --     الجديد يحل محله، ولا يمسّ دالة monitor_project_tasks ولا بقية المهام.
 --   * تنبيهات Windows من OZK2026 نفسه (بلا تعديل Windows): حين تُفتح حادثة FAILED وسببها له تنبيه Windows
---     مطابق في telegram_outbox خلال آخر 30 د (pull_failed ↔ winfail:pull-approved-prices، ameen_unreachable/
+--     مطابق في telegram_outbox خلال آخر 30 د ومنذ آخر وصول حيّ (سلسلة الفشل الحالية وحدها) (pull_failed ↔ winfail:pull-approved-prices، ameen_unreachable/
 --     apply_failed ↔ winfail:apply-to-ameen، verify_mismatch ↔ price-sync:mismatch*، verify_failed ↔
 --     price-sync:verify-failed) تُعدّ الحادثة مُعلنة بذلك التنبيه (announced_by='windows') فلا رسالة فتح ثانية،
 --     وتبقى رسالة التعافي الواحدة. STALE/DISABLED/UNKNOWN لا تُمتص (Windows لا يبلّغ عنها).
@@ -371,8 +371,10 @@ as $$
     'انتهت الحادثة.');
 $$;
 
--- تنبيه Windows مطابق لسبب الفشل خلال النافذة (منع التكرار بلا تعديل Windows). null إن لم يوجد.
-create or replace function private.price_sync_monitor_windows_alert_at(p_reason text, p_now timestamptz, p_minutes integer)
+-- تنبيه Windows مطابق لسبب الفشل خلال النافذة **ومنذ آخر وصول حيّ** (أي من سلسلة الفشل الحالية نفسها)،
+-- لمنع التكرار بلا تعديل Windows. null إن لم يوجد. الحد الأدنى p_since ضروري: مفاتيح Windows ثابتة بنافذة
+-- 60 د، فانقطاع ثانٍ بعد تعافٍ قصير لا يُنتج صفاً جديداً، وصف الانقطاع الأول لا يجوز أن يُعلن الثاني (Codex P1).
+create or replace function private.price_sync_monitor_windows_alert_at(p_reason text, p_now timestamptz, p_minutes integer, p_since timestamptz)
 returns timestamptz
 language sql
 stable
@@ -384,6 +386,7 @@ as $$
    where p_minutes > 0
      and o.created_at <= p_now
      and o.created_at >= p_now - pg_catalog.make_interval(mins => p_minutes)
+     and o.created_at > coalesce(p_since, '-infinity'::timestamptz)
      and coalesce(o.dedupe_key, '') ~ (case p_reason
            when 'pull_failed'       then '^winfail:pull-approved-prices$'
            when 'ameen_unreachable' then '^winfail:apply-to-ameen$'
@@ -444,7 +447,7 @@ begin
   if inc.id is null then
     if v_outage then
       v_windows := case when a.state = 'FAILED'
-                     then private.price_sync_monitor_windows_alert_at(a.reason, p_now, cfg.absorb_windows_minutes) end;
+                     then private.price_sync_monitor_windows_alert_at(a.reason, p_now, cfg.absorb_windows_minutes, a.last_alive_at) end;
       insert into private.price_sync_incidents (kind, opened_at, opened_state, opened_reason, current_state, current_reason, last_seen_at, alert_sent_at, announced_by)
       values ('outage', p_now, a.state, a.reason, a.state, a.reason, p_now, coalesce(v_windows, p_now),
               case when v_windows is not null then 'windows' else 'monitor' end)
@@ -504,7 +507,7 @@ begin
     -- انتقال جزئي ← انقطاع: تُغلق الجزئية بصمت وتُفتح حادثة انقطاع برسالتها.
     update private.price_sync_incidents set closed_at = p_now, last_seen_at = p_now where id = inc.id;
     v_windows := case when a.state = 'FAILED'
-                   then private.price_sync_monitor_windows_alert_at(a.reason, p_now, cfg.absorb_windows_minutes) end;
+                   then private.price_sync_monitor_windows_alert_at(a.reason, p_now, cfg.absorb_windows_minutes, a.last_alive_at) end;
     insert into private.price_sync_incidents (kind, opened_at, opened_state, opened_reason, current_state, current_reason, last_seen_at, alert_sent_at, announced_by)
     values ('outage', p_now, a.state, a.reason, a.state, a.reason, p_now, coalesce(v_windows, p_now),
             case when v_windows is not null then 'windows' else 'monitor' end)
@@ -559,7 +562,7 @@ revoke all on function private.price_sync_monitor_reason_text(text) from public,
 revoke all on function private.price_sync_monitor_alert_text(text, text, timestamptz, timestamptz, timestamptz, text) from public, anon, authenticated, service_role;
 revoke all on function private.price_sync_monitor_partial_text(boolean, timestamptz, timestamptz, integer, integer, integer, integer, timestamptz, text) from public, anon, authenticated, service_role;
 revoke all on function private.price_sync_monitor_recovery_text(text, timestamptz, integer, integer, integer, timestamptz, timestamptz) from public, anon, authenticated, service_role;
-revoke all on function private.price_sync_monitor_windows_alert_at(text, timestamptz, integer) from public, anon, authenticated, service_role;
+revoke all on function private.price_sync_monitor_windows_alert_at(text, timestamptz, integer, timestamptz) from public, anon, authenticated, service_role;
 revoke all on function private.price_sync_monitor_tick(timestamptz) from public, anon, authenticated, service_role;
 
 -- ── منع التكرار: المراقب الجديد يحل محل صف «price-sync» القديم ──────────────────────────────

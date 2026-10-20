@@ -21,7 +21,7 @@ drop function if exists private.price_sync_monitor_assess(timestamptz);
 drop function if exists private.price_sync_monitor_alert_text(text, text, timestamptz, timestamptz, timestamptz, text);
 drop function if exists private.price_sync_monitor_recovery_text(text, timestamptz, integer, integer, integer, timestamptz, timestamptz);
 drop function if exists private.price_sync_monitor_partial_text(boolean, timestamptz, timestamptz, integer, integer, integer, integer, timestamptz, text);
-drop function if exists private.price_sync_monitor_windows_alert_at(text, timestamptz, integer);
+drop function if exists private.price_sync_monitor_windows_alert_at(text, timestamptz, integer, timestamptz);
 drop function if exists private.price_sync_monitor_minutes(timestamptz, timestamptz);
 drop function if exists private.price_sync_monitor_reason_text(text);
 drop function if exists private.price_sync_monitor_time(timestamptz, timestamptz);

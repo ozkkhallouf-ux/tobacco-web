@@ -216,7 +216,7 @@
     - 🟢 تعافٍ.
   - مفتاح dedupe: `price-sync-outage|price-sync-partial:<incident_key UUID>:open|recovered`.
 - **التعافي:** آخر محاولة نفسها نجاح مثبت خلال 15 د، ولا فحص «معطّلة» أحدث منها. رسالة واحدة فقط إن أُعلنت الحادثة.
-- **منع ازدواج Windows/Supabase بلا تعديل Windows:** حادثة FAILED لها تنبيه Windows مطابق في `telegram_outbox` خلال آخر 30 د تُعدّ مُعلنة به (`announced_by='windows'`)، فلا رسالة فتح ثانية، وتبقى رسالة التعافي.
+- **منع ازدواج Windows/Supabase بلا تعديل Windows:** حادثة FAILED لها تنبيه Windows مطابق في `telegram_outbox` خلال آخر 30 د **ومنذ آخر وصول حيّ** (سلسلة الفشل الحالية وحدها، فانقطاع ثانٍ بعد تعافٍ قصير يُعلَن دائماً) تُعدّ مُعلنة به (`announced_by='windows'`)، فلا رسالة فتح ثانية، وتبقى رسالة التعافي.
   - الربط: `pull_failed`↔`winfail:pull-approved-prices`.
   - `ameen_unreachable`/`apply_failed`↔`winfail:apply-to-ameen`.
   - `verify_mismatch`↔`price-sync:mismatch*` (يشمل مفتاح 13 المنقّح).
@@ -234,7 +234,7 @@
   - `supabase/tests/price-sync-monitor.sql`
   - `scripts/check-price-sync-monitor.mjs`:
     - عقود ساكنة.
-    - 130 تأكيداً حياً.
+    - 132 تأكيداً حياً.
     - تزامن حقيقي في 4 حالات: انقطاع، وأول تشغيل، وانقطاع ← جزئي، وتعافٍ.
 
 **ترتيب التطبيق مع 12/13/15:**

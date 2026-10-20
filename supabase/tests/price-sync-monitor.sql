@@ -407,6 +407,10 @@ do $$ begin
   perform pg_temp.expect('incident announced by windows', (select announced_by from private.price_sync_incidents where closed_at is null), 'windows');
   perform pg_temp.attempt(15, 'applied');
   perform pg_temp.expect('single recovery still sent', pg_temp.tick(15.5), 'recovery_sent');
+  -- فشل ثانٍ بعد تعافٍ قصير: Windows لا يرسل جديداً (مفتاح ثابت بنافذة 60 د)، وصفّه القديم لا يُعلن الحادثة الجديدة.
+  perform pg_temp.attempt(20, 'ameen_unreachable'); perform pg_temp.attempt(25, 'ameen_unreachable');
+  perform pg_temp.expect('second outage within window is announced by the monitor', pg_temp.tick(25.5), 'alert_sent');
+  perform pg_temp.expect('second outage message really queued', pg_temp.outbox('price_sync_outage'), '1');
 
   perform pg_temp.reset();
   perform pg_temp.attempt(0, 'applied'); perform pg_temp.tick(0.5);
