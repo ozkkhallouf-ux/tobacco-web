@@ -48,8 +48,15 @@ assert.match(code, /security definer\s+set search_path = ''/);
 assert.match(code, /if not public\.ameen_invoice_is_sync_writer\(\) then/);
 assert.match(code, /errcode = '42501'/);
 assert.doesNotMatch(code, /'service_role'/, "لا احتياط بمفتاح service_role");
-assert.match(code, /\(v_at, v_seq\) <= \(v_cur\.source_event_at, v_cur\.source_seq\)/, "الحدث الأقدم stale ولا يطبَّق");
-assert.match(code, /order by \(e ->> 'source_seq'\)::bigint/, "الدفعة تُعالج بترتيب التسلسل");
+// مراجعة المالك P1: التسلسل وحده يحدد الأحدث — لا وقت المصدر.
+assert.match(code, /if v_found and v_seq <= v_cur\.source_seq then\s+v_outcome := 'stale';/, "الحدث الأقدم (تسلسله ≤ المطبَّق) stale ولا يطبَّق");
+assert.doesNotMatch(code, /\(v_at, v_seq\)|v_at\s*<=?\s*v_cur|source_event_at\s*<=?/, "وقت المصدر لا يدخل في تحديد الأحدث");
+// مراجعة المالك P1: عزل الحدث المعطوب — كتلة فرعية لكل حدث، ورفضه نتيجة لا استثناء للطلب كله.
+assert.match(code, /exception when others then\s+v_reason := case/, "كتلة استثناء لكل حدث");
+assert.match(code, /'outcome', 'rejected', 'reason_code', sqlstate, 'reason', v_reason/);
+assert.match(code, /v_reason := case when sqlstate in \('22023', '22007'\) then sqlerrm else 'unexpected error ' \|\| sqlstate end;/,
+  "السبب المعاد بلا محتوى الحدث");
+assert.match(code, /then \(e\.value ->> 'source_seq'\)::bigint end nulls last,/, "الدفعة تُعالج بترتيب التسلسل، والمعطوب آخراً");
 assert.match(code, /pg_advisory_xact_lock/, "قفل لكل فاتورة");
 assert.match(code, /on conflict \(bill_guid\) do update/, "التعديل يحدّث الصف نفسه");
 assert.match(code, /revision = t\.revision \+ 1/);
@@ -92,6 +99,16 @@ for (const name of [
   "tie on time, lower seq = stale",
   "unordered batch: final content is newest",
   "late older event: stale",
+  "newer seq with OLDER Ameen time: applied",
+  "older seq with NEWER Ameen time: stale",
+  "mixed batch: two valid applied",
+  "mixed batch: nine rejected",
+  "mixed batch: future event rejected with reason",
+  "mixed batch: reasons carry no bill content",
+  "mixed batch: nothing written for rejected bill",
+  "mixed batch: dirty day only from valid events",
+  "repaired future event: applied",
+  "requeued old seq after newer applied: stale",
   "edit: still exactly one row for the bill",
 ]) assert.ok(sqlTest.includes(`'${name}'`), `اختبار SQL إلزامي مفقود: ${name}`);
 const psTest = read("tools/tests/Test-AmeenInvoiceEvents.ps1");
@@ -103,6 +120,15 @@ for (const name of [
   "offline: nothing removed",
   "online again: sent strictly in seq order",
   "edit: one updated event for the SAME bill_guid",
+  "validate: future timestamp flagged",
+  "mixed batch: no batch failure",
+  "mixed batch: locally invalid events never sent",
+  "mixed batch: outbox empty, nothing lost",
+  "dead letter: no sensitive data in reasons or log (no customer name, no amounts)",
+  "repair requeue: back in pending with ORIGINAL seq",
+  "repair requeue of still-broken event refused",
+  "refused repair stays in dead letter (not lost, not queued)",
+  "repair resnapshot: same content re-emitted with a newer seq",
 ]) assert.ok(psTest.includes(`'${name}'`), `اختبار PowerShell إلزامي مفقود: ${name}`);
 
 const rollback = read(rollbackRel).replace(/--.*$/gm, "");
@@ -131,6 +157,8 @@ assert.match(agentCode, /\$ActivationFlag = "send-enabled\.flag"/, "ولا بل�
 assert.match(agentCode, /Assert-AmeenReadOnlySql \$Sql/, "كل SQL يمرّ عبر حارس القراءة");
 assert.match(agentCode, /SET LOCK_TIMEOUT 3000; /);
 assert.match(agentCode, /\$ExpectedDatabase = "AmnDb002"/);
+assert.match(agentCode, /if \(\$ListDeadLetter -or \$RepairDeadLetterSeq -gt 0\) \{/, "طريقة واضحة لعرض الأحداث المعزولة وإصلاحها");
+assert.match(libCode, /Move-AmeenEventToDeadLetter -Dir \$Dir -File \$p\.file -Event \$p\.event -Code \$why\.code/, "التحقق المحلي يعزل قبل الإرسال");
 for (const [name, text] of [["agent", agent], ["lib", lib]]) {
   assert.doesNotMatch(text, /AMEEN_SQL_WRITE_CONNECTION_STRING|WRITE_CONNECTION/, `${name}: لا سلسلة اتصال الكتابة`);
   assert.doesNotMatch(text, /Register-ScheduledTask|schtasks/i, `${name}: لا تسجيل مهمة مجدولة`);
@@ -200,7 +228,7 @@ if (probe.status !== 0) {
     process.exit(run.status || 1);
   }
   if (drop.status !== 0) console.error(output(drop));
-  assert.ok(passes >= 120, `عدد التأكيدات الحية أقل من المتوقع (${passes})`);
+  assert.ok(passes >= 139, `عدد التأكيدات الحية أقل من المتوقع (${passes})`);
   console.log(`  ✓ اختبار SQL حي على PostgreSQL: ${passes} تأكيداً`);
 }
 
@@ -218,7 +246,7 @@ if (pwshProbe.status !== 0) {
     process.exit(ps.status || 1);
   }
   const m = psText.match(/Ameen invoice events: (\d+) PASS, (\d+) FAIL/);
-  assert.ok(m && Number(m[2]) === 0 && Number(m[1]) >= 95, "نتيجة اختبار PowerShell غير متوقعة");
+  assert.ok(m && Number(m[2]) === 0 && Number(m[1]) >= 115, "نتيجة اختبار PowerShell غير متوقعة");
   console.log(`  ✓ اختبار PowerShell (${pwshProbe.stdout.trim()}): ${m[1]} تأكيداً`);
 }
 console.log("check-ameen-invoice-events: اجتاز الفحص.");

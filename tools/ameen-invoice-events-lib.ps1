@@ -19,7 +19,12 @@
 #     مطابقة لآخر نسخة صدرت، والخادم يرفض الحدث المكرر بمفتاحه.
 #   * مفتاح الحدث = sha256(bill_guid|source_seq|kind|version_hash|source_event_at): GUID الفاتورة
 #     وتسلسل متزايد لا بصمة المحتوى وحدها، فالعودة لمحتوى سابق (A ← B ← A) حدث جديد.
-#   * الترتيب: تسلسل محلي متزايد لا يتراجع، والإرسال بترتيبه حصراً؛ فشل حدث يوقف ما بعده.
+#   * الترتيب: source_seq يُمنح مرة واحدة لكل حدث ويُحفظ معه (ثابت عبر إعادة المحاولة)، ومتزايد
+#     لكل فاتورة؛ الخادم يحدد الأحدث به وحده لا بوقت الأمين. الإرسال بترتيبه، وانقطاع الاتصال يوقف الدفعة.
+#   * العزل (Dead Letter): الحدث المعطوب — يرفضه التحقق المحلي أو الخادم — يُنقل إلى deadletter\ مع
+#     سببه ومعرّفه (بلا محتوى الفاتورة في السبب أو السجل)، وتكمل بقية الأحداث. الإصلاح عبر
+#     Repair-AmeenDeadLetter بأحد وضعين: Resnapshot (لقطة جديدة من الأمين بتسلسل أحدث) أو Requeue
+#     (الحدث نفسه بعد تصحيحه، بتسلسله الأصلي — والخادم يجعله stale إن سبقه أحدث، فلا يكتب فوقه).
 # ============================================================
 
 $script:AmeenInvoiceEventSchema = "ameen-invoice-event/v1"
@@ -248,6 +253,9 @@ function ConvertTo-AmeenHashtable {
     # ConvertFrom-Json في 5.1 لا يدعم -AsHashtable؛ تحويل عودي يدوي.
     param($Value)
     if ($null -eq $Value) { return $null }
+    # PowerShell 7 يحوّل نصوص ISO إلى DateTime عند ConvertFrom-Json (و5.1 لا يفعل). كل أوقاتنا تُكتب
+    # بصيغة واحدة yyyy-MM-ddTHH:mm:ss.fffZ، فنعيدها نصاً حرفياً كي يتطابق المفتاح على الإصدارين.
+    if ($Value -is [datetime]) { return $Value.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ", $script:Invariant) }
     if ($Value -is [System.Management.Automation.PSCustomObject]) {
         $h = @{}
         foreach ($p in $Value.PSObject.Properties) { $h[$p.Name] = ConvertTo-AmeenHashtable $p.Value }
@@ -302,7 +310,7 @@ function Resolve-AmeenInvoiceChanges {
                 change          = $(if ($null -eq $known) { "created" } elseif ($known.v -eq "deleted") { "restored" } else { "updated" })
                 bill            = $o.snapshot
             })
-            $State.bills[$guid] = @{ v = $version; seen = $o.detected_at_utc }
+            $State.bills[$guid] = @{ v = $version; seen = $o.detected_at_utc; seq = [long]$State.last_seq }
         } else {
             $hasDeleteOp = @($ops | Where-Object { [int]$_.op -eq 2 }).Count -gt 0
             if ($null -ne $known -and $known.v -eq "deleted") { continue }
@@ -323,7 +331,7 @@ function Resolve-AmeenInvoiceChanges {
                 detected_at     = [string]$o.detected_at_utc
                 change          = "deleted"
             })
-            $State.bills[$guid] = @{ v = "deleted"; seen = $o.detected_at_utc }
+            $State.bills[$guid] = @{ v = "deleted"; seen = $o.detected_at_utc; seq = [long]$State.last_seq }
         }
     }
     return ,$events.ToArray()
@@ -416,38 +424,168 @@ function Get-AmeenBackoffSeconds {
     return [int][math]::Min(300, $s)
 }
 
+# ---------------------------------------------------------------- التحقق والعزل (Dead Letter)
+function Test-AmeenInvoiceEvent {
+    # نفس قواعد الخادم حدثاً حدثاً. يعيد $null للحدث السليم، وإلا @{ code; reason } بلا محتوى الفاتورة.
+    param([Parameter(Mandatory = $true)]$Event, [datetime]$NowUtc = [datetime]::UtcNow)
+    $bad = { param($c, $r) return @{ code = $c; reason = $r } }
+    if (-not ($Event -is [System.Collections.IDictionary])) { return (& $bad "not_object" "event must be an object") }
+    if ($Event.schema -ne $script:AmeenInvoiceEventSchema) { return (& $bad "schema" "unsupported event schema") }
+    $seq = [long]0
+    if (-not [long]::TryParse([string]$Event.source_seq, [ref]$seq) -or $seq -lt 1) { return (& $bad "seq" "source_seq must be a positive integer") }
+    if ([string]$Event.event_id -notmatch '^[0-9a-f]{64}$') { return (& $bad "event_id" "event_id must be a sha256 hex") }
+    if (@("upsert", "delete") -notcontains [string]$Event.kind) { return (& $bad "kind" "unsupported event kind") }
+    $g = [string]$Event.bill_guid
+    if ($g -cnotmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' -or $g -eq $script:ZeroGuid) { return (& $bad "bill_guid" "bill_guid must be a lowercase non-zero uuid") }
+    $h = [string]$Event.version_hash
+    if (($Event.kind -eq "upsert" -and $h -notmatch '^[0-9a-f]{64}$') -or ($Event.kind -eq "delete" -and $h -ne "deleted")) { return (& $bad "version_hash" "version_hash does not match event kind") }
+    $styles = [Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal
+    $at = [datetime]::MinValue
+    if (-not [datetime]::TryParse([string]$Event.source_event_at, $script:Invariant, $styles, [ref]$at)) { return (& $bad "timestamp" "event timestamp is invalid") }
+    if ($at -gt $NowUtc.AddMinutes(5)) { return (& $bad "future" "event timestamp is in the future") }
+    if ($Event.detected_at) {
+        $det = [datetime]::MinValue
+        if (-not [datetime]::TryParse([string]$Event.detected_at, $script:Invariant, $styles, [ref]$det)) { return (& $bad "timestamp" "event timestamp is invalid") }
+        if ($det -gt $NowUtc.AddMinutes(5)) { return (& $bad "future" "event timestamp is in the future") }
+    }
+    $expected = Get-AmeenInvoiceEventId -BillGuid $g -Seq $seq -Kind ([string]$Event.kind) -VersionHash $h -SourceEventAt ([string]$Event.source_event_at)
+    if ($Event.event_id -ne $expected) { return (& $bad "event_id" "event_id does not match event content") }
+    if ($Event.kind -eq "upsert") {
+        $b = $Event.bill
+        if (-not ($b -is [System.Collections.IDictionary]) -or [string]$b.bill_guid -ne $g -or @(1, 3) -notcontains [int]$b.bill_type -or $null -eq $b.lines) { return (& $bad "bill" "upsert needs a bill snapshot for the same bill_guid") }
+        if ($b.bill_date -and [string]$b.bill_date -notmatch '^\d{4}-\d{2}-\d{2}$') { return (& $bad "bill" "bill_date must be YYYY-MM-DD") }
+        if ([Text.Encoding]::UTF8.GetByteCount((ConvertTo-AmeenCanonicalJson $b)) -gt 262144) { return (& $bad "size" "bill snapshot too large") }
+        if ((Get-AmeenInvoiceVersionHash $b) -ne $h) { return (& $bad "version_hash" "version_hash does not match bill content") }
+    }
+    return $null
+}
+
+function Move-AmeenEventToDeadLetter {
+    # ينقل ملف الحدث إلى deadletter\ ويكتب بجانبه سبباً مختصراً. السبب والسجل بلا محتوى الفاتورة
+    # (لا اسم زبون ولا مبالغ): المعرّف والتسلسل وGUID الفاتورة والنوع والرمز فقط.
+    param([Parameter(Mandatory = $true)][string]$Dir, [Parameter(Mandatory = $true)][string]$File, [Parameter(Mandatory = $true)]$Event,
+          [Parameter(Mandatory = $true)][string]$Code, [Parameter(Mandatory = $true)][string]$Reason, [Parameter(Mandatory = $true)][string]$Source,
+          [datetime]$NowUtc = [datetime]::UtcNow)
+    $dl = Join-Path $Dir "deadletter"
+    if (-not (Test-Path -LiteralPath $dl)) { New-Item -ItemType Directory -Path $dl -Force | Out-Null }
+    $name = [IO.Path]::GetFileNameWithoutExtension($File)
+    $safeReason = ($Reason -replace '[\r\n\t]', ' ')
+    if ($safeReason.Length -gt 200) { $safeReason = $safeReason.Substring(0, 200) }
+    $info = [ordered]@{
+        event_id = [string]$Event.event_id; source_seq = [string]$Event.source_seq; bill_guid = [string]$Event.bill_guid
+        kind = [string]$Event.kind; reason_code = $Code; reason = $safeReason; source = $Source
+        at = $NowUtc.ToString("yyyy-MM-ddTHH:mm:ssZ", $script:Invariant)
+    }
+    Write-AmeenAtomicFile -Path (Join-Path $dl ($name + ".reason.json")) -Content (ConvertTo-AmeenCanonicalJson $info)
+    Move-Item -LiteralPath $File -Destination (Join-Path $dl ($name + ".json")) -Force
+    Add-Content -LiteralPath (Join-Path $Dir "deadletter.log") -Value ("{0}`t{1}`t{2}`t{3}`t{4}`t{5}`t{6}" -f $info.at, $info.source_seq, $info.event_id, $info.bill_guid, $info.kind, $Source, $Code) -Encoding UTF8
+}
+
+function Get-AmeenDeadLetters {
+    param([Parameter(Mandatory = $true)][string]$Dir)
+    # تُعاد العناصر عبر خط الأنابيب (لا مصفوفة ملفوفة) كي يعمل Where-Object عليها؛ المستدعي يلفّها بـ @().
+    $dl = Join-Path $Dir "deadletter"
+    $list = New-Object System.Collections.Generic.List[object]
+    if (-not (Test-Path -LiteralPath $dl)) { return }
+    foreach ($f in @(Get-ChildItem -LiteralPath $dl -Filter "*.reason.json" | Sort-Object Name)) {
+        $info = ConvertTo-AmeenHashtable (Get-Content -Raw -LiteralPath $f.FullName -Encoding UTF8 | ConvertFrom-Json)
+        $info.file = Join-Path $dl ($f.Name -replace '\.reason\.json$', '.json')
+        $info.reason_file = $f.FullName
+        $list.Add($info)
+    }
+    return $list.ToArray()
+}
+
+function Repair-AmeenDeadLetter {
+    # طريقتان آمنتان لإصلاح حدث معزول دون فقدانه ودون كسر الترتيب:
+    #   Resnapshot: يُعلَّم أن الفاتورة تحتاج لقطة جديدة؛ المطابقة التالية تقرأ حالتها الحالية من الأمين
+    #               وتُصدر حدثاً بتسلسل أحدث (الحالة الحالية هي الحقيقة، لا المحتوى القديم المعطوب).
+    #   Requeue:    الحدث نفسه بعد تصحيح ملفه يدوياً: تُعاد البصمة والمفتاح بتسلسله الأصلي، ويُتحقق منه،
+    #               ثم يعود إلى pending\ في موضعه. إن سبقه حدث أحدث للفاتورة نفسها فالخادم يعدّه stale.
+    param([Parameter(Mandatory = $true)][string]$Dir, [Parameter(Mandatory = $true)][hashtable]$State,
+          [Parameter(Mandatory = $true)][long]$Seq, [ValidateSet("Resnapshot", "Requeue")][string]$Mode = "Resnapshot",
+          [datetime]$NowUtc = [datetime]::UtcNow)
+    $item = @(Get-AmeenDeadLetters -Dir $Dir | Where-Object { [long]$_.source_seq -eq $Seq }) | Select-Object -First 1
+    if ($null -eq $item) { throw "dead letter seq $Seq not found" }
+    $resolved = Join-Path (Join-Path $Dir "deadletter") "resolved"
+    if (-not (Test-Path -LiteralPath $resolved)) { New-Item -ItemType Directory -Path $resolved -Force | Out-Null }
+    $stamp = $NowUtc.ToString("yyyyMMddTHHmmssZ", $script:Invariant)
+    if ($Mode -eq "Resnapshot") {
+        $State.bills[[string]$item.bill_guid] = @{ v = "resnapshot"; fp = $null; seen = $NowUtc.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", $script:Invariant) }
+    } else {
+        $evt = ConvertTo-AmeenHashtable (Get-Content -Raw -LiteralPath $item.file -Encoding UTF8 | ConvertFrom-Json)
+        if ($evt.kind -eq "upsert" -and $evt.bill -is [System.Collections.IDictionary]) { $evt.version_hash = Get-AmeenInvoiceVersionHash $evt.bill }
+        $evt.source_seq = $Seq
+        $evt.event_id = Get-AmeenInvoiceEventId -BillGuid ([string]$evt.bill_guid) -Seq $Seq -Kind ([string]$evt.kind) -VersionHash ([string]$evt.version_hash) -SourceEventAt ([string]$evt.source_event_at)
+        $why = Test-AmeenInvoiceEvent -Event $evt -NowUtc $NowUtc
+        if ($null -ne $why) { throw ("requeue refused (" + $why.code + "): " + $why.reason) }
+        $target = Join-Path (Join-Path $Dir "pending") (([long]$Seq).ToString("D12", $script:Invariant) + ".json")
+        if (Test-Path -LiteralPath $target) { throw "requeue refused: pending already has seq $Seq" }
+        Write-AmeenAtomicFile -Path $target -Content (ConvertTo-AmeenCanonicalJson $evt)
+    }
+    $base = [IO.Path]::GetFileNameWithoutExtension($item.file)
+    Move-Item -LiteralPath $item.file -Destination (Join-Path $resolved ("{0}.{1}.{2}.json" -f $base, $Mode.ToLowerInvariant(), $stamp)) -Force
+    Move-Item -LiteralPath $item.reason_file -Destination (Join-Path $resolved ("{0}.{1}.{2}.reason.json" -f $base, $Mode.ToLowerInvariant(), $stamp)) -Force
+    Add-Content -LiteralPath (Join-Path $Dir "deadletter.log") -Value ("{0}`t{1}`t{2}`t{3}`trepaired`t{4}" -f $NowUtc.ToString("yyyy-MM-ddTHH:mm:ssZ", $script:Invariant), $Seq, $item.event_id, $item.bill_guid, $Mode) -Encoding UTF8
+    return $Mode
+}
+
 function Send-AmeenInvoiceOutbox {
-    # يرسل المعلّق بترتيب التسلسل. Transport: scriptblock يستقبل مصفوفة الأحداث ويعيد
-    # مصفوفة @{ event_id; outcome } — outcome ∈ applied|duplicate|stale|noop كلها تعني «استُلم».
-    # أي فشل (استثناء، رد ناقص، نتيجة غير معروفة) ⇒ لا يُحذف شيء، ويُؤجَّل الإرسال تراجعياً.
+    # يرسل المعلّق بترتيب التسلسل. Transport: scriptblock يستقبل مصفوفة الأحداث ويعيد مصفوفة
+    # @{ event_id; index; outcome; reason_code; reason }.
+    #   applied|duplicate|stale|noop ⇒ استُلم ويُزال.   rejected ⇒ يُعزل في deadletter\ وتكمل البقية.
+    # الحدث الذي يرفضه التحقق المحلي يُعزل قبل الإرسال ولا يحجز ما بعده.
+    # فشل النقل (استثناء، رد ناقص، نتيجة غير معروفة) ⇒ لا يُحذف شيء، ويُؤجَّل الإرسال تراجعياً.
     param([Parameter(Mandatory = $true)][string]$Dir, [Parameter(Mandatory = $true)][hashtable]$State,
           [Parameter(Mandatory = $true)][scriptblock]$Transport, [datetime]$NowUtc = [datetime]::UtcNow, [int]$BatchSize = 50)
-    $result = @{ sent = 0; acked = 0; skipped_backoff = $false; error = $null; outcomes = @{} }
+    $result = @{ sent = 0; acked = 0; deadlettered = 0; skipped_backoff = $false; error = $null; outcomes = @{} }
     if ($State.send.next_at) {
         $next = [datetime]::Parse([string]$State.send.next_at, $script:Invariant, [Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal)
         if ($NowUtc -lt $next) { $result.skipped_backoff = $true; return $result }
     }
     $pending = Get-AmeenOutboxPending -Dir $Dir -Max $BatchSize
     if ($pending.Count -eq 0) { return $result }
-    $events = @($pending | ForEach-Object { $_.event })
+    $valid = New-Object System.Collections.Generic.List[object]
+    foreach ($p in $pending) {
+        $why = Test-AmeenInvoiceEvent -Event $p.event -NowUtc $NowUtc
+        if ($null -ne $why) {
+            Move-AmeenEventToDeadLetter -Dir $Dir -File $p.file -Event $p.event -Code $why.code -Reason $why.reason -Source "local" -NowUtc $NowUtc
+            $result.deadlettered++
+            $result.outcomes[[string]$p.event.event_id] = "deadletter"
+        } else { $valid.Add($p) }
+    }
+    if ($valid.Count -eq 0) { return $result }
+    $events = @($valid | ForEach-Object { $_.event })
     $result.sent = $events.Count
     try {
         $responses = @(& $Transport $events)
         $byId = @{}
-        foreach ($r in $responses) { if ($null -ne $r -and $r.event_id) { $byId[[string]$r.event_id] = [string]$r.outcome } }
-        foreach ($p in $pending) {
+        foreach ($r in $responses) {
+            if ($null -eq $r) { continue }
+            $id = [string]$r.event_id
+            if (-not $id -and $r.index) { $i = [int]$r.index - 1; if ($i -ge 0 -and $i -lt $valid.Count) { $id = [string]$valid[$i].event.event_id } }
+            if ($id) { $byId[$id] = $r }
+        }
+        foreach ($p in $valid) {
             $id = [string]$p.event.event_id
             if (-not $byId.ContainsKey($id)) { throw "server response missing event $id" }
-            if (@("applied", "duplicate", "stale", "noop") -notcontains $byId[$id]) { throw ("unexpected outcome " + $byId[$id] + " for " + $id) }
+            if (@("applied", "duplicate", "stale", "noop", "rejected") -notcontains [string]$byId[$id].outcome) { throw ("unexpected outcome " + $byId[$id].outcome + " for " + $id) }
         }
-        # كل الدفعة مؤكدة: تُزال بالترتيب ويُسجَّل كل تأكيد.
         $ackLog = Join-Path $Dir "acked.log"
-        foreach ($p in $pending) {
+        foreach ($p in $valid) {
             $id = [string]$p.event.event_id
-            Add-Content -LiteralPath $ackLog -Value ("{0}`t{1}`t{2}`t{3}`t{4}" -f $NowUtc.ToString("yyyy-MM-ddTHH:mm:ssZ", $script:Invariant), $p.event.source_seq, $p.event.bill_guid, $p.event.kind, $byId[$id]) -Encoding UTF8
-            Remove-Item -LiteralPath $p.file -Force
-            $result.acked++
-            $result.outcomes[$id] = $byId[$id]
+            $r = $byId[$id]
+            if ([string]$r.outcome -eq "rejected") {
+                $code = [string]$r.reason_code; if (-not $code) { $code = "server" }
+                $reason = [string]$r.reason; if (-not $reason) { $reason = "rejected by server" }
+                Move-AmeenEventToDeadLetter -Dir $Dir -File $p.file -Event $p.event -Code $code -Reason $reason -Source "server" -NowUtc $NowUtc
+                $result.deadlettered++
+            } else {
+                Add-Content -LiteralPath $ackLog -Value ("{0}`t{1}`t{2}`t{3}`t{4}" -f $NowUtc.ToString("yyyy-MM-ddTHH:mm:ssZ", $script:Invariant), $p.event.source_seq, $p.event.bill_guid, $p.event.kind, $r.outcome) -Encoding UTF8
+                Remove-Item -LiteralPath $p.file -Force
+                $result.acked++
+            }
+            $result.outcomes[$id] = [string]$r.outcome
         }
         $State.send.failures = 0; $State.send.next_at = $null
     } catch {

@@ -190,8 +190,8 @@ begin
   perform pg_temp.expect('edit: payload updated', (select payload ->> 'total' from public.ameen_invoices where bill_guid = g1::uuid), '150');
   perform pg_temp.expect('edit: version updated', (select version_hash from public.ameen_invoices where bill_guid = g1::uuid), vB);
 
-  -- ٦) حدث أقدم متأخر الوصول ⇒ stale ولا يرجّع المحتوى
-  r := pg_temp.apply_as('sync', jsonb_build_array(pg_temp.ev(g1, 'upsert', vC, t0, 3, pg_temp.bill(g1, 1, 999))));
+  -- ٦) حدث أقدم (تسلسل أصغر) متأخر الوصول ⇒ stale ولا يرجّع المحتوى
+  r := pg_temp.apply_as('sync', jsonb_build_array(pg_temp.ev(g1, 'upsert', vC, t0, 1, pg_temp.bill(g1, 1, 999))));
   perform pg_temp.expect('late older event: stale', r -> 'results' -> 0 ->> 'outcome', 'stale');
   perform pg_temp.expect('late older event: payload kept', (select payload ->> 'total' from public.ameen_invoices where bill_guid = g1::uuid), '150');
   perform pg_temp.expect('late older event: revision kept', (select revision from public.ameen_invoices where bill_guid = g1::uuid)::text, '2');
@@ -214,7 +214,7 @@ begin
   perform pg_temp.expect('delete: still one row', (select count(*) from public.ameen_invoices where bill_guid = g1::uuid)::text, '1');
   perform pg_temp.expect('delete: deleted_at set', ((select deleted_at from public.ameen_invoices where bill_guid = g1::uuid) is not null)::text, 'true');
   perform pg_temp.expect('delete: last payload kept for audit', (select payload ->> 'total' from public.ameen_invoices where bill_guid = g1::uuid), '100');
-  r := pg_temp.apply_as('sync', jsonb_build_array(pg_temp.ev(g1, 'upsert', vC, t4, 7, pg_temp.bill(g1, 1, 5))));
+  r := pg_temp.apply_as('sync', jsonb_build_array(pg_temp.ev(g1, 'upsert', vC, t4, 5, pg_temp.bill(g1, 1, 5))));
   perform pg_temp.expect('older upsert after delete: stale', r -> 'results' -> 0 ->> 'outcome', 'stale');
   perform pg_temp.expect('older upsert after delete: still deleted', (select status from public.ameen_invoices where bill_guid = g1::uuid), 'deleted');
   r := pg_temp.apply_as('sync', jsonb_build_array(pg_temp.ev(g1, 'delete', 'deleted', '2026-10-20T15:06:00.000Z', 8)));
@@ -229,7 +229,7 @@ begin
   -- ١١) حذف فاتورة لم نرها ⇒ شاهد قبر يمنع إحياءها بحدث أقدم
   r := pg_temp.apply_as('sync', jsonb_build_array(pg_temp.ev(g2, 'delete', 'deleted', t3, 10)));
   perform pg_temp.expect('delete unknown: applied', r -> 'results' -> 0 ->> 'outcome', 'applied');
-  r := pg_temp.apply_as('sync', jsonb_build_array(pg_temp.ev(g2, 'upsert', vA, t2, 11, pg_temp.bill(g2, 1, 10))));
+  r := pg_temp.apply_as('sync', jsonb_build_array(pg_temp.ev(g2, 'upsert', vA, t2, 9, pg_temp.bill(g2, 1, 10))));
   perform pg_temp.expect('older create after unknown delete: stale', r -> 'results' -> 0 ->> 'outcome', 'stale');
   perform pg_temp.expect('unknown delete stays deleted', (select status from public.ameen_invoices where bill_guid = g2::uuid), 'deleted');
 
@@ -252,23 +252,11 @@ begin
   perform pg_temp.expect('unpost: applied as update', r -> 'results' -> 0 ->> 'outcome', 'applied');
   perform pg_temp.expect('unpost: is_posted false', (select is_posted::text from public.ameen_invoices where bill_guid = g4::uuid), 'false');
 
-  -- ١٤) رفض المدخلات المعطوبة أو المختلَقة
-  perform pg_temp.expect('forged event_id rejected', pg_temp.try_as('sync', format('select public.apply_ameen_invoice_events(%L::jsonb)',
-    jsonb_build_array(jsonb_set(pg_temp.ev(g3, 'upsert', vC, t3, 40, pg_temp.bill(g3, 1, 1)), '{event_id}', to_jsonb(vC)))::text)), '22023');
-  perform pg_temp.expect('future timestamp rejected', pg_temp.try_as('sync', format('select public.apply_ameen_invoice_events(%L::jsonb)',
-    jsonb_build_array(pg_temp.ev(g3, 'upsert', vC, '2099-01-01T00:00:00.000Z', 41, pg_temp.bill(g3, 1, 1)))::text)), '22023');
-  perform pg_temp.expect('bill for another guid rejected', pg_temp.try_as('sync', format('select public.apply_ameen_invoice_events(%L::jsonb)',
-    jsonb_build_array(pg_temp.ev(g3, 'upsert', vC, t3, 42, pg_temp.bill(g4, 1, 1)))::text)), '22023');
-  perform pg_temp.expect('delete with content hash rejected', pg_temp.try_as('sync', format('select public.apply_ameen_invoice_events(%L::jsonb)',
-    jsonb_build_array(pg_temp.ev(g3, 'delete', vC, t3, 43))::text)), '22023');
-  perform pg_temp.expect('wrong schema rejected', pg_temp.try_as('sync', format('select public.apply_ameen_invoice_events(%L::jsonb)',
-    jsonb_build_array(jsonb_set(pg_temp.ev(g3, 'upsert', vC, t3, 44, pg_temp.bill(g3, 1, 1)), '{schema}', '"v0"'))::text)), '22023');
-  perform pg_temp.expect('non-array rejected', pg_temp.try_as('sync', 'select public.apply_ameen_invoice_events(''{}''::jsonb)'), '22023');
-  perform pg_temp.expect('missing seq rejected', pg_temp.try_as('sync', format('select public.apply_ameen_invoice_events(%L::jsonb)',
-    jsonb_build_array(pg_temp.ev(g3, 'upsert', vC, t3, 45, pg_temp.bill(g3, 1, 1)) - 'source_seq')::text)), '22023');
-  perform pg_temp.expect('201 events rejected', pg_temp.try_as('sync', format('select public.apply_ameen_invoice_events(%L::jsonb)',
+  -- ١٤) أخطاء على مستوى الطلب كله فقط ترفض الطلب: ليس مصفوفة، أو أكثر من 200 حدث
+  perform pg_temp.expect('non-array request rejected', pg_temp.try_as('sync', 'select public.apply_ameen_invoice_events(''{}''::jsonb)'), '22023');
+  perform pg_temp.expect('201 events request rejected', pg_temp.try_as('sync', format('select public.apply_ameen_invoice_events(%L::jsonb)',
     (select jsonb_agg(pg_temp.ev(g3, 'upsert', vC, t3, 100 + i, pg_temp.bill(g3, 1, 1))) from generate_series(1, 201) i)::text)), '22023');
-  perform pg_temp.expect('rejected batch changed nothing', (select payload ->> 'total' from public.ameen_invoices where bill_guid = g3::uuid), '20');
+  perform pg_temp.expect('rejected request changed nothing', (select payload ->> 'total' from public.ameen_invoices where bill_guid = g3::uuid), '20');
 
   -- ١٥) القراءة: الموظفون فقط
   perform pg_temp.expect('staff can read', pg_temp.try_as('staff', 'select 1 from public.ameen_invoices limit 1'), 'OK');
@@ -384,6 +372,65 @@ begin
   perform set_config('request.jwt.claims', '', true);
   perform pg_temp.expect('non-staff user sees no daily totals', n::text, '0');
 end $$;
+
+-- ١٥ج) مراجعة المالك P1 — الترتيب بالتسلسل وحده، وعزل الأحداث المعطوبة
+do $p1$
+declare
+  m1 text := 'e0000000-0000-0000-0000-000000000001';
+  m2 text := 'e0000000-0000-0000-0000-000000000002';
+  m3 text := 'e0000000-0000-0000-0000-000000000003';
+  vA text := pg_temp.hx('p1-A');
+  vB text := pg_temp.hx('p1-B');
+  good1 jsonb; good2 jsonb; future jsonb; forged jsonb; badschema jsonb; badguid jsonb; strseq jsonb; baddate jsonb; delhash jsonb; otherbill jsonb;
+  r jsonb;
+  ev_before bigint;
+begin
+  -- (أ) تعديل أحدث (تسلسل أكبر) لكن تاريخ تعديله في الأمين أقدم ⇒ يُطبَّق (لا يُرفض بسبب الوقت)
+  r := pg_temp.apply_as('sync', jsonb_build_array(pg_temp.ev(m1, 'upsert', vA, '2026-10-20T16:30:00.000Z', 5000, pg_temp.bill(m1, 1, 10, true, true, '2026-09-10'))));
+  r := pg_temp.apply_as('sync', jsonb_build_array(pg_temp.ev(m1, 'upsert', vB, '2026-10-20T16:00:00.000Z', 5001, pg_temp.bill(m1, 1, 11, true, true, '2026-09-10'))));
+  perform pg_temp.expect('newer seq with OLDER Ameen time: applied', r -> 'results' -> 0 ->> 'outcome', 'applied');
+  perform pg_temp.expect('newer seq with older time: content updated', (select payload ->> 'total' from public.ameen_invoices where bill_guid = m1::uuid), '11');
+  -- والعكس: تسلسل أقدم بوقت أحدث ⇒ stale
+  r := pg_temp.apply_as('sync', jsonb_build_array(pg_temp.ev(m1, 'upsert', vA, '2026-10-20T16:59:00.000Z', 4999, pg_temp.bill(m1, 1, 10, true, true, '2026-09-10'))));
+  perform pg_temp.expect('older seq with NEWER Ameen time: stale', r -> 'results' -> 0 ->> 'outcome', 'stale');
+  perform pg_temp.expect('older seq with newer time: newest content kept', (select payload ->> 'total' from public.ameen_invoices where bill_guid = m1::uuid), '11');
+
+  -- (ب) دفعة مختلطة: سليمان + ثمانية معطوبة، منها حدث بتاريخ مستقبلي ⇒ السليمان يُطبَّقان والبقية تُعزل
+  good1     := pg_temp.ev(m2, 'upsert', vA, '2026-10-20T16:31:00.000Z', 5010, pg_temp.bill(m2, 1, 70, true, true, '2026-09-11'));
+  future    := pg_temp.ev(m3, 'upsert', vA, '2099-01-01T00:00:00.000Z', 5011, pg_temp.bill(m3, 1, 5));
+  forged    := jsonb_set(pg_temp.ev(m3, 'upsert', vA, '2026-10-20T16:31:00.000Z', 5012, pg_temp.bill(m3, 1, 5)), '{event_id}', to_jsonb(vB));
+  badschema := jsonb_set(pg_temp.ev(m3, 'upsert', vA, '2026-10-20T16:31:00.000Z', 5013, pg_temp.bill(m3, 1, 5)), '{schema}', '"v0"');
+  badguid   := jsonb_set(pg_temp.ev(m3, 'upsert', vA, '2026-10-20T16:31:00.000Z', 5014, pg_temp.bill(m3, 1, 5)), '{bill_guid}', '"NOT-A-GUID"');
+  strseq    := jsonb_set(pg_temp.ev(m3, 'upsert', vA, '2026-10-20T16:31:00.000Z', 5015, pg_temp.bill(m3, 1, 5)), '{source_seq}', '"5015"');
+  baddate   := pg_temp.ev(m3, 'upsert', vA, '2026-10-20T16:31:00.000Z', 5016, pg_temp.bill(m3, 1, 5, true, true, '20-10-2026'));
+  delhash   := pg_temp.ev(m3, 'delete', vA, '2026-10-20T16:31:00.000Z', 5017);
+  otherbill := pg_temp.ev(m3, 'upsert', vA, '2026-10-20T16:31:00.000Z', 5018, pg_temp.bill(m2, 1, 5));
+  good2     := pg_temp.ev(m2, 'upsert', vB, '2026-10-20T16:32:00.000Z', 5019, pg_temp.bill(m2, 1, 75, true, true, '2026-09-11'));
+  select count(*) into ev_before from public.ameen_invoice_events;
+  r := pg_temp.apply_as('sync', jsonb_build_array(good1, future, forged, badschema, badguid, strseq, baddate, delhash, otherbill, good2, '"not an object"'::jsonb));
+  perform pg_temp.expect('mixed batch: request itself succeeds', (r is not null)::text, 'true');
+  perform pg_temp.expect('mixed batch: two valid applied', r ->> 'applied', '2');
+  perform pg_temp.expect('mixed batch: nine rejected', r ->> 'rejected', '9');
+  perform pg_temp.expect('mixed batch: every event has a result', jsonb_array_length(r -> 'results')::text, '11');
+  perform pg_temp.expect('mixed batch: future event rejected with reason',
+    (select x ->> 'reason' from jsonb_array_elements(r -> 'results') x where x ->> 'index' = '2'), 'event timestamp is in the future');
+  perform pg_temp.expect('mixed batch: forged key rejected', (select x ->> 'reason' from jsonb_array_elements(r -> 'results') x where x ->> 'index' = '3'), 'event_id does not match event content');
+  perform pg_temp.expect('mixed batch: rejected results carry the event id', (select x ->> 'event_id' from jsonb_array_elements(r -> 'results') x where x ->> 'index' = '2'), future ->> 'event_id');
+  perform pg_temp.expect('mixed batch: reasons carry no bill content', (select count(*)::text from jsonb_array_elements(r -> 'results') x where x::text ~ '"total"|lines|customer'), '0');
+  perform pg_temp.expect('mixed batch: valid content applied in order', (select payload ->> 'total' from public.ameen_invoices where bill_guid = m2::uuid), '75');
+  perform pg_temp.expect('mixed batch: nothing written for rejected bill', (select count(*)::text from public.ameen_invoices where bill_guid = m3::uuid), '0');
+  perform pg_temp.expect('mixed batch: only valid events logged', (select count(*) - ev_before from public.ameen_invoice_events)::text, '2');
+  perform pg_temp.expect('mixed batch: dirty day only from valid events', r ->> 'dirty_days', '1');
+
+  -- (ج) إصلاح الحدث المعزول وإعادة إرساله: الحدث المستقبلي بعد تصحيح وقته يُطبَّق
+  r := pg_temp.apply_as('sync', jsonb_build_array(pg_temp.ev(m3, 'upsert', vA, '2026-10-20T16:31:00.000Z', 5011, pg_temp.bill(m3, 1, 5))));
+  perform pg_temp.expect('repaired future event: applied', r -> 'results' -> 0 ->> 'outcome', 'applied');
+  -- وإعادة حدث مُصلَح بتسلسله الأصلي بعد أن سبقه أحدث ⇒ stale، لا يكتب فوق الأحدث
+  r := pg_temp.apply_as('sync', jsonb_build_array(pg_temp.ev(m2, 'upsert', vA, '2026-10-20T16:31:30.000Z', 5012, pg_temp.bill(m2, 1, 1, true, true, '2026-09-11'))));
+  perform pg_temp.expect('requeued old seq after newer applied: stale', r -> 'results' -> 0 ->> 'outcome', 'stale');
+  perform pg_temp.expect('requeued old seq: newest content kept', (select payload ->> 'total' from public.ameen_invoices where bill_guid = m2::uuid), '75');
+end
+$p1$;
 
 -- ١٦) الدالة SECURITY DEFINER بمسار بحث ثابت، والجداول بلا سياسات كتابة
 do $$

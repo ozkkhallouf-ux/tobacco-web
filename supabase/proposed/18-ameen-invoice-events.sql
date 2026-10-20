@@ -20,8 +20,13 @@
 --   * الكتابة الوحيدة عبر public.apply_ameen_invoice_events(jsonb) — SECURITY DEFINER بمسار بحث فارغ —
 --     ولا تقبل إلا هوية المزامنة المعتمدة (9724dbe4-…، نفس حساب ameen_price_sync_status). أي مستخدم
 --     آخر — ولو موظفاً أو مالكاً — يُرفض بـ 42501. لا احتياط بمفتاح service_role.
---   * الترتيب: يُطبَّق الحدث فقط إن كان (source_event_at, source_seq) أحدث مما في الصف؛ الأقدم «stale»
---     ولا يغيّر شيئاً. داخل الدفعة تُعالج الأحداث بترتيب source_seq، مع قفل استشاري لكل فاتورة.
+--   * الترتيب (مراجعة المالك P1، 2026-10-20): التسلسل source_seq الذي يمنحه الوكيل مرة واحدة لكل حدث
+--     (ثابت عبر إعادة المحاولة، متزايد لكل فاتورة) هو وحده ما يحدد الأحدث — لا وقت المصدر. تعديل أحدث
+--     يُطبَّق ولو كان تاريخ تعديله في الأمين أقدم؛ وما تسلسله ≤ المطبَّق «stale» ولا يغيّر شيئاً. داخل
+--     الدفعة تُعالج الأحداث بترتيب source_seq، مع قفل استشاري لكل فاتورة.
+--   * العزل (مراجعة المالك P1): كل حدث يُتحقق منه ويُطبَّق في كتلة فرعية مستقلة؛ الحدث المعطوب (ومنه
+--     المستقبلي التاريخ) يعود «rejected» برمز وسبب مختصر بلا محتوى، وتكتمل بقية الدفعة. الوكيل يعزله
+--     محلياً (Dead Letter) ولا يُفقد.
 --   * مفتاح الحدث = sha256(bill_guid|source_seq|kind|version_hash|source_event_at): يحمل GUID الفاتورة
 --     وتسلسلاً متزايداً، لا بصمة المحتوى وحدها — فعودة الفاتورة لمحتوى سابق (A ← B ← A) حدث جديد لا
 --     «مكرر» (ملاحظة المالك 2026-10-20). يُعاد حسابه على الخادم، فلا يُقبل مفتاح مختلَق.
@@ -187,6 +192,7 @@ declare
   v_writer   uuid := (select auth.uid());
   v_now      timestamptz := pg_catalog.now();
   v_evt      jsonb;
+  v_idx      bigint;
   v_id       text;
   v_kind     text;
   v_guid     uuid;
@@ -204,16 +210,18 @@ declare
   v_dupes    integer := 0;
   v_stale    integer := 0;
   v_noop     integer := 0;
+  v_rejected integer := 0;
+  v_reason   text;
   v_old_day  date;
   v_new_day  date;
   v_days     date[] := '{}'::date[];
   v_marked   integer := 0;
 begin
+  -- أخطاء على مستوى الطلب كله (الهوية والشكل والحجم) ترفض الطلب؛ ما عداها يُعزل حدثاً حدثاً.
   if not public.ameen_invoice_is_sync_writer() then
     raise exception 'apply_ameen_invoice_events is restricted to the trusted sync identity'
       using errcode = '42501';
   end if;
-
   if p_events is null or pg_catalog.jsonb_typeof(p_events) <> 'array' then
     raise exception 'events must be a JSON array' using errcode = '22023';
   end if;
@@ -223,154 +231,171 @@ begin
   if pg_catalog.pg_column_size(p_events) > 4194304 then
     raise exception 'events payload too large' using errcode = '22023';
   end if;
-  if exists (
-    select 1 from pg_catalog.jsonb_array_elements(p_events) e
-     where pg_catalog.jsonb_typeof(e) <> 'object'
-        or pg_catalog.jsonb_typeof(e -> 'source_seq') is distinct from 'number'
-        or (e ->> 'source_seq') !~ '^[0-9]{1,18}$'
-  ) then
-    raise exception 'every event needs an integer source_seq' using errcode = '22023';
-  end if;
 
-  for v_evt in
-    select e from pg_catalog.jsonb_array_elements(p_events) e order by (e ->> 'source_seq')::bigint
+  -- الترتيب بالتسلسل وحده؛ الحدث بلا تسلسل صالح يأتي آخراً ويُرفض منفرداً.
+  for v_evt, v_idx in
+    select e.value, e.ordinality
+      from pg_catalog.jsonb_array_elements(p_events) with ordinality as e(value, ordinality)
+     order by case when pg_catalog.jsonb_typeof(e.value -> 'source_seq') = 'number'
+                    and (e.value ->> 'source_seq') ~ '^[0-9]{1,18}$'
+                   then (e.value ->> 'source_seq')::bigint end nulls last,
+              e.ordinality
   loop
-    -- ── تحقّق الحقول ──
-    if coalesce(v_evt ->> 'schema', '') <> 'ameen-invoice-event/v1' then
-      raise exception 'unsupported event schema' using errcode = '22023';
-    end if;
-    v_id      := v_evt ->> 'event_id';
-    v_kind    := v_evt ->> 'kind';
-    v_hash    := v_evt ->> 'version_hash';
-    v_at_text := v_evt ->> 'source_event_at';
-    v_seq     := (v_evt ->> 'source_seq')::bigint;
-    if v_id is null or v_id !~ '^[0-9a-f]{64}$' then
-      raise exception 'event_id must be a sha256 hex' using errcode = '22023';
-    end if;
-    if v_kind is null or v_kind not in ('upsert', 'delete') then
-      raise exception 'unsupported event kind' using errcode = '22023';
-    end if;
-    if coalesce(v_evt ->> 'bill_guid', '') !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-       or v_evt ->> 'bill_guid' = '00000000-0000-0000-0000-000000000000' then
-      raise exception 'bill_guid must be a lowercase non-zero uuid' using errcode = '22023';
-    end if;
-    v_guid := (v_evt ->> 'bill_guid')::uuid;
-    if v_seq < 1 then
-      raise exception 'source_seq must be positive' using errcode = '22023';
-    end if;
-    if (v_kind = 'upsert' and coalesce(v_hash, '') !~ '^[0-9a-f]{64}$')
-       or (v_kind = 'delete' and v_hash is distinct from 'deleted') then
-      raise exception 'version_hash does not match event kind' using errcode = '22023';
-    end if;
+    v_id := case when pg_catalog.jsonb_typeof(v_evt) = 'object' and (v_evt ->> 'event_id') ~ '^[0-9a-f]{64}$'
+                 then v_evt ->> 'event_id' end;
+    -- كتلة فرعية لكل حدث: أي خطأ فيه يُرجع تغييراته وحده ويُسجَّل «rejected» ثم نكمل.
+    -- متغيرات PL/pgSQL لا تُرجعها الكتلة، لذلك تُحدَّث العدّادات والأيام في آخرها فقط.
     begin
-      v_at := v_at_text::timestamptz;
-      v_detected := nullif(v_evt ->> 'detected_at', '')::timestamptz;
+      if pg_catalog.jsonb_typeof(v_evt) <> 'object' then
+        raise exception 'event must be a JSON object' using errcode = '22023';
+      end if;
+      if coalesce(v_evt ->> 'schema', '') <> 'ameen-invoice-event/v1' then
+        raise exception 'unsupported event schema' using errcode = '22023';
+      end if;
+      if pg_catalog.jsonb_typeof(v_evt -> 'source_seq') is distinct from 'number'
+         or (v_evt ->> 'source_seq') !~ '^[0-9]{1,18}$' then
+        raise exception 'source_seq must be a positive integer' using errcode = '22023';
+      end if;
+      v_seq     := (v_evt ->> 'source_seq')::bigint;
+      v_kind    := v_evt ->> 'kind';
+      v_hash    := v_evt ->> 'version_hash';
+      v_at_text := v_evt ->> 'source_event_at';
+      if v_seq < 1 then
+        raise exception 'source_seq must be a positive integer' using errcode = '22023';
+      end if;
+      if v_id is null then
+        raise exception 'event_id must be a sha256 hex' using errcode = '22023';
+      end if;
+      if v_kind is null or v_kind not in ('upsert', 'delete') then
+        raise exception 'unsupported event kind' using errcode = '22023';
+      end if;
+      if coalesce(v_evt ->> 'bill_guid', '') !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+         or v_evt ->> 'bill_guid' = '00000000-0000-0000-0000-000000000000' then
+        raise exception 'bill_guid must be a lowercase non-zero uuid' using errcode = '22023';
+      end if;
+      v_guid := (v_evt ->> 'bill_guid')::uuid;
+      if (v_kind = 'upsert' and coalesce(v_hash, '') !~ '^[0-9a-f]{64}$')
+         or (v_kind = 'delete' and v_hash is distinct from 'deleted') then
+        raise exception 'version_hash does not match event kind' using errcode = '22023';
+      end if;
+      begin
+        v_at := v_at_text::timestamptz;
+        v_detected := nullif(v_evt ->> 'detected_at', '')::timestamptz;
+      exception when others then
+        raise exception 'event timestamp is invalid' using errcode = '22007';
+      end;
+      if v_at is null then
+        raise exception 'source_event_at is required' using errcode = '22023';
+      end if;
+      if v_at > v_now + interval '5 minutes' or v_detected > v_now + interval '5 minutes' then
+        raise exception 'event timestamp is in the future' using errcode = '22023';
+      end if;
+      -- المفتاح مشتقّ لا مختلَق: نفس صيغة الوكيل حرفياً.
+      if v_id <> pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(
+           (v_evt ->> 'bill_guid') || '|' || (v_evt ->> 'source_seq') || '|' || v_kind || '|' || v_hash || '|' || v_at_text, 'UTF8')), 'hex') then
+        raise exception 'event_id does not match event content' using errcode = '22023';
+      end if;
+      if v_kind = 'upsert' then
+        v_bill := v_evt -> 'bill';
+        if pg_catalog.jsonb_typeof(v_bill) is distinct from 'object'
+           or v_bill ->> 'bill_guid' is distinct from v_evt ->> 'bill_guid'
+           or coalesce(v_bill ->> 'bill_type', '') not in ('1', '3')
+           or pg_catalog.jsonb_typeof(v_bill -> 'lines') is distinct from 'array' then
+          raise exception 'upsert needs a bill snapshot for the same bill_guid' using errcode = '22023';
+        end if;
+        if pg_catalog.pg_column_size(v_bill) > 262144 then
+          raise exception 'bill snapshot too large' using errcode = '22023';
+        end if;
+        if v_bill ? 'bill_date' and (v_bill ->> 'bill_date') !~ '^\d{4}-\d{2}-\d{2}$' then
+          raise exception 'bill_date must be YYYY-MM-DD' using errcode = '22023';
+        end if;
+      else
+        v_bill := null;
+      end if;
+
+      -- ── منع التكرار ──
+      if exists (select 1 from public.ameen_invoice_events x where x.event_id = v_id) then
+        v_outcome := 'duplicate';
+      else
+        -- ── الترتيب لكل فاتورة: التسلسل وحده يحدد الأحدث (لا وقت المصدر) ──
+        -- تعديل أحدث يُطبَّق ولو كان تاريخ تعديله في الأمين أقدم؛ وما تسلسله ≤ المطبَّق stale.
+        perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('ameen_invoice:' || v_guid::text, 0));
+        select i.status, i.version_hash, i.source_seq, i.bill_date into v_cur
+          from public.ameen_invoices i where i.bill_guid = v_guid for update;
+        v_found := found;
+        v_old_day := case when v_found and v_cur.status = 'active' then v_cur.bill_date end;
+        v_new_day := case when v_kind = 'upsert' then (v_bill ->> 'bill_date')::date end;
+
+        if v_found and v_seq <= v_cur.source_seq then
+          v_outcome := 'stale';
+        elsif v_kind = 'upsert' then
+          if v_found and v_cur.status = 'active' and v_cur.version_hash = v_hash then
+            v_outcome := 'noop';
+            update public.ameen_invoices
+               set source_event_at = v_at, source_seq = v_seq
+             where bill_guid = v_guid;
+          else
+            v_outcome := 'applied';
+            insert into public.ameen_invoices as t
+              (bill_guid, bill_type, status, version_hash, revision, source_event_at, source_seq,
+               bill_number, bill_date, customer_guid, is_named, is_posted, payload, updated_at, deleted_at)
+            values
+              (v_guid, (v_bill ->> 'bill_type')::smallint, 'active', v_hash, 1, v_at, v_seq,
+               case when pg_catalog.jsonb_typeof(v_bill -> 'number') = 'number' then (v_bill ->> 'number')::numeric::bigint end,
+               v_new_day,
+               case when (v_bill ->> 'customer_guid') ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then (v_bill ->> 'customer_guid')::uuid end,
+               case when pg_catalog.jsonb_typeof(v_bill -> 'is_named') = 'boolean' then (v_bill ->> 'is_named')::boolean end,
+               case when pg_catalog.jsonb_typeof(v_bill -> 'is_posted') = 'boolean' then (v_bill ->> 'is_posted')::boolean end,
+               v_bill, v_now, null)
+            on conflict (bill_guid) do update
+              set bill_type = excluded.bill_type, status = 'active', version_hash = excluded.version_hash,
+                  revision = t.revision + 1, source_event_at = excluded.source_event_at,
+                  source_seq = excluded.source_seq, bill_number = excluded.bill_number,
+                  bill_date = excluded.bill_date, customer_guid = excluded.customer_guid,
+                  is_named = excluded.is_named, is_posted = excluded.is_posted,
+                  payload = excluded.payload, updated_at = v_now, deleted_at = null;
+          end if;
+        else
+          if v_found and v_cur.status = 'deleted' then
+            v_outcome := 'noop';
+            update public.ameen_invoices
+               set source_event_at = v_at, source_seq = v_seq
+             where bill_guid = v_guid;
+          else
+            v_outcome := 'applied';
+            -- شاهد قبر: نحتفظ بآخر لقطة للتدقيق، ونمنع إحياء الفاتورة بحدث أقدم.
+            insert into public.ameen_invoices as t
+              (bill_guid, bill_type, status, version_hash, revision, source_event_at, source_seq, updated_at, deleted_at)
+            values (v_guid, null, 'deleted', 'deleted', 1, v_at, v_seq, v_now, v_now)
+            on conflict (bill_guid) do update
+              set status = 'deleted', version_hash = 'deleted', revision = t.revision + 1,
+                  source_event_at = excluded.source_event_at, source_seq = excluded.source_seq,
+                  updated_at = v_now, deleted_at = v_now;
+          end if;
+        end if;
+
+        insert into public.ameen_invoice_events
+          (event_id, bill_guid, kind, version_hash, source_event_at, source_seq, detected_at, outcome, writer_id, received_at)
+        values (v_id, v_guid, v_kind, v_hash, v_at, v_seq, v_detected, v_outcome, v_writer, v_now);
+      end if;
+
+      -- آخر الكتلة: العدّادات واليوم القديم/الجديد (قد يتكرران — تعديل بلا تغيير التاريخ — يُزال لاحقاً).
+      if v_outcome = 'applied' then
+        v_days := v_days || v_old_day || v_new_day;
+        v_applied := v_applied + 1;
+      elsif v_outcome = 'duplicate' then v_dupes := v_dupes + 1;
+      elsif v_outcome = 'stale' then v_stale := v_stale + 1;
+      else v_noop := v_noop + 1;
+      end if;
+      v_results := v_results || pg_catalog.jsonb_build_array(pg_catalog.jsonb_build_object(
+        'event_id', v_id, 'index', v_idx, 'outcome', v_outcome));
     exception when others then
-      raise exception 'event timestamp is invalid' using errcode = '22007';
+      -- عزل: سبب مختصر بلا محتوى الحدث. رسائلنا (22023/22007) معروفة النص؛ غيرها يُختصر لرمزه.
+      v_reason := case when sqlstate in ('22023', '22007') then sqlerrm else 'unexpected error ' || sqlstate end;
+      v_rejected := v_rejected + 1;
+      v_results := v_results || pg_catalog.jsonb_build_array(pg_catalog.jsonb_build_object(
+        'event_id', v_id, 'index', v_idx, 'outcome', 'rejected', 'reason_code', sqlstate, 'reason', v_reason));
     end;
-    if v_at is null then
-      raise exception 'source_event_at is required' using errcode = '22023';
-    end if;
-    if v_at > v_now + interval '5 minutes' then
-      raise exception 'source_event_at is in the future' using errcode = '22023';
-    end if;
-    -- المفتاح مشتقّ لا مختلَق: نفس صيغة الوكيل حرفياً.
-    if v_id <> pg_catalog.encode(pg_catalog.sha256(pg_catalog.convert_to(
-         (v_evt ->> 'bill_guid') || '|' || (v_evt ->> 'source_seq') || '|' || v_kind || '|' || v_hash || '|' || v_at_text, 'UTF8')), 'hex') then
-      raise exception 'event_id does not match event content' using errcode = '22023';
-    end if;
-    if v_kind = 'upsert' then
-      v_bill := v_evt -> 'bill';
-      if pg_catalog.jsonb_typeof(v_bill) is distinct from 'object'
-         or v_bill ->> 'bill_guid' is distinct from v_evt ->> 'bill_guid'
-         or coalesce(v_bill ->> 'bill_type', '') not in ('1', '3')
-         or pg_catalog.jsonb_typeof(v_bill -> 'lines') is distinct from 'array' then
-        raise exception 'upsert needs a bill snapshot for the same bill_guid' using errcode = '22023';
-      end if;
-      if pg_catalog.pg_column_size(v_bill) > 262144 then
-        raise exception 'bill snapshot too large' using errcode = '22023';
-      end if;
-    else
-      v_bill := null;
-    end if;
-
-    -- ── منع التكرار ──
-    if exists (select 1 from public.ameen_invoice_events x where x.event_id = v_id) then
-      v_dupes := v_dupes + 1;
-      v_results := v_results || pg_catalog.jsonb_build_array(pg_catalog.jsonb_build_object('event_id', v_id, 'outcome', 'duplicate'));
-      continue;
-    end if;
-
-    -- ── الترتيب لكل فاتورة ──
-    perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('ameen_invoice:' || v_guid::text, 0));
-    select i.status, i.version_hash, i.source_event_at, i.source_seq, i.bill_date into v_cur
-      from public.ameen_invoices i where i.bill_guid = v_guid for update;
-    v_found := found;
-    v_old_day := case when v_found and v_cur.status = 'active' then v_cur.bill_date end;
-    v_new_day := case when v_kind = 'upsert' and (v_bill ->> 'bill_date') ~ '^\d{4}-\d{2}-\d{2}$' then (v_bill ->> 'bill_date')::date end;
-
-    if v_found and (v_at, v_seq) <= (v_cur.source_event_at, v_cur.source_seq) then
-      v_outcome := 'stale';
-    elsif v_kind = 'upsert' then
-      if v_found and v_cur.status = 'active' and v_cur.version_hash = v_hash then
-        v_outcome := 'noop';
-        update public.ameen_invoices
-           set source_event_at = v_at, source_seq = v_seq
-         where bill_guid = v_guid;
-      else
-        v_outcome := 'applied';
-        insert into public.ameen_invoices as t
-          (bill_guid, bill_type, status, version_hash, revision, source_event_at, source_seq,
-           bill_number, bill_date, customer_guid, is_named, is_posted, payload, updated_at, deleted_at)
-        values
-          (v_guid, (v_bill ->> 'bill_type')::smallint, 'active', v_hash, 1, v_at, v_seq,
-           case when pg_catalog.jsonb_typeof(v_bill -> 'number') = 'number' then (v_bill ->> 'number')::numeric::bigint end,
-           case when (v_bill ->> 'bill_date') ~ '^\d{4}-\d{2}-\d{2}$' then (v_bill ->> 'bill_date')::date end,
-           case when (v_bill ->> 'customer_guid') ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then (v_bill ->> 'customer_guid')::uuid end,
-           case when pg_catalog.jsonb_typeof(v_bill -> 'is_named') = 'boolean' then (v_bill ->> 'is_named')::boolean end,
-           case when pg_catalog.jsonb_typeof(v_bill -> 'is_posted') = 'boolean' then (v_bill ->> 'is_posted')::boolean end,
-           v_bill, v_now, null)
-        on conflict (bill_guid) do update
-          set bill_type = excluded.bill_type, status = 'active', version_hash = excluded.version_hash,
-              revision = t.revision + 1, source_event_at = excluded.source_event_at,
-              source_seq = excluded.source_seq, bill_number = excluded.bill_number,
-              bill_date = excluded.bill_date, customer_guid = excluded.customer_guid,
-              is_named = excluded.is_named, is_posted = excluded.is_posted,
-              payload = excluded.payload, updated_at = v_now, deleted_at = null;
-      end if;
-    else
-      if v_found and v_cur.status = 'deleted' then
-        v_outcome := 'noop';
-        update public.ameen_invoices
-           set source_event_at = v_at, source_seq = v_seq
-         where bill_guid = v_guid;
-      else
-        v_outcome := 'applied';
-        -- شاهد قبر: نحتفظ بآخر لقطة للتدقيق، ونمنع إحياء الفاتورة بحدث أقدم.
-        insert into public.ameen_invoices as t
-          (bill_guid, bill_type, status, version_hash, revision, source_event_at, source_seq, updated_at, deleted_at)
-        values (v_guid, null, 'deleted', 'deleted', 1, v_at, v_seq, v_now, v_now)
-        on conflict (bill_guid) do update
-          set status = 'deleted', version_hash = 'deleted', revision = t.revision + 1,
-              source_event_at = excluded.source_event_at, source_seq = excluded.source_seq,
-              updated_at = v_now, deleted_at = v_now;
-      end if;
-    end if;
-
-    insert into public.ameen_invoice_events
-      (event_id, bill_guid, kind, version_hash, source_event_at, source_seq, detected_at, outcome, writer_id, received_at)
-    values (v_id, v_guid, v_kind, v_hash, v_at, v_seq, v_detected, v_outcome, v_writer, v_now);
-
-    -- اليوم القديم والجديد للتقارير؛ قد يتكرران (تعديل بلا تغيير التاريخ) — يُزال التكرار لاحقاً.
-    if v_outcome = 'applied' then
-      v_days := v_days || v_old_day || v_new_day;
-    end if;
-
-    if v_outcome = 'applied' then v_applied := v_applied + 1;
-    elsif v_outcome = 'stale' then v_stale := v_stale + 1;
-    else v_noop := v_noop + 1;
-    end if;
-    v_results := v_results || pg_catalog.jsonb_build_array(pg_catalog.jsonb_build_object('event_id', v_id, 'outcome', v_outcome));
   end loop;
 
   -- إدخال واحد للأيام المتأثرة بعد إزالة التكرار: ON CONFLICT DO UPDATE لا يقبل الصف نفسه مرتين
@@ -385,7 +410,7 @@ begin
 
   return pg_catalog.jsonb_build_object(
     'results', v_results, 'applied', v_applied, 'duplicate', v_dupes, 'stale', v_stale, 'noop', v_noop,
-    'dirty_days', v_marked);
+    'rejected', v_rejected, 'dirty_days', v_marked);
 end;
 $$;
 

@@ -25,6 +25,14 @@
 #   .\tools\ameen-invoice-event-agent.ps1 -Once                 # دورة رصد واحدة، تكتب الصندوق المحلي فقط
 #   .\tools\ameen-invoice-event-agent.ps1 -RunMinutes 30        # رصد لمدة 30 دقيقة بلا إرسال
 #   .\tools\ameen-invoice-event-agent.ps1 -Send                 # يرسل فقط إن وُجد ملف التفعيل
+#
+# الأحداث المعزولة (Dead Letter) — محلياً فقط، بلا اتصال بالأمين ولا Supabase:
+#   .\tools\ameen-invoice-event-agent.ps1 -ListDeadLetter                               # التسلسل والسبب والمعرّف
+#   .\tools\ameen-invoice-event-agent.ps1 -RepairDeadLetterSeq <seq> -RepairMode Resnapshot
+#       (المفضّل) لقطة جديدة من الأمين في المطابقة التالية بتسلسل أحدث — الحالة الحالية هي الحقيقة.
+#   .\tools\ameen-invoice-event-agent.ps1 -RepairDeadLetterSeq <seq> -RepairMode Requeue
+#       بعد تصحيح ملف deadletter\<seq>.json يدوياً: يُعاد إلى الصف بتسلسله الأصلي بعد التحقق؛
+#       إن سبقه حدث أحدث للفاتورة فالخادم يعدّه stale ولا يكتب فوق الأحدث.
 # ============================================================
 param(
     [int]$PollSeconds = 2,
@@ -39,7 +47,10 @@ param(
     [string]$OutboxDir = (Join-Path $env:ProgramData "OZK-TOBACCO\ameen-invoice-events"),
     [string]$EnvFile = "$PSScriptRoot\.env",
     [string]$LogFile = "$PSScriptRoot\logs\ameen-invoice-events.log",
-    [string]$ExpectedDatabase = "AmnDb002"
+    [string]$ExpectedDatabase = "AmnDb002",
+    [switch]$ListDeadLetter,
+    [long]$RepairDeadLetterSeq = 0,
+    [ValidateSet("Resnapshot", "Requeue")][string]$RepairMode = "Resnapshot"
 )
 
 $ErrorActionPreference = "Stop"
@@ -70,6 +81,23 @@ function Get-AgentSetting([string]$Name) {
     $v = [Environment]::GetEnvironmentVariable($Name, "Process")
     if (-not $v) { $v = [Environment]::GetEnvironmentVariable($Name, "User") }
     return $v
+}
+
+# ---------------------------------------------------------------- الأحداث المعزولة (محلياً فقط)
+if ($ListDeadLetter -or $RepairDeadLetterSeq -gt 0) {
+    Initialize-AmeenInvoiceOutbox -Dir $OutboxDir
+    if ($ListDeadLetter) {
+        $items = @(Get-AmeenDeadLetters -Dir $OutboxDir)
+        Write-Host ("أحداث معزولة: {0}" -f $items.Count)
+        foreach ($i in $items) { Write-Host ("  seq={0} kind={1} bill={2} source={3} code={4} reason={5} at={6}" -f $i.source_seq, $i.kind, $i.bill_guid, $i.source, $i.reason_code, $i.reason, $i.at) }
+    }
+    if ($RepairDeadLetterSeq -gt 0) {
+        $state = Read-AmeenInvoiceState -Dir $OutboxDir
+        $mode = Repair-AmeenDeadLetter -Dir $OutboxDir -State $state -Seq $RepairDeadLetterSeq -Mode $RepairMode
+        Save-AmeenInvoiceState -Dir $OutboxDir -State $state
+        Write-AgentLog ("أُصلح الحدث المعزول seq={0} بوضع {1}" -f $RepairDeadLetterSeq, $mode)
+    }
+    exit 0
 }
 
 $connStr = Get-AgentSetting "AMEEN_SQL_CONNECTION_STRING"
@@ -221,6 +249,7 @@ try {
 
         if ($sendOn) {
             $r = Send-AmeenInvoiceOutbox -Dir $OutboxDir -State $state -Transport $transport
+            if ($r.deadlettered -gt 0) { Write-AgentLog ("عُزل {0} حدث معطوب في deadletter\ (راجع -ListDeadLetter)" -f $r.deadlettered) }
             if ($r.error) { Write-AgentLog ("فشل الإرسال (سيُعاد): " + $r.error) }
             elseif ($r.acked -gt 0) { Write-AgentLog ("أُكِّد {0} حدث" -f $r.acked) }
             Save-AmeenInvoiceState -Dir $OutboxDir -State $state

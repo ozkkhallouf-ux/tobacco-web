@@ -201,7 +201,7 @@ try {
   $partial = { param($Events) return @(@{ event_id = $Events[0].event_id; outcome = "applied" }) }
   $r = Send-AmeenInvoiceOutbox -Dir $box -State $st -Transport $partial -NowUtc $now.AddMinutes(10)
   Assert 'partial server reply: treated as failure, nothing removed' ($r.error -match "missing" -and (Get-AmeenOutboxPending -Dir $box).Count -eq 3)
-  $weird = { param($Events) return @($Events | ForEach-Object { @{ event_id = $_.event_id; outcome = "rejected" } }) }
+  $weird = { param($Events) return @($Events | ForEach-Object { @{ event_id = $_.event_id; outcome = "exploded" } }) }
   $r = Send-AmeenInvoiceOutbox -Dir $box -State $st -Transport $weird -NowUtc $now.AddMinutes(20)
   Assert 'unknown outcome: treated as failure' ($r.error -match "unexpected outcome" -and (Get-AmeenOutboxPending -Dir $box).Count -eq 3)
 
@@ -222,6 +222,79 @@ try {
   $dup = { param($Events) return @($Events | ForEach-Object { @{ event_id = $_.event_id; outcome = "duplicate" } }) }
   $r = Send-AmeenInvoiceOutbox -Dir $box -State $st -Transport $dup -NowUtc $now.AddMinutes(40)
   Assert 'duplicate reply acknowledged' ($r.acked -eq 1 -and (Get-AmeenOutboxPending -Dir $box).Count -eq 0)
+
+  # ── ٥ب) مراجعة المالك P1: عزل الأحداث المعطوبة (Dead Letter) دون إفشال الدفعة ────────────────
+  $dbox = Join-Path $tempDir "outbox-deadletter"
+  Initialize-AmeenInvoiceOutbox -Dir $dbox
+  $ds = New-AmeenInvoiceState
+  $G2 = "C0000000-0000-0000-0000-000000000002"; $G3 = "C0000000-0000-0000-0000-000000000003"
+  $obsG = { param($g, $snap, $at) @{ guid = $g; snapshot = $snap; ops = @(@{ op = 1; at_utc = $at }); detected_at_utc = $at } }
+  $good1 = Resolve-AmeenInvoiceChanges -State $ds -Observations @((& $obsG $G1 (ConvertTo-AmeenInvoiceSnapshot -Header (New-Header -Guid $G1) -Lines @($L1)) "2026-10-20T17:00:00.000Z"))
+  # حدث بتاريخ مستقبلي (ساعة الجهاز خاطئة مثلاً): مفتاحه صحيح لكن وقته بعد الآن + 5 دقائق
+  $future = Resolve-AmeenInvoiceChanges -State $ds -Observations @((& $obsG $G2 (ConvertTo-AmeenInvoiceSnapshot -Header (New-Header -Guid $G2) -Lines @($L1)) "2027-01-01T00:00:00.000Z"))
+  $good2 = Resolve-AmeenInvoiceChanges -State $ds -Observations @((& $obsG $G3 (ConvertTo-AmeenInvoiceSnapshot -Header (New-Header -Guid $G3) -Lines @($L2)) "2026-10-20T17:00:02.000Z"))
+  # حدث محتواه عُبث به بعد البصمة (المبلغ تغيّر والبصمة قديمة)
+  $tampered = Resolve-AmeenInvoiceChanges -State $ds -Observations @((& $obsG $G1 (ConvertTo-AmeenInvoiceSnapshot -Header (New-Header -Guid $G1 -Total 999) -Lines @($L1)) "2026-10-20T17:00:03.000Z"))
+  $tampered[0].bill.total = 1.0
+  Add-AmeenOutboxEvents -Dir $dbox -Events @($good1 + $future + $good2 + $tampered)
+  $nowD = [datetime]::SpecifyKind([datetime]"2026-10-20T17:05:00", [DateTimeKind]::Utc)
+  Assert 'validate: future timestamp flagged' ((Test-AmeenInvoiceEvent -Event $future[0] -NowUtc $nowD).code -eq "future")
+  Assert 'validate: tampered content flagged' ((Test-AmeenInvoiceEvent -Event $tampered[0] -NowUtc $nowD).code -eq "version_hash")
+  Assert 'validate: good event passes' ($null -eq (Test-AmeenInvoiceEvent -Event $good1[0] -NowUtc $nowD))
+  $forged = @{}; foreach ($k in $good1[0].Keys) { $forged[$k] = $good1[0][$k] }; $forged.source_seq = [long]$good1[0].source_seq + 99
+  Assert 'validate: forged seq (key mismatch) flagged' ((Test-AmeenInvoiceEvent -Event $forged -NowUtc $nowD).code -eq "event_id")
+
+  # الخادم يرفض حدثاً سليماً محلياً (قاعدة على الخادم وحده) ⇒ يُعزل هو فقط
+  $script:dlSent = @()
+  $mixed = { param($Events)
+    $script:dlSent += @($Events | ForEach-Object { [long]$_.source_seq })
+    $i = 0
+    return @($Events | ForEach-Object { $i++
+      if ($_.bill_guid -eq $G3.ToLowerInvariant()) { @{ event_id = $_.event_id; index = $i; outcome = "rejected"; reason_code = "22023"; reason = "bill snapshot too large" } }
+      else { @{ event_id = $_.event_id; index = $i; outcome = "applied" } } }) }
+  $r = Send-AmeenInvoiceOutbox -Dir $dbox -State $ds -Transport $mixed -NowUtc $nowD
+  Assert 'mixed batch: no batch failure' ($null -eq $r.error)
+  Assert 'mixed batch: valid event acked' ($r.acked -eq 1)
+  Assert 'mixed batch: 3 dead-lettered (future + tampered locally, 1 by server)' ($r.deadlettered -eq 3)
+  Assert 'mixed batch: locally invalid events never sent' (-not ($script:dlSent -contains [long]$future[0].source_seq) -and -not ($script:dlSent -contains [long]$tampered[0].source_seq))
+  Assert 'mixed batch: outbox empty, nothing lost' ((Get-AmeenOutboxPending -Dir $dbox).Count -eq 0 -and (@(Get-AmeenDeadLetters -Dir $dbox).Count + $r.acked) -eq 4)
+  $dl = @(Get-AmeenDeadLetters -Dir $dbox)
+  Assert 'dead letter: reason and id recorded' (@($dl | Where-Object { $_.reason_code -eq "future" -and $_.event_id -eq $future[0].event_id -and $_.source -eq "local" }).Count -eq 1)
+  Assert 'dead letter: server reason recorded' (@($dl | Where-Object { $_.reason_code -eq "22023" -and $_.source -eq "server" }).Count -eq 1)
+  $reasonText = (Get-ChildItem -LiteralPath (Join-Path $dbox "deadletter") -Filter "*.reason.json" | ForEach-Object { Get-Content -Raw -LiteralPath $_.FullName }) -join "`n"
+  $logText = Get-Content -Raw -LiteralPath (Join-Path $dbox "deadletter.log")
+  Assert 'dead letter: no sensitive data in reasons or log (no customer name, no amounts)' ($reasonText -notmatch 'customer_name|زبون|"total"|lines' -and $logText -notmatch 'زبون|customer_name')
+  Assert 'dead letter: original event kept for repair' (Test-Path -LiteralPath $dl[0].file)
+
+  # إصلاح ١: Requeue بعد تصحيح الوقت المستقبلي — يعود بتسلسله الأصلي
+  $fe = ConvertTo-AmeenHashtable (Get-Content -Raw -LiteralPath (@($dl | Where-Object { $_.reason_code -eq "future" })[0].file) -Encoding UTF8 | ConvertFrom-Json)
+  $fe.source_event_at = "2026-10-20T17:00:01.000Z"; $fe.detected_at = "2026-10-20T17:00:01.000Z"
+  Write-AmeenAtomicFile -Path (@($dl | Where-Object { $_.reason_code -eq "future" })[0].file) -Content (ConvertTo-AmeenCanonicalJson $fe)
+  $futureSeq = [long]$future[0].source_seq
+  Assert 'repair requeue: accepted' ((Repair-AmeenDeadLetter -Dir $dbox -State $ds -Seq $futureSeq -Mode Requeue -NowUtc $nowD) -eq "Requeue")
+  $rq = Get-AmeenOutboxPending -Dir $dbox
+  Assert 'repair requeue: back in pending with ORIGINAL seq' ($rq.Count -eq 1 -and [long]$rq[0].event.source_seq -eq $futureSeq)
+  Assert 'repair requeue: key recomputed and valid' ($null -eq (Test-AmeenInvoiceEvent -Event $rq[0].event -NowUtc $nowD) -and $rq[0].event.event_id -ne $future[0].event_id)
+  Assert 'repair requeue: removed from dead letter, kept in resolved' (@(Get-AmeenDeadLetters -Dir $dbox | Where-Object { [long]$_.source_seq -eq $futureSeq }).Count -eq 0 -and @(Get-ChildItem -LiteralPath (Join-Path $dbox "deadletter\resolved") -Filter "*requeue*").Count -eq 2)
+  $r = Send-AmeenInvoiceOutbox -Dir $dbox -State $ds -Transport $mixed -NowUtc $nowD
+  Assert 'repair requeue: sent and acked' ($r.acked -eq 1 -and (Get-AmeenOutboxPending -Dir $dbox).Count -eq 0)
+
+  # إصلاح يبقى معطوباً ⇒ يُرفض ويبقى معزولاً (لا يضيع)
+  $tamperSeq = [long]$tampered[0].source_seq
+  $tdl = @(Get-AmeenDeadLetters -Dir $dbox | Where-Object { [long]$_.source_seq -eq $tamperSeq })[0]
+  $te = ConvertTo-AmeenHashtable (Get-Content -Raw -LiteralPath $tdl.file -Encoding UTF8 | ConvertFrom-Json)
+  $te.bill.bill_type = 7
+  Write-AmeenAtomicFile -Path $tdl.file -Content (ConvertTo-AmeenCanonicalJson $te)
+  Assert 'repair requeue of still-broken event refused' (Throws { Repair-AmeenDeadLetter -Dir $dbox -State $ds -Seq $tamperSeq -Mode Requeue -NowUtc $nowD })
+  Assert 'refused repair stays in dead letter (not lost, not queued)' (@(Get-AmeenDeadLetters -Dir $dbox | Where-Object { [long]$_.source_seq -eq $tamperSeq }).Count -eq 1 -and (Get-AmeenOutboxPending -Dir $dbox).Count -eq 0)
+
+  # إصلاح ٢: Resnapshot — يُعلَّم أن الفاتورة تحتاج لقطة جديدة؛ اللقطة التالية تصدر بتسلسل أحدث
+  $g3l = $G3.ToLowerInvariant()
+  $srvSeq = [long](@(Get-AmeenDeadLetters -Dir $dbox | Where-Object { $_.source -eq "server" })[0].source_seq)
+  Assert 'repair resnapshot: accepted' ((Repair-AmeenDeadLetter -Dir $dbox -State $ds -Seq $srvSeq -Mode Resnapshot -NowUtc $nowD) -eq "Resnapshot")
+  Assert 'repair resnapshot: bill marked for fresh snapshot' ($ds.bills[$g3l].v -eq "resnapshot")
+  $again = Resolve-AmeenInvoiceChanges -State $ds -Observations @((& $obsG $G3 (ConvertTo-AmeenInvoiceSnapshot -Header (New-Header -Guid $G3) -Lines @($L2)) "2026-10-20T17:06:00.000Z"))
+  Assert 'repair resnapshot: same content re-emitted with a newer seq' ($again.Count -eq 1 -and [long]$again[0].source_seq -gt $srvSeq)
 
   # ── ٦) الوكيل: يُحلَّل بلا أخطاء، ولا يسجّل مهمة، ولا يرسل افتراضياً ───────────────────────────
   $tokens = $null; $errors = $null
