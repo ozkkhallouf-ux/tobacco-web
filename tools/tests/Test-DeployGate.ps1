@@ -75,6 +75,13 @@ function Get-GateTaskInfo($Config, [string[]]$TaskNames) {
     $launcher = Join-Path $Config.gateDir 'run-repo-task.ps1'
     return @($TaskNames | ForEach-Object { [pscustomobject]@{ name = $_; visible = $true; state = 'Ready'; nextRunUtc = $null; actionText = ('powershell.exe -File "' + $launcher + '" -Script "tools/reader.ps1"') } })
 }
+# فشل مرة واحدة في كتابة الحالة: يحاكي انقطاعاً في منتصف إكمال التراجع.
+$script:FailSaveStateOnce = $false
+$script:OriginalSaveGateState = ${function:Save-GateState}
+function Save-GateState {
+    if ($script:FailSaveStateOnce) { $script:FailSaveStateOnce = $false; throw 'simulated crash while writing state.json' }
+    & $script:OriginalSaveGateState @args
+}
 $script:ResetOverride = $null
 function Invoke-GateReset($Config, [string]$Target) {
     if ($script:ResetOverride) { return (& $script:ResetOverride $Config $Target) }
@@ -864,6 +871,46 @@ try {
     Assert-True ($r.result -eq 'RECOVERED' -and (Get-TreeSnapshot $ra) -eq $snap) 'Recover returns the device exactly to its pre-rollback snapshot (files, flag, state)'
     $r = Invoke-DeployGate -Config $ra.Config -GateMode 'Rollback' -RollbackTo $a1
     Assert-True ($r.result -eq 'OK' -and (Get-TestHead $ra) -eq $a1) 'rollback succeeds once every guard passes'
+
+    Write-Host '== Codex P1 (94c4c9e): task started after the wait; inflight kept until finalization'
+    $rs = New-InitializedEnv
+    $s1 = Get-TestHead $rs
+    $s2 = Publish-TestRelease $rs @{ 'tools/reader.ps1' = "'restart v2'`n" } -Approve
+    [void](Invoke-DeployGate -Config $rs.Config -GateMode 'Deploy')
+    $directRs = 'powershell.exe -File "' + (Join-Path (Join-Path $rs.Repo 'tools') 'reader.ps1') + '"'
+    $idleExempt = { param($Config, $Names) @($Names | ForEach-Object { [pscustomobject]@{ name = $_; visible = $true; state = 'Ready'; nextRunUtc = (Get-Date).ToUniversalTime().AddHours(1); actionText = ('powershell.exe -File "' + (Join-Path $Config.repoPath 'tools/reader.ps1') + '"') } }) }
+    $runningExempt = { param($Config, $Names) @($Names | ForEach-Object { [pscustomobject]@{ name = $_; visible = $true; state = 'Running'; nextRunUtc = (Get-Date).ToUniversalTime().AddDays(1); actionText = ('powershell.exe -File "' + (Join-Path $Config.repoPath 'tools/reader.ps1') + '"') } }) }
+    $rs.Config.routingExempt = @('T1')
+    $snap = Get-TreeSnapshot $rs
+    $script:TaskInfoSequence = @($idleExempt, $runningExempt)
+    $r = Invoke-DeployGate -Config $rs.Config -GateMode 'Rollback' -RollbackTo $s1
+    Assert-True ($r.result -eq 'SKIP' -and $r.reason -like '*tasks started after the idle wait*T1*' -and (Get-TreeSnapshot $rs) -eq $snap) 'exempt task starts after the idle wait (next run far away) => rollback SKIP, nothing changed'
+    $s3 = Publish-TestRelease $rs @{ 'tools/reader.ps1' = "'restart v3'`n" } -Approve
+    $script:TaskInfoSequence = @($idleExempt, $runningExempt)
+    $r = Invoke-DeployGate -Config $rs.Config -GateMode 'Deploy'
+    Assert-True ($r.result -eq 'SKIP' -and $r.reason -like '*tasks started after the idle wait*' -and (Get-TestHead $rs) -eq $s2) 'same case on Deploy => SKIP before merge'
+    $script:TaskInfoSequence = $null
+    $rs.Config.routingExempt = @()
+
+    $script:ResetOverride = {
+        param($Config, $Target)
+        $res = Invoke-GateGit $Config @('reset', '--keep', $Target)
+        return [pscustomobject]@{ Code = 1; Out = @('crash after reset'); Text = 'crash after reset' }
+    }
+    $r = Invoke-DeployGate -Config $rs.Config -GateMode 'Rollback' -RollbackTo $s1
+    $script:ResetOverride = $null
+    Assert-True ($r.result -eq 'FAIL' -and (Get-TestHead $rs) -eq $s1 -and (Test-Path -LiteralPath (Join-Path $rs.Gate 'inflight.json'))) 'rollback interrupted after HEAD moved => inflight kept'
+    $script:FailSaveStateOnce = $true
+    $crashed = $false
+    try { [void](Invoke-DeployGate -Config $rs.Config -GateMode 'Recover') } catch { $crashed = $true }
+    Assert-True ($crashed -and (Test-Path -LiteralPath (Join-Path $rs.Gate 'inflight.json')) -and (Get-TestState $rs).lastDeployedSha -eq $s2) 'crash while Recover finalizes the rollback => inflight.json still present, state not half-written'
+    $r = Invoke-DeployGate -Config $rs.Config -GateMode 'Recover'
+    $st = Get-TestState $rs
+    Assert-True ($r.result -eq 'RECOVERED' -and $st.status -eq 'ROLLED_BACK_PINNED' -and $st.pinnedSha -eq $s1 -and -not (Test-Path -LiteralPath (Join-Path $rs.Gate 'inflight.json')) -and -not (Test-Path -LiteralPath (Join-Path $rs.Gate 'deploying.flag'))) 'the next Recover completes the rollback from the kept record'
+    Assert-True ((Test-Path -LiteralPath (Join-Path $r.backup_dir 'inflight.recovered.json'))) 'the record is archived inside its backup only after finalization'
+    $snap = Get-TreeSnapshot $rs
+    $r = Invoke-DeployGate -Config $rs.Config -GateMode 'Recover'
+    Assert-True ($r.result -eq 'NOOP' -and (Get-TreeSnapshot $rs) -eq $snap) 'Recover after completion => NOOP, nothing changed'
 
     Write-Host '== Safety invariants in the source'
     $src = [System.IO.File]::ReadAllText($gateScript)

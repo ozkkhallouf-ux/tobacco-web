@@ -194,6 +194,10 @@ const rollbackSrc = gateSrc.slice(gateSrc.indexOf("function Invoke-GateRollback"
 assert.match(rollbackSrc, /Get-TaskGuard[\s\S]{0,1200}New-DeployBackup/, "التراجع يمرّ بحارس المهام قبل أي نسخ أو reset");
 assert.match(rollbackSrc, /Get-SwitchBlockers \$Config \$Head[\s\S]{0,2000}Invoke-GateReset/, "وإعادة الفحص بعد الانتظار قبل reset --keep");
 assert.match(gateSrc, /\$running \+= \(\$name \+ ' \(not visible\)'\)/, "مهمة غير مرئية ليست خاملة في Wait-TasksIdle");
+assert.match(gateSrc, /tasks started after the idle wait/, "مهمة بدأت بعد الانتظار تمنع التبديل");
+const completeSrc = gateSrc.slice(gateSrc.indexOf("function Complete-RollbackState"), gateSrc.indexOf("function Invoke-GateUnpin"));
+assert.match(completeSrc, /Save-GateState[\s\S]*Clear-DeployFlag[\s\S]*Close-InflightRecord/, "inflight.json يُزال آخراً بعد كتابة الحالة");
+assert.doesNotMatch(recover, /Move-Item -LiteralPath \$Paths\.Inflight/, "Recover لا ينقل السجل قبل اكتمال الإنهاء");
 ok("تدقيق 2026-10-20: لا إصدار أقدم من الجهاز، الثغرات الست (a–f)، قفل، نسخة احتياطية بـSHA256، تحقق بعد التبديل، واستعادة آمنة");
 
 // 2) الـworkflow

@@ -439,12 +439,13 @@ function Get-TaskGuard($Config, $Infos, [datetime]$NowUtc) {
     $pause = @($Config.pauseTasks | ForEach-Object { [string]$_ })
     $guardSeconds = 120
     if ($null -ne $Config.startGuardSeconds) { $guardSeconds = [int]$Config.startGuardSeconds }
-    $g = [ordered]@{ invisible = @(); unrouted = @(); imminent = @(); scripts = [ordered]@{} }
+    $g = [ordered]@{ invisible = @(); unrouted = @(); imminent = @(); running = @(); scripts = [ordered]@{} }
     foreach ($i in @($Infos)) {
         if (-not $i.visible) { $g.invisible += [string]$i.name; continue }
         if ([string]$i.state -eq 'Disabled') { continue }
         $g.scripts[[string]$i.name] = @(Get-TaskRepoScripts $Config ([string]$i.actionText))
         if ($pause -notcontains [string]$i.name) { continue }
+        if ([string]$i.state -eq 'Running') { $g.running += [string]$i.name }
         $routed = Test-TaskRouted $Config ([string]$i.actionText)
         if (-not $routed -and $exempt -notcontains [string]$i.name) { $g.unrouted += [string]$i.name }
         if (-not $routed -and $i.nextRunUtc) {
@@ -556,6 +557,9 @@ function Get-SwitchBlockers($Config, [string]$Head) {
     $reasons = @()
     if (@($late.invisible).Count -gt 0) { $reasons += ('tasks became invisible: ' + (@($late.invisible) -join ', ')) }
     if (@($late.imminent).Count -gt 0) { $reasons += ('unrouted tasks about to start: ' + (@($late.imminent) -join ', ')) }
+    # Codex P1 على #337: مهمة (خاصة المعفاة التي لا ترى العلم) بدأت بعد انتهاء الانتظار وقبل هذا الفحص؛
+    # موعدها التالي قد يكون بعيداً فلا يلتقطها «imminent» — حالتها Running الآن تكفي للمنع.
+    if (@($late.running).Count -gt 0) { $reasons += ('tasks started after the idle wait: ' + (@($late.running) -join ', ')) }
     $markers = @(Get-GitOperationMarkers $Config)
     if ($markers.Count -gt 0) { $reasons += ('git operation in progress: ' + ($markers -join ', ')) }
     if ((Get-GitValue $Config @('rev-parse', 'HEAD')) -ne $Head) { $reasons += 'HEAD moved during the pause' }
@@ -905,14 +909,22 @@ function Invoke-GateRollback($Config, $Paths, $Record, $State, [string]$Head, [s
     return Complete-Gate $Paths $Record 'OK' ('rolled back ' + $Head.Substring(0, 7) + ' -> ' + $toSha.Substring(0, 7) + '; pinned') $true
 }
 
-# الخطوة الأخيرة المشتركة بين التراجع الناجح وإكماله من Recover: بصمات الكتّاب، التثبيت،
-# ثم إزالة inflight والعلم — بهذا الترتيب، كي لا تُزال علامة الانقطاع قبل تسجيل الحالة.
-function Complete-RollbackState($Config, $Paths, [string]$From, [string]$To, [string]$Branch, [string[]]$Pending) {
+# الخطوة الأخيرة المشتركة بين التراجع الناجح وإكماله من Recover. الترتيب مقصود (Codex P1 على #337):
+# بصمات الكتّاب ثم الحالة ثم العلم، ثم أرشفة inflight.json (نسخ) ثم إزالته آخراً. أي توقف قبل
+# الإزالة يُبقي السجل، فيكمل Recover التالي من جديد (الخطوات كلها قابلة للتكرار بلا أثر جانبي).
+function Complete-RollbackState($Config, $Paths, [string]$From, [string]$To, [string]$Branch, [string[]]$Pending, [string]$BackupDir = '') {
     $hashes = Save-WriterAllowlist $Config $Paths $To
     Save-GateState $Paths $To $Branch $To $From $Pending
-    if (Test-Path -LiteralPath $Paths.Inflight) { Remove-Item -LiteralPath $Paths.Inflight -Force }
     Clear-DeployFlag $Paths
+    Close-InflightRecord $Paths $BackupDir
     return $hashes
+}
+
+# أرشفة سجل العملية داخل نسختها الاحتياطية (نسخ أولاً) ثم إزالته — دائماً آخر خطوة.
+function Close-InflightRecord($Paths, [string]$BackupDir) {
+    if (-not (Test-Path -LiteralPath $Paths.Inflight)) { return }
+    if ($BackupDir -and (Test-Path -LiteralPath $BackupDir)) { Copy-Item -LiteralPath $Paths.Inflight -Destination (Join-Path $BackupDir 'inflight.recovered.json') -Force }
+    Remove-Item -LiteralPath $Paths.Inflight -Force
 }
 
 function Invoke-GateUnpin($Config, $Paths, $Record, $State, [string]$Head) {
@@ -960,8 +972,7 @@ function Invoke-GateRecover($Config, $Paths, $Record, [string]$Head) {
             return Complete-Gate $Paths $Record 'STOP' ('rollback moved HEAD but the tree does not match the target (' + ((@($dirty) + @($bad)) -join '; ') + '); nothing changed. Manual review required.') $true
         }
         Write-JsonFile (Join-Path $backupDir 'manifest.json') $manifest
-        Move-Item -LiteralPath $Paths.Inflight -Destination (Join-Path $backupDir 'inflight.recovered.json') -Force
-        [void](Complete-RollbackState $Config $Paths ([string]$inflight.from) ([string]$inflight.to) ([string]$inflight.branch) @($inflight.pendingRestart))
+        [void](Complete-RollbackState $Config $Paths ([string]$inflight.from) ([string]$inflight.to) ([string]$inflight.branch) @($inflight.pendingRestart) $backupDir)
         $Record.new_sha = $Head
         $Record.pending_restart = @($inflight.pendingRestart)
         return Complete-Gate $Paths $Record 'RECOVERED' ('interrupted rollback completed: HEAD ' + $Head.Substring(0, 7) + ' verified against the backup manifest; pinned') $true
@@ -997,8 +1008,9 @@ function Invoke-GateRecover($Config, $Paths, $Record, [string]$Head) {
     }
     $dirty = @(Get-DirtyEntries $Config)
     if ($dirty.Count -gt 0) { return Complete-Gate $Paths $Record 'FAIL' ('tree still not clean after restore; deploy flag kept: ' + ($dirty -join ', ')) $true }
-    Move-Item -LiteralPath $Paths.Inflight -Destination (Join-Path $backupDir 'inflight.recovered.json') -Force
+    # العلم قبل السجل: توقف بينهما يترك السجل وشجرة نظيفة، فيكمل Recover التالي بلا مساس.
     Clear-DeployFlag $Paths
+    Close-InflightRecord $Paths $backupDir
     $Record.new_sha = $Head
     return Complete-Gate $Paths $Record 'RECOVERED' ('interrupted ' + [string]$inflight.mode + ' undone: restored ' + $restored + ' file(s), quarantined ' + $moved + '; HEAD ' + $Head.Substring(0, 7) + ' and tree clean') $true
 }
