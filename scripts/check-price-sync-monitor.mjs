@@ -30,11 +30,12 @@ const f15 = read("supabase/proposed/15-ameen-sync-outage-incident.sql");
 const code = migration.replace(/--.*$/gm, "");
 const md5 = (s) => createHash("md5").update(s).digest("hex");
 
+// تهريب كامل لمحارف التعبير النمطي، ومنها الشرطة المائلة العكسية (CodeQL js/incomplete-sanitization).
+const escapeRegExp = (value) => String(value).replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+
 // تعريف دالة كما في ملف الحزمة: { body = prosrc، sql = جملة create كاملة }.
 function definition(text, name) {
-  // تهريب كامل لمحارف التعبير النمطي (CodeQL js/incomplete-sanitization).
-  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const re = new RegExp(`create or replace function ${escaped}\\s*\\(`, "gi");
+  const re = new RegExp(`create or replace function ${escapeRegExp(name)}\\s*\\(`, "gi");
   const found = [];
   let m;
   while ((m = re.exec(text))) {
@@ -75,6 +76,21 @@ function topLevelStatements(sql) {
   }
   if (buf.trim()) out.push(buf.trim());
   return out;
+}
+
+// ── ٠) تهريب التعبير النمطي (يمنع عودة CodeQL js/incomplete-sanitization) ────────────────────────
+for (const sample of ["private.monitor_project_tasks", "a\\b", "a\\.b", "x\\", "(a|b)*+?^$[]{}"]) {
+  const re = new RegExp(`^${escapeRegExp(sample)}$`);
+  assert.ok(re.test(sample), `التهريب يجب أن يطابق النص الحرفي: ${sample}`);
+}
+assert.ok(!new RegExp(`^${escapeRegExp("private.monitor")}$`).test("privateXmonitor"), "النقطة حرفية");
+// بلا تهريب الشرطة العكسية يصبح «a\\b» حدَّ كلمة /^a\b$/ فيطابق «a» وحدها.
+assert.ok(new RegExp("^a\\b$").test("a"), "شاهد: الشرطة العكسية غير المهرّبة تغيّر المعنى");
+assert.ok(!new RegExp(`^${escapeRegExp("a\\b")}$`).test("a"), "الشرطة العكسية المهرّبة حرفية لا بادئة هروب");
+assert.equal(escapeRegExp("a\\b"), "a\\\\b", "الشرطة العكسية تُهرَّب");
+{
+  const self = readFileSync(fileURLToPath(import.meta.url), "utf8");
+  assert.doesNotMatch(self, /name\.replace\(\/\\\.\/g/, "لا تهريب للنقطة وحدها");
 }
 
 // ── ١) عقود ساكنة ───────────────────────────────────────────────────────────────────────────
@@ -171,7 +187,15 @@ const freshDb = () => {
 const envBundle = envSql.replace("\\i :m16", () => m16);
 
 // علامات «الحزمة مطبَّقة»: لقطاتها وأجسام دوالها الحقيقية من ملفاتها (البصمات نفسها التي يتحقق منها الحارس).
-function packagesSql({ p12 = true, p13 = true, p15 = true, times = [1, 2, 3], dispatch15 = true, snapshot13 = true, partial15 = false, noTick15 = false, section12 = false, noCron15 = false, oldMonitor = false, migrations = null } = {}) {
+const REV2 = { p12: "digest_only_bundle", p13: "digest_routing_noncritical", p15: "ameen_sync_outage_incident" };
+function packagesSql({ p12 = true, p13 = true, p15 = true, times = [1, 2, 3], dispatch15 = true, snapshot13 = true, partial15 = false, noTick15 = false, section12 = false, noCron15 = false, oldMonitor = false, migrations = "auto" } = {}) {
+  // «auto»: سجل rev2 الصحيح لكل حزمة مطبَّقة، بإصدار يتبع ترتيب لقطتها.
+  if (migrations === "auto") {
+    migrations = [];
+    if (p12) migrations.push([`2026102100${String(times[0]).padStart(2, "0")}00`, REV2.p12]);
+    if (p13) migrations.push([`2026102100${String(times[1]).padStart(2, "0")}00`, REV2.p13]);
+    if (p15) migrations.push([`2026102100${String(times[2]).padStart(2, "0")}00`, REV2.p15]);
+  }
   const at = (k) => `timestamptz '2026-10-21 00:00:00+00' + interval '${k} minutes'`;
   const parts = ["set check_function_bodies = off;", "create schema if not exists private;"];
   if (p12) parts.push(
@@ -204,7 +228,7 @@ const GUARD_CASES = [
   { name: "لقطة 12 وجداولها بلا جسم المراقب الجديد", pk: { oldMonitor: true }, refuse: /requires proposed\/12/ },
   { name: "12 فقط", pk: { p13: false, p15: false }, refuse: /requires proposed\/13/ },
   { name: "12 و13 فقط", pk: { p15: false }, refuse: /requires proposed\/15/ },
-  { name: "الثلاث بالترتيب الصحيح", pk: { migrations: [["20261021000100", "digest_only_atomic_bundle"], ["20261021000200", "digest_routing_for_noncritical_alerts"], ["20261021000300", "ameen_sync_outage_incident"]] }, ok: true },
+  { name: "الثلاث بالترتيب الصحيح وسجل rev2 الحرفي", pk: {}, ok: true },
   { name: "عدد لقطات صحيح لكن جسم إرسال 13 لا 15 (معرّف خاطئ)", pk: { dispatch15: false }, refuse: /requires proposed\/15/ },
   { name: "15 جزئية: جسم الإرسال ولقطتها بلا قسم التقرير ولا sync_outage_tick", pk: { partial15: true }, refuse: /requires proposed\/15/ },
   { name: "قسم التقرير بجسم 12 لا 15 (بقية 15 مطبَّقة)", pk: { section12: true }, refuse: /requires proposed\/15/ },
@@ -212,9 +236,15 @@ const GUARD_CASES = [
   { name: "15 بلا sync_outage_tick وحدها", pk: { noTick15: true }, refuse: /requires proposed\/15/ },
   { name: "دوال 13 موجودة بلا لقطتها", pk: { snapshot13: false }, refuse: /requires proposed\/13/ },
   { name: "الثلاث لكن بترتيب خاطئ (15 قبل 13)", pk: { times: [1, 3, 2] }, refuse: /applied in that order/ },
-  { name: "سجل هجرات بعدد صحيح وإصدارات معكوسة", pk: { migrations: [["3", "digest_only_atomic_bundle"], ["2", "digest_routing_for_noncritical_alerts"], ["1", "ameen_sync_outage_incident"]] }, refuse: /schema_migrations records 12\/13\/15 inconsistently/ },
-  { name: "سجل هجرات بعدد صحيح ومعرّفات أخرى، بلا حزم", pk: { p12: false, p13: false, p15: false, migrations: [["1", "a_12"], ["2", "b_13"], ["3", "c_15"]] }, refuse: /requires proposed\/12/ },
-  { name: "سجل ناقص (13 غير مسجّلة) مع حزم مطبَّقة", pk: { migrations: [["1", "digest_only_atomic_bundle"], ["3", "ameen_sync_outage_incident"]] }, refuse: /inconsistently/ },
+  { name: "أسماء rev1 القديمة (digest_only_atomic_bundle…) بعدد صحيح", pk: { migrations: [["20261021000100", "digest_only_atomic_bundle"], ["20261021000200", "digest_routing_for_noncritical_alerts"], ["20261021000300", "ameen_sync_outage_incident"]] }, refuse: /must record digest_only_bundle/ },
+  { name: "اسم قريب لا حرفي (digest_only_bundle_v2)", pk: { migrations: [["20261021000100", "digest_only_bundle_v2"], ["20261021000200", "digest_routing_noncritical"], ["20261021000300", "ameen_sync_outage_incident"]] }, refuse: /must record digest_only_bundle/ },
+  { name: "أسماء rev2 بإصدارات معكوسة", pk: { migrations: [["20261021000300", "digest_only_bundle"], ["20261021000200", "digest_routing_noncritical"], ["20261021000100", "ameen_sync_outage_incident"]] }, refuse: /must record digest_only_bundle/ },
+  { name: "أسماء rev2 بإصدارات ليست 14 رقماً", pk: { migrations: [["1", "digest_only_bundle"], ["2", "digest_routing_noncritical"], ["3", "ameen_sync_outage_incident"]] }, refuse: /must record digest_only_bundle/ },
+  { name: "اسم rev2 مكرر (12 مرتين)", pk: { migrations: [["20261021000100", "digest_only_bundle"], ["20261021000150", "digest_only_bundle"], ["20261021000200", "digest_routing_noncritical"], ["20261021000300", "ameen_sync_outage_incident"]] }, refuse: /must record digest_only_bundle/ },
+  { name: "سجل ناقص (13 غير مسجّلة) مع حزم مطبَّقة", pk: { migrations: [["20261021000100", "digest_only_bundle"], ["20261021000300", "ameen_sync_outage_incident"]] }, refuse: /must record digest_only_bundle/ },
+  { name: "حزم مطبَّقة بلا أي سجل هجرات", pk: { migrations: [] }, refuse: /must record digest_only_bundle/ },
+  { name: "سجل rev2 صحيح لكن اللقطات بترتيب معكوس", pk: { times: [1, 3, 2], migrations: [["20261021000100", "digest_only_bundle"], ["20261021000200", "digest_routing_noncritical"], ["20261021000300", "ameen_sync_outage_incident"]] }, refuse: /applied in that order/ },
+  { name: "سجل بعدد صحيح ومعرّفات أخرى، بلا حزم", pk: { p12: false, p13: false, p15: false, migrations: [["20261021000100", "a_12"], ["20261021000200", "b_13"], ["20261021000300", "c_15"]] }, refuse: /requires proposed\/12/ },
   { name: "تنفيذ أمر بأمر (autocommit) مع الحزم الثلاث", pk: {}, autocommit: true, refuse: /single transaction/ }
 ];
 let failed = false;

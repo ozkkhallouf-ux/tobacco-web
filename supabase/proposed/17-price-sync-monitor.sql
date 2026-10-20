@@ -71,8 +71,10 @@
 --     وprivate.daily_open_faults_section = d5bb80ca…، وprivate.sync_outage_tick = 91e6d4d8…، ومهمة cron
 --     sync-outage-tick نشطة.
 --   * الترتيب: أول taken_at في لقطة 12 < لقطة 13 < لقطة 15 (كل حزمة تأخذ لقطتها في معاملتها).
---   * سجل الهجرات: إن سُجّلت أيٌّ من الحزم الثلاث في supabase_migrations.schema_migrations (بأسمائها)
---     فيجب أن تُسجَّل الثلاث وبإصدارات تصاعدية 12 < 13 < 15. العدد وحده لا يكفي.
+--   * سجل الهجرات (إلزامي): supabase_migrations.schema_migrations يحمل أسماء rev2 الحرفية، كلٌّ مرة واحدة:
+--     digest_only_bundle (12) وdigest_routing_noncritical (13) وameen_sync_outage_incident (15)، بإصدارات من
+--     14 رقماً تصاعدية 12 < 13 < 15 مطابقة لترتيب اللقطات. أسماء أخرى أو ناقصة أو مكررة أو إصدارات معكوسة
+--     ⇒ رفض. العدد وحده لا يكفي.
 -- البصمات مأخوذة من ملفات 12/13/15 في main نفسها، وscripts/check-price-sync-monitor.mjs يفشل إن انجرفت.
 -- ذرّية: كل جملة تنشئ شيئاً داخل كتلة تثبيت واحدة لا تعمل إلا إن نجح الحارس في المعاملة نفسها (إعداد
 -- محلي app.price_sync_monitor_17). حارس فاشل لا ينشئ جدولاً ولا دالة ولا مهمة cron، حتى لو نُفِّذ الملف
@@ -148,16 +150,20 @@ begin
     raise exception 'proposed/17 requires 12, 13, 15 applied in that order (snapshots: 12=%, 13=%, 15=%)', t12, t13, t15;
   end if;
 
-  -- سجل الهجرات: معرّفات وإصدارات لا عدد. إن سُجّلت أيٌّ منها فيجب أن تُسجَّل الثلاث وبترتيب تصاعدي.
-  if to_regclass('supabase_migrations.schema_migrations') is not null then
-    execute $q$select count(*) filter (where name ~ 'digest_only_atomic_bundle'), max(version) filter (where name ~ 'digest_only_atomic_bundle'),
-                      count(*) filter (where name ~ 'digest_routing'), max(version) filter (where name ~ 'digest_routing'),
-                      count(*) filter (where name ~ 'ameen_sync_outage'), max(version) filter (where name ~ 'ameen_sync_outage')
-                 from supabase_migrations.schema_migrations$q$
-      into n12, v12, n13, v13, n15, v15;
-    if n12 + n13 + n15 > 0 and not (n12 = 1 and n13 = 1 and n15 = 1 and v12 < v13 and v13 < v15) then
-      raise exception 'proposed/17: schema_migrations records 12/13/15 inconsistently (12=% x%, 13=% x%, 15=% x%); expected each once, versions ascending', v12, n12, v13, n13, v15, n15;
-    end if;
+  -- سجل الهجرات (إلزامي): أسماء rev2 الحرفية بمساواة تامة لا بنمط، كلٌّ مرة واحدة، وإصدارات من 14 رقماً
+  -- تصاعدية 12 < 13 < 15 (وترتيب اللقطات أعلاه هو ترتيب التطبيق الفعلي، فيجب أن يتفقا).
+  if to_regclass('supabase_migrations.schema_migrations') is null then
+    raise exception 'proposed/17 requires supabase_migrations.schema_migrations to record 12/13/15';
+  end if;
+  execute $q$select count(*) filter (where name = 'digest_only_bundle'),         min(version) filter (where name = 'digest_only_bundle'),
+                    count(*) filter (where name = 'digest_routing_noncritical'), min(version) filter (where name = 'digest_routing_noncritical'),
+                    count(*) filter (where name = 'ameen_sync_outage_incident'), min(version) filter (where name = 'ameen_sync_outage_incident')
+               from supabase_migrations.schema_migrations$q$
+    into n12, v12, n13, v13, n15, v15;
+  if not (n12 = 1 and n13 = 1 and n15 = 1
+          and v12 ~ '^[0-9]{14}$' and v13 ~ '^[0-9]{14}$' and v15 ~ '^[0-9]{14}$'
+          and v12::numeric < v13::numeric and v13::numeric < v15::numeric) then
+    raise exception 'proposed/17: schema_migrations must record digest_only_bundle, digest_routing_noncritical, ameen_sync_outage_incident exactly once each with ascending 14-digit versions (12=% x%, 13=% x%, 15=% x%)', v12, n12, v13, n13, v15, n15;
   end if;
 
   perform set_config('app.price_sync_monitor_17', 'guard-passed', true);
