@@ -5,7 +5,7 @@
 //   ١) عقود ساكنة على نص الهجرة: مصدر واحد (price_sync_heartbeats)، ساعة الخادم، قفل استشاري، حادثة
 //      واحدة مفتوحة، بلا أسرار ولا HTML، توافق التوجيه مع 12/13/15، وتعطيل المراقب القديم؛ والحارس:
 //      بصماته = أجسام 12/13/15 في ملفاتها نفسها، وكل جملة تُنشئ شيئاً داخل كتلة التثبيت المحروسة.
-//   ٢) حارس 17 حياً على PostgreSQL محلي، كلٌّ في قاعدة مستقلة: لا حزمة، 12 فقط، 12+13، الثلاث بالترتيب،
+//   ٢) حارس 17 حياً على PostgreSQL محلي، كلٌّ في قاعدة مستقلة: لا حزمة، 12 فقط، 12+13، الثلاث بالترتيب أو في معاملة واحدة (لقطات متساوية)،
 //      عدد صحيح بمعرّفات خاطئة (بصمة/ترتيب/سجل هجرات)، وتنفيذ أمر بأمر — والحارس الفاشل لا يُنشئ شيئاً.
 //   ٣) supabase/tests/price-sync-monitor.sql كاملاً (السلوك)، ثم تزامن حقيقي في أربع حالات انتقال.
 // لا شبكة ولا تيليغرام حقيقي ولا بيانات إنتاج.
@@ -253,6 +253,9 @@ const GUARD_CASES = [
   { name: "15 بلا مهمة cron sync-outage-tick", pk: { noCron15: true }, refuse: /sync-outage-tick missing/ },
   { name: "15 بلا sync_outage_tick وحدها", pk: { noTick15: true }, refuse: /requires proposed\/15/ },
   { name: "دوال 13 موجودة بلا لقطتها", pk: { snapshot13: false }, refuse: /requires proposed\/13/ },
+  { name: "الثلاث في معاملة واحدة (لقطات متساوية) بإصدارات الإنتاج التصاعدية", pk: { times: [1, 1, 1], migrations: [["20261020080600", REV2.p12], ["20261020080601", REV2.p13], ["20261020080602", REV2.p15]] }, ok: true },
+  { name: "لقطات متساوية لكن إصدارات معكوسة", pk: { times: [1, 1, 1], migrations: [["20261020080602", REV2.p12], ["20261020080601", REV2.p13], ["20261020080600", REV2.p15]] }, refuse: /must record digest_only_bundle/ },
+  { name: "12 و13 متساويتان و15 أقدم منهما", pk: { times: [2, 2, 1], migrations: [["20261020080600", REV2.p12], ["20261020080601", REV2.p13], ["20261020080602", REV2.p15]] }, refuse: /applied in that order/ },
   { name: "الثلاث لكن بترتيب خاطئ (15 قبل 13)", pk: { times: [1, 3, 2] }, refuse: /applied in that order/ },
   { name: "أسماء rev1 القديمة (digest_only_atomic_bundle…) بعدد صحيح", pk: { migrations: [["20261021000100", "digest_only_atomic_bundle"], ["20261021000200", "digest_routing_for_noncritical_alerts"], ["20261021000300", "ameen_sync_outage_incident"]] }, refuse: /must record digest_only_bundle/ },
   { name: "اسم قريب لا حرفي (digest_only_bundle_v2)", pk: { migrations: [["20261021000100", "digest_only_bundle_v2"], ["20261021000200", "digest_routing_noncritical"], ["20261021000300", "ameen_sync_outage_incident"]] }, refuse: /must record digest_only_bundle/ },

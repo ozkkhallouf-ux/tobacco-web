@@ -72,7 +72,8 @@
 --   * 15: private.sync_outage_snapshot، وprivate.notify_telegram_dispatch = c35b5c19… (جسم 15 النهائي)،
 --     وprivate.daily_open_faults_section = d5bb80ca…، وprivate.sync_outage_tick = 91e6d4d8…، ومهمة cron
 --     sync-outage-tick نشطة.
---   * الترتيب: أول taken_at في لقطة 12 < لقطة 13 < لقطة 15 (كل حزمة تأخذ لقطتها في معاملتها).
+--   * الترتيب: أول taken_at في لقطة 12 ≤ لقطة 13 ≤ لقطة 15. التساوي مقبول لأن rev2 طبّق الثلاث في معاملة
+--     واحدة (now() واحد لكل اللقطات)؛ لقطة أحدث من التي تليها ⇒ رفض. الترتيب الصارم تثبته الإصدارات أدناه.
 --   * سجل الهجرات (إلزامي): supabase_migrations.schema_migrations يحمل أسماء rev2 الحرفية، كلٌّ مرة واحدة:
 --     digest_only_bundle (12) وdigest_routing_noncritical (13) وameen_sync_outage_incident (15)، بإصدارات من
 --     14 رقماً تصاعدية 12 < 13 < 15 مطابقة لترتيب اللقطات. أسماء أخرى أو ناقصة أو مكررة أو إصدارات معكوسة
@@ -148,7 +149,7 @@ begin
   execute 'select min(taken_at) from private.digest_bundle_snapshot' into t12;
   execute 'select min(taken_at) from private.digest_routing_snapshot' into t13;
   execute 'select min(taken_at) from private.sync_outage_snapshot' into t15;
-  if t12 is null or t13 is null or t15 is null or not (t12 < t13 and t13 < t15) then
+  if t12 is null or t13 is null or t15 is null or not (t12 <= t13 and t13 <= t15) then
     raise exception 'proposed/17 requires 12, 13, 15 applied in that order (snapshots: 12=%, 13=%, 15=%)', t12, t13, t15;
   end if;
 
