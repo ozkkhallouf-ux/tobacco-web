@@ -238,11 +238,11 @@ try {
   $tampered[0].bill.total = 1.0
   Add-AmeenOutboxEvents -Dir $dbox -Events @($good1 + $future + $good2 + $tampered)
   $nowD = [datetime]::SpecifyKind([datetime]"2026-10-20T17:05:00", [DateTimeKind]::Utc)
-  Assert 'validate: future timestamp flagged' ((Test-AmeenInvoiceEvent -Event $future[0] -NowUtc $nowD).code -eq "future")
-  Assert 'validate: tampered content flagged' ((Test-AmeenInvoiceEvent -Event $tampered[0] -NowUtc $nowD).code -eq "version_hash")
-  Assert 'validate: good event passes' ($null -eq (Test-AmeenInvoiceEvent -Event $good1[0] -NowUtc $nowD))
+  Assert 'validate: future timestamp flagged' ((Test-AmeenInvoiceEvent -InvoiceEvent $future[0] -NowUtc $nowD).code -eq "future")
+  Assert 'validate: tampered content flagged' ((Test-AmeenInvoiceEvent -InvoiceEvent $tampered[0] -NowUtc $nowD).code -eq "version_hash")
+  Assert 'validate: good event passes' ($null -eq (Test-AmeenInvoiceEvent -InvoiceEvent $good1[0] -NowUtc $nowD))
   $forged = @{}; foreach ($k in $good1[0].Keys) { $forged[$k] = $good1[0][$k] }; $forged.source_seq = [long]$good1[0].source_seq + 99
-  Assert 'validate: forged seq (key mismatch) flagged' ((Test-AmeenInvoiceEvent -Event $forged -NowUtc $nowD).code -eq "event_id")
+  Assert 'validate: forged seq (key mismatch) flagged' ((Test-AmeenInvoiceEvent -InvoiceEvent $forged -NowUtc $nowD).code -eq "event_id")
 
   # الخادم يرفض حدثاً سليماً محلياً (قاعدة على الخادم وحده) ⇒ يُعزل هو فقط
   $script:dlSent = @()
@@ -274,7 +274,7 @@ try {
   Assert 'repair requeue: accepted' ((Repair-AmeenDeadLetter -Dir $dbox -State $ds -Seq $futureSeq -Mode Requeue -NowUtc $nowD) -eq "Requeue")
   $rq = @(Get-AmeenOutboxPending -Dir $dbox)
   Assert 'repair requeue: back in pending with ORIGINAL seq' ($rq.Count -eq 1 -and [long]$rq[0].event.source_seq -eq $futureSeq)
-  Assert 'repair requeue: key recomputed and valid' ($null -eq (Test-AmeenInvoiceEvent -Event $rq[0].event -NowUtc $nowD) -and $rq[0].event.event_id -ne $future[0].event_id)
+  Assert 'repair requeue: key recomputed and valid' ($null -eq (Test-AmeenInvoiceEvent -InvoiceEvent $rq[0].event -NowUtc $nowD) -and $rq[0].event.event_id -ne $future[0].event_id)
   Assert 'repair requeue: removed from dead letter, kept in resolved' (@(Get-AmeenDeadLetters -Dir $dbox | Where-Object { [long]$_.source_seq -eq $futureSeq }).Count -eq 0 -and @(Get-ChildItem -LiteralPath (Join-Path $dbox "deadletter\resolved") -Filter "*requeue*").Count -eq 2)
   $r = Send-AmeenInvoiceOutbox -Dir $dbox -State $ds -Transport $mixed -NowUtc $nowD
   Assert 'repair requeue: sent and acked' ($r.acked -eq 1 -and @(Get-AmeenOutboxPending -Dir $dbox).Count -eq 0)
@@ -330,7 +330,7 @@ try {
   Assert 'resnapshot: exactly one new event in outbox' ($q.emitted -eq 1 -and $pq.Count -eq 1)
   Assert 'resnapshot: new seq is newer than the isolated event and every earlier seq' ([long]$pq[0].event.source_seq -gt $oldSeq -and [long]$pq[0].event.source_seq -gt $seqBefore)
   Assert 'resnapshot: event carries the old bill (date outside the 60-day window)' ($pq[0].event.bill.bill_date -eq "2026-06-15" -and $pq[0].event.kind -eq "upsert")
-  Assert 'resnapshot: new event is valid' ($null -eq (Test-AmeenInvoiceEvent -Event $pq[0].event -NowUtc $nowD.AddMinutes(30)))
+  Assert 'resnapshot: new event is valid' ($null -eq (Test-AmeenInvoiceEvent -InvoiceEvent $pq[0].event -NowUtc $nowD.AddMinutes(30)))
   Assert 'resnapshot: request closed only after the event was written' (@(Get-AmeenDeadLetters -Dir $dbox | Where-Object { [long]$_.source_seq -eq $oldSeq }).Count -eq 0 -and @(Get-ChildItem -LiteralPath (Join-Path $dbox "deadletter\resolved") -Filter ("{0:D12}.resnapshot*" -f $oldSeq)).Count -eq 2)
   $q = Invoke-AmeenResnapshotQueue -Dir $dbox -State $ds -Reader $okReader -NowUtc $nowD.AddMinutes(6)
   Assert 'resnapshot: running the queue again creates no duplicate event' ($q.emitted -eq 0 -and @(Get-AmeenOutboxPending -Dir $dbox | Where-Object { $_.event.bill_guid -eq $g9l }).Count -eq 1)

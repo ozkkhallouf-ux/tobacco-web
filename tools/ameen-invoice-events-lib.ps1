@@ -455,7 +455,7 @@ function Get-AmeenOutboxBatch {
         if ($read.ok -and $read.value -is [System.Collections.IDictionary]) { $list.Add(@{ file = $f.FullName; event = $read.value }); continue }
         $why = $read.error; if ($read.ok) { $why = "event must be an object" }
         try {
-            Move-AmeenEventToDeadLetter -Dir $Dir -File $f.FullName -Event $null -SafeIds (Get-AmeenSafeEventIds -Raw $read.raw -FileName $f.Name) -Code "unreadable_json" -Reason $why -Source "local" -NowUtc $NowUtc
+            Move-AmeenEventToDeadLetter -Dir $Dir -File $f.FullName -InvoiceEvent $null -SafeIds (Get-AmeenSafeEventIds -Raw $read.raw -FileName $f.Name) -Code "unreadable_json" -Reason $why -Source "local" -NowUtc $NowUtc
             $isolated++
         } catch { $skipped++ }
     }
@@ -479,31 +479,31 @@ function Get-AmeenBackoffSeconds {
 # ---------------------------------------------------------------- التحقق والعزل (Dead Letter)
 function Test-AmeenInvoiceEvent {
     # نفس قواعد الخادم حدثاً حدثاً. يعيد $null للحدث السليم، وإلا @{ code; reason } بلا محتوى الفاتورة.
-    param([Parameter(Mandatory = $true)]$Event, [datetime]$NowUtc = [datetime]::UtcNow)
+    param([Parameter(Mandatory = $true)]$InvoiceEvent, [datetime]$NowUtc = [datetime]::UtcNow)
     $bad = { param($c, $r) return @{ code = $c; reason = $r } }
-    if (-not ($Event -is [System.Collections.IDictionary])) { return (& $bad "not_object" "event must be an object") }
-    if ($Event.schema -ne $script:AmeenInvoiceEventSchema) { return (& $bad "schema" "unsupported event schema") }
+    if (-not ($InvoiceEvent -is [System.Collections.IDictionary])) { return (& $bad "not_object" "event must be an object") }
+    if ($InvoiceEvent.schema -ne $script:AmeenInvoiceEventSchema) { return (& $bad "schema" "unsupported event schema") }
     $seq = [long]0
-    if (-not [long]::TryParse([string]$Event.source_seq, [ref]$seq) -or $seq -lt 1) { return (& $bad "seq" "source_seq must be a positive integer") }
-    if ([string]$Event.event_id -notmatch '^[0-9a-f]{64}$') { return (& $bad "event_id" "event_id must be a sha256 hex") }
-    if (@("upsert", "delete") -notcontains [string]$Event.kind) { return (& $bad "kind" "unsupported event kind") }
-    $g = [string]$Event.bill_guid
+    if (-not [long]::TryParse([string]$InvoiceEvent.source_seq, [ref]$seq) -or $seq -lt 1) { return (& $bad "seq" "source_seq must be a positive integer") }
+    if ([string]$InvoiceEvent.event_id -notmatch '^[0-9a-f]{64}$') { return (& $bad "event_id" "event_id must be a sha256 hex") }
+    if (@("upsert", "delete") -notcontains [string]$InvoiceEvent.kind) { return (& $bad "kind" "unsupported event kind") }
+    $g = [string]$InvoiceEvent.bill_guid
     if ($g -cnotmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' -or $g -eq $script:ZeroGuid) { return (& $bad "bill_guid" "bill_guid must be a lowercase non-zero uuid") }
-    $h = [string]$Event.version_hash
-    if (($Event.kind -eq "upsert" -and $h -notmatch '^[0-9a-f]{64}$') -or ($Event.kind -eq "delete" -and $h -ne "deleted")) { return (& $bad "version_hash" "version_hash does not match event kind") }
+    $h = [string]$InvoiceEvent.version_hash
+    if (($InvoiceEvent.kind -eq "upsert" -and $h -notmatch '^[0-9a-f]{64}$') -or ($InvoiceEvent.kind -eq "delete" -and $h -ne "deleted")) { return (& $bad "version_hash" "version_hash does not match event kind") }
     $styles = [Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal
     $at = [datetime]::MinValue
-    if (-not [datetime]::TryParse([string]$Event.source_event_at, $script:Invariant, $styles, [ref]$at)) { return (& $bad "timestamp" "event timestamp is invalid") }
+    if (-not [datetime]::TryParse([string]$InvoiceEvent.source_event_at, $script:Invariant, $styles, [ref]$at)) { return (& $bad "timestamp" "event timestamp is invalid") }
     if ($at -gt $NowUtc.AddMinutes(5)) { return (& $bad "future" "event timestamp is in the future") }
-    if ($Event.detected_at) {
+    if ($InvoiceEvent.detected_at) {
         $det = [datetime]::MinValue
-        if (-not [datetime]::TryParse([string]$Event.detected_at, $script:Invariant, $styles, [ref]$det)) { return (& $bad "timestamp" "event timestamp is invalid") }
+        if (-not [datetime]::TryParse([string]$InvoiceEvent.detected_at, $script:Invariant, $styles, [ref]$det)) { return (& $bad "timestamp" "event timestamp is invalid") }
         if ($det -gt $NowUtc.AddMinutes(5)) { return (& $bad "future" "event timestamp is in the future") }
     }
-    $expected = Get-AmeenInvoiceEventId -BillGuid $g -Seq $seq -Kind ([string]$Event.kind) -VersionHash $h -SourceEventAt ([string]$Event.source_event_at)
-    if ($Event.event_id -ne $expected) { return (& $bad "event_id" "event_id does not match event content") }
-    if ($Event.kind -eq "upsert") {
-        $b = $Event.bill
+    $expected = Get-AmeenInvoiceEventId -BillGuid $g -Seq $seq -Kind ([string]$InvoiceEvent.kind) -VersionHash $h -SourceEventAt ([string]$InvoiceEvent.source_event_at)
+    if ($InvoiceEvent.event_id -ne $expected) { return (& $bad "event_id" "event_id does not match event content") }
+    if ($InvoiceEvent.kind -eq "upsert") {
+        $b = $InvoiceEvent.bill
         if (-not ($b -is [System.Collections.IDictionary]) -or [string]$b.bill_guid -ne $g -or @(1, 3) -notcontains [int]$b.bill_type -or $null -eq $b.lines) { return (& $bad "bill" "upsert needs a bill snapshot for the same bill_guid") }
         if ($b.bill_date -and [string]$b.bill_date -notmatch '^\d{4}-\d{2}-\d{2}$') { return (& $bad "bill" "bill_date must be YYYY-MM-DD") }
         if ([Text.Encoding]::UTF8.GetByteCount((ConvertTo-AmeenCanonicalJson $b)) -gt 262144) { return (& $bad "size" "bill snapshot too large") }
@@ -517,7 +517,7 @@ function Move-AmeenEventToDeadLetter {
     # (لا اسم زبون ولا مبالغ): المعرّف والتسلسل وGUID الفاتورة والنوع والرمز واسم الملف فقط.
     # الترتيب: السبب أولاً ثم نقل الملف (rename) — فالملف لا يغيب أبداً قبل أن يُحفظ في العزل،
     # ولا يُكتب فوق ملف معزول سابق بالاسم نفسه.
-    param([Parameter(Mandatory = $true)][string]$Dir, [Parameter(Mandatory = $true)][string]$File, [AllowNull()]$Event,
+    param([Parameter(Mandatory = $true)][string]$Dir, [Parameter(Mandatory = $true)][string]$File, [AllowNull()]$InvoiceEvent,
           [hashtable]$SafeIds, [Parameter(Mandatory = $true)][string]$Code, [Parameter(Mandatory = $true)][string]$Reason,
           [Parameter(Mandatory = $true)][string]$Source, [datetime]$NowUtc = [datetime]::UtcNow)
     $dl = Join-Path $Dir "deadletter"
@@ -529,8 +529,8 @@ function Move-AmeenEventToDeadLetter {
     $safeReason = ($Reason -replace '[\r\n\t]', ' ')
     if ($safeReason.Length -gt 200) { $safeReason = $safeReason.Substring(0, 200) }
     $ids = @{ event_id = ""; source_seq = ""; bill_guid = ""; kind = "" }
-    if ($Event -is [System.Collections.IDictionary]) {
-        $ids = @{ event_id = [string]$Event.event_id; source_seq = [string]$Event.source_seq; bill_guid = [string]$Event.bill_guid; kind = [string]$Event.kind }
+    if ($InvoiceEvent -is [System.Collections.IDictionary]) {
+        $ids = @{ event_id = [string]$InvoiceEvent.event_id; source_seq = [string]$InvoiceEvent.source_seq; bill_guid = [string]$InvoiceEvent.bill_guid; kind = [string]$InvoiceEvent.kind }
     } elseif ($null -ne $SafeIds) { $ids = $SafeIds }
     $info = [ordered]@{
         event_id = [string]$ids.event_id; source_seq = [string]$ids.source_seq; bill_guid = [string]$ids.bill_guid
@@ -613,7 +613,7 @@ function Repair-AmeenDeadLetter {
     if ($evt.kind -eq "upsert" -and $evt.bill -is [System.Collections.IDictionary]) { $evt.version_hash = Get-AmeenInvoiceVersionHash $evt.bill }
     $evt.source_seq = $Seq
     $evt.event_id = Get-AmeenInvoiceEventId -BillGuid ([string]$evt.bill_guid) -Seq $Seq -Kind ([string]$evt.kind) -VersionHash ([string]$evt.version_hash) -SourceEventAt ([string]$evt.source_event_at)
-    $why = Test-AmeenInvoiceEvent -Event $evt -NowUtc $NowUtc
+    $why = Test-AmeenInvoiceEvent -InvoiceEvent $evt -NowUtc $NowUtc
     if ($null -ne $why) { throw ("requeue refused (" + $why.code + "): " + $why.reason) }
     $target = Join-Path (Join-Path $Dir "pending") (([long]$Seq).ToString("D12", $script:Invariant) + ".json")
     if (Test-Path -LiteralPath $target) { throw "requeue refused: pending already has seq $Seq" }
@@ -701,9 +701,9 @@ function Send-AmeenInvoiceOutbox {
     if ($pending.Count -eq 0) { return $result }
     $valid = New-Object System.Collections.Generic.List[object]
     foreach ($p in $pending) {
-        $why = Test-AmeenInvoiceEvent -Event $p.event -NowUtc $NowUtc
+        $why = Test-AmeenInvoiceEvent -InvoiceEvent $p.event -NowUtc $NowUtc
         if ($null -ne $why) {
-            Move-AmeenEventToDeadLetter -Dir $Dir -File $p.file -Event $p.event -Code $why.code -Reason $why.reason -Source "local" -NowUtc $NowUtc
+            Move-AmeenEventToDeadLetter -Dir $Dir -File $p.file -InvoiceEvent $p.event -Code $why.code -Reason $why.reason -Source "local" -NowUtc $NowUtc
             $result.deadlettered++
             $result.outcomes[[string]$p.event.event_id] = "deadletter"
         } else { $valid.Add($p) }
@@ -732,7 +732,7 @@ function Send-AmeenInvoiceOutbox {
             if ([string]$r.outcome -eq "rejected") {
                 $code = [string]$r.reason_code; if (-not $code) { $code = "server" }
                 $reason = [string]$r.reason; if (-not $reason) { $reason = "rejected by server" }
-                Move-AmeenEventToDeadLetter -Dir $Dir -File $p.file -Event $p.event -Code $code -Reason $reason -Source "server" -NowUtc $NowUtc
+                Move-AmeenEventToDeadLetter -Dir $Dir -File $p.file -InvoiceEvent $p.event -Code $code -Reason $reason -Source "server" -NowUtc $NowUtc
                 $result.deadlettered++
             } else {
                 Add-Content -LiteralPath $ackLog -Value ("{0}`t{1}`t{2}`t{3}`t{4}" -f $NowUtc.ToString("yyyy-MM-ddTHH:mm:ssZ", $script:Invariant), $p.event.source_seq, $p.event.bill_guid, $p.event.kind, $r.outcome) -Encoding UTF8

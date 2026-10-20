@@ -177,7 +177,7 @@ assert.match(agentCode, /Assert-AmeenReadOnlySql \$Sql/, "كل SQL يمرّ عب
 assert.match(agentCode, /SET LOCK_TIMEOUT 3000; /);
 assert.match(agentCode, /\$ExpectedDatabase = "AmnDb002"/);
 assert.match(agentCode, /if \(\$ListDeadLetter -or \$RepairDeadLetterSeq -gt 0\) \{/, "طريقة واضحة لعرض الأحداث المعزولة وإصلاحها");
-assert.match(libCode, /Move-AmeenEventToDeadLetter -Dir \$Dir -File \$p\.file -Event \$p\.event -Code \$why\.code/, "التحقق المحلي يعزل قبل الإرسال");
+assert.match(libCode, /Move-AmeenEventToDeadLetter -Dir \$Dir -File \$p\.file -InvoiceEvent \$p\.event -Code \$why\.code/, "التحقق المحلي يعزل قبل الإرسال");
 // Codex P1-2: كل ملف يُقرأ ويُحلَّل منفرداً، والتالف يُعزل ولا يرمي.
 assert.match(libCode, /\$read = Read-AmeenJsonFileSafe -Path \$f\.FullName/, "قراءة محمية لكل ملف معلّق");
 assert.match(libCode, /-Code "unreadable_json"/);
