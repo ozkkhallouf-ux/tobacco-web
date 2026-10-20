@@ -182,6 +182,14 @@ assert.match(gateSrc, /inflight\.json/);
 const recover = gateSrc.slice(gateSrc.indexOf("function Invoke-GateRecover"), gateSrc.indexOf("function Invoke-GateAckRestart"));
 assert.doesNotMatch(recover, /Invoke-GateGit \$Config @\('(reset|checkout|merge|clean|restore|stash)'/, "الاستعادة لا تستعمل أي أمر git كاتب");
 assert.match(recover, /quarantine/, "الملف الناقص يُنقل ولا يُحذف");
+// Codex P1 على #337: التراجع يُسجَّل في inflight.json قبل reset --keep، وRecover يكمله أو يتراجع عنه أو يتوقف.
+assert.match(gateSrc, /Write-InflightRecord \$Paths 'Rollback'[\s\S]{0,300}\$reset = Invoke-GateReset/, "inflight.json يُكتب قبل reset --keep");
+assert.match(gateSrc, /function Invoke-GateReset[\s\S]{0,120}'reset', '--keep'/);
+assert.match(recover, /Read-InflightRecord/, "Recover يتحقق من السجل قبل أي مساس");
+assert.match(recover, /interrupted rollback completed/);
+assert.match(recover, /refusing to guess the state/, "سجل مفقود مع علم أو شجرة متّسخة = توقف");
+assert.match(gateSrc, /outside the gate backups folder/);
+assert.match(gateSrc, /backup manifest does not match inflight\.json/);
 ok("تدقيق 2026-10-20: لا إصدار أقدم من الجهاز، الثغرات الست (a–f)، قفل، نسخة احتياطية بـSHA256، تحقق بعد التبديل، واستعادة آمنة");
 
 // 2) الـworkflow

@@ -168,6 +168,11 @@ function Get-GitOperationMarkers($Config) {
     return @(@('index.lock', 'MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge', 'rebase-apply') | Where-Object { Test-Path -LiteralPath (Join-Path $gitDir $_) })
 }
 
+# التراجع نفسه — نقطة تماس كي تحاكي الاختبارات انقطاعه في منتصفه.
+function Invoke-GateReset($Config, [string]$Target) {
+    return Invoke-GateGit $Config @('reset', '--keep', $Target)
+}
+
 # التبديل نفسه — نقطة تماس كي تحاكي الاختبارات انقطاعاً في منتصفه.
 function Invoke-GateMerge($Config, [string]$Target) {
     return Invoke-GateGit $Config @('merge', '--ff-only', $Target)
@@ -514,6 +519,35 @@ function Test-DeployedFiles($Config, $Manifest) {
     return $bad
 }
 
+# سجل العملية الجارية: يُكتب قبل أي أمر git يغيّر الشجرة، ويُزال فقط بعد تحقق كامل.
+function Write-InflightRecord($Paths, [string]$Mode, [string]$From, [string]$To, [string]$BackupDir, [string]$Branch, [string[]]$Pending) {
+    Write-JsonFile $Paths.Inflight ([pscustomobject]@{
+        schema = 1; mode = $Mode; from = $From; to = $To; backupDir = $BackupDir; branch = $Branch
+        pendingRestart = @(@($Pending) | Where-Object { $_ }); started_utc = (Get-Date).ToUniversalTime().ToString('o')
+    })
+}
+
+# قراءة inflight.json والتحقق منه بلا تخمين: أي حقل مفقود أو تالف، أو نسخة خارج مجلد
+# backups، أو manifest لا يطابق السجل = $null مع السبب (Recover يتوقف ولا يلمس شيئاً).
+function Read-InflightRecord($Config, $Paths) {
+    $r = [pscustomobject]@{ ok = $false; reason = ''; record = $null; manifest = $null }
+    try { $raw = [System.IO.File]::ReadAllText($Paths.Inflight) } catch { $r.reason = 'inflight.json unreadable'; return $r }
+    try { $rec = $raw | ConvertFrom-Json } catch { $r.reason = 'inflight.json is not valid JSON'; return $r }
+    if (-not $rec) { $r.reason = 'inflight.json is empty'; return $r }
+    if (@('Deploy', 'Rollback') -cnotcontains [string]$rec.mode) { $r.reason = ('inflight.json has an unknown mode: ' + [string]$rec.mode); return $r }
+    foreach ($k in 'from', 'to') { if ([string]$rec.$k -notmatch '^[0-9a-f]{40}$') { $r.reason = ('inflight.json has an invalid ' + $k); return $r } }
+    $dir = [string]$rec.backupDir
+    $root = [System.IO.Path]::GetFullPath($Paths.Backups).TrimEnd('\', '/')
+    if (-not $dir) { $r.reason = 'inflight.json has no backupDir'; return $r }
+    $full = [System.IO.Path]::GetFullPath($dir).TrimEnd('\', '/')
+    if (-not $full.StartsWith($root + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { $r.reason = 'inflight.json backupDir is outside the gate backups folder'; return $r }
+    try { $man = Read-JsonFile (Join-Path $full 'manifest.json') } catch { $man = $null }
+    if (-not $man) { $r.reason = 'backup manifest missing or unreadable'; return $r }
+    if ([string]$man.from -ne [string]$rec.from -or [string]$man.to -ne [string]$rec.to) { $r.reason = 'backup manifest does not match inflight.json'; return $r }
+    $r.ok = $true; $r.record = $rec; $r.manifest = $man
+    return $r
+}
+
 function Wait-TasksIdle($Config) {
     $deadline = (Get-Date).AddSeconds([int]$Config.drainTimeoutSeconds)
     while ($true) {
@@ -749,7 +783,7 @@ function Invoke-DeployGate {
         return Complete-Gate $paths $record 'SKIP' ('not switching: ' + ($reasons -join '; ')) $true
     }
 
-    Write-JsonFile $paths.Inflight ([pscustomobject]@{ from = $head; to = $target; backupDir = $backup.dir; started_utc = (Get-Date).ToUniversalTime().ToString('o'); mode = 'Deploy' })
+    Write-InflightRecord $paths 'Deploy' $head $target $backup.dir $branch @($record.pending_restart)
     $merge = Invoke-GateMerge $Config $target
     $record.pause_ms = [int]((Get-Date) - $started).TotalMilliseconds
     $newHead = Get-GitValue $Config @('rev-parse', 'HEAD')
@@ -824,23 +858,44 @@ function Invoke-GateRollback($Config, $Paths, $Record, $State, [string]$Head, [s
     $stillRunning = @(Wait-TasksIdle $Config)
     if ($stillRunning.Count -gt 0) { Clear-DeployFlag $Paths; return Complete-Gate $Paths $Record 'SKIP' ('tasks still running: ' + ($stillRunning -join ', ')) $true }
     $Record.writer_hashes_before = Get-WriterDiskHashes $Config
+    # Codex P1 (#337): يُسجَّل التراجع في inflight.json قبل reset --keep، فانقطاعه في منتصفه
+    # (HEAD بقي والشجرة متّسخة، أو HEAD تحرّك قبل التحقق) يُستعاد بـ-Mode Recover لا بالتخمين.
+    # pendingRestart وbranch محفوظان لإكمال التثبيت (ROLLED_BACK_PINNED) من Recover إن لزم.
+    $changedBack = @(Get-ChangedFiles $Config $toSha $Head | ForEach-Object { $_.path })
+    $pendingAfter = @(@(Get-StatePending $State) + @(Get-AffectedLongRunning $Config $changedBack) | Select-Object -Unique)
+    Write-InflightRecord $Paths 'Rollback' $Head $toSha $backup.dir ([string]$State.branch) $pendingAfter
     # reset --keep يرفض إن كان سيُضيع تعديلاً محلياً — ليس --hard
-    $reset = Invoke-GateGit $Config @('reset', '--keep', $toSha)
+    $reset = Invoke-GateReset $Config $toSha
     $Record.pause_ms = [int]((Get-Date) - $started).TotalMilliseconds
     $newHead = Get-GitValue $Config @('rev-parse', 'HEAD')
     $Record.stash_count_after = Get-StashCount $Config
-    if ($reset.Code -ne 0 -or $newHead -ne $toSha) { return Complete-Gate $Paths $Record 'FAIL' ('rollback failed; deploy flag kept: ' + $reset.Text) $true }
+    if ($reset.Code -ne 0 -or $newHead -ne $toSha) {
+        if ($newHead -eq $Head -and @(Get-DirtyEntries $Config).Count -eq 0) {
+            # رفض نظيف من git (لم يُكتب شيء): لا شيء يُستعاد.
+            Remove-Item -LiteralPath $Paths.Inflight -Force
+            Clear-DeployFlag $Paths
+            return Complete-Gate $Paths $Record 'FAIL' ('rollback refused, tree unchanged: ' + $reset.Text) $true
+        }
+        return Complete-Gate $Paths $Record 'FAIL' ('rollback interrupted; deploy flag and inflight.json kept; run -Mode Recover (backup ' + $backup.dir + '): ' + $reset.Text) $true
+    }
     $badFiles = @(Test-DeployedFiles $Config $backup.manifest)
     $Record.post_verify = if ($badFiles.Count -eq 0) { 'ok' } else { $badFiles }
     Write-JsonFile (Join-Path $backup.dir 'manifest.json') $backup.manifest
     if ($badFiles.Count -gt 0) { return Complete-Gate $Paths $Record 'FAIL' ('rollback file verification failed; deploy flag kept: ' + ($badFiles -join '; ')) $true }
-    $Record.writer_hashes_after = Save-WriterAllowlist $Config $Paths $toSha
-    $changedBack = @(Get-ChangedFiles $Config $toSha $Head | ForEach-Object { $_.path })
     $Record.changed_files = $changedBack
-    $Record.pending_restart = @(@(Get-StatePending $State) + @(Get-AffectedLongRunning $Config $changedBack) | Select-Object -Unique)
-    Save-GateState $Paths $toSha $State.branch $toSha $Head $Record.pending_restart
-    Clear-DeployFlag $Paths
+    $Record.pending_restart = $pendingAfter
+    $Record.writer_hashes_after = Complete-RollbackState $Config $Paths $Head $toSha ([string]$State.branch) $pendingAfter
     return Complete-Gate $Paths $Record 'OK' ('rolled back ' + $Head.Substring(0, 7) + ' -> ' + $toSha.Substring(0, 7) + '; pinned') $true
+}
+
+# الخطوة الأخيرة المشتركة بين التراجع الناجح وإكماله من Recover: بصمات الكتّاب، التثبيت،
+# ثم إزالة inflight والعلم — بهذا الترتيب، كي لا تُزال علامة الانقطاع قبل تسجيل الحالة.
+function Complete-RollbackState($Config, $Paths, [string]$From, [string]$To, [string]$Branch, [string[]]$Pending) {
+    $hashes = Save-WriterAllowlist $Config $Paths $To
+    Save-GateState $Paths $To $Branch $To $From $Pending
+    if (Test-Path -LiteralPath $Paths.Inflight) { Remove-Item -LiteralPath $Paths.Inflight -Force }
+    Clear-DeployFlag $Paths
+    return $hashes
 }
 
 function Invoke-GateUnpin($Config, $Paths, $Record, $State, [string]$Head) {
@@ -858,26 +913,58 @@ function Invoke-GateUnpin($Config, $Paths, $Record, $State, [string]$Head) {
     return Complete-Gate $Paths $Record 'OK' 'unpinned' $false
 }
 
-# استعادة بعد تبديل انقطع في منتصفه (HEAD بقي على الإصدار السابق والشجرة متّسخة):
-# كل ملف كان موجوداً يُعاد من النسخة الاحتياطية ويُتحقَّق من SHA256 الخاص به، وكل ملف أضافه
-# التبديل الناقص يُنقل إلى quarantine داخل النسخة (لا حذف). لا أمر git كاتب إطلاقاً.
+# استعادة بعد نشر أو تراجع انقطع في منتصفه (inflight.json قائم). القرار من السجل وحده، بلا تخمين:
+#   HEAD = from (لم يتقدّم): يُعاد كل ملف من النسخة الاحتياطية مع التحقق من SHA256، والملفات التي
+#     أضافها التبديل الناقص تُنقل إلى quarantine داخل النسخة (لا حذف)، ثم شجرة نظيفة شرط.
+#   HEAD = to في تراجع (Rollback): reset --keep حرّك HEAD ثم انقطع قبل التحقق. يُكمَل التراجع
+#     فقط إن طابق كل ملف blob الهدف والشجرة نظيفة؛ وإلا مراجعة يدوية.
+#   أي حالة أخرى، أو inflight.json مفقود/تالف/لا يطابق النسخة = STOP بلا أي مساس.
+# لا أمر git كاتب إطلاقاً. وبعد استعادة ناجحة يُنقل السجل إلى النسخة نفسها، فتكرار Recover لا يفعل شيئاً.
 function Invoke-GateRecover($Config, $Paths, $Record, [string]$Head) {
-    $inflight = Read-JsonFile $Paths.Inflight
-    if (-not $inflight) { return Complete-Gate $Paths $Record 'STOP' 'nothing to recover (no inflight.json)' $false }
-    $Record.backup_dir = [string]$inflight.backupDir
-    if ($Head -ne [string]$inflight.from) {
-        return Complete-Gate $Paths $Record 'STOP' ('HEAD is ' + $Head.Substring(0, 7) + ', not the pre-switch ' + ([string]$inflight.from).Substring(0, 7) + '; recover only undoes a switch that never moved HEAD. Manual review required.') $true
+    if (-not (Test-Path -LiteralPath $Paths.Inflight)) {
+        $dirty = @(Get-DirtyEntries $Config)
+        if ((Test-Path -LiteralPath $Paths.Flag) -or $dirty.Count -gt 0) {
+            return Complete-Gate $Paths $Record 'STOP' 'inflight.json is missing but the deploy flag or uncommitted changes are present; refusing to guess the state. Manual review required.' $true
+        }
+        return Complete-Gate $Paths $Record 'NOOP' 'nothing to recover (no inflight.json, no deploy flag, tree clean)' $false
     }
-    $manifest = Read-JsonFile (Join-Path ([string]$inflight.backupDir) 'manifest.json')
-    if (-not $manifest) { return Complete-Gate $Paths $Record 'FAIL' 'backup manifest missing; manual review required' $true }
-    $quarantine = Join-Path ([string]$inflight.backupDir) 'quarantine'
+    $read = Read-InflightRecord $Config $Paths
+    if (-not $read.ok) { return Complete-Gate $Paths $Record 'STOP' ($read.reason + '; nothing changed. Manual review required.') $true }
+    $inflight = $read.record
+    $manifest = $read.manifest
+    $backupDir = [string]$inflight.backupDir
+    $Record.backup_dir = $backupDir
+    $Record.old_sha = $Head
+
+    if ($Head -eq [string]$inflight.to -and [string]$inflight.mode -ceq 'Rollback') {
+        $dirty = @(Get-DirtyEntries $Config)
+        $bad = @(Test-DeployedFiles $Config $manifest)
+        if ($dirty.Count -gt 0 -or $bad.Count -gt 0) {
+            return Complete-Gate $Paths $Record 'STOP' ('rollback moved HEAD but the tree does not match the target (' + ((@($dirty) + @($bad)) -join '; ') + '); nothing changed. Manual review required.') $true
+        }
+        Write-JsonFile (Join-Path $backupDir 'manifest.json') $manifest
+        Move-Item -LiteralPath $Paths.Inflight -Destination (Join-Path $backupDir 'inflight.recovered.json') -Force
+        [void](Complete-RollbackState $Config $Paths ([string]$inflight.from) ([string]$inflight.to) ([string]$inflight.branch) @($inflight.pendingRestart))
+        $Record.new_sha = $Head
+        $Record.pending_restart = @($inflight.pendingRestart)
+        return Complete-Gate $Paths $Record 'RECOVERED' ('interrupted rollback completed: HEAD ' + $Head.Substring(0, 7) + ' verified against the backup manifest; pinned') $true
+    }
+    if ($Head -ne [string]$inflight.from) {
+        return Complete-Gate $Paths $Record 'STOP' ('HEAD is ' + $Head.Substring(0, 7) + ', neither the pre-switch ' + ([string]$inflight.from).Substring(0, 7) + ' nor a completed rollback; nothing changed. Manual review required.') $true
+    }
+
+    # HEAD لم يتقدّم: تحقق كل نسخة احتياطية أولاً، ثم الاستعادة (لا استعادة جزئية من نسخة ناقصة).
+    foreach ($e in @($manifest.files | Where-Object { [bool]$_.existed })) {
+        $copy = Join-Path (Join-Path $backupDir 'files') (([string]$e.path) -replace '/', [IO.Path]::DirectorySeparatorChar)
+        if (-not (Test-Path -LiteralPath $copy) -or (Get-FileSha256 $copy) -ne [string]$e.preSha256) { return Complete-Gate $Paths $Record 'STOP' ('backup copy missing or altered: ' + $e.path + '; nothing changed. Manual review required.') $true }
+    }
+    $quarantine = Join-Path $backupDir 'quarantine'
     $restored = 0; $moved = 0
     foreach ($e in @($manifest.files)) {
         $full = Get-RepoFullPath $Config $e.path
         if ([bool]$e.existed) {
             if ((Test-Path -LiteralPath $full -PathType Leaf) -and (Get-FileSha256 $full) -eq [string]$e.preSha256) { continue }
-            $copy = Join-Path (Join-Path ([string]$inflight.backupDir) 'files') (([string]$e.path) -replace '/', [IO.Path]::DirectorySeparatorChar)
-            if (-not (Test-Path -LiteralPath $copy) -or (Get-FileSha256 $copy) -ne [string]$e.preSha256) { return Complete-Gate $Paths $Record 'FAIL' ('backup copy missing or altered: ' + $e.path) $true }
+            $copy = Join-Path (Join-Path $backupDir 'files') (([string]$e.path) -replace '/', [IO.Path]::DirectorySeparatorChar)
             $dir = Split-Path -Parent $full
             if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
             Copy-Item -LiteralPath $copy -Destination $full -Force
@@ -893,10 +980,10 @@ function Invoke-GateRecover($Config, $Paths, $Record, [string]$Head) {
     }
     $dirty = @(Get-DirtyEntries $Config)
     if ($dirty.Count -gt 0) { return Complete-Gate $Paths $Record 'FAIL' ('tree still not clean after restore; deploy flag kept: ' + ($dirty -join ', ')) $true }
-    Move-Item -LiteralPath $Paths.Inflight -Destination (Join-Path ([string]$inflight.backupDir) 'inflight.recovered.json') -Force
+    Move-Item -LiteralPath $Paths.Inflight -Destination (Join-Path $backupDir 'inflight.recovered.json') -Force
     Clear-DeployFlag $Paths
     $Record.new_sha = $Head
-    return Complete-Gate $Paths $Record 'RECOVERED' ('restored ' + $restored + ' file(s), quarantined ' + $moved + '; HEAD ' + $Head.Substring(0, 7) + ' and tree clean') $true
+    return Complete-Gate $Paths $Record 'RECOVERED' ('interrupted ' + [string]$inflight.mode + ' undone: restored ' + $restored + ' file(s), quarantined ' + $moved + '; HEAD ' + $Head.Substring(0, 7) + ' and tree clean') $true
 }
 
 # تسجيل يدوي بعد أن يعيد المالك تشغيل عملية طويلة بنفسه. لا يمسّ أي مهمة ولا عملية.

@@ -68,6 +68,11 @@ function Get-GateTaskInfo($Config, [string[]]$TaskNames) {
     $launcher = Join-Path $Config.gateDir 'run-repo-task.ps1'
     return @($TaskNames | ForEach-Object { [pscustomobject]@{ name = $_; visible = $true; state = 'Ready'; nextRunUtc = $null; actionText = ('powershell.exe -File "' + $launcher + '" -Script "tools/reader.ps1"') } })
 }
+$script:ResetOverride = $null
+function Invoke-GateReset($Config, [string]$Target) {
+    if ($script:ResetOverride) { return (& $script:ResetOverride $Config $Target) }
+    return Invoke-GateGit $Config @('reset', '--keep', $Target)
+}
 $script:MergeOverride = $null
 function Invoke-GateMerge($Config, [string]$Target) {
     if ($script:MergeOverride) { return (& $script:MergeOverride $Config $Target) }
@@ -133,7 +138,7 @@ function New-GateTestEnv {
     $config.requiredMainWorkflows = @('Deploy TOBACCO Web'); $config.requiredPrChecks = @('check')
     $config.drainTimeoutSeconds = 1; $config.pauseTasks = @('T1'); $config.routingExempt = @(); $config.deviceBaselineSha = ''
     $script:Approved = @{}; $script:PrChecks = @{}; $script:RedCi = @{}; $script:UnkindOnly = @{}; $script:Running = @(); $script:Alerts.Clear()
-    $script:TaskInfoOverride = $null; $script:MergeOverride = $null
+    $script:TaskInfoOverride = $null; $script:MergeOverride = $null; $script:ResetOverride = $null
     return [pscustomobject]@{ Base = $base; Seed = $seed; Repo = $repo; Gate = $gate; Config = $config }
 }
 
@@ -170,6 +175,17 @@ function Get-AuditLines($T) {
     $p = Join-Path $T.Gate 'audit.jsonl'
     if (-not (Test-Path -LiteralPath $p)) { return @() }
     return @([System.IO.File]::ReadAllLines($p) | Where-Object { $_ } | ForEach-Object { $_ | ConvertFrom-Json })
+}
+# بصمة كل ملف في الشجرة (خارج .git) مع وقت تعديله، وحالة البوابة: لإثبات «لا تغيير إضافي».
+function Get-TreeSnapshot($T) {
+    $repoFull = [System.IO.Path]::GetFullPath($T.Repo)
+    $lines = @(Get-ChildItem -LiteralPath $T.Repo -Recurse -File -Force | Where-Object { $_.FullName -notlike ('*' + [IO.Path]::DirectorySeparatorChar + '.git' + [IO.Path]::DirectorySeparatorChar + '*') } | Sort-Object FullName | ForEach-Object {
+        $_.FullName.Substring($repoFull.Length) + '=' + (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash + '@' + $_.LastWriteTimeUtc.Ticks })
+    foreach ($f in 'state.json', 'deploying.flag', 'inflight.json', 'writer-allowlist.json') {
+        $p = Join-Path $T.Gate $f
+        if (Test-Path -LiteralPath $p) { $lines += ($f + '=' + (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash) } else { $lines += ($f + '=absent') }
+    }
+    return ($lines -join "`n")
 }
 function Get-TestState($T) { return ([System.IO.File]::ReadAllText((Join-Path $T.Gate 'state.json')) | ConvertFrom-Json) }
 
@@ -630,6 +646,128 @@ try {
     Assert-True ((Get-TestState $ev).lastDeployedSha -eq $before -and (Test-Path -LiteralPath (Join-Path $ev.Gate 'deploying.flag'))) 'state not advanced and writers stay paused after a failed verification'
     $r = Invoke-DeployGate -Config $ev.Config -GateMode 'Recover'
     Assert-True ($r.result -eq 'STOP' -and $r.reason -like '*Manual review*') 'Recover refuses when HEAD already moved (manual review, no guessing)'
+
+    Write-Host '== Interrupted rollback (Codex P1 on #337)'
+    $rb = New-InitializedEnv
+    $r1 = Get-TestHead $rb
+    $r2 = Publish-TestRelease $rb @{ 'tools/reader.ps1' = "'rollback source v2'`n"; 'tools/rb-added.ps1' = "'only in v2'`n" } -Approve
+    $r = Invoke-DeployGate -Config $rb.Config -GateMode 'Deploy'
+    Assert-True ($r.result -eq 'OK' -and (Get-TestHead $rb) -eq $r2) 'v2 deployed (rollback source)'
+    $v2Reader = (Get-FileHash -LiteralPath (Join-Path $rb.Repo 'tools/reader.ps1') -Algorithm SHA256).Hash.ToLowerInvariant()
+    $stateBefore = [System.IO.File]::ReadAllText((Join-Path $rb.Gate 'state.json'))
+    $script:ResetOverride = {
+        param($Config, $Target)
+        # انقطاع reset --keep بعد بدء الكتابة: ملف رجع لنسخة v1، وملف v2 أُزيل، وHEAD لم يتحرّك.
+        [System.IO.File]::WriteAllText((Join-Path $Config.repoPath 'tools/reader.ps1'), "'reader v1'`n")
+        Remove-Item -LiteralPath (Join-Path $Config.repoPath 'tools/rb-added.ps1') -Force
+        return [pscustomobject]@{ Code = 128; Out = @('fatal: Could not reset index file'); Text = 'fatal: Could not reset index file' }
+    }
+    $r = Invoke-DeployGate -Config $rb.Config -GateMode 'Rollback' -RollbackTo $r1
+    $script:ResetOverride = $null
+    Assert-True ($r.result -eq 'FAIL' -and $r.reason -like '*rollback interrupted*inflight.json kept*Recover*' -and (Get-TestHead $rb) -eq $r2) 'interrupted reset --keep => FAIL, HEAD unchanged'
+    $inf = [System.IO.File]::ReadAllText((Join-Path $rb.Gate 'inflight.json')) | ConvertFrom-Json
+    Assert-True ($inf.mode -eq 'Rollback' -and $inf.from -eq $r2 -and $inf.to -eq $r1 -and $inf.schema -eq 1 -and (Test-Path -LiteralPath (Join-Path $inf.backupDir 'manifest.json'))) 'inflight.json records the rollback (mode, from, to, backup) before reset --keep'
+    Assert-True ((Test-Path -LiteralPath (Join-Path $rb.Gate 'deploying.flag')) -and [System.IO.File]::ReadAllText((Join-Path $rb.Gate 'state.json')) -eq $stateBefore) 'flag kept and state untouched after the interrupted rollback'
+    $r = Invoke-DeployGate -Config $rb.Config -GateMode 'Deploy'
+    Assert-True ($r.result -eq 'STOP' -and $r.reason -like '*interrupted*Recover*') 'no deploy on top of an interrupted rollback'
+    $r = Invoke-DeployGate -Config $rb.Config -GateMode 'Rollback' -RollbackTo $r1
+    Assert-True ($r.result -eq 'STOP' -and $r.reason -like '*interrupted*Recover*') 'no second rollback on top of an interrupted one'
+    $r = Invoke-DeployGate -Config $rb.Config -GateMode 'Recover'
+    $nowReader = (Get-FileHash -LiteralPath (Join-Path $rb.Repo 'tools/reader.ps1') -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-True ($r.result -eq 'RECOVERED' -and $r.reason -like '*Rollback undone*' -and (Get-TestHead $rb) -eq $r2 -and $nowReader -eq $v2Reader -and (Test-Path -LiteralPath (Join-Path $rb.Repo 'tools/rb-added.ps1'))) 'Recover undoes the interrupted rollback: v2 files back with verified SHA256'
+    Assert-True (@(Get-DirtyEntries $rb.Config).Count -eq 0 -and -not (Test-Path -LiteralPath (Join-Path $rb.Gate 'deploying.flag')) -and -not (Test-Path -LiteralPath (Join-Path $rb.Gate 'inflight.json')) -and [System.IO.File]::ReadAllText((Join-Path $rb.Gate 'state.json')) -eq $stateBefore) 'tree clean, flag and inflight cleared, state exactly as before the rollback'
+
+    Write-Host '== Recover is idempotent'
+    $snap = Get-TreeSnapshot $rb
+    $auditCount = @(Get-AuditLines $rb).Count
+    foreach ($i in 1..2) {
+        $r = Invoke-DeployGate -Config $rb.Config -GateMode 'Recover'
+        Assert-True ($r.result -eq 'NOOP' -and $r.reason -like 'nothing to recover*') ('Recover #' + ($i + 1) + ' after a completed recovery => NOOP')
+        Assert-True ((Get-TreeSnapshot $rb) -eq $snap -and @(Get-AuditLines $rb).Count -eq $auditCount) ('Recover #' + ($i + 1) + ' changes no file, timestamp, gate state or audit')
+    }
+    $r = Invoke-DeployGate -Config $rb.Config -GateMode 'Rollback' -RollbackTo $r1
+    Assert-True ($r.result -eq 'OK' -and (Get-TestHead $rb) -eq $r1 -and (Get-TestState $rb).status -eq 'ROLLED_BACK_PINNED' -and -not (Test-Path -LiteralPath (Join-Path $rb.Gate 'inflight.json'))) 'the real rollback then succeeds and leaves no inflight marker'
+
+    Write-Host '== Rollback interrupted after HEAD moved => Recover completes it'
+    $rc = New-InitializedEnv
+    $c1 = Get-TestHead $rc
+    $c2 = Publish-TestRelease $rc @{ 'tools/ameen-read-worker.ps1' = "'worker v2'`n" } -Approve
+    [void](Invoke-DeployGate -Config $rc.Config -GateMode 'Deploy')
+    $script:ResetOverride = {
+        param($Config, $Target)
+        $res = Invoke-GateGit $Config @('reset', '--keep', $Target)
+        return [pscustomobject]@{ Code = 1; Out = @('simulated crash after reset'); Text = 'simulated crash after reset' }
+    }
+    $r = Invoke-DeployGate -Config $rc.Config -GateMode 'Rollback' -RollbackTo $c1
+    $script:ResetOverride = $null
+    Assert-True ($r.result -eq 'FAIL' -and (Get-TestHead $rc) -eq $c1 -and (Get-TestState $rc).lastDeployedSha -eq $c2 -and (Test-Path -LiteralPath (Join-Path $rc.Gate 'inflight.json'))) 'HEAD moved but the rollback was not recorded => FAIL with inflight kept'
+    $r = Invoke-DeployGate -Config $rc.Config -GateMode 'Recover'
+    $st = Get-TestState $rc
+    Assert-True ($r.result -eq 'RECOVERED' -and $r.reason -like '*rollback completed*' -and $st.status -eq 'ROLLED_BACK_PINNED' -and $st.pinnedSha -eq $c1 -and $st.rolledBackFrom -eq $c2) 'Recover verifies every file against the target and completes the rollback (pinned)'
+    Assert-True (@($st.pendingRestart) -contains 'TOBACCO Ameen Read Worker' -and -not (Test-Path -LiteralPath (Join-Path $rc.Gate 'deploying.flag'))) 'completed rollback keeps the pending restart and clears the flag'
+    $snap = Get-TreeSnapshot $rc
+    $r = Invoke-DeployGate -Config $rc.Config -GateMode 'Recover'
+    Assert-True ($r.result -eq 'NOOP' -and (Get-TreeSnapshot $rc) -eq $snap) 'second Recover after completing the rollback => NOOP, nothing changed'
+
+    Write-Host '== Clean reset refusal leaves nothing to recover'
+    $rr = New-InitializedEnv
+    $q1 = Get-TestHead $rr
+    $q2 = Publish-TestRelease $rr @{ 'tools/reader.ps1' = "'q2'`n" } -Approve
+    [void](Invoke-DeployGate -Config $rr.Config -GateMode 'Deploy')
+    $script:ResetOverride = { param($Config, $Target) return [pscustomobject]@{ Code = 128; Out = @('error: Entry would be overwritten'); Text = 'error: Entry would be overwritten' } }
+    $r = Invoke-DeployGate -Config $rr.Config -GateMode 'Rollback' -RollbackTo $q1
+    $script:ResetOverride = $null
+    Assert-True ($r.result -eq 'FAIL' -and $r.reason -like '*refused, tree unchanged*' -and (Get-TestHead $rr) -eq $q2 -and -not (Test-Path -LiteralPath (Join-Path $rr.Gate 'inflight.json')) -and -not (Test-Path -LiteralPath (Join-Path $rr.Gate 'deploying.flag'))) 'git refusing reset --keep cleanly => FAIL, no inflight, no flag'
+
+    Write-Host '== Fail closed: damaged or missing inflight.json'
+    $fc = New-InitializedEnv
+    $f1 = Get-TestHead $fc
+    $f2 = Publish-TestRelease $fc @{ 'tools/reader.ps1' = "'fc v2'`n" } -Approve
+    [void](Invoke-DeployGate -Config $fc.Config -GateMode 'Deploy')
+    $script:ResetOverride = {
+        param($Config, $Target)
+        [System.IO.File]::WriteAllText((Join-Path $Config.repoPath 'tools/reader.ps1'), "'half reset'`n")
+        return [pscustomobject]@{ Code = 128; Out = @('interrupted'); Text = 'interrupted' }
+    }
+    $r = Invoke-DeployGate -Config $fc.Config -GateMode 'Rollback' -RollbackTo $f1
+    $script:ResetOverride = $null
+    $infPath = Join-Path $fc.Gate 'inflight.json'
+    $goodInflight = [System.IO.File]::ReadAllText($infPath)
+    $goodObj = $goodInflight | ConvertFrom-Json
+    $altDir = Join-Path $fc.Base 'elsewhere'
+    New-Item -ItemType Directory -Force -Path $altDir | Out-Null
+    Copy-Item -LiteralPath (Join-Path $goodObj.backupDir 'manifest.json') -Destination (Join-Path $altDir 'manifest.json')
+    $cases = @(
+        @{ name = 'truncated JSON'; text = '{"schema":1,"mode":"Rollb'; reason = '*not valid JSON*' },
+        @{ name = 'empty file'; text = ''; reason = '*inflight.json is*' },
+        @{ name = 'unknown mode'; text = ($goodInflight -replace '"Rollback"', '"Guess"'); reason = '*unknown mode*' },
+        @{ name = 'invalid from'; text = ($goodInflight -replace $f2, 'not-a-sha'); reason = '*invalid from*' },
+        @{ name = 'backup outside the gate folder'; text = ($goodInflight.Replace(($goodObj.backupDir | ConvertTo-Json).Trim('"'), ($altDir | ConvertTo-Json).Trim('"'))); reason = '*outside the gate backups folder*' },
+        @{ name = 'manifest of another operation'; text = ($goodInflight -replace $f1, '1111111111111111111111111111111111111111'); reason = '*does not match inflight*' })
+    foreach ($c in $cases) {
+        [System.IO.File]::WriteAllText($infPath, $c.text)
+        $snap = Get-TreeSnapshot $fc
+        $r = Invoke-DeployGate -Config $fc.Config -GateMode 'Recover'
+        Assert-True ($r.result -eq 'STOP' -and $r.reason -like $c.reason -and $r.reason -like '*Manual review*') ('inflight.json ' + $c.name + ' => Recover STOP (' + $r.reason + ')')
+        Assert-True ((Get-TreeSnapshot $fc) -eq $snap -and (Get-TestHead $fc) -eq $f2) ('inflight.json ' + $c.name + ' => no file, flag or state touched')
+        $r = Invoke-DeployGate -Config $fc.Config -GateMode 'Deploy'
+        Assert-True ($r.result -eq 'STOP' -and $r.reason -like '*interrupted*') ('inflight.json ' + $c.name + ' => Deploy still refused')
+    }
+    $copyPath = Join-Path (Join-Path $goodObj.backupDir 'files') (Join-Path 'tools' 'reader.ps1')
+    $goodCopy = [System.IO.File]::ReadAllText($copyPath)
+    [System.IO.File]::WriteAllText($infPath, $goodInflight)
+    [System.IO.File]::WriteAllText($copyPath, "'tampered backup'`n")
+    $snap = Get-TreeSnapshot $fc
+    $r = Invoke-DeployGate -Config $fc.Config -GateMode 'Recover'
+    Assert-True ($r.result -eq 'STOP' -and $r.reason -like '*backup copy missing or altered*' -and (Get-TreeSnapshot $fc) -eq $snap) 'altered backup copy => STOP before restoring anything'
+    [System.IO.File]::WriteAllText($copyPath, $goodCopy)
+    Move-Item -LiteralPath $infPath -Destination (Join-Path $fc.Base 'inflight.moved.json')
+    $snap = Get-TreeSnapshot $fc
+    $r = Invoke-DeployGate -Config $fc.Config -GateMode 'Recover'
+    Assert-True ($r.result -eq 'STOP' -and $r.reason -like '*inflight.json is missing*refusing to guess*' -and (Get-TreeSnapshot $fc) -eq $snap) 'inflight.json missing while the flag/dirty tree remain => STOP, nothing changed'
+    Move-Item -LiteralPath (Join-Path $fc.Base 'inflight.moved.json') -Destination $infPath
+    $r = Invoke-DeployGate -Config $fc.Config -GateMode 'Recover'
+    Assert-True ($r.result -eq 'RECOVERED' -and (Get-TestHead $fc) -eq $f2 -and @(Get-DirtyEntries $fc.Config).Count -eq 0) 'with the original inflight.json restored, Recover succeeds (fail-closed paths destroyed nothing)'
 
     Write-Host '== Safety invariants in the source'
     $src = [System.IO.File]::ReadAllText($gateScript)
