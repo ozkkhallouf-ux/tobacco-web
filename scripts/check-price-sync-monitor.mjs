@@ -32,7 +32,9 @@ const md5 = (s) => createHash("md5").update(s).digest("hex");
 
 // تعريف دالة كما في ملف الحزمة: { body = prosrc، sql = جملة create كاملة }.
 function definition(text, name) {
-  const re = new RegExp(`create or replace function ${name.replace(/\./g, "\\.")}\\s*\\(`, "gi");
+  // تهريب كامل لمحارف التعبير النمطي (CodeQL js/incomplete-sanitization).
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`create or replace function ${escaped}\\s*\\(`, "gi");
   const found = [];
   let m;
   while ((m = re.exec(text))) {
