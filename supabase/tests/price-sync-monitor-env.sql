@@ -82,6 +82,12 @@ create or replace function cron.unschedule(p_name text) returns boolean language
 create schema if not exists supabase_migrations;
 create table supabase_migrations.schema_migrations (version text primary key, name text);
 
+create table private.project_task_health_state (task_key text primary key, is_healthy boolean, last_observed_at timestamptz,
+  last_success_at timestamptz, last_alert_at timestamptz, last_detail text, last_alerted_terminal_at timestamptz,
+  last_alerted_health text, last_alerted_health_since timestamptz, fault_since timestamptz);
+insert into private.project_task_health_state (task_key, is_healthy, last_detail, fault_since) values
+  ('price-sync', false, 'آخر نجاح منذ 40 دقيقة', now() - interval '40 minutes'),
+  ('ameen-main', false, 'آخر نجاح منذ 20 دقيقة', now() - interval '20 minutes');
 create table private.project_task_monitors (task_key text primary key, task_label text, enabled boolean not null default true,
   source_table text, report_source text, max_age_minutes integer, check_status boolean default false);
 insert into private.project_task_monitors values

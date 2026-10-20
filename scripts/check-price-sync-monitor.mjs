@@ -60,6 +60,13 @@ const PKG = {
   tick15: definition(f15, "private.sync_outage_tick")
 };
 // إعادة جسم الإرسال الإنتاجي المبسّط (بيئة الاختبار وحدها): جسم 15 يحمل قيماً افتراضية للمعاملات فلا يُستبدل بلا drop.
+// جدول حوادث 12 كما في ملفه (لاختبار إغلاق حادثة المراقب القديم).
+const incidents12 = (() => {
+  const start = f12.indexOf("create table if not exists private.project_task_incidents (");
+  const end = f12.indexOf(";", f12.indexOf("create unique index if not exists project_task_incidents_one_open", start)) + 1;
+  assert.ok(start > 0 && end > start, "تعريف project_task_incidents في 12");
+  return f12.slice(start, end);
+})();
 const dispatchProd = `drop function if exists private.notify_telegram_dispatch(text,text,text,integer,jsonb);\n${definition(envSql, "private.notify_telegram_dispatch").sql}`;
 
 // الجمل العليا (احترام السلاسل الدولارية والمفردة والتعليقات).
@@ -115,6 +122,8 @@ assert.match(code, /revoke all on function private\.price_sync_monitor_tick\(tim
 assert.doesNotMatch(code, /grant\s+(execute|select|insert|update|delete|all)[^;]*price_sync_(monitor|incidents)/i, "لا منح لأي دور");
 assert.match(code, /update private\.project_task_monitors set enabled = false where task_key = 'price-sync' and enabled;/,
   "المراقب القديم يُعطَّل لمنع التنبيه المزدوج");
+assert.match(code, /update private\.project_task_incidents\s+set ended_at = now\(\)[\s\S]*?where task_key = 'price-sync' and ended_at is null;/,
+  "حادثة المراقب القديم المفتوحة تُغلق ذرّياً مع تعطيله (Codex P1)");
 assert.match(code, /cron\.schedule\('price-sync-monitor', '\* \* \* \* \*', 'select private\.price_sync_monitor_tick\(\);'\)/);
 assert.match(rollback, /cron\.unschedule\('price-sync-monitor'\)/);
 assert.match(rollback, /set enabled = true where task_key = 'price-sync'/);
@@ -200,7 +209,10 @@ function packagesSql({ p12 = true, p13 = true, p15 = true, times = [1, 2, 3], di
   const parts = ["set check_function_bodies = off;", "create schema if not exists private;"];
   if (p12) parts.push(
     "create table if not exists private.ops_events (id int);",
-    "create table if not exists private.project_task_incidents (id int);",
+    incidents12,
+    `insert into private.project_task_incidents (task_key, started_at, confirmed_at, detail, alerted) values
+       ('price-sync', now() - interval '40 minutes', now() - interval '10 minutes', 'آخر نجاح منذ 40 دقيقة', false),
+       ('ameen-main', now() - interval '20 minutes', now() - interval '5 minutes', 'آخر نجاح منذ 20 دقيقة', false);`,
     "create table private.digest_bundle_snapshot (fn text primary key, def text not null, taken_at timestamptz not null default now());",
     `insert into private.digest_bundle_snapshot values ('private.monitor_project_tasks()', 'x', ${at(times[0])}), ('public.send_evening_report()', 'x', ${at(times[0])});`,
     oldMonitor ? "create or replace function private.monitor_project_tasks() returns void language plpgsql as $$ begin null; end $$;" : PKG.monitor12.sql);
@@ -222,6 +234,12 @@ const OBJECTS17 = `select (select count(*) from pg_class c join pg_namespace n o
   + (select count(*) from pg_proc p join pg_namespace n on n.oid = p.pronamespace where n.nspname = 'private' and p.proname like 'price_sync_monitor%')
   || ':' || (select count(*) from cron.job where jobname = 'price-sync-monitor')
   || ':' || (select enabled from private.project_task_monitors where task_key = 'price-sync')`;
+// بعد التطبيق: حادثة price-sync المفتوحة أُغلقت وصحتها سليمة، وحادثة ameen-main لم تُمسّ.
+const RETIRED = `select (select count(*) from private.project_task_incidents where task_key = 'price-sync' and ended_at is null)
+  || ':' || (select count(*) from private.project_task_incidents where task_key = 'price-sync' and ended_at is not null)
+  || ':' || (select count(*) from private.project_task_incidents where task_key = 'ameen-main' and ended_at is null)
+  || ':' || (select is_healthy::text || '/' || coalesce(fault_since::text, 'null') from private.project_task_health_state where task_key = 'price-sync')
+  || ':' || (select is_healthy::text from private.project_task_health_state where task_key = 'ameen-main')`;
 
 const GUARD_CASES = [
   { name: "لم تُطبَّق أي حزمة", pk: { p12: false, p13: false, p15: false }, refuse: /requires proposed\/12/ },
@@ -257,9 +275,13 @@ for (const gc of GUARD_CASES) {
   const after = psql(["-d", DB, "-tA", "-c", OBJECTS17]).stdout.trim();
   const text = output(apply);
   let ok;
-  if (gc.ok) ok = setup.status === 0 && apply.status === 0 && /^\d+:1:false$/.test(after) && Number(after.split(":")[0]) >= 10;
-  else ok = setup.status === 0 && gc.refuse.test(text) && after === "0:0:true" && (gc.autocommit || apply.status !== 0);
-  guardLines.push(`${ok ? "✓" : "✗"} ${gc.name} ⇒ ${gc.ok ? "طُبّق" : "رُفض"} (كائنات:cron:المراقب القديم مفعّل = ${after})`);
+  const retired = gc.ok ? psql(["-d", DB, "-tA", "-c", RETIRED]).stdout.trim() : "";
+  if (gc.ok) ok = setup.status === 0 && apply.status === 0 && /^\d+:1:false$/.test(after) && Number(after.split(":")[0]) >= 10
+    && retired === "0:1:1:true/null:false";
+  const untouched = gc.ok ? "" : psql(["-d", DB, "-tA", "-c", "select count(*) from private.project_task_incidents where task_key = 'price-sync' and ended_at is null"]).stdout.trim();
+  if (!gc.ok) ok = setup.status === 0 && gc.refuse.test(text) && after === "0:0:true" && (gc.autocommit || apply.status !== 0)
+    && (gc.pk.p12 === false || gc.pk.oldMonitor || untouched === "1");
+  guardLines.push(`${ok ? "✓" : "✗"} ${gc.name} ⇒ ${gc.ok ? `طُبّق؛ حادثة price-sync القديمة أُغلقت وameen-main لم تُمسّ (${retired})` : "رُفض"} (كائنات:cron:المراقب القديم مفعّل = ${after})`);
   if (!ok) { failed = true; console.error(gc.name, output(setup), text); }
 }
 

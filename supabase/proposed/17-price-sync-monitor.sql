@@ -51,7 +51,9 @@
 -- منع التكرار:
 --   * المراقب القائم: private.monitor_project_tasks يراقب «price-sync» من ameen_price_sync_status (يُكتب
 --     بعد النجاح فقط) بحد 30 د ويعيد التنبيه كل 60 د. هذا الملف يعطّل ذلك الصف (enabled=false) لأن المراقب
---     الجديد يحل محله، ولا يمسّ دالة monitor_project_tasks ولا بقية المهام.
+--     الجديد يحل محله، ويغلق في المعاملة نفسها حادثته المفتوحة في private.project_task_incidents (12) ويعيد
+--     صف صحته سليماً، وإلا بقي قسم الأعطال المسائي (15) يعرضها للأبد. لا يمسّ دالة monitor_project_tasks ولا
+--     بقية المهام.
 --   * تنبيهات Windows من OZK2026 نفسه (بلا تعديل Windows): حين تُفتح حادثة FAILED وسببها له تنبيه Windows
 --     مطابق في telegram_outbox خلال آخر 30 د ومنذ آخر وصول حيّ (سلسلة الفشل الحالية وحدها) (pull_failed ↔ winfail:pull-approved-prices، ameen_unreachable/
 --     apply_failed ↔ winfail:apply-to-ameen، verify_mismatch ↔ price-sync:mismatch*، verify_failed ↔
@@ -718,6 +720,25 @@ do $retire$
 begin
   if to_regclass('private.project_task_monitors') is not null then
     update private.project_task_monitors set enabled = false where task_key = 'price-sync' and enabled;
+  end if;
+  -- المراقب القديم لن يزور «price-sync» بعد اليوم، فلن يضع ended_at لحادثته المفتوحة (12)، وقسم الأعطال في
+  -- التقرير المسائي (15) يعرض كل حادثة مؤكَّدة مفتوحة ولو عُطّل مراقبها ⇒ تُغلق ذرّياً هنا (Codex P1).
+  -- المراقب الجديد يتولى الحالة الحية من دورته الأولى (خط أساس صامت، ويُنبَّه إن بقي العطل 30 د).
+  if to_regclass('private.project_task_incidents') is not null then
+    update private.project_task_incidents
+       set ended_at = now(), last_seen_at = now(),
+           detail = coalesce(detail || ' — ', '') || 'أُغلقت: حلّ محلّها مراقب مزامنة الأسعار proposed/17'
+     where task_key = 'price-sync' and ended_at is null;
+  end if;
+  if to_regclass('private.project_task_health_state') is not null then
+    update private.project_task_health_state
+       set is_healthy = true, last_observed_at = now(), last_alert_at = null,
+           last_detail = 'أُحيل إلى مراقب مزامنة الأسعار proposed/17'
+     where task_key = 'price-sync';
+    if exists (select 1 from information_schema.columns
+               where table_schema = 'private' and table_name = 'project_task_health_state' and column_name = 'fault_since') then
+      execute format('update private.project_task_health_state set fault_since = null where task_key = %L', 'price-sync');
+    end if;
   end if;
 end
 $retire$
