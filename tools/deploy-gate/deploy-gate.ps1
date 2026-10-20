@@ -17,13 +17,25 @@
 #   -Mode Rollback -To <sha>   رجوع طارئ يدوي (reset --keep) ثم تثبيت الحالة
 #   -Mode Unpin       فك التثبيت بعد نشر إصدار مصحَّح على windows-production
 #   -Mode AckRestart -Components <أسماء>   تسجيل أن المالك أعاد تشغيل عملية طويلة يدوياً
+#   -Mode Recover     استعادة الملفات من نسخة ما قبل النشر بعد تبديل انقطع في منتصفه
+#                     (HEAD لم يتقدّم والشجرة متّسخة). بلا أي أمر git كاتب.
 #
 # البوابة لا تعيد تشغيل أي مهمة ولا توقف أي عملية أبداً: إصدار يمسّ ملفات عملية
 # طويلة (longRunningComponents) يُسجَّل DEPLOYED_PENDING_RESTART مع تنبيه يسمّيها.
+#
+# حمايات تدقيق 2026-10-20:
+#   - deviceBaselineSha: لا هدف لا يحوي ما يشغّله الجهاز فعلاً (لا رجوع بإصدار أقدم)،
+#     وInitialize يرفض فرعاً متأخراً عن الجهاز بدل التبديل إليه.
+#   - مهمة غير مرئية لحساب البوابة = STOP (شغّلها كـSYSTEM). مهمة غير موجَّهة عبر
+#     run-repo-task.ps1 = STOP في Deploy، ومهمة معفاة يقترب موعدها = SKIP.
+#   - إصدار يحذف سكربتاً تشغّله مهمة = STOP.
+#   - نسخة احتياطية مع SHA256 لكل ملف متغيّر قبل أي تبديل، ثم تحقق من كل ملف بعده،
+#     وinflight.json يمنع أي نشر جديد بعد انقطاع حتى -Mode Recover.
+#   - قفل حصري للبوابة، وفحص عملية git جارية (index.lock وغيره) قبل التبديل.
 # ============================================================
 [CmdletBinding()]
 param(
-    [ValidateSet('Deploy', 'DryRun', 'Initialize', 'Rollback', 'Unpin', 'AckRestart')]
+    [ValidateSet('Deploy', 'DryRun', 'Initialize', 'Rollback', 'Unpin', 'AckRestart', 'Recover')]
     [string]$Mode = 'Deploy',
     [string]$To = '',
     [string[]]$Components = @(),
@@ -56,6 +68,8 @@ function Get-GateConfig([string]$Path) {
     foreach ($key in 'expectedHost', 'repoPath', 'gateDir', 'githubRepo', 'windowsBranch', 'mainBranch', 'deploymentEnvironment') {
         if ([string]::IsNullOrWhiteSpace([string]$cfg.$key)) { throw "gate config missing: $key" }
     }
+    $baseline = [string]$cfg.deviceBaselineSha
+    if ($baseline -and $baseline -notmatch '^[0-9a-f]{40}$') { throw 'gate config: deviceBaselineSha must be a full 40-character SHA' }
     return $cfg
 }
 
@@ -67,7 +81,21 @@ function Get-GatePaths($Config) {
         Allowlist = Join-Path $Config.gateDir 'writer-allowlist.json'
         Log       = Join-Path $Config.gateDir 'deploy-gate.log'
         Lock      = Join-Path $Config.gateDir 'deploy-gate.lock'
+        Inflight  = Join-Path $Config.gateDir 'inflight.json'
+        Backups   = Join-Path $Config.gateDir 'backups'
     }
+}
+
+# قفل حصري: نسختان من البوابة (مهمة + تشغيل يدوي، أو وكيلان) لا تعملان معاً أبداً.
+# المقبض يبقى مفتوحاً حتى نهاية العملية؛ يُغلق تلقائياً إن انتهت العملية بأي شكل.
+function Enter-GateLock($Paths) {
+    try { $stream = [System.IO.File]::Open($Paths.Lock, 'OpenOrCreate', 'ReadWrite', 'None') }
+    catch { return $null }
+    try {
+        $info = [System.Text.Encoding]::UTF8.GetBytes(('pid=' + $PID + ' since=' + (Get-Date).ToUniversalTime().ToString('o')))
+        $stream.SetLength(0); $stream.Write($info, 0, $info.Length); $stream.Flush()
+    } catch { Write-Verbose 'lock owner info not written' }
+    return $stream
 }
 
 function Write-GateLog($Paths, [string]$Message) {
@@ -115,6 +143,35 @@ function Get-RunningTaskNames([string[]]$TaskNames) {
 }
 
 function Start-GateSleep([int]$Seconds) { Start-Sleep -Seconds $Seconds }
+
+# تعريف المهام كما يراه حساب البوابة: الظهور، الحالة، الموعد التالي، ونص الـAction.
+# مهمة لا يراها الحساب (مثل Read Worker لـOZKSync) تُعاد visible=$false ولا تُعدّ «متوقفة».
+function Get-GateTaskInfo($Config, [string[]]$TaskNames) {
+    $out = @()
+    foreach ($name in @($TaskNames | Where-Object { $_ } | Select-Object -Unique)) {
+        $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+        if (-not $task) { $out += [pscustomobject]@{ name = $name; visible = $false; state = ''; nextRunUtc = $null; actionText = '' }; continue }
+        $next = $null
+        try {
+            $info = $task | Get-ScheduledTaskInfo -ErrorAction Stop
+            if ($info.NextRunTime) { $next = ([datetime]$info.NextRunTime).ToUniversalTime() }
+        } catch { Write-Verbose ('no schedule info: ' + $name) }
+        $action = (@($task.Actions | ForEach-Object { [string]$_.Execute + ' ' + [string]$_.Arguments + ' ' + [string]$_.WorkingDirectory }) -join "`n")
+        $out += [pscustomobject]@{ name = $name; visible = $true; state = [string]$task.State; nextRunUtc = $next; actionText = $action }
+    }
+    return $out
+}
+
+# عملية git جارية في المستودع (وكيل آخر، أو دمج/rebase عالق) = لا تبديل الآن.
+function Get-GitOperationMarkers($Config) {
+    $gitDir = Join-Path $Config.repoPath '.git'
+    return @(@('index.lock', 'MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge', 'rebase-apply') | Where-Object { Test-Path -LiteralPath (Join-Path $gitDir $_) })
+}
+
+# التبديل نفسه — نقطة تماس كي تحاكي الاختبارات انقطاعاً في منتصفه.
+function Invoke-GateMerge($Config, [string]$Target) {
+    return Invoke-GateGit $Config @('merge', '--ff-only', $Target)
+}
 
 # ------------------------------------------------------------
 # git — الحكم برمز الخروج وحده (stderr في 5.1 يصير أخطاء)
@@ -343,6 +400,120 @@ function Clear-DeployFlag($Paths) {
     if (Test-Path -LiteralPath $Paths.Flag) { Remove-Item -LiteralPath $Paths.Flag -Force }
 }
 
+# ------------------------------------------------------------
+# حارس المهام (تدقيق 2026-10-20: الثغرات e وf، وسكربت مهمة محذوف)
+# ------------------------------------------------------------
+function Get-GateTaskNames($Config) {
+    $names = @($Config.pauseTasks) + @($Config.longRunningComponents | ForEach-Object { $_.taskName })
+    return @($names | Where-Object { $_ } | ForEach-Object { [string]$_ } | Select-Object -Unique)
+}
+
+# السكربتات داخل المستودع التي تشغّلها المهمة (مسار مطلق في الـAction أو غلافه، أو -Script نسبي
+# عبر run-repo-task.ps1)، بمسارها النسبي بحالة أحرفها الأصلية (git يميّز حالة الأحرف).
+function Get-TaskRepoScripts($Config, [string]$ActionText) {
+    $repoKey = ConvertTo-PreflightPath $Config.repoPath
+    $rels = @()
+    foreach ($ref in @(Get-TaskScriptReferences $ActionText)) {
+        $n = ([string]$ref -replace '/', '\').TrimEnd('\')
+        if ($n.ToLowerInvariant().StartsWith($repoKey + '\')) { $rels += ($n.Substring($repoKey.Length + 1) -replace '\\', '/') }
+    }
+    foreach ($m in [regex]::Matches([string]$ActionText, '-Script\s+"?([^"\s]+)')) { $rels += (([string]$m.Groups[1].Value -replace '\\', '/').TrimStart('/')) }
+    return @($rels | Select-Object -Unique)
+}
+
+function Test-TaskRouted($Config, [string]$ActionText) {
+    $launcher = ConvertTo-PreflightPath (Join-Path $Config.gateDir 'run-repo-task.ps1')
+    return [bool](@(Get-TaskScriptReferences $ActionText | Where-Object { (ConvertTo-PreflightPath $_) -eq $launcher }).Count)
+}
+
+# حكم ساكن على المهام: غير مرئية، غير موجَّهة، أو معفاة/غير موجَّهة يقترب موعدها.
+function Get-TaskGuard($Config, $Infos, [datetime]$NowUtc) {
+    $exempt = @($Config.routingExempt | ForEach-Object { [string]$_ })
+    $pause = @($Config.pauseTasks | ForEach-Object { [string]$_ })
+    $guardSeconds = 120
+    if ($null -ne $Config.startGuardSeconds) { $guardSeconds = [int]$Config.startGuardSeconds }
+    $g = [ordered]@{ invisible = @(); unrouted = @(); imminent = @(); scripts = [ordered]@{} }
+    foreach ($i in @($Infos)) {
+        if (-not $i.visible) { $g.invisible += [string]$i.name; continue }
+        if ([string]$i.state -eq 'Disabled') { continue }
+        $g.scripts[[string]$i.name] = @(Get-TaskRepoScripts $Config ([string]$i.actionText))
+        if ($pause -notcontains [string]$i.name) { continue }
+        $routed = Test-TaskRouted $Config ([string]$i.actionText)
+        if (-not $routed -and $exempt -notcontains [string]$i.name) { $g.unrouted += [string]$i.name }
+        if (-not $routed -and $i.nextRunUtc) {
+            $delta = (([datetime]$i.nextRunUtc) - $NowUtc).TotalSeconds
+            if ($delta -ge -5 -and $delta -le $guardSeconds) { $g.imminent += ([string]$i.name + ' in ' + [int]$delta + 's') }
+        }
+    }
+    return [pscustomobject]$g
+}
+
+# سكربت تشغّله مهمة ولا يوجد في الهدف: موجود في HEAD = الإصدار يكسر المهمة (STOP)،
+# ومفقود في HEAD أصلاً = عطل سابق لا يسبّبه الإصدار (تحذير مسجَّل، مثل Invoice Watcher).
+function Get-TaskScriptFindings($Config, $Guard, [string]$Head, [string]$Target) {
+    $broken = @(); $preexisting = @()
+    foreach ($task in @($Guard.scripts.Keys)) {
+        foreach ($rel in @($Guard.scripts[$task])) {
+            if ((Invoke-GateGit $Config @('cat-file', '-e', ($Target + ':' + $rel))).Code -eq 0) { continue }
+            if ((Invoke-GateGit $Config @('cat-file', '-e', ($Head + ':' + $rel))).Code -eq 0) { $broken += ($task + ': ' + $rel) }
+            else { $preexisting += ($task + ': ' + $rel) }
+        }
+    }
+    return [pscustomobject]@{ broken = $broken; preexisting = $preexisting }
+}
+
+# ------------------------------------------------------------
+# النسخة الاحتياطية والتحقق بعد التبديل
+# ------------------------------------------------------------
+function Get-FileSha256([string]$Path) { return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
+
+function Get-RepoFullPath($Config, [string]$Rel) { return (Join-Path $Config.repoPath ((ConvertTo-RepoRelative $Rel) -replace '/', [IO.Path]::DirectorySeparatorChar)) }
+
+# نسخة من كل ملف سيتغيّر، كما هو على القرص، مع SHA256 قبل، والـblob المتوقَّع بعد.
+# تُنشأ وتُتحقَّق قبل أي تعديل على المستودع؛ أي فشل هنا = لا تبديل إطلاقاً.
+function New-DeployBackup($Config, $Paths, [string]$From, [string]$To, $Files) {
+    $id = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ') + '-' + $From.Substring(0, 7) + '-' + $To.Substring(0, 7)
+    $dir = Join-Path $Paths.Backups $id
+    New-Item -ItemType Directory -Force -Path (Join-Path $dir 'files') | Out-Null
+    $entries = @()
+    foreach ($f in @($Files)) {
+        $full = Get-RepoFullPath $Config $f.path
+        $existed = Test-Path -LiteralPath $full -PathType Leaf
+        $pre = $null
+        if ($existed) {
+            $pre = Get-FileSha256 $full
+            $copy = Join-Path (Join-Path $dir 'files') (($f.path) -replace '/', [IO.Path]::DirectorySeparatorChar)
+            $copyDir = Split-Path -Parent $copy
+            if (-not (Test-Path -LiteralPath $copyDir)) { New-Item -ItemType Directory -Force -Path $copyDir | Out-Null }
+            Copy-Item -LiteralPath $full -Destination $copy -Force
+            if ((Get-FileSha256 $copy) -ne $pre) { throw ('backup copy does not match the original: ' + $f.path) }
+        }
+        $blob = 'deleted'
+        if ($f.status -ne 'D') { $blob = Get-GitValue $Config @('rev-parse', ($To + ':' + $f.path)) }
+        $entries += [pscustomobject]@{ path = $f.path; status = $f.status; existed = [bool]$existed; preSha256 = $pre; targetBlob = $blob; postSha256 = $null }
+    }
+    $manifest = [pscustomobject]@{ id = $id; from = $From; to = $To; created_utc = (Get-Date).ToUniversalTime().ToString('o'); files = $entries }
+    Write-JsonFile (Join-Path $dir 'manifest.json') $manifest
+    return [pscustomobject]@{ dir = $dir; manifest = $manifest }
+}
+
+# بعد التبديل: كل ملف متغيّر يطابق blob الهدف (بفلاتر git نفسها)، والمحذوف غير موجود.
+function Test-DeployedFiles($Config, $Manifest) {
+    $bad = @()
+    foreach ($e in @($Manifest.files)) {
+        $full = Get-RepoFullPath $Config $e.path
+        if ([string]$e.targetBlob -eq 'deleted') {
+            if (Test-Path -LiteralPath $full) { $bad += ($e.path + ' (should be deleted)') }
+            continue
+        }
+        if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { $bad += ($e.path + ' (missing)'); continue }
+        $actual = Invoke-GateGit $Config @('hash-object', '--', $e.path)
+        if ($actual.Code -ne 0 -or $actual.Text -ne [string]$e.targetBlob) { $bad += ($e.path + ' (content differs from target)'); continue }
+        $e.postSha256 = Get-FileSha256 $full
+    }
+    return $bad
+}
+
 function Wait-TasksIdle($Config) {
     $deadline = (Get-Date).AddSeconds([int]$Config.drainTimeoutSeconds)
     while ($true) {
@@ -367,6 +538,8 @@ function New-GateRecord($Config, [string]$GateMode) {
         ci = $null; changed_files = @(); ps1_changed = $false; sql_changed = $false; mjs_changed = $false
         writer_scripts_changed = @(); write_capable_detected = @(); writer_hashes_before = $null; writer_hashes_after = $null
         pending_restart = @(); preflight = @()
+        tasks_unrouted = @(); tasks_invisible = @(); warnings = @(); live_served_changed = @()
+        backup_dir = $null; post_verify = $null
         pause_ms = 0; stash_count_before = $null; stash_count_after = $null
         result = $null; reason = $null
     }
@@ -401,6 +574,8 @@ function Invoke-DeployGate {
     $record.old_sha = $head
     $record.stash_count_before = Get-StashCount $Config
 
+    $baseline = [string]$Config.deviceBaselineSha
+
     if ($GateMode -eq 'Initialize') {
         if ($state) { return Complete-Gate $paths $record 'STOP' 'already initialized' $false }
         $pre = Invoke-MigrationPreflight $Config
@@ -408,12 +583,28 @@ function Invoke-DeployGate {
         if (-not $pre.ok) {
             return Complete-Gate $paths $record 'STOP' ('migration preflight blocked: ' + (@($pre.results | Where-Object { $_.verdict -ne 'PASS' } | ForEach-Object { $_.task + ' (' + $_.reason + ')' }) -join '; ')) $true
         }
-        if ($branch -ne [string]$Config.windowsBranch) { return Complete-Gate $paths $record 'STOP' ('expected branch ' + $Config.windowsBranch + ', found ' + $branch) $true }
-        if (@(Get-DirtyEntries $Config).Count -gt 0) { return Complete-Gate $paths $record 'STOP' 'worktree not clean' $true }
+        $invisible = @(Get-GateTaskInfo $Config (Get-GateTaskNames $Config) | Where-Object { -not $_.visible } | ForEach-Object { $_.name })
+        if ($invisible.Count -gt 0) { return Complete-Gate $paths $record 'STOP' ('tasks not visible to the gate account (run as SYSTEM): ' + ($invisible -join ', ')) $true }
+        # الجلب يحدّث مراجع origin فقط، ولا يمسّ الشجرة. نقارن الجهاز بالفرع قبل أي حكم آخر:
+        # فرع متأخر عن الجهاز يعني أن التبديل إليه رجوع صامت بالإنتاج إلى الوراء.
         $fetch = Invoke-GateGit $Config @('fetch', 'origin', $Config.windowsBranch)
         if ($fetch.Code -ne 0) { return Complete-Gate $paths $record 'FAIL' ('fetch failed: ' + $fetch.Text) $true }
         $remote = Get-GitValue $Config @('rev-parse', ('origin/' + $Config.windowsBranch))
-        if ($remote -ne $head) { return Complete-Gate $paths $record 'STOP' 'HEAD differs from origin/windows-production' $true }
+        if ($baseline -and -not (Test-GitAncestor $Config $baseline $head)) {
+            return Complete-Gate $paths $record 'STOP' ('device HEAD ' + $head.Substring(0, 7) + ' does not contain deviceBaselineSha ' + $baseline.Substring(0, 7) + ' (configuration does not describe this device)') $true
+        }
+        if ($remote -ne $head) {
+            if (Test-GitAncestor $Config $remote $head) {
+                $behind = [int](Get-GitValue $Config @('rev-list', '--count', ($remote + '..' + $head)))
+                return Complete-Gate $paths $record 'STOP' ($Config.windowsBranch + ' (' + $remote.Substring(0, 7) + ') is behind the device (' + $head.Substring(0, 7) + ') by ' + $behind + ' commits; switching would roll production back. Publish a release that contains HEAD first.') $true
+            }
+            if (Test-GitAncestor $Config $head $remote) {
+                return Complete-Gate $paths $record 'STOP' ('device (' + $head.Substring(0, 7) + ') is behind ' + $Config.windowsBranch + ' (' + $remote.Substring(0, 7) + '); initialize only where HEAD equals the published release') $true
+            }
+            return Complete-Gate $paths $record 'STOP' ('device HEAD and ' + $Config.windowsBranch + ' have diverged; manual review required') $true
+        }
+        if ($branch -ne [string]$Config.windowsBranch) { return Complete-Gate $paths $record 'STOP' ('expected branch ' + $Config.windowsBranch + ', found ' + $branch) $true }
+        if (@(Get-DirtyEntries $Config).Count -gt 0) { return Complete-Gate $paths $record 'STOP' 'worktree not clean' $true }
         $record.writer_hashes_after = Save-WriterAllowlist $Config $paths $head
         Save-GateState $paths $head $branch '' '' @()
         $record.new_sha = $head
@@ -424,6 +615,10 @@ function Invoke-DeployGate {
     if ($branch -ne [string]$state.branch -or $branch -ne [string]$Config.windowsBranch) {
         return Complete-Gate $paths $record 'STOP' ('unexpected branch: ' + $branch) $true
     }
+
+    if ($GateMode -eq 'Recover') { return Invoke-GateRecover $Config $paths $record $head }
+    # تبديل سابق انقطع ولم يُستعَد بعد: لا نشر ولا رجوع فوق شجرة غير مؤكَّدة.
+    if (Test-Path -LiteralPath $paths.Inflight) { return Complete-Gate $paths $record 'STOP' 'a previous switch was interrupted (inflight.json present); run -Mode Recover first' $true }
 
     if ($GateMode -eq 'Rollback') { return Invoke-GateRollback $Config $paths $record $state $head $RollbackTo }
     if ($GateMode -eq 'Unpin') { return Invoke-GateUnpin $Config $paths $record $state $head }
@@ -454,6 +649,10 @@ function Invoke-DeployGate {
     $localAhead = [int](Get-GitValue $Config @('rev-list', '--count', ($target + '..HEAD')))
     if ($localAhead -gt 0) { return Complete-Gate $paths $record 'STOP' ('local commits present: ' + $localAhead) $true }
     if (-not (Test-GitAncestor $Config $target ('origin/' + $Config.mainBranch))) { return Complete-Gate $paths $record 'STOP' 'target is not on main' $true }
+    # لا إصدار أقدم مما يشغّله الجهاز فعلاً، ولو كان Fast-Forward من الفرع (تدقيق 2026-10-20).
+    if ($baseline -and -not (Test-GitAncestor $Config $baseline $target)) {
+        return Complete-Gate $paths $record 'STOP' ('target ' + $target.Substring(0, 7) + ' does not contain deviceBaselineSha ' + $baseline.Substring(0, 7) + ': it is older than what the device runs') $true
+    }
     if ((Test-AiLockActive $Config $target) -or (Test-AiLockActive $Config ('origin/' + $Config.mainBranch))) {
         return Complete-Gate $paths $record 'SKIP' 'active AI task lock' $true
     }
@@ -500,10 +699,35 @@ function Invoke-DeployGate {
         }
     }
 
-    $record.writer_hashes_before = Get-WriterDiskHashes $Config
-    if ($GateMode -eq 'DryRun') { return Complete-Gate $paths $record 'DRYRUN' 'all checks passed; no change made' $false }
+    # المهام (الثغرات e وf): غير مرئية = STOP دائماً؛ غير موجَّهة = STOP في Deploy وتحذير في DryRun.
+    # وإصدار يحذف سكربتاً تشغّله مهمة = STOP.
+    $guard = Get-TaskGuard $Config @(Get-GateTaskInfo $Config (Get-GateTaskNames $Config)) ((Get-Date).ToUniversalTime())
+    $record.tasks_invisible = @($guard.invisible)
+    $record.tasks_unrouted = @($guard.unrouted)
+    if (@($guard.invisible).Count -gt 0) { return Complete-Gate $paths $record 'STOP' ('tasks not visible to the gate account (run as SYSTEM): ' + (@($guard.invisible) -join ', ')) $true }
+    $scriptFindings = Get-TaskScriptFindings $Config $guard $head $target
+    if (@($scriptFindings.broken).Count -gt 0) { return Complete-Gate $paths $record 'STOP' ('release removes scripts that scheduled tasks run: ' + (@($scriptFindings.broken) -join '; ')) $true }
+    foreach ($p in @($scriptFindings.preexisting)) { $record.warnings += ('task points at a script missing from the repository (pre-existing): ' + $p) }
+    $liveRoots = @($Config.liveServedFromRepo.paths | ForEach-Object { [string]$_ })
+    $record.live_served_changed = @($files | Where-Object { $p = $_.path; @($liveRoots | Where-Object { $p -eq $_ -or ($_.EndsWith('/') -and $p.StartsWith($_)) }).Count -gt 0 } | ForEach-Object { $_.path })
+    if (@($guard.unrouted).Count -gt 0) {
+        if ($GateMode -eq 'Deploy') { return Complete-Gate $paths $record 'STOP' ('tasks not routed through run-repo-task.ps1 (they would ignore deploying.flag): ' + (@($guard.unrouted) -join ', ')) $true }
+        $record.warnings += ('Deploy would STOP: tasks not routed through run-repo-task.ps1: ' + (@($guard.unrouted) -join ', '))
+    }
 
-    # الإيقاف المؤقت ثم التبديل
+    $record.writer_hashes_before = Get-WriterDiskHashes $Config
+    if ($GateMode -eq 'DryRun') {
+        $note = 'all checks passed; no change made'
+        if (@($record.warnings).Count -gt 0) { $note = 'checks evaluated; no change made; warnings: ' + (@($record.warnings) -join ' | ') }
+        return Complete-Gate $paths $record 'DRYRUN' $note $false
+    }
+
+    # نسخة احتياطية + SHA256 قبل أي مساس بالمستودع. أي فشل هنا = لا تبديل.
+    try { $backup = New-DeployBackup $Config $paths $head $target $files }
+    catch { return Complete-Gate $paths $record 'FAIL' ('backup failed before any change: ' + $_.Exception.Message) $true }
+    $record.backup_dir = $backup.dir
+
+    # الإيقاف المؤقت ثم إعادة التحقق ثم التبديل
     $started = Get-Date
     Set-DeployFlag $paths $target
     $stillRunning = @(Wait-TasksIdle $Config)
@@ -511,7 +735,22 @@ function Invoke-DeployGate {
         Clear-DeployFlag $paths
         return Complete-Gate $paths $record 'SKIP' ('tasks still running: ' + ($stillRunning -join ', ')) $true
     }
-    $merge = Invoke-GateGit $Config @('merge', '--ff-only', $target)
+    # الشروط قد تتغيّر أثناء الانتظار: نعيد فحصها قبل التبديل مباشرة (لا TOCTOU).
+    $late = Get-TaskGuard $Config @(Get-GateTaskInfo $Config (Get-GateTaskNames $Config)) ((Get-Date).ToUniversalTime())
+    $reasons = @()
+    if (@($late.invisible).Count -gt 0) { $reasons += ('tasks became invisible: ' + (@($late.invisible) -join ', ')) }
+    if (@($late.imminent).Count -gt 0) { $reasons += ('unrouted tasks about to start: ' + (@($late.imminent) -join ', ')) }
+    $markers = @(Get-GitOperationMarkers $Config)
+    if ($markers.Count -gt 0) { $reasons += ('git operation in progress: ' + ($markers -join ', ')) }
+    if ((Get-GitValue $Config @('rev-parse', 'HEAD')) -ne $head) { $reasons += 'HEAD moved during the pause' }
+    if (@(Get-DirtyEntries $Config).Count -gt 0) { $reasons += 'worktree changed during the pause' }
+    if ($reasons.Count -gt 0) {
+        Clear-DeployFlag $paths
+        return Complete-Gate $paths $record 'SKIP' ('not switching: ' + ($reasons -join '; ')) $true
+    }
+
+    Write-JsonFile $paths.Inflight ([pscustomobject]@{ from = $head; to = $target; backupDir = $backup.dir; started_utc = (Get-Date).ToUniversalTime().ToString('o'); mode = 'Deploy' })
+    $merge = Invoke-GateMerge $Config $target
     $record.pause_ms = [int]((Get-Date) - $started).TotalMilliseconds
     $newHead = Get-GitValue $Config @('rev-parse', 'HEAD')
     $dirtyAfter = @(Get-DirtyEntries $Config)
@@ -521,15 +760,23 @@ function Invoke-DeployGate {
         $consistent = ($dirtyAfter.Count -eq 0 -and ($newHead -eq $head -or $newHead -eq $target))
         if ($consistent) {
             if ($newHead -eq $target) { Save-GateState $paths $target $branch '' '' $record.pending_restart }
+            Remove-Item -LiteralPath $paths.Inflight -Force
             Clear-DeployFlag $paths
             return Complete-Gate $paths $record 'FAIL' ('ff-merge failed, tree consistent: ' + $merge.Text) $true
         }
-        # غير متسق: تبقى العلامة (القرّاء يعودون بعد انتهاء عمرها، والكتّاب متوقفون)
-        return Complete-Gate $paths $record 'FAIL' ('ff-merge failed, tree INCONSISTENT; deploy flag kept: ' + $merge.Text) $true
+        # غير متسق: تبقى العلامة وinflight.json (القرّاء يعودون بعد انتهاء عمرها، والكتّاب متوقفون).
+        return Complete-Gate $paths $record 'FAIL' ('ff-merge failed, tree INCONSISTENT; deploy flag kept; run -Mode Recover (backup ' + $backup.dir + '): ' + $merge.Text) $true
     }
     if ($dirtyAfter.Count -gt 0 -or $record.stash_count_after -ne $record.stash_count_before) {
         return Complete-Gate $paths $record 'FAIL' 'post-update verification failed (dirty tree or stash change); deploy flag kept' $true
     }
+    $badFiles = @(Test-DeployedFiles $Config $backup.manifest)
+    $record.post_verify = if ($badFiles.Count -eq 0) { 'ok' } else { $badFiles }
+    Write-JsonFile (Join-Path $backup.dir 'manifest.json') $backup.manifest
+    if ($badFiles.Count -gt 0) {
+        return Complete-Gate $paths $record 'FAIL' ('post-deploy file verification failed; deploy flag kept: ' + ($badFiles -join '; ')) $true
+    }
+    Remove-Item -LiteralPath $paths.Inflight -Force
 
     $record.writer_hashes_after = Save-WriterAllowlist $Config $paths $target
     Save-GateState $paths $target $branch '' '' $record.pending_restart
@@ -567,6 +814,11 @@ function Invoke-GateRollback($Config, $Paths, $Record, $State, [string]$Head, [s
 
     $Record.new_sha = $toSha
     $Record.rollback_sha = $Head
+    $markers = @(Get-GitOperationMarkers $Config)
+    if ($markers.Count -gt 0) { return Complete-Gate $Paths $Record 'STOP' ('git operation in progress: ' + ($markers -join ', ')) $true }
+    try { $backup = New-DeployBackup $Config $Paths $Head $toSha @(Get-ChangedFiles $Config $Head $toSha) }
+    catch { return Complete-Gate $Paths $Record 'FAIL' ('backup failed before any change: ' + $_.Exception.Message) $true }
+    $Record.backup_dir = $backup.dir
     $started = Get-Date
     Set-DeployFlag $Paths $toSha
     $stillRunning = @(Wait-TasksIdle $Config)
@@ -578,6 +830,10 @@ function Invoke-GateRollback($Config, $Paths, $Record, $State, [string]$Head, [s
     $newHead = Get-GitValue $Config @('rev-parse', 'HEAD')
     $Record.stash_count_after = Get-StashCount $Config
     if ($reset.Code -ne 0 -or $newHead -ne $toSha) { return Complete-Gate $Paths $Record 'FAIL' ('rollback failed; deploy flag kept: ' + $reset.Text) $true }
+    $badFiles = @(Test-DeployedFiles $Config $backup.manifest)
+    $Record.post_verify = if ($badFiles.Count -eq 0) { 'ok' } else { $badFiles }
+    Write-JsonFile (Join-Path $backup.dir 'manifest.json') $backup.manifest
+    if ($badFiles.Count -gt 0) { return Complete-Gate $Paths $Record 'FAIL' ('rollback file verification failed; deploy flag kept: ' + ($badFiles -join '; ')) $true }
     $Record.writer_hashes_after = Save-WriterAllowlist $Config $Paths $toSha
     $changedBack = @(Get-ChangedFiles $Config $toSha $Head | ForEach-Object { $_.path })
     $Record.changed_files = $changedBack
@@ -602,6 +858,47 @@ function Invoke-GateUnpin($Config, $Paths, $Record, $State, [string]$Head) {
     return Complete-Gate $Paths $Record 'OK' 'unpinned' $false
 }
 
+# استعادة بعد تبديل انقطع في منتصفه (HEAD بقي على الإصدار السابق والشجرة متّسخة):
+# كل ملف كان موجوداً يُعاد من النسخة الاحتياطية ويُتحقَّق من SHA256 الخاص به، وكل ملف أضافه
+# التبديل الناقص يُنقل إلى quarantine داخل النسخة (لا حذف). لا أمر git كاتب إطلاقاً.
+function Invoke-GateRecover($Config, $Paths, $Record, [string]$Head) {
+    $inflight = Read-JsonFile $Paths.Inflight
+    if (-not $inflight) { return Complete-Gate $Paths $Record 'STOP' 'nothing to recover (no inflight.json)' $false }
+    $Record.backup_dir = [string]$inflight.backupDir
+    if ($Head -ne [string]$inflight.from) {
+        return Complete-Gate $Paths $Record 'STOP' ('HEAD is ' + $Head.Substring(0, 7) + ', not the pre-switch ' + ([string]$inflight.from).Substring(0, 7) + '; recover only undoes a switch that never moved HEAD. Manual review required.') $true
+    }
+    $manifest = Read-JsonFile (Join-Path ([string]$inflight.backupDir) 'manifest.json')
+    if (-not $manifest) { return Complete-Gate $Paths $Record 'FAIL' 'backup manifest missing; manual review required' $true }
+    $quarantine = Join-Path ([string]$inflight.backupDir) 'quarantine'
+    $restored = 0; $moved = 0
+    foreach ($e in @($manifest.files)) {
+        $full = Get-RepoFullPath $Config $e.path
+        if ([bool]$e.existed) {
+            if ((Test-Path -LiteralPath $full -PathType Leaf) -and (Get-FileSha256 $full) -eq [string]$e.preSha256) { continue }
+            $copy = Join-Path (Join-Path ([string]$inflight.backupDir) 'files') (([string]$e.path) -replace '/', [IO.Path]::DirectorySeparatorChar)
+            if (-not (Test-Path -LiteralPath $copy) -or (Get-FileSha256 $copy) -ne [string]$e.preSha256) { return Complete-Gate $Paths $Record 'FAIL' ('backup copy missing or altered: ' + $e.path) $true }
+            $dir = Split-Path -Parent $full
+            if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+            Copy-Item -LiteralPath $copy -Destination $full -Force
+            if ((Get-FileSha256 $full) -ne [string]$e.preSha256) { return Complete-Gate $Paths $Record 'FAIL' ('restore verification failed: ' + $e.path) $true }
+            $restored++
+        } elseif (Test-Path -LiteralPath $full) {
+            $dest = Join-Path $quarantine (([string]$e.path) -replace '/', [IO.Path]::DirectorySeparatorChar)
+            $dir = Split-Path -Parent $dest
+            if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+            Move-Item -LiteralPath $full -Destination $dest -Force
+            $moved++
+        }
+    }
+    $dirty = @(Get-DirtyEntries $Config)
+    if ($dirty.Count -gt 0) { return Complete-Gate $Paths $Record 'FAIL' ('tree still not clean after restore; deploy flag kept: ' + ($dirty -join ', ')) $true }
+    Move-Item -LiteralPath $Paths.Inflight -Destination (Join-Path ([string]$inflight.backupDir) 'inflight.recovered.json') -Force
+    Clear-DeployFlag $Paths
+    $Record.new_sha = $Head
+    return Complete-Gate $Paths $Record 'RECOVERED' ('restored ' + $restored + ' file(s), quarantined ' + $moved + '; HEAD ' + $Head.Substring(0, 7) + ' and tree clean') $true
+}
+
 # تسجيل يدوي بعد أن يعيد المالك تشغيل عملية طويلة بنفسه. لا يمسّ أي مهمة ولا عملية.
 function Invoke-GateAckRestart($Paths, $Record, $State, [string]$Head, [string[]]$Names) {
     $pending = @(Get-StatePending $State)
@@ -623,11 +920,10 @@ if ($MyInvocation.InvocationName -ne '.') {
     $script:GateConfigPath = $ConfigPath
     $config = Get-GateConfig $ConfigPath
     $paths = Get-GatePaths $config
-    $lock = $null
-    try {
-        $lock = [System.IO.File]::Open($paths.Lock, 'OpenOrCreate', 'ReadWrite', 'None')
-    } catch {
+    $lock = Enter-GateLock $paths
+    if (-not $lock) {
         Write-Host 'deploy gate already running'
+        try { Write-GateLog $paths 'SKIP: another gate instance holds the lock' } catch { Write-Verbose 'log unavailable' }
         exit 0
     }
     try {

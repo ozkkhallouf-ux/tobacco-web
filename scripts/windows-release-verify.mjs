@@ -145,6 +145,19 @@ export async function recordedReleases(ctx, config, sha = "") {
   return out;
 }
 
+// لا إصدار أقدم مما يشغّله OZK2026 فعلاً (تدقيق 2026-10-20): الجهاز انجرف يدوياً إلى main@1843024
+// بينما windows-production على 88ae841، فهدف Fast-Forward بينهما كان سيُرجع الإنتاج إلى الوراء.
+// deviceBaselineSha في الإعداد هو ما يشغّله الجهاز؛ كل هدف يجب أن يحويه.
+export function assertNotOlderThanDevice(ctx, sha, config) {
+  const baseline = String(config.deviceBaselineSha || "").trim().toLowerCase();
+  if (!baseline) return;
+  if (!/^[0-9a-f]{40}$/.test(baseline)) throw new Error("deviceBaselineSha must be a full 40-character SHA");
+  if (!ctx.gitOk(["cat-file", "-e", `${baseline}^{commit}`])) throw new Error(`deviceBaselineSha ${baseline} not found`);
+  if (!ctx.gitOk(["merge-base", "--is-ancestor", baseline, sha])) {
+    throw new Error(`${sha} does not contain deviceBaselineSha ${baseline.slice(0, 7)}: it is older than what OZK2026 runs`);
+  }
+}
+
 // شروط git ثم الأساس (base). حالة الاستكمال (Codex P1 #4): الفرع يساوي الهدف بالضبط لأن
 // الدفع نجح ثم فشل تسجيل الـDeployment — الأساس عندها آخر إصدار مسجَّل ناجح قبله، ولا دفع.
 // أي حالة أخرى لا تساوي الأساس ولا الهدف = رفض.
@@ -152,6 +165,7 @@ export async function resolveReleaseBase(ctx, sha, config) {
   if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error("sha must be a full 40-character commit SHA");
   if (!ctx.gitOk(["cat-file", "-e", `${sha}^{commit}`])) throw new Error(`commit ${sha} not found`);
   if (!ctx.gitOk(["merge-base", "--is-ancestor", sha, `origin/${config.mainBranch}`])) throw new Error("commit is not on main");
+  assertNotOlderThanDevice(ctx, sha, config);
   if (!ctx.gitOk(["rev-parse", "--verify", `origin/${config.windowsBranch}`])) {
     throw new Error(`origin/${config.windowsBranch} does not exist; the owner creates it once from the SHA currently deployed on OZK2026`);
   }

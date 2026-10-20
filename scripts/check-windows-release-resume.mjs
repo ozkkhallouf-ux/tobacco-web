@@ -16,7 +16,8 @@ import { applyRelease, planPush } from "./windows-release-apply.mjs";
 
 let passed = 0;
 const ok = (msg) => { passed += 1; console.log(`  ✓ ${msg}`); };
-const config = { ...loadGateConfig(), requiredMainWorkflows: ["Deploy TOBACCO Web"], requiredPrChecks: ["check"] };
+// deviceBaselineSha الحقيقي غير موجود في المستودع المؤقت؛ الحالة 6 تختبره بقيمة من هذا المستودع.
+const config = { ...loadGateConfig(), requiredMainWorkflows: ["Deploy TOBACCO Web"], requiredPrChecks: ["check"], deviceBaselineSha: "" };
 
 const base = mkdtempSync(path.join(tmpdir(), "ozk-release-"));
 const sh = (cwd, ...args) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false", ...args], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
@@ -194,6 +195,25 @@ try {
   await assert.rejects(applyRelease(ctx5, { verification: v5, inputSha: c1, approver: "owner", runId: "6", config }), /CI not green/);
   assert.equal(api5.state.posts.length, 0, "الاستكمال أيضاً يعيد التحقق من CI قبل التسجيل");
   ok("5) الدفع والاستكمال يعيدان التحقق من الـSHA وmain وCI وموافقة الكتابة قبل أي أثر");
+
+  // 6) لا إصدار أقدم مما يشغّله الجهاز (تدقيق 2026-10-20): الفرع على c0، والجهاز انجرف إلى c2،
+  //    فالهدف c1 (Fast-Forward صحيح من الفرع) يُرفض في الفحص وفي التطبيق، وc2 يُقبل.
+  moveBranch(c0);
+  const cDevice = commit("device.txt", "2\n");
+  sh(seed, "push", "-q", "origin", "main");
+  refresh();
+  const deviceConfig = { ...config, deviceBaselineSha: cDevice };
+  const api6 = fakeApi();
+  const ctx6 = makeCtx(api6);
+  await assert.rejects(verifyRelease(ctx6, { sha: c1, writeApproved: false, config: deviceConfig }), /older than what OZK2026 runs/);
+  const v6 = await verifyRelease(ctx6, { sha: c1, writeApproved: false, config });
+  await assert.rejects(applyRelease(ctx6, { verification: v6, inputSha: c1, approver: "owner", runId: "7", config: deviceConfig }), /older than what OZK2026 runs/);
+  assert.equal(ctx6.pushes, 0);
+  assert.equal(remote(), c0);
+  const v6ok = await verifyRelease(ctx6, { sha: cDevice, writeApproved: false, config: deviceConfig });
+  assert.equal(v6ok.base, c0);
+  await assert.rejects(verifyRelease(ctx6, { sha: cDevice, writeApproved: false, config: { ...config, deviceBaselineSha: "1843024" } }), /40-character/);
+  ok("6) هدف لا يحوي deviceBaselineSha (أقدم من الجهاز) ⇒ رفض في الفحص والتطبيق بلا دفع؛ هدف يحويه ⇒ يمرّ");
 } finally {
   rmSync(base, { recursive: true, force: true });
 }

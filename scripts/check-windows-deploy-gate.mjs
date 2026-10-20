@@ -138,6 +138,52 @@ assert.match(gateSrc, /\$pre = Invoke-MigrationPreflight \$Config[\s\S]{0,400}mi
 assert.match(checkWfRaw(), /tools\\tests\\Test-MigrationPreflight\.ps1/);
 ok("مزامنة النشرات تبقى على main عبر worktree مخصّص، والتحويل محجوب حتى ينجح الفحص (Codex P1 #5)");
 
+// تدقيق 2026-10-20: الثغرات الست، ومنع الرجوع، والتزامن، والنسخ الاحتياطي، والاستعادة.
+assert.match(cfg0.deviceBaselineSha, /^[0-9a-f]{40}$/, "deviceBaselineSha = SHA كامل لما يشغّله الجهاز");
+assert.match(gateSrc, /does not contain deviceBaselineSha/, "البوابة ترفض هدفاً أقدم من الجهاز");
+assert.match(gateSrc, /is behind the device/, "Initialize يرفض فرعاً متأخراً عن الجهاز بدل التبديل إليه");
+assert.match(read("scripts/windows-release-verify.mjs"), /assertNotOlderThanDevice\(ctx, sha, config\);/, "الـworkflow يرفض إصداراً أقدم من الجهاز قبل الموافقة");
+assert.match(read("scripts/windows-release-apply.mjs"), /assertNotOlderThanDevice\(ctx, sha, config\);/, "ويعيد الرفض قبل الدفع");
+// (a) الخادم المحلي الفعلي
+const live = cfg0.liveServedFromRepo;
+assert.equal(live.taskName, "TOBACCO Local Web Server");
+assert.match(live.serverCode, /ProgramData\\OZK-TOBACCO\\LocalWebServer\\server\.mjs$/);
+for (const p of ["index.html", "src/", "public/"]) assert.ok(live.paths.includes(p), `الخادم المحلي يخدم ${p} من المستودع`);
+assert.match(gateSrc, /live_served_changed/);
+// (b) مشغّل الطباعة الحقيقي
+const autoprint = comps.find((c) => c.name === "OZK-AmeenAutoPrint");
+assert.match(autoprint.runner, /LOGON/);
+assert.doesNotMatch(autoprint.runner, /\(ONSTART\)/);
+// (c) مهام النسخ الاحتياطي تستدعي سكربت التنبيه من المستودع
+for (const t of ["OZK Ameen Verified Backup", "OZK Ameen Backup Health Monitor"]) {
+  assert.ok(cfg0.pauseTasks.includes(t), `${t} ضمن pauseTasks`);
+  assert.ok(cfg0.routingExempt.includes(t), `${t} معفاة من التوجيه (كودها مثبّت خارج المستودع)`);
+}
+for (const t of cfg0.routingExempt) assert.ok(cfg0.pauseTasks.includes(t), `routingExempt ⊆ pauseTasks: ${t}`);
+assert.ok(!cfg0.routingExempt.includes("TOBACCO Ameen Sync") && !cfg0.routingExempt.includes("TOBACCO Approved Prices Pull"), "مهام المستودع لا تُعفى من التوجيه");
+assert.ok(Number(cfg0.startGuardSeconds) >= 60);
+// (d) worktree الـmain المنفصل يُسمّى صراحةً
+assert.match(pre, /detached HEAD at/);
+// (e) لا تبديل مع مهمة غير موجَّهة أو موعد قريب أو عملية git جارية، وإعادة الفحص بعد الانتظار
+assert.match(gateSrc, /not routed through run-repo-task\.ps1/);
+assert.match(gateSrc, /unrouted tasks about to start/);
+assert.match(gateSrc, /git operation in progress/);
+assert.match(gateSrc, /HEAD moved during the pause/);
+// (f) مهمة غير مرئية لا تُعدّ متوقفة
+assert.match(gateSrc, /not visible to the gate account \(run as SYSTEM\)/);
+for (const name of ["TOBACCO Ameen Read Worker", "OZK-AmeenAutoPrint"]) assert.equal(comps.find((c) => c.name === name).taskName, name);
+// سكربت مهمة يحذفه الإصدار
+assert.match(gateSrc, /release removes scripts that scheduled tasks run/);
+// قفل، نسخة احتياطية + SHA256، تحقق بعد التبديل، استعادة بلا git كاتب
+assert.match(gateSrc, /function Enter-GateLock[\s\S]{0,200}'None'/);
+assert.match(gateSrc, /New-DeployBackup[\s\S]{0,4000}Set-DeployFlag/, "النسخة الاحتياطية تسبق أي إيقاف أو تبديل");
+assert.match(gateSrc, /Test-DeployedFiles/);
+assert.match(gateSrc, /inflight\.json/);
+const recover = gateSrc.slice(gateSrc.indexOf("function Invoke-GateRecover"), gateSrc.indexOf("function Invoke-GateAckRestart"));
+assert.doesNotMatch(recover, /Invoke-GateGit \$Config @\('(reset|checkout|merge|clean|restore|stash)'/, "الاستعادة لا تستعمل أي أمر git كاتب");
+assert.match(recover, /quarantine/, "الملف الناقص يُنقل ولا يُحذف");
+ok("تدقيق 2026-10-20: لا إصدار أقدم من الجهاز، الثغرات الست (a–f)، قفل، نسخة احتياطية بـSHA256، تحقق بعد التبديل، واستعادة آمنة");
+
 // 2) الـworkflow
 const wf = read(".github/workflows/windows-release.yml").split("\n").filter((l) => !l.trim().startsWith("#")).join("\n");
 const onBlock = wf.slice(wf.indexOf("\non:"), wf.indexOf("\npermissions:"));

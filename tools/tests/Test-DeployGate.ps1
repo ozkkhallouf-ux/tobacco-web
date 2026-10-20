@@ -61,6 +61,18 @@ $script:Preflight = [pscustomobject]@{ ok = $true; results = @([pscustomobject]@
 function Invoke-MigrationPreflight($Config) { return $script:Preflight }
 function Send-GateAlert([string]$Message, [string]$DedupeKey) { [void]$script:Alerts.Add($Message) }
 function Get-RunningTaskNames([string[]]$TaskNames) { return @($script:Running) }
+# المهام كما يراها حساب البوابة: افتراضياً مرئية وموجَّهة عبر run-repo-task.ps1 وبلا موعد قريب.
+$script:TaskInfoOverride = $null
+function Get-GateTaskInfo($Config, [string[]]$TaskNames) {
+    if ($null -ne $script:TaskInfoOverride) { return @($script:TaskInfoOverride) }
+    $launcher = Join-Path $Config.gateDir 'run-repo-task.ps1'
+    return @($TaskNames | ForEach-Object { [pscustomobject]@{ name = $_; visible = $true; state = 'Ready'; nextRunUtc = $null; actionText = ('powershell.exe -File "' + $launcher + '" -Script "tools/reader.ps1"') } })
+}
+$script:MergeOverride = $null
+function Invoke-GateMerge($Config, [string]$Target) {
+    if ($script:MergeOverride) { return (& $script:MergeOverride $Config $Target) }
+    return Invoke-GateGit $Config @('merge', '--ff-only', $Target)
+}
 function Start-GateSleep([int]$Seconds) { Start-Sleep -Milliseconds 50 }
 function Get-GitHubJson($Config, [string]$RelativePath) {
     if ($RelativePath -match '^deployments\?.*sha=([0-9a-f]{40})') {
@@ -119,8 +131,9 @@ function New-GateTestEnv {
     $config = [System.IO.File]::ReadAllText($script:ExampleConfig) | ConvertFrom-Json
     $config.expectedHost = 'TESTHOST'; $config.repoPath = $repo; $config.gateDir = $gate; $config.githubRepo = 'test/test'
     $config.requiredMainWorkflows = @('Deploy TOBACCO Web'); $config.requiredPrChecks = @('check')
-    $config.drainTimeoutSeconds = 1; $config.pauseTasks = @('T1')
+    $config.drainTimeoutSeconds = 1; $config.pauseTasks = @('T1'); $config.routingExempt = @(); $config.deviceBaselineSha = ''
     $script:Approved = @{}; $script:PrChecks = @{}; $script:RedCi = @{}; $script:UnkindOnly = @{}; $script:Running = @(); $script:Alerts.Clear()
+    $script:TaskInfoOverride = $null; $script:MergeOverride = $null
     return [pscustomobject]@{ Base = $base; Seed = $seed; Repo = $repo; Gate = $gate; Config = $config }
 }
 
@@ -458,6 +471,165 @@ try {
     [System.IO.File]::WriteAllText($auditPath, ('{not json' + "`n" + $original))
     $r = Invoke-DeployGate -Config $eo.Config -GateMode 'Rollback' -RollbackTo $o1
     Assert-True ($r.result -eq 'OK' -and (Get-TestHead $eo) -eq $o1) 'rollback from a previous OK deployment => allowed (a malformed line elsewhere is ignored)'
+
+    Write-Host '== Never older than the device (audit 2026-10-20, gap 3)'
+    $eb = New-GateTestEnv; [void]$environments.Add($eb)
+    Invoke-TestGit $eb.Seed @('checkout', '-q', 'main') | Out-Null
+    Write-TestFile (Join-Path $eb.Seed 'tools/reader.ps1') "'manual main merge on the device'`n"
+    Invoke-TestGit $eb.Seed @('commit', '-q', '-am', 'main ahead of windows-production') | Out-Null
+    Invoke-TestGit $eb.Seed @('push', '-q', 'origin', 'main') | Out-Null
+    Invoke-TestGit $eb.Repo @('fetch', '-q', 'origin') | Out-Null
+    Invoke-TestGit $eb.Repo @('checkout', '-q', '-B', 'main', 'origin/main') | Out-Null
+    $devHead = Get-TestHead $eb
+    $r = Invoke-DeployGate -Config $eb.Config -GateMode 'Initialize'
+    Assert-True ($r.result -eq 'STOP' -and $r.reason -like '*behind the device*roll production back*' -and (Get-TestHead $eb) -eq $devHead) 'Initialize: windows-production behind the device => STOP, nothing switched'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $eb.Gate 'state.json'))) 'no state recorded when the branch is behind the device'
+    $eb.Config.deviceBaselineSha = '0123456789012345678901234567890123456789'
+    $r = Invoke-DeployGate -Config $eb.Config -GateMode 'Initialize'
+    Assert-True ($r.result -eq 'STOP' -and $r.reason -like '*deviceBaselineSha*') 'Initialize: HEAD without the configured baseline => STOP'
+    $ebl = New-InitializedEnv
+    $before = Get-TestHead $ebl
+    [void](Publish-TestRelease $ebl @{ 'tools/reader.ps1' = "'release r1'`n" } -Approve)
+    Invoke-TestGit $ebl.Seed @('checkout', '-q', 'main') | Out-Null
+    Write-TestFile (Join-Path $ebl.Seed 'docs/newer.md') "newer than the release`n"
+    Invoke-TestGit $ebl.Seed @('add', '-A') | Out-Null
+    Invoke-TestGit $ebl.Seed @('commit', '-q', '-m', 'device runs this') | Out-Null
+    Invoke-TestGit $ebl.Seed @('push', '-q', 'origin', 'main') | Out-Null
+    $ebl.Config.deviceBaselineSha = Invoke-TestGit $ebl.Seed @('rev-parse', 'HEAD')
+    $r = Invoke-DeployGate -Config $ebl.Config -GateMode 'Deploy'
+    Assert-True ($r.result -eq 'STOP' -and $r.reason -like '*older than what the device runs*' -and (Get-TestHead $ebl) -eq $before) 'Deploy: approved fast-forward target older than the baseline => STOP'
+
+    Write-Host '== Task guard (gaps e/f, missing task script)'
+    $et = New-InitializedEnv
+    $before = Get-TestHead $et
+    $sha = Publish-TestRelease $et @{ 'tools/reader.ps1' = "'guarded'`n" } -Approve
+    $script:TaskInfoOverride = @([pscustomobject]@{ name = 'T1'; visible = $false; state = ''; nextRunUtc = $null; actionText = '' })
+    $r = Invoke-DeployGate -Config $et.Config -GateMode 'Deploy'
+    Assert-True ($r.result -eq 'STOP' -and $r.reason -like '*not visible*SYSTEM*' -and (Get-TestHead $et) -eq $before) 'task invisible to the gate account => STOP (never treated as idle)'
+    $direct = 'powershell.exe -File "' + (Join-Path (Join-Path $et.Repo 'tools') 'reader.ps1') + '"'
+    $script:TaskInfoOverride = @([pscustomobject]@{ name = 'T1'; visible = $true; state = 'Ready'; nextRunUtc = $null; actionText = $direct })
+    $r = Invoke-DeployGate -Config $et.Config -GateMode 'Deploy'
+    Assert-True ($r.result -eq 'STOP' -and $r.reason -like '*not routed through run-repo-task*' -and (Get-TestHead $et) -eq $before) 'task not routed through run-repo-task.ps1 => Deploy STOP'
+    $r = Invoke-DeployGate -Config $et.Config -GateMode 'DryRun'
+    Assert-True ($r.result -eq 'DRYRUN' -and $r.reason -like '*Deploy would STOP*' -and (Get-TestHead $et) -eq $before) 'DryRun reports the unrouted task as a warning'
+    $et.Config.routingExempt = @('T1')
+    $script:TaskInfoOverride = @([pscustomobject]@{ name = 'T1'; visible = $true; state = 'Ready'; nextRunUtc = (Get-Date).ToUniversalTime().AddSeconds(30); actionText = $direct })
+    $r = Invoke-DeployGate -Config $et.Config -GateMode 'Deploy'
+    Assert-True ($r.result -eq 'SKIP' -and $r.reason -like '*about to start*' -and (Get-TestHead $et) -eq $before) 'exempt (unrouted) task due within startGuardSeconds => SKIP'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $et.Gate 'deploying.flag')) -and -not (Test-Path -LiteralPath (Join-Path $et.Gate 'inflight.json'))) 'imminent-start SKIP leaves no flag and no inflight marker'
+    $script:TaskInfoOverride = @([pscustomobject]@{ name = 'T1'; visible = $true; state = 'Disabled'; nextRunUtc = (Get-Date).ToUniversalTime().AddSeconds(30); actionText = $direct })
+    $r = Invoke-DeployGate -Config $et.Config -GateMode 'Deploy'
+    Assert-True ($r.result -eq 'OK' -and (Get-TestHead $et) -eq $sha) 'a disabled task neither blocks nor needs routing'
+    $et.Config.routingExempt = @()
+    $launcherCmd = 'powershell.exe -File "' + (Join-Path $et.Gate 'run-repo-task.ps1') + '" -Script "tools/reader.ps1"'
+    $script:TaskInfoOverride = @([pscustomobject]@{ name = 'T1'; visible = $true; state = 'Ready'; nextRunUtc = $null; actionText = $launcherCmd })
+    $before = Get-TestHead $et
+    Invoke-TestGit $et.Seed @('fetch', '-q', 'origin') | Out-Null
+    Invoke-TestGit $et.Seed @('checkout', '-q', 'main') | Out-Null
+    Invoke-TestGit $et.Seed @('rm', '-q', 'tools/reader.ps1') | Out-Null
+    Invoke-TestGit $et.Seed @('commit', '-q', '-m', 'remove a script a task runs') | Out-Null
+    $del = Invoke-TestGit $et.Seed @('rev-parse', 'HEAD')
+    Invoke-TestGit $et.Seed @('push', '-q', 'origin', 'main', ($del + ':refs/heads/windows-production')) | Out-Null
+    $script:Approved[$del] = [pscustomobject]@{ kind = 'ozk-windows-release'; sha = $del; approver = 'owner'; runId = '9'; writeScriptsApproved = $false; writerBlobs = [pscustomobject]@{} }
+    $r = Invoke-DeployGate -Config $et.Config -GateMode 'Deploy'
+    Assert-True ($r.result -eq 'STOP' -and $r.reason -like '*removes scripts that scheduled tasks run*T1: tools/reader.ps1*' -and (Get-TestHead $et) -eq $before) 'release deleting a script a task runs => STOP'
+    $ew = New-InitializedEnv
+    $sha = Publish-TestRelease $ew @{ 'docs/w.md' = "w`n" } -Approve
+    $script:TaskInfoOverride = @([pscustomobject]@{ name = 'T1'; visible = $true; state = 'Ready'; nextRunUtc = $null; actionText = ('powershell.exe -File "' + (Join-Path $ew.Gate 'run-repo-task.ps1') + '" -Script "tools/watch-customer-invoices.ps1"') })
+    $r = Invoke-DeployGate -Config $ew.Config -GateMode 'Deploy'
+    Assert-True ($r.result -eq 'OK' -and @($r.warnings | Where-Object { $_ -like '*pre-existing*watch-customer-invoices*' }).Count -eq 1) 'task already pointing at a missing script (Invoice Watcher case) => deploy proceeds with a recorded warning'
+    $script:TaskInfoOverride = $null
+
+    Write-Host '== Concurrency'
+    $ec = New-InitializedEnv
+    $before = Get-TestHead $ec
+    [void](Publish-TestRelease $ec @{ 'tools/reader.ps1' = "'concurrent'`n" } -Approve)
+    $cfgFile = Join-Path $ec.Base 'gate-config.json'
+    [System.IO.File]::WriteAllText($cfgFile, ($ec.Config | ConvertTo-Json -Depth 10))
+    $held = Enter-GateLock (Get-GatePaths $ec.Config)
+    Assert-True ($null -ne $held) 'first gate instance takes the exclusive lock'
+    $second = Enter-GateLock (Get-GatePaths $ec.Config)
+    Assert-True ($null -eq $second) 'a second instance in the same process cannot take the lock'
+    $psExe = (Get-Process -Id $PID).Path
+    # في 5.1 يصير stderr العملية الفرعية خطأً منهياً مع Stop — الحكم بالمخرجات ورمز الخروج.
+    $oldPref = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try {
+        $out = & $psExe -NoProfile -ExecutionPolicy Bypass -File $gateScript -Mode Deploy -ConfigPath $cfgFile 2>&1 | ForEach-Object { "$_" }
+        $code = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $oldPref }
+    Assert-True ((($out -join ' ') -like '*already running*') -and $code -eq 0 -and (Get-TestHead $ec) -eq $before) 'a concurrent gate process exits without touching the repository'
+    $held.Close()
+    Write-TestFile (Join-Path $ec.Repo '.git/index.lock') ''
+    $r = Invoke-DeployGate -Config $ec.Config -GateMode 'Deploy'
+    Assert-True ($r.result -eq 'SKIP' -and $r.reason -like '*git operation in progress*index.lock*' -and (Get-TestHead $ec) -eq $before) 'another git operation (index.lock) => SKIP before switching'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $ec.Gate 'deploying.flag'))) 'flag cleared after the git-operation SKIP'
+    Remove-Item -LiteralPath (Join-Path $ec.Repo '.git/index.lock') -Force
+
+    Write-Host '== Backup, SHA256 and post-deploy verification'
+    $eh = New-InitializedEnv
+    $oldHash = (Get-FileHash -LiteralPath (Join-Path $eh.Repo 'tools/reader.ps1') -Algorithm SHA256).Hash.ToLowerInvariant()
+    $sha = Publish-TestRelease $eh @{ 'tools/reader.ps1' = "'hashed v2'`n"; 'tools/new-tool.ps1' = "'new'`n" } -Approve
+    $r = Invoke-DeployGate -Config $eh.Config -GateMode 'Deploy'
+    $man = [System.IO.File]::ReadAllText((Join-Path $r.backup_dir 'manifest.json')) | ConvertFrom-Json
+    $rd = @($man.files | Where-Object { $_.path -eq 'tools/reader.ps1' })[0]
+    $nt = @($man.files | Where-Object { $_.path -eq 'tools/new-tool.ps1' })[0]
+    $newHash = (Get-FileHash -LiteralPath (Join-Path $eh.Repo 'tools/reader.ps1') -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-True ($r.result -eq 'OK' -and $r.post_verify -eq 'ok') 'deploy verified every changed file against the target blob'
+    Assert-True ($rd.existed -and $rd.preSha256 -eq $oldHash -and $rd.postSha256 -eq $newHash -and (Get-FileHash -LiteralPath (Join-Path (Join-Path $r.backup_dir 'files') (Join-Path 'tools' 'reader.ps1')) -Algorithm SHA256).Hash.ToLowerInvariant() -eq $oldHash) 'backup holds the old file with SHA256 before and after'
+    Assert-True (-not $nt.existed -and $null -ne $nt.postSha256) 'added file recorded as new, with its post-deploy SHA256'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $eh.Gate 'inflight.json'))) 'inflight marker removed after a verified deploy'
+    $bad = @(Test-DeployedFiles $eh.Config ([pscustomobject]@{ files = @([pscustomobject]@{ path = 'tools/reader.ps1'; targetBlob = '0000000000000000000000000000000000000000'; postSha256 = $null }) }))
+    Assert-True ($bad.Count -eq 1 -and $bad[0] -like '*content differs*') 'Test-DeployedFiles flags content that differs from the target blob'
+
+    $ebk = New-InitializedEnv
+    $before = Get-TestHead $ebk
+    [void](Publish-TestRelease $ebk @{ 'tools/reader.ps1' = "'no backup'`n" } -Approve)
+    Write-TestFile (Join-Path $ebk.Gate 'backups') 'not a directory'
+    $r = Invoke-DeployGate -Config $ebk.Config -GateMode 'Deploy'
+    Assert-True ($r.result -eq 'FAIL' -and $r.reason -like 'backup failed before any change*' -and (Get-TestHead $ebk) -eq $before -and -not (Test-Path -LiteralPath (Join-Path $ebk.Gate 'deploying.flag'))) 'backup failure => FAIL with no change and no flag'
+
+    Write-Host '== Interrupted switch => Recover'
+    $ei = New-InitializedEnv
+    $before = Get-TestHead $ei
+    $preReader = (Get-FileHash -LiteralPath (Join-Path $ei.Repo 'tools/reader.ps1') -Algorithm SHA256).Hash.ToLowerInvariant()
+    $sha = Publish-TestRelease $ei @{ 'tools/reader.ps1' = "'interrupted v2'`n"; 'tools/added.ps1' = "'added'`n" } -Approve
+    $script:MergeOverride = {
+        param($Config, $Target)
+        # انقطاع في منتصف التبديل: ملف كُتب بنسخة الهدف، وملف جديد ظهر، وHEAD لم يتقدّم.
+        [System.IO.File]::WriteAllText((Join-Path $Config.repoPath 'tools/reader.ps1'), "'interrupted v2'`n")
+        [System.IO.File]::WriteAllText((Join-Path $Config.repoPath 'tools/added.ps1'), "'added'`n")
+        return [pscustomobject]@{ Code = 128; Out = @('error: unable to unlink old file'); Text = 'error: unable to unlink old file' }
+    }
+    $r = Invoke-DeployGate -Config $ei.Config -GateMode 'Deploy'
+    $script:MergeOverride = $null
+    Assert-True ($r.result -eq 'FAIL' -and $r.reason -like '*INCONSISTENT*Recover*' -and (Get-TestHead $ei) -eq $before) 'interrupted switch => FAIL INCONSISTENT, HEAD unchanged'
+    Assert-True ((Test-Path -LiteralPath (Join-Path $ei.Gate 'deploying.flag')) -and (Test-Path -LiteralPath (Join-Path $ei.Gate 'inflight.json'))) 'flag and inflight marker kept (writers stay paused)'
+    $r = Invoke-DeployGate -Config $ei.Config -GateMode 'Deploy'
+    Assert-True ($r.result -eq 'STOP' -and $r.reason -like '*interrupted*Recover*') 'no new deploy on top of an interrupted switch'
+    $r = Invoke-DeployGate -Config $ei.Config -GateMode 'Recover'
+    $postReader = (Get-FileHash -LiteralPath (Join-Path $ei.Repo 'tools/reader.ps1') -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-True ($r.result -eq 'RECOVERED' -and $postReader -eq $preReader -and -not (Test-Path -LiteralPath (Join-Path $ei.Repo 'tools/added.ps1'))) 'Recover restores the old file (SHA256 verified) and removes the half-written new file'
+    Assert-True ((Test-Path -LiteralPath (Join-Path (Join-Path $r.backup_dir 'quarantine') (Join-Path 'tools' 'added.ps1'))) -and @(Get-DirtyEntries $ei.Config).Count -eq 0) 'the half-written file is quarantined, not deleted, and the tree is clean'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $ei.Gate 'deploying.flag')) -and -not (Test-Path -LiteralPath (Join-Path $ei.Gate 'inflight.json'))) 'Recover clears the flag and the inflight marker'
+    $r = Invoke-DeployGate -Config $ei.Config -GateMode 'Deploy'
+    Assert-True ($r.result -eq 'OK' -and (Get-TestHead $ei) -eq $sha) 'the same release deploys cleanly after recovery'
+
+    Write-Host '== Verification failure after the switch'
+    $ev = New-InitializedEnv
+    $before = Get-TestHead $ev
+    [void](Publish-TestRelease $ev @{ 'tools/reader.ps1' = "'verified v2'`n" } -Approve)
+    $script:MergeOverride = {
+        param($Config, $Target)
+        $res = Invoke-GateGit $Config @('merge', '--ff-only', $Target)
+        [System.IO.File]::WriteAllText((Join-Path $Config.repoPath 'tools/reader.ps1'), "'tampered during switch'`n")
+        return $res
+    }
+    $r = Invoke-DeployGate -Config $ev.Config -GateMode 'Deploy'
+    $script:MergeOverride = $null
+    Assert-True ($r.result -eq 'FAIL' -and $r.reason -like '*verification failed*flag kept*') 'content differing from the target after the switch => FAIL'
+    Assert-True ((Get-TestState $ev).lastDeployedSha -eq $before -and (Test-Path -LiteralPath (Join-Path $ev.Gate 'deploying.flag'))) 'state not advanced and writers stay paused after a failed verification'
+    $r = Invoke-DeployGate -Config $ev.Config -GateMode 'Recover'
+    Assert-True ($r.result -eq 'STOP' -and $r.reason -like '*Manual review*') 'Recover refuses when HEAD already moved (manual review, no guessing)'
 
     Write-Host '== Safety invariants in the source'
     $src = [System.IO.File]::ReadAllText($gateScript)
