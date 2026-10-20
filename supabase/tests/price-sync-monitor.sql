@@ -1,0 +1,456 @@
+-- اختبار proposed/17-price-sync-monitor.sql على PostgreSQL محلي مؤقت.
+-- يشغّله scripts/check-price-sync-monitor.mjs: قاعدة مستقلة تُحذف بعده، والملفات تُمرَّر عبر stdin.
+-- بيئة مصطنعة: أدوار Supabase، وauth.uid()/auth.jwt()، وis_staff()، وproposed/16، ونسخ مطابقة لجسم
+-- الإنتاج من public.notify_telegram وprivate.notify_telegram_dispatch وtelegram_outbox، وجدول
+-- private.project_task_monitors مصغّر. لا شبكة ولا تيليغرام حقيقي: الرسائل تبقى في telegram_outbox.
+-- الساعة مثبتة: T0 = 2026-10-19 10:00 UTC (13:00 دمشق).
+\set ON_ERROR_STOP 1
+\set QUIET 1
+
+\i :env
+
+-- الحزم 12 و13 و15 مطبَّقة بالترتيب (بصمات أجسامها الحقيقية من ملفاتها)، ثم يُعاد جسم الإرسال
+-- الإنتاجي المبسّط كي تعمل رسائل الاختبار؛ كل تطبيق لـ17 يعيد جسم 15 مؤقتاً داخل معاملته (يتولاه المشغّل).
+\i :packages
+
+-- ── الهجرة ──────────────────────────────────────────────────────────────────────────────────
+\i :migration
+\i :migration
+
+-- ── أدوات الاختبار ───────────────────────────────────────────────────────────────────────────
+create or replace function pg_temp.expect(p_name text, p_actual text, p_expected text) returns void language plpgsql as $$
+begin
+  if p_actual is distinct from p_expected then
+    raise exception 'TEST FAIL: % — expected %, got %', p_name, p_expected, p_actual;
+  end if;
+  raise notice 'PASS %', p_name;
+end $$;
+create or replace function pg_temp.expect_like(p_name text, p_actual text, p_pattern text) returns void language plpgsql as $$
+begin
+  if p_actual is null or p_actual not like p_pattern then
+    raise exception 'TEST FAIL: % — expected like %, got %', p_name, p_pattern, p_actual;
+  end if;
+  raise notice 'PASS %', p_name;
+end $$;
+create or replace function pg_temp.t(p_minutes numeric) returns timestamptz language sql immutable as $$
+  select timestamptz '2026-10-19 10:00:00+00' + make_interval(secs => p_minutes * 60) $$;
+create or replace function pg_temp.reset() returns void language plpgsql as $$
+begin
+  delete from public.price_sync_heartbeats;
+  delete from private.price_sync_incidents;
+  delete from private.price_sync_monitor_state;
+  delete from public.telegram_outbox;
+end $$;
+-- نبضة محاولة (received_at = ساعة الخادم المصطنعة).
+create or replace function pg_temp.attempt(p_min numeric, p_outcome text) returns void language plpgsql as $$
+begin
+  insert into public.price_sync_heartbeats (received_at, writer_id, kind, host, occurred_at, outcome, summary, last_success_at, last_ameen_contact_at)
+  values (pg_temp.t(p_min), '9724dbe4-ecb0-49f7-a6b4-12f7f73c68f3', 'attempt', 'OZK2026', pg_temp.t(p_min), p_outcome,
+    jsonb_build_object('schema','price-sync-heartbeat/v1','kind','attempt','host','OZK2026','outcome',p_outcome,
+      'attempt_finished_at', pg_temp.t(p_min)::text,
+      'applied_wholesale', 321, 'applied_retail', 317, 'conflict_count', 0, 'not_in_ameen', 0,
+      'verify', jsonb_build_object('mismatches', 0, 'missing', 0)),
+    case when p_outcome in ('applied','no_changes') then pg_temp.t(p_min) end, pg_temp.t(p_min));
+end $$;
+create or replace function pg_temp.partial(p_min numeric, p_conflicts integer default 2, p_not_in integer default 1) returns void language plpgsql as $$
+begin
+  insert into public.price_sync_heartbeats (received_at, writer_id, kind, host, occurred_at, outcome, summary, last_success_at, last_ameen_contact_at)
+  values (pg_temp.t(p_min), '9724dbe4-ecb0-49f7-a6b4-12f7f73c68f3', 'attempt', 'OZK2026', pg_temp.t(p_min), 'applied_with_conflicts',
+    jsonb_build_object('schema','price-sync-heartbeat/v1','kind','attempt','host','OZK2026','outcome','applied_with_conflicts',
+      'attempt_finished_at', pg_temp.t(p_min)::text,
+      'applied_wholesale', 318, 'applied_retail', 315, 'conflict_count', p_conflicts, 'not_in_ameen', p_not_in,
+      'verify', jsonb_build_object('mismatches', 0, 'missing', 0)),
+    null, pg_temp.t(p_min));
+end $$;
+create or replace function pg_temp.windows_alert(p_min numeric, p_key text) returns void language sql as $$
+  insert into public.telegram_outbox (event_type, message, dedupe_key, created_at)
+  values ('sync_failure', '🚨 تنبيه Windows', p_key, pg_temp.t(p_min)) $$;
+create or replace function pg_temp.probe(p_min numeric, p_enabled boolean, p_exists boolean default true) returns void language plpgsql as $$
+begin
+  insert into public.price_sync_heartbeats (received_at, writer_id, kind, host, occurred_at, outcome, summary)
+  values (pg_temp.t(p_min), '9724dbe4-ecb0-49f7-a6b4-12f7f73c68f3', 'task_probe', 'OZK2026', pg_temp.t(p_min), null,
+    jsonb_build_object('schema','price-sync-heartbeat/v1','kind','task_probe','host','OZK2026','probed_at', pg_temp.t(p_min)::text,
+      'task', jsonb_build_object('exists', p_exists, 'enabled', p_enabled, 'state', case when p_enabled then 'Ready' else 'Disabled' end)));
+end $$;
+create or replace function pg_temp.tick(p_min numeric) returns text language sql as $$
+  select private.price_sync_monitor_tick(pg_temp.t(p_min)) $$;
+create or replace function pg_temp.outbox(p_event text) returns text language sql as $$
+  select count(*)::text from public.telegram_outbox where event_type = p_event $$;
+create or replace function pg_temp.state(p_min numeric) returns text language sql as $$
+  select state from private.price_sync_monitor_assess(pg_temp.t(p_min)) $$;
+
+\set QUIET 0
+
+-- ── ١) منع التكرار مع المراقب القديم، والتطبيق المزدوج آمن ────────────────────────────────────
+do $$ begin
+  perform pg_temp.expect('old price-sync monitor disabled', (select enabled::text from private.project_task_monitors where task_key = 'price-sync'), 'false');
+  perform pg_temp.expect('other monitors untouched', (select enabled::text from private.project_task_monitors where task_key = 'ameen-main'), 'true');
+  perform pg_temp.expect('config row single', (select count(*)::text from private.price_sync_monitor_config), '1');
+end $$;
+
+-- ── ٢) التصنيف ──────────────────────────────────────────────────────────────────────────────
+do $$ begin
+  perform pg_temp.reset();
+  perform pg_temp.expect('no attempts = UNKNOWN (absence is not success)', pg_temp.state(0), 'UNKNOWN');
+  perform pg_temp.attempt(0, 'applied');
+  perform pg_temp.expect('fresh proven success = HEALTHY', pg_temp.state(5), 'HEALTHY');
+  perform pg_temp.expect('success at exactly 15 min = HEALTHY', pg_temp.state(15), 'HEALTHY');
+  perform pg_temp.expect('old success (16 min) with no attempts = STALE', pg_temp.state(16), 'STALE');
+  perform pg_temp.attempt(14, 'ameen_unreachable');
+  perform pg_temp.expect('single failure after recent success = HEALTHY (transient)', pg_temp.state(14.5), 'HEALTHY');
+  perform pg_temp.expect('no success > 15 min but recent attempts = FAILED', pg_temp.state(16), 'FAILED');
+  perform pg_temp.attempt(15.2, 'apply_failed');
+  perform pg_temp.expect('two consecutive failures = FAILED early', pg_temp.state(15.3), 'FAILED');
+  perform pg_temp.probe(16, false);
+  perform pg_temp.expect('fresh disabled probe = DISABLED', pg_temp.state(16.5), 'DISABLED');
+  perform pg_temp.expect('disabled probe older than 45 min ignored', pg_temp.state(70), 'STALE');
+  -- طوابع العميل لا تُحتسب: نجاح وصل قديماً (received_at) مهما كان occurred_at.
+  perform pg_temp.reset();
+  insert into public.price_sync_heartbeats (received_at, writer_id, kind, host, occurred_at, outcome, summary)
+  values (pg_temp.t(-40), gen_random_uuid(), 'attempt', 'OZK2026', pg_temp.t(0), 'applied', '{}'::jsonb);
+  perform pg_temp.expect('server received_at decides, not client occurred_at', pg_temp.state(0), 'STALE');
+end $$;
+
+-- ── ٣) أول تشغيل: خط أساس صامت ─────────────────────────────────────────────────────────────
+do $$ begin
+  perform pg_temp.reset();
+  perform pg_temp.attempt(-5, 'applied'); perform pg_temp.attempt(0, 'applied');
+  perform pg_temp.expect('first run healthy = baseline', pg_temp.tick(1), 'baseline');
+  perform pg_temp.expect('baseline sends nothing', (select count(*)::text from public.telegram_outbox), '0');
+  perform pg_temp.expect('second run healthy', pg_temp.tick(2), 'healthy');
+  perform pg_temp.expect('no recovery without incident', pg_temp.outbox('price_sync_recovered'), '0');
+end $$;
+
+-- ── ٤) انقطاع كامل (الجهاز مطفأ): تنبيه واحد بعد 15 د، لا تكرار، تعافٍ واحد ────────────────────
+do $$
+declare i int; msg text;
+begin
+  -- متابعة من ٣: آخر نجاح عند 0.
+  perform pg_temp.expect('at 10 min still healthy', pg_temp.tick(10), 'healthy');
+  perform pg_temp.expect('at 15 min still healthy (threshold inclusive)', pg_temp.tick(15), 'healthy');
+  perform pg_temp.expect('at 16 min outage alert', pg_temp.tick(16), 'alert_sent');
+  perform pg_temp.expect('exactly one outage alert', pg_temp.outbox('price_sync_outage'), '1');
+  for i in 17..120 loop perform pg_temp.tick(i); end loop;
+  perform pg_temp.expect('no repeat across 104 more minutes', pg_temp.outbox('price_sync_outage'), '1');
+  select message into msg from public.telegram_outbox where event_type = 'price_sync_outage';
+  perform pg_temp.expect_like('alert title', msg, '🔴 OZK | توقف مزامنة الأسعار%');
+  perform pg_temp.expect_like('alert last success in Damascus time', msg, '%آخر مزامنة ناجحة: 13:00%');
+  perform pg_temp.expect_like('alert outage duration', msg, '%مدة الانقطاع: 16 دقيقة%');
+  perform pg_temp.expect_like('alert state', msg, '%الحالة: STALE%');
+  perform pg_temp.expect_like('alert monitor and device', msg, '%المراقبة: Supabase%الجهاز: OZK2026');
+  perform pg_temp.expect('alert has no HTML', (msg ~ '<[a-zA-Z/]')::text, 'false');
+  perform pg_temp.expect('alert dedupe key per incident', ((select dedupe_key from public.telegram_outbox where event_type = 'price_sync_outage') ~ '^price-sync-outage:[0-9a-f-]{36}:open$')::text, 'true');
+  -- نبضة فاشلة متأخرة لا تعلن تعافياً.
+  perform pg_temp.attempt(121, 'pull_failed');
+  perform pg_temp.expect('late failed heartbeat keeps incident', pg_temp.tick(122), 'incident_ongoing');
+  -- نجاح مثبت حديث ⇒ تعافٍ واحد.
+  perform pg_temp.attempt(125, 'applied');
+  perform pg_temp.expect('proven fresh success = recovery', pg_temp.tick(126), 'recovery_sent');
+  perform pg_temp.expect('exactly one recovery', pg_temp.outbox('price_sync_recovered'), '1');
+  for i in 127..140 loop perform pg_temp.tick(i); end loop;
+  perform pg_temp.expect('no second recovery', pg_temp.outbox('price_sync_recovered'), '1');
+  select message into msg from public.telegram_outbox where event_type = 'price_sync_recovered';
+  perform pg_temp.expect_like('recovery text', msg, '🟢 OZK | عودة مزامنة الأسعار%عادت المزامنة للعمل بنجاح.%آخر نجاح: 15:05%جملة: 321%مفرق: 317%التعارضات: 0%انتهت الحادثة.');
+  perform pg_temp.expect('incident closed', (select count(*)::text from private.price_sync_incidents where closed_at is null), '0');
+end $$;
+
+-- ── ٥) فشل عابر لا يفتح حادثة ───────────────────────────────────────────────────────────────
+do $$ begin
+  perform pg_temp.reset();
+  perform pg_temp.attempt(0, 'applied'); perform pg_temp.tick(0.5);
+  perform pg_temp.attempt(5, 'ameen_unreachable');
+  perform pg_temp.expect('one failure: no incident', pg_temp.tick(5.5), 'healthy');
+  perform pg_temp.attempt(10, 'applied');
+  perform pg_temp.expect('recovered before threshold: still no incident', pg_temp.tick(10.5), 'healthy');
+  perform pg_temp.expect('no messages for transient failure', (select count(*)::text from public.telegram_outbox), '0');
+end $$;
+
+-- ── ٦) فشل متكرر: اكتشاف مبكر قبل 15 د ───────────────────────────────────────────────────────
+do $$
+declare msg text;
+begin
+  perform pg_temp.reset();
+  perform pg_temp.attempt(0, 'applied'); perform pg_temp.tick(0.5);
+  perform pg_temp.attempt(5, 'ameen_unreachable'); perform pg_temp.tick(5.5);
+  perform pg_temp.attempt(10, 'ameen_unreachable');
+  perform pg_temp.expect('second consecutive failure alerts early', pg_temp.tick(10.5), 'alert_sent');
+  select message into msg from public.telegram_outbox where event_type = 'price_sync_outage';
+  perform pg_temp.expect_like('failed title and reason', msg, '🔴 OZK | فشل مزامنة الأسعار%الحالة: FAILED%السبب: تعذّر الاتصال بقاعدة الأمين%');
+  -- نجاح ثم فشل فوري: لا تعافٍ لأن آخر محاولة ليست ناجحة… ثم نجاح ⇒ تعافٍ واحد.
+  perform pg_temp.attempt(15, 'applied');
+  perform pg_temp.attempt(20, 'pull_failed');
+  perform pg_temp.expect('success followed by failure is not proof of recovery', pg_temp.tick(20.5), 'incident_waiting_proof');
+  perform pg_temp.attempt(25, 'no_changes');
+  perform pg_temp.expect('no_changes is proven success: recovery', pg_temp.tick(25.5), 'recovery_sent');
+  perform pg_temp.expect('one alert one recovery', (select string_agg(event_type, ',' order by id) from public.telegram_outbox), 'price_sync_outage,price_sync_recovered');
+end $$;
+
+-- ── ٧) المهمة معطّلة: اكتشاف فوري، حادثة واحدة رغم تغيّر الحالة الفرعية ─────────────────────────
+do $$ begin
+  perform pg_temp.reset();
+  perform pg_temp.attempt(0, 'applied'); perform pg_temp.tick(0.5);
+  perform pg_temp.probe(2, false);
+  perform pg_temp.expect('disabled probe alerts immediately', pg_temp.tick(2.5), 'alert_sent');
+  perform pg_temp.expect_like('disabled message', (select message from public.telegram_outbox), '🔴 OZK | مهمة مزامنة الأسعار معطّلة%الحالة: DISABLED%');
+  perform pg_temp.tick(30); perform pg_temp.tick(60);
+  perform pg_temp.expect('DISABLED then STALE: still one alert', pg_temp.outbox('price_sync_outage'), '1');
+  perform pg_temp.expect('incident tracks current state', (select current_state from private.price_sync_incidents where closed_at is null), 'STALE');
+  perform pg_temp.probe(61, true); perform pg_temp.attempt(62, 'applied');
+  perform pg_temp.expect('re-enabled and synced: recovery', pg_temp.tick(62.5), 'recovery_sent');
+end $$;
+
+-- ── ٨) خط أساس على عطل قائم: صامت ثم تصعيد واحد بعد 30 د؛ وتعافٍ صامت إن لم يُنبَّه ─────────────
+do $$ begin
+  perform pg_temp.reset();
+  perform pg_temp.attempt(-120, 'applied');
+  perform pg_temp.expect('historical outage at first run = silent', pg_temp.tick(0), 'baseline_open_silent');
+  perform pg_temp.expect('silent baseline sends nothing', (select count(*)::text from public.telegram_outbox), '0');
+  perform pg_temp.expect('before escalation window', pg_temp.tick(29), 'incident_ongoing');
+  perform pg_temp.expect('escalates once after 30 min', pg_temp.tick(30), 'baseline_escalated');
+  perform pg_temp.tick(31); perform pg_temp.tick(90);
+  perform pg_temp.expect('escalation not repeated', pg_temp.outbox('price_sync_outage'), '1');
+
+  perform pg_temp.reset();
+  perform pg_temp.attempt(-120, 'applied');
+  perform pg_temp.tick(0);
+  perform pg_temp.attempt(10, 'applied');
+  perform pg_temp.expect('silent incident recovers silently', pg_temp.tick(10.5), 'closed_silent');
+  perform pg_temp.expect('no recovery for an incident never announced', (select count(*)::text from public.telegram_outbox), '0');
+
+  perform pg_temp.reset();
+  perform pg_temp.expect('empty table at first run = silent', pg_temp.tick(0), 'baseline_open_silent');
+  perform pg_temp.expect('empty table escalates as UNKNOWN', pg_temp.tick(30), 'baseline_escalated');
+  perform pg_temp.expect_like('unknown message', (select message from public.telegram_outbox), '%الحالة: UNKNOWN%لا توجد أي نبضة مزامنة مسجّلة%');
+end $$;
+
+-- ── ٩) فشل إرسال تيليغرام: لا ضياع ولا حالة مُعلّمة كذباً ──────────────────────────────────────
+do $$
+declare v_state text;
+begin
+  perform pg_temp.reset();
+  perform pg_temp.attempt(0, 'applied'); perform pg_temp.tick(0.5);
+  alter table public.telegram_outbox add constraint outbox_down check (false) not valid;
+  begin
+    perform pg_temp.tick(16);
+    v_state := 'no error';
+  exception when others then
+    v_state := sqlstate;
+  end;
+  alter table public.telegram_outbox drop constraint outbox_down;
+  perform pg_temp.expect('outbox failure aborts the tick', v_state, '23514');
+  perform pg_temp.expect('no incident recorded when alert could not be queued', (select count(*)::text from private.price_sync_incidents), '0');
+  perform pg_temp.expect('next tick retries and alerts', pg_temp.tick(17), 'alert_sent');
+  perform pg_temp.expect('exactly one alert after retry', pg_temp.outbox('price_sync_outage'), '1');
+end $$;
+
+
+-- ── ١٢أ) إعادة تفعيل المهمة: التعافي من أول نجاح مثبت حديث، ودليل التعطيل الأحدث يغلب ──────────
+do $$ begin
+  perform pg_temp.reset();
+  perform pg_temp.attempt(0, 'applied'); perform pg_temp.tick(0.5);
+  perform pg_temp.probe(2, false);
+  perform pg_temp.expect('disabled probe alerts', pg_temp.tick(2.5), 'alert_sent');
+  -- أُعيد تفعيل المهمة فاشتغلت ونجحت، ولم يصل فحص جديد بعد (الفحص السليم كل 30 د).
+  perform pg_temp.attempt(10, 'applied');
+  perform pg_temp.expect('newer attempt supersedes the disabled probe', pg_temp.state(10.5), 'HEALTHY');
+  perform pg_temp.expect('recovery on first proven success, not after probe expiry', pg_temp.tick(10.5), 'recovery_sent');
+  -- فحص «معطّلة» أحدث من آخر نجاح يغلب.
+  perform pg_temp.probe(12, false);
+  perform pg_temp.expect('newer disabled probe wins over older success', pg_temp.state(12.5), 'DISABLED');
+  perform pg_temp.expect('new disable = new incident alert', pg_temp.tick(12.5), 'alert_sent');
+  perform pg_temp.expect('two DISABLED incidents, two alerts', pg_temp.outbox('price_sync_outage'), '2');
+  -- فشل وصل بعد الفحص لا يُسقط دليل التعطيل ولا يحوّله HEALTHY.
+  perform pg_temp.attempt(13, 'pull_failed');
+  perform pg_temp.expect('failed attempt after disabled probe keeps DISABLED', pg_temp.state(13.5), 'DISABLED');
+  perform pg_temp.expect('incident stays open after failed attempt', pg_temp.tick(13.5), 'incident_ongoing');
+end $$;
+
+-- ── ١٢ب) المشكلة الجزئية (تعارض/أصناف غير موجودة) منفصلة عن الانقطاع الكلي ──────────────────────
+do $$
+declare i int; msg text;
+begin
+  perform pg_temp.reset();
+  perform pg_temp.attempt(0, 'applied'); perform pg_temp.tick(0.5);
+  perform pg_temp.partial(5);
+  perform pg_temp.expect('one partial attempt is PARTIAL, never HEALTHY', pg_temp.state(5.5), 'PARTIAL');
+  perform pg_temp.expect('one partial attempt: pending, no alert', pg_temp.tick(5.5), 'partial_pending');
+  perform pg_temp.partial(10);
+  perform pg_temp.expect('two partial attempts: partial alert', pg_temp.tick(10.5), 'partial_alert_sent');
+  select message into msg from public.telegram_outbox where event_type = 'price_sync_partial';
+  perform pg_temp.expect_like('partial message', msg, '🟠 OZK | تعارض في مزامنة الأسعار%المزامنة تعمل، لكن بعض الأصناف لم تُطبَّق.%طُبّق: جملة 318 — مفرق 315%التعارضات: 2%غير موجودة في الأمين: 1%الحالة: PARTIAL%');
+  perform pg_temp.expect('partial key namespace', ((select dedupe_key from public.telegram_outbox where event_type = 'price_sync_partial') ~ '^price-sync-partial:[0-9a-f-]{36}:open$')::text, 'true');
+  -- تعارض مستمر ساعة: المزامنة حيّة فلا انقطاع، ولا تكرار.
+  for i in 3..12 loop perform pg_temp.partial(i * 5); perform pg_temp.tick(i * 5 + 0.5); end loop;
+  perform pg_temp.expect('persistent partial is not an outage', pg_temp.state(60.5), 'PARTIAL');
+  perform pg_temp.expect('no repeat partial alerts', pg_temp.outbox('price_sync_partial'), '1');
+  perform pg_temp.expect('no outage alert for partial problem', pg_temp.outbox('price_sync_outage'), '0');
+  perform pg_temp.attempt(65, 'applied');
+  perform pg_temp.expect('full proven success clears partial', pg_temp.tick(65.5), 'recovery_sent');
+  select message into msg from public.telegram_outbox where event_type = 'price_sync_recovered';
+  perform pg_temp.expect_like('partial recovery message', msg, '🟢 OZK | زالت تعارضات مزامنة الأسعار%طُبّقت كل الأسعار بنجاح وبلا تعارض.%التعارضات: 0%انتهت الحادثة.');
+  perform pg_temp.expect('partial recovery key', ((select dedupe_key from public.telegram_outbox where event_type = 'price_sync_recovered') ~ '^price-sync-partial:[0-9a-f-]{36}:recovered$')::text, 'true');
+
+  -- تعارض عابر واحد ثم نجاح: لا حادثة.
+  perform pg_temp.reset();
+  perform pg_temp.attempt(0, 'applied'); perform pg_temp.tick(0.5);
+  perform pg_temp.partial(5); perform pg_temp.tick(5.5);
+  perform pg_temp.attempt(10, 'applied');
+  perform pg_temp.expect('transient partial then success: healthy', pg_temp.tick(10.5), 'healthy');
+  perform pg_temp.expect('transient partial: no messages', (select count(*)::text from public.telegram_outbox), '0');
+  -- فشل عابر بعد تعارض لا يُعلن HEALTHY.
+  perform pg_temp.partial(15); perform pg_temp.attempt(20, 'pull_failed');
+  perform pg_temp.expect('failure after partial stays PARTIAL', pg_temp.state(20.5), 'PARTIAL');
+end $$;
+
+-- ── ١٢ج) انتقالات: انقطاع ← جزئي برسالة واحدة، وجزئي ← انقطاع ─────────────────────────────────
+do $$
+declare msg text;
+begin
+  perform pg_temp.reset();
+  perform pg_temp.attempt(0, 'applied'); perform pg_temp.tick(0.5);
+  perform pg_temp.expect('outage alert', pg_temp.tick(16), 'alert_sent');
+  perform pg_temp.partial(20);
+  perform pg_temp.expect('one partial after outage: wait for confirmation', pg_temp.tick(20.5), 'incident_waiting_proof');
+  perform pg_temp.partial(25);
+  perform pg_temp.expect('confirmed partial after outage: one combined message', pg_temp.tick(25.5), 'outage_to_partial');
+  select message into msg from public.telegram_outbox where event_type = 'price_sync_partial';
+  perform pg_temp.expect_like('combined message', msg, '🟠 OZK | عادت مزامنة الأسعار جزئياً%انتهى الانقطاع بعد 9 دقيقة، لكن بعض الأصناف لم تُطبَّق.%');
+  perform pg_temp.expect('outage incident closed as announced', (select (recovery_sent_at is not null)::text from private.price_sync_incidents where kind = 'outage'), 'true');
+  perform pg_temp.expect('no separate outage recovery message', pg_temp.outbox('price_sync_recovered'), '0');
+  perform pg_temp.expect('partial incident open', (select kind from private.price_sync_incidents where closed_at is null), 'partial');
+  -- جزئي ← انقطاع: الجهاز ينطفئ.
+  perform pg_temp.expect('partial then silence: new outage', pg_temp.tick(41), 'partial_to_outage');
+  perform pg_temp.expect('two outage alerts total', pg_temp.outbox('price_sync_outage'), '2');
+  perform pg_temp.expect('partial closed silently', (select (closed_at is not null and recovery_sent_at is null)::text from private.price_sync_incidents where kind = 'partial'), 'true');
+  perform pg_temp.attempt(50, 'applied');
+  perform pg_temp.expect('outage recovery after transitions', pg_temp.tick(50.5), 'recovery_sent');
+  perform pg_temp.expect('message sequence', (select string_agg(event_type, ',' order by id) from public.telegram_outbox), 'price_sync_outage,price_sync_partial,price_sync_outage,price_sync_recovered');
+end $$;
+
+-- ── ١٢د) منع ازدواج Windows/Supabase بلا تعديل Windows ─────────────────────────────────────────
+do $$ begin
+  perform pg_temp.reset();
+  perform pg_temp.attempt(0, 'applied'); perform pg_temp.tick(0.5);
+  perform pg_temp.attempt(5, 'ameen_unreachable'); perform pg_temp.windows_alert(5, 'winfail:apply-to-ameen');
+  perform pg_temp.attempt(10, 'ameen_unreachable');
+  perform pg_temp.expect('FAILED with matching Windows alert is absorbed', pg_temp.tick(10.5), 'alert_absorbed_windows');
+  perform pg_temp.expect('no second open message', pg_temp.outbox('price_sync_outage'), '0');
+  perform pg_temp.expect('incident announced by windows', (select announced_by from private.price_sync_incidents where closed_at is null), 'windows');
+  perform pg_temp.attempt(15, 'applied');
+  perform pg_temp.expect('single recovery still sent', pg_temp.tick(15.5), 'recovery_sent');
+  -- فشل ثانٍ بعد تعافٍ قصير: Windows لا يرسل جديداً (مفتاح ثابت بنافذة 60 د)، وصفّه القديم لا يُعلن الحادثة الجديدة.
+  perform pg_temp.attempt(20, 'ameen_unreachable'); perform pg_temp.attempt(25, 'ameen_unreachable');
+  perform pg_temp.expect('second outage within window is announced by the monitor', pg_temp.tick(25.5), 'alert_sent');
+  perform pg_temp.expect('second outage message really queued', pg_temp.outbox('price_sync_outage'), '1');
+
+  perform pg_temp.reset();
+  perform pg_temp.attempt(0, 'applied'); perform pg_temp.tick(0.5);
+  perform pg_temp.windows_alert(-40, 'winfail:apply-to-ameen');
+  perform pg_temp.attempt(5, 'apply_failed'); perform pg_temp.attempt(10, 'apply_failed');
+  perform pg_temp.expect('Windows alert older than window is not absorbed', pg_temp.tick(10.5), 'alert_sent');
+
+  perform pg_temp.reset();
+  perform pg_temp.attempt(0, 'applied'); perform pg_temp.tick(0.5);
+  perform pg_temp.windows_alert(4, 'price-sync:mismatch:detected:3:1');
+  perform pg_temp.attempt(5, 'verify_mismatch'); perform pg_temp.attempt(10, 'verify_mismatch');
+  perform pg_temp.expect('refined mismatch key (package 13) is absorbed', pg_temp.tick(10.5), 'alert_absorbed_windows');
+
+  perform pg_temp.reset();
+  perform pg_temp.attempt(0, 'applied'); perform pg_temp.tick(0.5);
+  perform pg_temp.windows_alert(5, 'winfail:pull-approved-prices');
+  perform pg_temp.attempt(5, 'ameen_unreachable'); perform pg_temp.attempt(10, 'ameen_unreachable');
+  perform pg_temp.expect('unrelated Windows alert is not absorbed', pg_temp.tick(10.5), 'alert_sent');
+
+  perform pg_temp.reset();
+  perform pg_temp.attempt(0, 'applied'); perform pg_temp.tick(0.5);
+  perform pg_temp.windows_alert(5, 'winfail:pull-approved-prices');
+  perform pg_temp.windows_alert(6, 'winfail:khalil-audit');
+  perform pg_temp.attempt(5, 'apply_failed'); perform pg_temp.attempt(10, 'apply_failed');
+  perform pg_temp.expect('apply_failed absorbs only winfail:apply-to-ameen', pg_temp.tick(10.5), 'alert_sent');
+
+  perform pg_temp.reset();
+  perform pg_temp.attempt(0, 'applied'); perform pg_temp.tick(0.5);
+  perform pg_temp.windows_alert(10, 'winfail:apply-to-ameen');
+  perform pg_temp.expect('STALE (device off) is never absorbed', pg_temp.tick(16), 'alert_sent');
+
+  perform pg_temp.reset();
+  update private.price_sync_monitor_config set absorb_windows_minutes = 0;
+  perform pg_temp.attempt(0, 'applied'); perform pg_temp.tick(0.5);
+  perform pg_temp.attempt(5, 'ameen_unreachable'); perform pg_temp.windows_alert(5, 'winfail:apply-to-ameen');
+  perform pg_temp.attempt(10, 'ameen_unreachable');
+  perform pg_temp.expect('absorption can be switched off', pg_temp.tick(10.5), 'alert_sent');
+  update private.price_sync_monitor_config set absorb_windows_minutes = 30;
+end $$;
+
+-- ── ١٢هـ) خط أساس على مشكلة جزئية قائمة: صامت ثم تصعيد واحد ─────────────────────────────────────
+do $$ begin
+  perform pg_temp.reset();
+  perform pg_temp.partial(-10); perform pg_temp.partial(-5);
+  perform pg_temp.expect('historical partial at first run = silent', pg_temp.tick(0), 'baseline_open_silent');
+  perform pg_temp.expect('baseline incident kind partial', (select kind from private.price_sync_incidents where closed_at is null), 'partial');
+  perform pg_temp.partial(10); perform pg_temp.partial(20); perform pg_temp.partial(28);
+  perform pg_temp.expect('partial baseline before window', pg_temp.tick(29), 'incident_ongoing');
+  perform pg_temp.expect('partial baseline escalates once', pg_temp.tick(30), 'baseline_escalated');
+  perform pg_temp.expect('escalated with partial message', pg_temp.outbox('price_sync_partial'), '1');
+end $$;
+
+-- ── ١٠) الأمن: لا أحد غير cron/postgres يشغّل المراقب أو يقرأ الحوادث ───────────────────────────
+do $$
+declare r text; who text;
+begin
+  foreach who in array array['anon','authenticated','service_role'] loop
+    begin
+      execute format('set local role %I', who);
+      perform private.price_sync_monitor_tick(now());
+      r := 'OK';
+    exception when others then r := sqlstate; end;
+    reset role;
+    perform pg_temp.expect(who || ' cannot run tick', r, '42501');
+    begin
+      execute format('set local role %I', who);
+      perform count(*) from private.price_sync_incidents;
+      r := 'OK';
+    exception when others then r := sqlstate; end;
+    reset role;
+    perform pg_temp.expect(who || ' cannot read incidents', r, '42501');
+    begin
+      execute format('set local role %I', who);
+      insert into private.price_sync_incidents (opened_at, opened_state, current_state, last_seen_at) values (now(), 'STALE', 'STALE', now());
+      r := 'OK';
+    exception when others then r := sqlstate; end;
+    reset role;
+    perform pg_temp.expect(who || ' cannot forge incident', r, '42501');
+  end loop;
+  perform pg_temp.expect('tick is security definer with empty search_path',
+    (select (prosecdef and proconfig @> array['search_path=""'])::text from pg_proc where oid = 'private.price_sync_monitor_tick(timestamptz)'::regprocedure), 'true');
+end $$;
+
+-- ── ١١) التراجع ──────────────────────────────────────────────────────────────────────────────
+\i :rollback
+do $$ begin
+  perform pg_temp.expect('rollback drops tick', (to_regprocedure('private.price_sync_monitor_tick(timestamptz)') is null)::text, 'true');
+  perform pg_temp.expect('rollback drops incidents', (to_regclass('private.price_sync_incidents') is null)::text, 'true');
+  perform pg_temp.expect('rollback re-enables old monitor', (select enabled::text from private.project_task_monitors where task_key = 'price-sync'), 'true');
+  perform pg_temp.expect('rollback keeps heartbeats table', (to_regclass('public.price_sync_heartbeats') is not null)::text, 'true');
+end $$;
+\i :migration
+
+-- ── ١٢) تراجع ثم إعادة تطبيق مع بقاء telegram_outbox (Codex P1): الحادثة الجديدة تُنبَّه فعلاً ─────
+do $$ begin
+  perform pg_temp.expect('outbox kept across rollback/reapply', (select (count(*) > 0)::text from public.telegram_outbox where dedupe_key like 'price-sync-%'), 'true');
+  delete from public.price_sync_heartbeats;
+  -- مفتاح تثبيت سابق بمعرّف تسلسلي (كما كان قبل الإصلاح) ما زال داخل نافذة الأسبوع.
+  insert into public.telegram_outbox (event_type, message, dedupe_key) values ('price_sync_outage', 'old', 'price-sync-outage:1:open');
+  perform pg_temp.attempt(0, 'applied');
+  perform pg_temp.expect('reapplied: baseline', pg_temp.tick(0.5), 'baseline');
+  perform pg_temp.expect('reapplied: new outage alerts', pg_temp.tick(16), 'alert_sent');
+  perform pg_temp.expect('new incident message really queued (no dedupe collision)',
+    (select count(*)::text from public.telegram_outbox o join private.price_sync_incidents i
+       on o.dedupe_key = 'price-sync-outage:' || i.incident_key || ':open'
+     where i.closed_at is null and o.message like '🔴 OZK |%'), '1');
+  perform pg_temp.expect('a real outage message was queued after reapply',
+    (select count(*)::text from public.telegram_outbox where event_type = 'price_sync_outage' and message like '🔴 OZK |%' and created_at = now()
+       and dedupe_key <> 'price-sync-outage:1:open'), '1');
+end $$;
+
+select 'PRICE_SYNC_MONITOR_OK';

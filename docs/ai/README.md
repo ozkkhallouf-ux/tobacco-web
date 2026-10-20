@@ -36,7 +36,6 @@
 - [أرصدة الزبائن والدفعات](topics/customer-balances.md)
 - [المشتريات والموردون](topics/purchases-suppliers.md)
 - [مزامنة الأمين](topics/ameen-sync.md)
-- [نبضة مزامنة الأسعار](topics/price-sync-heartbeat.md)
 - [الطباعة والفواتير](topics/printing.md)
 - [الإشعارات والنشر](topics/notifications-deployment.md)
 - [تنسيق تنبيهات تيليغرام](topics/telegram-alert-format.md)

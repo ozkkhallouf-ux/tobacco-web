@@ -89,24 +89,6 @@ try {
     "[$timestamp] Pulled $($response.Count) approved prices → $OutputCsv" | Add-Content $LogFile
 
     Write-Host "Pulled $($response.Count) approved prices from Supabase ✓" -ForegroundColor Green
-
-    # سطر آلي ASCII لنبضة المزامنة: عدد الأسعار وأحدث updated_at بتوقيت UTC.
-    # PowerShell 5.1 يُبقي التاريخ نصاً و7 يحوّله DateTime؛ نقبل الاثنين.
-    $feedMax = $null
-    foreach ($item in $response) {
-        $value = $item.updated_at
-        if ($null -eq $value -or [string]$value -eq "") { continue }
-        $parsed = [DateTimeOffset]::MinValue
-        if ($value -is [datetime]) {
-            $parsed = [DateTimeOffset]$value.ToUniversalTime()
-        } elseif (-not [DateTimeOffset]::TryParse([string]$value, [Globalization.CultureInfo]::InvariantCulture,
-                [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$parsed)) {
-            continue
-        }
-        if ($null -eq $feedMax -or $parsed -gt $feedMax) { $feedMax = $parsed }
-    }
-    $feedMaxText = if ($feedMax) { $feedMax.UtcDateTime.ToString("o") } else { "none" }
-    Write-Output "PRICE_PULL count=$($response.Count) max_updated_at=$feedMaxText"
     exit 0
 
 } catch {

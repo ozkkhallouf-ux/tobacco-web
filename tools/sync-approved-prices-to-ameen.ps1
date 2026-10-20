@@ -1,6 +1,11 @@
 ﻿# ============================================================
 # sync-approved-prices-to-ameen.ps1
 # يسحب الأسعار من Supabase ويطبّقها على قاعدة بيانات الأمين
+#
+# نبض المزامنة (2026-10-18): كل تشغيل ينشر صفاً في price_sync_heartbeats (proposed/16) عبر
+# publish-price-sync-heartbeat.ps1 — نجاحاً أو فشلاً — كي لا يتقادم آخر «ok» بصمت.
+# النبض best-effort: لا يغيّر رموز الخروج ولا تنبيهات تيليغرام ولا ameen_price_sync_status.
+# التوثيق: docs/ai/topics/price-sync-heartbeat.md
 # ============================================================
 
 param(
@@ -10,55 +15,87 @@ param(
     [string]$LogFile = "$PSScriptRoot\logs\approved-prices-sync.log"
 )
 
-# نبضة كل محاولة (نجاح أو فشل) في price_sync_heartbeat — supabase/proposed/16-price-sync-heartbeat.sql.
-# بلاها يبقى الفشل والتوقف بلا أثر ويبدو آخر «ok» حديثاً. best-effort: لا تغيّر رمز الخروج.
 $attemptStartedAt = (Get-Date).ToUniversalTime().ToString("o")
-$heartbeat = @{ AttemptStartedAt = $attemptStartedAt; EnvFile = $EnvFile }
-
-function Publish-Heartbeat([hashtable]$Fields) {
-    $arguments = $heartbeat.Clone()
-    foreach ($key in $Fields.Keys) { $arguments[$key] = $Fields[$key] }
-    try { & "$PSScriptRoot\publish-price-sync-heartbeat.ps1" @arguments } catch { }
+$heartbeat = @{
+    AttemptStartedAt = $attemptStartedAt
+    EnvFile = $EnvFile
 }
 
-function Read-MachineLine($Lines, [string]$Pattern) {
-    foreach ($line in @($Lines)) {
-        $match = [regex]::Match([string]$line, $Pattern)
-        if ($match.Success) { return $match }
+function Send-PriceSyncHeartbeat([hashtable]$Fields) {
+    try {
+        $arguments = $heartbeat.Clone()
+        foreach ($key in $Fields.Keys) { $arguments[$key] = $Fields[$key] }
+        & "$PSScriptRoot\publish-price-sync-heartbeat.ps1" -Mode Attempt @arguments | ForEach-Object { Write-Host $_ }
+    } catch {
+        Write-Host "PRICE-SYNC-HEARTBEAT FAILED: $($_.Exception.Message)" -ForegroundColor Yellow
     }
-    return $null
+}
+
+# عدد الأسعار المسحوبة وبصمتها السعرية (بلا updated_at، لأنه يتغيّر مع تحديث المخزون أيضاً).
+function Get-PricesSnapshot([string]$Path) {
+    try {
+        if (-not (Test-Path -LiteralPath $Path)) { return $null }
+        $rows = @(Import-Csv -LiteralPath $Path -Encoding UTF8)
+        $lines = @($rows | ForEach-Object {
+            "{0}|{1}|{2}|{3}|{4}|{5}" -f $_.item_key, $_.sale_price, $_.unit1_price, $_.unit2_price, $_.unit2_factor, $_.retail_carton_usd
+        } | Sort-Object)
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try {
+            $bytes = [Text.Encoding]::UTF8.GetBytes(($lines -join "`n"))
+            $hash = ([BitConverter]::ToString($sha.ComputeHash($bytes)) -replace '-', '').ToLowerInvariant()
+        } finally { $sha.Dispose() }
+        return @{ Count = $rows.Count; Fingerprint = $hash }
+    } catch { return $null }
 }
 
 # الخطوة 1: سحب الأسعار من Supabase
 Write-Host "الخطوة 1: سحب الأسعار من Supabase..." -ForegroundColor Cyan
-$pullOutput = & "$PSScriptRoot\pull-approved-prices.ps1" -EnvFile $EnvFile -OutputCsv $CsvFile -LogFile $LogFile
-$pullExit = $LASTEXITCODE
-$pullOutput | ForEach-Object { Write-Output $_ }
-if ($pullExit -ne 0) {
+& "$PSScriptRoot\pull-approved-prices.ps1" -EnvFile $EnvFile -OutputCsv $CsvFile -LogFile $LogFile
+if ($LASTEXITCODE -ne 0) {
     Write-Host "فشل سحب الأسعار!" -ForegroundColor Red
-    if ($Apply) { Publish-Heartbeat @{ Status = "pull_failed"; Stage = "pull"; Message = "فشل سحب الأسعار من Supabase" } }
+    Send-PriceSyncHeartbeat @{ Outcome = "pull_failed"; StageFailed = "pull"; Message = "pull-approved-prices exit $LASTEXITCODE" }
     exit 1
 }
-$pull = Read-MachineLine $pullOutput 'PRICE_PULL count=(\d+) max_updated_at=(\S+)'
-if ($pull) {
-    $heartbeat.PulledCount = [int]$pull.Groups[1].Value
-    if ($pull.Groups[2].Value -ne "none") { $heartbeat.FeedMaxUpdatedAt = $pull.Groups[2].Value }
+
+$snapshot = Get-PricesSnapshot $CsvFile
+if ($snapshot) {
+    $heartbeat.SentCount = [int]$snapshot.Count
+    $heartbeat.PricesFingerprint = [string]$snapshot.Fingerprint
 }
 
 if (-not $Apply) {
-    # المعاينة لا تكتب في الأمين، فلا تُنشر نبضة: لا تُحسب محاولة مزامنة.
     Write-Host "وضع المعاينة — لم يتم التطبيق على الأمين. استخدم -Apply للتطبيق الفعلي." -ForegroundColor Yellow
+    Send-PriceSyncHeartbeat @{ Outcome = "preview_only"; StageFailed = "apply"; Message = "registered without -Apply" }
     exit 0
 }
 
 # الخطوة 2: تطبيق الأسعار على الأمين
 Write-Host "الخطوة 2: تطبيق الأسعار على الأمين..." -ForegroundColor Cyan
-$applyOutput = & "$PSScriptRoot\apply-approved-prices-to-ameen.ps1" -CsvFile $CsvFile -EnvFile $EnvFile -LogFile $LogFile
-$applyExit = $LASTEXITCODE
+$applyOutput = @(& "$PSScriptRoot\apply-approved-prices-to-ameen.ps1" -CsvFile $CsvFile -EnvFile $EnvFile -LogFile $LogFile)
+$applyExitCode = $LASTEXITCODE
 $applyOutput | ForEach-Object { Write-Output $_ }
-if ($applyExit -ne 0) {
+$applyResult = [regex]::Match(($applyOutput -join "`n"), 'PRICE_APPLY jumla=(\d+) retail=(\d+) skipped=(\d+) notfound=(\d+) conflict=(\d+)')
+if ($applyResult.Success) {
+    $heartbeat.AmeenContact = $true
+    $heartbeat.AppliedWholesale = [int]$applyResult.Groups[1].Value
+    $heartbeat.AppliedRetail = [int]$applyResult.Groups[2].Value
+    $heartbeat.Skipped = [int]$applyResult.Groups[3].Value
+    $heartbeat.NotInAmeen = [int]$applyResult.Groups[4].Value
+    $heartbeat.ConflictCount = [int]$applyResult.Groups[5].Value
+}
+if ($applyExitCode -ne 0) {
     Write-Host "فشل تطبيق الأسعار على الأمين!" -ForegroundColor Red
-    Publish-Heartbeat @{ Status = "apply_failed"; Stage = "apply"; Message = "فشل تطبيق الأسعار على قاعدة الأمين" }
+    # نميّز تعذّر الاتصال بالأمين عن فشل التطبيق نفسه من آخر سطر AMEEN ERROR في السجل.
+    $ameenError = ""
+    try {
+        if (Test-Path -LiteralPath $LogFile) {
+            $ameenError = [string](Get-Content -LiteralPath $LogFile -Tail 20 -Encoding UTF8 | Where-Object { $_ -match 'AMEEN ERROR' } | Select-Object -Last 1)
+        }
+    } catch { }
+    $unreachable = $ameenError -match '(?i)network-related|instance-specific|could not open a connection|login failed|server was not found|timeout expired|actively refused|transport-level'
+    $failure = if ($unreachable) { "ameen_unreachable" } else { "apply_failed" }
+    $stage = if ($unreachable) { "connect" } else { "apply" }
+    Send-PriceSyncHeartbeat @{ Outcome = $failure; StageFailed = $stage; Message = ($ameenError -replace '^\[[^\]]*\]\s*', '') }
     # إشعار تيليغرام عند الفشل (مرة كل ساعة كحد أقصى لنفس العطل)
     try {
         & "$PSScriptRoot\send-telegram-notification.ps1" `
@@ -67,16 +104,6 @@ if ($applyExit -ne 0) {
             -EnvFile $EnvFile
     } catch { }
     exit 1
-}
-$heartbeat.Applied = $true
-$heartbeat.AmeenConnected = $true
-$applied = Read-MachineLine $applyOutput 'PRICE_APPLY jumla=(\d+) retail=(\d+) skipped=(\d+) notfound=(\d+) conflict=(\d+)'
-if ($applied) {
-    $heartbeat.AppliedWholesale = [int]$applied.Groups[1].Value
-    $heartbeat.AppliedRetail = [int]$applied.Groups[2].Value
-    $heartbeat.SkippedCount = [int]$applied.Groups[3].Value
-    $heartbeat.NotFoundCount = [int]$applied.Groups[4].Value
-    $heartbeat.ConflictCount = [int]$applied.Groups[5].Value
 }
 
 Write-Host "تمت المزامنة الكاملة بنجاح ✓" -ForegroundColor Green
@@ -93,25 +120,27 @@ if ($machineResult.Success) {
     $mismatchCount = [int]$machineResult.Groups[3].Value
     $missingCount = [int]$machineResult.Groups[4].Value
     $status = if (($mismatchCount + $missingCount) -eq 0) { "ok" } else { "mismatch" }
+    $heartbeat.AmeenContact = $true   # الفحص قرأ القائمتين من الأمين فعلاً
+    $heartbeat.WholesaleMatched = $wholesaleMatched
+    $heartbeat.RetailMatched = $retailMatched
+    $heartbeat.Mismatches = $mismatchCount
+    $heartbeat.Missing = $missingCount
+    $partial = ([int]$heartbeat['ConflictCount'] -gt 0) -or ([int]$heartbeat['NotInAmeen'] -gt 0)
+    # تطبيق بلا سطر PRICE_APPLY مقروء لا يُعدّ وصولاً مثبتاً للأسعار.
+    $heartbeatOutcome = if ($status -ne "ok") { "verify_mismatch" } elseif (-not $applyResult.Success) { "apply_failed" } elseif ($partial) { "applied_with_conflicts" } else { "applied" }
+    Send-PriceSyncHeartbeat @{ Outcome = $heartbeatOutcome }
     & "$PSScriptRoot\publish-price-sync-status.ps1" -Status $status `
         -WholesaleMatched $wholesaleMatched -RetailMatched $retailMatched `
         -MismatchCount $mismatchCount -MissingCount $missingCount
-    Publish-Heartbeat @{
-        Status = $status; Stage = "done"
-        VerifiedWholesale = $wholesaleMatched; VerifiedRetail = $retailMatched
-        MismatchCount = $mismatchCount; MissingCount = $missingCount
-    }
     if ($status -ne "ok") {
         & "$PSScriptRoot\send-telegram-notification.ps1" `
             -Message "⚠️ مزامنة الأسعار ليست مكتملة`nفروقات: $mismatchCount — مواد ناقصة: $missingCount" `
             -EventType "price_sync_mismatch" -DedupeKey "price-sync:mismatch" -DedupeMinutes 30 -EnvFile $EnvFile
         exit 2
     }
-    # صريح: رمز خروج آخر سكربت مُستدعى (النبضة قبل تطبيق 16 مثلاً) لا يصير نتيجة المهمة.
-    exit 0
 } else {
+    Send-PriceSyncHeartbeat @{ Outcome = "verify_failed"; StageFailed = "verify"; Message = "PRICE_VERIFY line not found" }
     & "$PSScriptRoot\publish-price-sync-status.ps1" -Status "error" -Message "تعذر تحليل نتيجة فحص الأسعار"
-    Publish-Heartbeat @{ Status = "verify_failed"; Stage = "verify"; Message = "تعذر تحليل نتيجة فحص الأسعار" }
     & "$PSScriptRoot\send-telegram-notification.ps1" `
         -Message "🚨 تعذر التحقق من مزامنة الأسعار مع الأمين" `
         -EventType "price_sync_failure" -DedupeKey "price-sync:verify-failed" -DedupeMinutes 60 -EnvFile $EnvFile

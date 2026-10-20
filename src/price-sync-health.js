@@ -1,36 +1,36 @@
 // ============================================================================
-// حالة مزامنة الأسعار (الموقع → الأمين) — منطق نقي بلا شبكة ولا DOM ولا كتابة.
+// صحة مزامنة الأسعار (الموقع ← الأمين) — منطق نقي (Pure) بلا شبكة ولا DOM ولا كتابة.
 //
-// المدخل آخر صف من public.price_sync_heartbeat (supabase/proposed/16-price-sync-heartbeat.sql)
-// كما يعيده PostgREST. يكتب الصف tools/sync-approved-prices-to-ameen.ps1 في كل محاولة،
-// والقيم last_* محسوبة على ساعة الخادم.
+// السبب (حادثة 2026-10-18): مهمة «TOBACCO Approved Prices Pull» عُطّلت أربع ساعات
+// للصيانة، فبقي آخر صف «ok» في ameen_price_sync_status يتقادم بصمت، وعُدّلت أسعار
+// في الموقع لم تصل للأمين، وصدرت فواتير بالأسعار القديمة. آخر نجاح قديم ليس دليلاً
+// على أن المزامنة تعمل الآن.
 //
-// المخرج واحدة من خمس حالات، ولا يُعدّ نجاح قديم دليلاً على أن المزامنة تعمل الآن:
-//   HEALTHY  آخر محاولة حديثة ونجحت: تطبيق + تحقق مطابق + صفر تعارض.
-//   STALE    لا محاولة منذ أكثر من staleAfterMinutes (المهمة لا تعمل، أو الجهاز مطفأ).
-//   FAILED   آخر محاولة حديثة وفشلت: سحب، أو اتصال بالأمين، أو تحقق، أو فروق، أو تعارض.
-//   DISABLED أبلغ طرف خارجي (الحارس أو إجراء صيانة) أن المهمة معطّلة أو موقوفة.
-//   UNKNOWN  لا صف، أو صف لا يُقرأ، أو وقت في المستقبل.
+// المدخلات صفوف الجدول المستقل `public.price_sync_heartbeats` (supabase/proposed/16) كما هي
+// (received_at بساعة الخادم + summary). لا يكتبها إلا هوية المزامنة المعتمدة عبر الدالة
+// record_price_sync_heartbeat، من tools/publish-price-sync-heartbeat.ps1 بنوعين:
+//   • kind="attempt"     — نتيجة كل تشغيل لـ sync-approved-prices-to-ameen.ps1
+//   • kind="task_probe"  — حالة المهمة المجدولة نفسها كما يراها Sync Watchdog
+//                          (الطريق الوحيد لاكتشاف DISABLED، لأن المهمة المعطّلة لا تكتب شيئاً)
 //
-// الأوقات تُعرض بتوقيت دمشق (Asia/Damascus). المستهلكون: شريط صفحة الأسعار
-// (المرحلة 2) وأوامر Telegram لاحقاً. التوثيق: docs/ai/topics/price-sync-heartbeat.md
+// قراءة الحالة لا تحتاج أي صلاحية على قاعدة الأمين: كل ما هنا يُقرأ من Supabase.
+//
+// الحالات الخمس:
+//   HEALTHY  آخر محاولة حديثة ونجحت بإثبات (تطبيق + فحص مستقل بلا فروق، أو لا أسعار جديدة)
+//   STALE    لا محاولة حديثة (المهمة لا تعمل أو الناشر لا يصل) — مهما كان آخر نجاح
+//   FAILED   آخر محاولة حديثة فشلت أو لم تكتمل (اتصال الأمين، تطبيق، فحص، تعارض، معاينة فقط)
+//   DISABLED المهمة معطّلة أو غير مسجّلة حسب فحص حديث للمهمة
+//   UNKNOWN  لا بيانات، أو بيانات تالفة، أو ساعة مستقبلية
+//
+// التوثيق: docs/ai/topics/price-sync-heartbeat.md
 // ============================================================================
 (function () {
   "use strict";
 
   const VERSION = 1;
-
-  const CONFIG = Object.freeze({
-    // المهمة كل 5 دقائق: ثلاث دورات فائتة = متوقفة.
-    staleAfterMinutes: 15,
-    // ساعة الجهاز القارئ قد تسبق الخادم قليلاً؛ أبعد من هذا = وقت غير موثوق.
-    futureToleranceMinutes: 5,
-    // توقف أطول من هذا ثم نجاح = «عادت المزامنة» (المرحلة 5 تبني عليه تقرير الفجوة).
-    resumeGapMinutes: 15,
-    // تعديل سعر أحدث من آخر تطبيق بأكثر من هذا = بانتظار الوصول للأمين.
-    pendingGraceMinutes: 1,
-    timeZone: "Asia/Damascus"
-  });
+  const SOURCE = "ameen_price_sync_heartbeat";
+  const SCHEMA = "price-sync-heartbeat/v1";
+  const TIME_ZONE = "Asia/Damascus";
 
   const STATES = Object.freeze({
     HEALTHY: "HEALTHY",
@@ -40,235 +40,354 @@
     UNKNOWN: "UNKNOWN"
   });
 
-  const FAILURE_STATUSES = new Set(["mismatch", "pull_failed", "apply_failed", "verify_failed"]);
-  const EXTERNAL_STATUSES = new Set(["disabled", "paused"]);
-  const KNOWN_STATUSES = new Set(["ok", ...FAILURE_STATUSES, ...EXTERNAL_STATUSES]);
+  // المهمة تعمل كل 5 دقائق. ثلاث دورات بلا محاولة = متوقفة.
+  const THRESHOLDS = Object.freeze({
+    taskIntervalMinutes: 5,
+    staleAfterMinutes: 15,
+    // فحص المهمة يُنشر كل 30 دقيقة حين تكون سليمة، وفوراً حين تتعطّل.
+    probeFreshMinutes: 45,
+    // هامش انحراف ساعة مقبول قبل اعتبار الطابع الزمني مستقبلياً.
+    futureSkewMinutes: 5
+  });
 
-  function toTime(value) {
+  // نتائج المحاولة الناجحة بإثبات.
+  const SUCCESS_OUTCOMES = Object.freeze(["applied", "no_changes"]);
+  // نتائج الفشل المعروفة ومعنى كل منها.
+  const FAILURE_OUTCOMES = Object.freeze({
+    pull_failed: "تعذّر سحب الأسعار من الموقع",
+    ameen_unreachable: "تعذّر الاتصال بقاعدة الأمين",
+    apply_failed: "فشل تطبيق الأسعار على الأمين",
+    verify_failed: "تعذّر التحقق من الأسعار في الأمين",
+    verify_mismatch: "أسعار الأمين لا تطابق الموقع",
+    applied_with_conflicts: "طُبّقت الأسعار مع تعارض أو أصناف غير موجودة",
+    preview_only: "المهمة تعمل بوضع المعاينة ولا تكتب في الأمين",
+    unproven_success: "أُعلن نجاح بلا إثبات وصول الأسعار للأمين"
+  });
+
+  function toDate(value) {
     if (value === null || value === undefined || value === "") return null;
-    const time = value instanceof Date ? value.getTime() : Date.parse(String(value));
-    return Number.isFinite(time) ? time : null;
+    const date = value instanceof Date ? new Date(value.getTime()) : new Date(value);
+    return Number.isNaN(date.getTime()) ? null : date;
   }
 
-  function toIso(time) {
-    return time === null ? null : new Date(time).toISOString();
+  function maxDate(...values) {
+    let best = null;
+    for (const value of values) {
+      const date = toDate(value);
+      if (date && (!best || date > best)) best = date;
+    }
+    return best;
   }
 
-  function toCount(value) {
+  function minutesBetween(later, earlier) {
+    return (later.getTime() - earlier.getTime()) / 60000;
+  }
+
+  function toInt(value) {
     const number = Number(value);
-    return Number.isFinite(number) && number >= 0 ? Math.floor(number) : 0;
+    return Number.isFinite(number) ? Math.trunc(number) : null;
   }
 
-  function minutesBetween(fromTime, toTimeValue) {
-    return Math.round(((toTimeValue - fromTime) / 60000) * 10) / 10;
+  function summaryOf(row) {
+    if (!row || typeof row !== "object") return null;
+    const summary = row.summary && typeof row.summary === "object" ? row.summary : row;
+    if (summary.schema && summary.schema !== SCHEMA) return null;
+    return summary;
   }
 
-  function unknown(reason, nowTime) {
+  // زمن الصف: received_at (ساعة الخادم في price_sync_heartbeats) هو المرجع حين يوجد، فلا يستطيع
+  // العميل تقديم حداثة بطابع زمني يرسله؛ وإلا (summary مباشرة في الاختبارات) أحدث طابع متاح.
+  function rowTime(row, ...summaryTimes) {
+    const received = toDate(row && row.received_at);
+    return received || maxDate(...summaryTimes, row && row.created_at);
+  }
+
+  // لا تتقدّم طوابع العميل على زمن الصف نفسه.
+  function capAt(value, at) {
+    const date = toDate(value);
+    return date && date > at ? at : date;
+  }
+
+  // النجاح يعني وصول الأسعار للأمين: نفس شرط record_price_sync_heartbeat على الخادم.
+  function provenSuccess(summary, verify) {
+    const isZero = (value) => typeof value === "number" && value === 0;
+    const zeroOrAbsent = (value) => value === undefined || value === null || isZero(value);
+    return Boolean(summary.ameen_contact_at)
+      && isZero(verify.mismatches) && isZero(verify.missing)
+      && typeof summary.applied_wholesale === "number" && summary.applied_wholesale >= 1
+      && zeroOrAbsent(summary.conflict_count) && zeroOrAbsent(summary.not_in_ameen);
+  }
+
+  // يحوّل صف price_sync_heartbeats (أو summary مباشرة) إلى محاولة موحّدة، أو null إن تلف.
+  function normalizeAttempt(row) {
+    const summary = summaryOf(row);
+    if (!summary || summary.kind !== "attempt") return null;
+    const at = rowTime(row, summary.attempt_finished_at, summary.attempt_started_at);
+    if (!at || typeof summary.outcome !== "string" || !summary.outcome) return null;
+    const verify = summary.verify && typeof summary.verify === "object" ? summary.verify : {};
+    // «نجاح» بلا إثبات لا يُصدَّق أبداً: يُعامل فشلاً صريحاً.
+    const unproven = SUCCESS_OUTCOMES.includes(summary.outcome) && !provenSuccess(summary, verify);
     return {
-      version: VERSION,
-      state: STATES.UNKNOWN,
-      reason,
-      status: null,
-      checkedAt: toIso(nowTime),
-      lastAttemptAt: null,
-      ageMinutes: null,
-      lastSuccessAt: null,
-      lastAppliedAt: null,
-      lastFailureAt: null,
-      lastFailureStatus: null,
-      ameenConnectedAt: null,
-      newPrices: null,
-      resumedAfterMinutes: null,
-      pendingEdits: false,
-      counts: null,
-      message: ""
+      at,
+      outcome: unproven ? "unproven_success" : summary.outcome,
+      stageFailed: summary.stage_failed || null,
+      ameenContactAt: capAt(summary.ameen_contact_at, at),
+      sentCount: toInt(summary.sent_count),
+      appliedWholesale: toInt(summary.applied_wholesale),
+      appliedRetail: toInt(summary.applied_retail),
+      notInAmeen: toInt(summary.not_in_ameen) || 0,
+      conflictCount: toInt(summary.conflict_count) || 0,
+      mismatches: toInt(verify.mismatches),
+      missing: toInt(verify.missing),
+      pricesChanged: typeof summary.prices_changed === "boolean" ? summary.prices_changed : null,
+      // الأعمدة المحسوبة على الخادم (proposed/16) تتقدّم على ذاكرة الناشر المحلية.
+      lastSuccessAt: unproven ? null : capAt(row && row.last_success_at !== undefined ? row.last_success_at : summary.last_success_at, at),
+      serverContactAt: capAt(row && row.last_ameen_contact_at, at),
+      lastFailureAt: capAt(summary.last_failure_at, at),
+      message: typeof summary.message === "string" ? summary.message : "",
+      host: typeof summary.host === "string" ? summary.host : ""
     };
   }
 
-  // row: آخر صف من price_sync_heartbeat، أو null.
-  // options.now: وقت القراءة (افتراضياً الآن).
-  // options.latestPriceEditAt: أحدث approved_price_items.updated_at (اختياري).
-  function classifyPriceSyncHealth(row, options = {}) {
-    const config = { ...CONFIG, ...(options.config || {}) };
-    const nowTime = toTime(options.now ?? new Date());
-    if (nowTime === null) throw new TypeError("classifyPriceSyncHealth: options.now غير صالح");
-
-    if (!row || typeof row !== "object") return unknown("no_data", nowTime);
-    const status = typeof row.status === "string" ? row.status : null;
-    if (!status || !KNOWN_STATUSES.has(status)) return unknown("unknown_status", nowTime);
-
-    // وقت الخادم (created_at) هو المرجع، لا ساعة جهاز Windows.
-    const attemptTime = toTime(row.created_at);
-    if (attemptTime === null) return unknown("no_timestamp", nowTime);
-    if (attemptTime - nowTime > config.futureToleranceMinutes * 60000) {
-      return unknown("future_timestamp", nowTime);
-    }
-
-    const ageMinutes = Math.max(0, minutesBetween(attemptTime, nowTime));
-    const lastSuccessTime = toTime(row.last_success_at);
-    const lastAppliedTime = toTime(row.last_applied_at);
-    const appliedFeedMax = toTime(row.applied_feed_max_updated_at);
-    const latestEdit = toTime(options.latestPriceEditAt);
-    const conflictCount = toCount(row.conflict_count);
-    const gap = Number(row.gap_minutes);
-
-    const counts = {
-      pulled: toCount(row.pulled_count),
-      appliedWholesale: toCount(row.applied_wholesale),
-      appliedRetail: toCount(row.applied_retail),
-      skipped: toCount(row.skipped_count),
-      notFound: toCount(row.not_found_count),
-      conflicts: conflictCount,
-      verifiedWholesale: toCount(row.verified_wholesale),
-      verifiedRetail: toCount(row.verified_retail),
-      mismatches: toCount(row.mismatch_count),
-      missing: toCount(row.missing_count)
+  function normalizeProbe(row) {
+    const summary = summaryOf(row);
+    if (!summary || summary.kind !== "task_probe") return null;
+    const at = rowTime(row, summary.probed_at);
+    const task = summary.task && typeof summary.task === "object" ? summary.task : null;
+    if (!at || !task) return null;
+    const state = typeof task.state === "string" ? task.state : "";
+    return {
+      at,
+      exists: task.exists !== false,
+      enabled: task.enabled !== false && state.toLowerCase() !== "disabled",
+      state,
+      lastRunAt: toDate(task.last_run_time),
+      lastResult: toInt(task.last_result),
+      host: typeof summary.host === "string" ? summary.host : ""
     };
+  }
 
-    let state;
-    let reason;
-    if (EXTERNAL_STATUSES.has(status)) {
-      state = STATES.DISABLED;
-      reason = status;
-    } else if (ageMinutes > config.staleAfterMinutes) {
-      // حتى لو كان آخر صف «ok»: نجاح قديم ليس دليلاً على عمل المزامنة الآن.
-      state = STATES.STALE;
-      reason = status === "ok" ? "no_recent_attempt" : `no_recent_attempt_after_${status}`;
-    } else if (FAILURE_STATUSES.has(status)) {
-      state = STATES.FAILED;
-      reason = status;
-    } else if (conflictCount > 0) {
-      // التطبيق والتحقق نجحا، لكن أسعار الأصناف المتعارضة لم تُكتب في الأمين.
-      state = STATES.FAILED;
-      reason = "conflict";
-    } else {
-      state = STATES.HEALTHY;
-      reason = row.new_prices === false ? "no_new_prices" : "applied";
-    }
+  function isSuccess(attempt) {
+    return SUCCESS_OUTCOMES.includes(attempt.outcome);
+  }
 
-    // إشارة «عادت» عند أول نجاح بعد فجوة. تُحسب من صف الخادم نفسه.
-    const resumedAfterMinutes = state === STATES.HEALTHY
-      && Number.isFinite(gap) && gap > config.resumeGapMinutes ? gap : null;
-
-    // تعديل في الموقع لم يدخل أي تطبيق بعد. أثناء HEALTHY هذا طبيعي حتى الدورة التالية.
-    const pendingEdits = latestEdit !== null && (
-      appliedFeedMax === null
-        ? true
-        : latestEdit - appliedFeedMax > config.pendingGraceMinutes * 60000
-    );
-
+  function emptyHealth(state, reason, now) {
     return {
       version: VERSION,
       state,
       reason,
-      status,
-      checkedAt: toIso(nowTime),
-      lastAttemptAt: toIso(attemptTime),
-      ageMinutes,
-      lastSuccessAt: toIso(lastSuccessTime),
-      lastAppliedAt: toIso(lastAppliedTime),
-      lastFailureAt: toIso(toTime(row.last_failure_at)),
-      lastFailureStatus: typeof row.last_failure_status === "string" ? row.last_failure_status : null,
-      ameenConnectedAt: toIso(toTime(row.ameen_connected_at)),
-      newPrices: typeof row.new_prices === "boolean" ? row.new_prices : null,
-      resumedAfterMinutes,
-      pendingEdits,
-      counts,
-      message: typeof row.message === "string" ? row.message : ""
+      checkedAt: now,
+      lastAttemptAt: null,
+      lastSuccessAt: null,
+      lastFailureAt: null,
+      lastAmeenContactAt: null,
+      ageMinutes: null,
+      outcome: null,
+      counts: null,
+      task: null,
+      resumedAfter: null,
+      warnings: []
     };
   }
 
-  const damascusParts = (time, timeZone) => {
-    const parts = new Intl.DateTimeFormat("en-GB", {
-      timeZone,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      hourCycle: "h23"
-    }).formatToParts(new Date(time));
-    const get = (type) => parts.find((part) => part.type === type)?.value ?? "";
-    return { year: get("year"), month: get("month"), day: get("day"), hour: get("hour"), minute: get("minute") };
-  };
+  // rows: صفوف public.price_sync_heartbeats (proposed/16) بأي ترتيب وأي خليط من النوعين.
+  function classifyPriceSyncHealth(rows, options = {}) {
+    const now = toDate(options.now) || new Date();
+    const thresholds = Object.assign({}, THRESHOLDS, options.thresholds || {});
+    const list = Array.isArray(rows) ? rows : [];
 
-  // «11:34» إن كان اليوم نفسه بتوقيت دمشق، وإلا «17/10 11:34».
-  function formatDamascusTime(value, options = {}) {
-    const time = toTime(value);
-    if (time === null) return "غير معروف";
-    const timeZone = options.timeZone || CONFIG.timeZone;
-    const at = damascusParts(time, timeZone);
-    const clock = `${at.hour}:${at.minute}`;
-    const nowTime = toTime(options.now ?? new Date());
-    if (nowTime !== null) {
-      const today = damascusParts(nowTime, timeZone);
-      if (today.year === at.year && today.month === at.month && today.day === at.day) return clock;
-      if (today.year !== at.year) return `${at.day}/${at.month}/${at.year} ${clock}`;
+    const attempts = list.map(normalizeAttempt).filter(Boolean).sort((a, b) => b.at - a.at);
+    const probes = list.map(normalizeProbe).filter(Boolean).sort((a, b) => b.at - a.at);
+    const warnings = [];
+    const ignored = list.length - attempts.length - probes.length;
+    if (ignored > 0) warnings.push(`ignored_rows:${ignored}`);
+
+    if (!attempts.length && !probes.length) {
+      const health = emptyHealth(STATES.UNKNOWN, list.length ? "unreadable_data" : "no_data", now);
+      health.warnings = warnings;
+      return health;
     }
-    return `${at.day}/${at.month} ${clock}`;
+
+    const futureLimit = new Date(now.getTime() + thresholds.futureSkewMinutes * 60000);
+    const latest = attempts[0] || null;
+    const probe = probes[0] || null;
+
+    // آخر نجاح مثبت: من أي محاولة ناجحة، أو مما حمله الناشر من حالته المحلية.
+    let lastSuccessAt = null;
+    let lastFailureAt = null;
+    for (const attempt of attempts) {
+      if (isSuccess(attempt)) lastSuccessAt = maxDate(lastSuccessAt, attempt.at);
+      else lastFailureAt = maxDate(lastFailureAt, attempt.at);
+      lastSuccessAt = maxDate(lastSuccessAt, attempt.lastSuccessAt);
+      lastFailureAt = maxDate(lastFailureAt, attempt.lastFailureAt);
+    }
+    const lastAmeenContactAt = maxDate(...attempts.map((attempt) => attempt.ameenContactAt), ...attempts.map((attempt) => attempt.serverContactAt));
+
+    const health = emptyHealth(STATES.UNKNOWN, "", now);
+    health.warnings = warnings;
+    health.lastAttemptAt = latest ? latest.at : null;
+    health.lastSuccessAt = lastSuccessAt;
+    health.lastFailureAt = lastFailureAt;
+    health.lastAmeenContactAt = lastAmeenContactAt;
+    health.outcome = latest ? latest.outcome : null;
+    health.ageMinutes = latest ? Math.max(0, Math.round(minutesBetween(now, latest.at))) : null;
+    if (latest) {
+      health.counts = {
+        sent: latest.sentCount,
+        appliedWholesale: latest.appliedWholesale,
+        appliedRetail: latest.appliedRetail,
+        notInAmeen: latest.notInAmeen,
+        conflicts: latest.conflictCount,
+        mismatches: latest.mismatches,
+        missing: latest.missing,
+        pricesChanged: latest.pricesChanged
+      };
+    }
+    if (probe) {
+      health.task = {
+        probedAt: probe.at,
+        exists: probe.exists,
+        enabled: probe.enabled,
+        state: probe.state,
+        lastRunAt: probe.lastRunAt,
+        lastResult: probe.lastResult
+      };
+    }
+
+    if ((latest && latest.at > futureLimit) || (probe && probe.at > futureLimit)) {
+      health.state = STATES.UNKNOWN;
+      health.reason = "future_timestamp";
+      return health;
+    }
+
+    // DISABLED يتقدّم على كل شيء: فحص حديث للمهمة يقول إنها معطّلة أو غير مسجّلة.
+    const probeFresh = probe && minutesBetween(now, probe.at) <= thresholds.probeFreshMinutes;
+    if (probeFresh && (!probe.exists || !probe.enabled)) {
+      health.state = STATES.DISABLED;
+      health.reason = probe.exists ? "task_disabled" : "task_missing";
+      return health;
+    }
+    if (probe && !probeFresh) warnings.push("task_probe_stale");
+
+    if (!latest) {
+      health.state = STATES.UNKNOWN;
+      health.reason = "no_attempts";
+      return health;
+    }
+
+    if (minutesBetween(now, latest.at) > thresholds.staleAfterMinutes) {
+      health.state = STATES.STALE;
+      health.reason = "no_recent_attempt";
+      return health;
+    }
+
+    if (isSuccess(latest)) {
+      health.state = STATES.HEALTHY;
+      health.reason = latest.outcome;
+      // استئناف: نجاح حالي سبقه فشل، أو فجوة أطول من عتبة التوقف بين آخر محاولتين.
+      const previous = attempts[1] || null;
+      if (previous && (!isSuccess(previous) || minutesBetween(latest.at, previous.at) > thresholds.staleAfterMinutes)) {
+        health.resumedAfter = {
+          previousAttemptAt: previous.at,
+          previousOutcome: previous.outcome,
+          gapMinutes: Math.round(minutesBetween(latest.at, previous.at))
+        };
+      }
+      return health;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(FAILURE_OUTCOMES, latest.outcome)) {
+      health.state = STATES.FAILED;
+      health.reason = latest.outcome;
+      return health;
+    }
+
+    health.state = STATES.UNKNOWN;
+    health.reason = "unknown_outcome";
+    return health;
   }
 
-  const FAILURE_TITLES = Object.freeze({
-    apply_failed: "❌ فشل آخر اتصال بالأمين",
-    pull_failed: "❌ تعذّر سحب الأسعار من الموقع",
-    verify_failed: "❌ تعذّر التحقق من أسعار الأمين",
-    mismatch: "❌ الأسعار لم تصل كاملة للأمين",
-    conflict: "❌ تعارض أسعار — لم تُكتب بعض الأصناف"
+  const timeFormatter = new Intl.DateTimeFormat("en-GB", {
+    timeZone: TIME_ZONE, hour: "2-digit", minute: "2-digit", hour12: false
+  });
+  const dateFormatter = new Intl.DateTimeFormat("en-GB", {
+    timeZone: TIME_ZONE, year: "numeric", month: "2-digit", day: "2-digit"
   });
 
-  // نص عرض موحّد لشريط الصفحة وTelegram. tone: ok | warn | error | muted.
+  function damascusParts(value) {
+    const date = toDate(value);
+    if (!date) return null;
+    const dateParts = Object.fromEntries(dateFormatter.formatToParts(date).map((part) => [part.type, part.value]));
+    return { time: timeFormatter.format(date), date: `${dateParts.year}-${dateParts.month}-${dateParts.day}` };
+  }
+
+  // «HH:MM» بتوقيت دمشق، ويُضاف التاريخ إن لم يكن يوم `now` نفسه (بتوقيت دمشق).
+  function formatDamascusTime(value, now) {
+    const parts = damascusParts(value);
+    if (!parts) return "—";
+    const today = damascusParts(toDate(now) || new Date());
+    return today && today.date === parts.date ? parts.time : `${parts.date} ${parts.time}`;
+  }
+
+  // وصف عربي مختصر للحالة — للشريط في صفحة الأسعار (المرحلة الثانية) وللبوت لاحقاً.
   function describePriceSyncHealth(health, options = {}) {
-    const at = (value) => formatDamascusTime(value, options);
-    const lastArrival = health.lastSuccessAt ? `آخر وصول للأمين: ${at(health.lastSuccessAt)}` : "لا وصول مثبت للأمين بعد";
-    const pending = health.pendingEdits && health.state !== STATES.HEALTHY
-      ? "يوجد تعديل أسعار بالموقع لم يصل للأمين — الكاشير يبيع بالسعر القديم"
-      : "";
-    const join = (...lines) => lines.filter(Boolean).join("\n");
+    if (!health) return { level: "unknown", icon: "❔", text: "حالة مزامنة الأسعار غير معروفة", detail: "" };
+    const now = toDate(options.now) || toDate(health.checkedAt) || new Date();
+    const at = (value) => formatDamascusTime(value, now);
+    const since = health.lastSuccessAt ? at(health.lastSuccessAt) : null;
 
     switch (health.state) {
       case STATES.HEALTHY: {
-        const resumed = health.resumedAfterMinutes
-          ? `عادت المزامنة بعد توقف ${Math.round(health.resumedAfterMinutes)} دقيقة — راجع الفواتير الصادرة أثناءه`
-          : "";
-        const idle = health.reason === "no_new_prices" ? "لا أسعار جديدة منذ آخر وصول" : "";
-        return { tone: "ok", title: `✅ آخر وصول للأمين: ${at(health.lastSuccessAt)}`, detail: join(resumed, idle) };
+        const detail = health.reason === "no_changes" ? "لا أسعار جديدة منذ آخر مزامنة" : "";
+        const resumed = health.resumedAfter ? `عادت المزامنة بعد انقطاع ${health.resumedAfter.gapMinutes} دقيقة` : "";
+        return { level: "ok", icon: "✅", text: `آخر وصول للأمين: ${at(health.lastSuccessAt || health.lastAttemptAt)}`, detail: [detail, resumed].filter(Boolean).join(" — ") };
       }
       case STATES.STALE:
         return {
-          tone: "warn",
-          title: `⚠️ المزامنة متوقفة منذ ${at(health.lastAttemptAt)}`,
-          detail: join(lastArrival, pending)
-        };
-      case STATES.FAILED:
-        return {
-          tone: "error",
-          title: FAILURE_TITLES[health.reason] || "❌ فشلت آخر مزامنة للأسعار",
-          detail: join(
-            health.reason === "mismatch" ? `فروق: ${health.counts.mismatches} — ناقصة: ${health.counts.missing}` : "",
-            health.reason === "conflict" ? `أصناف متعارضة: ${health.counts.conflicts}` : "",
-            `آخر محاولة: ${at(health.lastAttemptAt)}`,
-            lastArrival,
-            pending
-          )
+          level: "warn",
+          icon: "⚠️",
+          text: since ? `المزامنة متوقفة منذ ${since}` : "المزامنة متوقفة",
+          detail: health.lastAttemptAt ? `آخر محاولة: ${at(health.lastAttemptAt)}` : ""
         };
       case STATES.DISABLED:
         return {
-          tone: "warn",
-          title: `${health.reason === "paused" ? "⏸ المزامنة موقوفة للصيانة" : "⛔ مهمة مزامنة الأسعار معطّلة"} منذ ${at(health.lastAttemptAt)}`,
-          detail: join(health.message, lastArrival, pending)
+          level: "error",
+          icon: "⛔",
+          text: health.reason === "task_missing" ? "مهمة مزامنة الأسعار غير مسجّلة على جهاز Windows" : "مهمة مزامنة الأسعار معطّلة",
+          detail: since ? `آخر وصول للأمين: ${since}` : ""
         };
+      case STATES.FAILED: {
+        const counts = health.counts || {};
+        let text = FAILURE_OUTCOMES[health.reason] || "فشلت آخر مزامنة";
+        if (health.reason === "ameen_unreachable") text = "فشل آخر اتصال بالأمين";
+        if (health.reason === "applied_with_conflicts") {
+          const parts = [];
+          if (counts.conflicts) parts.push(`تعارض في ${counts.conflicts} صنف`);
+          if (counts.notInAmeen) parts.push(`${counts.notInAmeen} صنف غير موجود بالأمين`);
+          if (parts.length) text = `طُبّقت الأسعار مع ${parts.join(" و")}`;
+        }
+        if (health.reason === "verify_mismatch") text = `أسعار الأمين لا تطابق الموقع (فروق: ${counts.mismatches ?? "؟"}، ناقص: ${counts.missing ?? "؟"})`;
+        return { level: "error", icon: "❌", text, detail: since ? `آخر وصول مثبت للأمين: ${since}` : "لا يوجد وصول مثبت للأمين" };
+      }
       default:
-        return { tone: "muted", title: "❔ حالة مزامنة الأسعار غير معروفة", detail: "" };
+        return { level: "unknown", icon: "❔", text: "حالة مزامنة الأسعار غير معروفة", detail: health.reason === "no_data" ? "لا توجد بيانات نبض بعد" : "" };
     }
   }
 
   const api = Object.freeze({
     VERSION,
-    CONFIG,
+    SOURCE,
+    SCHEMA,
+    TIME_ZONE,
     STATES,
+    THRESHOLDS,
+    SUCCESS_OUTCOMES,
+    FAILURE_OUTCOMES,
+    normalizeAttempt,
+    normalizeProbe,
     classifyPriceSyncHealth,
-    describePriceSyncHealth,
-    formatDamascusTime
+    formatDamascusTime,
+    describePriceSyncHealth
   });
 
   if (typeof window !== "undefined") window.ozkPriceSyncHealth = api;
