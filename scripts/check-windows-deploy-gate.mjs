@@ -198,6 +198,9 @@ assert.match(gateSrc, /tasks started after the idle wait/, "مهمة بدأت ب
 const completeSrc = gateSrc.slice(gateSrc.indexOf("function Complete-RollbackState"), gateSrc.indexOf("function Invoke-GateUnpin"));
 assert.match(completeSrc, /Save-GateState[\s\S]*Clear-DeployFlag[\s\S]*Close-InflightRecord/, "inflight.json يُزال آخراً بعد كتابة الحالة");
 assert.doesNotMatch(recover, /Move-Item -LiteralPath \$Paths\.Inflight/, "Recover لا ينقل السجل قبل اكتمال الإنهاء");
+assert.match(recover, /Get-TaskGuard[\s\S]*Wait-TasksIdle[\s\S]*Get-SwitchBlockers \$Config \$Head -AllowDirty[\s\S]*Copy-Item -LiteralPath \$copy/, "Recover يمرّ بحارس المهام والانتظار وإعادة الفحص قبل أي إعادة كتابة");
+assert.match(gateSrc, /'git-index'/, "فهرس git يُنسخ احتياطياً قبل التبديل");
+assert.match(recover, /indexSha256/, "Recover يعيد الفهرس بعد التحقق من بصمته");
 ok("تدقيق 2026-10-20: لا إصدار أقدم من الجهاز، الثغرات الست (a–f)، قفل، نسخة احتياطية بـSHA256، تحقق بعد التبديل، واستعادة آمنة");
 
 // 2) الـworkflow

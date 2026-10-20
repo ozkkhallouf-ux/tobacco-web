@@ -500,7 +500,16 @@ function New-DeployBackup($Config, $Paths, [string]$From, [string]$To, $Files) {
         if ($f.status -ne 'D') { $blob = Get-GitValue $Config @('rev-parse', ($To + ':' + $f.path)) }
         $entries += [pscustomobject]@{ path = $f.path; status = $f.status; existed = [bool]$existed; preSha256 = $pre; targetBlob = $blob; postSha256 = $null }
     }
-    $manifest = [pscustomobject]@{ id = $id; from = $From; to = $To; created_utc = (Get-Date).ToUniversalTime().ToString('o'); files = $entries }
+    # فهرس git قبل التبديل (Codex P1 على #337): تبديل انقطع بعد كتابة الفهرس وقبل تحريك HEAD يترك
+    # الفهرس على الهدف؛ هذه النسخة تعيده كما كان (الشجرة كانت نظيفة، فالفهرس يطابق HEAD تماماً).
+    $indexSha = $null
+    $indexPath = Join-Path (Join-Path $Config.repoPath '.git') 'index'
+    if (Test-Path -LiteralPath $indexPath -PathType Leaf) {
+        $indexCopy = Join-Path $dir 'git-index'
+        Copy-Item -LiteralPath $indexPath -Destination $indexCopy -Force
+        $indexSha = Get-FileSha256 $indexCopy
+    }
+    $manifest = [pscustomobject]@{ id = $id; from = $From; to = $To; created_utc = (Get-Date).ToUniversalTime().ToString('o'); indexSha256 = $indexSha; files = $entries }
     Write-JsonFile (Join-Path $dir 'manifest.json') $manifest
     return [pscustomobject]@{ dir = $dir; manifest = $manifest }
 }
@@ -552,7 +561,7 @@ function Read-InflightRecord($Config, $Paths) {
 }
 
 # فحوص ما قبل التبديل مباشرة، مشتركة بين النشر والتراجع: بعد انتظار الخمول قد تتغيّر الشروط.
-function Get-SwitchBlockers($Config, [string]$Head) {
+function Get-SwitchBlockers($Config, [string]$Head, [switch]$AllowDirty) {
     $late = Get-TaskGuard $Config @(Get-GateTaskInfo $Config (Get-GateTaskNames $Config)) ((Get-Date).ToUniversalTime())
     $reasons = @()
     if (@($late.invisible).Count -gt 0) { $reasons += ('tasks became invisible: ' + (@($late.invisible) -join ', ')) }
@@ -563,7 +572,8 @@ function Get-SwitchBlockers($Config, [string]$Head) {
     $markers = @(Get-GitOperationMarkers $Config)
     if ($markers.Count -gt 0) { $reasons += ('git operation in progress: ' + ($markers -join ', ')) }
     if ((Get-GitValue $Config @('rev-parse', 'HEAD')) -ne $Head) { $reasons += 'HEAD moved during the pause' }
-    if (@(Get-DirtyEntries $Config).Count -gt 0) { $reasons += 'worktree changed during the pause' }
+    # Recover يعمل على شجرة متّسخة بطبيعتها (هي ما يُستعاد)، فيُستثنى هذا الشرط له وحده.
+    if (-not $AllowDirty -and @(Get-DirtyEntries $Config).Count -gt 0) { $reasons += 'worktree changed during the pause' }
     return $reasons
 }
 
@@ -986,6 +996,36 @@ function Invoke-GateRecover($Config, $Paths, $Record, [string]$Head) {
         $copy = Join-Path (Join-Path $backupDir 'files') (([string]$e.path) -replace '/', [IO.Path]::DirectorySeparatorChar)
         if (-not (Test-Path -LiteralPath $copy) -or (Get-FileSha256 $copy) -ne [string]$e.preSha256) { return Complete-Gate $Paths $Record 'STOP' ('backup copy missing or altered: ' + $e.path + '; nothing changed. Manual review required.') $true }
     }
+    $indexCopy = Join-Path $backupDir 'git-index'
+    if ($manifest.indexSha256 -and (-not (Test-Path -LiteralPath $indexCopy) -or (Get-FileSha256 $indexCopy) -ne [string]$manifest.indexSha256)) {
+        return Complete-Gate $Paths $Record 'STOP' 'backup copy of the git index missing or altered; nothing changed. Manual review required.' $true
+    }
+
+    # Codex P1 على #337: الاستعادة تعيد كتابة ملفات الإنتاج، فتخضع لحارس المهام نفسه كالنشر والتراجع:
+    # غير مرئية/غير موجَّهة = STOP، انتظار الخمول، ثم إعادة الفحص (Running، مواعيد قريبة، git، HEAD).
+    $guard = Get-TaskGuard $Config @(Get-GateTaskInfo $Config (Get-GateTaskNames $Config)) ((Get-Date).ToUniversalTime())
+    $Record.tasks_invisible = @($guard.invisible)
+    $Record.tasks_unrouted = @($guard.unrouted)
+    if (@($guard.invisible).Count -gt 0) { return Complete-Gate $Paths $Record 'STOP' ('tasks not visible to the gate account (run as SYSTEM): ' + (@($guard.invisible) -join ', ') + '; nothing changed') $true }
+    if (@($guard.unrouted).Count -gt 0) { return Complete-Gate $Paths $Record 'STOP' ('tasks not routed through run-repo-task.ps1 (they would ignore deploying.flag): ' + (@($guard.unrouted) -join ', ') + '; nothing changed') $true }
+    # العلم قائم عادةً منذ الانقطاع؛ يُعاد إن فُقد كي تبقى المهام الموجَّهة متوقفة طوال الاستعادة.
+    if (-not (Test-Path -LiteralPath $Paths.Flag)) { Set-DeployFlag $Paths ([string]$inflight.from) }
+    $stillRunning = @(Wait-TasksIdle $Config)
+    if ($stillRunning.Count -gt 0) { return Complete-Gate $Paths $Record 'SKIP' ('not recovering yet, tasks still running: ' + ($stillRunning -join ', ') + '; nothing changed, flag kept') $true }
+    $blockers = @(Get-SwitchBlockers $Config $Head -AllowDirty)
+    if ($blockers.Count -gt 0) { return Complete-Gate $Paths $Record 'SKIP' ('not recovering yet: ' + ($blockers -join '; ') + '; nothing changed, flag kept') $true }
+
+    $indexRestored = $false
+    if ($manifest.indexSha256) {
+        $liveIndex = Join-Path (Join-Path $Config.repoPath '.git') 'index'
+        if (-not (Test-Path -LiteralPath $liveIndex) -or (Get-FileSha256 $liveIndex) -ne [string]$manifest.indexSha256) {
+            $tmpIndex = $liveIndex + '.ozk-recover'
+            Copy-Item -LiteralPath $indexCopy -Destination $tmpIndex -Force
+            Move-Item -LiteralPath $tmpIndex -Destination $liveIndex -Force
+            if ((Get-FileSha256 $liveIndex) -ne [string]$manifest.indexSha256) { return Complete-Gate $Paths $Record 'FAIL' 'git index restore verification failed; flag kept' $true }
+            $indexRestored = $true
+        }
+    }
     $quarantine = Join-Path $backupDir 'quarantine'
     $restored = 0; $moved = 0
     foreach ($e in @($manifest.files)) {
@@ -1012,7 +1052,7 @@ function Invoke-GateRecover($Config, $Paths, $Record, [string]$Head) {
     Clear-DeployFlag $Paths
     Close-InflightRecord $Paths $backupDir
     $Record.new_sha = $Head
-    return Complete-Gate $Paths $Record 'RECOVERED' ('interrupted ' + [string]$inflight.mode + ' undone: restored ' + $restored + ' file(s), quarantined ' + $moved + '; HEAD ' + $Head.Substring(0, 7) + ' and tree clean') $true
+    return Complete-Gate $Paths $Record 'RECOVERED' ('interrupted ' + [string]$inflight.mode + ' undone: restored ' + $restored + ' file(s), quarantined ' + $moved + ', git index restored: ' + $indexRestored + '; HEAD ' + $Head.Substring(0, 7) + ' and tree clean') $true
 }
 
 # تسجيل يدوي بعد أن يعيد المالك تشغيل عملية طويلة بنفسه. لا يمسّ أي مهمة ولا عملية.

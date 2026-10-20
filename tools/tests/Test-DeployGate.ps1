@@ -912,6 +912,73 @@ try {
     $r = Invoke-DeployGate -Config $rs.Config -GateMode 'Recover'
     Assert-True ($r.result -eq 'NOOP' -and (Get-TreeSnapshot $rs) -eq $snap) 'Recover after completion => NOOP, nothing changed'
 
+    Write-Host '== Codex P1 (231c878): Recover obeys the task guard; interrupted switch that wrote the index'
+    $ix = New-InitializedEnv
+    $x1 = Get-TestHead $ix
+    $x1Reader = (Get-FileHash -LiteralPath (Join-Path $ix.Repo 'tools/reader.ps1') -Algorithm SHA256).Hash.ToLowerInvariant()
+    $x2 = Publish-TestRelease $ix @{ 'tools/reader.ps1' = "'index v2'`n"; 'tools/index-added.ps1' = "'new in v2'`n" } -Approve
+    # انقطاع بعد كتابة الفهرس والملفات على الهدف وقبل تحريك HEAD (read-tree -m -u بلا تحديث المرجع).
+    $script:MergeOverride = {
+        param($Config, $Target)
+        [void](Invoke-GateGit $Config @('read-tree', '-m', '-u', 'HEAD', $Target))
+        return [pscustomobject]@{ Code = 128; Out = @('fatal: interrupted after index write'); Text = 'fatal: interrupted after index write' }
+    }
+    $r = Invoke-DeployGate -Config $ix.Config -GateMode 'Deploy'
+    $script:MergeOverride = $null
+    $staged = Invoke-TestGit $ix.Repo @('diff', '--cached', '--name-only')
+    Assert-True ($r.result -eq 'FAIL' -and (Get-TestHead $ix) -eq $x1 -and $staged -like '*tools/reader.ps1*') 'interrupted switch left the index describing the target (staged changes), HEAD unchanged'
+    $man = [System.IO.File]::ReadAllText((Join-Path $r.backup_dir 'manifest.json')) | ConvertFrom-Json
+    Assert-True ($man.indexSha256 -match '^[0-9a-f]{64}$' -and (Test-Path -LiteralPath (Join-Path $r.backup_dir 'git-index'))) 'the pre-switch git index is backed up with its SHA256'
+
+    # الحارس قبل أي إعادة كتابة: مهمة نشطة / غير مرئية / بدأت بعد الانتظار ⇒ لا مساس.
+    $snap = Get-TreeSnapshot $ix
+    $idxBefore = (Get-FileHash -LiteralPath (Join-Path $ix.Repo '.git/index') -Algorithm SHA256).Hash
+    $script:Running = @('T1')
+    $r = Invoke-DeployGate -Config $ix.Config -GateMode 'Recover'
+    Assert-True ($r.result -eq 'SKIP' -and $r.reason -like '*tasks still running*T1*nothing changed*') 'Recover while a production task runs => SKIP'
+    $script:Running = @()
+    $script:TaskInfoOverride = @([pscustomobject]@{ name = 'T1'; visible = $false; state = ''; nextRunUtc = $null; actionText = '' })
+    $r = Invoke-DeployGate -Config $ix.Config -GateMode 'Recover'
+    Assert-True ($r.result -eq 'STOP' -and $r.reason -like '*not visible*nothing changed*') 'Recover with an invisible task => STOP'
+    $script:TaskInfoOverride = $null
+    $ix.Config.routingExempt = @('T1')
+    $exIdle = { param($Config, $Names) @($Names | ForEach-Object { [pscustomobject]@{ name = $_; visible = $true; state = 'Ready'; nextRunUtc = (Get-Date).ToUniversalTime().AddHours(1); actionText = ('powershell.exe -File "' + (Join-Path $Config.repoPath 'tools/reader.ps1') + '"') } }) }
+    $exRunning = { param($Config, $Names) @($Names | ForEach-Object { [pscustomobject]@{ name = $_; visible = $true; state = 'Running'; nextRunUtc = (Get-Date).ToUniversalTime().AddDays(1); actionText = ('powershell.exe -File "' + (Join-Path $Config.repoPath 'tools/reader.ps1') + '"') } }) }
+    $script:TaskInfoSequence = @($exIdle, $exRunning)
+    $r = Invoke-DeployGate -Config $ix.Config -GateMode 'Recover'
+    $script:TaskInfoSequence = $null
+    $ix.Config.routingExempt = @()
+    Assert-True ($r.result -eq 'SKIP' -and $r.reason -like '*tasks started after the idle wait*') 'Recover when an exempt task starts after the idle wait => SKIP'
+    Assert-True ((Get-TreeSnapshot $ix) -eq $snap -and (Get-FileHash -LiteralPath (Join-Path $ix.Repo '.git/index') -Algorithm SHA256).Hash -eq $idxBefore -and (Test-Path -LiteralPath (Join-Path $ix.Gate 'inflight.json'))) 'guard failures during Recover => no file, index, flag or record change'
+
+    $idxCopy = Join-Path (([System.IO.File]::ReadAllText((Join-Path $ix.Gate 'inflight.json')) | ConvertFrom-Json).backupDir) 'git-index'
+    $idxBytes = [System.IO.File]::ReadAllBytes($idxCopy)
+    [System.IO.File]::WriteAllBytes($idxCopy, [byte[]](1, 2, 3))
+    $r = Invoke-DeployGate -Config $ix.Config -GateMode 'Recover'
+    Assert-True ($r.result -eq 'STOP' -and $r.reason -like '*git index missing or altered*' -and (Get-TreeSnapshot $ix) -eq $snap) 'altered backup of the git index => STOP, nothing changed'
+    [System.IO.File]::WriteAllBytes($idxCopy, $idxBytes)
+
+    $r = Invoke-DeployGate -Config $ix.Config -GateMode 'Recover'
+    $nowReader = (Get-FileHash -LiteralPath (Join-Path $ix.Repo 'tools/reader.ps1') -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-True ($r.result -eq 'RECOVERED' -and $r.reason -like '*git index restored: True*' -and (Get-TestHead $ix) -eq $x1 -and $nowReader -eq $x1Reader -and -not (Test-Path -LiteralPath (Join-Path $ix.Repo 'tools/index-added.ps1'))) 'Recover restores the git index and the files of an interrupted switch'
+    Assert-True (@(Get-DirtyEntries $ix.Config).Count -eq 0 -and (Invoke-TestGit $ix.Repo @('diff', '--cached', '--name-only')) -eq '' -and -not (Test-Path -LiteralPath (Join-Path $ix.Gate 'inflight.json'))) 'nothing staged, tree clean, record closed'
+    $snap = Get-TreeSnapshot $ix
+    $r = Invoke-DeployGate -Config $ix.Config -GateMode 'Recover'
+    Assert-True ($r.result -eq 'NOOP' -and (Get-TreeSnapshot $ix) -eq $snap) 'second Recover => NOOP'
+    $r = Invoke-DeployGate -Config $ix.Config -GateMode 'Deploy'
+    Assert-True ($r.result -eq 'OK' -and (Get-TestHead $ix) -eq $x2) 'the release then deploys cleanly'
+
+    $script:ResetOverride = {
+        param($Config, $Target)
+        [void](Invoke-GateGit $Config @('read-tree', '-m', '-u', 'HEAD', $Target))
+        return [pscustomobject]@{ Code = 128; Out = @('interrupted reset after index write'); Text = 'interrupted reset after index write' }
+    }
+    $r = Invoke-DeployGate -Config $ix.Config -GateMode 'Rollback' -RollbackTo $x1
+    $script:ResetOverride = $null
+    Assert-True ($r.result -eq 'FAIL' -and (Get-TestHead $ix) -eq $x2 -and (Invoke-TestGit $ix.Repo @('diff', '--cached', '--name-only')) -ne '') 'interrupted reset --keep left a staged index'
+    $r = Invoke-DeployGate -Config $ix.Config -GateMode 'Recover'
+    Assert-True ($r.result -eq 'RECOVERED' -and (Get-TestHead $ix) -eq $x2 -and @(Get-DirtyEntries $ix.Config).Count -eq 0 -and (Test-Path -LiteralPath (Join-Path $ix.Repo 'tools/index-added.ps1'))) 'Recover undoes the interrupted rollback including its index'
+
     Write-Host '== Safety invariants in the source'
     $src = [System.IO.File]::ReadAllText($gateScript)
     Assert-True ($src -notmatch "'pull'" -and $src -notmatch "'rebase'" -and $src -notmatch "'--hard'") 'gate never passes pull, rebase or --hard to git'
