@@ -33,6 +33,9 @@ assert.doesNotMatch(code, /<[a-z\/][^>]*>/i, "لا HTML في الرسائل");
 assert.doesNotMatch(code, /telegram_bot_token|api\.telegram\.org|vault\.|net\.http_post/i, "لا أسرار ولا إرسال مباشر: notify_telegram فقط");
 assert.match(code, /public\.notify_telegram\('price_sync_outage'/);
 assert.match(code, /public\.notify_telegram\('price_sync_recovered'/);
+assert.match(code, /public\.notify_telegram\('price_sync_partial'/);
+assert.match(code, /and not probe_superseded then/, "محاولة أحدث من فحص «معطّلة» تُسقطه");
+assert.match(code, /when 'ameen_unreachable' then '\^winfail:apply-to-ameen\$'/, "امتصاص تنبيه Windows المطابق");
 assert.match(code, /incident_key\s+uuid not null default gen_random_uuid\(\) unique/, "مفتاح حادثة لا يتكرر بعد تراجع وإعادة تطبيق");
 assert.doesNotMatch(code, /'price-sync-outage:' \|\| inc\.id/, "لا معرّف تسلسلي في مفتاح dedupe");
 assert.doesNotMatch(code, /exception\s+when/i, "فشل إدراج الرسالة يُرجع الدورة كلها (لا التقاط)");
@@ -46,13 +49,13 @@ assert.match(rollback, /set enabled = true where task_key = 'price-sync'/);
 assert.doesNotMatch(rollback.replace(/--.*$/gm, ""), /price_sync_heartbeats|notify_telegram/);
 
 // التوجيه في الحزم 12/13 (غير مطبَّقة): نوع الحدث ومفتاحه لا يقعان تحت قواعد «الملخص».
-const dedupeOpen = "price-sync-outage:3f0c2a1e-7b9d-4c1e-9a55-0d6b2c8e4f10:open";
+const dedupeKeys = ["price-sync-outage:3f0c2a1e-7b9d-4c1e-9a55-0d6b2c8e4f10:open", "price-sync-partial:3f0c2a1e-7b9d-4c1e-9a55-0d6b2c8e4f10:open"];
 for (const rule of [/^price-sync:/, /^winfail:/, /^project-cron-failure:/, /^(price-sync:|winfail:|project-cron-failure:)/]) {
-  assert.ok(!rule.test(dedupeOpen), `مفتاح الحادثة يطابق قاعدة ملخص ${rule}`);
+  for (const key of dedupeKeys) assert.ok(!rule.test(key), `مفتاح الحادثة ${key} يطابق قاعدة ملخص ${rule}`);
 }
 for (const file of ["supabase/proposed/12-digest-only-atomic-bundle.sql", "supabase/proposed/13-digest-routing-for-noncritical-alerts.sql", "supabase/proposed/15-ameen-sync-outage-incident.sql"]) {
   const text = read(file);
-  assert.doesNotMatch(text, /price_sync_outage|price_sync_recovered|price-sync-outage/, `${file} يعرّف نوع حدثنا`);
+  assert.doesNotMatch(text, /price_sync_outage|price_sync_partial|price_sync_recovered|price-sync-outage|price-sync-partial/, `${file} يعرّف نوع حدثنا`);
 }
 console.log("  ✓ عقود ساكنة: مصدر واحد، ساعة الخادم، قفل، حادثة واحدة، بلا أسرار ولا HTML، توافق 12/13/15");
 
@@ -93,42 +96,67 @@ const text = `${output(create)}${output(run)}`;
 const passes = (text.match(/PASS /g) || []).length;
 let failed = create.status !== 0 || run.status !== 0 || !text.includes("PRICE_SYNC_MONITOR_OK") || /TEST FAIL/.test(text);
 
-// تزامن حقيقي: دورتان من اتصالين منفصلين في اللحظة نفسها على انقطاع قائم.
-let concurrency = "skipped";
+// تزامن حقيقي: 3 دورات من اتصالات منفصلة في اللحظة نفسها، في أربع حالات انتقال.
+const RESET = `delete from public.price_sync_heartbeats; delete from private.price_sync_incidents;
+  delete from private.price_sync_monitor_state; delete from public.telegram_outbox;`;
+const HB = (minutesAgo, outcome) => `insert into public.price_sync_heartbeats
+  (received_at, writer_id, kind, host, occurred_at, outcome, summary, last_success_at)
+  values (now() - interval '${minutesAgo} minutes', gen_random_uuid(), 'attempt', 'OZK2026', now(), '${outcome}',
+  '{"applied_wholesale":321,"applied_retail":317,"conflict_count":${outcome === "applied_with_conflicts" ? 2 : 0},"not_in_ameen":0}'::jsonb,
+  ${["applied", "no_changes"].includes(outcome) ? `now() - interval '${minutesAgo} minutes'` : "null"});`;
+const STATE = `insert into private.price_sync_monitor_state values (true, now() - interval '2 hours', now() - interval '1 minute', 'HEALTHY', 'applied');`;
+const OPEN = (kind, state) => `insert into private.price_sync_incidents (kind, opened_at, opened_state, current_state, last_seen_at, alert_sent_at, announced_by)
+  values ('${kind}', now() - interval '20 minutes', '${state}', '${state}', now() - interval '1 minute', now() - interval '20 minutes', 'monitor');`;
+const SCENARIOS = [
+  { name: "انقطاع قائم", setup: `${RESET} ${HB(40, "applied")} ${STATE}`,
+    expect: { price_sync_outage: 1, open: 1 }, winner: "alert_sent" },
+  { name: "أول تشغيل بلا حالة", setup: `${RESET} ${HB(2, "applied")}`,
+    expect: { price_sync_outage: 0, open: 0 }, winner: "baseline" },
+  { name: "انقطاع ← جزئي", setup: `${RESET} ${HB(40, "applied")} ${HB(6, "applied_with_conflicts")} ${HB(1, "applied_with_conflicts")} ${STATE} ${OPEN("outage", "STALE")}`,
+    expect: { price_sync_partial: 1, open: 1 }, winner: "outage_to_partial" },
+  { name: "تعافٍ", setup: `${RESET} ${HB(1, "applied")} ${STATE} ${OPEN("outage", "STALE")}`,
+    expect: { price_sync_recovered: 1, open: 0 }, winner: "recovery_sent" }
+];
+const tickSql = "begin; select private.price_sync_monitor_tick(); select pg_sleep(0.5); commit;";
+const parallel = () => new Promise((resolve) => {
+  const child = spawn(command, argvOf(["-d", DB, "-X", "-v", "ON_ERROR_STOP=1", "-tAc", tickSql]));
+  let out = "";
+  child.stdout.on("data", (d) => { out += d; });
+  child.stderr.on("data", (d) => { out += d; });
+  child.on("close", (status) => resolve({ status, out }));
+});
+const concurrency = [];
 if (!failed) {
-  const setup = psql(["-d", DB, "-X", "-v", "ON_ERROR_STOP=1", "-c", `
-    delete from public.price_sync_heartbeats; delete from private.price_sync_incidents;
-    delete from private.price_sync_monitor_state; delete from public.telegram_outbox;
-    insert into public.price_sync_heartbeats (received_at, writer_id, kind, host, occurred_at, outcome, summary, last_success_at)
-      values (now() - interval '40 minutes', gen_random_uuid(), 'attempt', 'OZK2026', now(), 'applied', '{}'::jsonb, now() - interval '40 minutes');
-    insert into private.price_sync_monitor_state values (true, now() - interval '2 hours', now() - interval '1 minute', 'HEALTHY', 'applied');`]);
-  const tickSql = "begin; select private.price_sync_monitor_tick(); select pg_sleep(0.5); commit;";
-  const parallel = () => new Promise((resolve) => {
-    const child = spawn(command, argvOf(["-d", DB, "-X", "-v", "ON_ERROR_STOP=1", "-tAc", tickSql]));
-    let out = "";
-    child.stdout.on("data", (d) => { out += d; });
-    child.stderr.on("data", (d) => { out += d; });
-    child.on("close", (status) => resolve({ status, out }));
-  });
-  const results = await Promise.all([parallel(), parallel(), parallel()]);
-  const count = psql(["-d", DB, "-tAc", "select count(*) from public.telegram_outbox where event_type = 'price_sync_outage'"]);
-  const opened = psql(["-d", DB, "-tAc", "select count(*) from private.price_sync_incidents where closed_at is null"]);
-  const ticks = results.map((r) => (r.out.match(/\b(alert_sent|incident_ongoing|healthy|baseline\w*|recovery_sent)\b/) || ["?"])[0]).sort().join(",");
-  concurrency = `${count.stdout.trim()} alert / ${opened.stdout.trim()} incident (${ticks})`;
-  if (setup.status !== 0 || results.some((r) => r.status !== 0) || count.stdout.trim() !== "1" || opened.stdout.trim() !== "1") {
-    failed = true;
-    console.error(output(setup), results.map((r) => r.out).join("\n"));
+  for (const scenario of SCENARIOS) {
+    const setup = psql(["-d", DB, "-X", "-v", "ON_ERROR_STOP=1", "-c", scenario.setup]);
+    const results = await Promise.all([parallel(), parallel(), parallel()]);
+    const counts = {};
+    for (const key of Object.keys(scenario.expect)) {
+      const q = key === "open"
+        ? "select count(*) from private.price_sync_incidents where closed_at is null"
+        : `select count(*) from public.telegram_outbox where event_type = '${key}'`;
+      counts[key] = Number(psql(["-d", DB, "-tAc", q]).stdout.trim());
+    }
+    const ticks = results.map((r) => (r.out.match(/\b(alert_\w+|partial_\w+|outage_to_partial|incident_\w+|healthy|baseline\w*|recovery_sent|closed_silent)\b/) || ["?"])[0]);
+    const winners = ticks.filter((t) => t === scenario.winner).length;
+    const ok = setup.status === 0 && results.every((r) => r.status === 0) && winners === 1
+      && Object.entries(scenario.expect).every(([k, v]) => counts[k] === v);
+    concurrency.push(`${ok ? "✓" : "✗"} ${scenario.name}: ${ticks.sort().join(",")} ${JSON.stringify(counts)}`);
+    if (!ok) {
+      failed = true;
+      console.error(output(setup), results.map((r) => r.out).join("\n"));
+    }
   }
 }
 psql(["-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", `drop database if exists ${DB}`]);
 
 if (failed) {
   console.error(text);
-  console.error(`concurrency: ${concurrency}`);
+  console.error(`concurrency:\n${concurrency.join("\n")}`);
   console.error("check-price-sync-monitor: live SQL test failed");
   process.exit(1);
 }
-assert.ok(passes >= 70, `عدد التأكيدات الحية أقل من المتوقع (${passes})`);
+assert.ok(passes >= 110, `عدد التأكيدات الحية أقل من المتوقع (${passes})`);
 console.log(`  ✓ اختبار حي على PostgreSQL: ${passes} تأكيداً`);
-console.log(`  ✓ تزامن: 3 دورات متوازية ⇒ ${concurrency}`);
+for (const line of concurrency) console.log(`  تزامن (3 دورات متوازية) ${line}`);
 console.log("check-price-sync-monitor: اجتاز الفحص.");
