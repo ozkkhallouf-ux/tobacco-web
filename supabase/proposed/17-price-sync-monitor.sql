@@ -1,7 +1,7 @@
 -- proposed/17-price-sync-monitor.sql
 --
 -- **غير مطبَّق على الإنتاج ويتطلب موافقة المالك الصريحة.** يُنشئ مهمة cron جديدة ويعطّل صف المراقب
--- القديم «price-sync» (راجع «منع التكرار» أدناه). يرفع عدد مهام cron بواحدة (راجع «ترتيب التطبيق»).
+-- القديم «price-sync» (راجع «منع التكرار» أدناه). **يتطلب 12 ثم 13 ثم 15 مطبَّقة فعلاً** (راجع «ترتيب التطبيق»).
 --
 -- OZK Price Sync Protection — المرحلة الثالثة: مراقبة مستقلة على Supabase لمزامنة الأسعار
 -- (الموقع ← الأمين)، تعمل حتى لو كان OZK2026 مطفأً أو بلا إنترنت، وتنبّه في تيليغرام مرة واحدة
@@ -62,18 +62,45 @@
 -- والمفتاحان «price-sync-outage:»/«price-sync-partial:» لا تطابق قواعد التوجيه إلى الملخص فيهما (sync_failure،
 -- ‎^price-sync:، ‎^winfail:) فيبقى التنبيه فورياً. و12/15 تقرآن صفوف project_task_monitors المفعّلة فقط.
 --
--- ترتيب التطبيق: 17 لا يغيّر أي دالة تثبّت 12/13/15 بصمتها، لكنه يضيف مهمة cron. خطة 12→13→15 تشترط
--- «16/16 cron نشطة» قبل 12 و«17 مهمة» بعد 15؛ إن طُبّق 17 أولاً تصبح 17/17 قبل 12 و18 بعد 15. وبعد 12/13
--- يذهب فشل cron:price-sync-monitor نفسه (project-cron-failure:*) إلى الملخص المسائي لا فورياً.
+-- ترتيب التطبيق (قرار المالك 2026-10-20): **17 لا يُطبَّق إلا بعد 12 ثم 13 ثم 15 فعلياً**. الحارس في أول الملف
+-- يتحقق من الواقع الحي لا من عدد الهجرات:
+--   * 12: private.digest_bundle_snapshot وprivate.ops_events وprivate.project_task_incidents، وجسم
+--     private.monitor_project_tasks() = md5 fcaf57eb… (جسم 12 بالضبط).
+--   * 13: private.digest_routing_snapshot، وpublic.health_lifecycle = 1cd6b62f…، وprivate.ops_event_route = 7228700c….
+--   * 15: private.sync_outage_snapshot، وprivate.notify_telegram_dispatch = c35b5c19… (جسم 15 النهائي)،
+--     وprivate.daily_open_faults_section = d5bb80ca…، وprivate.sync_outage_tick = 91e6d4d8…، ومهمة cron
+--     sync-outage-tick نشطة.
+--   * الترتيب: أول taken_at في لقطة 12 < لقطة 13 < لقطة 15 (كل حزمة تأخذ لقطتها في معاملتها).
+--   * سجل الهجرات: إن سُجّلت أيٌّ من الحزم الثلاث في supabase_migrations.schema_migrations (بأسمائها)
+--     فيجب أن تُسجَّل الثلاث وبإصدارات تصاعدية 12 < 13 < 15. العدد وحده لا يكفي.
+-- البصمات مأخوذة من ملفات 12/13/15 في main نفسها، وscripts/check-price-sync-monitor.mjs يفشل إن انجرفت.
+-- ذرّية: كل جملة تنشئ شيئاً داخل كتلة تثبيت واحدة لا تعمل إلا إن نجح الحارس في المعاملة نفسها (إعداد
+-- محلي app.price_sync_monitor_17). حارس فاشل لا ينشئ جدولاً ولا دالة ولا مهمة cron، حتى لو نُفِّذ الملف
+-- أمراً بأمر (autocommit). بعد 17 يصبح عدد مهام cron 18 (17 بعد 15 + price-sync-monitor). وبعد 13 يذهب فشل
+-- cron:price-sync-monitor نفسه (project-cron-failure:*) إلى الملخص المسائي لا فورياً.
 --
 -- الأمن: الدوال والجداول في private بلا أي منح لـ anon/authenticated/service_role؛ لا يستدعيها إلا
 -- cron (postgres). الموظف لا يستطيع فتح حادثة أو إعلان تعافٍ، ولا كتابة نبض (16).
 --
 -- التراجع: 17-price-sync-monitor-rollback.sql. الاختبار: supabase/tests/price-sync-monitor.sql عبر
--- scripts/check-price-sync-monitor.mjs (PostgreSQL محلي في CI).
+-- scripts/check-price-sync-monitor.mjs (PostgreSQL محلي في CI)، ومعه اختبارات الحارس لكل حالة تطبيق جزئي.
+-- **طريقة التشغيل**: طلب واحد (apply_migration أو execute_sql) أو psql --single-transaction -v ON_ERROR_STOP=1.
 
-do $pre$
+select set_config('app.price_sync_monitor_17', 'on', true);
+
+-- ── الحارس: 16 ثم 12 ثم 13 ثم 15 مطبَّقة فعلاً وبالترتيب — قبل أي تعديل ─────────────────────────
+do $guard17$
+declare
+  v_md5 text;
+  t12 timestamptz; t13 timestamptz; t15 timestamptz;
+  v12 text; v13 text; v15 text; n12 int; n13 int; n15 int;
 begin
+  -- تنفيذ أمر بأمر (autocommit) يُسقط الإعداد المحلي أعلاه فيتوقف هنا، وكتلة التثبيت تتوقف كذلك.
+  if coalesce(current_setting('app.price_sync_monitor_17', true), '') <> 'on' then
+    raise exception 'proposed/17 must run as a single transaction (one request or psql --single-transaction); refusing to apply statement-by-statement';
+  end if;
+
+  -- 16 والبنية الأساسية.
   if to_regclass('public.price_sync_heartbeats') is null then
     raise exception 'proposed/17 requires proposed/16 (public.price_sync_heartbeats)';
   end if;
@@ -83,13 +110,73 @@ begin
   if to_regclass('public.telegram_outbox') is null then
     raise exception 'proposed/17 requires public.telegram_outbox';
   end if;
+
+  -- 12: الحزمة الذرّية للملخص.
+  select md5(prosrc) into v_md5 from pg_proc where oid = to_regprocedure('private.monitor_project_tasks()');
+  if to_regclass('private.digest_bundle_snapshot') is null or to_regclass('private.ops_events') is null
+     or to_regclass('private.project_task_incidents') is null
+     or v_md5 is distinct from 'fcaf57ebe99fd132762a426ffd4873e9' then
+    raise exception 'proposed/17 requires proposed/12 (digest bundle) to be applied first (monitor_project_tasks md5 %)', coalesce(v_md5, 'missing');
+  end if;
+
+  -- 13: توجيه التنبيهات غير الحرجة إلى الملخص.
+  if to_regclass('private.digest_routing_snapshot') is null
+     or md5((select prosrc from pg_proc where oid = to_regprocedure('public.health_lifecycle(text,text,integer,text)'))) is distinct from '1cd6b62f9474327d3d32e0b993c548c4'
+     or md5((select prosrc from pg_proc where oid = to_regprocedure('private.ops_event_route(text,text)'))) is distinct from '7228700c82cfc2948563abfc3d2025d1' then
+    raise exception 'proposed/17 requires proposed/13 (digest routing) to be applied after 12';
+  end if;
+
+  -- 15: حادثة انقطاع مزامنة الأمين (الجسم النهائي للإرسال).
+  select md5(prosrc) into v_md5 from pg_proc where oid = to_regprocedure('private.notify_telegram_dispatch(text,text,text,integer,jsonb)');
+  if to_regclass('private.sync_outage_snapshot') is null
+     or v_md5 is distinct from 'c35b5c198c2b10b3901471bf5b1cbec1'
+     or md5((select prosrc from pg_proc where oid = to_regprocedure('private.daily_open_faults_section(timestamptz,integer)'))) is distinct from 'd5bb80ca095984e779928b57ab1f3a95'
+     or md5((select prosrc from pg_proc where oid = to_regprocedure('private.sync_outage_tick(timestamptz)'))) is distinct from '91e6d4d8517fd766f048902d57e1a94e' then
+    raise exception 'proposed/17 requires proposed/15 (Ameen sync outage incident) to be applied after 13 (notify_telegram_dispatch md5 %)', coalesce(v_md5, 'missing');
+  end if;
+  if to_regnamespace('cron') is not null then
+    if not exists (select 1 from cron.job where jobname = 'sync-outage-tick' and active) then
+      raise exception 'proposed/17 requires proposed/15: cron job sync-outage-tick missing or inactive';
+    end if;
+  end if;
+
+  -- الترتيب الفعلي: كل حزمة أخذت لقطتها في معاملتها، فالترتيب الزمني للقطات هو ترتيب التطبيق.
+  execute 'select min(taken_at) from private.digest_bundle_snapshot' into t12;
+  execute 'select min(taken_at) from private.digest_routing_snapshot' into t13;
+  execute 'select min(taken_at) from private.sync_outage_snapshot' into t15;
+  if t12 is null or t13 is null or t15 is null or not (t12 < t13 and t13 < t15) then
+    raise exception 'proposed/17 requires 12, 13, 15 applied in that order (snapshots: 12=%, 13=%, 15=%)', t12, t13, t15;
+  end if;
+
+  -- سجل الهجرات: معرّفات وإصدارات لا عدد. إن سُجّلت أيٌّ منها فيجب أن تُسجَّل الثلاث وبترتيب تصاعدي.
+  if to_regclass('supabase_migrations.schema_migrations') is not null then
+    execute $q$select count(*) filter (where name ~ 'digest_only_atomic_bundle'), max(version) filter (where name ~ 'digest_only_atomic_bundle'),
+                      count(*) filter (where name ~ 'digest_routing'), max(version) filter (where name ~ 'digest_routing'),
+                      count(*) filter (where name ~ 'ameen_sync_outage'), max(version) filter (where name ~ 'ameen_sync_outage')
+                 from supabase_migrations.schema_migrations$q$
+      into n12, v12, n13, v13, n15, v15;
+    if n12 + n13 + n15 > 0 and not (n12 = 1 and n13 = 1 and n15 = 1 and v12 < v13 and v13 < v15) then
+      raise exception 'proposed/17: schema_migrations records 12/13/15 inconsistently (12=% x%, 13=% x%, 15=% x%); expected each once, versions ascending', v12, n12, v13, n13, v15, n15;
+    end if;
+  end if;
+
+  perform set_config('app.price_sync_monitor_17', 'guard-passed', true);
 end
-$pre$;
+$guard17$;
 
-create schema if not exists private;
+-- ── التثبيت: لا يعمل إلا إن نجح الحارس في المعاملة نفسها ─────────────────────────────────────
+do $install17$
+begin
+  if coalesce(current_setting('app.price_sync_monitor_17', true), '') <> 'guard-passed' then
+    raise exception 'proposed/17: guard did not pass in this transaction; nothing installed';
+  end if;
 
--- ── الإعدادات والحالة ────────────────────────────────────────────────────────────────────────
+  execute $s01$
+create schema if not exists private
+$s01$;
 
+  -- ── الإعدادات والحالة ────────────────────────────────────────────────────────────────────────
+  execute $s02$
 create table if not exists private.price_sync_monitor_config (
   id                        boolean primary key default true check (id),
   stale_after_minutes       integer not null default 15 check (stale_after_minutes between 5 and 240),
@@ -99,17 +186,24 @@ create table if not exists private.price_sync_monitor_config (
   baseline_escalate_minutes integer not null default 30 check (baseline_escalate_minutes between 5 and 1440),
   absorb_windows_minutes    integer not null default 30 check (absorb_windows_minutes between 0 and 240),
   device_label              text    not null default 'OZK2026'
-);
-insert into private.price_sync_monitor_config (id) values (true) on conflict (id) do nothing;
+)
+$s02$;
 
+  execute $s03$
+insert into private.price_sync_monitor_config (id) values (true) on conflict (id) do nothing
+$s03$;
+
+  execute $s04$
 create table if not exists private.price_sync_monitor_state (
   id                boolean primary key default true check (id),
   baseline_at       timestamptz not null,
   last_evaluated_at timestamptz not null,
   last_state        text not null,
   last_reason       text
-);
+)
+$s04$;
 
+  execute $s05$
 create table if not exists private.price_sync_incidents (
   id               bigint generated always as identity primary key,
   -- مفتاح الحادثة في dedupe: UUID لا يتكرر بعد تراجع وإعادة تطبيق (الهوية id تبدأ من 1 من جديد
@@ -132,15 +226,21 @@ create table if not exists private.price_sync_incidents (
     and current_state in ('STALE','FAILED','DISABLED','UNKNOWN','PARTIAL')),
   constraint price_sync_incidents_kind_state check (
     (kind = 'partial') = (opened_state = 'PARTIAL'))
-);
+)
+$s05$;
+
+  execute $s06$
 create unique index if not exists price_sync_incidents_one_open
-  on private.price_sync_incidents ((true)) where closed_at is null;
+  on private.price_sync_incidents ((true)) where closed_at is null
+$s06$;
 
+  execute $s07$
 revoke all on table private.price_sync_monitor_config, private.price_sync_monitor_state, private.price_sync_incidents
-  from public, anon, authenticated, service_role;
+  from public, anon, authenticated, service_role
+$s07$;
 
--- ── التصنيف (قراءة فقط) ─────────────────────────────────────────────────────────────────────
-
+  -- ── التصنيف (قراءة فقط) ─────────────────────────────────────────────────────────────────────
+  execute $s08$
 create or replace function private.price_sync_monitor_assess(p_now timestamptz default now())
 returns table (
   state text, reason text,
@@ -245,10 +345,11 @@ begin
   end if;
   return next;
 end;
-$$;
+$$
+$s08$;
 
--- ── نصوص الرسائل (بلا HTML، بتوقيت دمشق) ────────────────────────────────────────────────────
-
+  -- ── نصوص الرسائل (بلا HTML، بتوقيت دمشق) ────────────────────────────────────────────────────
+  execute $s09$
 create or replace function private.price_sync_monitor_time(p_at timestamptz, p_now timestamptz)
 returns text
 language sql
@@ -261,8 +362,10 @@ as $$
       then pg_catalog.to_char(p_at at time zone 'Asia/Damascus', 'HH24:MI')
     else pg_catalog.to_char(p_at at time zone 'Asia/Damascus', 'YYYY-MM-DD HH24:MI')
   end;
-$$;
+$$
+$s09$;
 
+  execute $s10$
 create or replace function private.price_sync_monitor_minutes(p_from timestamptz, p_now timestamptz)
 returns text
 language sql
@@ -270,8 +373,10 @@ stable
 set search_path = ''
 as $$
   select coalesce((pg_catalog.floor(extract(epoch from (p_now - p_from)) / 60))::bigint::text || ' دقيقة', 'غير معروفة');
-$$;
+$$
+$s10$;
 
+  execute $s11$
 create or replace function private.price_sync_monitor_reason_text(p_reason text)
 returns text
 language sql
@@ -292,8 +397,10 @@ as $$
     when 'preview_only'           then 'المهمة تعمل بوضع المعاينة ولا تكتب في الأمين'
     else coalesce(p_reason, 'غير معروف')
   end;
-$$;
+$$
+$s11$;
 
+  execute $s12$
 create or replace function private.price_sync_monitor_alert_text(
   p_state text, p_reason text, p_last_success timestamptz, p_since timestamptz, p_now timestamptz, p_device text)
 returns text
@@ -319,9 +426,11 @@ as $$
     '',
     'المراقبة: Supabase',
     'الجهاز: ' || coalesce(p_device, 'OZK2026'));
-$$;
+$$
+$s12$;
 
--- p_after_outage: الرسالة نفسها تُنهي حادثة انقطاع مُعلنة (انتقال انقطاع ← جزئي).
+  -- p_after_outage: الرسالة نفسها تُنهي حادثة انقطاع مُعلنة (انتقال انقطاع ← جزئي).
+  execute $s13$
 create or replace function private.price_sync_monitor_partial_text(
   p_after_outage boolean, p_outage_since timestamptz, p_last_alive timestamptz,
   p_wholesale integer, p_retail integer, p_conflicts integer, p_not_in_ameen integer,
@@ -348,8 +457,10 @@ as $$
     '',
     'المراقبة: Supabase',
     'الجهاز: ' || coalesce(p_device, 'OZK2026'));
-$$;
+$$
+$s13$;
 
+  execute $s14$
 create or replace function private.price_sync_monitor_recovery_text(
   p_kind text, p_last_success timestamptz, p_wholesale integer, p_retail integer, p_conflicts integer,
   p_opened_at timestamptz, p_now timestamptz)
@@ -369,11 +480,13 @@ as $$
     'مدة الحادثة: ' || private.price_sync_monitor_minutes(p_opened_at, p_now),
     '',
     'انتهت الحادثة.');
-$$;
+$$
+$s14$;
 
--- تنبيه Windows مطابق لسبب الفشل خلال النافذة **ومنذ آخر وصول حيّ** (أي من سلسلة الفشل الحالية نفسها)،
--- لمنع التكرار بلا تعديل Windows. null إن لم يوجد. الحد الأدنى p_since ضروري: مفاتيح Windows ثابتة بنافذة
--- 60 د، فانقطاع ثانٍ بعد تعافٍ قصير لا يُنتج صفاً جديداً، وصف الانقطاع الأول لا يجوز أن يُعلن الثاني (Codex P1).
+  -- تنبيه Windows مطابق لسبب الفشل خلال النافذة **ومنذ آخر وصول حيّ** (أي من سلسلة الفشل الحالية نفسها)،
+  -- لمنع التكرار بلا تعديل Windows. null إن لم يوجد. الحد الأدنى p_since ضروري: مفاتيح Windows ثابتة بنافذة
+  -- 60 د، فانقطاع ثانٍ بعد تعافٍ قصير لا يُنتج صفاً جديداً، وصف الانقطاع الأول لا يجوز أن يُعلن الثاني (Codex P1).
+  execute $s15$
 create or replace function private.price_sync_monitor_windows_alert_at(p_reason text, p_now timestamptz, p_minutes integer, p_since timestamptz)
 returns timestamptz
 language sql
@@ -394,10 +507,11 @@ as $$
            when 'verify_mismatch'   then '^price-sync:mismatch'
            when 'verify_failed'     then '^price-sync:verify-failed'
            else '^$a' end);
-$$;
+$$
+$s15$;
 
--- ── دورة المراقبة ──────────────────────────────────────────────────────────────────────────
-
+  -- ── دورة المراقبة ──────────────────────────────────────────────────────────────────────────
+  execute $s16$
 create or replace function private.price_sync_monitor_tick(p_now timestamptz default now())
 returns text
 language plpgsql
@@ -553,30 +667,58 @@ begin
    where id;
   return v_result;
 end;
-$$;
+$$
+$s16$;
 
-revoke all on function private.price_sync_monitor_assess(timestamptz) from public, anon, authenticated, service_role;
-revoke all on function private.price_sync_monitor_time(timestamptz, timestamptz) from public, anon, authenticated, service_role;
-revoke all on function private.price_sync_monitor_minutes(timestamptz, timestamptz) from public, anon, authenticated, service_role;
-revoke all on function private.price_sync_monitor_reason_text(text) from public, anon, authenticated, service_role;
-revoke all on function private.price_sync_monitor_alert_text(text, text, timestamptz, timestamptz, timestamptz, text) from public, anon, authenticated, service_role;
-revoke all on function private.price_sync_monitor_partial_text(boolean, timestamptz, timestamptz, integer, integer, integer, integer, timestamptz, text) from public, anon, authenticated, service_role;
-revoke all on function private.price_sync_monitor_recovery_text(text, timestamptz, integer, integer, integer, timestamptz, timestamptz) from public, anon, authenticated, service_role;
-revoke all on function private.price_sync_monitor_windows_alert_at(text, timestamptz, integer, timestamptz) from public, anon, authenticated, service_role;
-revoke all on function private.price_sync_monitor_tick(timestamptz) from public, anon, authenticated, service_role;
+  execute $s17$
+revoke all on function private.price_sync_monitor_assess(timestamptz) from public, anon, authenticated, service_role
+$s17$;
 
--- ── منع التكرار: المراقب الجديد يحل محل صف «price-sync» القديم ──────────────────────────────
+  execute $s18$
+revoke all on function private.price_sync_monitor_time(timestamptz, timestamptz) from public, anon, authenticated, service_role
+$s18$;
 
+  execute $s19$
+revoke all on function private.price_sync_monitor_minutes(timestamptz, timestamptz) from public, anon, authenticated, service_role
+$s19$;
+
+  execute $s20$
+revoke all on function private.price_sync_monitor_reason_text(text) from public, anon, authenticated, service_role
+$s20$;
+
+  execute $s21$
+revoke all on function private.price_sync_monitor_alert_text(text, text, timestamptz, timestamptz, timestamptz, text) from public, anon, authenticated, service_role
+$s21$;
+
+  execute $s22$
+revoke all on function private.price_sync_monitor_partial_text(boolean, timestamptz, timestamptz, integer, integer, integer, integer, timestamptz, text) from public, anon, authenticated, service_role
+$s22$;
+
+  execute $s23$
+revoke all on function private.price_sync_monitor_recovery_text(text, timestamptz, integer, integer, integer, timestamptz, timestamptz) from public, anon, authenticated, service_role
+$s23$;
+
+  execute $s24$
+revoke all on function private.price_sync_monitor_windows_alert_at(text, timestamptz, integer, timestamptz) from public, anon, authenticated, service_role
+$s24$;
+
+  execute $s25$
+revoke all on function private.price_sync_monitor_tick(timestamptz) from public, anon, authenticated, service_role
+$s25$;
+
+  -- ── منع التكرار: المراقب الجديد يحل محل صف «price-sync» القديم ──────────────────────────────
+  execute $s26$
 do $retire$
 begin
   if to_regclass('private.project_task_monitors') is not null then
     update private.project_task_monitors set enabled = false where task_key = 'price-sync' and enabled;
   end if;
 end
-$retire$;
+$retire$
+$s26$;
 
--- ── الجدولة (cron كل دقيقة) ─────────────────────────────────────────────────────────────────
-
+  -- ── الجدولة (cron كل دقيقة) ─────────────────────────────────────────────────────────────────
+  execute $s27$
 do $schedule$
 begin
   if to_regnamespace('cron') is not null then
@@ -586,4 +728,21 @@ begin
     perform cron.schedule('price-sync-monitor', '* * * * *', 'select private.price_sync_monitor_tick();');
   end if;
 end
-$schedule$;
+$schedule$
+$s27$;
+end
+$install17$;
+
+-- ── تحقق بعدي ────────────────────────────────────────────────────────────────────────────────
+do $post17$
+begin
+  if to_regprocedure('private.price_sync_monitor_tick(timestamptz)') is null or to_regclass('private.price_sync_incidents') is null then
+    raise exception 'postflight 17: monitor objects missing';
+  end if;
+  if to_regnamespace('cron') is not null then
+    if not exists (select 1 from cron.job where jobname = 'price-sync-monitor') then
+      raise exception 'postflight 17: cron job price-sync-monitor missing';
+    end if;
+  end if;
+end
+$post17$;
