@@ -406,6 +406,74 @@ try {
   Assert 'corrupt state.json: moved aside, not deleted' (@(Get-ChildItem -LiteralPath $cbox -Filter "state.corrupt-*.json").Count -eq 1)
   Assert 'corrupt state.json: new seq above every earlier seq' ([long]$script:rec.last_seq -gt $maxSeen)
 
+  # ── ٥هـ) Codex P1 (da7413e8): حدّ الدفعة بالبايتات تحت حدّ الخادم 4MB ───────────────────────────
+  Assert 'batch byte limit: default is below the server 4MB request limit' ([int]$script:AmeenMaxBatchBytes -gt 0 -and [int]$script:AmeenMaxBatchBytes -lt 4194304)
+  $bbox = Join-Path $tempDir "outbox-bytes"
+  Initialize-AmeenInvoiceOutbox -Dir $bbox
+  $bs = New-AmeenInvoiceState
+  $bigLines = @(1..60 | ForEach-Object { New-Line (($_ % 9) + 1) ("b1000000-0000-0000-0000-{0:D12}" -f $_) })
+  $nowB = [datetime]::SpecifyKind([datetime]"2026-10-21T10:00:00", [DateTimeKind]::Utc)
+  foreach ($k in 1..12) {
+    $gk = "D0000000-0000-0000-0000-{0:D12}" -f $k
+    Add-AmeenOutboxEvents -Dir $bbox -Events (Resolve-AmeenInvoiceChanges -State $bs -Observations @((& $obsG $gk (ConvertTo-AmeenInvoiceSnapshot -Header (New-Header -Guid $gk) -Lines $bigLines) "2026-10-21T09:00:00.000Z")))
+  }
+  $oneSize = [Text.Encoding]::UTF8.GetByteCount((ConvertTo-AmeenCanonicalJson (@(Get-AmeenOutboxPending -Dir $bbox))[0].event))
+  $limit = 4 * $oneSize + 100                                  # يتسع لأربعة أحداث تقريباً
+  $script:reqBytes = @(); $script:reqSeqs = @()
+  $sizeT = { param($Events)
+    $script:reqBytes += [Text.Encoding]::UTF8.GetByteCount((ConvertTo-AmeenCanonicalJson @{ p_events = @($Events) }))
+    $script:reqSeqs += @($Events | ForEach-Object { [long]$_.source_seq })
+    return @($Events | ForEach-Object { @{ event_id = $_.event_id; outcome = "applied" } }) }
+  $calls = 0
+  while (@(Get-AmeenOutboxPending -Dir $bbox).Count -gt 0 -and $calls -lt 20) {
+    $r = Send-AmeenInvoiceOutbox -Dir $bbox -State $bs -Transport $sizeT -NowUtc $nowB -MaxBatchBytes $limit
+    $calls++
+    if ($r.acked -eq 0) { break }
+  }
+  Assert 'batch byte limit: every request body within the byte limit' (@($script:reqBytes | Where-Object { $_ -gt $limit }).Count -eq 0)
+  Assert 'batch byte limit: split into several requests, each making progress' ($calls -ge 3 -and @(Get-AmeenOutboxPending -Dir $bbox).Count -eq 0)
+  Assert 'batch byte limit: all 12 events delivered exactly once' ($script:reqSeqs.Count -eq 12 -and @($script:reqSeqs | Sort-Object -Unique).Count -eq 12)
+  Assert 'batch byte limit: order preserved across requests' ((($script:reqSeqs) -join ",") -eq ((@($script:reqSeqs | Sort-Object)) -join ","))
+  # حدث واحد أكبر من الحدّ وحده يُرسل منفرداً ولا يحجز الصندوق
+  Add-AmeenOutboxEvents -Dir $bbox -Events (Resolve-AmeenInvoiceChanges -State $bs -Observations @((& $obsG "D0000000-0000-0000-0000-000000000099" (ConvertTo-AmeenInvoiceSnapshot -Header (New-Header -Guid "D0000000-0000-0000-0000-000000000099") -Lines $bigLines) "2026-10-21T09:00:00.000Z")))
+  $r = Send-AmeenInvoiceOutbox -Dir $bbox -State $bs -Transport $sizeT -NowUtc $nowB -MaxBatchBytes ([int]($oneSize / 2))
+  Assert 'batch byte limit: single event larger than the limit still sent alone (no stall)' ($r.acked -eq 1 -and @(Get-AmeenOutboxPending -Dir $bbox).Count -eq 0)
+  # الخادم يرفض الطلب لحجمه رغم ذلك ⇒ يُنصَّف سقف العدد، والمحاولة التالية أصغر وتنجح، ثم يعود السقف
+  foreach ($k in 20..27) {
+    $gk = "D0000000-0000-0000-0000-{0:D12}" -f $k
+    Add-AmeenOutboxEvents -Dir $bbox -Events (Resolve-AmeenInvoiceChanges -State $bs -Observations @((& $obsG $gk (ConvertTo-AmeenInvoiceSnapshot -Header (New-Header -Guid $gk) -Lines @($L1)) "2026-10-21T09:00:00.000Z")))
+  }
+  $tooLarge = { param($Events) throw "events payload too large (22023)" }
+  $r = Send-AmeenInvoiceOutbox -Dir $bbox -State $bs -Transport $tooLarge -NowUtc $nowB
+  Assert 'server size rejection: nothing removed, batch cap halved' ($r.error -match "too large" -and @(Get-AmeenOutboxPending -Dir $bbox).Count -eq 8 -and [int]$bs.send.batch_cap -eq 4)
+  $script:reqSeqs = @()
+  $r = Send-AmeenInvoiceOutbox -Dir $bbox -State $bs -Transport $sizeT -NowUtc $nowB.AddMinutes(5)
+  Assert 'server size rejection: next request uses the smaller cap and succeeds' ($r.acked -eq 4 -and $script:reqSeqs.Count -eq 4)
+  Assert 'server size rejection: cap cleared after success' ($null -eq $bs.send.batch_cap)
+  $r = Send-AmeenInvoiceOutbox -Dir $bbox -State $bs -Transport $sizeT -NowUtc $nowB.AddMinutes(6)
+  Assert 'server size rejection: remaining events then delivered' ($r.acked -eq 4 -and @(Get-AmeenOutboxPending -Dir $bbox).Count -eq 0)
+
+  # ── ٥و) Codex P1 (da7413e8): قفل مثيل واحد على مجلد الصندوق ───────────────────────────────────
+  $lbox = Join-Path $tempDir "outbox-lock"
+  $lock1 = Enter-AmeenOutboxLock -Dir $lbox
+  Assert 'outbox lock: first instance acquires' ($null -ne $lock1)
+  $lock2 = Enter-AmeenOutboxLock -Dir $lbox
+  Assert 'outbox lock: second acquire in the same process refused' ($null -eq $lock2)
+  $shell = (Get-Process -Id $PID).Path
+  $libPath = Join-Path $repoRoot "tools\ameen-invoice-events-lib.ps1"
+  $probeCmd = ". '{0}'; `$l = Enter-AmeenOutboxLock -Dir '{1}'; if (`$null -eq `$l) {{ 'LOCKED' }} else {{ 'ACQUIRED'; Exit-AmeenOutboxLock `$l }}" -f $libPath, $lbox
+  $other = (& $shell -NoProfile -Command $probeCmd 2>&1 | Out-String).Trim()
+  Assert 'outbox lock: another process is refused while held' ($other -match 'LOCKED')
+  # الوكيل نفسه كمثيل ثانٍ: يخرج برمز 5 قبل قراءة الحالة أو أي اتصال، ولا يكتب شيئاً
+  $agentLog = Join-Path $tempDir "agent-lock.log"
+  & $shell -NoProfile -File $agentPath -Once -OutboxDir $lbox -LogFile $agentLog -EnvFile (Join-Path $tempDir "no.env") *> $null
+  $agentExit = $LASTEXITCODE
+  Assert 'outbox lock: second agent instance exits with code 5' ($agentExit -eq 5)
+  Assert 'outbox lock: refused agent wrote no state or pending files' (-not (Test-Path -LiteralPath (Join-Path $lbox "state.json")) -and -not (Test-Path -LiteralPath (Join-Path $lbox "pending")))
+  Exit-AmeenOutboxLock $lock1
+  $other = (& $shell -NoProfile -Command $probeCmd 2>&1 | Out-String).Trim()
+  Assert 'outbox lock: released lock can be acquired again' ($other -match 'ACQUIRED')
+
   # ── ٦) الوكيل: يُحلَّل بلا أخطاء، ولا يسجّل مهمة، ولا يرسل افتراضياً ───────────────────────────
   $tokens = $null; $errors = $null
   [void][System.Management.Automation.Language.Parser]::ParseFile($agentPath, [ref]$tokens, [ref]$errors)

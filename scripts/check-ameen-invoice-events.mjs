@@ -148,6 +148,19 @@ for (const name of [
   "corrupt json: no file content or bill data in reason or log",
   "corrupt json: agent keeps working (next event acked)",
   "corrupt state.json: read does not throw",
+  // Codex P1 (da7413e8): حدّ الدفعة بالبايتات، وقفل مثيل واحد
+  "batch byte limit: default is below the server 4MB request limit",
+  "batch byte limit: every request body within the byte limit",
+  "batch byte limit: split into several requests, each making progress",
+  "batch byte limit: order preserved across requests",
+  "batch byte limit: single event larger than the limit still sent alone (no stall)",
+  "server size rejection: nothing removed, batch cap halved",
+  "server size rejection: next request uses the smaller cap and succeeds",
+  "outbox lock: second acquire in the same process refused",
+  "outbox lock: another process is refused while held",
+  "outbox lock: second agent instance exits with code 5",
+  "outbox lock: refused agent wrote no state or pending files",
+  "outbox lock: released lock can be acquired again",
 ]) assert.ok(psTest.includes(`'${name}'`), `اختبار PowerShell إلزامي مفقود: ${name}`);
 
 const rollback = read(rollbackRel).replace(/--.*$/gm, "");
@@ -187,6 +200,14 @@ assert.doesNotMatch(libCode, /Get-Content -Raw -LiteralPath \$f\.FullName -Encod
 assert.match(agentCode, /Invoke-AmeenResnapshotQueue -Dir \$OutboxDir -State \$state -Reader \$resnapshotReader/);
 assert.match(agentCode, /\$o = Get-AmeenBillObservation \(\[string\]\$Guid\) @\(\)/, "القارئ بالـGUID مباشرة (لا نافذة تاريخ)");
 assert.match(libCode, /status = "resnapshot_pending"/, "الطلب محفوظ مع الحدث المعزول (دائم)");
+// Codex P1 (da7413e8): حدّ بايتات أدنى من حدّ الخادم، وقفل مثيل واحد قبل قراءة الحالة.
+const maxBytes = Number((lib.match(/\$script:AmeenMaxBatchBytes = (\d+)/) || [])[1]);
+const serverMax = Number((migration.match(/pg_column_size\(p_events\) > (\d+)/) || [])[1]);
+assert.ok(maxBytes > 0 && serverMax > 0 && maxBytes < serverMax, `حدّ دفعة الوكيل (${maxBytes}) يجب أن يقل عن حدّ الخادم (${serverMax})`);
+assert.match(libCode, /if \(\$take\.Count -gt 0 -and \(\$bytes \+ \$add\) -gt \$MaxBatchBytes\) \{ break \}/, "الدفعة تُبنى بحد بايتات");
+assert.match(libCode, /\[IO\.FileShare\]::None/, "قفل حصري على ملف agent.lock");
+assert.match(agentCode, /\$outboxLock = Enter-AmeenOutboxLock -Dir \$OutboxDir/, "الوكيل يأخذ القفل");
+assert.ok(agentCode.indexOf("Enter-AmeenOutboxLock -Dir $OutboxDir") < agentCode.indexOf("Read-AmeenInvoiceState -Dir $OutboxDir"), "القفل قبل قراءة الحالة");
 for (const [name, text] of [["agent", agent], ["lib", lib]]) {
   assert.doesNotMatch(text, /AMEEN_SQL_WRITE_CONNECTION_STRING|WRITE_CONNECTION/, `${name}: لا سلسلة اتصال الكتابة`);
   assert.doesNotMatch(text, /Register-ScheduledTask|schtasks/i, `${name}: لا تسجيل مهمة مجدولة`);
@@ -274,7 +295,7 @@ if (pwshProbe.status !== 0) {
     process.exit(ps.status || 1);
   }
   const m = psText.match(/Ameen invoice events: (\d+) PASS, (\d+) FAIL/);
-  assert.ok(m && Number(m[2]) === 0 && Number(m[1]) >= 145, "نتيجة اختبار PowerShell غير متوقعة");
+  assert.ok(m && Number(m[2]) === 0 && Number(m[1]) >= 160, "نتيجة اختبار PowerShell غير متوقعة");
   console.log(`  ✓ اختبار PowerShell (${pwshProbe.stdout.trim()}): ${m[1]} تأكيداً`);
 }
 console.log("check-ameen-invoice-events: اجتاز الفحص.");

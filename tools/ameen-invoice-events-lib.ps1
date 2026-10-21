@@ -30,6 +30,9 @@
 $script:AmeenInvoiceEventSchema = "ameen-invoice-event/v1"
 $script:ZeroGuid = "00000000-0000-0000-0000-000000000000"
 $script:Invariant = [Globalization.CultureInfo]::InvariantCulture
+# حدّ جسم طلب الإرسال بالبايتات (UTF-8): أدنى بهامش واسع من حدّ الخادم 4194304 لـ pg_column_size(jsonb)،
+# لأن تمثيل jsonb قد يكبر عن النص قليلاً.
+$script:AmeenMaxBatchBytes = 2621440
 
 # ---------------------------------------------------------------- حارس القراءة فقط
 function Assert-AmeenReadOnlySql {
@@ -349,6 +352,27 @@ function Write-AmeenAtomicFile {
     $tmp = $Path + ".tmp-" + [guid]::NewGuid().ToString("N")
     [IO.File]::WriteAllText($tmp, $Content, (New-Object System.Text.UTF8Encoding($false)))
     if (Test-Path -LiteralPath $Path) { [IO.File]::Replace($tmp, $Path, [NullString]::Value) } else { [IO.File]::Move($tmp, $Path) }
+}
+
+function Enter-AmeenOutboxLock {
+    # قفل مثيل واحد لكل مجلد صندوق (Codex P1 على da7413e8): مثيلان على المجلد نفسه قد يقرآن التسلسل N
+    # فيخصّص كلٌّ منهما N+1 ويكتب فوق ملف الآخر وتتسابق كتابة الحالة. القفل ملف agent.lock مفتوح حصرياً
+    # (FileShare.None) طوال عمر العملية؛ يحرّره نظام التشغيل تلقائياً عند خروجها ولو انهارت، فلا قفل عالق.
+    # يعيد مقبض القفل، أو $null إن كان مثيل آخر يملكه.
+    param([Parameter(Mandatory = $true)][string]$Dir)
+    if (-not (Test-Path -LiteralPath $Dir)) { New-Item -ItemType Directory -Path $Dir -Force | Out-Null }
+    $p = Join-Path $Dir "agent.lock"
+    try { $fs = [IO.File]::Open($p, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) } catch { return $null }
+    try {
+        $info = [Text.Encoding]::UTF8.GetBytes(("pid={0} host={1} since={2}" -f $PID, [Environment]::MachineName, [datetime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", $script:Invariant)))
+        $fs.SetLength(0); $fs.Write($info, 0, $info.Length); $fs.Flush()
+    } catch { }
+    return $fs
+}
+
+function Exit-AmeenOutboxLock {
+    param($Lock)
+    if ($null -ne $Lock) { $Lock.Dispose() }
 }
 
 function Initialize-AmeenInvoiceOutbox {
@@ -689,8 +713,9 @@ function Send-AmeenInvoiceOutbox {
     # الحدث الذي يرفضه التحقق المحلي يُعزل قبل الإرسال ولا يحجز ما بعده.
     # فشل النقل (استثناء، رد ناقص، نتيجة غير معروفة) ⇒ لا يُحذف شيء، ويُؤجَّل الإرسال تراجعياً.
     param([Parameter(Mandatory = $true)][string]$Dir, [Parameter(Mandatory = $true)][hashtable]$State,
-          [Parameter(Mandatory = $true)][scriptblock]$Transport, [datetime]$NowUtc = [datetime]::UtcNow, [int]$BatchSize = 50)
-    $result = @{ sent = 0; acked = 0; deadlettered = 0; skipped_backoff = $false; error = $null; outcomes = @{} }
+          [Parameter(Mandatory = $true)][scriptblock]$Transport, [datetime]$NowUtc = [datetime]::UtcNow, [int]$BatchSize = 50,
+          [int]$MaxBatchBytes = $script:AmeenMaxBatchBytes)
+    $result = @{ sent = 0; acked = 0; deadlettered = 0; skipped_backoff = $false; error = $null; outcomes = @{}; request_bytes = 0; deferred = 0 }
     if ($State.send.next_at) {
         $next = [datetime]::Parse([string]$State.send.next_at, $script:Invariant, [Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal)
         if ($NowUtc -lt $next) { $result.skipped_backoff = $true; return $result }
@@ -709,8 +734,27 @@ function Send-AmeenInvoiceOutbox {
         } else { $valid.Add($p) }
     }
     if ($valid.Count -eq 0) { return $result }
+    # حدّ الطلب بالبايتات لا بالعدد وحده (Codex P1 على da7413e8): الخادم يرفض الطلب كله فوق 4MB، وفاتورة
+    # سليمة واحدة قد تبلغ 256KB، فقد تتجاوز 50 فاتورة كبيرة الحدّ فيعيد الوكيل إرسال الدفعة نفسها بلا نهاية.
+    # الدفعة = أطول بادئة بترتيب التسلسل لا يتجاوز جسمها MaxBatchBytes (والحدث الأول دائماً، فلا توقف).
+    # وإن رفض الخادم الطلب لحجمه رغم ذلك، يُنصَّف سقف العدد في المحاولة التالية حتى حدث واحد.
+    $cap = $valid.Count
+    if ($State.send.batch_cap) { $cap = [math]::Max(1, [math]::Min($cap, [int]$State.send.batch_cap)) }
+    $overhead = [Text.Encoding]::UTF8.GetByteCount('{"p_events":[]}')
+    $take = New-Object System.Collections.Generic.List[object]
+    $bytes = $overhead
+    foreach ($p in $valid) {
+        if ($take.Count -ge $cap) { break }
+        $size = [Text.Encoding]::UTF8.GetByteCount((ConvertTo-AmeenCanonicalJson $p.event))
+        $add = $size; if ($take.Count -gt 0) { $add++ }
+        if ($take.Count -gt 0 -and ($bytes + $add) -gt $MaxBatchBytes) { break }
+        $take.Add($p); $bytes += $add
+    }
+    $result.deferred = $valid.Count - $take.Count
+    $valid = $take
     $events = @($valid | ForEach-Object { $_.event })
     $result.sent = $events.Count
+    $result.request_bytes = $bytes
     try {
         $responses = @(& $Transport $events)
         $byId = @{}
@@ -741,8 +785,11 @@ function Send-AmeenInvoiceOutbox {
             }
             $result.outcomes[$id] = [string]$r.outcome
         }
-        $State.send.failures = 0; $State.send.next_at = $null
+        $State.send.failures = 0; $State.send.next_at = $null; $State.send.batch_cap = $null
     } catch {
+        if ($_.Exception.Message -match '(?i)payload too large|too many events|request entity too large|\b413\b') {
+            $State.send.batch_cap = [math]::Max(1, [int][math]::Floor($events.Count / 2))
+        }
         $State.send.failures = [int]$State.send.failures + 1
         $State.send.next_at = $NowUtc.AddSeconds((Get-AmeenBackoffSeconds $State.send.failures)).ToString("yyyy-MM-ddTHH:mm:ssZ", $script:Invariant)
         $result.error = $_.Exception.Message

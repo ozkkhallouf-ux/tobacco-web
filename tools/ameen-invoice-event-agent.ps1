@@ -84,6 +84,14 @@ function Get-AgentSetting([string]$Name) {
 }
 
 # ---------------------------------------------------------------- الأحداث المعزولة (محلياً فقط)
+# قفل مثيل واحد على مجلد الصندوق قبل قراءة الحالة أو تخصيص أي تسلسل (Codex P1). العرض وحده لا يكتب
+# فلا يحتاجه؛ الإصلاح والرصد والإرسال يحتاجونه. مثيل ثانٍ يخرج فوراً برمز 5 بلا أي كتابة.
+$outboxLock = $null
+if (-not ($ListDeadLetter -and $RepairDeadLetterSeq -le 0)) {
+    $outboxLock = Enter-AmeenOutboxLock -Dir $OutboxDir
+    if ($null -eq $outboxLock) { Write-AgentLog ("رفض: مثيل آخر من الوكيل يعمل على الصندوق نفسه ({0}) — لا تشغيل متوازٍ." -f $OutboxDir); exit 5 }
+}
+
 if ($ListDeadLetter -or $RepairDeadLetterSeq -gt 0) {
     Initialize-AmeenInvoiceOutbox -Dir $OutboxDir
     if ($ListDeadLetter) {
@@ -97,6 +105,7 @@ if ($ListDeadLetter -or $RepairDeadLetterSeq -gt 0) {
         Save-AmeenInvoiceState -Dir $OutboxDir -State $state
         Write-AgentLog ("أُصلح الحدث المعزول seq={0} بوضع {1}" -f $RepairDeadLetterSeq, $mode)
     }
+    Exit-AmeenOutboxLock $outboxLock
     exit 0
 }
 
@@ -289,4 +298,5 @@ try {
     Write-AgentLog ("انتهى الوكيل: last_seq={0} pending={1}" -f $state.last_seq, @(Get-ChildItem -LiteralPath (Join-Path $OutboxDir "pending") -Filter "*.json").Count)
 } finally {
     if ($conn.State -ne [System.Data.ConnectionState]::Closed) { $conn.Close() }
+    Exit-AmeenOutboxLock $outboxLock
 }
