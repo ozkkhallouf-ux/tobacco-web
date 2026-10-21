@@ -9,9 +9,17 @@ name: إصدار Windows (windows-production)
 # تتحقق منه بوابة Windows المثبّتة في ProgramData قبل أي تحديث.
 #
 # إعدادات لازمة (خطوة مالك منفصلة، ليست جزءاً من هذا الملف):
-#   - Environment «windows-production» بمراجع مطلوب واحد (المالك).
+#   - Environment «windows-production» بمراجع مطلوب واحد (المالك)، والفرع main وحده.
 #   - فرع windows-production يُنشأ مرة واحدة من الـSHA المنشور حالياً على OZK2026.
-#   - Ruleset للفرع: منع force push والحذف، والتحديث من GitHub Actions فقط.
+#   - Ruleset للفرع: منع force push والحذف، والتحديث من تطبيق الإصدار وحده.
+#
+# هوية الدفع (2026-10-21): GitHub App «OZK Windows Release» (releaseApp في gate-config):
+#   - أسرار البيئة RELEASE_APP_ID وRELEASE_APP_PRIVATE_KEY تصل إلى خطوة واحدة فقط في job
+#     الإصدار، وهو لا يبدأ إلا بعد موافقة المالك ومن main.
+#   - التوكن يُنشأ داخل السكربت بعد إعادة التحقق كاملاً، لحظة الدفع، مقيّداً بهذا المستودع
+#     وبصلاحيتي contents/workflows، ويُخفى من السجلات، ويُبطَل بعد الدفع.
+#   - GITHUB_TOKEN لا يملك الكتابة على المحتوى هنا، وكل checkout بلا اعتماد محفوظ.
+#   - لا يعمل الـworkflow إلا يدوياً ومن main (لا pull_request ولا كود فرع غير مدموج).
 
 on:
   workflow_dispatch:
@@ -36,6 +44,8 @@ concurrency:
 jobs:
   verify:
     name: فحص الإصدار
+    # لا تشغيل من فرع آخر: كود الفحص والإصدار هو كود main المدموج والمراجَع وحده.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -47,6 +57,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -74,10 +85,12 @@ jobs:
   release:
     name: موافقة المالك ثم التقديم
     needs: verify
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: windows-production
+    # GITHUB_TOKEN: قراءة وتسجيل Deployment فقط. الدفع بتوكن التطبيق داخل خطوة الإصدار وحدها.
     permissions:
-      contents: write
+      contents: read
       deployments: write
       actions: read
       checks: read
@@ -87,6 +100,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Download verification
         uses: actions/download-artifact@v4
@@ -102,9 +116,12 @@ jobs:
       # ثم يدفع Fast-Forward فقط إن كان الفرع على الأساس المتحقَّق (بلا --force)، أو يتخطى الدفع
       # إن كان الفرع يساوي الهدف بالضبط (دفعٌ سابق نجح وفشل تسجيله)، ثم يسجّل الإصدار بلا تكرار.
       # أي موضع آخر للفرع = رفض.
+      # أسرار التطبيق في هذه الخطوة وحدها، ولا يُنشأ منها توكن إلا بعد إعادة التحقق وقبيل الدفع مباشرة.
       - name: Fast-forward windows-production and record the release
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_APP_ID: ${{ secrets.RELEASE_APP_ID }}
+          RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
           INPUT_SHA: ${{ inputs.sha }}
           APPROVER: ${{ github.actor }}
           RUN_ID: ${{ github.run_id }}
