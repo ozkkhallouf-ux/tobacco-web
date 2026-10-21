@@ -8,7 +8,7 @@
 
 | الملف | الدور |
 |---|---|
-| `deploy-gate.ps1` | يحدّث المستودع على OZK2026 إلى `origin/windows-production` بـ`merge --ff-only` بعد كل الفحوص. أوضاعه: `Deploy` و`DryRun` و`Initialize` و`Rollback -To <sha>` و`Unpin` |
+| `deploy-gate.ps1` | يحدّث المستودع على OZK2026 إلى `origin/windows-production` بـ`merge --ff-only` بعد كل الفحوص. أوضاعه: `Deploy` و`DryRun` و`Initialize` و`Rollback -To <sha>` و`Unpin` و`AckRestart` و`Recover` |
 | `run-repo-task.ps1` | مشغّل موحّد لكل Scheduled Task تشغّل سكربتاً من المستودع. يتخطى أثناء النشر، ويتحقق من بصمات سكربتات الكتابة |
 | `notify.ps1` | تنبيه تيليغرام مستقل عن سكربتات المستودع |
 | `migration-preflight.ps1` | فحص قراءة فقط قبل تحويل المستودع التشغيلي إلى `windows-production`: المهام التي تحتاج main يجب أن تعمل من worktree مخصّص صحيح. يستدعيه `-Mode Initialize` أيضاً |
@@ -25,6 +25,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\ProgramData\OZK-TOBAC
 
 # بعد أن يعيد المالك تشغيل عملية طويلة يدوياً (البوابة لا تعيد تشغيل شيئاً بنفسها)
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\ProgramData\OZK-TOBACCO\DeployGate\deploy-gate.ps1 -Mode AckRestart -Components "TOBACCO Ameen Read Worker"
+
+# بعد تبديل انقطع في منتصفه (FAIL INCONSISTENT + inflight.json): استعادة من النسخة الاحتياطية بلا git كاتب
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\ProgramData\OZK-TOBACCO\DeployGate\deploy-gate.ps1 -Mode Recover
 
 # فك التثبيت بعد نشر إصدار مصحَّح على windows-production
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\ProgramData\OZK-TOBACCO\DeployGate\deploy-gate.ps1 -Mode Unpin
