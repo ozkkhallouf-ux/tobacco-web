@@ -280,6 +280,11 @@ try {
             if ($rq.failed -gt 0) { Write-AgentLog ("Resnapshot: تعذّرت قراءة {0} فاتورة — يبقى الطلب ويُعاد لاحقاً" -f $rq.failed) }
         } catch { Write-AgentLog ("Resnapshot: خطأ في معالجة الطابور (الطلبات باقية): " + $_.Exception.GetType().Name) }
 
+        # ملف التفعيل هو مفتاح الإيقاف الحي (Codex P1 على 51783c90): يُعاد فحصه قبل كل إرسال،
+        # فحذف send-enabled.flag يوقف الرفع فوراً دون إنهاء العملية — خطوة التراجع الموثقة.
+        $wasSending = $sendOn
+        $sendOn = Test-SendActivated
+        if ($wasSending -and -not $sendOn) { Write-AgentLog "الإرسال توقف: حُذف ملف التفعيل أو تغيّر محتواه — رصد فقط." }
         if ($sendOn) {
             $r = Send-AmeenInvoiceOutbox -Dir $OutboxDir -State $state -Transport $transport
             if ($r.deadlettered -gt 0) { Write-AgentLog ("عُزل {0} حدث معطوب في deadletter\ (راجع -ListDeadLetter)" -f $r.deadlettered) }

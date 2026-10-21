@@ -537,6 +537,10 @@ try {
   Assert 'agent never registers a scheduled task' ($agentText -notmatch '(?i)Register-ScheduledTask|schtasks')
   Assert 'agent never reads the write connection string' ($agentText -notmatch 'AMEEN_SQL_WRITE_CONNECTION_STRING|WRITE_CONNECTION')
   Assert 'agent sends only with -Send AND the owner flag file' ($agentText -match 'if \(-not \$Send\) \{ return \$false \}' -and $agentText -match 'send-enabled\.flag')
+  $loopAt = $agentText.IndexOf("do {")
+  $recheckAt = $agentText.IndexOf('$sendOn = Test-SendActivated', $loopAt)
+  $sendCallAt = $agentText.IndexOf("Send-AmeenInvoiceOutbox", $loopAt)
+  Assert 'send flag: re-checked inside the loop before each send' ($loopAt -ge 0 -and $recheckAt -ge 0 -and $sendCallAt -gt $recheckAt)
   Assert 'agent runs every SQL through the read-only guard' ($agentText -match 'Assert-AmeenReadOnlySql \$Sql' -and $agentText -notmatch 'ExecuteNonQuery|ExecuteReader|ExecuteScalar')
 } finally {
   Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue

@@ -169,6 +169,8 @@ for (const name of [
   "rpc 400: error message carries status and PostgREST message from the body",
   "rpc 400: details/hint not copied into the message",
   "http 400 size rejection: batch cap halved (not retried forever at the same size)",
+  // Codex P1 (51783c90): ملف التفعيل يُعاد فحصه قبل كل إرسال
+  "send flag: re-checked inside the loop before each send",
 ]) assert.ok(psTest.includes(`'${name}'`), `اختبار PowerShell إلزامي مفقود: ${name}`);
 
 const rollback = read(rollbackRel).replace(/--.*$/gm, "");
@@ -221,6 +223,10 @@ assert.doesNotMatch(agentCode, /Invoke-RestMethod -Method Post -Uri \(\$script:s
 assert.match(libCode, /\[int\]::TryParse\(\[string\]\$b\.bill_type/, "تحويل bill_type آمن");
 assert.doesNotMatch(libCode, /catch \{\s*\}/, "لا كتلة catch فارغة (CodeFactor PSAvoidUsingEmptyCatchBlock)");
 assert.ok(agentCode.indexOf("Enter-AmeenOutboxLock -Dir $OutboxDir") < agentCode.indexOf("Read-AmeenInvoiceState -Dir $OutboxDir"), "القفل قبل قراءة الحالة");
+const loopAt = agentCode.indexOf("do {");
+const recheckAt = agentCode.indexOf("$sendOn = Test-SendActivated", loopAt);
+const sendAt = agentCode.indexOf("Send-AmeenInvoiceOutbox", loopAt);
+assert.ok(loopAt >= 0 && recheckAt >= 0 && sendAt > recheckAt, "إعادة فحص ملف التفعيل داخل الحلقة قبل كل إرسال");
 for (const [name, text] of [["agent", agent], ["lib", lib]]) {
   assert.doesNotMatch(text, /AMEEN_SQL_WRITE_CONNECTION_STRING|WRITE_CONNECTION/, `${name}: لا سلسلة اتصال الكتابة`);
   assert.doesNotMatch(text, /Register-ScheduledTask|schtasks/i, `${name}: لا تسجيل مهمة مجدولة`);
