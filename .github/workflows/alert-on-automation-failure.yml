@@ -56,6 +56,10 @@ jobs:
       github.event.workflow_run.conclusion != 'success' &&
       github.event.workflow_run.conclusion != 'skipped'
     runs-on: ubuntu-latest
+    # مفتاح Supabase بصلاحية service role في بيئة supabase-ops المحصورة بفرع main وحده: لا يصل إليه
+    # workflow على فرع آخر ولا PR. بلا مراجع مطلوب كي يعمل التشغيل المجدول/الآلي بلا موافقة يدوية.
+    # (سرّ البيئة يتقدّم على سرّ المستودع بنفس الاسم؛ قبل نقله يعمل الـjob بسرّ المستودع كما هو.)
+    environment: supabase-ops
     steps:
       - name: Send Telegram alert via notify_telegram RPC
         env:
@@ -68,7 +72,7 @@ jobs:
           CONCLUSION: ${{ github.event.workflow_run.conclusion }}
         run: |
           if [ -z "$SUPABASE_SERVICE_ROLE_KEY" ]; then
-            echo "::error::السرّ SUPABASE_SERVICE_ROLE_KEY غير مُعرَّف — لا يمكن إرسال تنبيه تيليغرام. أضِفه عبر: gh secret set SUPABASE_SERVICE_ROLE_KEY"
+            echo "::error::السرّ SUPABASE_SERVICE_ROLE_KEY غير مُعرَّف — لا تنبيه. gh secret set SUPABASE_SERVICE_ROLE_KEY --env supabase-ops"
             exit 1
           fi
 
