@@ -1,13 +1,13 @@
--- تراجع 18: يعيد public.tg_notify_daily_movement() إلى جسم الإنتاج قبل 18 حرفياً (feb6663e…)، ويحذف صفوف
--- daily_movement من السجل. يُسقط private.daily_report_notifications فقط إذا لم تعد أي دالة تستعمله (19 غير مطبَّقة).
+-- تراجع 19: يعيد public.tg_notify_daily_movement() إلى جسم الإنتاج قبل 19 حرفياً (feb6663e…)، ويحذف صفوف
+-- daily_movement من السجل. يُسقط private.daily_report_notifications فقط إذا لم تعد أي دالة تستعمله (20 غير مطبَّقة).
 -- لا يمسّ telegram_outbox ولا الرسائل السابقة ولا أي Cron.
 begin;
 set local lock_timeout = '20s';
 
 do $pre$
 begin
-  if md5((select prosrc from pg_proc where oid = to_regprocedure('public.tg_notify_daily_movement()'))) is distinct from '0626eaaa998300717c3584108ade03e6' then
-    raise exception 'ROLLBACK 18 PRE: tg_notify_daily_movement() is not the 18 body';
+  if md5((select prosrc from pg_proc where oid = to_regprocedure('public.tg_notify_daily_movement()'))) is distinct from '287872ff20674cf03adb840ec48e9722' then
+    raise exception 'ROLLBACK 19 PRE: tg_notify_daily_movement() is not the 19 body';
   end if;
 end
 $pre$;
@@ -89,7 +89,7 @@ delete from private.daily_report_notifications where report_kind = 'daily_moveme
 do $post$
 begin
   if md5((select prosrc from pg_proc where oid = to_regprocedure('public.tg_notify_daily_movement()'))) is distinct from 'feb6663e6fcebe7ca17248960e0ec8d8' then
-    raise exception 'ROLLBACK 18 POST: not back to feb6663e';
+    raise exception 'ROLLBACK 19 POST: not back to feb6663e';
   end if;
   if not exists (select 1 from pg_proc where prosrc like '%private.daily_report_notifications%') then
     drop table private.daily_report_notifications;

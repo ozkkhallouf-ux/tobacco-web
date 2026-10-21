@@ -1,5 +1,5 @@
 // ============================================================================
-// تقريرا الحركة اليومية والجرد: رسالة واحدة لكل تاريخ تقرير (supabase/proposed/18 و19).
+// تقريرا الحركة اليومية والجرد: رسالة واحدة لكل تاريخ تقرير (supabase/proposed/19 و20).
 //
 // طبقتان:
 //   ١) عقود ساكنة: كل هجرة تعدّل دالة trigger واحدة بحارس بصمة قبل وبعد، ولا تمسّ notify_telegram
@@ -20,10 +20,10 @@ import { fileURLToPath } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const read = (rel) => readFileSync(path.join(root, rel), "utf8");
 const FILES = {
-  m18: read("supabase/proposed/18-daily-movement-once-per-date.sql"),
-  r18: read("supabase/proposed/18-daily-movement-once-per-date-rollback.sql"),
-  m19: read("supabase/proposed/19-inventory-report-once-per-date.sql"),
-  r19: read("supabase/proposed/19-inventory-report-once-per-date-rollback.sql")
+  m19: read("supabase/proposed/19-daily-movement-once-per-date.sql"),
+  r19: read("supabase/proposed/19-daily-movement-once-per-date-rollback.sql"),
+  m20: read("supabase/proposed/20-inventory-report-once-per-date.sql"),
+  r20: read("supabase/proposed/20-inventory-report-once-per-date-rollback.sql")
 };
 const envSql = read("supabase/tests/daily-report-once-per-date-env.sql");
 
@@ -33,7 +33,7 @@ const PROD = {
   notify: "6ca4caa80df699aa530ef9aee3c86bda",
   dispatch: "c35b5c198c2b10b3901471bf5b1cbec1"
 };
-const NEW = { movement: "0626eaaa998300717c3584108ade03e6", inventory: "397fd9a73944f4ca689640879dfe5707" };
+const NEW = { movement: "287872ff20674cf03adb840ec48e9722", inventory: "578be73ec38616f4c5d5537b0435aba7" };
 
 // تعريف دالة كامل (من CREATE حتى $function$;).
 function definition(text, name) {
@@ -47,8 +47,8 @@ function definition(text, name) {
 // ── ١) عقود ساكنة ─────────────────────────────────────────────────────────────────────────
 const strip = (s) => s.replace(/--.*$/gm, "");
 for (const [m, r, fn, prod, fresh] of [
-  ["m18", "r18", "public.tg_notify_daily_movement", PROD.movement, NEW.movement],
-  ["m19", "r19", "public.tg_notify_inventory_report", PROD.inventory, NEW.inventory]
+  ["m19", "r19", "public.tg_notify_daily_movement", PROD.movement, NEW.movement],
+  ["m20", "r20", "public.tg_notify_inventory_report", PROD.inventory, NEW.inventory]
 ]) {
   const code = strip(FILES[m]);
   assert.match(code, new RegExp(`is distinct from '${prod}'`), `${m}: حارس البصمة قبل التطبيق`);
@@ -63,9 +63,9 @@ for (const [m, r, fn, prod, fresh] of [
   assert.equal(definition(FILES[r], fn), definition(envSql, fn), `${r}: التراجع يعيد جسم الإنتاج حرفياً`);
   assert.match(strip(FILES[r]), new RegExp(`is distinct from '${fresh}'`), `${r}: يرفض إن لم تكن النسخة الجديدة`);
 }
-// تنبيه الدفعات في 18 بنصه ومفتاحه ونافذته كما في الإنتاج
+// تنبيه الدفعات في 19 بنصه ومفتاحه ونافذته كما في الإنتاج
 const tail = (s) => s.slice(s.indexOf("  select coalesce(r.payload->'payments'"), s.indexOf("$function$;", s.indexOf("  select coalesce(r.payload->'payments'")));
-assert.equal(tail(definition(FILES.m18, "public.tg_notify_daily_movement")), tail(definition(envSql, "public.tg_notify_daily_movement")), "18: جزء الدفعات حرفياً كما في الإنتاج");
+assert.equal(tail(definition(FILES.m19, "public.tg_notify_daily_movement")), tail(definition(envSql, "public.tg_notify_daily_movement")), "19: جزء الدفعات حرفياً كما في الإنتاج");
 console.log("  ✓ عقود ساكنة: دالة واحدة لكل هجرة بحارسَي بصمة، لا إرسال ولا Cron، الدفعات كما هي، والتراجع حرفي");
 
 // ── ٢) تشغيل حي ──────────────────────────────────────────────────────────────────────────
@@ -103,9 +103,9 @@ const fresh = (...migs) => {
   for (const m of migs) run(FILES[m]);
 };
 const KIND = {
-  movement: { mig: "m18", rb: "r18", prefix: "movement", event: "daily_movement", fn: "tg_notify_daily_movement",
+  movement: { mig: "m19", rb: "r19", prefix: "movement", event: "daily_movement", fn: "tg_notify_daily_movement",
     snap: (d) => `insert into public.daily_movement_reports(report_date, payload) values (${d}, '{"payments":[]}');` },
-  inventory: { mig: "m19", rb: "r19", prefix: "inventory", event: "inventory_report", fn: "tg_notify_inventory_report",
+  inventory: { mig: "m20", rb: "r20", prefix: "inventory", event: "inventory_report", fn: "tg_notify_inventory_report",
     snap: (d) => `insert into public.inventory_reports(report_date, source, items) values (${d}, 'ameen_inventory', '[1,2,3]');` }
 };
 const TODAY = "(now() at time zone 'Asia/Damascus')::date";
@@ -198,20 +198,20 @@ for (const [name, k] of Object.entries(KIND)) {
 }
 
 // الهجرتان معاً: مستقلتان، وتراجع واحدة لا يُسقط جدول الأخرى
-fresh("m18", "m19");
+fresh("m19", "m20");
 run(KIND.movement.snap(dateSql(0)) + KIND.inventory.snap(dateSql(0)) + KIND.movement.snap(dateSql(0)) + KIND.inventory.snap(dateSql(0)));
-eq(count(KIND.movement) + count(KIND.inventory), 2, "18+19: رسالة واحدة لكل تقرير");
-run(FILES.r18);
-eq(fp("tg_notify_daily_movement"), PROD.movement, "18+19: تراجع 18 وحده");
-eq(fp("tg_notify_inventory_report"), NEW.inventory, "18+19: 19 باقية");
-eq(val(`select count(*) from private.daily_report_notifications where report_kind='inventory_report'`), "1", "18+19: سجل 19 باقٍ");
-run(KIND.inventory.snap(dateSql(0))); eq(count(KIND.inventory), 1, "18+19: 19 تعمل بعد تراجع 18");
+eq(count(KIND.movement) + count(KIND.inventory), 2, "19+20: رسالة واحدة لكل تقرير");
 run(FILES.r19);
-eq(val(`select to_regclass('private.daily_report_notifications') is null`), "t", "18+19: الجدول يُسقط بعد التراجعين");
-// تنبيه الدفعات بعد 18: دفعة جديدة ⇒ رسالة، اللقطة نفسها ⇒ لا
-fresh("m18");
+eq(fp("tg_notify_daily_movement"), PROD.movement, "19+20: تراجع 19 وحده");
+eq(fp("tg_notify_inventory_report"), NEW.inventory, "19+20: 20 باقية");
+eq(val(`select count(*) from private.daily_report_notifications where report_kind='inventory_report'`), "1", "19+20: سجل 20 باقٍ");
+run(KIND.inventory.snap(dateSql(0))); eq(count(KIND.inventory), 1, "19+20: 20 تعمل بعد تراجع 19");
+run(FILES.r20);
+eq(val(`select to_regclass('private.daily_report_notifications') is null`), "t", "19+20: الجدول يُسقط بعد التراجعين");
+// تنبيه الدفعات بعد 19: دفعة جديدة ⇒ رسالة، اللقطة نفسها ⇒ لا
+fresh("m19");
 run(`insert into public.daily_movement_reports(report_date,payload) values (${dateSql(0)}, '{"payments":[{"customer":"T","amount":5}]}');`.repeat(2));
-eq(val(`select count(*) from public.telegram_outbox where event_type='ameen_payment'`), "1", "18: تنبيه الدفعات كما هو");
+eq(val(`select count(*) from public.telegram_outbox where event_type='ameen_payment'`), "1", "19: تنبيه الدفعات كما هو");
 
 run(`drop database if exists ${DB}`, { db: "postgres" });
 console.log(`  ✓ تشغيل حي: ${checks} تأكيداً على نسخ الإنتاج الحرفية (التكرار مُعاد إنتاجه ثم مُصلَح)`);

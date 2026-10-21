@@ -1,4 +1,4 @@
--- بيئة اختبار proposed/18 و19: نسخ حرفية من جسم الإنتاج (pg_get_functiondef، 2026-10-21) لـ notify_telegram
+-- بيئة اختبار proposed/19 و20: نسخ حرفية من جسم الإنتاج (pg_get_functiondef، 2026-10-21) لـ notify_telegram
 -- (6ca4caa8) وnotify_telegram_dispatch (c35b5c19) وtg_notify_daily_movement (feb6663e) وtg_notify_inventory_report
 -- (775cf58c)، وجداول مصغّرة بأعمدة الإنتاج. مسارات الامتصاص (13/15) بدائل تعيد false: النوعان مصنّفان «فوري» في الإنتاج.
 -- يُحمَّل عبر scripts/check-daily-report-once-per-date.mjs في قاعدة مؤقتة مستقلة. لا شبكة ولا تيليغرام حقيقي.

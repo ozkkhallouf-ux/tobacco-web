@@ -1,5 +1,5 @@
 -- ============================================================================
--- 18: تقرير الحركة اليومية — رسالة واحدة لكل تاريخ تقرير (2026-10-21)
+-- 19: تقرير الحركة اليومية — رسالة واحدة لكل تاريخ تقرير (2026-10-21)
 --
 -- السبب الجذري: trigger على public.daily_movement_reports (لقطة متجددة ~240 مرة يومياً) يستدعي
 -- notify_telegram بالمفتاح movement:<date> ونافذة 720 دقيقة، فأول لقطة بعد 12 ساعة تُرسل الرسالة ثانيةً
@@ -14,8 +14,8 @@
 --   • الاحتياط عند غياب report_date: تاريخ دمشق لا تاريخ الجلسة.
 --   • بذر السجل من telegram_outbox الحالية كي لا يُعاد إعلان تاريخ أُرسل قبل التطبيق.
 -- لا يمسّ: notify_telegram وnotify_telegram_dispatch وdispatch_telegram_outbox وأي Cron، ولا مفاتيح الدفعات
--- (ameen-payments بنافذة 1440) ولا التكاليف ولا النفاد. مستقل عن 19 (يشتركان في جدول السجل فقط).
--- التراجع: 18-daily-movement-once-per-date-rollback.sql. الاختبار: scripts/check-daily-report-once-per-date.mjs
+-- (ameen-payments بنافذة 1440) ولا التكاليف ولا النفاد. مستقل عن 20 (يشتركان في جدول السجل فقط).
+-- التراجع: 19-daily-movement-once-per-date-rollback.sql. الاختبار: scripts/check-daily-report-once-per-date.mjs
 -- ============================================================================
 begin;
 set local lock_timeout = '20s';
@@ -23,7 +23,7 @@ set local lock_timeout = '20s';
 do $pre$
 begin
   if md5((select prosrc from pg_proc where oid = to_regprocedure('public.tg_notify_daily_movement()'))) is distinct from 'feb6663e6fcebe7ca17248960e0ec8d8' then
-    raise exception 'PRE 18: tg_notify_daily_movement() is not the audited production body (feb6663e)';
+    raise exception 'PRE 19: tg_notify_daily_movement() is not the audited production body (feb6663e)';
   end if;
 end
 $pre$;
@@ -67,7 +67,7 @@ declare
   v_claimed integer := 0;
   v_outbox bigint;
 begin
-  -- once-per-date:v1 (proposed/18) — رسالة واحدة لكل تاريخ تقرير
+  -- once-per-date:v1 (proposed/19) — رسالة واحدة لكل تاريخ تقرير
   if v_date >= (now() at time zone 'Asia/Damascus')::date - 14 then
     insert into private.daily_report_notifications (report_kind, report_date)
     values ('daily_movement', v_date)
@@ -145,12 +145,12 @@ $function$;
 
 do $post$
 begin
-  if md5((select prosrc from pg_proc where oid = to_regprocedure('public.tg_notify_daily_movement()'))) is distinct from '0626eaaa998300717c3584108ade03e6' then
-    raise exception 'POST 18: tg_notify_daily_movement() body is not the tested version';
+  if md5((select prosrc from pg_proc where oid = to_regprocedure('public.tg_notify_daily_movement()'))) is distinct from '287872ff20674cf03adb840ec48e9722' then
+    raise exception 'POST 19: tg_notify_daily_movement() body is not the tested version';
   end if;
   if not exists (select 1 from pg_trigger where tgname = 'trg_notify_daily_movement'
                  and tgrelid = 'public.daily_movement_reports'::regclass and not tgisinternal) then
-    raise exception 'POST 18: trigger trg_notify_daily_movement missing';
+    raise exception 'POST 19: trigger trg_notify_daily_movement missing';
   end if;
 end
 $post$;
