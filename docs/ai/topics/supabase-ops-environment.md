@@ -23,7 +23,7 @@
   - سياسة فروع مخصّصة: `main` فقط.
   - `can_admins_bypass: false`.
   - **بلا مراجع مطلوب**، كي تعمل الدورات المجدولة والآلية بلا موافقة يدوية.
-- **الـjobs الثلاثة** تعلن `environment: supabase-ops`.
+- **الـjobs الثلاثة** تعلن `environment: supabase-ops` وشرط `github.ref == 'refs/heads/main'` (تشغيل من فرع آخر يُتخطّى بدل أن يفشل فيطلق تنبيه فشل الأتمتة).
 - **التشغيل من غير main** (workflow_dispatch من فرع آخر، أو كود فرع) يُرفض من GitHub قبل بدء الـjob، فلا يصل إلى سرّ البيئة.
 - **لا كود PR يصل إلى السرّ:** الثلاثة لا تُطلق بـpull_request ولا pull_request_target ولا push، و`workflow_run` وschedule يشغّلان نسخة main.
 - **الحارس:** `scripts/check-supabase-ops-environment.mjs` ضمن `npm run check`.
@@ -51,10 +51,11 @@
 ### التوافق
 - مفاتيح `sb_secret_…` الجديدة تعطي صلاحية service role نفسها، أي تتجاوز RLS.
 - **لا تُقيَّد بجداول أو دوال**، ففائدتها **الاستقلال**: إبطال هذا المفتاح وحده دون مسّ OZK2026 أو Edge Functions. لا تقلّل الصلاحية.
-- **غير مؤكَّد بعد:** هل يقبل الـgateway المفتاح الجديد في ترويسة `Authorization: Bearer`؟
-  - السكربتات الثلاثة ترسله في `apikey` وفي `Authorization` معاً.
-  - المفتاح ليس JWT، فإن رُفض في `Authorization` يلزم تعديل صغير: إرساله في `apikey` وحدها حين يبدأ بـ`sb_secret_`.
-  - يُثبت هذا باختبار قراءة فقط قبل التحويل.
+- **مؤكَّد من توثيق Supabase:** المفتاح الجديد ليس JWT، فيُرفض في `Authorization: Bearer` بـ«Invalid JWT».
+  - لذلك تبني `scripts/supabase-service-headers.mjs` الترويسات: JWT القديم في `apikey` و`Authorization` كما كان،
+    و`sb_…` في `apikey` وحدها. يستعملها health-check (notify_telegram وhealth_lifecycle) وstock-priority-alerts،
+    وalert-on-automation-failure يطبّق القاعدة نفسها في bash.
+  - التحويل لا يحتاج أي تعديل كود؛ الحارس يثبت السلوكين بلا شبكة.
 
 ### مَن يعتمد على المفتاح القديم (legacy service_role JWT)
 - Edge Functions (يُحقن تلقائياً).
@@ -67,9 +68,8 @@
 ### الخطوات (كل خطوة بموافقة منفصلة)
 1. **إنشاء المفتاح (المالك):** من Supabase Dashboard ← API Keys، مفتاح `sb_secret_` باسم `github-actions`. لا يمسّ أي مفتاح آخر.
 2. **اختبار آمن بقراءة فقط،** من جهاز المالك أو workflow يدوي على main بلا إرسال:
-   - `GET /rest/v1/bot_config?select=key&limit=1` بـ`apikey` وحدها، ثم مع `Authorization`.
-   - النتيجة تحدد هل يلزم تعديل الترويسة.
-3. **إن لزم:** PR صغير يجعل السكربتات الثلاثة ترسل `apikey` وحدها لمفاتيح `sb_secret_`.
+   - `GET /rest/v1/bot_config?select=key&limit=1` بـ`apikey` وحدها (لا `Authorization`).
+3. **تعديل الترويسة:** منجز في هذا الـPR (`supabase-service-headers.mjs`).
 4. **وضعه سرّ بيئة** في `supabase-ops`، وهو الخطوة 3 في الترتيب أعلاه، ثم مراقبة دورة كاملة.
 5. **حذف سرّ المستودع القديم.** الـJWT القديم يبقى صالحاً للـEdge Functions وOZK2026، فلا تعطّل.
 6. **التراجع:** حذف سرّ البيئة (فيعود سرّ المستودع إن كان باقياً)، أو إبطال المفتاح الجديد وحده من Dashboard.

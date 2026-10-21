@@ -23,6 +23,8 @@ concurrency:
 
 jobs:
   stock-priority-alerts:
+    # التشغيل من فرع آخر يُتخطّى (skipped) بدل أن يفشل فيطلق تنبيه فشل الأتمتة؛ الحماية الفعلية سياسة البيئة.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     # مفتاح Supabase بصلاحية service role في بيئة supabase-ops المحصورة بفرع main وحده: لا يصل إليه
     # workflow على فرع آخر ولا PR. بلا مراجع مطلوب كي يعمل التشغيل المجدول/الآلي بلا موافقة يدوية.

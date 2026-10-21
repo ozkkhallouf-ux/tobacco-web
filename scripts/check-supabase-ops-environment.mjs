@@ -10,11 +10,19 @@
 //   3. لا طباعة للمفتاح ولا set -x ولا كتابته إلى GITHUB_ENV/GITHUB_OUTPUT ولا إلى ملف.
 //   4. checkout بلا اعتماد محفوظ، وصلاحيات GITHUB_TOKEN كما هي دون توسيع.
 //   5. لا مفتاح Supabase سرّي مكتوب في أي workflow (sb_secret_ أو JWT service_role).
+//   6. كل job يقرأ المفتاح خلف شرط refs/heads/main، وبلا deployment: false.
+//   7. جرد الأسرار المخزَّنة لكل workflow: أي سرّ جديد يُفشل الفحص حتى يُراجَع.
+//   8. لا مفتاح sb_secret_ ولا JWT خدمة في أي ملف متتبَّع بالمستودع.
+//   9. الترويسات: JWT القديم في apikey وAuthorization كما كان، وsb_secret_ في apikey وحدها.
 // ============================================================================
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { supabaseServiceHeaders } from "./supabase-service-headers.mjs";
+import { callLifecycle } from "./health-check.mjs";
+import { run as runStockAlerts } from "./stock-priority-alerts.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const wfDir = path.join(root, ".github/workflows");
@@ -106,5 +114,75 @@ for (const f of files) {
   assert.doesNotMatch(raw, /eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}/, `${f}: JWT مكتوب`);
 }
 ok("لا مفتاح sb_secret_ ولا JWT مكتوب في أي workflow");
+
+// 6) شرط main وبلا deployment: false
+for (const [f, jobs] of Object.entries(users)) {
+  for (const { job, body } of jobs) {
+    assert.ok(body.includes("github.ref == 'refs/heads/main'"), `${f}#${job}: يجب شرط github.ref == 'refs/heads/main'`);
+    assert.doesNotMatch(body, /deployment:\s*false/, `${f}#${job}: لا deployment: false قبل إثبات بقاء سياسة فروع البيئة معه`);
+  }
+}
+ok("كل job يقرأ المفتاح خلف شرط refs/heads/main، وبلا deployment: false");
+
+// 7) جرد الأسرار المخزَّنة (GITHUB_TOKEN ليس سراً مخزَّناً)
+const SECRET_INVENTORY = {
+  "health-check.yml": [SECRET],
+  "stock-priority-alerts.yml": [SECRET],
+  "alert-on-automation-failure.yml": [SECRET],
+  "pages.yml": ["ROLLBAR_POST_CLIENT_ITEM_TOKEN"],
+  "windows-release.yml": ["RELEASE_APP_ID", "RELEASE_APP_PRIVATE_KEY"]
+};
+for (const f of files) {
+  const src = stripComments(readFileSync(path.join(wfDir, f), "utf8"));
+  const used = [...new Set([...src.matchAll(/secrets\.([A-Za-z0-9_]+)/g)].map((m) => m[1]).filter((n) => n !== "GITHUB_TOKEN"))].sort();
+  assert.deepEqual(used, [...(SECRET_INVENTORY[f] || [])].sort(), `${f}: أسرار خارج الجرد المراجَع (${used.join(",") || "لا شيء"})`);
+}
+ok("جرد الأسرار المخزَّنة مطابق لكل workflow");
+
+// 8) لا مفتاح في أي ملف متتبَّع
+const tracked = execFileSync("git", ["ls-files", "-z"], { cwd: root, encoding: "utf8" }).split("\0").filter(Boolean)
+  .filter((f) => !/\.(png|jpe?g|gif|ico|pdf|woff2?|ttf|xlsx|zip)$/i.test(f));
+const leaks = [];
+for (const f of tracked) {
+  let text;
+  try { text = readFileSync(path.join(root, f), "utf8"); } catch { continue; }
+  if (/sb_secret_[A-Za-z0-9_-]{16,}/.test(text) || /eyJhbGciOi[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}/.test(text)) leaks.push(f);
+}
+assert.deepEqual(leaks, [], `مفتاح Supabase محفوظ في ملفات المستودع: ${leaks.join(", ")}`);
+ok("لا مفتاح sb_secret_ ولا JWT خدمة في أي ملف متتبَّع");
+
+// 9) الترويسات مع المفتاحين، في كل endpoint يلمسه الـjobs
+const JWT = "eyJ.test.legacy";
+const NEW = "sb_secret_TESTONLY";
+assert.deepEqual(supabaseServiceHeaders(JWT), { apikey: JWT, Authorization: `Bearer ${JWT}` });
+assert.deepEqual(supabaseServiceHeaders(NEW), { apikey: NEW });
+for (const key of [JWT, NEW]) {
+  const hc = [];
+  const res = await callLifecycle("probe", {}, {
+    env: { SUPABASE_URL: "https://x.invalid", SUPABASE_SERVICE_KEY: key },
+    fetchImpl: async (url, init) => { hc.push(init.headers); return new Response(JSON.stringify({ ok: true, op: "probe", ready: true }), { status: 200 }); }
+  });
+  assert.equal(res.kind, "ok");
+  assert.equal(hc[0].apikey, key);
+  assert.equal("Authorization" in hc[0], key === JWT, "health_lifecycle: Authorization للمفتاح القديم وحده");
+
+  const stock = [];
+  await runStockAlerts({
+    env: { SUPABASE_URL: "https://x.invalid", SUPABASE_SERVICE_ROLE_KEY: key }, argv: [], log: () => {},
+    fetchImpl: async (url, init = {}) => { stock.push(init.headers || {}); return new Response("[]", { status: 200 }); }
+  });
+  assert.ok(stock.length >= 3, "stock-priority-alerts: inventory_reports ×2 وbot_config");
+  for (const h of stock) {
+    assert.equal(h.apikey, key);
+    assert.equal("Authorization" in h, key === JWT, "stock-priority-alerts: Authorization للمفتاح القديم وحده");
+  }
+}
+const healthSrc = readFileSync(path.join(root, "scripts/health-check.mjs"), "utf8");
+assert.doesNotMatch(healthSrc, /Authorization:\s*`Bearer \$\{serviceKey\}`/, "health-check: لا Bearer ثابت (notify_telegram وhealth_lifecycle عبر supabaseServiceHeaders)");
+assert.equal((healthSrc.match(/\.\.\.supabaseServiceHeaders\(serviceKey\)/g) || []).length, 2, "health-check: notify_telegram وhealth_lifecycle عبر supabaseServiceHeaders");
+const alertSrc = readFileSync(path.join(wfDir, "alert-on-automation-failure.yml"), "utf8");
+assert.match(alertSrc, /case "\$SUPABASE_SERVICE_ROLE_KEY" in\s*\n\s*sb_\*\) ;;\s*\n\s*\*\) AUTH_HEADER=\(-H "Authorization: Bearer \$\{SUPABASE_SERVICE_ROLE_KEY\}"\) ;;/, "alert: Authorization للمفتاح القديم وحده");
+assert.match(alertSrc, /"\$\{AUTH_HEADER\[@\]\}"/);
+ok("JWT القديم في الترويستين كما كان، وsb_secret_ في apikey وحدها (health_lifecycle وnotify_telegram وقراءات المخزون والتنبيه)");
 
 console.log(`check-supabase-ops-environment: اجتاز ${passed} عقود.`);
