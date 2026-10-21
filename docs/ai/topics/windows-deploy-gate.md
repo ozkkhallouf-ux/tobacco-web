@@ -199,6 +199,37 @@
 تُطبَّق الملفات الثلاثة المنشورة يدوياً عبر الـindex فقط بعد التحقق أن blob كل منها يطابق الهدف، ثم `merge --ff-only`.
 اختُبر هذا بمحاكاة على نسخة: لم يتغيّر أي بايت ولا mtime في الملفات التشغيلية.
 
+## هوية الإصدار: GitHub App «OZK Windows Release» (2026-10-21)
+
+| العنصر | القيمة |
+|---|---|
+| التطبيق | `OZK Windows Release`، App ID `5412959`، خاص، مثبّت على `tobacco-web` وحده (التثبيت `173807509`) |
+| صلاحيات التطبيق | Contents RW وWorkflows RW وMetadata R، ولا شيء غيرها. Workflows لازمة لأن الإصدارات تقدّم commits تعدّل `.github/workflows` |
+| الأسرار | `RELEASE_APP_ID` و`RELEASE_APP_PRIVATE_KEY` في بيئة `windows-production` وحدها |
+| الإعداد | `releaseApp` في `gate-config.example.json`: المعرّفان والصلاحيتان، ويُرفض أي اختلاف |
+
+### مسار الإصدار في `windows-release.yml`
+
+1. **التشغيل:** `workflow_dispatch` فقط، وكل job بشرط `github.ref == 'refs/heads/main'`. لا يعمل بسبب PR أو دمج، ولا يشغّل كود فرع غير مدموج.
+2. **job الفحص:** بلا أي سرّ.
+3. **job الإصدار:**
+   - لا يبدأ إلا بعد موافقة المالك في بيئة `windows-production`، وهذه لا تقبل إلا `main`.
+   - كل checkout بـ`persist-credentials: false`.
+   - صلاحية `GITHUB_TOKEN` فيه `contents: read` و`deployments: write` فقط.
+4. **الأسرار:** في خطوة واحدة (`windows-release-apply.mjs`)، والتوكن يُنشأ داخل `ctx.push` وحده، أي:
+   - بعد إعادة التحقق كاملاً: الـSHA، وmain، و`deviceBaselineSha`، وموافقة الكتابة، وCI، وموضع الفرع.
+   - التحقق أن التثبيت هو `173807509` للتطبيق `5412959` على هذا المستودع.
+   - توكن مقيّد بـ`tobacco-web` وبـ`contents:write` و`workflows:write`، ورفضه إن أعاد GitHub أوسع من ذلك.
+   - `::add-mask::` للـJWT والتوكن والترويسة.
+   - دفع `‹SHA›:refs/heads/windows-production` بترويسة لا URL، وبلا force ولا «+».
+   - رسالة خطأ git بلا اعتماد.
+   - إبطال التوكن فوراً (`DELETE /installation/token`)، نجح الدفع أو فشل.
+5. **تسجيل الـDeployment:** يبقى بـ`GITHUB_TOKEN`، و`deploymentCreator` كما هو.
+
+**الحارس:** `scripts/check-windows-release-app-token.mjs` ضمن `npm run check`.
+**الخطوة التالية (موافقة منفصلة):** Ruleset ثانٍ يمنع تحديث `windows-production` إلا للتطبيق `5412959`
+(Integration bypass)، وتبقى القاعدة الحالية (منع الحذف وforce) بلا أي استثناء.
+
 ## الفحوص الإلزامية
 
 - `npm run check`، ويشمل `check-windows-deploy-gate.mjs`.
