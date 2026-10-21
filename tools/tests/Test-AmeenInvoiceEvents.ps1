@@ -474,6 +474,61 @@ try {
   $other = (& $shell -NoProfile -Command $probeCmd 2>&1 | Out-String).Trim()
   Assert 'outbox lock: released lock can be acquired again' ($other -match 'ACQUIRED')
 
+  # ── ٥ز) Codex P1 (7dbd9915): bill_type غير رقمي يُعزل ولا يُسقط الوكيل ──────────────────────────
+  $tbox = Join-Path $tempDir "outbox-billtype"
+  Initialize-AmeenInvoiceOutbox -Dir $tbox
+  $ts = New-AmeenInvoiceState
+  $nowT = [datetime]::SpecifyKind([datetime]"2026-10-21T11:00:00", [DateTimeKind]::Utc)
+  $tg = @("E1000000-0000-0000-0000-000000000001", "E1000000-0000-0000-0000-000000000002", "E1000000-0000-0000-0000-000000000003")
+  $tev = @()
+  foreach ($g in $tg) { $tev += Resolve-AmeenInvoiceChanges -State $ts -Observations @((& $obsG $g (ConvertTo-AmeenInvoiceSnapshot -Header (New-Header -Guid $g) -Lines @($L1)) "2026-10-21T10:00:00.000Z")) }
+  $tev[0].bill.bill_type = "abc"                                # نص غير رقمي
+  $tev[1].bill.bill_type = 99999999999                          # خارج Int32
+  Add-AmeenOutboxEvents -Dir $tbox -Events $tev
+  Assert 'bill_type text: validation returns a reason instead of throwing' (-not (Throws { $script:bt1 = Test-AmeenInvoiceEvent -InvoiceEvent (@(Get-AmeenOutboxPending -Dir $tbox))[0].event -NowUtc $nowT }) -and $script:bt1.code -eq "bill")
+  Assert 'bill_type out of Int32: validation returns a reason instead of throwing' (-not (Throws { $script:bt2 = Test-AmeenInvoiceEvent -InvoiceEvent (@(Get-AmeenOutboxPending -Dir $tbox))[1].event -NowUtc $nowT }) -and $script:bt2.code -eq "bill")
+  $script:tSent = @()
+  $okB = { param($Events) $script:tSent += @($Events | ForEach-Object { $_.bill_guid }); return @($Events | ForEach-Object { @{ event_id = $_.event_id; outcome = "applied" } }) }
+  Assert 'bad bill_type: send does not throw' (-not (Throws { $script:tr = Send-AmeenInvoiceOutbox -Dir $tbox -State $ts -Transport $okB -NowUtc $nowT }))
+  Assert 'bad bill_type: both bad events isolated, valid one sent' ($script:tr.deadlettered -eq 2 -and $script:tr.acked -eq 1 -and $script:tSent.Count -eq 1 -and $script:tSent[0] -eq $tg[2].ToLowerInvariant())
+  Assert 'bad bill_type: isolated with code bill, outbox empty' (@(Get-AmeenDeadLetters -Dir $tbox | Where-Object { $_.reason_code -eq "bill" }).Count -eq 2 -and @(Get-AmeenOutboxPending -Dir $tbox).Count -eq 0)
+
+  # ── ٥ح) Codex P1 (7dbd9915): رفض الحجم من جسم استجابة PostgREST (HTTP 400) يُنصّف الدفعة ───────────
+  $tcp = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 0); $tcp.Start(); $port = $tcp.LocalEndpoint.Port; $tcp.Stop()
+  $server = Start-Job -ArgumentList $port -ScriptBlock {
+    param($Port)
+    $l = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, $Port); $l.Start()
+    try {
+      foreach ($k in 1..3) {
+        $c = $l.AcceptTcpClient(); $st = $c.GetStream(); $st.ReadTimeout = 5000
+        $buf = New-Object byte[] 65536; $acc = New-Object System.IO.MemoryStream
+        do { $n = $st.Read($buf, 0, $buf.Length); $acc.Write($buf, 0, $n); $txt = [Text.Encoding]::ASCII.GetString($acc.ToArray()) } while ($n -gt 0 -and $txt.IndexOf("`r`n`r`n") -lt 0)
+        $hdrEnd = $txt.IndexOf("`r`n`r`n") + 4
+        $len = 0; if ($txt -match '(?i)content-length:\s*(\d+)') { $len = [int]$Matches[1] }
+        while (($acc.Length - $hdrEnd) -lt $len) { $n = $st.Read($buf, 0, $buf.Length); if ($n -le 0) { break }; $acc.Write($buf, 0, $n) }
+        $body = '{"code":"22023","details":null,"hint":null,"message":"events payload too large"}'
+        $resp = "HTTP/1.1 400 Bad Request`r`nContent-Type: application/json; charset=utf-8`r`nContent-Length: " + $body.Length + "`r`nConnection: close`r`n`r`n" + $body
+        $bytes = [Text.Encoding]::ASCII.GetBytes($resp); $st.Write($bytes, 0, $bytes.Length); $st.Flush(); $c.Close()
+      }
+    } finally { $l.Stop() }
+  }
+  $up = $false
+  foreach ($w in 1..60) { try { $tc = New-Object System.Net.Sockets.TcpClient; $tc.Connect("127.0.0.1", $port); $tc.Close(); $up = $true; break } catch { Start-Sleep -Milliseconds 250 } }
+  # (اتصال الفحص أعلاه يستهلك قبولاً واحداً بلا طلب؛ الخادم يقرأ صفراً ويغلق، فيبقى قبولان للطلبين الحقيقيين.)
+  Assert 'rpc test server started' ($up)
+  $rpcMsg = $null
+  try { [void](Invoke-AmeenRpc -Url ("http://127.0.0.1:{0}/rest/v1/rpc/apply_ameen_invoice_events" -f $port) -Headers @{ apikey = "test" } -Body ([Text.Encoding]::UTF8.GetBytes('{"p_events":[]}')) -TimeoutSec 10) } catch { $rpcMsg = $_.Exception.Message }
+  Assert 'rpc 400: error message carries status and PostgREST message from the body' ($rpcMsg -match 'HTTP 400' -and $rpcMsg -match '22023' -and $rpcMsg -match 'events payload too large')
+  Assert 'rpc 400: details/hint not copied into the message' ($rpcMsg -notmatch 'details|hint')
+  $hbox = Join-Path $tempDir "outbox-http400"
+  Initialize-AmeenInvoiceOutbox -Dir $hbox
+  $hs = New-AmeenInvoiceState
+  foreach ($k in 1..6) { $gk = "E2000000-0000-0000-0000-{0:D12}" -f $k; Add-AmeenOutboxEvents -Dir $hbox -Events (Resolve-AmeenInvoiceChanges -State $hs -Observations @((& $obsG $gk (ConvertTo-AmeenInvoiceSnapshot -Header (New-Header -Guid $gk) -Lines @($L1)) "2026-10-21T10:00:00.000Z"))) }
+  $httpT = { param($Events) $r = Invoke-AmeenRpc -Url ("http://127.0.0.1:{0}/rest/v1/rpc/apply_ameen_invoice_events" -f $port) -Headers @{ apikey = "test" } -Body ([Text.Encoding]::UTF8.GetBytes((ConvertTo-AmeenCanonicalJson @{ p_events = @($Events) }))) -TimeoutSec 10; return @($r.results) }
+  $r = Send-AmeenInvoiceOutbox -Dir $hbox -State $hs -Transport $httpT -NowUtc $nowT
+  Assert 'http 400 size rejection: batch cap halved (not retried forever at the same size)' ($r.error -match 'payload too large' -and [int]$hs.send.batch_cap -eq 3 -and @(Get-AmeenOutboxPending -Dir $hbox).Count -eq 6)
+  Stop-Job $server -ErrorAction SilentlyContinue; Remove-Job $server -Force -ErrorAction SilentlyContinue
+
   # ── ٦) الوكيل: يُحلَّل بلا أخطاء، ولا يسجّل مهمة، ولا يرسل افتراضياً ───────────────────────────
   $tokens = $null; $errors = $null
   [void][System.Management.Automation.Language.Parser]::ParseFile($agentPath, [ref]$tokens, [ref]$errors)

@@ -175,10 +175,11 @@ $transport = {
     param($Events)
     if ($null -eq $script:session -or (Get-Date) -ge $script:session.expires) { $script:session = Get-SupabaseSession }
     $body = [Text.Encoding]::UTF8.GetBytes((ConvertTo-AmeenCanonicalJson @{ p_events = @($Events) }))
-    $resp = Invoke-RestMethod -Method Post -Uri ($script:session.url + "/rest/v1/rpc/" + $RpcName) -Headers @{
+    # Invoke-AmeenRpc يوحّد رسالة الفشل من جسم PostgREST، فيرى منطق تنصيف الدفعة «payload too large» على 5.1.
+    $resp = Invoke-AmeenRpc -Url ($script:session.url + "/rest/v1/rpc/" + $RpcName) -Headers @{
         apikey = $script:session.key; Authorization = "Bearer " + $script:session.token
         "Accept-Profile" = "public"; "Content-Profile" = "public"
-    } -ContentType "application/json; charset=utf-8" -Body $body -TimeoutSec 30
+    } -Body $body -TimeoutSec 30
     return @($resp.results)
 }
 

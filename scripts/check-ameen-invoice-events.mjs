@@ -161,6 +161,14 @@ for (const name of [
   "outbox lock: second agent instance exits with code 5",
   "outbox lock: refused agent wrote no state or pending files",
   "outbox lock: released lock can be acquired again",
+  // Codex P1 (7dbd9915): bill_type غير رقمي، وجسم استجابة PostgREST
+  "bill_type text: validation returns a reason instead of throwing",
+  "bill_type out of Int32: validation returns a reason instead of throwing",
+  "bad bill_type: send does not throw",
+  "bad bill_type: both bad events isolated, valid one sent",
+  "rpc 400: error message carries status and PostgREST message from the body",
+  "rpc 400: details/hint not copied into the message",
+  "http 400 size rejection: batch cap halved (not retried forever at the same size)",
 ]) assert.ok(psTest.includes(`'${name}'`), `اختبار PowerShell إلزامي مفقود: ${name}`);
 
 const rollback = read(rollbackRel).replace(/--.*$/gm, "");
@@ -207,6 +215,11 @@ assert.ok(maxBytes > 0 && serverMax > 0 && maxBytes < serverMax, `حدّ دفع�
 assert.match(libCode, /if \(\$take\.Count -gt 0 -and \(\$bytes \+ \$add\) -gt \$MaxBatchBytes\) \{ break \}/, "الدفعة تُبنى بحد بايتات");
 assert.match(libCode, /\[IO\.FileShare\]::None/, "قفل حصري على ملف agent.lock");
 assert.match(agentCode, /\$outboxLock = Enter-AmeenOutboxLock -Dir \$OutboxDir/, "الوكيل يأخذ القفل");
+// Codex P1 (7dbd9915): الإرسال عبر Invoke-AmeenRpc (رسالة موحّدة من الجسم)، وتحويل bill_type آمن.
+assert.match(agentCode, /\$resp = Invoke-AmeenRpc -Url/, "الوكيل يرسل عبر Invoke-AmeenRpc");
+assert.doesNotMatch(agentCode, /Invoke-RestMethod -Method Post -Uri \(\$script:session\.url/, "لا استدعاء RPC مباشر يضيّع جسم الخطأ");
+assert.match(libCode, /\[int\]::TryParse\(\[string\]\$b\.bill_type/, "تحويل bill_type آمن");
+assert.doesNotMatch(libCode, /catch \{\s*\}/, "لا كتلة catch فارغة (CodeFactor PSAvoidUsingEmptyCatchBlock)");
 assert.ok(agentCode.indexOf("Enter-AmeenOutboxLock -Dir $OutboxDir") < agentCode.indexOf("Read-AmeenInvoiceState -Dir $OutboxDir"), "القفل قبل قراءة الحالة");
 for (const [name, text] of [["agent", agent], ["lib", lib]]) {
   assert.doesNotMatch(text, /AMEEN_SQL_WRITE_CONNECTION_STRING|WRITE_CONNECTION/, `${name}: لا سلسلة اتصال الكتابة`);
@@ -295,7 +308,7 @@ if (pwshProbe.status !== 0) {
     process.exit(ps.status || 1);
   }
   const m = psText.match(/Ameen invoice events: (\d+) PASS, (\d+) FAIL/);
-  assert.ok(m && Number(m[2]) === 0 && Number(m[1]) >= 160, "نتيجة اختبار PowerShell غير متوقعة");
+  assert.ok(m && Number(m[2]) === 0 && Number(m[1]) >= 170, "نتيجة اختبار PowerShell غير متوقعة");
   console.log(`  ✓ اختبار PowerShell (${pwshProbe.stdout.trim()}): ${m[1]} تأكيداً`);
 }
 console.log("check-ameen-invoice-events: اجتاز الفحص.");

@@ -366,7 +366,10 @@ function Enter-AmeenOutboxLock {
     try {
         $info = [Text.Encoding]::UTF8.GetBytes(("pid={0} host={1} since={2}" -f $PID, [Environment]::MachineName, [datetime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", $script:Invariant)))
         $fs.SetLength(0); $fs.Write($info, 0, $info.Length); $fs.Flush()
-    } catch { }
+    } catch {
+        # معلومات القفل (pid والوقت) للتشخيص فقط؛ القفل نفسه مأخوذ بفتح الملف حصرياً، فلا يُفشل التشغيل.
+        Write-Verbose ("agent.lock info not written: " + $_.Exception.GetType().Name)
+    }
     return $fs
 }
 
@@ -528,7 +531,10 @@ function Test-AmeenInvoiceEvent {
     if ($InvoiceEvent.event_id -ne $expected) { return (& $bad "event_id" "event_id does not match event content") }
     if ($InvoiceEvent.kind -eq "upsert") {
         $b = $InvoiceEvent.bill
-        if (-not ($b -is [System.Collections.IDictionary]) -or [string]$b.bill_guid -ne $g -or @(1, 3) -notcontains [int]$b.bill_type -or $null -eq $b.lines) { return (& $bad "bill" "upsert needs a bill snapshot for the same bill_guid") }
+        # تحويل آمن (Codex P1 على 7dbd9915): نص غير رقمي أو رقم خارج Int32 كان يرمي هنا فيُسقط الوكيل.
+        $bt = 0
+        $btOk = ($b -is [System.Collections.IDictionary]) -and [int]::TryParse([string]$b.bill_type, [Globalization.NumberStyles]::Integer, $script:Invariant, [ref]$bt)
+        if (-not $btOk -or [string]$b.bill_guid -ne $g -or @(1, 3) -notcontains $bt -or $null -eq $b.lines) { return (& $bad "bill" "upsert needs a bill snapshot for the same bill_guid") }
         if ($b.bill_date -and [string]$b.bill_date -notmatch '^\d{4}-\d{2}-\d{2}$') { return (& $bad "bill" "bill_date must be YYYY-MM-DD") }
         if ([Text.Encoding]::UTF8.GetByteCount((ConvertTo-AmeenCanonicalJson $b)) -gt 262144) { return (& $bad "size" "bill snapshot too large") }
         if ((Get-AmeenInvoiceVersionHash $b) -ne $h) { return (& $bad "version_hash" "version_hash does not match bill content") }
@@ -706,6 +712,37 @@ function Invoke-AmeenResnapshotQueue {
     return $summary
 }
 
+function Invoke-AmeenRpc {
+    # استدعاء RPC عبر PostgREST. عند فشل HTTP يُرمى استثناء برسالة موحّدة فيها الحالة ورمز الخطأ ورسالته من
+    # جسم الاستجابة (Codex P1 على 7dbd9915): في Windows PowerShell 5.1 تكون Exception.Message عامة
+    # «(400) Bad Request» بينما «events payload too large» في الجسم، فلا يراها منطق تنصيف الدفعة.
+    # من الجسم يؤخذ code وmessage فقط (نصوص أخطاء الخادم المعروفة)، بلا details/hint، وبحد 300 حرف.
+    param([Parameter(Mandatory = $true)][string]$Url, [Parameter(Mandatory = $true)][hashtable]$Headers,
+          [Parameter(Mandatory = $true)][byte[]]$Body, [int]$TimeoutSec = 30)
+    try {
+        return Invoke-RestMethod -Method Post -Uri $Url -Headers $Headers -ContentType "application/json; charset=utf-8" -Body $Body -TimeoutSec $TimeoutSec
+    } catch {
+        $status = ""
+        $resp = $_.Exception.Response
+        if ($null -ne $resp) { try { $status = [string][int]$resp.StatusCode } catch { $status = "" } }
+        $raw = ""
+        if ($_.ErrorDetails -and $_.ErrorDetails.Message) { $raw = [string]$_.ErrorDetails.Message }
+        elseif ($resp -is [System.Net.HttpWebResponse]) {
+            try { $sr = New-Object System.IO.StreamReader($resp.GetResponseStream()); $raw = $sr.ReadToEnd(); $sr.Dispose() } catch { $raw = "" }
+        }
+        $pgCode = ""; $pgMsg = ""
+        try {
+            $j = $raw | ConvertFrom-Json -ErrorAction Stop
+            if ($j.code) { $pgCode = [string]$j.code }
+            if ($j.message) { $pgMsg = [string]$j.message }
+        } catch { $pgMsg = "" }
+        if (-not $pgMsg) { $pgMsg = $_.Exception.Message }
+        $msg = ("HTTP {0} {1}: {2}" -f $status, $pgCode, ($pgMsg -replace '[\r\n\t]', ' ')).Trim()
+        if ($msg.Length -gt 300) { $msg = $msg.Substring(0, 300) }
+        throw $msg
+    }
+}
+
 function Send-AmeenInvoiceOutbox {
     # يرسل المعلّق بترتيب التسلسل. Transport: scriptblock يستقبل مصفوفة الأحداث ويعيد مصفوفة
     # @{ event_id; index; outcome; reason_code; reason }.
@@ -726,7 +763,9 @@ function Send-AmeenInvoiceOutbox {
     if ($pending.Count -eq 0) { return $result }
     $valid = New-Object System.Collections.Generic.List[object]
     foreach ($p in $pending) {
-        $why = Test-AmeenInvoiceEvent -InvoiceEvent $p.event -NowUtc $NowUtc
+        # أي استثناء غير متوقع أثناء التحقق يعزل الحدث نفسه ولا يُسقط الوكيل أو يحجز ما بعده.
+        try { $why = Test-AmeenInvoiceEvent -InvoiceEvent $p.event -NowUtc $NowUtc }
+        catch { $why = @{ code = "invalid"; reason = ("event could not be validated (" + $_.Exception.GetType().Name + ")") } }
         if ($null -ne $why) {
             Move-AmeenEventToDeadLetter -Dir $Dir -File $p.file -InvoiceEvent $p.event -Code $why.code -Reason $why.reason -Source "local" -NowUtc $NowUtc
             $result.deadlettered++
