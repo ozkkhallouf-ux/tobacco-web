@@ -8,6 +8,17 @@
   "mainBranch": "main",
   "deploymentEnvironment": "windows-production",
   "deploymentCreator": "github-actions[bot]",
+  "_releaseApp": "Release identity (2026-10-21): GitHub App 'OZK Windows Release', installed on this repository only. windows-release.yml mints a short-lived installation token inside the approved release job (environment windows-production) right before the push, limited to this repository and exactly contents:write + workflows:write (workflows is required because releases fast-forward commits that change .github/workflows). RELEASE_APP_ID must equal appId; the private key is the environment secret RELEASE_APP_PRIVATE_KEY. Neither id is secret.",
+  "releaseApp": {
+    "appId": 5412959,
+    "installationId": 173807509,
+    "permissions": {
+      "contents": "write",
+      "workflows": "write"
+    }
+  },
+  "_deviceBaselineSha": "Gap 3 (2026-10-20 audit): the SHA the device actually runs (OZK2026 reflog: manual merges after the 09-28 freeze left it on main@1843024, ahead of windows-production@88ae841). The gate and the release workflow refuse any target that does not contain it, so no release can roll the device back. Raise it only after a verified re-baseline.",
+  "deviceBaselineSha": "1843024a358e35768eebf737b1157e2d0cc291c0",
   "requiredMainWorkflows": [
     "Deploy TOBACCO Web",
     "دخان ما بعد النشر"
@@ -21,6 +32,9 @@
   ],
   "drainTimeoutSeconds": 180,
   "flagTtlMinutes": 15,
+  "startGuardSeconds": 120,
+  "_startGuardSeconds": "Gap e: a task that is not routed through run-repo-task.ps1 does not honour deploying.flag, so the gate refuses to switch files when such a task is due to start within this many seconds (no race between the idle check and the merge).",
+  "_pauseTasks": "The gate waits until none of these is Running (and refuses if any is not visible to its account: run the gate as SYSTEM). Gap c: the two backup tasks run pinned code from ProgramData but pass the repository's tools/send-telegram-notification.ps1 as -NotifyScript, so a deploy must not swap that file under them.",
   "pauseTasks": [
     "TOBACCO Ameen Sync",
     "TOBACCO Customer Movements Push",
@@ -37,7 +51,14 @@
     "TOBACCO Ameen Warehouse Reports",
     "TOBACCO Khalil Audit Sync",
     "TOBACCO Sync Watchdog",
-    "OZK Ameen Full Backup"
+    "OZK Ameen Full Backup",
+    "OZK Ameen Verified Backup",
+    "OZK Ameen Backup Health Monitor"
+  ],
+  "_routingExempt": "Tasks whose own code is pinned outside the repository (they only call into it). They cannot honour deploying.flag, so the gate applies startGuardSeconds to them instead of requiring run-repo-task.ps1. Every other enabled pauseTask must be routed through run-repo-task.ps1 before -Mode Deploy (DryRun only warns).",
+  "routingExempt": [
+    "OZK Ameen Verified Backup",
+    "OZK Ameen Backup Health Monitor"
   ],
   "writerScripts": [
     "tools/sync-approved-prices-to-ameen.ps1",
@@ -79,18 +100,19 @@
   "longRunningComponents": [
     {
       "name": "TOBACCO Ameen Read Worker",
-      "runner": "Scheduled Task (LOQ), one long PowerShell process",
+      "runner": "Scheduled Task (LOQ; Boot + every 10 min, IgnoreNew) -> powershell -File tools/ameen-read-worker.ps1, one long process. Not visible to OZKSync: the gate must run as SYSTEM.",
       "files": [
         "tools/ameen-read-worker.ps1",
         "tools/ameen-read-gateway.ps1",
         "tools/ameen-stock-query.sql",
         "tools/ameen-customer-balances-query.sql"
       ],
-      "untrackedFiles": []
+      "untrackedFiles": [],
+      "taskName": "TOBACCO Ameen Read Worker"
     },
     {
       "name": "OZK-AmeenAutoPrint",
-      "runner": "Scheduled Task (ONSTART) -> tools/ameen-autoprint/run-watcher.bat -> node watcher.js",
+      "runner": "Scheduled Task (LOQ, LOGON trigger, not ONSTART) -> wscript C:\\ProgramData\\OZK-TOBACCO\\TaskWrappers\\ozk-ameen-autoprint-hidden.vbs -> tools/ameen-autoprint/run-watcher.bat (untracked, gitignored) -> node watcher.js",
       "files": [
         "tools/ameen-autoprint/watcher.js",
         "tools/ameen-autoprint/config.js",
@@ -102,17 +124,33 @@
       ],
       "untrackedFiles": [
         "tools/ameen-autoprint/run-watcher.bat"
-      ]
+      ],
+      "taskName": "OZK-AmeenAutoPrint"
     },
     {
       "name": "OZK-Tobacco-Server (scripts/serve.mjs)",
-      "runner": "Startup item OZK-Tobacco-Server.vbs (LOQ logon) -> node scripts/serve.mjs",
+      "runner": "Legacy startup item OZK-Tobacco-Server.vbs (LOQ logon) -> node scripts/serve.mjs. Not running on 2026-10-20: the live local server is the TOBACCO Local Web Server task (see liveServedFromRepo).",
       "files": [
         "scripts/serve.mjs"
       ],
       "untrackedFiles": []
     }
   ],
+  "liveServedFromRepo": {
+    "_comment": "Gap a: the live local web server is NOT scripts/serve.mjs. Task 'TOBACCO Local Web Server' (OZKSync, every 5 min) runs node C:\\ProgramData\\OZK-TOBACCO\\LocalWebServer\\server.mjs, a pinned copy outside the repository whose ROOT is repoPath. It reads static files per request, so a deploy changes what LAN clients get immediately, with no restart. The gate records these paths as live_served_changed (information, never a restart).",
+    "name": "TOBACCO Local Web Server",
+    "taskName": "TOBACCO Local Web Server",
+    "serverCode": "C:\\ProgramData\\OZK-TOBACCO\\LocalWebServer\\server.mjs",
+    "paths": [
+      "index.html",
+      "404.html",
+      "privacy-policy.html",
+      "terms-of-use.html",
+      "service-worker.js",
+      "src/",
+      "public/"
+    ]
+  },
   "mainWorktree": {
     "_comment": "Dedicated main checkout ONLY for tasks that must run on main (Codex P1 #5). Never a path to update operational Windows scripts: the gate never touches it and run-repo-task.ps1 refuses scripts outside repoPath. It must be a separate worktree/clone on main with the official remote before the operational repo is switched to windows-production.",
     "path": "C:\\Users\\LOQ\\Documents\\OZK-TOBACCO\\tobacco-web-main",
@@ -120,7 +158,8 @@
     "remote": "https://github.com/ozkkhallouf-ux/tobacco-web.git",
     "allowedScripts": [
       "tools/auto-sync-price-lists.ps1"
-    ]
+    ],
+    "_state20261020": "Gap d (2026-10-20 audit): tobacco-web-main exists but is a DETACHED HEAD at 3c122d1 (2026-08-07), and OZK-PriceListSync (Disabled) points at tobacco-web-main-sync (also detached). migration-preflight.ps1 therefore BLOCKS Initialize until the owner fixes both; this is intended (fail-closed)."
   },
   "mainDependentTasks": [
     {

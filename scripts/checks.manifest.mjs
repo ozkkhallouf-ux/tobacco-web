@@ -44,6 +44,7 @@ export const CHECKS = [
   'check-customer-invoice-identity.mjs',
   'check-customer-payment-rule.mjs',
   'check-daily-pull-not-silently-stuck.mjs',
+  'check-daily-report-once-per-date.mjs',
   'check-decision-pipeline-safety.mjs',
   'check-decision-scoring.mjs',
   'check-docker-dev-port-binding.mjs',
@@ -120,6 +121,7 @@ export const CHECKS = [
   'check-telegram-grok-ask.mjs',
   'check-warehouse-stock-prune.mjs',
   'check-windows-deploy-gate.mjs',
+  'check-windows-release-app-token.mjs',
   'check-windows-release-resume.mjs',
 ];
 

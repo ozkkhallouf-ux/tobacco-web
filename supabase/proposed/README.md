@@ -166,3 +166,22 @@ definition لهذا المراقب، وقد جرى تعديله (PR #220) بإص
 |---|---|---|
 | `17-price-sync-monitor.sql` | **مقترح — غير مطبَّق على الإنتاج، يتطلب موافقة المالك، وبعد 12 و13 و15** | يحتاج 16. ينشئ `private.price_sync_monitor_config/state` و`private.price_sync_incidents` (حادثة واحدة مفتوحة على الأكثر)، و`private.price_sync_monitor_assess` (HEALTHY/PARTIAL/STALE/FAILED/DISABLED/UNKNOWN من `price_sync_heartbeats` بساعة الخادم؛ PARTIAL = تعارض أو أصناف غير موجودة، حادثة منفصلة ولا تُعلن HEALTHY؛ وصول حيّ أحدث من فحص «معطّلة» يُسقطه فوراً)، و`private.price_sync_monitor_tick` (قفل استشاري، رسالة `price_sync_outage` واحدة عند الفتح و`price_sync_recovered` واحدة عند التعافي المثبت، خط أساس صامت عند أول تشغيل، فشل الإدراج يُرجع الدورة). يجدول cron `price-sync-monitor` كل دقيقة، ويعطّل صف `price-sync` في `project_task_monitors` (المراقب القديم عبر `ameen_price_sync_status`) لمنع التنبيه المزدوج، ويغلق حادثته المفتوحة في `project_task_incidents` ويعيد صحته سليمة كي لا يعرضها قسم الأعطال المسائي للأبد، ويمتص حادثة FAILED إن سبقها تنبيه Windows مطابق خلال 30 د. بلا منح لأي دور. **يتطلب 12 ثم 13 ثم 15 مطبَّقة فعلاً**: حارس في أول الملف يتحقق من لقطاتها وبصمات أجسامها وترتيبها، ومن سجل `schema_migrations` بأسماء rev2 الحرفية (`digest_only_bundle` و`digest_routing_noncritical` و`ameen_sync_outage_incident`) مرة واحدة لكلٍّ وبإصدارات تصاعدية، وكل إنشاء داخل كتلة لا تعمل إلا بعد نجاحه، فالرفض لا يترك جدولاً ولا دالة ولا cron. بعده يصبح عدد مهام cron 18. اختبار: `supabase/tests/price-sync-monitor.sql` عبر `scripts/check-price-sync-monitor.mjs`. التوثيق: `docs/ai/topics/price-sync-heartbeat.md`. |
 | `17-price-sync-monitor-rollback.sql` | **مقترح — غير مطبَّق على الإنتاج** | يلغي cron `price-sync-monitor`، ويُسقط دوال 17 وجداولها، ويعيد تفعيل صف `price-sync` القديم. لا يمسّ 16 ولا `notify_telegram`. |
+
+## 19 و20: رسالة واحدة لكل تاريخ لتقريرَي الحركة اليومية والجرد (2026-10-21) — غير مطبَّقة على الإنتاج
+
+الرقم 18 محجوز لـ#336 (أحداث فواتير الأمين). السبب الجذري المشترك: كل لقطة تُدرج في الجدول (الحركة ~240 مرة يومياً، والجرد مع كل إدراج في `inventory_reports`) تستدعي
+`notify_telegram` بمفتاح يحمل التاريخ لكن بنافذة زمنية (720 دقيقة للحركة، 1200 للجرد)، فتخرج رسالة ثانية لنفس التاريخ بعد
+مرور النافذة (الحركة: 00:00 ثم ~12:02 دمشق؛ الجرد: 00:00 ثم 20:00). الإصلاح يجعل الحد «تاريخ التقرير» لا «مرور الوقت».
+
+| الملف | الحالة | ما يفعله |
+|---|---|---|
+| `19-daily-movement-once-per-date.sql` | **مقترح — غير مطبَّق، يتطلب موافقة المالك** | حارس بصمة الإنتاج `feb6663e…`. ينشئ (إن لم يوجد) `private.daily_report_notifications` بمفتاح أساسي `(report_kind, report_date)` ويبذره من `telegram_outbox`، ويستبدل `public.tg_notify_daily_movement()`: مطالبة ذرّية بالتاريخ (`insert … on conflict do nothing`) فلا تُنشئ لقطتان متزامنتان رسالتين؛ الادعاء يُحفظ فقط إن وُجد صف للرسالة في `telegram_outbox` (وإلا يُلغى وتحاول اللقطة التالية)؛ الصف الفاشل يبقى ويعيد `dispatch_telegram_outbox` محاولته كما هو؛ تاريخ أقدم من 14 يوماً (احتفاظ outbox) لا يُعلن؛ احتياط التاريخ الغائب بتوقيت دمشق. جزء تنبيه الدفعات حرفياً كما هو. البصمة بعده `287872ff…`. |
+| `19-daily-movement-once-per-date-rollback.sql` | **مقترح** | يعيد جسم الإنتاج حرفياً (`feb6663e…`)، ويحذف صفوف `daily_movement` من السجل، ويُسقط الجدول فقط إن لم تعد 20 تستعمله. |
+| `20-inventory-report-once-per-date.sql` | **مقترح — غير مطبَّق، يتطلب موافقة المالك** | مثل 19 لـ`public.tg_notify_inventory_report()` (حارس `775cf58c…`، بعده `578be73e…`)، نص الرسالة وعدد المواد كما هما. مستقل عن 19؛ يشتركان في جدول السجل فقط. |
+| `20-inventory-report-once-per-date-rollback.sql` | **مقترح** | يعيد جسم الإنتاج حرفياً (`775cf58c…`)، ويحذف صفوف `inventory_report`، ويُسقط الجدول فقط إن لم تعد 19 تستعمله. |
+
+لا تمسّ أيٌّ منهما `notify_telegram` ولا `notify_telegram_dispatch` ولا `dispatch_telegram_outbox` ولا أي Cron، ولا دورية التكاليف
+أو النفاد أو تنبيه الدفعات. اختبار: `scripts/check-daily-report-once-per-date.mjs` على نسخ حرفية من دوال الإنتاج
+(`supabase/tests/daily-report-once-per-date-env.sql`): يعيد إنتاج التكرار على النسخة الحالية ثم يتحقق من الإصلاح (أول إرسال،
+إعادة التشغيل، اختلاف الوقت، يوم دمشق الجديد، دفعة متأخرة، جلستان متزامنتان، صف فاشل وإحياؤه، غياب صف outbox، نافذة 14 يوماً،
+تنظيف outbox، غياب التاريخ، البذر، رفض إعادة التطبيق، التراجع، والاستقلال). بعد التطبيق: حدّث `supabase/telegram-notifications.sql`.

@@ -110,6 +110,10 @@ try {
     Invoke-TestGit $mainWt @('checkout', '-q', '-b', 'feature/x') | Out-Null
     $r = Invoke-MigrationPreflight $config
     Assert-True (-not $r.ok -and (Get-Verdict $r 'OZK-PriceListSync').reason -like '*not ''main''*') 'main worktree on the wrong branch => BLOCK'
+    # الحالة الفعلية على OZK2026 (تدقيق 2026-10-20): tobacco-web-main HEAD منفصل على commit قديم.
+    Invoke-TestGit $mainWt @('checkout', '-q', '--detach', 'main') | Out-Null
+    $r = Invoke-MigrationPreflight $config
+    Assert-True (-not $r.ok -and (Get-Verdict $r 'OZK-PriceListSync').reason -like '*detached HEAD at*') 'main worktree on a detached HEAD => BLOCK and named as detached'
     Invoke-TestGit $mainWt @('checkout', '-q', 'main') | Out-Null
     Invoke-TestGit $repo @('remote', 'set-url', 'origin', 'https://github.com/someone-else/tobacco-web.git') | Out-Null
     $r = Invoke-MigrationPreflight $config
