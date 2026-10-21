@@ -138,6 +138,76 @@ assert.match(gateSrc, /\$pre = Invoke-MigrationPreflight \$Config[\s\S]{0,400}mi
 assert.match(checkWfRaw(), /tools\\tests\\Test-MigrationPreflight\.ps1/);
 ok("مزامنة النشرات تبقى على main عبر worktree مخصّص، والتحويل محجوب حتى ينجح الفحص (Codex P1 #5)");
 
+// تدقيق 2026-10-20: الثغرات الست، ومنع الرجوع، والتزامن، والنسخ الاحتياطي، والاستعادة.
+assert.match(cfg0.deviceBaselineSha, /^[0-9a-f]{40}$/, "deviceBaselineSha = SHA كامل لما يشغّله الجهاز");
+assert.match(gateSrc, /does not contain deviceBaselineSha/, "البوابة ترفض هدفاً أقدم من الجهاز");
+assert.match(gateSrc, /is behind the device/, "Initialize يرفض فرعاً متأخراً عن الجهاز بدل التبديل إليه");
+assert.match(read("scripts/windows-release-verify.mjs"), /assertNotOlderThanDevice\(ctx, sha, config\);/, "الـworkflow يرفض إصداراً أقدم من الجهاز قبل الموافقة");
+assert.match(read("scripts/windows-release-apply.mjs"), /assertNotOlderThanDevice\(ctx, sha, config\);/, "ويعيد الرفض قبل الدفع");
+// (a) الخادم المحلي الفعلي
+const live = cfg0.liveServedFromRepo;
+assert.equal(live.taskName, "TOBACCO Local Web Server");
+assert.match(live.serverCode, /ProgramData\\OZK-TOBACCO\\LocalWebServer\\server\.mjs$/);
+for (const p of ["index.html", "src/", "public/"]) assert.ok(live.paths.includes(p), `الخادم المحلي يخدم ${p} من المستودع`);
+assert.match(gateSrc, /live_served_changed/);
+// (b) مشغّل الطباعة الحقيقي
+const autoprint = comps.find((c) => c.name === "OZK-AmeenAutoPrint");
+assert.match(autoprint.runner, /LOGON/);
+assert.doesNotMatch(autoprint.runner, /\(ONSTART\)/);
+// (c) مهام النسخ الاحتياطي تستدعي سكربت التنبيه من المستودع
+for (const t of ["OZK Ameen Verified Backup", "OZK Ameen Backup Health Monitor"]) {
+  assert.ok(cfg0.pauseTasks.includes(t), `${t} ضمن pauseTasks`);
+  assert.ok(cfg0.routingExempt.includes(t), `${t} معفاة من التوجيه (كودها مثبّت خارج المستودع)`);
+}
+for (const t of cfg0.routingExempt) assert.ok(cfg0.pauseTasks.includes(t), `routingExempt ⊆ pauseTasks: ${t}`);
+assert.ok(!cfg0.routingExempt.includes("TOBACCO Ameen Sync") && !cfg0.routingExempt.includes("TOBACCO Approved Prices Pull"), "مهام المستودع لا تُعفى من التوجيه");
+assert.ok(Number(cfg0.startGuardSeconds) >= 60);
+// (d) worktree الـmain المنفصل يُسمّى صراحةً
+assert.match(pre, /detached HEAD at/);
+// (e) لا تبديل مع مهمة غير موجَّهة أو موعد قريب أو عملية git جارية، وإعادة الفحص بعد الانتظار
+assert.match(gateSrc, /not routed through run-repo-task\.ps1/);
+assert.match(gateSrc, /unrouted tasks about to start/);
+assert.match(gateSrc, /git operation in progress/);
+assert.match(gateSrc, /HEAD moved during the pause/);
+// (f) مهمة غير مرئية لا تُعدّ متوقفة
+assert.match(gateSrc, /not visible to the gate account \(run as SYSTEM\)/);
+for (const name of ["TOBACCO Ameen Read Worker", "OZK-AmeenAutoPrint"]) assert.equal(comps.find((c) => c.name === name).taskName, name);
+// سكربت مهمة يحذفه الإصدار
+assert.match(gateSrc, /release removes scripts that scheduled tasks run/);
+// قفل، نسخة احتياطية + SHA256، تحقق بعد التبديل، استعادة بلا git كاتب
+assert.match(gateSrc, /function Enter-GateLock[\s\S]{0,200}'None'/);
+assert.match(gateSrc, /New-DeployBackup[\s\S]{0,4000}Set-DeployFlag/, "النسخة الاحتياطية تسبق أي إيقاف أو تبديل");
+assert.match(gateSrc, /Test-DeployedFiles/);
+assert.match(gateSrc, /inflight\.json/);
+const recover = gateSrc.slice(gateSrc.indexOf("function Invoke-GateRecover"), gateSrc.indexOf("function Invoke-GateAckRestart"));
+assert.doesNotMatch(recover, /Invoke-GateGit \$Config @\('(reset|checkout|merge|clean|restore|stash)'/, "الاستعادة لا تستعمل أي أمر git كاتب");
+assert.match(recover, /quarantine/, "الملف الناقص يُنقل ولا يُحذف");
+// Codex P1 على #337: التراجع يُسجَّل في inflight.json قبل reset --keep، وRecover يكمله أو يتراجع عنه أو يتوقف.
+assert.match(gateSrc, /Write-InflightRecord \$Paths 'Rollback'[\s\S]{0,300}\$reset = Invoke-GateReset/, "inflight.json يُكتب قبل reset --keep");
+assert.match(gateSrc, /function Invoke-GateReset[\s\S]{0,120}'reset', '--keep'/);
+assert.match(recover, /Read-InflightRecord/, "Recover يتحقق من السجل قبل أي مساس");
+assert.match(recover, /interrupted rollback completed/);
+assert.match(recover, /refusing to guess the state/, "سجل مفقود مع علم أو شجرة متّسخة = توقف");
+assert.match(gateSrc, /outside the gate backups folder/);
+assert.match(gateSrc, /backup manifest does not match inflight\.json/);
+const rollbackSrc = gateSrc.slice(gateSrc.indexOf("function Invoke-GateRollback"), gateSrc.indexOf("function Complete-RollbackState"));
+assert.match(rollbackSrc, /Get-TaskGuard[\s\S]{0,1200}New-DeployBackup/, "التراجع يمرّ بحارس المهام قبل أي نسخ أو reset");
+assert.match(rollbackSrc, /Get-SwitchBlockers \$Config \$Head[\s\S]{0,2000}Invoke-GateReset/, "وإعادة الفحص بعد الانتظار قبل reset --keep");
+assert.match(gateSrc, /\$running \+= \(\$name \+ ' \(not visible\)'\)/, "مهمة غير مرئية ليست خاملة في Wait-TasksIdle");
+assert.match(gateSrc, /tasks started after the idle wait/, "مهمة بدأت بعد الانتظار تمنع التبديل");
+const completeSrc = gateSrc.slice(gateSrc.indexOf("function Complete-RollbackState"), gateSrc.indexOf("function Invoke-GateUnpin"));
+assert.match(completeSrc, /Save-GateState[\s\S]*Clear-DeployFlag[\s\S]*Close-InflightRecord/, "inflight.json يُزال آخراً بعد كتابة الحالة");
+assert.doesNotMatch(recover, /Move-Item -LiteralPath \$Paths\.Inflight/, "Recover لا ينقل السجل قبل اكتمال الإنهاء");
+assert.match(recover, /Get-TaskGuard[\s\S]*Wait-TasksIdle[\s\S]*Get-SwitchBlockers \$Config \$Head -AllowDirty[\s\S]*Copy-Item -LiteralPath \$copy/, "Recover يمرّ بحارس المهام والانتظار وإعادة الفحص قبل أي إعادة كتابة");
+assert.match(gateSrc, /'git-index'/, "فهرس git يُنسخ احتياطياً قبل التبديل");
+const completeDeploy = gateSrc.slice(gateSrc.indexOf("function Complete-DeployState"), gateSrc.indexOf("function Close-InflightRecord"));
+assert.match(completeDeploy, /Save-WriterAllowlist[\s\S]*Save-GateState[\s\S]*Clear-DeployFlag[\s\S]*Close-InflightRecord/, "النشر يزيل inflight.json آخراً");
+const deployTail = gateSrc.slice(gateSrc.indexOf("post-deploy file verification failed"), gateSrc.indexOf("function Invoke-GateRollback"));
+assert.doesNotMatch(deployTail, /Remove-Item -LiteralPath \$paths\.Inflight/, "لا إزالة للسجل قبل الإنهاء في النشر");
+assert.match(recover, /interrupted deploy completed/, "Recover يكمل نشراً حرّك HEAD بعد التحقق");
+assert.match(recover, /indexSha256/, "Recover يعيد الفهرس بعد التحقق من بصمته");
+ok("تدقيق 2026-10-20: لا إصدار أقدم من الجهاز، الثغرات الست (a–f)، قفل، نسخة احتياطية بـSHA256، تحقق بعد التبديل، واستعادة آمنة");
+
 // 2) الـworkflow
 const wf = read(".github/workflows/windows-release.yml").split("\n").filter((l) => !l.trim().startsWith("#")).join("\n");
 const onBlock = wf.slice(wf.indexOf("\non:"), wf.indexOf("\npermissions:"));

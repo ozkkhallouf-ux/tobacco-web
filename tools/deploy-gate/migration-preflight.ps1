@@ -92,6 +92,11 @@ function Test-MainWorktree($Config) {
     $prefix = Invoke-PreflightGit $path @('rev-parse', '--show-prefix')
     if ($prefix.Code -ne 0 -or $prefix.Text -ne '') { return ('not a git worktree root: ' + $path) }
     $branch = Invoke-PreflightGit $path @('rev-parse', '--abbrev-ref', 'HEAD')
+    # تدقيق 2026-10-20: tobacco-web-main على الجهاز HEAD منفصل على commit قديم؛ الرسالة تسمّيه صراحةً.
+    if ($branch.Code -eq 0 -and $branch.Text -eq 'HEAD') {
+        $at = Invoke-PreflightGit $path @('rev-parse', '--short', 'HEAD')
+        return ('main worktree is a detached HEAD at ' + $at.Text + ', not on ''' + $mw.branch + '''')
+    }
     if ($branch.Code -ne 0 -or $branch.Text -ne [string]$mw.branch) { return ('main worktree is on ''' + $branch.Text + ''' not ''' + $mw.branch + '''') }
     $remote = Invoke-PreflightGit $path @('remote', 'get-url', 'origin')
     if ($remote.Code -ne 0 -or (ConvertTo-RemoteKey $remote.Text) -ne (ConvertTo-RemoteKey $mw.remote)) { return ('main worktree remote is ''' + $remote.Text + ''' not the official repository') }
