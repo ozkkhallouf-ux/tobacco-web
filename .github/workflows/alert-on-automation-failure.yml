@@ -52,9 +52,14 @@ jobs:
     # 'action_required' لأعطال أخرى — رأينا 'startup_failure' فعلياً بتاريخ
     # هذا المستودع. الاستثناء الوحيد المقصود: 'success' و'skipped' (تشغيلة
     # شرطية لم تكن بحاجة للعمل أصلاً — ليست عطلاً).
+    #
+    # السرّ في بيئة supabase-ops (فرع main وحده). workflow_run يعمل دائماً بنسخة main
+    # فيبقى ref هنا refs/heads/main أياً كان فرع التشغيلة المراقَبة؛ والشرط حارس إضافي فقط.
     if: |
+      github.ref == 'refs/heads/main' &&
       github.event.workflow_run.conclusion != 'success' &&
       github.event.workflow_run.conclusion != 'skipped'
+    environment: supabase-ops
     runs-on: ubuntu-latest
     steps:
       - name: Send Telegram alert via notify_telegram RPC
@@ -127,10 +132,18 @@ jobs:
             --argjson dedupe_minutes 60 \
             '{p_event_type: $event_type, p_message: $message, p_dedupe_key: $dedupe_key, p_dedupe_minutes: $dedupe_minutes}')
 
+          # مفتاح sb_secret_ ليس JWT: يُرسل في apikey وحده (Authorization معه يُرفض بـInvalid JWT).
+          # المفتاح القديم JWT يبقى في الترويستين كما كان (scripts/supabase-service-headers.mjs).
+          AUTH_HEADER=()
+          case "$SUPABASE_SERVICE_ROLE_KEY" in
+            sb_*) ;;
+            *) AUTH_HEADER=(-H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}") ;;
+          esac
+
           HTTP_CODE=$(curl -sS -o /tmp/notify_response.json -w "%{http_code}" \
             -X POST "${SUPABASE_URL}/rest/v1/rpc/notify_telegram" \
             -H "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" \
-            -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
+            "${AUTH_HEADER[@]}" \
             -H "Content-Type: application/json" \
             -H "Content-Profile: public" \
             -d "$PAYLOAD")

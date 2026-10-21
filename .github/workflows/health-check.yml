@@ -20,6 +20,11 @@ concurrency:
 
 jobs:
   health-check:
+    # السرّ في بيئة supabase-ops (فرع main وحده، راجع docs/ai/topics/supabase-ops-environment.md).
+    # الشرط يجعل التشغيل من فرع آخر «skipped» نظيفاً بدل فشل يطلق تنبيه الأتمتة؛
+    # والحماية الفعلية سياسة البيئة نفسها، فلا يكفي حذف هذا السطر في فرع لقراءة السرّ.
+    if: github.ref == 'refs/heads/main'
+    environment: supabase-ops
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

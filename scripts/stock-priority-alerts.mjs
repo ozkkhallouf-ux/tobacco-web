@@ -12,13 +12,13 @@
 // ============================================================================
 import "../src/telegram-format.js";
 import "../src/stock-alert-priority.js";
+import { supabaseServiceHeaders } from "./supabase-service-headers.mjs";
 
 const engine = globalThis.ozkStockAlertPriority;
 
 function headers(serviceKey, profileHeader) {
   return {
-    apikey: serviceKey,
-    Authorization: `Bearer ${serviceKey}`,
+    ...supabaseServiceHeaders(serviceKey),
     Accept: "application/json",
     [profileHeader]: "public"
   };
