@@ -10,7 +10,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { RELEASE_KIND, fetchCi, loadGateConfig, makeGitContext, makeGitHubApi, recordedReleases } from "./windows-release-verify.mjs";
+import { RELEASE_KIND, assertNotOlderThanDevice, fetchCi, loadGateConfig, makeGitContext, makeGitHubApi, recordedReleases } from "./windows-release-verify.mjs";
 
 // قرار الدفع وحده، بلا آثار جانبية.
 export function planPush({ current, base, sha, isAncestor }) {
@@ -28,6 +28,7 @@ export async function applyRelease(ctx, { verification: v, inputSha, approver, r
   // إعادة التحقق: الـSHA موجود وعلى main، CI أخضر الآن، وموافقة الكتابة متسقة.
   if (!ctx.gitOk(["cat-file", "-e", `${sha}^{commit}`])) throw new Error(`commit ${sha} not found`);
   if (!ctx.gitOk(["merge-base", "--is-ancestor", sha, `origin/${config.mainBranch}`])) throw new Error("commit is not on main");
+  assertNotOlderThanDevice(ctx, sha, config);
   if (v.writerScriptsChanged.length && !v.writeScriptsApproved) throw new Error("writer scripts changed without write approval");
   const ci = await fetchCi(ctx, sha, config);
   if (!ci.ok) throw new Error(`CI not green on ${sha}: ${ci.failing.join(", ")}`);
