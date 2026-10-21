@@ -48,7 +48,7 @@ export function assertTokenScope(response, { repo, permissions }) {
   if (response.repository_selection !== "selected" || repos.length !== 1 || repos[0] !== repo) {
     throw new Error(`installation token is not limited to ${repo}`);
   }
-  const granted = { ...(response.permissions || {}) };
+  const granted = { ...response.permissions };
   if (granted.metadata && granted.metadata !== "read") throw new Error("installation token grants metadata beyond read");
   delete granted.metadata;
   if (JSON.stringify(Object.keys(granted).sort().map((k) => [k, granted[k]])) !== JSON.stringify(Object.keys(permissions).sort().map((k) => [k, permissions[k]]))) {
