@@ -20,11 +20,19 @@ concurrency:
 
 jobs:
   health-check:
+    # التشغيل من فرع آخر يُتخطّى (skipped) بدل أن يفشل فيطلق تنبيه فشل الأتمتة؛ الحماية الفعلية سياسة البيئة.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # مفتاح Supabase بصلاحية service role في بيئة supabase-ops المحصورة بفرع main وحده: لا يصل إليه
+    # workflow على فرع آخر ولا PR. بلا مراجع مطلوب كي يعمل التشغيل المجدول/الآلي بلا موافقة يدوية.
+    # (سرّ البيئة يتقدّم على سرّ المستودع بنفس الاسم؛ قبل نقله يعمل الـjob بسرّ المستودع كما هو.)
+    environment: supabase-ops
     timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
