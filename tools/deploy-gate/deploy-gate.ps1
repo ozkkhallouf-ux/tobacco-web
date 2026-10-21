@@ -832,11 +832,8 @@ function Invoke-DeployGate {
     if ($badFiles.Count -gt 0) {
         return Complete-Gate $paths $record 'FAIL' ('post-deploy file verification failed; deploy flag kept: ' + ($badFiles -join '; ')) $true
     }
-    Remove-Item -LiteralPath $paths.Inflight -Force
-
-    $record.writer_hashes_after = Save-WriterAllowlist $Config $paths $target
-    Save-GateState $paths $target $branch '' '' $record.pending_restart
-    Clear-DeployFlag $paths
+    # Codex P1 على #337: inflight.json يُزال آخراً، بعد البصمات والحالة والعلم (Complete-DeployState).
+    $record.writer_hashes_after = Complete-DeployState $Config $paths $target $branch @($record.pending_restart) $backup.dir
     if (@($record.pending_restart).Count -gt 0) {
         # الملفات نُشرت، لكن الإصدار ليس مطبَّقاً بالكامل: لا إعادة تشغيل تلقائية ولا إيقاف عمليات.
         return Complete-Gate $paths $record 'DEPLOYED_PENDING_RESTART' ('deployed ' + $head.Substring(0, 7) + ' -> ' + $target.Substring(0, 7) + '; manual restart (owner approval) required for: ' + (@($record.pending_restart) -join ', ')) $true
@@ -930,6 +927,16 @@ function Complete-RollbackState($Config, $Paths, [string]$From, [string]$To, [st
     return $hashes
 }
 
+# الخطوة الأخيرة للنشر الناجح وإكماله من Recover، بنفس ترتيب التراجع: البصمات ثم الحالة ثم العلم،
+# ثم أرشفة inflight.json وإزالته آخراً. أي توقف قبلها يُبقي السجل فيكمل Recover التالي.
+function Complete-DeployState($Config, $Paths, [string]$To, [string]$Branch, [string[]]$Pending, [string]$BackupDir = '') {
+    $hashes = Save-WriterAllowlist $Config $Paths $To
+    Save-GateState $Paths $To $Branch '' '' $Pending
+    Clear-DeployFlag $Paths
+    Close-InflightRecord $Paths $BackupDir
+    return $hashes
+}
+
 # أرشفة سجل العملية داخل نسختها الاحتياطية (نسخ أولاً) ثم إزالته — دائماً آخر خطوة.
 function Close-InflightRecord($Paths, [string]$BackupDir) {
     if (-not (Test-Path -LiteralPath $Paths.Inflight)) { return }
@@ -975,6 +982,20 @@ function Invoke-GateRecover($Config, $Paths, $Record, [string]$Head) {
     $Record.backup_dir = $backupDir
     $Record.old_sha = $Head
 
+    if ($Head -eq [string]$inflight.to -and [string]$inflight.mode -ceq 'Deploy') {
+        # النشر حرّك HEAD والملفات ثم توقف قبل تسجيل الحالة: يُكمَل فقط إن طابق كل ملف blob الهدف
+        # والشجرة نظيفة؛ وإلا مراجعة يدوية. لا يُعاد كتابة أي ملف هنا.
+        $dirty = @(Get-DirtyEntries $Config)
+        $bad = @(Test-DeployedFiles $Config $manifest)
+        if ($dirty.Count -gt 0 -or $bad.Count -gt 0) {
+            return Complete-Gate $Paths $Record 'STOP' ('deploy moved HEAD but the tree does not match the target (' + ((@($dirty) + @($bad)) -join '; ') + '); nothing changed. Manual review required.') $true
+        }
+        Write-JsonFile (Join-Path $backupDir 'manifest.json') $manifest
+        $Record.writer_hashes_after = Complete-DeployState $Config $Paths ([string]$inflight.to) ([string]$inflight.branch) @($inflight.pendingRestart) $backupDir
+        $Record.new_sha = $Head
+        $Record.pending_restart = @($inflight.pendingRestart)
+        return Complete-Gate $Paths $Record 'RECOVERED' ('interrupted deploy completed: HEAD ' + $Head.Substring(0, 7) + ' verified against the backup manifest') $true
+    }
     if ($Head -eq [string]$inflight.to -and [string]$inflight.mode -ceq 'Rollback') {
         $dirty = @(Get-DirtyEntries $Config)
         $bad = @(Test-DeployedFiles $Config $manifest)

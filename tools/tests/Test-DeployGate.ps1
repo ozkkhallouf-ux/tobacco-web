@@ -979,6 +979,28 @@ try {
     $r = Invoke-DeployGate -Config $ix.Config -GateMode 'Recover'
     Assert-True ($r.result -eq 'RECOVERED' -and (Get-TestHead $ix) -eq $x2 -and @(Get-DirtyEntries $ix.Config).Count -eq 0 -and (Test-Path -LiteralPath (Join-Path $ix.Repo 'tools/index-added.ps1'))) 'Recover undoes the interrupted rollback including its index'
 
+    Write-Host '== Codex P1 (c1050ce): deploy keeps inflight.json until finalization'
+    $df = New-InitializedEnv
+    $d1 = Get-TestHead $df
+    $d2 = Publish-TestRelease $df @{ 'tools/ameen-read-worker.ps1' = "'worker d2'`n" } -Approve
+    $script:FailSaveStateOnce = $true
+    $crashed = $false
+    try { [void](Invoke-DeployGate -Config $df.Config -GateMode 'Deploy') } catch { $crashed = $true }
+    Assert-True ($crashed -and (Get-TestHead $df) -eq $d2 -and (Get-TestState $df).lastDeployedSha -eq $d1 -and (Test-Path -LiteralPath (Join-Path $df.Gate 'inflight.json')) -and (Test-Path -LiteralPath (Join-Path $df.Gate 'deploying.flag'))) 'crash while writing state after a verified switch => inflight.json and flag kept, state still old'
+    $r = Invoke-DeployGate -Config $df.Config -GateMode 'Deploy'
+    Assert-True ($r.result -eq 'STOP' -and $r.reason -like '*interrupted*Recover*' -and (Get-TestHead $df) -eq $d2) 'next Deploy points at Recover (not at an unexplained HEAD drift)'
+    $r = Invoke-DeployGate -Config $df.Config -GateMode 'Recover'
+    $st = Get-TestState $df
+    Assert-True ($r.result -eq 'RECOVERED' -and $r.reason -like '*interrupted deploy completed*' -and $st.lastDeployedSha -eq $d2 -and $st.status -eq 'DEPLOYED_PENDING_RESTART' -and @($st.pendingRestart) -contains 'TOBACCO Ameen Read Worker') 'Recover verifies the files and completes the deploy (state, pending restart)'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $df.Gate 'inflight.json')) -and -not (Test-Path -LiteralPath (Join-Path $df.Gate 'deploying.flag')) -and (Test-Path -LiteralPath (Join-Path $r.backup_dir 'inflight.recovered.json'))) 'record archived and removed last; flag cleared'
+    $allow = [System.IO.File]::ReadAllText((Join-Path $df.Gate 'writer-allowlist.json')) | ConvertFrom-Json
+    Assert-True ($allow.sha -eq $d2) 'writer allowlist finalized for the completed release'
+    $snap = Get-TreeSnapshot $df
+    $r = Invoke-DeployGate -Config $df.Config -GateMode 'Recover'
+    Assert-True ($r.result -eq 'NOOP' -and (Get-TreeSnapshot $df) -eq $snap) 'Recover after completion => NOOP, nothing changed'
+    $r = Invoke-DeployGate -Config $df.Config -GateMode 'Deploy'
+    Assert-True ($r.result -eq 'NOOP' -and (Get-TestHead $df) -eq $d2) 'gate is consistent again (NOOP on the same release)'
+
     Write-Host '== Safety invariants in the source'
     $src = [System.IO.File]::ReadAllText($gateScript)
     Assert-True ($src -notmatch "'pull'" -and $src -notmatch "'rebase'" -and $src -notmatch "'--hard'") 'gate never passes pull, rebase or --hard to git'

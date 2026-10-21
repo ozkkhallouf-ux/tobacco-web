@@ -200,6 +200,11 @@ assert.match(completeSrc, /Save-GateState[\s\S]*Clear-DeployFlag[\s\S]*Close-Inf
 assert.doesNotMatch(recover, /Move-Item -LiteralPath \$Paths\.Inflight/, "Recover لا ينقل السجل قبل اكتمال الإنهاء");
 assert.match(recover, /Get-TaskGuard[\s\S]*Wait-TasksIdle[\s\S]*Get-SwitchBlockers \$Config \$Head -AllowDirty[\s\S]*Copy-Item -LiteralPath \$copy/, "Recover يمرّ بحارس المهام والانتظار وإعادة الفحص قبل أي إعادة كتابة");
 assert.match(gateSrc, /'git-index'/, "فهرس git يُنسخ احتياطياً قبل التبديل");
+const completeDeploy = gateSrc.slice(gateSrc.indexOf("function Complete-DeployState"), gateSrc.indexOf("function Close-InflightRecord"));
+assert.match(completeDeploy, /Save-WriterAllowlist[\s\S]*Save-GateState[\s\S]*Clear-DeployFlag[\s\S]*Close-InflightRecord/, "النشر يزيل inflight.json آخراً");
+const deployTail = gateSrc.slice(gateSrc.indexOf("post-deploy file verification failed"), gateSrc.indexOf("function Invoke-GateRollback"));
+assert.doesNotMatch(deployTail, /Remove-Item -LiteralPath \$paths\.Inflight/, "لا إزالة للسجل قبل الإنهاء في النشر");
+assert.match(recover, /interrupted deploy completed/, "Recover يكمل نشراً حرّك HEAD بعد التحقق");
 assert.match(recover, /indexSha256/, "Recover يعيد الفهرس بعد التحقق من بصمته");
 ok("تدقيق 2026-10-20: لا إصدار أقدم من الجهاز، الثغرات الست (a–f)، قفل، نسخة احتياطية بـSHA256، تحقق بعد التبديل، واستعادة آمنة");
 
