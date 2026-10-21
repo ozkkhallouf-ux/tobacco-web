@@ -174,6 +174,8 @@ for (const name of [
   "send switch: deleting the flag turns sending off on the next check",
   "send switch: wrong flag content keeps sending off",
   "send switch: agent re-checks the flag inside the loop before each send",
+  // Codex P1 (51783c90): ملف التفعيل يُعاد فحصه قبل كل إرسال
+  "send flag: re-checked inside the loop before each send",
 ]) assert.ok(psTest.includes(`'${name}'`), `اختبار PowerShell إلزامي مفقود: ${name}`);
 
 const rollback = read(rollbackRel).replace(/--.*$/gm, "");
@@ -233,6 +235,10 @@ assert.doesNotMatch(agentCode, /Invoke-RestMethod -Method Post -Uri \(\$script:s
 assert.match(libCode, /\[int\]::TryParse\(\[string\]\$b\.bill_type/, "تحويل bill_type آمن");
 assert.doesNotMatch(libCode, /catch \{\s*\}/, "لا كتلة catch فارغة (CodeFactor PSAvoidUsingEmptyCatchBlock)");
 assert.ok(agentCode.indexOf("Enter-AmeenOutboxLock -Dir $OutboxDir") < agentCode.indexOf("Read-AmeenInvoiceState -Dir $OutboxDir"), "القفل قبل قراءة الحالة");
+const loopAt = agentCode.indexOf("do {");
+const recheckAt = agentCode.indexOf("$sendNow = Test-AmeenSendActivated", loopAt);  // (من Cursor 25965c77، مُحدَّث للدالة الجديدة)
+const sendAt = agentCode.indexOf("Send-AmeenInvoiceOutbox", loopAt);
+assert.ok(loopAt >= 0 && recheckAt > loopAt && sendAt > recheckAt, "إعادة فحص ملف التفعيل داخل الحلقة قبل كل إرسال");
 for (const [name, text] of [["agent", agent], ["lib", lib]]) {
   assert.doesNotMatch(text, /AMEEN_SQL_WRITE_CONNECTION_STRING|WRITE_CONNECTION/, `${name}: لا سلسلة اتصال الكتابة`);
   assert.doesNotMatch(text, /Register-ScheduledTask|schtasks/i, `${name}: لا تسجيل مهمة مجدولة`);
