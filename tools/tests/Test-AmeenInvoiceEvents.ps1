@@ -529,6 +529,22 @@ try {
   Assert 'http 400 size rejection: batch cap halved (not retried forever at the same size)' ($r.error -match 'payload too large' -and [int]$hs.send.batch_cap -eq 3 -and @(Get-AmeenOutboxPending -Dir $hbox).Count -eq 6)
   Stop-Job $server -ErrorAction SilentlyContinue; Remove-Job $server -Force -ErrorAction SilentlyContinue
 
+  # ── ٥ط) Codex P1 (51783c90): حذف ملف التفعيل يوقف الإرسال في الدورة التالية ─────────────────────
+  $fbox = Join-Path $tempDir "outbox-flag"
+  Initialize-AmeenInvoiceOutbox -Dir $fbox
+  $flagPath = Join-Path $fbox "send-enabled.flag"
+  Set-Content -LiteralPath $flagPath -Value "enabled-by-owner" -Encoding ASCII
+  Assert 'send switch: on with -Send and the owner flag' (Test-AmeenSendActivated -Dir $fbox -SendRequested)
+  Assert 'send switch: off without -Send even when the flag exists (explicit)' (-not (Test-AmeenSendActivated -Dir $fbox))
+  Remove-Item -LiteralPath $flagPath -Force
+  Assert 'send switch: deleting the flag turns sending off on the next check' (-not (Test-AmeenSendActivated -Dir $fbox -SendRequested))
+  Set-Content -LiteralPath $flagPath -Value "yes" -Encoding ASCII
+  Assert 'send switch: wrong flag content keeps sending off' (-not (Test-AmeenSendActivated -Dir $fbox -SendRequested))
+  # الوكيل يعيد الفحص داخل الحلقة قبل كل دفعة، لا مرة واحدة قبلها
+  $loopBody = $agentTextForLoop = (Get-Content -Raw -LiteralPath $agentPath -Encoding UTF8)
+  $doIdx = $loopBody.IndexOf("    do {"); $whileIdx = $loopBody.IndexOf("} while (`$true)"); $chkIdx = $loopBody.IndexOf('$sendNow = Test-AmeenSendActivated -Dir $OutboxDir -SendRequested:$Send')
+  Assert 'send switch: agent re-checks the flag inside the loop before each send' ($doIdx -gt 0 -and $chkIdx -gt $doIdx -and $chkIdx -lt $whileIdx)
+
   # ── ٦) الوكيل: يُحلَّل بلا أخطاء، ولا يسجّل مهمة، ولا يرسل افتراضياً ───────────────────────────
   $tokens = $null; $errors = $null
   [void][System.Management.Automation.Language.Parser]::ParseFile($agentPath, [ref]$tokens, [ref]$errors)
@@ -536,7 +552,7 @@ try {
   $agentText = Get-Content -Raw -LiteralPath $agentPath -Encoding UTF8
   Assert 'agent never registers a scheduled task' ($agentText -notmatch '(?i)Register-ScheduledTask|schtasks')
   Assert 'agent never reads the write connection string' ($agentText -notmatch 'AMEEN_SQL_WRITE_CONNECTION_STRING|WRITE_CONNECTION')
-  Assert 'agent sends only with -Send AND the owner flag file' ($agentText -match 'if \(-not \$Send\) \{ return \$false \}' -and $agentText -match 'send-enabled\.flag')
+  Assert 'agent sends only with -Send AND the owner flag file' ($agentText -match 'Test-AmeenSendActivated -Dir \$OutboxDir -SendRequested:\$Send')
   Assert 'agent runs every SQL through the read-only guard' ($agentText -match 'Assert-AmeenReadOnlySql \$Sql' -and $agentText -notmatch 'ExecuteNonQuery|ExecuteReader|ExecuteScalar')
 } finally {
   Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue

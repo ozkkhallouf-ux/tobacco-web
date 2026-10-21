@@ -378,6 +378,19 @@ function Exit-AmeenOutboxLock {
     if ($null -ne $Lock) { $Lock.Dispose() }
 }
 
+function Test-AmeenSendActivated {
+    # مفتاح الإرسال: يُطلب -Send ويوجد <Dir>\send-enabled.flag بمحتوى enabled-by-owner. يُعاد فحصه قبل كل
+    # دفعة (Codex P1 على 51783c90): حذف الملف هو خطوة الإيقاف الموثّقة، فيجب أن يوقف الإرسال في الدورة
+    # التالية لا عند إعادة تشغيل العملية. أي خطأ في القراءة = إيقاف (fail closed).
+    param([Parameter(Mandatory = $true)][string]$Dir, [switch]$SendRequested)
+    if (-not $SendRequested) { return $false }
+    $flag = Join-Path $Dir "send-enabled.flag"
+    try {
+        if (-not (Test-Path -LiteralPath $flag)) { return $false }
+        return ((Get-Content -Raw -LiteralPath $flag -ErrorAction Stop).Trim() -eq "enabled-by-owner")
+    } catch { return $false }
+}
+
 function Initialize-AmeenInvoiceOutbox {
     param([Parameter(Mandatory = $true)][string]$Dir)
     foreach ($d in @($Dir, (Join-Path $Dir "pending"))) { if (-not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null } }

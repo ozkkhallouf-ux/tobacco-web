@@ -169,6 +169,11 @@ for (const name of [
   "rpc 400: error message carries status and PostgREST message from the body",
   "rpc 400: details/hint not copied into the message",
   "http 400 size rejection: batch cap halved (not retried forever at the same size)",
+  // Codex P1 (51783c90): حذف ملف التفعيل يوقف الإرسال
+  "send switch: on with -Send and the owner flag",
+  "send switch: deleting the flag turns sending off on the next check",
+  "send switch: wrong flag content keeps sending off",
+  "send switch: agent re-checks the flag inside the loop before each send",
 ]) assert.ok(psTest.includes(`'${name}'`), `اختبار PowerShell إلزامي مفقود: ${name}`);
 
 const rollback = read(rollbackRel).replace(/--.*$/gm, "");
@@ -192,8 +197,15 @@ const agentCode = agent.replace(/#.*$/gm, "");
 const libCode = lib.replace(/#.*$/gm, "");
 assert.match(agentCode, /\$RpcName = "apply_ameen_invoice_events"/, "الوكيل يكتب عبر الدالة المقترحة وحدها");
 assert.match(agentCode, /\/rest\/v1\/rpc\//);
-assert.match(agentCode, /if \(-not \$Send\) \{ return \$false \}/, "لا إرسال بلا -Send");
-assert.match(agentCode, /\$ActivationFlag = "send-enabled\.flag"/, "ولا بلا ملف تفعيل يضعه المالك");
+assert.match(libCode, /if \(-not \$SendRequested\) \{ return \$false \}/, "لا إرسال بلا -Send");
+assert.match(libCode, /\$flag = Join-Path \$Dir "send-enabled\.flag"/, "ولا بلا ملف تفعيل يضعه المالك");
+// Codex P1 (51783c90): ملف التفعيل يُعاد فحصه داخل الحلقة قبل كل دفعة، فحذفه مفتاح إيقاف فعلي.
+{
+  const doIdx = agentCode.indexOf("    do {");
+  const whileIdx = agentCode.indexOf("} while ($true)");
+  const chkIdx = agentCode.indexOf("$sendNow = Test-AmeenSendActivated -Dir $OutboxDir -SendRequested:$Send");
+  assert.ok(doIdx > 0 && chkIdx > doIdx && chkIdx < whileIdx, "إعادة فحص ملف التفعيل داخل الحلقة قبل كل دفعة");
+}
 assert.match(agentCode, /Assert-AmeenReadOnlySql \$Sql/, "كل SQL يمرّ عبر حارس القراءة");
 assert.match(agentCode, /SET LOCK_TIMEOUT 3000; /);
 assert.match(agentCode, /\$ExpectedDatabase = "AmnDb002"/);

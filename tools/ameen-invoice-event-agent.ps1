@@ -57,8 +57,6 @@ $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "ameen-invoice-events-lib.ps1")
 
 $RpcName = "apply_ameen_invoice_events"
-$ActivationFlag = "send-enabled.flag"
-$ActivationText = "enabled-by-owner"
 
 function Write-AgentLog([string]$Message) {
     $line = "{0} {1}" -f (Get-Date).ToString("yyyy-MM-dd HH:mm:ss"), $Message
@@ -183,12 +181,6 @@ $transport = {
     return @($resp.results)
 }
 
-function Test-SendActivated {
-    if (-not $Send) { return $false }
-    $flag = Join-Path $OutboxDir $ActivationFlag
-    if (-not (Test-Path -LiteralPath $flag)) { return $false }
-    return ((Get-Content -Raw -LiteralPath $flag).Trim() -eq $ActivationText)
-}
 
 # ---------------------------------------------------------------- الحلقة
 try {
@@ -200,7 +192,7 @@ try {
     $state = Read-AmeenInvoiceState -Dir $OutboxDir
     $serverNow = [datetime](Invoke-AmeenRead "SELECT GETDATE() t").Rows[0].t
     if (-not $state.watermark) { $state.watermark = Format-AmeenSqlDate $serverNow.AddMinutes(-5) }
-    $sendOn = Test-SendActivated
+    $sendOn = Test-AmeenSendActivated -Dir $OutboxDir -SendRequested:$Send
     Write-AgentLog ("بدء الوكيل: db={0} outbox={1} send={2} last_seq={3} bills={4}" -f $db, $OutboxDir, $sendOn, $state.last_seq, $state.bills.Count)
     if ($Send -and -not $sendOn) { Write-AgentLog "الإرسال مطلوب لكن ملف التفعيل غير موجود — رصد فقط." }
 
@@ -280,6 +272,12 @@ try {
             if ($rq.failed -gt 0) { Write-AgentLog ("Resnapshot: تعذّرت قراءة {0} فاتورة — يبقى الطلب ويُعاد لاحقاً" -f $rq.failed) }
         } catch { Write-AgentLog ("Resnapshot: خطأ في معالجة الطابور (الطلبات باقية): " + $_.Exception.GetType().Name) }
 
+        # يُعاد فحص ملف التفعيل قبل كل دفعة: حذفه يوقف الإرسال من الدورة التالية (Codex P1 على 51783c90).
+        $sendNow = Test-AmeenSendActivated -Dir $OutboxDir -SendRequested:$Send
+        if ($sendNow -ne $sendOn) {
+            if ($sendNow) { Write-AgentLog "ملف التفعيل موجود — استؤنف الإرسال." } else { Write-AgentLog "ملف التفعيل حُذف أو تغيّر — أُوقف الإرسال؛ الأحداث تبقى في الصندوق المحلي." }
+            $sendOn = $sendNow
+        }
         if ($sendOn) {
             $r = Send-AmeenInvoiceOutbox -Dir $OutboxDir -State $state -Transport $transport
             if ($r.deadlettered -gt 0) { Write-AgentLog ("عُزل {0} حدث معطوب في deadletter\ (راجع -ListDeadLetter)" -f $r.deadlettered) }
