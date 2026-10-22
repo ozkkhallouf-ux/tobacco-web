@@ -158,7 +158,8 @@ check("مهمة التزامات الموردين مسجّلة الآن (كان�
 
 check("مصدر الأرصدة يجلب دفعات تكفي نافذة الزخم ويعلن عددها الحقيقي", () => {
   const sql = read("tools/ameen-customer-balances-query.sql");
-  const match = /select\s+top\s+(\d+)\s+cast\(en\.Credit/i.exec(sql);
+  // المبلغ للمورد من المدين (ما دفعناه له)، وللزبون من الدائن كما كان.
+  const match = /select\s+top\s+(\d+)\s+cast\((?:case when acp\.Name = N'الموردون' then en\.Debit else )?en\.Credit/i.exec(sql);
   assert.ok(match, "تعذّر العثور على سقف الدفعات في استعلام الأرصدة");
   assert.ok(Number(match[1]) >= 40,
     `سقف الدفعات ${match[1]} لا يغطي نافذة 90 يوماً — الزخم يُحسب على سجل مقتطع`);

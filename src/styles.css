@@ -1403,6 +1403,49 @@ code {
   gap: 10px;
 }
 
+/* آخر فاتورة وآخر دفعة في صف الذمم: عمودان جنباً إلى جنب، ويتراكبان على الهاتف. */
+.last-activity-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.inventory-row .last-activity-col {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  min-width: 0;
+  color: var(--ink);
+}
+
+.last-activity-col small {
+  color: var(--muted);
+}
+
+.inventory-row .last-activity {
+  font-weight: 700;
+  color: var(--ink);
+  cursor: help;
+}
+
+.inventory-row .last-activity-none,
+.inventory-row .last-activity-pending {
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.inventory-row .last-activity-future,
+.inventory-row .last-activity-invalid {
+  color: var(--danger);
+}
+
+@media (max-width: 560px) {
+  .last-activity-row {
+    grid-template-columns: 1fr;
+  }
+}
+
 .customer-limit-editor {
   display: grid;
   grid-template-columns: minmax(110px, 0.7fr) minmax(120px, 1fr) auto;
