@@ -13,9 +13,9 @@
 // (page.pdf) وحده، وهندسته صحيحة.
 
 import { chromium } from "playwright";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { createServer } from "node:http";
-import { extname, join } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
@@ -98,7 +98,15 @@ async function html2pdfGeometry(){
   } finally { c.remove(); }
 }`;
 
-const TYPES = { ".js": "text/javascript", ".woff2": "font/woff2" };
+// الخادم يخدم قائمة ملفات ثابتة تُقرأ من القرص مرة واحدة عند الإقلاع — لا يُبنى أي
+// مسار من عنوان الطلب، فلا مجال لقراءة ملف خارج القائمة.
+const SERVED = new Map([
+  ["/src/ozk-font.js", { type: "text/javascript", data: readFileSync(join(root, "src/ozk-font.js")) }],
+  ["/public/vendor/html2pdf.bundle.min.js", { type: "text/javascript", data: readFileSync(join(root, "public/vendor/html2pdf.bundle.min.js")) }],
+  ...readdirSync(join(root, "public/fonts/cairo"))
+    .filter((name) => name.endsWith(".woff2"))
+    .map((name) => [`/public/fonts/cairo/${name}`, { type: "font/woff2", data: readFileSync(join(root, "public/fonts/cairo", name)) }])
+]);
 const server = createServer((req, res) => {
   const path = decodeURIComponent(req.url.split("?")[0]);
   if (path === "/") {
@@ -106,14 +114,10 @@ const server = createServer((req, res) => {
     res.end('<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"></head><body></body></html>');
     return;
   }
-  if (!/^\/(src\/ozk-font\.js|public\/vendor\/html2pdf\.bundle\.min\.js|public\/fonts\/cairo\/[\w.-]+\.woff2)$/.test(path)) {
-    res.writeHead(404); res.end(); return;
-  }
-  try {
-    const data = readFileSync(join(root, path));
-    res.writeHead(200, { "content-type": TYPES[extname(path)] || "application/octet-stream" });
-    res.end(data);
-  } catch { res.writeHead(404); res.end(); }
+  const file = SERVED.get(path);
+  if (!file) { res.writeHead(404); res.end(); return; }
+  res.writeHead(200, { "content-type": file.type });
+  res.end(file.data);
 });
 await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 
