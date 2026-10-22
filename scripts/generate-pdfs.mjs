@@ -22,6 +22,7 @@ import { existsSync } from "node:fs";
 // نفس تعريف ألوان الثيم وقواعد خلفية المستند المستخدمة داخل الموقع، بدل قيم
 // حرفية مكررة هنا. تكرارها سابقاً هو ما سمح لتصدير الموقع أن يختلف عن النشرات
 // المنشورة (خلفية داكنة سليمة هنا، وأبيض/أسود مقطّع هناك).
+import "../src/ozk-font.js";
 import "../src/price-list-template.js";
 
 const priceListTemplate = globalThis.OZKPriceListTemplate;

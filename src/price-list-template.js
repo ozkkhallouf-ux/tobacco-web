@@ -12,13 +12,16 @@
   // خط النشرة وسلسلته الاحتياطية. مُصدَّران كي ينتظرهما `src/app.js` قبل القياس
   // وكي يفرض السلسلة الاحتياطية على مستند الطباعة حين يقيس بها — بدل تكرار
   // الأسماء حرفياً في مكانين، تكرارٌ يجعل تغيير الخط يكسر الانتظار بصمت.
-  const BULLETIN_FONT_FAMILY = "Almarai";
+  // المصدر: الخط الرسمي الموحّد في src/ozk-font.js (Cairo) — يُحمَّل قبل هذا الملف
+  // في التطبيق وفي سكربتات التوليد. وبغيابه يبقى الاسم نفسه والاحتياط يعمل.
+  const OFFICIAL_FONT = root.OZK_FONT || null;
+  const BULLETIN_FONT_FAMILY = OFFICIAL_FONT ? OFFICIAL_FONT.FAMILY : "Cairo";
   const BULLETIN_FALLBACK_FONT_STACK = "Tahoma,Arial,sans-serif";
-  // أوزان الخط التي يطلبها الـCSS أدناه فعلاً (400 افتراضي الجدول، و600/900
-  // تُستوفى من 700/800 المحمَّلين). القياس لا يكون سليماً حتى يجهز **كلّها**:
+  // أوزان الخط المحمَّلة فعلاً (400 افتراضي الجدول، و600 فما فوق تُستوفى من 700
+  // — Cairo الرسمي وزنان فقط كما في المرجع). القياس لا يكون سليماً حتى يجهز **كلّها**:
   // وصولُ وزنٍ دون آخر يعني عموداً مقيساً بمقاييس مختلطة. مُصدَّرة كي ينتظرها
   // `src/app.js` بلا تكرار القائمة في مكانين (ملاحظة Codex P1 على dd324da).
-  const BULLETIN_FONT_WEIGHTS = Object.freeze([400, 700, 800]);
+  const BULLETIN_FONT_WEIGHTS = Object.freeze(OFFICIAL_FONT ? [...OFFICIAL_FONT.WEIGHTS] : [400, 700]);
   // عيّنات الكشف: **واحدة لكل مجموعة محارف يطلبها القالب**. Google Fonts تُقسّم
   // الخط إلى مجموعات فرعية (subsets) تصل مستقلّةً، فقد تكتمل اللاتينية بينما
   // العربية ما زالت في الطريق. وعيّنة مختلطة تنجح عندئذٍ بفضل المحارف اللاتينية
@@ -31,7 +34,7 @@
   //
   // كان مستند الطباعة يتلقّى قاعدةً تفرض السلسلة الاحتياطية، بينما يُقاس الترميز
   // في مستند التطبيق بلا تلك القاعدة. فحين يجهز بعضُ أوجه الخط دون بعض تكون
-  // النتيجة: قياسٌ بمقاييس **مختلطة** (ما جهز بـAlmarai والباقي بالاحتياطي)
+  // النتيجة: قياسٌ بمقاييس **مختلطة** (ما جهز بخط النشرة والباقي بالاحتياطي)
   // مقابل طباعةٍ بالاحتياطي **كاملةً** — أي اختلافٌ من باب آخر
   // (ملاحظة Codex P1 على 20d0c44).
   //
@@ -76,8 +79,18 @@
     return `<span class="issue-date-day">${escapeHtml(parts[1])}</span><span class="issue-date-month" dir="rtl">${escapeHtml(parts[2])}</span><span class="issue-date-year">${escapeHtml(parts[3])}</span>`;
   }
 
+  // أوجه الخط محلية (لا Google Fonts): في المتصفح بعناوين مطلقة، وفي النشرات
+  // المولَّدة داخل public/downloads/ نسبيةً إلى جذر الموقع.
+  const BULLETIN_FONT_FACES = OFFICIAL_FONT
+    ? OFFICIAL_FONT.faceCss(typeof document === "undefined" ? "../../" : undefined)
+    : "";
+
+  // ارتفاع السطر صريح: «normal» في Cairo = 1.874em مقابل 1.116em لـAlmarai، فبلاه
+  // زادت النشرة العامة ورقة كاملة (4 ← 5، قياس 2026-10-22)؛ بـ1.35 تبقى 4 أوراق.
+  const BULLETIN_LINE_HEIGHT = OFFICIAL_FONT ? OFFICIAL_FONT.DOC_LINE_HEIGHT : "normal";
+
   const CSS = `
-    @import url('https://fonts.googleapis.com/css2?family=Almarai:wght@300;400;700;800&display=swap');
+    ${BULLETIN_FONT_FACES}
     @page { size: A4 portrait; margin: 0; }
     .ozk-price-list, .ozk-price-list * { box-sizing: border-box; }
     .ozk-price-list {
@@ -85,7 +98,7 @@
       --text:#f3ead2; --muted:#a88d61; --line:#33240d; --gold:#d7a83f;
       --gold-strong:#efc45d; --button-text:#0c0a07;
       width:100%; margin:0; padding:0; overflow:hidden; background:var(--page); color:var(--text);
-      direction:rtl; font-family:'${BULLETIN_FONT_FAMILY}',${BULLETIN_FALLBACK_FONT_STACK}; transition:background .2s ease,color .2s ease;
+      direction:rtl; line-height:${BULLETIN_LINE_HEIGHT}; font-family:'${BULLETIN_FONT_FAMILY}',${BULLETIN_FALLBACK_FONT_STACK}; transition:background .2s ease,color .2s ease;
     }
     .ozk-price-list[data-theme="light"] {
       --page:#fffdf8; --surface:#ffffff; --surface-alt:#f8f3e8; --surface-strong:#5b3a09;
@@ -213,7 +226,7 @@
     .ozk-price-list .price-list-document-tools a {
       background:var(--gold); color:var(--button-text); border:1px solid var(--gold); padding:8px 12px;
       border-radius:6px; font-size:11px; font-weight:900; cursor:pointer;
-      font-family:'Almarai',Tahoma,sans-serif; text-decoration:none;
+      font-family:'${BULLETIN_FONT_FAMILY}',${BULLETIN_FALLBACK_FONT_STACK}; text-decoration:none;
     }
     .ozk-price-list .price-list-document-tools .theme-switch {
       background:var(--surface); color:var(--text); border-color:var(--line);

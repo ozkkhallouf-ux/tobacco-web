@@ -10,7 +10,7 @@
   --accent: #f2cf78;
   --danger: #ff7468;
   --success: #6fcf97;
-  font-family: "Segoe UI", Tahoma, Arial, sans-serif;
+  font-family: var(--ozk-font, "Segoe UI", Tahoma, Arial, sans-serif);
   color-scheme: dark;
 }
 

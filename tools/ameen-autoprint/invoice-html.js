@@ -1,6 +1,37 @@
 "use strict";
 // قالب فاتورة A4 — نفس تصميم receipt.html (renderInvoice) المستخدم على الموقع
 
+const fs = require("fs");
+const path = require("path");
+const vm = require("vm");
+
+// الخط الرسمي Cairo مضمَّناً base64: puppeteer يرسم عبر setContent بلا أصل
+// ولا شبكة مضمونة، فلا يصل إلى عنوان woff2. أسماء الملفات والأوزان ونطاقات
+// المحارف تُقرأ من المصدر الوحيد src/ozk-font.js (يُشغَّل في vm معزول)، والملفات
+// من public/fonts/cairo في المستودع نفسه. أي فشل (ملف ناقص في نسخة منشورة
+// جزئياً) ⇒ لا أوجه، فيُطبع بالاحتياطي Tahoma كما كان تماماً — لا يتوقف الطباعة.
+const REPO_ROOT = path.resolve(__dirname, "..", "..");
+let officialFontCache = null;
+function officialFont() {
+  if (officialFontCache) return officialFontCache;
+  let result = { css: "", stack: "Tahoma,Arial,sans-serif", lineHeight: "normal" };
+  try {
+    const sandbox = {};
+    vm.runInNewContext(fs.readFileSync(path.join(REPO_ROOT, "src", "ozk-font.js"), "utf8"), sandbox, { timeout: 1000 });
+    const font = sandbox.OZK_FONT;
+    const css = font.WEIGHTS.flatMap((weight) => Object.keys(font.RANGES).map((subset) => {
+      const data = fs.readFileSync(path.join(REPO_ROOT, ...font.FILE(subset, weight).split("/"))).toString("base64");
+      return `@font-face{font-family:"${font.FAMILY}";font-style:normal;font-weight:${weight};`
+        + `src:url(data:font/woff2;base64,${data}) format("woff2");unicode-range:${font.RANGES[subset]}}`;
+    })).join("");
+    result = { css, stack: font.STACK, lineHeight: font.DOC_LINE_HEIGHT };
+  } catch {
+    // الاحتياط أعلاه.
+  }
+  officialFontCache = result;
+  return result;
+}
+
 function esc(s) {
   return String(s == null ? "" : s).replace(/[&<>"]/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])
@@ -40,6 +71,7 @@ function buildInvoiceHtml(inv) {
 <head>
 <meta charset="UTF-8">
 <title>فاتورة رقم ${esc(inv.number)}</title>
+<style>${officialFont().css}</style>
 <style>
   :root {
     --gold:#b8892a; --ink:#221808; --muted:#6b5535;
@@ -48,7 +80,7 @@ function buildInvoiceHtml(inv) {
   }
   * { box-sizing:border-box; }
   html,body { margin:0; padding:0; background:#fff; color:var(--ink);
-              font-family:Tahoma,Arial,sans-serif; }
+              font-family:${officialFont().stack}; line-height:${officialFont().lineHeight}; }
   .wrap { max-width:720px; margin:0 auto; padding:14px; }
   .doc { background:#fff; border:1px solid var(--line); border-radius:12px;
          padding:22px 22px 16px; }

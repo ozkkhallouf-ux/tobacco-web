@@ -610,8 +610,14 @@
     for (let i = 0; i < lines.length; i += pageSize) pages.push(lines.slice(i, i + pageSize));
     const popup = window.open("", "_blank", "noopener,noreferrer");
     if (!popup) return callbacks.notice("error", "اسمح بفتح نافذة الطباعة أولاً.");
-    popup.document.write(`<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><title>دفتر جرد أعمى</title><style>@page{size:A4;margin:10mm}body{font-family:Arial;color:#111}.page{page-break-after:always}table{width:100%;border-collapse:collapse}th,td{border:1px solid #333;padding:6px}h1,p{text-align:center}.count{height:26px;width:110px}</style></head><body>${pages.map((page,index)=>`<section class="page"><h1>دفتر جرد — ${esc(state.session.warehouseName)}</h1><p>صفحة ${index+1} من ${pages.length} · الكمية النظامية مخفية</p><table><thead><tr><th>الكود</th><th>الصنف</th><th>الوحدة</th><th>الكمية الفعلية</th></tr></thead><tbody>${page.map(line=>`<tr><td>${esc(line.itemCode||line.itemKey)}</td><td>${esc(line.itemName)}</td><td>${esc(line.unit1Name)}</td><td class="count"></td></tr>`).join("")}</tbody></table></section>`).join("")}</body></html>`);
-    popup.document.close(); popup.focus(); popup.print();
+    const faces = typeof OZK_FONT !== "undefined" ? `<style data-ozk-font-face>${OZK_FONT.rootCss()}</style>` : "";
+    popup.document.write(`<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><title>دفتر جرد أعمى</title>${faces}<style>@page{size:A4;margin:10mm}body{font-family:var(--ozk-font,Arial);color:#111}.page{page-break-after:always}table{width:100%;border-collapse:collapse}th,td{border:1px solid #333;padding:6px}h1,p{text-align:center}.count{height:26px;width:110px}</style></head><body>${pages.map((page,index)=>`<section class="page"><h1>دفتر جرد — ${esc(state.session.warehouseName)}</h1><p>صفحة ${index+1} من ${pages.length} · الكمية النظامية مخفية</p><table><thead><tr><th>الكود</th><th>الصنف</th><th>الوحدة</th><th>الكمية الفعلية</th></tr></thead><tbody>${page.map(line=>`<tr><td>${esc(line.itemCode||line.itemKey)}</td><td>${esc(line.itemName)}</td><td>${esc(line.unit1Name)}</td><td class="count"></td></tr>`).join("")}</tbody></table></section>`).join("")}</body></html>`);
+    popup.document.close();
+    // الطباعة بعد جهوزية الخط (بسقف) كي لا تخرج الورقة بالخط الاحتياطي.
+    const printNow = () => { popup.focus(); popup.print(); };
+    const fontsReady = popup.document.fonts && popup.document.fonts.ready;
+    if (fontsReady && typeof fontsReady.then === "function") Promise.race([fontsReady, new Promise((r) => setTimeout(r, 3000))]).then(printNow, printNow);
+    else printNow();
   }
 
   function bindResultControls(scope, root, session) {

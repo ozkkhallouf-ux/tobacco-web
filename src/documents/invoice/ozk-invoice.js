@@ -28,7 +28,7 @@ const OZK_INVOICE = (() => {
   //    الآخر. القيم مطابقة للمرجع 634 حرفياً.
   // ==========================================================================
   const STYLE = `<style>
-.ozk-inv{font-family:Tahoma,Arial,sans-serif;color:#221808;background:#fff;direction:rtl;padding:6px 10px;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+.ozk-inv{font-family:var(--ozk-font,Tahoma,Arial,sans-serif);line-height:var(--ozk-doc-line-height,normal);color:#221808;background:#fff;direction:rtl;padding:6px 10px;-webkit-print-color-adjust:exact;print-color-adjust:exact}
 .ozk-inv .rhead{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #b8892a;padding-bottom:8px;margin-bottom:12px}
 .ozk-inv .brand{font-weight:900;font-size:19px}.ozk-inv .brand small{display:block;font-weight:400;font-size:10px;color:#6b5535}
 .ozk-inv .rtitle{flex:1;text-align:right;white-space:nowrap;padding-right:14px}.ozk-inv .rtitle h2{margin:0;font-size:16px;color:#b8892a;white-space:nowrap}.ozk-inv .rtitle span{font-size:10px;color:#6b5535;white-space:nowrap}
@@ -48,7 +48,7 @@ const OZK_INVOICE = (() => {
 .ozk-inv .items-table{table-layout:fixed}
 .ozk-inv .items-table td,.ozk-inv .items-table th{overflow-wrap:anywhere}
 .ozk-inv .qty{display:block}
-.ozk-inv .qg{display:block;overflow:hidden}
+.ozk-inv .qg{display:block;overflow:hidden;padding-bottom:.3em;margin-bottom:-.3em}
 .ozk-inv .qg .qv{float:right}
 .ozk-inv .qg .qu{float:right;margin-right:4px}
 .ozk-inv .qty span{white-space:nowrap}
