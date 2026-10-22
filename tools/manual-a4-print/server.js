@@ -404,9 +404,14 @@ function sqlErrorLabel(err) {
   return code ? `خطأ SQL (${code})` : "خطأ SQL";
 }
 
+// علامة خاصة بـhttpError: مكتبات HTTP/SQL قد تحمل .status على استثناء
+// غير مقصود، فلا يُعرض نصّه لمجرد وجود الحقل.
+const HTTP_PUBLIC = Symbol("ozk.httpPublic");
+
 function httpError(status, message) {
   const e = new Error(message);
   e.status = status;
+  e[HTTP_PUBLIC] = String(message);
   return e;
 }
 
@@ -491,9 +496,11 @@ function createHttpHandler(app, cfg) {
       if (file) return send(res, 200, fs.readFileSync(file), "application/pdf");
       return send(res, 404, { error: "not found" });
     } catch (err) {
-      // أخطاء الطلب المقصودة (httpError) تُعرض كما هي؛ غيرها يُسجَّل محلياً ولا
-      // يخرج نصّه ولا تتبّعه إلى الواجهة.
-      if (err && err.status) return send(res, err.status, { error: err.message });
+      // أخطاء الطلب المقصودة (httpError) وحدها تُعرض؛ غيرها — حتى لو حمل
+      // status من مكتبة — يُسجَّل محلياً ولا يخرج نصّه ولا تتبّعه إلى الواجهة.
+      if (err && typeof err[HTTP_PUBLIC] === "string") {
+        return send(res, err.status, { error: err[HTTP_PUBLIC] });
+      }
       console.error(err && err.stack || err);
       return send(res, 500, { error: "خطأ داخلي — التفاصيل في server.err.log" });
     }

@@ -295,20 +295,36 @@ test("تحليل سلسلة الاتصال: مثيل ومنفذ واسم مست�
   assert.equal(c.options.readOnlyIntent, true);
 });
 
-test("HTTP: خطأ داخلي لا يكشف نصّ الاستثناء للواجهة", async () => {
+async function httpSearch(ameenSearch) {
   const { app, cfg, ameen } = makeApp({ browserPath: "" });
-  ameen.search = async () => { throw new Error("secret-detail Password=x at Connection"); };
+  ameen.search = ameenSearch;
   const h = server.createHttpHandler(app, cfg);
   const origError = console.error;
   console.error = () => undefined;
   try {
-    const out = await new Promise((resolve) => {
+    return await new Promise((resolve) => {
       const res = { status: 0, writeHead(st) { this.status = st; }, end(b) { resolve({ status: this.status, body: String(b) }); } };
       h.handle({ method: "GET", url: "/api/search?number=42", headers: { host: `127.0.0.1:${cfg.port}` }, on: () => undefined }, res);
     });
-    assert.equal(out.status, 500);
-    assert.doesNotMatch(out.body, /secret-detail|Password/);
   } finally {
     console.error = origError;
   }
+}
+
+test("HTTP: خطأ داخلي لا يكشف نصّ الاستثناء للواجهة", async () => {
+  const out = await httpSearch(async () => { throw new Error("secret-detail Password=x at Connection"); });
+  assert.equal(out.status, 500);
+  assert.doesNotMatch(out.body, /secret-detail|Password/);
+});
+
+test("HTTP: خطأ مكتبة يحمل status لا يُعامل كـhttpError ولا يكشف النص", async () => {
+  // مكتبات HTTP/SQL كثيراً ما تضع .status على الاستثناء؛ هذا ليس httpError.
+  const out = await httpSearch(async () => {
+    const e = new Error("secret-detail Password=x at Connection\n    at Object.search (server.js:1:1)");
+    e.status = 503;
+    throw e;
+  });
+  assert.equal(out.status, 500);
+  assert.match(out.body, /خطأ داخلي/);
+  assert.doesNotMatch(out.body, /secret-detail|Password|at Object.search/);
 });
