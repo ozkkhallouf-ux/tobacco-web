@@ -42,6 +42,8 @@ param(
     # متتالية بدل ضغطة واحدة على الأمين.
     [int]$ReconcileBatch = 150,
     [int]$RunMinutes = 0,
+    # سطر أداء دوري في السجل: عدد الدورات ومتوسط زمنها وأقصاه، وعدد الحفظ الكامل وحفظ العلامة وحدها.
+    [int]$PerfLogMinutes = 5,
     [switch]$Once,
     [switch]$Send,
     [string]$OutboxDir = (Join-Path $env:ProgramData "OZK-TOBACCO\ameen-invoice-events"),
@@ -198,10 +200,15 @@ try {
 
     $start = Get-Date
     $lastReconcile = [datetime]::MinValue
+    # الحالة الكاملة تُحفظ عند تغيّرها فقط (أداء، 2026-10-22): حفظها في كل دورة كان يكلّف ~6 ث على 5.1
+    # فيُبطئ حارس الأداء الرصد إلى 30 ث. بلا تغيير تُحفظ العلامة المائية وحدها في ملف صغير.
+    $lastFullSave = [datetime]::UtcNow
+    $perf = @{ since = Get-Date; cycles = 0; total_ms = 0.0; max_ms = 0.0; full = 0; watermark = 0; watermark_failed = 0 }
     $interval = [math]::Max(1, $PollSeconds)
     $slowStreak = 0
     do {
         $cycleStart = Get-Date
+        $stateDirty = $false
         $nowSrv = [datetime](Invoke-AmeenRead "SELECT GETDATE() t").Rows[0].t
         $detectedUtc = ConvertTo-AmeenUtcIso $nowSrv
         $wm = [datetime]::ParseExact([string]$state.watermark, "yyyy-MM-ddTHH:mm:ss.fff", [Globalization.CultureInfo]::InvariantCulture)
@@ -241,20 +248,30 @@ try {
                     if ($fp.ContainsKey($g) -or $ops.ContainsKey($g) -or $state.bills[$g].v -eq "deleted") { continue }
                     $exists = [int](Invoke-AmeenRead ("SELECT COUNT(*) c FROM dbo.bu000 WHERE GUID = '" + ([guid]$g).ToString() + "'")).Rows[0].c
                     if ($exists -eq 0) { $observations.Add(@{ guid = $g; snapshot = $null; ops = @(); detected_at_utc = $detectedUtc; source = "reconcile" }) }
-                    else { $state.bills.Remove($g) }
+                    else { $state.bills.Remove($g); $stateDirty = $true }
                 }
                 # دفعة ناقصة ⇒ تُكمَل في الدورة التالية بدل انتظار 10 دقائق.
                 if (-not $reconcileTruncated) { $lastReconcile = Get-Date }
             }
 
             $events = Resolve-AmeenInvoiceChanges -State $state -Observations $observations.ToArray()
-            foreach ($obs in $observations) { if ($fp -and $fp.ContainsKey($obs.guid) -and $state.bills.ContainsKey($obs.guid)) { $state.bills[$obs.guid].fp = $fp[$obs.guid] } }
+            foreach ($obs in $observations) {
+                if ($fp -and $fp.ContainsKey($obs.guid) -and $state.bills.ContainsKey($obs.guid) -and $state.bills[$obs.guid].fp -ne $fp[$obs.guid]) {
+                    $state.bills[$obs.guid].fp = $fp[$obs.guid]; $stateDirty = $true
+                }
+            }
             if ($events.Count -gt 0) {
+                $stateDirty = $true
                 Add-AmeenOutboxEvents -Dir $OutboxDir -Events $events
                 foreach ($e in $events) { Write-AgentLog ("حدث {0} seq={1} {2} bill={3}" -f $e.kind, $e.source_seq, $e.change, $e.bill_guid) }
             }
             $state.watermark = Format-AmeenSqlDate $nowSrv
-            Save-AmeenInvoiceState -Dir $OutboxDir -State $state
+            # الأحداث في الصندوق أولاً، ثم الحالة (إن تغيّرت)، ثم العلامة — فلا تتقدّم العلامة على ما لم يُحفظ.
+            if ((Get-AmeenStateSaveMode -Dirty $stateDirty -LastFullSaveUtc $lastFullSave) -eq "full") {
+                Save-AmeenInvoiceState -Dir $OutboxDir -State $state; $lastFullSave = [datetime]::UtcNow; $perf.full++
+            } else {
+                if (Save-AmeenInvoiceWatermark -Dir $OutboxDir -State $state) { $perf.watermark++ } else { $perf.watermark_failed++ }
+            }
         } catch {
             # أخطاء SQL تصل ملفوفة بـ MethodInvocationException؛ نفحص السلسلة كلها.
             $ex = $_.Exception; $isSql = $false
@@ -283,11 +300,17 @@ try {
             if ($r.deadlettered -gt 0) { Write-AgentLog ("عُزل {0} حدث معطوب في deadletter\ (راجع -ListDeadLetter)" -f $r.deadlettered) }
             if ($r.error) { Write-AgentLog ("فشل الإرسال (سيُعاد): " + $r.error) }
             elseif ($r.acked -gt 0) { Write-AgentLog ("أُكِّد {0} حدث" -f $r.acked) }
-            Save-AmeenInvoiceState -Dir $OutboxDir -State $state
+            # لا إرسال فعلي (الصندوق فارغ أو مهلة تراجع) ⇒ لا تغيير في الحالة ولا حفظ.
+            if ($r.sent -gt 0 -or $r.error -or $r.deadlettered -gt 0) { Save-AmeenInvoiceState -Dir $OutboxDir -State $state; $lastFullSave = [datetime]::UtcNow; $perf.full++ }
         }
 
         # حارس الأداء: لا نضغط على الأمين. دورة بطيئة أو مهلة قفل ⇒ إيقاع أبطأ.
         $elapsedMs = ((Get-Date) - $cycleStart).TotalMilliseconds
+        $perf.cycles++; $perf.total_ms += $elapsedMs; if ($elapsedMs -gt $perf.max_ms) { $perf.max_ms = $elapsedMs }
+        if ($PerfLogMinutes -gt 0 -and ((Get-Date) - $perf.since).TotalMinutes -ge $PerfLogMinutes) {
+            Write-AgentLog ("أداء: دورات={0} متوسط={1:n0}ms أقصى={2:n0}ms حفظ_كامل={3} حفظ_علامة={4} علامة_متعذرة={5} إيقاع={6}ث" -f $perf.cycles, ($perf.total_ms / [math]::Max(1, $perf.cycles)), $perf.max_ms, $perf.full, $perf.watermark, $perf.watermark_failed, $interval)
+            $perf = @{ since = Get-Date; cycles = 0; total_ms = 0.0; max_ms = 0.0; full = 0; watermark = 0; watermark_failed = 0 }
+        }
         if ($elapsedMs -gt 500 -or $lockErrors -gt 0) { $slowStreak++ } else { $slowStreak = 0; $interval = [math]::Max(1, $PollSeconds) }
         if ($slowStreak -ge 3) { $interval = [math]::Min(30, $interval * 2); $slowStreak = 0; Write-AgentLog "إبطاء الإيقاع إلى $interval ثانية (حارس الأداء)." }
         if ($Once) { break }

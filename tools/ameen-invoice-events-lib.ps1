@@ -33,6 +33,12 @@ $script:Invariant = [Globalization.CultureInfo]::InvariantCulture
 # حدّ جسم طلب الإرسال بالبايتات (UTF-8): أدنى بهامش واسع من حدّ الخادم 4194304 لـ pg_column_size(jsonb)،
 # لأن تمثيل jsonb قد يكبر عن النص قليلاً.
 $script:AmeenMaxBatchBytes = 2621440
+# نص لا يحتاج هروباً (لا علامة اقتباس ولا شرطة مائلة ولا محرف تحكم) يُنسخ كما هو في JSON القانوني.
+$script:AmeenJsonNeedsEscape = New-Object System.Text.RegularExpressions.Regex('[\x00-\x1f"\\]', [System.Text.RegularExpressions.RegexOptions]::Compiled)
+# الحفظ الكامل الدوري لملف الحالة حتى بلا تغيير جوهري (يثبّت «seen» وما شابه). ما عداه يُحفظ عند التغيّر فقط.
+$script:AmeenStateFullSaveMinutes = 10
+# محاولات استبدال الملف في الكتابة الذرّية (تراجع 25←50←100←200 ms بين المحاولات).
+$script:AmeenAtomicReplaceAttempts = 5
 
 # ---------------------------------------------------------------- حارس القراءة فقط
 function Assert-AmeenReadOnlySql {
@@ -178,6 +184,9 @@ function ConvertTo-AmeenCanonicalJson {
     if ($null -eq $Value -or $Value -is [DBNull]) { return "null" }
     if ($Value -is [bool]) { if ($Value) { return "true" } else { return "false" } }
     if ($Value -is [string]) {
+        # المسار السريع (أداء، 2026-10-22): أغلب النصوص (GUID، بصمات، أوقات، أسماء) لا تحتاج هروباً،
+        # والمرور عليها محرفاً محرفاً كان يكلّف ثوانيَ لكل حفظ للحالة على 5.1. الناتج مطابق بايتاً ببايت.
+        if (-not $script:AmeenJsonNeedsEscape.IsMatch($Value)) { return '"' + $Value + '"' }
         $sb = New-Object System.Text.StringBuilder
         [void]$sb.Append('"')
         foreach ($ch in $Value.ToCharArray()) {
@@ -348,10 +357,27 @@ function Resolve-AmeenInvoiceChanges {
 # الكتابة ذرّية: ملف مؤقت ثم نقل، فانقطاع الكهرباء لا يترك حدثاً نصف مكتوب.
 
 function Write-AmeenAtomicFile {
+    # ملف مؤقت يُكتب كاملاً ويُدفع إلى القرص (Flush(true)) ثم يحلّ محل الأصل دفعة واحدة: انقطاع الكهرباء
+    # يترك إمّا النسخة القديمة كاملة وإمّا الجديدة كاملة، وبقايا .tmp-* تُزال عند البدء.
     param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Content)
     $tmp = $Path + ".tmp-" + [guid]::NewGuid().ToString("N")
-    [IO.File]::WriteAllText($tmp, $Content, (New-Object System.Text.UTF8Encoding($false)))
-    if (Test-Path -LiteralPath $Path) { [IO.File]::Replace($tmp, $Path, [NullString]::Value) } else { [IO.File]::Move($tmp, $Path) }
+    $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($Content)
+    $fs = New-Object System.IO.FileStream($tmp, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try { $fs.Write($bytes, 0, $bytes.Length); $fs.Flush($true) } finally { $fs.Dispose() }
+    # الاستبدال قد يُرفض لحظياً إن فتح برنامج آخر الأصل (مكافح الفيروسات أو الفهرسة على Windows) —
+    # ثبت فعلياً على OZK2026 مع الحفظ كل ثانيتين. إعادة محاولة قصيرة متصاعدة (~0.4 ث)، ثم رمي بلا بقايا.
+    for ($attempt = 1; ; $attempt++) {
+        try {
+            if (Test-Path -LiteralPath $Path) { [IO.File]::Replace($tmp, $Path, [NullString]::Value) } else { [IO.File]::Move($tmp, $Path) }
+            return
+        } catch {
+            if ($attempt -ge $script:AmeenAtomicReplaceAttempts) {
+                Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+                throw
+            }
+            Start-Sleep -Milliseconds (25 * [int][math]::Pow(2, $attempt - 1))
+        }
+    }
 }
 
 function Enter-AmeenOutboxLock {
@@ -394,8 +420,10 @@ function Test-AmeenSendActivated {
 function Initialize-AmeenInvoiceOutbox {
     param([Parameter(Mandatory = $true)][string]$Dir)
     foreach ($d in @($Dir, (Join-Path $Dir "pending"))) { if (-not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null } }
-    # بقايا كتابة مقطوعة: الملف المؤقت لم يُنقل، فالحدث لم يُسجَّل أصلاً ولا يُرسل.
+    # بقايا كتابة مقطوعة: الملف المؤقت لم يُنقل، فالحدث لم يُسجَّل أصلاً ولا يُرسل. وكذلك بقايا حفظ الحالة
+    # أو العلامة المائية: الأصل باقٍ كاملاً لأن الاستبدال لم يقع.
     Get-ChildItem -LiteralPath (Join-Path $Dir "pending") -Filter "*.tmp-*" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    foreach ($f in @("state.json.tmp-*", "watermark.json.tmp-*")) { Get-ChildItem -LiteralPath $Dir -Filter $f -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue }
 }
 
 function Read-AmeenJsonFileSafe {
@@ -435,6 +463,9 @@ function Read-AmeenInvoiceState {
         $read = Read-AmeenJsonFileSafe -Path $p
         if ($read.ok -and $read.value -is [System.Collections.IDictionary] -and $read.value.schema -eq "ameen-invoice-agent-state/v1") {
             $h = $read.value
+            # العلامة المائية بتوقيت خادم الأمين المحلي بلا منطقة؛ PowerShell 7 يحوّلها عند القراءة إلى UTC
+            # بلاحقة Z فتنزاح وتفشل ParseExact في الوكيل. تُؤخذ حرفياً من نص الملف على الإصدارين.
+            $h.watermark = Get-AmeenRawWatermark $read.raw
         } else {
             # حالة تالفة لا توقف الوكيل: تُنقل جانباً كما هي (لا حذف) ونبدأ حالة جديدة. التسلسل يبدأ من
             # الساعة وفوق كل معلّق، والنسخ المعروفة تُعاد معرفتها بالمطابقة (الخادم يعيد noop للمطابق).
@@ -446,15 +477,62 @@ function Read-AmeenInvoiceState {
     if ($null -eq $h.bills) { $h.bills = @{} }
     if ($null -eq $h.send) { $h.send = @{ failures = 0; next_at = $null } }
     $h.last_seq = [long]$h.last_seq
+    # العلامة المائية تُحفظ كل دورة في ملف صغير مستقل، والحالة الكاملة عند تغيّرها فقط. تُعتمد الأحدث منهما
+    # فقط إن كُتبت لنفس نسخة الحالة (state_seq = last_seq المحفوظ): ملف الحالة يُحفظ دائماً قبل العلامة،
+    # فتطابق التسلسل يعني أن كل ما رُصد حتى تلك العلامة محفوظ. أي شك (تالف، تسلسل مختلف) ⇒ تُتجاهل
+    # ونرصد من علامة الحالة الأقدم — إعادة رصد آمنة لا تكرر حدثاً لأن النسخ المعروفة لا تُصدر ثانية.
+    $wmPath = Join-Path $Dir "watermark.json"
+    if ($h.watermark -and (Test-Path -LiteralPath $wmPath)) {
+        $wm = Read-AmeenJsonFileSafe -Path $wmPath
+        $wmText = $null; if ($wm.ok) { $wmText = Get-AmeenRawWatermark $wm.raw }
+        if ($wmText -and $wm.value -is [System.Collections.IDictionary] -and $wm.value.schema -eq "ameen-invoice-agent-watermark/v1" -and
+            [long]$wm.value.state_seq -eq [long]$h.last_seq -and [string]::CompareOrdinal($wmText, [string]$h.watermark) -gt 0) {
+            $h.watermark = $wmText
+        }
+    }
     # التسلسل لا يتراجع أبداً: إن ضاعت الحالة وبقيت أحداث معلّقة، نبدأ بعد أكبرها.
     $maxPending = Get-AmeenOutboxMaxSeq $Dir
     if ($maxPending -gt $h.last_seq) { $h.last_seq = $maxPending }
     return $h
 }
 
+function Get-AmeenRawWatermark {
+    # «watermark» حرفياً من نص JSON بصيغة yyyy-MM-ddTHH:mm:ss.fff (توقيت الأمين المحلي)، وإلا $null.
+    param([AllowNull()][string]$Raw)
+    if ($Raw -and $Raw -match '"watermark"\s*:\s*"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3})"') { return $Matches[1] }
+    return $null
+}
+
 function Save-AmeenInvoiceState {
+    # الحفظ الكامل: الحالة أولاً ثم العلامة المائية المطابقة لها (الترتيب شرط لصحة Read-AmeenInvoiceState).
     param([Parameter(Mandatory = $true)][string]$Dir, [Parameter(Mandatory = $true)][hashtable]$State)
     Write-AmeenAtomicFile -Path (Join-Path $Dir "state.json") -Content (ConvertTo-AmeenCanonicalJson $State)
+    [void](Save-AmeenInvoiceWatermark -Dir $Dir -State $State)
+}
+
+function Save-AmeenInvoiceWatermark {
+    # حفظ خفيف لكل دورة بلا تغيير جوهري: العلامة المائية وحدها مع تسلسل الحالة التي تنتمي إليها.
+    # فشله لا يوقف الوكيل: العلامة تحسين فقط (فقدها = إعادة رصد آمنة)، والدورة التالية تكتبها مجدداً.
+    # يعيد $true عند النجاح و$false عند الفشل.
+    param([Parameter(Mandatory = $true)][string]$Dir, [Parameter(Mandatory = $true)][hashtable]$State)
+    if (-not $State.watermark) { return $true }
+    $wm = @{ schema = "ameen-invoice-agent-watermark/v1"; watermark = [string]$State.watermark; state_seq = [long]$State.last_seq }
+    try {
+        Write-AmeenAtomicFile -Path (Join-Path $Dir "watermark.json") -Content (ConvertTo-AmeenCanonicalJson $wm)
+        return $true
+    } catch {
+        Write-Verbose ("watermark.json not saved: " + $_.Exception.GetType().Name)
+        return $false
+    }
+}
+
+function Get-AmeenStateSaveMode {
+    # «full» حين تغيّر شيء جوهري (حدث جديد، بصمة مطابقة، إزالة فاتورة، إرسال) أو مضت الفترة الدورية؛
+    # وإلا «watermark»: لا يُعاد كتابة ملف الحالة كله في كل دورة رصد.
+    param([bool]$Dirty, [datetime]$LastFullSaveUtc, [datetime]$NowUtc = [datetime]::UtcNow, [int]$FullSaveMinutes = $script:AmeenStateFullSaveMinutes)
+    if ($Dirty) { return "full" }
+    if (($NowUtc - $LastFullSaveUtc).TotalMinutes -ge $FullSaveMinutes) { return "full" }
+    return "watermark"
 }
 
 function Get-AmeenOutboxMaxSeq {

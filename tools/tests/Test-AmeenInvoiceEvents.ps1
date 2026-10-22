@@ -545,6 +545,92 @@ try {
   $doIdx = $loopBody.IndexOf("    do {"); $whileIdx = $loopBody.IndexOf("} while (`$true)"); $chkIdx = $loopBody.IndexOf('$sendNow = Test-AmeenSendActivated -Dir $OutboxDir -SendRequested:$Send')
   Assert 'send switch: agent re-checks the flag inside the loop before each send' ($doIdx -gt 0 -and $chkIdx -gt $doIdx -and $chkIdx -lt $whileIdx)
 
+  # ── ٥ي) أداء حفظ الحالة (2026-10-22): الحالة الكاملة عند تغيّرها فقط، والعلامة المائية كل دورة ────
+  # JSON القانوني: المسار السريع للنص الذي لا يحتاج هروباً يعطي البايتات نفسها
+  Assert 'canonical json: plain text fast path is byte-identical' ((ConvertTo-AmeenCanonicalJson "عربي — 7f5b0921-61f3 2026-10-22T07:00:00.000Z") -eq '"عربي — 7f5b0921-61f3 2026-10-22T07:00:00.000Z"')
+  Assert 'canonical json: escapes still applied when needed' ((ConvertTo-AmeenCanonicalJson ("a`"b\c`td" + [char]1)) -eq '"a\"b\\c\u0009d\u0001"')
+
+  Assert 'state save mode: unchanged cycle saves the watermark only' ((Get-AmeenStateSaveMode -Dirty $false -LastFullSaveUtc ([datetime]::UtcNow.AddMinutes(-1))) -eq "watermark")
+  Assert 'state save mode: a real change saves the full state' ((Get-AmeenStateSaveMode -Dirty $true -LastFullSaveUtc ([datetime]::UtcNow)) -eq "full")
+  Assert 'state save mode: periodic full save after the interval' ((Get-AmeenStateSaveMode -Dirty $false -LastFullSaveUtc ([datetime]::UtcNow.AddMinutes(-11))) -eq "full")
+
+  # حالة واقعية الحجم (2000 فاتورة، مثل خط الأساس الفعلي على OZK2026)
+  $pbox = Join-Path $tempDir "outbox-perf"
+  Initialize-AmeenInvoiceOutbox -Dir $pbox
+  $ps = New-AmeenInvoiceState; $ps.watermark = "2026-10-22T07:00:00.000"
+  for ($i = 0; $i -lt 2000; $i++) { $g = ("{0:x8}-0000-4000-8000-{1:x12}" -f $i, ($i * 7919)); $ps.bills[$g] = @{ v = (Get-AmeenSha256Hex $g); seen = "2026-10-22T04:00:00.000Z"; seq = [long]($ps.last_seq + $i); fp = ("{0}:{1}:3" -f ($i * 31), ($i * 17)) } }
+  $ps.last_seq = [long]$ps.last_seq + 2000
+  $sw = [Diagnostics.Stopwatch]::StartNew(); Save-AmeenInvoiceState -Dir $pbox -State $ps; $fullMs = $sw.Elapsed.TotalMilliseconds
+  $statePath = Join-Path $pbox "state.json"
+  $stateHash = (Get-FileHash -LiteralPath $statePath -Algorithm SHA256).Hash
+  $wmTimes = @()
+  for ($k = 1; $k -le 20; $k++) {
+    $ps.watermark = ([datetime]"2026-10-22T07:00:00").AddSeconds(2 * $k).ToString("yyyy-MM-ddTHH:mm:ss.fff", [Globalization.CultureInfo]::InvariantCulture)
+    $sw.Restart(); [void](Save-AmeenInvoiceWatermark -Dir $pbox -State $ps); $wmTimes += $sw.Elapsed.TotalMilliseconds
+  }
+  $wmAvg = ($wmTimes | Measure-Object -Average).Average
+  Write-Host ("  perf: full save {0:n0} ms, watermark save avg {1:n1} ms (2000 bills)" -f $fullMs, $wmAvg)
+  Assert 'performance: 20 unchanged cycles never rewrite state.json' ((Get-FileHash -LiteralPath $statePath -Algorithm SHA256).Hash -eq $stateHash)
+  Assert 'performance: watermark save stays well under the 500ms cycle budget' ($wmAvg -lt 100)
+  Assert 'performance: watermark save is at least 10x cheaper than a full save' (($wmAvg * 10) -lt [math]::Max($fullMs, 1))
+
+  # إعادة التشغيل: العلامة الأحدث تُعتمد إن كانت لنفس نسخة الحالة، ولا تُفقد التغييرات
+  $rs = Read-AmeenInvoiceState -Dir $pbox
+  Assert 'restart: newer watermark of the same state version is used' ($rs.watermark -eq "2026-10-22T07:00:40.000")
+  Assert 'restart: bills and seq come back intact' ($rs.bills.Count -eq 2000 -and [long]$rs.last_seq -eq [long]$ps.last_seq)
+  $wmOnly = Join-Path $tempDir "outbox-wm-verbatim"; Initialize-AmeenInvoiceOutbox -Dir $wmOnly
+  $vs = New-AmeenInvoiceState; $vs.watermark = "2026-10-22T07:00:00.000"; Save-AmeenInvoiceState -Dir $wmOnly -State $vs
+  Remove-Item -LiteralPath (Join-Path $wmOnly "watermark.json") -Force
+  Assert 'restart: watermark kept verbatim in server-local time (no UTC shift on PowerShell 7)' ((Read-AmeenInvoiceState -Dir $wmOnly).watermark -eq "2026-10-22T07:00:00.000")
+  # حدث بعد آخر حفظ كامل لم تُحفظ حالته (انقطاع بين الصندوق والحالة) ⇒ العلامة لا تُعتمد ويُعاد الرصد
+  $ps2 = Read-AmeenInvoiceState -Dir $pbox
+  $ps2.last_seq = [long]$ps2.last_seq + 1; $ps2.watermark = "2026-10-22T07:05:00.000"
+  [void](Save-AmeenInvoiceWatermark -Dir $pbox -State $ps2)
+  $rs2 = Read-AmeenInvoiceState -Dir $pbox
+  Assert 'restart: watermark from an unsaved state version is ignored (safe rescan)' ($rs2.watermark -eq "2026-10-22T07:00:00.000")
+  # علامة أقدم من الحالة لا تُرجع الحالة إلى الوراء
+  Save-AmeenInvoiceState -Dir $pbox -State $rs
+  $old = @{ schema = "ameen-invoice-agent-watermark/v1"; watermark = "2026-10-22T06:00:00.000"; state_seq = [long]$rs.last_seq }
+  Write-AmeenAtomicFile -Path (Join-Path $pbox "watermark.json") -Content (ConvertTo-AmeenCanonicalJson $old)
+  Assert 'restart: an older watermark never moves the state back' ((Read-AmeenInvoiceState -Dir $pbox).watermark -eq "2026-10-22T07:00:40.000")
+  # ملف علامة تالف أو مقطوع ⇒ يُتجاهل بلا رمي، وتبقى علامة الحالة
+  [IO.File]::WriteAllText((Join-Path $pbox "watermark.json"), '{"schema":"ameen-invoice-agent-water')
+  $rs3 = $null
+  Assert 'corrupt watermark.json: read does not throw' (-not (Throws { $script:rs3 = Read-AmeenInvoiceState -Dir $pbox }))
+  Assert 'corrupt watermark.json: state watermark kept' ($script:rs3.watermark -eq "2026-10-22T07:00:40.000" -and $script:rs3.bills.Count -eq 2000)
+  # حفظ غير مكتمل (انقطاع قبل الاستبدال): يبقى الأصل كاملاً، وتُزال البقايا عند البدء
+  [IO.File]::WriteAllText((Join-Path $pbox ("state.json.tmp-" + [guid]::NewGuid().ToString("N"))), '{"schema":"ameen-invoice-agent-state/v1","bil')
+  [IO.File]::WriteAllText((Join-Path $pbox ("watermark.json.tmp-" + [guid]::NewGuid().ToString("N"))), '{"sch')
+  Initialize-AmeenInvoiceOutbox -Dir $pbox
+  Assert 'interrupted save: temp leftovers removed on start' (@(Get-ChildItem -LiteralPath $pbox -Filter "*.tmp-*").Count -eq 0)
+  $rs4 = Read-AmeenInvoiceState -Dir $pbox
+  Assert 'interrupted save: original state.json intact and readable' ($rs4.bills.Count -eq 2000 -and @(Get-ChildItem -LiteralPath $pbox -Filter "state.corrupt-*.json").Count -eq 0)
+  # الكتابة الذرّية: لا ملف مؤقت باقٍ بعد حفظ ناجح
+  Assert 'atomic write: no temp file left after a successful save' (@(Get-ChildItem -LiteralPath $pbox -Filter "*.tmp-*").Count -eq 0)
+  # ملف مقفول من برنامج آخر (مكافح فيروسات/فهرسة — ثبت على OZK2026): العلامة لا توقف الوكيل، والحالة
+  # الكاملة ترمي بعد المحاولات بلا بقايا ويبقى الأصل كاملاً. القفل الحصري يُفرض على Windows وحده.
+  if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+    $wmFile = Join-Path $pbox "watermark.json"
+    $held = [IO.File]::Open($wmFile, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+    try {
+      $okSave = $true
+      Assert 'locked watermark.json: save does not throw' (-not (Throws { $script:okSave = Save-AmeenInvoiceWatermark -Dir $pbox -State $rs4 }))
+      Assert 'locked watermark.json: save reports failure and leaves no temp file' (($script:okSave -eq $false) -and @(Get-ChildItem -LiteralPath $pbox -Filter "watermark.json.tmp-*").Count -eq 0)
+    } finally { $held.Dispose() }
+    Assert 'locked watermark.json: next save succeeds once released' (Save-AmeenInvoiceWatermark -Dir $pbox -State $rs4)
+    $stFile = Join-Path $pbox "state.json"
+    $stBefore = (Get-FileHash -LiteralPath $stFile -Algorithm SHA256).Hash
+    $held = [IO.File]::Open($stFile, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+    try { $threw = Throws { Save-AmeenInvoiceState -Dir $pbox -State $rs4 } } finally { $held.Dispose() }
+    Assert 'locked state.json: full save fails loudly, original intact, no temp file' ($threw -and (Get-FileHash -LiteralPath $stFile -Algorithm SHA256).Hash -eq $stBefore -and @(Get-ChildItem -LiteralPath $pbox -Filter "state.json.tmp-*").Count -eq 0)
+  }
+
+  # الوكيل: الحالة الكاملة تُحفظ عند التغيّر فقط، والعلامة وحدها في الدورة الهادئة
+  $agentSaveText = Get-Content -Raw -LiteralPath $agentPath -Encoding UTF8
+  Assert 'agent: detection loop chooses the save mode (no unconditional full save)' ($agentSaveText -match '\(Get-AmeenStateSaveMode -Dirty \$stateDirty -LastFullSaveUtc \$lastFullSave\) -eq "full"' -and $agentSaveText -match 'if \(Save-AmeenInvoiceWatermark -Dir \$OutboxDir -State \$state\)')
+  Assert 'agent: send path saves state only when something was sent or failed' ($agentSaveText -match 'if \(\$r\.sent -gt 0 -or \$r\.error -or \$r\.deadlettered -gt 0\) \{ Save-AmeenInvoiceState')
+  Assert 'agent: new events, fingerprint changes and removals mark the state dirty' (([regex]::Matches($agentSaveText, '\$stateDirty = \$true')).Count -ge 3)
+
   # ── ٦) الوكيل: يُحلَّل بلا أخطاء، ولا يسجّل مهمة، ولا يرسل افتراضياً ───────────────────────────
   $tokens = $null; $errors = $null
   [void][System.Management.Automation.Language.Parser]::ParseFile($agentPath, [ref]$tokens, [ref]$errors)
