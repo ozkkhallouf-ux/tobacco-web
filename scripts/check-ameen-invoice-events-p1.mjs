@@ -54,19 +54,64 @@ assert.match(cStub, /if to_regprocedure\('public\.is_staff\(\)'\) is null then/,
 assert.match(cStub, /\$body\$ select false \$body\$/, "البديل رفض افتراضي");
 assert.match(cStub, /raise warning '20260914125959: public\.is_staff\(\) absent/, "إنشاء البديل يُعلَن ولا يمرّ صامتاً");
 assert.doesNotMatch(cStub, /create or replace function|grant |revoke |drop |alter /i, "الشرط المسبق لا يستبدل ولا يغيّر صلاحيات");
-// السلسلة الفعلية (Codex P1 على 092f2ce4): لا استعمال غير محروس لـ is_staff() في أي هجرة فعّالة قبل الشرط المسبق.
-// «محروس» = الملف يفحص to_regprocedure('public.is_staff()') ويؤجّل ما يعتمد عليها. الترتيب بالإصدار كما يطبّقه Supabase.
+// السلسلة الفعلية (Codex P1 على 092f2ce4): كل هجرة «تتطلب» is_staff() تأتي بعد الشرط المسبق.
+// تصنيف كل هجرة فعّالة تذكر is_staff():
+//   «تؤجّل»  = تفحص to_regprocedure('public.is_staff()') وتتخطى ما يعتمد عليها حين تغيب (notice/تأجيل) — تعمل بلا الدالة.
+//   «تتطلب» = تستعملها بلا ذلك الفحص، أو تفحص وترفع exception حين تغيب (مثل 18: «requires public.is_staff()»).
+// الشرط: كل «تتطلب» بإصدار أحدث من الشرط المسبق. «تؤجّل» حرّة الموضع. الترتيب بالإصدار كما يطبّقه Supabase.
+const IS_STAFF_GUARD = /if\s+to_regprocedure\('public\.is_staff\(\)'\)\s+is\s+null\s+then([\s\S]*?)end\s+if/gi;
+function classifyIsStaffUse(sql) {
+  const c = code(sql);
+  if (!/\bis_staff\(\)/.test(c)) return "none";
+  const guards = [...c.matchAll(IS_STAFF_GUARD)];
+  if (guards.length === 0) return "requires";
+  return guards.some((g) => /\braise\s+exception\b/i.test(g[1])) ? "requires" : "defers";
+}
+// files: [{ name, sql }] بأي ترتيب؛ يعيد قائمة المخالفات (فارغة = سليم).
+function isStaffChainViolations(files, stubName) {
+  const sorted = [...files].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  if (!sorted.some((f) => f.name === stubName)) return [`${stubName}: الشرط المسبق غائب عن السلسلة`];
+  const stubVersion = stubName.slice(0, 14);
+  return sorted
+    .filter((f) => f.name !== stubName && classifyIsStaffUse(f.sql) === "requires" && f.name.slice(0, 14) <= stubVersion)
+    .map((f) => `${f.name}: يتطلب is_staff() قبل الشرط المسبق ${stubVersion}`);
+}
+// اختبار القاعدة نفسها على سلاسل مصطنعة: تنجح مع الترتيب الصحيح وتفشل عند اعتماد مفقود فعلي.
+{
+  const stubName = path.basename(stubRel);
+  const defers = "do $$ begin if to_regprocedure('public.is_staff()') is null then raise notice 'deferred'; else create policy p on t using (is_staff()); end if; end $$;";
+  const raises = "do $$ begin if to_regprocedure('public.is_staff()') is null then raise exception 'x requires public.is_staff()'; end if; end $$; create policy p on t using ((select public.is_staff()));";
+  const bare = "create view v as select 1 where is_staff();";
+  const unrelated = "create table t (id int);";
+  assert.equal(classifyIsStaffUse(defers), "defers");
+  assert.equal(classifyIsStaffUse(raises), "requires");
+  assert.equal(classifyIsStaffUse(bare), "requires");
+  assert.equal(classifyIsStaffUse(unrelated), "none");
+  assert.equal(classifyIsStaffUse(m18), "requires", "18 تتطلب is_staff (ترفع exception حين تغيب)");
+  const good = [
+    { name: "20260827110254_defers.sql", sql: defers }, { name: stubName, sql: stub },
+    { name: "20260914130000_bare.sql", sql: bare }, { name: "20261022034859_raises.sql", sql: raises },
+    { name: "20261023000000_defers_late.sql", sql: defers },
+  ];
+  assert.deepEqual(isStaffChainViolations(good, stubName), [], "الترتيب الصحيح ينجح، وما يؤجّل حرّ الموضع");
+  const bareBefore = [...good, { name: "20260901000000_bare_early.sql", sql: bare }];
+  assert.deepEqual(isStaffChainViolations(bareBefore, stubName), [`20260901000000_bare_early.sql: يتطلب is_staff() قبل الشرط المسبق ${stubName.slice(0, 14)}`], "استعمال غير محروس قبل الشرط المسبق يفشل");
+  const raisesBefore = [...good, { name: "20260902000000_raises_early.sql", sql: raises }];
+  assert.equal(isStaffChainViolations(raisesBefore, stubName).length, 1, "هجرة ترفع exception لغياب is_staff قبل الشرط المسبق تفشل");
+  assert.equal(isStaffChainViolations(good.filter((f) => f.name !== stubName), stubName).length, 1, "غياب الشرط المسبق عن السلسلة يفشل");
+  // السلسلة كما ستصير بعد #344 (18 داخل migrations بإصدارها المسجَّل) سليمة
+  const dir = path.join(root, "supabase/migrations");
+  const real = readdirSync(dir).filter((f) => /^\d{14}_.+\.sql$/.test(f)).map((name) => ({ name, sql: readFileSync(path.join(dir, name), "utf8") }));
+  const with18 = real.some((f) => f.name.startsWith("20261022034859_")) ? real : [...real, { name: "20261022034859_ameen_invoice_events.sql", sql: m18 }];
+  assert.deepEqual(isStaffChainViolations(with18, stubName), [], "السلسلة الفعّالة مع 18 سليمة");
+  console.log("  ✓ قاعدة ترتيب is_staff: تنجح مع الترتيب الصحيح، وتفشل لاعتماد مفقود (غير محروس أو exception قبل الشرط المسبق، أو غياب الشرط)");
+}
+// السلسلة الفعّالة كما هي في المستودع
 {
   const dir = path.join(root, "supabase/migrations");
-  const stubVersion = path.basename(stubRel).slice(0, 14);
-  const chain = readdirSync(dir).filter((f) => /^\d{14}_.+\.sql$/.test(f)).sort();
-  assert.ok(chain.includes(path.basename(stubRel)), "الشرط المسبق في السلسلة الفعّالة");
-  const users = chain.filter((f) => /\bis_staff\(\)/.test(code(readFileSync(path.join(dir, f), "utf8"))) && f !== path.basename(stubRel));
-  const unguarded = users.filter((f) => !/to_regprocedure\('public\.is_staff\(\)'\)/.test(code(readFileSync(path.join(dir, f), "utf8"))));
-  assert.ok(unguarded.length > 0, "السلسلة فيها استعمال غير محروس (لهذا وُجد الشرط المسبق)");
-  for (const f of unguarded) assert.ok(f.slice(0, 14) > stubVersion, `${f}: يستعمل is_staff() بلا حراسة قبل الشرط المسبق ${stubVersion}`);
-  assert.ok(unguarded.includes("20260914130000_bot_health_alerts_dispatched_and_failed_windows.sql"), "أول استعمال غير محروس معروف");
-  assert.ok(users.filter((f) => !unguarded.includes(f)).every((f) => f.slice(0, 14) < stubVersion), "الهجرات المحروسة قبله فلا يتغيّر تأجيلها");
+  const files = readdirSync(dir).filter((f) => /^\d{14}_.+\.sql$/.test(f)).map((name) => ({ name, sql: readFileSync(path.join(dir, name), "utf8") }));
+  assert.deepEqual(isStaffChainViolations(files, path.basename(stubRel)), [], "السلسلة الفعّالة: كل ما يتطلب is_staff() بعد الشرط المسبق");
+  assert.equal(classifyIsStaffUse(read("supabase/migrations/20260914130000_bot_health_alerts_dispatched_and_failed_windows.sql")), "requires", "أول استعمال يتطلبها معروف");
 }
 console.log("  ✓ عقود ساكنة: 18 بلا مساس، 21 جسم الدالة فقط، الشرط المسبق رفض افتراضي محروس");
 
