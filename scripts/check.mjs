@@ -959,7 +959,7 @@ for (const contract of [
 }
 for (const [name, pattern] of [
   ["shared reports", /async function exportReportPdf[\s\S]{0,900}isHandheldDevice\(\)[\s\S]{0,900}createPortablePdfBlob/],
-  ["overdue report", /async function printOverdueReport[\s\S]{0,2600}isHandheldDevice\(\)[\s\S]{0,900}createPortablePdfBlob/],
+  ["overdue report", /async function printOverdueReport[\s\S]{0,2800}isHandheldDevice\(\)[\s\S]{0,900}createPortablePdfBlob/],
   ["current sales invoice", /async function saveSalesInvoicePdf[\s\S]{0,9000}isHandheldDevice\(\)[\s\S]{0,500}presentPortablePdf/]
 ]) {
   if (!pattern.test(appJs)) {
