@@ -109,7 +109,8 @@ async function bootApp(width, height, { blockWebfont = false } = {}) {
   const context = await browser.newContext({ viewport: { width, height }, bypassCSP: true, serviceWorkers: "block" });
   const page = await context.newPage();
   await page.route("**://*.supabase.co/**", (route) => route.abort());
-  if (blockWebfont) await page.route(/fonts\.(googleapis|gstatic)\.com/, (route) => route.abort());
+  // الخط الرسمي محلي (public/fonts/cairo — src/ozk-font.js): حجبه هو ما يبني سيناريو الاحتياطي.
+  if (blockWebfont) await page.route(/\/public\/fonts\/cairo\/|fonts\.(googleapis|gstatic)\.com/, (route) => route.abort());
   await page.goto(`${BASE}/index.html`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => typeof window.buildBulletinDataset === "function", null, { timeout: 20000 });
   await page.evaluate(({ items, prices }) => {
@@ -354,7 +355,7 @@ for (const sc of [
     const asTable = (tableWidth) => `<section class="ozk-price-list"><table `
       + `style="table-layout:fixed;width:${tableWidth}px;border-collapse:collapse"><tbody><tr>`
       + `<td class="name" style="width:100%;padding:2.5px 8px;box-sizing:border-box;`
-      + `font-family:Almarai,sans-serif;font-weight:700;font-size:10px;white-space:normal;`
+      + `font-family:Cairo,sans-serif;font-weight:700;font-size:10px;white-space:normal;`
       + `overflow-wrap:break-word;word-break:break-word">ماستر سليم أزرق</td></tr></tbody></table></section>`;
     const singleLine = asTable(206.828);
     // التفاف حقيقي: نفس الخلية بعرض ضيّق جداً يفرض سطرين فعلياً — لا تخمين ارتفاع.
@@ -684,7 +685,7 @@ const CHROME_WHOLE_BLOCK_PUSH_BAND_PX = 8;
     && /font-family:Tahoma,Arial,sans-serif !important/.test(documentHtml),
     "الترميز لا يحمل قرار الخط — قد يُقاس بخطٍّ ويُطبع بآخر");
 
-  // يُطبع في سياق الخط فيه متاح: لولا الوراثة لرُسم بـAlmarai وخالف المقيس.
+  // يُطبع في سياق الخط فيه متاح: لولا الوراثة لرُسم بـCairo وخالف المقيس.
   const printed = await printExportDocument(documentHtml);
   const usedFont = await (async () => {
     const ctx2 = await browser.newContext({ viewport: { width: 794, height: 1123 }, bypassCSP: true, serviceWorkers: "block" });
@@ -701,7 +702,7 @@ const CHROME_WHOLE_BLOCK_PUSH_BAND_PX = 8;
     return v;
   })();
   check("اتفاق الخط: المستند يُرسم بالاحتياطي حتى حين يكون الخط متاحاً للطباعة",
-    !/Almarai/.test(usedFont), `font-family المطبوع = ${usedFont}`);
+    !/Cairo/.test(usedFont), `font-family المطبوع = ${usedFont}`);
 
   // **قياس كمّي لا نصّي هنا عمداً.** مطابقة الصفوف حرفياً تتطلّب خطاً يُشكّل
   // العربية، والسلسلة الاحتياطية تختلف بين الأنظمة (Tahoma على ماك، وخطٌّ آخر

@@ -1936,11 +1936,11 @@ async function printOverdueReport() {
     <tr style="background:${i % 2 === 0 ? "#fff" : "#fdf8ee"}">
       <td style="padding:8px 10px;border:1px solid #d8c890;text-align:center">${i + 1}</td>
       <td style="padding:8px 10px;border:1px solid #d8c890">${escapeHtml(item.customer_name || item.name || "—")}</td>
-      <td style="padding:8px 10px;border:1px solid #d8c890;direction:ltr;text-align:left;font-family:monospace">${formatMoney(customerBalance(item))}</td>
+      <td style="padding:8px 10px;border:1px solid #d8c890;direction:ltr;text-align:left;font-family:var(--ozk-font,monospace);font-variant-numeric:tabular-nums">${formatMoney(customerBalance(item))}</td>
       <td style="padding:8px 10px;border:1px solid #d8c890;text-align:center;color:${item.daysSince === null ? "#888" : item.daysSince >= 7 ? "#b00" : "#9a6000"};font-weight:bold">${item.daysSince === null ? "—" : item.daysSince + " يوم"}</td>
     </tr>`).join("");
   const html = `
-    <div dir="rtl" style="font-family:Tahoma,Arial,sans-serif;color:#221808;padding:20px">
+    <div dir="rtl" style="font-family:var(--ozk-font,Tahoma,Arial,sans-serif);line-height:var(--ozk-doc-line-height,normal);color:#221808;padding:20px">
       <div style="text-align:center;margin-bottom:20px;border-bottom:2px solid #d7a83f;padding-bottom:16px">
         <h2 style="margin:0 0 4px;font-size:1.4rem">OZK TOBACCO</h2>
         <h3 style="margin:0;font-size:1.1rem;color:#6b4e10">تقرير الزبائن المتأخرين عن الدفع</h3>
@@ -1978,10 +1978,11 @@ async function printOverdueReport() {
     return;
   }
 
-  archiveToICloud("other_report", html, overdueArchiveMeta);
+  archiveToICloud("other_report", typeof OZK_FONT !== "undefined" ? OZK_FONT.withFaces(html) : html, overdueArchiveMeta);
   const container = document.createElement("div");
   container.innerHTML = html;
   document.body.appendChild(container);
+  if (typeof OZK_FONT !== "undefined") await OZK_FONT.ready();
   window.html2pdf().set({
     margin: [10, 15, 10, 15],
     filename,
@@ -5763,7 +5764,7 @@ function customerMovementRow(movement) {
 
 // ====== تقارير PDF (محرّك مشترك) ======
 const REPORT_STYLE = `<style>
-.ozk-rpt{font-family:Tahoma,Arial,sans-serif;color:#221808;background:#fff;direction:rtl;padding:6px 10px;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+.ozk-rpt{font-family:var(--ozk-font,Tahoma,Arial,sans-serif);line-height:var(--ozk-doc-line-height,normal);color:#221808;background:#fff;direction:rtl;padding:6px 10px;-webkit-print-color-adjust:exact;print-color-adjust:exact}
 .ozk-rpt .rhead{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #b8892a;padding-bottom:8px;margin-bottom:12px}
 .ozk-rpt .brand{font-weight:900;font-size:19px}.ozk-rpt .brand small{display:block;font-weight:400;font-size:10px;color:#6b5535}
 .ozk-rpt .rtitle{flex:1;text-align:right;white-space:nowrap;padding-right:14px}.ozk-rpt .rtitle h2{margin:0;font-size:16px;color:#b8892a;white-space:nowrap}.ozk-rpt .rtitle span{font-size:10px;color:#6b5535;white-space:nowrap}
@@ -5916,6 +5917,7 @@ async function createPortablePdfBlob(bodyHtml, filename, options = {}) {
   }
 
   try {
+    if (typeof OZK_FONT !== "undefined") await OZK_FONT.ready();
     if (document.fonts && document.fonts.ready) await document.fonts.ready;
     const worker = window.html2pdf().set({
       margin: options.margin || [8, 8, 8, 8],
@@ -6010,6 +6012,11 @@ function trimTrailingPortablePdfDecorations(source, margin) {
 // فيفتح ورقة الطباعة الأصلية للنظام (وفيها «حفظ بصيغة PDF» وزر إلغاء)، ويعمل
 // على iOS وأندرويد وويندوز معاً بلا حاجة للسماح بالنوافذ المنبثقة.
 function printHtmlDocument(html, options = {}) {
+  // مستند الإطار مستقل لا يرث @font-face من الصفحة: الخط الرسمي يُحقن فيه
+  // بعناوين مطلقة، فيصل إلى ورقة الطباعة وإلى نسخة iCloud معاً. يُحقن فقط في
+  // مستند يقرأ --ozk-font: فاتورة الكاشير 80mm لا تقرؤه، فتُطبع وتُؤرشف بايتاً بايتاً
+  // كما كانت (مجمَّدة بقرار المالك).
+  if (typeof OZK_FONT !== "undefined" && String(html).includes("--ozk-font")) html = OZK_FONT.withFaces(html);
   // نسخة iCloud تُطلق قبل فتح ورقة الطباعة كي لا ينتظرها المستخدم إطلاقاً،
   // ولا يؤثر نجاحها أو فشلها على الطباعة نفسها بأي شكل.
   if (options.archive && options.archive.docType) {
@@ -6300,7 +6307,8 @@ async function exportReportPdf(bodyHtml, archive) {
   const docType = archive && archive.docType;
   const title = docType ? archiveDocumentTitle(docType, archive.meta) : "تقرير";
   const filename = `${title}.pdf`;
-  if (docType) archiveToICloud(docType, bodyHtml, archive.meta);
+  // نسخة iCloud مستند مستقل كإطار الطباعة: تحمل @font-face الخط الرسمي معها.
+  if (docType) archiveToICloud(docType, typeof OZK_FONT !== "undefined" ? OZK_FONT.withFaces(bodyHtml) : bodyHtml, archive.meta);
   if (isHandheldDevice()) {
     try {
       const blob = await createPortablePdfBlob(bodyHtml, filename, { width: BULLETIN_PAGE_WIDTH_PX });
@@ -7733,6 +7741,9 @@ async function exportInventoryReportPdf() {
     return;
   }
   const amanat = await loadAmanatWarehouseSheet(items);
+  // التقسيم إلى صفحات يقيس النص في مستند التطبيق: القياس بخط احتياطي ثم الطباعة
+  // بـCairo يغيّر لفّ الأسماء فتنكسر الأعمدة.
+  if (typeof OZK_FONT !== "undefined") await OZK_FONT.ready();
   const exported = await exportReportPdf(
     inventoryReportPdfMarkup(amanat),
     { docType: "stock_report", meta: { date: todayIsoDate() } }
@@ -9818,7 +9829,7 @@ function salesInvoicePdfMarkup(data) {
 
   return `
   <div dir="rtl" style="width:754px;padding:20px;background:#ffffff;color:#241f18;
-       font-family:'Segoe UI',Tahoma,Arial,sans-serif">
+       font-family:var(--ozk-font,'Segoe UI',Tahoma,Arial,sans-serif);line-height:var(--ozk-doc-line-height,normal)">
     ${salesDraftBannerHtml(data.invNo)}
     <div class="pdf-head" style="display:flex;justify-content:space-between;align-items:flex-start;
          border-bottom:2px solid #8a6d3b;padding-bottom:10px;margin-bottom:12px;${pdfRowStyle}">
@@ -9999,6 +10010,7 @@ async function saveSalesInvoicePdf() {
   const keepScrollY = window.scrollY || 0;
   try {
     window.scrollTo(0, 0);
+    if (typeof OZK_FONT !== "undefined") await OZK_FONT.ready();
     // دقة أقل على الهاتف: المقياس 2 يستهلك ذاكرة كبيرة على iOS.
     const worker = window.html2pdf().set({
       margin: [6, 6, 6, 6],
@@ -10304,7 +10316,7 @@ function printSalesInvoice() {
 <title>فاتورة مبيعات ${invNo}</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: 'Segoe UI', Tahoma, Arial, sans-serif; font-size: 13px; color: #1a1a1a; background: #fff; padding: 40px; direction: rtl; }
+  body { font-family: var(--ozk-font, 'Segoe UI', Tahoma, Arial, sans-serif); line-height: var(--ozk-doc-line-height, normal); font-size: 13px; color: #1a1a1a; background: #fff; padding: 40px; direction: rtl; }
   .inv-head { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 36px; border-bottom: 3px solid #b8860b; padding-bottom: 20px; }
   .inv-company { font-size: 22px; font-weight: 700; color: #5c3d00; letter-spacing: 1px; }
   .inv-company small { display: block; font-size: 12px; font-weight: 400; color: #888; margin-top: 4px; }
@@ -10321,7 +10333,7 @@ function printSalesInvoice() {
   td { padding: 9px 12px; border-bottom: 1px solid #eee; font-size: 13px; }
   tr:nth-child(even) td { background: #fdf9f3; }
   .col-num { width: 36px; text-align: center; color: #aaa; }
-  .col-price, .col-total { text-align: left; direction: ltr; font-family: monospace; }
+  .col-price, .col-total { text-align: left; direction: ltr; font-family: var(--ozk-font, monospace); font-variant-numeric: tabular-nums; }
   .summary-wrap { display: flex; justify-content: flex-start; }
   .summary-table { width: 320px; margin-bottom: 24px; }
   .summary-table td { border-bottom: 1px solid #eee; }
@@ -11944,7 +11956,7 @@ function printPurchaseInvoice(id) {
 <title>فاتورة مشتريات ${po.publicId}</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: 'Segoe UI', Tahoma, Arial, sans-serif; font-size: 13px; color: #1a1a1a; background: #fff; padding: 40px; direction: rtl; }
+  body { font-family: var(--ozk-font, 'Segoe UI', Tahoma, Arial, sans-serif); line-height: var(--ozk-doc-line-height, normal); font-size: 13px; color: #1a1a1a; background: #fff; padding: 40px; direction: rtl; }
   .inv-head { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 36px; border-bottom: 3px solid #b8860b; padding-bottom: 20px; }
   .inv-company { font-size: 22px; font-weight: 700; color: #5c3d00; letter-spacing: 1px; }
   .inv-company small { display: block; font-size: 12px; font-weight: 400; color: #888; margin-top: 4px; }
@@ -11961,7 +11973,7 @@ function printPurchaseInvoice(id) {
   td { padding: 9px 12px; border-bottom: 1px solid #eee; font-size: 13px; }
   tr:nth-child(even) td { background: #fdf9f3; }
   .col-num { width: 36px; text-align: center; color: #aaa; }
-  .col-price, .col-total { text-align: left; direction: ltr; font-family: monospace; }
+  .col-price, .col-total { text-align: left; direction: ltr; font-family: var(--ozk-font, monospace); font-variant-numeric: tabular-nums; }
   .total-row td { border-top: 2px solid #b8860b; font-weight: 700; font-size: 14px; background: #faf7f0; }
   .pay-row td { font-size: 12px; color: #555; }
   .notes { font-size: 12px; color: #666; margin-bottom: 28px; padding: 10px 14px; border-right: 3px solid #b8860b; background: #fdfaf5; }

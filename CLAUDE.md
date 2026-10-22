@@ -91,6 +91,10 @@ npm run dev
 و`public/vendor/html2pdf.bundle.min.js`. **أضف المعامل يدوياً مرة واحدة عند
 إضافة أي أصل جديد**، وبعدها يتكفّل النشر برفعه.
 
+ملفات الخط الرسمي `public/fonts/cairo/cairo-3.130-*.woff2` لا تحمل المعامل عمداً:
+رقم الإصدار في اسم الملف نفسه، ولا يحمّلها وسم في `index.html` بل `src/ozk-font.js`.
+خط جديد ⇐ اسم ملف جديد. راجع `docs/ai/topics/official-font.md`.
+
 الـworkflow يعمل عند كل push إلى `main`، وعند `workflow_dispatch`، وبعد اكتمال
 workflow «توليد نشرات الأسعار».
 

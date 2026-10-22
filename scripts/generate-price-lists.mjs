@@ -6,11 +6,14 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { createHash } from "node:crypto";
+// الخط الرسمي أولاً: القالب يقرأ اسمه وأوجهه منه (src/ozk-font.js).
+import "../src/ozk-font.js";
 import "../src/price-list-template.js";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root  = resolve(__dir, "..");
 const pdfRendererSignature = createHash("sha256")
+  .update(readFileSync(resolve(root, "src/ozk-font.js"), "utf8"))
   .update(readFileSync(resolve(root, "src/price-list-template.js"), "utf8"))
   .update(readFileSync(resolve(root, "scripts/generate-pdfs.mjs"), "utf8"))
   .digest("hex");
@@ -349,13 +352,16 @@ const buildColumnLayout = (list) => {
 };
 
 // ── CSS ───────────────────────────────────────────────────────────────────────
+// الصفحات تُكتب في public/downloads/، فالأوجه نسبية إلى جذر الموقع بـ"../../".
+const OZK_FONT_FACES = globalThis.OZK_FONT.faceCss("../../");
+const OZK_FONT_STACK = globalThis.OZK_FONT.STACK;
 const CSS = `
-  @import url('https://fonts.googleapis.com/css2?family=Almarai:wght@300;400;700;800&display=swap');
+  ${OZK_FONT_FACES}
 
   * { margin:0; padding:0; box-sizing:border-box; }
 
   body {
-    font-family: 'Almarai', Tahoma, Arial, sans-serif;
+    font-family: ${OZK_FONT_STACK};
     --page: #0c0a07;
     --surface: #141009;
     --surface-alt: #0f0c07;
@@ -571,7 +577,7 @@ const CSS = `
     background: var(--gold); color: var(--button-text); border: 1px solid var(--gold);
     padding: 8px 12px; border-radius: 6px; font-size: 11px;
     font-weight: 900; cursor: pointer;
-    font-family: 'Almarai', Tahoma, sans-serif;
+    font-family: ${OZK_FONT_STACK};
     text-decoration: none;
   }
   .document-tools .theme-switch {
@@ -748,9 +754,9 @@ const indexHtml = `<!DOCTYPE html>
 <meta http-equiv="Content-Language" content="ar">
 <title>نشرات الأسعار — OZK TOBACCO</title>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Almarai:wght@400;700;800&display=swap');
+  ${OZK_FONT_FACES}
   * { margin:0; padding:0; box-sizing:border-box; }
-  body { font-family:'Almarai',Tahoma,sans-serif; background:#0c0a07; color:#e8d9b0;
+  body { font-family:${OZK_FONT_STACK}; background:#0c0a07; color:#e8d9b0;
          min-height:100vh; display:flex; flex-direction:column; align-items:center; padding:40px 20px; }
   .logo-img { height:80px; margin-bottom:6px; }
   .sub  { color:#a08850; font-size:.88rem; margin-bottom:2px; font-weight:600; }

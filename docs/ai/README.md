@@ -37,6 +37,7 @@
 - [المشتريات والموردون](topics/purchases-suppliers.md)
 - [مزامنة الأمين](topics/ameen-sync.md)
 - [الطباعة والفواتير](topics/printing.md)
+- [الخط الرسمي الموحّد Cairo](topics/official-font.md)
 - [الإشعارات والنشر](topics/notifications-deployment.md)
 - [تنسيق تنبيهات تيليغرام](topics/telegram-alert-format.md)
 - [بوابة نشر Windows](topics/windows-deploy-gate.md)
