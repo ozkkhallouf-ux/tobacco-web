@@ -16,6 +16,10 @@
 -- على الإنتاج is_staff() موجودة ⇒ لا شيء يتغيّر إطلاقاً (لا جسم ولا صلاحية). لا جداول ولا بيانات ولا cron.
 -- لا يُطبَّق على الإنتاج إلا بموافقة المالك، وتطبيقه هناك no-op.
 --
+-- ⚠️ تحذير: البديل يعيد false دائماً. هو مخصّص فقط لتجاوز اعتماد مفقود أثناء تجهيز قاعدة جديدة (reset محلي،
+-- فرع معاينة)، وليس بديلاً عن نظام صلاحيات الموظفين (staff_allowlist وis_staff() الحقيقية) ولا يُعتمد عليه
+-- في أي بيئة يعمل عليها موظفون: كل ما يحرسه is_staff() يبقى مغلقاً على الجميع حتى تُثبَّت الدالة الحقيقية.
+--
 -- لماذا يبقى في migrations لا في proposed: هدفه إعادة تشغيل السلسلة نفسها (reset محلي، فرع معاينة Supabase)،
 -- وهذه تقرأ migrations وحدها بترتيب الإصدار؛ في proposed لن يُرى أبداً.
 --
@@ -36,7 +40,8 @@ begin
     $fn$;
     comment on function public.is_staff() is
       'بديل رفض افتراضي لإعادة تشغيل السلسلة (20260914125959). الإنتاج يستعمل تعريفه الخاص خارج السلسلة.';
-    raise warning '20260914125959: public.is_staff() absent — created deny-by-default stub (returns false; staff reads blocked). Install the real is_staff()/staff_allowlist out of band with create or replace.';
+    raise warning '20260914125959: public.is_staff() absent — created deny-by-default stub (returns false; staff reads blocked). Install the real is_staff()/staff_allowlist out of band with create or replace.'
+      using detail = 'The stub ALWAYS returns false. It only unblocks migration replay on a fresh database; it is NOT a replacement for the staff permission system and must not be relied on where staff work.';
   end if;
 end
 $stub$;
