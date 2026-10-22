@@ -481,19 +481,38 @@ function Read-AmeenInvoiceState {
     # فقط إن كُتبت لنفس نسخة الحالة (state_seq = last_seq المحفوظ): ملف الحالة يُحفظ دائماً قبل العلامة،
     # فتطابق التسلسل يعني أن كل ما رُصد حتى تلك العلامة محفوظ. أي شك (تالف، تسلسل مختلف) ⇒ تُتجاهل
     # ونرصد من علامة الحالة الأقدم — إعادة رصد آمنة لا تكرر حدثاً لأن النسخ المعروفة لا تُصدر ثانية.
+    # الملف اختياري: أي قيمة تالفة أو غير متوقعة فيه تُسقطه وحده ولا تمنع إقلاع الوكيل (Codex P1 على 42af3a30).
     $wmPath = Join-Path $Dir "watermark.json"
     if ($h.watermark -and (Test-Path -LiteralPath $wmPath)) {
-        $wm = Read-AmeenJsonFileSafe -Path $wmPath
-        $wmText = $null; if ($wm.ok) { $wmText = Get-AmeenRawWatermark $wm.raw }
-        if ($wmText -and $wm.value -is [System.Collections.IDictionary] -and $wm.value.schema -eq "ameen-invoice-agent-watermark/v1" -and
-            [long]$wm.value.state_seq -eq [long]$h.last_seq -and [string]::CompareOrdinal($wmText, [string]$h.watermark) -gt 0) {
-            $h.watermark = $wmText
+        try {
+            $wm = Read-AmeenJsonFileSafe -Path $wmPath
+            $wmText = $null; $wmSeq = $null
+            if ($wm.ok -and $wm.value -is [System.Collections.IDictionary] -and $wm.value.schema -eq "ameen-invoice-agent-watermark/v1") {
+                $wmText = Get-AmeenRawWatermark $wm.raw
+                $wmSeq = Get-AmeenRawStateSeq $wm.raw
+            }
+            if ($wmText -and $null -ne $wmSeq -and $wmSeq -eq [long]$h.last_seq -and [string]::CompareOrdinal($wmText, [string]$h.watermark) -gt 0) {
+                $h.watermark = $wmText
+            }
+        } catch {
+            Write-Verbose ("watermark.json ignored: " + $_.Exception.GetType().Name)
         }
     }
     # التسلسل لا يتراجع أبداً: إن ضاعت الحالة وبقيت أحداث معلّقة، نبدأ بعد أكبرها.
     $maxPending = Get-AmeenOutboxMaxSeq $Dir
     if ($maxPending -gt $h.last_seq) { $h.last_seq = $maxPending }
     return $h
+}
+
+function Get-AmeenRawStateSeq {
+    # «state_seq» من نص JSON: عدد صحيح موجب يقبله Int64 (TryParse الثابت الثقافة، متوافق مع 5.1)، وإلا $null.
+    # النص لا القيمة المحوَّلة: ConvertFrom-Json قد يعطي double أو decimal أو نصاً، والتحويل [long] يرمي.
+    param([AllowNull()][string]$Raw)
+    if (-not $Raw -or $Raw -notmatch '"state_seq"\s*:\s*(\d{1,19})\s*[,}]') { return $null }
+    $n = [long]0
+    if (-not [long]::TryParse($Matches[1], [Globalization.NumberStyles]::None, $script:Invariant, [ref]$n)) { return $null }
+    if ($n -lt 1) { return $null }
+    return $n
 }
 
 function Get-AmeenRawWatermark {

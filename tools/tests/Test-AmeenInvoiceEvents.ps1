@@ -598,6 +598,35 @@ try {
   $rs3 = $null
   Assert 'corrupt watermark.json: read does not throw' (-not (Throws { $script:rs3 = Read-AmeenInvoiceState -Dir $pbox }))
   Assert 'corrupt watermark.json: state watermark kept' ($script:rs3.watermark -eq "2026-10-22T07:00:40.000" -and $script:rs3.bills.Count -eq 2000)
+  # Codex P1 (42af3a30): JSON صالح لكن state_seq تالف/مفقود/خارج Int64 ⇒ تُتجاهل العلامة ولا يفشل الإقلاع
+  $goodSeq = [long]$rs.last_seq
+  $wmHead = '{"schema":"ameen-invoice-agent-watermark/v1",'
+  $badSeqCases = [ordered]@{
+    'non-numeric'      = $wmHead + '"state_seq":"abc","watermark":"2026-10-22T07:09:00.000"}'
+    'missing'          = $wmHead + '"watermark":"2026-10-22T07:09:00.000"}'
+    'beyond Int64'     = $wmHead + '"state_seq":99999999999999999999,"watermark":"2026-10-22T07:09:00.000"}'
+    'negative'         = $wmHead + '"state_seq":-' + $goodSeq + ',"watermark":"2026-10-22T07:09:00.000"}'
+    'fractional'       = $wmHead + '"state_seq":' + $goodSeq + '.5,"watermark":"2026-10-22T07:09:00.000"}'
+    'null'             = $wmHead + '"state_seq":null,"watermark":"2026-10-22T07:09:00.000"}'
+    'object'           = $wmHead + '"state_seq":{"n":' + $goodSeq + '},"watermark":"2026-10-22T07:09:00.000"}'
+  }
+  foreach ($case in $badSeqCases.Keys) {
+    [IO.File]::WriteAllText((Join-Path $pbox "watermark.json"), $badSeqCases[$case])
+    $script:rsb = $null
+    $threw = Throws { $script:rsb = Read-AmeenInvoiceState -Dir $pbox }
+    Assert ("watermark state_seq ${case}: startup does not fail, watermark ignored, state intact") ((-not $threw) -and $script:rsb.watermark -eq "2026-10-22T07:00:40.000" -and $script:rsb.bills.Count -eq 2000 -and [long]$script:rsb.last_seq -eq $goodSeq)
+  }
+  # القيمة الصحيحة تُعتمد، وإعادة التشغيل بعد تجاهل علامة تالفة تعود طبيعية بلا فقد ولا تكرار
+  [IO.File]::WriteAllText((Join-Path $pbox "watermark.json"), $wmHead + '"state_seq":' + $goodSeq + ',"watermark":"2026-10-22T07:09:00.000"}')
+  Assert 'watermark state_seq valid: newer watermark used' ((Read-AmeenInvoiceState -Dir $pbox).watermark -eq "2026-10-22T07:09:00.000")
+  [IO.File]::WriteAllText((Join-Path $pbox "watermark.json"), $badSeqCases['non-numeric'])
+  $rr = Read-AmeenInvoiceState -Dir $pbox
+  $rr.watermark = "2026-10-22T07:10:00.000"
+  [void](Save-AmeenInvoiceWatermark -Dir $pbox -State $rr)
+  $rr2 = Read-AmeenInvoiceState -Dir $pbox
+  Assert 'watermark state_seq restart: bad file replaced by the next save, no seq change' ($rr2.watermark -eq "2026-10-22T07:10:00.000" -and [long]$rr2.last_seq -eq $goodSeq -and $rr2.bills.Count -eq 2000)
+  Assert 'watermark state_seq restart: no event emitted for known versions after recovery' ((Resolve-AmeenInvoiceChanges -State $rr2 -Observations @()).Count -eq 0 -and [long]$rr2.last_seq -eq $goodSeq)
+  Assert 'watermark state_seq parser: TryParse rejects text, overflow and zero' ($null -eq (Get-AmeenRawStateSeq '{"state_seq":"1"}') -and $null -eq (Get-AmeenRawStateSeq '{"state_seq":99999999999999999999}') -and $null -eq (Get-AmeenRawStateSeq '{"state_seq":0}') -and (Get-AmeenRawStateSeq ('{"state_seq":' + $goodSeq + '}')) -eq $goodSeq)
   # حفظ غير مكتمل (انقطاع قبل الاستبدال): يبقى الأصل كاملاً، وتُزال البقايا عند البدء
   [IO.File]::WriteAllText((Join-Path $pbox ("state.json.tmp-" + [guid]::NewGuid().ToString("N"))), '{"schema":"ameen-invoice-agent-state/v1","bil')
   [IO.File]::WriteAllText((Join-Path $pbox ("watermark.json.tmp-" + [guid]::NewGuid().ToString("N"))), '{"sch')

@@ -196,6 +196,11 @@ for (const name of [
   // ملف مقفول لحظياً (ثبت على OZK2026): العلامة لا توقف الوكيل، والحالة الكاملة لا تُفسد الأصل
   "locked watermark.json: save does not throw",
   "locked state.json: full save fails loudly, original intact, no temp file",
+  // Codex P1 (42af3a30): state_seq تالف في watermark.json لا يمنع الإقلاع
+  "watermark state_seq valid: newer watermark used",
+  "watermark state_seq restart: bad file replaced by the next save, no seq change",
+  "watermark state_seq restart: no event emitted for known versions after recovery",
+  "watermark state_seq parser: TryParse rejects text, overflow and zero",
 ]) assert.ok(psTest.includes(`'${name}'`), `اختبار PowerShell إلزامي مفقود: ${name}`);
 
 const rollback = read(rollbackRel).replace(/--.*$/gm, "");
