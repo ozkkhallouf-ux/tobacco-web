@@ -4448,10 +4448,12 @@ function downloadFilteredCustomerBalances() {
     customerLimit(item) > 0 ? customerRemainingLimit(item) : "",
     customerLastPaymentAmount(item) > 0 ? customerLastPaymentAmount(item) : "",
     customerLastPaymentDate(item) || "",
-    customerStatusLabel(item.status)
+    customerStatusLabel(item.status),
+    customerLastActivityText(customerLastActivity(item).invoice),
+    customerLastActivityText(customerLastActivity(item).payment)
   ]);
   const worksheet = window.XLSX.utils.aoa_to_sheet([
-    ["الزبون", "الرصيد", "الحد المسموح", "المتبقي من الحد", "آخر دفعة", "تاريخ آخر دفعة", "الحالة"],
+    ["الزبون", "الرصيد", "الحد المسموح", "المتبقي من الحد", "آخر دفعة", "تاريخ آخر دفعة", "الحالة", "آخر فاتورة (منذ)", "آخر دفعة (منذ)"],
     ...rows
   ]);
   const workbook = window.XLSX.utils.book_new();
@@ -4991,6 +4993,120 @@ function customerLastPaymentDate(item) {
   return item?.lastPaymentDate || "";
 }
 
+// ====== آخر فاتورة وآخر دفعة (تقرير الذمم) ======
+// المصدر أعمدة last-activity في tools/ameen-customer-balances-query.sql، والعلامة
+// summary.lastActivity = "v1" تعني أن الاستعلام حمل الأعمدة الأربعة. بلاها لا نقول
+// «لا توجد فواتير» — نقول «بانتظار المزامنة»، لأن الغياب هنا غياب عمود لا غياب مستند.
+// الدور من شجرة الحسابات: المورد يُقرأ على فواتير الشراء والدفع له، وغيره على فواتير
+// البيع والقبض منه. الحساب ذو الدورين يُظهر الجانب الآخر سطراً ثانياً موسوماً، فلا
+// تختلط فاتورة بيع بشراء ولا قبض بدفع.
+// التاريخ تاريخ المستند كما في الأمين (توقيت دمشق المحلي على OZK2026)، فيُقرأ يومه من
+// النص نفسه بلا تحويل منطقة، ويُقارن بـ«اليوم» في Asia/Damascus — لا بوقت المزامنة.
+const LAST_ACTIVITY_MARKER = "v1";
+const LAST_ACTIVITY_TIME_ZONE = "Asia/Damascus";
+const LAST_ACTIVITY_WEEKDAYS = ["الأحد", "الإثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت"];
+
+function customerReportHasLastActivity(report = state.customerBalanceReports[0]) {
+  return report?.summary?.lastActivity === LAST_ACTIVITY_MARKER;
+}
+
+function lastActivityRole(item) {
+  const cls = String(item?.accountClass || "").trim();
+  if (cls) return cls === "supplier" ? "supplier" : "customer";
+  return item?.isSupplier === true ? "supplier" : "customer";
+}
+
+function lastActivityDay(value) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value || "").trim());
+  if (!m) return null;
+  const utc = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  const d = new Date(utc);
+  if (d.getUTCFullYear() !== Number(m[1]) || d.getUTCMonth() !== Number(m[2]) - 1 || d.getUTCDate() !== Number(m[3])) return null;
+  return utc / 86400000;
+}
+
+function lastActivityToday(now = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", { timeZone: LAST_ACTIVITY_TIME_ZONE, year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
+  return lastActivityDay(parts);
+}
+
+function arabicElapsed(days) {
+  if (days === 0) return "اليوم";
+  if (days === 1) return "أمس";
+  if (days === 2) return "منذ يومين";
+  if (days <= 10) return `منذ ${days} أيام`;
+  if (days < 30) return `منذ ${days} يوماً`;
+  if (days < 365) {
+    const months = Math.floor(days / 30);
+    if (months === 1) return "منذ شهر";
+    if (months === 2) return "منذ شهرين";
+    return months <= 10 ? `منذ ${months} أشهر` : `منذ ${months} شهراً`;
+  }
+  const years = Math.floor(days / 365);
+  if (years === 1) return "منذ سنة";
+  if (years === 2) return "منذ سنتين";
+  return years <= 10 ? `منذ ${years} سنوات` : `منذ ${years} سنة`;
+}
+
+function lastActivityFullDate(value) {
+  const text = String(value || "").trim();
+  const day = lastActivityDay(text);
+  if (day === null) return text;
+  const weekday = LAST_ACTIVITY_WEEKDAYS[new Date(day * 86400000).getUTCDay()];
+  const time = /T(\d{2}):(\d{2})/.exec(text);
+  const clock = time && `${time[1]}:${time[2]}` !== "00:00" ? ` ${time[1]}:${time[2]}` : "";
+  return `${weekday} ${text.slice(0, 10)}${clock}`;
+}
+
+// حالة خلية واحدة: ok بمدة، أو none/pending/future/invalid بنص صريح بدل مدة مضلِّلة.
+function lastActivityCell(value, noneLabel, hasMarker, now = new Date()) {
+  if (!hasMarker) return { state: "pending", label: "بانتظار المزامنة", title: "تقرير الأرصدة الحالي لا يحمل هذا العمود بعد", day: null };
+  if (!value) return { state: "none", label: noneLabel, title: noneLabel, day: null };
+  const day = lastActivityDay(value);
+  if (day === null) return { state: "invalid", label: "تاريخ غير صالح", title: String(value), day: null };
+  const full = lastActivityFullDate(value);
+  const days = lastActivityToday(now) - day;
+  if (days < 0) return { state: "future", label: "تاريخ مستقبلي", title: full, day };
+  return { state: "ok", label: arabicElapsed(days), title: full, day };
+}
+
+// يعيد { invoice: [..], payment: [..] }؛ كل مصفوفة سطر الدور الأساسي، ثم سطر الدور الآخر
+// موسوماً إن وُجد له مستند فعلاً.
+function customerLastActivity(item, hasMarker = customerReportHasLastActivity(), now = new Date()) {
+  const supplier = lastActivityRole(item) === "supplier";
+  const sale = { kind: "sale", tag: "بيع", value: item?.lastSaleInvoiceDate || "" };
+  const purchase = { kind: "purchase", tag: "شراء", value: item?.lastPurchaseInvoiceDate || "" };
+  const receipt = { kind: "receipt", tag: "قبض", value: item?.lastReceiptDate || "" };
+  const paid = { kind: "disbursement", tag: "دفع", value: item?.lastDisbursementDate || "" };
+  const [mainInv, otherInv] = supplier ? [purchase, sale] : [sale, purchase];
+  const [mainPay, otherPay] = supplier ? [paid, receipt] : [receipt, paid];
+  const dual = hasMarker && Boolean(otherInv.value);
+  const build = (main, other, noneLabel) => {
+    const rows = [{ ...main, ...lastActivityCell(main.value, noneLabel, hasMarker, now), tagged: dual }];
+    if (dual && other.value) rows.push({ ...other, ...lastActivityCell(other.value, noneLabel, hasMarker, now), tagged: true });
+    return rows;
+  };
+  return {
+    invoice: build(mainInv, otherInv, "لا توجد فواتير"),
+    payment: build(mainPay, otherPay, "لا توجد دفعات")
+  };
+}
+
+// مفتاح الترتيب: أحدث يوم بين أسطر العمود (للحساب ذي الدورين)، وnull لما لا تاريخ له.
+function customerLastActivitySortDay(item, column) {
+  const rows = customerLastActivity(item)[column] || [];
+  const days = rows.filter((r) => r.state === "ok" || r.state === "future").map((r) => r.day);
+  return days.length ? Math.max(...days) : null;
+}
+
+function customerLastActivityText(rows) {
+  return rows.map((r) => (r.tagged ? `${r.tag}: ` : "") + r.label + (r.state === "ok" || r.state === "future" ? ` (${String(r.value).slice(0, 10)})` : "")).join(" | ");
+}
+
+function customerLastActivityHtml(rows) {
+  return rows.map((r) => `<span class="last-activity last-activity-${escapeHtml(r.state)}" title="${escapeHtml(r.title)}">${r.tagged ? `<b>${escapeHtml(r.tag)}:</b> ` : ""}${escapeHtml(r.label)}</span>`).join("");
+}
+
 function customerLimitSourceLabel(source) {
   return {
     internal: "حد داخلي",
@@ -5229,12 +5345,32 @@ function filterCustomerItems(items, filter, query) {
   });
 }
 
+const LAST_ACTIVITY_SORTS = {
+  lastInvoiceDesc: { column: "invoice", dir: "desc" },
+  lastInvoiceAsc: { column: "invoice", dir: "asc" },
+  lastPaymentDesc: { column: "payment", dir: "desc" },
+  lastPaymentAsc: { column: "payment", dir: "asc" }
+};
+
 function sortCustomerItems(items, sort) {
   const sorted = [...items];
   if (sort === "remainingAsc") {
     sorted.sort((a, b) => customerRemainingLimit(a) - customerRemainingLimit(b));
   } else if (sort === "nameAsc") {
     sorted.sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "ar"));
+  } else if (LAST_ACTIVITY_SORTS[sort]) {
+    // بلا تاريخ في آخر القائمة بالاتجاهين؛ التعادل يحسمه الرصيد كالترتيب الافتراضي.
+    const { column, dir } = LAST_ACTIVITY_SORTS[sort];
+    const keyed = sorted.map((item) => ({ item, day: customerLastActivitySortDay(item, column) }));
+    keyed.sort((a, b) => {
+      if (a.day === null || b.day === null) {
+        if (a.day !== b.day) return a.day === null ? 1 : -1;
+      } else if (a.day !== b.day) {
+        return dir === "desc" ? b.day - a.day : a.day - b.day;
+      }
+      return customerBalanceSortValue(b.item) - customerBalanceSortValue(a.item);
+    });
+    return keyed.map((k) => k.item);
   } else {
     sorted.sort((a, b) => customerBalanceSortValue(b) - customerBalanceSortValue(a));
   }
@@ -5570,6 +5706,7 @@ function customerBalanceRow(item) {
       <span>الرصيد: ${escapeHtml(formatMoney(customerBalance(item)))} / الحد: ${escapeHtml(limit > 0 ? formatMoney(limit) : "غير محدد")}</span>
       <span>المتبقي من الحد: ${escapeHtml(limit > 0 ? formatMoney(remaining) : "غير محدد")} / الحالة: ${escapeHtml(customerStatusLabel(item.status))} / المصدر: ${escapeHtml(customerLimitSourceLabel(item.limitSource))}</span>
       <span>آخر دفعة: ${escapeHtml(customerLastPaymentAmount(item) > 0 ? formatMoney(customerLastPaymentAmount(item)) : "غير متوفر")} / التاريخ: ${escapeHtml(customerLastPaymentDate(item) ? formatDate(customerLastPaymentDate(item)) : "غير متوفر")}</span>
+      ${customerLastActivityRow(item)}
       <form class="customer-limit-editor" data-form="customer-limit" data-customer-key="${escapeHtml(key)}" data-customer-guid="${escapeHtml(normGuid(item.customerGuid))}" data-customer-name="${escapeHtml(item.name || "")}">
         <label>
           الحد الداخلي
@@ -5583,6 +5720,25 @@ function customerBalanceRow(item) {
       </form>
     </div>
   `;
+}
+
+// في لوحة التفاصيل يظهر التاريخ الكامل نصاً لا تلميحاً فقط — الهاتف لا يعرف التمرير.
+function customerLastActivityMetrics(item) {
+  const activity = customerLastActivity(item);
+  const metric = (label, rows) => rows.map((r) => inventoryMetric(
+    r.tagged ? `${label} (${r.tag})` : label,
+    r.label,
+    r.state === "ok" || r.state === "future" ? r.title : (r.state === "pending" ? "يظهر بعد أول مزامنة بالاستعلام الجديد" : "")
+  )).join("");
+  return metric("آخر فاتورة", activity.invoice) + metric("آخر دفعة (منذ)", activity.payment);
+}
+
+function customerLastActivityRow(item) {
+  const activity = customerLastActivity(item);
+  return `<div class="last-activity-row">
+        <span class="last-activity-col"><small>🧾 آخر فاتورة</small>${customerLastActivityHtml(activity.invoice)}</span>
+        <span class="last-activity-col"><small>💵 آخر دفعة</small>${customerLastActivityHtml(activity.payment)}</span>
+      </div>`;
 }
 
 function customerPaymentRow(payment) {
@@ -6732,6 +6888,17 @@ function receivablesPdfMarkup() {
   const withBalance = groups.base
     .sort((a, b) => customerBalanceSortValue(b) - customerBalanceSortValue(a));
   const rowCount = withBalance.length + groups.native.length;
+  // عمودا «آخر فاتورة» و«آخر دفعة» يظهران فقط حين يحمل التقرير أعمدتهما (lastActivity).
+  const withActivity = customerReportHasLastActivity();
+  const activityPdf = (rows) => rows.map((r) => (r.tagged ? `${escapeHtml(r.tag)}: ` : "") + escapeHtml(r.label)
+    + (r.state === "ok" || r.state === "future" ? `<br><small class="muted">${escapeHtml(String(r.value).slice(0, 10))}</small>` : "")).join("<br>");
+  const activityCells = (it) => {
+    if (!withActivity) return "";
+    const a = customerLastActivity(it, true);
+    return `<td>${activityPdf(a.invoice)}</td><td>${activityPdf(a.payment)}</td>`;
+  };
+  const activityBlank = withActivity ? "<td></td><td></td>" : "";
+  const columnCount = withActivity ? 8 : 6;
   // قيمة آخر دفعة تأتي من en000.Credit بعملة الأساس دائماً؛ على صف معروض بعملة
   // أخرى تُوسم بالدولار صراحةً كي لا تُقرأ بعملة الرصيد المجاور.
   const paymentCells = (it, usdLabel = "") => {
@@ -6746,6 +6913,7 @@ function receivablesPdfMarkup() {
     return `<tr><td>${idx + 1}</td><td>${escapeHtml(it.name || "")}</td>`
       + `<td class="deb">${isDebit ? escapeHtml(formatMoney(bal)) : "—"}</td>`
       + `<td class="cred">${isDebit ? "—" : escapeHtml(formatMoney(Math.abs(bal)))}</td>`
+      + activityCells(it)
       + paymentCells(it);
   }).join("");
   const nativeRows = groups.native.map(({ item: it, amount, currency }, idx) => {
@@ -6753,22 +6921,23 @@ function receivablesPdfMarkup() {
     return `<tr><td>${withBalance.length + idx + 1}</td><td>${escapeHtml(it.name || "")}</td>`
       + `<td class="deb">${amount > 0 ? text : "—"}</td>`
       + `<td class="cred">${amount > 0 ? "—" : text}</td>`
+      + activityCells(it)
       + paymentCells(it, " $");
   }).join("");
   const nativeTotalRows = [...groups.nativeTotals].map(([currency, t]) =>
     `<tr class="closing"><td></td><td>الإجمالي بـ${escapeHtml(currency)} (${escapeHtml(t.debitCustomers + t.creditCustomers)} زبون)</td>`
       + `<td class="deb">${escapeHtml(formatMoney(t.debit))}</td>`
-      + `<td class="cred">${escapeHtml(formatMoney(t.credit))}</td><td></td><td></td></tr>`).join("");
+      + `<td class="cred">${escapeHtml(formatMoney(t.credit))}</td>${activityBlank}<td></td><td></td></tr>`).join("");
   const nativeCards = [...groups.nativeTotals].map(([currency, t]) =>
     `<div class="rcard"><div class="v red">${escapeHtml(formatMoney(t.debit - t.credit))} ${escapeHtml(currency)}</div><div class="l">صافي حسابات ${escapeHtml(currency)} بعملتها (مدين ${escapeHtml(t.debitCustomers)} · دائن ${escapeHtml(t.creditCustomers)})</div></div>`).join("");
   const rows = rowCount
     ? baseRows
       + `<tr class="closing"><td></td><td>الإجمالي بالدولار (${escapeHtml(withBalance.length)} زبون)</td>`
       + `<td class="deb">${escapeHtml(formatMoney(totalDebit))}</td>`
-      + `<td class="cred">${escapeHtml(formatMoney(totalCredit))}</td><td></td><td></td></tr>`
+      + `<td class="cred">${escapeHtml(formatMoney(totalCredit))}</td>${activityBlank}<td></td><td></td></tr>`
       + nativeRows
       + nativeTotalRows
-    : `<tr><td colspan="6" class="muted">لا يوجد زبائن أصحاب أرصدة</td></tr>`;
+    : `<tr><td colspan="${columnCount}" class="muted">لا يوجد زبائن أصحاب أرصدة</td></tr>`;
   const settledNote = groups.settled
     ? `<p class="muted" style="margin:8px 0 0">${escapeHtml(groups.settled)} حساب بعملة غير الدولار مسدَّد بعملته (أقل من ${escapeHtml(RECEIVABLES_NATIVE_SETTLED_BELOW)} بعملة الحساب) فلا يُعرض ذمة؛ الباقي عليه بالدولار فرق صرف فقط.</p>`
     : "";
@@ -6783,7 +6952,7 @@ function receivablesPdfMarkup() {
     </div>
     <div class="sec">أرصدة الزبائن — المدين والدائن (${escapeHtml(rowCount)} زبون)</div>
     <table>
-      <thead><tr><th>#</th><th>الزبون</th><th>مدين (عليه)</th><th>دائن (له)</th><th>تاريخ آخر دفعة</th><th>قيمة آخر دفعة</th></tr></thead>
+      <thead><tr><th>#</th><th>الزبون</th><th>مدين (عليه)</th><th>دائن (له)</th>${withActivity ? "<th>آخر فاتورة</th><th>آخر دفعة (منذ)</th>" : ""}<th>تاريخ آخر دفعة</th><th>قيمة آخر دفعة</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
     ${settledNote}
@@ -7739,6 +7908,7 @@ function customerDetailsPanel(item) {
         ${inventoryMetric("الحد المسموح", customerLimit(item) > 0 ? formatMoney(customerLimit(item)) : "غير محدد", customerLimitSourceLabel(item.limitSource))}
         ${inventoryMetric("المتبقي من الحد", customerLimit(item) > 0 ? formatMoney(customerRemainingLimit(item)) : "غير محدد", "من الحد الفعال")}
         ${inventoryMetric("آخر دفعة", customerLastPaymentAmount(item) > 0 ? formatMoney(customerLastPaymentAmount(item)) : "غير متوفر", customerLastPaymentDate(item) ? formatDate(customerLastPaymentDate(item)) : "لا يوجد تاريخ")}
+        ${customerLastActivityMetrics(item)}
       </div>
 
       ${state.session ? `
@@ -7891,6 +8061,10 @@ function customerBalanceSection(report) {
             <option value="balanceDesc" ${state.customerSort === "balanceDesc" ? "selected" : ""}>أعلى رصيد أولاً</option>
             <option value="remainingAsc" ${state.customerSort === "remainingAsc" ? "selected" : ""}>الأقرب للحد أولاً</option>
             <option value="nameAsc" ${state.customerSort === "nameAsc" ? "selected" : ""}>الاسم أبجدياً</option>
+            <option value="lastInvoiceDesc" ${state.customerSort === "lastInvoiceDesc" ? "selected" : ""}>آخر فاتورة: الأحدث أولاً</option>
+            <option value="lastInvoiceAsc" ${state.customerSort === "lastInvoiceAsc" ? "selected" : ""}>آخر فاتورة: الأقدم أولاً</option>
+            <option value="lastPaymentDesc" ${state.customerSort === "lastPaymentDesc" ? "selected" : ""}>آخر دفعة: الأحدث أولاً</option>
+            <option value="lastPaymentAsc" ${state.customerSort === "lastPaymentAsc" ? "selected" : ""}>آخر دفعة: الأقدم أولاً</option>
           </select>
         </label>
       </div>

@@ -401,6 +401,13 @@ function Build-CustomerBalanceReport($Rows) {
       accountCurrency = [string]$row.account_currency
       accountCurrencyIsBase = if ($null -eq $row.account_currency_is_base) { $null } else { ((To-Number $row.account_currency_is_base) -eq 1) }
       balanceAccountCcy = if ($null -eq $row.balance_account_ccy) { $null } else { [math]::Round((To-Number $row.balance_account_ccy), 3) }
+      # آخر فاتورة وآخر دفعة لتقرير الذمم (last-activity في ameen-customer-balances-query.sql).
+      # تاريخ المستند/القيد كما في الأمين؛ فراغ يعني «لا يوجد». العلامة lastActivity أدناه
+      # هي ما يميّز «لا يوجد» عن «استعلام قديم لا يحمل الأعمدة».
+      lastSaleInvoiceDate = To-IsoDate $row.last_sale_invoice_date
+      lastPurchaseInvoiceDate = To-IsoDate $row.last_purchase_invoice_date
+      lastReceiptDate = To-IsoDate $row.last_receipt_date
+      lastDisbursementDate = To-IsoDate $row.last_disbursement_date
     }
   }
 
@@ -425,11 +432,17 @@ function Build-CustomerBalanceReport($Rows) {
   # العلامة تعني: كل بطاقة تحمل accountClass من شجرة الحسابات (لا من الاسم). بلاها يبقى
   # الموقع على قوائمه الصريحة (src/customer-intelligence.js: ACCOUNT_CLASSES_MARKER).
   $accountClassesComplete = (@($items | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.accountClass) }).Count -eq 0)
+  # العلامة تُرفع فقط إن حمل الاستعلام أعمدة last-activity الأربعة؛ بلاها يعرض الموقع
+  # «بانتظار المزامنة» بدل «لا توجد فواتير» الكاذبة.
+  $firstRow = @($Rows | Select-Object -First 1)
+  $lastActivityColumns = @("last_sale_invoice_date", "last_purchase_invoice_date", "last_receipt_date", "last_disbursement_date")
+  $lastActivityComplete = ($firstRow.Count -gt 0) -and (@($lastActivityColumns | Where-Object { $firstRow[0].PSObject.Properties.Name -notcontains $_ }).Count -eq 0)
 
   $summary = [ordered]@{
     reportDate = (Get-Date).ToString("yyyy-MM-dd")
     source = "ameen_customer_balances"
     accountClasses = $(if ($accountClassesComplete) { "v1" } else { $null })
+    lastActivity = $(if ($lastActivityComplete) { "v1" } else { $null })
     totalCustomers = $items.Count
     customersWithBalance = @($items | Where-Object { $_.balance -ne 0 }).Count
     customersWithDebitBalance = @($items | Where-Object { $_.balance -gt 0 }).Count

@@ -47,6 +47,36 @@ payment_lines as (
     )
 )
 -- payment-rule:end
+-- supplier-payment-rule:begin
+-- «الدفعة» على حساب المورد (الأب المباشر الموردون، نفس is_supplier) هي ما دفعناه له فعلاً:
+-- سطر مدين على حسابه مقابل صندوق من شجرة 13 عدا 135، أو مقابل صفري في قيد غير افتتاحي فيه
+-- دائن على ذلك الصندوق — مرآة payment_lines. كان الشرط السابق يعدّ كل سطر دائن على المورد
+-- «دفعة»، أي فواتير الشراء نفسها، فساوت «آخر دفعة» تاريخ آخر شراء عند 12 من 43 مورداً
+-- (قياس قراءة على AmnDb002 في 2026-10-22). فاتورة الشراء والمرتجع والمبيعات للمورد والحسم
+-- والقيد الافتتاحي والمقاصّة مع حساب آخر خارجها بنيوياً لأن مقابلها ليس صندوقاً.
+, supplier_payment_lines as (
+  select en.GUID
+  from dbo.en000 en
+  left join dbo.ce000 ce on ce.GUID = en.ParentGUID
+  where coalesce(en.Debit, 0) > 0 and coalesce(en.Type, 0) = 0
+    and en.AccountGUID in (
+      select sa.GUID from dbo.ac000 sa join dbo.ac000 sp on sp.GUID = sa.ParentGUID where sp.Name = N'الموردون'
+    )
+    and (
+      en.ContraAccGUID in (select c.GUID from cash_accounts c)
+      or (
+        coalesce(en.ContraAccGUID, '00000000-0000-0000-0000-000000000000') = '00000000-0000-0000-0000-000000000000'
+        and ce.GUID is not null
+        and coalesce(ce.TypeGUID, '00000000-0000-0000-0000-000000000000') <> 'ea69ba80-662d-4fa4-90ee-4d2e1988a8ea'
+        and exists (
+          select 1 from dbo.en000 d
+          where d.ParentGUID = en.ParentGUID and coalesce(d.Credit, 0) > 0
+            and d.AccountGUID in (select c.GUID from cash_accounts c)
+        )
+      )
+    )
+)
+-- supplier-payment-rule:end
 -- account-class:begin
 -- تصنيف حساب البطاقة من شجرة دليل الحسابات (قرار المالك 2026-09-28): بطاقة cu000 وحدها ليست
 -- دليلاً أن الحساب زبون. الانتماء الشجري بمعرّفات جذور الدليل (مُثبتة قراءةً على OZK2026)
@@ -77,6 +107,57 @@ account_class_chain as (
   where c.depth < 32
 )
 -- account-class:end
+-- last-activity:begin
+-- آخر فاتورة وآخر دفعة لكل بطاقة (تقرير الذمم، 2026-10-22). أعمدة مضافة لا تمسّ balance ولا
+-- last_payment_* ولا أي عمود قائم. مجمّعة مرة واحدة على مستوى الجدول ثم تُربط بالبطاقة —
+-- لا استعلام لكل حساب. التاريخ تاريخ المستند/القيد (bu000.Date وen000.Date) لا تاريخ
+-- الإنشاء أو التعديل، والنوع يُحكم بالمعرّف لا بالاسم:
+--   • فاتورة بيع: bt000.BillType = 1، مرحّلة (IsPosted = 1)، مربوطة بالبطاقة بـbu000.CustGUID.
+--     تشمل الفاتورة النقدية لزبون مسمّى (قيدها على الصندوق، والمستند مستنده). المرتجع
+--     (BillType = 3) خارجها.
+--   • فاتورة شراء: TypeGUID 91377a56… حرفياً (نفس pull-purchase-invoices-from-ameen.ps1)؛
+--     مرتجع الشراء c9aca8fe… خارجها.
+--   • قبض من الحساب: سطر دائن مقابله صندوق من شجرة 13 عدا 135، أو مقابل صفري في قيد غير
+--     افتتاحي فيه مدين على ذلك الصندوق — تعريف payment_lines نفسه بلا قيد شجرة 121.
+--   • دفع للحساب: مرآته — سطر مدين مقابله صندوق، أو مقابل صفري في قيد غير افتتاحي فيه
+--     دائن على الصندوق. الحسم (43) والمرتجع (42) والقيد الافتتاحي والتسويات خارجها بنيوياً.
+, last_bills as (
+  select u.CustGUID as cust_guid,
+         max(case when bt.BillType = 1 then u.Date end) as last_sale_invoice_date,
+         max(case when u.TypeGUID = '91377a56-ebfc-48c0-b79e-72063e1d7e3a' then u.Date end) as last_purchase_invoice_date
+  from dbo.bu000 u
+  join dbo.bt000 bt on bt.GUID = u.TypeGUID
+  where coalesce(u.IsPosted, 0) = 1
+    and (bt.BillType = 1 or u.TypeGUID = '91377a56-ebfc-48c0-b79e-72063e1d7e3a')
+  group by u.CustGUID
+),
+last_cash as (
+  select en.AccountGUID as acct,
+         max(case when coalesce(en.Credit, 0) > 0 then en.Date end) as last_receipt_date,
+         max(case when coalesce(en.Debit, 0) > 0 then en.Date end) as last_disbursement_date
+  from dbo.en000 en
+  left join dbo.ce000 ce on ce.GUID = en.ParentGUID
+  where coalesce(en.Type, 0) = 0
+    and (coalesce(en.Credit, 0) > 0 or coalesce(en.Debit, 0) > 0)
+    and en.AccountGUID in (select c2.AccountGUID from dbo.cu000 c2)
+    and (
+      en.ContraAccGUID in (select c.GUID from cash_accounts c)
+      or (
+        coalesce(en.ContraAccGUID, '00000000-0000-0000-0000-000000000000') = '00000000-0000-0000-0000-000000000000'
+        and ce.GUID is not null
+        and coalesce(ce.TypeGUID, '00000000-0000-0000-0000-000000000000') <> 'ea69ba80-662d-4fa4-90ee-4d2e1988a8ea'
+        and exists (
+          select 1 from dbo.en000 d
+          where d.ParentGUID = en.ParentGUID
+            and d.AccountGUID in (select c.GUID from cash_accounts c)
+            and ((coalesce(en.Credit, 0) > 0 and coalesce(d.Debit, 0) > 0)
+              or (coalesce(en.Debit, 0) > 0 and coalesce(d.Credit, 0) > 0))
+        )
+      )
+    )
+  group by en.AccountGUID
+)
+-- last-activity:end
 select
   cu.CustomerName as customer_name,
   cast(coalesce(ac.Debit, 0) - coalesce(ac.Credit, 0) as decimal(18, 3)) as balance,
@@ -106,11 +187,19 @@ select
   acc_cur.Code as account_currency,
   case when acc_cur.GUID is null then null
        when abs(coalesce(acc_cur.CurrencyVal, 0) - 1) < 0.000001 then 1 else 0 end as account_currency_is_base,
-  account_ccy.balance_account_ccy
+  account_ccy.balance_account_ccy,
+  -- last-activity-columns:begin
+  last_bills.last_sale_invoice_date,
+  last_bills.last_purchase_invoice_date,
+  last_cash.last_receipt_date,
+  last_cash.last_disbursement_date
+  -- last-activity-columns:end
 from dbo.cu000 cu
 left join dbo.ac000 ac  on ac.GUID = cu.AccountGUID
 left join dbo.ac000 acp on acp.GUID = ac.ParentGUID
 left join dbo.my000 acc_cur on acc_cur.GUID = ac.CurrencyGUID
+left join last_bills on last_bills.cust_guid = cu.GUID
+left join last_cash on last_cash.acct = cu.AccountGUID
 -- account-ccy:begin
 outer apply (
   -- مجموع (مدين − دائن) ÷ سعر السطر، على أسطر عملة الحساب وحدها. يكفي سطر واحد بعملة
@@ -133,20 +222,27 @@ outer apply (
 ) account_ccy
 -- account-ccy:end
 outer apply (
-  select top 1 en.Credit as last_payment_amount, en.Date as last_payment_date, en.Notes as last_payment_notes
+  -- المبلغ: دائن على الزبون (قبض منه)، ومدين على المورد (دفع له).
+  select top 1 case when acp.Name = N'الموردون' then en.Debit else en.Credit end as last_payment_amount, en.Date as last_payment_date, en.Notes as last_payment_notes
   from dbo.en000 en
-  where en.AccountGUID = cu.AccountGUID and coalesce(en.Credit, 0) > 0 and coalesce(en.Type, 0) = 0
-    and (acp.Name = N'الموردون' or en.GUID in (select pl.GUID from payment_lines pl))
+  where en.AccountGUID = cu.AccountGUID and coalesce(en.Type, 0) = 0
+    and (
+      (coalesce(acp.Name, N'') <> N'الموردون' and coalesce(en.Credit, 0) > 0 and en.GUID in (select pl.GUID from payment_lines pl))
+      or (acp.Name = N'الموردون' and en.GUID in (select sp.GUID from supplier_payment_lines sp))
+    )
   order by en.Date desc, en.Number desc, en.GUID desc
 ) last_payment
 outer apply (
   select (
     -- 40 لا 6: نموذج خطر التحصيل يقيس زخم السداد على نافذة 90 يوماً، وسقف الستّ
     -- كان يقتطعها لـ35 زبوناً من 121 (29%) فيُظهر سدادهم أسوأ مما هو.
-    select top 40 cast(en.Credit as decimal(18, 3)) as amount, en.Date as date, en.Notes as notes, en.Number as number
+    select top 40 cast(case when acp.Name = N'الموردون' then en.Debit else en.Credit end as decimal(18, 3)) as amount, en.Date as date, en.Notes as notes, en.Number as number
     from dbo.en000 en
-    where en.AccountGUID = cu.AccountGUID and coalesce(en.Credit, 0) > 0 and coalesce(en.Type, 0) = 0
-      and (acp.Name = N'الموردون' or en.GUID in (select pl.GUID from payment_lines pl))
+    where en.AccountGUID = cu.AccountGUID and coalesce(en.Type, 0) = 0
+      and (
+        (coalesce(acp.Name, N'') <> N'الموردون' and coalesce(en.Credit, 0) > 0 and en.GUID in (select pl.GUID from payment_lines pl))
+        or (acp.Name = N'الموردون' and en.GUID in (select sp.GUID from supplier_payment_lines sp))
+      )
     order by en.Date desc, en.Number desc, en.GUID desc
     for json path
   ) as recent_payments_json
@@ -158,8 +254,11 @@ outer apply (
   select count_big(*) as payments_in_window,
          cast(dateadd(day, -90, cast(getdate() as date)) as date) as payments_window_start
   from dbo.en000 en
-  where en.AccountGUID = cu.AccountGUID and coalesce(en.Credit, 0) > 0 and coalesce(en.Type, 0) = 0
-    and (acp.Name = N'الموردون' or en.GUID in (select pl.GUID from payment_lines pl))
+  where en.AccountGUID = cu.AccountGUID and coalesce(en.Type, 0) = 0
+    and (
+      (coalesce(acp.Name, N'') <> N'الموردون' and coalesce(en.Credit, 0) > 0 and en.GUID in (select pl.GUID from payment_lines pl))
+      or (acp.Name = N'الموردون' and en.GUID in (select sp.GUID from supplier_payment_lines sp))
+    )
     and en.Date >= dateadd(day, -90, cast(getdate() as date))
 ) payments_window
 outer apply (
