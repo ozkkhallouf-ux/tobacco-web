@@ -75,6 +75,9 @@ for (const rel of SCANNED) {
   check(`${rel}: لا Google Fonts`, !/fonts\.googleapis\.com/.test(source));
 }
 check("فاتورة الكاشير 80mm على خطها الأصلي (مجمَّدة)", /font-family: 'Segoe UI', Tahoma, Arial, sans-serif; font-size: 12px; line-height: 1\.5;/.test(salesReceipt));
+check("فاتورة الكاشير 80mm لا تقرأ --ozk-font", salesReceipt.length > 0 && !salesReceipt.includes("--ozk-font"));
+check("printHtmlDocument لا يحقن الخط إلا في مستند يقرأ --ozk-font (الكاشير 80mm تُطبع كما كانت)",
+  /String\(html\)\.includes\("--ozk-font"\)\) html = OZK_FONT\.withFaces\(html\)/.test(read("src/app.js")));
 
 // ===== 2) حيّ =====
 const TYPES = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",

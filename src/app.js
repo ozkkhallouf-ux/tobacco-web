@@ -1978,7 +1978,7 @@ async function printOverdueReport() {
     return;
   }
 
-  archiveToICloud("other_report", html, overdueArchiveMeta);
+  archiveToICloud("other_report", typeof OZK_FONT !== "undefined" ? OZK_FONT.withFaces(html) : html, overdueArchiveMeta);
   const container = document.createElement("div");
   container.innerHTML = html;
   document.body.appendChild(container);
@@ -6013,8 +6013,10 @@ function trimTrailingPortablePdfDecorations(source, margin) {
 // على iOS وأندرويد وويندوز معاً بلا حاجة للسماح بالنوافذ المنبثقة.
 function printHtmlDocument(html, options = {}) {
   // مستند الإطار مستقل لا يرث @font-face من الصفحة: الخط الرسمي يُحقن فيه
-  // بعناوين مطلقة، فيصل إلى ورقة الطباعة وإلى نسخة iCloud معاً.
-  if (typeof OZK_FONT !== "undefined") html = OZK_FONT.withFaces(html);
+  // بعناوين مطلقة، فيصل إلى ورقة الطباعة وإلى نسخة iCloud معاً. يُحقن فقط في
+  // مستند يقرأ --ozk-font: فاتورة الكاشير 80mm لا تقرؤه، فتُطبع وتُؤرشف بايتاً بايتاً
+  // كما كانت (مجمَّدة بقرار المالك).
+  if (typeof OZK_FONT !== "undefined" && String(html).includes("--ozk-font")) html = OZK_FONT.withFaces(html);
   // نسخة iCloud تُطلق قبل فتح ورقة الطباعة كي لا ينتظرها المستخدم إطلاقاً،
   // ولا يؤثر نجاحها أو فشلها على الطباعة نفسها بأي شكل.
   if (options.archive && options.archive.docType) {
@@ -6305,7 +6307,8 @@ async function exportReportPdf(bodyHtml, archive) {
   const docType = archive && archive.docType;
   const title = docType ? archiveDocumentTitle(docType, archive.meta) : "تقرير";
   const filename = `${title}.pdf`;
-  if (docType) archiveToICloud(docType, bodyHtml, archive.meta);
+  // نسخة iCloud مستند مستقل كإطار الطباعة: تحمل @font-face الخط الرسمي معها.
+  if (docType) archiveToICloud(docType, typeof OZK_FONT !== "undefined" ? OZK_FONT.withFaces(bodyHtml) : bodyHtml, archive.meta);
   if (isHandheldDevice()) {
     try {
       const blob = await createPortablePdfBlob(bodyHtml, filename, { width: BULLETIN_PAGE_WIDTH_PX });
