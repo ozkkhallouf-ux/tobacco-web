@@ -79,6 +79,7 @@ export const CHECKS = [
   'check-keyboard-shortcut-routes.mjs',
   'check-local-site-server.mjs',
   'check-mac-archive-bridge.mjs',
+  'check-manual-a4-print.mjs',
   'check-master-item-coverage-dedup.mjs',
   'check-migration-drift-guard.mjs',
   'check-movement-line-kinds.mjs',

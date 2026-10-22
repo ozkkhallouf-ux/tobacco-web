@@ -1,0 +1,15 @@
+{
+  "name": "ozk-manual-a4-print",
+  "version": "1.0.0",
+  "private": true,
+  "description": "OZK - طباعة فواتير A4 يدوياً عند الطلب على Canon G3410 (قراءة فقط من الأمين)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "health": "node server.js --health"
+  },
+  "dependencies": {
+    "mssql": "11.0.1",
+    "puppeteer-core": "22.15.0"
+  }
+}
