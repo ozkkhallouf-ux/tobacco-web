@@ -108,7 +108,8 @@
 1. **دمج فحص المصادقة،** ثم مراقبة دورتين مجدولتين بالمفتاح القديم. المتوقع في السجل «🔐 مصادقة Supabase: مُثبتة … نوع المفتاح legacy-jwt». وفي سجلات Supabase (edge_logs): `POST /rest/v1/rpc/health_lifecycle` بحالة 200 كل 30 دقيقة.
 2. **إنشاء المفتاح:** المالك ينشئ `sb_secret_` (`ozk-github-actions`) من Dashboard. لا يُلغى ولا يُدوَّر أي مفتاح قديم.
 3. **اختبار عزل قبل التبديل،** على جهاز المالك، قراءة فقط، بلا طباعة. نفس الطلب بالضبط:
-   `pbpaste | xargs -I{} curl -sS -o /dev/null -w '%{http_code}\n' -X POST https://dyxbirfpxeocqffnfdeb.supabase.co/rest/v1/rpc/health_lifecycle -H 'apikey: {}' -H 'Content-Type: application/json' -H 'Content-Profile: public' -d '{"p_op":"probe","p_key":null,"p_issue":null,"p_label":null}'`
+   `pbpaste | sed 's/^/apikey: /' | curl -sS -o /dev/null -w '%{http_code}\n' -X POST https://dyxbirfpxeocqffnfdeb.supabase.co/rest/v1/rpc/health_lifecycle -H @- -H 'Content-Type: application/json' -H 'Content-Profile: public' -d '{"p_op":"probe","p_key":null,"p_issue":null,"p_label":null}'`
+   (المفتاح يمرّ عبر stdin إلى `-H @-`، لا في وسائط الأمر ولا في سجل الـshell.)
    - المتوقع `200`. أي `401/403` ⇒ توقف.
 4. **التبديل:** وضعه في بيئة `supabase-ops` بالاسم نفسه، بأمر يقرأ من الحافظة دون طباعة. سرّ المستودع لا يُمسّ.
 5. **الإثبات:** أول دورة مجدولة يجب أن تسجّل «نوع المفتاح sb_secret» و«مُثبتة»، مع 200 في edge_logs.
