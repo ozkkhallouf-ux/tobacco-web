@@ -26,6 +26,7 @@
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import "../src/telegram-format.js";
+import { supabaseServiceHeaders } from "./supabase-service-headers.mjs";
 
 const REPO = process.env.GITHUB_REPOSITORY || "ozkkhallouf-ux/tobacco-web";
 const SITE_URL = "https://ozktobacco.com/";
@@ -341,8 +342,7 @@ async function notifyTelegram(problem, issueUrl, dedupeMinutes = 180) {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        apikey: serviceKey,
-        Authorization: `Bearer ${serviceKey}`,
+        ...supabaseServiceHeaders(serviceKey),
         "Content-Profile": "public",
         Prefer: "return=minimal",
       },
@@ -396,8 +396,7 @@ export async function callLifecycle(op, args = {}, { env = process.env, fetchImp
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        apikey: serviceKey,
-        Authorization: `Bearer ${serviceKey}`,
+        ...supabaseServiceHeaders(serviceKey),
         "Content-Profile": "public",
       },
       body: JSON.stringify({ p_op: op, p_key: args.key ?? null, p_issue: args.issue ?? null, p_label: args.label ?? null }),

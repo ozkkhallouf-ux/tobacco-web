@@ -116,11 +116,13 @@ export const CHECKS = [
   'check-smart-inventory.mjs',
   'check-stock-alert-priority.mjs',
   'check-stock-qty-net-calc.mjs',
+  'check-supabase-ops-environment.mjs',
   'check-telegram-delivery-observability.mjs',
   'check-telegram-format.mjs',
   'check-telegram-grok-ask.mjs',
   'check-warehouse-stock-prune.mjs',
   'check-windows-deploy-gate.mjs',
+  'check-windows-release-app-token.mjs',
   'check-windows-release-resume.mjs',
 ];
 

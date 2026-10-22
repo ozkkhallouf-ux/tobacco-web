@@ -8,6 +8,15 @@
   "mainBranch": "main",
   "deploymentEnvironment": "windows-production",
   "deploymentCreator": "github-actions[bot]",
+  "_releaseApp": "Release identity (2026-10-21): GitHub App 'OZK Windows Release', installed on this repository only. windows-release.yml mints a short-lived installation token inside the approved release job (environment windows-production) right before the push, limited to this repository and exactly contents:write + workflows:write (workflows is required because releases fast-forward commits that change .github/workflows). RELEASE_APP_ID must equal appId; the private key is the environment secret RELEASE_APP_PRIVATE_KEY. Neither id is secret.",
+  "releaseApp": {
+    "appId": 5412959,
+    "installationId": 173807509,
+    "permissions": {
+      "contents": "write",
+      "workflows": "write"
+    }
+  },
   "_deviceBaselineSha": "Gap 3 (2026-10-20 audit): the SHA the device actually runs (OZK2026 reflog: manual merges after the 09-28 freeze left it on main@1843024, ahead of windows-production@88ae841). The gate and the release workflow refuse any target that does not contain it, so no release can roll the device back. Raise it only after a verified re-baseline.",
   "deviceBaselineSha": "1843024a358e35768eebf737b1157e2d0cc291c0",
   "requiredMainWorkflows": [
