@@ -127,6 +127,7 @@
       const pills = [];
       pills.push(health.sql && health.sql.ok ? `<span class="pill ok">الأمين: متصل (قراءة)</span>` : `<span class="pill bad">الأمين: غير متصل</span>`);
       pills.push(pr.state === "ready" ? `<span class="pill ok">${esc(health.printerName)}: جاهزة</span>` : `<span class="pill bad">${esc(health.printerName)}: ${esc(pr.reason || pr.state)}</span>`);
+      if (pr.state === "ready" && pr.warning) pills.push(`<span class="pill warn">${esc(pr.warning)}</span>`);
       pills.push(health.officialFontEmbedded ? `<span class="pill ok">خط Cairo</span>` : `<span class="pill bad">خط Cairo غير متاح</span>`);
       if (health.dryRun) pills.push(`<span class="pill warn">وضع اختبار — لا يُرسل للطابعة</span>`);
       if (health.autoPrintTask === "Ready" || health.autoPrintTask === "Running") pills.push(`<span class="pill warn">الطباعة التلقائية ما زالت تعمل</span>`);

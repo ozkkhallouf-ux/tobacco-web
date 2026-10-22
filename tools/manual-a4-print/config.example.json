@@ -1,6 +1,8 @@
 {
   "port": 47616,
   "printerName": "Canon G3410 WiFi",
+  "printerHost": "",
+  "printerHostPort": 631,
   "dryRun": true,
   "maxCopies": 5,
   "papers": ["A4"],

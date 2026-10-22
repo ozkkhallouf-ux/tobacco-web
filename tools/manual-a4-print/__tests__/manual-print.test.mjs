@@ -59,6 +59,21 @@ test("الكمية بوحدة الإدخال 1/2/3 والمعامل المفقو
   assert.deepEqual(model.lineFromRow({ ...base, input_unit: 2, unit2_fact: 0 }), { name: "صنف", unit: "كروز", qty: 100 });
 });
 
+test("فحص الطابعة: لا «جاهزة» لطابعة لا تردّ أو فيها خطأ، والطابور العالق تنبيه", () => {
+  const ok = { port: "IP_192.0.2.10", offline: "False", status: "3", detected: "2", jobs: "0", reach: "ok", target: "192.0.2.10:9100" };
+  assert.equal(server.classifyPrinter(ok).state, "ready");
+  assert.equal(server.classifyPrinter({ ...ok, reach: "fail" }).state, "unreachable");
+  assert.equal(server.classifyPrinter({ ...ok, reach: "none" }).state, "ready");
+  assert.equal(server.classifyPrinter({ ...ok, detected: "4" }).state, "error");
+  assert.equal(server.classifyPrinter({ ...ok, detected: "8" }).state, "error");
+  assert.equal(server.classifyPrinter({ ...ok, status: "7" }).state, "offline");
+  assert.equal(server.classifyPrinter({ ...ok, offline: "True" }).state, "offline");
+  assert.equal(server.classifyPrinter({ ...ok, port: "TS001" }).state, "redirected");
+  const queued = server.classifyPrinter({ ...ok, jobs: "5" });
+  assert.equal(queued.state, "ready");
+  assert.match(queued.warning, /5/);
+});
+
 test("الكاشير ونوع غير معتمد لا يُطبعان، والجملة تُطبع", () => {
   assert.equal(model.printBlockReason(WHOLESALE, {}), "");
   assert.match(model.printBlockReason(CASHIER, {}), /الكاشير/);

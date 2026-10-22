@@ -28,44 +28,54 @@ try {
         if ($cfg.port) { $port = [int]$cfg.port }
     }
 
-    if (-not (Test-Server $port)) {
-        # سرّ اتصال القراءة: DPAPI على مستوى الجهاز + ACL يقصر قراءته على المستخدم
-        # والمدراء (set-sql-secret.ps1). بلا ملف ⇒ متغير البيئة الحالي.
-        if (Test-Path $SecretFile) {
-            Add-Type -AssemblyName System.Security
-            $enc = [IO.File]::ReadAllBytes($SecretFile)
-            $plain = [Security.Cryptography.ProtectedData]::Unprotect($enc, [Text.Encoding]::UTF8.GetBytes('OZK-ManualA4Print'),
-                [Security.Cryptography.DataProtectionScope]::LocalMachine)
-            $env:OZK_MANUAL_PRINT_SQL = [Text.Encoding]::UTF8.GetString($plain)
-        }
-        $node = Join-Path $AppDir '..\..\runtime\node.exe'
-        if (-not (Test-Path $node)) {
-            $cmd = Get-Command node.exe -ErrorAction SilentlyContinue
-            if (-not $cmd) { throw 'لم يُعثر على Node.js (runtime\node.exe أو node في PATH).' }
-            $node = $cmd.Source
-        }
-        New-Item -ItemType Directory -Force -Path $UserData | Out-Null
-        # مفتاح جلسة سابقة (خادم توقف) لا يصلح للخادم الجديد.
-        Remove-Item -LiteralPath $KeyFile -ErrorAction SilentlyContinue
-        Start-Process -FilePath $node -ArgumentList @('server.js') -WorkingDirectory $AppDir -WindowStyle Hidden `
-            -RedirectStandardOutput (Join-Path $UserData 'server.out.log') -RedirectStandardError (Join-Path $UserData 'server.err.log')
-        Remove-Item Env:\OZK_MANUAL_PRINT_SQL -ErrorAction SilentlyContinue
-        $deadline = (Get-Date).AddSeconds(20)
-        while (-not (Test-Server $port)) {
-            if ((Get-Date) -gt $deadline) {
-                $errLog = Join-Path $UserData 'server.err.log'
-                $err = if (Test-Path $errLog) { (Get-Content -Tail 5 -Encoding UTF8 $errLog) -join "`n" } else { '' }
-                throw "تعذّر تشغيل خادم الطباعة.`n$err"
+    # تشغيلان متزامنان للاختصار: الثاني ينتظر الأول، ثم يجد الخادم يعمل فلا يحذف مفتاحه.
+    $mutex = New-Object Threading.Mutex($false, "Local\OZK-ManualA4Print-Launch-$port")
+    $owned = $false
+    try { $owned = $mutex.WaitOne(30000) } catch [Threading.AbandonedMutexException] { $owned = $true }
+    try {
+        if (-not $owned) { throw 'تشغيل آخر للأداة لم ينتهِ بعد. أعد المحاولة بعد لحظات.' }
+        if (-not (Test-Server $port)) {
+            # سرّ اتصال القراءة: DPAPI على مستوى الجهاز + ACL يقصر قراءته على المستخدم
+            # والمدراء (set-sql-secret.ps1). بلا ملف ⇒ متغير البيئة الحالي.
+            if (Test-Path $SecretFile) {
+                Add-Type -AssemblyName System.Security
+                $enc = [IO.File]::ReadAllBytes($SecretFile)
+                $plain = [Security.Cryptography.ProtectedData]::Unprotect($enc, [Text.Encoding]::UTF8.GetBytes('OZK-ManualA4Print'),
+                    [Security.Cryptography.DataProtectionScope]::LocalMachine)
+                $env:OZK_MANUAL_PRINT_SQL = [Text.Encoding]::UTF8.GetString($plain)
             }
-            Start-Sleep -Milliseconds 400
+            $node = Join-Path $AppDir '..\..\runtime\node.exe'
+            if (-not (Test-Path $node)) {
+                $cmd = Get-Command node.exe -ErrorAction SilentlyContinue
+                if (-not $cmd) { throw 'لم يُعثر على Node.js (runtime\node.exe أو node في PATH).' }
+                $node = $cmd.Source
+            }
+            New-Item -ItemType Directory -Force -Path $UserData | Out-Null
+            # مفتاح جلسة سابقة (خادم توقف) لا يصلح للخادم الجديد.
+            Remove-Item -LiteralPath $KeyFile -ErrorAction SilentlyContinue
+            Start-Process -FilePath $node -ArgumentList @('server.js') -WorkingDirectory $AppDir -WindowStyle Hidden `
+                -RedirectStandardOutput (Join-Path $UserData 'server.out.log') -RedirectStandardError (Join-Path $UserData 'server.err.log')
+            Remove-Item Env:\OZK_MANUAL_PRINT_SQL -ErrorAction SilentlyContinue
+            $deadline = (Get-Date).AddSeconds(20)
+            while (-not (Test-Server $port)) {
+                if ((Get-Date) -gt $deadline) {
+                    $errLog = Join-Path $UserData 'server.err.log'
+                    $err = if (Test-Path $errLog) { (Get-Content -Tail 5 -Encoding UTF8 $errLog) -join "`n" } else { '' }
+                    throw "تعذّر تشغيل خادم الطباعة.`n$err"
+                }
+                Start-Sleep -Milliseconds 400
+            }
         }
-    }
 
-    # مفتاح الجلسة يكتبه الخادم في مجلد المستخدم؛ يُمرَّر مرة واحدة ويتحوّل إلى كوكي.
-    $deadline = (Get-Date).AddSeconds(10)
-    while (-not (Test-Path $KeyFile)) {
-        if ((Get-Date) -gt $deadline) { throw 'لم يُنشئ الخادم مفتاح الجلسة.' }
-        Start-Sleep -Milliseconds 200
+        # مفتاح الجلسة يكتبه الخادم في مجلد المستخدم؛ يُمرَّر مرة واحدة ويتحوّل إلى كوكي.
+        $deadline = (Get-Date).AddSeconds(10)
+        while (-not (Test-Path $KeyFile)) {
+            if ((Get-Date) -gt $deadline) { throw 'لم يُنشئ الخادم مفتاح الجلسة.' }
+            Start-Sleep -Milliseconds 200
+        }
+    } finally {
+        if ($owned) { $mutex.ReleaseMutex() }
+        $mutex.Dispose()
     }
     $key = (Get-Content -Raw -Encoding UTF8 $KeyFile).Trim()
     $url = "http://127.0.0.1:$port/?k=$key"

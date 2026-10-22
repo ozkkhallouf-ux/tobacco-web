@@ -43,6 +43,8 @@ const PING_SQL = assertReadOnlySql("SELECT DB_NAME() AS db, SUSER_SNAME() AS log
 const DEFAULTS = {
   port: 47616,
   printerName: "Canon G3410 WiFi",
+  printerHost: "",
+  printerHostPort: 631,
   sumatraPath: path.join(APP_DIR, "bin", "SumatraPDF.exe"),
   browserPath: "",
   dataDir: path.join(process.env.LOCALAPPDATA || os.homedir(), "OZK", "ManualA4Print"),
@@ -203,22 +205,49 @@ function runPowerShell(script, timeout) {
   });
 }
 
+// DetectedErrorState في Win32_Printer: ورق/حبر/غطاء/انحشار/Offline/صيانة/درج ممتلئ.
+const PRINTER_BLOCKING_ERRORS = {
+  4: "نفد الورق", 6: "نفد الحبر", 7: "غطاء الطابعة مفتوح", 8: "انحشار ورق",
+  9: "الطابعة غير متصلة", 10: "الطابعة تحتاج صيانة", 11: "درج الإخراج ممتلئ",
+};
+
+// يحكم على حالة الطابعة من حقول الاستعلام. Windows قد يُبقي طابعة الشبكة «جاهزة» وهي لا
+// تردّ، فلا تُعدّ جاهزة إلا إذا ردّت على منفذها حين يكون عنوانها معروفاً.
+function classifyPrinter(f) {
+  const port = f.port || "";
+  const base = { port, printerStatus: f.status, detectedError: f.detected, queuedJobs: f.jobs };
+  if (/^TS\d/i.test(port)) return { state: "redirected", ...base, reason: "منفذ جلسة عن بُعد (RDP) — مرفوض" };
+  if (String(f.offline).trim().toLowerCase() === "true" || Number(f.status) === 7) {
+    return { state: "offline", ...base, reason: "الطابعة غير متصلة (Work Offline)" };
+  }
+  const blocking = PRINTER_BLOCKING_ERRORS[Number(f.detected)];
+  if (blocking) return { state: "error", ...base, reason: blocking };
+  if (Number(f.status) === 6) return { state: "error", ...base, reason: "الطابعة متوقفة" };
+  if (f.reach === "fail") return { state: "unreachable", ...base, target: f.target, reason: `الطابعة لا تردّ على الشبكة (${f.target})` };
+  const warn = Number(f.jobs) > 0 ? `في طابور الطابعة ${f.jobs} مهمة سابقة لم تُطبع` : "";
+  return { state: "ready", ...base, reachable: f.reach === "ok" ? true : null, warning: warn, reason: "" };
+}
+
 function createPrinter(cfg) {
   function probe() {
     if (process.platform !== "win32") return { state: "unknown", reason: "ليس Windows" };
-    const name = cfg.printerName.replace(/'/g, "''");
+    const q = (v) => String(v || "").replace(/'/g, "''");
     const r = runPowerShell(
-      `$p = Get-CimInstance Win32_Printer | Where-Object { $_.Name -eq '${name}' }\n`
+      `$p = Get-CimInstance Win32_Printer | Where-Object { $_.Name -eq '${q(cfg.printerName)}' }\n`
       + `if (-not $p) { 'NOT_FOUND'; exit 0 }\n`
-      + `'FOUND|' + $p.PortName + '|' + $p.WorkOffline + '|' + $p.PrinterStatus`
+      + `$jobs = @(Get-CimInstance Win32_PrintJob | Where-Object { $_.Name -like ($p.Name + ',*') }).Count\n`
+      + `$h = '${q(cfg.printerHost)}'; $n = ${Number(cfg.printerHostPort) || 631}\n`
+      + `$tp = Get-CimInstance Win32_TCPIPPrinterPort | Where-Object { $_.Name -eq $p.PortName } | Select-Object -First 1\n`
+      + `if ($tp -and $tp.HostAddress) { $h = $tp.HostAddress; $n = [int]$tp.PortNumber }\n`
+      + `$reach = 'none'\n`
+      + `if ($h) { $c = New-Object Net.Sockets.TcpClient; try { $reach = if ($c.ConnectAsync($h, $n).Wait(2000)) { 'ok' } else { 'fail' } } catch { $reach = 'fail' } finally { $c.Close() } }\n`
+      + `'FOUND|' + $p.PortName + '|' + $p.WorkOffline + '|' + $p.PrinterStatus + '|' + $p.DetectedErrorState + '|' + $jobs + '|' + $reach + '|' + $h + ':' + $n`
     );
     const out = String(r.stdout || "").trim();
     if (out === "NOT_FOUND") return { state: "missing", reason: `الطابعة "${cfg.printerName}" غير مثبّتة على هذا الجهاز` };
     if (r.status !== 0 || !out.startsWith("FOUND|")) return { state: "unknown", reason: "تعذّر الاستعلام عن الطابعة" };
-    const [, port, offline, status] = out.split("|");
-    if (/^TS\d/i.test(port)) return { state: "redirected", port, reason: "منفذ جلسة عن بُعد (RDP) — مرفوض" };
-    if (String(offline).trim().toLowerCase() === "true") return { state: "offline", port, reason: "الطابعة غير متصلة (Work Offline)" };
-    return { state: "ready", port, printerStatus: status, reason: "" };
+    const [, port, offline, status, detected, jobs, reach, target] = out.split("|");
+    return classifyPrinter({ port, offline, status, detected, jobs, reach, target });
   }
   function send(pdfPath, paper, copies) {
     if (!fs.existsSync(cfg.sumatraPath)) throw new Error(`SumatraPDF غير موجود: ${cfg.sumatraPath}`);
@@ -659,7 +688,7 @@ async function main() {
 }
 
 module.exports = {
-  createApp, createHttpHandler, SESSION_COOKIE, parseSqlConnStr, countPdfPages, loadConfig, DEFAULTS,
+  createApp, classifyPrinter, createHttpHandler, SESSION_COOKIE, parseSqlConnStr, countPdfPages, loadConfig, DEFAULTS,
   SEARCH_SQL, LINES_SQL, BALANCE_SQL, createRenderer,
 };
 
