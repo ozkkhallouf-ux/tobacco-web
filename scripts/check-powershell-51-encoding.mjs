@@ -55,6 +55,10 @@ const EXECUTED_UNDER_PS51 = [
   "tools/sync-approved-prices-to-ameen.ps1",
   "tools/ensure-ameen-sync.ps1",
   "tools/publish-price-sync-heartbeat.ps1",
+  // أحداث فواتير الأمين (2026-10-20، غير مفعَّلة): الوكيل ومكتبته واختبار 5.1
+  "tools/ameen-invoice-event-agent.ps1",
+  "tools/ameen-invoice-events-lib.ps1",
+  "tools/tests/Test-AmeenInvoiceEvents.ps1",
 ];
 
 const ARABIC = /[؀-ۿ]/;
