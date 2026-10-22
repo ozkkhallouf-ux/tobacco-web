@@ -153,7 +153,8 @@ function Get-DailyMovementRows($ConnectionString, $ReportDate) {
   $parsedDate = [DateTime]::ParseExact($ReportDate, "yyyy-MM-dd", $null)
 
   # last_payment_date بتعريف الدفعة الموحّد نفسه في tools/ameen-customer-balances-query.sql
-  # (الكتلة بين علامتَي payment-rule منسوخة حرفياً ويفرض الفحص تطابقها). الموردون على شرطهم السابق.
+  # (الكتلتان payment-rule وsupplier-payment-rule منسوختان حرفياً ويفرض الفحص تطابقهما): القبض
+  # من الزبون، والدفع للمورد.
   $query = @"
 -- payment-rule:begin
 -- تعريف «الدفعة» الموحّد لآخر دفعة وسجل الدفعات وعدّاد نافذة الزخم معاً. كل سطر دائن
@@ -203,6 +204,36 @@ payment_lines as (
     )
 )
 -- payment-rule:end
+-- supplier-payment-rule:begin
+-- «الدفعة» على حساب المورد (الأب المباشر الموردون، نفس is_supplier) هي ما دفعناه له فعلاً:
+-- سطر مدين على حسابه مقابل صندوق من شجرة 13 عدا 135، أو مقابل صفري في قيد غير افتتاحي فيه
+-- دائن على ذلك الصندوق — مرآة payment_lines. كان الشرط السابق يعدّ كل سطر دائن على المورد
+-- «دفعة»، أي فواتير الشراء نفسها، فساوت «آخر دفعة» تاريخ آخر شراء عند 12 من 43 مورداً
+-- (قياس قراءة على AmnDb002 في 2026-10-22). فاتورة الشراء والمرتجع والمبيعات للمورد والحسم
+-- والقيد الافتتاحي والمقاصّة مع حساب آخر خارجها بنيوياً لأن مقابلها ليس صندوقاً.
+, supplier_payment_lines as (
+  select en.GUID
+  from dbo.en000 en
+  left join dbo.ce000 ce on ce.GUID = en.ParentGUID
+  where coalesce(en.Debit, 0) > 0 and coalesce(en.Type, 0) = 0
+    and en.AccountGUID in (
+      select sa.GUID from dbo.ac000 sa join dbo.ac000 sp on sp.GUID = sa.ParentGUID where sp.Name = N'الموردون'
+    )
+    and (
+      en.ContraAccGUID in (select c.GUID from cash_accounts c)
+      or (
+        coalesce(en.ContraAccGUID, '00000000-0000-0000-0000-000000000000') = '00000000-0000-0000-0000-000000000000'
+        and ce.GUID is not null
+        and coalesce(ce.TypeGUID, '00000000-0000-0000-0000-000000000000') <> 'ea69ba80-662d-4fa4-90ee-4d2e1988a8ea'
+        and exists (
+          select 1 from dbo.en000 d
+          where d.ParentGUID = en.ParentGUID and coalesce(d.Credit, 0) > 0
+            and d.AccountGUID in (select c.GUID from cash_accounts c)
+        )
+      )
+    )
+)
+-- supplier-payment-rule:end
 select
   cu.CustomerName as customer_name,
   cu.GUID as customer_guid,
@@ -210,13 +241,15 @@ select
   cast(sum(coalesce(en.Credit, 0)) as decimal(18, 3)) as daily_credit,
   cast(sum(coalesce(en.Debit, 0) - coalesce(en.Credit, 0)) as decimal(18, 3)) as daily_net,
   count(*) as movement_count,
-  max(case when coalesce(en.Credit, 0) > 0 and (acp.Name = N'الموردون' or pl.GUID is not null) then en.Date end) as last_payment_date
+  max(case when (coalesce(acp.Name, N'') <> N'الموردون' and coalesce(en.Credit, 0) > 0 and pl.GUID is not null)
+             or (acp.Name = N'الموردون' and sp.GUID is not null) then en.Date end) as last_payment_date
 from dbo.en000 en
 join dbo.cu000 cu
   on cu.AccountGUID = en.AccountGUID
 left join dbo.ac000 acc on acc.GUID = cu.AccountGUID
 left join dbo.ac000 acp on acp.GUID = acc.ParentGUID
 left join payment_lines pl on pl.GUID = en.GUID
+left join supplier_payment_lines sp on sp.GUID = en.GUID
 where
   en.Date >= @reportDate
   and en.Date < dateadd(day, 1, @reportDate)

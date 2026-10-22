@@ -180,13 +180,67 @@ test("حساب بلا فواتير ولا دفعات: كل الأعمدة NULL",
   assert.deepEqual([R(5).sale, R(5).purchase, R(5).receipt, R(5).paid], [null, null, null, null]);
 });
 
+// ---------------------------------------------------------------------------
+// 1ب) «آخر دفعة» القديمة للمورد (last_payment_* / recentPayments / paymentsInWindow):
+// كانت تعدّ كل دائن على المورد — أي فاتورة الشراء — دفعةً. صارت supplier_payment_lines:
+// ما دفعناه له فعلاً عبر صندوق، مرآة last_cash للبطاقة نفسها.
+const supBegin = sql.indexOf("-- supplier-payment-rule:begin");
+const supEnd = sql.indexOf("-- supplier-payment-rule:end");
+const supBlockRaw = sql.slice(supBegin, supEnd + "-- supplier-payment-rule:end".length);
+const supBlock = sql.slice(supBegin, supEnd).replace(/--[^\n]*/g, "").replace(/\bdbo\./g, "").replace(/\bN'/g, "'").trim();
+const dailySummary = readFileSync(new URL("../tools/ameen-daily-summary.ps1", import.meta.url), "utf8").replace(/\r\n/g, "\n");
+const SUPPLIERS_ROOT = "d0000000-0000-4000-8000-000000000221";
+const CUSTOMER_1241 = "d0000000-0000-4000-8000-000000001241";
+test("كتلة supplier-payment-rule موجودة ومنسوخة حرفياً في ameen-daily-summary.ps1", () => {
+  assert.ok(supBegin > 0 && supEnd > supBegin, "علامتا supplier-payment-rule مفقودتان");
+  assert.ok(dailySummary.includes(supBlockRaw), "الكتلة في الملخص اليومي انحرفت عن استعلام الأرصدة");
+});
+let supRows = [];
+test("قاعدة دفع المورد على SQLite: نقد وقيد مركب فقط", () => {
+  const S = acct(3);
+  const sEn = [];
+  const sCe = [];
+  let k = 0;
+  const L = (parent, account, contra, debit, credit, date) => sEn.push([`s${++k}`, parent, account, contra, debit, credit, date, 0]);
+  const E = (id, type = "e0000000-0000-4000-8000-0000000000aa") => sCe.push([id, type]);
+  E("p1"); L("p1", S, PURCHASES, 0, 300, "2026-10-20T00:00:00");           // فاتورة شراء (دائن) — ليست دفعة
+  E("p2"); L("p2", S, CASH, 100, 0, "2026-10-10T00:00:00");                // دفعة نقدية للمورد
+  E("p3"); L("p3", S, ZERO, 120, 0, "2026-10-19T00:00:00"); L("p3", CASH, ZERO, 0, 120, "2026-10-19T00:00:00"); // قيد مركب بصندوق
+  E("p4"); L("p4", S, PURCHASES, 30, 0, "2026-10-21T00:00:00");            // مرتجع شراء — ليس دفعة
+  E("p5", OPENING_ENTRY_TYPE); L("p5", S, ZERO, 40, 0, "2026-10-22T00:00:00"); L("p5", CASH, ZERO, 0, 40, "2026-10-22T00:00:00"); // افتتاحي
+  E("p6"); L("p6", S, CASH_DIFF_135, 5, 0, "2026-10-22T00:00:00");          // فروقات صندوق 135
+  E("p7"); L("p7", S, SALES, 50, 0, "2026-10-22T00:00:00");                // بيع للمورد
+  E("p8"); L("p8", S, CUSTOMER_1241, 60, 0, "2026-10-22T00:00:00");        // مقاصة مع حساب زبون
+  E("p9"); L("p9", S, DISCOUNT_43, 3, 0, "2026-10-22T00:00:00");           // حسم
+  E("p10"); L("p10", acct(1), CASH, 70, 0, "2026-10-22T00:00:00");         // زبون (ليس تحت الموردون): مدين نقدي ليس دفعة مورد
+  E("p11"); L("p11", S, CASH, 0, 25, "2026-10-22T00:00:00");               // استرداد نقدي من المورد (دائن) — ليس دفعة له
+  E("p12"); L("p12", S, ZERO, 15, 0, "2026-10-22T00:00:00"); L("p12", CASH, ZERO, 15, 0, "2026-10-22T00:00:00"); L("p12", PURCHASES, ZERO, 0, 30, "2026-10-22T00:00:00"); // مركب بلا خروج نقد
+  const query = `with cash_accounts as (select GUID from cash_accounts_fixture)\n${supBlock}\nselect en.GUID as g, en.Date as d from supplier_payment_lines s join en000 en on en.GUID = s.GUID order by en.Date`;
+  supRows = runSql({
+    cash_accounts_fixture: { columns: ["GUID text"], rows: [[CASH]] },
+    ac000: { columns: ["GUID text", "ParentGUID text", "Name text"], rows: [[SUPPLIERS_ROOT, ZERO, "الموردون"], [S, SUPPLIERS_ROOT, "مورد"], [acct(1), ZERO, "زبون"]] },
+    ce000: { columns: ["GUID text", "TypeGUID text"], rows: sCe },
+    en000: { columns: ["GUID text", "ParentGUID text", "AccountGUID text", "ContraAccGUID text", "Debit real", "Credit real", "Date text", "Type integer"], rows: sEn }
+  }, query);
+  assert.equal(supRows.map((r) => r.d).join(","), "2026-10-10T00:00:00,2026-10-19T00:00:00",
+    "دفعات المورد يجب أن تكون النقدية والقيد المركب فقط");
+});
+test("الأماكن الثلاثة للمورد: المبلغ من المدين، والزبون على الدائن كما كان", () => {
+  for (const alias of ["last_payment", "recent_payments"]) {
+    const endAt = sql.indexOf(`) ${alias}\n`);
+    const body = sql.slice(sql.lastIndexOf("outer apply (", endAt), endAt);
+    assert.match(body, /case when acp\.Name = N'الموردون' then en\.Debit else en\.Credit end/, `${alias}: المبلغ لا يتبع الجهة`);
+  }
+  assert.doesNotMatch(sql, /acp\.Name = N'الموردون' or en\.GUID in/, "بقي الشرط القديم «كل دائن على المورد»");
+});
+
 test("الاستعلام يعرض الأعمدة الأربعة ويربط بمعرّف البطاقة وحسابها", () => {
   assert.match(sql, /last_bills\.last_sale_invoice_date,\n\s+last_bills\.last_purchase_invoice_date,\n\s+last_cash\.last_receipt_date,\n\s+last_cash\.last_disbursement_date\n/);
   assert.match(sql, /left join last_bills on last_bills\.cust_guid = cu\.GUID\nleft join last_cash on last_cash\.acct = cu\.AccountGUID\n/);
 });
 test("balance وآخر دفعة القديمة لم يتغيّرا", () => {
   assert.match(sql, /cast\(coalesce\(ac\.Debit, 0\) - coalesce\(ac\.Credit, 0\) as decimal\(18, 3\)\) as balance,/);
-  assert.match(sql, /select top 1 en\.Credit as last_payment_amount, en\.Date as last_payment_date/);
+  assert.match(sql, /select top 1 case when acp\.Name = N'الموردون' then en\.Debit else en\.Credit end as last_payment_amount, en\.Date as last_payment_date/);
 });
 test("وكيل المزامنة يمرّر الحقول الأربعة ويرفع العلامة فقط إن حملها الاستعلام", () => {
   for (const f of ["lastSaleInvoiceDate = To-IsoDate $row.last_sale_invoice_date", "lastPurchaseInvoiceDate = To-IsoDate $row.last_purchase_invoice_date",
