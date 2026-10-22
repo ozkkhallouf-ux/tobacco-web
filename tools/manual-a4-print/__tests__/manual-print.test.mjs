@@ -270,12 +270,39 @@ test("عدد نسخ خارج الحد مرفوض، والطابعة غير ال�
   assert.equal(off.sent.length, 1);
 });
 
+const TEST_KEY = "a".repeat(64);
+const AUTH_COOKIE = `${server.SESSION_COOKIE}=${TEST_KEY}`;
+
+test("HTTP: كل مسار يتطلب مفتاح الجلسة، و/?k يحوّله إلى كوكي HttpOnly", async () => {
+  const { app, cfg } = makeApp({ browserPath: "" });
+  const h = server.createHttpHandler(app, cfg, TEST_KEY);
+  const call = (method, url, headers) => new Promise((resolve) => {
+    const res = { status: 0, headers: {}, writeHead(s, hd) { this.status = s; this.headers = hd; }, end(b) { resolve({ status: this.status, headers: this.headers, body: String(b) }); } };
+    h.handle({ method, url, headers: { host: `127.0.0.1:${cfg.port}`, ...headers }, on: () => undefined }, res);
+  });
+  // بلا كوكي: البحث والفحص والمعاينة والواجهة نفسها مرفوضة؛ ping وحده مسموح.
+  for (const u of ["/api/search?number=42", "/api/health", "/", `/preview/${"0".repeat(32)}.pdf`]) {
+    assert.equal((await call("GET", u)).status, 401, u);
+  }
+  assert.equal((await call("POST", "/api/print", { "x-ozk": "1" })).status, 401);
+  assert.equal((await call("GET", "/api/search?number=42", { cookie: `${server.SESSION_COOKIE}=${"b".repeat(64)}` })).status, 401);
+  assert.equal((await call("GET", "/api/ping")).status, 200);
+  // مفتاح خاطئ في الرابط مرفوض؛ الصحيح يضع كوكي HttpOnly SameSite=Strict ويوجّه إلى /.
+  assert.equal((await call("GET", "/?k=wrong")).status, 403);
+  const login = await call("GET", `/?k=${TEST_KEY}`);
+  assert.equal(login.status, 303);
+  assert.equal(login.headers.Location, "/");
+  assert.match(login.headers["Set-Cookie"], /HttpOnly/);
+  assert.match(login.headers["Set-Cookie"], /SameSite=Strict/);
+  assert.equal((await call("GET", "/api/search?number=42", { cookie: AUTH_COOKIE })).status, 200);
+});
+
 test("HTTP: مضيف غير محلي مرفوض، وPOST بلا ترويسة X-OZK مرفوض", async () => {
   const { app, cfg } = makeApp({ browserPath: "" });
-  const h = server.createHttpHandler(app, cfg);
+  const h = server.createHttpHandler(app, cfg, TEST_KEY);
   const call = (method, url, headers) => new Promise((resolve) => {
     const res = { status: 0, writeHead(s) { this.status = s; }, end(b) { resolve({ status: this.status, body: String(b) }); } };
-    const req = { method, url, headers: { host: `127.0.0.1:${cfg.port}`, ...headers }, on: () => undefined };
+    const req = { method, url, headers: { host: `127.0.0.1:${cfg.port}`, cookie: AUTH_COOKIE, ...headers }, on: () => undefined };
     h.handle(req, res);
   });
   assert.equal((await call("GET", "/api/ping", { host: "evil.example:80" })).status, 403);
@@ -298,13 +325,13 @@ test("تحليل سلسلة الاتصال: مثيل ومنفذ واسم مست�
 async function httpSearch(ameenSearch) {
   const { app, cfg, ameen } = makeApp({ browserPath: "" });
   ameen.search = ameenSearch;
-  const h = server.createHttpHandler(app, cfg);
+  const h = server.createHttpHandler(app, cfg, TEST_KEY);
   const origError = console.error;
   console.error = () => undefined;
   try {
     return await new Promise((resolve) => {
       const res = { status: 0, writeHead(st) { this.status = st; }, end(b) { resolve({ status: this.status, body: String(b) }); } };
-      h.handle({ method: "GET", url: "/api/search?number=42", headers: { host: `127.0.0.1:${cfg.port}` }, on: () => undefined }, res);
+      h.handle({ method: "GET", url: "/api/search?number=42", headers: { host: `127.0.0.1:${cfg.port}`, cookie: AUTH_COOKIE }, on: () => undefined }, res);
     });
   } finally {
     console.error = origError;

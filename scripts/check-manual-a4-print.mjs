@@ -24,6 +24,9 @@ for (const ps of ["launch.ps1", "install.ps1", "set-sql-secret.ps1", "autoprint-
   const t = read(ps);
   assert.doesNotMatch(t, /Print ?Bridge.*(Disable|Stop|Unregister)|XPRINTER/i, `${ps} لا يلمس جسر الكاشير`);
 }
+const ui = read("ui/index.html");
+assert.match(ui, /if \(gen !== previewGen \|\| !selected \|\| selected\.guid !== want\.guid/, "استجابة معاينة متأخرة تُهمَل ولا تستبدل رمز الطباعة");
+assert.match(server, /if \(!sameKey\(cookieValue\(req, SESSION_COOKIE\), sessionKey\)\)/, "كل مسار يتطلب كوكي الجلسة");
 const mode = read("autoprint-mode.ps1");
 assert.match(mode, /\$Task = 'OZK-AmeenAutoPrint'/, "التبديل محصور بمهمة Canon وحدها");
 assert.match(mode, /AcceptBacklog/, "الاسترجاع يشترط إقراراً صريحاً بدفعة اللحاق");

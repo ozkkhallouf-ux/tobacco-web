@@ -103,11 +103,15 @@
   };
   const fmtTime = (iso) => { try { return new Date(iso).toLocaleString("ar-SY"); } catch { return iso; } };
   let health = null, selected = null, previewToken = null, busy = false, maxCopies = 5;
+  // رقم جيل المعاينة: كل اختيار أو تغيير ورق أو بحث جديد يرفعه، فتُهمَل استجابة
+  // معاينة أقدم وصلت متأخرة ولا تحلّ رمزها محلّ رمز الاختيار الحالي.
+  let previewGen = 0;
 
   async function api(path, body) {
     const opt = body ? { method: "POST", headers: { "Content-Type": "application/json", "X-OZK": "1" }, body: JSON.stringify(body) } : {};
     const r = await fetch(path, opt);
     const j = await r.json().catch(() => ({}));
+    if (r.status === 401) throw new Error("انتهت الجلسة — أغلق النافذة وافتح الأداة من اختصار سطح المكتب.");
     if (!r.ok) throw new Error(j.error || ("HTTP " + r.status));
     return j;
   }
@@ -134,6 +138,7 @@
   }
 
   function resetPreview() {
+    previewGen++;
     previewToken = null;
     $("printBtn").disabled = true;
     $("pdf").style.display = "none"; $("pdf").removeAttribute("src");
@@ -183,9 +188,12 @@
   async function loadPreview() {
     if (!selected) return;
     resetPreview();
+    const gen = previewGen;
+    const want = { guid: selected.guid, paper: $("paper").value };
     msg("previewMsg", "warn", "جارٍ توليد المعاينة…");
     try {
-      const p = await api("/api/preview", { guid: selected.guid, paper: $("paper").value });
+      const p = await api("/api/preview", want);
+      if (gen !== previewGen || !selected || selected.guid !== want.guid || p.invoice.guid !== want.guid || p.paper !== want.paper) return;
       previewToken = p.token;
       $("emptyPreview").style.display = "none";
       $("pdf").src = p.pdfUrl; $("pdf").style.display = "";
@@ -198,7 +206,7 @@
       msg("previewMsg", p.fontOk ? "ok" : "err", notes.join("<br>"));
       $("printBtn").disabled = !p.fontOk;
     } catch (e) {
-      msg("previewMsg", "err", esc(e.message));
+      if (gen === previewGen) msg("previewMsg", "err", esc(e.message));
     }
   }
   $("paper").addEventListener("change", loadPreview);

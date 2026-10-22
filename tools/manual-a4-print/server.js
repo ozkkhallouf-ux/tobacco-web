@@ -16,6 +16,7 @@
 // ============================================================================
 
 const fs = require("fs");
+const crypto = require("crypto");
 const os = require("os");
 const path = require("path");
 const http = require("http");
@@ -416,17 +417,52 @@ function httpError(status, message) {
 }
 
 // ─── HTTP ───────────────────────────────────────────────────────────────────
-function createHttpHandler(app, cfg) {
+// مصادقة الجلسة: المنفذ المحلي يصل إليه أي مستخدم أو عملية على الجهاز، والترويسة
+// X-OZK ثابتة معروفة. فيولّد الخادم عند إقلاعه مفتاحاً عشوائياً يكتبه في ملف داخل
+// %LOCALAPPDATA% للمستخدم (لا يقرؤه مستخدم آخر غير مدير). launch.ps1 يقرؤه ويفتح
+// /?k=<المفتاح> مرة واحدة، فيحوّله الخادم إلى كوكي HttpOnly ثم يعيد التوجيه إلى /.
+// كل مسار غير /?k يتطلب الكوكي.
+const SESSION_COOKIE = "ozk_s";
+
+function newSessionKey() {
+  return crypto.randomBytes(32).toString("hex");
+}
+
+function writeSessionKeyFile(file, key) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, key, { encoding: "utf8", mode: 0o600 });
+  fs.renameSync(tmp, file);
+}
+
+function sameKey(a, b) {
+  const x = Buffer.from(String(a || ""));
+  const y = Buffer.from(String(b || ""));
+  return x.length === y.length && x.length > 0 && crypto.timingSafeEqual(x, y);
+}
+
+function cookieValue(req, name) {
+  for (const part of String(req.headers.cookie || "").split(";")) {
+    const eq = part.indexOf("=");
+    if (eq > 0 && part.slice(0, eq).trim() === name) return part.slice(eq + 1).trim();
+  }
+  return "";
+}
+
+function createHttpHandler(app, cfg, sessionKey) {
+  if (!sessionKey) throw new Error("مفتاح الجلسة مطلوب");
   const uiFile = path.join(APP_DIR, "ui", "index.html");
   const allowedHosts = new Set([`127.0.0.1:${cfg.port}`, `localhost:${cfg.port}`]);
   let lastActivity = Date.now();
 
-  function send(res, status, body, type) {
+  function send(res, status, body, type, extraHeaders) {
     res.writeHead(status, {
       "Content-Type": type || "application/json; charset=utf-8",
       "Cache-Control": "no-store",
       "X-Content-Type-Options": "nosniff",
       "X-Frame-Options": "SAMEORIGIN",
+      "Referrer-Policy": "no-referrer",
+      ...(extraHeaders || {}),
     });
     res.end(typeof body === "string" || Buffer.isBuffer(body) ? body : JSON.stringify(body));
   }
@@ -481,11 +517,31 @@ function createHttpHandler(app, cfg) {
     return "";
   }
 
+  // /?k=<مفتاح> ⇒ كوكي الجلسة ثم توجيه إلى / (لا يبقى المفتاح في الشريط).
+  function tryLogin(req, res, url) {
+    if (req.method !== "GET" || url.pathname !== "/" || !url.searchParams.has("k")) return false;
+    if (!sameKey(url.searchParams.get("k"), sessionKey)) {
+      send(res, 403, "مفتاح جلسة غير صالح — افتح الأداة من اختصار سطح المكتب.", "text/plain; charset=utf-8");
+      return true;
+    }
+    send(res, 303, "", "text/plain; charset=utf-8", {
+      Location: "/",
+      "Set-Cookie": `${SESSION_COOKIE}=${sessionKey}; HttpOnly; SameSite=Strict; Path=/`,
+    });
+    return true;
+  }
+
   async function handle(req, res) {
     lastActivity = Date.now();
     const reject = rejectReason(req);
     if (reject) return send(res, 403, { error: reject });
     const url = new URL(req.url, `http://${req.headers.host}`);
+    if (tryLogin(req, res, url)) return undefined;
+    // /api/ping بلا مصادقة: لا يعيد شيئاً سوى أن الخادم حيّ (يحتاجه launch.ps1).
+    if (req.method === "GET" && url.pathname === "/api/ping") return send(res, 200, { ok: true });
+    if (!sameKey(cookieValue(req, SESSION_COOKIE), sessionKey)) {
+      return send(res, 401, { error: "الجلسة غير مصادَق عليها — افتح الأداة من اختصار سطح المكتب." });
+    }
     try {
       const route = routes[`${req.method} ${url.pathname}`];
       if (route) {
@@ -580,14 +636,19 @@ async function main() {
   const cfg = loadConfig();
   const { app, deps } = buildRealApp(cfg);
   cleanupPreviews(app.previewDir, 24 * 3600 * 1000);
-  const handler = createHttpHandler(app, cfg);
+  const sessionKey = newSessionKey();
+  const handler = createHttpHandler(app, cfg, sessionKey);
   const server = http.createServer((req, res) => { handler.handle(req, res); });
   server.on("error", (err) => {
     // المنفذ محجوز ⇒ نسخة أخرى تعمل؛ launch.ps1 يفتح الواجهة عليها.
     console.error(err.code === "EADDRINUSE" ? "نسخة أخرى تعمل على المنفذ نفسه" : String(err));
     process.exit(err.code === "EADDRINUSE" ? 3 : 1);
   });
-  server.listen(cfg.port, "127.0.0.1", () => console.log(`OZK manual A4 print ${VERSION} على http://127.0.0.1:${cfg.port}/ (dryRun=${cfg.dryRun})`));
+  server.listen(cfg.port, "127.0.0.1", () => {
+    // المفتاح يُكتب بعد حجز المنفذ فقط: نسخة ثانية مرفوضة لا تكتب فوق مفتاح الأولى.
+    writeSessionKeyFile(path.join(cfg.dataDir, "session.key"), sessionKey);
+    console.log(`OZK manual A4 print ${VERSION} على http://127.0.0.1:${cfg.port}/ (dryRun=${cfg.dryRun})`);
+  });
   const idleLimit = Number(cfg.idleExitMinutes) * 60 * 1000;
   setInterval(async () => {
     if (idleLimit > 0 && handler.idleMs() > idleLimit) {
@@ -598,7 +659,7 @@ async function main() {
 }
 
 module.exports = {
-  createApp, createHttpHandler, parseSqlConnStr, countPdfPages, loadConfig, DEFAULTS,
+  createApp, createHttpHandler, SESSION_COOKIE, parseSqlConnStr, countPdfPages, loadConfig, DEFAULTS,
   SEARCH_SQL, LINES_SQL, BALANCE_SQL, createRenderer,
 };
 

@@ -5,6 +5,7 @@ $AppDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $DataRoot = Join-Path $env:ProgramData 'OZK\ManualA4Print'
 $SecretFile = Join-Path $DataRoot 'sql.secret'
 $UserData = Join-Path $env:LOCALAPPDATA 'OZK\ManualA4Print'
+$KeyFile = Join-Path $UserData 'session.key'
 
 function Show-Error([string]$Text) {
     Add-Type -AssemblyName System.Windows.Forms
@@ -44,6 +45,8 @@ try {
             $node = $cmd.Source
         }
         New-Item -ItemType Directory -Force -Path $UserData | Out-Null
+        # مفتاح جلسة سابقة (خادم توقف) لا يصلح للخادم الجديد.
+        Remove-Item -LiteralPath $KeyFile -ErrorAction SilentlyContinue
         Start-Process -FilePath $node -ArgumentList @('server.js') -WorkingDirectory $AppDir -WindowStyle Hidden `
             -RedirectStandardOutput (Join-Path $UserData 'server.out.log') -RedirectStandardError (Join-Path $UserData 'server.err.log')
         Remove-Item Env:\OZK_MANUAL_PRINT_SQL -ErrorAction SilentlyContinue
@@ -58,7 +61,14 @@ try {
         }
     }
 
-    $url = "http://127.0.0.1:$port/"
+    # مفتاح الجلسة يكتبه الخادم في مجلد المستخدم؛ يُمرَّر مرة واحدة ويتحوّل إلى كوكي.
+    $deadline = (Get-Date).AddSeconds(10)
+    while (-not (Test-Path $KeyFile)) {
+        if ((Get-Date) -gt $deadline) { throw 'لم يُنشئ الخادم مفتاح الجلسة.' }
+        Start-Sleep -Milliseconds 200
+    }
+    $key = (Get-Content -Raw -Encoding UTF8 $KeyFile).Trim()
+    $url = "http://127.0.0.1:$port/?k=$key"
     $edge = @("${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe", "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe") |
         Where-Object { Test-Path $_ } | Select-Object -First 1
     if ($edge) { Start-Process -FilePath $edge -ArgumentList @("--app=$url", '--window-size=1280,860') }
