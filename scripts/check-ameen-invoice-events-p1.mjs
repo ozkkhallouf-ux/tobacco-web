@@ -54,18 +54,72 @@ assert.match(cStub, /if to_regprocedure\('public\.is_staff\(\)'\) is null then/,
 assert.match(cStub, /\$body\$ select false \$body\$/, "البديل رفض افتراضي");
 assert.match(cStub, /raise warning '20260914125959: public\.is_staff\(\) absent/, "إنشاء البديل يُعلَن ولا يمرّ صامتاً");
 assert.doesNotMatch(cStub, /create or replace function|grant |revoke |drop |alter /i, "الشرط المسبق لا يستبدل ولا يغيّر صلاحيات");
-// السلسلة الفعلية (Codex P1 على 092f2ce4): كل هجرة «تتطلب» is_staff() تأتي بعد الشرط المسبق.
-// تصنيف كل هجرة فعّالة تذكر is_staff():
-//   «تؤجّل»  = تفحص to_regprocedure('public.is_staff()') وتتخطى ما يعتمد عليها حين تغيب (notice/تأجيل) — تعمل بلا الدالة.
-//   «تتطلب» = تستعملها بلا ذلك الفحص، أو تفحص وترفع exception حين تغيب (مثل 18: «requires public.is_staff()»).
-// الشرط: كل «تتطلب» بإصدار أحدث من الشرط المسبق. «تؤجّل» حرّة الموضع. الترتيب بالإصدار كما يطبّقه Supabase.
-const IS_STAFF_GUARD = /if\s+to_regprocedure\('public\.is_staff\(\)'\)\s+is\s+null\s+then([\s\S]*?)end\s+if/gi;
+// السلسلة الفعلية (Codex P1 على 092f2ce4 و#351): كل هجرة «تتطلب» is_staff() تأتي بعد الشرط المسبق.
+// التصنيف لكل استعمال على حدة (لا للملف كله — Codex P1 على bf18d616): الاستعمال «محمي» فقط إن كان
+//   ١) في فرع else لـ «if to_regprocedure('public.is_staff()') is null then … else … end if»، أو في فرع then
+//      لـ «if to_regprocedure('public.is_staff()') is not null … then»؛ أو
+//   ٢) بعد حارس «is null then … return; end if;» في كتلة DO نفسها (خروج مبكر حين تغيب الدالة)؛ أو
+//   ٣) مسبوقاً في العبارة نفسها بـ «to_regprocedure('public.is_staff()') is not null and» (حارس وقت التشغيل).
+// نص رسائل raise وcomment … is لا يُعدّ استعمالاً. الملف «يؤجّل» إن كانت كل استعمالاته محمية، و«يتطلب» إن وُجد
+// استعمال واحد غير محمي (ومنه حارس يرفع exception ثم يستعمل الدالة، مثل 18). «يؤجّل» حرّ الموضع.
+const GUARD_COND = String.raw`to_regprocedure\('public\.is_staff\(\)'\)\s+is\s+`;
+function maskMessageLiterals(c) {
+  // يستبدل محتوى النصوص الحرفية التي هي رسائل (raise <level> '…' أو comment on … is '…') بمسافات، مع حفظ المواقع.
+  let out = c;
+  for (const m of c.matchAll(/'(?:[^']|'')*'/g)) {
+    const before = c.slice(Math.max(0, m.index - 80), m.index);
+    if (/(raise\s+(notice|warning|info|log|debug|exception)|\bis)\s*$/i.test(before)) {
+      out = out.slice(0, m.index) + " ".repeat(m[0].length) + out.slice(m.index + m[0].length);
+    }
+  }
+  return out;
+}
+function isStaffUseProtected(c, p) {
+  // ٣) حارس وقت التشغيل في العبارة نفسها
+  const stmtStart = c.lastIndexOf(";", p) + 1;
+  if (new RegExp(`${GUARD_COND}not\\s+null\\s+and\\s+[\\s\\S]*$`, "i").test(c.slice(stmtStart, p))) return true;
+  // ٢) خروج مبكر في كتلة DO نفسها
+  for (const d of c.matchAll(/\bdo\s+(\$\w*\$)([\s\S]*?)\1/gi)) {
+    const bodyStart = d.index + d[0].indexOf(d[1]) + d[1].length;
+    const bodyEnd = bodyStart + d[2].length;
+    if (p < bodyStart || p > bodyEnd) continue;
+    const re = new RegExp(`\\bif\\s+${GUARD_COND}null\\s+then([\\s\\S]*?)\\bend\\s+if\\b`, "gi");
+    for (const g of d[2].matchAll(re)) {
+      if (bodyStart + g.index + g[0].length <= p && /\breturn\b/i.test(g[1]) && !/\braise\s+exception\b/i.test(g[1])) return true;
+    }
+  }
+  // ١) فرع محمي لحارس if — مسح بنيوي بمكدّس (if/elsif/else/end if، وcase/end لتجاهل else التعبيرات)
+  const stack = [];
+  const tok = /\bend\s+if\b|\bend\s+case\b|\bend\b|\belsif\b|\belse\b|\bcase\b|\bif\b/gi;
+  for (const t of c.matchAll(tok)) {
+    if (t.index >= p) break;
+    const w = t[0].toLowerCase().replace(/\s+/g, " ");
+    if (w === "if") {
+      const rest = c.slice(t.index, c.indexOf(";", t.index) === -1 ? c.length : c.indexOf(";", t.index));
+      if (!/\bthen\b/i.test(rest)) continue; // «if exists» / «if not exists» في DDL ليست جملة if
+      const kind = new RegExp(`^if\\s+${GUARD_COND}null\\s+then`, "i").test(rest) ? "null"
+        : new RegExp(`^if\\s+${GUARD_COND}not\\s+null\\b`, "i").test(rest) ? "notnull" : "other";
+      stack.push({ type: "if", kind, branch: "then" });
+    } else if (w === "elsif" || w === "else") {
+      const top = stack[stack.length - 1];
+      if (top) top.branch = top.type === "if" && w === "elsif" ? "elsif" : "else";
+    } else if (w === "case") {
+      stack.push({ type: "case" });
+    } else if (w === "end if") {
+      while (stack.length && stack[stack.length - 1].type !== "if") stack.pop();
+      stack.pop();
+    } else if (w === "end case" || w === "end") {
+      if (stack.length && stack[stack.length - 1].type === "case") stack.pop();
+    }
+  }
+  return stack.some((f) => f.type === "if" && ((f.kind === "null" && f.branch === "else") || (f.kind === "notnull" && f.branch === "then")));
+}
 function classifyIsStaffUse(sql) {
-  const c = code(sql);
-  if (!/\bis_staff\(\)/.test(c)) return "none";
-  const guards = [...c.matchAll(IS_STAFF_GUARD)];
-  if (guards.length === 0) return "requires";
-  return guards.some((g) => /\braise\s+exception\b/i.test(g[1])) ? "requires" : "defers";
+  const c = maskMessageLiterals(code(sql));
+  // وسيط to_regprocedure('public.is_staff()') هو الحارس نفسه لا استدعاء للدالة
+  const uses = [...c.matchAll(/(?<!to_regprocedure\('(?:public\.)?)\bis_staff\(\)/g)].map((m) => m.index);
+  if (uses.length === 0) return "none";
+  return uses.every((p) => isStaffUseProtected(c, p)) ? "defers" : "requires";
 }
 // files: [{ name, sql }] بأي ترتيب؛ يعيد قائمة المخالفات (فارغة = سليم).
 function isStaffChainViolations(files, stubName) {
@@ -88,6 +142,25 @@ function isStaffChainViolations(files, stubName) {
   assert.equal(classifyIsStaffUse(bare), "requires");
   assert.equal(classifyIsStaffUse(unrelated), "none");
   assert.equal(classifyIsStaffUse(m18), "requires", "18 تتطلب is_staff (ترفع exception حين تغيب)");
+  // Codex P1 (bf18d616): حارس لا يرمي في موضع، واستعمال غير محمي في موضع آخر من الملف نفسه ⇒ «تتطلب»
+  const noticeThenBare = "do $$ begin if to_regprocedure('public.is_staff()') is null then raise notice 'skip'; end if; end $$; create policy p on t using (is_staff());";
+  const returnOwnBlockThenBare = "do $g$ begin if to_regprocedure('public.is_staff()') is null then raise notice 'skip'; return; end if; end $g$; create policy p on t using (is_staff());";
+  const earlyReturn = "do $g$ begin if to_regprocedure('public.is_staff()') is null then raise notice 'skip public.is_staff() absent'; return; end if; if not exists (select 1) then create policy p on t using (is_staff()); end if; end $g$;";
+  const runtime = "create function f() returns boolean language plpgsql as $f$ begin if (to_regprocedure('public.is_staff()') is not null and public.is_staff()) then return true; end if; return false; end $f$;";
+  const notNullBlock = "do $$ begin if to_regprocedure('public.is_staff()') is not null then execute 'create policy p on t using (is_staff())'; end if; end $$;";
+  const caseInside = "do $$ begin if to_regprocedure('public.is_staff()') is null then raise notice 'x'; else perform case when true then 1 else 2 end; create policy p on t using (is_staff()); end if; end $$;";
+  const messageOnly = "do $$ begin raise notice 'needs public.is_staff() later'; end $$; comment on table t is 'gated by is_staff()';";
+  assert.equal(classifyIsStaffUse(noticeThenBare), "requires", "حارس notice ثم استعمال خارجه ⇒ تتطلب");
+  assert.equal(classifyIsStaffUse(returnOwnBlockThenBare), "requires", "return من كتلة DO أخرى لا يحمي ما بعدها ⇒ تتطلب");
+  assert.equal(classifyIsStaffUse(earlyReturn), "defers", "خروج مبكر في كتلة DO نفسها يحمي ما بعده");
+  assert.equal(classifyIsStaffUse(runtime), "defers", "حارس وقت التشغيل is not null and يحمي");
+  assert.equal(classifyIsStaffUse(notNullBlock), "defers", "فرع then لحارس is not null يحمي");
+  assert.equal(classifyIsStaffUse(caseInside), "defers", "else تعبير case لا يُربك تتبّع فرع الحارس");
+  assert.equal(classifyIsStaffUse(messageOnly), "none", "نص الرسائل ليس استعمالاً");
+  // الهجرات الحقيقية: الثلاث المحروسة «تؤجّل» فعلاً لكل استعمال، والأولى غير المحروسة «تتطلب»
+  for (const f of ["20260827110254_add_item_guid_to_approved_price_items.sql", "20260830141802_khalil_audit_log.sql", "20260902080000_p2_heartbeat_rls_initplan.sql"]) {
+    assert.equal(classifyIsStaffUse(read(`supabase/migrations/${f}`)), "defers", `${f}: كل استعمال محمي`);
+  }
   const good = [
     { name: "20260827110254_defers.sql", sql: defers }, { name: stubName, sql: stub },
     { name: "20260914130000_bare.sql", sql: bare }, { name: "20261022034859_raises.sql", sql: raises },
