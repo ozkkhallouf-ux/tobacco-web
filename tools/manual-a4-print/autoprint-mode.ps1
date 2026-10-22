@@ -22,11 +22,21 @@ $Backup = Join-Path $env:ProgramData 'OZK\ManualA4Print\autoprint-task-backup'
 if (@($Status, $Disable, $Restore | Where-Object { $_ }).Count -ne 1) { throw 'اختر واحداً: -Status أو -Disable أو -Restore' }
 if ($env:COMPUTERNAME -ne 'OZK2026') { throw "هذا السكربت لـOZK2026 فقط (الجهاز الحالي $env:COMPUTERNAME)" }
 
+# عملية المراقب: node بسطر أوامر فيه watcher.js. المهمة تشغّله عبر run-watcher.bat من مجلده،
+# فسطره قد يكون «node watcher.js» بلا مسار؛ لذلك يُقبل إن ذكر سطره أو سطر أبيه ameen-autoprint.
+function Get-WatcherProcs {
+    $all = @(Get-CimInstance Win32_Process)
+    $all | Where-Object { $_.Name -eq 'node.exe' -and $_.CommandLine -match '(^|[\\/\s"])watcher\.js' } | Where-Object {
+        $p = $_; $parent = $all | Where-Object { $_.ProcessId -eq $p.ParentProcessId } | Select-Object -First 1
+        ($p.CommandLine -match 'ameen-autoprint') -or ($parent -and $parent.CommandLine -match 'ameen-autoprint|run-watcher')
+    }
+}
+
 function Get-State {
     $t = Get-ScheduledTask -TaskName $Task -ErrorAction SilentlyContinue
     if (-not $t) { throw "المهمة $Task غير موجودة" }
     $i = Get-ScheduledTaskInfo -TaskName $Task
-    $procs = @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.CommandLine -match 'ameen-autoprint\\watcher\.js' })
+    $procs = @(Get-WatcherProcs)
     [pscustomobject]@{
         Task = $Task; State = [string]$t.State; Enabled = $t.Settings.Enabled
         LastRun = $i.LastRunTime; LastResult = $i.LastTaskResult
@@ -44,10 +54,11 @@ if ($Disable) {
     Stop-ScheduledTask -TaskName $Task
     Disable-ScheduledTask -TaskName $Task | Out-Null
     # المهمة تشغّل run-watcher.bat الذي يشغّل node؛ إيقاف المهمة قد يترك node حياً.
-    Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.CommandLine -match 'ameen-autoprint\\watcher\.js' } |
-        ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+    Get-WatcherProcs | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
     Start-Sleep -Seconds 2
-    'AFTER:'; Get-State | Format-List
+    $after = Get-State
+    'AFTER:'; $after | Format-List
+    if ($after.WatcherPids) { throw "المراقب ما زال يعمل (PID $($after.WatcherPids)) بعد التعطيل." }
     "BACKUP: $Backup\$Task-$stamp.xml"
     return
 }
