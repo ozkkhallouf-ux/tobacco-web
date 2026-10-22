@@ -462,7 +462,7 @@ function createHttpHandler(app, cfg, sessionKey) {
       "X-Content-Type-Options": "nosniff",
       "X-Frame-Options": "SAMEORIGIN",
       "Referrer-Policy": "no-referrer",
-      ...(extraHeaders || {}),
+      ...extraHeaders,
     });
     res.end(typeof body === "string" || Buffer.isBuffer(body) ? body : JSON.stringify(body));
   }
