@@ -1,0 +1,11 @@
+{
+  "port": 47616,
+  "printerName": "Canon G3410 WiFi",
+  "dryRun": true,
+  "maxCopies": 5,
+  "papers": ["A4"],
+  "requireOfficialFont": true,
+  "autoPrintStatePath": "",
+  "autoPrintTaskName": "",
+  "idleExitMinutes": 120
+}

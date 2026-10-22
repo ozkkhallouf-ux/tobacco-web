@@ -1,0 +1,548 @@
+"use strict";
+// ============================================================================
+// OZK - طباعة فواتير A4 (يدوياً عند الطلب) — خادم محلي على 127.0.0.1 فقط
+//
+// المستخدم يُدخل رقم الفاتورة ← بحث في AmnDb002 (SELECT فقط) ← اختيار السجل
+// الصحيح عند تكرار الرقم بين الأنواع ← معاينة PDF بالقالب الرسمي وخط Cairo ←
+// طباعة بعدد نسخ على Canon عبر SumatraPDF.
+//
+// لا يكتب شيئاً في الأمين. السجل محلي (JSON Lines). مستقل عن الموقع وعن
+// مراقب الطباعة التلقائية: يستعمل قالبه (invoice-html.js) واستعلام الرصيد نفسيهما
+// قراءةً فقط، ولا يلمس ملف حالته ولا مهمته.
+//
+//   node server.js                 تشغيل الخادم (يفتحه launch.ps1)
+//   node server.js --health        فحص الجاهزية وطباعة النتيجة JSON ثم خروج
+//   node server.js --selftest N    بحث + معاينة PDF للفاتورة N بلا طباعة ثم خروج
+// ============================================================================
+
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const http = require("http");
+const { spawnSync } = require("child_process");
+
+const { assertReadOnlySql } = require("./lib/sql-guard");
+const model = require("./lib/invoice-model");
+const { paperFor, pdfOptions, sumatraSettings, applyPaperCss } = require("./lib/paper");
+const { createPrintLog } = require("./lib/print-log");
+const { createPrintGuard } = require("./lib/print-guard");
+
+const APP_DIR = __dirname;
+const AUTOPRINT_DIR = path.join(APP_DIR, "..", "ameen-autoprint");
+const VERSION = (() => {
+  try { return fs.readFileSync(path.join(APP_DIR, "VERSION"), "utf8").trim(); } catch { return "dev"; }
+})();
+
+const SEARCH_SQL = assertReadOnlySql(fs.readFileSync(path.join(APP_DIR, "lib", "search-query.sql"), "utf8"));
+const LINES_SQL = assertReadOnlySql(fs.readFileSync(path.join(APP_DIR, "lib", "lines-query.sql"), "utf8"));
+const BALANCE_SQL = assertReadOnlySql(fs.readFileSync(path.join(AUTOPRINT_DIR, "ameen-customer-balance-query.sql"), "utf8"));
+const PING_SQL = assertReadOnlySql("SELECT DB_NAME() AS db, SUSER_SNAME() AS login");
+
+// ─── الإعداد ────────────────────────────────────────────────────────────────
+const DEFAULTS = {
+  port: 47616,
+  printerName: "Canon G3410 WiFi",
+  sumatraPath: path.join(APP_DIR, "bin", "SumatraPDF.exe"),
+  browserPath: "",
+  dataDir: path.join(process.env.LOCALAPPDATA || os.homedir(), "OZK", "ManualA4Print"),
+  dryRun: true,
+  maxCopies: 5,
+  papers: ["A4"],
+  allowedTypeGuids: model.DEFAULT_ALLOWED_TYPE_GUIDS,
+  requireOfficialFont: true,
+  autoPrintStatePath: "",
+  autoPrintTaskName: "",
+  idleExitMinutes: 120,
+};
+
+function loadConfig() {
+  const file = process.env.OZK_MANUAL_PRINT_CONFIG || path.join(APP_DIR, "config.json");
+  let user = {};
+  if (fs.existsSync(file)) user = JSON.parse(fs.readFileSync(file, "utf8").replace(/^\uFEFF/, ""));
+  const cfg = { ...DEFAULTS, ...user };
+  if (!path.isAbsolute(cfg.sumatraPath)) cfg.sumatraPath = path.join(APP_DIR, cfg.sumatraPath);
+  cfg.maxCopies = Math.max(1, Math.min(10, Number(cfg.maxCopies) || 5));
+  return cfg;
+}
+
+// ─── SQL ────────────────────────────────────────────────────────────────────
+function parseSqlConnStr(cs) {
+  const kv = {};
+  String(cs || "").split(";").forEach((part) => {
+    const eq = part.indexOf("=");
+    if (eq > 0) {
+      let val = part.slice(eq + 1).trim();
+      if (val.length >= 2 && val[0] === '"' && val[val.length - 1] === '"') val = val.slice(1, -1);
+      kv[part.slice(0, eq).trim().toLowerCase()] = val;
+    }
+  });
+  let server = kv["server"] || kv["data source"] || "localhost";
+  let port;
+  const comma = server.match(/^(.*),(\d+)$/);
+  if (comma) { server = comma[1]; port = Number(comma[2]); }
+  let instanceName;
+  const slash = server.match(/^([^\\]+)\\(.+)$/);
+  if (slash) { server = slash[1]; instanceName = slash[2]; }
+  const cfg = {
+    server: server === "." ? "localhost" : server,
+    database: kv["database"] || kv["initial catalog"] || "AmnDb002",
+    user: kv["user id"] || kv["uid"] || "",
+    password: kv["password"] || kv["pwd"] || "",
+    options: {
+      trustServerCertificate: true,
+      encrypt: false,
+      enableArithAbort: true,
+      appName: "OZK-ManualA4Print",
+      readOnlyIntent: true,
+    },
+    connectionTimeout: 15_000,
+    requestTimeout: 30_000,
+    pool: { max: 2, min: 0, idleTimeoutMillis: 60_000 },
+  };
+  if (port) cfg.port = port;
+  if (instanceName) cfg.options.instanceName = instanceName;
+  return cfg;
+}
+
+function createAmeenSource(connString) {
+  const sql = require("mssql");
+  const cfg = parseSqlConnStr(connString);
+  let poolPromise = null;
+  function pool() {
+    if (!poolPromise) {
+      poolPromise = new sql.ConnectionPool(cfg).connect().catch((err) => { poolPromise = null; throw err; });
+    }
+    return poolPromise;
+  }
+  async function q(text, bind) {
+    const p = await pool();
+    const req = p.request();
+    if (bind) bind(req, sql);
+    const r = await req.query(assertReadOnlySql(text));
+    return r.recordset;
+  }
+  return {
+    describe: () => ({ server: cfg.server, instance: cfg.options.instanceName || "", database: cfg.database, user: cfg.user }),
+    ping: async () => (await q(PING_SQL))[0],
+    search: (number) => q(SEARCH_SQL, (r, s) => r.input("number", s.Int, number)),
+    lines: (guid) => q(LINES_SQL, (r, s) => r.input("invoiceGuid", s.UniqueIdentifier, guid)),
+    balance: async (guid) => {
+      const rows = await q(BALANCE_SQL, (r, s) => r.input("invoiceGuid", s.UniqueIdentifier, guid));
+      if (!rows.length || rows[0].document_current === null || rows[0].document_current === undefined) return null;
+      const v = Number(rows[0].document_current);
+      return Number.isFinite(v) ? v : null;
+    },
+    close: async () => { if (poolPromise) (await poolPromise).close(); },
+  };
+}
+
+// ─── تحويل HTML ← PDF عبر Edge/Chromium المثبّت على الجهاز ──────────────────
+function findBrowser(cfg) {
+  const candidates = [
+    cfg.browserPath,
+    process.env.OZK_BROWSER_PATH,
+    "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+    "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+    "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+  ].filter(Boolean);
+  return candidates.find((p) => { try { return fs.statSync(p).isFile(); } catch { return false; } }) || "";
+}
+
+function createRenderer(cfg) {
+  let browserPromise = null;
+  async function browser() {
+    if (browserPromise) {
+      const b = await browserPromise.catch(() => null);
+      if (b && b.connected) return b;
+    }
+    const executablePath = findBrowser(cfg);
+    if (!executablePath) throw new Error("لم يُعثر على Microsoft Edge أو Chrome لتوليد PDF");
+    const puppeteer = require("puppeteer-core");
+    browserPromise = puppeteer.launch({
+      executablePath,
+      headless: true,
+      args: ["--no-first-run", "--disable-extensions", "--disable-gpu"]
+        // بيئة الفحص الآلي على Linux تعمل بـroot؛ على Windows لا يُلغى العزل.
+        .concat(process.platform !== "win32" && process.getuid && process.getuid() === 0 ? ["--no-sandbox"] : []),
+    });
+    return browserPromise;
+  }
+  async function render(html, paper, outPath) {
+    const page = await (await browser()).newPage();
+    try {
+      await page.setJavaScriptEnabled(false);
+      await page.setContent(applyPaperCss(html, paper), { waitUntil: "load" });
+      await page.evaluateHandle("document.fonts.ready").catch(() => {});
+      const fontOk = await page.evaluate(
+        "document.fonts.check('700 16px Cairo') && document.fonts.check('400 13px Cairo') && [...document.fonts].some(f => f.family.replace(/\"/g,'') === 'Cairo' && f.status === 'loaded')"
+      ).catch(() => false);
+      const pdf = await page.pdf({ ...pdfOptions(paper), path: outPath });
+      return { fontOk: Boolean(fontOk), pages: countPdfPages(pdf), bytes: pdf.length };
+    } finally {
+      await page.close().catch(() => {});
+    }
+  }
+  async function close() {
+    if (browserPromise) { const b = await browserPromise.catch(() => null); if (b) await b.close().catch(() => {}); }
+  }
+  return { render, close, browserPath: () => findBrowser(cfg) };
+}
+
+function countPdfPages(buf) {
+  const m = Buffer.from(buf).toString("latin1").match(/\/Type\s*\/Page(?![s\w])/g);
+  return m ? m.length : 0;
+}
+
+// ─── الطابعة ────────────────────────────────────────────────────────────────
+function runPowerShell(script, timeout) {
+  const encoded = Buffer.from(script, "utf16le").toString("base64");
+  return spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand", encoded], {
+    timeout: timeout || 15_000, encoding: "utf8", windowsHide: true,
+  });
+}
+
+function createPrinter(cfg) {
+  function probe() {
+    if (process.platform !== "win32") return { state: "unknown", reason: "ليس Windows" };
+    const name = cfg.printerName.replace(/'/g, "''");
+    const r = runPowerShell(
+      `$p = Get-CimInstance Win32_Printer | Where-Object { $_.Name -eq '${name}' }\n`
+      + `if (-not $p) { 'NOT_FOUND'; exit 0 }\n`
+      + `'FOUND|' + $p.PortName + '|' + $p.WorkOffline + '|' + $p.PrinterStatus`
+    );
+    const out = String(r.stdout || "").trim();
+    if (out === "NOT_FOUND") return { state: "missing", reason: `الطابعة "${cfg.printerName}" غير مثبّتة على هذا الجهاز` };
+    if (r.status !== 0 || !out.startsWith("FOUND|")) return { state: "unknown", reason: "تعذّر الاستعلام عن الطابعة" };
+    const [, port, offline, status] = out.split("|");
+    if (/^TS\d/i.test(port)) return { state: "redirected", port, reason: "منفذ جلسة عن بُعد (RDP) — مرفوض" };
+    if (String(offline).trim().toLowerCase() === "true") return { state: "offline", port, reason: "الطابعة غير متصلة (Work Offline)" };
+    return { state: "ready", port, printerStatus: status, reason: "" };
+  }
+  function send(pdfPath, paper, copies) {
+    if (!fs.existsSync(cfg.sumatraPath)) throw new Error(`SumatraPDF غير موجود: ${cfg.sumatraPath}`);
+    const r = spawnSync(cfg.sumatraPath, [
+      "-print-to", cfg.printerName,
+      "-print-settings", sumatraSettings(paper, copies),
+      "-silent", "-exit-when-done",
+      pdfPath,
+    ], { timeout: 90_000, windowsHide: true });
+    if (r.error) throw r.error;
+    if (r.status !== 0) throw new Error(`SumatraPDF خرج بالرمز ${r.status}`);
+  }
+  return { probe, send };
+}
+
+// ─── حالة الطباعة التلقائية (قراءة فقط) ─────────────────────────────────────
+function autoPrintInfo(cfg, guid) {
+  const out = { configured: Boolean(cfg.autoPrintStatePath || cfg.autoPrintTaskName) };
+  if (cfg.autoPrintStatePath && guid) {
+    try {
+      const st = JSON.parse(fs.readFileSync(cfg.autoPrintStatePath, "utf8"));
+      const ts = st && st.printedGuids && st.printedGuids[guid];
+      out.autoPrintedAt = ts ? new Date(Number(ts)).toISOString() : null;
+    } catch { out.autoPrintedAt = undefined; }
+  }
+  return out;
+}
+
+function autoPrintTaskState(cfg) {
+  if (!cfg.autoPrintTaskName || process.platform !== "win32") return null;
+  const name = cfg.autoPrintTaskName.replace(/'/g, "''");
+  const r = runPowerShell(`$t = Get-ScheduledTask -TaskName '${name}' -ErrorAction SilentlyContinue; if ($t) { [string]$t.State } else { 'NOT_FOUND' }`);
+  return String(r.stdout || "").trim() || "unknown";
+}
+
+// ─── التطبيق ────────────────────────────────────────────────────────────────
+function createApp(deps) {
+  const { cfg, ameen, renderer, printer, log, guard } = deps;
+  const { buildInvoiceHtml } = deps.template || require(path.join(AUTOPRINT_DIR, "invoice-html.js"));
+  const previewDir = path.join(cfg.dataDir, "previews");
+  fs.mkdirSync(previewDir, { recursive: true });
+
+  async function health() {
+    const h = {
+      version: VERSION,
+      host: os.hostname(),
+      user: os.userInfo().username,
+      dryRun: Boolean(cfg.dryRun),
+      printerName: cfg.printerName,
+      papers: cfg.papers,
+      maxCopies: cfg.maxCopies,
+      sumatra: fs.existsSync(cfg.sumatraPath),
+      browser: renderer.browserPath() || "",
+      logFile: log.filePath,
+    };
+    h.printer = printer.probe();
+    try {
+      const p = await ameen.ping();
+      h.sql = { ok: true, ...ameen.describe(), db: p.db, login: p.login };
+    } catch (err) {
+      h.sql = { ok: false, ...ameen.describe(), error: String(err.message || err) };
+    }
+    h.autoPrintTask = autoPrintTaskState(cfg);
+    const sample = buildInvoiceHtml({ number: 0, date: "", customer: "", total: 0, discount: 0, firstPay: 0, items: [] });
+    h.officialFontEmbedded = /@font-face\{font-family:"Cairo"/.test(sample);
+    return h;
+  }
+
+  async function search(number) {
+    const rows = await ameen.search(number);
+    const matches = rows.map((r) => model.headerFromRow(r, cfg));
+    log.append({ event: "search", number, matches: matches.length });
+    return matches;
+  }
+
+  async function preview(guid, paperName) {
+    const paper = paperFor(paperName, cfg);
+    const header = await headerByGuid(guid);
+    if (!header) throw httpError(404, "الفاتورة غير موجودة");
+    if (!header.printable) throw httpError(409, header.blockReason);
+    const [lines, balance] = await Promise.all([ameen.lines(guid), ameen.balance(guid)]);
+    const inv = model.buildInvoice(header, lines, balance);
+    const html = buildInvoiceHtml(inv);
+    const fontEmbedded = /@font-face\{font-family:"Cairo"/.test(html);
+    const token = guard.issue(guid, { paper: paper.label, number: header.number });
+    const pdfPath = path.join(previewDir, `${token}.pdf`);
+    const result = await renderer.render(html, paper, pdfPath);
+    const fontOk = fontEmbedded && result.fontOk;
+    guard.lookup(token).pdfPath = pdfPath;
+    guard.lookup(token).fontOk = fontOk;
+    log.append({ event: "preview", guid, number: header.number, type: header.typeName, paper: paper.label, pages: result.pages, fontOk });
+    return {
+      token,
+      pdfUrl: `/preview/${token}.pdf`,
+      pages: result.pages,
+      fontOk,
+      paper: paper.label,
+      invoice: { ...header, items: inv.items.length, customerBalanceFound: inv.customerBalanceFound },
+      previousPrints: log.successfulPrints(guid).slice(-5),
+      autoPrint: autoPrintInfo(cfg, guid),
+    };
+  }
+
+  // البحث بالـGUID يمرّ بنفس الاستعلام عبر الرقم المخزَّن في الرمز؛ يُبقي SQL
+  // ثابتاً (لا استعلام ثالث) ويتحقق أن الـGUID فعلاً من نتائج ذلك الرقم.
+  const knownNumbers = new Map(); // guid → number
+  async function headerByGuid(guid) {
+    const number = knownNumbers.get(guid);
+    if (number === undefined) return null;
+    const rows = await ameen.search(number);
+    const hit = rows.map((r) => model.headerFromRow(r, cfg)).find((h) => h.guid === guid);
+    return hit || null;
+  }
+
+  async function print(token, copies, confirmReprint) {
+    const n = Number(copies);
+    if (!Number.isInteger(n) || n < 1 || n > cfg.maxCopies) throw httpError(400, `عدد النسخ يجب أن يكون بين 1 و${cfg.maxCopies}`);
+    const g = guard.begin(token, { confirmReprint: Boolean(confirmReprint) });
+    if (!g.ok) {
+      const t = guard.lookup(token);
+      log.append({ event: "print_rejected", guid: t ? t.guid : null, code: g.code });
+      return g;
+    }
+    const t = g.entry;
+    let success = false;
+    try {
+      if (cfg.requireOfficialFont && !t.fontOk) {
+        log.append({ event: "print_rejected", guid: t.guid, number: t.number, code: "FONT" });
+        return { ok: false, code: "FONT", message: "خط Cairo لم يُضمَّن في المعاينة — أُلغيت الطباعة." };
+      }
+      const pr = printer.probe();
+      if (pr.state !== "ready" && !(cfg.dryRun && pr.state === "unknown")) {
+        log.append({ event: "print_rejected", guid: t.guid, number: t.number, code: "PRINTER", printer: pr.state });
+        return { ok: false, code: "PRINTER", message: pr.reason || "الطابعة غير جاهزة" };
+      }
+      const paper = paperFor(t.paper, cfg);
+      log.append({ event: "print_requested", guid: t.guid, number: t.number, copies: n, paper: paper.label, reprint: g.reprint, dryRun: Boolean(cfg.dryRun) });
+      if (cfg.dryRun) {
+        log.append({ event: "dry_run", guid: t.guid, number: t.number, copies: n, paper: paper.label, printer: cfg.printerName });
+        success = true;
+        return { ok: true, dryRun: true, message: "وضع الاختبار: لم يُرسل شيء للطابعة (dryRun)." };
+      }
+      printer.send(t.pdfPath, paper, n);
+      log.append({ event: "print_sent", guid: t.guid, number: t.number, copies: n, paper: paper.label, printer: cfg.printerName, reprint: g.reprint });
+      success = true;
+      return { ok: true, message: `أُرسلت ${n} نسخة إلى ${cfg.printerName}` };
+    } catch (err) {
+      log.append({ event: "print_failed", guid: t.guid, number: t.number, error: String(err.message || err) });
+      return { ok: false, code: "FAILED", message: `فشل الإرسال: ${err.message || err}` };
+    } finally {
+      g.finish(success);
+    }
+  }
+
+  return { health, search, preview, print, knownNumbers, previewDir };
+}
+
+function httpError(status, message) {
+  const e = new Error(message);
+  e.status = status;
+  return e;
+}
+
+// ─── HTTP ───────────────────────────────────────────────────────────────────
+function createHttpHandler(app, cfg) {
+  const uiFile = path.join(APP_DIR, "ui", "index.html");
+  const allowedHosts = new Set([`127.0.0.1:${cfg.port}`, `localhost:${cfg.port}`]);
+  let lastActivity = Date.now();
+
+  function send(res, status, body, type) {
+    res.writeHead(status, {
+      "Content-Type": type || "application/json; charset=utf-8",
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "SAMEORIGIN",
+    });
+    res.end(typeof body === "string" || Buffer.isBuffer(body) ? body : JSON.stringify(body));
+  }
+
+  function readJson(req) {
+    return new Promise((resolve, reject) => {
+      let size = 0;
+      const chunks = [];
+      req.on("data", (c) => { size += c.length; if (size > 16_384) { reject(httpError(413, "طلب كبير")); req.destroy(); } else chunks.push(c); });
+      req.on("end", () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}")); } catch { reject(httpError(400, "JSON غير صالح")); } });
+      req.on("error", reject);
+    });
+  }
+
+  async function handle(req, res) {
+    lastActivity = Date.now();
+    // حماية من DNS rebinding وطلبات المواقع الأخرى: مضيف محلي فقط، والكتابة
+    // تتطلب ترويسة مخصّصة لا يرسلها متصفح عبر الأصول بلا preflight.
+    if (!allowedHosts.has(String(req.headers.host || ""))) return send(res, 403, { error: "host" });
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    if (req.method === "POST" && req.headers["x-ozk"] !== "1") return send(res, 403, { error: "header" });
+    try {
+      if (req.method === "GET" && url.pathname === "/") {
+        return send(res, 200, fs.readFileSync(uiFile), "text/html; charset=utf-8");
+      }
+      if (req.method === "GET" && url.pathname === "/api/health") return send(res, 200, await app.health());
+      if (req.method === "GET" && url.pathname === "/api/ping") return send(res, 200, { ok: true });
+      if (req.method === "GET" && url.pathname === "/api/search") {
+        const raw = String(url.searchParams.get("number") || "").trim();
+        if (!/^\d{1,9}$/.test(raw)) throw httpError(400, "أدخل رقم فاتورة صحيحاً (أرقام فقط)");
+        const number = Number(raw);
+        const matches = await app.search(number);
+        for (const m of matches) app.knownNumbers.set(m.guid, number);
+        return send(res, 200, { number, matches });
+      }
+      if (req.method === "POST" && url.pathname === "/api/preview") {
+        const body = await readJson(req);
+        const guid = model.normGuid(body.guid);
+        if (!model.isGuid(guid)) throw httpError(400, "معرّف فاتورة غير صالح");
+        return send(res, 200, await app.preview(guid, body.paper || "A4"));
+      }
+      if (req.method === "POST" && url.pathname === "/api/print") {
+        const body = await readJson(req);
+        return send(res, 200, await app.print(String(body.token || ""), body.copies, body.confirmReprint === true));
+      }
+      const pm = url.pathname.match(/^\/preview\/([0-9a-f]{32})\.pdf$/);
+      if (req.method === "GET" && pm) {
+        const file = path.join(app.previewDir, `${pm[1]}.pdf`);
+        if (!fs.existsSync(file)) return send(res, 404, { error: "not found" });
+        return send(res, 200, fs.readFileSync(file), "application/pdf");
+      }
+      return send(res, 404, { error: "not found" });
+    } catch (err) {
+      return send(res, err.status || 500, { error: String(err.message || err) });
+    }
+  }
+
+  return { handle, idleMs: () => Date.now() - lastActivity };
+}
+
+function cleanupPreviews(dir, maxAgeMs) {
+  let entries = [];
+  try { entries = fs.readdirSync(dir); } catch { return; }
+  for (const name of entries) {
+    const p = path.join(dir, name);
+    try { if (Date.now() - fs.statSync(p).mtimeMs > maxAgeMs) fs.unlinkSync(p); } catch { /* ملف مقفل — لاحقاً */ }
+  }
+}
+
+function connectionString() {
+  return process.env.OZK_MANUAL_PRINT_SQL || process.env.AMEEN_SQL_CONNECTION_STRING || "";
+}
+
+function buildRealApp(cfg) {
+  const cs = connectionString();
+  if (!cs) throw new Error("لا يوجد اتصال SQL: OZK_MANUAL_PRINT_SQL أو AMEEN_SQL_CONNECTION_STRING");
+  const log = createPrintLog(path.join(cfg.dataDir, "print-log.jsonl"));
+  const deps = {
+    cfg,
+    ameen: createAmeenSource(cs),
+    renderer: createRenderer(cfg),
+    printer: createPrinter(cfg),
+    log,
+  };
+  deps.guard = createPrintGuard({ log });
+  return { app: createApp(deps), deps };
+}
+
+async function cli(argv) {
+  const cfg = loadConfig();
+  const { app, deps } = buildRealApp(cfg);
+  try {
+    if (argv.includes("--health")) {
+      console.log(JSON.stringify(await app.health(), null, 2));
+      return 0;
+    }
+    const i = argv.indexOf("--selftest");
+    const number = Number(argv[i + 1]);
+    if (!Number.isInteger(number) || number < 1) throw new Error("الاستعمال: --selftest <رقم الفاتورة> [--paper A4|A5]");
+    const pi = argv.indexOf("--paper");
+    const paper = pi >= 0 ? argv[pi + 1] : "A4";
+    const matches = await app.search(number);
+    for (const m of matches) app.knownNumbers.set(m.guid, number);
+    const report = { number, matches: matches.map((m) => ({ guid: m.guid, type: m.typeName, date: m.date, customer: m.customer ? "[موجود]" : "", printable: m.printable, lines: m.lineCount })) };
+    const target = matches.find((m) => m.printable);
+    if (target) {
+      const pv = await app.preview(target.guid, paper);
+      const kept = path.join(cfg.dataDir, `selftest-${number}-${paper}.pdf`);
+      fs.copyFileSync(path.join(app.previewDir, `${pv.token}.pdf`), kept);
+      report.preview = { pages: pv.pages, fontOk: pv.fontOk, paper: pv.paper, pdf: kept, bytes: fs.statSync(kept).size, autoPrint: pv.autoPrint };
+    }
+    console.log(JSON.stringify(report, null, 2));
+    return 0;
+  } finally {
+    await deps.renderer.close();
+    await deps.ameen.close().catch(() => {});
+  }
+}
+
+async function main() {
+  const cfg = loadConfig();
+  const { app, deps } = buildRealApp(cfg);
+  cleanupPreviews(app.previewDir, 24 * 3600 * 1000);
+  const handler = createHttpHandler(app, cfg);
+  const server = http.createServer((req, res) => { handler.handle(req, res); });
+  server.on("error", (err) => {
+    // المنفذ محجوز ⇒ نسخة أخرى تعمل؛ launch.ps1 يفتح الواجهة عليها.
+    console.error(err.code === "EADDRINUSE" ? "نسخة أخرى تعمل على المنفذ نفسه" : String(err));
+    process.exit(err.code === "EADDRINUSE" ? 3 : 1);
+  });
+  server.listen(cfg.port, "127.0.0.1", () => console.log(`OZK manual A4 print ${VERSION} على http://127.0.0.1:${cfg.port}/ (dryRun=${cfg.dryRun})`));
+  const idleLimit = Number(cfg.idleExitMinutes) * 60 * 1000;
+  setInterval(async () => {
+    if (idleLimit > 0 && handler.idleMs() > idleLimit) {
+      await deps.renderer.close();
+      process.exit(0);
+    }
+  }, 60_000).unref();
+}
+
+module.exports = {
+  createApp, createHttpHandler, parseSqlConnStr, countPdfPages, loadConfig, DEFAULTS,
+  SEARCH_SQL, LINES_SQL, BALANCE_SQL, createRenderer,
+};
+
+if (require.main === module) {
+  const argv = process.argv.slice(2);
+  if (argv.includes("--health") || argv.includes("--selftest")) {
+    cli(argv).then((c) => process.exit(c), (err) => { console.error(String(err.message || err)); process.exit(1); });
+  } else {
+    main().catch((err) => { console.error(String(err.message || err)); process.exit(1); });
+  }
+}

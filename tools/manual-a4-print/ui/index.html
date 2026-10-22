@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OZK - طباعة فواتير A4</title>
+<style>
+  :root { --gold:#b8892a; --ink:#221808; --muted:#6b5535; --line:#c8b890; --cream:#faf6ec;
+          --card:#ffffff; --red:#c0271f; --green:#1d7a3a; --blue:#16357a; --bg:#f3eee1; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:Tahoma,Arial,sans-serif; background:var(--bg); color:var(--ink); }
+  header { background:var(--ink); color:#fff; padding:10px 18px; display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; }
+  header h1 { margin:0; font-size:18px; }
+  header .st { font-size:12px; display:flex; gap:10px; flex-wrap:wrap; }
+  .pill { padding:3px 9px; border-radius:20px; background:#444; }
+  .pill.ok { background:var(--green); } .pill.bad { background:var(--red); } .pill.warn { background:#a8650b; }
+  main { display:grid; grid-template-columns: 420px 1fr; gap:14px; padding:14px; height:calc(100vh - 52px); }
+  @media (max-width: 980px) { main { grid-template-columns: 1fr; height:auto; } }
+  .panel { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; overflow:auto; }
+  label { font-weight:700; font-size:14px; display:block; margin-bottom:6px; }
+  .row { display:flex; gap:8px; }
+  input[type=text], input[type=number], select { font-size:20px; padding:8px 10px; border:1px solid var(--line); border-radius:8px; width:100%; font-family:inherit; }
+  button { font-family:inherit; font-size:16px; padding:9px 16px; border-radius:8px; border:1px solid var(--line); background:var(--cream); cursor:pointer; }
+  button.primary { background:var(--gold); color:#fff; border-color:var(--gold); font-weight:700; }
+  button.print { background:var(--blue); color:#fff; border-color:var(--blue); font-weight:700; font-size:20px; width:100%; padding:14px; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  .match { border:1px solid var(--line); border-radius:8px; padding:10px; margin:8px 0; cursor:pointer; background:var(--cream); }
+  .match.sel { outline:3px solid var(--gold); }
+  .match.blocked { opacity:.6; cursor:not-allowed; background:#eee; }
+  .match .t { font-weight:700; } .match .m { font-size:13px; color:var(--muted); margin-top:3px; }
+  .msg { padding:9px 11px; border-radius:8px; margin:10px 0; font-size:14px; }
+  .msg.err { background:#fde8e6; color:var(--red); border:1px solid #f1b5b0; }
+  .msg.ok { background:#e5f4ea; color:var(--green); border:1px solid #a9d8b8; }
+  .msg.warn { background:#fff3dc; color:#7a4a00; border:1px solid #f0cf8a; }
+  .opts { display:grid; grid-template-columns: 1fr 1fr; gap:10px; margin:12px 0; }
+  iframe { width:100%; height:100%; min-height:600px; border:1px solid var(--line); border-radius:8px; background:#fff; }
+  .empty { color:var(--muted); text-align:center; margin-top:120px; font-size:16px; }
+  .modal { position:fixed; inset:0; background:rgba(0,0,0,.45); display:none; align-items:center; justify-content:center; }
+  .modal .box { background:#fff; border-radius:12px; padding:20px; max-width:440px; width:92%; }
+  .modal .actions { display:flex; gap:10px; justify-content:flex-start; margin-top:16px; }
+  table.log { width:100%; border-collapse:collapse; font-size:12px; }
+  table.log td { border-bottom:1px solid #eee; padding:3px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>OZK - طباعة فواتير A4</h1>
+  <div class="st" id="status"><span class="pill">جارٍ الفحص…</span></div>
+</header>
+<main>
+  <section class="panel">
+    <form id="searchForm" autocomplete="off">
+      <label for="num">رقم الفاتورة</label>
+      <div class="row">
+        <input id="num" type="text" inputmode="numeric" pattern="\d*" maxlength="9" autofocus>
+        <button class="primary" id="searchBtn" type="submit">بحث</button>
+      </div>
+    </form>
+    <div id="searchMsg"></div>
+    <div id="matches"></div>
+
+    <div id="printBox" style="display:none">
+      <div id="invInfo"></div>
+      <div class="opts">
+        <div>
+          <label for="paper">حجم الورق</label>
+          <select id="paper"></select>
+        </div>
+        <div>
+          <label for="copies">عدد النسخ</label>
+          <input id="copies" type="number" min="1" value="1">
+        </div>
+      </div>
+      <div id="previewMsg"></div>
+      <button class="print" id="printBtn" disabled>طباعة</button>
+      <div id="printMsg"></div>
+    </div>
+  </section>
+  <section class="panel" id="previewPanel">
+    <div class="empty" id="emptyPreview">ابحث عن فاتورة واختر السجل الصحيح لعرض المعاينة هنا</div>
+    <iframe id="pdf" style="display:none" title="معاينة الفاتورة"></iframe>
+  </section>
+</main>
+
+<div class="modal" id="confirmModal">
+  <div class="box">
+    <h3 style="margin-top:0">إعادة طباعة؟</h3>
+    <div id="confirmText"></div>
+    <div class="actions">
+      <button class="primary" id="confirmYes">نعم، أعد الطباعة</button>
+      <button id="confirmNo">إلغاء</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+  const money = (n, iso) => {
+    const v = Number(n || 0).toLocaleString("en-US", { maximumFractionDigits: 2 });
+    return iso === "USD" ? "$ " + v : (iso === "SYP" || !iso ? v + " ل.س" : v + " " + iso);
+  };
+  const fmtTime = (iso) => { try { return new Date(iso).toLocaleString("ar-SY"); } catch { return iso; } };
+  let health = null, selected = null, previewToken = null, busy = false, maxCopies = 5;
+
+  async function api(path, body) {
+    const opt = body ? { method: "POST", headers: { "Content-Type": "application/json", "X-OZK": "1" }, body: JSON.stringify(body) } : {};
+    const r = await fetch(path, opt);
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || ("HTTP " + r.status));
+    return j;
+  }
+  function msg(el, kind, text) { $(el).innerHTML = text ? `<div class="msg ${kind}">${text}</div>` : ""; }
+
+  async function loadHealth() {
+    try {
+      health = await api("/api/health");
+      maxCopies = health.maxCopies || 5;
+      $("copies").max = maxCopies;
+      $("paper").innerHTML = (health.papers || ["A4"]).map((p) => `<option value="${esc(p)}">${esc(p)}</option>`).join("");
+      const pr = health.printer || {};
+      const pills = [];
+      pills.push(health.sql && health.sql.ok ? `<span class="pill ok">الأمين: متصل (قراءة)</span>` : `<span class="pill bad">الأمين: غير متصل</span>`);
+      pills.push(pr.state === "ready" ? `<span class="pill ok">${esc(health.printerName)}: جاهزة</span>` : `<span class="pill bad">${esc(health.printerName)}: ${esc(pr.reason || pr.state)}</span>`);
+      pills.push(health.officialFontEmbedded ? `<span class="pill ok">خط Cairo</span>` : `<span class="pill bad">خط Cairo غير متاح</span>`);
+      if (health.dryRun) pills.push(`<span class="pill warn">وضع اختبار — لا يُرسل للطابعة</span>`);
+      if (health.autoPrintTask === "Ready" || health.autoPrintTask === "Running") pills.push(`<span class="pill warn">الطباعة التلقائية ما زالت تعمل</span>`);
+      pills.push(`<span class="pill">${esc(health.host)} · ${esc(health.version)}</span>`);
+      $("status").innerHTML = pills.join("");
+    } catch (e) {
+      $("status").innerHTML = `<span class="pill bad">تعذّر الفحص: ${esc(e.message)}</span>`;
+    }
+  }
+
+  function resetPreview() {
+    previewToken = null;
+    $("printBtn").disabled = true;
+    $("pdf").style.display = "none"; $("pdf").removeAttribute("src");
+    $("emptyPreview").style.display = "";
+    msg("previewMsg"); msg("printMsg");
+  }
+
+  $("searchForm").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const n = $("num").value.trim();
+    msg("searchMsg"); $("matches").innerHTML = ""; $("printBox").style.display = "none"; selected = null; resetPreview();
+    if (!/^\d{1,9}$/.test(n)) return msg("searchMsg", "err", "أدخل رقم فاتورة صحيحاً (أرقام فقط).");
+    $("searchBtn").disabled = true;
+    try {
+      const r = await api("/api/search?number=" + encodeURIComponent(n));
+      if (!r.matches.length) return msg("searchMsg", "warn", `لا توجد فاتورة بالرقم ${esc(n)}.`);
+      const printable = r.matches.filter((m) => m.printable);
+      msg("searchMsg", r.matches.length > 1 ? "warn" : "ok",
+        r.matches.length > 1 ? `الرقم ${esc(n)} موجود في ${r.matches.length} سجلات — اختر السجل الصحيح حسب النوع والتاريخ والزبون.` : "وُجدت فاتورة واحدة.");
+      $("matches").innerHTML = r.matches.map((m, i) => `
+        <div class="match ${m.printable ? "" : "blocked"}" data-i="${i}">
+          <div class="t">${esc(m.typeName)} · رقم ${esc(m.number)}</div>
+          <div class="m">التاريخ: ${esc(m.date)} · الزبون: ${esc(m.customer || "—")}</div>
+          <div class="m">الإجمالي: ${esc(money(m.total, m.currencyIso))} · الأصناف: ${esc(m.lineCount)}${m.isPosted ? "" : " · <b>غير مرحّلة</b>"}</div>
+          ${m.printable ? "" : `<div class="m" style="color:var(--red)">${esc(m.blockReason)}</div>`}
+        </div>`).join("");
+      document.querySelectorAll(".match").forEach((el) => el.addEventListener("click", () => {
+        const m = r.matches[Number(el.dataset.i)];
+        if (!m.printable) return;
+        document.querySelectorAll(".match").forEach((x) => x.classList.remove("sel"));
+        el.classList.add("sel");
+        selectInvoice(m);
+      }));
+      if (printable.length === 1 && r.matches.length === 1) document.querySelector(".match").click();
+    } catch (e) {
+      msg("searchMsg", "err", esc(e.message));
+    } finally { $("searchBtn").disabled = false; }
+  });
+
+  async function selectInvoice(m) {
+    selected = m;
+    $("printBox").style.display = "";
+    $("invInfo").innerHTML = `<div class="msg ok"><b>${esc(m.typeName)} رقم ${esc(m.number)}</b><br>${esc(m.customer || "—")} · ${esc(m.date)} · ${esc(money(m.total, m.currencyIso))}</div>`;
+    await loadPreview();
+  }
+
+  async function loadPreview() {
+    if (!selected) return;
+    resetPreview();
+    msg("previewMsg", "warn", "جارٍ توليد المعاينة…");
+    try {
+      const p = await api("/api/preview", { guid: selected.guid, paper: $("paper").value });
+      previewToken = p.token;
+      $("emptyPreview").style.display = "none";
+      $("pdf").src = p.pdfUrl; $("pdf").style.display = "";
+      const notes = [];
+      notes.push(`المعاينة: ${p.pages} صفحة ${esc(p.paper)}`);
+      if (!p.fontOk) notes.push("<b>تحذير: خط Cairo لم يُضمَّن — الطباعة ممنوعة</b>");
+      if (!p.invoice.customerBalanceFound) notes.push("رصيد الزبون غير متاح لهذه الفاتورة");
+      if (p.autoPrint && p.autoPrint.autoPrintedAt) notes.push(`<b>طُبعت تلقائياً على Canon في ${esc(fmtTime(p.autoPrint.autoPrintedAt))}</b>`);
+      if (p.previousPrints && p.previousPrints.length) notes.push(`<b>طُبعت يدوياً على هذا الجهاز ${p.previousPrints.length} مرة، آخرها ${esc(fmtTime(p.previousPrints[p.previousPrints.length - 1].at))}</b>`);
+      msg("previewMsg", p.fontOk ? "ok" : "err", notes.join("<br>"));
+      $("printBtn").disabled = !p.fontOk;
+    } catch (e) {
+      msg("previewMsg", "err", esc(e.message));
+    }
+  }
+  $("paper").addEventListener("change", loadPreview);
+
+  function askConfirm(text) {
+    return new Promise((resolve) => {
+      $("confirmText").innerHTML = text;
+      $("confirmModal").style.display = "flex";
+      const done = (v) => { $("confirmModal").style.display = "none"; $("confirmYes").onclick = $("confirmNo").onclick = null; resolve(v); };
+      $("confirmYes").onclick = () => { $("confirmYes").disabled = true; setTimeout(() => { $("confirmYes").disabled = false; }, 1500); done(true); };
+      $("confirmNo").onclick = () => done(false);
+    });
+  }
+
+  async function doPrint(confirmReprint) {
+    const copies = Number($("copies").value);
+    if (!Number.isInteger(copies) || copies < 1 || copies > maxCopies) return msg("printMsg", "err", `عدد النسخ بين 1 و${maxCopies}.`);
+    busy = true; $("printBtn").disabled = true; $("printBtn").textContent = "جارٍ الإرسال…";
+    try {
+      const r = await api("/api/print", { token: previewToken, copies, confirmReprint });
+      if (r.ok) return msg("printMsg", r.dryRun ? "warn" : "ok", esc(r.message));
+      if (r.code === "NEEDS_CONFIRM") {
+        const prev = (r.previous || []).map((e) => `• ${esc(fmtTime(e.at))} — ${esc(e.copies)} نسخة`).join("<br>");
+        busy = false; $("printBtn").textContent = "طباعة"; $("printBtn").disabled = false;
+        if (await askConfirm(`${esc(r.message)}<br><br>${prev}`)) return doPrint(true);
+        return msg("printMsg", "warn", "أُلغيت إعادة الطباعة.");
+      }
+      msg("printMsg", "err", esc(r.message));
+    } catch (e) {
+      msg("printMsg", "err", esc(e.message));
+    } finally {
+      busy = false; $("printBtn").textContent = "طباعة"; $("printBtn").disabled = !previewToken;
+    }
+  }
+  $("printBtn").addEventListener("click", () => { if (!busy && previewToken) doPrint(false); });
+
+  loadHealth();
+  setInterval(() => fetch("/api/ping").catch(() => {}), 60000);
+})();
+</script>
+</body>
+</html>
