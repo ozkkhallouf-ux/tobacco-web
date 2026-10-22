@@ -81,6 +81,11 @@
 
 **الحل:** `probeSupabaseAuth()` في `scripts/health-check.mjs`، في كل دورة (كل 30 دقيقة).
 
+**شروط التشغيل:**
+- لا يعمل إلا مع `HEALTH_LIFECYCLE_MODE=managed`، أي حين تكون `health_lifecycle` معلَنة منشورة. الإنتاج اليوم `managed`، والدالة موجودة في `pg_proc`.
+- مع `HEALTH_LIFECYCLE_SIGNALS=off` (إيقاف طوارئ) لا يُرسل أي طلب.
+- في الحالتين يُتخطّى بسطر مرئي بلا حادثة.
+
 **الطلب نفسه:**
 - `POST rpc/health_lifecycle` بـ`{p_op:"probe", p_key:null, p_issue:null, p_label:null}`.
 - يستعمل المفتاح والترويسات نفسها (`supabaseServiceHeaders`).

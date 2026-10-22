@@ -481,6 +481,17 @@ export async function probeSupabaseAuth({
 } = {}) {
   const keyType = serviceKeyType(env.SUPABASE_SERVICE_KEY);
   const inActions = env.GITHUB_ACTIONS === "true";
+  // Codex P1 على #343: إيقاف الطوارئ يسبق كل شيء (صفر استدعاء DB)، والفحص لا يعمل إلا حيث
+  // health_lifecycle معلَن منشوراً (HEALTH_LIFECYCLE_MODE=managed)؛ وإلا يُتخطّى مرئياً بلا مشكلة
+  // كي لا يولّد PGRST202 حادثة «unproven» كاذبة في بيئة لم تُطبَّق فيها الدالة.
+  if (lifecycleSwitchOff(env)) {
+    log("⏸ فحص مصادقة Supabase: متوقف (HEALTH_LIFECYCLE_SIGNALS=off) — لا استدعاء DB هذه الدورة.");
+    return { kind: "skipped", reason: "switch-off", keyType, attempts: 0, problems: [], healthy: [] };
+  }
+  if (declaredLifecycleMode(env) !== "managed") {
+    log(`⏭ فحص مصادقة Supabase: يتطلب HEALTH_LIFECYCLE_MODE=managed (health_lifecycle منشور) — الحالي ${declaredLifecycleMode(env)}، تخطٍّ بلا مشكلة.`);
+    return { kind: "skipped", reason: "lifecycle-not-managed", keyType, attempts: 0, problems: [], healthy: [] };
+  }
   let r;
   let attempts = 0;
   for (;;) {
@@ -495,7 +506,7 @@ export async function probeSupabaseAuth({
   const statusText = r.status ? `HTTP ${r.status}` : r.reason || "-";
   const result = { kind: r.kind, keyType, attempts, problems: [], healthy: [] };
   if (r.kind === "missing") {
-    if (!inActions) { log("⏭ فحص مصادقة Supabase: خارج GitHub Actions بلا مفتاح — تخطٍّ."); result.kind = "skipped"; return result; }
+    if (!inActions) { log("⏭ فحص مصادقة Supabase: خارج GitHub Actions بلا مفتاح — تخطٍّ."); result.kind = "skipped"; result.reason = "no-key-local"; return result; }
     result.kind = "auth";
   }
   if (result.kind === "ok") {

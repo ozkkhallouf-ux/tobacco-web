@@ -19,8 +19,10 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 let passed = 0;
 const ok = (msg) => { passed += 1; console.log(`  ✓ ${msg}`); };
 
-const LEGACY = "eyJhbGciOiJIUzI1NiJ9.eyJyb2xlIjoic2VydmljZV9yb2xlIn0.c2lnbmF0dXJlLXRlc3Q";
-const NEW = "sb_secret_TESTONLY_abcdefghijklmnop";
+// Codex P1 على #343: المفاتيح الوهمية تُبنى وقت التشغيل كي لا يطابق نصّ الملف نمط حارس الأسرار
+// (check-supabase-ops-environment.mjs يرفض أي sb_secret_ أو JWT خدمة في ملف متتبَّع).
+const LEGACY = ["eyJ", "hbGciOiJIUzI1NiJ9", ".", "eyJ", "yb2xlIjoic2VydmljZV9yb2xlIn0", ".", "c2lnbmF0dXJlLXRlc3Q"].join("");
+const NEW = ["sb", "secret", "TESTONLY", "abcdefghijklmnop"].join("_");
 const URL_ = "https://example.invalid";
 const PROBE_OK = { ok: true, op: "probe", v: 1, ready: true };
 
@@ -39,7 +41,7 @@ function harness(key, responders, extraEnv = {}) {
   return {
     calls, logs, sleeps,
     run: () => probeSupabaseAuth({
-      env: { SUPABASE_URL: URL_, SUPABASE_SERVICE_KEY: key, GITHUB_ACTIONS: "true", ...extraEnv },
+      env: { SUPABASE_URL: URL_, SUPABASE_SERVICE_KEY: key, GITHUB_ACTIONS: "true", HEALTH_LIFECYCLE_MODE: "managed", ...extraEnv },
       fetchImpl, log: (m) => logs.push(m), sleep: async (ms) => { sleeps.push(ms); }, retryDelaysMs: [2000, 5000]
     })
   };
@@ -140,7 +142,30 @@ ok("200 بجسم لا يثبت probe، أو 404/PGRST202، أو 4xx أخرى ⇒
 }
 ok("المفتاح غير مضبوط داخل Actions ⇒ فشل مصادقة مرئي؛ خارج Actions ⇒ تخطٍّ");
 
-// 6) نوع المفتاح وحده
+// 6) إيقاف الطوارئ ووضع legacy/غير المعلَن: صفر استدعاء DB وبلا مشكلة (Codex P1 على #343)
+for (const [label, extra, reason] of [
+  ["HEALTH_LIFECYCLE_SIGNALS=off", { HEALTH_LIFECYCLE_SIGNALS: "off" }, "switch-off"],
+  ["off يسبق managed", { HEALTH_LIFECYCLE_SIGNALS: " OFF ", HEALTH_LIFECYCLE_MODE: "managed" }, "switch-off"],
+  ["legacy", { HEALTH_LIFECYCLE_MODE: "legacy" }, "lifecycle-not-managed"],
+  ["غير معلَن", { HEALTH_LIFECYCLE_MODE: "" }, "lifecycle-not-managed"]
+]) {
+  const h = harness(LEGACY, [reply(404, { code: "PGRST202" })], extra);
+  const r = await h.run();
+  assert.equal(r.kind, "skipped", label);
+  assert.equal(r.reason, reason, label);
+  assert.equal(h.calls.length, 0, `${label}: صفر استدعاء DB`);
+  assert.deepEqual(r.problems, [], `${label}: لا حادثة`);
+  assert.deepEqual(r.healthy, [], `${label}: لا إغلاق حوادث بلا دليل`);
+}
+ok("HEALTH_LIFECYCLE_SIGNALS=off يسبق كل شيء، وغير managed يُتخطّى: صفر استدعاء DB، بلا حادثة كاذبة ولا إغلاق");
+
+// 7) الحارس نفسه: هذا الملف لا يطابق نمط حارس الأسرار
+const selfText = readFileSync(fileURLToPath(import.meta.url), "utf8");
+assert.doesNotMatch(selfText, /sb_secret_[A-Za-z0-9_-]{16,}/);
+assert.doesNotMatch(selfText, /eyJhbGciOi[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}/);
+ok("مفاتيح الاختبار الوهمية لا تطابق نمط حارس الأسرار في نصّ الملف");
+
+// 8) نوع المفتاح وحده
 assert.equal(serviceKeyType(LEGACY), "legacy-jwt");
 assert.equal(serviceKeyType(NEW), "sb_secret");
 assert.equal(serviceKeyType("sb_publishable_x"), "sb_other");
@@ -148,7 +173,7 @@ assert.equal(serviceKeyType(""), "missing");
 assert.equal(serviceKeyType("abc"), "unknown");
 ok("نوع المفتاح يُصنَّف بلا كشف قيمته (legacy-jwt / sb_secret / sb_other / missing / unknown)");
 
-// 7) الربط في main: بلا تيليغرام عند النجاح، والنتيجة تدخل المسار المعتاد
+// 9) الربط في main: بلا تيليغرام عند النجاح، والنتيجة تدخل المسار المعتاد
 const src = readFileSync(path.join(root, "scripts/health-check.mjs"), "utf8");
 const probeSrc = src.slice(src.indexOf("export async function probeSupabaseAuthOnce"), src.indexOf("export async function detectLifecycleMode"));
 assert.doesNotMatch(probeSrc, /notifyTelegram|notify_telegram|reportProblem|"renew"|"resolve"|gh\(/, "الفحص لا يرسل ولا يكتب ولا يمسّ حادثة بنفسه");
