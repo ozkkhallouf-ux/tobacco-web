@@ -294,3 +294,21 @@ test("تحليل سلسلة الاتصال: مثيل ومنفذ واسم مست�
   assert.equal(c.user, "ozk_print_reader");
   assert.equal(c.options.readOnlyIntent, true);
 });
+
+test("HTTP: خطأ داخلي لا يكشف نصّ الاستثناء للواجهة", async () => {
+  const { app, cfg, ameen } = makeApp({ browserPath: "" });
+  ameen.search = async () => { throw new Error("secret-detail Password=x at Connection"); };
+  const h = server.createHttpHandler(app, cfg);
+  const origError = console.error;
+  console.error = () => undefined;
+  try {
+    const out = await new Promise((resolve) => {
+      const res = { status: 0, writeHead(st) { this.status = st; }, end(b) { resolve({ status: this.status, body: String(b) }); } };
+      h.handle({ method: "GET", url: "/api/search?number=42", headers: { host: `127.0.0.1:${cfg.port}` }, on: () => undefined }, res);
+    });
+    assert.equal(out.status, 500);
+    assert.doesNotMatch(out.body, /secret-detail|Password/);
+  } finally {
+    console.error = origError;
+  }
+});

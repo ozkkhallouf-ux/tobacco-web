@@ -157,7 +157,7 @@ function createRenderer(cfg) {
       if (b && b.connected) return b;
     }
     const executablePath = findBrowser(cfg);
-    if (!executablePath) throw new Error("لم يُعثر على Microsoft Edge أو Chrome لتوليد PDF");
+    if (!executablePath) throw httpError(503, "لم يُعثر على Microsoft Edge أو Chrome لتوليد PDF");
     const puppeteer = require("puppeteer-core");
     browserPromise = puppeteer.launch({
       executablePath,
@@ -278,7 +278,8 @@ function createApp(deps) {
       const p = await ameen.ping();
       h.sql = { ok: true, ...ameen.describe(), db: p.db, login: p.login };
     } catch (err) {
-      h.sql = { ok: false, ...ameen.describe(), error: String(err.message || err) };
+      console.error(`SQL health: ${err && err.stack || err}`);
+      h.sql = { ok: false, ...ameen.describe(), error: sqlErrorLabel(err) };
     }
     h.autoPrintTask = autoPrintTaskState(cfg);
     const sample = buildInvoiceHtml({ number: 0, date: "", customer: "", total: 0, discount: 0, firstPay: 0, items: [] });
@@ -385,13 +386,22 @@ function createApp(deps) {
       return result;
     } catch (err) {
       log.append({ event: "print_failed", guid: t.guid, number: t.number, error: String(err.message || err) });
-      return { ok: false, code: "FAILED", message: `فشل الإرسال: ${err.message || err}` };
+      // التفاصيل في السجل المحلي وحده؛ الواجهة تأخذ رسالة ثابتة.
+      return { ok: false, code: "FAILED", message: "فشل الإرسال إلى الطابعة — التفاصيل في سجل الطباعة المحلي." };
     } finally {
       g.finish(success);
     }
   }
 
   return { health, search, preview, print, knownNumbers, previewDir };
+}
+
+// تصنيف خطأ SQL لعرضه بلا نصّ الاستثناء نفسه.
+function sqlErrorLabel(err) {
+  const code = String(err && err.code || "");
+  if (code === "ELOGIN") return "فشل تسجيل الدخول إلى SQL (اسم المستخدم أو كلمة المرور)";
+  if (code === "ESOCKET" || code === "ETIMEOUT" || code === "EINSTLOOKUP") return "تعذّر الوصول إلى خادم SQL على الشبكة";
+  return code ? `خطأ SQL (${code})` : "خطأ SQL";
 }
 
 function httpError(status, message) {
@@ -481,7 +491,11 @@ function createHttpHandler(app, cfg) {
       if (file) return send(res, 200, fs.readFileSync(file), "application/pdf");
       return send(res, 404, { error: "not found" });
     } catch (err) {
-      return send(res, err.status || 500, { error: String(err.message || err) });
+      // أخطاء الطلب المقصودة (httpError) تُعرض كما هي؛ غيرها يُسجَّل محلياً ولا
+      // يخرج نصّه ولا تتبّعه إلى الواجهة.
+      if (err && err.status) return send(res, err.status, { error: err.message });
+      console.error(err && err.stack || err);
+      return send(res, 500, { error: "خطأ داخلي — التفاصيل في server.err.log" });
     }
   }
 
