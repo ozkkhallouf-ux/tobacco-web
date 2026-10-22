@@ -26,6 +26,7 @@ export const CHECKS = [
   'check-amanat-price-bulletin-isolation.mjs',
   'check-amanat-warehouse-page.mjs',
   'check-ameen-autoprint-regression.mjs',
+  'check-ameen-invoice-events-p1.mjs',
   'check-ameen-invoice-events.mjs',
   'check-ameen-read-connection-preference.mjs',
   'check-ameen-read-gateway.mjs',
