@@ -50,8 +50,8 @@ try {
         $deadline = (Get-Date).AddSeconds(20)
         while (-not (Test-Server $port)) {
             if ((Get-Date) -gt $deadline) {
-                $err = ''
-                try { $err = (Get-Content -Tail 5 -Encoding UTF8 (Join-Path $UserData 'server.err.log')) -join "`n" } catch {}
+                $errLog = Join-Path $UserData 'server.err.log'
+                $err = if (Test-Path $errLog) { (Get-Content -Tail 5 -Encoding UTF8 $errLog) -join "`n" } else { '' }
                 throw "تعذّر تشغيل خادم الطباعة.`n$err"
             }
             Start-Sleep -Milliseconds 400

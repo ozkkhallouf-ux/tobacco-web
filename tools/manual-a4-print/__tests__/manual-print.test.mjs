@@ -275,7 +275,7 @@ test("HTTP: مضيف غير محلي مرفوض، وPOST بلا ترويسة X-O
   const h = server.createHttpHandler(app, cfg);
   const call = (method, url, headers) => new Promise((resolve) => {
     const res = { status: 0, writeHead(s) { this.status = s; }, end(b) { resolve({ status: this.status, body: String(b) }); } };
-    const req = { method, url, headers: { host: `127.0.0.1:${cfg.port}`, ...headers }, on() {} };
+    const req = { method, url, headers: { host: `127.0.0.1:${cfg.port}`, ...headers }, on: () => undefined };
     h.handle(req, res);
   });
   assert.equal((await call("GET", "/api/ping", { host: "evil.example:80" })).status, 403);

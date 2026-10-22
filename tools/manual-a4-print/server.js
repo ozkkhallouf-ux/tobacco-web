@@ -332,9 +332,40 @@ function createApp(deps) {
     return hit || null;
   }
 
-  async function print(token, copies, confirmReprint) {
+  function parseCopies(copies) {
     const n = Number(copies);
     if (!Number.isInteger(n) || n < 1 || n > cfg.maxCopies) throw httpError(400, `عدد النسخ يجب أن يكون بين 1 و${cfg.maxCopies}`);
+    return n;
+  }
+
+  // شروط ما قبل الإرسال: الخط مضمَّن والطابعة جاهزة. تعيد رفضاً أو null.
+  function preSendRejection(t) {
+    if (cfg.requireOfficialFont && !t.fontOk) {
+      return { ok: false, code: "FONT", message: "خط Cairo لم يُضمَّن في المعاينة — أُلغيت الطباعة." };
+    }
+    const pr = printer.probe();
+    const tolerated = cfg.dryRun && pr.state === "unknown";
+    if (pr.state !== "ready" && !tolerated) {
+      return { ok: false, code: "PRINTER", message: pr.reason || "الطابعة غير جاهزة", printer: pr.state };
+    }
+    return null;
+  }
+
+  function dispatchToPrinter(t, n, reprint) {
+    const paper = paperFor(t.paper, cfg);
+    const base = { guid: t.guid, number: t.number, copies: n, paper: paper.label };
+    log.append({ event: "print_requested", ...base, reprint, dryRun: Boolean(cfg.dryRun) });
+    if (cfg.dryRun) {
+      log.append({ event: "dry_run", ...base, printer: cfg.printerName });
+      return { ok: true, dryRun: true, message: "وضع الاختبار: لم يُرسل شيء للطابعة (dryRun)." };
+    }
+    printer.send(t.pdfPath, paper, n);
+    log.append({ event: "print_sent", ...base, printer: cfg.printerName, reprint });
+    return { ok: true, message: `أُرسلت ${n} نسخة إلى ${cfg.printerName}` };
+  }
+
+  async function print(token, copies, confirmReprint) {
+    const n = parseCopies(copies);
     const g = guard.begin(token, { confirmReprint: Boolean(confirmReprint) });
     if (!g.ok) {
       const t = guard.lookup(token);
@@ -344,26 +375,14 @@ function createApp(deps) {
     const t = g.entry;
     let success = false;
     try {
-      if (cfg.requireOfficialFont && !t.fontOk) {
-        log.append({ event: "print_rejected", guid: t.guid, number: t.number, code: "FONT" });
-        return { ok: false, code: "FONT", message: "خط Cairo لم يُضمَّن في المعاينة — أُلغيت الطباعة." };
+      const rejected = preSendRejection(t);
+      if (rejected) {
+        log.append({ event: "print_rejected", guid: t.guid, number: t.number, code: rejected.code, printer: rejected.printer });
+        return rejected;
       }
-      const pr = printer.probe();
-      if (pr.state !== "ready" && !(cfg.dryRun && pr.state === "unknown")) {
-        log.append({ event: "print_rejected", guid: t.guid, number: t.number, code: "PRINTER", printer: pr.state });
-        return { ok: false, code: "PRINTER", message: pr.reason || "الطابعة غير جاهزة" };
-      }
-      const paper = paperFor(t.paper, cfg);
-      log.append({ event: "print_requested", guid: t.guid, number: t.number, copies: n, paper: paper.label, reprint: g.reprint, dryRun: Boolean(cfg.dryRun) });
-      if (cfg.dryRun) {
-        log.append({ event: "dry_run", guid: t.guid, number: t.number, copies: n, paper: paper.label, printer: cfg.printerName });
-        success = true;
-        return { ok: true, dryRun: true, message: "وضع الاختبار: لم يُرسل شيء للطابعة (dryRun)." };
-      }
-      printer.send(t.pdfPath, paper, n);
-      log.append({ event: "print_sent", guid: t.guid, number: t.number, copies: n, paper: paper.label, printer: cfg.printerName, reprint: g.reprint });
+      const result = dispatchToPrinter(t, n, g.reprint);
       success = true;
-      return { ok: true, message: `أُرسلت ${n} نسخة إلى ${cfg.printerName}` };
+      return result;
     } catch (err) {
       log.append({ event: "print_failed", guid: t.guid, number: t.number, error: String(err.message || err) });
       return { ok: false, code: "FAILED", message: `فشل الإرسال: ${err.message || err}` };
@@ -407,43 +426,59 @@ function createHttpHandler(app, cfg) {
     });
   }
 
+  // جدول المسارات: "METHOD path" ← معالج يعيد [status, body, type?].
+  const routes = {
+    "GET /": async () => [200, fs.readFileSync(uiFile), "text/html; charset=utf-8"],
+    "GET /api/health": async () => [200, await app.health()],
+    "GET /api/ping": async () => [200, { ok: true }],
+    "GET /api/search": async (req, url) => {
+      const raw = String(url.searchParams.get("number") || "").trim();
+      if (!/^\d{1,9}$/.test(raw)) throw httpError(400, "أدخل رقم فاتورة صحيحاً (أرقام فقط)");
+      const number = Number(raw);
+      const matches = await app.search(number);
+      for (const m of matches) app.knownNumbers.set(m.guid, number);
+      return [200, { number, matches }];
+    },
+    "POST /api/preview": async (req) => {
+      const body = await readJson(req);
+      const guid = model.normGuid(body.guid);
+      if (!model.isGuid(guid)) throw httpError(400, "معرّف فاتورة غير صالح");
+      return [200, await app.preview(guid, body.paper || "A4")];
+    },
+    "POST /api/print": async (req) => {
+      const body = await readJson(req);
+      return [200, await app.print(String(body.token || ""), body.copies, body.confirmReprint === true)];
+    },
+  };
+
+  function previewFile(url) {
+    const pm = url.pathname.match(/^\/preview\/([0-9a-f]{32})\.pdf$/);
+    if (!pm) return null;
+    const file = path.join(app.previewDir, `${pm[1]}.pdf`);
+    return fs.existsSync(file) ? file : null;
+  }
+
+  // حماية من DNS rebinding وطلبات المواقع الأخرى: مضيف محلي فقط، والكتابة
+  // تتطلب ترويسة مخصّصة لا يرسلها متصفح عبر الأصول بلا preflight.
+  function rejectReason(req) {
+    if (!allowedHosts.has(String(req.headers.host || ""))) return "host";
+    if (req.method === "POST" && req.headers["x-ozk"] !== "1") return "header";
+    return "";
+  }
+
   async function handle(req, res) {
     lastActivity = Date.now();
-    // حماية من DNS rebinding وطلبات المواقع الأخرى: مضيف محلي فقط، والكتابة
-    // تتطلب ترويسة مخصّصة لا يرسلها متصفح عبر الأصول بلا preflight.
-    if (!allowedHosts.has(String(req.headers.host || ""))) return send(res, 403, { error: "host" });
+    const reject = rejectReason(req);
+    if (reject) return send(res, 403, { error: reject });
     const url = new URL(req.url, `http://${req.headers.host}`);
-    if (req.method === "POST" && req.headers["x-ozk"] !== "1") return send(res, 403, { error: "header" });
     try {
-      if (req.method === "GET" && url.pathname === "/") {
-        return send(res, 200, fs.readFileSync(uiFile), "text/html; charset=utf-8");
+      const route = routes[`${req.method} ${url.pathname}`];
+      if (route) {
+        const [status, body, type] = await route(req, url);
+        return send(res, status, body, type);
       }
-      if (req.method === "GET" && url.pathname === "/api/health") return send(res, 200, await app.health());
-      if (req.method === "GET" && url.pathname === "/api/ping") return send(res, 200, { ok: true });
-      if (req.method === "GET" && url.pathname === "/api/search") {
-        const raw = String(url.searchParams.get("number") || "").trim();
-        if (!/^\d{1,9}$/.test(raw)) throw httpError(400, "أدخل رقم فاتورة صحيحاً (أرقام فقط)");
-        const number = Number(raw);
-        const matches = await app.search(number);
-        for (const m of matches) app.knownNumbers.set(m.guid, number);
-        return send(res, 200, { number, matches });
-      }
-      if (req.method === "POST" && url.pathname === "/api/preview") {
-        const body = await readJson(req);
-        const guid = model.normGuid(body.guid);
-        if (!model.isGuid(guid)) throw httpError(400, "معرّف فاتورة غير صالح");
-        return send(res, 200, await app.preview(guid, body.paper || "A4"));
-      }
-      if (req.method === "POST" && url.pathname === "/api/print") {
-        const body = await readJson(req);
-        return send(res, 200, await app.print(String(body.token || ""), body.copies, body.confirmReprint === true));
-      }
-      const pm = url.pathname.match(/^\/preview\/([0-9a-f]{32})\.pdf$/);
-      if (req.method === "GET" && pm) {
-        const file = path.join(app.previewDir, `${pm[1]}.pdf`);
-        if (!fs.existsSync(file)) return send(res, 404, { error: "not found" });
-        return send(res, 200, fs.readFileSync(file), "application/pdf");
-      }
+      const file = req.method === "GET" ? previewFile(url) : null;
+      if (file) return send(res, 200, fs.readFileSync(file), "application/pdf");
       return send(res, 404, { error: "not found" });
     } catch (err) {
       return send(res, err.status || 500, { error: String(err.message || err) });
@@ -481,6 +516,27 @@ function buildRealApp(cfg) {
   return { app: createApp(deps), deps };
 }
 
+async function selftest(app, cfg, number, paper) {
+  const matches = await app.search(number);
+  for (const m of matches) app.knownNumbers.set(m.guid, number);
+  const report = {
+    number,
+    matches: matches.map((m) => ({ guid: m.guid, type: m.typeName, date: m.date, customer: m.customer ? "[موجود]" : "", printable: m.printable, lines: m.lineCount })),
+  };
+  const target = matches.find((m) => m.printable);
+  if (!target) return report;
+  const pv = await app.preview(target.guid, paper);
+  const kept = path.join(cfg.dataDir, `selftest-${number}-${paper}.pdf`);
+  fs.copyFileSync(path.join(app.previewDir, `${pv.token}.pdf`), kept);
+  report.preview = { pages: pv.pages, fontOk: pv.fontOk, paper: pv.paper, pdf: kept, bytes: fs.statSync(kept).size, autoPrint: pv.autoPrint };
+  return report;
+}
+
+function argValue(argv, name, fallback) {
+  const i = argv.indexOf(name);
+  return i >= 0 && argv[i + 1] !== undefined ? argv[i + 1] : fallback;
+}
+
 async function cli(argv) {
   const cfg = loadConfig();
   const { app, deps } = buildRealApp(cfg);
@@ -489,22 +545,9 @@ async function cli(argv) {
       console.log(JSON.stringify(await app.health(), null, 2));
       return 0;
     }
-    const i = argv.indexOf("--selftest");
-    const number = Number(argv[i + 1]);
+    const number = Number(argValue(argv, "--selftest", ""));
     if (!Number.isInteger(number) || number < 1) throw new Error("الاستعمال: --selftest <رقم الفاتورة> [--paper A4|A5]");
-    const pi = argv.indexOf("--paper");
-    const paper = pi >= 0 ? argv[pi + 1] : "A4";
-    const matches = await app.search(number);
-    for (const m of matches) app.knownNumbers.set(m.guid, number);
-    const report = { number, matches: matches.map((m) => ({ guid: m.guid, type: m.typeName, date: m.date, customer: m.customer ? "[موجود]" : "", printable: m.printable, lines: m.lineCount })) };
-    const target = matches.find((m) => m.printable);
-    if (target) {
-      const pv = await app.preview(target.guid, paper);
-      const kept = path.join(cfg.dataDir, `selftest-${number}-${paper}.pdf`);
-      fs.copyFileSync(path.join(app.previewDir, `${pv.token}.pdf`), kept);
-      report.preview = { pages: pv.pages, fontOk: pv.fontOk, paper: pv.paper, pdf: kept, bytes: fs.statSync(kept).size, autoPrint: pv.autoPrint };
-    }
-    console.log(JSON.stringify(report, null, 2));
+    console.log(JSON.stringify(await selftest(app, cfg, number, argValue(argv, "--paper", "A4")), null, 2));
     return 0;
   } finally {
     await deps.renderer.close();
