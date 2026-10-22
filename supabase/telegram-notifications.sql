@@ -481,23 +481,66 @@ create trigger trg_notify_daily_sales
 after insert on public.daily_sales_summary
 for each row execute function public.tg_notify_daily_sales();
 
-create or replace function public.tg_notify_daily_movement()
-returns trigger language plpgsql security definer set search_path = public
-as $$
+-- رسالة واحدة لكل تاريخ لتقريرَي الحركة والجرد (supabase/proposed/19 و20، مطبّقتان على الإنتاج
+-- 2026-10-21 16:28Z و2026-10-22 02:47Z، وغير مسجلتين في schema_migrations). الدالتان أدناه مطابقتان
+-- حرفياً للإنتاج (md5(prosrc): الحركة 287872ff…، الجرد 578be73e…) ويحرسهما
+-- scripts/check-daily-report-once-per-date.mjs. لا تُعِد منطق النافذة الزمنية القديم (720/1200 دقيقة).
+-- سجلّ المطالبة الذرّية بالتاريخ (المفتاح الأساسي يمنع رسالتين لنفس التاريخ):
+create table if not exists private.daily_report_notifications (
+  report_kind text not null check (report_kind in ('daily_movement', 'inventory_report')),
+  report_date date not null,
+  outbox_id   bigint,
+  claimed_at  timestamptz not null default now(),
+  primary key (report_kind, report_date)
+);
+revoke all on table private.daily_report_notifications from public;
+do $grants$
+begin
+  if exists (select 1 from pg_roles where rolname = 'anon') then
+    execute 'revoke all on table private.daily_report_notifications from anon, authenticated';
+  end if;
+end
+$grants$;
+
+CREATE OR REPLACE FUNCTION public.tg_notify_daily_movement()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public'
+AS $function$
 declare
   previous_payments jsonb := '[]'::jsonb;
   payment_count integer := 0;
   payment_total numeric := 0;
   payment_lines text := '';
+  v_date date := coalesce(new.report_date, (now() at time zone 'Asia/Damascus')::date);
+  v_key text := 'movement:' || coalesce(new.report_date, (now() at time zone 'Asia/Damascus')::date)::text;
+  v_claimed integer := 0;
+  v_outbox bigint;
 begin
-  perform public.notify_telegram(
-    'daily_movement',
-    '📈 وصل تقرير الحركة اليومية — ' || coalesce(to_char(new.report_date, 'YYYY-MM-DD'), 'بدون تاريخ'),
-    'movement:' || coalesce(new.report_date::text, to_char(now(), 'YYYY-MM-DD')), 720);
+  -- once-per-date:v1 (proposed/19) — رسالة واحدة لكل تاريخ تقرير
+  if v_date >= (now() at time zone 'Asia/Damascus')::date - 14 then
+    insert into private.daily_report_notifications (report_kind, report_date)
+    values ('daily_movement', v_date)
+    on conflict do nothing;
+    get diagnostics v_claimed = row_count;
+    if v_claimed = 1 then
+      perform public.notify_telegram(
+        'daily_movement',
+        '📈 وصل تقرير الحركة اليومية — ' || coalesce(to_char(new.report_date, 'YYYY-MM-DD'), 'بدون تاريخ'),
+        v_key,
+        20160
+      );
+      select o.id into v_outbox from public.telegram_outbox o where o.dedupe_key = v_key order by o.id desc limit 1;
+      if v_outbox is null then
+        delete from private.daily_report_notifications where report_kind = 'daily_movement' and report_date = v_date;
+      else
+        update private.daily_report_notifications set outbox_id = v_outbox
+        where report_kind = 'daily_movement' and report_date = v_date;
+      end if;
+    end if;
+  end if;
 
-  -- daily_movement_reports is a rolling snapshot uploaded every few minutes.
-  -- Notify only for payments that were not present in the previous snapshot;
-  -- payment_records contains manual website entries and is not fed by Ameen.
   select coalesce(r.payload->'payments', '[]'::jsonb)
     into previous_payments
   from public.daily_movement_reports r
@@ -549,19 +592,37 @@ begin
 
   return null;
 end;
-$$;
+$function$;
 drop trigger if exists trg_notify_daily_movement on public.daily_movement_reports;
 create trigger trg_notify_daily_movement
 after insert on public.daily_movement_reports
 for each row execute function public.tg_notify_daily_movement();
 
 -- أول تقرير جرد في اليوم = إشارة أن مزامنة الأمين تعمل
-create or replace function public.tg_notify_inventory_report()
-returns trigger language plpgsql security definer set search_path = public
-as $$
+CREATE OR REPLACE FUNCTION public.tg_notify_inventory_report()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public'
+AS $function$
 declare
   item_count int := null;
+  v_date date := coalesce(new.report_date, (now() at time zone 'Asia/Damascus')::date);
+  v_key text := 'inventory:' || coalesce(new.report_date, (now() at time zone 'Asia/Damascus')::date)::text;
+  v_claimed integer := 0;
+  v_outbox bigint;
 begin
+  -- once-per-date:v1 (proposed/20) — رسالة واحدة لكل تاريخ تقرير
+  if v_date < (now() at time zone 'Asia/Damascus')::date - 14 then
+    return null;
+  end if;
+  insert into private.daily_report_notifications (report_kind, report_date)
+  values ('inventory_report', v_date)
+  on conflict do nothing;
+  get diagnostics v_claimed = row_count;
+  if v_claimed = 0 then
+    return null;
+  end if;
   if jsonb_typeof(new.items) = 'array' then
     item_count := jsonb_array_length(new.items);
   end if;
@@ -569,10 +630,17 @@ begin
     'inventory_report',
     '📦 وصل تقرير الجرد اليومي من الأمين'
     || case when item_count is not null then chr(10) || 'عدد المواد: ' || item_count else '' end,
-    'inventory:' || coalesce(new.report_date::text, to_char(now(), 'YYYY-MM-DD')), 1200);
+    v_key, 20160);
+  select o.id into v_outbox from public.telegram_outbox o where o.dedupe_key = v_key order by o.id desc limit 1;
+  if v_outbox is null then
+    delete from private.daily_report_notifications where report_kind = 'inventory_report' and report_date = v_date;
+  else
+    update private.daily_report_notifications set outbox_id = v_outbox
+    where report_kind = 'inventory_report' and report_date = v_date;
+  end if;
   return null;
 end;
-$$;
+$function$;
 revoke execute on function public.tg_notify_inventory_report() from public;
 revoke execute on function public.tg_notify_inventory_report() from anon;
 revoke execute on function public.tg_notify_inventory_report() from authenticated;

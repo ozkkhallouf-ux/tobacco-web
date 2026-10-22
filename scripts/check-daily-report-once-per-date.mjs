@@ -12,6 +12,7 @@
 // لا شبكة ولا تيليغرام حقيقي ولا بيانات إنتاج.
 // ============================================================================
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import path from "node:path";
@@ -26,6 +27,8 @@ const FILES = {
   r20: read("supabase/proposed/20-inventory-report-once-per-date-rollback.sql")
 };
 const envSql = read("supabase/tests/daily-report-once-per-date-env.sql");
+// الملف المرجعي: 19 و20 مطبّقتان على الإنتاج، فيجب أن يحمل جسميهما الجديدين لا القديمين.
+const refSql = read("supabase/telegram-notifications.sql");
 
 const PROD = {
   movement: "feb6663e6fcebe7ca17248960e0ec8d8",
@@ -67,6 +70,25 @@ for (const [m, r, fn, prod, fresh] of [
 const tail = (s) => s.slice(s.indexOf("  select coalesce(r.payload->'payments'"), s.indexOf("$function$;", s.indexOf("  select coalesce(r.payload->'payments'")));
 assert.equal(tail(definition(FILES.m19, "public.tg_notify_daily_movement")), tail(definition(envSql, "public.tg_notify_daily_movement")), "19: جزء الدفعات حرفياً كما في الإنتاج");
 console.log("  ✓ عقود ساكنة: دالة واحدة لكل هجرة بحارسَي بصمة، لا إرسال ولا Cron، الدفعات كما هي، والتراجع حرفي");
+// الملف المرجعي = الإنتاج بعد 19 و20: التعريف حرفياً كما في الهجرة، وبصمة الجسم = بصمة الإنتاج،
+// وجدول السجل معرَّف قبله، ولا عودة لمنطق النافذة الزمنية القديم (720/1200 دقيقة).
+// يُطبَّع CRLF (نسخة Windows بـcore.autocrlf) إلى LF قبل الحساب: بصمة الإنتاج محسوبة على LF.
+const bodyMd5 = (def) => createHash("md5").update(def.slice(def.indexOf("AS $function$") + "AS $function$".length, def.lastIndexOf("$function$;")).replace(/\r\n/g, "\n")).digest("hex");
+const refCode = strip(refSql);
+for (const [m, fn, fresh, oldWindow] of [
+  ["m19", "public.tg_notify_daily_movement", NEW.movement, /'movement:'[\s\S]{0,120}?,\s*720\s*\)/],
+  ["m20", "public.tg_notify_inventory_report", NEW.inventory, /'inventory:'[\s\S]{0,120}?,\s*1200\s*\)/]
+]) {
+  const refDef = definition(refSql, fn);
+  assert.equal(refDef, definition(FILES[m], fn), `telegram-notifications.sql: ${fn} مطابق حرفياً لـ${m}`);
+  assert.equal(bodyMd5(refDef), fresh, `telegram-notifications.sql: بصمة ${fn} = الإنتاج`);
+  assert.equal((refCode.match(new RegExp(`create or replace function ${fn.replace(".", "\\.")}\\(`, "gi")) || []).length, 1, `telegram-notifications.sql: تعريف واحد لـ${fn}`);
+  assert.doesNotMatch(refCode, oldWindow, `telegram-notifications.sql: عاد منطق النافذة القديم لـ${fn}`);
+}
+const refTable = refCode.indexOf("create table if not exists private.daily_report_notifications");
+assert.ok(refTable >= 0 && refTable < refCode.indexOf("CREATE OR REPLACE FUNCTION public.tg_notify_daily_movement("), "telegram-notifications.sql: جدول السجل قبل الدالتين");
+console.log("  ✓ الملف المرجعي: الدالتان مطابقتان لـ19 و20 والإنتاج (287872ff/578be73e)، بلا منطق النافذة القديم");
+
 
 // ── ٢) تشغيل حي ──────────────────────────────────────────────────────────────────────────
 const LOCAL_HOSTS = new Set(["", "localhost", "127.0.0.1", "::1"]);
@@ -196,6 +218,16 @@ for (const [name, k] of Object.entries(KIND)) {
   eq(fp(k.fn), PROD[name], `${name} 14a: التراجع يعيد جسم الإنتاج`);
   eq(val(`select to_regclass('private.daily_report_notifications') is null`), "t", `${name} 14b: الجدول يُسقط إن لم يستعمله غيره`);
 }
+
+// الملف المرجعي على بيئة الإنتاج: جدوله ودالتاه تعطيان بصمتَي الإنتاج وتعملان مع السجل
+fresh();
+run(refSql.slice(refSql.indexOf("create table if not exists private.daily_report_notifications"), refSql.indexOf("$grants$;") + "$grants$;".length));
+run(definition(refSql, "public.tg_notify_daily_movement") + "\n" + definition(refSql, "public.tg_notify_inventory_report"));
+eq(fp("tg_notify_daily_movement"), NEW.movement, "ref: movement = 287872ff");
+eq(fp("tg_notify_inventory_report"), NEW.inventory, "ref: inventory = 578be73e");
+run(KIND.movement.snap(dateSql(0)).repeat(2) + KIND.inventory.snap(dateSql(0)).repeat(2));
+eq(count(KIND.movement) + count(KIND.inventory), 2, "ref: رسالة واحدة لكل تقرير");
+eq(val(`select count(*) from private.daily_report_notifications d join public.telegram_outbox o on o.id = d.outbox_id`), "2", "ref: كل حجز مرتبط برسالته");
 
 // الهجرتان معاً: مستقلتان، وتراجع واحدة لا يُسقط جدول الأخرى
 fresh("m19", "m20");
