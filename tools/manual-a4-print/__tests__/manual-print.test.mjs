@@ -160,7 +160,7 @@ function findChromium() {
 
 function makeApp(over) {
   const dataDir = tmp();
-  const cfg = { ...server.DEFAULTS, dataDir, browserPath: findChromium(), papers: ["A4", "A5"], ...(over || {}) };
+  const cfg = { ...server.DEFAULTS, dataDir, browserPath: findChromium(), papers: ["A4", "A5"], ...over };
   const log = createPrintLog(path.join(dataDir, "print-log.jsonl"));
   const sent = [];
   const printerState = { value: { state: "ready" } };
