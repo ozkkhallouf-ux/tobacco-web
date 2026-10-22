@@ -15,6 +15,13 @@
 -- العروض والسياسات ولا يقرأ أحدٌ عبرها إلى أن تُثبَّت الدالة الحقيقية خارج السلسلة (create or replace).
 -- على الإنتاج is_staff() موجودة ⇒ لا شيء يتغيّر إطلاقاً (لا جسم ولا صلاحية). لا جداول ولا بيانات ولا cron.
 -- لا يُطبَّق على الإنتاج إلا بموافقة المالك، وتطبيقه هناك no-op.
+--
+-- لماذا يبقى في migrations لا في proposed: هدفه إعادة تشغيل السلسلة نفسها (reset محلي، فرع معاينة Supabase)،
+-- وهذه تقرأ migrations وحدها بترتيب الإصدار؛ في proposed لن يُرى أبداً.
+--
+-- لا يُخفي اعتماداً مفقوداً: حين يُنشئ البديل يرفع WARNING صريحاً في سجل الهجرات، فبيئة بلا الدالة الحقيقية
+-- تُعلَن (لا تبدو سليمة بصمت)، وأثره رفض القراءة على الموظفين فيها — لا منح أي صلاحية. تثبيت الدالة الحقيقية
+-- خارج السلسلة بـ create or replace يحلّ محله؛ وcreate function بلا replace يفشل صراحةً لا صامتاً.
 
 do $stub$
 begin
@@ -29,6 +36,7 @@ begin
     $fn$;
     comment on function public.is_staff() is
       'بديل رفض افتراضي لإعادة تشغيل السلسلة (20260914125959). الإنتاج يستعمل تعريفه الخاص خارج السلسلة.';
+    raise warning '20260914125959: public.is_staff() absent — created deny-by-default stub (returns false; staff reads blocked). Install the real is_staff()/staff_allowlist out of band with create or replace.';
   end if;
 end
 $stub$;

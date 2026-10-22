@@ -52,6 +52,7 @@ assert.ok(fn18.length > 1000 && r21.includes(fn18.trim()), "21-rollback يعيد
 const cStub = code(stub);
 assert.match(cStub, /if to_regprocedure\('public\.is_staff\(\)'\) is null then/, "الشرط المسبق محروس بغياب الدالة");
 assert.match(cStub, /\$body\$ select false \$body\$/, "البديل رفض افتراضي");
+assert.match(cStub, /raise warning '20260914125959: public\.is_staff\(\) absent/, "إنشاء البديل يُعلَن ولا يمرّ صامتاً");
 assert.doesNotMatch(cStub, /create or replace function|grant |revoke |drop |alter /i, "الشرط المسبق لا يستبدل ولا يغيّر صلاحيات");
 // السلسلة الفعلية (Codex P1 على 092f2ce4): لا استعمال غير محروس لـ is_staff() في أي هجرة فعّالة قبل الشرط المسبق.
 // «محروس» = الملف يفحص to_regprocedure('public.is_staff()') ويؤجّل ما يعتمد عليها. الترتيب بالإصدار كما يطبّقه Supabase.
@@ -240,10 +241,16 @@ function replayFreshDatabase() {
   assert.notEqual(without.status, 0, "بلا الشرط المسبق: 18 تتوقف (العيب مُعاد إنتاجه)");
   assert.match(output(without), /requires public\.is_staff\(\)/);
   pass("قاعدة جديدة بلا الشرط المسبق: 18 تتوقف عند is_staff (العيب مُعاد إنتاجه)");
+  const outs = [];
   for (const [sql, what] of [[stub, "الشرط المسبق"], [m18, "18 بعد الشرط المسبق"], [stub, "إعادة الشرط المسبق"]]) {
     const r = run(DBR, sql);
     assert.equal(r.status, 0, `${what}\n${output(r)}`);
+    outs.push(output(r));
   }
+  // لا يُخفي الاعتماد المفقود: إنشاء البديل يُعلَن بـ WARNING، وإعادة التشغيل (الدالة موجودة) صامتة
+  assert.match(outs[0], /WARNING:\s+20260914125959: public\.is_staff\(\) absent — created deny-by-default stub/, outs[0]);
+  assert.doesNotMatch(outs[2], /WARNING/, outs[2]);
+  pass("قاعدة جديدة: إنشاء البديل يرفع WARNING صريحاً (لا يُخفي غياب is_staff)، والتشغيل الثاني صامت");
   const st = run(DBR, "select public.is_staff()::text || ',' || (select count(*) from pg_policies where tablename like 'ameen_invoice%')::text");
   assert.equal(st.stdout.trim(), "false,3", output(st));
   pass("قاعدة جديدة: الشرط المسبق ثم 18 ⇒ تُطبَّق، 3 سياسات، is_staff() = false (رفض افتراضي)، وإعادة التشغيل آمنة");
@@ -260,6 +267,7 @@ function stubIsNoOpOnProductionLike() {
   const b0 = run(DBP, sig).stdout.trim();
   const s3 = run(DBP, stub);
   assert.equal(s3.status, 0, output(s3));
+  assert.doesNotMatch(output(s3), /WARNING/, "كالإنتاج: لا بديل ولا تحذير");
   assert.equal(run(DBP, sig).stdout.trim(), b0, "الشرط المسبق لا يغيّر is_staff الموجودة");
   pass("قاعدة كالإنتاج: الشرط المسبق لا يغيّر جسم is_staff ولا صلاحياتها ولا خصائصها");
 }
@@ -289,5 +297,5 @@ try {
 } finally {
   for (const d of dbs) psql(["-d", "postgres", "-c", `drop database if exists ${d}`]);
 }
-assert.ok(passes >= 12, `عدد التأكيدات الحية أقل من المتوقع (${passes})`);
+assert.ok(passes >= 13, `عدد التأكيدات الحية أقل من المتوقع (${passes})`);
 console.log(`check-ameen-invoice-events-p1: اجتاز الفحص (${passes} سيناريو حي).`);
