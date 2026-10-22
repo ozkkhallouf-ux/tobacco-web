@@ -166,79 +166,81 @@ async function concurrentSameEvent(db, ev, bOptions = {}) {
 
 let passes = 0;
 const pass = (name) => { passes++; console.log(`  ✓ ${name}`); };
-try {
-  // P1-a على 18 وحدها: إثبات العيب (الطلب الثاني يُرفض)
-  const DBC = "ozk_ameen_invoice_p1_concurrency";
+const DBC = "ozk_ameen_invoice_p1_concurrency";
+const countEvents = (db, guid) => run(db, `select count(*) from public.ameen_invoice_events${guid ? ` where bill_guid = '${guid}'` : ""}`).stdout.trim();
+
+// P1-a على 18 وحدها: إثبات العيب (الطلب الثاني يُرفض، ومهلة القفل العابرة كذلك)
+async function reproduceOn18() {
   freshDb(DBC, PRELUDE + PROD_IS_STAFF + m18);
   const before = await concurrentSameEvent(DBC, invoiceEvent("c0000000-0000-4000-8000-000000000001", 1792641146300));
   assert.equal(outcomeOf(before.a.out), "applied", before.a.out);
   assert.equal(outcomeOf(before.b.out), "rejected", `18 وحدها: متوقع إعادة إنتاج العيب\n${before.b.out}`);
   pass("18 وحدها: الحدث نفسه في طلبين متزامنين ⇒ الثاني rejected (العيب مُعاد إنتاجه)");
-  // مهلة قفل على 18: الحدث السليم يُرفض أيضاً
   const lt18 = await concurrentSameEvent(DBC, invoiceEvent("c0000000-0000-4000-8000-000000000002", 1792641146301), { lockTimeout: "300ms" });
   assert.equal(outcomeOf(lt18.b.out), "rejected", lt18.b.out);
   pass("18 وحدها: مهلة قفل عابرة ⇒ الحدث السليم rejected (العيب مُعاد إنتاجه)");
+}
 
-  // تطبيق 21 على القاعدة نفسها
+function apply21KeepsGrants() {
   const ap = run(DBC, m21);
   assert.equal(ap.status, 0, output(ap));
   const acl = run(DBC, "select has_function_privilege('anon','public.apply_ameen_invoice_events(jsonb)','execute')::text || ',' || has_function_privilege('service_role','public.apply_ameen_invoice_events(jsonb)','execute')::text || ',' || has_function_privilege('authenticated','public.apply_ameen_invoice_events(jsonb)','execute')::text || ',' || (select prosecdef::text from pg_proc where oid = 'public.apply_ameen_invoice_events(jsonb)'::regprocedure)");
   assert.equal(acl.stdout.trim(), "false,false,true,true", output(acl));
   pass("21: الصلاحيات كما هي (anon وservice_role بلا تنفيذ، authenticated فقط، SECURITY DEFINER)");
+}
 
+async function concurrentDuplicateOn21() {
   const after = await concurrentSameEvent(DBC, invoiceEvent("c0000000-0000-4000-8000-000000000003", 1792641146302));
   assert.equal(outcomeOf(after.a.out), "applied", after.a.out);
   assert.equal(outcomeOf(after.b.out), "duplicate", `21: الطلب الثاني يجب أن يكون duplicate\n${after.b.out}`);
-  const rows = run(DBC, "select count(*) from public.ameen_invoice_events where bill_guid = 'c0000000-0000-4000-8000-000000000003'");
-  assert.equal(rows.stdout.trim(), "1");
+  assert.equal(countEvents(DBC, "c0000000-0000-4000-8000-000000000003"), "1");
   pass("21: الحدث نفسه في طلبين متزامنين ⇒ applied ثم duplicate، وصف حدث واحد فقط");
+}
 
+async function lockTimeoutOn21() {
   const lt21 = await concurrentSameEvent(DBC, invoiceEvent("c0000000-0000-4000-8000-000000000004", 1792641146303), { lockTimeout: "300ms" });
   assert.notEqual(lt21.b.status, 0, "21: مهلة القفل تُفشل الطلب كله");
   assert.match(lt21.b.out, /lock timeout/i);
   assert.equal(outcomeOf(lt21.b.out), null, "21: لا نتيجة rejected لحدث سليم");
-  const rows4 = run(DBC, "select count(*) from public.ameen_invoice_events where bill_guid = 'c0000000-0000-4000-8000-000000000004'");
-  assert.equal(rows4.stdout.trim(), "1");
+  assert.equal(countEvents(DBC, "c0000000-0000-4000-8000-000000000004"), "1");
   pass("21: مهلة قفل عابرة ⇒ الطلب يفشل كله (يعيده الوكيل بتراجع) ولا يُرفض الحدث");
+}
 
-  // دفاع ثانٍ: تعارض المفتاح يُعامل duplicate حتى لو فات فحص التكرار
-  const def = run(DBC, `
-    begin;
-    select set_config('request.jwt.claims', '{"sub":"${SYNC}","role":"authenticated"}', true) \\g /dev/null
-    set local role authenticated;
-    select 'RESULT ' || public.apply_ameen_invoice_events($ev$${JSON.stringify([invoiceEvent("c0000000-0000-4000-8000-000000000003", 1792641146302)])}$ev$::jsonb)::text;
-    commit;`);
+function sequentialRetryOn21() {
+  const def = run(DBC, session([invoiceEvent("c0000000-0000-4000-8000-000000000003", 1792641146302)]));
   assert.equal(outcomeOf(def.stdout), "duplicate", output(def));
   pass("21: إعادة إرسال متتالية للحدث نفسه ⇒ duplicate");
+}
 
-  // التراجع يعيد جسم 18 (والعيب معه) بلا مساس بالبيانات
+function rollback21KeepsData() {
   const rb = run(DBC, r21);
   assert.equal(rb.status, 0, output(rb));
-  const kept = run(DBC, "select count(*) from public.ameen_invoice_events");
-  assert.equal(kept.stdout.trim(), "4");
+  assert.equal(countEvents(DBC), "4");
   pass("21-rollback: يعيد جسم 18 ولا يمسّ الأحداث المسجّلة");
+}
 
-  // P1-b: إعادة تشغيل على قاعدة جديدة بلا is_staff
+// P1-b: إعادة تشغيل على قاعدة جديدة بلا is_staff
+function replayFreshDatabase() {
   const DBR = "ozk_ameen_invoice_p1_replay";
   freshDb(DBR, PRELUDE);
   const without = run(DBR, m18);
   assert.notEqual(without.status, 0, "بلا الشرط المسبق: 18 تتوقف (العيب مُعاد إنتاجه)");
   assert.match(output(without), /requires public\.is_staff\(\)/);
   pass("قاعدة جديدة بلا الشرط المسبق: 18 تتوقف عند is_staff (العيب مُعاد إنتاجه)");
-  const s1 = run(DBR, stub);
-  assert.equal(s1.status, 0, output(s1));
-  const m = run(DBR, m18);
-  assert.equal(m.status, 0, `بعد الشرط المسبق: 18 تُطبَّق\n${output(m)}`);
-  const s2 = run(DBR, stub);
-  assert.equal(s2.status, 0, "الشرط المسبق قابل لإعادة التشغيل");
+  for (const [sql, what] of [[stub, "الشرط المسبق"], [m18, "18 بعد الشرط المسبق"], [stub, "إعادة الشرط المسبق"]]) {
+    const r = run(DBR, sql);
+    assert.equal(r.status, 0, `${what}\n${output(r)}`);
+  }
   const st = run(DBR, "select public.is_staff()::text || ',' || (select count(*) from pg_policies where tablename like 'ameen_invoice%')::text");
   assert.equal(st.stdout.trim(), "false,3", output(st));
   pass("قاعدة جديدة: الشرط المسبق ثم 18 ⇒ تُطبَّق، 3 سياسات، is_staff() = false (رفض افتراضي)، وإعادة التشغيل آمنة");
   const r21r = run(DBR, m21);
   assert.equal(r21r.status, 0, output(r21r));
   pass("قاعدة جديدة: 21 تُطبَّق بعد 18 بلا خطأ");
+}
 
-  // الشرط المسبق no-op حيث توجد is_staff (كالإنتاج)
+// الشرط المسبق no-op حيث توجد is_staff (كالإنتاج)
+function stubIsNoOpOnProductionLike() {
   const DBP = "ozk_ameen_invoice_p1_prodlike";
   freshDb(DBP, PRELUDE + PROD_IS_STAFF);
   const sig = "select md5(prosrc) || '|' || coalesce(proacl::text,'') || '|' || prosecdef::text || '|' || coalesce(array_to_string(proconfig, ','), '') from pg_proc where oid = 'public.is_staff()'::regprocedure";
@@ -247,19 +249,32 @@ try {
   assert.equal(s3.status, 0, output(s3));
   assert.equal(run(DBP, sig).stdout.trim(), b0, "الشرط المسبق لا يغيّر is_staff الموجودة");
   pass("قاعدة كالإنتاج: الشرط المسبق لا يغيّر جسم is_staff ولا صلاحياتها ولا خصائصها");
+}
 
-  // مجموعة 18 الكاملة (139 تأكيداً) مع 21 مطبَّقة فوقها: لا تراجع في الدلالات
+// مجموعة 18 الكاملة (139 تأكيداً) مع 21 مطبَّقة فوقها: لا تراجع في الدلالات
+function fullSuiteWith21() {
   const DBS = "ozk_ameen_invoice_events_test";
   freshDb(DBS, null);
-  const suite = read(suiteRel);
-  const bundled = suite.replace("\\i :migration", () => `${m18}\n${m21}`).replace("\\i :rollback", () => read("supabase/proposed/18-ameen-invoice-events-rollback.sql"));
+  const bundled = read(suiteRel).replace("\\i :migration", () => `${m18}\n${m21}`).replace("\\i :rollback", () => read("supabase/proposed/18-ameen-invoice-events-rollback.sql"));
   const sr = psql(["-d", DBS, "-X", "-v", "ON_ERROR_STOP=1"], { input: bundled });
-  const st2 = output(sr);
-  const n = (st2.match(/PASS /g) || []).length;
-  assert.ok(sr.status === 0 && st2.includes("AMEEN_INVOICE_EVENTS_OK") && !/TEST FAIL/.test(st2) && n >= 139, st2);
+  const text = output(sr);
+  const n = (text.match(/PASS /g) || []).length;
+  assert.ok(sr.status === 0 && text.includes("AMEEN_INVOICE_EVENTS_OK") && !/TEST FAIL/.test(text) && n >= 139, text);
   pass(`مجموعة 18 كاملة مع 21 فوقها: ${n} تأكيداً بلا فشل`);
+}
+
+try {
+  await reproduceOn18();
+  apply21KeepsGrants();
+  await concurrentDuplicateOn21();
+  await lockTimeoutOn21();
+  sequentialRetryOn21();
+  rollback21KeepsData();
+  replayFreshDatabase();
+  stubIsNoOpOnProductionLike();
+  fullSuiteWith21();
 } finally {
   for (const d of dbs) psql(["-d", "postgres", "-c", `drop database if exists ${d}`]);
 }
-assert.ok(passes >= 11, `عدد التأكيدات الحية أقل من المتوقع (${passes})`);
+assert.ok(passes >= 12, `عدد التأكيدات الحية أقل من المتوقع (${passes})`);
 console.log(`check-ameen-invoice-events-p1: اجتاز الفحص (${passes} سيناريو حي).`);
