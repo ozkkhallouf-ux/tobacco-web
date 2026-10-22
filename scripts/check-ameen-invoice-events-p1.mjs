@@ -4,7 +4,7 @@
 //   P1-a: حدث يصل مرتين في اللحظة نفسها (طلبان متزامنان) كان الثاني يُرفض فيعزله الوكيل.
 //         الإصلاح: supabase/proposed/21-ameen-invoice-events-concurrent-duplicates.sql (مقترح، غير مطبَّق).
 //   P1-b: إعادة تشغيل السلسلة على قاعدة جديدة تقف عند 18 لغياب public.is_staff().
-//         الإصلاح: supabase/migrations/20261022034858_is_staff_replay_prerequisite.sql (رفض افتراضي، no-op
+//         الإصلاح: supabase/migrations/20260914125959_is_staff_replay_prerequisite.sql (رفض افتراضي، no-op
 //         حيث توجد الدالة كالإنتاج).
 //
 // طبقتان: عقود ساكنة (في كل مكان)، وتشغيل حي على PostgreSQL محلي مؤقت (إلزامي في CI) يشمل طلبين
@@ -12,7 +12,7 @@
 // ============================================================================
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -24,7 +24,7 @@ const sha256 = (s) => createHash("sha256").update(s, "utf8").digest("hex");
 const m18Rel = "supabase/proposed/18-ameen-invoice-events.sql";
 const m21Rel = "supabase/proposed/21-ameen-invoice-events-concurrent-duplicates.sql";
 const r21Rel = "supabase/proposed/21-ameen-invoice-events-concurrent-duplicates-rollback.sql";
-const stubRel = "supabase/migrations/20261022034858_is_staff_replay_prerequisite.sql";
+const stubRel = "supabase/migrations/20260914125959_is_staff_replay_prerequisite.sql";
 const suiteRel = "supabase/tests/ameen-invoice-events.sql";
 const m18 = read(m18Rel), m21 = read(m21Rel), r21 = read(r21Rel), stub = read(stubRel);
 
@@ -53,7 +53,20 @@ const cStub = code(stub);
 assert.match(cStub, /if to_regprocedure\('public\.is_staff\(\)'\) is null then/, "الشرط المسبق محروس بغياب الدالة");
 assert.match(cStub, /\$body\$ select false \$body\$/, "البديل رفض افتراضي");
 assert.doesNotMatch(cStub, /create or replace function|grant |revoke |drop |alter /i, "الشرط المسبق لا يستبدل ولا يغيّر صلاحيات");
-assert.ok("20261022034858" < "20261022034859", "الشرط المسبق يسبق 18 في الترتيب");
+// السلسلة الفعلية (Codex P1 على 092f2ce4): لا استعمال غير محروس لـ is_staff() في أي هجرة فعّالة قبل الشرط المسبق.
+// «محروس» = الملف يفحص to_regprocedure('public.is_staff()') ويؤجّل ما يعتمد عليها. الترتيب بالإصدار كما يطبّقه Supabase.
+{
+  const dir = path.join(root, "supabase/migrations");
+  const stubVersion = path.basename(stubRel).slice(0, 14);
+  const chain = readdirSync(dir).filter((f) => /^\d{14}_.+\.sql$/.test(f)).sort();
+  assert.ok(chain.includes(path.basename(stubRel)), "الشرط المسبق في السلسلة الفعّالة");
+  const users = chain.filter((f) => /\bis_staff\(\)/.test(code(readFileSync(path.join(dir, f), "utf8"))) && f !== path.basename(stubRel));
+  const unguarded = users.filter((f) => !/to_regprocedure\('public\.is_staff\(\)'\)/.test(code(readFileSync(path.join(dir, f), "utf8"))));
+  assert.ok(unguarded.length > 0, "السلسلة فيها استعمال غير محروس (لهذا وُجد الشرط المسبق)");
+  for (const f of unguarded) assert.ok(f.slice(0, 14) > stubVersion, `${f}: يستعمل is_staff() بلا حراسة قبل الشرط المسبق ${stubVersion}`);
+  assert.ok(unguarded.includes("20260914130000_bot_health_alerts_dispatched_and_failed_windows.sql"), "أول استعمال غير محروس معروف");
+  assert.ok(users.filter((f) => !unguarded.includes(f)).every((f) => f.slice(0, 14) < stubVersion), "الهجرات المحروسة قبله فلا يتغيّر تأجيلها");
+}
 console.log("  ✓ عقود ساكنة: 18 بلا مساس، 21 جسم الدالة فقط، الشرط المسبق رفض افتراضي محروس");
 
 // ── ٢) تشغيل حي على PostgreSQL محلي ──────────────────────────────────────────────────────────
