@@ -14,7 +14,7 @@ const TOKEN_TTL_MS = 30 * 60 * 1000;
 const REPRINT_COOLDOWN_MS = 10 * 1000;
 
 function rejection(code, message, extra) {
-  return { ok: false, code, message, ...(extra || {}) };
+  return { ok: false, code, message, ...extra };
 }
 
 function createPrintGuard(deps) {
