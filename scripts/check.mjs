@@ -957,6 +957,14 @@ for (const contract of [
     failed = true;
   }
 }
+// مشاركة ملف PDF تمرّر الملف وحده: أي title/text مرافق للملفات يحفظه iOS عند
+// «حفظ في الملفات» ملف .txt ثانياً بجانب الـPDF (بلاغ المالك 2026-10-22).
+for (const call of appJs.match(/navigator\.share\(\{[^)]*\}\)/g) || []) {
+  if (/files\s*:/.test(call) && /\b(title|text|url)\s*:/.test(call)) {
+    console.error(`Mobile PDF share must pass the file alone (iOS saves title/text as an extra .txt): ${call}`);
+    failed = true;
+  }
+}
 for (const [name, pattern] of [
   ["shared reports", /async function exportReportPdf[\s\S]{0,900}isHandheldDevice\(\)[\s\S]{0,900}createPortablePdfBlob/],
   ["overdue report", /async function printOverdueReport[\s\S]{0,2800}isHandheldDevice\(\)[\s\S]{0,900}createPortablePdfBlob/],

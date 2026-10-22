@@ -5861,7 +5861,10 @@ function presentPortablePdf(blob, filename, title) {
   dialog.querySelector("[data-pdf-share]")?.addEventListener("click", async () => {
     try {
       // الاستدعاء يبدأ داخل معالج النقرة نفسه كي تبقى user activation فعالة على iOS.
-      await navigator.share({ files: [file], title: title || filename });
+      // الملف وحده بلا title/text: iOS يشارك أي title/text مرافق للملفات عنصراً
+      // مستقلاً، فيكتبه «حفظ في الملفات» ملف .txt ثانياً بجانب الـPDF. اسم الملف
+      // يصل أصلاً عبر File.name، فلا يُفقد شيء بحذف العنوان.
+      await navigator.share({ files: [file] });
     } catch (error) {
       if (error && error.name === "AbortError") return;
       setNotice("error", "تعذّرت المشاركة. استخدم «تنزيل PDF» أو «فتح PDF».");
@@ -7188,17 +7191,24 @@ const INVENTORY_PACK_SAFETY_PX = 10;
 //  - print (اللابتوب): ورقة الطباعة الأصلية، @page{size:A4;margin:10mm} فتصير
 //    منطقة المحتوى 190mm × 277mm، وبـ96dpi تساوي 718.1 × 1046.9 بكسل CSS.
 //    حشوة .ozk-rpt صفر هنا (@media print داخل INVENTORY_REPORT_STYLE).
-//  - canvas (الهاتف عبر html2pdf): الحاوية 794px وهامش 8mm لكل جهة، أي أن عرض
-//    794px يُرسم داخل 194mm فيصير المقياس 794/194 بكسل لكل مم، والارتفاع المفيد
-//    281mm. حشوة .ozk-rpt (6px 10px) تبقى فعّالة لأن html2canvas يرسم ضمن
-//    media=screen لا print، فتُخصم من العرض والارتفاع معاً.
+//  - canvas (الهاتف عبر html2pdf): html2pdf **لا** يرسم الحاوية بعرضها (794px).
+//    `toContainer()` ينسخ المصدر داخل حاوية بعرض المنطقة الداخلية للصفحة نفسها:
+//    194mm (A4 ناقص هامش 8mm لكل جهة) بـ96dpi، أي floor(733.2) = 733px، ثم
+//    يقطع الـcanvas صفحاتٍ ارتفاعها floor(عرض × 281/194) ≈ 1061px. قيس فعلياً
+//    (pageSize.inner.px = {width:733,height:1062}). الافتراض القديم (794px و
+//    1138px) جعل كل صفحة مُعبَّأة أطول من ورقتها بنحو 75px وأعمدتها أعرض من
+//    الحقيقة (فالأسماء تلتفّ أكثر عند الرسم)، فيفيض ذيل كل صفحة إلى ورقة جديدة،
+//    ثم يدفع break-after:page الصفحة التالية لورقة أخرى: 4 صفحات مُعبَّأة كانت
+//    تخرج 8 أوراق نصفها شبه فارغ. حشوة .ozk-rpt (6px 10px) تبقى فعّالة لأن
+//    html2canvas يرسم ضمن media=screen لا print، فتُخصم من العرض والارتفاع معاً.
 function inventoryPageGeometry(mode) {
   if (mode === "canvas") {
-    const containerWidthPx = 794;
-    const pxPerMm = containerWidthPx / (210 - 8 * 2);
+    const innerWidthMm = 210 - 8 * 2;
+    const innerHeightMm = 297 - 8 * 2;
+    const containerWidthPx = Math.floor(innerWidthMm * 96 / 25.4);
     return {
       contentWidthPx: containerWidthPx - 10 * 2,
-      pageHeightPx: (297 - 8 * 2) * pxPerMm - 6 * 2
+      pageHeightPx: Math.floor(containerWidthPx * innerHeightMm / innerWidthMm) - 6 * 2
     };
   }
   const pxPerMm = 96 / 25.4;
@@ -10088,7 +10098,8 @@ async function saveSalesInvoicePdf() {
     // انتظار التوليد) نسقط إلى التنزيل المباشر.
     if (navigator.canShare && navigator.canShare({ files: [file] })) {
       try {
-        await navigator.share({ files: [file], title: `فاتورة مبيعات ${invNo}` });
+        // الملف وحده: title مرافق يُحفظ على iOS ملف .txt ثانياً (راجع presentPortablePdf).
+        await navigator.share({ files: [file] });
         setNotice("success", `تم تجهيز الفاتورة ${invNo} PDF ومشاركتها.`);
         render();
         return;
