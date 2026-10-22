@@ -72,7 +72,8 @@ assert.equal(tail(definition(FILES.m19, "public.tg_notify_daily_movement")), tai
 console.log("  ✓ عقود ساكنة: دالة واحدة لكل هجرة بحارسَي بصمة، لا إرسال ولا Cron، الدفعات كما هي، والتراجع حرفي");
 // الملف المرجعي = الإنتاج بعد 19 و20: التعريف حرفياً كما في الهجرة، وبصمة الجسم = بصمة الإنتاج،
 // وجدول السجل معرَّف قبله، ولا عودة لمنطق النافذة الزمنية القديم (720/1200 دقيقة).
-const bodyMd5 = (def) => createHash("md5").update(def.slice(def.indexOf("AS $function$") + "AS $function$".length, def.lastIndexOf("$function$;"))).digest("hex");
+// يُطبَّع CRLF (نسخة Windows بـcore.autocrlf) إلى LF قبل الحساب: بصمة الإنتاج محسوبة على LF.
+const bodyMd5 = (def) => createHash("md5").update(def.slice(def.indexOf("AS $function$") + "AS $function$".length, def.lastIndexOf("$function$;")).replace(/\r\n/g, "\n")).digest("hex");
 const refCode = strip(refSql);
 for (const [m, fn, fresh, oldWindow] of [
   ["m19", "public.tg_notify_daily_movement", NEW.movement, /'movement:'[\s\S]{0,120}?,\s*720\s*\)/],
