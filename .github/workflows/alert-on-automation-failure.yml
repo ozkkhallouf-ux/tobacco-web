@@ -52,15 +52,16 @@ jobs:
     # 'action_required' لأعطال أخرى — رأينا 'startup_failure' فعلياً بتاريخ
     # هذا المستودع. الاستثناء الوحيد المقصود: 'success' و'skipped' (تشغيلة
     # شرطية لم تكن بحاجة للعمل أصلاً — ليست عطلاً).
-    #
-    # السرّ في بيئة supabase-ops (فرع main وحده). workflow_run يعمل دائماً بنسخة main
-    # فيبقى ref هنا refs/heads/main أياً كان فرع التشغيلة المراقَبة؛ والشرط حارس إضافي فقط.
+    # workflow_run يعمل بنسخة main دائماً، فشرط ref حارس إضافي فقط.
     if: |
       github.ref == 'refs/heads/main' &&
       github.event.workflow_run.conclusion != 'success' &&
       github.event.workflow_run.conclusion != 'skipped'
-    environment: supabase-ops
     runs-on: ubuntu-latest
+    # مفتاح Supabase بصلاحية service role في بيئة supabase-ops المحصورة بفرع main وحده: لا يصل إليه
+    # workflow على فرع آخر ولا PR. بلا مراجع مطلوب كي يعمل التشغيل المجدول/الآلي بلا موافقة يدوية.
+    # (سرّ البيئة يتقدّم على سرّ المستودع بنفس الاسم؛ قبل نقله يعمل الـjob بسرّ المستودع كما هو.)
+    environment: supabase-ops
     steps:
       - name: Send Telegram alert via notify_telegram RPC
         env:
@@ -73,7 +74,7 @@ jobs:
           CONCLUSION: ${{ github.event.workflow_run.conclusion }}
         run: |
           if [ -z "$SUPABASE_SERVICE_ROLE_KEY" ]; then
-            echo "::error::السرّ SUPABASE_SERVICE_ROLE_KEY غير مُعرَّف — لا يمكن إرسال تنبيه تيليغرام. أضِفه عبر: gh secret set SUPABASE_SERVICE_ROLE_KEY"
+            echo "::error::السرّ SUPABASE_SERVICE_ROLE_KEY غير مُعرَّف — لا تنبيه. gh secret set SUPABASE_SERVICE_ROLE_KEY --env supabase-ops"
             exit 1
           fi
 

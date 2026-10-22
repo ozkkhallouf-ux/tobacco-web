@@ -17,7 +17,6 @@
 | الإشعارات والنشر | [notifications-deployment.md](notifications-deployment.md) |
 | تنسيق تنبيهات تيليغرام (المنسِّق الموحّد، جرد المصادر) | [telegram-alert-format.md](telegram-alert-format.md) |
 | بوابة نشر Windows (OZK2026) | [windows-deploy-gate.md](windows-deploy-gate.md) |
-| حماية مفتاح Supabase في GitHub Actions (بيئة supabase-ops) | [supabase-ops-environment.md](supabase-ops-environment.md) |
 | تعاون Slack وGitHub والوكلاء | [collaboration-workflow.md](collaboration-workflow.md) |
 | الأرشفة إلى iCloud (ماك) | [icloud-archive.md](icloud-archive.md) |
 

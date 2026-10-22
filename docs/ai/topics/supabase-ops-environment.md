@@ -1,79 +1,76 @@
-# حماية مفتاح Supabase في GitHub Actions (بيئة `supabase-ops`)
+# بيئة supabase-ops: حماية مفتاح Supabase في GitHub Actions (2026-10-21)
 
-## الحالة الحالية
+## المشكلة
 
-- `SUPABASE_SERVICE_ROLE_KEY` سرّ على **مستوى المستودع**. أي جهة تستطيع دفع فرع (المالك، أو
-  تطبيق بصلاحية كتابة) تستطيع قراءته بـworkflow على فرعها، لأن أسرار المستودع لا تُقيَّد بفرع.
-- ثلاثة jobs فقط تحتاجه، وكلها صارت خلف `environment: supabase-ops` وشرط
-  `github.ref == 'refs/heads/main'`:
+`SUPABASE_SERVICE_ROLE_KEY`، ومعه `GENERATE_TOKEN` و`ROLLBAR_POST_CLIENT_ITEM_TOKEN`، معرّف **على
+مستوى المستودع**. سرّ المستودع يقرأه أي workflow على أي فرع، فأي جهة تستطيع دفع فرع تستطيع قراءته.
+تكفي workflow بـ`on: push`، أو نسخة معدّلة من `health-check.yml` تُشغَّل يدوياً من الفرع.
 
-| الـworkflow | الـjob | الزناد | الاستعمال |
+## مستعملو المفتاح على main
+
+| workflow | job | المُطلق | الاستعمال |
 |---|---|---|---|
-| `health-check.yml` | `health-check` | جدولة كل 30 دقيقة + يدوي | `notify_telegram` و`health_lifecycle` |
-| `stock-priority-alerts.yml` | `stock-priority-alerts` | يدوي احتياطي (الجدولة في pg_cron) | قراءة `inventory_reports`/`bot_config` و`notify_telegram` |
-| `alert-on-automation-failure.yml` | `notify` | `workflow_run` (يعمل بنسخة main دائماً) | `notify_telegram` |
+| `health-check.yml` | `health-check` | schedule (كل 30 دقيقة) + يدوي | `rpc/notify_telegram` و`rpc/health_lifecycle` |
+| `stock-priority-alerts.yml` | `stock-priority-alerts` | يدوي فقط (احتياط، آخر تشغيل 2026-10-03) | قراءة `inventory_reports` و`bot_config` + `rpc/notify_telegram` |
+| `alert-on-automation-failure.yml` | `notify` | workflow_run (نسخة main دائماً) | `rpc/notify_telegram` |
 
-- الحماية الفعلية **لا تكتمل** إلا بعد نقل السرّ إلى البيئة وحذف نسخة المستودع (الترتيب أدناه).
-  قبل ذلك يبقى السرّ قابلاً للقراءة من أي فرع كما كان.
-- لا `deployment: false`: لم يثبت بعد أن سياسة فروع البيئة تبقى مطبَّقة معه، فكل تشغيل
-  ينشئ سجل deployment في `supabase-ops` (ضجيج مقبول مقابل ضمان السياسة).
+- `GENERATE_TOKEN`: لا يستعمله أي workflow على main.
+- `ROLLBAR_POST_CLIENT_ITEM_TOKEN`: توكن «post_client_item» عميل بطبيعته، يُضمَّن في JS المتصفح، و`pages.yml` يعمل في بيئة `github-pages` المحصورة بـmain.
 
-## المصدر الموثوق
+## الحماية
 
-- إعداد البيئة على GitHub: `supabase-ops`، فروع النشر = `main` وحده، بلا مراجعين (كي لا تتوقف
-  الجدولة)، `can_admins_bypass=false`.
-- `scripts/supabase-service-headers.mjs`: المفتاح القديم (JWT) في `apikey` و`Authorization`،
-  ومفتاح `sb_secret_` في `apikey` وحده (المنصة ترفض `sb_secret_` في Bearer بـ«Invalid JWT»).
+- **البيئة `supabase-ops`** (أُنشئت 2026-10-21):
+  - سياسة فروع مخصّصة: `main` فقط.
+  - `can_admins_bypass: false`.
+  - **بلا مراجع مطلوب**، كي تعمل الدورات المجدولة والآلية بلا موافقة يدوية.
+- **الـjobs الثلاثة** تعلن `environment: supabase-ops` وشرط `github.ref == 'refs/heads/main'` (تشغيل من فرع آخر يُتخطّى بدل أن يفشل فيطلق تنبيه فشل الأتمتة).
+- **التشغيل من غير main** (workflow_dispatch من فرع آخر، أو كود فرع) يُرفض من GitHub قبل بدء الـjob، فلا يصل إلى سرّ البيئة.
+- **لا كود PR يصل إلى السرّ:** الثلاثة لا تُطلق بـpull_request ولا pull_request_target ولا push، و`workflow_run` وschedule يشغّلان نسخة main.
+- **الحارس:** `scripts/check-supabase-ops-environment.mjs` ضمن `npm run check`.
+- ملاحظة: كل تشغيل لـjob يعلن بيئة يُنشئ سجل Deployment في `supabase-ops`، أي ضجيج إداري فقط. بوابة Windows تفلتر على `windows-production`.
 
-## نطاق الملفات
+## الترتيب الآمن للانتقال (بلا فجوة تشغيلية)
 
-`.github/workflows/{health-check,stock-priority-alerts,alert-on-automation-failure}.yml`،
-`scripts/supabase-service-headers.mjs`، `scripts/health-check.mjs`، `scripts/stock-priority-alerts.mjs`،
-`scripts/check-supabase-ops-environment.mjs`.
+قاعدة GitHub: **سرّ البيئة يتقدّم على سرّ المستودع بنفس الاسم، وسرّ المستودع يبقى متاحاً لـjob البيئة إن
+لم يوجد في البيئة.**
 
-## القيود الثابتة
+1. **دمج الـPR أولاً.** الـjobs تعمل من main داخل البيئة، وتستعمل سرّ المستودع الحالي. لا تغيير في السلوك.
+2. **مراقبة دورة أو دورتين** لـ`health-check` (مجدول)، والتأكد من نجاحها داخل البيئة.
+3. **وضع المفتاح في البيئة** (`gh secret set SUPABASE_SERVICE_ROLE_KEY --env supabase-ops`)، يُفضَّل بمفتاح `sb_secret_` جديد مخصّص (أدناه).
+   القيمة الحالية لا تُقرأ من GitHub، فيلزم إدخال قيمة يملكها المالك.
+4. **دورة ناجحة بسرّ البيئة.**
+5. **حذف سرّ المستودع** `SUPABASE_SERVICE_ROLE_KEY`. بعدها لا يقرؤه أي فرع. ثم `GENERATE_TOKEN` بعد التأكد أنه غير مستعمل.
 
-1. **البيئة توجد قبل الدمج.** job يشير لبيئة غير موجودة يُنشئها GitHub تلقائياً **بلا أي حماية**.
-2. **لا يُحذف سرّ المستودع قبل نجاح تشغيلات حقيقية من البيئة.** سرّ البيئة يتقدّم على سرّ
-   المستودع بالاسم نفسه، وغيابه يعيد القراءة إلى سرّ المستودع، فالترتيب أدناه بلا فجوة.
-3. لا مراجعين على `supabase-ops`: health-check يعمل كل 30 دقيقة ولا ينتظر موافقة.
-4. لا `pull_request`/`pull_request_target`/`push` في هذه الـworkflows، ولا سرّ داخل `run:`.
-5. المفتاح نفسه موجود في `tools/.env` على OZK2026 وفي أسرار Edge Functions؛ **لا تدوير** له
-   من هنا. Actions تنتقل إلى مفتاح `sb_secret_` مستقل بدل ذلك.
-6. المفاتيح القديمة (`anon`/`service_role`) تعمل حتى نهاية 2026 وفق توثيق Supabase؛ OZK2026
-   والدوال تحتاج خطة انتقال منفصلة قبل ذلك.
+**التراجع:**
+- في الخطوتين 1 و2: revert للـPR.
+- في الخطوتين 3 و4: حذف سرّ البيئة، فيعود الـjob لسرّ المستودع.
+- بعد الخطوة 5: إعادة سرّ المستودع، بقيمة يملكها المالك.
 
-## الترتيب الآمن للنقل (كل خطوة بموافقة عمر)
+## مفتاح Supabase مستقل لـGitHub Actions (خطة، لم يُنفَّذ)
 
-1. إنشاء `supabase-ops` (main فقط، بلا مراجعين، بلا bypass) والتحقق منها.
-2. دمج هذا الـPR. التشغيلات تقرأ سرّ المستودع (لا سرّ في البيئة بعد) فلا انقطاع.
-3. التحقق: تشغيل health-check المجدول التالي ينجح ويظهر deployment في `supabase-ops`.
-4. وضع `SUPABASE_SERVICE_ROLE_KEY` في البيئة (القيمة نفسها مؤقتاً، أو مفتاح `sb_secret_` الجديد).
-5. التحقق: تشغيلتا health-check مجدولتان ناجحتان + `notify_telegram` يقبل (لا HTTP ≥ 300).
-6. حذف `SUPABASE_SERVICE_ROLE_KEY` من أسرار المستودع. ثم تشغيل مجدول ناجح ثالث.
+### التوافق
+- مفاتيح `sb_secret_…` الجديدة تعطي صلاحية service role نفسها، أي تتجاوز RLS.
+- **لا تُقيَّد بجداول أو دوال**، ففائدتها **الاستقلال**: إبطال هذا المفتاح وحده دون مسّ OZK2026 أو Edge Functions. لا تقلّل الصلاحية.
+- **مؤكَّد من توثيق Supabase:** المفتاح الجديد ليس JWT، فيُرفض في `Authorization: Bearer` بـ«Invalid JWT».
+  - لذلك تبني `scripts/supabase-service-headers.mjs` الترويسات: JWT القديم في `apikey` و`Authorization` كما كان،
+    و`sb_…` في `apikey` وحدها. يستعملها health-check (notify_telegram وhealth_lifecycle) وstock-priority-alerts،
+    وalert-on-automation-failure يطبّق القاعدة نفسها في bash.
+  - التحويل لا يحتاج أي تعديل كود؛ الحارس يثبت السلوكين بلا شبكة.
 
-**التراجع:** قبل الخطوة 6 يكفي حذف سرّ البيئة (تعود القراءة لسرّ المستودع). بعدها: إعادة السرّ
-إلى المستودع، أو revert لهذا الـPR (يُرجع الـjobs بلا بيئة). مفتاح `sb_secret_` يُعطَّل وحده من
-لوحة Supabase دون مساس بـOZK2026 أو الدوال.
+### مَن يعتمد على المفتاح القديم (legacy service_role JWT)
+- Edge Functions (يُحقن تلقائياً).
+- pg_cron/الدوال التي تستدعي الـfunctions.
+- أي سكربت على OZK2026 يستعمل service key في `tools/.env`.
+- GitHub Actions اليوم.
 
-## مفتاح `sb_secret_` المستقل لـActions
+**لا يُدوَّر الـJWT القديم:** تدويره يعني تدوير JWT secret للمشروع كله، فيتعطّل كل ما سبق.
 
-- الصلاحية: مثل `service_role` تماماً (يتجاوز RLS)، **ليس محدوداً**. ميزته أنه يُلغى ويُدوَّر
-  وحده، فتسرّبه من Actions لا يفرض تدوير مفتاح OZK2026 والدوال.
-- التوافق: الكود هنا يرسله في `apikey` وحده تلقائياً. Node وcurl لا يحملان User-Agent متصفح،
-  فلا يقع عليهما رفض «401 من المتصفح».
-- الاختبار الآمن قبل التحويل: من الـMac (السحابة لا تصل supabase.co) طلب قراءة واحد
-  `GET /rest/v1/bot_config?key=eq.low_stock_threshold&select=value` بالمفتاح في `apikey` وحده،
-  ثم `POST /rest/v1/rpc/health_lifecycle` بـ`p_op=probe` (لا يرسل تيليغرام). لا `notify_telegram` تجريبياً.
-- بعد التحويل: المفتاح القديم يبقى كما هو لـOZK2026 والدوال، ويختفي من GitHub كلياً.
-
-## الفحوص الإلزامية
-
-`node scripts/check-supabase-ops-environment.mjs` (ضمن `npm run check`)، و`check-alert-on-automation-failure.mjs`
-و`check-health-check-logic.mjs` و`check-stock-alert-priority.mjs`.
-
-## الخطوة التالية
-
-موافقة عمر على إنشاء البيئة ثم الدمج ثم نقل السرّ بالترتيب أعلاه.
-أسرار أخرى: `GENERATE_TOKEN` غير مستعمل في أي workflow (يُحذف بموافقة)، و`ROLLBAR_POST_CLIENT_ITEM_TOKEN`
-رمز عميل يُحقن في `index.html` المنشور علناً أصلاً (نقله لبيئة `github-pages` اختياري).
+### الخطوات (كل خطوة بموافقة منفصلة)
+1. **إنشاء المفتاح (المالك):** من Supabase Dashboard ← API Keys، مفتاح `sb_secret_` باسم `github-actions`. لا يمسّ أي مفتاح آخر.
+2. **اختبار آمن بقراءة فقط،** من جهاز المالك أو workflow يدوي على main بلا إرسال:
+   - `GET /rest/v1/bot_config?select=key&limit=1` بـ`apikey` وحدها (لا `Authorization`).
+3. **تعديل الترويسة:** منجز في هذا الـPR (`supabase-service-headers.mjs`).
+4. **وضعه سرّ بيئة** في `supabase-ops`، وهو الخطوة 3 في الترتيب أعلاه، ثم مراقبة دورة كاملة.
+5. **حذف سرّ المستودع القديم.** الـJWT القديم يبقى صالحاً للـEdge Functions وOZK2026، فلا تعطّل.
+6. **التراجع:** حذف سرّ البيئة (فيعود سرّ المستودع إن كان باقياً)، أو إبطال المفتاح الجديد وحده من Dashboard.
+7. **لاحقاً (مسار مستقل):** نقل OZK2026 وEdge Functions إلى مفاتيح جديدة مستقلة، ثم تعطيل legacy keys بعد التحقق الكامل.
