@@ -27,6 +27,8 @@ for (const ps of ["launch.ps1", "install.ps1", "set-sql-secret.ps1", "autoprint-
 const mode = read("autoprint-mode.ps1");
 assert.match(mode, /\$Task = 'OZK-AmeenAutoPrint'/, "التبديل محصور بمهمة Canon وحدها");
 assert.match(mode, /AcceptBacklog/, "الاسترجاع يشترط إقراراً صريحاً بدفعة اللحاق");
+assert.match(mode, /SkipBacklog/, "الاسترجاع يتيح التخطّي عبر دورة الترحيل");
+assert.match(mode, /WatcherPids\) \{ throw/, "لا تعديل على ملف الحالة والمراقب يعمل");
 assert.match(read("set-sql-secret.ps1"), /-ieq 'sa'/, "حفظ السر يرفض حساب sa");
 
 const result = spawnSync(process.execPath, [path.join(dir, "__tests__", "manual-print.test.mjs")], { stdio: "inherit" });
