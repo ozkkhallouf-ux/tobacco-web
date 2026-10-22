@@ -421,6 +421,131 @@ export async function callLifecycle(op, args = {}, { env = process.env, fetchImp
 // حالة التشغيل (مرة واحدة لكل تشغيل):
 //   "off" طوارئ؛ "legacy" مُعلَن؛ "unknown" غير مُعلَن؛ "ready" = managed + probe ok و ready=true؛
 //   "unavailable" = managed لكن الـprobe لم ينجح (PGRST202/شبكة/أسرار ناقصة/…) ⇒ hold، وليس legacy أبداً.
+// ---------------------------------------------------------------------------
+// فحص مصادقة Supabase (قراءة فقط) في كل دورة — دليل فعلي أن مفتاح الخدمة يعمل، لا مجرد نجاح الـjob.
+//
+// الطلب: rpc/health_lifecycle بعملية probe بالمفتاح نفسه والترويسات نفسها التي يستعملها health-check.
+// probe يقرأ pg_proc فقط ولا يكتب صفاً ولا يرسل تيليغرام ولا يمسّ أي حادثة، والدالة لا يملك EXECUTE
+// عليها إلا service_role (وpostgres)؛ فـ200 بجسم {ok:true, op:"probe", v:1} يثبت مصادقة service_role.
+// التصنيف:
+//   ok          200 بإقرار probe صالح.
+//   auth        401/403 (أو مفتاح غير موجود داخل Actions) ⇒ مشكلة "supabase-auth-failed".
+//   unproven    نجاح شكلي لا يثبت الصلاحية (200 بجسم غير متوقع، 404/PGRST202، 4xx أخرى) ⇒ "supabase-auth-unproven".
+//   transient   429/5xx/timeout/شبكة ⇒ إعادة محاولة مرئية (::warning::)، وإن استمر بعد كل المحاولات
+//               ⇒ "supabase-api-unavailable" (لا يُعدّ فشل مصادقة، ولا يُخفى).
+// لا يُطبع المفتاح ولا جزء منه ولا ترويسة Authorization؛ يُسجَّل نوع المفتاح وحده.
+// ---------------------------------------------------------------------------
+export const AUTH_PROBE_KEYS = ["supabase-auth-failed", "supabase-auth-unproven", "supabase-api-unavailable"];
+
+export function serviceKeyType(key) {
+  const k = String(key || "");
+  if (!k) return "missing";
+  if (k.startsWith("sb_secret_")) return "sb_secret";
+  if (k.startsWith("sb_")) return "sb_other";
+  if (/^eyJ[\w-]*\.[\w-]+\.[\w-]+$/.test(k)) return "legacy-jwt";
+  return "unknown";
+}
+
+export async function probeSupabaseAuthOnce({ env = process.env, fetchImpl = fetch, timeoutMs = RPC_TIMEOUT_MS } = {}) {
+  const supabaseUrl = env.SUPABASE_URL;
+  const serviceKey = env.SUPABASE_SERVICE_KEY;
+  if (!supabaseUrl || !serviceKey) return { kind: "missing" };
+  let res;
+  let text = "";
+  try {
+    res = await fetchImpl(`${supabaseUrl}/rest/v1/rpc/health_lifecycle`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...supabaseServiceHeaders(serviceKey), "Content-Profile": "public" },
+      body: JSON.stringify({ p_op: "probe", p_key: null, p_issue: null, p_label: null }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    text = await res.text();
+  } catch (err) {
+    const timeout = err && (err.name === "TimeoutError" || err.name === "AbortError");
+    return { kind: "transient", reason: timeout ? "timeout" : "network" };
+  }
+  let body = null;
+  try { body = JSON.parse(text); } catch { /* جسم غير JSON */ }
+  const pgCode = body && typeof body.code === "string" ? body.code : "";
+  if (res.status === 401 || res.status === 403) return { kind: "auth", status: res.status, pgCode };
+  if (res.status === 429 || res.status >= 500) return { kind: "transient", reason: res.status === 429 ? "rate-limited" : "server", status: res.status };
+  if (!res.ok) return { kind: "unproven", status: res.status, pgCode };
+  const valid = body && body.ok === true && body.op === "probe" && body.v === 1 && typeof body.ready === "boolean";
+  if (!valid) return { kind: "unproven", status: res.status, pgCode: "unexpected-ack" };
+  return { kind: "ok", status: res.status, ready: body.ready };
+}
+
+export async function probeSupabaseAuth({
+  env = process.env, fetchImpl = fetch, log = (m) => console.log(m),
+  sleep = (ms) => new Promise((r) => setTimeout(r, ms)), retryDelaysMs = [2000, 5000], timeoutMs = RPC_TIMEOUT_MS
+} = {}) {
+  const keyType = serviceKeyType(env.SUPABASE_SERVICE_KEY);
+  const inActions = env.GITHUB_ACTIONS === "true";
+  // Codex P1 على #343: إيقاف الطوارئ يسبق كل شيء (صفر استدعاء DB)، والفحص لا يعمل إلا حيث
+  // health_lifecycle معلَن منشوراً (HEALTH_LIFECYCLE_MODE=managed)؛ وإلا يُتخطّى مرئياً بلا مشكلة
+  // كي لا يولّد PGRST202 حادثة «unproven» كاذبة في بيئة لم تُطبَّق فيها الدالة.
+  if (lifecycleSwitchOff(env)) {
+    log("⏸ فحص مصادقة Supabase: متوقف (HEALTH_LIFECYCLE_SIGNALS=off) — لا استدعاء DB هذه الدورة.");
+    return { kind: "skipped", reason: "switch-off", keyType, attempts: 0, problems: [], healthy: [] };
+  }
+  if (declaredLifecycleMode(env) !== "managed") {
+    log(`⏭ فحص مصادقة Supabase: يتطلب HEALTH_LIFECYCLE_MODE=managed (health_lifecycle منشور) — الحالي ${declaredLifecycleMode(env)}، تخطٍّ بلا مشكلة.`);
+    return { kind: "skipped", reason: "lifecycle-not-managed", keyType, attempts: 0, problems: [], healthy: [] };
+  }
+  let r;
+  let attempts = 0;
+  for (;;) {
+    attempts += 1;
+    // eslint-disable-next-line no-await-in-loop
+    r = await probeSupabaseAuthOnce({ env, fetchImpl, timeoutMs });
+    if (r.kind !== "transient" || attempts > retryDelaysMs.length) break;
+    log(`::warning::فحص مصادقة Supabase: خلل عابر (${r.reason}${r.status ? ` HTTP ${r.status}` : ""}) — محاولة ${attempts + 1} بعد ${retryDelaysMs[attempts - 1]}ms`);
+    // eslint-disable-next-line no-await-in-loop
+    await sleep(retryDelaysMs[attempts - 1]);
+  }
+  const statusText = r.status ? `HTTP ${r.status}` : r.reason || "-";
+  const result = { kind: r.kind, keyType, attempts, problems: [], healthy: [] };
+  if (r.kind === "missing") {
+    if (!inActions) { log("⏭ فحص مصادقة Supabase: خارج GitHub Actions بلا مفتاح — تخطٍّ."); result.kind = "skipped"; result.reason = "no-key-local"; return result; }
+    result.kind = "auth";
+  }
+  if (result.kind === "ok") {
+    result.healthy.push(...AUTH_PROBE_KEYS);
+    log(`🔐 مصادقة Supabase: مُثبتة (service_role) — نوع المفتاح ${keyType}، ${statusText}، ready=${r.ready}، المحاولات ${attempts}`);
+    return result;
+  }
+  if (result.kind === "auth") {
+    log(`::error::فحص مصادقة Supabase: فشل مصادقة/صلاحيات — نوع المفتاح ${keyType}، ${r.kind === "missing" ? "المفتاح غير مضبوط" : statusText}${r.pgCode ? ` (${r.pgCode})` : ""}`);
+    result.problems.push({
+      key: "supabase-auth-failed",
+      title: "فشل مصادقة مفتاح Supabase في GitHub Actions",
+      severity: "عالٍ",
+      details: `نوع المفتاح: ${keyType}؛ ${r.kind === "missing" ? "المفتاح غير مضبوط في البيئة" : statusText}${r.pgCode ? ` (${r.pgCode})` : ""}؛ الطلب: rpc/health_lifecycle probe (قراءة فقط).`,
+    });
+    return result;
+  }
+  if (result.kind === "unproven") {
+    log(`::error::فحص مصادقة Supabase: استجابة لا تثبت صلاحية service_role — نوع المفتاح ${keyType}، ${statusText}${r.pgCode ? ` (${r.pgCode})` : ""}`);
+    result.problems.push({
+      key: "supabase-auth-unproven",
+      title: "تعذّر إثبات صلاحية مفتاح Supabase (service_role) في GitHub Actions",
+      severity: "عالٍ",
+      details: `نوع المفتاح: ${keyType}؛ ${statusText}${r.pgCode ? ` (${r.pgCode})` : ""}؛ الطلب: rpc/health_lifecycle probe (قراءة فقط).`,
+    });
+    return result;
+  }
+  // transient بعد كل المحاولات: خلل خدمة/اتصال مستمر، لا فشل مصادقة.
+  log(`::error::فحص مصادقة Supabase: الخدمة غير متاحة بعد ${attempts} محاولات (${statusText}) — ليس فشل مصادقة`);
+  result.kind = "unavailable";
+  result.problems.push({
+    key: "supabase-api-unavailable",
+    title: "واجهة Supabase غير متاحة لفحص الصحة",
+    severity: "متوسط",
+    details: `${attempts} محاولات، آخرها: ${statusText}؛ نوع المفتاح: ${keyType}.`,
+  });
+  return result;
+}
+
 export async function detectLifecycleMode(deps = {}) {
   const env = deps.env || process.env;
   if (lifecycleSwitchOff(env)) return "off";
@@ -643,16 +768,19 @@ async function main() {
   const priceGen = checkLatestWorkflowRun("توليد نشرات الأسعار", "price-generation-failed", "عالٍ");
   const deploy = checkLatestWorkflowRun("Deploy TOBACCO Web", "deploy-failed", "عالٍ");
   const recent = checkRecentWorkflowFailures();
+  // دليل مصادقة فعلي في كل دورة (قراءة فقط، بلا تيليغرام عند النجاح).
+  const supabaseAuth = await probeSupabaseAuth();
 
   const problems = dedupeByKey([
     ...site.problems,
     ...priceGen.problems,
     ...deploy.problems,
     ...recent.problems,
+    ...supabaseAuth.problems,
   ]);
 
   // الدليل الإيجابي وحده هو ما يسمح بإغلاق حادثة (انظر decideIssuesToClose).
-  const healthyKeys = new Set([...site.healthy, ...priceGen.healthy, ...deploy.healthy]);
+  const healthyKeys = new Set([...site.healthy, ...priceGen.healthy, ...deploy.healthy, ...supabaseAuth.healthy]);
   if (recent.scanOk) healthyKeys.add("workflow-scan-failed");
 
   console.log(`المشاكل المكتشفة: ${problems.length}`);
@@ -685,6 +813,7 @@ async function main() {
       "",
       `- تم الفحص: ${new Date().toISOString()}`,
       `- عدد المشاكل المكتشفة: ${problems.length}`,
+      `- مصادقة Supabase: ${supabaseAuth.kind} (نوع المفتاح ${supabaseAuth.keyType}، المحاولات ${supabaseAuth.attempts})`,
       ...problems.map((p) => `  - **${p.severity}** — ${p.title}`),
     ];
     fs.appendFileSync(summaryPath, lines.join("\n") + "\n");
