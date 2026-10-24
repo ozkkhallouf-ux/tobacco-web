@@ -21,6 +21,12 @@ const DOC_TYPE = "wholesale_invoice";
 const GLOBAL_DRIVE = { NEEDS_REAUTH: "needs_reauth", IDENTITY_MISMATCH: "identity_mismatch", NOT_PRIVATE: "not_private", OFFLINE: "disconnected" };
 const GLOBAL_EDGE = new Set(["AUTH", "OFFLINE"]);
 
+function minTime(a, b) {
+  if (!a) return b || null;
+  if (!b) return a;
+  return a < b ? a : b;
+}
+
 function addSeconds(iso, seconds) {
   const t = Date.parse(`${String(iso).replace(/Z$/, "")}Z`);
   return new Date(t + seconds * 1000).toISOString().replace(/Z$/, "");
@@ -86,31 +92,34 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
     return header;
   }
 
-  // صفحات مرتبة تصاعدياً بوقت التغيير (TOP 500 في الاستعلام)؛ الصفحة التالية من آخر وقت.
-  // نفس الصف قد يتكرر على حدّ الصفحتين، والتلميح يجعله بلا أثر.
-  async function fetchChanged(since, dateFrom) {
+  // صفحات مرتبة بـ(وقت التغيير، GUID) (TOP 500 في الاستعلام)، والمؤشر المركّب حصري:
+  // الصفحة التالية تبدأ بعد آخر صف بالضبط، فلا تحبسها فواتير كثيرة بالوقت نفسه (Codex P1).
+  // نافذة أطول من 40 صفحة تُستأنف من المؤشر نفسه في الدورة التالية (state.resume).
+  async function fetchChanged(window) {
     const all = [];
-    let from = since;
+    let cursor = { since: window.since, sinceGuid: window.sinceGuid || "" };
     for (let page = 0; page < 40; page++) {
-      const rows = await ameen.changedInvoices({ since: from, dateFrom });
+      const rows = await ameen.changedInvoices({ ...cursor, dateFrom: window.dateFrom });
       all.push(...rows);
-      if (rows.length < 500) return { rows: all, complete: true };
-      const last = rows[rows.length - 1].changed_at;
-      if (last === from) break; // 500 فاتورة بالوقت نفسه: لا تقدّم ممكن هنا
-      from = last;
+      if (rows.length < 500) return { rows: all, complete: true, cursor: null };
+      const last = rows[rows.length - 1];
+      cursor = { since: last.changed_at, sinceGuid: last.invoice_guid };
     }
-    return { rows: all, complete: false };
+    return { rows: all, complete: false, cursor };
   }
 
   // ─── الرصد ───
-  // نافذة القراءة: مطابقة شاملة دورية (lookback)، وإلا من العلامة ناقص التداخل.
+  // نافذة القراءة: استئناف مسح لم يكتمل، أو مطابقة شاملة دورية (lookback)، وإلا من العلامة
+  // ناقص التداخل. بلا علامة (صندوق جديد أو ضاع ملف الحالة) لا مطابقة: المسح الأول يغطي
+  // النطاق المصرَّح به كاملاً من archiveFrom، وlookback لا يُطبَّق إلا بعد اكتماله (Codex P1).
   function detectWindow(serverNow, reconcile) {
+    if (state.resume) return { ...state.resume };
     if (!reconcile) {
       return { since: state.watermark ? addSeconds(state.watermark, -cfg.overlapSeconds) : `${cfg.archiveFrom}T00:00:00`, dateFrom: cfg.archiveFrom };
     }
     folderCache = {}; // مجلد حُذف يدوياً لا يبقى في المخبأ أكثر من دورة مطابقة
     const lookback = addSeconds(serverNow, -cfg.lookbackDays * 86400).slice(0, 10);
-    return { since: "1900-01-01T00:00:00", dateFrom: lookback > cfg.archiveFrom ? lookback : cfg.archiveFrom };
+    return { since: "1900-01-01T00:00:00", dateFrom: lookback > cfg.archiveFrom ? lookback : cfg.archiveFrom, reconcile: true };
   }
 
   function newJob(header, version, versionHash, latest, pdf) {
@@ -205,9 +214,9 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
 
   async function detect() {
     const serverNow = await ameen.serverNow();
-    const reconcile = now() - (state.lastReconcileAt || 0) >= cfg.reconcileMinutes * 60_000;
-    const { since, dateFrom } = detectWindow(serverNow, reconcile);
-    const { rows, complete } = await fetchChanged(since, dateFrom);
+    const window = detectWindow(serverNow, Boolean(state.watermark) && now() - (state.lastReconcileAt || 0) >= cfg.reconcileMinutes * 60_000);
+    const reconcile = Boolean(window.reconcile);
+    const { rows, complete, cursor } = await fetchChanged(window);
     state.detectErrors = state.detectErrors || {};
     let holdBack = null; // أقدم فاتورة مرحّلة لم تستقر بعد
     let created = 0;
@@ -216,11 +225,19 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
       if (outcome === "created") created++;
       if (outcome === "unstable" && (!holdBack || row.changed_at < holdBack)) holdBack = row.changed_at;
     }
-    let mark = complete ? serverNow : rows[rows.length - 1].changed_at;
+    holdBack = minTime(window.holdBack, holdBack);
+    // مسح لم يكتمل: العلامة كما هي، والمؤشر يُحفظ ليُستأنف منه بالضبط في الدورة التالية.
+    if (!complete) {
+      state.resume = { ...window, since: cursor.since, sinceGuid: cursor.sinceGuid, holdBack };
+      store.saveState();
+      return { rows: rows.length, created, reconcile, complete };
+    }
+    state.resume = null;
+    let mark = serverNow;
     if (holdBack && holdBack < mark) mark = holdBack;
     advanceWatermark(mark, reconcile);
     store.saveState();
-    return { rows: rows.length, created, reconcile };
+    return { rows: rows.length, created, reconcile, complete };
   }
 
   function due(job) {

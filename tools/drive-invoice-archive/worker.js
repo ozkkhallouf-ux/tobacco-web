@@ -43,6 +43,8 @@ const LINES_SQL = assertReadOnlySql(fs.readFileSync(path.join(MANUAL_DIR, "lib",
 const BALANCE_SQL = assertReadOnlySql(fs.readFileSync(path.join(AUTOPRINT_DIR, "ameen-customer-balance-query.sql"), "utf8"));
 const NOW_SQL = assertReadOnlySql("SELECT CONVERT(nvarchar(33), GETDATE(), 126) AS now, DB_NAME() AS db, SUSER_SNAME() AS login");
 
+const ZERO_GUID = "00000000-0000-0000-0000-000000000000";
+
 function naiveDate(iso) {
   return new Date(`${String(iso).replace(/Z$/, "")}Z`);
 }
@@ -68,11 +70,12 @@ function createAmeen(connString, typeGuids) {
   return {
     ping: async () => (await q(NOW_SQL))[0],
     serverNow: async () => (await q(NOW_SQL))[0].now,
-    changedInvoices: ({ since, dateFrom }) => q(CHANGED_SQL, (r, s) => r
+    changedInvoices: ({ since, sinceGuid, dateFrom }) => q(CHANGED_SQL, (r, s) => r
       .input("t0", s.UniqueIdentifier, t0)
       .input("t1", s.UniqueIdentifier, t1)
       .input("dateFrom", s.Date, naiveDate(`${dateFrom}T00:00:00`))
-      .input("since", s.DateTime2, naiveDate(since))),
+      .input("since", s.DateTime2(3), naiveDate(since))
+      .input("sinceGuid", s.UniqueIdentifier, sinceGuid || ZERO_GUID)),
     lines: (guid) => q(LINES_SQL, (r, s) => r.input("invoiceGuid", s.UniqueIdentifier, guid)),
     balance: async (guid) => {
       const rows = await q(BALANCE_SQL, (r, s) => r.input("invoiceGuid", s.UniqueIdentifier, guid));

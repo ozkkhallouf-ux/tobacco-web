@@ -9,7 +9,12 @@
 -- المعاملات:
 --   @t0, @t1      أنواع الجملة المعتمدة (الكاشير cc1097b1 مرفوض قبل الوصول هنا)
 --   @dateFrom     أقدم تاريخ فاتورة يدخل الأرشيف
---   @since        أقدم وقت إنشاء/تعديل مرشّح
+--   @since        مؤشر الصفحات: وقت التغيير (datetime2(3))
+--   @sinceGuid    مؤشر الصفحات: آخر GUID عند @since نفسه (صفري لبداية نافذة)
+--
+-- المؤشر مركّب (changed_at, GUID) وحصري، بنفس ترتيب ORDER BY: 500 فاتورة أو أكثر بالوقت
+-- نفسه (استيراد دفعة) لا تحبس الصفحات على أول 500. changed_at مقرَّب إلى datetime2(3)
+-- فيطابق النص الراجع القيمة المقارَنة بالضبط (datetime يحمل أجزاء 1/300 ثانية).
 
 SELECT TOP (500)
   LOWER(CONVERT(nvarchar(36), u.GUID))                AS invoice_guid,
@@ -33,13 +38,16 @@ SELECT TOP (500)
   DATEDIFF(second, chg.changed_at, GETDATE())         AS seconds_since_change
 FROM dbo.bu000 u
 CROSS APPLY (
-  SELECT CASE WHEN ISNULL(u.LastUpdateDate, '19000101') > ISNULL(u.CreateDate, '19000101')
-              THEN u.LastUpdateDate ELSE u.CreateDate END AS changed_at
+  SELECT CONVERT(datetime2(3),
+           CASE WHEN ISNULL(u.LastUpdateDate, '19000101') > ISNULL(u.CreateDate, '19000101')
+                THEN u.LastUpdateDate ELSE u.CreateDate END) AS changed_at
 ) chg
 LEFT JOIN dbo.bt000 bt  ON bt.GUID  = u.TypeGUID
 LEFT JOIN dbo.my000 cur ON cur.GUID = u.CurrencyGUID
 LEFT JOIN dbo.cu000 cu  ON cu.GUID  = u.CustGUID
 WHERE u.TypeGUID IN (@t0, @t1)
   AND u.Date >= @dateFrom
-  AND (u.CreateDate >= @since OR u.LastUpdateDate >= @since)
+  -- ترشيح أولي واسع بثانية (التقريب قد يرفع القيمة جزءاً من الملّي ثانية)، ثم المؤشر الدقيق.
+  AND (u.CreateDate >= DATEADD(second, -1, @since) OR u.LastUpdateDate >= DATEADD(second, -1, @since))
+  AND (chg.changed_at > @since OR (chg.changed_at = @since AND u.GUID > @sinceGuid))
 ORDER BY chg.changed_at ASC, u.GUID ASC

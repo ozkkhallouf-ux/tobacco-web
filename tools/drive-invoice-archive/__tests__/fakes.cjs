@@ -39,12 +39,15 @@ function createFakeAmeen() {
   }
   const api = {
     serverNow: async () => db.now,
-    changedInvoices: async ({ since, dateFrom }) => {
+    // نفس دلالة الاستعلام: مؤشر مركّب حصري (changed_at, GUID) وترتيب بهما معاً.
+    changedInvoices: async ({ since, sinceGuid = "", dateFrom }) => {
       reads++;
+      const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
       return [...db.invoices.values()]
-        .filter((i) => [WHOLESALE, CASHIER].includes(i.typeGuid) && i.date >= dateFrom && (i.createdAt >= since || i.updatedAt >= since))
+        .filter((i) => [WHOLESALE, CASHIER].includes(i.typeGuid) && i.date >= dateFrom)
         .map(row)
-        .sort((a, b) => (a.changed_at < b.changed_at ? -1 : a.changed_at > b.changed_at ? 1 : 0))
+        .filter((r) => r.changed_at > since || (r.changed_at === since && r.invoice_guid > sinceGuid))
+        .sort((a, b) => cmp(a.changed_at, b.changed_at) || cmp(a.invoice_guid, b.invoice_guid))
         .slice(0, 500);
     },
     lines: async (guid) => { reads++; return db.invoices.get(guid).lines.map((l) => ({ ...l })); },

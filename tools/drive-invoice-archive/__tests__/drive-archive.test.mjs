@@ -25,6 +25,7 @@ const { paperFor } = require(path.join(dir, "..", "manual-a4-print", "lib", "pap
 const G1 = "11111111-1111-4111-8111-111111111111";
 const G2 = "22222222-2222-4222-8222-222222222222";
 const G3 = "33333333-3333-4333-8333-333333333333";
+const G4 = "44444444-4444-4444-8444-444444444444";
 const CUST_B = "bbbbbbbb-0000-4000-8000-000000000002";
 
 function tmp() { return fs.mkdtempSync(path.join(os.tmpdir(), "ozk-drive-archive-")); }
@@ -146,6 +147,44 @@ test("فواتير غير مؤهلة لا تُؤرشف: غير مرحّلة، ا
   t.advance(200); // استقرت الثالثة
   await t.cycle();
   assert.deepEqual(t.store.jobs().map((j) => j.number), [3]);
+});
+
+test("501 فاتورة بوقت التغيير نفسه + فاتورة أحدث: كلها تُؤرشف مرة واحدة (مؤشر مركّب، Codex P1)", async () => {
+  const t = await setup({ mode: "dry-run" });
+  const guidOf = (i) => `${i.toString(16).padStart(8, "0")}-0000-4000-8000-000000000000`;
+  for (let i = 1; i <= 501; i++) t.ameen.add({ guid: guidOf(i), number: 1000 + i }); // دفعة مستوردة: createdAt واحد
+  t.advance(60);
+  t.ameen.add({ guid: guidOf(9999), number: 999 });
+  t.advance(300);
+  await t.cycle();
+  await t.cycle();
+  t.advance(1800); // ومطابقة دورية بعدها لا تكرر شيئاً
+  await t.cycle();
+  const numbers = t.store.jobs().map((j) => j.number);
+  assert.equal(numbers.length, 502, `أُرشف ${numbers.length} من 502`);
+  assert.equal(new Set(numbers).size, 502, "لا تكرار");
+  assert.ok(numbers.includes(1501) && numbers.includes(999), "الفاتورة 501 في الدفعة والأحدث 999 وصلتا");
+});
+
+test("المسح الأول بلا علامة يغطي archiveFrom كاملاً قبل lookback، وكذا التعافي بعد ضياع الحالة (Codex P1)", async () => {
+  const t = await setup({ mode: "dry-run", overrides: { archiveFrom: "2026-01-01" } });
+  t.ameen.add({ guid: G1, number: 11, date: "2026-01-05", createdAt: "2026-01-05T10:00:00" }); // أقدم من 60 يوماً
+  t.ameen.add({ guid: G2, number: 12, date: "2025-12-20", createdAt: "2025-12-20T10:00:00" }); // قبل archiveFrom
+  t.ameen.add({ guid: G3, number: 13 }); // حديثة
+  t.advance(300);
+  await t.cycle();
+  await t.cycle();
+  assert.deepEqual(t.store.jobs().map((j) => j.number).sort(), [11, 13]);
+  assert.ok(t.store.state.watermark >= "2026-10-24", "العلامة تتقدّم بعد اكتمال المسح");
+
+  // تعافٍ: ضاع ملف الحالة، وفاتورة قديمة لم يرها أي مسح سابق (استعادة نسخة مثلاً).
+  t.ameen.add({ guid: G4, number: 14, date: "2026-02-01", createdAt: "2026-02-01T09:00:00" });
+  fs.rmSync(path.join(t.cfg.dataDir, "state.json"));
+  t.restart();
+  t.advance(60);
+  await t.cycle();
+  await t.cycle();
+  assert.deepEqual(t.store.jobs().map((j) => j.number).sort(), [11, 13, 14], "بلا تكرار، والقديمة وصلت");
 });
 
 test("إعادة معالجة الحدث نفسه (فقدان state.json وإعادة التشغيل) لا تكرر ملفاً ولا إشعاراً", async () => {
