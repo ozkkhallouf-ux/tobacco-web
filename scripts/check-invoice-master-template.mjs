@@ -8,7 +8,7 @@
 //
 // ما يحرسه:
 //   · الشعار ووجوده وارتفاعه 46px
-//   · Tahoma وليس Noto
+//   · الخط الرسمي Cairo (عبر --ozk-font) واحتياطه Tahoma، ولا Noto
 //   · لوحة ألوان الفاتورة كاملة (ذهبي/كريمي/zebra/حدود/أحمر/أخضر)
 //   · الختم الكحلي #16357a بحدوده ودورانه وشفافيته ونصّه
 //   · أعمدة جدول الأصناف الأربعة بترتيبها ونسبها 37/26/20/17
@@ -149,8 +149,9 @@ test("ارتفاع الشعار 46px", () => {
   assert.ok(/\.ozk-inv \.rlogo\{height:46px/.test(OZK_INVOICE.STYLE), "ارتفاع الشعار ليس 46px");
 });
 
-test("الخط Tahoma وليس Noto", () => {
-  assert.ok(/font-family:Tahoma,Arial,sans-serif/.test(OZK_INVOICE.STYLE), "Tahoma مفقود");
+test("الخط الرسمي Cairo عبر --ozk-font واحتياطه Tahoma، وليس Noto", () => {
+  assert.ok(/font-family:var\(--ozk-font,Tahoma,Arial,sans-serif\)/.test(OZK_INVOICE.STYLE), "الخط الرسمي/احتياط Tahoma مفقود");
+  assert.ok(/line-height:var\(--ozk-doc-line-height,normal\)/.test(OZK_INVOICE.STYLE), "ارتفاع سطر المستند الرسمي مفقود");
   assert.ok(!/Noto/i.test(OZK_INVOICE.STYLE), "Noto ممنوع في الفواتير");
   assert.ok(!/Noto/i.test(reference), "Noto ممنوع في مخرجات الفاتورة");
 });

@@ -552,6 +552,11 @@ async function htmlToPdf(htmlContent, pdfPath) {
   const page = await browser.newPage();
   try {
     await page.setContent(htmlContent, { waitUntil: "networkidle0" });
+    // الخط الرسمي مضمَّن data: — ننتظر فكّه قبل الرسم، بسقف كي لا تتعطل الطباعة.
+    await page.evaluate(() => Promise.race([
+      document.fonts.ready,
+      new Promise((resolve) => setTimeout(resolve, 3000))
+    ])).catch(() => {});
     await page.pdf({
       path:            pdfPath,
       format:          "A4",

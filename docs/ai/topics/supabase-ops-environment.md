@@ -74,3 +74,48 @@
 5. **حذف سرّ المستودع القديم.** الـJWT القديم يبقى صالحاً للـEdge Functions وOZK2026، فلا تعطّل.
 6. **التراجع:** حذف سرّ البيئة (فيعود سرّ المستودع إن كان باقياً)، أو إبطال المفتاح الجديد وحده من Dashboard.
 7. **لاحقاً (مسار مستقل):** نقل OZK2026 وEdge Functions إلى مفاتيح جديدة مستقلة، ثم تعطيل legacy keys بعد التحقق الكامل.
+
+## فحص المصادقة في health-check (2026-10-22)
+
+**المشكلة:** دورة `health-check` بلا مشاكل لا تتصل بـSupabase إطلاقاً، فنجاح الـjob لا يثبت أن المفتاح يعمل. ظهر ذلك في سجلات 2026-10-22 الساعة 00:04Z: لا طلب لـ`rpc/health_lifecycle` ولا لـ`rpc/notify_telegram`.
+
+**الحل:** `probeSupabaseAuth()` في `scripts/health-check.mjs`، في كل دورة (كل 30 دقيقة).
+
+**شروط التشغيل:**
+- لا يعمل إلا مع `HEALTH_LIFECYCLE_MODE=managed`، أي حين تكون `health_lifecycle` معلَنة منشورة. الإنتاج اليوم `managed`، والدالة موجودة في `pg_proc`.
+- مع `HEALTH_LIFECYCLE_SIGNALS=off` (إيقاف طوارئ) لا يُرسل أي طلب.
+- في الحالتين يُتخطّى بسطر مرئي بلا حادثة.
+
+**الطلب نفسه:**
+- `POST rpc/health_lifecycle` بـ`{p_op:"probe", p_key:null, p_issue:null, p_label:null}`.
+- يستعمل المفتاح والترويسات نفسها (`supabaseServiceHeaders`).
+
+**لماذا هو قراءة فقط ويثبت الصلاحية:**
+- `probe` يقرأ `pg_proc` فقط، ولا يكتب صفاً ولا يرسل تيليغرام ولا يمسّ `ops_events`.
+- EXECUTE على الدالة لـ`service_role` و`postgres` وحدهما.
+- فاستجابة 200 بجسم `{ok:true, op:"probe", v:1, ready:<bool>}` لا تصدر إلا لطلب مصادَق بدور service_role.
+
+**التصنيف:**
+
+| الحالة | النتيجة | المشكلة (المسار المعتاد: Issue وتنبيه عند المشكلة فقط) |
+|---|---|---|
+| 200 بإقرار صالح | ok، ويُسجَّل نوع المفتاح وحده | تُغلق حوادث المصادقة الثلاث بدليل إيجابي |
+| 401/403، أو مفتاح غير مضبوط داخل Actions | auth، بلا إعادة محاولة | `supabase-auth-failed` (عالٍ) |
+| 200 بجسم غير مُثبِت، أو 404/PGRST202، أو 4xx أخرى | unproven | `supabase-auth-unproven` (عالٍ) |
+| 429/5xx/timeout/شبكة | إعادة محاولة مرئية (`::warning::`) بعد 2 ثانية ثم 5 ثوانٍ | إن استمر: `supabase-api-unavailable` (متوسط)، وليس فشل مصادقة |
+
+- لا تيليغرام جديد عند النجاح.
+- لا يُطبع المفتاح ولا مقطع منه ولا ترويسة Authorization.
+- **الحارس:** `scripts/check-supabase-auth-probe.mjs`.
+
+## اختبار المفتاح الجديد قبل تبديل سرّ المهام المجدولة
+
+1. **دمج فحص المصادقة،** ثم مراقبة دورتين مجدولتين بالمفتاح القديم. المتوقع في السجل «🔐 مصادقة Supabase: مُثبتة … نوع المفتاح legacy-jwt». وفي سجلات Supabase (edge_logs): `POST /rest/v1/rpc/health_lifecycle` بحالة 200 كل 30 دقيقة.
+2. **إنشاء المفتاح:** المالك ينشئ `sb_secret_` (`ozk-github-actions`) من Dashboard. لا يُلغى ولا يُدوَّر أي مفتاح قديم.
+3. **اختبار عزل قبل التبديل،** على جهاز المالك، قراءة فقط، بلا طباعة. نفس الطلب بالضبط:
+   `pbpaste | sed 's/^/apikey: /' | curl -sS -o /dev/null -w '%{http_code}\n' -X POST https://dyxbirfpxeocqffnfdeb.supabase.co/rest/v1/rpc/health_lifecycle -H @- -H 'Content-Type: application/json' -H 'Content-Profile: public' -d '{"p_op":"probe","p_key":null,"p_issue":null,"p_label":null}'`
+   (المفتاح يمرّ عبر stdin إلى `-H @-`، لا في وسائط الأمر ولا في سجل الـshell.)
+   - المتوقع `200`. أي `401/403` ⇒ توقف.
+4. **التبديل:** وضعه في بيئة `supabase-ops` بالاسم نفسه، بأمر يقرأ من الحافظة دون طباعة. سرّ المستودع لا يُمسّ.
+5. **الإثبات:** أول دورة مجدولة يجب أن تسجّل «نوع المفتاح sb_secret» و«مُثبتة»، مع 200 في edge_logs.
+6. **التراجع:** إن ظهر `supabase-auth-failed` أو `unproven`، يُحذف سرّ البيئة، فتعود المهام لسرّ المستودع. الدورة التالية يجب أن تُظهر `legacy-jwt` ومُثبتة. المفتاح الجديد لا يُلغى قبل مراجعة استعماله.

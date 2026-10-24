@@ -323,9 +323,11 @@ const readingOrder = (pages) => pages.flatMap((page) => [...page.columns[0], ...
   check(`هندسة الطباعة: ارتفاع الصفحة 277mm ≈ ${print.pageHeightPx.toFixed(1)}px`,
     Math.abs(print.pageHeightPx - 277 * (96 / 25.4)) < 0.5);
   const canvas = api.inventoryPageGeometry("canvas");
-  check("هندسة الهاتف: العرض يخصم حشوة .ozk-rpt الأفقية (794-20)", canvas.contentWidthPx === 774);
-  check(`هندسة الهاتف: ارتفاع الصفحة موجب ومعقول (${canvas.pageHeightPx.toFixed(1)}px)`,
-    canvas.pageHeightPx > 900 && canvas.pageHeightPx < 1300);
+  // html2pdf يعيد رصف النسخة بعرض 194mm = 733px (لا 794px) ويقطع الورقة عند
+  // floor(733 × 281/194) = 1061px — المقاسان الفعليان في check-inventory-report-phone-pdf.mjs.
+  check("هندسة الهاتف: العرض = حاوية html2pdf (733) ناقص حشوة .ozk-rpt الأفقية (20)", canvas.contentWidthPx === 713);
+  check(`هندسة الهاتف: ارتفاع الصفحة = 1061 ناقص الحشوة الرأسية (${canvas.pageHeightPx}px)`,
+    canvas.pageHeightPx === 1049);
   check("هامش الأمان مُعرَّف وموجب", api.INVENTORY_PACK_SAFETY_PX > 0);
 }
 

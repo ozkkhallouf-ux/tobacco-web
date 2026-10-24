@@ -190,14 +190,18 @@ test("استخراج دوال تقرير الذمم", () => {
     threshold: /const RECEIVABLES_NATIVE_SETTLED_BELOW = [^;]+;/,
     receivablesNativeBalance: /function receivablesNativeBalance\(item\) \{[\s\S]*?\n\}\n/,
     receivablesReportGroups: /function receivablesReportGroups\(items\) \{[\s\S]*?\n\}\n/,
-    receivablesPdfMarkup: /function receivablesPdfMarkup\(\) \{[\s\S]*?\n\}\n/
+    receivablesPdfMarkup: /function receivablesPdfMarkup\(\) \{[\s\S]*?\n\}\n/,
+    // أعمدة آخر فاتورة/آخر دفعة (تُفحص بنفسها في check-receivables-last-activity.mjs)؛
+    // هنا تُستخرج فقط كي يعمل مستند الذمم، وتقارير هذا الفحص بلا العلامة فلا تظهر.
+    lastActivity: /const LAST_ACTIVITY_MARKER = [\s\S]*?\nfunction customerLastActivityHtml\(rows\) \{[\s\S]*?\n\}\n/
   });
   box = {
     REPORT_STYLE: "",
     escapeHtml: (v) => String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"),
     formatMoney: (v) => new Intl.NumberFormat("en-US", { maximumFractionDigits: 3 }).format(Number(v || 0)),
     todayIsoDate: () => "2026-01-01",
-    latestCustomerBalanceItems: () => box.__items
+    latestCustomerBalanceItems: () => box.__items,
+    state: { customerBalanceReports: [] }
   };
   vm.createContext(box);
   vm.runInContext(`${source}\nthis.receivablesReportGroups = receivablesReportGroups; this.receivablesPdfMarkup = receivablesPdfMarkup;`, box);

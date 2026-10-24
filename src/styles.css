@@ -17,7 +17,7 @@
   --nav-hover-bg: #20180e;
   --nav-hover-color: #fff7dc;
   --nav-hover-border: #6f5124;
-  font-family: "Segoe UI", Tahoma, Arial, sans-serif;
+  font-family: var(--ozk-font, "Segoe UI", Tahoma, Arial, sans-serif);
 }
 
 [data-theme="light"] {
@@ -1403,6 +1403,49 @@ code {
   gap: 10px;
 }
 
+/* آخر فاتورة وآخر دفعة في صف الذمم: عمودان جنباً إلى جنب، ويتراكبان على الهاتف. */
+.last-activity-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.inventory-row .last-activity-col {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  min-width: 0;
+  color: var(--ink);
+}
+
+.last-activity-col small {
+  color: var(--muted);
+}
+
+.inventory-row .last-activity {
+  font-weight: 700;
+  color: var(--ink);
+  cursor: help;
+}
+
+.inventory-row .last-activity-none,
+.inventory-row .last-activity-pending {
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.inventory-row .last-activity-future,
+.inventory-row .last-activity-invalid {
+  color: var(--danger);
+}
+
+@media (max-width: 560px) {
+  .last-activity-row {
+    grid-template-columns: 1fr;
+  }
+}
+
 .customer-limit-editor {
   display: grid;
   grid-template-columns: minmax(110px, 0.7fr) minmax(120px, 1fr) auto;
@@ -1528,7 +1571,7 @@ code {
   width: 760px;
   background: #fffdf8 !important;
   color: #211b12 !important;
-  font-family: Tahoma, Arial, sans-serif;
+  font-family: var(--ozk-font, Tahoma, Arial, sans-serif);
   direction: rtl;
 }
 
@@ -2538,7 +2581,8 @@ code {
 }
 
 .inv-line-total {
-  font-family: monospace;
+  font-family: var(--ozk-font, monospace);
+  font-variant-numeric: tabular-nums;
   direction: ltr;
   text-align: left;
   color: var(--muted);
@@ -2579,7 +2623,8 @@ code {
   font-size: 1.3rem;
   font-weight: 700;
   color: var(--primary);
-  font-family: monospace;
+  font-family: var(--ozk-font, monospace);
+  font-variant-numeric: tabular-nums;
   direction: ltr;
 }
 
@@ -2823,7 +2868,8 @@ code {
   min-width: 44px;
   font-size: 0.78rem;
   color: var(--muted);
-  font-family: monospace;
+  font-family: var(--ozk-font, monospace);
+  font-variant-numeric: tabular-nums;
 }
 
 .sales-suggest-name {
@@ -2834,7 +2880,8 @@ code {
 .sales-suggest-price {
   font-size: 0.8rem;
   color: var(--primary);
-  font-family: monospace;
+  font-family: var(--ozk-font, monospace);
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
@@ -2866,7 +2913,8 @@ code {
 
 .sales-summary-row strong {
   color: var(--ink);
-  font-family: monospace;
+  font-family: var(--ozk-font, monospace);
+  font-variant-numeric: tabular-nums;
   font-size: 1rem;
 }
 
@@ -2883,7 +2931,8 @@ code {
   width: 130px;
   text-align: left;
   direction: ltr;
-  font-family: monospace;
+  font-family: var(--ozk-font, monospace);
+  font-variant-numeric: tabular-nums;
   padding: 6px 10px;
 }
 
@@ -2952,7 +3001,8 @@ code {
 
 .sales-cust-row strong {
   color: var(--ink);
-  font-family: monospace;
+  font-family: var(--ozk-font, monospace);
+  font-variant-numeric: tabular-nums;
 }
 
 .sales-cust-projected strong {
@@ -3062,7 +3112,8 @@ code {
 
 .sales-info-row strong {
   color: var(--ink);
-  font-family: monospace;
+  font-family: var(--ozk-font, monospace);
+  font-variant-numeric: tabular-nums;
 }
 
 .sales-info-profit strong {
@@ -3114,7 +3165,8 @@ code {
 
 .sales-info-store strong {
   color: var(--ink);
-  font-family: monospace;
+  font-family: var(--ozk-font, monospace);
+  font-variant-numeric: tabular-nums;
 }
 
 .sales-info-stale {
@@ -3249,7 +3301,8 @@ code {
 }
 
 .overdue-balance {
-  font-family: monospace;
+  font-family: var(--ozk-font, monospace);
+  font-variant-numeric: tabular-nums;
   font-size: 0.88rem;
   direction: ltr;
   color: var(--danger);

@@ -265,7 +265,7 @@ test("مرتجع بلا أي حقل رصيد إطلاقاً (تحذير مسار
 
 // ===== 5) هوية المرتجع =====
 
-test("هوية المرتجع: kind/العنوان/RET/الأخضر/الأصناف/legal/الختم/Tahoma", () => {
+test("هوية المرتجع: kind/العنوان/RET/الأخضر/الأصناف/legal/الختم/الخط الرسمي", () => {
   const doc = saleInvoiceDocument(listOpts(INV_48, "زبون أ", 36273.646, 36120.426));
   assert.equal(doc.kind, "return");
   assert.equal(saleInvoiceDocument({ type: "return", amount: 1, lines: [] }).no, "RET-20260914-0001", "البديل ليس من KINDS.return.prefix");
@@ -277,7 +277,7 @@ test("هوية المرتجع: kind/العنوان/RET/الأخضر/الأصنا
   assert.ok(!/class="big" style="color:#c0271f"/.test(html), "أحمر البيع على المرتجع");
   assert.ok(html.includes('<div class="sec">أصناف المرتجع</div>'));
   assert.ok(html.includes('class="legalbox"') && html.includes('class="seal"'));
-  assert.ok(html.includes("font-family:Tahoma,Arial,sans-serif"));
+  assert.ok(html.includes("font-family:var(--ozk-font,Tahoma,Arial,sans-serif)"));
   assert.ok(html.includes('<div class="nm">زبون أ</div>'), "الطرف ليس اسم الزبون");
 });
 
@@ -301,15 +301,17 @@ test("الأرشفة واسم الملف: return_invoice ومطابق لـKINDS.
 // مقارنة المخرجات قبله وبعده أثبتت أن الفرق الوحيد نصوص المبالغ (505 ⇒ 505.00، 129.673 ⇒
 // 129.67، 1,370 ⇒ 1,370.00…) بنفس القيمة مقرّبة لمنزلتين، بلا أي تغيير في نص أو صف أو تخطيط.
 // صفوف 634 مثبّتة حرفياً أدناه كي لا يمرّ تغيير رقمي خلف بصمة جديدة.
+// وأُعيد التقاط الثلاث نفسها بعد الخط الرسمي Cairo (2026-10-22): diff المخرجات مع main f145a10
+// = سطرا STYLE وحدهما (`.ozk-inv` → var(--ozk-font)/line-height، و`.qg` حشوة قصّ معوَّضة)، بلا نص ولا رقم ولا صف.
 
 const SALE_LINES = [
   { material: "معسل فاخر اسود حرة كف", qty: 48, qtyUnits: 2, unit1: "كف", unit2: "كرتونة", price: 170 },
   { material: "فحم ايكو نارة احمر", qty: 80, qtyUnits: 5, unit1: "كف", unit2: "كرتونة", price: 33 }
 ];
 const GOLDEN = [
-  ["فاتورة بيع بحسم ودفعة وتسوية", { type: "invoice", no: "634", date: "2026-09-05", name: "زبون د", phone: "0985000771", cur: "$", amount: 505, prevBalance: 1000, newBalance: 1370, discount: 25, payment: 100, adjust: 10, lines: SALE_LINES }, "e0d0c5d95e9783670107530e55144b89ed9e9a0bb09f281a8d29d7a8f5333158"],
-  ["فاتورة بيع غير منعكسة على الذمة", { type: "invoice", no: "2046", date: "2026-09-05", name: "زبون هـ", cur: "$", amount: 129.673, accountBalance: -1.15, accountBalanceAt: "2026-09-05T10:00:00Z", lines: SALE_LINES }, "fedbb62635add674adb905e9efce86961232c0f712f802e19d76b58d7463a1b6"],
-  ["فاتورة بيع بلا رقم ولا رصيد", { type: "invoice", date: "2026-09-05", name: "زبون و", amount: 50, lines: [] }, "b409ac49fe5f539910d35deaec2b92cb49c0f5585a965f8f3ac2b94a4f86afdb"],
+  ["فاتورة بيع بحسم ودفعة وتسوية", { type: "invoice", no: "634", date: "2026-09-05", name: "زبون د", phone: "0985000771", cur: "$", amount: 505, prevBalance: 1000, newBalance: 1370, discount: 25, payment: 100, adjust: 10, lines: SALE_LINES }, "e65108ddf45c528fa952608dadd95525c84144db8fda36a4bb486c95a899eff9"],
+  ["فاتورة بيع غير منعكسة على الذمة", { type: "invoice", no: "2046", date: "2026-09-05", name: "زبون هـ", cur: "$", amount: 129.673, accountBalance: -1.15, accountBalanceAt: "2026-09-05T10:00:00Z", lines: SALE_LINES }, "bc11b893ff3717c8b4fe23351e06aa888eaaa14cd37f87a0ad18cb131c054cd7"],
+  ["فاتورة بيع بلا رقم ولا رصيد", { type: "invoice", date: "2026-09-05", name: "زبون و", amount: 50, lines: [] }, "7464565e9929449b115ada26d12fa878b20f7b4df28a65919976f516a67a375d"],
   ["سند قبض برصيد بعد الدفعة ورصيد حالي", { type: "receipt", no: "R-1", date: "2026-09-10", name: "زبون ز", cur: "$", amount: 20, balance: 80, balanceLabel: "الرصيد بعد الدفعة", currentBalance: 60.2, currentBalanceAt: "2026-09-10T10:00:00Z" }, "7964a1c9e7d49ff1b9c642618391cd18a25889ffd8498a06bf1cb4189e9cee5a"],
   ["سند قبض بمبلغ قريب من مرتجع بنفس اليوم", { type: "receipt", no: "R-2", date: "2026-09-10", name: "زبون ز", cur: "$", amount: 20, balance: 80, newBalance: 80, prevBalance: 100, lines: LINES_48 }, "bc8ff71504ce875f9c48b90e663903f90dc117681997135206a7f79f397c1e64"],
   ["سند صرف", { type: "payment", no: "PV-1", date: "2026-09-06", name: "أبو زياد للنقل", cur: "ل.س", amount: 90000, method: "نقدي", notes: "نقل", balance: 0 }, "ccd26af26cdbea7610992d9781153ed0bf901c07d1c6d28580c9e9408e708e90"],

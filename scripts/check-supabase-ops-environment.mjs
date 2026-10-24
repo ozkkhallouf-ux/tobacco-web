@@ -179,7 +179,7 @@ for (const key of [JWT, NEW]) {
 }
 const healthSrc = readFileSync(path.join(root, "scripts/health-check.mjs"), "utf8");
 assert.doesNotMatch(healthSrc, /Authorization:\s*`Bearer \$\{serviceKey\}`/, "health-check: لا Bearer ثابت (notify_telegram وhealth_lifecycle عبر supabaseServiceHeaders)");
-assert.equal((healthSrc.match(/\.\.\.supabaseServiceHeaders\(serviceKey\)/g) || []).length, 2, "health-check: notify_telegram وhealth_lifecycle عبر supabaseServiceHeaders");
+assert.equal((healthSrc.match(/\.\.\.supabaseServiceHeaders\(serviceKey\)/g) || []).length, 3, "health-check: notify_telegram وhealth_lifecycle وفحص المصادقة (probe) عبر supabaseServiceHeaders");
 const alertSrc = readFileSync(path.join(wfDir, "alert-on-automation-failure.yml"), "utf8");
 assert.match(alertSrc, /case "\$SUPABASE_SERVICE_ROLE_KEY" in\s*\n\s*sb_\*\) ;;\s*\n\s*\*\) AUTH_HEADER=\(-H "Authorization: Bearer \$\{SUPABASE_SERVICE_ROLE_KEY\}"\) ;;/, "alert: Authorization للمفتاح القديم وحده");
 assert.match(alertSrc, /"\$\{AUTH_HEADER\[@\]\}"/);

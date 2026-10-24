@@ -1936,11 +1936,11 @@ async function printOverdueReport() {
     <tr style="background:${i % 2 === 0 ? "#fff" : "#fdf8ee"}">
       <td style="padding:8px 10px;border:1px solid #d8c890;text-align:center">${i + 1}</td>
       <td style="padding:8px 10px;border:1px solid #d8c890">${escapeHtml(item.customer_name || item.name || "—")}</td>
-      <td style="padding:8px 10px;border:1px solid #d8c890;direction:ltr;text-align:left;font-family:monospace">${formatMoney(customerBalance(item))}</td>
+      <td style="padding:8px 10px;border:1px solid #d8c890;direction:ltr;text-align:left;font-family:var(--ozk-font,monospace);font-variant-numeric:tabular-nums">${formatMoney(customerBalance(item))}</td>
       <td style="padding:8px 10px;border:1px solid #d8c890;text-align:center;color:${item.daysSince === null ? "#888" : item.daysSince >= 7 ? "#b00" : "#9a6000"};font-weight:bold">${item.daysSince === null ? "—" : item.daysSince + " يوم"}</td>
     </tr>`).join("");
   const html = `
-    <div dir="rtl" style="font-family:Tahoma,Arial,sans-serif;color:#221808;padding:20px">
+    <div dir="rtl" style="font-family:var(--ozk-font,Tahoma,Arial,sans-serif);line-height:var(--ozk-doc-line-height,normal);color:#221808;padding:20px">
       <div style="text-align:center;margin-bottom:20px;border-bottom:2px solid #d7a83f;padding-bottom:16px">
         <h2 style="margin:0 0 4px;font-size:1.4rem">OZK TOBACCO</h2>
         <h3 style="margin:0;font-size:1.1rem;color:#6b4e10">تقرير الزبائن المتأخرين عن الدفع</h3>
@@ -1978,10 +1978,11 @@ async function printOverdueReport() {
     return;
   }
 
-  archiveToICloud("other_report", html, overdueArchiveMeta);
+  archiveToICloud("other_report", typeof OZK_FONT !== "undefined" ? OZK_FONT.withFaces(html) : html, overdueArchiveMeta);
   const container = document.createElement("div");
   container.innerHTML = html;
   document.body.appendChild(container);
+  if (typeof OZK_FONT !== "undefined") await OZK_FONT.ready();
   window.html2pdf().set({
     margin: [10, 15, 10, 15],
     filename,
@@ -4448,10 +4449,12 @@ function downloadFilteredCustomerBalances() {
     customerLimit(item) > 0 ? customerRemainingLimit(item) : "",
     customerLastPaymentAmount(item) > 0 ? customerLastPaymentAmount(item) : "",
     customerLastPaymentDate(item) || "",
-    customerStatusLabel(item.status)
+    customerStatusLabel(item.status),
+    customerLastActivityText(customerLastActivity(item).invoice),
+    customerLastActivityText(customerLastActivity(item).payment)
   ]);
   const worksheet = window.XLSX.utils.aoa_to_sheet([
-    ["الزبون", "الرصيد", "الحد المسموح", "المتبقي من الحد", "آخر دفعة", "تاريخ آخر دفعة", "الحالة"],
+    ["الزبون", "الرصيد", "الحد المسموح", "المتبقي من الحد", "آخر دفعة", "تاريخ آخر دفعة", "الحالة", "آخر فاتورة (منذ)", "آخر دفعة (منذ)"],
     ...rows
   ]);
   const workbook = window.XLSX.utils.book_new();
@@ -4991,6 +4994,120 @@ function customerLastPaymentDate(item) {
   return item?.lastPaymentDate || "";
 }
 
+// ====== آخر فاتورة وآخر دفعة (تقرير الذمم) ======
+// المصدر أعمدة last-activity في tools/ameen-customer-balances-query.sql، والعلامة
+// summary.lastActivity = "v1" تعني أن الاستعلام حمل الأعمدة الأربعة. بلاها لا نقول
+// «لا توجد فواتير» — نقول «بانتظار المزامنة»، لأن الغياب هنا غياب عمود لا غياب مستند.
+// الدور من شجرة الحسابات: المورد يُقرأ على فواتير الشراء والدفع له، وغيره على فواتير
+// البيع والقبض منه. الحساب ذو الدورين يُظهر الجانب الآخر سطراً ثانياً موسوماً، فلا
+// تختلط فاتورة بيع بشراء ولا قبض بدفع.
+// التاريخ تاريخ المستند كما في الأمين (توقيت دمشق المحلي على OZK2026)، فيُقرأ يومه من
+// النص نفسه بلا تحويل منطقة، ويُقارن بـ«اليوم» في Asia/Damascus — لا بوقت المزامنة.
+const LAST_ACTIVITY_MARKER = "v1";
+const LAST_ACTIVITY_TIME_ZONE = "Asia/Damascus";
+const LAST_ACTIVITY_WEEKDAYS = ["الأحد", "الإثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت"];
+
+function customerReportHasLastActivity(report = state.customerBalanceReports[0]) {
+  return report?.summary?.lastActivity === LAST_ACTIVITY_MARKER;
+}
+
+function lastActivityRole(item) {
+  const cls = String(item?.accountClass || "").trim();
+  if (cls) return cls === "supplier" ? "supplier" : "customer";
+  return item?.isSupplier === true ? "supplier" : "customer";
+}
+
+function lastActivityDay(value) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value || "").trim());
+  if (!m) return null;
+  const utc = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  const d = new Date(utc);
+  if (d.getUTCFullYear() !== Number(m[1]) || d.getUTCMonth() !== Number(m[2]) - 1 || d.getUTCDate() !== Number(m[3])) return null;
+  return utc / 86400000;
+}
+
+function lastActivityToday(now = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", { timeZone: LAST_ACTIVITY_TIME_ZONE, year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
+  return lastActivityDay(parts);
+}
+
+function arabicElapsed(days) {
+  if (days === 0) return "اليوم";
+  if (days === 1) return "أمس";
+  if (days === 2) return "منذ يومين";
+  if (days <= 10) return `منذ ${days} أيام`;
+  if (days < 30) return `منذ ${days} يوماً`;
+  if (days < 365) {
+    const months = Math.floor(days / 30);
+    if (months === 1) return "منذ شهر";
+    if (months === 2) return "منذ شهرين";
+    return months <= 10 ? `منذ ${months} أشهر` : `منذ ${months} شهراً`;
+  }
+  const years = Math.floor(days / 365);
+  if (years === 1) return "منذ سنة";
+  if (years === 2) return "منذ سنتين";
+  return years <= 10 ? `منذ ${years} سنوات` : `منذ ${years} سنة`;
+}
+
+function lastActivityFullDate(value) {
+  const text = String(value || "").trim();
+  const day = lastActivityDay(text);
+  if (day === null) return text;
+  const weekday = LAST_ACTIVITY_WEEKDAYS[new Date(day * 86400000).getUTCDay()];
+  const time = /T(\d{2}):(\d{2})/.exec(text);
+  const clock = time && `${time[1]}:${time[2]}` !== "00:00" ? ` ${time[1]}:${time[2]}` : "";
+  return `${weekday} ${text.slice(0, 10)}${clock}`;
+}
+
+// حالة خلية واحدة: ok بمدة، أو none/pending/future/invalid بنص صريح بدل مدة مضلِّلة.
+function lastActivityCell(value, noneLabel, hasMarker, now = new Date()) {
+  if (!hasMarker) return { state: "pending", label: "بانتظار المزامنة", title: "تقرير الأرصدة الحالي لا يحمل هذا العمود بعد", day: null };
+  if (!value) return { state: "none", label: noneLabel, title: noneLabel, day: null };
+  const day = lastActivityDay(value);
+  if (day === null) return { state: "invalid", label: "تاريخ غير صالح", title: String(value), day: null };
+  const full = lastActivityFullDate(value);
+  const days = lastActivityToday(now) - day;
+  if (days < 0) return { state: "future", label: "تاريخ مستقبلي", title: full, day };
+  return { state: "ok", label: arabicElapsed(days), title: full, day };
+}
+
+// يعيد { invoice: [..], payment: [..] }؛ كل مصفوفة سطر الدور الأساسي، ثم سطر الدور الآخر
+// موسوماً إن وُجد له مستند فعلاً.
+function customerLastActivity(item, hasMarker = customerReportHasLastActivity(), now = new Date()) {
+  const supplier = lastActivityRole(item) === "supplier";
+  const sale = { kind: "sale", tag: "بيع", value: item?.lastSaleInvoiceDate || "" };
+  const purchase = { kind: "purchase", tag: "شراء", value: item?.lastPurchaseInvoiceDate || "" };
+  const receipt = { kind: "receipt", tag: "قبض", value: item?.lastReceiptDate || "" };
+  const paid = { kind: "disbursement", tag: "دفع", value: item?.lastDisbursementDate || "" };
+  const [mainInv, otherInv] = supplier ? [purchase, sale] : [sale, purchase];
+  const [mainPay, otherPay] = supplier ? [paid, receipt] : [receipt, paid];
+  const dual = hasMarker && Boolean(otherInv.value);
+  const build = (main, other, noneLabel) => {
+    const rows = [{ ...main, ...lastActivityCell(main.value, noneLabel, hasMarker, now), tagged: dual }];
+    if (dual && other.value) rows.push({ ...other, ...lastActivityCell(other.value, noneLabel, hasMarker, now), tagged: true });
+    return rows;
+  };
+  return {
+    invoice: build(mainInv, otherInv, "لا توجد فواتير"),
+    payment: build(mainPay, otherPay, "لا توجد دفعات")
+  };
+}
+
+// مفتاح الترتيب: أحدث يوم بين أسطر العمود (للحساب ذي الدورين)، وnull لما لا تاريخ له.
+function customerLastActivitySortDay(item, column) {
+  const rows = customerLastActivity(item)[column] || [];
+  const days = rows.filter((r) => r.state === "ok" || r.state === "future").map((r) => r.day);
+  return days.length ? Math.max(...days) : null;
+}
+
+function customerLastActivityText(rows) {
+  return rows.map((r) => (r.tagged ? `${r.tag}: ` : "") + r.label + (r.state === "ok" || r.state === "future" ? ` (${String(r.value).slice(0, 10)})` : "")).join(" | ");
+}
+
+function customerLastActivityHtml(rows) {
+  return rows.map((r) => `<span class="last-activity last-activity-${escapeHtml(r.state)}" title="${escapeHtml(r.title)}">${r.tagged ? `<b>${escapeHtml(r.tag)}:</b> ` : ""}${escapeHtml(r.label)}</span>`).join("");
+}
+
 function customerLimitSourceLabel(source) {
   return {
     internal: "حد داخلي",
@@ -5229,12 +5346,32 @@ function filterCustomerItems(items, filter, query) {
   });
 }
 
+const LAST_ACTIVITY_SORTS = {
+  lastInvoiceDesc: { column: "invoice", dir: "desc" },
+  lastInvoiceAsc: { column: "invoice", dir: "asc" },
+  lastPaymentDesc: { column: "payment", dir: "desc" },
+  lastPaymentAsc: { column: "payment", dir: "asc" }
+};
+
 function sortCustomerItems(items, sort) {
   const sorted = [...items];
   if (sort === "remainingAsc") {
     sorted.sort((a, b) => customerRemainingLimit(a) - customerRemainingLimit(b));
   } else if (sort === "nameAsc") {
     sorted.sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "ar"));
+  } else if (LAST_ACTIVITY_SORTS[sort]) {
+    // بلا تاريخ في آخر القائمة بالاتجاهين؛ التعادل يحسمه الرصيد كالترتيب الافتراضي.
+    const { column, dir } = LAST_ACTIVITY_SORTS[sort];
+    const keyed = sorted.map((item) => ({ item, day: customerLastActivitySortDay(item, column) }));
+    keyed.sort((a, b) => {
+      if (a.day === null || b.day === null) {
+        if (a.day !== b.day) return a.day === null ? 1 : -1;
+      } else if (a.day !== b.day) {
+        return dir === "desc" ? b.day - a.day : a.day - b.day;
+      }
+      return customerBalanceSortValue(b.item) - customerBalanceSortValue(a.item);
+    });
+    return keyed.map((k) => k.item);
   } else {
     sorted.sort((a, b) => customerBalanceSortValue(b) - customerBalanceSortValue(a));
   }
@@ -5570,6 +5707,7 @@ function customerBalanceRow(item) {
       <span>الرصيد: ${escapeHtml(formatMoney(customerBalance(item)))} / الحد: ${escapeHtml(limit > 0 ? formatMoney(limit) : "غير محدد")}</span>
       <span>المتبقي من الحد: ${escapeHtml(limit > 0 ? formatMoney(remaining) : "غير محدد")} / الحالة: ${escapeHtml(customerStatusLabel(item.status))} / المصدر: ${escapeHtml(customerLimitSourceLabel(item.limitSource))}</span>
       <span>آخر دفعة: ${escapeHtml(customerLastPaymentAmount(item) > 0 ? formatMoney(customerLastPaymentAmount(item)) : "غير متوفر")} / التاريخ: ${escapeHtml(customerLastPaymentDate(item) ? formatDate(customerLastPaymentDate(item)) : "غير متوفر")}</span>
+      ${customerLastActivityRow(item)}
       <form class="customer-limit-editor" data-form="customer-limit" data-customer-key="${escapeHtml(key)}" data-customer-guid="${escapeHtml(normGuid(item.customerGuid))}" data-customer-name="${escapeHtml(item.name || "")}">
         <label>
           الحد الداخلي
@@ -5583,6 +5721,25 @@ function customerBalanceRow(item) {
       </form>
     </div>
   `;
+}
+
+// في لوحة التفاصيل يظهر التاريخ الكامل نصاً لا تلميحاً فقط — الهاتف لا يعرف التمرير.
+function customerLastActivityMetrics(item) {
+  const activity = customerLastActivity(item);
+  const metric = (label, rows) => rows.map((r) => inventoryMetric(
+    r.tagged ? `${label} (${r.tag})` : label,
+    r.label,
+    r.state === "ok" || r.state === "future" ? r.title : (r.state === "pending" ? "يظهر بعد أول مزامنة بالاستعلام الجديد" : "")
+  )).join("");
+  return metric("آخر فاتورة", activity.invoice) + metric("آخر دفعة (منذ)", activity.payment);
+}
+
+function customerLastActivityRow(item) {
+  const activity = customerLastActivity(item);
+  return `<div class="last-activity-row">
+        <span class="last-activity-col"><small>🧾 آخر فاتورة</small>${customerLastActivityHtml(activity.invoice)}</span>
+        <span class="last-activity-col"><small>💵 آخر دفعة</small>${customerLastActivityHtml(activity.payment)}</span>
+      </div>`;
 }
 
 function customerPaymentRow(payment) {
@@ -5607,7 +5764,7 @@ function customerMovementRow(movement) {
 
 // ====== تقارير PDF (محرّك مشترك) ======
 const REPORT_STYLE = `<style>
-.ozk-rpt{font-family:Tahoma,Arial,sans-serif;color:#221808;background:#fff;direction:rtl;padding:6px 10px;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+.ozk-rpt{font-family:var(--ozk-font,Tahoma,Arial,sans-serif);line-height:var(--ozk-doc-line-height,normal);color:#221808;background:#fff;direction:rtl;padding:6px 10px;-webkit-print-color-adjust:exact;print-color-adjust:exact}
 .ozk-rpt .rhead{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #b8892a;padding-bottom:8px;margin-bottom:12px}
 .ozk-rpt .brand{font-weight:900;font-size:19px}.ozk-rpt .brand small{display:block;font-weight:400;font-size:10px;color:#6b5535}
 .ozk-rpt .rtitle{flex:1;text-align:right;white-space:nowrap;padding-right:14px}.ozk-rpt .rtitle h2{margin:0;font-size:16px;color:#b8892a;white-space:nowrap}.ozk-rpt .rtitle span{font-size:10px;color:#6b5535;white-space:nowrap}
@@ -5704,7 +5861,10 @@ function presentPortablePdf(blob, filename, title) {
   dialog.querySelector("[data-pdf-share]")?.addEventListener("click", async () => {
     try {
       // الاستدعاء يبدأ داخل معالج النقرة نفسه كي تبقى user activation فعالة على iOS.
-      await navigator.share({ files: [file], title: title || filename });
+      // الملف وحده بلا title/text: iOS يشارك أي title/text مرافق للملفات عنصراً
+      // مستقلاً، فيكتبه «حفظ في الملفات» ملف .txt ثانياً بجانب الـPDF. اسم الملف
+      // يصل أصلاً عبر File.name، فلا يُفقد شيء بحذف العنوان.
+      await navigator.share({ files: [file] });
     } catch (error) {
       if (error && error.name === "AbortError") return;
       setNotice("error", "تعذّرت المشاركة. استخدم «تنزيل PDF» أو «فتح PDF».");
@@ -5760,6 +5920,7 @@ async function createPortablePdfBlob(bodyHtml, filename, options = {}) {
   }
 
   try {
+    if (typeof OZK_FONT !== "undefined") await OZK_FONT.ready();
     if (document.fonts && document.fonts.ready) await document.fonts.ready;
     const worker = window.html2pdf().set({
       margin: options.margin || [8, 8, 8, 8],
@@ -5854,6 +6015,11 @@ function trimTrailingPortablePdfDecorations(source, margin) {
 // فيفتح ورقة الطباعة الأصلية للنظام (وفيها «حفظ بصيغة PDF» وزر إلغاء)، ويعمل
 // على iOS وأندرويد وويندوز معاً بلا حاجة للسماح بالنوافذ المنبثقة.
 function printHtmlDocument(html, options = {}) {
+  // مستند الإطار مستقل لا يرث @font-face من الصفحة: الخط الرسمي يُحقن فيه
+  // بعناوين مطلقة، فيصل إلى ورقة الطباعة وإلى نسخة iCloud معاً. يُحقن فقط في
+  // مستند يقرأ --ozk-font: فاتورة الكاشير 80mm لا تقرؤه، فتُطبع وتُؤرشف بايتاً بايتاً
+  // كما كانت (مجمَّدة بقرار المالك).
+  if (typeof OZK_FONT !== "undefined" && String(html).includes("--ozk-font")) html = OZK_FONT.withFaces(html);
   // نسخة iCloud تُطلق قبل فتح ورقة الطباعة كي لا ينتظرها المستخدم إطلاقاً،
   // ولا يؤثر نجاحها أو فشلها على الطباعة نفسها بأي شكل.
   if (options.archive && options.archive.docType) {
@@ -6144,7 +6310,8 @@ async function exportReportPdf(bodyHtml, archive) {
   const docType = archive && archive.docType;
   const title = docType ? archiveDocumentTitle(docType, archive.meta) : "تقرير";
   const filename = `${title}.pdf`;
-  if (docType) archiveToICloud(docType, bodyHtml, archive.meta);
+  // نسخة iCloud مستند مستقل كإطار الطباعة: تحمل @font-face الخط الرسمي معها.
+  if (docType) archiveToICloud(docType, typeof OZK_FONT !== "undefined" ? OZK_FONT.withFaces(bodyHtml) : bodyHtml, archive.meta);
   if (isHandheldDevice()) {
     try {
       const blob = await createPortablePdfBlob(bodyHtml, filename, { width: BULLETIN_PAGE_WIDTH_PX });
@@ -6732,6 +6899,17 @@ function receivablesPdfMarkup() {
   const withBalance = groups.base
     .sort((a, b) => customerBalanceSortValue(b) - customerBalanceSortValue(a));
   const rowCount = withBalance.length + groups.native.length;
+  // عمودا «آخر فاتورة» و«آخر دفعة» يظهران فقط حين يحمل التقرير أعمدتهما (lastActivity).
+  const withActivity = customerReportHasLastActivity();
+  const activityPdf = (rows) => rows.map((r) => (r.tagged ? `${escapeHtml(r.tag)}: ` : "") + escapeHtml(r.label)
+    + (r.state === "ok" || r.state === "future" ? `<br><small class="muted">${escapeHtml(String(r.value).slice(0, 10))}</small>` : "")).join("<br>");
+  const activityCells = (it) => {
+    if (!withActivity) return "";
+    const a = customerLastActivity(it, true);
+    return `<td>${activityPdf(a.invoice)}</td><td>${activityPdf(a.payment)}</td>`;
+  };
+  const activityBlank = withActivity ? "<td></td><td></td>" : "";
+  const columnCount = withActivity ? 8 : 6;
   // قيمة آخر دفعة تأتي من en000.Credit بعملة الأساس دائماً؛ على صف معروض بعملة
   // أخرى تُوسم بالدولار صراحةً كي لا تُقرأ بعملة الرصيد المجاور.
   const paymentCells = (it, usdLabel = "") => {
@@ -6746,6 +6924,7 @@ function receivablesPdfMarkup() {
     return `<tr><td>${idx + 1}</td><td>${escapeHtml(it.name || "")}</td>`
       + `<td class="deb">${isDebit ? escapeHtml(formatMoney(bal)) : "—"}</td>`
       + `<td class="cred">${isDebit ? "—" : escapeHtml(formatMoney(Math.abs(bal)))}</td>`
+      + activityCells(it)
       + paymentCells(it);
   }).join("");
   const nativeRows = groups.native.map(({ item: it, amount, currency }, idx) => {
@@ -6753,22 +6932,23 @@ function receivablesPdfMarkup() {
     return `<tr><td>${withBalance.length + idx + 1}</td><td>${escapeHtml(it.name || "")}</td>`
       + `<td class="deb">${amount > 0 ? text : "—"}</td>`
       + `<td class="cred">${amount > 0 ? "—" : text}</td>`
+      + activityCells(it)
       + paymentCells(it, " $");
   }).join("");
   const nativeTotalRows = [...groups.nativeTotals].map(([currency, t]) =>
     `<tr class="closing"><td></td><td>الإجمالي بـ${escapeHtml(currency)} (${escapeHtml(t.debitCustomers + t.creditCustomers)} زبون)</td>`
       + `<td class="deb">${escapeHtml(formatMoney(t.debit))}</td>`
-      + `<td class="cred">${escapeHtml(formatMoney(t.credit))}</td><td></td><td></td></tr>`).join("");
+      + `<td class="cred">${escapeHtml(formatMoney(t.credit))}</td>${activityBlank}<td></td><td></td></tr>`).join("");
   const nativeCards = [...groups.nativeTotals].map(([currency, t]) =>
     `<div class="rcard"><div class="v red">${escapeHtml(formatMoney(t.debit - t.credit))} ${escapeHtml(currency)}</div><div class="l">صافي حسابات ${escapeHtml(currency)} بعملتها (مدين ${escapeHtml(t.debitCustomers)} · دائن ${escapeHtml(t.creditCustomers)})</div></div>`).join("");
   const rows = rowCount
     ? baseRows
       + `<tr class="closing"><td></td><td>الإجمالي بالدولار (${escapeHtml(withBalance.length)} زبون)</td>`
       + `<td class="deb">${escapeHtml(formatMoney(totalDebit))}</td>`
-      + `<td class="cred">${escapeHtml(formatMoney(totalCredit))}</td><td></td><td></td></tr>`
+      + `<td class="cred">${escapeHtml(formatMoney(totalCredit))}</td>${activityBlank}<td></td><td></td></tr>`
       + nativeRows
       + nativeTotalRows
-    : `<tr><td colspan="6" class="muted">لا يوجد زبائن أصحاب أرصدة</td></tr>`;
+    : `<tr><td colspan="${columnCount}" class="muted">لا يوجد زبائن أصحاب أرصدة</td></tr>`;
   const settledNote = groups.settled
     ? `<p class="muted" style="margin:8px 0 0">${escapeHtml(groups.settled)} حساب بعملة غير الدولار مسدَّد بعملته (أقل من ${escapeHtml(RECEIVABLES_NATIVE_SETTLED_BELOW)} بعملة الحساب) فلا يُعرض ذمة؛ الباقي عليه بالدولار فرق صرف فقط.</p>`
     : "";
@@ -6783,7 +6963,7 @@ function receivablesPdfMarkup() {
     </div>
     <div class="sec">أرصدة الزبائن — المدين والدائن (${escapeHtml(rowCount)} زبون)</div>
     <table>
-      <thead><tr><th>#</th><th>الزبون</th><th>مدين (عليه)</th><th>دائن (له)</th><th>تاريخ آخر دفعة</th><th>قيمة آخر دفعة</th></tr></thead>
+      <thead><tr><th>#</th><th>الزبون</th><th>مدين (عليه)</th><th>دائن (له)</th>${withActivity ? "<th>آخر فاتورة</th><th>آخر دفعة (منذ)</th>" : ""}<th>تاريخ آخر دفعة</th><th>قيمة آخر دفعة</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
     ${settledNote}
@@ -7011,17 +7191,24 @@ const INVENTORY_PACK_SAFETY_PX = 10;
 //  - print (اللابتوب): ورقة الطباعة الأصلية، @page{size:A4;margin:10mm} فتصير
 //    منطقة المحتوى 190mm × 277mm، وبـ96dpi تساوي 718.1 × 1046.9 بكسل CSS.
 //    حشوة .ozk-rpt صفر هنا (@media print داخل INVENTORY_REPORT_STYLE).
-//  - canvas (الهاتف عبر html2pdf): الحاوية 794px وهامش 8mm لكل جهة، أي أن عرض
-//    794px يُرسم داخل 194mm فيصير المقياس 794/194 بكسل لكل مم، والارتفاع المفيد
-//    281mm. حشوة .ozk-rpt (6px 10px) تبقى فعّالة لأن html2canvas يرسم ضمن
-//    media=screen لا print، فتُخصم من العرض والارتفاع معاً.
+//  - canvas (الهاتف عبر html2pdf): html2pdf **لا** يرسم الحاوية بعرضها (794px).
+//    `toContainer()` ينسخ المصدر داخل حاوية بعرض المنطقة الداخلية للصفحة نفسها:
+//    194mm (A4 ناقص هامش 8mm لكل جهة) بـ96dpi، أي floor(733.2) = 733px، ثم
+//    يقطع الـcanvas صفحاتٍ ارتفاعها floor(عرض × 281/194) ≈ 1061px. قيس فعلياً
+//    (pageSize.inner.px = {width:733,height:1062}). الافتراض القديم (794px و
+//    1138px) جعل كل صفحة مُعبَّأة أطول من ورقتها بنحو 75px وأعمدتها أعرض من
+//    الحقيقة (فالأسماء تلتفّ أكثر عند الرسم)، فيفيض ذيل كل صفحة إلى ورقة جديدة،
+//    ثم يدفع break-after:page الصفحة التالية لورقة أخرى: 4 صفحات مُعبَّأة كانت
+//    تخرج 8 أوراق نصفها شبه فارغ. حشوة .ozk-rpt (6px 10px) تبقى فعّالة لأن
+//    html2canvas يرسم ضمن media=screen لا print، فتُخصم من العرض والارتفاع معاً.
 function inventoryPageGeometry(mode) {
   if (mode === "canvas") {
-    const containerWidthPx = 794;
-    const pxPerMm = containerWidthPx / (210 - 8 * 2);
+    const innerWidthMm = 210 - 8 * 2;
+    const innerHeightMm = 297 - 8 * 2;
+    const containerWidthPx = Math.floor(innerWidthMm * 96 / 25.4);
     return {
       contentWidthPx: containerWidthPx - 10 * 2,
-      pageHeightPx: (297 - 8 * 2) * pxPerMm - 6 * 2
+      pageHeightPx: Math.floor(containerWidthPx * innerHeightMm / innerWidthMm) - 6 * 2
     };
   }
   const pxPerMm = 96 / 25.4;
@@ -7564,6 +7751,9 @@ async function exportInventoryReportPdf() {
     return;
   }
   const amanat = await loadAmanatWarehouseSheet(items);
+  // التقسيم إلى صفحات يقيس النص في مستند التطبيق: القياس بخط احتياطي ثم الطباعة
+  // بـCairo يغيّر لفّ الأسماء فتنكسر الأعمدة.
+  if (typeof OZK_FONT !== "undefined") await OZK_FONT.ready();
   const exported = await exportReportPdf(
     inventoryReportPdfMarkup(amanat),
     { docType: "stock_report", meta: { date: todayIsoDate() } }
@@ -7739,6 +7929,7 @@ function customerDetailsPanel(item) {
         ${inventoryMetric("الحد المسموح", customerLimit(item) > 0 ? formatMoney(customerLimit(item)) : "غير محدد", customerLimitSourceLabel(item.limitSource))}
         ${inventoryMetric("المتبقي من الحد", customerLimit(item) > 0 ? formatMoney(customerRemainingLimit(item)) : "غير محدد", "من الحد الفعال")}
         ${inventoryMetric("آخر دفعة", customerLastPaymentAmount(item) > 0 ? formatMoney(customerLastPaymentAmount(item)) : "غير متوفر", customerLastPaymentDate(item) ? formatDate(customerLastPaymentDate(item)) : "لا يوجد تاريخ")}
+        ${customerLastActivityMetrics(item)}
       </div>
 
       ${state.session ? `
@@ -7891,6 +8082,10 @@ function customerBalanceSection(report) {
             <option value="balanceDesc" ${state.customerSort === "balanceDesc" ? "selected" : ""}>أعلى رصيد أولاً</option>
             <option value="remainingAsc" ${state.customerSort === "remainingAsc" ? "selected" : ""}>الأقرب للحد أولاً</option>
             <option value="nameAsc" ${state.customerSort === "nameAsc" ? "selected" : ""}>الاسم أبجدياً</option>
+            <option value="lastInvoiceDesc" ${state.customerSort === "lastInvoiceDesc" ? "selected" : ""}>آخر فاتورة: الأحدث أولاً</option>
+            <option value="lastInvoiceAsc" ${state.customerSort === "lastInvoiceAsc" ? "selected" : ""}>آخر فاتورة: الأقدم أولاً</option>
+            <option value="lastPaymentDesc" ${state.customerSort === "lastPaymentDesc" ? "selected" : ""}>آخر دفعة: الأحدث أولاً</option>
+            <option value="lastPaymentAsc" ${state.customerSort === "lastPaymentAsc" ? "selected" : ""}>آخر دفعة: الأقدم أولاً</option>
           </select>
         </label>
       </div>
@@ -9644,7 +9839,7 @@ function salesInvoicePdfMarkup(data) {
 
   return `
   <div dir="rtl" style="width:754px;padding:20px;background:#ffffff;color:#241f18;
-       font-family:'Segoe UI',Tahoma,Arial,sans-serif">
+       font-family:var(--ozk-font,'Segoe UI',Tahoma,Arial,sans-serif);line-height:var(--ozk-doc-line-height,normal)">
     ${salesDraftBannerHtml(data.invNo)}
     <div class="pdf-head" style="display:flex;justify-content:space-between;align-items:flex-start;
          border-bottom:2px solid #8a6d3b;padding-bottom:10px;margin-bottom:12px;${pdfRowStyle}">
@@ -9825,6 +10020,7 @@ async function saveSalesInvoicePdf() {
   const keepScrollY = window.scrollY || 0;
   try {
     window.scrollTo(0, 0);
+    if (typeof OZK_FONT !== "undefined") await OZK_FONT.ready();
     // دقة أقل على الهاتف: المقياس 2 يستهلك ذاكرة كبيرة على iOS.
     const worker = window.html2pdf().set({
       margin: [6, 6, 6, 6],
@@ -9902,7 +10098,8 @@ async function saveSalesInvoicePdf() {
     // انتظار التوليد) نسقط إلى التنزيل المباشر.
     if (navigator.canShare && navigator.canShare({ files: [file] })) {
       try {
-        await navigator.share({ files: [file], title: `فاتورة مبيعات ${invNo}` });
+        // الملف وحده: title مرافق يُحفظ على iOS ملف .txt ثانياً (راجع presentPortablePdf).
+        await navigator.share({ files: [file] });
         setNotice("success", `تم تجهيز الفاتورة ${invNo} PDF ومشاركتها.`);
         render();
         return;
@@ -10130,7 +10327,7 @@ function printSalesInvoice() {
 <title>فاتورة مبيعات ${invNo}</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: 'Segoe UI', Tahoma, Arial, sans-serif; font-size: 13px; color: #1a1a1a; background: #fff; padding: 40px; direction: rtl; }
+  body { font-family: var(--ozk-font, 'Segoe UI', Tahoma, Arial, sans-serif); line-height: var(--ozk-doc-line-height, normal); font-size: 13px; color: #1a1a1a; background: #fff; padding: 40px; direction: rtl; }
   .inv-head { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 36px; border-bottom: 3px solid #b8860b; padding-bottom: 20px; }
   .inv-company { font-size: 22px; font-weight: 700; color: #5c3d00; letter-spacing: 1px; }
   .inv-company small { display: block; font-size: 12px; font-weight: 400; color: #888; margin-top: 4px; }
@@ -10147,7 +10344,7 @@ function printSalesInvoice() {
   td { padding: 9px 12px; border-bottom: 1px solid #eee; font-size: 13px; }
   tr:nth-child(even) td { background: #fdf9f3; }
   .col-num { width: 36px; text-align: center; color: #aaa; }
-  .col-price, .col-total { text-align: left; direction: ltr; font-family: monospace; }
+  .col-price, .col-total { text-align: left; direction: ltr; font-family: var(--ozk-font, monospace); font-variant-numeric: tabular-nums; }
   .summary-wrap { display: flex; justify-content: flex-start; }
   .summary-table { width: 320px; margin-bottom: 24px; }
   .summary-table td { border-bottom: 1px solid #eee; }
@@ -11770,7 +11967,7 @@ function printPurchaseInvoice(id) {
 <title>فاتورة مشتريات ${po.publicId}</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: 'Segoe UI', Tahoma, Arial, sans-serif; font-size: 13px; color: #1a1a1a; background: #fff; padding: 40px; direction: rtl; }
+  body { font-family: var(--ozk-font, 'Segoe UI', Tahoma, Arial, sans-serif); line-height: var(--ozk-doc-line-height, normal); font-size: 13px; color: #1a1a1a; background: #fff; padding: 40px; direction: rtl; }
   .inv-head { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 36px; border-bottom: 3px solid #b8860b; padding-bottom: 20px; }
   .inv-company { font-size: 22px; font-weight: 700; color: #5c3d00; letter-spacing: 1px; }
   .inv-company small { display: block; font-size: 12px; font-weight: 400; color: #888; margin-top: 4px; }
@@ -11787,7 +11984,7 @@ function printPurchaseInvoice(id) {
   td { padding: 9px 12px; border-bottom: 1px solid #eee; font-size: 13px; }
   tr:nth-child(even) td { background: #fdf9f3; }
   .col-num { width: 36px; text-align: center; color: #aaa; }
-  .col-price, .col-total { text-align: left; direction: ltr; font-family: monospace; }
+  .col-price, .col-total { text-align: left; direction: ltr; font-family: var(--ozk-font, monospace); font-variant-numeric: tabular-nums; }
   .total-row td { border-top: 2px solid #b8860b; font-weight: 700; font-size: 14px; background: #faf7f0; }
   .pay-row td { font-size: 12px; color: #555; }
   .notes { font-size: 12px; color: #666; margin-bottom: 28px; padding: 10px 14px; border-right: 3px solid #b8860b; background: #fdfaf5; }

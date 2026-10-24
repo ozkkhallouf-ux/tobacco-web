@@ -2,8 +2,9 @@
 
 ## الحالة الحالية
 
-**المرحلة 2: كود فقط على فرع ومسودة PR — غير مفعَّل وغير منشور.** لا مهمة مجدولة تشغّل الوكيل،
-والهجرة `supabase/proposed/18-ameen-invoice-events.sql` غير مطبَّقة على الإنتاج، والمزامنة القائمة
+**المرحلة 2: الكود على main (#336) والهجرة مطبَّقة — الإرسال غير مفعَّل.** لا مهمة مجدولة تشغّل الوكيل،
+والهجرة `supabase/proposed/18-ameen-invoice-events.sql` مطبَّقة على الإنتاج منذ 2026-10-22 ومسجَّلة بالإصدار
+`20261022034859` (نسخة مطابقة حرفياً في `supabase/migrations/`)؛ الجداول فارغة إلى أن يُفعَّل الإرسال، والمزامنة القائمة
 (تقرير `ameen_customer_invoices` في `inventory_reports` عبر `tools/push-customer-invoices.ps1`) لم تُمسّ.
 
 الهدف: فاتورة تُنشأ أو تُعدَّل أو تُحذف أو يُلغى ترحيلها في الأمين تصل الموقع خلال ثوانٍ، وتعديلها
@@ -92,11 +93,13 @@ AmnDb002 (قراءة فقط، LOCK_TIMEOUT 3000، بلا NOLOCK)
 ## الفحوص الإلزامية
 
 ```bash
-npm run check                                   # يشمل scripts/check-ameen-invoice-events.mjs
+npm run check                                   # يشمل scripts/check-ameen-invoice-events.mjs و-p1.mjs
 pwsh -NoProfile -File tools/tests/Test-AmeenInvoiceEvents.ps1
 ```
 
 ووظيفة `ps51-compat` في CI تشغّل الاختبار على Windows PowerShell 5.1.
+
+**قبل تفعيل الإرسال:** طبّق `supabase/proposed/21-ameen-invoice-events-concurrent-duplicates.sql` (Codex P1 على #344): بدونه قد يتحوّل حدث سليم إلى Dead Letter إن أعاد الوكيل إرساله بعد مهلة HTTP بينما الطلب الأول ما زال يعمل، أو عند مهلة قفل عابرة. والشرط المسبق `supabase/migrations/20260914125959_is_staff_replay_prerequisite.sql` يجعل السلسلة قابلة لإعادة التشغيل على قاعدة جديدة (no-op على الإنتاج).
 
 ## الخطوة التالية
 

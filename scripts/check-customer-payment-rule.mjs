@@ -239,7 +239,10 @@ test("الأماكن الثلاثة (آخر دفعة، سجل الدفعات، �
   for (const alias of ["last_payment", "recent_payments", "payments_window"]) {
     const body = apply(alias);
     assert.match(body, /en\.GUID in \(select pl\.GUID from payment_lines pl\)/, `${alias} لا يستعمل payment_lines`);
-    assert.match(body, /acp\.Name = N'الموردون' or en\.GUID in/, `${alias} غيّر منطق الموردين`);
+    // الزبون على payment_lines، والمورد (الأب المباشر الموردون) على supplier_payment_lines —
+    // لا «كل دائن» كما كان (كان يعدّ فواتير الشراء دفعات؛ check-receivables-last-activity).
+    assert.match(body, /\(coalesce\(acp\.Name, N''\) <> N'الموردون' and coalesce\(en\.Credit, 0\) > 0 and en\.GUID in \(select pl\.GUID from payment_lines pl\)\)/, `${alias} غيّر منطق الزبائن`);
+    assert.match(body, /or \(acp\.Name = N'الموردون' and en\.GUID in \(select sp\.GUID from supplier_payment_lines sp\)\)/, `${alias} غيّر منطق الموردين`);
   }
   assert.doesNotMatch(apply("recent_movements"), /payment_lines/, "آخر الحركات ليست دفعات — يجب ألا تُصفّى بقاعدة الدفعة");
 });
@@ -258,7 +261,8 @@ test("ameen-daily-summary.ps1 يحمل الكتلة نفسها حرفياً وي
   assert.equal(ruleBlock(dailySummaryPs, "ameen-daily-summary.ps1"), balancesBlock, "الكتلة في ملخص اليوم انحرفت عن استعلام الأرصدة");
   const ps = dailySummaryPs.replace(/\r\n/g, "\n");
   assert.match(ps, /left join payment_lines pl on pl\.GUID = en\.GUID/);
-  assert.match(ps, /max\(case when coalesce\(en\.Credit, 0\) > 0 and \(acp\.Name = N'الموردون' or pl\.GUID is not null\) then en\.Date end\) as last_payment_date/);
+  assert.match(ps, /max\(case when \(coalesce\(acp\.Name, N''\) <> N'الموردون' and coalesce\(en\.Credit, 0\) > 0 and pl\.GUID is not null\)\s+or \(acp\.Name = N'الموردون' and sp\.GUID is not null\) then en\.Date end\) as last_payment_date/);
+  assert.match(ps, /left join supplier_payment_lines sp on sp\.GUID = en\.GUID/);
 });
 
 // ── «دفعات اليوم» (tools/push-daily-movement.ps1) ─────────────────────────────
