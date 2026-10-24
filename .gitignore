@@ -65,3 +65,9 @@ tasks/*.xml
 # أُدخل هذا الملف سهواً في PR #190 بـ`git add -A` ثم أُزيل. الاستثناء هنا يمنع
 # تكراره: أي `add -A` من جذر المستودع كان يبتلعه بلا أن ينتبه أحد.
 /.codex/
+
+# عامل أرشفة Google Drive: الإعداد المحلي وملفات العميل والأسرار والبيانات خارج Git
+tools/drive-invoice-archive/config.json
+tools/drive-invoice-archive/client_secret*.json
+tools/drive-invoice-archive/*.secret
+tools/drive-invoice-archive/data/

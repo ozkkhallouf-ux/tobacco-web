@@ -23,3 +23,7 @@ verify_jwt = false
 
 [functions.stock-priority-alert]
 verify_jwt = false
+
+# عامل أرشفة Google Drive على OZK2026 بلا JWT؛ الحماية سرّ DOCUMENT_ARCHIVE_SECRET يتحقق منه الكود.
+[functions.document-archive-notify]
+verify_jwt = false
