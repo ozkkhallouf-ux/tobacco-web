@@ -186,10 +186,15 @@ assert.match(rollback, /drop view if exists public\.ameen_invoice_daily_totals;/
 assert.match(rollback, /drop function if exists public\.apply_ameen_invoice_events\(jsonb\);/);
 assert.doesNotMatch(rollback, /inventory_reports|is_staff|ameen_price_sync_status/);
 
-// الهجرة مقترحة فقط: لا تدخل سلسلة supabase/migrations.
-for (const f of readdirSync(path.join(root, "supabase/migrations")).filter((n) => n.endsWith(".sql"))) {
-  const sql = readFileSync(path.join(root, "supabase/migrations", f), "utf8");
-  assert.doesNotMatch(sql, /apply_ameen_invoice_events|public\.ameen_invoices\b/, `${f}: المرحلة 2 غير مطبَّقة؛ لا هجرة فعّالة لها`);
+// طُبِّقت 18 على الإنتاج (2026-10-22) وسُجِّلت بإصدار واحد: هجرة وحيدة في السلسلة تحمل هذه الكائنات،
+// ونصّها مطابق حرفياً لما طُبِّق (proposed/18) — أي تعديل لاحق يأتي بهجرة جديدة لا بتحرير هذه.
+{
+  const appliedRel = "supabase/migrations/20261022034859_ameen_invoice_events.sql";
+  const carriers = readdirSync(path.join(root, "supabase/migrations"))
+    .filter((n) => n.endsWith(".sql"))
+    .filter((f) => /apply_ameen_invoice_events|public\.ameen_invoices\b/.test(readFileSync(path.join(root, "supabase/migrations", f), "utf8")));
+  assert.deepEqual(carriers, [path.basename(appliedRel)], "هجرة واحدة فقط تحمل كائنات 18، بالإصدار المسجَّل على الإنتاج");
+  assert.equal(read(appliedRel), read(migrationRel), `${appliedRel}: يجب أن تطابق proposed/18 حرفياً`);
 }
 
 // الوكيل والمكتبة: قراءة فقط، لا تسجيل مهمة، لا إرسال افتراضي.
