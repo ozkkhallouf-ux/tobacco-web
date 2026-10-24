@@ -20,7 +20,7 @@ function createEdge({ url, secret, fetchImpl = globalThis.fetch, host = "" }) {
   async function post(route, init) {
     let res;
     try {
-      res = await fetchImpl(`${base}/${route}`, { method: "POST", ...init, headers: { ...(init.headers || {}), "x-ozk-archive-secret": secret } });
+      res = await fetchImpl(`${base}/${route}`, { method: "POST", ...init, headers: { ...init.headers, "x-ozk-archive-secret": secret } });
     } catch (err) {
       throw new EdgeError("OFFLINE", err && err.code ? String(err.code) : "network");
     }

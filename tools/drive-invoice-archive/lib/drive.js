@@ -71,7 +71,7 @@ function createDrive({ credentials, expectedEmail, fetchImpl = globalThis.fetch,
 
   async function api(method, url, { json, body, headers } = {}, retried = false) {
     if (!access || now() >= accessExpiresAt) await refresh();
-    const init = { method, headers: { Authorization: `Bearer ${access}`, ...(headers || {}) } };
+    const init = { method, headers: { Authorization: `Bearer ${access}`, ...headers } };
     if (json !== undefined) {
       init.headers["Content-Type"] = "application/json; charset=UTF-8";
       init.body = JSON.stringify(json);
