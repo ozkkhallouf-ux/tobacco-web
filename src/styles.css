@@ -2398,6 +2398,12 @@ code {
   flex-wrap: wrap;
 }
 
+.notif-banner-actions {
+  display: inline-flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 /* ── Dashboard ── */
 .status-board.full {
   grid-template-columns: repeat(4, 1fr);
