@@ -311,8 +311,21 @@
     toast(message, "warn");
   }
 
+  // واجهة iCloud مخفية بمفتاح (قرار المالك 2026-10-24: أرشفة Google Drive تحلّ محلّها).
+  // الكود والجسر باقيان كما هما؛ الإخفاء للشارة والتنبيهات فقط، ويُعاد بحذف المفتاح.
+  function uiHidden() {
+    try {
+      var cfg = window.appConfig && window.appConfig.documentArchive;
+      return Boolean(cfg && cfg.icloudUi === false);
+    } catch (e) { return false; }
+  }
+
+  function badgeAllowed() {
+    return isSupportedPlatform() && isEnabled() && !uiHidden();
+  }
+
   function toast(message, kind) {
-    if (typeof document === "undefined" || !document.body) return;
+    if (typeof document === "undefined" || !document.body || uiHidden()) return;
     var existing = document.querySelector("[data-ozk-archive-toast]");
     if (existing) existing.remove();
     var box = document.createElement("div");
@@ -336,7 +349,7 @@
   // بلا أي تفصيل تقني. تظهر على الماك وحده فلا يراها مستخدم ويندوز أو الآيفون.
   function renderStatus(value) {
     if (typeof document === "undefined" || !document.body) return;
-    if (!isSupportedPlatform() || !isEnabled()) {
+    if (!badgeAllowed()) {
       if (statusEl) { statusEl.remove(); statusEl = null; }
       return;
     }

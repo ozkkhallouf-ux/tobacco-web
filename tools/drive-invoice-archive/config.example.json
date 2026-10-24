@@ -1,0 +1,8 @@
+{
+  "mode": "dry-run",
+  "archiveFrom": "2026-11-01",
+  "expectedAccountEmail": "ozkkhallouf@gmail.com",
+  "edgeUrl": "",
+  "stableSeconds": 180,
+  "pollSeconds": 30
+}
