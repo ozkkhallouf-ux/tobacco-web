@@ -99,7 +99,7 @@ pwsh -NoProfile -File tools/tests/Test-AmeenInvoiceEvents.ps1
 
 ووظيفة `ps51-compat` في CI تشغّل الاختبار على Windows PowerShell 5.1.
 
-**قبل تفعيل الإرسال:** طبّق `supabase/proposed/21-ameen-invoice-events-concurrent-duplicates.sql` (Codex P1 على #344): بدونه قد يتحوّل حدث سليم إلى Dead Letter إن أعاد الوكيل إرساله بعد مهلة HTTP بينما الطلب الأول ما زال يعمل، أو عند مهلة قفل عابرة. والشرط المسبق `supabase/migrations/20260914125959_is_staff_replay_prerequisite.sql` يجعل السلسلة قابلة لإعادة التشغيل على قاعدة جديدة (no-op على الإنتاج).
+**مطبَّق 2026-10-24 (`20261024145946`):** `supabase/proposed/21-ameen-invoice-events-concurrent-duplicates.sql` (Codex P1 على #344)، مسجَّل حرفياً في `supabase/migrations/20261024145946_ameen_invoice_events_concurrent_duplicates.sql`؛ التراجع وحدوده في `supabase/proposed/README.md` («التراجع عن 21»). بدونه قد يتحوّل حدث سليم إلى Dead Letter إن أعاد الوكيل إرساله بعد مهلة HTTP بينما الطلب الأول ما زال يعمل، أو عند مهلة قفل عابرة. والشرط المسبق `supabase/migrations/20260914125959_is_staff_replay_prerequisite.sql` يجعل السلسلة قابلة لإعادة التشغيل على قاعدة جديدة (no-op على الإنتاج).
 
 ## الخطوة التالية
 

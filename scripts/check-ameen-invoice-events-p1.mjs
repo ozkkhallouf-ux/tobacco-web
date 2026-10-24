@@ -2,7 +2,8 @@
 // «أحداث فواتير الأمين» — إصلاحا Codex P1 على #344 (75a7fc37)، بلا تعديل ملف 18 المطبَّق.
 //
 //   P1-a: حدث يصل مرتين في اللحظة نفسها (طلبان متزامنان) كان الثاني يُرفض فيعزله الوكيل.
-//         الإصلاح: supabase/proposed/21-ameen-invoice-events-concurrent-duplicates.sql (مقترح، غير مطبَّق).
+//         الإصلاح: supabase/proposed/21-ameen-invoice-events-concurrent-duplicates.sql (مطبَّق على الإنتاج
+//         2026-10-24 بالإصدار 20261024145946، ومسجَّل حرفياً في supabase/migrations).
 //   P1-b: إعادة تشغيل السلسلة على قاعدة جديدة تقف عند 18 لغياب public.is_staff().
 //         الإصلاح: supabase/migrations/20260914125959_is_staff_replay_prerequisite.sql (رفض افتراضي، no-op
 //         حيث توجد الدالة كالإنتاج).
@@ -31,6 +32,9 @@ const m18 = read(m18Rel), m21 = read(m21Rel), r21 = read(r21Rel), stub = read(st
 // ── ١) عقود ساكنة ─────────────────────────────────────────────────────────────────────────────
 // ملف 18 كما طُبّق على الإنتاج 2026-10-22 (الإصدار 20261022034859) — لا يُمسّ.
 assert.equal(sha256(readFileSync(path.join(root, m18Rel), "utf8")), "f7c6e491b97d1e00df7f549d0cf7e1543f0280cce7f0fa73346c0500fbb16c79", "proposed/18 يجب أن يبقى مطابقاً للنسخة المطبَّقة");
+// ملف 21 كما طُبّق على الإنتاج 2026-10-24 (الإصدار 20261024145946) وتراجعه — لا يُمسّان.
+assert.equal(sha256(readFileSync(path.join(root, m21Rel), "utf8")), "88b407c11341cf2f2c77ab8e7b71a14c83abc8ecf44da1a08361fe2da6bab528", "proposed/21 يجب أن يبقى مطابقاً للنسخة المطبَّقة");
+assert.equal(sha256(readFileSync(path.join(root, r21Rel), "utf8")), "bcc4526055e41a84c86f73362e93a767bf21d17bfa7761f6115db52c53a1883e", "21-rollback يجب أن يبقى مطابقاً للنسخة المختبرة");
 
 const code = (s) => s.replace(/--.*$/gm, "");
 const c21 = code(m21);
