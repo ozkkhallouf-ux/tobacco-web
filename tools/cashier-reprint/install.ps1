@@ -1,10 +1,12 @@
 ﻿# تثبيت «OZK - إعادة طباعة فاتورة كاشير» أو إزالته. يُشغَّل بصلاحية مدير بموافقة المالك.
 # لا يلمس جسر الطباعة التلقائية ولا مهمته ولا state.json ولا الطابعات ولا أداة A4.
 #
-#   powershell -File install.ps1 -DesktopUser OZKKH            نسخ الملفات إلى ProgramData وإنشاء الاختصار
+#   powershell -File install.ps1 -DesktopUser OZKKH                 جهاز الطابعة (OZKUSER): نسخ الملفات وإنشاء الاختصار
+#   powershell -File install.ps1 -DesktopUser LOQ -Mode remote      جهاز بلا طابعة (OZK2026): يرسل الطلب إلى OZKUSER
 #   powershell -File install.ps1 -DesktopUser OZKKH -Remove    إزالة الاختصار وحده (السجل والإعداد يبقيان)
 param(
     [Parameter(Mandatory = $true)][string]$DesktopUser,
+    [ValidateSet("local", "remote")][string]$Mode = "local",
     [switch]$Remove
 )
 $ErrorActionPreference = 'Stop'
@@ -36,12 +38,14 @@ if ($Remove) {
 }
 
 New-Item -ItemType Directory -Force -Path $AppDir | Out-Null
-foreach ($file in @('cashier-reprint-lib.ps1', 'cashier-reprint.ps1', 'cashier-reprint-ui.ps1', 'set-sql-secret.ps1', 'config.example.json', 'README.md')) {
+foreach ($file in @('cashier-reprint-lib.ps1', 'cashier-reprint.ps1', 'cashier-reprint-ui.ps1', 'set-sql-secret.ps1', 'config.example.json', 'config.remote.example.json', 'README.md')) {
     Copy-Item -Force -LiteralPath (Join-Path $SourceDir $file) -Destination (Join-Path $AppDir $file)
 }
 $configPath = Join-Path $Root 'config.json'
 if (-not (Test-Path -LiteralPath $configPath)) {
-    Copy-Item -LiteralPath (Join-Path $SourceDir 'config.example.json') -Destination $configPath
+    $example = 'config.example.json'
+    if ($Mode -eq 'remote') { $example = 'config.remote.example.json' }
+    Copy-Item -LiteralPath (Join-Path $SourceDir $example) -Destination $configPath
     "CONFIG_CREATED: $configPath"
 } else {
     "CONFIG_KEPT: $configPath"

@@ -159,10 +159,10 @@ $printButton.Add_Click({
         }
         if ($found.LastReprintAt) {
             $lines.Add("")
-            $lines.Add("طُبعت يدوياً من قبل على هذا الجهاز: $($found.LastReprintAt)")
+            $lines.Add("أُعيدت طباعتها يدوياً من قبل (طلب من $($found.LastReprintFrom)): $($found.LastReprintAt)")
         }
         $lines.Add("")
-        $lines.Add("هل تريد طباعة نسخة على طابعة الكاشير؟")
+        $lines.Add("هل تريد طباعة نسخة على طابعة الكاشير في $($found.Host)؟")
         $answer = [Windows.Forms.MessageBox]::Show(($lines -join "`n"), "تأكيد الطباعة",
             [Windows.Forms.MessageBoxButtons]::YesNo, [Windows.Forms.MessageBoxIcon]::Question,
             [Windows.Forms.MessageBoxDefaultButton]::Button2, [Windows.Forms.MessageBoxOptions]::RtlReading)
@@ -174,11 +174,11 @@ $printButton.Add_Click({
         $form.Refresh()
         $printArgs = @("-Mode", "Print", "-InvoiceNumber", [string]$number, "-InvoiceDate", [string]$inv.Date, "-RequestId", $requestId)
         $result = Invoke-ReprintCli $printArgs
-        switch ([string]$result.Status) {
-            "printed" { Set-Status ([string]$result.Message) "ok" }
-            "uncertain" { Set-Status ([string]$result.Message) "warn" }
-            default { Set-Status ([string]$result.Message) "error" }
-        }
+        # «sent» = أُنشئت مهمة طباعة؛ التأكيد بعدها هو ما رآه طابور Windows فقط، لا دليل ورقي.
+        $status = [string]$result.Status
+        if ($status -eq "sent" -and [string]$result.Confirmation -eq "spooler_completed") { Set-Status ([string]$result.Message) "ok" }
+        elseif ($status -eq "sent" -or $status -eq "uncertain" -or $status -eq "unknown" -or $status -eq "duplicate_request") { Set-Status ([string]$result.Message) "warn" }
+        else { Set-Status ([string]$result.Message) "error" }
     } catch {
         Set-Status ("تعذّرت العملية: " + [string]$_.Exception.Message) "error"
     } finally {
@@ -188,6 +188,9 @@ $printButton.Add_Click({
         $numberBox.Enabled = $true
         $printButton.Enabled = $true
         $script:busy = $false
+        # جاهز لرقم فاتورة جديد مباشرة: الكتابة تستبدل الرقم السابق.
+        $numberBox.Focus()
+        $numberBox.SelectAll()
     }
 })
 

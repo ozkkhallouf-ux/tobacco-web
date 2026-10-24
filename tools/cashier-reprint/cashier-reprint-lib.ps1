@@ -23,25 +23,50 @@ function Get-CashierDefaultRoot {
 function Read-CashierReprintConfig([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "ملف الإعداد غير موجود: $Path" }
     $raw = Get-Content -Raw -LiteralPath $Path -Encoding UTF8 | ConvertFrom-Json
+    $mode = "local"
+    if ($null -ne $raw.PSObject.Properties["mode"]) { $mode = ([string]$raw.mode).Trim().ToLowerInvariant() }
+    if ($mode -ne "local" -and $mode -ne "remote") { throw "الإعداد mode يجب أن يكون local أو remote." }
     $config = [ordered]@{
+        mode = $mode
         bridgeScriptPath = [string]$raw.bridgeScriptPath
         expectedBridgeSha256 = ([string]$raw.expectedBridgeSha256).Trim().ToLowerInvariant()
         printerName = [string]$raw.printerName
         bridgeTimeoutSeconds = 120
         recentReprintWarningSeconds = 120
         newInvoiceWarningSeconds = 120
+        jobWatchSeconds = 20
+        remoteHost = ""
+        remoteUser = ""
+        remotePort = 22
+        remoteKeyPath = ""
+        remoteKnownHostsPath = ""
+        remoteTimeoutSeconds = 180
+        remoteExpectedHostName = ""
     }
-    foreach ($name in @("bridgeTimeoutSeconds", "recentReprintWarningSeconds", "newInvoiceWarningSeconds")) {
+    foreach ($name in @("bridgeTimeoutSeconds", "recentReprintWarningSeconds", "newInvoiceWarningSeconds", "jobWatchSeconds", "remotePort", "remoteTimeoutSeconds")) {
         if ($null -ne $raw.PSObject.Properties[$name]) { $config[$name] = [int]$raw.$name }
     }
-    # المسار قد يحمل %LOCALAPPDATA% لأن الجسر مثبّت داخل ملف المستخدم نفسه.
-    $config.bridgeScriptPath = [Environment]::ExpandEnvironmentVariables($config.bridgeScriptPath)
-    if ([string]::IsNullOrWhiteSpace($config.bridgeScriptPath)) { throw "الإعداد bridgeScriptPath فارغ." }
-    if ($config.expectedBridgeSha256 -notmatch '^[0-9a-f]{64}$') { throw "الإعداد expectedBridgeSha256 ليس بصمة SHA256 صحيحة." }
+    foreach ($name in @("remoteHost", "remoteUser", "remoteKeyPath", "remoteKnownHostsPath", "remoteExpectedHostName")) {
+        if ($null -ne $raw.PSObject.Properties[$name]) { $config[$name] = [Environment]::ExpandEnvironmentVariables([string]$raw.$name) }
+    }
     if ($config.printerName -cne $script:CashierPrinterName) {
         throw "طابعة الكاشير الوحيدة المسموحة هي '$($script:CashierPrinterName)'."
     }
-    if ($config.bridgeTimeoutSeconds -lt 30 -or $config.bridgeTimeoutSeconds -gt 600) { throw "bridgeTimeoutSeconds خارج المدى 30–600." }
+    if ($mode -eq "local") {
+        # المسار قد يحمل %LOCALAPPDATA% لأن الجسر مثبّت داخل ملف المستخدم نفسه.
+        $config.bridgeScriptPath = [Environment]::ExpandEnvironmentVariables($config.bridgeScriptPath)
+        if ([string]::IsNullOrWhiteSpace($config.bridgeScriptPath)) { throw "الإعداد bridgeScriptPath فارغ." }
+        if ($config.expectedBridgeSha256 -notmatch '^[0-9a-f]{64}$') { throw "الإعداد expectedBridgeSha256 ليس بصمة SHA256 صحيحة." }
+        if ($config.bridgeTimeoutSeconds -lt 30 -or $config.bridgeTimeoutSeconds -gt 600) { throw "bridgeTimeoutSeconds خارج المدى 30–600." }
+    } else {
+        if ($config.remoteHost -notmatch '^[A-Za-z0-9.-]{1,253}$') { throw "الإعداد remoteHost غير صالح." }
+        if ($config.remoteUser -notmatch '^[A-Za-z0-9._-]{1,64}$') { throw "الإعداد remoteUser غير صالح." }
+        if ($config.remoteExpectedHostName -notmatch '^[A-Za-z0-9-]{1,15}$') { throw "الإعداد remoteExpectedHostName مطلوب (اسم جهاز الطابعة)." }
+        if ([string]::IsNullOrWhiteSpace($config.remoteKeyPath) -or [string]::IsNullOrWhiteSpace($config.remoteKnownHostsPath)) {
+            throw "الوضع البعيد يتطلب remoteKeyPath وremoteKnownHostsPath (مفتاح مقيَّد وبصمة الجهاز المعروفة)."
+        }
+        if ($config.remoteTimeoutSeconds -lt 30 -or $config.remoteTimeoutSeconds -gt 600) { throw "remoteTimeoutSeconds خارج المدى 30–600." }
+    }
     return [pscustomobject]$config
 }
 
@@ -262,7 +287,7 @@ function Read-CashierReprintLog([string]$Root) {
 
 # آخر طباعة يدوية ناجحة لنفس الفاتورة على هذا الجهاز (للتنبيه فقط، لا للمنع).
 function Get-CashierLastReprint([string]$Root, [string]$InvoiceGuid) {
-    $hits = @(Read-CashierReprintLog $Root | Where-Object { $_.event -eq "reprint_printed" -and $_.invoiceGuid -eq $InvoiceGuid })
+    $hits = @(Read-CashierReprintLog $Root | Where-Object { $_.event -eq "reprint_sent" -and $_.invoiceGuid -eq $InvoiceGuid })
     if ($hits.Count -eq 0) { return $null }
     return $hits[$hits.Count - 1]
 }
@@ -364,6 +389,27 @@ function Invoke-CashierBridgeProcess($Config, [int]$Number, [string]$Date) {
     return [pscustomobject]@{ ExitCode = $exitCode; Output = $output; TimedOut = $timedOut }
 }
 
+# ── تأكيد ما بعد الإرسال: ما يمكن إثباته من طابور Windows فقط ───────────────────
+# spooler_completed: المهمة غادرت الطابور بلا خطأ (سلّمها Windows للطابعة؛ ليس دليلاً ورقياً).
+# printer_error: المهمة عالقة بحالة خطأ (ورق، غطاء، انقطاع USB…).
+# queued: ما زالت في الطابور عند انتهاء المراقبة.
+# unknown: تعذّرت قراءة الطابور.
+function Watch-CashierPrintJob($Config, [int]$JobId) {
+    $deadline = (Get-Date).AddSeconds([math]::Max(1, $Config.jobWatchSeconds))
+    try {
+        while ($true) {
+            $job = @(Get-PrintJob -PrinterName $script:CashierPrinterName -ErrorAction Stop | Where-Object { $_.Id -eq $JobId })
+            if ($job.Count -eq 0) { return "spooler_completed" }
+            $state = [string]$job[0].JobStatus
+            if ($state -match '(?i)error|offline|paperout|blocked|usersintervention') { return "printer_error" }
+            if ((Get-Date) -ge $deadline) { return "queued" }
+            Start-Sleep -Milliseconds 500
+        }
+    } catch {
+        return "unknown"
+    }
+}
+
 # ── تدفق الطباعة الكامل ────────────────────────────────────────────────────────
 # $Lookup: scriptblock يأخذ رقم الفاتورة ويعيد صفوف الأمين (حقيقي أو وهمي في الاختبار).
 # $Runner: scriptblock يأخذ (config, number, date) ويعيد {ExitCode, Output, TimedOut}.
@@ -376,9 +422,11 @@ function Invoke-CashierReprint {
         [string]$RequestId,
         [scriptblock]$Lookup,
         [scriptblock]$Runner,
-        [scriptblock]$BridgeCheck = { param($c) Assert-CashierBridgePinned $c }
+        [scriptblock]$BridgeCheck = { param($c) Assert-CashierBridgePinned $c },
+        [scriptblock]$JobWatcher = { param($c, $j) Watch-CashierPrintJob $c $j },
+        [string]$RequestedFrom = $env:COMPUTERNAME
     )
-    $base = [ordered]@{ requestId = $RequestId; invoiceNumber = $Number; invoiceDate = $Date }
+    $base = [ordered]@{ requestId = $RequestId; requestedFrom = $RequestedFrom; invoiceNumber = $Number; invoiceDate = $Date }
 
     function Complete([string]$Status, [string]$Message, $Extra) {
         $entry = [ordered]@{ event = "reprint_$Status" }
@@ -416,7 +464,16 @@ function Invoke-CashierReprint {
         $extra = @{ bridgeSha256 = $bridgeHash; exitCode = $run.ExitCode; reason = $outcome.Reason; printer = $script:CashierPrinterName }
         if ($outcome.Outcome -eq "printed") {
             $extra.jobId = $outcome.JobId
-            return (Complete "printed" "أُرسلت الفاتورة رقم $Number ($($invoice.InvoiceDate)) إلى $($script:CashierPrinterName)." $extra)
+            $confirmation = [string](& $JobWatcher $Config $outcome.JobId)
+            $extra.confirmation = $confirmation
+            $head = "أُرسلت الفاتورة رقم $Number ($($invoice.InvoiceDate)) إلى طابعة الكاشير على $($env:COMPUTERNAME)."
+            switch ($confirmation) {
+                "spooler_completed" { $tail = "سلّمها Windows للطابعة. تأكد من خروج الورقة." }
+                "printer_error" { $tail = "لكن الطابعة أبلغت عن خطأ (ورق أو غطاء أو اتصال). افحصها قبل أي محاولة جديدة." }
+                "queued" { $tail = "ما زالت في طابور الطابعة؛ قد تتأخر. لا تُعد الطلب قبل فحص الطابعة." }
+                default { $tail = "تعذّر التحقق من طابور الطابعة؛ تأكد من خروج الورقة." }
+            }
+            return (Complete "sent" "$head $tail" $extra)
         }
         if ($outcome.Outcome -eq "not_printed") {
             return (Complete "failed" "تعذّرت الطباعة ولم تُرسل أي ورقة ($($outcome.Reason)). يمكنك إعادة المحاولة بأمان." $extra)
@@ -424,5 +481,134 @@ function Invoke-CashierReprint {
         return (Complete "uncertain" "لم يتأكد خروج الورقة (قد تكون طُبعت). افحص الطابعة قبل أي محاولة جديدة." $extra)
     } finally {
         $lock.Dispose()
+    }
+}
+
+# ── حالة طلب سابق (قراءة السجل فقط، بلا أي طباعة) ─────────────────────────────
+# not_received: لم يُسجَّل الطلب على جهاز الطابعة إطلاقاً ⇒ لم يُطبع يقيناً (الحجز يسبق الطباعة).
+# in_progress: سُجّل ولم تصل نتيجته بعد (يعمل الآن أو انقطع أثناء التنفيذ) ⇒ غير مؤكد.
+# غير ذلك: آخر حالة نهائية مسجّلة لهذا المعرّف.
+function Get-CashierRequestStatus([string]$Root, [string]$RequestId) {
+    $parsed = [guid]::Empty
+    if (-not [guid]::TryParse($RequestId, [ref]$parsed)) { throw "معرّف الطلب غير صالح." }
+    $requestFile = Join-Path (Join-Path $Root "requests") ($parsed.ToString("N") + ".json")
+    $id = $parsed.ToString()
+    $final = @(Read-CashierReprintLog $Root | Where-Object { $_.requestId -eq $id -and $_.event -ne "reprint_duplicate_request" })
+    if ($final.Count -gt 0) {
+        $last = $final[$final.Count - 1]
+        return [pscustomobject]@{ Status = ([string]$last.event).Replace("reprint_", ""); Confirmation = [string]$last.confirmation; At = [string]$last.at; Host = [string]$last.host }
+    }
+    if (Test-Path -LiteralPath $requestFile -PathType Leaf) {
+        return [pscustomobject]@{ Status = "in_progress"; Confirmation = ""; At = ""; Host = $env:COMPUTERNAME }
+    }
+    return [pscustomobject]@{ Status = "not_received"; Confirmation = ""; At = ""; Host = $env:COMPUTERNAME }
+}
+
+# ── JSON بأحرف ASCII فقط: يعبر ssh وأي صفحة ترميز دون تشويه العربية ────────────
+function ConvertTo-CashierAsciiJson($Object) {
+    $json = $Object | ConvertTo-Json -Compress -Depth 6
+    $builder = New-Object Text.StringBuilder
+    foreach ($ch in $json.ToCharArray()) {
+        if ([int]$ch -gt 126) { [void]$builder.AppendFormat("\u{0:x4}", [int]$ch) } else { [void]$builder.Append($ch) }
+    }
+    return $builder.ToString()
+}
+
+# ── الأمر البعيد: صيغة ضيقة جداً، وكل ما عداها مرفوض ──────────────────────────
+#   resolve <number> [<yyyy-MM-dd>]
+#   print <number> <yyyy-MM-dd> <request-guid> <requester-host>
+#   status <request-guid>
+function ConvertFrom-CashierRemoteCommand([string]$Text) {
+    $t = ([string]$Text).Trim()
+    $m = [regex]::Match($t, '^resolve (\d{1,9})(?: (\d{4}-\d{2}-\d{2}))?$')
+    if ($m.Success) { return [pscustomobject]@{ Verb = "resolve"; Number = [int]$m.Groups[1].Value; Date = $m.Groups[2].Value; RequestId = ""; From = "" } }
+    $m = [regex]::Match($t, '^print (\d{1,9}) (\d{4}-\d{2}-\d{2}) ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}) ([A-Za-z0-9-]{1,15})$')
+    if ($m.Success) { return [pscustomobject]@{ Verb = "print"; Number = [int]$m.Groups[1].Value; Date = $m.Groups[2].Value; RequestId = $m.Groups[3].Value; From = $m.Groups[4].Value } }
+    $m = [regex]::Match($t, '^status ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$')
+    if ($m.Success) { return [pscustomobject]@{ Verb = "status"; Number = 0; Date = ""; RequestId = $m.Groups[1].Value; From = "" } }
+    throw "أمر بعيد مرفوض."
+}
+
+# يشغّل ssh بمفتاح مقيَّد وبصمة جهاز معروفة (StrictHostKeyChecking=yes)، بلا كلمات سر (BatchMode).
+# النتيجة: {ExitCode, Output, TimedOut, Transport}. Transport=failed حين لم يُنشأ الاتصال أصلاً.
+function Invoke-CashierRemoteCommand($Config, [string]$Command) {
+    $ssh = Join-Path $env:SystemRoot "System32\OpenSSH\ssh.exe"
+    if (-not (Test-Path -LiteralPath $ssh -PathType Leaf)) { throw "عميل OpenSSH غير موجود على هذا الجهاز." }
+    $arguments = @(
+        "-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "PasswordAuthentication=no",
+        "-o", ('UserKnownHostsFile="{0}"' -f $Config.remoteKnownHostsPath), "-o", "ConnectTimeout=8",
+        "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3",
+        "-i", ('"{0}"' -f $Config.remoteKeyPath), "-p", [string]$Config.remotePort,
+        ("{0}@{1}" -f $Config.remoteUser, $Config.remoteHost), ('"{0}"' -f $Command)
+    )
+    $info = New-Object Diagnostics.ProcessStartInfo
+    $info.FileName = $ssh
+    $info.Arguments = ($arguments -join " ")
+    $info.UseShellExecute = $false
+    $info.CreateNoWindow = $true
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::Start($info)
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+    $timedOut = -not $process.WaitForExit($Config.remoteTimeoutSeconds * 1000)
+    if ($timedOut) { try { $process.Kill() } catch { $null = $_ }; [void]$process.WaitForExit(5000) }
+    $exitCode = -1
+    if (-not $timedOut) { $exitCode = $process.ExitCode }
+    $stdout = ""; $stderr = ""
+    try { $stdout = $stdoutTask.Result; $stderr = $stderrTask.Result } catch { $null = $_ }
+    return [pscustomobject]@{ ExitCode = $exitCode; Output = $stdout; Error = $stderr; TimedOut = $timedOut }
+}
+
+function Get-CashierRemoteJson([string]$Output) {
+    $line = @(([string]$Output) -split "`r?`n" | Where-Object { $_.Trim().StartsWith("{") } | Select-Object -Last 1)
+    if ($line.Count -eq 0) { return $null }
+    try { return ($line[0] | ConvertFrom-Json) } catch { return $null }
+}
+
+# طلب طباعة من جهاز بلا طابعة إلى جهاز الطابعة. لا إعادة طباعة تلقائية أبداً:
+# عند انقطاع النتيجة يُسأل جهاز الطابعة عن حالة المعرّف نفسه (قراءة فقط)، والمعرّف المكرر
+# يُرفض هناك، فلا تخرج ورقتان لطلب واحد مهما تكررت المحاولة.
+function Invoke-CashierRemotePrint {
+    param($Config, [string]$Root, [int]$Number, [string]$Date, [string]$RequestId, [scriptblock]$Transport = { param($c, $cmd) Invoke-CashierRemoteCommand $c $cmd })
+    $parsed = [guid]::Empty
+    if (-not [guid]::TryParse($RequestId, [ref]$parsed) -or $parsed -eq [guid]::Empty) { throw "معرّف الطلب غير صالح." }
+    if ($Date -notmatch '^\d{4}-\d{2}-\d{2}$') { throw "الطلب البعيد يتطلب تاريخ الفاتورة المحسوم." }
+    $id = $parsed.ToString()
+    $command = "print $Number $Date $id $($env:COMPUTERNAME)"
+    $log = [ordered]@{ requestId = $id; invoiceNumber = $Number; invoiceDate = $Date; target = $Config.remoteExpectedHostName }
+
+    function Finish([string]$Status, [string]$Message, [string]$Confirmation = "") {
+        $entry = [ordered]@{ event = "remote_$Status" }
+        foreach ($k in $log.Keys) { $entry[$k] = $log[$k] }
+        if ($Confirmation) { $entry.confirmation = $Confirmation }
+        [void](Write-CashierReprintLog $Root ([pscustomobject]$entry))
+        return [pscustomobject]@{ Status = $Status; Message = $Message }
+    }
+
+    $sendError = $null
+    try { $run = & $Transport $Config $command } catch { $sendError = $_; $run = $null }
+    $reply = $null
+    if ($null -ne $run) { $reply = Get-CashierRemoteJson $run.Output }
+    if ($null -ne $reply -and $reply.Host -and $reply.Host -ne $Config.remoteExpectedHostName) {
+        return (Finish "wrong_host" "ردّ جهاز غير متوقع ($($reply.Host)) بدل $($Config.remoteExpectedHostName). لن يُعتمد الرد.")
+    }
+    if ($null -ne $reply -and $reply.Status) {
+        return (Finish ([string]$reply.Status) ([string]$reply.Message) ([string]$reply.Confirmation))
+    }
+
+    # لا رد مفهوم: لا افتراض نجاح ولا فشل. نسأل عن المعرّف نفسه.
+    $status = $null
+    try {
+        $probe = & $Transport $Config "status $id"
+        $status = Get-CashierRemoteJson $probe.Output
+    } catch { $status = $null }
+    if ($null -eq $status -or -not $status.Status -or ($status.Host -and $status.Host -ne $Config.remoteExpectedHostName)) {
+        return (Finish "unknown" "تعذّر الاتصال بجهاز الطابعة $($Config.remoteExpectedHostName)، ولا يمكن تأكيد هل وصل الطلب. لا تعد الطلب قبل فحص الطابعة أو حالة الطلب لاحقاً.")
+    }
+    switch ([string]$status.Status) {
+        "not_received" { return (Finish "not_received" "لم يصل الطلب إلى جهاز الطابعة، فلم يُطبع شيء. يمكنك الضغط على «طباعة» من جديد.") }
+        "in_progress" { return (Finish "unknown" "وصل الطلب إلى جهاز الطابعة ولم تُعرف نتيجته بعد. لا تعد الطلب قبل فحص الطابعة.") }
+        default { return (Finish ([string]$status.Status) "انقطع الاتصال أثناء الطلب. الحالة المسجّلة على جهاز الطابعة: $($status.Status)." ([string]$status.Confirmation)) }
     }
 }

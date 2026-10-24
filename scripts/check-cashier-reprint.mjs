@@ -34,6 +34,19 @@ for (const name of ['CashierInvoiceLookupSql', 'CashierPrincipalProbeSql']) {
   assert.match(lib, new RegExp(`Assert-CashierSelectOnly \\$script:${name}`), `${name} يمر بالحارس قبل الإرسال`);
 }
 
+// الوضع البعيد: ssh بلا كلمات سر وببصمة جهاز معروفة، وصيغة أوامر ضيقة، وطلب طباعة واحد لكل نداء.
+assert.match(lib, /"BatchMode=yes"/, 'ssh بلا كلمات سر');
+assert.match(lib, /"StrictHostKeyChecking=yes"/, 'ssh يرفض جهازاً غير معروف');
+const remotePrint = lib.slice(lib.indexOf('function Invoke-CashierRemotePrint'));
+assert.equal((remotePrint.match(/"print \$Number/g) || []).length, 1, 'أمر print واحد فقط لكل طلب؛ لا إعادة طباعة تلقائية');
+assert.match(lib, /\^resolve \(\\d\{1,9\}\)/, 'صيغة resolve ضيقة');
+for (const remote of ['config.remote.example.json']) {
+  const c = JSON.parse(read(remote));
+  assert.equal(c.mode, 'remote');
+  assert.equal(c.remoteExpectedHostName, 'OZKUSER');
+  assert.ok(!('password' in c) && !JSON.stringify(c).match(/password/i), 'لا كلمات سر في الإعداد');
+}
+
 const config = JSON.parse(read('config.example.json'));
 assert.equal(config.printerName, 'XPRINTER XP-T80Q 80MM');
 assert.match(config.expectedBridgeSha256, /^[0-9a-f]{64}$/);

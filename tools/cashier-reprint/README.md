@@ -19,6 +19,29 @@
    `ozk-print-bridge.ps1 -Mode PrintInvoice -InvoiceType Retail -InvoiceNumber N -InvoiceDate D -ConfirmPhysicalPrint`.
    لذلك يخرج الإيصال بتنسيق الطباعة التلقائية حرفياً.
 
+## الطباعة من جهاز بلا طابعة (OZK2026 ← OZKUSER)
+
+OZK2026 لا يحوي XPRINTER، والجهازان لا يتشاركان طابعة. لذلك يعمل OZK2026 بـ`mode=remote`
+(`config.remote.example.json`): الواجهة نفسها، لكن الحسم والطباعة يجريان **على OZKUSER**:
+
+- النقل عبر ssh القائم على OZKUSER (Meshnet)، بلا منفذ جديد ولا مشاركة ولا خدمة جديدة.
+  مفتاح مخصّص على OZK2026، مسجَّل على OZKUSER بأمر مفروض:
+  ```
+  command="powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\ProgramData\OZK\CashierReprint\app\cashier-reprint.ps1 -Mode Serve",no-port-forwarding,no-agent-forwarding,no-X11-forwarding,no-pty ssh-ed25519 AAAA… ozk2026-cashier-reprint
+  ```
+  فلا يستطيع المفتاح إلا ثلاثة أوامر بصيغة ضيقة: `resolve <رقم> [تاريخ]` و`print <رقم> <تاريخ> <معرّف> <جهاز>`
+  و`status <معرّف>`. كل ما عداها مرفوض.
+- `BatchMode=yes` و`StrictHostKeyChecking=yes` ببصمة OZKUSER المحفوظة، فلا كلمات سر ولا قبول لجهاز
+  منتحل. وأي رد لا يحمل اسم الجهاز المتوقع (`remoteExpectedHostName`) لا يُعتمد.
+- منع التكرار على OZKUSER نفسه: المعرّف يُحجز هناك قبل الطباعة، فإعادة إرسال المعرّف نفسه بسبب
+  الشبكة تُرفض.
+- **انقطاع أثناء الطلب:** لا إعادة طباعة تلقائية. يسأل OZK2026 عن حالة المعرّف نفسه (قراءة فقط):
+  - `not_received`: لم يصل الطلب، فلم يُطبع شيء يقيناً.
+  - `in_progress`: وصل ولم تُعرف نتيجته، فالحالة غير مؤكدة.
+  - أو الحالة النهائية المسجّلة على OZKUSER.
+  - وإن تعذّر السؤال أيضاً: `unknown`.
+- السجلان: OZKUSER يسجّل كل طباعة مع `requestedFrom`، وOZK2026 يسجّل نتيجة كل طلب أرسله.
+
 ## لماذا لا تمسّ الطباعة التلقائية
 
 - لا تقرأ `state.json` ولا تكتبه، ولا تمرّر `-StatePath`، ولا تلمس مهمة `\OZK Print Bridge`
@@ -39,11 +62,12 @@
 
 | الحالة | المعنى |
 |---|---|
-| `printed` | أعاد الجسر رقم مهمة طباعة |
+| `sent` | أعاد الجسر رقم مهمة طباعة. ومعه `confirmation`: `spooler_completed` (غادرت المهمة الطابور بلا خطأ، وهذا ليس دليلاً ورقياً)، أو `printer_error`، أو `queued`، أو `unknown` |
 | `failed` | الخطأ قبل إنشاء مهمة الطباعة يقيناً (SQL، الطابعة غير موجودة، OpenPrinter…). الإعادة آمنة |
 | `uncertain` | الخطأ بعد بدء المهمة، أو مجهول، أو انتهت المهلة. افحص الطابعة قبل الإعادة |
 | `connection_failed` | تعذّر الوصول إلى الأمين. لم يُطبع شيء |
 | `blocked` | الجسر غير موجود أو نسخته غير معتمدة |
+| `not_received` / `unknown` / `remote_unreachable` | للوضع البعيد، راجع القسم أعلاه |
 
 ## السجل
 
@@ -54,10 +78,16 @@
 ## التثبيت (لكل جهاز، بموافقة المالك)
 
 ```
-powershell -File install.ps1 -DesktopUser <user>                # نسخ إلى ProgramData\OZK\CashierReprint\app + اختصار
+powershell -File install.ps1 -DesktopUser <user> [-Mode remote] # نسخ إلى ProgramData\OZK\CashierReprint\app + اختصار
 powershell -File set-sql-secret.ps1 -User <user> -FromManualA4Print   # نسخ سرّ حساب القراءة من أداة A4 على الجهاز نفسه
 powershell -File app\cashier-reprint.ps1 -Mode Health          # فحص بلا طباعة: الجسر والطابعة والاتصال
 ```
+
+للوضع البعيد على OZK2026 يلزم بعد ذلك، وكلها بموافقة:
+- مفتاح ed25519 بلا عبارة مرور في `keys\` (قراءة LOQ وحده).
+- `known_hosts` ببصمة OZKUSER بعد مطابقتها يدوياً.
+- سطر الأمر المفروض أعلاه على OZKUSER.
+- لا سرّ SQL على OZK2026 في هذا الوضع.
 
 الإزالة: `install.ps1 -DesktopUser <user> -Remove`، ثم حذف `C:\ProgramData\OZK\CashierReprint` عند الحاجة.
 

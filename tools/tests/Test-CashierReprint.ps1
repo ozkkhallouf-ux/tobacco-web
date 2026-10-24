@@ -8,6 +8,9 @@ $toolDir = Join-Path $repoRoot "tools\cashier-reprint"
 if (-not (Test-Path -LiteralPath $toolDir)) { $toolDir = Join-Path $repoRoot "tools/cashier-reprint" }
 . (Join-Path $toolDir "cashier-reprint-lib.ps1")
 
+# على غير Windows لا يوجد COMPUTERNAME، والأداة تسجّله وترسله في الأمر البعيد.
+if ([string]::IsNullOrWhiteSpace($env:COMPUTERNAME)) { $env:COMPUTERNAME = "TESTHOST" }
+
 $script:pass = 0
 $script:fail = 0
 function Assert($Name, [bool]$Condition) {
@@ -48,7 +51,7 @@ function New-Runner([int]$ExitCode = 0, [string]$Output = $okOutput, [bool]$Time
 }
 function Invoke-Test($Rows, [int]$Number, [string]$Date = "", [string]$RequestId = ([guid]::NewGuid().ToString()), $Runner = (New-Runner), $Root = (New-Root), $Config = (New-TestConfig)) {
     $r = $Rows
-    return (Invoke-CashierReprint -Config $Config -Root $Root -Number $Number -Date $Date -RequestId $RequestId -Lookup { param($n) return $r }.GetNewClosure() -Runner $Runner)
+    return (Invoke-CashierReprint -Config $Config -Root $Root -Number $Number -Date $Date -RequestId $RequestId -Lookup { param($n) return $r }.GetNewClosure() -Runner $Runner -JobWatcher { param($c, $j) "spooler_completed" })
 }
 
 try {
@@ -90,7 +93,7 @@ try {
     $script:runs.Clear()
     $root = New-Root
     $out = Invoke-Test $new 501 -Root $root
-    Assert "طباعة فاتورة جديدة ⇒ printed" ($out.Status -eq "printed" -and $script:runs.Count -eq 1)
+    Assert "طباعة فاتورة جديدة ⇒ sent" ($out.Status -eq "sent" -and $script:runs.Count -eq 1)
     Assert "الجسر يُستدعى بتاريخ الفاتورة المحسوم" ($script:runs[0].Date -eq "2026-10-24" -and $script:runs[0].Number -eq 501)
 
     $script:runs.Clear()
@@ -98,17 +101,17 @@ try {
     $root = New-Root
     $first = Invoke-Test $new 501 -RequestId $rid -Root $root
     $retry = Invoke-Test $new 501 -RequestId $rid -Root $root
-    Assert "إعادة محاولة تقنية بنفس المعرّف ⇒ duplicate_request بلا طباعة ثانية" ($first.Status -eq "printed" -and $retry.Status -eq "duplicate_request" -and $script:runs.Count -eq 1)
+    Assert "إعادة محاولة تقنية بنفس المعرّف ⇒ duplicate_request بلا طباعة ثانية" ($first.Status -eq "sent" -and $retry.Status -eq "duplicate_request" -and $script:runs.Count -eq 1)
     $again = Invoke-Test $new 501 -Root $root
-    Assert "طلب صريح جديد لفاتورة طُبعت ⇒ يُطبع (منع التكرار الآلي لا يمنعه)" ($again.Status -eq "printed" -and $script:runs.Count -eq 2)
+    Assert "طلب صريح جديد لفاتورة طُبعت ⇒ يُطبع (منع التكرار الآلي لا يمنعه)" ($again.Status -eq "sent" -and $script:runs.Count -eq 2)
     $last = Get-CashierLastReprint $root "a1"
     Assert "آخر طباعة يدوية تُقرأ من السجل للتنبيه" ($null -ne $last -and $last.host -eq $env:COMPUTERNAME)
 
     $script:runs.Clear()
     $out = Invoke-Test $edited 502
-    Assert "فاتورة معدّلة تُطبع ببياناتها الحالية" ($out.Status -eq "printed" -and $out.Details.invoiceGuid -eq "new1")
+    Assert "فاتورة معدّلة تُطبع ببياناتها الحالية" ($out.Status -eq "sent" -and $out.Details.invoiceGuid -eq "new1")
     $out = Invoke-Test $old 77
-    Assert "فاتورة قديمة تُطبع" ($out.Status -eq "printed" -and $script:runs[1].Date -eq "2025-01-15")
+    Assert "فاتورة قديمة تُطبع" ($out.Status -eq "sent" -and $script:runs[1].Date -eq "2025-01-15")
 
     $script:runs.Clear()
     foreach ($case in @(@{ Rows = @(); N = 999; S = "not_found" }, @{ Rows = $twoDates; N = 600; S = "ambiguous" }, @{ Rows = $sameDay; N = 601; S = "ambiguous" }, @{ Rows = $wholesale; N = 700; S = "not_cashier" })) {
@@ -119,7 +122,7 @@ try {
 
     $root = New-Root
     $out = Invoke-CashierReprint -Config (New-TestConfig) -Root $root -Number 501 -RequestId ([guid]::NewGuid().ToString()) `
-        -Lookup { param($n) throw (New-Object System.InvalidOperationException "A network-related error occurred") } -Runner (New-Runner)
+        -Lookup { param($n) throw (New-Object System.InvalidOperationException "A network-related error occurred") } -Runner (New-Runner) -JobWatcher { param($c, $j) "spooler_completed" }
     Assert "فشل الاتصال بالأمين ⇒ connection_failed بلا طباعة" ($out.Status -eq "connection_failed" -and $script:runs.Count -eq 0)
 
     $out = Invoke-Test $new 501 -Runner (New-Runner 1 "Printer queue not found or ambiguous: XPRINTER XP-T80Q 80MM")
@@ -145,13 +148,13 @@ try {
     $lock.Dispose()
     Assert "طلب متزامن لنفس الفاتورة ⇒ busy" ($out.Status -eq "busy" -and $script:runs.Count -eq 0)
     $out = Invoke-Test $new 501 -Root $root
-    Assert "بعد تحرير القفل ⇒ يُطبع" ($out.Status -eq "printed")
+    Assert "بعد تحرير القفل ⇒ يُطبع" ($out.Status -eq "sent")
 
     Assert "معرّف طلب غير صالح ⇒ خطأ" (Throws { Invoke-Test $new 501 -RequestId "not-a-guid" })
 
     # ── السجل ────────────────────────────────────────────────────────────────
     $entries = @(Read-CashierReprintLog $root)
-    $printed = @($entries | Where-Object { $_.event -eq "reprint_printed" })
+    $printed = @($entries | Where-Object { $_.event -eq "reprint_sent" })
     Assert "السجل يحفظ الرقم والتاريخ والجهاز والمستخدم والوقت ومعرّف الطلب" ($printed.Count -eq 1 -and $printed[0].invoiceNumber -eq 501 -and $printed[0].invoiceDate -eq "2026-10-24" -and $printed[0].host -eq $env:COMPUTERNAME -and $printed[0].at -and $printed[0].requestId -and $printed[0].jobId -eq 77)
     Assert "السجل يحفظ المحاولات المرفوضة أيضاً" (@($entries | Where-Object { $_.event -eq "reprint_busy" }).Count -eq 1)
     $logText = [IO.File]::ReadAllText((Join-Path $root "logs\manual-reprints.jsonl".Replace("\", [IO.Path]::DirectorySeparatorChar)))
@@ -177,6 +180,83 @@ try {
     Assert "الأداة لا تمرّر -StatePath ولا تلمس state.json" ($code -notmatch 'StatePath' -and $code -notmatch 'state\.json')
     Assert "الأداة تستدعي الجسر بوضع PrintInvoice ونوع Retail حصراً" ($code -match '"-Mode", "PrintInvoice"' -and $code -match '"-InvoiceType", "Retail"' -and $code -notmatch 'Observe' -and $code -notmatch 'IncludeWholesale')
 
+    # ── التأكيد بعد الإرسال ───────────────────────────────────────────────────
+    $out = Invoke-CashierReprint -Config (New-TestConfig) -Root (New-Root) -Number 501 -RequestId ([guid]::NewGuid().ToString()) `
+        -Lookup { param($n) return @(New-Row "a1" 501 "2026-10-24") } -Runner (New-Runner) -JobWatcher { param($c, $j) "printer_error" }
+    Assert "إرسال مع خطأ طابعة ⇒ sent مع تأكيد printer_error ورسالة تحذير" ($out.Status -eq "sent" -and $out.Details.confirmation -eq "printer_error" -and $out.Message -match "خطأ")
+    $out = Invoke-CashierReprint -Config (New-TestConfig) -Root (New-Root) -Number 501 -RequestId ([guid]::NewGuid().ToString()) `
+        -Lookup { param($n) return @(New-Row "a1" 501 "2026-10-24") } -Runner (New-Runner) -JobWatcher { param($c, $j) "queued" }
+    Assert "مهمة ما زالت في الطابور ⇒ sent/queued لا تأكيد" ($out.Status -eq "sent" -and $out.Details.confirmation -eq "queued")
+
+    # ── الأمر البعيد: صيغة ضيقة ───────────────────────────────────────────────
+    $g = [guid]::NewGuid().ToString()
+    $c1 = ConvertFrom-CashierRemoteCommand "print 501 2026-10-24 $g OZK2026"
+    Assert "أمر print صحيح يُقرأ" ($c1.Verb -eq "print" -and $c1.Number -eq 501 -and $c1.Date -eq "2026-10-24" -and $c1.RequestId -eq $g -and $c1.From -eq "OZK2026")
+    Assert "أمر resolve بلا تاريخ يُقرأ" ((ConvertFrom-CashierRemoteCommand "resolve 77").Verb -eq "resolve")
+    Assert "أمر status يُقرأ" ((ConvertFrom-CashierRemoteCommand "status $g").RequestId -eq $g)
+    foreach ($bad in @("print 501 2026-10-24 $g OZK2026; Remove-Item C:\x", "print 501 2026-10-24 $g", "powershell -c whoami", "resolve -1", "status not-a-guid", "print 501 24-10-2026 $g OZK2026", "", "resolve 1 2026-10-24 extra")) {
+        Assert "أمر مرفوض: [$bad]" (Throws { ConvertFrom-CashierRemoteCommand $bad })
+    }
+    $ascii = ConvertTo-CashierAsciiJson ([pscustomobject]@{ Message = "أُرسلت الفاتورة" })
+    Assert "JSON بأحرف ASCII فقط ويعود عربياً سليماً" ((-not ($ascii -match '[^\x00-\x7e]')) -and (($ascii | ConvertFrom-Json).Message -eq "أُرسلت الفاتورة"))
+
+    # ── محاكاة OZK2026 ← OZKUSER عبر ssh ───────────────────────────────────────
+    $script:serverRoot = New-Root
+    $script:serverConfig = New-TestConfig
+    $script:serverRows = @(New-Row "a1" 501 "2026-10-24")
+    $script:runs.Clear()
+    $script:serverRunner = New-Runner
+    $script:server = {
+        param([string]$cmd)
+        $req = ConvertFrom-CashierRemoteCommand $cmd
+        if ($req.Verb -eq "print") {
+            $r = Invoke-CashierReprint -Config $script:serverConfig -Root $script:serverRoot -Number $req.Number -Date $req.Date -RequestId $req.RequestId -RequestedFrom $req.From `
+                -Lookup { param($n) return $script:serverRows } -Runner $script:serverRunner -JobWatcher { param($c, $j) "spooler_completed" }
+            $o = [pscustomobject]@{ Status = $r.Status; Message = $r.Message; Confirmation = [string]$r.Details.confirmation; Host = "OZKUSER" }
+        } elseif ($req.Verb -eq "status") {
+            $s = Get-CashierRequestStatus $script:serverRoot $req.RequestId
+            $o = [pscustomobject]@{ Status = $s.Status; Confirmation = $s.Confirmation; Host = "OZKUSER" }
+        } else { throw "unexpected" }
+        return [pscustomobject]@{ ExitCode = 0; Output = (ConvertTo-CashierAsciiJson $o); TimedOut = $false }
+    }
+    $clientConfig = [pscustomobject]@{ remoteExpectedHostName = "OZKUSER" }
+    $clientRoot = New-Root
+
+    $rid = [guid]::NewGuid().ToString()
+    $out = Invoke-CashierRemotePrint -Config $clientConfig -Root $clientRoot -Number 501 -Date "2026-10-24" -RequestId $rid -Transport { param($c, $cmd) & $script:server $cmd }
+    Assert "بعيد: طلب من OZK2026 يُطبع على OZKUSER ⇒ sent" ($out.Status -eq "sent" -and $script:runs.Count -eq 1)
+    $srvLog = @(Read-CashierReprintLog $script:serverRoot | Where-Object { $_.requestId -eq $rid -and $_.event -eq "reprint_sent" })
+    Assert "بعيد: سجل OZKUSER يحفظ الجهاز الطالب" ($srvLog.Count -eq 1 -and $srvLog[0].requestedFrom -eq $env:COMPUTERNAME)
+    Assert "بعيد: سجل الجهاز الطالب يحفظ النتيجة" (@(Read-CashierReprintLog $clientRoot | Where-Object { $_.event -eq "remote_sent" -and $_.requestId -eq $rid }).Count -eq 1)
+
+    $out = Invoke-CashierRemotePrint -Config $clientConfig -Root $clientRoot -Number 501 -Date "2026-10-24" -RequestId $rid -Transport { param($c, $cmd) & $script:server $cmd }
+    Assert "بعيد: إعادة إرسال المعرّف نفسه (إعادة محاولة شبكة) ⇒ duplicate_request بلا ورقة ثانية" ($out.Status -eq "duplicate_request" -and $script:runs.Count -eq 1)
+
+    $rid = [guid]::NewGuid().ToString()
+    $dropAfter = { param($c, $cmd) $null = & $script:server $cmd; if ($cmd -like "print *") { throw "Connection reset by peer" }; return (& $script:server $cmd) }
+    $out = Invoke-CashierRemotePrint -Config $clientConfig -Root $clientRoot -Number 501 -Date "2026-10-24" -RequestId $rid -Transport $dropAfter
+    Assert "بعيد: انقطاع بعد التنفيذ ⇒ الحالة تُقرأ (sent) ولا طباعة ثانية" ($out.Status -eq "sent" -and $script:runs.Count -eq 2)
+
+    $rid = [guid]::NewGuid().ToString()
+    $dropBefore = { param($c, $cmd) if ($cmd -like "print *") { throw "Connection timed out" }; return (& $script:server $cmd) }
+    $out = Invoke-CashierRemotePrint -Config $clientConfig -Root $clientRoot -Number 501 -Date "2026-10-24" -RequestId $rid -Transport $dropBefore
+    Assert "بعيد: انقطاع قبل الوصول ⇒ not_received (لم يُطبع) بلا طباعة" ($out.Status -eq "not_received" -and $script:runs.Count -eq 2)
+
+    $rid = [guid]::NewGuid().ToString()
+    $dead = { param($c, $cmd) throw "No route to host" }
+    $out = Invoke-CashierRemotePrint -Config $clientConfig -Root $clientRoot -Number 501 -Date "2026-10-24" -RequestId $rid -Transport $dead
+    Assert "بعيد: الجهازان منقطعان تماماً ⇒ unknown بلا افتراض" ($out.Status -eq "unknown" -and $script:runs.Count -eq 2)
+
+    $rid = [guid]::NewGuid().ToString()
+    [void](Register-CashierReprintRequest $script:serverRoot $rid 501 "2026-10-24")
+    $out = Invoke-CashierRemotePrint -Config $clientConfig -Root $clientRoot -Number 501 -Date "2026-10-24" -RequestId $rid -Transport $dropBefore
+    Assert "بعيد: طلب وصل ولم تُعرف نتيجته ⇒ unknown لا إعادة" ($out.Status -eq "unknown" -and $script:runs.Count -eq 2)
+
+    $wrong = { param($c, $cmd) return [pscustomobject]@{ ExitCode = 0; Output = (ConvertTo-CashierAsciiJson ([pscustomobject]@{ Status = "sent"; Host = "OTHERPC" })); TimedOut = $false } }
+    $out = Invoke-CashierRemotePrint -Config $clientConfig -Root $clientRoot -Number 501 -Date "2026-10-24" -RequestId ([guid]::NewGuid().ToString()) -Transport $wrong
+    Assert "بعيد: رد من جهاز غير متوقع لا يُعتمد" ($out.Status -eq "wrong_host")
+    Assert "بعيد: لا طلب بلا تاريخ محسوم" (Throws { Invoke-CashierRemotePrint -Config $clientConfig -Root $clientRoot -Number 501 -Date "" -RequestId ([guid]::NewGuid().ToString()) -Transport $dead })
+
     # ── تشغيل حقيقي لسكربت جسر وهمي (Windows فقط) ──────────────────────────────
     if ($env:OS -eq "Windows_NT") {
         $argsFile = Join-Path $tempRoot "bridge-args.txt"
@@ -187,10 +267,10 @@ try {
         [IO.File]::WriteAllText($bridge2, $body, (New-Object Text.UTF8Encoding($true)))
         $cfg2 = New-TestConfig $bridge2 (Get-CashierFileSha256 $bridge2)
         $out = Invoke-CashierReprint -Config $cfg2 -Root (New-Root) -Number 501 -RequestId ([guid]::NewGuid().ToString()) `
-            -Lookup { param($n) return @(New-Row "a1" 501 "2026-10-24") } -Runner { param($c, $n, $d) Invoke-CashierBridgeProcess $c $n $d }
+            -Lookup { param($n) return @(New-Row "a1" 501 "2026-10-24") } -Runner { param($c, $n, $d) Invoke-CashierBridgeProcess $c $n $d } -JobWatcher { param($c, $j) "spooler_completed" }
         $seen = (Get-Content -LiteralPath $argsFile -Raw).Trim()
         Assert "جسر حقيقي: الوسائط PrintInvoice|Retail|الرقم|التاريخ|XPRINTER|تأكيد" ($seen -eq "PrintInvoice|Retail|501|2026-10-24|XPRINTER XP-T80Q 80MM|True")
-        Assert "جسر حقيقي: النتيجة printed برقم المهمة" ($out.Status -eq "printed" -and $out.Details.jobId -eq 91)
+        Assert "جسر حقيقي: النتيجة printed برقم المهمة" ($out.Status -eq "sent" -and $out.Details.jobId -eq 91)
     } else {
         Write-Host "SKIP تشغيل الجسر الوهمي الحقيقي (يحتاج Windows)"
     }
