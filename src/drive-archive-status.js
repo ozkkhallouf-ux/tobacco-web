@@ -99,6 +99,9 @@
   let panel = null;
   let lastView = null;
   let timer = null;
+  let generation = 0; // يزداد عند الخروج أو تبدّل المستخدم: نتيجة قراءة أقدم منه تُهمل
+  let authUserId = null;
+  let authWatched = false;
 
   function config() {
     try { return (window.appConfig && window.appConfig.documentArchive) || {}; } catch { return {}; }
@@ -124,6 +127,26 @@
   function hide() {
     if (chip) { chip.remove(); chip = null; }
     if (panel) { panel.remove(); panel = null; }
+  }
+
+  // بيانات المالك (أسماء زبائن وروابط) لا تبقى على الشاشة بعد الخروج: إزالة فورية
+  // للشارة واللوحة والحالة المخبّأة، وإبطال أي قراءة جارية للجلسة السابقة.
+  function resetSession() {
+    generation++;
+    lastView = null;
+    hide();
+  }
+
+  function watchAuth(c) {
+    if (authWatched || !c || !c.auth || typeof c.auth.onAuthStateChange !== "function") return;
+    authWatched = true;
+    c.auth.onAuthStateChange((event, session) => {
+      const userId = (session && session.user && session.user.id) || null;
+      if (event !== "SIGNED_OUT" && userId === authUserId) return;
+      authUserId = userId;
+      resetSession();
+      if (userId) refresh();
+    });
   }
 
   function renderChip(view) {
@@ -204,8 +227,12 @@
 
   async function refresh() {
     if (config().driveUi !== true || typeof document === "undefined" || !document.body) { hide(); return; }
+    const c = client();
+    watchAuth(c);
+    const started = generation;
     let view = null;
-    try { view = await load(client()); } catch { view = null; }
+    try { view = await load(c); } catch { view = null; }
+    if (started !== generation) return; // خرج المستخدم أو تبدّل أثناء القراءة
     lastView = view;
     if (!view) { hide(); return; }
     renderChip(view);

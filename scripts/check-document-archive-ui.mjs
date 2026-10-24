@@ -51,16 +51,22 @@ function installFakeClient(fake) {
     const chain = {
       select() { return chain; }, order() { return chain; },
       eq(col, val) { q.filters.push([col, val]); return chain; },
-      limit() {
+      async limit() {
         window.__calls.push({ kind: "from", ...q });
+        if (fake.slow && window.__slowGate) await window.__slowGate;
         if (fake.error) return Promise.resolve({ data: null, error: { message: "permission denied" } });
         return Promise.resolve({ data: fake[table] || [], error: null });
       },
     };
     return chain;
   };
+  window.__authListeners = [];
+  window.__signOut = () => { fake.noSession = true; window.__authListeners.forEach((cb) => cb("SIGNED_OUT", null)); };
   window.ozkSupabaseClient = {
-    auth: { getSession: async () => ({ data: { session: fake.noSession ? null : { user: {} } } }) },
+    auth: {
+      getSession: async () => ({ data: { session: fake.noSession ? null : { user: { id: "owner-1" } } } }),
+      onAuthStateChange: (cb) => { window.__authListeners.push(cb); return { data: { subscription: { unsubscribe() {} } } }; },
+    },
     from: builder,
     rpc: async (name, args) => { window.__calls.push({ kind: "rpc", name, args }); return { data: { ok: true }, error: null }; },
   };
@@ -188,6 +194,26 @@ await test("Drive: اللوحة تهرّب الأسماء، وتعرض رابط 
   assert.deepEqual(rpc, [{ kind: "rpc", name: "request_document_archive_retry", args: { p_job_id: "c".repeat(32) } }]);
   assert.match(r.panel, /طُلبت إعادة المحاولة/);
   assert.deepEqual(r.errors, []);
+});
+
+await test("Drive: الخروج يزيل الشارة واللوحة فوراً، وقراءة جارية لا تعيد بيانات الجلسة السابقة (Codex P1)", async () => {
+  const r = await load({ driveUi: true }, { document_archive_heartbeat: [heartbeat()], document_archive_items: ITEMS }, async (page) => {
+    await page.click("[data-ozk-drive-archive-status]");
+    await page.evaluate(() => window.__signOut());
+  });
+  assert.equal(r.chip, null, "الشارة بقيت بعد الخروج");
+  assert.equal(r.panel, null, "اللوحة بقيت بعد الخروج");
+  const slow = await load({ driveUi: true }, { slow: true, document_archive_heartbeat: [heartbeat()], document_archive_items: ITEMS }, async (page) => {
+    await page.evaluate(async () => {
+      let release;
+      window.__slowGate = new Promise((res) => { release = res; });
+      const pending = window.ozkDriveArchiveStatus.refresh(); // قراءة عالقة
+      window.__signOut();
+      release();
+      await pending;
+    });
+  });
+  assert.equal(slow.chip, null, "قراءة جارية أعادت رسم بيانات جلسة منتهية");
 });
 
 await test("Drive: البحث برقم الفاتورة يقرأ بالرقم وحده ويرفض غير الأرقام", async () => {
