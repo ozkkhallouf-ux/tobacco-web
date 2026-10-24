@@ -137,7 +137,7 @@ if (probe.status !== 0) {
     console.error("check-drive-invoice-archive: live SQL test failed");
     process.exit(run.status || 1);
   }
-  assert.ok(passes >= 23, `عدد تأكيدات SQL (${passes}) أقل من المتوقع`);
+  assert.ok(passes >= 25, `عدد تأكيدات SQL (${passes}) أقل من المتوقع`);
   console.log(`  ✓ الهجرة 22 والتراجع على PostgreSQL محلي: ${passes} تأكيداً`);
 }
 console.log("check-drive-invoice-archive: OK");
