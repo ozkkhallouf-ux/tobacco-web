@@ -69,8 +69,7 @@ function createDrive({ credentials, expectedEmail, fetchImpl = globalThis.fetch,
     accessExpiresAt = now() + Math.max(60, Number(data.expires_in) || 3600) * 1000 - 60_000;
   }
 
-  async function api(method, url, { json, body, headers } = {}, retried = false) {
-    if (!access || now() >= accessExpiresAt) await refresh();
+  function requestInit(method, { json, body, headers }) {
     const init = { method, headers: { Authorization: `Bearer ${access}`, ...(headers || {}) } };
     if (json !== undefined) {
       init.headers["Content-Type"] = "application/json; charset=UTF-8";
@@ -78,19 +77,27 @@ function createDrive({ credentials, expectedEmail, fetchImpl = globalThis.fetch,
     } else if (body !== undefined) {
       init.body = body;
     }
-    const res = await call(url, init);
+    return init;
+  }
+
+  function apiError(status, data) {
+    if (status === 401) return new DriveError("NEEDS_REAUTH", "401");
+    const errors = data && data.error && data.error.errors;
+    const reason = Array.isArray(errors) && errors[0] ? errors[0].reason : "";
+    const transient = status === 429 || status >= 500 || /rateLimit|backendError/i.test(reason);
+    return new DriveError(transient ? "TRANSIENT" : "API", `${status} ${reason}`.trim());
+  }
+
+  async function api(method, url, options = {}, retried = false) {
+    if (!access || now() >= accessExpiresAt) await refresh();
+    const res = await call(url, requestInit(method, options));
     if (res.status === 401 && !retried) {
       access = null;
-      return api(method, url, { json, body, headers }, true);
+      return api(method, url, options, true);
     }
     const data = await res.json().catch(() => ({}));
     if (res.ok) return data;
-    if (res.status === 401) throw new DriveError("NEEDS_REAUTH", "401");
-    const reason = data && data.error && Array.isArray(data.error.errors) && data.error.errors[0] ? data.error.errors[0].reason : "";
-    if (res.status === 429 || res.status >= 500 || /rateLimit|backendError/i.test(reason)) {
-      throw new DriveError("TRANSIENT", `${res.status} ${reason}`.trim());
-    }
-    throw new DriveError("API", `${res.status} ${reason}`.trim());
+    throw apiError(res.status, data);
   }
 
   // الهوية قبل أي كتابة، ثم تُعاد كل 5 دقائق (حالة «متصل» لا تأتي من تحقق قديم).

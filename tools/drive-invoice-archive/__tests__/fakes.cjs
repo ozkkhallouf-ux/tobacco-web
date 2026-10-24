@@ -101,50 +101,58 @@ function createFakeDrive({ email = "ozkkhallouf@gmail.com" } = {}) {
     s.seq++;
     return `F${String(s.seq).padStart(12, "0")}xyz`;
   }
+  const notFound = () => json(404, { error: { errors: [{ reason: "notFound" }] } });
+  function token() {
+    if (s.invalidGrant) return json(400, { error: "invalid_grant" });
+    return json(200, { access_token: `ya29.fake-${s.seq}`, expires_in: 3600, scope: s.scope, token_type: "Bearer" });
+  }
+  function listFiles(u) {
+    const q = u.searchParams.get("q");
+    const fields = /files\(([^)]*)\)/.exec(u.searchParams.get("fields"))[1].split(",");
+    const list = [...files.values()].filter((f) => matches(f, q)).sort((a, b) => a.createdTime - b.createdTime);
+    return json(200, { files: list.slice(0, 10).map((f) => view(f, fields)) });
+  }
+  function createFolder(init) {
+    const f = { id: newId(), ...JSON.parse(init.body), shared: false, trashed: false, createdTime: s.seq };
+    files.set(f.id, f);
+    return json(200, view(f, ["shared"]));
+  }
+  function getFile(u) {
+    const f = files.get(decodeURIComponent(u.pathname.split("/").pop()));
+    return f ? json(200, view(f, ["shared", "trashed"])) : notFound();
+  }
+  // multipart/related: الجزء الأول JSON الوصف، والثاني PDF.
+  function partBody(part) {
+    return part.split("\r\n\r\n").slice(1).join("\r\n\r\n").replace(/\r\n$/, "");
+  }
+  function upload(init) {
+    if (s.failUploads) return json(503, { error: { errors: [{ reason: "backendError" }] } });
+    const boundary = /boundary=(.+)$/.exec(init.headers["Content-Type"])[1];
+    const parts = Buffer.from(init.body).toString("latin1").split(`--${boundary}`);
+    const meta = JSON.parse(Buffer.from(partBody(parts[1]), "latin1").toString("utf8"));
+    const content = Buffer.from(partBody(parts[2]), "latin1");
+    const f = { id: newId(), ...meta, content: s.corruptUpload ? content.subarray(0, content.length - 3) : content, shared: false, trashed: false, createdTime: s.seq };
+    files.set(f.id, f);
+    s.uploads++;
+    return json(200, view(f, ["name", "webViewLink", "md5Checksum", "size", "shared"]));
+  }
+  function route(u, method) {
+    if (u.pathname === "/drive/v3/about") return () => json(200, { user: { emailAddress: s.email } });
+    if (u.pathname === "/drive/v3/files") return { GET: () => listFiles(u), POST: createFolder }[method];
+    if (u.pathname.startsWith("/drive/v3/files/") && method === "GET") return () => getFile(u);
+    if (u.pathname === "/upload/drive/v3/files" && method === "POST") return upload;
+    return null;
+  }
   async function fetchImpl(url, init = {}) {
-    calls.push({ url: String(url), method: init.method || "GET" });
+    const method = init.method || "GET";
+    calls.push({ url: String(url), method });
     if (s.offline) { const e = new Error("getaddrinfo ENOTFOUND"); e.code = "ENOTFOUND"; throw e; }
     const u = new URL(url);
-    if (u.href.startsWith("https://oauth2.googleapis.com/token")) {
-      if (s.invalidGrant) return json(400, { error: "invalid_grant" });
-      return json(200, { access_token: `ya29.fake-${s.seq}`, expires_in: 3600, scope: s.scope, token_type: "Bearer" });
-    }
+    if (u.href.startsWith("https://oauth2.googleapis.com/token")) return token();
     if (/permissions/.test(u.pathname)) throw new Error("permissions endpoint must never be called");
     if (s.fail503 > 0) { s.fail503--; return json(503, { error: { errors: [{ reason: "backendError" }] } }); }
-    if (u.pathname === "/drive/v3/about") return json(200, { user: { emailAddress: s.email } });
-    if (u.pathname === "/drive/v3/files" && (init.method || "GET") === "GET") {
-      const q = u.searchParams.get("q");
-      const fields = /files\(([^)]*)\)/.exec(u.searchParams.get("fields"))[1].split(",");
-      const list = [...files.values()].filter((f) => matches(f, q)).sort((a, b) => a.createdTime - b.createdTime);
-      return json(200, { files: list.slice(0, 10).map((f) => view(f, fields)) });
-    }
-    if (u.pathname === "/drive/v3/files" && init.method === "POST") {
-      const meta = JSON.parse(init.body);
-      const f = { id: newId(), ...meta, shared: false, trashed: false, createdTime: s.seq };
-      files.set(f.id, f);
-      return json(200, view(f, ["shared"]));
-    }
-    if (u.pathname.startsWith("/drive/v3/files/") && (init.method || "GET") === "GET") {
-      const f = files.get(decodeURIComponent(u.pathname.split("/").pop()));
-      if (!f) return json(404, { error: { errors: [{ reason: "notFound" }] } });
-      return json(200, view(f, ["shared", "trashed"]));
-    }
-    if (u.pathname === "/upload/drive/v3/files" && init.method === "POST") {
-      if (s.failUploads) return json(503, { error: { errors: [{ reason: "backendError" }] } });
-      const boundary = /boundary=(.+)$/.exec(init.headers["Content-Type"])[1];
-      const body = Buffer.from(init.body);
-      const text = body.toString("latin1");
-      const parts = text.split(`--${boundary}`);
-      const metaText = Buffer.from(parts[1].split("\r\n\r\n").slice(1).join("\r\n\r\n").replace(/\r\n$/, ""), "latin1").toString("utf8");
-      const meta = JSON.parse(metaText);
-      const pdfLatin = parts[2].split("\r\n\r\n").slice(1).join("\r\n\r\n").replace(/\r\n$/, "");
-      const content = Buffer.from(pdfLatin, "latin1");
-      const f = { id: newId(), ...meta, content: s.corruptUpload ? content.subarray(0, content.length - 3) : content, shared: false, trashed: false, createdTime: s.seq };
-      files.set(f.id, f);
-      s.uploads++;
-      return json(200, view(f, ["name", "webViewLink", "md5Checksum", "size", "shared"]));
-    }
-    return json(404, { error: { errors: [{ reason: "notFound" }] } });
+    const handler = route(u, method);
+    return handler ? handler(init) : notFound();
   }
   const pathOf = (f) => {
     const names = [f.name];

@@ -320,6 +320,10 @@
     } catch (e) { return false; }
   }
 
+  function badgeAllowed() {
+    return isSupportedPlatform() && isEnabled() && !uiHidden();
+  }
+
   function toast(message, kind) {
     if (typeof document === "undefined" || !document.body || uiHidden()) return;
     var existing = document.querySelector("[data-ozk-archive-toast]");
@@ -345,7 +349,7 @@
   // بلا أي تفصيل تقني. تظهر على الماك وحده فلا يراها مستخدم ويندوز أو الآيفون.
   function renderStatus(value) {
     if (typeof document === "undefined" || !document.body) return;
-    if (!isSupportedPlatform() || !isEnabled() || uiHidden()) {
+    if (!badgeAllowed()) {
       if (statusEl) { statusEl.remove(); statusEl = null; }
       return;
     }

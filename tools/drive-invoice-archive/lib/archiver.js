@@ -103,105 +103,122 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
   }
 
   // ─── الرصد ───
+  // نافذة القراءة: مطابقة شاملة دورية (lookback)، وإلا من العلامة ناقص التداخل.
+  function detectWindow(serverNow, reconcile) {
+    if (!reconcile) {
+      return { since: state.watermark ? addSeconds(state.watermark, -cfg.overlapSeconds) : `${cfg.archiveFrom}T00:00:00`, dateFrom: cfg.archiveFrom };
+    }
+    folderCache = {}; // مجلد حُذف يدوياً لا يبقى في المخبأ أكثر من دورة مطابقة
+    const lookback = addSeconds(serverNow, -cfg.lookbackDays * 86400).slice(0, 10);
+    return { since: "1900-01-01T00:00:00", dateFrom: lookback > cfg.archiveFrom ? lookback : cfg.archiveFrom };
+  }
+
+  function newJob(header, version, versionHash, latest, pdf) {
+    return {
+      jobId: jobIdFor(DOC_TYPE, header.guid, versionHash, version),
+      docType: DOC_TYPE,
+      sourceGuid: header.guid,
+      number: header.number,
+      date: header.date,
+      typeGuid: header.typeGuid,
+      customerGuid: header.customerGuid,
+      customerName: header.customer,
+      amount: Math.round((header.total - header.discount) * 1000) / 1000,
+      currencyIso: header.currencyIso,
+      version,
+      versionHash,
+      previousJobId: latest ? latest.jobId : null,
+      status: STATUS.RENDERED,
+      pdfSha256: sha256(pdf),
+      pdfBytes: pdf.length,
+      createdAt: new Date(now()).toISOString(),
+      attempts: 0,
+      nextAttemptAt: 0,
+      failed: false,
+      drive: null,
+      telegram: null,
+    };
+  }
+
+  // نسخة جديدة لفاتورة مستقرة: PDF ثم مهمة. يعيد true إن أُنشئت مهمة.
+  async function archiveRow(header, hint) {
+    const lines = await ameen.lines(header.guid);
+    const content = model.buildInvoice(header, lines, null);
+    content.customerGuid = header.customerGuid;
+    const versionHash = invoiceVersionHash(content);
+    const latest = store.latestVersion(DOC_TYPE, header.guid);
+    let created = false;
+    if (!latest || latest.versionHash !== versionHash) {
+      const version = store.nextVersionNumber(DOC_TYPE, header.guid);
+      const pdfFile = store.pdfPath(jobIdFor(DOC_TYPE, header.guid, versionHash, version));
+      await renderInvoice(header, lines, pdfFile);
+      const job = newJob(header, version, versionHash, latest, fs.readFileSync(pdfFile));
+      store.saveJob(job);
+      created = true;
+      emit(version > 1 ? "invoice_edited" : "invoice_detected", { jobId: job.jobId, number: header.number, version });
+    }
+    state.hints[header.guid] = hint;
+    delete state.detectErrors[header.guid];
+    return created;
+  }
+
+  // لا مهمة بلا PDF سليم. يُعاد بتراجع (حتى ساعة)، والمطابقة الدورية تعيد رؤيته.
+  function recordDetectError(header, hint, prevError, err) {
+    const attempts = (prevError && prevError.hint === hint ? prevError.attempts : 0) + 1;
+    state.detectErrors[header.guid] = {
+      hint,
+      number: header.number,
+      attempts,
+      code: String(err && err.code || "ERROR").slice(0, 30),
+      at: new Date(now()).toISOString(),
+      nextAt: now() + Math.min(3600, 60 * 2 ** Math.min(attempts, 6)) * 1000,
+    };
+    emit("detect_error", { guid: header.guid, number: header.number, code: err && err.code, message: err && err.message });
+  }
+
+  // صف واحد: «unstable» (لم يستقر، يحجز العلامة) أو «skip» أو «created» أو «same».
+  async function detectRow(row) {
+    const header = headerOf(row);
+    if (!header.printable || !header.guid || !header.isPosted) return "skip"; // غير المرحّلة ليست نسخة نهائية
+    if (Number(row.seconds_since_change) < cfg.stableSeconds) return "unstable";
+    const hint = rowHint(row);
+    if (state.hints[header.guid] === hint) return "skip";
+    const prevError = state.detectErrors[header.guid];
+    if (prevError && prevError.hint === hint && now() < prevError.nextAt) return "skip";
+    try {
+      return (await archiveRow(header, hint)) ? "created" : "same";
+    } catch (err) {
+      recordDetectError(header, hint, prevError, err);
+      return "error";
+    }
+  }
+
+  // العلامة: لا تتجاوز أقدم فاتورة غير مستقرة، ولا آخر صف إن لم تكتمل الصفحات.
+  function advanceWatermark(mark, reconcile) {
+    if (!reconcile) {
+      state.watermark = mark;
+      return;
+    }
+    state.lastReconcileAt = now();
+    if (!state.watermark || mark < state.watermark) state.watermark = mark;
+  }
+
   async function detect() {
     const serverNow = await ameen.serverNow();
     const reconcile = now() - (state.lastReconcileAt || 0) >= cfg.reconcileMinutes * 60_000;
-    let since;
-    let dateFrom = cfg.archiveFrom;
-    if (reconcile) {
-      since = "1900-01-01T00:00:00";
-      const lookback = addSeconds(serverNow, -cfg.lookbackDays * 86400).slice(0, 10);
-      if (lookback > dateFrom) dateFrom = lookback;
-      folderCache = {}; // مجلد حُذف يدوياً لا يبقى في المخبأ أكثر من دورة مطابقة
-    } else {
-      since = state.watermark ? addSeconds(state.watermark, -cfg.overlapSeconds) : `${cfg.archiveFrom}T00:00:00`;
-    }
+    const { since, dateFrom } = detectWindow(serverNow, reconcile);
     const { rows, complete } = await fetchChanged(since, dateFrom);
     state.detectErrors = state.detectErrors || {};
-    let holdBack = null; // أقدم فاتورة مرحّلة لم تستقر بعد: العلامة لا تتجاوزها
+    let holdBack = null; // أقدم فاتورة مرحّلة لم تستقر بعد
     let created = 0;
-
     for (const row of rows) {
-      const header = headerOf(row);
-      if (!header.printable || !header.guid) continue;
-      if (!header.isPosted) continue; // غير المرحّلة ليست نسخة نهائية
-      if (Number(row.seconds_since_change) < cfg.stableSeconds) {
-        if (!holdBack || row.changed_at < holdBack) holdBack = row.changed_at;
-        continue;
-      }
-      const hint = rowHint(row);
-      if (state.hints[header.guid] === hint) continue;
-      const prevError = state.detectErrors[header.guid];
-      if (prevError && prevError.hint === hint && now() < prevError.nextAt) continue;
-      try {
-        const lines = await ameen.lines(header.guid);
-        const content = model.buildInvoice(header, lines, null);
-        content.customerGuid = header.customerGuid;
-        const versionHash = invoiceVersionHash(content);
-        const latest = store.latestVersion(DOC_TYPE, header.guid);
-        if (latest && latest.versionHash === versionHash) {
-          state.hints[header.guid] = hint;
-          delete state.detectErrors[header.guid];
-          continue;
-        }
-        const version = store.nextVersionNumber(DOC_TYPE, header.guid);
-        const jobId = jobIdFor(DOC_TYPE, header.guid, versionHash, version);
-        const pdfFile = store.pdfPath(jobId);
-        await renderInvoice(header, lines, pdfFile);
-        const pdf = fs.readFileSync(pdfFile);
-        const job = {
-          jobId,
-          docType: DOC_TYPE,
-          sourceGuid: header.guid,
-          number: header.number,
-          date: header.date,
-          typeGuid: header.typeGuid,
-          customerGuid: header.customerGuid,
-          customerName: header.customer,
-          amount: Math.round((header.total - header.discount) * 1000) / 1000,
-          currencyIso: header.currencyIso,
-          version,
-          versionHash,
-          previousJobId: latest ? latest.jobId : null,
-          status: STATUS.RENDERED,
-          pdfSha256: sha256(pdf),
-          pdfBytes: pdf.length,
-          createdAt: new Date(now()).toISOString(),
-          attempts: 0,
-          nextAttemptAt: 0,
-          failed: false,
-          drive: null,
-          telegram: null,
-        };
-        store.saveJob(job);
-        state.hints[header.guid] = hint;
-        delete state.detectErrors[header.guid];
-        created++;
-        emit(version > 1 ? "invoice_edited" : "invoice_detected", { jobId, number: header.number, version });
-      } catch (err) {
-        // لا مهمة بلا PDF سليم. يُعاد بتراجع (حتى ساعة)، والمطابقة الدورية تعيد رؤيته.
-        const attempts = (prevError && prevError.hint === hint ? prevError.attempts : 0) + 1;
-        state.detectErrors[header.guid] = {
-          hint,
-          number: header.number,
-          attempts,
-          code: String(err && err.code || "ERROR").slice(0, 30),
-          at: new Date(now()).toISOString(),
-          nextAt: now() + Math.min(3600, 60 * 2 ** Math.min(attempts, 6)) * 1000,
-        };
-        emit("detect_error", { guid: header.guid, number: header.number, code: err && err.code, message: err && err.message });
-      }
+      const outcome = await detectRow(row);
+      if (outcome === "created") created++;
+      if (outcome === "unstable" && (!holdBack || row.changed_at < holdBack)) holdBack = row.changed_at;
     }
-
-    // العلامة: لا تتجاوز أقدم فاتورة غير مستقرة، ولا آخر صف إن لم تكتمل الصفحات.
     let mark = complete ? serverNow : rows[rows.length - 1].changed_at;
     if (holdBack && holdBack < mark) mark = holdBack;
-    if (reconcile) {
-      state.lastReconcileAt = now();
-      if (!state.watermark || mark < state.watermark) state.watermark = mark;
-    } else {
-      state.watermark = mark;
-    }
+    advanceWatermark(mark, reconcile);
     store.saveState();
     return { rows: rows.length, created, reconcile };
   }

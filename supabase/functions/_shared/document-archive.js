@@ -53,51 +53,45 @@ export function isPdfBytes(bytes) {
     && bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46 && bytes[4] === 0x2d);
 }
 
+const text = (value) => String(value ?? "").trim();
+const optionalNumber = (value) => (value === "" || value === null || value === undefined ? null : Number(value));
+
+// قواعد الحقول بالترتيب: أول قاعدة فاشلة تحدد رمز الخطأ.
+const NOTIFY_RULES = [
+  ["job_id", (v) => JOB_ID_RE.test(v.job_id)],
+  ["doc_type", (v) => Boolean(DOC_TYPES[v.doc_type])],
+  ["source_guid", (v) => GUID_RE.test(v.source_guid)],
+  ["doc_number", (v) => v.doc_number.length > 0 && v.doc_number.length <= 40],
+  ["doc_date", (v) => DATE_RE.test(v.doc_date)],
+  ["version", (v) => Number.isInteger(v.version) && v.version >= 1 && v.version <= 1000],
+  ["version_hash", (v) => HASH_RE.test(v.version_hash)],
+  ["amount", (v) => v.amount === null || Number.isFinite(v.amount)],
+  ["drive_link", (v) => isDriveViewLink(v.drive_link)],
+  ["drive_file_id", (v) => /^[A-Za-z0-9_-]{10,200}$/.test(v.drive_file_id) && v.drive_link.includes(`/d/${v.drive_file_id}/`)],
+  ["customer_guid", (v) => !v.customer_guid || GUID_RE.test(v.customer_guid)],
+];
+
 // يتحقق من حقول طلب الإشعار ويعيد كائناً نظيفاً، أو { error } برمز ثابت.
 export function validateNotifyFields(input) {
   const f = input || {};
-  for (const key of FORBIDDEN_FIELDS) {
-    if (Object.prototype.hasOwnProperty.call(f, key)) return { error: "recipient_not_allowed" };
-  }
-  const jobId = String(f.job_id ?? "").trim();
-  if (!JOB_ID_RE.test(jobId)) return { error: "job_id" };
-  const docType = String(f.doc_type ?? "").trim();
-  if (!DOC_TYPES[docType]) return { error: "doc_type" };
-  const sourceGuid = String(f.source_guid ?? "").trim().toLowerCase();
-  if (!GUID_RE.test(sourceGuid)) return { error: "source_guid" };
-  const docNumber = String(f.doc_number ?? "").trim();
-  if (!docNumber || docNumber.length > 40) return { error: "doc_number" };
-  const docDate = String(f.doc_date ?? "").trim();
-  if (!DATE_RE.test(docDate)) return { error: "doc_date" };
-  const version = Number(f.version);
-  if (!Number.isInteger(version) || version < 1 || version > 1000) return { error: "version" };
-  const versionHash = String(f.version_hash ?? "").trim();
-  if (!HASH_RE.test(versionHash)) return { error: "version_hash" };
-  const amountRaw = f.amount === "" || f.amount === null || f.amount === undefined ? null : Number(f.amount);
-  if (amountRaw !== null && !Number.isFinite(amountRaw)) return { error: "amount" };
-  const driveLink = String(f.drive_link ?? "").trim();
-  if (!isDriveViewLink(driveLink)) return { error: "drive_link" };
-  const driveFileId = String(f.drive_file_id ?? "").trim();
-  if (!/^[A-Za-z0-9_-]{10,200}$/.test(driveFileId) || !driveLink.includes(`/d/${driveFileId}/`)) return { error: "drive_file_id" };
-  const customerGuidRaw = String(f.customer_guid ?? "").trim().toLowerCase();
-  if (customerGuidRaw && !GUID_RE.test(customerGuidRaw)) return { error: "customer_guid" };
-  return {
-    value: {
-      job_id: jobId,
-      doc_type: docType,
-      source_guid: sourceGuid,
-      doc_number: docNumber,
-      doc_date: docDate,
-      customer_guid: customerGuidRaw || null,
-      customer_name: fmt().clean(f.customer_name ?? "", 120),
-      amount: amountRaw,
-      currency: fmt().clean(f.currency ?? "", 8).toUpperCase(),
-      version,
-      version_hash: versionHash,
-      drive_link: driveLink,
-      drive_file_id: driveFileId,
-    },
+  if (FORBIDDEN_FIELDS.some((key) => Object.prototype.hasOwnProperty.call(f, key))) return { error: "recipient_not_allowed" };
+  const value = {
+    job_id: text(f.job_id),
+    doc_type: text(f.doc_type),
+    source_guid: text(f.source_guid).toLowerCase(),
+    doc_number: text(f.doc_number),
+    doc_date: text(f.doc_date),
+    customer_guid: text(f.customer_guid).toLowerCase() || null,
+    customer_name: fmt().clean(f.customer_name ?? "", 120),
+    amount: optionalNumber(f.amount),
+    currency: fmt().clean(f.currency ?? "", 8).toUpperCase(),
+    version: Number(f.version),
+    version_hash: text(f.version_hash),
+    drive_link: text(f.drive_link),
+    drive_file_id: text(f.drive_file_id),
   };
+  const failed = NOTIFY_RULES.find(([, ok]) => !ok(value));
+  return failed ? { error: failed[0] } : { value };
 }
 
 // وصف المستند في تيليغرام: كل الحقول المطلوبة في نص عادي ≤ CAPTION_MAX.
