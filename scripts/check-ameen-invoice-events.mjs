@@ -201,6 +201,9 @@ for (const name of [
   "watermark state_seq restart: bad file replaced by the next save, no seq change",
   "watermark state_seq restart: no event emitted for known versions after recovery",
   "watermark state_seq parser: TryParse rejects text, overflow and zero",
+  // Codex P1 (37be4ca8): تاريخ مستحيل في العلامة لا يوقف الوكيل
+  "state.json invalid watermark date: read does not throw and watermark is cleared",
+  "watermark parser: valid date returned verbatim, impossible dates rejected",
 ]) assert.ok(psTest.includes(`'${name}'`), `اختبار PowerShell إلزامي مفقود: ${name}`);
 
 const rollback = read(rollbackRel).replace(/--.*$/gm, "");

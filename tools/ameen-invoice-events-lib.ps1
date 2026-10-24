@@ -517,9 +517,14 @@ function Get-AmeenRawStateSeq {
 
 function Get-AmeenRawWatermark {
     # «watermark» حرفياً من نص JSON بصيغة yyyy-MM-ddTHH:mm:ss.fff (توقيت الأمين المحلي)، وإلا $null.
+    # الشكل وحده لا يكفي (Codex P1 على 37be4ca8): «2026-99-22T…» يطابق النمط ثم يرمي ParseExact في حلقة
+    # الوكيل خارج معالجة أخطاء الدورة. يُتحقق أنه تاريخ حقيقي بـ TryParseExact، ويُعاد النص الأصلي كما هو.
     param([AllowNull()][string]$Raw)
-    if ($Raw -and $Raw -match '"watermark"\s*:\s*"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3})"') { return $Matches[1] }
-    return $null
+    if (-not $Raw -or $Raw -notmatch '"watermark"\s*:\s*"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3})"') { return $null }
+    $text = $Matches[1]
+    $parsed = [datetime]::MinValue
+    if (-not [datetime]::TryParseExact($text, "yyyy-MM-ddTHH:mm:ss.fff", $script:Invariant, [Globalization.DateTimeStyles]::None, [ref]$parsed)) { return $null }
+    return $text
 }
 
 function Save-AmeenInvoiceState {

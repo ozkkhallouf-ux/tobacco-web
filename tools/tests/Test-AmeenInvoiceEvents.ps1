@@ -626,6 +626,23 @@ try {
   $rr2 = Read-AmeenInvoiceState -Dir $pbox
   Assert 'watermark state_seq restart: bad file replaced by the next save, no seq change' ($rr2.watermark -eq "2026-10-22T07:10:00.000" -and [long]$rr2.last_seq -eq $goodSeq -and $rr2.bills.Count -eq 2000)
   Assert 'watermark state_seq restart: no event emitted for known versions after recovery' ((Resolve-AmeenInvoiceChanges -State $rr2 -Observations @()).Count -eq 0 -and [long]$rr2.last_seq -eq $goodSeq)
+  # Codex P1 (37be4ca8): تاريخ مستحيل بالشكل الصحيح وتسلسل مطابق ⇒ يُتجاهل الملف، ويبقى ما يقرؤه الوكيل قابلاً لـ ParseExact
+  [IO.File]::WriteAllText((Join-Path $pbox "watermark.json"), '{"schema":"ameen-invoice-agent-watermark/v1","state_seq":0,"watermark":"x"}')
+  $baseWm = (Read-AmeenInvoiceState -Dir $pbox).watermark
+  foreach ($bad in @("2026-99-22T07:00:00.000", "2026-02-30T07:00:00.000", "2026-10-22T25:00:00.000", "2026-10-22T07:61:00.000", "0000-10-22T07:00:00.000")) {
+    [IO.File]::WriteAllText((Join-Path $pbox "watermark.json"), $wmHead + '"state_seq":' + $goodSeq + ',"watermark":"' + $bad + '"}')
+    $script:rbd = $null
+    $threw = Throws { $script:rbd = Read-AmeenInvoiceState -Dir $pbox }
+    $parses = $false
+    if (-not $threw -and $script:rbd.watermark) { $parses = -not (Throws { [void][datetime]::ParseExact([string]$script:rbd.watermark, "yyyy-MM-ddTHH:mm:ss.fff", [Globalization.CultureInfo]::InvariantCulture) }) }
+    Assert ("watermark invalid date ${bad}: ignored, state watermark kept, agent ParseExact safe") ((-not $threw) -and $script:rbd.watermark -eq $baseWm -and $parses -and $script:rbd.bills.Count -eq 2000)
+  }
+  # تاريخ مستحيل داخل state.json نفسه ⇒ لا رمي، والعلامة فارغة فيبدأ الوكيل من وقت الخادم (والمطابقة تلتقط ما فات)
+  $sbox = Join-Path $tempDir "outbox-bad-state-date"; Initialize-AmeenInvoiceOutbox -Dir $sbox
+  [IO.File]::WriteAllText((Join-Path $sbox "state.json"), '{"bills":{},"last_seq":1792641146179,"schema":"ameen-invoice-agent-state/v1","send":{"failures":0,"next_at":null},"watermark":"2026-13-40T07:00:00.000"}')
+  $script:rsd = $null
+  Assert 'state.json invalid watermark date: read does not throw and watermark is cleared' ((-not (Throws { $script:rsd = Read-AmeenInvoiceState -Dir $sbox })) -and $null -eq $script:rsd.watermark -and [long]$script:rsd.last_seq -eq 1792641146179)
+  Assert 'watermark parser: valid date returned verbatim, impossible dates rejected' ((Get-AmeenRawWatermark '{"watermark":"2026-10-22T07:00:00.000"}') -eq "2026-10-22T07:00:00.000" -and $null -eq (Get-AmeenRawWatermark '{"watermark":"2026-99-22T07:00:00.000"}') -and $null -eq (Get-AmeenRawWatermark '{"watermark":"2026-02-29T07:00:00.000"}') -and (Get-AmeenRawWatermark '{"watermark":"2028-02-29T07:00:00.000"}') -eq "2028-02-29T07:00:00.000")
   Assert 'watermark state_seq parser: TryParse rejects text, overflow and zero' ($null -eq (Get-AmeenRawStateSeq '{"state_seq":"1"}') -and $null -eq (Get-AmeenRawStateSeq '{"state_seq":99999999999999999999}') -and $null -eq (Get-AmeenRawStateSeq '{"state_seq":0}') -and (Get-AmeenRawStateSeq ('{"state_seq":' + $goodSeq + '}')) -eq $goodSeq)
   # حفظ غير مكتمل (انقطاع قبل الاستبدال): يبقى الأصل كاملاً، وتُزال البقايا عند البدء
   [IO.File]::WriteAllText((Join-Path $pbox ("state.json.tmp-" + [guid]::NewGuid().ToString("N"))), '{"schema":"ameen-invoice-agent-state/v1","bil')
