@@ -257,6 +257,16 @@ try {
     Assert "بعيد: رد من جهاز غير متوقع لا يُعتمد" ($out.Status -eq "wrong_host")
     Assert "بعيد: لا طلب بلا تاريخ محسوم" (Throws { Invoke-CashierRemotePrint -Config $clientConfig -Root $clientRoot -Number 501 -Date "" -RequestId ([guid]::NewGuid().ToString()) -Transport $dead })
 
+    # ── عميل ssh: المدمج أولاً، ثم OpenSSH المستقل في Program Files ─────────────
+    $sshBuiltin = Join-Path $tempRoot "System32-OpenSSH-ssh.exe"
+    $sshStandalone = Join-Path $tempRoot "ProgramFiles-OpenSSH-ssh.exe"
+    $sshMissing = Join-Path $tempRoot "missing-ssh.exe"
+    Set-Content -LiteralPath $sshStandalone -Value "x"
+    Assert "ssh: المستقل يُستعمل حين لا يوجد المدمج" ((Find-CashierSshClient @($sshMissing, $sshStandalone)) -eq $sshStandalone)
+    Set-Content -LiteralPath $sshBuiltin -Value "x"
+    Assert "ssh: المدمج مقدَّم حين يوجد الاثنان" ((Find-CashierSshClient @($sshBuiltin, $sshStandalone)) -eq $sshBuiltin)
+    Assert "ssh: خطأ واضح حين لا يوجد أي عميل" (Throws { Find-CashierSshClient @($sshMissing) })
+
     # ── تشغيل حقيقي لسكربت جسر وهمي (Windows فقط) ──────────────────────────────
     if ($env:OS -eq "Windows_NT") {
         $argsFile = Join-Path $tempRoot "bridge-args.txt"

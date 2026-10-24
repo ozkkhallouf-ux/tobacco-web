@@ -27,7 +27,7 @@
 | `supabase/functions/_shared/document-archive.js` | التحقق من الحقول والرابط وPDF ونص الإشعار (مشترك مع اختبارات العامل) |
 | `supabase/config.toml` | `verify_jwt = false` للدالة (المصادقة بسرّ `x-ozk-archive-secret`) |
 | `supabase/proposed/22-document-archive*.sql` | الجداول الثلاثة وRLS والدوال، والتراجع |
-| `supabase/tests/document-archive.sql` | 23 تأكيداً على PostgreSQL محلي |
+| `supabase/tests/document-archive.sql` | 25 تأكيداً على PostgreSQL محلي |
 | `src/drive-archive-status.js` | شارة المالك ولوحتها: الحالة، آخر نجاح، المعلّق والفاشل، إعادة المحاولة، روابط Drive وبحث برقم الفاتورة |
 | `src/icloud-archive.js` | `uiHidden()`: إخفاء الشارة والتنبيهات بالمفتاح فقط |
 | `src/config.js` | `documentArchive: { icloudUi, driveUi }` |

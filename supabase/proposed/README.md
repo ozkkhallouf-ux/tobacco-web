@@ -231,10 +231,10 @@ definition لهذا المراقب، وقد جرى تعديله (PR #220) بإص
 
 | الملف | الحالة | ما يفعله |
 |---|---|---|
-| `22-document-archive.sql` | **غير مطبَّق — بانتظار موافقة المالك** | ثلاثة جداول: `document_archive_items` (سجل كل نسخة مؤرشفة: Drive file id ورابط العرض الخاص وmessage_id)، `document_archive_heartbeat` (حالة العامل)، `document_archive_retry_requests`. RLS على الثلاثة، والقراءة لـ`is_owner()` وحده، ولا شيء لـanon، والكتابة عبر `service_role` فقط بدوال `document_archive_ingest_report` و`document_archive_record_notification` (لا تخفض الحالة، وهوية المهمة ثابتة، والرابط العام مرفوض بقيد). `request_document_archive_retry(text)` للمالك وحده وللفاشلة وحدها. لا cron ولا حذف تلقائي. |
+| `22-document-archive.sql` | **غير مطبَّق — بانتظار موافقة المالك** | ثلاثة جداول: `document_archive_items` (سجل كل نسخة مؤرشفة: Drive file id ورابط العرض الخاص وmessage_id)، `document_archive_heartbeat` (حالة العامل)، `document_archive_retry_requests`. RLS على الثلاثة، والقراءة لـ`is_owner()` وحده، ولا شيء لـanon، والكتابة عبر `service_role` فقط بدوال `document_archive_ingest_report` و`document_archive_record_notification` (لا تخفض الحالة، وهوية المهمة ثابتة، والرابط العام مرفوض بقيد، والعنصر المتعارض بنسخته يُرفض وحده دون إسقاط الدفعة). `request_document_archive_retry(text)` للمالك وحده وللفاشلة وحدها. لا cron ولا حذف تلقائي. |
 | `22-document-archive-rollback.sql` | تراجع جاهز — غير مطبَّق | يحذف الجداول الثلاثة والدوال. يفقد سجل الروابط في Supabase فقط؛ ملفات Drive وطابور العامل على OZK2026 تبقى. |
 
-اختبار: `supabase/tests/document-archive.sql` عبر `scripts/check-drive-invoice-archive.mjs` (23 تأكيداً، مع التراجع). ترتيب التطبيق: 22 أولاً، ثم نشر `document-archive-notify`، ثم العامل — انظر `docs/ai/topics/drive-invoice-archive.md`.
+اختبار: `supabase/tests/document-archive.sql` عبر `scripts/check-drive-invoice-archive.mjs` (25 تأكيداً، مع التراجع). ترتيب التطبيق: 22 أولاً، ثم نشر `document-archive-notify`، ثم العامل — انظر `docs/ai/topics/drive-invoice-archive.md`.
 
 ## 23: قائمة صريحة لأنواع Web Push ومنع التكرار وسجل قبول المزود (2026-10-24) — غير مطبَّق على الإنتاج
 
