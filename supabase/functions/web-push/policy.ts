@@ -27,13 +27,19 @@ const STICKY_EVENTS = new Set([
 const SITE = "https://ozktobacco.com";
 const ICON = `${SITE}/public/icons/ozk-ios-full-notification-icon.png`;
 
-type MaybeUser = { app_metadata?: Record<string, unknown> | null } | null | undefined;
+type MaybeUser = { id?: string | null; app_metadata?: Record<string, unknown> | null } | null | undefined;
 
-// المستلم المخوّل للإشعارات التشغيلية والمالية: دور owner في app_metadata، وهو المصدر نفسه الذي تعتمده
-// public.is_owner() في قاعدة البيانات. البريد لا يكفي لأنه قابل للتعديل من المستخدم.
+// مستلمو إشعارات المالك بالمعرّف الثابت في auth.users (قرار المالك 2026-10-24): ozkkhallouf@gmail.com وحده.
+// لا يستلمها ozk.kh@outlook.com (employee) ولا ozkkhalouf@gmail.com (owner بلام واحدة). المعرّف لا يتغير بتغيير
+// البريد، فلا تُعتمد المطابقة بالبريد. إضافة مستلم = إضافة معرّفه هنا بقرار صريح.
+export const OWNER_PUSH_RECIPIENT_IDS: readonly string[] = ["3e5f16bb-1cc5-4acd-ade0-7189e54d7dde"];
+
+// الشرطان معاً: المعرّف في القائمة، والدور owner في app_metadata (المصدر نفسه لـpublic.is_owner()).
+// سحب دور owner من الحساب يوقف الاستلام حتى لو بقي معرّفه هنا.
 export function isAuthorizedRecipient(user: MaybeUser): boolean {
+  const id = String(user?.id ?? "").trim().toLowerCase();
   const role = String(user?.app_metadata?.role ?? "").trim().toLowerCase();
-  return role === "owner";
+  return role === "owner" && OWNER_PUSH_RECIPIENT_IDS.includes(id);
 }
 
 export type PushErrorKind = "expired" | "transient" | "rejected";

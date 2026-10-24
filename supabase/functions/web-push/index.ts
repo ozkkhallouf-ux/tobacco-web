@@ -31,8 +31,9 @@ function bearer(req: Request) {
 type Admin = ReturnType<typeof createClient>;
 type PushSubscriptionRow = { id: number; user_id: string; endpoint: string; p256dh: string; auth_key: string };
 
-// المستلمون: اشتراكات أصحاب دور owner فقط. أي حساب آخر (موظف، عدّاد جرد) لا يستلم إشعاراً
-// تشغيلياً أو مالياً حتى لو كان له اشتراك مفعّل. فشل قراءة مستخدم ⇒ يُستبعد (لا إرسال بلا تحقق).
+// المستلمون: اشتراكات الحساب المعتمد لإشعارات المالك وحده (isAuthorizedRecipient: المعرّف + دور owner).
+// أي حساب آخر (موظف، owner آخر، عدّاد جرد) لا يستلم حتى لو كان له اشتراك مفعّل، ولا يُعطَّل اشتراكه.
+// فشل قراءة مستخدم ⇒ يُستبعد (لا إرسال بلا تحقق).
 async function authorizedSubscriptions(admin: Admin, all: PushSubscriptionRow[]) {
   const roleByUser = new Map<string, boolean>();
   for (const userId of new Set(all.map((sub) => String(sub.user_id)))) {

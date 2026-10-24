@@ -45,13 +45,23 @@ const policy = loadTs("supabase/functions/web-push/policy.ts");
 {
   const { isAuthorizedRecipient, classifyPushError, isStale, messageTag, buildMessagePayload, outboxOutcome } = policy;
   assert.equal(policy.PUSH_TTL_SECONDS, 86400, "TTL الأحداث 24 ساعة");
-  assert.equal(isAuthorizedRecipient({ app_metadata: { role: "owner" } }), true);
-  assert.equal(isAuthorizedRecipient({ app_metadata: { role: " Owner " } }), true);
+  // قرار المالك 2026-10-24: ozkkhallouf@gmail.com وحده، بمعرّفه، ودوره owner.
+  const MAIN = "3e5f16bb-1cc5-4acd-ade0-7189e54d7dde"; // ozkkhallouf@gmail.com
+  const ALIAS = "9724dbe4-ecb0-49f7-a6b4-12f7f73c68f3"; // ozkkhalouf@gmail.com — owner بلام واحدة
+  const STAFF = "0effbc8d-e290-48c0-a6ba-96c91f492041"; // ozk.kh@outlook.com — employee
+  assert.deepEqual([...policy.OWNER_PUSH_RECIPIENT_IDS], [MAIN], "مستلم واحد فقط");
+  assert.equal(isAuthorizedRecipient({ id: MAIN, app_metadata: { role: "owner" } }), true);
+  assert.equal(isAuthorizedRecipient({ id: MAIN.toUpperCase(), app_metadata: { role: " Owner " } }), true);
+  assert.equal(isAuthorizedRecipient({ id: ALIAS, app_metadata: { role: "owner" } }), false, "حساب owner آخر لا يستلم");
+  assert.equal(isAuthorizedRecipient({ id: STAFF, app_metadata: { role: "employee" } }), false, "الموظف لا يستلم");
+  assert.equal(isAuthorizedRecipient({ id: STAFF, app_metadata: { role: "owner" } }), false, "حتى لو صار owner لا يستلم بلا قرار");
+  assert.equal(isAuthorizedRecipient({ id: MAIN, app_metadata: { role: "employee" } }), false, "سحب دور owner يوقف الاستلام");
+  assert.equal(isAuthorizedRecipient({ app_metadata: { role: "owner" } }), false, "بلا معرّف لا استلام");
   for (const role of ["employee", "inventory_counter", "", null, undefined]) {
-    assert.equal(isAuthorizedRecipient({ app_metadata: { role } }), false, `الدور ${role} غير مخوّل`);
+    assert.equal(isAuthorizedRecipient({ id: MAIN, app_metadata: { role } }), false, `الدور ${role} غير مخوّل`);
   }
   assert.equal(isAuthorizedRecipient(null), false);
-  assert.equal(isAuthorizedRecipient({ user_metadata: { role: "owner" } }), false, "user_metadata يكتبه المستخدم فلا يُعتمد");
+  assert.equal(isAuthorizedRecipient({ id: MAIN, user_metadata: { role: "owner" } }), false, "user_metadata يكتبه المستخدم فلا يُعتمد");
 
   assert.equal(classifyPushError(404), "expired");
   assert.equal(classifyPushError(410), "expired");
@@ -81,7 +91,7 @@ const policy = loadTs("supabase/functions/web-push/policy.ts");
   assert.equal(outboxOutcome({ accepted: 0, failed: 2, transientOnly: true }, 0).status, "pending");
   assert.equal(outboxOutcome({ accepted: 0, failed: 2, transientOnly: true }, 2).status, "failed", "حد إعادة المحاولة");
   assert.equal(outboxOutcome({ accepted: 0, failed: 2, transientOnly: false }, 0, "boom").last_error, "boom");
-  console.log("  ✓ policy.ts: مالك فقط، تصنيف الأخطاء، TTL 24س، تجاوز القديم، وسم فريد، حالة الصندوق");
+  console.log("  ✓ policy.ts: مستلم واحد بالمعرّف + دور owner، تصنيف الأخطاء، TTL 24س، تجاوز القديم، وسم فريد، حالة الصندوق");
 }
 
 // ── ٢) Edge Function تحت عملاء وهميين ─────────────────────────────────────────────────────
@@ -168,9 +178,14 @@ async function runEdge({ db, usersById, responder = () => 201, missingColumns = 
   return { status: res.status, body: await res.json(), sent: push.sent, db, log: admin.log };
 }
 
-const OWNER = "00000000-0000-0000-0000-00000000000a";
-const EMPLOYEE = "00000000-0000-0000-0000-00000000000b";
-const users = { [OWNER]: { id: OWNER, app_metadata: { role: "owner" } }, [EMPLOYEE]: { id: EMPLOYEE, app_metadata: { role: "employee" } } };
+const OWNER = "3e5f16bb-1cc5-4acd-ade0-7189e54d7dde"; // ozkkhallouf@gmail.com
+const OWNER_ALIAS = "9724dbe4-ecb0-49f7-a6b4-12f7f73c68f3"; // ozkkhalouf@gmail.com (owner، غير مستلم)
+const EMPLOYEE = "0effbc8d-e290-48c0-a6ba-96c91f492041"; // ozk.kh@outlook.com
+const users = {
+  [OWNER]: { id: OWNER, app_metadata: { role: "owner" } },
+  [OWNER_ALIAS]: { id: OWNER_ALIAS, app_metadata: { role: "owner" } },
+  [EMPLOYEE]: { id: EMPLOYEE, app_metadata: { role: "employee" } }
+};
 const secrets = [
   { name: "web_push_dispatch_token", value: "t".repeat(40) },
   { name: "web_push_vapid_public_key", value: "pub" },
@@ -184,12 +199,14 @@ const msg = (id, event_type, extra = {}) => ({ id, event_type, title: `عنوا�
   // حساب غير مالك + اشتراك منتهٍ + دفعة من الأمين
   const db = {
     app_secrets: secrets.map((s) => ({ ...s })),
-    web_push_subscriptions: [sub(1, OWNER, "https://fcm/mac"), sub(2, OWNER, "https://fcm/old"), sub(3, EMPLOYEE, "https://fcm/emp")],
+    web_push_subscriptions: [sub(1, OWNER, "https://fcm/mac"), sub(2, OWNER, "https://fcm/old"), sub(3, EMPLOYEE, "https://fcm/emp"), sub(5, OWNER_ALIAS, "https://fcm/alias")],
     web_push_outbox: [msg(10, "ameen_payment")]
   };
   const r = await runEdge({ db, usersById: users, responder: (e) => (e === "https://fcm/old" ? 410 : 201) });
   assert.equal(r.status, 200);
-  assert.deepEqual(r.sent.map((s) => s.endpoint).sort(), ["https://fcm/mac", "https://fcm/old"], "لا إرسال لحساب الموظف");
+  assert.deepEqual(r.sent.map((s) => s.endpoint).sort(), ["https://fcm/mac", "https://fcm/old"], "لا إرسال لحساب الموظف ولا لحساب owner الآخر");
+  assert.equal(db.web_push_subscriptions[3].enabled, true, "اشتراك الحساب الآخر لا يُعطَّل ولا يُحذف");
+  assert.equal(db.web_push_subscriptions[3].last_success_at, undefined);
   assert.ok(r.sent.every((s) => s.options.TTL === 86400), "TTL 24 ساعة");
   assert.equal(db.web_push_subscriptions[1].enabled, false, "الاشتراك المنتهي (410) يُعطَّل");
   assert.equal(db.web_push_subscriptions[1].last_error, "expired:410");
@@ -200,7 +217,7 @@ const msg = (id, event_type, extra = {}) => ({ id, event_type, title: `عنوا�
   assert.equal(row.provider_failed, 1);
   assert.equal(r.body.recipients, 2);
   assert.equal(r.sent[0].payload.notification.require_interaction, true);
-  console.log("  ✓ dispatch: مالك فقط، 410 يُعطَّل، TTL 24س، وعدّاد قبول المزود منفصل عن الظهور");
+  console.log("  ✓ dispatch: ozkkhallouf@gmail.com وحده (لا الموظف ولا owner الآخر)، 410 يُعطَّل، TTL 24س، وعدّاد قبول المزود منفصل عن الظهور");
 }
 {
   // ثلاث رسائل متتالية من النوع نفسه

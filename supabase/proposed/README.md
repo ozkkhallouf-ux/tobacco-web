@@ -233,5 +233,5 @@ definition لهذا المراقب، وقد جرى تعديله (PR #220) بإص
 - **الملفات:** `23-web-push-explicit-allowlist.sql` و`23-web-push-explicit-allowlist-rollback.sql`، وبيئة الاختبار `../tests/web-push-allowlist-env.sql` (جسم الإنتاج الحرفي)، والحارس `../../scripts/check-web-push-delivery.mjs`.
 - **ما يفعله:** `public.web_push_allowed_event_types()` قائمة صريحة (22 نوعاً)، ومرآة تُسقط ما عداها وتتجاهل النص نفسه خلال 30 دقيقة، وأعمدة `source_telegram_id` و`provider_accepted` و`provider_failed` بتعليقات تقول إن القبول ليس ظهوراً. لا Cron ولا `notify_telegram` ولا backfill.
 - **البصمات:** جسم المرآة قبل `d1e5f0e91bd925e3a6cd02cf1c5b6a66` ⇒ بعد `2b7bf2592546534cca021a7f1a558f0c`. الهجرة ترفض أي انحراف، وإعادة تطبيقها مرفوضة.
-- **شرط الترتيب:** تُنشر Edge Function `web-push` الجديدة **قبلها** (تقييد المستلمين بدور owner)، وإلا وصلت الأنواع المالية الجديدة لكل اشتراك مفعّل.
+- **شرط الترتيب:** تُنشر Edge Function `web-push` الجديدة **قبلها** (الإرسال لحساب ozkkhallouf@gmail.com وحده بمعرّفه ودور owner)، وإلا وصلت الأنواع المالية الجديدة لكل اشتراك مفعّل.
 - **التراجع:** الملف `-rollback` يعيد جسم الإنتاج حرفياً ويُسقط دالة القائمة، ويرفض إن لم يكن الجسم الحالي جسم 23. الأعمدة تبقى (غير ضارة).

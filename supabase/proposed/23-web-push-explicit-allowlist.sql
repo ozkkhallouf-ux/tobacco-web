@@ -23,7 +23,7 @@
 -- ameen_cost_anomaly، price_sync_partial، price_sync_mismatch، sync_outage_detector_failed، khalil_audit_event.
 --
 -- ما لا يفعله: لا يعيد إرسال أي حدث قديم (يعمل على الإدراجات الجديدة في telegram_outbox فقط، ولا backfill)،
--- ولا يغيّر المستلمين. تقييد المستلمين بدور المالك يتم في Edge Function `web-push` (dispatch)، ولذلك
+-- ولا يغيّر المستلمين. حصر المستلمين بحساب المالك المعتمد (المعرّف + دور owner) يتم في Edge Function `web-push` (dispatch)، ولذلك
 -- **تُنشر الدالة قبل هذه الهجرة** كي لا تصل الأنواع المالية الجديدة لحساب غير مالك.
 --
 -- بصمة جسم الدالة: قبل d1e5f0e91bd925e3a6cd02cf1c5b6a66 (الإنتاج 2026-10-24) ⇒ بعد 2b7bf2592546534cca021a7f1a558f0c.
