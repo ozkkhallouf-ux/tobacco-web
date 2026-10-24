@@ -8,6 +8,12 @@ window.appConfig = {
     "لوحة ويب عربية لإدارة طلبات العملاء، متابعة العمل عن بعد، مراقبة الحالة، وتجهيز الدفع الإلكتروني عند اختيار مزود مناسب.",
   language: "ar",
   paymentStatus: "واجهة جاهزة للربط",
+  // أرشفة المستندات: شارة iCloud مخفية (الكود باقٍ للتراجع)، وشارة Google Drive تُفعَّل
+  // بعد تطبيق الهجرة 22 وتشغيل العامل على OZK2026 بموافقة المالك.
+  documentArchive: {
+    icloudUi: false,
+    driveUi: false
+  },
   staffRoles: {
     "ozk.kh@outlook.com": { name: "موظف OZK", role: "موظف", accessRole: "employee" },
     "ozkkhalouf@gmail.com": { name: "مالك OZK", role: "المالك", accessRole: "owner" },
