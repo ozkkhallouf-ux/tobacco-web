@@ -88,6 +88,7 @@ export const CHECKS = [
   'check-owner-authorization-behavior.mjs',
   'check-ozk-official-font.mjs',
   'check-payment-out-not-invoice.mjs',
+  'check-pdf-scroll-offset.mjs',
   'check-post-deploy-smoke-console-gate.mjs',
   'check-powershell-51-encoding.mjs',
   'check-price-bulletin-export-integrity.mjs',

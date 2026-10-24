@@ -1987,7 +1987,10 @@ async function printOverdueReport() {
     margin: [10, 15, 10, 15],
     filename,
     image: { type: "jpeg", quality: 0.95 },
-    html2canvas: { scale: 2, useCORS: true },
+    // scrollX/scrollY صفر كما في createPortablePdfBlob: html2canvas يطرح إزاحة
+    // تمرير النافذة من موضع الالتقاط، فالزر المضغوط أسفل صفحة ممرّرة كان يُخرج
+    // الجدول مُزاحاً لأسفل ومقصوصاً (أو ورقة بيضاء كاملة إن تجاوز التمرير الورقة).
+    html2canvas: { scale: 2, useCORS: true, scrollX: 0, scrollY: 0 },
     jsPDF: { unit: "mm", format: "a4", orientation: "portrait" }
   }).from(container).save().finally(() => container.remove());
 }
