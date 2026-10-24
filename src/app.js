@@ -7672,9 +7672,9 @@ function amanatWarehousePageMarkup(result) {
   } else {
     const qtyText = (it) => formatQtyCartons({ stockQty: it.qty, unit1Name: it.unit1Name, unit2Name: it.unit2Name, unit2Factor: it.unit2Factor });
     body = `<table class="amanat-table"><thead><tr>
-        <th style="width:11%">${escapeHtml(pdfAr("رقم الصنف"))}</th><th style="width:33%">${escapeHtml(pdfAr("اسم الصنف"))}</th><th style="width:20%">${escapeHtml(pdfAr("المجموعة"))}</th><th style="width:12%">${escapeHtml(pdfAr("الكمية"))}</th><th style="width:9%">${escapeHtml(pdfAr("الوحدة"))}</th><th style="width:15%">${escapeHtml(pdfAr("بالكرتونة"))}</th>
+        <th style="width:44%">${escapeHtml(pdfAr("اسم الصنف"))}</th><th style="width:20%">${escapeHtml(pdfAr("المجموعة"))}</th><th style="width:12%">${escapeHtml(pdfAr("الكمية"))}</th><th style="width:9%">${escapeHtml(pdfAr("الوحدة"))}</th><th style="width:15%">${escapeHtml(pdfAr("بالكرتونة"))}</th>
       </tr></thead><tbody>
-      ${sheet.items.map((it) => `<tr><td>${escapeHtml(it.itemNumber)}</td><td>${pdfArWrap(it.name)}</td><td>${pdfArWrap(it.groupLabel)}</td><td>${escapeHtml(formatMoney(roundPrice(it.qty)))}</td><td>${escapeHtml(pdfAr(it.unit1Name))}</td><td>${escapeHtml(pdfAr(qtyText(it)))}</td></tr>`).join("")}
+      ${sheet.items.map((it) => `<tr><td>${pdfArWrap(it.name)}</td><td>${pdfArWrap(it.groupLabel)}</td><td>${escapeHtml(formatMoney(roundPrice(it.qty)))}</td><td>${escapeHtml(pdfAr(it.unit1Name))}</td><td>${escapeHtml(pdfAr(qtyText(it)))}</td></tr>`).join("")}
       </tbody></table>
       <p class="muted" style="margin-top:6px">${escapeHtml(pdfAr(`عدد الأصناف: ${sheet.items.length} · آخر تحديث للمستودع: ${formatDateTime(sheet.generatedAt)}`))}</p>`;
   }
@@ -7722,7 +7722,9 @@ function inventoryReportPdfMarkup(amanatResult = null) {
   // `part`/`partCount` تخصّان المجموعة الأطول من عمود كامل وحدها: تُقسَّم إلى أجزاء
   // ويحمل كل جزء رأس المجموعة ورقمه (٢/٣) كي يبقى واضحاً أنه استكمال لا مجموعة
   // جديدة، ويعرض عدد أصنافه هو لا عدد المجموعة كلها.
-  const groupMarkup = (group, part = 0, partCount = 1) => `<div class="inventory-group"><table><tbody>
+  // <colgroup> يثبّت العروض المقصودة 48/29/23: بلاه يأخذ table-layout:fixed عروضه من
+  // أول صف، وهو صف المجموعة colspan=3، فتصير الأعمدة أثلاثاً متساوية (≈117px للاسم).
+  const groupMarkup = (group, part = 0, partCount = 1) => `<div class="inventory-group"><table><colgroup><col style="width:48%"><col style="width:29%"><col style="width:23%"></colgroup><tbody>
     <tr class="inventory-group-row"><td colspan="3">${escapeHtml(pdfAr(group.label))}${partCount > 1 ? ` <span class="group-part">${escapeHtml(pdfAr(`${part + 1}/${partCount}`))}</span>` : ""}<span class="group-count">${escapeHtml(group.items.length)}</span></td></tr>
     ${group.items.map((it) => `<tr><td style="width:48%">${pdfArWrap(it.name || "")}</td><td style="width:29%">${escapeHtml(pdfAr(formatQtyCartons(it)))}</td><td style="width:23%">${badgeOf(it)}</td></tr>`).join("")}
   </tbody></table></div>`;

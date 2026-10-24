@@ -1,5 +1,6 @@
 // فحص انحدار لتراكب أسماء الأصناف الطويلة فوق عمودَي الكمية والحالة في تقرير
-// المخزون (وقائمة مستودع الأمانات) — بتخطيط Chromium حقيقي بخط Cairo الرسمي.
+// المخزون (وقائمة مستودع الأمانات) — بتخطيط Chromium حقيقي بخط Cairo الرسمي —
+// ولعروض الأعمدة: الاسم 48% في التقرير الرئيسي، و44% في صفحة الأمانات بلا «رقم الصنف».
 //
 // العطل الذي يحرسه: الاسم كان يُمرَّر عبر pdfAr وحدها، وهي تحوّل كل مسافة إلى
 // مسافة ثابتة (U+00A0) لا ينكسر عندها السطر أبداً. الخلية عرضها ثابت
@@ -62,7 +63,8 @@ try {
   const res = await page.evaluate(async ({ names, faces }) => {
     const row = (cell) => '<tr><td style="width:48%">' + cell + '</td><td style="width:29%">'
       + escapeHtml(pdfAr("37 كرتونة")) + '</td><td style="width:23%"><span class="status-active">متوفّر</span></td></tr>';
-    const table = (fn) => '<div class="inventory-columns"><div class="inventory-column"><div class="inventory-group"><table><tbody>'
+    const table = (fn, cols) => '<div class="inventory-columns"><div class="inventory-column"><div class="inventory-group"><table>'
+      + (cols ? '<colgroup><col style="width:48%"><col style="width:29%"><col style="width:23%"></colgroup>' : '') + '<tbody>'
       + '<tr class="inventory-group-row"><td colspan="3">' + escapeHtml(pdfAr("كابتن بلاك")) + '<span class="group-count">6</span></td></tr>'
       + names.map((n) => row(fn(n))).join("") + '</tbody></table></div></div><div class="inventory-column"></div></div>';
     const style = document.createElement("style");
@@ -70,11 +72,13 @@ try {
     document.head.appendChild(style);
     document.body.innerHTML = REPORT_STYLE + INVENTORY_REPORT_STYLE
       + '<div class="ozk-rpt inventory-rpt"><section id="old">' + table((n) => escapeHtml(pdfAr(n))) + '</section>'
-      + '<section id="new">' + table(pdfArWrap) + '</section></div>';
+      + '<section id="new">' + table(pdfArWrap, true) + '</section></div>';
     await document.fonts.ready;
     const measure = (id) => [...document.querySelectorAll("#" + id + " tr:not(.inventory-group-row) td:first-child")].map((td) => ({
       overflow: td.scrollWidth - td.clientWidth,
-      text: td.textContent
+      text: td.textContent,
+      share: td.getBoundingClientRect().width / td.closest("table").getBoundingClientRect().width,
+      rowOverflow: [...td.parentElement.children].some((c) => c.scrollWidth - c.clientWidth > 1)
     }));
     return {
       cairo: document.fonts.check('10px "Cairo"', "كابتن"),
@@ -91,6 +95,9 @@ try {
     oldOver >= 3);
   const over = res.now.map((c, i) => (c.overflow > 1 ? `${i + 1}:${c.overflow}px` : null)).filter(Boolean);
   check(`لا اسم يفيض عن خليته بعد الإصلاح (${over.join(",") || "صفر"})`, over.length === 0);
+  check(`عمود الاسم بعرضه المقصود ≈48% لا ثلث (${Math.round(res.now[0].share * 100)}%)`,
+    res.now.every((c) => c.share > 0.45 && c.share < 0.51));
+  check("لا خلية كمية أو حالة تفيض في الصفوف نفسها", res.now.every((c) => !c.rowOverflow));
   check("نص الاسم محفوظ حرفياً بلا حذف ولا اختصار",
     res.now.every((c, i) => c.text === res.expected[i]));
   check("لا فرصة كسر بين مسافة ورقم يليها (تسقط المسافة على مسار الهاتف)",
@@ -103,11 +110,33 @@ try {
   await browser.close();
 }
 
-// حرّاس نصّيون: موضعا الاسم يستخدمان النسخة القابلة للالتفاف.
+// حرّاس نصّيون: موضعا الاسم يستخدمان النسخة القابلة للالتفاف، وأعمدة التقرير الرئيسي
+// ثلاثة فقط (الاسم، الكمية، الحالة) بعروضها المقصودة — لا عمود رمز/رقم صنف فيه.
+const groupSrc = appJs.match(/const groupMarkup = \(group, part = 0, partCount = 1\) => `[\s\S]*?<\/table><\/div>`;/)?.[0] || "";
+check("groupMarkup مستخرج", Boolean(groupSrc));
+check("التقرير الرئيسي يثبّت العروض 48/29/23 بـcolgroup",
+  groupSrc.includes('<colgroup><col style="width:48%"><col style="width:29%"><col style="width:23%"></colgroup>'));
+check("صف الصنف في التقرير الرئيسي ثلاث خلايا فقط",
+  (groupSrc.match(/group\.items\.map\(\(it\) => `<tr>([\s\S]*?)<\/tr>`/)?.[1].match(/<td/g) || []).length === 3);
+check("لا رمز/رقم صنف في التقرير الرئيسي",
+  !/itemNumber|itemCode|رقم الصنف|رمز المادة|الكود/.test(groupSrc));
 check("تقرير المخزون: خلية الاسم عبر pdfArWrap",
   appJs.includes('<td style="width:48%">${pdfArWrap(it.name || "")}</td>'));
 check("قائمة الأمانات: الاسم والمجموعة عبر pdfArWrap",
-  appJs.includes("<td>${pdfArWrap(it.name)}</td><td>${pdfArWrap(it.groupLabel)}</td>"));
+  appJs.includes("<tr><td>${pdfArWrap(it.name)}</td><td>${pdfArWrap(it.groupLabel)}</td>"));
+// قرار عمر (2026-10-24): «رقم الصنف» يُحذف من صفحة الأمانات **المطبوعة** وحدها، ويتّسع
+// الاسم (33% ← 44%). البيانات نفسها باقية: ورقة Excel للأمانات تحمل رقم الصنف كما هي.
+const amanatSrc = appJs.match(/function amanatWarehousePageMarkup\(result\) \{[\s\S]*?\n\}\n/)?.[0] || "";
+check("amanatWarehousePageMarkup مستخرج", Boolean(amanatSrc));
+check("صفحة الأمانات المطبوعة بلا عمود «رقم الصنف»",
+  !amanatSrc.includes("رقم الصنف") && !/escapeHtml\(it\.itemNumber\)/.test(amanatSrc));
+check("عمود اسم الصنف في صفحة الأمانات 44%",
+  amanatSrc.includes('<th style="width:44%">${escapeHtml(pdfAr("اسم الصنف"))}</th>'));
+const amanatWidths = [...(amanatSrc.match(/<thead>[\s\S]*?<\/thead>/)?.[0] || "").matchAll(/width:(\d+)%/g)].map((m) => +m[1]);
+check(`عروض أعمدة الأمانات مجموعها 100% (${amanatWidths.join("+")})`,
+  amanatWidths.length === 5 && amanatWidths.reduce((a, b) => a + b, 0) === 100);
+check("ورقة Excel للأمانات ما زالت تحمل رقم الصنف (لا حذف بيانات)",
+  /const AMANAT_SHEET_HEADERS = \["رقم الصنف",/.test(appJs) && /sheet\.items\.map\(\(it\) => \[it\.itemNumber, it\.name/.test(appJs));
 
 if (failed) {
   console.error("\ninventory report name-wrap check FAILED");

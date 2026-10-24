@@ -54,7 +54,7 @@ if (failed) process.exit(1);
 // نفس بنية groupMarkup في inventoryReportPdfMarkup حرفياً (بما فيها رقم الجزء).
 const BUILDER = `
 const esc=(v)=>String(v==null?"":v).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;");
-const renderGroup=(g,part=0,partCount=1)=>'<div class="inventory-group"><table><tbody>'
+const renderGroup=(g,part=0,partCount=1)=>'<div class="inventory-group"><table><colgroup><col style="width:48%"><col style="width:29%"><col style="width:23%"></colgroup><tbody>'
  +'<tr class="inventory-group-row"><td colspan="3">'+esc(g.label)
  +(partCount>1?' <span class="group-part">'+esc((part+1)+"/"+partCount)+'</span>':'')
  +'<span class="group-count">'+g.items.length+'</span></td></tr>'
