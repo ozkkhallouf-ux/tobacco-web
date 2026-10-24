@@ -226,3 +226,12 @@ definition لهذا المراقب، وقد جرى تعديله (PR #220) بإص
 - **التنفيذ:** بموافقة المالك فقط، طلب واحد أو `psql --single-transaction -f supabase/proposed/21-ameen-invoice-events-concurrent-duplicates-rollback.sql`. لا يُحذف ملف `../migrations/20261024145946_…` ولا يُعدَّل؛ إن طُبِّق التراجع على الإنتاج يُسجَّل بإصداره كهجرة جديدة.
 - **التحقق:** `md5(prosrc)` لـ`public.apply_ameen_invoice_events(jsonb)` يعود `dfe57bcce86afe4556ddddc6c4b1357a` (جسم 18)، ويبقى المالك وSECURITY DEFINER و`search_path=''` والـACL (`postgres` و`authenticated` فقط) كما هي.
 - **الحدود:** يستبدل جسم الدالة وحده؛ لا يمسّ `ameen_invoices` ولا `ameen_invoice_events` ولا `ameen_invoice_dirty_days` ولا السياسات، وما سُجِّل من أحداث يبقى. بعد التراجع يعود عيب Codex P1 (حدث مكرر في طلبين متزامنين أو مهلة قفل عابرة ⇒ `rejected` يعزله الوكيل)، فلا يُفعَّل الإرسال على جسم 18.
+
+## 23: قائمة صريحة لأنواع Web Push ومنع التكرار وسجل قبول المزود (2026-10-24) — غير مطبَّق على الإنتاج
+
+- **السبب:** مرآة Telegram ← Push كانت بأنماط أسقطت `ameen_payment` و`customer_request` (88 من 510 حدثاً صارت Push خلال 7 أيام). تقرير التدقيق: `/mnt/project-files/notifications-audit/audit-2026-10-24.md`.
+- **الملفات:** `23-web-push-explicit-allowlist.sql` و`23-web-push-explicit-allowlist-rollback.sql`، وبيئة الاختبار `../tests/web-push-allowlist-env.sql` (جسم الإنتاج الحرفي)، والحارس `../../scripts/check-web-push-delivery.mjs`.
+- **ما يفعله:** `public.web_push_allowed_event_types()` قائمة صريحة (22 نوعاً)، ومرآة تُسقط ما عداها وتتجاهل النص نفسه خلال 30 دقيقة، وأعمدة `source_telegram_id` و`provider_accepted` و`provider_failed` بتعليقات تقول إن القبول ليس ظهوراً. لا Cron ولا `notify_telegram` ولا backfill.
+- **البصمات:** جسم المرآة قبل `d1e5f0e91bd925e3a6cd02cf1c5b6a66` ⇒ بعد `2b7bf2592546534cca021a7f1a558f0c`. الهجرة ترفض أي انحراف، وإعادة تطبيقها مرفوضة.
+- **شرط الترتيب:** تُنشر Edge Function `web-push` الجديدة **قبلها** (تقييد المستلمين بدور owner)، وإلا وصلت الأنواع المالية الجديدة لكل اشتراك مفعّل.
+- **التراجع:** الملف `-rollback` يعيد جسم الإنتاج حرفياً ويُسقط دالة القائمة، ويرفض إن لم يكن الجسم الحالي جسم 23. الأعمدة تبقى (غير ضارة).
