@@ -136,7 +136,7 @@ function fakeAdmin(db, { usersById, missingColumns = false, sessionUser = null }
         admin: {
           getUserById: async (id) => (usersById[id] instanceof Error
             ? { data: { user: null }, error: usersById[id] }
-            : { data: { user: usersById[id] ?? null }, error: usersById[id] ? null : new Error("missing") })
+            : { data: { user: usersById[id] ?? null }, error: usersById[id] ? null : Object.assign(new Error("User not found"), { status: 404 }) })
         }
       }
     }
@@ -272,7 +272,7 @@ const msg = (id, event_type, extra = {}) => ({ id, event_type, title: `عنوا�
   console.log("  ✓ أخطاء المزود: العابر يُعاد 3 مرات كحد أقصى، والدائم يُسجَّل بلا تعطيل");
 }
 {
-  // لا مالك مشترك، أو تعذّر قراءة المستخدم ⇒ لا إرسال لأحد
+  // تعذّر قراءة الحساب المدرج (عطل Auth عابر) ⇒ لا إرسال لأحد، والرسالة تبقى pending بلا زيادة attempts
   const db = {
     app_secrets: secrets.map((s) => ({ ...s })),
     web_push_subscriptions: [sub(3, EMPLOYEE, "https://fcm/emp"), sub(4, OWNER, "https://fcm/mac")],
@@ -280,8 +280,41 @@ const msg = (id, event_type, extra = {}) => ({ id, event_type, title: `عنوا�
   };
   const r = await runEdge({ db, usersById: { [EMPLOYEE]: users[EMPLOYEE], [OWNER]: new Error("auth down") } });
   assert.equal(r.sent.length, 0, "فشل التحقق من الدور = لا إرسال");
+  assert.equal(r.status, 503);
+  assert.equal(r.body.error, "recipient_lookup_failed");
+  assert.equal(db.web_push_outbox[0].status, "pending", "عطل التحقق لا يُسقط الرسالة");
+  assert.equal(db.web_push_outbox[0].attempts, 0);
+  assert.equal(r.log.updates.filter((u) => u.table === "web_push_outbox").length, 0);
+  // بعد التعافي: التشغيل التالي يرسلها للمالك وحده
+  const r2 = await runEdge({ db, usersById: users });
+  assert.deepEqual(r2.sent.map((x) => x.endpoint), ["https://fcm/mac"]);
+  assert.equal(db.web_push_outbox[0].status, "sent");
+  console.log("  ✓ تعذّر التحقق من الدور لا يفتح الإرسال ولا يُسقط الرسالة؛ تُرسل بعد التعافي");
+}
+{
+  // رفض مؤكد: الحساب المدرج غير موجود (404) ⇒ لا مستلم، والرسالة failed بلا إعادة
+  const db = {
+    app_secrets: secrets.map((s) => ({ ...s })),
+    web_push_subscriptions: [sub(3, EMPLOYEE, "https://fcm/emp"), sub(4, OWNER, "https://fcm/mac")],
+    web_push_outbox: [msg(52, "payment")]
+  };
+  const r = await runEdge({ db, usersById: { [EMPLOYEE]: users[EMPLOYEE] } });
+  assert.equal(r.sent.length, 0);
+  assert.equal(db.web_push_outbox[0].status, "failed");
   assert.equal(db.web_push_outbox[0].last_error, "no_authorized_subscriptions");
-  console.log("  ✓ حساب غير مخوّل لا يستلم، وتعذّر التحقق من الدور لا يفتح الإرسال");
+  console.log("  ✓ حساب غير موجود رفض مؤكد: لا إرسال لغيره");
+}
+{
+  // عطل قراءة حساب غير مدرج لا يوقف الجولة: لا يُستعلم عنه أصلاً
+  const db = {
+    app_secrets: secrets.map((s) => ({ ...s })),
+    web_push_subscriptions: [sub(3, EMPLOYEE, "https://fcm/emp"), sub(5, OWNER_ALIAS, "https://fcm/alias"), sub(4, OWNER, "https://fcm/mac")],
+    web_push_outbox: [msg(53, "payment")]
+  };
+  const r = await runEdge({ db, usersById: { [EMPLOYEE]: new Error("auth down"), [OWNER_ALIAS]: new Error("auth down"), [OWNER]: users[OWNER] } });
+  assert.deepEqual(r.sent.map((x) => x.endpoint), ["https://fcm/mac"]);
+  assert.equal(db.web_push_outbox[0].status, "sent");
+  console.log("  ✓ الحسابات خارج القائمة لا يُستعلم عنها ولا تستلم");
 }
 {
   // الدالة الجديدة قبل تطبيق الهجرة: الأعمدة الجديدة غائبة ⇒ يُكتب السجل بدونها

@@ -4,6 +4,7 @@ import {
   buildMessagePayload,
   classifyPushError,
   isAuthorizedRecipient,
+  isListedRecipientId,
   isStale,
   outboxOutcome,
   PUSH_TTL_SECONDS,
@@ -32,19 +33,25 @@ type Admin = ReturnType<typeof createClient>;
 type PushSubscriptionRow = { id: number; user_id: string; endpoint: string; p256dh: string; auth_key: string };
 
 // المستلمون: اشتراكات الحساب المعتمد لإشعارات المالك وحده (isAuthorizedRecipient: المعرّف + دور owner).
-// أي حساب آخر (موظف، owner آخر، عدّاد جرد) لا يستلم حتى لو كان له اشتراك مفعّل، ولا يُعطَّل اشتراكه.
-// فشل قراءة مستخدم ⇒ يُستبعد (لا إرسال بلا تحقق).
-async function authorizedSubscriptions(admin: Admin, all: PushSubscriptionRow[]) {
-  const roleByUser = new Map<string, boolean>();
-  for (const userId of new Set(all.map((sub) => String(sub.user_id)))) {
+// أي حساب آخر (موظف، owner آخر، عدّاد جرد) لا يستلم حتى لو كان له اشتراك مفعّل، ولا يُعطَّل اشتراكه،
+// ولا يُستعلم عنه أصلاً لأن معرّفه خارج القائمة.
+// تعذّر التحقق من حساب مدرج (شبكة/5xx من Auth) ⇒ null: لا إرسال، والجولة تتوقف والرسائل تبقى pending.
+// «غير موجود» (404) أو دور غير owner رفض مؤكد ⇒ يُستبعد الحساب.
+async function authorizedSubscriptions(admin: Admin, all: PushSubscriptionRow[]): Promise<PushSubscriptionRow[] | null> {
+  const authorized = new Set<string>();
+  for (const userId of new Set(all.map((sub) => String(sub.user_id)).filter(isListedRecipientId))) {
     try {
       const { data, error } = await admin.auth.admin.getUserById(userId);
-      roleByUser.set(userId, !error && isAuthorizedRecipient(data?.user));
+      if (error) {
+        if (Number((error as { status?: number }).status) === 404) continue;
+        return null;
+      }
+      if (isAuthorizedRecipient(data?.user)) authorized.add(userId);
     } catch {
-      roleByUser.set(userId, false);
+      return null;
     }
   }
-  return all.filter((sub) => roleByUser.get(String(sub.user_id)) === true);
+  return all.filter((sub) => authorized.has(String(sub.user_id)));
 }
 
 // الأعمدة provider_accepted/provider_failed تضيفها proposed/23. إن لم تُطبَّق بعد، يُكتب السجل بدونها
@@ -90,6 +97,8 @@ async function dispatchOutbox(admin: Admin) {
   ]);
   if (messageError || subscriptionError) return json({ error: "load_failed" }, 500);
   const subscriptions = await authorizedSubscriptions(admin, (allSubscriptions || []) as PushSubscriptionRow[]);
+  // عطل تحقق عابر لا يُسقط الرسائل: تبقى pending بلا زيادة attempts، ويعيدها التشغيل التالي.
+  if (!subscriptions) return json({ ok: false, error: "recipient_lookup_failed", deferred: (messages || []).length }, 503);
 
   let sent = 0;
   let failed = 0;

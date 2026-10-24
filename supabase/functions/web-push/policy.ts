@@ -36,10 +36,13 @@ export const OWNER_PUSH_RECIPIENT_IDS: readonly string[] = ["3e5f16bb-1cc5-4acd-
 
 // الشرطان معاً: المعرّف في القائمة، والدور owner في app_metadata (المصدر نفسه لـpublic.is_owner()).
 // سحب دور owner من الحساب يوقف الاستلام حتى لو بقي معرّفه هنا.
+export function isListedRecipientId(id: unknown): boolean {
+  return OWNER_PUSH_RECIPIENT_IDS.includes(String(id ?? "").trim().toLowerCase());
+}
+
 export function isAuthorizedRecipient(user: MaybeUser): boolean {
-  const id = String(user?.id ?? "").trim().toLowerCase();
   const role = String(user?.app_metadata?.role ?? "").trim().toLowerCase();
-  return role === "owner" && OWNER_PUSH_RECIPIENT_IDS.includes(id);
+  return role === "owner" && isListedRecipientId(user?.id);
 }
 
 export type PushErrorKind = "expired" | "transient" | "rejected";
