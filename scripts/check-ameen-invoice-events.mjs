@@ -214,15 +214,19 @@ assert.match(rollback, /drop view if exists public\.ameen_invoice_daily_totals;/
 assert.match(rollback, /drop function if exists public\.apply_ameen_invoice_events\(jsonb\);/);
 assert.doesNotMatch(rollback, /inventory_reports|is_staff|ameen_price_sync_status/);
 
-// طُبِّقت 18 على الإنتاج (2026-10-22) وسُجِّلت بإصدار واحد: هجرة وحيدة في السلسلة تحمل هذه الكائنات،
-// ونصّها مطابق حرفياً لما طُبِّق (proposed/18) — أي تعديل لاحق يأتي بهجرة جديدة لا بتحرير هذه.
+// طُبِّقت 18 على الإنتاج (2026-10-22) ثم 21 (2026-10-24)، وسُجِّلت كل منهما بإصدارها على الإنتاج: هجرتان
+// فقط في السلسلة تحملان هذه الكائنات، ونصّ كل منهما مطابق حرفياً لما طُبِّق (proposed/18 وproposed/21) —
+// أي تعديل لاحق يأتي بهجرة جديدة لا بتحرير هاتين.
 {
-  const appliedRel = "supabase/migrations/20261022034859_ameen_invoice_events.sql";
+  const applied18Rel = "supabase/migrations/20261022034859_ameen_invoice_events.sql";
+  const applied21Rel = "supabase/migrations/20261024145946_ameen_invoice_events_concurrent_duplicates.sql";
   const carriers = readdirSync(path.join(root, "supabase/migrations"))
     .filter((n) => n.endsWith(".sql"))
-    .filter((f) => /apply_ameen_invoice_events|public\.ameen_invoices\b/.test(readFileSync(path.join(root, "supabase/migrations", f), "utf8")));
-  assert.deepEqual(carriers, [path.basename(appliedRel)], "هجرة واحدة فقط تحمل كائنات 18، بالإصدار المسجَّل على الإنتاج");
-  assert.equal(read(appliedRel), read(migrationRel), `${appliedRel}: يجب أن تطابق proposed/18 حرفياً`);
+    .filter((f) => /apply_ameen_invoice_events|public\.ameen_invoices\b/.test(readFileSync(path.join(root, "supabase/migrations", f), "utf8")))
+    .sort();
+  assert.deepEqual(carriers, [path.basename(applied18Rel), path.basename(applied21Rel)], "هجرتان فقط تحملان كائنات 18/21، بالإصدارين المسجَّلين على الإنتاج");
+  assert.equal(read(applied18Rel), read(migrationRel), `${applied18Rel}: يجب أن تطابق proposed/18 حرفياً`);
+  assert.equal(read(applied21Rel), read("supabase/proposed/21-ameen-invoice-events-concurrent-duplicates.sql"), `${applied21Rel}: يجب أن تطابق proposed/21 حرفياً`);
 }
 
 // الوكيل والمكتبة: قراءة فقط، لا تسجيل مهمة، لا إرسال افتراضي.
