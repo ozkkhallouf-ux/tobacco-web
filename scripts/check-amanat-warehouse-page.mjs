@@ -72,6 +72,7 @@ const ENGINE = [
   fnSrc("inventoryWorkbookSheets"),
   fnSrc("amanatWarehousePageMarkup"),
   fnSrc("pdfAr"),
+  fnSrc("pdfArWrap"),
   fnSrc("formatQtyCartons")
 ].join("\n");
 if (failed) {
