@@ -63,6 +63,7 @@ export const CHECKS = [
   'check-inventory-report-phone-pdf.mjs',
   'check-inventory-report-print-pages.mjs',
   'check-invoice-brand-isolation.mjs',
+  'check-invoice-debit-match.mjs',
   'check-invoice-discount-not-receipt.mjs',
   'check-invoice-document-integrity.mjs',
   'check-invoice-input-unit.mjs',
