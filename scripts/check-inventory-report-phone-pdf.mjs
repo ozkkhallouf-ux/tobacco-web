@@ -41,7 +41,7 @@ const ENGINE = [
   ...["normalizeItemName", "isPriorityInventoryGroup", "inventoryPageGeometry", "inventoryPackPages",
     "inventoryBalanceLastPage", "inventoryTwoColumnPages", "measureInventoryReportBlocks",
     "splitOversizedInventoryEntries", "inventoryReportPages", "canvasInkRatio",
-    "trimTrailingPortablePdfDecorations", "createPortablePdfBlob"].map(fn)
+    "trimTrailingPortablePdfDecorations", "pinArabicSpacesForCanvas", "createPortablePdfBlob"].map(fn)
 ].join("\n");
 if (failed) process.exit(1);
 
