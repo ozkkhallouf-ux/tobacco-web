@@ -86,6 +86,7 @@ export const CHECKS = [
   'check-migration-drift-guard.mjs',
   'check-movement-line-kinds.mjs',
   'check-new-duplicate-guid-guard.mjs',
+  'check-overdue-report-print-path.mjs',
   'check-owner-authorization-behavior.mjs',
   'check-ozk-official-font.mjs',
   'check-payment-out-not-invoice.mjs',
