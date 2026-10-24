@@ -6986,6 +6986,19 @@ function pdfAr(s) {
   return String(s == null ? "" : s).replace(/ /g, " ");
 }
 
+// مثل pdfAr لكن **قابل للالتفاف**، ويعيد HTML مهرَّباً جاهزاً. المسافة الثابتة
+// وحدها لا تنكسر أبداً، فالاسم الأطول من خليته (عرضها ثابت بـtable-layout:fixed)
+// كان يفيض فوق العمود المجاور ويتراكب معه — قِيس بأسماء النشرة الحقيقية: «كابتن
+// بلاك كور ازرق جديد — مع قداحات» يفيض 34px فوق عمودَي الكمية والحالة.
+// <wbr> بعد كل مسافة ثابتة يعيد فرصة الكسر بين الكلمات من غير أن يعيد المسافة
+// العادية التي يسقطها html2canvas، فيبقى الحرف ظاهراً على المسارين.
+// لا كسر بين مسافة ورقم يليها («بلاك 11»، «قداحات 1»): <wbr> هناك يقسم العقدة
+// النصية عند تبدّل الاتجاه فيسقط html2canvas المسافة («بلاك11») — قِيس على مسار
+// الهاتف — والرقم يبقى ملتصقاً بكلمته قبله وهو المطلوب أصلاً.
+function pdfArWrap(s) {
+  return escapeHtml(pdfAr(s)).replace(/\u00a0(?![0-9\u0660-\u0669])/g, "\u00a0<wbr>");
+}
+
 // كمية الصنف بالوحدة الكبرى (كرتونة/شرحة/طرد): نفضّل stockQtyUnit2 المحسوبة جاهزةً في
 // مزامنة الأمين، وإلا نقسم كمية الكروز على معامل الوحدة.
 function itemQtyUnit2(it) {
@@ -7654,9 +7667,9 @@ function amanatWarehousePageMarkup(result) {
   } else {
     const qtyText = (it) => formatQtyCartons({ stockQty: it.qty, unit1Name: it.unit1Name, unit2Name: it.unit2Name, unit2Factor: it.unit2Factor });
     body = `<table class="amanat-table"><thead><tr>
-        <th style="width:11%">${escapeHtml(pdfAr("رقم الصنف"))}</th><th style="width:33%">${escapeHtml(pdfAr("اسم الصنف"))}</th><th style="width:20%">${escapeHtml(pdfAr("المجموعة"))}</th><th style="width:12%">${escapeHtml(pdfAr("الكمية"))}</th><th style="width:9%">${escapeHtml(pdfAr("الوحدة"))}</th><th style="width:15%">${escapeHtml(pdfAr("بالكرتونة"))}</th>
+        <th style="width:44%">${escapeHtml(pdfAr("اسم الصنف"))}</th><th style="width:20%">${escapeHtml(pdfAr("المجموعة"))}</th><th style="width:12%">${escapeHtml(pdfAr("الكمية"))}</th><th style="width:9%">${escapeHtml(pdfAr("الوحدة"))}</th><th style="width:15%">${escapeHtml(pdfAr("بالكرتونة"))}</th>
       </tr></thead><tbody>
-      ${sheet.items.map((it) => `<tr><td>${escapeHtml(it.itemNumber)}</td><td>${escapeHtml(pdfAr(it.name))}</td><td>${escapeHtml(pdfAr(it.groupLabel))}</td><td>${escapeHtml(formatMoney(roundPrice(it.qty)))}</td><td>${escapeHtml(pdfAr(it.unit1Name))}</td><td>${escapeHtml(pdfAr(qtyText(it)))}</td></tr>`).join("")}
+      ${sheet.items.map((it) => `<tr><td>${pdfArWrap(it.name)}</td><td>${pdfArWrap(it.groupLabel)}</td><td>${escapeHtml(formatMoney(roundPrice(it.qty)))}</td><td>${escapeHtml(pdfAr(it.unit1Name))}</td><td>${escapeHtml(pdfAr(qtyText(it)))}</td></tr>`).join("")}
       </tbody></table>
       <p class="muted" style="margin-top:6px">${escapeHtml(pdfAr(`عدد الأصناف: ${sheet.items.length} · آخر تحديث للمستودع: ${formatDateTime(sheet.generatedAt)}`))}</p>`;
   }
@@ -7704,9 +7717,11 @@ function inventoryReportPdfMarkup(amanatResult = null) {
   // `part`/`partCount` تخصّان المجموعة الأطول من عمود كامل وحدها: تُقسَّم إلى أجزاء
   // ويحمل كل جزء رأس المجموعة ورقمه (٢/٣) كي يبقى واضحاً أنه استكمال لا مجموعة
   // جديدة، ويعرض عدد أصنافه هو لا عدد المجموعة كلها.
-  const groupMarkup = (group, part = 0, partCount = 1) => `<div class="inventory-group"><table><tbody>
+  // <colgroup> يثبّت العروض المقصودة 48/29/23: بلاه يأخذ table-layout:fixed عروضه من
+  // أول صف، وهو صف المجموعة colspan=3، فتصير الأعمدة أثلاثاً متساوية (≈117px للاسم).
+  const groupMarkup = (group, part = 0, partCount = 1) => `<div class="inventory-group"><table><colgroup><col style="width:48%"><col style="width:29%"><col style="width:23%"></colgroup><tbody>
     <tr class="inventory-group-row"><td colspan="3">${escapeHtml(pdfAr(group.label))}${partCount > 1 ? ` <span class="group-part">${escapeHtml(pdfAr(`${part + 1}/${partCount}`))}</span>` : ""}<span class="group-count">${escapeHtml(group.items.length)}</span></td></tr>
-    ${group.items.map((it) => `<tr><td style="width:48%">${escapeHtml(pdfAr(it.name || ""))}</td><td style="width:29%">${escapeHtml(pdfAr(formatQtyCartons(it)))}</td><td style="width:23%">${badgeOf(it)}</td></tr>`).join("")}
+    ${group.items.map((it) => `<tr><td style="width:48%">${pdfArWrap(it.name || "")}</td><td style="width:29%">${escapeHtml(pdfAr(formatQtyCartons(it)))}</td><td style="width:23%">${badgeOf(it)}</td></tr>`).join("")}
   </tbody></table></div>`;
   // كل مجموعة تُبنى مرة واحدة ثم تُقاس وتُرسم بنفس الـHTML حرفياً — فيستحيل أن
   // يفترق ما قِيس عمّا طُبع. `rows` للمسار الاحتياطي بلا DOM فقط، و`group` يلزم
