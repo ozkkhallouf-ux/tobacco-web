@@ -5,9 +5,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
-const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..", "..", "..");
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const fnDir = path.join(root, "supabase", "functions");
 const SECRET = "z".repeat(48);
 const OWNER_CHAT = "987654321";

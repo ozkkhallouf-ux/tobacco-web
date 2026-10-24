@@ -6,9 +6,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
-const dir = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
+const dir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const fakes = require("./fakes.cjs");
 const { createStore } = require(path.join(dir, "lib", "store.js"));
 const { createArchiver } = require(path.join(dir, "lib", "archiver.js"));

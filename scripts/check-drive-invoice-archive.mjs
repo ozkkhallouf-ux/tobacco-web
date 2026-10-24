@@ -36,7 +36,7 @@ const edgeFn = read("supabase/functions/document-archive-notify/index.ts");
 assert.match(edgeFn, /doc\.append\("chat_id", chat\);/, "المستلم من bot_config وحده");
 assert.doesNotMatch(edgeFn.replace(/^\s*\/\/.*$/gm, ""), /fields\.chat_id|parse_mode|protect_content/, "لا مستلم من الطلب ولا parse_mode");
 assert.match(edgeFn, /timingSafeEqualText\(req\.headers\.get\("x-ozk-archive-secret"\), ARCHIVE_SECRET\)/, "سرّ الدالة إلزامي");
-assert.match(read("supabase/config.toml"), /\[functions\.document-archive-notify\]\nverify_jwt = false/, "verify_jwt=false صريح");
+assert.match(read("supabase/config.toml"), /\[functions\.document-archive-notify\]\r?\nverify_jwt = false/, "verify_jwt=false صريح");
 
 // الأمين قراءة فقط: أنماط الكتابة نفسها التي تفحصها بوابة نشر Windows.
 const gate = JSON.parse(read("tools/deploy-gate/gate-config.example.json"));
