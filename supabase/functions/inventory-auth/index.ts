@@ -170,7 +170,7 @@ async function mutateAccount(req: Request, body: Record<string, unknown>, action
   if (action === "reset_password") {
     if (!validPassword(body.password)) return reply(400, { error: "invalid_password" });
     const { error } = await admin.auth.admin.updateUserById(userId, { password: String(body.password) });
-    if (error) return reply(400, { error: "password_reset_failed" });
+    if (error) return reply(400, { error: error.code === "weak_password" || error.message?.toLowerCase().includes("weak") ? "weak_password" : "password_reset_failed" });
     await admin.from("inventory_counter_accounts").update({ credential_version: Date.now(), updated_at: new Date().toISOString() }).eq("user_id", userId);
   } else if (action === "disable") {
     await admin.from("inventory_counter_accounts").update({ enabled: false, disabled_at: new Date().toISOString(), disabled_by: owner.id, updated_at: new Date().toISOString() }).eq("user_id", userId);
