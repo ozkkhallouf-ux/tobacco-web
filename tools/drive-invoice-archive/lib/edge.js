@@ -10,7 +10,8 @@ class EdgeError extends Error {
 }
 
 function createEdge({ url, secret, fetchImpl = globalThis.fetch, host = "" }) {
-  const base = String(url || "").replace(/\/+$/, "");
+  let base = String(url || "").slice(0, 300);
+  while (base.endsWith("/")) base = base.slice(0, -1); // بلا regex: لا تراجع كارثي على سلسلة شرطات
   if (!/^https:\/\/[a-z0-9-]+\.supabase\.co\/functions\/v1\/document-archive-notify$/.test(base)
     && !/^http:\/\/127\.0\.0\.1:\d+\/document-archive-notify$/.test(base)) {
     throw new EdgeError("REJECTED", "عنوان دالة الإشعار غير معتمد");

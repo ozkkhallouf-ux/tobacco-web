@@ -14,7 +14,8 @@ const DOC_TYPES = Object.freeze({
 const UNSAFE_RE = /[\\/:*?"<>|\u0000-\u001f\u007f؜‎‏‪-‮⁦-⁩]/g;
 
 function safeSegment(value, max = 80) {
-  const flat = String(value == null ? "" : value).replace(UNSAFE_RE, " ").replace(/\s+/g, " ").trim()
+  // قصّ مبكر: يحدّ كلفة التعابير أدناه مهما طال النص القادم من الأمين.
+  const flat = String(value == null ? "" : value).slice(0, max * 4).replace(UNSAFE_RE, " ").replace(/\s+/g, " ").trim()
     .replace(/^[.\s]+|[.\s]+$/g, "");
   return Array.from(flat).slice(0, max).join("").trim();
 }

@@ -149,7 +149,7 @@ Deno.serve(async (req) => {
   if (!timingSafeEqualText(req.headers.get("x-ozk-archive-secret"), ARCHIVE_SECRET)) {
     return json(401, { ok: false, error: "unauthorized" });
   }
-  const route = new URL(req.url).pathname.replace(/\/+$/, "").split("/").pop();
+  const route = new URL(req.url).pathname.split("/").filter(Boolean).pop();
   try {
     if (route === "notify") return await handleNotify(req);
     if (route === "report") return await handleReport(req);
