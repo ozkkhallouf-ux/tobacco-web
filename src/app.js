@@ -6379,29 +6379,94 @@ function movementForBill(custName, billGuid) {
   ) || null;
 }
 
-// حركة الفاتورة في تقرير الحركات: نطابق بمعرّف القيد (GUID) إن وُجد وغير صفري، وإلا بالتاريخ
-// والمبلغ على جهة المدين. سبب الاحتياط: قيود السنة الجديدة (AmnDb002 بعد التدوير) تأتي أحياناً
-// بمعرّف صفري (00000000-...) فيفشل الربط بالمعرّف وحده — وقياس 2026-09-05 على بيانات
-// الإنتاج: **كل** الـ1830 قيداً في التقرير تحمل الصفري، فالربط بالمعرّف لا يعمل عملياً اليوم.
-function invoiceMovement(custName, inv) {
-  const report = state.customerMovementsReport;
-  const items = report && Array.isArray(report.items) ? report.items : [];
-  const match = smartNameMatch(items, (it) => it.name, custName);
-  const movements = match && Array.isArray(match.movements) ? match.movements : [];
-  if (!movements.length) return null;
-  const g = normGuid(inv?.guid);
+// ربط فاتورة البيع بقيدها في دفتر الزبون — الشرط الذي يمنع طبع أرصدة قيد على فاتورة أخرى.
+//
+// العطل الذي يمنعه (فاتورة 1091، أبو جاد فطوم، 2026-10-24): قيود المبيعات تصل كلها
+// بـbillGuid فارغ، فكان زر «فاتورة PDF» يسقط إلى «أول فاتورة بنفس التاريخ» حين تتأخر
+// تفاصيل الفاتورة الأحدث. قيد الفاتورة 1095 (451) طُبع بأصناف 1091 (806.60)، وطُبع
+// الفرق «تسوية على الحساب 355.20» — رقم لا وجود له في الأمين.
+//
+// القاعدة: لا ربط بالتاريخ وحده ولا بالمبلغ وحده ولا بترتيب النتائج. الربط إمّا
+// بمعرّف الفاتورة، أو بتطابق **واحد لواحد**: فاتورة واحدة وقيد مدين واحد للزبون
+// نفسه، بنفس اليوم ونفس المبلغ بالسنت. وفي الحالتين يجب أن يساوي مبلغ القيد قيمة
+// الفاتورة — فاتورة عُدّلت ولم يلحقها أحد التقريرين لا تُربط بقيدها القديم.
+const SALE_BINDING_TOLERANCE = 0.005;
+
+function saleAmountsEqual(a, b) {
+  return Math.abs(Number(a || 0) - Number(b || 0)) <= SALE_BINDING_TOLERANCE;
+}
+
+// كل سطر مدين للزبون بنفس اليوم والمبلغ — أياً كان نوعه، كي يُعدّ أي تشابه التباساً.
+function saleLedgerCandidates(movements, date, amount) {
+  const d = String(date || "").slice(0, 10);
+  return (Array.isArray(movements) ? movements : []).filter((m) =>
+    Number(m?.debit || 0) > 0 && !movementReturnLink(m)
+    && String(m?.date || "").slice(0, 10) === d && saleAmountsEqual(m.debit, amount));
+}
+
+function saleInvoiceCandidates(invoices, date, amount) {
+  const d = String(date || "").slice(0, 10);
+  return (Array.isArray(invoices) ? invoices : []).filter((x) =>
+    x && !x.isReturn && String(x.date || "").slice(0, 10) === d && saleAmountsEqual(x.total, amount));
+}
+
+// يعيد { invoice, movement } عند ربط قاطع، أو { reason } يشرح لماذا تعذّر:
+//   "missing-invoice"  لا تفاصيل فاتورة تطابق القيد (لم تُزامَن بعد غالباً)
+//   "missing-movement" لا قيد في الدفتر يطابق الفاتورة
+//   "ambiguous"        أكثر من فاتورة أو أكثر من قيد بنفس اليوم والمبلغ
+//   "amount-mismatch"  المعرّف يربطهما لكن المبلغين مختلفان (تعديل لم يكتمل تزامنه)
+function bindSaleInvoiceLedger({ movements, invoices, invoice = null, movement = null }) {
+  const rows = Array.isArray(movements) ? movements : [];
+  const invs = Array.isArray(invoices) ? invoices : [];
+  const g = normGuid(invoice?.guid) || normGuid(movement?.billGuid);
   if (g) {
-    const byGuid = movements.find((m) => normGuid(m?.billGuid) === g);
-    if (byGuid) return byGuid;
+    const inv = invoice || invs.find((x) => normGuid(x?.guid) === g && !x.isReturn) || null;
+    const byGuid = rows.filter((m) => normGuid(m?.billGuid) === g && Number(m?.debit || 0) > 0);
+    const mv = movement || (byGuid.length === 1 ? byGuid[0] : null);
+    if (inv && mv) {
+      return saleAmountsEqual(mv.debit, inv.total) ? { invoice: inv, movement: mv } : { reason: "amount-mismatch" };
+    }
+    if (byGuid.length > 1) return { reason: "ambiguous" };
   }
-  const d = String(inv?.date || "").slice(0, 10);
-  const total = Number(inv?.total || 0);
-  for (let i = movements.length - 1; i >= 0; i--) {
-    const m = movements[i];
-    if (d && String(m?.date || "").slice(0, 10) !== d) continue;
-    if (Number(m?.debit || 0) > 0 && Math.abs(Number(m?.debit || 0) - total) <= 0.5) return m;
-  }
-  return null;
+  const date = invoice ? invoice.date : movement?.date;
+  const amount = invoice ? invoice.total : movement?.debit;
+  const pool = invoice && !invs.includes(invoice) ? [...invs, invoice] : invs;
+  const invMatches = saleInvoiceCandidates(pool, date, amount);
+  const mvMatches = saleLedgerCandidates(rows, date, amount);
+  if (invMatches.length > 1 || mvMatches.length > 1) return { reason: "ambiguous" };
+  if (movement && !mvMatches.includes(movement)) return { reason: "ambiguous" };
+  if (!invMatches.length) return { reason: "missing-invoice" };
+  if (!mvMatches.length) return { reason: "missing-movement" };
+  return { invoice: invMatches[0], movement: mvMatches[0] };
+}
+
+// فرق «السابق + الفاتورة − الحسم − الدفعة − الجديد» لا يُطبع إلا إذا أثبتته أسطر حقيقية
+// في **قيد الفاتورة نفسه** (نفس اليوم ونفس رصيدَي السند): سطر فروقات الصندوق 0.50 مثلاً.
+// ما لا تفسّره أسطر القيد ليس تسوية — هو علامة ربط خاطئ أو بيانات ناقصة.
+function invoiceEntryProvesResidual(movements, movement, residual) {
+  if (Math.abs(Number(residual || 0)) <= 0.009) return true;
+  const dp = movement?.docPrev, dn = movement?.docNew;
+  if (dp === undefined || dp === null || dp === "" || dn === undefined || dn === null || dn === "") return false;
+  const d = String(movement?.date || "").slice(0, 10);
+  const net = (Array.isArray(movements) ? movements : []).reduce((sum, m) => {
+    if (m === movement || String(m?.date || "").slice(0, 10) !== d) return sum;
+    if (Number(m?.docPrev) !== Number(dp) || Number(m?.docNew) !== Number(dn)) return sum;
+    const kind = String(m?.lineKind || "");
+    if (kind === "discount" || kind === "sale_payment") return sum;
+    return sum + Number(m?.credit || 0) - Number(m?.debit || 0);
+  }, 0);
+  return Math.abs(roundPrice(net) - roundPrice(residual)) <= 0.009;
+}
+
+// رسالة الرفض المعروضة بدل مستند بأرقام لا نثق بها.
+function saleBindingRefusal(reason, amount, date, item) {
+  const what = `فاتورة بقيمة ${formatMoney(amount)}$ بتاريخ ${String(date || "").slice(0, 10) || "—"}`;
+  const tail = "لم يُصدَّر أي PDF كي لا يحمل المستند أرصدة فاتورة أخرى.";
+  if (reason === "missing-invoice") return `لم أجد تفاصيل ${what} للزبون «${item?.name || ""}». ${customerInvoicesEmptyText(item)} ${tail}`;
+  if (reason === "amount-mismatch") return `قيمة الفاتورة في تفاصيل الفواتير تخالف قيدها في دفتر الحساب (${what}) — يبدو أنها عُدّلت ولم تكتمل المزامنة. أعد المحاولة بعد المزامنة التالية. ${tail}`;
+  if (reason === "missing-movement") return `لم أجد قيد ${what} في دفتر حساب الزبون «${item?.name || ""}» — قد يكون الدفتر لم يُزامَن بعد. ${tail}`;
+  if (reason === "residual") return `أرصدة قيد ${what} لا تُغلق بالحسم والدفعة ولا يفسّر الفرق أي سطر في قيدها. ${tail}`;
+  return `تعذّر ربط ${what} بقيدها بشكل قاطع: يوجد أكثر من فاتورة أو قيد بنفس التاريخ والمبلغ ولا معرّف يميّزها. ${tail}`;
 }
 
 // هل يغطّي دفتر الحركات المحمَّل تاريخ هذا المستند فعلاً؟
@@ -6648,11 +6713,10 @@ function voucherInvoiceBalanceRows(rows, v, cur, balCur, isRet) {
   if (Number(v.payment || 0) > 0.009) {
     rows.push({ label: "دفعة من الزبون", value: `− ${money(v.payment)} ${cur}`, tone: "cred" });
   }
-  // `adjust` فرق **غير منسوب**: ما تبقّى من حركة الحساب بعد طرح الحسم والدفعة
-  // المعروفَين. لا يُسمّى حسماً: مصدر فواتير الأمين لا يفصل الحسم عن الدفعة
-  // (راجع tools/push-customer-invoices.ps1 — الفاتورة تصل بحقول
-  // number/date/guid/total/isReturn/lines فقط)، فتسميته حسماً تطبع دفعة زبون
-  // على أنها حسم في مستند يُسلَّم للزبون.
+  // `adjust` ما تبقّى من حركة الحساب بعد طرح الحسم والدفعة المعروفَين. لا يُسمّى
+  // حسماً (تسميته حسماً تطبع دفعة زبون على أنها حسم). ومسارا التصدير لا يضعانه إلا
+  // إذا أثبتته أسطر حقيقية في قيد الفاتورة نفسه (invoiceEntryProvesResidual)، كسطر
+  // فروقات الصندوق 0.50 — فرق أرصدة بلا سطر يثبته يمنع المستند ولا يُطبع «تسوية».
   if (Number(v.adjust || 0) > 0.009) {
     rows.push({ label: "تسوية على الحساب", value: `− ${money(v.adjust)} ${cur}`, tone: "cred" });
   } else if (Number(v.adjust || 0) < -0.009) {
@@ -13125,56 +13189,62 @@ function render() {
         // الزبون يُمرَّر كعنصر (يحمل customerGuid) لا كاسم — الاسم في تقرير الفواتير
         // مصدره حقل نصّي آخر في الأمين وقد يتخلّف عن اسم الحساب بعد أي تعديل.
         const invs = customerInvoicesFor(item).filter((x) => !x.isReturn);
-        // نطابق الفاتورة التفصيلية بمعرّف القيد (قطعي) أولاً — وعلى كامل التقرير،
-        // لا داخل مجموعة الزبون: معرّف الفاتورة فريد فلا يحتاج معرفة الزبون.
-        // ثم بالتاريخ/المبلغ داخل مجموعة الزبون كاحتياط.
-        const bg = normGuid(el.dataset.billGuid);
+        // سطر الدفتر الذي ضُغط زرّه، من نفس المصدر الذي رُسمت منه القائمة.
+        const ledgerRows = customerFullMovements(item)?.movements || item.recentMovements || [];
         const dOnly = String(el.dataset.date || "").slice(0, 10);
-        const amtMatch = (x) => Math.abs(Number(x.total || 0) - debit) < 1;
-        const dateMatch = (x) => String(x.date || "").slice(0, 10) === dOnly;
+        const sameDoc = (v, raw) => raw === undefined || raw === "" || Number(v) === Number(raw);
+        const clicked = ledgerRows.find((m) => Number(m?.debit || 0) > 0 && !(Number(m?.credit || 0) > 0)
+          && String(m?.date || "").slice(0, 10) === dOnly && saleAmountsEqual(m.debit, debit)
+          && sameDoc(m.docPrev, el.dataset.docPrev) && sameDoc(m.docNew, el.dataset.docNew)) || null;
+        // معرّف الفاتورة (قطعي) على كامل التقرير أولاً، ثم تطابق واحد لواحد بنفس اليوم
+        // والمبلغ — ولا شيء غير ذلك: لا تاريخ وحده، ولا مبلغ وحده، ولا ترتيب النتائج.
+        const bg = normGuid(el.dataset.billGuid);
         const byGuid = bg ? invoiceByGuid(bg) : null;
-        const match = (byGuid && !byGuid.invoice.isReturn ? byGuid.invoice : null)
-          || invs.find((x) => dateMatch(x) && amtMatch(x)) || invs.find((x) => amtMatch(x)) || invs.find((x) => dateMatch(x));
-        if (match) {
-          const total = match.total || debit;
-          const opts = { ...base, cur: "$", type: "invoice", amount: total, no: match.number ? String(match.number) : docNumber("INV"), lines: match.lines || [] };
-          if (storedDocNew !== null && Number.isFinite(storedDocNew)) {
-            opts.newBalance = roundPrice(storedDocNew);
-            const prev = (storedDocPrev !== null && Number.isFinite(storedDocPrev)) ? storedDocPrev : (storedDocNew - debit);
-            opts.prevBalance = roundPrice(prev);
-            // الحسم ودفعة الزبون يُنسبان أولاً، ويبقى ما لا يُنسب «تسوية» صريحة.
-            // (تصحيح 2026-09-05: التعليق السابق هنا كان يقول إن المزامنة لا تجلب
-            // الحقلين. هذا لم يعد صحيحاً — `push-customer-invoices.ps1` يجلب
-            // `TotalDisc` و`FirstPay` على رأس الفاتورة، وفي تقرير الإنتاج الحالي
-            // 67 فاتورة بحسم و58 بدفعة مرافقة من أصل 635.) ما يتبقّى بعد نسبتهما
-            // لا يُسمّى حسماً أبداً، لأن تسميته حسماً تطبع دفعة الزبون على أنها حسم.
-            const knownDiscount = Math.max(0, roundPrice(Number(match.discount || 0)));
-            const knownPayment = Math.max(0, roundPrice(Number(match.payment || 0)));
-            if (knownDiscount > 0.009) opts.discount = knownDiscount;
-            if (knownPayment > 0.009) opts.payment = knownPayment;
-            const adjust = roundPrice(
-              opts.prevBalance + total - knownDiscount - knownPayment - opts.newBalance
-            );
-            if (Math.abs(adjust) > 0.009) opts.adjust = adjust;
-          } else {
-            // قيد الحركة بلا أرصدة مخزَّنة (تقرير أقدم من تحديث المزامنة):
-            // نفس قاعدة مسار الفواتير — رصيد الحساب مستقلاً وموسوماً متى كان
-            // الدفتر يغطّي التاريخ، ولا شيء إطلاقاً متى لم يكن.
-            const account = customerBalance(item);
-            if (movementsReportCovers(el.dataset.date) && Number.isFinite(account)) {
-              opts.accountBalance = roundPrice(account);
-              opts.accountBalanceAt = reportSyncedAt(state.customerBalanceReports[0]);
-            }
-          }
-          exportVoucherPdf(opts);
-        } else {
-          // لا فشل صامت: نقول أي مصدر ينقصه ماذا. أشيع سبب مُثبت هو تأخّر مزامنة
-          // تفاصيل الفواتير خلف دفتر الحساب — القيد وصل والفاتورة لم تصل بعد.
-          showNoticeNow(
-            "error",
-            `لم أجد تفاصيل فاتورة بقيمة ${formatMoney(debit)}$ بتاريخ ${dOnly || "—"} للزبون «${item.name || ""}». ${customerInvoicesEmptyText(item)}`
-          );
+        const binding = clicked
+          ? bindSaleInvoiceLedger({
+            movements: ledgerRows,
+            invoices: invs,
+            invoice: byGuid && !byGuid.invoice.isReturn ? byGuid.invoice : null,
+            movement: clicked
+          })
+          : { reason: "missing-movement" };
+        const match = binding.invoice || null;
+        if (!match) {
+          showNoticeNow("error", saleBindingRefusal(binding.reason, debit, dOnly, item));
+          return;
         }
+        const total = match.total || debit;
+        const opts = { ...base, cur: "$", type: "invoice", amount: total, no: match.number ? String(match.number) : docNumber("INV"), lines: match.lines || [] };
+        if (storedDocNew !== null && Number.isFinite(storedDocNew)) {
+          opts.newBalance = roundPrice(storedDocNew);
+          const prev = (storedDocPrev !== null && Number.isFinite(storedDocPrev)) ? storedDocPrev : (storedDocNew - debit);
+          opts.prevBalance = roundPrice(prev);
+          // الحسم ودفعة الزبون يأتيان من الأمين على رأس الفاتورة (TotalDisc وFirstPay)
+          // ويُنسبان أولاً. ما يتبقّى بعدهما لا يُسمّى حسماً أبداً، ولا يُطبع إلا إذا
+          // أثبتته أسطر حقيقية في قيد الفاتورة نفسه — وإلا لا مستند.
+          const knownDiscount = Math.max(0, roundPrice(Number(match.discount || 0)));
+          const knownPayment = Math.max(0, roundPrice(Number(match.payment || 0)));
+          if (knownDiscount > 0.009) opts.discount = knownDiscount;
+          if (knownPayment > 0.009) opts.payment = knownPayment;
+          const residual = roundPrice(
+            opts.prevBalance + total - knownDiscount - knownPayment - opts.newBalance
+          );
+          if (!invoiceEntryProvesResidual(ledgerRows, binding.movement, residual)) {
+            showNoticeNow("error", saleBindingRefusal("residual", debit, dOnly, item));
+            return;
+          }
+          if (Math.abs(residual) > 0.009) opts.adjust = residual;
+        } else {
+          // قيد الحركة بلا أرصدة مخزَّنة (تقرير أقدم من تحديث المزامنة):
+          // نفس قاعدة مسار الفواتير — رصيد الحساب مستقلاً وموسوماً متى كان
+          // الدفتر يغطّي التاريخ، ولا شيء إطلاقاً متى لم يكن.
+          const account = customerBalance(item);
+          if (movementsReportCovers(el.dataset.date) && Number.isFinite(account)) {
+            opts.accountBalance = roundPrice(account);
+            opts.accountBalanceAt = reportSyncedAt(state.customerBalanceReports[0]);
+          }
+        }
+        exportVoucherPdf(opts);
       } else if (credit > 0) {
         // مرتجع المبيعات يُقيَّد دائناً كالدفعة تماماً — يُعرف بربطه القطعي بفاتورة المرتجع
         // (creditMovementKind) لا بالتاريخ والمبلغ، ويُصدَّر بأصنافه وأرصدة قيده هو.
@@ -13233,31 +13303,44 @@ function render() {
           no: inv.number ? String(inv.number) : docNumber(inv.isReturn ? "RET" : "INV"),
           lines: inv.lines || []
         };
-        // الرصيد قبل/بعد الفاتورة من قيدها في دفتر الأمين. نستعمل الرصيد **الزمني الحقيقي**
-        // (balanceChrono) لا رصيد ترتيب-الكشف، كي لا يتضخّم رصيد الفاتورة إن جاءت دفعة بينها
-        // وبين فاتورة أخرى في نفس اليوم. المطابقة بالمعرّف أو بالتاريخ/المبلغ (المعرّف قد يكون صفرياً).
+        // الرصيد قبل/بعد الفاتورة من قيدها في دفتر الأمين — رصيدا سند القيد (docPrev/docNew)
+        // لا رصيد ترتيب-الكشف. الربط بالمعرّف أو بتطابق واحد لواحد بنفس اليوم والمبلغ
+        // (bindSaleInvoiceLedger)؛ ربط ملتبس أو فاتورة عُدّلت ولم يلحقها الدفتر ⇒ لا مستند.
         // المرتجع يأخذ أرصدة قيده عبر ربطه القطعي بمعرّف فاتورته (applyReturnLedgerForBill).
-        // عند أي خطأ في حساب الرصيد يخرج المستند بلا سطر رصيد — دون منع تصديره.
+        let refusal = "";
         try {
-          const mv = inv.isReturn ? null : invoiceMovement(custName, inv);
+          const ledgerRows = inv.isReturn ? [] : (customerFullMovements(custItem)?.movements || []);
+          const binding = inv.isReturn ? null : bindSaleInvoiceLedger({
+            movements: ledgerRows,
+            invoices: byGuid ? byGuid.entry?.invoices : invs,
+            invoice: inv
+          });
+          if (binding && (binding.reason === "ambiguous" || binding.reason === "amount-mismatch")) {
+            refusal = saleBindingRefusal(binding.reason, invoiceTotal, inv.date, custItem || { name: custName });
+          }
+          const mv = binding?.movement || null;
           const db = mv ? movementDocBalances(mv) : null;
-          if (db && Number.isFinite(db.newBalance) && Number.isFinite(db.prevBalance)) {
+          if (refusal) {
+            // لا أرصدة ولا مستند — الرسالة تُعرض بعد الخروج من هذه الكتلة.
+          } else if (db && Number.isFinite(db.newBalance) && Number.isFinite(db.prevBalance)) {
             opts.newBalance = roundPrice(db.newBalance);
             opts.prevBalance = roundPrice(db.prevBalance);
             // الحسم ودفعة الزبون يأتيان من الأمين على رأس الفاتورة (TotalDisc و
-            // FirstPay) ويُنسبان أولاً، ولا يبقى «تسوية» إلا ما لا يُفسَّر بهما.
-            // كان هذا المسار (التقارير ← فواتير الزبون) يضع الفرق كاملاً في
-            // adjust، فتُطبع دفعة الفاتورة 562 «تسوية على الحساب 2000» بينما
-            // يعرضها مسار زر الحركات «دفعة من الزبون» صحيحاً — مسارا تصدير
-            // لنفس المستند بنتيجتين مختلفتين.
+            // FirstPay) ويُنسبان أولاً. كان هذا المسار يضع الفرق كاملاً في adjust،
+            // فتُطبع دفعة الفاتورة 562 «تسوية على الحساب 2000». وما يتبقّى بعدهما
+            // لا يُطبع إلا إذا أثبتته أسطر حقيقية في قيد الفاتورة نفسه.
             const knownDiscount = Math.max(0, roundPrice(Number(inv.discount || 0)));
             const knownPayment = Math.max(0, roundPrice(Number(inv.payment || 0)));
             if (knownDiscount > 0.009) opts.discount = knownDiscount;
             if (knownPayment > 0.009) opts.payment = knownPayment;
-            const adjust = roundPrice(
+            const residual = roundPrice(
               opts.prevBalance + invoiceTotal - knownDiscount - knownPayment - opts.newBalance
             );
-            if (Math.abs(adjust) > 0.009) opts.adjust = adjust;
+            if (!invoiceEntryProvesResidual(ledgerRows, mv, residual)) {
+              refusal = saleBindingRefusal("residual", invoiceTotal, inv.date, custItem || { name: custName });
+            } else if (Math.abs(residual) > 0.009) {
+              opts.adjust = residual;
+            }
           } else if (inv.isReturn) {
             // أرصدة قيد المرتجع نفسه بربطه القطعي — لا الرصيد الحالي أبداً.
             applyReturnLedgerForBill(opts, inv);
@@ -13285,6 +13368,10 @@ function render() {
             delete opts.discount;
             opts.ledgerWarning = "تعذّر حساب رصيد المرتجع.";
           }
+        }
+        if (refusal) {
+          showNoticeNow("error", refusal);
+          return;
         }
         exportVoucherPdf(opts);
       } catch (error) {
