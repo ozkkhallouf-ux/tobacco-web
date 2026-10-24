@@ -28,6 +28,92 @@ function bearer(req: Request) {
   return value.toLowerCase().startsWith("bearer ") ? value.slice(7).trim() : "";
 }
 
+type Admin = ReturnType<typeof createClient>;
+type PushSubscriptionRow = { id: number; user_id: string; endpoint: string; p256dh: string; auth_key: string };
+
+// المستلمون: اشتراكات أصحاب دور owner فقط. أي حساب آخر (موظف، عدّاد جرد) لا يستلم إشعاراً
+// تشغيلياً أو مالياً حتى لو كان له اشتراك مفعّل. فشل قراءة مستخدم ⇒ يُستبعد (لا إرسال بلا تحقق).
+async function authorizedSubscriptions(admin: Admin, all: PushSubscriptionRow[]) {
+  const roleByUser = new Map<string, boolean>();
+  for (const userId of new Set(all.map((sub) => String(sub.user_id)))) {
+    try {
+      const { data, error } = await admin.auth.admin.getUserById(userId);
+      roleByUser.set(userId, !error && isAuthorizedRecipient(data?.user));
+    } catch {
+      roleByUser.set(userId, false);
+    }
+  }
+  return all.filter((sub) => roleByUser.get(String(sub.user_id)) === true);
+}
+
+// الأعمدة provider_accepted/provider_failed تضيفها proposed/23. إن لم تُطبَّق بعد، يُكتب السجل بدونها
+// كي تعمل هذه النسخة قبل الهجرة وبعدها (الدالة تُنشر أولاً).
+async function updateOutbox(admin: Admin, id: number, fields: Record<string, unknown>, counts: Record<string, number>) {
+  const { error } = await admin.from("web_push_outbox").update({ ...fields, ...counts }).eq("id", id);
+  if (error) await admin.from("web_push_outbox").update(fields).eq("id", id);
+}
+
+// يرسل حمولة واحدة لكل اشتراك ويحدّث حالة الاشتراك. accepted = قبول مزود Push، لا ظهور على الجهاز.
+async function sendToSubscriptions(admin: Admin, subscriptions: PushSubscriptionRow[], payload: string) {
+  let accepted = 0;
+  let rejected = 0;
+  let transientOnly = true;
+  let lastError = "";
+  for (const sub of subscriptions) {
+    try {
+      await webpush.sendNotification({
+        endpoint: sub.endpoint,
+        keys: { p256dh: sub.p256dh, auth: sub.auth_key },
+      }, payload, { TTL: PUSH_TTL_SECONDS, urgency: "high" });
+      accepted++;
+      await admin.from("web_push_subscriptions").update({ last_success_at: new Date().toISOString(), last_error: null }).eq("id", sub.id);
+    } catch (error) {
+      rejected++;
+      const statusCode = Number((error as { statusCode?: number })?.statusCode || 0);
+      const kind = classifyPushError(statusCode);
+      if (kind !== "transient") transientOnly = false;
+      lastError = String((error as Error)?.message || "push_failed").slice(0, 500);
+      const update = kind === "expired"
+        ? { enabled: false, last_error: `expired:${statusCode}` }
+        : { last_error: `${kind}:${statusCode}:${lastError}`.slice(0, 500) };
+      await admin.from("web_push_subscriptions").update(update).eq("id", sub.id);
+    }
+  }
+  return { accepted, rejected, transientOnly, lastError };
+}
+
+async function dispatchOutbox(admin: Admin) {
+  const [{ data: messages, error: messageError }, { data: allSubscriptions, error: subscriptionError }] = await Promise.all([
+    admin.from("web_push_outbox").select("id,event_type,title,body,tag,navigate,attempts,created_at").eq("status", "pending").order("created_at").limit(20),
+    admin.from("web_push_subscriptions").select("id,user_id,endpoint,p256dh,auth_key").eq("enabled", true),
+  ]);
+  if (messageError || subscriptionError) return json({ error: "load_failed" }, 500);
+  const subscriptions = await authorizedSubscriptions(admin, (allSubscriptions || []) as PushSubscriptionRow[]);
+
+  let sent = 0;
+  let failed = 0;
+  let skipped = 0;
+  for (const message of messages || []) {
+    if (isStale(message.created_at)) {
+      await updateOutbox(admin, message.id, { status: "failed", attempts: Number(message.attempts || 0), last_error: "stale_skipped" }, { provider_accepted: 0, provider_failed: 0 });
+      skipped++;
+      continue;
+    }
+    const result = await sendToSubscriptions(admin, subscriptions, JSON.stringify(buildMessagePayload(message)));
+    const outcome = outboxOutcome({ accepted: result.accepted, failed: result.rejected, transientOnly: result.transientOnly }, Number(message.attempts || 0), result.lastError);
+    await updateOutbox(admin, message.id, {
+      status: outcome.status,
+      attempts: outcome.attempts,
+      last_error: outcome.last_error,
+      ...(outcome.status === "sent" ? { sent_at: new Date().toISOString() } : {}),
+    }, { provider_accepted: result.accepted, provider_failed: result.rejected });
+    if (outcome.status === "sent") sent++;
+    else if (outcome.status === "failed") failed++;
+  }
+  // sent = رسائل قبلها مزود Push لاشتراك واحد على الأقل. القبول ليس ظهوراً على الجهاز.
+  return json({ ok: true, sent, failed, skipped, recipients: subscriptions.length });
+}
+
 export default {
   async fetch(req: Request) {
     if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
@@ -169,81 +255,7 @@ export default {
       if (!vapidPublic || !vapidPrivate) return json({ error: "vapid_not_configured" }, 503);
       webpush.setVapidDetails("mailto:admin@ozktobacco.com", vapidPublic, vapidPrivate);
 
-      const [{ data: messages, error: messageError }, { data: allSubscriptions, error: subscriptionError }] = await Promise.all([
-        admin.from("web_push_outbox").select("id,event_type,title,body,tag,navigate,attempts,created_at").eq("status", "pending").order("created_at").limit(20),
-        admin.from("web_push_subscriptions").select("id,user_id,endpoint,p256dh,auth_key").eq("enabled", true),
-      ]);
-      if (messageError || subscriptionError) return json({ error: "load_failed" }, 500);
-
-      // المستلمون: اشتراكات أصحاب دور owner فقط. أي حساب آخر (موظف، عدّاد جرد) لا يستلم إشعاراً
-      // تشغيلياً أو مالياً حتى لو كان له اشتراك مفعّل. فشل قراءة مستخدم ⇒ يُستبعد (لا إرسال بلا تحقق).
-      const roleByUser = new Map<string, boolean>();
-      for (const userId of new Set((allSubscriptions || []).map((sub) => String(sub.user_id)))) {
-        try {
-          const { data, error } = await admin.auth.admin.getUserById(userId);
-          roleByUser.set(userId, !error && isAuthorizedRecipient(data?.user));
-        } catch {
-          roleByUser.set(userId, false);
-        }
-      }
-      const subscriptions = (allSubscriptions || []).filter((sub) => roleByUser.get(String(sub.user_id)) === true);
-
-      // الأعمدة provider_accepted/provider_failed تضيفها proposed/23. إن لم تُطبَّق بعد، يُكتب السجل بدونها
-      // كي تعمل هذه النسخة قبل الهجرة وبعدها (الدالة تُنشر أولاً).
-      async function updateOutbox(id: number, fields: Record<string, unknown>, counts: Record<string, number>) {
-        const { error } = await admin.from("web_push_outbox").update({ ...fields, ...counts }).eq("id", id);
-        if (error) await admin.from("web_push_outbox").update(fields).eq("id", id);
-      }
-
-      let sent = 0;
-      let failed = 0;
-      let skipped = 0;
-      for (const message of messages || []) {
-        if (isStale(message.created_at)) {
-          await updateOutbox(message.id, { status: "failed", attempts: Number(message.attempts || 0), last_error: "stale_skipped" }, { provider_accepted: 0, provider_failed: 0 });
-          skipped++;
-          continue;
-        }
-
-        const payload = JSON.stringify(buildMessagePayload(message));
-        let accepted = 0;
-        let rejected = 0;
-        let transientOnly = true;
-        let lastError = "";
-        for (const sub of subscriptions) {
-          try {
-            await webpush.sendNotification({
-              endpoint: sub.endpoint,
-              keys: { p256dh: sub.p256dh, auth: sub.auth_key },
-            }, payload, { TTL: PUSH_TTL_SECONDS, urgency: "high" });
-            accepted++;
-            await admin.from("web_push_subscriptions").update({ last_success_at: new Date().toISOString(), last_error: null }).eq("id", sub.id);
-          } catch (error) {
-            rejected++;
-            const statusCode = Number((error as { statusCode?: number })?.statusCode || 0);
-            const kind = classifyPushError(statusCode);
-            if (kind !== "transient") transientOnly = false;
-            lastError = String((error as Error)?.message || "push_failed").slice(0, 500);
-            if (kind === "expired") {
-              await admin.from("web_push_subscriptions").update({ enabled: false, last_error: `expired:${statusCode}` }).eq("id", sub.id);
-            } else {
-              await admin.from("web_push_subscriptions").update({ last_error: `${kind}:${statusCode}:${lastError}`.slice(0, 500) }).eq("id", sub.id);
-            }
-          }
-        }
-
-        const outcome = outboxOutcome({ accepted, failed: rejected, transientOnly }, Number(message.attempts || 0), lastError);
-        await updateOutbox(message.id, {
-          status: outcome.status,
-          attempts: outcome.attempts,
-          last_error: outcome.last_error,
-          ...(outcome.status === "sent" ? { sent_at: new Date().toISOString() } : {}),
-        }, { provider_accepted: accepted, provider_failed: rejected });
-        if (outcome.status === "sent") sent++;
-        else if (outcome.status === "failed") failed++;
-      }
-      // sent = رسائل قبلها مزود Push لاشتراك واحد على الأقل. القبول ليس ظهوراً على الجهاز.
-      return json({ ok: true, sent, failed, skipped, recipients: subscriptions.length });
+      return await dispatchOutbox(admin);
     }
 
     return json({ error: "unknown_action" }, 400);

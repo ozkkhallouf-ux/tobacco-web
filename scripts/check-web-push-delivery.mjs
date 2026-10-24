@@ -91,15 +91,17 @@ function fakeAdmin(db, { usersById, missingColumns = false, sessionUser = null }
     const filters = [];
     let patch = null;
     let mode = "select";
+    // كل حلقة في السلسلة وعد ينفّذ الاستعلام بعد اكتمال السلسلة المتزامنة (microtask)، فيرى كل
+    // المرشّحات؛ مثل PostgREST builder الحقيقي يُنتظر مباشرة بـawait.
+    const link = () => Object.assign(Promise.resolve().then(run), api);
     const api = {
-      select() { mode = mode === "update" ? mode : "select"; return api; },
-      eq(col, value) { filters.push([col, value]); return api; },
-      order() { return api; },
-      limit() { return api; },
-      maybeSingle() { return Promise.resolve(run()).then((r) => ({ data: r.data?.[0] ?? null, error: r.error })); },
-      update(fields) { mode = "update"; patch = fields; return api; },
-      upsert() { return Promise.resolve({ error: null }); },
-      then(resolve, reject) { return Promise.resolve(run()).then(resolve, reject); }
+      select() { return link(); },
+      eq(col, value) { filters.push([col, value]); return link(); },
+      order() { return link(); },
+      limit() { return link(); },
+      maybeSingle() { return Promise.resolve().then(run).then((r) => ({ data: r.data?.[0] ?? null, error: r.error })); },
+      update(fields) { mode = "update"; patch = fields; return link(); },
+      upsert() { return Promise.resolve({ error: null }); }
     };
     function rows() { return (db[table] || []).filter((r) => filters.every(([c, v]) => r[c] === v)); }
     function run() {
