@@ -531,9 +531,18 @@ function ConvertFrom-CashierRemoteCommand([string]$Text) {
 
 # يشغّل ssh بمفتاح مقيَّد وبصمة جهاز معروفة (StrictHostKeyChecking=yes)، بلا كلمات سر (BatchMode).
 # النتيجة: {ExitCode, Output, TimedOut, Transport}. Transport=failed حين لم يُنشأ الاتصال أصلاً.
+# عميل OpenSSH: ميزة Windows المدمجة أولاً، ثم تثبيت OpenSSH المستقل (OZK2026 عليه هذا وحده).
+function Find-CashierSshClient([string[]]$Candidates = @(
+        (Join-Path $env:SystemRoot "System32\OpenSSH\ssh.exe"),
+        (Join-Path $env:ProgramFiles "OpenSSH\ssh.exe"))) {
+    foreach ($path in $Candidates) {
+        if (-not [string]::IsNullOrWhiteSpace($path) -and (Test-Path -LiteralPath $path -PathType Leaf)) { return $path }
+    }
+    throw "عميل OpenSSH غير موجود على هذا الجهاز."
+}
+
 function Invoke-CashierRemoteCommand($Config, [string]$Command) {
-    $ssh = Join-Path $env:SystemRoot "System32\OpenSSH\ssh.exe"
-    if (-not (Test-Path -LiteralPath $ssh -PathType Leaf)) { throw "عميل OpenSSH غير موجود على هذا الجهاز." }
+    $ssh = Find-CashierSshClient
     $arguments = @(
         "-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "PasswordAuthentication=no",
         "-o", ('UserKnownHostsFile="{0}"' -f $Config.remoteKnownHostsPath), "-o", "ConnectTimeout=8",
