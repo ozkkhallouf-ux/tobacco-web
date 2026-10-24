@@ -450,33 +450,89 @@ if (liveSql) {
 {
   const sw = read("public/service-worker.js");
   const pushLine = sw.split("\n").find((l) => l.startsWith('self.addEventListener("push"'));
+  const clickLine = sw.split("\n").find((l) => l.startsWith('self.addEventListener("notificationclick"'));
   assert.ok(pushLine, "معالج push موجود");
-  const shown = [];
-  const listeners = {};
-  const self = {
-    registration: { showNotification: async (title, options) => { shown.push({ title, options }); } },
-    addEventListener: (name, fn) => { listeners[name] = fn; }
-  };
-  vm.runInNewContext(pushLine, { self, String, JSON });
-  const fire = async (data) => {
-    let waited;
-    listeners.push({ data, waitUntil: (p) => { waited = p; } });
-    await waited;
+  assert.ok(clickLine, "معالج notificationclick موجود");
+  // لا يفرض الـSW صوتاً أو اهتزازاً أو صمتاً: هذه لإعدادات المتصفح والنظام
+  assert.doesNotMatch(pushLine, /\b(silent|vibrate|sound)\s*:/, "لا تجاوز لإعدادات الجهاز");
+  const SCOPE = "https://ozktobacco.com/";
+  const makeSw = ({ withGetNotifications = true } = {}) => {
+    const shown = [];
+    const displayed = new Map(); // tag ⇒ آخر إشعار معروض (الوسم نفسه يستبدل كما في المتصفح)
+    const listeners = {};
+    const opened = [];
+    const registration = {
+      scope: SCOPE,
+      showNotification: async (title, options) => { shown.push({ title, options }); displayed.set(options.tag, { title, options }); }
+    };
+    if (withGetNotifications) registration.getNotifications = async ({ tag } = {}) => (displayed.has(tag) ? [displayed.get(tag)] : []);
+    const self = { registration, addEventListener: (name, fn) => { listeners[name] = fn; } };
+    const clients = { matchAll: async () => [], openWindow: async (url) => { opened.push(url); } };
+    vm.runInNewContext(`${pushLine}\n${clickLine}`, { self, clients, String, JSON, URL });
+    const fire = async (data) => {
+      let waited;
+      listeners.push({ data, waitUntil: (p) => { waited = p; } });
+      await waited;
+    };
+    const click = async (navigate) => {
+      let waited;
+      listeners.notificationclick({ notification: { close() {}, data: { navigate } }, waitUntil: (p) => { waited = p; } });
+      await waited;
+      return opened.at(-1);
+    };
+    return { shown, displayed, fire, click };
   };
   const jsonData = (obj) => ({ json: () => obj, text: () => JSON.stringify(obj) });
-  for (const id of [1, 2, 3]) {
-    await fire(jsonData(policy.buildMessagePayload({ id, event_type: "stock_low", title: `نقص ${id}`, body: "x", tag: "stock_low" })));
+  const msg = (id, event_type, tag = event_type) => jsonData(policy.buildMessagePayload({ id, event_type, title: `${event_type} ${id}`, body: "x", tag }));
+
+  // ١) عشرة إشعارات متتابعة من النوع نفسه: كلها معروضة معاً، لا يستبدل أحدها الآخر
+  {
+    const w = makeSw();
+    for (let id = 1; id <= 10; id++) await w.fire(msg(id, "stock_low"));
+    assert.equal(w.shown.length, 10);
+    assert.equal(w.displayed.size, 10, "عشرة إشعارات معروضة معاً");
+    assert.ok(w.shown.every((s) => s.options.renotify === true && s.options.requireInteraction === false));
+    // أنواع مختلفة متداخلة، والمالية منها تبقى حتى يتفاعل المالك
+    await w.fire(msg(11, "ameen_payment"));
+    await w.fire(msg(12, "customer_request"));
+    await w.fire(msg(13, "ameen_payment"));
+    assert.equal(w.displayed.size, 13);
+    assert.deepEqual(w.shown.slice(-3).map((s) => s.options.requireInteraction), [true, true, true]);
+    console.log("  ✓ Service Worker: 13 إشعاراً متتابعاً (10 من النوع نفسه) معروضة كلها مستقلة");
   }
-  assert.equal(new Set(shown.map((s) => s.options.tag)).size, 3, "ثلاثة إشعارات مستقلة");
-  assert.ok(shown.every((s) => s.options.renotify === true && s.options.requireInteraction === false));
-  await fire(jsonData(policy.buildMessagePayload({ id: 4, event_type: "ameen_payment", title: "دفعة", body: "x", tag: "ameen_payment" })));
-  assert.equal(shown.at(-1).options.requireInteraction, true);
-  // نص خام (اختبار DevTools) أو رسالة الاختبار القديمة: وسم افتراضي بلا renotify
-  await fire({ json: () => { throw new Error("not json"); }, text: () => "تجربة" });
-  assert.deepEqual([shown.at(-1).options.tag, shown.at(-1).options.renotify, shown.at(-1).options.body], ["ozk-alert", false, "تجربة"]);
-  await fire(jsonData({ web_push: 8030, notification: { title: "🔔 اختبار", body: "b", tag: "push-test" } }));
-  assert.deepEqual([shown.at(-1).options.tag, shown.at(-1).options.renotify], ["push-test", false]);
-  console.log("  ✓ Service Worker: كل رسالة إشعار مستقل، وrenotify/requireInteraction من الحمولة وحدها");
+  // ٢) إعادة تسليم الرسالة نفسها (المعرّف نفسه): تستبدل بصمت، لا تنبيه مكرر ولا إشعار ثانٍ
+  {
+    const w = makeSw();
+    await w.fire(msg(21, "ameen_payment"));
+    await w.fire(msg(21, "ameen_payment"));
+    assert.equal(w.displayed.size, 1, "إشعار واحد للرسالة المكررة");
+    assert.deepEqual(w.shown.map((s) => s.options.renotify), [true, false], "التسليم الثاني بلا تنبيه");
+    await w.fire(msg(22, "ameen_payment"));
+    assert.equal(w.shown.at(-1).options.renotify, true, "رسالة جديدة تنبّه من جديد");
+    // متصفح بلا getNotifications: يُعرض الإشعار ولا يُبتلع
+    const old = makeSw({ withGetNotifications: false });
+    await old.fire(msg(23, "stock_low"));
+    assert.equal(old.shown.length, 1);
+    console.log("  ✓ Service Worker: إعادة تسليم الرسالة نفسها تستبدل بصمت، والجديدة تنبّه");
+  }
+  // ٣) نص خام (اختبار DevTools) ورسالة الاختبار: وسم ثابت بلا renotify
+  {
+    const w = makeSw();
+    await w.fire({ json: () => { throw new Error("not json"); }, text: () => "تجربة" });
+    assert.deepEqual([w.shown.at(-1).options.tag, w.shown.at(-1).options.renotify, w.shown.at(-1).options.body], ["ozk-alert", false, "تجربة"]);
+    await w.fire(jsonData({ web_push: 8030, notification: { title: "🔔 اختبار", body: "b", tag: "push-test" } }));
+    assert.deepEqual([w.shown.at(-1).options.tag, w.shown.at(-1).options.renotify], ["push-test", false]);
+  }
+  // ٤) النقر: أصل التطبيق وحده
+  {
+    const w = makeSw();
+    assert.equal(await w.click("/?route=balances"), `${SCOPE}?route=balances`);
+    assert.equal(await w.click("https://ozktobacco.com/?route=overview"), `${SCOPE}?route=overview`, "رابط رسالة الاختبار المطلق");
+    assert.equal(await w.click("https://evil.example/phish"), `${SCOPE}?route=overview`, "أصل خارجي مرفوض");
+    assert.equal(await w.click("javascript:alert(1)"), `${SCOPE}?route=overview`);
+    assert.equal(await w.click(undefined), `${SCOPE}?route=overview`);
+    console.log("  ✓ Service Worker: النقر لا يفتح إلا عنواناً من أصل التطبيق");
+  }
 }
 
 console.log("check-web-push-delivery: OK");
