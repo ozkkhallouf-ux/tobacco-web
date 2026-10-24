@@ -1978,18 +1978,13 @@ async function printOverdueReport() {
     return;
   }
 
-  archiveToICloud("other_report", typeof OZK_FONT !== "undefined" ? OZK_FONT.withFaces(html) : html, overdueArchiveMeta);
-  const container = document.createElement("div");
-  container.innerHTML = html;
-  document.body.appendChild(container);
-  if (typeof OZK_FONT !== "undefined") await OZK_FONT.ready();
-  window.html2pdf().set({
-    margin: [10, 15, 10, 15],
-    filename,
-    image: { type: "jpeg", quality: 0.95 },
-    html2canvas: { scale: 2, useCORS: true },
-    jsPDF: { unit: "mm", format: "a4", orientation: "portrait" }
-  }).from(container).save().finally(() => container.remove());
+  // الكمبيوتر: نفس مسار طباعة Chrome الأصلي لبقية التقارير (exportReportPdf ←
+  // printHtmlDocument، ‎@page A4 بهامش 10mm، ويؤرشف نسخة iCloud بنفسه). كان هذا
+  // التقرير وحده يحوّل الصفحة إلى صورة بـhtml2pdf حتى على الكمبيوتر، فكان يقسم
+  // الصف الأخير بين ورقتين (القص على ارتفاع الصورة لا على حدود الصفوف) ويسقط
+  // html2canvas المسافات العربية («بالجملةونصف»، «32يوم») — والطباعة الأصلية
+  // تحترم tr{page-break-inside:avoid} وتكرّر رأس الجدول وترسم النص كما هو.
+  await exportReportPdf(html, { docType: "other_report", meta: overdueArchiveMeta });
 }
 
 function setRoute(route, clearNotice = true) {
