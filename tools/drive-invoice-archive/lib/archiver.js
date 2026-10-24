@@ -202,6 +202,20 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
     }
   }
 
+  // طابور إعادة دائم لأخطاء الرصد، مستقل عن نافذة القراءة: فاتورة فشل توليدها لا تضيع حين
+  // تتقدّم العلامة بعدها وتاريخها خارج lookback (Codex P1). تُقرأ بمعرّفها وحده عند حلول
+  // موعدها؛ فاتورة حُذفت أو خرجت من النطاق أو صارت غير مرحّلة تخرج من الطابور.
+  async function retryDetectErrors() {
+    const dueGuids = Object.keys(state.detectErrors)
+      .filter((g) => model.isGuid(g) && now() >= (Number(state.detectErrors[g].nextAt) || 0))
+      .slice(0, 50);
+    for (const guid of dueGuids) {
+      const [row] = await ameen.changedInvoices({ since: "1900-01-01T00:00:00", sinceGuid: "", dateFrom: cfg.archiveFrom, onlyGuid: guid });
+      const outcome = row ? await detectRow(row) : "gone";
+      if (outcome !== "error") delete state.detectErrors[guid];
+    }
+  }
+
   // العلامة: لا تتجاوز أقدم فاتورة غير مستقرة، ولا آخر صف إن لم تكتمل الصفحات.
   function advanceWatermark(mark, reconcile) {
     if (!reconcile) {
@@ -226,6 +240,7 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
       if (outcome === "unstable" && (!holdBack || row.changed_at < holdBack)) holdBack = row.changed_at;
     }
     holdBack = minTime(window.holdBack, holdBack);
+    await retryDetectErrors();
     // مسح لم يكتمل: العلامة كما هي، والمؤشر يُحفظ ليُستأنف منه بالضبط في الدورة التالية.
     if (!complete) {
       state.resume = { ...window, since: cursor.since, sinceGuid: cursor.sinceGuid, holdBack };

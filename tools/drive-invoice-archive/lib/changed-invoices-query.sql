@@ -11,6 +11,7 @@
 --   @dateFrom     أقدم تاريخ فاتورة يدخل الأرشيف
 --   @since        مؤشر الصفحات: وقت التغيير (datetime2(3))
 --   @sinceGuid    مؤشر الصفحات: آخر GUID عند @since نفسه (صفري لبداية نافذة)
+--   @onlyGuid     NULL للرصد العادي؛ أو فاتورة واحدة لطابور إعادة أخطاء الرصد
 --
 -- المؤشر مركّب (changed_at, GUID) وحصري، بنفس ترتيب ORDER BY: 500 فاتورة أو أكثر بالوقت
 -- نفسه (استيراد دفعة) لا تحبس الصفحات على أول 500. changed_at مقرَّب إلى datetime2(3)
@@ -50,4 +51,5 @@ WHERE u.TypeGUID IN (@t0, @t1)
   -- ترشيح أولي واسع بثانية (التقريب قد يرفع القيمة جزءاً من الملّي ثانية)، ثم المؤشر الدقيق.
   AND (u.CreateDate >= DATEADD(second, -1, @since) OR u.LastUpdateDate >= DATEADD(second, -1, @since))
   AND (chg.changed_at > @since OR (chg.changed_at = @since AND u.GUID > @sinceGuid))
+  AND (@onlyGuid IS NULL OR u.GUID = @onlyGuid)
 ORDER BY chg.changed_at ASC, u.GUID ASC

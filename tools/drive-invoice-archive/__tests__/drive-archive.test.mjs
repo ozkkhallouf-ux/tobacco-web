@@ -187,6 +187,43 @@ test("المسح الأول بلا علامة يغطي archiveFrom كاملاً 
   assert.deepEqual(t.store.jobs().map((j) => j.number).sort(), [11, 13, 14], "بلا تكرار، والقديمة وصلت");
 });
 
+test("فاتورة قديمة (خارج lookback) فشل توليدها في المسح الأول تُعاد من طابور الأخطاء الدائم (Codex P1)", async () => {
+  const t = await setup({ mode: "dry-run", overrides: { archiveFrom: "2026-01-01" } });
+  const realRender = t.renderer.render;
+  t.renderer.render = async () => { throw Object.assign(new Error("عطل مؤقت في المحوّل"), { code: "RENDER" }); };
+  t.ameen.add({ guid: G1, number: 21, date: "2026-01-05", createdAt: "2026-01-05T10:00:00" });
+  t.advance(300);
+  await t.cycle();
+  assert.equal(t.store.jobs().length, 0);
+  assert.equal(Object.keys(t.store.state.detectErrors).length, 1);
+  assert.ok(t.store.state.watermark >= "2026-10-24", "العلامة تقدّمت فلن تراها القراءة التزايدية");
+  t.renderer.render = realRender;
+  t.advance(3700); // بعد التراجع، ومع مطابقة دورية لا تشمل تاريخها
+  await t.cycle();
+  assert.deepEqual(t.store.jobs().map((j) => j.number), [21]);
+  assert.equal(Object.keys(t.store.state.detectErrors).length, 0);
+  await t.cycle();
+  assert.equal(t.store.jobs().length, 1, "بلا تكرار");
+});
+
+test("طابور الأخطاء: فاتورة حُذفت أو أُلغي ترحيلها تخرج منه ولا تُعاد بلا نهاية", async () => {
+  const t = await setup({ mode: "dry-run", overrides: { archiveFrom: "2026-01-01" } });
+  const realRender = t.renderer.render;
+  t.renderer.render = async () => { throw Object.assign(new Error("عطل"), { code: "RENDER" }); };
+  t.ameen.add({ guid: G1, number: 31, date: "2026-01-05", createdAt: "2026-01-05T10:00:00" });
+  t.ameen.add({ guid: G2, number: 32, date: "2026-01-06", createdAt: "2026-01-06T10:00:00" });
+  t.advance(300);
+  await t.cycle();
+  assert.equal(Object.keys(t.store.state.detectErrors).length, 2);
+  t.renderer.render = realRender;
+  t.ameen.db.invoices.delete(G1);
+  t.ameen.db.invoices.get(G2).posted = 0;
+  t.advance(3700);
+  await t.cycle();
+  assert.equal(t.store.jobs().length, 0);
+  assert.equal(Object.keys(t.store.state.detectErrors).length, 0);
+});
+
 test("إعادة معالجة الحدث نفسه (فقدان state.json وإعادة التشغيل) لا تكرر ملفاً ولا إشعاراً", async () => {
   const t = await setup();
   t.ameen.add({ guid: G1, number: 501 });

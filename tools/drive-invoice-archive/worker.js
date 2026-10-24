@@ -70,12 +70,13 @@ function createAmeen(connString, typeGuids) {
   return {
     ping: async () => (await q(NOW_SQL))[0],
     serverNow: async () => (await q(NOW_SQL))[0].now,
-    changedInvoices: ({ since, sinceGuid, dateFrom }) => q(CHANGED_SQL, (r, s) => r
+    changedInvoices: ({ since, sinceGuid, dateFrom, onlyGuid }) => q(CHANGED_SQL, (r, s) => r
       .input("t0", s.UniqueIdentifier, t0)
       .input("t1", s.UniqueIdentifier, t1)
       .input("dateFrom", s.Date, naiveDate(`${dateFrom}T00:00:00`))
       .input("since", s.DateTime2(3), naiveDate(since))
-      .input("sinceGuid", s.UniqueIdentifier, sinceGuid || ZERO_GUID)),
+      .input("sinceGuid", s.UniqueIdentifier, sinceGuid || ZERO_GUID)
+      .input("onlyGuid", s.UniqueIdentifier, onlyGuid || null)),
     lines: (guid) => q(LINES_SQL, (r, s) => r.input("invoiceGuid", s.UniqueIdentifier, guid)),
     balance: async (guid) => {
       const rows = await q(BALANCE_SQL, (r, s) => r.input("invoiceGuid", s.UniqueIdentifier, guid));
