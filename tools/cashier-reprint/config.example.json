@@ -1,0 +1,8 @@
+{
+  "bridgeScriptPath": "%LOCALAPPDATA%\\OZK-TOBACCO\\PrintBridge\\ozk-print-bridge.ps1",
+  "expectedBridgeSha256": "53e14662264520e931000d8732905c2f38a2fe1a31cd3c64596ef6227d3ff65d",
+  "printerName": "XPRINTER XP-T80Q 80MM",
+  "bridgeTimeoutSeconds": 120,
+  "recentReprintWarningSeconds": 120,
+  "newInvoiceWarningSeconds": 120
+}

@@ -253,3 +253,10 @@ jobs:
       - name: Ameen invoice events - detection and offline outbox test
         shell: powershell
         run: .\tools\tests\Test-AmeenInvoiceEvents.ps1
+
+      # إعادة طباعة فاتورة كاشير يدوياً (tools/cashier-reprint): حسم الرقم والنوع، منع تكرار
+      # إعادة المحاولة التقنية، تصنيف نتيجة الجسر، والسجل — وتشغيل حقيقي لجسر وهمي بـpowershell.exe
+      # للتحقق من الوسائط. بلا أمين ولا طابعة حقيقيين.
+      - name: Cashier reprint - resolution, duplicate guard and bridge call test
+        shell: powershell
+        run: .\tools\tests\Test-CashierReprint.ps1
