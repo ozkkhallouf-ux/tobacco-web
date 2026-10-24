@@ -57,14 +57,17 @@ try {
   const page = await browser.newPage({ viewport: { width: 718, height: 1047 } });
   await page.setContent('<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><style>html,body{margin:0;padding:0}</style></head><body></body></html>');
   await page.emulateMedia({ media: "print" });
-  const res = await page.evaluate(`(async()=>{${ENGINE}
-    const names = ${JSON.stringify(NAMES)};
+  // المحرّك (نص src/app.js) يُحقن وسم script، والبيانات تمرّ وسيطاً لا نصاً مُركّباً.
+  await page.addScriptTag({ content: ENGINE });
+  const res = await page.evaluate(async ({ names, faces }) => {
     const row = (cell) => '<tr><td style="width:48%">' + cell + '</td><td style="width:29%">'
       + escapeHtml(pdfAr("37 كرتونة")) + '</td><td style="width:23%"><span class="status-active">متوفّر</span></td></tr>';
     const table = (fn) => '<div class="inventory-columns"><div class="inventory-column"><div class="inventory-group"><table><tbody>'
       + '<tr class="inventory-group-row"><td colspan="3">' + escapeHtml(pdfAr("كابتن بلاك")) + '<span class="group-count">6</span></td></tr>'
       + names.map((n) => row(fn(n))).join("") + '</tbody></table></div></div><div class="inventory-column"></div></div>';
-    document.head.insertAdjacentHTML("beforeend", "<style>" + ${JSON.stringify(FACES)} + "</style>");
+    const style = document.createElement("style");
+    style.textContent = faces;
+    document.head.appendChild(style);
     document.body.innerHTML = REPORT_STYLE + INVENTORY_REPORT_STYLE
       + '<div class="ozk-rpt inventory-rpt"><section id="old">' + table((n) => escapeHtml(pdfAr(n))) + '</section>'
       + '<section id="new">' + table(pdfArWrap) + '</section></div>';
@@ -79,7 +82,7 @@ try {
       expected: names.map((n) => pdfAr(n)),
       wrapped: names.map(pdfArWrap)
     };
-  })()`);
+  }, { names: NAMES, faces: FACES });
 
   check("خط Cairo محمَّل للقياس", res.cairo);
   // ضابط: بأسماء بطول النشرة الحقيقية (لا بالاسم المبالغ فيه وحده) يفيض الاسم فعلاً.
@@ -91,10 +94,10 @@ try {
   check("نص الاسم محفوظ حرفياً بلا حذف ولا اختصار",
     res.now.every((c, i) => c.text === res.expected[i]));
   check("لا فرصة كسر بين مسافة ورقم يليها (تسقط المسافة على مسار الهاتف)",
-    res.wrapped.every((h) => !/<wbr>[0-9٠-٩]/.test(h)));
+    res.wrapped.every((h) => !/<wbr>[0-9\u0660-\u0669]/.test(h)));
   check("فرصة كسر بين الكلمات العربية موجودة",
-    res.wrapped[0].includes(" <wbr>"));
-  const xss = await page.evaluate(`(()=>{${ENGINE}\nreturn pdfArWrap('<img src=x> & "ب"');})()`);
+    res.wrapped[0].includes("\u00a0<wbr>"));
+  const xss = await page.evaluate(() => pdfArWrap('<img src=x> & "ب"'));
   check("pdfArWrap تهرّب HTML", !xss.includes("<img") && xss.includes("&lt;img"));
 } finally {
   await browser.close();
