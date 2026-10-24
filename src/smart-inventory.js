@@ -600,8 +600,10 @@
     const source = root.querySelector(".smart-owner-table")?.closest(".panel")?.cloneNode(true);
     if (!source) return;
     source.querySelectorAll("button").forEach((button) => button.remove());
+    // scrollX/scrollY صفر: الجدول يُصدَّر عادةً والصفحة ممرّرة لأسفل، وhtml2canvas
+    // يطرح إزاحة التمرير من موضع الالتقاط فيخرج المحتوى مُزاحاً ومقصوصاً.
     window.html2pdf().set({ filename: `smart-inventory-${state.ownerReport.warehouseName}.pdf`, margin: 8,
-      image: { type: "jpeg", quality: 0.96 }, html2canvas: { scale: 2 }, jsPDF: { unit: "mm", format: "a4", orientation: "landscape" } }).from(source).save();
+      image: { type: "jpeg", quality: 0.96 }, html2canvas: { scale: 2, scrollX: 0, scrollY: 0 }, jsPDF: { unit: "mm", format: "a4", orientation: "landscape" } }).from(source).save();
   }
 
   function printBlindBook() {
