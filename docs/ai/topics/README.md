@@ -19,6 +19,7 @@
 | تنسيق تنبيهات تيليغرام (المنسِّق الموحّد، جرد المصادر) | [telegram-alert-format.md](telegram-alert-format.md) |
 | بوابة نشر Windows (OZK2026) | [windows-deploy-gate.md](windows-deploy-gate.md) |
 | تعاون Slack وGitHub والوكلاء | [collaboration-workflow.md](collaboration-workflow.md) |
-| الأرشفة إلى iCloud (ماك) | [icloud-archive.md](icloud-archive.md) |
+| الأرشفة إلى iCloud (ماك، الواجهة مخفية) | [icloud-archive.md](icloud-archive.md) |
+| أرشفة فواتير الجملة على Google Drive + تيليغرام (غير مفعَّل) | [drive-invoice-archive.md](drive-invoice-archive.md) |
 
 كل تقرير يحتفظ بستة أقسام إلزامية: الحالة الحالية، المصدر الموثوق، نطاق الملفات، القيود الثابتة، الفحوص الإلزامية، والخطوة التالية.
