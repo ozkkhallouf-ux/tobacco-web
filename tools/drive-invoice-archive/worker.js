@@ -28,6 +28,7 @@ const { createDrive } = require("./lib/drive");
 const { createEdge } = require("./lib/edge");
 const { readSecret, hasSecret } = require("./lib/secrets");
 const { redact } = require("./lib/redact");
+const { createRenderer, puppeteerPath } = require("./lib/renderer");
 const { assertReadOnlySql } = require("../manual-a4-print/lib/sql-guard");
 const { paperFor } = require("../manual-a4-print/lib/paper");
 
@@ -106,7 +107,6 @@ function buildDeps(cfg) {
   const conn = readSecret("sql", cfg.secretDir);
   if (!conn) throw new Error("سرّ SQL غير محفوظ (set-secret.ps1 -Name sql)");
   const ameen = createAmeen(conn, typeGuids);
-  const { createRenderer } = require(path.join(MANUAL_DIR, "server.js"));
   const renderer = createRenderer({ browserPath: cfg.browserPath });
   const template = require(path.join(AUTOPRINT_DIR, "invoice-html.js"));
   const mode = MODES[cfg.mode];
@@ -140,6 +140,7 @@ async function health(cfg) {
   try {
     const deps = buildDeps(cfg);
     out.browser = deps.renderer.browserPath() || "";
+    try { puppeteerPath(); out.pdfEngine = { ok: true }; } catch (err) { out.pdfEngine = { ok: false, error: "puppeteer-core غير مثبّت في مجلد العامل (npm ci)" }; }
     try {
       const p = await deps.ameen.ping();
       out.sql = { ok: true, db: p.db, login: p.login };

@@ -59,6 +59,16 @@ for (const rel of codeFiles) {
 }
 assert.match(read(`${toolRel}/set-secret.ps1`), /-ieq 'sa'/, "حفظ السر يرفض حساب sa");
 
+// puppeteer-core يُحمَّل من مجلد العامل نفسه: محوّل أداة الطباعة يحلّه من مجلدها هي،
+// فيفشل كل PDF على تثبيت فيه تبعيات العامل وحده (Codex P1 على #359).
+for (const rel of codeFiles) {
+  for (const m of read(rel).matchAll(/createRenderer[^=\n]*\}\s*=\s*require\(([^)]*)\)/g)) {
+    assert.match(m[1], /^"\.\/lib\/renderer"$/, `${rel}: المحوّل من lib/renderer.js لا من أداة الطباعة`);
+  }
+}
+assert.match(read(`${toolRel}/lib/renderer.js`), /require\("puppeteer-core"\)/, "المحوّل يحمّل puppeteer-core من مجلد العامل");
+assert.match(read(`${toolRel}/package.json`), /"puppeteer-core":/, "puppeteer-core تبعية للعامل");
+
 // غير مفعَّل: لا مهمة مجدولة ولا workflow يشغّل العامل.
 const runners = [];
 const scan = (rel) => {
