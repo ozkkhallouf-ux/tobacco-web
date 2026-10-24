@@ -59,6 +59,7 @@ export const CHECKS = [
   'check-icloud-archive-console-silence.mjs',
   'check-inventory-excluded-stores.mjs',
   'check-inventory-recon-cost-fallbacks.mjs',
+  'check-inventory-report-name-wrap.mjs',
   'check-inventory-report-page-packing.mjs',
   'check-inventory-report-phone-pdf.mjs',
   'check-inventory-report-print-pages.mjs',
