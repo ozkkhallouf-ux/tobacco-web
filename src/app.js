@@ -5874,6 +5874,31 @@ function presentPortablePdf(blob, filename, title) {
   document.body.appendChild(dialog);
 }
 
+// html2canvas قد يحذف المسافة العادية الملاصقة لكلمة عربية (مثل «رقم 1»
+// فتصير «رقم1»). نثبّت المسافة **الملاصقة لحرف عربي من الجانبين المعنيَّين
+// فقط**، لا كل مسافة في العقدة.
+//
+// الاستبدال الأعمى السابق (`replace(/ /g, NBSP)` على أي عقدة فيها عربي) كان
+// يجمّد المسافات الملاصقة للأقواس والشرطة وعلامة العملة أيضاً. وNBSP محرف
+// محايد لا يُكسر، فكان يلصق «(100 كروز)» و«$ 250 / كرتونة» بجوارهما فيعامل
+// خوارزمُ الاتجاه المقطعَ كتلةً واحدة ويقلب ترتيبه. الآن نحمي وصلَي
+// «عربي↔عربي» و«رقم↔عربي» فقط، ونترك المسافة الملاصقة لأي رمز (قوس أو شرطة
+// أو / أو $) مسافةً عادية كي يفصل الخوارزم الاتجاهات كما يجب.
+function pinArabicSpacesForCanvas(source) {
+  const textWalker = document.createTreeWalker(source, NodeFilter.SHOW_TEXT);
+  let textNode = textWalker.nextNode();
+  while (textNode) {
+    const text = String(textNode.nodeValue || "");
+    if (/[\u0600-\u06ff]/.test(text)) {
+      textNode.nodeValue = text.replace(
+        /([\u0600-\u06ff]) (?=[\u0600-\u06ff0-9\u0660-\u0669])|([0-9\u0660-\u0669]) (?=[\u0600-\u06ff])/g,
+        (match, arabicBefore, digitBefore) => `${arabicBefore || digitBefore}\u00a0`
+      );
+    }
+    textNode = textWalker.nextNode();
+  }
+}
+
 // يبني Blob PDF فعلياً من القالب الظاهر. نمرّر عنصر المحتوى لا الحاوية
 // الموضوعة خارج الشاشة كي لا يلتقط html2canvas لوحة بارتفاع صفر على الهاتف.
 async function createPortablePdfBlob(bodyHtml, filename, options = {}) {
@@ -5896,28 +5921,7 @@ async function createPortablePdfBlob(bodyHtml, filename, options = {}) {
   // هذا المسار يبقى لتقارير وفواتير الهاتف التي تحمل تنسيقها inline.
   const source = [...container.children].find((element) => element.tagName !== "STYLE") || container;
 
-  // html2canvas قد يحذف المسافة العادية الملاصقة لكلمة عربية (مثل «رقم 1»
-  // فتصير «رقم1»). نثبّت المسافة **الملاصقة لحرف عربي من الجانبين المعنيَّين
-  // فقط**، لا كل مسافة في العقدة.
-  //
-  // الاستبدال الأعمى السابق (`replace(/ /g, NBSP)` على أي عقدة فيها عربي) كان
-  // يجمّد المسافات الملاصقة للأقواس والشرطة وعلامة العملة أيضاً. وNBSP محرف
-  // محايد لا يُكسر، فكان يلصق «(100 كروز)» و«$ 250 / كرتونة» بجوارهما فيعامل
-  // خوارزمُ الاتجاه المقطعَ كتلةً واحدة ويقلب ترتيبه. الآن نحمي وصلَي
-  // «عربي↔عربي» و«رقم↔عربي» فقط، ونترك المسافة الملاصقة لأي رمز (قوس أو شرطة
-  // أو / أو $) مسافةً عادية كي يفصل الخوارزم الاتجاهات كما يجب.
-  const textWalker = document.createTreeWalker(source, NodeFilter.SHOW_TEXT);
-  let textNode = textWalker.nextNode();
-  while (textNode) {
-    const text = String(textNode.nodeValue || "");
-    if (/[\u0600-\u06ff]/.test(text)) {
-      textNode.nodeValue = text.replace(
-        /([\u0600-\u06ff]) (?=[\u0600-\u06ff0-9\u0660-\u0669])|([0-9\u0660-\u0669]) (?=[\u0600-\u06ff])/g,
-        (match, arabicBefore, digitBefore) => `${arabicBefore || digitBefore}\u00a0`
-      );
-    }
-    textNode = textWalker.nextNode();
-  }
+  pinArabicSpacesForCanvas(source);
 
   try {
     if (typeof OZK_FONT !== "undefined") await OZK_FONT.ready();
@@ -9832,9 +9836,14 @@ function salesInvoicePdfMarkup(data) {
       <td style="${td};background:#faf8f3;font-weight:${strong ? 700 : 400}">${escapeHtml(label)}</td>
       <td style="${td};text-align:left;font-weight:${strong ? 700 : 400}" dir="ltr">${escapeHtml(value)}</td>
     </tr>`;
+  // html2canvas يرسم كل مقطع نصي باتجاه LTR (لا يطبّق اتجاه المستند)، فكانت
+  // النقطتان بعد العنوان العربي تنتقلان إلى يمينه («:الزبون»، «صفة :البيع») والتاريخ
+  // ينقلب («2026 24 أكتوبر»). &rlm; بعد النقطتين وقبل القيمة يجعل المقطع RTL فيُرسم
+  // بالترتيب الصحيح، وهو محرف خفي لا يغيّر شيئاً في المتصفح نفسه. المسافة الملاصقة
+  // للشرطة/النقطة/القوس تُثبَّت &nbsp; لأن html2canvas يسقطها هناك.
   const info = (label, value) => `
     <div style="font-size:12px;color:#241f18;margin:2px 0">
-      <span style="color:#6b6154">${escapeHtml(label)}:</span> <b>${escapeHtml(value)}</b>
+      <span style="color:#6b6154">${escapeHtml(label)}:&rlm;</span> <b>&rlm;${escapeHtml(value)}</b>
     </div>`;
 
   return `
@@ -9845,7 +9854,7 @@ function salesInvoicePdfMarkup(data) {
          border-bottom:2px solid #8a6d3b;padding-bottom:10px;margin-bottom:12px;${pdfRowStyle}">
       <div>
         <div style="font-size:20px;font-weight:700;color:#8a6d3b">OZK TOBACCO</div>
-        <div style="font-size:12px;color:#6b6154">مركز أبو زياد — لتجارة الدخان</div>
+        <div style="font-size:12px;color:#6b6154">مركز أبو زياد&nbsp;—&nbsp;لتجارة الدخان</div>
       </div>
       <div style="text-align:left">
         <div style="font-size:16px;font-weight:700">فاتورة مبيعات</div>
@@ -9885,13 +9894,13 @@ function salesInvoicePdfMarkup(data) {
         ${summaryRow("الحسم", data.discount)}
         ${summaryRow("الصافي", data.net, true)}
         ${summaryRow("المدفوع", data.paid)}
-        ${summaryRow(`المتبقّي (${data.remainingLabel})`, data.remaining, true)}
+        ${summaryRow(`المتبقّي\u00a0(${data.remainingLabel})`, data.remaining, true)}
       </tbody>
     </table>
 
     <div class="pdf-foot" style="margin-top:18px;padding-top:8px;border-top:1px solid #d9d2c4;
          font-size:11px;color:#6b6154;display:flex;justify-content:space-between;${pdfRowStyle}">
-      <span>صفة البيع: ${escapeHtml(SALES_TRADE_CAPACITY)} · السجل التجاري: <span dir="ltr">${escapeHtml(SALES_TRADE_REGISTER_NO)}</span></span>
+      <span>صفة البيع:&rlm;&nbsp;${escapeHtml(SALES_TRADE_CAPACITY)}&nbsp;·&nbsp;السجل التجاري:&rlm;<span dir="ltr" style="margin-right:.3em">${escapeHtml(SALES_TRADE_REGISTER_NO)}</span></span>
       <span dir="ltr">0985000771 — 0984000662</span>
     </div>
     </div>
@@ -10003,6 +10012,9 @@ async function saveSalesInvoicePdf() {
   container.style.cssText = "position:absolute;left:-10000px;top:0;width:794px;background:#ffffff;";
   container.innerHTML = markup;
   document.body.appendChild(container);
+  // نفس تثبيت المسافات العربية الذي يطبّقه createPortablePdfBlob على تقارير الهاتف:
+  // هذا المسار يستدعي html2pdf مباشرة فكان يفوته، فخرجت «فاتورةمبيعات» و«محل أبوأحمد».
+  pinArabicSpacesForCanvas(container);
 
   // اسم الملف المنزَّل من نفس بيانات الفاتورة المطبوعة الآن — لا رقم بلا اسم
   // زبون، ولا صيغة إنكليزية. هو نفسه مصدر اسم النسخة في iCloud.
