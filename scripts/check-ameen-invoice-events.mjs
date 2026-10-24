@@ -176,6 +176,34 @@ for (const name of [
   "send switch: agent re-checks the flag inside the loop before each send",
   // Codex P1 (51783c90): ملف التفعيل يُعاد فحصه قبل كل إرسال
   "send flag: re-checked inside the loop before each send",
+  // أداء حفظ الحالة (2026-10-22): الحالة الكاملة عند التغيّر فقط، والعلامة المائية كل دورة
+  "canonical json: plain text fast path is byte-identical",
+  "canonical json: escapes still applied when needed",
+  "state save mode: unchanged cycle saves the watermark only",
+  "state save mode: a real change saves the full state",
+  "performance: 20 unchanged cycles never rewrite state.json",
+  "performance: watermark save stays well under the 500ms cycle budget",
+  "performance: watermark save is at least 10x cheaper than a full save",
+  "restart: newer watermark of the same state version is used",
+  "restart: watermark kept verbatim in server-local time (no UTC shift on PowerShell 7)",
+  "restart: watermark from an unsaved state version is ignored (safe rescan)",
+  "restart: an older watermark never moves the state back",
+  "corrupt watermark.json: state watermark kept",
+  "interrupted save: temp leftovers removed on start",
+  "interrupted save: original state.json intact and readable",
+  "agent: detection loop chooses the save mode (no unconditional full save)",
+  "agent: send path saves state only when something was sent or failed",
+  // ملف مقفول لحظياً (ثبت على OZK2026): العلامة لا توقف الوكيل، والحالة الكاملة لا تُفسد الأصل
+  "locked watermark.json: save does not throw",
+  "locked state.json: full save fails loudly, original intact, no temp file",
+  // Codex P1 (42af3a30): state_seq تالف في watermark.json لا يمنع الإقلاع
+  "watermark state_seq valid: newer watermark used",
+  "watermark state_seq restart: bad file replaced by the next save, no seq change",
+  "watermark state_seq restart: no event emitted for known versions after recovery",
+  "watermark state_seq parser: TryParse rejects text, overflow and zero",
+  // Codex P1 (37be4ca8): تاريخ مستحيل في العلامة لا يوقف الوكيل
+  "state.json invalid watermark date: read does not throw and watermark is cleared",
+  "watermark parser: valid date returned verbatim, impossible dates rejected",
 ]) assert.ok(psTest.includes(`'${name}'`), `اختبار PowerShell إلزامي مفقود: ${name}`);
 
 const rollback = read(rollbackRel).replace(/--.*$/gm, "");
