@@ -93,6 +93,19 @@ select public.document_archive_ingest_report(jsonb_build_object('host', 'OZK2026
   'items', jsonb_build_array(pg_temp.item(repeat('a', 32), 1, 'notified', jsonb_build_object('version_hash', repeat('f', 64), 'customer_name', 'مزوّر')))));
 select pg_temp.ok((select customer_name = 'زبون تجريبي' from public.document_archive_items where job_id = repeat('a', 32)), 'identity of job is immutable');
 
+-- نسخة مكررة بـjob_id آخر (ملف مهمة تالف أُعيد رقمه محلياً): تُرفض وحدها، والدفعة والنبض يمرّان.
+select pg_temp.ok((select (public.document_archive_ingest_report(jsonb_build_object('host', 'OZK2026', 'drive_state', 'disconnected', 'mode', 'live',
+  'items', jsonb_build_array(
+    pg_temp.item(repeat('e', 32), 1, 'rendered', jsonb_build_object('version_hash', repeat('e', 64))),
+    pg_temp.item(repeat('9', 32), 9, 'rendered')))) ->> 'rejected')::int = 1), 'duplicate version rejected alone');
+select pg_temp.ok((select drive_state = 'disconnected' from public.document_archive_heartbeat where host = 'OZK2026')
+  and exists (select 1 from public.document_archive_items where job_id = repeat('9', 32))
+  and not exists (select 1 from public.document_archive_items where job_id = repeat('e', 32)), 'batch and heartbeat survive duplicate');
+reset role;
+delete from public.document_archive_items where job_id = repeat('9', 32); -- تنظيف الاختبار (لا يمسّ العدّ أدناه)
+set role service_role;
+select pg_temp.act('service');
+
 -- رابط عام مرفوض بقيد الجدول.
 do $$ begin
   perform public.document_archive_ingest_report(jsonb_build_object('host', 'OZK2026', 'drive_state', 'connected', 'mode', 'live',

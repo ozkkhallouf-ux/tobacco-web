@@ -170,6 +170,7 @@ declare
   v_items jsonb := coalesce(p_report -> 'items', '[]'::jsonb);
   v_item  jsonb;
   v_retry jsonb;
+  v_rejected int := 0;
 begin
   if jsonb_typeof(v_items) <> 'array' or jsonb_array_length(v_items) > 200 then
     raise exception 'document_archive: items must be an array of at most 200' using errcode = '22023';
@@ -197,8 +198,14 @@ begin
     worker_version = excluded.worker_version,
     reported_at = v_now;
 
+  -- عنصر يتعارض مع (doc_type, source_guid, version) بـjob_id آخر (ملف مهمة تالف عُزل محلياً
+  -- فأُعيد رقم النسخة) يُرفض وحده ويُعدّ؛ لا يُسقط الدفعة ولا النبض فتتجمّد المرآة.
   for v_item in select value from jsonb_array_elements(v_items) loop
-    perform private.document_archive_upsert_item(v_item || jsonb_build_object('host', p_report ->> 'host'), v_now);
+    begin
+      perform private.document_archive_upsert_item(v_item || jsonb_build_object('host', p_report ->> 'host'), v_now);
+    exception when unique_violation then
+      v_rejected := v_rejected + 1;
+    end;
   end loop;
 
   -- طلبات المالك المفتوحة: تُسلَّم مرة واحدة وتُعلَّم مستهلكة في المعاملة نفسها.
@@ -210,7 +217,7 @@ begin
   )
   select coalesce(jsonb_agg(job_id), '[]'::jsonb) into v_retry from taken;
 
-  return jsonb_build_object('items', jsonb_array_length(v_items), 'retry_job_ids', v_retry);
+  return jsonb_build_object('items', jsonb_array_length(v_items), 'rejected', v_rejected, 'retry_job_ids', v_retry);
 end;
 $$;
 
