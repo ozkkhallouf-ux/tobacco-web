@@ -134,19 +134,34 @@ function createDrive({ credentials, expectedEmail, fetchImpl = globalThis.fetch,
     });
   }
 
-  // المسار كاملاً؛ يتوقف إن كان الجذر مشتركاً.
+  // حالة مجلد محفوظ في المخبأ الآن (لا من وقت إنشائه)؛ null إن حُذف أو نُقل إلى السلة.
+  async function cachedFolder(id) {
+    try {
+      const data = await api("GET", `${API}/files/${encodeURIComponent(id)}?fields=id,shared,trashed`);
+      return data.trashed ? null : data;
+    } catch (err) {
+      if (err instanceof DriveError && err.code === "API" && /^404\b/.test(err.message.replace(/^API: /, ""))) return null;
+      throw err;
+    }
+  }
+
+  // المسار كاملاً. صلاحيات المجلد تنتقل إلى ما بداخله، فأي مجلد مشترك في المسار
+  // (الجذر أو النوع أو السنة أو الشهر أو الزبون) يوقف الرفع **قبل** إرسال المحتوى،
+  // والمجلدات المخبّأة تُفحص من جديد في كل رفع.
   async function ensurePath(plan, cache) {
     let parent = "root";
     for (const step of plan) {
       const cacheKey = `${parent}|${step.key}`;
-      let id = cache && cache[cacheKey];
-      if (!id) {
-        const folder = await ensureFolder(parent, step.key, step.name);
-        if (step.key === "root" && folder.shared) throw new DriveError("NOT_PRIVATE", "مجلد الأرشيف الجذر مشترك");
-        id = folder.id;
-        if (cache) cache[cacheKey] = id;
+      let folder = cache && cache[cacheKey] ? await cachedFolder(cache[cacheKey]) : null;
+      if (!folder) {
+        if (cache) delete cache[cacheKey];
+        folder = await ensureFolder(parent, step.key, step.name);
       }
-      parent = id;
+      if (folder.shared) {
+        throw new DriveError("NOT_PRIVATE", step.key === "root" ? "مجلد الأرشيف الجذر مشترك" : `مجلد مشترك في مسار الأرشيف (${step.key.split(":")[0]})`);
+      }
+      if (cache) cache[cacheKey] = folder.id;
+      parent = folder.id;
     }
     return parent;
   }

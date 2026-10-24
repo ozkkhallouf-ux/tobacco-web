@@ -321,6 +321,48 @@ test("مجلد الأرشيف الجذر صار مشتركاً ⇒ إيقاف ا
   assert.equal(t.drive.pdfFiles().length, 1, "لا ملف جديد في أرشيف مشترك");
 });
 
+test("مجلد فرعي (زبون) صار مشتركاً والجذر خاص ⇒ لا رفع إليه ولو كان في المخبأ (Codex P1)", async () => {
+  const t = await setup();
+  t.ameen.add({ guid: G1, number: 501 });
+  t.advance(300);
+  await t.cycle();
+  const [first] = t.drive.pdfFiles();
+  const customerFolder = t.drive.files.get(first.parents[0]);
+  customerFolder.shared = true; // الجذر يبقى خاصاً
+  t.ameen.add({ guid: G2, number: 502 });
+  t.advance(300);
+  const uploadsBefore = t.drive.state.uploads;
+  const r = await t.cycle();
+  assert.equal(r.driveState, "not_private");
+  assert.equal(t.drive.state.uploads, uploadsBefore, "لا محتوى يُرسل إلى مجلد مشترك");
+  assert.equal(t.drive.pdfFiles().length, 1);
+  const month = t.drive.files.get(customerFolder.parents[0]);
+  customerFolder.shared = false;
+  month.shared = true; // مستوى آخر في المسار
+  t.advance(3600);
+  assert.equal((await t.cycle()).driveState, "not_private");
+  assert.equal(t.drive.pdfFiles().length, 1);
+  month.shared = false;
+  t.advance(3600);
+  await t.cycle();
+  assert.equal(t.drive.pdfFiles().length, 2, "بعد إلغاء المشاركة يُستأنف الرفع");
+});
+
+test("مجلد مخبّأ حُذف يدوياً ⇒ يُعاد إنشاؤه ويُرفع الملف بلا خطأ", async () => {
+  const t = await setup();
+  t.ameen.add({ guid: G1, number: 501 });
+  t.advance(300);
+  await t.cycle();
+  const [first] = t.drive.pdfFiles();
+  t.drive.files.delete(first.parents[0]); // مجلد الزبون لم يعد موجوداً (404)
+  t.ameen.add({ guid: G2, number: 502 });
+  t.advance(300);
+  const r = await t.cycle();
+  assert.equal(r.driveState, "connected");
+  const second = t.drive.pdfFiles().find((f) => f.id !== first.id);
+  assert.ok(second && t.drive.files.has(second.parents[0]), "رُفع إلى مجلد زبون جديد");
+});
+
 test("فشل تيليغرام: يُعاد الإشعار دون إعادة رفع الملف", async () => {
   const t = await setup();
   t.ameen.add({ guid: G1, number: 501 });
