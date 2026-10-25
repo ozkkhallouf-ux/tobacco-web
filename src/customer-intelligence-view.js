@@ -205,6 +205,8 @@
   // --------------------------------------------------------------------------
   // رصيد مدين بلا حد موثوق: يُراجَع ضمن خطر الائتمان (لا يختفي التنبيه لأن الرقم غير موثوق).
   const insufficientWithBalance = (row) => row.flags.includes("credit_insufficient_data") && isNumber(row.currentBalance) && row.currentBalance > 0;
+  const CREDIT_ATTENTION_FLAGS = ["over_credit_limit", "near_credit_limit", "credit_delinquent"];
+  const creditAttention = (row) => CREDIT_ATTENTION_FLAGS.some((flag) => row.flags.includes(flag)) || insufficientWithBalance(row);
 
   function matchesFilter(row) {
     const has = (flag) => row.flags.includes(flag);
@@ -214,8 +216,8 @@
       case "inactive": return has("inactive");
       case "reactivated": return has("reactivated");
       case "new": return has("new") || has("possibly_new");
-      case "credit": return has("over_credit_limit") || has("near_credit_limit") || has("credit_delinquent") || insufficientWithBalance(row);
-      case "attention": return has("over_credit_limit") || has("near_credit_limit") || has("credit_delinquent") || insufficientWithBalance(row) || has("declining") || has("inactive") || has("at_risk_churn");
+      case "credit": return creditAttention(row);
+      case "attention": return creditAttention(row) || has("declining") || has("inactive") || has("at_risk_churn");
       case "insufficient": return row.primarySegment === "insufficient_data";
       default: return true;
     }
@@ -321,15 +323,20 @@
 
   // خلايا الائتمان: الحد المقترح (رقم أو حالة صريحة بدل رقم غير موثوق)، الرصيد، ثم المتاح
   // والاستخدام والتجاوز على الحد المعتمد يدوياً إن وُجد (قرار المالك 2026-10-25).
+  function usageCell(row) {
+    const usage = isNumber(row.creditUsagePercent);
+    const text = usage ? `${Math.round(row.creditUsagePercent)}%` : (CREDIT_STATUS_TEXT[row.creditStatus] || "—");
+    const basisTag = row.limitBasis === "approved" ? ` <span class="ci-basis" title="محسوب على الحد المعتمد يدوياً">معتمد</span>` : "";
+    return `<td dir="${usage ? "ltr" : "auto"}">${escape(text)}${basisTag}</td>`;
+  }
+
   function creditCells(row) {
     const amountCurrency = row.balanceCurrency || row.creditCurrency || "USD";
-    const usageText = isNumber(row.creditUsagePercent) ? `${Math.round(row.creditUsagePercent)}%` : (CREDIT_STATUS_TEXT[row.creditStatus] || "—");
-    const basisTag = row.limitBasis === "approved" ? ` <span class="ci-basis" title="محسوب على الحد المعتمد يدوياً">معتمد</span>` : "";
     const overClass = isNumber(row.overLimitAmount) && row.overLimitAmount > 0 ? "bad" : "";
     return `<td dir="${isNumber(row.creditLimitDisplay) ? "ltr" : "auto"}">${proposedText(row)}</td>
         <td dir="ltr">${money(row.balanceDisplay ?? row.currentBalance, amountCurrency)}</td>
         <td dir="ltr">${money(row.availableCredit, amountCurrency)}</td>
-        <td dir="${isNumber(row.creditUsagePercent) ? "ltr" : "auto"}">${escape(usageText)}${basisTag}</td>
+        ${usageCell(row)}
         <td dir="ltr" class="${overClass}">${money(row.overLimitAmount, amountCurrency)}</td>`;
   }
 
@@ -553,6 +560,9 @@
   };
 
   // تاريخ الحد كما حسبه المحرك: آخر لقطة، وسبب التغيير، والتنعيم، واتجاه الخطر — عرض فقط.
+  // بيانات غير كافية: لا أرقام حد (ولا حدود التنعيم) — «يحتاج مراجعة» فقط.
+  const smoothingVisible = (row, smoothing) => Boolean(smoothing && SMOOTHING_TEXT[smoothing.reason]) && row.autoCredit?.status !== "low_data";
+
   function historySection(row) {
     const history = row.creditHistory;
     if (!history) {
@@ -566,8 +576,7 @@
       lines.push(`<p class="muted">لا لقطة سابقة لهذا الزبون بعد.</p>`);
     }
     const smoothing = history.smoothing;
-    // بيانات غير كافية: لا أرقام حد (ولا حدود التنعيم) — «يحتاج مراجعة» فقط.
-    if (smoothing && SMOOTHING_TEXT[smoothing.reason] && row.autoCredit?.status !== "low_data") {
+    if (smoothingVisible(row, smoothing)) {
       const baseline = smoothing.baselineDate ? ` (المرجع ${escape(smoothing.baselineDate)}${isNumber(smoothing.minLimitBase) ? `: بين ${money(smoothing.minLimitBase)} و${money(smoothing.maxLimitBase)}` : ""})` : "";
       lines.push(`<p class="muted">التنعيم الأسبوعي: ${escape(SMOOTHING_TEXT[smoothing.reason])}${baseline}${isNumber(row.autoCredit?.limitBaseRaw) && smoothing.applied ? ` — الحد المحسوب قبل التنعيم ${money(row.autoCredit.limitBaseRaw)}` : ""}</p>`);
     }
@@ -760,6 +769,12 @@
     });
   }
 
+  function approvableRow(form) {
+    if (approvedSave.busy || !window.ozkCanAccessRoute?.(ROUTE)) return null;
+    const row = intel?.customers.find((entry) => entry.customerId === form.dataset.ciApprove);
+    return row?.customerGuid ? row : null;
+  }
+
   function approvedInputValue(form) {
     const value = Number(String(new FormData(form).get("approvedLimit") ?? "").replace(/,/g, ""));
     return Number.isFinite(value) && value >= 0 ? value : null;
@@ -769,8 +784,8 @@
 
   // حفظ الحد المعتمد بضغطة المالك وحده — نفس دالة صفحة الأرصدة (upsertCustomerCreditLimit).
   async function saveApprovedLimit(form) {
-    const row = intel?.customers.find((entry) => entry.customerId === form.dataset.ciApprove);
-    if (!row || !row.customerGuid || approvedSave.busy || !window.ozkCanAccessRoute?.(ROUTE)) return;
+    const row = approvableRow(form);
+    if (!row) return;
     const value = approvedInputValue(form);
     if (value === null) {
       approvedSave = { customerId: row.customerId, busy: false, message: "أدخل رقماً صحيحاً (صفر أو أكثر).", tone: "error" };

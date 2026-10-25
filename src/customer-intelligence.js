@@ -1154,7 +1154,7 @@
       oldestOpenDays: facts.oldestOpenAge,
       daysSinceLastPayment: facts.lastPaymentDay === null ? null : referenceDay - facts.lastPaymentDay,
       lastPaymentDate: dayNumberToKey(facts.lastPaymentDay),
-      drawAverages: facts.drawAverages || null
+      drawAverages: facts.drawAverages
     });
 
     // 1) متعثّر: رصيد قائم + دين أقدم من دورته بهامش واضح (وبقيمة معتبرة) +
@@ -1274,10 +1274,7 @@
     const insufficientData = autoUsable && auto.status === "low_data";
     if (autoUsable) {
       creditLimitSource = "auto";
-      if (auto.limitBase !== null && !insufficientData) {
-        creditLimitDisplay = foreign ? commercialRound(auto.limitBase / rate, currency) : commercialRound(auto.limitBase, CONFIG.baseCurrency);
-        creditLimit = foreign ? round(creditLimitDisplay * rate, 3) : creditLimitDisplay;
-      }
+      ({ creditLimit, creditLimitDisplay } = displayedAutoLimit(auto, insufficientData, foreign ? { currency, rate } : null));
     } else if (ameenLimit !== null) {
       // حد الأمين مخزَّن بعملة الأساس كبقية مبالغه.
       creditLimitSource = "ameen";
@@ -1396,7 +1393,8 @@
     credit.proposedCreditStatus = credit.creditStatus;
     const measured = credit.availableCredit !== null && credit.availableCredit !== undefined;
     credit.limitBasis = measured ? credit.creditLimitSource : null;
-    credit.effectiveLimit = measured ? (credit.balanceCurrency === credit.creditCurrency ? credit.creditLimitDisplay : credit.creditLimit) : null;
+    const comparedLimit = credit.balanceCurrency === credit.creditCurrency ? credit.creditLimitDisplay : credit.creditLimit;
+    credit.effectiveLimit = measured ? comparedLimit : null;
     const limit = approvedComparableLimit(credit, entry, rate);
     if (limit === null) return;
     const exposure = Math.max(0, credit.balanceDisplay ?? 0);
@@ -1429,14 +1427,23 @@
   // حساب الليرة برصيده بعملته × سعر الصرف (لا الدولار المشوّه بفروقات الصرف)، ثم أساس الحكم.
   function attachApprovedCredit(credit, balanceRow, approvedEntry, display) {
     const rate = display.rate;
-    const accountCcyBalance = numberOrNull(balanceRow?.balanceAccountCcy);
-    const nativeBase = rate !== null && accountCcyBalance !== null ? accountCcyBalance * rate : credit.currentBalance;
-    const baseExposure = credit.currentBalance === null ? null : Math.max(0, nativeBase);
+    const baseExposure = baseExposureOf(credit, balanceRow, rate);
     credit.approvedCredit = approvedCreditOf(approvedEntry, baseExposure, credit.creditLimit);
     applyEffectiveLimit(credit, approvedEntry, rate);
-    const ameenLimitRaw = numberOrNull(balanceRow?.creditLimit ?? balanceRow?.credit_limit);
-    credit.ameenCreditLimit = ameenLimitRaw !== null && ameenLimitRaw > 0 ? ameenLimitRaw : null;
+    credit.ameenCreditLimit = ameenCreditLimitOf(balanceRow);
     credit.exchangeRate = rate === null ? null : { rate, currency: display.currency, basis: display.rateBasis || null, date: display.rateDate || null };
+  }
+
+  function baseExposureOf(credit, balanceRow, rate) {
+    if (credit.currentBalance === null) return null;
+    const accountCcyBalance = numberOrNull(balanceRow?.balanceAccountCcy);
+    return Math.max(0, rate !== null && accountCcyBalance !== null ? accountCcyBalance * rate : credit.currentBalance);
+  }
+
+  // حد الأمين (cu000) قراءة فقط؛ الصفر فيه «بلا حد» كما يخزّنه الأمين لكل الحسابات.
+  function ameenCreditLimitOf(balanceRow) {
+    const value = numberOrNull(balanceRow?.creditLimit ?? balanceRow?.credit_limit);
+    return value !== null && value > 0 ? value : null;
   }
 
   // سبب التجاوز/القرب بنص يسمّي الحد الذي قيس عليه، فلا يناقض الرقم المعروض.
@@ -1445,6 +1452,17 @@
     const label = LIMIT_BASIS_LABELS[credit.limitBasis] || "حد الائتمان";
     if (credit.creditUsagePercent === null) return `${customerName ? `${customerName} ` : ""}عليه رصيد مدين و${label} صفر.`;
     return `${customerName ? `رصيد ${customerName}` : "الرصيد"} بلغ ${credit.creditUsagePercent}% من ${label}.`;
+  }
+
+  // الحد الآلي المعروض: مقرَّب تجارياً بعملة الحساب (أو الأساس). بيانات غير كافية ⇒ لا رقم.
+  function displayedAutoLimit(auto, insufficientData, fx) {
+    if (auto.limitBase === null || insufficientData) return { creditLimit: null, creditLimitDisplay: null };
+    if (!fx) {
+      const value = commercialRound(auto.limitBase, CONFIG.baseCurrency);
+      return { creditLimit: value, creditLimitDisplay: value };
+    }
+    const display = commercialRound(auto.limitBase / fx.rate, fx.currency);
+    return { creditLimit: round(display * fx.rate, 3), creditLimitDisplay: display };
   }
 
   // المتاح من الحد ومقدار التجاوز بعملة المقارنة نفسها (عملة الحساب أو الأساس). «غير نشط: بلا حد»
@@ -1742,10 +1760,14 @@
       maxLimitBase: round(max, 3)
     };
     auto.limitBase = limited;
-    // بيانات غير كافية: الحد داخلي لا يُعرض، فلا يُذكر رقمه في السبب.
-    if (applied && auto.status !== "low_data") {
-      auto.notes.push(`التنعيم الأسبوعي: الحد المحسوب ${Math.round(raw)} حُصر عند ${Math.round(limited)} (بين −${Math.round(H.maxWeeklyDecrease * 100)}% و+${Math.round(H.maxWeeklyIncrease * 100)}% من حد ${baseline.date}).`);
-    }
+    if (applied) pushSmoothingNote(auto, raw, limited, baseline.date);
+  }
+
+  // بيانات غير كافية: الحد داخلي لا يُعرض، فلا يُذكر رقمه في السبب.
+  function pushSmoothingNote(auto, raw, limited, baselineDate) {
+    if (auto.status === "low_data") return;
+    const H = CONFIG.creditHistory;
+    auto.notes.push(`التنعيم الأسبوعي: الحد المحسوب ${Math.round(raw)} حُصر عند ${Math.round(limited)} (بين −${Math.round(H.maxWeeklyDecrease * 100)}% و+${Math.round(H.maxWeeklyIncrease * 100)}% من حد ${baselineDate}).`);
   }
 
   const formatAmount = (value, currency) => {
@@ -1815,6 +1837,12 @@
     precaution: () => `دخل السقف الاحترازي (${CONFIG.autoCredit.precautionaryCapMultiple}× الاحتياج الطبيعي = السحب اليومي × دورة السداد)`
   });
 
+  const UNCAP_REASONS = Object.freeze({
+    coverage: "خرج من سقف التغطية",
+    low_data: "صارت بياناته كافية فزال الحد المحافظ",
+    precaution: "خرج من السقف الاحترازي"
+  });
+
   // تفسير تغيّر الحد أو الحالة عن آخر لقطة صالحة، من مكوّنات الصيغة الفعلية وحدها.
   function creditChangeExplanation(previous, current) {
     const A = CONFIG.autoCredit;
@@ -1866,8 +1894,7 @@
       keys.push(`cap_${C.cappedBy}`);
     } else if (direction > 0 && P.cappedBy && P.cappedBy !== C.cappedBy) {
       keys.push(`uncap_${P.cappedBy}`);
-      reasons.push(P.cappedBy === "low_data" ? "صارت بياناته كافية فزال الحد المحافظ"
-        : P.cappedBy === "precaution" ? "خرج من السقف الاحترازي" : "خرج من سقف التغطية");
+      reasons.push(UNCAP_REASONS[P.cappedBy] || UNCAP_REASONS.coverage);
     }
     for (const factor of dominantFactors(creditFactorChanges(previous, current), direction)) {
       reasons.push(factor.phrase);
