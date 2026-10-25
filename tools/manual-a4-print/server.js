@@ -211,6 +211,45 @@ const PRINTER_BLOCKING_ERRORS = {
   9: "الطابعة غير متصلة", 10: "الطابعة تحتاج صيانة", 11: "درج الإخراج ممتلئ",
 };
 
+// ردود WS-Discovery كما يكتبها سكربت الفحص: «epr^xaddr^reach» مفصولة بـ«~».
+function parseWsdReplies(raw) {
+  return String(raw || "").split("~").filter(Boolean).map((r) => {
+    const [epr, xaddr, reach] = r.split("^");
+    return { epr: String(epr || "").trim().toLowerCase(), xaddr: String(xaddr || "").trim(), reach: reach || "none" };
+  });
+}
+
+function urlHost(u) {
+  try { const x = new URL(u); return `${x.hostname}:${x.port || (x.protocol === "https:" ? 443 : 80)}`; } catch { return ""; }
+}
+
+// حكم طابور WSD: الهوية بالـUUID وحده، والعنوان هو ما ردّت به الطابعة الآن على
+// WS-Discovery. ما يحفظه Windows للجهاز يُقارن فقط للتنبيه، فتغيّر عنوان DHCP لا يرفض الطباعة.
+function wsdVerdict(wsd) {
+  const uuid = String(wsd.uuid || "").trim().toLowerCase();
+  const want = `urn:uuid:${uuid}`;
+  const replies = parseWsdReplies(wsd.replies);
+  const mine = replies.filter((r) => r.epr === want && r.xaddr);
+  const match = mine.find((r) => r.reach === "ok") || mine[0];
+  if (!uuid) return { reach: "fail", target: "WSD", reason: "منفذ WSD بلا معرّف طابعة (UUID) — لا يمكن التحقق من هويتها" };
+  if (!match) {
+    const other = replies.length > 0;
+    return {
+      reach: "fail", target: `WSD ${uuid}`,
+      reason: other
+        ? `ردّ على اكتشاف WSD جهاز لا يطابق معرّف الطابعة (${uuid})`
+        : `الطابعة لا تردّ على اكتشاف WSD (${uuid})`,
+    };
+  }
+  const target = urlHost(match.xaddr) || match.xaddr;
+  if (match.reach !== "ok") return { reach: "fail", target, reason: `الطابعة لا تردّ على الشبكة (${target})` };
+  const winHost = urlHost(wsd.windowsUrl);
+  const warning = winHost && winHost !== target
+    ? `Windows ما زال يحفظ عنوان الطابعة ${winHost} بينما تردّ الآن على ${target}`
+    : "";
+  return { reach: "ok", target, warning };
+}
+
 // يحكم على حالة الطابعة من حقول الاستعلام. Windows قد يُبقي طابعة الشبكة «جاهزة» وهي لا
 // تردّ، فلا تُعدّ جاهزة إلا إذا ردّت على منفذها حين يكون عنوانها معروفاً.
 function classifyPrinter(f) {
@@ -223,31 +262,79 @@ function classifyPrinter(f) {
   const blocking = PRINTER_BLOCKING_ERRORS[Number(f.detected)];
   if (blocking) return { state: "error", ...base, reason: blocking };
   if (Number(f.status) === 6) return { state: "error", ...base, reason: "الطابعة متوقفة" };
-  if (f.reach === "fail") return { state: "unreachable", ...base, target: f.target, reason: `الطابعة لا تردّ على الشبكة (${f.target})` };
-  const warn = Number(f.jobs) > 0 ? `في طابور الطابعة ${f.jobs} مهمة سابقة لم تُطبع` : "";
-  return { state: "ready", ...base, reachable: f.reach === "ok" ? true : null, warning: warn, reason: "" };
+  const w = f.wsd ? wsdVerdict(f.wsd) : null;
+  const reach = w ? w.reach : f.reach;
+  const target = w ? w.target : f.target;
+  if (reach === "fail") return { state: "unreachable", ...base, target, reason: (w && w.reason) || `الطابعة لا تردّ على الشبكة (${target})` };
+  const warn = [w && w.warning, Number(f.jobs) > 0 ? `في طابور الطابعة ${f.jobs} مهمة سابقة لم تُطبع` : ""].filter(Boolean).join(" — ");
+  return { state: "ready", ...base, ...(w ? { target } : {}), reachable: reach === "ok" ? true : null, warning: warn, reason: "" };
+}
+
+// سكربت فحص الطابعة. منفذ WSD لا يحمل عنواناً في Win32_TCPIPPrinterPort:
+// - طابور «IPP Class Driver» يحفظ رابط الطابعة على عقدة SWD\IPP\<UUID>، ويُفحص ذلك الرابط.
+// - طابور WSD عادي يُسأل عنه بالـUUID عبر WS-Discovery (multicast على كل بطاقات IPv4)،
+//   فيُفحص العنوان الذي تردّ به الطابعة الآن لا عنواناً محفوظاً. قيمة LocationInformation
+//   لعقدة الطابور نفسه (تحت Enum) لا تُستعمل: تبقى على العنوان القديم بعد تغيّر DHCP.
+function printerProbeScript(cfg) {
+  const q = (v) => String(v || "").replace(/'/g, "''");
+  return `$p = Get-CimInstance Win32_Printer | Where-Object { $_.Name -eq '${q(cfg.printerName)}' }\n`
+    + `if (-not $p) { 'NOT_FOUND'; exit 0 }\n`
+    + `$jobs = @(Get-CimInstance Win32_PrintJob | Where-Object { $_.Name -like ($p.Name + ',*') }).Count\n`
+    + `$h = '${q(cfg.printerHost)}'; $n = ${Number(cfg.printerHostPort) || 631}\n`
+    + `$tp = Get-CimInstance Win32_TCPIPPrinterPort | Where-Object { $_.Name -eq $p.PortName } | Select-Object -First 1\n`
+    + `if ($tp -and $tp.HostAddress) { $h = $tp.HostAddress; $n = [int]$tp.PortNumber }\n`
+    + `$wsd = ''\n`
+    + `if (-not $h -and $p.PortName -like 'WSD-*') {\n`
+    + `  $w = Get-ItemProperty -LiteralPath ('HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Print\\Monitors\\WSD Port\\Ports\\' + $p.PortName) -ErrorAction SilentlyContinue\n`
+    + `  $uuid = if ($w) { [string]$w.'Printer UUID' } else { '' }\n`
+    + `  if ($w -and $w.'IPP PortId' -and $uuid) {\n`
+    + `    $u = (Get-PnpDeviceProperty -InstanceId ('SWD\\IPP\\' + $uuid) -KeyName '{A35996AB-11CF-4935-8B61-A6761081ECDF} 12' -ErrorAction SilentlyContinue).Data\n`
+    + `    if ($u) { try { $x = [Uri]"$u"; $h = $x.Host; $n = $x.Port } catch { } }\n`
+    + `  } else {\n`
+    + `    $win = if ($uuid) { [string](Get-PnpDeviceProperty -InstanceId ('SWD\\DAFWSDProvider\\urn:uuid:' + $uuid) -KeyName 'DEVPKEY_Device_LocationInfo' -ErrorAction SilentlyContinue).Data } else { '' }\n`
+    + `    $rep = @()\n`
+    + `    if ($uuid) {\n`
+    + `      $want = 'urn:uuid:' + $uuid\n`
+    + `      $xml = '<?xml version="1.0" encoding="utf-8"?><s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:a="http://schemas.xmlsoap.org/ws/2004/08/addressing" xmlns:d="http://schemas.xmlsoap.org/ws/2005/04/discovery"><s:Header><a:To>urn:schemas-xmlsoap-org:ws:2005:04:discovery</a:To><a:Action>http://schemas.xmlsoap.org/ws/2005/04/discovery/Resolve</a:Action><a:MessageID>urn:uuid:' + [guid]::NewGuid() + '</a:MessageID></s:Header><s:Body><d:Resolve><a:EndpointReference><a:Address>' + $want + '</a:Address></a:EndpointReference></d:Resolve></s:Body></s:Envelope>'\n`
+    + `      $b = [Text.Encoding]::UTF8.GetBytes($xml); $socks = @()\n`
+    + `      $addrs = [Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() | Where-Object { $_.OperationalStatus -eq 'Up' } | ForEach-Object { $_.GetIPProperties().UnicastAddresses } | ForEach-Object { $_.Address } | Where-Object { $_.AddressFamily -eq 'InterNetwork' -and -not [Net.IPAddress]::IsLoopback($_) -and -not $_.ToString().StartsWith('169.254.') }\n`
+    + `      foreach ($a in $addrs) { try { $s = New-Object Net.Sockets.UdpClient (New-Object Net.IPEndPoint ($a, 0)); [void]$s.Send($b, $b.Length, '239.255.255.250', 3702); $socks += $s } catch { } }\n`
+    + `      $found = @(); $sw = [Diagnostics.Stopwatch]::StartNew(); $ep = New-Object Net.IPEndPoint ([Net.IPAddress]::Any, 0)\n`
+    + `      while ($sw.ElapsedMilliseconds -lt 2000 -and -not ($found | Where-Object { $_[0] -ieq $want })) {\n`
+    + `        foreach ($s in $socks) { while ($s.Available -gt 0) { try { $t = [Text.Encoding]::UTF8.GetString($s.Receive([ref]$ep)); $e = ([regex]::Match($t, 'Address>\\s*(urn:uuid:[^<\\s]+)')).Groups[1].Value; $xa = (([regex]::Match($t, 'XAddrs>\\s*([^<]+)<')).Groups[1].Value.Trim() -split '\\s+')[0]; if ($e) { $found += ,@($e, $xa) } } catch { } } }\n`
+    + `        Start-Sleep -Milliseconds 50\n`
+    + `      }\n`
+    + `      foreach ($s in $socks) { $s.Close() }\n`
+    + `      foreach ($f in $found | Select-Object -First 5) { $r = 'none'; try { $xu = [Uri]$f[1]; $c = New-Object Net.Sockets.TcpClient; try { $r = if ($c.ConnectAsync($xu.Host, $xu.Port).Wait(2000)) { 'ok' } else { 'fail' } } catch { $r = 'fail' } finally { $c.Close() } } catch { }; $rep += ($f[0] + '^' + $f[1] + '^' + $r) }\n`
+    + `    }\n`
+    + `    $wsd = 'WSD^' + $uuid + '^' + $win + '^' + ($rep -join '~')\n`
+    + `  }\n`
+    + `}\n`
+    + `$reach = 'none'\n`
+    + `if ($h) { $c = New-Object Net.Sockets.TcpClient; try { $reach = if ($c.ConnectAsync($h, $n).Wait(2000)) { 'ok' } else { 'fail' } } catch { $reach = 'fail' } finally { $c.Close() } }\n`
+    + `'FOUND|' + $p.PortName + '|' + $p.WorkOffline + '|' + $p.PrinterStatus + '|' + $p.DetectedErrorState + '|' + $jobs + '|' + $reach + '|' + $h + ':' + $n + '|' + $wsd`;
+}
+
+// يفكّ سطر الفحص إلى حقول classifyPrinter.
+function parseProbeLine(out) {
+  const [, port, offline, status, detected, jobs, reach, target, wsdRaw] = String(out).split("|");
+  const f = { port, offline, status, detected, jobs, reach, target };
+  if (wsdRaw && wsdRaw.startsWith("WSD^")) {
+    const parts = wsdRaw.split("^");
+    // WSD^uuid^windowsUrl^replies — والردود نفسها تحوي «^» داخلها.
+    f.wsd = { uuid: parts[1] || "", windowsUrl: parts[2] || "", replies: parts.slice(3).join("^") };
+  }
+  return f;
 }
 
 function createPrinter(cfg) {
   function probe() {
     if (process.platform !== "win32") return { state: "unknown", reason: "ليس Windows" };
-    const q = (v) => String(v || "").replace(/'/g, "''");
-    const r = runPowerShell(
-      `$p = Get-CimInstance Win32_Printer | Where-Object { $_.Name -eq '${q(cfg.printerName)}' }\n`
-      + `if (-not $p) { 'NOT_FOUND'; exit 0 }\n`
-      + `$jobs = @(Get-CimInstance Win32_PrintJob | Where-Object { $_.Name -like ($p.Name + ',*') }).Count\n`
-      + `$h = '${q(cfg.printerHost)}'; $n = ${Number(cfg.printerHostPort) || 631}\n`
-      + `$tp = Get-CimInstance Win32_TCPIPPrinterPort | Where-Object { $_.Name -eq $p.PortName } | Select-Object -First 1\n`
-      + `if ($tp -and $tp.HostAddress) { $h = $tp.HostAddress; $n = [int]$tp.PortNumber }\n`
-      + `$reach = 'none'\n`
-      + `if ($h) { $c = New-Object Net.Sockets.TcpClient; try { $reach = if ($c.ConnectAsync($h, $n).Wait(2000)) { 'ok' } else { 'fail' } } catch { $reach = 'fail' } finally { $c.Close() } }\n`
-      + `'FOUND|' + $p.PortName + '|' + $p.WorkOffline + '|' + $p.PrinterStatus + '|' + $p.DetectedErrorState + '|' + $jobs + '|' + $reach + '|' + $h + ':' + $n`
-    );
+    const r = runPowerShell(printerProbeScript(cfg));
     const out = String(r.stdout || "").trim();
     if (out === "NOT_FOUND") return { state: "missing", reason: `الطابعة "${cfg.printerName}" غير مثبّتة على هذا الجهاز` };
     if (r.status !== 0 || !out.startsWith("FOUND|")) return { state: "unknown", reason: "تعذّر الاستعلام عن الطابعة" };
-    const [, port, offline, status, detected, jobs, reach, target] = out.split("|");
-    return classifyPrinter({ port, offline, status, detected, jobs, reach, target });
+    return classifyPrinter(parseProbeLine(out));
   }
   function send(pdfPath, paper, copies) {
     if (!fs.existsSync(cfg.sumatraPath)) throw new Error(`SumatraPDF غير موجود: ${cfg.sumatraPath}`);
@@ -688,7 +775,7 @@ async function main() {
 }
 
 module.exports = {
-  createApp, classifyPrinter, createHttpHandler, SESSION_COOKIE, parseSqlConnStr, countPdfPages, loadConfig, DEFAULTS,
+  createApp, classifyPrinter, printerProbeScript, parseProbeLine, wsdVerdict, createHttpHandler, SESSION_COOKIE, parseSqlConnStr, countPdfPages, loadConfig, DEFAULTS,
   SEARCH_SQL, LINES_SQL, BALANCE_SQL, createRenderer,
 };
 

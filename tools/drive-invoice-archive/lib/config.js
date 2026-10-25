@@ -39,12 +39,51 @@ const DEFAULTS = Object.freeze({
   secretDir: BASE_DIR,
   browserPath: "",
   lockPort: 47617,
+  // تجربة محصورة (لا للإنتاج): إن امتلأت القائمة لا يُرصد ولا يُرفع ولا يُرسَل ولا يُبلَّغ إلا
+  // عن هذه الفواتير. تتطلب تاريخ انتهاء قريباً؛ بعده يرفض العامل العمل كلياً (لا يتسع بصمت
+  // إلى كل الفواتير، ولا يبقى محصوراً بصمت في التشغيل الإنتاجي).
+  pilotInvoiceGuids: [],
+  pilotExpiresAt: "",           // YYYY-MM-DD، آخر يوم مسموح، ≤ PILOT_MAX_DAYS من اليوم
 });
+
+const PILOT_MAX_GUIDS = 5;
+const PILOT_MAX_DAYS = 7;
+const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-function validate(cfg) {
+// اليوم بتوقيت دمشق (UTC+3) كي لا ينقلب الحكم على الانتهاء عند منتصف ليل UTC.
+function damascusDay(nowMs) {
+  return new Date(nowMs + 3 * 3600_000).toISOString().slice(0, 10);
+}
+
+// انقضاء التجربة يُفحص عند الإقلاع (validate) وقبل كل دورة (archiver.cycle)، فعملية
+// بدأت قبل الانتهاء لا تتجاوز منتصف ليل آخر يوم.
+function pilotExpired(cfg, nowMs) {
+  return (cfg.pilotInvoiceGuids || []).length > 0 && String(cfg.pilotExpiresAt || "") < damascusDay(nowMs);
+}
+
+function validatePilot(cfg, nowMs, errors) {
+  const list = cfg.pilotInvoiceGuids;
+  if (!Array.isArray(list)) { errors.push("pilotInvoiceGuids يجب أن تكون قائمة"); return; }
+  const expires = String(cfg.pilotExpiresAt || "");
+  if (!list.length) {
+    if (expires) errors.push("pilotExpiresAt بلا pilotInvoiceGuids");
+    return;
+  }
+  if (list.length > PILOT_MAX_GUIDS) errors.push(`pilotInvoiceGuids لا تتجاوز ${PILOT_MAX_GUIDS}`);
+  if (!list.every((g) => GUID_RE.test(String(g)))) errors.push("pilotInvoiceGuids: معرّفات GUID فقط");
+  if (new Set(list.map((g) => String(g).toLowerCase())).size !== list.length) errors.push("pilotInvoiceGuids: معرّف مكرر");
+  if (!DATE_RE.test(expires)) { errors.push("التجربة المحصورة تتطلب pilotExpiresAt بصيغة YYYY-MM-DD"); return; }
+  const today = damascusDay(nowMs);
+  const latest = damascusDay(nowMs + PILOT_MAX_DAYS * 86400_000);
+  if (expires < today) errors.push(`انتهت التجربة المحصورة (${expires}): احذف pilotInvoiceGuids وpilotExpiresAt أو جدّدها بقرار المالك`);
+  else if (expires > latest) errors.push(`pilotExpiresAt لا يتجاوز ${PILOT_MAX_DAYS} أيام`);
+}
+
+function validate(cfg, nowMs = Date.now()) {
   const errors = [];
+  validatePilot(cfg, nowMs, errors);
   if (!MODES[cfg.mode]) errors.push(`mode غير معروف: ${cfg.mode}`);
   if (String(cfg.expectedAccountEmail || "").trim().toLowerCase() !== APPROVED_ACCOUNT) {
     errors.push("expectedAccountEmail يجب أن يكون الحساب المعتمد وحده");
@@ -67,4 +106,4 @@ function loadConfig(file) {
   return validate({ ...DEFAULTS, ...user });
 }
 
-module.exports = { APPROVED_ACCOUNT, MODES, DEFAULTS, BASE_DIR, validate, loadConfig };
+module.exports = { APPROVED_ACCOUNT, MODES, DEFAULTS, BASE_DIR, PILOT_MAX_DAYS, pilotExpired, validate, loadConfig };

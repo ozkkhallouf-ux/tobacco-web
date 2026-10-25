@@ -104,6 +104,66 @@ const OZK_FONT = (() => {
     ]);
   }
 
+  // هل يرسم الـcanvas بـCairo فعلاً؟ html2canvas يرسم النص بـctx.fillText، فهذا هو
+  // القياس نفسه الذي يحكم شكل PDF الهاتف. عرض نص بـ"Cairo",monospace يساوي عرضه
+  // بـmonospace وحده ⇐ Cairo غير متاح للوزن والمقطع (عربي/أرقام).
+  function usable(doc) {
+    const target = doc || (typeof document !== "undefined" ? document : null);
+    if (!target || typeof target.createElement !== "function") return false;
+    try {
+      const ctx = target.createElement("canvas").getContext("2d");
+      if (!ctx) return false;
+      const width = (font, text) => { ctx.font = font; return ctx.measureText(text).width; };
+      return WEIGHTS.every((weight) => ["ابت ثجح", "0123456789"].every((text) =>
+        Math.abs(width(`${weight} 40px "${FAMILY}",monospace`, text) - width(`${weight} 40px monospace`, text)) > 0.5));
+    } catch {
+      return false;
+    }
+  }
+
+  // وجه @font-face الذي فشل تحميله (شبكة الهاتف البطيئة، انقطاع لحظي) يبقى في حالة
+  // "error" طوال الجلسة ولا يعيد المتصفح طلبه. لذا نحمّل نسخة FontFace جديدة لكل
+  // مقطع/وزن لم يجهز، بنفس العنوان ونفس unicode-range، ونضيفها إلى document.fonts.
+  function reloadFaces(target) {
+    if (typeof FontFace === "undefined" || !target.fonts || typeof target.fonts.add !== "function") return Promise.resolve();
+    const loaded = [...target.fonts].filter((face) => String(face.family).replace(/["']/g, "") === FAMILY && face.status === "loaded");
+    const jobs = WEIGHTS.flatMap((weight) => Object.keys(RANGES).map((subset) => {
+      const has = loaded.some((face) => String(face.weight) === String(weight)
+        && String(face.unicodeRange).replace(/\s/g, "").toUpperCase() === RANGES[subset].replace(/\s/g, "").toUpperCase());
+      if (has) return null;
+      const face = new FontFace(FAMILY, `url("${url(subset, weight)}") format("woff2")`, {
+        style: "normal", weight: String(weight), unicodeRange: RANGES[subset]
+      });
+      return face.load().then((ok) => { target.fonts.add(ok); }, () => {});
+    })).filter(Boolean);
+    return Promise.all(jobs);
+  }
+
+  // جاهزية مؤكَّدة قبل تصوير مستند: انتظار + إعادة محاولة للأوجه الفاشلة + حكم بالقياس.
+  // يعيد true فقط إن كان Cairo يُرسم فعلاً بالوزنين للعربية والأرقام.
+  async function ensure(options = {}) {
+    const target = typeof document !== "undefined" ? document : null;
+    if (!target) return false;
+    const attempts = Math.max(1, Number(options.attempts) || 3);
+    const timeoutMs = Math.max(500, Number(options.timeoutMs) || 8000);
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      if (usable(target)) return true;
+      await Promise.race([
+        (attempt === 0 ? load(target) : reloadFaces(target).then(() => load(target))).catch(() => false),
+        new Promise((resolve) => setTimeout(resolve, timeoutMs))
+      ]);
+    }
+    return usable(target);
+  }
+
+  // للمستندات المصوَّرة (PDF الهاتف عبر html2canvas): لا تصدير بخط احتياطي صامت.
+  // كان التصدير يكمل بعد سقف ready() بالخط الاحتياطي، فيخرج الملف بخط النظام القديم
+  // بلا أي إشارة (الفاتورة 1100، 2026-10-25). الآن: رسالة واضحة والمستخدم يعيد المحاولة.
+  async function assertReady(options) {
+    if (await ensure(options)) return true;
+    throw new Error("تعذّر تحميل الخط الرسمي (Cairo)، فلم يُنشأ الملف كي لا يخرج بخط قديم. تحقّق من الاتصال وجرّب مجدداً.");
+  }
+
   if (typeof document !== "undefined" && document.head && !document.querySelector("style[data-ozk-font-face]")) {
     const style = document.createElement("style");
     style.setAttribute("data-ozk-font-face", "");
@@ -112,7 +172,7 @@ const OZK_FONT = (() => {
     void load();
   }
 
-  return Object.freeze({ FAMILY, VERSION, STACK, WEIGHTS, DOC_LINE_HEIGHT, RANGES, FILE, faceCss, rootCss, withFaces, load, ready });
+  return Object.freeze({ FAMILY, VERSION, STACK, WEIGHTS, DOC_LINE_HEIGHT, RANGES, FILE, faceCss, rootCss, withFaces, load, ready, usable, ensure, assertReady });
 })();
 
 // globalThis كي تستورده سكربتات Node (توليد النشرات) بـimport جانبي.

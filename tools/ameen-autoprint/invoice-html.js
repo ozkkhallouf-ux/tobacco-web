@@ -129,8 +129,18 @@ function buildInvoiceHtml(inv) {
   .seal .s-info { font-size:10.5px; font-weight:700; }
   .seal .s-addr { font-size:11px; font-weight:700; border-top:1px solid #16357a;
                   margin-top:4px; padding-top:3px; }
+  /* فاصل الصفحات: سطر الجدول لا يُشطر، ورأس الجدول يتكرر في كل صفحة، والختم مع
+     التذييل كتلة واحدة مع ملخص الدفع وصفة البيع — فلا تبدأ صفحة بالختم أو
+     بالتذييل وحدهما. */
+  tr { break-inside:avoid; }
+  .closing { break-inside:avoid; }
   @page { size:A4 portrait; margin:12mm; }
-  @media print { .doc { border:none; box-shadow:none; border-radius:0; } }
+  /* إطار المستند مخفي في الطباعة، فحشوته الرأسية فراغ أبيض يدفع آخر المحتوى إلى
+     صفحة ثانية (فاتورة 11 سطراً). الحشوة الأفقية تبقى كي لا يتغيّر عرض الجدول. */
+  @media print {
+    .doc { border:none; box-shadow:none; border-radius:0; padding-top:0; padding-bottom:0; }
+    .wrap { padding-top:0; padding-bottom:0; }
+  }
 </style>
 </head>
 <body>
@@ -161,14 +171,17 @@ function buildInvoiceHtml(inv) {
     </div>
 
     <table>
-      <tr><th>#</th><th>الصنف</th><th>الكمية</th></tr>
+      <thead><tr><th>#</th><th>الصنف</th><th>الكمية</th></tr></thead>
+      <tbody>
       ${rows}
       <tr class="totrow">
         <td colspan="2">إجمالي الفاتورة</td>
         <td>${amt(inv, inv.total)}</td>
       </tr>
+      </tbody>
     </table>
 
+    <div class="closing">
     <div class="rows">
       ${inv.discount > 0 ? `<div class="row"><span>الحسم</span><b>${amt(inv, inv.discount)}</b></div>` : ""}
       ${inv.discount > 0 ? `<div class="row"><span>الصافي</span><b>${amt(inv, net)}</b></div>` : ""}
@@ -195,6 +208,7 @@ function buildInvoiceHtml(inv) {
     <div class="foot">
       <span>صادر آليًا عن نظام OZK TOBACCO · رقم المركز: 0994092038</span>
       <span dir="ltr">0985000771 — 0984000662</span>
+    </div>
     </div>
   </div>
 </div>
