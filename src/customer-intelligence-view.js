@@ -319,22 +319,26 @@
     return change ? `<div class="ci-change ${change.direction === "down" ? "bad" : change.direction === "up" ? "good" : ""}">${escape(change.text)}</div>` : "";
   }
 
+  // خلايا الائتمان: الحد المقترح (رقم أو حالة صريحة بدل رقم غير موثوق)، الرصيد، ثم المتاح
+  // والاستخدام والتجاوز على الحد المعتمد يدوياً إن وُجد (قرار المالك 2026-10-25).
+  function creditCells(row) {
+    const amountCurrency = row.balanceCurrency || row.creditCurrency || "USD";
+    const usageText = isNumber(row.creditUsagePercent) ? `${Math.round(row.creditUsagePercent)}%` : (CREDIT_STATUS_TEXT[row.creditStatus] || "—");
+    const basisTag = row.limitBasis === "approved" ? ` <span class="ci-basis" title="محسوب على الحد المعتمد يدوياً">معتمد</span>` : "";
+    const overClass = isNumber(row.overLimitAmount) && row.overLimitAmount > 0 ? "bad" : "";
+    return `<td dir="${isNumber(row.creditLimitDisplay) ? "ltr" : "auto"}">${proposedText(row)}</td>
+        <td dir="ltr">${money(row.balanceDisplay ?? row.currentBalance, amountCurrency)}</td>
+        <td dir="ltr">${money(row.availableCredit, amountCurrency)}</td>
+        <td dir="${isNumber(row.creditUsagePercent) ? "ltr" : "auto"}">${escape(usageText)}${basisTag}</td>
+        <td dir="ltr" class="${overClass}">${money(row.overLimitAmount, amountCurrency)}</td>`;
+  }
+
   function tableRow(row) {
     const trend = row.purchaseTrend?.percent;
     const trendClass = isNumber(trend) ? (trend < 0 ? "bad" : trend > 0 ? "good" : "") : "";
     const trendText = isNumber(trend)
       ? percent(trend)
       : ({ new_activity: "نشاط جديد", no_activity: "لا حركة", insufficient_data: "غير كافٍ", no_positive_baseline: "بلا أساس" }[row.purchaseTrend?.state] || "—");
-    const creditText = isNumber(row.creditUsagePercent)
-      ? `${Math.round(row.creditUsagePercent)}%`
-      : (CREDIT_STATUS_TEXT[row.creditStatus] || "—");
-    // الاستخدام والمتاح والتجاوز على الحد المعتمد يدوياً إن وُجد (قرار المالك 2026-10-25).
-    const basisTag = row.limitBasis === "approved" ? ` <span class="ci-basis" title="محسوب على الحد المعتمد يدوياً">معتمد</span>` : "";
-    const creditCurrency = row.creditCurrency || "USD";
-    const amountCurrency = row.balanceCurrency || creditCurrency;
-    // الحد المقترح: رقم إن وُجد، وإلا حالة صريحة («يحتاج مراجعة»، «موقوف»...) بدل رقم غير موثوق.
-    const proposedCell = proposedText(row);
-    const overClass = isNumber(row.overLimitAmount) && row.overLimitAmount > 0 ? "bad" : "";
     return `
       <tr class="ci-row ${view.selectedId === row.customerId ? "selected" : ""}" data-ci-customer="${escape(row.customerId)}" tabindex="0">
         <td class="ci-name">${escape(row.customerName)}${changeLine(row)}</td>
@@ -344,11 +348,7 @@
         <td dir="ltr" class="${trendClass}">${escape(trendText)}</td>
         <td dir="ltr">${day(row.lastPurchaseAt)}</td>
         <td dir="ltr">${count(row.daysSinceLastPurchase)}</td>
-        <td dir="${isNumber(row.creditLimitDisplay) ? "ltr" : "auto"}">${proposedCell}</td>
-        <td dir="ltr">${money(row.balanceDisplay ?? row.currentBalance, row.balanceCurrency || row.creditCurrency || "USD")}</td>
-        <td dir="ltr">${money(row.availableCredit, amountCurrency)}</td>
-        <td dir="${isNumber(row.creditUsagePercent) ? "ltr" : "auto"}">${escape(creditText)}${basisTag}</td>
-        <td dir="ltr" class="${overClass}">${money(row.overLimitAmount, amountCurrency)}</td>
+        ${creditCells(row)}
         <td dir="ltr">${count(row.riskScore)} ${riskTrendBadge(row)}</td>
         <td class="ci-flags">${flagChips(row.flags, 3)}</td>
       </tr>`;
@@ -519,19 +519,25 @@
       return `<p class="muted ci-note">${row.customerGuid ? "تعديل الحد غير متاح في هذه الجلسة." : "لا معرّف أمين لهذا السجل، فلا يُحفظ له حد من هنا."}</p>`;
     }
     const saveState = approvedSave.customerId === row.customerId ? approvedSave : {};
-    const approved = row.approvedCredit;
-    const prefill = approved?.limit >= 0 ? approved.limit : (isNumber(row.creditLimit) ? Math.round(row.creditLimit) : "");
-    const message = saveState.message ? `<p class="ci-${saveState.tone === "error" ? "warning" : "change good"}">${escape(saveState.message)}</p>` : "";
     return `
       <form class="ci-approve" data-ci-approve="${escape(row.customerId)}">
         <label>اعتماد حد يدوياً (بالدولار)
-          <input type="number" name="approvedLimit" min="0" step="any" inputmode="decimal" value="${escape(prefill)}" dir="ltr" required>
+          <input type="number" name="approvedLimit" min="0" step="any" inputmode="decimal" value="${escape(approvedPrefill(row))}" dir="ltr" required>
         </label>
         <button class="button" type="submit" ${saveState.busy ? "disabled" : ""}>${saveState.busy ? "جاري الحفظ…" : "حفظ الحد المعتمد"}</button>
       </form>
       <p class="muted ci-note">الحفظ يكتب إلى حدود الزبائن في الموقع (نفس حد صفحة الأرصدة) ولا يغيّر شيئاً في الأمين.</p>
-      ${message}`;
+      ${saveMessage(saveState)}`;
   }
+
+  // القيمة الأولية: الحد المعتمد الحالي (والصفر منه)، وإلا المقترح، وإلا فارغ.
+  function approvedPrefill(row) {
+    const approved = row.approvedCredit;
+    if (isNumber(approved?.limit) && approved.limit >= 0) return approved.limit;
+    return isNumber(row.creditLimit) ? Math.round(row.creditLimit) : "";
+  }
+
+  const saveMessage = (state) => (state.message ? `<p class="ci-${state.tone === "error" ? "warning" : "change good"}">${escape(state.message)}</p>` : "");
 
   function approvedSection(row) {
     const ameen = isNumber(row.ameenCreditLimit) ? `<p class="muted">حد الأمين (قراءة فقط): ${money(row.ameenCreditLimit, BASE)}</p>` : "";
@@ -572,6 +578,18 @@
     return `<div class="ci-history"><h4>تاريخ الحد</h4>${lines.join("")}</div>`;
   }
 
+  function creditFacts(row) {
+    const amountCurrency = row.balanceCurrency || row.creditCurrency || "USD";
+    return [
+      ["الرصيد الحالي", money(row.balanceDisplay ?? row.currentBalance, amountCurrency)],
+      ["الحد المقترح", creditLimitText(row)],
+      ["أساس الاستخدام والتجاوز", LIMIT_BASIS_TEXT[row.limitBasis] || "لا حد يُقاس عليه"],
+      ["المتاح من الحد", money(row.availableCredit, amountCurrency)],
+      ["نسبة استخدام الحد", isNumber(row.creditUsagePercent) ? `${row.creditUsagePercent}%` : (CREDIT_STATUS_TEXT[row.creditStatus] || "—")],
+      ["مقدار التجاوز", money(row.overLimitAmount, amountCurrency)]
+    ];
+  }
+
   function detailPanel() {
     const row = intel.customers.find((entry) => entry.customerId === view.selectedId);
     if (!row) return `<section class="panel ci-detail"><h3>تفاصيل الزبون</h3><p class="muted">اختر زبوناً من الجدول لعرض تحليله.</p></section>`;
@@ -595,12 +613,7 @@
       ["عدد الفواتير (30 يوم)", count(row.invoiceCount30d)],
       ["عدد الفواتير (السابقة)", count(row.invoiceCountPrevious30d)],
       ["متوسط الفاتورة", money(row.averageInvoice30d, row.currency)],
-      ["الرصيد الحالي", money(row.balanceDisplay ?? row.currentBalance, row.balanceCurrency || row.creditCurrency || "USD")],
-      ["الحد المقترح", creditLimitText(row)],
-      ["أساس الاستخدام والتجاوز", LIMIT_BASIS_TEXT[row.limitBasis] || "لا حد يُقاس عليه"],
-      ["المتاح من الحد", money(row.availableCredit, row.balanceCurrency || row.creditCurrency || "USD")],
-      ["نسبة استخدام الحد", isNumber(row.creditUsagePercent) ? `${row.creditUsagePercent}%` : (CREDIT_STATUS_TEXT[row.creditStatus] || "—")],
-      ["مقدار التجاوز", money(row.overLimitAmount, row.balanceCurrency || row.creditCurrency || "USD")],
+      ...creditFacts(row),
       ["نمط الشراء المعتاد", row.cadenceTrusted ? `كل ${row.typicalGapDays} يوماً` : "غير محسوب (تاريخ غير كافٍ)"],
       ["حد اعتبار التوقف", `${row.inactiveThresholdDays} يوماً`],
       ["درجة النشاط", count(row.activityScore)],
@@ -747,12 +760,19 @@
     });
   }
 
+  function approvedInputValue(form) {
+    const value = Number(String(new FormData(form).get("approvedLimit") ?? "").replace(/,/g, ""));
+    return Number.isFinite(value) && value >= 0 ? value : null;
+  }
+
+  const approvalNote = (row) => `اعتماد من ذكاء الزبائن (المقترح عندها: ${isNumber(row.creditLimit) ? Math.round(row.creditLimit) : "غير متاح"})`;
+
   // حفظ الحد المعتمد بضغطة المالك وحده — نفس دالة صفحة الأرصدة (upsertCustomerCreditLimit).
   async function saveApprovedLimit(form) {
     const row = intel?.customers.find((entry) => entry.customerId === form.dataset.ciApprove);
     if (!row || !row.customerGuid || approvedSave.busy || !window.ozkCanAccessRoute?.(ROUTE)) return;
-    const value = Number(String(new FormData(form).get("approvedLimit") ?? "").replace(/,/g, ""));
-    if (!Number.isFinite(value) || value < 0) {
+    const value = approvedInputValue(form);
+    if (value === null) {
       approvedSave = { customerId: row.customerId, busy: false, message: "أدخل رقماً صحيحاً (صفر أو أكثر).", tone: "error" };
       render();
       return;
@@ -765,7 +785,7 @@
         customerGuid: row.customerGuid,
         customerName: row.customerName,
         creditLimit: value,
-        notes: `اعتماد من ذكاء الزبائن (المقترح عندها: ${isNumber(row.creditLimit) ? Math.round(row.creditLimit) : "غير متاح"})`
+        notes: approvalNote(row)
       });
       approvedSave = { customerId: row.customerId, busy: false, message: `حُفظ الحد المعتمد ${value.toLocaleString("en-US")} USD.`, tone: "good" };
       await loadIntel();

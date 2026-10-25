@@ -1397,22 +1397,46 @@
     const measured = credit.availableCredit !== null && credit.availableCredit !== undefined;
     credit.limitBasis = measured ? credit.creditLimitSource : null;
     credit.effectiveLimit = measured ? (credit.balanceCurrency === credit.creditCurrency ? credit.creditLimitDisplay : credit.creditLimit) : null;
-    if (!validApprovedLimit(entry) || APPROVED_BLOCKED_STATUSES.has(credit.creditStatus)) return;
-    const native = credit.balanceCurrency && credit.balanceCurrency !== CONFIG.baseCurrency;
-    if (native && (!(rate > 0) || APPROVED_FX_GATED_STATUSES.has(credit.creditStatus))) return;
-    const limit = native ? round(entry.value / rate, 3) : entry.value;
+    const limit = approvedComparableLimit(credit, entry, rate);
+    if (limit === null) return;
     const exposure = Math.max(0, credit.balanceDisplay ?? 0);
-    const ratio = limit > 0 ? exposure / limit : (exposure > 0 ? Infinity : 0);
     // التعثّر سلوك دفع يبقى ظاهراً؛ أرقام الحد بجانبه على المعتمد.
-    if (credit.creditStatus !== "delinquent") {
-      credit.creditStatus = exposure > limit ? "over_limit" : exposure > 0 && ratio >= CONFIG.nearLimitRatio ? "near_limit" : "normal";
-    }
+    if (credit.creditStatus !== "delinquent") credit.creditStatus = approvedLimitStatus(exposure, limit);
     Object.assign(credit, {
       limitBasis: "approved",
       effectiveLimit: limit,
-      creditUsagePercent: limit > 0 ? round(ratio * 100, 2) : null,
+      creditUsagePercent: limit > 0 ? round((exposure / limit) * 100, 2) : null,
       ...limitHeadroom(limit, exposure, credit.creditStatus)
     });
+  }
+
+  // الحد المعتمد بعملة مقارنة الرصيد، أو null حين لا يُحكم به.
+  function approvedComparableLimit(credit, entry, rate) {
+    if (!validApprovedLimit(entry) || APPROVED_BLOCKED_STATUSES.has(credit.creditStatus)) return null;
+    const native = Boolean(credit.balanceCurrency) && credit.balanceCurrency !== CONFIG.baseCurrency;
+    if (!native) return entry.value;
+    if (!(rate > 0) || APPROVED_FX_GATED_STATUSES.has(credit.creditStatus)) return null;
+    return round(entry.value / rate, 3);
+  }
+
+  function approvedLimitStatus(exposure, limit) {
+    if (exposure > limit) return "over_limit";
+    if (exposure > 0 && exposure >= limit * CONFIG.nearLimitRatio) return "near_limit";
+    return "normal";
+  }
+
+  // الحد المعتمد (المالك، بعملة الأساس كما تحفظه صفحة الأرصدة) مقابل الرصيد بعملة الأساس:
+  // حساب الليرة برصيده بعملته × سعر الصرف (لا الدولار المشوّه بفروقات الصرف)، ثم أساس الحكم.
+  function attachApprovedCredit(credit, balanceRow, approvedEntry, display) {
+    const rate = display.rate;
+    const accountCcyBalance = numberOrNull(balanceRow?.balanceAccountCcy);
+    const nativeBase = rate !== null && accountCcyBalance !== null ? accountCcyBalance * rate : credit.currentBalance;
+    const baseExposure = credit.currentBalance === null ? null : Math.max(0, nativeBase);
+    credit.approvedCredit = approvedCreditOf(approvedEntry, baseExposure, credit.creditLimit);
+    applyEffectiveLimit(credit, approvedEntry, rate);
+    const ameenLimitRaw = numberOrNull(balanceRow?.creditLimit ?? balanceRow?.credit_limit);
+    credit.ameenCreditLimit = ameenLimitRaw !== null && ameenLimitRaw > 0 ? ameenLimitRaw : null;
+    credit.exchangeRate = rate === null ? null : { rate, currency: display.currency, basis: display.rateBasis || null, date: display.rateDate || null };
   }
 
   // سبب التجاوز/القرب بنص يسمّي الحد الذي قيس عليه، فلا يناقض الرقم المعروض.
@@ -2381,16 +2405,7 @@
         credit.availableCredit = null;
         credit.overLimitAmount = null;
       }
-      // الحد المعتمد (المالك، بعملة الأساس كما تحفظه صفحة الأرصدة) مقابل الرصيد بعملة الأساس:
-      // حساب الليرة برصيده بعملته × سعر الصرف (لا الدولار المشوّه بفروقات الصرف).
-      const accountCcyBalance = numberOrNull(record.balanceRow?.balanceAccountCcy);
-      const baseExposure = credit.currentBalance === null ? null
-        : Math.max(0, display.rate !== null && accountCcyBalance !== null ? accountCcyBalance * display.rate : credit.currentBalance);
-      credit.approvedCredit = approvedCreditOf(approvedEntry, baseExposure, credit.creditLimit);
-      applyEffectiveLimit(credit, approvedEntry, display.rate);
-      const ameenLimitRaw = numberOrNull(record.balanceRow?.creditLimit ?? record.balanceRow?.credit_limit);
-      credit.ameenCreditLimit = ameenLimitRaw !== null && ameenLimitRaw > 0 ? ameenLimitRaw : null;
-      credit.exchangeRate = display.rate !== null ? { rate: display.rate, currency: display.currency, basis: display.rateBasis || null, date: display.rateDate || null } : null;
+      attachApprovedCredit(credit, record.balanceRow, approvedEntry, display);
 
       // أصناف مختلطة العملة: لا نجمع lineTotals بعملات مختلفة — نُعيد صفر أصناف.
       const items = currencyMixed ? { items: [], identity: "item_guid" } : topItems(windowRows);
