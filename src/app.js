@@ -6925,6 +6925,39 @@ function withDocumentTitle(html, title) {
   return source;
 }
 
+// منطقة الطباعة في وثيقة exportReportPdf: A4 بهامش @page 10mm = 190×277mm.
+const INVOICE_PRINT_AREA_PX = Object.freeze({ width: 190 * 96 / 25.4, height: 277 * 96 / 25.4 });
+const INVOICE_FIT_MIN_ZOOM = 0.9;
+
+// فاتورة تزيد عن ورقة A4 ببضعة بكسلات (الفاتورة 1109: 14 صنفاً، 1050px من 1047px) كانت
+// تُخرج ورقتين: كتلة الختام (الأرصدة والختم والتذييل) لا تنشطر، فتنتقل كلها إلى الورقة
+// الثانية وتترك فراغاً كبيراً تحت جدول الأصناف. نقيس الفاتورة بعرض منطقة الطباعة نفسها،
+// فإن زادت عن الورقة بما يكفيه تصغير لا يقل عن 90% أعدنا المقياس الذي يجعلها ورقة واحدة،
+// وإلا null فتُطبع على عدة أوراق كالمعتاد. قالب الفاتورة وحده (.ozk-inv)؛ التقارير لا تُمسّ.
+function invoicePrintFitZoom(bodyHtml) {
+  if (typeof document === "undefined" || !String(bodyHtml).includes('class="ozk-inv"')) return null;
+  const probe = document.createElement("div");
+  probe.style.cssText = `position:absolute;left:-10000px;top:0;width:${INVOICE_PRINT_AREA_PX.width}px;visibility:hidden;pointer-events:none`;
+  probe.innerHTML = bodyHtml;
+  document.body.appendChild(probe);
+  try {
+    const invoice = probe.querySelector(".ozk-inv");
+    if (!invoice) return null;
+    // الحشوة تبقى: نمط القالب يأتي بعد `@media print{.ozk-inv{padding:0}}` في رأس
+    // الوثيقة فيغلبه، أي أن الفاتورة تُطبع بحشوتها (القياس بلاها نقص 12px فخرجت ورقتان).
+    const limit = INVOICE_PRINT_AREA_PX.height - 4;
+    const natural = invoice.getBoundingClientRect().height;
+    if (!(natural > limit)) return null;
+    for (let zoom = Math.floor((limit / natural) * 100) / 100; zoom >= INVOICE_FIT_MIN_ZOOM; zoom = Math.round((zoom - 0.01) * 100) / 100) {
+      invoice.style.zoom = String(zoom);
+      if (invoice.getBoundingClientRect().height <= limit) return zoom;
+    }
+    return null;
+  } finally {
+    probe.remove();
+  }
+}
+
 // نستعمل طباعة المتصفح الأصلية (حفظ بصيغة PDF) بدل html2canvas —
 // المحرّك القديم صار يطلّع صفحات بيضا بعد تحديثات كروم. الطباعة الأصلية
 // ترسم التقرير مثل الشاشة تماماً (عربي وألوان مظبوطة) ومستحيل تطلع فاضية.
@@ -6951,6 +6984,8 @@ async function exportReportPdf(bodyHtml, archive) {
       return false;
     }
   }
+  if (typeof OZK_FONT !== "undefined" && String(bodyHtml).includes('class="ozk-inv"')) await OZK_FONT.ready();
+  const fitZoom = invoicePrintFitZoom(bodyHtml);
   const doc =
     '<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">' +
     '<base href="' + window.location.href + '">' +
@@ -6960,6 +6995,7 @@ async function exportReportPdf(bodyHtml, archive) {
     'img{max-width:100%}table{page-break-inside:auto}tr{page-break-inside:avoid}thead{display:table-header-group}tfoot{display:table-footer-group}' +
     '@media print{.ozk-rpt,.ozk-inv{padding:0}}</style>' +
     '</head><body>' + bodyHtml +
+    (fitZoom ? '<style>@media print{.ozk-inv{zoom:' + fitZoom + '}}</style>' : '') +
     '</body></html>';
   printHtmlDocument(doc, {
     title,
