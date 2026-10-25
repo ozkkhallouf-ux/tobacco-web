@@ -60,6 +60,10 @@ const OZK_INVOICE = (() => {
 .ozk-inv .seal .s-logo{font-size:18px;font-weight:900;letter-spacing:1px;margin:2px 0}
 .ozk-inv .seal .s-info{font-size:10.5px;font-weight:700}
 .ozk-inv .seal .s-addr{font-size:11px;font-weight:700;border-top:1px solid #16357a;margin-top:4px;padding-top:3px}
+.ozk-inv .inv-closing{page-break-inside:avoid;break-inside:avoid}
+.ozk-inv .items-table td{padding:3px 8px}.ozk-inv .items-table th{padding:4px 8px}
+.ozk-inv .inv-closing td,.ozk-inv .inv-closing th{padding:3px 8px}
+.ozk-inv .inv-closing .stamp-wrap{margin-top:10px}.ozk-inv .inv-closing .rfoot{margin-top:10px}
 </style>`;
 
   // ==========================================================================
@@ -255,11 +259,13 @@ const OZK_INVOICE = (() => {
       <div style="text-align:left"><div class="muted">${esc(doc.amountLabel || kind.amountLabel)}</div>
         <div class="big" style="color:${doc.amountColor || kind.amountColor}"><bdi>${esc(doc.amountText || "")} ${esc(cur)}</bdi></div></div>
     </div>${itemsTable}
+    <div class="inv-closing">
     <table>${infoRows}</table>
     <p class="muted" style="margin:8px 0 0">${isolateBrand(esc(doc.note || kind.note))}</p>
     ${kind.legal ? legalBox(esc) : ""}
     ${kind.seal ? SEAL : ""}
     <div class="rfoot"><span>صادر آليًا عن نظام${BRAND} · رقم المركز: 0994092038</span><span dir="ltr">0985000771 — 0984000662</span></div>
+    </div>
   </div>`;
   }
 

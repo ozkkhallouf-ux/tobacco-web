@@ -6548,6 +6548,8 @@ async function createPortablePdfBlob(bodyHtml, filename, options = {}) {
     const renderContainer = worker.prop && worker.prop.container;
     const renderSource = renderContainer?.querySelector(".ozk-rpt, .ozk-inv") || renderContainer?.firstElementChild || renderContainer;
     if (renderSource) trimTrailingPortablePdfDecorations(renderSource, options.margin || [8, 8, 8, 8]);
+    const spacerRanges = portablePdfSpacerRanges(renderContainer);
+    const renderWidth = renderContainer ? renderContainer.getBoundingClientRect().width : 0;
     await worker.toCanvas();
     const canvas = (worker.prop && worker.prop.canvas) || worker.canvas;
     // معدّل الحبر على كامل الـcanvas يُخفي صفحة واحدة فارغة إن كانت بقية الصفحات
@@ -6559,7 +6561,17 @@ async function createPortablePdfBlob(bodyHtml, filename, options = {}) {
     const bandRatios = canvas
       ? Array.from({ length: bandCount }, (_, i) => canvasInkRatio(canvas, i * bandHeight, (i + 1) * bandHeight))
       : [];
-    if (!canvas || canvasInkRatio(canvas) <= 0.001 || bandRatios.some((ratio) => ratio <= 0.0005)) {
+    // البياض الذي يصنعه html2pdf عمداً لدفع كتلة كاملة إلى الورقة التالية (ختام الفاتورة
+    // مثلاً) ليس صفحة سقطت؛ الشريحة التي يغطيه أغلبها لا تُحسب فارغة.
+    const canvasPerCssPx = canvas && renderWidth > 0 ? canvas.width / renderWidth : 0;
+    const bandIsSpacer = (i) => {
+      const top = i * bandHeight;
+      const bottom = top + bandHeight;
+      const covered = spacerRanges.reduce((sum, [from, to]) =>
+        sum + Math.max(0, Math.min(bottom, to * canvasPerCssPx) - Math.max(top, from * canvasPerCssPx)), 0);
+      return covered >= bandHeight * 0.5;
+    };
+    if (!canvas || canvasInkRatio(canvas) <= 0.001 || bandRatios.some((ratio, i) => ratio <= 0.0005 && !bandIsSpacer(i))) {
       throw new Error("خرجت صفحة PDF فارغة. أغلق التطبيق وافتحه ثم جرّب مجدداً.");
     }
     await worker.toPdf();
@@ -6572,6 +6584,21 @@ async function createPortablePdfBlob(bodyHtml, filename, options = {}) {
   } finally {
     container.remove();
   }
+}
+
+// فواصل «لا تقسم هذه الكتلة» التي يُدرجها html2pdf نفسه في نسخته: div فارغ بلا صنف،
+// نمطه display:block وارتفاع بالبكسل لا غير. مداها بإحداثيات الحاوية، بالبكسل.
+function portablePdfSpacerRanges(container) {
+  if (!container) return [];
+  const origin = container.getBoundingClientRect().top;
+  return [...container.querySelectorAll("div")]
+    .filter((el) => !el.firstChild && el.attributes.length === 1 && el.style.length === 2
+      && el.style.display === "block" && /px$/.test(el.style.height))
+    .map((el) => {
+      const rect = el.getBoundingClientRect();
+      return [rect.top - origin, rect.bottom - origin];
+    })
+    .filter(([top, bottom]) => bottom > top);
 }
 
 // إذا بدأ التذييل الزخرفي وحده في صفحة جديدة نخفيه من نسخة الهاتف؛ إبقاؤه كان يصنع
