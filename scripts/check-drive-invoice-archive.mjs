@@ -157,6 +157,19 @@ if (pwshProbe.status !== 0) {
   console.log(`  ✓ الغلاف المجدول (pwsh ${pwshProbe.stdout.trim()}): ${m[1]} تأكيداً`);
 }
 
+// مسار الغلاف في قالب المهمة: يجب أن يقابل tools/drive-invoice-archive/run-scheduled.ps1 بجوار
+// worker.js تحت app (القالب الأول أشار إلى app\run-scheduled.ps1 فكانت كل دورة ستفشل برمز 12).
+if (pwshProbe.status === 0) {
+  const tt = spawnSync("pwsh", ["-NoProfile", "-File", path.join(dir, "__tests__", "Test-TaskTemplate.ps1")], { encoding: "utf8" });
+  const t = /Test-TaskTemplate: (\d+) PASS, (\d+) FAIL/.exec(tt.stdout || "");
+  if (tt.status !== 0 || !t || t[2] !== "0") {
+    console.error(tt.stdout, tt.stderr);
+    console.error("check-drive-invoice-archive: فشل Test-TaskTemplate.ps1");
+    process.exit(1);
+  }
+  console.log(`  ✓ قالب المهمة: ${t[1]} تأكيدات`);
+}
+
 // ── ٣) الهجرة على PostgreSQL محلي ────────────────────────────────────────────
 const DB = "ozk_document_archive_test";
 const LOCAL_HOSTS = new Set(["", "localhost", "127.0.0.1", "::1"]);
