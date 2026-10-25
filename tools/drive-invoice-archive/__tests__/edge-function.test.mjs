@@ -36,50 +36,59 @@ function createBackend() {
   const s = { items: new Map(), telegram: [], rpc: [], failRecord: false, failRecordTimes: 0, recordCalls: 0,
     telegramFail: 0, telegramStatus: 500, restDown: false, calls: 0 };
   const json = (status, body) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
-  async function fetchMock(url, init = {}) {
-    const u = new URL(url);
-    s.calls++;
-    if (u.hostname !== "api.telegram.org" && s.restDown) { const e = new TypeError("fetch failed"); e.code = "ECONNRESET"; throw e; }
-    if (u.hostname === "api.telegram.org" && s.telegramFail > 0) {
+
+  function telegramApi(u, init) {
+    if (s.telegramFail > 0) {
       s.telegramFail--;
       return json(s.telegramStatus, { ok: false, error_code: s.telegramStatus, description: "Too Many Requests: retry after 5" });
     }
-    if (u.hostname === "api.telegram.org") {
-      const method = u.pathname.split("/").pop();
-      const entry = { method, token: u.pathname.split("/")[1] };
-      if (init.body instanceof FormData) {
-        for (const [k, v] of init.body.entries()) entry[k] = typeof v === "string" ? v : { name: v.name, size: v.size };
-      } else {
-        Object.assign(entry, JSON.parse(init.body));
-      }
-      s.telegram.push(entry);
-      return json(200, { ok: true, result: { message_id: 7000 + s.telegram.length } });
+    const entry = { method: u.pathname.split("/").pop(), token: u.pathname.split("/")[1] };
+    if (init.body instanceof FormData) {
+      for (const [k, v] of init.body.entries()) entry[k] = typeof v === "string" ? v : { name: v.name, size: v.size };
+    } else {
+      Object.assign(entry, JSON.parse(init.body));
     }
-    if (u.pathname === "/rest/v1/bot_config") return json(200, [{ value: OWNER_CHAT }]);
-    if (u.pathname === "/rest/v1/document_archive_items") {
-      const id = /job_id=eq\.([0-9a-f]+)/.exec(u.search)[1];
-      const it = s.items.get(id);
+    s.telegram.push(entry);
+    return json(200, { ok: true, result: { message_id: 7000 + s.telegram.length } });
+  }
+
+  function recordNotification(init) {
+    s.recordCalls++;
+    if (s.failRecord) return json(500, { message: "boom" });
+    if (s.failRecordTimes > 0) { s.failRecordTimes--; return json(503, { message: "busy" }); }
+    const { p_item } = JSON.parse(init.body);
+    s.items.set(p_item.job_id, p_item);
+    s.rpc.push(p_item);
+    return json(200, null);
+  }
+
+  function ingestReport(init) {
+    const items = JSON.parse(init.body).p_report.items;
+    // نفس قاعدة upsert في Migration 22: message_id الأول لا يُكتب فوقه.
+    for (const it of items) {
+      const prev = s.items.get(it.job_id);
+      s.items.set(it.job_id, { ...it, telegram_message_id: (prev && prev.telegram_message_id) ?? it.telegram_message_id ?? null });
+    }
+    return json(200, { items: items.length, retry_job_ids: [] });
+  }
+
+  const rest = {
+    "/rest/v1/bot_config": () => json(200, [{ value: OWNER_CHAT }]),
+    "/rest/v1/document_archive_items": (init, u) => {
+      const it = s.items.get(/job_id=eq\.([0-9a-f]+)/.exec(u.search)[1]);
       return json(200, it ? [{ telegram_message_id: it.telegram_message_id }] : []);
-    }
-    if (u.pathname === "/rest/v1/rpc/document_archive_record_notification") {
-      s.recordCalls++;
-      if (s.failRecord) return json(500, { message: "boom" });
-      if (s.failRecordTimes > 0) { s.failRecordTimes--; return json(503, { message: "busy" }); }
-      const { p_item } = JSON.parse(init.body);
-      s.items.set(p_item.job_id, p_item);
-      s.rpc.push(p_item);
-      return json(200, null);
-    }
-    if (u.pathname === "/rest/v1/rpc/document_archive_ingest_report") {
-      const items = JSON.parse(init.body).p_report.items;
-      // نفس قاعدة upsert في Migration 22: message_id الأول لا يُكتب فوقه.
-      for (const it of items) {
-        const prev = s.items.get(it.job_id);
-        s.items.set(it.job_id, { ...it, telegram_message_id: (prev && prev.telegram_message_id) ?? it.telegram_message_id ?? null });
-      }
-      return json(200, { items: items.length, retry_job_ids: [] });
-    }
-    return json(404, {});
+    },
+    "/rest/v1/rpc/document_archive_record_notification": recordNotification,
+    "/rest/v1/rpc/document_archive_ingest_report": ingestReport,
+  };
+
+  async function fetchMock(url, init = {}) {
+    const u = new URL(url);
+    s.calls++;
+    if (u.hostname === "api.telegram.org") return telegramApi(u, init);
+    if (s.restDown) { const e = new TypeError("fetch failed"); e.code = "ECONNRESET"; throw e; }
+    const route = rest[u.pathname];
+    return route ? route(init, u) : json(404, {});
   }
   return { s, fetchMock };
 }
