@@ -7,10 +7,8 @@
 # ضمانات الغلاف:
 # - نسخة واحدة: Mutex باسم عام، والحالة المهجورة بعد موت العملية تُستلم. فوقه قفل
 #   المنفذ 47617 داخل العامل نفسه.
-# - الوضع محصور: يرفض التشغيل إن لم يكن mode في الإعداد المفحوص ضمن -AllowedModes
-#   (الافتراضي dry-run وحده). العامل يُشغَّل على لقطة من البايتات نفسها عبر
-#   OZK_DRIVE_ARCHIVE_CONFIG، فلا يُقرأ متغير موروث ولا config.json مجاور مختلف
-#   ولا ملف تغيّر بعد الفحص. فلا يتسع الغلاف إلى drive/live بتعديل config وحده؛
+# - الوضع محصور: يرفض التشغيل إن لم يكن mode في config.json ضمن -AllowedModes
+#   (الافتراضي dry-run وحده). فلا يتسع الغلاف إلى drive/live بتعديل config وحده؛
 #   يلزم تغيير وسيطة المهمة أيضاً، وهو قرار منفصل للمالك.
 # - إيقاف آمن: وجود ملف STOP يمنع أي دورة جديدة ولا يقطع دورة جارية.
 # - مهلة: دورة تتجاوز -TimeoutSeconds تُقتل مع شجرتها (node وEdge). هذا آمن، لأن
@@ -98,12 +96,6 @@ function Read-JsonFile([string]$Path) {
     return ($text | ConvertFrom-Json)
 }
 
-function Convert-ConfigBytes([byte[]]$Bytes) {
-    $text = [Text.Encoding]::UTF8.GetString($Bytes)
-    if ($text.Length -gt 0 -and $text[0] -eq [char]0xFEFF) { $text = $text.Substring(1) }
-    return ($text | ConvertFrom-Json)
-}
-
 function Save-RunState([string]$Path, [int]$ExitCode, [string]$Outcome) {
     $state = [ordered]@{ lastRunAt = $null; lastExitCode = $null; lastOutcome = ''; lastSuccessAt = $null; consecutiveFailures = 0 }
     if (Test-Path -LiteralPath $Path) {
@@ -169,13 +161,15 @@ function Invoke-ScheduledRun {
     $acquired = $false
     $statePath = $null
     $c = $null
-    $cfgBytes = $null
     try {
         # ── الفحص المسبق (قبل القفل كي لا يحجز تشغيلٌ معطوب القفلَ) ─────────
         if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) { throw 'config.json غير موجود' }
-        # قراءة واحدة: الفحص واللقطة من البايتات نفسها، فلا يتغيّر الملف بعد الفحص.
+        # يُقرأ الإعداد مرة واحدة، والعامل يعمل على لقطة البايتات نفسها التي فُحصت (لا على
+        # OZK_DRIVE_ARCHIVE_CONFIG موروث ولا على config.json تغيّر بعد الفحص).
         $cfgBytes = [IO.File]::ReadAllBytes($ConfigPath)
-        $cfg = Convert-ConfigBytes $cfgBytes
+        $cfgText = [Text.Encoding]::UTF8.GetString($cfgBytes)
+        if ($cfgText.Length -gt 0 -and $cfgText[0] -eq [char]0xFEFF) { $cfgText = $cfgText.Substring(1) }
+        $cfg = $cfgText | ConvertFrom-Json
         $mode = if ($cfg.mode) { [string]$cfg.mode } else { 'dry-run' }
         $dataDir = if ($cfg.dataDir) { [string]$cfg.dataDir } else { Join-Path $baseDir 'data' }
         $logDirEff = if ($LogDir) { $LogDir } else { Join-Path $dataDir 'logs' }
@@ -217,15 +211,13 @@ function Invoke-ScheduledRun {
         $runId = [guid]::NewGuid().ToString('N').Substring(0, 12)
         $outFile = Join-Path $logDirEff "run-$runId.out.tmp"
         $errFile = Join-Path $logDirEff "run-$runId.err.tmp"
-        $snapPath = Join-Path $logDirEff "run-$runId.config.json"
+        $cfgSnapshot = Join-Path $logDirEff "run-$runId.config.json"
+        $prevConfigEnv = $env:OZK_DRIVE_ARCHIVE_CONFIG
         $started = Get-Date
         Write-RunLog 'run_start' @{ runId = $runId; mode = $mode; timeoutSeconds = $TimeoutSeconds }
-        $hadConfigEnv = Test-Path Env:OZK_DRIVE_ARCHIVE_CONFIG
-        $prevConfigEnv = $env:OZK_DRIVE_ARCHIVE_CONFIG
         try {
-            [IO.File]::WriteAllBytes($snapPath, $cfgBytes)
-            # يتجاوز أي قيمة موروثة؛ loadConfig() يقرأ المتغير قبل config.json المجاور.
-            $env:OZK_DRIVE_ARCHIVE_CONFIG = $snapPath
+            [IO.File]::WriteAllBytes($cfgSnapshot, $cfgBytes)
+            $env:OZK_DRIVE_ARCHIVE_CONFIG = $cfgSnapshot
             $proc = Start-Process -FilePath $node -ArgumentList @("`"$worker`"", '--once') -WorkingDirectory $WorkerDir `
                 -RedirectStandardOutput $outFile -RedirectStandardError $errFile -NoNewWindow -PassThru
             $null = $proc.Handle # يحفظ رمز الخروج على 5.1
@@ -252,11 +244,8 @@ function Invoke-ScheduledRun {
                 }
             }
         } finally {
-            if ($hadConfigEnv) { $env:OZK_DRIVE_ARCHIVE_CONFIG = $prevConfigEnv }
-            else { Remove-Item Env:OZK_DRIVE_ARCHIVE_CONFIG -ErrorAction SilentlyContinue }
-            foreach ($f in @($outFile, $errFile, $snapPath)) {
-                if ($f -and (Test-Path -LiteralPath $f)) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
-            }
+            $env:OZK_DRIVE_ARCHIVE_CONFIG = $prevConfigEnv
+            foreach ($f in @($outFile, $errFile, $cfgSnapshot)) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue } }
         }
         $fields = @{ runId = $runId; outcome = $script:outcome; exitCode = $script:exitCode; durationMs = [int]((Get-Date) - $started).TotalMilliseconds }
         if ($c -and $c.summary) { $fields.summary = $c.summary }

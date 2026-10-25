@@ -34,12 +34,10 @@ function New-Env([string]$Mode = 'dry-run', [switch]$NoConfig) {
     return [pscustomobject]@{ Root = $root; WorkerDir = $workerDir; LogDir = $logDir; Stop = (Join-Path $root 'STOP'); Runs = (Join-Path $root 'runs.txt') }
 }
 
-function Get-WrapperArgs($E, [int]$Timeout = 60, [string[]]$Allowed = @('dry-run'), [string]$Node = $node, [string]$ConfigPath = '') {
-    $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $wrapper,
+function Get-WrapperArgs($E, [int]$Timeout = 60, [string[]]$Allowed = @('dry-run'), [string]$Node = $node) {
+    return @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $wrapper,
         '-WorkerDir', $E.WorkerDir, '-NodePath', $Node, '-LogDir', $E.LogDir, '-StopFile', $E.Stop,
         '-MutexName', $mutexName, '-TimeoutSeconds', "$Timeout", '-AllowedModes', ($Allowed -join ','))
-    if ($ConfigPath) { $a += @('-ConfigPath', $ConfigPath) }
-    return $a
 }
 
 # على 5.1 مع Stop يصبح أي stderr من عملية native خطأً منهياً؛ رمز الخروج وحده هو الحكم.
@@ -50,10 +48,23 @@ function Invoke-Ps([string[]]$ArgList) {
     return $LASTEXITCODE
 }
 
-function Invoke-Wrapper($E, [string]$FakeMode = 'ok', [int]$Timeout = 60, [string[]]$Allowed = @('dry-run'), [string]$Node = $node, [string]$ConfigPath = '') {
+# غلاف في الخلفية بسطر أوامر مقتبس صراحة: Start-Process على 5.1 يضم مصفوفة الوسائط بلا اقتباس،
+# فلم تصل -WorkerDir إلى الغلاف على عدّاء Windows (CI على 1363b25).
+function Start-WrapperProcess($E) {
+    $quoted = @(Get-WrapperArgs $E | ForEach-Object { '"' + ([string]$_).Replace('"', '\"') + '"' })
+    $psi = New-Object Diagnostics.ProcessStartInfo
+    $psi.FileName = $psExe
+    $psi.Arguments = $quoted -join ' '
+    $psi.UseShellExecute = $false
+    $p = [Diagnostics.Process]::Start($psi)
+    $null = $p.Handle
+    return $p
+}
+
+function Invoke-Wrapper($E, [string]$FakeMode = 'ok', [int]$Timeout = 60, [string[]]$Allowed = @('dry-run'), [string]$Node = $node) {
     $env:FAKE_WORKER_MODE = $FakeMode
     $env:FAKE_WORKER_RUNS = $E.Runs
-    return (Invoke-Ps (Get-WrapperArgs $E $Timeout $Allowed $Node $ConfigPath))
+    return (Invoke-Ps (Get-WrapperArgs $E $Timeout $Allowed $Node))
 }
 
 function Get-Log($E) {
@@ -100,26 +111,21 @@ try {
     $e = New-Env 'drive'
     Assert 'drive مسموح صراحة بالوسيطة ⇒ يعمل' ((Invoke-Wrapper $e 'ok' 60 @('dry-run', 'drive')) -eq 0 -and (Get-RunCount $e) -eq 1)
 
-    # ── الإعداد المفحوص يصل إلى العامل (Codex P1 على #383) ────────────────────
-    $e = New-Env 'dry-run'
-    $liveCfg = Join-Path $e.Root 'inherited-live.json'
-    [IO.File]::WriteAllText($liveCfg, '{ "mode": "live", "archiveFrom": "2026-11-01", "edgeUrl": "https://example.invalid/functions/v1/x" }')
+    # ── العامل يقرأ الإعداد المفحوص نفسه (Codex P1) ──────────────────────────
+    $liveCfg = Join-Path $tempRoot 'inherited-live.json'
+    [IO.File]::WriteAllText($liveCfg, '{ "mode": "live", "archiveFrom": "2026-11-01", "edgeUrl": "https://x" }')
+    $e = New-Env
     $env:OZK_DRIVE_ARCHIVE_CONFIG = $liveCfg
-    try {
-        $code = Invoke-Wrapper $e 'ok'
-        $used = if (Test-Path -LiteralPath $e.Runs) { [IO.File]::ReadAllText($e.Runs) } else { '' }
-        Assert 'متغير موروث يشير إلى live لا يتجاوز فحص dry-run' ($code -eq 0 -and $used -match 'mode=dry-run' -and $used -notmatch 'mode=live')
-    } finally {
-        Remove-Item Env:\OZK_DRIVE_ARCHIVE_CONFIG -ErrorAction SilentlyContinue
-    }
-
+    try { $code = Invoke-Wrapper $e 'ok' } finally { Remove-Item Env:\OZK_DRIVE_ARCHIVE_CONFIG -ErrorAction SilentlyContinue }
+    Assert 'OZK_DRIVE_ARCHIVE_CONFIG موروث يشير إلى live ⇒ العامل يقرأ dry-run المفحوص' ($code -eq 0 -and ([IO.File]::ReadAllText($e.Runs) -match 'mode=dry-run') -and ([IO.File]::ReadAllText($e.Runs) -notmatch 'mode=live'))
     $e = New-Env 'live'
-    $dryCfg = Join-Path $e.Root 'explicit-dry.json'
-    [IO.File]::WriteAllText($dryCfg, '{ "mode": "dry-run", "archiveFrom": "2026-11-01", "edgeUrl": "" }', (New-Object Text.UTF8Encoding($true)))
-    $code = Invoke-Wrapper $e 'ok' 60 @('dry-run') $node $dryCfg
-    $used = if (Test-Path -LiteralPath $e.Runs) { [IO.File]::ReadAllText($e.Runs) } else { '' }
-    Assert '-ConfigPath dry-run بينما config.json المجاور live ⇒ العامل على المفحوص' ($code -eq 0 -and $used -match 'mode=dry-run' -and $used -notmatch 'mode=live' -and (Get-RunCount $e) -eq 1)
-    Assert 'لقطة الإعداد لا تبقى بعد التشغيل' (@(Get-ChildItem -LiteralPath $e.LogDir -Filter 'run-*.config.json' -ErrorAction SilentlyContinue).Count -eq 0)
+    $dryCfg = Join-Path $e.Root 'dry.json'
+    [IO.File]::WriteAllText($dryCfg, '{ "mode": "dry-run", "archiveFrom": "2026-11-01" }')
+    $env:FAKE_WORKER_MODE = 'ok'
+    $env:FAKE_WORKER_RUNS = $e.Runs
+    $code = Invoke-Ps ((Get-WrapperArgs $e) + @('-ConfigPath', $dryCfg))
+    Assert '-ConfigPath لملف dry-run وconfig.json المجاور live ⇒ العامل يقرأ dry-run' ($code -eq 0 -and ([IO.File]::ReadAllText($e.Runs) -match 'mode=dry-run'))
+    Assert 'لا لقطة إعداد باقية بعد التشغيل' (@(Get-ChildItem -LiteralPath $e.LogDir -Filter 'run-*.config.json').Count -eq 0)
 
     # ── الفحص المسبق ──────────────────────────────────────────────────────────
     $e = New-Env -NoConfig
@@ -144,9 +150,9 @@ try {
     $env:FAKE_WORKER_MODE = 'sleep'
     $env:FAKE_WORKER_SLEEP_MS = '5000'
     $env:FAKE_WORKER_RUNS = $e.Runs
-    $first = Start-Process -FilePath $psExe -ArgumentList (Get-WrapperArgs $e) -PassThru -NoNewWindow
-    $null = $first.Handle
+    $first = Start-WrapperProcess $e
     $started = Wait-For { (Get-RunCount $e) -ge 1 }
+    if (-not $started) { Write-Host ('DIAG args: ' + $first.StartInfo.Arguments) }
     Assert 'التشغيل الأول بدأ' $started
     $second = Invoke-Wrapper $e 'ok'
     Assert 'تشغيل ثانٍ أثناء الأول ⇒ 10 بلا تشغيل عامل ثانٍ' ($second -eq 10 -and (Get-RunCount $e) -eq 1)
@@ -160,7 +166,7 @@ try {
     $env:FAKE_WORKER_MODE = 'sleep'
     $env:FAKE_WORKER_SLEEP_MS = '30000'
     $env:FAKE_WORKER_RUNS = $e.Runs
-    $victim = Start-Process -FilePath $psExe -ArgumentList (Get-WrapperArgs $e) -PassThru -NoNewWindow
+    $victim = Start-WrapperProcess $e
     [void](Wait-For { (Get-RunCount $e) -ge 1 })
     $workerPid = [int](([IO.File]::ReadAllLines($e.Runs)[0] -split ' ')[0])
     Stop-Process -Id $victim.Id -Force
@@ -247,7 +253,7 @@ try {
     [void](Invoke-Ps $a)
     Assert 'عدد الملفات المدوَّرة لا يتجاوز الحد' ((Test-Path -LiteralPath "$logFile.2") -and -not (Test-Path -LiteralPath "$logFile.3"))
 } finally {
-    Remove-Item Env:\FAKE_WORKER_MODE, Env:\FAKE_WORKER_RUNS, Env:\OZK_DRIVE_ARCHIVE_CONFIG -ErrorAction SilentlyContinue
+    Remove-Item Env:\FAKE_WORKER_MODE, Env:\FAKE_WORKER_RUNS -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 

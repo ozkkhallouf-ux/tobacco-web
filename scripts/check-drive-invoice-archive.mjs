@@ -89,8 +89,8 @@ assert.deepEqual(runners, [], `العامل غير مفعَّل: لا يجوز �
 const runner = read(`${toolRel}/run-scheduled.ps1`);
 assert.match(runner, /\[string\[\]\]\$AllowedModes = @\('dry-run'\),/, "الغلاف: dry-run وحده افتراضياً");
 assert.match(runner, /-ArgumentList @\("`"\$worker`"", '--once'\)/, "الغلاف: دورة واحدة --once لا حلقة مستمرة");
-assert.match(runner, /WriteAllBytes\(\$snapPath,\s*\$cfgBytes\)/, "الغلاف: لقطة من بايتات الإعداد المفحوص");
-assert.match(runner, /\$env:OZK_DRIVE_ARCHIVE_CONFIG = \$snapPath/, "الغلاف: العامل يقرأ اللقطة لا متغيراً موروثاً");
+assert.match(runner, /WriteAllBytes\(\$cfgSnapshot,\s*\$cfgBytes\)/, "الغلاف: لقطة من بايتات الإعداد المفحوص");
+assert.match(runner, /\$env:OZK_DRIVE_ARCHIVE_CONFIG = \$cfgSnapshot/, "الغلاف: العامل يقرأ اللقطة لا متغيراً موروثاً");
 assert.match(runner, /Threading\.Mutex/, "الغلاف: قفل نسخة واحدة");
 for (const rel of codeFiles.filter((f) => f.endsWith(".ps1"))) {
   assert.doesNotMatch(read(rel), /Register-ScheduledTask|schtasks(\.exe)?\s+\/create|Enable-ScheduledTask/i, `${rel}: لا تسجيل ولا تفعيل لمهمة مجدولة`);
