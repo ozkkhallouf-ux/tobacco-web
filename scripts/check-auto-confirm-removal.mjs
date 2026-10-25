@@ -14,6 +14,7 @@
 //   6) جسم مختلف عن المدقَّق ⇒ الحارس يرفض.
 // ============================================================================
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -26,6 +27,10 @@ const ROLLBACK = read("supabase/proposed/25-remove-auto-confirm-trigger-rollback
 const INVENTORY_AUTH = read("supabase/functions/inventory-auth/index.ts");
 
 // --- عقود ثابتة ----------------------------------------------------------------
+// 25 مطبَّقة على الإنتاج (2026-10-25 10:21:51Z، الإصدار 20261025102151): النص مجمَّد، والنسخة المسجّلة مطابقة حرفياً.
+// البصمة على نهايات LF: نسخة Windows بـcore.autocrlf=true تحمل CRLF والنص نفسه.
+assert.equal(crypto.createHash("sha256").update(MIGRATION.replace(/\r\n/g, "\n")).digest("hex"), "6a9a7b59ffb11b8a7a9684f67ec479118df5ffa5d3f72ec6934b3ceadd2a421c", "proposed/25 يجب أن يبقى مطابقاً للنسخة المطبَّقة");
+assert.equal(read("supabase/migrations/20261025102151_remove_auto_confirm_trigger.sql"), MIGRATION, "migrations/20261025102151_remove_auto_confirm_trigger.sql يجب أن تطابق proposed/25 حرفياً");
 assert.match(MIGRATION, /^begin;/m, "الهجرة يجب أن تكون معاملة واحدة");
 assert.match(MIGRATION, /migration 25 guard: already applied/);
 assert.match(MIGRATION, /md5\(prosrc\)[^\n]*'87419c26b8fbe5fd1e29a7e180829363'/, "الحارس يقارن جسم الإنتاج المدقَّق");
