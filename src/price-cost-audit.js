@@ -51,6 +51,7 @@
     zero: "سعر صفري",
     invalid: "سعر غير صالح"
   });
+  const CLEARANCE_PATTERN = /صلاحيه|تصفيه/;
   const BULLETIN_LABELS = Object.freeze({ general: "النشرة العامة", wazari: "الوزاري" });
 
   const REASONS = Object.freeze({
@@ -171,7 +172,10 @@
       unit1Name: String(item.unit1Name || ""),
       unit2Name: String(item.unit2Name || ""),
       unit2Factor: positiveFactor(item.unit2Factor),
-      stockQty: Number(item.stockQty) || 0
+      stockQty: Number(item.stockQty) || 0,
+      // اسم يدل على صلاحية قريبة ⇒ بيع تحت التكلفة قد يكون تصفية مقصودة. يُوسم ولا يُستبعد:
+      // القرار للمالك، والأداة لا تحكم على النية.
+      clearanceHint: CLEARANCE_PATTERN.test(normalizeQuery(item.name))
     };
   }
 

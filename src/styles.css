@@ -3859,3 +3859,15 @@ details[open]>.acc-summary::after{transform:rotate(180deg)}
   .price-audit-table td.price-audit-item { display: block; }
   .price-audit-table td.price-audit-item::before { content: none; }
 }
+
+.price-audit-tag {
+  display: inline-block;
+  margin: 2px 0;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid #e8912d;
+  color: #e8912d;
+  font-size: 0.75rem;
+  font-weight: 800;
+}
+[data-theme="light"] .price-audit-tag { color: #9a5a0c; border-color: #9a5a0c; }

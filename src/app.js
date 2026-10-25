@@ -5863,7 +5863,8 @@ function priceAuditMoney(value) {
 
 function priceAuditItemCell(row) {
   const meta = [row.code ? `رمز ${row.code}` : "", row.groupName, row.bulletinLabel].filter(Boolean).join(" · ");
-  return `<td data-label="المادة" class="price-audit-item"><strong>${escapeHtml(row.name)}</strong><small>${escapeHtml(meta)}</small></td>`;
+  const clearance = row.clearanceHint ? '<span class="price-audit-tag" title="الاسم يدل على صلاحية قريبة — راجع إن كان السعر تصفية مقصودة">تصفية صلاحية؟</span>' : "";
+  return `<td data-label="المادة" class="price-audit-item"><strong>${escapeHtml(row.name)}</strong>${clearance}<small>${escapeHtml(meta)}</small></td>`;
 }
 
 function priceAuditBelowRows(audit) {

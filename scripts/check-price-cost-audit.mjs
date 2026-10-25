@@ -262,6 +262,32 @@ test("الأداء: 5000 صنف تُدقَّق في أقل من ثانية", () 
   assert.ok(audit.belowCost.rows.length > 0 && audit.unpriced.itemCount > 0);
 });
 
+test("أسعار التصفية لا تُستبعد: صنف «صلاحية» تحت التكلفة يظهر موسوماً، وغيره بلا وسم", () => {
+  const audit = run({
+    items: [item("A", { name: "نخلة صلاحية شهر 10", wholesale: 325, retail: 325, factor: 25 }), item("B", { wholesale: 90, retail: 200 })],
+    costs: [cost("A", 17.382), cost("B", 2)]
+  });
+  const a = audit.belowCost.rows.filter((r) => r.code === "CA");
+  assert.equal(a.length, 2, "التصفية المحتملة تبقى في القائمة بنوعي السعر");
+  assert.ok(a.every((r) => r.clearanceHint === true));
+  assert.ok(audit.belowCost.rows.filter((r) => r.code === "CB").every((r) => r.clearanceHint === false));
+  assert.equal(audit.belowCost.itemCount, 2);
+});
+
+test("أصناف المزايا تُدقَّق كلٌّ بسعره: لا سعر احتياطي ثابت (132/135) يخفي غير المسعّر", () => {
+  const audit = run({
+    items: [item("M1", { name: "معسل مزايا تفاحتين", approved: false, factor: 12 }), item("M2", { name: "معسل مزايا عنب", wholesale: 145, retail: 150, factor: 12 })],
+    costs: [cost("M1", 11), cost("M2", 11)]
+  });
+  assert.deepEqual(audit.unpriced.rows.map((r) => r.code), ["CM1"]);
+  assert.equal(audit.unpriced.rows[0].wholesaleState, "missing");
+  const app = readFileSync("src/app.js", "utf8");
+  const input = app.slice(app.indexOf("function priceAuditInput()"), app.indexOf("// يُعاد الحساب فقط عند تغيّر"));
+  assert.match(input, /pricingWorklistItems\(\{ ignoreSearch: true \}\)/, "المدخلات أصناف أصلية قبل الدمج");
+  assert.doesNotMatch(input, /mergeMazayaPriceItems|consolidateGeneralPriceItems|mergeBulletinNamedGroups|customerPriceListItems|MAZAYA_/,
+    "التدقيق لا يمرّ بأي دمج أو سعر احتياطي");
+});
+
 test("الوحدة نقية: لا شبكة ولا كتابة ولا DOM", () => {
   const source = readFileSync("src/price-cost-audit.js", "utf8").replace(/\/\/.*$/gm, "");
   assert.doesNotMatch(source, /fetch\(|XMLHttpRequest|dataStore|supabase|\.from\(|upsert|insert|update\(|delete|document\.|localStorage/i);
