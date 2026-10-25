@@ -398,6 +398,58 @@ test("ترقية مخطط البصمة: مهمة قديمة بمحتوى لم ي
   assert.deepEqual(versions.map((j) => j.version), [1, 2]);
 });
 
+test("سيناريو بشكل الفاتورة 1100 (11 سطراً، نصف كرتونة، نسخة V1 بالمخطط القديم): الترقية بلا إصدار، وتبادل سعرين مع ثبات الإجمالي ⇒ V2 واحد", async () => {
+  const { legacyVersionHash } = require(path.join(dir, "lib", "fingerprint.js"));
+  const model = require(path.join(dir, "..", "manual-a4-print", "lib", "invoice-model.js"));
+  // بيانات اختبار معزولة بالشكل فقط (لا أسماء ولا أسعار حقيقية).
+  const lines = Array.from({ length: 11 }, (_, i) => fakes.line({
+    line_guid: `eeeeeeee-0000-4000-8000-${String(i + 1).padStart(12, "0")}`,
+    line_number: i,
+    mat_guid: `cccccccc-0000-4000-8000-${String(i + 1).padStart(12, "0")}`,
+    item_name: `صنف ${i + 1}`,
+    input_unit: 2,
+    qty: i === 3 ? 25 : 50 * (i + 1), // السطر الرابع نصف كرتونة
+    price: 10 + i,
+  }));
+  const total = lines.reduce((sum, l) => sum + l.price * (l.qty / 50), 0);
+  const t = await archivedOnce({ lines, total });
+  // V1 كما هي على OZK2026 اليوم: محسوبة بالكود الحالي (المخطط 1).
+  const job = t.store.jobs()[0];
+  const row = (await t.ameen.api.changedInvoices({ since: "1900-01-01T00:00:00", dateFrom: "2026-10-01" }))[0];
+  const header = model.headerFromRow(row, t.cfg);
+  header.customerGuid = job.customerGuid;
+  const inv = model.buildInvoice(header, await t.ameen.api.lines(G1), null);
+  inv.customerGuid = job.customerGuid;
+  job.versionHash = legacyVersionHash(inv);
+  delete job.hashSchema;
+  t.store.saveJob(job);
+  t.restart();
+  // أول دورة بعد الترقية: كل التلميحات تتغيّر (أعمدة جديدة) لكن لا إصدار.
+  t.advance(t.cfg.reconcileMinutes * 60);
+  await t.cycle();
+  t.advance(t.cfg.reconcileMinutes * 60);
+  await t.cycle();
+  assert.equal(t.store.versionsOf("wholesale_invoice", G1).length, 1, "لا إصدار زائف بعد الترقية");
+  assert.equal(t.renderer.calls(), 1);
+  // تبادل سعرَي سطرين لهما الكمية نفسها: الإجمالي والورقة كما هما.
+  const swapped = lines.map((l) => ({ ...l }));
+  [swapped[5].qty, swapped[6].qty] = [300, 300];
+  const base = lines.map((l) => ({ ...l }));
+  [base[5].qty, base[6].qty] = [300, 300];
+  // نبدأ من حالة بالكميتين نفسيهما ثم نبادل السعرين وحدهما.
+  let versions = await editAndCycle(t, { lines: base, total: base.reduce((s, l) => s + l.price * (l.qty / 50), 0) });
+  assert.equal(versions.length, 2, "تغيير الكميات تعديل حقيقي");
+  [swapped[5].price, swapped[6].price] = [base[6].price, base[5].price];
+  const sameTotal = base.reduce((s, l) => s + l.price * (l.qty / 50), 0);
+  assert.equal(swapped.reduce((s, l) => s + l.price * (l.qty / 50), 0), sameTotal, "الإجمالي ثابت");
+  versions = await editAndCycle(t, { lines: swapped, total: sameTotal });
+  assert.deepEqual(versions.map((j) => j.version), [1, 2, 3], "تبادل السعرين بإجمالي ثابت ⇒ إصدار جديد");
+  // دورات إضافية بلا تغيير: لا إصدار.
+  t.advance(t.cfg.reconcileMinutes * 60);
+  await t.cycle();
+  assert.equal(t.store.versionsOf("wholesale_invoice", G1).length, 3);
+});
+
 test("إعادة تشغيل بلا ملف الحالة بعد تعديل: إصدار واحد فقط مهما تكررت الدورات", async () => {
   const t = await archivedOnce();
   t.ameen.edit(G1, { total: 140 });
