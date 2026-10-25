@@ -3,8 +3,8 @@
 # migration-preflight.ps1 — فحص ما قبل تحويل المستودع التشغيلي إلى windows-production
 # (نسخة مرجعية؛ قراءة فقط، لا يغيّر أي مهمة ولا ملفاً ولا فرعاً)
 #
-# Codex P1 #5: مهام تحتاج main صراحةً (mainDependentTasks، اليوم OZK-PriceListSync
-# → tools/auto-sync-price-lists.ps1 الذي يرفض العمل على غير main) تتوقف كلها لو حُوِّل
+# Codex P1 #5: مهام تحتاج main صراحةً (mainDependentTasks؛ فارغة منذ تقاعد OZK-PriceListSync
+# في 2026-09-07، وهي الآن في retiredMainTasks ويجب أن تبقى معطّلة) تتوقف كلها لو حُوِّل
 # المستودع الذي تعمل منه إلى windows-production. لذلك التحويل محجوب حتى تعمل كل مهمة منها
 # من worktree مخصّص لـmain (mainWorktree): موجود، ليس المستودع التشغيلي، على main، وبالـremote
 # الرسمي، والسكربت ضمن allowedScripts. والـworktree المخصّص ليس باباً خلفياً: أي مهمة أخرى
@@ -29,6 +29,13 @@ function Get-PreflightTaskActionText([string]$TaskName) {
     $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     if (-not $task) { return $null }
     return (@($task.Actions | ForEach-Object { [string]$_.Execute + ' ' + [string]$_.Arguments + ' ' + [string]$_.WorkingDirectory }) -join "`n")
+}
+
+# حالة المهمة كما هي ('Disabled' أو 'Ready' أو 'Running'...)، أو $null إن لم تكن مرئية. قراءة فقط.
+function Get-PreflightTaskState([string]$TaskName) {
+    $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    if (-not $task) { return $null }
+    return [string]$task.State
 }
 
 function Read-PreflightWrapperText([string]$Path) {
@@ -108,7 +115,8 @@ function Invoke-MigrationPreflight($Config) {
     $mwKey = ConvertTo-PreflightPath $Config.mainWorktree.path
     $repoKey = ConvertTo-PreflightPath $Config.repoPath
     $allowed = @($Config.mainWorktree.allowedScripts | ForEach-Object { ([string]$_ -replace '\\', '/') })
-    $dependent = @($Config.mainDependentTasks)
+    # Where-Object: قائمة فارغة من JSON قد تصل $null على 5.1، فلا تُعدّ مهمة بلا اسم.
+    $dependent = @($Config.mainDependentTasks | Where-Object { $null -ne $_ })
     $worktreeProblem = $null
     $worktreeChecked = $false
 
@@ -128,8 +136,19 @@ function Invoke-MigrationPreflight($Config) {
         $results += [pscustomobject]@{ task = $name; verdict = 'PASS'; reason = 'runs from the dedicated main worktree' }
     }
 
-    # لا باب خلفي: أي مهمة أخرى أو سكربت غير مسموح يعمل من worktree الـmain = حجب.
+    # مهام متقاعدة كانت تحتاج main (retiredMainTasks): لا تُطلب لها worktree، لكنها يجب أن تبقى
+    # معطّلة؛ مهمة مفعّلة أو غير مرئية = حجب (fail-closed). ولا يجوز أن تكون معلنة ومتقاعدة معاً.
     $dependentNames = @($dependent | ForEach-Object { [string]$_.task })
+    foreach ($ret in @($Config.retiredMainTasks | Where-Object { $null -ne $_ })) {
+        $name = [string]$ret.task
+        if ($dependentNames -contains $name) { $results += [pscustomobject]@{ task = $name; verdict = 'BLOCK'; reason = 'declared both main-dependent and retired' }; continue }
+        $state = Get-PreflightTaskState $name
+        if ($null -eq $state) { $results += [pscustomobject]@{ task = $name; verdict = 'BLOCK'; reason = 'retired task not visible (missing or no permission); run the preflight as an administrator' }; continue }
+        if ($state -ne 'Disabled') { $results += [pscustomobject]@{ task = $name; verdict = 'BLOCK'; reason = ('retired main task is enabled (' + $state + '); it must stay Disabled') }; continue }
+        $results += [pscustomobject]@{ task = $name; verdict = 'PASS'; reason = 'retired main task is Disabled' }
+    }
+
+    # لا باب خلفي: أي مهمة أخرى أو سكربت غير مسموح يعمل من worktree الـmain = حجب.
     foreach ($name in @(Get-PreflightTaskNames)) {
         $action = Get-PreflightTaskActionText $name
         if ($null -eq $action) { continue }

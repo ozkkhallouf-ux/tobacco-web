@@ -117,26 +117,37 @@ assert.equal(mw.branch, "main");
 assert.match(mw.remote, /github\.com[/:]ozkkhallouf-ux\/tobacco-web(\.git)?$/);
 assert.notEqual(mw.path.toLowerCase(), cfg0.repoPath.toLowerCase(), "الـworktree المخصّص ليس المستودع التشغيلي");
 assert.deepEqual(mw.allowedScripts, ["tools/auto-sync-price-lists.ps1"], "الـworktree المخصّص لنشرات الأسعار وحدها");
-assert.deepEqual(cfg0.mainDependentTasks.map((t) => [t.task, t.script]), [["OZK-PriceListSync", "tools/auto-sync-price-lists.ps1"]]);
+// تشخيص 2026-10-25: مزامنة النشرات متقاعدة (معطّلة منذ 2026-09-07، النشرات من generate-price-lists.yml)،
+// فلا مهمة تحتاج main اليوم. الاستثناء محصور بهذه المهمة وحدها، ويشترط الفحص بقاءها معطّلة.
+assert.deepEqual(cfg0.mainDependentTasks, [], "لا مهمة تحتاج main؛ أي إضافة تمرّ بمراجعة صريحة");
+assert.deepEqual(cfg0.retiredMainTasks.map((t) => [t.task, t.script]), [["OZK-PriceListSync", "tools/auto-sync-price-lists.ps1"]], "الاستثناء المتقاعد لمزامنة النشرات وحدها");
+for (const t of cfg0.retiredMainTasks) {
+  assert.match(t.retiredOn, /^\d{4}-\d{2}-\d{2}$/, `${t.task}: تاريخ التقاعد مطلوب`);
+  assert.ok(String(t.reason || "").length > 40, `${t.task}: تعليل التقاعد مطلوب`);
+}
 const sync = read("tools/auto-sync-price-lists.ps1");
 assert.match(sync, /rev-parse --abbrev-ref HEAD/);
 assert.match(sync, /\$currentBranch -ne "main"/, "حارس main في مزامنة النشرات لم يُخفَّف");
-// أي سكربت يشترط الفرع main يجب أن يكون مهمة معلنة (أو أداة يدوية مستثناة بتعليل).
+// أي سكربت يشترط الفرع main يجب أن يكون مهمة معلنة، أو مهمة متقاعدة معلنة، أو أداة يدوية مستثناة بتعليل.
 const manualMainTools = { "tools/ai-work-coordination.ps1": "أداة يدوية لقفل AI على main، ليست مهمة مجدولة" };
-const declared = new Set(cfg0.mainDependentTasks.map((t) => t.script));
+const declared = new Set([...cfg0.mainDependentTasks, ...cfg0.retiredMainTasks].map((t) => t.script));
 for (const f of readdirSync(path.join(root, "tools")).filter((n) => n.endsWith(".ps1")).map((n) => `tools/${n}`)) {
   const src = read(f);
   if (/(abbrev-ref HEAD|branch --show-current)/.test(src) && /-ne\s+["']main["']/.test(src)) {
-    assert.ok(declared.has(f) || manualMainTools[f], `${f} يشترط main وليس معلناً في mainDependentTasks`);
+    assert.ok(declared.has(f) || manualMainTools[f], `${f} يشترط main وليس معلناً في mainDependentTasks أو retiredMainTasks`);
   }
 }
 const pre = read("tools/deploy-gate/migration-preflight.ps1");
 assert.match(pre, /task definition not visible/, "مهمة غير مرئية ⇒ حجب");
 assert.match(pre, /outside its allow-list/, "لا باب خلفي عبر worktree الـmain");
+assert.match(pre, /retired main task is enabled/, "مهمة متقاعدة مفعّلة ⇒ حجب");
+assert.match(pre, /retired task not visible/, "مهمة متقاعدة غير مرئية ⇒ حجب");
+assert.match(pre, /declared both main-dependent and retired/);
+assert.match(pre, /function Get-PreflightTaskState[\s\S]{0,300}Get-ScheduledTask -TaskName/, "حالة المهمة قراءة فقط");
 assert.match(pre, /main worktree must not be the operational repository/);
 assert.match(gateSrc, /\$pre = Invoke-MigrationPreflight \$Config[\s\S]{0,400}migration preflight blocked/, "Initialize يرفض ما لم ينجح الفحص");
 assert.match(checkWfRaw(), /tools\\tests\\Test-MigrationPreflight\.ps1/);
-ok("مزامنة النشرات تبقى على main عبر worktree مخصّص، والتحويل محجوب حتى ينجح الفحص (Codex P1 #5)");
+ok("لا مهمة تحتاج main؛ مزامنة النشرات متقاعدة ويجب أن تبقى معطّلة، والـworktree ليس باباً خلفياً، والتحويل محجوب حتى ينجح الفحص (Codex P1 #5)");
 
 // تدقيق 2026-10-20: الثغرات الست، ومنع الرجوع، والتزامن، والنسخ الاحتياطي، والاستعادة.
 assert.match(cfg0.deviceBaselineSha, /^[0-9a-f]{40}$/, "deviceBaselineSha = SHA كامل لما يشغّله الجهاز");
