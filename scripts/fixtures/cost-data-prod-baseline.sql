@@ -81,10 +81,10 @@ create table public.sales_line_items_sync_state (
 
 create table public.ameen_item_snapshot (
   id uuid primary key default gen_random_uuid(), item_key text not null unique, item_guid text, item_number text,
-  item_name text not null default '', unit1_name text default '', unit2_name text default '', unit2_factor numeric default 1,
-  stock_unit1 numeric default 0, stock_unit2 numeric default 0, last_purchase_price numeric, last_purchase_currency text,
-  last_purchase_date date, last_purchase_unit text, average_cost numeric, average_cost_currency text,
-  average_cost_basis text default '', last_supplier_name text, last_supplier_guid text, units_sold_30d numeric,
+  item_name text not null default '', unit1_name text default '', unit2_name text default '', unit2_factor numeric(12,4) default 1,
+  stock_unit1 numeric(15,3) default 0, stock_unit2 numeric(15,3) default 0, last_purchase_price numeric(15,4), last_purchase_currency text,
+  last_purchase_date date, last_purchase_unit text, average_cost numeric(15,4), average_cost_currency text,
+  average_cost_basis text default '', last_supplier_name text, last_supplier_guid text, units_sold_30d numeric(15,3),
   movement_rank integer, generated_at timestamptz not null default now());
 
 create table public.inventory_reports (

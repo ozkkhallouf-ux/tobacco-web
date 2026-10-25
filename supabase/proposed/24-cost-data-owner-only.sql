@@ -103,11 +103,12 @@ begin
   return query
   select s.id, s.item_key, s.item_guid, s.item_number, s.item_name, s.unit1_name, s.unit2_name,
          s.unit2_factor, s.stock_unit1, s.stock_unit2,
-         case when v_owner then s.last_purchase_price end,
+         -- الأنواع صريحة: CASE يعيد numeric بلا دقة، وRETURN QUERY يرفضه أمام numeric(15,4).
+         (case when v_owner then s.last_purchase_price end)::numeric(15,4),
          case when v_owner then s.last_purchase_currency end,
          s.last_purchase_date,
          case when v_owner then s.last_purchase_unit end,
-         case when v_owner then s.average_cost end,
+         (case when v_owner then s.average_cost end)::numeric(15,4),
          case when v_owner then s.average_cost_currency end,
          case when v_owner then s.average_cost_basis end,
          s.last_supplier_name, s.last_supplier_guid, s.units_sold_30d, s.movement_rank, s.generated_at
