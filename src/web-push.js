@@ -57,6 +57,7 @@
     if (permission !== "granted") throw new Error("لم يتم السماح بالإشعارات.");
 
     const registration = await navigator.serviceWorker.ready;
+    await setDetachGuard(false);
     let subscription = await registration.pushManager.getSubscription();
     if (!subscription) {
       const { publicKey } = await callPush("config");
@@ -95,6 +96,29 @@
     try { return localStorage.getItem(DETACH_PENDING_KEY) === "1"; } catch { return false; }
   }
 
+  // علامة يقرؤها Service Worker (public/service-worker.js: ozkPushDetached) فيعرض نصاً عاماً بدل محتوى
+  // المالك إن بقي اشتراك على جهاز مفصول. IndexedDB لا Cache Storage (activate يحذف الكاشات القديمة).
+  // لا ترمي أبداً، وبمهلة: فشلها لا يمنع الخروج ولا التفعيل.
+  function setDetachGuard(detached) {
+    return withTimeout(new Promise((resolve) => {
+      if (typeof indexedDB === "undefined") return resolve(false);
+      const open = indexedDB.open("ozk-push-guard", 1);
+      open.onupgradeneeded = () => { open.result.createObjectStore("state"); };
+      open.onerror = () => resolve(false);
+      open.onsuccess = () => {
+        try {
+          const db = open.result;
+          const tx = db.transaction("state", "readwrite");
+          tx.objectStore("state").put(detached === true, "detached");
+          tx.oncomplete = () => { db.close(); resolve(true); };
+          tx.onerror = () => { db.close(); resolve(false); };
+        } catch {
+          resolve(false);
+        }
+      };
+    }), 1000, false);
+  }
+
   // getRegistration لا ready: ready لا يُحسم أبداً إن لم يُسجَّل عامل، فيعلق الخروج.
   async function currentSubscription() {
     if (!("serviceWorker" in navigator) || typeof navigator.serviceWorker.getRegistration !== "function") return null;
@@ -109,6 +133,8 @@
     setDetachPending(true);
     const result = { subscribed: false, browser: false, server: false };
     const run = async () => {
+      // العلامة أولاً: إن فشل الإلغاء أو علق، يبقى Service Worker يعرض نصاً عاماً لا محتوى المالك.
+      await setDetachGuard(true);
       const subscription = await currentSubscription();
       if (!subscription) {
         result.browser = true;
@@ -130,14 +156,15 @@
 
   // يُستدعى بعد كل تغيّر للجلسة (إقلاع، دخول، خروج). owner: يمسح علامة الفصل المعلّق ولا يلمس الاشتراك.
   // غير ذلك: يُستكمل فصل خروج سابق لم يكتمل. وتنظيف اشتراك المالك عند دخول حساب غير مالك (الخيار ج)
-  // لا يعمل إلا بـappConfig.webPush.detachNonOwnerSessions = true، لأنه يُنهي استثناء OZKUSER (قرار المالك).
+  // مفعّل بقرار المالك (2026-10-25: إشعاراته على Mac وiPhone وحدهما)، ويُطفأ بـappConfig.webPush.detachNonOwnerSessions = false.
   // المتصفح وحده: جلسة الموظف لا تملك صف المالك في الخادم، والمزود يرد 404/410 فيُعطَّل الصف تلقائياً.
   async function syncSession({ signedIn = false, owner = false, timeoutMs = DETACH_TIMEOUT_MS } = {}) {
     if (signedIn && owner) {
       setDetachPending(false);
+      await setDetachGuard(false);
       return { action: "kept" };
     }
-    const nonOwnerCleanup = signedIn && window.appConfig?.webPush?.detachNonOwnerSessions === true;
+    const nonOwnerCleanup = signedIn && window.appConfig?.webPush?.detachNonOwnerSessions !== false;
     if (!detachPending() && !nonOwnerCleanup) return { action: "none" };
     const result = await disable({ timeoutMs, server: false });
     return { action: result.subscribed ? "detached" : "none", ...result };

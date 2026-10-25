@@ -8,8 +8,9 @@
 //   • الخروج يلغي اشتراك المتصفح ويعطّل صف هذا الجهاز في الخادم قبل signOut،
 //     بمهلة، ولا يمنع الخروج أبداً. وما لم يكتمل يُستكمل عند الفتح التالي.
 //   • زر «إعادة تفعيل الإشعارات» للمالك حين الإذن ممنوح ولا اشتراك.
-//   • تنظيف اشتراك المالك عند فتح الموقع بحساب غير مالك مطفأ افتراضياً
-//     (appConfig.webPush.detachNonOwnerSessions) احتراماً لاستثناء OZKUSER.
+//   • فتح الموقع بحساب غير مالك يلغي اشتراك المالك في ذلك المتصفح (قرار المالك
+//     2026-10-25: Mac وiPhone وحدهما)، ويُطفأ بـappConfig.webPush.detachNonOwnerSessions.
+//   • علامة «مفصول» في IndexedDB يقرؤها Service Worker فيعرض نصاً عاماً.
 //
 // التطبيق الحقيقي في Chromium عبر scripts/serve.mjs. Supabase مُحاكى بالكامل
 // (لا طلب يغادر الجهاز، ولا حساب حقيقي)، وكذلك Service Worker وPushManager
@@ -86,7 +87,7 @@ async function installRoutes(context, ctl) {
 }
 
 // unsubscribe: ok | hang | reject. registration: ok | hang.
-async function openApp({ session = "owner", subscribed = true, permission = "granted", unsubscribe = "ok", registration = "ok", push = "ok", pending = false, detachNonOwner = false } = {}) {
+async function openApp({ session = "owner", subscribed = true, permission = "granted", unsubscribe = "ok", registration = "ok", push = "ok", pending = false, detachNonOwner } = {}) {
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 }, serviceWorkers: "block" });
   const ctl = { push, pushCalls: [], logouts: 0 };
   await installRoutes(context, ctl);
@@ -162,7 +163,8 @@ async function openApp({ session = "owner", subscribed = true, permission = "gra
       get: () => value,
       set: (next) => {
         value = next;
-        if (value) value.webPush = { ...value.webPush, detachNonOwnerSessions: window.__setDetachNonOwner === true };
+        // بلا تجاوز: القيمة كما في src/config.js (المنشورة فعلاً).
+        if (value && typeof window.__setDetachNonOwner === "boolean") value.webPush = { ...value.webPush, detachNonOwnerSessions: window.__setDetachNonOwner };
       }
     });
   });
@@ -176,6 +178,18 @@ const events = (page) => page.evaluate(() => window.__push.events.slice());
 const subActive = (page) => page.evaluate(() => localStorage.getItem("__fakeSubActive") === "1");
 const pendingFlag = (page) => page.evaluate((key) => localStorage.getItem(key), PENDING_KEY);
 const reenableBanner = (page) => page.locator("[data-owner-push-missing]").count();
+// علامة حارس Service Worker كما يقرؤها (IndexedDB «ozk-push-guard»): true أو false أو null إن لم تُكتب.
+const guardFlag = (page) => page.evaluate(() => new Promise((resolve) => {
+  const open = indexedDB.open("ozk-push-guard", 1);
+  open.onupgradeneeded = () => { open.result.createObjectStore("state"); };
+  open.onerror = () => resolve("error");
+  open.onsuccess = () => {
+    const db = open.result;
+    const get = db.transaction("state", "readonly").objectStore("state").get("detached");
+    get.onsuccess = () => { db.close(); resolve(get.result === undefined ? null : get.result); };
+    get.onerror = () => { db.close(); resolve("error"); };
+  };
+}));
 
 async function logoutAndTime(page) {
   const started = Date.now();
@@ -224,6 +238,7 @@ await test("خروج المالك: إلغاء المتصفح وصف هذا ال�
   assert(calls.length === 1 && calls[0].endpoint === ENDPOINT, `الخادم لم يُطلب منه إلا endpoint هذا الجهاز: ${JSON.stringify(calls)}`);
   assert(!(await subActive(page)), "اشتراك المتصفح باقٍ بعد الخروج");
   assert((await pendingFlag(page)) === null, "علامة الفصل المعلّق بقيت بعد فصل ناجح");
+  assert((await guardFlag(page)) === true, "علامة حارس Service Worker لم تُكتب عند الخروج");
   await assertLoggedOut(page);
 });
 
@@ -251,6 +266,7 @@ await test("إلغاء المتصفح يعلق: الخروج يكتمل بالم
   assert(elapsed < DETACH_TIMEOUT_MS + 1500, `الخروج استغرق ${elapsed}ms فوق المهلة`);
   await assertLoggedOut(page);
   assert((await pendingFlag(page)) === "1", "لا علامة فصل معلّق بعد إلغاء لم يكتمل");
+  assert((await guardFlag(page)) === true, "الإلغاء علق ولم تُكتب علامة الحارس قبله");
   assert(await subActive(page), "تجهيز الاختبار: الاشتراك يجب أن يبقى بعد التعليق");
   // الفتح التالي بلا جلسة والمتصفح متاح الآن: يُستكمل الفصل دون نداء للخادم.
   await page.evaluate(() => localStorage.setItem("__pushMode", JSON.stringify({ unsubscribe: "ok", registration: "ok" })));
@@ -291,6 +307,7 @@ await test("علامة فصل معلّق ثم دخول المالك: الاشت�
   await settle(page);
   assert(await subActive(page), "أُلغي اشتراك المالك وجلسته حاضرة");
   assert((await pendingFlag(page)) === null, "العلامة بقيت مع جلسة المالك");
+  assert((await guardFlag(page)) === false, "علامة الحارس لم تُمسح بجلسة المالك");
 });
 
 await test("المالك بإذن ممنوح بلا اشتراك: زر «إعادة التفعيل» ونقرته تستدعي enable مرة واحدة", async (open) => {
@@ -336,21 +353,35 @@ await test("الموظف بإذن ممنوح بلا اشتراك: لا زر «إ
   assert((await reenableBanner(page)) === 0, "زر إعادة تفعيل إشعارات المالك ظهر لموظف");
 });
 
-await test("استثناء OZKUSER (الافتراضي): جلسة موظف لا تلغي اشتراك المالك القائم", async (open) => {
+await test("الافتراضي المنشور (قرار المالك): جلسة موظف تلغي اشتراك المالك في المتصفح وحده", async (open) => {
+  const { page, ctl } = await open({ session: "employee" });
+  await waitBooted(page);
+  await settle(page);
+  assert(await page.evaluate(() => appConfig.webPush.detachNonOwnerSessions === true), "الإعداد المنشور ليس مفعّلاً");
+  assert(!(await subActive(page)), "اشتراك المالك بقي على جهاز بجلسة موظف");
+  assert(ctl.pushCalls.length === 0, `جلسة الموظف نادت الخادم: ${JSON.stringify(ctl.pushCalls)}`);
+  assert((await guardFlag(page)) === true, "علامة الحارس لم تُكتب لجلسة الموظف");
+});
+
+await test("الموظف ثم المالك على المتصفح نفسه: علامة الحارس تُمسح بجلسة المالك", async (open) => {
+  const { page } = await open({ session: "employee" });
+  await waitBooted(page);
+  await settle(page);
+  assert((await guardFlag(page)) === true, "تجهيز: لا علامة بعد جلسة الموظف");
+  await page.evaluate((cfg) => localStorage.setItem(cfg.key, JSON.stringify(cfg.session)), { key: STORAGE_KEY, session: fakeSession("owner") });
+  await page.reload();
+  await waitBooted(page);
+  await settle(page);
+  assert((await guardFlag(page)) === false, "علامة الحارس بقيت بجلسة المالك فيُحجب عنه محتوى إشعاراته");
+  await page.waitForSelector("[data-owner-push-missing]", { timeout: 5000 });
+});
+
+await test("التراجع بـdetachNonOwnerSessions = false: جلسة موظف لا تلغي اشتراكاً قائماً", async (open) => {
   const { page, ctl } = await open({ session: "employee", detachNonOwner: false });
   await waitBooted(page);
   await settle(page);
-  assert(await page.evaluate(() => appConfig.webPush.detachNonOwnerSessions === false), "الإعداد ليس مطفأً");
-  assert(await subActive(page), "أُلغي اشتراك قائم رغم أن التنظيف التلقائي مطفأ");
+  assert(await subActive(page), "أُلغي اشتراك قائم رغم إطفاء الإعداد");
   assert(ctl.pushCalls.length === 0, "نداء Push بجلسة الموظف");
-});
-
-await test("تنظيف حساب غير مالك (عند تفعيله بقرار المالك): المتصفح وحده، بلا نداء للخادم", async (open) => {
-  const { page, ctl } = await open({ session: "employee", detachNonOwner: true });
-  await waitBooted(page);
-  await settle(page);
-  assert(!(await subActive(page)), "اشتراك المالك بقي على جهاز بجلسة موظف رغم التفعيل");
-  assert(ctl.pushCalls.length === 0, `جلسة الموظف نادت الخادم: ${JSON.stringify(ctl.pushCalls)}`);
 });
 
 await test("تنظيف حساب غير مالك مفعّل: جلسة المالك لا تتأثر", async (open) => {

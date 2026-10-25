@@ -74,8 +74,9 @@ static-only — تطابق نص SQL بالـregex ولا تنفّذ شيئاً �
 - **الخروج** (ومسارا استعادة كلمة المرور): `detachPushBeforeSignOut()` في `src/app.js` تستدعي `ozkWebPush.disable()` قبل `signOut()` لأن نداء الخادم يحتاج الجلسة. `disable()` في `src/web-push.js` يلغي اشتراك المتصفح وينادي `unsubscribe` لـendpoint هذا الجهاز وحده معاً، بمهلة 3 ثوانٍ، ولا يرمي. `getRegistration` لا `ready` (ready لا يُحسم بلا عامل).
 - **ما لم يكتمل** (مهلة، بلا شبكة، إغلاق التبويب): علامة `ozk-push-detach-pending` في localStorage، تُستكمل عند الفتح التالي بلا جلسة أو بجلسة غير مالك (`syncSession`)، وتُمسح بجلسة المالك دون لمس اشتراكه.
 - **زر «إعادة تفعيل الإشعارات»**: للمالك حين الإذن `granted` ولا اشتراك (`ownerPushReenableBanner`). شريط «تفعيل» القديم يشترط `default`، فبدون الزر يفقد المالك Push بصمت بعد خروج ودخول. لا اشتراك صامت بلا نقرة.
-- **حساب غير مالك على جهاز فيه اشتراك المالك**: التنظيف مطفأ افتراضياً `appConfig.webPush.detachNonOwnerSessions = false`، لأنه يُنهي استثناء OZKUSER الذي أقرّه المالك. عند تفعيله بقراره: إلغاء المتصفح وحده، بلا نداء للخادم بجلسة الموظف.
-- لا تغيير للدالة ولا للجداول ولا لـService Worker. الحارس: `scripts/check-web-push-session-detach.mjs`.
+- **حساب غير مالك على جهاز فيه اشتراك المالك** (قرار المالك 2026-10-25: إشعاراته على Mac وiPhone وحدهما): يُلغى الاشتراك في المتصفح وحده، بلا نداء للخادم بجلسة الموظف. `appConfig.webPush.detachNonOwnerSessions = false` يطفئ هذا الشق وحده (تراجع).
+- **حارس Service Worker:** الصفحة تكتب `detached` في IndexedDB `ozk-push-guard` (مخزن `state`) عند الخروج أو جلسة غير مالك، وتمسحه بجلسة المالك أو بإعادة التفعيل. `ozkPushDetached` في `public/service-worker.js` يقرؤها: نص عام بلا أسماء ولا مبالغ، وإلغاء الاشتراك من الـSW. Cache Storage لا يصلح (activate يحذف الكاشات القديمة). خطأ أو مهلة ⇒ يُعرض المحتوى كما كان؛ الحارس احتياط فوق إلغاء الصفحة لا بديل عنه، ولا يعمل على جهاز لم يُفتح عليه الموقع بعد النشر.
+- لا تغيير للدالة ولا للجداول. الحراس: `scripts/check-web-push-session-detach.mjs` و`scripts/check-web-push-delivery.mjs` (القسم ٥).
 
 ## نطاق الملفات
 
