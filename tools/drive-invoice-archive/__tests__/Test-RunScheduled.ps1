@@ -202,6 +202,12 @@ try {
     [void](Invoke-Wrapper $e 'ok')
     Assert 'نجاح بعدها يصفّر العدّاد' ((Get-State $e).consecutiveFailures -eq 0)
 
+    $e = New-Env
+    [void](New-Item -ItemType Directory -Path $e.LogDir -Force)
+    [IO.File]::WriteAllText((Join-Path $e.LogDir 'scheduled-run.state.json'), '{ broken')
+    $code = Invoke-Wrapper $e 'ok'
+    Assert 'ملف حالة تالف ⇒ يُعاد بناؤه بلا توقف (state_reset)' ($code -eq 0 -and (Get-Log $e) -match 'state_reset' -and (Get-State $e).consecutiveFailures -eq 0)
+
     # ── تدوير السجل ───────────────────────────────────────────────────────────
     $e = New-Env
     [void](New-Item -ItemType Directory -Path $e.LogDir -Force)

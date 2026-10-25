@@ -102,7 +102,7 @@ function Save-RunState([string]$Path, [int]$ExitCode, [string]$Outcome) {
         try {
             $old = Read-JsonFile $Path
             foreach ($k in @('lastSuccessAt', 'consecutiveFailures')) { if ($null -ne $old.$k) { $state[$k] = $old.$k } }
-        } catch { }
+        } catch { Write-RunLog 'state_reset' @{ error = (Get-RedactedText $_.Exception.Message 200) } }
     }
     $now = (Get-Date).ToUniversalTime().ToString('o')
     $state.lastRunAt = $now
@@ -245,7 +245,7 @@ function Invoke-ScheduledRun {
         else { $script:exitCode = 1; $script:outcome = 'wrapper_error' }
         Write-RunLog $script:outcome @{ error = (Get-RedactedText $_.Exception.Message 300) }
     } finally {
-        if ($acquired) { try { $mutex.ReleaseMutex() } catch { } }
+        if ($acquired) { try { $mutex.ReleaseMutex() } catch { Write-RunLog 'mutex_release_failed' @{ error = (Get-RedactedText $_.Exception.Message 200) } } }
         if ($mutex) { $mutex.Dispose() }
         if ($statePath) {
             try {
@@ -253,7 +253,7 @@ function Invoke-ScheduledRun {
                 if (@(0, 10, 13) -notcontains $script:exitCode -and [int]$st.consecutiveFailures -ge $FailureStreakAlert) {
                     Write-RunLog 'failure_streak' @{ consecutiveFailures = $st.consecutiveFailures; lastSuccessAt = $st.lastSuccessAt }
                 }
-            } catch { }
+            } catch { Write-RunLog 'state_save_failed' @{ error = (Get-RedactedText $_.Exception.Message 200) } }
         }
     }
 }
