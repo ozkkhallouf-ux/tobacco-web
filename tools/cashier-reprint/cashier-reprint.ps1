@@ -91,6 +91,9 @@ try {
         $checks = [ordered]@{ Mode = $config.mode; User = $env:USERNAME }
         if ($config.mode -eq "local") {
             try { $checks.BridgeSha256 = Assert-CashierBridgePinned $config; $checks.Bridge = "ok" } catch { $checks.Bridge = [string]$_.Exception.Message }
+            if ($config.expectedRendererSha256 -ne "") {
+                try { $checks.RendererSha256 = Assert-CashierRendererPinned $config; $checks.Renderer = "ok" } catch { $checks.Renderer = [string]$_.Exception.Message }
+            }
             try {
                 $printer = Get-CashierPrinterInfo $config.printerName
                 $checks.Printer = "ok"; $checks.PrinterPort = $printer.PortName; $checks.PrinterStatus = $printer.StatusText
@@ -114,6 +117,7 @@ try {
             $healthy = ($checks.Bridge -eq "ok" -and $checks.Printer -eq "ok" -and $checks.Sql -eq "ok")
             if ($config.bridgeSqlSource -eq "tool-secret" -and $checks.BridgeSql -ne "ok") { $healthy = $false }
             if ($config.enforceProtectedPaths -and $checks.ProtectedPaths -ne "ok") { $healthy = $false }
+            if ($config.expectedRendererSha256 -ne "" -and $checks.Renderer -ne "ok") { $healthy = $false }
         } else {
             # فحص بعيد بلا طباعة: حالة معرّف عشوائي جديد يجب أن تكون not_received من جهاز الطابعة المتوقع.
             try {

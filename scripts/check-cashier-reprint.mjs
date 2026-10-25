@@ -2,6 +2,7 @@
 // يثبت الحدود التي لا تُكسر: لا مساس بجسر الطباعة التلقائية ولا بحالته، كاشير Retail وحده
 // على XPRINTER وحدها، والاستعلامات SELECT فقط. الاختبار السلوكي في tools/tests/Test-CashierReprint.ps1.
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -69,6 +70,24 @@ assert.match(lib, /if \(error == 87\) return -1;/, 'مهمة غادرت الطا
 assert.match(cli, /Get-CashierPrinterInfo \$config\.printerName/, 'فحص Health للطابعة عبر winspool');
 assert.doesNotMatch(lib, /\$arguments[^\n]*SqlConnectionString/, 'السرّ لا يدخل وسائط سطر الأوامر');
 assert.match(lib, /Assert-CashierBridgeReady \$c \$r/, 'شرط الطباعة الافتراضي يشمل فحص الحماية حين يُفرض');
+
+// نسخة الـrenderer للجسر الثابت (حساب الخدمة): فحص الطابور عبر winspool بلا CIM، قبل الرسم والإرسال،
+// وبصمتها مثبّتة في مثال حساب الخدمة. الجسر التلقائي الأصلي لا يُمسّ ولا يستعمل هذه النسخة.
+const rendererRel = path.join('static-bridge', 'ozk-print-bridge', 'OzkReceiptRenderer.psm1');
+const rendererBytes = readFileSync(path.join(dir, rendererRel));
+assert.ok(rendererBytes[0] === 0xef && rendererBytes[1] === 0xbb && rendererBytes[2] === 0xbf, 'renderer: يحتاج BOM لـWindows PowerShell 5.1');
+assert.ok(!rendererBytes.includes(0x0d), 'renderer: نهايات LF وحدها كي تبقى البصمة ثابتة');
+const renderer = code(rendererBytes.toString('utf8'));
+assert.doesNotMatch(renderer, /Get-PrintJob|Get-Printer\b|CimInstance|CimSession|Get-WmiObject|Win32_Printer/i, 'renderer: لا WMI/CIM');
+assert.match(renderer, /\$script:CashierPrinterName = "XPRINTER XP-T80Q 80MM"/, 'renderer: طابعة الكاشير وحدها');
+assert.match(renderer, /pDataType = "RAW"/, 'renderer: الإرسال RAW كما هو');
+const send = renderer.slice(renderer.indexOf('function Send-OzkReceiptToPrinter'));
+const order = ['if (-not $ConfirmPhysicalPrint)', '$PrinterName -cne $script:CashierPrinterName', 'Assert-OzkPrinterQueueReady $PrinterName', 'New-OzkReceiptBitmap', '[OzkRawThermalPrinter]::Send('].map((t) => send.indexOf(t));
+assert.ok(order.every((i) => i >= 0) && order.every((i, k) => k === 0 || i > order[k - 1]), 'renderer: التأكيد ثم الطابعة ثم فحص الطابور ثم الرسم ثم الإرسال');
+assert.match(renderer, /Export-ModuleMember -Function New-OzkReceiptBitmap, Save-OzkReceiptPreview, Send-OzkReceiptToPrinter\s*$/, 'renderer: الدوال المصدَّرة كما هي');
+const rendererHash = createHash('sha256').update(rendererBytes).digest('hex');
+assert.equal(service.expectedRendererSha256, rendererHash, 'مثال حساب الخدمة يثبّت بصمة الـrenderer في المستودع');
+assert.match(lib, /\[void\]\(Assert-CashierRendererPinned \$Config\)/, 'بصمة الـrenderer ضمن شرط الطباعة');
 
 const config = JSON.parse(read('config.example.json'));
 assert.equal(config.printerName, 'XPRINTER XP-T80Q 80MM');
