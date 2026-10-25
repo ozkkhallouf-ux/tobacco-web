@@ -74,18 +74,70 @@ test("فحص الطابعة: لا «جاهزة» لطابعة لا تردّ أو
   assert.match(queued.warning, /5/);
 });
 
-test("فحص الطابعة: منفذ WSD/IPP يُفحص على العنوان الذي حفظه Windows، و printerHost يتقدّم عليه", () => {
-  const script = server.printerProbeScript({ printerName: "Canon G3410 (auto)", printerHost: "", printerHostPort: 631 });
+test("فحص الطابعة: سكربت WSD/IPP يبحث بالـUUID ولا يعتمد عنواناً محفوظاً قديماً", () => {
+  const script = server.printerProbeScript({ printerName: "Canon G3010 series (Copy 1)", printerHost: "", printerHostPort: 631 });
   assert.match(script, /if \(-not \$h -and \$p\.PortName -like 'WSD-\*'\)/);
-  assert.match(script, /'SWD\\IPP\\' \+ \$w\.'Printer UUID'/);
-  assert.match(script, /A35996AB-11CF-4935-8B61-A6761081ECDF\} 12/);
-  assert.match(script, /Enum\\SWD\\PRINTENUM\\/);
+  assert.match(script, /'SWD\\IPP\\' \+ \$uuid/);
+  assert.match(script, /discovery\/Resolve/);
+  assert.match(script, /239\.255\.255\.250', 3702/);
+  assert.match(script, /SWD\\DAFWSDProvider\\urn:uuid:/);
+  assert.doesNotMatch(script, /PRINTENUM/, "LocationInformation في PRINTENUM يبقى قديماً بعد تغيّر DHCP");
   assert.match(server.printerProbeScript({ printerName: "x", printerHost: "192.0.2.5" }), /\$h = '192\.0\.2\.5'/);
   assert.match(server.printerProbeScript({ printerName: "O'Brien" }), /-eq 'O''Brien'/);
-  // ما يعيده السكربت حين بقي العنوان المحفوظ قديماً: يُرفض قبل SumatraPDF بدل فشل بعد 50 ثانية.
-  const stale = server.classifyPrinter({ port: "WSD-21d4", offline: "False", status: "3", detected: "0", jobs: "0", reach: "fail", target: "192.168.1.62:631" });
-  assert.equal(stale.state, "unreachable");
-  assert.match(stale.reason, /192\.168\.1\.62:631/);
+});
+
+const UUID = "00000000-0000-1000-8000-5003cf162ac8";
+const wsdLine = (windowsUrl, replies) => `FOUND|WSD-1ff9|False|3|0|0|none|:631|WSD^${UUID}^${windowsUrl}^${replies}`;
+
+test("WSD: تغيّر العنوان من .62 إلى .60 لا يرفض الطباعة، ويُفحص العنوان الجديد", () => {
+  const now = `urn:uuid:${UUID}^http://192.168.1.60:80/wsd/pnpx-metadata.cgi^ok`;
+  const same = server.classifyPrinter(server.parseProbeLine(wsdLine("http://192.168.1.60:80/wsd/pnpx-metadata.cgi", now)));
+  assert.equal(same.state, "ready");
+  assert.equal(same.target, "192.168.1.60:80");
+  assert.equal(same.warning, "");
+  // Windows لم يلتقط العنوان الجديد بعد: جاهزة مع تنبيه، لا رفض.
+  const stale = server.classifyPrinter(server.parseProbeLine(wsdLine("http://192.168.1.62:80/wsd/pnpx-metadata.cgi", now)));
+  assert.equal(stale.state, "ready");
+  assert.equal(stale.target, "192.168.1.60:80");
+  assert.match(stale.warning, /192\.168\.1\.62:80.*192\.168\.1\.60:80/);
+  // UUID بأحرف كبيرة من الطابعة يطابق.
+  const upper = server.classifyPrinter(server.parseProbeLine(wsdLine("", `URN:UUID:${UUID.toUpperCase()}^http://192.168.1.60:80/wsd/x^ok`)));
+  assert.equal(upper.state, "ready");
+});
+
+test("WSD: فشل الاكتشاف أو عدم الوصول يرفض الطباعة برسالة واضحة", () => {
+  const none = server.classifyPrinter(server.parseProbeLine(wsdLine("http://192.168.1.62:80/wsd/x", "")));
+  assert.equal(none.state, "unreachable");
+  assert.match(none.reason, /لا تردّ على اكتشاف WSD/);
+  assert.match(none.reason, new RegExp(UUID));
+  const down = server.classifyPrinter(server.parseProbeLine(wsdLine("", `urn:uuid:${UUID}^http://192.168.1.60:80/wsd/x^fail`)));
+  assert.equal(down.state, "unreachable");
+  assert.match(down.reason, /192\.168\.1\.60:80/);
+  const noUuid = server.classifyPrinter(server.parseProbeLine("FOUND|WSD-1|False|3|0|0|none|:631|WSD^^^"));
+  assert.equal(noUuid.state, "unreachable");
+  assert.match(noUuid.reason, /UUID/);
+});
+
+test("WSD: جهاز آخر يردّ بعنوان يمكن الوصول إليه لا يُقبل بدل الطابعة", () => {
+  const other = "urn:uuid:00000000-0000-1000-8000-00183beab604^http://192.168.1.60:80/wsd/x^ok~urn:uuid:aaaa^http://192.168.1.25/onvif^ok";
+  const r = server.classifyPrinter(server.parseProbeLine(wsdLine("", other)));
+  assert.equal(r.state, "unreachable");
+  assert.match(r.reason, /لا يطابق معرّف الطابعة/);
+  // ردّ مطابق بين ردود أخرى يُختار هو وحده.
+  const mixed = server.classifyPrinter(server.parseProbeLine(wsdLine("", `${other}~urn:uuid:${UUID}^http://192.168.1.77:80/wsd/x^ok`)));
+  assert.equal(mixed.state, "ready");
+  assert.equal(mixed.target, "192.168.1.77:80");
+});
+
+test("TCP/IP وIPP: السطر القديم بلا حقل WSD يُحكم كما كان", () => {
+  const ipp = server.classifyPrinter(server.parseProbeLine("FOUND|WSD-21d4|False|3|0|0|fail|192.168.1.62:631|"));
+  assert.equal(ipp.state, "unreachable");
+  assert.match(ipp.reason, /192\.168\.1\.62:631/);
+  const tcp = server.classifyPrinter(server.parseProbeLine("FOUND|IP_192.0.2.10|False|3|0|0|ok|192.0.2.10:9100"));
+  assert.equal(tcp.state, "ready");
+  assert.equal(tcp.reachable, true);
+  const queued = server.classifyPrinter(server.parseProbeLine("FOUND|IP_192.0.2.10|False|3|0|2|ok|192.0.2.10:9100|"));
+  assert.match(queued.warning, /2 مهمة/);
 });
 
 test("الكاشير ونوع غير معتمد لا يُطبعان، والجملة تُطبع", () => {
