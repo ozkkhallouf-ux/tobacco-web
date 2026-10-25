@@ -290,7 +290,8 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
   // موعدها؛ فاتورة حُذفت أو خرجت من النطاق أو صارت غير مرحّلة تخرج من الطابور.
   async function retryDetectErrors() {
     const dueGuids = Object.keys(state.detectErrors)
-      .filter((g) => model.isGuid(g) && now() >= (Number(state.detectErrors[g].nextAt) || 0))
+      // خطأ فاتورة خارج التجربة المحصورة يبقى محفوظاً حتى رفع الحصر، فلا يُحذف بنتيجة «skip» (Codex P1).
+      .filter((g) => model.isGuid(g) && inScope(g) && now() >= (Number(state.detectErrors[g].nextAt) || 0))
       .slice(0, 50);
     for (const guid of dueGuids) {
       const [row] = await ameen.changedInvoices({ since: "1900-01-01T00:00:00", sinceGuid: "", dateFrom: cfg.archiveFrom, onlyGuid: guid });

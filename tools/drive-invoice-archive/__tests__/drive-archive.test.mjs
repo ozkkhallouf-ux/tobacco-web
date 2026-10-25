@@ -132,6 +132,29 @@ test("التجربة المحصورة: انقضاء التاريخ أثناء ع
   assert.ok(t.logs.some((l) => l.event === "pilot_expired"));
 });
 
+test("التجربة المحصورة: خطأ رصد لفاتورة خارجها يبقى في الطابور ويُؤرشف بعد رفع الحصر (Codex P1)", async () => {
+  const t = await setup({ mode: "dry-run", overrides: { archiveFrom: "2026-01-01" } });
+  const realRender = t.renderer.render;
+  t.renderer.render = async () => { throw Object.assign(new Error("عطل"), { code: "RENDER" }); };
+  t.ameen.add({ guid: G2, number: 41, date: "2026-01-05", createdAt: "2026-01-05T10:00:00" }); // خارج lookback
+  t.advance(300);
+  await t.cycle();
+  assert.deepEqual(Object.keys(t.store.state.detectErrors), [G2]);
+  t.renderer.render = realRender;
+  Object.assign(t.cfg, { pilotInvoiceGuids: [G1], pilotExpiresAt: "2026-10-25" });
+  t.restart();
+  t.advance(3700);
+  await t.cycle();
+  assert.deepEqual(Object.keys(t.store.state.detectErrors), [G2], "لا يُحذف أثناء الحصر");
+  assert.equal(t.store.jobs().length, 0);
+  Object.assign(t.cfg, { pilotInvoiceGuids: [], pilotExpiresAt: "" });
+  t.restart();
+  t.advance(60);
+  await t.cycle();
+  assert.deepEqual(t.store.jobs().map((j) => j.number), [41], "يُؤرشف بعد رفع الحصر");
+  assert.equal(Object.keys(t.store.state.detectErrors).length, 0);
+});
+
 test("التجربة المحصورة: فاتورة واحدة فقط تُرفع ويُرسل إشعارها، والمهام السابقة خارجها لا تُلمس، ورفع الحصر يعيد الباقي", async () => {
   const t = await setup({ mode: "dry-run" });
   t.ameen.add({ guid: G1, number: 1100 });
