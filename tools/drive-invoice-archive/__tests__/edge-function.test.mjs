@@ -33,38 +33,62 @@ async function loadHandler(env, fetchMock) {
 }
 
 function createBackend() {
-  const s = { items: new Map(), telegram: [], rpc: [], failRecord: false };
+  const s = { items: new Map(), telegram: [], rpc: [], failRecord: false, failRecordTimes: 0, recordCalls: 0,
+    telegramFail: 0, telegramStatus: 500, restDown: false, calls: 0 };
   const json = (status, body) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+
+  function telegramApi(u, init) {
+    if (s.telegramFail > 0) {
+      s.telegramFail--;
+      return json(s.telegramStatus, { ok: false, error_code: s.telegramStatus, description: "Too Many Requests: retry after 5" });
+    }
+    const entry = { method: u.pathname.split("/").pop(), token: u.pathname.split("/")[1] };
+    if (init.body instanceof FormData) {
+      for (const [k, v] of init.body.entries()) entry[k] = typeof v === "string" ? v : { name: v.name, size: v.size };
+    } else {
+      Object.assign(entry, JSON.parse(init.body));
+    }
+    s.telegram.push(entry);
+    return json(200, { ok: true, result: { message_id: 7000 + s.telegram.length } });
+  }
+
+  function recordNotification(init) {
+    s.recordCalls++;
+    if (s.failRecord) return json(500, { message: "boom" });
+    if (s.failRecordTimes > 0) { s.failRecordTimes--; return json(503, { message: "busy" }); }
+    const { p_item } = JSON.parse(init.body);
+    s.items.set(p_item.job_id, p_item);
+    s.rpc.push(p_item);
+    return json(200, null);
+  }
+
+  function ingestReport(init) {
+    const items = JSON.parse(init.body).p_report.items;
+    // نفس قاعدة upsert في Migration 22: message_id الأول لا يُكتب فوقه.
+    for (const it of items) {
+      const prev = s.items.get(it.job_id);
+      s.items.set(it.job_id, { ...it, telegram_message_id: (prev && prev.telegram_message_id) ?? it.telegram_message_id ?? null });
+    }
+    return json(200, { items: items.length, retry_job_ids: [] });
+  }
+
+  const rest = {
+    "/rest/v1/bot_config": () => json(200, [{ value: OWNER_CHAT }]),
+    "/rest/v1/document_archive_items": (init, u) => {
+      const it = s.items.get(/job_id=eq\.([0-9a-f]+)/.exec(u.search)[1]);
+      return json(200, it ? [{ telegram_message_id: it.telegram_message_id }] : []);
+    },
+    "/rest/v1/rpc/document_archive_record_notification": recordNotification,
+    "/rest/v1/rpc/document_archive_ingest_report": ingestReport,
+  };
+
   async function fetchMock(url, init = {}) {
     const u = new URL(url);
-    if (u.hostname === "api.telegram.org") {
-      const method = u.pathname.split("/").pop();
-      const entry = { method, token: u.pathname.split("/")[1] };
-      if (init.body instanceof FormData) {
-        for (const [k, v] of init.body.entries()) entry[k] = typeof v === "string" ? v : { name: v.name, size: v.size };
-      } else {
-        Object.assign(entry, JSON.parse(init.body));
-      }
-      s.telegram.push(entry);
-      return json(200, { ok: true, result: { message_id: 7000 + s.telegram.length } });
-    }
-    if (u.pathname === "/rest/v1/bot_config") return json(200, [{ value: OWNER_CHAT }]);
-    if (u.pathname === "/rest/v1/document_archive_items") {
-      const id = /job_id=eq\.([0-9a-f]+)/.exec(u.search)[1];
-      const it = s.items.get(id);
-      return json(200, it ? [{ telegram_message_id: it.telegram_message_id }] : []);
-    }
-    if (u.pathname === "/rest/v1/rpc/document_archive_record_notification") {
-      if (s.failRecord) return json(500, { message: "boom" });
-      const { p_item } = JSON.parse(init.body);
-      s.items.set(p_item.job_id, p_item);
-      s.rpc.push(p_item);
-      return json(200, null);
-    }
-    if (u.pathname === "/rest/v1/rpc/document_archive_ingest_report") {
-      return json(200, { items: JSON.parse(init.body).p_report.items.length, retry_job_ids: [] });
-    }
-    return json(404, {});
+    s.calls++;
+    if (u.hostname === "api.telegram.org") return telegramApi(u, init);
+    if (s.restDown) { const e = new TypeError("fetch failed"); e.code = "ECONNRESET"; throw e; }
+    const route = rest[u.pathname];
+    return route ? route(init, u) : json(404, {});
   }
   return { s, fetchMock };
 }
@@ -139,4 +163,143 @@ test("Edge: فشل تسجيل message_id لا يُفشل الإشعار، وال
     body: JSON.stringify({ host: "OZK2026", mode: "live", drive_state: "connected", items: [] }),
   }));
   assert.equal(report.status, 200);
+});
+
+// ─── سيناريوهات تدقيق الجاهزية (بيانات تجريبية فقط، بلا شبكة) ───
+const SKIP = !stripTypesSupported() && "Node < 22";
+
+function captureConsole() {
+  const lines = [];
+  const orig = { error: console.error, log: console.log, warn: console.warn };
+  for (const k of Object.keys(orig)) console[k] = (...a) => lines.push(a.map(String).join(" "));
+  return { lines, restore: () => Object.assign(console, orig) };
+}
+
+test("Edge: فشل تيليغرام (429/500) ⇒ 502 بلا تسجيل، وإعادة المحاولة ترسل مرة واحدة فقط", { skip: SKIP }, async () => {
+  const b = createBackend();
+  const handler = await loadHandler(ENV, b.fetchMock);
+  b.s.telegramFail = 1;
+  b.s.telegramStatus = 429;
+  const r1 = await handler(notifyRequest(FIELDS));
+  assert.equal(r1.status, 502);
+  assert.equal((await r1.json()).error, "telegram_sendDocument_429");
+  assert.equal(b.s.recordCalls, 0, "لا تسجيل لإشعار لم يصل");
+  b.s.telegramFail = 1;
+  b.s.telegramStatus = 500;
+  assert.equal((await handler(notifyRequest(FIELDS))).status, 502);
+  const ok = await (await handler(notifyRequest(FIELDS))).json();
+  assert.equal(ok.duplicate, false);
+  assert.equal(ok.recorded, true);
+  const again = await (await handler(notifyRequest(FIELDS))).json();
+  assert.equal(again.duplicate, true);
+  assert.equal(b.s.telegram.length, 1, "مستند واحد وصل للمالك");
+});
+
+test("Edge: فشل عابر في تسجيل الإشعار يُعاد داخل الدالة، فإعادة العامل لا تكرر الإرسال", { skip: SKIP }, async () => {
+  const b = createBackend();
+  const handler = await loadHandler(ENV, b.fetchMock);
+  b.s.failRecordTimes = 2;
+  const body = await (await handler(notifyRequest(FIELDS))).json();
+  assert.equal(body.recorded, true);
+  assert.equal(b.s.recordCalls, 3);
+  assert.equal((await (await handler(notifyRequest(FIELDS))).json()).duplicate, true);
+  assert.equal(b.s.telegram.length, 1);
+});
+
+test("Edge: فشل التسجيل كلياً ⇒ recorded=false، وتقرير العامل يسجّل message_id فيمنع الإرسال الثاني", { skip: SKIP }, async () => {
+  const b = createBackend();
+  b.s.failRecord = true;
+  const handler = await loadHandler(ENV, b.fetchMock);
+  const first = await (await handler(notifyRequest(FIELDS))).json();
+  assert.equal(first.recorded, false);
+  assert.equal(b.s.recordCalls, 3, "ثلاث محاولات ثم استسلام");
+  const report = await handler(new Request("https://x/functions/v1/document-archive-notify/report", {
+    method: "POST", headers: { "x-ozk-archive-secret": SECRET, "Content-Type": "application/json" },
+    body: JSON.stringify({ host: "OZK2026", mode: "live", items: [{ job_id: FIELDS.job_id, status: "notified", telegram_message_id: first.message_id }] }),
+  }));
+  assert.equal(report.status, 200);
+  const again = await (await handler(notifyRequest(FIELDS))).json();
+  assert.equal(again.duplicate, true);
+  assert.equal(again.message_id, first.message_id);
+  assert.equal(b.s.telegram.length, 1);
+});
+
+test("Edge: PDF تالف أو مقطوع أو فارغ أو أكبر من 20MB مرفوض قبل أي إرسال", { skip: SKIP }, async () => {
+  const b = createBackend();
+  const handler = await loadHandler(ENV, b.fetchMock);
+  const truncated = Buffer.from("%PDF-1.4\n1 0 obj<</Type /Page>>endobj\n");
+  assert.equal((await (await handler(notifyRequest(FIELDS, { file: truncated }))).json()).error, "file_type");
+  const big = Buffer.alloc(20 * 1024 * 1024 + 1, 0x20);
+  big.write("%PDF-1.4\n", 0);
+  big.write("%%EOF\n", big.length - 6);
+  const rBig = await handler(notifyRequest(FIELDS, { file: big }));
+  assert.equal(rBig.status, 413);
+  assert.equal((await rBig.json()).error, "file_size");
+  const rEmpty = await handler(notifyRequest(FIELDS, { file: Buffer.alloc(0) }));
+  assert.equal(rEmpty.status, 413);
+  const rNoFile = await handler(notifyRequest(FIELDS, { file: null }));
+  assert.equal((await rNoFile.json()).error, "file");
+  // ملف صالح بفراغات بعد %%EOF مقبول
+  const trailing = Buffer.concat([PDF, Buffer.from("\n\n  ")]);
+  assert.equal((await handler(notifyRequest(FIELDS, { file: trailing }))).status, 200);
+  assert.equal(b.s.telegram.length, 1);
+});
+
+test("Edge: طلب بلا سرّ أو بسرّ خاطئ يُرفض قبل قراءة الجسم وبلا أي اتصال خارجي، ومسار مجهول 404", { skip: SKIP }, async () => {
+  const b = createBackend();
+  const handler = await loadHandler(ENV, b.fetchMock);
+  const noHeader = new Request("https://x/functions/v1/document-archive-notify/notify", { method: "POST", body: "x".repeat(1000) });
+  assert.equal((await handler(noHeader)).status, 401);
+  assert.equal((await handler(notifyRequest(FIELDS, { secret: SECRET.slice(0, -1) }))).status, 401);
+  assert.equal((await handler(notifyRequest(FIELDS, { secret: `${SECRET}z` }))).status, 401);
+  const report = new Request("https://x/functions/v1/document-archive-notify/report", { method: "POST", body: "{}" });
+  assert.equal((await handler(report)).status, 401);
+  assert.equal(b.s.calls, 0, "لا Supabase ولا تيليغرام لطلب غير مخوّل");
+  const unknown = await handler(new Request("https://x/functions/v1/document-archive-notify/admin", {
+    method: "POST", headers: { "x-ozk-archive-secret": SECRET }, body: "{}",
+  }));
+  assert.equal(unknown.status, 404);
+});
+
+test("Edge: انقطاع Supabase ⇒ 502 برمز قصير بلا إرسال، والسجلات بلا رابط Drive ولا بيانات فاتورة ولا أسرار", { skip: SKIP }, async () => {
+  const b = createBackend();
+  const handler = await loadHandler(ENV, b.fetchMock);
+  b.s.restDown = true;
+  const cap = captureConsole();
+  let res;
+  try {
+    res = await handler(notifyRequest(FIELDS));
+  } finally {
+    cap.restore();
+  }
+  assert.equal(res.status, 502);
+  const body = await res.text();
+  assert.equal(b.s.telegram.length, 0);
+  // فشل تيليغرام برسالة تحمل التوكن: الرمز وحده في السجل والرد.
+  b.s.restDown = false;
+  b.s.telegramFail = 1;
+  b.s.telegramStatus = 400;
+  const cap2 = captureConsole();
+  let res2;
+  try {
+    res2 = await handler(notifyRequest(FIELDS));
+  } finally {
+    cap2.restore();
+  }
+  const body2 = await res2.text();
+  const all = [...cap.lines, ...cap2.lines, body, body2].join("\n");
+  assert.ok(cap.lines.length + cap2.lines.length >= 1, "يُسجَّل رمز الخطأ");
+  for (const secretish of [TOKEN, TOKEN.split(":")[1], SECRET, "service-key", FIELDS.drive_link, FIELDS.drive_file_id, FIELDS.customer_name, FIELDS.amount, OWNER_CHAT]) {
+    assert.ok(!all.includes(secretish), `تسرّب في السجل/الرد: ${secretish.slice(0, 6)}…`);
+  }
+});
+
+test("Edge: /report يمرّر الدفعة إلى RPC بمفتاح الخدمة، وJSON غير صالح 400", { skip: SKIP }, async () => {
+  const b = createBackend();
+  const handler = await loadHandler(ENV, b.fetchMock);
+  const bad = await handler(new Request("https://x/functions/v1/document-archive-notify/report", {
+    method: "POST", headers: { "x-ozk-archive-secret": SECRET, "Content-Type": "application/json" }, body: "{not json",
+  }));
+  assert.equal(bad.status, 400);
+  assert.equal(b.s.telegram.length, 0);
 });

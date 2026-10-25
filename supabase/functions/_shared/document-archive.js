@@ -48,9 +48,16 @@ export function isDriveViewLink(value) {
   return DRIVE_VIEW_RE.test(String(value ?? ""));
 }
 
+// ملف PDF كامل: يبدأ بـ«%PDF-» وينتهي بعلامة «%%EOF» ضمن آخر 1024 بايت (المعيار
+// يسمح بفراغات بعدها). ملف مقطوع أثناء النقل أو الكتابة يفقد العلامة فيُرفض قبل الإرسال.
+const PDF_EOF = [0x25, 0x25, 0x45, 0x4f, 0x46];
 export function isPdfBytes(bytes) {
-  return Boolean(bytes && bytes.length >= 5
-    && bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46 && bytes[4] === 0x2d);
+  if (!(bytes && bytes.length >= 10
+    && bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46 && bytes[4] === 0x2d)) return false;
+  for (let i = bytes.length - PDF_EOF.length; i >= Math.max(5, bytes.length - 1024); i--) {
+    if (PDF_EOF.every((b, j) => bytes[i + j] === b)) return true;
+  }
+  return false;
 }
 
 const text = (value) => String(value ?? "").trim();
