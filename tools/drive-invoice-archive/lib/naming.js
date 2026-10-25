@@ -54,12 +54,11 @@ function folderPlan(job) {
   ];
 }
 
-// «فاتورة جملة - رقم 1234 - 2026-10-24 - 1a2b3c4d.pdf»، والنسخة المعدّلة « - نسخة 2».
+// «فاتورة جملة - رقم 1234 - 2026-10-24 - 1a2b3c4d - V1.pdf»، والتعديلات V2 وV3… بجانبها.
 function fileName(job) {
   const info = docTypeInfo(job.docType);
   const number = safeSegment(job.number, 30) || "بلا-رقم";
-  const version = Number(job.version) > 1 ? ` - نسخة ${Number(job.version)}` : "";
-  return `${info.label} - رقم ${number} - ${job.date} - ${shortGuid(job.sourceGuid)}${version}.pdf`;
+  return `${info.label} - رقم ${number} - ${job.date} - ${shortGuid(job.sourceGuid)} - V${Number(job.version) || 1}.pdf`;
 }
 
 module.exports = { ROOT_FOLDER_NAME, DOC_TYPES, safeSegment, shortGuid, customerFolderName, folderPlan, fileName };
