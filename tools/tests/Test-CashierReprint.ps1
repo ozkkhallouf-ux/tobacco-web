@@ -10,6 +10,7 @@ if (-not (Test-Path -LiteralPath $toolDir)) { $toolDir = Join-Path $repoRoot "to
 
 # على غير Windows لا يوجد COMPUTERNAME، والأداة تسجّله وترسله في الأمر البعيد.
 if ([string]::IsNullOrWhiteSpace($env:COMPUTERNAME)) { $env:COMPUTERNAME = "TESTHOST" }
+if ([string]::IsNullOrWhiteSpace($env:SystemRoot)) { $env:SystemRoot = [IO.Path]::GetTempPath() }
 
 $script:pass = 0
 $script:fail = 0
@@ -281,6 +282,114 @@ try {
     Assert "عملية بملفات: المهلة توقف العملية" ($run.TimedOut -and $run.ExitCode -eq -1 -and $clock.Elapsed.TotalSeconds -lt 20)
     Assert "عملية بملفات: لا تبقى ملفات مؤقتة" (@(Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) -Filter "ozk-cashier-*" -ErrorAction SilentlyContinue).Count -eq 0)
 
+    # ── حساب خدمة محدود (C0): الإعداد ومصدر اتصال الجسر ─────────────────────────
+    function New-RawConfig([hashtable]$Extra) {
+        $o = [ordered]@{ bridgeScriptPath = $fakeBridge; expectedBridgeSha256 = $fakeHash; printerName = "XPRINTER XP-T80Q 80MM" }
+        foreach ($k in $Extra.Keys) { $o[$k] = $Extra[$k] }
+        $path = Join-Path $tempRoot ("raw-" + [guid]::NewGuid().ToString("N") + ".json")
+        [IO.File]::WriteAllText($path, (([pscustomobject]$o) | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
+        return $path
+    }
+    $legacy = New-TestConfig
+    Assert "إعداد قديم بلا مفاتيح جديدة ⇒ user-env وبلا فرض (سلوك المدير الحالي كما هو)" ($legacy.bridgeSqlSource -eq "user-env" -and $legacy.enforceProtectedPaths -eq $false)
+    $svc = Read-CashierReprintConfig (New-RawConfig @{ bridgeSqlSource = "tool-secret"; enforceProtectedPaths = $true })
+    Assert "إعداد حساب الخدمة يُقرأ: tool-secret مع فرض الحماية" ($svc.bridgeSqlSource -eq "tool-secret" -and $svc.enforceProtectedPaths)
+    Assert "bridgeSqlSource بقيمة مجهولة مرفوض" (Throws { Read-CashierReprintConfig (New-RawConfig @{ bridgeSqlSource = "plaintext" }) })
+    Assert "enforceProtectedPaths نصّي مرفوض (لا تفسير مرن)" (Throws { Read-CashierReprintConfig (New-RawConfig @{ enforceProtectedPaths = "yes" }) })
+    Assert "مسار جسر نسبي مرفوض" (Throws { Read-CashierReprintConfig (New-RawConfig @{ bridgeScriptPath = "ozk-print-bridge.ps1" }) })
+    Assert "مسار جسر بمتغيّر غير معرَّف لهذا الحساب مرفوض (لا يُفكّ لمسار خاطئ)" (Throws { Read-CashierReprintConfig (New-RawConfig @{ bridgeScriptPath = "%OZK_UNDEFINED_TEST_VAR_9F%\ozk-print-bridge.ps1" }) })
+    Assert "مسار جسر شبكي UNC مرفوض" (Throws { Read-CashierReprintConfig (New-RawConfig @{ bridgeScriptPath = "\\server\share\ozk-print-bridge.ps1" }) })
+    Assert "مسار جسر ليس .ps1 مرفوض" (Throws { Read-CashierReprintConfig (New-RawConfig @{ bridgeScriptPath = (Join-Path $tempRoot "bridge.exe") }) })
+    $env:OZK_CASHIER_TEST_DIR = $tempRoot
+    $expanded = Read-CashierReprintConfig (New-RawConfig @{ bridgeScriptPath = "%OZK_CASHIER_TEST_DIR%" + [IO.Path]::DirectorySeparatorChar + "fake-bridge.ps1" })
+    Remove-Item Env:\OZK_CASHIER_TEST_DIR
+    Assert "مسار بمتغيّر معرَّف (%LOCALAPPDATA% للتثبيت الحالي) ما زال يُفكّ ويعمل" ($expanded.bridgeScriptPath -eq $fakeBridge)
+    $serviceExample = Get-Content -Raw -LiteralPath (Join-Path $toolDir "config.service.example.json") | ConvertFrom-Json
+    Assert "مثال حساب الخدمة: مسار مطلق في ProgramData وtool-secret وفرض الحماية" ($serviceExample.bridgeScriptPath -like "C:\ProgramData\OZK\CashierReprint\*" -and $serviceExample.bridgeSqlSource -eq "tool-secret" -and $serviceExample.enforceProtectedPaths -eq $true)
+
+    $cs = Get-CashierBridgeSqlConnectionString "Data Source=OZK2026,1433;Initial Catalog=AmnDb002;User ID=ozk_print_reader;Password=x"
+    Assert "سلسلة الجسر من سرّ الأداة تُفرض ReadOnly" ($cs -match "ReadOnly" -and $cs -match "ozk_print_reader")
+    Assert "سلسلة الجسر بحساب sa مرفوضة" (Throws { Get-CashierBridgeSqlConnectionString "Data Source=x;User ID=sa;Password=x" })
+    Assert "سلسلة الجسر بلا User Id مرفوضة (لا Windows auth لحساب الخدمة)" (Throws { Get-CashierBridgeSqlConnectionString "Data Source=x;Integrated Security=true" })
+    Assert "سرّ فارغ مرفوض" (Throws { Get-CashierBridgeSqlConnectionString "" })
+
+    $info = New-CashierBridgeStartInfo $legacy 501 "2026-10-24"
+    Assert "المدير الحالي: لا متغيّر اتصال يُضاف للجسر (يرث بيئته كما كان)" ($info.EnvironmentVariables["AMEEN_SQL_CONNECTION_STRING"] -eq $env:AMEEN_SQL_CONNECTION_STRING)
+    $info = New-CashierBridgeStartInfo $svc 501 "2026-10-24" "Data Source=x;User ID=ozk_print_reader;Password=SECRET-TEST"
+    Assert "حساب الخدمة: المتغيّر يُمرَّر للعملية الفرعية وحدها" ($info.EnvironmentVariables["AMEEN_SQL_CONNECTION_STRING"] -match "SECRET-TEST")
+    Assert "السرّ لا يظهر في وسائط سطر الأوامر" ($info.Arguments -notmatch "SECRET-TEST" -and $info.Arguments -notmatch "Password")
+    Assert "سرّ العملية الفرعية لا يتسرّب لبيئة الأداة نفسها" ($env:AMEEN_SQL_CONNECTION_STRING -notmatch "SECRET-TEST")
+
+    $script:runs.Clear()
+    $sqlSeen = New-Object System.Collections.Generic.List[string]
+    $captureRunner = { param($c, $n, $d, $s) $sqlSeen.Add([string]$s); [pscustomobject]@{ ExitCode = 0; Output = $okOutput; TimedOut = $false } }.GetNewClosure()
+    $out = Invoke-CashierReprint -Config $svc -Root (New-Root) -Number 501 -RequestId ([guid]::NewGuid().ToString()) -Lookup { param($n) @(New-Row "a1" 501 "2026-10-24") } `
+        -BridgeCheck { param($c, $r) "hash" } -BridgeSql { param($c) "CS-FROM-SECRET" } -Runner $captureRunner -JobWatcher { param($c, $j) "spooler_completed" }
+    Assert "tool-secret: سلسلة السرّ تصل إلى مشغّل الجسر" ($out.Status -eq "sent" -and $sqlSeen[0] -eq "CS-FROM-SECRET")
+    $sqlSeen.Clear()
+    $out = Invoke-CashierReprint -Config $svc -Root (New-Root) -Number 501 -RequestId ([guid]::NewGuid().ToString()) -Lookup { param($n) @(New-Row "a1" 501 "2026-10-24") } `
+        -BridgeCheck { param($c, $r) "hash" } -BridgeSql { param($c) throw (New-Object System.UnauthorizedAccessException "Access to the path is denied") } -Runner $captureRunner -JobWatcher { param($c, $j) "spooler_completed" }
+    Assert "سرّ غير مقروء لحساب الخدمة (رفض وصول) ⇒ blocked بلا تشغيل الجسر" ($out.Status -eq "blocked" -and $out.Details.reason -eq "bridge_sql_unavailable" -and $sqlSeen.Count -eq 0)
+    $out = Invoke-CashierReprint -Config $svc -Root (New-Root) -Number 501 -RequestId ([guid]::NewGuid().ToString()) `
+        -Lookup { param($n) throw (New-Object System.UnauthorizedAccessException "Access to the path is denied") } -BridgeCheck { param($c, $r) "hash" } -Runner $captureRunner -JobWatcher { param($c, $j) "spooler_completed" }
+    Assert "رفض وصول لسرّ القراءة عند البحث ⇒ connection_failed بلا طباعة" ($out.Status -eq "connection_failed" -and $sqlSeen.Count -eq 0)
+    $out = Invoke-Test $new 501 -Config $legacy
+    Assert "المدير الحالي: الطباعة كما كانت (لا سلسلة تُمرَّر)" ($out.Status -eq "sent")
+
+    # ── الملفات المنفَّذة: لا كتابة من مستخدم عادي ────────────────────────────────
+    $trusted = @("S-1-5-18", "S-1-5-32-544", "S-1-5-21-1-2-3-1001")
+    Assert "Users بصلاحية كتابة ⇒ خطر" (Test-CashierWriteRiskAce "S-1-5-32-545" 0x116 "Allow" $false $trusted)
+    Assert "Users بقراءة وتشغيل فقط ⇒ سليم" (-not (Test-CashierWriteRiskAce "S-1-5-32-545" 0x1200a9 "Allow" $false $trusted))
+    Assert "Everyone بـGENERIC_WRITE ⇒ خطر" (Test-CashierWriteRiskAce "S-1-1-0" 0x40000000 "Allow" $false $trusted)
+    Assert "Authenticated Users بإنشاء ملفات في مجلد ⇒ خطر" (Test-CashierWriteRiskAce "S-1-5-11" 0x2 "Allow" $false $trusted)
+    Assert "حساب الخدمة بحذف ملف ⇒ خطر (ليس موثوقاً على البرنامج)" (Test-CashierWriteRiskAce "S-1-5-21-9-9-9-1005" 0x10000 "Allow" $false $trusted)
+    Assert "حساب الخدمة بتغيير الصلاحيات ⇒ خطر" (Test-CashierWriteRiskAce "S-1-5-21-9-9-9-1005" 0x40000 "Allow" $false $trusted)
+    Assert "المدراء والنظام وصاحب التشغيل ⇒ سليم" (-not (Test-CashierWriteRiskAce "S-1-5-32-544" 0x1f01ff "Allow" $false $trusted) -and -not (Test-CashierWriteRiskAce "S-1-5-21-1-2-3-1001" 0x1f01ff "Allow" $false $trusted))
+    Assert "Deny لا يُعدّ خطراً" (-not (Test-CashierWriteRiskAce "S-1-5-32-545" 0x116 "Deny" $false $trusted))
+    Assert "صلاحية للوراثة فقط لا تخص الكائن نفسه" (-not (Test-CashierWriteRiskAce "S-1-5-32-545" 0x116 "Allow" $true $trusted))
+
+    function New-FakeAcl([string]$Owner, [object[]]$Rules) {
+        $o = [pscustomobject]@{ Owner = $Owner; Rules = $Rules }
+        $o | Add-Member -MemberType ScriptMethod -Name GetAccessRules -Value { param($a, $b, $c) return $this.Rules }
+        return $o
+    }
+    function New-FakeRule([string]$Sid, [int64]$Rights, [string]$Type = "Allow", [int]$Prop = 0) {
+        return [pscustomobject]@{ IdentityReference = [pscustomobject]@{ Value = $Sid } | Add-Member -MemberType ScriptMethod -Name Translate -Value { param($t) throw "no" } -PassThru; FileSystemRights = $Rights; AccessControlType = $Type; PropagationFlags = $Prop }
+    }
+    $acls = @{
+        "app" = (New-FakeAcl "S-1-5-32-544" @((New-FakeRule "S-1-5-18" 0x1f01ff), (New-FakeRule "S-1-5-32-545" 0x1200a9)))
+        "bad" = (New-FakeAcl "S-1-5-32-544" @((New-FakeRule "S-1-5-32-545" 0x6)))
+        "own" = (New-FakeAcl "S-1-5-21-9-9-9-1005" @((New-FakeRule "S-1-5-18" 0x1f01ff)))
+    }
+    $get = { param($p) if ($p -eq "missing") { throw "denied" }; return $acls[$p] }.GetNewClosure()
+    Assert "مسار محمي ⇒ بلا أخطار" (@(Get-CashierPathWriteRisks @("app") $trusted $get).Count -eq 0)
+    $r = @(Get-CashierPathWriteRisks @("app", "bad") $trusted $get)
+    Assert "مجلد يسمح لـUsers بإنشاء ملفات ⇒ يُبلَّغ باسمه" ($r.Count -eq 1 -and $r[0] -like "bad:*S-1-5-32-545*")
+    Assert "مالك غير موثوق ⇒ يُبلَّغ (يستطيع تغيير الصلاحيات)" (@(Get-CashierPathWriteRisks @("own") $trusted $get) -like "own:*").Count -eq 1
+    Assert "تعذّر قراءة الصلاحيات ⇒ يُعدّ خطراً لا سليماً" (@(Get-CashierPathWriteRisks @("missing") $trusted $get).Count -eq 1)
+
+    $protRoot = New-Root
+    [void](New-Item -ItemType Directory -Path (Join-Path $protRoot "app") -Force)
+    Set-Content -LiteralPath (Join-Path (Join-Path $protRoot "app") "cashier-reprint.ps1") -Value "x"
+    Set-Content -LiteralPath (Join-Path $protRoot "config.json") -Value "{}"
+    foreach ($sub in @("logs", "requests", "locks")) { [void](New-Item -ItemType Directory -Path (Join-Path $protRoot $sub) -Force) }
+    $bridgeDir = Join-Path $tempRoot ("bridge-" + [guid]::NewGuid().ToString("N"))
+    [void](New-Item -ItemType Directory -Path (Join-Path $bridgeDir "ozk-print-bridge") -Force)
+    $bridgeCopy = Join-Path $bridgeDir "ozk-print-bridge.ps1"
+    Copy-Item -LiteralPath $fakeBridge -Destination $bridgeCopy
+    $renderer = Join-Path (Join-Path $bridgeDir "ozk-print-bridge") "renderer.ps1"
+    Set-Content -LiteralPath $renderer -Value "x"
+    $listed = @(Get-CashierProtectedPaths (New-TestConfig $bridgeCopy $fakeHash) $protRoot)
+    Assert "المسارات المحمية تشمل البرنامج والإعداد والجسر وملفات كوده" (($listed -contains (Join-Path (Join-Path $protRoot "app") "cashier-reprint.ps1")) -and ($listed -contains (Join-Path $protRoot "config.json")) -and ($listed -contains $bridgeCopy) -and ($listed -contains $renderer) -and ($listed -contains $bridgeDir))
+    Assert "المسارات المحمية لا تشمل مجلدات البيانات (logs وrequests وlocks)" (-not ($listed | Where-Object { $_ -like "*logs*" -or $_ -like "*requests*" -or $_ -like "*locks*" }))
+
+    $script:runs.Clear()
+    $svcFake = Read-CashierReprintConfig (New-RawConfig @{ enforceProtectedPaths = $true })
+    $out = Invoke-CashierReprint -Config $svcFake -Root $protRoot -Number 501 -RequestId ([guid]::NewGuid().ToString()) -Lookup { param($n) @(New-Row "a1" 501 "2026-10-24") } `
+        -BridgeCheck { param($c, $r) $bad = { param($p) return (New-FakeAcl "S-1-5-32-544" @((New-FakeRule "S-1-5-32-545" 0x6))) }; [void](Assert-CashierBridgePinned $c); Assert-CashierProtectedPaths $c $r $bad } `
+        -Runner (New-Runner) -JobWatcher { param($c, $j) "spooler_completed" }
+    Assert "فرض الحماية مع ملف قابل للكتابة من Users ⇒ blocked بلا طباعة" ($out.Status -eq "blocked" -and $script:runs.Count -eq 0)
+
     # ── تشغيل حقيقي لسكربت جسر وهمي (Windows فقط) ──────────────────────────────
     if ($env:OS -eq "Windows_NT") {
         $argsFile = Join-Path $tempRoot "bridge-args.txt"
@@ -295,6 +404,40 @@ try {
         $seen = (Get-Content -LiteralPath $argsFile -Raw).Trim()
         Assert "جسر حقيقي: الوسائط PrintInvoice|Retail|الرقم|التاريخ|XPRINTER|تأكيد" ($seen -eq "PrintInvoice|Retail|501|2026-10-24|XPRINTER XP-T80Q 80MM|True")
         Assert "جسر حقيقي: النتيجة printed برقم المهمة" ($out.Status -eq "sent" -and $out.Details.jobId -eq 91)
+
+        # الجسر الحقيقي يقرأ متغيّر User أولاً ثم Process: الوهمي يحاكي القراءة نفسها.
+        $envFile = Join-Path $tempRoot "bridge-env.txt"
+        $bridge3 = Join-Path $tempRoot "fake-bridge-3.ps1"
+        $body3 = 'param([string]$Mode,[string]$InvoiceType,[int]$InvoiceNumber,[string]$InvoiceDate,[string]$PrinterName,[switch]$ConfirmPhysicalPrint)' + "`r`n" +
+            ('Set-Content -LiteralPath "{0}" -Value ([string][Environment]::GetEnvironmentVariable("AMEEN_SQL_CONNECTION_STRING", "Process"))' -f $envFile) + "`r`n" +
+            '[pscustomobject]@{ Event = "manual_reprint_submitted"; JobId = 92 } | Format-List'
+        [IO.File]::WriteAllText($bridge3, $body3, (New-Object Text.UTF8Encoding($true)))
+        $cfg3 = New-TestConfig $bridge3 (Get-CashierFileSha256 $bridge3)
+        $out = Invoke-CashierReprint -Config $cfg3 -Root (New-Root) -Number 501 -RequestId ([guid]::NewGuid().ToString()) `
+            -Lookup { param($n) return @(New-Row "a1" 501 "2026-10-24") } -BridgeSql { param($c) "Data Source=x;User ID=ozk_print_reader;Password=CHILD-ONLY" } `
+            -Runner { param($c, $n, $d, $s) Invoke-CashierBridgeProcess $c $n $d $s } -JobWatcher { param($c, $j) "spooler_completed" }
+        Assert "جسر حقيقي: حساب الخدمة يستلم الاتصال متغيّر Process" ($out.Status -eq "sent" -and (Get-Content -LiteralPath $envFile -Raw) -match "CHILD-ONLY")
+        Assert "جسر حقيقي: المتغيّر لا يبقى في بيئة الأداة" ($env:AMEEN_SQL_CONNECTION_STRING -notmatch "CHILD-ONLY")
+
+        # صلاحيات حقيقية: ملف محمي سليم، وإضافة كتابة لـUsers تُكتشف.
+        $aclDir = Join-Path $tempRoot "acl-real"
+        [void](New-Item -ItemType Directory -Path $aclDir -Force)
+        $aclFile = Join-Path $aclDir "script.ps1"
+        Set-Content -LiteralPath $aclFile -Value "x"
+        $me = [Security.Principal.WindowsIdentity]::GetCurrent().User
+        $acl = New-Object Security.AccessControl.FileSecurity
+        $acl.SetAccessRuleProtection($true, $false)
+        $acl.SetOwner($me)
+        foreach ($sid in @("S-1-5-18", "S-1-5-32-544", $me.Value)) {
+            $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier $sid), "FullControl", "Allow")))
+        }
+        $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier "S-1-5-32-545"), "ReadAndExecute", "Allow")))
+        Set-Acl -LiteralPath $aclFile -AclObject $acl
+        Assert "صلاحيات حقيقية: ملف محمي ⇒ بلا أخطار" (@(Get-CashierPathWriteRisks @($aclFile)).Count -eq 0)
+        $acl = Get-Acl -LiteralPath $aclFile
+        $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier "S-1-5-32-545"), "Modify", "Allow")))
+        Set-Acl -LiteralPath $aclFile -AclObject $acl
+        Assert "صلاحيات حقيقية: Users بـModify على سكربت ⇒ خطر يُكتشف" (@(Get-CashierPathWriteRisks @($aclFile)).Count -ge 1)
     } else {
         Write-Host "SKIP تشغيل الجسر الوهمي الحقيقي (يحتاج Windows)"
     }
