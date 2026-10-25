@@ -162,7 +162,7 @@ async function openApp({ session = "owner", subscribed = true, permission = "gra
       get: () => value,
       set: (next) => {
         value = next;
-        if (value) value.webPush = { ...(value.webPush || {}), detachNonOwnerSessions: window.__setDetachNonOwner === true };
+        if (value) value.webPush = { ...value.webPush, detachNonOwnerSessions: window.__setDetachNonOwner === true };
       }
     });
   });
