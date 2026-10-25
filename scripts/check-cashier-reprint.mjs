@@ -58,6 +58,15 @@ assert.ok(!JSON.stringify(service).match(/password|pwd|connectionstring/i), 'ل�
 assert.equal((lib.match(/EnvironmentVariables\[/g) || []).length, 1, 'متغيّر بيئة واحد فقط يُضبط للجسر');
 assert.match(lib, /\$info\.EnvironmentVariables\["AMEEN_SQL_CONNECTION_STRING"\] = \$SqlConnectionString/, 'المتغيّر للعملية الفرعية وحدها');
 assert.doesNotMatch(lib, /SetEnvironmentVariable/, 'لا كتابة لمتغيرات بيئة الجهاز أو المستخدم');
+
+// الطابعة والطابور عبر winspool: WMI/CIM يرفض دخول الشبكة (ssh) لحساب غير مدير.
+const cli = code(read('cashier-reprint.ps1'));
+for (const [name, body] of [['cashier-reprint-lib.ps1', lib], ['cashier-reprint.ps1', cli]]) {
+  assert.doesNotMatch(body, /Get-PrintJob|Get-Printer\b|CimInstance|CimSession|Get-WmiObject/i, `${name}: لا WMI/CIM لفحص الطابعة أو الطابور`);
+}
+assert.match(lib, /DllImport\("winspool\.drv"/, 'الطابور عبر winspool مباشرة');
+assert.match(lib, /if \(error == 87\) return -1;/, 'مهمة غادرت الطابور تُعرف بـERROR_INVALID_PARAMETER');
+assert.match(cli, /Get-CashierPrinterInfo \$config\.printerName/, 'فحص Health للطابعة عبر winspool');
 assert.doesNotMatch(lib, /\$arguments[^\n]*SqlConnectionString/, 'السرّ لا يدخل وسائط سطر الأوامر');
 assert.match(lib, /Assert-CashierBridgeReady \$c \$r/, 'شرط الطباعة الافتراضي يشمل فحص الحماية حين يُفرض');
 
