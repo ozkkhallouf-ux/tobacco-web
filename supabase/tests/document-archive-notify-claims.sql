@@ -126,6 +126,51 @@ select public.document_archive_ingest_report(jsonb_build_object('host', 'OZK2026
 select pg_temp.ok(pg_temp.claim(repeat('f', 32)) ->> 'message_id' = '7006', 'worker report message_id returned for a stuck claim');
 select pg_temp.ok(pg_temp.state(repeat('f', 32)) = 'sent', 'worker report resolves a stuck sending claim to sent');
 
+-- ── ٥ب) تنبيه المالك عند «غير محسوم» ──
+-- قبل وجود notify_telegram (أعلاه): الانتقال إلى unknown نجح بلا تنبيه ولا خطأ.
+select pg_temp.ok((select alerted_at is null from public.document_archive_notify_claims where job_id = repeat('c', 32)), 'no notify_telegram: unknown still recorded, no alert, no error');
+reset role;
+create table public.test_alerts (event_type text, message text, dedupe_key text, dedupe_minutes int);
+grant select on public.test_alerts to service_role;
+create function public.notify_telegram(p_event_type text, p_message text, p_dedupe_key text default null,
+  p_dedupe_minutes int default 60, p_reply_markup jsonb default null) returns void language plpgsql as $$
+begin
+  if current_setting('test.alerts_fail', true) = 'on' then raise exception 'outbox down'; end if;
+  if p_dedupe_key is not null and exists (select 1 from public.test_alerts where dedupe_key = p_dedupe_key) then return; end if;
+  insert into public.test_alerts values (p_event_type, p_message, p_dedupe_key, p_dedupe_minutes);
+end $$;
+set role service_role;
+
+insert into t values ('g', public.document_archive_claim_notification(repeat('a', 31) || '1', 300, 'فاتورة جملة رقم 601 — 2026-10-25 — V1'));
+select pg_temp.ok((select count(*) from public.test_alerts) = 0, 'claim alone sends no alert');
+select pg_temp.ok((public.document_archive_finish_notification(repeat('a', 31) || '1', (select (v ->> 'token')::uuid from t where k = 'g'), 'unknown', null, 'telegram_sendDocument_network') ->> 'ok')::boolean, 'finish unknown with outbox');
+select pg_temp.ok((select count(*) from public.test_alerts) = 1, 'unknown raises exactly one owner alert');
+select pg_temp.ok((select event_type = 'document_archive_unknown' and dedupe_key = 'document-archive-unknown:' || repeat('a', 31) || '1' and dedupe_minutes = 1440
+  from public.test_alerts), 'alert event, per-job dedupe key, 24h window');
+select pg_temp.ok((select message like '%إرسال غير محسوم%' and message like '%فاتورة جملة رقم 601 — 2026-10-25 — V1%'
+  and message like '%ولن يُعاد إرساله تلقائياً%' and message like '%telegram_sendDocument_network%' from public.test_alerts), 'alert text names the document, the reason and no auto-resend');
+select pg_temp.ok((select alerted_at is not null from public.document_archive_notify_claims where job_id = repeat('a', 31) || '1'), 'alerted_at recorded');
+select pg_temp.ok(pg_temp.claim(repeat('a', 31) || '1') ->> 'status' = 'unknown' and (select count(*) from public.test_alerts) = 1, 'repeated claims on unknown do not re-alert');
+
+insert into t values ('h', public.document_archive_claim_notification(repeat('a', 31) || '2', 300, 'فاتورة جملة رقم 602 — 2026-10-25 — V2'));
+update public.document_archive_notify_claims set claimed_at = now() - interval '10 minutes' where job_id = repeat('a', 31) || '2';
+select pg_temp.ok(pg_temp.claim(repeat('a', 31) || '2') ->> 'status' = 'unknown', 'lease expiry with outbox');
+select pg_temp.ok((select count(*) from public.test_alerts where message like '%رقم 602%' and message like '%lease_expired%') = 1, 'lease expiry alerts once with reason');
+
+insert into t values ('i', public.document_archive_claim_notification(repeat('a', 31) || '3', 300, 'فاتورة جملة رقم 603'));
+select public.document_archive_finish_notification(repeat('a', 31) || '3', (select (v ->> 'token')::uuid from t where k = 'i'), 'not_sent', null, 'telegram_sendDocument_429') is not null as x \gset
+insert into t values ('j', public.document_archive_claim_notification(repeat('a', 31) || '4', 300, 'فاتورة جملة رقم 604'));
+select public.document_archive_finish_notification(repeat('a', 31) || '4', (select (v ->> 'token')::uuid from t where k = 'j'), 'sent', 7604) is not null as x \gset
+select pg_temp.ok((select count(*) from public.test_alerts) = 2, 'not_sent and sent raise no alert');
+
+select set_config('test.alerts_fail', 'on', false) is not null as x \gset
+insert into t values ('k', public.document_archive_claim_notification(repeat('a', 31) || '5', 300, 'فاتورة جملة رقم 605'));
+select pg_temp.ok((public.document_archive_finish_notification(repeat('a', 31) || '5', (select (v ->> 'token')::uuid from t where k = 'k'), 'unknown', null, 'x') ->> 'ok')::boolean
+  , 'outbox failure does not fail finish');
+select pg_temp.ok(pg_temp.state(repeat('a', 31) || '5') = 'unknown', 'outbox failure keeps unknown state');
+select pg_temp.ok((select alerted_at is null from public.document_archive_notify_claims where job_id = repeat('a', 31) || '5'), 'failed alert not marked alerted');
+select set_config('test.alerts_fail', 'off', false) is not null as x \gset
+
 -- ── ٦) مدخلات ──
 do $$ begin
   perform public.document_archive_claim_notification('not-a-job', 300);

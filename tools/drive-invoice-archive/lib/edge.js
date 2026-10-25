@@ -5,7 +5,7 @@
 class EdgeError extends Error {
   constructor(code, detail) {
     super(detail ? `${code}: ${detail}` : code);
-    this.code = code; // OFFLINE | TRANSIENT | AUTH | REJECTED | DELIVERY_UNKNOWN
+    this.code = code; // OFFLINE | TRANSIENT | AUTH | REJECTED | IN_PROGRESS | DELIVERY_UNKNOWN
   }
 }
 
@@ -37,8 +37,8 @@ function createEdge({ url, secret, fetchImpl = globalThis.fetch, host = "", time
     if (res.ok && data && data.ok) return data;
     const code = String((data && data.error) || res.status).slice(0, 60);
     if (res.status === 401) throw new EdgeError("AUTH", code);
-    // 409: الحجز قائم (طلب سابق ما زال يرسل) ⇒ عابر؛ أو نتيجة مجهولة ⇒ لا إعادة إلا بطلب المالك.
-    if (res.status === 409 && code === "in_progress") throw new EdgeError("TRANSIENT", code);
+    // 409: الحجز قائم (طلب سابق ما زال يرسل) ⇒ انتظار؛ أو نتيجة مجهولة ⇒ لا إعادة إلا بطلب المالك.
+    if (res.status === 409 && code === "in_progress") throw new EdgeError("IN_PROGRESS", code);
     if (res.status === 409 && code === "delivery_unknown") throw new EdgeError("DELIVERY_UNKNOWN", code);
     if (res.status === 429 || res.status >= 500) throw new EdgeError("TRANSIENT", code);
     throw new EdgeError("REJECTED", code);

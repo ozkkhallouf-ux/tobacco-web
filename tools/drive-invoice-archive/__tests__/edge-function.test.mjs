@@ -36,7 +36,7 @@ function createBackend() {
   const s = { items: new Map(), telegram: [], rpc: [], failRecord: false, failRecordTimes: 0, recordCalls: 0,
     telegramFail: 0, telegramStatus: 500, restDown: false, calls: 0,
     // Migration 26: نموذج الحجز بالذاكرة بنفس قواعد supabase/proposed/26 (تُختبر SQL حياً في check-drive-invoice-archive).
-    claims: new Map(), clock: Date.parse("2026-10-25T12:00:00Z"), noClaimRpc: false, failFinish: false, released: [],
+    claims: new Map(), labels: [], clock: Date.parse("2026-10-25T12:00:00Z"), noClaimRpc: false, failFinish: false, released: [],
     // تيليغرام: lostReply يوصل المستند ثم يقطع الاتصال؛ unreadable يوصله بجسم غير مقروء؛ delayMs يبطئه.
     lostReply: 0, unreadable: 0, delayMs: 0 };
   const json = (status, body) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
@@ -62,7 +62,8 @@ function createBackend() {
   const LEASE_MS = 300 * 1000;
   function claimRpc(init) {
     if (s.noClaimRpc) return json(404, { message: "function not found" });
-    const { p_job_id: id } = JSON.parse(init.body);
+    const { p_job_id: id, p_label: label } = JSON.parse(init.body);
+    s.labels.push(label);
     const item = s.items.get(id);
     const token = `t${Math.random()}`;
     if (item && item.telegram_message_id != null) {
@@ -477,4 +478,17 @@ test("Edge: الدالة الجديدة بلا Migration 26 تفشل مغلقة:
   try { r = await handler(notifyRequest(FIELDS)); } finally { cap.restore(); }
   assert.equal(r.status, 502);
   assert.equal(b.s.telegram.length, 0);
+});
+
+test("Edge: الحجز يحمل وصف تنبيه «غير محسوم» (النوع والرقم والتاريخ والنسخة) بلا زبون ولا مبلغ ولا رابط", { skip: SKIP }, async () => {
+  const b = createBackend();
+  const handler = await loadHandler(ENV, b.fetchMock);
+  b.s.lostReply = 1;
+  const cap = captureConsole();
+  try { await handler(notifyRequest(FIELDS)); } finally { cap.restore(); }
+  assert.equal(b.s.labels[0], "فاتورة جملة رقم 501 — 2026-10-24 — V1");
+  for (const sensitive of [FIELDS.customer_name, FIELDS.amount, FIELDS.drive_link, FIELDS.drive_file_id]) {
+    assert.ok(!b.s.labels[0].includes(sensitive));
+  }
+  assert.ok(cap.lines.some((l) => l.includes("delivery unknown")), "سجل الدالة يذكر النتيجة المجهولة");
 });

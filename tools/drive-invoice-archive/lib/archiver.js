@@ -56,19 +56,35 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
     log({ at: new Date(now()).toISOString(), event, ...safe });
   }
 
-  function failJob(job, stage, err, { immediate = false, ownerOnly = false } = {}) {
+  function failJob(job, stage, err, { immediate = false } = {}) {
     job.attempts = (job.attempts || 0) + 1;
     job.lastError = redact(`${stage}:${err && err.code ? err.code : "ERROR"}`, 120);
     job.lastErrorAt = new Date(now()).toISOString();
     const backoff = Math.min(3600, 30 * 2 ** Math.min(job.attempts, 7));
     job.nextAttemptAt = now() + backoff * 1000;
-    if (immediate || ownerOnly || job.attempts >= cfg.maxAttempts) {
+    if (immediate || job.attempts >= cfg.maxAttempts) {
       job.failed = true;
       job.failedAt = job.lastErrorAt;
     }
-    if (ownerOnly) job.ownerRetryOnly = true;
     store.saveJob(job);
     emit("job_error", { jobId: job.jobId, number: job.number, version: job.version, stage, code: err && err.code, message: err && err.message });
+  }
+
+  // نتيجة غير محسومة لا تستهلك محاولة (Migration 26): الإرسال لم يفشل، بل لا نعرف أو ننتظر.
+  // IN_PROGRESS: حجز طلب سابق قائم ⇒ انتظار قصير ثابت. DELIVERY_UNKNOWN: قد يكون وصل ⇒ موقوفة
+  // حتى إعادة المالك (ownerRetryOnly، بلا إحياء تلقائي)، والدالة نبّهت المالك نصاً.
+  function holdJob(job, stage, code) {
+    job.lastError = `${stage}:${code}`;
+    job.lastErrorAt = new Date(now()).toISOString();
+    if (code === "DELIVERY_UNKNOWN") {
+      job.failed = true;
+      job.failedAt = job.lastErrorAt;
+      job.ownerRetryOnly = true;
+    } else {
+      job.nextAttemptAt = now() + cfg.notifyWaitSeconds * 1000;
+    }
+    store.saveJob(job);
+    emit(code === "DELIVERY_UNKNOWN" ? "delivery_unknown" : "notify_in_progress", { jobId: job.jobId, number: job.number, version: job.version, stage });
   }
 
   // ─── المولّد: نفس القالب الرسمي A4 وخط Cairo؛ بلا خط مضمَّن ⇒ لا أرشفة ───
@@ -465,8 +481,11 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
           emit("notify_unavailable", { code: err.code, message: err.message });
           break;
         }
-        // نتيجة مجهولة: قد يكون المستند وصل. فاشلة فوراً تظهر للمالك، وإعادتها بيده وحده.
-        failJob(job, "notify", err, { ownerOnly: err && err.code === "DELIVERY_UNKNOWN" });
+        if (err && (err.code === "IN_PROGRESS" || err.code === "DELIVERY_UNKNOWN")) {
+          holdJob(job, "notify", err.code);
+          continue;
+        }
+        failJob(job, "notify", err);
       }
     }
     return { notified };

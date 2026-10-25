@@ -192,7 +192,7 @@ async function createFakeEdge() {
   require("../../../supabase/functions/_shared/telegram-format.js");
   const shared = await import("../../../supabase/functions/_shared/document-archive.js");
   // conflict: ردّ 409 للطلب التالي ("in_progress" حجز قائم، "delivery_unknown" ضاع ردّ تيليغرام) — Migration 26.
-  const s = { secret: "s".repeat(40), sent: [], items: new Map(), retry: [], down: false, loseResponse: 0, reports: [], conflict: [], notifyCalls: 0 };
+  const s = { secret: "s".repeat(40), sent: [], items: new Map(), retry: [], down: false, loseResponse: 0, reports: [], conflict: [], notifyCalls: 0, reject: 0 };
   const json = (status, body) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
   async function fetchImpl(url, init) {
     if (s.down) { const e = new Error("ECONNRESET"); e.code = "ECONNRESET"; throw e; }
@@ -208,6 +208,7 @@ async function createFakeEdge() {
       if (!shared.isPdfBytes(bytes)) return json(400, { ok: false, error: "file_type" });
       s.notifyCalls++;
       if (s.conflict.length) return json(409, { ok: false, error: s.conflict.shift() });
+      if (s.reject > 0) { s.reject--; return json(502, { ok: false, error: "telegram_sendDocument_429" }); }
       const existing = s.items.get(checked.value.job_id);
       if (existing && existing.telegram_message_id) return json(200, { ok: true, duplicate: true, message_id: existing.telegram_message_id });
       const { caption, followUp } = shared.buildNotifyCaption(checked.value);

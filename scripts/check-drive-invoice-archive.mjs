@@ -122,11 +122,11 @@ assert.match(claims, /alter table public\.document_archive_notify_claims enable 
 assert.match(claims, /using \(public\.is_owner\(\)\)/, "قراءة الحجوزات للمالك وحده");
 assert.doesNotMatch(claims, /grant [^;]* to [^;]*\banon\b/i, "لا صلاحية لـanon على الحجوزات");
 assert.doesNotMatch(claims, /\bdelete\b|\bcron\.schedule|on delete cascade/i, "التحرير حالة released لا حذف");
-for (const f of ["document_archive_claim_notification(text, int)", "document_archive_finish_notification(text, uuid, text, bigint, text)", "document_archive_release_notification_claims(text[])"]) {
+for (const f of ["document_archive_claim_notification(text, int, text)", "document_archive_finish_notification(text, uuid, text, bigint, text)", "document_archive_release_notification_claims(text[])"]) {
   assert.ok(claims.includes(`grant execute on function public.${f} to service_role;`), `${f}: service_role وحده`);
 }
 const notifyFn = read("supabase/functions/document-archive-notify/index.ts");
-assert.ok(notifyFn.indexOf("claimNotification(v.job_id)") > 0 && notifyFn.indexOf("claimNotification(v.job_id)") < notifyFn.indexOf('telegramSend("sendDocument"'), "الدالة: الحجز قبل sendDocument");
+assert.ok(notifyFn.indexOf("claimNotification(v.job_id,") > 0 && notifyFn.indexOf("claimNotification(v.job_id,") < notifyFn.indexOf('telegramSend("sendDocument"'), "الدالة: الحجز قبل sendDocument");
 assert.doesNotMatch(notifyFn, /existingMessageId/, "الدالة: لا فحص قراءة غير ذرّي قبل الإرسال");
 console.log("  ✓ حراسات ثابتة: قراءة فقط، بلا مشاركة ولا حذف، المالك وحده، الحساب المعتمد، غير مفعَّل");
 
@@ -226,7 +226,8 @@ async function checkNotifyClaims() {
 
     const rb = psql(["-d", CDB, "-X", "-tA", "-v", "ON_ERROR_STOP=1"], { input: `${read("supabase/proposed/26-document-archive-notify-claims-rollback.sql")}
 select (to_regclass('public.document_archive_notify_claims') is null
-  and to_regprocedure('public.document_archive_claim_notification(text,int)') is null
+  and to_regprocedure('public.document_archive_claim_notification(text,int,text)') is null
+  and to_regprocedure('private.document_archive_alert_unknown(text,text)') is null
   and to_regclass('public.document_archive_items') is not null)::text;` });
     if (rb.status !== 0 || rb.stdout.trim().split("\n").pop() !== "true") throw new Error(`rollback 26 failed: ${output(rb)}`);
     console.log(`  ✓ الهجرة 26 (حجز الإشعار) على PostgreSQL محلي: ${passes} تأكيداً + تزامن 12 عملية + التراجع`);

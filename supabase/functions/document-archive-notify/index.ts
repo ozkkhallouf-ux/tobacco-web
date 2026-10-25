@@ -108,8 +108,14 @@ async function telegramSend(method: string, body: FormData | Record<string, unkn
 
 type Claim = { status: "claimed" | "sent" | "in_progress" | "unknown"; token?: string; message_id?: number };
 
-async function claimNotification(jobId: string): Promise<Claim> {
-  return await rpc("document_archive_claim_notification", { p_job_id: jobId, p_lease_seconds: CLAIM_LEASE_SECONDS }) as Claim;
+// الوصف في تنبيه «غير محسوم» للمالك (Migration 26): نوع المستند ورقمه وتاريخه ونسخته، بلا زبون ولا مبلغ.
+function claimLabel(v: { doc_type: string; doc_number: string; doc_date: string; version: number | string }): string {
+  const kind = v.doc_type === "wholesale_invoice" ? "فاتورة جملة" : "مستند";
+  return `${kind} رقم ${v.doc_number} — ${v.doc_date} — V${v.version}`;
+}
+
+async function claimNotification(jobId: string, label: string): Promise<Claim> {
+  return await rpc("document_archive_claim_notification", { p_job_id: jobId, p_lease_seconds: CLAIM_LEASE_SECONDS, p_label: label }) as Claim;
 }
 
 // تسجيل النتيجة يُعاد حتى 3 مرات. إن فشل كلياً بقي الحجز sending فيصير unknown بعد
@@ -146,7 +152,7 @@ async function handleNotify(req: Request): Promise<Response> {
   await botToken();
   const { caption, followUp } = buildNotifyCaption(v);
 
-  const claim = await claimNotification(v.job_id);
+  const claim = await claimNotification(v.job_id, claimLabel(v));
   if (claim.status === "sent") return json(200, { ok: true, duplicate: true, message_id: Number(claim.message_id) });
   if (claim.status === "in_progress") return json(409, { ok: false, error: "in_progress" });
   if (claim.status !== "claimed" || !claim.token) return json(409, { ok: false, error: "delivery_unknown" });

@@ -19,11 +19,17 @@
 --               محاولة من الموقع (request_document_archive_retry) بعد أن يتحقق من تيليغرام.
 -- حجز «sending» تجاوز مهلته (العملية ماتت في منتصف الإرسال) يصير unknown لا released.
 --
+-- تنبيه المالك: كل انتقال إلى unknown يضع رسالة نصية واحدة في telegram_outbox عبر
+-- notify_telegram (مفتاح منع تكرار لكل مهمة، 24 ساعة): «إرسال غير محسوم» مع وصف المستند
+-- وما يفعله. نص فقط، لا PDF، فالتنبيه لا يكرر المستند. فشل التنبيه لا يغيّر حالة الحجز.
+--
 -- الأمن: RLS والقراءة للمالك وحده كجداول 22؛ الكتابة عبر الدوال بدور service_role وحده.
 -- لا حذف: التحرير حالة released لا إزالة صف، ولا cron ولا cascade.
 -- ============================================================================
 
 begin;
+
+create schema if not exists private;
 
 create table if not exists public.document_archive_notify_claims (
   job_id      text primary key check (job_id ~ '^[0-9a-f]{32}$'),
@@ -34,6 +40,8 @@ create table if not exists public.document_archive_notify_claims (
   message_id  bigint,
   resolved_at timestamptz,
   last_error  text check (last_error is null or length(last_error) <= 80),
+  label       text check (label is null or length(label) <= 200),
+  alerted_at  timestamptz,
   check (state <> 'sent' or message_id is not null)
 );
 
@@ -46,9 +54,43 @@ drop policy if exists document_archive_notify_claims_owner_read on public.docume
 create policy document_archive_notify_claims_owner_read on public.document_archive_notify_claims
   for select to authenticated using (public.is_owner());
 
+-- ─── تنبيه «غير محسوم» للمالك (نص عبر telegram_outbox) ───
+-- لا يرمي أبداً: غياب notify_telegram أو فشلها لا يُسقط انتقال الحالة.
+create or replace function private.document_archive_alert_unknown(p_job_id text, p_reason text)
+returns boolean
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
+declare
+  v_label text;
+begin
+  select coalesce(nullif(label, ''), 'مستند أرشفة') into v_label
+    from public.document_archive_notify_claims where job_id = p_job_id;
+  if to_regproc('public.notify_telegram') is null then
+    return false;
+  end if;
+  perform public.notify_telegram(
+    'document_archive_unknown',
+    '⚠️ أرشفة الفواتير: إرسال غير محسوم' || chr(10)
+      || v_label || chr(10)
+      || 'لم يتأكد وصول ملف PDF إلى تيليغرام (' || coalesce(p_reason, 'unknown') || ')، ولن يُعاد إرساله تلقائياً.' || chr(10)
+      || 'إن وصلك المستند فلا تفعل شيئاً. وإن لم يصل فاطلب إعادة المحاولة لهذه المهمة.' || chr(10)
+      || 'المهمة: ' || left(p_job_id, 12),
+    'document-archive-unknown:' || p_job_id,
+    1440);
+  update public.document_archive_notify_claims set alerted_at = now() where job_id = p_job_id;
+  return true;
+exception when others then
+  return false;
+end;
+$$;
+
+revoke all on function private.document_archive_alert_unknown(text, text) from public, anon, authenticated;
+
 -- ─── الحجز قبل الإرسال ───
 -- يعيد {status: claimed|sent|in_progress|unknown, token?, message_id?}.
-create or replace function public.document_archive_claim_notification(p_job_id text, p_lease_seconds int default 300)
+create or replace function public.document_archive_claim_notification(p_job_id text, p_lease_seconds int default 300, p_label text default null)
 returns jsonb
 language plpgsql
 security definer
@@ -78,8 +120,8 @@ begin
     return jsonb_build_object('status', 'sent', 'message_id', v_claim.message_id);
   end if;
 
-  insert into public.document_archive_notify_claims (job_id, state, claim_token)
-  values (p_job_id, 'sending', v_token)
+  insert into public.document_archive_notify_claims (job_id, state, claim_token, label)
+  values (p_job_id, 'sending', v_token, left(p_label, 200))
   on conflict (job_id) do nothing;
   if found then
     return jsonb_build_object('status', 'claimed', 'token', v_token);
@@ -91,7 +133,7 @@ begin
   elsif v_claim.state = 'released' then
     update public.document_archive_notify_claims
        set state = 'sending', claim_token = v_token, claimed_at = now(), attempts = attempts + 1,
-           resolved_at = null, last_error = null
+           resolved_at = null, last_error = null, alerted_at = null, label = coalesce(left(p_label, 200), label)
      where job_id = p_job_id;
     return jsonb_build_object('status', 'claimed', 'token', v_token);
   elsif v_claim.state = 'sending' and v_claim.claimed_at > now() - make_interval(secs => p_lease_seconds) then
@@ -100,13 +142,14 @@ begin
     update public.document_archive_notify_claims
        set state = 'unknown', resolved_at = now(), last_error = 'lease_expired'
      where job_id = p_job_id;
+    perform private.document_archive_alert_unknown(p_job_id, 'lease_expired');
   end if;
   return jsonb_build_object('status', 'unknown');
 end;
 $$;
 
-revoke all on function public.document_archive_claim_notification(text, int) from public, anon, authenticated;
-grant execute on function public.document_archive_claim_notification(text, int) to service_role;
+revoke all on function public.document_archive_claim_notification(text, int, text) from public, anon, authenticated;
+grant execute on function public.document_archive_claim_notification(text, int, text) to service_role;
 
 -- ─── نتيجة الإرسال ───
 -- بالرمز نفسه وحده. sent يُقبل أيضاً بعد أن صار الحجز unknown بانتهاء المهلة (الرد وصل متأخراً:
@@ -137,6 +180,9 @@ begin
     raise exception 'document_archive: outcome must be sent, not_sent or unknown' using errcode = '22023';
   end if;
   get diagnostics v_rows = row_count;
+  if v_rows = 1 and p_outcome = 'unknown' then
+    perform private.document_archive_alert_unknown(p_job_id, left(p_error, 80));
+  end if;
   return jsonb_build_object('ok', v_rows = 1);
 end;
 $$;
