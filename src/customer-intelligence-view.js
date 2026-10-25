@@ -411,7 +411,10 @@
   const amountCell = (value, currency, className = "") => `<td class="ci-num ${className}">${amountText(value, currency)}</td>`;
   const statusCell = (short, full, className = "") => `<td class="ci-status ${className}" title="${escape(full || short)}">${escape(short)}</td>`;
   // الحد المعتمد بالدولار كما يحفظه المالك (والصفر منه قرار صريح)، أو null.
-  const approvedLimitOf = (row) => (isNumber(row.approvedCredit?.limit) && row.approvedCredit.limit >= 0 ? row.approvedCredit.limit : null);
+  const approvedLimitOf = (row) => {
+    const limit = row.approvedCredit?.limit;
+    return isNumber(limit) && limit >= 0 ? limit : null;
+  };
 
   // نص قصير لحالات الائتمان بلا رقم داخل الجدول؛ النص الكامل في CREDIT_STATUS_TEXT.
   const SHORT_STATUS_TEXT = {
@@ -476,10 +479,10 @@
 
   // عند الترتيب بعمود مبالغ: سطر فاصل قبل كل فوج عملة غير الدولار.
   function tableBody(rows, columns) {
-    const column = COLUMNS.find((entry) => entry.key === view.sortKey);
+    const currencyOf = COLUMNS.find((entry) => entry.key === view.sortKey)?.currency;
     let previous = null;
     return rows.map((row) => {
-      const code = column?.currency ? column.currency(row) || BASE : null;
+      const code = currencyOf ? currencyOf(row) || BASE : null;
       const divider = code && previous !== null && code !== previous
         ? `<tr class="ci-group"><td colspan="${columns.length}">حسابات بعملة ${escape(code)} — مرتبة وحدها، لا تُقارن أرقامها بالدولار</td></tr>` : "";
       previous = code;
@@ -915,7 +918,7 @@
     }));
 
     const picker = app.querySelector("[data-ci-columns]");
-    picker?.addEventListener("toggle", () => { view.columnsOpen = picker.open; });
+    if (picker) picker.addEventListener("toggle", () => { view.columnsOpen = picker.open; });
     app.querySelectorAll("[data-ci-column]").forEach((box) => box.addEventListener("change", () => {
       const key = box.dataset.ciColumn;
       const others = visibleColumnKeys().filter((entry) => entry !== key);
