@@ -217,6 +217,18 @@ const state = {
   approvedPriceItems: [],
   approvedPriceError: null,
   itemCosts: [],
+  // "idle" قبل أول تحميل · "ok" · "error" · "not_owner" — يميّز فشل التحميل عن «لا تكلفة».
+  itemCostsStatus: "idle",
+  itemCostsError: null,
+  priceAudit: {
+    belowOpen: false,
+    unpricedOpen: false,
+    unverifiableOpen: false,
+    belowQuery: "",
+    belowSort: "lossPercentDesc",
+    unpricedQuery: "",
+    unpricedSort: "groupAsc"
+  },
   paymentRecords: {},
   paymentError: null,
   lastInventoryRefresh: null,
@@ -954,11 +966,17 @@ async function loadItemCosts() {
   try {
     if (!isOwner() || !dataStore.listItemCosts) {
       state.itemCosts = [];
+      state.itemCostsStatus = isOwner() ? "error" : "not_owner";
+      state.itemCostsError = null;
       return;
     }
     state.itemCosts = await dataStore.listItemCosts();
-  } catch {
+    state.itemCostsStatus = "ok";
+    state.itemCostsError = null;
+  } catch (error) {
     state.itemCosts = [];
+    state.itemCostsStatus = "error";
+    state.itemCostsError = safeErrorMessage(error);
   }
 }
 
@@ -5760,6 +5778,281 @@ function pricingRow(item) {
   `;
 }
 
+// ===== تدقيق النشرة: مواد تحت سعر التكلفة ومواد غير مسعّرة =====
+// المنطق كله في src/price-cost-audit.js (نقي). هنا جمع المدخلات من الحالة والعرض فقط.
+// لا شيء هنا يكتب سعراً أو تكلفة.
+
+// نطاق النشرة: كل صنف بمخزون موجب في آخر جرد، ما عدا ما تستبعده النشرات عمداً
+// (معسل 100غ). الوزاري يبقى في النطاق لأن له نشرتين مستقلتين.
+function priceAuditBulletinOf(item) {
+  if (isWazariPriceItem(item)) return "wazari";
+  const normalizedName = normalizeItemName(item.name || item.itemName || "");
+  if (isGeneralShishaPriceItem(item) && /100\s*غ/u.test(normalizedName)) return "";
+  return "general";
+}
+
+function priceAuditInput() {
+  const latest = latestStockReport();
+  const items = latest ? pricingWorklistItems({ ignoreSearch: true }) : [];
+  const pricesStatus = state.approvedPriceError
+    ? "error"
+    : dataStore.isConfigured() && !state.session ? "unauthenticated" : "ok";
+  return {
+    now: new Date().toISOString(),
+    stock: { available: Boolean(latest), syncedAt: reportSyncedAt(latest) },
+    prices: { status: pricesStatus, error: state.approvedPriceError || "" },
+    costs: {
+      status: isOwner() ? state.itemCostsStatus : "not_owner",
+      error: state.itemCostsError || "",
+      rows: isOwner() ? state.itemCosts : []
+    },
+    items: items
+      .map((item) => {
+        const bulletin = priceAuditBulletinOf(item);
+        if (!bulletin) return null;
+        const approved = item.approvedPrice || null;
+        const raw = approved && approved.rawPrice;
+        return {
+          key: item.key,
+          name: item.name,
+          code: (approved && (approved.itemCode || approved.itemNumber)) || "",
+          groupName: item.groupName || "مواد بدون مجموعة",
+          itemGuid: item.itemGuid || "",
+          stockQty: itemQty(item),
+          unit1Name: itemUnit1Name(item),
+          unit2Name: itemUnit2Name(item),
+          // عامل الأمين من تقرير المخزون نفسه، لا البديل «1» عند غيابه.
+          unit2Factor: item.unit2Factor,
+          fullUnit2: hasFullSecondUnit(item),
+          bulletin,
+          approved: approved
+            ? {
+                unit2Price: raw ? raw.unit2Price : approved.unit2Price,
+                unit1Price: raw ? raw.unit1Price : approved.unit1Price,
+                unit2Factor: raw ? raw.unit2Factor : approved.unit2Factor,
+                retailPrice: approved.pricePayload && approved.pricePayload.retail
+                  ? approved.pricePayload.retail.price
+                  : undefined
+              }
+            : null
+        };
+      })
+      .filter(Boolean)
+  };
+}
+
+// يُعاد الحساب فقط عند تغيّر أحد المصادر — الصفحة تُرسم كثيراً (تحديث تلقائي).
+let _priceAuditCache = { key: null, result: null };
+function currentPriceAudit() {
+  const engine = window.ozkPriceCostAudit;
+  if (!engine) return null;
+  const parts = [state.inventoryReports, state.approvedPriceItems, state.itemCosts, state.itemCostsStatus, state.approvedPriceError, isOwner(), Boolean(state.session)];
+  const cached = _priceAuditCache.key;
+  if (cached && cached.length === parts.length && cached.every((part, i) => part === parts[i])) {
+    // التكلفة القديمة تُقاس بالوقت، فلا يبقى الحكم المخزّن أكثر من دقيقة.
+    if (Date.now() - new Date(_priceAuditCache.result.generatedAt).getTime() < 60000) return _priceAuditCache.result;
+  }
+  const result = engine.auditPriceCost(priceAuditInput());
+  _priceAuditCache = { key: parts, result };
+  return result;
+}
+
+function priceAuditMoney(value) {
+  return value == null ? "—" : `${formatMoney(value)} $`;
+}
+
+function priceAuditItemCell(row) {
+  const meta = [row.code ? `رمز ${row.code}` : "", row.groupName, row.bulletinLabel].filter(Boolean).join(" · ");
+  return `<td data-label="المادة" class="price-audit-item"><strong>${escapeHtml(row.name)}</strong><small>${escapeHtml(meta)}</small></td>`;
+}
+
+function priceAuditBelowRows(audit) {
+  const engine = window.ozkPriceCostAudit;
+  const panel = audit.belowCost;
+  if (panel.status !== "ok") return `<p class="price-audit-state">${escapeHtml(panel.reason)}</p>`;
+  const rows = engine.sortRows(engine.filterRows(panel.rows, state.priceAudit.belowQuery), "belowCost", state.priceAudit.belowSort);
+  if (!panel.rows.length) return '<p class="price-audit-state is-ok">لا توجد مادة مسعّرة تحت تكلفتها المثبتة.</p>';
+  if (!rows.length) return '<p class="price-audit-state">لا توجد مواد تطابق البحث.</p>';
+  return `
+    <div class="price-audit-table-wrap">
+      <table class="price-audit-table">
+        <thead><tr><th>المادة</th><th>نوع السعر</th><th>سعر التكلفة</th><th>سعر البيع</th><th>الخسارة للوحدة</th><th>النسبة</th></tr></thead>
+        <tbody>
+          ${rows.map((row) => `
+            <tr>
+              ${priceAuditItemCell(row)}
+              <td data-label="نوع السعر">${escapeHtml(row.priceTypeLabel)} / ${escapeHtml(row.unit2Name || "وحدة")}${row.inBulletin ? "" : '<small class="muted">خارج النشرة حالياً</small>'}</td>
+              <td data-label="سعر التكلفة"><bdi dir="ltr">${escapeHtml(priceAuditMoney(row.cartonCost))}</bdi></td>
+              <td data-label="سعر البيع" class="price-audit-bad"><bdi dir="ltr">${escapeHtml(priceAuditMoney(row.salePrice))}</bdi></td>
+              <td data-label="الخسارة للوحدة" class="price-audit-bad"><bdi dir="ltr">−${escapeHtml(priceAuditMoney(row.lossPerUnit2))}</bdi></td>
+              <td data-label="النسبة" class="price-audit-bad"><bdi dir="ltr">−${escapeHtml(row.lossPercent.toFixed(1))}%</bdi></td>
+            </tr>`).join("")}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+function priceAuditUnverifiableRows(audit) {
+  const engine = window.ozkPriceCostAudit;
+  const rows = engine.filterRows(audit.belowCost.unverifiable, state.priceAudit.belowQuery);
+  if (!rows.length) return '<p class="price-audit-state">لا توجد مواد تطابق البحث.</p>';
+  return `
+    <div class="price-audit-table-wrap">
+      <table class="price-audit-table">
+        <thead><tr><th>المادة</th><th>نوع السعر</th><th>سعر البيع</th><th>سبب تعذّر الحكم</th></tr></thead>
+        <tbody>
+          ${rows.map((row) => `
+            <tr>
+              ${priceAuditItemCell(row)}
+              <td data-label="نوع السعر">${escapeHtml(row.priceTypeLabel)} / ${escapeHtml(row.unit2Name || "وحدة")}</td>
+              <td data-label="سعر البيع"><bdi dir="ltr">${escapeHtml(priceAuditMoney(row.salePrice))}</bdi></td>
+              <td data-label="السبب">${escapeHtml(row.reasonLabel)}${row.cartonCost != null ? ` <small class="muted" dir="ltr">(التكلفة ${escapeHtml(priceAuditMoney(row.cartonCost))})</small>` : ""}</td>
+            </tr>`).join("")}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+function priceAuditStateCell(label, state, value) {
+  const cls = state === "valid" ? "" : state === "invalid" ? "price-audit-bad" : "price-audit-warn";
+  const text = state === "valid" ? priceAuditMoney(value) : window.ozkPriceCostAudit.PRICE_STATE_LABELS[state];
+  return `<td data-label="${escapeHtml(label)}" class="${cls}"><bdi ${state === "valid" ? 'dir="ltr"' : ""}>${escapeHtml(text)}</bdi></td>`;
+}
+
+function priceAuditUnpricedRows(audit) {
+  const engine = window.ozkPriceCostAudit;
+  const panel = audit.unpriced;
+  if (panel.status !== "ok") return `<p class="price-audit-state">${escapeHtml(panel.reason)}</p>`;
+  if (!panel.rows.length) return '<p class="price-audit-state is-ok">كل مواد النشرة لها سعر جملة ومفرق صالحان.</p>';
+  const rows = engine.sortRows(engine.filterRows(panel.rows, state.priceAudit.unpricedQuery), "unpriced", state.priceAudit.unpricedSort);
+  if (!rows.length) return '<p class="price-audit-state">لا توجد مواد تطابق البحث.</p>';
+  const owner = isOwner();
+  return `
+    <div class="price-audit-table-wrap">
+      <table class="price-audit-table">
+        <thead><tr><th>المادة</th><th>المخزون</th><th>الجملة</th><th>المفرق</th>${owner ? "<th>سعر التكلفة</th>" : ""}</tr></thead>
+        <tbody>
+          ${rows.map((row) => `
+            <tr>
+              ${priceAuditItemCell(row)}
+              <td data-label="المخزون">${escapeHtml(formatQtyCartons(row))}</td>
+              ${priceAuditStateCell("الجملة", row.wholesaleState, row.wholesalePrice)}
+              ${priceAuditStateCell("المفرق", row.retailState, row.retailPrice)}
+              ${owner ? `<td data-label="سعر التكلفة">${row.cartonCost != null ? `<span><bdi dir="ltr">${escapeHtml(priceAuditMoney(row.cartonCost))}</bdi> / ${escapeHtml(row.unit2Name || "وحدة")}</span>` : `<small class="muted">${escapeHtml(row.costNote || "غير متاحة")}</small>`}</td>` : ""}
+            </tr>`).join("")}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+function priceAuditSortSelect(panel, current) {
+  const labels = panel === "below"
+    ? { lossPercentDesc: "أكبر نسبة خسارة", lossValueDesc: "أكبر خسارة للوحدة", groupAsc: "المجموعة", nameAsc: "الاسم أبجدياً" }
+    : { groupAsc: "المجموعة", nameAsc: "الاسم أبجدياً", stockDesc: "المخزون الأعلى", costDesc: "التكلفة الأعلى" };
+  return `<select data-price-audit-sort="${panel}" aria-label="ترتيب القائمة">${Object.entries(labels)
+    .map(([value, label]) => `<option value="${value}" ${current === value ? "selected" : ""}>${escapeHtml(label)}</option>`)
+    .join("")}</select>`;
+}
+
+function priceAuditResultsHtml(panel, audit) {
+  if (panel === "below") return priceAuditBelowRows(audit);
+  if (panel === "unverifiable") return priceAuditUnverifiableRows(audit);
+  return priceAuditUnpricedRows(audit);
+}
+
+function priceAuditPanels() {
+  const audit = currentPriceAudit();
+  if (!audit) return "";
+  const pa = state.priceAudit;
+  const below = audit.belowCost;
+  const unpriced = audit.unpriced;
+  const stamp = `آخر جرد: ${formatDateTime(audit.stockSyncedAt)}`;
+  const costStamp = audit.costsUpdatedAt ? ` · آخر رفع للتكلفة: ${formatDateTime(audit.costsUpdatedAt)}` : "";
+  const countBadge = (status, count) => status === "ok"
+    ? `<span class="price-audit-count">${escapeHtml(count)}</span>`
+    : '<span class="price-audit-count is-unknown" title="البيانات غير متاحة">؟</span>';
+  const belowSplit = below.status === "ok" && below.rows.length
+    ? ` · جملة ${below.byPriceType.wholesale} · مفرق ${below.byPriceType.retail}`
+    : "";
+  const belowPanel = isOwner() ? `
+      <details class="price-audit-panel is-below" data-price-audit-panel="below" ${pa.belowOpen ? "open" : ""}>
+        <summary>
+          <span class="price-audit-title"><span aria-hidden="true">🔴</span> مواد تحت سعر التكلفة</span>
+          ${countBadge(below.status, below.itemCount)}
+          <small>${escapeHtml(stamp + costStamp + belowSplit)}</small>
+        </summary>
+        <div class="price-audit-body">
+          <p class="price-audit-note">التكلفة = متوسط تكلفة الأمين لكل وحدة أولى × عدد الوحدات في الوحدة الثانية، بالدولار. للعلم فقط — لا يُعدَّل أي سعر من هنا.</p>
+          <div class="price-audit-controls">
+            <input type="search" data-price-audit-search="below" value="${escapeHtml(pa.belowQuery)}" placeholder="بحث بالاسم أو الرمز أو المجموعة" aria-label="بحث في المواد تحت التكلفة">
+            ${priceAuditSortSelect("below", pa.belowSort)}
+          </div>
+          <div data-price-audit-results="below">${pa.belowOpen ? priceAuditResultsHtml("below", audit) : ""}</div>
+          ${below.status === "ok" && below.unverifiable.length ? `
+          <details class="price-audit-sub" data-price-audit-panel="unverifiable" ${pa.unverifiableOpen ? "open" : ""}>
+            <summary>تعذّر الحكم لنقص البيانات <span class="price-audit-count is-muted">${escapeHtml(below.unverifiableItemCount)}</span></summary>
+            <div data-price-audit-results="unverifiable">${pa.belowOpen && pa.unverifiableOpen ? priceAuditResultsHtml("unverifiable", audit) : ""}</div>
+          </details>` : ""}
+        </div>
+      </details>` : "";
+  return `
+    <section class="price-audit" aria-label="تدقيق أسعار النشرة">
+      ${belowPanel}
+      <details class="price-audit-panel is-unpriced" data-price-audit-panel="unpriced" ${pa.unpricedOpen ? "open" : ""}>
+        <summary>
+          <span class="price-audit-title"><span aria-hidden="true">🟠</span> مواد غير مسعّرة</span>
+          ${countBadge(unpriced.status, unpriced.itemCount)}
+          <small>${escapeHtml(stamp)}</small>
+        </summary>
+        <div class="price-audit-body">
+          <p class="price-audit-note">مواد بمخزون موجب في آخر جرد ينقصها سعر جملة أو مفرق صالح. «مفقود» لا سعر محفوظ، «صفري» محفوظ بصفر، «غير صالح» قيمة سالبة أو غير رقمية.</p>
+          <div class="price-audit-controls">
+            <input type="search" data-price-audit-search="unpriced" value="${escapeHtml(pa.unpricedQuery)}" placeholder="بحث بالاسم أو الرمز أو المجموعة" aria-label="بحث في المواد غير المسعّرة">
+            ${priceAuditSortSelect("unpriced", pa.unpricedSort)}
+          </div>
+          <div data-price-audit-results="unpriced">${pa.unpricedOpen ? priceAuditResultsHtml("unpriced", audit) : ""}</div>
+        </div>
+      </details>
+    </section>`;
+}
+
+// تحديث جدول الستارة وحده — يحفظ التركيز أثناء الكتابة في البحث.
+function updatePriceAuditResults(panel) {
+  const audit = currentPriceAudit();
+  const target = app.querySelector(`[data-price-audit-results="${panel}"]`);
+  if (!audit || !target) return;
+  target.innerHTML = priceAuditResultsHtml(panel, audit);
+}
+
+function bindPriceAuditPanels(root) {
+  const pa = state.priceAudit;
+  const openKey = { below: "belowOpen", unpriced: "unpricedOpen", unverifiable: "unverifiableOpen" };
+  root.querySelectorAll("[data-price-audit-panel]").forEach((panel) => {
+    panel.addEventListener("toggle", (event) => {
+      if (event.target !== panel) return;
+      const name = panel.dataset.priceAuditPanel;
+      pa[openKey[name]] = panel.open;
+      if (panel.open) updatePriceAuditResults(name);
+      if (name === "below" && panel.open && pa.unverifiableOpen) updatePriceAuditResults("unverifiable");
+    });
+  });
+  root.querySelectorAll("[data-price-audit-search]").forEach((input) => {
+    input.addEventListener("input", () => {
+      const panel = input.dataset.priceAuditSearch;
+      pa[panel === "below" ? "belowQuery" : "unpricedQuery"] = input.value;
+      updatePriceAuditResults(panel);
+      if (panel === "below" && pa.unverifiableOpen) updatePriceAuditResults("unverifiable");
+    });
+  });
+  root.querySelectorAll("[data-price-audit-sort]").forEach((select) => {
+    select.addEventListener("change", () => {
+      const panel = select.dataset.priceAuditSort;
+      pa[panel === "below" ? "belowSort" : "unpricedSort"] = select.value;
+      updatePriceAuditResults(panel);
+    });
+  });
+}
+
 function pricing() {
   const latest = latestStockReport();
   const items = generalPricingWorklistItems();
@@ -5858,6 +6151,8 @@ function pricing() {
         <p class="muted" style="margin:8px 0 0">اختيار اللون يطبّق على المعاينة وPDF الحالي. «اعتماد ونشر» يولّد للزبائن النسختين الداكنة والفاتحة بالسعر نفسه.</p>
         <p class="bulletin-status ${escapeHtml(state.bulletinStatus?.type || "muted")}" data-bulletin-status ${state.bulletinStatus ? "" : "hidden"}>${escapeHtml(state.bulletinStatus?.msg || "")}</p>
       </section>
+
+      ${priceAuditPanels()}
 
       <section class="panel wide inventory-browser newsletter-pricing-panel">
       <div class="panel-title-row inventory-browser-head">
@@ -13701,6 +13996,8 @@ function render() {
     state.ameenSort = event.currentTarget.value;
     updateAmeenBrowserResults();
   });
+
+  bindPriceAuditPanels(app);
 
   app.querySelector("[data-pricing-search]")?.addEventListener("input", (event) => {
     state.pricingSearch = event.currentTarget.value;
