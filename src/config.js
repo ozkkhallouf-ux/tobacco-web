@@ -14,6 +14,12 @@ window.appConfig = {
     icloudUi: false,
     driveUi: false
   },
+  // إشعارات Push: الخروج يلغي اشتراك الجهاز دائماً، وفتح الموقع بحساب غير مالك (موظف، عدّاد جرد) يلغي أي
+  // اشتراك للمالك على ذلك المتصفح. قرار المالك 2026-10-25: إشعاراته على Mac وiPhone وحدهما، لا على أجهزة
+  // Windows ولا أجهزة الموظفين (ومنها OZKUSER وOZK2026). false يطفئ الشق الثاني وحده (تراجع).
+  webPush: {
+    detachNonOwnerSessions: true
+  },
   staffRoles: {
     "ozk.kh@outlook.com": { name: "موظف OZK", role: "موظف", accessRole: "employee" },
     "ozkkhalouf@gmail.com": { name: "مالك OZK", role: "المالك", accessRole: "owner" },
