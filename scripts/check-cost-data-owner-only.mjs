@@ -10,6 +10,7 @@
 //   3) يطبّق التراجع ويقارن بصمة السياسات والصلاحيات ببصمة ما قبل الهجرة حرفياً.
 // ============================================================================
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -23,6 +24,10 @@ const FIXTURE = read("scripts/fixtures/cost-data-prod-baseline.sql");
 const CLIENT = read("src/supabase-client.js");
 
 // --- عقود ثابتة ----------------------------------------------------------------
+// 24 مطبَّقة على الإنتاج (2026-10-25، الإصدار 20261025024900): النص مجمَّد، والنسخة المسجّلة مطابقة حرفياً.
+// البصمة على نهايات LF: نسخة Windows بـcore.autocrlf=true تحمل CRLF والنص نفسه.
+assert.equal(crypto.createHash("sha256").update(MIGRATION.replace(/\r\n/g, "\n")).digest("hex"), "7b55af00c95b0ed3923f32412ab3cb9b55aa390af8631cdaf51d1aa03e7bcab6", "proposed/24 يجب أن يبقى مطابقاً للنسخة المطبَّقة");
+assert.equal(read("supabase/migrations/20261025024900_cost_data_owner_only.sql"), MIGRATION, "migrations/20261025024900_cost_data_owner_only.sql يجب أن تطابق proposed/24 حرفياً");
 assert.match(MIGRATION, /^begin;/m, "الهجرة يجب أن تكون معاملة واحدة");
 assert.match(MIGRATION, /migration 24 guard: already applied/, "الحارس يجب أن يرفض التطبيق المكرر");
 assert.doesNotMatch(MIGRATION, /\b(delete\s+from|truncate\s+(table\s+)?public|update\s+public\.)/i,
