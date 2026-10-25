@@ -3078,12 +3078,10 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   // الجدول المضغوط (طلب المالك 2026-10-25) نقل سبب التغيّر واتجاه الخطر إلى لوحة التفاصيل،
   // فنفتحها بنقرة صف كما يفعل المستخدم ثم نفحص ما رُسم.
   const renderView = async (listCustomerCreditHistory, openCustomer = null) => {
-    let rowClick = null;
+    const row = { dataset: { ciCustomer: null }, clicks: [], addEventListener(type, fn) { if (type === "click") this.clicks.push(fn); } };
     const appNode = {
       innerHTML: "",
-      querySelectorAll: (selector) => (selector === "[data-ci-customer]"
-        ? [{ dataset: { get ciCustomer() { return openCustomer?.(sandbox.ozkCustomerIntelligenceView.snapshot()); } }, addEventListener: (type, fn) => { if (type === "click") rowClick = fn; } }]
-        : []),
+      querySelectorAll: (selector) => (selector === "[data-ci-customer]" ? [row] : []),
       querySelector: () => null
     };
     const sandbox = {
@@ -3113,7 +3111,10 @@ if (!process.env.OZK_CI_TZ_CHILD) {
     vm.runInContext(readText("src/customer-intelligence.js"), viewContext, { filename: "src/customer-intelligence.js" });
     vm.runInContext(readText("src/customer-intelligence-view.js"), viewContext, { filename: "src/customer-intelligence-view.js" });
     await sandbox.ozkCustomerIntelligenceView.refresh();
-    if (openCustomer && rowClick) rowClick();
+    if (openCustomer) {
+      row.dataset.ciCustomer = openCustomer(sandbox.ozkCustomerIntelligenceView.snapshot());
+      row.clicks.at(-1)();
+    }
     return { html: appNode.innerHTML, intel: sandbox.ozkCustomerIntelligenceView.snapshot() };
   };
   const viewHistory = [snap(G_DELINQ, 7, { limit_base: 5000, credit_limit_display: 5000 }),
