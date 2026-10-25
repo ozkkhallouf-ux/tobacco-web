@@ -86,7 +86,8 @@ assert.deepEqual(runners, [], `العامل غير مفعَّل: لا يجوز �
 // الهجرة: المالك وحده يقرأ، ولا شيء لـanon، والكتابة لـservice_role.
 const migration = read("supabase/proposed/22-document-archive.sql");
 // 22 مطبَّقة على الإنتاج (2026-10-24، الإصدار 20261024234500): النص مجمَّد، والنسخة المسجّلة مطابقة حرفياً.
-assert.equal(crypto.createHash("sha256").update(migration).digest("hex"), "bff8d757cd4da64ecc3cfcccd92ad8f423940a2c632f0b07c7e9b3332d9c9968", "proposed/22 يجب أن يبقى مطابقاً للنسخة المطبَّقة");
+// البصمة على نهايات LF: نسخة Windows بـcore.autocrlf=true تحمل CRLF والنص نفسه.
+assert.equal(crypto.createHash("sha256").update(migration.replace(/\r\n/g, "\n")).digest("hex"), "bff8d757cd4da64ecc3cfcccd92ad8f423940a2c632f0b07c7e9b3332d9c9968", "proposed/22 يجب أن يبقى مطابقاً للنسخة المطبَّقة");
 assert.equal(read("supabase/migrations/20261024234500_document_archive.sql"), migration, "migrations/20261024234500_document_archive.sql يجب أن تطابق proposed/22 حرفياً");
 for (const t of ["document_archive_items", "document_archive_heartbeat", "document_archive_retry_requests"]) {
   assert.match(migration, new RegExp(`alter table public\\.${t} enable row level security;`), `RLS على ${t}`);
