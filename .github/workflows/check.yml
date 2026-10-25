@@ -266,3 +266,8 @@ jobs:
       - name: Drive archive - scheduled run wrapper test
         shell: powershell
         run: .\tools\drive-invoice-archive\__tests__\Test-RunScheduled.ps1
+
+      # قالب المهمة المجدولة لأرشفة Drive: مسار الغلاف ومجلد العمل يقابلان مكان worker.js في التثبيت.
+      - name: Drive archive - scheduled task template path test
+        shell: powershell
+        run: .\tools\drive-invoice-archive\__tests__\Test-TaskTemplate.ps1

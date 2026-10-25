@@ -56,8 +56,8 @@
   <Actions Context="Author">
     <Exec>
       <Command>%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe</Command>
-      <Arguments>-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "C:\ProgramData\OZK\DriveArchive\app\run-scheduled.ps1" -AllowedModes dry-run -TimeoutSeconds 600</Arguments>
-      <WorkingDirectory>C:\ProgramData\OZK\DriveArchive\app</WorkingDirectory>
+      <Arguments>-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "C:\ProgramData\OZK\DriveArchive\app\tools\drive-invoice-archive\run-scheduled.ps1" -AllowedModes dry-run -TimeoutSeconds 600</Arguments>
+      <WorkingDirectory>C:\ProgramData\OZK\DriveArchive\app\tools\drive-invoice-archive</WorkingDirectory>
     </Exec>
   </Actions>
 </Task>
