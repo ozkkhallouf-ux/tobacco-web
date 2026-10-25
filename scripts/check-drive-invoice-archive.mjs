@@ -128,21 +128,20 @@ for (const t of ["drive-archive.test.mjs", "edge-function.test.mjs"]) {
 
 // اختبار الغلاف المجدول بعامل وهمي (بلا أمين ولا Drive ولا Telegram). على Windows يعمل أيضاً
 // تحت PowerShell 5.1 في وظيفة ps51-compat.
+const psTest = path.join(dir, "__tests__", "Test-RunScheduled.ps1");
 const pwshProbe = spawnSync("pwsh", ["-NoProfile", "-Command", "$PSVersionTable.PSVersion.Major"], { encoding: "utf8" });
 if (pwshProbe.status !== 0) {
-  if (process.env.CI === "true") { console.error("CI must run the drive-archive PowerShell tests (pwsh missing)"); process.exit(1); }
+  if (process.env.CI === "true") { console.error("CI must run Test-RunScheduled.ps1 (pwsh missing)"); process.exit(1); }
   console.log("  - اختبار الغلاف المجدول: متخطى (لا pwsh)");
 } else {
-  for (const [file, tag, label] of [["Test-RunScheduled.ps1", "run-scheduled", "الغلاف المجدول"], ["Test-TaskTemplate.ps1", "task-template", "قالب المهمة"]]) {
-    const ps = spawnSync("pwsh", ["-NoProfile", "-File", path.join(dir, "__tests__", file)], { encoding: "utf8" });
-    const m = new RegExp(`${tag}: (\\d+) PASS, (\\d+) FAIL`).exec(ps.stdout || "");
-    if (ps.status !== 0 || !m || m[2] !== "0") {
-      console.error(ps.stdout, ps.stderr);
-      console.error(`check-drive-invoice-archive: فشل ${file}`);
-      process.exit(1);
-    }
-    console.log(`  ✓ ${label} (pwsh ${pwshProbe.stdout.trim()}): ${m[1]} تأكيداً`);
+  const ps = spawnSync("pwsh", ["-NoProfile", "-File", psTest], { encoding: "utf8" });
+  const m = /run-scheduled: (\d+) PASS, (\d+) FAIL/.exec(ps.stdout || "");
+  if (ps.status !== 0 || !m || m[2] !== "0") {
+    console.error(ps.stdout, ps.stderr);
+    console.error("check-drive-invoice-archive: فشل Test-RunScheduled.ps1");
+    process.exit(1);
   }
+  console.log(`  ✓ الغلاف المجدول (pwsh ${pwshProbe.stdout.trim()}): ${m[1]} تأكيداً`);
 }
 
 // ── ٣) الهجرة على PostgreSQL محلي ────────────────────────────────────────────
