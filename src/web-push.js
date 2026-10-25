@@ -71,19 +71,81 @@
     return subscription;
   }
 
-  async function disable() {
-    if (!("serviceWorker" in navigator)) return;
-    const registration = await navigator.serviceWorker.ready;
-    const subscription = await registration.pushManager?.getSubscription();
-    if (!subscription) return;
-    try { await callPush("unsubscribe", { endpoint: subscription.endpoint }); } catch {}
-    await subscription.unsubscribe();
+  // فصل الجهاز عن الحساب عند الخروج (تدقيق الأجهزة المشتركة 2026-10-25): بلا ذلك يبقى اشتراك المتصفح
+  // وصفّه في الخادم مفعّلين باسم المالك، فيعرض الجهاز إشعاراته المالية بعد الخروج ولمن يدخل بعده.
+  const DETACH_TIMEOUT_MS = 3000;
+  // علامة «خروج لم يكتمل فصله» (مهلة أو بلا شبكة أو أُغلق التبويب): تُستكمل عند الفتح التالي.
+  const DETACH_PENDING_KEY = "ozk-push-detach-pending";
+
+  function withTimeout(promise, ms, fallback) {
+    return Promise.race([
+      Promise.resolve(promise).catch(() => fallback),
+      new Promise((done) => setTimeout(() => done(fallback), ms))
+    ]);
+  }
+
+  function setDetachPending(pending) {
+    try {
+      if (pending) localStorage.setItem(DETACH_PENDING_KEY, "1");
+      else localStorage.removeItem(DETACH_PENDING_KEY);
+    } catch {}
+  }
+
+  function detachPending() {
+    try { return localStorage.getItem(DETACH_PENDING_KEY) === "1"; } catch { return false; }
+  }
+
+  // getRegistration لا ready: ready لا يُحسم أبداً إن لم يُسجَّل عامل، فيعلق الخروج.
+  async function currentSubscription() {
+    if (!("serviceWorker" in navigator) || typeof navigator.serviceWorker.getRegistration !== "function") return null;
+    const registration = await navigator.serviceWorker.getRegistration();
+    return (await registration?.pushManager?.getSubscription?.()) || null;
+  }
+
+  // إلغاء المتصفح هو ما يمنع العرض على هذا الجهاز، فلا يُشترط نجاح الخادم. نداء الخادم يعطّل صف
+  // هذا الجهاز وحده (user_id + endpoint) ويحتاج الجلسة، فيُستدعى قبل signOut. الاثنان معاً بمهلة،
+  // ولا يرمي أبداً: فشل الفصل لا يمنع الخروج.
+  async function disable({ timeoutMs = DETACH_TIMEOUT_MS, server = true } = {}) {
+    setDetachPending(true);
+    const result = { subscribed: false, browser: false, server: false };
+    const run = async () => {
+      const subscription = await currentSubscription();
+      if (!subscription) {
+        result.browser = true;
+        return;
+      }
+      result.subscribed = true;
+      const endpoint = subscription.endpoint;
+      await Promise.allSettled([
+        Promise.resolve(subscription.unsubscribe()).then((ok) => { result.browser = ok !== false; }),
+        server
+          ? callPush("unsubscribe", { endpoint }).then(() => { result.server = true; })
+          : Promise.resolve()
+      ]);
+    };
+    await withTimeout(run(), timeoutMs, undefined);
+    if (result.browser) setDetachPending(false);
+    return { ...result };
+  }
+
+  // يُستدعى بعد كل تغيّر للجلسة (إقلاع، دخول، خروج). owner: يمسح علامة الفصل المعلّق ولا يلمس الاشتراك.
+  // غير ذلك: يُستكمل فصل خروج سابق لم يكتمل. وتنظيف اشتراك المالك عند دخول حساب غير مالك (الخيار ج)
+  // لا يعمل إلا بـappConfig.webPush.detachNonOwnerSessions = true، لأنه يُنهي استثناء OZKUSER (قرار المالك).
+  // المتصفح وحده: جلسة الموظف لا تملك صف المالك في الخادم، والمزود يرد 404/410 فيُعطَّل الصف تلقائياً.
+  async function syncSession({ signedIn = false, owner = false, timeoutMs = DETACH_TIMEOUT_MS } = {}) {
+    if (signedIn && owner) {
+      setDetachPending(false);
+      return { action: "kept" };
+    }
+    const nonOwnerCleanup = signedIn && window.appConfig?.webPush?.detachNonOwnerSessions === true;
+    if (!detachPending() && !nonOwnerCleanup) return { action: "none" };
+    const result = await disable({ timeoutMs, server: false });
+    return { action: result.subscribed ? "detached" : "none", ...result };
   }
 
   async function status() {
     if (!supported()) return { supported: false, permission: "unsupported", subscribed: false };
-    const registration = await navigator.serviceWorker.ready;
-    const subscription = await registration.pushManager.getSubscription();
+    const subscription = await withTimeout(currentSubscription(), DETACH_TIMEOUT_MS, null);
     return { supported: true, permission: Notification.permission, subscribed: Boolean(subscription) };
   }
 
@@ -91,5 +153,5 @@
   // النقرة. كان هذا الملف يضيف مستمعاً ثانياً على الزر نفسه، فيُطلب الإذن مرتين
   // في نقرة واحدة، ويُبتلع فشل الاشتراك في console فقط.
 
-  window.ozkWebPush = { enable, disable, status, supported };
+  window.ozkWebPush = { enable, disable, syncSession, status, supported };
 })();

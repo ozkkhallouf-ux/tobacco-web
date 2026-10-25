@@ -14,6 +14,11 @@ window.appConfig = {
     icloudUi: false,
     driveUi: false
   },
+  // إشعارات Push: الخروج يلغي اشتراك الجهاز دائماً. أما إلغاء اشتراك المالك تلقائياً حين يُفتح الموقع
+  // بحساب غير مالك (موظف، عدّاد جرد) فمطفأ، لأنه يُنهي استثناء OZKUSER الذي أقرّه المالك. لا يُفعَّل إلا بقراره.
+  webPush: {
+    detachNonOwnerSessions: false
+  },
   staffRoles: {
     "ozk.kh@outlook.com": { name: "موظف OZK", role: "موظف", accessRole: "employee" },
     "ozkkhalouf@gmail.com": { name: "مالك OZK", role: "المالك", accessRole: "owner" },

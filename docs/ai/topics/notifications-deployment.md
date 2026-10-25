@@ -67,6 +67,16 @@ static-only — تطابق نص SQL بالـregex ولا تنفّذ شيئاً �
 من المرجع — بلا dispatch/cron/triggers المجالات. الإنتاج يتخطّى الملف لأن الإصدار
 مسجَّل أصلاً.
 
+## فصل اشتراك Push عن الجلسة — 2026-10-25
+
+الثغرة: `logout()` كان يستدعي `signOut()` وحده، فيبقى اشتراك المتصفح وصفّه في `web_push_subscriptions` مفعّلين باسم المالك، ويعرض الجهاز إشعاراته المالية بعد الخروج ولمن يدخل بعده.
+
+- **الخروج** (ومسارا استعادة كلمة المرور): `detachPushBeforeSignOut()` في `src/app.js` تستدعي `ozkWebPush.disable()` قبل `signOut()` لأن نداء الخادم يحتاج الجلسة. `disable()` في `src/web-push.js` يلغي اشتراك المتصفح وينادي `unsubscribe` لـendpoint هذا الجهاز وحده معاً، بمهلة 3 ثوانٍ، ولا يرمي. `getRegistration` لا `ready` (ready لا يُحسم بلا عامل).
+- **ما لم يكتمل** (مهلة، بلا شبكة، إغلاق التبويب): علامة `ozk-push-detach-pending` في localStorage، تُستكمل عند الفتح التالي بلا جلسة أو بجلسة غير مالك (`syncSession`)، وتُمسح بجلسة المالك دون لمس اشتراكه.
+- **زر «إعادة تفعيل الإشعارات»**: للمالك حين الإذن `granted` ولا اشتراك (`ownerPushReenableBanner`). شريط «تفعيل» القديم يشترط `default`، فبدون الزر يفقد المالك Push بصمت بعد خروج ودخول. لا اشتراك صامت بلا نقرة.
+- **حساب غير مالك على جهاز فيه اشتراك المالك**: التنظيف مطفأ افتراضياً `appConfig.webPush.detachNonOwnerSessions = false`، لأنه يُنهي استثناء OZKUSER الذي أقرّه المالك. عند تفعيله بقراره: إلغاء المتصفح وحده، بلا نداء للخادم بجلسة الموظف.
+- لا تغيير للدالة ولا للجداول ولا لـService Worker. الحارس: `scripts/check-web-push-session-detach.mjs`.
+
 ## نطاق الملفات
 
 `src/web-push.js`, `public/service-worker.js`, `public/manifest.webmanifest`, `supabase/functions/web-push/`, `supabase/functions/telegram-webhook/` (`index.ts` + `grok-ask.mjs`)، `supabase/*notifications.sql`, `.github/workflows/`.

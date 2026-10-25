@@ -139,6 +139,7 @@ export const CHECKS = [
   'check-telegram-grok-ask.mjs',
   'check-warehouse-stock-prune.mjs',
   'check-web-push-delivery.mjs',
+  'check-web-push-session-detach.mjs',
   'check-windows-deploy-gate.mjs',
   'check-windows-release-app-token.mjs',
   'check-windows-release-resume.mjs',
