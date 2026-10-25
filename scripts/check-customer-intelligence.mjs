@@ -2591,9 +2591,9 @@ if (!process.env.OZK_CI_TZ_CHILD) {
     // فاتورتان: الفاصل بين الدفعات يُقاس فقط ما بقي دين؛ انقطاع 35 يوماً بلا دين ليس دورة.
     { id: 153, name: "v6 فاصل بلا انقطاع", accountClass: "customer", movements: tagAll([debit(59, 300), pay(57, 100), pay(53, 200), debit(20, 300), pay(18, 100), pay(10, 200)]) },
     // سرعة نمو حديثة مع سداد متفاوت: هامش ذروة + اتجاه صاعد ⇒ يحصره السقف الاحترازي.
-    { id: 154, name: "v6 ذروة", accountClass: "customer", movements: tagAll([
-      ...[69, 59, 49, 39, 29, 19, 9].flatMap((n, i) => [debit(n, n < 30 ? 600 : 200), pay(n - (i % 3 ? 2 : 8), n < 30 ? 600 : 200)])
-    ].sort((a, b) => a.date.localeCompare(b.date))) },
+    { id: 154, name: "v6 ذروة", accountClass: "customer", movements: tagAll([69, 59, 49, 39, 29, 19, 9]
+      .flatMap((n, i) => [debit(n, n < 30 ? 600 : 200), pay(n - (i % 3 ? 2 : 8), n < 30 ? 600 : 200)])
+      .sort((a, b) => a.date.localeCompare(b.date))) },
     // محفظة بدورات متفاوتة (2..20 يوماً) كي لا تحصر P10/P90 هامش الذروة في يوم واحد.
     ...[2, 3, 4, 8, 12, 16, 20].map((lag, i) => ({ id: 160 + i, name: `v6 محفظة ${lag}`, accountClass: "customer",
       movements: tagAll(regular({ from: 59, every: 6, amount: 300, lag })) }))

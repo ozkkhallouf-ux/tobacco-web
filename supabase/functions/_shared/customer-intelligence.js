@@ -1446,6 +1446,18 @@
     return value !== null && value > 0 ? value : null;
   }
 
+  // سجل الحد المعتمد كما تحفظه صفحة الأرصدة، مع طريقة ربطه (المعرّف أو الاسم القديم).
+  function approvedLimitEntry(limit, value, guid) {
+    return { value, updatedAt: isoOrNull(limit?.updatedAt ?? limit?.updated_at), matchedBy: guid ? "guid" : "name" };
+  }
+  const approvedValueOf = (entry) => (entry ? entry.value : null);
+
+  // رصيد مدين بلا حد يُقاس عليه: 35، ومع بيانات غير كافية (يحتاج مراجعة) فوق حد التعثّر 50.
+  function unlimitedBalanceRisk(credit) {
+    return credit.creditStatus === "insufficient_data" && credit.currentBalance > CONFIG.autoCredit.delinquentMinAmount ? 50 : 35;
+  }
+  const insufficientDataFlags = (credit) => (credit.creditStatus === "insufficient_data" ? ["credit_insufficient_data"] : []);
+
   // سبب التجاوز/القرب بنص يسمّي الحد الذي قيس عليه، فلا يناقض الرقم المعروض.
   const LIMIT_BASIS_LABELS = Object.freeze({ approved: "الحد المعتمد يدوياً", auto: "الحد المقترح", ameen: "حد الأمين" });
   function limitUsageReason(credit, customerName = null) {
@@ -2095,7 +2107,7 @@
       if (!key && !guid) continue;
       const value = numberOrNull(limit?.creditLimit ?? limit?.credit_limit);
       if (value === null) continue;
-      const entry = { value, updatedAt: isoOrNull(limit?.updatedAt ?? limit?.updated_at), matchedBy: guid ? "guid" : "name" };
+      const entry = approvedLimitEntry(limit, value, guid);
       if (guid && !legacyLimitByGuid.has(guid)) legacyLimitByGuid.set(guid, entry);
       if (!guid && key && !legacyLimitByKey.has(key)) legacyLimitByKey.set(key, entry);
     }
@@ -2352,7 +2364,7 @@
       const approvedEntry = record.customerGuid
         ? (legacyLimitByGuid.get(record.customerGuid) ?? legacyLimitByKey.get(record.nameKey) ?? null)
         : (legacyLimitByKey.get(record.nameKey) ?? null);
-      const legacyCreditLimit = approvedEntry ? approvedEntry.value : null;
+      const legacyCreditLimit = approvedValueOf(approvedEntry);
       const isSupplierRecord = isSupplierAccount(record.customerGuid, record.balanceRow?.isSupplier);
       const display = accountDisplay(record.balanceRow, record.customerGuid);
       let auto = null;
@@ -2662,7 +2674,7 @@
       if (draft.credit.creditStatus === "inactive_no_limit") flags.push("credit_inactive");
       if (draft.credit.creditStatus === "not_customer") flags.push("credit_not_customer");
       if (draft.credit.creditStatus === "needs_review") flags.push("credit_needs_review");
-      if (draft.credit.creditStatus === "insufficient_data") flags.push("credit_insufficient_data");
+      flags.push(...insufficientDataFlags(draft.credit));
       if (draft.credit.autoCredit?.mixedRole) flags.push("credit_mixed_role");
       if (draft.credit.autoCredit?.oldDebtCollection) flags.push("old_debt_collection");
       if (draft.credit.autoCredit?.status === "low_data") flags.push("credit_low_data");
@@ -2698,9 +2710,7 @@
       if (draft.credit.creditStatus === "over_limit" || draft.credit.creditStatus === "delinquent") creditRisk = 100;
       else if (draft.credit.creditStatus === "near_limit") creditRisk = 80;
       else if (draft.credit.creditUsagePercent !== null) creditRisk = round(clamp(draft.credit.creditUsagePercent * 0.7, 0, 70), 2);
-      // رصيد مدين بلا حد موثوق (بيانات غير كافية): يحتاج مراجعة، أعلى من رصيد عادي بلا حد.
-      else if (draft.credit.creditStatus === "insufficient_data" && draft.credit.currentBalance > CONFIG.autoCredit.delinquentMinAmount) creditRisk = 50;
-      else if (draft.credit.currentBalance > 0) creditRisk = 35;
+      else if (draft.credit.currentBalance > 0) creditRisk = unlimitedBalanceRisk(draft.credit);
 
       let churnRisk = 0;
       if (isInactive) churnRisk = 90;
@@ -2744,8 +2754,7 @@
       else if (draft.credit.creditStatus === "delinquent") reasons.push(...draft.credit.autoCredit.notes);
       else if (draft.credit.creditStatus === "inactive_no_limit") reasons.push(...draft.credit.autoCredit.notes);
       else if (draft.credit.creditStatus === "not_customer") reasons.push(...draft.credit.autoCredit.notes);
-      else if (draft.credit.creditStatus === "needs_review") reasons.push(...draft.credit.autoCredit.notes);
-      else if (draft.credit.creditStatus === "insufficient_data") reasons.push(...draft.credit.autoCredit.notes);
+      else if (["needs_review", "insufficient_data"].includes(draft.credit.creditStatus)) reasons.push(...draft.credit.autoCredit.notes);
       else if (draft.credit.creditStatus === "old_debt_collection") reasons.push(OLD_DEBT_NOTE(draft.credit.autoCredit.oldDebtCollection));
       else if (draft.credit.creditStatus === "near_limit") reasons.push(limitUsageReason(draft.credit));
       else if (draft.credit.creditStatus === "unknown_limit") reasons.push("عليه رصيد مدين بلا حد ائتمان محدد.");
