@@ -34,6 +34,7 @@ export const CHECKS = [
   'check-assistant-authorization.mjs',
   'check-assistant-read-only.mjs',
   'check-assistant-routing.mjs',
+  'check-auto-confirm-removal.mjs',
   'check-business-audit-item-identity.mjs',
   'check-cashier-reprint.mjs',
   'check-checks-manifest.mjs',
