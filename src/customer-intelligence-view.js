@@ -179,12 +179,19 @@
     return chosen.length > 1 ? chosen : DEFAULT_COLUMNS;
   }
 
+  // التخزين قد يكون محجوباً (تصفّح خاص) أو تالفاً؛ عندها يبقى العرض الافتراضي.
+  function readStoredColumns(userId) {
+    try {
+      return JSON.parse(localStorage.getItem(columnsStorageKey(userId)) || "null")?.columns;
+    } catch {
+      return null;
+    }
+  }
+
   function visibleColumnKeys() {
     const userId = state?.session?.id;
     if (columnPrefs.userId !== userId) {
-      let stored = null;
-      try { stored = JSON.parse(localStorage.getItem(columnsStorageKey(userId)) || "null"); } catch { stored = null; }
-      columnPrefs = { userId, keys: sanitizeColumnKeys(stored?.columns) };
+      columnPrefs = { userId, keys: sanitizeColumnKeys(readStoredColumns(userId)) };
     }
     return columnPrefs.keys;
   }
@@ -196,7 +203,9 @@
     try {
       if (clean.join() === DEFAULT_COLUMNS.join()) localStorage.removeItem(columnsStorageKey(userId));
       else localStorage.setItem(columnsStorageKey(userId), JSON.stringify({ columns: clean }));
-    } catch {}
+    } catch {
+      // التخزين محجوب: يبقى الاختيار لهذه الجلسة فقط.
+    }
   }
 
   const visibleColumns = () => {
