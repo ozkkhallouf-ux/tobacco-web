@@ -454,6 +454,14 @@
       sourceReportId: row.source_report_id || "",
       sourceSyncedAt: row.source_synced_at || "",
       pricePayload: row.price_payload || {},
+      // القيم الخام كما في القاعدة قبل التطبيع: التطبيع يحوّل السالب وغير الرقمي إلى
+      // صفر والعامل غير الصالح إلى 1، وتدقيق النشرة يحتاج التمييز بين المفقود والصفري
+      // وغير الصالح (src/price-cost-audit.js).
+      rawPrice: {
+        unit2Price: row.unit2_price,
+        unit1Price: row.unit1_price ?? row.sale_price,
+        unit2Factor: row.unit2_factor
+      },
       notes: row.notes || "",
       approvedAtExplicit: row.approved_at || "",
       approvedAt: row.approved_at || row.updated_at || row.created_at || "",
@@ -906,17 +914,21 @@
 
     async listItemCosts() {
       // التكلفة محمية على مستوى القاعدة (RLS = is_owner). غير المدير يرجع له [] دائماً.
+      // الخطأ يُرمى ولا يُبتلع: «فشل التحميل» يجب ألا يبدو «لا تكلفة» (تدقيق النشرة
+      // مقابل التكلفة يعلّق أحكامه عند الفشل). صفحات من 1000 صف: سقف PostgREST.
       if (!client) return [];
       const session = await getSupabaseSession();
       if (!session) return [];
-      try {
+      const rows = [];
+      for (let from = 0; ; from += 1000) {
         const { data, error } = await client
           .from(itemCostsTable)
-          .select("item_guid, item_name, avg_cost, currency, updated_at");
-        if (error) return [];
-        return data || [];
-      } catch {
-        return [];
+          .select("item_guid, item_name, avg_cost, currency, updated_at")
+          .order("match_key", { ascending: true })
+          .range(from, from + 999);
+        if (error) throw new Error(translateDbError(error.message));
+        rows.push(...(data || []));
+        if (!data || data.length < 1000) return rows;
       }
     },
 
