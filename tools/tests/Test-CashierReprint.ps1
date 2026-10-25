@@ -390,8 +390,39 @@ try {
         -Runner (New-Runner) -JobWatcher { param($c, $j) "spooler_completed" }
     Assert "فرض الحماية مع ملف قابل للكتابة من Users ⇒ blocked بلا طباعة" ($out.Status -eq "blocked" -and $script:runs.Count -eq 0)
 
+    # ── مراقبة مهمة الطباعة: قراءة حالة winspool مصطنعة، بلا طابور حقيقي ─────────────
+    $watchCfg = [pscustomobject]@{ jobWatchSeconds = 1 }
+    Assert "مراقبة: المهمة غادرت الطابور (-1) ⇒ spooler_completed" ((Watch-CashierPrintJob $watchCfg 7 { param($p, $j) -1 }) -eq "spooler_completed")
+    foreach ($bit in @(0x2, 0x20, 0x40, 0x200, 0x400)) {
+        Assert ("مراقبة: بت خطأ 0x{0:X} ⇒ printer_error" -f $bit) ((Watch-CashierPrintJob $watchCfg 7 { param($p, $j) $bit }.GetNewClosure()) -eq "printer_error")
+    }
+    Assert "مراقبة: خطأ مع بتات أخرى (0x10|0x40) ⇒ printer_error" ((Watch-CashierPrintJob $watchCfg 7 { param($p, $j) 0x50 }) -eq "printer_error")
+    Assert "مراقبة: ما زالت تُطبع (0x10) حتى المهلة ⇒ queued" ((Watch-CashierPrintJob $watchCfg 7 { param($p, $j) 0x10 }) -eq "queued")
+    Assert "مراقبة: تعذّر قراءة الطابور ⇒ unknown" ((Watch-CashierPrintJob $watchCfg 7 { param($p, $j) throw (New-Object System.ComponentModel.Win32Exception 5) }) -eq "unknown")
+    $script:polls = 0
+    $seq = Watch-CashierPrintJob ([pscustomobject]@{ jobWatchSeconds = 5 }) 7 { param($p, $j) $script:polls++; if ($script:polls -lt 3) { 0x10 } else { -1 } }
+    Assert "مراقبة: تُطبع ثم تغادر ⇒ spooler_completed بعد عدة قراءات" ($seq -eq "spooler_completed" -and $script:polls -eq 3)
+    $script:watched = $null
+    [void](Watch-CashierPrintJob $watchCfg 42 { param($p, $j) $script:watched = "$p|$j"; -1 })
+    Assert "مراقبة: تقرأ طابعة الكاشير الثابتة ورقم المهمة نفسه" ($script:watched -eq "XPRINTER XP-T80Q 80MM|42")
+
     # ── تشغيل حقيقي لسكربت جسر وهمي (Windows فقط) ──────────────────────────────
     if ($env:OS -eq "Windows_NT") {
+        # winspool حقيقي بلا طباعة: لا CIM، فيعمل لحساب الخدمة بدخول الشبكة.
+        Initialize-CashierSpool
+        Assert "winspool: الكود يُترجم تحت هذا الإصدار" ([bool]("OzkCashierSpool" -as [type]))
+        Assert "winspool: طابعة غير موجودة ⇒ استثناء" (Throws { Get-CashierPrinterInfo "OZK-NO-SUCH-PRINTER-$([guid]::NewGuid().ToString('N'))" })
+        Assert "winspool: مراقبة على طابعة غير موجودة ⇒ unknown" ((Watch-CashierPrintJob $watchCfg 7 { param($p, $j) Get-CashierSpoolJobStatus "OZK-NO-SUCH-PRINTER" $j }) -eq "unknown")
+        $pdfPrinter = "Microsoft Print to PDF"
+        $pdfInfo = $null
+        try { $pdfInfo = Get-CashierPrinterInfo $pdfPrinter } catch { $pdfInfo = $null }
+        if ($pdfInfo) {
+            Assert "winspool: قراءة منفذ وحالة طابعة موجودة" (-not [string]::IsNullOrWhiteSpace($pdfInfo.PortName) -and -not [string]::IsNullOrWhiteSpace($pdfInfo.StatusText))
+            Assert "winspool: مهمة غير موجودة ⇒ -1 (غادرت الطابور)" ((Get-CashierSpoolJobStatus $pdfPrinter 999999) -eq -1)
+        } else {
+            Write-Host "SKIP winspool على طابعة موجودة (لا توجد Microsoft Print to PDF)"
+        }
+
         $argsFile = Join-Path $tempRoot "bridge-args.txt"
         $bridge2 = Join-Path $tempRoot "fake-bridge-2.ps1"
         $body = 'param([string]$Mode,[string]$InvoiceType,[int]$InvoiceNumber,[string]$InvoiceDate,[string]$PrinterName,[switch]$ConfirmPhysicalPrint)' + "`r`n" +
