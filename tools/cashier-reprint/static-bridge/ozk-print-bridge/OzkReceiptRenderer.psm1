@@ -127,6 +127,63 @@ public static class OzkRawThermalPrinter
 "@
 }
 
+# Queue check through winspool. Win32_Printer (WMI/CIM) denies a non-admin network logon such as
+# the ssh service account, while OpenPrinter/GetPrinter need only the print right Send already uses.
+if (-not ("OzkThermalPrinterQueue" -as [type])) {
+    Add-Type -TypeDefinition @"
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+
+public static class OzkThermalPrinterQueue
+{
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct PRINTER_INFO_2
+    {
+        public string pServerName, pPrinterName, pShareName, pPortName, pDriverName, pComment, pLocation;
+        public IntPtr pDevMode;
+        public string pSepFile, pPrintProcessor, pDatatype, pParameters;
+        public IntPtr pSecurityDescriptor;
+        public uint Attributes, Priority, DefaultPriority, StartTime, UntilTime, Status, cJobs, AveragePPM;
+    }
+
+    [DllImport("winspool.drv", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool OpenPrinter(string printerName, out IntPtr printer, IntPtr defaults);
+    [DllImport("winspool.drv", SetLastError = true)]
+    private static extern bool ClosePrinter(IntPtr printer);
+    [DllImport("winspool.drv", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool GetPrinter(IntPtr printer, int level, IntPtr buffer, int size, out int needed);
+
+    // [queue name as Windows reports it, PRINTER_INFO_2.Status]
+    public static string[] Info(string printerName)
+    {
+        IntPtr printer;
+        if (!OpenPrinter(printerName, out printer, IntPtr.Zero)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        IntPtr buffer = IntPtr.Zero;
+        try
+        {
+            int needed;
+            GetPrinter(printer, 2, IntPtr.Zero, 0, out needed);
+            if (needed <= 0) throw new Win32Exception(Marshal.GetLastWin32Error());
+            buffer = Marshal.AllocHGlobal(needed);
+            if (!GetPrinter(printer, 2, buffer, needed, out needed)) throw new Win32Exception(Marshal.GetLastWin32Error());
+            PRINTER_INFO_2 info = (PRINTER_INFO_2)Marshal.PtrToStructure(buffer, typeof(PRINTER_INFO_2));
+            return new string[] { info.pPrinterName, info.Status.ToString() };
+        }
+        finally
+        {
+            if (buffer != IntPtr.Zero) Marshal.FreeHGlobal(buffer);
+            ClosePrinter(printer);
+        }
+    }
+}
+"@
+}
+
+# PRINTER_STATUS bits that would leave a job waiting in the queue to print later on its own:
+# paused, error, pending deletion, paper jam, paper out, offline, not available, user intervention, door open.
+$script:PrinterBlockingStatusMask = 0x1 -bor 0x2 -bor 0x4 -bor 0x8 -bor 0x10 -bor 0x80 -bor 0x1000 -bor 0x100000 -bor 0x400000
+
 $script:ReceiptWidth = 576
 $script:ReceiptDpi = 203
 $script:CashierPrinterName = "XPRINTER XP-T80Q 80MM"
@@ -415,6 +472,22 @@ function Save-OzkReceiptPreview {
     return $fullPath
 }
 
+# Runs before any job exists, so every failure here means nothing was printed.
+function Assert-OzkPrinterQueueReady([string]$PrinterName) {
+    try { $queue = [OzkThermalPrinterQueue]::Info($PrinterName) }
+    catch {
+        $inner = $_.Exception
+        while ($null -ne $inner.InnerException) { $inner = $inner.InnerException }
+        if ($inner -is [ComponentModel.Win32Exception] -and $inner.NativeErrorCode -eq 1801) { throw "Printer queue not found or ambiguous: $PrinterName" }
+        throw ("OpenPrinter failed for {0}: {1}" -f $PrinterName, $inner.Message)
+    }
+    if ([string]$queue[0] -ne $PrinterName) { throw "Printer queue not found or ambiguous: $PrinterName" }
+    $status = [uint32]$queue[1]
+    if (($status -band $script:PrinterBlockingStatusMask) -ne 0) {
+        throw ("Printer queue not ready: {0} (status 0x{1:X})" -f $PrinterName, $status)
+    }
+}
+
 function Send-OzkReceiptToPrinter {
     [CmdletBinding()]
     param(
@@ -427,8 +500,7 @@ function Send-OzkReceiptToPrinter {
     if ($PrinterName -cne $script:CashierPrinterName) {
         throw "Cashier receipts are restricted to '$($script:CashierPrinterName)'; refusing '$PrinterName'."
     }
-    $installed = @(Get-CimInstance Win32_Printer | Where-Object { $_.Name -eq $PrinterName })
-    if ($installed.Count -ne 1) { throw "Printer queue not found or ambiguous: $PrinterName" }
+    Assert-OzkPrinterQueueReady $PrinterName
     $bitmap = New-OzkReceiptBitmap -Receipt $Receipt -LogoPath $LogoPath
     try {
         $payload = [OzkRawThermalPrinter]::ToEscPosRaster($bitmap, 190)

@@ -406,6 +406,30 @@ try {
     [void](Watch-CashierPrintJob $watchCfg 42 { param($p, $j) $script:watched = "$p|$j"; -1 })
     Assert "مراقبة: تقرأ طابعة الكاشير الثابتة ورقم المهمة نفسه" ($script:watched -eq "XPRINTER XP-T80Q 80MM|42")
 
+    # ── بصمة الـrenderer: اختيارية، وحين تُضبط شرط للطباعة ─────────────────────────
+    Assert "إعداد بلا expectedRendererSha256 ⇒ لا فحص للـrenderer (السلوك الحالي)" ((Assert-CashierRendererPinned (New-TestConfig $bridgeCopy $fakeHash)) -eq "")
+    Assert "expectedRendererSha256 غير صالحة ⇒ رفض الإعداد" (Throws { Read-CashierReprintConfig (New-RawConfig @{ bridgeScriptPath = $bridgeCopy; expectedRendererSha256 = "abc" }) })
+    $rendererCfgPath = New-RawConfig @{ bridgeScriptPath = $bridgeCopy; expectedRendererSha256 = ("0" * 64) }
+    $rendererFile = Get-CashierRendererPath (Read-CashierReprintConfig $rendererCfgPath)
+    Assert "مسار الـrenderer بجانب الجسر: ozk-print-bridge\OzkReceiptRenderer.psm1" ($rendererFile.StartsWith($bridgeDir) -and $rendererFile.EndsWith("OzkReceiptRenderer.psm1"))
+    Assert "بصمة renderer مضبوطة والملف غائب ⇒ رفض" (Throws { Assert-CashierRendererPinned (Read-CashierReprintConfig $rendererCfgPath) })
+    [void](New-Item -ItemType Directory -Path (Split-Path -Parent $rendererFile) -Force)
+    [IO.File]::WriteAllText($rendererFile, "renderer", (New-Object Text.UTF8Encoding($true)))
+    $rendererHash = Get-CashierFileSha256 $rendererFile
+    $rendererOk = Read-CashierReprintConfig (New-RawConfig @{ bridgeScriptPath = $bridgeCopy; expectedRendererSha256 = $rendererHash.ToUpperInvariant() })
+    Assert "بصمة renderer مطابقة ⇒ تُعاد البصمة" ((Assert-CashierRendererPinned $rendererOk) -eq $rendererHash)
+    Assert "بصمة renderer مختلفة ⇒ رفض" (Throws { Assert-CashierRendererPinned (Read-CashierReprintConfig $rendererCfgPath) })
+    $script:runs.Clear()
+    $out = Invoke-CashierReprint -Config (Read-CashierReprintConfig $rendererCfgPath) -Root $protRoot -Number 501 -RequestId ([guid]::NewGuid().ToString()) `
+        -Lookup { param($n) @(New-Row "a1" 501 "2026-10-24") } -BridgeCheck { param($c, $r) Assert-CashierBridgeReady $c $r } -Runner (New-Runner) -JobWatcher { param($c, $j) "spooler_completed" }
+    Assert "renderer غير معتمد ⇒ blocked بلا تشغيل الجسر" ($out.Status -eq "blocked" -and $out.Details.reason -eq "bridge_not_pinned" -and $script:runs.Count -eq 0)
+
+    # ── فحص الطابور في الـrenderer يقع قبل إنشاء أي مهمة: لا ورق ⇒ not_printed ─────────
+    foreach ($msg in @("Printer queue not found or ambiguous: XPRINTER XP-T80Q 80MM", "Printer queue not ready: XPRINTER XP-T80Q 80MM (status 0x80)", "OpenPrinter failed for XPRINTER XP-T80Q 80MM: Access is denied")) {
+        Assert "خطأ قبل الطابور ⇒ not_printed: $msg" ((Get-CashierBridgeOutcome 1 $msg $false).Outcome -eq "not_printed")
+    }
+    Assert "Access denied من CIM (الـrenderer القديم) ⇒ uncertain كما في C5" ((Get-CashierBridgeOutcome 1 "Get-CimInstance : Access denied" $false).Outcome -eq "uncertain")
+
     # ── تشغيل حقيقي لسكربت جسر وهمي (Windows فقط) ──────────────────────────────
     if ($env:OS -eq "Windows_NT") {
         # winspool حقيقي بلا طباعة: لا CIM، فيعمل لحساب الخدمة بدخول الشبكة.
@@ -422,6 +446,53 @@ try {
         } else {
             Write-Host "SKIP winspool على طابعة موجودة (لا توجد Microsoft Print to PDF)"
         }
+
+        # الـrenderer الثابت لحساب الخدمة: فحص الطابور عبر winspool بلا CIM، وبلا أي طباعة.
+        $rendererModule = Import-Module (Join-Path $toolDir "static-bridge\ozk-print-bridge\OzkReceiptRenderer.psm1") -Force -PassThru
+        Assert "renderer: يُستورد تحت هذا الإصدار ونوع الطابور مترجم" ([bool]("OzkThermalPrinterQueue" -as [type]))
+        Assert "renderer: الدوال المصدَّرة كما هي" ((@($rendererModule.ExportedFunctions.Keys | Sort-Object) -join ",") -eq "New-OzkReceiptBitmap,Save-OzkReceiptPreview,Send-OzkReceiptToPrinter")
+        $queueCheck = { param($name) & $rendererModule { param($n) Assert-OzkPrinterQueueReady $n } $name }
+        $missingMessage = ""
+        try { & $queueCheck "OZK-NO-SUCH-PRINTER-$([guid]::NewGuid().ToString('N'))" } catch { $missingMessage = [string]$_.Exception.Message }
+        Assert "renderer: طابعة غير موجودة ⇒ Printer queue not found (not_printed)" ($missingMessage -match "^Printer queue not found or ambiguous" -and (Get-CashierBridgeOutcome 1 $missingMessage $false).Outcome -eq "not_printed")
+        $mask = & $rendererModule { $script:PrinterBlockingStatusMask }
+        foreach ($bit in @(0x1, 0x2, 0x8, 0x10, 0x80, 0x1000, 0x100000, 0x400000)) {
+            Assert ("renderer: حالة الطابعة 0x{0:X} تمنع الإرسال" -f $bit) (($mask -band $bit) -ne 0)
+        }
+        foreach ($bit in @(0x0, 0x200, 0x400, 0x4000)) {
+            Assert ("renderer: حالة الطابعة 0x{0:X} (جاهزة/تطبع) لا تمنع الإرسال" -f $bit) (($mask -band $bit) -eq 0)
+        }
+        if ($pdfInfo) {
+            if (($pdfInfo.Status -band $mask) -eq 0) {
+                Assert "renderer: طابور موجود وجاهز ⇒ يمر الفحص" (-not (Throws { & $queueCheck $pdfPrinter }))
+            } else {
+                Assert "renderer: طابور موجود بحالة مانعة ⇒ Printer queue not ready" ((Throws { & $queueCheck $pdfPrinter }))
+            }
+        }
+        # فحص الطابور قبل الرسم: على جهاز بلا XPRINTER يقف الإرسال عنده. على جهاز الطابعة لا يُشغَّل
+        # إطلاقاً، ومسار الشعار الغائب يمنع الرسم والإرسال حتى لو تجاوز الفحص.
+        $xprinterPresent = $true
+        try { [void][OzkThermalPrinterQueue]::Info("XPRINTER XP-T80Q 80MM") } catch { $xprinterPresent = $false }
+        if (-not $xprinterPresent -and $env:COMPUTERNAME -ne "OZKUSER") {
+            $sendMessage = ""
+            try { [void](Send-OzkReceiptToPrinter -Receipt ([pscustomobject]@{}) -LogoPath (Join-Path $tempRoot "no-logo.png") -PrinterName "XPRINTER XP-T80Q 80MM" -ConfirmPhysicalPrint) } catch { $sendMessage = [string]$_.Exception.Message }
+            Assert "renderer: الإرسال يفحص الطابور قبل الرسم ⇒ Printer queue not found" ($sendMessage -match "^Printer queue not found or ambiguous")
+        } else {
+            Write-Host "SKIP ترتيب فحص الطابور في الإرسال (XPRINTER موجودة على هذا الجهاز)"
+        }
+        Assert "renderer: طابعة غير الكاشير مرفوضة قبل الطابور" ((Throws { Send-OzkReceiptToPrinter -Receipt ([pscustomobject]@{}) -LogoPath "x" -PrinterName "Microsoft Print to PDF" -ConfirmPhysicalPrint }))
+        $logo = Join-Path $tempRoot "logo.png"
+        $logoBitmap = New-Object Drawing.Bitmap(150, 168)
+        try { $logoBitmap.Save($logo, [Drawing.Imaging.ImageFormat]::Png) } finally { $logoBitmap.Dispose() }
+        $sample = [pscustomobject]@{
+            MerchantName = "تجربة"; Subtitle = "تجربة"; CommercialRegister = "0"; Phones = "0"; CenterPhone = "0"; Address = "تجربة"
+            Date = "2026-10-25"; Time = "10:00"; CustomerName = "تجربة"; Description = "تجربة"; SaleDescription = "تجربة"
+            Lines = @([pscustomobject]@{ Name = "مادة تجربة"; Quantity = 2; UnitPrice = 1.5; Total = 3 })
+            GrossTotal = 3; Discount = 0; NetTotal = 3; Payment = 3; BalanceFound = $false; PreviousBalance = 0; CurrentBalance = 0; ItemCount = 1; TotalQuantity = 2
+        }
+        $preview = Save-OzkReceiptPreview -Receipt $sample -LogoPath $logo -Path (Join-Path $tempRoot "preview.png")
+        Assert "renderer: رسم معاينة إيصال إلى PNG بلا طابعة" ((Test-Path -LiteralPath $preview) -and (Get-Item -LiteralPath $preview).Length -gt 0)
+        $rendererModule | Remove-Module -Force
 
         $argsFile = Join-Path $tempRoot "bridge-args.txt"
         $bridge2 = Join-Path $tempRoot "fake-bridge-2.ps1"
