@@ -92,6 +92,11 @@ OZK2026 لا يحوي XPRINTER، والجهازان لا يتشاركان طاب
   تغيير صلاحيات أو ملكية لغير SYSTEM والمدراء وTrustedInstaller وصاحب التشغيل. يشمل الفحص مجلد الأداة،
   و`app`، و`config.json`، و`sql.secret`، والجسر وملفات كوده ومجلداته. مع `true` يمنع أي خطر من هذا النوع
   الطباعة (`blocked`). مجلدات البيانات `logs` و`requests` و`locks` خارج الفحص لأنها لا تُنفَّذ.
+- **الطابعة والطابور:** فحص الطابعة في `-Mode Health` ومتابعة مهمة الطباعة بعد الإرسال يقرآن من winspool مباشرة
+  (`OpenPrinter` و`GetPrinter` و`GetJob`)، لا من `Get-Printer`/`Get-PrintJob`. سبب ذلك أن حساب الخدمة يدخل عبر ssh
+  دخول شبكة، وWMI/CIM يرفض هذا الدخول لغير المدراء، بينما winspool يحتاج صلاحية الطباعة العادية فقط. مهمة لم تعد
+  في الطابور تعني `spooler_completed`، وبتات الخطأ (ERROR، OFFLINE، PAPEROUT، BLOCKED_DEVQ، USER_INTERVENTION) تعني
+  `printer_error`.
 
 ## التثبيت (لكل جهاز، بموافقة المالك)
 

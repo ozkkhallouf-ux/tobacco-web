@@ -502,19 +502,125 @@ function Invoke-CashierBridgeProcess($Config, [int]$Number, [string]$Date, [stri
     return [pscustomobject]@{ ExitCode = $exitCode; Output = $output; TimedOut = $timedOut }
 }
 
+# ── طابور Windows عبر winspool مباشرة ─────────────────────────────────────────
+# حساب الخدمة يدخل عبر ssh دخول شبكة (LogonType 3)، وWMI/CIM يرفض هذا الدخول لغير المدراء
+# (Get-Printer وGet-PrintJob ⇒ Access denied). winspool يعمل بصلاحية الطباعة نفسها التي يطبع بها الجسر.
+$script:CashierSpoolSource = @"
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+public static class OzkCashierSpool {
+    [DllImport("winspool.drv", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool OpenPrinter(string name, out IntPtr handle, IntPtr defaults);
+    [DllImport("winspool.drv", SetLastError = true)]
+    static extern bool ClosePrinter(IntPtr handle);
+    [DllImport("winspool.drv", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool GetPrinter(IntPtr handle, int level, IntPtr buffer, int size, out int needed);
+    [DllImport("winspool.drv", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool GetJob(IntPtr handle, int jobId, int level, IntPtr buffer, int size, out int needed);
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct PRINTER_INFO_2 {
+        public string pServerName, pPrinterName, pShareName, pPortName, pDriverName, pComment, pLocation;
+        public IntPtr pDevMode;
+        public string pSepFile, pPrintProcessor, pDatatype, pParameters;
+        public IntPtr pSecurityDescriptor;
+        public uint Attributes, Priority, DefaultPriority, StartTime, UntilTime, Status, cJobs, AveragePPM;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    struct SYSTEMTIME { public ushort Year, Month, DayOfWeek, Day, Hour, Minute, Second, Milliseconds; }
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct JOB_INFO_1 {
+        public uint JobId;
+        public string pPrinterName, pMachineName, pUserName, pDocument, pDatatype, pStatus;
+        public uint Status, Priority, Position, TotalPages, PagesPrinted;
+        public SYSTEMTIME Submitted;
+    }
+
+    static IntPtr Open(string name) {
+        IntPtr handle;
+        if (!OpenPrinter(name, out handle, IntPtr.Zero)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        return handle;
+    }
+
+    // [PortName, Status]
+    public static string[] PrinterInfo(string name) {
+        IntPtr handle = Open(name);
+        IntPtr buffer = IntPtr.Zero;
+        try {
+            int needed;
+            GetPrinter(handle, 2, IntPtr.Zero, 0, out needed);
+            if (needed <= 0) throw new Win32Exception(Marshal.GetLastWin32Error());
+            buffer = Marshal.AllocHGlobal(needed);
+            if (!GetPrinter(handle, 2, buffer, needed, out needed)) throw new Win32Exception(Marshal.GetLastWin32Error());
+            PRINTER_INFO_2 info = (PRINTER_INFO_2)Marshal.PtrToStructure(buffer, typeof(PRINTER_INFO_2));
+            return new string[] { info.pPortName, info.Status.ToString() };
+        } finally {
+            if (buffer != IntPtr.Zero) Marshal.FreeHGlobal(buffer);
+            ClosePrinter(handle);
+        }
+    }
+
+    // -1: المهمة لم تعد في الطابور (ERROR_INVALID_PARAMETER). غير ذلك: بتات JOB_STATUS.
+    public static long JobStatus(string name, int jobId) {
+        IntPtr handle = Open(name);
+        IntPtr buffer = IntPtr.Zero;
+        try {
+            int needed;
+            if (!GetJob(handle, jobId, 1, IntPtr.Zero, 0, out needed)) {
+                int error = Marshal.GetLastWin32Error();
+                if (error == 87) return -1;
+                if (error != 122 || needed <= 0) throw new Win32Exception(error);
+            }
+            buffer = Marshal.AllocHGlobal(needed);
+            if (!GetJob(handle, jobId, 1, buffer, needed, out needed)) {
+                int error = Marshal.GetLastWin32Error();
+                if (error == 87) return -1;
+                throw new Win32Exception(error);
+            }
+            JOB_INFO_1 job = (JOB_INFO_1)Marshal.PtrToStructure(buffer, typeof(JOB_INFO_1));
+            return job.Status;
+        } finally {
+            if (buffer != IntPtr.Zero) Marshal.FreeHGlobal(buffer);
+            ClosePrinter(handle);
+        }
+    }
+}
+"@
+
+function Initialize-CashierSpool {
+    if (-not ("OzkCashierSpool" -as [type])) { Add-Type -TypeDefinition $script:CashierSpoolSource }
+}
+
+function Get-CashierPrinterInfo([string]$Name) {
+    Initialize-CashierSpool
+    $info = [OzkCashierSpool]::PrinterInfo($Name)
+    $status = [uint32]$info[1]
+    $text = "Normal"
+    if ($status -ne 0) { $text = "0x{0:X}" -f $status }
+    return [pscustomobject]@{ PortName = [string]$info[0]; Status = $status; StatusText = $text }
+}
+
+function Get-CashierSpoolJobStatus([string]$PrinterName, [int]$JobId) {
+    Initialize-CashierSpool
+    return [int64][OzkCashierSpool]::JobStatus($PrinterName, $JobId)
+}
+
 # ── تأكيد ما بعد الإرسال: ما يمكن إثباته من طابور Windows فقط ───────────────────
 # spooler_completed: المهمة غادرت الطابور بلا خطأ (سلّمها Windows للطابعة؛ ليس دليلاً ورقياً).
 # printer_error: المهمة عالقة بحالة خطأ (ورق، غطاء، انقطاع USB…).
 # queued: ما زالت في الطابور عند انتهاء المراقبة.
 # unknown: تعذّرت قراءة الطابور.
-function Watch-CashierPrintJob($Config, [int]$JobId) {
+# بتات JOB_STATUS: ERROR 0x2، OFFLINE 0x20، PAPEROUT 0x40، BLOCKED_DEVQ 0x200، USER_INTERVENTION 0x400.
+$script:CashierJobErrorBits = 0x2 -bor 0x20 -bor 0x40 -bor 0x200 -bor 0x400
+
+function Watch-CashierPrintJob($Config, [int]$JobId, [scriptblock]$GetStatus = { param($p, $j) Get-CashierSpoolJobStatus $p $j }) {
     $deadline = (Get-Date).AddSeconds([math]::Max(1, $Config.jobWatchSeconds))
     try {
         while ($true) {
-            $job = @(Get-PrintJob -PrinterName $script:CashierPrinterName -ErrorAction Stop | Where-Object { $_.Id -eq $JobId })
-            if ($job.Count -eq 0) { return "spooler_completed" }
-            $state = [string]$job[0].JobStatus
-            if ($state -match '(?i)error|offline|paperout|blocked|usersintervention') { return "printer_error" }
+            $status = [int64](& $GetStatus $script:CashierPrinterName $JobId)
+            if ($status -lt 0) { return "spooler_completed" }
+            if (($status -band $script:CashierJobErrorBits) -ne 0) { return "printer_error" }
             if ((Get-Date) -ge $deadline) { return "queued" }
             Start-Sleep -Milliseconds 500
         }
