@@ -6,7 +6,11 @@ const { spawn } = require("child_process");
 
 const mode = process.env.FAKE_WORKER_MODE || "ok";
 const runs = process.env.FAKE_WORKER_RUNS;
-if (runs) fs.appendFileSync(runs, `${process.pid} ${process.argv.slice(2).join(" ")}\n`);
+// يسجّل أيضاً وضع الإعداد الذي سيقرؤه lib/config.js فعلاً (المتغير أولاً ثم config.json المجاور).
+const cfgPath = process.env.OZK_DRIVE_ARCHIVE_CONFIG || require("path").join(__dirname, "config.json");
+let cfgMode = "missing";
+try { cfgMode = JSON.parse(fs.readFileSync(cfgPath, "utf8").replace(/^\uFEFF/, "")).mode || "dry-run"; } catch { /* يبقى missing */ }
+if (runs) fs.appendFileSync(runs, `${process.pid} ${process.argv.slice(2).join(" ")} mode=${cfgMode}\n`);
 
 const cycle = (extra) => console.log(JSON.stringify({ detect: { rows: 0, created: 0, reconcile: false, complete: true }, upload: null, notify: null, report: null, driveState: "unknown", ...extra }));
 

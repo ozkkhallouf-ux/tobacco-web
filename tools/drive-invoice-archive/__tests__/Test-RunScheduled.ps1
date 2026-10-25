@@ -98,6 +98,22 @@ try {
     $e = New-Env 'drive'
     Assert 'drive مسموح صراحة بالوسيطة ⇒ يعمل' ((Invoke-Wrapper $e 'ok' 60 @('dry-run', 'drive')) -eq 0 -and (Get-RunCount $e) -eq 1)
 
+    # ── العامل يقرأ الإعداد المفحوص نفسه (Codex P1) ──────────────────────────
+    $liveCfg = Join-Path $tempRoot 'inherited-live.json'
+    [IO.File]::WriteAllText($liveCfg, '{ "mode": "live", "archiveFrom": "2026-11-01", "edgeUrl": "https://x" }')
+    $e = New-Env
+    $env:OZK_DRIVE_ARCHIVE_CONFIG = $liveCfg
+    try { $code = Invoke-Wrapper $e 'ok' } finally { Remove-Item Env:\OZK_DRIVE_ARCHIVE_CONFIG -ErrorAction SilentlyContinue }
+    Assert 'OZK_DRIVE_ARCHIVE_CONFIG موروث يشير إلى live ⇒ العامل يقرأ dry-run المفحوص' ($code -eq 0 -and ([IO.File]::ReadAllText($e.Runs) -match 'mode=dry-run') -and ([IO.File]::ReadAllText($e.Runs) -notmatch 'mode=live'))
+    $e = New-Env 'live'
+    $dryCfg = Join-Path $e.Root 'dry.json'
+    [IO.File]::WriteAllText($dryCfg, '{ "mode": "dry-run", "archiveFrom": "2026-11-01" }')
+    $env:FAKE_WORKER_MODE = 'ok'
+    $env:FAKE_WORKER_RUNS = $e.Runs
+    $code = Invoke-Ps ((Get-WrapperArgs $e) + @('-ConfigPath', $dryCfg))
+    Assert '-ConfigPath لملف dry-run وconfig.json المجاور live ⇒ العامل يقرأ dry-run' ($code -eq 0 -and ([IO.File]::ReadAllText($e.Runs) -match 'mode=dry-run'))
+    Assert 'لا لقطة إعداد باقية بعد التشغيل' (@(Get-ChildItem -LiteralPath $e.LogDir -Filter 'run-*.config.json').Count -eq 0)
+
     # ── الفحص المسبق ──────────────────────────────────────────────────────────
     $e = New-Env -NoConfig
     Assert 'config.json مفقود ⇒ 12 بلا تشغيل' ((Invoke-Wrapper $e 'ok') -eq 12 -and (Get-RunCount $e) -eq 0)
