@@ -7,10 +7,8 @@
 // ============================================================================
 import { chromium } from "playwright";
 import { mkdirSync } from "node:fs";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 
-const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SHOTS = process.env.PRICE_AUDIT_SHOTS || "";
 if (SHOTS) mkdirSync(SHOTS, { recursive: true });
 
@@ -107,7 +105,7 @@ async function openPricing({ session, viewport }) {
   const names = await page.locator('[data-price-audit-results="below"] tbody tr .price-audit-item strong').allInnerTexts();
   check(names[0] === "صنف تحت التكلفة ألف", `الأكبر نسبة خسارة أولاً: ${names.join(" | ")}`);
   check(names.length === 3, `ألف بالجملة والمفرق + باء بالجملة = 3 صفوف، ظهر ${names.length}`);
-  const redCell = await page.locator('[data-price-audit-results="below"] tbody tr').first().locator("td.price-audit-bad").first();
+  const redCell = page.locator('[data-price-audit-results="below"] tbody tr').first().locator("td.price-audit-bad").first();
   const color = await redCell.evaluate((el) => getComputedStyle(el).color);
   check(/rgb\(2(55|5\d), 1[01]\d, 10\d\)|rgb\(184, 50, 40\)/.test(color), `السعر المخالف بالأحمر: ${color}`);
   if (SHOTS) await page.locator(".price-audit").screenshot({ path: join(SHOTS, "desktop-below.png") });
@@ -205,4 +203,3 @@ if (failures.length) {
   process.exit(1);
 }
 console.log(`check-price-cost-audit-ui: اجتاز ${passed} فحصاً.`);
-void root;

@@ -125,7 +125,7 @@
       const guid = String(row.item_guid || "").trim().toUpperCase();
       if (guid && !byGuid.has(guid)) byGuid.set(guid, row);
       const ms = timeMs(row.updated_at);
-      if (Number.isFinite(ms) && !(ms <= newestMs)) newestMs = ms;
+      if (Number.isFinite(ms) && (!Number.isFinite(newestMs) || ms > newestMs)) newestMs = ms;
     });
     return { byGuid, newestMs };
   }
@@ -136,7 +136,7 @@
   }
 
   // تكلفة الوحدة الثانية أو سبب تعذّرها — مستقلة عن نوع السعر.
-  function resolveCost(item, costIndex, now) {
+  function resolveCost(item, costIndex) {
     const guid = String(item.itemGuid || "").trim().toUpperCase();
     if (!guid) return { ok: false, reason: "no_guid" };
     const row = costIndex.byGuid.get(guid);
@@ -232,7 +232,7 @@
           retail: retailPrice(item.approved)
         };
         const showCost = costs.ok || (source.costs && source.costs.status === "ok");
-        const cost = showCost ? resolveCost(item, costIndex, nowMs) : { ok: false, reason: "" };
+        const cost = showCost ? resolveCost(item, costIndex) : { ok: false, reason: "" };
 
         if (prices.wholesale.state !== PRICE_STATES.valid || prices.retail.state !== PRICE_STATES.valid) {
           unpriced.push({
