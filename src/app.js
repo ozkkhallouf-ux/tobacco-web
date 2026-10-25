@@ -334,6 +334,8 @@ const state = {
   // "default" ولا تُقرأ إلا في آخر boot()، فظهر شريط التفعيل طوال الإقلاع لمن
   // منح الإذن أو رفضه، وبقي ظاهراً إلى الأبد إن لم يكتمل الإقلاع.
   notifPermission: readNotifPermission(),
+  // المالك بإذن ممنوح ولا اشتراك Push على هذا الجهاز (بعد خروج سابق مثلاً): يُعرض زر «إعادة التفعيل».
+  ownerPushMissing: false,
   seenRequestIds: new Set(),
   globalSearch: "",
   syriaCurrency: "USD",
@@ -469,6 +471,86 @@ function requestNotifPermission() {
   return notifPermissionRequest;
 }
 
+// الخروج يلغي اشتراك Push على الجهاز، والإذن يبقى ممنوحاً، فلا يظهر شريط «تفعيل» (يشترط default).
+// بلا هذا الزر يفقد المالك إشعاراته على جهازه الشخصي بصمت بعد أول خروج ودخول.
+function ownerPushReenableBanner() {
+  const busy = Boolean(ownerPushReenableRequest);
+  return `
+    <section class="notice-panel warning notif-banner" data-owner-push-missing>
+      <span><strong>إشعارات المالك متوقفة على هذا الجهاز</strong> — أُلغيت عند تسجيل الخروج. أعد تفعيلها إن كان هذا جهازك الشخصي.</span>
+      <span class="notif-banner-actions">
+        <button class="button primary" type="button" data-action="reenable-push"${busy ? " disabled" : ""}>إعادة تفعيل الإشعارات</button>
+        <button class="button secondary" type="button" data-action="snooze-notif">لاحقاً</button>
+      </span>
+    </section>
+  `;
+}
+
+let ownerPushReenableRequest = null;
+
+// enable() مباشرة داخل النقرة (شرط iPhone)، ولا اشتراك صامت بلا نقرة.
+function reenableOwnerPush() {
+  const push = window.ozkWebPush;
+  if (ownerPushReenableRequest || !push?.enable) return ownerPushReenableRequest || Promise.resolve();
+  let pending;
+  try {
+    pending = push.enable();
+  } catch (error) {
+    pending = Promise.reject(error);
+  }
+  ownerPushReenableRequest = Promise.resolve(pending)
+    .then(
+      () => {
+        state.ownerPushMissing = false;
+        setNotice("success", "أُعيد تفعيل الإشعارات على هذا الجهاز.");
+      },
+      (error) => setNotice("error", `تعذّرت إعادة تفعيل الإشعارات: ${safeErrorMessage(error)}`)
+    )
+    .finally(() => {
+      ownerPushReenableRequest = null;
+      state.notifPermission = readNotifPermission();
+      render();
+    });
+  render();
+  return ownerPushReenableRequest;
+}
+
+// بعد كل تغيّر للجلسة: يستكمل فصل خروج لم يكتمل (وتنظيف حساب غير مالك إن فُعّل في الإعدادات)،
+// ثم يحدّث حالة زر «إعادة التفعيل». لا يرمي ولا يؤخّر الإقلاع.
+function syncPushWithSession() {
+  const push = window.ozkWebPush;
+  if (!push?.syncSession) return Promise.resolve();
+  const signedIn = Boolean(state.session);
+  return Promise.resolve()
+    .then(() => push.syncSession({ signedIn, owner: signedIn && isOwner() }))
+    .catch(() => {})
+    .then(refreshOwnerPushStatus);
+}
+
+async function refreshOwnerPushStatus() {
+  const push = window.ozkWebPush;
+  let missing = false;
+  if (state.session && isOwner() && push?.supported?.() && readNotifPermission() === "granted") {
+    try {
+      missing = !(await push.status()).subscribed;
+    } catch {
+      missing = false;
+    }
+  }
+  if (state.ownerPushMissing !== missing) {
+    state.ownerPushMissing = missing;
+    render();
+  }
+}
+
+// قبل كل signOut: نداء الخادم لإلغاء صف هذا الجهاز يحتاج الجلسة. disable() بمهلة ولا يرمي،
+// والـtry هنا احتياط: فشل الفصل لا يمنع الخروج أبداً.
+async function detachPushBeforeSignOut() {
+  try {
+    await window.ozkWebPush?.disable?.();
+  } catch {}
+}
+
 // إشعار محلي من الصفحة. عبر Service Worker أولاً: `new Notification` يرمي
 // TypeError («Illegal constructor») على Chrome أندرويد، وكان ذلك يقع داخل
 // try الإقلاع فيُعرض «تعذر الاتصال بقاعدة البيانات». getRegistration لا
@@ -548,8 +630,10 @@ function initKeyboardShortcuts() {
 }
 
 function notifPermissionBanner() {
-  if (!state.session || !notifSupported() || state.notifPermission !== "default") return "";
+  if (!state.session || !notifSupported()) return "";
   if (notifPromptSnoozed()) return "";
+  if (state.notifPermission === "granted" && state.ownerPushMissing && isOwner()) return ownerPushReenableBanner();
+  if (state.notifPermission !== "default") return "";
   const busy = Boolean(notifPermissionRequest);
   return `
     <section class="notice-panel warning notif-banner">
@@ -758,6 +842,7 @@ async function refreshSession() {
     state.session = null;
     setNotice("error", safeErrorMessage(error));
   }
+  syncPushWithSession();
 }
 
 async function loadRequests() {
@@ -2247,6 +2332,7 @@ async function saveSession(form, action) {
     const result = action === "signup" ? await dataStore.signUp(input) : await dataStore.signIn(input);
     state.session = result.session || (await dataStore.getSession());
     window.__ozkSession = state.session;
+    syncPushWithSession();
 
     if (result.needsEmailConfirmation) {
       setNotice("success", "تم إنشاء الحساب. إذا كان تأكيد البريد مفعلا في Supabase، افتح البريد ثم سجل الدخول.");
@@ -2284,6 +2370,7 @@ async function saveInventoryCounterSession(form) {
     state.session = result.session || (await dataStore.getSession());
     window.__ozkSession = state.session;
     if (state.session?.accessRole !== "inventory_counter") throw new Error("هذا الحساب ليس حساب موظف جرد.");
+    syncPushWithSession();
     state.route = "smartInventory";
     window.history.replaceState({}, "", `${window.location.pathname}?route=smartInventory`);
     await window.SmartInventory?.load(state.session, true);
@@ -2317,6 +2404,7 @@ async function saveRecoveredPasswordCode(form) {
       await dataStore.verifyPasswordRecoveryOtp(email, token);
     }
     await dataStore.updateRecoveredPassword(password);
+    await detachPushBeforeSignOut();
     await dataStore.signOut();
     state.session = null;
     state.passwordResetMode = false;
@@ -2335,6 +2423,7 @@ async function saveRecoveredPassword(form) {
     const confirmation = formValue(form, "passwordConfirmation");
     if (password !== confirmation) throw new Error("كلمتا المرور غير متطابقتين.");
     await dataStore.updateRecoveredPassword(password);
+    await detachPushBeforeSignOut();
     await dataStore.signOut();
     state.session = null;
     window.history.replaceState({}, "", `${window.location.pathname}?route=login`);
@@ -2352,9 +2441,11 @@ async function logout() {
   state.salesHistoryOpen = false;
   state.salesHistoryQuery = "";
   try {
+    await detachPushBeforeSignOut();
     await dataStore.signOut();
     state.session = null;
     window.__ozkSession = null;
+    state.ownerPushMissing = false;
     window.SmartInventory?.reset?.();
     state.route = "login";
     window.history.replaceState({}, "", `${window.location.pathname}?route=login`);
@@ -2366,6 +2457,7 @@ async function logout() {
     state.approvedPriceItems = [];
     state.approvedPriceError = null;
     state.purchaseInvoices = [];
+    syncPushWithSession();
     setNotice("success", "تم تسجيل الخروج.");
   } catch (error) {
     setNotice("error", safeErrorMessage(error));
@@ -13038,6 +13130,7 @@ function render() {
   app.querySelector("[data-action='logout']")?.addEventListener("click", logout);
   app.querySelector("[data-action='enable-notif']")?.addEventListener("click", () => { requestNotifPermission(); });
   app.querySelector("[data-action='snooze-notif']")?.addEventListener("click", snoozeNotifPrompt);
+  app.querySelector("[data-action='reenable-push']")?.addEventListener("click", () => { reenableOwnerPush(); });
   app.querySelector("[data-action='export-monthly']")?.addEventListener("click", exportMonthlyReport);
 
   app.querySelector("[data-form='global-search']")?.addEventListener("submit", (e) => {
