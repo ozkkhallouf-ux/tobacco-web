@@ -109,13 +109,14 @@ test("التجربة المحصورة: تتطلب انتهاءً قريباً، 
   assert.equal(example.pilotInvoiceGuids, undefined, "مثال الإعداد بلا حصر");
 });
 
-test("التجربة المحصورة: انقضاء التاريخ أثناء عمل العملية يوقف كل المراحل دون إعادة تشغيل", async () => {
+test("التجربة المحصورة: انقضاء التاريخ أثناء عمل العملية يوقف كل المراحل (Fail Closed) ولا يتسع الحصر إلى كل الفواتير", async () => {
   const t = await setup({ mode: "dry-run" });
   // الساعة المحقونة 2026-10-24T12:00Z = 15:00 دمشق؛ آخر يوم مسموح هو اليوم نفسه.
   Object.assign(t.cfg, { mode: "live", pilotInvoiceGuids: [G1], pilotExpiresAt: "2026-10-24" });
   t.restart();
   t.advance(8 * 3600 + 59 * 60); // 20:59Z = 23:59 دمشق: ما زالت سارية
   t.ameen.add({ guid: G1, number: 1100 });
+  t.ameen.add({ guid: G2, number: 1101 }); // خارج الحصر: يجب ألا تُلمس بعد الانقضاء أيضاً
   t.advance(300 - 120); // 21:02Z: انقضت، والعملية نفسها ما زالت تعمل
   const sentBefore = t.edgeFake.state.sent.length;
   const reportsBefore = t.edgeFake.state.reports.length;
@@ -130,6 +131,15 @@ test("التجربة المحصورة: انقضاء التاريخ أثناء ع
   assert.equal(t.edgeFake.state.sent.length, sentBefore, "لا إشعار");
   assert.equal(t.edgeFake.state.reports.length, reportsBefore, "لا تقرير");
   assert.ok(t.logs.some((l) => l.event === "pilot_expired"));
+  // دورات لاحقة في العملية نفسها: تبقى موقوفة، ولا تتحول إلى أرشفة كل الفواتير.
+  t.advance(3 * 3600);
+  const later = await t.cycle();
+  assert.equal(later.pilotExpired, true);
+  assert.equal(t.store.jobs().length, 0, "لا مهمة لأي فاتورة، داخل الحصر أو خارجه");
+  assert.equal(t.store.versionsOf("wholesale_invoice", G2).length, 0);
+  assert.equal(t.drive.pdfFiles().length, 0);
+  // وعند إعادة التشغيل يرفض الإعداد نفسه، فلا يبدأ العامل أصلاً.
+  assert.throws(() => validate({ ...DEFAULTS, archiveFrom: "2026-10-01", pilotInvoiceGuids: [G1], pilotExpiresAt: "2026-10-24" }, Date.parse("2026-10-24T21:02:00Z")), /انتهت التجربة/);
 });
 
 test("التجربة المحصورة: خطأ رصد لفاتورة خارجها يبقى في الطابور ويُؤرشف بعد رفع الحصر (Codex P1)", async () => {
