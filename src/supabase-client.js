@@ -1585,12 +1585,15 @@
       if (!client) return [];
       const session = await getSupabaseSession();
       if (!session) return [];
-      const { data, error } = await client
-        .from(itemSnapshotTable)
-        .select(
-          "item_key, item_guid, item_number, item_name, unit1_name, unit2_name, unit2_factor, stock_unit1, last_purchase_price, last_purchase_date, last_purchase_currency, last_purchase_unit, average_cost, average_cost_currency, average_cost_basis, last_supplier_name, last_supplier_guid, movement_rank, units_sold_30d, generated_at"
-        )
-        .limit(5000);
+      const columns =
+        "item_key, item_guid, item_number, item_name, unit1_name, unit2_name, unit2_factor, stock_unit1, last_purchase_price, last_purchase_date, last_purchase_currency, last_purchase_unit, average_cost, average_cost_currency, average_cost_basis, last_supplier_name, last_supplier_guid, movement_rank, units_sold_30d, generated_at";
+      // Migration 24: الجدول نفسه للمالك وحده؛ الدالة تعيد اللقطة للطاقم بأعمدة التكلفة
+      // وآخر سعر شراء فارغة لغير المالك (الحجب على الخادم لا في الواجهة).
+      let { data, error } = await client.rpc("list_ameen_item_snapshot").select(columns).limit(5000);
+      // قبل تطبيق الهجرة على قاعدة ما: الدالة غير موجودة بعد ⇒ القراءة القديمة كما كانت.
+      if (error && (error.code === "PGRST202" || error.code === "42883")) {
+        ({ data, error } = await client.from(itemSnapshotTable).select(columns).limit(5000));
+      }
       if (error) {
         if (error.code === "42P01") return []; // الجدول لم يُنشأ بعد على قاعدة الإنتاج — طبيعي قبل تطبيق SQL الجديد
         throw new Error(translateDbError(error.message));
