@@ -3710,3 +3710,164 @@ details[open]>.acc-summary::after{transform:rotate(180deg)}
      الملف المطبوع يبقى بمقاس A4 حرفياً. */
   .price-preview-scroll .ozk-price-list{zoom:.46}
 }
+
+/* ===== تدقيق النشرة: ستارتا «تحت التكلفة» و«غير مسعّرة» (src/price-cost-audit.js) ===== */
+.price-audit {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 16px;
+}
+
+.price-audit-panel {
+  border: 1px solid var(--line);
+  border-inline-start: 4px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+  min-width: 0;
+}
+
+.price-audit-panel.is-below { border-inline-start-color: var(--danger); }
+.price-audit-panel.is-unpriced { border-inline-start-color: #e8912d; }
+
+.price-audit-panel > summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  cursor: pointer;
+  padding: 13px 16px;
+  color: var(--ink);
+  list-style-position: inside;
+}
+
+.price-audit-panel[open] > summary { border-bottom: 1px solid var(--line); }
+.price-audit-title { font-weight: 900; }
+
+.price-audit-panel > summary small {
+  flex-basis: 100%;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.price-audit-count {
+  min-width: 28px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: var(--danger);
+  color: #fff;
+  font-weight: 900;
+  text-align: center;
+  font-size: 0.85rem;
+}
+
+.price-audit-panel.is-unpriced .price-audit-count { background: #e8912d; color: #1a0f02; }
+.price-audit-count.is-unknown,
+.price-audit-count.is-muted { background: var(--surface-soft); color: var(--muted); border: 1px solid var(--line); }
+
+.price-audit-body { padding: 12px 14px 14px; min-width: 0; }
+.price-audit-note { margin: 0 0 10px; color: var(--muted); font-size: 0.85rem; }
+
+.price-audit-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.price-audit-controls input,
+.price-audit-controls select {
+  flex: 1 1 200px;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  color: var(--ink);
+  font: inherit;
+}
+
+.price-audit-controls select { flex: 0 1 190px; }
+
+.price-audit-state { margin: 6px 0; color: var(--muted); }
+.price-audit-state.is-ok { color: var(--ink); }
+
+.price-audit-table-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  max-height: 60vh;
+  overflow-y: auto;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.price-audit-table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+
+.price-audit-table th {
+  position: sticky;
+  top: 0;
+  background: var(--surface-soft);
+  color: var(--ink);
+  padding: 8px 10px;
+  text-align: right;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.price-audit-table td {
+  padding: 7px 10px;
+  border-top: 1px solid var(--line);
+  vertical-align: top;
+}
+
+.price-audit-table td small { display: block; color: var(--muted); font-size: 0.78rem; }
+.price-audit-item strong { display: block; }
+.price-audit-bad { color: var(--danger); font-weight: 800; }
+.price-audit-warn { color: #e8912d; font-weight: 800; }
+[data-theme="light"] .price-audit-warn { color: #9a5a0c; }
+
+.price-audit-sub { margin-top: 12px; border-top: 1px dashed var(--line); padding-top: 10px; }
+.price-audit-sub > summary { cursor: pointer; color: var(--muted); font-weight: 800; margin-bottom: 8px; }
+
+/* الهاتف: كل صف بطاقة، وكل خلية «عنوان: قيمة» — بلا تمرير أفقي. */
+@media (max-width: 640px) {
+  .price-audit-table-wrap { max-height: none; overflow: visible; border: 0; }
+  .price-audit-table thead { display: none; }
+  .price-audit-table,
+  .price-audit-table tbody,
+  .price-audit-table tr,
+  .price-audit-table td { display: block; width: 100%; }
+  .price-audit-table tr {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    margin-bottom: 8px;
+    padding: 6px 0;
+  }
+  .price-audit-table td {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    border: 0;
+    padding: 4px 10px;
+  }
+  .price-audit-table td::before {
+    content: attr(data-label);
+    color: var(--muted);
+    font-weight: 700;
+    flex-shrink: 0;
+  }
+  .price-audit-table td.price-audit-item { display: block; }
+  .price-audit-table td.price-audit-item::before { content: none; }
+}
+
+.price-audit-tag {
+  display: inline-block;
+  margin: 2px 0;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid #e8912d;
+  color: #e8912d;
+  font-size: 0.75rem;
+  font-weight: 800;
+}
+[data-theme="light"] .price-audit-tag { color: #9a5a0c; border-color: #9a5a0c; }
