@@ -137,6 +137,7 @@ async function health(cfg) {
     version: VERSION,
     host: os.hostname(),
     mode: cfg.mode,
+    pilot: (cfg.pilotInvoiceGuids || []).length ? { invoiceGuids: cfg.pilotInvoiceGuids, expiresAt: cfg.pilotExpiresAt } : null,
     archiveFrom: cfg.archiveFrom,
     approvedAccount: cfg.expectedAccountEmail,
     dataDir: cfg.dataDir,
@@ -180,7 +181,7 @@ async function main(argv) {
   }
   const store = createStore(cfg.dataDir);
   if (argv.includes("--status")) {
-    console.log(JSON.stringify({ mode: cfg.mode, ...store.summary({ notifyEnabled: MODES[cfg.mode].notify }), detectErrors: Object.keys(store.state.detectErrors || {}).length, sourceIssues: Object.values(store.state.sourceIssues || {}).map((v) => ({ number: v.number, status: v.status, lastVersion: v.lastVersion, since: v.since })) }, null, 2));
+    console.log(JSON.stringify({ mode: cfg.mode, pilot: (cfg.pilotInvoiceGuids || []).length ? { invoiceGuids: cfg.pilotInvoiceGuids, expiresAt: cfg.pilotExpiresAt } : null, ...store.summary({ notifyEnabled: MODES[cfg.mode].notify }), detectErrors: Object.keys(store.state.detectErrors || {}).length, sourceIssues: Object.values(store.state.sourceIssues || {}).map((v) => ({ number: v.number, status: v.status, lastVersion: v.lastVersion, since: v.since })) }, null, 2));
     return 0;
   }
   const lock = await acquireLock(cfg.lockPort);

@@ -41,6 +41,10 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
   const mode = MODES[cfg.mode];
   const state = store.state;
   state.hints = state.hints || {};
+  // التجربة المحصورة: كل المراحل (رصد، رفع، إشعار، تقرير، توثيق المصدر) ترى هذه الفواتير وحدها.
+  // ما يُتخطّى هنا لا يُعلَّم ملحوظاً (لا تلميح)، فتلتقطه المطابقة الدورية بعد رفع الحصر.
+  const pilot = new Set((cfg.pilotInvoiceGuids || []).map((g) => model.normGuid(g)));
+  const inScope = (guid) => pilot.size === 0 || pilot.has(model.normGuid(guid));
   let folderCache = {};
   let driveState = mode.upload ? "disconnected" : "disabled";
   let driveCheckedAt = null;
@@ -233,7 +237,7 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
     const issues = state.sourceIssues || {};
     const latestByGuid = new Map();
     for (const j of store.jobs()) {
-      if (j.docType !== DOC_TYPE) continue;
+      if (j.docType !== DOC_TYPE || !inScope(j.sourceGuid)) continue;
       const cur = latestByGuid.get(j.sourceGuid);
       if (!cur || j.version > cur.version) latestByGuid.set(j.sourceGuid, j);
     }
@@ -263,7 +267,7 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
   // صف واحد: «unstable» (لم يستقر، يحجز العلامة) أو «skip» أو «created» أو «same».
   async function detectRow(row) {
     const header = headerOf(row);
-    if (!header.guid) return "skip";
+    if (!header.guid || !inScope(header.guid)) return "skip";
     // غير المرحّلة ليست نسخة نهائية. فاتورة مؤرشفة أُلغي ترحيلها أو تغيّر نوعها تُوثَّق فقط.
     if (!header.printable) { noteSourceIssue(header.guid, "type_changed"); return "skip"; }
     if (!header.isPosted) { noteSourceIssue(header.guid, "unposted"); return "skip"; }
@@ -395,7 +399,7 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
   }
 
   async function uploadStage() {
-    const ready = store.jobs().filter((j) => j.status === STATUS.RENDERED && due(j));
+    const ready = store.jobs().filter((j) => j.status === STATUS.RENDERED && inScope(j.sourceGuid) && due(j));
     let drive;
     try {
       drive = getDrive();
@@ -428,7 +432,7 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
 
   // ─── الإشعار ───
   async function notifyStage() {
-    const ready = store.jobs().filter((j) => j.status === STATUS.UPLOADED && j.drive && j.drive.fileId && due(j));
+    const ready = store.jobs().filter((j) => j.status === STATUS.UPLOADED && j.drive && j.drive.fileId && inScope(j.sourceGuid) && due(j));
     let notified = 0;
     for (const job of ready.sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
       let pdf;
@@ -506,8 +510,10 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
   async function reportStage(host, version, force = false) {
     if (!edge) return null;
     if (!force && now() - lastReportAt < cfg.reportSeconds * 1000) return null;
-    const since = state.lastReportedUpdate || "";
-    const changed = store.jobs().filter((j) => (j.updatedAt || "") > since)
+    // مؤشر مستقل للتجربة: تقدّمه لا يتخطّى مهام خارج الحصر فلا تُبلَّغ أبداً بعد رفعه.
+    const cursorKey = pilot.size ? "lastReportedUpdatePilot" : "lastReportedUpdate";
+    const since = state[cursorKey] || "";
+    const changed = store.jobs().filter((j) => (j.updatedAt || "") > since && inScope(j.sourceGuid))
       .sort((a, b) => a.updatedAt.localeCompare(b.updatedAt)).slice(0, 200);
     const s = store.summary({ notifyEnabled: mode.notify });
     const payload = {
@@ -524,7 +530,7 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
     try {
       const res = await edge.report(payload);
       lastReportAt = now();
-      if (changed.length) state.lastReportedUpdate = changed[changed.length - 1].updatedAt;
+      if (changed.length) state[cursorKey] = changed[changed.length - 1].updatedAt;
       store.saveState();
       const retried = applyRetry(res.retryJobIds, "owner");
       return { items: changed.length, retried };
@@ -536,6 +542,10 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
 
   async function cycle({ host = "", version = "dev" } = {}) {
     const out = { detect: null, upload: null, notify: null, report: null };
+    if (pilot.size) {
+      out.pilot = { invoices: pilot.size, expiresAt: cfg.pilotExpiresAt };
+      emit("pilot_active", out.pilot);
+    }
     try {
       out.detect = await detect();
     } catch (err) {

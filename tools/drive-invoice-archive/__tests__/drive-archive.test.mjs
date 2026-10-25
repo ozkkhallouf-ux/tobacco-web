@@ -85,6 +85,66 @@ test("كل استعلامات العامل SELECT صافية وتجتاز الح
   assert.doesNotMatch(src, /ExecuteNonQuery|\.execute\(|\.batch\(|bulk\(/, "لا تنفيذ إجراءات ولا كتابة");
 });
 
+// ─── التجربة المحصورة ───
+const DAY = 86400_000;
+const dayOf = (ms) => new Date(ms + 3 * 3600_000).toISOString().slice(0, 10);
+
+test("التجربة المحصورة: تتطلب انتهاءً قريباً، وبعده يرفض العامل العمل كلياً", () => {
+  const now = Date.parse("2026-10-25T03:00:00Z");
+  const base = { ...DEFAULTS, archiveFrom: "2026-10-25" };
+  const ok = validate({ ...base, pilotInvoiceGuids: [G1], pilotExpiresAt: "2026-10-26" }, now);
+  assert.deepEqual(ok.pilotInvoiceGuids, [G1]);
+  assert.equal(validate(base, now).pilotInvoiceGuids.length, 0, "الافتراضي: لا حصر");
+  assert.throws(() => validate({ ...base, pilotInvoiceGuids: [G1] }, now), /pilotExpiresAt/);
+  assert.throws(() => validate({ ...base, pilotInvoiceGuids: [G1], pilotExpiresAt: "2026-10-24" }, now), /انتهت التجربة/);
+  assert.throws(() => validate({ ...base, pilotInvoiceGuids: [G1], pilotExpiresAt: "2026-11-05" }, now), /7 أيام/);
+  assert.throws(() => validate({ ...base, pilotInvoiceGuids: ["1100"], pilotExpiresAt: "2026-10-26" }, now), /GUID/);
+  assert.throws(() => validate({ ...base, pilotInvoiceGuids: [G1, G1.toUpperCase()], pilotExpiresAt: "2026-10-26" }, now), /مكرر/);
+  assert.throws(() => validate({ ...base, pilotExpiresAt: "2026-10-26" }, now), /بلا pilotInvoiceGuids/);
+  assert.throws(() => validate({ ...base, pilotInvoiceGuids: "x", pilotExpiresAt: "2026-10-26" }, now), /قائمة/);
+  // آخر يوم بتوقيت دمشق ما زال صالحاً حتى منتصف ليله، ثم يُرفض.
+  assert.doesNotThrow(() => validate({ ...base, pilotInvoiceGuids: [G1], pilotExpiresAt: "2026-10-25" }, Date.parse("2026-10-25T20:59:00Z")));
+  assert.throws(() => validate({ ...base, pilotInvoiceGuids: [G1], pilotExpiresAt: "2026-10-25" }, Date.parse("2026-10-25T21:01:00Z")), /انتهت التجربة/);
+  const example = JSON.parse(fs.readFileSync(path.join(dir, "config.example.json"), "utf8"));
+  assert.equal(example.pilotInvoiceGuids, undefined, "مثال الإعداد بلا حصر");
+});
+
+test("التجربة المحصورة: فاتورة واحدة فقط تُرفع ويُرسل إشعارها، والمهام السابقة خارجها لا تُلمس، ورفع الحصر يعيد الباقي", async () => {
+  const t = await setup({ mode: "dry-run" });
+  t.ameen.add({ guid: G1, number: 1100 });
+  t.ameen.add({ guid: G2, number: 1101 });
+  t.advance(300);
+  await t.cycle(); // DRY RUN سابق بلا حصر: مهمتان محليتان
+  assert.equal(t.store.jobs().length, 2);
+  t.ameen.add({ guid: G3, number: 1102 });
+  const reportsBefore = t.edgeFake.state.reports.length;
+  Object.assign(t.cfg, { mode: "live", pilotInvoiceGuids: [G1], pilotExpiresAt: dayOf(Date.now() + DAY) });
+  t.restart();
+  t.advance(t.cfg.reconcileMinutes * 60);
+  const out = await t.cycle();
+  assert.deepEqual(out.pilot, { invoices: 1, expiresAt: t.cfg.pilotExpiresAt });
+  assert.deepEqual(t.drive.pdfFiles().map((f) => f.name), ["فاتورة جملة - رقم 1100 - 2026-10-24 - 11111111 - V1.pdf"]);
+  assert.equal(t.edgeFake.state.sent.length, 1, "إشعار واحد للفاتورة المحصورة");
+  assert.equal(t.store.versionsOf("wholesale_invoice", G3).length, 0, "فاتورة جديدة خارج الحصر لا تُرصد");
+  assert.equal(t.store.state.hints[G3], undefined, "ولا تُعلَّم ملحوظة");
+  const pilotReports = t.edgeFake.state.reports.slice(reportsBefore);
+  assert.ok(pilotReports.length > 0 && pilotReports.every((r) => r.items.every((i) => i.source_guid === G1)), "التقرير لا يحمل غيرها");
+  assert.ok(t.logs.some((l) => l.event === "pilot_active"));
+  // دورة ثانية: لا رفع ولا إشعار مكرر.
+  t.advance(60);
+  await t.cycle();
+  assert.equal(t.drive.pdfFiles().length, 1);
+  assert.equal(t.edgeFake.state.sent.length, 1);
+  // رفع الحصر بقرار المالك: الباقي يُؤرشف، وG1 لا يتكرر.
+  Object.assign(t.cfg, { pilotInvoiceGuids: [], pilotExpiresAt: "" });
+  t.restart();
+  t.advance(t.cfg.reconcileMinutes * 60);
+  await t.cycle();
+  assert.equal(t.drive.pdfFiles().length, 3);
+  assert.equal(t.edgeFake.state.sent.length, 3);
+  assert.equal(t.store.versionsOf("wholesale_invoice", G1).length, 1);
+});
+
 // ─── التسمية ───
 test("التسمية: مسار المجلدات بالنوع/السنة/الشهر/الزبون، واسمان متشابهان لا يختلطان", () => {
   const job = { docType: "wholesale_invoice", date: "2026-10-24", customerName: "أبو علي / المزة", customerGuid: "aaaaaaaa-0000-4000-8000-000000000001", number: 1234, sourceGuid: G1, version: 1 };
