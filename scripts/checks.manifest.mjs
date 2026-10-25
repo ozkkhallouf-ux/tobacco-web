@@ -40,6 +40,7 @@ export const CHECKS = [
   'check-codex-review-gate-logic.mjs',
   'check-collection-priority.mjs',
   'check-command-center.mjs',
+  'check-cost-data-owner-only.mjs',
   'check-credit-limit-identity.mjs',
   'check-cron-job-health-classifier.mjs',
   'check-customer-intelligence-wiring.mjs',
