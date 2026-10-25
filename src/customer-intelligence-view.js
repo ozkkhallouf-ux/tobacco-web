@@ -23,6 +23,8 @@
   let historyError = null;
   let lastUpdatedAt = null;
   let refreshTimer = null;
+  // حفظ الحد المعتمد يدوياً (المالك): رسالة آخر محاولة لكل زبون.
+  let approvedSave = { customerId: null, busy: false, message: "", tone: "" };
 
   const view = {
     search: "",
@@ -82,12 +84,13 @@
     credit_balance_unknown: "الرصيد غير متاح",
     credit_delinquent: "متعثّر: الائتمان موقوف",
     credit_inactive: "غير نشط: بلا حد",
-    credit_low_data: "حد محافظ: بيانات قليلة",
+    credit_low_data: "بيانات غير كافية",
     credit_smoothed: "حد منعَّم أسبوعياً",
     key_customer: "زبون مهم",
     key_customer_absent: "زبون مهم غائب",
     credit_not_customer: "ليس زبون مبيعات: بلا حد",
     credit_needs_review: "حد الائتمان غير متاح: يحتاج مراجعة",
+    credit_insufficient_data: "الحد يحتاج مراجعة: بيانات غير كافية",
     credit_mixed_role: "دور مختلط (زبون ومورد)",
     old_debt_collection: "تحصيل دين قديم",
     ambiguous_identity: "اسم ملتبس بين معرّفين",
@@ -113,6 +116,7 @@
     credit_delinquent: "danger",
     credit_low_data: "warn",
     credit_needs_review: "warn",
+    credit_insufficient_data: "warn",
     credit_mixed_role: "warn",
     old_debt_collection: "warn",
     vip: "good",
@@ -141,8 +145,11 @@
     { key: "trendPercent", label: "التغير %", type: "number" },
     { key: "lastPurchaseAt", label: "آخر شراء", type: "text" },
     { key: "daysSinceLastPurchase", label: "أيام منذ آخر شراء", type: "number" },
-    { key: "currentBalance", label: "الرصيد", type: "number" },
-    { key: "creditUsagePercent", label: "الائتمان", type: "number" },
+    { key: "creditLimitDisplay", label: "الحد الائتماني المقترح", type: "number" },
+    { key: "currentBalance", label: "الرصيد الحالي", type: "number" },
+    { key: "availableCredit", label: "المتاح من الحد", type: "number" },
+    { key: "creditUsagePercent", label: "نسبة استخدام الحد", type: "number" },
+    { key: "overLimitAmount", label: "مقدار التجاوز", type: "number" },
     { key: "riskScore", label: "الخطر", type: "number" },
     { key: "flags", label: "التنبيهات", type: "none" }
   ];
@@ -196,6 +203,11 @@
   // --------------------------------------------------------------------------
   // ترشيح وترتيب (عرض فقط)
   // --------------------------------------------------------------------------
+  // رصيد مدين بلا حد موثوق: يُراجَع ضمن خطر الائتمان (لا يختفي التنبيه لأن الرقم غير موثوق).
+  const insufficientWithBalance = (row) => row.flags.includes("credit_insufficient_data") && isNumber(row.currentBalance) && row.currentBalance > 0;
+  const CREDIT_ATTENTION_FLAGS = ["over_credit_limit", "near_credit_limit", "credit_delinquent"];
+  const creditAttention = (row) => CREDIT_ATTENTION_FLAGS.some((flag) => row.flags.includes(flag)) || insufficientWithBalance(row);
+
   function matchesFilter(row) {
     const has = (flag) => row.flags.includes(flag);
     switch (view.segment) {
@@ -204,8 +216,8 @@
       case "inactive": return has("inactive");
       case "reactivated": return has("reactivated");
       case "new": return has("new") || has("possibly_new");
-      case "credit": return has("over_credit_limit") || has("near_credit_limit") || has("credit_delinquent");
-      case "attention": return has("over_credit_limit") || has("near_credit_limit") || has("credit_delinquent") || has("declining") || has("inactive") || has("at_risk_churn");
+      case "credit": return creditAttention(row);
+      case "attention": return creditAttention(row) || has("declining") || has("inactive") || has("at_risk_churn");
       case "insufficient": return row.primarySegment === "insufficient_data";
       default: return true;
     }
@@ -249,8 +261,10 @@
   // أجزاء العرض
   // --------------------------------------------------------------------------
   function flagChips(flags, limit = 0) {
-    const list = limit > 0 ? flags.slice(0, limit) : flags;
-    const extra = limit > 0 && flags.length > limit ? `<span class="ci-chip">+${flags.length - limit}</span>` : "";
+    // «يحتاج مراجعة: بيانات غير كافية» يغني عن وسم البيانات القليلة نفسه.
+    const shown = flags.includes("credit_insufficient_data") ? flags.filter((flag) => flag !== "credit_low_data") : flags;
+    const list = limit > 0 ? shown.slice(0, limit) : shown;
+    const extra = limit > 0 && shown.length > limit ? `<span class="ci-chip">+${shown.length - limit}</span>` : "";
     return list
       .map((flag) => `<span class="ci-chip ${escape(FLAG_TONE[flag] || "")}">${escape(FLAG_LABELS[flag] || flag)}</span>`)
       .join("") + extra;
@@ -307,15 +321,31 @@
     return change ? `<div class="ci-change ${change.direction === "down" ? "bad" : change.direction === "up" ? "good" : ""}">${escape(change.text)}</div>` : "";
   }
 
+  // خلايا الائتمان: الحد المقترح (رقم أو حالة صريحة بدل رقم غير موثوق)، الرصيد، ثم المتاح
+  // والاستخدام والتجاوز على الحد المعتمد يدوياً إن وُجد (قرار المالك 2026-10-25).
+  function usageCell(row) {
+    const usage = isNumber(row.creditUsagePercent);
+    const text = usage ? `${Math.round(row.creditUsagePercent)}%` : (CREDIT_STATUS_TEXT[row.creditStatus] || "—");
+    const basisTag = row.limitBasis === "approved" ? ` <span class="ci-basis" title="محسوب على الحد المعتمد يدوياً">معتمد</span>` : "";
+    return `<td dir="${usage ? "ltr" : "auto"}">${escape(text)}${basisTag}</td>`;
+  }
+
+  function creditCells(row) {
+    const amountCurrency = row.balanceCurrency || row.creditCurrency || "USD";
+    const overClass = isNumber(row.overLimitAmount) && row.overLimitAmount > 0 ? "bad" : "";
+    return `<td dir="${isNumber(row.creditLimitDisplay) ? "ltr" : "auto"}">${proposedText(row)}</td>
+        <td dir="ltr">${money(row.balanceDisplay ?? row.currentBalance, amountCurrency)}</td>
+        <td dir="ltr">${money(row.availableCredit, amountCurrency)}</td>
+        ${usageCell(row)}
+        <td dir="ltr" class="${overClass}">${money(row.overLimitAmount, amountCurrency)}</td>`;
+  }
+
   function tableRow(row) {
     const trend = row.purchaseTrend?.percent;
     const trendClass = isNumber(trend) ? (trend < 0 ? "bad" : trend > 0 ? "good" : "") : "";
     const trendText = isNumber(trend)
       ? percent(trend)
       : ({ new_activity: "نشاط جديد", no_activity: "لا حركة", insufficient_data: "غير كافٍ", no_positive_baseline: "بلا أساس" }[row.purchaseTrend?.state] || "—");
-    const creditText = isNumber(row.creditUsagePercent)
-      ? `${Math.round(row.creditUsagePercent)}%`
-      : (CREDIT_STATUS_TEXT[row.creditStatus] || "—");
     return `
       <tr class="ci-row ${view.selectedId === row.customerId ? "selected" : ""}" data-ci-customer="${escape(row.customerId)}" tabindex="0">
         <td class="ci-name">${escape(row.customerName)}${changeLine(row)}</td>
@@ -325,8 +355,7 @@
         <td dir="ltr" class="${trendClass}">${escape(trendText)}</td>
         <td dir="ltr">${day(row.lastPurchaseAt)}</td>
         <td dir="ltr">${count(row.daysSinceLastPurchase)}</td>
-        <td dir="ltr">${money(row.balanceDisplay ?? row.currentBalance, row.balanceCurrency || row.creditCurrency || "USD")}</td>
-        <td dir="ltr">${escape(creditText)}</td>
+        ${creditCells(row)}
         <td dir="ltr">${count(row.riskScore)} ${riskTrendBadge(row)}</td>
         <td class="ci-flags">${flagChips(row.flags, 3)}</td>
       </tr>`;
@@ -345,11 +374,20 @@
     accounting_day_mismatch: "غير متاح: يوم المحاسبة غير متطابق",
     missing_rate: "غير متاح: لا سعر صرف لعملة الحساب",
     needs_review: "غير متاح: يحتاج مراجعة",
+    insufficient_data: "يحتاج مراجعة",
     old_debt_collection: "تحصيل دين قديم"
+  };
+  // نص خانة «الحد المقترح» حين لا رقم.
+  const PROPOSED_STATUS_TEXT = {
+    insufficient_data: "يحتاج مراجعة",
+    needs_review: "يحتاج مراجعة",
+    not_customer: "ليس زبوناً تجارياً",
+    prepaid: "لا تعرّض (دفع مسبق)",
+    unknown_limit: "غير محدد"
   };
   const AUTO_STATUS_TEXT = {
     normal: "آلي",
-    low_data: "آلي محافظ (بيانات قليلة)",
+    low_data: "يحتاج مراجعة: بيانات غير كافية",
     delinquent: "آلي: موقوف للتعثّر",
     inactive: "آلي: لا حد (غير نشط)",
     prepaid: "آلي: لا تعرّض (دفع مسبق)",
@@ -375,27 +413,142 @@
     const auto = row.autoCredit;
     if (row.creditLimitSource === "auto") {
       const label = AUTO_STATUS_TEXT[auto?.status] || "آلي";
-      return row.creditLimitDisplay === null ? escape(label) : `${money(row.creditLimitDisplay, row.creditCurrency || "USD")} (${escape(label)})`;
+      return row.creditLimitDisplay === null ? escape(label) : `${money(row.creditLimitDisplay, row.creditCurrency || "USD")} (${escape(label)} — مقترح)`;
     }
     if (UNAVAILABLE_LIMIT_TEXT[row.creditLimitSource]) return UNAVAILABLE_LIMIT_TEXT[row.creditLimitSource];
     if (row.creditLimitSource === "ameen") return `${money(row.creditLimitDisplay ?? row.creditLimit, row.creditCurrency || "USD")} (من الأمين — لا دفتر حساب للحساب الآلي)`;
     return "غير محدد";
   }
 
-  // مكوّنات الحد الآلي كما حسبها المحرك — عرض فقط، بلا إعادة حساب.
-  function autoCreditFacts(row) {
-    const auto = row.autoCredit;
+  // مكوّنات الحد المقترح كما حسبها المحرك — عرض فقط، بلا إعادة حساب.
+  const num = (value, digits = 2) => (isNumber(value) ? value.toLocaleString("en-US", { maximumFractionDigits: digits }) : "—");
+  const share = (value) => (isNumber(value) ? `${Math.round(value * 100)}%` : "—");
+  const CAPPED_BY_TEXT = {
+    coverage: "سقف التغطية (التحصيل أقل من 90%)",
+    low_data: "سقف البيانات القليلة",
+    precaution: "السقف الاحترازي (1.5× الاحتياج الطبيعي)"
+  };
+
+  // «لماذا هذا الحد؟» — كل رقم من مخرج المحرك. المبالغ بعملة الأساس (الدولار) كما يحسبها الدفتر.
+  const BASE = "USD";
+  const factList = (facts) => `<dl class="ci-facts">${facts.map(([label, value]) => `<div><dt>${escape(label)}</dt><dd dir="auto">${value}</dd></div>`).join("")}</dl>`;
+  const sinceText = (date, days) => (date ? `${day(date)}${isNumber(days) ? ` (منذ ${days} يوماً)` : ""}` : "—");
+
+  function drawTable(draws) {
+    if (!Array.isArray(draws) || !draws.length) return "";
+    const cells = (key, missing) => draws.map((d) => `<td dir="ltr">${d.covered ? money(d[key], BASE) : missing}</td>`).join("");
+    return `<div class="ci-mini-wrap"><table class="ci-mini"><thead><tr><th>السحب (فواتير البيع)</th>${draws.map((d) => `<th>آخر ${d.days} يوماً</th>`).join("")}</tr></thead><tbody>
+        <tr><td>الإجمالي</td>${cells("total", "غير مغطى")}</tr>
+        <tr><td>المتوسط اليومي</td>${cells("daily", "—")}</tr>
+        <tr><td>المتوسط الشهري</td>${cells("monthly", "—")}</tr>
+      </tbody></table></div>`;
+  }
+
+  function behaviourFacts(pb) {
+    if (!pb) return [];
+    return [
+      ["فواتير مسددة فعلاً", count(pb.settledCount)],
+      ["انتظام الدفع", isNumber(pb.onTimeShare) ? `${share(pb.onTimeShare)} من قيمتها سُدِّد خلال ${num(pb.dueDays, 1)} يوماً` : "غير محسوب (لا فواتير مسددة)"],
+      ["متوسط التأخير بعد الاستحقاق", isNumber(pb.averageDelayDays) ? `${num(pb.averageDelayDays, 1)} يوماً (${count(pb.lateCount)} فاتورة متأخرة)` : "—"]
+    ];
+  }
+
+  function proposalFacts(row, auto) {
     const facts = [];
-    if (isNumber(row.legacyCreditLimit)) facts.push(["الحد القديم (للمقارنة فقط)", money(row.legacyCreditLimit)]);
-    if (!auto || !isNumber(auto.velocity)) return facts;
-    facts.push(
-      ["سرعة السحب اليومية", money(auto.velocity)],
-      ["دورة السداد", `${auto.cycleDays} يوماً (${escape(CYCLE_BASIS_TEXT[auto.cycleBasis] || auto.cycleBasis)})`],
-      ["التحصيل / جودة السداد", `${isNumber(auto.coverage) ? `${Math.round(auto.coverage * 100)}%` : "—"} · Q ${auto.quality}`],
-      ["الانضباط / مخاطر الرصيد", `${auto.punctuality} · ${auto.risk}`],
-      ["الاتجاه", `T ${auto.trend}`]
-    );
+    if (isNumber(auto.cycleDays)) facts.push(["دورة السداد الفعلية", `${num(auto.cycleDays, 1)} يوماً (${escape(CYCLE_BASIS_TEXT[auto.cycleBasis] || auto.cycleBasis || "—")})`]);
+    facts.push(...behaviourFacts(auto.paymentBehaviour));
+    if (isNumber(auto.coverage)) facts.push(["تغطية الدفع (60 يوماً)", share(auto.coverage)]);
+    if (isNumber(auto.overdueAmount)) facts.push([`الرصيد المتأخر (أقدم من ${num(auto.overdueAfterDays, 0)} يوماً)`, `<bdi dir="ltr">${money(auto.overdueAmount, BASE)}</bdi>`]);
+    if (isNumber(auto.oldestOpenDays)) facts.push(["أقدم دين مفتوح", `${auto.oldestOpenDays} يوماً`]);
+    facts.push(["آخر شراء", sinceText(row.lastPurchaseAt, row.daysSinceLastPurchase)]);
+    facts.push(["آخر دفعة", auto.lastPaymentDate ? sinceText(auto.lastPaymentDate, auto.daysSinceLastPayment) : "لا دفعة في الدفتر"]);
     return facts;
+  }
+
+  function formulaResult(auto) {
+    if (auto.status === "low_data") return "<strong>يحتاج مراجعة</strong> — البيانات لا تكفي لرقم موثوق، فلا يُعرض الحد المحافظ المحسوب.";
+    const smoothed = auto.smoothing?.applied && isNumber(auto.limitBaseRaw) ? ` (بعد التنعيم الأسبوعي؛ قبله ${money(auto.limitBaseRaw, BASE)})` : "";
+    return `<strong dir="ltr">${money(auto.limitBase, BASE)}</strong>${smoothed}`;
+  }
+
+  function formulaBlock(auto) {
+    if (!isNumber(auto.velocity) || !isNumber(auto.exposureCycleDays) || !isNumber(auto.quality)) return "";
+    const caps = auto.cappedBy ? ` × ${escape(CAPPED_BY_TEXT[auto.cappedBy] || auto.cappedBy)}` : "";
+    const need = auto.status === "low_data" ? ""
+      : `<p class="muted">الاحتياج الطبيعي = السحب اليومي × دورة السداد الفعلية = <bdi dir="ltr">${money(auto.naturalNeed, BASE)}</bdi>، والسقف الاحترازي (1.5×) = <bdi dir="ltr">${money(auto.precautionaryCap, BASE)}</bdi>. الحد المعروض مقرَّب تجارياً للأسفل.</p>`;
+    return `<p class="ci-formula">الحد المقترح = السحب اليومي <bdi dir="ltr">${money(auto.velocity, BASE)}</bdi> × الدورة المتوقعة <bdi dir="ltr">${num(auto.exposureCycleDays, 1)}</bdi> يوماً × معامل انتظام الدفع <bdi dir="ltr">${num(auto.quality, 3)}</bdi> × معامل المخاطر <bdi dir="ltr">${num(auto.riskFactor, 3)}</bdi> = ${formulaResult(auto)}</p>
+        <p class="muted">معامل الانتظام Q من التغطية (${share(auto.coverageScore)}) والانضباط (${num(auto.punctuality, 2)}) ومخاطر الرصيد (${num(auto.risk, 2)}). معامل المخاطر = الاتجاه (${num(auto.trend, 3)})${caps}.</p>
+        ${need}`;
+  }
+
+  function rateLine(rate) {
+    if (!rate) return "";
+    const source = rate.basis === "customer_latest_invoice" ? "آخر فاتورة للزبون" : "آخر فاتورة بهذه العملة في المحفظة";
+    return `<p class="muted">حساب بعملة ${escape(rate.currency)}: التحويل بسعر <bdi dir="ltr">${num(1 / rate.rate, 0)}</bdi> ${escape(rate.currency)} للدولار من ${source} بتاريخ ${day(rate.date)}.</p>`;
+  }
+
+  // الحالات التي تعرض ملاحظات المحرك في «لماذا» أعلى اللوحة لا تكررها هنا.
+  const NOTES_SHOWN_ABOVE = new Set(["delinquent", "inactive_no_limit", "not_customer", "needs_review", "insufficient_data"]);
+  const FIFO_NOTE = `<p class="muted ci-note">الدورة وأيام السداد بطريقة FIFO: كل دفعة تسدّد أقدم فاتورة مفتوحة، فالدفعة الجزئية لا تُغلق الفاتورة، والفواتير المتزامنة تُسدَّد بترتيبها، ومدة الانقطاع عن الشراء بلا دين لا تُحسب دورة سداد.</p>`;
+
+  function proposalSection(row) {
+    const auto = row.autoCredit;
+    if (!auto) return "";
+    const notes = !NOTES_SHOWN_ABOVE.has(row.creditStatus) && (auto.notes || []).length
+      ? `<ul class="ci-why">${auto.notes.map((note) => `<li>${escape(note)}</li>`).join("")}</ul>` : "";
+    return `<div class="ci-proposal"><h4>لماذا هذا الحد المقترح؟</h4>${drawTable(auto.drawAverages)}${formulaBlock(auto)}${factList(proposalFacts(row, auto))}${FIFO_NOTE}${rateLine(row.exchangeRate)}${notes}</div>`;
+  }
+
+  // الحد المعتمد: ما يحفظه المالك يدوياً (customer_credit_limits، بالدولار كصفحة الأرصدة). المقترح
+  // لا يُحفظ تلقائياً أبداً، ولا يُكتب أي حد إلى الأمين.
+  const proposedText = (row) => (isNumber(row.creditLimitDisplay)
+    ? money(row.creditLimitDisplay, row.creditCurrency || BASE)
+    : escape(PROPOSED_STATUS_TEXT[row.creditStatus] || CREDIT_STATUS_TEXT[row.creditStatus] || "غير متاح"));
+
+  const LIMIT_BASIS_TEXT = { approved: "الحد المعتمد يدوياً", auto: "الحد المقترح", ameen: "حد الأمين" };
+
+  function approvedLines(approved) {
+    if (!approved || !isNumber(approved.limit) || approved.limit < 0) return [`<p class="muted">لا حد معتمد يدوياً لهذا الزبون، فالاستخدام والتجاوز على الحد المقترح.</p>`];
+    const updated = approved.updatedAt ? ` <span class="muted">آخر تعديل ${escape(approved.updatedAt.slice(0, 10))}</span>` : "";
+    const byName = approved.matchedBy === "name" ? ` <span class="muted">(مربوط بالاسم)</span>` : "";
+    const usage = isNumber(approved.usagePercent) ? `${Math.round(approved.usagePercent)}%` : "—";
+    const diff = isNumber(approved.proposedMinusApproved)
+      ? ` · المقترح ${approved.proposedMinusApproved >= 0 ? "أعلى" : "أقل"} بـ ${money(Math.abs(approved.proposedMinusApproved), BASE)}` : "";
+    const zero = approved.limit === 0 ? ` <span class="muted">(قرار صريح: بلا آجل)</span>` : "";
+    return [
+      `<p>الحد المعتمد (المالك): <strong dir="ltr">${money(approved.limit, BASE)}</strong>${zero}${updated}${byName}</p>`,
+      `<p class="muted">مقابل الحد المعتمد: الاستخدام ${usage} · المتاح ${money(approved.availableCredit, BASE)} · التجاوز ${money(approved.overLimitAmount, BASE)}${diff}</p>`
+    ];
+  }
+
+  function approvedForm(row) {
+    if (!row.customerGuid || !window.tobaccoData?.upsertCustomerCreditLimit) {
+      return `<p class="muted ci-note">${row.customerGuid ? "تعديل الحد غير متاح في هذه الجلسة." : "لا معرّف أمين لهذا السجل، فلا يُحفظ له حد من هنا."}</p>`;
+    }
+    const saveState = approvedSave.customerId === row.customerId ? approvedSave : {};
+    return `
+      <form class="ci-approve" data-ci-approve="${escape(row.customerId)}">
+        <label>اعتماد حد يدوياً (بالدولار)
+          <input type="number" name="approvedLimit" min="0" step="any" inputmode="decimal" value="${escape(approvedPrefill(row))}" dir="ltr" required>
+        </label>
+        <button class="button" type="submit" ${saveState.busy ? "disabled" : ""}>${saveState.busy ? "جاري الحفظ…" : "حفظ الحد المعتمد"}</button>
+      </form>
+      <p class="muted ci-note">الحفظ يكتب إلى حدود الزبائن في الموقع (نفس حد صفحة الأرصدة) ولا يغيّر شيئاً في الأمين.</p>
+      ${saveMessage(saveState)}`;
+  }
+
+  // القيمة الأولية: الحد المعتمد الحالي (والصفر منه)، وإلا المقترح، وإلا فارغ.
+  function approvedPrefill(row) {
+    const approved = row.approvedCredit;
+    if (isNumber(approved?.limit) && approved.limit >= 0) return approved.limit;
+    return isNumber(row.creditLimit) ? Math.round(row.creditLimit) : "";
+  }
+
+  const saveMessage = (state) => (state.message ? `<p class="ci-${state.tone === "error" ? "warning" : "change good"}">${escape(state.message)}</p>` : "");
+
+  function approvedSection(row) {
+    const ameen = isNumber(row.ameenCreditLimit) ? `<p class="muted">حد الأمين (قراءة فقط): ${money(row.ameenCreditLimit, BASE)}</p>` : "";
+    return `<div class="ci-approved"><h4>الحد المقترح والحد المعتمد</h4><p>الحد المقترح: <strong>${proposedText(row)}</strong> — حساب آلي، غير معتمد.</p>${approvedLines(row.approvedCredit).join("")}${ameen}${approvedForm(row)}</div>`;
   }
 
   const SMOOTHING_TEXT = {
@@ -407,6 +560,9 @@
   };
 
   // تاريخ الحد كما حسبه المحرك: آخر لقطة، وسبب التغيير، والتنعيم، واتجاه الخطر — عرض فقط.
+  // بيانات غير كافية: لا أرقام حد (ولا حدود التنعيم) — «يحتاج مراجعة» فقط.
+  const smoothingVisible = (row, smoothing) => Boolean(smoothing && SMOOTHING_TEXT[smoothing.reason]) && row.autoCredit?.status !== "low_data";
+
   function historySection(row) {
     const history = row.creditHistory;
     if (!history) {
@@ -420,7 +576,7 @@
       lines.push(`<p class="muted">لا لقطة سابقة لهذا الزبون بعد.</p>`);
     }
     const smoothing = history.smoothing;
-    if (smoothing && SMOOTHING_TEXT[smoothing.reason]) {
+    if (smoothingVisible(row, smoothing)) {
       const baseline = smoothing.baselineDate ? ` (المرجع ${escape(smoothing.baselineDate)}${isNumber(smoothing.minLimitBase) ? `: بين ${money(smoothing.minLimitBase)} و${money(smoothing.maxLimitBase)}` : ""})` : "";
       lines.push(`<p class="muted">التنعيم الأسبوعي: ${escape(SMOOTHING_TEXT[smoothing.reason])}${baseline}${isNumber(row.autoCredit?.limitBaseRaw) && smoothing.applied ? ` — الحد المحسوب قبل التنعيم ${money(row.autoCredit.limitBaseRaw)}` : ""}</p>`);
     }
@@ -429,6 +585,18 @@
       lines.push(`<p class="muted">اتجاه الخطر: ${riskTrendBadge(row)} ${escape(RISK_TREND[trend.direction].label)} (${trend.delta > 0 ? "+" : ""}${escape(trend.delta)} درجة من ${escape(trend.fromDate)} إلى ${escape(trend.toDate)}، ${count(trend.points)} لقطات)</p>`);
     }
     return `<div class="ci-history"><h4>تاريخ الحد</h4>${lines.join("")}</div>`;
+  }
+
+  function creditFacts(row) {
+    const amountCurrency = row.balanceCurrency || row.creditCurrency || "USD";
+    return [
+      ["الرصيد الحالي", money(row.balanceDisplay ?? row.currentBalance, amountCurrency)],
+      ["الحد المقترح", creditLimitText(row)],
+      ["أساس الاستخدام والتجاوز", LIMIT_BASIS_TEXT[row.limitBasis] || "لا حد يُقاس عليه"],
+      ["المتاح من الحد", money(row.availableCredit, amountCurrency)],
+      ["نسبة استخدام الحد", isNumber(row.creditUsagePercent) ? `${row.creditUsagePercent}%` : (CREDIT_STATUS_TEXT[row.creditStatus] || "—")],
+      ["مقدار التجاوز", money(row.overLimitAmount, amountCurrency)]
+    ];
   }
 
   function detailPanel() {
@@ -454,10 +622,7 @@
       ["عدد الفواتير (30 يوم)", count(row.invoiceCount30d)],
       ["عدد الفواتير (السابقة)", count(row.invoiceCountPrevious30d)],
       ["متوسط الفاتورة", money(row.averageInvoice30d, row.currency)],
-      ["الرصيد الحالي", money(row.balanceDisplay ?? row.currentBalance, row.balanceCurrency || row.creditCurrency || "USD")],
-      ["حد الائتمان", creditLimitText(row)],
-      ["نسبة استخدام الائتمان", isNumber(row.creditUsagePercent) ? `${row.creditUsagePercent}%` : (CREDIT_STATUS_TEXT[row.creditStatus] || "—")],
-      ...autoCreditFacts(row),
+      ...creditFacts(row),
       ["نمط الشراء المعتاد", row.cadenceTrusted ? `كل ${row.typicalGapDays} يوماً` : "غير محسوب (تاريخ غير كافٍ)"],
       ["حد اعتبار التوقف", `${row.inactiveThresholdDays} يوماً`],
       ["درجة النشاط", count(row.activityScore)],
@@ -476,6 +641,8 @@
         </div>
         <div class="ci-flag-row">${flagChips(row.flags)}</div>
         <ul class="ci-why">${row.explanation.map((line) => `<li>${escape(line)}</li>`).join("")}</ul>
+        ${approvedSection(row)}
+        ${proposalSection(row)}
         ${historySection(row)}
         <dl class="ci-facts">${facts.map(([label, value]) => `<div><dt>${escape(label)}</dt><dd dir="auto">${value}</dd></div>`).join("")}</dl>
         <h4>أهم الأصناف (${escape(intel.window.previousStartDate)} → ${escape(intel.window.referenceDate)})</h4>
@@ -588,6 +755,11 @@
       render();
     }));
 
+    app.querySelectorAll("[data-ci-approve]").forEach((form) => form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      saveApprovedLimit(form);
+    }));
+
     app.querySelectorAll("[data-ci-customer]").forEach((row) => {
       const select = () => { view.selectedId = row.dataset.ciCustomer; render(); };
       row.addEventListener("click", select);
@@ -595,6 +767,47 @@
         if (event.key === "Enter" || event.key === " ") { event.preventDefault(); select(); }
       });
     });
+  }
+
+  function approvableRow(form) {
+    if (approvedSave.busy || !window.ozkCanAccessRoute?.(ROUTE)) return null;
+    const row = intel?.customers.find((entry) => entry.customerId === form.dataset.ciApprove);
+    return row?.customerGuid ? row : null;
+  }
+
+  function approvedInputValue(form) {
+    const value = Number(String(new FormData(form).get("approvedLimit") ?? "").replace(/,/g, ""));
+    return Number.isFinite(value) && value >= 0 ? value : null;
+  }
+
+  const approvalNote = (row) => `اعتماد من ذكاء الزبائن (المقترح عندها: ${isNumber(row.creditLimit) ? Math.round(row.creditLimit) : "غير متاح"})`;
+
+  // حفظ الحد المعتمد بضغطة المالك وحده — نفس دالة صفحة الأرصدة (upsertCustomerCreditLimit).
+  async function saveApprovedLimit(form) {
+    const row = approvableRow(form);
+    if (!row) return;
+    const value = approvedInputValue(form);
+    if (value === null) {
+      approvedSave = { customerId: row.customerId, busy: false, message: "أدخل رقماً صحيحاً (صفر أو أكثر).", tone: "error" };
+      render();
+      return;
+    }
+    approvedSave = { customerId: row.customerId, busy: true, message: "", tone: "" };
+    render();
+    try {
+      await window.tobaccoData.upsertCustomerCreditLimit({
+        customerKey: window.ozkCustomerIntelligence.normalizeName(row.customerName),
+        customerGuid: row.customerGuid,
+        customerName: row.customerName,
+        creditLimit: value,
+        notes: approvalNote(row)
+      });
+      approvedSave = { customerId: row.customerId, busy: false, message: `حُفظ الحد المعتمد ${value.toLocaleString("en-US")} USD.`, tone: "good" };
+      await loadIntel();
+    } catch (error) {
+      approvedSave = { customerId: row.customerId, busy: false, message: String(error?.message || error || "تعذّر حفظ الحد."), tone: "error" };
+    }
+    render();
   }
 
   function addNav() {
