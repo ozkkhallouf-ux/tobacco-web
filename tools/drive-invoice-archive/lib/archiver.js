@@ -357,6 +357,11 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
         failJob(job, "notify", { code: "PDF_MISSING" }, { immediate: true });
         continue;
       }
+      // نفس البصمة التي رُفعت إلى Drive: ملف تغيّر أو تلف محلياً بعد الرفع لا يُرسَل.
+      if (sha256(pdf) !== job.pdfSha256) {
+        failJob(job, "notify", { code: "PDF_CHANGED" }, { immediate: true });
+        continue;
+      }
       try {
         const res = await edge.notify(job, pdf, job.drive.fileName || fileName(job));
         job.telegram = { messageId: res.messageId, duplicate: res.duplicate, sentAt: new Date(now()).toISOString() };

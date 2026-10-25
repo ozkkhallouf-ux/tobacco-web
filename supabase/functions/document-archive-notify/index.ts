@@ -30,6 +30,7 @@ const SUPA_URL = Deno.env.get("SUPABASE_URL") ?? "";
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 const ARCHIVE_SECRET = Deno.env.get("DOCUMENT_ARCHIVE_SECRET") ?? "";
 const PROFILE = "public";
+const RECORD_RETRY_MS = 400;
 
 function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
@@ -120,13 +121,23 @@ async function handleNotify(req: Request): Promise<Response> {
     // الرسالة المرتبطة: ردّ على المستند نفسه. فشلها لا يُفشل الإشعار (المستند وصل).
     await telegram("sendMessage", { chat_id: chat, text: followUp, reply_to_message_id: messageId }).catch(() => 0);
   }
-  let recorded = true;
-  try {
-    await rpc("document_archive_record_notification", { p_item: itemFromNotify(v, messageId, String(fields.host || "")) });
-  } catch {
-    recorded = false; // المستند وصل؛ العامل يرسل message_id في تقريره التالي فيُسجَّل.
-  }
+  const recorded = await recordNotification(itemFromNotify(v, messageId, String(fields.host || "")));
   return json(200, { ok: true, duplicate: false, message_id: messageId, recorded });
+}
+
+// التسجيل هو حارس عدم التكرار: إن ضاع مع ضياع الرد على العامل، أعاد العامل المحاولة
+// فوصل المستند مرتين. لذا يُعاد التسجيل حتى 3 مرات قبل الاستسلام. وإن فشل كلياً
+// فالمستند وصل؛ العامل يرسل message_id في تقريره التالي فيُسجَّل.
+async function recordNotification(item: unknown): Promise<boolean> {
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      await rpc("document_archive_record_notification", { p_item: item });
+      return true;
+    } catch {
+      if (attempt < 3) await new Promise((r) => setTimeout(r, RECORD_RETRY_MS * attempt));
+    }
+  }
+  return false;
 }
 
 // اسم المرفق: من العامل إن كان آمناً، وإلا اسم ثابت. لا مسارات.

@@ -9,7 +9,11 @@ class EdgeError extends Error {
   }
 }
 
-function createEdge({ url, secret, fetchImpl = globalThis.fetch, host = "" }) {
+// مهلة الطلب الواحد: رفع PDF حتى 20MB وإرساله إلى تيليغرام. بعدها يُعدّ الاتصال
+// منقطعاً وتُعاد المحاولة في دورة لاحقة (والدالة تمنع الإرسال الثاني إن سُجّل الأول).
+const REQUEST_TIMEOUT_MS = 120000;
+
+function createEdge({ url, secret, fetchImpl = globalThis.fetch, host = "", timeoutMs = REQUEST_TIMEOUT_MS }) {
   let base = String(url || "").slice(0, 300);
   while (base.endsWith("/")) base = base.slice(0, -1); // بلا regex: لا تراجع كارثي على سلسلة شرطات
   if (!/^https:\/\/[a-z0-9-]+\.supabase\.co\/functions\/v1\/document-archive-notify$/.test(base)
@@ -21,9 +25,12 @@ function createEdge({ url, secret, fetchImpl = globalThis.fetch, host = "" }) {
   async function post(route, init) {
     let res;
     try {
-      res = await fetchImpl(`${base}/${route}`, { method: "POST", ...init, headers: { ...init.headers, "x-ozk-archive-secret": secret } });
+      res = await fetchImpl(`${base}/${route}`, {
+        method: "POST", ...init, headers: { ...init.headers, "x-ozk-archive-secret": secret }, signal: AbortSignal.timeout(timeoutMs),
+      });
     } catch (err) {
-      throw new EdgeError("OFFLINE", err && err.code ? String(err.code) : "network");
+      const code = err && err.name === "TimeoutError" ? "timeout" : err && err.code ? String(err.code) : "network";
+      throw new EdgeError("OFFLINE", code);
     }
     const data = await res.json().catch(() => ({}));
     if (res.ok && data && data.ok) return data;
