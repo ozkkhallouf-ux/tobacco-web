@@ -786,6 +786,42 @@ test("ضياع ردّ الإشعار بعد الإرسال: إعادة المح�
   assert.equal(t.edgeFake.state.sent.length, 1);
 });
 
+test("نتيجة إرسال مجهولة (409 delivery_unknown) ⇒ فاشلة فوراً بلا إعادة تلقائية، وإعادة المالك وحدها ترسل", async () => {
+  const t = await setup();
+  t.ameen.add({ guid: G1, number: 501 });
+  t.advance(300);
+  t.edgeFake.state.conflict = ["delivery_unknown"];
+  await t.cycle();
+  const [job] = t.store.jobs();
+  const failed = t.store.get(job.jobId);
+  assert.equal(failed.status, "uploaded");
+  assert.equal(failed.failed, true, "فاشلة فوراً");
+  assert.equal(failed.lastError, "notify:DELIVERY_UNKNOWN");
+  for (let i = 0; i < 3; i++) { t.advance(3600); await t.cycle(); }
+  assert.equal(t.edgeFake.state.notifyCalls, 1, "لا إعادة تلقائية ولا إحياء بعد التهدئة");
+  assert.equal(t.store.get(job.jobId).failed, true);
+  assert.equal(t.archiver.applyRetry([job.jobId], "owner"), 1);
+  await t.cycle();
+  assert.equal(t.store.get(job.jobId).status, "notified");
+  assert.equal(t.edgeFake.state.sent.length, 1);
+  assert.equal(t.drive.state.uploads, 1, "لا رفع ثانٍ");
+});
+
+test("حجز قائم (409 in_progress) ⇒ عابر: لا فشل نهائي، والدورة التالية ترسل مرة واحدة", async () => {
+  const t = await setup();
+  t.ameen.add({ guid: G1, number: 501 });
+  t.advance(300);
+  t.edgeFake.state.conflict = ["in_progress"];
+  await t.cycle();
+  const [job] = t.store.jobs();
+  assert.equal(t.store.get(job.jobId).failed, false);
+  assert.equal(t.store.get(job.jobId).lastError, "notify:TRANSIENT");
+  t.advance(120);
+  await t.cycle();
+  assert.equal(t.store.get(job.jobId).status, "notified");
+  assert.equal(t.edgeFake.state.sent.length, 1);
+});
+
 test("PDF تغيّر محلياً بعد الرفع وقبل الإشعار ⇒ فاشلة فوراً بلا إرسال (بصمة الرفع نفسها)", async () => {
   const t = await setup();
   t.ameen.add({ guid: G1, number: 501 });

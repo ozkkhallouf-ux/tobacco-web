@@ -56,16 +56,17 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
     log({ at: new Date(now()).toISOString(), event, ...safe });
   }
 
-  function failJob(job, stage, err, { immediate = false } = {}) {
+  function failJob(job, stage, err, { immediate = false, ownerOnly = false } = {}) {
     job.attempts = (job.attempts || 0) + 1;
     job.lastError = redact(`${stage}:${err && err.code ? err.code : "ERROR"}`, 120);
     job.lastErrorAt = new Date(now()).toISOString();
     const backoff = Math.min(3600, 30 * 2 ** Math.min(job.attempts, 7));
     job.nextAttemptAt = now() + backoff * 1000;
-    if (immediate || job.attempts >= cfg.maxAttempts) {
+    if (immediate || ownerOnly || job.attempts >= cfg.maxAttempts) {
       job.failed = true;
       job.failedAt = job.lastErrorAt;
     }
+    if (ownerOnly) job.ownerRetryOnly = true;
     store.saveJob(job);
     emit("job_error", { jobId: job.jobId, number: job.number, version: job.version, stage, code: err && err.code, message: err && err.message });
   }
@@ -343,6 +344,7 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
 
   function due(job) {
     if (job.failed) {
+      if (job.ownerRetryOnly) return false; // لا إحياء تلقائي: إعادة المالك وحدها (applyRetry)
       const failedAt = Date.parse(job.failedAt || 0) || 0;
       if (now() - failedAt < cfg.failedCooldownMinutes * 60_000) return false;
       job.failed = false; // إحياء تلقائي بعد التهدئة: دورة محاولات كاملة أخرى
@@ -463,7 +465,8 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
           emit("notify_unavailable", { code: err.code, message: err.message });
           break;
         }
-        failJob(job, "notify", err);
+        // نتيجة مجهولة: قد يكون المستند وصل. فاشلة فوراً تظهر للمالك، وإعادتها بيده وحده.
+        failJob(job, "notify", err, { ownerOnly: err && err.code === "DELIVERY_UNKNOWN" });
       }
     }
     return { notified };
@@ -499,6 +502,7 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
       const job = store.get(id);
       if (!job || !job.failed) continue;
       job.failed = false;
+      job.ownerRetryOnly = false;
       job.attempts = 0;
       job.nextAttemptAt = 0;
       store.saveJob(job);

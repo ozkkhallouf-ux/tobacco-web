@@ -263,3 +263,12 @@ definition لهذا المراقب، وقد جرى تعديله (PR #220) بإص
 
 - **الأثر:** حسابات `inventory-auth` تبقى مؤكَّدة (`email_confirm: true`). إضافة مستخدم من لوحة Supabase تحتاج بعدها خيار «Auto Confirm User» صراحة. التسجيل الذاتي يبقى مغلقاً بإعداد Auth `disable_signup` وحده؛ الهجرة لا تفتحه ولا تغلقه.
 - **اختبار:** `scripts/check-auto-confirm-removal.mjs` (Postgres محلي، دور غير مالك كما في Production، ثم دور مالك، والتراجع والتكرار والانحراف). واختُبر يدوياً على GoTrue v2.180.0 حقيقي محلياً (قبل/بعد/التسجيل مغلق/التراجع/المالك). التقرير: `/mnt/project-files/cost-data-leak-audit/`.
+
+## 26: إشعار أرشفة المستندات «مرة واحدة على الأكثر» (2026-10-25) — غير مطبَّق على الإنتاج
+
+| الملف | الحالة | ما يفعله |
+|---|---|---|
+| `26-document-archive-notify-claims.sql` | **مقترح — غير مطبَّق** (بموافقة المالك فقط، **قبل** نشر نسخة `document-archive-notify` التي تستدعيه؛ النسخة الجديدة بلاه تفشل مغلقة 502 بلا إرسال) | جدول `document_archive_notify_claims` (RLS، قراءة `is_owner()` وحده، لا شيء لـanon) ودوال `service_role` وحده: `document_archive_claim_notification` (حجز ذرّي لـjob_id قبل sendDocument؛ قائم ⇒ in_progress، مُرسَل ⇒ message_id نفسه، مهلة منتهية ⇒ unknown)، `document_archive_finish_notification` (sent / not_sent ⇒ released / unknown بالرمز نفسه وحده)، `document_archive_release_notification_claims` (تحرير المجهول وحده بطلبات إعادة المالك). `telegram_message_id` المسجَّل في `document_archive_items` يبقى حارساً. لا حذف ولا cron. |
+| `26-document-archive-notify-claims-rollback.sql` | تراجع جاهز — غير مطبَّق | يحذف الجدول ودواله الثلاث وحدها؛ جداول 22 لا تُمسّ. انشر قبله نسخة الدالة السابقة. |
+
+- **اختبار:** `scripts/check-drive-invoice-archive.mjs` فوق 22 على Postgres محلي (`supabase/tests/document-archive-notify-claims.sql`)، ثم 12 عملية psql متوازية تحجز المهمة نفسها (حجز واحد بالضبط)، ثم التراجع.
