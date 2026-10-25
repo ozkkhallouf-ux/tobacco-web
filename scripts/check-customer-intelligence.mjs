@@ -2213,6 +2213,8 @@ if (!process.env.OZK_CI_TZ_CHILD) {
     assert.equal(u.creditLimit === null || u.creditLimitSource === "ameen", true, `test 80: لا حد آلي بلا علامة (${typed.customerGuid})`);
     // حد مُدخل يدوياً في الأمين (إن وُجد) يبقى بمصدره كمسار الدفتر غير الحديث — ليس حداً آلياً.
     if (u.creditLimitSource === "ameen") { assert.equal(typed.creditLimitSource, "ameen", "test 80: حد الأمين بمصدره"); continue; }
+    // الحد المعتمد يدوياً (قرار المالك 2026-10-25) ليس تقديراً من الدفتر: الحكم عليه وحده.
+    if (u.limitBasis === "approved") { assert.equal(u.proposedCreditStatus, "awaiting_typed_source", "test 80: المقترح مغلق بلا علامة والحكم على المعتمد"); continue; }
     assert.ok(!["delinquent", "over_limit", "near_limit", "normal", "inactive_no_limit", "prepaid"].includes(u.creditStatus), `test 80: لا حكم ائتمان بلا علامة (${typed.customerGuid}: ${u.creditStatus})`);
     assert.equal(u.creditUsagePercent, null, `test 80: لا نسبة استخدام بلا علامة (${typed.customerGuid})`);
     if (["not_customer", "needs_review"].includes(typed.creditStatus)) {
@@ -2259,6 +2261,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
         continue;
       }
       if (c.creditLimitSource === "ameen") { assert.equal(fresh.creditLimitSource, "ameen", "test 81: حد الأمين بمصدره لا حداً آلياً"); continue; }
+      if (c.limitBasis === "approved") { assert.equal(c.proposedCreditStatus, "stale_invoices", "test 81: المقترح مغلق والحكم على المعتمد"); assert.equal(c.creditLimit, null); continue; }
       assert.ok(!["delinquent", "over_limit", "near_limit", "normal", "inactive_no_limit", "prepaid"].includes(c.creditStatus),
         `test 81 (${label}): لا حكم ائتمان من فواتير قديمة (${fresh.customerGuid}: ${c.creditStatus})`);
       assert.equal(c.creditLimit, null, `test 81 (${label}): لا حد آلي (${fresh.customerGuid})`);
@@ -2373,6 +2376,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
       assert.equal(c.creditLimit, null); continue;
     }
     if (c.creditLimitSource === "ameen") continue;
+    if (c.limitBasis === "approved") { assert.equal(c.proposedCreditStatus, "accounting_day_mismatch", "test 84: المقترح مغلق والحكم على المعتمد"); assert.equal(c.creditLimit, null); continue; }
     assert.ok(!["delinquent", "over_limit", "near_limit", "normal", "inactive_no_limit", "prepaid"].includes(c.creditStatus),
       `test 84: لا حكم ائتمان عبر يومين (${fresh.customerGuid}: ${c.creditStatus})`);
     assert.equal(c.creditLimit, null);
@@ -2494,7 +2498,7 @@ if (!process.env.OZK_CI_TZ_CHILD) {
 
   // 89–91) قرارات المالك (2026-09-28) تحت lineKinds:v1: الدور المختلط، تحصيل الدين القديم،
   //         وتصنيف الحساب من شجرة دليل الحسابات. لا تغيير في الصيغة ولا Q ولا T ولا النافذة.
-  const build89 = (list, { classes = false, creditLimits = [] } = {}) => {
+  const build89 = (list, { classes = false, creditLimits = [], creditHistory } = {}) => {
     const all = [...portfolio77.map((a) => ({ ...a, accountClass: "customer" })), ...list.map((c) => ({ ...c, guid: gid(c.id) }))];
     return engine.build({
       now: NOW,
@@ -2507,7 +2511,8 @@ if (!process.env.OZK_CI_TZ_CHILD) {
       movementsReport: { ...reports.movementsReport, summary: { ...reports.movementsReport.summary, lineKinds: "v1" },
         items: all.filter((a) => a.movements.length || a.openingBalance).map((a) => ({ customerGuid: a.guid, name: a.name, truncated: false,
           openingBalance: a.openingBalance ?? 0, movements: a.movements })) },
-      creditLimits
+      creditLimits,
+      ...(creditHistory ? { creditHistory } : {})
     });
   };
   const at89 = (built, id) => built.customers.find((c) => c.customerGuid === gid(id));
@@ -2609,14 +2614,20 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   assert.ok(Math.abs(a119.velocity * a119.exposureCycleDays * a119.quality * a119.riskFactor - a119.limitBase) < 0.5, "test 119: المقترح = السحب × الدورة × Q × المخاطر");
   assert.ok(Math.abs(a119.naturalNeed - a119.velocity * a119.cycleDays) < 0.01 && Math.abs(a119.precautionaryCap - 1.5 * a119.naturalNeed) < 0.01, "test 119: الاحتياج الطبيعي وسقفه");
   // المتاح والتجاوز بعملة المقارنة، والحد المعتمد منفصل عن المقترح.
-  assert.equal(steady119.availableCredit, Math.max(0, steady119.creditLimitDisplay - Math.max(0, steady119.balanceDisplay)), "test 119: المتاح من الحد");
-  assert.equal(steady119.overLimitAmount, Math.max(0, Math.max(0, steady119.balanceDisplay) - steady119.creditLimitDisplay), "test 119: مقدار التجاوز");
+  // بحد معتمد: المتاح والتجاوز على المعتمد (قرار المالك 2026-10-25)؛ وبلا معتمد: على المقترح.
+  assert.equal(steady119.limitBasis, "approved", "test 119: الحكم على الحد المعتمد أولاً");
+  assert.equal(steady119.availableCredit, Math.max(0, 1000 - Math.max(0, steady119.balanceDisplay)), "test 119: المتاح من الحد المعتمد");
+  assert.equal(steady119.overLimitAmount, Math.max(0, Math.max(0, steady119.balanceDisplay) - 1000), "test 119: مقدار التجاوز عن المعتمد");
+  const plain119 = at89(rc119, 160);
+  assert.equal(plain119.limitBasis, "auto", "test 119: بلا حد معتمد الحكم على المقترح الموثوق");
+  assert.equal(plain119.availableCredit, Math.max(0, plain119.creditLimitDisplay - Math.max(0, plain119.balanceDisplay)), "test 119: المتاح من المقترح");
+  assert.equal(plain119.overLimitAmount, Math.max(0, Math.max(0, plain119.balanceDisplay) - plain119.creditLimitDisplay), "test 119: مقدار التجاوز عن المقترح");
   assert.equal(steady119.approvedCredit.limit, 1000, "test 119: الحد المعتمد من المالك ظاهر");
   assert.equal(steady119.approvedCredit.updatedAt, "2026-09-01T10:00:00.000Z", "test 119: تاريخ الاعتماد");
   assert.equal(steady119.approvedCredit.proposedMinusApproved, steady119.creditLimit - 1000, "test 119: الفرق بين المقترح والمعتمد");
   assert.notEqual(steady119.creditLimit, 1000, "test 119: المعتمد لا يحلّ محل المقترح");
   assert.equal(steady119.legacyCreditLimit, 1000, "test 119: التوافق مع الحقل القديم");
-  // أي حد رقمي محسوب لا يتجاوز سقفه الاحترازي (قبل التنعيم).
+  // أي حد رقمي محسوب لا يتجاوز سقفه الاحترازي (قيد نهائي بعد التنعيم).
   for (const row of rc119.customers) {
     const auto = row.autoCredit;
     if (auto && Number.isFinite(auto.precautionaryCap) && Number.isFinite(auto.limitBase)) assert.ok(auto.limitBase <= auto.precautionaryCap + 1e-6, `test 119: ${row.customerName} تحت السقف الاحترازي`);
@@ -2677,6 +2688,69 @@ if (!process.env.OZK_CI_TZ_CHILD) {
 
   // 92) تعريف واحد للمورد (ملاحظة Codex P1): مع accountClasses:v1 صنف الشجرة هو المصدر في كل
   //     المحرك (الفوج، المعايرة، الحقل isSupplier، العدّادات)؛ بلا العلامة isSupplier القديم كما هو.
+  // 120) قرارا المالك (2026-10-25): (1) السقف الاحترازي قيد نهائي بعد التنعيم الأسبوعي، والتنعيم
+  //      يعمل داخله فقط. (2) التجاوز والاستخدام والمتاح على الحد المعتمد يدوياً أولاً ثم المقترح
+  //      الموثوق؛ بيانات غير كافية بلا معتمد ⇒ «يحتاج مراجعة» بلا تنبيه رقمي؛ الصفر المخزَّن قرار صريح.
+  const cap120 = peak119.precautionaryCap;
+  const snap120 = (id, limitBase) => ({ customer_guid: gid(id), snapshot_date: d(7), auto_status: "normal", credit_status: "normal",
+    limit_base: limitBase, credit_limit_display: limitBase, credit_currency: "USD", risk_score: 0, factors: {} });
+  // (1-أ) أساس أعلى من السقف: النزول المحصور بالتنعيم لا يُبقي الحد فوق السقف.
+  const highBase120 = at89(build89(v6, { creditHistory: [snap120(154, cap120 * 2)] }), 154).autoCredit;
+  assert.equal(highBase120.smoothing.baselineDate, d(7), "test 120: التنعيم جرى على أساس الأسبوع الماضي");
+  assert.ok(highBase120.limitBaseRaw > cap120, "test 120: الحد قبل التنعيم والسقف أعلى من السقف");
+  assert.equal(highBase120.limitBase, cap120, "test 120: السقف نهائي بعد التنعيم");
+  assert.equal(highBase120.cappedBy, "precaution");
+  assert.ok(Math.abs(highBase120.velocity * highBase120.exposureCycleDays * highBase120.quality * highBase120.riskFactor - highBase120.limitBase) < 0.5, "test 120: الصيغة تطابق الحد النهائي");
+  // (1-ب) أساس منخفض: التنعيم يحصر الصعود داخل السقف، والسقف لا يدخل.
+  const lowBase120 = at89(build89(v6, { creditHistory: [snap120(154, cap120 * 0.4)] }), 154).autoCredit;
+  assert.equal(lowBase120.smoothing.reason, "capped_increase", "test 120: التنعيم يحصر الصعود");
+  assert.ok(Math.abs(lowBase120.limitBase - cap120 * 0.5) < 1e-6, "test 120: الحد = الأساس × 1.25 داخل السقف");
+  assert.notEqual(lowBase120.cappedBy, "precaution", "test 120: الحد تحت السقف فلا يُنسب إليه");
+  // (2) الحد المعتمد أولاً.
+  const v6b = [...v6,
+    { id: 170, name: "v6 معتمد صفر برصيد", accountClass: "customer", movements: tagAll(regular({ from: 59, every: 6, amount: 300, lag: 8 })) },
+    { id: 171, name: "v6 معتمد صفر بلا رصيد", accountClass: "customer", movements: tagAll([debit(40, 100), pay(38, 100)]) }];
+  const limit120 = (id, creditLimit) => ({ customerGuid: gid(id), customerKey: `k${id}`, customerName: `c${id}`, creditLimit, updatedAt: "2026-09-01T10:00:00Z" });
+  const rc120 = build89(v6b, { creditLimits: [limit120(170, 0), limit120(171, 0), limit120(152, 200), limit120(151, -5)] });
+  const zero120 = at89(rc120, 170);
+  assert.ok(zero120.balanceDisplay > 0, "test 120: التركيبة برصيد مفتوح");
+  assert.equal(zero120.limitBasis, "approved", "test 120: الصفر المخزَّن حد معتمد لا غياب");
+  assert.equal(zero120.creditStatus, "over_limit", "test 120: حد معتمد صفر مع رصيد ⇒ تجاوز");
+  assert.equal(zero120.overLimitAmount, zero120.balanceDisplay, "test 120: التجاوز = الرصيد كله");
+  assert.equal(zero120.availableCredit, 0, "test 120: لا متاح");
+  assert.equal(zero120.creditUsagePercent, null, "test 120: لا نسبة على صفر");
+  assert.ok(zero120.flags.includes("over_credit_limit"), "test 120: التنبيه يطابق الرقم");
+  assert.ok(zero120.explanation.some((reason) => reason.includes("الحد المعتمد يدوياً صفر")), "test 120: السبب يسمّي الحد المعتمد الصفري");
+  const drafts120 = engine.buildAlertDrafts(rc120).filter((draft) => draft.code.startsWith("CREDIT_"));
+  assert.ok(drafts120.some((draft) => draft.customers.includes(zero120.customerId) && draft.code === "CREDIT_OVER_LIMIT"), "test 120: مسودة التنبيه من الحد المعتمد");
+  assert.ok(drafts120.every((draft) => !/null|undefined|NaN/u.test(draft.message)), "test 120: نص التنبيه بلا قيم فارغة");
+  const zeroClear120 = at89(rc120, 171);
+  assert.equal(zeroClear120.limitBasis, "approved");
+  assert.equal(zeroClear120.creditStatus, "normal", "test 120: حد صفر بلا رصيد ⇒ لا تجاوز");
+  assert.equal(zeroClear120.overLimitAmount, 0);
+  assert.ok(!zeroClear120.flags.includes("over_credit_limit") && !zeroClear120.flags.includes("credit_insufficient_data"), "test 120: الحد المعتمد يحسم بدل «يحتاج مراجعة»");
+  const fewApproved120 = at89(rc120, 152);
+  assert.equal(fewApproved120.proposedCreditStatus, "insufficient_data", "test 120: المقترح غير موثوق");
+  assert.equal(fewApproved120.creditLimit, null, "test 120: المعتمد لا يملأ خانة المقترح");
+  assert.equal(fewApproved120.limitBasis, "approved", "test 120: الحكم على المعتمد رغم نقص البيانات");
+  assert.equal(fewApproved120.creditStatus, fewApproved120.balanceDisplay > 200 ? "over_limit" : fewApproved120.balanceDisplay >= 180 ? "near_limit" : "normal");
+  assert.equal(fewApproved120.overLimitAmount, Math.max(0, fewApproved120.balanceDisplay - 200));
+  assert.equal(fewApproved120.creditUsagePercent, Math.round((fewApproved120.balanceDisplay / 200) * 10000) / 100);
+  const negative120 = at89(rc120, 151);
+  assert.equal(negative120.limitBasis, "auto", "test 120: حد سالب ليس حداً معتمداً ⇒ المقترح");
+  assert.equal(negative120.balanceDisplay, negative120.creditLimitDisplay, "test 120: التركيبة رصيدها على الحد تماماً");
+  assert.equal(negative120.creditStatus, "near_limit", "test 120: عند الحد تماماً قرب الحد لا تجاوز بمقدار صفر");
+  assert.equal(negative120.creditUsagePercent, 100);
+  assert.equal(negative120.availableCredit, Math.max(0, negative120.creditLimitDisplay - Math.max(0, negative120.balanceDisplay)));
+  // لا تناقض بين التنبيهات والأرقام في أي سجل.
+  for (const row of rc120.customers) {
+    if (row.flags.includes("over_credit_limit")) assert.ok(row.overLimitAmount > 0, `test 120: تنبيه التجاوز برقم (${row.customerName})`);
+    if (row.overLimitAmount > 0 && row.creditStatus !== "delinquent") assert.equal(row.creditStatus, "over_limit", `test 120: رقم التجاوز بتنبيه (${row.customerName})`);
+    if (row.availableCredit !== null) assert.ok(row.limitBasis, `test 120: المتاح بأساس معروف (${row.customerName})`);
+    if (row.creditStatus === "inactive_no_limit") assert.ok(row.availableCredit === null && row.overLimitAmount === null, `test 120: «بلا حد» بلا تجاوز رقمي (${row.customerName})`);
+    if (row.creditStatus === "insufficient_data") assert.ok(row.availableCredit === null && row.overLimitAmount === null && row.creditUsagePercent === null, `test 120: «يحتاج مراجعة» بلا أرقام (${row.customerName})`);
+  }
+
   const trade92 = () => regular({ from: 58, every: 6, amount: 3000, lag: 4 }).map((m) => tag(m, m.credit > 0 ? "payment" : "sale"));
   const sup92 = [
     { id: 151, name: "مورد بالشجرة وعلامته القديمة false", accountClass: "supplier", isSupplier: false, movements: trade92() },
@@ -2811,8 +2885,13 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   // 95) التنعيم نزولاً: الحد لا ينزل أكثر من −40% بالأسبوع.
   const down = at(withHistory([snap(G_STEADY, 7, { limit_base: raw * 3, credit_limit_display: engine.commercialRound(raw * 3, "USD") })]), G_STEADY);
   assert.equal(down.autoCredit.smoothing.reason, "capped_decrease", "test 95: حصر النزول");
-  assert.ok(Math.abs(down.autoCredit.limitBase - raw * 3 * 0.6) < 1e-6, "test 95: الحد = الأساس × 0.6");
-  assert.equal(down.creditLimit, engine.commercialRound(raw * 3 * 0.6, "USD"));
+  // قرار المالك (2026-10-25): السقف الاحترازي قيد نهائي بعد التنعيم — النزول التدريجي من أساس
+  // أعلى من السقف لا يُبقي الحد فوقه.
+  const cap95 = down.autoCredit.precautionaryCap;
+  assert.ok(cap95 < raw * 3 * 0.6, "test 95: التركيبة تختبر سقفاً أدنى من الحد المنعَّم");
+  assert.equal(down.autoCredit.limitBase, cap95, "test 95: الحد = min(الأساس × 0.6، السقف الاحترازي)");
+  assert.equal(down.autoCredit.cappedBy, "precaution", "test 95: السقف بعد التنعيم");
+  assert.equal(down.creditLimit, engine.commercialRound(cap95, "USD"));
   assert.equal(down.creditHistory.change.direction, "down");
   assert.ok(down.creditHistory.change.text.startsWith("نزل الحد من "), "test 95: نص النزول");
 
@@ -3616,4 +3695,4 @@ const keyRow = (n) => keyResult.customers.find((row) => row.customerGuid === kGu
   assert.match(fn, /sameToken\(req\.headers\.get\("x-ozk-inactivity-alert-token"\)/, "test 118: الرمز شرط في التنبيه");
 }
 
-console.log(`ذكاء الزبائن: 119 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
+console.log(`ذكاء الزبائن: 120 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);

@@ -231,6 +231,14 @@
 .ci-detail .ci-note { font-size: 0.74rem; margin-top: 10px; }
 
 /* الحد المقترح والمعتمد (v6) */
+.ci-basis {
+  display: inline-block;
+  margin-inline-start: 4px;
+  padding: 0 6px;
+  border-radius: 8px;
+  font-size: 0.7rem;
+  border: 1px solid rgba(176, 140, 79, 0.45);
+}
 .ci-detail .ci-approved,
 .ci-detail .ci-proposal {
   margin: 10px 0 14px;

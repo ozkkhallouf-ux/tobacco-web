@@ -1042,6 +1042,26 @@
     return { status: "low_data", limit: capped, cappedBy };
   }
 
+  // السقف الاحترازي (قرار المالك 2026-10-25): قيد نهائي على المقترح بعد التنعيم الأسبوعي —
+  // لا يتجاوز 1.5× الاحتياج الطبيعي (السحب اليومي × دورة السداد الفعلية، بلا هامش ذروة).
+  // التنعيم يعمل داخل السقف فقط، فلا يرفع الحد فوقه أياً كان أساس الأسبوع الماضي.
+  function applyPrecautionaryCap(auto) {
+    if (!auto || !NUMERIC_AUTO_STATUSES.has(auto.status) || !Number.isFinite(auto.limitBase) || !Number.isFinite(auto.precautionaryCap)) return;
+    const limit = auto.limitBase;
+    const cap = auto.precautionaryCap;
+    if (limit > cap) {
+      auto.limitBase = cap;
+      auto.cappedBy = "precaution";
+      auto.precautionApplied = true;
+      if (auto.status !== "low_data") {
+        auto.notes.push(`السقف الاحترازي: الحد ${Math.round(limit)} حُصر عند ${Math.round(cap)} (${CONFIG.autoCredit.precautionaryCapMultiple}× الاحتياج الطبيعي ${Math.round(auto.naturalNeed)}).`);
+      }
+    }
+    // معامل المخاطر = ما بقي من الصيغة بعد السحب والدورة وQ: الاتجاه ثم السقوف والتنعيم.
+    // فالمقترح = السحب × الدورة المتوقعة × Q × معامل المخاطر حرفياً.
+    auto.riskFactor = auto.formulaBase > 0 ? roundOrNull(Math.max(0, auto.limitBase) / auto.formulaBase, 4) : null;
+  }
+
   // انتظام الدفع والتأخير من فواتير البيع المسددة فعلاً (FIFO): «في موعدها» = سُدِّدت خلال
   // موعد الاستحقاق المتوقع (دورة السداد الفعلية × 1.5 + 3، صيغة الانضباط نفسها)، والتأخير = ما زاد عليه.
   // مرجّح بالمبلغ: فاتورة كبيرة متأخرة أثقل من صغيرة. الدفعات الجزئية تتوزع FIFO فلا تُحسب
@@ -1195,29 +1215,20 @@
     // 7) الاتجاه، ثم السقوف.
     const trend = autoCreditTrend(facts, fullWindow, coverage, risk, notes);
     const capped = cappedAutoLimit(exposure * quality * trend, facts, age, { exposure, coverage, quality }, notes);
-    const { status } = capped;
-    let { limit, cappedBy } = capped;
+    const { status, limit, cappedBy } = capped;
 
-    // 8) السقف الاحترازي: المقترح لا يتجاوز 1.5× الاحتياج الطبيعي (السحب اليومي × دورة السداد
-    //    الفعلية، بلا هامش ذروة). يُطبَّق بعد كل العوامل والسقوف، وقبل التنعيم الأسبوعي.
+    // 8) السقف الاحترازي يُحسب هنا ويُطبَّق بعد التنعيم الأسبوعي (applyPrecautionaryCap).
     const naturalNeed = velocity * cycleDays;
-    const precautionaryCap = A.precautionaryCapMultiple * naturalNeed;
-    if (limit > precautionaryCap) {
-      notes.push(`السقف الاحترازي: الحد المحسوب ${Math.round(limit)} حُصر عند ${Math.round(precautionaryCap)} (${A.precautionaryCapMultiple}× الاحتياج الطبيعي ${Math.round(naturalNeed)}).`);
-      limit = precautionaryCap;
-      cappedBy = "precaution";
-    }
-    // معامل المخاطر = ما بقي من الصيغة بعد السحب والدورة وQ: الاتجاه ثم السقوف (التغطية،
-    // البيانات القليلة، الاحترازي). فالمقترح = السحب × الدورة المتوقعة × Q × معامل المخاطر حرفياً.
+    const precautionaryCap = CONFIG.autoCredit.precautionaryCapMultiple * naturalNeed;
     const formulaBase = velocity * exposureCycle * quality;
-    const riskFactor = formulaBase > 0 ? Math.max(0, limit) / formulaBase : null;
 
     Object.assign(result, {
       status,
       limitBase: Math.max(0, limit),
       naturalNeed: round(naturalNeed, 3),
       precautionaryCap: round(precautionaryCap, 3),
-      riskFactor: roundOrNull(riskFactor, 4),
+      formulaBase: round(formulaBase, 6),
+      riskFactor: null,
 
       activeDays,
       fullWindow,
@@ -1352,7 +1363,8 @@
     else if (compareLimit !== null && compareLimit > 0) {
       usagePercent = round((exposure / compareLimit) * 100, 2);
       const ratio = exposure / compareLimit;
-      if (ratio >= 1) creditStatus = "over_limit";
+      // عند الحد تماماً = قرب الحد (100%) لا تجاوز بمقدار صفر؛ كصفحة الأرصدة (balance > limit).
+      if (ratio > 1) creditStatus = "over_limit";
       else if (ratio >= CONFIG.nearLimitRatio) creditStatus = "near_limit";
     } else if (compareLimit === 0 && exposure > 0) {
       creditStatus = "over_limit";               // حد محسوب أقل من أصغر خطوة تقريب
@@ -1360,8 +1372,6 @@
       creditStatus = "unknown_limit";
     }
 
-    // المتاح من الحد ومقدار التجاوز بعملة المقارنة نفسها (عملة الحساب أو الأساس).
-    const measurable = compareLimit !== null && !["not_customer", "needs_review", "insufficient_data"].includes(creditStatus);
     return {
       ...base,
       currentBalance: round(balance, 3),
@@ -1369,8 +1379,75 @@
       balanceCurrency,
       creditUsagePercent: usagePercent,
       creditStatus,
-      availableCredit: measurable ? round(Math.max(0, compareLimit - exposure), 3) : null,
-      overLimitAmount: measurable ? round(Math.max(0, exposure - compareLimit), 3) : null
+      ...limitHeadroom(compareLimit, exposure, creditStatus)
+    };
+  }
+
+  // حالات لا يُحكم فيها بالحد المعتمد: رصيد مجهول أو قديم أو بلا سعر صرف، أو سجل ليس
+  // زبوناً تجارياً أو دوره ملتبس. وحساب بعملة غير الأساس على لقطة فواتير قديمة أو يوم آخر
+  // سعر صرفه نفسه موضع شك.
+  const APPROVED_BLOCKED_STATUSES = new Set(["unknown_balance", "stale_balance", "missing_rate", "not_customer", "needs_review"]);
+  const APPROVED_FX_GATED_STATUSES = new Set(["stale_invoices", "accounting_day_mismatch", "awaiting_typed_source"]);
+
+  // قرار المالك (2026-10-25): التجاوز ونسبة الاستخدام والمتاح على الحد المعتمد يدوياً أولاً،
+  // وبدونه على المقترح الموثوق. بيانات غير كافية بلا حد معتمد ⇒ «يحتاج مراجعة» بلا تنبيه رقمي.
+  // الحالة المقترحة تبقى في proposedCreditStatus (أساس التاريخ واللقطات).
+  function applyEffectiveLimit(credit, entry, rate) {
+    credit.proposedCreditStatus = credit.creditStatus;
+    const measured = credit.availableCredit !== null && credit.availableCredit !== undefined;
+    credit.limitBasis = measured ? credit.creditLimitSource : null;
+    credit.effectiveLimit = measured ? (credit.balanceCurrency === credit.creditCurrency ? credit.creditLimitDisplay : credit.creditLimit) : null;
+    if (!validApprovedLimit(entry) || APPROVED_BLOCKED_STATUSES.has(credit.creditStatus)) return;
+    const native = credit.balanceCurrency && credit.balanceCurrency !== CONFIG.baseCurrency;
+    if (native && (!(rate > 0) || APPROVED_FX_GATED_STATUSES.has(credit.creditStatus))) return;
+    const limit = native ? round(entry.value / rate, 3) : entry.value;
+    const exposure = Math.max(0, credit.balanceDisplay ?? 0);
+    const ratio = limit > 0 ? exposure / limit : (exposure > 0 ? Infinity : 0);
+    // التعثّر سلوك دفع يبقى ظاهراً؛ أرقام الحد بجانبه على المعتمد.
+    if (credit.creditStatus !== "delinquent") {
+      credit.creditStatus = exposure > limit ? "over_limit" : exposure > 0 && ratio >= CONFIG.nearLimitRatio ? "near_limit" : "normal";
+    }
+    Object.assign(credit, {
+      limitBasis: "approved",
+      effectiveLimit: limit,
+      creditUsagePercent: limit > 0 ? round(ratio * 100, 2) : null,
+      ...limitHeadroom(limit, exposure, credit.creditStatus)
+    });
+  }
+
+  // سبب التجاوز/القرب بنص يسمّي الحد الذي قيس عليه، فلا يناقض الرقم المعروض.
+  const LIMIT_BASIS_LABELS = Object.freeze({ approved: "الحد المعتمد يدوياً", auto: "الحد المقترح", ameen: "حد الأمين" });
+  function limitUsageReason(credit, customerName = null) {
+    const label = LIMIT_BASIS_LABELS[credit.limitBasis] || "حد الائتمان";
+    if (credit.creditUsagePercent === null) return `${customerName ? `${customerName} ` : ""}عليه رصيد مدين و${label} صفر.`;
+    return `${customerName ? `رصيد ${customerName}` : "الرصيد"} بلغ ${credit.creditUsagePercent}% من ${label}.`;
+  }
+
+  // المتاح من الحد ومقدار التجاوز بعملة المقارنة نفسها (عملة الحساب أو الأساس). «غير نشط: بلا حد»
+  // ليس حداً صفرياً يُقاس عليه — لا تجاوز رقمي بجانب حالة تقول «بلا حد».
+  const NO_HEADROOM_STATUSES = new Set(["not_customer", "needs_review", "insufficient_data", "inactive_no_limit"]);
+  function limitHeadroom(limit, exposure, creditStatus) {
+    if (limit === null || NO_HEADROOM_STATUSES.has(creditStatus)) return { availableCredit: null, overLimitAmount: null };
+    return { availableCredit: round(Math.max(0, limit - exposure), 3), overLimitAmount: round(Math.max(0, exposure - limit), 3) };
+  }
+
+  // الحد المعتمد صالح = رقم مخزَّن ≥ 0. الصفر المخزَّن قرار صريح «بلا آجل» لا غياب للحد
+  // (قرار المالك 2026-10-25)؛ السالب أو غير الرقمي ليس حداً.
+  const validApprovedLimit = (entry) => Boolean(entry) && Number.isFinite(entry.value) && entry.value >= 0;
+
+  // الحد المعتمد (المالك، بعملة الأساس كما تحفظه صفحة الأرصدة) مقابل التعرض بعملة الأساس.
+  function approvedCreditOf(entry, baseExposure, proposedBase) {
+    if (!entry) return null;
+    const measurable = validApprovedLimit(entry) && baseExposure !== null;
+    return {
+      limit: entry.value,
+      currency: CONFIG.baseCurrency,
+      updatedAt: entry.updatedAt,
+      matchedBy: entry.matchedBy,
+      usagePercent: measurable && entry.value > 0 ? round((baseExposure / entry.value) * 100, 2) : null,
+      ...(measurable ? limitHeadroom(entry.value, baseExposure, "normal") : { availableCredit: null, overLimitAmount: null }),
+      // المقترح بعملة الأساس للمقارنة: موجب = المقترح أعلى من المعتمد.
+      proposedMinusApproved: proposedBase !== null ? round(proposedBase - entry.value, 3) : null
     };
   }
 
@@ -1812,7 +1889,7 @@
       day: referenceDay,
       date: dayNumberToKey(referenceDay),
       autoStatus: auto?.status || "",
-      creditStatus: row.creditStatus,
+      creditStatus: row.proposedCreditStatus ?? row.creditStatus,
       limitBase: Number.isFinite(auto?.limitBase) ? round(auto.limitBase, 3) : null,
       creditLimitDisplay: row.creditLimitDisplay,
       creditCurrency: row.creditCurrency || CONFIG.baseCurrency,
@@ -1825,7 +1902,7 @@
   // اللقطة صالحة للتاريخ: زبون بمعرّف، حالة حد معروفة، وليست فجوة بيانات.
   function snapshotEligibleRow(row) {
     return Boolean(row && !row.isSupplier && row.customerGuid && row.autoCredit
-      && AUTO_STATUS_LABELS[row.autoCredit.status] && !HISTORY_GAP_CREDIT_STATUSES.has(row.creditStatus));
+      && AUTO_STATUS_LABELS[row.autoCredit.status] && !HISTORY_GAP_CREDIT_STATUSES.has(row.proposedCreditStatus ?? row.creditStatus));
   }
 
   function creditHistoryView(row, history, referenceDay) {
@@ -2282,8 +2359,9 @@
           const oldDebt = oldDebtCollectionOf(facts, unifiedBalance, window.referenceDay);
           if (oldDebt) auto.oldDebtCollection = oldDebt;
         }
-        // التنعيم الأسبوعي قبل حكم الاستخدام/التجاوز: الحد المعروض هو الحد المنعَّم.
+        // التنعيم الأسبوعي ثم السقف الاحترازي قيداً نهائياً، قبل حكم الاستخدام/التجاوز.
         if (historyIndex) smoothAutoCredit(auto, historyIndex.get(record.customerGuid), window.referenceDay);
+        applyPrecautionaryCap(auto);
       }
       const credit = resolveCredit(record.balanceRow, auto, display, legacyCreditLimit, {
         balancesStale: sourcesFreshness.balances.stale,
@@ -2299,24 +2377,17 @@
       if (credit.autoCredit?.oldDebtCollection && ["over_limit", "near_limit", "insufficient_data"].includes(credit.creditStatus)) {
         credit.creditStatus = "old_debt_collection";
         credit.creditUsagePercent = null;
+        // لا متاح ولا تجاوز رقمي مقابل حد لا تُقرأ المقارنة معه.
+        credit.availableCredit = null;
+        credit.overLimitAmount = null;
       }
       // الحد المعتمد (المالك، بعملة الأساس كما تحفظه صفحة الأرصدة) مقابل الرصيد بعملة الأساس:
       // حساب الليرة برصيده بعملته × سعر الصرف (لا الدولار المشوّه بفروقات الصرف).
       const accountCcyBalance = numberOrNull(record.balanceRow?.balanceAccountCcy);
       const baseExposure = credit.currentBalance === null ? null
         : Math.max(0, display.rate !== null && accountCcyBalance !== null ? accountCcyBalance * display.rate : credit.currentBalance);
-      const approvedValue = approvedEntry && approvedEntry.value > 0 ? approvedEntry.value : null;
-      credit.approvedCredit = approvedEntry ? {
-        limit: approvedEntry.value,
-        currency: CONFIG.baseCurrency,
-        updatedAt: approvedEntry.updatedAt,
-        matchedBy: approvedEntry.matchedBy,
-        usagePercent: approvedValue !== null && baseExposure !== null ? round((baseExposure / approvedValue) * 100, 2) : null,
-        available: approvedValue !== null && baseExposure !== null ? round(Math.max(0, approvedValue - baseExposure), 3) : null,
-        overLimitAmount: approvedValue !== null && baseExposure !== null ? round(Math.max(0, baseExposure - approvedValue), 3) : null,
-        // المقترح بعملة الأساس للمقارنة: موجب = المقترح أعلى من المعتمد.
-        proposedMinusApproved: credit.creditLimit !== null ? round(credit.creditLimit - approvedEntry.value, 3) : null
-      } : null;
+      credit.approvedCredit = approvedCreditOf(approvedEntry, baseExposure, credit.creditLimit);
+      applyEffectiveLimit(credit, approvedEntry, display.rate);
       const ameenLimitRaw = numberOrNull(record.balanceRow?.creditLimit ?? record.balanceRow?.credit_limit);
       credit.ameenCreditLimit = ameenLimitRaw !== null && ameenLimitRaw > 0 ? ameenLimitRaw : null;
       credit.exchangeRate = display.rate !== null ? { rate: display.rate, currency: display.currency, basis: display.rateBasis || null, date: display.rateDate || null } : null;
@@ -2627,18 +2698,14 @@
         }
         if (isReactivated) reasons.push("عاد للشراء بعد انقطاع تجاوز نمطه المعتاد.");
       }
-      if (draft.credit.creditStatus === "over_limit") {
-        reasons.push(draft.credit.creditUsagePercent === null
-          ? "عليه رصيد مدين وحده الآلي المحسوب صفر."
-          : `الرصيد ${draft.credit.creditUsagePercent}% من حد الائتمان الآلي.`);
-      }
+      if (draft.credit.creditStatus === "over_limit") reasons.push(limitUsageReason(draft.credit));
       else if (draft.credit.creditStatus === "delinquent") reasons.push(...draft.credit.autoCredit.notes);
       else if (draft.credit.creditStatus === "inactive_no_limit") reasons.push(...draft.credit.autoCredit.notes);
       else if (draft.credit.creditStatus === "not_customer") reasons.push(...draft.credit.autoCredit.notes);
       else if (draft.credit.creditStatus === "needs_review") reasons.push(...draft.credit.autoCredit.notes);
       else if (draft.credit.creditStatus === "insufficient_data") reasons.push(...draft.credit.autoCredit.notes);
       else if (draft.credit.creditStatus === "old_debt_collection") reasons.push(OLD_DEBT_NOTE(draft.credit.autoCredit.oldDebtCollection));
-      else if (draft.credit.creditStatus === "near_limit") reasons.push(`الرصيد بلغ ${draft.credit.creditUsagePercent}% من حد الائتمان.`);
+      else if (draft.credit.creditStatus === "near_limit") reasons.push(limitUsageReason(draft.credit));
       else if (draft.credit.creditStatus === "unknown_limit") reasons.push("عليه رصيد مدين بلا حد ائتمان محدد.");
       else if (draft.credit.creditStatus === "awaiting_typed_source") reasons.push(UNTYPED_LEDGER_NOTE);
       else if (draft.credit.creditStatus === "missing_rate") reasons.push("حساب بعملة غير الدولار ولا يوجد سعر صرف لعملته في لقطة الفواتير: الرصيد بعملته، بلا حد آلي ولا نسبة استخدام ولا حكم تجاوز حتى يتوفر سعر.");
@@ -2694,6 +2761,9 @@
         legacyCreditLimit: draft.credit.legacyCreditLimit,
         autoCredit: draft.credit.autoCredit,
         availableCredit: draft.credit.availableCredit,
+        limitBasis: draft.credit.limitBasis,
+        effectiveLimit: draft.credit.effectiveLimit,
+        proposedCreditStatus: draft.credit.proposedCreditStatus,
         overLimitAmount: draft.credit.overLimitAmount,
         approvedCredit: draft.credit.approvedCredit,
         ameenCreditLimit: draft.credit.ameenCreditLimit,
@@ -2820,6 +2890,7 @@
       availableCredit: row.availableCredit,
       overLimitAmount: row.overLimitAmount,
       approvedCreditLimit: row.approvedCredit?.limit ?? null,
+      limitBasis: row.limitBasis,
       riskScore: row.riskScore,
       explanation: row.explanation
     };
@@ -3073,7 +3144,7 @@
         code: row.creditStatus === "over_limit" ? "CREDIT_OVER_LIMIT" : "CREDIT_NEAR_LIMIT",
         severity: row.creditStatus === "over_limit" ? "critical" : "high",
         count: 1,
-        message: `${row.customerName} وصل إلى ${row.creditUsagePercent}% من حد الائتمان.`,
+        message: limitUsageReason(row, row.customerName),
         dedupeKey: `customer-intel:credit:${row.creditStatus}:${row.customerId}:${day}`,
         cooldownMinutes: 360,
         customers: [row.customerId]
