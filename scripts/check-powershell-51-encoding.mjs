@@ -64,6 +64,9 @@ const EXECUTED_UNDER_PS51 = [
   "tools/manual-a4-print/install.ps1",
   "tools/manual-a4-print/set-sql-secret.ps1",
   "tools/manual-a4-print/autoprint-mode.ps1",
+  // أرشفة Drive (2026-10-25، غير مسجَّلة): غلاف المهمة المقترحة واختبار 5.1
+  "tools/drive-invoice-archive/run-scheduled.ps1",
+  "tools/drive-invoice-archive/__tests__/Test-RunScheduled.ps1",
 ];
 
 const ARABIC = /[؀-ۿ]/;

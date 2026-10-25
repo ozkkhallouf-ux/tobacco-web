@@ -77,11 +77,28 @@ const scan = (rel) => {
     const r = `${rel}/${e.name}`;
     if (e.isDirectory()) { if (!["node_modules", ".git", "drive-invoice-archive"].includes(e.name)) scan(r); continue; }
     if (!/\.(ps1|psm1|cmd|bat|vbs|json|yml|yaml|js|mjs)$/.test(e.name) || /^scripts\/check[^/]*\.mjs$/.test(r)) continue;
-    if (/drive-invoice-archive/.test(read(r))) runners.push(r);
+    // استدعاء اختبار من __tests__ (وظيفة PowerShell 5.1 في CI) لا يشغّل العامل.
+    if (/drive-invoice-archive(?![\\/]__tests__[\\/])/.test(read(r))) runners.push(r);
   }
 };
 for (const rel of ["tools", ".github"]) if (fs.existsSync(path.join(root, rel))) scan(rel);
 assert.deepEqual(runners, [], `العامل غير مفعَّل: لا يجوز أن يستدعيه ملف (${runners.join(", ")})`);
+
+// غلاف التشغيل المجدول (run-scheduled.ps1): محصور بـdry-run افتراضياً، دورة واحدة --once لكل
+// تشغيل، ولا يسجّل مهمة. القالب المقترح للمراجعة وحدها، ومعطَّل حتى لو استُورد.
+const runner = read(`${toolRel}/run-scheduled.ps1`);
+assert.match(runner, /\[string\[\]\]\$AllowedModes = @\('dry-run'\),/, "الغلاف: dry-run وحده افتراضياً");
+assert.match(runner, /-ArgumentList @\("`"\$worker`"", '--once'\)/, "الغلاف: دورة واحدة --once لا حلقة مستمرة");
+assert.match(runner, /Threading\.Mutex/, "الغلاف: قفل نسخة واحدة");
+for (const rel of codeFiles.filter((f) => f.endsWith(".ps1"))) {
+  assert.doesNotMatch(read(rel), /Register-ScheduledTask|schtasks(\.exe)?\s+\/create|Enable-ScheduledTask/i, `${rel}: لا تسجيل ولا تفعيل لمهمة مجدولة`);
+}
+const taskXml = read(`${toolRel}/scheduled-task/OZK-DriveArchive-DryRun.task.xml`);
+assert.match(taskXml, /<Settings>[\s\S]*<Enabled>false<\/Enabled>[\s\S]*<\/Settings>/, "قالب المهمة معطَّل");
+assert.match(taskXml, /<MultipleInstancesPolicy>IgnoreNew<\/MultipleInstancesPolicy>/, "قالب المهمة: نسخة واحدة");
+assert.match(taskXml, /<LogonType>S4U<\/LogonType>/, "قالب المهمة: بلا كلمة مرور مخزّنة");
+assert.match(taskXml, /run-scheduled\.ps1" -AllowedModes dry-run /, "قالب المهمة: الغلاف بـdry-run وحده");
+assert.doesNotMatch(taskXml, /<Password>|<BootTrigger>[\s\S]*live/i, "قالب المهمة: بلا كلمة مرور");
 
 // الهجرة: المالك وحده يقرأ، ولا شيء لـanon، والكتابة لـservice_role.
 const migration = read("supabase/proposed/22-document-archive.sql");
@@ -105,6 +122,24 @@ for (const t of ["drive-archive.test.mjs", "edge-function.test.mjs"]) {
     console.error(`check-drive-invoice-archive: فشل ${t}`);
     process.exit(r.status || 1);
   }
+}
+
+// اختبار الغلاف المجدول بعامل وهمي (بلا أمين ولا Drive ولا Telegram). على Windows يعمل أيضاً
+// تحت PowerShell 5.1 في وظيفة ps51-compat.
+const psTest = path.join(dir, "__tests__", "Test-RunScheduled.ps1");
+const pwshProbe = spawnSync("pwsh", ["-NoProfile", "-Command", "$PSVersionTable.PSVersion.Major"], { encoding: "utf8" });
+if (pwshProbe.status !== 0) {
+  if (process.env.CI === "true") { console.error("CI must run Test-RunScheduled.ps1 (pwsh missing)"); process.exit(1); }
+  console.log("  - اختبار الغلاف المجدول: متخطى (لا pwsh)");
+} else {
+  const ps = spawnSync("pwsh", ["-NoProfile", "-File", psTest], { encoding: "utf8" });
+  const m = /run-scheduled: (\d+) PASS, (\d+) FAIL/.exec(ps.stdout || "");
+  if (ps.status !== 0 || !m || m[2] !== "0") {
+    console.error(ps.stdout, ps.stderr);
+    console.error("check-drive-invoice-archive: فشل Test-RunScheduled.ps1");
+    process.exit(1);
+  }
+  console.log(`  ✓ الغلاف المجدول (pwsh ${pwshProbe.stdout.trim()}): ${m[1]} تأكيداً`);
 }
 
 // ── ٣) الهجرة على PostgreSQL محلي ────────────────────────────────────────────
