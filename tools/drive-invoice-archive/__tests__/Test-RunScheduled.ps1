@@ -48,6 +48,19 @@ function Invoke-Ps([string[]]$ArgList) {
     return $LASTEXITCODE
 }
 
+# غلاف في الخلفية بسطر أوامر مقتبس صراحة: Start-Process على 5.1 يضم مصفوفة الوسائط بلا اقتباس،
+# فلم تصل -WorkerDir إلى الغلاف على عدّاء Windows (CI على 1363b25).
+function Start-WrapperProcess($E) {
+    $quoted = @(Get-WrapperArgs $E | ForEach-Object { '"' + ([string]$_).Replace('"', '\"') + '"' })
+    $psi = New-Object Diagnostics.ProcessStartInfo
+    $psi.FileName = $psExe
+    $psi.Arguments = $quoted -join ' '
+    $psi.UseShellExecute = $false
+    $p = [Diagnostics.Process]::Start($psi)
+    $null = $p.Handle
+    return $p
+}
+
 function Invoke-Wrapper($E, [string]$FakeMode = 'ok', [int]$Timeout = 60, [string[]]$Allowed = @('dry-run'), [string]$Node = $node) {
     $env:FAKE_WORKER_MODE = $FakeMode
     $env:FAKE_WORKER_RUNS = $E.Runs
@@ -137,9 +150,9 @@ try {
     $env:FAKE_WORKER_MODE = 'sleep'
     $env:FAKE_WORKER_SLEEP_MS = '5000'
     $env:FAKE_WORKER_RUNS = $e.Runs
-    $first = Start-Process -FilePath $psExe -ArgumentList (Get-WrapperArgs $e) -PassThru -NoNewWindow
-    $null = $first.Handle
+    $first = Start-WrapperProcess $e
     $started = Wait-For { (Get-RunCount $e) -ge 1 }
+    if (-not $started) { Write-Host ('DIAG args: ' + $first.StartInfo.Arguments) }
     Assert 'التشغيل الأول بدأ' $started
     $second = Invoke-Wrapper $e 'ok'
     Assert 'تشغيل ثانٍ أثناء الأول ⇒ 10 بلا تشغيل عامل ثانٍ' ($second -eq 10 -and (Get-RunCount $e) -eq 1)
@@ -153,7 +166,7 @@ try {
     $env:FAKE_WORKER_MODE = 'sleep'
     $env:FAKE_WORKER_SLEEP_MS = '30000'
     $env:FAKE_WORKER_RUNS = $e.Runs
-    $victim = Start-Process -FilePath $psExe -ArgumentList (Get-WrapperArgs $e) -PassThru -NoNewWindow
+    $victim = Start-WrapperProcess $e
     [void](Wait-For { (Get-RunCount $e) -ge 1 })
     $workerPid = [int](([IO.File]::ReadAllLines($e.Runs)[0] -split ' ')[0])
     Stop-Process -Id $victim.Id -Force
