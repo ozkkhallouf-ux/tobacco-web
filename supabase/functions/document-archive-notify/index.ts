@@ -9,9 +9,12 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 //
 // المسارات (POST فقط، بالرأس x-ozk-archive-secret):
 //   /notify  multipart: حقول المستند + file (PDF). يرسل المستند إلى محادثة المالك
-//            وحدها (bot_config.owner_chat_id) ويسجّل message_id. إن كان للمهمة
-//            message_id مسجَّل يعيده بلا إرسال ثانٍ (إعادة محاولة العامل بعد ضياع الرد).
-//   /report  JSON: نبض العامل + ملخص المهام؛ يعيد طلبات إعادة المحاولة من المالك.
+//            وحدها (bot_config.owner_chat_id) مرة واحدة على الأكثر (Migration 26):
+//            حجز ذرّي لـjob_id قبل sendDocument، ثم تسجيل النتيجة. حجز قائم ⇒ 409
+//            in_progress؛ نتيجة مجهولة (ضاع ردّ تيليغرام) ⇒ 409 delivery_unknown بلا إعادة
+//            تلقائية أبداً؛ مُرسَل ⇒ message_id نفسه بلا إرسال ثانٍ.
+//   /report  JSON: نبض العامل + ملخص المهام؛ يعيد طلبات إعادة المحاولة من المالك،
+//            ويحرّر حجوزاتها المجهولة (المالك تحقق بنفسه أن المستند لم يصل).
 //
 // لا chat_id من الطلب إطلاقاً، ولا parse_mode، ولا روابط مشاركة عامة.
 // النسخة غير منشورة؛ النشر بموافقة المالك من الـMac (verify_jwt=false في config.toml).
@@ -31,6 +34,10 @@ const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 const ARCHIVE_SECRET = Deno.env.get("DOCUMENT_ARCHIVE_SECRET") ?? "";
 const PROFILE = "public";
 const RECORD_RETRY_MS = 400;
+// مهلة طلب تيليغرام: بعدها النتيجة مجهولة (قد يكون وصل). أقل من مهلة العامل (120ث)
+// ومن حدّ الحجز (300ث) كي لا يصير الحجز مجهولاً والطلب ما زال يرسل.
+const TELEGRAM_TIMEOUT_MS = 60000;
+const CLAIM_LEASE_SECONDS = 300;
 
 function json(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
@@ -74,23 +81,56 @@ async function ownerChatId(): Promise<string> {
   return id;
 }
 
-async function telegram(method: string, body: FormData | Record<string, unknown>): Promise<number> {
+type SendOutcome =
+  | { outcome: "sent"; messageId: number }
+  | { outcome: "not_sent" | "unknown"; error: string };
+
+// نتيجة الإرسال بثلاث حالات. not_sent فقط حين يقول تيليغرام صراحةً ok=false (لم يُرسَل).
+// انقطاع أو مهلة أو جسم غير مقروء أو ok بلا message_id ⇒ unknown: قد يكون وصل.
+// لا نعيد نص خطأ تيليغرام (قد يتضمن تفاصيل الطلب)؛ الرمز وحده.
+async function telegramSend(method: string, body: FormData | Record<string, unknown>): Promise<SendOutcome> {
   const token = await botToken();
   const init: RequestInit = body instanceof FormData
     ? { method: "POST", body }
     : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
-  const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, init);
+  let res: Response;
+  try {
+    res = await fetch(`https://api.telegram.org/bot${token}/${method}`, { ...init, signal: AbortSignal.timeout(TELEGRAM_TIMEOUT_MS) });
+  } catch {
+    return { outcome: "unknown", error: `telegram_${method}_network` };
+  }
   const data = await res.json().catch(() => null) as { ok?: boolean; result?: { message_id?: number } } | null;
-  const messageId = data && data.ok && data.result ? Number(data.result.message_id) : NaN;
-  // لا نعيد نص خطأ تيليغرام (قد يتضمن تفاصيل الطلب)؛ الرمز وحده.
-  if (!Number.isFinite(messageId)) throw new Error(`telegram_${method}_${res.status}`);
-  return messageId;
+  if (data && data.ok === false) return { outcome: "not_sent", error: `telegram_${method}_${res.status}` };
+  const messageId = data && data.ok === true && data.result ? Number(data.result.message_id) : NaN;
+  if (!Number.isFinite(messageId)) return { outcome: "unknown", error: `telegram_${method}_${res.status}_unreadable` };
+  return { outcome: "sent", messageId };
 }
 
-async function existingMessageId(jobId: string): Promise<number | null> {
-  const rows = await restGet(`document_archive_items?job_id=eq.${jobId}&select=telegram_message_id`) as Array<{ telegram_message_id: number | null }>;
-  const v = Array.isArray(rows) && rows[0] ? rows[0].telegram_message_id : null;
-  return v === null || v === undefined ? null : Number(v);
+type Claim = { status: "claimed" | "sent" | "in_progress" | "unknown"; token?: string; message_id?: number };
+
+// الوصف في تنبيه «غير محسوم» للمالك (Migration 26): نوع المستند ورقمه وتاريخه ونسخته، بلا زبون ولا مبلغ.
+function claimLabel(v: { doc_type: string; doc_number: string; doc_date: string; version: number | string }): string {
+  const kind = v.doc_type === "wholesale_invoice" ? "فاتورة جملة" : "مستند";
+  return `${kind} رقم ${v.doc_number} — ${v.doc_date} — V${v.version}`;
+}
+
+async function claimNotification(jobId: string, label: string): Promise<Claim> {
+  return await rpc("document_archive_claim_notification", { p_job_id: jobId, p_lease_seconds: CLAIM_LEASE_SECONDS, p_label: label }) as Claim;
+}
+
+// تسجيل النتيجة يُعاد حتى 3 مرات. إن فشل كلياً بقي الحجز sending فيصير unknown بعد
+// المهلة: لا إرسال ثانٍ في كل الأحوال.
+async function finishNotification(jobId: string, token: string, outcome: string, messageId: number | null, error: string | null): Promise<boolean> {
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const r = await rpc("document_archive_finish_notification",
+        { p_job_id: jobId, p_token: token, p_outcome: outcome, p_message_id: messageId, p_error: error }) as { ok?: boolean };
+      return Boolean(r && r.ok);
+    } catch {
+      if (attempt < 3) await new Promise((r) => setTimeout(r, RECORD_RETRY_MS * attempt));
+    }
+  }
+  return false;
 }
 
 async function handleNotify(req: Request): Promise<Response> {
@@ -107,27 +147,41 @@ async function handleNotify(req: Request): Promise<Response> {
   const bytes = new Uint8Array(await file.arrayBuffer());
   if (!isPdfBytes(bytes)) return json(400, { ok: false, error: "file_type" });
 
-  const already = await existingMessageId(v.job_id);
-  if (already !== null) return json(200, { ok: true, duplicate: true, message_id: already });
-
+  // كل ما قد يفشل قبل الإرسال يُقرأ قبل الحجز، كي لا يبقى حجز بلا محاولة.
   const chat = await ownerChatId();
+  await botToken();
   const { caption, followUp } = buildNotifyCaption(v);
+
+  const claim = await claimNotification(v.job_id, claimLabel(v));
+  if (claim.status === "sent") return json(200, { ok: true, duplicate: true, message_id: Number(claim.message_id) });
+  if (claim.status === "in_progress") return json(409, { ok: false, error: "in_progress" });
+  if (claim.status !== "claimed" || !claim.token) return json(409, { ok: false, error: "delivery_unknown" });
+
   const doc = new FormData();
   doc.append("chat_id", chat);
   doc.append("caption", caption);
   doc.append("document", new Blob([bytes], { type: "application/pdf" }), fileNameFor(v, String(fields.file_name || "")));
-  const messageId = await telegram("sendDocument", doc);
+  const sent = await telegramSend("sendDocument", doc);
+  if (sent.outcome !== "sent") {
+    await finishNotification(v.job_id, claim.token, sent.outcome, null, sent.error);
+    if (sent.outcome === "unknown") {
+      console.error(`document-archive-notify: ${sent.error} (delivery unknown, no automatic resend)`);
+      return json(409, { ok: false, error: "delivery_unknown" });
+    }
+    throw new Error(sent.error);
+  }
+  const messageId = sent.messageId;
+  const claimRecorded = await finishNotification(v.job_id, claim.token, "sent", messageId, null);
   if (followUp) {
     // الرسالة المرتبطة: ردّ على المستند نفسه. فشلها لا يُفشل الإشعار (المستند وصل).
-    await telegram("sendMessage", { chat_id: chat, text: followUp, reply_to_message_id: messageId }).catch(() => 0);
+    await telegramSend("sendMessage", { chat_id: chat, text: followUp, reply_to_message_id: messageId }).catch(() => null);
   }
   const recorded = await recordNotification(itemFromNotify(v, messageId, String(fields.host || "")));
-  return json(200, { ok: true, duplicate: false, message_id: messageId, recorded });
+  return json(200, { ok: true, duplicate: false, message_id: messageId, recorded: recorded && claimRecorded });
 }
 
-// التسجيل هو حارس عدم التكرار: إن ضاع مع ضياع الرد على العامل، أعاد العامل المحاولة
-// فوصل المستند مرتين. لذا يُعاد التسجيل حتى 3 مرات قبل الاستسلام. وإن فشل كلياً
-// فالمستند وصل؛ العامل يرسل message_id في تقريره التالي فيُسجَّل.
+// مرآة الموقع: message_id على عنصر المهمة. حارس التكرار هو الحجز (Migration 26) لا هذا
+// التسجيل؛ يُعاد حتى 3 مرات، وإن فشل كلياً أرسل العامل message_id في تقريره التالي.
 async function recordNotification(item: unknown): Promise<boolean> {
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
@@ -150,7 +204,14 @@ function fileNameFor(v: { doc_number: string; doc_date: string }, given: string)
 async function handleReport(req: Request): Promise<Response> {
   const body = await req.json().catch(() => null);
   if (!body || typeof body !== "object") return json(400, { ok: false, error: "json" });
-  const result = await rpc("document_archive_ingest_report", { p_report: body });
+  const result = await rpc("document_archive_ingest_report", { p_report: body }) as { retry_job_ids?: unknown };
+  const retryIds = Array.isArray(result && result.retry_job_ids)
+    ? (result.retry_job_ids as unknown[]).map(String).filter((id) => /^[0-9a-f]{32}$/.test(id)) : [];
+  if (retryIds.length) {
+    // طلب المالك يحرّر الحجوزات المجهولة وحدها؛ فشل التحرير لا يُسقط التقرير (الإعادة تعود مجهولة فيطلبها ثانية).
+    await rpc("document_archive_release_notification_claims", { p_job_ids: retryIds })
+      .catch(() => console.error("document-archive-notify: release_claims_failed"));
+  }
   return json(200, { ok: true, result });
 }
 

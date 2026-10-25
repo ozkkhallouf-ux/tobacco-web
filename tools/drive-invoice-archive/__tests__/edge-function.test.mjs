@@ -34,10 +34,15 @@ async function loadHandler(env, fetchMock) {
 
 function createBackend() {
   const s = { items: new Map(), telegram: [], rpc: [], failRecord: false, failRecordTimes: 0, recordCalls: 0,
-    telegramFail: 0, telegramStatus: 500, restDown: false, calls: 0 };
+    telegramFail: 0, telegramStatus: 500, restDown: false, calls: 0,
+    // Migration 26: نموذج الحجز بالذاكرة بنفس قواعد supabase/proposed/26 (تُختبر SQL حياً في check-drive-invoice-archive).
+    claims: new Map(), labels: [], clock: Date.parse("2026-10-25T12:00:00Z"), noClaimRpc: false, failFinish: false, released: [],
+    // تيليغرام: lostReply يوصل المستند ثم يقطع الاتصال؛ unreadable يوصله بجسم غير مقروء؛ delayMs يبطئه.
+    lostReply: 0, unreadable: 0, delayMs: 0 };
   const json = (status, body) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 
-  function telegramApi(u, init) {
+  async function telegramApi(u, init) {
+    if (s.delayMs) await new Promise((r) => setTimeout(r, s.delayMs));
     if (s.telegramFail > 0) {
       s.telegramFail--;
       return json(s.telegramStatus, { ok: false, error_code: s.telegramStatus, description: "Too Many Requests: retry after 5" });
@@ -49,7 +54,51 @@ function createBackend() {
       Object.assign(entry, JSON.parse(init.body));
     }
     s.telegram.push(entry);
+    if (s.lostReply > 0) { s.lostReply--; const e = new TypeError("fetch failed"); e.code = "ECONNRESET"; throw e; }
+    if (s.unreadable > 0) { s.unreadable--; return new Response("<html>bad gateway</html>", { status: 200 }); }
     return json(200, { ok: true, result: { message_id: 7000 + s.telegram.length } });
+  }
+
+  const LEASE_MS = 300 * 1000;
+  function claimRpc(init) {
+    if (s.noClaimRpc) return json(404, { message: "function not found" });
+    const { p_job_id: id, p_label: label } = JSON.parse(init.body);
+    s.labels.push(label);
+    const item = s.items.get(id);
+    const token = `t${Math.random()}`;
+    if (item && item.telegram_message_id != null) {
+      s.claims.set(id, { ...(s.claims.get(id) || { token }), state: "sent", msg: item.telegram_message_id });
+      return json(200, { status: "sent", message_id: item.telegram_message_id });
+    }
+    const c = s.claims.get(id);
+    if (!c || c.state === "released") {
+      s.claims.set(id, { state: "sending", token, at: s.clock, attempts: (c ? c.attempts : 0) + 1 });
+      return json(200, { status: "claimed", token });
+    }
+    if (c.state === "sent") return json(200, { status: "sent", message_id: c.msg });
+    if (c.state === "sending" && s.clock - c.at < LEASE_MS) return json(200, { status: "in_progress" });
+    if (c.state === "sending") c.state = "unknown";
+    return json(200, { status: "unknown" });
+  }
+
+  function finishRpc(init) {
+    if (s.failFinish) return json(503, { message: "busy" });
+    const { p_job_id: id, p_token: token, p_outcome: outcome, p_message_id: msg } = JSON.parse(init.body);
+    const c = s.claims.get(id);
+    let ok = false;
+    if (c && c.token === token) {
+      if (outcome === "sent" && (c.state === "sending" || c.state === "unknown")) { c.state = "sent"; c.msg = msg; ok = true; }
+      else if (outcome !== "sent" && c.state === "sending") { c.state = outcome === "not_sent" ? "released" : "unknown"; ok = true; }
+    }
+    return json(200, { ok });
+  }
+
+  function releaseRpc(init) {
+    const { p_job_ids: ids } = JSON.parse(init.body);
+    let n = 0;
+    for (const id of ids) { const c = s.claims.get(id); if (c && c.state === "unknown") { c.state = "released"; n++; } }
+    s.released.push(...ids);
+    return json(200, n);
   }
 
   function recordNotification(init) {
@@ -69,7 +118,9 @@ function createBackend() {
       const prev = s.items.get(it.job_id);
       s.items.set(it.job_id, { ...it, telegram_message_id: (prev && prev.telegram_message_id) ?? it.telegram_message_id ?? null });
     }
-    return json(200, { items: items.length, retry_job_ids: [] });
+    const retry = s.retryNext || [];
+    s.retryNext = [];
+    return json(200, { items: items.length, retry_job_ids: retry });
   }
 
   const rest = {
@@ -80,6 +131,9 @@ function createBackend() {
     },
     "/rest/v1/rpc/document_archive_record_notification": recordNotification,
     "/rest/v1/rpc/document_archive_ingest_report": ingestReport,
+    "/rest/v1/rpc/document_archive_claim_notification": claimRpc,
+    "/rest/v1/rpc/document_archive_finish_notification": finishRpc,
+    "/rest/v1/rpc/document_archive_release_notification_claims": releaseRpc,
   };
 
   async function fetchMock(url, init = {}) {
@@ -302,4 +356,139 @@ test("Edge: /report يمرّر الدفعة إلى RPC بمفتاح الخدمة
   }));
   assert.equal(bad.status, 400);
   assert.equal(b.s.telegram.length, 0);
+});
+
+// ─── مرة واحدة على الأكثر (Migration 26) ───
+
+function reportRequest(items = []) {
+  return new Request("https://x/functions/v1/document-archive-notify/report", {
+    method: "POST", headers: { "x-ozk-archive-secret": SECRET, "Content-Type": "application/json" },
+    body: JSON.stringify({ host: "OZK2026", mode: "live", drive_state: "connected", items }),
+  });
+}
+
+test("Edge: طلبان متزامنان للمهمة نفسها ⇒ إرسال واحد، والثاني 409 in_progress", { skip: SKIP }, async () => {
+  const b = createBackend();
+  const handler = await loadHandler(ENV, b.fetchMock);
+  b.s.delayMs = 50;
+  const results = await Promise.all([1, 2, 3].map(() => handler(notifyRequest(FIELDS))));
+  const statuses = results.map((r) => r.status).sort();
+  assert.deepEqual(statuses, [200, 409, 409]);
+  for (const r of results.filter((x) => x.status === 409)) assert.equal((await r.json()).error, "in_progress");
+  assert.equal(b.s.telegram.filter((t) => t.method === "sendDocument").length, 1, "مستند واحد فقط");
+  b.s.delayMs = 0;
+  assert.equal((await (await handler(notifyRequest(FIELDS))).json()).duplicate, true);
+  assert.equal(b.s.telegram.length, 1);
+});
+
+test("Edge: ضياع ردّ تيليغرام بعد الوصول ⇒ 409 delivery_unknown، والإعادة لا ترسل ثانية", { skip: SKIP }, async () => {
+  const b = createBackend();
+  const handler = await loadHandler(ENV, b.fetchMock);
+  b.s.lostReply = 1;
+  const cap = captureConsole();
+  let r1;
+  try { r1 = await handler(notifyRequest(FIELDS)); } finally { cap.restore(); }
+  assert.equal(r1.status, 409);
+  assert.equal((await r1.json()).error, "delivery_unknown");
+  assert.equal(b.s.claims.get(FIELDS.job_id).state, "unknown");
+  for (let i = 0; i < 3; i++) {
+    const again = await handler(notifyRequest(FIELDS));
+    assert.equal(again.status, 409);
+    assert.equal((await again.json()).error, "delivery_unknown");
+  }
+  b.s.clock += 3600 * 1000;
+  assert.equal((await handler(notifyRequest(FIELDS))).status, 409, "ولا بعد ساعة");
+  assert.equal(b.s.telegram.length, 1, "وصل مرة واحدة ولم يُعَد");
+  assert.equal(b.s.recordCalls, 0);
+});
+
+test("Edge: ردّ 200 غير مقروء أو بلا message_id ⇒ مجهول بلا إعادة", { skip: SKIP }, async () => {
+  const b = createBackend();
+  const handler = await loadHandler(ENV, b.fetchMock);
+  b.s.unreadable = 1;
+  const cap = captureConsole();
+  let r1;
+  try { r1 = await handler(notifyRequest(FIELDS)); } finally { cap.restore(); }
+  assert.equal((await r1.json()).error, "delivery_unknown");
+  assert.equal((await handler(notifyRequest(FIELDS))).status, 409);
+  assert.equal(b.s.telegram.length, 1);
+});
+
+test("Edge: رفض صريح من تيليغرام (ok=false) يحرّر الحجز، فإعادة العامل ترسل مرة واحدة", { skip: SKIP }, async () => {
+  const b = createBackend();
+  const handler = await loadHandler(ENV, b.fetchMock);
+  b.s.telegramFail = 1;
+  b.s.telegramStatus = 429;
+  const cap = captureConsole();
+  let r1;
+  try { r1 = await handler(notifyRequest(FIELDS)); } finally { cap.restore(); }
+  assert.equal(r1.status, 502);
+  assert.equal(b.s.claims.get(FIELDS.job_id).state, "released");
+  const ok = await (await handler(notifyRequest(FIELDS))).json();
+  assert.equal(ok.duplicate, false);
+  assert.equal(b.s.claims.get(FIELDS.job_id).attempts, 2);
+  assert.equal(b.s.telegram.length, 1);
+});
+
+test("Edge: فشل تسجيل النتيجة والمرآة معاً بعد الإرسال ⇒ لا إرسال ثانٍ: in_progress ثم مجهول بعد المهلة", { skip: SKIP }, async () => {
+  const b = createBackend();
+  const handler = await loadHandler(ENV, b.fetchMock);
+  b.s.failFinish = true;
+  b.s.failRecord = true;
+  const first = await (await handler(notifyRequest(FIELDS))).json();
+  assert.equal(first.ok, true);
+  assert.equal(first.recorded, false);
+  const again = await handler(notifyRequest(FIELDS));
+  assert.equal((await again.json()).error, "in_progress");
+  b.s.clock += 301 * 1000;
+  const later = await handler(notifyRequest(FIELDS));
+  assert.equal((await later.json()).error, "delivery_unknown");
+  assert.equal(b.s.telegram.length, 1);
+  // تقرير العامل يحمل message_id ⇒ يُعرف أنه وصل: «مُرسَل» لا مجهول.
+  b.s.failRecord = false;
+  await handler(reportRequest([{ job_id: FIELDS.job_id, status: "notified", telegram_message_id: first.message_id }]));
+  const known = await (await handler(notifyRequest(FIELDS))).json();
+  assert.equal(known.duplicate, true);
+  assert.equal(known.message_id, first.message_id);
+  assert.equal(b.s.telegram.length, 1);
+});
+
+test("Edge: المجهول لا يُعاد إلا بطلب المالك؛ /report يحرّر حجوزات retry_job_ids وحدها", { skip: SKIP }, async () => {
+  const b = createBackend();
+  const handler = await loadHandler(ENV, b.fetchMock);
+  b.s.lostReply = 1;
+  const cap = captureConsole();
+  try { await handler(notifyRequest(FIELDS)); } finally { cap.restore(); }
+  await handler(reportRequest());
+  assert.equal((await handler(notifyRequest(FIELDS))).status, 409, "تقرير بلا طلب مالك لا يحرّر");
+  b.s.retryNext = [FIELDS.job_id];
+  assert.equal((await handler(reportRequest())).status, 200);
+  assert.deepEqual(b.s.released, [FIELDS.job_id]);
+  const resent = await (await handler(notifyRequest(FIELDS))).json();
+  assert.equal(resent.duplicate, false);
+  assert.equal(b.s.telegram.length, 2, "إعادة صريحة بقرار المالك");
+});
+
+test("Edge: الدالة الجديدة بلا Migration 26 تفشل مغلقة: 502 بلا إرسال", { skip: SKIP }, async () => {
+  const b = createBackend();
+  b.s.noClaimRpc = true;
+  const handler = await loadHandler(ENV, b.fetchMock);
+  const cap = captureConsole();
+  let r;
+  try { r = await handler(notifyRequest(FIELDS)); } finally { cap.restore(); }
+  assert.equal(r.status, 502);
+  assert.equal(b.s.telegram.length, 0);
+});
+
+test("Edge: الحجز يحمل وصف تنبيه «غير محسوم» (النوع والرقم والتاريخ والنسخة) بلا زبون ولا مبلغ ولا رابط", { skip: SKIP }, async () => {
+  const b = createBackend();
+  const handler = await loadHandler(ENV, b.fetchMock);
+  b.s.lostReply = 1;
+  const cap = captureConsole();
+  try { await handler(notifyRequest(FIELDS)); } finally { cap.restore(); }
+  assert.equal(b.s.labels[0], "فاتورة جملة رقم 501 — 2026-10-24 — V1");
+  for (const sensitive of [FIELDS.customer_name, FIELDS.amount, FIELDS.drive_link, FIELDS.drive_file_id]) {
+    assert.ok(!b.s.labels[0].includes(sensitive));
+  }
+  assert.ok(cap.lines.some((l) => l.includes("delivery unknown")), "سجل الدالة يذكر النتيجة المجهولة");
 });
