@@ -43,6 +43,7 @@ export const CHECKS = [
   'check-cost-data-owner-only.mjs',
   'check-credit-limit-identity.mjs',
   'check-cron-job-health-classifier.mjs',
+  'check-customer-intelligence-view.mjs',
   'check-customer-intelligence-wiring.mjs',
   'check-customer-intelligence.mjs',
   'check-customer-invoice-identity.mjs',

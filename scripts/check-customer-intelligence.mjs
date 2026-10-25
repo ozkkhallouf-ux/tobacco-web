@@ -3075,8 +3075,15 @@ if (!process.env.OZK_CI_TZ_CHILD) {
 
   // 107ب) الواجهة ترسم التاريخ كما حسبه المحرك، وفشل قراءة الجدول (قبل تطبيق الـmigration)
   //       لا يُسقط الشاشة بل يعيد سلوك STEP 1.
-  const renderView = async (listCustomerCreditHistory) => {
-    const appNode = { innerHTML: "", querySelectorAll: () => [], querySelector: () => null };
+  // الجدول المضغوط (طلب المالك 2026-10-25) نقل سبب التغيّر واتجاه الخطر إلى لوحة التفاصيل،
+  // فنفتحها بنقرة صف كما يفعل المستخدم ثم نفحص ما رُسم.
+  const renderView = async (listCustomerCreditHistory, openCustomer = null) => {
+    const row = { dataset: { ciCustomer: null }, clicks: [], addEventListener(type, fn) { if (type === "click") this.clicks.push(fn); } };
+    const appNode = {
+      innerHTML: "",
+      querySelectorAll: (selector) => (selector === "[data-ci-customer]" ? [row] : []),
+      querySelector: () => null
+    };
     const sandbox = {
       console, Date, Math, JSON, Number, String, Object, Array, Map, Set, Promise, Infinity, isNaN, URLSearchParams,
       location: { search: "?route=customerIntel" },
@@ -3104,16 +3111,21 @@ if (!process.env.OZK_CI_TZ_CHILD) {
     vm.runInContext(readText("src/customer-intelligence.js"), viewContext, { filename: "src/customer-intelligence.js" });
     vm.runInContext(readText("src/customer-intelligence-view.js"), viewContext, { filename: "src/customer-intelligence-view.js" });
     await sandbox.ozkCustomerIntelligenceView.refresh();
+    if (openCustomer) {
+      row.dataset.ciCustomer = openCustomer(sandbox.ozkCustomerIntelligenceView.snapshot());
+      row.clicks.at(-1)();
+    }
     return { html: appNode.innerHTML, intel: sandbox.ozkCustomerIntelligenceView.snapshot() };
   };
   const viewHistory = [snap(G_DELINQ, 7, { limit_base: 5000, credit_limit_display: 5000 }),
     ...[10, 20, 30, 40, 50, 60].map((score, i) => snap(G_DELINQ, 6 - i, { risk_score: score, limit_base: 5000, credit_limit_display: 5000 }))];
   let askedSince = null;
-  const rendered = await renderView(async ({ sinceDate } = {}) => { askedSince = sinceDate; return viewHistory; });
+  const rendered = await renderView(async ({ sinceDate } = {}) => { askedSince = sinceDate; return viewHistory; },
+    (intel) => intel.customers.find((row) => row.customerGuid === G_DELINQ).customerId);
   assert.equal(askedSince, new Date(NOW.getTime() - (21 + 2) * 86400000).toISOString().slice(0, 10), "test 107ب: نافذة الجلب من إعداد المحرك");
   const viewRow = rendered.intel.customers.find((row) => row.customerGuid === G_DELINQ);
   assert.ok(viewRow.creditHistory.change, "test 107ب: المحرك في المتصفح استلم التاريخ");
-  assert.ok(rendered.html.includes(viewRow.creditHistory.change.text.replace(/&/g, "&amp;")), "test 107ب: نص السبب بجانب الزبون كما حسبه المحرك");
+  assert.ok(rendered.html.includes(viewRow.creditHistory.change.text.replace(/&/g, "&amp;")), "test 107ب: نص السبب في تفاصيل الزبون كما حسبه المحرك");
   assert.match(rendered.html, /class="ci-trend bad"[^>]*>↑</u, "test 107ب: سهم الخطر الصاعد");
   const broken = await renderView(async () => { throw new Error('relation "public.customer_credit_history" does not exist'); });
   assert.ok(broken.intel, "test 107ب: فشل التاريخ لا يُسقط الشاشة");

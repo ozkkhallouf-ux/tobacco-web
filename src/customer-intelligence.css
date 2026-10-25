@@ -100,23 +100,51 @@
 /* ── الجدول ──────────────────────────────────────────────────────────────── */
 .customer-intel .ci-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 
+/* جدول مضغوط (2026-10-25): ثمانية أعمدة افتراضية تتسع لشاشة MacBook بلا تمرير أفقي.
+   الأرقام بخانات متساوية العرض فتصطف الآحاد تحت الآحاد، والأسماء تلتف ولا تُقصّ. */
 .customer-intel .ci-table {
   width: 100%;
-  min-width: 940px;
   border-collapse: collapse;
-  font-size: 0.84rem;
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
 }
 
 .customer-intel .ci-table th,
 .customer-intel .ci-table td {
-  padding: 8px 10px;
+  padding: 6px 8px;
   text-align: right;
-  border-bottom: 1px solid rgba(176, 140, 79, 0.18);
+  border-bottom: 1px solid rgba(176, 140, 79, 0.16);
   white-space: nowrap;
+  line-height: 1.45;
 }
 
-.customer-intel .ci-table td.ci-name { white-space: normal; min-width: 160px; font-weight: 600; }
+.customer-intel .ci-table th { font-size: 0.76rem; vertical-align: bottom; }
+.customer-intel .ci-table td.ci-name { white-space: normal; min-width: 140px; max-width: 240px; }
 .customer-intel .ci-table td.ci-flags { white-space: normal; min-width: 190px; }
+.customer-intel .ci-table td.ci-status { font-size: 0.76rem; }
+.customer-intel .ci-ccy { font-size: 0.68rem; opacity: 0.75; }
+
+/* عمود الاسم ثابت عند التمرير الأفقي (هاتف أو أعمدة اختيارية كثيرة). */
+.customer-intel .ci-table th.ci-col-customerName,
+.customer-intel .ci-table td.ci-name {
+  position: sticky;
+  right: 0;
+  z-index: 1;
+  background: var(--surface);
+}
+
+.customer-intel .ci-name-link {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  font-weight: 700;
+  text-align: start;
+  cursor: pointer;
+}
+.customer-intel .ci-name-link:hover,
+.customer-intel .ci-name-link:focus-visible { color: #d9a94f; text-decoration: underline; }
 
 .customer-intel .ci-sort {
   background: none;
@@ -126,13 +154,45 @@
   font-weight: 700;
   cursor: pointer;
   padding: 0;
+  white-space: nowrap;
 }
 .customer-intel .ci-sort.active { color: #d9a94f; }
 
+/* خلية الاسم الثابتة تحتاج خلفية معتمة، فيُرسم تظليل الصف فوقها طبقةً لا لوناً بديلاً. */
 .customer-intel .ci-row { cursor: pointer; }
-.customer-intel .ci-row:hover,
-.customer-intel .ci-row:focus-visible { background: rgba(176, 140, 79, 0.1); outline: none; }
+.customer-intel .ci-row:hover { background: rgba(176, 140, 79, 0.1); }
 .customer-intel .ci-row.selected { background: rgba(176, 140, 79, 0.18); }
+.customer-intel .ci-row:hover td.ci-name { background-image: linear-gradient(rgba(176, 140, 79, 0.1), rgba(176, 140, 79, 0.1)); }
+.customer-intel .ci-row.selected td.ci-name { background-image: linear-gradient(rgba(176, 140, 79, 0.18), rgba(176, 140, 79, 0.18)); }
+
+.customer-intel .ci-table tr.ci-group td {
+  padding: 8px;
+  font-size: 0.74rem;
+  font-weight: 700;
+  color: #b08c4f;
+  background: rgba(176, 140, 79, 0.06);
+  white-space: normal;
+}
+
+.customer-intel .ci-table-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+.customer-intel .ci-table-meta > p { margin: 4px 0; font-size: 0.78rem; }
+
+.customer-intel .ci-columns { font-size: 0.8rem; }
+.customer-intel .ci-columns summary { cursor: pointer; font-weight: 700; padding: 4px 0; }
+.customer-intel .ci-column-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 4px 12px;
+  margin: 8px 0;
+}
+.customer-intel .ci-column-option { display: flex; align-items: center; gap: 6px; }
 
 .customer-intel .ci-change {
   margin-top: 3px;
@@ -151,7 +211,8 @@
 .ci-detail .ci-history p { margin: 2px 0; }
 
 .customer-intel .ci-table td.good { color: #4caf7d; }
-.customer-intel .ci-table td.bad { color: #e2725b; }
+.customer-intel .ci-table td.bad { color: #e2725b; font-weight: 700; }
+.customer-intel .ci-table td.warn { color: #d9a94f; }
 
 /* ── الشارات ─────────────────────────────────────────────────────────────── */
 .ci-chip {
@@ -260,4 +321,8 @@
 @media (max-width: 640px) {
   .customer-intel .ci-cards { grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); }
   .customer-intel .ci-card strong { font-size: 1.25rem; }
+  .customer-intel .ci-table { font-size: 0.78rem; }
+  .customer-intel .ci-table th,
+  .customer-intel .ci-table td { padding: 5px 6px; }
+  .customer-intel .ci-table td.ci-name { min-width: 110px; max-width: 150px; }
 }
