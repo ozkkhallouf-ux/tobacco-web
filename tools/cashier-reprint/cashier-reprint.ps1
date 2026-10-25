@@ -92,8 +92,8 @@ try {
         if ($config.mode -eq "local") {
             try { $checks.BridgeSha256 = Assert-CashierBridgePinned $config; $checks.Bridge = "ok" } catch { $checks.Bridge = [string]$_.Exception.Message }
             try {
-                $printer = @(Get-Printer -Name $config.printerName -ErrorAction Stop)
-                $checks.Printer = "ok"; $checks.PrinterPort = [string]$printer[0].PortName; $checks.PrinterStatus = [string]$printer[0].PrinterStatus
+                $printer = Get-CashierPrinterInfo $config.printerName
+                $checks.Printer = "ok"; $checks.PrinterPort = $printer.PortName; $checks.PrinterStatus = $printer.StatusText
             } catch { $checks.Printer = "غير موجودة: $($config.printerName)" }
             try { $connection = Open-CashierReadOnlyConnection (Read-CashierSqlSecret $secretPath); $connection.Dispose(); $checks.Sql = "ok" }
             catch { $checks.Sql = [string]$_.Exception.Message }
