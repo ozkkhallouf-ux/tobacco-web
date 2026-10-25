@@ -13,7 +13,7 @@ const model = require("../../manual-a4-print/lib/invoice-model");
 const { HASH_SCHEMA, invoiceVersionHash, legacyVersionHash, jobIdFor, sha256 } = require("./fingerprint");
 const { folderPlan, fileName } = require("./naming");
 const { STATUS } = require("./store");
-const { MODES } = require("./config");
+const { MODES, pilotExpired } = require("./config");
 const { redact } = require("./redact");
 
 const DOC_TYPE = "wholesale_invoice";
@@ -544,6 +544,12 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
     const out = { detect: null, upload: null, notify: null, report: null };
     if (pilot.size) {
       out.pilot = { invoices: pilot.size, expiresAt: cfg.pilotExpiresAt };
+      // انتهت التجربة أثناء عمل العملية: لا رصد ولا رفع ولا إشعار ولا تقرير.
+      if (pilotExpired(cfg, now())) {
+        out.pilotExpired = true;
+        emit("pilot_expired", out.pilot);
+        return out;
+      }
       emit("pilot_active", out.pilot);
     }
     try {

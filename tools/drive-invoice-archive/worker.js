@@ -203,10 +203,12 @@ async function main(argv) {
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
   const once = argv.includes("--once");
+  let exitCode = 0;
   do {
     try {
       const r = await archiver.cycle({ host, version: VERSION });
       if (once) console.log(JSON.stringify(r));
+      if (r.pilotExpired) { exitCode = 2; break; }
     } catch (err) {
       log({ at: new Date().toISOString(), event: "cycle_failed", message: redact(err && err.message) });
     }
@@ -216,7 +218,7 @@ async function main(argv) {
   await deps.ameen.close().catch(() => {});
   await deps.renderer.close().catch(() => {});
   lock.close();
-  return 0;
+  return exitCode;
 }
 
 module.exports = { createAmeen, acquireLock, health, CHANGED_SQL, LINES_SQL, BALANCE_SQL, NOW_SQL };

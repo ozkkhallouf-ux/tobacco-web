@@ -109,6 +109,29 @@ test("التجربة المحصورة: تتطلب انتهاءً قريباً، 
   assert.equal(example.pilotInvoiceGuids, undefined, "مثال الإعداد بلا حصر");
 });
 
+test("التجربة المحصورة: انقضاء التاريخ أثناء عمل العملية يوقف كل المراحل دون إعادة تشغيل", async () => {
+  const t = await setup({ mode: "dry-run" });
+  // الساعة المحقونة 2026-10-24T12:00Z = 15:00 دمشق؛ آخر يوم مسموح هو اليوم نفسه.
+  Object.assign(t.cfg, { mode: "live", pilotInvoiceGuids: [G1], pilotExpiresAt: "2026-10-24" });
+  t.restart();
+  t.advance(8 * 3600 + 59 * 60); // 20:59Z = 23:59 دمشق: ما زالت سارية
+  t.ameen.add({ guid: G1, number: 1100 });
+  t.advance(300 - 120); // 21:02Z: انقضت، والعملية نفسها ما زالت تعمل
+  const sentBefore = t.edgeFake.state.sent.length;
+  const reportsBefore = t.edgeFake.state.reports.length;
+  const out = await t.cycle();
+  assert.equal(out.pilotExpired, true);
+  assert.equal(out.detect, null, "لا قراءة للمصدر");
+  assert.equal(out.upload, null);
+  assert.equal(out.notify, null);
+  assert.equal(out.report, null);
+  assert.equal(t.store.jobs().length, 0, "لا مهمة");
+  assert.equal(t.drive.pdfFiles().length, 0, "لا رفع");
+  assert.equal(t.edgeFake.state.sent.length, sentBefore, "لا إشعار");
+  assert.equal(t.edgeFake.state.reports.length, reportsBefore, "لا تقرير");
+  assert.ok(t.logs.some((l) => l.event === "pilot_expired"));
+});
+
 test("التجربة المحصورة: فاتورة واحدة فقط تُرفع ويُرسل إشعارها، والمهام السابقة خارجها لا تُلمس، ورفع الحصر يعيد الباقي", async () => {
   const t = await setup({ mode: "dry-run" });
   t.ameen.add({ guid: G1, number: 1100 });

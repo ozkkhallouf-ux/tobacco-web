@@ -57,6 +57,12 @@ function damascusDay(nowMs) {
   return new Date(nowMs + 3 * 3600_000).toISOString().slice(0, 10);
 }
 
+// انقضاء التجربة يُفحص عند الإقلاع (validate) وقبل كل دورة (archiver.cycle)، فعملية
+// بدأت قبل الانتهاء لا تتجاوز منتصف ليل آخر يوم.
+function pilotExpired(cfg, nowMs) {
+  return (cfg.pilotInvoiceGuids || []).length > 0 && String(cfg.pilotExpiresAt || "") < damascusDay(nowMs);
+}
+
 function validatePilot(cfg, nowMs, errors) {
   const list = cfg.pilotInvoiceGuids;
   if (!Array.isArray(list)) { errors.push("pilotInvoiceGuids يجب أن تكون قائمة"); return; }
@@ -100,4 +106,4 @@ function loadConfig(file) {
   return validate({ ...DEFAULTS, ...user });
 }
 
-module.exports = { APPROVED_ACCOUNT, MODES, DEFAULTS, BASE_DIR, PILOT_MAX_DAYS, validate, loadConfig };
+module.exports = { APPROVED_ACCOUNT, MODES, DEFAULTS, BASE_DIR, PILOT_MAX_DAYS, pilotExpired, validate, loadConfig };
