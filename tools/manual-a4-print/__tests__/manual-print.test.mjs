@@ -74,6 +74,20 @@ test("فحص الطابعة: لا «جاهزة» لطابعة لا تردّ أو
   assert.match(queued.warning, /5/);
 });
 
+test("فحص الطابعة: منفذ WSD/IPP يُفحص على العنوان الذي حفظه Windows، و printerHost يتقدّم عليه", () => {
+  const script = server.printerProbeScript({ printerName: "Canon G3410 (auto)", printerHost: "", printerHostPort: 631 });
+  assert.match(script, /if \(-not \$h -and \$p\.PortName -like 'WSD-\*'\)/);
+  assert.match(script, /'SWD\\IPP\\' \+ \$w\.'Printer UUID'/);
+  assert.match(script, /A35996AB-11CF-4935-8B61-A6761081ECDF\} 12/);
+  assert.match(script, /Enum\\SWD\\PRINTENUM\\/);
+  assert.match(server.printerProbeScript({ printerName: "x", printerHost: "192.0.2.5" }), /\$h = '192\.0\.2\.5'/);
+  assert.match(server.printerProbeScript({ printerName: "O'Brien" }), /-eq 'O''Brien'/);
+  // ما يعيده السكربت حين بقي العنوان المحفوظ قديماً: يُرفض قبل SumatraPDF بدل فشل بعد 50 ثانية.
+  const stale = server.classifyPrinter({ port: "WSD-21d4", offline: "False", status: "3", detected: "0", jobs: "0", reach: "fail", target: "192.168.1.62:631" });
+  assert.equal(stale.state, "unreachable");
+  assert.match(stale.reason, /192\.168\.1\.62:631/);
+});
+
 test("الكاشير ونوع غير معتمد لا يُطبعان، والجملة تُطبع", () => {
   assert.equal(model.printBlockReason(WHOLESALE, {}), "");
   assert.match(model.printBlockReason(CASHIER, {}), /الكاشير/);

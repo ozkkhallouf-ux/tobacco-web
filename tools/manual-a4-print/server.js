@@ -228,21 +228,33 @@ function classifyPrinter(f) {
   return { state: "ready", ...base, reachable: f.reach === "ok" ? true : null, warning: warn, reason: "" };
 }
 
+// سكربت فحص الطابعة. منفذ WSD/IPP لا يحمل عنواناً في Win32_TCPIPPrinterPort، وطابور
+// «IPP Class Driver» يحفظ عنوان الطابعة وقت إضافته؛ فإن تغيّر عنوانها (DHCP) يبقى Windows
+// يراها «جاهزة» بينما يفشل الإرسال بعد نحو 50 ثانية. لذا يُقرأ العنوان المحفوظ نفسه ويُفحص.
+function printerProbeScript(cfg) {
+  const q = (v) => String(v || "").replace(/'/g, "''");
+  return `$p = Get-CimInstance Win32_Printer | Where-Object { $_.Name -eq '${q(cfg.printerName)}' }\n`
+    + `if (-not $p) { 'NOT_FOUND'; exit 0 }\n`
+    + `$jobs = @(Get-CimInstance Win32_PrintJob | Where-Object { $_.Name -like ($p.Name + ',*') }).Count\n`
+    + `$h = '${q(cfg.printerHost)}'; $n = ${Number(cfg.printerHostPort) || 631}\n`
+    + `$tp = Get-CimInstance Win32_TCPIPPrinterPort | Where-Object { $_.Name -eq $p.PortName } | Select-Object -First 1\n`
+    + `if ($tp -and $tp.HostAddress) { $h = $tp.HostAddress; $n = [int]$tp.PortNumber }\n`
+    + `if (-not $h -and $p.PortName -like 'WSD-*') {\n`
+    + `  $u = ''\n`
+    + `  $w = Get-ItemProperty -LiteralPath ('HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Print\\Monitors\\WSD Port\\Ports\\' + $p.PortName) -ErrorAction SilentlyContinue\n`
+    + `  if ($w -and $w.'IPP PortId' -and $w.'Printer UUID') { $u = (Get-PnpDeviceProperty -InstanceId ('SWD\\IPP\\' + $w.'Printer UUID') -KeyName '{A35996AB-11CF-4935-8B61-A6761081ECDF} 12' -ErrorAction SilentlyContinue).Data }\n`
+    + `  if (-not $u) { $u = (Get-ItemProperty -LiteralPath ('HKLM:\\SYSTEM\\CurrentControlSet\\Enum\\SWD\\PRINTENUM\\' + $p.PortName) -ErrorAction SilentlyContinue).LocationInformation }\n`
+    + `  if ($u) { try { $x = [Uri]"$u"; $h = $x.Host; $n = $x.Port } catch { } }\n`
+    + `}\n`
+    + `$reach = 'none'\n`
+    + `if ($h) { $c = New-Object Net.Sockets.TcpClient; try { $reach = if ($c.ConnectAsync($h, $n).Wait(2000)) { 'ok' } else { 'fail' } } catch { $reach = 'fail' } finally { $c.Close() } }\n`
+    + `'FOUND|' + $p.PortName + '|' + $p.WorkOffline + '|' + $p.PrinterStatus + '|' + $p.DetectedErrorState + '|' + $jobs + '|' + $reach + '|' + $h + ':' + $n`;
+}
+
 function createPrinter(cfg) {
   function probe() {
     if (process.platform !== "win32") return { state: "unknown", reason: "ليس Windows" };
-    const q = (v) => String(v || "").replace(/'/g, "''");
-    const r = runPowerShell(
-      `$p = Get-CimInstance Win32_Printer | Where-Object { $_.Name -eq '${q(cfg.printerName)}' }\n`
-      + `if (-not $p) { 'NOT_FOUND'; exit 0 }\n`
-      + `$jobs = @(Get-CimInstance Win32_PrintJob | Where-Object { $_.Name -like ($p.Name + ',*') }).Count\n`
-      + `$h = '${q(cfg.printerHost)}'; $n = ${Number(cfg.printerHostPort) || 631}\n`
-      + `$tp = Get-CimInstance Win32_TCPIPPrinterPort | Where-Object { $_.Name -eq $p.PortName } | Select-Object -First 1\n`
-      + `if ($tp -and $tp.HostAddress) { $h = $tp.HostAddress; $n = [int]$tp.PortNumber }\n`
-      + `$reach = 'none'\n`
-      + `if ($h) { $c = New-Object Net.Sockets.TcpClient; try { $reach = if ($c.ConnectAsync($h, $n).Wait(2000)) { 'ok' } else { 'fail' } } catch { $reach = 'fail' } finally { $c.Close() } }\n`
-      + `'FOUND|' + $p.PortName + '|' + $p.WorkOffline + '|' + $p.PrinterStatus + '|' + $p.DetectedErrorState + '|' + $jobs + '|' + $reach + '|' + $h + ':' + $n`
-    );
+    const r = runPowerShell(printerProbeScript(cfg));
     const out = String(r.stdout || "").trim();
     if (out === "NOT_FOUND") return { state: "missing", reason: `الطابعة "${cfg.printerName}" غير مثبّتة على هذا الجهاز` };
     if (r.status !== 0 || !out.startsWith("FOUND|")) return { state: "unknown", reason: "تعذّر الاستعلام عن الطابعة" };
@@ -688,7 +700,7 @@ async function main() {
 }
 
 module.exports = {
-  createApp, classifyPrinter, createHttpHandler, SESSION_COOKIE, parseSqlConnStr, countPdfPages, loadConfig, DEFAULTS,
+  createApp, classifyPrinter, printerProbeScript, createHttpHandler, SESSION_COOKIE, parseSqlConnStr, countPdfPages, loadConfig, DEFAULTS,
   SEARCH_SQL, LINES_SQL, BALANCE_SQL, createRenderer,
 };
 
