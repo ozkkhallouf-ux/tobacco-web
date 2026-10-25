@@ -85,6 +85,122 @@ test("كل استعلامات العامل SELECT صافية وتجتاز الح
   assert.doesNotMatch(src, /ExecuteNonQuery|\.execute\(|\.batch\(|bulk\(/, "لا تنفيذ إجراءات ولا كتابة");
 });
 
+// ─── التجربة المحصورة ───
+const DAY = 86400_000;
+const dayOf = (ms) => new Date(ms + 3 * 3600_000).toISOString().slice(0, 10);
+
+test("التجربة المحصورة: تتطلب انتهاءً قريباً، وبعده يرفض العامل العمل كلياً", () => {
+  const now = Date.parse("2026-10-25T03:00:00Z");
+  const base = { ...DEFAULTS, archiveFrom: "2026-10-25" };
+  const ok = validate({ ...base, pilotInvoiceGuids: [G1], pilotExpiresAt: "2026-10-26" }, now);
+  assert.deepEqual(ok.pilotInvoiceGuids, [G1]);
+  assert.equal(validate(base, now).pilotInvoiceGuids.length, 0, "الافتراضي: لا حصر");
+  assert.throws(() => validate({ ...base, pilotInvoiceGuids: [G1] }, now), /pilotExpiresAt/);
+  assert.throws(() => validate({ ...base, pilotInvoiceGuids: [G1], pilotExpiresAt: "2026-10-24" }, now), /انتهت التجربة/);
+  assert.throws(() => validate({ ...base, pilotInvoiceGuids: [G1], pilotExpiresAt: "2026-11-05" }, now), /7 أيام/);
+  assert.throws(() => validate({ ...base, pilotInvoiceGuids: ["1100"], pilotExpiresAt: "2026-10-26" }, now), /GUID/);
+  assert.throws(() => validate({ ...base, pilotInvoiceGuids: [G1, G1.toUpperCase()], pilotExpiresAt: "2026-10-26" }, now), /مكرر/);
+  assert.throws(() => validate({ ...base, pilotExpiresAt: "2026-10-26" }, now), /بلا pilotInvoiceGuids/);
+  assert.throws(() => validate({ ...base, pilotInvoiceGuids: "x", pilotExpiresAt: "2026-10-26" }, now), /قائمة/);
+  // آخر يوم بتوقيت دمشق ما زال صالحاً حتى منتصف ليله، ثم يُرفض.
+  assert.doesNotThrow(() => validate({ ...base, pilotInvoiceGuids: [G1], pilotExpiresAt: "2026-10-25" }, Date.parse("2026-10-25T20:59:00Z")));
+  assert.throws(() => validate({ ...base, pilotInvoiceGuids: [G1], pilotExpiresAt: "2026-10-25" }, Date.parse("2026-10-25T21:01:00Z")), /انتهت التجربة/);
+  const example = JSON.parse(fs.readFileSync(path.join(dir, "config.example.json"), "utf8"));
+  assert.equal(example.pilotInvoiceGuids, undefined, "مثال الإعداد بلا حصر");
+});
+
+test("التجربة المحصورة: انقضاء التاريخ أثناء عمل العملية يوقف كل المراحل (Fail Closed) ولا يتسع الحصر إلى كل الفواتير", async () => {
+  const t = await setup({ mode: "dry-run" });
+  // الساعة المحقونة 2026-10-24T12:00Z = 15:00 دمشق؛ آخر يوم مسموح هو اليوم نفسه.
+  Object.assign(t.cfg, { mode: "live", pilotInvoiceGuids: [G1], pilotExpiresAt: "2026-10-24" });
+  t.restart();
+  t.advance(8 * 3600 + 59 * 60); // 20:59Z = 23:59 دمشق: ما زالت سارية
+  t.ameen.add({ guid: G1, number: 1100 });
+  t.ameen.add({ guid: G2, number: 1101 }); // خارج الحصر: يجب ألا تُلمس بعد الانقضاء أيضاً
+  t.advance(300 - 120); // 21:02Z: انقضت، والعملية نفسها ما زالت تعمل
+  const sentBefore = t.edgeFake.state.sent.length;
+  const reportsBefore = t.edgeFake.state.reports.length;
+  const out = await t.cycle();
+  assert.equal(out.pilotExpired, true);
+  assert.equal(out.detect, null, "لا قراءة للمصدر");
+  assert.equal(out.upload, null);
+  assert.equal(out.notify, null);
+  assert.equal(out.report, null);
+  assert.equal(t.store.jobs().length, 0, "لا مهمة");
+  assert.equal(t.drive.pdfFiles().length, 0, "لا رفع");
+  assert.equal(t.edgeFake.state.sent.length, sentBefore, "لا إشعار");
+  assert.equal(t.edgeFake.state.reports.length, reportsBefore, "لا تقرير");
+  assert.ok(t.logs.some((l) => l.event === "pilot_expired"));
+  // دورات لاحقة في العملية نفسها: تبقى موقوفة، ولا تتحول إلى أرشفة كل الفواتير.
+  t.advance(3 * 3600);
+  const later = await t.cycle();
+  assert.equal(later.pilotExpired, true);
+  assert.equal(t.store.jobs().length, 0, "لا مهمة لأي فاتورة، داخل الحصر أو خارجه");
+  assert.equal(t.store.versionsOf("wholesale_invoice", G2).length, 0);
+  assert.equal(t.drive.pdfFiles().length, 0);
+  // وعند إعادة التشغيل يرفض الإعداد نفسه، فلا يبدأ العامل أصلاً.
+  assert.throws(() => validate({ ...DEFAULTS, archiveFrom: "2026-10-01", pilotInvoiceGuids: [G1], pilotExpiresAt: "2026-10-24" }, Date.parse("2026-10-24T21:02:00Z")), /انتهت التجربة/);
+});
+
+test("التجربة المحصورة: خطأ رصد لفاتورة خارجها يبقى في الطابور ويُؤرشف بعد رفع الحصر (Codex P1)", async () => {
+  const t = await setup({ mode: "dry-run", overrides: { archiveFrom: "2026-01-01" } });
+  const realRender = t.renderer.render;
+  t.renderer.render = async () => { throw Object.assign(new Error("عطل"), { code: "RENDER" }); };
+  t.ameen.add({ guid: G2, number: 41, date: "2026-01-05", createdAt: "2026-01-05T10:00:00" }); // خارج lookback
+  t.advance(300);
+  await t.cycle();
+  assert.deepEqual(Object.keys(t.store.state.detectErrors), [G2]);
+  t.renderer.render = realRender;
+  Object.assign(t.cfg, { pilotInvoiceGuids: [G1], pilotExpiresAt: "2026-10-25" });
+  t.restart();
+  t.advance(3700);
+  await t.cycle();
+  assert.deepEqual(Object.keys(t.store.state.detectErrors), [G2], "لا يُحذف أثناء الحصر");
+  assert.equal(t.store.jobs().length, 0);
+  Object.assign(t.cfg, { pilotInvoiceGuids: [], pilotExpiresAt: "" });
+  t.restart();
+  t.advance(60);
+  await t.cycle();
+  assert.deepEqual(t.store.jobs().map((j) => j.number), [41], "يُؤرشف بعد رفع الحصر");
+  assert.equal(Object.keys(t.store.state.detectErrors).length, 0);
+});
+
+test("التجربة المحصورة: فاتورة واحدة فقط تُرفع ويُرسل إشعارها، والمهام السابقة خارجها لا تُلمس، ورفع الحصر يعيد الباقي", async () => {
+  const t = await setup({ mode: "dry-run" });
+  t.ameen.add({ guid: G1, number: 1100 });
+  t.ameen.add({ guid: G2, number: 1101 });
+  t.advance(300);
+  await t.cycle(); // DRY RUN سابق بلا حصر: مهمتان محليتان
+  assert.equal(t.store.jobs().length, 2);
+  t.ameen.add({ guid: G3, number: 1102 });
+  const reportsBefore = t.edgeFake.state.reports.length;
+  Object.assign(t.cfg, { mode: "live", pilotInvoiceGuids: [G1], pilotExpiresAt: dayOf(Date.now() + DAY) });
+  t.restart();
+  t.advance(t.cfg.reconcileMinutes * 60);
+  const out = await t.cycle();
+  assert.deepEqual(out.pilot, { invoices: 1, expiresAt: t.cfg.pilotExpiresAt });
+  assert.deepEqual(t.drive.pdfFiles().map((f) => f.name), ["فاتورة جملة - رقم 1100 - 2026-10-24 - 11111111 - V1.pdf"]);
+  assert.equal(t.edgeFake.state.sent.length, 1, "إشعار واحد للفاتورة المحصورة");
+  assert.equal(t.store.versionsOf("wholesale_invoice", G3).length, 0, "فاتورة جديدة خارج الحصر لا تُرصد");
+  assert.equal(t.store.state.hints[G3], undefined, "ولا تُعلَّم ملحوظة");
+  const pilotReports = t.edgeFake.state.reports.slice(reportsBefore);
+  assert.ok(pilotReports.length > 0 && pilotReports.every((r) => r.items.every((i) => i.source_guid === G1)), "التقرير لا يحمل غيرها");
+  assert.ok(t.logs.some((l) => l.event === "pilot_active"));
+  // دورة ثانية: لا رفع ولا إشعار مكرر.
+  t.advance(60);
+  await t.cycle();
+  assert.equal(t.drive.pdfFiles().length, 1);
+  assert.equal(t.edgeFake.state.sent.length, 1);
+  // رفع الحصر بقرار المالك: الباقي يُؤرشف، وG1 لا يتكرر.
+  Object.assign(t.cfg, { pilotInvoiceGuids: [], pilotExpiresAt: "" });
+  t.restart();
+  t.advance(t.cfg.reconcileMinutes * 60);
+  await t.cycle();
+  assert.equal(t.drive.pdfFiles().length, 3);
+  assert.equal(t.edgeFake.state.sent.length, 3);
+  assert.equal(t.store.versionsOf("wholesale_invoice", G1).length, 1);
+});
+
 // ─── التسمية ───
 test("التسمية: مسار المجلدات بالنوع/السنة/الشهر/الزبون، واسمان متشابهان لا يختلطان", () => {
   const job = { docType: "wholesale_invoice", date: "2026-10-24", customerName: "أبو علي / المزة", customerGuid: "aaaaaaaa-0000-4000-8000-000000000001", number: 1234, sourceGuid: G1, version: 1 };
