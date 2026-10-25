@@ -30,6 +30,7 @@ function Read-CashierReprintConfig([string]$Path) {
         mode = $mode
         bridgeScriptPath = [string]$raw.bridgeScriptPath
         expectedBridgeSha256 = ([string]$raw.expectedBridgeSha256).Trim().ToLowerInvariant()
+        expectedRendererSha256 = ([string]$raw.expectedRendererSha256).Trim().ToLowerInvariant()
         printerName = [string]$raw.printerName
         bridgeTimeoutSeconds = 120
         recentReprintWarningSeconds = 120
@@ -73,6 +74,7 @@ function Read-CashierReprintConfig([string]$Path) {
             throw "الإعداد bridgeScriptPath يجب أن يكون مساراً محلياً مطلقاً لملف .ps1: $($config.bridgeScriptPath)"
         }
         if ($config.expectedBridgeSha256 -notmatch '^[0-9a-f]{64}$') { throw "الإعداد expectedBridgeSha256 ليس بصمة SHA256 صحيحة." }
+        if ($config.expectedRendererSha256 -ne "" -and $config.expectedRendererSha256 -notmatch '^[0-9a-f]{64}$') { throw "الإعداد expectedRendererSha256 ليس بصمة SHA256 صحيحة." }
         if ($config.bridgeTimeoutSeconds -lt 30 -or $config.bridgeTimeoutSeconds -gt 600) { throw "bridgeTimeoutSeconds خارج المدى 30–600." }
     } else {
         if ($config.remoteHost -notmatch '^[A-Za-z0-9.-]{1,253}$') { throw "الإعداد remoteHost غير صالح." }
@@ -282,6 +284,23 @@ function Assert-CashierBridgePinned($Config) {
     return $actual
 }
 
+# ملف رسم الإيصال الذي يستورده الجسر من مجلده. بصمته اختيارية (expectedRendererSha256)، وحين
+# تُضبط تصير شرطاً للطباعة مثل بصمة الجسر: نسخة الجسر الثابتة لحساب الخدمة تحتاج renderer بلا CIM.
+function Get-CashierRendererPath($Config) {
+    return (Join-Path (Split-Path -Parent $Config.bridgeScriptPath) "ozk-print-bridge\OzkReceiptRenderer.psm1")
+}
+
+function Assert-CashierRendererPinned($Config) {
+    if ([string]::IsNullOrEmpty($Config.expectedRendererSha256)) { return "" }
+    $path = Get-CashierRendererPath $Config
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "ملف رسم الإيصال للجسر غير موجود على هذا الجهاز: $path" }
+    $actual = Get-CashierFileSha256 $path
+    if ($actual -ne $Config.expectedRendererSha256) {
+        throw "نسخة رسم الإيصال على هذا الجهاز تغيّرت (البصمة $($actual.Substring(0,12))…) ولم تُعتمد لإعادة الطباعة. لن تُطبع أي فاتورة."
+    }
+    return $actual
+}
+
 # ── الملفات التي تُنفَّذ: لا كتابة عليها لغير المدراء والنظام وصاحب التشغيل ────────
 # إن استطاع مستخدم عادي تعديل سكربت أو إعداد يشغّله حساب أعلى (المدير عبر ssh اليوم) فهذا
 # طريق رفع صلاحيات. الفحص يشمل البرنامج والإعداد والسرّ والجسر وملفات الكود بجانبه، ولا يشمل
@@ -352,9 +371,10 @@ function Assert-CashierProtectedPaths($Config, [string]$Root, [scriptblock]$GetA
     }
 }
 
-# شرط الطباعة: بصمة الجسر دائماً، وحماية الملفات المنفَّذة حين enforceProtectedPaths=true.
+# شرط الطباعة: بصمة الجسر دائماً، وبصمة الـrenderer حين تُضبط، وحماية الملفات المنفَّذة حين enforceProtectedPaths=true.
 function Assert-CashierBridgeReady($Config, [string]$Root) {
     $hash = Assert-CashierBridgePinned $Config
+    [void](Assert-CashierRendererPinned $Config)
     if ($Config.enforceProtectedPaths) { Assert-CashierProtectedPaths $Config $Root }
     return $hash
 }
@@ -436,7 +456,7 @@ function Enter-CashierInvoiceLock([string]$Root, [string]$InvoiceGuid) {
 $script:CashierPreSpoolErrorPatterns = @(
     "No posted invoice matched", "More than one posted invoice", "is not stable yet", "InvoiceNumber is required",
     "Missing required environment variable", "refuses database", "requires a db_datareader", "refuses a SQL principal",
-    "Printer queue not found", "OpenPrinter failed", "StartDocPrinter failed", "Cashier receipts are restricted",
+    "Printer queue not found", "Printer queue not ready", "OpenPrinter failed", "StartDocPrinter failed", "Cashier receipts are restricted",
     "Receipt logo not found", "must be exactly 576 dots", "requires -ConfirmPhysicalPrint",
     "network-related", "Login failed", "Cannot open database", "Connection Timeout Expired", "server was not found",
     "transport-level error", "A connection was successfully established"

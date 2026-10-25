@@ -70,6 +70,23 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
     emit("job_error", { jobId: job.jobId, number: job.number, version: job.version, stage, code: err && err.code, message: err && err.message });
   }
 
+  // نتيجة غير محسومة لا تستهلك محاولة (Migration 26): الإرسال لم يفشل، بل لا نعرف أو ننتظر.
+  // IN_PROGRESS: حجز طلب سابق قائم ⇒ انتظار قصير ثابت. DELIVERY_UNKNOWN: قد يكون وصل ⇒ موقوفة
+  // حتى إعادة المالك (ownerRetryOnly، بلا إحياء تلقائي)، والدالة نبّهت المالك نصاً.
+  function holdJob(job, stage, code) {
+    job.lastError = `${stage}:${code}`;
+    job.lastErrorAt = new Date(now()).toISOString();
+    if (code === "DELIVERY_UNKNOWN") {
+      job.failed = true;
+      job.failedAt = job.lastErrorAt;
+      job.ownerRetryOnly = true;
+    } else {
+      job.nextAttemptAt = now() + cfg.notifyWaitSeconds * 1000;
+    }
+    store.saveJob(job);
+    emit(code === "DELIVERY_UNKNOWN" ? "delivery_unknown" : "notify_in_progress", { jobId: job.jobId, number: job.number, version: job.version, stage });
+  }
+
   // ─── المولّد: نفس القالب الرسمي A4 وخط Cairo؛ بلا خط مضمَّن ⇒ لا أرشفة ───
   async function renderInvoice(header, lines, outPath) {
     const balance = await ameen.balance(header.guid);
@@ -343,6 +360,7 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
 
   function due(job) {
     if (job.failed) {
+      if (job.ownerRetryOnly) return false; // لا إحياء تلقائي: إعادة المالك وحدها (applyRetry)
       const failedAt = Date.parse(job.failedAt || 0) || 0;
       if (now() - failedAt < cfg.failedCooldownMinutes * 60_000) return false;
       job.failed = false; // إحياء تلقائي بعد التهدئة: دورة محاولات كاملة أخرى
@@ -463,6 +481,10 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
           emit("notify_unavailable", { code: err.code, message: err.message });
           break;
         }
+        if (err && (err.code === "IN_PROGRESS" || err.code === "DELIVERY_UNKNOWN")) {
+          holdJob(job, "notify", err.code);
+          continue;
+        }
         failJob(job, "notify", err);
       }
     }
@@ -499,6 +521,7 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
       const job = store.get(id);
       if (!job || !job.failed) continue;
       job.failed = false;
+      job.ownerRetryOnly = false;
       job.attempts = 0;
       job.nextAttemptAt = 0;
       store.saveJob(job);

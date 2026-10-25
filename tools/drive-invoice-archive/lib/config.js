@@ -31,6 +31,7 @@ const DEFAULTS = Object.freeze({
   reconcileMinutes: 30,
   lookbackDays: 60,
   maxAttempts: 8,
+  notifyWaitSeconds: 60,        // حجز إشعار قائم (409 in_progress): انتظار ثابت بلا استهلاك محاولة
   failedCooldownMinutes: 60,    // الفاشل نهائياً يُعاد تلقائياً بعد ساعة (كما telegram_outbox)
   requireOfficialFont: true,
   edgeUrl: "",                  // https://<ref>.supabase.co/functions/v1/document-archive-notify
@@ -90,7 +91,7 @@ function validate(cfg, nowMs = Date.now()) {
   }
   if (!DATE_RE.test(String(cfg.archiveFrom || ""))) errors.push("archiveFrom مطلوب بصيغة YYYY-MM-DD");
   if (model.allowedTypes(cfg).length === 0) errors.push("لا أنواع جملة مسموحة");
-  for (const k of ["stableSeconds", "pollSeconds", "overlapSeconds", "reconcileMinutes", "lookbackDays", "maxAttempts", "reportSeconds"]) {
+  for (const k of ["stableSeconds", "pollSeconds", "overlapSeconds", "reconcileMinutes", "lookbackDays", "maxAttempts", "reportSeconds", "notifyWaitSeconds"]) {
     if (!(Number(cfg[k]) > 0)) errors.push(`${k} يجب أن يكون موجباً`);
   }
   if (Number(cfg.stableSeconds) < 60) errors.push("stableSeconds لا يقل عن 60");

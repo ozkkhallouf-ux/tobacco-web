@@ -2,6 +2,7 @@
   "mode": "local",
   "bridgeScriptPath": "C:\\ProgramData\\OZK\\CashierReprint\\bridge\\ozk-print-bridge.ps1",
   "expectedBridgeSha256": "53e14662264520e931000d8732905c2f38a2fe1a31cd3c64596ef6227d3ff65d",
+  "expectedRendererSha256": "7f6398ca27871dd4b4715a92209ffe4ed89cc5899ad52b87c3e2a626b8f1ab23",
   "printerName": "XPRINTER XP-T80Q 80MM",
   "bridgeSqlSource": "tool-secret",
   "enforceProtectedPaths": true,

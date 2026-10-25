@@ -6,7 +6,7 @@
 //   3. الهجرة المقترحة 22 والتراجع على PostgreSQL محلي مؤقت إن وُجد (إلزامي في CI).
 // ============================================================================
 import crypto from "node:crypto";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -115,6 +115,19 @@ assert.equal((migration.match(/using \(public\.is_owner\(\)\)/g) || []).length, 
 assert.doesNotMatch(migration, /grant [^;]* to [^;]*\banon\b/i, "لا صلاحية لـanon");
 assert.doesNotMatch(migration, /for (insert|update|delete|all) to authenticated/i, "لا سياسة كتابة للمستخدمين");
 assert.doesNotMatch(migration, /\bcron\.schedule|on delete cascade/i, "لا حذف تلقائي لسجل الأرشيف");
+
+// 26: إشعار «مرة واحدة على الأكثر» — حجز ذرّي قبل الإرسال، بلا حذف ولا صلاحية لغير service_role.
+const claims = read("supabase/proposed/26-document-archive-notify-claims.sql");
+assert.match(claims, /alter table public\.document_archive_notify_claims enable row level security;/, "RLS على الحجوزات");
+assert.match(claims, /using \(public\.is_owner\(\)\)/, "قراءة الحجوزات للمالك وحده");
+assert.doesNotMatch(claims, /grant [^;]* to [^;]*\banon\b/i, "لا صلاحية لـanon على الحجوزات");
+assert.doesNotMatch(claims, /\bdelete\b|\bcron\.schedule|on delete cascade/i, "التحرير حالة released لا حذف");
+for (const f of ["document_archive_claim_notification(text, int, text)", "document_archive_finish_notification(text, uuid, text, bigint, text)", "document_archive_release_notification_claims(text[])"]) {
+  assert.ok(claims.includes(`grant execute on function public.${f} to service_role;`), `${f}: service_role وحده`);
+}
+const notifyFn = read("supabase/functions/document-archive-notify/index.ts");
+assert.ok(notifyFn.indexOf("claimNotification(v.job_id,") > 0 && notifyFn.indexOf("claimNotification(v.job_id,") < notifyFn.indexOf('telegramSend("sendDocument"'), "الدالة: الحجز قبل sendDocument");
+assert.doesNotMatch(notifyFn, /existingMessageId/, "الدالة: لا فحص قراءة غير ذرّي قبل الإرسال");
 console.log("  ✓ حراسات ثابتة: قراءة فقط، بلا مشاركة ولا حذف، المالك وحده، الحساب المعتمد، غير مفعَّل");
 
 // ── ٢) الاختبارات ────────────────────────────────────────────────────────────
@@ -194,5 +207,72 @@ if (probe.status !== 0) {
   }
   assert.ok(passes >= 25, `عدد تأكيدات SQL (${passes}) أقل من المتوقع`);
   console.log(`  ✓ الهجرة 22 والتراجع على PostgreSQL محلي: ${passes} تأكيداً`);
+  await checkNotifyClaims();
+}
+
+// 26 فوق 22: الحالات، ثم تزامن حقيقي (عمليات psql متوازية تحجز المهمة نفسها)، ثم التراجع.
+async function checkNotifyClaims() {
+  const CDB = "ozk_document_archive_claims_test";
+  psql(["-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", `drop database if exists ${CDB}`]);
+  const created = psql(["-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", `create database ${CDB}`]);
+  try {
+    const sql = read("supabase/tests/document-archive-notify-claims.sql")
+      .replace("\\i :migration22", () => migration)
+      .replace("\\i :migration26", () => claims)
+      .replaceAll("\\i :owner_retry", () => read("supabase/proposed/26-document-archive-owner-retry.sql").replaceAll("<job_id>", "8".repeat(32)));
+    const run = psql(["-d", CDB, "-X", "-v", "ON_ERROR_STOP=1"], { input: sql });
+    const text = `${output(created)}${output(run)}`;
+    const passes = (text.match(/PASS /g) || []).length;
+    if (created.status !== 0 || run.status !== 0 || !text.includes("NOTIFY_CLAIMS_SQL_OK") || /TEST FAIL/.test(text)) {
+      console.error(text);
+      throw new Error("notify claims SQL test failed");
+    }
+    assert.ok(passes >= 30, `عدد تأكيدات حجوزات الإشعار (${passes}) أقل من المتوقع`);
+
+    // تزامن: 12 عملية منفصلة تحجز job_id نفسه في اللحظة نفسها ⇒ claimed واحدة بالضبط.
+    const job = "1".repeat(32);
+    const one = `set role service_role; select public.document_archive_claim_notification('${job}', 300) ->> 'status';`;
+    const runs = await Promise.all(Array.from({ length: 12 }, () => psqlAsync(["-d", CDB, "-X", "-tA", "-v", "ON_ERROR_STOP=1", "-c", one])));
+    const statuses = runs.map((r) => r.stdout.trim().split("\n").pop());
+    if (runs.some((r) => r.status !== 0)) throw new Error(`concurrent claim failed: ${runs.map(output).join("\n")}`);
+    assert.equal(statuses.filter((x) => x === "claimed").length, 1, `حجز واحد فقط بالتزامن (${statuses.join(",")})`);
+    assert.equal(statuses.filter((x) => x === "in_progress").length, 11, "البقية in_progress");
+
+    // التنبيه بالتزامن: الحجز نفسه بعد انتهاء مهلته ⇒ 12 طلباً متزامناً كلها unknown وتنبيه واحد للحادثة.
+    const expire = psql(["-d", CDB, "-X", "-tA", "-v", "ON_ERROR_STOP=1", "-c",
+      `update public.document_archive_notify_claims set claimed_at = now() - interval '10 minutes' where job_id = '${job}'`]);
+    if (expire.status !== 0) throw new Error(`expire lease failed: ${output(expire)}`);
+    const late = await Promise.all(Array.from({ length: 12 }, () => psqlAsync(["-d", CDB, "-X", "-tA", "-v", "ON_ERROR_STOP=1", "-c", one])));
+    if (late.some((r) => r.status !== 0)) throw new Error(`concurrent expired claim failed: ${late.map(output).join("\n")}`);
+    assert.ok(late.every((r) => r.stdout.trim().split("\n").pop() === "unknown"), "حجز منتهٍ ⇒ unknown للجميع");
+    const alerts = psql(["-d", CDB, "-X", "-tA", "-c", `select count(*) from public.test_alerts where dedupe_key like 'document-archive-unknown:${job}:%'`]);
+    assert.equal(alerts.stdout.trim(), "1", "حادثة واحدة بالتزامن ⇒ تنبيه واحد");
+
+    const rb = psql(["-d", CDB, "-X", "-tA", "-v", "ON_ERROR_STOP=1"], { input: `${read("supabase/proposed/26-document-archive-notify-claims-rollback.sql")}
+select (to_regclass('public.document_archive_notify_claims') is null
+  and to_regprocedure('public.document_archive_claim_notification(text,int,text)') is null
+  and to_regprocedure('private.document_archive_alert_unknown(text,text)') is null
+  and to_regclass('public.document_archive_items') is not null)::text;` });
+    if (rb.status !== 0 || rb.stdout.trim().split("\n").pop() !== "true") throw new Error(`rollback 26 failed: ${output(rb)}`);
+    console.log(`  ✓ الهجرة 26 (حجز الإشعار) على PostgreSQL محلي: ${passes} تأكيداً + تزامن 12 عملية (حجز واحد، ثم تنبيه واحد للحادثة) + التراجع`);
+  } catch (err) {
+    console.error(`check-drive-invoice-archive: ${err.message}`);
+    process.exitCode = 1;
+  } finally {
+    psql(["-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", `drop database if exists ${CDB}`]);
+  }
+  if (process.exitCode) process.exit(process.exitCode);
+}
+
+function psqlAsync(args) {
+  const viaTcp = Boolean(process.env.PGHOST);
+  return new Promise((resolve) => {
+    const child = spawn(viaTcp ? "psql" : "sudo", viaTcp ? args : ["-n", "-u", "postgres", "psql", ...args]);
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (d) => { stdout += d; });
+    child.stderr.on("data", (d) => { stderr += d; });
+    child.on("close", (status) => resolve({ status, stdout, stderr }));
+  });
 }
 console.log("check-drive-invoice-archive: OK");
