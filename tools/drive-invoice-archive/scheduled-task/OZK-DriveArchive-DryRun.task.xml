@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  قالب مقترح للمراجعة وحده: غير مسجَّل، ولا يسجّله أي سكربت في المستودع.
+  حتى لو استُورد، يبقى معطَّلاً (<Enabled>false</Enabled>) إلى أن يفعّله المالك بقرار منفصل.
+
+  - كل دقيقة دورة واحدة عبر run-scheduled.ps1 (worker.js بوسيطة once)، لا حلقة مستمرة.
+  - -AllowedModes dry-run: الغلاف يرفض التشغيل إن صار config.json بوضع drive أو live.
+  - IgnoreNew + Mutex في الغلاف + قفل المنفذ في العامل: نسخة واحدة دائماً.
+  - S4U بحساب LOQ: بلا كلمة مرور مخزّنة، فتغيير كلمة مرور LOQ لا يُفشل المهمة. أسرار
+    العامل DPAPI على مستوى الجهاز، ولا تحتاج ملف تعريف المستخدم.
+  - أولوية 7 (أدنى من العادي) كي لا تزاحم الأمين.
+  - ExecutionTimeLimit = 15 دقيقة احتياطاً فوق مهلة الغلاف (600 ثانية).
+-->
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Author>OZK</Author>
+    <Description>OZK Drive invoice archive - one dry-run cycle per minute (review template, not registered).</Description>
+    <URI>\OZK Drive Invoice Archive (DryRun)</URI>
+  </RegistrationInfo>
+  <Triggers>
+    <TimeTrigger>
+      <Repetition>
+        <Interval>PT1M</Interval>
+        <StopAtDurationEnd>false</StopAtDurationEnd>
+      </Repetition>
+      <StartBoundary>2026-11-01T00:00:00</StartBoundary>
+      <Enabled>true</Enabled>
+    </TimeTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>LOQ</UserId>
+      <LogonType>S4U</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>false</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT15M</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe</Command>
+      <Arguments>-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "C:\ProgramData\OZK\DriveArchive\app\run-scheduled.ps1" -AllowedModes dry-run -TimeoutSeconds 600</Arguments>
+      <WorkingDirectory>C:\ProgramData\OZK\DriveArchive\app</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
