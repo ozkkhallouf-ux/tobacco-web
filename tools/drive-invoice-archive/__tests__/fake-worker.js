@@ -1,12 +1,28 @@
 "use strict";
 // عامل وهمي لاختبار run-scheduled.ps1: لا أمين ولا Drive ولا Supabase ولا Telegram.
 // السلوك من FAKE_WORKER_MODE، ويُسجَّل كل تشغيل في FAKE_WORKER_RUNS (سطر لكل تشغيل).
+// مسار الإعداد يُحلّ كـ loadConfig(): المتغير ثم config.json المجاور — بلا تحقق شبكة.
 const fs = require("fs");
+const path = require("path");
 const { spawn } = require("child_process");
+
+function resolvedConfigPath() {
+  return process.env.OZK_DRIVE_ARCHIVE_CONFIG || path.join(__dirname, "config.json");
+}
+function resolvedConfigMode() {
+  const target = resolvedConfigPath();
+  try {
+    if (!fs.existsSync(target)) return "missing";
+    const user = JSON.parse(fs.readFileSync(target, "utf8").replace(/^\uFEFF/, ""));
+    return user.mode || "dry-run";
+  } catch {
+    return "unreadable";
+  }
+}
 
 const mode = process.env.FAKE_WORKER_MODE || "ok";
 const runs = process.env.FAKE_WORKER_RUNS;
-if (runs) fs.appendFileSync(runs, `${process.pid} ${process.argv.slice(2).join(" ")}\n`);
+if (runs) fs.appendFileSync(runs, `${process.pid} ${process.argv.slice(2).join(" ")} mode=${resolvedConfigMode()}\n`);
 
 const cycle = (extra) => console.log(JSON.stringify({ detect: { rows: 0, created: 0, reconcile: false, complete: true }, upload: null, notify: null, report: null, driveState: "unknown", ...extra }));
 
