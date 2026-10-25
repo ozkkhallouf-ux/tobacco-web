@@ -10,7 +10,7 @@
 
 const fs = require("fs");
 const model = require("../../manual-a4-print/lib/invoice-model");
-const { invoiceVersionHash, jobIdFor, sha256 } = require("./fingerprint");
+const { HASH_SCHEMA, invoiceVersionHash, legacyVersionHash, jobIdFor, sha256 } = require("./fingerprint");
 const { folderPlan, fileName } = require("./naming");
 const { STATUS } = require("./store");
 const { MODES } = require("./config");
@@ -136,6 +136,8 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
       currencyIso: header.currencyIso,
       version,
       versionHash,
+      hashSchema: HASH_SCHEMA,
+      changeKind: version > 1 ? "edited" : "new",
       previousJobId: latest ? latest.jobId : null,
       status: STATUS.RENDERED,
       pdfSha256: sha256(pdf),
@@ -149,15 +151,27 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
     };
   }
 
+  // بصمة آخر نسخة للمقارنة. نسخة حُسبت بمخطط أقدم: إن طابقت بصمتها القديمة محتوى اليوم
+  // فالفاتورة لم تتغيّر، فتُحفظ عليها بصمة المخطط الحالي (rebasedHash) بلا نسخة جديدة.
+  // versionHash وjobId لا يُمسّان: هما هوية الملف على Drive وفي الموقع.
+  function comparableHash(latest, versionHash, legacyHash) {
+    if (latest.hashSchema === HASH_SCHEMA) return latest.versionHash;
+    if (latest.rebasedHash) return latest.rebasedHash;
+    if (latest.versionHash !== legacyHash) return latest.versionHash;
+    latest.rebasedHash = versionHash;
+    store.saveJob(latest);
+    emit("hash_rebased", { jobId: latest.jobId, number: latest.number, version: latest.version });
+    return versionHash;
+  }
+
   // نسخة جديدة لفاتورة مستقرة: PDF ثم مهمة. يعيد true إن أُنشئت مهمة.
-  async function archiveRow(header, hint) {
+  // البصمة من الرأس والأسطر كما خُزّنت في الأمين (fingerprint.js)، لا من الورقة وحدها.
+  async function archiveRow(header, hint, row) {
     const lines = await ameen.lines(header.guid);
-    const content = model.buildInvoice(header, lines, null);
-    content.customerGuid = header.customerGuid;
-    const versionHash = invoiceVersionHash(content);
+    const versionHash = invoiceVersionHash(row, lines);
     const latest = store.latestVersion(DOC_TYPE, header.guid);
     let created = false;
-    if (!latest || latest.versionHash !== versionHash) {
+    if (!latest || comparableHash(latest, versionHash, legacyHash(header, lines)) !== versionHash) {
       const version = store.nextVersionNumber(DOC_TYPE, header.guid);
       const pdfFile = store.pdfPath(jobIdFor(DOC_TYPE, header.guid, versionHash, version));
       await renderInvoice(header, lines, pdfFile);
@@ -169,6 +183,67 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
     state.hints[header.guid] = hint;
     delete state.detectErrors[header.guid];
     return created;
+  }
+
+  function legacyHash(header, lines) {
+    const inv = model.buildInvoice(header, lines, null);
+    inv.customerGuid = header.customerGuid;
+    return legacyVersionHash(inv);
+  }
+
+  // ─── فاتورة مؤرشفة اختفت أو تغيّرت حالتها في المصدر ───
+  // توثيق محلي فقط (state.sourceIssues + السجل + --status): لا حذف ولا استبدال لأي نسخة
+  // في الصندوق أو على Drive، والنسخ المعلّقة تُكمل رفعها — كل نسخة كانت مستنداً مرحّلاً
+  // فعلاً وقت أرشفتها. رجوع الفاتورة مرحّلة يمحو العلامة («source_restored»).
+  function noteSourceIssue(guid, status) {
+    const latest = store.latestVersion(DOC_TYPE, guid);
+    if (!latest) return; // لم تؤرشف قط ⇒ لا شيء يُوثَّق
+    state.sourceIssues = state.sourceIssues || {};
+    if (state.sourceIssues[guid] && state.sourceIssues[guid].status === status) return;
+    state.sourceIssues[guid] = {
+      status,
+      number: latest.number,
+      lastVersion: latest.version,
+      lastJobId: latest.jobId,
+      since: new Date(now()).toISOString(),
+    };
+    emit(`source_${status}`, { guid, number: latest.number, version: latest.version, jobId: latest.jobId });
+  }
+
+  function clearSourceIssue(guid) {
+    const issue = state.sourceIssues && state.sourceIssues[guid];
+    if (!issue) return;
+    delete state.sourceIssues[guid];
+    emit("source_restored", { guid, number: issue.number, previousStatus: issue.status });
+  }
+
+  function sourceIssueOf(src) {
+    if (!src) return "deleted";
+    if (model.printBlockReason(src.type_guid, cfg)) return "type_changed";
+    if (String(src.invoice_date || "") < cfg.archiveFrom) return "out_of_range";
+    if (Number(src.is_posted) !== 1) return "unposted";
+    return null; // موجودة ومؤهلة، وتاريخها خارج نافذة هذا المسح فقط
+  }
+
+  // بعد مطابقة دورية مكتملة: كل فاتورة مؤرشفة بتاريخ داخل النافذة ولم ترجع في المسح يُسأل
+  // عنها المصدر بمعرّفها وحده. المحذوفة سابقاً لا تُسأل ثانية (رجوعها يظهر في المسح نفسه).
+  async function checkMissing(window, rows) {
+    if (!ameen.sourceStatus) return;
+    const seen = new Set(rows.map((r) => model.normGuid(r.invoice_guid)));
+    const issues = state.sourceIssues || {};
+    const latestByGuid = new Map();
+    for (const j of store.jobs()) {
+      if (j.docType !== DOC_TYPE) continue;
+      const cur = latestByGuid.get(j.sourceGuid);
+      if (!cur || j.version > cur.version) latestByGuid.set(j.sourceGuid, j);
+    }
+    const missing = [...latestByGuid.values()]
+      .filter((j) => j.date >= window.dateFrom && !seen.has(j.sourceGuid) && !(issues[j.sourceGuid] && issues[j.sourceGuid].status === "deleted"))
+      .slice(0, 50);
+    for (const job of missing) {
+      const status = sourceIssueOf(await ameen.sourceStatus(job.sourceGuid));
+      if (status) noteSourceIssue(job.sourceGuid, status);
+    }
   }
 
   // لا مهمة بلا PDF سليم. يُعاد بتراجع (حتى ساعة)، والمطابقة الدورية تعيد رؤيته.
@@ -188,14 +263,18 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
   // صف واحد: «unstable» (لم يستقر، يحجز العلامة) أو «skip» أو «created» أو «same».
   async function detectRow(row) {
     const header = headerOf(row);
-    if (!header.printable || !header.guid || !header.isPosted) return "skip"; // غير المرحّلة ليست نسخة نهائية
+    if (!header.guid) return "skip";
+    // غير المرحّلة ليست نسخة نهائية. فاتورة مؤرشفة أُلغي ترحيلها أو تغيّر نوعها تُوثَّق فقط.
+    if (!header.printable) { noteSourceIssue(header.guid, "type_changed"); return "skip"; }
+    if (!header.isPosted) { noteSourceIssue(header.guid, "unposted"); return "skip"; }
+    clearSourceIssue(header.guid); // حاضرة مرحّلة ومؤهلة من جديد
     if (Number(row.seconds_since_change) < cfg.stableSeconds) return "unstable";
     const hint = rowHint(row);
     if (state.hints[header.guid] === hint) return "skip";
     const prevError = state.detectErrors[header.guid];
     if (prevError && prevError.hint === hint && now() < prevError.nextAt) return "skip";
     try {
-      return (await archiveRow(header, hint)) ? "created" : "same";
+      return (await archiveRow(header, hint, row)) ? "created" : "same";
     } catch (err) {
       recordDetectError(header, hint, prevError, err);
       return "error";
@@ -228,6 +307,7 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
 
   async function detect() {
     const serverNow = await ameen.serverNow();
+    const resumed = Boolean(state.resume); // مسح مستأنف: صفوف هذه الدورة جزء من النافذة فقط
     const window = detectWindow(serverNow, Boolean(state.watermark) && now() - (state.lastReconcileAt || 0) >= cfg.reconcileMinutes * 60_000);
     const reconcile = Boolean(window.reconcile);
     const { rows, complete, cursor } = await fetchChanged(window);
@@ -241,6 +321,7 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
     }
     holdBack = minTime(window.holdBack, holdBack);
     await retryDetectErrors();
+    if (reconcile && complete && !resumed) await checkMissing(window, rows);
     // مسح لم يكتمل: العلامة كما هي، والمؤشر يُحفظ ليُستأنف منه بالضبط في الدورة التالية.
     if (!complete) {
       state.resume = { ...window, since: cursor.since, sinceGuid: cursor.sinceGuid, holdBack };
