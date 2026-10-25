@@ -14,6 +14,13 @@
 // وفي createPortablePdfBlob (src/app.js): البياض الذي يدرجه html2pdf عمداً لدفع كتلة
 // كاملة لم يعد يُحسب «صفحة فارغة» ويُفشل التصدير.
 //
+// الجولة الثانية (الفاتورة 1109، 2026-10-25): 14 صنفاً بأرصدة عادية ارتفاعها 1050px، أي
+// تزيد 3px فقط عن الورقة، فانتقلت كتلة الختام كاملةً إلى الورقة الثانية وتركت فراغاً تحت
+// الجدول. الإصلاح invoicePrintFitZoom في src/app.js: على مسار الطباعة الأصلية وحده، إن
+// زادت الفاتورة عن الورقة بما يكفيه تصغير لا يقل عن 90% طُبعت بهذا المقياس على ورقة واحدة،
+// وإلا تُطبع على عدة أوراق كالمعتاد. الحشوة تُقاس كما تُطبع: نمط القالب يغلب
+// `@media print{.ozk-inv{padding:0}}` لأنه يأتي بعده، والقياس بلاها نقص 12px فبقيت ورقتان.
+//
 // المساران المفحوصان هما مسارا exportReportPdf حرفياً: وثيقة الطباعة الأصلية (اللابتوب)
 // بـ@page A4 وهامش 10mm، وcreatePortablePdfBlob عبر html2pdf الحقيقي (الهاتف).
 // الخط Cairo الحقيقي من public/fonts، لأن ارتفاع السطر يقرّر مكان القطع.
@@ -44,7 +51,9 @@ const ENGINE = [
   grab(/const BULLETIN_PAGE_WIDTH_PX = \d+;/, "BULLETIN_PAGE_WIDTH_PX"),
   grab(/const SALES_TRADE_REGISTER_NO = "[^"]*";/, "SALES_TRADE_REGISTER_NO"),
   grab(/const SALES_TRADE_CAPACITY = "[^"]*";/, "SALES_TRADE_CAPACITY"),
-  ...["canvasInkRatio", "portablePdfSpacerRanges", "trimTrailingPortablePdfDecorations",
+  grab(/const INVOICE_PRINT_AREA_PX = [^\n]*/, "INVOICE_PRINT_AREA_PX"),
+  grab(/const INVOICE_FIT_MIN_ZOOM = [^\n]*/, "INVOICE_FIT_MIN_ZOOM"),
+  ...["invoicePrintFitZoom", "canvasInkRatio", "portablePdfSpacerRanges", "trimTrailingPortablePdfDecorations",
     "pinArabicSpacesForCanvas", "createPortablePdfBlob"].map(fn)
 ].join("\n");
 // وثيقة الطباعة كما يبنيها exportReportPdf، لا نسخة منها.
@@ -86,6 +95,10 @@ const server = createServer((req, res) => {
 await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 const base = `http://127.0.0.1:${server.address().port}/`;
 
+check("تصغير الملاءمة لا ينزل عن 90%", /const INVOICE_FIT_MIN_ZOOM = 0\.9;/.test(appJs));
+check("تصغير الملاءمة على وثيقة الطباعة الأصلية وحدها",
+  appJs.includes("(fitZoom ? '<style>@media print{.ozk-inv{zoom:' + fitZoom + '}}</style>' : '')"));
+
 // بيانات اصطناعية بالكامل. الكمية بسطرين (كرتونة ثم كروز) كما تُطبع الفواتير الحقيقية،
 // والأرصدة بأطول صيغها: السابق، القيمة، الحسم، دفعة الزبون، الجديد.
 const BUILDER = `
@@ -93,7 +106,7 @@ const esc=(v)=>String(v==null?"":v).replaceAll("&","&amp;").replaceAll("<","&lt;
 const NAMES=["غلواز احمر طويل","ماستر ابيض سليم","كابتن بلاك كلاسيك","اليغانس سوبر سليم فضي","كينغ سايز ذهبي 20 سيجارة","مالبورو احمر","ونستون لايت","سيدرز ازرق","ال ام نانو منتول","غلواز ازرق اورجينال سليم","ماستر سوبر سليم ذهبي"];
 function invoice(n,o){
   const lines=Array.from({length:n},(_,i)=>({material:NAMES[i%NAMES.length]+(o.long&&i%3===0?" إصدار خاص بعلبة كرتون مقوّى":""),
-    qtyParts:{value:String(1+i%4),unit:"كرتونة",detailValue:String((1+i%4)*50),detailUnit:"كروز"},
+    qtyParts:o.lastSingle&&i===n-1?{value:"7",unit:"كروز",detailValue:"",detailUnit:""}:{value:String(1+i%4),unit:"كرتونة",detailValue:String((1+i%4)*50),detailUnit:"كروز"},
     priceText:"$ "+(250+i*3)+".00 / كرتونة",valueText:"$ "+((1+i%4)*(250+i*3))+".00"}));
   const rows=[{label:"التاريخ",value:"2026-10-24",width:"130px",isDate:true},
     {label:"الرصيد السابق",value:"1,250.00 $ (عليكم)"},{label:"قيمة هذه الفاتورة",value:"3,410.00 $"}];
@@ -138,8 +151,10 @@ function textOpsPerPage(pdf) {
 
 // ورقة التذييل وحده = 78 عملية نص، وكتلة الختام كاملة ≥ 290. الحد بينهما.
 const NEAR_EMPTY_OPS = 200;
-// كل فاتورة حتى هذا العدد بأطول أرصدة تتسع لورقة واحدة بعد الإصلاح (قِيس: 12).
-const ONE_PAGE_UP_TO = 12;
+// كل فاتورة حتى هذا العدد بأطول أرصدة تتسع لورقة واحدة: على اللابتوب بتصغير الملاءمة
+// (قِيس: 15؛ كانت 12)، وعلى الهاتف بلا تصغير (html2pdf لم يتغيّر، قِيس: 12).
+const DESK_ONE_PAGE_UP_TO = 15;
+const PHONE_ONE_PAGE_UP_TO = 12;
 const PHONE_SAMPLE = [1, 6, 10, 11, 12, 13, 14, 16, 20, 30, 35, 38, 39, 40];
 
 const browser = await chromium.launch();
@@ -157,16 +172,17 @@ try {
   const desk = async (n, o) => {
     const body = await page.evaluate(([n, o]) => window.__invoice(n, o), [n, o]);
     // eval للوثيقة المستخرجة نفسها: bodyHtml وtitle هما متغيّرا exportReportPdf.
-    const html = await page.evaluate(([bodyHtml, src]) => {
+    const { html, fitZoom } = await page.evaluate(([bodyHtml, src]) => {
       const title = "فاتورة";
-      return OZK_FONT.withFaces(eval(src + "\ndoc"));
+      const fitZoom = invoicePrintFitZoom(bodyHtml);
+      return { html: OZK_FONT.withFaces(eval(src + "\ndoc")), fitZoom };
     }, [body, PRINT_DOC]);
     await printPage.goto(base);
     await printPage.evaluate((h) => { document.open(); document.write(h); document.close(); }, html);
     await printPage.waitForLoadState("load");
     await printPage.evaluate(() => document.fonts.ready);
     const rows = await printPage.evaluate(() => document.querySelectorAll(".items-table tbody tr").length);
-    return { ops: textOpsPerPage(await printPage.pdf({ format: "A4", printBackground: true, preferCSSPageSize: true })), rows };
+    return { ops: textOpsPerPage(await printPage.pdf({ format: "A4", printBackground: true, preferCSSPageSize: true })), rows, fitZoom };
   };
 
   // 1) الفاتورة المبلَّغ عنها: 11 صنفاً، بأرصدة قصيرة وطويلة وأسماء طويلة ⇒ ورقة واحدة
@@ -177,12 +193,24 @@ try {
     check(`الهاتف: ${label} ورقة واحدة (${p.pages ?? p.error})`, p.pages === 1);
   }
 
+  // 1ب) شكل الفاتورة 1109 (بيانات اصطناعية): 14 صنفاً آخرها بسطر كمية واحد، أرصدة عادية
+  const r1109 = await desk(14, { lastSingle: true });
+  check(`اللابتوب: شكل الفاتورة 1109 ورقة واحدة والختام تحت الأصناف (${r1109.ops.join("/")}، تصغير ${r1109.fitZoom})`,
+    r1109.ops.length === 1 && r1109.rows === 14 && r1109.fitZoom >= 0.9);
+  const r3 = await desk(3, {});
+  check(`اللابتوب: 3 أصناف ورقة واحدة بلا أي تصغير (${r3.fitZoom})`, r3.ops.length === 1 && r3.fitZoom === null);
+  check("التقارير (بلا .ozk-inv) لا يمسّها تصغير الملاءمة",
+    await page.evaluate(() => invoicePrintFitZoom('<div class="ozk-rpt">' + "<p>سطر</p>".repeat(400) + "</div>") === null));
+  const r45 = await desk(45, { full: true });
+  check(`اللابتوب 45 صنفاً: عدة أوراق بلا ورقة شبه فارغة وكل الأصناف مطبوعة (${r45.ops.join("/")})`,
+    r45.ops.length >= 2 && r45.ops.every((ops) => ops >= NEAR_EMPTY_OPS) && r45.rows === 45 && r45.fitZoom === null);
+
   // 2) مسح من 1 إلى 40 صنفاً بأطول أرصدة على مسار الطباعة الأصلية
   for (let n = 1; n <= 40; n++) {
     const r = await desk(n, { full: true });
     const nearEmpty = r.ops.map((ops, i) => (ops < NEAR_EMPTY_OPS ? i + 1 : null)).filter(Boolean);
     check(`اللابتوب ${n} صنفاً: ${r.ops.length} ورقة، لا ورقة شبه فارغة (${r.ops.join("/")})`, nearEmpty.length === 0);
-    if (n <= ONE_PAGE_UP_TO) check(`اللابتوب ${n} صنفاً: ورقة واحدة`, r.ops.length === 1);
+    if (n <= DESK_ONE_PAGE_UP_TO) check(`اللابتوب ${n} صنفاً: ورقة واحدة`, r.ops.length === 1);
     check(`اللابتوب ${n} صنفاً: كل الأصناف مطبوعة (${r.rows}/${n})`, r.rows === n);
   }
 
@@ -190,7 +218,7 @@ try {
   for (const n of PHONE_SAMPLE) {
     const p = await page.evaluate(([n, o]) => window.__phone(n, o), [n, { full: true }]);
     check(`الهاتف ${n} صنفاً: تصدير ناجح (${p.pages ?? p.error})`, Number.isInteger(p.pages) && p.pages >= 1);
-    if (n <= ONE_PAGE_UP_TO) check(`الهاتف ${n} صنفاً: ورقة واحدة`, p.pages === 1);
+    if (n <= PHONE_ONE_PAGE_UP_TO) check(`الهاتف ${n} صنفاً: ورقة واحدة`, p.pages === 1);
   }
 } finally {
   await browser.close();
