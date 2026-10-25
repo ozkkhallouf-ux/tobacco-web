@@ -20,7 +20,7 @@
 -- حجز «sending» تجاوز مهلته (العملية ماتت في منتصف الإرسال) يصير unknown لا released.
 --
 -- تنبيه المالك: كل انتقال إلى unknown يضع رسالة نصية واحدة في telegram_outbox عبر
--- notify_telegram (مفتاح منع تكرار لكل مهمة، 24 ساعة): «إرسال غير محسوم» مع وصف المستند
+-- notify_telegram (مفتاح منع تكرار لكل مهمة ومحاولة حجز، 24 ساعة): «إرسال غير محسوم» مع وصف المستند
 -- وما يفعله. نص فقط، لا PDF، فالتنبيه لا يكرر المستند. فشل التنبيه لا يغيّر حالة الحجز.
 --
 -- الأمن: RLS والقراءة للمالك وحده كجداول 22؛ الكتابة عبر الدوال بدور service_role وحده.
@@ -64,8 +64,9 @@ set search_path = public, pg_temp
 as $$
 declare
   v_label text;
+  v_attempt int;
 begin
-  select coalesce(nullif(label, ''), 'مستند أرشفة') into v_label
+  select coalesce(nullif(label, ''), 'مستند أرشفة'), attempts into v_label, v_attempt
     from public.document_archive_notify_claims where job_id = p_job_id;
   if to_regproc('public.notify_telegram') is null then
     return false;
@@ -77,7 +78,9 @@ begin
       || 'لم يتأكد وصول ملف PDF إلى تيليغرام (' || coalesce(p_reason, 'unknown') || ')، ولن يُعاد إرساله تلقائياً.' || chr(10)
       || 'إن وصلك المستند فلا تفعل شيئاً. وإن لم يصل فاطلب إعادة المحاولة لهذه المهمة.' || chr(10)
       || 'المهمة: ' || left(p_job_id, 12),
-    'document-archive-unknown:' || p_job_id,
+    -- حادثة = (مهمة، محاولة حجز): إعادة المالك تحجز بمحاولة جديدة، فحادثتها الجديدة تُنبَّه ولو
+    -- خلال 24 ساعة، وتكرار طلبات الحادثة نفسها لا يكرر التنبيه.
+    'document-archive-unknown:' || p_job_id || ':' || coalesce(v_attempt, 1),
     1440);
   update public.document_archive_notify_claims set alerted_at = now() where job_id = p_job_id;
   return true;

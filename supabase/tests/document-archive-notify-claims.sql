@@ -145,12 +145,30 @@ insert into t values ('g', public.document_archive_claim_notification(repeat('a'
 select pg_temp.ok((select count(*) from public.test_alerts) = 0, 'claim alone sends no alert');
 select pg_temp.ok((public.document_archive_finish_notification(repeat('a', 31) || '1', (select (v ->> 'token')::uuid from t where k = 'g'), 'unknown', null, 'telegram_sendDocument_network') ->> 'ok')::boolean, 'finish unknown with outbox');
 select pg_temp.ok((select count(*) from public.test_alerts) = 1, 'unknown raises exactly one owner alert');
-select pg_temp.ok((select event_type = 'document_archive_unknown' and dedupe_key = 'document-archive-unknown:' || repeat('a', 31) || '1' and dedupe_minutes = 1440
-  from public.test_alerts), 'alert event, per-job dedupe key, 24h window');
+select pg_temp.ok((select event_type = 'document_archive_unknown' and dedupe_key = 'document-archive-unknown:' || repeat('a', 31) || '1:1' and dedupe_minutes = 1440
+  from public.test_alerts), 'alert event, per-incident dedupe key (job:attempt), 24h window');
 select pg_temp.ok((select message like '%إرسال غير محسوم%' and message like '%فاتورة جملة رقم 601 — 2026-10-25 — V1%'
   and message like '%ولن يُعاد إرساله تلقائياً%' and message like '%telegram_sendDocument_network%' from public.test_alerts), 'alert text names the document, the reason and no auto-resend');
 select pg_temp.ok((select alerted_at is not null from public.document_archive_notify_claims where job_id = repeat('a', 31) || '1'), 'alerted_at recorded');
 select pg_temp.ok(pg_temp.claim(repeat('a', 31) || '1') ->> 'status' = 'unknown' and (select count(*) from public.test_alerts) = 1, 'repeated claims on unknown do not re-alert');
+
+-- حادثة ثانية خلال 24 ساعة: المالك يعيد المحاولة (مساره الموثّق أدناه في ٥ج)، فتصير المحاولة الجديدة
+-- غير محسومة أيضاً (توقفت الدالة بعد الإرسال ⇒ انتهاء المهلة) ⇒ تنبيه جديد واحد لها، والسابق لا يتكرر.
+select pg_temp.ok(public.document_archive_release_notification_claims(array[repeat('a', 31) || '1']) = 1, 'incident 1 released by owner retry');
+insert into t values ('g2', public.document_archive_claim_notification(repeat('a', 31) || '1', 300, 'فاتورة جملة رقم 601 — 2026-10-25 — V1'));
+select pg_temp.ok((select v ->> 'status' from t where k = 'g2') = 'claimed', 'owner retry: exactly one new claim');
+select pg_temp.ok(pg_temp.claim(repeat('a', 31) || '1') ->> 'status' = 'in_progress' and (select count(*) from public.test_alerts) = 1, 'new attempt in flight: no alert yet');
+update public.document_archive_notify_claims set claimed_at = now() - interval '10 minutes' where job_id = repeat('a', 31) || '1';
+select pg_temp.ok(pg_temp.claim(repeat('a', 31) || '1') ->> 'status' = 'unknown', 'incident 2: second attempt expires to unknown');
+select pg_temp.ok((select count(*) from public.test_alerts where dedupe_key like 'document-archive-unknown:' || repeat('a', 31) || '1:%') = 2
+  and exists (select 1 from public.test_alerts where dedupe_key = 'document-archive-unknown:' || repeat('a', 31) || '1:2'), 'incident 2 within 24h: one new alert');
+select pg_temp.ok(pg_temp.claim(repeat('a', 31) || '1') ->> 'status' = 'unknown' and pg_temp.claim(repeat('a', 31) || '1') ->> 'status' = 'unknown'
+  and (select count(*) from public.test_alerts where dedupe_key like 'document-archive-unknown:' || repeat('a', 31) || '1:%') = 2, 'incident 2 repeated claims: no extra alert');
+-- الردّ المتأخر للمحاولة الثانية (ضاع ثم وصل بالرمز نفسه) يحسمها مُرسَلة بلا تنبيه ولا إرسال آخر.
+select pg_temp.ok((public.document_archive_finish_notification(repeat('a', 31) || '1', (select (v ->> 'token')::uuid from t where k = 'g2'), 'sent', 7601) ->> 'ok')::boolean
+  and pg_temp.claim(repeat('a', 31) || '1') = '{"status":"sent","message_id":7601}'::jsonb, 'late response resolves incident 2 to sent');
+select pg_temp.ok(public.document_archive_release_notification_claims(array[repeat('a', 31) || '1']) = 0, 'owner retry cannot release a sent claim');
+select pg_temp.ok((select count(*) from public.test_alerts where dedupe_key like 'document-archive-unknown:' || repeat('a', 31) || '1:%') = 2, 'no alert for sent');
 
 insert into t values ('h', public.document_archive_claim_notification(repeat('a', 31) || '2', 300, 'فاتورة جملة رقم 602 — 2026-10-25 — V2'));
 update public.document_archive_notify_claims set claimed_at = now() - interval '10 minutes' where job_id = repeat('a', 31) || '2';
@@ -161,7 +179,7 @@ insert into t values ('i', public.document_archive_claim_notification(repeat('a'
 select public.document_archive_finish_notification(repeat('a', 31) || '3', (select (v ->> 'token')::uuid from t where k = 'i'), 'not_sent', null, 'telegram_sendDocument_429') is not null as x \gset
 insert into t values ('j', public.document_archive_claim_notification(repeat('a', 31) || '4', 300, 'فاتورة جملة رقم 604'));
 select public.document_archive_finish_notification(repeat('a', 31) || '4', (select (v ->> 'token')::uuid from t where k = 'j'), 'sent', 7604) is not null as x \gset
-select pg_temp.ok((select count(*) from public.test_alerts) = 2, 'not_sent and sent raise no alert');
+select pg_temp.ok((select count(*) from public.test_alerts) = 3, 'not_sent and sent raise no alert');
 
 select set_config('test.alerts_fail', 'on', false) is not null as x \gset
 insert into t values ('k', public.document_archive_claim_notification(repeat('a', 31) || '5', 300, 'فاتورة جملة رقم 605'));
@@ -170,6 +188,51 @@ select pg_temp.ok((public.document_archive_finish_notification(repeat('a', 31) |
 select pg_temp.ok(pg_temp.state(repeat('a', 31) || '5') = 'unknown', 'outbox failure keeps unknown state');
 select pg_temp.ok((select alerted_at is null from public.document_archive_notify_claims where job_id = repeat('a', 31) || '5'), 'failed alert not marked alerted');
 select set_config('test.alerts_fail', 'off', false) is not null as x \gset
+
+-- ── ٥ج) مسار إعادة المالك اليدوي من SQL Editor (supabase/proposed/26-document-archive-owner-retry.sql) ──
+-- SQL Editor بلا جلسة: الدالة الرسمية وحدها ترفض. الملف يمرّ بها بهوية المالك من auth.users.
+reset role;
+select set_config('request.jwt.claims', '', false) is not null as x \gset
+create table auth.users (id uuid primary key, email text unique, raw_app_meta_data jsonb);
+insert into auth.users values
+  ('22222222-2222-2222-2222-222222222222', 'ozkkhallouf@gmail.com', '{"role":"owner"}'),
+  ('11111111-1111-1111-1111-111111111111', 'staff@example.test', '{"role":"employee"}');
+set role service_role;
+select pg_temp.act('service');
+insert into t values ('r', pg_temp.claim(repeat('8', 32)));
+select public.document_archive_finish_notification(repeat('8', 32), (select (v ->> 'token')::uuid from t where k = 'r'), 'unknown', null, 'telegram_sendDocument_network') is not null as x \gset
+select public.document_archive_ingest_report(jsonb_build_object('host', 'OZK2026', 'drive_state', 'connected', 'mode', 'live',
+  'items', jsonb_build_array(jsonb_build_object('job_id', repeat('8', 32), 'doc_type', 'wholesale_invoice',
+    'source_guid', '11111111-1111-4111-8111-111111111188', 'doc_number', '608', 'doc_date', '2026-10-25',
+    'version', 1, 'version_hash', repeat('8', 64), 'status', 'uploaded', 'failed', true, 'attempts', 0,
+    'last_error', 'notify:DELIVERY_UNKNOWN')))) is not null as x \gset
+reset role;
+select set_config('request.jwt.claims', '', false) is not null as x \gset
+do $$ begin
+  perform public.request_document_archive_retry(repeat('8', 32));
+  raise exception 'TEST FAIL: retry without owner session accepted';
+exception when insufficient_privilege then raise notice 'PASS SQL Editor without session: direct call refused (owner only)';
+end $$;
+\i :owner_retry
+select pg_temp.ok((select count(*) = 1 and bool_and(requested_by = '22222222-2222-2222-2222-222222222222' and consumed_at is null)
+  from public.document_archive_retry_requests where job_id = repeat('8', 32)), 'owner retry file: one open request as the owner');
+select pg_temp.ok(coalesce(current_setting('request.jwt.claims', true), '') = '', 'owner identity does not outlive the transaction');
+\i :owner_retry
+select pg_temp.ok((select count(*) from public.document_archive_retry_requests where job_id = repeat('8', 32)) = 1, 'owner retry file twice: still one request');
+-- حساب غير مالك بالمسار نفسه ⇒ رفض.
+do $$ begin
+  perform set_config('request.jwt.claims', (select json_build_object('sub', id, 'role', 'authenticated', 'app_metadata', raw_app_meta_data)::text
+    from auth.users where email = 'staff@example.test'), true);
+  perform public.request_document_archive_retry(repeat('8', 32));
+  raise exception 'TEST FAIL: staff retry accepted';
+exception when insufficient_privilege then raise notice 'PASS non-owner identity refused';
+end $$;
+-- التقرير التالي يسلّم الطلب، وتحرير الدالة يمسّ المجهول وحده، فحجز جديد واحد بالضبط.
+set role service_role;
+select pg_temp.act('service');
+select pg_temp.ok((select (public.document_archive_ingest_report('{"host":"OZK2026","drive_state":"connected","mode":"live"}') -> 'retry_job_ids') = jsonb_build_array(repeat('8', 32))), 'report delivers owner retry once');
+select pg_temp.ok(public.document_archive_release_notification_claims(array[repeat('8', 32)]) = 1, '/report releases the unknown claim');
+select pg_temp.ok(pg_temp.claim(repeat('8', 32)) ->> 'status' = 'claimed' and pg_temp.claim(repeat('8', 32)) ->> 'status' = 'in_progress', 'after owner retry: one claim, then in_progress');
 
 -- ── ٦) مدخلات ──
 do $$ begin
