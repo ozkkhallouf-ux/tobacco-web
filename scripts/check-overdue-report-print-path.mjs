@@ -27,7 +27,11 @@ const grab = (re, name) => {
 };
 const fn = (name) => grab(new RegExp(`(async )?function ${name}\\([^)]*\\) \\{[\\s\\S]*?\\n\\}\\n`), name);
 const overdueSrc = fn("printOverdueReport");
-const ENGINE = [fn("escapeHtml"), overdueSrc, fn("exportReportPdf")].join("\n");
+// تصغير ملاءمة الفاتورة (invoicePrintFitZoom) يستدعيه exportReportPdf؛ لا يمسّ التقارير.
+const ENGINE = [fn("escapeHtml"), overdueSrc,
+  grab(/const INVOICE_PRINT_AREA_PX = [^\n]*/, "INVOICE_PRINT_AREA_PX"),
+  grab(/const INVOICE_FIT_MIN_ZOOM = [^\n]*/, "INVOICE_FIT_MIN_ZOOM"),
+  fn("invoicePrintFitZoom"), fn("exportReportPdf")].join("\n");
 if (failed) process.exit(1);
 
 check("printOverdueReport لا يستدعي html2pdf مباشرة (مسار الكمبيوتر عبر exportReportPdf)",
