@@ -267,6 +267,20 @@ try {
     Assert "ssh: المدمج مقدَّم حين يوجد الاثنان" ((Find-CashierSshClient @($sshBuiltin, $sshStandalone)) -eq $sshBuiltin)
     Assert "ssh: خطأ واضح حين لا يوجد أي عميل" (Throws { Find-CashierSshClient @($sshMissing) })
 
+    # ── تشغيل ssh بملفات لا pipe: المخرجات ورمز الخروج والمهلة ───────────────────
+    $psExe = (Get-Process -Id $PID).Path
+    $echo = Join-Path $tempRoot "echo-child.ps1"
+    Set-Content -LiteralPath $echo -Value '[Console]::Out.WriteLine("{""Status"":""ok""}"); [Console]::Error.WriteLine("warn"); exit 3'
+    $run = Invoke-CashierFileRedirectedProcess $psExe ('-NoProfile -NonInteractive -File "{0}"' -f $echo) 60
+    Assert "عملية بملفات: المخرجات تُقرأ" ((Get-CashierRemoteJson $run.Output).Status -eq "ok")
+    Assert "عملية بملفات: stderr ورمز الخروج" ($run.Error -match "warn" -and $run.ExitCode -eq 3 -and -not $run.TimedOut)
+    $slow = Join-Path $tempRoot "slow-child.ps1"
+    Set-Content -LiteralPath $slow -Value 'Start-Sleep -Seconds 30'
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    $run = Invoke-CashierFileRedirectedProcess $psExe ('-NoProfile -NonInteractive -File "{0}"' -f $slow) 2
+    Assert "عملية بملفات: المهلة توقف العملية" ($run.TimedOut -and $run.ExitCode -eq -1 -and $clock.Elapsed.TotalSeconds -lt 20)
+    Assert "عملية بملفات: لا تبقى ملفات مؤقتة" (@(Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) -Filter "ozk-cashier-*" -ErrorAction SilentlyContinue).Count -eq 0)
+
     # ── تشغيل حقيقي لسكربت جسر وهمي (Windows فقط) ──────────────────────────────
     if ($env:OS -eq "Windows_NT") {
         $argsFile = Join-Path $tempRoot "bridge-args.txt"
