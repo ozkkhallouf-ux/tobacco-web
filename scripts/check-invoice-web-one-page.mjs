@@ -110,18 +110,30 @@ async function phone(n,o){
   }catch(e){return {error:String(e&&e.message||e)};}
 }`;
 
+// عمليات النص في كل ورقة. الدفق يُقرأ بطول /Length المعلن (مباشراً أو مرجعاً)، لا بتعبير
+// نمطي حتى «endstream»: بايتات الدفق المضغوط قد تحوي تلك السلسلة فيُقطع مبكراً ويُقرأ صفراً
+// (وقع على CI: ورقة كاملة قيست 0).
 function textOpsPerPage(pdf) {
   const s = pdf.toString("latin1");
-  const contents = [...s.matchAll(/\/Type\s*\/Page[^s][\s\S]{0,400}?\/Contents\s+(\d+)\s+0\s+R/g)].map((m) => +m[1]);
-  const objs = {};
-  for (const m of s.matchAll(/(\d+)\s+0\s+obj([\s\S]*?)endobj/g)) objs[+m[1]] = m[2];
-  return contents.map((id) => {
-    const sm = (objs[id] || "").match(/stream\r?\n([\s\S]*?)\r?\nendstream/);
-    if (!sm) return -1;
-    let d = Buffer.from(sm[1], "latin1");
+  const objs = new Map();
+  for (const m of s.matchAll(/(?:^|[\r\n])(\d+)\s+0\s+obj\b/g)) objs.set(+m[1], m.index + m[0].length);
+  const lengthOf = (dict) => {
+    const ref = dict.match(/\/Length\s+(\d+)\s+0\s+R/);
+    if (ref) return Number((s.slice(objs.get(+ref[1])).match(/^\s*(\d+)/) || [])[1]);
+    return Number((dict.match(/\/Length\s+(\d+)/) || [])[1]);
+  };
+  const streamOps = (id) => {
+    const start = objs.get(id);
+    if (start === undefined) return -1;
+    const at = s.indexOf("stream", start);
+    const length = lengthOf(s.slice(start, at));
+    if (!(length > 0)) return -1;
+    const bodyStart = at + 6 + (s[at + 6] === "\r" ? 2 : 1);
+    let d = Buffer.from(s.slice(bodyStart, bodyStart + length), "latin1");
     try { d = zlib.inflateSync(d); } catch { /* غير مضغوط */ }
     return (d.toString("latin1").match(/\bTJ\b|\bTj\b/g) || []).length;
-  });
+  };
+  return [...s.matchAll(/\/Type\s*\/Page[^s][\s\S]{0,400}?\/Contents\s+(\d+)\s+0\s+R/g)].map((m) => streamOps(+m[1]));
 }
 
 // ورقة التذييل وحده = 78 عملية نص، وكتلة الختام كاملة ≥ 290. الحد بينهما.
