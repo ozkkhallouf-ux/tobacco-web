@@ -540,18 +540,17 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
     }
   }
 
+  // انتهت التجربة أثناء عمل العملية: لا رصد ولا رفع ولا إشعار ولا تقرير.
+  function pilotGate(out) {
+    out.pilot = { invoices: pilot.size, expiresAt: cfg.pilotExpiresAt };
+    out.pilotExpired = pilotExpired(cfg, now());
+    emit(out.pilotExpired ? "pilot_expired" : "pilot_active", out.pilot);
+    return !out.pilotExpired;
+  }
+
   async function cycle({ host = "", version = "dev" } = {}) {
     const out = { detect: null, upload: null, notify: null, report: null };
-    if (pilot.size) {
-      out.pilot = { invoices: pilot.size, expiresAt: cfg.pilotExpiresAt };
-      // انتهت التجربة أثناء عمل العملية: لا رصد ولا رفع ولا إشعار ولا تقرير.
-      if (pilotExpired(cfg, now())) {
-        out.pilotExpired = true;
-        emit("pilot_expired", out.pilot);
-        return out;
-      }
-      emit("pilot_active", out.pilot);
-    }
+    if (pilot.size && !pilotGate(out)) return out;
     try {
       out.detect = await detect();
     } catch (err) {

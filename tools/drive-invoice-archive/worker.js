@@ -173,6 +173,27 @@ async function health(cfg) {
   return out;
 }
 
+// الحلقة: دورة كل pollSeconds حتى الإيقاف. انقضاء التجربة المحصورة أثناء العمل يُنهيها بالرمز 2.
+async function runLoop(archiver, cfg, log, { host, once }) {
+  let stopping = false;
+  const stop = () => { stopping = true; };
+  process.on("SIGINT", stop);
+  process.on("SIGTERM", stop);
+  while (!stopping) {
+    let r = null;
+    try {
+      r = await archiver.cycle({ host, version: VERSION });
+      if (once) console.log(JSON.stringify(r));
+    } catch (err) {
+      log({ at: new Date().toISOString(), event: "cycle_failed", message: redact(err && err.message) });
+    }
+    if (r && r.pilotExpired) return 2;
+    if (once) break;
+    await new Promise((res) => setTimeout(res, cfg.pollSeconds * 1000));
+  }
+  return 0;
+}
+
 async function main(argv) {
   const cfg = loadConfig();
   if (argv.includes("--health")) {
@@ -198,23 +219,7 @@ async function main(argv) {
   const archiver = createArchiver({ cfg, store, log, paper: paperFor("A4", { papers: ["A4"] }), ...deps });
   const host = os.hostname();
   log({ at: new Date().toISOString(), event: "worker_start", version: VERSION, mode: cfg.mode });
-  let stopping = false;
-  const stop = () => { stopping = true; };
-  process.on("SIGINT", stop);
-  process.on("SIGTERM", stop);
-  const once = argv.includes("--once");
-  let exitCode = 0;
-  do {
-    try {
-      const r = await archiver.cycle({ host, version: VERSION });
-      if (once) console.log(JSON.stringify(r));
-      if (r.pilotExpired) { exitCode = 2; break; }
-    } catch (err) {
-      log({ at: new Date().toISOString(), event: "cycle_failed", message: redact(err && err.message) });
-    }
-    if (once || stopping) break;
-    await new Promise((res) => setTimeout(res, cfg.pollSeconds * 1000));
-  } while (!stopping);
+  const exitCode = await runLoop(archiver, cfg, log, { host, once: argv.includes("--once") });
   await deps.ameen.close().catch(() => {});
   await deps.renderer.close().catch(() => {});
   lock.close();
