@@ -471,6 +471,34 @@ test("ضياع ردّ الإشعار بعد الإرسال: إعادة المح�
   assert.equal(t.edgeFake.state.sent.length, 1);
 });
 
+test("PDF تغيّر محلياً بعد الرفع وقبل الإشعار ⇒ فاشلة فوراً بلا إرسال (بصمة الرفع نفسها)", async () => {
+  const t = await setup();
+  t.ameen.add({ guid: G1, number: 501 });
+  t.advance(300);
+  t.edgeFake.state.down = true;
+  await t.cycle();
+  const [job] = t.store.jobs();
+  assert.equal(job.status, "uploaded");
+  fs.appendFileSync(t.store.pdfPath(job.jobId), "tampered");
+  t.edgeFake.state.down = false;
+  t.advance(120);
+  await t.cycle();
+  const after = t.store.get(job.jobId);
+  assert.equal(after.failed, true);
+  assert.match(after.lastError, /notify:PDF_CHANGED/);
+  assert.equal(t.edgeFake.state.sent.length, 0);
+});
+
+test("عميل Edge: طلب معلّق يُقطع بالمهلة ⇒ OFFLINE (لا يجمّد العامل)", async () => {
+  // مؤقّت AbortSignal.timeout غير مُثبِّت للحلقة (في الإنتاج يثبّتها المقبس المفتوح)؛ هنا مؤقّت حارس.
+  const keep = setTimeout(() => {}, 5000);
+  const hang = (url, init) => new Promise((resolve, reject) => {
+    init.signal.addEventListener("abort", () => { clearTimeout(keep); reject(init.signal.reason); });
+  });
+  const edge = createEdge({ url: "https://abc.supabase.co/functions/v1/document-archive-notify", secret: "x".repeat(40), fetchImpl: hang, timeoutMs: 30 });
+  await assert.rejects(edge.report({ items: [] }), (err) => err.code === "OFFLINE" && /timeout/.test(err.message));
+});
+
 test("دالة الإشعار: لا مستلم من الطلب، ولا رابط عام، ولا ملف غير PDF", async () => {
   const { shared } = await fakes.createFakeEdge();
   const base = {
