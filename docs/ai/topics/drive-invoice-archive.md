@@ -2,7 +2,7 @@
 
 ## الحالة الحالية
 
-مبنية ومختبرة على الفرع، **غير مفعَّلة**: الهجرة 22 غير مطبّقة، ودالة Edge غير منشورة، والعامل غير مثبّت على OZK2026،
+مدموجة ومنشورة ويب، **غير مفعَّلة**: الهجرة 22 مطبّقة على الإنتاج (2026-10-24، الإصدار `20261024234500`، جداول فارغة)، ودالة Edge غير منشورة، والعامل غير مثبّت على OZK2026،
 و`appConfig.documentArchive.driveUi=false`. تحلّ محلّ واجهة iCloud (قرار المالك 2026-10-24) التي أُخفيت بالمفتاح
 `documentArchive.icloudUi=false` وبقي كودها وجسرها للتراجع (`icloud-archive.md`).
 
@@ -55,6 +55,6 @@
 
 1. المالك: مشروع Google Cloud، تفعيل Drive API، شاشة موافقة **In production** (وإلا تنتهي صلاحية refresh token بعد 7 أيام)،
    عميل OAuth من نوع Desktop app.
-2. تطبيق الهجرة 22 ونشر `document-archive-notify` من الـMac مع `DOCUMENT_ARCHIVE_SECRET`.
+2. ✓ تطبيق الهجرة 22 (2026-10-24). التالي: نشر `document-archive-notify` من الـMac مع `DOCUMENT_ARCHIVE_SECRET`.
 3. تثبيت العامل على OZK2026 (`npm ci` في المجلد) وحفظ سرّي `sql` و`notify`، ثم المالك يشغّل `authorize.js` بنفسه.
 4. `--health` ثم `dry-run` ثم `drive` ثم `live`، كل مرحلة بموافقة، ثم `driveUi=true`.
