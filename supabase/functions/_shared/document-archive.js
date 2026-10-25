@@ -107,14 +107,21 @@ export function validateNotifyFields(input) {
 export function buildNotifyCaption(v) {
   const t = fmt();
   const type = DOC_TYPES[v.doc_type];
-  const versionText = v.version > 1 ? ` (نسخة معدّلة رقم ${t.num(v.version, 0)})` : "";
+  // V1 فاتورة جديدة؛ V2 فما فوق تعديل لفاتورة مؤرشفة، والإصدارات السابقة باقية بجانبه.
+  const edited = v.version > 1;
+  const tag = (n) => `${t.LRI}V${Number(n)}${t.PDI}`; // version صحيح 1..1000 (NOTIFY_RULES)
+  const versionLabel = tag(v.version);
+  const versionText = edited
+    ? `${versionLabel} — تعديل؛ الإصدار ${tag(v.version - 1)} وما قبله محفوظ بلا تغيير`
+    : `${versionLabel} — فاتورة جديدة`;
   const amount = v.amount === null || v.amount === undefined
     ? "—"
     : t.money(v.amount, v.currency || "$", 2);
   const lines = [
-    t.line(`${type.icon} ${type.label} — أرشفة ناجحة`),
+    t.line(`${edited ? "✏️" : type.icon} ${type.label} ${edited ? "معدّلة" : "جديدة"} — أرشفة ناجحة`),
     t.field("الزبون", t.name(v.customer_name, "زبون غير محدد")),
-    t.field("رقم المستند", `${t.name(v.doc_number)}${versionText}`),
+    t.field("رقم المستند", t.name(v.doc_number)),
+    t.field("الإصدار", versionText),
     t.field("التاريخ", `${t.LRI}${v.doc_date}${t.PDI}`),
     t.field("المبلغ", amount),
     t.field("حالة الأرشفة", "✅ محفوظ في Google Drive (خاص)"),
@@ -123,7 +130,7 @@ export function buildNotifyCaption(v) {
   ];
   const full = lines.join("\n");
   if (full.length <= CAPTION_MAX) return { caption: full, followUp: null };
-  const short = [lines[0], lines[2], lines[5]].join("\n").slice(0, CAPTION_MAX);
+  const short = [lines[0], lines[2], lines[3], lines[6]].join("\n").slice(0, CAPTION_MAX);
   return { caption: short, followUp: full.slice(0, 3900) };
 }
 

@@ -451,12 +451,14 @@ if (liveSql) {
   const sw = read("public/service-worker.js");
   const pushLine = sw.split("\n").find((l) => l.startsWith('self.addEventListener("push"'));
   const clickLine = sw.split("\n").find((l) => l.startsWith('self.addEventListener("notificationclick"'));
+  const guardLine = sw.split("\n").find((l) => l.startsWith("const ozkPushDetached="));
+  assert.ok(guardLine, "حارس الجهاز المفصول موجود");
   assert.ok(pushLine, "معالج push موجود");
   assert.ok(clickLine, "معالج notificationclick موجود");
   // لا يفرض الـSW صوتاً أو اهتزازاً أو صمتاً: هذه لإعدادات المتصفح والنظام
   assert.doesNotMatch(pushLine, /\b(silent|vibrate|sound)\s*:/, "لا تجاوز لإعدادات الجهاز");
   const SCOPE = "https://ozktobacco.com/";
-  const makeSw = ({ withGetNotifications = true } = {}) => {
+  const makeSw = ({ withGetNotifications = true, indexedDB, subscription = null } = {}) => {
     const shown = [];
     const displayed = new Map(); // tag ⇒ آخر إشعار معروض (الوسم نفسه يستبدل كما في المتصفح)
     const listeners = {};
@@ -465,10 +467,13 @@ if (liveSql) {
       scope: SCOPE,
       showNotification: async (title, options) => { shown.push({ title, options }); displayed.set(options.tag, { title, options }); }
     };
+    registration.pushManager = { getSubscription: async () => subscription };
     if (withGetNotifications) registration.getNotifications = async ({ tag } = {}) => (displayed.has(tag) ? [displayed.get(tag)] : []);
     const self = { registration, addEventListener: (name, fn) => { listeners[name] = fn; } };
     const clients = { matchAll: async () => [], openWindow: async (url) => { opened.push(url); } };
-    vm.runInNewContext(`${pushLine}\n${clickLine}`, { self, clients, String, JSON, URL });
+    const globals = { self, clients, String, JSON, URL, Promise, setTimeout };
+    if (indexedDB) globals.indexedDB = indexedDB;
+    vm.runInNewContext(`${guardLine}\n${pushLine}\n${clickLine}`, globals);
     const fire = async (data) => {
       let waited;
       listeners.push({ data, waitUntil: (p) => { waited = p; } });
@@ -533,6 +538,86 @@ if (liveSql) {
     assert.equal(await w.click(undefined), `${SCOPE}?route=overview`);
     console.log("  ✓ Service Worker: النقر لا يفتح إلا عنواناً من أصل التطبيق");
   }
+}
+
+// ── ٥) حارس الجهاز المفصول (فصل الاشتراك عند الخروج وتبديل الحساب، 2026-10-25) ─────────────────
+{
+  const sw = read("public/service-worker.js");
+  const pushLine = sw.split("\n").find((l) => l.startsWith('self.addEventListener("push"'));
+  const clickLine = sw.split("\n").find((l) => l.startsWith('self.addEventListener("notificationclick"'));
+  const guardLine = sw.split("\n").find((l) => l.startsWith("const ozkPushDetached="));
+  // IndexedDB وهمي بالحد الأدنى الذي يستعمله الحارس: open ⇒ onsuccess ⇒ transaction().objectStore().get().
+  const fakeIdb = ({ detached, failOpen = false, hang = false }) => ({
+    open() {
+      const request = {};
+      if (hang) return request;
+      setTimeout(() => {
+        if (failOpen) return request.onerror?.();
+        request.result = {
+          close() {},
+          transaction: () => ({ objectStore: () => ({ get: () => {
+            const get = { result: detached };
+            setTimeout(() => get.onsuccess?.(), 0);
+            return get;
+          } }) })
+        };
+        request.onsuccess?.();
+      }, 0);
+      return request;
+    }
+  });
+  const run = async (options, data) => {
+    const shown = [];
+    const listeners = {};
+    let unsubscribed = 0;
+    const subscription = { unsubscribe: async () => { unsubscribed += 1; return true; } };
+    const registration = {
+      scope: "https://ozktobacco.com/",
+      pushManager: { getSubscription: async () => subscription },
+      getNotifications: async () => [],
+      showNotification: async (title, opts) => { shown.push({ title, options: opts }); }
+    };
+    const self = { registration, addEventListener: (name, fn) => { listeners[name] = fn; } };
+    const globals = { self, clients: {}, String, JSON, URL, Promise, setTimeout };
+    if (options.idb) globals.indexedDB = options.idb;
+    vm.runInNewContext(`${guardLine}\n${pushLine}\n${clickLine}`, globals);
+    let waited;
+    listeners.push({ data, waitUntil: (p) => { waited = p; } });
+    await waited;
+    return { shown, unsubscribed };
+  };
+  const ownerMessage = { json: () => policy.buildMessagePayload({ id: 77, event_type: "ameen_payment", title: "💵 دفعة من زبون اختبار", body: "قيمة 1,250$", tag: "ameen_payment" }), text: () => "" };
+  const SENSITIVE = /زبون اختبار|1,250/;
+
+  // جهاز مفصول: نص عام فقط، ويُلغى الاشتراك من Service Worker نفسه
+  {
+    const r = await run({ idb: fakeIdb({ detached: true }) }, ownerMessage);
+    assert.equal(r.shown.length, 1, "إشعار واحد (Chrome يفرض العرض)");
+    assert.doesNotMatch(`${r.shown[0].title} ${r.shown[0].options.body}`, SENSITIVE, "محتوى المالك ظهر على جهاز مفصول");
+    assert.equal(r.shown[0].options.tag, "ozk-detached");
+    assert.equal(r.shown[0].options.data.navigate, "/?route=login");
+    assert.equal(r.unsubscribed, 1, "الاشتراك لم يُلغَ من Service Worker");
+  }
+  // جهاز غير مفصول (المالك): المحتوى كاملاً بلا إلغاء
+  for (const idb of [fakeIdb({ detached: false }), fakeIdb({ detached: undefined })]) {
+    const r = await run({ idb }, ownerMessage);
+    assert.match(r.shown[0].options.body, /1,250/, "حُجب محتوى المالك على جهازه");
+    assert.equal(r.unsubscribed, 0, "أُلغي اشتراك المالك على جهازه");
+  }
+  // بلا IndexedDB، أو فشل فتحه، أو تعليقه: يُعرض كما كان (الحماية الأساسية في الصفحة) ولا يعلق المعالج
+  for (const options of [{}, { idb: fakeIdb({ failOpen: true }) }, { idb: fakeIdb({ hang: true }) }]) {
+    const started = Date.now();
+    const r = await run(options, ownerMessage);
+    assert.equal(r.shown.length, 1);
+    assert.equal(r.unsubscribed, 0);
+    assert.ok(Date.now() - started < 2500, "الحارس علق معالج push");
+  }
+  // الصفحة والـSW يتفقان على الاسم نفسه للقاعدة والمخزن والمفتاح
+  const page = read("src/web-push.js");
+  for (const token of ['"ozk-push-guard"', '"state"', '"detached"']) {
+    assert.ok(guardLine.includes(token) && page.includes(token), `اسم غير متطابق بين الصفحة والـSW: ${token}`);
+  }
+  console.log("  ✓ Service Worker: جهاز مفصول يعرض نصاً عاماً ويلغي اشتراكه، والمالك يرى محتواه، والعطل لا يحجب ولا يعلق");
 }
 
 console.log("check-web-push-delivery: OK");

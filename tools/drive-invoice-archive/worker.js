@@ -39,7 +39,8 @@ const AUTOPRINT_DIR = path.join(__dirname, "..", "ameen-autoprint");
 const MANUAL_DIR = path.join(__dirname, "..", "manual-a4-print");
 
 const CHANGED_SQL = assertReadOnlySql(fs.readFileSync(path.join(__dirname, "lib", "changed-invoices-query.sql"), "utf8"));
-const LINES_SQL = assertReadOnlySql(fs.readFileSync(path.join(MANUAL_DIR, "lib", "lines-query.sql"), "utf8"));
+const LINES_SQL = assertReadOnlySql(fs.readFileSync(path.join(__dirname, "lib", "archive-lines-query.sql"), "utf8"));
+const SOURCE_STATUS_SQL = assertReadOnlySql(fs.readFileSync(path.join(__dirname, "lib", "source-status-query.sql"), "utf8"));
 const BALANCE_SQL = assertReadOnlySql(fs.readFileSync(path.join(AUTOPRINT_DIR, "ameen-customer-balance-query.sql"), "utf8"));
 const NOW_SQL = assertReadOnlySql("SELECT CONVERT(nvarchar(33), GETDATE(), 126) AS now, DB_NAME() AS db, SUSER_SNAME() AS login");
 
@@ -78,6 +79,7 @@ function createAmeen(connString, typeGuids) {
       .input("sinceGuid", s.UniqueIdentifier, sinceGuid || ZERO_GUID)
       .input("onlyGuid", s.UniqueIdentifier, onlyGuid || null)),
     lines: (guid) => q(LINES_SQL, (r, s) => r.input("invoiceGuid", s.UniqueIdentifier, guid)),
+    sourceStatus: async (guid) => (await q(SOURCE_STATUS_SQL, (r, s) => r.input("invoiceGuid", s.UniqueIdentifier, guid)))[0] || null,
     balance: async (guid) => {
       const rows = await q(BALANCE_SQL, (r, s) => r.input("invoiceGuid", s.UniqueIdentifier, guid));
       if (!rows.length || rows[0].document_current === null || rows[0].document_current === undefined) return null;
@@ -178,7 +180,7 @@ async function main(argv) {
   }
   const store = createStore(cfg.dataDir);
   if (argv.includes("--status")) {
-    console.log(JSON.stringify({ mode: cfg.mode, ...store.summary({ notifyEnabled: MODES[cfg.mode].notify }), detectErrors: Object.keys(store.state.detectErrors || {}).length }, null, 2));
+    console.log(JSON.stringify({ mode: cfg.mode, ...store.summary({ notifyEnabled: MODES[cfg.mode].notify }), detectErrors: Object.keys(store.state.detectErrors || {}).length, sourceIssues: Object.values(store.state.sourceIssues || {}).map((v) => ({ number: v.number, status: v.status, lastVersion: v.lastVersion, since: v.since })) }, null, 2));
     return 0;
   }
   const lock = await acquireLock(cfg.lockPort);
