@@ -541,32 +541,40 @@ function Find-CashierSshClient([string[]]$Candidates = @(
     throw "عميل OpenSSH غير موجود على هذا الجهاز."
 }
 
+# يشغّل برنامجاً ومخرجاته إلى ملفات مؤقتة لا إلى pipe، ومدخله ملف فارغ (EOF فوري).
+# OpenSSH 10.0p2 على OZK2026 لا ينتهي ما دام stdout مُحوَّلاً إلى pipe من .NET، فينتظر كل طلب
+# حتى المهلة (180 ثانية) مع أن الرد وصل؛ مع الملفات ينتهي خلال ثانية تقريباً.
+function Invoke-CashierFileRedirectedProcess([string]$FilePath, [string]$Arguments, [int]$TimeoutSeconds) {
+    $base = Join-Path ([IO.Path]::GetTempPath()) ("ozk-cashier-" + [guid]::NewGuid().ToString("N"))
+    $inFile = "$base.in"; $outFile = "$base.out"; $errFile = "$base.err"
+    [IO.File]::WriteAllBytes($inFile, [byte[]]@())
+    try {
+        $process = Start-Process -FilePath $FilePath -ArgumentList $Arguments -NoNewWindow -PassThru `
+            -RedirectStandardInput $inFile -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+        $null = $process.Handle  # يحفظ المقبض كي يبقى ExitCode متاحاً بعد الخروج
+        $timedOut = -not $process.WaitForExit($TimeoutSeconds * 1000)
+        if ($timedOut) { try { $process.Kill() } catch { $null = $_ }; [void]$process.WaitForExit(5000) }
+        $exitCode = -1
+        if (-not $timedOut) { $exitCode = $process.ExitCode }
+        $stdout = ""; $stderr = ""
+        if (Test-Path -LiteralPath $outFile) { $stdout = [IO.File]::ReadAllText($outFile) }
+        if (Test-Path -LiteralPath $errFile) { $stderr = [IO.File]::ReadAllText($errFile) }
+        return [pscustomobject]@{ ExitCode = $exitCode; Output = $stdout; Error = $stderr; TimedOut = $timedOut }
+    } finally {
+        foreach ($f in @($inFile, $outFile, $errFile)) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
+    }
+}
+
 function Invoke-CashierRemoteCommand($Config, [string]$Command) {
     $ssh = Find-CashierSshClient
     $arguments = @(
-        "-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "PasswordAuthentication=no",
+        "-n", "-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "PasswordAuthentication=no",
         "-o", ('UserKnownHostsFile="{0}"' -f $Config.remoteKnownHostsPath), "-o", "ConnectTimeout=8",
         "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3",
         "-i", ('"{0}"' -f $Config.remoteKeyPath), "-p", [string]$Config.remotePort,
         ("{0}@{1}" -f $Config.remoteUser, $Config.remoteHost), ('"{0}"' -f $Command)
     )
-    $info = New-Object Diagnostics.ProcessStartInfo
-    $info.FileName = $ssh
-    $info.Arguments = ($arguments -join " ")
-    $info.UseShellExecute = $false
-    $info.CreateNoWindow = $true
-    $info.RedirectStandardOutput = $true
-    $info.RedirectStandardError = $true
-    $process = [Diagnostics.Process]::Start($info)
-    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-    $stderrTask = $process.StandardError.ReadToEndAsync()
-    $timedOut = -not $process.WaitForExit($Config.remoteTimeoutSeconds * 1000)
-    if ($timedOut) { try { $process.Kill() } catch { $null = $_ }; [void]$process.WaitForExit(5000) }
-    $exitCode = -1
-    if (-not $timedOut) { $exitCode = $process.ExitCode }
-    $stdout = ""; $stderr = ""
-    try { $stdout = $stdoutTask.Result; $stderr = $stderrTask.Result } catch { $null = $_ }
-    return [pscustomobject]@{ ExitCode = $exitCode; Output = $stdout; Error = $stderr; TimedOut = $timedOut }
+    return (Invoke-CashierFileRedirectedProcess $ssh ($arguments -join " ") $Config.remoteTimeoutSeconds)
 }
 
 function Get-CashierRemoteJson([string]$Output) {
