@@ -92,8 +92,8 @@ test("التسمية: مسار المجلدات بالنوع/السنة/الشه
   assert.deepEqual(plan.map((p) => p.name), ["OZK Tobacco Archive", "فواتير مبيعات الجملة", "2026", "10", "أبو علي المزة [aaaaaaaa]"]);
   const other = naming.folderPlan({ ...job, customerGuid: CUST_B });
   assert.notEqual(plan[4].key, other[4].key, "زبونان بالاسم نفسه ⇒ مجلدان");
-  assert.equal(naming.fileName(job), "فاتورة جملة - رقم 1234 - 2026-10-24 - 11111111.pdf");
-  assert.equal(naming.fileName({ ...job, version: 2 }), "فاتورة جملة - رقم 1234 - 2026-10-24 - 11111111 - نسخة 2.pdf");
+  assert.equal(naming.fileName(job), "فاتورة جملة - رقم 1234 - 2026-10-24 - 11111111 - V1.pdf");
+  assert.equal(naming.fileName({ ...job, version: 2 }), "فاتورة جملة - رقم 1234 - 2026-10-24 - 11111111 - V2.pdf");
   assert.equal(naming.safeSegment("a‮b\\c:d*e"), "a b c d e");
 });
 
@@ -121,7 +121,7 @@ test("live: رفع خاص إلى المسار الصحيح ثم إشعار ال�
   assert.equal(job.status, "notified");
   const pdfs = t.drive.pdfFiles();
   assert.equal(pdfs.length, 1);
-  assert.equal(t.drive.pathOf(pdfs[0]), "OZK Tobacco Archive/فواتير مبيعات الجملة/2026/10/محل الأمانة [aaaaaaaa]/فاتورة جملة - رقم 501 - 2026-10-24 - 11111111.pdf");
+  assert.equal(t.drive.pathOf(pdfs[0]), "OZK Tobacco Archive/فواتير مبيعات الجملة/2026/10/محل الأمانة [aaaaaaaa]/فاتورة جملة - رقم 501 - 2026-10-24 - 11111111 - V1.pdf");
   assert.equal(pdfs[0].shared, false);
   assert.equal(pdfs[0].appProperties.ozkJobId, job.jobId);
   assert.ok(!t.drive.calls.some((c) => /permissions/.test(c.url)), "لا مشاركة إطلاقاً");
@@ -133,7 +133,7 @@ test("live: رفع خاص إلى المسار الصحيح ثم إشعار ال�
     assert.ok(plain.includes(part), `الوصف يتضمن ${part}`);
   }
   assert.ok(msg.caption.length <= 1024);
-  assert.equal(msg.fileName, "فاتورة جملة - رقم 501 - 2026-10-24 - 11111111.pdf");
+  assert.equal(msg.fileName, "فاتورة جملة - رقم 501 - 2026-10-24 - 11111111 - V1.pdf");
 });
 
 test("فواتير غير مؤهلة لا تُؤرشف: غير مرحّلة، الكاشير، ولم تستقر بعد", async () => {
@@ -273,13 +273,18 @@ test("تعديل فاتورة مؤرشفة ⇒ نسخة 2 بجانب الأول�
   assert.equal(versions[1].previousJobId, v1.jobId);
   const names = t.drive.pdfFiles().map((f) => f.name).sort();
   assert.deepEqual(names, [
-    "فاتورة جملة - رقم 501 - 2026-10-24 - 11111111 - نسخة 2.pdf",
-    "فاتورة جملة - رقم 501 - 2026-10-24 - 11111111 - نسخة 3.pdf",
-    "فاتورة جملة - رقم 501 - 2026-10-24 - 11111111.pdf",
+    "فاتورة جملة - رقم 501 - 2026-10-24 - 11111111 - V1.pdf",
+    "فاتورة جملة - رقم 501 - 2026-10-24 - 11111111 - V2.pdf",
+    "فاتورة جملة - رقم 501 - 2026-10-24 - 11111111 - V3.pdf",
   ]);
   assert.ok(Buffer.from(t.drive.files.get(v1.drive.fileId).content).equals(v1Bytes), "النسخة الأولى لم تُمسّ");
   assert.equal(t.edgeFake.state.sent.length, 3);
-  assert.ok(globalThis.ozkTelegramFormat.stripBidi(t.edgeFake.state.sent[1].caption).includes("نسخة معدّلة رقم 2"));
+  const caption = (i) => globalThis.ozkTelegramFormat.stripBidi(t.edgeFake.state.sent[i].caption);
+  assert.match(caption(0), /فاتورة جملة جديدة/);
+  assert.match(caption(0), /الإصدار: V1 — فاتورة جديدة/);
+  assert.match(caption(1), /فاتورة جملة معدّلة/);
+  assert.match(caption(1), /الإصدار: V2 — تعديل؛ الإصدار V1 وما قبله محفوظ بلا تغيير/);
+  assert.match(caption(2), /V3 — تعديل/);
 });
 
 test("تغيّر الرصيد وحده لا يولّد نسخة جديدة", async () => {
@@ -292,6 +297,200 @@ test("تغيّر الرصيد وحده لا يولّد نسخة جديدة", asy
   t.advance(300);
   await t.cycle();
   assert.equal(t.store.jobs().length, 1);
+});
+
+// ─── التعديل اللاحق: البصمة تغطي الرأس والأسطر كما خُزّنت في الأمين ───
+const L1 = "eeeeeeee-0000-4000-8000-000000000001";
+const L2 = "eeeeeeee-0000-4000-8000-000000000002";
+const MAT2 = "cccccccc-0000-4000-8000-000000000002";
+
+async function archivedOnce(patch = {}) {
+  const t = await setup({ mode: "dry-run" });
+  t.ameen.add({ guid: G1, number: 501, ...patch });
+  t.advance(300);
+  await t.cycle();
+  assert.equal(t.store.jobs().length, 1);
+  return t;
+}
+
+async function editAndCycle(t, patch) {
+  t.ameen.edit(G1, patch);
+  t.advance(300);
+  await t.cycle();
+  return t.store.versionsOf("wholesale_invoice", G1);
+}
+
+test("كل تعديل مؤثر بالرأس أو الأسطر ⇒ إصدار جديد، حتى لو بقي الإجمالي والورقة كما هما", async () => {
+  const two = [fakes.line({ line_guid: L1, line_number: 0, price: 10 }), fakes.line({ line_guid: L2, line_number: 1, mat_guid: MAT2, item_name: "صنف ثانٍ", price: 5 })];
+  const cases = [
+    ["سعر سطرين تبادلا والإجمالي ثابت", { lines: [{ ...two[0], price: 5 }, { ...two[1], price: 10 }] }],
+    ["حسم سطر", { lines: [{ ...two[0], line_discount: 2 }, two[1]] }],
+    ["إضافة سطر", { lines: [two[0], two[1], fakes.line({ line_guid: "eeeeeeee-0000-4000-8000-000000000003", line_number: 2 })] }],
+    ["حذف سطر", { lines: [two[0]] }],
+    ["مادة السطر تغيّرت بالاسم نفسه", { lines: [{ ...two[0], mat_guid: "cccccccc-0000-4000-8000-000000000009" }, two[1]] }],
+    ["الكمية", { lines: [{ ...two[0], qty: 11 }, two[1]] }],
+    ["كمية هدية", { lines: [{ ...two[0], bonus_qty: 1 }, two[1]] }],
+    ["حسم الفاتورة", { discount: 3 }],
+    ["إضافات الفاتورة", { totalExtra: 4 }],
+    ["المبلغ", { total: 130 }],
+    ["المدفوع", { firstPay: 50 }],
+    ["الزبون", { customerGuid: CUST_B }],
+    ["طريقة الدفع", { payType: 2 }],
+    ["المستودع", { storeGuid: "dddddddd-0000-4000-8000-000000000002" }],
+  ];
+  for (const [label, patch] of cases) {
+    const t = await archivedOnce({ lines: two });
+    const versions = await editAndCycle(t, patch);
+    assert.deepEqual(versions.map((j) => j.version), [1, 2], label);
+    assert.equal(versions[1].changeKind, "edited", label);
+    assert.equal(versions[0].changeKind, "new", label);
+    assert.equal(versions[1].previousJobId, versions[0].jobId, label);
+  }
+});
+
+test("لا إصدار بلا تغيير حقيقي: لمسة حفظ، أو إعادة تسمية بطاقة الزبون أو المادة", async () => {
+  const t = await archivedOnce();
+  let versions = await editAndCycle(t, {}); // حفظ بلا تغيير (LastUpdateDate وحده)
+  assert.equal(versions.length, 1, "لمسة حفظ");
+  versions = await editAndCycle(t, { customer: "اسم بطاقة جديد", billCustomerName: "زبون تجريبي" });
+  assert.equal(versions.length, 1, "إعادة تسمية بطاقة الزبون ليست تعديلاً للفاتورة");
+  versions = await editAndCycle(t, { lines: [fakes.line({ item_name: "اسم مادة جديد" })] });
+  assert.equal(versions.length, 1, "إعادة تسمية بطاقة المادة ليست تعديلاً للفاتورة");
+  assert.equal(t.renderer.calls(), 1, "لا PDF جديد");
+});
+
+test("تعديل لا يلمس LastUpdateDate تلتقطه المطابقة الدورية", async () => {
+  const t = await archivedOnce();
+  t.advance(t.cfg.overlapSeconds + 60);
+  await t.cycle(); // أول مطابقة دورية (لا تقدّم العلامة)
+  t.advance(60);
+  await t.cycle(); // العلامة تتقدّم فتخرج الفاتورة من نافذة التداخل التزايدية
+  const inv = t.ameen.db.invoices.get(G1);
+  inv.lines = [fakes.line({ price: 12 })]; // بلا تحديث updatedAt
+  t.advance(300);
+  await t.cycle();
+  assert.equal(t.store.jobs().length, 1, "الرصد التزايدي لا يراه");
+  t.advance(t.cfg.reconcileMinutes * 60);
+  await t.cycle();
+  assert.deepEqual(t.store.versionsOf("wholesale_invoice", G1).map((j) => j.version), [1, 2]);
+});
+
+test("ترقية مخطط البصمة: مهمة قديمة بمحتوى لم يتغيّر لا تولّد إصداراً، وتعديل بعدها يولّد V2", async () => {
+  const { legacyVersionHash } = require(path.join(dir, "lib", "fingerprint.js"));
+  const model = require(path.join(dir, "..", "manual-a4-print", "lib", "invoice-model.js"));
+  const t = await archivedOnce();
+  // نحاكي مهمة حُسبت قبل الترقية: بصمة المخطط 1 وبلا hashSchema.
+  const job = t.store.jobs()[0];
+  const header = model.headerFromRow((await t.ameen.api.changedInvoices({ since: "1900-01-01T00:00:00", dateFrom: "2026-10-01" }))[0], t.cfg);
+  header.customerGuid = job.customerGuid;
+  const inv = model.buildInvoice(header, await t.ameen.api.lines(G1), null);
+  inv.customerGuid = job.customerGuid;
+  job.versionHash = legacyVersionHash(inv);
+  delete job.hashSchema;
+  t.store.saveJob(job);
+  t.restart();
+  t.store.state.hints = {};
+  let versions = await editAndCycle(t, {});
+  assert.equal(versions.length, 1, "المحتوى نفسه بالمخطط القديم ⇒ لا إصدار");
+  assert.ok(versions[0].rebasedHash, "ثُبّتت عليها بصمة المخطط الحالي");
+  assert.equal(versions[0].versionHash, job.versionHash, "هوية المهمة لم تتغيّر");
+  versions = await editAndCycle(t, { lines: [fakes.line({ price: 11 })] });
+  assert.deepEqual(versions.map((j) => j.version), [1, 2]);
+});
+
+test("سيناريو بشكل الفاتورة 1100 (11 سطراً، نصف كرتونة، نسخة V1 بالمخطط القديم): الترقية بلا إصدار، وتبادل سعرين مع ثبات الإجمالي ⇒ V2 واحد", async () => {
+  const { legacyVersionHash } = require(path.join(dir, "lib", "fingerprint.js"));
+  const model = require(path.join(dir, "..", "manual-a4-print", "lib", "invoice-model.js"));
+  // بيانات اختبار معزولة بالشكل فقط (لا أسماء ولا أسعار حقيقية).
+  const lines = Array.from({ length: 11 }, (_, i) => fakes.line({
+    line_guid: `eeeeeeee-0000-4000-8000-${String(i + 1).padStart(12, "0")}`,
+    line_number: i,
+    mat_guid: `cccccccc-0000-4000-8000-${String(i + 1).padStart(12, "0")}`,
+    item_name: `صنف ${i + 1}`,
+    input_unit: 2,
+    qty: i === 3 ? 25 : 50 * (i + 1), // السطر الرابع نصف كرتونة
+    price: 10 + i,
+  }));
+  const total = lines.reduce((sum, l) => sum + l.price * (l.qty / 50), 0);
+  const t = await archivedOnce({ lines, total });
+  // V1 كما هي على OZK2026 اليوم: محسوبة بالكود الحالي (المخطط 1).
+  const job = t.store.jobs()[0];
+  const row = (await t.ameen.api.changedInvoices({ since: "1900-01-01T00:00:00", dateFrom: "2026-10-01" }))[0];
+  const header = model.headerFromRow(row, t.cfg);
+  header.customerGuid = job.customerGuid;
+  const inv = model.buildInvoice(header, await t.ameen.api.lines(G1), null);
+  inv.customerGuid = job.customerGuid;
+  job.versionHash = legacyVersionHash(inv);
+  delete job.hashSchema;
+  t.store.saveJob(job);
+  t.restart();
+  // أول دورة بعد الترقية: كل التلميحات تتغيّر (أعمدة جديدة) لكن لا إصدار.
+  t.advance(t.cfg.reconcileMinutes * 60);
+  await t.cycle();
+  t.advance(t.cfg.reconcileMinutes * 60);
+  await t.cycle();
+  assert.equal(t.store.versionsOf("wholesale_invoice", G1).length, 1, "لا إصدار زائف بعد الترقية");
+  assert.equal(t.renderer.calls(), 1);
+  // تبادل سعرَي سطرين لهما الكمية نفسها: الإجمالي والورقة كما هما.
+  const swapped = lines.map((l) => ({ ...l }));
+  [swapped[5].qty, swapped[6].qty] = [300, 300];
+  const base = lines.map((l) => ({ ...l }));
+  [base[5].qty, base[6].qty] = [300, 300];
+  // نبدأ من حالة بالكميتين نفسيهما ثم نبادل السعرين وحدهما.
+  let versions = await editAndCycle(t, { lines: base, total: base.reduce((s, l) => s + l.price * (l.qty / 50), 0) });
+  assert.equal(versions.length, 2, "تغيير الكميات تعديل حقيقي");
+  [swapped[5].price, swapped[6].price] = [base[6].price, base[5].price];
+  const sameTotal = base.reduce((s, l) => s + l.price * (l.qty / 50), 0);
+  assert.equal(swapped.reduce((s, l) => s + l.price * (l.qty / 50), 0), sameTotal, "الإجمالي ثابت");
+  versions = await editAndCycle(t, { lines: swapped, total: sameTotal });
+  assert.deepEqual(versions.map((j) => j.version), [1, 2, 3], "تبادل السعرين بإجمالي ثابت ⇒ إصدار جديد");
+  // دورات إضافية بلا تغيير: لا إصدار.
+  t.advance(t.cfg.reconcileMinutes * 60);
+  await t.cycle();
+  assert.equal(t.store.versionsOf("wholesale_invoice", G1).length, 3);
+});
+
+test("إعادة تشغيل بلا ملف الحالة بعد تعديل: إصدار واحد فقط مهما تكررت الدورات", async () => {
+  const t = await archivedOnce();
+  t.ameen.edit(G1, { total: 140 });
+  t.advance(300);
+  await t.cycle();
+  fs.rmSync(path.join(t.cfg.dataDir, "state.json"), { force: true });
+  t.restart();
+  t.advance(300);
+  await t.cycle();
+  t.advance(t.cfg.reconcileMinutes * 60);
+  await t.cycle();
+  assert.deepEqual(t.store.versionsOf("wholesale_invoice", G1).map((j) => j.version), [1, 2]);
+});
+
+test("حذف فاتورة مؤرشفة أو إلغاء ترحيلها: توثيق محلي فقط، بلا حذف أي نسخة، والرجوع يمحو العلامة", async () => {
+  const t = await setup();
+  t.ameen.add({ guid: G1, number: 501 });
+  t.ameen.add({ guid: G2, number: 502 });
+  t.advance(300);
+  await t.cycle();
+  const filesBefore = t.drive.pdfFiles().length;
+  assert.equal(filesBefore, 2);
+  t.ameen.remove(G1);
+  t.ameen.edit(G2, { posted: 0 });
+  t.advance(t.cfg.reconcileMinutes * 60);
+  await t.cycle();
+  const issues = t.store.state.sourceIssues;
+  assert.equal(issues[G1].status, "deleted");
+  assert.equal(issues[G1].lastVersion, 1);
+  assert.equal(issues[G2].status, "unposted");
+  assert.equal(t.store.jobs().length, 2, "المهام باقية");
+  assert.equal(t.drive.pdfFiles().length, filesBefore, "لا ملف حُذف ولا أُضيف على Drive");
+  assert.ok(t.logs.some((l) => l.event === "source_deleted"));
+  // إعادة الترحيل بالمحتوى نفسه: لا إصدار، والعلامة تُمحى.
+  t.ameen.edit(G2, { posted: 1 });
+  t.advance(300);
+  await t.cycle();
+  assert.equal(t.store.state.sourceIssues[G2], undefined);
+  assert.equal(t.store.versionsOf("wholesale_invoice", G2).length, 1);
+  assert.ok(t.logs.some((l) => l.event === "source_restored"));
+  assert.equal(t.edgeFake.state.sent.length, 2, "لا إشعار للحذف أو إلغاء الترحيل");
 });
 
 test("انقطاع الإنترنت: المهمة تبقى معلّقة بلا عدّ محاولات وتُرفع عند العودة", async () => {

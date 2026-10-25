@@ -8,6 +8,17 @@ const WHOLESALE = "7f5b0921-61f3-4f23-a1f4-fbfae4144bf4";
 const CASHIER = "cc1097b1-662d-4d80-8e4e-3b493249591c";
 
 // ─── الأمين ───
+// سطر بأعمدة archive-lines-query.sql كلها: أعمدة العرض ثم أعمدة البصمة.
+function line(patch = {}) {
+  return {
+    item_name: "صنف تجريبي", input_unit: 1, unit1_name: "علبة", unit2_name: "كرتونة", unit3_name: "", unit2_fact: 50, unit3_fact: 0, qty: 10,
+    line_guid: "eeeeeeee-0000-4000-8000-000000000001", line_number: 0, mat_guid: "cccccccc-0000-4000-8000-000000000001",
+    qty2: 0, qty3: 0, price: 10, line_discount: 0, line_extra: 0, bonus_qty: 0, line_vat: 0,
+    line_store_guid: "dddddddd-0000-4000-8000-000000000001", cost_guid: "00000000-0000-0000-0000-000000000000",
+    ...patch,
+  };
+}
+
 function createFakeAmeen() {
   const db = { invoices: new Map(), now: "2026-10-24T12:00:00" };
   let reads = 0;
@@ -15,7 +26,8 @@ function createFakeAmeen() {
     db.invoices.set(inv.guid, {
       typeGuid: WHOLESALE, posted: 1, customerGuid: "aaaaaaaa-0000-4000-8000-000000000001",
       customer: "زبون تجريبي", total: 100, discount: 0, firstPay: 0, currencyIso: "USD",
-      lines: [{ item_name: "صنف تجريبي", input_unit: 1, unit1_name: "علبة", unit2_name: "كرتونة", unit3_name: "", unit2_fact: 50, unit3_fact: 0, qty: 10 }],
+      lines: [line()],
+      totalExtra: 0, payType: 1, storeGuid: "dddddddd-0000-4000-8000-000000000001",
       createdAt: db.now, updatedAt: "1980-01-01T00:00:00", date: db.now.slice(0, 10), ...inv,
     });
   }
@@ -34,6 +46,8 @@ function createFakeAmeen() {
       type_name: "مبيعات", bill_type: 1, is_posted: inv.posted, customer_guid: inv.customerGuid,
       customer_name: inv.customer, total: inv.total, discount: inv.discount, first_pay: inv.firstPay,
       currency_val: 1, currency_iso: inv.currencyIso, line_count: inv.lines.length, lines_checksum: lc,
+      customer_account_guid: inv.customerGuid, bill_customer_name: inv.billCustomerName || inv.customer,
+      store_guid: inv.storeGuid, pay_type: inv.payType, total_extra: inv.totalExtra, items_disc: 0, items_extra: 0, bonus_disc: 0, vat: 0,
       changed_at: changed, seconds_since_change: secondsBetween(changed, db.now),
     };
   }
@@ -52,9 +66,15 @@ function createFakeAmeen() {
         .slice(0, 500);
     },
     lines: async (guid) => { reads++; return db.invoices.get(guid).lines.map((l) => ({ ...l })); },
+    sourceStatus: async (guid) => {
+      reads++;
+      const inv = db.invoices.get(guid);
+      return inv ? { invoice_guid: inv.guid, invoice_number: inv.number, invoice_date: inv.date, type_guid: inv.typeGuid, is_posted: inv.posted } : null;
+    },
     balance: async () => 250,
   };
-  return { db, api, add, edit, setNow: (t) => { db.now = t; }, reads: () => reads };
+  const remove = (guid) => db.invoices.delete(guid);
+  return { db, api, add, edit, remove, setNow: (t) => { db.now = t; }, reads: () => reads };
 }
 
 // ─── المحوّل: PDF صغير صالح بنية، محتواه بصمة الـHTML ───
@@ -205,4 +225,4 @@ async function createFakeEdge() {
   return { state: s, fetchImpl, shared, url: "http://127.0.0.1:54321/document-archive-notify" };
 }
 
-module.exports = { WHOLESALE, CASHIER, createFakeAmeen, createFakeRenderer, createFakeDrive, createFakeEdge };
+module.exports = { WHOLESALE, CASHIER, line, createFakeAmeen, createFakeRenderer, createFakeDrive, createFakeEdge };
