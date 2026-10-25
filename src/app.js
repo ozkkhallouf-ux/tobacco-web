@@ -236,7 +236,10 @@ const state = {
   dailyMovementError: null,
   dmFetchedFor: null,
   loading: true,
-  startupDegraded: false,
+  // ثلاث حالات إقلاع منفصلة، ولا تُعرض «تعذر الاتصال» إلا بدليل (classifyStartupOutcome):
+  startupDegraded: false,  // فشل اتصال فعلي رصده عميل Supabase
+  startupSlow: false,      // التحميل تجاوز STARTUP_TIMEOUT_MS بلا أي فشل اتصال
+  startupAppError: false,  // استثناء في الواجهة نفسها لا علاقة له بالقاعدة
   notice: null,
   passwordResetMode: new URLSearchParams(window.location.search).get("recovery") === "code",
   passwordResetEmail: "",
@@ -315,7 +318,10 @@ const state = {
   warehouseShowZero: false,
   warehouseTransferReport: null,
   warehouseLoading: false,
-  notifPermission: "default",
+  // الإذن الحقيقي يُقرأ فوراً، مستقلاً عن تحميل البيانات. كانت القيمة مكتوبة
+  // "default" ولا تُقرأ إلا في آخر boot()، فظهر شريط التفعيل طوال الإقلاع لمن
+  // منح الإذن أو رفضه، وبقي ظاهراً إلى الأبد إن لم يكتمل الإقلاع.
+  notifPermission: readNotifPermission(),
   seenRequestIds: new Set(),
   globalSearch: "",
   syriaCurrency: "USD",
@@ -383,23 +389,99 @@ function notifSupported() {
   return "Notification" in window;
 }
 
-async function requestNotifPermission() {
-  if (!notifSupported()) return;
-  const result = await Notification.requestPermission();
-  state.notifPermission = result;
+function readNotifPermission() {
+  try {
+    return notifSupported() ? Notification.permission : "denied";
+  } catch {
+    return "denied";
+  }
+}
+
+// «لاحقاً» يُحفظ في هذا المتصفح وحده (الإذن نفسه لكل جهاز ومتصفح أصلاً).
+const NOTIF_SNOOZE_KEY = "notif-prompt-snoozed-until";
+const NOTIF_SNOOZE_MS = 14 * 24 * 60 * 60 * 1000;
+
+function notifPromptSnoozed(now = Date.now()) {
+  const until = Number(readJson(NOTIF_SNOOZE_KEY, 0));
+  return Number.isFinite(until) && until > now;
+}
+
+function snoozeNotifPrompt() {
+  writeJson(NOTIF_SNOOZE_KEY, Date.now() + NOTIF_SNOOZE_MS);
   render();
 }
 
-function fireRequestNotif(customerName) {
-  if (!notifSupported() || Notification.permission !== "granted") return;
-  const opts = { body: `طلب جديد من ${customerName}`, icon: "public/icons/app-icon.png", dir: "rtl", lang: "ar" };
-  if (navigator.serviceWorker?.controller) {
-    navigator.serviceWorker.ready
-      .then((reg) => reg.showNotification("OZK TOBACCO", opts))
-      .catch(() => new Notification("OZK TOBACCO", opts));
-  } else {
-    new Notification("OZK TOBACCO", opts);
+// طلب إذن واحد لكل نقرة. كان app.js وweb-push.js يستدعيان
+// Notification.requestPermission() معاً على النقرة نفسها. الآن المسار واحد:
+// ozkWebPush.enable() يطلب الإذن ثم يسجّل اشتراك Push، ويُستدعى مباشرة داخل
+// النقرة لأن iPhone يشترط ذلك. نقرة ثانية أثناء الطلب تعيد الوعد نفسه.
+let notifPermissionRequest = null;
+
+function requestNotifPermission() {
+  if (!notifSupported()) return Promise.resolve();
+  if (notifPermissionRequest) return notifPermissionRequest;
+  if (readNotifPermission() !== "default") {
+    state.notifPermission = readNotifPermission();
+    render();
+    return Promise.resolve();
   }
+  const push = window.ozkWebPush;
+  const viaPush = Boolean(push?.supported?.());
+  let pending;
+  try {
+    pending = viaPush ? push.enable() : Notification.requestPermission();
+  } catch (error) {
+    pending = Promise.reject(error);
+  }
+  notifPermissionRequest = Promise.resolve(pending)
+    .then(
+      () => {
+        if (readNotifPermission() === "granted") setNotice("success", "تم تفعيل الإشعارات على هذا الجهاز.");
+      },
+      (error) => {
+        const permission = readNotifPermission();
+        if (permission === "granted") {
+          // الإذن ممنوح والإشعارات المحلية تعمل، لكن تسجيل الجهاز لإشعارات Push فشل.
+          setNotice("error", `سُمح بالإشعارات، لكن تعذّر تسجيل هذا الجهاز لإشعارات الطلبات: ${safeErrorMessage(error)}`);
+        } else if (permission === "denied") {
+          setNotice("error", "رُفض إذن الإشعارات. يمكن تغييره من إعدادات الموقع في المتصفح.");
+        }
+      }
+    )
+    .finally(() => {
+      notifPermissionRequest = null;
+      state.notifPermission = readNotifPermission();
+      render();
+    });
+  render();
+  return notifPermissionRequest;
+}
+
+// إشعار محلي من الصفحة. عبر Service Worker أولاً: `new Notification` يرمي
+// TypeError («Illegal constructor») على Chrome أندرويد، وكان ذلك يقع داخل
+// try الإقلاع فيُعرض «تعذر الاتصال بقاعدة البيانات». getRegistration لا
+// `ready` — فـready لا يُحسم أبداً إن لم يُسجَّل عامل. لا ترمي أبداً.
+function showLocalNotification(title, opts) {
+  if (readNotifPermission() !== "granted") return Promise.resolve(false);
+  const direct = () => {
+    try {
+      new Notification(title, opts);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const registration = navigator.serviceWorker?.getRegistration
+    ? navigator.serviceWorker.getRegistration()
+    : Promise.resolve(null);
+  return Promise.resolve(registration)
+    .then((reg) => (reg?.showNotification ? reg.showNotification(title, opts).then(() => true) : direct()))
+    .catch(direct);
+}
+
+function fireRequestNotif(customerName) {
+  const opts = { body: `طلب جديد من ${customerName}`, icon: "public/icons/app-icon.png", dir: "rtl", lang: "ar" };
+  return showLocalNotification("OZK TOBACCO", opts);
 }
 
 function applyTheme() {
@@ -455,26 +537,118 @@ function initKeyboardShortcuts() {
 
 function notifPermissionBanner() {
   if (!state.session || !notifSupported() || state.notifPermission !== "default") return "";
+  if (notifPromptSnoozed()) return "";
+  const busy = Boolean(notifPermissionRequest);
   return `
     <section class="notice-panel warning notif-banner">
       <span><strong>إشعارات الطلبات</strong> — فعّل الإشعارات لتصلك تنبيهات فورية عند وصول طلب جديد.</span>
-      <button class="button primary" type="button" data-action="enable-notif">تفعيل</button>
+      <span class="notif-banner-actions">
+        <button class="button primary" type="button" data-action="enable-notif"${busy ? " disabled" : ""}>تفعيل</button>
+        <button class="button secondary" type="button" data-action="snooze-notif">لاحقاً</button>
+      </span>
     </section>
   `;
 }
 
+// بعد هذه المدة تُفتح الواجهة بما وصل. تجاوزها وحده يعني «بطء» لا «فشل اتصال».
 const STARTUP_TIMEOUT_MS = 12000;
+
+// قرار حالة الإقلاع، نقي ومنفصل كي يُختبر. «تعذر الاتصال» يحتاج دليلاً:
+// رفض fetch أو 5xx رصده عميل Supabase منذ بدء الإقلاع، أو المتصفح نفسه
+// يقول إنه بلا شبكة. الاستثناء بلا فشل شبكة خطأ واجهة، والمهلة وحدها بطء.
+function classifyStartupOutcome({ finished, timedOut, error, connectivityFailures, offline }) {
+  if (Number(connectivityFailures) > 0 || offline) return "connection";
+  if (error) return "app-error";
+  if (!finished && timedOut) return "slow";
+  return "ok";
+}
+
+function connectivityFailuresSince(before) {
+  const now = dataStore.connectivitySnapshot?.();
+  if (!now || !before) return 0;
+  return (now.networkFailures - before.networkFailures) + (now.serverErrors - before.serverErrors);
+}
+
+// عدّادات الطلبات منذ بدء الإقلاع، أرقاماً فقط (للقياس).
+function connectivityMetricsSince(before) {
+  const now = dataStore.connectivitySnapshot?.();
+  if (!now || !before) return {};
+  return {
+    okResponses: now.ok - before.ok,
+    networkFailures: now.networkFailures - before.networkFailures,
+    serverErrors: now.serverErrors - before.serverErrors
+  };
+}
+
+function applyStartupOutcome(outcome) {
+  state.startupDegraded = outcome === "connection";
+  state.startupSlow = outcome === "slow";
+  state.startupAppError = outcome === "app-error";
+}
+
+// قياس آمن إلى Sentry: المفاتيح أسماء مراحل ثابتة من الكود والقيم أرقام فقط
+// (مدد بالمللي ثانية وعدّادات طلبات)، ونوع الخطأ اسم صنفه فقط. لا نصوص خطأ ولا
+// عناوين ولا أسماء ولا مبالغ — فلا شيء مالي أو شخصي يغادر الجهاز بهذا المسار.
+// الاستثناء الحقيقي نفسه يُرسَل captureException فيمرّ بتنقية beforeSend.
+function reportStartupDiagnostic(outcome, metrics, error) {
+  try {
+    const sentry = window.Sentry;
+    if (!sentry || typeof sentry.captureMessage !== "function") return;
+    const extra = {};
+    for (const [key, value] of Object.entries(metrics || {})) {
+      if (/^[A-Za-z]{1,32}$/.test(key) && Number.isFinite(value)) extra[key] = Math.round(value);
+    }
+    const errorType = /^[A-Za-z]{1,40}$/.test(String(error?.name || "")) ? error.name : error ? "Error" : "none";
+    const level = outcome === "slow" || outcome === "late" ? "warning" : "error";
+    sentry.captureMessage(`startup:${outcome}`, { level, tags: { startup_outcome: outcome, startup_error_type: errorType }, extra });
+    if (error && outcome === "app-error" && typeof sentry.captureException === "function") sentry.captureException(error);
+  } catch {}
+}
+
+// يجمع كل مرحلة ومدتها. allSettled كي لا ينتهي الإقلاع قبل أن تكتمل كل
+// المراحل حتى لو رمت إحداها، ثم يُعاد أول خطأ.
+async function runStartupPhases(phases, timings) {
+  const results = await Promise.allSettled(Object.entries(phases).map(async ([name, run]) => {
+    const started = performance.now();
+    try {
+      await run();
+    } finally {
+      timings[name] = performance.now() - started;
+    }
+  }));
+  const failure = results.find((result) => result.status === "rejected");
+  if (failure) throw failure.reason;
+}
 
 async function boot() {
   applyTheme();
   initKeyboardShortcuts();
   state.loading = true;
-  state.startupDegraded = false;
+  state.notifPermission = readNotifPermission();
+  applyStartupOutcome("ok");
+  const startedAt = performance.now();
+  const connectivityAtStart = dataStore.connectivitySnapshot?.() || null;
+  const timings = {};
+  let timedOut = false;
+  let startupError = null;
   const startupTimeout = window.setTimeout(() => {
     if (!state.loading) return;
+    timedOut = true;
     if (!state.session) state.route = "overview";
     state.loading = false;
-    state.startupDegraded = true;
+    const outcome = classifyStartupOutcome({
+      finished: false,
+      timedOut: true,
+      connectivityFailures: connectivityFailuresSince(connectivityAtStart),
+      offline: navigator.onLine === false
+    });
+    applyStartupOutcome(outcome);
+    reportStartupDiagnostic(outcome === "connection" ? "connection" : "slow", {
+      ...timings,
+      ...connectivityMetricsSince(connectivityAtStart),
+      elapsedMs: performance.now() - startedAt,
+      timeoutMs: STARTUP_TIMEOUT_MS
+    });
     render();
   }, STARTUP_TIMEOUT_MS);
 
@@ -495,27 +669,56 @@ async function boot() {
       await window.SmartInventory?.load(state.session);
       return;
     }
-    await loadRequests();
-    await loadInventoryReports();
-    await loadCustomerBalanceReports();
-    await loadCustomerCreditLimits();
-    await loadApprovedPriceItems();
-    await loadCustomerProfiles();
-    await loadPurchaseInvoices();
-    await loadReconSessions();
-    await loadWarehouseDashboard();
+    // المصادر مستقلة فتُحمَّل معاً بدل تسلسل ~15 طلباً. كل دالة تبتلع خطأها
+    // وتضبط حالتها الخاصة كما كانت. المستودعات وحدها تعتمد على قائمة
+    // المستودعات من الجرد الشهري فتبقى متسلسلة داخل مرحلتها.
+    await runStartupPhases({
+      requests: loadRequests,
+      inventory: loadInventoryReports,
+      balances: loadCustomerBalanceReports,
+      creditLimits: loadCustomerCreditLimits,
+      prices: loadApprovedPriceItems,
+      profiles: loadCustomerProfiles,
+      purchases: loadPurchaseInvoices,
+      warehouses: async () => {
+        await loadReconSessions();
+        await loadWarehouseDashboard();
+      }
+    }, timings);
     state.seenRequestIds = new Set(state.requests.map((r) => r.id));
-    state.notifPermission = notifSupported() ? Notification.permission : "denied";
-    state.startupDegraded = false;
-    const overdue = overdueCustomers();
-    if (overdue.length > 0) fireOverdueNotif(overdue.length);
   } catch (error) {
-    state.startupDegraded = true;
-    setNotice("error", `تعذر تحميل بعض البيانات: ${safeErrorMessage(error)}`);
+    startupError = error;
+    console.error("[OZK Startup]", error);
   } finally {
     window.clearTimeout(startupTimeout);
     state.loading = false;
+    state.notifPermission = readNotifPermission();
+    const outcome = classifyStartupOutcome({
+      finished: true,
+      timedOut,
+      error: startupError,
+      connectivityFailures: connectivityFailuresSince(connectivityAtStart),
+      offline: navigator.onLine === false
+    });
+    applyStartupOutcome(outcome);
+    const metrics = {
+      ...timings,
+      totalMs: performance.now() - startedAt,
+      timeoutMs: STARTUP_TIMEOUT_MS,
+      ...connectivityMetricsSince(connectivityAtStart)
+    };
+    if (outcome !== "ok") reportStartupDiagnostic(outcome, metrics, startupError);
+    else if (timedOut) reportStartupDiagnostic("late", metrics);
     render();
+  }
+  // تنبيه الديون بعد اكتمال الإقلاع وخارج try: إشعار لا يجوز أن يغيّر حالة الاتصال.
+  if (state.session && !isInventoryCounter()) {
+    try {
+      const overdue = overdueCustomers();
+      if (overdue.length > 0) fireOverdueNotif(overdue.length);
+    } catch (error) {
+      console.error("[OZK Overdue notification]", error);
+    }
   }
 }
 
@@ -4547,6 +4750,21 @@ function connectionNotice() {
       </section>
     `;
   }
+  if (state.startupAppError) {
+    return `
+      <section class="notice-panel warning" data-startup-app-error>
+        <span><strong>تعذر تجهيز بعض أجزاء الواجهة.</strong> الاتصال بقاعدة البيانات يعمل، لكن خطأً في الصفحة منع اكتمال التحميل. أعد تحميل الصفحة، وإن تكرر فأبلغ الدعم.</span>
+        <button class="button primary" type="button" data-action="retry-startup">إعادة التحميل</button>
+      </section>
+    `;
+  }
+  if (state.startupSlow) {
+    return `
+      <section class="notice-panel" data-startup-slow>
+        <span><strong>التحميل يستغرق أطول من المعتاد.</strong> لم يُرصد أي فشل في الاتصال، وتظهر البيانات فور وصولها.</span>
+      </section>
+    `;
+  }
   return "";
 }
 
@@ -5223,7 +5441,6 @@ function overdueCustomers(thresholdDays = 3) {
 }
 
 function fireOverdueNotif(count) {
-  if (!notifSupported() || Notification.permission !== "granted") return;
   const opts = {
     body: `${count} زبون بدون دفعة منذ أكثر من 3 أيام`,
     icon: "public/icons/app-icon.png",
@@ -5231,11 +5448,7 @@ function fireOverdueNotif(count) {
     lang: "ar",
     tag: "overdue-customers"
   };
-  if (navigator.serviceWorker?.controller) {
-    navigator.serviceWorker.ready.then((reg) => reg.showNotification("OZK — تنبيه ديون", opts)).catch(() => new Notification("OZK — تنبيه ديون", opts));
-  } else {
-    new Notification("OZK — تنبيه ديون", opts);
-  }
+  return showLocalNotification("OZK — تنبيه ديون", opts);
 }
 
 function customerBalanceTotals(items) {
@@ -12527,7 +12740,8 @@ function render() {
   });
   app.querySelector("[data-action='install']")?.addEventListener("click", installApp);
   app.querySelector("[data-action='logout']")?.addEventListener("click", logout);
-  app.querySelector("[data-action='enable-notif']")?.addEventListener("click", requestNotifPermission);
+  app.querySelector("[data-action='enable-notif']")?.addEventListener("click", () => { requestNotifPermission(); });
+  app.querySelector("[data-action='snooze-notif']")?.addEventListener("click", snoozeNotifPrompt);
   app.querySelector("[data-action='export-monthly']")?.addEventListener("click", exportMonthlyReport);
 
   app.querySelector("[data-form='global-search']")?.addEventListener("submit", (e) => {

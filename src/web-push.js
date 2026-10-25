@@ -87,18 +87,9 @@
     return { supported: true, permission: Notification.permission, subscribed: Boolean(subscription) };
   }
 
-  // Existing app button already requests Notification permission. This listener adds
-  // the real PushSubscription without changing the current app.js implementation.
-  document.addEventListener("click", (event) => {
-    const button = event.target?.closest?.("[data-action='enable-notif']");
-    if (!button) return;
-    enable()
-      .then(() => {
-        button.textContent = "✓ الإشعارات مفعّلة";
-        button.disabled = true;
-      })
-      .catch((error) => console.error("[OZK Web Push]", error?.message || error));
-  }, true);
+  // لا مستمع نقر هنا بعد الآن: زر «تفعيل» في app.js يستدعي enable() مباشرة داخل
+  // النقرة. كان هذا الملف يضيف مستمعاً ثانياً على الزر نفسه، فيُطلب الإذن مرتين
+  // في نقرة واحدة، ويُبتلع فشل الاشتراك في console فقط.
 
-  window.ozkWebPush = { enable, disable, status };
+  window.ozkWebPush = { enable, disable, status, supported };
 })();

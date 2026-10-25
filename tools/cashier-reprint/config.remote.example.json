@@ -1,0 +1,12 @@
+{
+  "mode": "remote",
+  "printerName": "XPRINTER XP-T80Q 80MM",
+  "remoteHost": "100.127.19.47",
+  "remoteUser": "OZKKH",
+  "remotePort": 22,
+  "remoteExpectedHostName": "OZKUSER",
+  "remoteKeyPath": "C:\\ProgramData\\OZK\\CashierReprint\\keys\\ozk2026-cashier-reprint",
+  "remoteKnownHostsPath": "C:\\ProgramData\\OZK\\CashierReprint\\keys\\known_hosts",
+  "remoteTimeoutSeconds": 180,
+  "newInvoiceWarningSeconds": 120
+}

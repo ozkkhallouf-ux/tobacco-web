@@ -97,6 +97,34 @@
   // مصدر الحقيقة الوحيد لسعر صرف الليرة السورية بنشرة الأسعار (يقرأه أيضاً
   // GitHub Actions عبر مفتاح anon — سياسة SELECT على الجدول تسمح بذلك عمداً).
   const exchangeRateTable = config.exchangeRateTable || "bulletin_exchange_rate";
+  // سجلّ أحداث الشبكة الفعلية لعميل Supabase: كل دالة تحميل تبتلع أخطاءها،
+  // فلا يبقى دليل على فشل الاتصال إلا هنا. يُحصى رفض fetch نفسه (لا شبكة،
+  // DNS، انقطاع) وردود 5xx فقط؛ ردود 4xx تعني أن الخادم وصل وردّ. لا تُحفظ
+  // عناوين ولا أجسام ولا ترويسات — أرقام وأوقات فقط.
+  const connectivity = { ok: 0, networkFailures: 0, serverErrors: 0, lastFailureAt: 0, lastOkAt: 0 };
+  function observedFetch(input, init) {
+    return window.fetch(input, init).then(
+      (response) => {
+        if (response.status >= 500) {
+          connectivity.serverErrors += 1;
+          connectivity.lastFailureAt = Date.now();
+        } else {
+          connectivity.ok += 1;
+          connectivity.lastOkAt = Date.now();
+        }
+        return response;
+      },
+      (error) => {
+        // الإلغاء المقصود ليس فشل اتصال.
+        if (error?.name !== "AbortError") {
+          connectivity.networkFailures += 1;
+          connectivity.lastFailureAt = Date.now();
+        }
+        throw error;
+      }
+    );
+  }
+
   const client =
     hasConfig && hasLibrary
       ? window.supabase.createClient(config.url, config.publishableKey, {
@@ -104,7 +132,8 @@
             persistSession: true,
             autoRefreshToken: true,
             detectSessionInUrl: true
-          }
+          },
+          global: { fetch: observedFetch }
         })
       : null;
   const initialRecoveryUrl = String(window.location?.href || "");
@@ -633,6 +662,12 @@
       return Boolean(client);
     },
 
+    // نسخة من عدّادات الشبكة (انظر observedFetch) — للإقلاع كي لا يدّعي
+    // «تعذر الاتصال» بلا دليل.
+    connectivitySnapshot() {
+      return { ...connectivity };
+    },
+
     statusLabel() {
       if (client) return "متصل بقاعدة Supabase";
       if (hasConfig && !hasLibrary) return "مفاتيح Supabase موجودة لكن المكتبة لم تتحمل";
@@ -1005,7 +1040,9 @@
         .select("id, report_date, source, summary, items, created_at")
         .eq("source", "ameen_customer_balances")
         .order("created_at", { ascending: false })
-        .limit(12);
+        // كل مستهلك يقرأ [0] وحده (app.js، business-snapshot، customer-intelligence،
+        // decision-engine)، وكان جلب 12 تقريراً كاملاً ≈ 6MB يثقل الإقلاع بلا فائدة.
+        .limit(1);
 
       if (error) throw new Error(translateDbError(error.message));
       return data || [];

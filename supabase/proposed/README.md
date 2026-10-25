@@ -226,3 +226,12 @@ definition لهذا المراقب، وقد جرى تعديله (PR #220) بإص
 - **التنفيذ:** بموافقة المالك فقط، طلب واحد أو `psql --single-transaction -f supabase/proposed/21-ameen-invoice-events-concurrent-duplicates-rollback.sql`. لا يُحذف ملف `../migrations/20261024145946_…` ولا يُعدَّل؛ إن طُبِّق التراجع على الإنتاج يُسجَّل بإصداره كهجرة جديدة.
 - **التحقق:** `md5(prosrc)` لـ`public.apply_ameen_invoice_events(jsonb)` يعود `dfe57bcce86afe4556ddddc6c4b1357a` (جسم 18)، ويبقى المالك وSECURITY DEFINER و`search_path=''` والـACL (`postgres` و`authenticated` فقط) كما هي.
 - **الحدود:** يستبدل جسم الدالة وحده؛ لا يمسّ `ameen_invoices` ولا `ameen_invoice_events` ولا `ameen_invoice_dirty_days` ولا السياسات، وما سُجِّل من أحداث يبقى. بعد التراجع يعود عيب Codex P1 (حدث مكرر في طلبين متزامنين أو مهلة قفل عابرة ⇒ `rejected` يعزله الوكيل)، فلا يُفعَّل الإرسال على جسم 18.
+
+## 22: أرشفة فواتير الجملة على Google Drive (2026-10-24) — غير مطبَّق على الإنتاج
+
+| الملف | الحالة | ما يفعله |
+|---|---|---|
+| `22-document-archive.sql` | **غير مطبَّق — بانتظار موافقة المالك** | ثلاثة جداول: `document_archive_items` (سجل كل نسخة مؤرشفة: Drive file id ورابط العرض الخاص وmessage_id)، `document_archive_heartbeat` (حالة العامل)، `document_archive_retry_requests`. RLS على الثلاثة، والقراءة لـ`is_owner()` وحده، ولا شيء لـanon، والكتابة عبر `service_role` فقط بدوال `document_archive_ingest_report` و`document_archive_record_notification` (لا تخفض الحالة، وهوية المهمة ثابتة، والرابط العام مرفوض بقيد، والعنصر المتعارض بنسخته يُرفض وحده دون إسقاط الدفعة). `request_document_archive_retry(text)` للمالك وحده وللفاشلة وحدها. لا cron ولا حذف تلقائي. |
+| `22-document-archive-rollback.sql` | تراجع جاهز — غير مطبَّق | يحذف الجداول الثلاثة والدوال. يفقد سجل الروابط في Supabase فقط؛ ملفات Drive وطابور العامل على OZK2026 تبقى. |
+
+اختبار: `supabase/tests/document-archive.sql` عبر `scripts/check-drive-invoice-archive.mjs` (25 تأكيداً، مع التراجع). ترتيب التطبيق: 22 أولاً، ثم نشر `document-archive-notify`، ثم العامل — انظر `docs/ai/topics/drive-invoice-archive.md`.

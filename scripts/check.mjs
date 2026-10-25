@@ -44,6 +44,7 @@ const required = [
   "docs/ai/topics/printing.md",
   "docs/ai/topics/notifications-deployment.md",
   "docs/ai/topics/icloud-archive.md",
+  "docs/ai/topics/drive-invoice-archive.md",
   "src/customer-intelligence.js",
   "src/customer-intelligence-view.js",
   "src/customer-intelligence.css",

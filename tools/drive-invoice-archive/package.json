@@ -1,0 +1,16 @@
+{
+  "name": "ozk-drive-invoice-archive",
+  "version": "1.0.0",
+  "private": true,
+  "description": "OZK - أرشفة فواتير الجملة على Google Drive وإشعار المالك على Telegram (قراءة فقط من الأمين)",
+  "main": "worker.js",
+  "scripts": {
+    "start": "node worker.js",
+    "health": "node worker.js --health",
+    "test": "node --test __tests__/"
+  },
+  "dependencies": {
+    "mssql": "11.0.1",
+    "puppeteer-core": "22.15.0"
+  }
+}
