@@ -6520,7 +6520,8 @@ async function createPortablePdfBlob(bodyHtml, filename, options = {}) {
   pinArabicSpacesForCanvas(source);
 
   try {
-    if (typeof OZK_FONT !== "undefined") await OZK_FONT.ready();
+    // html2canvas يصوّر النص: خط لم يجهز يُصوَّر بالاحتياطي القديم بصمت، فلا تصدير بدونه.
+    if (typeof OZK_FONT !== "undefined") await OZK_FONT.assertReady();
     if (document.fonts && document.fonts.ready) await document.fonts.ready;
     const worker = window.html2pdf().set({
       margin: options.margin || [8, 8, 8, 8],
@@ -10734,7 +10735,7 @@ async function saveSalesInvoicePdf() {
   const keepScrollY = window.scrollY || 0;
   try {
     window.scrollTo(0, 0);
-    if (typeof OZK_FONT !== "undefined") await OZK_FONT.ready();
+    if (typeof OZK_FONT !== "undefined") await OZK_FONT.assertReady();
     // دقة أقل على الهاتف: المقياس 2 يستهلك ذاكرة كبيرة على iOS.
     const worker = window.html2pdf().set({
       margin: [6, 6, 6, 6],

@@ -42,6 +42,8 @@ function Read-CashierReprintConfig([string]$Path) {
         remoteKnownHostsPath = ""
         remoteTimeoutSeconds = 180
         remoteExpectedHostName = ""
+        bridgeSqlSource = "user-env"
+        enforceProtectedPaths = $false
     }
     foreach ($name in @("bridgeTimeoutSeconds", "recentReprintWarningSeconds", "newInvoiceWarningSeconds", "jobWatchSeconds", "remotePort", "remoteTimeoutSeconds")) {
         if ($null -ne $raw.PSObject.Properties[$name]) { $config[$name] = [int]$raw.$name }
@@ -49,13 +51,27 @@ function Read-CashierReprintConfig([string]$Path) {
     foreach ($name in @("remoteHost", "remoteUser", "remoteKeyPath", "remoteKnownHostsPath", "remoteExpectedHostName")) {
         if ($null -ne $raw.PSObject.Properties[$name]) { $config[$name] = [Environment]::ExpandEnvironmentVariables([string]$raw.$name) }
     }
+    if ($null -ne $raw.PSObject.Properties["bridgeSqlSource"]) { $config.bridgeSqlSource = ([string]$raw.bridgeSqlSource).Trim().ToLowerInvariant() }
+    if ($config.bridgeSqlSource -ne "user-env" -and $config.bridgeSqlSource -ne "tool-secret") {
+        throw "الإعداد bridgeSqlSource يجب أن يكون user-env أو tool-secret."
+    }
+    if ($null -ne $raw.PSObject.Properties["enforceProtectedPaths"]) {
+        if ($raw.enforceProtectedPaths -isnot [bool]) { throw "الإعداد enforceProtectedPaths يجب أن يكون true أو false." }
+        $config.enforceProtectedPaths = [bool]$raw.enforceProtectedPaths
+    }
     if ($config.printerName -cne $script:CashierPrinterName) {
         throw "طابعة الكاشير الوحيدة المسموحة هي '$($script:CashierPrinterName)'."
     }
     if ($mode -eq "local") {
-        # المسار قد يحمل %LOCALAPPDATA% لأن الجسر مثبّت داخل ملف المستخدم نفسه.
+        # المسار قد يحمل %LOCALAPPDATA% (التثبيت الحالي: الجسر داخل ملف المستخدم نفسه)، لكنه يُفكّ
+        # لحساب من يشغّل الأداة. حساب خدمة يحتاج مساراً مطلقاً ثابتاً (config.service.example.json).
         $config.bridgeScriptPath = [Environment]::ExpandEnvironmentVariables($config.bridgeScriptPath)
         if ([string]::IsNullOrWhiteSpace($config.bridgeScriptPath)) { throw "الإعداد bridgeScriptPath فارغ." }
+        if ($config.bridgeScriptPath.Contains("%")) { throw "الإعداد bridgeScriptPath يحوي متغيراً غير معرَّف لهذا الحساب: $($config.bridgeScriptPath)" }
+        if (-not [IO.Path]::IsPathRooted($config.bridgeScriptPath) -or $config.bridgeScriptPath.StartsWith("\\") -or
+            [IO.Path]::GetExtension($config.bridgeScriptPath) -ine ".ps1") {
+            throw "الإعداد bridgeScriptPath يجب أن يكون مساراً محلياً مطلقاً لملف .ps1: $($config.bridgeScriptPath)"
+        }
         if ($config.expectedBridgeSha256 -notmatch '^[0-9a-f]{64}$') { throw "الإعداد expectedBridgeSha256 ليس بصمة SHA256 صحيحة." }
         if ($config.bridgeTimeoutSeconds -lt 30 -or $config.bridgeTimeoutSeconds -gt 600) { throw "bridgeTimeoutSeconds خارج المدى 30–600." }
     } else {
@@ -117,6 +133,17 @@ function Read-CashierSqlSecret([string]$Path) {
     $plain = [Security.Cryptography.ProtectedData]::Unprotect($bytes, [Text.Encoding]::UTF8.GetBytes("OZK-CashierReprint"),
         [Security.Cryptography.DataProtectionScope]::LocalMachine)
     return [Text.Encoding]::UTF8.GetString($plain)
+}
+
+# سلسلة اتصال الجسر حين bridgeSqlSource=tool-secret: من سرّ الأداة نفسه (لا سرّ جديد)، وبالقيود نفسها.
+function Get-CashierBridgeSqlConnectionString([string]$Secret) {
+    Add-Type -AssemblyName System.Data
+    if ([string]::IsNullOrWhiteSpace($Secret)) { throw "سرّ اتصال القراءة فارغ." }
+    $builder = New-Object System.Data.SqlClient.SqlConnectionStringBuilder $Secret
+    if (-not $builder.UserID) { throw "مرفوض: سلسلة اتصال الجسر بلا User Id." }
+    if ($builder.UserID -ieq "sa") { throw "مرفوض: حساب sa لا يُستعمل لإعادة الطباعة." }
+    $builder["ApplicationIntent"] = "ReadOnly"
+    return $builder.ConnectionString
 }
 
 function Open-CashierReadOnlyConnection([string]$ConnectionString) {
@@ -255,6 +282,83 @@ function Assert-CashierBridgePinned($Config) {
     return $actual
 }
 
+# ── الملفات التي تُنفَّذ: لا كتابة عليها لغير المدراء والنظام وصاحب التشغيل ────────
+# إن استطاع مستخدم عادي تعديل سكربت أو إعداد يشغّله حساب أعلى (المدير عبر ssh اليوم) فهذا
+# طريق رفع صلاحيات. الفحص يشمل البرنامج والإعداد والسرّ والجسر وملفات الكود بجانبه، ولا يشمل
+# مجلدات البيانات (logs وrequests وlocks) لأنها لا تُنفَّذ.
+$script:CashierWriteRightsMask = 0x2 -bor 0x4 -bor 0x40 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000
+$script:CashierCodeExtensions = @(".ps1", ".psm1", ".psd1", ".dll", ".exe", ".cs", ".cmd", ".bat", ".vbs", ".js")
+
+function Get-CashierTrustedSids {
+    $sids = New-Object System.Collections.Generic.List[string]
+    foreach ($s in @("S-1-5-18", "S-1-5-32-544", "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464")) { $sids.Add($s) }
+    try { $sids.Add([Security.Principal.WindowsIdentity]::GetCurrent().User.Value) } catch { $null = $_ }
+    return $sids.ToArray()
+}
+
+function Test-CashierWriteRiskAce([string]$Sid, [int64]$Rights, [string]$Type, [bool]$InheritOnly, [string[]]$TrustedSids) {
+    if ($Type -ne "Allow" -or $InheritOnly) { return $false }
+    if ($TrustedSids -contains $Sid) { return $false }
+    return (($Rights -band $script:CashierWriteRightsMask) -ne 0)
+}
+
+function Get-CashierProtectedPaths($Config, [string]$Root) {
+    $paths = New-Object System.Collections.Generic.List[string]
+    $app = Join-Path $Root "app"
+    foreach ($p in @($Root, $app, (Join-Path $Root "config.json"), (Join-Path $Root "sql.secret"))) { $paths.Add($p) }
+    if (Test-Path -LiteralPath $app -PathType Container) {
+        foreach ($f in @(Get-ChildItem -LiteralPath $app -File -ErrorAction SilentlyContinue)) { $paths.Add($f.FullName) }
+    }
+    if ($Config.mode -eq "local" -and -not [string]::IsNullOrWhiteSpace($Config.bridgeScriptPath)) {
+        $bridgeDir = Split-Path -Parent $Config.bridgeScriptPath
+        $paths.Add($Config.bridgeScriptPath)
+        $paths.Add($bridgeDir)
+        if (Test-Path -LiteralPath $bridgeDir -PathType Container) {
+            foreach ($f in @(Get-ChildItem -LiteralPath $bridgeDir -File -Recurse -ErrorAction SilentlyContinue | Where-Object { $script:CashierCodeExtensions -contains $_.Extension.ToLowerInvariant() })) {
+                $paths.Add($f.FullName)
+            }
+            foreach ($d in @(Get-ChildItem -LiteralPath $bridgeDir -Directory -Recurse -ErrorAction SilentlyContinue)) { $paths.Add($d.FullName) }
+        }
+    }
+    return @($paths | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -Unique)
+}
+
+# يعيد سطراً لكل صلاحية كتابة خطرة: «المسار: المعرّف (الصلاحية)». القائمة الفارغة = سليم.
+function Get-CashierPathWriteRisks([string[]]$Paths, [string[]]$TrustedSids = (Get-CashierTrustedSids), [scriptblock]$GetAcl = { param($p) Get-Acl -LiteralPath $p }) {
+    $risks = New-Object System.Collections.Generic.List[string]
+    foreach ($path in $Paths) {
+        try { $acl = & $GetAcl $path }
+        catch { $risks.Add("${path}: تعذّرت قراءة الصلاحيات"); continue }
+        try {
+            $owner = ([Security.Principal.NTAccount]$acl.Owner).Translate([Security.Principal.SecurityIdentifier]).Value
+        } catch { $owner = [string]$acl.Owner }
+        if ($TrustedSids -notcontains $owner) { $risks.Add("${path}: المالك $($acl.Owner)") }
+        foreach ($rule in @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))) {
+            $inheritOnly = ([int]$rule.PropagationFlags -band 2) -ne 0
+            if (Test-CashierWriteRiskAce ([string]$rule.IdentityReference.Value) ([int64]$rule.FileSystemRights) ([string]$rule.AccessControlType) $inheritOnly $TrustedSids) {
+                $name = [string]$rule.IdentityReference.Value
+                try { $name = $rule.IdentityReference.Translate([Security.Principal.NTAccount]).Value } catch { $null = $_ }
+                $risks.Add("${path}: $name ($($rule.FileSystemRights))")
+            }
+        }
+    }
+    return $risks.ToArray()
+}
+
+function Assert-CashierProtectedPaths($Config, [string]$Root, [scriptblock]$GetAcl = { param($p) Get-Acl -LiteralPath $p }) {
+    $risks = @(Get-CashierPathWriteRisks (Get-CashierProtectedPaths $Config $Root) (Get-CashierTrustedSids) $GetAcl)
+    if ($risks.Count -gt 0) {
+        throw "ملفات البرنامج أو الجسر قابلة للكتابة من حساب غير موثوق، فلن تُطبع أي فاتورة: $($risks[0])"
+    }
+}
+
+# شرط الطباعة: بصمة الجسر دائماً، وحماية الملفات المنفَّذة حين enforceProtectedPaths=true.
+function Assert-CashierBridgeReady($Config, [string]$Root) {
+    $hash = Assert-CashierBridgePinned $Config
+    if ($Config.enforceProtectedPaths) { Assert-CashierProtectedPaths $Config $Root }
+    return $hash
+}
+
 # ── السجل والطلبات ───────────────────────────────────────────────────────────
 function Write-CashierReprintLog([string]$Root, $Entry) {
     try {
@@ -355,7 +459,10 @@ function Get-CashierBridgeOutcome([int]$ExitCode, [string]$Output, [bool]$TimedO
     return [pscustomobject]@{ Outcome = "uncertain"; JobId = $null; Reason = "unclassified_error" }
 }
 
-function Invoke-CashierBridgeProcess($Config, [int]$Number, [string]$Date) {
+# SqlConnectionString غير فارغ ⇒ يُمرَّر للجسر متغيّر Process اسمه AMEEN_SQL_CONNECTION_STRING للعملية
+# الفرعية وحدها (لا يُكتب على القرص ولا في الوسائط). الجسر يقدّم متغيّر User إن وُجد، فلا يتغيّر
+# سلوك حساب له متغيّره الخاص. فارغ ⇒ لا تغيير إطلاقاً عن السلوك السابق.
+function New-CashierBridgeStartInfo($Config, [int]$Number, [string]$Date, [string]$SqlConnectionString = "") {
     $powershellPath = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
     $arguments = @(
         "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
@@ -374,6 +481,12 @@ function Invoke-CashierBridgeProcess($Config, [int]$Number, [string]$Date) {
     $info.CreateNoWindow = $true
     $info.RedirectStandardOutput = $true
     $info.RedirectStandardError = $true
+    if (-not [string]::IsNullOrEmpty($SqlConnectionString)) { $info.EnvironmentVariables["AMEEN_SQL_CONNECTION_STRING"] = $SqlConnectionString }
+    return $info
+}
+
+function Invoke-CashierBridgeProcess($Config, [int]$Number, [string]$Date, [string]$SqlConnectionString = "") {
+    $info = New-CashierBridgeStartInfo $Config $Number $Date $SqlConnectionString
     $process = [Diagnostics.Process]::Start($info)
     $stdoutTask = $process.StandardOutput.ReadToEndAsync()
     $stderrTask = $process.StandardError.ReadToEndAsync()
@@ -422,7 +535,8 @@ function Invoke-CashierReprint {
         [string]$RequestId,
         [scriptblock]$Lookup,
         [scriptblock]$Runner,
-        [scriptblock]$BridgeCheck = { param($c) Assert-CashierBridgePinned $c },
+        [scriptblock]$BridgeCheck = { param($c, $r) Assert-CashierBridgeReady $c $r },
+        [scriptblock]$BridgeSql = { param($c) "" },
         [scriptblock]$JobWatcher = { param($c, $j) Watch-CashierPrintJob $c $j },
         [string]$RequestedFrom = $env:COMPUTERNAME
     )
@@ -440,8 +554,11 @@ function Invoke-CashierReprint {
         return (Complete "duplicate_request" "هذا الطلب نُفّذ سابقاً (إعادة محاولة تقنية). لم تُرسل طباعة ثانية. لطباعة نسخة جديدة اضغط «طباعة» من جديد." $null)
     }
 
-    try { $bridgeHash = & $BridgeCheck $Config }
+    try { $bridgeHash = & $BridgeCheck $Config $Root }
     catch { return (Complete "blocked" ([string]$_.Exception.Message) @{ reason = "bridge_not_pinned" }) }
+
+    try { $bridgeSqlText = [string](& $BridgeSql $Config) }
+    catch { return (Complete "blocked" "تعذّر تجهيز اتصال القراءة للجسر على هذا الجهاز، فلم تُطبع أي فاتورة." @{ reason = "bridge_sql_unavailable"; errorType = $_.Exception.GetType().FullName }) }
 
     try { $rows = @(& $Lookup $Number) }
     catch { return (Complete "connection_failed" "تعذّر الاتصال بقاعدة الأمين أو قراءتها. لم تُطبع أي فاتورة. تحقق من الشبكة ثم أعد المحاولة." @{ errorType = $_.Exception.GetType().FullName }) }
@@ -459,7 +576,7 @@ function Invoke-CashierReprint {
         return (Complete "busy" "هذه الفاتورة قيد الطباعة الآن من طلب آخر. انتظر انتهاءه." $null)
     }
     try {
-        $run = & $Runner $Config $Number $invoice.InvoiceDate
+        $run = & $Runner $Config $Number $invoice.InvoiceDate $bridgeSqlText
         $outcome = Get-CashierBridgeOutcome $run.ExitCode $run.Output $run.TimedOut
         $extra = @{ bridgeSha256 = $bridgeHash; exitCode = $run.ExitCode; reason = $outcome.Reason; printer = $script:CashierPrinterName }
         if ($outcome.Outcome -eq "printed") {
