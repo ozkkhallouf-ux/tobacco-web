@@ -230,6 +230,33 @@
 }
 .ci-detail .ci-note { font-size: 0.74rem; margin-top: 10px; }
 
+/* الحد المقترح والمعتمد (v6) */
+.ci-basis {
+  display: inline-block;
+  margin-inline-start: 4px;
+  padding: 0 6px;
+  border-radius: 8px;
+  font-size: 0.7rem;
+  border: 1px solid rgba(176, 140, 79, 0.45);
+}
+.ci-detail .ci-approved,
+.ci-detail .ci-proposal {
+  margin: 10px 0 14px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(176, 140, 79, 0.25);
+}
+.ci-detail .ci-approved p,
+.ci-detail .ci-proposal p { margin: 4px 0; font-size: 0.88rem; line-height: 1.8; }
+.ci-detail .ci-formula { font-weight: 600; }
+.ci-detail .ci-mini-wrap { overflow-x: auto; }
+.ci-detail .ci-mini { width: 100%; border-collapse: collapse; font-size: 0.8rem; margin: 6px 0 10px; }
+.ci-detail .ci-mini th,
+.ci-detail .ci-mini td { padding: 4px 6px; border-bottom: 1px solid rgba(176, 140, 79, 0.18); text-align: start; white-space: nowrap; }
+.ci-detail .ci-approve { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; margin-top: 8px; }
+.ci-detail .ci-approve label { display: flex; flex-direction: column; gap: 4px; font-size: 0.8rem; }
+.ci-detail .ci-approve input { min-width: 140px; max-width: 100%; }
+
 @media (max-width: 640px) {
   .customer-intel .ci-cards { grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); }
   .customer-intel .ci-card strong { font-size: 1.25rem; }
