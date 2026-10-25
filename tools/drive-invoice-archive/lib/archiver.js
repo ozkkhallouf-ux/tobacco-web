@@ -20,6 +20,8 @@ const DOC_TYPE = "wholesale_invoice";
 // أخطاء تخصّ الاتصال أو الحساب لا المهمة: توقف المرحلة كلها في هذه الدورة بلا عدّ محاولات.
 const GLOBAL_DRIVE = { NEEDS_REAUTH: "needs_reauth", IDENTITY_MISMATCH: "identity_mismatch", NOT_PRIVATE: "not_private", OFFLINE: "disconnected" };
 const GLOBAL_EDGE = new Set(["AUTH", "OFFLINE"]);
+// حجز إرسال قائم في الدالة: انتظار بلا عدّ محاولة؛ الدالة تحسمه خلال 15 دقيقة (مرسَل أو غامض).
+const IN_FLIGHT_WAIT_MS = 5 * 60_000;
 
 function minTime(a, b) {
   if (!a) return b || null;
@@ -342,6 +344,8 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
   }
 
   function due(job) {
+    // إشعار غامض (ربما وصل): لا إحياء تلقائي أبداً؛ الإعادة بطلب المالك وحده (applyRetry).
+    if (job.failed && job.notifyUncertain) return false;
     if (job.failed) {
       const failedAt = Date.parse(job.failedAt || 0) || 0;
       if (now() - failedAt < cfg.failedCooldownMinutes * 60_000) return false;
@@ -463,7 +467,15 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
           emit("notify_unavailable", { code: err.code, message: err.message });
           break;
         }
-        failJob(job, "notify", err);
+        if (err && err.code === "IN_FLIGHT") {
+          job.nextAttemptAt = now() + IN_FLIGHT_WAIT_MS;
+          job.lastError = "notify:IN_FLIGHT";
+          store.saveJob(job);
+          emit("notify_in_flight", { jobId: job.jobId, number: job.number, version: job.version });
+          continue;
+        }
+        if (err && err.code === "UNCERTAIN") job.notifyUncertain = true;
+        failJob(job, "notify", err, { immediate: Boolean(job.notifyUncertain) });
       }
     }
     return { notified };
@@ -499,6 +511,7 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
       const job = store.get(id);
       if (!job || !job.failed) continue;
       job.failed = false;
+      job.notifyUncertain = false;
       job.attempts = 0;
       job.nextAttemptAt = 0;
       store.saveJob(job);

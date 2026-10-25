@@ -6,7 +6,7 @@
 //   3. الهجرة المقترحة 22 والتراجع على PostgreSQL محلي مؤقت إن وُجد (إلزامي في CI).
 // ============================================================================
 import crypto from "node:crypto";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -181,5 +181,48 @@ if (probe.status !== 0) {
   }
   assert.ok(passes >= 25, `عدد تأكيدات SQL (${passes}) أقل من المتوقع`);
   console.log(`  ✓ الهجرة 22 والتراجع على PostgreSQL محلي: ${passes} تأكيداً`);
+
+  // 26 (حجز الإرسال) فوق 22: وظيفي، ثم حجوزات متزامنة من جلسات منفصلة، ثم التراجعان.
+  const claimTest = read("supabase/tests/document-archive-send-claim.sql")
+    .replace("\\i :migration22", () => migration)
+    .replace("\\i :migration26", () => read("supabase/proposed/26-document-archive-send-claim.sql"))
+    .replace("\\i :rollback26", () => read("supabase/proposed/26-document-archive-send-claim-rollback.sql"))
+    .replace("\\i :rollback22", () => read("supabase/proposed/22-document-archive-rollback.sql"));
+  const [part1, part2] = claimTest.split("-- @@CONCURRENCY@@");
+  const psqlAsync = (input) => new Promise((resolve) => {
+    const viaTcp = Boolean(process.env.PGHOST);
+    const args = ["-d", DB, "-X", "-q", "-tA", "-v", "ON_ERROR_STOP=1"];
+    const child = spawn(viaTcp ? "psql" : "sudo", viaTcp ? args : ["-n", "-u", "postgres", "psql", ...args]);
+    let out = "";
+    child.stdout.on("data", (d) => { out += d; });
+    child.stderr.on("data", (d) => { out += d; });
+    child.on("close", (status) => resolve({ status, out }));
+    child.stdin.end(input);
+  });
+  psql(["-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", `drop database if exists ${DB}`]);
+  const create2 = psql(["-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", `create database ${DB}`]);
+  const run1 = psql(["-d", DB, "-X", "-v", "ON_ERROR_STOP=1"], { input: part1 });
+  // ١٠ طلبات للمهمة نفسها في اللحظة نفسها (كل طلب يمسك القفل نصف ثانية قبل الالتزام): حجز واحد فقط.
+  const job = "5".repeat(32);
+  const item = JSON.stringify({ job_id: job, doc_type: "wholesale_invoice", source_guid: "11111111-1111-4111-8111-111111111155",
+    doc_number: "502", doc_date: "2026-10-24", customer_name: "زبون تجريبي", currency: "USD", version: 1,
+    version_hash: "1".repeat(64), status: "rendered", failed: false, attempts: 0 });
+  const racers = run1.status === 0 ? await Promise.all(Array.from({ length: 10 }, () => psqlAsync(
+    `set role service_role;\nbegin;\nselect public.document_archive_claim_send('${item}'::jsonb, gen_random_uuid()) ->> 'result';\ndo $$ begin perform pg_sleep(0.5); end $$;\ncommit;\n`))) : [];
+  const results = racers.map((r) => r.out.trim());
+  const run2 = run1.status === 0 ? psql(["-d", DB, "-X", "-v", "ON_ERROR_STOP=1"], { input: part2 }) : { status: 1 };
+  psql(["-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", `drop database if exists ${DB}`]);
+  const text2 = `${output(create2)}${output(run1)}${run2.stdout ? output(run2) : ""}`;
+  const passes2 = (text2.match(/PASS /g) || []).length;
+  const claimed = results.filter((r) => r === "claimed").length;
+  const inFlight = results.filter((r) => r === "in_flight").length;
+  if (create2.status !== 0 || run1.status !== 0 || run2.status !== 0 || racers.some((r) => r.status !== 0)
+      || claimed !== 1 || inFlight !== 9 || !text2.includes("DOCUMENT_ARCHIVE_SEND_CLAIM_OK") || /TEST FAIL/.test(text2)) {
+    console.error(text2, results);
+    console.error("check-drive-invoice-archive: send-claim SQL test failed");
+    process.exit(1);
+  }
+  assert.ok(passes2 >= 50, `عدد تأكيدات 26 (${passes2}) أقل من المتوقع`);
+  console.log(`  ✓ الهجرة 26 (حجز الإرسال) والتراجع: ${passes2} تأكيداً + ١٠ حجوزات متزامنة ⇒ حجز واحد و٩ in_flight`);
 }
 console.log("check-drive-invoice-archive: OK");

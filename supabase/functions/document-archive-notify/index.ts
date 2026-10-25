@@ -9,8 +9,10 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 //
 // المسارات (POST فقط، بالرأس x-ozk-archive-secret):
 //   /notify  multipart: حقول المستند + file (PDF). يرسل المستند إلى محادثة المالك
-//            وحدها (bot_config.owner_chat_id) ويسجّل message_id. إن كان للمهمة
-//            message_id مسجَّل يعيده بلا إرسال ثانٍ (إعادة محاولة العامل بعد ضياع الرد).
+//            وحدها (bot_config.owner_chat_id) ويسجّل message_id. «مرة واحدة على الأكثر»:
+//            حجز ذرّي في القاعدة (document_archive_claim_send، هجرة 26) قبل أي إرسال.
+//            له message_id ⇒ يعيده بلا إرسال (200 duplicate). حجز آخر قائم ⇒ 409 in_flight.
+//            حجز علق أو إرسال غامض ⇒ 409 uncertain: لا إرسال تلقائي أبداً، والمالك يقرر.
 //   /report  JSON: نبض العامل + ملخص المهام؛ يعيد طلبات إعادة المحاولة من المالك.
 //
 // لا chat_id من الطلب إطلاقاً، ولا parse_mode، ولا روابط مشاركة عامة.
@@ -74,24 +76,38 @@ async function ownerChatId(): Promise<string> {
   return id;
 }
 
+// definite: تيليغرام رفض الطلب صراحةً (4xx بجسم ok:false) فلم يُسلَّم شيء يقيناً.
+// غير ذلك (انقطاع، مهلة، 5xx، ردّ غير مفهوم) ربما سُلِّم المستند ⇒ غامض.
+class TelegramError extends Error {
+  definite: boolean;
+  constructor(code: string, definite: boolean) {
+    super(code);
+    this.definite = definite;
+  }
+}
+
 async function telegram(method: string, body: FormData | Record<string, unknown>): Promise<number> {
   const token = await botToken();
   const init: RequestInit = body instanceof FormData
     ? { method: "POST", body }
     : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
-  const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, init);
+  let res: Response;
+  try {
+    res = await fetch(`https://api.telegram.org/bot${token}/${method}`, init);
+  } catch {
+    throw new TelegramError(`telegram_${method}_network`, false);
+  }
   const data = await res.json().catch(() => null) as { ok?: boolean; result?: { message_id?: number } } | null;
   const messageId = data && data.ok && data.result ? Number(data.result.message_id) : NaN;
   // لا نعيد نص خطأ تيليغرام (قد يتضمن تفاصيل الطلب)؛ الرمز وحده.
-  if (!Number.isFinite(messageId)) throw new Error(`telegram_${method}_${res.status}`);
+  if (!Number.isFinite(messageId)) {
+    const rejected = res.status >= 400 && res.status < 500 && data !== null && data.ok === false;
+    throw new TelegramError(`telegram_${method}_${res.status}`, rejected);
+  }
   return messageId;
 }
 
-async function existingMessageId(jobId: string): Promise<number | null> {
-  const rows = await restGet(`document_archive_items?job_id=eq.${jobId}&select=telegram_message_id`) as Array<{ telegram_message_id: number | null }>;
-  const v = Array.isArray(rows) && rows[0] ? rows[0].telegram_message_id : null;
-  return v === null || v === undefined ? null : Number(v);
-}
+type ClaimResult = { result?: string; message_id?: number | string | null };
 
 async function handleNotify(req: Request): Promise<Response> {
   const form = await req.formData().catch(() => null);
@@ -107,27 +123,49 @@ async function handleNotify(req: Request): Promise<Response> {
   const bytes = new Uint8Array(await file.arrayBuffer());
   if (!isPdfBytes(bytes)) return json(400, { ok: false, error: "file_type" });
 
-  const already = await existingMessageId(v.job_id);
-  if (already !== null) return json(200, { ok: true, duplicate: true, message_id: already });
-
+  // الإعداد قبل الحجز: نقصه لا يترك حجزاً معلَّقاً.
   const chat = await ownerChatId();
+  await botToken();
+  const host = String(fields.host || "");
+  const claimId = crypto.randomUUID();
+  const claim = await rpc("document_archive_claim_send", { p_item: itemFromNotify(v, null, host), p_claim_id: claimId }) as ClaimResult | null;
+  const result = claim && claim.result;
+  if (result === "duplicate" && claim!.message_id !== null && claim!.message_id !== undefined) {
+    return json(200, { ok: true, duplicate: true, message_id: Number(claim!.message_id) });
+  }
+  if (result === "in_flight" || result === "uncertain" || result === "identity_conflict") {
+    return json(409, { ok: false, error: result });
+  }
+  if (result !== "claimed") throw new Error("claim_unexpected");
+
   const { caption, followUp } = buildNotifyCaption(v);
   const doc = new FormData();
   doc.append("chat_id", chat);
   doc.append("caption", caption);
   doc.append("document", new Blob([bytes], { type: "application/pdf" }), fileNameFor(v, String(fields.file_name || "")));
-  const messageId = await telegram("sendDocument", doc);
+  let messageId: number;
+  try {
+    messageId = await telegram("sendDocument", doc);
+  } catch (err) {
+    if (err instanceof TelegramError && err.definite) {
+      // لم يُسلَّم شيء: يُحرَّر الحجز لمحاولة لاحقة. إن فشل التحرير بقي الحجز فصار غامضاً (آمن).
+      await rpc("document_archive_release_send", { p_job_id: v.job_id, p_claim_id: claimId }).catch(() => false);
+      throw err;
+    }
+    // ربما وصل: الحجز يبقى، فلا إرسال آخر حتى يُحسم (رقم الرسالة أو قرار المالك).
+    throw new Error("telegram_uncertain");
+  }
   if (followUp) {
     // الرسالة المرتبطة: ردّ على المستند نفسه. فشلها لا يُفشل الإشعار (المستند وصل).
     await telegram("sendMessage", { chat_id: chat, text: followUp, reply_to_message_id: messageId }).catch(() => 0);
   }
-  const recorded = await recordNotification(itemFromNotify(v, messageId, String(fields.host || "")));
+  const recorded = await recordNotification(itemFromNotify(v, messageId, host));
   return json(200, { ok: true, duplicate: false, message_id: messageId, recorded });
 }
 
-// التسجيل هو حارس عدم التكرار: إن ضاع مع ضياع الرد على العامل، أعاد العامل المحاولة
-// فوصل المستند مرتين. لذا يُعاد التسجيل حتى 3 مرات قبل الاستسلام. وإن فشل كلياً
-// فالمستند وصل؛ العامل يرسل message_id في تقريره التالي فيُسجَّل.
+// التسجيل يحوّل الحجز إلى «مرسَل» ويحفظ message_id لإعادته عند تكرار الطلب. يُعاد حتى
+// 3 مرات. وإن فشل كلياً فالحجز يبقى قائماً (لا إرسال ثانٍ)، والعامل يرسل message_id في
+// تقريره التالي فيُسجَّل؛ وإن لم يصل خلال 15 دقيقة صار غامضاً بتنبيه واحد للمالك.
 async function recordNotification(item: unknown): Promise<boolean> {
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {

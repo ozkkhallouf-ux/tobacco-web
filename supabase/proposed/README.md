@@ -263,3 +263,13 @@ definition لهذا المراقب، وقد جرى تعديله (PR #220) بإص
 
 - **الأثر:** حسابات `inventory-auth` تبقى مؤكَّدة (`email_confirm: true`). إضافة مستخدم من لوحة Supabase تحتاج بعدها خيار «Auto Confirm User» صراحة. التسجيل الذاتي يبقى مغلقاً بإعداد Auth `disable_signup` وحده؛ الهجرة لا تفتحه ولا تغلقه.
 - **اختبار:** `scripts/check-auto-confirm-removal.mjs` (Postgres محلي، دور غير مالك كما في Production، ثم دور مالك، والتراجع والتكرار والانحراف). واختُبر يدوياً على GoTrue v2.180.0 حقيقي محلياً (قبل/بعد/التسجيل مغلق/التراجع/المالك). التقرير: `/mnt/project-files/cost-data-leak-audit/`.
+
+## 26: إشعار أرشفة المستندات «مرة واحدة على الأكثر» (2026-10-25) — غير مطبَّق على الإنتاج
+
+| الملف | الحالة | ما يفعله |
+|---|---|---|
+| `26-document-archive-send-claim.sql` | **مقترحة — غير مطبَّقة** (بموافقة المالك المنفصلة فقط) | أعمدة `send_state`/`send_claim_id`/`send_claimed_at` على `document_archive_items` (ما له رقم رسالة يُعلَّم `sent`). `document_archive_claim_send(jsonb, uuid)` لـservice_role: حجز ذرّي قبل الإرسال (`claimed`/`duplicate`/`in_flight`/`uncertain`/`identity_conflict`). `document_archive_release_send` يحرّر حجز صاحبه وحده عند رفض صريح من تيليغرام. حجز أقدم من 15 دقيقة بلا رقم ⇒ `uncertain` + تنبيه واحد للمالك عبر `notify_telegram` (من الحجز ومن كل تقرير للعامل، بلا cron). `request_document_archive_resend(text)` للمالك وحده وللغامض وحده. `upsert_item` و`ingest_report` كما في 22 مع حسم الحالة برقم الرسالة. |
+| `26-document-archive-send-claim-rollback.sql` | تراجع جاهز — غير مطبَّق | يعيد دالتي 22 حرفياً ويحذف دوال الحجز وأعمدته. لا يمسّ أي صف ولا رقم رسالة. |
+
+- **الترتيب:** الهجرة أولاً، ثم نشر `document-archive-notify` الجديدة (تستدعي `document_archive_claim_send`؛ بلا الهجرة تفشل مغلقة بـ502 بلا إرسال). الدالة القديمة تعمل على مخطط 26 بلا تغيير. التراجع بالعكس: الدالة السابقة ثم ملف التراجع.
+- **اختبار:** `supabase/tests/document-archive-send-claim.sql` عبر `scripts/check-drive-invoice-archive.mjs`.

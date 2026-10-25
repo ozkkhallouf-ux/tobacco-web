@@ -191,7 +191,17 @@ function createFakeDrive({ email = "ozkkhallouf@gmail.com" } = {}) {
 async function createFakeEdge() {
   require("../../../supabase/functions/_shared/telegram-format.js");
   const shared = await import("../../../supabase/functions/_shared/document-archive.js");
-  const s = { secret: "s".repeat(40), sent: [], items: new Map(), retry: [], down: false, loseResponse: 0, reports: [] };
+  // حجز الإرسال كما في الدالة وهجرة 26: sending ⇒ 409 in_flight؛ stale يحاكي مرور 15 دقيقة ⇒ uncertain.
+  // crashAfterSend: الدالة سلّمت المستند ثم توقفت قبل التسجيل (الحجز يبقى، والعامل يرى انقطاعاً).
+  const s = { secret: "s".repeat(40), sent: [], items: new Map(), retry: [], down: false, loseResponse: 0, crashAfterSend: 0, stale: false, reports: [] };
+  // طلب المالك «أعد الإرسال» لإشعار غامض (request_document_archive_resend).
+  s.resend = (jobId) => {
+    const it = s.items.get(jobId);
+    if (!it || it.telegram_message_id || it.send_state !== "uncertain") return false;
+    it.send_state = null;
+    s.retry.push(jobId);
+    return true;
+  };
   const json = (status, body) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
   async function fetchImpl(url, init) {
     if (s.down) { const e = new Error("ECONNRESET"); e.code = "ECONNRESET"; throw e; }
@@ -207,16 +217,27 @@ async function createFakeEdge() {
       if (!shared.isPdfBytes(bytes)) return json(400, { ok: false, error: "file_type" });
       const existing = s.items.get(checked.value.job_id);
       if (existing && existing.telegram_message_id) return json(200, { ok: true, duplicate: true, message_id: existing.telegram_message_id });
+      if (existing && existing.send_state === "sending") {
+        if (!s.stale) return json(409, { ok: false, error: "in_flight" });
+        existing.send_state = "uncertain";
+      }
+      if (existing && existing.send_state === "uncertain") return json(409, { ok: false, error: "uncertain" });
+      s.items.set(checked.value.job_id, { ...shared.itemFromNotify(checked.value, null, fields.host), send_state: "sending" });
       const { caption, followUp } = shared.buildNotifyCaption(checked.value);
       const messageId = 1000 + s.sent.length;
       s.sent.push({ chat: "OWNER", caption, followUp, fileName: file.name, bytes: bytes.length, messageId });
-      s.items.set(checked.value.job_id, shared.itemFromNotify(checked.value, messageId, fields.host));
+      if (s.crashAfterSend > 0) { s.crashAfterSend--; const e = new Error("socket hang up"); e.code = "ECONNRESET"; throw e; }
+      s.items.set(checked.value.job_id, { ...shared.itemFromNotify(checked.value, messageId, fields.host), send_state: "sent" });
       if (s.loseResponse > 0) { s.loseResponse--; const e = new Error("socket hang up"); e.code = "ECONNRESET"; throw e; }
       return json(200, { ok: true, duplicate: false, message_id: messageId });
     }
     if (route === "report") {
       const body = JSON.parse(init.body);
       s.reports.push(body);
+      for (const it of body.items || []) {
+        const prev = s.items.get(it.job_id);
+        if (prev && !prev.telegram_message_id && it.telegram_message_id) Object.assign(prev, { telegram_message_id: it.telegram_message_id, send_state: "sent" });
+      }
       const ids = s.retry.splice(0);
       return json(200, { ok: true, result: { items: body.items.length, retry_job_ids: ids } });
     }

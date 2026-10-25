@@ -34,10 +34,20 @@ async function loadHandler(env, fetchMock) {
 
 function createBackend() {
   const s = { items: new Map(), telegram: [], rpc: [], failRecord: false, failRecordTimes: 0, recordCalls: 0,
-    telegramFail: 0, telegramStatus: 500, restDown: false, calls: 0 };
+    telegramFail: 0, telegramStatus: 500, telegramNetworkFail: 0, telegramDelayMs: 0, restDown: false, calls: 0,
+    claims: [], releases: [] };
   const json = (status, body) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 
-  function telegramApi(u, init) {
+  async function telegramApi(u, init) {
+    if (s.telegramDelayMs) await new Promise((r) => setTimeout(r, s.telegramDelayMs));
+    if (s.telegramNetworkFail > 0) {
+      // انقطاع بعد أن وصل الطلب: تيليغرام سلّم المستند ولم يصل الرد.
+      s.telegramNetworkFail--;
+      s.telegram.push({ method: u.pathname.split("/").pop(), lostResponse: true });
+      const e = new TypeError("fetch failed");
+      e.code = "ECONNRESET";
+      throw e;
+    }
     if (s.telegramFail > 0) {
       s.telegramFail--;
       return json(s.telegramStatus, { ok: false, error_code: s.telegramStatus, description: "Too Many Requests: retry after 5" });
@@ -52,32 +62,61 @@ function createBackend() {
     return json(200, { ok: true, result: { message_id: 7000 + s.telegram.length } });
   }
 
+  // نفس قاعدة upsert في Migration 22/26: message_id الأول لا يُكتب فوقه، ووجوده = «مرسَل».
+  function upsert(it) {
+    const prev = s.items.get(it.job_id) || {};
+    const messageId = prev.telegram_message_id ?? it.telegram_message_id ?? null;
+    s.items.set(it.job_id, { ...prev, ...it, telegram_message_id: messageId,
+      send_state: messageId !== null ? "sent" : (prev.send_state ?? null) });
+  }
+
   function recordNotification(init) {
     s.recordCalls++;
     if (s.failRecord) return json(500, { message: "boom" });
     if (s.failRecordTimes > 0) { s.failRecordTimes--; return json(503, { message: "busy" }); }
     const { p_item } = JSON.parse(init.body);
-    s.items.set(p_item.job_id, p_item);
+    upsert(p_item);
     s.rpc.push(p_item);
     return json(200, null);
   }
 
   function ingestReport(init) {
-    const items = JSON.parse(init.body).p_report.items;
-    // نفس قاعدة upsert في Migration 22: message_id الأول لا يُكتب فوقه.
-    for (const it of items) {
-      const prev = s.items.get(it.job_id);
-      s.items.set(it.job_id, { ...it, telegram_message_id: (prev && prev.telegram_message_id) ?? it.telegram_message_id ?? null });
-    }
+    const items = JSON.parse(init.body).p_report.items || [];
+    for (const it of items) upsert(it);
     return json(200, { items: items.length, retry_job_ids: [] });
+  }
+
+  // document_archive_claim_send (هجرة 26) بالذاكرة. staleClaims يحاكي مرور 15 دقيقة.
+  function claimSend(init) {
+    const { p_item, p_claim_id } = JSON.parse(init.body);
+    s.claims.push(p_claim_id);
+    const prev = s.items.get(p_item.job_id);
+    if (prev && (prev.version_hash !== p_item.version_hash || prev.source_guid !== p_item.source_guid)) {
+      return json(200, { result: "identity_conflict" });
+    }
+    if (prev && prev.telegram_message_id != null) return json(200, { result: "duplicate", message_id: prev.telegram_message_id });
+    if (prev && prev.send_state === "sending") {
+      if (!s.staleClaims) return json(200, { result: "in_flight" });
+      prev.send_state = "uncertain";
+    }
+    if (prev && prev.send_state === "uncertain") return json(200, { result: "uncertain" });
+    s.items.set(p_item.job_id, { ...p_item, telegram_message_id: null, status: "uploaded", send_state: "sending", send_claim_id: p_claim_id });
+    return json(200, { result: "claimed" });
+  }
+
+  function releaseSend(init) {
+    const { p_job_id, p_claim_id } = JSON.parse(init.body);
+    s.releases.push(p_claim_id);
+    const it = s.items.get(p_job_id);
+    const ok = Boolean(it && it.send_state === "sending" && it.send_claim_id === p_claim_id && it.telegram_message_id == null);
+    if (ok) Object.assign(it, { send_state: null, send_claim_id: null });
+    return json(200, ok);
   }
 
   const rest = {
     "/rest/v1/bot_config": () => json(200, [{ value: OWNER_CHAT }]),
-    "/rest/v1/document_archive_items": (init, u) => {
-      const it = s.items.get(/job_id=eq\.([0-9a-f]+)/.exec(u.search)[1]);
-      return json(200, it ? [{ telegram_message_id: it.telegram_message_id }] : []);
-    },
+    "/rest/v1/rpc/document_archive_claim_send": claimSend,
+    "/rest/v1/rpc/document_archive_release_send": releaseSend,
     "/rest/v1/rpc/document_archive_record_notification": recordNotification,
     "/rest/v1/rpc/document_archive_ingest_report": ingestReport,
   };
@@ -175,7 +214,7 @@ function captureConsole() {
   return { lines, restore: () => Object.assign(console, orig) };
 }
 
-test("Edge: فشل تيليغرام (429/500) ⇒ 502 بلا تسجيل، وإعادة المحاولة ترسل مرة واحدة فقط", { skip: SKIP }, async () => {
+test("Edge: رفض صريح من تيليغرام (429/400) ⇒ 502 ويُحرَّر الحجز، وإعادة المحاولة ترسل مرة واحدة فقط", { skip: SKIP }, async () => {
   const b = createBackend();
   const handler = await loadHandler(ENV, b.fetchMock);
   b.s.telegramFail = 1;
@@ -184,8 +223,10 @@ test("Edge: فشل تيليغرام (429/500) ⇒ 502 بلا تسجيل، وإع
   assert.equal(r1.status, 502);
   assert.equal((await r1.json()).error, "telegram_sendDocument_429");
   assert.equal(b.s.recordCalls, 0, "لا تسجيل لإشعار لم يصل");
+  assert.equal(b.s.releases.length, 1, "الحجز حُرِّر بحجز الطلب نفسه");
+  assert.equal(b.s.releases[0], b.s.claims[0]);
   b.s.telegramFail = 1;
-  b.s.telegramStatus = 500;
+  b.s.telegramStatus = 400;
   assert.equal((await handler(notifyRequest(FIELDS))).status, 502);
   const ok = await (await handler(notifyRequest(FIELDS))).json();
   assert.equal(ok.duplicate, false);
@@ -193,6 +234,68 @@ test("Edge: فشل تيليغرام (429/500) ⇒ 502 بلا تسجيل، وإع
   const again = await (await handler(notifyRequest(FIELDS))).json();
   assert.equal(again.duplicate, true);
   assert.equal(b.s.telegram.length, 1, "مستند واحد وصل للمالك");
+});
+
+test("Edge: خطأ 5xx من تيليغرام غامض ⇒ telegram_uncertain والحجز باقٍ، فلا إرسال ثانٍ", { skip: SKIP }, async () => {
+  const b = createBackend();
+  const handler = await loadHandler(ENV, b.fetchMock);
+  b.s.telegramFail = 1;
+  b.s.telegramStatus = 500;
+  const cap = captureConsole();
+  let r1;
+  try { r1 = await handler(notifyRequest(FIELDS)); } finally { cap.restore(); }
+  assert.equal(r1.status, 502);
+  assert.equal((await r1.json()).error, "telegram_uncertain");
+  assert.equal(b.s.releases.length, 0, "لا تحرير لحجز غامض");
+  const r2 = await handler(notifyRequest(FIELDS));
+  assert.equal(r2.status, 409);
+  assert.equal((await r2.json()).error, "in_flight");
+  b.s.staleClaims = true;
+  const r3 = await handler(notifyRequest(FIELDS));
+  assert.equal(r3.status, 409);
+  assert.equal((await r3.json()).error, "uncertain");
+  assert.equal(b.s.telegram.length, 0, "لا محاولة إرسال بعد الغموض");
+});
+
+test("Edge: ضياع ردّ تيليغرام بعد التسليم ⇒ غامض، والإعادة لا تكرر الرسالة", { skip: SKIP }, async () => {
+  const b = createBackend();
+  const handler = await loadHandler(ENV, b.fetchMock);
+  b.s.telegramNetworkFail = 1;
+  const cap = captureConsole();
+  let r1;
+  try { r1 = await handler(notifyRequest(FIELDS)); } finally { cap.restore(); }
+  assert.equal(r1.status, 502);
+  assert.equal((await r1.json()).error, "telegram_uncertain");
+  for (let i = 0; i < 3; i++) assert.equal((await handler(notifyRequest(FIELDS))).status, 409);
+  b.s.staleClaims = true;
+  assert.equal((await (await handler(notifyRequest(FIELDS))).json()).error, "uncertain");
+  assert.equal(b.s.telegram.length, 1, "المستند وصل مرة واحدة ولم يُعد إرساله");
+});
+
+test("Edge: طلبان متزامنان للمهمة نفسها ⇒ إرسال واحد والآخر 409 in_flight", { skip: SKIP }, async () => {
+  const b = createBackend();
+  const handler = await loadHandler(ENV, b.fetchMock);
+  b.s.telegramDelayMs = 50;
+  const [x, y] = await Promise.all([handler(notifyRequest(FIELDS)), handler(notifyRequest(FIELDS))]);
+  const statuses = [x.status, y.status].sort();
+  assert.deepEqual(statuses, [200, 409]);
+  const loser = x.status === 409 ? x : y;
+  assert.equal((await loser.json()).error, "in_flight");
+  assert.equal(b.s.telegram.filter((t) => t.method === "sendDocument").length, 1);
+  // بعد التسجيل: أي طلب لاحق duplicate بالرقم نفسه.
+  const again = await (await handler(notifyRequest(FIELDS))).json();
+  assert.equal(again.duplicate, true);
+  assert.equal(b.s.telegram.filter((t) => t.method === "sendDocument").length, 1);
+});
+
+test("Edge: job_id نفسه ببصمة مختلفة ⇒ 409 identity_conflict بلا إرسال", { skip: SKIP }, async () => {
+  const b = createBackend();
+  const handler = await loadHandler(ENV, b.fetchMock);
+  assert.equal((await handler(notifyRequest(FIELDS))).status, 200);
+  const r = await handler(notifyRequest({ ...FIELDS, version_hash: "c".repeat(64) }));
+  assert.equal(r.status, 409);
+  assert.equal((await r.json()).error, "identity_conflict");
+  assert.equal(b.s.telegram.length, 1);
 });
 
 test("Edge: فشل عابر في تسجيل الإشعار يُعاد داخل الدالة، فإعادة العامل لا تكرر الإرسال", { skip: SKIP }, async () => {
@@ -213,6 +316,11 @@ test("Edge: فشل التسجيل كلياً ⇒ recorded=false، وتقرير �
   const first = await (await handler(notifyRequest(FIELDS))).json();
   assert.equal(first.recorded, false);
   assert.equal(b.s.recordCalls, 3, "ثلاث محاولات ثم استسلام");
+  // قبل وصول التقرير: الحجز قائم، فإعادة العامل لا ترسل (الثغرة السابقة: إرسال ثانٍ هنا).
+  const early = await handler(notifyRequest(FIELDS));
+  assert.equal(early.status, 409);
+  assert.equal((await early.json()).error, "in_flight");
+  assert.equal(b.s.telegram.length, 1);
   const report = await handler(new Request("https://x/functions/v1/document-archive-notify/report", {
     method: "POST", headers: { "x-ozk-archive-secret": SECRET, "Content-Type": "application/json" },
     body: JSON.stringify({ host: "OZK2026", mode: "live", items: [{ job_id: FIELDS.job_id, status: "notified", telegram_message_id: first.message_id }] }),

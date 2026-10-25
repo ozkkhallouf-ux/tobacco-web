@@ -786,6 +786,66 @@ test("ضياع ردّ الإشعار بعد الإرسال: إعادة المح�
   assert.equal(t.edgeFake.state.sent.length, 1);
 });
 
+test("إشعار حجزه قائم (الدالة توقفت بعد الإرسال): انتظار بلا عدّ محاولات ولا رسالة ثانية", async () => {
+  const t = await setup();
+  t.ameen.add({ guid: G1, number: 501 });
+  t.advance(300);
+  t.edgeFake.state.crashAfterSend = 1;
+  await t.cycle();
+  const [job] = t.store.jobs();
+  assert.equal(job.status, "uploaded");
+  for (let i = 0; i < 6; i++) {
+    t.advance(310);
+    await t.cycle();
+  }
+  const after = t.store.get(job.jobId);
+  assert.equal(after.lastError, "notify:IN_FLIGHT");
+  assert.equal(after.attempts, 0, "الانقطاع وانتظار الحجز لا يستهلكان المحاولات");
+  assert.equal(after.failed, false);
+  assert.equal(t.edgeFake.state.sent.length, 1, "رسالة واحدة فقط");
+  assert.ok(t.logs.some((e) => e.event === "notify_in_flight"));
+});
+
+test("إشعار غامض: فاشل بلا إحياء تلقائي أبداً، والإعادة بطلب المالك وحده ترسل مرة واحدة", async () => {
+  const t = await setup();
+  t.ameen.add({ guid: G1, number: 501 });
+  t.advance(300);
+  t.edgeFake.state.crashAfterSend = 1;
+  await t.cycle();
+  const [job] = t.store.jobs();
+  t.edgeFake.state.stale = true;
+  t.advance(310);
+  await t.cycle();
+  let after = t.store.get(job.jobId);
+  assert.equal(after.failed, true);
+  assert.equal(after.notifyUncertain, true);
+  assert.equal(after.lastError, "notify:UNCERTAIN");
+  // بعد ساعات (أطول من failedCooldownMinutes) وإعادة تشغيل العامل: لا إحياء ولا إرسال.
+  t.restart();
+  for (let i = 0; i < 4; i++) {
+    t.advance(3700);
+    await t.cycle();
+  }
+  after = t.store.get(job.jobId);
+  assert.equal(after.failed, true);
+  assert.equal(after.status, "uploaded");
+  assert.equal(t.edgeFake.state.sent.length, 1, "لا إرسال تلقائي لإشعار غامض");
+  const reported = t.edgeFake.state.reports.flatMap((r) => r.items).filter((i) => i.job_id === job.jobId).pop();
+  assert.equal(reported.failed, true, "الموقع يرى الإشعار الغامض فاشلاً");
+  assert.equal(reported.last_error, "notify:UNCERTAIN");
+  // المالك تحقق أنه لم يصل وطلب الإعادة.
+  assert.equal(t.edgeFake.state.resend(job.jobId), true);
+  t.edgeFake.state.stale = false;
+  t.advance(310);
+  await t.cycle(); // التقرير يسلّم الطلب
+  t.advance(310);
+  await t.cycle();
+  after = t.store.get(job.jobId);
+  assert.equal(after.status, "notified");
+  assert.equal(after.notifyUncertain, false);
+  assert.equal(t.edgeFake.state.sent.length, 2, "إرسال واحد بقرار المالك");
+});
+
 test("PDF تغيّر محلياً بعد الرفع وقبل الإشعار ⇒ فاشلة فوراً بلا إرسال (بصمة الرفع نفسها)", async () => {
   const t = await setup();
   t.ameen.add({ guid: G1, number: 501 });
