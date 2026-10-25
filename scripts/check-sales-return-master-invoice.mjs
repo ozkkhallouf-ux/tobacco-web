@@ -303,15 +303,18 @@ test("الأرشفة واسم الملف: return_invoice ومطابق لـKINDS.
 // صفوف 634 مثبّتة حرفياً أدناه كي لا يمرّ تغيير رقمي خلف بصمة جديدة.
 // وأُعيد التقاط الثلاث نفسها بعد الخط الرسمي Cairo (2026-10-22): diff المخرجات مع main f145a10
 // = سطرا STYLE وحدهما (`.ozk-inv` → var(--ozk-font)/line-height، و`.qg` حشوة قصّ معوَّضة)، بلا نص ولا رقم ولا صف.
+// وأُعيد التقاطها بعد منع الورقة الثانية شبه الفارغة (2026-10-25): حذف إضافات الإصلاح نصياً
+// (أربعة أسطر STYLE لحشوة الخلايا وكتلة `.inv-closing`، ووسما فتح الكتلة وإغلاقها) من القالب
+// الجديد يعيد البصمات القديمة الثلاث حرفياً، فلا نص ولا رقم ولا صف تغيّر.
 
 const SALE_LINES = [
   { material: "معسل فاخر اسود حرة كف", qty: 48, qtyUnits: 2, unit1: "كف", unit2: "كرتونة", price: 170 },
   { material: "فحم ايكو نارة احمر", qty: 80, qtyUnits: 5, unit1: "كف", unit2: "كرتونة", price: 33 }
 ];
 const GOLDEN = [
-  ["فاتورة بيع بحسم ودفعة وتسوية", { type: "invoice", no: "634", date: "2026-09-05", name: "زبون د", phone: "0985000771", cur: "$", amount: 505, prevBalance: 1000, newBalance: 1370, discount: 25, payment: 100, adjust: 10, lines: SALE_LINES }, "e65108ddf45c528fa952608dadd95525c84144db8fda36a4bb486c95a899eff9"],
-  ["فاتورة بيع غير منعكسة على الذمة", { type: "invoice", no: "2046", date: "2026-09-05", name: "زبون هـ", cur: "$", amount: 129.673, accountBalance: -1.15, accountBalanceAt: "2026-09-05T10:00:00Z", lines: SALE_LINES }, "bc11b893ff3717c8b4fe23351e06aa888eaaa14cd37f87a0ad18cb131c054cd7"],
-  ["فاتورة بيع بلا رقم ولا رصيد", { type: "invoice", date: "2026-09-05", name: "زبون و", amount: 50, lines: [] }, "7464565e9929449b115ada26d12fa878b20f7b4df28a65919976f516a67a375d"],
+  ["فاتورة بيع بحسم ودفعة وتسوية", { type: "invoice", no: "634", date: "2026-09-05", name: "زبون د", phone: "0985000771", cur: "$", amount: 505, prevBalance: 1000, newBalance: 1370, discount: 25, payment: 100, adjust: 10, lines: SALE_LINES }, "aa56f552256e596a832fc4f71920927b0026f80ca203bbdf98a4614738be7f32"],
+  ["فاتورة بيع غير منعكسة على الذمة", { type: "invoice", no: "2046", date: "2026-09-05", name: "زبون هـ", cur: "$", amount: 129.673, accountBalance: -1.15, accountBalanceAt: "2026-09-05T10:00:00Z", lines: SALE_LINES }, "08f823e3b75949aab470982fae083d6fdcaf51acbbdb7edbab5e095d3f84450c"],
+  ["فاتورة بيع بلا رقم ولا رصيد", { type: "invoice", date: "2026-09-05", name: "زبون و", amount: 50, lines: [] }, "0cccf0bd6cbd03dec58eef14280fbb8a9a616c1fffe2e5d162f93f7526e2ebd2"],
   ["سند قبض برصيد بعد الدفعة ورصيد حالي", { type: "receipt", no: "R-1", date: "2026-09-10", name: "زبون ز", cur: "$", amount: 20, balance: 80, balanceLabel: "الرصيد بعد الدفعة", currentBalance: 60.2, currentBalanceAt: "2026-09-10T10:00:00Z" }, "7964a1c9e7d49ff1b9c642618391cd18a25889ffd8498a06bf1cb4189e9cee5a"],
   ["سند قبض بمبلغ قريب من مرتجع بنفس اليوم", { type: "receipt", no: "R-2", date: "2026-09-10", name: "زبون ز", cur: "$", amount: 20, balance: 80, newBalance: 80, prevBalance: 100, lines: LINES_48 }, "bc8ff71504ce875f9c48b90e663903f90dc117681997135206a7f79f397c1e64"],
   ["سند صرف", { type: "payment", no: "PV-1", date: "2026-09-06", name: "أبو زياد للنقل", cur: "ل.س", amount: 90000, method: "نقدي", notes: "نقل", balance: 0 }, "ccd26af26cdbea7610992d9781153ed0bf901c07d1c6d28580c9e9408e708e90"],

@@ -77,6 +77,7 @@ export const CHECKS = [
   'check-invoice-master-template.mjs',
   'check-invoice-quantity-render.mjs',
   'check-invoice-sync-cadence.mjs',
+  'check-invoice-web-one-page.mjs',
   'check-item-cost-matching.mjs',
   'check-item-guid-migrations.mjs',
   'check-item-guid-preservation.mjs',
