@@ -260,3 +260,9 @@ jobs:
       - name: Cashier reprint - resolution, duplicate guard and bridge call test
         shell: powershell
         run: .\tools\tests\Test-CashierReprint.ps1
+
+      # غلاف المهمة المجدولة لأرشفة Drive (غير مسجَّل): القفل والتزامن، المهلة وقتل الشجرة،
+      # الوضع المحصور بـdry-run، ملف STOP، تنقيح السجل وتدويره — بعامل وهمي بلا أي خدمة حقيقية.
+      - name: Drive archive - scheduled run wrapper test
+        shell: powershell
+        run: .\tools\drive-invoice-archive\__tests__\Test-RunScheduled.ps1
