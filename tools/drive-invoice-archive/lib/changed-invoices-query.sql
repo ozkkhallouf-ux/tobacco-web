@@ -3,7 +3,8 @@
 --
 -- رصد تزايدي: ما أُنشئ أو عُدِّل بعد @since (CreateDate أو LastUpdateDate؛ قيمة الأخير
 -- الافتراضية 1980-01-01 لفاتورة لم تُعدَّل)، ومطابقة دورية بـ@since قديم على نافذة تاريخ.
--- lines_checksum تلميح رخيص لتغيّر الأسطر: اختلافه يستدعي تحميل الأسطر وحساب البصمة الحقيقية.
+-- lines_checksum تلميح رخيص لتغيّر الأسطر (كل أعمدة البصمة): اختلافه يستدعي تحميل الأسطر
+-- وحساب البصمة الحقيقية. تعديل لا يلمس LastUpdateDate تلتقطه المطابقة الدورية بهذا التلميح.
 -- seconds_since_change بساعة SQL نفسها (لا ساعة الجهاز) لمهلة الاستقرار قبل الأرشفة.
 --
 -- المعاملات:
@@ -30,10 +31,21 @@ SELECT TOP (500)
   CAST(ISNULL(u.Total,     0) AS decimal(18,2))       AS total,
   CAST(ISNULL(u.TotalDisc, 0) AS decimal(18,2))       AS discount,
   CAST(ISNULL(u.FirstPay,  0) AS decimal(18,2))       AS first_pay,
+  -- حقول البصمة (المخطط 2): بقية الرأس كما خُزّن، بأعمدة مثبتة على AmnDb002 في وكيل الأحداث.
+  LOWER(CONVERT(nvarchar(36), u.CustAccGUID))         AS customer_account_guid,
+  LTRIM(RTRIM(ISNULL(u.Cust_Name, N'')))              AS bill_customer_name,
+  LOWER(CONVERT(nvarchar(36), u.StoreGUID))           AS store_guid,
+  ISNULL(u.PayType, 0)                                AS pay_type,
+  CAST(ISNULL(u.TotalExtra, 0) AS decimal(28,6))      AS total_extra,
+  CAST(ISNULL(u.ItemsDisc,  0) AS decimal(28,6))      AS items_disc,
+  CAST(ISNULL(u.ItemsExtra, 0) AS decimal(28,6))      AS items_extra,
+  CAST(ISNULL(u.BonusDisc,  0) AS decimal(28,6))      AS bonus_disc,
+  CAST(ISNULL(u.VAT,        0) AS decimal(28,6))      AS vat,
   CAST(ISNULL(u.CurrencyVal, 1) AS decimal(28,12))    AS currency_val,
   LTRIM(RTRIM(ISNULL(cur.CurrencyISO, N'')))          AS currency_iso,
   (SELECT COUNT(*) FROM dbo.bi000 c WHERE c.ParentGUID = u.GUID) AS line_count,
-  (SELECT CHECKSUM_AGG(BINARY_CHECKSUM(c.MatGUID, c.Qty, c.Unity, c.Price, c.Number))
+  (SELECT CHECKSUM_AGG(BINARY_CHECKSUM(c.GUID, c.Number, c.MatGUID, c.Qty, c.Qty2, c.Qty3, c.Unity, c.Price,
+                                       c.Discount, c.Extra, c.BonusQnt, c.VAT, c.StoreGUID, c.CostGUID))
      FROM dbo.bi000 c WHERE c.ParentGUID = u.GUID)   AS lines_checksum,
   CONVERT(nvarchar(33), chg.changed_at, 126)          AS changed_at,
   DATEDIFF(second, chg.changed_at, GETDATE())         AS seconds_since_change
