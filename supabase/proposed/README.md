@@ -235,3 +235,12 @@ definition لهذا المراقب، وقد جرى تعديله (PR #220) بإص
 | `22-document-archive-rollback.sql` | **تراجع جاهز — غير مطبَّق** (بموافقة المالك فقط؛ إن طُبِّق يُسجَّل بإصداره كهجرة جديدة ولا يُحذف ملف `../migrations/20261024234500_…`) | يحذف الجداول الثلاثة والدوال. يفقد سجل الروابط في Supabase فقط؛ ملفات Drive وطابور العامل على OZK2026 تبقى. |
 
 اختبار: `supabase/tests/document-archive.sql` عبر `scripts/check-drive-invoice-archive.mjs` (25 تأكيداً، مع التراجع). ترتيب التطبيق: 22 أولاً، ثم نشر `document-archive-notify`، ثم العامل — انظر `docs/ai/topics/drive-invoice-archive.md`.
+
+## 24: قصر بيانات التكلفة والربح على المالك (2026-10-25) — غير مطبَّقة على الإنتاج
+
+| الملف | الحالة | ما يفعله |
+|---|---|---|
+| `24-cost-data-owner-only.sql` | **مقترحة — غير مطبَّقة** (بموافقة المالك فقط، معاملة واحدة بحارس وتحقق أدوار داخلي) | `sales_line_items` و`ameen_item_snapshot`: القراءة المباشرة للمالك أو هوية المزامنة فقط. `list_ameen_item_snapshot()` (SECURITY DEFINER) تعيد اللقطة للطاقم بأعمدة التكلفة وآخر سعر شراء NULL. سياسة RESTRICTIVE على `inventory_reports` تحجب مصدرَي `ameen_daily_profit` و`ameen_purchase_invoices` عن غير المالك قراءةً وكتابةً. `supplier_item_offers` للمالك. سحب صلاحيات anon عن `item_costs` و`app_secrets` و`bot_config` و`v_item_supplier_comparison`، وTRUNCATE/REFERENCES/TRIGGER عن authenticated في `item_costs`، وكل الصلاحيات عن authenticated في `app_secrets` و`bot_config`. لا يمسّ أي بيانات. |
+| `24-cost-data-owner-only-rollback.sql` | **تراجع جاهز — غير مطبَّق** | يعيد السياسات والصلاحيات كما كانت حرفياً (أي يعيد التسرّب). |
+
+اختبار: `scripts/check-cost-data-owner-only.mjs` على نسخة بنية Production (`scripts/fixtures/cost-data-prod-baseline.sql`، بيانات اصطناعية): يثبت التسرّب قبل الهجرة، ثم سبعة أدوار بعدها (anon، موظف، طاقم بلا دور، حساب غريب، موظف جرد، المالك، هوية المزامنة بدوال الكتابة)، ثم أن بصمة السياسات والـACL بعد التراجع تطابق ما قبل الهجرة حرفياً. ترتيب التطبيق: الهجرة أولاً، ثم نشر الويب (`listItemSnapshots` يقرأ عبر الدالة ويرجع للجدول إن لم توجد). التقرير: `/mnt/project-files/cost-data-leak-audit/`.
