@@ -38,7 +38,7 @@ if ($Remove) {
 }
 
 New-Item -ItemType Directory -Force -Path $AppDir | Out-Null
-foreach ($file in @('cashier-reprint-lib.ps1', 'cashier-reprint.ps1', 'cashier-reprint-ui.ps1', 'set-sql-secret.ps1', 'config.example.json', 'config.remote.example.json', 'README.md')) {
+foreach ($file in @('cashier-reprint-lib.ps1', 'cashier-reprint.ps1', 'cashier-reprint-ui.ps1', 'set-sql-secret.ps1', 'config.example.json', 'config.remote.example.json', 'config.service.example.json', 'README.md')) {
     Copy-Item -Force -LiteralPath (Join-Path $SourceDir $file) -Destination (Join-Path $AppDir $file)
 }
 $configPath = Join-Path $Root 'config.json'

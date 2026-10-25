@@ -49,8 +49,12 @@ function Get-LocalResolveResult($Config, [string]$CashierRoot, [scriptblock]$Loo
 }
 
 function Invoke-LocalPrint($Config, [string]$CashierRoot, [scriptblock]$Lookup, [int]$Number, [string]$Date, [string]$Id, [string]$From) {
+    # tool-secret: اتصال القراءة للجسر من sql.secret نفسه، لحساب خدمة بلا متغيّر AMEEN_SQL_CONNECTION_STRING.
+    $secretFile = Join-Path $CashierRoot "sql.secret"
+    $bridgeSql = { param($c) "" }
+    if ($Config.bridgeSqlSource -eq "tool-secret") { $bridgeSql = { param($c) Get-CashierBridgeSqlConnectionString (Read-CashierSqlSecret $secretFile) }.GetNewClosure() }
     $result = Invoke-CashierReprint -Config $Config -Root $CashierRoot -Number $Number -Date $Date -RequestId $Id -RequestedFrom $From `
-        -Lookup $Lookup -Runner { param($c, $n, $d) Invoke-CashierBridgeProcess $c $n $d }
+        -Lookup $Lookup -BridgeSql $bridgeSql -Runner { param($c, $n, $d, $s) Invoke-CashierBridgeProcess $c $n $d $s }
     return [pscustomobject]@{ Status = $result.Status; Message = $result.Message; Confirmation = [string]$result.Details.confirmation }
 }
 
@@ -93,7 +97,23 @@ try {
             } catch { $checks.Printer = "غير موجودة: $($config.printerName)" }
             try { $connection = Open-CashierReadOnlyConnection (Read-CashierSqlSecret $secretPath); $connection.Dispose(); $checks.Sql = "ok" }
             catch { $checks.Sql = [string]$_.Exception.Message }
+            # مصدر اتصال الجسر: متغيّر User للحساب الحالي (السلوك الأصلي) أو سرّ الأداة.
+            $checks.BridgeSqlSource = $config.bridgeSqlSource
+            if ($config.bridgeSqlSource -eq "tool-secret") {
+                try { [void](Get-CashierBridgeSqlConnectionString (Read-CashierSqlSecret $secretPath)); $checks.BridgeSql = "ok" }
+                catch { $checks.BridgeSql = [string]$_.Exception.Message }
+            } elseif ([string]::IsNullOrEmpty([Environment]::GetEnvironmentVariable("AMEEN_SQL_CONNECTION_STRING", "User"))) {
+                $checks.BridgeSql = "متغيّر AMEEN_SQL_CONNECTION_STRING غير موجود لحساب $($env:USERNAME)"
+            } else { $checks.BridgeSql = "ok" }
+            # كتابة غير موثوقة على ما يُنفَّذ: تُعرض دائماً، وتمنع الطباعة حين enforceProtectedPaths=true.
+            $checks.EnforceProtectedPaths = $config.enforceProtectedPaths
+            try {
+                $risks = @(Get-CashierPathWriteRisks (Get-CashierProtectedPaths $config $Root))
+                if ($risks.Count -eq 0) { $checks.ProtectedPaths = "ok" } else { $checks.ProtectedPaths = @($risks | Select-Object -First 10) }
+            } catch { $checks.ProtectedPaths = @([string]$_.Exception.Message) }
             $healthy = ($checks.Bridge -eq "ok" -and $checks.Printer -eq "ok" -and $checks.Sql -eq "ok")
+            if ($config.bridgeSqlSource -eq "tool-secret" -and $checks.BridgeSql -ne "ok") { $healthy = $false }
+            if ($config.enforceProtectedPaths -and $checks.ProtectedPaths -ne "ok") { $healthy = $false }
         } else {
             # فحص بعيد بلا طباعة: حالة معرّف عشوائي جديد يجب أن تكون not_received من جهاز الطابعة المتوقع.
             try {

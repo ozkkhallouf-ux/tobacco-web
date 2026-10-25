@@ -47,6 +47,20 @@ for (const remote of ['config.remote.example.json']) {
   assert.ok(!('password' in c) && !JSON.stringify(c).match(/password/i), 'لا كلمات سر في الإعداد');
 }
 
+// حساب خدمة محدود: مسار جسر مطلق، واتصال الجسر من سرّ الأداة نفسه للعملية الفرعية وحدها.
+const service = JSON.parse(read('config.service.example.json'));
+assert.equal(service.mode, 'local');
+assert.match(service.bridgeScriptPath, /^C:\\ProgramData\\OZK\\CashierReprint\\/, 'مسار الجسر لحساب الخدمة مطلق في ProgramData');
+assert.doesNotMatch(service.bridgeScriptPath, /%/, 'لا متغيرات بيئة في مسار حساب الخدمة');
+assert.equal(service.bridgeSqlSource, 'tool-secret');
+assert.equal(service.enforceProtectedPaths, true);
+assert.ok(!JSON.stringify(service).match(/password|pwd|connectionstring/i), 'لا أسرار في مثال حساب الخدمة');
+assert.equal((lib.match(/EnvironmentVariables\[/g) || []).length, 1, 'متغيّر بيئة واحد فقط يُضبط للجسر');
+assert.match(lib, /\$info\.EnvironmentVariables\["AMEEN_SQL_CONNECTION_STRING"\] = \$SqlConnectionString/, 'المتغيّر للعملية الفرعية وحدها');
+assert.doesNotMatch(lib, /SetEnvironmentVariable/, 'لا كتابة لمتغيرات بيئة الجهاز أو المستخدم');
+assert.doesNotMatch(lib, /\$arguments[^\n]*SqlConnectionString/, 'السرّ لا يدخل وسائط سطر الأوامر');
+assert.match(lib, /Assert-CashierBridgeReady \$c \$r/, 'شرط الطباعة الافتراضي يشمل فحص الحماية حين يُفرض');
+
 const config = JSON.parse(read('config.example.json'));
 assert.equal(config.printerName, 'XPRINTER XP-T80Q 80MM');
 assert.match(config.expectedBridgeSha256, /^[0-9a-f]{64}$/);
