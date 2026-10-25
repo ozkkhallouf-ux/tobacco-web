@@ -29,10 +29,13 @@
   const view = {
     search: "",
     segment: "all",
-    sortKey: "riskScore",
+    sortKey: "netSales30d",
     sortDir: "desc",
     selectedId: null,
-    includeSuppliers: false
+    includeSuppliers: false,
+    columnsOpen: false,
+    // اختيار الزبون من الجدول ينقل الشاشة إلى تفاصيله بعد الرسم.
+    revealDetail: false
   };
 
   const escape = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[char]));
@@ -137,22 +140,69 @@
     { id: "insufficient", label: "بيانات غير كافية" }
   ];
 
+  // أعمدة الجدول. الثمانية الأولى (default) هي العرض الافتراضي بترتيب المالك (2026-10-25)،
+  // والبقية اختيارية يظهرها من «تخصيص الأعمدة». كل خلية تُرسم بدالتها، والعنوان المختصر
+  // يحمل الوصف الكامل في title. الاسم لا يُخفى: هو مدخل التفاصيل.
   const COLUMNS = [
-    { key: "customerName", label: "الزبون", type: "text" },
-    { key: "primarySegment", label: "التصنيف", type: "text" },
-    { key: "netSales30d", label: "مبيعات 30 يوم", type: "number" },
-    { key: "netSalesPrevious30d", label: "الفترة السابقة", type: "number" },
-    { key: "trendPercent", label: "التغير %", type: "number" },
-    { key: "lastPurchaseAt", label: "آخر شراء", type: "text" },
-    { key: "daysSinceLastPurchase", label: "أيام منذ آخر شراء", type: "number" },
-    { key: "creditLimitDisplay", label: "الحد الائتماني المقترح", type: "number" },
-    { key: "currentBalance", label: "الرصيد الحالي", type: "number" },
-    { key: "availableCredit", label: "المتاح من الحد", type: "number" },
-    { key: "creditUsagePercent", label: "نسبة استخدام الحد", type: "number" },
-    { key: "overLimitAmount", label: "مقدار التجاوز", type: "number" },
-    { key: "riskScore", label: "الخطر", type: "number" },
-    { key: "flags", label: "التنبيهات", type: "none" }
+    { key: "customerName", label: "الزبون", title: "اسم الزبون — اضغطه لفتح التفاصيل", type: "text", default: true, locked: true, cell: (row) => nameCell(row) },
+    { key: "netSales30d", label: "مبيعات 30 يوماً", title: "صافي مبيعات آخر 30 يوماً", type: "number", default: true, currency: (row) => row.currency, cell: (row) => amountCell(row.netSales30d, row.currency) },
+    { key: "trendPercent", label: "التغير %", title: "آخر 30 يوماً مقارنة بالثلاثين السابقة", type: "number", default: true, cell: (row) => trendCell(row) },
+    { key: "currentBalance", label: "الرصيد", title: "الرصيد الحالي بذمة الزبون", type: "number", default: true, currency: (row) => creditCurrencyOf(row), cell: (row) => amountCell(row.balanceDisplay ?? row.currentBalance, creditCurrencyOf(row)) },
+    { key: "creditLimitDisplay", label: "الحد المقترح", title: "الحد الائتماني المقترح (محرك v6)", type: "number", default: true, currency: (row) => row.creditCurrency || BASE, cell: (row) => proposedCell(row) },
+    { key: "availableCredit", label: "المتاح", title: "المتاح قبل الوصول إلى الحد الفعّال", type: "number", default: true, currency: (row) => creditCurrencyOf(row), cell: (row) => amountCell(row.availableCredit, creditCurrencyOf(row)) },
+    { key: "creditUsagePercent", label: "الاستخدام", title: "نسبة الرصيد من الحد الفعّال", type: "number", default: true, cell: (row) => usageCell(row) },
+    { key: "overLimitAmount", label: "التجاوز", title: "المبلغ الزائد عن الحد الفعّال", type: "number", default: true, currency: (row) => creditCurrencyOf(row), cell: (row) => overCell(row) },
+    { key: "approvedLimit", label: "الحد المعتمد", title: "الحد المعتمد يدوياً (بالدولار)", type: "number", cell: (row) => amountCell(approvedLimitOf(row), BASE) },
+    { key: "primarySegment", label: "التصنيف", type: "text", cell: (row) => `<td><span class="ci-segment ${escape(row.primarySegment)}">${escape(SEGMENT_LABELS[row.primarySegment] || row.primarySegment)}</span></td>` },
+    { key: "netSalesPrevious30d", label: "الفترة السابقة", title: "صافي مبيعات الثلاثين يوماً السابقة", type: "number", currency: (row) => row.currency, cell: (row) => amountCell(row.netSalesPrevious30d, row.currency) },
+    { key: "lastPurchaseAt", label: "آخر شراء", type: "text", cell: (row) => `<td dir="ltr">${day(row.lastPurchaseAt)}</td>` },
+    { key: "daysSinceLastPurchase", label: "أيام منذ آخر شراء", type: "number", cell: (row) => `<td dir="ltr">${count(row.daysSinceLastPurchase)}</td>` },
+    { key: "riskScore", label: "الخطر", title: "درجة الخطر واتجاهها", type: "number", cell: (row) => `<td dir="ltr">${count(row.riskScore)} ${riskTrendBadge(row)}</td>` },
+    { key: "flags", label: "التنبيهات", type: "none", cell: (row) => `<td class="ci-flags">${flagChips(row.flags, 3)}</td>` }
   ];
+  const DEFAULT_COLUMNS = COLUMNS.filter((column) => column.default).map((column) => column.key);
+
+  // --------------------------------------------------------------------------
+  // تفضيل الأعمدة لكل مستخدم على هذا الجهاز: قائمة مفاتيح أعمدة فقط، بلا أي رقم أو
+  // اسم زبون، فلا تتسرّب بيانات مالية عبر التخزين المحلي. التخزين قد يكون محجوباً
+  // (تصفّح خاص) فيبقى العرض الافتراضي.
+  // --------------------------------------------------------------------------
+  const COLUMNS_STORAGE_PREFIX = "ozk_customer_intel_columns:v1";
+  let columnPrefs = { userId: undefined, keys: DEFAULT_COLUMNS };
+
+  const columnsStorageKey = (userId) => `${COLUMNS_STORAGE_PREFIX}:${userId || "anon"}`;
+
+  function sanitizeColumnKeys(keys) {
+    if (!Array.isArray(keys)) return DEFAULT_COLUMNS;
+    const wanted = new Set(keys.filter((key) => typeof key === "string"));
+    const chosen = COLUMNS.filter((column) => column.locked || wanted.has(column.key)).map((column) => column.key);
+    return chosen.length > 1 ? chosen : DEFAULT_COLUMNS;
+  }
+
+  function visibleColumnKeys() {
+    const userId = state?.session?.id;
+    if (columnPrefs.userId !== userId) {
+      let stored = null;
+      try { stored = JSON.parse(localStorage.getItem(columnsStorageKey(userId)) || "null"); } catch { stored = null; }
+      columnPrefs = { userId, keys: sanitizeColumnKeys(stored?.columns) };
+    }
+    return columnPrefs.keys;
+  }
+
+  function saveColumnKeys(keys) {
+    const userId = state?.session?.id;
+    const clean = sanitizeColumnKeys(keys);
+    columnPrefs = { userId, keys: clean };
+    try {
+      if (clean.join() === DEFAULT_COLUMNS.join()) localStorage.removeItem(columnsStorageKey(userId));
+      else localStorage.setItem(columnsStorageKey(userId), JSON.stringify({ columns: clean }));
+    } catch {}
+  }
+
+  const visibleColumns = () => {
+    const keys = new Set(visibleColumnKeys());
+    return COLUMNS.filter((column) => keys.has(column.key));
+  };
 
   // --------------------------------------------------------------------------
   // جلب البيانات — نفس دوال الوصول القائمة، بلا استعلام جديد ولا مفتاح خدمة.
@@ -225,8 +275,15 @@
 
   function sortValue(row, key) {
     if (key === "trendPercent") return row.purchaseTrend?.percent;
+    if (key === "approvedLimit") return approvedLimitOf(row);
+    if (key === "currentBalance") return row.balanceDisplay ?? row.currentBalance;
     return row[key];
   }
+
+  // المحرك لا يحوّل المبالغ بين العملات (يرتّب كل عملة في فوجها)، فالترتيب بعمود مبالغ
+  // يجمع صفوف كل عملة معاً — الدولار أولاً — ولا يضع 48 مليون ليرة فوق 77 ألف دولار.
+  const currencyRank = (code) => (code === BASE ? "" : String(code || "~"));
+  const sortCurrency = (column, row) => (column.currency ? currencyRank(column.currency(row)) : "");
 
   function visibleRows() {
     if (!intel) return [];
@@ -240,6 +297,8 @@
       .filter(matchesFilter)
       .slice()
       .sort((a, b) => {
+        const byCurrency = sortCurrency(column, a).localeCompare(sortCurrency(column, b));
+        if (byCurrency) return byCurrency;
         const left = sortValue(a, view.sortKey);
         const right = sortValue(b, view.sortKey);
         if (column.type === "number") {
@@ -294,13 +353,26 @@
     return cards.map((card) => `<article class="ci-card"><small>${escape(card.label)}</small><strong>${card.value}</strong><span>${escape(card.hint)}</span></article>`).join("");
   }
 
-  function tableHead() {
-    return COLUMNS.map((column) => {
-      if (column.type === "none") return `<th>${escape(column.label)}</th>`;
+  function tableHead(columns) {
+    return columns.map((column) => {
+      const title = column.title ? ` title="${escape(column.title)}"` : "";
+      if (column.type === "none") return `<th${title}>${escape(column.label)}</th>`;
       const active = view.sortKey === column.key;
       const arrow = active ? (view.sortDir === "asc" ? "▲" : "▼") : "";
-      return `<th><button type="button" class="ci-sort ${active ? "active" : ""}" data-ci-sort="${escape(column.key)}">${escape(column.label)} ${arrow}</button></th>`;
+      const sorted = active ? ` aria-sort="${view.sortDir === "asc" ? "ascending" : "descending"}"` : "";
+      return `<th class="ci-col-${escape(column.key)}"${sorted}><button type="button" class="ci-sort ${active ? "active" : ""}" data-ci-sort="${escape(column.key)}"${title}>${escape(column.label)}${arrow ? ` <span aria-hidden="true">${arrow}</span>` : ""}</button></th>`;
     }).join("");
+  }
+
+  function columnsPicker() {
+    const shown = new Set(visibleColumnKeys());
+    const isDefault = visibleColumnKeys().join() === DEFAULT_COLUMNS.join();
+    const boxes = COLUMNS.filter((column) => !column.locked).map((column) => `<label class="ci-column-option"><input type="checkbox" data-ci-column="${escape(column.key)}" ${shown.has(column.key) ? "checked" : ""}> ${escape(column.label)}${column.default ? "" : ` <span class="muted">(اختياري)</span>`}</label>`).join("");
+    return `<details class="ci-columns" data-ci-columns ${view.columnsOpen ? "open" : ""}>
+        <summary>تخصيص الأعمدة${isDefault ? "" : ` <span class="ci-basis">مخصّص</span>`}</summary>
+        <div class="ci-column-list">${boxes}</div>
+        <button type="button" class="button secondary" data-ci-columns-reset ${isDefault ? "disabled" : ""}>استعادة العرض الافتراضي</button>
+      </details>`;
   }
 
   // اتجاه الخطر كما حسبه المحرك من آخر 7 لقطات — عرض فقط.
@@ -316,48 +388,100 @@
     return `<span class="ci-trend ${trend.tone}" title="${escape(`${trend.label}: ${delta > 0 ? "+" : ""}${delta} درجة على ${row.creditHistory.riskTrend.points} لقطات`)}">${trend.arrow}</span>`;
   }
 
-  function changeLine(row) {
-    const change = row.creditHistory?.change;
-    return change ? `<div class="ci-change ${change.direction === "down" ? "bad" : change.direction === "up" ? "good" : ""}">${escape(change.text)}</div>` : "";
+  // --------------------------------------------------------------------------
+  // خلايا الجدول المضغوط. المبالغ بلا رمز عملة حين تكون بالدولار (ملاحظة واحدة فوق
+  // الجدول تقول ذلك)، ويظهر الرمز بجانب الرقم فقط حين تختلف العملة — فلا يُخلط
+  // مبلغ بالليرة بمبلغ بالدولار. الحالة غير الرقمية بنص قصير، والنص الكامل في title.
+  // --------------------------------------------------------------------------
+  const creditCurrencyOf = (row) => row.balanceCurrency || row.creditCurrency || BASE;
+  // كسر صغير سالب يُقرَّب إلى «‎-0» في Intl؛ الصفر يُعرض صفراً.
+  const plainNumber = (value) => (Math.round(value) || 0).toLocaleString("en-US");
+  const amountText = (value, currency) => (isNumber(value)
+    ? `<bdi dir="ltr">${plainNumber(value)}</bdi>${currency && currency !== BASE ? ` <small class="ci-ccy">${escape(currency)}</small>` : ""}`
+    : `<span class="muted">—</span>`);
+  const amountCell = (value, currency, className = "") => `<td class="ci-num ${className}">${amountText(value, currency)}</td>`;
+  const statusCell = (short, full, className = "") => `<td class="ci-status ${className}" title="${escape(full || short)}">${escape(short)}</td>`;
+  // الحد المعتمد بالدولار كما يحفظه المالك (والصفر منه قرار صريح)، أو null.
+  const approvedLimitOf = (row) => (isNumber(row.approvedCredit?.limit) && row.approvedCredit.limit >= 0 ? row.approvedCredit.limit : null);
+
+  // نص قصير لحالات الائتمان بلا رقم داخل الجدول؛ النص الكامل في CREDIT_STATUS_TEXT.
+  const SHORT_STATUS_TEXT = {
+    unknown_limit: "بلا حد",
+    unknown_balance: "رصيد غير متاح",
+    delinquent: "موقوف",
+    inactive_no_limit: "غير نشط",
+    prepaid: "رصيد دائن",
+    not_customer: "ليس زبوناً",
+    stale_balance: "غير متاح",
+    awaiting_typed_source: "غير متاح",
+    stale_invoices: "غير متاح",
+    accounting_day_mismatch: "غير متاح",
+    missing_rate: "غير متاح",
+    needs_review: "يحتاج مراجعة",
+    insufficient_data: "يحتاج مراجعة",
+    old_debt_collection: "تحصيل دين"
+  };
+
+  const TREND_STATE_TEXT = { new_activity: "نشاط جديد", no_activity: "لا حركة", insufficient_data: "غير كافٍ", no_positive_baseline: "بلا أساس" };
+
+  function nameCell(row) {
+    const selected = view.selectedId === row.customerId;
+    return `<td class="ci-name"><button type="button" class="ci-name-link" data-ci-open="${escape(row.customerId)}" aria-expanded="${selected}" title="عرض تفاصيل ${escape(row.customerName)}">${escape(row.customerName)}</button></td>`;
   }
 
-  // خلايا الائتمان: الحد المقترح (رقم أو حالة صريحة بدل رقم غير موثوق)، الرصيد، ثم المتاح
-  // والاستخدام والتجاوز على الحد المعتمد يدوياً إن وُجد (قرار المالك 2026-10-25).
-  function usageCell(row) {
-    const usage = isNumber(row.creditUsagePercent);
-    const text = usage ? `${Math.round(row.creditUsagePercent)}%` : (CREDIT_STATUS_TEXT[row.creditStatus] || "—");
-    const basisTag = row.limitBasis === "approved" ? ` <span class="ci-basis" title="محسوب على الحد المعتمد يدوياً">معتمد</span>` : "";
-    return `<td dir="${usage ? "ltr" : "auto"}">${escape(text)}${basisTag}</td>`;
-  }
-
-  function creditCells(row) {
-    const amountCurrency = row.balanceCurrency || row.creditCurrency || "USD";
-    const overClass = isNumber(row.overLimitAmount) && row.overLimitAmount > 0 ? "bad" : "";
-    return `<td dir="${isNumber(row.creditLimitDisplay) ? "ltr" : "auto"}">${proposedText(row)}</td>
-        <td dir="ltr">${money(row.balanceDisplay ?? row.currentBalance, amountCurrency)}</td>
-        <td dir="ltr">${money(row.availableCredit, amountCurrency)}</td>
-        ${usageCell(row)}
-        <td dir="ltr" class="${overClass}">${money(row.overLimitAmount, amountCurrency)}</td>`;
-  }
-
-  function tableRow(row) {
+  function trendCell(row) {
     const trend = row.purchaseTrend?.percent;
-    const trendClass = isNumber(trend) ? (trend < 0 ? "bad" : trend > 0 ? "good" : "") : "";
-    const trendText = isNumber(trend)
-      ? percent(trend)
-      : ({ new_activity: "نشاط جديد", no_activity: "لا حركة", insufficient_data: "غير كافٍ", no_positive_baseline: "بلا أساس" }[row.purchaseTrend?.state] || "—");
+    if (!isNumber(trend)) return `<td class="ci-num muted">${escape(TREND_STATE_TEXT[row.purchaseTrend?.state] || "—")}</td>`;
+    const tone = trend < 0 ? "bad" : trend > 0 ? "good" : "";
+    return `<td class="ci-num ${tone}"><bdi dir="ltr">${escape(percent(trend))}</bdi></td>`;
+  }
+
+  function proposedCell(row) {
+    if (isNumber(row.creditLimitDisplay)) return amountCell(row.creditLimitDisplay, row.creditCurrency || BASE);
+    const full = PROPOSED_STATUS_TEXT[row.creditStatus] || CREDIT_STATUS_TEXT[row.creditStatus] || "غير متاح";
+    return statusCell(SHORT_STATUS_TEXT[row.creditStatus] || full, full, "muted");
+  }
+
+  // الاستخدام على الحد الفعّال: المعتمد يدوياً أولاً ثم المقترح الموثوق (قرار المالك 2026-10-25).
+  // حد فعّال صفر لا يُقسَم عليه: وصف صريح، والتجاوز في عموده كامل الرصيد.
+  function usageCell(row) {
+    const basisTag = row.limitBasis === "approved" ? ` <span class="ci-basis" title="محسوب على الحد المعتمد يدوياً: ${escape(plainNumber(approvedLimitOf(row) ?? 0))} USD">معتمد</span>` : "";
+    if (isNumber(row.creditUsagePercent)) {
+      // اللون من التجاوز نفسه لا من الحالة: المتعثّر يبقى «متعثّراً» وقد يكون متجاوزاً أيضاً.
+      const tone = isNumber(row.overLimitAmount) && row.overLimitAmount > 0 ? "bad" : row.creditStatus === "near_limit" ? "warn" : "";
+      return `<td class="ci-num ${tone}"><bdi dir="ltr">${Math.round(row.creditUsagePercent)}%</bdi>${basisTag}</td>`;
+    }
+    if (row.effectiveLimit === 0) {
+      const text = row.limitBasis === "approved" ? "بلا آجل" : "حد صفر";
+      return `<td class="ci-status" title="الحد الفعّال صفر: لا تُحسب نسبة، وكل رصيد مدين تجاوز">${text}${basisTag}</td>`;
+    }
+    const full = CREDIT_STATUS_TEXT[row.creditStatus];
+    return full ? statusCell(SHORT_STATUS_TEXT[row.creditStatus] || full, full, "muted") : amountCell(null);
+  }
+
+  function overCell(row) {
+    const over = row.overLimitAmount;
+    if (isNumber(over) && over > 0) return amountCell(over, creditCurrencyOf(row), "bad");
+    return isNumber(over) ? `<td class="ci-num muted"><bdi dir="ltr">0</bdi></td>` : amountCell(null);
+  }
+
+  // عند الترتيب بعمود مبالغ: سطر فاصل قبل كل فوج عملة غير الدولار.
+  function tableBody(rows, columns) {
+    const column = COLUMNS.find((entry) => entry.key === view.sortKey);
+    let previous = null;
+    return rows.map((row) => {
+      const code = column?.currency ? column.currency(row) || BASE : null;
+      const divider = code && previous !== null && code !== previous
+        ? `<tr class="ci-group"><td colspan="${columns.length}">حسابات بعملة ${escape(code)} — مرتبة وحدها، لا تُقارن أرقامها بالدولار</td></tr>` : "";
+      previous = code;
+      return divider + tableRow(row, columns);
+    }).join("");
+  }
+
+  function tableRow(row, columns) {
     return `
-      <tr class="ci-row ${view.selectedId === row.customerId ? "selected" : ""}" data-ci-customer="${escape(row.customerId)}" tabindex="0">
-        <td class="ci-name">${escape(row.customerName)}${changeLine(row)}</td>
-        <td><span class="ci-segment ${escape(row.primarySegment)}">${escape(SEGMENT_LABELS[row.primarySegment] || row.primarySegment)}</span></td>
-        <td dir="ltr">${money(row.netSales30d, row.currency)}</td>
-        <td dir="ltr">${money(row.netSalesPrevious30d, row.currency)}</td>
-        <td dir="ltr" class="${trendClass}">${escape(trendText)}</td>
-        <td dir="ltr">${day(row.lastPurchaseAt)}</td>
-        <td dir="ltr">${count(row.daysSinceLastPurchase)}</td>
-        ${creditCells(row)}
-        <td dir="ltr">${count(row.riskScore)} ${riskTrendBadge(row)}</td>
-        <td class="ci-flags">${flagChips(row.flags, 3)}</td>
+      <tr class="ci-row ${view.selectedId === row.customerId ? "selected" : ""}" data-ci-customer="${escape(row.customerId)}">
+        ${columns.map((column) => column.cell(row)).join("")}
       </tr>`;
   }
 
@@ -587,12 +711,16 @@
     return `<div class="ci-history"><h4>تاريخ الحد</h4>${lines.join("")}</div>`;
   }
 
+  const LIMIT_STATUS_TEXT = { normal: "ضمن الحد", near_limit: "قريب من الحد", over_limit: "متجاوز للحد" };
+
   function creditFacts(row) {
     const amountCurrency = row.balanceCurrency || row.creditCurrency || "USD";
     return [
       ["الرصيد الحالي", money(row.balanceDisplay ?? row.currentBalance, amountCurrency)],
       ["الحد المقترح", creditLimitText(row)],
+      ["حالة الحد", escape(LIMIT_STATUS_TEXT[row.creditStatus] || CREDIT_STATUS_TEXT[row.creditStatus] || "—")],
       ["أساس الاستخدام والتجاوز", LIMIT_BASIS_TEXT[row.limitBasis] || "لا حد يُقاس عليه"],
+      ["الحد الفعّال", row.effectiveLimit === 0 ? "صفر (بلا آجل)" : money(row.effectiveLimit, amountCurrency)],
       ["المتاح من الحد", money(row.availableCredit, amountCurrency)],
       ["نسبة استخدام الحد", isNumber(row.creditUsagePercent) ? `${row.creditUsagePercent}%` : (CREDIT_STATUS_TEXT[row.creditStatus] || "—")],
       ["مقدار التجاوز", money(row.overLimitAmount, amountCurrency)]
@@ -611,23 +739,29 @@
       ? `معرّف الأمين: <code dir="ltr">${escape(row.customerGuid)}</code>`
       : "لا يوجد معرّف أمين لهذا السجل — الربط بالاسم المطبَّع فقط.";
 
-    const facts = [
-      ["آخر شراء", `${day(row.lastPurchaseAt)}${isNumber(row.daysSinceLastPurchase) ? ` (منذ ${row.daysSinceLastPurchase} يوماً)` : ""}`],
-      ["أول شراء مرصود", day(row.firstPurchaseAt)],
-      ["صافي مبيعات 30 يوم", money(row.netSales30d, row.currency)],
-      ["صافي الفترة السابقة", money(row.netSalesPrevious30d, row.currency)],
-      ["التغير", isNumber(row.purchaseTrend.percent) ? percent(row.purchaseTrend.percent) : "—"],
-      ["مبيعات قبل المرتجعات", money(row.sales30d, row.currency)],
-      ["المرتجعات (30 يوم)", money(row.returns30d, row.currency)],
-      ["عدد الفواتير (30 يوم)", count(row.invoiceCount30d)],
-      ["عدد الفواتير (السابقة)", count(row.invoiceCountPrevious30d)],
-      ["متوسط الفاتورة", money(row.averageInvoice30d, row.currency)],
-      ...creditFacts(row),
-      ["نمط الشراء المعتاد", row.cadenceTrusted ? `كل ${row.typicalGapDays} يوماً` : "غير محسوب (تاريخ غير كافٍ)"],
-      ["حد اعتبار التوقف", `${row.inactiveThresholdDays} يوماً`],
-      ["درجة النشاط", count(row.activityScore)],
-      ["درجة القيمة", count(row.valueScore)],
-      ["درجة الخطر", `${count(row.riskScore)} ${riskTrendBadge(row)}`]
+    // تفاصيل الزبون مجمّعة بعناوين: كل ما كان أعمدةً في الجدول قبل التبسيط موجود هنا.
+    const factGroups = [
+      ["المبيعات والنشاط", [
+        ["آخر شراء", `${day(row.lastPurchaseAt)}${isNumber(row.daysSinceLastPurchase) ? ` (منذ ${row.daysSinceLastPurchase} يوماً)` : ""}`],
+        ["أول شراء مرصود", day(row.firstPurchaseAt)],
+        ["صافي مبيعات 30 يوم", money(row.netSales30d, row.currency)],
+        ["صافي الفترة السابقة", money(row.netSalesPrevious30d, row.currency)],
+        ["التغير", isNumber(row.purchaseTrend.percent) ? percent(row.purchaseTrend.percent) : escape(TREND_STATE_TEXT[row.purchaseTrend?.state] || "—")],
+        ["مبيعات قبل المرتجعات", money(row.sales30d, row.currency)],
+        ["المرتجعات (30 يوم)", money(row.returns30d, row.currency)],
+        ["عدد الفواتير (30 يوم)", count(row.invoiceCount30d)],
+        ["عدد الفواتير (السابقة)", count(row.invoiceCountPrevious30d)],
+        ["متوسط الفاتورة", money(row.averageInvoice30d, row.currency)],
+        ["نمط الشراء المعتاد", row.cadenceTrusted ? `كل ${row.typicalGapDays} يوماً` : "غير محسوب (تاريخ غير كافٍ)"],
+        ["حد اعتبار التوقف", `${row.inactiveThresholdDays} يوماً`]
+      ]],
+      ["الائتمان", creditFacts(row)],
+      ["التصنيف والمخاطر", [
+        ["التصنيف", escape(SEGMENT_LABELS[row.primarySegment] || row.primarySegment)],
+        ["درجة النشاط", count(row.activityScore)],
+        ["درجة القيمة", count(row.valueScore)],
+        ["درجة الخطر", `${count(row.riskScore)} ${riskTrendBadge(row)}`]
+      ]]
     ];
 
     return `
@@ -644,7 +778,7 @@
         ${approvedSection(row)}
         ${proposalSection(row)}
         ${historySection(row)}
-        <dl class="ci-facts">${facts.map(([label, value]) => `<div><dt>${escape(label)}</dt><dd dir="auto">${value}</dd></div>`).join("")}</dl>
+        ${factGroups.map(([title, facts]) => `<h4>${escape(title)}</h4>${factList(facts)}`).join("")}
         <h4>أهم الأصناف (${escape(intel.window.previousStartDate)} → ${escape(intel.window.referenceDate)})</h4>
         ${items}
         <p class="muted ci-note">${row.topItemsIdentity === "item_name" ? "تجميع الأصناف بالاسم المطبَّع — تقرير الفواتير لا يحمل معرّف مادة بعد." : "تجميع الأصناف بمعرّف المادة من الأمين."}</p>
@@ -663,6 +797,7 @@
     }
 
     const rows = visibleRows();
+    const columns = visibleColumns();
     const updated = lastUpdatedAt ? lastUpdatedAt.toLocaleTimeString("ar", { hour: "2-digit", minute: "2-digit" }) : "—";
     const staleWarning = intel.staleData
       ? `<p class="ci-warning">⚠️ أحد مصادر البيانات ليس حديثاً بما يكفي. الأرقام معروضة كما هي، ولا تُبنى عليها قرارات عالية الثقة قبل نجاح المزامنة.</p>`
@@ -696,11 +831,14 @@
           <div class="ci-filters">${FILTERS.map((filter) => `<button type="button" class="button secondary ${view.segment === filter.id ? "active" : ""}" data-ci-filter="${escape(filter.id)}">${escape(filter.label)}</button>`).join("")}</div>
           <label class="ci-toggle"><input type="checkbox" data-ci-suppliers ${view.includeSuppliers ? "checked" : ""}> إظهار حسابات الموردين</label>
         </div>
-        <p class="muted">${count(rows.length)} سجل معروض.</p>
+        <div class="ci-table-meta">
+          <p class="muted">${count(rows.length)} سجل معروض · المبالغ بالدولار ما لم يُذكر رمز عملة أخرى بجانب الرقم · «معتمد» = الاستخدام محسوب على الحد المعتمد يدوياً.</p>
+          ${columnsPicker()}
+        </div>
         <div class="ci-table-wrap">
           <table class="ci-table">
-            <thead><tr>${tableHead()}</tr></thead>
-            <tbody>${rows.length ? rows.map(tableRow).join("") : `<tr><td colspan="${COLUMNS.length}" class="muted">لا نتائج مطابقة.</td></tr>`}</tbody>
+            <thead><tr>${tableHead(columns)}</tr></thead>
+            <tbody>${rows.length ? tableBody(rows, columns) : `<tr><td colspan="${columns.length}" class="muted">لا نتائج مطابقة.</td></tr>`}</tbody>
           </table>
         </div>
       </section>
@@ -760,13 +898,30 @@
       saveApprovedLimit(form);
     }));
 
-    app.querySelectorAll("[data-ci-customer]").forEach((row) => {
-      const select = () => { view.selectedId = row.dataset.ciCustomer; render(); };
-      row.addEventListener("click", select);
-      row.addEventListener("keydown", (event) => {
-        if (event.key === "Enter" || event.key === " ") { event.preventDefault(); select(); }
-      });
+    // الاسم زرّ (لوحة المفاتيح تصله بـTab)، والصف كله يفتح التفاصيل بالفأرة أيضاً.
+    app.querySelectorAll("[data-ci-customer]").forEach((row) => row.addEventListener("click", () => {
+      view.selectedId = row.dataset.ciCustomer;
+      view.revealDetail = true;
+      render();
+    }));
+
+    const picker = app.querySelector("[data-ci-columns]");
+    picker?.addEventListener("toggle", () => { view.columnsOpen = picker.open; });
+    app.querySelectorAll("[data-ci-column]").forEach((box) => box.addEventListener("change", () => {
+      const key = box.dataset.ciColumn;
+      const others = visibleColumnKeys().filter((entry) => entry !== key);
+      saveColumnKeys(box.checked ? [...others, key] : others);
+      render();
+    }));
+    app.querySelector("[data-ci-columns-reset]")?.addEventListener("click", () => {
+      saveColumnKeys(DEFAULT_COLUMNS);
+      render();
     });
+
+    if (view.revealDetail) {
+      view.revealDetail = false;
+      app.querySelector(".ci-detail")?.scrollIntoView({ block: "start", behavior: "smooth" });
+    }
   }
 
   function approvableRow(form) {
