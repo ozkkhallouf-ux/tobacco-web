@@ -300,8 +300,7 @@ await test("تدوير ٧: حارس الاستعلامات — طباعة الج
   const reTotalExtra = /CAST\(ISNULL\(u\.TotalExtra,\s*0\) AS decimal\(18,2\)\)\s+AS total_extra,/;
   assert.match(read("ameen-autoprint", "ameen-sales-query.sql"), reTotalExtra, "استعلام الطباعة التلقائية لا يقرأ TotalExtra");
   assert.match(read("manual-a4-print", "lib", "search-query.sql"), reTotalExtra, "استعلام A4 اليدوية لا يقرأ TotalExtra");
-  assert.match(read("drive-invoice-archive", "lib", "changed-invoices-query.sql"), /u\.TotalExtra, 0\) AS decimal\(28,6\)\)\s+AS total_extra,/,
-    "استعلام الأرشفة لا يقرأ TotalExtra");
+  // استعلام عامل الأرشفة يقرؤه أصلاً لبصمته؛ حارسه في اختبارات العامل نفسه.
   assert.match(read("manual-a4-print", "lib", "invoice-model.js"), /extra: round2\(Number\(row\.total_extra\) \|\| 0\) \/ cv,/, "invoice-model لا ينقل التدوير");
   assert.match(watcherSrc, /extra:\s*Number\(row\.total_extra \|\| 0\) \/ cv,/, "watcher لا ينقل التدوير");
 });

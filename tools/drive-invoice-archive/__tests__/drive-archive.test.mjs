@@ -435,6 +435,8 @@ test("PDF الأرشيف: «تدوير» TotalExtra سطر مستقل يدخل �
   assert.match(text(601), /تدوير \$ 20\.49 الصافي \$ 132 المدفوع \$ 50 المتبقي من هذه الفاتورة \$ 82/);
   assert.match(text(601), /إجمالي الفاتورة \$ 111\.51/);
   assert.ok(!/تدوير|الصافي/.test(text(602)), "فاتورة بلا تدوير ولا حسم كما كانت");
+  assert.match(fs.readFileSync(path.join(dir, "lib", "changed-invoices-query.sql"), "utf8"),
+    /CAST\(ISNULL\(u\.TotalExtra, 0\) AS decimal\(28,6\)\)\s+AS total_extra,/, "استعلام الأرشفة لا يقرأ TotalExtra");
 });
 
 async function archivedOnce(patch = {}) {
