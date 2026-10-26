@@ -115,7 +115,15 @@ assert.doesNotMatch(restore, /Invoke-CashierReprint|Invoke-LocalPrint|& \$Print/
 assert.match(fnBody(lib, 'New-CashierAgentTicket'), /FileMode\]::CreateNew/, 'التذكرة حصرية: CreateNew');
 assert.doesNotMatch(fnBody(lib, 'Write-CashierAgentResult'), /Move\([^)]*,\s*\$true\)|Move-Item|Copy-Item|Set-Content[^\n]*\$final/, 'النتيجة لا تُستبدل');
 assert.match(cli, /if \(\$config\.printDispatch -eq "agent"\) \{ \$r = Submit-CashierAgentPrint/, 'Serve يحوّل الطباعة للعامل في وضع agent');
-assert.match(cli, /Threading\.Mutex\(\$false, "Global\\OZK-CashierReprint-Agent"\)/, 'نسخة واحدة من العامل');
+assert.match(cli, /\$agentLock = Open-CashierAgentLock \$Root/, 'نسخة واحدة من العامل بقفل ملف');
+assert.doesNotMatch(cli, /Threading\.Mutex/, 'لا Mutex عام: أي حساب محلي يستطيع حجز اسمه فيعطّل العامل');
+assert.match(fnBody(lib, 'Open-CashierAgentLock'), /FileShare\]::None/, 'قفل العامل حصري');
+assert.match(fnBody(lib, 'Get-CashierAgentPaths'), /Lock = Join-Path \(Join-Path \$base "processing"\) "agent\.lock"/, 'القفل داخل processing حيث لا يصل حساب الخدمة');
+assert.match(fnBody(lib, 'Open-CashierAgentTicketHold'), /FileAccess\]::Read, \[IO\.FileShare\]::Read\)/, 'مقبض الاستلام يمنع الكتابة والحذف');
+assert.ok(ticket.indexOf('Open-CashierAgentTicketHold $claimed') > ticket.indexOf('[IO.File]::Move($TicketPath, $claimed)') && ticket.indexOf('Open-CashierAgentTicketHold $claimed') < ticket.indexOf('"pickup_timeout"'), 'العامل يمسك التذكرة قبل أي فحص');
+assert.match(ticket, /Read-CashierAgentTicketStream \$hold/, 'المحتوى يُقرأ من مقبض الاستلام نفسه');
+assert.doesNotMatch(ticket, /Read-CashierAgentTicket \$claimed|ReadAllText|ReadAllBytes/, 'لا قراءة ثانية للتذكرة من المسار');
+assert.ok(ticket.indexOf('$hold.Dispose()') < ticket.indexOf('& $Print'), 'المقبض يُغلق قبل الطباعة (الطباعة من الذاكرة)');
 assert.equal(service.printDispatch, 'agent', 'حساب الخدمة يطبع عبر العامل المحلي');
 assert.ok(service.agentRequesterSids.every((sid) => /^S-1-5-21-\d+-\d+-\d+-\d+$/.test(sid)), 'معرّفات حسابات محلية فقط');
 assert.ok(service.agentResultTimeoutSeconds >= service.agentPickupSeconds + service.bridgeTimeoutSeconds + service.jobWatchSeconds, 'مهلة النتيجة تغطي الطباعة كاملة');
