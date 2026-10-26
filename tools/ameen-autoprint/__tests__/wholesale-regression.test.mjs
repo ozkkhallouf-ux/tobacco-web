@@ -235,7 +235,7 @@ function sumInv(patch) {
 function closingRows(html) {
   const block = html.slice(html.indexOf('<div class="closing">'), html.indexOf('<div class="sale-desc">'));
   return [...block.matchAll(/<div class="row"><span>([^<]+)<\/span><b[^>]*>([\s\S]*?)<\/b><\/div>/g)]
-    .map((m) => [m[1], m[2].replace(/<[^>]+>/g, "").trim()]);
+    .map((m) => [m[1], m[2].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()]);
 }
 const noFont = (html) => html.replace(/<style>@font-face[^<]*<\/style>/, "<style></style>");
 const sha = (text) => crypto.createHash("sha256").update(text).digest("hex");
@@ -280,7 +280,7 @@ await test("تدوير ٥: الليرة ⇒ التدوير بعملة الفات
   const cv = 0.0001;
   const rows = closingRows(buildInvoiceHtml(sumInv({ currencyIso: "SYP", currencyVal: cv,
     total: 1349.99 / cv, extra: 0.01 / cv, firstPay: 350 / cv })));
-  assert.deepEqual(rows.slice(0, 4).map(([k, v]) => [k, v.replace(/\s+/g, " ")]),
+  assert.deepEqual(rows.slice(0, 4),
     [["تدوير", "100 ل.س"], ["الصافي", "13,500,000 ل.س"], ["المدفوع", "3,500,000 ل.س"], ["المتبقي من هذه الفاتورة", "10,000,000 ل.س"]]);
 });
 
