@@ -124,8 +124,12 @@
     - أي موضع آخر للفرع (أحدث، أو غير مرتبط، أو متأخر، أو ليس Fast-Forward) = رفض. لا force،
       لا reset، لا rebase.
 11. **worktree الـmain المخصّص** (`mainWorktree`، Codex P1 #5):
-    - مخصّص فقط للمهام المعلنة في `mainDependentTasks`، واليوم هي مزامنة النشرات وحدها
-      (`allowedScripts`).
+    - مخصّص فقط للمهام المعلنة في `mainDependentTasks`. **القائمة فارغة منذ 2026-10-25**:
+      مزامنة النشرات `OZK-PriceListSync` متقاعدة (معطّلة منذ 2026-09-07، والنشرات من
+      `generate-price-lists.yml`)، فانتقلت إلى `retiredMainTasks`.
+    - `retiredMainTasks` استثناء محصور بهذه المهمة وحدها (`check-windows-deploy-gate.mjs`
+      يفرض ذلك): لا تُطلب لها worktree، لكن الفحص يحجب إن كانت مفعّلة أو غير مرئية. البوابة
+      لا تعدّل تعريفها ولا تحذفها. حذف المهمة من Windows لاحقاً يستلزم إزالتها من القائمة.
     - ليس مساراً لتحديث سكربتات Windows التشغيلية: البوابة لا تلمسه، والمشغّل يرفض أي سكربت
       خارج المستودع التشغيلي.
     - الفحص يحجب:
@@ -247,13 +251,13 @@
    - نسخ `tools/deploy-gate/*` إلى `C:\ProgramData\OZK-TOBACCO\DeployGate\`.
    - صلاحيات: OZKSync قراءة وتنفيذ فقط.
    - `gate-config.json` من المثال.
-3. **قبل تبديل الفرع** (Codex P1 #5)، مهمة نشرات الأسعار `OZK-PriceListSync` تحتاج main:
-   1. إنشاء worktree مستقل موثوق لـmain في `mainWorktree.path`
-      (`C:\Users\LOQ\Documents\OZK-TOBACCO\tobacco-web-main`).
+3. **قبل تبديل الفرع** (Codex P1 #5): `migration-preflight.ps1` بحساب مدير يجب أن يعطي
+   `PREFLIGHT PASS`. منذ 2026-10-25 لا مهمة تحتاج main؛ `OZK-PriceListSync` متقاعدة ويجب أن
+   تبقى معطّلة، ولا مهمة تعمل من `mainWorktree.path`. إن أُعيدت مهمة تحتاج main يوماً:
+   1. إنشاء clone مستقل موثوق لـmain في `mainWorktree.path` (لا worktree للمستودع التشغيلي
+      نفسه: git يمنع فرعاً واحداً في worktreeين).
    2. التحقق أنه على `main`، وأن الـremote هو المستودع الرسمي.
-   3. نقل مهمة نشرات الأسعار إليه صراحةً.
-   4. اختبارها.
-   5. `migration-preflight.ps1` بحساب مدير يجب أن يعطي `PREFLIGHT PASS`.
+   3. إعلانها في `mainDependentTasks` (بمراجعة)، ونقلها إليه صراحةً، واختبارها.
 4. تبديل الفرع المحلي بلا تغيير ملفات: `git switch -c windows-production --track origin/windows-production`
    عندما يكون HEAD مساوياً له. ثم `deploy-gate.ps1 -Mode Initialize`، الذي يعيد الفحص ويرفض
    التسجيل إذا لم ينجح.
