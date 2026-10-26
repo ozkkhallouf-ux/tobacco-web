@@ -52,7 +52,12 @@ param(
     [string]$ExpectedDatabase = "AmnDb002",
     [switch]$ListDeadLetter,
     [long]$RepairDeadLetterSeq = 0,
-    [ValidateSet("Resnapshot", "Requeue")][string]$RepairMode = "Resnapshot"
+    [ValidateSet("Resnapshot", "Requeue")][string]$RepairMode = "Resnapshot",
+    # تعافي اتصال SQL (2026-10-26): تراجع أسّي 2←300 ث، وحدّ أعلى للمحاولات المتتالية (288 ≈ 24 ساعة عند السقف)
+    # ثم خروج صريح برمز 6. 0 = بلا حدّ.
+    [int]$MaxReconnectAttempts = 288,
+    [int]$ReconnectBaseSeconds = 2,
+    [int]$ReconnectMaxSeconds = 300
 )
 
 $ErrorActionPreference = "Stop"
@@ -116,17 +121,57 @@ if (-not $connStr) { Write-AgentLog "خطأ: AMEEN_SQL_CONNECTION_STRING غير 
 Add-Type -AssemblyName "System.Data"
 $csb = New-Object System.Data.SqlClient.SqlConnectionStringBuilder($connStr)
 $csb["Application Name"] = "ozk-ameen-invoice-event-agent"
-$conn = New-Object System.Data.SqlClient.SqlConnection($csb.ConnectionString)
+$script:conn = New-Object System.Data.SqlClient.SqlConnection($csb.ConnectionString)
 
 function Invoke-AmeenRead([string]$Sql, [int]$TimeoutSeconds = 15) {
     Assert-AmeenReadOnlySql $Sql
-    $c = $conn.CreateCommand()
+    $c = $script:conn.CreateCommand()
     $c.CommandTimeout = $TimeoutSeconds
     $c.CommandText = "SET LOCK_TIMEOUT 3000; " + $Sql
     $da = New-Object System.Data.SqlClient.SqlDataAdapter($c)
     $t = New-Object System.Data.DataTable
     [void]$da.Fill($t)
     return ,$t
+}
+
+# فتح اتصال جديد نظيف والتحقق من القاعدة. اتصال مكسور لا يُعاد استخدامه: يُغلق ويُتخلّص منه أولاً.
+# قاعدة خاطئة ليست انقطاعاً: الرمز 4 فوراً، لا إعادة محاولة.
+function Open-AmeenSqlConnection {
+    if ($null -ne $script:conn) {
+        try { if ($script:conn.State -ne [System.Data.ConnectionState]::Closed) { $script:conn.Close() } } catch { Write-Verbose ("close: " + $_.Exception.GetType().Name) }
+        # مجمّع SqlClient قد يعيد مقبضاً ميتاً بعد الإسبات: يُفرَّغ قبل الفتح الجديد (مأخوذ من #397).
+        try { [System.Data.SqlClient.SqlConnection]::ClearPool($script:conn) } catch { Write-Verbose ("clearpool: " + $_.Exception.GetType().Name) }
+        try { $script:conn.Dispose() } catch { Write-Verbose ("dispose: " + $_.Exception.GetType().Name) }
+    }
+    $script:conn = New-Object System.Data.SqlClient.SqlConnection($csb.ConnectionString)
+    $script:conn.Open()
+    $script:db = (Invoke-AmeenRead "SELECT DB_NAME() d").Rows[0].d
+    if ($script:db -ne $ExpectedDatabase) { Write-AgentLog "رفض: القاعدة المتصلة $($script:db) لا تطابق $ExpectedDatabase."; exit 4 }
+}
+
+function Get-AmeenConnectionStateText {
+    if ($null -eq $script:conn) { return "Closed" }
+    try { return [string]$script:conn.State } catch { return "Broken" }
+}
+
+# يُستدعى من catch: هل الخطأ انقطاع اتصال؟ إن نعم يسجّل DISCONNECTED ويعيد الاتصال (أو يخرج برمز 6 عند
+# نفاد المحاولات) ويعيد $true فتُترك الدورة كلها بلا تقدّم للعلامة؛ وإلا يعيد $false ويقرّر المستدعي.
+function Resume-AmeenSqlAfterFailure($ErrorRecord, [string]$Where, [switch]$AnySqlIsLost) {
+    $f = Get-AmeenSqlFailureInfo $ErrorRecord
+    if (-not (Test-AmeenSqlConnectionLost -IsSql $f.is_sql -Number $f.number -ConnectionState (Get-AmeenConnectionStateText) -ConnectionHint $f.connection_hint -AnySqlIsLost:$AnySqlIsLost)) { return $false }
+    Write-AgentLog ("DISCONNECTED: انقطع اتصال SQL أثناء {0} ({1}{2}): {3} — لا تقدّم للعلامة المائية" -f $Where, $f.type, $(if ($f.is_sql) { " " + $f.number } else { "" }), $f.message)
+    $r = Invoke-AmeenSqlReconnect -Open { Open-AmeenSqlConnection } -Log { param($m) Write-AgentLog $m } -MaxAttempts $MaxReconnectAttempts -BaseSeconds $ReconnectBaseSeconds -MaxSeconds $ReconnectMaxSeconds
+    if (-not $r.ok) { Write-AgentLog ("GAVE_UP: تعذّر اتصال SQL بعد {0} محاولة — خروج برمز 6 (الأحداث والعلامة محفوظة كما هي)" -f $r.attempts); exit 6 }
+    return $true
+}
+
+# بعد عودة الاتصال: مهلة قبل إعادة الدورة (لا إعادة فورية تتخطى حارس الأداء)، تكبر مع العودات المتتالية.
+$script:resumeStreak = 0
+function Wait-AmeenAfterSqlResume {
+    $script:resumeStreak++
+    $s = Get-AmeenResumePauseSeconds -Streak $script:resumeStreak -PollSeconds $PollSeconds -BaseSeconds $ReconnectBaseSeconds -MaxSeconds $ReconnectMaxSeconds
+    Write-AgentLog ("إعادة الدورة بعد {0} ث (عودة متتالية رقم {1})" -f $s, $script:resumeStreak)
+    Start-Sleep -Seconds $s
 }
 
 function Get-AmeenBillObservation([string]$Guid, $Ops, [string]$DetectedAtUtc, [string]$Source) {
@@ -186,13 +231,18 @@ $transport = {
 
 # ---------------------------------------------------------------- الحلقة
 try {
-    $conn.Open()
-    $db = (Invoke-AmeenRead "SELECT DB_NAME() d").Rows[0].d
-    if ($db -ne $ExpectedDatabase) { Write-AgentLog "رفض: القاعدة المتصلة $db لا تطابق $ExpectedDatabase."; exit 4 }
+    # الاتصال الأول نفسه قد يفشل (SQL لم يقم بعد إقلاع أو عودة من إسبات): نفس مسار إعادة الاتصال.
+    try { Open-AmeenSqlConnection }
+    catch { if (-not (Resume-AmeenSqlAfterFailure $_ "الاتصال الأول" -AnySqlIsLost)) { throw } }
+    $db = $script:db
 
     Initialize-AmeenInvoiceOutbox -Dir $OutboxDir
     $state = Read-AmeenInvoiceState -Dir $OutboxDir
-    $serverNow = [datetime](Invoke-AmeenRead "SELECT GETDATE() t").Rows[0].t
+    $serverNow = $null
+    while ($null -eq $serverNow) {
+        try { $serverNow = [datetime](Invoke-AmeenRead "SELECT GETDATE() t").Rows[0].t }
+        catch { if (-not (Resume-AmeenSqlAfterFailure $_ "قراءة وقت الخادم" -AnySqlIsLost)) { throw } }
+    }
     if (-not $state.watermark) { $state.watermark = Format-AmeenSqlDate $serverNow.AddMinutes(-5) }
     $sendOn = Test-AmeenSendActivated -Dir $OutboxDir -SendRequested:$Send
     Write-AgentLog ("بدء الوكيل: db={0} outbox={1} send={2} last_seq={3} bills={4}" -f $db, $OutboxDir, $sendOn, $state.last_seq, $state.bills.Count)
@@ -209,12 +259,17 @@ try {
     do {
         $cycleStart = Get-Date
         $stateDirty = $false
-        $nowSrv = [datetime](Invoke-AmeenRead "SELECT GETDATE() t").Rows[0].t
+        # أول استعلام في الدورة داخل المعالجة (حادثة 2026-10-25): بعد إسبات يرمي هنا، فنعيد الاتصال ونعيد الدورة.
+        try { $nowSrv = [datetime](Invoke-AmeenRead "SELECT GETDATE() t").Rows[0].t }
+        catch { if (Resume-AmeenSqlAfterFailure $_ "بداية الدورة" -AnySqlIsLost) { Wait-AmeenAfterSqlResume; continue } else { throw } }
         $detectedUtc = ConvertTo-AmeenUtcIso $nowSrv
         $wm = [datetime]::ParseExact([string]$state.watermark, "yyyy-MM-ddTHH:mm:ss.fff", [Globalization.CultureInfo]::InvariantCulture)
         $q = Get-AmeenInvoiceDetectionSql -Watermark $wm
         $ops = @{}
         $lockErrors = 0
+        # بعد اكتمال القراءات تبدأ الكتابة على الحالة في الذاكرة والصندوق: أي خطأ بعدها (قرص مثلاً) ليس انقطاع
+        # SQL ولا يُتعافى منه هنا، بل يوقف الوكيل (FATAL) قبل حفظ حالة تحمل أحداثاً لم تُكتب (Codex P1 على #397).
+        $readsDone = $false
         try {
             foreach ($r in (Invoke-AmeenRead $q.Log).Rows) {
                 $g = ConvertTo-AmeenGuidText $r.RecGUID; if (-not $g) { continue }
@@ -254,6 +309,7 @@ try {
                 if (-not $reconcileTruncated) { $lastReconcile = Get-Date }
             }
 
+            $readsDone = $true
             $events = Resolve-AmeenInvoiceChanges -State $state -Observations $observations.ToArray()
             foreach ($obs in $observations) {
                 if ($fp -and $fp.ContainsKey($obs.guid) -and $state.bills.ContainsKey($obs.guid) -and $state.bills[$obs.guid].fp -ne $fp[$obs.guid]) {
@@ -276,6 +332,9 @@ try {
             # أخطاء SQL تصل ملفوفة بـ MethodInvocationException؛ نفحص السلسلة كلها.
             $ex = $_.Exception; $isSql = $false
             while ($null -ne $ex) { if ($ex -is [System.Data.SqlClient.SqlException]) { $isSql = $true; break }; $ex = $ex.InnerException }
+            if ($readsDone) { throw }
+            # انقطاع الاتصال (لا مهلة قفل على اتصال سليم) ⇒ إعادة اتصال ثم الدورة كاملة من العلامة نفسها.
+            if (Resume-AmeenSqlAfterFailure $_ "الرصد والمطابقة") { Wait-AmeenAfterSqlResume; continue }
             if (-not $isSql) { throw }
             $lockErrors++
             Write-AgentLog ("تحذير SQL (لا تقدّم للعلامة المائية): " + $ex.Message)
@@ -306,6 +365,7 @@ try {
 
         # حارس الأداء: لا نضغط على الأمين. دورة بطيئة أو مهلة قفل ⇒ إيقاع أبطأ.
         $elapsedMs = ((Get-Date) - $cycleStart).TotalMilliseconds
+        $script:resumeStreak = 0
         $perf.cycles++; $perf.total_ms += $elapsedMs; if ($elapsedMs -gt $perf.max_ms) { $perf.max_ms = $elapsedMs }
         if ($PerfLogMinutes -gt 0 -and ((Get-Date) - $perf.since).TotalMinutes -ge $PerfLogMinutes) {
             Write-AgentLog ("أداء: دورات={0} متوسط={1:n0}ms أقصى={2:n0}ms حفظ_كامل={3} حفظ_علامة={4} علامة_متعذرة={5} إيقاع={6}ث" -f $perf.cycles, ($perf.total_ms / [math]::Max(1, $perf.cycles)), $perf.max_ms, $perf.full, $perf.watermark, $perf.watermark_failed, $interval)
@@ -318,7 +378,12 @@ try {
         Start-Sleep -Milliseconds ([math]::Max(200, ($interval * 1000) - [int]$elapsedMs))
     } while ($true)
     Write-AgentLog ("انتهى الوكيل: last_seq={0} pending={1}" -f $state.last_seq, @(Get-ChildItem -LiteralPath (Join-Path $OutboxDir "pending") -Filter "*.json").Count)
+} catch {
+    # لا خروج صامت بعد اليوم: أي خطأ غير متوقع يُسجَّل بنوعه ورسالة منقّحة (بلا أسرار) قبل الرمز 1.
+    $f = Get-AmeenSqlFailureInfo $_
+    Write-AgentLog ("FATAL: خطأ غير متوقع أوقف الوكيل ({0}{1}): {2}" -f $f.type, $(if ($f.is_sql) { " " + $f.number } else { "" }), $f.message)
+    exit 1
 } finally {
-    if ($conn.State -ne [System.Data.ConnectionState]::Closed) { $conn.Close() }
+    try { if ($null -ne $script:conn -and $script:conn.State -ne [System.Data.ConnectionState]::Closed) { $script:conn.Close() } } catch { Write-Verbose ("close: " + $_.Exception.GetType().Name) }
     Exit-AmeenOutboxLock $outboxLock
 }

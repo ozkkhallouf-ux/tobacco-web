@@ -677,6 +677,131 @@ try {
   Assert 'agent: send path saves state only when something was sent or failed' ($agentSaveText -match 'if \(\$r\.sent -gt 0 -or \$r\.error -or \$r\.deadlettered -gt 0\) \{ Save-AmeenInvoiceState')
   Assert 'agent: new events, fingerprint changes and removals mark the state dirty' (([regex]::Matches($agentSaveText, '\$stateDirty = \$true')).Count -ge 3)
 
+  # ── ٥ط) تعافي اتصال SQL (حادثة OZK2026 2026-10-25: إسبات بطارية ثم خروج صامت برمز 1) ─────────────
+  $delays = @(1..10 | ForEach-Object { Get-AmeenReconnectDelaySeconds -Attempt $_ })
+  Assert 'sql reconnect: delay doubles from 2s and caps at 300s' (($delays[0..7] -join ',') -eq '2,4,8,16,32,64,128,256' -and $delays[8] -eq 300 -and $delays[9] -eq 300 -and (Get-AmeenReconnectDelaySeconds -Attempt 50) -eq 300)
+  Assert 'sql reconnect: lock timeout on an open connection is not a disconnect' (-not (Test-AmeenSqlConnectionLost -IsSql $true -Number 1222 -ConnectionState "Open"))
+  Assert 'sql reconnect: closed or broken connection is a disconnect' ((Test-AmeenSqlConnectionLost -IsSql $true -Number 1222 -ConnectionState "Closed") -and (Test-AmeenSqlConnectionLost -IsSql $false -ConnectionState "Broken"))
+  Assert 'sql reconnect: transport error numbers are a disconnect' ((@(-1, 53, 233, 10054, 10060, 18456) | ForEach-Object { Test-AmeenSqlConnectionLost -IsSql $true -Number $_ -ConnectionState "Open" }) -notcontains $false)
+  Assert 'sql reconnect: command timeout (-2/258) on an open connection is a slow-server warning, not a disconnect' (-not (Test-AmeenSqlConnectionLost -IsSql $true -Number -2 -ConnectionState "Open") -and -not (Test-AmeenSqlConnectionLost -IsSql $true -Number 258 -ConnectionState "Open") -and (Test-AmeenSqlConnectionLost -IsSql $true -Number -2 -ConnectionState "Closed"))
+  $pauses = @(1..12 | ForEach-Object { Get-AmeenResumePauseSeconds -Streak $_ -PollSeconds 2 })
+  Assert 'sql reconnect: pause after a resume is at least the poll interval and grows with consecutive resumes up to 300s' (($pauses[0..4] -join ',') -eq '2,4,8,16,32' -and $pauses[11] -eq 300 -and (Get-AmeenResumePauseSeconds -Streak 1 -PollSeconds 10) -eq 10 -and (Get-AmeenResumePauseSeconds -Streak 0 -PollSeconds 0) -eq 1)
+  Assert 'sql reconnect: non-SQL error on an open connection is not a disconnect' (-not (Test-AmeenSqlConnectionLost -IsSql $false -ConnectionState "Open"))
+  Assert 'sql reconnect: SqlException 0 "connection is broken" counts as a disconnect (live test 2026-10-26)' ((@('The connection is broken and recovery is not possible.  The client driver attempted to recover the connection one or more times and all attempts failed.', 'A transport-level error has occurred when receiving results from the server.', 'A network-related or instance-specific error occurred while establishing a connection to SQL Server.') | ForEach-Object { $_ -match $script:AmeenSqlConnectionLostText }) -notcontains $false)
+  Assert 'sql reconnect: deadlock or syntax message is not mistaken for a disconnect' (-not ('Transaction (Process ID 61) was deadlocked on lock resources' -match $script:AmeenSqlConnectionLostText) -and -not ("Incorrect syntax near 'FROM'." -match $script:AmeenSqlConnectionLostText))
+  Assert 'sql reconnect: any SQL failure of a trivial query (GETDATE, open) is a disconnect' ((Test-AmeenSqlConnectionLost -IsSql $true -Number 0 -ConnectionState "Open" -AnySqlIsLost) -and -not (Test-AmeenSqlConnectionLost -IsSql $false -ConnectionState "Open" -AnySqlIsLost))
+  $ioe = Get-AmeenSqlFailureInfo (New-Object System.InvalidOperationException("ExecuteReader requires an open and available Connection. The connection's current state is closed."))
+  $ioFile = Get-AmeenSqlFailureInfo (New-Object System.IO.IOException("The process cannot access the file 'state.json' because it is being used by another process."))
+  Assert 'sql reconnect: connection InvalidOperationException is a disconnect' ($ioe.connection_hint -and (Test-AmeenSqlConnectionLost -IsSql $false -ConnectionState "Open" -ConnectionHint $ioe.connection_hint))
+  Assert 'sql reconnect: a locked state file is not mistaken for a disconnect' (-not $ioFile.connection_hint -and -not (Test-AmeenSqlConnectionLost -IsSql $false -ConnectionState "Open" -ConnectionHint $ioFile.connection_hint))
+  $script:rcOpen = 0; $script:rcLog = New-Object System.Collections.Generic.List[string]; $script:rcSleep = New-Object System.Collections.Generic.List[int]
+  $rc = Invoke-AmeenSqlReconnect -Open { $script:rcOpen++; if ($script:rcOpen -le 3) { throw (New-Object System.InvalidOperationException("connection broken")) } } -Log { param($m) $script:rcLog.Add($m) } -Sleep { param($s) $script:rcSleep.Add($s) } -MaxAttempts 10
+  Assert 'sql reconnect: recovers after failures with backoff and logs RECONNECTING then RECOVERED' ($rc.ok -and $rc.attempts -eq 4 -and ($script:rcSleep -join ',') -eq '2,4,8' -and @($script:rcLog | Where-Object { $_ -like 'RECONNECTING*' }).Count -eq 3 -and $script:rcLog[$script:rcLog.Count - 1] -like 'RECOVERED*')
+  $script:rcLog.Clear(); $script:rcSleep.Clear()
+  $threwRc = $false
+  try { $rc2 = Invoke-AmeenSqlReconnect -Open { throw "down" } -Log { param($m) $script:rcLog.Add($m) } -Sleep { param($s) $script:rcSleep.Add($s) } -MaxAttempts 3 } catch { $threwRc = $true }
+  Assert 'sql reconnect: gives up after the attempt limit without throwing' (-not $threwRc -and -not $rc2.ok -and $rc2.attempts -eq 3 -and @($script:rcLog | Where-Object { $_ -like 'RECONNECTING*' }).Count -eq 3 -and ($script:rcSleep -join ',') -eq '2,4')
+  $safe = ConvertTo-AmeenSafeLogText "Login failed. Server=x;User ID=tobacco_sync_service;Password=S3cr3t!;Database=AmnDb002"
+  Assert 'sql reconnect: log text never carries a password' ($safe -notmatch 'S3cr3t' -and $safe -notmatch 'tobacco_sync_service' -and $safe -match 'Password=\*\*\*')
+
+  # الوكيل الحقيقي مع اتصال أول فاسد (منفذ مغلق محلياً، لا خادم ولا بيانات): لا خروج صامت، إعادة محاولة محدودة ثم الرمز 6
+  $cbox = Join-Path $tempDir "outbox-sqldown"
+  $cenv = Join-Path $tempDir "sqldown.env"
+  Set-Content -LiteralPath $cenv -Value "AMEEN_SQL_CONNECTION_STRING=Server=127.0.0.1,1;Database=AmnDb002;User ID=probe_user;Password=NOT-A-REAL-SECRET-42;Connect Timeout=1" -Encoding UTF8
+  $clog = Join-Path $tempDir "agent-sqldown.log"
+  & $shell -NoProfile -File $agentPath -Once -OutboxDir $cbox -LogFile $clog -EnvFile $cenv -MaxReconnectAttempts 2 -ReconnectBaseSeconds 0 *> $null
+  $cExit = $LASTEXITCODE
+  $cText = if (Test-Path -LiteralPath $clog) { Get-Content -Raw -LiteralPath $clog -Encoding UTF8 } else { "" }
+  Assert 'first connection failure: agent retries, logs DISCONNECTED/RECONNECTING/GAVE_UP and exits with code 6' ($cExit -eq 6 -and $cText -match 'DISCONNECTED' -and ([regex]::Matches($cText, 'RECONNECTING')).Count -eq 2 -and $cText -match 'GAVE_UP' -and $cText -notmatch 'FATAL')
+  Assert 'first connection failure: no password or user in the agent log' ($cText -notmatch 'NOT-A-REAL-SECRET-42' -and $cText -notmatch 'probe_user')
+  Assert 'first connection failure: no state, watermark or pending written' (-not (Test-Path -LiteralPath (Join-Path $cbox "state.json")) -and -not (Test-Path -LiteralPath (Join-Path $cbox "watermark.json")) -and -not (Test-Path -LiteralPath (Join-Path $cbox "pending")))
+  $relock = Enter-AmeenOutboxLock -Dir $cbox
+  Assert 'first connection failure: outbox lock released after exit' ($null -ne $relock)
+  if ($relock) { Exit-AmeenOutboxLock $relock }
+
+  # دورة رصد محاكاة بنفس ترتيب الوكيل (القراءات أولاً، ثم Resolve، ثم الصندوق، ثم العلامة، ثم الحفظ)، بالمصنِّف
+  # الحقيقي: انقطاع ثم عودة ثم إعادة تشغيل ⇒ لا حدث ضائع ولا مكرر، والعلامة لا تتقدّم قبل نجاح المعالجة.
+  # (مأخوذة من #397 مع مصنِّف #398؛ تشمل Codex P1 على #397: فشل كتابة الصندوق بعد القراءات ليس انقطاعاً.)
+  $rbox = Join-Path $tempDir "outbox-reconnect"
+  Initialize-AmeenInvoiceOutbox -Dir $rbox
+  $rs = New-AmeenInvoiceState; $rs.watermark = "2026-10-25T23:22:30.000"; Save-AmeenInvoiceState -Dir $rbox -State $rs
+  $rSeq0 = [long]$rs.last_seq
+  $RG2 = "c0000000-0000-4000-8000-000000000002"
+  $rA = ConvertTo-AmeenInvoiceSnapshot -Header (New-Header) -Lines @($L1, $L2)
+  $rB = ConvertTo-AmeenInvoiceSnapshot -Header (New-Header -Guid $RG2 -Total 62) -Lines @($L2)
+  $rw = @{ conn = "Open"; failOn = ""; failWrite = $false; now = [datetime]"2026-10-26T06:40:05" }
+  $rRead = {
+    param($What)
+    if ($rw.failOn -eq $What) { $rw.conn = "Broken"; throw (New-Object System.InvalidOperationException("ExecuteReader requires an open and available Connection. The connection's current state is closed.")) }
+    if ($rw.conn -ne "Open") { throw (New-Object System.InvalidOperationException("Invalid operation. The connection is closed.")) }
+    if ($What -eq "now") { return $rw.now }
+    return @(
+      @{ guid = $G1; snapshot = $rA; ops = @(@{ op = 1; at_utc = "2026-10-26T03:41:00.000Z" }); detected_at_utc = "2026-10-26T03:41:05.000Z"; source = "incremental" },
+      @{ guid = $RG2; snapshot = $rB; ops = @(@{ op = 1; at_utc = "2026-10-26T03:41:10.000Z" }); detected_at_utc = "2026-10-26T03:41:05.000Z"; source = "incremental" }
+    )
+  }
+  $rCycle = {
+    param($State)
+    $readsDone = $false
+    try {
+      $now = & $rRead "now"
+      $observations = & $rRead "observations"
+      $readsDone = $true
+      $events = Resolve-AmeenInvoiceChanges -State $State -Observations $observations
+      if ($rw.failWrite) { throw (New-Object System.IO.IOException("The process cannot access the file because it is being used by another process")) }
+      if ($events.Count -gt 0) { Add-AmeenOutboxEvents -Dir $rbox -Events $events }
+      $State.watermark = Format-AmeenSqlDate $now
+      Save-AmeenInvoiceState -Dir $rbox -State $State
+      return "ok"
+    } catch {
+      if ($readsDone) { throw }
+      $f = Get-AmeenSqlFailureInfo $_
+      if (Test-AmeenSqlConnectionLost -IsSql $f.is_sql -Number $f.number -ConnectionState $rw.conn -ConnectionHint $f.connection_hint) { return "connection" }
+      throw
+    }
+  }
+  $rPending = { @(Get-ChildItem -LiteralPath (Join-Path $rbox "pending") -Filter "*.json" -ErrorAction SilentlyContinue).Count }
+  $rw.failOn = "now"
+  $rr1 = & $rCycle $rs
+  Assert 'disconnect at first query: watermark not advanced (memory and disk)' ($rr1 -eq "connection" -and $rs.watermark -eq "2026-10-25T23:22:30.000" -and (Read-AmeenInvoiceState -Dir $rbox).watermark -eq "2026-10-25T23:22:30.000")
+  Assert 'disconnect at first query: no event and no seq allocated' ((& $rPending) -eq 0 -and [long]$rs.last_seq -eq $rSeq0)
+  $rw.failOn = "observations"; $rw.conn = "Open"
+  $rr2 = & $rCycle $rs
+  Assert 'disconnect mid-cycle: nothing emitted, watermark and checkpoint unchanged' ($rr2 -eq "connection" -and (& $rPending) -eq 0 -and [long]$rs.last_seq -eq $rSeq0 -and (Read-AmeenInvoiceState -Dir $rbox).watermark -eq "2026-10-25T23:22:30.000")
+  $rw.failOn = ""; $rw.conn = "Open"; $rw.failWrite = $true
+  $rMem = Read-AmeenInvoiceState -Dir $rbox
+  $rWriteThrew = Throws { & $rCycle $rMem }
+  Assert 'outbox write failure after reads: not treated as a SQL disconnect (agent stops instead)' ($rWriteThrew)
+  Assert 'outbox write failure after reads: nothing saved, disk state and watermark unchanged' ((& $rPending) -eq 0 -and [long](Read-AmeenInvoiceState -Dir $rbox).last_seq -eq $rSeq0 -and (Read-AmeenInvoiceState -Dir $rbox).watermark -eq "2026-10-25T23:22:30.000")
+  $rw.failWrite = $false; $rw.conn = "Broken"
+  $rrc = Invoke-AmeenSqlReconnect -Open { $rw.conn = "Open" } -Log { param($m) } -Sleep { param($x) } -MaxAttempts 3
+  $rr3 = & $rCycle $rs
+  $rAfter = @(Get-ChildItem -LiteralPath (Join-Path $rbox "pending") -Filter "*.json" | Sort-Object Name | ForEach-Object { Get-Content -Raw -LiteralPath $_.FullName -Encoding UTF8 | ConvertFrom-Json })
+  Assert 'after reconnect: both invoices from the outage emitted exactly once' ($rrc.ok -and $rr3 -eq "ok" -and $rAfter.Count -eq 2 -and @($rAfter | Select-Object -ExpandProperty bill_guid -Unique).Count -eq 2)
+  Assert 'after reconnect: seq strictly increasing from the last checkpoint' ([long]$rAfter[0].source_seq -eq ($rSeq0 + 1) -and [long]$rAfter[1].source_seq -eq ($rSeq0 + 2))
+  Assert 'after reconnect: watermark advances only after the successful cycle' ((Read-AmeenInvoiceState -Dir $rbox).watermark -eq "2026-10-26T06:40:05.000")
+  $rw.now = [datetime]"2026-10-26T06:40:07"
+  [void](& $rCycle $rs)
+  Assert 'after reconnect: re-reading the same invoices creates no duplicate' ((& $rPending) -eq 2 -and [long]$rs.last_seq -eq ($rSeq0 + 2))
+  $rRestart = Read-AmeenInvoiceState -Dir $rbox
+  $rw.now = [datetime]"2026-10-26T06:45:00"
+  [void](& $rCycle $rRestart)
+  Assert 'agent restart after recovery: no lost and no duplicate events' ((& $rPending) -eq 2 -and [long]$rRestart.last_seq -eq ($rSeq0 + 2) -and $rRestart.bills.Count -eq 2)
+
+  # الوكيل: كل نقاط SQL داخل المعالجة، ولا خروج صامت، والعلامة بعد الأحداث
+  $rcText = Get-Content -Raw -LiteralPath $agentPath -Encoding UTF8
+  $loopStart = $rcText.IndexOf("    do {")
+  $firstQuery = $rcText.IndexOf('Invoke-AmeenRead "SELECT GETDATE() t"', $loopStart)
+  Assert 'agent: first SQL query of each cycle runs inside error handling' ($loopStart -gt 0 -and $firstQuery -gt $loopStart -and $rcText.Substring($firstQuery - 40, 40) -match 'try \{' -and $rcText -match 'catch \{ if \(Resume-AmeenSqlAfterFailure \$_ "بداية الدورة" -AnySqlIsLost\) \{ Wait-AmeenAfterSqlResume; continue \} else \{ throw \} \}')
+  Assert 'agent: startup connection and server time go through the reconnect path' ($rcText -match 'try \{ Open-AmeenSqlConnection \}' -and $rcText -match 'Resume-AmeenSqlAfterFailure \$_ "الاتصال الأول" -AnySqlIsLost' -and $rcText -match 'Resume-AmeenSqlAfterFailure \$_ "قراءة وقت الخادم" -AnySqlIsLost')
+  Assert 'agent: a disconnect inside detection restarts the cycle without advancing the watermark' ($rcText -match 'if \(Resume-AmeenSqlAfterFailure \$_ "الرصد والمطابقة"\) \{ Wait-AmeenAfterSqlResume; continue \}' -and $rcText.IndexOf('Add-AmeenOutboxEvents -Dir $OutboxDir -Events $events') -lt $rcText.IndexOf('$state.watermark = Format-AmeenSqlDate $nowSrv'))
+  Assert 'agent: unexpected errors are logged as FATAL before exit' ($rcText -match 'Write-AgentLog \("FATAL: ')
+  $rdAt = $rcText.IndexOf('$readsDone = $true'); $rsAt = $rcText.IndexOf('$events = Resolve-AmeenInvoiceChanges'); $guardAt = $rcText.IndexOf('if ($readsDone) { throw }'); $resumeAt = $rcText.IndexOf('Resume-AmeenSqlAfterFailure $_ "الرصد والمطابقة"')
+  Assert 'agent: only failures before Resolve can trigger SQL recovery' ($rdAt -gt 0 -and $rdAt -lt $rsAt -and $guardAt -gt $rsAt -and $guardAt -lt $resumeAt)
+  Assert 'agent: database name re-verified after every reconnect' ($rcText -match 'function Open-AmeenSqlConnection' -and $rcText -match 'if \(\$script:db -ne \$ExpectedDatabase\)' -and $rcText -match '-Open \{ Open-AmeenSqlConnection \}')
+  Assert 'agent: dead pooled connections cleared before reopening' ($rcText -match '\[System\.Data\.SqlClient\.SqlConnection\]::ClearPool\(\$script:conn\)')
+  Assert 'agent: a broken connection is replaced, never reused' ($rcText -match '\$script:conn\.Dispose\(\)' -and $rcText -match '\$script:conn = New-Object System\.Data\.SqlClient\.SqlConnection')
+
   # ── ٦) الوكيل: يُحلَّل بلا أخطاء، ولا يسجّل مهمة، ولا يرسل افتراضياً ───────────────────────────
   $tokens = $null; $errors = $null
   [void][System.Management.Automation.Language.Parser]::ParseFile($agentPath, [ref]$tokens, [ref]$errors)
