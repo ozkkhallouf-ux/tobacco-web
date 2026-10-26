@@ -808,14 +808,17 @@ function New-CashierAgentTicket([string]$Root, [int]$Number, [string]$Date, [str
     try {
         $stream = New-Object IO.FileStream($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
     } catch [IO.IOException] {
-        return $false
+        return $null
     }
     try {
         $body = [pscustomobject]@{ requestId = $id.ToString(); invoiceNumber = $Number; invoiceDate = $Date; requestedFrom = $RequestedFrom; createdAt = $NowUtc.ToString("o") } | ConvertTo-Json -Compress
         $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes($body)
         $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush()
+        # وقت الإنشاء يُقرأ والملف ما زال مفتوحاً حصرياً، فلا يستطيع العامل نقله قبل ذلك (FileShare.None).
+        $created = [IO.File]::GetCreationTimeUtc($path)
     } finally { $stream.Dispose() }
-    return $true
+    return $created
 }
 
 # يقرأ التذكرة ويتحقق من صيغتها كاملة؛ أي انحراف ⇒ استثناء (تُرفض ولا تُطبع).
@@ -1010,12 +1013,12 @@ function Submit-CashierAgentPrint {
         return [pscustomobject]@{ Status = "duplicate_request"; Message = "هذا الطلب وصل سابقاً. لم تُرسل طباعة ثانية."; Confirmation = "" }
     }
     $start = [datetime](& $Clock)
-    if (-not (New-CashierAgentTicket $Root $Number $Date $id $RequestedFrom $start)) {
+    $created = New-CashierAgentTicket $Root $Number $Date $id $RequestedFrom $start
+    if ($null -eq $created) {
         return [pscustomobject]@{ Status = "duplicate_request"; Message = "هذا الطلب وصل سابقاً. لم تُرسل طباعة ثانية."; Confirmation = "" }
     }
-    $paths = Get-CashierAgentPaths $Root
-    $ticketPath = Join-Path $paths.Inbox (([guid]$id).ToString("N") + ".json")
-    $created = (Get-Item -LiteralPath $ticketPath).CreationTimeUtc
+    # لا قراءة للتذكرة بعد نشرها: قد يلتقطها العامل فوراً، وغيابها من inbox ليس خطأ.
+    $ticketPath = Join-Path (Get-CashierAgentPaths $Root).Inbox (([guid]$id).ToString("N") + ".json")
     $pickupDeadline = $created.AddSeconds($Config.agentPickupSeconds + $script:CashierAgentPickupMarginSeconds)
     $resultDeadline = $start.AddSeconds($Config.agentResultTimeoutSeconds)
     while ($true) {

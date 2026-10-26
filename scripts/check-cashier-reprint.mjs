@@ -103,6 +103,7 @@ const fnBody = (text, name) => {
 };
 const submit = fnBody(lib, 'Submit-CashierAgentPrint');
 assert.doesNotMatch(submit, /Invoke-CashierReprint|Invoke-LocalPrint|Invoke-CashierBridge|Start-CashierProcess|Register-CashierReprintRequest|& \$Print/, 'Serve في وضع العامل لا يطبع ولا يحجز');
+assert.doesNotMatch(submit, /Get-Item[^\n]*\$ticketPath/, 'Serve لا يقرأ التذكرة بعد نشرها (قد يلتقطها العامل فوراً)');
 assert.match(submit, /agent_unavailable/, 'Serve يرفض الطلب بلا نبضة عامل حديثة قبل كتابة أي تذكرة');
 assert.ok(submit.indexOf('agent_unavailable') < submit.indexOf('New-CashierAgentTicket'), 'فحص النبضة قبل كتابة التذكرة');
 const ticket = fnBody(lib, 'Invoke-CashierAgentTicket');

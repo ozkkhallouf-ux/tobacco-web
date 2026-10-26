@@ -87,8 +87,9 @@ try {
     # ── التذكرة ──────────────────────────────────────────────────────────────
     $root = New-AgentRoot
     $id = [guid]::NewGuid().ToString()
-    Assert "تذكرة أولى تُكتب" (New-CashierAgentTicket $root 2682 "2026-10-24" $id "OZK2026")
-    Assert "تذكرة ثانية بالمعرّف نفسه ⇒ false (حصرية)" (-not (New-CashierAgentTicket $root 2682 "2026-10-24" $id "OZK2026"))
+    $createdAt = New-CashierAgentTicket $root 2682 "2026-10-24" $id "OZK2026"
+    Assert "تذكرة أولى تُكتب وتعيد وقت إنشائها" ($createdAt -is [datetime] -and $createdAt -eq (Get-Item -LiteralPath (Get-TicketPath $root $id)).CreationTimeUtc)
+    Assert "تذكرة ثانية بالمعرّف نفسه ⇒ null (حصرية)" ($null -eq (New-CashierAgentTicket $root 2682 "2026-10-24" $id "OZK2026"))
     $t = Read-CashierAgentTicket (Get-TicketPath $root $id)
     Assert "التذكرة تُقرأ بحقولها" ($t.RequestId -eq $id -and $t.InvoiceNumber -eq 2682 -and $t.InvoiceDate -eq "2026-10-24" -and $t.RequestedFrom -eq "OZK2026")
     Assert "تاريخ بصيغة خاطئة لا يُكتب" (Throws { New-CashierAgentTicket $root 1 "24-10-2026" ([guid]::NewGuid().ToString()) "OZK2026" })
