@@ -6,17 +6,21 @@
 #   -Mode Health                                                       فحص الإعداد والمسار، بلا طباعة
 #   -Mode Serve                                                        على جهاز الطابعة فقط: يُشغَّل كأمر
 #        مفروض لمفتاح ssh المقيَّد، ويقرأ الطلب من SSH_ORIGINAL_COMMAND بصيغة ضيقة.
+#        مع printDispatch=agent لا يطبع: يكتب تذكرة للعامل المحلي وينتظر نتيجتها.
+#   -Mode Agent [-Once]                                                على جهاز الطابعة فقط: العامل المحلي
+#        (مهمة مجدولة بهوية الكاشير التفاعلية) يلتقط تذاكر Serve ويطبع كل واحدة مرة واحدة.
 #
 # config.json: mode=local (جهاز الطابعة: OZKUSER) أو mode=remote (جهاز بلا طابعة: OZK2026، يرسل
 # الطلب عبر ssh إلى OZKUSER). لا يلمس جسر الطباعة التلقائية ولا state.json ولا مهمته.
 [CmdletBinding()]
 param(
-    [ValidateSet("Resolve", "Print", "Status", "Health", "Serve")]
+    [ValidateSet("Resolve", "Print", "Status", "Health", "Serve", "Agent")]
     [string]$Mode = "Health",
     [int]$InvoiceNumber = 0,
     [string]$InvoiceDate = "",
     [string]$RequestId = "",
-    [string]$Root = ""
+    [string]$Root = "",
+    [switch]$Once
 )
 
 $ErrorActionPreference = "Stop"
@@ -82,8 +86,38 @@ try {
         $request = ConvertFrom-CashierRemoteCommand ([string]$env:SSH_ORIGINAL_COMMAND)
         switch ($request.Verb) {
             "resolve" { $r = Get-LocalResolveResult $config $Root $lookup $request.Number $request.Date; Out-Result $r $(if ($r.Status -eq "ok") { 0 } else { 1 }) }
-            "print" { $r = Invoke-LocalPrint $config $Root $lookup $request.Number $request.Date $request.RequestId $request.From; Out-Result $r $(if ($r.Status -eq "sent") { 0 } else { 1 }) }
+            "print" {
+                if ($config.printDispatch -eq "agent") { $r = Submit-CashierAgentPrint -Config $config -Root $Root -Number $request.Number -Date $request.Date -RequestId $request.RequestId -RequestedFrom $request.From }
+                else { $r = Invoke-LocalPrint $config $Root $lookup $request.Number $request.Date $request.RequestId $request.From }
+                Out-Result $r $(if ($r.Status -eq "sent") { 0 } else { 1 })
+            }
             "status" { Out-Result (Get-StatusResult $Root $request.RequestId) 0 }
+        }
+    }
+
+    if ($Mode -eq "Agent") {
+        if ($config.mode -ne "local" -or $config.printDispatch -ne "agent") { throw "وضع Agent يتطلب mode=local وprintDispatch=agent." }
+        # نسخة واحدة فقط من العامل على الجهاز: نسخة ثانية تخرج فوراً بلا أي معالجة.
+        $mutex = New-Object Threading.Mutex($false, "Global\OZK-CashierReprint-Agent")
+        $owned = $false
+        try { $owned = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $owned = $true }
+        if (-not $owned) { Out-Result ([pscustomobject]@{ Status = "agent_already_running"; Message = "" }) 1 }
+        try {
+            $paths = Initialize-CashierAgentFolders $Root
+            Write-CashierAgentHeartbeat $Root
+            $recovered = @(Restore-CashierAgentState $Root)
+            $print = { param($n, $d, $id, $from) Invoke-LocalPrint $config $Root $lookup $n $d $id $from }
+            $handled = 0
+            while ($true) {
+                Write-CashierAgentHeartbeat $Root
+                $handled += @(Invoke-CashierAgentPass -Config $config -Root $Root -Print $print).Count
+                if ($Once) { break }
+                Start-Sleep -Milliseconds 1000
+            }
+            Out-Result ([pscustomobject]@{ Status = "ok"; Handled = $handled; Recovered = $recovered.Count; Inbox = $paths.Inbox }) 0
+        } finally {
+            $mutex.ReleaseMutex()
+            $mutex.Dispose()
         }
     }
 
@@ -118,6 +152,13 @@ try {
             if ($config.bridgeSqlSource -eq "tool-secret" -and $checks.BridgeSql -ne "ok") { $healthy = $false }
             if ($config.enforceProtectedPaths -and $checks.ProtectedPaths -ne "ok") { $healthy = $false }
             if ($config.expectedRendererSha256 -ne "" -and $checks.Renderer -ne "ok") { $healthy = $false }
+            $checks.PrintDispatch = $config.printDispatch
+            if ($config.printDispatch -eq "agent") {
+                $age = Get-CashierAgentHeartbeatAge $Root
+                $checks.AgentHeartbeatAgeSeconds = $age
+                if ($age -ge 0 -and $age -le $config.agentHeartbeatMaxAgeSeconds) { $checks.Agent = "ok" } else { $checks.Agent = "عامل الطباعة لا يعمل" }
+                if ($checks.Agent -ne "ok") { $healthy = $false }
+            }
         } else {
             # فحص بعيد بلا طباعة: حالة معرّف عشوائي جديد يجب أن تكون not_received من جهاز الطابعة المتوقع.
             try {

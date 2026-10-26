@@ -45,8 +45,14 @@ function Read-CashierReprintConfig([string]$Path) {
         remoteExpectedHostName = ""
         bridgeSqlSource = "user-env"
         enforceProtectedPaths = $false
+        printDispatch = "direct"
+        agentRequesterSids = @()
+        agentPickupSeconds = 20
+        agentResultTimeoutSeconds = 150
+        agentHeartbeatMaxAgeSeconds = 30
     }
-    foreach ($name in @("bridgeTimeoutSeconds", "recentReprintWarningSeconds", "newInvoiceWarningSeconds", "jobWatchSeconds", "remotePort", "remoteTimeoutSeconds")) {
+    foreach ($name in @("bridgeTimeoutSeconds", "recentReprintWarningSeconds", "newInvoiceWarningSeconds", "jobWatchSeconds", "remotePort", "remoteTimeoutSeconds",
+            "agentPickupSeconds", "agentResultTimeoutSeconds", "agentHeartbeatMaxAgeSeconds")) {
         if ($null -ne $raw.PSObject.Properties[$name]) { $config[$name] = [int]$raw.$name }
     }
     foreach ($name in @("remoteHost", "remoteUser", "remoteKeyPath", "remoteKnownHostsPath", "remoteExpectedHostName")) {
@@ -59,6 +65,27 @@ function Read-CashierReprintConfig([string]$Path) {
     if ($null -ne $raw.PSObject.Properties["enforceProtectedPaths"]) {
         if ($raw.enforceProtectedPaths -isnot [bool]) { throw "الإعداد enforceProtectedPaths يجب أن يكون true أو false." }
         $config.enforceProtectedPaths = [bool]$raw.enforceProtectedPaths
+    }
+    if ($null -ne $raw.PSObject.Properties["printDispatch"]) { $config.printDispatch = ([string]$raw.printDispatch).Trim().ToLowerInvariant() }
+    if ($config.printDispatch -ne "direct" -and $config.printDispatch -ne "agent") { throw "الإعداد printDispatch يجب أن يكون direct أو agent." }
+    if ($null -ne $raw.PSObject.Properties["agentRequesterSids"]) {
+        $config.agentRequesterSids = @(@($raw.agentRequesterSids) | ForEach-Object { ([string]$_).Trim().ToUpperInvariant() })
+    }
+    foreach ($sid in $config.agentRequesterSids) {
+        if ($sid -notmatch '^S-1-5-21-\d+-\d+-\d+-\d+$') { throw "الإعداد agentRequesterSids يقبل معرّفات حسابات محلية فقط (S-1-5-21-…): $sid" }
+    }
+    if ($config.printDispatch -eq "agent") {
+        if ($mode -ne "local") { throw "printDispatch=agent يعمل على جهاز الطابعة فقط (mode=local)." }
+        if ($config.agentRequesterSids.Count -eq 0) { throw "printDispatch=agent يتطلب agentRequesterSids (حساب الخدمة الذي يقدّم الطلبات)." }
+        if ($config.agentPickupSeconds -lt 5 -or $config.agentPickupSeconds -gt 120) { throw "agentPickupSeconds خارج المدى 5–120." }
+        if ($config.agentHeartbeatMaxAgeSeconds -lt 10 -or $config.agentHeartbeatMaxAgeSeconds -gt 300) { throw "agentHeartbeatMaxAgeSeconds خارج المدى 10–300." }
+        if ($config.agentResultTimeoutSeconds -le $config.agentPickupSeconds -or $config.agentResultTimeoutSeconds -gt 600) {
+            throw "agentResultTimeoutSeconds يجب أن يزيد على agentPickupSeconds ولا يتجاوز 600."
+        }
+        # Serve ينتظر طباعة كاملة: التقاط + تشغيل الجسر + مراقبة الطابور، وإلا أبلغ in_progress عن طلب سليم.
+        if ($config.agentResultTimeoutSeconds -lt ($config.agentPickupSeconds + $config.bridgeTimeoutSeconds + $config.jobWatchSeconds)) {
+            throw "agentResultTimeoutSeconds يجب ألا يقل عن agentPickupSeconds + bridgeTimeoutSeconds + jobWatchSeconds."
+        }
     }
     if ($config.printerName -cne $script:CashierPrinterName) {
         throw "طابعة الكاشير الوحيدة المسموحة هي '$($script:CashierPrinterName)'."
@@ -727,22 +754,317 @@ function Invoke-CashierReprint {
     }
 }
 
+# ── العامل المحلي (printDispatch=agent) ───────────────────────────────────────
+# حساب الخدمة يدخل عبر ssh دخول شبكة (LogonType 3) بلا Administrators ولا INTERACTIVE. مهامه تُقبل
+# في الطابور وتصل بياناتها كاملة، ثم تعلق «Error, Printing» عند إخراجها إلى منفذ USB003 (C5b وC5c)،
+# بينما كل مهمة لهوية تفاعلية تُطبع (الجسر التلقائي، والواجهة). لذلك لا يطبع Serve بنفسه في هذا الوضع:
+# يكتب «تذكرة» في inbox، والعامل — مهمة مجدولة بهوية تفاعلية محدودة على جهاز الطابعة، مثل الجسر
+# التلقائي — يلتقطها ويطبع عبر Invoke-CashierReprint نفسه (حجز المعرّف، القفل، الحسم، السجل).
+#
+# ضمانات لا تُكسر:
+#   - التذكرة تُنشأ حصرياً (CreateNew): المعرّف نفسه لا يدخل مرتين، وحجز requests\ يبقى خط الدفاع الثاني.
+#   - العامل يقبل تذكرة يملكها حساب من agentRequesterSids فقط، بصيغة ضيقة وحجم محدود.
+#   - مهلة الالتقاط: تذكرة أقدم من agentPickupSeconds تُرفض بعد نقلها إلى processing\ (النقل ذرّي)،
+#     فإن رآها Serve ما زالت في inbox بعد المهلة وهامشها، فهي لن تُطبع يقيناً. بعد انقطاع الكهرباء
+#     لا تُطبع تذكرة قديمة أبداً.
+#   - تذكرة وُجدت في processing\ عند بدء العامل (انقطع أثناءها) لا تُعاد: تُحسم من السجل وحجز requests\.
+$script:CashierAgentTicketMaxBytes = 4096
+$script:CashierAgentPickupMarginSeconds = 3
+
+function Get-CashierAgentPaths([string]$Root) {
+    $base = Join-Path $Root "agent"
+    return [pscustomobject]@{
+        Base = $base
+        Inbox = Join-Path $base "inbox"
+        Processing = Join-Path $base "processing"
+        Results = Join-Path $base "results"
+        Rejected = Join-Path $base "rejected"
+        Heartbeat = Join-Path $base "heartbeat"
+    }
+}
+
+function Initialize-CashierAgentFolders([string]$Root) {
+    $paths = Get-CashierAgentPaths $Root
+    foreach ($dir in @($paths.Base, $paths.Inbox, $paths.Processing, $paths.Results, $paths.Rejected)) {
+        if (-not (Test-Path -LiteralPath $dir -PathType Container)) { [void](New-Item -ItemType Directory -Path $dir -Force) }
+    }
+    return $paths
+}
+
+function ConvertTo-CashierAgentId([string]$RequestId) {
+    $parsed = [guid]::Empty
+    if (-not [guid]::TryParse($RequestId, [ref]$parsed) -or $parsed -eq [guid]::Empty) { throw "معرّف الطلب غير صالح." }
+    return $parsed
+}
+
+# يكتب التذكرة حصرياً. false ⇒ تذكرة بالمعرّف نفسه موجودة (لا تُكتب ثانية).
+function New-CashierAgentTicket([string]$Root, [int]$Number, [string]$Date, [string]$RequestId, [string]$RequestedFrom, [datetime]$NowUtc = [datetime]::UtcNow) {
+    $id = ConvertTo-CashierAgentId $RequestId
+    if ($Number -le 0) { throw "رقم الفاتورة غير صالح." }
+    if ($Date -notmatch '^\d{4}-\d{2}-\d{2}$') { throw "تاريخ الفاتورة غير صالح." }
+    if ($RequestedFrom -notmatch '^[A-Za-z0-9-]{1,15}$') { throw "اسم الجهاز الطالب غير صالح." }
+    $inbox = (Get-CashierAgentPaths $Root).Inbox
+    $path = Join-Path $inbox ($id.ToString("N") + ".json")
+    try {
+        $stream = New-Object IO.FileStream($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    } catch [IO.IOException] {
+        return $false
+    }
+    try {
+        $body = [pscustomobject]@{ requestId = $id.ToString(); invoiceNumber = $Number; invoiceDate = $Date; requestedFrom = $RequestedFrom; createdAt = $NowUtc.ToString("o") } | ConvertTo-Json -Compress
+        $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes($body)
+        $stream.Write($bytes, 0, $bytes.Length)
+    } finally { $stream.Dispose() }
+    return $true
+}
+
+# يقرأ التذكرة ويتحقق من صيغتها كاملة؛ أي انحراف ⇒ استثناء (تُرفض ولا تُطبع).
+function Read-CashierAgentTicket([string]$Path) {
+    $info = Get-Item -LiteralPath $Path
+    if ($info.Length -le 0 -or $info.Length -gt $script:CashierAgentTicketMaxBytes) { throw "حجم التذكرة غير مقبول." }
+    $text = [IO.File]::ReadAllText($Path, (New-Object Text.UTF8Encoding($false)))
+    $raw = $text | ConvertFrom-Json
+    $names = @($raw.PSObject.Properties | ForEach-Object { $_.Name } | Sort-Object)
+    if (($names -join ",") -ne "createdAt,invoiceDate,invoiceNumber,requestedFrom,requestId") { throw "حقول التذكرة غير مطابقة." }
+    $id = ConvertTo-CashierAgentId ([string]$raw.requestId)
+    if ($id.ToString("N") + ".json" -ne $info.Name) { throw "اسم التذكرة لا يطابق معرّفها." }
+    if ([string]$raw.invoiceNumber -notmatch '^\d{1,9}$' -or [int]$raw.invoiceNumber -le 0) { throw "رقم الفاتورة في التذكرة غير صالح." }
+    if ([string]$raw.invoiceDate -notmatch '^\d{4}-\d{2}-\d{2}$') { throw "تاريخ الفاتورة في التذكرة غير صالح." }
+    if ([string]$raw.requestedFrom -notmatch '^[A-Za-z0-9-]{1,15}$') { throw "الجهاز الطالب في التذكرة غير صالح." }
+    return [pscustomobject]@{ RequestId = $id.ToString(); InvoiceNumber = [int]$raw.invoiceNumber; InvoiceDate = [string]$raw.invoiceDate; RequestedFrom = [string]$raw.requestedFrom }
+}
+
+function Get-CashierFileOwnerSid([string]$Path) {
+    $owner = (Get-Acl -LiteralPath $Path).GetOwner([Security.Principal.SecurityIdentifier])
+    return ([string]$owner.Value).ToUpperInvariant()
+}
+
+# النتيجة تُكتب مرة واحدة (ملف مؤقت ثم نقل)؛ نتيجة موجودة لا تُستبدل.
+function Write-CashierAgentResult([string]$Root, [string]$RequestId, $Result) {
+    $id = ConvertTo-CashierAgentId $RequestId
+    $dir = (Get-CashierAgentPaths $Root).Results
+    $final = Join-Path $dir ($id.ToString("N") + ".json")
+    if (Test-Path -LiteralPath $final) { return $false }
+    $tmp = Join-Path $dir ($id.ToString("N") + "." + [guid]::NewGuid().ToString("N") + ".tmp")
+    $body = [pscustomobject]@{
+        requestId = $id.ToString(); status = [string]$Result.Status; message = [string]$Result.Message
+        confirmation = [string]$Result.Confirmation; at = [datetime]::UtcNow.ToString("o"); agentHost = $env:COMPUTERNAME
+    } | ConvertTo-Json -Compress
+    [IO.File]::WriteAllText($tmp, $body, (New-Object Text.UTF8Encoding($false)))
+    try { [IO.File]::Move($tmp, $final) }
+    catch [IO.IOException] { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue; return $false }
+    return $true
+}
+
+function Read-CashierAgentResult([string]$Root, [string]$RequestId) {
+    $id = ConvertTo-CashierAgentId $RequestId
+    $path = Join-Path (Get-CashierAgentPaths $Root).Results ($id.ToString("N") + ".json")
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
+    try { $raw = [IO.File]::ReadAllText($path, (New-Object Text.UTF8Encoding($false))) | ConvertFrom-Json }
+    catch { return $null }
+    return [pscustomobject]@{ Status = [string]$raw.status; Message = [string]$raw.message; Confirmation = [string]$raw.confirmation; At = [string]$raw.at }
+}
+
+function Write-CashierAgentHeartbeat([string]$Root) {
+    $path = (Get-CashierAgentPaths $Root).Heartbeat
+    [IO.File]::WriteAllText($path, [datetime]::UtcNow.ToString("o"), (New-Object Text.UTF8Encoding($false)))
+}
+
+# عمر آخر نبضة بالثواني، أو -1 إن لم يعمل العامل قط.
+function Get-CashierAgentHeartbeatAge([string]$Root, [datetime]$NowUtc = [datetime]::UtcNow) {
+    $path = (Get-CashierAgentPaths $Root).Heartbeat
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return -1 }
+    return [int]($NowUtc - (Get-Item -LiteralPath $path).LastWriteTimeUtc).TotalSeconds
+}
+
+function Move-CashierAgentTicketToRejected([string]$Root, [string]$Path) {
+    $target = Join-Path (Get-CashierAgentPaths $Root).Rejected ([IO.Path]::GetFileNameWithoutExtension($Path) + "." + [datetime]::UtcNow.ToString("yyyyMMddTHHmmssfffZ") + ".json")
+    try { [IO.File]::Move($Path, $target) } catch { Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue }
+}
+
+$script:CashierAgentMessages = @{
+    expired = "انتهت مهلة التقاط الطلب قبل أن يستلمه عامل الطباعة على جهاز الطابعة، فلم يُطبع شيء. يمكنك الضغط على «طباعة» من جديد."
+    rejected = "رفض عامل الطباعة الطلب (صيغة أو مصدر غير مقبول)، فلم يُطبع شيء."
+    interrupted_before_print = "انقطع عامل الطباعة قبل بدء الطباعة، فلم يُطبع شيء. يمكنك الضغط على «طباعة» من جديد."
+    interrupted_uncertain = "انقطع عامل الطباعة أثناء الطلب، ولا يمكن تأكيد خروج الورقة. افحص الطابعة قبل أي محاولة جديدة."
+}
+
+# يعالج تذكرة واحدة من inbox: نقل ذرّي إلى processing، ثم الفحوص، ثم طباعة واحدة عبر $Print، ثم نتيجة.
+# $Print: scriptblock يأخذ (number, date, requestId, requestedFrom) ويعيد {Status, Message, Confirmation}.
+function Invoke-CashierAgentTicket {
+    param(
+        $Config,
+        [string]$Root,
+        [string]$TicketPath,
+        [scriptblock]$Print,
+        [scriptblock]$GetOwner = { param($p) Get-CashierFileOwnerSid $p },
+        [scriptblock]$Clock = { [datetime]::UtcNow }
+    )
+    $paths = Get-CashierAgentPaths $Root
+    $name = [IO.Path]::GetFileName($TicketPath)
+    $claimed = Join-Path $paths.Processing $name
+    try { [IO.File]::Move($TicketPath, $claimed) }
+    catch { return $null }  # سبقه غيره أو اختفت التذكرة: لا شيء يُفعل
+
+    $created = (Get-Item -LiteralPath $claimed).CreationTimeUtc
+    $written = (Get-Item -LiteralPath $claimed).LastWriteTimeUtc
+    $now = [datetime](& $Clock)
+    $requestId = $null
+    try { $requestId = (ConvertTo-CashierAgentId ([IO.Path]::GetFileNameWithoutExtension($name))).ToString() } catch { $requestId = $null }
+
+    function Reject([string]$Status, [string]$Reason) {
+        [void](Write-CashierReprintLog $Root ([pscustomobject]@{ event = "agent_$Status"; requestId = $requestId; reason = $Reason }))
+        if ($null -ne $requestId) {
+            [void](Write-CashierAgentResult $Root $requestId ([pscustomobject]@{ Status = $Status; Message = $script:CashierAgentMessages[$Status]; Confirmation = "" }))
+        }
+        Move-CashierAgentTicketToRejected $Root $claimed
+        return [pscustomobject]@{ Status = $Status; Reason = $Reason; RequestId = $requestId }
+    }
+
+    # المهلة أولاً: بعد انقطاع الكهرباء أو توقف العامل لا تُطبع تذكرة قديمة مهما كان مصدرها.
+    $ageCreated = ($now - $created).TotalSeconds
+    $ageWritten = ($now - $written).TotalSeconds
+    if ($ageCreated -gt $Config.agentPickupSeconds -or $ageWritten -gt $Config.agentPickupSeconds) { return (Reject "expired" "pickup_timeout") }
+    if ($ageCreated -lt -5 -or $ageWritten -lt -5) { return (Reject "rejected" "clock_skew") }
+    try { $owner = [string](& $GetOwner $claimed) } catch { $owner = "" }
+    if (@($Config.agentRequesterSids) -notcontains $owner.ToUpperInvariant()) { return (Reject "rejected" "owner_not_allowed") }
+    try { $ticket = Read-CashierAgentTicket $claimed } catch { return (Reject "rejected" "malformed") }
+
+    try {
+        $result = & $Print $ticket.InvoiceNumber $ticket.InvoiceDate $ticket.RequestId $ticket.RequestedFrom
+    } catch {
+        # خطأ غير متوقع خارج Invoke-CashierReprint: الحكم من الحجز والسجل، لا افتراض.
+        $state = Get-CashierRequestStatus $Root $ticket.RequestId -IgnoreAgentTickets
+        if ($state.Status -eq "not_received") { $result = [pscustomobject]@{ Status = "failed"; Message = $script:CashierAgentMessages.interrupted_before_print; Confirmation = "" } }
+        else { $result = [pscustomobject]@{ Status = "uncertain"; Message = $script:CashierAgentMessages.interrupted_uncertain; Confirmation = "" } }
+    }
+    [void](Write-CashierAgentResult $Root $ticket.RequestId $result)
+    Remove-Item -LiteralPath $claimed -Force -ErrorAction SilentlyContinue
+    return [pscustomobject]@{ Status = [string]$result.Status; Reason = ""; RequestId = $ticket.RequestId }
+}
+
+# عند بدء العامل: ما بقي في processing\ انقطع أثناء معالجته ⇒ يُحسم ولا يُعاد أبداً.
+function Restore-CashierAgentState([string]$Root) {
+    $paths = Initialize-CashierAgentFolders $Root
+    $recovered = New-Object System.Collections.Generic.List[object]
+    foreach ($file in @(Get-ChildItem -LiteralPath $paths.Processing -File -Filter "*.json" -ErrorAction SilentlyContinue)) {
+        $requestId = $null
+        try { $requestId = (ConvertTo-CashierAgentId $file.BaseName).ToString() } catch { $requestId = $null }
+        if ($null -ne $requestId -and $null -eq (Read-CashierAgentResult $Root $requestId)) {
+            $state = Get-CashierRequestStatus $Root $requestId -IgnoreAgentTickets
+            if ($state.Status -eq "not_received") {
+                $result = [pscustomobject]@{ Status = "failed"; Message = $script:CashierAgentMessages.interrupted_before_print; Confirmation = "" }
+            } elseif ($state.Status -eq "in_progress") {
+                $result = [pscustomobject]@{ Status = "uncertain"; Message = $script:CashierAgentMessages.interrupted_uncertain; Confirmation = "" }
+                [void](Write-CashierReprintLog $Root ([pscustomobject]@{ event = "reprint_uncertain"; requestId = $requestId; reason = "agent_interrupted" }))
+            } else {
+                $result = [pscustomobject]@{ Status = $state.Status; Message = "انقطع عامل الطباعة بعد انتهاء الطلب. الحالة المسجّلة: $($state.Status)."; Confirmation = $state.Confirmation }
+            }
+            [void](Write-CashierAgentResult $Root $requestId $result)
+        }
+        [void](Write-CashierReprintLog $Root ([pscustomobject]@{ event = "agent_recovered"; requestId = $requestId }))
+        Move-CashierAgentTicketToRejected $Root $file.FullName
+        $recovered.Add($requestId)
+    }
+    return $recovered.ToArray()
+}
+
+# دورة واحدة: كل تذاكر inbox بترتيب إنشائها، واحدة تلو الأخرى.
+function Invoke-CashierAgentPass {
+    param(
+        $Config,
+        [string]$Root,
+        [scriptblock]$Print,
+        [scriptblock]$GetOwner = { param($p) Get-CashierFileOwnerSid $p },
+        [scriptblock]$Clock = { [datetime]::UtcNow }
+    )
+    $paths = Get-CashierAgentPaths $Root
+    $handled = New-Object System.Collections.Generic.List[object]
+    $tickets = @(Get-ChildItem -LiteralPath $paths.Inbox -File -ErrorAction SilentlyContinue | Sort-Object CreationTimeUtc)
+    foreach ($ticket in $tickets) {
+        if ($ticket.Extension -ine ".json") { Move-CashierAgentTicketToRejected $Root $ticket.FullName; continue }
+        $outcome = Invoke-CashierAgentTicket -Config $Config -Root $Root -TicketPath $ticket.FullName -Print $Print -GetOwner $GetOwner -Clock $Clock
+        if ($null -ne $outcome) { $handled.Add($outcome) }
+    }
+    return $handled.ToArray()
+}
+
+# جهة Serve (حساب الخدمة): تذكرة واحدة ثم انتظار النتيجة. لا طباعة هنا إطلاقاً.
+function Submit-CashierAgentPrint {
+    param(
+        $Config,
+        [string]$Root,
+        [int]$Number,
+        [string]$Date,
+        [string]$RequestId,
+        [string]$RequestedFrom,
+        [scriptblock]$Clock = { [datetime]::UtcNow },
+        [scriptblock]$Sleep = { Start-Sleep -Milliseconds 500 }
+    )
+    $id = (ConvertTo-CashierAgentId $RequestId).ToString()
+    $age = Get-CashierAgentHeartbeatAge $Root ([datetime](& $Clock))
+    if ($age -lt 0 -or $age -gt $Config.agentHeartbeatMaxAgeSeconds) {
+        return [pscustomobject]@{ Status = "agent_unavailable"; Message = "عامل الطباعة لا يعمل الآن على $($env:COMPUTERNAME) (جلسة الكاشير غير مفتوحة؟). لم يُرسل أي طلب ولم يُطبع شيء."; Confirmation = "" }
+    }
+    if ((Get-CashierRequestStatus $Root $id).Status -ne "not_received") {
+        return [pscustomobject]@{ Status = "duplicate_request"; Message = "هذا الطلب وصل سابقاً. لم تُرسل طباعة ثانية."; Confirmation = "" }
+    }
+    $start = [datetime](& $Clock)
+    if (-not (New-CashierAgentTicket $Root $Number $Date $id $RequestedFrom $start)) {
+        return [pscustomobject]@{ Status = "duplicate_request"; Message = "هذا الطلب وصل سابقاً. لم تُرسل طباعة ثانية."; Confirmation = "" }
+    }
+    $paths = Get-CashierAgentPaths $Root
+    $ticketPath = Join-Path $paths.Inbox (([guid]$id).ToString("N") + ".json")
+    $created = (Get-Item -LiteralPath $ticketPath).CreationTimeUtc
+    $pickupDeadline = $created.AddSeconds($Config.agentPickupSeconds + $script:CashierAgentPickupMarginSeconds)
+    $resultDeadline = $start.AddSeconds($Config.agentResultTimeoutSeconds)
+    while ($true) {
+        $result = Read-CashierAgentResult $Root $id
+        if ($null -ne $result) { return [pscustomobject]@{ Status = $result.Status; Message = $result.Message; Confirmation = $result.Confirmation } }
+        $now = [datetime](& $Clock)
+        if ((Test-Path -LiteralPath $ticketPath -PathType Leaf) -and $now -gt $pickupDeadline) {
+            # العامل يرفض أي تذكرة تجاوزت المهلة بعد التقاطها، فهذه لن تُطبع يقيناً.
+            return [pscustomobject]@{ Status = "expired"; Message = $script:CashierAgentMessages.expired; Confirmation = "" }
+        }
+        if ($now -gt $resultDeadline) {
+            return [pscustomobject]@{ Status = "in_progress"; Message = "استلم عامل الطباعة الطلب ولم تصل نتيجته بعد. لا تعد الطلب قبل فحص الطابعة."; Confirmation = "" }
+        }
+        & $Sleep
+    }
+}
+
 # ── حالة طلب سابق (قراءة السجل فقط، بلا أي طباعة) ─────────────────────────────
 # not_received: لم يُسجَّل الطلب على جهاز الطابعة إطلاقاً ⇒ لم يُطبع يقيناً (الحجز يسبق الطباعة).
 # in_progress: سُجّل ولم تصل نتيجته بعد (يعمل الآن أو انقطع أثناء التنفيذ) ⇒ غير مؤكد.
-# غير ذلك: آخر حالة نهائية مسجّلة لهذا المعرّف.
-function Get-CashierRequestStatus([string]$Root, [string]$RequestId) {
+# غير ذلك: آخر حالة نهائية مسجّلة لهذا المعرّف، أو نتيجة العامل المحلي إن وُجدت.
+# تذكرة العامل في inbox\ أو processing\ ⇒ in_progress (وصل الطلب). IgnoreAgentTickets للعامل نفسه
+# حين يحسم تذكرة انقطعت: يسأل «هل حُجز المعرّف وبدأت الطباعة؟» لا «هل وصلت التذكرة؟».
+function Get-CashierRequestStatus([string]$Root, [string]$RequestId, [switch]$IgnoreAgentTickets) {
     $parsed = [guid]::Empty
     if (-not [guid]::TryParse($RequestId, [ref]$parsed)) { throw "معرّف الطلب غير صالح." }
     $requestFile = Join-Path (Join-Path $Root "requests") ($parsed.ToString("N") + ".json")
     $id = $parsed.ToString()
-    $final = @(Read-CashierReprintLog $Root | Where-Object { $_.requestId -eq $id -and $_.event -ne "reprint_duplicate_request" })
+    if (-not $IgnoreAgentTickets) {
+        $agentResult = Read-CashierAgentResult $Root $id
+        if ($null -ne $agentResult) {
+            return [pscustomobject]@{ Status = $agentResult.Status; Confirmation = $agentResult.Confirmation; At = $agentResult.At; Host = $env:COMPUTERNAME }
+        }
+    }
+    $final = @(Read-CashierReprintLog $Root | Where-Object { $_.requestId -eq $id -and ([string]$_.event).StartsWith("reprint_") -and $_.event -ne "reprint_duplicate_request" })
     if ($final.Count -gt 0) {
         $last = $final[$final.Count - 1]
         return [pscustomobject]@{ Status = ([string]$last.event).Replace("reprint_", ""); Confirmation = [string]$last.confirmation; At = [string]$last.at; Host = [string]$last.host }
     }
     if (Test-Path -LiteralPath $requestFile -PathType Leaf) {
         return [pscustomobject]@{ Status = "in_progress"; Confirmation = ""; At = ""; Host = $env:COMPUTERNAME }
+    }
+    if (-not $IgnoreAgentTickets) {
+        $agent = Get-CashierAgentPaths $Root
+        foreach ($dir in @($agent.Inbox, $agent.Processing)) {
+            if (Test-Path -LiteralPath (Join-Path $dir ($parsed.ToString("N") + ".json")) -PathType Leaf) {
+                return [pscustomobject]@{ Status = "in_progress"; Confirmation = ""; At = ""; Host = $env:COMPUTERNAME }
+            }
+        }
     }
     return [pscustomobject]@{ Status = "not_received"; Confirmation = ""; At = ""; Host = $env:COMPUTERNAME }
 }
