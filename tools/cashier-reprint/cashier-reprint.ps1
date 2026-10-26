@@ -98,10 +98,8 @@ try {
     if ($Mode -eq "Agent") {
         if ($config.mode -ne "local" -or $config.printDispatch -ne "agent") { throw "وضع Agent يتطلب mode=local وprintDispatch=agent." }
         # نسخة واحدة فقط من العامل على الجهاز: نسخة ثانية تخرج فوراً بلا أي معالجة.
-        $mutex = New-Object Threading.Mutex($false, "Global\OZK-CashierReprint-Agent")
-        $owned = $false
-        try { $owned = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $owned = $true }
-        if (-not $owned) { Out-Result ([pscustomobject]@{ Status = "agent_already_running"; Message = "" }) 1 }
+        $agentLock = Open-CashierAgentLock $Root
+        if ($null -eq $agentLock) { Out-Result ([pscustomobject]@{ Status = "agent_already_running"; Message = "" }) 1 }
         try {
             $paths = Initialize-CashierAgentFolders $Root
             Write-CashierAgentHeartbeat $Root
@@ -116,8 +114,7 @@ try {
             }
             Out-Result ([pscustomobject]@{ Status = "ok"; Handled = $handled; Recovered = $recovered.Count; Inbox = $paths.Inbox }) 0
         } finally {
-            $mutex.ReleaseMutex()
-            $mutex.Dispose()
+            $agentLock.Dispose()
         }
     }
 
