@@ -144,6 +144,35 @@ try {
     $out = @(Invoke-CashierAgentPass -Config $cfg -Root $root -Print $printStub -GetOwner { param($p) throw "acl" })
     Assert "تعذّر قراءة المالك ⇒ rejected بلا طباعة" ($out[0].Status -eq "rejected" -and $script:prints.Count -eq 0)
 
+    # ── لا تعديل للتذكرة بعد استلامها ────────────────────────────────────────
+    # كاتب ما زال يمسك التذكرة (يسمح بالنقل) ⇒ لا يُفتح مقبض الاستلام ⇒ رفض بلا طباعة.
+    $idBusy = [guid]::NewGuid().ToString()
+    [void](New-CashierAgentTicket $root 13 "2026-10-24" $idBusy "OZK2026")
+    $writer = New-Object IO.FileStream((Get-TicketPath $root $idBusy), [IO.FileMode]::Open, [IO.FileAccess]::Write, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+    try { $out = @(Invoke-CashierAgentPass -Config $cfg -Root $root -Print $printStub -GetOwner $ownerSvc) } finally { $writer.Dispose() }
+    Assert "تذكرة يمسكها كاتب عند الاستلام ⇒ rejected/ticket_busy بلا طباعة" ($out.Count -eq 1 -and $out[0].Reason -eq "ticket_busy" -and $script:prints.Count -eq 0)
+    # مقبض الاستلام يمنع أي فتح للكتابة أو الحذف ما دام مفتوحاً، والقراءة من النسخة المقروءة نفسها.
+    $idHold = [guid]::NewGuid().ToString()
+    [void](New-CashierAgentTicket $root 14 "2026-10-24" $idHold "OZK2026")
+    $hold = Open-CashierAgentTicketHold (Get-TicketPath $root $idHold)
+    try {
+        Assert "مقبض الاستلام يمنع الفتح للكتابة" (Throws { (New-Object IO.FileStream((Get-TicketPath $root $idHold), [IO.FileMode]::Open, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)).Dispose() })
+        Assert "مقبض الاستلام يمنع الحذف" (Throws { [IO.File]::Delete((Get-TicketPath $root $idHold)) ; if (-not (Test-Path -LiteralPath (Get-TicketPath $root $idHold))) { throw "deleted" } })
+        $t = Read-CashierAgentTicketStream $hold
+        Assert "التذكرة تُقرأ من مقبض الاستلام" ($t.InvoiceNumber -eq 14 -and $t.RequestId -eq $idHold)
+    } finally { $hold.Dispose() }
+    # الطباعة من النسخة المقروءة: تعديل الملف في processing أثناء الطباعة لا يغيّر ما يُطبع.
+    $script:tamperRoot = $root
+    $tamperPrint = {
+        param($n, $d, $id, $from)
+        $f = Join-Path (Get-CashierAgentPaths $script:tamperRoot).Processing (([guid]$id).ToString("N") + ".json")
+        [IO.File]::WriteAllText($f, '{"requestId":"' + $id + '","invoiceNumber":999,"invoiceDate":"2026-10-24","requestedFrom":"OZK2026","createdAt":"x"}')
+        $script:prints.Add([pscustomobject]@{ Number = $n; Date = $d; RequestId = $id; From = $from })
+        return [pscustomobject]@{ Status = "sent"; Message = "ok"; Confirmation = "spooler_completed" }
+    }
+    $out = @(Invoke-CashierAgentPass -Config $cfg -Root $root -Print $tamperPrint -GetOwner $ownerSvc)
+    Assert "تعديل التذكرة بعد قراءتها لا أثر له على الطباعة" ($script:prints.Count -eq 1 -and @($script:prints | Where-Object { $_.Number -eq 999 }).Count -eq 0 -and $script:prints[0].Number -eq 14)
+
     # ── مهلة الالتقاط وانحراف الساعة ─────────────────────────────────────────
     $root = New-AgentRoot
     $idOld = [guid]::NewGuid().ToString()
@@ -255,12 +284,21 @@ try {
     $cli = Join-Path $toolDir "cashier-reprint.ps1"
     $json = (& $exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $cli -Mode Agent -Once -Root $cliRoot | Select-Object -Last 1) | ConvertFrom-Json
     Assert "Mode Agent -Once يعمل ويكتب النبضة" ($json.Status -eq "ok" -and (Get-CashierAgentHeartbeatAge $cliRoot) -ge 0)
-    $mutex = New-Object Threading.Mutex($false, "Global\OZK-CashierReprint-Agent")
-    [void]$mutex.WaitOne(0)
+    # Mutex باسم Global\ آخر لا يعطّل العامل (قفله ملف داخل processing\ لا Mutex عام).
+    $foreign = New-Object Threading.Mutex($false, "Global\OZK-CashierReprint-Agent")
+    [void]$foreign.WaitOne(0)
     try {
         $json = (& $exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $cli -Mode Agent -Once -Root $cliRoot | Select-Object -Last 1) | ConvertFrom-Json
+        Assert "حجز Mutex العام القديم لا يعطّل العامل" ($json.Status -eq "ok")
+    } finally { $foreign.ReleaseMutex(); $foreign.Dispose() }
+    $agentLock = Open-CashierAgentLock $cliRoot
+    try {
+        Assert "قفل العامل في processing" ($null -ne $agentLock -and $agentLock.Name -eq (Get-CashierAgentPaths $cliRoot).Lock)
+        Assert "القفل لا يُفتح مرتين" ($null -eq (Open-CashierAgentLock $cliRoot))
+        $json = (& $exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $cli -Mode Agent -Once -Root $cliRoot | Select-Object -Last 1) | ConvertFrom-Json
         Assert "نسخة ثانية من العامل ترفض العمل" ($json.Status -eq "agent_already_running")
-    } finally { $mutex.ReleaseMutex(); $mutex.Dispose() }
+    } finally { if ($null -ne $agentLock) { $agentLock.Dispose() } }
+    Assert "الاستعادة تتجاهل ملف القفل" (@(Restore-CashierAgentState $cliRoot).Count -eq 0 -and (Test-Path -LiteralPath (Get-CashierAgentPaths $cliRoot).Lock))
     Copy-Item -Force -LiteralPath (Write-ConfigFile @{}) -Destination (Join-Path $cliRoot "config.json")
     $json = (& $exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $cli -Mode Agent -Once -Root $cliRoot | Select-Object -Last 1) | ConvertFrom-Json
     Assert "Mode Agent مع printDispatch=direct يُرفض" ($json.Status -eq "error")
