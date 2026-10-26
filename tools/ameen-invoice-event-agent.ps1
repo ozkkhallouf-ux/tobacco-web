@@ -165,6 +165,15 @@ function Resume-AmeenSqlAfterFailure($ErrorRecord, [string]$Where, [switch]$AnyS
     return $true
 }
 
+# بعد عودة الاتصال: مهلة قبل إعادة الدورة (لا إعادة فورية تتخطى حارس الأداء)، تكبر مع العودات المتتالية.
+$script:resumeStreak = 0
+function Wait-AmeenAfterSqlResume {
+    $script:resumeStreak++
+    $s = Get-AmeenResumePauseSeconds -Streak $script:resumeStreak -PollSeconds $PollSeconds -BaseSeconds $ReconnectBaseSeconds -MaxSeconds $ReconnectMaxSeconds
+    Write-AgentLog ("إعادة الدورة بعد {0} ث (عودة متتالية رقم {1})" -f $s, $script:resumeStreak)
+    Start-Sleep -Seconds $s
+}
+
 function Get-AmeenBillObservation([string]$Guid, $Ops, [string]$DetectedAtUtc, [string]$Source) {
     $q = Get-AmeenInvoiceSnapshotSql -BillGuid $Guid
     $h = Invoke-AmeenRead $q.Header
@@ -252,7 +261,7 @@ try {
         $stateDirty = $false
         # أول استعلام في الدورة داخل المعالجة (حادثة 2026-10-25): بعد إسبات يرمي هنا، فنعيد الاتصال ونعيد الدورة.
         try { $nowSrv = [datetime](Invoke-AmeenRead "SELECT GETDATE() t").Rows[0].t }
-        catch { if (Resume-AmeenSqlAfterFailure $_ "بداية الدورة" -AnySqlIsLost) { continue } else { throw } }
+        catch { if (Resume-AmeenSqlAfterFailure $_ "بداية الدورة" -AnySqlIsLost) { Wait-AmeenAfterSqlResume; continue } else { throw } }
         $detectedUtc = ConvertTo-AmeenUtcIso $nowSrv
         $wm = [datetime]::ParseExact([string]$state.watermark, "yyyy-MM-ddTHH:mm:ss.fff", [Globalization.CultureInfo]::InvariantCulture)
         $q = Get-AmeenInvoiceDetectionSql -Watermark $wm
@@ -325,7 +334,7 @@ try {
             while ($null -ne $ex) { if ($ex -is [System.Data.SqlClient.SqlException]) { $isSql = $true; break }; $ex = $ex.InnerException }
             if ($readsDone) { throw }
             # انقطاع الاتصال (لا مهلة قفل على اتصال سليم) ⇒ إعادة اتصال ثم الدورة كاملة من العلامة نفسها.
-            if (Resume-AmeenSqlAfterFailure $_ "الرصد والمطابقة") { continue }
+            if (Resume-AmeenSqlAfterFailure $_ "الرصد والمطابقة") { Wait-AmeenAfterSqlResume; continue }
             if (-not $isSql) { throw }
             $lockErrors++
             Write-AgentLog ("تحذير SQL (لا تقدّم للعلامة المائية): " + $ex.Message)
@@ -356,6 +365,7 @@ try {
 
         # حارس الأداء: لا نضغط على الأمين. دورة بطيئة أو مهلة قفل ⇒ إيقاع أبطأ.
         $elapsedMs = ((Get-Date) - $cycleStart).TotalMilliseconds
+        $script:resumeStreak = 0
         $perf.cycles++; $perf.total_ms += $elapsedMs; if ($elapsedMs -gt $perf.max_ms) { $perf.max_ms = $elapsedMs }
         if ($PerfLogMinutes -gt 0 -and ((Get-Date) - $perf.since).TotalMinutes -ge $PerfLogMinutes) {
             Write-AgentLog ("أداء: دورات={0} متوسط={1:n0}ms أقصى={2:n0}ms حفظ_كامل={3} حفظ_علامة={4} علامة_متعذرة={5} إيقاع={6}ث" -f $perf.cycles, ($perf.total_ms / [math]::Max(1, $perf.cycles)), $perf.max_ms, $perf.full, $perf.watermark, $perf.watermark_failed, $interval)

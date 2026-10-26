@@ -209,6 +209,8 @@ for (const name of [
   "sql reconnect: lock timeout on an open connection is not a disconnect",
   "sql reconnect: closed or broken connection is a disconnect",
   "sql reconnect: transport error numbers are a disconnect",
+  "sql reconnect: command timeout (-2/258) on an open connection is a slow-server warning, not a disconnect",
+  "sql reconnect: pause after a resume is at least the poll interval and grows with consecutive resumes up to 300s",
   "sql reconnect: non-SQL error on an open connection is not a disconnect",
   "sql reconnect: connection InvalidOperationException is a disconnect",
   "sql reconnect: a locked state file is not mistaken for a disconnect",
@@ -277,8 +279,11 @@ const libCode = lib.replace(/#.*$/gm, "");
 {
   const loop = agentCode.slice(agentCode.indexOf("    do {"), agentCode.indexOf("} while ($true)"));
   assert.match(loop, /try \{ \$nowSrv = \[datetime\]\(Invoke-AmeenRead "SELECT GETDATE\(\) t"\)/, "أول استعلام في الدورة داخل try");
-  assert.match(loop, /catch \{ if \(Resume-AmeenSqlAfterFailure \$_ "بداية الدورة" -AnySqlIsLost\) \{ continue \} else \{ throw \} \}/, "انقطاع في بداية الدورة ⇒ إعادة اتصال ثم الدورة من جديد");
-  assert.match(loop, /if \(Resume-AmeenSqlAfterFailure \$_ "الرصد والمطابقة"\) \{ continue \}/, "انقطاع أثناء الرصد ⇒ لا تقدّم للعلامة");
+  assert.match(loop, /catch \{ if \(Resume-AmeenSqlAfterFailure \$_ "بداية الدورة" -AnySqlIsLost\) \{ Wait-AmeenAfterSqlResume; continue \} else \{ throw \} \}/, "انقطاع في بداية الدورة ⇒ إعادة اتصال ثم مهلة ثم الدورة من جديد");
+  assert.match(loop, /if \(Resume-AmeenSqlAfterFailure \$_ "الرصد والمطابقة"\) \{ Wait-AmeenAfterSqlResume; continue \}/, "انقطاع أثناء الرصد ⇒ لا تقدّم للعلامة، ومهلة قبل الإعادة");
+  // لا continue بعد عودة الاتصال بلا مهلة: الإعادة الفورية كانت تتخطى حارس الأداء والنوم (مراجعة دمج #398).
+  assert.equal((loop.match(/Resume-AmeenSqlAfterFailure[^\n]*\{ continue \}/g) || []).length, 0, "كل عودة اتصال في الحلقة تمر بـWait-AmeenAfterSqlResume");
+  assert.ok(loop.indexOf("$script:resumeStreak = 0") > loop.indexOf("$elapsedMs = ((Get-Date) - $cycleStart)"), "عدّاد العودات يُصفَّر بعد دورة مكتملة فقط");
   assert.ok(loop.indexOf("Add-AmeenOutboxEvents -Dir $OutboxDir -Events $events") < loop.indexOf("$state.watermark = Format-AmeenSqlDate $nowSrv"), "العلامة بعد كتابة الأحداث");
   const rd = loop.indexOf("$readsDone = $true"), rs = loop.indexOf("$events = Resolve-AmeenInvoiceChanges"), gd = loop.indexOf("if ($readsDone) { throw }"), rm = loop.indexOf('Resume-AmeenSqlAfterFailure $_ "الرصد والمطابقة"');
   assert.ok(rd > 0 && rd < rs && gd > rs && gd < rm, "التعافي من SQL قبل Resolve فقط؛ فشل الكتابة بعده FATAL (Codex P1 على #397)");
@@ -287,6 +292,7 @@ assert.match(agentCode, /Write-AgentLog \("FATAL: /, "لا خروج صامت: ا
 assert.match(agentCode, /\[int\]\$MaxReconnectAttempts = 288/, "حدّ أعلى لمحاولات إعادة الاتصال");
 assert.doesNotMatch(agentCode, /Write-AgentLog[^\n]*(\$connStr|ConnectionString)/, "لا تُسجَّل سلسلة الاتصال");
 assert.match(libCode, /function Invoke-AmeenSqlReconnect/);
+assert.doesNotMatch(libCode.match(/\$script:AmeenSqlConnectionLostNumbers = @\(([^)]*)\)/)[1], /(^|,\s*)(-2|258)(\s*,|$)/, "مهلة الأمر ليست انقطاعاً: تبقى لحارس الأداء");
 assert.match(libCode, /function ConvertTo-AmeenSafeLogText/);
 assert.match(agentCode, /\$RpcName = "apply_ameen_invoice_events"/, "الوكيل يكتب عبر الدالة المقترحة وحدها");
 assert.match(agentCode, /\/rest\/v1\/rpc\//);

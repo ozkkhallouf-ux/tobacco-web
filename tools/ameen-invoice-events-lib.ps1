@@ -957,9 +957,10 @@ function Send-AmeenInvoiceOutbox {
 # القاعدة الآن: انقطاع الاتصال حالة متوقعة ⇒ DISCONNECTED ثم RECONNECTING بتراجع أسّي ثم RECOVERED، والعلامة
 # المائية لا تتقدّم في الدورة المنقطعة (تُعاد كاملة بعد العودة، والتكرار يُزال بالبصمة). خطأ غير متوقع يُسجَّل FATAL.
 
-# أرقام SqlException التي تعني أن الطريق إلى الخادم انقطع (لا خطأ في الاستعلام نفسه): مهلة، شبكة، خادم غير
-# متاح أو يبدأ، جلسة مقطوعة. مهلة القفل 1222 ليست منها: الاتصال سليم وتبقى «تحذير SQL» كما هي.
-$script:AmeenSqlConnectionLostNumbers = @(-2, -1, 2, 53, 64, 121, 233, 258, 1231, 4060, 4221, 10053, 10054, 10060, 10061, 11001, 18456, 40613)
+# أرقام SqlException التي تعني أن الطريق إلى الخادم انقطع (لا خطأ في الاستعلام نفسه): شبكة، خادم غير متاح أو
+# يبدأ، جلسة مقطوعة. مهلة القفل 1222 ومهلة الأمر -2/258 ليست منها: على اتصال Open تعني خادماً بطيئاً لا مقطوعاً،
+# فتبقى «تحذير SQL» ويبطّئ حارس الأداء الإيقاع. عدّها انقطاعاً كان يعيد الاستعلام الثقيل فوراً بلا إبطاء.
+$script:AmeenSqlConnectionLostNumbers = @(-1, 2, 53, 64, 121, 233, 1231, 4060, 4221, 10053, 10054, 10060, 10061, 11001, 18456, 40613)
 $script:AmeenSqlConnectionLostText = '(?i)connection is broken|transport-level error|network-related|physical connection is not usable|forcibly closed|semaphore timeout|connection was closed|connection has been closed|server was not found|not accessible|recovery is not possible'
 
 function Get-AmeenSqlFailureInfo {
@@ -1017,6 +1018,14 @@ function Get-AmeenReconnectDelaySeconds {
     if ($Attempt -le 0 -or $BaseSeconds -le 0) { return 0 }
     $d = [double]$BaseSeconds * [math]::Pow(2, [math]::Min($Attempt - 1, 20))
     return [int][math]::Min([double]$MaxSeconds, $d)
+}
+
+function Get-AmeenResumePauseSeconds {
+    # بعد عودة الاتصال لا تبدأ الدورة التالية فوراً: مهلة لا تقل عن الإيقاع وتتضاعف مع تكرار العودات المتتالية
+    # (اتصال يتأرجح أو خادم يقطع كل دورة)، وتعود للصفر بأول دورة مكتملة. هكذا لا يتخطى الانقطاع حارس الأداء.
+    param([int]$Streak, [int]$PollSeconds = 2, [int]$BaseSeconds = 2, [int]$MaxSeconds = 300)
+    $poll = [math]::Max(1, $PollSeconds)
+    return [int][math]::Max($poll, (Get-AmeenReconnectDelaySeconds -Attempt $Streak -BaseSeconds $BaseSeconds -MaxSeconds $MaxSeconds))
 }
 
 function Invoke-AmeenSqlReconnect {
