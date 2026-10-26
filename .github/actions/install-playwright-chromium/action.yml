@@ -1,0 +1,106 @@
+name: Install Playwright Chromium (cached)
+description: >-
+  يثبّت Chromium واعتمادياته بنفس الأمر السابق حرفياً (npx playwright install --with-deps chromium)،
+  لكن من كاش لمتصفح Playwright ولحزم .deb التي يجلبها --with-deps، بدل الشبكة في كل تشغيل.
+
+# ⚠️ لماذا (قياس 2026-10-26 على 20 تشغيلاً): 15 من 60 وظيفة استغرق فيها هذا التثبيت 7.5–12 دقيقة.
+#   المتصفح نفسه ينزل من CDN في ~5 ثوانٍ؛ البطء كله في --with-deps: خطوط (fonts-unifont،
+#   fonts-wqy-zenhei، …) من مرآة azure.archive.ubuntu.com بسرعة 37.8 kB/s (10 دقائق و52 ثانية).
+#
+# البيئة لا تتغيّر: الأمر نفسه يعمل دائماً، فيثبّت الحزم نفسها بالإصدارات التي يختارها apt من
+#   فهرسه الحالي. الكاش يوفّر ملفات .deb فقط في /var/cache/apt/archives، وapt لا يستعمل ملفاً
+#   هناك إلا إن طابق حجمه وبصمته SHA256 ما في فهرس Packages الموقَّع؛ وإلا تجاهله ونزّل الأصلي.
+#   فملف .deb عالق أو مُتلاعَب به لا يُثبَّت أبداً — أسوأ حالاته العودة إلى التنزيل كما اليوم.
+#
+# الثقة في الكاش: لا أسرار ولا مخرجات بناء — متصفح Playwright العام وحزم Ubuntu العامة فقط.
+#   كاش GitHub معزول بالنطاق: تشغيل PR يقرأ كاش فرعه وكاش main ويكتب في نطاق فرعه وحده، فلا
+#   يستطيع PR أن يغيّر ما تقرؤه PRs أخرى أو main. ولا يُستعمل هذا من أي workflow بـpull_request_target.
+#
+# عند Cache Miss: يُنزَّل كل شيء من الشبكة كما قبل هذا التعديل تماماً، ثم يُحفظ الكاش. فشل
+#   الحفظ (سباق بين وظيفتين على المفتاح نفسه) لا يُفشل الوظيفة.
+#
+# المفاتيح:
+#   المتصفح: نظام الصورة + المعمارية + إصدار playwright المثبّت فعلاً من package-lock.
+#   حزم apt: نفسها + إصدار صورة العدّاء (ImageVersion)؛ عند صورة جديدة يُستعاد أقرب كاش لنفس
+#   النظام، فيستعمل apt ما يطابق منه وينزّل الباقي، ويُحفظ كاش جديد بالمفتاح الدقيق.
+
+runs:
+  using: composite
+  steps:
+    - name: Compute Playwright cache keys
+      id: keys
+      shell: bash
+      run: |
+        set -euo pipefail
+        version="$(node -p "require('playwright/package.json').version")"
+        : "${ImageOS:?ImageOS غير معرّف — ليس عدّاء GitHub مستضافاً}"
+        : "${ImageVersion:?ImageVersion غير معرّف — ليس عدّاء GitHub مستضافاً}"
+        echo "Playwright ${version} على ${ImageOS} ${ImageVersion} (${RUNNER_ARCH})"
+        {
+          echo "browsers=playwright-browsers-v1-${ImageOS}-${RUNNER_ARCH}-${version}"
+          echo "apt=playwright-apt-v1-${ImageOS}-${RUNNER_ARCH}-${version}-${ImageVersion}"
+          echo "apt_prefix=playwright-apt-v1-${ImageOS}-${RUNNER_ARCH}-"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Restore Playwright browser cache
+      id: browsers
+      uses: actions/cache/restore@v4
+      with:
+        path: ~/.cache/ms-playwright
+        key: ${{ steps.keys.outputs.browsers }}
+
+    - name: Restore Playwright apt package cache
+      id: debs
+      uses: actions/cache/restore@v4
+      with:
+        path: ~/.cache/playwright-apt-debs
+        key: ${{ steps.keys.outputs.apt }}
+        restore-keys: ${{ steps.keys.outputs.apt_prefix }}
+
+    - name: Seed apt archives from cache
+      shell: bash
+      run: |
+        set -euo pipefail
+        dir="$HOME/.cache/playwright-apt-debs"
+        count=0
+        if [ -d "$dir" ]; then
+          count="$(find "$dir" -maxdepth 1 -name '*.deb' | wc -l)"
+        fi
+        if [ "$count" -gt 0 ]; then
+          sudo cp -n "$dir"/*.deb /var/cache/apt/archives/
+        fi
+        echo "playwright-apt-cache: ${count} حزمة .deb مستعادة (المتصفح من الكاش: ${{ steps.browsers.outputs.cache-hit == 'true' }})"
+
+    - name: Install Playwright Chromium browser
+      shell: bash
+      run: npx playwright install --with-deps chromium
+
+    - name: Collect apt packages for cache
+      id: collect
+      if: steps.debs.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        dir="$HOME/.cache/playwright-apt-debs"
+        rm -rf "$dir"
+        mkdir -p "$dir"
+        find /var/cache/apt/archives -maxdepth 1 -name '*.deb' -exec cp {} "$dir"/ \;
+        count="$(find "$dir" -maxdepth 1 -name '*.deb' | wc -l)"
+        echo "playwright-apt-cache: ${count} حزمة .deb للحفظ ($(du -sh "$dir" | cut -f1))"
+        echo "count=${count}" >> "$GITHUB_OUTPUT"
+
+    - name: Save Playwright apt package cache
+      if: steps.debs.outputs.cache-hit != 'true' && steps.collect.outputs.count != '0'
+      continue-on-error: true
+      uses: actions/cache/save@v4
+      with:
+        path: ~/.cache/playwright-apt-debs
+        key: ${{ steps.keys.outputs.apt }}
+
+    - name: Save Playwright browser cache
+      if: steps.browsers.outputs.cache-hit != 'true'
+      continue-on-error: true
+      uses: actions/cache/save@v4
+      with:
+        path: ~/.cache/ms-playwright
+        key: ${{ steps.keys.outputs.browsers }}

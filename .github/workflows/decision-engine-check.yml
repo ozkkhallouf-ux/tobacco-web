@@ -33,9 +33,20 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
+      # psql 16 مثبّت مسبقاً في صورة ubuntu-24.04؛ apt كان يضيف الحزمة الوصفية postgresql-client
+      # وحدها بعد `apt-get update` (10–47s). التثبيت يبقى احتياطاً، والإصدار يُتحقق منه.
       - name: Install Postgres client
-        run: sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql-client
-      - run: npx playwright install --with-deps chromium
+        run: |
+          set -euo pipefail
+          if ! command -v psql >/dev/null; then
+            echo "psql غير مثبّت مسبقاً على العدّاء — تثبيت احتياطي من apt"
+            sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql-client
+          fi
+          psql --version
+          psql --version | grep -qE '\(PostgreSQL\) 16\.'
+      # نفس `npx playwright install --with-deps chromium` حرفياً، من كاش موثوق.
+      - name: Install Playwright Chromium browser
+        uses: ./.github/actions/install-playwright-chromium
       - name: Run project check
         env:
           PGHOST: 127.0.0.1

@@ -126,6 +126,7 @@ export const CHECKS = [
   'check-receivables-account-currency.mjs',
   'check-receivables-last-activity.mjs',
   'check-replace-path-item-guid.mjs',
+  'check-run-checks-shard.mjs',
   'check-sales-invoice-pdf-bidi.mjs',
   'check-sales-invoice-print-grace.mjs',
   'check-sales-line-items-pipeline.mjs',
