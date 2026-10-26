@@ -155,6 +155,18 @@ test("المبالغ تُحوَّل لعملة الفاتورة بـCurrencyVal 
   assert.equal(model.buildInvoice(h, [], null).customerBalanceFound, false);
 });
 
+test("«تدوير» TotalExtra: يُنقل بعملة الفاتورة وبخانتين كبقية مبالغ الرأس، وغيابه صفر", () => {
+  const row = { invoice_guid: G1, invoice_number: 5, invoice_date: "2026-10-26", type_guid: WHOLESALE, type_name: "مبيعات", total: 111.51, discount: 0, first_pay: 0, currency_val: 1, currency_iso: "USD", line_count: 1 };
+  assert.equal(model.headerFromRow(row, {}).extra, 0, "بلا عمود ⇒ صفر");
+  assert.equal(model.headerFromRow({ ...row, total_extra: null }, {}).extra, 0);
+  // استعلام الأرشفة يقرؤه decimal(28,6): 20.4906 ⇒ 20.49 كما يقرؤه search-query.sql بخانتين.
+  assert.equal(model.headerFromRow({ ...row, total_extra: 20.4906 }, {}).extra, 20.49);
+  assert.equal(model.headerFromRow({ ...row, total_extra: 0.005 }, {}).extra, 0.01, "نصف السنت بعيداً عن الصفر كـCAST");
+  assert.equal(model.headerFromRow({ ...row, total_extra: 1.005 }, {}).extra, 1.01, "تمثيل الفاصلة العائمة لا يقلب التقريب");
+  assert.equal(model.headerFromRow({ ...row, total_extra: 0.014999 }, {}).extra, 0.01);
+  assert.equal(Math.round(model.headerFromRow({ ...row, total_extra: 0.01, currency_val: 0.0001, currency_iso: "SYP" }, {}).extra), 100, "÷ CurrencyVal");
+});
+
 test("A5 غير متاح ما لم يُفعَّل في الإعداد", () => {
   assert.equal(paperFor("A4", {}).label, "A4");
   assert.throws(() => paperFor("A5", {}));
@@ -209,8 +221,15 @@ const SEARCH_ROWS = {
     { invoice_guid: G1, invoice_number: 42, invoice_date: "2026-10-22", type_guid: WHOLESALE, type_name: "مبيعات", bill_type: 1, is_posted: 1, customer_name: "زبون تجريبي", total: 286, discount: 0, first_pay: 100, currency_val: 1, currency_iso: "USD", line_count: 2 },
     { invoice_guid: G2, invoice_number: 42, invoice_date: "2026-10-20", type_guid: CASHIER, type_name: "مبيعات مركز", bill_type: 1, is_posted: 1, customer_name: "", total: 5, discount: 0, first_pay: 5, currency_val: 1, currency_iso: "USD", line_count: 1 },
   ],
+  // جملة بتدوير (TotalExtra) كما يرجعه search-query.sql: 3000.98 + 0.02 = 3001.
+  43: [
+    { invoice_guid: G3, invoice_number: 43, invoice_date: "2026-10-26", type_guid: WHOLESALE, type_name: "مبيعات", bill_type: 1, is_posted: 1, customer_name: "زبون تجريبي", total: 3000.98, discount: 0, first_pay: 1000, total_extra: 0.02, currency_val: 1, currency_iso: "USD", line_count: 2 },
+  ],
 };
 const LINES = {
+  [G3]: [
+    { item_name: "دخان تجريبي أحمر", input_unit: 1, unit1_name: "كروز", unit2_name: "كرتونة", unit3_name: "", unit2_fact: 50, unit3_fact: 0, qty: 10 },
+  ],
   [G1]: [
     { item_name: "دخان تجريبي أحمر", input_unit: 2, unit1_name: "كروز", unit2_name: "كرتونة", unit3_name: "", unit2_fact: 50, unit3_fact: 0, qty: 50 },
     { item_name: "دخان تجريبي أزرق", input_unit: 1, unit1_name: "كروز", unit2_name: "كرتونة", unit3_name: "", unit2_fact: 50, unit3_fact: 0, qty: 10 },
@@ -299,6 +318,18 @@ test("PDF حقيقي: خط Cairo مضمَّن، صفحة A4 واحدة، وA5 ب
   } finally {
     await renderer.close();
   }
+});
+
+test("A4 اليدوية: فاتورة بتدوير تُطبع بسطر «تدوير» والصافي والمتبقي كما في قيد الأمين", async () => {
+  const { app, renderer } = makeApp({ browserPath: "" });
+  let html = "";
+  const realRender = renderer.render;
+  renderer.render = async (h, paper, out) => { html = h; return realRender(h, paper, out); };
+  for (const m of await app.search(43)) app.knownNumbers.set(m.guid, 43);
+  await app.preview(G3, "A4");
+  const text = html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+  assert.match(text, /تدوير \$ 0\.02 الصافي \$ 3,001 المدفوع \$ 1,000 المتبقي من هذه الفاتورة \$ 2,001/);
+  assert.match(text, /إجمالي الفاتورة \$ 3,000\.98/, "إجمالي البضاعة بلا تغيير");
 });
 
 test("dryRun: لا إرسال للطابعة إطلاقاً ويُسجَّل الحدث", async () => {
