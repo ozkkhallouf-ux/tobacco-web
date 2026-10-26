@@ -230,6 +230,19 @@ for (const name of [
   "agent: a disconnect inside detection restarts the cycle without advancing the watermark",
   "agent: unexpected errors are logged as FATAL before exit",
   "agent: a broken connection is replaced, never reused",
+  "disconnect at first query: watermark not advanced (memory and disk)",
+  "disconnect at first query: no event and no seq allocated",
+  "disconnect mid-cycle: nothing emitted, watermark and checkpoint unchanged",
+  "outbox write failure after reads: not treated as a SQL disconnect (agent stops instead)",
+  "outbox write failure after reads: nothing saved, disk state and watermark unchanged",
+  "after reconnect: both invoices from the outage emitted exactly once",
+  "after reconnect: seq strictly increasing from the last checkpoint",
+  "after reconnect: watermark advances only after the successful cycle",
+  "after reconnect: re-reading the same invoices creates no duplicate",
+  "agent restart after recovery: no lost and no duplicate events",
+  "agent: only failures before Resolve can trigger SQL recovery",
+  "agent: database name re-verified after every reconnect",
+  "agent: dead pooled connections cleared before reopening",
 ]) assert.ok(psTest.includes(`'${name}'`), `اختبار PowerShell إلزامي مفقود: ${name}`);
 
 const rollback = read(rollbackRel).replace(/--.*$/gm, "");
@@ -267,6 +280,8 @@ const libCode = lib.replace(/#.*$/gm, "");
   assert.match(loop, /catch \{ if \(Resume-AmeenSqlAfterFailure \$_ "بداية الدورة" -AnySqlIsLost\) \{ continue \} else \{ throw \} \}/, "انقطاع في بداية الدورة ⇒ إعادة اتصال ثم الدورة من جديد");
   assert.match(loop, /if \(Resume-AmeenSqlAfterFailure \$_ "الرصد والمطابقة"\) \{ continue \}/, "انقطاع أثناء الرصد ⇒ لا تقدّم للعلامة");
   assert.ok(loop.indexOf("Add-AmeenOutboxEvents -Dir $OutboxDir -Events $events") < loop.indexOf("$state.watermark = Format-AmeenSqlDate $nowSrv"), "العلامة بعد كتابة الأحداث");
+  const rd = loop.indexOf("$readsDone = $true"), rs = loop.indexOf("$events = Resolve-AmeenInvoiceChanges"), gd = loop.indexOf("if ($readsDone) { throw }"), rm = loop.indexOf('Resume-AmeenSqlAfterFailure $_ "الرصد والمطابقة"');
+  assert.ok(rd > 0 && rd < rs && gd > rs && gd < rm, "التعافي من SQL قبل Resolve فقط؛ فشل الكتابة بعده FATAL (Codex P1 على #397)");
 }
 assert.match(agentCode, /Write-AgentLog \("FATAL: /, "لا خروج صامت: الخطأ غير المتوقع يُسجَّل");
 assert.match(agentCode, /\[int\]\$MaxReconnectAttempts = 288/, "حدّ أعلى لمحاولات إعادة الاتصال");

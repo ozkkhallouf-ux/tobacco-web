@@ -139,6 +139,8 @@ function Invoke-AmeenRead([string]$Sql, [int]$TimeoutSeconds = 15) {
 function Open-AmeenSqlConnection {
     if ($null -ne $script:conn) {
         try { if ($script:conn.State -ne [System.Data.ConnectionState]::Closed) { $script:conn.Close() } } catch { Write-Verbose ("close: " + $_.Exception.GetType().Name) }
+        # مجمّع SqlClient قد يعيد مقبضاً ميتاً بعد الإسبات: يُفرَّغ قبل الفتح الجديد (مأخوذ من #397).
+        try { [System.Data.SqlClient.SqlConnection]::ClearPool($script:conn) } catch { Write-Verbose ("clearpool: " + $_.Exception.GetType().Name) }
         try { $script:conn.Dispose() } catch { Write-Verbose ("dispose: " + $_.Exception.GetType().Name) }
     }
     $script:conn = New-Object System.Data.SqlClient.SqlConnection($csb.ConnectionString)
@@ -256,6 +258,9 @@ try {
         $q = Get-AmeenInvoiceDetectionSql -Watermark $wm
         $ops = @{}
         $lockErrors = 0
+        # بعد اكتمال القراءات تبدأ الكتابة على الحالة في الذاكرة والصندوق: أي خطأ بعدها (قرص مثلاً) ليس انقطاع
+        # SQL ولا يُتعافى منه هنا، بل يوقف الوكيل (FATAL) قبل حفظ حالة تحمل أحداثاً لم تُكتب (Codex P1 على #397).
+        $readsDone = $false
         try {
             foreach ($r in (Invoke-AmeenRead $q.Log).Rows) {
                 $g = ConvertTo-AmeenGuidText $r.RecGUID; if (-not $g) { continue }
@@ -295,6 +300,7 @@ try {
                 if (-not $reconcileTruncated) { $lastReconcile = Get-Date }
             }
 
+            $readsDone = $true
             $events = Resolve-AmeenInvoiceChanges -State $state -Observations $observations.ToArray()
             foreach ($obs in $observations) {
                 if ($fp -and $fp.ContainsKey($obs.guid) -and $state.bills.ContainsKey($obs.guid) -and $state.bills[$obs.guid].fp -ne $fp[$obs.guid]) {
@@ -317,6 +323,7 @@ try {
             # أخطاء SQL تصل ملفوفة بـ MethodInvocationException؛ نفحص السلسلة كلها.
             $ex = $_.Exception; $isSql = $false
             while ($null -ne $ex) { if ($ex -is [System.Data.SqlClient.SqlException]) { $isSql = $true; break }; $ex = $ex.InnerException }
+            if ($readsDone) { throw }
             # انقطاع الاتصال (لا مهلة قفل على اتصال سليم) ⇒ إعادة اتصال ثم الدورة كاملة من العلامة نفسها.
             if (Resume-AmeenSqlAfterFailure $_ "الرصد والمطابقة") { continue }
             if (-not $isSql) { throw }

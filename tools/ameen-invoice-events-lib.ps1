@@ -979,6 +979,8 @@ function Get-AmeenSqlFailureInfo {
             # رقم 0 مع «connection is broken / transport-level / network-related» (ثبت باختبار حي: الاتصال يبقى
             # Open بعد عودة الخادم بينما الجلسة ميتة) ⇒ انقطاع لا خطأ استعلام.
             if ([string]$cur.Message -match $script:AmeenSqlConnectionLostText) { $info.connection_hint = $true }
+            # الخطورة 20 فأعلى تعني أن الخادم أغلق الجلسة (أخطاء النقل والجلسة) — مأخوذ من #397.
+            if ($null -ne $cur.PSObject.Properties["Class"] -and [int]$cur.Class -ge 20) { $info.connection_hint = $true }
             break
         }
         if ($name -eq "InvalidOperationException" -and [string]$cur.Message -match '(?i)connection') { $info.type = $name; $info.connection_hint = $true }
