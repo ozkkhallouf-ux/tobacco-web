@@ -18,6 +18,7 @@ SELECT TOP (50)
   CAST(ISNULL(u.Total,     0) AS decimal(18,2))     AS total,
   CAST(ISNULL(u.TotalDisc, 0) AS decimal(18,2))     AS discount,
   CAST(ISNULL(u.FirstPay,  0) AS decimal(18,2))     AS first_pay,
+  CAST(ISNULL(u.TotalExtra, 0) AS decimal(18,2))    AS total_extra,
   CAST(ISNULL(u.CurrencyVal, 1) AS decimal(28,12))  AS currency_val,
   LTRIM(RTRIM(ISNULL(cur.CurrencyISO, N'')))        AS currency_iso,
   (SELECT COUNT(*) FROM dbo.bi000 c WHERE c.ParentGUID = u.GUID) AS line_count

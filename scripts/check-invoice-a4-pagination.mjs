@@ -37,10 +37,10 @@ const NAMES = ["اوسكار طويل", "اوسكار سليم فضي", "جيت�
   "اليغانس طويل فضي", "غلواز كوين أحمر", "غلواز كوين أصفر", "أوريس منغا", "روز طويل فضي", "يونايتد"];
 const LONG = " صنف باسم طويل جداً جداً لاختبار التفاف السطر داخل خلية الجدول عند الطباعة";
 
-function invoice(n, { discount = false, longItems = false } = {}) {
+function invoice(n, { discount = false, longItems = false, extra = false } = {}) {
   return {
     number: 9001, date: "2026-10-25", customer: "زبون اختبار", currencyIso: "USD",
-    total: 5538, discount: discount ? 38 : 0, firstPay: 0, customerBalanceFound: true, customerBalance: 12670,
+    total: 5538, discount: discount ? 38 : 0, extra: extra ? 0.17 : 0, firstPay: 0, customerBalanceFound: true, customerBalance: 12670,
     items: Array.from({ length: n }, (_, i) => ({ name: NAMES[i % NAMES.length] + (longItems ? LONG : ""), unit: "كرتونة", qty: (i % 3) + 1 })),
   };
 }
@@ -90,6 +90,13 @@ try {
   const f1100 = await layout(11, {});
   assert.equal(f1100.length, 1, "فاتورة 11 سطراً بلا حسم تخرج صفحة واحدة");
   assert.deepEqual(f1100[0], { row: true, sums: true, seal: true, foot: true }, "الصفحة الواحدة تحمل الجدول والملخص والختم والتذييل");
+  // سطرا «تدوير» و«الصافي» يأخذان مكان سطرين من الجدول كسطرَي الحسم والصافي تماماً:
+  // صفحة واحدة حتى 10 أسطر بتدوير، و9 بحسم وتدوير معاً (و12 بلا ملخص إضافي).
+  for (const [n, opts] of [[10, { extra: true }], [9, { discount: true, extra: true }]]) {
+    const one = await layout(n, opts);
+    assert.equal(one.length, 1, `فاتورة ${n} أسطر ${JSON.stringify(opts)} تخرج صفحة واحدة`);
+    assert.deepEqual(one[0], { row: true, sums: true, seal: true, foot: true }, "الجدول والملخص والختم والتذييل في الصفحة نفسها");
+  }
 
   // ٢) لا قص ولا تصغير: أحجام الخط وعرض الجدول كما هي في وسط الطباعة.
   await page.emulateMedia({ media: "print" });
@@ -105,7 +112,9 @@ try {
   await page.emulateMedia({ media: null });
 
   // ٣) قصيرة وطويلة ومتعددة الصفحات، A4 وA5.
-  const VARIANTS = [["A4", {}], ["A4", { discount: true }], ["A4", { longItems: true }], ["A5", {}]];
+  // الحسم والتدوير معاً أطول ملخص ممكن (سطرا الحسم والتدوير والصافي).
+  const VARIANTS = [["A4", {}], ["A4", { discount: true }], ["A4", { discount: true, extra: true }], ["A4", { longItems: true }],
+    ["A5", {}], ["A5", { discount: true, extra: true }]];
   for (const [paperKey, opts] of VARIANTS) {
     for (const n of [1, 8, 10, 11, 12, 13, 15, 20, 22, 25, 30, 40, 45, 50, 60]) {
       const pages = await layout(n, opts, paperKey);
@@ -124,4 +133,4 @@ try {
 } finally {
   await browser.close();
 }
-console.log(`check-invoice-a4-pagination: اجتاز ${cases + 2} حالة (فاتورة 1100 صفحة واحدة، لا تذييل ولا ختم منفردان، الخط والعرض ثابتان).`);
+console.log(`check-invoice-a4-pagination: اجتاز ${cases + 4} حالة (فاتورة 1100 صفحة واحدة، والتدوير بلا ورقة زائدة حتى 10 أسطر، لا تذييل ولا ختم منفردان، الخط والعرض ثابتان).`);

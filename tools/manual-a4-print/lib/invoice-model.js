@@ -54,12 +54,21 @@ function headerFromRow(row, config) {
     total: Number(row.total) / cv,
     discount: Number(row.discount) / cv,
     firstPay: Number(row.first_pay) / cv,
+    extra: round2(Number(row.total_extra) || 0) / cv,
     currencyVal: cv,
     currencyIso: String(row.currency_iso || "").trim().toUpperCase(),
     lineCount: Number(row.line_count) || 0,
     printable: block === "",
     blockReason: block,
   };
+}
+
+// «تدوير» الإجمالي بخانتين كبقية مبالغ الرأس: استعلام البحث يقرؤه decimal(18,2)، أما
+// استعلام عامل الأرشفة فيقرؤه decimal(28,6) لبصمته، فلا يختلف المطبوع بين المسارين.
+// التقريب بعيداً عن الصفر كـCAST في SQL Server؛ الهامش 1e-7 سنتاً يصحّح تمثيل الفاصلة
+// العائمة (1.005 × 100 = 100.4999…) ولا يمسّ قيمة بستّ خانات كما يقرؤها الاستعلام.
+function round2(n) {
+  return Math.sign(n) * Math.round(Math.abs(n) * 100 + 1e-7) / 100;
 }
 
 function round3(n) {

@@ -19,6 +19,8 @@ SELECT
   CAST(ISNULL(u.Total,    0) AS decimal(18,2))         AS total,
   CAST(ISNULL(u.TotalDisc,0) AS decimal(18,2))         AS discount,
   CAST(ISNULL(u.FirstPay, 0) AS decimal(18,2))         AS first_pay,
+  -- «تدوير» الإجمالي (الإضافة): يدخل الصافي والمتبقي = Total − TotalDisc + TotalExtra − FirstPay.
+  CAST(ISNULL(u.TotalExtra,0) AS decimal(18,2))        AS total_extra,
   -- عملة الفاتورة: القيم أعلاه مخزَّنة بعملة الأساس (دولار). المبلغ المعروض
   -- = القيمة الخام ÷ CurrencyVal، والتسمية من CurrencyISO. لا نص عملة ثابت.
   CAST(ISNULL(u.CurrencyVal, 1) AS decimal(28,12))     AS currency_val,
