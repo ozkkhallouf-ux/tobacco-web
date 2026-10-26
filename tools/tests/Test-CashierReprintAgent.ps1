@@ -172,6 +172,7 @@ try {
     }
     $out = @(Invoke-CashierAgentPass -Config $cfg -Root $root -Print $tamperPrint -GetOwner $ownerSvc)
     Assert "تعديل التذكرة بعد قراءتها لا أثر له على الطباعة" ($script:prints.Count -eq 1 -and @($script:prints | Where-Object { $_.Number -eq 999 }).Count -eq 0 -and $script:prints[0].Number -eq 14)
+    $script:prints.Clear()
 
     # ── مهلة الالتقاط وانحراف الساعة ─────────────────────────────────────────
     $root = New-AgentRoot
