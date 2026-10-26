@@ -154,10 +154,17 @@ OZK2026 لا يحوي XPRINTER، والجهازان لا يتشاركان طاب
 والطابعة. حساب الخدمة يبقى بلا صلاحيات مدير.
 
 **خطوات النشر لاحقاً، كلٌّ بموافقة منفصلة:**
-1. صلاحيات مجلدات `agent` (`agent` محمي من الوراثة وبلا CREATOR OWNER): لحساب الخدمة على `inbox` إنشاء ملفات
-   على المجلد وحده (`WD`) بلا أي حق على الملفات، وOWNER RIGHTS `(OI)(IO)(RC)` كي لا يغيّر مالك التذكرة صلاحياتها،
-   فالكتابة ممكنة بمقبض الإنشاء وحده. وله قراءة `results` وسرد `processing`، ولا شيء على `rejected` ولا على ملف
-   القفل. ولـOZKKH تعديل `agent` و`logs` و`requests` و`locks`.
+1. صلاحيات مجلدات `agent`، بالأوامر نفسها التي اختُبرت معزولةً بتوكن حساب الخدمة على OZKUSER (2026-10-26).
+   `<SVC>` معرّف حساب الخدمة و`<KH>` معرّف حساب الكاشير؛ تُنشأ المجلدات الفرعية بعد ضبط `agent`:
+   ```
+   icacls agent /inheritance:r /grant:r *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F *<KH>:(OI)(CI)M *<SVC>:(OI)(NP)(RX)
+   icacls agent\inbox /grant *<SVC>:(WD,X,RA,S) *S-1-3-4:(OI)(IO)(RA)
+   icacls agent\results /grant *<SVC>:(OI)(CI)RX
+   ```
+   لا CREATOR OWNER في أي مكان: حساب الخدمة يكتب التذكرة بمقبض الإنشاء وحده، وبعد إغلاقه لا يملك عليها إلا
+   ما تعطيه OWNER RIGHTS (قراءة الخصائص)، فلا كتابة ولا حذف ولا تغيير صلاحيات، قبل النقل إلى `processing` وبعده.
+   ولا شيء له على `processing` و`rejected` (يكفي `Test-Path` على تذكرته بلا سرد). ولـOZKKH أيضاً تعديل `logs`
+   و`requests` و`locks`.
 2. قراءة `sql.secret` لـOZKKH بتوكن Limited، لأن المدراء ينزلون إلى deny-only.
 3. تسجيل المهمة يدوياً من القالب بعد تبديل اسم الحساب، مثلاً:
    `Register-ScheduledTask -TaskName "OZK Cashier Reprint Agent" -Xml (Get-Content -Raw agent-task.example.xml)`.
