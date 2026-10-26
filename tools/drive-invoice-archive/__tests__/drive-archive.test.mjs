@@ -420,6 +420,23 @@ const L1 = "eeeeeeee-0000-4000-8000-000000000001";
 const L2 = "eeeeeeee-0000-4000-8000-000000000002";
 const MAT2 = "cccccccc-0000-4000-8000-000000000002";
 
+test("PDF الأرشيف: «تدوير» TotalExtra سطر مستقل يدخل الصافي والمتبقي، وإجمالي البضاعة كما هو", async () => {
+  const t = await setup({ mode: "dry-run" });
+  const htmls = [];
+  const realRender = t.renderer.render;
+  t.renderer.render = async (html, p, out) => { htmls.push(html); return realRender(html, p, out); };
+  // التدوير بستّ خانات كما يقرؤه changed-invoices-query.sql ⇒ يُعرض بخانتين.
+  t.ameen.add({ guid: G1, number: 601, total: 111.51, totalExtra: 20.4906, firstPay: 50 });
+  t.ameen.add({ guid: G2, number: 602, total: 100, totalExtra: 0 });
+  t.advance(300);
+  await t.cycle();
+  assert.equal(htmls.length, 2);
+  const text = (n) => htmls.find((h) => h.includes(`رقم: ${n} `)).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+  assert.match(text(601), /تدوير \$ 20\.49 الصافي \$ 132 المدفوع \$ 50 المتبقي من هذه الفاتورة \$ 82/);
+  assert.match(text(601), /إجمالي الفاتورة \$ 111\.51/);
+  assert.ok(!/تدوير|الصافي/.test(text(602)), "فاتورة بلا تدوير ولا حسم كما كانت");
+});
+
 async function archivedOnce(patch = {}) {
   const t = await setup({ mode: "dry-run" });
   t.ameen.add({ guid: G1, number: 501, ...patch });

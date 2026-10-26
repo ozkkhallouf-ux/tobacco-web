@@ -14,6 +14,8 @@ import fs from "node:fs";
 import path from "node:path";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
+import crypto from "node:crypto";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const AUTOPRINT_DIR = path.join(__dirname, "..");
@@ -217,6 +219,98 @@ await test("invoice-html.js: صفة البيع موجودة", () => {
 
 await test("invoice-html.js: عدم توفّر الرصيد يُعرض كـ'غير متاح' فقط عند customerBalanceFound=false، وليس صفراً ملفّقاً", () => {
   assert.ok(/inv\.customerBalanceFound[\s\S]{0,400}غير متاح/.test(invoiceHtmlSrc));
+});
+
+console.log("\n== wholesale-regression: «تدوير» الإجمالي TotalExtra في ملخص الفاتورة ==");
+
+// قيد الأمين (مثبت على AmnDb002 في 68/68 فاتورة جملة): أثر الفاتورة على الحساب =
+// Total − TotalDisc + TotalExtra − FirstPay. أرقام اصطناعية كلها، بلا بيانات زبائن.
+const { buildInvoiceHtml, invoiceSummary } = createRequire(import.meta.url)(path.join(AUTOPRINT_DIR, "invoice-html.js"));
+const ITEMS = [{ name: "صنف أ", qty: 2, unit: "كرتونة" }, { name: "صنف ب", qty: 1.5, unit: "علبة" }];
+function sumInv(patch) {
+  return { number: 1, date: "2026-10-26", customer: "زبون اختبار", currencyIso: "USD", currencyVal: 1,
+    total: 100, discount: 0, firstPay: 0, customerBalanceFound: false, customerBalance: null, items: ITEMS, ...patch };
+}
+// صفوف كتلة الختام بترتيبها: [التسمية، النص المعروض بلا وسوم].
+function closingRows(html) {
+  const block = html.slice(html.indexOf('<div class="closing">'), html.indexOf('<div class="sale-desc">'));
+  return [...block.matchAll(/<div class="row"><span>([^<]+)<\/span><b[^>]*>([\s\S]*?)<\/b><\/div>/g)]
+    .map((m) => [m[1], m[2].replace(/<[^>]+>/g, "").trim()]);
+}
+const noFont = (html) => html.replace(/<style>@font-face[^<]*<\/style>/, "<style></style>");
+const sha = (text) => crypto.createHash("sha256").update(text).digest("hex");
+
+await test("تدوير ١: فاتورة بلا تدوير ⇒ ناتج main نفسه بايتاً ببايت (بصمات مرجعية من 27311e2، بلا الخط المضمَّن)", () => {
+  const goldens = [
+    [sumInv({ total: 177.86, customerBalanceFound: true, customerBalance: 178 }), "79d50215f92aa5f6d3ffcb835610e49e5c395898751a8b2f04c272b1fa5f928d"],
+    [sumInv({ number: 2, discount: 1.83, firstPay: 50 }), "81f15781576a205cc1374a3bc7c219706378426130d134a58e80eaa759d924e0"],
+    [sumInv({ number: 3, customer: "", currencyIso: "SYP", currencyVal: 0.00007547, total: 1350000, firstPay: 350000,
+      customerBalanceFound: true, customerBalance: -15000, items: [] }), "e9668edda83b04022659628b9471ad3f0c96a5fcddd0e2fb1e9ac5db19057f6b"],
+  ];
+  for (const [inv, hash] of goldens) {
+    for (const extra of [undefined, 0, -0, null, "0", NaN]) {
+      const html = buildInvoiceHtml(extra === undefined ? inv : { ...inv, extra });
+      assert.equal(sha(noFont(html)), hash, `فاتورة ${inv.number} extra=${String(extra)}: تغيّر الناتج`);
+      assert.ok(!html.includes("تدوير"), "سطر تدوير بلا تدوير");
+    }
+  }
+  assert.ok(!closingRows(buildInvoiceHtml(sumInv({}))).some(([k]) => k === "الصافي"), "الصافي يظهر بلا حسم ولا تدوير");
+});
+
+await test("تدوير ٢: تدوير وحده (3000.98 + 0.02) ⇒ سطر «تدوير» و«الصافي» 3,001، وإجمالي البضاعة 3,000.98 بلا تغيير", () => {
+  const html = buildInvoiceHtml(sumInv({ total: 3000.98, extra: 0.02 }));
+  assert.deepEqual(closingRows(html).slice(0, 4), [["تدوير", "$ 0.02"], ["الصافي", "$ 3,001"], ["المدفوع", "$ 0"], ["المتبقي من هذه الفاتورة", "$ 3,001"]]);
+  assert.match(html, /<div class="big"><span dir="ltr">\$ 3,000.98<\/span><\/div>/, "صندوق إجمالي الفاتورة تغيّر");
+  assert.match(html, /<td colspan="2">إجمالي الفاتورة<\/td>\s*<td><span dir="ltr">\$ 3,000.98<\/span><\/td>/, "سطر مجموع الأسطر تغيّر");
+});
+
+await test("تدوير ٣: تدوير مع مدفوع (9.99 + 0.01 − 5 ⇒ 5) وتدوير كبير بخانتين (111.51 + 20.49 − 50 ⇒ 82)", () => {
+  assert.deepEqual(closingRows(buildInvoiceHtml(sumInv({ total: 9.99, extra: 0.01, firstPay: 5 }))).slice(0, 4),
+    [["تدوير", "$ 0.01"], ["الصافي", "$ 10"], ["المدفوع", "$ 5"], ["المتبقي من هذه الفاتورة", "$ 5"]]);
+  assert.deepEqual(closingRows(buildInvoiceHtml(sumInv({ total: 111.51, extra: 20.49, firstPay: 50 }))).slice(0, 4),
+    [["تدوير", "$ 20.49"], ["الصافي", "$ 132"], ["المدفوع", "$ 50"], ["المتبقي من هذه الفاتورة", "$ 82"]]);
+});
+
+await test("تدوير ٤: حسم وتدوير معاً (حالة اصطناعية) ⇒ الحسم ثم التدوير ثم الصافي = Total − Disc + Extra", () => {
+  assert.deepEqual(closingRows(buildInvoiceHtml(sumInv({ total: 100, discount: 1.83, extra: 0.83, firstPay: 9 }))).slice(0, 5),
+    [["الحسم", "$ 1.83"], ["تدوير", "$ 0.83"], ["الصافي", "$ 99"], ["المدفوع", "$ 9"], ["المتبقي من هذه الفاتورة", "$ 90"]]);
+});
+
+await test("تدوير ٥: الليرة ⇒ التدوير بعملة الفاتورة كالحسم (مقسوماً على CurrencyVal كبقية المبالغ)", () => {
+  const cv = 0.0001;
+  const rows = closingRows(buildInvoiceHtml(sumInv({ currencyIso: "SYP", currencyVal: cv,
+    total: 1349.99 / cv, extra: 0.01 / cv, firstPay: 350 / cv })));
+  assert.deepEqual(rows.slice(0, 4).map(([k, v]) => [k, v.replace(/\s+/g, " ")]),
+    [["تدوير", "100 ل.س"], ["الصافي", "13,500,000 ل.س"], ["المدفوع", "3,500,000 ل.س"], ["المتبقي من هذه الفاتورة", "10,000,000 ل.س"]]);
+});
+
+await test("تدوير ٦: هوية الدفتر — المتبقي = Total − TotalDisc + TotalExtra − FirstPay لكل الحالات", () => {
+  const cases = [[177.86, 0, 0.14, 0], [2956.98, 0, 0.02, 0], [111.51, 0, 20.49, 50], [9.99, 0, 0.01, 5],
+    [100, 1.83, 0.83, 9], [5538, 38, 0, 0], [348.84, 0, 1.16, 350], [0, 0, 0, 0]];
+  for (const [total, discount, extra, firstPay] of cases) {
+    const s = invoiceSummary({ total, discount, extra, firstPay });
+    assert.ok(Math.abs(s.remaining - (total - discount + extra - firstPay)) <= 0.005, `${total}/${discount}/${extra}/${firstPay}`);
+    assert.ok(Math.abs(s.net - (total - discount + extra)) <= 0.005);
+  }
+  assert.deepEqual(invoiceSummary({ total: 10, discount: 0, firstPay: 4 }), { extra: 0, net: 10, remaining: 6 }, "غياب extra ⇒ صفر");
+});
+
+await test("تدوير ٧: حارس الاستعلامات — طباعة الجملة التلقائية واليدوية تقرأ TotalExtra ويُعيَّن إلى extra", () => {
+  const read = (...p) => fs.readFileSync(path.join(AUTOPRINT_DIR, "..", ...p), "utf8");
+  const reTotalExtra = /CAST\(ISNULL\(u\.TotalExtra,\s*0\) AS decimal\(18,2\)\)\s+AS total_extra,/;
+  assert.match(read("ameen-autoprint", "ameen-sales-query.sql"), reTotalExtra, "استعلام الطباعة التلقائية لا يقرأ TotalExtra");
+  assert.match(read("manual-a4-print", "lib", "search-query.sql"), reTotalExtra, "استعلام A4 اليدوية لا يقرأ TotalExtra");
+  assert.match(read("drive-invoice-archive", "lib", "changed-invoices-query.sql"), /u\.TotalExtra, 0\) AS decimal\(28,6\)\)\s+AS total_extra,/,
+    "استعلام الأرشفة لا يقرأ TotalExtra");
+  assert.match(read("manual-a4-print", "lib", "invoice-model.js"), /extra: round2\(Number\(row\.total_extra\) \|\| 0\) \/ cv,/, "invoice-model لا ينقل التدوير");
+  assert.match(watcherSrc, /extra:\s*Number\(row\.total_extra \|\| 0\) \/ cv,/, "watcher لا ينقل التدوير");
+});
+
+await test("تدوير ٨: لا معادلة ملخص ثانية — القالب وسجل watcher يستعملان invoiceSummary وحدها", () => {
+  assert.ok(!/inv\.total - inv\.discount/.test(watcherSrc), "watcher يحسب الصافي بمعادلته الخاصة");
+  assert.match(watcherSrc, /const \{ remaining \} = invoiceSummary\(inv\);/);
+  assert.equal((invoiceHtmlSrc.match(/inv\.total - inv\.discount/g) || []).length, 1, "معادلة الصافي مكررة في القالب");
+  assert.match(invoiceHtmlSrc, /const \{ extra, net, remaining \} = invoiceSummary\(inv\);/);
 });
 
 console.log("\n== wholesale-regression: بوّابة جاهزية الطابعة (إصلاح P1 على PR #208) ==");
