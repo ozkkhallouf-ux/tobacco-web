@@ -56,18 +56,20 @@ $ownerSvc = { param($p) $SVC }
 $ownerOther = { param($p) $OTHER }
 
 # طباعة حقيقية عبر Invoke-CashierReprint بجسر وهمي: الحجز والقفل والسجل كما في الإنتاج.
+# بلا GetNewClosure: في Windows PowerShell 5.1 لا يرى الـclosure دوال المكتبة المحمّلة في نطاق السكربت،
+# فتُمرَّر القيم عبر متغيرات نطاق السكربت.
 $bridge = @{ Runs = 0 }
 function New-RealPrint([string]$Root, $Config) {
-    $r = $Root; $c = $Config; $counter = $bridge
+    $script:realRoot = $Root; $script:realConfig = $Config
     return {
         param($n, $d, $id, $from)
-        $result = Invoke-CashierReprint -Config $c -Root $r -Number $n -Date $d -RequestId $id -RequestedFrom $from `
+        $result = Invoke-CashierReprint -Config $script:realConfig -Root $script:realRoot -Number $n -Date $d -RequestId $id -RequestedFrom $from `
             -Lookup { param($x) @([pscustomobject]@{ InvoiceGuid = "g1"; InvoiceNumber = $x; TypeGuid = $RETAIL; TypeName = "مبيعات مركز"; BillType = 1; InvoiceDate = "2026-10-24"; CreateDate = [datetime]"2026-10-24 10:00:00"; IsPosted = $true; RecordState = 0; Total = 1; CustomerName = "x" }) } `
             -BridgeCheck { param($a, $b) "hash" } `
-            -Runner { param($a, $b, $e, $f) $counter.Runs++; [pscustomobject]@{ ExitCode = 0; Output = "JobId : 9"; TimedOut = $false } } `
+            -Runner { param($a, $b, $e, $f) $script:bridge.Runs++; [pscustomobject]@{ ExitCode = 0; Output = "JobId : 9"; TimedOut = $false } } `
             -JobWatcher { param($a, $b) "spooler_completed" }
         return [pscustomobject]@{ Status = $result.Status; Message = $result.Message; Confirmation = [string]$result.Details.confirmation }
-    }.GetNewClosure()
+    }
 }
 
 try {
@@ -202,8 +204,8 @@ try {
     Assert "استثناء قبل الحجز ⇒ failed" ($out[0].Status -eq "failed")
     $idY = [guid]::NewGuid().ToString()
     [void](New-CashierAgentTicket $root 1 "2026-10-24" $idY "OZK2026")
-    $rootY = $root
-    $out = @(Invoke-CashierAgentPass -Config $cfg -Root $root -Print { param($n, $d, $i, $f) [void](Register-CashierReprintRequest $rootY $i $n $d); throw "boom" }.GetNewClosure() -GetOwner $ownerSvc)
+    $script:rootY = $root
+    $out = @(Invoke-CashierAgentPass -Config $cfg -Root $root -Print { param($n, $d, $i, $f) [void](Register-CashierReprintRequest $script:rootY $i $n $d); throw "boom" } -GetOwner $ownerSvc)
     Assert "استثناء بعد الحجز ⇒ uncertain" ($out[0].Status -eq "uncertain")
 
     # ── جهة Serve (حساب الخدمة) ──────────────────────────────────────────────
@@ -216,9 +218,9 @@ try {
     Assert "نبضة قديمة ⇒ agent_unavailable" ($r.Status -eq "agent_unavailable")
 
     $script:prints.Clear()
-    $agentRoot = $root; $agentCfg = $cfg; $stub = $printStub; $own = $ownerSvc
+    $script:agentRoot = $root; $script:agentCfg = $cfg
     $r = Submit-CashierAgentPrint -Config $cfg -Root $root -Number 2682 -Date "2026-10-24" -RequestId $idS -RequestedFrom "OZK2026" `
-        -Sleep { [void](Invoke-CashierAgentPass -Config $agentCfg -Root $agentRoot -Print $stub -GetOwner $own) }.GetNewClosure()
+        -Sleep { [void](Invoke-CashierAgentPass -Config $script:agentCfg -Root $script:agentRoot -Print $script:printStub -GetOwner $script:ownerSvc) }
     Assert "Serve يكتب تذكرة والعامل يطبع ⇒ النتيجة تعود sent" ($r.Status -eq "sent" -and $r.Confirmation -eq "spooler_completed" -and $script:prints.Count -eq 1)
     $r = Submit-CashierAgentPrint -Config $cfg -Root $root -Number 2682 -Date "2026-10-24" -RequestId $idS -RequestedFrom "OZK2026" -Sleep { }
     Assert "المعرّف نفسه من جديد ⇒ duplicate_request بلا تذكرة" ($r.Status -eq "duplicate_request" -and $script:prints.Count -eq 1)
@@ -233,12 +235,12 @@ try {
 
     $idP = [guid]::NewGuid().ToString()
     $script:tick = 0
-    $pRoot = $root
+    $script:pRoot = $root
     $claimOnly = {
         $script:tick += 10
-        $p = Join-Path (Get-CashierAgentPaths $pRoot).Inbox ("*.json")
-        foreach ($f in @(Get-ChildItem -Path $p -File)) { [IO.File]::Move($f.FullName, (Join-Path (Get-CashierAgentPaths $pRoot).Processing $f.Name)) }
-    }.GetNewClosure()
+        $p = Join-Path (Get-CashierAgentPaths $script:pRoot).Inbox ("*.json")
+        foreach ($f in @(Get-ChildItem -Path $p -File)) { [IO.File]::Move($f.FullName, (Join-Path (Get-CashierAgentPaths $script:pRoot).Processing $f.Name)) }
+    }
     $r = Submit-CashierAgentPrint -Config $cfg -Root $root -Number 2682 -Date "2026-10-24" -RequestId $idP -RequestedFrom "OZK2026" -Clock $clock -Sleep $claimOnly
     Assert "التقطها العامل ولم تصل النتيجة ⇒ in_progress (لا افتراض)" ($r.Status -eq "in_progress")
     Assert "حالة طلب في processing ⇒ in_progress" ((Get-CashierRequestStatus $root $idP).Status -eq "in_progress")
