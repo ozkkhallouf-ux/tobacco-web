@@ -177,7 +177,7 @@ $printButton.Add_Click({
         # «sent» = أُنشئت مهمة طباعة؛ التأكيد بعدها هو ما رآه طابور Windows فقط، لا دليل ورقي.
         $status = [string]$result.Status
         if ($status -eq "sent" -and [string]$result.Confirmation -eq "spooler_completed") { Set-Status ([string]$result.Message) "ok" }
-        elseif ($status -eq "sent" -or $status -eq "uncertain" -or $status -eq "unknown" -or $status -eq "duplicate_request") { Set-Status ([string]$result.Message) "warn" }
+        elseif ($status -eq "sent" -or $status -eq "uncertain" -or $status -eq "unknown" -or $status -eq "in_progress" -or $status -eq "duplicate_request") { Set-Status ([string]$result.Message) "warn" }
         else { Set-Status ([string]$result.Message) "error" }
     } catch {
         Set-Status ("تعذّرت العملية: " + [string]$_.Exception.Message) "error"

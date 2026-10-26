@@ -261,6 +261,12 @@ jobs:
         shell: powershell
         run: .\tools\tests\Test-CashierReprint.ps1
 
+      # العامل المحلي لإعادة الطباعة (printDispatch=agent): التذكرة الحصرية والمالك والمهلة ومنع التكرار،
+      # والاستعادة بعد انقطاع الكهرباء بلا إعادة طباعة. طباعة وهمية بلا طابعة ولا أمين.
+      - name: Cashier reprint - local print agent, power loss and recovery test
+        shell: powershell
+        run: .\tools\tests\Test-CashierReprintAgent.ps1
+
       # غلاف المهمة المجدولة لأرشفة Drive (غير مسجَّل): القفل والتزامن، المهلة وقتل الشجرة،
       # الوضع المحصور بـdry-run، ملف STOP، تنقيح السجل وتدويره — بعامل وهمي بلا أي خدمة حقيقية.
       - name: Drive archive - scheduled run wrapper test
