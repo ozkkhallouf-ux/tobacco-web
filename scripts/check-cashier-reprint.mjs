@@ -93,7 +93,43 @@ const config = JSON.parse(read('config.example.json'));
 assert.equal(config.printerName, 'XPRINTER XP-T80Q 80MM');
 assert.match(config.expectedBridgeSha256, /^[0-9a-f]{64}$/);
 
+// العامل المحلي (printDispatch=agent): حساب الخدمة يكتب تذكرة وينتظر النتيجة ولا يطبع أبداً؛ العامل يطبع
+// بجلسة الكاشير بعد التحقق، بالترتيب: المهلة ثم المالك ثم الصيغة ثم الطباعة. لا تسجيل مهام من الكود.
+const fnBody = (text, name) => {
+  const start = text.indexOf(`function ${name}`);
+  assert.ok(start >= 0, `${name} موجود`);
+  const next = text.indexOf('\nfunction ', start + 1);
+  return text.slice(start, next < 0 ? undefined : next);
+};
+const submit = fnBody(lib, 'Submit-CashierAgentPrint');
+assert.doesNotMatch(submit, /Invoke-CashierReprint|Invoke-LocalPrint|Invoke-CashierBridge|Start-CashierProcess|Register-CashierReprintRequest|& \$Print/, 'Serve في وضع العامل لا يطبع ولا يحجز');
+assert.doesNotMatch(submit, /Get-Item[^\n]*\$ticketPath/, 'Serve لا يقرأ التذكرة بعد نشرها (قد يلتقطها العامل فوراً)');
+assert.match(submit, /agent_unavailable/, 'Serve يرفض الطلب بلا نبضة عامل حديثة قبل كتابة أي تذكرة');
+assert.ok(submit.indexOf('agent_unavailable') < submit.indexOf('New-CashierAgentTicket'), 'فحص النبضة قبل كتابة التذكرة');
+const ticket = fnBody(lib, 'Invoke-CashierAgentTicket');
+const agentOrder = ['[IO.File]::Move($TicketPath, $claimed)', '"pickup_timeout"', '"clock_skew"', '"owner_not_allowed"', '"malformed"', '& $Print'].map((t) => ticket.indexOf(t));
+assert.ok(agentOrder.every((i) => i >= 0) && agentOrder.every((i, k) => k === 0 || i > agentOrder[k - 1]), 'العامل: الالتقاط الذري ثم المهلة ثم الساعة ثم المالك ثم الصيغة ثم الطباعة');
+assert.equal((ticket.match(/& \$Print/g) || []).length, 1, 'العامل: طباعة واحدة لكل تذكرة');
+const restore = fnBody(lib, 'Restore-CashierAgentState');
+assert.doesNotMatch(restore, /Invoke-CashierReprint|Invoke-LocalPrint|& \$Print/, 'الاستعادة بعد الانقطاع لا تطبع أبداً');
+assert.match(fnBody(lib, 'New-CashierAgentTicket'), /FileMode\]::CreateNew/, 'التذكرة حصرية: CreateNew');
+assert.doesNotMatch(fnBody(lib, 'Write-CashierAgentResult'), /Move\([^)]*,\s*\$true\)|Move-Item|Copy-Item|Set-Content[^\n]*\$final/, 'النتيجة لا تُستبدل');
+assert.match(cli, /if \(\$config\.printDispatch -eq "agent"\) \{ \$r = Submit-CashierAgentPrint/, 'Serve يحوّل الطباعة للعامل في وضع agent');
+assert.match(cli, /Threading\.Mutex\(\$false, "Global\\OZK-CashierReprint-Agent"\)/, 'نسخة واحدة من العامل');
+assert.equal(service.printDispatch, 'agent', 'حساب الخدمة يطبع عبر العامل المحلي');
+assert.ok(service.agentRequesterSids.every((sid) => /^S-1-5-21-\d+-\d+-\d+-\d+$/.test(sid)), 'معرّفات حسابات محلية فقط');
+assert.ok(service.agentResultTimeoutSeconds >= service.agentPickupSeconds + service.bridgeTimeoutSeconds + service.jobWatchSeconds, 'مهلة النتيجة تغطي الطباعة كاملة');
+const remoteCfg = JSON.parse(read('config.remote.example.json'));
+assert.ok(remoteCfg.remoteTimeoutSeconds > service.agentResultTimeoutSeconds, 'مهلة ssh على OZK2026 أطول من انتظار Serve');
+const task = read('agent-task.example.xml');
+assert.match(task, /<LogonType>InteractiveToken<\/LogonType>/, 'العامل بجلسة الكاشير التفاعلية');
+assert.match(task, /<RunLevel>LeastPrivilege<\/RunLevel>/, 'العامل بلا رفع صلاحيات');
+assert.match(task, /<MultipleInstancesPolicy>IgnoreNew<\/MultipleInstancesPolicy>/, 'لا نسخة ثانية من المهمة');
+assert.match(task, /-Mode Agent -Root "C:\\ProgramData\\OZK\\CashierReprint"/, 'المهمة تشغّل وضع العامل وحده');
+assert.doesNotMatch(task, /PrintBridge|state\.json|-Once/i, 'المهمة لا تمسّ الجسر التلقائي');
+
 const workflow = readFileSync(path.join(root, '.github', 'workflows', 'check.yml'), 'utf8');
 assert.match(workflow, /tools\\tests\\Test-CashierReprint\.ps1/, 'الاختبار السلوكي يعمل في وظيفة PowerShell 5.1');
+assert.match(workflow, /tools\\tests\\Test-CashierReprintAgent\.ps1/, 'اختبار العامل المحلي يعمل في وظيفة PowerShell 5.1');
 
 console.log('check-cashier-reprint: OK');
