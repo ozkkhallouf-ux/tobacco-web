@@ -677,6 +677,55 @@ try {
   Assert 'agent: send path saves state only when something was sent or failed' ($agentSaveText -match 'if \(\$r\.sent -gt 0 -or \$r\.error -or \$r\.deadlettered -gt 0\) \{ Save-AmeenInvoiceState')
   Assert 'agent: new events, fingerprint changes and removals mark the state dirty' (([regex]::Matches($agentSaveText, '\$stateDirty = \$true')).Count -ge 3)
 
+  # ── ٥ط) تعافي اتصال SQL (حادثة OZK2026 2026-10-25: إسبات بطارية ثم خروج صامت برمز 1) ─────────────
+  $delays = @(1..10 | ForEach-Object { Get-AmeenReconnectDelaySeconds -Attempt $_ })
+  Assert 'sql reconnect: delay doubles from 2s and caps at 300s' (($delays[0..7] -join ',') -eq '2,4,8,16,32,64,128,256' -and $delays[8] -eq 300 -and $delays[9] -eq 300 -and (Get-AmeenReconnectDelaySeconds -Attempt 50) -eq 300)
+  Assert 'sql reconnect: lock timeout on an open connection is not a disconnect' (-not (Test-AmeenSqlConnectionLost -IsSql $true -Number 1222 -ConnectionState "Open"))
+  Assert 'sql reconnect: closed or broken connection is a disconnect' ((Test-AmeenSqlConnectionLost -IsSql $true -Number 1222 -ConnectionState "Closed") -and (Test-AmeenSqlConnectionLost -IsSql $false -ConnectionState "Broken"))
+  Assert 'sql reconnect: transport error numbers are a disconnect' ((@(-2, 53, 233, 10054, 10060, 18456) | ForEach-Object { Test-AmeenSqlConnectionLost -IsSql $true -Number $_ -ConnectionState "Open" }) -notcontains $false)
+  Assert 'sql reconnect: non-SQL error on an open connection is not a disconnect' (-not (Test-AmeenSqlConnectionLost -IsSql $false -ConnectionState "Open"))
+  Assert 'sql reconnect: SqlException 0 "connection is broken" counts as a disconnect (live test 2026-10-26)' ((@('The connection is broken and recovery is not possible.  The client driver attempted to recover the connection one or more times and all attempts failed.', 'A transport-level error has occurred when receiving results from the server.', 'A network-related or instance-specific error occurred while establishing a connection to SQL Server.') | ForEach-Object { $_ -match $script:AmeenSqlConnectionLostText }) -notcontains $false)
+  Assert 'sql reconnect: deadlock or syntax message is not mistaken for a disconnect' (-not ('Transaction (Process ID 61) was deadlocked on lock resources' -match $script:AmeenSqlConnectionLostText) -and -not ("Incorrect syntax near 'FROM'." -match $script:AmeenSqlConnectionLostText))
+  Assert 'sql reconnect: any SQL failure of a trivial query (GETDATE, open) is a disconnect' ((Test-AmeenSqlConnectionLost -IsSql $true -Number 0 -ConnectionState "Open" -AnySqlIsLost) -and -not (Test-AmeenSqlConnectionLost -IsSql $false -ConnectionState "Open" -AnySqlIsLost))
+  $ioe = Get-AmeenSqlFailureInfo (New-Object System.InvalidOperationException("ExecuteReader requires an open and available Connection. The connection's current state is closed."))
+  $ioFile = Get-AmeenSqlFailureInfo (New-Object System.IO.IOException("The process cannot access the file 'state.json' because it is being used by another process."))
+  Assert 'sql reconnect: connection InvalidOperationException is a disconnect' ($ioe.connection_hint -and (Test-AmeenSqlConnectionLost -IsSql $false -ConnectionState "Open" -ConnectionHint $ioe.connection_hint))
+  Assert 'sql reconnect: a locked state file is not mistaken for a disconnect' (-not $ioFile.connection_hint -and -not (Test-AmeenSqlConnectionLost -IsSql $false -ConnectionState "Open" -ConnectionHint $ioFile.connection_hint))
+  $script:rcOpen = 0; $script:rcLog = New-Object System.Collections.Generic.List[string]; $script:rcSleep = New-Object System.Collections.Generic.List[int]
+  $rc = Invoke-AmeenSqlReconnect -Open { $script:rcOpen++; if ($script:rcOpen -le 3) { throw (New-Object System.InvalidOperationException("connection broken")) } } -Log { param($m) $script:rcLog.Add($m) } -Sleep { param($s) $script:rcSleep.Add($s) } -MaxAttempts 10
+  Assert 'sql reconnect: recovers after failures with backoff and logs RECONNECTING then RECOVERED' ($rc.ok -and $rc.attempts -eq 4 -and ($script:rcSleep -join ',') -eq '2,4,8' -and @($script:rcLog | Where-Object { $_ -like 'RECONNECTING*' }).Count -eq 3 -and $script:rcLog[$script:rcLog.Count - 1] -like 'RECOVERED*')
+  $script:rcLog.Clear(); $script:rcSleep.Clear()
+  $threwRc = $false
+  try { $rc2 = Invoke-AmeenSqlReconnect -Open { throw "down" } -Log { param($m) $script:rcLog.Add($m) } -Sleep { param($s) $script:rcSleep.Add($s) } -MaxAttempts 3 } catch { $threwRc = $true }
+  Assert 'sql reconnect: gives up after the attempt limit without throwing' (-not $threwRc -and -not $rc2.ok -and $rc2.attempts -eq 3 -and @($script:rcLog | Where-Object { $_ -like 'RECONNECTING*' }).Count -eq 3 -and ($script:rcSleep -join ',') -eq '2,4')
+  $safe = ConvertTo-AmeenSafeLogText "Login failed. Server=x;User ID=tobacco_sync_service;Password=S3cr3t!;Database=AmnDb002"
+  Assert 'sql reconnect: log text never carries a password' ($safe -notmatch 'S3cr3t' -and $safe -notmatch 'tobacco_sync_service' -and $safe -match 'Password=\*\*\*')
+
+  # الوكيل الحقيقي مع اتصال أول فاسد (منفذ مغلق محلياً، لا خادم ولا بيانات): لا خروج صامت، إعادة محاولة محدودة ثم الرمز 6
+  $cbox = Join-Path $tempDir "outbox-sqldown"
+  $cenv = Join-Path $tempDir "sqldown.env"
+  Set-Content -LiteralPath $cenv -Value "AMEEN_SQL_CONNECTION_STRING=Server=127.0.0.1,1;Database=AmnDb002;User ID=probe_user;Password=NOT-A-REAL-SECRET-42;Connect Timeout=1" -Encoding UTF8
+  $clog = Join-Path $tempDir "agent-sqldown.log"
+  & $shell -NoProfile -File $agentPath -Once -OutboxDir $cbox -LogFile $clog -EnvFile $cenv -MaxReconnectAttempts 2 -ReconnectBaseSeconds 0 *> $null
+  $cExit = $LASTEXITCODE
+  $cText = if (Test-Path -LiteralPath $clog) { Get-Content -Raw -LiteralPath $clog -Encoding UTF8 } else { "" }
+  Assert 'first connection failure: agent retries, logs DISCONNECTED/RECONNECTING/GAVE_UP and exits with code 6' ($cExit -eq 6 -and $cText -match 'DISCONNECTED' -and ([regex]::Matches($cText, 'RECONNECTING')).Count -eq 2 -and $cText -match 'GAVE_UP' -and $cText -notmatch 'FATAL')
+  Assert 'first connection failure: no password or user in the agent log' ($cText -notmatch 'NOT-A-REAL-SECRET-42' -and $cText -notmatch 'probe_user')
+  Assert 'first connection failure: no state, watermark or pending written' (-not (Test-Path -LiteralPath (Join-Path $cbox "state.json")) -and -not (Test-Path -LiteralPath (Join-Path $cbox "watermark.json")) -and -not (Test-Path -LiteralPath (Join-Path $cbox "pending")))
+  $relock = Enter-AmeenOutboxLock -Dir $cbox
+  Assert 'first connection failure: outbox lock released after exit' ($null -ne $relock)
+  if ($relock) { Exit-AmeenOutboxLock $relock }
+
+  # الوكيل: كل نقاط SQL داخل المعالجة، ولا خروج صامت، والعلامة بعد الأحداث
+  $rcText = Get-Content -Raw -LiteralPath $agentPath -Encoding UTF8
+  $loopStart = $rcText.IndexOf("    do {")
+  $firstQuery = $rcText.IndexOf('Invoke-AmeenRead "SELECT GETDATE() t"', $loopStart)
+  Assert 'agent: first SQL query of each cycle runs inside error handling' ($loopStart -gt 0 -and $firstQuery -gt $loopStart -and $rcText.Substring($firstQuery - 40, 40) -match 'try \{' -and $rcText -match 'catch \{ if \(Resume-AmeenSqlAfterFailure \$_ "بداية الدورة" -AnySqlIsLost\) \{ continue \} else \{ throw \} \}')
+  Assert 'agent: startup connection and server time go through the reconnect path' ($rcText -match 'try \{ Open-AmeenSqlConnection \}' -and $rcText -match 'Resume-AmeenSqlAfterFailure \$_ "الاتصال الأول" -AnySqlIsLost' -and $rcText -match 'Resume-AmeenSqlAfterFailure \$_ "قراءة وقت الخادم" -AnySqlIsLost')
+  Assert 'agent: a disconnect inside detection restarts the cycle without advancing the watermark' ($rcText -match 'if \(Resume-AmeenSqlAfterFailure \$_ "الرصد والمطابقة"\) \{ continue \}' -and $rcText.IndexOf('Add-AmeenOutboxEvents -Dir $OutboxDir -Events $events') -lt $rcText.IndexOf('$state.watermark = Format-AmeenSqlDate $nowSrv'))
+  Assert 'agent: unexpected errors are logged as FATAL before exit' ($rcText -match 'Write-AgentLog \("FATAL: ')
+  Assert 'agent: a broken connection is replaced, never reused' ($rcText -match '\$script:conn\.Dispose\(\)' -and $rcText -match '\$script:conn = New-Object System\.Data\.SqlClient\.SqlConnection')
+
   # ── ٦) الوكيل: يُحلَّل بلا أخطاء، ولا يسجّل مهمة، ولا يرسل افتراضياً ───────────────────────────
   $tokens = $null; $errors = $null
   [void][System.Management.Automation.Language.Parser]::ParseFile($agentPath, [ref]$tokens, [ref]$errors)

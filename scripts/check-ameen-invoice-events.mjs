@@ -204,6 +204,32 @@ for (const name of [
   // Codex P1 (37be4ca8): تاريخ مستحيل في العلامة لا يوقف الوكيل
   "state.json invalid watermark date: read does not throw and watermark is cleared",
   "watermark parser: valid date returned verbatim, impossible dates rejected",
+  // تعافي اتصال SQL (حادثة OZK2026 2026-10-25: إسبات بطارية ثم خروج صامت برمز 1)
+  "sql reconnect: delay doubles from 2s and caps at 300s",
+  "sql reconnect: lock timeout on an open connection is not a disconnect",
+  "sql reconnect: closed or broken connection is a disconnect",
+  "sql reconnect: transport error numbers are a disconnect",
+  "sql reconnect: non-SQL error on an open connection is not a disconnect",
+  "sql reconnect: connection InvalidOperationException is a disconnect",
+  "sql reconnect: a locked state file is not mistaken for a disconnect",
+  'sql reconnect: SqlException 0 "connection is broken" counts as a disconnect (live test 2026-10-26)',
+  "sql reconnect: deadlock or syntax message is not mistaken for a disconnect",
+  "sql reconnect: any SQL failure of a trivial query (GETDATE, open) is a disconnect",
+  'sql reconnect: SqlException 0 "connection is broken" counts as a disconnect (live test 2026-10-26)',
+  "sql reconnect: deadlock or syntax message is not mistaken for a disconnect",
+  "sql reconnect: any SQL failure of a trivial query (GETDATE, open) is a disconnect",
+  "sql reconnect: recovers after failures with backoff and logs RECONNECTING then RECOVERED",
+  "sql reconnect: gives up after the attempt limit without throwing",
+  "sql reconnect: log text never carries a password",
+  "first connection failure: agent retries, logs DISCONNECTED/RECONNECTING/GAVE_UP and exits with code 6",
+  "first connection failure: no password or user in the agent log",
+  "first connection failure: no state, watermark or pending written",
+  "first connection failure: outbox lock released after exit",
+  "agent: first SQL query of each cycle runs inside error handling",
+  "agent: startup connection and server time go through the reconnect path",
+  "agent: a disconnect inside detection restarts the cycle without advancing the watermark",
+  "agent: unexpected errors are logged as FATAL before exit",
+  "agent: a broken connection is replaced, never reused",
 ]) assert.ok(psTest.includes(`'${name}'`), `اختبار PowerShell إلزامي مفقود: ${name}`);
 
 const rollback = read(rollbackRel).replace(/--.*$/gm, "");
@@ -234,6 +260,19 @@ const agent = read(agentRel);
 const lib = read(libRel);
 const agentCode = agent.replace(/#.*$/gm, "");
 const libCode = lib.replace(/#.*$/gm, "");
+// تعافي اتصال SQL (حادثة OZK2026 2026-10-25): لا استعلام في الحلقة خارج المعالجة، ولا خروج صامت، ولا تسجيل لسلسلة الاتصال.
+{
+  const loop = agentCode.slice(agentCode.indexOf("    do {"), agentCode.indexOf("} while ($true)"));
+  assert.match(loop, /try \{ \$nowSrv = \[datetime\]\(Invoke-AmeenRead "SELECT GETDATE\(\) t"\)/, "أول استعلام في الدورة داخل try");
+  assert.match(loop, /catch \{ if \(Resume-AmeenSqlAfterFailure \$_ "بداية الدورة" -AnySqlIsLost\) \{ continue \} else \{ throw \} \}/, "انقطاع في بداية الدورة ⇒ إعادة اتصال ثم الدورة من جديد");
+  assert.match(loop, /if \(Resume-AmeenSqlAfterFailure \$_ "الرصد والمطابقة"\) \{ continue \}/, "انقطاع أثناء الرصد ⇒ لا تقدّم للعلامة");
+  assert.ok(loop.indexOf("Add-AmeenOutboxEvents -Dir $OutboxDir -Events $events") < loop.indexOf("$state.watermark = Format-AmeenSqlDate $nowSrv"), "العلامة بعد كتابة الأحداث");
+}
+assert.match(agentCode, /Write-AgentLog \("FATAL: /, "لا خروج صامت: الخطأ غير المتوقع يُسجَّل");
+assert.match(agentCode, /\[int\]\$MaxReconnectAttempts = 288/, "حدّ أعلى لمحاولات إعادة الاتصال");
+assert.doesNotMatch(agentCode, /Write-AgentLog[^\n]*(\$connStr|ConnectionString)/, "لا تُسجَّل سلسلة الاتصال");
+assert.match(libCode, /function Invoke-AmeenSqlReconnect/);
+assert.match(libCode, /function ConvertTo-AmeenSafeLogText/);
 assert.match(agentCode, /\$RpcName = "apply_ameen_invoice_events"/, "الوكيل يكتب عبر الدالة المقترحة وحدها");
 assert.match(agentCode, /\/rest\/v1\/rpc\//);
 assert.match(libCode, /if \(-not \$SendRequested\) \{ return \$false \}/, "لا إرسال بلا -Send");
