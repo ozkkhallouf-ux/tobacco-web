@@ -204,6 +204,26 @@ for (const name of [
   // Codex P1 (37be4ca8): تاريخ مستحيل في العلامة لا يوقف الوكيل
   "state.json invalid watermark date: read does not throw and watermark is cleared",
   "watermark parser: valid date returned verbatim, impossible dates rejected",
+  // تعافي اتصال SQL (تدقيق انقطاع الكهرباء 2026-10-26): لا خروج صامت، ولا فقد ولا تكرار بعد العودة
+  "reconnect backoff: 2,4,8 doubling up to the 300s cap",
+  "failure kind: lock timeout on an open connection is transient (no reconnect)",
+  "failure kind: closed connection after hibernation is a connection loss",
+  "first connection to a dead server: real SqlException classified as connection loss",
+  "safe error: passwords masked in logged text",
+  "reconnect: recovers on the 3rd attempt after 2 failures",
+  "reconnect: no password in any log line",
+  "reconnect limit: does not throw, reports failure after max attempts",
+  "first connection failure: no wait before the first try, then 2,4",
+  "disconnect at first query: watermark not advanced (memory and disk)",
+  "disconnect mid-cycle: nothing emitted, watermark and checkpoint unchanged",
+  "after reconnect: both invoices from the outage emitted exactly once",
+  "after reconnect: re-reading the same invoices creates no duplicate",
+  "agent restart after recovery: no lost and no duplicate events",
+  "agent with a dead first connection: exits with code 6 after the attempt limit",
+  "agent with a dead first connection: no password in the log",
+  "agent with a dead first connection: single-instance lock released on exit",
+  "agent: cycle GETDATE runs inside the protected block",
+  "agent: reconnect branch saves nothing (no state or watermark write)",
 ]) assert.ok(psTest.includes(`'${name}'`), `اختبار PowerShell إلزامي مفقود: ${name}`);
 
 const rollback = read(rollbackRel).replace(/--.*$/gm, "");
@@ -247,6 +267,10 @@ assert.match(libCode, /\$flag = Join-Path \$Dir "send-enabled\.flag"/, "ولا �
 }
 assert.match(agentCode, /Assert-AmeenReadOnlySql \$Sql/, "كل SQL يمرّ عبر حارس القراءة");
 assert.match(agentCode, /SET LOCK_TIMEOUT 3000; /);
+// تعافي الاتصال: لا خروج صامت برمز 1، وحدّ أعلى للمحاولات ثم رمز 6.
+assert.match(agentCode, /\[int\]\$MaxReconnectAttempts = 60,/, "حدّ أعلى لمحاولات إعادة الاتصال");
+assert.match(agentCode, /if \(-not \$link\.ok\) \{ exit 6 \}/, "استنفاد المحاولات ⇒ خروج برمز 6");
+assert.match(agentCode, /Write-AgentLog \("FATAL: /, "الخطأ القاتل يُسجَّل قبل الخروج");
 assert.match(agentCode, /\$ExpectedDatabase = "AmnDb002"/);
 assert.match(agentCode, /if \(\$ListDeadLetter -or \$RepairDeadLetterSeq -gt 0\) \{/, "طريقة واضحة لعرض الأحداث المعزولة وإصلاحها");
 assert.match(libCode, /Move-AmeenEventToDeadLetter -Dir \$Dir -File \$p\.file -InvoiceEvent \$p\.event -Code \$why\.code/, "التحقق المحلي يعزل قبل الإرسال");

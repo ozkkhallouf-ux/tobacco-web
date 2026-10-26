@@ -677,6 +677,166 @@ try {
   Assert 'agent: send path saves state only when something was sent or failed' ($agentSaveText -match 'if \(\$r\.sent -gt 0 -or \$r\.error -or \$r\.deadlettered -gt 0\) \{ Save-AmeenInvoiceState')
   Assert 'agent: new events, fingerprint changes and removals mark the state dirty' (([regex]::Matches($agentSaveText, '\$stateDirty = \$true')).Count -ge 3)
 
+  # ── ٥ك) تعافي اتصال SQL (تدقيق انقطاع الكهرباء 2026-10-26): بعد الإسبات انكسر الاتصال فخرج الوكيل برمز 1
+  # بلا سطر. محاكاة آمنة كلها: لا اتصال بالأمين، ولا قاعدة بيانات إطلاقاً.
+  $delays = @(1..10 | ForEach-Object { Get-AmeenReconnectDelaySeconds -Attempt $_ })
+  Assert 'reconnect backoff: 2,4,8 doubling up to the 300s cap' (($delays -join ",") -eq "2,4,8,16,32,64,128,256,300,300")
+  Assert 'reconnect backoff: no wait for attempt 0, cap holds for huge attempts' ((Get-AmeenReconnectDelaySeconds -Attempt 0) -eq 0 -and (Get-AmeenReconnectDelaySeconds -Attempt 500) -eq 300)
+
+  $refs = @(); if ($PSVersionTable.PSEdition -ne "Core") { $refs = @("System.Data") }
+  if (-not ("OzkFakeSqlError" -as [type])) {
+    $fakeSrc = "public class OzkFakeSqlError : System.Data.Common.DbException { public OzkFakeSqlError(string m, byte c) : base(m) { Class = c; } public byte Class { get; private set; } }"
+    if ($refs.Count -gt 0) { Add-Type -TypeDefinition $fakeSrc -ReferencedAssemblies $refs } else { Add-Type -TypeDefinition $fakeSrc }
+  }
+  $wrap = { param($inner) New-Object System.Management.Automation.MethodInvocationException("Exception calling ""Fill"" with ""1"" argument(s)", $inner) }
+  $lockTimeout = New-Object OzkFakeSqlError("Lock request time out period exceeded.", [byte]16)
+  $transport = New-Object OzkFakeSqlError("A transport-level error has occurred when receiving results from the server.", [byte]20)
+  $closedOp = New-Object System.InvalidOperationException("ExecuteReader requires an open and available Connection. The connection's current state is closed.")
+  Assert 'failure kind: lock timeout on an open connection is transient (no reconnect)' ((Get-AmeenSqlFailureKind -Exception (& $wrap $lockTimeout) -ConnectionState "Open") -eq "transient")
+  Assert 'failure kind: transport-level SQL error (class 20) is a connection loss' ((Get-AmeenSqlFailureKind -Exception (& $wrap $transport) -ConnectionState "Open") -eq "connection")
+  Assert 'failure kind: closed connection after hibernation is a connection loss' ((Get-AmeenSqlFailureKind -Exception (& $wrap $closedOp) -ConnectionState "Closed") -eq "connection")
+  Assert 'failure kind: broken connection state alone means reconnect' ((Get-AmeenSqlFailureKind -Exception (New-Object System.Exception("x")) -ConnectionState "Broken") -eq "connection")
+  Assert 'failure kind: socket/IO error is a connection loss' ((Get-AmeenSqlFailureKind -Exception (& $wrap (New-Object System.IO.IOException("Unable to read data from the transport connection"))) -ConnectionState "Open") -eq "connection")
+  Assert 'failure kind: non-SQL bug on an open connection stays fatal' ((Get-AmeenSqlFailureKind -Exception (New-Object System.FormatException("bad")) -ConnectionState "Open") -eq "fatal")
+  # خطأ SqlClient حقيقي: اتصال أول فاسد إلى منفذ محلي مغلق (لا خادم ولا أمين)
+  Add-Type -AssemblyName "System.Data"
+  $deadConn = New-Object System.Data.SqlClient.SqlConnection("Server=127.0.0.1,1;Database=AmnDb002;User ID=ozk_test;Password=Sim-Secret-91;Connect Timeout=2")
+  $realErr = $null
+  try { $deadConn.Open() } catch { $realErr = $_.Exception }
+  Assert 'first connection to a dead server: real SqlException classified as connection loss' ($null -ne $realErr -and (Get-AmeenSqlFailureKind -Exception $realErr -ConnectionState ([string]$deadConn.State)) -eq "connection")
+
+  $pwErr = New-Object System.InvalidOperationException("Login failed; Data Source=OZK-TOBACCO;Initial Catalog=AmnDb002;User ID=tobacco_sync_reader;Password=Sim-Secret-91;pwd = other;")
+  $safe = Format-AmeenSafeError (& $wrap $pwErr)
+  Assert 'safe error: passwords masked in logged text' ($safe -notmatch 'Sim-Secret-91' -and $safe -notmatch 'other' -and $safe -match 'Password=\*\*\*' -and $safe -match 'pwd=\*\*\*')
+  Assert 'safe error: SQL number and message kept for diagnosis' ((Format-AmeenSafeError $realErr) -match '^SqlException \d+: ')
+
+  # إعادة الاتصال: نجاح بعد فشلين، بتراجع 2 ← 4 ← 8، وسجلات RECONNECTING/RECOVERED
+  $sim = @{ opens = 0; failFirst = 2; sleeps = New-Object System.Collections.Generic.List[int]; log = New-Object System.Collections.Generic.List[string] }
+  $simOpen = { $sim.opens++; if ($sim.opens -le $sim.failFirst) { throw (& $wrap (New-Object System.IO.IOException("network down; Password=Sim-Secret-91"))) } }
+  $simProbe = { [pscustomobject]@{ d = "AmnDb002"; t = [datetime]"2026-10-26T06:41:00" } }
+  $simSleep = { param($s) $sim.sleeps.Add([int]$s) }
+  $simLog = { param($m) $sim.log.Add([string]$m) }
+  $r = Invoke-AmeenSqlReconnect -Open $simOpen -Probe $simProbe -Log $simLog -Sleep $simSleep -MaxAttempts 5
+  Assert 'reconnect: recovers on the 3rd attempt after 2 failures' ($r.ok -and $r.attempts -eq 3 -and $r.recovered -and $r.probe.d -eq "AmnDb002")
+  Assert 'reconnect: waits 2,4,8 seconds (exponential backoff)' (($sim.sleeps -join ",") -eq "2,4,8")
+  Assert 'reconnect: logs RECONNECTING and RECOVERED' ((@($sim.log | Where-Object { $_ -like "RECONNECTING*" }).Count -eq 5) -and (@($sim.log | Where-Object { $_ -like "RECOVERED*" }).Count -eq 1))
+  Assert 'reconnect: no password in any log line' (@($sim.log | Where-Object { $_ -match 'Sim-Secret-91' }).Count -eq 0)
+
+  # حد المحاولات: لا رمي، نتيجة فاشلة وسطر FATAL، وعدد المحاولات لا يتجاوز الحد
+  $sim = @{ opens = 0; failFirst = 99; sleeps = New-Object System.Collections.Generic.List[int]; log = New-Object System.Collections.Generic.List[string] }
+  $threw = Throws { $script:rx = Invoke-AmeenSqlReconnect -Open $simOpen -Probe $simProbe -Log $simLog -Sleep $simSleep -MaxAttempts 4 }
+  Assert 'reconnect limit: does not throw, reports failure after max attempts' ((-not $threw) -and -not $script:rx.ok -and $sim.opens -eq 4 -and ($sim.sleeps -join ",") -eq "2,4,8,16")
+  Assert 'reconnect limit: FATAL logged once' (@($sim.log | Where-Object { $_ -like "FATAL*" }).Count -eq 1)
+  Assert 'reconnect limit: cap applies to every wait' (-not (@(1..60 | ForEach-Object { Get-AmeenReconnectDelaySeconds -Attempt $_ }) | Where-Object { $_ -gt 300 }))
+
+  # استعلام الاختبار يفشل بعد فتح ناجح (اتصال فاسد) = محاولة فاشلة لا نجاح كاذب
+  $sim = @{ opens = 0; probes = 0; failFirst = 0; sleeps = New-Object System.Collections.Generic.List[int]; log = New-Object System.Collections.Generic.List[string] }
+  $badProbe = { $sim.probes++; if ($sim.probes -eq 1) { throw (& $wrap $transport) }; [pscustomobject]@{ d = "AmnDb002"; t = Get-Date } }
+  $r = Invoke-AmeenSqlReconnect -Open $simOpen -Probe $badProbe -Log $simLog -Sleep $simSleep -MaxAttempts 5
+  Assert 'reconnect: a failing probe after Open counts as a failed attempt' ($r.ok -and $r.attempts -eq 2 -and $sim.probes -eq 2)
+
+  # الاتصال الأول عند البدء: المحاولة الأولى فوراً بلا انتظار؛ فشلها DISCONNECTED ثم تراجع 2 ← 4
+  $sim = @{ opens = 0; failFirst = 2; sleeps = New-Object System.Collections.Generic.List[int]; log = New-Object System.Collections.Generic.List[string] }
+  $r = Invoke-AmeenSqlReconnect -Open $simOpen -Probe $simProbe -Log $simLog -Sleep $simSleep -MaxAttempts 5 -FirstAttemptNow
+  Assert 'first connection failure: no wait before the first try, then 2,4' ($r.ok -and $r.attempts -eq 3 -and ($sim.sleeps -join ",") -eq "2,4")
+  Assert 'first connection failure: DISCONNECTED then RECOVERED logged' (($sim.log[0] -like "DISCONNECTED*") -and ($sim.log[$sim.log.Count - 1] -like "RECOVERED*"))
+  $sim = @{ opens = 0; failFirst = 0; sleeps = New-Object System.Collections.Generic.List[int]; log = New-Object System.Collections.Generic.List[string] }
+  $r = Invoke-AmeenSqlReconnect -Open $simOpen -Probe $simProbe -Log $simLog -Sleep $simSleep -FirstAttemptNow
+  Assert 'first connection ok: no wait and no recovery noise in the log' ($r.ok -and -not $r.recovered -and $sim.sleeps.Count -eq 0 -and $sim.log.Count -eq 0)
+
+  # دورة رصد محاكاة بنفس ترتيب الوكيل (كل القراءات أولاً، ثم Resolve، ثم الصندوق، ثم العلامة، ثم الحفظ):
+  # انقطاع ثم عودة ثم إعادة تشغيل ⇒ لا حدث ضائع ولا مكرر، والعلامة لا تتقدّم قبل نجاح المعالجة.
+  $cbox = Join-Path $tempDir "outbox-reconnect"
+  Initialize-AmeenInvoiceOutbox -Dir $cbox
+  $cs = New-AmeenInvoiceState; $cs.watermark = "2026-10-25T23:22:30.000"; Save-AmeenInvoiceState -Dir $cbox -State $cs
+  $seqStart = [long]$cs.last_seq
+  $G2 = "c0000000-0000-4000-8000-000000000002"
+  $sA = ConvertTo-AmeenInvoiceSnapshot -Header (New-Header) -Lines @($L1, $L2)
+  $sB = ConvertTo-AmeenInvoiceSnapshot -Header (New-Header -Guid $G2 -Total 62) -Lines @($L2)
+  $world = @{ conn = "Open"; failOn = ""; now = [datetime]"2026-10-26T06:40:05" }
+  $simRead = {
+    param($What)
+    if ($world.failOn -eq $What) { $world.conn = "Broken"; throw (& $wrap $transport) }
+    if ($world.conn -ne "Open") { throw (& $wrap $closedOp) }
+    if ($What -eq "now") { return $world.now }
+    return @(
+      @{ guid = $G1; snapshot = $sA; ops = @(@{ op = 1; at_utc = "2026-10-26T03:41:00.000Z" }); detected_at_utc = "2026-10-26T03:41:05.000Z"; source = "incremental" },
+      @{ guid = $G2; snapshot = $sB; ops = @(@{ op = 1; at_utc = "2026-10-26T03:41:10.000Z" }); detected_at_utc = "2026-10-26T03:41:05.000Z"; source = "incremental" }
+    )
+  }
+  $simCycle = {
+    param($State)
+    try {
+      $now = & $simRead "now"
+      $observations = & $simRead "observations"
+      $events = Resolve-AmeenInvoiceChanges -State $State -Observations $observations
+      if ($events.Count -gt 0) { Add-AmeenOutboxEvents -Dir $cbox -Events $events }
+      $State.watermark = Format-AmeenSqlDate $now
+      Save-AmeenInvoiceState -Dir $cbox -State $State
+      return "ok"
+    } catch {
+      $k = Get-AmeenSqlFailureKind -Exception $_.Exception -ConnectionState $world.conn
+      if ($k -eq "fatal") { throw }
+      return $k
+    }
+  }
+  $pendingCount = { @(Get-ChildItem -LiteralPath (Join-Path $cbox "pending") -Filter "*.json" -ErrorAction SilentlyContinue).Count }
+  # (١) الاستعلام الأول في الدورة (GETDATE) يرمي بعد الإسبات
+  $world.failOn = "now"
+  $res1 = & $simCycle $cs
+  Assert 'disconnect at first query: classified as connection loss' ($res1 -eq "connection")
+  Assert 'disconnect at first query: watermark not advanced (memory and disk)' ($cs.watermark -eq "2026-10-25T23:22:30.000" -and (Read-AmeenInvoiceState -Dir $cbox).watermark -eq "2026-10-25T23:22:30.000")
+  Assert 'disconnect at first query: no event and no seq allocated' ((& $pendingCount) -eq 0 -and [long]$cs.last_seq -eq $seqStart)
+  # (٢) الاتصال ما زال مكسوراً، والانقطاع في منتصف القراءات
+  $world.failOn = "observations"; $world.conn = "Open"
+  $res2 = & $simCycle $cs
+  Assert 'disconnect mid-cycle: nothing emitted, watermark and checkpoint unchanged' ($res2 -eq "connection" -and (& $pendingCount) -eq 0 -and [long]$cs.last_seq -eq $seqStart -and (Read-AmeenInvoiceState -Dir $cbox).watermark -eq "2026-10-25T23:22:30.000")
+  # (٣) العودة: إعادة اتصال ناجحة، والدورة التالية من العلامة نفسها تلتقط الفاتورتين مرة واحدة
+  $world.failOn = ""
+  $rc = Invoke-AmeenSqlReconnect -Open { $world.conn = "Open" } -Probe $simProbe -Log { param($m) } -Sleep { param($s) } -MaxAttempts 3
+  $res3 = & $simCycle $cs
+  $after = @(Get-ChildItem -LiteralPath (Join-Path $cbox "pending") -Filter "*.json" | Sort-Object Name | ForEach-Object { Get-Content -Raw -LiteralPath $_.FullName -Encoding UTF8 | ConvertFrom-Json })
+  Assert 'after reconnect: both invoices from the outage emitted exactly once' ($rc.ok -and $res3 -eq "ok" -and $after.Count -eq 2 -and @($after | Select-Object -ExpandProperty bill_guid -Unique).Count -eq 2)
+  Assert 'after reconnect: seq strictly increasing from the last checkpoint' ([long]$after[0].source_seq -eq ($seqStart + 1) -and [long]$after[1].source_seq -eq ($seqStart + 2))
+  Assert 'after reconnect: watermark advances only after the successful cycle' ((Read-AmeenInvoiceState -Dir $cbox).watermark -eq "2026-10-26T06:40:05.000")
+  # (٤) الدورة التالية ترى الفاتورتين نفسيهما ⇒ لا تكرار
+  $world.now = [datetime]"2026-10-26T06:40:07"
+  [void](& $simCycle $cs)
+  Assert 'after reconnect: re-reading the same invoices creates no duplicate' ((& $pendingCount) -eq 2 -and [long]$cs.last_seq -eq ($seqStart + 2))
+  # (٥) إعادة تشغيل الوكيل: الحالة من القرص، ثم الدورة نفسها ⇒ لا حدث جديد ولا تسلسل جديد
+  $restarted = Read-AmeenInvoiceState -Dir $cbox
+  $world.now = [datetime]"2026-10-26T06:45:00"
+  [void](& $simCycle $restarted)
+  Assert 'agent restart after recovery: no lost and no duplicate events' ((& $pendingCount) -eq 2 -and [long]$restarted.last_seq -eq ($seqStart + 2) -and $restarted.bills.Count -eq 2)
+
+  # الوكيل الفعلي باتصال أول فاسد (منفذ محلي مغلق؛ لا أمين): يسجّل DISCONNECTED/RECONNECTING/FATAL، يخرج برمز 6،
+  # لا يكتب حالة ولا أحداثاً، لا كلمة مرور في السجل، ويحرّر القفل.
+  $dbox = Join-Path $tempDir "outbox-dead-sql"
+  $denv = Join-Path $tempDir "dead-sql.env"
+  [IO.File]::WriteAllText($denv, "AMEEN_SQL_CONNECTION_STRING=Server=127.0.0.1,1;Database=AmnDb002;User ID=ozk_test;Password=Sim-Secret-91;Connect Timeout=2`n")
+  $dlog = Join-Path $tempDir "agent-dead-sql.log"
+  & $shell -NoProfile -File $agentPath -Once -OutboxDir $dbox -LogFile $dlog -EnvFile $denv -MaxReconnectAttempts 2 -ReconnectBaseSeconds 1 -ReconnectMaxSeconds 1 *> $null
+  $deadExit = $LASTEXITCODE
+  $dtext = ""; if (Test-Path -LiteralPath $dlog) { $dtext = Get-Content -Raw -LiteralPath $dlog -Encoding UTF8 }
+  Assert 'agent with a dead first connection: exits with code 6 after the attempt limit' ($deadExit -eq 6)
+  Assert 'agent with a dead first connection: logs DISCONNECTED, RECONNECTING and FATAL' ($dtext -match 'DISCONNECTED' -and $dtext -match 'RECONNECTING' -and $dtext -match 'FATAL')
+  Assert 'agent with a dead first connection: no password in the log' ($dtext -notmatch 'Sim-Secret-91')
+  Assert 'agent with a dead first connection: no state, watermark or pending written' (-not (Test-Path -LiteralPath (Join-Path $dbox "state.json")) -and -not (Test-Path -LiteralPath (Join-Path $dbox "watermark.json")) -and -not (Test-Path -LiteralPath (Join-Path $dbox "pending")))
+  $relock = Enter-AmeenOutboxLock -Dir $dbox
+  Assert 'agent with a dead first connection: single-instance lock released on exit' ($null -ne $relock)
+  Exit-AmeenOutboxLock $relock
+
+  # الوكيل: نص الحلقة يطبّق ما سبق
+  $agentRc = Get-Content -Raw -LiteralPath $agentPath -Encoding UTF8
+  $loopStart = $agentRc.IndexOf("    do {"); $tryAt = $agentRc.IndexOf("        try {", $loopStart)
+  $getdateAt = $agentRc.IndexOf('$nowSrv = [datetime](Invoke-AmeenRead "SELECT GETDATE() t")', $loopStart)
+  Assert 'agent: cycle GETDATE runs inside the protected block' ($tryAt -gt $loopStart -and $getdateAt -gt $tryAt)
+  Assert 'agent: first connection goes through the reconnect routine' ($agentRc -match 'Restore-AgentSqlConnection -FirstAttemptNow' -and $agentRc -notmatch '(?m)^\s*\$conn\.Open\(\)\s*$\r?\n\s*\$db = ')
+  Assert 'agent: database name re-verified after reconnect' ($agentRc -match '\[string\]\$link\.probe\.d -ne \$ExpectedDatabase')
+  Assert 'agent: outer catch logs FATAL before exit 1' ($agentRc -match '(?s)\} catch \{\s*#[^\n]*\n\s*Write-AgentLog \("FATAL: ')
+  $disc = $agentRc.IndexOf('if ($connectionLost) {'); $discEnd = $agentRc.IndexOf('} else {', $disc)
+  Assert 'agent: reconnect branch saves nothing (no state or watermark write)' ($disc -gt 0 -and $agentRc.Substring($disc, $discEnd - $disc) -notmatch 'Save-AmeenInvoice')
+
   # ── ٦) الوكيل: يُحلَّل بلا أخطاء، ولا يسجّل مهمة، ولا يرسل افتراضياً ───────────────────────────
   $tokens = $null; $errors = $null
   [void][System.Management.Automation.Language.Parser]::ParseFile($agentPath, [ref]$tokens, [ref]$errors)
