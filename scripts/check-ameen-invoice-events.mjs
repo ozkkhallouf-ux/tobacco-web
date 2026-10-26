@@ -224,6 +224,9 @@ for (const name of [
   "agent with a dead first connection: single-instance lock released on exit",
   "agent: cycle GETDATE runs inside the protected block",
   "agent: reconnect branch saves nothing (no state or watermark write)",
+  "outbox write failure after reads: not treated as a SQL disconnect (agent stops instead)",
+  "outbox write failure after reads: nothing saved, disk state and watermark unchanged",
+  "agent: only failures before Resolve can trigger SQL recovery",
 ]) assert.ok(psTest.includes(`'${name}'`), `اختبار PowerShell إلزامي مفقود: ${name}`);
 
 const rollback = read(rollbackRel).replace(/--.*$/gm, "");

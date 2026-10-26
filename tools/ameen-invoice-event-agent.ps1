@@ -237,6 +237,9 @@ try {
         $ops = @{}
         $lockErrors = 0
         $connectionLost = $false
+        # بعد اكتمال القراءات تبدأ الكتابة على الحالة في الذاكرة والصندوق: أي خطأ بعدها (قرص مثلاً) ليس
+        # انقطاع SQL ولا يُتعافى منه هنا، بل يوقف الوكيل قبل حفظ حالة تحمل أحداثاً لم تُكتب (Codex P1 على 49bee87).
+        $readsDone = $false
         try {
             # وقت الخادم داخل المعالجة: أول استعلام بعد الإسبات هو الذي يرمي عادةً.
             $nowSrv = [datetime](Invoke-AmeenRead "SELECT GETDATE() t").Rows[0].t
@@ -279,6 +282,7 @@ try {
                 if (-not $reconcileTruncated) { $lastReconcile = Get-Date }
             }
 
+            $readsDone = $true
             $events = Resolve-AmeenInvoiceChanges -State $state -Observations $observations.ToArray()
             foreach ($obs in $observations) {
                 if ($fp -and $fp.ContainsKey($obs.guid) -and $state.bills.ContainsKey($obs.guid) -and $state.bills[$obs.guid].fp -ne $fp[$obs.guid]) {
@@ -300,6 +304,7 @@ try {
         } catch {
             # أخطاء SQL تصل ملفوفة بـ MethodInvocationException؛ التصنيف يفحص السلسلة كلها مع حالة الاتصال.
             # كل قراءات الدورة تسبق Resolve-AmeenInvoiceChanges، فالخطأ هنا يعني: لا حدث ولا علامة ولا حفظ.
+            if ($readsDone) { throw }
             $kind = Get-AmeenSqlFailureKind -Exception $_.Exception -ConnectionState ([string]$conn.State)
             if ($kind -eq "fatal") { throw }
             if ($kind -eq "connection") {

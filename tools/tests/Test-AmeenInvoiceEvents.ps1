@@ -753,7 +753,7 @@ try {
   $G2 = "c0000000-0000-4000-8000-000000000002"
   $sA = ConvertTo-AmeenInvoiceSnapshot -Header (New-Header) -Lines @($L1, $L2)
   $sB = ConvertTo-AmeenInvoiceSnapshot -Header (New-Header -Guid $G2 -Total 62) -Lines @($L2)
-  $world = @{ conn = "Open"; failOn = ""; now = [datetime]"2026-10-26T06:40:05" }
+  $world = @{ conn = "Open"; failOn = ""; failWrite = $false; now = [datetime]"2026-10-26T06:40:05" }
   $simRead = {
     param($What)
     if ($world.failOn -eq $What) { $world.conn = "Broken"; throw (& $wrap $transport) }
@@ -766,15 +766,19 @@ try {
   }
   $simCycle = {
     param($State)
+    $readsDone = $false
     try {
       $now = & $simRead "now"
       $observations = & $simRead "observations"
+      $readsDone = $true
       $events = Resolve-AmeenInvoiceChanges -State $State -Observations $observations
+      if ($world.failWrite) { throw (New-Object System.IO.IOException("The process cannot access the file because it is being used by another process")) }
       if ($events.Count -gt 0) { Add-AmeenOutboxEvents -Dir $cbox -Events $events }
       $State.watermark = Format-AmeenSqlDate $now
       Save-AmeenInvoiceState -Dir $cbox -State $State
       return "ok"
     } catch {
+      if ($readsDone) { throw }
       $k = Get-AmeenSqlFailureKind -Exception $_.Exception -ConnectionState $world.conn
       if ($k -eq "fatal") { throw }
       return $k
@@ -791,6 +795,15 @@ try {
   $world.failOn = "observations"; $world.conn = "Open"
   $res2 = & $simCycle $cs
   Assert 'disconnect mid-cycle: nothing emitted, watermark and checkpoint unchanged' ($res2 -eq "connection" -and (& $pendingCount) -eq 0 -and [long]$cs.last_seq -eq $seqStart -and (Read-AmeenInvoiceState -Dir $cbox).watermark -eq "2026-10-25T23:22:30.000")
+  # (٢ب) Codex P1 (49bee87): فشل كتابة الصندوق (IOException) بعد Resolve والاتصال سليم ليس انقطاع SQL:
+  # يُرمى (الوكيل يسجّل FATAL ويخرج) فلا تُحفظ حالة تحمل أحداثاً لم تُكتب، وإعادة التشغيل تلتقطها من القرص.
+  $world.failOn = ""; $world.conn = "Open"; $world.failWrite = $true
+  $memState = Read-AmeenInvoiceState -Dir $cbox
+  $writeThrew = Throws { & $simCycle $memState }
+  Assert 'outbox write failure after reads: not treated as a SQL disconnect (agent stops instead)' ($writeThrew)
+  Assert 'outbox write failure after reads: nothing saved, disk state and watermark unchanged' ((& $pendingCount) -eq 0 -and [long](Read-AmeenInvoiceState -Dir $cbox).last_seq -eq $seqStart -and (Read-AmeenInvoiceState -Dir $cbox).watermark -eq "2026-10-25T23:22:30.000")
+  $world.failWrite = $false
+  $world.conn = "Broken"
   # (٣) العودة: إعادة اتصال ناجحة، والدورة التالية من العلامة نفسها تلتقط الفاتورتين مرة واحدة
   $world.failOn = ""
   $rc = Invoke-AmeenSqlReconnect -Open { $world.conn = "Open" } -Probe $simProbe -Log { param($m) } -Sleep { param($s) } -MaxAttempts 3
@@ -835,6 +848,8 @@ try {
   Assert 'agent: database name re-verified after reconnect' ($agentRc -match '\[string\]\$link\.probe\.d -ne \$ExpectedDatabase')
   Assert 'agent: outer catch logs FATAL before exit 1' ($agentRc -match '(?s)\} catch \{\s*#[^\n]*\n\s*Write-AgentLog \("FATAL: ')
   $disc = $agentRc.IndexOf('if ($connectionLost) {'); $discEnd = $agentRc.IndexOf('} else {', $disc)
+  $resolveAt = $agentRc.IndexOf('$events = Resolve-AmeenInvoiceChanges', $loopStart)
+  Assert 'agent: only failures before Resolve can trigger SQL recovery' ($agentRc.LastIndexOf('$readsDone = $true', $resolveAt) -gt $getdateAt -and $agentRc -match '\} catch \{\s*#[^\n]*\n[^\n]*\n\s*if \(\$readsDone\) \{ throw \}')
   Assert 'agent: reconnect branch saves nothing (no state or watermark write)' ($disc -gt 0 -and $agentRc.Substring($disc, $discEnd - $disc) -notmatch 'Save-AmeenInvoice')
 
   # ── ٦) الوكيل: يُحلَّل بلا أخطاء، ولا يسجّل مهمة، ولا يرسل افتراضياً ───────────────────────────
