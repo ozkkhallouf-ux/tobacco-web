@@ -271,3 +271,5 @@ try {
 Write-Host ""
 Write-Host "$($script:pass) passed, $($script:fail) failed"
 if ($script:fail -gt 0) { exit 1 }
+# العامل في الاختبارات أعلاه يخرج بـ1 عن قصد (نسخة ثانية/إعداد مرفوض)، فيبقى $LASTEXITCODE=1 وتعدّه CI فشلاً.
+exit 0
