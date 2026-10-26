@@ -5,7 +5,8 @@
 # Codex P1 #5: tools/auto-sync-price-lists.ps1 يرفض العمل على غير main، فتحويل
 # المستودع التشغيلي إلى windows-production يوقف مهمة OZK-PriceListSync. الفحص
 # (tools/deploy-gate/migration-preflight.ps1) يحجب التحويل حتى تعمل كل مهمة تحتاج
-# main من worktree مخصّص صحيح. الاختبار يبني مستودعاً تشغيلياً وworktree لـmain بـgit
+# main من worktree مخصّص صحيح. منذ 2026-10-25 المزامنة متقاعدة (retiredMainTasks):
+# الفحص يشترط بقاءها معطّلة، والـworktree يبقى ممنوعاً على كل المهام. الاختبار يبني مستودعاً تشغيلياً وworktree لـmain بـgit
 # حقيقي، ويستبدل قراءة المهام المجدولة فقط.
 #
 # التشغيل:
@@ -49,6 +50,13 @@ function Write-TestFile([string]$Path, [string]$Content) {
 $script:Tasks = @{}
 function Get-PreflightTaskNames { return @($script:Tasks.Keys) }
 function Get-PreflightTaskActionText([string]$TaskName) { if ($script:Tasks.ContainsKey($TaskName)) { return $script:Tasks[$TaskName] } return $null }
+# حالة المهمة الوهمية: من $script:States إن وُجدت، وإلا 'Ready' لكل مهمة مسجّلة.
+$script:States = @{}
+function Get-PreflightTaskState([string]$TaskName) {
+    if ($script:States.ContainsKey($TaskName)) { return $script:States[$TaskName] }
+    if ($script:Tasks.ContainsKey($TaskName)) { return 'Ready' }
+    return $null
+}
 
 $base = Join-Path ([System.IO.Path]::GetTempPath()) ('ozk-preflight-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
 New-Item -ItemType Directory -Force -Path $base | Out-Null
@@ -74,6 +82,10 @@ try {
     $config = [System.IO.File]::ReadAllText($exampleConfig) | ConvertFrom-Json
     $config.repoPath = $repo
     $config.mainWorktree.path = $mainWt
+    # آلية mainDependentTasks نفسها تُختبر بمهمة معلنة صراحةً (الإعداد الفعلي فارغ منذ تقاعد
+    # مزامنة النشرات؛ القسم الأخير يختبره كما هو).
+    $config.mainDependentTasks = @([pscustomobject]@{ task = 'OZK-PriceListSync'; script = 'tools/auto-sync-price-lists.ps1'; reason = 'fixture' })
+    $config.retiredMainTasks = @()
     $sep = [IO.Path]::DirectorySeparatorChar
     $inRepo = (Join-Path $repo 'tools') + $sep + 'auto-sync-price-lists.ps1'
     $inMain = (Join-Path $mainWt 'tools') + $sep + 'auto-sync-price-lists.ps1'
@@ -140,11 +152,51 @@ try {
     $r = Invoke-MigrationPreflight $config
     Assert-True (-not $r.ok -and (Get-Verdict $r 'OZK-PriceListSync').reason -like '*not visible*') 'task not visible to this account => BLOCK (run as administrator)'
 
+    Write-Host '== retired price-list sync (the shipped config, as on OZK2026)'
+    # tobacco-web-main HEAD منفصل ولا مهمة تستعمله؛ OZK-PriceListSync معطّلة على worktree آخر.
+    $real = [System.IO.File]::ReadAllText($exampleConfig) | ConvertFrom-Json
+    $real.repoPath = $repo
+    $real.mainWorktree.path = $mainWt
+    Invoke-TestGit $mainWt @('checkout', '-q', '--detach', 'main') | Out-Null
+    $syncWt = (Join-Path $other 'tools') + $sep + 'auto-sync-price-lists.ps1'
+    $opTask = $ps + ' -File "' + ((Join-Path $repo 'tools') + $sep + 'other.ps1') + '"'
+    $script:Tasks = @{ 'OZK-PriceListSync' = ($ps + ' -File "' + $syncWt + '"'); 'TOBACCO Ameen Sync' = $opTask }
+    $script:States = @{ 'OZK-PriceListSync' = 'Disabled' }
+    $r = Invoke-MigrationPreflight $real
+    Assert-True ($r.ok -and (Get-Verdict $r 'OZK-PriceListSync').verdict -eq 'PASS') 'retired task Disabled on its own worktree, main worktree detached and unused => PASS'
+    $script:States = @{ 'OZK-PriceListSync' = 'Ready' }
+    $r = Invoke-MigrationPreflight $real
+    Assert-True (-not $r.ok -and (Get-Verdict $r 'OZK-PriceListSync').reason -like '*retired main task is enabled*') 'retired task re-enabled => BLOCK'
+    $script:States = @{ 'OZK-PriceListSync' = 'Running' }
+    $r = Invoke-MigrationPreflight $real
+    Assert-True (-not $r.ok) 'retired task running => BLOCK'
+    $script:Tasks = @{ 'TOBACCO Ameen Sync' = $opTask }
+    $script:States = @{}
+    $r = Invoke-MigrationPreflight $real
+    Assert-True (-not $r.ok -and (Get-Verdict $r 'OZK-PriceListSync').reason -like '*retired task not visible*') 'retired task not visible => BLOCK (fail closed)'
+    # إزالة الاعتماد لا تفتح باباً خلفياً: لا مهمة (ولا المتقاعدة نفسها) تعمل من worktree الـmain.
+    $script:Tasks = @{ 'OZK-PriceListSync' = ($ps + ' -File "' + $inMain + '"'); 'TOBACCO Ameen Sync' = $opTask }
+    $script:States = @{ 'OZK-PriceListSync' = 'Disabled' }
+    $r = Invoke-MigrationPreflight $real
+    Assert-True (-not $r.ok -and @($r.results | Where-Object { $_.task -eq 'OZK-PriceListSync' -and $_.reason -like '*outside its allow-list*' }).Count -eq 1) 'retired task pointed at the main worktree => BLOCK (no back door)'
+    $script:Tasks = @{ 'OZK-PriceListSync' = ($ps + ' -File "' + $syncWt + '"'); 'TOBACCO Ameen Sync' = ($ps + ' -File "' + ((Join-Path $mainWt 'tools') + $sep + 'other.ps1') + '"') }
+    $r = Invoke-MigrationPreflight $real
+    Assert-True (-not $r.ok -and (Get-Verdict $r 'TOBACCO Ameen Sync').reason -like '*outside its allow-list*') 'operational task running from the main worktree => BLOCK'
+    $script:Tasks = @{ 'OZK-PriceListSync' = ($ps + ' -File "' + $syncWt + '"'); 'TOBACCO Ameen Sync' = $opTask }
+    $both = [System.IO.File]::ReadAllText($exampleConfig) | ConvertFrom-Json
+    $both.repoPath = $repo
+    $both.mainWorktree.path = $mainWt
+    $both.mainDependentTasks = @($both.retiredMainTasks)
+    $r = Invoke-MigrationPreflight $both
+    Assert-True (-not $r.ok -and @($r.results | Where-Object { $_.reason -eq 'declared both main-dependent and retired' }).Count -eq 1) 'a task declared both main-dependent and retired => BLOCK'
+    $script:States = @{}
+
     Write-Host '== price-list sync contract unchanged'
     $sync = [System.IO.File]::ReadAllText((Join-Path (Join-Path $repoRoot 'tools') 'auto-sync-price-lists.ps1'))
     Assert-True ($sync -match 'rev-parse --abbrev-ref HEAD' -and $sync -match '-ne "main"') 'auto-sync-price-lists.ps1 still refuses to run off main (guard not weakened)'
-    Assert-True (@($config.mainDependentTasks | Where-Object { $_.task -eq 'OZK-PriceListSync' -and $_.script -eq 'tools/auto-sync-price-lists.ps1' }).Count -eq 1) 'price-list sync is declared main-dependent'
-    Assert-True (@($config.mainWorktree.allowedScripts).Count -eq 1 -and $config.mainWorktree.allowedScripts[0] -eq 'tools/auto-sync-price-lists.ps1') 'main worktree allow-list holds only the price-list sync'
+    Assert-True (@($real.mainDependentTasks | Where-Object { $null -ne $_ }).Count -eq 0) 'no task is declared main-dependent'
+    Assert-True (@($real.retiredMainTasks).Count -eq 1 -and $real.retiredMainTasks[0].task -eq 'OZK-PriceListSync' -and $real.retiredMainTasks[0].script -eq 'tools/auto-sync-price-lists.ps1') 'only the price-list sync is retired'
+    Assert-True (@($real.mainWorktree.allowedScripts).Count -eq 1 -and $real.mainWorktree.allowedScripts[0] -eq 'tools/auto-sync-price-lists.ps1') 'main worktree allow-list holds only the price-list sync'
 } catch {
     Add-Failure ('unexpected error: ' + $_.Exception.Message + ' @ ' + $_.InvocationInfo.PositionMessage)
 } finally {
