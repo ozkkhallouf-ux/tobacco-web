@@ -13,7 +13,7 @@ const { execSync, spawnSync } = require("child_process");
 const sql  = require("mssql");
 const puppeteer = require("puppeteer");
 const config = require("./config");
-const { buildInvoiceHtml } = require("./invoice-html");
+const { buildInvoiceHtml, invoiceSummary } = require("./invoice-html");
 
 const SALES_QUERY = fs.readFileSync(
   path.join(__dirname, "ameen-sales-query.sql"), "utf8"
@@ -513,6 +513,7 @@ function groupIntoInvoices(rows) {
         total:    Number(row.total) / cv,
         discount: Number(row.discount) / cv,
         firstPay: Number(row.first_pay) / cv,
+        extra:    Number(row.total_extra || 0) / cv,
         currencyVal: cv,
         currencyIso: String(row.currency_iso || "").trim().toUpperCase(),
         items:    [],
@@ -605,8 +606,7 @@ async function printInvoice(inv) {
     try { fs.unlinkSync(tmpPdf); } catch {}
   }
 
-  const net       = inv.total - inv.discount;
-  const remaining = net - inv.firstPay;
+  const { remaining } = invoiceSummary(inv);
   console.log(
     `[${new Date().toLocaleTimeString("ar")}]  ✓ فاتورة #${inv.number}`
     + `  |  ${inv.customer || "—"}`

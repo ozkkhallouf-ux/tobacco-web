@@ -204,29 +204,47 @@ for (const name of [
   // Codex P1 (37be4ca8): تاريخ مستحيل في العلامة لا يوقف الوكيل
   "state.json invalid watermark date: read does not throw and watermark is cleared",
   "watermark parser: valid date returned verbatim, impossible dates rejected",
-  // تعافي اتصال SQL (تدقيق انقطاع الكهرباء 2026-10-26): لا خروج صامت، ولا فقد ولا تكرار بعد العودة
-  "reconnect backoff: 2,4,8 doubling up to the 300s cap",
-  "failure kind: lock timeout on an open connection is transient (no reconnect)",
-  "failure kind: closed connection after hibernation is a connection loss",
-  "first connection to a dead server: real SqlException classified as connection loss",
-  "safe error: passwords masked in logged text",
-  "reconnect: recovers on the 3rd attempt after 2 failures",
-  "reconnect: no password in any log line",
-  "reconnect limit: does not throw, reports failure after max attempts",
-  "first connection failure: no wait before the first try, then 2,4",
+  // تعافي اتصال SQL (حادثة OZK2026 2026-10-25: إسبات بطارية ثم خروج صامت برمز 1)
+  "sql reconnect: delay doubles from 2s and caps at 300s",
+  "sql reconnect: lock timeout on an open connection is not a disconnect",
+  "sql reconnect: closed or broken connection is a disconnect",
+  "sql reconnect: transport error numbers are a disconnect",
+  "sql reconnect: command timeout (-2/258) on an open connection is a slow-server warning, not a disconnect",
+  "sql reconnect: pause after a resume is at least the poll interval and grows with consecutive resumes up to 300s",
+  "sql reconnect: non-SQL error on an open connection is not a disconnect",
+  "sql reconnect: connection InvalidOperationException is a disconnect",
+  "sql reconnect: a locked state file is not mistaken for a disconnect",
+  'sql reconnect: SqlException 0 "connection is broken" counts as a disconnect (live test 2026-10-26)',
+  "sql reconnect: deadlock or syntax message is not mistaken for a disconnect",
+  "sql reconnect: any SQL failure of a trivial query (GETDATE, open) is a disconnect",
+  'sql reconnect: SqlException 0 "connection is broken" counts as a disconnect (live test 2026-10-26)',
+  "sql reconnect: deadlock or syntax message is not mistaken for a disconnect",
+  "sql reconnect: any SQL failure of a trivial query (GETDATE, open) is a disconnect",
+  "sql reconnect: recovers after failures with backoff and logs RECONNECTING then RECOVERED",
+  "sql reconnect: gives up after the attempt limit without throwing",
+  "sql reconnect: log text never carries a password",
+  "first connection failure: agent retries, logs DISCONNECTED/RECONNECTING/GAVE_UP and exits with code 6",
+  "first connection failure: no password or user in the agent log",
+  "first connection failure: no state, watermark or pending written",
+  "first connection failure: outbox lock released after exit",
+  "agent: first SQL query of each cycle runs inside error handling",
+  "agent: startup connection and server time go through the reconnect path",
+  "agent: a disconnect inside detection restarts the cycle without advancing the watermark",
+  "agent: unexpected errors are logged as FATAL before exit",
+  "agent: a broken connection is replaced, never reused",
   "disconnect at first query: watermark not advanced (memory and disk)",
+  "disconnect at first query: no event and no seq allocated",
   "disconnect mid-cycle: nothing emitted, watermark and checkpoint unchanged",
-  "after reconnect: both invoices from the outage emitted exactly once",
-  "after reconnect: re-reading the same invoices creates no duplicate",
-  "agent restart after recovery: no lost and no duplicate events",
-  "agent with a dead first connection: exits with code 6 after the attempt limit",
-  "agent with a dead first connection: no password in the log",
-  "agent with a dead first connection: single-instance lock released on exit",
-  "agent: cycle GETDATE runs inside the protected block",
-  "agent: reconnect branch saves nothing (no state or watermark write)",
   "outbox write failure after reads: not treated as a SQL disconnect (agent stops instead)",
   "outbox write failure after reads: nothing saved, disk state and watermark unchanged",
+  "after reconnect: both invoices from the outage emitted exactly once",
+  "after reconnect: seq strictly increasing from the last checkpoint",
+  "after reconnect: watermark advances only after the successful cycle",
+  "after reconnect: re-reading the same invoices creates no duplicate",
+  "agent restart after recovery: no lost and no duplicate events",
   "agent: only failures before Resolve can trigger SQL recovery",
+  "agent: database name re-verified after every reconnect",
+  "agent: dead pooled connections cleared before reopening",
 ]) assert.ok(psTest.includes(`'${name}'`), `اختبار PowerShell إلزامي مفقود: ${name}`);
 
 const rollback = read(rollbackRel).replace(/--.*$/gm, "");
@@ -257,6 +275,25 @@ const agent = read(agentRel);
 const lib = read(libRel);
 const agentCode = agent.replace(/#.*$/gm, "");
 const libCode = lib.replace(/#.*$/gm, "");
+// تعافي اتصال SQL (حادثة OZK2026 2026-10-25): لا استعلام في الحلقة خارج المعالجة، ولا خروج صامت، ولا تسجيل لسلسلة الاتصال.
+{
+  const loop = agentCode.slice(agentCode.indexOf("    do {"), agentCode.indexOf("} while ($true)"));
+  assert.match(loop, /try \{ \$nowSrv = \[datetime\]\(Invoke-AmeenRead "SELECT GETDATE\(\) t"\)/, "أول استعلام في الدورة داخل try");
+  assert.match(loop, /catch \{ if \(Resume-AmeenSqlAfterFailure \$_ "بداية الدورة" -AnySqlIsLost\) \{ Wait-AmeenAfterSqlResume; continue \} else \{ throw \} \}/, "انقطاع في بداية الدورة ⇒ إعادة اتصال ثم مهلة ثم الدورة من جديد");
+  assert.match(loop, /if \(Resume-AmeenSqlAfterFailure \$_ "الرصد والمطابقة"\) \{ Wait-AmeenAfterSqlResume; continue \}/, "انقطاع أثناء الرصد ⇒ لا تقدّم للعلامة، ومهلة قبل الإعادة");
+  // لا continue بعد عودة الاتصال بلا مهلة: الإعادة الفورية كانت تتخطى حارس الأداء والنوم (مراجعة دمج #398).
+  assert.equal((loop.match(/Resume-AmeenSqlAfterFailure[^\n]*\{ continue \}/g) || []).length, 0, "كل عودة اتصال في الحلقة تمر بـWait-AmeenAfterSqlResume");
+  assert.ok(loop.indexOf("$script:resumeStreak = 0") > loop.indexOf("$elapsedMs = ((Get-Date) - $cycleStart)"), "عدّاد العودات يُصفَّر بعد دورة مكتملة فقط");
+  assert.ok(loop.indexOf("Add-AmeenOutboxEvents -Dir $OutboxDir -Events $events") < loop.indexOf("$state.watermark = Format-AmeenSqlDate $nowSrv"), "العلامة بعد كتابة الأحداث");
+  const rd = loop.indexOf("$readsDone = $true"), rs = loop.indexOf("$events = Resolve-AmeenInvoiceChanges"), gd = loop.indexOf("if ($readsDone) { throw }"), rm = loop.indexOf('Resume-AmeenSqlAfterFailure $_ "الرصد والمطابقة"');
+  assert.ok(rd > 0 && rd < rs && gd > rs && gd < rm, "التعافي من SQL قبل Resolve فقط؛ فشل الكتابة بعده FATAL (Codex P1 على #397)");
+}
+assert.match(agentCode, /Write-AgentLog \("FATAL: /, "لا خروج صامت: الخطأ غير المتوقع يُسجَّل");
+assert.match(agentCode, /\[int\]\$MaxReconnectAttempts = 288/, "حدّ أعلى لمحاولات إعادة الاتصال");
+assert.doesNotMatch(agentCode, /Write-AgentLog[^\n]*(\$connStr|ConnectionString)/, "لا تُسجَّل سلسلة الاتصال");
+assert.match(libCode, /function Invoke-AmeenSqlReconnect/);
+assert.doesNotMatch(libCode.match(/\$script:AmeenSqlConnectionLostNumbers = @\(([^)]*)\)/)[1], /(^|,\s*)(-2|258)(\s*,|$)/, "مهلة الأمر ليست انقطاعاً: تبقى لحارس الأداء");
+assert.match(libCode, /function ConvertTo-AmeenSafeLogText/);
 assert.match(agentCode, /\$RpcName = "apply_ameen_invoice_events"/, "الوكيل يكتب عبر الدالة المقترحة وحدها");
 assert.match(agentCode, /\/rest\/v1\/rpc\//);
 assert.match(libCode, /if \(-not \$SendRequested\) \{ return \$false \}/, "لا إرسال بلا -Send");
@@ -270,10 +307,6 @@ assert.match(libCode, /\$flag = Join-Path \$Dir "send-enabled\.flag"/, "ولا �
 }
 assert.match(agentCode, /Assert-AmeenReadOnlySql \$Sql/, "كل SQL يمرّ عبر حارس القراءة");
 assert.match(agentCode, /SET LOCK_TIMEOUT 3000; /);
-// تعافي الاتصال: لا خروج صامت برمز 1، وحدّ أعلى للمحاولات ثم رمز 6.
-assert.match(agentCode, /\[int\]\$MaxReconnectAttempts = 60,/, "حدّ أعلى لمحاولات إعادة الاتصال");
-assert.match(agentCode, /if \(-not \$link\.ok\) \{ exit 6 \}/, "استنفاد المحاولات ⇒ خروج برمز 6");
-assert.match(agentCode, /Write-AgentLog \("FATAL: /, "الخطأ القاتل يُسجَّل قبل الخروج");
 assert.match(agentCode, /\$ExpectedDatabase = "AmnDb002"/);
 assert.match(agentCode, /if \(\$ListDeadLetter -or \$RepairDeadLetterSeq -gt 0\) \{/, "طريقة واضحة لعرض الأحداث المعزولة وإصلاحها");
 assert.match(libCode, /Move-AmeenEventToDeadLetter -Dir \$Dir -File \$p\.file -InvoiceEvent \$p\.event -Code \$why\.code/, "التحقق المحلي يعزل قبل الإرسال");

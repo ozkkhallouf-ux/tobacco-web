@@ -780,7 +780,17 @@ function Get-CashierAgentPaths([string]$Root) {
         Results = Join-Path $base "results"
         Rejected = Join-Path $base "rejected"
         Heartbeat = Join-Path $base "heartbeat"
+        # قفل النسخة الواحدة داخل processing\ لأن حساب الخدمة لا يصل ملفاتها. Mutex باسم Global\ يستطيع أي حساب
+        # محلي حجزه قبل العامل فيعطّله.
+        Lock = Join-Path (Join-Path $base "processing") "agent.lock"
     }
+}
+
+# قفل حصري (FileShare.None) يبقى ما بقي العامل يعمل. $null ⇒ نسخة أخرى تمسكه.
+function Open-CashierAgentLock([string]$Root) {
+    $path = (Initialize-CashierAgentFolders $Root).Lock
+    try { return New-Object IO.FileStream($path, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) }
+    catch [IO.IOException] { return $null }
 }
 
 function Initialize-CashierAgentFolders([string]$Root) {
@@ -821,16 +831,37 @@ function New-CashierAgentTicket([string]$Root, [int]$Number, [string]$Date, [str
     return $created
 }
 
-# يقرأ التذكرة ويتحقق من صيغتها كاملة؛ أي انحراف ⇒ استثناء (تُرفض ولا تُطبع).
+# يفتح التذكرة للقراءة ويمنع أي كاتب آخر (FileShare.Read بلا Write ولا Delete) ما دام المقبض مفتوحاً.
+function Open-CashierAgentTicketHold([string]$Path) {
+    return New-Object IO.FileStream($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+}
+
+# يقرأ التذكرة من مقبض مفتوح ويتحقق من صيغتها كاملة؛ أي انحراف ⇒ استثناء (تُرفض ولا تُطبع).
+function Read-CashierAgentTicketStream([IO.FileStream]$Stream) {
+    $length = $Stream.Length
+    if ($length -le 0 -or $length -gt $script:CashierAgentTicketMaxBytes) { throw "حجم التذكرة غير مقبول." }
+    $bytes = New-Object byte[] $length
+    $read = 0
+    while ($read -lt $length) {
+        $n = $Stream.Read($bytes, $read, $length - $read)
+        if ($n -le 0) { throw "التذكرة انقطعت أثناء القراءة." }
+        $read += $n
+    }
+    $text = (New-Object Text.UTF8Encoding($false, $true)).GetString($bytes)
+    return (ConvertFrom-CashierAgentTicketText $text ([IO.Path]::GetFileName($Stream.Name)))
+}
+
 function Read-CashierAgentTicket([string]$Path) {
-    $info = Get-Item -LiteralPath $Path
-    if ($info.Length -le 0 -or $info.Length -gt $script:CashierAgentTicketMaxBytes) { throw "حجم التذكرة غير مقبول." }
-    $text = [IO.File]::ReadAllText($Path, (New-Object Text.UTF8Encoding($false)))
-    $raw = $text | ConvertFrom-Json
+    $stream = Open-CashierAgentTicketHold $Path
+    try { return (Read-CashierAgentTicketStream $stream) } finally { $stream.Dispose() }
+}
+
+function ConvertFrom-CashierAgentTicketText([string]$Text, [string]$Name) {
+    $raw = $Text | ConvertFrom-Json
     $names = @($raw.PSObject.Properties | ForEach-Object { $_.Name } | Sort-Object)
     if (($names -join ",") -ne "createdAt,invoiceDate,invoiceNumber,requestedFrom,requestId") { throw "حقول التذكرة غير مطابقة." }
     $id = ConvertTo-CashierAgentId ([string]$raw.requestId)
-    if ($id.ToString("N") + ".json" -ne $info.Name) { throw "اسم التذكرة لا يطابق معرّفها." }
+    if ($id.ToString("N") + ".json" -ne $Name) { throw "اسم التذكرة لا يطابق معرّفها." }
     if ([string]$raw.invoiceNumber -notmatch '^\d{1,9}$' -or [int]$raw.invoiceNumber -le 0) { throw "رقم الفاتورة في التذكرة غير صالح." }
     if ([string]$raw.invoiceDate -notmatch '^\d{4}-\d{2}-\d{2}$') { throw "تاريخ الفاتورة في التذكرة غير صالح." }
     if ([string]$raw.requestedFrom -notmatch '^[A-Za-z0-9-]{1,15}$') { throw "الجهاز الطالب في التذكرة غير صالح." }
@@ -908,10 +939,6 @@ function Invoke-CashierAgentTicket {
     $claimed = Join-Path $paths.Processing $name
     try { [IO.File]::Move($TicketPath, $claimed) }
     catch { return $null }  # سبقه غيره أو اختفت التذكرة: لا شيء يُفعل
-
-    $created = (Get-Item -LiteralPath $claimed).CreationTimeUtc
-    $written = (Get-Item -LiteralPath $claimed).LastWriteTimeUtc
-    $now = [datetime](& $Clock)
     $requestId = $null
     try { $requestId = (ConvertTo-CashierAgentId ([IO.Path]::GetFileNameWithoutExtension($name))).ToString() } catch { $requestId = $null }
 
@@ -924,14 +951,26 @@ function Invoke-CashierAgentTicket {
         return [pscustomobject]@{ Status = $Status; Reason = $Reason; RequestId = $requestId }
     }
 
+    # من لحظة الاستلام: مقبض يمنع أي كتابة، فالأوقات والمالك والمحتوى تُقرأ من النسخة نفسها، والطباعة من
+    # الذاكرة. كاتب ما زال يمسك الملف ⇒ لا يُفتح المقبض ⇒ رفض بلا طباعة. ما يُكتب بعد إغلاق المقبض لا أثر له.
+    try { $hold = Open-CashierAgentTicketHold $claimed } catch { return (Reject "rejected" "ticket_busy") }
+    $ticket = $null
+    $malformed = $false
+    try {
+        $created = [IO.File]::GetCreationTimeUtc($claimed)
+        $written = [IO.File]::GetLastWriteTimeUtc($claimed)
+        $now = [datetime](& $Clock)
+        try { $owner = [string](& $GetOwner $claimed) } catch { $owner = "" }
+        try { $ticket = Read-CashierAgentTicketStream $hold } catch { $malformed = $true }
+    } finally { $hold.Dispose() }
+
     # المهلة أولاً: بعد انقطاع الكهرباء أو توقف العامل لا تُطبع تذكرة قديمة مهما كان مصدرها.
     $ageCreated = ($now - $created).TotalSeconds
     $ageWritten = ($now - $written).TotalSeconds
     if ($ageCreated -gt $Config.agentPickupSeconds -or $ageWritten -gt $Config.agentPickupSeconds) { return (Reject "expired" "pickup_timeout") }
     if ($ageCreated -lt -5 -or $ageWritten -lt -5) { return (Reject "rejected" "clock_skew") }
-    try { $owner = [string](& $GetOwner $claimed) } catch { $owner = "" }
     if (@($Config.agentRequesterSids) -notcontains $owner.ToUpperInvariant()) { return (Reject "rejected" "owner_not_allowed") }
-    try { $ticket = Read-CashierAgentTicket $claimed } catch { return (Reject "rejected" "malformed") }
+    if ($malformed) { return (Reject "rejected" "malformed") }
 
     try {
         $result = & $Print $ticket.InvoiceNumber $ticket.InvoiceDate $ticket.RequestId $ticket.RequestedFrom
