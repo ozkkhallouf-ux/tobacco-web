@@ -59,6 +59,9 @@ const EXECUTED_UNDER_PS51 = [
   "tools/ameen-invoice-event-agent.ps1",
   "tools/ameen-invoice-events-lib.ps1",
   "tools/tests/Test-AmeenInvoiceEvents.ps1",
+  // مراقب الوكيل المستقل (2026-10-27، غير مسجَّل): تنبيه انقطاع SQL الطويل والتوقف
+  "tools/ameen-invoice-agent-monitor.ps1",
+  "tools/tests/Test-AmeenInvoiceAgentMonitor.ps1",
   // طباعة فواتير A4 يدوياً (2026-10-22): اختصار سطح المكتب يشغّل launch.ps1 بـ5.1
   "tools/manual-a4-print/launch.ps1",
   "tools/manual-a4-print/install.ps1",

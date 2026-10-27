@@ -358,8 +358,9 @@ const walk = (dir) => {
     if (entry.isDirectory()) { if (!["node_modules", ".git", "tests"].includes(entry.name)) walk(rel); continue; }
     if (!/\.(ps1|psm1|vbs|cmd|bat|json|js|mjs|yml|yaml)$/.test(entry.name)) continue;
     const relPosix = rel.split(path.sep).join("/");
-    // الوكيل ومكتبته، وفحوص scripts/check*.mjs (تقرأ الملفات ولا تشغّلها — نفس استثناء writeScan في البوابة).
-    if ([agentRel, libRel].includes(relPosix) || /^scripts\/check[^/]*\.mjs$/.test(relPosix)) continue;
+    // الوكيل ومكتبته، والمراقب (يذكر اسمه ليتعرّف على عمليته فقط — حارسه في القسم ٤)، وفحوص scripts/check*.mjs
+    // (تقرأ الملفات ولا تشغّلها — نفس استثناء writeScan في البوابة).
+    if ([agentRel, libRel, "tools/ameen-invoice-agent-monitor.ps1"].includes(relPosix) || /^scripts\/check[^/]*\.mjs$/.test(relPosix)) continue;
     if (readFileSync(path.join(root, rel), "utf8").includes("ameen-invoice-event-agent")) runners.push(rel);
   }
 };
@@ -425,5 +426,36 @@ if (pwshProbe.status !== 0) {
   const m = psText.match(/Ameen invoice events: (\d+) PASS, (\d+) FAIL/);
   assert.ok(m && Number(m[2]) === 0 && Number(m[1]) >= 170, "نتيجة اختبار PowerShell غير متوقعة");
   console.log(`  ✓ اختبار PowerShell (${pwshProbe.stdout.trim()}): ${m[1]} تأكيداً`);
+}
+
+// ── ٤) مراقب الوكيل المستقل (تنبيه انقطاع SQL الطويل، شرط المالك 2026-10-26) ────────────────────
+const monitorRel = "tools/ameen-invoice-agent-monitor.ps1";
+const monitor = read(monitorRel);
+assert.match(monitor, /\$script:EventType = 'invoice_agent'/, "المراقب يرسل بنوع invoice_agent");
+assert.match(monitor, /\[int\]\$ThresholdMinutes = 10,/, "عتبة الانقطاع 10 دقائق افتراضياً");
+assert.match(monitor, /if \(\$out -match 'TELEGRAM-NOTIFY OK'\)/, "التنبيه واصل فقط بسطر TELEGRAM-NOTIFY OK");
+assert.doesNotMatch(monitor, /SqlConnection|Invoke-Sqlcmd|EnvFile|Get-Content|GetEnvironmentVariable|Invoke-RestMethod/,
+  "المراقب لا يتصل بـSQL ولا يقرأ الأسرار ولا يتصل بالشبكة بنفسه");
+assert.doesNotMatch(monitor, /Stop-ScheduledTask|Start-ScheduledTask|Stop-Process|Register-ScheduledTask|Remove-Item/,
+  "المراقب لا يوقف الوكيل ولا يغيّر المهام ولا يحذف شيئاً");
+assert.deepEqual(monitor.split("\n").filter((l) => l.includes("ameen-invoice-event-agent")).map((l) => l.trim().slice(0, 40)),
+  ["if ($p.CommandLine -match 'ameen-invoice"], "المراقب يذكر الوكيل في سطر التعرّف على عمليته وحده، ولا يشغّله");
+// كل نص يُرسل يُبنى من نصوص ثابتة وأوقات ومدد: نص السجل الخام لا يدخل أي تنبيه.
+assert.doesNotMatch(monitor, /\$msg\b[^\n]*-f|-f[^\n]*\$msg\b/, "نص سطر السجل لا يدخل نص تنبيه");
+for (const marker of ["DISCONNECTED:", "RECONNECTING:", "RECOVERED:", "GAVE_UP:", "FATAL:", "بدء الوكيل:", "انتهى الوكيل:", "رفض: مثيل آخر"]) {
+  assert.ok(monitor.includes(`'${marker}`), `المراقب يتعرّف على ${marker}`);
+  assert.ok(agent.includes(marker) || lib.includes(marker), `علامة ${marker} ما زالت يكتبها الوكيل أو مكتبته (عقد السجل)`);
+}
+if (pwshProbe.status === 0) {
+  const pm = spawnSync("pwsh", ["-NoProfile", "-File", path.join(root, "tools/tests/Test-AmeenInvoiceAgentMonitor.ps1")], { encoding: "utf8" });
+  const pmText = output(pm);
+  const mm = pmText.match(/PASSED: (\d+) assertions/);
+  if (pm.status !== 0 || !mm) {
+    console.error(pmText);
+    console.error("check-ameen-invoice-events: agent monitor PowerShell test failed");
+    process.exit(pm.status || 1);
+  }
+  assert.ok(Number(mm[1]) >= 53, `عدد تأكيدات مراقب الوكيل أقل من المتوقع (${mm[1]})`);
+  console.log(`  ✓ مراقب الوكيل (محاكاة الانقطاع والتوقف وفشل Telegram): ${mm[1]} تأكيداً`);
 }
 console.log("check-ameen-invoice-events: اجتاز الفحص.");
