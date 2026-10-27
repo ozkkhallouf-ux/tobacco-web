@@ -167,7 +167,7 @@ try {
     $sent = Get-Sent
     Assert-True ($sent.Count -eq 2 -and $sent[1] -eq 'invoice-agent:back:20261027T091400-gaveup') 'عودة الوكيل: تنبيه back واحد'
     $msg = @(Get-AllMessages | Where-Object { $_ -match '✅' })[0]
-    Assert-True ($msg -match 'عاد للعمل' -and $msg -match 'واتصال SQL عاد بعد انقطاع دام 41 دقيقة') 'عودة SQL مدمجة في رسالة العودة نفسها'
+    Assert-True ($msg -match 'رجع شغّال' -and $msg -match 'وكيل أحداث الفواتير على OZK2026' -and $msg -match 'واتصال SQL عاد بعد انقطاع دام 41 دقيقة') 'عودة SQL مدمجة في رسالة العودة نفسها'
     Add-Perf $c 57
     [void](Invoke-Run $c 60); [void](Invoke-Run $c 70)
     Assert-True ((Get-Sent).Count -eq 2) 'لا sql-up منفصل بعد الدمج، ولا تكرار للعودة'

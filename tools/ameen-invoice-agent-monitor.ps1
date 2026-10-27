@@ -26,6 +26,8 @@
 # تُحفظ ذرّياً بعد كل تنبيه واصل؛ ما لم يصل يُعاد في الفحص التالي بالمفتاح نفسه، والخادم يبتلع
 # أي تكرار بنفس المفتاح خلال 24 ساعة (لو وصل الطلب وضاع الرد).
 #
+# الإرسال داخل العملية نفسها (&): تمرير نص عربي لعملية powershell.exe فرعية يكسر الوسائط على 5.1.
+#
 # الخصوصية: نص التنبيه نصوص ثابتة وأوقات ومدد واسم الجهاز ونوع الخطأ فقط — لا يُنقل أي نص من
 # رسائل السجل (قد تحمل تفاصيل اتصال)، ولا يقرأ المراقب tools\.env إطلاقاً.
 #
@@ -239,7 +241,8 @@ function Get-StopReasonText($Status) {
 function Get-AgentMonitorAlerts($Timeline, $Status, $State, [datetime]$Now, [string]$HostName, [int]$ThresholdMinutes, [int]$FlapMinutes, [int]$LateRecoveryMinutes) {
     $alerts = New-Object System.Collections.ArrayList
     $p = $script:KeyPrefix
-    $tail = ('الجهاز: {0}' -f $HostName)
+    # الاسم والرمزان ⛔/✅ كما في تنبيهات المراقب التجريبي (DRY RUN 2026-10-25) كي لا تختلف الرسائل.
+    $who = ('وكيل أحداث الفواتير على {0}' -f $HostName)
     $alive = ($Status.status -eq 'alive')
     $open = $null
     $notified = @(); if ($State -and $State.notifiedIncidents) { $notified = @($State.notifiedIncidents) }
@@ -250,7 +253,7 @@ function Get-AgentMonitorAlerts($Timeline, $Status, $State, [datetime]$Now, [str
         if (-not $inc.closedAt) {
             $open = $inc
             if ($alive -and ($Now - $inc.start).TotalMinutes -ge $ThresholdMinutes -and -not (Test-SentKey $State $downKey)) {
-                $text = "🔴 وكيل فواتير الأمين: اتصال SQL منقطع منذ {0} (من {1}).`nالوكيل يعيد المحاولة تلقائياً، ولا يُفقد أي حدث.`n{2}" -f (Format-MonDuration ($Now - $inc.start)), (Format-MonTime $inc.start), $tail
+                $text = "🔴 {0}: اتصال SQL منقطع منذ {1} (من {2}).`nالوكيل يعيد المحاولة تلقائياً، ولا يُفقد أي حدث." -f $who, (Format-MonDuration ($Now - $inc.start)), (Format-MonTime $inc.start)
                 [void]$alerts.Add([pscustomobject]@{ key = $downKey; kind = 'sql-down'; text = $text; marks = @($downKey); incident = $inc.id; stopId = $null })
             }
             continue
@@ -261,30 +264,28 @@ function Get-AgentMonitorAlerts($Timeline, $Status, $State, [datetime]$Now, [str
         if ($backDue -and ($notified -contains $inc.id)) { $mergedUp = [pscustomobject]@{ key = $upKey; dur = $dur }; continue }
         if (($Now - $inc.closedAt).TotalMinutes -lt $FlapMinutes) { continue }
         if ((Test-SentKey $State $downKey) -or ($notified -contains $inc.id)) {
-            $text = "🟢 وكيل فواتير الأمين: عاد اتصال SQL بعد انقطاع دام {0} (من {1} حتى {2}).`n{3}" -f $dur, (Format-MonTime $inc.start), (Format-MonTime $inc.closedAt), $tail
+            $text = "🟢 {0}: عاد اتصال SQL بعد انقطاع دام {1} (من {2} حتى {3})." -f $who, $dur, (Format-MonTime $inc.start), (Format-MonTime $inc.closedAt)
             [void]$alerts.Add([pscustomobject]@{ key = $upKey; kind = 'sql-up'; text = $text; marks = @($upKey); incident = $inc.id; stopId = $null })
         } elseif (($inc.closedAt - $inc.start).TotalMinutes -ge $ThresholdMinutes -and ($Now - $inc.closedAt).TotalMinutes -le $LateRecoveryMinutes) {
-            $text = "🟢 وكيل فواتير الأمين: انقطع اتصال SQL {0} (من {1} حتى {2}) ثم عاد.`nلم يُرسل تنبيه الانقطاع في حينه (المراقب لم يعمل خلاله).`n{3}" -f $dur, (Format-MonTime $inc.start), (Format-MonTime $inc.closedAt), $tail
+            $text = "🟢 {0}: انقطع اتصال SQL {1} (من {2} حتى {3}) ثم عاد.`nلم يُرسل تنبيه الانقطاع في حينه (المراقب لم يعمل خلاله)." -f $who, $dur, (Format-MonTime $inc.start), (Format-MonTime $inc.closedAt)
             [void]$alerts.Add([pscustomobject]@{ key = $upKey; kind = 'sql-up'; text = $text; marks = @($upKey); incident = $inc.id; stopId = $null })
         }
     }
     if ($Status.status -eq 'stopped') {
         $stopKey = $p + 'stopped:' + $Status.id
         if (-not (Test-SentKey $State $stopKey)) {
-            $lines = @(('⛔ وكيل فواتير الأمين متوقف: {0}.' -f (Get-StopReasonText $Status)))
+            $lines = @(('⛔ {0} توقف.' -f $who), ('السبب: {0}.' -f (Get-StopReasonText $Status)))
             if ($Timeline.lastLine) { $lines += ('آخر سطر في سجله: {0}.' -f (Format-MonTime $Timeline.lastLine)) }
             if ($open) { $lines += ('اتصال SQL كان منقطعاً منذ {0} ({1}).' -f (Format-MonTime $open.start), (Format-MonDuration ($Now - $open.start))) }
             $lines += 'الأحداث المحفوظة في الصندوق المحلي لا تضيع.'
-            $lines += $tail
             [void]$alerts.Add([pscustomobject]@{ key = $stopKey; kind = 'stopped'; text = ($lines -join "`n"); marks = @($stopKey); incident = $(if ($open) { $open.id } else { $null }); stopId = $Status.id })
         }
     } elseif ($backDue) {
         $backKey = $p + 'back:' + $State.stop.id
-        $lines = @('✅ وكيل فواتير الأمين عاد للعمل.')
+        $lines = @(('✅ {0} رجع شغّال.' -f $who))
         if ($Timeline.lastStart) { $lines += ('أقلع: {0}.' -f (Format-MonTime $Timeline.lastStart)) }
         $marks = @($backKey)
         if ($mergedUp) { $lines += ('واتصال SQL عاد بعد انقطاع دام {0}.' -f $mergedUp.dur); $marks += $mergedUp.key }
-        $lines += $tail
         [void]$alerts.Add([pscustomobject]@{ key = $backKey; kind = 'back'; text = ($lines -join "`n"); marks = $marks; incident = $null; stopId = $null })
     }
     return [pscustomobject]@{ alerts = @($alerts); open = $open }
