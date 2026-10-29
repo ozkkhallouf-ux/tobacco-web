@@ -44,6 +44,8 @@ const PATTERNS = {
   saleLedgerCandidates: /function saleLedgerCandidates\(movements, date, amount\) \{[\s\S]*?\n\}\n/,
   saleInvoiceCandidates: /function saleInvoiceCandidates\(invoices, date, amount\) \{[\s\S]*?\n\}\n/,
   bindSaleInvoiceLedger: /function bindSaleInvoiceLedger\(\{ movements, invoices, invoice = null, movement = null \}\) \{[\s\S]*?\n\}\n/,
+  invoiceLedgerResidual: /function invoiceLedgerResidual\(prev, total, discount, extra, payment, next\) \{[\s\S]*?\n\}\n/,
+  invoiceKnownExtra: /function invoiceKnownExtra\(inv\) \{[\s\S]*?\n\}\n/,
   invoiceEntryProvesResidual: /function invoiceEntryProvesResidual\(movements, movement, residual\) \{[\s\S]*?\n\}\n/,
   saleBindingRefusal: /function saleBindingRefusal\(reason, amount, date, item\) \{[\s\S]*?\n\}\n/,
   movementsReportCovers: /function movementsReportCovers\(dateStr\) \{[\s\S]*?\n\}\n/,
@@ -402,6 +404,38 @@ test("حسم مصنَّف «unknown» في الدفتر يُغلق المعاد�
   h.clickMovement(sale);
   const opts = onlyExport(h);
   assert.ok(!("adjust" in opts));
+});
+
+test("تدوير TotalExtra على رأس الفاتورة: يُطبع «تدوير» ويُغلق القيد، لا يُرفض ولا يُسمّى تسوية", () => {
+  // شاهد #402: 3000.98 + 0.02 = 3001. سطر التدوير مقابل 43 يُوسم discount إن كان
+  // دائناً على الزبون، أو adjustment إن كان مديناً — في الحالين ليس تسوية.
+  const inv = { guid: "00000000-0000-4000-8000-000000000043", number: "43", date: DAY, total: 3000.98, discount: 0, extra: 0.02, payment: 1000, isReturn: false, lines: [line("صنف ف", 1, 3000.98)] };
+  const sale = mv({ debit: 3000.98, docPrev: 0, docNew: 2001, balance: 3000.98, balanceChrono: 3000.98, lineKind: "sale" });
+  const extraLine = mv({ debit: 0.02, docPrev: 0, docNew: 2001, balance: 3001, balanceChrono: 3001, lineKind: "discount" });
+  const pay = mv({ credit: 1000, docPrev: 0, docNew: 2001, balance: 2001, balanceChrono: 2001, lineKind: "sale_payment" });
+  for (const click of ["clickMovement", "clickInvoice"]) {
+    const h = harness({ movements: [sale, extraLine, pay], invoices: [inv] });
+    h[click](click === "clickMovement" ? sale : inv);
+    const opts = onlyExport(h);
+    assert.equal(opts.extra, 0.02);
+    assert.equal(opts.payment, 1000);
+    assert.ok(!("adjust" in opts), "التدوير طُبع تسوية");
+    const rows = ledgerRows(pdf(h, opts)).map((r) => r[0]);
+    assert.ok(rows.includes("تدوير"), rows.join("|"));
+    assert.ok(!rows.includes("إضافة / تسوية") && !rows.includes("تسوية على الحساب"), rows.join("|"));
+  }
+});
+
+test("تدوير 20.49 بلا سطر دفتر مستقل: المعادلة تُغلق من رأس الفاتورة ولا تُرفض", () => {
+  const inv = { guid: "00000000-0000-4000-8000-000000000707", number: "707b", date: DAY, total: 341.51, discount: 0, extra: 20.491, payment: 230, isReturn: false, lines: [line("صنف م", 1, 341.51)] };
+  const sale = mv({ debit: 341.51, docPrev: 0, docNew: 132.001, balance: 341.51, balanceChrono: 341.51, lineKind: "sale" });
+  const pay = mv({ credit: 230, docPrev: 0, docNew: 132.001, balance: 132.001, balanceChrono: 132.001, lineKind: "sale_payment" });
+  const h = harness({ movements: [sale, pay], invoices: [inv] });
+  h.clickInvoice(inv);
+  const opts = onlyExport(h);
+  assert.equal(opts.extra, 20.491);
+  assert.ok(!("adjust" in opts));
+  assert.ok(ledgerRows(pdf(h, opts)).some((r) => r[0] === "تدوير"));
 });
 
 test("فرق أرصدة لا يثبته أي سطر في قيد الفاتورة: لا PDF ولا «تسوية»", () => {

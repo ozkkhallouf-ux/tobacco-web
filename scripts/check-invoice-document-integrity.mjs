@@ -273,10 +273,11 @@ test("balance calculation subtracts both independently", () => {
 });
 
 test("الحسم لا يبتلع الدفعة عند حساب الفرق غير المنسوب", () => {
-  // الفرق يُحسب بعد طرح الحسم والدفعة المعروفَين، فلا يعود يبتلعهما.
-  assert.match(appJs, /opts\.prevBalance \+ total - knownDiscount - knownPayment - opts\.newBalance/);
+  // الفرق يُحسب بعد طرح الحسم والدفعة وإدخال التدوير المعروف، فلا يعود يبتلع أياً منها.
+  assert.match(appJs, /invoiceLedgerResidual\(\s*opts\.prevBalance,/);
   assert.match(appJs, /if \(knownDiscount > 0\.009\) opts\.discount = knownDiscount;/);
   assert.match(appJs, /if \(knownPayment > 0\.009\) opts\.payment = knownPayment;/);
+  assert.match(appJs, /if \(Math\.abs\(knownExtra\) > 0\.009\) opts\.extra = knownExtra;/);
 });
 
 // ===== 3) الفصل المحاسبي من مصدر الأمين (A) =====
@@ -334,8 +335,10 @@ test("TotalDisc لا يُعامل كنسبة", () => {
   assert.ok(!/discount[^\n]*\*\s*(\$b\.total|total)/i.test(ps1Code), "الحسم مضروب بالإجمالي");
   assert.match(ps1, /CAST\(COALESCE\(u\.TotalDisc,0\) AS decimal\(18,3\)\) AS bill_discount/);
   assert.match(ps1, /CAST\(COALESCE\(u\.FirstPay,0\)\s+AS decimal\(18,3\)\) AS bill_first_pay/);
+  assert.match(ps1, /CAST\(COALESCE\(u\.TotalExtra,0\) AS decimal\(18,3\)\) AS bill_extra/);
   assert.match(ps1, /discount = \[math\]::Round\(\$b\.discount, 3\)/);
   assert.match(ps1, /payment  = \[math\]::Round\(\$b\.payment, 3\)/);
+  assert.match(ps1, /extra\s+= \[math\]::Round\(\$b\.extra, 3\)/);
   // SELECT فقط على الأمين. الفحص محصور بنصوص SQL نفسها (here-strings) — بقية
   // السكربت يخاطب Supabase عبر HTTP وله عمليات حذف مشروعة هناك لا علاقة لها بالأمين.
   const sqlBlocks = ps1.match(/@"[\s\S]*?"@/g) || [];
@@ -347,13 +350,14 @@ test("TotalDisc لا يُعامل كنسبة", () => {
   }
   // والحقلان الجديدان من bu000 نفسه بلا join إضافي.
   const invoiceSql = sqlBlocks.find((b) => b.includes("bill_discount")) || "";
-  assert.ok(invoiceSql.includes("u.TotalDisc") && invoiceSql.includes("u.FirstPay"),
+  assert.ok(invoiceSql.includes("u.TotalDisc") && invoiceSql.includes("u.FirstPay") && invoiceSql.includes("u.TotalExtra"),
     "الحقلان لا يُقرآن من رأس الفاتورة");
   assert.equal((invoiceSql.match(/\bJOIN\b/gi) || []).length, 3, "عدد الـjoins تغيّر عن bt000/bi000/mt000");
 });
 
 test("fallback adjustment يساوي فقط الفرق غير المفسر", () => {
-  assert.match(appJs, /opts\.prevBalance \+ total - knownDiscount - knownPayment - opts\.newBalance/);
+  assert.match(appJs, /function invoiceLedgerResidual\(/);
+  assert.equal((appJs.match(/invoiceLedgerResidual\(/g) || []).length, 3, "دالة المعادلة أو موضعَا التصدير غابا");
   // مع القيم الحقيقية للفاتورة 562 لا يبقى فرق إطلاقاً.
   const residual = 0 + AMEEN_562.total - AMEEN_562.discount - AMEEN_562.payment
     - (AMEEN_562.total - AMEEN_562.discount - AMEEN_562.payment);
@@ -365,6 +369,12 @@ test("fallback adjustment يساوي فقط الفرق غير المفسر", () 
   });
   assert.ok(html.includes("<th>الحسم</th>") && html.includes("<th>دفعة من الزبون</th>")
     && html.includes("تسوية على الحساب"), "الثلاثة يجب أن تظهر منفصلة");
+  const extraHtml = voucherPdfMarkup({
+    type: "invoice", name: "س", no: "43", date: "2026-10-26", cur: "$",
+    amount: 3000.98, prevBalance: 0, extra: 0.02, payment: 1000, newBalance: 2001
+  });
+  assert.ok(extraHtml.includes("<th>تدوير</th>"), "سطر التدوير غائب");
+  assert.ok(!extraHtml.includes("تسوية"), "التدوير طُبع تسوية");
 });
 
 // ===== 4) قيمة السطر / نصف الكرتونة (B) =====
@@ -815,25 +825,24 @@ test("تدقيق المصدر: كلتا الدالتين تستشير خطة ا�
 
 // ===== 5) كل مسارات تصدير الفاتورة تنسب الحسم والدفعة (لا مسار متخلّف) =====
 
-test("تدقيق: كل موضع يحسب adjust يطرح الحسم والدفعة أولاً", () => {
+test("تدقيق: كل موضع يحسب adjust يطرح الحسم والدفعة والتدوير أولاً", () => {
   // العطل الذي كان: أُصلح مسار زر الحركات وحده، وبقي مسار «التقارير ← فواتير
   // الزبون» يضع الفرق كاملاً في adjust — فتظهر دفعة الفاتورة 562 «تسوية على
   // الحساب 2000». مسارا تصدير لنفس المستند بنتيجتين مختلفتين.
-  const sites = appJs.match(/opts\.prevBalance \+ (?:total|invoiceTotal|amount)[^;]*?opts\.newBalance/g) || [];
-  assert.ok(sites.length >= 2, `عدد مواضع حساب adjust = ${sites.length} (متوقع 2 على الأقل)`);
-  for (const site of sites) {
-    assert.ok(/knownDiscount/.test(site) && /knownPayment/.test(site),
-      "موضع يحسب adjust بلا طرح الحسم والدفعة: " + site.replace(/\s+/g, " "));
-  }
-  // وكل موضع يمرّر الحقلين إلى المستند.
+  const sites = appJs.match(/invoiceLedgerResidual\(\s*opts\.prevBalance,/g) || [];
+  assert.equal(sites.length, 2, `عدد مواضع حساب adjust = ${sites.length} (متوقع 2)`);
+  // وكل موضع يمرّر الحقول الثلاثة إلى المستند.
   assert.equal((appJs.match(/if \(knownDiscount > 0\.009\) opts\.discount = knownDiscount;/g) || []).length, sites.length);
   assert.equal((appJs.match(/if \(knownPayment > 0\.009\) opts\.payment = knownPayment;/g) || []).length, sites.length);
-  // مسار التقارير يقرأ الحقلين من حمولة الأمين نفسها.
+  assert.equal((appJs.match(/if \(Math\.abs\(knownExtra\) > 0\.009\) opts\.extra = knownExtra;/g) || []).length, sites.length);
+  // مسار التقارير يقرأ الحقول من حمولة الأمين نفسها.
   assert.match(appJs, /Number\(inv\.discount \|\| 0\)/);
   assert.match(appJs, /Number\(inv\.payment \|\| 0\)/);
-  // ومسار زر الحركات يقرأهما من الفاتورة المطابَقة.
+  assert.match(appJs, /invoiceKnownExtra\(inv\)/);
+  // ومسار زر الحركات يقرأها من الفاتورة المطابَقة.
   assert.match(appJs, /Number\(match\.discount \|\| 0\)/);
   assert.match(appJs, /Number\(match\.payment \|\| 0\)/);
+  assert.match(appJs, /invoiceKnownExtra\(match\)/);
 });
 
 test("مسار التقارير: الفاتورة 562 تُظهر دفعة لا تسوية", () => {
