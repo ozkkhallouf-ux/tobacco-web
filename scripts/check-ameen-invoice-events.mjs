@@ -455,7 +455,7 @@ if (pwshProbe.status === 0) {
     console.error("check-ameen-invoice-events: agent monitor PowerShell test failed");
     process.exit(pm.status || 1);
   }
-  assert.ok(Number(mm[1]) >= 53, `عدد تأكيدات مراقب الوكيل أقل من المتوقع (${mm[1]})`);
+  assert.ok(Number(mm[1]) >= 56, `عدد تأكيدات مراقب الوكيل أقل من المتوقع (${mm[1]})`);
   console.log(`  ✓ مراقب الوكيل (محاكاة الانقطاع والتوقف وفشل Telegram): ${mm[1]} تأكيداً`);
 }
 console.log("check-ameen-invoice-events: اجتاز الفحص.");

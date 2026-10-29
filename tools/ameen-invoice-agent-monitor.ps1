@@ -132,6 +132,9 @@ function ConvertFrom-AgentLogLine([string]$Line) {
 
 function Format-AgentId([datetime]$Ts) { return $Ts.ToString('yyyyMMdd\THHmmss', [System.Globalization.CultureInfo]::InvariantCulture) }
 
+# مفتاح داخلي (لا يُرسل): «أُبلغ عن عودة الحادثة عند هذا الإغلاق».
+function Get-UpClosureKey($Incident) { return ($script:KeyPrefix + 'sql-up-closed:' + $Incident.id + '@' + (Format-AgentId $Incident.closedAt)) }
+
 function Test-SentKey($State, [string]$Key) {
     if ($null -eq $State -or $null -eq $State.sentKeys) { return $false }
     return (@($State.sentKeys) -contains $Key)
@@ -139,7 +142,9 @@ function Test-SentKey($State, [string]$Key) {
 
 # يطوي أحداث السجل زمنياً: حوادث انقطاع SQL، وآخر سطر نهاية، وآخر إقلاع.
 # العودة (RECOVERED أو إقلاع جديد) إغلاق مبدئي: انقطاع جديد خلال -FlapMinutes يُكمل الحادثة نفسها
-# (اتصال يتأرجح) ما لم يكن تنبيه عودتها قد أُرسل. الإغلاق يتأكد بمرور -FlapMinutes بلا انقطاع.
+# (اتصال يتأرجح) ما لم يكن تنبيه عودتها قد أُرسل عن هذا الإغلاق بعينه. الإغلاق يتأكد بمرور -FlapMinutes بلا انقطاع.
+# المنع مربوط بوقت الإغلاق الذي أُبلغ عنه لا بالحادثة كلها، فإعادة طيّ السجل نفسه بعد الإرسال تعطي
+# التجميع نفسه (Codex P2 على cf82cff3: عودة قصيرة داخل انقطاع أُبلغ عن نهايته كانت تشطره حادثتين).
 function Get-AgentTimeline($Lines, $State, [int]$FlapMinutes) {
     $events = @()
     foreach ($l in @($Lines)) { $e = ConvertFrom-AgentLogLine $l; if ($e) { $events += $e } }
@@ -159,7 +164,7 @@ function Get-AgentTimeline($Lines, $State, [int]$FlapMinutes) {
         if ($terminal -and @('gaveup', 'fatal', 'end', 'config') -notcontains $e.kind) { $terminal = $null }
         switch ($e.kind) {
             { $_ -eq 'disconnected' -or $_ -eq 'reconnecting' } {
-                $reopen = ($current -and $current.closedAt -and (($e.ts - $current.closedAt).TotalMinutes -lt $FlapMinutes) -and -not (Test-SentKey $State ($script:KeyPrefix + 'sql-up:' + $current.id)))
+                $reopen = ($current -and $current.closedAt -and (($e.ts - $current.closedAt).TotalMinutes -lt $FlapMinutes) -and -not (Test-SentKey $State (Get-UpClosureKey $current)))
                 if ($current -and -not $current.closedAt) { }
                 elseif ($reopen) { $current.closedAt = $null }
                 else {
@@ -261,14 +266,14 @@ function Get-AgentMonitorAlerts($Timeline, $Status, $State, [datetime]$Now, [str
         if (Test-SentKey $State $upKey) { continue }
         $dur = Format-MonDuration ($inc.closedAt - $inc.start)
         # انقطاع ذُكر في تنبيه التوقف ثم عاد مع عودة الوكيل: يُضم إلى رسالة «عاد الوكيل» بدل رسالتين.
-        if ($backDue -and ($notified -contains $inc.id)) { $mergedUp = [pscustomobject]@{ key = $upKey; dur = $dur }; continue }
+        if ($backDue -and ($notified -contains $inc.id)) { $mergedUp = [pscustomobject]@{ key = $upKey; dur = $dur; closure = (Get-UpClosureKey $inc) }; continue }
         if (($Now - $inc.closedAt).TotalMinutes -lt $FlapMinutes) { continue }
         if ((Test-SentKey $State $downKey) -or ($notified -contains $inc.id)) {
             $text = "🟢 {0}: عاد اتصال SQL بعد انقطاع دام {1} (من {2} حتى {3})." -f $who, $dur, (Format-MonTime $inc.start), (Format-MonTime $inc.closedAt)
-            [void]$alerts.Add([pscustomobject]@{ key = $upKey; kind = 'sql-up'; text = $text; marks = @($upKey); incident = $inc.id; stopId = $null })
+            [void]$alerts.Add([pscustomobject]@{ key = $upKey; kind = 'sql-up'; text = $text; marks = @($upKey, (Get-UpClosureKey $inc)); incident = $inc.id; stopId = $null })
         } elseif (($inc.closedAt - $inc.start).TotalMinutes -ge $ThresholdMinutes -and ($Now - $inc.closedAt).TotalMinutes -le $LateRecoveryMinutes) {
             $text = "🟢 {0}: انقطع اتصال SQL {1} (من {2} حتى {3}) ثم عاد.`nلم يُرسل تنبيه الانقطاع في حينه (المراقب لم يعمل خلاله)." -f $who, $dur, (Format-MonTime $inc.start), (Format-MonTime $inc.closedAt)
-            [void]$alerts.Add([pscustomobject]@{ key = $upKey; kind = 'sql-up'; text = $text; marks = @($upKey); incident = $inc.id; stopId = $null })
+            [void]$alerts.Add([pscustomobject]@{ key = $upKey; kind = 'sql-up'; text = $text; marks = @($upKey, (Get-UpClosureKey $inc)); incident = $inc.id; stopId = $null })
         }
     }
     if ($Status.status -eq 'stopped') {
@@ -285,7 +290,7 @@ function Get-AgentMonitorAlerts($Timeline, $Status, $State, [datetime]$Now, [str
         $lines = @(('✅ {0} رجع شغّال.' -f $who))
         if ($Timeline.lastStart) { $lines += ('أقلع: {0}.' -f (Format-MonTime $Timeline.lastStart)) }
         $marks = @($backKey)
-        if ($mergedUp) { $lines += ('واتصال SQL عاد بعد انقطاع دام {0}.' -f $mergedUp.dur); $marks += $mergedUp.key }
+        if ($mergedUp) { $lines += ('واتصال SQL عاد بعد انقطاع دام {0}.' -f $mergedUp.dur); $marks += $mergedUp.key; $marks += $mergedUp.closure }
         [void]$alerts.Add([pscustomobject]@{ key = $backKey; kind = 'back'; text = ($lines -join "`n"); marks = $marks; incident = $null; stopId = $null })
     }
     return [pscustomobject]@{ alerts = @($alerts); open = $open }

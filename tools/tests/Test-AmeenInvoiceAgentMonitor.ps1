@@ -265,6 +265,24 @@ try {
     $sent = Get-Sent
     Assert-True ($sent.Count -eq 1 -and $sent[0] -eq 'invoice-agent:sql-down:20261027T091000' -and (Get-AllMessages)[0] -match 'منذ 12 دقيقة') 'تأرجح 12 دقيقة: تنبيه واحد من أول انقطاع'
 
+    # Codex P2 على cf82cff3: عودة قصيرة داخل انقطاع طويل ثم إرسال تنبيه عودته لا يشطر الحادثة في الفحص التالي.
+    $c = New-Case 'flap-replay'
+    Add-Start $c 0; Add-Down $c 10; Add-Up $c 10.5; Add-Down $c 13; Add-Retry $c 20 1
+    [void](Invoke-Run $c 21)
+    Add-Up $c 40; Add-Perf $c 45
+    [void](Invoke-Run $c 47)
+    Add-Perf $c 55; Add-Perf $c 65; Add-Perf $c 80; Add-Perf $c 88
+    [void](Invoke-Run $c 52); [void](Invoke-Run $c 57); [void](Invoke-Run $c 90)
+    $sent = Get-Sent
+    Assert-True ($sent.Count -eq 2 -and $sent[0] -eq 'invoice-agent:sql-down:20261027T091000' -and $sent[1] -eq 'invoice-agent:sql-up:20261027T091000') ('بعد إرسال العودة: إعادة طيّ السجل نفسه لا تولّد عودة ثانية: ' + ($sent -join ','))
+    $msgs = Get-AllMessages
+    Assert-True ((@($msgs | Where-Object { $_ -match '🟢' }) -join "`n") -match 'دام 30 دقيقة') 'المدة من أول انقطاع حتى العودة الأخيرة'
+    # وبعد الإرسال: انقطاع جديد قريب من العودة المبلَّغ عنها حادثة جديدة لا تُسكت.
+    Add-Down $c 92; Add-Retry $c 102 1
+    [void](Invoke-Run $c 103)
+    $sent = Get-Sent
+    Assert-True ($sent.Count -eq 3 -and $sent[2] -eq 'invoice-agent:sql-down:20261027T103200') 'انقطاع جديد بعد العودة المبلَّغ عنها: حادثة جديدة بتنبيهها'
+
     Write-Host '== 9) انقطاع فات المراقب كله'
     $c = New-Case 'late'
     Add-Start $c 0; Add-Down $c 10; Add-Up $c 30; Add-Perf $c 35
