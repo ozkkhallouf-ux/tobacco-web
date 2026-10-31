@@ -234,11 +234,39 @@
 **الخطوة التالية (موافقة منفصلة):** Ruleset ثانٍ يمنع تحديث `windows-production` إلا للتطبيق `5412959`
 (Integration bypass)، وتبقى القاعدة الحالية (منع الحذف وforce) بلا أي استثناء.
 
+## الدفعة د0 (2026-10-31): وكيل الفواتير ومراقبه، وسجل المشغّل
+
+في المستودع فقط. نسخ الإعداد إلى ProgramData وتجهيز مجلد السجل خطوتان إداريتان، كلٌّ بموافقة مستقلة.
+
+- **«TOBACCO Ameen Invoice Agent» في `longRunningComponents`** (ملفّا الوكيل ومكتبته):
+  - الوكيل عملية واحدة طويلة، تحمّل `ameen-invoice-events-lib.ps1` مرة واحدة عند البدء.
+  - نشرٌ يغيّر أحدهما يسجّل `DEPLOYED_PENDING_RESTART`، ولا يعيد تشغيل شيء.
+  - البوابة لا تلمس وسائط المهمة ولا `-Send` ولا `-StrictEnvFile` ولا ملف الاتصال. هذه قرارات مالك خارجها.
+- **«TOBACCO Ameen Invoice Agent Monitor» في `pauseTasks`**، وهو غير معفى من التوجيه لأن كوده من المستودع:
+  - ما دام غير موجّه عبر `run-repo-task.ps1`، فهو المهمة غير الموجّهة رقم 16، وDeploy يتوقف عليه (STOP).
+  - توجيهه دفعة لاحقة بموافقة.
+- **سجل المشغّل:**
+  - حسابا المهام LOQ وOZKSync لهما قراءة وتنفيذ فقط على مجلد البوابة، فلا يُكتب `gateDir\launcher.log` اليوم (يُستعمل Write-Host بدلاً منه).
+  - صار المفتاح `launcherLogDir` يحدد مجلداً منفصلاً هو `C:\ProgramData\OZK-TOBACCO\logs\run-repo-task`.
+  - الملف شهري `launcher-YYYY-MM.log`، والتدوير بالاسم: لا حذف ولا إعادة تسمية.
+  - المشغّل لا ينشئ المجلد، ويرفض مجلداً هو مجلد البوابة أو داخله.
+- **`set-launcher-log-acl.ps1`** يجهّز المجلد بحساب مدير، وبلا `-Apply` يطبع الخطة فقط. الصلاحيات التي يضعها:
+  - قائمة محمية، والمالك Administrators.
+  - للحسابين على المجلد: عرض وإنشاء ملفات فقط.
+  - للحسابين على الملفات: قراءة وكتابة وإلحاق.
+  - بلا حذف، ولا تغيير صلاحيات، ولا امتلاك، ولا مجلدات فرعية.
+  - `OWNER RIGHTS` (S-1-3-4) يلغي `WRITE_DAC` الضمني لمنشئ الملف.
+  - لا يمسّ مجلد البوابة.
+- **حد معروف:** LOQ عضو في Administrators. الحماية تفترض أن المهام تعمل بـ`RunLevel Limited`.
+
 ## الفحوص الإلزامية
 
 - `npm run check`، ويشمل `check-windows-deploy-gate.mjs`.
-- `tools/tests/Test-DeployGate.ps1` و`tools/tests/Test-RunRepoTask.ps1` على Windows
-  PowerShell 5.1. يشغّلهما عدّاء `ps51-compat` في `check.yml`، ويعملان محلياً أيضاً بـ`pwsh`.
+- على Windows PowerShell 5.1، ثلاثة اختبارات:
+  - `tools/tests/Test-DeployGate.ps1`
+  - `tools/tests/Test-RunRepoTask.ps1`
+  - `tools/tests/Test-LauncherLogAcl.ps1`: حساب محلي مؤقت غير مدير يكتب السجل عبر المشغّل الحقيقي، ويُرفض تعديله لملفات البوابة. يحتاج مديراً.
+- يشغّلها عدّاء `ps51-compat` في `check.yml`.
 
 ## الخطوة التالية (كل خطوة بموافقة المالك)
 

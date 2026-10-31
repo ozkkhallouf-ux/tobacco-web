@@ -442,7 +442,9 @@ try {
         @{ file = 'tools/ameen-read-gateway.ps1'; name = 'TOBACCO Ameen Read Worker' },
         @{ file = 'tools/ameen-autoprint/invoice-html.js'; name = 'OZK-AmeenAutoPrint' },
         @{ file = 'tools/ameen-autoprint/package.json'; name = 'OZK-AmeenAutoPrint' },
-        @{ file = 'scripts/serve.mjs'; name = 'OZK-Tobacco-Server (scripts/serve.mjs)' })
+        @{ file = 'scripts/serve.mjs'; name = 'OZK-Tobacco-Server (scripts/serve.mjs)' },
+        @{ file = 'tools/ameen-invoice-event-agent.ps1'; name = 'TOBACCO Ameen Invoice Agent' },
+        @{ file = 'tools/ameen-invoice-events-lib.ps1'; name = 'TOBACCO Ameen Invoice Agent' })
     foreach ($c in $cases) {
         $ec = New-InitializedEnv
         $sha = Publish-TestRelease $ec @{ ($c.file) = ("// change " + [guid]::NewGuid().ToString('N') + "`n") } -Approve

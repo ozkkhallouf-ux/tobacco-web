@@ -117,6 +117,37 @@ try {
     Assert-True ($code -eq 2) 'script outside the repository refused'
     $code = Invoke-RepoTask -Config $config -RelativeScript 'tools/missing.ps1' -Arguments @() -PsExe $psExe
     Assert-True ($code -eq 2 -and ($script:Alerts -contains 'launcher-missing-tools/missing.ps1')) 'missing script refused with alert'
+
+    Write-Host '== Launcher log location (batch D0: launcherLogDir)'
+    $gateLog = Join-Path $gate 'launcher.log'
+    Assert-True (Test-Path -LiteralPath $gateLog) 'without launcherLogDir the launcher keeps writing gateDir\launcher.log'
+    $logDir = Join-Path $base 'logs'
+    New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+    $logConfig = [pscustomobject]@{ repoPath = $repo; gateDir = $gate; flagTtlMinutes = 15; writerScripts = @($config.writerScripts); launcherLogDir = $logDir }
+    $before = (Get-Item -LiteralPath $gateLog).Length
+    $code = Invoke-RepoTask -Config $logConfig -RelativeScript 'tools/missing-two.ps1' -Arguments @() -PsExe $psExe
+    $monthLog = Join-Path $logDir ('launcher-' + (Get-Date).ToString('yyyy-MM', [Globalization.CultureInfo]::InvariantCulture) + '.log')
+    Assert-True ($code -eq 2 -and (Test-Path -LiteralPath $monthLog)) 'with launcherLogDir the log goes to launcher-YYYY-MM.log in that directory'
+    Assert-True (([System.IO.File]::ReadAllText($monthLog)) -like '*REFUSE missing script: tools/missing-two.ps1*') 'the refusal line is in the monthly log'
+    Assert-True ((Get-Item -LiteralPath $gateLog).Length -eq $before) 'nothing more is written to gateDir'
+    $p1 = Get-LauncherLogPath $logConfig ([datetime]'2026-10-31T23:59:00')
+    $p2 = Get-LauncherLogPath $logConfig ([datetime]'2026-11-01T00:00:00')
+    Assert-True ($p1 -like '*launcher-2026-10.log' -and $p2 -like '*launcher-2026-11.log') 'rotation is by month in the file name (no delete or rename needed)'
+    foreach ($bad in @($gate, (Join-Path $gate 'logs'), ($gate + [IO.Path]::DirectorySeparatorChar))) {
+        $badConfig = [pscustomobject]@{ repoPath = $repo; gateDir = $gate; flagTtlMinutes = 15; writerScripts = @(); launcherLogDir = $bad }
+        Assert-True ($null -eq (Get-LauncherLogPath $badConfig)) ('a log dir that is the gate dir or inside it is refused: ' + $bad)
+    }
+    $insideConfig = [pscustomobject]@{ repoPath = $repo; gateDir = $gate; flagTtlMinutes = 15; writerScripts = @(); launcherLogDir = (Join-Path $gate 'logs') }
+    $before = (Get-Item -LiteralPath $gateLog).Length
+    $code = Invoke-RepoTask -Config $insideConfig -RelativeScript 'tools/reader.ps1' -Arguments @('-Tag', 'l1') -PsExe $psExe
+    Write-TestFile $flag '{}'
+    $code2 = Invoke-RepoTask -Config $insideConfig -RelativeScript 'tools/reader.ps1' -Arguments @('-Tag', 'l2') -PsExe $psExe
+    Remove-Item -LiteralPath $flag
+    Assert-True ($code -eq 3 -and $code2 -eq 0 -and -not (Test-Path -LiteralPath (Join-Path $gate 'logs')) -and (Get-Item -LiteralPath $gateLog).Length -eq $before) 'refused log dir: nothing written near the gate files, the task still runs or skips normally'
+    $missingDir = Join-Path $base 'not-provisioned'
+    $missingConfig = [pscustomobject]@{ repoPath = $repo; gateDir = $gate; flagTtlMinutes = 15; writerScripts = @(); launcherLogDir = $missingDir }
+    $code = Invoke-RepoTask -Config $missingConfig -RelativeScript 'tools/missing-three.ps1' -Arguments @() -PsExe $psExe
+    Assert-True ($code -eq 2 -and -not (Test-Path -LiteralPath $missingDir)) 'an unprovisioned log dir is never created by the launcher, and the refusal still happens'
 } catch {
     Add-Failure ('unexpected error: ' + $_.Exception.Message)
 } finally {
