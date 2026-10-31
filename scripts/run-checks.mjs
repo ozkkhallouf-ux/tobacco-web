@@ -19,25 +19,33 @@
 // الوسائط (للمنسِّق نفسه، لا تُمرَّر لأي فحص):
 //   بلا وسائط       → كل CHECKS بترتيب البيان (السلوك الافتراضي، لم يتغيّر).
 //   --shard k/n     → الجزء k من n بتقسيم حتمي (scripts/run-checks-shard.mjs).
+//   --weights <ملف> → مع --shard: تقسيم موزون بأزمنة CI (scripts/checks.weights.json).
+//   --report <ملف>  → مع --shard: يكتب تقرير JSON بالفحوص المنفَّذة **فقط إن نجحت كلها**؛
+//                     تتحقق منه وظيفة التجميع في CI (scripts/verify-check-shards.mjs).
 //   --list          → يطبع أسماء الفحوص المختارة سطراً سطراً ولا يشغّل شيئاً.
 //   أي وسيط آخر يُرفض برمز خروج 2 قبل تشغيل أي فحص.
 //
 // قائمة الفحوص وترتيبها في scripts/checks.manifest.mjs، وهو مصدر الحقيقة.
 // ============================================================================
 import { spawnSync } from 'node:child_process';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { CHECKS } from './checks.manifest.mjs';
-import { formatSeconds, parseRunChecksArgs, selectShard } from './run-checks-shard.mjs';
+import {
+  buildShardReport, formatSeconds, parseRunChecksArgs, parseWeights, selectShard,
+} from './run-checks-shard.mjs';
 
 const scriptsDir = path.dirname(fileURLToPath(import.meta.url));
 
 let options;
+let weights = null;
 let selected;
 try {
   options = parseRunChecksArgs(process.argv.slice(2));
-  selected = selectShard(CHECKS, options.shard);
+  if (options.weights) weights = parseWeights(readFileSync(options.weights, 'utf8'));
+  selected = selectShard(CHECKS, options.shard, weights);
 } catch (error) {
   console.error(`run-checks: ${error.message}`);
   process.exit(2);
@@ -88,4 +96,9 @@ for (const name of selected) {
 }
 
 printTimings();
+if (options.report) {
+  const report = buildShardReport({ checks: CHECKS, shard: options.shard, weights, executed: timings.map((t) => t.name) });
+  mkdirSync(path.dirname(path.resolve(options.report)), { recursive: true });
+  writeFileSync(options.report, `${JSON.stringify(report, null, 2)}\n`);
+}
 console.log(`run-checks: اجتاز ${selected.length} فحصاً${scope}.`);
