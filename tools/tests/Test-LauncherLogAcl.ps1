@@ -85,9 +85,11 @@ try {
         $rng = New-Object System.Security.Cryptography.RNGCryptoServiceProvider
         $bytes = New-Object byte[] 28
         $rng.GetBytes($bytes)
-        $plain = 'Aa1!' + (-join ($bytes | ForEach-Object { $chars[$_ % $chars.Length] }))
-        $secure = ConvertTo-SecureString $plain -AsPlainText -Force
-        $plain = $null
+        # كلمة سر عشوائية تُبنى حرفاً حرفاً داخل SecureString مباشرة: لا نص صريح ولا ConvertTo-SecureString.
+        $secure = New-Object System.Security.SecureString
+        foreach ($c in [char[]]'Aa1!') { $secure.AppendChar($c) }
+        foreach ($b in $bytes) { $secure.AppendChar($chars[$b % $chars.Length]) }
+        $secure.MakeReadOnly()
         New-LocalUser -Name $userName -Password $secure -AccountNeverExpires -PasswordNeverExpires -UserMayNotChangePassword -Description 'OZK launcher log ACL test (temporary)' | Out-Null
         $userCreated = $true
         Add-LocalGroupMember -Group (New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-545')).Translate([System.Security.Principal.NTAccount]).Value.Split('\')[-1] -Member $userName -ErrorAction SilentlyContinue
