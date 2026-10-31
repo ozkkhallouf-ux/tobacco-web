@@ -237,9 +237,10 @@ SELECT CAST(u.GUID AS varchar(40)) AS bill_guid,
        -- (ItemsDiscAccGUID مقابل FPayAccGUID). TotalDisc **قيمة نقدية** لا نسبة،
        -- فلا تُضرب بالإجمالي. Total إجمالي قبل الحسم (مؤكَّد: Total = مجموع
        -- الأسطر بالضبط رغم وجود TotalDisc). أثر الفاتورة على حساب الزبون =
-       -- Total − TotalDisc − FirstPay.
+       -- Total − TotalDisc + TotalExtra − FirstPay.
        CAST(COALESCE(u.TotalDisc,0) AS decimal(18,3)) AS bill_discount,
        CAST(COALESCE(u.FirstPay,0)  AS decimal(18,3)) AS bill_first_pay,
+       CAST(COALESCE(u.TotalExtra,0) AS decimal(18,3)) AS bill_extra,
        bt.BillType AS bill_type,
        $currencyIsoSel AS currency_iso,
        $currencyValSel AS currency_val,
@@ -294,6 +295,7 @@ ORDER BY u.Date DESC, u.GUID
                 total    = [double]$r["bill_total"]
                 discount = [double]$r["bill_discount"]
                 payment  = [double]$r["bill_first_pay"]
+                extra    = [double]$r["bill_extra"]
                 # مرتجع مبيعات (BillType=3) — نميّزه عن فاتورة البيع العادية (BillType=1)
                 # ليعرضه الموقع كمستند «فاتورة مرتجع» منفصل بدل دمجه كدفعة عامة.
                 isReturn = ([int]$r["bill_type"] -eq 3)
@@ -356,6 +358,7 @@ ORDER BY u.Date DESC, u.GUID
             total    = [math]::Round($b.total, 3)
             discount = [math]::Round($b.discount, 3)
             payment  = [math]::Round($b.payment, 3)
+            extra    = [math]::Round($b.extra, 3)
             isReturn = $b.isReturn
             lines    = $b.lines.ToArray()
         })
