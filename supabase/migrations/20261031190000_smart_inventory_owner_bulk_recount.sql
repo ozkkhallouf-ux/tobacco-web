@@ -52,7 +52,14 @@ begin
   if cardinality(v_refs)=0 then raise exception 'items_required'; end if;
   if cardinality(v_refs)>1000 then raise exception 'too_many_items'; end if;
 
-  -- قفل الجلسات أولاً بترتيب ثابت كي لا يتداخل مع إغلاق جلسة من جهاز موظف.
+  -- ترتيب الأقفال مطابق لحفظ الموظف (smart_inventory_save_item): الأصناف أولاً ثم الجلسة،
+  -- وإلا قد يتقاطع قفلنا للجلسة مع FOR SHARE الذي يأخذه الحفظ بعد قفل صنفه فيحدث deadlock.
+  perform 1 from public.smart_inventory_items i
+    join public.smart_inventory_sessions s on s.id=i.session_id
+    where s.inventory_date=v_date and coalesce(nullif(i.item_guid,''),i.item_key)=any(v_refs)
+    order by i.id for update of i;
+
+  -- ثم الجلسات بترتيب ثابت؛ القراءة تحت القفل ترى آخر حالة ملتزمة (إغلاق متزامن يُعاد فتحه).
   for v_session in
     select s.* from public.smart_inventory_sessions s
     where s.inventory_date=v_date

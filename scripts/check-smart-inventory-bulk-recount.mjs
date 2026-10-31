@@ -29,6 +29,10 @@ for (const contract of [
   "order by s.id for update",
 ]) assert(code.includes(contract), `Bulk recount migration missing: ${contract}`);
 
+// نفس ترتيب أقفال smart_inventory_save_item (الصنف ثم الجلسة) كي لا يحدث deadlock مع حفظ موظف.
+const itemLock = code.indexOf("order by i.id for update of i");
+const sessionLock = code.indexOf("order by s.id for update");
+assert(itemLock > 0 && sessionLock > itemLock, "Bulk recount must lock items before sessions (same order as counter save).");
 // العد الأعمى يبقى: لا مسح لهوية الجارد الأصلي ولا لكمياته ولا حذف محاولات.
 const updates = [...code.matchAll(/\bupdate\s+public\.\w+[^;]*?\bset\b([\s\S]*?)(?:\bwhere\b|\bfrom\b)/gi)].map((m) => m[1]).join("\n");
 assert(updates.length > 0 && !/\b(counted_by|counted_by_display_name|count_state|unit1_qty|unit2_qty|actual_qty_unit1|damaged_unit1_qty)\s*=/i.test(updates) && !/delete\s+from/i.test(code),
