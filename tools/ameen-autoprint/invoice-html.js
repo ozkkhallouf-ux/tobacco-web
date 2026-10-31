@@ -64,14 +64,29 @@ function invoiceSummary(inv) {
   return { extra, net, remaining: net - inv.firstPay };
 }
 
-function buildInvoiceHtml(inv) {
+// عمودا «سعر الوحدة» و«الإجمالي» اختياريان: يطلبهما عامل أرشفة Drive وحده بعد مطابقة
+// مجموع الأسطر مع إجمالي الفاتورة (lib/line-prices.js في مجلد عامل الأرشفة).
+// بلا الخيار يبقى الناتج حرفياً كما هو للطباعة التلقائية واليدوية A4.
+const PRICE_CSS = `<style>
+  td.num, th.num { white-space:nowrap; }
+  td.num { text-align:left; }
+</style>`;
+
+function pricedItems(items) {
+  return items.length > 0 && items.every((it) => Number.isFinite(it.unitPrice) && Number.isFinite(it.lineTotal));
+}
+
+function buildInvoiceHtml(inv, { linePrices = false } = {}) {
   const items = Array.isArray(inv.items) ? inv.items : [];
   const { extra, net, remaining } = invoiceSummary(inv);
+  const priced = linePrices === true && pricedItems(items);
 
   const rows = items.length
     ? items.map((it, i) =>
         `<tr><td>${i + 1}</td><td>${esc(it.name)}</td>`
-        + `<td>${money(it.qty)} ${esc(it.unit)}</td></tr>`
+        + `<td>${money(it.qty)} ${esc(it.unit)}</td>`
+        + (priced ? `<td class="num">${amt(inv, it.unitPrice)}</td><td class="num">${amt(inv, it.lineTotal)}</td>` : "")
+        + `</tr>`
       ).join("")
     : `<tr><td colspan="3" style="color:var(--muted)">لا توجد أصناف</td></tr>`;
 
@@ -151,7 +166,7 @@ function buildInvoiceHtml(inv) {
     .wrap { padding-top:0; padding-bottom:0; }
   }
 </style>
-</head>
+${priced ? PRICE_CSS : ""}</head>
 <body>
 <div class="wrap">
   <div class="doc">
@@ -180,11 +195,11 @@ function buildInvoiceHtml(inv) {
     </div>
 
     <table>
-      <thead><tr><th>#</th><th>الصنف</th><th>الكمية</th></tr></thead>
+      <thead><tr><th>#</th><th>الصنف</th><th>الكمية</th>${priced ? `<th class="num">سعر الوحدة</th><th class="num">الإجمالي</th>` : ""}</tr></thead>
       <tbody>
       ${rows}
       <tr class="totrow">
-        <td colspan="2">إجمالي الفاتورة</td>
+        <td colspan="${priced ? 4 : 2}">إجمالي الفاتورة</td>
         <td>${amt(inv, inv.total)}</td>
       </tr>
       </tbody>
