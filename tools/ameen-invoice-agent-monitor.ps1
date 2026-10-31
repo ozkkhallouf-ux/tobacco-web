@@ -233,7 +233,7 @@ function Get-StopReasonText($Status) {
         'gaveup' { return 'استنفد محاولات إعادة اتصال SQL (GAVE_UP) وخرج' }
         'fatal' { if ($Status.type) { return ('خطأ غير متوقع أوقفه (FATAL: {0})' -f $Status.type) } return 'خطأ غير متوقع أوقفه (FATAL)' }
         'end' { return 'انتهى تشغيله' }
-        'config' { return 'رفض الإقلاع (إعداد أو قاعدة بيانات غير صحيحة)' }
+        'config' { return 'رفض الإقلاع (إعداد أو ملف اتصال أو قاعدة بيانات أو حساب SQL غير مقبول)' }
         'process-missing' { return 'عمليته غير موجودة' }
         'hung' { return ('عمليته موجودة لكن سجله متوقف منذ {0} دقيقة' -f [int]$Status.ageMinutes) }
         'stale' { return ('لا جديد في سجله منذ {0} دقيقة' -f [int]$Status.ageMinutes) }
@@ -276,9 +276,16 @@ function Get-AgentMonitorAlerts($Timeline, $Status, $State, [datetime]$Now, [str
             [void]$alerts.Add([pscustomobject]@{ key = $upKey; kind = 'sql-up'; text = $text; marks = @($upKey, (Get-UpClosureKey $inc)); incident = $inc.id; stopId = $null })
         }
     }
+    # توقف أُبلغ عنه ولم يُعقبه إقلاع: المهمة تعيد إطلاق الوكيل كل 10 دقائق، فرفض متكرر (حساب SQL غير مقبول،
+    # ملف اتصال مفقود) يكتب سطر «رفض:» جديداً كل مرة بمعرّف جديد. رسالة واحدة لكل توقف حتى يعود الوكيل.
+    $repeatStop = $false
+    if ($Status.status -eq 'stopped' -and $State -and $State.stop -and -not (Test-SentKey $State ($p + 'back:' + $State.stop.id))) {
+        $stopAt = ConvertTo-MonDate $State.stop.at
+        $repeatStop = ($stopAt -and -not ($Timeline.lastStart -and $Timeline.lastStart -gt $stopAt))
+    }
     if ($Status.status -eq 'stopped') {
         $stopKey = $p + 'stopped:' + $Status.id
-        if (-not (Test-SentKey $State $stopKey)) {
+        if (-not $repeatStop -and -not (Test-SentKey $State $stopKey)) {
             $lines = @(('⛔ {0} توقف.' -f $who), ('السبب: {0}.' -f (Get-StopReasonText $Status)))
             if ($Timeline.lastLine) { $lines += ('آخر سطر في سجله: {0}.' -f (Format-MonTime $Timeline.lastLine)) }
             if ($open) { $lines += ('اتصال SQL كان منقطعاً منذ {0} ({1}).' -f (Format-MonTime $open.start), (Format-MonDuration ($Now - $open.start))) }

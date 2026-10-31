@@ -245,6 +245,14 @@ for (const name of [
   "agent: only failures before Resolve can trigger SQL recovery",
   "agent: database name re-verified after every reconnect",
   "agent: dead pooled connections cleared before reopening",
+  "strict env file: agent refuses a missing, corrupt or malformed file with code 7 and never falls back to the environment",
+  "strict env file: SQL outage still goes through DISCONNECTED/RECONNECTING/GAVE_UP (code 6)",
+  "login guard: query passes the read-only guard as is",
+  "login guard: unexpected account refused without naming it",
+  "login guard: write on the price table, db_datawriter, database INSERT, EXECUTE or sysadmin refused",
+  "login guard: fail-closed on undetermined role, missing read permission or empty result",
+  "login guard: runs after the database check on every connection, first and after each reconnect",
+  "login guard: a confirmed violation stops the agent with code 8 and a refusal line",
 ]) assert.ok(psTest.includes(`'${name}'`), `اختبار PowerShell إلزامي مفقود: ${name}`);
 
 const rollback = read(rollbackRel).replace(/--.*$/gm, "");

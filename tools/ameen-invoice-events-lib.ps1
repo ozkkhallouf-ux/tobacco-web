@@ -50,6 +50,96 @@ function Assert-AmeenReadOnlySql {
     if ($s -match ';\s*\S') { throw "AMEEN-READ-ONLY: refused multiple statements" }
 }
 
+# ---------------------------------------------------------------- حساب SQL الصارم (2026-10-31)
+# -StrictEnvFile: سلسلة الاتصال من الملف المحدد حصراً. لا رجوع إلى متغيرات البيئة، فغياب الملف أو تلفه
+# يوقف الوكيل بدل أن يعود صامتاً إلى حساب آخر (على OZK2026 متغير المستخدم يشير إلى حساب يكتب الأسعار).
+# لا يُعاد نص السلسلة ولا أي جزء منها في السبب.
+function Read-AmeenStrictConnectionSetting {
+    param([Parameter(Mandatory = $true)][string]$Path, [string]$Name = "AMEEN_SQL_CONNECTION_STRING")
+    $fail = { param($Reason) return [pscustomobject]@{ ok = $false; reason = $Reason; value = $null } }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return (& $fail "missing") }
+    try { $lines = @(Get-Content -LiteralPath $Path -Encoding UTF8 -ErrorAction Stop) } catch { return (& $fail "unreadable") }
+    $pattern = '^\s*' + [regex]::Escape($Name) + '\s*=(.*)$'
+    $found = @($lines | Where-Object { $_ -match $pattern })
+    if ($found.Count -eq 0) { return (& $fail "no-key") }
+    if ($found.Count -gt 1) { return (& $fail "duplicate-key") }
+    $value = ([regex]::Match($found[0], $pattern)).Groups[1].Value.Trim()
+    if (-not $value) { return (& $fail "empty") }
+    try {
+        Add-Type -AssemblyName "System.Data"
+        $b = New-Object System.Data.SqlClient.SqlConnectionStringBuilder($value)
+    } catch { return (& $fail "malformed") }
+    if (-not $b.DataSource -or -not $b.InitialCatalog) { return (& $fail "malformed") }
+    return [pscustomobject]@{ ok = $true; reason = $null; value = $value }
+}
+
+# حارس حساب SQL عند كل اتصال: الحساب المتصل هو المتوقع، ويقرأ الجداول الأربعة، ولا يملك أي كتابة أو تعديل
+# أو دور إداري. استعلام SELECT واحد بدوال الصلاحيات القياسية (بلا مسح كتالوج)، وأسماء الأدوار والصلاحيات
+# معاملات لا نصوص في الاستعلام، فيمرّ بحارس القراءة فقط كما هو.
+$script:AmeenGuardServerRoles = @("sysadmin", "serveradmin", "securityadmin", "setupadmin", "processadmin", "diskadmin", "dbcreator", "bulkadmin")
+$script:AmeenGuardDbRoles = @("db_owner", "db_datawriter", "db_ddladmin", "db_securityadmin", "db_accessadmin", "db_backupoperator")
+$script:AmeenGuardServerPerms = @("CONTROL SERVER", "ALTER ANY LOGIN", "ALTER ANY DATABASE", "IMPERSONATE ANY LOGIN")
+$script:AmeenGuardDbPerms = @("INSERT", "UPDATE", "DELETE", "ALTER", "EXECUTE", "CONTROL", "TAKE OWNERSHIP", "ALTER ANY SCHEMA", "ALTER ANY USER", "ALTER ANY ROLE")
+$script:AmeenGuardReadTables = @("dbo.log000", "dbo.bt000", "dbo.bu000", "dbo.bi000")
+$script:AmeenGuardWriteTables = @("dbo.log000", "dbo.bt000", "dbo.bu000", "dbo.bi000", "dbo.MaterialPriceListItem000")
+$script:AmeenGuardObjectPerms = @("INSERT", "UPDATE", "DELETE", "ALTER", "CONTROL", "TAKE OWNERSHIP")
+# صلاحيات المخطط dbo: إنشاء أي كائن يتطلب ALTER على المخطط، والمنح على المخطط يشمل كل جداوله.
+$script:AmeenGuardSchemaPerms = @("ALTER", "CONTROL", "INSERT", "UPDATE", "DELETE", "EXECUTE", "TAKE OWNERSHIP")
+
+function Get-AmeenLoginGuardQuery {
+    # يعيد نص الاستعلام ومعاملاته وقائمة الفحوص (العمود ونوعه والوصف الذي يظهر في سطر الرفض).
+    param([Parameter(Mandatory = $true)][string]$Database)
+    $items = New-Object System.Collections.ArrayList
+    foreach ($r in $script:AmeenGuardServerRoles) { [void]$items.Add(@{ kind = "srvrole"; expr = "IS_SRVROLEMEMBER({r})"; label = ("server-role:" + $r); values = @{ r = $r } }) }
+    foreach ($r in $script:AmeenGuardDbRoles) { [void]$items.Add(@{ kind = "dbrole"; expr = "IS_ROLEMEMBER({r})"; label = ("db-role:" + $r); values = @{ r = $r } }) }
+    foreach ($p in $script:AmeenGuardServerPerms) { [void]$items.Add(@{ kind = "srvperm"; expr = "HAS_PERMS_BY_NAME(NULL, NULL, {p})"; label = ("server:" + $p); values = @{ p = $p } }) }
+    foreach ($p in $script:AmeenGuardDbPerms) { [void]$items.Add(@{ kind = "dbperm"; expr = "HAS_PERMS_BY_NAME({s}, N'DATABASE', {p})"; label = ("database:" + $p); values = @{ s = $Database; p = $p } }) }
+    foreach ($p in $script:AmeenGuardSchemaPerms) { [void]$items.Add(@{ kind = "objwrite"; expr = "HAS_PERMS_BY_NAME({s}, N'SCHEMA', {p})"; label = ("schema-dbo:" + $p); values = @{ s = "dbo"; p = $p } }) }
+    foreach ($o in $script:AmeenGuardWriteTables) {
+        foreach ($p in $script:AmeenGuardObjectPerms) { [void]$items.Add(@{ kind = "objwrite"; expr = "HAS_PERMS_BY_NAME({s}, N'OBJECT', {p})"; label = ($p + "@" + $o); values = @{ s = $o; p = $p } }) }
+    }
+    foreach ($o in $script:AmeenGuardReadTables) { [void]$items.Add(@{ kind = "objread"; expr = "HAS_PERMS_BY_NAME({s}, N'OBJECT', {p})"; label = ("read@" + $o); values = @{ s = $o; p = "SELECT" } }) }
+    $cols = New-Object System.Collections.ArrayList
+    $params = New-Object System.Collections.ArrayList
+    $probes = New-Object System.Collections.ArrayList
+    for ($i = 0; $i -lt $items.Count; $i++) {
+        $it = $items[$i]
+        $expr = [string]$it.expr
+        foreach ($k in @($it.values.Keys)) {
+            $pn = "@" + $k + $i
+            $expr = $expr.Replace("{" + $k + "}", $pn)
+            [void]$params.Add([pscustomobject]@{ name = $pn; value = [string]$it.values[$k] })
+        }
+        [void]$cols.Add($expr + " AS c" + $i)
+        [void]$probes.Add([pscustomobject]@{ column = ("c" + $i); kind = $it.kind; label = $it.label })
+    }
+    $sql = "SELECT SUSER_SNAME() AS login_name, " + ($cols -join ", ")
+    return [pscustomobject]@{ sql = $sql; params = @($params); probes = @($probes) }
+}
+
+function Test-AmeenLoginGuardResult {
+    # قيم الأعمدة ⇐ حكم. القاعدة fail-closed: دور غير محسوم (NULL) مخالفة، وصلاحية خادم أو قاعدة غير محسومة
+    # مخالفة. صلاحية كتابة على جدول أو على المخطط = NULL تعني أن الحساب لا يراه أصلاً (أي منح يجعله مرئياً)،
+    # أي لا كتابة. القراءة يجب أن تكون 1.
+    # المخالفات أسماء أدوار وصلاحيات وجداول فقط: لا اسم الحساب المتصل ولا أي جزء من سلسلة الاتصال.
+    param([Parameter(Mandatory = $true)]$Probes, [Parameter(Mandatory = $true)][hashtable]$Values, [Parameter(Mandatory = $true)][string]$ExpectedLogin)
+    $violations = New-Object System.Collections.ArrayList
+    $login = $Values["login_name"]
+    if ($login -is [System.DBNull]) { $login = $null }
+    if (-not $login -or -not ([string]$login).Equals($ExpectedLogin, [System.StringComparison]::OrdinalIgnoreCase)) { [void]$violations.Add("login:not-" + $ExpectedLogin) }
+    foreach ($p in @($Probes)) {
+        $v = $Values[$p.column]
+        if ($null -eq $v -or $v -is [System.DBNull]) { $n = $null } else { $n = [int]$v }
+        switch ($p.kind) {
+            { $_ -eq "srvrole" -or $_ -eq "dbrole" -or $_ -eq "srvperm" -or $_ -eq "dbperm" } { if ($n -ne 0) { [void]$violations.Add($p.label) } }
+            "objwrite" { if ($n -eq 1) { [void]$violations.Add($p.label) } }
+            "objread" { if ($n -ne 1) { [void]$violations.Add($p.label + ":missing") } }
+            default { [void]$violations.Add("unknown-probe:" + $p.kind) }
+        }
+    }
+    return [pscustomobject]@{ ok = ($violations.Count -eq 0); violations = @($violations) }
+}
+
 # ---------------------------------------------------------------- SQL (قراءة فقط)
 function Format-AmeenSqlDate {
     param([Parameter(Mandatory = $true)][datetime]$Value)
