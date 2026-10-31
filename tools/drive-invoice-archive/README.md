@@ -40,6 +40,27 @@ Edge Function document-archive-notify  ── sendDocument إلى bot_config.own
 
 `archiveFrom` إلزامي: لا يُؤرشف ما قبله (لا أرشفة رجعية جماعية بالخطأ).
 
+### نطاق الإنتاج: الفواتير الجديدة وحدها
+
+`archiveFrom` يقارن تاريخ الفاتورة المكتوب (`u.Date`)، والمستخدم يغيّره. فلا يكفي وحده لاستبعاد
+فواتير موجودة قبل التفعيل. لذلك يرفض العامل `drive` و`live` بلا حصر تجربة ما لم يُضبط:
+
+| المفتاح | المعنى |
+|---|---|
+| `newInvoicesFrom` | لحظة التفعيل بساعة SQL (`YYYY-MM-DDTHH:MM:SS`، بلا منطقة). لا تُقرأ فاتورة `CreateDate` فيها قبلها، في الاستعلام وفي العامل معاً |
+| `baselineFile` | لقطة بمعرّفات كل فاتورة جملة موجودة لحظة التفعيل، بأي تاريخ وحالة ترحيل. فاتورة فيها لا تُرصد ولا تُرفع ولا يُرسل عنها ولا تُبلَّغ أبداً، مهما عُدّلت أو رُحّلت أو تغيّر تاريخها |
+| `baselineSha256` | بصمة ملف اللقطة. أي اختلاف (بصمة، لحظة، عدد، معرّف) يرفض الإقلاع |
+
+اللقطة تُؤخذ مرة واحدة، قراءة فقط، ولا تكتب فوق ملف قائم:
+
+```
+node worker.js --baseline C:\ProgramData\OZK\DriveArchive\baseline-<UTC>.json
+```
+
+تطبع `newInvoicesFrom` و`count` و`baselineSha256` لتُنسخ إلى `config.json`، و`createdAtOrAfter`
+(فواتير أُنشئت خلال ثانية اللقطة: داخلها، فتُستبعد احتياطاً ولا تُؤرشف).
+مهام الصندوق القائمة لفواتير في اللقطة (مثل مهام التجربة) لا تُعالج بعد التفعيل.
+
 ## الأسرار (خارج Git، DPAPI على الجهاز)
 
 في `%ProgramData%\OZK\DriveArchive\<name>.secret`، تُكتب بـ`set-secret.ps1` فقط وتُقرأ لمستخدم المهمة وحده:
@@ -58,6 +79,7 @@ Edge Function document-archive-notify  ── sendDocument إلى bot_config.own
 ```
 node worker.js --health     فحص الجاهزية (الأمين، الهوية في Drive، خصوصية الجذر، Edge) بلا رفع ولا إرسال
 node worker.js --once       دورة واحدة ثم خروج
+node worker.js --baseline <ملف>   لقطة الأساس لتفعيل الإنتاج (قراءة فقط، ملف جديد)
 node worker.js              حلقة دائمة (للمهمة المجدولة بعد الموافقة)
 node worker.js --status     ملخص الطابور المحلي
 node worker.js --retry failed | <jobId>
