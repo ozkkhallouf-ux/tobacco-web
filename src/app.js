@@ -14310,7 +14310,10 @@ setInterval(() => {
   if (!dataStore.isConfigured() || !state.session) return;
   const active = document.activeElement;
   if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.tagName === "SELECT")) return;
-  if (!["ameen", "balances", "pricing", "dashboard", "payments"].includes(state.route)) return;
+  // «الفواتير السابقة» تُعرض داخل مسار المبيعات (state.salesHistoryOpen) لا مسار مستقل؛
+  // نموذج إدخال الفاتورة نفسه لا يُعاد رسمه هنا (حارس الحقل النشط فوق، وشرط الشاشة).
+  const salesHistory = state.route === "sales" && state.salesHistoryOpen;
+  if (!salesHistory && !["ameen", "balances", "pricing", "dashboard", "payments"].includes(state.route)) return;
   loadLiveInvoices().then((changed) => { if (changed) render(); }).catch(() => {});
 }, 10000);
 

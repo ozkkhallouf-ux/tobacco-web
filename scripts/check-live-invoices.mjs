@@ -193,6 +193,9 @@ test("الموقع يحمّل الوحدة قبل app.js ويخزّنها في �
   const fn = client.slice(client.indexOf("async listLiveAmeenInvoices"), client.indexOf("async getPurchaseInvoicesAmeenReport"));
   assert.ok(fn.includes('.from("ameen_invoices")'));
   assert.ok(!/\.(insert|update|upsert|delete|rpc)\(/.test(fn), "قراءة الفواتير الفورية يجب أن تبقى قراءة فقط");
+  const app = readFileSync(new URL("../src/app.js", import.meta.url), "utf8");
+  const poll = app.slice(app.indexOf("// الفواتير الفورية: قراءة خفيفة كل 10 ثوانٍ"));
+  assert.ok(/state\.route === "sales" && state\.salesHistoryOpen/.test(poll.slice(0, 1500)), "شاشة «الفواتير السابقة» يجب أن تتحدّث فورياً");
   const engine = readFileSync(new URL("../src/live-invoices.js", import.meta.url), "utf8");
   assert.ok(!/fetch\(|XMLHttpRequest|\.from\(/.test(engine), "منطق الدمج يجب أن يبقى نقياً بلا شبكة");
 });
