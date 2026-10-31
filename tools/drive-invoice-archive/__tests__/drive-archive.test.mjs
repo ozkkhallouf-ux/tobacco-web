@@ -45,7 +45,12 @@ async function setup({ mode = "live", email, overrides = {} } = {}) {
   const edgeFake = await fakes.createFakeEdge();
   let clock = Date.parse("2026-10-24T12:00:00Z");
   const now = () => clock;
-  const cfg = validate({ ...DEFAULTS, mode, archiveFrom: "2026-10-01", dataDir, edgeUrl: edgeFake.url, ...overrides });
+  // نطاق إنتاج افتراضي واسع (كل الفواتير الوهمية أُنشئت بعده، ولقطة أساس فارغة) كي تبقى
+  // الاختبارات القائمة على حالها؛ اختبارات النطاق تمرّر لحظتها ولقطتها.
+  const { baselineGuids = [], ...rest } = overrides;
+  const prod = { newInvoicesFrom: "1900-01-01T00:00:00", baselineFile: "test-baseline.json", baselineSha256: "0".repeat(64) };
+  const cfg = validate({ ...DEFAULTS, mode, archiveFrom: "2026-10-01", dataDir, edgeUrl: edgeFake.url, ...prod, ...rest });
+  cfg.baselineGuids = baselineGuids;
   const logs = [];
   const log = (e) => logs.push(e);
   const build = () => {
@@ -1293,4 +1298,126 @@ test("PDF حقيقي بالأسعار: 45 سطراً بوحدتين مختلفت
   } finally {
     await browser.close();
   }
+});
+
+// ─── نطاق الإنتاج: الفواتير الجديدة وحدها بعد لحظة التفعيل ───
+const G5 = "55555555-5555-4555-8555-555555555551";
+const G6 = "66666666-6666-4666-8666-666666666661";
+const G7 = "77777777-7777-4777-8777-777777777771";
+const { readBaseline, BASELINE_SCHEMA } = require(path.join(dir, "lib", "config.js"));
+const { snapshotBaseline } = require(path.join(dir, "worker.js"));
+
+test("نطاق الإنتاج: الرفع أو الإرسال بلا حصر تجربة يتطلب لحظة التفعيل ولقطة الأساس ببصمتها", () => {
+  const base = { ...DEFAULTS, archiveFrom: "2026-10-25", edgeUrl: "https://x.supabase.co/functions/v1/document-archive-notify" };
+  const prod = { newInvoicesFrom: "2026-10-31T16:00:00", baselineFile: "C:\\b.json", baselineSha256: "a".repeat(64) };
+  for (const mode of ["drive", "live"]) {
+    assert.throws(() => validate({ ...base, mode }), /newInvoicesFrom/, `${mode} بلا نطاق إنتاج مرفوض`);
+    assert.doesNotThrow(() => validate({ ...base, mode, ...prod }));
+  }
+  assert.doesNotThrow(() => validate({ ...base, mode: "dry-run" }), "dry-run بلا نطاق كما كان");
+  const pilotOk = { ...base, mode: "live", pilotInvoiceGuids: [G1], pilotExpiresAt: dayOf(Date.now() + DAY) };
+  assert.doesNotThrow(() => validate(pilotOk), "التجربة المحصورة كما كانت");
+  assert.throws(() => validate({ ...base, mode: "live", ...prod, newInvoicesFrom: "2026-10-31" }), /YYYY-MM-DDTHH:MM:SS/);
+  assert.throws(() => validate({ ...base, mode: "live", ...prod, newInvoicesFrom: "2026-10-31T16:00:00Z" }), /YYYY-MM-DDTHH:MM:SS/);
+  assert.throws(() => validate({ ...base, mode: "live", ...prod, baselineFile: "" }), /baselineFile/);
+  assert.throws(() => validate({ ...base, mode: "live", ...prod, baselineSha256: "ABC" }), /baselineSha256/);
+  assert.throws(() => validate({ ...base, baselineFile: "C:\\b.json" }), /بلا newInvoicesFrom/);
+});
+
+test("لقطة الأساس: --baseline تكتب ملفاً جديداً فقط، والإعداد يرفض أي لقطة تالفة أو مختلفة", async () => {
+  const ameen = fakes.createFakeAmeen();
+  ameen.add({ guid: G1, number: 1 });
+  ameen.add({ guid: G2, number: 2, posted: 0 }); // غير مرحّلة الآن: تبقى قديمة ولو رُحّلت لاحقاً
+  ameen.add({ guid: G3, number: 3, typeGuid: fakes.CASHIER });
+  const d = tmp();
+  const file = path.join(d, "baseline.json");
+  const out = await snapshotBaseline({ ...DEFAULTS }, file, ameen.api);
+  assert.equal(out.count, 2, "نوع الجملة وحده، بأي حالة ترحيل");
+  assert.equal(out.newInvoicesFrom, "2026-10-24T12:00:00", "لحظة التفعيل بساعة SQL");
+  assert.equal(out.createdAtOrAfter, 2, "ما أُنشئ في الثانية نفسها يُذكر ولا يُؤرشف");
+  await assert.rejects(snapshotBaseline({ ...DEFAULTS }, file, ameen.api), /لا كتابة فوقه/);
+  const cfg = { newInvoicesFrom: out.newInvoicesFrom, baselineFile: file, baselineSha256: out.baselineSha256 };
+  assert.deepEqual(readBaseline(cfg), [G1, G2].sort());
+  assert.throws(() => readBaseline({ ...cfg, baselineSha256: "0".repeat(64) }), /لا تطابق/);
+  assert.throws(() => readBaseline({ ...cfg, newInvoicesFrom: "2026-10-24T12:00:01" }), /للحظة غير/);
+  const bad = (doc) => {
+    const f = path.join(d, `b-${Math.random()}.json`);
+    fs.writeFileSync(f, JSON.stringify(doc));
+    return { newInvoicesFrom: "2026-10-24T12:00:00", baselineFile: f, baselineSha256: require("crypto").createHash("sha256").update(fs.readFileSync(f)).digest("hex") };
+  };
+  const ok = { schema: BASELINE_SCHEMA, newInvoicesFrom: "2026-10-24T12:00:00", count: 1, guids: [G1] };
+  assert.doesNotThrow(() => readBaseline(bad(ok)));
+  assert.throws(() => readBaseline(bad({ ...ok, count: 2 })), /count/);
+  assert.throws(() => readBaseline(bad({ ...ok, guids: ["1147"] })), /GUID/);
+  assert.throws(() => readBaseline(bad({ ...ok, schema: 9 })), /مخطط/);
+  assert.throws(() => readBaseline(bad({ ...ok, guids: undefined })), /guids/);
+});
+
+test("نطاق الإنتاج: لا فاتورة سبقت التفعيل تُؤرشف أو يُرسل عنها مهما عُدّلت، والجديدة إشعار واحد", async () => {
+  // قبل التفعيل: G1 قديمة عادية، G2 بتاريخ مستقبلي، G3 غير مرحّلة، G4 أُنشئت في ثانية اللقطة.
+  const pre = fakes.createFakeAmeen();
+  pre.setNow("2026-10-31T09:00:00");
+  pre.add({ guid: G1, number: 1101 });
+  pre.add({ guid: G2, number: 1102, date: "2026-11-05" });
+  pre.add({ guid: G3, number: 1103, posted: 0 });
+  pre.setNow("2026-10-31T16:00:00");
+  pre.add({ guid: G4, number: 1104 });
+  const d = tmp();
+  const snap = await snapshotBaseline({ ...DEFAULTS }, path.join(d, "baseline.json"), pre.api);
+  assert.equal(snap.count, 4);
+  const baselineGuids = readBaseline({ newInvoicesFrom: snap.newInvoicesFrom, baselineFile: snap.file, baselineSha256: snap.baselineSha256 });
+
+  const t = await setup({ overrides: { archiveFrom: "2026-10-25", newInvoicesFrom: snap.newInvoicesFrom, baselineGuids } });
+  t.ameen.setNow("2026-10-31T09:00:00");
+  for (const g of [G1, G2, G3]) t.ameen.add({ ...pre.db.invoices.get(g) });
+  t.ameen.setNow("2026-10-31T16:00:00");
+  t.ameen.add({ ...pre.db.invoices.get(G4) });
+  // بعد التفعيل: G5 جديدة؛ G6 من نوع آخر أُنشئت قبل التفعيل ثم صارت جملة (خارج اللقطة، يستبعدها CreateDate).
+  t.ameen.setNow("2026-10-31T08:00:00");
+  t.ameen.add({ guid: G6, number: 1106, typeGuid: fakes.CASHIER });
+  t.ameen.setNow("2026-10-31T16:05:00");
+  t.ameen.add({ guid: G5, number: 1105 });
+  t.ameen.edit(G1, { total: 999, date: "2026-11-01" }); // تعديل + تغيير تاريخ بعد التفعيل
+  t.ameen.edit(G3, { posted: 1 });                       // ترحيل بعد التفعيل
+  t.ameen.edit(G6, { typeGuid: fakes.WHOLESALE });
+  // فاتورة قديمة «يعيدها» المصدر رغم الحدّ (حماية مزدوجة): وقت إنشاء قبل التفعيل ⇒ لا شيء.
+  t.ameen.setNow("2026-10-31T09:30:00");
+  t.ameen.add({ guid: G7, number: 1107 });
+  const realChanged = t.ameen.api.changedInvoices;
+  t.ameen.api.changedInvoices = async (args) => {
+    const rows = await realChanged(args);
+    const leak = await realChanged({ ...args, createdFrom: null });
+    return [...rows, ...leak.filter((r) => r.invoice_guid === G7)];
+  };
+  t.ameen.setNow("2026-10-31T16:05:00");
+  t.advance(300);
+  for (let i = 0; i < 4; i++) { await t.cycle(); t.advance(1900); }
+
+  const jobs = t.store.jobs();
+  assert.deepEqual(jobs.map((j) => j.number), [1105], "الجديدة وحدها لها مهمة");
+  assert.equal(jobs[0].status, "notified");
+  assert.equal(t.edgeFake.state.sent.length, 1, "إشعار واحد فقط");
+  assert.equal(t.drive.pdfFiles().length, 1, "ملف Drive واحد فقط");
+  const reported = t.edgeFake.state.reports.flatMap((r) => r.items.map((i) => i.doc_number));
+  assert.ok(reported.length > 0 && reported.every((n) => n === "1105"), "التقرير لا يحمل فاتورة قديمة");
+  const out = await t.cycle();
+  assert.deepEqual(out.scope, { newInvoicesFrom: "2026-10-31T16:00:00", baseline: 4 });
+});
+
+test("نطاق الإنتاج: مهمة قائمة لفاتورة في لقطة الأساس (من التجربة) لا تُرفع ولا يُرسل عنها ولا تُبلَّغ", async () => {
+  const t = await setup({ mode: "drive" });
+  t.ameen.add({ guid: G1, number: 1147 });
+  t.advance(300);
+  await t.cycle();
+  const [job] = t.store.jobs();
+  assert.equal(job.status, "uploaded");
+  const sentBefore = t.edgeFake.state.sent.length;
+  Object.assign(t.cfg, { mode: "live", newInvoicesFrom: "2026-10-24T13:00:00", baselineGuids: [G1] });
+  t.restart();
+  t.advance(400);
+  const reportsBefore = t.edgeFake.state.reports.length;
+  await t.cycle();
+  assert.equal(t.store.get(job.jobId).status, "uploaded", "بقيت كما هي");
+  assert.equal(t.edgeFake.state.sent.length, sentBefore, "لا إشعار");
+  assert.ok(t.edgeFake.state.reports.slice(reportsBefore).every((r) => r.items.length === 0), "لا تبليغ عنها");
 });

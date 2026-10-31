@@ -14,6 +14,7 @@
 //   node worker.js --health        فحص الجاهزية (بلا رفع ولا إرسال) ثم خروج
 //   node worker.js --status        ملخص الصندوق المحلي ثم خروج
 //   node worker.js --retry <jobId|failed>   إعادة محاولة مهمة فاشلة محلياً
+//   node worker.js --baseline <ملف>         لقطة الأساس لتفعيل الإنتاج (قراءة فقط، ملف جديد)
 // ============================================================================
 
 const fs = require("fs");
@@ -21,7 +22,7 @@ const net = require("net");
 const os = require("os");
 const path = require("path");
 
-const { loadConfig, MODES } = require("./lib/config");
+const { loadConfig, MODES, BASELINE_SCHEMA } = require("./lib/config");
 const { createStore } = require("./lib/store");
 const { createArchiver } = require("./lib/archiver");
 const { createDrive } = require("./lib/drive");
@@ -40,6 +41,7 @@ const MANUAL_DIR = path.join(__dirname, "..", "manual-a4-print");
 
 const CHANGED_SQL = assertReadOnlySql(fs.readFileSync(path.join(__dirname, "lib", "changed-invoices-query.sql"), "utf8"));
 const LINES_SQL = assertReadOnlySql(fs.readFileSync(path.join(__dirname, "lib", "archive-lines-query.sql"), "utf8"));
+const BASELINE_SQL = assertReadOnlySql(fs.readFileSync(path.join(__dirname, "lib", "baseline-invoices-query.sql"), "utf8"));
 const SOURCE_STATUS_SQL = assertReadOnlySql(fs.readFileSync(path.join(__dirname, "lib", "source-status-query.sql"), "utf8"));
 const BALANCE_SQL = assertReadOnlySql(fs.readFileSync(path.join(AUTOPRINT_DIR, "ameen-customer-balance-query.sql"), "utf8"));
 const NOW_SQL = assertReadOnlySql("SELECT CONVERT(nvarchar(33), GETDATE(), 126) AS now, DB_NAME() AS db, SUSER_SNAME() AS login");
@@ -71,13 +73,17 @@ function createAmeen(connString, typeGuids) {
   return {
     ping: async () => (await q(NOW_SQL))[0],
     serverNow: async () => (await q(NOW_SQL))[0].now,
-    changedInvoices: ({ since, sinceGuid, dateFrom, onlyGuid }) => q(CHANGED_SQL, (r, s) => r
+    changedInvoices: ({ since, sinceGuid, dateFrom, onlyGuid, createdFrom }) => q(CHANGED_SQL, (r, s) => r
       .input("t0", s.UniqueIdentifier, t0)
       .input("t1", s.UniqueIdentifier, t1)
       .input("dateFrom", s.Date, naiveDate(`${dateFrom}T00:00:00`))
       .input("since", s.DateTime2(3), naiveDate(since))
       .input("sinceGuid", s.UniqueIdentifier, sinceGuid || ZERO_GUID)
-      .input("onlyGuid", s.UniqueIdentifier, onlyGuid || null)),
+      .input("onlyGuid", s.UniqueIdentifier, onlyGuid || null)
+      .input("createdFrom", s.DateTime2(3), createdFrom ? naiveDate(createdFrom) : null)),
+    baselineInvoices: () => q(BASELINE_SQL, (r, s) => r
+      .input("t0", s.UniqueIdentifier, t0)
+      .input("t1", s.UniqueIdentifier, t1)),
     lines: (guid) => q(LINES_SQL, (r, s) => r.input("invoiceGuid", s.UniqueIdentifier, guid)),
     sourceStatus: async (guid) => (await q(SOURCE_STATUS_SQL, (r, s) => r.input("invoiceGuid", s.UniqueIdentifier, guid)))[0] || null,
     balance: async (guid) => {
@@ -139,6 +145,7 @@ async function health(cfg) {
     mode: cfg.mode,
     pilot: (cfg.pilotInvoiceGuids || []).length ? { invoiceGuids: cfg.pilotInvoiceGuids, expiresAt: cfg.pilotExpiresAt } : null,
     archiveFrom: cfg.archiveFrom,
+    production: cfg.newInvoicesFrom ? { newInvoicesFrom: cfg.newInvoicesFrom, baseline: (cfg.baselineGuids || []).length, baselineSha256: cfg.baselineSha256 } : null,
     approvedAccount: cfg.expectedAccountEmail,
     dataDir: cfg.dataDir,
     secrets: { sql: hasSecret("sql", cfg.secretDir), googleOauth: hasSecret("google-oauth", cfg.secretDir), notify: hasSecret("notify", cfg.secretDir) },
@@ -194,7 +201,42 @@ async function runLoop(archiver, cfg, log, { host, once }) {
   return 0;
 }
 
+// لقطة الأساس: لحظة التفعيل = ساعة SQL قبل القراءة (مقطوعة إلى الثانية)، ثم كل فاتورة جملة
+// موجودة. فاتورة أُنشئت بين اللحظة ونهاية القراءة تدخل اللقطة فتُستبعد (حذر: تُذكر في العدد
+// createdAtOrAfter ولا تُؤرشف). ملف قائم لا يُكتب فوقه. لا رفع ولا إرسال ولا كتابة على الأمين.
+async function snapshotBaseline(cfg, outFile, ameen) {
+  if (!outFile || outFile.startsWith("--")) throw new Error("الاستعمال: node worker.js --baseline <ملف جديد>");
+  const target = path.resolve(outFile);
+  if (fs.existsSync(target)) throw new Error(`الملف موجود، لا كتابة فوقه: ${target}`);
+  const newInvoicesFrom = String(await ameen.serverNow()).slice(0, 19);
+  const rows = await ameen.baselineInvoices();
+  const guids = [...new Set(rows.map((r) => String(r.invoice_guid).toLowerCase()))].sort();
+  const createdAtOrAfter = rows.filter((r) => Date.parse(`${String(r.created_at || "").replace(/Z$/, "")}Z`) >= Date.parse(`${newInvoicesFrom}Z`)).length;
+  const typeGuids = require("../manual-a4-print/lib/invoice-model").allowedTypes(cfg);
+  const doc = { schema: BASELINE_SCHEMA, newInvoicesFrom, takenAtUtc: new Date().toISOString(), host: os.hostname(), typeGuids, count: guids.length, guids };
+  const body = Buffer.from(`${JSON.stringify(doc, null, 1)}\n`, "utf8");
+  fs.writeFileSync(target, body, { flag: "wx" });
+  const sha = require("crypto").createHash("sha256").update(body).digest("hex");
+  return { file: target, newInvoicesFrom, count: guids.length, createdAtOrAfter, baselineSha256: sha };
+}
+
 async function main(argv) {
+  if (argv.includes("--baseline")) {
+    // الإعداد كما هو (قد يكون بلا نطاق إنتاج بعد): قراءة فقط، فلا تطبَّق قيود الرفع هنا.
+    const { DEFAULTS } = require("./lib/config");
+    const target = process.env.OZK_DRIVE_ARCHIVE_CONFIG || path.join(__dirname, "config.json");
+    const user = fs.existsSync(target) ? JSON.parse(fs.readFileSync(target, "utf8").replace(/^\uFEFF/, "")) : {};
+    const cfg = { ...DEFAULTS, ...user };
+    const conn = readSecret("sql", cfg.secretDir);
+    if (!conn) throw new Error("سرّ SQL غير محفوظ (set-secret.ps1 -Name sql)");
+    const ameen = createAmeen(conn, require("../manual-a4-print/lib/invoice-model").allowedTypes(cfg));
+    try {
+      console.log(JSON.stringify(await snapshotBaseline(cfg, argv[argv.indexOf("--baseline") + 1], ameen), null, 2));
+    } finally {
+      await ameen.close().catch(() => {});
+    }
+    return 0;
+  }
   const cfg = loadConfig();
   if (argv.includes("--health")) {
     console.log(JSON.stringify(await health(cfg), null, 2));
@@ -202,7 +244,7 @@ async function main(argv) {
   }
   const store = createStore(cfg.dataDir);
   if (argv.includes("--status")) {
-    console.log(JSON.stringify({ mode: cfg.mode, pilot: (cfg.pilotInvoiceGuids || []).length ? { invoiceGuids: cfg.pilotInvoiceGuids, expiresAt: cfg.pilotExpiresAt } : null, ...store.summary({ notifyEnabled: MODES[cfg.mode].notify }), detectErrors: Object.keys(store.state.detectErrors || {}).length, sourceIssues: Object.values(store.state.sourceIssues || {}).map((v) => ({ number: v.number, status: v.status, lastVersion: v.lastVersion, since: v.since })) }, null, 2));
+    console.log(JSON.stringify({ mode: cfg.mode, production: cfg.newInvoicesFrom ? { newInvoicesFrom: cfg.newInvoicesFrom, baseline: (cfg.baselineGuids || []).length } : null, pilot: (cfg.pilotInvoiceGuids || []).length ? { invoiceGuids: cfg.pilotInvoiceGuids, expiresAt: cfg.pilotExpiresAt } : null, ...store.summary({ notifyEnabled: MODES[cfg.mode].notify }), detectErrors: Object.keys(store.state.detectErrors || {}).length, sourceIssues: Object.values(store.state.sourceIssues || {}).map((v) => ({ number: v.number, status: v.status, lastVersion: v.lastVersion, since: v.since })) }, null, 2));
     return 0;
   }
   const lock = await acquireLock(cfg.lockPort);
@@ -226,7 +268,7 @@ async function main(argv) {
   return exitCode;
 }
 
-module.exports = { createAmeen, acquireLock, health, CHANGED_SQL, LINES_SQL, BALANCE_SQL, NOW_SQL };
+module.exports = { createAmeen, acquireLock, health, snapshotBaseline, CHANGED_SQL, LINES_SQL, BALANCE_SQL, BASELINE_SQL, NOW_SQL };
 
 if (require.main === module) {
   main(process.argv.slice(2)).then((c) => process.exit(c), (err) => {

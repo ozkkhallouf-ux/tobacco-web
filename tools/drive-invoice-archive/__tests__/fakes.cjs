@@ -48,23 +48,29 @@ function createFakeAmeen() {
       currency_val: 1, currency_iso: inv.currencyIso, line_count: inv.lines.length, lines_checksum: lc,
       customer_account_guid: inv.customerGuid, bill_customer_name: inv.billCustomerName || inv.customer,
       store_guid: inv.storeGuid, pay_type: inv.payType, total_extra: inv.totalExtra, items_disc: 0, items_extra: 0, bonus_disc: 0, vat: 0,
-      changed_at: changed, seconds_since_change: secondsBetween(changed, db.now),
+      changed_at: changed, created_at: inv.createdAt, seconds_since_change: secondsBetween(changed, db.now),
     };
   }
   const api = {
     serverNow: async () => db.now,
     // نفس دلالة الاستعلام: مؤشر مركّب حصري (changed_at, GUID) وترتيب بهما معاً.
-    changedInvoices: async ({ since, sinceGuid = "", dateFrom, onlyGuid = null }) => {
+    changedInvoices: async ({ since, sinceGuid = "", dateFrom, onlyGuid = null, createdFrom = null }) => {
       reads++;
       const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
       return [...db.invoices.values()]
         .filter((i) => [WHOLESALE, CASHIER].includes(i.typeGuid) && i.date >= dateFrom)
+        .filter((i) => !createdFrom || i.createdAt >= createdFrom)
         .map(row)
         .filter((r) => r.changed_at > since || (r.changed_at === since && r.invoice_guid > sinceGuid))
         .filter((r) => !onlyGuid || r.invoice_guid === onlyGuid)
         .sort((a, b) => cmp(a.changed_at, b.changed_at) || cmp(a.invoice_guid, b.invoice_guid))
         .slice(0, 500);
     },
+    // نفس دلالة baseline-invoices-query.sql: كل فاتورة بنوع الجملة، بأي تاريخ وحالة.
+    baselineInvoices: async () => [...db.invoices.values()]
+      .filter((i) => i.typeGuid === WHOLESALE)
+      .map((i) => ({ invoice_guid: i.guid, created_at: i.createdAt }))
+      .sort((a, b) => (a.invoice_guid < b.invoice_guid ? -1 : 1)),
     lines: async (guid) => { reads++; return db.invoices.get(guid).lines.map((l) => ({ ...l })); },
     sourceStatus: async (guid) => {
       reads++;
