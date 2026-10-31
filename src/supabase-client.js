@@ -2129,6 +2129,16 @@
       return inventoryRpc("smart_inventory_owner_open_recount", { p_item_id: itemId, p_reason: cleanText(reason, 500) });
     },
 
+    // إعادة عد جماعية: المواد بمعرّف الأمين، وتُفتح في كل مستودعات اليوم دفعة واحدة.
+    async getSmartInventoryOwnerDayItems(date = null) {
+      return inventoryRpc("smart_inventory_owner_day_items", { p_date: date || null });
+    },
+
+    async openSmartInventoryBulkRecount(itemRefs, reason, date = null) {
+      const refs = Array.from(new Set((itemRefs || []).map((ref) => cleanText(ref, 200)).filter(Boolean)));
+      return inventoryRpc("smart_inventory_owner_bulk_recount", { p_date: date || null, p_item_refs: refs, p_reason: cleanText(reason, 500) });
+    },
+
     async reopenSmartInventorySession(sessionId, reason) {
       return inventoryRpc("smart_inventory_owner_reopen_session", { p_session_id: sessionId, p_reason: cleanText(reason, 500) });
     },
