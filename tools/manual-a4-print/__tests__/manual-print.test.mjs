@@ -86,6 +86,33 @@ test("فحص الطابعة: سكربت WSD/IPP يبحث بالـUUID ولا ي�
   assert.match(server.printerProbeScript({ printerName: "O'Brien" }), /-eq 'O''Brien'/);
 });
 
+test("فحص WSD: عنوان Windows المحفوظ من السجل لا من WMI، وTCP للردّ المطابق وحده", () => {
+  const script = server.printerProbeScript({ printerName: "Canon G3010 series (Copy 1)", printerHost: "", printerHostPort: 631 });
+  // Get-PnpDeviceProperty (Win32_PnPEntity) علِق في جلسة سطح المكتب حتى قُتل الفحص.
+  assert.doesNotMatch(script, /DAFWSDProvider[^\n]*Get-PnpDeviceProperty|Get-PnpDeviceProperty[^\n]*DAFWSDProvider/);
+  assert.match(script, /HKLM:\\SYSTEM\\CurrentControlSet\\Enum\\SWD\\DAFWSDProvider\\urn:uuid:' \+ \$uuid\) -Name LocationInformation/);
+  assert.match(script, /if \(\$f\[0\] -ieq \$want\) \{ try \{ \$xu = \[Uri\]/);
+});
+
+test("فشل الفحص يعرض سببه الفعلي لا رسالة عامة", () => {
+  const cfg = { printerName: "Canon G3010 series (Copy 1)", printerHost: "", printerHostPort: 631 };
+  const probe = (r) => {
+    const orig = console.error; console.error = () => {};
+    try { return server.createPrinter(cfg, () => r).probe(); } finally { console.error = orig; }
+  };
+  const timeout = probe({ error: Object.assign(new Error("spawnSync powershell.exe ETIMEDOUT"), { code: "ETIMEDOUT" }), status: null, signal: "SIGTERM", stdout: "", stderr: "" });
+  assert.equal(timeout.state, "unknown");
+  assert.match(timeout.reason, /انتهت مهلة الفحص \(15 ث\)/);
+  const missing = probe({ error: Object.assign(new Error("ENOENT"), { code: "ENOENT" }), status: null, stdout: "" });
+  assert.match(missing.reason, /تعذّر تشغيل PowerShell \(ENOENT\)/);
+  const clixml = '#< CLIXML\r\n<Objs Version="1.1.0.1"><S S="Error">Get-CimInstance : Access denied _x000D__x000A_</S><S S="Error">At line:1_x000D__x000A_</S></Objs>';
+  const failed = probe({ status: 1, stdout: "", stderr: clixml });
+  assert.match(failed.reason, /خرج بالرمز 1 — Get-CimInstance : Access denied/);
+  assert.equal(probe({ status: 0, stdout: "NOT_FOUND", stderr: "" }).state, "missing");
+  const ok = probe({ status: 0, stdout: `FOUND|WSD-1ff9|False|3|0|0|none|:631|WSD^${UUID}^^urn:uuid:${UUID}^http://192.168.1.60:80/wsd/x^ok`, stderr: clixml });
+  assert.equal(ok.state, "ready");
+});
+
 const UUID = "00000000-0000-1000-8000-5003cf162ac8";
 const wsdLine = (windowsUrl, replies) => `FOUND|WSD-1ff9|False|3|0|0|none|:631|WSD^${UUID}^${windowsUrl}^${replies}`;
 
