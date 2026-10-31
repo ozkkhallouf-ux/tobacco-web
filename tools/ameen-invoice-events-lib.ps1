@@ -950,3 +950,107 @@ function Send-AmeenInvoiceOutbox {
     }
     return $result
 }
+
+# ---------------------------------------------------------------- تعافي اتصال SQL (2026-10-26)
+# حادثة OZK2026 (2026-10-25 23:22Z): نفدت البطارية في انقطاع كهرباء فدخل الجهاز الإسبات 7 ساعات، وعند العودة
+# كان اتصال SQL مكسوراً؛ أول استعلام في الدورة كان خارج أي معالجة فخرج الوكيل برمز 1 بلا سطر في السجل.
+# القاعدة الآن: انقطاع الاتصال حالة متوقعة ⇒ DISCONNECTED ثم RECONNECTING بتراجع أسّي ثم RECOVERED، والعلامة
+# المائية لا تتقدّم في الدورة المنقطعة (تُعاد كاملة بعد العودة، والتكرار يُزال بالبصمة). خطأ غير متوقع يُسجَّل FATAL.
+
+# أرقام SqlException التي تعني أن الطريق إلى الخادم انقطع (لا خطأ في الاستعلام نفسه): شبكة، خادم غير متاح أو
+# يبدأ، جلسة مقطوعة. مهلة القفل 1222 ومهلة الأمر -2/258 ليست منها: على اتصال Open تعني خادماً بطيئاً لا مقطوعاً،
+# فتبقى «تحذير SQL» ويبطّئ حارس الأداء الإيقاع. عدّها انقطاعاً كان يعيد الاستعلام الثقيل فوراً بلا إبطاء.
+$script:AmeenSqlConnectionLostNumbers = @(-1, 2, 53, 64, 121, 233, 1231, 4060, 4221, 10053, 10054, 10060, 10061, 11001, 18456, 40613)
+$script:AmeenSqlConnectionLostText = '(?i)connection is broken|transport-level error|network-related|physical connection is not usable|forcibly closed|semaphore timeout|connection was closed|connection has been closed|server was not found|not accessible|recovery is not possible'
+
+function Get-AmeenSqlFailureInfo {
+    # يصف الاستثناء بلا كشف أسرار: نوع، ورقم SqlException إن وُجد في السلسلة، ورسالة منقّحة، وهل يشير إلى
+    # الاتصال نفسه (InvalidOperationException برسالة عن الاتصال: «connection … closed/broken»).
+    param($ErrorRecordOrException)
+    $ex = $ErrorRecordOrException
+    if ($ex -is [System.Management.Automation.ErrorRecord]) { $ex = $ex.Exception }
+    $info = @{ is_sql = $false; number = 0; type = ""; message = ""; connection_hint = $false }
+    if ($null -eq $ex) { return $info }
+    $info.type = $ex.GetType().Name
+    $cur = $ex
+    while ($null -ne $cur) {
+        $name = $cur.GetType().Name
+        if ($cur.GetType().FullName -match 'SqlClient\.SqlException$') {
+            $info.is_sql = $true; $info.number = [int]$cur.Number; $info.type = "SqlException"
+            # رقم 0 مع «connection is broken / transport-level / network-related» (ثبت باختبار حي: الاتصال يبقى
+            # Open بعد عودة الخادم بينما الجلسة ميتة) ⇒ انقطاع لا خطأ استعلام.
+            if ([string]$cur.Message -match $script:AmeenSqlConnectionLostText) { $info.connection_hint = $true }
+            # الخطورة 20 فأعلى تعني أن الخادم أغلق الجلسة (أخطاء النقل والجلسة) — مأخوذ من #397.
+            if ($null -ne $cur.PSObject.Properties["Class"] -and [int]$cur.Class -ge 20) { $info.connection_hint = $true }
+            break
+        }
+        if ($name -eq "InvalidOperationException" -and [string]$cur.Message -match '(?i)connection') { $info.type = $name; $info.connection_hint = $true }
+        $cur = $cur.InnerException
+    }
+    $info.message = ConvertTo-AmeenSafeLogText ([string]$ex.Message)
+    return $info
+}
+
+function ConvertTo-AmeenSafeLogText {
+    # لا كلمات مرور ولا مستخدمين في السجل حتى لو حملتها رسالة خطأ.
+    param([string]$Text, [int]$Max = 160)
+    if (-not $Text) { return "" }
+    $t = $Text -replace '(?i)(password|pwd|user id|uid|user)\s*=\s*[^;]*', '$1=***'
+    $t = ($t -replace '[\r\n\t]+', ' ').Trim()
+    if ($t.Length -gt $Max) { $t = $t.Substring(0, $Max) }
+    return $t
+}
+
+function Test-AmeenSqlConnectionLost {
+    # هل يعني الخطأ أن الاتصال انقطع (فنعيد الاتصال) أم أنه خطأ استعلام أو ملف عادي؟ خطأ ليس من SQL على اتصال
+    # سليم (مثلاً ملف حالة مقفول) لا يُعدّ انقطاعاً ولا يُخفى بإعادة اتصال. -AnySqlIsLost لاستعلامات لا تفشل
+    # لسبب في الاستعلام نفسه (SELECT GETDATE() وفتح الاتصال): أي SqlException فيها انقطاع.
+    param([bool]$IsSql, [int]$Number = 0, [string]$ConnectionState = "Open", [bool]$ConnectionHint = $false, [switch]$AnySqlIsLost)
+    if ($ConnectionState -and $ConnectionState -ne "Open") { return $true }
+    if ($IsSql -and $AnySqlIsLost) { return $true }
+    if ($IsSql -and ($script:AmeenSqlConnectionLostNumbers -contains $Number)) { return $true }
+    if ($ConnectionHint) { return $true }
+    return $false
+}
+
+function Get-AmeenReconnectDelaySeconds {
+    param([int]$Attempt, [int]$BaseSeconds = 2, [int]$MaxSeconds = 300)
+    if ($Attempt -le 0 -or $BaseSeconds -le 0) { return 0 }
+    $d = [double]$BaseSeconds * [math]::Pow(2, [math]::Min($Attempt - 1, 20))
+    return [int][math]::Min([double]$MaxSeconds, $d)
+}
+
+function Get-AmeenResumePauseSeconds {
+    # بعد عودة الاتصال لا تبدأ الدورة التالية فوراً: مهلة لا تقل عن الإيقاع وتتضاعف مع تكرار العودات المتتالية
+    # (اتصال يتأرجح أو خادم يقطع كل دورة)، وتعود للصفر بأول دورة مكتملة. هكذا لا يتخطى الانقطاع حارس الأداء.
+    param([int]$Streak, [int]$PollSeconds = 2, [int]$BaseSeconds = 2, [int]$MaxSeconds = 300)
+    $poll = [math]::Max(1, $PollSeconds)
+    return [int][math]::Max($poll, (Get-AmeenReconnectDelaySeconds -Attempt $Streak -BaseSeconds $BaseSeconds -MaxSeconds $MaxSeconds))
+}
+
+function Invoke-AmeenSqlReconnect {
+    # يعيد فتح الاتصال حتى ينجح أو تنفد المحاولات، بلا أي استثناء للمستدعي. Open/Log/Sleep قابلة للاستبدال
+    # في الاختبار. Open يرمي عند الفشل؛ ونجاحه يعني اتصالاً مفتوحاً على القاعدة الصحيحة.
+    param(
+        [Parameter(Mandatory = $true)][scriptblock]$Open,
+        [Parameter(Mandatory = $true)][scriptblock]$Log,
+        [scriptblock]$Sleep = { param($s) Start-Sleep -Seconds $s },
+        [int]$MaxAttempts = 288, [int]$BaseSeconds = 2, [int]$MaxSeconds = 300
+    )
+    $started = [datetime]::UtcNow
+    for ($i = 1; $MaxAttempts -le 0 -or $i -le $MaxAttempts; $i++) {
+        try {
+            & $Open
+            & $Log ("RECOVERED: اتصال SQL عاد بعد {0} محاولة و{1:n0} ث" -f $i, ([datetime]::UtcNow - $started).TotalSeconds)
+            return @{ ok = $true; attempts = $i }
+        } catch {
+            $f = Get-AmeenSqlFailureInfo $_
+            $wait = Get-AmeenReconnectDelaySeconds -Attempt $i -BaseSeconds $BaseSeconds -MaxSeconds $MaxSeconds
+            $last = ($MaxAttempts -gt 0 -and $i -ge $MaxAttempts)
+            if ($last) { $wait = 0 }
+            & $Log ("RECONNECTING: محاولة {0} فشلت ({1}{2})، التالية بعد {3} ث" -f $i, $f.type, $(if ($f.is_sql) { " " + $f.number } else { "" }), $wait)
+            if ($wait -gt 0) { & $Sleep $wait }
+        }
+    }
+    return @{ ok = $false; attempts = $MaxAttempts }
+}

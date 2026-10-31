@@ -54,6 +54,16 @@ function amt(inv, value) {
   return `<span dir="ltr">${money(value)} ${iso}</span>`;
 }
 
+// ملخص الفاتورة كما يقيّده الأمين (مثبت على AmnDb002 بقيود 68/68 فاتورة جملة):
+// أثرها على الحساب = Total − TotalDisc + TotalExtra − FirstPay. TotalExtra هو «تدوير»
+// الإجمالي لإلغاء الكسور (3000.98 + 0.02 = 3001)، يُرحَّل دائناً على «الحسم الممنوح».
+// إجمالي البضاعة Total وأسعار الأسطر لا تتغيّر؛ inv.extra غائب أو صفر ⇒ الصافي كما كان.
+function invoiceSummary(inv) {
+  const extra = Number(inv.extra) || 0;
+  const net = inv.total - inv.discount + extra;
+  return { extra, net, remaining: net - inv.firstPay };
+}
+
 // عمودا «سعر الوحدة» و«الإجمالي» اختياريان: يطلبهما عامل أرشفة Drive وحده بعد مطابقة
 // مجموع الأسطر مع إجمالي الفاتورة (lib/line-prices.js في مجلد عامل الأرشفة).
 // بلا الخيار يبقى الناتج حرفياً كما هو للطباعة التلقائية واليدوية A4.
@@ -68,8 +78,7 @@ function pricedItems(items) {
 
 function buildInvoiceHtml(inv, { linePrices = false } = {}) {
   const items = Array.isArray(inv.items) ? inv.items : [];
-  const net = inv.total - inv.discount;
-  const remaining = net - inv.firstPay;
+  const { extra, net, remaining } = invoiceSummary(inv);
   const priced = linePrices === true && pricedItems(items);
 
   const rows = items.length
@@ -198,8 +207,8 @@ ${priced ? PRICE_CSS : ""}</head>
 
     <div class="closing">
     <div class="rows">
-      ${inv.discount > 0 ? `<div class="row"><span>الحسم</span><b>${amt(inv, inv.discount)}</b></div>` : ""}
-      ${inv.discount > 0 ? `<div class="row"><span>الصافي</span><b>${amt(inv, net)}</b></div>` : ""}
+      ${inv.discount > 0 ? `<div class="row"><span>الحسم</span><b>${amt(inv, inv.discount)}</b></div>` : ""}${extra !== 0 ? `<div class="row"><span>تدوير</span><b>${amt(inv, extra)}</b></div>` : ""}
+      ${inv.discount > 0 || extra !== 0 ? `<div class="row"><span>الصافي</span><b>${amt(inv, net)}</b></div>` : ""}
       <div class="row"><span>المدفوع</span><b>${amt(inv, inv.firstPay)}</b></div>
       <div class="row"><span>المتبقي من هذه الفاتورة</span><b>${amt(inv, remaining)}</b></div>
       ${inv.customerBalanceFound
@@ -231,4 +240,4 @@ ${priced ? PRICE_CSS : ""}</head>
 </html>`;
 }
 
-module.exports = { buildInvoiceHtml };
+module.exports = { buildInvoiceHtml, invoiceSummary };

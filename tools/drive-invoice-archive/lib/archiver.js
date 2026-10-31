@@ -157,7 +157,9 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
       typeGuid: header.typeGuid,
       customerGuid: header.customerGuid,
       customerName: header.customer,
-      amount: Math.round((header.total - header.discount) * 1000) / 1000,
+      // «الصافي» نفسه المطبوع في الـPDF (invoiceSummary في القالب): Total − الحسم + التدوير (TotalExtra).
+      // مصدر واحد للإشعار وتقرير الموقع والورقة؛ المدفوع والمتبقي خارج المبلغ كما كانا.
+      amount: Math.round(template.invoiceSummary(header).net * 1000) / 1000,
       currencyIso: header.currencyIso,
       version,
       versionHash,

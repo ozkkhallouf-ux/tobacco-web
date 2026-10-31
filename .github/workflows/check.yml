@@ -254,6 +254,13 @@ jobs:
         shell: powershell
         run: .\tools\tests\Test-AmeenInvoiceEvents.ps1
 
+      # مراقب وكيل الفواتير المستقل (غير مسجَّل): تنبيه انقطاع SQL أطول من 10 دقائق، والتعافي بالمدة،
+      # والتوقف (GAVE_UP/FATAL/اختفاء العملية)، ومنع التكرار عبر إعادة تشغيل المراقب وفشل Telegram —
+      # ملف الحالة يُقرأ بـConvertFrom-Json الخاص بـ5.1 تحديداً. بلا SQL ولا Telegram حقيقيين.
+      - name: Ameen invoice agent monitor - long SQL outage and stop alerts test
+        shell: powershell
+        run: .\tools\tests\Test-AmeenInvoiceAgentMonitor.ps1
+
       # إعادة طباعة فاتورة كاشير يدوياً (tools/cashier-reprint): حسم الرقم والنوع، منع تكرار
       # إعادة المحاولة التقنية، تصنيف نتيجة الجسر، والسجل — وتشغيل حقيقي لجسر وهمي بـpowershell.exe
       # للتحقق من الوسائط. بلا أمين ولا طابعة حقيقيين.
