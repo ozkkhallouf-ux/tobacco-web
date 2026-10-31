@@ -18,6 +18,7 @@
 | الإشعارات والنشر | [notifications-deployment.md](notifications-deployment.md) |
 | تنسيق تنبيهات تيليغرام (المنسِّق الموحّد، جرد المصادر) | [telegram-alert-format.md](telegram-alert-format.md) |
 | بوابة نشر Windows (OZK2026) | [windows-deploy-gate.md](windows-deploy-gate.md) |
+| أداء CI على GitHub Actions (قياس، shards، كاش Playwright) | [ci-performance.md](ci-performance.md) |
 | تعاون Slack وGitHub والوكلاء | [collaboration-workflow.md](collaboration-workflow.md) |
 | الأرشفة إلى iCloud (ماك، الواجهة مخفية) | [icloud-archive.md](icloud-archive.md) |
 | أرشفة فواتير الجملة على Google Drive + تيليغرام (غير مفعَّل) | [drive-invoice-archive.md](drive-invoice-archive.md) |
