@@ -973,6 +973,26 @@
       return (data && data[0]) || null;
     },
 
+    async listLiveAmeenInvoices(sinceIso) {
+      // آخر حالة لكل فاتورة تغيّرت بعد لقطة تقرير الفواتير (يكتبها وكيل أحداث الفواتير
+      // على Windows خلال ثوانٍ من الحفظ في الأمين). قراءة فقط؛ RLS يحصرها بالموظفين.
+      // الدمج والتحقق الحسابي في src/live-invoices.js.
+      if (!client) return [];
+      const session = await getSupabaseSession();
+      if (!session) return [];
+
+      const { data, error } = await client
+        .from("ameen_invoices")
+        .select("bill_guid, bill_type, status, revision, source_event_at, source_seq, bill_number, bill_date, customer_guid, is_named, payload, updated_at")
+        .gte("source_event_at", sinceIso)
+        .or("is_named.eq.true,status.eq.deleted")
+        .order("source_event_at", { ascending: true })
+        .limit(1000);
+
+      if (error) throw new Error(translateDbError(error.message));
+      return Array.isArray(data) ? data : [];
+    },
+
     async getPurchaseInvoicesAmeenReport() {
       // فواتير المشتريات الحقيقية من الأمين لكل مورد مع محتوياتها (يكتبها
       // pull-purchase-invoices-from-ameen.ps1). قراءة فقط، من جدول مستقل محمي

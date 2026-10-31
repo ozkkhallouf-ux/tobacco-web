@@ -88,6 +88,7 @@ export const CHECKS = [
   'check-item-snapshot-registration.mjs',
   'check-item-snapshot-security.mjs',
   'check-keyboard-shortcut-routes.mjs',
+  'check-live-invoices.mjs',
   'check-local-site-server.mjs',
   'check-mac-archive-bridge.mjs',
   'check-manual-a4-print.mjs',
