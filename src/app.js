@@ -211,6 +211,8 @@ const state = {
   customerInvoicesBaseReport: null,
   liveInvoicesBase: null,
   liveInvoicesSignature: "",
+  liveInvoicesPrices: null,
+  liveInvoicesBalances: null,
   liveInvoicesStats: null,
   invoiceSeriesReport: null,   // آخر رقم فاتورة لكل سلسلة ترقيم في الأمين
   customerWhatsapp: [],
@@ -1304,9 +1306,17 @@ async function loadLiveInvoices() {
     return false;
   }
   const signature = rows.map((r) => `${r.bill_guid}:${r.source_seq}`).join("|");
-  if (base === state.liveInvoicesBase && signature === state.liveInvoicesSignature) return false;
+  // مدخلات الدمج كلها في مفتاح الذاكرة: اللقطة والصفوف ولائحة الأسعار (دليل المواد
+  // الاحتياطي) والأرصدة (أسماء المجموعات الجديدة). عند الدخول تُحمَّل الأسعار بعد
+  // الفواتير، فصف رُفض بـunknown_item يجب أن يُعاد دمجه حين تصل اللائحة.
+  const prices = state.approvedPriceItems;
+  const balances = (state.customerBalanceReports && state.customerBalanceReports[0]) || null;
+  if (base === state.liveInvoicesBase && signature === state.liveInvoicesSignature
+    && prices === state.liveInvoicesPrices && balances === state.liveInvoicesBalances) return false;
   state.liveInvoicesBase = base;
   state.liveInvoicesSignature = signature;
+  state.liveInvoicesPrices = prices;
+  state.liveInvoicesBalances = balances;
   const { report, stats } = engine.mergeLiveInvoices(base, rows, {
     priceItems: state.approvedPriceItems,
     balanceItems: latestCustomerBalanceItems()
@@ -2237,6 +2247,8 @@ async function loadApprovedPriceItems() {
     state.approvedPriceItems = [];
     state.approvedPriceError = safeErrorMessage(error);
   }
+  // لائحة الأسعار احتياط دليل المواد للفواتير الفورية: وصولها يعيد الدمج فوراً.
+  await loadLiveInvoices();
 }
 
 async function loadPaymentRecords(customerKey) {

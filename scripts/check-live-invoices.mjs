@@ -219,6 +219,10 @@ test("الموقع يحمّل الوحدة قبل app.js ويخزّنها في �
   const app = readFileSync(new URL("../src/app.js", import.meta.url), "utf8");
   const poll = app.slice(app.indexOf("// الفواتير الفورية: قراءة خفيفة كل 10 ثوانٍ"));
   assert.ok(/state\.route === "sales" && state\.salesHistoryOpen/.test(poll.slice(0, 1500)), "شاشة «الفواتير السابقة» يجب أن تتحدّث فورياً");
+  const loader = app.slice(app.indexOf("async function loadLiveInvoices()"), app.indexOf("// ===== هوية الزبون والفاتورة"));
+  assert.ok(/prices === state\.liveInvoicesPrices/.test(loader), "تغيّر لائحة الأسعار يجب أن يُبطل ذاكرة الدمج");
+  const pricesLoader = app.slice(app.indexOf("async function loadApprovedPriceItems()"));
+  assert.ok(/await loadLiveInvoices\(\);\n\}/.test(pricesLoader.slice(0, 900)), "وصول لائحة الأسعار يعيد دمج الفواتير الفورية");
   const engine = readFileSync(new URL("../src/live-invoices.js", import.meta.url), "utf8");
   assert.ok(!/fetch\(|XMLHttpRequest|\.from\(/.test(engine), "منطق الدمج يجب أن يبقى نقياً بلا شبكة");
 });
