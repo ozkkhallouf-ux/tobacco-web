@@ -32,8 +32,11 @@ $script:LogWriterDirRights = [System.Security.AccessControl.FileSystemRights]'Li
 # FileStream بوضع Append يطلب GENERIC_WRITE، أي WriteData وAppendData وWriteAttributes وWriteExtendedAttributes معاً.
 $script:LogWriterFileRights = [System.Security.AccessControl.FileSystemRights]'ReadData, ReadAttributes, ReadExtendedAttributes, ReadPermissions, WriteData, AppendData, WriteAttributes, WriteExtendedAttributes, Synchronize'
 $script:LogOwnerRightsFile = [System.Security.AccessControl.FileSystemRights]'ReadPermissions, Synchronize'
-# ما يجب ألا يملكه حساب التشغيل في أي سطر من صلاحياته.
-$script:LogForbiddenRights = [System.Security.AccessControl.FileSystemRights]'Delete, DeleteSubdirectoriesAndFiles, ChangePermissions, TakeOwnership, CreateDirectories'
+# ما يجب ألا يملكه حساب التشغيل في أي سطر من صلاحياته (المجلد والملفات).
+$script:LogForbiddenRights = [System.Security.AccessControl.FileSystemRights]'Delete, DeleteSubdirectoriesAndFiles, ChangePermissions, TakeOwnership'
+# وعلى المجلد وحده: لا مجلدات فرعية. CreateDirectories وAppendData البتّ نفسه (0x4)، فهذا الفحص
+# لا يصحّ على سطر الملفات الذي يمنح AppendData عمداً.
+$script:LogForbiddenDirRights = [System.Security.AccessControl.FileSystemRights]'CreateDirectories'
 
 function Resolve-LogPrincipal([string]$Name) {
     if ($Name -match '^S-\d-') { return New-Object System.Security.Principal.SecurityIdentifier($Name) }

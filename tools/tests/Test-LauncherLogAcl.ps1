@@ -52,9 +52,11 @@ try {
     }
     $writerRules = @($rules | Where-Object { $_.IdentityReference.Value -eq $writerSid.Value })
     Assert-True ($writerRules.Count -eq 2) 'the task account has exactly two rules (dir, files)'
-    Assert-True (@($writerRules | Where-Object { Test-HasAny $_.FileSystemRights $script:LogForbiddenRights }).Count -eq 0) 'no delete, no permission change, no take ownership, no subdirectory for the task account'
+    Assert-True (@($writerRules | Where-Object { Test-HasAny $_.FileSystemRights $script:LogForbiddenRights }).Count -eq 0) 'no delete, no permission change, no take ownership for the task account'
     Assert-True (@($writerRules | Where-Object { $_.AccessControlType -ne 'Allow' }).Count -eq 0) 'allow rules only'
     $dirRule = @($writerRules | Where-Object { $_.InheritanceFlags -eq 'None' })
+    # CreateDirectories = AppendData (0x4): يُفحص على سطر المجلد وحده.
+    Assert-True ($dirRule.Count -eq 1 -and -not (Test-HasAny $dirRule[0].FileSystemRights $script:LogForbiddenDirRights)) 'directory rule: no subdirectories'
     $fileRule = @($writerRules | Where-Object { $_.InheritanceFlags -eq 'ObjectInherit' -and $_.PropagationFlags -eq 'InheritOnly' })
     Assert-True ($dirRule.Count -eq 1 -and (Test-HasAny $dirRule[0].FileSystemRights $FSR::CreateFiles)) 'directory rule: create files in this folder only'
     Assert-True ($fileRule.Count -eq 1 -and (Test-HasAny $fileRule[0].FileSystemRights $FSR::AppendData) -and (Test-HasAny $fileRule[0].FileSystemRights $FSR::WriteData)) 'file rule: write and append, inherited by files only'
