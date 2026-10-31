@@ -19,7 +19,9 @@
     finishing: false,
     finishProgress: null,
     lastError: "",
-    localNotice: ""
+    localNotice: "",
+    // إعادة عد جماعية (المالك): المواد بمعرّف الأمين، تُفتح في كل مستودعات اليوم دفعة واحدة.
+    bulk: { items: [], unavailable: false, query: "", selected: {}, busy: false, result: null }
   };
   let callbacks = { render() {}, notice() {} };
   let autoRefreshTimer = null;
@@ -222,11 +224,15 @@
     state.loading = true; state.lastError = ""; callbacks.render();
     try {
       if (isOwner(session)) {
-        const [dashboard, accounts] = await Promise.all([
+        const [dashboard, accounts, dayItems] = await Promise.all([
           store.getSmartInventoryOwnerDashboard(),
-          store.listInventoryCounterAccounts().catch(() => ({ accounts: [] }))
+          store.listInventoryCounterAccounts().catch(() => ({ accounts: [] })),
+          // قبل تطبيق الهجرة لا توجد الدالة: تبقى اللوحة تعمل ويُعطَّل القسم وحده.
+          store.getSmartInventoryOwnerDayItems().catch(() => null)
         ]);
         state.dashboard = Array.isArray(dashboard) ? dashboard : [];
+        state.bulk.unavailable = !dayItems;
+        state.bulk.items = Array.isArray(dayItems?.items) ? dayItems.items : [];
         state.accounts = Array.isArray(accounts?.accounts) ? accounts.accounts : [];
       } else {
         const warehouses = await store.listSmartInventoryWarehouses();
@@ -462,6 +468,111 @@
       </tbody></table></div></section>`;
   }
 
+  function bulkCandidates() {
+    const q = normalizeSearch(state.bulk.query);
+    return state.bulk.items.filter((item) => !q || normalizeSearch(`${item.itemName} ${item.itemCode || ""}`).includes(q));
+  }
+
+  function bulkSelectedRefs() {
+    return Object.keys(state.bulk.selected).filter((ref) => state.bulk.selected[ref]);
+  }
+
+  function bulkRowsMarkup() {
+    const rows = bulkCandidates();
+    if (!rows.length) return '<p class="muted">لا توجد مواد مطابقة.</p>';
+    const limit = 200;
+    return rows.slice(0, limit).map((item) => `<label class="smart-bulk-row"><input type="checkbox" data-smart-bulk-pick="${esc(item.itemRef)}" ${state.bulk.selected[item.itemRef] ? "checked" : ""} ${attrDisabled(state.bulk.busy)}><span><strong>${esc(item.itemName)}</strong><small>${esc(item.itemCode || "")} · معدودة في ${fmtNum(item.counted)} من ${fmtNum(item.sessions)} مستودع${Number(item.recountOpen) ? ` · بانتظار إعادة عد في ${fmtNum(item.recountOpen)}` : ""}</small></span></label>`).join("")
+      + (rows.length > limit ? `<p class="muted">يظهر أول ${limit} من ${fmtNum(rows.length)} — ضيّق البحث.</p>` : "");
+  }
+
+  function bulkApplyLabel() {
+    if (state.bulk.busy) return "جاري فتح إعادة العد…";
+    return `فتح إعادة العد في كل المستودعات (${bulkSelectedRefs().length})`;
+  }
+
+  function bulkResultMarkup() {
+    const result = state.bulk.result;
+    if (!result) return "";
+    const rows = Array.isArray(result.warehouses) ? result.warehouses : [];
+    return `<div class="smart-bulk-result"><strong>فُتحت إعادة العد لـ ${fmtNum(result.opened)} سطر${Number(result.reopenedSessions) ? ` وأُعيد فتح ${fmtNum(result.reopenedSessions)} جلسة مكتملة` : ""}.</strong>
+      <ul>${rows.map((row) => `<li>${esc(row.warehouseName)}: فُتح ${fmtNum(row.opened)}${Number(row.skippedUncounted) ? ` · غير معدود بعد ${fmtNum(row.skippedUncounted)}` : ""}${Number(row.skippedAlready) ? ` · مفتوح سابقاً ${fmtNum(row.skippedAlready)}` : ""}${row.reopened ? " · أُعيد فتح الجلسة" : ""}</li>`).join("")}</ul>
+      ${Number(result.notFound) ? `<p class="muted">${fmtNum(result.notFound)} مادة غير موجودة في جلسات اليوم.</p>` : ""}</div>`;
+  }
+
+  function bulkRecountPanel() {
+    const head = '<div class="panel-title-row"><div><h2>إعادة عد جماعية</h2><p class="muted">اختر المواد مرة واحدة فتُفتح لإعادة عد عمياء في كل مستودعات اليوم. ينفّذها موظف غير الذي عدّها أول مرة، والجلسة المكتملة تُعاد فتحها تلقائياً. غير المعدود يبقى كما هو.</p></div></div>';
+    if (state.bulk.unavailable) return `<section class="panel wide smart-bulk">${head}<p class="muted">هذا القسم بانتظار تحديث قاعدة البيانات.</p></section>`;
+    if (!state.bulk.items.length) return `<section class="panel wide smart-bulk">${head}<p class="muted">لا توجد جلسات جرد اليوم بعد.</p></section>`;
+    const count = bulkSelectedRefs().length;
+    return `<section class="panel wide smart-bulk">${head}
+      <div class="smart-toolbar smart-bulk-toolbar"><input data-smart-bulk-search placeholder="ابحث بالاسم أو الكود" value="${esc(state.bulk.query)}" autocomplete="off" aria-controls="smart-bulk-results"><div class="button-row">
+        <button class="button secondary" type="button" data-smart-bulk-select-visible ${attrDisabled(state.bulk.busy)}>تحديد النتائج الظاهرة</button>
+        <button class="button secondary" type="button" data-smart-bulk-clear ${attrDisabled(state.bulk.busy)}>إلغاء التحديد</button></div></div>
+      <div id="smart-bulk-results" class="smart-bulk-list" data-smart-bulk-results>${bulkRowsMarkup()}</div>
+      <label class="smart-bulk-reason">سبب إعادة العد (إلزامي)<input data-smart-bulk-reason maxlength="500" autocomplete="off" value="${esc(state.bulk.reason || "")}" ${attrDisabled(state.bulk.busy)}></label>
+      <div class="button-row"><button class="button warning" type="button" data-smart-bulk-apply ${attrDisabled(state.bulk.busy || !count)}>${bulkApplyLabel()}</button></div>
+      ${bulkResultMarkup()}
+    </section>`;
+  }
+
+  function renderBulkResults(root) {
+    const list = root.querySelector("[data-smart-bulk-results]");
+    if (list) { list.innerHTML = bulkRowsMarkup(); bindBulkPicks(list, root); }
+    updateBulkApply(root);
+  }
+
+  function updateBulkApply(root) {
+    const button = root.querySelector("[data-smart-bulk-apply]");
+    if (!button) return;
+    button.textContent = bulkApplyLabel();
+    button.disabled = state.bulk.busy || !bulkSelectedRefs().length;
+  }
+
+  function bindBulkPicks(scope, root) {
+    scope.querySelectorAll("[data-smart-bulk-pick]").forEach((input) => input.addEventListener("change", () => {
+      if (input.checked) state.bulk.selected[input.dataset.smartBulkPick] = true;
+      else delete state.bulk.selected[input.dataset.smartBulkPick];
+      updateBulkApply(root);
+    }));
+  }
+
+  async function applyBulkRecount(root, session) {
+    const refs = bulkSelectedRefs();
+    const reason = root.querySelector("[data-smart-bulk-reason]")?.value?.trim() || "";
+    if (!refs.length || state.bulk.busy) return;
+    if (reason.length < 3) return callbacks.notice("error", "اكتب سبب إعادة العد (3 أحرف على الأقل).");
+    if (!confirm(`ستُفتح إعادة عد عمياء لـ ${refs.length} مادة في كل مستودعات اليوم، وتُعاد فتح الجلسات المكتملة التي تحتويها. متابعة؟`)) return;
+    state.bulk.busy = true; callbacks.render();
+    try {
+      state.bulk.result = await store.openSmartInventoryBulkRecount(refs, reason);
+      state.bulk.selected = {}; state.bulk.reason = "";
+      callbacks.notice("success", `فُتحت إعادة العد لـ ${fmtNum(state.bulk.result?.opened || 0)} سطر في كل المستودعات.`);
+      state.bulk.busy = false;
+      state.loadedForRole = ""; await load(session, true);
+    } catch (error) { callbacks.notice("error", error.message); }
+    finally { state.bulk.busy = false; callbacks.render(); }
+  }
+
+  function bindBulk(root, session) {
+    const search = root.querySelector("[data-smart-bulk-search]");
+    if (search) {
+      // تحديث القائمة وحدها كي لا يسقط التركيز أو ينقطع تشكيل العربية (نفس مبدأ بحث الموظف).
+      const onSearch = (event) => { state.bulk.query = liveSearchValue(event); renderBulkResults(root); };
+      search.addEventListener("input", onSearch);
+      search.addEventListener("compositionupdate", onSearch);
+      search.addEventListener("compositionend", onSearch);
+    }
+    const list = root.querySelector("[data-smart-bulk-results]");
+    if (list) bindBulkPicks(list, root);
+    root.querySelector("[data-smart-bulk-select-visible]")?.addEventListener("click", () => {
+      bulkCandidates().slice(0, 200).forEach((item) => { state.bulk.selected[item.itemRef] = true; });
+      renderBulkResults(root);
+    });
+    root.querySelector("[data-smart-bulk-reason]")?.addEventListener("input", (event) => { state.bulk.reason = event.currentTarget.value; });
+    root.querySelector("[data-smart-bulk-clear]")?.addEventListener("click", () => { state.bulk.selected = {}; renderBulkResults(root); });
+    root.querySelector("[data-smart-bulk-apply]")?.addEventListener("click", () => applyBulkRecount(root, session));
+  }
+
   function ownerAccounts() {
     return `<section class="panel wide"><div class="panel-title-row"><div><h2>حسابات موظفي الجرد</h2><p class="muted">المالك فقط ينشئ الحساب. لا بريد حقيقي ولا Google ولا OTP.</p></div></div>
       <form class="smart-account-form" data-smart-account-create><label>اسم الموظف<input name="displayName" required maxlength="80"></label><label>اسم المستخدم<input name="username" required maxlength="48" autocomplete="off"></label><label>كلمة المرور<input name="password" type="password" minlength="8" maxlength="128" autocomplete="new-password" required></label><button class="button primary" ${state.accountBusy ? "disabled" : ""}>إنشاء حساب</button></form>
@@ -473,7 +584,7 @@
     if (state.loading && !state.loadedForRole) return '<section class="panel wide"><h2>جاري تجهيز الجرد الذكي…</h2></section>';
     if (state.lastError) return `<section class="notice-panel error"><span>${esc(state.lastError)}</span><button class="button primary" data-smart-retry>إعادة المحاولة</button></section>`;
     if (state.session) return isOwner(session) ? ownerReport() : counterSession(session);
-    if (isOwner(session)) return `<section class="panel wide"><div class="panel-title-row"><div><h2>متابعة الجرد اليومية</h2><p class="muted">توقيت اليوم Asia/Beirut. تظهر المستودعات التي لم تبدأ أيضاً.</p></div><span>${onlineLabel()}</span></div></section>${warehouseCards(state.dashboard, session)}${ownerAccounts()}`;
+    if (isOwner(session)) return `<section class="panel wide"><div class="panel-title-row"><div><h2>متابعة الجرد اليومية</h2><p class="muted">توقيت اليوم Asia/Beirut. تظهر المستودعات التي لم تبدأ أيضاً.</p></div><span>${onlineLabel()}</span></div></section>${bulkRecountPanel()}${warehouseCards(state.dashboard, session)}${ownerAccounts()}`;
     return `<section class="panel wide"><div class="panel-title-row"><div><h2>اختر المستودع</h2><p class="muted">يمكنك بدء أو متابعة أي مستودع. لا تظهر كمية الأمين أو الفروقات في حسابك.</p></div><span>${onlineLabel()}</span></div></section>${warehouseCards(state.warehouses, session)}`;
   }
 
@@ -714,6 +825,7 @@
       const reason = prompt("سبب إعادة فتح الجرد (إلزامي):"); if (!reason) return;
       try { await store.reopenSmartInventorySession(state.session.id, reason); await openSession(state.session.id, session); callbacks.notice("success", "أعيد فتح الجلسة وسُجل السبب."); } catch (error) { callbacks.notice("error", error.message); }
     });
+    bindBulk(root, session);
     root.querySelector("[data-smart-export-xlsx]")?.addEventListener("click", exportOwnerXlsx);
     root.querySelector("[data-smart-export-pdf]")?.addEventListener("click", () => exportOwnerPdf(root));
     root.querySelector("[data-smart-print-book]")?.addEventListener("click", printBlindBook);
@@ -848,6 +960,6 @@
     state, load, render, bind, deviceId, canCounterCorrect,
     parseCountInput, planSessionFinish, zeroCountPayload, finishZeroConfirmText, finishZeroSuccessText, finishBlockedMessage,
     finishSession, saveItem,
-    reset() { state.loadedForRole = ""; state.session = null; state.ownerReport = null; state.warehouses = []; state.dashboard = []; state.editingItemId = ""; state.finishing = false; state.finishProgress = null; }
+    reset() { state.bulk = { items: [], unavailable: false, query: "", selected: {}, busy: false, result: null }; state.loadedForRole = ""; state.session = null; state.ownerReport = null; state.warehouses = []; state.dashboard = []; state.editingItemId = ""; state.finishing = false; state.finishProgress = null; }
   };
 })();
