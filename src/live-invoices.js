@@ -252,8 +252,12 @@
       stats.applied += 1;
       if (where) {
         const entry = entries[where.ei];
-        if (normGuid(entry.customerGuid) && invoice.customerGuid && normGuid(entry.customerGuid) !== invoice.customerGuid) {
-          // الفاتورة نُقلت لزبون آخر: تُحذف من مجموعة الأول وتُضاف لمجموعة الثاني.
+        const previous = entry.invoices[where.ii];
+        const before = identityKey(normGuid(previous?.customerGuid) || normGuid(entry.customerGuid), entry.name);
+        const after = identityKey(invoice.customerGuid, result.customerName);
+        if (before !== after) {
+          // هوية الزبون تغيّرت (معرّف آخر، أو معرّف ⇄ بلا معرّف، أو اسم آخر بلا معرّف):
+          // تُحذف من مجموعة الأول وتُضاف لمجموعة الثاني، فلا تُعرض أو تُصدَّر باسم خطأ.
           removals.push(where);
           addToCustomer(entries, invoice, result.customerName, nameByGuid);
         } else {
@@ -287,6 +291,12 @@
       }
     };
     return { report: merged, stats };
+  }
+
+  // هوية التجميع كما في push-customer-invoices.ps1: المعرّف متى وُجد، وإلا الاسم.
+  function identityKey(guid, name) {
+    const g = normGuid(guid);
+    return g ? `g:${g}` : `n:${String(name || "").trim().toLowerCase()}`;
   }
 
   function addToCustomer(entries, invoice, customerName, nameByGuid) {

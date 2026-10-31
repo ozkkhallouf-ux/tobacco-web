@@ -147,6 +147,29 @@ test("نقل الفاتورة لزبون آخر يزيلها من الأول و�
   assert.equal(invoices(report).filter((i) => i.guid === G(1)).length, 1);
 });
 
+test("نقل فاتورة من زبون بحساب إلى اسم بلا حساب، والعكس، يغيّر مجموعتها", () => {
+  const toNameOnly = liveRow(G(1), { customer: null, name: "زبون ج بلا حساب", total: 572, lines: [ln(ITEM_X, 100, 286, 2), ln(ITEM_Y, 10, 0, 1)] });
+  const a = L.mergeLiveInvoices(baseReport(), [toNameOnly]).report;
+  const moved = byGuid(a, G(1));
+  assert.equal(moved.owner, "");
+  assert.equal(moved.ownerName, "زبون ج بلا حساب");
+  assert.equal(invoices(a).filter((i) => i.guid === G(1)).length, 1);
+
+  const base = baseReport();
+  base.items.push({ name: "زبون د", customerGuid: "", invoices: [{ ...base.items[0].invoices[1], guid: G(10), customerGuid: "" }] });
+  const toAccount = liveRow(G(10), { customer: CUST_B, name: "زبون د", total: 22, lines: [ln(ITEM_Y, 10, 2.2, 1)] });
+  const b = L.mergeLiveInvoices(base, [toAccount], { balanceItems: [{ name: "زبون ب", customerGuid: CUST_B }] }).report;
+  assert.equal(byGuid(b, G(10)).owner, CUST_B);
+  assert.ok(!b.items.some((e) => e.name === "زبون د"), "المجموعة القديمة بلا معرّف تفرغ فتُحذف");
+});
+
+test("تعديل فاتورة بنفس الهوية (نص اسم مختلف ومعرّف واحد) يبقيها في مكانها", () => {
+  const row = liveRow(G(1), { name: "نص اسم آخر", number: 100, date: "2026-10-30", total: 858, lines: [ln(ITEM_X, 150, 286, 2)] });
+  const { report } = L.mergeLiveInvoices(baseReport(), [row]);
+  assert.equal(report.items.length, 1);
+  assert.equal(byGuid(report, G(1)).ownerName, "زبون أ");
+});
+
 test("فاتورة بلا اسم زبون (كاشير) لا تدخل، كما في التقرير", () => {
   const { stats } = L.mergeLiveInvoices(baseReport(), [liveRow(G(6), { name: null, customer: null, total: 22, lines: [ln(ITEM_Y, 10, 2.2, 1)] })]);
   assert.equal(stats.rejected.unnamed, 1);
