@@ -208,6 +208,12 @@ const state = {
   customerBalanceReports: [],
   customerMovementsReport: null,
   customerInvoicesReport: null,
+  customerInvoicesBaseReport: null,
+  liveInvoicesBase: null,
+  liveInvoicesSignature: "",
+  liveInvoicesPrices: null,
+  liveInvoicesBalances: null,
+  liveInvoicesStats: null,
   invoiceSeriesReport: null,   // آخر رقم فاتورة لكل سلسلة ترقيم في الأمين
   customerWhatsapp: [],
   broadcastType: "",
@@ -1258,12 +1264,14 @@ async function loadCustomerBalanceReports() {
     state.customerMovementsReport = null;
   }
   try {
-    state.customerInvoicesReport = dataStore.getCustomerInvoicesReport
+    state.customerInvoicesBaseReport = dataStore.getCustomerInvoicesReport
       ? await dataStore.getCustomerInvoicesReport()
       : null;
   } catch {
-    state.customerInvoicesReport = null;
+    state.customerInvoicesBaseReport = null;
   }
+  state.customerInvoicesReport = state.customerInvoicesBaseReport;
+  await loadLiveInvoices();
   try {
     state.poAmeenReport = dataStore.getPurchaseInvoicesAmeenReport
       ? await dataStore.getPurchaseInvoicesAmeenReport()
@@ -1279,6 +1287,43 @@ async function loadCustomerBalanceReports() {
     state.invoiceSeriesReport = null;
   }
   await loadCustomerWhatsapp();
+}
+
+// ===== الفواتير الفورية (ameen_invoices) فوق تقرير الفواتير =====
+// وكيل أحداث الفواتير يرفع كل فاتورة جديدة أو معدّلة أو محذوفة خلال ثوانٍ. هنا تُدمج
+// فوق لقطة التقرير (src/live-invoices.js): الأحدث يفوز، والنسخة الفورية لا تُقبل إلا
+// إن طابق مجموع أسطرها إجمالي الفاتورة في الأمين. عرض فقط — لا كتابة على أي جدول.
+// `state.customerInvoicesBaseReport` اللقطة كما وصلت، و`state.customerInvoicesReport`
+// الناتج المدموج الذي تقرؤه كل الشاشات. فشل القراءة الفورية يُبقي اللقطة كما هي.
+async function loadLiveInvoices() {
+  const base = state.customerInvoicesBaseReport;
+  const engine = window.ozkLiveInvoices;
+  if (!engine || !dataStore.listLiveAmeenInvoices) return false;
+  let rows;
+  try {
+    rows = await dataStore.listLiveAmeenInvoices(engine.liveFetchSince(base, Date.now()));
+  } catch {
+    return false;
+  }
+  const signature = rows.map((r) => `${r.bill_guid}:${r.source_seq}`).join("|");
+  // مدخلات الدمج كلها في مفتاح الذاكرة: اللقطة والصفوف ولائحة الأسعار (دليل المواد
+  // الاحتياطي) والأرصدة (أسماء المجموعات الجديدة). عند الدخول تُحمَّل الأسعار بعد
+  // الفواتير، فصف رُفض بـunknown_item يجب أن يُعاد دمجه حين تصل اللائحة.
+  const prices = state.approvedPriceItems;
+  const balances = (state.customerBalanceReports && state.customerBalanceReports[0]) || null;
+  if (base === state.liveInvoicesBase && signature === state.liveInvoicesSignature
+    && prices === state.liveInvoicesPrices && balances === state.liveInvoicesBalances) return false;
+  state.liveInvoicesBase = base;
+  state.liveInvoicesSignature = signature;
+  state.liveInvoicesPrices = prices;
+  state.liveInvoicesBalances = balances;
+  const { report, stats } = engine.mergeLiveInvoices(base, rows, {
+    priceItems: state.approvedPriceItems,
+    balanceItems: latestCustomerBalanceItems()
+  });
+  state.customerInvoicesReport = report;
+  state.liveInvoicesStats = stats;
+  return true;
 }
 
 // ===== هوية الزبون والفاتورة: المعرّف أولاً، الاسم احتياطاً =====
@@ -2202,6 +2247,8 @@ async function loadApprovedPriceItems() {
     state.approvedPriceItems = [];
     state.approvedPriceError = safeErrorMessage(error);
   }
+  // لائحة الأسعار احتياط دليل المواد للفواتير الفورية: وصولها يعيد الدمج فوراً.
+  await loadLiveInvoices();
 }
 
 async function loadPaymentRecords(customerKey) {
@@ -14267,6 +14314,20 @@ setInterval(() => {
       .catch(() => {});
   }
 }, 60000);
+
+// الفواتير الفورية: قراءة خفيفة كل 10 ثوانٍ (صفوف ما بعد لقطة التقرير فقط)، وإعادة
+// رسم فقط حين يتغيّر شيء فعلاً، وبلا مقاطعة كتابة في نموذج.
+setInterval(() => {
+  if (isInventoryCounter() || document.hidden) return;
+  if (!dataStore.isConfigured() || !state.session) return;
+  const active = document.activeElement;
+  if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.tagName === "SELECT")) return;
+  // «الفواتير السابقة» تُعرض داخل مسار المبيعات (state.salesHistoryOpen) لا مسار مستقل؛
+  // نموذج إدخال الفاتورة نفسه لا يُعاد رسمه هنا (حارس الحقل النشط فوق، وشرط الشاشة).
+  const salesHistory = state.route === "sales" && state.salesHistoryOpen;
+  if (!salesHistory && !["ameen", "balances", "pricing", "dashboard", "payments"].includes(state.route)) return;
+  loadLiveInvoices().then((changed) => { if (changed) render(); }).catch(() => {});
+}, 10000);
 
 setInterval(async () => {
   if (isInventoryCounter()) return;

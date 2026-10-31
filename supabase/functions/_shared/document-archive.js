@@ -13,8 +13,8 @@
 // ============================================================================
 
 export const DOC_TYPES = Object.freeze({
-  wholesale_invoice: { label: "فاتورة جملة", icon: "🧾" },
-  receipt: { label: "سند قبض", icon: "💵" },
+  wholesale_invoice: { label: "فاتورة جملة", numberLabel: "فاتورة رقم", icon: "🧾" },
+  receipt: { label: "سند قبض", numberLabel: "سند قبض رقم", icon: "💵" },
 });
 
 // حد تيليغرام لوصف المرفق 1024 محرفاً؛ هامش للأمان.
@@ -117,8 +117,12 @@ export function buildNotifyCaption(v) {
   const amount = v.amount === null || v.amount === undefined
     ? "—"
     : t.money(v.amount, v.currency || "$", 2);
+  // العنوان بتنسيق اسم الملف على Drive: «اسم الزبون - فاتورة رقم 1151 - 31-10-2026».
+  const [y, m, d] = v.doc_date.split("-"); // DATE_RE مُتحقَّق في validateNotifyFields
+  const title = `${t.name(v.customer_name, "زبون غير محدد", 80)} - ${type.numberLabel} ${t.name(v.doc_number)} - ${t.LRI}${d}-${m}-${y}${t.PDI}${edited ? ` - ${versionLabel}` : ""}`;
   const lines = [
-    t.line(`${edited ? "✏️" : type.icon} ${type.label} ${edited ? "معدّلة" : "جديدة"} — أرشفة ناجحة`),
+    t.line(`${edited ? "✏️" : type.icon} ${title}`),
+    t.line(`${type.label} ${edited ? "معدّلة" : "جديدة"} — أرشفة ناجحة`),
     t.field("الزبون", t.name(v.customer_name, "زبون غير محدد")),
     t.field("رقم المستند", t.name(v.doc_number)),
     t.field("الإصدار", versionText),
@@ -130,7 +134,7 @@ export function buildNotifyCaption(v) {
   ];
   const full = lines.join("\n");
   if (full.length <= CAPTION_MAX) return { caption: full, followUp: null };
-  const short = [lines[0], lines[2], lines[3], lines[6]].join("\n").slice(0, CAPTION_MAX);
+  const short = [lines[0], lines[1], lines[3], lines[4], lines[7]].join("\n").slice(0, CAPTION_MAX);
   return { caption: short, followUp: full.slice(0, 3900) };
 }
 

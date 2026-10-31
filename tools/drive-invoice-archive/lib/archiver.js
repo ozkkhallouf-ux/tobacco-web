@@ -45,7 +45,13 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
   // التجربة المحصورة: كل المراحل (رصد، رفع، إشعار، تقرير، توثيق المصدر) ترى هذه الفواتير وحدها.
   // ما يُتخطّى هنا لا يُعلَّم ملحوظاً (لا تلميح)، فتلتقطه المطابقة الدورية بعد رفع الحصر.
   const pilot = new Set((cfg.pilotInvoiceGuids || []).map((g) => model.normGuid(g)));
-  const inScope = (guid) => pilot.size === 0 || pilot.has(model.normGuid(guid));
+  // نطاق الإنتاج: فاتورة في لقطة الأساس (موجودة لحظة التفعيل) خارج كل المراحل نهائياً، ومعها
+  // حدّ CreateDate في الاستعلام وهنا (حماية مزدوجة لا تعتمد على تاريخ الفاتورة المكتوب).
+  const baseline = new Set((cfg.baselineGuids || []).map((g) => model.normGuid(g)));
+  const createdFrom = cfg.newInvoicesFrom || null;
+  const inScope = (guid) => (pilot.size === 0 || pilot.has(model.normGuid(guid))) && !baseline.has(model.normGuid(guid));
+  const createdBeforeCutoff = (row) => Boolean(createdFrom) &&
+    !(Date.parse(`${String(row.created_at || "").replace(/Z$/, "")}Z`) >= Date.parse(`${createdFrom}Z`));
   let folderCache = {};
   let driveState = mode.upload ? "disconnected" : "disabled";
   let driveCheckedAt = null;
@@ -124,7 +130,7 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
     const all = [];
     let cursor = { since: window.since, sinceGuid: window.sinceGuid || "" };
     for (let page = 0; page < 40; page++) {
-      const rows = await ameen.changedInvoices({ ...cursor, dateFrom: window.dateFrom });
+      const rows = await ameen.changedInvoices({ ...cursor, dateFrom: window.dateFrom, createdFrom });
       all.push(...rows);
       if (rows.length < 500) return { rows: all, complete: true, cursor: null };
       const last = rows[rows.length - 1];
@@ -291,6 +297,8 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
   async function detectRow(row) {
     const header = headerOf(row);
     if (!header.guid || !inScope(header.guid)) return "skip";
+    // أُنشئت قبل التفعيل (أو بلا وقت إنشاء مقروء) ⇒ ليست جديدة، ولو أعادها المصدر.
+    if (createdBeforeCutoff(row)) return "skip";
     // غير المرحّلة ليست نسخة نهائية. فاتورة مؤرشفة أُلغي ترحيلها أو تغيّر نوعها تُوثَّق فقط.
     if (!header.printable) { noteSourceIssue(header.guid, "type_changed"); return "skip"; }
     if (!header.isPosted) { noteSourceIssue(header.guid, "unposted"); return "skip"; }
@@ -317,7 +325,7 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
       .filter((g) => model.isGuid(g) && inScope(g) && now() >= (Number(state.detectErrors[g].nextAt) || 0))
       .slice(0, 50);
     for (const guid of dueGuids) {
-      const [row] = await ameen.changedInvoices({ since: "1900-01-01T00:00:00", sinceGuid: "", dateFrom: cfg.archiveFrom, onlyGuid: guid });
+      const [row] = await ameen.changedInvoices({ since: "1900-01-01T00:00:00", sinceGuid: "", dateFrom: cfg.archiveFrom, onlyGuid: guid, createdFrom });
       const outcome = row ? await detectRow(row) : "gone";
       if (outcome !== "error") delete state.detectErrors[guid];
     }
@@ -580,6 +588,7 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
 
   async function cycle({ host = "", version = "dev" } = {}) {
     const out = { detect: null, upload: null, notify: null, report: null };
+    if (createdFrom) out.scope = { newInvoicesFrom: createdFrom, baseline: baseline.size };
     if (pilot.size && !pilotGate(out)) return out;
     try {
       out.detect = await detect();

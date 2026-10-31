@@ -128,6 +128,14 @@ try {
     $code = Invoke-RepoTask -Config $logConfig -RelativeScript 'tools/missing-two.ps1' -Arguments @() -PsExe $psExe
     $monthLog = Join-Path $logDir ('launcher-' + (Get-Date).ToString('yyyy-MM', [Globalization.CultureInfo]::InvariantCulture) + '.log')
     Assert-True ($code -eq 2 -and (Test-Path -LiteralPath $monthLog)) 'with launcherLogDir the log goes to launcher-YYYY-MM.log in that directory'
+    $code = Invoke-RepoTask -Config $logConfig -RelativeScript 'tools/reader.ps1' -Arguments @('-Tag', 'secret-value') -PsExe $psExe
+    $lines = @([System.IO.File]::ReadAllLines($monthLog))
+    $run = @($lines | Where-Object { $_ -match ' RUN tools/reader\.ps1 pid=\d+ writer=False args=2$' })
+    $done = @($lines | Where-Object { $_ -match ' DONE tools/reader\.ps1 pid=\d+ exit=3 seconds=\d+$' })
+    Assert-True ($code -eq 3 -and $run.Count -eq 1 -and $done.Count -eq 1) 'a normal run writes one RUN line and one DONE line with the exit code'
+    Assert-True (-not (@($lines | Where-Object { $_ -like '*secret-value*' }).Count)) 'task arguments are not written to the launcher log'
+    $code = Invoke-RepoTask -Config $logConfig -RelativeScript 'tools/missing-three.ps1' -Arguments @() -PsExe $psExe
+    Assert-True (-not (@([System.IO.File]::ReadAllLines($monthLog) | Where-Object { $_ -like '*RUN tools/missing-three*' }).Count)) 'a refused task writes no RUN line'
     Assert-True (([System.IO.File]::ReadAllText($monthLog)) -like '*REFUSE missing script: tools/missing-two.ps1*') 'the refusal line is in the monthly log'
     Assert-True ((Get-Item -LiteralPath $gateLog).Length -eq $before) 'nothing more is written to gateDir'
     $p1 = Get-LauncherLogPath $logConfig ([datetime]'2026-10-31T23:59:00')
