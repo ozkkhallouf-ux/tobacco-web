@@ -204,6 +204,47 @@ for (const name of [
   // Codex P1 (37be4ca8): تاريخ مستحيل في العلامة لا يوقف الوكيل
   "state.json invalid watermark date: read does not throw and watermark is cleared",
   "watermark parser: valid date returned verbatim, impossible dates rejected",
+  // تعافي اتصال SQL (حادثة OZK2026 2026-10-25: إسبات بطارية ثم خروج صامت برمز 1)
+  "sql reconnect: delay doubles from 2s and caps at 300s",
+  "sql reconnect: lock timeout on an open connection is not a disconnect",
+  "sql reconnect: closed or broken connection is a disconnect",
+  "sql reconnect: transport error numbers are a disconnect",
+  "sql reconnect: command timeout (-2/258) on an open connection is a slow-server warning, not a disconnect",
+  "sql reconnect: pause after a resume is at least the poll interval and grows with consecutive resumes up to 300s",
+  "sql reconnect: non-SQL error on an open connection is not a disconnect",
+  "sql reconnect: connection InvalidOperationException is a disconnect",
+  "sql reconnect: a locked state file is not mistaken for a disconnect",
+  'sql reconnect: SqlException 0 "connection is broken" counts as a disconnect (live test 2026-10-26)',
+  "sql reconnect: deadlock or syntax message is not mistaken for a disconnect",
+  "sql reconnect: any SQL failure of a trivial query (GETDATE, open) is a disconnect",
+  'sql reconnect: SqlException 0 "connection is broken" counts as a disconnect (live test 2026-10-26)',
+  "sql reconnect: deadlock or syntax message is not mistaken for a disconnect",
+  "sql reconnect: any SQL failure of a trivial query (GETDATE, open) is a disconnect",
+  "sql reconnect: recovers after failures with backoff and logs RECONNECTING then RECOVERED",
+  "sql reconnect: gives up after the attempt limit without throwing",
+  "sql reconnect: log text never carries a password",
+  "first connection failure: agent retries, logs DISCONNECTED/RECONNECTING/GAVE_UP and exits with code 6",
+  "first connection failure: no password or user in the agent log",
+  "first connection failure: no state, watermark or pending written",
+  "first connection failure: outbox lock released after exit",
+  "agent: first SQL query of each cycle runs inside error handling",
+  "agent: startup connection and server time go through the reconnect path",
+  "agent: a disconnect inside detection restarts the cycle without advancing the watermark",
+  "agent: unexpected errors are logged as FATAL before exit",
+  "agent: a broken connection is replaced, never reused",
+  "disconnect at first query: watermark not advanced (memory and disk)",
+  "disconnect at first query: no event and no seq allocated",
+  "disconnect mid-cycle: nothing emitted, watermark and checkpoint unchanged",
+  "outbox write failure after reads: not treated as a SQL disconnect (agent stops instead)",
+  "outbox write failure after reads: nothing saved, disk state and watermark unchanged",
+  "after reconnect: both invoices from the outage emitted exactly once",
+  "after reconnect: seq strictly increasing from the last checkpoint",
+  "after reconnect: watermark advances only after the successful cycle",
+  "after reconnect: re-reading the same invoices creates no duplicate",
+  "agent restart after recovery: no lost and no duplicate events",
+  "agent: only failures before Resolve can trigger SQL recovery",
+  "agent: database name re-verified after every reconnect",
+  "agent: dead pooled connections cleared before reopening",
 ]) assert.ok(psTest.includes(`'${name}'`), `اختبار PowerShell إلزامي مفقود: ${name}`);
 
 const rollback = read(rollbackRel).replace(/--.*$/gm, "");
@@ -234,6 +275,25 @@ const agent = read(agentRel);
 const lib = read(libRel);
 const agentCode = agent.replace(/#.*$/gm, "");
 const libCode = lib.replace(/#.*$/gm, "");
+// تعافي اتصال SQL (حادثة OZK2026 2026-10-25): لا استعلام في الحلقة خارج المعالجة، ولا خروج صامت، ولا تسجيل لسلسلة الاتصال.
+{
+  const loop = agentCode.slice(agentCode.indexOf("    do {"), agentCode.indexOf("} while ($true)"));
+  assert.match(loop, /try \{ \$nowSrv = \[datetime\]\(Invoke-AmeenRead "SELECT GETDATE\(\) t"\)/, "أول استعلام في الدورة داخل try");
+  assert.match(loop, /catch \{ if \(Resume-AmeenSqlAfterFailure \$_ "بداية الدورة" -AnySqlIsLost\) \{ Wait-AmeenAfterSqlResume; continue \} else \{ throw \} \}/, "انقطاع في بداية الدورة ⇒ إعادة اتصال ثم مهلة ثم الدورة من جديد");
+  assert.match(loop, /if \(Resume-AmeenSqlAfterFailure \$_ "الرصد والمطابقة"\) \{ Wait-AmeenAfterSqlResume; continue \}/, "انقطاع أثناء الرصد ⇒ لا تقدّم للعلامة، ومهلة قبل الإعادة");
+  // لا continue بعد عودة الاتصال بلا مهلة: الإعادة الفورية كانت تتخطى حارس الأداء والنوم (مراجعة دمج #398).
+  assert.equal((loop.match(/Resume-AmeenSqlAfterFailure[^\n]*\{ continue \}/g) || []).length, 0, "كل عودة اتصال في الحلقة تمر بـWait-AmeenAfterSqlResume");
+  assert.ok(loop.indexOf("$script:resumeStreak = 0") > loop.indexOf("$elapsedMs = ((Get-Date) - $cycleStart)"), "عدّاد العودات يُصفَّر بعد دورة مكتملة فقط");
+  assert.ok(loop.indexOf("Add-AmeenOutboxEvents -Dir $OutboxDir -Events $events") < loop.indexOf("$state.watermark = Format-AmeenSqlDate $nowSrv"), "العلامة بعد كتابة الأحداث");
+  const rd = loop.indexOf("$readsDone = $true"), rs = loop.indexOf("$events = Resolve-AmeenInvoiceChanges"), gd = loop.indexOf("if ($readsDone) { throw }"), rm = loop.indexOf('Resume-AmeenSqlAfterFailure $_ "الرصد والمطابقة"');
+  assert.ok(rd > 0 && rd < rs && gd > rs && gd < rm, "التعافي من SQL قبل Resolve فقط؛ فشل الكتابة بعده FATAL (Codex P1 على #397)");
+}
+assert.match(agentCode, /Write-AgentLog \("FATAL: /, "لا خروج صامت: الخطأ غير المتوقع يُسجَّل");
+assert.match(agentCode, /\[int\]\$MaxReconnectAttempts = 288/, "حدّ أعلى لمحاولات إعادة الاتصال");
+assert.doesNotMatch(agentCode, /Write-AgentLog[^\n]*(\$connStr|ConnectionString)/, "لا تُسجَّل سلسلة الاتصال");
+assert.match(libCode, /function Invoke-AmeenSqlReconnect/);
+assert.doesNotMatch(libCode.match(/\$script:AmeenSqlConnectionLostNumbers = @\(([^)]*)\)/)[1], /(^|,\s*)(-2|258)(\s*,|$)/, "مهلة الأمر ليست انقطاعاً: تبقى لحارس الأداء");
+assert.match(libCode, /function ConvertTo-AmeenSafeLogText/);
 assert.match(agentCode, /\$RpcName = "apply_ameen_invoice_events"/, "الوكيل يكتب عبر الدالة المقترحة وحدها");
 assert.match(agentCode, /\/rest\/v1\/rpc\//);
 assert.match(libCode, /if \(-not \$SendRequested\) \{ return \$false \}/, "لا إرسال بلا -Send");
@@ -298,8 +358,9 @@ const walk = (dir) => {
     if (entry.isDirectory()) { if (!["node_modules", ".git", "tests"].includes(entry.name)) walk(rel); continue; }
     if (!/\.(ps1|psm1|vbs|cmd|bat|json|js|mjs|yml|yaml)$/.test(entry.name)) continue;
     const relPosix = rel.split(path.sep).join("/");
-    // الوكيل ومكتبته، وفحوص scripts/check*.mjs (تقرأ الملفات ولا تشغّلها — نفس استثناء writeScan في البوابة).
-    if ([agentRel, libRel].includes(relPosix) || /^scripts\/check[^/]*\.mjs$/.test(relPosix)) continue;
+    // الوكيل ومكتبته، والمراقب (يذكر اسمه ليتعرّف على عمليته فقط — حارسه في القسم ٤)، وفحوص scripts/check*.mjs
+    // (تقرأ الملفات ولا تشغّلها — نفس استثناء writeScan في البوابة).
+    if ([agentRel, libRel, "tools/ameen-invoice-agent-monitor.ps1"].includes(relPosix) || /^scripts\/check[^/]*\.mjs$/.test(relPosix)) continue;
     if (readFileSync(path.join(root, rel), "utf8").includes("ameen-invoice-event-agent")) runners.push(rel);
   }
 };
@@ -365,5 +426,36 @@ if (pwshProbe.status !== 0) {
   const m = psText.match(/Ameen invoice events: (\d+) PASS, (\d+) FAIL/);
   assert.ok(m && Number(m[2]) === 0 && Number(m[1]) >= 170, "نتيجة اختبار PowerShell غير متوقعة");
   console.log(`  ✓ اختبار PowerShell (${pwshProbe.stdout.trim()}): ${m[1]} تأكيداً`);
+}
+
+// ── ٤) مراقب الوكيل المستقل (تنبيه انقطاع SQL الطويل، شرط المالك 2026-10-26) ────────────────────
+const monitorRel = "tools/ameen-invoice-agent-monitor.ps1";
+const monitor = read(monitorRel);
+assert.match(monitor, /\$script:EventType = 'invoice_agent'/, "المراقب يرسل بنوع invoice_agent");
+assert.match(monitor, /\[int\]\$ThresholdMinutes = 10,/, "عتبة الانقطاع 10 دقائق افتراضياً");
+assert.match(monitor, /if \(\$out -match 'TELEGRAM-NOTIFY OK'\)/, "التنبيه واصل فقط بسطر TELEGRAM-NOTIFY OK");
+assert.doesNotMatch(monitor, /SqlConnection|Invoke-Sqlcmd|EnvFile|Get-Content|GetEnvironmentVariable|Invoke-RestMethod/,
+  "المراقب لا يتصل بـSQL ولا يقرأ الأسرار ولا يتصل بالشبكة بنفسه");
+assert.doesNotMatch(monitor, /Stop-ScheduledTask|Start-ScheduledTask|Stop-Process|Register-ScheduledTask|Remove-Item/,
+  "المراقب لا يوقف الوكيل ولا يغيّر المهام ولا يحذف شيئاً");
+assert.deepEqual(monitor.split("\n").filter((l) => l.includes("ameen-invoice-event-agent")).map((l) => l.trim().slice(0, 40)),
+  ["if ($p.CommandLine -match 'ameen-invoice"], "المراقب يذكر الوكيل في سطر التعرّف على عمليته وحده، ولا يشغّله");
+// كل نص يُرسل يُبنى من نصوص ثابتة وأوقات ومدد: نص السجل الخام لا يدخل أي تنبيه.
+assert.doesNotMatch(monitor, /\$msg\b[^\n]*-f|-f[^\n]*\$msg\b/, "نص سطر السجل لا يدخل نص تنبيه");
+for (const marker of ["DISCONNECTED:", "RECONNECTING:", "RECOVERED:", "GAVE_UP:", "FATAL:", "بدء الوكيل:", "انتهى الوكيل:", "رفض: مثيل آخر"]) {
+  assert.ok(monitor.includes(`'${marker}`), `المراقب يتعرّف على ${marker}`);
+  assert.ok(agent.includes(marker) || lib.includes(marker), `علامة ${marker} ما زالت يكتبها الوكيل أو مكتبته (عقد السجل)`);
+}
+if (pwshProbe.status === 0) {
+  const pm = spawnSync("pwsh", ["-NoProfile", "-File", path.join(root, "tools/tests/Test-AmeenInvoiceAgentMonitor.ps1")], { encoding: "utf8" });
+  const pmText = output(pm);
+  const mm = pmText.match(/PASSED: (\d+) assertions/);
+  if (pm.status !== 0 || !mm) {
+    console.error(pmText);
+    console.error("check-ameen-invoice-events: agent monitor PowerShell test failed");
+    process.exit(pm.status || 1);
+  }
+  assert.ok(Number(mm[1]) >= 56, `عدد تأكيدات مراقب الوكيل أقل من المتوقع (${mm[1]})`);
+  console.log(`  ✓ مراقب الوكيل (محاكاة الانقطاع والتوقف وفشل Telegram): ${mm[1]} تأكيداً`);
 }
 console.log("check-ameen-invoice-events: اجتاز الفحص.");
