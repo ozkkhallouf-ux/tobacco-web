@@ -24,18 +24,36 @@ jobs:
 
       # Postgres محلي لهذه الوظيفة: فحص التنظيف يتصل بمقبس peer عبر sudo
       # عندما لا يُضبط PGHOST. وظيفتا validate وpages تستخدمان خدمة postgres:16.
+      #
+      # PostgreSQL 16 مثبّت مسبقاً في صورة ubuntu-24.04 (خادم وعميل وcontrib). كان
+      # `apt-get install postgresql postgresql-client postgresql-contrib` لا يضيف إلا الحزم
+      # الوصفية الثلاث (16+257build1.1، 52KB، كلها all) بعد `apt-get update` يكلّف 15–40s —
+      # ثابت في سجل 2026-10-26: "0 upgraded, 3 newly installed". فالخادم نفسه لم يتغيّر.
+      # التثبيت يبقى احتياطاً إن غاب postgresql-16 عن صورة مستقبلية، والتحقق أدناه يُفشل
+      # الوظيفة بدل أن تختلف البيئة بصمت.
       - name: Start throwaway Postgres for the warehouse prune test
         run: |
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql postgresql-client postgresql-contrib
+          set -euo pipefail
+          if ! dpkg-query -W -f='${Status}' postgresql-16 2>/dev/null | grep -q 'install ok installed' \
+            || ! command -v pg_lsclusters >/dev/null; then
+            echo "postgresql-16 غير مثبّت مسبقاً على العدّاء — تثبيت احتياطي من apt"
+            sudo apt-get update
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql postgresql-client postgresql-contrib
+          fi
+          dpkg-query -W postgresql-16 postgresql-client-16
           if ! pg_isready -q; then
             ver="$(pg_lsclusters --no-header | awk 'NR==1 { print $1 }')"
             sudo pg_ctlcluster "$ver" main start
           fi
-          sudo -u postgres psql -d postgres -c 'select 1'
+          sudo -u postgres psql -d postgres -v ON_ERROR_STOP=1 -c 'select version()'
+          # البيئة التي تفترضها الفحوص: الخادم 16، وpgcrypto وdblink متاحان.
+          test "$(sudo -u postgres psql -d postgres -tAc "select current_setting('server_version_num')::int / 10000")" = 16
+          test "$(sudo -u postgres psql -d postgres -tAc "select count(*) from pg_available_extensions where name in ('pgcrypto', 'dblink')")" = 2
 
+      # نفس `npx playwright install --with-deps chromium` حرفياً، من كاش موثوق — راجع
+      # .github/actions/install-playwright-chromium/action.yml.
       - name: Install Playwright Chromium browser
-        run: npx playwright install --with-deps chromium
+        uses: ./.github/actions/install-playwright-chromium
 
       - name: Run project check
         run: npm run check
@@ -75,8 +93,10 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # نفس `npx playwright install --with-deps chromium` حرفياً، من كاش موثوق — راجع
+      # .github/actions/install-playwright-chromium/action.yml.
       - name: Install Playwright Chromium browser
-        run: npx playwright install --with-deps chromium
+        uses: ./.github/actions/install-playwright-chromium
 
       - name: Run critical journeys
         run: npm run check:critical
