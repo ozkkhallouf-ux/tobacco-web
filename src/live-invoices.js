@@ -279,7 +279,7 @@
       ...(report || { source: "ameen_customer_invoices" }),
       items,
       summary: {
-        ...(report?.summary || {}),
+        ...report?.summary,
         customers: items.length,
         bills,
         liveInvoices: stats.applied,
