@@ -13,7 +13,7 @@ worker.js  ── PDF بالقالب الرسمي A4 (tools/ameen-autoprint/invo
    │ طابور دائم على القرص: rendered → uploaded → notified
    ▼
 Google Drive (ozkkhallouf@gmail.com وحده، نطاق drive.file)
-   OZK Tobacco Archive / فواتير مبيعات الجملة / 2026 / 11 / <الزبون [guid8]> / فاتورة جملة - رقم N - YYYY-MM-DD - guid8.pdf
+   OZK Tobacco Archive / فواتير مبيعات الجملة / 2026 / 11 / <الزبون [guid8]> / <اسم الزبون> - فاتورة رقم N - DD-MM-YYYY.pdf  (التعديل: … - V2.pdf)
    ▼
 Edge Function document-archive-notify  ── sendDocument إلى bot_config.owner_chat_id وحده (PDF + رابط Drive الخاص)
 ```

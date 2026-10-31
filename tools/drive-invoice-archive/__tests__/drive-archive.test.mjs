@@ -186,7 +186,7 @@ test("التجربة المحصورة: فاتورة واحدة فقط تُرفع
   t.advance(t.cfg.reconcileMinutes * 60);
   const out = await t.cycle();
   assert.deepEqual(out.pilot, { invoices: 1, expiresAt: t.cfg.pilotExpiresAt });
-  assert.deepEqual(t.drive.pdfFiles().map((f) => f.name), ["فاتورة جملة - رقم 1100 - 2026-10-24 - 11111111 - V1.pdf"]);
+  assert.deepEqual(t.drive.pdfFiles().map((f) => f.name), ["زبون تجريبي - فاتورة رقم 1100 - 24-10-2026.pdf"]);
   assert.equal(t.edgeFake.state.sent.length, 1, "إشعار واحد للفاتورة المحصورة");
   assert.equal(t.store.versionsOf("wholesale_invoice", G3).length, 0, "فاتورة جديدة خارج الحصر لا تُرصد");
   assert.equal(t.store.state.hints[G3], undefined, "ولا تُعلَّم ملحوظة");
@@ -215,9 +215,33 @@ test("التسمية: مسار المجلدات بالنوع/السنة/الشه
   assert.deepEqual(plan.map((p) => p.name), ["OZK Tobacco Archive", "فواتير مبيعات الجملة", "2026", "10", "أبو علي المزة [aaaaaaaa]"]);
   const other = naming.folderPlan({ ...job, customerGuid: CUST_B });
   assert.notEqual(plan[4].key, other[4].key, "زبونان بالاسم نفسه ⇒ مجلدان");
-  assert.equal(naming.fileName(job), "فاتورة جملة - رقم 1234 - 2026-10-24 - 11111111 - V1.pdf");
-  assert.equal(naming.fileName({ ...job, version: 2 }), "فاتورة جملة - رقم 1234 - 2026-10-24 - 11111111 - V2.pdf");
+  assert.equal(naming.fileName(job), "أبو علي المزة - فاتورة رقم 1234 - 24-10-2026.pdf");
+  assert.equal(naming.fileName({ ...job, version: 2 }), "أبو علي المزة - فاتورة رقم 1234 - 24-10-2026 - V2.pdf");
   assert.equal(naming.safeSegment("a‮b\\c:d*e"), "a b c d e");
+});
+
+test("التسمية: اسم الزبون الحقيقي أولاً ثم رقم الفاتورة وتاريخها (dd-mm-yyyy)", () => {
+  const job = { docType: "wholesale_invoice", date: "2026-10-31", customerName: "مركز الخيال مساكن برزة", customerGuid: CUST_B, number: 1151, sourceGuid: G1, version: 1 };
+  assert.equal(naming.fileName(job), "مركز الخيال مساكن برزة - فاتورة رقم 1151 - 31-10-2026.pdf");
+  assert.equal(naming.displayDate("2026-01-05"), "05-01-2026");
+  // محارف ممنوعة على Windows/Drive، أسطر جديدة، ومحارف اتجاه داخل الاسم ⇒ مسافات تُطوى.
+  const dirty = naming.fileName({ ...job, customerName: "  محل\n«النور»: دمشق/المزة*?<>|\u202e‏  " });
+  assert.equal(dirty, "محل «النور» دمشق المزة - فاتورة رقم 1151 - 31-10-2026.pdf");
+  assert.doesNotMatch(dirty.replace(/\.pdf$/, ""), /[\\/:*?"<>|\u0000-\u001f\u200e\u200f\u202a-\u202e\u2066-\u2069]/);
+  // اسم عربي طويل جداً ⇒ يُقصّ عند 80 محرفاً (لا بايتاً) ويبقى الرقم والتاريخ كاملين.
+  const longName = "مؤسسة ".repeat(40);
+  const long = naming.fileName({ ...job, customerName: longName });
+  const [shown, ...rest] = long.split(" - ");
+  assert.ok(Array.from(shown).length <= 80, "الاسم ≤ 80 محرفاً");
+  assert.ok(longName.startsWith(shown), "قصّ من النهاية، لا تشويه");
+  assert.deepEqual(rest, ["فاتورة رقم 1151", "31-10-2026.pdf"]);
+  assert.ok(long.length <= 180, "ضمن حد اسم المرفق في الدالة");
+  // بلا اسم ⇒ نص صريح بدل فراغ؛ بلا رقم ⇒ «بلا-رقم».
+  assert.equal(naming.fileName({ ...job, customerName: " " }), "زبون غير محدد - فاتورة رقم 1151 - 31-10-2026.pdf");
+  assert.equal(naming.fileName({ ...job, number: "" }), "مركز الخيال مساكن برزة - فاتورة رقم بلا-رقم - 31-10-2026.pdf");
+  assert.throws(() => naming.fileName({ ...job, date: "31/10/2026" }), /تاريخ مستند غير صالح/);
+  // الاسم لا يحمل الهوية: فاتورتان مختلفتان بالاسم نفسه تبقيان مهمتين مختلفتين (ozkJobId).
+  assert.equal(naming.fileName({ ...job, sourceGuid: G2 }), naming.fileName(job));
 });
 
 // ─── الدورة الكاملة ───
@@ -244,7 +268,7 @@ test("live: رفع خاص إلى المسار الصحيح ثم إشعار ال�
   assert.equal(job.status, "notified");
   const pdfs = t.drive.pdfFiles();
   assert.equal(pdfs.length, 1);
-  assert.equal(t.drive.pathOf(pdfs[0]), "OZK Tobacco Archive/فواتير مبيعات الجملة/2026/10/محل الأمانة [aaaaaaaa]/فاتورة جملة - رقم 501 - 2026-10-24 - 11111111 - V1.pdf");
+  assert.equal(t.drive.pathOf(pdfs[0]), "OZK Tobacco Archive/فواتير مبيعات الجملة/2026/10/محل الأمانة [aaaaaaaa]/محل الأمانة - فاتورة رقم 501 - 24-10-2026.pdf");
   assert.equal(pdfs[0].shared, false);
   assert.equal(pdfs[0].appProperties.ozkJobId, job.jobId);
   assert.ok(!t.drive.calls.some((c) => /permissions/.test(c.url)), "لا مشاركة إطلاقاً");
@@ -256,7 +280,10 @@ test("live: رفع خاص إلى المسار الصحيح ثم إشعار ال�
     assert.ok(plain.includes(part), `الوصف يتضمن ${part}`);
   }
   assert.ok(msg.caption.length <= 1024);
-  assert.equal(msg.fileName, "فاتورة جملة - رقم 501 - 2026-10-24 - 11111111 - V1.pdf");
+  assert.equal(msg.fileName, "محل الأمانة - فاتورة رقم 501 - 24-10-2026.pdf");
+  const [title, status] = plain.split("\n");
+  assert.equal(title, "🧾 محل الأمانة - فاتورة رقم 501 - 24-10-2026", "عنوان الإشعار بتنسيق اسم الملف");
+  assert.equal(status, "فاتورة جملة جديدة — أرشفة ناجحة");
 });
 
 // المبلغ في الإشعار وتقرير الموقع = «الصافي» المطبوع في الـPDF: Total − الحسم + التدوير (TotalExtra).
@@ -450,9 +477,9 @@ test("تعديل فاتورة مؤرشفة ⇒ نسخة 2 بجانب الأول�
   assert.equal(versions[1].previousJobId, v1.jobId);
   const names = t.drive.pdfFiles().map((f) => f.name).sort();
   assert.deepEqual(names, [
-    "فاتورة جملة - رقم 501 - 2026-10-24 - 11111111 - V1.pdf",
-    "فاتورة جملة - رقم 501 - 2026-10-24 - 11111111 - V2.pdf",
-    "فاتورة جملة - رقم 501 - 2026-10-24 - 11111111 - V3.pdf",
+    "زبون تجريبي - فاتورة رقم 501 - 24-10-2026 - V2.pdf",
+    "زبون تجريبي - فاتورة رقم 501 - 24-10-2026 - V3.pdf",
+    "زبون تجريبي - فاتورة رقم 501 - 24-10-2026.pdf",
   ]);
   assert.ok(Buffer.from(t.drive.files.get(v1.drive.fileId).content).equals(v1Bytes), "النسخة الأولى لم تُمسّ");
   assert.equal(t.edgeFake.state.sent.length, 3);
@@ -460,6 +487,7 @@ test("تعديل فاتورة مؤرشفة ⇒ نسخة 2 بجانب الأول�
   assert.match(caption(0), /فاتورة جملة جديدة/);
   assert.match(caption(0), /الإصدار: V1 — فاتورة جديدة/);
   assert.match(caption(1), /فاتورة جملة معدّلة/);
+  assert.match(caption(1).split("\n")[0], /^✏️ زبون تجريبي - فاتورة رقم 501 - 24-10-2026 - V2$/, "عنوان التعديل يحمل لاحقة النسخة");
   assert.match(caption(1), /الإصدار: V2 — تعديل؛ الإصدار V1 وما قبله محفوظ بلا تغيير/);
   assert.match(caption(2), /V3 — تعديل/);
 });
@@ -975,6 +1003,16 @@ test("دالة الإشعار: لا مستلم من الطلب، ولا رابط
   assert.equal(shared.isPdfBytes(Buffer.from("<html>")), false);
   const long = shared.validateNotifyFields({ ...base, customer_name: "ب".repeat(5000) }).value;
   assert.ok(shared.buildNotifyCaption(long).caption.length <= 1024);
+  // العنوان: الاسم مقصوص عند 80 محرفاً، والرقم والتاريخ كاملان.
+  const strip = globalThis.ozkTelegramFormat.stripBidi;
+  const longTitle = strip(shared.buildNotifyCaption(long).caption.split("\n")[0]);
+  assert.ok(longTitle.endsWith(" - فاتورة رقم 501 - 24-10-2026"), longTitle.slice(-40));
+  assert.ok(Array.from(longTitle).length <= 2 + 80 + 30);
+  const named = strip(shared.buildNotifyCaption(shared.validateNotifyFields({ ...base, customer_name: "مركز الخيال مساكن برزة", doc_number: "1151", doc_date: "2026-10-31" }).value).caption);
+  assert.equal(named.split("\n")[0], "🧾 مركز الخيال مساكن برزة - فاتورة رقم 1151 - 31-10-2026");
+  for (const part of ["الزبون: مركز الخيال مساكن برزة", "رقم المستند: 1151", "التاريخ: 2026-10-31", "المبلغ:", "Google Drive", "https://drive.google.com/file/d/F000000000001xyz/view"]) {
+    assert.ok(named.includes(part), `باقي المعلومات محفوظة: ${part}`);
+  }
   assert.equal(shared.timingSafeEqualText("abc", "abd"), false);
   assert.equal(shared.timingSafeEqualText("", ""), false, "سرّ فارغ لا يطابق");
 });
