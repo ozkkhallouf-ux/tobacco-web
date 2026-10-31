@@ -17,6 +17,7 @@ jobs:
   # ------------------------------------------------------------
   validate-shard:
     name: validate shard ${{ matrix.shard }}/4
+    if: ${{ false }}  # TEMP negative test (PR #408) — سيُعاد فوراً: تخطٍّ متعمَّد
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
