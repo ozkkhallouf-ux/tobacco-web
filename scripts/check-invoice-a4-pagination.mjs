@@ -37,13 +37,16 @@ const NAMES = ["اوسكار طويل", "اوسكار سليم فضي", "جيت�
   "اليغانس طويل فضي", "غلواز كوين أحمر", "غلواز كوين أصفر", "أوريس منغا", "روز طويل فضي", "يونايتد"];
 const LONG = " صنف باسم طويل جداً جداً لاختبار التفاف السطر داخل خلية الجدول عند الطباعة";
 
-function invoice(n, { discount = false, longItems = false, extra = false } = {}) {
+// prices: عمودا سعر الوحدة والإجمالي (خيار عامل الأرشفة وحده) بأعرض أرقام متوقعة.
+function invoice(n, { discount = false, longItems = false, extra = false, prices = false } = {}) {
   return {
     number: 9001, date: "2026-10-25", customer: "زبون اختبار", currencyIso: "USD",
     total: 5538, discount: discount ? 38 : 0, extra: extra ? 0.17 : 0, firstPay: 0, customerBalanceFound: true, customerBalance: 12670,
-    items: Array.from({ length: n }, (_, i) => ({ name: NAMES[i % NAMES.length] + (longItems ? LONG : ""), unit: "كرتونة", qty: (i % 3) + 1 })),
+    items: Array.from({ length: n }, (_, i) => ({ name: NAMES[i % NAMES.length] + (longItems ? LONG : ""), unit: "كرتونة", qty: (i % 3) + 1,
+      ...(prices ? { unitPrice: 12345.678, lineTotal: 123456.789 } : {}) })),
   };
 }
+const htmlFor = (n, opts) => buildInvoiceHtml(invoice(n, opts), { linePrices: Boolean(opts && opts.prices) });
 
 // تيارات محتوى الصفحات بترتيب /Kids (شجرة الصفحات قد تتداخل).
 function pageContents(pdf) {
@@ -77,7 +80,7 @@ const browser = await chromium.launch(process.env.OZK_CHROME_PATH ? { executable
 const page = await browser.newPage();
 async function layout(n, opts, paperKey = "A4") {
   const paper = PAPERS[paperKey];
-  const html = applyPaperCss(buildInvoiceHtml(invoice(n, opts)), paper).replace("</head>", `${MARK_CSS}</head>`);
+  const html = applyPaperCss(htmlFor(n, opts), paper).replace("</head>", `${MARK_CSS}</head>`);
   await page.setContent(html, { waitUntil: "load" });
   await page.evaluate(() => document.fonts.ready);
   const pdf = await page.pdf(pdfOptions(paper));
@@ -109,12 +112,29 @@ try {
   });
   assert.deepEqual(css, { td: "13px", th: "12px", row: "14px", foot: "11px", big: "26px", wrapX: "14px", docX: "22px", repeatHead: "table-header-group" },
     "أحجام الخط والحشوة الأفقية ثابتة، ورأس الجدول thead يتكرر في كل صفحة");
+  // ٢ب) بالأسعار وأسماء طويلة: لا تجاوز لعرض الصفحة، والأرقام لا تلتف، ورأس الجدول يتكرر.
+  for (const paperKey of ["A4", "A5"]) {
+    await page.setContent(applyPaperCss(htmlFor(45, { prices: true, longItems: true }), PAPERS[paperKey]), { waitUntil: "load" });
+    const fit = await page.evaluate(() => ({
+      overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+      tableOverflow: document.querySelector("table").scrollWidth - document.querySelector(".doc").clientWidth,
+      numWrap: [...document.querySelectorAll("td.num")].filter((td) => getComputedStyle(td).whiteSpace !== "nowrap").length,
+      repeatHead: getComputedStyle(document.querySelector("thead")).display,
+      heads: [...document.querySelectorAll("thead th")].map((th) => th.textContent),
+    }));
+    assert.ok(fit.overflow <= 0 && fit.tableOverflow <= 0, `${paperKey} بالأسعار: لا تجاوز للعرض ${JSON.stringify(fit)}`);
+    assert.equal(fit.repeatHead, "table-header-group", `${paperKey} بالأسعار: رأس الجدول يتكرر`);
+    assert.equal(fit.numWrap, 0, `${paperKey} بالأسعار: خلايا الأرقام لا تلتف`);
+    assert.deepEqual(fit.heads, ["#", "الصنف", "الكمية", "سعر الوحدة", "الإجمالي"]);
+  }
   await page.emulateMedia({ media: null });
 
   // ٣) قصيرة وطويلة ومتعددة الصفحات، A4 وA5.
-  // الحسم والتدوير معاً أطول ملخص ممكن (سطرا الحسم والتدوير والصافي).
+  // الحسم والتدوير معاً أطول ملخص ممكن (سطرا الحسم والتدوير والصافي)، ومع عمودي الأسعار أعرض جدول.
   const VARIANTS = [["A4", {}], ["A4", { discount: true }], ["A4", { discount: true, extra: true }], ["A4", { longItems: true }],
-    ["A5", {}], ["A5", { discount: true, extra: true }]];
+    ["A5", {}], ["A5", { discount: true, extra: true }],
+    ["A4", { prices: true }], ["A4", { prices: true, discount: true, longItems: true }], ["A5", { prices: true }],
+    ["A4", { prices: true, discount: true, extra: true, longItems: true }], ["A5", { prices: true, discount: true, extra: true }]];
   for (const [paperKey, opts] of VARIANTS) {
     for (const n of [1, 8, 10, 11, 12, 13, 15, 20, 22, 25, 30, 40, 45, 50, 60]) {
       const pages = await layout(n, opts, paperKey);

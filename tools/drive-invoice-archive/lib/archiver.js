@@ -15,6 +15,7 @@ const { folderPlan, fileName } = require("./naming");
 const { STATUS } = require("./store");
 const { MODES, pilotExpired } = require("./config");
 const { redact } = require("./redact");
+const { priceInvoiceItems } = require("./line-prices");
 
 const DOC_TYPE = "wholesale_invoice";
 // أخطاء تخصّ الاتصال أو الحساب لا المهمة: توقف المرحلة كلها في هذه الدورة بلا عدّ محاولات.
@@ -91,7 +92,10 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
   async function renderInvoice(header, lines, outPath) {
     const balance = await ameen.balance(header.guid);
     const inv = model.buildInvoice(header, lines, balance);
-    const html = template.buildInvoiceHtml(inv);
+    // سعر الوحدة وإجمالي السطر للأرشيف وحده؛ عدم المطابقة ⇒ القالب كما كان + سبب بلا مبالغ.
+    const priced = priceInvoiceItems(inv, lines);
+    if (!priced.ok) emit("line_prices_skipped", { number: header.number, reason: priced.reason });
+    const html = template.buildInvoiceHtml(priced.inv, { linePrices: priced.ok });
     const fontEmbedded = /@font-face\{font-family:"Cairo"/.test(html);
     const result = await renderer.render(html, paper, outPath);
     if (cfg.requireOfficialFont && !(fontEmbedded && result.fontOk)) {

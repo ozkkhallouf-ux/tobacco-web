@@ -21,6 +21,8 @@ const { redact, registerSecret } = require(path.join(dir, "lib", "redact.js"));
 const { assertReadOnlySql } = require(path.join(dir, "..", "manual-a4-print", "lib", "sql-guard.js"));
 const template = require(path.join(dir, "..", "ameen-autoprint", "invoice-html.js"));
 const { paperFor } = require(path.join(dir, "..", "manual-a4-print", "lib", "paper.js"));
+const model = require(path.join(dir, "..", "manual-a4-print", "lib", "invoice-model.js"));
+const { priceInvoiceItems } = require(path.join(dir, "lib", "line-prices.js"));
 
 const G1 = "11111111-1111-4111-8111-111111111111";
 const G2 = "22222222-2222-4222-8222-222222222222";
@@ -1072,6 +1074,145 @@ test("سجلات دورة كاملة بأخطاء لا تحمل رمز التح�
   assert.ok(!text.includes("1//refresh-token") && !text.includes("GOCSPX-test"));
 });
 
+// ─── سعر الوحدة وإجمالي السطر (للأرشيف وحده) ───
+// سطر بالعلبة (Unity=1) وسطر بالكرتونة (Unity=2، 50 علبة): Qty بالعلبة دائماً، Price بوحدة الإدخال.
+const PACK = fakes.line({ item_name: "صنف بالعلبة", input_unit: 1, qty: 30, price: 1.5, line_guid: "eeeeeeee-0000-4000-8000-0000000000a1" });
+const CARTON = fakes.line({ item_name: "صنف بالكرتونة", input_unit: 2, unit2_fact: 50, qty: 100, price: 286, line_guid: "eeeeeeee-0000-4000-8000-0000000000a2" });
+
+function headerRow(patch = {}) {
+  return { invoice_guid: G1, invoice_number: 777, invoice_date: "2026-10-24", type_guid: fakes.WHOLESALE, is_posted: 1, customer_name: "زبون اختبار",
+    total: 617, discount: 0, first_pay: 0, currency_val: 1, currency_iso: "USD", line_count: 2, ...patch };
+}
+
+function pricedFor(rows, patch) {
+  const header = model.headerFromRow(headerRow(patch), DEFAULTS);
+  return priceInvoiceItems(model.buildInvoice(header, rows, 250), rows);
+}
+
+test("أسعار الأسطر: القاعدة المعتمدة Price×Qty÷معامل الوحدة، علبة وكرتونة في الفاتورة نفسها، تطابق الإجمالي", () => {
+  const r = pricedFor([PACK, CARTON]); // 1.5×30 + 286×100÷50 = 45 + 572 = 617
+  assert.equal(r.ok, true, r.reason);
+  assert.deepEqual(r.inv.items.map((i) => [i.unit, i.qty, i.unitPrice, i.lineTotal]), [["علبة", 30, 1.5, 45], ["كرتونة", 2, 286, 572]]);
+  // الحسم والمدفوع والعملة كما في الرأس بلا مساس.
+  const d = pricedFor([PACK, CARTON], { discount: 17, first_pay: 100 });
+  assert.equal(d.ok, true);
+  assert.deepEqual([d.inv.total, d.inv.discount, d.inv.firstPay, d.inv.currencyIso], [617, 17, 100, "USD"]);
+});
+
+test("أسعار الأسطر: عملة بسعر صرف ≠ 1 تُقسم كالرأس تماماً", () => {
+  // المخزَّن بعملة الأساس: الإجمالي 6170 وCurrencyVal=10 ⇒ المعروض 617.
+  const rows = [{ ...PACK, price: 15 }, { ...CARTON, price: 2860 }];
+  const r = pricedFor(rows, { total: 6170, currency_val: 10, currency_iso: "SYP" });
+  assert.equal(r.ok, true, r.reason);
+  assert.deepEqual(r.inv.items.map((i) => [i.unitPrice, i.lineTotal]), [[1.5, 45], [286, 572]]);
+  assert.equal(r.inv.total, 617);
+});
+
+test("أسعار الأسطر: فرق التقريب لخانتين مقبول، وأي فرق أكبر ⇒ لا أسعار بسبب total_mismatch", () => {
+  const near = pricedFor([{ ...PACK, price: 1.50013 }, CARTON]); // 617.0039 مقابل 617.00
+  assert.equal(near.ok, true, "فرق 0.004 من تقريب الرأس لخانتين");
+  const off = pricedFor([PACK, CARTON], { total: 617.02 });
+  assert.equal(off.ok, false);
+  assert.equal(off.reason, "total_mismatch");
+  assert.equal(off.inv.items.some((i) => "unitPrice" in i), false, "لا أسعار في الفاتورة الراجعة");
+});
+
+test("أسعار الأسطر: معامل مفقود أو وحدة مجهولة أو سطر مخفي ⇒ لا أسعار، بلا تخمين", () => {
+  assert.equal(pricedFor([PACK, { ...CARTON, unit2_fact: 0 }]).reason, "unit_factor_missing");
+  assert.equal(pricedFor([PACK, { ...CARTON, input_unit: 7 }]).reason, "unit_factor_missing");
+  assert.equal(pricedFor([PACK, { ...CARTON, price: "x" }]).reason, "invalid_number");
+  // سطر بلا اسم لا يُعرض لكنه في الإجمالي ⇒ المعروض لا يطابق ⇒ لا أسعار.
+  assert.equal(pricedFor([PACK, CARTON, { ...PACK, item_name: "", qty: 2 }], { total: 620 }).reason, "total_mismatch");
+  assert.equal(pricedFor([], { total: 0 }).reason, "no_lines");
+});
+
+test("القالب المشترك: بلا الخيار الناتج حرفياً كما هو للطباعة التلقائية واليدوية A4", () => {
+  const header = model.headerFromRow(headerRow({ discount: 17, first_pay: 100 }), DEFAULTS);
+  const plain = model.buildInvoice(header, [PACK, CARTON], 250);
+  const priced = priceInvoiceItems(plain, [PACK, CARTON]).inv;
+  const base = template.buildInvoiceHtml(plain);
+  assert.equal(template.buildInvoiceHtml(plain, {}), base);
+  assert.equal(template.buildInvoiceHtml(plain, { linePrices: false }), base);
+  assert.equal(template.buildInvoiceHtml(plain, { linePrices: true }), base, "الخيار بلا أسعار محسوبة لا يغيّر شيئاً");
+  assert.equal(template.buildInvoiceHtml(priced), base, "حقول الأسعار وحدها بلا الخيار لا تغيّر شيئاً");
+  assert.equal(template.buildInvoiceHtml(priced, { linePrices: "yes" }), base, "الخيار صريح true فقط");
+  assert.doesNotMatch(base, /سعر الوحدة/);
+  // الطباعة اليدوية والتلقائية تستدعيان buildInvoiceHtml(inv) بمعامل واحد فقط.
+  for (const f of ["../manual-a4-print/server.js", "../ameen-autoprint/watcher.js"]) {
+    const src = fs.readFileSync(path.join(dir, f), "utf8");
+    assert.match(src, /buildInvoiceHtml\(inv\);/, `${f}: الاستدعاء بلا خيار`);
+    assert.doesNotMatch(src, /linePrices/, `${f}: لا يطلب الأسعار`);
+  }
+});
+
+test("القالب بالخيار: عمودا سعر الوحدة والإجمالي بعملة الفاتورة، وسطر الإجمالي يمتد على 4 أعمدة", () => {
+  const header = model.headerFromRow(headerRow(), DEFAULTS);
+  const priced = priceInvoiceItems(model.buildInvoice(header, [PACK, CARTON], 250), [PACK, CARTON]).inv;
+  const html = template.buildInvoiceHtml(priced, { linePrices: true });
+  assert.match(html, /<th>الكمية<\/th><th class="num">سعر الوحدة<\/th><th class="num">الإجمالي<\/th><\/tr><\/thead>/);
+  assert.match(html, /<td>2 كرتونة<\/td><td class="num"><span dir="ltr">\$ 286<\/span><\/td><td class="num"><span dir="ltr">\$ 572<\/span><\/td>/);
+  assert.match(html, /<td>30 علبة<\/td><td class="num"><span dir="ltr">\$ 1.5<\/span><\/td><td class="num"><span dir="ltr">\$ 45<\/span><\/td>/);
+  assert.match(html, /<td colspan="4">إجمالي الفاتورة<\/td>/);
+  assert.match(html, /tr \{ break-inside:avoid; \}/, "السطر لا ينشطر بين صفحتين");
+  const syp = template.buildInvoiceHtml({ ...priced, currencyIso: "SYP" }, { linePrices: true });
+  assert.match(syp, /<td class="num"><span dir="ltr">286<\/span> ل.س<\/td>/);
+});
+
+test("الأرشيف: مطابقة ⇒ PDF بالأسعار؛ عدم مطابقة ⇒ القالب القديم وسبب في السجل بلا مبالغ ولا أسماء", async () => {
+  const t = await setup({ mode: "dry-run" });
+  const htmls = new Map();
+  const real = t.renderer.render;
+  t.renderer.render = async (html, paper, out) => { htmls.set(/فاتورة رقم (\d+)/.exec(html)[1], html); return real(html, paper, out); };
+  t.ameen.add({ guid: G1, number: 601, total: 617, lines: [PACK, CARTON] });
+  t.ameen.add({ guid: G2, number: 602, total: 999, lines: [PACK, CARTON] });
+  t.advance(300);
+  await t.cycle();
+  assert.equal(t.store.jobs().length, 2);
+  assert.match(htmls.get("601"), /سعر الوحدة/);
+  assert.doesNotMatch(htmls.get("602"), /سعر الوحدة/);
+  assert.match(htmls.get("602"), /<th>الكمية<\/th><\/tr><\/thead>/, "القالب القديم كما هو");
+  const skipped = t.logs.filter((l) => l.event === "line_prices_skipped");
+  assert.equal(skipped.length, 1);
+  assert.deepEqual(Object.keys(skipped[0]).sort(), ["at", "event", "number", "reason"]);
+  assert.deepEqual([skipped[0].number, skipped[0].reason], [602, "total_mismatch"]);
+});
+
+// الأسعار مع الحسم والتدوير (#402) ومبلغ الإشعار (#407): الأسطر تطابق Total (البضاعة) وحده،
+// والملخص Total − الحسم + التدوير يبقى كما هو، والمبلغ = الصافي، والبصمة لا تتأثر بالقالب.
+test("الأرشيف بالأسعار + حسم + تدوير: الأعمدة صحيحة، والصافي والمتبقي والمبلغ كما هي، والبصمة ومنع التكرار بلا تغيير", async () => {
+  const { invoiceVersionHash } = require(path.join(dir, "lib", "fingerprint.js"));
+  const t = await setup();
+  const htmls = new Map();
+  const real = t.renderer.render;
+  t.renderer.render = async (html, paper, out) => { htmls.set(/فاتورة رقم (\d+)/.exec(html)[1], html); return real(html, paper, out); };
+  // 617 − 17 + 0.4 = 600.4؛ المدفوع 100 ⇒ المتبقي 500.4. وفاتورة بتدوير سالب: 617 − 0.4 = 616.6.
+  t.ameen.add({ guid: G1, number: 611, total: 617, discount: 17, totalExtra: 0.4, firstPay: 100, lines: [PACK, CARTON] });
+  t.ameen.add({ guid: G2, number: 612, total: 617, totalExtra: -0.4, lines: [PACK, CARTON] });
+  t.advance(300);
+  await t.cycle();
+  const text = (n) => htmls.get(n).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+  const a = text("611");
+  assert.match(htmls.get("611"), /<td>2 كرتونة<\/td><td class="num"><span dir="ltr">\$ 286<\/span><\/td><td class="num"><span dir="ltr">\$ 572<\/span><\/td>/);
+  assert.match(htmls.get("611"), /<td>30 علبة<\/td><td class="num"><span dir="ltr">\$ 1.5<\/span><\/td><td class="num"><span dir="ltr">\$ 45<\/span><\/td>/);
+  assert.ok(a.includes("إجمالي الفاتورة $ 617"), "إجمالي البضاعة = مجموع الأسطر");
+  assert.match(a, /الحسم \$ 17 تدوير \$ 0\.4 الصافي \$ 600\.4 المدفوع \$ 100 المتبقي من هذه الفاتورة \$ 500\.4/);
+  assert.match(text("612"), /تدوير \$ -0\.4 الصافي \$ 616\.6/);
+  assert.match(htmls.get("612"), /سعر الوحدة/);
+  const byNumber = (n) => t.store.jobs().find((j) => j.number === n);
+  assert.equal(byNumber(611).amount, 600.4, "المبلغ = الصافي المطبوع");
+  assert.equal(byNumber(612).amount, 616.6);
+  for (const [guid, n] of [[G1, 611], [G2, 612]]) {
+    const row = (await t.ameen.api.changedInvoices({ since: "1900-01-01T00:00:00", dateFrom: "2026-10-01", onlyGuid: guid }))[0];
+    assert.equal(byNumber(n).versionHash, invoiceVersionHash(row, await t.ameen.api.lines(guid)), `${n}: البصمة من الصف الخام`);
+    assert.equal(t.edgeFake.state.items.get(byNumber(n).jobId).amount, byNumber(n).amount, `${n}: سجل الإشعار`);
+  }
+  const sent = t.edgeFake.state.sent.length;
+  t.advance(t.cfg.reconcileMinutes * 60);
+  await t.cycle();
+  assert.equal(t.store.jobs().length, 2, "لا إصدار جديد");
+  assert.equal(t.edgeFake.state.sent.length, sent, "لا إشعار مكرر");
+});
+
 // ─── PDF حقيقي بالقالب الرسمي وخط Cairo (Chromium عبر Playwright إن وُجد) ───
 function playwright() {
   try { return require("playwright"); } catch { return null; }
@@ -1106,6 +1247,49 @@ test("PDF حقيقي: القالب الرسمي A4 وخط Cairo مضمَّن", {
     assert.ok(pdf.subarray(0, 5).equals(Buffer.from("%PDF-")));
     assert.match(pdf.toString("latin1"), /Cairo/, "الخط مضمَّن في الملف");
     assert.ok(pdf.length > 8 * 1024);
+  } finally {
+    await browser.close();
+  }
+});
+
+test("PDF حقيقي بالأسعار: 45 سطراً بوحدتين مختلفتين + حسم + تدوير، Cairo مضمَّن، عدة صفحات", { skip: !playwright() && "Playwright غير متاح" }, async () => {
+  const pw = playwright();
+  const browser = await pw.chromium.launch();
+  try {
+    let fontOk = false;
+    let pages = 0;
+    let html = "";
+    const renderer = {
+      async render(h, _paper, outPath) {
+        html = h;
+        const page = await browser.newPage();
+        await page.setContent(h, { waitUntil: "load" });
+        await page.evaluate(() => document.fonts.ready);
+        fontOk = await page.evaluate(() => document.fonts.check("700 16px Cairo") && [...document.fonts].some((f) => f.family.replace(/"/g, "") === "Cairo" && f.status === "loaded"));
+        const pdf = await page.pdf({ format: "A4", printBackground: true, margin: { top: "12mm", bottom: "12mm", left: "12mm", right: "12mm" }, path: outPath });
+        await page.close();
+        pages = (pdf.toString("latin1").match(/\/Type\s*\/Page(?![s\w])/g) || []).length;
+        return { fontOk, pages, bytes: pdf.length };
+      },
+    };
+    const lines = Array.from({ length: 45 }, (_, i) => ({ ...(i % 2 ? CARTON : PACK), item_name: `صنف ${i + 1}`, line_guid: `eeeeeeee-0000-4000-8000-${String(i).padStart(12, "0")}` }));
+    const total = lines.reduce((s, l) => s + (l.price * l.qty) / (l.input_unit === 2 ? l.unit2_fact : 1), 0); // 23×45 + 22×572
+    const dataDir = tmp();
+    const ameen = fakes.createFakeAmeen();
+    ameen.add({ guid: G1, number: 778, customer: "زبون اختبار", total, discount: 10, totalExtra: 0.25, lines });
+    ameen.setNow("2026-10-24T12:10:00");
+    const store = createStore(dataDir);
+    const cfg = validate({ ...DEFAULTS, archiveFrom: "2026-10-01", dataDir });
+    const archiver = createArchiver({ cfg, store, ameen: ameen.api, renderer, template, paper: paperFor("A4", { papers: ["A4"] }), getDrive: () => null, edge: null, log: () => {} });
+    await archiver.cycle();
+    const [job] = store.jobs();
+    assert.ok(job, "مهمة واحدة");
+    assert.equal(fontOk, true, "Cairo محمَّل");
+    assert.ok(pages >= 2, `عدة صفحات (${pages})`);
+    assert.equal((html.match(/<td class="num">/g) || []).length, 90, "سعر وإجمالي لكل سطر من 45");
+    assert.equal(job.amount, Math.round((total - 10 + 0.25) * 1000) / 1000, "المبلغ = الصافي");
+    const pdf = fs.readFileSync(store.pdfPath(job.jobId));
+    assert.match(pdf.toString("latin1"), /Cairo/, "الخط مضمَّن في الملف");
   } finally {
     await browser.close();
   }
