@@ -574,7 +574,25 @@ try {
   Write-Host ("  perf: full save {0:n0} ms, watermark save avg {1:n1} ms, median {2:n1} ms (2000 bills)" -f $fullMs, $wmAvg, $wmMedian)
   Assert 'performance: 20 unchanged cycles never rewrite state.json' ((Get-FileHash -LiteralPath $statePath -Algorithm SHA256).Hash -eq $stateHash)
   Assert 'performance: watermark save stays well under the 500ms cycle budget' ($wmAvg -lt 100)
-  Assert 'performance: watermark save is at least 10x cheaper than a full save' (($wmMedian * 10) -lt [math]::Max($fullMs, 1))
+
+  # ما يكتبه كل حفظ وكلفة عمل الكود نفسه، بمعزل عن قرص العدّاء: يُعترض Write-AmeenAtomicFile بنسخة
+  # تسجّل الملف والحجم ولا تلمس القرص. زمن fsync (عشرات ms على عدّاء ubuntu) يدخل في الحفظين معاً،
+  # فقياس النسبة على القرص الحقيقي كان يقيس القرص لا الكود (فشل run 41192566439: full 425، وسيط 74.5).
+  $realAtomicWrite = ${function:Write-AmeenAtomicFile}
+  $atomicWrites = New-Object System.Collections.Generic.List[object]
+  function Write-AmeenAtomicFile { param([string]$Path, [AllowEmptyString()][string]$Content) $atomicWrites.Add([pscustomobject]@{ Name = [IO.Path]::GetFileName($Path); Bytes = [Text.Encoding]::UTF8.GetByteCount($Content) }) }
+  try {
+    [void](Save-AmeenInvoiceWatermark -Dir $pbox -State $ps); $wmWrites = $atomicWrites.ToArray(); $atomicWrites.Clear()
+    Save-AmeenInvoiceState -Dir $pbox -State $ps; $fullWrites = $atomicWrites.ToArray(); $atomicWrites.Clear()
+    $cpuFull = @(); for ($k = 1; $k -le 5; $k++) { $sw.Restart(); Save-AmeenInvoiceState -Dir $pbox -State $ps; $cpuFull += $sw.Elapsed.TotalMilliseconds }
+    $cpuWm = @(); for ($k = 1; $k -le 21; $k++) { $sw.Restart(); [void](Save-AmeenInvoiceWatermark -Dir $pbox -State $ps); $cpuWm += $sw.Elapsed.TotalMilliseconds }
+  } finally { ${function:Write-AmeenAtomicFile} = $realAtomicWrite }
+  $cpuFullMin = ($cpuFull | Measure-Object -Minimum).Minimum; $cpuWmMedian = @($cpuWm | Sort-Object)[10]
+  Write-Host ("  perf (no disk): full save min {0:n1} ms, watermark save median {1:n3} ms; bytes {2} vs {3}" -f $cpuFullMin, $cpuWmMedian, $fullWrites[0].Bytes, $wmWrites[0].Bytes)
+  Assert 'performance: watermark save writes watermark.json only, never state.json' ($wmWrites.Count -eq 1 -and $wmWrites[0].Name -eq "watermark.json")
+  Assert 'performance: full save writes state.json then watermark.json' ($fullWrites.Count -eq 2 -and $fullWrites[0].Name -eq "state.json" -and $fullWrites[1].Name -eq "watermark.json")
+  Assert 'performance: watermark payload stays constant-size with 2000 bills' ($wmWrites[0].Bytes -lt 256 -and ($wmWrites[0].Bytes * 1000) -lt $fullWrites[0].Bytes)
+  Assert 'performance: watermark save is at least 10x cheaper than a full save' (($cpuWmMedian * 10) -lt [math]::Max($cpuFullMin, 1))
 
   # إعادة التشغيل: العلامة الأحدث تُعتمد إن كانت لنفس نسخة الحالة، ولا تُفقد التغييرات
   $rs = Read-AmeenInvoiceState -Dir $pbox
