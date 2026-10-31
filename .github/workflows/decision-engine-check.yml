@@ -10,8 +10,19 @@ permissions:
   contents: read
 
 jobs:
-  validate:
+  # ------------------------------------------------------------
+  # `npm run check` مقسّمة إلى 4 shards متوازية — نفس تصميم check.yml وضماناته
+  # (راجع التعليق هناك). كل shard على عدّاء مستقل بخدمة postgres:16 خاصة به.
+  # الفحص الإلزامي `validate` هو وظيفة التجميع أدناه، باسمها نفسه.
+  # ------------------------------------------------------------
+  validate-shard:
+    name: validate shard ${{ matrix.shard }}/4
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     services:
       postgres:
         image: postgres:16
@@ -47,14 +58,56 @@ jobs:
       # نفس `npx playwright install --with-deps chromium` حرفياً، من كاش موثوق.
       - name: Install Playwright Chromium browser
         uses: ./.github/actions/install-playwright-chromium
-      - name: Run project check
+      - name: Run project check (shard ${{ matrix.shard }}/4)
         env:
           PGHOST: 127.0.0.1
           PGPORT: "5432"
           PGUSER: postgres
           PGPASSWORD: postgres
           PGDATABASE: postgres
-        run: npm run check
+          SHARD: ${{ matrix.shard }}
+        run: npm run check -- --shard "$SHARD/4" --weights scripts/checks.weights.json --report "$RUNNER_TEMP/validate-shard-reports/validate-shard-$SHARD.json"
+      # التقرير يُكتب فقط إن نجحت كل فحوص الـshard؛ غيابه وحده يُفشل التجميع.
+      - name: Upload shard report
+        uses: actions/upload-artifact@v4
+        with:
+          name: validate-shard-report-${{ matrix.shard }}
+          path: ${{ runner.temp }}/validate-shard-reports/validate-shard-${{ matrix.shard }}.json
+          retention-days: 1
+          if-no-files-found: error
+
+  # ------------------------------------------------------------
+  # وظيفة التجميع = الفحص الإلزامي `validate`. `if: always()` كي لا تصير «متخطّاة»
+  # (تُحسب ناجحة) حين تفشل shard أو تُلغى؛ تفشل صراحةً ما لم تنجح الأربعة، وتطابق
+  # تقاريرها مع التقسيم المتوقع، ثم تشغّل الفحوص الساكنة التي كانت بعد npm run check.
+  # ------------------------------------------------------------
+  validate:
+    if: ${{ always() }}
+    needs: [validate-shard]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Require every shard to succeed
+        env:
+          SHARDS_RESULT: ${{ needs.validate-shard.result }}
+        run: |
+          echo "نتيجة الـshards: $SHARDS_RESULT"
+          if [ "$SHARDS_RESULT" != "success" ]; then
+            echo "::error::validate: الـshards لم تنجح كلها (النتيجة: $SHARDS_RESULT) — فشل أو إلغاء أو تخطٍّ أو عدم تنفيذ."
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Download shard reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: validate-shard-report-*
+          path: ${{ runner.temp }}/validate-shard-reports
+          merge-multiple: true
+      - name: Verify every check ran exactly once
+        run: node scripts/verify-check-shards.mjs --dir "$RUNNER_TEMP/validate-shard-reports" --total 4 --weights scripts/checks.weights.json
       - run: node --check src/decision-scoring.js
       - run: node --check src/decision-engine.js
       - run: node --check src/decision-data-bridge.js

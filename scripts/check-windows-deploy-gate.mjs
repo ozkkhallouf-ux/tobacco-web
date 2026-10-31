@@ -89,7 +89,7 @@ ok("كشف الكتابة: قارئ يصير كاتباً يُحجب بلا مو
 
 // Codex P1 #3: عمليات طويلة — خريطة تبعيات صريحة، لا إعادة تشغيل تلقائية.
 const comps = cfg0.longRunningComponents;
-assert.deepEqual(comps.map((c) => c.name), ["TOBACCO Ameen Read Worker", "OZK-AmeenAutoPrint", "OZK-Tobacco-Server (scripts/serve.mjs)"]);
+assert.deepEqual(comps.map((c) => c.name), ["TOBACCO Ameen Read Worker", "OZK-AmeenAutoPrint", "OZK-Tobacco-Server (scripts/serve.mjs)", "TOBACCO Ameen Invoice Agent"]);
 for (const c of comps) for (const f of c.files) assert.ok(existsSync(path.join(root, f)), `ملف مُدرج موجود: ${f}`);
 const byName = Object.fromEntries(comps.map((c) => [c.name, new Set(c.files)]));
 const need = (name, rel) => assert.ok(byName[name].has(rel), `${name} يعتمد على ${rel} وهو خارج خريطة التبعيات`);
@@ -101,6 +101,23 @@ for (const f of ["watcher.js", "config.js", "invoice-html.js"]) {
   for (const m of src.matchAll(/require\(["']\.\/([A-Za-z0-9_.-]+)["']\)/g)) need("OZK-AmeenAutoPrint", `tools/ameen-autoprint/${m[1].endsWith(".js") ? m[1] : m[1] + ".js"}`);
   for (const m of src.matchAll(/path\.join\(__dirname,\s*["']([A-Za-z0-9_.-]+)["']\)/g)) need("OZK-AmeenAutoPrint", `tools/ameen-autoprint/${m[1]}`);
 }
+// الدفعة د0: وكيل الفواتير عملية واحدة طويلة تحمّل مكتبتها مرة عند البدء.
+for (const m of read("tools/ameen-invoice-event-agent.ps1").matchAll(/^\. \(Join-Path \$PSScriptRoot "([A-Za-z0-9_.-]+\.ps1)"\)/gm)) need("TOBACCO Ameen Invoice Agent", `tools/${m[1]}`);
+need("TOBACCO Ameen Invoice Agent", "tools/ameen-invoice-event-agent.ps1");
+need("TOBACCO Ameen Invoice Agent", "tools/ameen-invoice-events-lib.ps1");
+const invoiceAgent = comps.find((c) => c.name === "TOBACCO Ameen Invoice Agent");
+assert.equal(invoiceAgent.taskName, "TOBACCO Ameen Invoice Agent");
+assert.match(invoiceAgent.runner, /never restarts it/, "الوكيل: إعادة التشغيل خارج البوابة");
+assert.ok(!byName["TOBACCO Ameen Invoice Agent"].has("tools/ameen-invoice-agent-monitor.ps1"), "المراقب مهمة قصيرة، ليس عملية طويلة");
+assert.deepEqual(affectedLongRunning(["tools/ameen-invoice-events-lib.ps1"], comps), ["TOBACCO Ameen Invoice Agent"]);
+assert.ok(cfg0.pauseTasks.includes("TOBACCO Ameen Invoice Agent Monitor"), "مراقب الوكيل ضمن pauseTasks");
+assert.ok(!cfg0.routingExempt.includes("TOBACCO Ameen Invoice Agent Monitor"), "مراقب الوكيل غير معفى من التوجيه: كوده من المستودع");
+assert.ok(!cfg0.pauseTasks.includes("TOBACCO Ameen Invoice Agent"), "الوكيل لا يُنتظر خموله (لا ينتهي)، بل يُسجَّل للإعادة");
+// البوابة والمشغّل لا يمرّران -Send ولا -StrictEnvFile ولا يلمسان ملف التفعيل أو الاتصال: نص الإعداد وصف فقط.
+for (const src of [gateSrc, read("tools/deploy-gate/run-repo-task.ps1")]) {
+  assert.doesNotMatch(src, /'-Send'|-Send\b(?!-)|StrictEnvFile|send-enabled\.flag|ameen-invoice-agent\.env/, "لا -Send ولا -StrictEnvFile ولا ملف اتصال في البوابة");
+}
+assert.ok(Object.keys(invoiceAgent).every((k) => ["name", "runner", "files", "untrackedFiles", "taskName"].includes(k)), "مكوّن الوكيل بلا وسائط تشغيل");
 for (const m of read("scripts/serve.mjs").matchAll(/from\s+["'](\.{1,2}\/[^"']+)["']/g)) need("OZK-Tobacco-Server (scripts/serve.mjs)", path.posix.join("scripts", m[1]));
 assert.deepEqual(affectedLongRunning(["docs/a.md", "tools/reader.ps1"], comps), []);
 assert.deepEqual(affectedLongRunning(["tools/ameen-read-gateway.ps1"], comps), ["TOBACCO Ameen Read Worker"]);
@@ -251,6 +268,30 @@ assert.match(gate, /ROLLED_BACK_PINNED/);
 assert.doesNotMatch(gate, /Join-Path \$Config\.repoPath 'tools\\[^']*\.ps1'\)\s*\n?\s*&|& \(Join-Path \$Config\.repoPath/, "البوابة لا تشغّل سكربتات المستودع");
 const launcher = read("tools/deploy-gate/run-repo-task.ps1");
 assert.match(launcher, /deploying\.flag/);
+// الدفعة د0: سجل المشغّل خارج مجلد البوابة، شهري، والمشغّل لا ينشئ المجلد.
+assert.match(launcher, /function Get-LauncherLogPath/);
+assert.match(launcher, /'launcher-' \+ \$Now\.ToString\('yyyy-MM'/);
+assert.match(launcher, /StartsWith\(\$gateFull \+ \$sep/, "سجل داخل مجلد البوابة مرفوض");
+assert.doesNotMatch(launcher, /New-Item|CreateDirectory/, "المشغّل لا ينشئ مجلد السجل");
+assert.doesNotMatch(launcher, /Write-LauncherLog \$gateDir/, "كل نداءات السجل تمرّر الإعداد");
+assert.match(launcher, /Write-LauncherLog \$Config \('RUN ' \+ \$rel/, "المشغّل يكتب سطر RUN قبل كل تشغيل");
+assert.match(launcher, /Write-LauncherLog \$Config \('DONE ' \+ \$rel[^\n]*exit=/, "المشغّل يكتب سطر DONE برمز الخروج بعد كل تشغيل");
+assert.doesNotMatch(launcher, /Write-LauncherLog[^\n]*\$Arguments -join/, "وسائط المهمة لا تُكتب في سجل المشغّل");
+const logDirWin = String(cfg0.launcherLogDir || "").toLowerCase();
+const gateDirWin = String(cfg0.gateDir || "").toLowerCase().replace(/\\+$/, "");
+assert.ok(logDirWin && logDirWin !== gateDirWin && !logDirWin.startsWith(gateDirWin + "\\") && !gateDirWin.startsWith(logDirWin + "\\"), "launcherLogDir خارج gateDir");
+const logAcl = read("tools/deploy-gate/set-launcher-log-acl.ps1");
+assert.match(logAcl, /S-1-3-4/, "OWNER RIGHTS يلغي WRITE_DAC الضمني لمنشئ الملف");
+assert.match(logAcl, /SetAccessRuleProtection\(\$true, \$false\)/);
+assert.match(logAcl, /if \(-not \$DoApply\) \{[^}]*return 'PLAN'/, "بلا -Apply خطة فقط");
+for (const v of ["LogWriterDirRights", "LogWriterFileRights", "LogOwnerRightsFile"]) {
+  const m = logAcl.match(new RegExp(`\\$script:${v} = \\[System\\.Security\\.AccessControl\\.FileSystemRights\\]'([^']+)'`));
+  assert.ok(m, `${v} معرّف`);
+  for (const bad of ["FullControl", "Modify", "Delete", "DeleteSubdirectoriesAndFiles", "ChangePermissions", "TakeOwnership", "CreateDirectories", "Write"]) {
+    assert.ok(!m[1].split(/,\s*/).includes(bad), `${v} لا يمنح ${bad}`);
+  }
+}
+assert.ok(!/Set-Acl[^\n]*\$Gate\b/.test(logAcl), "سكربت السجل لا يغيّر صلاحيات مجلد البوابة");
 assert.match(launcher, /writer-allowlist\.json/);
 assert.match(launcher, /StartsWith\(\$repoFull/);
 ok("البوابة: ff-only، لا pull/rebase/--hard، موافقة بالحمولة، انحراف/تثبيت؛ والمشغّل يحترم العَلَم والبصمات");
@@ -276,7 +317,8 @@ ok(`writerScripts تغطي كل مسار كتابة الأسعار (${seen.size}
 const checkWf = read(".github/workflows/check.yml");
 assert.match(checkWf, /tools\\tests\\Test-DeployGate\.ps1/);
 assert.match(checkWf, /tools\\tests\\Test-RunRepoTask\.ps1/);
-for (const f of ["tools/deploy-gate/deploy-gate.ps1", "tools/deploy-gate/run-repo-task.ps1", "tools/deploy-gate/notify.ps1", "tools/deploy-gate/migration-preflight.ps1", "tools/tests/Test-DeployGate.ps1", "tools/tests/Test-RunRepoTask.ps1", "tools/tests/Test-MigrationPreflight.ps1"]) {
+assert.match(checkWf, /tools\\tests\\Test-LauncherLogAcl\.ps1/);
+for (const f of ["tools/deploy-gate/deploy-gate.ps1", "tools/deploy-gate/run-repo-task.ps1", "tools/deploy-gate/notify.ps1", "tools/deploy-gate/migration-preflight.ps1", "tools/tests/Test-DeployGate.ps1", "tools/tests/Test-RunRepoTask.ps1", "tools/tests/Test-MigrationPreflight.ps1", "tools/deploy-gate/set-launcher-log-acl.ps1", "tools/tests/Test-LauncherLogAcl.ps1"]) {
   const bytes = readFileSync(path.join(root, f));
   assert.ok(bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf, `${f} يحمل BOM (5.1 يقرأ غيره ANSI)`);
 }

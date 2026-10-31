@@ -7,8 +7,29 @@ permissions:
   contents: read
 
 jobs:
-  check:
+  # ------------------------------------------------------------
+  # بوابة `npm run check` مقسّمة إلى 4 shards متوازية (المرحلة 2 من تسريع CI).
+  #
+  # كل shard وظيفة على عدّاء مستقل (Postgres ومتصفح ومنافذ وملفات مؤقتة خاصة به)،
+  # يشغّل جزءه تسلسلياً بنفس دلالة البوابة، ويختار جزءه بتقسيم حتمي موزون بأزمنة
+  # CI المقيسة (scripts/checks.weights.json). أي فحص جديد بلا وزن يأخذ وزناً افتراضياً
+  # ويبقى مغطّى — الأوزان القديمة تُفسد التوازن وحده، لا التغطية.
+  #
+  # ⚠️ الفحص الإلزامي `check` هو وظيفة التجميع أدناه، لا هذه الـshards — اسمها
+  # (سياق الفحص) لم يتغيّر، فلا لمس للـruleset. عدد الـshards (4) مكتوب في ثلاثة
+  # مواضع: matrix هنا، و--shard، و--total في التجميع؛ أي عدم تطابق يُفشل البوابة
+  # (shard ناقص أو صيغة k/n مرفوضة)، لا يمرّرها.
+  # ------------------------------------------------------------
+  check-shard:
+    name: check shard ${{ matrix.shard }}/4
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      # كل shard يكمل حتى لو فشل غيره، فتظهر كل الإخفاقات في تشغيل واحد. لا
+      # يمرّر هذا نتيجة ناقصة: التجميع يشترط نجاح الأربعة وتقاريرها.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -55,8 +76,61 @@ jobs:
       - name: Install Playwright Chromium browser
         uses: ./.github/actions/install-playwright-chromium
 
-      - name: Run project check
-        run: npm run check
+      - name: Run project check (shard ${{ matrix.shard }}/4)
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: npm run check -- --shard "$SHARD/4" --weights scripts/checks.weights.json --report "$RUNNER_TEMP/check-shard-reports/check-shard-$SHARD.json"
+
+      # التقرير يُكتب فقط إن نجحت كل فحوص الـshard؛ غيابه وحده يُفشل التجميع.
+      - name: Upload shard report
+        uses: actions/upload-artifact@v4
+        with:
+          name: check-shard-report-${{ matrix.shard }}
+          path: ${{ runner.temp }}/check-shard-reports/check-shard-${{ matrix.shard }}.json
+          retention-days: 1
+          if-no-files-found: error
+
+  # ------------------------------------------------------------
+  # وظيفة التجميع: هي الفحص الإلزامي `check` (معرّفها بلا name:، كما كان).
+  #
+  # `if: always()` شرط سلامة لا راحة: وظيفة متخطّاة (skipped) لأن needs فشلت تُحسب
+  # «ناجحة» في الفحوص الإلزامية. فهذه تعمل دائماً — حتى عند الإلغاء — وتفشل صراحةً
+  # ما لم تنجح الـshards الأربعة، ثم تعيد حساب التقسيم المتوقع من البيان في هذا
+  # الـcommit وتطابق تقارير الـshards معه: كل فحص من الـ130 نُفِّذ ونجح مرة واحدة بالضبط.
+  # ------------------------------------------------------------
+  check:
+    if: ${{ always() }}
+    needs: [check-shard]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Require every shard to succeed
+        env:
+          SHARDS_RESULT: ${{ needs.check-shard.result }}
+        run: |
+          echo "نتيجة الـshards: $SHARDS_RESULT"
+          if [ "$SHARDS_RESULT" != "success" ]; then
+            echo "::error::check: الـshards لم تنجح كلها (النتيجة: $SHARDS_RESULT) — فشل أو إلغاء أو تخطٍّ أو عدم تنفيذ."
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Download shard reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: check-shard-report-*
+          path: ${{ runner.temp }}/check-shard-reports
+          merge-multiple: true
+
+      - name: Verify every check ran exactly once
+        run: node scripts/verify-check-shards.mjs --dir "$RUNNER_TEMP/check-shard-reports" --total 4 --weights scripts/checks.weights.json
 
   # ------------------------------------------------------------
   # المسارات الحرجة: الطبقة الوحيدة التي تفتح التطبيق وتتنقّل فيه كما يفعل
@@ -158,6 +232,13 @@ jobs:
       - name: Windows deploy gate - task launcher regression test
         shell: powershell
         run: .\tools\tests\Test-RunRepoTask.ps1
+
+      # الدفعة د0: صلاحيات سجل المشغّل. حساب محلي مؤقت غير مدير يكتب السجل الشهري
+      # عبر المشغّل الحقيقي، ويُرفض حذفه وإعادة تسميته وتغيير صلاحياته والكتابة على
+      # ملفات البوابة. كل شيء في مجلد مؤقت، والحساب يُحذف في النهاية.
+      - name: Windows deploy gate - launcher log ACL test
+        shell: powershell
+        run: .\tools\tests\Test-LauncherLogAcl.ps1
 
       # Codex P1 #5: مهمة نشرات الأسعار تحتاج main؛ تحويل المستودع التشغيلي إلى
       # windows-production محجوب حتى تعمل من worktree مخصّص صحيح (فرع/remote/مسار).
