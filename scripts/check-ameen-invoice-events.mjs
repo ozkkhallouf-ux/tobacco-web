@@ -369,6 +369,14 @@ const walk = (dir) => {
     // الوكيل ومكتبته، والمراقب (يذكر اسمه ليتعرّف على عمليته فقط — حارسه في القسم ٤)، وفحوص scripts/check*.mjs
     // (تقرأ الملفات ولا تشغّلها — نفس استثناء writeScan في البوابة).
     if ([agentRel, libRel, "tools/ameen-invoice-agent-monitor.ps1"].includes(relPosix) || /^scripts\/check[^/]*\.mjs$/.test(relPosix)) continue;
+    // إعداد بوابة نشر Windows (الدفعة د0) يذكر ملفَّي الوكيل في longRunningComponents ليُسجَّل
+    // DEPLOYED_PENDING_RESTART عند تغيّرهما — قائمة مراقبة لا تشغّل شيئاً. خارج ذلك المكوّن ممنوع.
+    if (relPosix === "tools/deploy-gate/gate-config.example.json") {
+      const g = JSON.parse(readFileSync(path.join(root, rel), "utf8"));
+      const rest = { ...g, longRunningComponents: g.longRunningComponents.filter((c) => c.name !== "TOBACCO Ameen Invoice Agent") };
+      if (JSON.stringify(rest).includes("ameen-invoice-event-agent")) runners.push(rel);
+      continue;
+    }
     if (readFileSync(path.join(root, rel), "utf8").includes("ameen-invoice-event-agent")) runners.push(rel);
   }
 };
