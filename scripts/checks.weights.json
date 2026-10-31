@@ -57,6 +57,7 @@
     "check-invoice-discount-not-receipt.mjs": 0.1,
     "check-invoice-document-integrity.mjs": 0.1,
     "check-invoice-input-unit.mjs": 0.1,
+    "check-live-invoices.mjs": 0.1,
     "check-invoice-ledger-binding.mjs": 0.1,
     "check-invoice-master-template.mjs": 0.1,
     "check-invoice-quantity-render.mjs": 1.3,

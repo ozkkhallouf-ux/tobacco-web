@@ -208,6 +208,10 @@ const state = {
   customerBalanceReports: [],
   customerMovementsReport: null,
   customerInvoicesReport: null,
+  customerInvoicesBaseReport: null,
+  liveInvoicesBase: null,
+  liveInvoicesSignature: "",
+  liveInvoicesStats: null,
   invoiceSeriesReport: null,   // آخر رقم فاتورة لكل سلسلة ترقيم في الأمين
   customerWhatsapp: [],
   broadcastType: "",
@@ -1258,12 +1262,14 @@ async function loadCustomerBalanceReports() {
     state.customerMovementsReport = null;
   }
   try {
-    state.customerInvoicesReport = dataStore.getCustomerInvoicesReport
+    state.customerInvoicesBaseReport = dataStore.getCustomerInvoicesReport
       ? await dataStore.getCustomerInvoicesReport()
       : null;
   } catch {
-    state.customerInvoicesReport = null;
+    state.customerInvoicesBaseReport = null;
   }
+  state.customerInvoicesReport = state.customerInvoicesBaseReport;
+  await loadLiveInvoices();
   try {
     state.poAmeenReport = dataStore.getPurchaseInvoicesAmeenReport
       ? await dataStore.getPurchaseInvoicesAmeenReport()
@@ -1279,6 +1285,35 @@ async function loadCustomerBalanceReports() {
     state.invoiceSeriesReport = null;
   }
   await loadCustomerWhatsapp();
+}
+
+// ===== الفواتير الفورية (ameen_invoices) فوق تقرير الفواتير =====
+// وكيل أحداث الفواتير يرفع كل فاتورة جديدة أو معدّلة أو محذوفة خلال ثوانٍ. هنا تُدمج
+// فوق لقطة التقرير (src/live-invoices.js): الأحدث يفوز، والنسخة الفورية لا تُقبل إلا
+// إن طابق مجموع أسطرها إجمالي الفاتورة في الأمين. عرض فقط — لا كتابة على أي جدول.
+// `state.customerInvoicesBaseReport` اللقطة كما وصلت، و`state.customerInvoicesReport`
+// الناتج المدموج الذي تقرؤه كل الشاشات. فشل القراءة الفورية يُبقي اللقطة كما هي.
+async function loadLiveInvoices() {
+  const base = state.customerInvoicesBaseReport;
+  const engine = window.ozkLiveInvoices;
+  if (!engine || !dataStore.listLiveAmeenInvoices) return false;
+  let rows;
+  try {
+    rows = await dataStore.listLiveAmeenInvoices(engine.liveFetchSince(base, Date.now()));
+  } catch {
+    return false;
+  }
+  const signature = rows.map((r) => `${r.bill_guid}:${r.source_seq}`).join("|");
+  if (base === state.liveInvoicesBase && signature === state.liveInvoicesSignature) return false;
+  state.liveInvoicesBase = base;
+  state.liveInvoicesSignature = signature;
+  const { report, stats } = engine.mergeLiveInvoices(base, rows, {
+    priceItems: state.approvedPriceItems,
+    balanceItems: latestCustomerBalanceItems()
+  });
+  state.customerInvoicesReport = report;
+  state.liveInvoicesStats = stats;
+  return true;
 }
 
 // ===== هوية الزبون والفاتورة: المعرّف أولاً، الاسم احتياطاً =====
@@ -14267,6 +14302,17 @@ setInterval(() => {
       .catch(() => {});
   }
 }, 60000);
+
+// الفواتير الفورية: قراءة خفيفة كل 10 ثوانٍ (صفوف ما بعد لقطة التقرير فقط)، وإعادة
+// رسم فقط حين يتغيّر شيء فعلاً، وبلا مقاطعة كتابة في نموذج.
+setInterval(() => {
+  if (isInventoryCounter() || document.hidden) return;
+  if (!dataStore.isConfigured() || !state.session) return;
+  const active = document.activeElement;
+  if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.tagName === "SELECT")) return;
+  if (!["ameen", "balances", "pricing", "dashboard", "payments"].includes(state.route)) return;
+  loadLiveInvoices().then((changed) => { if (changed) render(); }).catch(() => {});
+}, 10000);
 
 setInterval(async () => {
   if (isInventoryCounter()) return;
