@@ -37,32 +37,41 @@ export function parseShardSpec(spec) {
   return { index, total };
 }
 
-export function parseRunChecksArgs(argv) {
-  const options = { shard: null, list: false, weights: null, report: null };
-  const takeValue = (arg, i, flag) => {
-    const value = arg === flag ? argv[i + 1] : arg.slice(flag.length + 1);
+// وسائط تأخذ قيمة: --flag value أو --flag=value. القيمة تُحلَّل بـparse.
+const VALUE_FLAGS = {
+  '--shard': { key: 'shard', parse: parseShardSpec },
+  '--weights': { key: 'weights', parse: requirePath('--weights') },
+  '--report': { key: 'report', parse: requirePath('--report') },
+};
+
+function requirePath(flag) {
+  return (value) => {
     if (!value || value.startsWith('--')) throw new Error(`${flag} يتطلب مساراً`);
     return value;
   };
+}
+
+function splitFlag(arg) {
+  const eq = arg.indexOf('=');
+  return eq === -1 ? { flag: arg, inline: undefined } : { flag: arg.slice(0, eq), inline: arg.slice(eq + 1) };
+}
+
+export function parseRunChecksArgs(argv) {
+  const options = { shard: null, list: false, weights: null, report: null };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--list') {
       options.list = true;
-    } else if (arg === '--shard' || arg.startsWith('--shard=')) {
-      if (options.shard) throw new Error('--shard مكرر');
-      const value = arg === '--shard' ? argv[++i] : arg.slice('--shard='.length);
-      options.shard = parseShardSpec(value);
-    } else if (arg === '--weights' || arg.startsWith('--weights=')) {
-      if (options.weights) throw new Error('--weights مكرر');
-      options.weights = takeValue(arg, i, '--weights');
-      if (arg === '--weights') i += 1;
-    } else if (arg === '--report' || arg.startsWith('--report=')) {
-      if (options.report) throw new Error('--report مكرر');
-      options.report = takeValue(arg, i, '--report');
-      if (arg === '--report') i += 1;
-    } else {
+      continue;
+    }
+    const { flag, inline } = splitFlag(arg);
+    const spec = VALUE_FLAGS[flag];
+    if (!spec) {
       throw new Error(`وسيط غير معروف: "${arg}" — المسموح: --shard k/n و--weights <ملف> و--report <ملف> و--list`);
     }
+    if (options[spec.key]) throw new Error(`${flag} مكرر`);
+    const value = inline === undefined ? argv[++i] : inline;
+    options[spec.key] = spec.parse(value);
   }
   if ((options.weights || options.report) && !options.shard) {
     throw new Error('--weights و--report لا معنى لهما بلا --shard');
@@ -141,6 +150,27 @@ export function buildShardReport({ checks, shard, weights, executed }) {
   };
 }
 
+// يتحقق من تقرير shard واحد مقابل المتوقع؛ يرمي عند أي انحراف.
+function checkReportHeader(report, { total, weights, checks }) {
+  const where = `تقرير shard ${report?.shard?.index}/${report?.shard?.total}`;
+  if (!report || report.version !== REPORT_VERSION) throw new Error(`${where}: إصدار غير معروف`);
+  if (report.passed !== true) throw new Error(`${where}: لم ينجح`);
+  if (report.shard?.total !== total) throw new Error(`${where}: عدد الـshards فيه لا يساوي ${total}`);
+  const index = report.shard?.index;
+  if (!Number.isInteger(index) || index < 1 || index > total) throw new Error(`${where}: رقم shard غير صالح`);
+  if (report.strategy !== strategyOf(weights)) throw new Error(`${where}: استراتيجية ${report.strategy} لا ${strategyOf(weights)}`);
+  if (report.manifestSize !== checks.length) throw new Error(`${where}: بيان بـ${report.manifestSize} فحصاً لا ${checks.length}`);
+  if (!Array.isArray(report.executed)) throw new Error(`${where}: لا قائمة executed`);
+  return { where, index };
+}
+
+function checkReportExecuted(report, want, where) {
+  if (JSON.stringify(report.executed) === JSON.stringify(want)) return;
+  const missing = want.filter((n) => !report.executed.includes(n));
+  const extra = report.executed.filter((n) => !want.includes(n));
+  throw new Error(`${where}: المنفَّذ لا يطابق المتوقع (ناقص: ${missing.join(', ') || '—'}؛ زائد: ${extra.join(', ') || '—'})`);
+}
+
 // يرمي عند أي انحراف؛ ويعيد ملخصاً عند السلامة. reports: كائنات JSON مقروءة.
 export function verifyShardReports({ reports, checks, total, weights = null }) {
   if (!Number.isInteger(total) || total < 1) throw new Error(`عدد shards غير صالح: ${total}`);
@@ -151,27 +181,14 @@ export function verifyShardReports({ reports, checks, total, weights = null }) {
   const seenIndex = new Set();
   const seenCheck = new Map();
   for (const report of reports) {
-    const where = `تقرير shard ${report?.shard?.index}/${report?.shard?.total}`;
-    if (!report || report.version !== REPORT_VERSION) throw new Error(`${where}: إصدار غير معروف`);
-    if (report.passed !== true) throw new Error(`${where}: لم ينجح`);
-    if (report.shard?.total !== total) throw new Error(`${where}: عدد الـshards فيه لا يساوي ${total}`);
-    const index = report.shard?.index;
-    if (!Number.isInteger(index) || index < 1 || index > total) throw new Error(`${where}: رقم shard غير صالح`);
+    const { where, index } = checkReportHeader(report, { total, weights, checks });
     if (seenIndex.has(index)) throw new Error(`${where}: الـshard نفسه مرتين`);
     seenIndex.add(index);
-    if (report.strategy !== strategyOf(weights)) throw new Error(`${where}: استراتيجية ${report.strategy} لا ${strategyOf(weights)}`);
-    if (report.manifestSize !== checks.length) throw new Error(`${where}: بيان بـ${report.manifestSize} فحصاً لا ${checks.length}`);
-    if (!Array.isArray(report.executed)) throw new Error(`${where}: لا قائمة executed`);
     for (const name of report.executed) {
       if (seenCheck.has(name)) throw new Error(`${name} نُفِّذ في shardين (${seenCheck.get(name)} و${index})`);
       seenCheck.set(name, index);
     }
-    const want = expected[index - 1];
-    if (JSON.stringify(report.executed) !== JSON.stringify(want)) {
-      const missing = want.filter((n) => !report.executed.includes(n));
-      const extra = report.executed.filter((n) => !want.includes(n));
-      throw new Error(`${where}: المنفَّذ لا يطابق المتوقع (ناقص: ${missing.join(', ') || '—'}؛ زائد: ${extra.join(', ') || '—'})`);
-    }
+    checkReportExecuted(report, expected[index - 1], where);
   }
   const notRun = checks.filter((n) => !seenCheck.has(n));
   if (notRun.length) throw new Error(`فحوص لم تُنفَّذ في أي shard: ${notRun.join(', ')}`);
