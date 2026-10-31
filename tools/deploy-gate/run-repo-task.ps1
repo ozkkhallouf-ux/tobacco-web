@@ -133,6 +133,10 @@ function Invoke-RepoTask {
         $PsExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     }
     $childArgs = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $scriptFull) + @($Arguments | Where-Object { $_ -ne $null })
+    # سطر RUN قبل التشغيل وسطر DONE بعده: يُثبتان كل دورة ناجحة في سجل المشغّل نفسه.
+    # الوسائط لا تُكتب في السجل (قد تحمل مسارات أو قيماً لا تخص السجل)، عددها فقط.
+    Write-LauncherLog $Config ('RUN ' + $rel + ' pid=' + $PID + ' writer=' + $isWriter + ' args=' + @($Arguments | Where-Object { $_ -ne $null }).Count)
+    $started = Get-Date
     $old = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
@@ -140,6 +144,7 @@ function Invoke-RepoTask {
         $code = $LASTEXITCODE
     } finally { $ErrorActionPreference = $old }
     if ($null -eq $code) { $code = 0 }
+    Write-LauncherLog $Config ('DONE ' + $rel + ' pid=' + $PID + ' exit=' + $code + ' seconds=' + [int]((Get-Date) - $started).TotalSeconds)
     return $code
 }
 
