@@ -569,10 +569,12 @@ try {
     $sw.Restart(); [void](Save-AmeenInvoiceWatermark -Dir $pbox -State $ps); $wmTimes += $sw.Elapsed.TotalMilliseconds
   }
   $wmAvg = ($wmTimes | Measure-Object -Average).Average
-  Write-Host ("  perf: full save {0:n0} ms, watermark save avg {1:n1} ms (2000 bills)" -f $fullMs, $wmAvg)
+  # الوسيط لمقارنة النسبة: توقّف عابر واحد على مشغّل CI (GC/قرص) ينفخ المتوسط ولا يعبّر عن كلفة الحفظ
+  $wmSorted = @($wmTimes | Sort-Object); $wmMedian = ($wmSorted[9] + $wmSorted[10]) / 2
+  Write-Host ("  perf: full save {0:n0} ms, watermark save avg {1:n1} ms, median {2:n1} ms (2000 bills)" -f $fullMs, $wmAvg, $wmMedian)
   Assert 'performance: 20 unchanged cycles never rewrite state.json' ((Get-FileHash -LiteralPath $statePath -Algorithm SHA256).Hash -eq $stateHash)
   Assert 'performance: watermark save stays well under the 500ms cycle budget' ($wmAvg -lt 100)
-  Assert 'performance: watermark save is at least 10x cheaper than a full save' (($wmAvg * 10) -lt [math]::Max($fullMs, 1))
+  Assert 'performance: watermark save is at least 10x cheaper than a full save' (($wmMedian * 10) -lt [math]::Max($fullMs, 1))
 
   # إعادة التشغيل: العلامة الأحدث تُعتمد إن كانت لنفس نسخة الحالة، ولا تُفقد التغييرات
   $rs = Read-AmeenInvoiceState -Dir $pbox
