@@ -252,6 +252,60 @@ test("live: رفع خاص إلى المسار الصحيح ثم إشعار ال�
   assert.equal(msg.fileName, "فاتورة جملة - رقم 501 - 2026-10-24 - 11111111 - V1.pdf");
 });
 
+// المبلغ في الإشعار وتقرير الموقع = «الصافي» المطبوع في الـPDF: Total − الحسم + التدوير (TotalExtra).
+test("المبلغ يحتسب التدوير والحسم ويطابق الـPDF وتيليغرام والموقع، والبصمة ومنع التكرار كما هما", async () => {
+  const { invoiceVersionHash, HASH_SCHEMA } = require(path.join(dir, "lib", "fingerprint.js"));
+  const cases = [
+    { guid: G1, number: 601, total: 3000.98, discount: 0, totalExtra: 0.02, firstPay: 1000, net: 3001, label: "3,001 $" },
+    { guid: G2, number: 602, total: 100.03, discount: 0, totalExtra: -0.03, firstPay: 0, net: 100, label: "100 $" },
+    { guid: G3, number: 603, total: 250.5, discount: 0, totalExtra: 0, firstPay: 50, net: 250.5, label: "250.5 $" },
+    { guid: G4, number: 604, total: 100.7, discount: 5, totalExtra: 0.3, firstPay: 0, net: 96, label: "96 $" },
+    { guid: "55555555-5555-4555-8555-555555555555", number: 605, total: 111.51, discount: 0, totalExtra: 20.4906, firstPay: 50, net: 132, label: "132 $" },
+  ];
+  const t = await setup();
+  const html = new Map();
+  const realRender = t.renderer.render;
+  t.renderer.render = async (h, paper, out) => {
+    html.set(Number(/فاتورة رقم (\d+)/.exec(h)[1]), h.replace(/<[^>]+>/g, " ").replace(/\s+/g, " "));
+    return realRender(h, paper, out);
+  };
+  for (const c of cases) t.ameen.add({ guid: c.guid, number: c.number, total: c.total, discount: c.discount, totalExtra: c.totalExtra, firstPay: c.firstPay });
+  t.advance(300);
+  await t.cycle();
+  const jobs = t.store.jobs();
+  assert.equal(jobs.length, cases.length);
+  const reported = new Map(t.edgeFake.state.reports.flatMap((r) => r.items).map((i) => [i.job_id, i]));
+  const strip = globalThis.ozkTelegramFormat.stripBidi;
+  for (const c of cases) {
+    const job = jobs.find((j) => j.number === c.number);
+    assert.equal(job.status, "notified", `${c.number}`);
+    assert.equal(job.amount, c.net, `${c.number}: مبلغ المهمة = الصافي`);
+    // الـPDF: الصافي (أو إجمالي الفاتورة حين لا حسم ولا تدوير) والمتبقي = الصافي − المدفوع.
+    const text = html.get(c.number);
+    const money = (n) => n.toLocaleString("en-US", { maximumFractionDigits: 2 });
+    const shown = c.discount > 0 || c.totalExtra !== 0 ? "الصافي" : "إجمالي الفاتورة";
+    assert.ok(text.includes(`${shown} $ ${money(c.net)}`), `${c.number}: الـPDF يطبع ${shown} ${c.net}`);
+    assert.ok(text.includes(`المتبقي من هذه الفاتورة $ ${money(c.net - c.firstPay)}`), `${c.number}: المتبقي`);
+    if (c.totalExtra === 0) assert.ok(!/تدوير/.test(text), `${c.number}: لا سطر تدوير`);
+    // تيليغرام: «المبلغ» في الوصف.
+    const msg = t.edgeFake.state.sent.find((m) => m.messageId === job.telegram.messageId);
+    assert.ok(strip(msg.caption).includes(`المبلغ: ${c.label}`), `${c.number}: وصف تيليغرام ${c.label}`);
+    // الموقع: سجل الدالة بعد الإرسال، وتقرير العامل.
+    assert.equal(t.edgeFake.state.items.get(job.jobId).amount, c.net, `${c.number}: سجل الإشعار`);
+    assert.equal(reported.get(job.jobId).amount, c.net, `${c.number}: تقرير الموقع`);
+    // البصمة من الرأس والأسطر الخام في الأمين، لا من المبلغ المحسوب.
+    const row = (await t.ameen.api.changedInvoices({ since: "1900-01-01T00:00:00", dateFrom: "2026-10-01", onlyGuid: c.guid }))[0];
+    assert.equal(job.hashSchema, HASH_SCHEMA);
+    assert.equal(job.versionHash, invoiceVersionHash(row, await t.ameen.api.lines(c.guid)), `${c.number}: البصمة`);
+  }
+  // منع التكرار: دورة مطابقة كاملة لا تنشئ إصداراً ولا إشعاراً ثانياً.
+  const sent = t.edgeFake.state.sent.length;
+  t.advance(t.cfg.reconcileMinutes * 60);
+  await t.cycle();
+  assert.equal(t.store.jobs().length, cases.length, "لا إصدار جديد");
+  assert.equal(t.edgeFake.state.sent.length, sent, "لا إشعار مكرر");
+});
+
 test("فواتير غير مؤهلة لا تُؤرشف: غير مرحّلة، الكاشير، ولم تستقر بعد", async () => {
   const t = await setup();
   t.ameen.add({ guid: G1, number: 1, posted: 0 });
