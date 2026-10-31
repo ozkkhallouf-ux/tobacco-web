@@ -1,5 +1,3 @@
-// TEMP negative test (PR #408) — سيُعاد فوراً: فشل متعمَّد لإثبات أن التجميع يفشل.
-console.error("TEMP: فشل متعمَّد"); process.exit(1);
 import { existsSync, readFileSync } from "node:fs";
 import vm from "node:vm";
 
