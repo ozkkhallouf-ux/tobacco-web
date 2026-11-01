@@ -7152,7 +7152,22 @@ function bindSaleInvoiceLedger({ movements, invoices, invoice = null, movement =
   return { invoice: invMatches[0], movement: mvMatches[0] };
 }
 
-// فرق «السابق + الفاتورة − الحسم − الدفعة − الجديد» لا يُطبع إلا إذا أثبتته أسطر حقيقية
+// أثر الفاتورة على الحساب = Total − TotalDisc + TotalExtra − FirstPay
+// (مثبت 2026-10-26 على 68/68 فاتورة جملة). extra غائب أو صفر ⇒ المعادلة السابقة.
+function invoiceLedgerResidual(prev, total, discount, extra, payment, next) {
+  return roundPrice(
+    Number(prev || 0) + Number(total || 0)
+    - Number(discount || 0) + Number(extra || 0)
+    - Number(payment || 0) - Number(next || 0)
+  );
+}
+
+function invoiceKnownExtra(inv) {
+  const extra = roundPrice(Number(inv?.extra || 0));
+  return Number.isFinite(extra) ? extra : 0;
+}
+
+// فرق «السابق + الفاتورة − الحسم + التدوير − الدفعة − الجديد» لا يُطبع إلا إذا أثبتته أسطر حقيقية
 // في **قيد الفاتورة نفسه** (نفس اليوم ونفس رصيدَي السند): سطر فروقات الصندوق 0.50 مثلاً.
 // ما لا تفسّره أسطر القيد ليس تسوية — هو علامة ربط خاطئ أو بيانات ناقصة.
 function invoiceEntryProvesResidual(movements, movement, residual) {
@@ -7411,10 +7426,10 @@ function voucherInvoiceBalanceRows(rows, v, cur, balCur, isRet) {
   rows.push({ label: "الرصيد السابق", value: balanceText(v.prevBalance, balCur, money) });
   rows.push({ label: isRet ? "قيمة هذا المرتجع" : "قيمة هذه الفاتورة", value: `${money(v.amount || 0)} ${cur}` });
   // إن سُجّلت الفاتورة على الحساب بمبلغ أقل/أكثر من قيمتها (حسم أو تسوية) نُظهر الفرق
-  // ليبقى الحساب شفافاً: السابق + الفاتورة − الحسم = الجديد.
-  // الحسم ودفعة الزبون عمليتان محاسبيتان مستقلتان تماماً، ولكلٍّ سطره:
-  //   الرصيد الجديد = السابق + قيمة الفاتورة − الحسم − دفعة الزبون
-  // لا يجوز أن تُطبع دفعة داخل خانة الحسم ولا العكس. كلٌّ يظهر فقط إن وُجد.
+  // ليبقى الحساب شفافاً: السابق + الفاتورة − الحسم + التدوير = الجديد.
+  // الحسم ودفعة الزبون والتدوير عمليات محاسبية مستقلة تماماً، ولكلٍّ سطره:
+  //   الرصيد الجديد = السابق + قيمة الفاتورة − الحسم + التدوير − دفعة الزبون
+  // لا يجوز أن تُطبع دفعة داخل خانة الحسم ولا أن يُسمّى التدوير تسوية. كلٌّ يظهر فقط إن وُجد.
   if (Number(v.discount || 0) > 0.009) {
     // حسم المرتجع عكس حسم البيع: قيده مدين على الزبون (مقابل «الحسم الممنوح»)، فيرفع
     // الرصيد — الجديد = السابق − قيمة المرتجع + حسمه (مُثبت من قيد #32).
@@ -7422,13 +7437,18 @@ function voucherInvoiceBalanceRows(rows, v, cur, balCur, isRet) {
       ? { label: "حسم على المرتجع", value: `+ ${formatMoney(v.discount)} ${cur}`, tone: "deb" }
       : { label: "الحسم", value: `− ${money(v.discount)} ${cur}`, tone: "cred" });
   }
+  if (Math.abs(Number(v.extra || 0)) > 0.009) {
+    rows.push(Number(v.extra) > 0
+      ? { label: "تدوير", value: `+ ${money(v.extra)} ${cur}`, tone: "deb" }
+      : { label: "تدوير", value: `− ${money(Math.abs(v.extra))} ${cur}`, tone: "cred" });
+  }
   if (Number(v.payment || 0) > 0.009) {
     rows.push({ label: "دفعة من الزبون", value: `− ${money(v.payment)} ${cur}`, tone: "cred" });
   }
-  // `adjust` ما تبقّى من حركة الحساب بعد طرح الحسم والدفعة المعروفَين. لا يُسمّى
-  // حسماً (تسميته حسماً تطبع دفعة زبون على أنها حسم). ومسارا التصدير لا يضعانه إلا
-  // إذا أثبتته أسطر حقيقية في قيد الفاتورة نفسه (invoiceEntryProvesResidual)، كسطر
-  // فروقات الصندوق 0.50 — فرق أرصدة بلا سطر يثبته يمنع المستند ولا يُطبع «تسوية».
+  // `adjust` ما تبقّى من حركة الحساب بعد طرح الحسم والدفعة وإدخال التدوير المعروف.
+  // لا يُسمّى حسماً ولا تدويراً. ومسارا التصدير لا يضعانه إلا إذا أثبتته أسطر
+  // حقيقية في قيد الفاتورة نفسه (invoiceEntryProvesResidual)، كسطر فروقات الصندوق
+  // 0.50 — فرق أرصدة بلا سطر يثبته يمنع المستند ولا يُطبع «تسوية».
   if (Number(v.adjust || 0) > 0.009) {
     rows.push({ label: "تسوية على الحساب", value: `− ${money(v.adjust)} ${cur}`, tone: "cred" });
   } else if (Number(v.adjust || 0) < -0.009) {
@@ -7449,9 +7469,10 @@ function pushInvoiceRoundingDrift(rows, v, cur, balCur, isRet) {
   const cents = (x) => Math.round(Number(formatInvoiceMoney(x).replace(/,/g, "")) * 100);
   const balCents = (b) => (Math.abs(roundPrice(b)) < 0.01 ? 0 : cents(roundPrice(b)));
   const shownCredit = (x) => (Number(x || 0) > 0.009 ? cents(x) : 0);
+  const shownExtra = Math.abs(Number(v.extra || 0)) > 0.009 ? cents(v.extra) : 0;
   const adjust = Math.abs(Number(v.adjust || 0)) > 0.009 ? cents(v.adjust) : 0;
   const printed = balCents(v.prevBalance) + cents(v.amount || 0)
-    - shownCredit(v.discount) - shownCredit(v.payment) - adjust;
+    - shownCredit(v.discount) + shownExtra - shownCredit(v.payment) - adjust;
   const drift = balCents(v.newBalance) - printed;
   if (drift === 0 || Math.abs(drift) > 3) return;
   rows.push(drift > 0
@@ -13933,15 +13954,18 @@ function render() {
           opts.newBalance = roundPrice(storedDocNew);
           const prev = (storedDocPrev !== null && Number.isFinite(storedDocPrev)) ? storedDocPrev : (storedDocNew - debit);
           opts.prevBalance = roundPrice(prev);
-          // الحسم ودفعة الزبون يأتيان من الأمين على رأس الفاتورة (TotalDisc وFirstPay)
-          // ويُنسبان أولاً. ما يتبقّى بعدهما لا يُسمّى حسماً أبداً، ولا يُطبع إلا إذا
-          // أثبتته أسطر حقيقية في قيد الفاتورة نفسه — وإلا لا مستند.
+          // الحسم والدفعة والتدوير تأتي من الأمين على رأس الفاتورة
+          // (TotalDisc وFirstPay وTotalExtra) وتُنسب أولاً. ما يتبقّى بعدها لا يُسمّى
+          // حسماً ولا تدويراً، ولا يُطبع إلا إذا أثبتته أسطر حقيقية في قيد الفاتورة
+          // نفسه — وإلا لا مستند.
           const knownDiscount = Math.max(0, roundPrice(Number(match.discount || 0)));
           const knownPayment = Math.max(0, roundPrice(Number(match.payment || 0)));
+          const knownExtra = invoiceKnownExtra(match);
           if (knownDiscount > 0.009) opts.discount = knownDiscount;
           if (knownPayment > 0.009) opts.payment = knownPayment;
-          const residual = roundPrice(
-            opts.prevBalance + total - knownDiscount - knownPayment - opts.newBalance
+          if (Math.abs(knownExtra) > 0.009) opts.extra = knownExtra;
+          const residual = invoiceLedgerResidual(
+            opts.prevBalance, total, knownDiscount, knownExtra, knownPayment, opts.newBalance
           );
           if (!invoiceEntryProvesResidual(ledgerRows, binding.movement, residual)) {
             showNoticeNow("error", saleBindingRefusal("residual", debit, dOnly, item));
@@ -14039,16 +14063,18 @@ function render() {
           } else if (db && Number.isFinite(db.newBalance) && Number.isFinite(db.prevBalance)) {
             opts.newBalance = roundPrice(db.newBalance);
             opts.prevBalance = roundPrice(db.prevBalance);
-            // الحسم ودفعة الزبون يأتيان من الأمين على رأس الفاتورة (TotalDisc و
-            // FirstPay) ويُنسبان أولاً. كان هذا المسار يضع الفرق كاملاً في adjust،
-            // فتُطبع دفعة الفاتورة 562 «تسوية على الحساب 2000». وما يتبقّى بعدهما
-            // لا يُطبع إلا إذا أثبتته أسطر حقيقية في قيد الفاتورة نفسه.
+            // الحسم والدفعة والتدوير تأتي من الأمين على رأس الفاتورة (TotalDisc و
+            // FirstPay وTotalExtra) وتُنسب أولاً. كان هذا المسار يضع الفرق كاملاً في
+            // adjust، فتُطبع دفعة الفاتورة 562 «تسوية على الحساب 2000». وما يتبقّى
+            // بعدها لا يُطبع إلا إذا أثبتته أسطر حقيقية في قيد الفاتورة نفسه.
             const knownDiscount = Math.max(0, roundPrice(Number(inv.discount || 0)));
             const knownPayment = Math.max(0, roundPrice(Number(inv.payment || 0)));
+            const knownExtra = invoiceKnownExtra(inv);
             if (knownDiscount > 0.009) opts.discount = knownDiscount;
             if (knownPayment > 0.009) opts.payment = knownPayment;
-            const residual = roundPrice(
-              opts.prevBalance + invoiceTotal - knownDiscount - knownPayment - opts.newBalance
+            if (Math.abs(knownExtra) > 0.009) opts.extra = knownExtra;
+            const residual = invoiceLedgerResidual(
+              opts.prevBalance, invoiceTotal, knownDiscount, knownExtra, knownPayment, opts.newBalance
             );
             if (!invoiceEntryProvesResidual(ledgerRows, mv, residual)) {
               refusal = saleBindingRefusal("residual", invoiceTotal, inv.date, custItem || { name: custName });
