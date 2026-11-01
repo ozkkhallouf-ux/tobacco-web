@@ -153,6 +153,21 @@ try {
   $e = Resolve-AmeenInvoiceChanges -State (New-AmeenInvoiceState) -Observations @(@{ guid = $G1; snapshot = $s1; ops = @(); detected_at_utc = "2026-10-20T15:00:09.000Z"; source_create_utc = "2026-10-20T15:00:00.000Z"; source_update_utc = "2026-10-20T15:00:05.000Z" })
   Assert 'no log op: source time = real LastUpdateDate before CreateDate' ($e[0].source_event_at -eq "2026-10-20T15:00:05.000Z")
 
+  # ── ٤ب) جهاز إدخال بمنطقة زمنية أمام منطقة الوكيل (2026-11-01: سوريا UTC+3 مقابل بيروت UTC+2) ─────
+  # وقت السجل يتقدّم ساعة كاملة على لحظة الرصد ⇒ كان يُعزل «من المستقبل» ولا يصل. الحدث لا يقع بعد رصده.
+  $skewAt = "2026-11-01T16:23:15.000Z"; $skewDet = "2026-11-01T15:23:18.000Z"
+  $e = Resolve-AmeenInvoiceChanges -State (New-AmeenInvoiceState) -Observations @(@{ guid = $G1; snapshot = $s1; ops = @(@{ op = 1; at_utc = $skewAt }); detected_at_utc = $skewDet; source = "incremental"; source_create_utc = $skewAt })
+  Assert 'clock skew: log time ahead of detection is capped to detection time' ($e.Count -eq 1 -and $e[0].source_event_at -eq $skewDet)
+  Assert 'clock skew: event id hashes the capped time (server formula unchanged)' ($e[0].event_id -eq (Get-AmeenSha256Hex ("{0}|{1}|upsert|{2}|{3}" -f $G1.ToLowerInvariant(), $e[0].source_seq, $e[0].version_hash, $skewDet)))
+  Assert 'clock skew: capped event passes the local contract (not dead-lettered as future)' ($null -eq (Test-AmeenInvoiceEvent -InvoiceEvent $e[0] -NowUtc ([datetime]::Parse($skewDet, $script:Invariant, [Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal).AddSeconds(2))))
+  $e = Resolve-AmeenInvoiceChanges -State (New-AmeenInvoiceState) -Observations @(@{ guid = $G1; snapshot = $null; ops = @(@{ op = 2; at_utc = $skewAt }); detected_at_utc = $skewDet })
+  Assert 'clock skew: delete event capped too' ($e.Count -eq 1 -and $e[0].kind -eq "delete" -and $e[0].source_event_at -eq $skewDet)
+  $e = Resolve-AmeenInvoiceChanges -State (New-AmeenInvoiceState) -Observations @(@{ guid = $G1; snapshot = $s1; ops = @(); detected_at_utc = $skewDet; source_create_utc = $skewAt })
+  Assert 'clock skew: CreateDate fallback capped too' ($e[0].source_event_at -eq $skewDet)
+  Assert 'cap: earlier source time kept as is' ((Limit-AmeenEventTimeToDetection -SourceAtUtc "2026-11-01T15:20:00.000Z" -DetectedAtUtc $skewDet) -eq "2026-11-01T15:20:00.000Z")
+  Assert 'cap: missing detection time leaves source time' ((Limit-AmeenEventTimeToDetection -SourceAtUtc $skewAt -DetectedAtUtc "") -eq $skewAt)
+  Assert 'cap: unreadable detection time leaves source time' ((Limit-AmeenEventTimeToDetection -SourceAtUtc $skewAt -DetectedAtUtc "not-a-time") -eq $skewAt)
+
   # ── ٥) صندوق الإرسال: لا فقدان، لا تكرار، ترتيب ───────────────────────────────────────────────
   $box = Join-Path $tempDir "outbox"
   Initialize-AmeenInvoiceOutbox -Dir $box
