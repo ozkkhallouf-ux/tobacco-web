@@ -201,7 +201,7 @@ function validate(cfg, nowMs = Date.now()) {
 // دمج سطحي كما كان، وكائن receipts يُدمج مع افتراضه (إعداد قديم بلا المفتاح ⇒ مطفأة).
 function mergeConfig(user) {
   const u = user || {};
-  return { ...DEFAULTS, ...u, receipts: { ...DEFAULTS.receipts, ...(u.receipts || {}) } };
+  return { ...DEFAULTS, ...u, receipts: { ...DEFAULTS.receipts, ...u.receipts } };
 }
 
 function loadConfig(file) {
