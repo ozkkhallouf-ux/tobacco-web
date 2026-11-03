@@ -227,6 +227,35 @@ test("الموقع يحمّل الوحدة قبل app.js ويخزّنها في �
   assert.ok(!/fetch\(|XMLHttpRequest|\.from\(/.test(engine), "منطق الدمج يجب أن يبقى نقياً بلا شبكة");
 });
 
+test("خانة البحث لا توقف التحديث الدوري: تُحدَّث القائمة وحدها، وحقول النماذج تبقى محمية", () => {
+  const app = readFileSync(new URL("../src/app.js", import.meta.url), "utf8");
+  const block = app.slice(app.indexOf("// ===== التحديث الدوري وخانات البحث ====="), app.indexOf("// ===== الفواتير الفورية (ameen_invoices) فوق تقرير الفواتير ====="));
+  const calls = [];
+  const env = {
+    document: { activeElement: null },
+    updateCustomerBalanceResults: () => calls.push("customers"),
+    updateAmeenBrowserResults: () => calls.push("ameen"),
+    render: () => calls.push("render")
+  };
+  const api = new Function(...Object.keys(env), `${block}; return { focusedSearchAttr, isEditingFormField, renderAfterPeriodicRefresh };`)(...Object.values(env));
+  const input = (attr) => ({ tagName: "INPUT", hasAttribute: (a) => a === attr });
+  env.document.activeElement = input("data-customer-search");
+  assert.equal(api.isEditingFormField(env.document.activeElement), false, "بحث الزبائن ليس حقل نموذج");
+  api.renderAfterPeriodicRefresh();
+  env.document.activeElement = input("data-ameen-search");
+  api.renderAfterPeriodicRefresh();
+  env.document.activeElement = null;
+  api.renderAfterPeriodicRefresh();
+  assert.deepEqual(calls, ["customers", "ameen", "render"]);
+  assert.equal(api.isEditingFormField(input("name")), true, "حقل نموذج عادي يبقى محمياً");
+  assert.equal(api.isEditingFormField({ tagName: "TEXTAREA", hasAttribute: () => false }), true);
+  assert.equal(api.isEditingFormField({ tagName: "BUTTON", hasAttribute: () => false }), false);
+  const polls = app.slice(app.indexOf("boot();"));
+  assert.equal((polls.match(/if \(isEditingFormField\(\)\) return;/g) || []).length, 2, "الحارس الجديد في التحديثين الدوريين");
+  assert.ok(!/active\.tagName === "INPUT"/.test(polls.slice(0, 2500)), "لا حارس قديم يوقف القراءة أثناء البحث");
+  assert.equal((polls.slice(0, 2500).match(/renderAfterPeriodicRefresh\(\)/g) || []).length, 2);
+});
+
 console.log("check-live-invoices:");
 console.log(results.join("\n"));
 if (failed) { console.error(`\n${failed} فحص فشل`); process.exit(1); }

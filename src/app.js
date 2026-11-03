@@ -1289,6 +1289,36 @@ async function loadCustomerBalanceReports() {
   await loadCustomerWhatsapp();
 }
 
+// ===== التحديث الدوري وخانات البحث =====
+// التحديث الدوري (الفواتير الفورية كل 10 ث والتقارير كل دقيقة) كان يتوقف كلياً ما دام
+// المؤشر في أي خانة إدخال، حتى القراءة نفسها. فمن يكتب اسم الزبون في بحث «أرصدة الزبائن»
+// ويبقى المؤشر فيها لا تصله البيانات الجديدة، وحين يفتح الزبون تُرسم له النسخة القديمة
+// (عمر 2026-11-03: فاتورة 1178 وصلت السيرفر بثانيتين ولم تظهر). خانة البحث لا تحمل إدخالاً
+// يضيع: قيمتها في state. فصار التحديث يقرأ دائماً، ويحدّث قائمة النتائج وحدها تحت الخانة
+// (نفس دالة الكتابة في البحث) دون أن يمسّ الخانة نفسها ولا لوحة المفاتيح على الهاتف.
+// حقول النماذج الأخرى (سعر، حد ائتمان، دفعة...) تبقى محمية كما كانت: لا تحديث أثناء الكتابة.
+const LIVE_REFRESH_SEARCH_UPDATERS = {
+  "data-customer-search": () => updateCustomerBalanceResults(),
+  "data-ameen-search": () => updateAmeenBrowserResults()
+};
+
+function focusedSearchAttr(el = document.activeElement) {
+  if (!el || el.tagName !== "INPUT") return "";
+  return Object.keys(LIVE_REFRESH_SEARCH_UPDATERS).find((attr) => el.hasAttribute(attr)) || "";
+}
+
+function isEditingFormField(el = document.activeElement) {
+  if (!el || !(el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.tagName === "SELECT")) return false;
+  return !focusedSearchAttr(el);
+}
+
+// إعادة رسم بعد تحديث دوري: كاملة عادةً، وقائمة النتائج وحدها إن كان المؤشر في خانة بحث.
+function renderAfterPeriodicRefresh() {
+  const attr = focusedSearchAttr();
+  if (attr) { LIVE_REFRESH_SEARCH_UPDATERS[attr](); return; }
+  render();
+}
+
 // ===== الفواتير الفورية (ameen_invoices) فوق تقرير الفواتير =====
 // وكيل أحداث الفواتير يرفع كل فاتورة جديدة أو معدّلة أو محذوفة خلال ثوانٍ. هنا تُدمج
 // فوق لقطة التقرير (src/live-invoices.js): الأحدث يفوز، والنسخة الفورية لا تُقبل إلا
@@ -14305,12 +14335,11 @@ boot();
 setInterval(() => {
   if (isInventoryCounter()) return;
   // لا نقاطع المستخدم أثناء الكتابة في نموذج
-  const active = document.activeElement;
-  if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.tagName === "SELECT")) return;
+  if (isEditingFormField()) return;
   const autoRefreshRoutes = ["ameen", "balances", "pricing", "dashboard", "payments"];
   if (autoRefreshRoutes.includes(state.route) && (!dataStore.isConfigured() || state.session)) {
     Promise.all([loadInventoryReports(), loadCustomerBalanceReports(), loadCustomerCreditLimits(), loadApprovedPriceItems()])
-      .then(() => render())
+      .then(() => renderAfterPeriodicRefresh())
       .catch(() => {});
   }
 }, 60000);
@@ -14320,13 +14349,12 @@ setInterval(() => {
 setInterval(() => {
   if (isInventoryCounter() || document.hidden) return;
   if (!dataStore.isConfigured() || !state.session) return;
-  const active = document.activeElement;
-  if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.tagName === "SELECT")) return;
+  if (isEditingFormField()) return;
   // «الفواتير السابقة» تُعرض داخل مسار المبيعات (state.salesHistoryOpen) لا مسار مستقل؛
   // نموذج إدخال الفاتورة نفسه لا يُعاد رسمه هنا (حارس الحقل النشط فوق، وشرط الشاشة).
   const salesHistory = state.route === "sales" && state.salesHistoryOpen;
   if (!salesHistory && !["ameen", "balances", "pricing", "dashboard", "payments"].includes(state.route)) return;
-  loadLiveInvoices().then((changed) => { if (changed) render(); }).catch(() => {});
+  loadLiveInvoices().then((changed) => { if (changed) renderAfterPeriodicRefresh(); }).catch(() => {});
 }, 10000);
 
 setInterval(async () => {
