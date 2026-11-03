@@ -17,7 +17,9 @@ jobs:
   # ------------------------------------------------------------
   validate-shard:
     name: validate shard ${{ matrix.shard }}/4
-    runs-on: ubuntu-latest
+    # مثبّت على ubuntu-24.04 لا ubuntu-latest: منذ 2026-11-03 صار ubuntu-latest هو ubuntu-26.04
+    # وفيه PostgreSQL 18 فقط، بينما الفحوص تشترط PostgreSQL 16 (التحقق أدناه يُفشل غيره عمداً).
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
       fail-fast: false
