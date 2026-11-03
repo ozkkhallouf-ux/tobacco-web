@@ -4,5 +4,8 @@
   "expectedAccountEmail": "ozkkhallouf@gmail.com",
   "edgeUrl": "",
   "stableSeconds": 180,
-  "pollSeconds": 30
+  "pollSeconds": 30,
+  "receipts": {
+    "enabled": false
+  }
 }
