@@ -369,6 +369,24 @@ function ConvertTo-AmeenHashtable {
     return $Value
 }
 
+# ---------------------------------------------------------------- وقت الحدث لا يسبق رصده
+function Limit-AmeenEventTimeToDetection {
+    # أوقات الأمين (log000.LogTime وbu000.CreateDate/LastUpdateDate) تُكتب بساعة الجهاز الذي أُدخلت
+    # منه الفاتورة، بلا منطقة زمنية، والوكيل يفسّرها بمنطقة جهازه هو. حين يختلف التوقيتان (2026-11-01:
+    # جهاز إدخال على توقيت سوريا UTC+3 والوكيل على بيروت UTC+2 بعد نهاية الصيفي) يتقدّم الوقت ساعة
+    # كاملة، فيُعزل الحدث «من المستقبل» في Test-AmeenInvoiceEvent وفي الخادم، ولا يصل أبداً.
+    # الحدث لا يمكن أن يقع بعد لحظة رصده، فيُقصّ وقت المصدر إلى وقت الرصد (ساعة خادم SQL). وقت أقدم
+    # من الرصد يبقى كما هو؛ وغياب أي من الوقتين أو تعذّر قراءته يُبقي وقت المصدر بلا تعديل.
+    param([string]$SourceAtUtc, [string]$DetectedAtUtc)
+    if (-not $SourceAtUtc -or -not $DetectedAtUtc) { return $SourceAtUtc }
+    $styles = [Globalization.DateTimeStyles]::AdjustToUniversal -bor [Globalization.DateTimeStyles]::AssumeUniversal
+    $src = [datetime]::MinValue; $det = [datetime]::MinValue
+    if (-not [datetime]::TryParse($SourceAtUtc, $script:Invariant, $styles, [ref]$src)) { return $SourceAtUtc }
+    if (-not [datetime]::TryParse($DetectedAtUtc, $script:Invariant, $styles, [ref]$det)) { return $SourceAtUtc }
+    if ($src -gt $det) { return $DetectedAtUtc }
+    return $SourceAtUtc
+}
+
 # ---------------------------------------------------------------- محلّل التغييرات
 function Resolve-AmeenInvoiceChanges {
     # المدخل: ملاحظات دورة رصد واحدة. كل ملاحظة:
@@ -397,6 +415,7 @@ function Resolve-AmeenInvoiceChanges {
             if (-not $at -and $o.source_update_utc) { $at = [string]$o.source_update_utc }
             if (-not $at -and $o.source_create_utc) { $at = [string]$o.source_create_utc }
             if (-not $at) { $at = [string]$o.detected_at_utc }
+            $at = Limit-AmeenEventTimeToDetection -SourceAtUtc $at -DetectedAtUtc ([string]$o.detected_at_utc)
             $State.last_seq = [long]$State.last_seq + 1
             $kind = "upsert"
             $eventId = Get-AmeenInvoiceEventId -BillGuid $guid -Seq ([long]$State.last_seq) -Kind $kind -VersionHash $version -SourceEventAt $at
@@ -419,6 +438,7 @@ function Resolve-AmeenInvoiceChanges {
             if ($null -eq $known -and -not $hasDeleteOp) { continue }
             $at = $latestOp
             if (-not $at) { $at = [string]$o.detected_at_utc }
+            $at = Limit-AmeenEventTimeToDetection -SourceAtUtc $at -DetectedAtUtc ([string]$o.detected_at_utc)
             $State.last_seq = [long]$State.last_seq + 1
             $kind = "delete"
             $eventId = Get-AmeenInvoiceEventId -BillGuid $guid -Seq ([long]$State.last_seq) -Kind $kind -VersionHash "deleted" -SourceEventAt $at
