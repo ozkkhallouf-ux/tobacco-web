@@ -80,7 +80,60 @@ function createFakeAmeen() {
     balance: async () => 250,
   };
   const remove = (guid) => db.invoices.delete(guid);
-  return { db, api, add, edit, remove, setNow: (t) => { db.now = t; }, reads: () => reads };
+
+  // ─── سندات القبض: نفس دلالة receipts-query.sql (سطر لكل مبلغ قبض على زبون) ───
+  db.receipts = new Map();
+  let lineSeq = 0;
+  function receiptLine(l = {}) {
+    lineSeq++;
+    return {
+      lineGuid: `eeeeeeee-0000-4000-8000-${String(lineSeq).padStart(12, "0")}`, number: lineSeq,
+      accountGuid: "aaaaaaaa-0000-4000-8000-000000000001", customerGuid: "aaaaaaaa-0000-4000-8000-000000000001",
+      customer: "زبون تجريبي", amount: 100, currencyVal: 1, currencyIso: "USD", cashName: "الصندوق الرئيسي", notes: "", ...l,
+    };
+  }
+  function addReceipt(rc) {
+    db.receipts.set(rc.guid, {
+      number: "1", posted: 1, entryLinks: 1, entryGuid: "cccccccc-0000-4000-8000-000000000001", notes: "",
+      lines: [receiptLine()], createdAt: db.now, updatedAt: "1980-01-01T00:00:00", date: db.now.slice(0, 10), ...rc,
+    });
+  }
+  function editReceipt(guid, patch) {
+    Object.assign(db.receipts.get(guid), patch, { updatedAt: db.now });
+  }
+  function receiptRows(rc) {
+    const changed = rc.updatedAt > rc.createdAt ? rc.updatedAt : rc.createdAt;
+    const head = {
+      receipt_guid: rc.guid, receipt_number: rc.number, receipt_date: rc.date, receipt_notes: rc.notes,
+      entry_links: rc.entryLinks, entry_guid: rc.entryGuid, is_posted: rc.posted,
+      changed_at: changed, created_at: rc.createdAt, seconds_since_change: secondsBetween(changed, db.now),
+    };
+    if (!rc.lines.length) return [{ ...head, line_guid: null, line_number: null, account_guid: null, customer_guid: null, customer_name: null, amount: null, native_amount: null, currency_val: null, currency_iso: null, cash_name: null, line_notes: null }];
+    return rc.lines.map((l) => ({
+      ...head, line_guid: l.lineGuid, line_number: l.number, account_guid: l.accountGuid, customer_guid: l.customerGuid,
+      customer_name: l.customer, amount: l.amount, native_amount: l.amount / (l.currencyVal || 1), currency_val: l.currencyVal,
+      currency_iso: l.currencyIso, cash_name: l.cashName, line_notes: l.notes,
+    }));
+  }
+  Object.assign(api, {
+    changedReceipts: async ({ since, sinceGuid = "", dateFrom, onlyGuid = null, createdFrom = null }) => {
+      reads++;
+      const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+      const vouchers = [...db.receipts.values()]
+        .filter((r) => r.date >= dateFrom && (!createdFrom || r.createdAt >= createdFrom))
+        .map((r) => ({ r, changed: r.updatedAt > r.createdAt ? r.updatedAt : r.createdAt }))
+        .filter(({ r, changed }) => changed > since || (changed === since && r.guid > sinceGuid))
+        .filter(({ r }) => !onlyGuid || r.guid === onlyGuid)
+        .sort((a, b) => cmp(a.changed, b.changed) || cmp(a.r.guid, b.r.guid))
+        .slice(0, 500);
+      return vouchers.flatMap(({ r }) => receiptRows(r));
+    },
+    receiptBaseline: async () => [...db.receipts.values()]
+      .map((r) => ({ receipt_guid: r.guid, created_at: r.createdAt }))
+      .sort((a, b) => (a.receipt_guid < b.receipt_guid ? -1 : 1)),
+    receiptBalance: async () => ({ previous: 500, current: 400 }),
+  });
+  return { db, api, add, edit, remove, addReceipt, editReceipt, receiptLine, removeReceipt: (g) => db.receipts.delete(g), setNow: (t) => { db.now = t; }, reads: () => reads };
 }
 
 // ─── المحوّل: PDF صغير صالح بنية، محتواه بصمة الـHTML ───

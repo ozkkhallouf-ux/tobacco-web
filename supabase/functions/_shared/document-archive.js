@@ -12,9 +12,16 @@
 //   * الوصف نص عادي بلا parse_mode، فلا حقن تنسيق.
 // ============================================================================
 
+// نصوص كل نوع بتذكيره وتأنيثه: «فاتورة جملة جديدة/معدّلة» و«سند قبض جديد/معدّل».
 export const DOC_TYPES = Object.freeze({
-  wholesale_invoice: { label: "فاتورة جملة", numberLabel: "فاتورة رقم", icon: "🧾" },
-  receipt: { label: "سند قبض", numberLabel: "سند قبض رقم", icon: "💵" },
+  wholesale_invoice: {
+    label: "فاتورة جملة", numberLabel: "فاتورة رقم", icon: "🧾",
+    isNew: "جديدة", isEdited: "معدّلة", newVersion: "فاتورة جديدة", amountLabel: "المبلغ",
+  },
+  receipt: {
+    label: "سند قبض", numberLabel: "سند قبض رقم", icon: "💵",
+    isNew: "جديد", isEdited: "معدّل", newVersion: "سند قبض جديد", amountLabel: "المبلغ المستلم",
+  },
 });
 
 // حد تيليغرام لوصف المرفق 1024 محرفاً؛ هامش للأمان.
@@ -113,7 +120,7 @@ export function buildNotifyCaption(v) {
   const versionLabel = tag(v.version);
   const versionText = edited
     ? `${versionLabel} — تعديل؛ الإصدار ${tag(v.version - 1)} وما قبله محفوظ بلا تغيير`
-    : `${versionLabel} — فاتورة جديدة`;
+    : `${versionLabel} — ${type.newVersion}`;
   const amount = v.amount === null || v.amount === undefined
     ? "—"
     : t.money(v.amount, v.currency || "$", 2);
@@ -122,12 +129,12 @@ export function buildNotifyCaption(v) {
   const title = `${t.name(v.customer_name, "زبون غير محدد", 80)} - ${type.numberLabel} ${t.name(v.doc_number)} - ${t.LRI}${d}-${m}-${y}${t.PDI}${edited ? ` - ${versionLabel}` : ""}`;
   const lines = [
     t.line(`${edited ? "✏️" : type.icon} ${title}`),
-    t.line(`${type.label} ${edited ? "معدّلة" : "جديدة"} — أرشفة ناجحة`),
+    t.line(`${type.label} ${edited ? type.isEdited : type.isNew} — أرشفة ناجحة`),
     t.field("الزبون", t.name(v.customer_name, "زبون غير محدد")),
     t.field("رقم المستند", t.name(v.doc_number)),
     t.field("الإصدار", versionText),
     t.field("التاريخ", `${t.LRI}${v.doc_date}${t.PDI}`),
-    t.field("المبلغ", amount),
+    t.field(type.amountLabel, amount),
     t.field("حالة الأرشفة", "✅ محفوظ في Google Drive (خاص)"),
     t.line("الرابط الخاص (يفتح بحساب المالك فقط):"),
     v.drive_link,

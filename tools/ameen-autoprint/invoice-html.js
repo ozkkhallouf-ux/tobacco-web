@@ -240,4 +240,4 @@ ${priced ? PRICE_CSS : ""}</head>
 </html>`;
 }
 
-module.exports = { buildInvoiceHtml, invoiceSummary };
+module.exports = { buildInvoiceHtml, invoiceSummary, officialFont };

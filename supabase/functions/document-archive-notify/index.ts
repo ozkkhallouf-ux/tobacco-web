@@ -110,7 +110,7 @@ type Claim = { status: "claimed" | "sent" | "in_progress" | "unknown"; token?: s
 
 // الوصف في تنبيه «غير محسوم» للمالك (Migration 26): نوع المستند ورقمه وتاريخه ونسخته، بلا زبون ولا مبلغ.
 function claimLabel(v: { doc_type: string; doc_number: string; doc_date: string; version: number | string }): string {
-  const kind = v.doc_type === "wholesale_invoice" ? "فاتورة جملة" : "مستند";
+  const kind = v.doc_type === "wholesale_invoice" ? "فاتورة جملة" : v.doc_type === "receipt" ? "سند قبض" : "مستند";
   return `${kind} رقم ${v.doc_number} — ${v.doc_date} — V${v.version}`;
 }
 
@@ -195,10 +195,10 @@ async function recordNotification(item: unknown): Promise<boolean> {
 }
 
 // اسم المرفق: من العامل إن كان آمناً، وإلا اسم ثابت. لا مسارات.
-function fileNameFor(v: { doc_number: string; doc_date: string }, given: string): string {
+function fileNameFor(v: { doc_type: string; doc_number: string; doc_date: string }, given: string): string {
   const cleaned = given.replace(/[\\/:*?"<>|\u0000-\u001f‎‏⁦-⁩]/g, " ").trim();
   if (cleaned.toLowerCase().endsWith(".pdf") && cleaned.length <= 180) return cleaned;
-  return `invoice-${v.doc_number}-${v.doc_date}.pdf`;
+  return `${v.doc_type === "receipt" ? "receipt" : "invoice"}-${v.doc_number}-${v.doc_date}.pdf`;
 }
 
 async function handleReport(req: Request): Promise<Response> {
