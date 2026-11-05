@@ -120,6 +120,15 @@
     return `<button type="button" class="sales-mode-btn" data-action="spr-open" title="${owner ? "فواتير المحاسب التي تنتظر تسعيرك" : "فواتيرك المرسلة للتسعير وحالتها"}">${label}${badge}</button>`;
   }
 
+  // مدخل ثابت في قائمة التنقل: على الهاتف تصير القائمة شبكة أعلى الصفحة، وزر شريط
+  // الفاتورة يقع تحتها بعيداً عن العين. بلا عدّاد عمداً: القائمة لا تُحمَّل في كل
+  // صفحة، وعدّاد قديم أسوأ من لا عدّاد. الفتح يعيد التحميل دائماً.
+  function navButton(ctx) {
+    const owner = ctx.isOwner();
+    const active = view.open && ctx.route() === "sales" ? "active" : "";
+    return `<button type="button" class="nav-link ${active}" data-action="spr-nav-open" title="${owner ? "فواتير المحاسب التي تنتظر تسعيرك" : "فواتيرك المرسلة للتسعير وحالتها"}">${owner ? "📝 بانتظار تسعيري" : "📝 فواتير التسعير"}</button>`;
+  }
+
   function lineStockHtml(ctx, line) {
     const s = ctx.stockForLine(line);
     if (!s) return "";
@@ -274,6 +283,10 @@
     root.querySelectorAll("[data-spr-select]").forEach((btn) => btn.addEventListener("click", () => {
       view.selectedId = Number(btn.dataset.sprSelect);
       ctx.render();
+      // على الشاشة الضيقة التفاصيل تحت القائمة: انقل العين إليها كي لا يبدو الضغط بلا أثر.
+      if (window.matchMedia?.("(max-width: 900px)").matches) {
+        document.querySelector(".spr-detail")?.scrollIntoView({ block: "start", behavior: "smooth" });
+      }
     }));
     root.querySelectorAll("[data-spr-price]").forEach((input) => input.addEventListener("input", () => {
       const r = selected();
@@ -343,6 +356,10 @@
     errorMessage,
     isOpen: () => view.open,
     close: () => { view.open = false; },
+    // يُستدعى بعد setRoute("sales") (الذي يغلق اللوحة) — يفتحها ويحمّل القائمة طازجة.
+    // وإن كان تحميل طازج جارياً أصلاً (أول دخول للصفحة يطلقه ensureLoaded) لا نطلق ثانياً.
+    openPanel: (ctx) => { view.open = true; if (view.loading) ctx.render(); else load(ctx); },
+    navButton,
     ensureLoaded: (ctx) => { if (!view.attempted && !view.loading) load(ctx, { quiet: true }); },
     toolbarButton,
     panel,

@@ -4911,6 +4911,7 @@ function shell(content) {
           ${state.session ? navButton("balances", "💳 أرصدة الزبائن") : ""}
           ${navButton("pricing", "نشرة الأسعار")}
           ${state.session ? navButton("sales", "🧮 فاتورة مبيعات") : ""}
+          ${state.session && !isInventoryCounter() && window.OzkSalesPriceRequests ? window.OzkSalesPriceRequests.navButton(salesPriceRequestsCtx()) : ""}
           ${state.session ? navButton("purchases", "🧾 فواتير مشتريات") : ""}
           ${state.session ? navButton("warehouses", "🏭 المستودعات والمناقلات") : ""}
           ${state.session ? navButton("inventoryRecon", "📋 الجرد الشهري") : ""}
@@ -10632,6 +10633,7 @@ function salesPriceRequestsCtx() {
     formatDateTime,
     isOwner,
     session: () => state.session,
+    route: () => state.route,
     money: (value, mode) => salesMoney(value, mode),
     fmtPlain: (value, mode) => salesFmtPlain(value, mode),
     stockForLine: (line) => salesStockSummary(salesItemByKey(line.key), line.unitKey, line.qty),
@@ -13568,6 +13570,13 @@ function render() {
       event.preventDefault();
       setRoute(button.dataset.route);
     });
+  });
+
+  // مدخل «فواتير التسعير» في قائمة التنقل: setRoute يغلق اللوحة، فتُفتح بعده.
+  app.querySelector("[data-action='spr-nav-open']")?.addEventListener("click", (event) => {
+    event.preventDefault();
+    setRoute("sales");
+    if (state.route === "sales") window.OzkSalesPriceRequests?.openPanel(salesPriceRequestsCtx());
   });
 
   app.querySelectorAll("[data-task]").forEach((button) => {
