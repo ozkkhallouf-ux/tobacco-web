@@ -23,6 +23,8 @@ const INDEX = read("index.html");
 
 // --- عقود ثابتة ----------------------------------------------------------------
 assert.match(MIGRATION, /^begin;/m, "الهجرة معاملة واحدة");
+assert.equal(read("supabase/migrations/20261105130000_sales_price_requests.sql"), MIGRATION,
+  "migrations/20261105130000_sales_price_requests.sql يجب أن تطابق proposed/27 حرفياً");
 assert.match(MIGRATION, /^commit;/m);
 assert.match(MIGRATION, /migration 27 guard: already applied/, "حارس التطبيق المكرر");
 assert.doesNotMatch(MIGRATION, /\b(delete\s+from|truncate|drop\s+table|alter\s+table\s+public\.(?!sales_price_requests))/i,
