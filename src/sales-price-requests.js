@@ -197,7 +197,7 @@
       </table></div>
       <div class="sales-summary">
         <div class="sales-summary-row"><span>الإجمالي</span><strong dir="ltr" data-spr-total>${showPrices ? esc(ctx.money(total, mode)) : "—"}</strong></div>
-        ${canPrice ? `<div class="sales-summary-row"><span>حسم (${sym})</span><input class="inv-input-main sales-amount-input" data-spr-discount value="${esc(discount)}" inputmode="decimal" dir="ltr" type="text" placeholder="0"></div>` : !canPrice && Number(r.discount) > 0 ? `<div class="sales-summary-row"><span>حسم</span><strong dir="ltr">${esc(ctx.money(r.discount, mode))}</strong></div>` : ""}
+        ${canPrice ? `<div class="sales-summary-row"><span>حسم (${sym})</span><input class="inv-input-main sales-amount-input" data-spr-discount value="${esc(discount)}" inputmode="decimal" dir="ltr" type="text" placeholder="0"></div>` : Number(r.discount) > 0 ? `<div class="sales-summary-row"><span>حسم</span><strong dir="ltr">${esc(ctx.money(r.discount, mode))}</strong></div>` : ""}
         ${showPrices ? `<div class="sales-summary-row sales-summary-net"><span>الصافي</span><strong dir="ltr" data-spr-net>${esc(ctx.money(net, mode))}</strong></div>` : ""}
       </div>
       ${actions}
