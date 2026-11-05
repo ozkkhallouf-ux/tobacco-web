@@ -932,6 +932,45 @@
       }
     },
 
+    // تصحيحات تصنيف النشرة (عامة/وزاري) — Migration 28. قراءة للطاقم، والكتابة عبر
+    // دالة set_item_bulletin_classification للمالك وحده مع سجل تدقيق في القاعدة.
+    // غياب الجدول (قبل تطبيق الهجرة) ليس فشلاً: available=false والتصنيف يبقى على
+    // التصحيحات المؤكدة المثبّتة بالكود وقاعدة الاسم.
+    async listItemBulletinClassifications() {
+      if (!client) return { rows: [], available: false };
+      const session = await getSupabaseSession();
+      if (!session) return { rows: [], available: true };
+      const { data, error } = await client
+        .from("item_bulletin_classifications")
+        .select("item_guid, item_key, item_name, item_number, bulletin, reason, updated_by_email, updated_at")
+        .limit(5000);
+      if (error) {
+        if (error.code === "42P01" || error.code === "PGRST205") return { rows: [], available: false };
+        throw new Error(translateDbError(error.message));
+      }
+      return { rows: data || [], available: true };
+    },
+
+    async setItemBulletinClassification({ itemGuid, bulletin, itemKey, itemName, reason }) {
+      if (!client) throw new Error("تصحيح التصنيف يحتاج الاتصال بقاعدة البيانات.");
+      await requireUser();
+      const guid = String(itemGuid || "").trim().replace(/^\{|\}$/g, "").toUpperCase();
+      const { data, error } = await client.rpc("set_item_bulletin_classification", {
+        p_item_guid: guid,
+        p_bulletin: String(bulletin || ""),
+        p_item_key: String(itemKey || ""),
+        p_item_name: String(itemName || ""),
+        p_reason: String(reason || "")
+      });
+      if (error) {
+        if (error.code === "PGRST202" || error.code === "42883") {
+          throw new Error("تصحيح التصنيف غير مفعّل بعد على قاعدة البيانات (Migration 28).");
+        }
+        throw new Error(translateDbError(error.message));
+      }
+      return data;
+    },
+
     async getCustomerMovementsReport() {
       if (!client) {
         const local = readJson(INVENTORY_REPORTS_KEY, []).filter((report) => report.source === "ameen_customer_movements");

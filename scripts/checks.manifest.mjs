@@ -35,6 +35,8 @@ export const CHECKS = [
   'check-assistant-read-only.mjs',
   'check-assistant-routing.mjs',
   'check-auto-confirm-removal.mjs',
+  'check-bulletin-classification-ui.mjs',
+  'check-bulletin-classification.mjs',
   'check-business-audit-item-identity.mjs',
   'check-cashier-reprint.mjs',
   'check-checks-manifest.mjs',

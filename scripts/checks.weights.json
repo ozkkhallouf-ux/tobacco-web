@@ -18,6 +18,8 @@
     "check-assistant-read-only.mjs": 1.5,
     "check-assistant-routing.mjs": 14.6,
     "check-auto-confirm-removal.mjs": 1.5,
+    "check-bulletin-classification-ui.mjs": 12,
+    "check-bulletin-classification.mjs": 3,
     "check-business-audit-item-identity.mjs": 0,
     "check-cashier-reprint.mjs": 0,
     "check-checks-manifest.mjs": 0,

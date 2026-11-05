@@ -3972,3 +3972,12 @@ details[open]>.acc-summary::after{transform:rotate(180deg)}
 .spr-empty {
   padding: 20px 0;
 }
+
+/* ===== تصنيف النشرة على بطاقة التسعير (src/bulletin-classification.js) ===== */
+.bulletin-class-line { display: grid; gap: 6px; }
+.bulletin-class-line[data-bulletin="wazari"] b { color: var(--accent, inherit); }
+.bulletin-class-editor > summary { cursor: pointer; font-size: 0.85rem; }
+.bulletin-class-editor form { display: grid; gap: 8px; margin-top: 8px; }
+.bulletin-class-editor label { display: grid; gap: 4px; font-size: 0.85rem; }
+.bulletin-class-editor select,
+.bulletin-class-editor input { width: 100%; max-width: 100%; box-sizing: border-box; padding: 8px; border: 1px solid var(--line); border-radius: 8px; font: inherit; }

@@ -282,3 +282,12 @@ definition لهذا المراقب، وقد جرى تعديله (PR #220) بإص
 | `27-sales-price-requests-rollback.sql` | يحذف الجدول والدوال (يحذف الطلبات المحفوظة — بموافقة المالك فقط). |
 
 التطبيق يدوي في SQL Editor بموافقة المالك، ثم تُنسخ إلى `supabase/migrations/` بالإصدار الفعلي.
+
+## 28: تصحيح تصنيف النشرة عامة/وزاري بمعرّف الأمين (2026-11-05) — غير مطبَّقة على الإنتاج
+
+| الملف | ما يفعله |
+|---|---|
+| `28-item-bulletin-classifications.sql` | جدولان جديدان (`item_bulletin_classifications`، `item_bulletin_classification_audit`)، دالة `set_item_bulletin_classification` للمالك وحده، ونافذة anon `bulletin_item_classification_feed` (item_key والنشرة فقط) لمولّد النشرات، وبذر تصحيحَي وينستون المخصص (463/464 ⇒ general). لا يمسّ أي جدول قائم ولا سعراً. |
+| `28-item-bulletin-classifications-rollback.sql` | يحذف الجدولين والدالة والنافذة وتسجيل الهجرة. الوينستون المخصص يبقى «عامة» لأن تصحيحه مثبّت بالكود. |
+
+التطبيق يدوي في SQL Editor بموافقة المالك عبر ملف اللصق الذرّي (حارس + تسجيل 20261105170000 داخل المعاملة + بصمة `approved_price_items` قبل/بعد)، ثم تُنسخ إلى `supabase/migrations/` بالإصدار الفعلي.
