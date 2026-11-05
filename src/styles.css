@@ -3873,3 +3873,96 @@ details[open]>.acc-summary::after{transform:rotate(180deg)}
 [data-theme="light"] .price-audit-tag { color: #9a5a0c; border-color: #9a5a0c; }
 .smart-bulk-toolbar{display:flex;justify-content:space-between;gap:10px;align-items:center;margin:12px 0}.smart-bulk-toolbar>input{flex:1;min-width:220px;padding:11px;border:1px solid var(--line);border-radius:9px;background:var(--surface);color:var(--ink);font:inherit}.smart-bulk-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:8px;max-height:360px;overflow:auto;padding:4px}.smart-bulk-row{display:flex;gap:10px;align-items:flex-start;padding:10px;border:1px solid var(--line);border-radius:10px;cursor:pointer}.smart-bulk-row input{margin-top:4px}.smart-bulk-row small{display:block;color:var(--muted);margin-top:3px}.smart-bulk-reason{display:grid;gap:5px;margin:12px 0;font-weight:800}.smart-bulk-reason input{width:100%;padding:11px;border:1px solid var(--line);border-radius:9px;background:var(--surface);color:var(--ink);font:inherit}.smart-bulk-result{margin-top:12px;padding:12px;border:1px solid var(--line);border-radius:10px}.smart-bulk-result ul{margin:8px 0 0;padding-inline-start:18px}
 @media(max-width:760px){.smart-bulk-toolbar{flex-direction:column;align-items:stretch}.smart-bulk-toolbar>input{min-width:0;width:100%}.smart-bulk-list{grid-template-columns:1fr}}
+
+/* ── فواتير بانتظار تسعير المالك (src/sales-price-requests.js) ── */
+.spr-stock {
+  display: block;
+  margin-top: 3px;
+  font-size: 0.76rem;
+  color: var(--muted, #6b6252);
+  line-height: 1.35;
+  white-space: normal;
+}
+.spr-stock.is-short {
+  color: #b42318;
+  font-weight: 700;
+}
+.spr-hint {
+  margin: 8px 0;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: var(--surface-soft);
+  border: 1px solid var(--line);
+  font-size: 0.88rem;
+}
+.spr-badge {
+  display: inline-block;
+  min-width: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: #b42318;
+  color: #fff;
+  font-size: 0.75rem;
+  text-align: center;
+}
+.spr-layout {
+  display: grid;
+  grid-template-columns: minmax(220px, 300px) minmax(0, 1fr);
+  gap: 14px;
+  margin-top: 12px;
+}
+@media (max-width: 900px) {
+  .spr-layout { grid-template-columns: minmax(0, 1fr); }
+}
+.spr-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.spr-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  text-align: start;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--ink);
+  font-family: inherit;
+  cursor: pointer;
+}
+.spr-item.active {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 1px var(--primary);
+}
+.spr-item-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+.spr-status {
+  font-size: 0.75rem;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  white-space: nowrap;
+}
+.spr-status.is-submitted { background: #fff4e5; color: #8a4b00; border-color: #f5c27a; }
+.spr-status.is-priced { background: #e8f5ec; color: #146c2e; border-color: #8fd1a3; }
+.spr-status.is-entered { background: #eef2f7; color: #374151; }
+.spr-status.is-cancelled { background: #f3f3f3; color: #777; text-decoration: line-through; }
+.spr-detail h3 {
+  margin: 0 0 4px;
+  font-size: 1.05rem;
+}
+.spr-table input.inv-input {
+  max-width: 120px;
+}
+.spr-cost {
+  display: block;
+  font-size: 0.72rem;
+}
+.spr-empty {
+  padding: 20px 0;
+}
