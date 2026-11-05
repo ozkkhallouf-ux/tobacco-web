@@ -1114,7 +1114,7 @@
     async listSalesPriceRequests() {
       if (!client) return [];
       const session = await getSupabaseSession();
-      if (!session) throw new Error(missingSessionMessage());
+      if (!session) return [];
       const { data, error } = await client
         .from("sales_price_requests")
         .select("id, status, mode, rate, customer_name, pay_method, note, lines, total, discount, net, version, created_by, created_by_email, created_at, priced_at, ameen_bill_no, entered_at, cancel_reason")
