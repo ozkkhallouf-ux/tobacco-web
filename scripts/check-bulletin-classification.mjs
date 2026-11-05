@@ -24,6 +24,10 @@ const INDEX = read("index.html");
 const SW = read("public/service-worker.js");
 const MIGRATION = read("supabase/proposed/28-item-bulletin-classifications.sql");
 const ROLLBACK = read("supabase/proposed/28-item-bulletin-classifications-rollback.sql");
+// مطبّقة على الإنتاج بالإصدار 20261105170000؛ نسخة migrations يجب أن تطابق proposed/28 حرفياً
+// كي لا يراها Supabase CLI هجرة مختلفة أو ناقصة.
+assert.equal(read("supabase/migrations/20261105170000_item_bulletin_classifications.sql"), MIGRATION,
+  "migrations/20261105170000_item_bulletin_classifications.sql يجب أن تطابق proposed/28 حرفياً");
 
 await import("../src/bulletin-classification.js");
 const C = globalThis.ozkBulletinClassification;
