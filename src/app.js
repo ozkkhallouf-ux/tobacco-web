@@ -350,6 +350,10 @@ const state = {
   bulletinPdfTheme: readJson("bulletin-pdf-theme", "dark") === "light" ? "light" : "dark",
   openSections: {},
   priceMode: readJson("price-mode", "jumla"),
+  // تصحيحات تصنيف النشرة (عامة/وزاري) المحفوظة في Supabase — src/bulletin-classification.js
+  bulletinClassifications: [],
+  bulletinClassificationsStatus: "idle",
+  bulletinClassificationsError: null,
   showExchangeModal: false,
   pricePreview: null
 };
@@ -2297,8 +2301,30 @@ async function loadApprovedPriceItems() {
     state.approvedPriceItems = [];
     state.approvedPriceError = safeErrorMessage(error);
   }
+  await loadBulletinClassifications();
   // لائحة الأسعار احتياط دليل المواد للفواتير الفورية: وصولها يعيد الدمج فوراً.
   await loadLiveInvoices();
+}
+
+// تصحيحات تصنيف النشرة: فشل التحميل لا يُسقط الصفحة — يبقى التصنيف على
+// التصحيحات المؤكدة المثبّتة وقاعدة الاسم، ويُعلن السبب في قسم الوزاري.
+async function loadBulletinClassifications() {
+  if (!dataStore.listItemBulletinClassifications || (dataStore.isConfigured() && !state.session)) {
+    state.bulletinClassifications = [];
+    state.bulletinClassificationsStatus = "idle";
+    state.bulletinClassificationsError = null;
+    return;
+  }
+  try {
+    const result = await dataStore.listItemBulletinClassifications();
+    state.bulletinClassifications = result.rows || [];
+    state.bulletinClassificationsStatus = result.available === false ? "not_installed" : "ok";
+    state.bulletinClassificationsError = null;
+  } catch (error) {
+    state.bulletinClassifications = [];
+    state.bulletinClassificationsStatus = "error";
+    state.bulletinClassificationsError = safeErrorMessage(error);
+  }
 }
 
 async function loadPaymentRecords(customerKey) {
@@ -3276,19 +3302,27 @@ function customerPriceListItems(mode, options) {
   return consolidateGeneralPriceItems(items, mode);
 }
 
+// التصنيف عامة/وزاري من مصدر واحد مشترك مع مولّد النشرات
+// (src/bulletin-classification.js): تصحيح المالك بالـGUID ← تصحيح مؤكد مثبّت ← قاعدة الاسم.
+let _bulletinIndexRef = null;
+let _bulletinIndex = null;
+function bulletinOverrideIndex() {
+  const engine = window.ozkBulletinClassification;
+  if (!engine) return null;
+  if (_bulletinIndex && _bulletinIndexRef === state.bulletinClassifications) return _bulletinIndex;
+  _bulletinIndexRef = state.bulletinClassifications;
+  _bulletinIndex = engine.buildOverrideIndex(state.bulletinClassifications || []);
+  return _bulletinIndex;
+}
+
+function itemBulletinClassification(item) {
+  const engine = window.ozkBulletinClassification;
+  if (!engine) throw new Error("src/bulletin-classification.js لم يُحمَّل قبل app.js");
+  return engine.classifyItem(item, bulletinOverrideIndex());
+}
+
 function isWazariPriceItem(item) {
-  const name = normalizeItemName(item.name || item.itemName || "");
-  if (name.includes("نخله") && (name.includes("محزر") || name.includes("وزاري"))) return true;
-  if (name.includes("كينت") && !name.includes("حره")) return true;
-  if (name.includes("وينستون") && !name.includes("حره")) return true;
-  if (name.includes("فاخر") && name.includes("اسود") && name.includes("محزر")) return true;
-  if (
-    name.includes("مالبورو") &&
-    (name.includes("محزر") ||
-      (name.includes("ورق") && (name.includes("ابيض") || name.includes("احمر"))) ||
-      (name.includes("كوين") && name.includes("ازرق")))
-  ) return true;
-  return false;
+  return itemBulletinClassification(item).bulletin === "wazari";
 }
 
 function hasFullSecondUnit(item) {
@@ -4564,6 +4598,14 @@ function pricingWorklistItems({ ignoreSearch = false } = {}) {
       return String(item.key || "").includes(query) || normalizeItemName(item.name).includes(query);
     })
     .sort((a, b) => Number(a.hasApprovedPrice) - Number(b.hasApprovedPrice) || String(a.name || "").localeCompare(String(b.name || ""), "ar"));
+}
+
+// قائمة تسعير الوزاري: كل صنف وزاري فعلي بمخزون موجب في آخر جرد، بلا دمج ولا
+// حد كرتونة (الحد يحكم ظهوره بنشرة الجملة فقط ويُعرض على البطاقة). غير المسعّر أولاً.
+function wazariPricingWorklistItems() {
+  return pricingWorklistItems({ ignoreSearch: true })
+    .filter((item) => isWazariPriceItem(item))
+    .map((item) => ({ ...item, sourceKeys: [] }));
 }
 
 // قائمة العمل داخل الموقع تطابق النشرة العامة: الوزاري منفصل والدمج ظاهر كما يراه الزبون.
@@ -5948,6 +5990,7 @@ function pricingRow(item) {
       ${belowCostLine}
       ${retailHint}
       <span>${escapeHtml(priced ? "الأسعار مستقلة — راجع الحقلين" : statusLabel(item.status))}</span>
+      ${pricingBulletinLine(item)}
       <form class="pricing-editor" data-form="pricing-item" data-item-key="${escapeHtml(item.key)}" data-source-keys="${escapeHtml(JSON.stringify(item.sourceKeys || []))}" data-item-name="${escapeHtml(item.name || "")}" data-stock-qty="${escapeHtml(qty)}" data-stock-status="${escapeHtml(item.status || "")}" data-unit1-name="${escapeHtml(unit1Name)}" data-unit2-name="${escapeHtml(unit2Name)}" data-unit2-factor="${escapeHtml(unit2Factor)}">
         <div class="pricing-editor-fields">
           <label>
@@ -5967,6 +6010,101 @@ function pricingRow(item) {
       </form>
     </div>
   `;
+}
+
+const BULLETIN_SOURCE_LABELS = Object.freeze({
+  owner_override: "تصحيح المالك",
+  confirmed_override: "تصحيح مؤكد بمعرّف الأمين",
+  name_rule: "حسب الاسم"
+});
+
+// سطر التصنيف على بطاقة التسعير. الجميع يرى النشرة التي يتبعها الصنف؛ المالك وحده
+// يرى نموذج تصحيح التصنيف (والقاعدة ترفض أي محاولة من غيره — Migration 28).
+function pricingBulletinLine(item) {
+  const merged = Array.isArray(item.sourceKeys) && item.sourceKeys.length > 0;
+  if (merged) return "";
+  const result = itemBulletinClassification(item);
+  const sourceLabel = BULLETIN_SOURCE_LABELS[result.source] || "";
+  const wazari = result.bulletin === "wazari";
+  const jumlaHint = wazari
+    ? (hasFullSecondUnit(item) ? "يظهر بنشرة الوزاري جملة ومفرق" : "مفرق فقط — أقل من وحدة ثانية كاملة لنشرة الجملة")
+    : "";
+  const guid = normGuid(item.itemGuid);
+  const canEdit = isOwner() && Boolean(guid) && Boolean(dataStore.setItemBulletinClassification);
+  const editor = canEdit
+    ? `<details class="bulletin-class-editor">
+        <summary>تصحيح التصنيف (المالك)</summary>
+        <form data-form="bulletin-classification" data-item-guid="${escapeHtml(guid)}" data-item-key="${escapeHtml(item.key || "")}" data-item-name="${escapeHtml(item.name || "")}" data-current="${escapeHtml(result.bulletin)}">
+          <label><span>النشرة</span>
+            <select name="bulletin">
+              <option value="general"${wazari ? "" : " selected"}>الأصناف العامة</option>
+              <option value="wazari"${wazari ? " selected" : ""}>الوزاري</option>
+              <option value="auto">حسب الاسم (إزالة التصحيح)</option>
+            </select>
+          </label>
+          <label><span>السبب (إلزامي، يُحفظ في سجل التدقيق)</span>
+            <input name="reason" type="text" minlength="3" maxlength="300" required placeholder="مثال: صنف عام وليس وزاري">
+          </label>
+          <button class="button secondary mini-button" type="submit">حفظ التصنيف</button>
+        </form>
+      </details>`
+    : "";
+  return `<div class="bulletin-class-line" data-bulletin="${escapeHtml(result.bulletin)}">
+      <small>التصنيف: <b>${escapeHtml(result.label)}</b> · ${escapeHtml(sourceLabel)}${jumlaHint ? ` · ${escapeHtml(jumlaHint)}` : ""}</small>
+      ${editor}
+    </div>`;
+}
+
+async function saveBulletinClassification(form) {
+  const bulletin = String(form.querySelector("[name='bulletin']")?.value || "");
+  const reason = String(form.querySelector("[name='reason']")?.value || "").trim();
+  try {
+    if (!isOwner()) throw new Error("تصحيح التصنيف للمالك فقط.");
+    if (!["general", "wazari", "auto"].includes(bulletin)) throw new Error("اختر النشرة.");
+    if (reason.length < 3) throw new Error("اكتب سبب التصحيح (3 أحرف على الأقل).");
+    await dataStore.setItemBulletinClassification({
+      itemGuid: form.dataset.itemGuid || "",
+      bulletin,
+      itemKey: form.dataset.itemKey || "",
+      itemName: form.dataset.itemName || "",
+      reason
+    });
+    await loadBulletinClassifications();
+    setNotice("success", `حُفظ تصنيف «${form.dataset.itemName || ""}». لا يتغيّر أي سعر.`);
+  } catch (error) {
+    setNotice("error", `تعذّر حفظ التصنيف: ${safeErrorMessage(error)}`);
+  }
+  render();
+}
+
+function wazariPricingSection() {
+  const items = wazariPricingWorklistItems();
+  const priced = items.filter((item) => item.hasApprovedPrice || item.unit2Price > 0 || itemRetailPrice(item) > 0).length;
+  const unpriced = items.length - priced;
+  const status = state.bulletinClassificationsStatus;
+  const statusNote = status === "error"
+    ? `<p class="muted">تعذّر تحميل تصحيحات التصنيف المحفوظة (${escapeHtml(state.bulletinClassificationsError || "")})، فالتصنيف الآن حسب الاسم والتصحيحات المؤكدة فقط.</p>`
+    : status === "not_installed" && isOwner()
+      ? '<p class="muted">جدول تصحيحات التصنيف غير مفعّل بعد على قاعدة البيانات (Migration 28)؛ التصحيحات المؤكدة المثبّتة بالكود فعّالة.</p>'
+      : "";
+  const emptyText = dataStore.isConfigured() && !state.session
+    ? "سجل الدخول أولاً حتى تظهر أصناف الوزاري."
+    : "لا توجد أصناف وزاري بمخزون موجب في آخر جرد.";
+  return `
+      <section class="panel wide inventory-browser newsletter-pricing-panel" data-pricing-section="wazari">
+      <div class="panel-title-row inventory-browser-head">
+        <div>
+          <span class="newsletter-section-label">نشرة الوزاري</span>
+          <h3>تسعير أصناف الوزاري</h3>
+          <p class="muted">كل صنف وزاري فعلي بمخزون موجب. السعر المحفوظ هنا يظهر في نشرتي الوزاري (دولار وسوري) فقط، ولا يظهر في النشرة العامة.</p>
+        </div>
+        <span class="status-chip">${escapeHtml(priced)} مسعّر · ${escapeHtml(unpriced)} غير مسعّر</span>
+      </div>
+      ${statusNote}
+      <div class="inventory-list inventory-list-dense pricing-list" data-wazari-pricing-results>
+        ${items.length ? groupedAccordion("pricingWazari", items, { groupOf: (i) => i.groupName, rowOf: (i) => pricingRow(i) }) : `<p class="muted">${escapeHtml(emptyText)}</p>`}
+      </div>
+      </section>`;
 }
 
 // ===== تدقيق النشرة: مواد تحت سعر التكلفة ومواد غير مسعّرة =====
@@ -6349,9 +6487,9 @@ function pricing() {
       <section class="panel wide inventory-browser newsletter-pricing-panel">
       <div class="panel-title-row inventory-browser-head">
         <div>
-          <span class="newsletter-section-label">مراجعة المواد</span>
-          <h3>أسعار النشرة</h3>
-          <p class="muted">تظهر هنا النشرة العامة فقط بعد استبعاد الوزاري ودمج الأصناف المتشابهة. بعد حفظ الأسعار تُحدّث النشرة تلقائياً خلال لحظات.</p>
+          <span class="newsletter-section-label">النشرة العامة</span>
+          <h3>تسعير الأصناف العامة</h3>
+          <p class="muted">تظهر هنا أصناف النشرة العامة فقط بعد استبعاد الوزاري ودمج الأصناف المتشابهة. أصناف الوزاري لها قسم مستقل أدناه. بعد حفظ الأسعار تُحدّث النشرة تلقائياً خلال لحظات.</p>
         </div>
         <span class="status-chip">${escapeHtml(approvedCount)} سعر معتمد</span>
       </div>
@@ -6385,6 +6523,7 @@ function pricing() {
         </form>
       </details>
       </section>
+      ${wazariPricingSection()}
     </section>
   `);
 }
@@ -13208,7 +13347,19 @@ function bindCustomerDetailButtons(root = app) {
   });
 }
 
+function bindBulletinClassificationForms(root = app) {
+  root.querySelectorAll("[data-form='bulletin-classification']").forEach((form) => {
+    if (form.dataset.bound === "true") return;
+    form.dataset.bound = "true";
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      saveBulletinClassification(event.currentTarget);
+    });
+  });
+}
+
 function bindPricingForms(root = app) {
+  bindBulletinClassificationForms(root);
   root.querySelectorAll("[data-form='pricing-item']").forEach((form) => {
     if (form.dataset.bound === "true") return;
     form.dataset.bound = "true";

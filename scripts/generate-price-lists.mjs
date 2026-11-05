@@ -9,6 +9,8 @@ import { createHash } from "node:crypto";
 // الخط الرسمي أولاً: القالب يقرأ اسمه وأوجهه منه (src/ozk-font.js).
 import "../src/ozk-font.js";
 import "../src/price-list-template.js";
+// تصنيف عامة/وزاري من مصدر واحد مشترك مع الموقع (src/app.js).
+import "../src/bulletin-classification.js";
 
 const __dir = dirname(fileURLToPath(import.meta.url));
 const root  = resolve(__dir, "..");
@@ -150,6 +152,7 @@ if (feed.length) {
   const mapRow = (r) => {
     const name = canonicalDisplayName(r.item_name);
     return {
+      key: String(r.item_key || "").trim(),
       name,
       group: groupByName.get(name) ?? name.split(" ")[0],
       unit: r.unit2_name || "كرتونة",
@@ -177,19 +180,37 @@ if (feed.length) {
 
 // ── فصل الوزاري وتجميع أصناف المعسل المتشابهة ────────────────────────────────
 const includes = (name, text) => name.includes(text);
-const isWazari = (item) => {
-  const name = item.name;
-  if (includes(name, "نخلة") && (includes(name, "محزر") || includes(name, "وزاري"))) return true;
-  if (includes(name, "كينت") && !includes(name, "حرة")) return true;
-  if (includes(name, "وينستون") && !includes(name, "حرة")) return true;
-  if (includes(name, "فاخر") && includes(name, "اسود") && includes(name, "محزر")) return true;
-  if (includes(name, "مالبورو") && (
-    includes(name, "محزر") ||
-    (includes(name, "ورق") && (includes(name, "ابيض") || includes(name, "أبيض") || includes(name, "احمر") || includes(name, "أحمر"))) ||
-    (includes(name, "كوين") && (includes(name, "ازرق") || includes(name, "أزرق")))
-  )) return true;
-  return false;
-};
+const bulletinEngine = globalThis.ozkBulletinClassification;
+if (!bulletinEngine) throw new Error("src/bulletin-classification.js لم يعرّف ozkBulletinClassification");
+
+// تصحيحات المالك المحفوظة (Migration 28) عبر نافذة عامة لا تكشف إلا item_key والنشرة
+// لأصناف النافذة نفسها. قبل تطبيق الهجرة (النافذة غير موجودة) نكتفي بالتصحيحات المؤكدة
+// المثبّتة وقاعدة الاسم، وأي خطأ آخر يوقف التوليد: نشرة بتصنيف ناقص أسوأ من لا نشرة.
+async function fetchOwnerBulletinClassifications() {
+  const res = await fetch(
+    `${SUPABASE_URL}/rest/v1/bulletin_item_classification_feed?select=item_key,bulletin&limit=5000`,
+    {
+      headers: {
+        apikey: SUPABASE_KEY,
+        Authorization: `Bearer ${SUPABASE_KEY}`,
+        "Accept-Profile": "public",
+        "Cache-Control": "no-cache",
+        Pragma: "no-cache"
+      }
+    }
+  );
+  if (res.ok) return { rows: await res.json(), available: true };
+  const body = await res.text();
+  if (res.status === 404 || /PGRST205|42P01/.test(body)) return { rows: [], available: false };
+  throw new Error(`تعذّر قراءة تصحيحات تصنيف النشرة (${res.status}): ${body}`);
+}
+const ownerClassifications = await fetchOwnerBulletinClassifications();
+if (!ownerClassifications.available) {
+  console.warn("تنبيه: نافذة تصحيحات التصنيف غير مفعّلة بعد (Migration 28) — التصنيف بالتصحيحات المؤكدة وقاعدة الاسم.");
+}
+const bulletinIndex = bulletinEngine.buildOverrideIndex(ownerClassifications.rows);
+// صف النافذة لا يحمل GUID، فالمطابقة بالمفتاح item_key الحرفي بعد التطبيع.
+const isWazari = (item) => bulletinEngine.isWazariItem({ itemKey: item.key || item.name, name: item.name }, bulletinIndex);
 
 const shishaLabel = (item) => {
   const name = item.name;
