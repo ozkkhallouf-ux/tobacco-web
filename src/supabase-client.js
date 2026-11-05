@@ -1107,6 +1107,86 @@
       return { id: data.id, token: data.public_token, publicUrl: `receipt.html?t=${data.public_token}` };
     },
 
+    // ── فواتير بانتظار تسعير المالك (Migration 27) ─────────────────────────
+    // القراءة مباشرة (RLS: الطاقم)، وكل كتابة عبر الدوال وحدها — لا insert/update
+    // على الجدول من المتصفح. رسالة الخطأ تبقى رمز الخادم الخام (version_conflict…)
+    // كي تترجمه src/sales-price-requests.js إلى نص واضح.
+    async listSalesPriceRequests() {
+      if (!client) return [];
+      const session = await getSupabaseSession();
+      if (!session) return [];
+      const { data, error } = await client
+        .from("sales_price_requests")
+        .select("id, status, mode, rate, customer_name, pay_method, note, lines, total, discount, net, version, created_by, created_by_email, created_at, priced_at, ameen_bill_no, entered_at, cancel_reason")
+        .order("created_at", { ascending: false })
+        .limit(200);
+      if (error) throw new Error(translateDbError(error.message));
+      return (data || []).map((row) => ({
+        id: Number(row.id),
+        status: row.status,
+        mode: row.mode === "mufrak" ? "mufrak" : "jumla",
+        rate: row.rate === null ? null : Number(row.rate),
+        customerName: row.customer_name || "",
+        payMethod: row.pay_method,
+        note: row.note || "",
+        lines: Array.isArray(row.lines) ? row.lines : [],
+        total: Number(row.total || 0),
+        discount: Number(row.discount || 0),
+        net: Number(row.net || 0),
+        version: Number(row.version),
+        createdBy: row.created_by,
+        createdByEmail: row.created_by_email || "",
+        createdAt: row.created_at,
+        pricedAt: row.priced_at,
+        ameenBillNo: row.ameen_bill_no || "",
+        enteredAt: row.entered_at,
+        cancelReason: row.cancel_reason || ""
+      }));
+    },
+
+    async submitSalesPriceRequest({ mode, customerName, payMethod, lines, rate, note }) {
+      if (!client) throw new Error("غير متصل بقاعدة البيانات.");
+      const session = await getSupabaseSession();
+      if (!session) throw new Error(missingSessionMessage());
+      const { data, error } = await client.rpc("sales_price_request_submit", {
+        p_mode: mode,
+        p_customer_name: customerName || "",
+        p_pay_method: payMethod,
+        p_lines: lines,
+        p_rate: rate ?? null,
+        p_note: note || ""
+      });
+      if (error) throw new Error(error.message || "submit_failed");
+      return data;
+    },
+
+    async priceSalesPriceRequest(id, version, prices, discount) {
+      if (!client) throw new Error("غير متصل بقاعدة البيانات.");
+      const { data, error } = await client.rpc("sales_price_request_price", {
+        p_id: id, p_version: version, p_prices: prices, p_discount: discount || 0
+      });
+      if (error) throw new Error(error.message || "price_failed");
+      return data;
+    },
+
+    async markSalesPriceRequestEntered(id, version, ameenBillNo) {
+      if (!client) throw new Error("غير متصل بقاعدة البيانات.");
+      const { data, error } = await client.rpc("sales_price_request_mark_entered", {
+        p_id: id, p_version: version, p_ameen_bill_no: ameenBillNo
+      });
+      if (error) throw new Error(error.message || "mark_entered_failed");
+      return data;
+    },
+
+    async cancelSalesPriceRequest(id, version, reason) {
+      if (!client) throw new Error("غير متصل بقاعدة البيانات.");
+      const { data, error } = await client.rpc("sales_price_request_cancel", {
+        p_id: id, p_version: version, p_reason: reason || ""
+      });
+      if (error) throw new Error(error.message || "cancel_failed");
+      return data;
+    },
+
     async listCustomerCreditLimits() {
       if (!client) return readJson(CUSTOMER_LIMITS_KEY, []);
 

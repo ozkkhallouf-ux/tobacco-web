@@ -273,3 +273,12 @@ definition لهذا المراقب، وقد جرى تعديله (PR #220) بإص
 | `26-document-archive-notify-claims-rollback.sql` | تراجع جاهز — غير مطبَّق | يحذف الجدول ودواله الأربع وحدها؛ جداول 22 لا تُمسّ. انشر قبله نسخة الدالة السابقة. |
 
 - **اختبار:** `scripts/check-drive-invoice-archive.mjs` فوق 22 على Postgres محلي (`supabase/tests/document-archive-notify-claims.sql`)، ثم 12 عملية psql متوازية تحجز المهمة نفسها (حجز واحد بالضبط)، ثم التراجع.
+
+## 27: فواتير بانتظار تسعير المالك (2026-11-05) — غير مطبَّقة على الإنتاج
+
+| الملف | ما يفعله |
+|---|---|
+| `27-sales-price-requests.sql` | جدول جديد `sales_price_requests` ودوال `sales_price_request_submit/price/mark_entered/cancel`. لا يمسّ أي جدول قائم. معاملة واحدة بحارس. |
+| `27-sales-price-requests-rollback.sql` | يحذف الجدول والدوال (يحذف الطلبات المحفوظة — بموافقة المالك فقط). |
+
+التطبيق يدوي في SQL Editor بموافقة المالك، ثم تُنسخ إلى `supabase/migrations/` بالإصدار الفعلي.

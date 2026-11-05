@@ -2402,6 +2402,7 @@ function setRoute(route, clearNotice = true) {
   // لا إلى الأرشيف، كي لا تفتح «فاتورة مبيعات» فتجد قائمة الفواتير القديمة.
   state.salesHistoryOpen = false;
   cancelSalesHistorySearch();
+  window.OzkSalesPriceRequests?.close();
   if (clearNotice) state.notice = null;
   if (state.route === "smartInventory" && state.session) window.SmartInventory?.load(state.session);
   render();
@@ -10290,6 +10291,11 @@ function salesInvoice() {
   // شاشة الفواتير السابقة تُعرض قبل أي حساب للفاتورة الحالية: لا نستدعي
   // ensureSalesInvoiceNo هنا كي لا يُحجز أو يُستهلك رقم لمجرد تصفّح الأرشيف.
   if (state.salesHistoryOpen) return shell(salesHistoryPanel());
+  const priceRequests = window.OzkSalesPriceRequests;
+  if (priceRequests?.isOpen()) return shell(priceRequests.panel(salesPriceRequestsCtx()));
+  // فاتورة حساب غير المالك (المحاسب) لا تُحفظ مباشرة: تُرسل لتسعير المالك ثم تُدخل
+  // يدوياً في الأمين. فاتورة المالك من حسابه تبقى كما كانت (طلب عمر 2026-11-05).
+  const needsPricing = salesNeedsOwnerPricing();
 
   const mode = salesCurrentMode();
   const symbol = salesCurrencySymbol(mode);
@@ -10324,7 +10330,7 @@ function salesInvoice() {
         <input class="inv-input sales-search" data-sales-field="q" data-sales-index="${i}" value="${escapeHtml(row.q)}" placeholder="رقم الصنف أو الاسم" dir="auto" autocomplete="off">
         <div class="sales-suggest" data-sales-suggest="${i}"></div>
       </td>
-      <td class="sales-cell-name">${resolved ? `<strong>${escapeHtml(computed.item.itemName)}</strong>${salesItemCode(computed.item) ? `<small class="muted" dir="ltr"> #${escapeHtml(salesItemCode(computed.item))}</small>` : ""}<button type="button" class="sales-info-btn" data-sales-info="${escapeHtml(computed.item.itemKey)}" title="معلومات الصنف: المخزون والتكلفة والربح والمستودعات">i</button>` : '<span class="muted">—</span>'}</td>
+      <td class="sales-cell-name">${resolved ? `<strong>${escapeHtml(computed.item.itemName)}</strong>${salesItemCode(computed.item) ? `<small class="muted" dir="ltr"> #${escapeHtml(salesItemCode(computed.item))}</small>` : ""}<button type="button" class="sales-info-btn" data-sales-info="${escapeHtml(computed.item.itemKey)}" title="معلومات الصنف: المخزون والتكلفة والربح والمستودعات">i</button>${salesRowStockHtml(computed.item, row)}` : '<span class="muted">—</span>'}</td>
       <td class="sales-cell-unit">
         <button type="button" class="sales-unit-toggle" data-sales-unit="${i}" ${resolved ? "" : "disabled"} title="${resolved ? `تبديل إلى ${escapeHtml(otherLabel)}` : "اختر صنفاً أولاً"}">${escapeHtml(unitLabel)}</button>
       </td>
@@ -10343,6 +10349,7 @@ function salesInvoice() {
       <div class="inv-form-area">
         <div class="sales-toolbar">
           <button type="button" class="sales-mode-btn" data-action="sales-history-open" title="عرض الفواتير السابقة من الأمين">↩ الفواتير السابقة</button>
+          ${priceRequests ? priceRequests.toolbarButton(salesPriceRequestsCtx()) : ""}
           <div class="sales-mode-switch" role="group" aria-label="وضع التسعير">
             <button type="button" class="sales-mode-btn ${mode === "jumla" ? "active" : ""}" data-sales-mode="jumla">جملة · دولار</button>
             <button type="button" class="sales-mode-btn ${mode === "mufrak" ? "active" : ""}" data-sales-mode="mufrak">مفرق · سوري</button>
@@ -10352,8 +10359,8 @@ function salesInvoice() {
 
         <div class="sales-header-grid">
           <label class="inv-label">رقم الفاتورة
-            <input class="inv-input-main" value="${escapeHtml(invNo || "—")}" readonly dir="ltr">
-            <small class="muted sales-inv-no-hint">${escapeHtml(salesInvoiceNoHint())}</small>
+            <input class="inv-input-main" value="${escapeHtml(needsPricing ? "—" : (invNo || "—"))}" readonly dir="ltr">
+            <small class="muted sales-inv-no-hint">${escapeHtml(needsPricing ? "الرقم يُعطى في الأمين بعد التسعير" : salesInvoiceNoHint())}</small>
           </label>
           <label class="inv-label">التاريخ
             <input class="inv-input-main" value="${escapeHtml(todayIsoDate())}" readonly dir="ltr">
@@ -10371,6 +10378,7 @@ function salesInvoice() {
         </div>
 
         ${priceLoaded ? "" : '<p class="muted sales-hint">لم تُحمّل لائحة الأسعار بعد — لن تظهر اقتراحات المواد حتى تُحمّل.</p>'}
+        ${needsPricing ? '<p class="spr-hint">هذه الفاتورة تُرسل لتسعير المالك ولا تُحفظ في الأمين. بعد أن تصير «مسعّرة» أدخلها في الأمين بأسعارها.</p>' : ""}
 
         <div class="inv-table-wrap">
           <table class="inv-table sales-table">
@@ -10404,9 +10412,11 @@ function salesInvoice() {
         <div data-sales-cust-host>${salesCustomerPanel()}</div>
 
         <div class="inv-actions sales-actions">
-          <button class="button primary" data-action="sales-save">💾 حفظ الفاتورة</button>
+          ${needsPricing
+            ? '<button class="button primary" data-action="sales-submit-pricing">📨 إرسال للتسعير</button>'
+            : `<button class="button primary" data-action="sales-save">💾 حفظ الفاتورة</button>
           ${mode === "jumla" ? '<button class="button secondary" data-action="sales-pdf">📄 حفظ / مشاركة PDF</button>' : ""}
-          ${isHandheldDevice() ? "" : `<button class="button secondary" data-action="sales-print">🖨 ${mode === "mufrak" ? "طباعة فاتورة كاشير" : "طباعة"}</button>`}
+          ${isHandheldDevice() ? "" : `<button class="button secondary" data-action="sales-print">🖨 ${mode === "mufrak" ? "طباعة فاتورة كاشير" : "طباعة"}</button>`}`}
           <button class="button secondary" data-action="sales-new">＋ فاتورة جديدة</button>
         </div>
       </div>
@@ -10558,12 +10568,137 @@ function salesNewInvoice() {
   render();
 }
 
+// ── فواتير بانتظار تسعير المالك (src/sales-price-requests.js) ─────────────────
+function salesNeedsOwnerPricing() {
+  return !isOwner() && !!window.OzkSalesPriceRequests?.needsOwnerPricing(state.session);
+}
+
+// المتوفر بالمستودعات من تقرير ameen_item_details (الكمية فيه بالوحدة الأولى/الكروز،
+// ومستودع الامانة مستبعد أصلاً في المصدر). null = لا تقرير أو الصنف غير موجود فيه.
+function salesStoresAvailableUnit1(item) {
+  const details = salesDetailsFor(item);
+  if (!details || !Array.isArray(details.stores)) return null;
+  return details.stores.reduce((t, s) => t + Number(s.qty || 0), 0);
+}
+
+function salesFmtStockQty(item, q) {
+  const factor = salesUnit2Factor(item);
+  const abs = Math.abs(q);
+  const c = Math.floor(abs / factor);
+  const l = Math.round((abs - c * factor) * 100) / 100;
+  const parts = [];
+  if (c > 0) parts.push(`${c} ${salesUnitLabel(item, "unit2")}`);
+  if (l > 0) parts.push(`${l} ${salesUnitLabel(item, "unit1")}`);
+  if (!parts.length) parts.push(`0 ${salesUnitLabel(item, "unit2")}`);
+  return `${q < 0 ? "− " : ""}${parts.join(" + ")}`;
+}
+
+// سطر المخزون تحت اسم الصنف: المجموع ثم كل مستودع، وتحذير إن كانت الكمية المطلوبة أكبر.
+function salesStockSummary(item, unitKey, qty) {
+  if (!item) return null;
+  const available = salesStoresAvailableUnit1(item);
+  if (available === null) {
+    return { short: false, text: state.itemDetails ? "المخزون: غير موجود في تقرير المستودعات" : "المخزون: جاري التحميل…" };
+  }
+  const requested = toNumber(qty) * (unitKey === "unit2" ? salesUnit2Factor(item) : 1);
+  const check = window.OzkSalesPriceRequests?.stockCheck(requested, available) || { level: "ok" };
+  const stores = (salesDetailsFor(item).stores || []).filter((s) => Number(s.qty) !== 0)
+    .map((s) => `${s.name}: ${salesFmtStockQty(item, Number(s.qty))}`);
+  const text = `المتوفر ${salesFmtStockQty(item, available)}${stores.length > 1 ? ` (${stores.join("، ")})` : stores.length ? ` (${stores[0]})` : ""}${check.level === "short" ? " — أقل من المطلوب" : ""}`;
+  return { short: check.level === "short", text };
+}
+
+function salesRowStockHtml(item, row) {
+  const s = salesStockSummary(item, row.unit, row.qty);
+  if (!s) return "";
+  return `<small class="spr-stock ${s.short ? "is-short" : ""}">${escapeHtml(s.text)}</small>`;
+}
+
+// تقرير المستودعات يُحمَّل مرة واحدة عند فتح الصفحة كي يظهر المخزون في كل سطر.
+function salesEnsureStockDetails() {
+  if (state.itemDetails || state.salesStockDetailsRequested) return;
+  state.salesStockDetailsRequested = true;
+  loadItemDetails().then(() => { if (state.itemDetails && state.route === "sales" && !isEditingFormField()) render(); });
+}
+
+function salesPriceRequestsCtx() {
+  return {
+    dataStore,
+    render,
+    setNotice,
+    safeErrorMessage,
+    escapeHtml,
+    toNumber,
+    formatDateTime,
+    isOwner,
+    session: () => state.session,
+    money: (value, mode) => salesMoney(value, mode),
+    fmtPlain: (value, mode) => salesFmtPlain(value, mode),
+    stockForLine: (line) => salesStockSummary(salesItemByKey(line.key), line.unitKey, line.qty),
+    // تكلفة وحدة السطر للمالك وحده (item_costs محمي بـRLS؛ غير المالك يرجع 0).
+    costForLine: (line) => {
+      const item = salesItemByKey(line.key);
+      const unitCost = salesUnitCost(item).value;
+      if (!(unitCost > 0)) return 0;
+      return line.unitKey === "unit2" ? unitCost * salesUnit2Factor(item) : unitCost;
+    }
+  };
+}
+
+async function salesSubmitForPricing() {
+  if (state.salesSaving) return;
+  const mode = salesCurrentMode();
+  // السعر ليس شرطاً هنا: المالك يسعّر. الصنف والكمية فقط.
+  const rows = (state.salesRows || []).filter((row) => row.key && toNumber(row.qty) > 0);
+  if (!rows.length) {
+    setNotice("error", "أضف صنفاً واحداً على الأقل بكمية أكبر من صفر.");
+    render();
+    return;
+  }
+  state.salesSaving = true;
+  const btn = document.querySelector("[data-action='sales-submit-pricing']");
+  if (btn) btn.disabled = true;
+  try {
+    const lines = rows.map((row) => {
+      const item = salesItemByKey(row.key);
+      return {
+        key: row.key,
+        num: salesItemCode(item) || row.num || "",
+        name: item?.itemName || row.name || "",
+        unit: salesUnitLabel(item, row.unit),
+        unitKey: row.unit,
+        qty: toNumber(row.qty),
+        price: Math.max(0, toNumber(row.price))
+      };
+    });
+    const result = await window.OzkSalesPriceRequests.submit(salesPriceRequestsCtx(), {
+      mode,
+      customerName: state.salesCustomer.trim(),
+      payMethod: state.salesPayMethod,
+      rate: mode === "mufrak" ? Number(state.syriaExchangeRate) || null : null,
+      lines
+    });
+    state.salesRows = [salesEmptyRow()];
+    state.salesCustomer = "";
+    state.salesDiscount = "";
+    state.salesPaid = "";
+    setNotice("success", `أُرسلت الفاتورة #${result?.id ?? ""} للتسعير ✓ — لا تُدخلها في الأمين حتى تصير «مسعّرة».`);
+  } catch (error) {
+    setNotice("error", "تعذّر الإرسال للتسعير: " + (error?.message || safeErrorMessage(error)));
+  } finally {
+    state.salesSaving = false;
+    render();
+  }
+}
+
 async function salesSaveInvoice() {
   // نقرة ثانية أثناء تنفيذ الحفظ. هذا الفحص أولاً وقبل أي شيء، ورفعُ القفل بعده
   // مباشرةً وقبل أي await: عندما كان القفل يُرفع قبل الكتابة فقط، كانت النقرة
   // الثانية تمرّ أثناء جلب المزامنة فيُحفظ مستندان بالرقم نفسه (مانع أكّدته
   // المراجعة). كل خروج بعد هذه النقطة يمرّ عبر finally الذي يخفض القفل.
   if (state.salesSaving) return;
+  // حساب المحاسب لا يحفظ مباشرة ولو استُدعيت الدالة من غير زرها: الفاتورة تمرّ بتسعير المالك.
+  if (salesNeedsOwnerPricing()) return salesSubmitForPricing();
 
   if (!salesResolvedRows().length) {
     setNotice("error", "أضف صنفاً واحداً على الأقل بكمية وسعر أكبر من صفر.");
@@ -13932,6 +14067,12 @@ function render() {
     });
   });
   app.querySelector("[data-action='sales-save']")?.addEventListener("click", salesSaveInvoice);
+  app.querySelector("[data-action='sales-submit-pricing']")?.addEventListener("click", salesSubmitForPricing);
+  if (state.route === "sales" && state.session) {
+    window.OzkSalesPriceRequests?.bind(app, salesPriceRequestsCtx());
+    window.OzkSalesPriceRequests?.ensureLoaded(salesPriceRequestsCtx());
+    salesEnsureStockDetails();
+  }
   app.querySelector("[data-action='sales-print']")?.addEventListener("click", printSalesInvoice);
   app.querySelector("[data-action='sales-pdf']")?.addEventListener("click", saveSalesInvoicePdf);
   app.querySelector("[data-action='sales-new']")?.addEventListener("click", salesNewInvoice);
