@@ -645,7 +645,7 @@ await journey("balances-live-invoice", "بطاقة الزبون تعرض الف�
   await page.locator("[data-customer-details='c1']").click();
   const invoices = page.locator(".customer-detail-grid article").nth(0);
   await invoices.waitFor({ state: "visible", timeout: 10000 });
-  let text = await invoices.innerText();
+  const text = await invoices.innerText();
   assert(text.includes("فاتورة 9001: 777"), `الفاتورة الفورية لا تظهر قبل قيدها: ${text}`);
   assert(text.includes("فاتورة: 100"), `قيد الدفتر القديم سقط: ${text}`);
   assert(text.includes("2 فاتورة"), `عدد الفواتير لا يشمل الفورية: ${text}`);
@@ -661,7 +661,6 @@ await journey("balances-live-invoice", "بطاقة الزبون تعرض الف�
       items: state.customerBalanceReports[0].items.map((i) => i.key === "c1" ? { ...i, balance: 2277 } : i) }];
     (0, eval)("renderAfterPeriodicRefresh")();
   }, { report: invoicesReport([liveInvoice("live-test-2", 9002, 555), liveInvoice("live-test-1", 9001, 777)]) });
-  text = await invoices.innerText();
   const grid = await page.locator(".customer-detail-grid article").nth(0).innerText();
   assert(grid.includes("فاتورة 9002: 555"), `البطاقة لم تتحدّث والمؤشر في خانة البحث: ${grid}`);
   const metrics = await page.locator(".customer-detail-metrics").innerText();
