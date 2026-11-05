@@ -65,6 +65,7 @@ function createReceiptArchiver({ cfg, store, ameen, renderer, template, paper, e
       docType: DOC_TYPE,
       sourceGuid: doc.guid,
       receiptGuid: doc.receiptGuid,
+      sourceKind: doc.sourceKind,
       accountGuid: doc.accountGuid,
       number: doc.number,
       date: doc.date,

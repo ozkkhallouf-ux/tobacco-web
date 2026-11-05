@@ -104,7 +104,7 @@ function createFakeAmeen() {
   function receiptRows(rc) {
     const changed = rc.updatedAt > rc.createdAt ? rc.updatedAt : rc.createdAt;
     const head = {
-      receipt_guid: rc.guid, receipt_number: rc.number, receipt_date: rc.date, receipt_notes: rc.notes,
+      receipt_guid: rc.guid, receipt_number: rc.number, receipt_date: rc.date, receipt_notes: rc.notes, source_kind: rc.sourceKind || "voucher",
       entry_links: rc.entryLinks, entry_guid: rc.entryGuid, is_posted: rc.posted,
       changed_at: changed, created_at: rc.createdAt, seconds_since_change: secondsBetween(changed, db.now),
     };

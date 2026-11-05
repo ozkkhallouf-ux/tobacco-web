@@ -96,7 +96,7 @@ function buildReceiptHtml(doc) {
   <div class="doc">
     <div class="head">
       <div class="brand">OZK TOBACCO<small>مركز أبو زياد — لتجارة الدخان</small></div>
-      <div class="title"><h1>سند قبض</h1><span>رقم: ${esc(doc.number)} · ${esc(doc.date)}</span></div>
+      <div class="title"><h1>سند قبض</h1><span>${doc.sourceKind === "entry" ? "رقم القيد" : "رقم"}: ${esc(doc.number)} · ${esc(doc.date)}</span></div>
     </div>
 
     <div class="cust">
