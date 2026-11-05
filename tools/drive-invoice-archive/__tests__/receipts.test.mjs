@@ -199,6 +199,40 @@ test("غير مرحّل، أو قيد غير محسوم، أو غير مستقر
   assert.deepEqual(receiptJobs(env).map((j) => j.number).sort(), ["801", "803"]);
 });
 
+test("قيد يدوي فيه قبض على زبون ⇒ PDF برقم القيد، وبصمة سند القبض العادي لا تتغيّر", async () => {
+  const env = await setup();
+  env.ameen.addReceipt({ guid: R3, number: "6800", sourceKind: "entry", entryGuid: R3, lines: [env.ameen.receiptLine({ amount: 90 })] });
+  env.advance(600);
+  await env.cycle();
+  const [job] = receiptJobs(env);
+  assert.ok(job, "القيد اليدوي يؤرشف");
+  assert.equal(job.number, "6800");
+  assert.equal(job.sourceKind, "entry");
+  assert.equal(job.receiptGuid, R3);
+  assert.equal(env.edgeFake.state.sent.length, 1);
+  assert.match(env.edgeFake.state.sent[0].fileName, / - سند قبض رقم 6800 - /);
+  const [rec] = receiptModel.groupReceipts([{ ...fakeRow(), source_kind: "entry" }]);
+  assert.equal(rec.docs[0].sourceKind, "entry");
+  assert.match(receiptTemplate.buildReceiptHtml(rec.docs[0]), /رقم القيد: 77/);
+  const [voucher] = receiptModel.groupReceipts([fakeRow()]);
+  const [legacy] = receiptModel.groupReceipts([{ ...fakeRow(), source_kind: undefined }]);
+  assert.equal(voucher.docs[0].sourceKind, "voucher");
+  assert.equal(receiptModel.receiptVersionHash(voucher.docs[0]), receiptModel.receiptVersionHash(legacy.docs[0]));
+  assert.notEqual(receiptModel.receiptVersionHash(voucher.docs[0]), receiptModel.receiptVersionHash(rec.docs[0]));
+  assert.doesNotMatch(receiptTemplate.buildReceiptHtml(voucher.docs[0]), /رقم القيد/);
+});
+
+test("الاستعلام: القيود اليدوية بنوع صفري وبلا ربط er000 وبتعريف القبض نفسه، واللقطة تشملها", () => {
+  const q = fs.readFileSync(path.join(dir, "lib", "receipts-query.sql"), "utf8");
+  assert.match(q, /FROM dbo\.ce000 ce/);
+  assert.match(q, /NOT EXISTS \(SELECT 1 FROM dbo\.er000 er WHERE er\.EntryGUID = ce\.GUID\)/);
+  assert.match(q, /COALESCE\(ce\.TypeGUID, '0{8}-0{4}-0{4}-0{4}-0{12}'\) = '0{8}-0{4}-0{4}-0{4}-0{12}'/);
+  assert.match(q, /AS source_kind/);
+  assert.doesNotMatch(q, /ce\.Notes|ce\.LastUpdateDate/, "أعمدة ce000 غير المثبتة لا تُستعمل");
+  const b = fs.readFileSync(path.join(dir, "lib", "receipt-baseline-query.sql"), "utf8");
+  assert.match(b, /UNION ALL[\s\S]*FROM dbo\.ce000 ce/);
+});
+
 test("سند بلا سطر قبض على زبون ⇒ لا مستند", async () => {
   const env = await setup();
   env.ameen.addReceipt({ guid: R1, number: "901", lines: [] });
@@ -274,6 +308,13 @@ test("القالب: Cairo مضمَّن، وكل الحقول الأساسية، 
   const none = receiptTemplate.buildReceiptHtml({ ...doc, balance: null });
   assert.match(none, /غير متاح/);
 });
+
+function fakeRow() {
+  return { receipt_guid: R1, receipt_number: "77", receipt_date: "2026-11-03", receipt_notes: "", entry_links: 1, entry_guid: CC, is_posted: 1,
+    line_guid: "eeeeeeee-0000-4000-8000-000000000001", line_number: 1, account_guid: CA, customer_guid: CA, customer_name: "زبون",
+    amount: 25, native_amount: 25, currency_val: 1, currency_iso: "USD", cash_name: "الصندوق", line_notes: "",
+    changed_at: "2026-11-03T10:00:00", created_at: "2026-11-03T10:00:00", seconds_since_change: 900, source_kind: "voucher" };
+}
 
 function playwright() {
   try { return require("playwright"); } catch { return null; }

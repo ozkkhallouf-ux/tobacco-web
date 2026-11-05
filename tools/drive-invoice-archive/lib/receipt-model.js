@@ -63,6 +63,8 @@ function groupReceipts(rows) {
         row: r,
         header: {
           receiptGuid,
+          // «voucher» سند قبض (py000)، أو «entry» قيد يدوي فيه قبض (ce000، رقمه رقم القيد).
+          sourceKind: text(r.source_kind) === "entry" ? "entry" : "voucher",
           number: text(r.receipt_number),
           date: text(r.receipt_date),
           notes: text(r.receipt_notes),
@@ -108,6 +110,7 @@ function buildDoc(header, acc) {
     docType: DOC_TYPE,
     receiptGuid: header.receiptGuid,
     entryGuid: header.entryGuid,
+    sourceKind: header.sourceKind,
     accountGuid: acc.accountGuid,
     customerGuid: acc.customerGuid,
     customer: acc.customer,
@@ -139,6 +142,8 @@ function receiptVersionHash(doc) {
     notes: doc.notes,
     lines: doc.lines.map((l) => ({ number: l.number, amount: l.amount, currencyVal: l.currencyVal, currencyIso: l.currencyIso, cashName: l.cashName, notes: l.notes })),
   };
+  // القيد اليدوي وحده يضيف نوعه، فبصمات سندات القبض تبقى كما كانت.
+  if (doc.sourceKind === "entry") content.sourceKind = "entry";
   return sha256(JSON.stringify(canonical(content)));
 }
 

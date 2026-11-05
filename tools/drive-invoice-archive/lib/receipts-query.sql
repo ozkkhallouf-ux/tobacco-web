@@ -5,6 +5,7 @@
 --   * السند = py000 بنوع «سند قبض» (@receiptType)، ورقمه py000.Number (لا ce000.Number).
 --   * قيده ce000 عبر er000 (ParentType = 4)، وأسطره en000.
 --   * py000.CreateDate مضبوط دائماً، وLastUpdateDate عند التعديل ⇒ الرصد التزايدي كالفواتير.
+--   * ومعها القيود اليدوية التي فيها قبض على زبون (قرار المالك 2026-11-05)، source_kind = 'entry'.
 --   * السند الواحد قد يجمع عدة زبائن ⇒ مستند مستقل لكل (سند، حساب زبون) — قرار المالك 2026-11-03.
 -- سطر القبض بالتعريف الموحّد (tools/ameen-customer-balances-query.sql، payment-rule): دائن على
 -- حساب تحت شجرة الزبائن 121، سطر عادي en.Type = 0، مقابله صندوق من شجرة 13 عدا 135 فروقات
@@ -34,27 +35,61 @@ customer_tree AS (
   SELECT a.GUID FROM dbo.ac000 a JOIN customer_tree t ON a.ParentGUID = t.GUID
 ),
 vouchers AS (
-  SELECT TOP (500) p.GUID, p.Number, p.Date, p.Notes, p.CreateDate, chg.changed_at
-  FROM dbo.py000 p
-  CROSS APPLY (
-    SELECT CONVERT(datetime2(3),
-             CASE WHEN ISNULL(p.LastUpdateDate, '19000101') > ISNULL(p.CreateDate, '19000101')
-                  THEN p.LastUpdateDate ELSE p.CreateDate END) AS changed_at
-  ) chg
-  WHERE p.TypeGUID = @receiptType
-    AND p.Date >= @dateFrom
-    AND (p.CreateDate >= DATEADD(second, -1, @since) OR p.LastUpdateDate >= DATEADD(second, -1, @since))
-    AND (chg.changed_at > @since OR (chg.changed_at = @since AND p.GUID > @sinceGuid))
-    AND (@onlyGuid IS NULL OR p.GUID = @onlyGuid)
-    AND (@createdFrom IS NULL OR p.CreateDate >= @createdFrom)
-  ORDER BY chg.changed_at ASC, p.GUID ASC
+  SELECT TOP (500) u.GUID, u.Number, u.Date, u.Notes, u.CreateDate, u.changed_at, u.source_kind
+  FROM (
+    SELECT p.GUID, p.Number, p.Date, p.Notes, p.CreateDate, chg.changed_at, CAST('voucher' AS varchar(8)) AS source_kind
+    FROM dbo.py000 p
+    CROSS APPLY (
+      SELECT CONVERT(datetime2(3),
+               CASE WHEN ISNULL(p.LastUpdateDate, '19000101') > ISNULL(p.CreateDate, '19000101')
+                    THEN p.LastUpdateDate ELSE p.CreateDate END) AS changed_at
+    ) chg
+    WHERE p.TypeGUID = @receiptType
+      AND p.Date >= @dateFrom
+      AND (p.CreateDate >= DATEADD(second, -1, @since) OR p.LastUpdateDate >= DATEADD(second, -1, @since))
+      AND (chg.changed_at > @since OR (chg.changed_at = @since AND p.GUID > @sinceGuid))
+      AND (@onlyGuid IS NULL OR p.GUID = @onlyGuid)
+      AND (@createdFrom IS NULL OR p.CreateDate >= @createdFrom)
+    UNION ALL
+    -- قيد يدوي فيه قبض على زبون (قرار المالك 2026-11-05، مثاله القيد 6800): قيد بنوع صفري
+    -- (سند قيد عادي، لا الافتتاحي ea69ba80) لا يرتبط بأي مستند في er000 (لا سند ولا فاتورة)،
+    -- وفيه سطر قبض واحد على الأقل بالتعريف الموحّد نفسه أدناه. رقمه ce000.Number، وتغيّره
+    -- يُرصد بوقت إنشائه وحده (ce000 بلا عمود تعديل مثبت)؛ تعديله لاحقاً تلتقطه المطابقة الدورية.
+    SELECT ce.GUID, ce.Number, ce.Date, CAST(N'' AS nvarchar(250)) AS Notes, ce.CreateDate,
+           CONVERT(datetime2(3), ce.CreateDate) AS changed_at, CAST('entry' AS varchar(8)) AS source_kind
+    FROM dbo.ce000 ce
+    WHERE COALESCE(ce.TypeGUID, '00000000-0000-0000-0000-000000000000') = '00000000-0000-0000-0000-000000000000'
+      AND ce.Date >= @dateFrom
+      AND ce.CreateDate >= DATEADD(second, -1, @since)
+      AND (CONVERT(datetime2(3), ce.CreateDate) > @since
+           OR (CONVERT(datetime2(3), ce.CreateDate) = @since AND ce.GUID > @sinceGuid))
+      AND (@onlyGuid IS NULL OR ce.GUID = @onlyGuid)
+      AND (@createdFrom IS NULL OR ce.CreateDate >= @createdFrom)
+      AND NOT EXISTS (SELECT 1 FROM dbo.er000 er WHERE er.EntryGUID = ce.GUID)
+      AND EXISTS (
+        SELECT 1
+        FROM dbo.en000 en
+        JOIN customer_tree ct ON ct.GUID = en.AccountGUID
+        WHERE en.ParentGUID = ce.GUID AND COALESCE(en.Credit, 0) > 0 AND COALESCE(en.Type, 0) = 0
+          AND (
+            en.ContraAccGUID IN (SELECT c.GUID FROM cash c)
+            OR (COALESCE(en.ContraAccGUID, '00000000-0000-0000-0000-000000000000') = '00000000-0000-0000-0000-000000000000'
+                AND EXISTS (SELECT 1 FROM dbo.en000 d WHERE d.ParentGUID = ce.GUID AND COALESCE(d.Debit, 0) > 0
+                              AND d.AccountGUID IN (SELECT c.GUID FROM cash c)))
+          )
+      )
+  ) u
+  ORDER BY u.changed_at ASC, u.GUID ASC
 ),
 links AS (
-  SELECT v.GUID AS receipt_guid, COUNT(er.GUID) AS entry_links,
-         MAX(CONVERT(nvarchar(36), er.EntryGUID)) AS entry_guid_text
+  -- سند القبض: قيده عبر er000. القيد اليدوي: هو قيد نفسه (رابط واحد بتعريفه).
+  SELECT v.GUID AS receipt_guid,
+         CASE WHEN v.source_kind = 'entry' THEN 1 ELSE COUNT(er.GUID) END AS entry_links,
+         CASE WHEN v.source_kind = 'entry' THEN CONVERT(nvarchar(36), v.GUID)
+              ELSE MAX(CONVERT(nvarchar(36), er.EntryGUID)) END AS entry_guid_text
   FROM vouchers v
-  LEFT JOIN dbo.er000 er ON er.ParentGUID = v.GUID AND er.ParentType = 4
-  GROUP BY v.GUID
+  LEFT JOIN dbo.er000 er ON v.source_kind = 'voucher' AND er.ParentGUID = v.GUID AND er.ParentType = 4
+  GROUP BY v.GUID, v.source_kind
 ),
 lines AS (
   SELECT l.receipt_guid, en.GUID AS line_guid, en.Number AS line_number, en.AccountGUID AS account_guid,
@@ -86,6 +121,7 @@ SELECT
   v.Number                                                     AS receipt_number,
   CONVERT(nvarchar(10), CAST(v.Date AS date), 120)             AS receipt_date,
   LTRIM(RTRIM(ISNULL(v.Notes, N'')))                           AS receipt_notes,
+  v.source_kind                                                AS source_kind,
   l.entry_links                                                AS entry_links,
   LOWER(ISNULL(l.entry_guid_text, N''))                        AS entry_guid,
   ISNULL(ce.IsPosted, 0)                                       AS is_posted,
