@@ -133,6 +133,7 @@ export const CHECKS = [
   'check-sales-line-items-pipeline.mjs',
   'check-sales-line-items-registration.mjs',
   'check-sales-line-items-security.mjs',
+  'check-sales-price-requests.mjs',
   'check-sales-return-ledger.mjs',
   'check-sales-return-master-invoice.mjs',
   'check-service-worker-update-cycle.mjs',
