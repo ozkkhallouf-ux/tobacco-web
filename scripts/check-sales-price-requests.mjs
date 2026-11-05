@@ -58,6 +58,18 @@ assert.deepEqual(SPR.stockCheck(1, 0), { level: "short", available: 0 });
 assert.match(SPR.errorMessage("version_conflict"), /عدّل/);
 assert.match(SPR.errorMessage("owner_only"), /للمالك/);
 
+// مدخل قائمة التنقل (الهاتف: زر شريط الفاتورة يقع تحت شبكة القائمة الطويلة).
+const navCtx = (owner) => ({ isOwner: () => owner, route: () => "overview" });
+assert.match(SPR.navButton(navCtx(true)), /data-action="spr-nav-open"[^>]*>📝 بانتظار تسعيري</, "مدخل المالك في القائمة");
+assert.match(SPR.navButton(navCtx(false)), />📝 فواتير التسعير</, "مدخل المحاسب في القائمة");
+assert.doesNotMatch(SPR.navButton(navCtx(true)), /data-route=/, "المدخل ليس data-route: setRoute يغلق اللوحة");
+assert.equal(typeof SPR.openPanel, "function");
+assert.match(APP, /OzkSalesPriceRequests\.navButton\(salesPriceRequestsCtx\(\)\)/, "app.js يرسم المدخل في القائمة");
+assert.match(APP, /\$\{state\.session && !isInventoryCounter\(\) && window\.OzkSalesPriceRequests \? window\.OzkSalesPriceRequests\.navButton/, "المدخل لا يظهر لموظف الجرد ولا بلا جلسة");
+assert.match(APP, /\[data-action='spr-nav-open'\][\s\S]{0,200}setRoute\("sales"\);[\s\S]{0,120}openPanel\(salesPriceRequestsCtx\(\)\)/,
+  "المدخل ينقل إلى المبيعات ثم يفتح اللوحة (بهذا الترتيب)");
+assert.match(APP, /route: \(\) => state\.route/, "ctx يمرّر المسار الحالي");
+
 // --- الفحص الحي ------------------------------------------------------------------
 const LOCAL_HOSTS = new Set(["", "localhost", "127.0.0.1", "::1"]);
 if (!LOCAL_HOSTS.has(String(process.env.PGHOST || "").trim().toLowerCase())) {

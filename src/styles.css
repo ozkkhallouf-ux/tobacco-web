@@ -3956,8 +3956,14 @@ details[open]>.acc-summary::after{transform:rotate(180deg)}
   margin: 0 0 4px;
   font-size: 1.05rem;
 }
+/* حقل السعر ظاهر كحقل دائماً: inv-input شفاف بلا إطار حتى التركيز، فيبدو على
+   الهاتف (بلا مؤشر يمرّ فوقه) نصاً عادياً لا يُعرف أنه قابل للتعديل. */
 .spr-table input.inv-input {
   max-width: 120px;
+  min-width: 64px;
+  min-height: 38px;
+  background: var(--surface);
+  border-color: var(--line);
 }
 .spr-cost {
   display: block;
