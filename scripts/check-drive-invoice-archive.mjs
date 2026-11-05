@@ -131,7 +131,7 @@ assert.doesNotMatch(notifyFn, /existingMessageId/, "الدالة: لا فحص ق
 console.log("  ✓ حراسات ثابتة: قراءة فقط، بلا مشاركة ولا حذف، المالك وحده، الحساب المعتمد، غير مفعَّل");
 
 // ── ٢) الاختبارات ────────────────────────────────────────────────────────────
-for (const t of ["drive-archive.test.mjs", "edge-function.test.mjs"]) {
+for (const t of ["drive-archive.test.mjs", "receipts.test.mjs", "edge-function.test.mjs"]) {
   const r = spawnSync(process.execPath, [path.join(dir, "__tests__", t)], { stdio: "inherit" });
   if (r.error || r.signal || r.status !== 0) {
     console.error(`check-drive-invoice-archive: فشل ${t}`);

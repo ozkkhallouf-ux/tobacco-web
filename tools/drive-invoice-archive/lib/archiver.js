@@ -13,9 +13,11 @@ const model = require("../../manual-a4-print/lib/invoice-model");
 const { HASH_SCHEMA, invoiceVersionHash, legacyVersionHash, jobIdFor, sha256 } = require("./fingerprint");
 const { folderPlan, fileName } = require("./naming");
 const { STATUS } = require("./store");
-const { MODES, pilotExpired } = require("./config");
+const { MODES, pilotExpired, receiptsPilotExpired } = require("./config");
 const { redact } = require("./redact");
 const { priceInvoiceItems } = require("./line-prices");
+const { createReceiptArchiver } = require("./receipts");
+const RECEIPT_DOC_TYPE = require("./receipt-model").DOC_TYPE;
 
 const DOC_TYPE = "wholesale_invoice";
 // أخطاء تخصّ الاتصال أو الحساب لا المهمة: توقف المرحلة كلها في هذه الدورة بلا عدّ محاولات.
@@ -38,7 +40,7 @@ function rowHint(row) {
   return sha256(JSON.stringify(rest));
 }
 
-function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive, edge, log, now = () => Date.now() }) {
+function createArchiver({ cfg, store, ameen, renderer, template, receiptTemplate = null, paper, getDrive, edge, log, now = () => Date.now() }) {
   const mode = MODES[cfg.mode];
   const state = store.state;
   state.hints = state.hints || {};
@@ -52,6 +54,16 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
   const inScope = (guid) => (pilot.size === 0 || pilot.has(model.normGuid(guid))) && !baseline.has(model.normGuid(guid));
   const createdBeforeCutoff = (row) => Boolean(createdFrom) &&
     !(Date.parse(`${String(row.created_at || "").replace(/Z$/, "")}Z`) >= Date.parse(`${createdFrom}Z`));
+  // سندات القبض (المرحلة 2): مطفأة افتراضياً. مفعّلة ⇒ رصد مستقل بنطاقه، ومراحل الرفع والإشعار
+  // والتقرير أدناه نفسها. انتهاء حصر تجربتها أثناء العمل يوقف رصدها ورفعها وإرسالها وحدها.
+  const receiptsOn = Boolean(cfg.receipts && cfg.receipts.enabled && ameen && receiptTemplate);
+  const receipts = receiptsOn
+    ? createReceiptArchiver({ cfg, store, ameen, renderer, template: receiptTemplate, paper, emit: (e, d) => emit(e, d), now })
+    : null;
+  const receiptsLive = () => Boolean(receipts) && !receiptsPilotExpired(cfg, now());
+  const jobInScope = (j) => (j.docType === RECEIPT_DOC_TYPE
+    ? receiptsLive() && receipts.inScope(j.receiptGuid)
+    : inScope(j.sourceGuid));
   let folderCache = {};
   let driveState = mode.upload ? "disconnected" : "disabled";
   let driveCheckedAt = null;
@@ -432,7 +444,7 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
   }
 
   async function uploadStage() {
-    const ready = store.jobs().filter((j) => j.status === STATUS.RENDERED && inScope(j.sourceGuid) && due(j));
+    const ready = store.jobs().filter((j) => j.status === STATUS.RENDERED && jobInScope(j) && due(j));
     let drive;
     try {
       drive = getDrive();
@@ -465,7 +477,7 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
 
   // ─── الإشعار ───
   async function notifyStage() {
-    const ready = store.jobs().filter((j) => j.status === STATUS.UPLOADED && j.drive && j.drive.fileId && inScope(j.sourceGuid) && due(j));
+    const ready = store.jobs().filter((j) => j.status === STATUS.UPLOADED && j.drive && j.drive.fileId && jobInScope(j) && due(j));
     let notified = 0;
     for (const job of ready.sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
       let pdf;
@@ -551,7 +563,7 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
     // مؤشر مستقل للتجربة: تقدّمه لا يتخطّى مهام خارج الحصر فلا تُبلَّغ أبداً بعد رفعه.
     const cursorKey = pilot.size ? "lastReportedUpdatePilot" : "lastReportedUpdate";
     const since = state[cursorKey] || "";
-    const changed = store.jobs().filter((j) => (j.updatedAt || "") > since && inScope(j.sourceGuid))
+    const changed = store.jobs().filter((j) => (j.updatedAt || "") > since && jobInScope(j))
       .sort((a, b) => a.updatedAt.localeCompare(b.updatedAt)).slice(0, 200);
     const s = store.summary({ notifyEnabled: mode.notify });
     const payload = {
@@ -562,7 +574,8 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
       drive_checked_at: driveCheckedAt,
       last_success_at: s.lastSuccessAt,
       pending_count: s.pending,
-      failed_count: s.failed + Object.keys(state.detectErrors || {}).length,
+      failed_count: s.failed + Object.keys(state.detectErrors || {}).length
+        + Object.keys((state.receipts && state.receipts.detectErrors) || {}).length,
       items: changed.map(reportItem),
     };
     try {
@@ -594,6 +607,16 @@ function createArchiver({ cfg, store, ameen, renderer, template, paper, getDrive
       out.detect = await detect();
     } catch (err) {
       emit("detect_failed", { code: err && err.code, message: err && err.message });
+    }
+    if (receipts) {
+      if (!receiptsLive()) emit("receipts_pilot_expired", { expiresAt: cfg.receipts.pilotExpiresAt });
+      else {
+        try {
+          out.receipts = await receipts.detect();
+        } catch (err) {
+          emit("receipts_detect_failed", { code: err && err.code, message: err && err.message });
+        }
+      }
     }
     if (mode.upload) out.upload = await uploadStage();
     if (mode.notify && edge) out.notify = await notifyStage();

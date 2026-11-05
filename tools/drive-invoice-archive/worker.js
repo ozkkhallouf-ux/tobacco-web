@@ -15,6 +15,7 @@
 //   node worker.js --status        ملخص الصندوق المحلي ثم خروج
 //   node worker.js --retry <jobId|failed>   إعادة محاولة مهمة فاشلة محلياً
 //   node worker.js --baseline <ملف>         لقطة الأساس لتفعيل الإنتاج (قراءة فقط، ملف جديد)
+//   node worker.js --baseline-receipts <ملف> لقطة أساس سندات القبض (قراءة فقط، ملف جديد)
 // ============================================================================
 
 const fs = require("fs");
@@ -22,7 +23,7 @@ const net = require("net");
 const os = require("os");
 const path = require("path");
 
-const { loadConfig, MODES, BASELINE_SCHEMA } = require("./lib/config");
+const { loadConfig, mergeConfig, MODES, BASELINE_SCHEMA, RECEIPT_TYPE_GUID } = require("./lib/config");
 const { createStore } = require("./lib/store");
 const { createArchiver } = require("./lib/archiver");
 const { createDrive } = require("./lib/drive");
@@ -44,6 +45,9 @@ const LINES_SQL = assertReadOnlySql(fs.readFileSync(path.join(__dirname, "lib", 
 const BASELINE_SQL = assertReadOnlySql(fs.readFileSync(path.join(__dirname, "lib", "baseline-invoices-query.sql"), "utf8"));
 const SOURCE_STATUS_SQL = assertReadOnlySql(fs.readFileSync(path.join(__dirname, "lib", "source-status-query.sql"), "utf8"));
 const BALANCE_SQL = assertReadOnlySql(fs.readFileSync(path.join(AUTOPRINT_DIR, "ameen-customer-balance-query.sql"), "utf8"));
+const RECEIPTS_SQL = assertReadOnlySql(fs.readFileSync(path.join(__dirname, "lib", "receipts-query.sql"), "utf8"));
+const RECEIPT_BALANCE_SQL = assertReadOnlySql(fs.readFileSync(path.join(__dirname, "lib", "receipt-balance-query.sql"), "utf8"));
+const RECEIPT_BASELINE_SQL = assertReadOnlySql(fs.readFileSync(path.join(__dirname, "lib", "receipt-baseline-query.sql"), "utf8"));
 const NOW_SQL = assertReadOnlySql("SELECT CONVERT(nvarchar(33), GETDATE(), 126) AS now, DB_NAME() AS db, SUSER_SNAME() AS login");
 
 const ZERO_GUID = "00000000-0000-0000-0000-000000000000";
@@ -52,7 +56,7 @@ function naiveDate(iso) {
   return new Date(`${String(iso).replace(/Z$/, "")}Z`);
 }
 
-function createAmeen(connString, typeGuids) {
+function createAmeen(connString, typeGuids, receiptTypeGuid = RECEIPT_TYPE_GUID) {
   const sql = require("mssql");
   const { parseSqlConnStr } = require(path.join(MANUAL_DIR, "server.js"));
   const cfg = parseSqlConnStr(connString);
@@ -92,6 +96,24 @@ function createAmeen(connString, typeGuids) {
       const v = Number(rows[0].document_current);
       return Number.isFinite(v) ? v : null;
     },
+    // سندات القبض (المرحلة 2): نوع «سند قبض» وحده، قراءة فقط عبر الحارس نفسه.
+    changedReceipts: ({ since, sinceGuid, dateFrom, onlyGuid, createdFrom }) => q(RECEIPTS_SQL, (r, s) => r
+      .input("receiptType", s.UniqueIdentifier, receiptTypeGuid)
+      .input("dateFrom", s.Date, naiveDate(`${dateFrom}T00:00:00`))
+      .input("since", s.DateTime2(3), naiveDate(since))
+      .input("sinceGuid", s.UniqueIdentifier, sinceGuid || ZERO_GUID)
+      .input("onlyGuid", s.UniqueIdentifier, onlyGuid || null)
+      .input("createdFrom", s.DateTime2(3), createdFrom ? naiveDate(createdFrom) : null)),
+    receiptBaseline: () => q(RECEIPT_BASELINE_SQL, (r, s) => r.input("receiptType", s.UniqueIdentifier, receiptTypeGuid)),
+    receiptBalance: async (entryGuid, accountGuid) => {
+      const rows = await q(RECEIPT_BALANCE_SQL, (r, s) => r
+        .input("entryGuid", s.UniqueIdentifier, entryGuid)
+        .input("accountGuid", s.UniqueIdentifier, accountGuid));
+      if (!rows.length) return null;
+      const previous = Number(rows[0].document_previous);
+      const current = Number(rows[0].document_current);
+      return Number.isFinite(previous) && Number.isFinite(current) && rows[0].document_current !== null ? { previous, current } : null;
+    },
     close: async () => { if (poolPromise) (await poolPromise).close(); },
   };
 }
@@ -118,9 +140,10 @@ function buildDeps(cfg) {
   const typeGuids = require("../manual-a4-print/lib/invoice-model").allowedTypes(cfg);
   const conn = readSecret("sql", cfg.secretDir);
   if (!conn) throw new Error("سرّ SQL غير محفوظ (set-secret.ps1 -Name sql)");
-  const ameen = createAmeen(conn, typeGuids);
+  const ameen = createAmeen(conn, typeGuids, cfg.receipts && cfg.receipts.typeGuid);
   const renderer = createRenderer({ browserPath: cfg.browserPath });
   const template = require(path.join(AUTOPRINT_DIR, "invoice-html.js"));
+  const receiptTemplate = require("./lib/receipt-html");
   const mode = MODES[cfg.mode];
   let drive = null;
   const getDrive = () => {
@@ -135,7 +158,7 @@ function buildDeps(cfg) {
     if (secret) edge = createEdge({ url: cfg.edgeUrl, secret, host: os.hostname() });
     else if (mode.notify) throw new Error("سرّ دالة الإشعار غير محفوظ (set-secret.ps1 -Name notify)");
   }
-  return { ameen, renderer, template, getDrive, edge };
+  return { ameen, renderer, template, receiptTemplate, getDrive, edge };
 }
 
 async function health(cfg) {
@@ -146,6 +169,7 @@ async function health(cfg) {
     pilot: (cfg.pilotInvoiceGuids || []).length ? { invoiceGuids: cfg.pilotInvoiceGuids, expiresAt: cfg.pilotExpiresAt } : null,
     archiveFrom: cfg.archiveFrom,
     production: cfg.newInvoicesFrom ? { newInvoicesFrom: cfg.newInvoicesFrom, baseline: (cfg.baselineGuids || []).length, baselineSha256: cfg.baselineSha256 } : null,
+    receipts: receiptsSummary(cfg),
     approvedAccount: cfg.expectedAccountEmail,
     dataDir: cfg.dataDir,
     secrets: { sql: hasSecret("sql", cfg.secretDir), googleOauth: hasSecret("google-oauth", cfg.secretDir), notify: hasSecret("notify", cfg.secretDir) },
@@ -220,7 +244,50 @@ async function snapshotBaseline(cfg, outFile, ameen) {
   return { file: target, newInvoicesFrom, count: guids.length, createdAtOrAfter, baselineSha256: sha };
 }
 
+function receiptsSummary(cfg) {
+  const r = cfg.receipts || {};
+  if (!r.enabled) return { enabled: false };
+  return {
+    enabled: true,
+    typeGuid: r.typeGuid,
+    archiveFrom: r.archiveFrom || cfg.archiveFrom,
+    newReceiptsFrom: r.newReceiptsFrom || null,
+    baseline: (r.baselineGuids || []).length,
+    pilot: (r.pilotGuids || []).length ? { receiptGuids: r.pilotGuids, expiresAt: r.pilotExpiresAt } : null,
+  };
+}
+
+// لقطة أساس سندات القبض: كل سند قبض موجود لحظة التفعيل (بأي تاريخ). مثل --baseline تماماً.
+async function snapshotReceiptBaseline(outFile, ameen) {
+  if (!outFile || outFile.startsWith("--")) throw new Error("الاستعمال: node worker.js --baseline-receipts <ملف جديد>");
+  const target = path.resolve(outFile);
+  if (fs.existsSync(target)) throw new Error(`الملف موجود، لا كتابة فوقه: ${target}`);
+  const newReceiptsFrom = String(await ameen.serverNow()).slice(0, 19);
+  const rows = await ameen.receiptBaseline();
+  const guids = [...new Set(rows.map((r) => String(r.receipt_guid).toLowerCase()))].sort();
+  const createdAtOrAfter = rows.filter((r) => Date.parse(`${String(r.created_at || "").replace(/Z$/, "")}Z`) >= Date.parse(`${newReceiptsFrom}Z`)).length;
+  const doc = { schema: BASELINE_SCHEMA, kind: "receipt", newReceiptsFrom, takenAtUtc: new Date().toISOString(), host: os.hostname(), count: guids.length, guids };
+  const body = Buffer.from(`${JSON.stringify(doc, null, 1)}\n`, "utf8");
+  fs.writeFileSync(target, body, { flag: "wx" });
+  const sha = require("crypto").createHash("sha256").update(body).digest("hex");
+  return { file: target, newReceiptsFrom, count: guids.length, createdAtOrAfter, baselineSha256: sha };
+}
+
 async function main(argv) {
+  if (argv.includes("--baseline-receipts")) {
+    const target = process.env.OZK_DRIVE_ARCHIVE_CONFIG || path.join(__dirname, "config.json");
+    const user = fs.existsSync(target) ? JSON.parse(fs.readFileSync(target, "utf8").replace(/^\uFEFF/, "")) : {};
+    const cfg = mergeConfig(user);
+    const conn = readSecret("sql", cfg.secretDir);
+    if (!conn) throw new Error("سرّ SQL غير محفوظ (set-secret.ps1 -Name sql)");
+    const ameen = createAmeen(conn, require("../manual-a4-print/lib/invoice-model").allowedTypes(cfg), cfg.receipts.typeGuid);
+    try {
+      console.log(JSON.stringify(await snapshotReceiptBaseline(argv[argv.indexOf("--baseline-receipts") + 1], ameen), null, 2));
+    } finally {
+      await ameen.close().catch(() => {});
+    }
+    return 0;
+  }
   if (argv.includes("--baseline")) {
     // الإعداد كما هو (قد يكون بلا نطاق إنتاج بعد): قراءة فقط، فلا تطبَّق قيود الرفع هنا.
     const { DEFAULTS } = require("./lib/config");
@@ -268,7 +335,7 @@ async function main(argv) {
   return exitCode;
 }
 
-module.exports = { createAmeen, acquireLock, health, snapshotBaseline, CHANGED_SQL, LINES_SQL, BALANCE_SQL, BASELINE_SQL, NOW_SQL };
+module.exports = { createAmeen, acquireLock, health, snapshotBaseline, snapshotReceiptBaseline, CHANGED_SQL, LINES_SQL, BALANCE_SQL, BASELINE_SQL, NOW_SQL, RECEIPTS_SQL, RECEIPT_BALANCE_SQL, RECEIPT_BASELINE_SQL };
 
 if (require.main === module) {
   main(process.argv.slice(2)).then((c) => process.exit(c), (err) => {
