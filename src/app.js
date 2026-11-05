@@ -1297,8 +1297,10 @@ async function loadCustomerBalanceReports() {
 // يضيع: قيمتها في state. فصار التحديث يقرأ دائماً، ويحدّث قائمة النتائج وحدها تحت الخانة
 // (نفس دالة الكتابة في البحث) دون أن يمسّ الخانة نفسها ولا لوحة المفاتيح على الهاتف.
 // حقول النماذج الأخرى (سعر، حد ائتمان، دفعة...) تبقى محمية كما كانت: لا تحديث أثناء الكتابة.
+// وبطاقة الزبون المفتوحة فوق القائمة تتحدّث معها (أرقامها وفواتيرها ودفعاتها)، وإلا بقي
+// الرصيد الجديد في القائمة والفاتورة غائبة عن البطاقة (عمر 2026-11-05، فاتورة 1195).
 const LIVE_REFRESH_SEARCH_UPDATERS = {
-  "data-customer-search": () => updateCustomerBalanceResults(),
+  "data-customer-search": () => { updateCustomerBalanceResults(); refreshCustomerDetailPanelData(); },
   "data-ameen-search": () => updateAmeenBrowserResults()
 };
 
@@ -1317,6 +1319,24 @@ function renderAfterPeriodicRefresh() {
   const attr = focusedSearchAttr();
   if (attr) { LIVE_REFRESH_SEARCH_UPDATERS[attr](); return; }
   render();
+}
+
+// تحديث جزئي لبطاقة الزبون المفتوحة: أرقامها وقوائم الفواتير والمرتجعات والدفعات فقط.
+// رأس البطاقة ونموذج تسجيل الدفعة لا يُمسّان، فلا يضيع مبلغ مكتوب ولا تركيز.
+function refreshCustomerDetailPanelData() {
+  const panel = app.querySelector("[data-customer-detail-panel]");
+  if (!panel || !state.selectedCustomerKey) return;
+  const item = selectedCustomer(latestCustomerBalanceItems());
+  if (!item) return;
+  const holder = document.createElement("div");
+  holder.innerHTML = customerDetailsPanel(item);
+  for (const selector of [".customer-detail-metrics", ".customer-detail-grid"]) {
+    const current = panel.querySelector(selector);
+    const fresh = holder.querySelector(selector);
+    if (!current || !fresh || current.innerHTML === fresh.innerHTML) continue;
+    current.replaceWith(fresh);
+    bindMovementDocButtons(fresh);
+  }
 }
 
 // ===== الفواتير الفورية (ameen_invoices) فوق تقرير الفواتير =====
@@ -8684,6 +8704,24 @@ function optionalDataValue(value) {
   return value !== undefined && value !== null ? escapeHtml(String(value)) : "";
 }
 
+// فواتير البيع الفورية لهذا الزبون التي لم يصل قيدها إلى دفتر حسابه بعد.
+//
+// قائمة «الفواتير» في البطاقة مبنية من دفتر الحركات (يُرفع كل بضع دقائق)، بينما تصل
+// الفاتورة نفسها من وكيل الأحداث خلال ثوانٍ (2026-11-05: فاتورة 1195 وصلت بثانيتين
+// وتغيّر الرصيد، ولم تظهر في البطاقة). تُعرض هنا بلا زر مستند — مستند الفاتورة يحتاج
+// رصيدَي قيدها في الدفتر — وتختفي من هذه القائمة متى ربطها bindSaleInvoiceLedger بقيدها.
+// فقط ما يقول الربط عنه صراحةً «لا قيد يطابقها» (missing-movement)؛ الالتباس لا يُعرض.
+// والفاتورة إمّا فورية، أو بتاريخ اليوم/أمس: النسخة الفورية تُستبدل بنسخة التقرير بعد
+// دقائق، وقد يسبق تقريرُ الفواتير دفترَ الحركات. ولا شيء خارج نافذة الدفتر نفسه.
+function customerPendingLiveInvoices(item, movements) {
+  if (!item) return [];
+  const sales = customerInvoicesFor(item).filter((inv) => inv && !inv.isReturn);
+  const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  return sales.filter((inv) => (inv.live === true || String(inv.date || "") >= yesterday)
+    && movementsReportCovers(inv.date)
+    && bindSaleInvoiceLedger({ movements, invoices: sales, invoice: inv }).reason === "missing-movement");
+}
+
 function customerDetailsPanel(item) {
   if (!item) {
     return `
@@ -8713,6 +8751,8 @@ function customerDetailsPanel(item) {
   const typedLedger = fromFullLedger && movementsReportHasLineKinds();
   // سطر مدين من قيد مرتجع، أو payment_out، ليس فاتورة بيع.
   const invoiceMoves = movements.filter((m) => debitMovementKind(m, typedLedger).kind === "sale");
+  // فواتير البيع الفورية (وصلت من وكيل الأحداث خلال ثوانٍ) ولم يصل قيدها إلى الدفتر بعد.
+  const pendingLive = customerPendingLiveInvoices(item, movements);
   const creditMoves = movements.filter((m) => Number(m?.credit || 0) > 0);
   // مرتجع المبيعات يُقيَّد دائناً على حساب الزبون تماماً كالدفعة — نفرزه بربطه القطعي
   // بفاتورة المرتجع (creditMovementKind)، لا بالتاريخ والمبلغ. ما لا يجوز الحكم عليه
@@ -8771,9 +8811,18 @@ function customerDetailsPanel(item) {
         <article>
           <div class="detail-section-head">
             <h4>🧾 الفواتير</h4>
-            <span class="status-chip">${invoiceMoves.length} فاتورة</span>
+            <span class="status-chip">${invoiceMoves.length + pendingLive.length} فاتورة</span>
           </div>
           <div class="detail-list payment-timeline">
+            ${pendingLive.map((inv) => `
+                <div class="payment-entry" data-live-pending-invoice="${escapeHtml(String(inv.guid || ""))}">
+                  <div class="payment-entry-dot movement-dot"></div>
+                  <div class="payment-entry-body">
+                    <strong class="payment-amount">فاتورة ${escapeHtml(String(inv.number || ""))}: ${escapeHtml(formatMoney(Number(inv.total || 0)))}</strong>
+                    <span class="payment-date">${escapeHtml(inv.date ? formatDate(inv.date) : "بلا تاريخ")}</span>
+                    <small class="payment-note">⚡ وصلت من الأمين للتو. قيدها بدفتر الحساب يصل خلال دقائق، وبعدها يظهر زر PDF.</small>
+                  </div>
+                </div>`).join("")}
             ${invoiceMoves.length
               ? invoiceMoves.map((m) => `
                 <div class="payment-entry">
@@ -8786,7 +8835,7 @@ function customerDetailsPanel(item) {
                     <button class="button secondary mini-button" type="button" data-action="gen-movement-doc" data-debit="${escapeHtml(String(m?.debit || 0))}" data-credit="0" data-date="${escapeHtml(m?.date || "")}" data-notes="${escapeHtml(m?.notes || "")}" data-balance="${m?.balance !== undefined && m?.balance !== null ? escapeHtml(String(m.balance)) : ""}" data-balance-chrono="${m?.balanceChrono !== undefined && m?.balanceChrono !== null ? escapeHtml(String(m.balanceChrono)) : ""}" data-doc-new="${m?.docNew !== undefined && m?.docNew !== null ? escapeHtml(String(m.docNew)) : ""}" data-doc-prev="${m?.docPrev !== undefined && m?.docPrev !== null ? escapeHtml(String(m.docPrev)) : ""}" data-bill-guid="${escapeHtml(String(m?.billGuid || ""))}" style="margin-top:6px">📄 فاتورة PDF</button>
                   </div>
                 </div>`).join("")
-              : '<p class="muted" style="padding:12px 0">لا توجد فواتير مسجلة.</p>'}
+              : (pendingLive.length ? "" : '<p class="muted" style="padding:12px 0">لا توجد فواتير مسجلة.</p>')}
           </div>
         </article>
         <article>
@@ -13103,6 +13152,137 @@ function bindAccordions(root = app) {
   });
 }
 
+// أزرار مستندات قيود الدفتر (فاتورة/مرتجع/سند قبض/صرف) في بطاقة تفاصيل الزبون. دالة
+// مستقلة كي تُربط أيضاً بعد التحديث الجزئي للبطاقة (refreshCustomerDetailPanelData).
+// المعامل اسمه `app` عمداً (جذر البحث، يحجب العام): حرّاس check-invoice-ledger-binding
+// وcheck-payment-out-not-invoice يستخرجون المعالج الحقيقي بنصّه هذا ويشغّلونه.
+function bindMovementDocButtons(app) {
+  app.querySelectorAll("[data-action='gen-movement-doc']").forEach((el) => {
+    el.addEventListener("click", () => {
+      // نقرة ثانية أثناء تجهيز المستند تُتجاهَل: وإلا صدر سندان برقمين مختلفين
+      // للدفعة نفسها. الحارس على مستوى الوحدة كي يصمد أمام إعادة رسم الصفحة.
+      if (voucherExportBusy) return;
+      voucherExportBusy = true;
+      setTimeout(() => { voucherExportBusy = false; }, 1500);
+      const item = selectedCustomer(latestCustomerBalanceItems());
+      if (!item) { showNoticeNow("error", "اختر زبونًا أولاً."); return; }
+      const debit = Number(el.dataset.debit || 0);
+      const credit = Number(el.dataset.credit || 0);
+      const key = customerKey(item);
+      const base = {
+        name: item.name || "",
+        phone: customerProfile(key)?.phone || "",
+        date: el.dataset.date || todayIsoDate(),
+        notes: el.dataset.notes || "",
+        cur: customerCurrency(item)
+      };
+      // الرصيد المُخزَّن من دفتر الأمين لهذا القيد بالذات — ممرَّر مع الزر، بلا أي مطابقة.
+      const storedBal = el.dataset.balance !== undefined && el.dataset.balance !== ""
+        ? Number(el.dataset.balance) : null;
+      // الرصيد الزمني الحقيقي للمستند (لا يتضخّم بدفعة نفس اليوم). يسقط لرصيد الكشف إن غاب.
+      const storedBalChrono = el.dataset.balanceChrono !== undefined && el.dataset.balanceChrono !== ""
+        ? Number(el.dataset.balanceChrono) : storedBal;
+      const docBal = (storedBalChrono !== null && Number.isFinite(storedBalChrono)) ? storedBalChrono : storedBal;
+      // رصيدا المستند بعد/قبل سند القيد كاملاً (يشملان الخصم المرافق). يسقطان إلى الرصيد الزمني.
+      const storedDocNew = el.dataset.docNew !== undefined && el.dataset.docNew !== ""
+        ? Number(el.dataset.docNew) : docBal;
+      const storedDocPrev = el.dataset.docPrev !== undefined && el.dataset.docPrev !== ""
+        ? Number(el.dataset.docPrev) : null;
+      if (debit > 0 && credit <= 0) {
+        // سطر حسم المرتجع ليس فاتورة. payment_out صرف من الصندوق: سند صرف، بلا بحث عن أصناف.
+        if (movementReturnLink({ billGuid: el.dataset.billGuid })) {
+          showNoticeNow("error", "هذا السطر جزء من قيد مرتجع (حسم المرتجع)، وليس فاتورة بيع — صدّره من قائمة المرتجعات.");
+          return;
+        }
+        if (movementDocTypeFromButton(el.dataset.lineKind, debit, credit) === "payment") {
+          exportMovementReceipt(base, item, debit, storedDocNew, "payment");
+          return;
+        }
+        // الزبون يُمرَّر كعنصر (يحمل customerGuid) لا كاسم — الاسم في تقرير الفواتير
+        // مصدره حقل نصّي آخر في الأمين وقد يتخلّف عن اسم الحساب بعد أي تعديل.
+        const invs = customerInvoicesFor(item).filter((x) => !x.isReturn);
+        // سطر الدفتر الذي ضُغط زرّه، من نفس المصدر الذي رُسمت منه القائمة.
+        const ledgerRows = customerFullMovements(item)?.movements || item.recentMovements || [];
+        const dOnly = String(el.dataset.date || "").slice(0, 10);
+        const sameDoc = (v, raw) => raw === undefined || raw === "" || Number(v) === Number(raw);
+        const clicked = ledgerRows.find((m) => Number(m?.debit || 0) > 0 && !(Number(m?.credit || 0) > 0)
+          && String(m?.date || "").slice(0, 10) === dOnly && saleAmountsEqual(m.debit, debit)
+          && sameDoc(m.docPrev, el.dataset.docPrev) && sameDoc(m.docNew, el.dataset.docNew)) || null;
+        // معرّف الفاتورة (قطعي) على كامل التقرير أولاً، ثم تطابق واحد لواحد بنفس اليوم
+        // والمبلغ — ولا شيء غير ذلك: لا تاريخ وحده، ولا مبلغ وحده، ولا ترتيب النتائج.
+        const bg = normGuid(el.dataset.billGuid);
+        const byGuid = bg ? invoiceByGuid(bg) : null;
+        const binding = clicked
+          ? bindSaleInvoiceLedger({
+            movements: ledgerRows,
+            invoices: invs,
+            invoice: byGuid && !byGuid.invoice.isReturn ? byGuid.invoice : null,
+            movement: clicked
+          })
+          : { reason: "missing-movement" };
+        const match = binding.invoice || null;
+        if (!match) {
+          showNoticeNow("error", saleBindingRefusal(binding.reason, debit, dOnly, item));
+          return;
+        }
+        const total = match.total || debit;
+        const opts = { ...base, cur: "$", type: "invoice", amount: total, no: match.number ? String(match.number) : docNumber("INV"), lines: match.lines || [] };
+        if (storedDocNew !== null && Number.isFinite(storedDocNew)) {
+          opts.newBalance = roundPrice(storedDocNew);
+          const prev = (storedDocPrev !== null && Number.isFinite(storedDocPrev)) ? storedDocPrev : (storedDocNew - debit);
+          opts.prevBalance = roundPrice(prev);
+          // الحسم ودفعة الزبون يأتيان من الأمين على رأس الفاتورة (TotalDisc وFirstPay)
+          // ويُنسبان أولاً. ما يتبقّى بعدهما لا يُسمّى حسماً أبداً، ولا يُطبع إلا إذا
+          // أثبتته أسطر حقيقية في قيد الفاتورة نفسه — وإلا لا مستند.
+          const knownDiscount = Math.max(0, roundPrice(Number(match.discount || 0)));
+          const knownPayment = Math.max(0, roundPrice(Number(match.payment || 0)));
+          if (knownDiscount > 0.009) opts.discount = knownDiscount;
+          if (knownPayment > 0.009) opts.payment = knownPayment;
+          const residual = roundPrice(
+            opts.prevBalance + total - knownDiscount - knownPayment - opts.newBalance
+          );
+          if (!invoiceEntryProvesResidual(ledgerRows, binding.movement, residual)) {
+            showNoticeNow("error", saleBindingRefusal("residual", debit, dOnly, item));
+            return;
+          }
+          if (Math.abs(residual) > 0.009) opts.adjust = residual;
+        } else {
+          // قيد الحركة بلا أرصدة مخزَّنة (تقرير أقدم من تحديث المزامنة):
+          // نفس قاعدة مسار الفواتير — رصيد الحساب مستقلاً وموسوماً متى كان
+          // الدفتر يغطّي التاريخ، ولا شيء إطلاقاً متى لم يكن.
+          const account = customerBalance(item);
+          if (movementsReportCovers(el.dataset.date) && Number.isFinite(account)) {
+            opts.accountBalance = roundPrice(account);
+            opts.accountBalanceAt = reportSyncedAt(state.customerBalanceReports[0]);
+          }
+        }
+        exportVoucherPdf(opts);
+      } else if (credit > 0) {
+        // مرتجع المبيعات يُقيَّد دائناً كالدفعة تماماً — يُعرف بربطه القطعي بفاتورة المرتجع
+        // (creditMovementKind) لا بالتاريخ والمبلغ، ويُصدَّر بأصنافه وأرصدة قيده هو.
+        const kind = creditMovementKind(item, { date: el.dataset.date, credit, billGuid: el.dataset.billGuid, docPrev: el.dataset.docPrev, docNew: el.dataset.docNew }, el.dataset.ledgerLinked === "1");
+        if (kind.kind === "return") {
+          const retMatch = kind.invoice;
+          const opts = { ...base, cur: "$", type: "return", amount: retMatch.total || credit, no: retMatch.number ? String(retMatch.number) : docNumber("RET"), lines: retMatch.lines || [] };
+          // أرصدة القيد المخزَّنة وحدها — لا الرصيد الحالي أبداً.
+          applyReturnLedger(opts, retMatch, el.dataset.docPrev, el.dataset.docNew);
+          exportVoucherPdf(opts);
+        } else if (kind.kind !== "receipt") {
+          showNoticeNow("error", kind.kind === "invoice-discount"
+            ? "هذا السطر حسم على الفاتورة " + (kind.invoice?.number || "") + " وليس سند قبض — صدّر الفاتورة نفسها."
+            : kind.kind === "return-pending"
+            ? "هذا القيد مرتجع مبيعات، وتفاصيله لم تُزامَن بعد — لا مستند له حتى المزامنة التالية."
+            : "لا يمكن الحكم على هذا القيد: يطابق مرتجعاً ولا ربط قطعياً له — لم يُطبع سند قبض ولا مرتجع.");
+        } else {
+          exportMovementReceipt(base, item, credit, storedDocNew);
+        }
+      } else {
+        showNoticeNow("error", "لا يمكن تصدير هذا القيد.");
+      }
+    });
+  });
+}
+
 function render() {
   if (state.showExchangeModal) {
     app.innerHTML = `
@@ -13889,130 +14069,7 @@ function render() {
     setNotice("success", `عملة الزبون الآن: ${next}`);
     render();
   });
-  app.querySelectorAll("[data-action='gen-movement-doc']").forEach((el) => {
-    el.addEventListener("click", () => {
-      // نقرة ثانية أثناء تجهيز المستند تُتجاهَل: وإلا صدر سندان برقمين مختلفين
-      // للدفعة نفسها. الحارس على مستوى الوحدة كي يصمد أمام إعادة رسم الصفحة.
-      if (voucherExportBusy) return;
-      voucherExportBusy = true;
-      setTimeout(() => { voucherExportBusy = false; }, 1500);
-      const item = selectedCustomer(latestCustomerBalanceItems());
-      if (!item) { showNoticeNow("error", "اختر زبونًا أولاً."); return; }
-      const debit = Number(el.dataset.debit || 0);
-      const credit = Number(el.dataset.credit || 0);
-      const key = customerKey(item);
-      const base = {
-        name: item.name || "",
-        phone: customerProfile(key)?.phone || "",
-        date: el.dataset.date || todayIsoDate(),
-        notes: el.dataset.notes || "",
-        cur: customerCurrency(item)
-      };
-      // الرصيد المُخزَّن من دفتر الأمين لهذا القيد بالذات — ممرَّر مع الزر، بلا أي مطابقة.
-      const storedBal = el.dataset.balance !== undefined && el.dataset.balance !== ""
-        ? Number(el.dataset.balance) : null;
-      // الرصيد الزمني الحقيقي للمستند (لا يتضخّم بدفعة نفس اليوم). يسقط لرصيد الكشف إن غاب.
-      const storedBalChrono = el.dataset.balanceChrono !== undefined && el.dataset.balanceChrono !== ""
-        ? Number(el.dataset.balanceChrono) : storedBal;
-      const docBal = (storedBalChrono !== null && Number.isFinite(storedBalChrono)) ? storedBalChrono : storedBal;
-      // رصيدا المستند بعد/قبل سند القيد كاملاً (يشملان الخصم المرافق). يسقطان إلى الرصيد الزمني.
-      const storedDocNew = el.dataset.docNew !== undefined && el.dataset.docNew !== ""
-        ? Number(el.dataset.docNew) : docBal;
-      const storedDocPrev = el.dataset.docPrev !== undefined && el.dataset.docPrev !== ""
-        ? Number(el.dataset.docPrev) : null;
-      if (debit > 0 && credit <= 0) {
-        // سطر حسم المرتجع ليس فاتورة. payment_out صرف من الصندوق: سند صرف، بلا بحث عن أصناف.
-        if (movementReturnLink({ billGuid: el.dataset.billGuid })) {
-          showNoticeNow("error", "هذا السطر جزء من قيد مرتجع (حسم المرتجع)، وليس فاتورة بيع — صدّره من قائمة المرتجعات.");
-          return;
-        }
-        if (movementDocTypeFromButton(el.dataset.lineKind, debit, credit) === "payment") {
-          exportMovementReceipt(base, item, debit, storedDocNew, "payment");
-          return;
-        }
-        // الزبون يُمرَّر كعنصر (يحمل customerGuid) لا كاسم — الاسم في تقرير الفواتير
-        // مصدره حقل نصّي آخر في الأمين وقد يتخلّف عن اسم الحساب بعد أي تعديل.
-        const invs = customerInvoicesFor(item).filter((x) => !x.isReturn);
-        // سطر الدفتر الذي ضُغط زرّه، من نفس المصدر الذي رُسمت منه القائمة.
-        const ledgerRows = customerFullMovements(item)?.movements || item.recentMovements || [];
-        const dOnly = String(el.dataset.date || "").slice(0, 10);
-        const sameDoc = (v, raw) => raw === undefined || raw === "" || Number(v) === Number(raw);
-        const clicked = ledgerRows.find((m) => Number(m?.debit || 0) > 0 && !(Number(m?.credit || 0) > 0)
-          && String(m?.date || "").slice(0, 10) === dOnly && saleAmountsEqual(m.debit, debit)
-          && sameDoc(m.docPrev, el.dataset.docPrev) && sameDoc(m.docNew, el.dataset.docNew)) || null;
-        // معرّف الفاتورة (قطعي) على كامل التقرير أولاً، ثم تطابق واحد لواحد بنفس اليوم
-        // والمبلغ — ولا شيء غير ذلك: لا تاريخ وحده، ولا مبلغ وحده، ولا ترتيب النتائج.
-        const bg = normGuid(el.dataset.billGuid);
-        const byGuid = bg ? invoiceByGuid(bg) : null;
-        const binding = clicked
-          ? bindSaleInvoiceLedger({
-            movements: ledgerRows,
-            invoices: invs,
-            invoice: byGuid && !byGuid.invoice.isReturn ? byGuid.invoice : null,
-            movement: clicked
-          })
-          : { reason: "missing-movement" };
-        const match = binding.invoice || null;
-        if (!match) {
-          showNoticeNow("error", saleBindingRefusal(binding.reason, debit, dOnly, item));
-          return;
-        }
-        const total = match.total || debit;
-        const opts = { ...base, cur: "$", type: "invoice", amount: total, no: match.number ? String(match.number) : docNumber("INV"), lines: match.lines || [] };
-        if (storedDocNew !== null && Number.isFinite(storedDocNew)) {
-          opts.newBalance = roundPrice(storedDocNew);
-          const prev = (storedDocPrev !== null && Number.isFinite(storedDocPrev)) ? storedDocPrev : (storedDocNew - debit);
-          opts.prevBalance = roundPrice(prev);
-          // الحسم ودفعة الزبون يأتيان من الأمين على رأس الفاتورة (TotalDisc وFirstPay)
-          // ويُنسبان أولاً. ما يتبقّى بعدهما لا يُسمّى حسماً أبداً، ولا يُطبع إلا إذا
-          // أثبتته أسطر حقيقية في قيد الفاتورة نفسه — وإلا لا مستند.
-          const knownDiscount = Math.max(0, roundPrice(Number(match.discount || 0)));
-          const knownPayment = Math.max(0, roundPrice(Number(match.payment || 0)));
-          if (knownDiscount > 0.009) opts.discount = knownDiscount;
-          if (knownPayment > 0.009) opts.payment = knownPayment;
-          const residual = roundPrice(
-            opts.prevBalance + total - knownDiscount - knownPayment - opts.newBalance
-          );
-          if (!invoiceEntryProvesResidual(ledgerRows, binding.movement, residual)) {
-            showNoticeNow("error", saleBindingRefusal("residual", debit, dOnly, item));
-            return;
-          }
-          if (Math.abs(residual) > 0.009) opts.adjust = residual;
-        } else {
-          // قيد الحركة بلا أرصدة مخزَّنة (تقرير أقدم من تحديث المزامنة):
-          // نفس قاعدة مسار الفواتير — رصيد الحساب مستقلاً وموسوماً متى كان
-          // الدفتر يغطّي التاريخ، ولا شيء إطلاقاً متى لم يكن.
-          const account = customerBalance(item);
-          if (movementsReportCovers(el.dataset.date) && Number.isFinite(account)) {
-            opts.accountBalance = roundPrice(account);
-            opts.accountBalanceAt = reportSyncedAt(state.customerBalanceReports[0]);
-          }
-        }
-        exportVoucherPdf(opts);
-      } else if (credit > 0) {
-        // مرتجع المبيعات يُقيَّد دائناً كالدفعة تماماً — يُعرف بربطه القطعي بفاتورة المرتجع
-        // (creditMovementKind) لا بالتاريخ والمبلغ، ويُصدَّر بأصنافه وأرصدة قيده هو.
-        const kind = creditMovementKind(item, { date: el.dataset.date, credit, billGuid: el.dataset.billGuid, docPrev: el.dataset.docPrev, docNew: el.dataset.docNew }, el.dataset.ledgerLinked === "1");
-        if (kind.kind === "return") {
-          const retMatch = kind.invoice;
-          const opts = { ...base, cur: "$", type: "return", amount: retMatch.total || credit, no: retMatch.number ? String(retMatch.number) : docNumber("RET"), lines: retMatch.lines || [] };
-          // أرصدة القيد المخزَّنة وحدها — لا الرصيد الحالي أبداً.
-          applyReturnLedger(opts, retMatch, el.dataset.docPrev, el.dataset.docNew);
-          exportVoucherPdf(opts);
-        } else if (kind.kind !== "receipt") {
-          showNoticeNow("error", kind.kind === "invoice-discount"
-            ? "هذا السطر حسم على الفاتورة " + (kind.invoice?.number || "") + " وليس سند قبض — صدّر الفاتورة نفسها."
-            : kind.kind === "return-pending"
-            ? "هذا القيد مرتجع مبيعات، وتفاصيله لم تُزامَن بعد — لا مستند له حتى المزامنة التالية."
-            : "لا يمكن الحكم على هذا القيد: يطابق مرتجعاً ولا ربط قطعياً له — لم يُطبع سند قبض ولا مرتجع.");
-        } else {
-          exportMovementReceipt(base, item, credit, storedDocNew);
-        }
-      } else {
-        showNoticeNow("error", "لا يمكن تصدير هذا القيد.");
-      }
-    });
-  });
+  bindMovementDocButtons(app);
   app.querySelectorAll("[data-action='gen-invoice-doc']").forEach((el) => {
     el.addEventListener("click", () => {
       try {

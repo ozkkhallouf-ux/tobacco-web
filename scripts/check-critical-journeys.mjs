@@ -619,6 +619,77 @@ await journey("balances", "صفحة الذمم تعرض أرصدة الزبائ�
   assertClean("الذمم", collected);
 });
 
+// فاتورة فورية وصلت ولم يصل قيدها إلى الدفتر بعد (عمر 2026-11-05، فاتورة 1195): البطاقة
+// تعرضها فوراً، وتتحدّث أيضاً حين يكون المؤشر في خانة البحث — دون أن تمسّ الخانة.
+await journey("balances-live-invoice", "بطاقة الزبون تعرض الفاتورة الفورية قبل قيدها، وتتحدّث والمؤشر في خانة البحث", async (page) => {
+  const collected = await openApp(page);
+  const today = new Date().toISOString().slice(0, 10);
+  const liveInvoice = (guid, number, total) => ({
+    number: String(number), date: today, customerGuid: "", currency: "USD", currencyVal: 1, guid,
+    total, discount: 0, payment: 0, isReturn: false, live: true,
+    lines: [{ itemGuid: "", material: "صنف اختبار ألف", qty: 50, qtyUnits: 1, price: total, lineTotal: total,
+      lineTotalSource: "derived", unit1: "كروز", unit2: "كرتونة", unit2Fact: 50, unit3: "", unit3Fact: 0, inputUnit: 2 }]
+  });
+  const invoicesReport = (invoices) => ({
+    source: "ameen_customer_invoices",
+    summary: { syncedAt: "2026-01-02T00:00:00.000Z", fromDate: "2026-01-01" },
+    items: [{ name: "زبون اختبار أول", customerGuid: "", invoices }]
+  });
+  await seedSession(page, {
+    customerBalanceReports: TEST_BALANCE_REPORT,
+    customerMovementsReport: TEST_CASH_LEDGER,
+    customerInvoicesReport: invoicesReport([liveInvoice("live-test-1", 9001, 777)])
+  });
+  await gotoRoute(page, "balances");
+  await page.locator("details.acc-group[data-acc='balances'] > summary").click();
+  await page.locator("[data-customer-details='c1']").click();
+  const invoices = page.locator(".customer-detail-grid article").nth(0);
+  await invoices.waitFor({ state: "visible", timeout: 10000 });
+  let text = await invoices.innerText();
+  assert(text.includes("فاتورة 9001: 777"), `الفاتورة الفورية لا تظهر قبل قيدها: ${text}`);
+  assert(text.includes("فاتورة: 100"), `قيد الدفتر القديم سقط: ${text}`);
+  assert(text.includes("2 فاتورة"), `عدد الفواتير لا يشمل الفورية: ${text}`);
+
+  // المؤشر في خانة البحث، ثم يصل تحديث دوري: فاتورة فورية ثانية ورصيد جديد.
+  const search = page.locator("[data-customer-search]");
+  await search.click();
+  await search.fill("زبون اختبار");
+  await page.evaluate(({ report }) => {
+    const state = (0, eval)("state");
+    state.customerInvoicesReport = report;
+    state.customerBalanceReports = [{ ...state.customerBalanceReports[0],
+      items: state.customerBalanceReports[0].items.map((i) => i.key === "c1" ? { ...i, balance: 2277 } : i) }];
+    (0, eval)("renderAfterPeriodicRefresh")();
+  }, { report: invoicesReport([liveInvoice("live-test-2", 9002, 555), liveInvoice("live-test-1", 9001, 777)]) });
+  text = await invoices.innerText();
+  const grid = await page.locator(".customer-detail-grid article").nth(0).innerText();
+  assert(grid.includes("فاتورة 9002: 555"), `البطاقة لم تتحدّث والمؤشر في خانة البحث: ${grid}`);
+  const metrics = await page.locator(".customer-detail-metrics").innerText();
+  assert(metrics.includes("2,277"), `رصيد البطاقة لم يتحدّث: ${metrics}`);
+  const focus = await page.evaluate(() => ({
+    focused: document.activeElement?.hasAttribute("data-customer-search") === true,
+    value: document.activeElement?.value
+  }));
+  assert(focus.focused && focus.value === "زبون اختبار", `خانة البحث فقدت التركيز أو قيمتها: ${JSON.stringify(focus)}`);
+
+  // حين يصل القيد إلى الدفتر تختفي الفاتورة من «بالطريق» وتبقى سطراً واحداً من الدفتر.
+  await page.evaluate(({ day }) => {
+    const state = (0, eval)("state");
+    const ledger = state.customerMovementsReport;
+    state.customerMovementsReport = { ...ledger, items: [{ ...ledger.items[0], movements: [
+      { date: day, debit: 555, credit: 0, notes: "", lineKind: "sale", docPrev: 2600, docNew: 3155, balance: 3155 },
+      ...ledger.items[0].movements
+    ] }] };
+    (0, eval)("renderAfterPeriodicRefresh")();
+  }, { day: today });
+  const after = await page.locator(".customer-detail-grid article").nth(0).innerText();
+  assert(!after.includes("فاتورة 9002"), `الفاتورة بقيت «بالطريق» بعد وصول قيدها: ${after}`);
+  assert(after.includes("فاتورة: 555"), `قيد الفاتورة 555 لم يظهر من الدفتر: ${after}`);
+  assert(after.includes("فاتورة 9001: 777"), `الفاتورة الأخرى بلا قيد اختفت: ${after}`);
+  assert(await page.locator(".customer-detail-grid [data-action='gen-movement-doc']").count() > 0, "أزرار مستندات الدفتر غابت بعد التحديث الجزئي");
+  assertClean("بطاقة الزبون الفورية", collected);
+});
+
 // ===== ٨) الفاتورة =====
 await journey("sales-invoice", "الفاتورة: بحث ← اختيار صنف ← كمية ← سعر، مع صفر كتابة على الشبكة", async (page) => {
   const collected = await openApp(page);
