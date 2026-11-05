@@ -235,7 +235,10 @@ test("خانة البحث لا توقف التحديث الدوري: تُحدَ�
     document: { activeElement: null },
     updateCustomerBalanceResults: () => calls.push("customers"),
     updateAmeenBrowserResults: () => calls.push("ameen"),
-    render: () => calls.push("render")
+    render: () => calls.push("render"),
+    // لا بطاقة زبون مفتوحة هنا: التحديث الجزئي للبطاقة يُختبر في check-critical-journeys.
+    app: { querySelector: () => null },
+    state: { selectedCustomerKey: "" }
   };
   const api = new Function(...Object.keys(env), `${block}; return { focusedSearchAttr, isEditingFormField, renderAfterPeriodicRefresh };`)(...Object.values(env));
   const input = (attr) => ({ tagName: "INPUT", hasAttribute: (a) => a === attr });
