@@ -20,7 +20,9 @@
 ## القيود الثابتة
 - لا دمج ولا auto-merge ولا نشر ولا migration من هذا المسار أبداً؛ أقصى ناتج **Draft PR** بعد موافقة المالك.
 - ممنوع على الـpatch: `supabase/**`, `.github/**`, `tools/**` (ومنها `*.ps1`), `scripts/**`, الاختبارات، `package*.json`, `index.html`, `service-worker.js`، وأي إضافة/حذف/نقل/symlink/تنفيذ/ثنائي.
-- الحارس قبل الاختبارات دائماً، وأي استثناء فيه = رفض.
+- **العزل (CodeQL `actions/untrusted-checkout`):** سياق `workflow_run` المميّز لا ينفّذ أي كود من الفرع الفاشل — لا `npm ci`/`npm run check` ولا سكربتات. الاختبارات على الـpatch تعمل فقط في CI العادي (`pull_request`) على الـDraft PR. اختبار هجومي أثبت أن النسخة السابقة كانت تنفّذ `scripts` من الفرع.
+- `--safe-mode --restricted` إلزاميان لا تجميليان: بدونهما شغّل Claude في الاختبار hook `SessionStart` وخادم `.mcp.json` و`NODE_OPTIONS` من ملفات الفرع.
+- الحارس يُحمَّل من الفرع الافتراضي، وأي استثناء فيه = رفض.
 - لا تحليل لتشغيلات forks، ولا لفروع `autorepair/*` أو `windows-production`، ولا لإعادات التشغيل أو تشغيلات البوت.
 - السقوف: 3 تشغيلات/يوم، محاولتان لكل commit، `--max-turns 15`، `--max-budget-usd 1` (يُفحص بعد الدور فقد يتجاوزه بدور واحد).
 

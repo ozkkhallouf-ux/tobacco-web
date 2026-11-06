@@ -7,15 +7,18 @@ name: OZK Auto-Repair
 #   propose                    ⇒ كما سبق + Draft PR **بعد موافقة يدوية** على بيئة autorepair-propose.
 # تفعيل أي وضع يحتاج قراراً منفصلاً من المالك (متغيّر + سرّ Claude + بيئة) — لا شيء منها ضمن هذا الملف.
 #
-# نموذج الثقة: سجل CI والـpatch محتوى غير موثوق. الوكيل بلا shell وبلا git credentials وبلا توكن كتابة.
-# الحارس (.github/autorepair/guard.mjs) يُحمَّل من الفرع الافتراضي، ويعمل قبل أي اختبار، ويُعاد في propose.
+# نموذج الثقة: سجل CI وكود الفرع الفاشل والـpatch كلها محتوى غير موثوق.
+# قاعدة العزل: هذا الـworkflow (سياق workflow_run المميّز) **لا ينفّذ أي كود من الفرع الفاشل** —
+#   لا npm/node/make/سكربتات على شجرة work. يُقرأ الكود ويُعدَّل فقط (Claude بلا shell)، ويُفحص بحارس موثوق
+#   من الفرع الافتراضي. تشغيل الاختبارات على الـpatch يحدث حصراً في CI العادي غير المميّز (pull_request)
+#   على الـDraft PR نفسه. (CodeQL actions/untrusted-checkout — أُصلح بهذا الفصل لا بإخفاء التنبيه.)
 # كل الـactions الخارجية مثبّتة بـSHA (commits موقّعة)، والتعليق يذكر الإصدار.
 run-name: "auto-repair ${{ github.event.workflow_run.head_branch }} @ ${{ github.event.workflow_run.head_sha }}"
 
 # zizmor: workflow_run مقصود ومُقيَّد — لماذا هو آمن هنا:
 #  1) GitHub يشغّل دائماً نسخة هذا الملف من الفرع الافتراضي، فلا يستطيع فرعٌ تعديله لنفسه.
 #  2) gate يرفض تشغيلات forks (head_repository ≠ المستودع) ⇒ لا يُحلَّل إلا كود دفعه مَن يملك صلاحية الدفع أصلاً.
-#  3) السرّ في خطوة Claude وحدها، وClaude بلا shell؛ كود الفرع (npm ci/check) يعمل في خطوة بلا أسرار وبتوكن قراءة.
+#  3) السرّ في خطوة Claude وحدها، وClaude بلا shell؛ ولا تُنفَّذ أي خطوة كوداً من الفرع (لا npm ci/check هنا).
 #  4) propose لا يشغّل كود المستودع، ويعيد الحارس الموثوق على الـartifact قبل أي دفع، وهو خلف موافقة يدوية.
 on:  # zizmor: ignore[dangerous-triggers]
   workflow_run:
@@ -71,14 +74,20 @@ jobs:
   analyze:
     name: analyze (Claude, no shell, read-only)
     needs: gate
-    if: needs.gate.outputs.proceed == 'true'
+    if: needs.gate.outputs.proceed == 'true' && github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: read                     # checkout للـcommit الفاشل وللحارس الموثوق
       actions: read                      # قراءة سجل الفشل (gh run view --log-failed)
     steps:
-      - name: Checkout failing commit (no credentials kept)
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - name: Install pinned Claude Code (before any untrusted file exists on the runner)
+        run: npm install -g @anthropic-ai/claude-code@2.1.319
+      - name: Checkout failing commit (read-only; never executed — no credentials kept)
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
@@ -97,12 +106,6 @@ jobs:
           RUN_ID: ${{ github.event.workflow_run.id }}
           REPO: ${{ github.repository }}
         run: gh run view "$RUN_ID" --repo "$REPO" --log-failed | tail -c 20000 > "$RUNNER_TEMP/failing.log" || true
-      - name: Setup Node
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: '22'
-      - name: Install pinned Claude Code
-        run: npm install -g @anthropic-ai/claude-code@2.1.319
       - name: Claude Code — analysis + minimal fix (no shell, budget + turn caps)
         working-directory: work
         env:
@@ -125,23 +128,19 @@ jobs:
             const j = require(process.env.RUNNER_TEMP + "/claude.json");
             console.log("terminal_reason", j.terminal_reason, "turns", j.num_turns, "cost_usd", j.total_cost_usd);
             if (j.is_error !== false || j.terminal_reason !== "completed") { console.error("fail-closed: claude did not complete"); process.exit(1); }'
-      - name: Guard (trusted copy, BEFORE any test — fail-closed)
+      - name: Guard (trusted copy from default branch — fail-closed; no repo code is executed)
         run: |
           set -o pipefail
           node trusted/.github/autorepair/guard.mjs work HEAD > "$RUNNER_TEMP/guard.json"
           cat "$RUNNER_TEMP/guard.json"
-      - name: CI check on patched tree (no secrets in this step)
-        working-directory: work
-        run: |
-          npm ci --ignore-scripts
-          npm run check
       - name: Export patch + summary (untrusted artifact)
         run: |
           set -euo pipefail
           git -C work diff --cached --binary HEAD > "$RUNNER_TEMP/fix.patch"
           node -e 'const j=require(process.env.RUNNER_TEMP+"/claude.json");require("fs").writeFileSync(process.env.RUNNER_TEMP+"/summary.json",JSON.stringify({result:j.result,turns:j.num_turns,cost_usd:j.total_cost_usd}))'
           fence() { sed 's/`/ˋ/g'; }   # المحتوى غير موثوق: يمنع الخروج من كتلة الكود في الملخص
-          { echo "### OZK Auto-Repair — analysis"; echo; echo '```text'
+          { echo "### OZK Auto-Repair — analysis"; echo
+            echo "> الاختبارات لا تُشغَّل هنا عمداً (سياق مميّز). تُشغَّل في CI العادي على الـDraft PR."; echo; echo '```text'
             node -e 'console.log(String(require(process.env.RUNNER_TEMP+"/summary.json").result||""))' | fence; echo '```'; echo
             echo '```diff'; fence < "$RUNNER_TEMP/fix.patch"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       - name: Upload patch artifact
@@ -157,7 +156,7 @@ jobs:
   propose:
     name: propose (Draft PR after owner approval)
     needs: [gate, analyze]
-    if: vars.OZK_AUTOREPAIR_MODE == 'propose'
+    if: vars.OZK_AUTOREPAIR_MODE == 'propose' && github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 5
     environment: autorepair-propose      # مراجع إلزامي = المالك ⇒ لا دفع قبل موافقة صريحة على كل تشغيل
