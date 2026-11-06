@@ -259,6 +259,144 @@ test("خانة البحث لا توقف التحديث الدوري: تُحدَ�
   assert.equal((polls.slice(0, 2500).match(/renderAfterPeriodicRefresh\(\)/g) || []).length, 2);
 });
 
+function extractAppFn(name, endMarker) {
+  const app = readFileSync(new URL("../src/app.js", import.meta.url), "utf8");
+  const start = app.indexOf(name);
+  const end = app.indexOf(endMarker);
+  assert.ok(start > 0 && end > start, `لم تُوجد ${name}`);
+  return app.slice(start, end);
+}
+
+function installLiveLoaders() {
+  const liveSrc = extractAppFn("async function loadLiveInvoices()", "// ===== هوية الزبون والفاتورة");
+  const lbrSrc = extractAppFn("async function loadCustomerBalanceReports()", "// ===== التحديث الدوري وخانات البحث =====");
+  return function install(env) {
+    return new Function(
+      "state",
+      "window",
+      "dataStore",
+      "latestCustomerBalanceItems",
+      `${liveSrc}
+      async function loadCustomerWhatsapp() {}
+      ${lbrSrc}
+      return { loadLiveInvoices, loadCustomerBalanceReports };`
+    )(env.state, env.window, env.dataStore, env.latestCustomerBalanceItems);
+  };
+}
+
+function liveLoaderState(overrides = {}) {
+  return {
+    session: { id: "staff" },
+    customerBalanceReports: [],
+    customerMovementsReport: null,
+    customerInvoicesReport: null,
+    customerInvoicesBaseReport: null,
+    liveInvoicesBase: null,
+    liveInvoicesSignature: "",
+    liveInvoicesPrices: null,
+    liveInvoicesBalances: null,
+    liveInvoicesStats: null,
+    liveInvoicesMerged: null,
+    liveInvoicesLoadGen: 0,
+    approvedPriceItems: [],
+    ...overrides
+  };
+}
+
+async function testAsync(name, fn) {
+  try {
+    await fn();
+    results.push(`  ✅ ${name}`);
+  } catch (error) {
+    failed += 1;
+    results.push(`  ❌ ${name}\n     ${error && error.message}`);
+  }
+}
+
+const installLive = installLiveLoaders();
+
+await testAsync("تحديث اللقطة لا يمسح فاتورة فورية إن فشل الجلب الفوري", async () => {
+  const lbr = extractAppFn("async function loadCustomerBalanceReports()", "// ===== التحديث الدوري وخانات البحث =====");
+  const idxAssign = lbr.search(/state\.customerInvoicesReport\s*=\s*state\.customerInvoicesBaseReport/);
+  const idxLoad = lbr.indexOf("await loadLiveInvoices()");
+  assert.ok(idxLoad > 0, "تحديث التقارير يجب أن يعيد دمج الفواتير الفورية");
+  assert.ok(idxAssign < 0 || idxAssign > idxLoad,
+    "تعيين اللقطة غير المدموجة قبل الدمج يمسح الفاتورة الفورية إن فشل الجلب أو وُجدت في الذاكرة");
+
+  const snapshot = baseReport();
+  const live = liveRow(G(3), { total: 286, lines: [ln(ITEM_X, 50, 286, 2)] });
+  const merged = L.mergeLiveInvoices(snapshot, [live]).report;
+  assert.ok(byGuid(merged, G(3)), "المدمج يجب أن يحمل الفاتورة الفورية قبل التحديث");
+
+  const state = liveLoaderState({
+    customerInvoicesBaseReport: snapshot,
+    customerInvoicesReport: merged,
+    liveInvoicesBase: snapshot,
+    liveInvoicesSignature: `${G(3)}:5`,
+    liveInvoicesMerged: merged
+  });
+  const dataStore = {
+    isConfigured: () => true,
+    listCustomerBalanceReports: async () => [],
+    getCustomerMovementsReport: async () => null,
+    getCustomerInvoicesReport: async () => snapshot,
+    listLiveAmeenInvoices: async () => { throw new Error("network"); },
+    getPurchaseInvoicesAmeenReport: async () => null,
+    getInvoiceSeriesReport: async () => null
+  };
+  const api = installLive({
+    state,
+    window: { ozkLiveInvoices: L },
+    dataStore,
+    latestCustomerBalanceItems: () => []
+  });
+  await api.loadCustomerBalanceReports();
+  assert.ok(byGuid(state.customerInvoicesReport, G(3)),
+    "فاتورة فورية اختفت بعد تحديث اللقطة رغم أن الجلب الفوري فشل — يجب الإبقاء على الدمج السابق");
+});
+
+await testAsync("دمج قديم لا يكتب فوق لقطة أحدث وصلت أثناء الجلب (سباق 10ث مع 60ث)", async () => {
+  const snapshotA = baseReport();
+  const extra = {
+    number: "1200", date: "2026-10-31", customerGuid: CUST_A, currency: "USD", currencyVal: 1, guid: G(12),
+    total: 22, discount: 0, payment: 0, isReturn: false,
+    lines: [reportLine(ITEM_Y, "مادة ص", 10, 2.2, 1)]
+  };
+  const snapshotB = {
+    ...snapshotA,
+    items: [{ ...snapshotA.items[0], invoices: [...snapshotA.items[0].invoices, extra] }],
+    summary: { ...snapshotA.summary, bills: 3 }
+  };
+
+  const state = liveLoaderState({ customerInvoicesBaseReport: snapshotA, customerInvoicesReport: snapshotA });
+  let releaseA;
+  const holdA = new Promise((resolve) => { releaseA = resolve; });
+  let calls = 0;
+  const dataStore = {
+    isConfigured: () => true,
+    listLiveAmeenInvoices: async () => {
+      const n = ++calls;
+      if (n === 1) await holdA;
+      return [];
+    }
+  };
+  const api = installLive({
+    state,
+    window: { ozkLiveInvoices: L },
+    dataStore,
+    latestCustomerBalanceItems: () => []
+  });
+
+  const stale = api.loadLiveInvoices();
+  state.customerInvoicesBaseReport = snapshotB;
+  await api.loadLiveInvoices();
+  assert.ok(byGuid(state.customerInvoicesReport, G(12)), "اللقطة الأحدث يجب أن تظهر فاتورة 1200");
+  releaseA();
+  await stale;
+  assert.ok(byGuid(state.customerInvoicesReport, G(12)),
+    "اكتمل الدمج القديم بعد اللقطة الأحدث فمسح فاتورة موجودة في التقرير الجديد فقط");
+});
+
 console.log("check-live-invoices:");
 console.log(results.join("\n"));
 if (failed) { console.error(`\n${failed} فحص فشل`); process.exit(1); }
