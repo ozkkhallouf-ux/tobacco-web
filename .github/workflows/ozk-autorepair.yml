@@ -177,11 +177,12 @@ jobs:
     needs: [gate, analyze]
     if: vars.OZK_AUTOREPAIR_MODE == 'propose' && github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     environment: autorepair-propose      # مراجع إلزامي = المالك ⇒ لا دفع قبل موافقة صريحة على كل تشغيل
     permissions:
       contents: write                    # فرع autorepair/* فقط (قواعد الحماية تمنع main وwindows-production)
       pull-requests: write               # Draft PR فقط؛ لا دمج ولا auto-merge
+      actions: write                     # فقط لـself-dispatch (gh workflow run) على نفس الفرع؛ لا صلاحية لأي job آخر
     steps:
       - name: Checkout failing commit (credentials not persisted)
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -207,6 +208,7 @@ jobs:
           git -C work apply --index --whitespace=nowarn "$GITHUB_WORKSPACE/art/fix.patch"
           node trusted/.github/autorepair/guard.mjs work HEAD
       - name: Push fix branch + open DRAFT PR
+        id: push_pr
         working-directory: work
         env:
           GH_TOKEN: ${{ github.token }}
@@ -225,3 +227,41 @@ jobs:
           gh pr create --draft --base "$BASE" --head "$BR" \
             --title "[auto-repair] CI failure from run ${RUN_ID}" \
             --body "Automated DRAFT from OZK Auto-Repair. Owner review required. Auto-merge disabled. Analysis: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          echo "branch=${BR}" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      # GITHUB_TOKEN لا يُطلق تلقائياً pull_request/push (قيد منع التكرار لدى GitHub)؛
+      # workflow_dispatch مستثنى من هذا القيد رسمياً، فنستدعيه يدوياً هنا على نفس الفرع وSHA
+      # بعد التحقق من وجودهما على origin، ونتوقف فوراً عند أي فشل أو عدم ظهور تشغيل فعلي.
+      - name: Self-dispatch required CI checks on the new branch
+        working-directory: work
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BR: ${{ steps.push_pr.outputs.branch }}
+          SHA: ${{ steps.push_pr.outputs.sha }}
+        run: |
+          set -euo pipefail
+          [[ -n "$BR" && -n "$SHA" ]] || { echo "::error::فرع أو SHA غير متوفّرين من خطوة إنشاء الـDraft PR"; exit 1; }
+          REMOTE_SHA="$(git rev-parse "origin/${BR}")"
+          [[ "$REMOTE_SHA" == "$SHA" ]] || { echo "::error::عدم تطابق SHA: متوقع ${SHA} والفعلي على origin/${BR} هو ${REMOTE_SHA}"; exit 1; }
+          echo "### Self-dispatch لفحوص CI الإلزامية على ${BR} @ ${SHA}" >> "$GITHUB_STEP_SUMMARY"
+          for WF in check.yml decision-engine-check.yml; do
+            echo "::group::self-dispatch ${WF} على ${BR} @ ${SHA}"
+            gh workflow run "$WF" --ref "$BR"
+            FOUND=""
+            for _ in $(seq 1 15); do
+              sleep 4
+              FOUND="$(gh run list --workflow "$WF" --branch "$BR" --limit 10 \
+                --json headSha,databaseId,url,event \
+                --jq '[.[] | select(.headSha=="'"$SHA"'" and .event=="workflow_dispatch")][0]')"
+              [[ -n "$FOUND" && "$FOUND" != "null" ]] && break
+            done
+            if [[ -z "$FOUND" || "$FOUND" == "null" ]]; then
+              echo "::error::لم يُنتج self-dispatch أي تشغيل فعلي لـ ${WF} على ${BR} @ ${SHA} ضمن المهلة"
+              exit 1
+            fi
+            RUN_URL="$(jq -r '.url' <<<"$FOUND")"
+            RUN_DB_ID="$(jq -r '.databaseId' <<<"$FOUND")"
+            echo "تم تأكيد التشغيل: ${WF} -> ${RUN_URL} (id ${RUN_DB_ID})"
+            echo "- \`${WF}\`: [${RUN_URL}](${RUN_URL}) (run id ${RUN_DB_ID})" >> "$GITHUB_STEP_SUMMARY"
+            echo "::endgroup::"
+          done
