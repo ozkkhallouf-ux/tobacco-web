@@ -42,11 +42,13 @@ jobs:
     outputs:
       proceed: ${{ steps.g.outputs.proceed }}
       attempt: ${{ steps.g.outputs.attempt }}
+      category: ${{ steps.g.outputs.category }}
     steps:
       - id: g
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
           CONCLUSION: ${{ github.event.workflow_run.conclusion }}
           HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
           HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
@@ -62,6 +64,23 @@ jobs:
           [ "$ACTOR_TYPE" != "Bot" ]           || no "loop guard: bot actor"
           [ "$RUN_ATTEMPT" = "1" ]             || no "re-run ignored"
           [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]  || no "bad sha"
+          # تصنيف الفشل (منفذ pipeline/policy.js) قبل أي استدعاء لـClaude — fail-closed:
+          # أي فشل لا يطابق فئة "قابلة للإصلاح تلقائياً" (أو تعذّر جلب سجله) يُصنَّف unknown ويُحجَب هنا،
+          # فلا يُستهلَك سقف يومي ولا تُستدعى Claude على أعطال لا تصلح لإصلاح آلي أصلاً.
+          log=$(gh run view "$RUN_ID" --repo "$REPO" --log-failed 2>/dev/null | tail -c 20000) || log=""
+          category=unknown
+          if   grep -qiE '(Bad credentials|Resource not accessible by integration|permission denied|401 Unauthorized|403 Forbidden|secret)' <<<"$log"; then category=secret_or_permission
+          elif grep -qiE '(ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|rate limit|502 Bad Gateway|503 Service|runner .* lost|No space left)' <<<"$log"; then category=infra_network
+          elif grep -qiE '(timed out|The job running on runner .* has exceeded|Timeout of [0-9]+ms exceeded)' <<<"$log"; then category=timeout_or_flaky
+          elif grep -qiE '(error TS[0-9]{4}|TypeError: .* is not a function)' <<<"$log"; then category=type_error
+          elif grep -qiE '(eslint|prettier|[0-9]+ problems? \([0-9]+ errors?)' <<<"$log"; then category=lint_failure
+          elif grep -qiE '(ERR_ASSERTION|AssertionError|✖ |not ok [0-9]+|FAIL |tests? failed)' <<<"$log"; then category=test_failure
+          fi
+          echo "category=$category" >> "$GITHUB_OUTPUT"
+          case "$category" in
+            test_failure|lint_failure|type_error) : ;;
+            *) no "category_not_auto_repairable:$category (fail-closed)" ;;
+          esac
           # سقوف بلا حالة خارجية: من سجل تشغيلات GitHub نفسه (لا تعتمد على الماك)
           TODAY=$(date -u +%F)
           today=$(gh api -X GET "repos/$REPO/actions/workflows/ozk-autorepair.yml/runs" -f created=">=$TODAY" -f per_page=100 --jq '[.workflow_runs[]|select(.conclusion!="skipped")]|length')
