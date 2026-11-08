@@ -5,6 +5,9 @@ on:
     branches: [main]
   push:
     branches: [decision-engine-ui, feat/supplier-obligations-sync]
+  workflow_dispatch:  # يتيح لـOZK Auto-Repair (propose) تشغيل هذا الفحص على Draft PR يفتحه GITHUB_TOKEN،
+    # الذي لا يُطلق تلقائياً pull_request/push (قيد منع التكرار المعروف لدى GitHub). لا شروط if هنا
+    # تعتمد على سياق pull_request، فكل الوظائف تعمل بالضبط كما تعمل من pull_request.
 
 permissions:
   contents: read
