@@ -73,7 +73,7 @@ jobs:
           elif grep -qiE '(ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|rate limit|502 Bad Gateway|503 Service|runner .* lost|No space left)' <<<"$log"; then category=infra_network
           elif grep -qiE '(timed out|The job running on runner .* has exceeded|Timeout of [0-9]+ms exceeded)' <<<"$log"; then category=timeout_or_flaky
           elif grep -qiE '(error TS[0-9]{4}|TypeError: .* is not a function)' <<<"$log"; then category=type_error
-          elif grep -qiE '(eslint|prettier|[0-9]+ problems? \([0-9]+ errors?\))' <<<"$log"; then category=lint_failure
+          elif grep -qiE '(eslint|prettier|[0-9]+ problems? \([0-9]+ errors?)' <<<"$log"; then category=lint_failure
           elif grep -qiE '(ERR_ASSERTION|AssertionError|✖ |not ok [0-9]+|FAIL |tests? failed)' <<<"$log"; then category=test_failure
           fi
           echo "category=$category" >> "$GITHUB_OUTPUT"

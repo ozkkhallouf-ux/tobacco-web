@@ -106,6 +106,10 @@ function expect(name, overrides, wantProceed, wantCategory) {
 expect('C1 test_failure -> proceed', { MOCK_LOG: '1) sums\n  AssertionError: expected 1 to equal 2\n  tests failed' }, 'true', 'test_failure');
 expect('C2 lint_failure -> proceed', { MOCK_LOG: 'src/x.js\n  3 problems (3 errors, 0 warnings)\neslint found issues' }, 'true', 'lint_failure');
 expect('C3 type_error -> proceed', { MOCK_LOG: "src/x.ts(10,5): error TS2322: Type 'string' is not assignable" }, 'true', 'type_error');
+// مطابقة حرفية لـpolicy.js: /\d+ problems? \(\d+ errors?/ بلا قوس إغلاق إلزامي — سجل بلا
+// كلمة eslint/prettier ومقطوع فور "N errors" (بلا ")") يجب أن يُصنَّف lint_failure مثل
+// policy.js تماماً، لا unknown (كان هذا الفارق النصي يحجبه خطأً قبل الإصلاح).
+expect('C3b lint_failure truncated before ")" -> proceed (matches policy.js exactly)', { MOCK_LOG: 'src/x.js\n2 problems (2 errors' }, 'true', 'lint_failure');
 
 // فئات غير قابلة للإصلاح آلياً — يجب أن تُحجَب (proceed=false) قبل أي استدعاء لـClaude
 expect('C4 secret_or_permission -> blocked', { MOCK_LOG: 'Error: 403 Forbidden\nResource not accessible by integration' }, 'false', 'secret_or_permission');
