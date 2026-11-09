@@ -1587,3 +1587,56 @@ test("تعارض حجز قائم (in_progress) على الدفعة لا يُرس
   }
   assert.equal(t.edgeFake.state.sent.length, sentBefore + 1, "رسالة ملخص واحدة فقط رغم محاولتين");
 });
+
+// توليد guids صالحة فريدة بالعدد المطلوب لاختبارات المقياس (1/10/74/100) بلا تكرار BG المحدودة (6 فقط).
+function manyGuids(n, seed = 1) {
+  const guids = [];
+  for (let i = 0; i < n; i++) {
+    const v = seed + i;
+    const a = v.toString(16).padStart(8, "0").slice(-8);
+    const b = (v + 1).toString(16).padStart(4, "0").slice(-4);
+    const c = (v + 2).toString(16).padStart(3, "0").slice(-3);
+    const d = (v + 3).toString(16).padStart(3, "0").slice(-3);
+    const e = (v + 4).toString(16).padStart(12, "0").slice(-12);
+    guids.push(`${a}-${b}-4${c}-8${d}-${e}`);
+  }
+  return guids;
+}
+
+// مقياس حادثة 2026-11-09: بالضبط 1/10/74 (الحجم الحقيقي)/100 فاتورة معدَّلة في الدورة نفسها.
+// 1-5 (≤ cfg.burstNotifyThreshold الافتراضي) إشعار فردي مستقل؛ 10/74/100 (> الحدّ) رسالة ملخص
+// واحدة، وتبقى تحت حدّ تيليغرام 4096 محرفاً بلا أي تقسيم (أرقام فواتير حقيقية قصيرة).
+for (const n of [1, 10, 74, 100]) {
+  test(`مقياس حادثة 2026-11-09: بالضبط ${n} فاتورة معدَّلة في الدورة نفسها ⇒ ${n <= 5 ? "إشعار فردي" : "رسالة ملخص واحدة بلا تقسيم"}`, async () => {
+    const t = await setup();
+    const guids = manyGuids(n, 9000 + n * 1000);
+    await addAndArchive(t, guids, 1700 + n);
+    const sentBefore = t.edgeFake.state.sent.length;
+    const notifyCallsBefore = t.edgeFake.state.notifyCalls;
+    const batchCallsBefore = t.edgeFake.state.notifyBatchCalls || 0;
+    for (const g of guids) t.ameen.edit(g, { total: 150 + n });
+    t.advance(300);
+    await t.cycle();
+    const sent = t.edgeFake.state.sent.slice(sentBefore);
+    if (n <= 5) {
+      assert.equal(t.edgeFake.state.notifyBatchCalls || 0, batchCallsBefore, "ضمن الحدّ: بلا تجميع");
+      assert.equal(t.edgeFake.state.notifyCalls - notifyCallsBefore, n, `${n} محاولة إشعار فردية`);
+      assert.equal(sent.length, n);
+      assert.ok(sent.every((s) => !s.batch));
+      if (n === 1) assert.match(sent[0].caption || sent[0].text || "", /معدّلة/, "وصف «فاتورة معدّلة» في الإشعار الفردي");
+    } else {
+      assert.equal(t.edgeFake.state.notifyBatchCalls, batchCallsBefore + 1, "دفعة واحدة فقط بدل محاولة لكل فاتورة");
+      assert.equal(t.edgeFake.state.notifyCalls, notifyCallsBefore, "لا إشعار فردي لهذه الدورة");
+      const batch = sent.find((s) => s.batch);
+      assert.ok(batch, "رسالة ملخص واحدة");
+      assert.ok(batch.text.length < 4096, `${n} فاتورة: الرسالة تحت حدّ تيليغرام بلا تقسيم (${batch.text.length} محرف)`);
+      assert.match(batch.text, new RegExp(String(n)));
+      for (let i = 0; i < guids.length; i++) assert.ok(batch.text.includes(String(1700 + n + i)), `رقم ${1700 + n + i} في الملخص`);
+    }
+    for (const g of guids) {
+      const v2 = t.store.latestVersion("wholesale_invoice", g);
+      assert.equal(v2.version, 2);
+      assert.equal(v2.status, "notified", `${g} لم تُعلَّم notified`);
+    }
+  });
+}

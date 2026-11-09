@@ -294,23 +294,34 @@ async function createFakeEdge() {
         if (existing && existing.telegram_message_id) { alreadySent[v.job_id] = existing.telegram_message_id; continue; }
         toSend.push(v);
       }
-      const empty = { ok: true, notified_job_ids: [], message_id: null, already_sent: alreadySent, held_job_ids: [], unknown_job_ids: [] };
-      if (toSend.length === 0) return json(200, empty);
-      // conflict: نفس آلية /notify لكل عناصر الدفعة معاً — "in_progress" حجز قائم (انتظار قصير)،
-      // "delivery_unknown" حجز غامض يحتاج تحقق المالك. بخلاف /notify، لا 409: كل عنصر يُصنَّف في ردّ 200.
-      if (s.conflict.length) {
-        const code = s.conflict.shift();
-        const ids = toSend.map((v) => v.job_id);
-        return json(200, { ...empty, held_job_ids: code === "in_progress" ? ids : [], unknown_job_ids: code === "delivery_unknown" ? ids : [] });
+      if (toSend.length === 0) {
+        return json(200, { ok: true, notified_job_ids: [], notified_message_ids: {}, already_sent: alreadySent, held_job_ids: [], unknown_job_ids: [] });
       }
-      if (s.reject > 0) { s.reject--; return json(502, { ok: false, error: "telegram_sendMessage_502" }); }
-      const text = shared.buildBatchSummary(toSend);
-      const messageId = 1000 + s.sent.length;
-      s.sent.push({ chat: "OWNER", text, messageId, batch: true });
-      const notifiedIds = toSend.map((v) => v.job_id);
-      for (const v of toSend) s.items.set(v.job_id, shared.itemFromNotify(v, messageId, body.host));
-      if (s.loseResponse > 0) { s.loseResponse--; const e = new Error("socket hang up"); e.code = "ECONNRESET"; throw e; }
-      return json(200, { ok: true, notified_job_ids: notifiedIds, message_id: messageId, already_sent: alreadySent, held_job_ids: [], unknown_job_ids: [] });
+      const notifiedIds = [];
+      const notifiedMessageIds = {};
+      const heldIds = [];
+      const unknownIds = [];
+      // كل مجموعة (buildBatchSummaries قد تقسّم إلى أكثر من رسالة) تُرسَل وتُنهى بمعزل عن
+      // غيرها: نفس آلية /notify على كل مجموعة — "in_progress"/"delivery_unknown" تصنيف بلا 409
+      // (كل عنصر يُصنَّف في ردّ 200)، وفشل أو ضياع رسالة لا يمسّ مجموعة أخرى نجحت في الدفعة نفسها.
+      for (const group of shared.buildBatchSummaries(toSend)) {
+        if (s.conflict.length) {
+          const code = s.conflict.shift();
+          const ids = group.items.map((v) => v.job_id);
+          (code === "in_progress" ? heldIds : unknownIds).push(...ids);
+          continue;
+        }
+        if (s.reject > 0) { s.reject--; return json(502, { ok: false, error: "telegram_sendMessage_502" }); }
+        const messageId = 1000 + s.sent.length;
+        s.sent.push({ chat: "OWNER", text: group.text, messageId, batch: true });
+        for (const v of group.items) {
+          s.items.set(v.job_id, shared.itemFromNotify(v, messageId, body.host));
+          notifiedIds.push(v.job_id);
+          notifiedMessageIds[v.job_id] = messageId;
+        }
+        if (s.loseResponse > 0) { s.loseResponse--; const e = new Error("socket hang up"); e.code = "ECONNRESET"; throw e; }
+      }
+      return json(200, { ok: true, notified_job_ids: notifiedIds, notified_message_ids: notifiedMessageIds, already_sent: alreadySent, held_job_ids: heldIds, unknown_job_ids: unknownIds });
     }
     if (route === "report") {
       const body = JSON.parse(init.body);

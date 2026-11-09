@@ -38,13 +38,17 @@ function createBackend() {
     // Migration 26: نموذج الحجز بالذاكرة بنفس قواعد supabase/proposed/26 (تُختبر SQL حياً في check-drive-invoice-archive).
     claims: new Map(), labels: [], clock: Date.parse("2026-10-25T12:00:00Z"), noClaimRpc: false, failFinish: false, released: [],
     // تيليغرام: lostReply يوصل المستند ثم يقطع الاتصال؛ unreadable يوصله بجسم غير مقروء؛ delayMs يبطئه.
-    lostReply: 0, unreadable: 0, delayMs: 0 };
+    // failAt/lostReplyAt: Set بترتيب نداء تيليغرام (1 فصاعداً) لإفشال أو قطع رسالة واحدة بعينها
+    // ضمن دفعة مُقسَّمة لعدة رسائل، بمعزل عن الرسائل الأخرى في الدفعة نفسها.
+    lostReply: 0, unreadable: 0, delayMs: 0, telegramFailAt: null, lostReplyAt: null, telegramCallIndex: 0 };
   const json = (status, body) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 
   async function telegramApi(u, init) {
+    s.telegramCallIndex++;
+    const callIndex = s.telegramCallIndex;
     if (s.delayMs) await new Promise((r) => setTimeout(r, s.delayMs));
-    if (s.telegramFail > 0) {
-      s.telegramFail--;
+    if (s.telegramFail > 0 || (s.telegramFailAt && s.telegramFailAt.has(callIndex))) {
+      if (s.telegramFail > 0) s.telegramFail--;
       return json(s.telegramStatus, { ok: false, error_code: s.telegramStatus, description: "Too Many Requests: retry after 5" });
     }
     const entry = { method: u.pathname.split("/").pop(), token: u.pathname.split("/")[1] };
@@ -54,7 +58,10 @@ function createBackend() {
       Object.assign(entry, JSON.parse(init.body));
     }
     s.telegram.push(entry);
-    if (s.lostReply > 0) { s.lostReply--; const e = new TypeError("fetch failed"); e.code = "ECONNRESET"; throw e; }
+    if (s.lostReply > 0 || (s.lostReplyAt && s.lostReplyAt.has(callIndex))) {
+      if (s.lostReply > 0) s.lostReply--;
+      const e = new TypeError("fetch failed"); e.code = "ECONNRESET"; throw e;
+    }
     if (s.unreadable > 0) { s.unreadable--; return new Response("<html>bad gateway</html>", { status: 200 }); }
     return json(200, { ok: true, result: { message_id: 7000 + s.telegram.length } });
   }
@@ -532,7 +539,12 @@ test("Edge: /notify-batch يرسل ملخصاً واحداً لعدة فواتي
   assert.ok(!("document" in sent), "بلا ملف مرفق للرسالة الجماعية");
   for (const it of items) assert.match(sent.text, new RegExp(it.doc_number));
   assert.equal(b.s.recordCalls, 3);
-  for (const it of items) assert.equal(b.s.items.get(it.job_id).telegram_message_id, body.message_id);
+  const messageId = body.notified_message_ids[items[0].job_id];
+  assert.ok(Number.isFinite(messageId));
+  for (const it of items) {
+    assert.equal(body.notified_message_ids[it.job_id], messageId, "رسالة واحدة ⇒ نفس المعرّف لكل العناصر");
+    assert.equal(b.s.items.get(it.job_id).telegram_message_id, messageId);
+  }
 });
 
 test("Edge: /notify-batch وعنصر مُرسَل سابقاً عبر /notify يُفرز في already_sent برسالته الخاصة، والباقي يُرسل معاً", { skip: SKIP }, async () => {
@@ -605,4 +617,133 @@ test("Edge: رفض صريح من تيليغرام على رسالة الدفعة
   const again = await (await handler(batchRequest(items))).json();
   assert.deepEqual(again.notified_job_ids.sort(), items.map((i) => i.job_id).sort());
   assert.equal(b.s.telegram.length, 1, "رسالة واحدة فقط رغم محاولتين");
+});
+
+// الوحدة المشتركة (buildBatchSummaries) بعد تحميل telegram-format عبر loadHandler (استيراد
+// index.ts يحمّلها كأثر جانبي)، لحساب عدد الفواتير فعلياً بلا تخمين رياضي للنص المُركَّب.
+async function loadSharedDocArchive() {
+  const file = path.join(fnDir, "_shared", "document-archive.js");
+  return await import(`${pathToFileURL(file).href}?v=shared`);
+}
+
+function longDocNumber(n) { return `INV-${n}-${"X".repeat(40)}`.slice(0, 40); }
+
+test("Edge: /notify-batch دفعة تنقسم فعلياً لثلاث رسائل؛ فشل الرسالة الوسطى صريحاً لا يمسّ الأولى والأخيرة، ولا تُعاد الناجحتان", { skip: SKIP }, async () => {
+  const b = createBackend();
+  const handler = await loadHandler(ENV, b.fetchMock);
+  const shared = await loadSharedDocArchive();
+  const items = [];
+  let pages = 0;
+  for (let n = 1; pages < 3 && items.length < 200; n++) {
+    items.push(batchItem(n, { doc_number: longDocNumber(n) }));
+    pages = shared.buildBatchSummaries(items).length;
+  }
+  assert.ok(pages >= 3, "تعذّر فرض ٣ رسائل على الأقل ضمن حدّ الدفعة 200 عنصراً");
+  const groups = shared.buildBatchSummaries(items);
+  const failedIds = groups[1].items.map((it) => it.job_id);
+  const okIds = items.map((it) => it.job_id).filter((id) => !failedIds.includes(id));
+
+  b.s.telegramFailAt = new Set([2]); // الرسالة الثانية فقط تُرفض صريحاً من تيليغرام
+  const res = await handler(batchRequest(items));
+  const body = await res.json();
+  assert.equal(res.status, 200);
+  // telegramCallIndex: عدد محاولات الاتصال بتيليغرام فعلياً (ناجحة أو مرفوضة صريحاً)؛ s.telegram
+  // يسجّل فقط المحاولات التي وصلت ردّها (لا الرفض الصريح)، فطولها هنا = عدد الصفحات ناقص الفاشلة.
+  assert.equal(b.s.telegramCallIndex, pages, `محاولة اتصال واحدة بكل صفحة من الصفحات (${pages})، بما فيها الفاشلة صريحاً`);
+  assert.equal(b.s.telegram.length, pages - 1, "الرسائل الناجحة فقط سُجِّلت كمُرسَلة فعلياً؛ الرسالة المرفوضة صريحاً لم تُسجَّل");
+  assert.deepEqual(body.notified_job_ids.sort(), okIds.sort(), "كل عناصر الرسائل الناجحة (قبل الفاشلة وبعدها) أُنهيت ونُسِّمت فعلاً");
+  assert.deepEqual(body.held_job_ids.sort(), failedIds.sort(), "فقط عناصر الرسالة الفاشلة محجوزة لإعادة لاحقة");
+  assert.deepEqual(body.unknown_job_ids, []);
+  for (const id of failedIds) assert.equal(b.s.claims.get(id).state, "released");
+  for (const id of okIds) assert.equal(b.s.claims.get(id).state, "sent");
+
+  const sentBefore = b.s.telegram.length;
+  const retry = await (await handler(batchRequest(items))).json();
+  assert.equal(b.s.telegram.length, sentBefore + 1, "الإعادة تُرسل رسالة واحدة جديدة فقط لما بقي محجوزاً، بلا تكرار لما نجح");
+  assert.deepEqual(retry.notified_job_ids.sort(), failedIds.sort());
+  assert.equal(Object.keys(retry.already_sent).length, okIds.length, "كل الناجح سابقاً already_sent، لا إرسال ثانٍ");
+});
+
+test("Edge: /notify-batch دفعتان متزامنتان بعناصر متداخلة ⇒ لا فاتورة تُرسل مرتين ولا تضيع، والإعادة تُكمل الباقي بلا تكرار", { skip: SKIP }, async () => {
+  const b = createBackend();
+  const handler = await loadHandler(ENV, b.fetchMock);
+  const itemsA = [1, 2, 3, 4, 5].map((n) => batchItem(n));
+  const itemsB = [3, 4, 5, 6, 7].map((n) => batchItem(n));
+  const sharedIds = new Set([3, 4, 5].map((n) => batchItem(n).job_id));
+  const allIds = [1, 2, 3, 4, 5, 6, 7].map((n) => batchItem(n).job_id);
+
+  const [resA, resB] = await Promise.all([handler(batchRequest(itemsA)), handler(batchRequest(itemsB))]);
+  const [bodyA, bodyB] = await Promise.all([resA.json(), resB.json()]);
+  assert.equal(resA.status, 200);
+  assert.equal(resB.status, 200);
+
+  const notifiedBoth = bodyA.notified_job_ids.filter((id) => bodyB.notified_job_ids.includes(id));
+  assert.deepEqual(notifiedBoth, [], "لا فاتورة مشتركة اعتُبرت مُرسلة في الدفعتين معاً");
+  const allNotified = [...bodyA.notified_job_ids, ...bodyB.notified_job_ids];
+  assert.equal(allNotified.length, new Set(allNotified).size, "بلا ازدواج في notified_job_ids إجمالاً عبر الدفعتين");
+
+  const classified = (body, id) => (
+    body.notified_job_ids.includes(id) || id in body.already_sent || body.held_job_ids.includes(id) || body.unknown_job_ids.includes(id)
+  );
+  for (const id of sharedIds) {
+    assert.ok(classified(bodyA, id), `${id} غير مصنَّف في ردّ الدفعة الأولى`);
+    assert.ok(classified(bodyB, id), `${id} غير مصنَّف في ردّ الدفعة الثانية`);
+  }
+
+  const sentBefore = b.s.telegram.length;
+  const retry = await (await handler(batchRequest([1, 2, 3, 4, 5, 6, 7].map((n) => batchItem(n))))).json();
+  assert.equal(b.s.telegram.length, sentBefore, "دورة الإكمال لا تُرسل أي رسالة جديدة: كل الفواتير وصلت فعلاً من الدفعتين المتزامنتين");
+  const delivered = new Set([...retry.notified_job_ids, ...Object.keys(retry.already_sent)]);
+  for (const id of allIds) assert.ok(delivered.has(id), `${id} لم تُسلَّم أخيراً، أي فُقدت`);
+});
+
+for (const n of [1, 10, 74, 100]) {
+  test(`Edge: /notify-batch بالضبط ${n} فاتورة معدَّلة في دفعة واحدة (مقياس حادثة 2026-11-09 ×${n === 74 ? "1 (الحجم الحقيقي)" : "مختلف"}) ⇒ كل الفواتير مُصنَّفة وتحت حدّ الرسالة بلا تقسيم`, { skip: SKIP }, async () => {
+    const b = createBackend();
+    const handler = await loadHandler(ENV, b.fetchMock);
+    const items = Array.from({ length: n }, (_, i) => batchItem(i + 1));
+    const res = await handler(batchRequest(items));
+    const body = await res.json();
+    assert.equal(res.status, 200);
+    assert.deepEqual(body.notified_job_ids.sort(), items.map((i) => i.job_id).sort());
+    assert.deepEqual(body.held_job_ids, []);
+    assert.deepEqual(body.unknown_job_ids, []);
+    assert.equal(b.s.telegram.length, 1, `${n} فاتورة بأرقام واقعية تبقى ضمن رسالة واحدة (buildBatchSummaries) بلا تقسيم`);
+    const text = b.s.telegram[0].text;
+    assert.ok(text.length < 4096, "تحت حدّ تيليغرام الفعلي 4096 محرفاً");
+    for (const it of items) assert.match(text, new RegExp(it.doc_number));
+    if (n === 1) assert.match(text, /فاتورة معدَّلة|مستند معدَّل/, "رسالة فاتورة معدَّلة واحدة تحمل الوصف الصحيح");
+  });
+}
+
+test("Edge: /notify-batch انقطاع الاتصال أثناء إرسال رسالة واحدة ضمن دفعة من رسالتين لا يمسّ الرسالة الأخرى، ولا تُعاد الناجحة", { skip: SKIP }, async () => {
+  const b = createBackend();
+  const handler = await loadHandler(ENV, b.fetchMock);
+  const shared = await loadSharedDocArchive();
+  const items = [];
+  let pages = 0;
+  for (let n = 1; pages < 2 && items.length < 200; n++) {
+    items.push(batchItem(n, { doc_number: longDocNumber(n) }));
+    pages = shared.buildBatchSummaries(items).length;
+  }
+  assert.ok(pages >= 2);
+  const groups = shared.buildBatchSummaries(items);
+  const droppedIds = groups[0].items.map((it) => it.job_id);
+  const okIds = items.map((it) => it.job_id).filter((id) => !droppedIds.includes(id));
+
+  b.s.lostReplyAt = new Set([1]); // أول رسالة فقط: وصلت فعلياً لتيليغرام ثم انقطع الردّ (نتيجة "مجهولة")
+  const res = await handler(batchRequest(items));
+  const body = await res.json();
+  assert.equal(res.status, 200);
+  assert.equal(b.s.telegram.length, pages, "الرسالتان أُرسلتا فعلياً رغم ضياع ردّ الأولى");
+  assert.deepEqual(body.unknown_job_ids.sort(), droppedIds.sort(), "رسالة ضاع ردّها ⇒ مجهولة، لا مفقودة ولا مؤكَّد فشلها");
+  assert.deepEqual(body.notified_job_ids.sort(), okIds.sort(), "الرسالة الثانية الناجحة أُنهيت بمعزل عن ضياع ردّ الأولى");
+  for (const id of droppedIds) assert.equal(b.s.claims.get(id).state, "unknown");
+  for (const id of okIds) assert.equal(b.s.claims.get(id).state, "sent");
+
+  const sentBefore = b.s.telegram.length;
+  const retry = await (await handler(batchRequest(items))).json();
+  assert.equal(b.s.telegram.length, sentBefore, "لا إعادة إرسال تلقائية لنتيجة مجهولة (كما /notify بالضبط)، ولا تكرار للناجحة");
+  assert.deepEqual(retry.unknown_job_ids.sort(), droppedIds.sort());
+  assert.equal(Object.keys(retry.already_sent).length, okIds.length);
 });

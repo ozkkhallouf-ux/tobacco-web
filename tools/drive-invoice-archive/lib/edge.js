@@ -99,11 +99,18 @@ function createEdge({ url, secret, fetchImpl = globalThis.fetch, host = "", time
     const data = await post("notify-batch", {
       headers: { "Content-Type": "application/json" }, body: JSON.stringify({ host, items }),
     });
-    const messageId = Number(data.message_id);
     const alreadySent = data.already_sent && typeof data.already_sent === "object" ? data.already_sent : {};
+    // رقم رسالة كل عنصر على حدة: الدفعة قد تنقسم إلى أكثر من رسالة (buildBatchSummaries)،
+    // فمستند «أُرسل الآن» لا رقم رسالة واحد مشترك للدفعة كلها.
+    const rawNotifiedMessageIds = data.notified_message_ids && typeof data.notified_message_ids === "object" ? data.notified_message_ids : {};
+    const notifiedMessageIds = {};
+    for (const [jobId, msgId] of Object.entries(rawNotifiedMessageIds)) {
+      const n = Number(msgId);
+      if (/^[0-9a-f]{32}$/.test(jobId) && Number.isFinite(n)) notifiedMessageIds[jobId] = n;
+    }
     return {
-      messageId: Number.isFinite(messageId) ? messageId : null,
       notifiedJobIds: ids(data.notified_job_ids),
+      notifiedMessageIds,
       heldJobIds: ids(data.held_job_ids),
       unknownJobIds: ids(data.unknown_job_ids),
       alreadySent,

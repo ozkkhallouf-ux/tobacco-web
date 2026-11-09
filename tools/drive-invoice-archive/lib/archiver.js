@@ -489,7 +489,8 @@ function createArchiver({ cfg, store, ameen, renderer, template, receiptTemplate
       for (const job of jobs) {
         if (notifiedIds.has(job.jobId) || Object.prototype.hasOwnProperty.call(res.alreadySent, job.jobId)) {
           const duplicate = !notifiedIds.has(job.jobId);
-          const messageId = duplicate ? res.alreadySent[job.jobId] : res.messageId;
+          // كل عنصر برقم رسالته الخاصة: الدفعة قد تنقسم إلى أكثر من رسالة تيليغرام.
+          const messageId = duplicate ? res.alreadySent[job.jobId] : res.notifiedMessageIds[job.jobId];
           job.telegram = { messageId, duplicate, sentAt: new Date(now()).toISOString() };
           job.status = STATUS.NOTIFIED;
           job.attempts = 0;

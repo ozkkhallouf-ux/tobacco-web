@@ -14,9 +14,12 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 //            in_progress؛ نتيجة مجهولة (ضاع ردّ تيليغرام) ⇒ 409 delivery_unknown بلا إعادة
 //            تلقائية أبداً؛ مُرسَل ⇒ message_id نفسه بلا إرسال ثانٍ.
 //   /notify-batch  JSON: مصفوفة مستندات بلا ملفات (فواتير جملة معدَّلة كثيرة معاً، مثل
-//            تسوية دفعات دفعة واحدة) ترسل برسالة ملخص واحدة (العدد وأرقام المستندات)
-//            بدل عشرات رسائل /notify. الحجز الذري لكل job_id نفسه (Migration 26)،
-//            فحجز مُرسَل سابقاً أو قائم من محاولة متزامنة لا يُرسَل له ثانية ضمن الدفعة.
+//            تسوية دفعات دفعة واحدة) ترسل برسالة ملخص (العدد وأرقام المستندات)، أو أكثر من
+//            رسالة متتالية إذا تجاوز العدد حدّ تيليغرام (نادر). كل رسالة تُنهي حجز مستنداتها
+//            هي وحدها: فشل رسالة واحدة لا يمسّ مستندات رسالة أخرى نجحت في الدفعة نفسها، ولا
+//            يُعاد إرسالها معها لاحقاً. الحجز الذري لكل job_id نفسه (Migration 26)، فحجز
+//            مُرسَل سابقاً أو قائم من محاولة متزامنة (حتى من عامل آخر يعمل بالتوازي) لا يُرسَل
+//            له ثانية ضمن الدفعة.
 //   /report  JSON: نبض العامل + ملخص المهام؛ يعيد طلبات إعادة المحاولة من المالك،
 //            ويحرّر حجوزاتها المجهولة (المالك تحقق بنفسه أن المستند لم يصل).
 //
@@ -26,7 +29,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import "../_shared/telegram-format.js";
 import {
   MAX_PDF_BYTES,
-  buildBatchSummary,
+  buildBatchSummaries,
   buildNotifyCaption,
   isPdfBytes,
   itemFromNotify,
@@ -188,12 +191,17 @@ async function handleNotify(req: Request): Promise<Response> {
 const BATCH_MAX_ITEMS = 200;
 
 // تحديث جماعي: كل عنصر يُحجز ذرياً كما في /notify (نفس الدوال، بلا تعديل)، ثم رسالة ملخص
-// واحدة (sendMessage، بلا PDF) لكل ما نجح حجزه معاً. كل عنصر يُصنَّف في الرد: already_sent
-// (حجزه مُرسَل سابقاً برسالته الخاصة)، held_job_ids (حجز قائم من محاولة متزامنة، انتظار قصير)،
-// unknown_job_ids (حجز غامض يحتاج تحقق المالك، أو الرسالة الجماعية نفسها غامضة/مرفوضة)،
-// notified_job_ids (أُرسلت الآن ضمن هذه الرسالة). الرد 200 دائماً كي لا يضيع تصنيف عناصر
-// أخرى بسبب حالة عنصر واحد أو فشل الرسالة الجماعية؛ خطأ شبكة حقيقي قبل أي حجز أو تسجيل
-// يُرمى عادياً فيعيده المعالج العام 502 (إعادة الدفعة كاملة دورة لاحقة، كما /notify).
+// واحدة أو أكثر (sendMessage، بلا PDF) لكل ما نجح حجزه معاً — buildBatchSummaries تقسّم إلى
+// رسائل متتالية فقط إذا تجاوز العدد حدّ تيليغرام. كل رسالة تُنهي حجز مستنداتها هي وحدها
+// (finishNotification لكل عنصر بنتيجة رسالته بالذات): رسالة فشلت لا تُنهي حجز عنصر في رسالة
+// أخرى نجحت في الدفعة نفسها، فلا تُرسَل الناجحة ثانية ولا تضيع الفاشلة — تبقى محجوزة فقط
+// (claimed غير sent) فتُعاد في دورة لاحقة دون تكرار. كل عنصر يُصنَّف في الرد: already_sent
+// (حجزه مُرسَل سابقاً برسالته الخاصة)، held_job_ids (حجز قائم من محاولة متزامنة — عامل آخر أو
+// نفس العامل بالتوازي، انتظار قصير؛ أو رسالة رفضها تيليغرام صراحةً فحُرِّر حجزها)، unknown_job_ids
+// (حجز غامض يحتاج تحقق المالك، أو رسالة ضاع ردّها/غير مقروءة)، notified_job_ids (أُرسلت الآن،
+// مع رقم رسالتها في notified_message_ids). الرد 200 دائماً كي لا يضيع تصنيف عناصر أخرى بسبب
+// حالة عنصر واحد أو فشل رسالة واحدة؛ خطأ شبكة حقيقي قبل أي حجز أو تسجيل يُرمى عادياً فيعيده
+// المعالج العام 502 (إعادة الدفعة كاملة دورة لاحقة، كما /notify).
 async function handleNotifyBatch(req: Request): Promise<Response> {
   const body = await req.json().catch(() => null);
   if (!body || typeof body !== "object" || !Array.isArray((body as { items?: unknown }).items)) {
@@ -232,32 +240,39 @@ async function handleNotifyBatch(req: Request): Promise<Response> {
   }
 
   const notifiedJobIds: string[] = [];
+  const notifiedMessageIds: Record<string, number> = {};
   // not_sent صريح من تيليغرام (لم يُرسل) ⇒ الحجز released، إعادة تلقائية آمنة كمحاولة عادية.
   // unknown (شبكة/مهلة/جسم غير مقروء) ⇒ قد يكون وصل: لا إعادة تلقائية، كما /notify بالضبط.
   const releasedJobIds: string[] = [];
-  let messageId: number | null = null;
   if (claimed.length > 0) {
-    const text = buildBatchSummary(claimed.map((c) => c.v));
-    const sent = await telegramSend("sendMessage", { chat_id: chat, text });
-    if (sent.outcome === "sent") {
-      messageId = sent.messageId;
-      for (const { v, token } of claimed) {
-        await finishNotification(v.job_id, token, "sent", messageId, null);
-        await recordNotification(itemFromNotify(v, messageId, host));
-        notifiedJobIds.push(v.job_id);
+    const tokenByJobId = new Map(claimed.map((c) => [c.v.job_id, c.token]));
+    // كل مجموعة (رسالة واحدة محتملة) تُرسَل وتُنهى بمعزل عن المجموعات الأخرى: لا نسمة
+    // مشتركة في النتيجة بين رسالة ناجحة ورسالة فاشلة في الدفعة نفسها.
+    for (const group of buildBatchSummaries(claimed.map((c) => c.v))) {
+      const sent = await telegramSend("sendMessage", { chat_id: chat, text: group.text });
+      if (sent.outcome === "sent") {
+        const messageId = sent.messageId;
+        for (const v of group.items) {
+          const token = tokenByJobId.get(v.job_id) as string;
+          await finishNotification(v.job_id, token, "sent", messageId, null);
+          await recordNotification(itemFromNotify(v, messageId, host));
+          notifiedJobIds.push(v.job_id);
+          notifiedMessageIds[v.job_id] = messageId;
+        }
+      } else {
+        for (const v of group.items) {
+          const token = tokenByJobId.get(v.job_id) as string;
+          await finishNotification(v.job_id, token, sent.outcome, null, sent.error);
+          (sent.outcome === "unknown" ? unknownJobIds : releasedJobIds).push(v.job_id);
+        }
+        console.error(`document-archive-notify: ${sent.error} (batch ${sent.outcome}, no automatic resend)`);
       }
-    } else {
-      for (const { v, token } of claimed) {
-        await finishNotification(v.job_id, token, sent.outcome, null, sent.error);
-        (sent.outcome === "unknown" ? unknownJobIds : releasedJobIds).push(v.job_id);
-      }
-      console.error(`document-archive-notify: ${sent.error} (batch ${sent.outcome}, no automatic resend)`);
     }
   }
   return json(200, {
     ok: true,
     notified_job_ids: notifiedJobIds,
-    message_id: messageId,
+    notified_message_ids: notifiedMessageIds,
     already_sent: alreadySent,
     held_job_ids: [...heldJobIds, ...releasedJobIds],
     unknown_job_ids: unknownJobIds,
