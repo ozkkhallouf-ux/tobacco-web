@@ -492,3 +492,117 @@ test("Edge: الحجز يحمل وصف تنبيه «غير محسوم» (الن�
   }
   assert.ok(cap.lines.some((l) => l.includes("delivery unknown")), "سجل الدالة يذكر النتيجة المجهولة");
 });
+
+// ─── /notify-batch: تحديث جماعي برسالة ملخص واحدة (حادثة 2026-11-09: 74 إشعاراً فردياً لتسوية دفعات) ───
+
+function hex(n, len) { return n.toString(16).padStart(len, "0"); }
+
+function batchItem(n, overrides = {}) {
+  return {
+    job_id: hex(n, 32), doc_type: "wholesale_invoice", source_guid: `11111111-1111-4111-8111-${hex(n, 12)}`,
+    doc_number: String(500 + n), doc_date: "2026-10-24", customer_guid: "aaaaaaaa-0000-4000-8000-000000000001",
+    customer_name: `زبون ${n}`, amount: String(1000 + n), currency: "USD", version: "2", version_hash: hex(n, 64),
+    drive_file_id: `F${hex(n, 12)}xyz`, drive_link: `https://drive.google.com/file/d/F${hex(n, 12)}xyz/view?usp=drivesdk`,
+    ...overrides,
+  };
+}
+
+function batchRequest(items, { secret = SECRET, host = "OZK2026" } = {}) {
+  return new Request("https://example.supabase.co/functions/v1/document-archive-notify/notify-batch", {
+    method: "POST", headers: { "x-ozk-archive-secret": secret, "Content-Type": "application/json" },
+    body: JSON.stringify({ host, items }),
+  });
+}
+
+test("Edge: /notify-batch يرسل ملخصاً واحداً لعدة فواتير بلا ملف، ويسجّل كل واحدة بالمعرّف الجماعي نفسه", { skip: SKIP }, async () => {
+  const b = createBackend();
+  const handler = await loadHandler(ENV, b.fetchMock);
+  const items = [1, 2, 3].map((n) => batchItem(n));
+  const res = await handler(batchRequest(items));
+  const body = await res.json();
+  assert.equal(res.status, 200, JSON.stringify(body));
+  assert.deepEqual(body.notified_job_ids.sort(), items.map((i) => i.job_id).sort());
+  assert.deepEqual(body.already_sent, {});
+  assert.deepEqual(body.held_job_ids, []);
+  assert.deepEqual(body.unknown_job_ids, []);
+  assert.equal(b.s.telegram.length, 1, "رسالة واحدة فقط بدل ثلاث");
+  const sent = b.s.telegram[0];
+  assert.equal(sent.method, "sendMessage");
+  assert.equal(sent.chat_id, OWNER_CHAT);
+  assert.ok(!("document" in sent), "بلا ملف مرفق للرسالة الجماعية");
+  for (const it of items) assert.match(sent.text, new RegExp(it.doc_number));
+  assert.equal(b.s.recordCalls, 3);
+  for (const it of items) assert.equal(b.s.items.get(it.job_id).telegram_message_id, body.message_id);
+});
+
+test("Edge: /notify-batch وعنصر مُرسَل سابقاً عبر /notify يُفرز في already_sent برسالته الخاصة، والباقي يُرسل معاً", { skip: SKIP }, async () => {
+  const b = createBackend();
+  const handler = await loadHandler(ENV, b.fetchMock);
+  const prior = batchItem(1);
+  const firstSend = await (await handler(notifyRequest({
+    ...FIELDS, job_id: prior.job_id, source_guid: prior.source_guid, version_hash: prior.version_hash, doc_number: prior.doc_number,
+  }))).json();
+  const items = [prior, batchItem(2), batchItem(3)];
+  const res = await handler(batchRequest(items));
+  const body = await res.json();
+  assert.equal(res.status, 200);
+  assert.deepEqual(body.already_sent, { [prior.job_id]: firstSend.message_id });
+  assert.deepEqual(body.notified_job_ids.sort(), [items[1].job_id, items[2].job_id].sort());
+  assert.equal(b.s.telegram.filter((t) => t.method === "sendDocument").length, 1, "إشعار /notify السابق وحده");
+  assert.equal(b.s.telegram.filter((t) => t.method === "sendMessage").length, 1, "ملخص الدفعة للباقي فقط");
+});
+
+test("Edge: /notify-batch يرفض دفعة فارغة أو أكبر من الحدّ أو بمعرّف مكرر أو بعنصر غير صالح، بلا أي حجز أو إرسال", { skip: SKIP }, async () => {
+  const b = createBackend();
+  const handler = await loadHandler(ENV, b.fetchMock);
+  const rEmpty = await handler(batchRequest([]));
+  assert.equal(rEmpty.status, 400);
+  assert.equal((await rEmpty.json()).error, "empty");
+  const tooMany = Array.from({ length: 201 }, (_, i) => batchItem(i + 1));
+  const rBig = await handler(batchRequest(tooMany));
+  assert.equal(rBig.status, 400);
+  assert.equal((await rBig.json()).error, "batch_too_large");
+  const dup = [batchItem(1), { ...batchItem(2), job_id: batchItem(1).job_id }];
+  const rDup = await handler(batchRequest(dup));
+  assert.equal((await rDup.json()).error, "duplicate_job_id");
+  const invalid = [batchItem(1), { ...batchItem(2), doc_date: "24-10-2026" }];
+  const rInvalid = await handler(batchRequest(invalid));
+  assert.equal((await rInvalid.json()).error, "doc_date");
+  assert.equal(b.s.calls, 0, "لا حجز ولا اتصال خارجي قبل اكتمال التحقق من الدفعة كلها");
+});
+
+test("Edge: ضياع ردّ تيليغرام على رسالة الدفعة ⇒ unknown_job_ids وحجز «غير محسوم»، والإعادة لا تُرسل ثانية", { skip: SKIP }, async () => {
+  const b = createBackend();
+  const handler = await loadHandler(ENV, b.fetchMock);
+  const items = [batchItem(1), batchItem(2)];
+  b.s.lostReply = 1;
+  const cap = captureConsole();
+  let res;
+  try { res = await handler(batchRequest(items)); } finally { cap.restore(); }
+  const body = await res.json();
+  assert.equal(res.status, 200, "ردّ 200 دائماً؛ التصنيف في جسم الرد لا في رمز الحالة");
+  assert.deepEqual(body.unknown_job_ids.sort(), items.map((i) => i.job_id).sort());
+  assert.deepEqual(body.notified_job_ids, []);
+  for (const it of items) assert.equal(b.s.claims.get(it.job_id).state, "unknown");
+  assert.equal(b.s.telegram.length, 1, "الرسالة وصلت فعلياً رغم ضياع الردّ");
+  const again = await (await handler(batchRequest(items))).json();
+  assert.deepEqual(again.unknown_job_ids.sort(), items.map((i) => i.job_id).sort());
+  assert.equal(b.s.telegram.length, 1, "لا إعادة إرسال تلقائية لنتيجة غامضة، كما /notify بالضبط");
+});
+
+test("Edge: رفض صريح من تيليغرام على رسالة الدفعة يحرّر الحجز (held لا unknown)، وإعادة العامل ترسل مرة واحدة فقط", { skip: SKIP }, async () => {
+  const b = createBackend();
+  const handler = await loadHandler(ENV, b.fetchMock);
+  const items = [batchItem(1), batchItem(2)];
+  b.s.telegramFail = 1;
+  b.s.telegramStatus = 429;
+  const res = await handler(batchRequest(items));
+  const body = await res.json();
+  assert.equal(res.status, 200);
+  assert.deepEqual(body.held_job_ids.sort(), items.map((i) => i.job_id).sort(), "رفض صريح (not_sent) يُطوى في held لا unknown");
+  assert.deepEqual(body.unknown_job_ids, []);
+  for (const it of items) assert.equal(b.s.claims.get(it.job_id).state, "released");
+  const again = await (await handler(batchRequest(items))).json();
+  assert.deepEqual(again.notified_job_ids.sort(), items.map((i) => i.job_id).sort());
+  assert.equal(b.s.telegram.length, 1, "رسالة واحدة فقط رغم محاولتين");
+});

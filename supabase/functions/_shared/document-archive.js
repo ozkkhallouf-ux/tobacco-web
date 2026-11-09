@@ -145,6 +145,28 @@ export function buildNotifyCaption(v) {
   return { caption: short, followUp: full.slice(0, 3900) };
 }
 
+// رسالة ملخص واحدة لتحديث جماعي (عدة فواتير معدَّلة معاً): العدد وأرقام المستندات بدل
+// إشعار مستقل لكل واحدة. نص عادي بلا parse_mode كبقية الدالة؛ ≤ 3900 محرفاً (حدّ تيليغرام 4096).
+export function buildBatchSummary(items) {
+  const t = fmt();
+  const n = items.length;
+  const byType = new Map();
+  for (const it of items) {
+    if (!byType.has(it.doc_type)) byType.set(it.doc_type, []);
+    byType.get(it.doc_type).push(it);
+  }
+  const lines = [t.line(`📋 تحديث جماعي — ${n} ${n === 1 ? "مستند معدَّل" : "مستندات معدَّلة"}`)];
+  for (const [docType, list] of byType) {
+    const type = DOC_TYPES[docType];
+    const label = type ? type.label : docType;
+    const numbers = list.map((it) => t.name(it.doc_number)).join("، ");
+    lines.push(t.field(`${label} (${list.length})`, numbers));
+  }
+  lines.push(t.line("كل تعديل محفوظ بنسخة جديدة على Drive، والإصدار السابق باقٍ بلا تغيير."));
+  const full = lines.join("\n");
+  return full.length <= 3900 ? full : `${full.slice(0, 3850)}\n…`;
+}
+
 // صف document_archive_items الذي تسجّله الدالة بعد الإرسال.
 export function itemFromNotify(v, messageId, host) {
   return {

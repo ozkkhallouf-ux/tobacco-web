@@ -77,7 +77,40 @@ function createEdge({ url, secret, fetchImpl = globalThis.fetch, host = "", time
     return { retryJobIds: ids.filter((id) => /^[0-9a-f]{32}$/.test(String(id))) };
   }
 
-  return { notify, report };
+  // تحديث جماعي: فواتير معدَّلة كثيرة في الدورة نفسها برسالة ملخص واحدة بدل إشعار لكل واحدة.
+  // بلا ملف: الدالة لا ترفق PDF للرسالة الجماعية، فمستند كل فاتورة يبقى على Drive وحده.
+  async function notifyBatch(jobs) {
+    const ids = (arr) => (Array.isArray(arr) ? arr.filter((id) => /^[0-9a-f]{32}$/.test(String(id))) : []);
+    const items = jobs.map((job) => ({
+      job_id: job.jobId,
+      doc_type: job.docType,
+      source_guid: job.sourceGuid,
+      doc_number: String(job.number),
+      doc_date: job.date,
+      customer_guid: job.customerGuid || "",
+      customer_name: job.customerName || "",
+      amount: job.amount === null || job.amount === undefined ? "" : String(job.amount),
+      currency: job.currencyIso || "",
+      version: String(job.version),
+      version_hash: job.versionHash,
+      drive_link: job.drive.webViewLink,
+      drive_file_id: job.drive.fileId,
+    }));
+    const data = await post("notify-batch", {
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify({ host, items }),
+    });
+    const messageId = Number(data.message_id);
+    const alreadySent = data.already_sent && typeof data.already_sent === "object" ? data.already_sent : {};
+    return {
+      messageId: Number.isFinite(messageId) ? messageId : null,
+      notifiedJobIds: ids(data.notified_job_ids),
+      heldJobIds: ids(data.held_job_ids),
+      unknownJobIds: ids(data.unknown_job_ids),
+      alreadySent,
+    };
+  }
+
+  return { notify, report, notifyBatch };
 }
 
 module.exports = { EdgeError, createEdge };

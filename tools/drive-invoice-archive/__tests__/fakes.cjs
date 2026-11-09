@@ -277,6 +277,41 @@ async function createFakeEdge() {
       if (s.loseResponse > 0) { s.loseResponse--; const e = new Error("socket hang up"); e.code = "ECONNRESET"; throw e; }
       return json(200, { ok: true, duplicate: false, message_id: messageId });
     }
+    if (route === "notify-batch") {
+      const body = JSON.parse(init.body);
+      const rawItems = Array.isArray(body.items) ? body.items : [];
+      const values = [];
+      for (const raw of rawItems) {
+        const checked = shared.validateNotifyFields(raw);
+        if (checked.error) return json(400, { ok: false, error: checked.error });
+        values.push(checked.value);
+      }
+      s.notifyBatchCalls = (s.notifyBatchCalls || 0) + 1;
+      const alreadySent = {};
+      const toSend = [];
+      for (const v of values) {
+        const existing = s.items.get(v.job_id);
+        if (existing && existing.telegram_message_id) { alreadySent[v.job_id] = existing.telegram_message_id; continue; }
+        toSend.push(v);
+      }
+      const empty = { ok: true, notified_job_ids: [], message_id: null, already_sent: alreadySent, held_job_ids: [], unknown_job_ids: [] };
+      if (toSend.length === 0) return json(200, empty);
+      // conflict: نفس آلية /notify لكل عناصر الدفعة معاً — "in_progress" حجز قائم (انتظار قصير)،
+      // "delivery_unknown" حجز غامض يحتاج تحقق المالك. بخلاف /notify، لا 409: كل عنصر يُصنَّف في ردّ 200.
+      if (s.conflict.length) {
+        const code = s.conflict.shift();
+        const ids = toSend.map((v) => v.job_id);
+        return json(200, { ...empty, held_job_ids: code === "in_progress" ? ids : [], unknown_job_ids: code === "delivery_unknown" ? ids : [] });
+      }
+      if (s.reject > 0) { s.reject--; return json(502, { ok: false, error: "telegram_sendMessage_502" }); }
+      const text = shared.buildBatchSummary(toSend);
+      const messageId = 1000 + s.sent.length;
+      s.sent.push({ chat: "OWNER", text, messageId, batch: true });
+      const notifiedIds = toSend.map((v) => v.job_id);
+      for (const v of toSend) s.items.set(v.job_id, shared.itemFromNotify(v, messageId, body.host));
+      if (s.loseResponse > 0) { s.loseResponse--; const e = new Error("socket hang up"); e.code = "ECONNRESET"; throw e; }
+      return json(200, { ok: true, notified_job_ids: notifiedIds, message_id: messageId, already_sent: alreadySent, held_job_ids: [], unknown_job_ids: [] });
+    }
     if (route === "report") {
       const body = JSON.parse(init.body);
       s.reports.push(body);

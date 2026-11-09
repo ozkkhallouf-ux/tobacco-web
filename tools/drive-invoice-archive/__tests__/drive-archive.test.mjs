@@ -1459,3 +1459,131 @@ test("نطاق الإنتاج: مهمة قائمة لفاتورة في لقطة 
   assert.equal(t.edgeFake.state.sent.length, sentBefore, "لا إشعار");
   assert.ok(t.edgeFake.state.reports.slice(reportsBefore).every((r) => r.items.length === 0), "لا تبليغ عنها");
 });
+
+// ─── تحديث جماعي: فواتير جملة معدَّلة كثيرة معاً ⇒ رسالة ملخص واحدة (حادثة 2026-11-09) ───
+const BG = [G1, G2, G3, G4, "55555555-5555-4555-8555-555555555555", "66666666-6666-4666-8666-666666666666"];
+
+async function addAndArchive(t, guids, numberBase) {
+  for (let i = 0; i < guids.length; i++) t.ameen.add({ guid: guids[i], number: numberBase + i });
+  t.advance(300);
+  await t.cycle();
+}
+
+test("تعديل فاتورة واحدة أو عدد ضمن الحدّ معاً ⇒ إشعار فردي مستقل لكل واحدة بلا تجميع", async () => {
+  const t = await setup();
+  const guids = BG.slice(0, 5); // = cfg.burstNotifyThreshold الافتراضي
+  await addAndArchive(t, guids, 1200);
+  const sentBefore = t.edgeFake.state.sent.length;
+  const notifyCallsBefore = t.edgeFake.state.notifyCalls;
+  for (const g of guids) t.ameen.edit(g, { total: 150 });
+  t.advance(300);
+  await t.cycle();
+  assert.ok(!t.edgeFake.state.notifyBatchCalls, "لم تُستعمل دالة التجميع");
+  assert.equal(t.edgeFake.state.notifyCalls - notifyCallsBefore, 5, "خمس محاولات إشعار فردية");
+  const sent = t.edgeFake.state.sent.slice(sentBefore);
+  assert.equal(sent.length, 5);
+  assert.ok(sent.every((s) => !s.batch));
+  for (const g of guids) {
+    const v2 = t.store.latestVersion("wholesale_invoice", g);
+    assert.equal(v2.version, 2);
+    assert.equal(v2.status, "notified");
+  }
+});
+
+test("تحديث جماعي: فواتير جملة معدَّلة معاً أكثر من الحدّ ⇒ رسالة ملخص واحدة بدل إشعار كل فاتورة", async () => {
+  const t = await setup();
+  const guids = BG; // 6 > الحدّ الافتراضي 5
+  await addAndArchive(t, guids, 1300);
+  const notifyCallsBefore = t.edgeFake.state.notifyCalls;
+  for (const g of guids) t.ameen.edit(g, { total: 180 });
+  t.advance(300);
+  await t.cycle();
+  assert.equal(t.edgeFake.state.notifyBatchCalls, 1, "دفعة واحدة بدل ست محاولات");
+  assert.equal(t.edgeFake.state.notifyCalls, notifyCallsBefore, "لا إشعار فردي لهذه الدورة");
+  const batch = t.edgeFake.state.sent.at(-1);
+  assert.equal(batch.batch, true);
+  assert.match(batch.text, /6/);
+  for (let i = 0; i < guids.length; i++) assert.ok(batch.text.includes(String(1300 + i)), `رقم ${1300 + i} في الملخص`);
+  for (const g of guids) {
+    const v2 = t.store.latestVersion("wholesale_invoice", g);
+    assert.equal(v2.version, 2);
+    assert.equal(v2.status, "notified");
+    assert.equal(v2.telegram.messageId, batch.messageId);
+    assert.equal(v2.telegram.duplicate, false);
+  }
+});
+
+test("فاتورة جديدة لا تُجمَّع أبداً، حتى مع تحديث جماعي لفواتير أخرى في الدورة نفسها", async () => {
+  const t = await setup({ overrides: { burstNotifyThreshold: 1 } });
+  const edited = [G1, G2];
+  await addAndArchive(t, edited, 1400);
+  const sentBefore = t.edgeFake.state.sent.length;
+  const notifyCallsBefore = t.edgeFake.state.notifyCalls;
+  for (const g of edited) t.ameen.edit(g, { total: 190 });
+  t.ameen.add({ guid: G3, number: 1402 }); // فاتورة جديدة في الدورة نفسها
+  t.advance(300);
+  await t.cycle();
+  assert.equal(t.edgeFake.state.notifyBatchCalls, 1, "التعديلان معاً (2 > 1) دفعة واحدة");
+  const sent = t.edgeFake.state.sent.slice(sentBefore);
+  const batch = sent.find((s) => s.batch);
+  const individual = sent.filter((s) => !s.batch);
+  assert.ok(batch, "رسالة ملخص للتعديلين");
+  assert.match(batch.text, /2/);
+  assert.ok(!batch.text.includes("1402"), "الفاتورة الجديدة ليست في الملخص");
+  assert.equal(individual.length, 1, "الفاتورة الجديدة وحدها إشعار فردي مستقل");
+  assert.equal(t.edgeFake.state.notifyCalls - notifyCallsBefore, 1);
+  const newJob = t.store.latestVersion("wholesale_invoice", G3);
+  assert.equal(newJob.version, 1);
+  assert.equal(newJob.status, "notified");
+  assert.equal(newJob.telegram.messageId, individual[0].messageId);
+});
+
+test("حدّ التجميع: بالضبط عند الحدّ إشعار فردي، وفوقه بواحد تجميع", async () => {
+  const t = await setup({ overrides: { burstNotifyThreshold: 3 } });
+  const guids = BG.slice(0, 4);
+  await addAndArchive(t, guids, 1500);
+  // عند الحدّ بالضبط (3 = 3): فردي
+  const atThreshold = guids.slice(0, 3);
+  for (const g of atThreshold) t.ameen.edit(g, { total: 200 });
+  t.advance(300);
+  await t.cycle();
+  assert.ok(!t.edgeFake.state.notifyBatchCalls, "3 = الحدّ: لا تجميع");
+  for (const g of atThreshold) assert.equal(t.store.latestVersion("wholesale_invoice", g).version, 2);
+  // فوق الحدّ بواحد (4 > 3): تجميع
+  for (const g of guids) t.ameen.edit(g, { total: 210 });
+  t.advance(300);
+  await t.cycle();
+  assert.equal(t.edgeFake.state.notifyBatchCalls, 1, "4 > الحدّ: دفعة واحدة");
+  for (const g of atThreshold) assert.equal(t.store.latestVersion("wholesale_invoice", g).version, 3, "عُدِّلت مرتين");
+  assert.equal(t.store.latestVersion("wholesale_invoice", guids[3]).version, 2, "عُدِّلت مرة واحدة فقط");
+});
+
+test("تعارض حجز قائم (in_progress) على الدفعة لا يُرسل الملخص مرتين: انتظار ثم إرسال واحد في الدورة التالية", async () => {
+  const t = await setup({ overrides: { burstNotifyThreshold: 1 } });
+  const guids = [G1, G2];
+  await addAndArchive(t, guids, 1600);
+  for (const g of guids) t.ameen.edit(g, { total: 220 });
+  t.advance(300);
+  t.edgeFake.state.conflict = ["in_progress"];
+  const sentBefore = t.edgeFake.state.sent.length;
+  await t.cycle();
+  assert.equal(t.edgeFake.state.notifyBatchCalls, 1);
+  assert.equal(t.edgeFake.state.sent.length, sentBefore, "لم يُرسل شيء: الحجز قائم من محاولة متزامنة");
+  for (const g of guids) {
+    const v2 = t.store.latestVersion("wholesale_invoice", g);
+    assert.equal(v2.status, "uploaded", "لم تُعلَّم notified");
+    assert.equal(v2.failed, false, "لا فشل: انتظار بلا استهلاك محاولة");
+    assert.ok(v2.nextAttemptAt > Date.parse("2026-10-24T12:05:00Z"));
+  }
+  t.advance(t.cfg.notifyWaitSeconds + 5);
+  await t.cycle();
+  assert.equal(t.edgeFake.state.notifyBatchCalls, 2, "محاولة ثانية في الدورة التالية");
+  const batch = t.edgeFake.state.sent.at(-1);
+  assert.equal(batch.batch, true);
+  for (const g of guids) {
+    const v2 = t.store.latestVersion("wholesale_invoice", g);
+    assert.equal(v2.status, "notified");
+    assert.equal(v2.telegram.messageId, batch.messageId);
+  }
+  assert.equal(t.edgeFake.state.sent.length, sentBefore + 1, "رسالة ملخص واحدة فقط رغم محاولتين");
+});

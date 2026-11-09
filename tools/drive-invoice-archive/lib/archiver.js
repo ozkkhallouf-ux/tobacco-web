@@ -476,10 +476,61 @@ function createArchiver({ cfg, store, ameen, renderer, template, receiptTemplate
   }
 
   // ─── الإشعار ───
+  // تحديث جماعي: فواتير جملة معدَّلة (version > 1) جاهزة معاً أكثر من الحدّ المسموح تُرسَل
+  // برسالة ملخص واحدة (notifyBatchStage) بدل إشعار مستقل لكل واحدة. فاتورة جديدة (version 1)
+  // أو تعديل وحيد أو قليل تبقى على المسار الفردي كما كانت — لا تغيير في تلك الحالات.
+  async function notifyBatchStage(jobs) {
+    let notified = 0;
+    try {
+      const res = await edge.notifyBatch(jobs);
+      const notifiedIds = new Set(res.notifiedJobIds);
+      const heldIds = new Set(res.heldJobIds);
+      const unknownIds = new Set(res.unknownJobIds);
+      for (const job of jobs) {
+        if (notifiedIds.has(job.jobId) || Object.prototype.hasOwnProperty.call(res.alreadySent, job.jobId)) {
+          const duplicate = !notifiedIds.has(job.jobId);
+          const messageId = duplicate ? res.alreadySent[job.jobId] : res.messageId;
+          job.telegram = { messageId, duplicate, sentAt: new Date(now()).toISOString() };
+          job.status = STATUS.NOTIFIED;
+          job.attempts = 0;
+          job.nextAttemptAt = 0;
+          job.lastError = null;
+          store.saveJob(job);
+          notified++;
+        } else if (unknownIds.has(job.jobId)) {
+          holdJob(job, "notify", "DELIVERY_UNKNOWN");
+        } else {
+          // in_progress (حجز قائم من محاولة متزامنة)، أو لا بتّ له بعد: انتظار قصير بلا فشل.
+          holdJob(job, "notify", "IN_PROGRESS");
+        }
+      }
+      if (notifiedIds.size) emit("notified_batch", { count: notifiedIds.size, jobIds: [...notifiedIds] });
+    } catch (err) {
+      if (GLOBAL_EDGE.has(err && err.code)) {
+        emit("notify_unavailable", { code: err.code, message: err.message });
+        return notified;
+      }
+      if (err && err.code === "DELIVERY_UNKNOWN") {
+        for (const job of jobs) holdJob(job, "notify", "DELIVERY_UNKNOWN");
+        return notified;
+      }
+      for (const job of jobs) failJob(job, "notify", err);
+    }
+    return notified;
+  }
+
   async function notifyStage() {
     const ready = store.jobs().filter((j) => j.status === STATUS.UPLOADED && j.drive && j.drive.fileId && jobInScope(j) && due(j));
+    const sorted = ready.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    // الحصر بفواتير الجملة المعدَّلة وحدها: فاتورة جديدة تبقى إشعاراً فورياً مستقلاً دائماً،
+    // وسندات القبض (مرحلة أخرى، مستند مستقل لكل زبون) لا تُجمَّع هنا.
+    const burstEligible = sorted.filter((j) => j.docType === DOC_TYPE && j.changeKind === "edited");
+    const batchIds = burstEligible.length > cfg.burstNotifyThreshold ? new Set(burstEligible.map((j) => j.jobId)) : null;
+
     let notified = 0;
-    for (const job of ready.sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
+    let stopped = false;
+    for (const job of sorted) {
+      if (batchIds && batchIds.has(job.jobId)) continue; // تُرسَل كدفعة واحدة أدناه
       let pdf;
       try {
         pdf = fs.readFileSync(store.pdfPath(job.jobId));
@@ -505,6 +556,7 @@ function createArchiver({ cfg, store, ameen, renderer, template, receiptTemplate
       } catch (err) {
         if (GLOBAL_EDGE.has(err && err.code)) {
           emit("notify_unavailable", { code: err.code, message: err.message });
+          stopped = true;
           break;
         }
         if (err && (err.code === "IN_PROGRESS" || err.code === "DELIVERY_UNKNOWN")) {
@@ -514,6 +566,7 @@ function createArchiver({ cfg, store, ameen, renderer, template, receiptTemplate
         failJob(job, "notify", err);
       }
     }
+    if (batchIds && !stopped) notified += await notifyBatchStage(burstEligible);
     return { notified };
   }
 

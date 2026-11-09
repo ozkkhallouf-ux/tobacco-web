@@ -36,6 +36,10 @@ const DEFAULTS = Object.freeze({
   lookbackDays: 60,
   maxAttempts: 8,
   notifyWaitSeconds: 60,        // حجز إشعار قائم (409 in_progress): انتظار ثابت بلا استهلاك محاولة
+  // تحديث جماعي (حوادث مثل 2026-11-09، 74 إشعاراً من تسوية دفعات): فواتير معدَّلة (version > 1)
+  // جاهزة للإشعار في الدورة نفسها أكثر من هذا العدد تُجمَّع في رسالة ملخص واحدة بدل إشعار كل فاتورة
+  // على حدة. فاتورة جديدة (version 1) لا تُجمَّع أبداً، ولا فاتورة معدَّلة وحدها أو ضمن عدد قليل.
+  burstNotifyThreshold: 5,
   failedCooldownMinutes: 60,    // الفاشل نهائياً يُعاد تلقائياً بعد ساعة (كما telegram_outbox)
   requireOfficialFont: true,
   edgeUrl: "",                  // https://<ref>.supabase.co/functions/v1/document-archive-notify
@@ -193,6 +197,9 @@ function validate(cfg, nowMs = Date.now()) {
     if (!(Number(cfg[k]) > 0)) errors.push(`${k} يجب أن يكون موجباً`);
   }
   if (Number(cfg.stableSeconds) < 60) errors.push("stableSeconds لا يقل عن 60");
+  if (!(Number.isInteger(cfg.burstNotifyThreshold) && cfg.burstNotifyThreshold >= 1)) {
+    errors.push("burstNotifyThreshold يجب أن يكون عدداً صحيحاً ≥ 1");
+  }
   if (MODES[cfg.mode] && MODES[cfg.mode].notify && !cfg.edgeUrl) errors.push("live يتطلب edgeUrl");
   if (errors.length) throw new Error(`إعداد غير صالح: ${errors.join("؛ ")}`);
   return cfg;
