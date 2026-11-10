@@ -287,6 +287,9 @@ async function createFakeEdge() {
         values.push(checked.value);
       }
       s.notifyBatchCalls = (s.notifyBatchCalls || 0) + 1;
+      // rejectBatchCall: فشل (502 عابر، لا عطل عام) لطلب /notify-batch رقم N تحديداً بلا تأثير
+      // على طلبات أخرى — لاختبار عزل فشل دفعة واحدة وسط تقسيم BATCH_MAX_ITEMS=200 (Codex P1).
+      if (s.rejectBatchCall === s.notifyBatchCalls) return json(502, { ok: false, error: "telegram_sendMessage_502" });
       const alreadySent = {};
       const toSend = [];
       for (const v of values) {

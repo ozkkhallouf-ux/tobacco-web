@@ -479,7 +479,21 @@ function createArchiver({ cfg, store, ameen, renderer, template, receiptTemplate
   // تحديث جماعي: فواتير جملة معدَّلة (version > 1) جاهزة معاً أكثر من الحدّ المسموح تُرسَل
   // برسالة ملخص واحدة (notifyBatchStage) بدل إشعار مستقل لكل واحدة. فاتورة جديدة (version 1)
   // أو تعديل وحيد أو قليل تبقى على المسار الفردي كما كانت — لا تغيير في تلك الحالات.
-  async function notifyBatchStage(jobs) {
+  //
+  // دالة Edge (document-archive-notify/index.ts) ترفض أي طلب /notify-batch يتجاوز
+  // BATCH_MAX_ITEMS=200 عنصراً كاملاً (Codex P1، PR #437): فتُقسَّم القائمة هنا إلى دفعات
+  // (chunks) ≤200 عنصر، كل واحدة بطلب /notify-batch مستقل بمعزل كامل عن الأخرى — فشل دفعة
+  // لا يمسّ دفعة نجحت قبلها أو بعدها، ولا يُعاد إرسالها معها. لا تغيير على الحجز الذري
+  // (claim/finish) ولا على تصنيف unknown/sent: نفس استدعاء edge.notifyBatch لكل دفعة.
+  const NOTIFY_BATCH_CHUNK_SIZE = 200;
+
+  function chunked(list, size) {
+    const out = [];
+    for (let i = 0; i < list.length; i += size) out.push(list.slice(i, i + size));
+    return out;
+  }
+
+  async function notifyOneBatch(jobs) {
     let notified = 0;
     try {
       const res = await edge.notifyBatch(jobs);
@@ -506,16 +520,27 @@ function createArchiver({ cfg, store, ameen, renderer, template, receiptTemplate
         }
       }
       if (notifiedIds.size) emit("notified_batch", { count: notifiedIds.size, jobIds: [...notifiedIds] });
+      return { notified, stopAll: false };
     } catch (err) {
       if (GLOBAL_EDGE.has(err && err.code)) {
         emit("notify_unavailable", { code: err.code, message: err.message });
-        return notified;
+        return { notified, stopAll: true }; // عطل اتصال أو حساب: الدفعات التالية ستفشل بالسبب نفسه
       }
       if (err && err.code === "DELIVERY_UNKNOWN") {
         for (const job of jobs) holdJob(job, "notify", "DELIVERY_UNKNOWN");
-        return notified;
+        return { notified, stopAll: false };
       }
       for (const job of jobs) failJob(job, "notify", err);
+      return { notified, stopAll: false };
+    }
+  }
+
+  async function notifyBatchStage(jobs) {
+    let notified = 0;
+    for (const group of chunked(jobs, NOTIFY_BATCH_CHUNK_SIZE)) {
+      const result = await notifyOneBatch(group);
+      notified += result.notified;
+      if (result.stopAll) break;
     }
     return notified;
   }
