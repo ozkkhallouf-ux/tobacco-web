@@ -277,6 +277,55 @@ async function createFakeEdge() {
       if (s.loseResponse > 0) { s.loseResponse--; const e = new Error("socket hang up"); e.code = "ECONNRESET"; throw e; }
       return json(200, { ok: true, duplicate: false, message_id: messageId });
     }
+    if (route === "notify-batch") {
+      const body = JSON.parse(init.body);
+      const rawItems = Array.isArray(body.items) ? body.items : [];
+      const values = [];
+      for (const raw of rawItems) {
+        const checked = shared.validateNotifyFields(raw);
+        if (checked.error) return json(400, { ok: false, error: checked.error });
+        values.push(checked.value);
+      }
+      s.notifyBatchCalls = (s.notifyBatchCalls || 0) + 1;
+      // rejectBatchCall: فشل (502 عابر، لا عطل عام) لطلب /notify-batch رقم N تحديداً بلا تأثير
+      // على طلبات أخرى — لاختبار عزل فشل دفعة واحدة وسط تقسيم BATCH_MAX_ITEMS=200 (Codex P1).
+      if (s.rejectBatchCall === s.notifyBatchCalls) return json(502, { ok: false, error: "telegram_sendMessage_502" });
+      const alreadySent = {};
+      const toSend = [];
+      for (const v of values) {
+        const existing = s.items.get(v.job_id);
+        if (existing && existing.telegram_message_id) { alreadySent[v.job_id] = existing.telegram_message_id; continue; }
+        toSend.push(v);
+      }
+      if (toSend.length === 0) {
+        return json(200, { ok: true, notified_job_ids: [], notified_message_ids: {}, already_sent: alreadySent, held_job_ids: [], unknown_job_ids: [] });
+      }
+      const notifiedIds = [];
+      const notifiedMessageIds = {};
+      const heldIds = [];
+      const unknownIds = [];
+      // كل مجموعة (buildBatchSummaries قد تقسّم إلى أكثر من رسالة) تُرسَل وتُنهى بمعزل عن
+      // غيرها: نفس آلية /notify على كل مجموعة — "in_progress"/"delivery_unknown" تصنيف بلا 409
+      // (كل عنصر يُصنَّف في ردّ 200)، وفشل أو ضياع رسالة لا يمسّ مجموعة أخرى نجحت في الدفعة نفسها.
+      for (const group of shared.buildBatchSummaries(toSend)) {
+        if (s.conflict.length) {
+          const code = s.conflict.shift();
+          const ids = group.items.map((v) => v.job_id);
+          (code === "in_progress" ? heldIds : unknownIds).push(...ids);
+          continue;
+        }
+        if (s.reject > 0) { s.reject--; return json(502, { ok: false, error: "telegram_sendMessage_502" }); }
+        const messageId = 1000 + s.sent.length;
+        s.sent.push({ chat: "OWNER", text: group.text, messageId, batch: true });
+        for (const v of group.items) {
+          s.items.set(v.job_id, shared.itemFromNotify(v, messageId, body.host));
+          notifiedIds.push(v.job_id);
+          notifiedMessageIds[v.job_id] = messageId;
+        }
+        if (s.loseResponse > 0) { s.loseResponse--; const e = new Error("socket hang up"); e.code = "ECONNRESET"; throw e; }
+      }
+      return json(200, { ok: true, notified_job_ids: notifiedIds, notified_message_ids: notifiedMessageIds, already_sent: alreadySent, held_job_ids: heldIds, unknown_job_ids: unknownIds });
+    }
     if (route === "report") {
       const body = JSON.parse(init.body);
       s.reports.push(body);

@@ -13,6 +13,13 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 //            حجز ذرّي لـjob_id قبل sendDocument، ثم تسجيل النتيجة. حجز قائم ⇒ 409
 //            in_progress؛ نتيجة مجهولة (ضاع ردّ تيليغرام) ⇒ 409 delivery_unknown بلا إعادة
 //            تلقائية أبداً؛ مُرسَل ⇒ message_id نفسه بلا إرسال ثانٍ.
+//   /notify-batch  JSON: مصفوفة مستندات بلا ملفات (فواتير جملة معدَّلة كثيرة معاً، مثل
+//            تسوية دفعات دفعة واحدة) ترسل برسالة ملخص (العدد وأرقام المستندات)، أو أكثر من
+//            رسالة متتالية إذا تجاوز العدد حدّ تيليغرام (نادر). كل رسالة تُنهي حجز مستنداتها
+//            هي وحدها: فشل رسالة واحدة لا يمسّ مستندات رسالة أخرى نجحت في الدفعة نفسها، ولا
+//            يُعاد إرسالها معها لاحقاً. الحجز الذري لكل job_id نفسه (Migration 26)، فحجز
+//            مُرسَل سابقاً أو قائم من محاولة متزامنة (حتى من عامل آخر يعمل بالتوازي) لا يُرسَل
+//            له ثانية ضمن الدفعة.
 //   /report  JSON: نبض العامل + ملخص المهام؛ يعيد طلبات إعادة المحاولة من المالك،
 //            ويحرّر حجوزاتها المجهولة (المالك تحقق بنفسه أن المستند لم يصل).
 //
@@ -22,6 +29,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import "../_shared/telegram-format.js";
 import {
   MAX_PDF_BYTES,
+  buildBatchSummaries,
   buildNotifyCaption,
   isPdfBytes,
   itemFromNotify,
@@ -118,6 +126,18 @@ async function claimNotification(jobId: string, label: string): Promise<Claim> {
   return await rpc("document_archive_claim_notification", { p_job_id: jobId, p_lease_seconds: CLAIM_LEASE_SECONDS, p_label: label }) as Claim;
 }
 
+// تحرير حجز واحد بعينه (job_id + token هذا الحجز بالذات)، لا يُقبَل إلا من state='sending' —
+// كما document_archive_finish_notification تماماً. لا يرمي أبداً: فشل التحرير لا يُفقد شيئاً ولا
+// يعيد إرسالاً غير آمن، فالحجز يبقى sending فينتهي إلى unknown بالمهلة الطبيعية كالمعتاد.
+async function releaseClaimedNotification(jobId: string, token: string): Promise<boolean> {
+  try {
+    const r = await rpc("document_archive_release_notification_claim", { p_job_id: jobId, p_token: token }) as { released?: boolean };
+    return Boolean(r && r.released);
+  } catch {
+    return false;
+  }
+}
+
 // تسجيل النتيجة يُعاد حتى 3 مرات. إن فشل كلياً بقي الحجز sending فيصير unknown بعد
 // المهلة: لا إرسال ثانٍ في كل الأحوال.
 async function finishNotification(jobId: string, token: string, outcome: string, messageId: number | null, error: string | null): Promise<boolean> {
@@ -180,6 +200,110 @@ async function handleNotify(req: Request): Promise<Response> {
   return json(200, { ok: true, duplicate: false, message_id: messageId, recorded: recorded && claimRecorded });
 }
 
+const BATCH_MAX_ITEMS = 200;
+
+// تحديث جماعي: كل عنصر يُحجز ذرياً كما في /notify (نفس الدوال، بلا تعديل)، ثم رسالة ملخص
+// واحدة أو أكثر (sendMessage، بلا PDF) لكل ما نجح حجزه معاً — buildBatchSummaries تقسّم إلى
+// رسائل متتالية فقط إذا تجاوز العدد حدّ تيليغرام. كل رسالة تُنهي حجز مستنداتها هي وحدها
+// (finishNotification لكل عنصر بنتيجة رسالته بالذات): رسالة فشلت لا تُنهي حجز عنصر في رسالة
+// أخرى نجحت في الدفعة نفسها، فلا تُرسَل الناجحة ثانية ولا تضيع الفاشلة — تبقى محجوزة فقط
+// (claimed غير sent) فتُعاد في دورة لاحقة دون تكرار. كل عنصر يُصنَّف في الرد: already_sent
+// (حجزه مُرسَل سابقاً برسالته الخاصة)، held_job_ids (حجز قائم من محاولة متزامنة — عامل آخر أو
+// نفس العامل بالتوازي، انتظار قصير؛ أو رسالة رفضها تيليغرام صراحةً فحُرِّر حجزها)، unknown_job_ids
+// (حجز غامض يحتاج تحقق المالك، أو رسالة ضاع ردّها/غير مقروءة)، notified_job_ids (أُرسلت الآن،
+// مع رقم رسالتها في notified_message_ids). الرد 200 دائماً كي لا يضيع تصنيف عناصر أخرى بسبب
+// حالة عنصر واحد أو فشل رسالة واحدة؛ خطأ شبكة حقيقي قبل أي حجز أو تسجيل يُرمى عادياً فيعيده
+// المعالج العام 502 (إعادة الدفعة كاملة دورة لاحقة، كما /notify).
+async function handleNotifyBatch(req: Request): Promise<Response> {
+  const body = await req.json().catch(() => null);
+  if (!body || typeof body !== "object" || !Array.isArray((body as { items?: unknown }).items)) {
+    return json(400, { ok: false, error: "json" });
+  }
+  const rawItems = (body as { items: unknown[] }).items;
+  if (rawItems.length === 0) return json(400, { ok: false, error: "empty" });
+  if (rawItems.length > BATCH_MAX_ITEMS) return json(400, { ok: false, error: "batch_too_large" });
+  const host = String((body as { host?: string }).host || "");
+
+  type Value = NonNullable<ReturnType<typeof validateNotifyFields>["value"]>;
+  const values: Value[] = [];
+  const seen = new Set<string>();
+  for (const raw of rawItems) {
+    const checked = validateNotifyFields(raw);
+    if (checked.error) return json(400, { ok: false, error: checked.error });
+    const v = checked.value as Value;
+    if (seen.has(v.job_id)) return json(400, { ok: false, error: "duplicate_job_id" });
+    seen.add(v.job_id);
+    values.push(v);
+  }
+
+  const chat = await ownerChatId();
+  await botToken();
+
+  const alreadySent: Record<string, number> = {};
+  const heldJobIds: string[] = [];
+  const unknownJobIds: string[] = [];
+  const claimed: Array<{ v: Value; token: string }> = [];
+  try {
+    for (const v of values) {
+      const claim = await claimNotification(v.job_id, claimLabel(v));
+      if (claim.status === "sent") { alreadySent[v.job_id] = Number(claim.message_id); continue; }
+      if (claim.status === "in_progress") { heldJobIds.push(v.job_id); continue; }
+      if (claim.status === "claimed" && claim.token) { claimed.push({ v, token: claim.token }); continue; }
+      unknownJobIds.push(v.job_id); // claim.status === "unknown": حجز سابق غامض، يحتاج تحقق المالك
+    }
+  } catch (err) {
+    // فشل حجز عنصر في وسط الدفعة (عطل عابر): الحجوزات الناجحة سابقاً في هذه الدفعة بعينها لم
+    // يُحاول إرسالها أبداً بعد (الإرسال يبدأ فقط بعد اكتمال هذه الحلقة كلها) — تُحرَّر كل واحدة
+    // بـjob_id وtoken حجزها هي بذاتها فوراً للسماح بإعادة المحاولة بأمان، بدل تركها sending بلا
+    // أي محاولة إرسال حتى تنتهي مهلتها فتتحول unknown وتحتاج تدخل المالك لعطل كان عابراً فقط.
+    // لا تُرسَل رسالة ملخص هنا أبداً: لم يُحاول إرسال أي شيء بعد لهذه الدفعة، فلا شيء محسوم ليُعلَن.
+    // فشل تحرير عنصر واحد لا يوقف تحرير الباقي (releaseClaimedNotification لا يرمي أبداً)، ولا
+    // يُفقد شيئاً: من يفشل تحريره يبقى sending فينتهي إلى unknown بالمهلة الطبيعية كالمعتاد —
+    // أبداً لا يُعاد إرساله تلقائياً، وأبداً لا يُفترض وصوله.
+    await Promise.all(claimed.map((c) => releaseClaimedNotification(c.v.job_id, c.token)));
+    throw err;
+  }
+
+  const notifiedJobIds: string[] = [];
+  const notifiedMessageIds: Record<string, number> = {};
+  // not_sent صريح من تيليغرام (لم يُرسل) ⇒ الحجز released، إعادة تلقائية آمنة كمحاولة عادية.
+  // unknown (شبكة/مهلة/جسم غير مقروء) ⇒ قد يكون وصل: لا إعادة تلقائية، كما /notify بالضبط.
+  const releasedJobIds: string[] = [];
+  if (claimed.length > 0) {
+    const tokenByJobId = new Map(claimed.map((c) => [c.v.job_id, c.token]));
+    // كل مجموعة (رسالة واحدة محتملة) تُرسَل وتُنهى بمعزل عن المجموعات الأخرى: لا نسمة
+    // مشتركة في النتيجة بين رسالة ناجحة ورسالة فاشلة في الدفعة نفسها.
+    for (const group of buildBatchSummaries(claimed.map((c) => c.v))) {
+      const sent = await telegramSend("sendMessage", { chat_id: chat, text: group.text });
+      if (sent.outcome === "sent") {
+        const messageId = sent.messageId;
+        for (const v of group.items) {
+          const token = tokenByJobId.get(v.job_id) as string;
+          await finishNotification(v.job_id, token, "sent", messageId, null);
+          await recordNotification(itemFromNotify(v, messageId, host));
+          notifiedJobIds.push(v.job_id);
+          notifiedMessageIds[v.job_id] = messageId;
+        }
+      } else {
+        for (const v of group.items) {
+          const token = tokenByJobId.get(v.job_id) as string;
+          await finishNotification(v.job_id, token, sent.outcome, null, sent.error);
+          (sent.outcome === "unknown" ? unknownJobIds : releasedJobIds).push(v.job_id);
+        }
+        console.error(`document-archive-notify: ${sent.error} (batch ${sent.outcome}, no automatic resend)`);
+      }
+    }
+  }
+  return json(200, {
+    ok: true,
+    notified_job_ids: notifiedJobIds,
+    notified_message_ids: notifiedMessageIds,
+    already_sent: alreadySent,
+    held_job_ids: [...heldJobIds, ...releasedJobIds],
+    unknown_job_ids: unknownJobIds,
+  });
+}
+
 // مرآة الموقع: message_id على عنصر المهمة. حارس التكرار هو الحجز (Migration 26) لا هذا
 // التسجيل؛ يُعاد حتى 3 مرات، وإن فشل كلياً أرسل العامل message_id في تقريره التالي.
 async function recordNotification(item: unknown): Promise<boolean> {
@@ -224,6 +348,7 @@ Deno.serve(async (req) => {
   const route = new URL(req.url).pathname.split("/").filter(Boolean).pop();
   try {
     if (route === "notify") return await handleNotify(req);
+    if (route === "notify-batch") return await handleNotifyBatch(req);
     if (route === "report") return await handleReport(req);
     return json(404, { ok: false, error: "route" });
   } catch (err) {

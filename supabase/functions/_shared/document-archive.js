@@ -145,6 +145,66 @@ export function buildNotifyCaption(v) {
   return { caption: short, followUp: full.slice(0, 3900) };
 }
 
+// حدّ رسالة تيليغرام (sendMessage) 4096 محرفاً؛ هامش أمان كما CAPTION_MAX لنفس السبب.
+export const BATCH_MESSAGE_MAX = 3900;
+
+function renderBatchPage(order, byType, pageIndex, pageCount, total) {
+  const t = fmt();
+  const countLabel = total === 1 ? "مستند معدَّل" : "مستندات معدَّلة";
+  const header = pageCount > 1
+    ? t.line(`📋 تحديث جماعي — ${total} ${countLabel} (رسالة ${pageIndex + 1}/${pageCount})`)
+    : t.line(`📋 تحديث جماعي — ${total} ${countLabel}`);
+  const lines = [header];
+  for (const docType of order) {
+    const list = byType.get(docType);
+    const type = DOC_TYPES[docType];
+    const label = type ? type.label : docType;
+    const numbers = list.map((it) => t.name(it.doc_number)).join("، ");
+    lines.push(t.field(`${label} (${list.length})`, numbers));
+  }
+  lines.push(t.line("كل تعديل محفوظ بنسخة جديدة على Drive، والإصدار السابق باقٍ بلا تغيير."));
+  return lines.join("\n");
+}
+
+// رسائل ملخص لتحديث جماعي (عدة مستندات معدَّلة معاً): العدد وأرقام المستندات كاملة بدل
+// إشعار مستقل لكل واحد. رسالة واحدة تكفي عملياً دائماً (انظر تعليق burstNotifyThreshold في
+// config.js)؛ تُقسَّم إلى أكثر من رسالة متتالية فقط إذا تجاوز النص فعلاً حدّ تيليغرام
+// (BATCH_MESSAGE_MAX) — بلا حذف أو تقصير أي رقم فاتورة مهما كان العدد. كل صفحة مستقلة بذاتها
+// (ترويسة وتذييل كاملان) كي يُنهي العنصر حجزه بنجاح رسالته هو وحدها، لا الدفعة كلها.
+export function buildBatchSummaries(items) {
+  const total = items.length;
+  let currentOrder = [];
+  let currentByType = new Map();
+  let currentItems = [];
+  const pages = [];
+
+  const flush = () => { if (currentItems.length > 0) pages.push({ order: currentOrder, byType: currentByType, items: currentItems }); };
+
+  for (const it of items) {
+    const nextByType = new Map(currentByType);
+    const nextOrder = currentOrder.includes(it.doc_type) ? currentOrder : [...currentOrder, it.doc_type];
+    nextByType.set(it.doc_type, [...(nextByType.get(it.doc_type) || []), it]);
+    // هامش محافظ: نقيس بترويسة «رسالة n/2» دائماً (أطول من ترويسة الصفحة الواحدة) كي لا
+    // يتجاوز النص الحدّ الحقيقي بعد معرفة عدد الصفحات النهائي.
+    const probe = renderBatchPage(nextOrder, nextByType, 0, 2, total);
+    if (probe.length > BATCH_MESSAGE_MAX && currentItems.length > 0) {
+      flush();
+      currentOrder = [it.doc_type];
+      currentByType = new Map([[it.doc_type, [it]]]);
+      currentItems = [it];
+    } else {
+      currentOrder = nextOrder;
+      currentByType = nextByType;
+      currentItems = [...currentItems, it];
+    }
+  }
+  flush();
+  if (pages.length === 0) return [];
+
+  const pageCount = pages.length;
+  return pages.map((p, i) => ({ text: renderBatchPage(p.order, p.byType, i, pageCount, total), items: p.items }));
+}
+
 // صف document_archive_items الذي تسجّله الدالة بعد الإرسال.
 export function itemFromNotify(v, messageId, host) {
   return {

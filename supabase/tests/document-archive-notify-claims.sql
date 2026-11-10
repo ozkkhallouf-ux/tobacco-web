@@ -44,6 +44,7 @@ grant execute on function public.is_owner() to authenticated, service_role;
 
 \i :migration22
 \i :migration26
+\i :migration29
 
 create function pg_temp.act(p_who text) returns void language plpgsql as $$
 begin
@@ -234,6 +235,54 @@ select pg_temp.ok((select (public.document_archive_ingest_report('{"host":"OZK20
 select pg_temp.ok(public.document_archive_release_notification_claims(array[repeat('8', 32)]) = 1, '/report releases the unknown claim');
 select pg_temp.ok(pg_temp.claim(repeat('8', 32)) ->> 'status' = 'claimed' and pg_temp.claim(repeat('8', 32)) ->> 'status' = 'in_progress', 'after owner retry: one claim, then in_progress');
 
+-- ── ٥د) تحرير حجز واحد بعد عطل جزئي في دفعة (29) — نفس حارس finish_notification بالضبط ──
+set role service_role;
+select pg_temp.act('service');
+
+-- تحرير صحيح بـtoken الحجز نفسه ⇒ released، وقابل لإعادة الحجز.
+insert into t values ('2', pg_temp.claim(repeat('2', 32)));
+select pg_temp.ok((public.document_archive_release_notification_claim(repeat('2', 32), (select (v ->> 'token')::uuid from t where k = '2')) ->> 'released')::boolean, 'release with matching token succeeds');
+select pg_temp.ok(pg_temp.state(repeat('2', 32)) = 'released', 'release sets released state');
+select pg_temp.ok(pg_temp.claim(repeat('2', 32)) ->> 'status' = 'claimed', 'released partial-failure claim can be reclaimed');
+
+-- token خاطئ/أجنبي ⇒ لا أثر إطلاقاً (أمان التزامن: طلب آخر أعاد الحجز بـtoken مختلف لا يُلمَس).
+insert into t values ('3', pg_temp.claim(repeat('3', 32)));
+select pg_temp.ok((public.document_archive_release_notification_claim(repeat('3', 32), gen_random_uuid()) ->> 'released')::boolean = false, 'release with foreign token is a no-op');
+select pg_temp.ok(pg_temp.state(repeat('3', 32)) = 'sending', 'foreign-token release leaves sending state untouched');
+
+-- انتهت مهلته وصار unknown بالرمز القديم نفسه ⇒ لا يُلمَس أبداً (أمان الانتهاء: لا يُعاد ولا يُرسَل تلقائياً أبداً).
+insert into t values ('4', pg_temp.claim(repeat('4', 32)));
+update public.document_archive_notify_claims set claimed_at = now() - interval '10 minutes' where job_id = repeat('4', 32);
+select pg_temp.claim(repeat('4', 32)) ->> 'status' as o_status \gset
+select pg_temp.ok(:'o_status' = 'unknown', 'o: lease expired to unknown before release attempt');
+select pg_temp.ok((public.document_archive_release_notification_claim(repeat('4', 32), (select (v ->> 'token')::uuid from t where k = '4')) ->> 'released')::boolean = false, 'release never touches a claim already unknown');
+select pg_temp.ok(pg_temp.state(repeat('4', 32)) = 'unknown', 'unknown claim stays unknown after a release attempt with its old token');
+
+-- أُرسلت ونجحت (sent) بالرمز نفسه ⇒ لا يُلمَس (لا يُنتقَص إرسال محسوم أبداً).
+insert into t values ('5', pg_temp.claim(repeat('5', 32)));
+select public.document_archive_finish_notification(repeat('5', 32), (select (v ->> 'token')::uuid from t where k = '5'), 'sent', 7701) is not null as x \gset
+select pg_temp.ok((public.document_archive_release_notification_claim(repeat('5', 32), (select (v ->> 'token')::uuid from t where k = '5')) ->> 'released')::boolean = false, 'release never touches a sent claim');
+select pg_temp.ok(pg_temp.state(repeat('5', 32)) = 'sent', 'sent claim stays sent after a release attempt');
+
+-- تحرير مكرر (idempotent): ثانية بالرمز نفسه بعد أن صار released فعلاً ⇒ لا أثر (لا صف state='sending' بعد الآن).
+insert into t values ('6', pg_temp.claim(repeat('6', 32)));
+select (select (v ->> 'token')::uuid from t where k = '6') as q_token \gset
+select pg_temp.ok((public.document_archive_release_notification_claim(repeat('6', 32), :'q_token') ->> 'released')::boolean, 'q: first release succeeds');
+select pg_temp.ok((public.document_archive_release_notification_claim(repeat('6', 32), :'q_token') ->> 'released')::boolean = false, 'q: second release with the same token is a no-op (idempotent)');
+
+-- أمان التزامن بعد إعادة الحجز: token قديم بعد تحرير وحجز جديد لا يلمس الحجز الجديد (حالته sending من جديد لكن بtoken مختلف).
+select (select (v ->> 'token')::uuid from t where k = '6') as q_old_token \gset
+select pg_temp.claim(repeat('6', 32)) ->> 'token' as q_new_token \gset
+select pg_temp.ok(:'q_old_token' is distinct from :'q_new_token', 'q: reclaim issues a fresh token');
+select pg_temp.ok((public.document_archive_release_notification_claim(repeat('6', 32), :'q_old_token') ->> 'released')::boolean = false, 'stale token after reclaim cannot release the new claim');
+select pg_temp.ok(pg_temp.state(repeat('6', 32)) = 'sending', 'reclaimed-then-stale-release leaves the new sending claim untouched');
+
+-- عمليات psql متوازية حقيقية على الحجز نفسه بtoken نفسه: تحرير واحد بالضبط ينجح، والباقي no-op
+-- (الطابعة أدناه تلتقطها scripts/check-drive-invoice-archive.mjs لتشغيل التحرير المتزامن بعد هذا الملف).
+insert into t values ('0', pg_temp.claim(repeat('0', 32)));
+select 'RELEASE_CLAIM_TEST_TOKEN:' || (select v ->> 'token' from t where k = '0');
+reset role;
+
 -- ── ٦) مدخلات ──
 do $$ begin
   perform public.document_archive_claim_notification('not-a-job', 300);
@@ -266,6 +315,12 @@ do $$ declare r text; begin
       perform public.document_archive_release_notification_claims(array[repeat('c', 32)]);
       raise exception 'TEST FAIL: % can release', r;
     exception when insufficient_privilege then raise notice 'PASS % cannot release', r;
+    end;
+    begin
+      execute format('set local role %I', r);
+      perform public.document_archive_release_notification_claim(repeat('3', 32), gen_random_uuid());
+      raise exception 'TEST FAIL: % can release single claim (29)', r;
+    exception when insufficient_privilege then raise notice 'PASS % cannot release single claim (29)', r;
     end;
     begin
       execute format('set local role %I', r);
