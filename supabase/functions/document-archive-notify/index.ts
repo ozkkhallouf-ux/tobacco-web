@@ -126,6 +126,18 @@ async function claimNotification(jobId: string, label: string): Promise<Claim> {
   return await rpc("document_archive_claim_notification", { p_job_id: jobId, p_lease_seconds: CLAIM_LEASE_SECONDS, p_label: label }) as Claim;
 }
 
+// تحرير حجز واحد بعينه (job_id + token هذا الحجز بالذات)، لا يُقبَل إلا من state='sending' —
+// كما document_archive_finish_notification تماماً. لا يرمي أبداً: فشل التحرير لا يُفقد شيئاً ولا
+// يعيد إرسالاً غير آمن، فالحجز يبقى sending فينتهي إلى unknown بالمهلة الطبيعية كالمعتاد.
+async function releaseClaimedNotification(jobId: string, token: string): Promise<boolean> {
+  try {
+    const r = await rpc("document_archive_release_notification_claim", { p_job_id: jobId, p_token: token }) as { released?: boolean };
+    return Boolean(r && r.released);
+  } catch {
+    return false;
+  }
+}
+
 // تسجيل النتيجة يُعاد حتى 3 مرات. إن فشل كلياً بقي الحجز sending فيصير unknown بعد
 // المهلة: لا إرسال ثانٍ في كل الأحوال.
 async function finishNotification(jobId: string, token: string, outcome: string, messageId: number | null, error: string | null): Promise<boolean> {
@@ -231,12 +243,25 @@ async function handleNotifyBatch(req: Request): Promise<Response> {
   const heldJobIds: string[] = [];
   const unknownJobIds: string[] = [];
   const claimed: Array<{ v: Value; token: string }> = [];
-  for (const v of values) {
-    const claim = await claimNotification(v.job_id, claimLabel(v));
-    if (claim.status === "sent") { alreadySent[v.job_id] = Number(claim.message_id); continue; }
-    if (claim.status === "in_progress") { heldJobIds.push(v.job_id); continue; }
-    if (claim.status === "claimed" && claim.token) { claimed.push({ v, token: claim.token }); continue; }
-    unknownJobIds.push(v.job_id); // claim.status === "unknown": حجز سابق غامض، يحتاج تحقق المالك
+  try {
+    for (const v of values) {
+      const claim = await claimNotification(v.job_id, claimLabel(v));
+      if (claim.status === "sent") { alreadySent[v.job_id] = Number(claim.message_id); continue; }
+      if (claim.status === "in_progress") { heldJobIds.push(v.job_id); continue; }
+      if (claim.status === "claimed" && claim.token) { claimed.push({ v, token: claim.token }); continue; }
+      unknownJobIds.push(v.job_id); // claim.status === "unknown": حجز سابق غامض، يحتاج تحقق المالك
+    }
+  } catch (err) {
+    // فشل حجز عنصر في وسط الدفعة (عطل عابر): الحجوزات الناجحة سابقاً في هذه الدفعة بعينها لم
+    // يُحاول إرسالها أبداً بعد (الإرسال يبدأ فقط بعد اكتمال هذه الحلقة كلها) — تُحرَّر كل واحدة
+    // بـjob_id وtoken حجزها هي بذاتها فوراً للسماح بإعادة المحاولة بأمان، بدل تركها sending بلا
+    // أي محاولة إرسال حتى تنتهي مهلتها فتتحول unknown وتحتاج تدخل المالك لعطل كان عابراً فقط.
+    // لا تُرسَل رسالة ملخص هنا أبداً: لم يُحاول إرسال أي شيء بعد لهذه الدفعة، فلا شيء محسوم ليُعلَن.
+    // فشل تحرير عنصر واحد لا يوقف تحرير الباقي (releaseClaimedNotification لا يرمي أبداً)، ولا
+    // يُفقد شيئاً: من يفشل تحريره يبقى sending فينتهي إلى unknown بالمهلة الطبيعية كالمعتاد —
+    // أبداً لا يُعاد إرساله تلقائياً، وأبداً لا يُفترض وصوله.
+    await Promise.all(claimed.map((c) => releaseClaimedNotification(c.v.job_id, c.token)));
+    throw err;
   }
 
   const notifiedJobIds: string[] = [];

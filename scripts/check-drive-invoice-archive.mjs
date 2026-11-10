@@ -128,6 +128,25 @@ for (const f of ["document_archive_claim_notification(text, int, text)", "docume
 const notifyFn = read("supabase/functions/document-archive-notify/index.ts");
 assert.ok(notifyFn.indexOf("claimNotification(v.job_id,") > 0 && notifyFn.indexOf("claimNotification(v.job_id,") < notifyFn.indexOf('telegramSend("sendDocument"'), "الدالة: الحجز قبل sendDocument");
 assert.doesNotMatch(notifyFn, /existingMessageId/, "الدالة: لا فحص قراءة غير ذرّي قبل الإرسال");
+
+// 29: تحرير حجز واحد بعد عطل جزئي في دفعة — نفس حارس finish_notification (job_id+token+state) بالضبط.
+const claims29 = read("supabase/proposed/29-document-archive-notify-release-claim.sql");
+assert.match(claims29, /where job_id = p_job_id and claim_token = p_token and state = 'sending'/, "29: التحرير محصور بـjob_id+token+state='sending' فقط");
+assert.doesNotMatch(claims29, /grant [^;]* to [^;]*\banon\b/i, "29: لا صلاحية لـanon");
+assert.doesNotMatch(claims29, /\bdelete\b|\bcron\.schedule|on delete cascade/i, "29: التحرير حالة released لا حذف");
+assert.ok(claims29.includes("grant execute on function public.document_archive_release_notification_claim(text, uuid) to service_role;"), "29: service_role وحده");
+assert.equal(read("supabase/migrations/20261110110000_document_archive_notify_release_claim.sql"), claims29, "migrations/20261110110000 يجب أن تطابق proposed/29 حرفياً");
+
+// الإصلاح: الحلقة محاطة بـtry/catch، وعند الفشل تُحرَّر كل حجوزات هذه الدفعة بعينها بذاتها، لا الدالة الجماعية غير المحصورة.
+const claimLoopStart = notifyFn.indexOf("const claimed: Array<{ v: Value; token: string }> = [];");
+const claimLoopTry = notifyFn.indexOf("try {", claimLoopStart);
+const claimLoopCatch = notifyFn.indexOf("} catch (err) {", claimLoopTry);
+const claimLoopRelease = notifyFn.indexOf("releaseClaimedNotification(c.v.job_id, c.token)", claimLoopCatch);
+const claimLoopThrow = notifyFn.indexOf("throw err;", claimLoopRelease);
+assert.ok(claimLoopStart > 0 && claimLoopTry > claimLoopStart && claimLoopCatch > claimLoopTry && claimLoopRelease > claimLoopCatch && claimLoopThrow > claimLoopRelease,
+  "29: حلقة الحجز محاطة بـtry/catch يحرّر claimed قبل إعادة رمي الخطأ نفسه");
+assert.ok(notifyFn.indexOf("await Promise.all(claimed.map(") > claimLoopCatch && notifyFn.indexOf("await Promise.all(claimed.map(") < claimLoopThrow, "29: التحرير لكل عناصر claimed قبل رمي الخطأ");
+assert.doesNotMatch(notifyFn.slice(claimLoopCatch, claimLoopThrow), /document_archive_release_notification_claims\(/, "29: لا استدعاء للدالة الجماعية غير المحصورة داخل معالجة فشل الحجز");
 console.log("  ✓ حراسات ثابتة: قراءة فقط، بلا مشاركة ولا حذف، المالك وحده، الحساب المعتمد، غير مفعَّل");
 
 // ── ٢) الاختبارات ────────────────────────────────────────────────────────────
@@ -219,6 +238,7 @@ async function checkNotifyClaims() {
     const sql = read("supabase/tests/document-archive-notify-claims.sql")
       .replace("\\i :migration22", () => migration)
       .replace("\\i :migration26", () => claims)
+      .replace("\\i :migration29", () => claims29)
       .replaceAll("\\i :owner_retry", () => read("supabase/proposed/26-document-archive-owner-retry.sql").replaceAll("<job_id>", "8".repeat(32)));
     const run = psql(["-d", CDB, "-X", "-v", "ON_ERROR_STOP=1"], { input: sql });
     const text = `${output(created)}${output(run)}`;
@@ -248,13 +268,33 @@ async function checkNotifyClaims() {
     const alerts = psql(["-d", CDB, "-X", "-tA", "-c", `select count(*) from public.test_alerts where dedupe_key like 'document-archive-unknown:${job}:%'`]);
     assert.equal(alerts.stdout.trim(), "1", "حادثة واحدة بالتزامن ⇒ تنبيه واحد");
 
+    // 29 بالتزامن: الحجز 's' (مُجهَّز بالملف أعلاه) يُحرَّر بـtoken نفسه من 12 عملية متزامنة ⇒ واحدة بالضبط released=true.
+    const sTokenMatch = text.match(/RELEASE_CLAIM_TEST_TOKEN:([0-9a-f-]{36})/);
+    assert.ok(sTokenMatch, "رمز حجز 's' لاختبار التحرير المتزامن مفقود من ناتج SQL");
+    const sJob = "0".repeat(32);
+    const sToken = sTokenMatch[1];
+    const releaseOne = `set role service_role; select (public.document_archive_release_notification_claim('${sJob}', '${sToken}') ->> 'released');`;
+    const releaseRuns = await Promise.all(Array.from({ length: 12 }, () => psqlAsync(["-d", CDB, "-X", "-tA", "-v", "ON_ERROR_STOP=1", "-c", releaseOne])));
+    if (releaseRuns.some((r) => r.status !== 0)) throw new Error(`concurrent release failed: ${releaseRuns.map(output).join("\n")}`);
+    const releaseResults = releaseRuns.map((r) => r.stdout.trim().split("\n").pop());
+    assert.equal(releaseResults.filter((x) => x === "true").length, 1, `تحرير واحد فقط ينجح بالتزامن (${releaseResults.join(",")})`);
+    assert.equal(releaseResults.filter((x) => x === "false").length, 11, "البقية لا أثر لها (no-op)");
+    const sState = psql(["-d", CDB, "-X", "-tA", "-c", `select state from public.document_archive_notify_claims where job_id = '${sJob}'`]);
+    assert.equal(sState.stdout.trim(), "released", "حالة الحجز 's' بعد التحرير المتزامن: released بالضبط مرة واحدة");
+
+    // التراجع بترتيب معكوس للتطبيق: 29 أولاً (تعتمد على جدول 26)، ثم 26 نفسها.
+    const rb29 = psql(["-d", CDB, "-X", "-tA", "-v", "ON_ERROR_STOP=1"], { input: `${read("supabase/proposed/29-document-archive-notify-release-claim-rollback.sql")}
+select (to_regprocedure('public.document_archive_release_notification_claim(text,uuid)') is null
+  and to_regclass('public.document_archive_notify_claims') is not null)::text;` });
+    if (rb29.status !== 0 || rb29.stdout.trim().split("\n").pop() !== "true") throw new Error(`rollback 29 failed: ${output(rb29)}`);
+
     const rb = psql(["-d", CDB, "-X", "-tA", "-v", "ON_ERROR_STOP=1"], { input: `${read("supabase/proposed/26-document-archive-notify-claims-rollback.sql")}
 select (to_regclass('public.document_archive_notify_claims') is null
   and to_regprocedure('public.document_archive_claim_notification(text,int,text)') is null
   and to_regprocedure('private.document_archive_alert_unknown(text,text)') is null
   and to_regclass('public.document_archive_items') is not null)::text;` });
     if (rb.status !== 0 || rb.stdout.trim().split("\n").pop() !== "true") throw new Error(`rollback 26 failed: ${output(rb)}`);
-    console.log(`  ✓ الهجرة 26 (حجز الإشعار) على PostgreSQL محلي: ${passes} تأكيداً + تزامن 12 عملية (حجز واحد، ثم تنبيه واحد للحادثة) + التراجع`);
+    console.log(`  ✓ الهجرة 26 (حجز الإشعار) على PostgreSQL محلي: ${passes} تأكيداً + تزامن 12 عملية (حجز واحد، ثم تنبيه واحد للحادثة) + تحرير حجز واحد (29) بالتزامن + التراجع بترتيبه المعكوس`);
   } catch (err) {
     console.error(`check-drive-invoice-archive: ${err.message}`);
     process.exitCode = 1;

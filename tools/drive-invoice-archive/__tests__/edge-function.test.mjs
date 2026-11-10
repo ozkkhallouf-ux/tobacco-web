@@ -37,6 +37,10 @@ function createBackend() {
     telegramFail: 0, telegramStatus: 500, restDown: false, calls: 0,
     // Migration 26: نموذج الحجز بالذاكرة بنفس قواعد supabase/proposed/26 (تُختبر SQL حياً في check-drive-invoice-archive).
     claims: new Map(), labels: [], clock: Date.parse("2026-10-25T12:00:00Z"), noClaimRpc: false, failFinish: false, released: [],
+    // 29: فشل حجز عابر أو انقطاع شبكة حقيقي عند استدعاء حجز بعينه (بترتيب نداء الحجز، 1 فصاعداً)؛
+    // وفشل/انقطاع عند تحرير حجز واحد بعينه بعد عطل جزئي في الدفعة (بترتيب نداء التحرير المفرد).
+    claimCallIndex: 0, claimFailAt: null, claimNetworkFailAt: null,
+    releaseCallIndex: 0, releaseFailAt: null, releaseNetworkFailAt: null, releasedSingle: [],
     // تيليغرام: lostReply يوصل المستند ثم يقطع الاتصال؛ unreadable يوصله بجسم غير مقروء؛ delayMs يبطئه.
     // failAt/lostReplyAt: Set بترتيب نداء تيليغرام (1 فصاعداً) لإفشال أو قطع رسالة واحدة بعينها
     // ضمن دفعة مُقسَّمة لعدة رسائل، بمعزل عن الرسائل الأخرى في الدفعة نفسها.
@@ -68,6 +72,12 @@ function createBackend() {
 
   const LEASE_MS = 300 * 1000;
   function claimRpc(init) {
+    s.claimCallIndex++;
+    const claimCallIndex = s.claimCallIndex;
+    if (s.claimNetworkFailAt && s.claimNetworkFailAt.has(claimCallIndex)) {
+      const e = new TypeError("fetch failed"); e.code = "ECONNRESET"; throw e;
+    }
+    if (s.claimFailAt && s.claimFailAt.has(claimCallIndex)) return json(500, { message: "busy" });
     if (s.noClaimRpc) return json(404, { message: "function not found" });
     const { p_job_id: id, p_label: label } = JSON.parse(init.body);
     s.labels.push(label);
@@ -108,6 +118,23 @@ function createBackend() {
     return json(200, n);
   }
 
+  // 29: تحرير حجز واحد بعينه (job_id+token هذا الحجز بالذات)، محصور بـstate='sending' فقط —
+  // نفس حارس finishRpc بالضبط (concurrency/expiry-safe: token قديم أو حالة تغيّرت ⇒ no-op).
+  function releaseClaimRpc(init) {
+    s.releaseCallIndex++;
+    const releaseCallIndex = s.releaseCallIndex;
+    if (s.releaseNetworkFailAt && s.releaseNetworkFailAt.has(releaseCallIndex)) {
+      const e = new TypeError("fetch failed"); e.code = "ECONNRESET"; throw e;
+    }
+    if (s.releaseFailAt && s.releaseFailAt.has(releaseCallIndex)) return json(500, { message: "busy" });
+    const { p_job_id: id, p_token: token } = JSON.parse(init.body);
+    const c = s.claims.get(id);
+    let released = false;
+    if (c && c.token === token && c.state === "sending") { c.state = "released"; released = true; }
+    s.releasedSingle.push({ id, token, released });
+    return json(200, { released });
+  }
+
   function recordNotification(init) {
     s.recordCalls++;
     if (s.failRecord) return json(500, { message: "boom" });
@@ -141,6 +168,7 @@ function createBackend() {
     "/rest/v1/rpc/document_archive_claim_notification": claimRpc,
     "/rest/v1/rpc/document_archive_finish_notification": finishRpc,
     "/rest/v1/rpc/document_archive_release_notification_claims": releaseRpc,
+    "/rest/v1/rpc/document_archive_release_notification_claim": releaseClaimRpc,
   };
 
   async function fetchMock(url, init = {}) {
@@ -746,4 +774,129 @@ test("Edge: /notify-batch انقطاع الاتصال أثناء إرسال رس
   assert.equal(b.s.telegram.length, sentBefore, "لا إعادة إرسال تلقائية لنتيجة مجهولة (كما /notify بالضبط)، ولا تكرار للناجحة");
   assert.deepEqual(retry.unknown_job_ids.sort(), droppedIds.sort());
   assert.equal(Object.keys(retry.already_sent).length, okIds.length);
+});
+
+// ─── 29: عطل جزئي في حلقة الحجز (claimNotification) وسط /notify-batch — تحرير ما نجح حجزه من هذا
+// الطلب بعينه فقط، بتوكنه الخاص، قبل إعادة رمي الخطأ الأصلي؛ لا إرسال ولا تسمية إلا بعد نجاح الحجز
+// والإرسال معاً، ولا تحرير لأي حجز لا يخص هذا الطلب (هولد لعامل آخر، أو انتهت صلاحيته). ───
+
+test("Edge: /notify-batch فشل الحجز عند أول عنصر في الدفعة ⇒ 502 بلا إرسال وبلا أي تحرير (لا شيء حُجز بعد في هذا الطلب)", { skip: SKIP }, async () => {
+  const b = createBackend();
+  const handler = await loadHandler(ENV, b.fetchMock);
+  const items = [1, 2, 3].map((n) => batchItem(n));
+  b.s.claimFailAt = new Set([1]);
+  const cap = captureConsole();
+  let res;
+  try { res = await handler(batchRequest(items)); } finally { cap.restore(); }
+  assert.equal(res.status, 502);
+  assert.equal(b.s.telegram.length, 0, "لا إرسال قبل اكتمال حلقة الحجز كاملة");
+  assert.equal(b.s.releasedSingle.length, 0, "لا شيء تحرَّر: فشل أول عنصر قبل أي حجز ناجح في هذه الدفعة");
+  assert.equal(b.s.claims.has(items[0].job_id), false, "العنصر الأول لم يُحجز قط: فشل نداء الحجز نفسه");
+});
+
+test("Edge: /notify-batch فشل الحجز في وسط الدفعة ⇒ 502 بلا إرسال، وتحرير حجز العنصر الناجح قبله وحده، والإعادة تُكمل الدفعة كاملة", { skip: SKIP }, async () => {
+  const b = createBackend();
+  const handler = await loadHandler(ENV, b.fetchMock);
+  const items = [1, 2, 3].map((n) => batchItem(n));
+  b.s.claimFailAt = new Set([2]); // فشل حجز العنصر الثاني (الوسطي)
+  const cap = captureConsole();
+  let res;
+  try { res = await handler(batchRequest(items)); } finally { cap.restore(); }
+  assert.equal(res.status, 502);
+  assert.equal(b.s.telegram.length, 0, "لا إرسال قبل اكتمال حلقة الحجز كاملة");
+  assert.equal(b.s.claims.get(items[0].job_id).state, "released", "العنصر الأول (حُجز بنجاح قبل فشل الثاني) حُرِّر للإعادة");
+  assert.equal(b.s.claims.has(items[1].job_id), false, "العنصر الثاني: فشل نداء الحجز نفسه، فلا حجز له على الإطلاق");
+  assert.equal(b.s.claims.has(items[2].job_id), false, "العنصر الثالث لم تصل الحلقة إليه قط بعد رمي الخطأ عند الثاني");
+  assert.equal(b.s.releasedSingle.length, 1, "تحرير واحد بعينه فقط: للعنصر الناجح وحده");
+  assert.equal(b.s.releasedSingle[0].released, true);
+
+  b.s.claimFailAt = null;
+  const retryRes = await handler(batchRequest(items));
+  const retry = await retryRes.json();
+  assert.equal(retryRes.status, 200, "الحجز المُحرَّر قابل لإعادة الحجز بنجاح، تماماً كحجز جديد");
+  assert.deepEqual(retry.notified_job_ids.sort(), items.map((i) => i.job_id).sort(), "الإعادة تحجز وترسل الدفعة الثلاثية كاملة، بما فيها العنصر الذي كان محرَّراً");
+  assert.equal(b.s.telegram.length, 1, "الإعادة ترسل رسالة ملخص واحدة لكل الثلاثة معاً");
+});
+
+test("Edge: /notify-batch فشل الحجز عند آخر عنصر في الدفعة ⇒ 502 بلا إرسال، وتحرير كل العناصر الناجحة قبله", { skip: SKIP }, async () => {
+  const b = createBackend();
+  const handler = await loadHandler(ENV, b.fetchMock);
+  const items = [1, 2, 3].map((n) => batchItem(n));
+  b.s.claimFailAt = new Set([3]); // فشل حجز العنصر الثالث (الأخير)
+  const cap = captureConsole();
+  let res;
+  try { res = await handler(batchRequest(items)); } finally { cap.restore(); }
+  assert.equal(res.status, 502);
+  assert.equal(b.s.telegram.length, 0);
+  assert.equal(b.s.claims.get(items[0].job_id).state, "released");
+  assert.equal(b.s.claims.get(items[1].job_id).state, "released");
+  assert.equal(b.s.claims.has(items[2].job_id), false, "العنصر الثالث: فشل نداء الحجز نفسه فلا حجز له");
+  assert.equal(b.s.releasedSingle.length, 2, "تحرير العنصرين الناجحين كليهما، كل واحد بتوكنه الخاص");
+  assert.ok(b.s.releasedSingle.every((r) => r.released === true));
+});
+
+test("Edge: /notify-batch فشل عابر في تحرير حجز واحد أثناء التحرير نفسه لا يُسقط تحرير البقية ولا يُفقد شيئاً، ويبقى الحجز sending كالمعتاد حتى تنتهي مهلته", { skip: SKIP }, async () => {
+  const b = createBackend();
+  const handler = await loadHandler(ENV, b.fetchMock);
+  const items = [1, 2, 3].map((n) => batchItem(n));
+  b.s.claimFailAt = new Set([3]); // العنصران الأول والثاني يُحجزان بنجاح، فيُحاوَل تحريرهما بعد فشل حجز الثالث
+  b.s.releaseFailAt = new Set([1]); // تحرير العنصر الأول (أول نداء تحرير) يفشل بخطأ عابر من الـRPC
+  const cap = captureConsole();
+  let res;
+  try { res = await handler(batchRequest(items)); } finally { cap.restore(); }
+  assert.equal(res.status, 502, "الخطأ الأصلي (فشل الحجز) هو ما يُرجَع دائماً، لا خطأ فشل التحرير نفسه");
+  assert.equal(b.s.telegram.length, 0);
+  assert.equal(b.s.releaseCallIndex, 2, "حاول تحرير العنصرين كليهما رغم فشل تحرير الأول");
+  assert.equal(b.s.claims.get(items[0].job_id).state, "sending",
+    "فشل تحريره: يبقى sending كما كان تماماً — آمن بالكامل (ينتهي لاحقاً إلى unknown بانتهاء المهلة الطبيعية، لا يُفقد ولا يُعاد إرساله تلقائياً أبداً)");
+  assert.equal(b.s.claims.get(items[1].job_id).state, "released", "فشل تحرير الأول لا يمنع تحرير الثاني (Promise.all يحاول الجميع، لا يتوقف عند أول فشل)");
+});
+
+test("Edge: /notify-batch تشغيل متزامن — حجز عامل آخر قائم فعلاً (in_progress) على عنصر يبقى بلا لمس حين يفشل حجز عنصر مختلف في هذا الطلب", { skip: SKIP }, async () => {
+  const b = createBackend();
+  const handler = await loadHandler(ENV, b.fetchMock);
+  const items = [1, 2, 3].map((n) => batchItem(n));
+  // عامل آخر يحجز العنصر الثاني فعلاً الآن (محاكاة تشغيل متزامن سابق على هذا الطلب، بمعزل تام عنه)
+  b.s.claims.set(items[1].job_id, { state: "sending", token: "other-worker-token", at: b.s.clock, attempts: 1 });
+  b.s.claimFailAt = new Set([3]); // فشل حجز العنصر الثالث في طلبنا هذا
+  const cap = captureConsole();
+  let res;
+  try { res = await handler(batchRequest(items)); } finally { cap.restore(); }
+  assert.equal(res.status, 502);
+  assert.equal(b.s.telegram.length, 0);
+  assert.equal(b.s.claims.get(items[0].job_id).state, "released", "العنصر الذي حجزه طلبنا بعينه هو وحده المُحرَّر");
+  const other = b.s.claims.get(items[1].job_id);
+  assert.equal(other.state, "sending", "حجز العامل الآخر (in_progress لطلبنا) لم يُلمَس: ليس من حجوزات هذا الطلب");
+  assert.equal(other.token, "other-worker-token", "توكن العامل الآخر لم يتغيّر: لا تحرير ولا إعادة حجز له من طلبنا");
+  assert.equal(b.s.claims.has(items[2].job_id), false);
+  assert.equal(b.s.releasedSingle.length, 1, "تحرير واحد بعينه فقط: للعنصر الذي حجزه هذا الطلب بذاته، لا حجز العامل الآخر مطلقاً");
+});
+
+test("Edge: /notify-batch انقطاع شبكة حقيقي أثناء محاولة حجز عنصر (فشل fetch نفسه، لا ردّ HTTP بخطأ) ⇒ 502 بلا إرسال، وتحرير ما سبقه بنجاح", { skip: SKIP }, async () => {
+  const b = createBackend();
+  const handler = await loadHandler(ENV, b.fetchMock);
+  const items = [1, 2].map((n) => batchItem(n));
+  b.s.claimNetworkFailAt = new Set([2]); // انقطاع شبكة فعلي (لا ردّ HTTP على الإطلاق) عند حجز العنصر الثاني
+  const cap = captureConsole();
+  let res;
+  try { res = await handler(batchRequest(items)); } finally { cap.restore(); }
+  assert.equal(res.status, 502);
+  assert.equal(b.s.telegram.length, 0);
+  assert.equal(b.s.claims.get(items[0].job_id).state, "released", "العنصر الأول حُرِّر رغم أن فشل الثاني كان انقطاع شبكة حقيقياً لا خطأ HTTP من الـRPC");
+  assert.equal(b.s.claims.has(items[1].job_id), false);
+});
+
+test("Edge: /notify-batch انقطاع شبكة حقيقي أثناء محاولة تحرير حجز بعد فشل حجز لاحق ⇒ الخطأ الأصلي هو ما يُرجَع (502)، والحجز يبقى sending آمناً بلا فقد ولا إعادة تلقائية", { skip: SKIP }, async () => {
+  const b = createBackend();
+  const handler = await loadHandler(ENV, b.fetchMock);
+  const items = [1, 2].map((n) => batchItem(n));
+  b.s.claimFailAt = new Set([2]); // العنصر الأول يُحجز بنجاح، والثاني يفشل حجزه فيُحاوَل تحرير الأول
+  b.s.releaseNetworkFailAt = new Set([1]); // محاولة تحرير العنصر الأول تنقطع شبكياً (fetch نفسه يفشل، لا ردّ HTTP)
+  const cap = captureConsole();
+  let res;
+  try { res = await handler(batchRequest(items)); } finally { cap.restore(); }
+  assert.equal(res.status, 502, "انقطاع التحرير شبكياً لا يحجب خطأ الحجز الأصلي ولا يُسقط الدالة بخطأ غير متوقَّع");
+  assert.equal(b.s.telegram.length, 0);
+  assert.equal(b.s.claims.get(items[0].job_id).state, "sending",
+    "فشل التحرير شبكياً: الحجز يبقى sending كما هو تماماً (آمن بالكامل، ينتهي لاحقاً إلى unknown بالمهلة الطبيعية)");
 });
