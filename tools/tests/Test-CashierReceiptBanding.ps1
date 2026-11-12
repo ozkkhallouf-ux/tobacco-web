@@ -47,6 +47,30 @@ foreach ($path in $renderers) {
 Assert "الدالة متطابقة حرفياً في الملفات الثلاثة" (@($texts | Select-Object -Unique).Count -eq 1)
 . ([scriptblock]::Create($texts[0]))
 
+# ── لا تغيير غير مقصود: الرسّام الحي المُصلَح = الرسّام العامل على OZKUSER (f7806b56) + هذه الإضافات فقط ──
+# مقارنة أسطر (متعددة المجموعات): كل سطر محذوف يجب أن يكون أحد السطرين المستبدَلين، وكل سطر مضاف يجب أن
+# يكون تعليقاً أو فارغاً أو من دالة التقسيم أو من الأسطر المعدودة أدناه. أي تعديل آخر — في الرسم أو تنسيق
+# المبالغ أو الأسعار أو الإجماليات أو الإرسال — يُسقط الاختبار.
+$goldenLines = @(([IO.File]::ReadAllText((Join-Path $repoRoot "ozk-print-bridge/__golden__/OzkReceiptRenderer.live-f7806b56.psm1")) -replace "`r`n", "`n").TrimStart([char]0xFEFF) -split "`n")
+$fixedLines = @(([IO.File]::ReadAllText($renderers[0]) -replace "`r`n", "`n").TrimStart([char]0xFEFF) -split "`n")
+$pool = @{}; foreach ($l in $goldenLines) { if ($pool.ContainsKey($l)) { $pool[$l]++ } else { $pool[$l] = 1 } }
+$added = New-Object System.Collections.Generic.List[string]
+foreach ($l in $fixedLines) { if ($pool.ContainsKey($l) -and $pool[$l] -gt 0) { $pool[$l]-- } else { $added.Add($l) } }
+$removed = @($pool.Keys | Where-Object { $pool[$_] -gt 0 } | ForEach-Object { $k = $_; 1..$pool[$k] | ForEach-Object { $k } })
+$allowedRemoved = @('    $canvasHeight = 2600', '        $payload = [OzkRawThermalPrinter]::ToEscPosRaster($bitmap, 190)')
+$functionLines = @($texts[0] -split "`n")
+$allowedAdded = @('$script:ReceiptBandRows = 128', '$script:ReceiptMaxCanvasHeight = 15000', '    $canvasHeight = $script:ReceiptMaxCanvasHeight',
+    '        if ([math]::Ceiling($y) -gt $canvasHeight) {', '        }',
+    '            throw (New-Object InvalidOperationException(("Receipt layout needs {0} px which exceeds the {1} px safety limit; refusing to print a truncated receipt." -f [math]::Ceiling($y), $canvasHeight)))',
+    '        $payload = ConvertTo-OzkBandedRaster ([OzkRawThermalPrinter]::ToEscPosRaster($bitmap, 190)) $script:ReceiptBandRows')
+$unexpectedAdded = @($added | Where-Object { $_.Trim() -ne "" -and -not $_.TrimStart().StartsWith("#") -and $functionLines -notcontains $_ -and $allowedAdded -notcontains $_ })
+$unexpectedRemoved = @($removed | Where-Object { $allowedRemoved -notcontains $_ })
+foreach ($u in $unexpectedAdded) { Write-Host "DIFF+ $u" }
+foreach ($u in $unexpectedRemoved) { Write-Host "DIFF- $u" }
+Assert "لا تغيير غير مقصود: حُذف السطران المستبدَلان فقط ($($removed.Count))" ($unexpectedRemoved.Count -eq 0 -and $removed.Count -eq 2)
+Assert "لا تغيير غير مقصود: كل سطر مضاف من الإضافات المعدودة ($($added.Count) سطراً)" ($unexpectedAdded.Count -eq 0 -and $added.Count -gt 0)
+Assert "لا تغيير غير مقصود: دوال التنسيق والرسم (Format-OzkAmount، Format-OzkQuantity، New-OzkReceiptBitmap) لم تُمسّ" (@($added | Where-Object { $_ -match 'Format-Ozk|DrawString|Draw-Ozk|GrossTotal|NetTotal|Discount|UnitPrice' -and $functionLines -notcontains $_ }).Count -eq 0)
+
 # ── مُرمِّز مرجعي بحِزَم 512 (نفس صيغة ToEscPosRaster) وفاكّ ──────────────────
 $W = 72
 function New-Raster([int]$Rows, [int]$Seed) {
