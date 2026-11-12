@@ -29,8 +29,9 @@ function Assert($Name, [bool]$Condition) {
     else { $script:fail++; Write-Host "FAIL $Name" -ForegroundColor Red }
 }
 
-$candidateText = [IO.File]::ReadAllText($candidate)
-$referenceText = [IO.File]::ReadAllText($reference)
+# نهايات الأسطر تُوحَّد: Git على Windows CI قد يحوّل نسخة المرشّح إلى CRLF، والمقارنة على الكود لا الترميز.
+$candidateText = [IO.File]::ReadAllText($candidate) -replace "`r`n", "`n"
+$referenceText = [IO.File]::ReadAllText($reference) -replace "`r`n", "`n"
 Assert "المرشّح: لا لوح ثابت 2600" ($candidateText -notmatch '\$canvasHeight = 2600')
 Assert "المرشّح: رفض صريح بدل القص الصامت" ($candidateText -match 'refusing to print a truncated receipt')
 # الرسم نفسه: كل ما بين بداية Invoke… الرسم ونهاية التذييل مطابق حرفياً للحي.
