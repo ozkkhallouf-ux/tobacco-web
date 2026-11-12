@@ -132,6 +132,10 @@ function Invoke-Render([string]$Renderer, [string]$Tag) {
 }
 
 try {
+    # إحماء يُهمَل: أول رسم على جهاز جديد (ذاكرة الخطوط وGDI+ باردة) يختلف ببضع نقاط عن كل رسم بعده —
+    # ثبت على Windows CI: 2–19 نقطة من نحو 800 ألف، وتطابقت كل الرسوم اللاحقة حرفياً. المقارنة تبقى
+    # تطابقاً تاماً بلا هامش تسامح؛ الإحماء يزيل أثر البرودة لا أي فرق تصميم.
+    [void](Invoke-Render $reference "warmup")
     $ref = Invoke-Render $reference "live"
     $refAgain = Invoke-Render $reference "live-again"
     Assert "عدم الفراغ: كل إيصال له نتيجة رسم فعلية ($($set.Count))" ($ref.Count -eq $set.Count -and $refAgain.Count -eq $set.Count)
