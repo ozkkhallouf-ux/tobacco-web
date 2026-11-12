@@ -99,14 +99,24 @@ function Invoke-Render([string]$Renderer, [string]$Tag) {
     $ps = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
     & $ps -NoProfile -ExecutionPolicy Bypass -File $helper -Renderer $Renderer -Logo $logo -Receipts $receiptsPath -Out $OutDir -Tag $Tag -Result $result
     if ($LASTEXITCODE -ne 0) { throw "Renderer '$Tag' failed (exit $LASTEXITCODE)." }
+    # PowerShell 5.1: ConvertFrom-Json يُخرج المصفوفة كعنصر واحد في الأنبوب، فـ@(... | ConvertFrom-Json)
+    # يلفّها ويصير المفتاح الوحيد كل المعرّفات معاً — وتنجح المقارنة فارغةً (null = null). تُسند أولاً.
+    $rows = Get-Content -Raw -LiteralPath $result | ConvertFrom-Json
     $map = @{}
-    foreach ($row in @(Get-Content -Raw -LiteralPath $result | ConvertFrom-Json)) { $map[[string]$row.Id] = $row }
+    foreach ($row in $rows) { $map[[string]$row.Id] = $row }
+    foreach ($r in $set) {
+        $row = $map[[string]$r.Id]
+        if ($null -eq $row -or [string]::IsNullOrEmpty([string]$row.PixelSha) -or [string]::IsNullOrEmpty([string]$row.PayloadSha) -or [int]$row.Height -le 0) {
+            throw "Renderer '$Tag' produced no result for receipt '$($r.Id)'; refusing a vacuous comparison."
+        }
+    }
     return $map
 }
 
 try {
     $ref = Invoke-Render $reference "live"
     $refAgain = Invoke-Render $reference "live-again"
+    Assert "عدم الفراغ: كل إيصال له نتيجة رسم فعلية ($($set.Count))" ($ref.Count -eq $set.Count -and $refAgain.Count -eq $set.Count)
     Assert "الحتمية: المرجع يعطي البكسلات نفسها في تشغيلين" (@($set | Where-Object { $ref[$_.Id].PixelSha -ne $refAgain[$_.Id].PixelSha }).Count -eq 0)
     $cand = Invoke-Render $Candidate "candidate"
     foreach ($r in $set) {
@@ -117,7 +127,7 @@ try {
     }
     if ($ReportMainRenderer) {
         $main = Invoke-Render (Join-Path $bridgeDir "OzkReceiptRenderer.psm1") "repo-main"
-        $diff = @($set | Where-Object { $ref[$_.Id].PixelSha -ne $main[$_.Id].PixelSha }).Count
+        $diff = @($set | Where-Object { [string]$ref[$_.Id].PixelSha -ne [string]$main[$_.Id].PixelSha }).Count
         Write-Host "INFO رسّام المستودع الرئيسي يختلف عن التصميم الحي في $diff من $($set.Count) إيصالات — لا يُنشر قبل رسّام موحّد يطابق."
     }
     Write-Host "PNG للمراجعة: $OutDir"
