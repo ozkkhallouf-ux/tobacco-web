@@ -204,10 +204,13 @@ function Get-CashierWatchSpoolerCompletions([datetime]$SinceUtc) {
     } catch {
         return @()
     }
-    return @(foreach ($event in $events) {
+    return @(foreach ($archiveEvent in $events) {
         try {
-            [pscustomobject]@{ JobId = [int64]$event.Properties[0].Value; Printer = [string]$event.Properties[4].Value; AtUtc = $event.TimeCreated.ToUniversalTime() }
-        } catch { }
+            [pscustomobject]@{ JobId = [int64]$archiveEvent.Properties[0].Value; Printer = [string]$archiveEvent.Properties[4].Value; AtUtc = $archiveEvent.TimeCreated.ToUniversalTime() }
+        } catch {
+            # حدث بخصائص غير متوقعة لا يصلح دليلاً؛ يُتجاهل صراحةً ولا يُطابَق.
+            Write-Verbose ("Skipping unreadable PrintService event: " + $_.Exception.Message)
+        }
     })
 }
 

@@ -324,19 +324,19 @@ function Read-CashierArchivePrints([string]$ArchiveRoot) {
     foreach ($file in @(Get-ChildItem -LiteralPath $ArchiveRoot -Filter "events-*.jsonl" -File | Sort-Object Name)) {
         foreach ($line in [IO.File]::ReadAllLines($file.FullName, [Text.Encoding]::ASCII)) {
             if ($line.Trim().Length -eq 0) { continue }
-            try { $event = $line | ConvertFrom-Json } catch { continue }
-            $id = [string]$event.printId
+            try { $archiveEvent = $line | ConvertFrom-Json } catch { continue }
+            $id = [string]$archiveEvent.printId
             if (-not $byId.ContainsKey($id)) {
                 $byId[$id] = [pscustomobject]@{ PrintId = $id; InvoiceGuid = ""; InvoiceNumber = 0; PreparedAt = $null; PrintedNet = $null
                     ReceiptPath = ""; ContentSha256 = ""; Source = ""; Stages = @() }
             }
             $entry = $byId[$id]
-            if ([string]$event.stage -eq "prepared") {
-                $entry.InvoiceGuid = ([string]$event.invoiceGuid).ToLowerInvariant(); $entry.InvoiceNumber = [int]$event.invoiceNumber
-                $entry.PreparedAt = $(if ($event.at -is [datetime]) { $event.at.ToUniversalTime().ToString("o") } else { [string]$event.at }); $entry.PrintedNet = $event.printedNet; $entry.ReceiptPath = [string]$event.receiptPath
-                $entry.ContentSha256 = [string]$event.contentSha256; $entry.Source = [string]$event.source
+            if ([string]$archiveEvent.stage -eq "prepared") {
+                $entry.InvoiceGuid = ([string]$archiveEvent.invoiceGuid).ToLowerInvariant(); $entry.InvoiceNumber = [int]$archiveEvent.invoiceNumber
+                $entry.PreparedAt = $(if ($archiveEvent.at -is [datetime]) { $archiveEvent.at.ToUniversalTime().ToString("o") } else { [string]$archiveEvent.at }); $entry.PrintedNet = $archiveEvent.printedNet; $entry.ReceiptPath = [string]$archiveEvent.receiptPath
+                $entry.ContentSha256 = [string]$archiveEvent.contentSha256; $entry.Source = [string]$archiveEvent.source
             }
-            $entry.Stages = @($entry.Stages) + [string]$event.stage
+            $entry.Stages = @($entry.Stages) + [string]$archiveEvent.stage
         }
     }
     return @($byId.Values | Where-Object { $_.InvoiceGuid } | ForEach-Object {

@@ -460,9 +460,9 @@ function Get-OzkReceiptArchiveChainHead([string]$Root) {
     return ("0" * 64)
 }
 
-function Add-OzkReceiptArchiveEventUnlocked([string]$Root, $Event, [datetime]$NowUtc) {
+function Add-OzkReceiptArchiveEventUnlocked([string]$Root, $archiveEvent, [datetime]$NowUtc) {
     $record = [ordered]@{}
-    foreach ($key in $Event.Keys) { $record[$key] = $Event[$key] }
+    foreach ($key in $archiveEvent.Keys) { $record[$key] = $archiveEvent[$key] }
     $record["schema"] = $script:ArchiveSchema
     $record["at"] = $NowUtc.ToUniversalTime().ToString("o", $script:Invariant)
     $record["prev"] = Get-OzkReceiptArchiveChainHead $Root
@@ -502,7 +502,7 @@ function Save-OzkArchivedReceipt {
         $bytes = [Text.Encoding]::ASCII.GetBytes($json)
         $stream = Open-OzkAppendOnlyStream $finalPath ([IO.FileMode]::CreateNew)
         try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
-        $event = Add-OzkReceiptArchiveEventUnlocked $Root ([ordered]@{
+        $archiveEvent = Add-OzkReceiptArchiveEventUnlocked $Root ([ordered]@{
             stage = "prepared"
             printId = [string]$Content.printId
             invoiceGuid = [string]$Content.invoice.guid
@@ -514,7 +514,7 @@ function Save-OzkArchivedReceipt {
             receiptPath = $finalPath.Substring($Root.Length).TrimStart('\', '/')
             printedNet = $Content.printed.net
         }) $NowUtc
-        return [pscustomobject]@{ PrintId = [string]$Content.printId; ContentSha256 = $contentSha; Path = $finalPath; EventSha256 = $event.Sha256 }
+        return [pscustomobject]@{ PrintId = [string]$Content.printId; ContentSha256 = $contentSha; Path = $finalPath; EventSha256 = $archiveEvent.Sha256 }
     } finally {
         $lock.Dispose()
     }
@@ -534,12 +534,12 @@ function Add-OzkReceiptArchiveEvent {
     )
     Assert-OzkReceiptArchiveStage $Stage $Evidence
     Initialize-OzkReceiptArchive $Root
-    $event = [ordered]@{ stage = $Stage; printId = $PrintId.ToLowerInvariant(); invoiceGuid = $InvoiceGuid.ToLowerInvariant(); invoiceNumber = $InvoiceNumber }
-    if ($null -ne $JobId) { $event["jobId"] = [int64]$JobId }
-    if ($Evidence) { $event["evidence"] = $Evidence }
-    if ($Detail) { $event["detail"] = $Detail }
+    $archiveEvent = [ordered]@{ stage = $Stage; printId = $PrintId.ToLowerInvariant(); invoiceGuid = $InvoiceGuid.ToLowerInvariant(); invoiceNumber = $InvoiceNumber }
+    if ($null -ne $JobId) { $archiveEvent["jobId"] = [int64]$JobId }
+    if ($Evidence) { $archiveEvent["evidence"] = $Evidence }
+    if ($Detail) { $archiveEvent["detail"] = $Detail }
     $lock = Enter-OzkReceiptArchiveLock $Root
-    try { return (Add-OzkReceiptArchiveEventUnlocked $Root $event $NowUtc) } finally { $lock.Dispose() }
+    try { return (Add-OzkReceiptArchiveEventUnlocked $Root $archiveEvent $NowUtc) } finally { $lock.Dispose() }
 }
 
 function Get-OzkReceiptArchiveEvents([string]$Root) {
@@ -558,21 +558,21 @@ function Get-OzkReceiptArchiveEvents([string]$Root) {
 # ملخص لكل طباعة: آخر مرحلة معروفة من كل نوع، بلا استنتاج مرحلة من أخرى.
 function Get-OzkReceiptPrintSummaries([string]$Root) {
     $byId = [ordered]@{}
-    foreach ($event in @(Get-OzkReceiptArchiveEvents $Root)) {
-        $id = [string]$event.printId
+    foreach ($archiveEvent in @(Get-OzkReceiptArchiveEvents $Root)) {
+        $id = [string]$archiveEvent.printId
         if (-not $byId.Contains($id)) {
             $byId[$id] = [ordered]@{ printId = $id; invoiceGuid = $null; invoiceNumber = $null; invoiceDate = $null; source = $null
                 preparedAtUtc = $null; contentSha256 = $null; receiptPath = $null; printedNet = $null; jobId = $null; stages = @() }
         }
         $entry = $byId[$id]
-        if ($event.stage -eq "prepared") {
-            $entry.invoiceGuid = [string]$event.invoiceGuid; $entry.invoiceNumber = [int]$event.invoiceNumber
-            $entry.invoiceDate = [string]$event.invoiceDate; $entry.source = [string]$event.source
-            $entry.preparedAtUtc = ConvertTo-OzkUtcText $event.at; $entry.contentSha256 = [string]$event.contentSha256
-            $entry.receiptPath = [string]$event.receiptPath; $entry.printedNet = $event.printedNet
+        if ($archiveEvent.stage -eq "prepared") {
+            $entry.invoiceGuid = [string]$archiveEvent.invoiceGuid; $entry.invoiceNumber = [int]$archiveEvent.invoiceNumber
+            $entry.invoiceDate = [string]$archiveEvent.invoiceDate; $entry.source = [string]$archiveEvent.source
+            $entry.preparedAtUtc = ConvertTo-OzkUtcText $archiveEvent.at; $entry.contentSha256 = [string]$archiveEvent.contentSha256
+            $entry.receiptPath = [string]$archiveEvent.receiptPath; $entry.printedNet = $archiveEvent.printedNet
         }
-        if ($event.PSObject.Properties["jobId"] -and $null -ne $event.jobId) { $entry.jobId = [int64]$event.jobId }
-        if (@($entry.stages) -notcontains [string]$event.stage) { $entry.stages = @($entry.stages) + [string]$event.stage }
+        if ($archiveEvent.PSObject.Properties["jobId"] -and $null -ne $archiveEvent.jobId) { $entry.jobId = [int64]$archiveEvent.jobId }
+        if (@($entry.stages) -notcontains [string]$archiveEvent.stage) { $entry.stages = @($entry.stages) + [string]$archiveEvent.stage }
     }
     return @($byId.Values | ForEach-Object { [pscustomobject]$_ })
 }
