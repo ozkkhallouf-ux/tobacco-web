@@ -43,7 +43,18 @@ param(
     # يساوي "استخدم الافتراضي الكانوني"؛ تمريره فارغاً صراحةً مرفوض أدناه.
     [string]$StatePath = "",
 
-    [string]$LogPath = (Join-Path ([Environment]::GetFolderPath("CommonApplicationData")) "OZK-TOBACCO\PrintBridge\logs\events.jsonl")
+    [string]$LogPath = (Join-Path ([Environment]::GetFolderPath("CommonApplicationData")) "OZK-TOBACCO\PrintBridge\logs\events.jsonl"),
+
+    # أرشيف الإيصالات الثابت (OzkReceiptArchive.psm1). فارغ = المسار الافتراضي
+    # C:\ProgramData\OZK-TOBACCO\ReceiptArchive. Required: لا طباعة بلا نسخة مؤرشفة.
+    [string]$ReceiptArchiveRoot = "",
+
+    [ValidateSet("Required", "Off")]
+    [string]$ReceiptArchiveMode = "Required",
+
+    # PrintInvoice فقط: GUID الفاتورة الذي حسمه المستدعي. إن اختلف عمّا يحسمه الجسر
+    # بالرقم والتاريخ (رقم أعيد استخدامه بعد حذف) يُرفض الطلب قبل أي تصيير أو طباعة.
+    [string]$ExpectedInvoiceGuid = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -51,6 +62,10 @@ $ErrorActionPreference = "Stop"
 Import-Module (Join-Path $PSScriptRoot "OzkPrintBridgeCommon.psm1") -Force -DisableNameChecking
 if ([string]::IsNullOrWhiteSpace($StatePath)) {
     $StatePath = Get-OzkPrintBridgeUserStatePath
+}
+Import-Module (Join-Path $PSScriptRoot "OzkReceiptArchive.psm1") -Force -DisableNameChecking
+if ([string]::IsNullOrWhiteSpace($ReceiptArchiveRoot)) {
+    $ReceiptArchiveRoot = Get-OzkReceiptArchiveDefaultRoot
 }
 $script:RetailTypeGuid = "cc1097b1-662d-4d80-8e4e-3b493249591c"
 $script:WholesaleTypeGuids = @(
@@ -184,6 +199,65 @@ $script:DuplicateFingerprintWindowSeconds = 60
 # Kept well above the detection window so a bridge restart mid-window still
 # has the fingerprint available; has no effect on the 60s suppression rule.
 $script:DuplicateFingerprintRetentionSeconds = 3600
+
+# --- Receipt archive (OzkReceiptArchive.psm1) -----------------------------------
+# كل إيصال يُحفظ نسخة ثابتة قبل التسليم (prepared)، ثم تُسجَّل نتيجة التسليم
+# كما هي: submitted (رقم مهمة من Windows)، أو submit_failed_no_job، أو
+# submit_uncertain. لا تُكتب windows_completed ولا paper_confirmed هنا أبداً:
+# الأولى دليل من سجل Windows يجمعه المراقب، والثانية تحتاج دليلاً مستقلاً.
+$script:ArchiveFailureLogged = @{}
+
+function Get-BridgeFileSha256([string]$Path) {
+    try {
+        if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return "" }
+        return (Get-OzkSha256Hex ([IO.File]::ReadAllBytes($Path)))
+    } catch { return "" }
+}
+
+function Save-BridgeReceiptArchive([string]$Source, $Snapshot, $Receipt, $SpoolJob) {
+    if ($ReceiptArchiveMode -eq "Off") { return $null }
+    $printId = [guid]::NewGuid().ToString()
+    $content = New-OzkReceiptArchiveContent -PrintId $printId -Source $Source -Header $Snapshot.Header `
+        -Lines @($Snapshot.Lines) -Receipt $Receipt -PrinterName $PrinterName -SnapshotSignature ([string]$Snapshot.Signature) `
+        -Payload $SpoolJob.Payload -RendererSha256 (Get-BridgeFileSha256 $script:ReceiptModulePath) -BridgeSha256 (Get-BridgeFileSha256 $PSCommandPath)
+    $saved = Save-OzkArchivedReceipt -Root $ReceiptArchiveRoot -Content $content
+    return [pscustomobject]@{ PrintId = $saved.PrintId; InvoiceGuid = [string]$content.invoice.guid; InvoiceNumber = [int]$content.invoice.number; ContentSha256 = $saved.ContentSha256 }
+}
+
+# تسجيل نتيجة التسليم best-effort: الورق قد يكون خرج فعلاً، فلا يجوز أن يُسقط
+# فشلُ الأرشيف هنا الجسرَ أو يحوّل طباعة ناجحة إلى فشل. يُسجَّل العطل بوضوح.
+function Add-BridgeArchiveStage($Archive, [string]$Stage, $JobId = $null, [string]$Detail = "") {
+    if ($null -eq $Archive) { return }
+    try {
+        [void](Add-OzkReceiptArchiveEvent -Root $ReceiptArchiveRoot -PrintId $Archive.PrintId -Stage $Stage `
+            -InvoiceGuid $Archive.InvoiceGuid -InvoiceNumber $Archive.InvoiceNumber -JobId $JobId -Detail $Detail)
+    } catch {
+        Write-BridgeLog ([pscustomobject]@{
+            Event = "receipt_archive_stage_failed"
+            invoice_guid = $Archive.InvoiceGuid
+            invoice_number = $Archive.InvoiceNumber
+            print_id = $Archive.PrintId
+            stage = $Stage
+            Message = [string]$_.Exception.Message
+            At = (Get-Date).ToUniversalTime().ToString("o")
+            CustomerAndItemsRedacted = $true
+        })
+    }
+}
+
+function Get-BridgeSubmissionFailureStage($ErrorRecord) {
+    if (Test-PreSubmissionFailure $ErrorRecord) { return "submit_failed_no_job" }
+    return "submit_uncertain"
+}
+
+function Assert-ExpectedInvoiceGuid([string]$Expected, [string]$Actual, [int]$Number) {
+    if ([string]::IsNullOrWhiteSpace($Expected)) { return }
+    $expectedGuid = [guid]::Empty
+    if (-not [guid]::TryParse($Expected, [ref]$expectedGuid)) { throw "ExpectedInvoiceGuid is not a valid GUID." }
+    if ($expectedGuid -ne [guid]$Actual) {
+        throw "Invoice $Number now resolves to a different GUID than the one requested (number reused after a delete?). Refusing before any render or print."
+    }
+}
 
 function Get-RequiredUserSetting([string]$Name) {
     $value = [Environment]::GetEnvironmentVariable($Name, "User")
@@ -794,6 +868,7 @@ select
     u.TotalDisc as total_discount,
     u.TotalExtra as total_extra,
     u.CurrencyVal as currency_value,
+    u.LastUpdateDate as last_update_date,
     convert(varchar(36), u.CurrencyGUID) as currency_guid,
     my.CurrencyISO as currency_iso,
     u.IsPosted as is_posted,
@@ -848,6 +923,8 @@ order by bi.Number, bi.GUID;
                     TotalDiscount = Convert-ToNullableDouble $reader["total_discount"]
                     TotalExtra = Convert-ToNullableDouble $reader["total_extra"]
                     CurrencyValue = Convert-ToNullableDouble $reader["currency_value"]
+                    # للأرشيف وكشف التعديل بعد الطباعة فقط؛ خارج بصمة الاستقرار عمداً.
+                    LastUpdateDate = Convert-ToUtcText $reader["last_update_date"]
                     CurrencyGuid = if ($reader["currency_guid"] -is [DBNull]) { $null } else { ([string]$reader["currency_guid"]).ToLowerInvariant() }
                     CurrencyIso = if ($reader["currency_iso"] -is [DBNull]) { "" } else { [string]$reader["currency_iso"] }
                     IsPosted = [bool]$reader["is_posted"]
@@ -1346,6 +1423,7 @@ try {
         $invoiceTypeGuid = Get-InvoiceTypeGuid $InvoiceType
         $selected = Get-PostedInvoiceByNumber $connection $invoiceTypeGuid $InvoiceNumber $InvoiceDate
         if ($null -eq $selected) { throw "No posted invoice matched the selected type, number, and date." }
+        Assert-ExpectedInvoiceGuid $ExpectedInvoiceGuid ([string]$selected.InvoiceGuid) $InvoiceNumber
         $ready = Wait-InvoiceReady $connection ([guid]$selected.InvoiceGuid)
         if (-not $ready.Ready) { throw "The selected invoice is not stable yet. Try again shortly." }
         Import-Module $script:ReceiptModulePath -Force
@@ -1377,6 +1455,9 @@ try {
             # فشلٌ هنا لا يترك أثراً في state.seen، فإعادة المحاولة تبقى مضمونة.
             $manualSpoolJob = New-OzkReceiptSpoolJob -Receipt $receipt -LogoPath $script:ReceiptLogoPath -PrinterName $PrinterName
 
+            # الأرشيف قبل أي علامة وأي تسليم: فشله يُسقط الطلب ولم يُطبع شيء بعد.
+            $manualArchive = Save-BridgeReceiptArchive "manual" $confirmation.Snapshot $receipt $manualSpoolJob
+
             # تُحفظ علامة print_in_flight قبل التسليم بنفس أسلوب مسار الرصد
             # الآلي، لتمنع تكراراً تلقائياً إن تحققت حالة غامضة أدناه. هذا لا
             # يمنع إعادة الطباعة اليدوية المقصودة لاحقاً: -Mode PrintInvoice
@@ -1395,6 +1476,7 @@ try {
             try {
                 $manualPrintResult = Submit-OzkReceiptSpoolJob -Job $manualSpoolJob -ConfirmPhysicalPrint
             } catch {
+                Add-BridgeArchiveStage $manualArchive (Get-BridgeSubmissionFailureStage $_) $null ([string]$_.Exception.GetType().Name)
                 if (Test-PreSubmissionFailure $_) {
                     # فشل مثبَت أنه قبل قبول أي مهمة طباعة: الورق يقيناً لم
                     # يخرج، فتُزال العلامة كي لا تُقمع إعادة محاولة لاحقة —
@@ -1420,6 +1502,8 @@ try {
                 # عمداً، فلا يُعيد الرصد الآلي طباعة فاتورة قد تكون خرجت فعلاً.
                 throw
             }
+
+            Add-BridgeArchiveStage $manualArchive "submitted" $manualPrintResult.JobId
 
             # طباعة يدوية ناجحة فعلاً: تُسجَّل الحالة النهائية spooled كي لا
             # يُعيد الرصد الآلي طباعتها تلقائياً لاحقاً على نفس الـGUID.
@@ -1454,6 +1538,7 @@ try {
                 InvoiceType = $InvoiceType
                 Printer = $PrinterName
                 JobId = $manualPrintResult.JobId
+                ArchivePrintId = $(if ($null -ne $manualArchive) { $manualArchive.PrintId } else { $null })
                 At = (Get-Date).ToUniversalTime().ToString("o")
                 CustomerAndItemsRedacted = $true
             }
@@ -1836,6 +1921,29 @@ try {
                     continue
                 }
 
+                # 1b) الأرشيف الثابت قبل العلامة والتسليم. فشله لا يترك أثراً (لا
+                #     علامة ولا طباعة)، فتُعاد الفاتورة في استطلاع لاحق كأنها لم تصل.
+                #     طباعة بلا نسخة مؤرشفة ممنوعة في الوضع Required.
+                $autoArchive = $null
+                try {
+                    $autoArchive = Save-BridgeReceiptArchive "auto" $confirmation.Snapshot $receipt $spoolJob
+                } catch {
+                    if (-not $script:ArchiveFailureLogged.ContainsKey($candidate.InvoiceGuid)) {
+                        $script:ArchiveFailureLogged[$candidate.InvoiceGuid] = $true
+                        Write-BridgeLog ([pscustomobject]@{
+                            Event = "receipt_archive_failed_print_deferred"
+                            invoice_guid = $candidate.InvoiceGuid
+                            invoice_number = $candidate.InvoiceNumber
+                            ErrorType = $_.Exception.GetType().FullName
+                            Message = [string]$_.Exception.Message
+                            At = (Get-Date).ToUniversalTime().ToString("o")
+                            Consequence = "not printed and not marked; retried on a later poll"
+                            CustomerAndItemsRedacted = $true
+                        })
+                    }
+                    continue
+                }
+
                 # 2) من هنا فصاعداً قد تصير النتيجة غامضة، فتُحفظ العلامة على القرص
                 #    قبل التسليم. بدونها كان فشلُ حفظِ الحالة بعد نجاح التسليم يقتل
                 #    الجسر، فيعيده الـwatchdog بعد ثانية ويقرأ حالةً لا تحوي هذه
@@ -1852,9 +1960,11 @@ try {
                 #    StartDocPrinter) يعني يقيناً أن الورق لم يخرج، فنتراجع عن
                 #    العلامة كي لا تُقمع فاتورة كاشير لم تُطبع أصلاً. أي فشل آخر
                 #    يبقى غامضاً فتبقى العلامة ويُمنع التكرار الآلي.
+                $autoPrintResult = $null
                 try {
-                    [void](Submit-OzkReceiptSpoolJob -Job $spoolJob -ConfirmPhysicalPrint)
+                    $autoPrintResult = Submit-OzkReceiptSpoolJob -Job $spoolJob -ConfirmPhysicalPrint
                 } catch {
+                    Add-BridgeArchiveStage $autoArchive (Get-BridgeSubmissionFailureStage $_) $null ([string]$_.Exception.GetType().Name)
                     if (Test-PreSubmissionFailure $_) {
                         $submissionError = $_
                         $rollback = Persist-RetryablePrintRollback $StatePath $state $candidate.InvoiceGuid
@@ -1874,6 +1984,8 @@ try {
                     }
                     throw
                 }
+                Add-BridgeArchiveStage $autoArchive "submitted" $autoPrintResult.JobId
+                $invoiceEvent | Add-Member -NotePropertyName ArchivePrintId -NotePropertyValue $(if ($null -ne $autoArchive) { $autoArchive.PrintId } else { $null }) -Force
                 $invoiceEvent.Renderer = "ozk_80mm_v1"
                 # الدلالة الدقيقة: قُبلت المهمة في طابور الطباعة. لا إثبات على خروج الورق.
                 $invoiceEvent.Printer = "submitted_to_spooler:$PrinterName"
