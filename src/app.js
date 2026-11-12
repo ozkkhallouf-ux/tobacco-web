@@ -1268,11 +1268,15 @@ async function loadCustomerBalanceReports() {
     state.customerMovementsReport = null;
   }
   try {
-    state.customerInvoicesBaseReport = dataStore.getCustomerInvoicesReport
-      ? await dataStore.getCustomerInvoicesReport()
-      : null;
+    if (!dataStore.getCustomerInvoicesReport) {
+      state.customerInvoicesBaseReport = null;
+    } else {
+      const next = await dataStore.getCustomerInvoicesReport();
+      state.customerInvoicesBaseReport = next;
+    }
   } catch {
-    state.customerInvoicesBaseReport = null;
+    // فشل الشبكة أو المهلة ليسا «لا فواتير». اللقطة الناجحة السابقة تبقى،
+    // لأن الصفوف الفورية لا تغني عن تقرير الـ60 يوماً.
   }
   state.customerInvoicesReport = state.customerInvoicesBaseReport;
   await loadLiveInvoices();
@@ -1353,6 +1357,7 @@ async function loadLiveInvoices() {
   const base = state.customerInvoicesBaseReport;
   const engine = window.ozkLiveInvoices;
   if (!engine || !dataStore.listLiveAmeenInvoices) return false;
+  if (!base) return false;
   let rows;
   try {
     rows = await dataStore.listLiveAmeenInvoices(engine.liveFetchSince(base, Date.now()));
