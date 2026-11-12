@@ -19,6 +19,6 @@
   سطراً، غير موجودة في البيانات الفعلية) تُسقطه في حلقة إعادة تشغيل. الحدّ واسع عمداً.
 
 **الإصلاح نفسه في نسخة أداة إعادة الطباعة:** `tools/cashier-reprint/static-bridge/ozk-print-bridge/OzkReceiptRenderer.psm1`
-(على OZKUSER: `CashierReprint\bridge\…`، بصمة جديدة `4df69fce…`). الاختبار يثبت أن النسختين ترسمان بالبايت نفسه.
+(على OZKUSER: `CashierReprint\bridge\…`، بصمة جديدة `b2865472…`). الاختبار يثبت أن النسختين ترسمان بالبايت نفسه.
 
 **خطة النشر الكاملة:** النسخة الاحتياطية والتحقق والورق والتراجع في `docs/ai/topics/cashier-long-receipt-deploy-plan.md`.
