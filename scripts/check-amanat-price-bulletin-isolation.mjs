@@ -97,12 +97,15 @@ check(feedWhere.test(read("supabase/available-price-sync-feed.sql"))
   "available_price_sync_feed (الملف المرجعي وهجرة الإنتاج): التوفر = approved_price_items.stock_qty > 0 فقط");
 const generator = read("scripts/generate-price-lists.mjs");
 const generatorSources = [...generator.matchAll(/\/rest\/v1\/(\w+)/g)].map((m) => m[1]).sort();
-// bulletin_item_classification_feed (Migration 28) لا يحمل كمية: item_key والنشرة فقط،
-// ومصدره approved_price_items وحدها (يُثبته scripts/check-bulletin-classification.mjs).
-check(JSON.stringify(generatorSources) === JSON.stringify(["available_price_sync_feed", "bulletin_exchange_rate", "bulletin_item_classification_feed"]),
-  `generate-price-lists.mjs: الأصناف ومخزونها من available_price_sync_feed وحده، وسعر الصرف من bulletin_exchange_rate، والتصنيف من bulletin_item_classification_feed (${generatorSources.join(", ")})`);
+// bulletin_item_classification_feed (Migration 28) وbulletin_hidden_items_feed (Migration 30)
+// لا يحملان كمية: item_key فقط، ومصدرهما approved_price_items وحدها
+// (يُثبته scripts/check-bulletin-classification.mjs وscripts/check-bulletin-visibility.mjs).
+check(JSON.stringify(generatorSources) === JSON.stringify(["available_price_sync_feed", "bulletin_exchange_rate", "bulletin_hidden_items_feed", "bulletin_item_classification_feed"]),
+  `generate-price-lists.mjs: الأصناف ومخزونها من available_price_sync_feed وحده، وسعر الصرف من bulletin_exchange_rate، والتصنيف من bulletin_item_classification_feed، والإخفاء من bulletin_hidden_items_feed (${generatorSources.join(", ")})`);
 check(!WAREHOUSE_REF.test(read("supabase/proposed/28-item-bulletin-classifications.sql")),
   "Migration 28 (نافذة التصنيف): لا يذكر تقارير المستودعات ولا الامانة");
+check(!WAREHOUSE_REF.test(read("supabase/proposed/30-item-bulletin-visibility.sql")),
+  "Migration 30 (نافذة الظهور): لا يذكر تقارير المستودعات ولا الامانة");
 
 // ── 4) الواجهة: حفظ الأسعار من الجرد الحي، وتقارير المستودعات للعرض فقط ───────
 const appJs = read("src/app.js");

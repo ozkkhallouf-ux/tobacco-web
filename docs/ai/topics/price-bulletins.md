@@ -1,8 +1,49 @@
 # تقرير موضوع نشرات الأسعار
 
-آخر تحديث: 2026-11-05
+آخر تحديث: 2026-11-12
 
 ## الحالة الحالية
+
+**2026-11-12 — التحكم بظهور الأصناف في نشرة الأسعار (إخفاء مستقل عن المخزون/الأمين)، فرع `claude/bulletin-item-visibility`.**
+طلب عمر: تحكّم بالأصناف التي تظهر للزبائن في النشرة بشكل مستقل تماماً عن وجودها
+في المخزون أو الأمين؛ الصنف المخفي يبقى كاملاً في النظام والمخزون والفواتير
+والتقارير والجرد، ولا يتغيّر سعره أو كميته، والمالك وحده يملك صلاحية التغيير.
+
+- **المصدر الوحيد:** `src/bulletin-visibility.js` (نفس نمط `bulletin-classification.js`):
+  `buildHiddenIndex(rows)` يبني `{byGuid, byKey}`، و`isHiddenItem(item, index)`
+  يطابق بـGUID أولاً **ولا يرتدّ إلى المفتاح إطلاقاً إن وُجد GUID على الصنف** (فصنف
+  بـGUID مختلف لا يرث إخفاء صنف آخر بالاسم نفسه)، ويرتدّ إلى المفتاح المطبَّع فقط
+  حين لا يحمل الصنف GUID (حال صفوف المولّد القادمة من `available_price_sync_feed`
+  التي لا GUID فيها أصلاً). الحالة الافتراضية عند غياب أي قاعدة: **ظاهر**.
+- **الحفظ:** Migration 30 (`supabase/proposed/30-item-bulletin-visibility.sql`،
+  غير مطبَّقة على الإنتاج بعد) — جدول `item_bulletin_visibility` (مفتاحه
+  `item_guid`) + `item_bulletin_visibility_audit` (كل تغيير يُسجَّل، لا حذف) +
+  RPC وحيد للكتابة `set_item_bulletin_visibility` (المالك وحده، سبب اختياري
+  يُعبَّأ تلقائياً بنص عربي إن تُرك فارغاً) + نافذة عامة مصغّرة
+  `bulletin_hidden_items_feed` (عمود `item_key` فقط، وتستبعد صفر المخزون).
+  **القراءة أيضاً للمالك وحده على الجدولين** (أشدّ من Migration 28 للتصنيف
+  التي تسمح بقراءة الموظف) — قرار مقصود مذكور بتعليق الهجرة نفسها.
+- **الواجهة متوافقة مع قراءة المالك وحدها:** سطر حالة الظهور وزرّا
+  إظهار/إخفاء وفلتر (الكل/ظاهر/مخفي) وعدّاداته كلها تُعرض **للمالك فقط**
+  (`isOwner()`) — وليس فقط أزرار التعديل كما في التصنيف، لأن قراءة غير المالك
+  تُرجعها RLS صفراً صامتاً فتكون الحالة المعروضة لموظف مضلِّلة لا مجرد غير
+  قابلة للتعديل. `saveBulletinVisibility` تتحقّق من `isOwner()` ثانيةً دفاعياً
+  قبل أي كتابة.
+- **قبل التصدير لا بعده:** `scripts/generate-price-lists.mjs` يسحب
+  `bulletin_hidden_items_feed` ويستبعد الأصناف المخفية من `usdItems`/`sypItems`
+  **قبل** `toWazari()`/`consolidateGeneralPriceItems()`/دمج الأسماء، فتغيب
+  النسخ الأربع (عامة دولار/ليرة، وزاري دولار/ليرة) من الملف نفسه لا بصرياً وحده.
+- **فشل القراءة لا يُسرّب إخفاءً ولا يُخفي صامتاً:** فشل تحميل قواعد الظهور
+  يُعرض كتنبيه صريح للمالك (`bulletinVisibilityError`) وتبقى كل الأصناف
+  **ظاهرة افتراضياً** (فهرس فارغ ⇒ لا إخفاء) — لا يمكن لفشل قراءة أن يُخفي
+  صنفاً عن الزبون بصمت، والعكس وحده مسموح (فشل القراءة أسوأ حالاً يعني ظهوراً
+  أكثر لا أقل، وهو الاتجاه الآمن لصنف موجود فعلاً في المخزون).
+- **الفحوص:** `scripts/check-bulletin-visibility.mjs` (منطق الفهرسة + تطابق
+  حرفي للهجرة والتراجع مع `supabase/migrations/` + SQL حي عبر كل الأدوار:
+  مالك/موظف/عدّاد/غريب/anon + بصمة الأسعار قبل/بعد + تراجع كامل) و
+  `scripts/check-bulletin-visibility-ui.mjs` (متصفح: عدّادات وفلتر وحالة
+  الأزرار للمالك، غياب كل سطر وفلتر وزر للموظف حتى على عرض iPhone، وتنبيه
+  فشل القراءة مع بقاء الكل ظاهراً).
 
 **2026-11-05 — تصنيف عامة/وزاري بمصدر واحد وبمعرّف الأمين، وقسم «تسعير أصناف الوزاري».**
 بلاغ عمر: «وينستون ازرق مخصص» (رقم 463، GUID `294A7DC9-9BB3-4BEF-8791-F3C336AFD727`) و
@@ -300,7 +341,7 @@ Google Fonts الفرعية (لاتينية/عربية) تصل مستقلّةً 
 
 ## نطاق الملفات
 
-`src/app.js`, `src/price-list-template.js`, `scripts/generate-price-lists.mjs`, `scripts/generate-pdfs.mjs`, `scripts/check.mjs`, `scripts/check-smart-inventory.mjs`, `scripts/exchange-rate.json`, `scripts/price-data.json`, `public/downloads/`, `index.html`, `public/service-worker.js`, `.github/workflows/generate-price-lists.yml`, `tools/verify-prices.ps1`.
+`src/app.js`, `src/price-list-template.js`, `src/bulletin-classification.js`, `src/bulletin-visibility.js`, `src/supabase-client.js`, `scripts/generate-price-lists.mjs`, `scripts/generate-pdfs.mjs`, `scripts/check.mjs`, `scripts/check-smart-inventory.mjs`, `scripts/check-bulletin-classification.mjs`, `scripts/check-bulletin-classification-ui.mjs`, `scripts/check-bulletin-visibility.mjs`, `scripts/check-bulletin-visibility-ui.mjs`, `scripts/exchange-rate.json`, `scripts/price-data.json`, `public/downloads/`, `index.html`, `public/service-worker.js`, `.github/workflows/generate-price-lists.yml`, `tools/verify-prices.ps1`, `supabase/proposed/30-item-bulletin-visibility.sql`, `supabase/proposed/30-item-bulletin-visibility-rollback.sql`.
 
 ## قيود ثابتة
 
