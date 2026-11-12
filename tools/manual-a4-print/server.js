@@ -275,6 +275,10 @@ function classifyPrinter(f) {
 // - طابور WSD عادي يُسأل عنه بالـUUID عبر WS-Discovery (multicast على كل بطاقات IPv4)،
 //   فيُفحص العنوان الذي تردّ به الطابعة الآن لا عنواناً محفوظاً. قيمة LocationInformation
 //   لعقدة الطابور نفسه (تحت Enum) لا تُستعمل: تبقى على العنوان القديم بعد تغيّر DHCP.
+//   أما عنوان Windows المحفوظ لعقدة DAFWSDProvider (للتنبيه وحده) فيُقرأ من السجل لا من
+//   Get-PnpDeviceProperty: استعلام Win32_PnPEntity علِق في جلسة سطح المكتب أكثر من مهلة
+//   الفحص كلها (OZK2026، 2026-10-26) فقُتل الفحص وهو نفس القيمة.
+//   ولا يُفتح اتصال TCP إلا لردّ يطابق معرّف الطابعة؛ غيره لا يدخل في الحكم.
 function printerProbeScript(cfg) {
   const q = (v) => String(v || "").replace(/'/g, "''");
   return `$p = Get-CimInstance Win32_Printer | Where-Object { $_.Name -eq '${q(cfg.printerName)}' }\n`
@@ -291,7 +295,7 @@ function printerProbeScript(cfg) {
     + `    $u = (Get-PnpDeviceProperty -InstanceId ('SWD\\IPP\\' + $uuid) -KeyName '{A35996AB-11CF-4935-8B61-A6761081ECDF} 12' -ErrorAction SilentlyContinue).Data\n`
     + `    if ($u) { try { $x = [Uri]"$u"; $h = $x.Host; $n = $x.Port } catch { } }\n`
     + `  } else {\n`
-    + `    $win = if ($uuid) { [string](Get-PnpDeviceProperty -InstanceId ('SWD\\DAFWSDProvider\\urn:uuid:' + $uuid) -KeyName 'DEVPKEY_Device_LocationInfo' -ErrorAction SilentlyContinue).Data } else { '' }\n`
+    + `    $win = if ($uuid) { [string](Get-ItemProperty -LiteralPath ('HKLM:\\SYSTEM\\CurrentControlSet\\Enum\\SWD\\DAFWSDProvider\\urn:uuid:' + $uuid) -Name LocationInformation -ErrorAction SilentlyContinue).LocationInformation } else { '' }\n`
     + `    $rep = @()\n`
     + `    if ($uuid) {\n`
     + `      $want = 'urn:uuid:' + $uuid\n`
@@ -305,7 +309,7 @@ function printerProbeScript(cfg) {
     + `        Start-Sleep -Milliseconds 50\n`
     + `      }\n`
     + `      foreach ($s in $socks) { $s.Close() }\n`
-    + `      foreach ($f in $found | Select-Object -First 5) { $r = 'none'; try { $xu = [Uri]$f[1]; $c = New-Object Net.Sockets.TcpClient; try { $r = if ($c.ConnectAsync($xu.Host, $xu.Port).Wait(2000)) { 'ok' } else { 'fail' } } catch { $r = 'fail' } finally { $c.Close() } } catch { }; $rep += ($f[0] + '^' + $f[1] + '^' + $r) }\n`
+    + `      foreach ($f in $found | Select-Object -First 5) { $r = 'none'; if ($f[0] -ieq $want) { try { $xu = [Uri]$f[1]; $c = New-Object Net.Sockets.TcpClient; try { $r = if ($c.ConnectAsync($xu.Host, $xu.Port).Wait(2000)) { 'ok' } else { 'fail' } } catch { $r = 'fail' } finally { $c.Close() } } catch { } }; $rep += ($f[0] + '^' + $f[1] + '^' + $r) }\n`
     + `    }\n`
     + `    $wsd = 'WSD^' + $uuid + '^' + $win + '^' + ($rep -join '~')\n`
     + `  }\n`
@@ -327,13 +331,38 @@ function parseProbeLine(out) {
   return f;
 }
 
-function createPrinter(cfg) {
+const PRINTER_PROBE_TIMEOUT_MS = 15_000;
+
+// أول سطر خطأ من stderr. PowerShell يكتبه CLIXML حين يُعاد توجيه stderr: «<S S="Error">…».
+function firstPowerShellError(stderr) {
+  const raw = String(stderr || "");
+  const xml = [...raw.matchAll(/<S S="Error">([^<]*)<\/S>/g)].map((m) => m[1]).join("");
+  const text = (xml || raw.replace(/^#< CLIXML\s*/, ""))
+    .replace(/_x000D__x000A_/g, "\n").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+  return text.split(/\r?\n/).map((l) => l.trim()).find(Boolean) || "";
+}
+
+// سبب فشل الفحص كما وقع: انتهاء المهلة، أو تعذّر تشغيل PowerShell، أو رمز خروج وخطؤه.
+function probeFailureReason(r, timeoutMs) {
+  const head = "تعذّر الاستعلام عن الطابعة";
+  if (r.error && r.error.code === "ETIMEDOUT") return `${head}: انتهت مهلة الفحص (${Math.round(timeoutMs / 1000)} ث)`;
+  if (r.error) return `${head}: تعذّر تشغيل PowerShell (${r.error.code || r.error.message})`;
+  const err = firstPowerShellError(r.stderr);
+  if (r.status !== 0) return `${head}: PowerShell خرج بالرمز ${r.status}${err ? ` — ${err}` : ""}`;
+  return `${head}: ردّ غير متوقع${err ? ` — ${err}` : ""}`;
+}
+
+function createPrinter(cfg, run = runPowerShell) {
   function probe() {
-    if (process.platform !== "win32") return { state: "unknown", reason: "ليس Windows" };
-    const r = runPowerShell(printerProbeScript(cfg));
+    if (process.platform !== "win32" && run === runPowerShell) return { state: "unknown", reason: "ليس Windows" };
+    const r = run(printerProbeScript(cfg), PRINTER_PROBE_TIMEOUT_MS);
     const out = String(r.stdout || "").trim();
     if (out === "NOT_FOUND") return { state: "missing", reason: `الطابعة "${cfg.printerName}" غير مثبّتة على هذا الجهاز` };
-    if (r.status !== 0 || !out.startsWith("FOUND|")) return { state: "unknown", reason: "تعذّر الاستعلام عن الطابعة" };
+    if (r.status !== 0 || !out.startsWith("FOUND|")) {
+      const reason = probeFailureReason(r, PRINTER_PROBE_TIMEOUT_MS);
+      console.error(`printer probe: ${reason} | status=${r.status} signal=${r.signal} stdout=${out.slice(0, 200)}`);
+      return { state: "unknown", reason };
+    }
     return classifyPrinter(parseProbeLine(out));
   }
   function send(pdfPath, paper, copies) {
@@ -775,7 +804,7 @@ async function main() {
 }
 
 module.exports = {
-  createApp, classifyPrinter, printerProbeScript, parseProbeLine, wsdVerdict, createHttpHandler, SESSION_COOKIE, parseSqlConnStr, countPdfPages, loadConfig, DEFAULTS,
+  createApp, classifyPrinter, printerProbeScript, parseProbeLine, wsdVerdict, createPrinter, probeFailureReason, firstPowerShellError, createHttpHandler, SESSION_COOKIE, parseSqlConnStr, countPdfPages, loadConfig, DEFAULTS,
   SEARCH_SQL, LINES_SQL, BALANCE_SQL, createRenderer,
 };
 
