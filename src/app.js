@@ -214,6 +214,8 @@ const state = {
   liveInvoicesPrices: null,
   liveInvoicesBalances: null,
   liveInvoicesStats: null,
+  liveInvoicesMerged: null,
+  liveInvoicesLoadGen: 0,
   invoiceSeriesReport: null,   // آخر رقم فاتورة لكل سلسلة ترقيم في الأمين
   customerWhatsapp: [],
   broadcastType: "",
@@ -1274,8 +1276,12 @@ async function loadCustomerBalanceReports() {
   } catch {
     state.customerInvoicesBaseReport = null;
   }
-  state.customerInvoicesReport = state.customerInvoicesBaseReport;
+  // لا تُعرض اللقطة غير المدموجة هنا: مؤقّتا 60ث و10ث يطلقان loadLiveInvoices معاً،
+  // وتعيين التقرير للقطة قبل الدمج يمسح فاتورة فورية (1178/1195) إن فشل الجلب أو
+  // اكتمل دمج قديم بعد لقطة أحدث. الدمج يكتب التقرير؛ وإن لم يكن هناك تقرير بعد
+  // (أول تحميل فشل الجلب الفوري) نعرض اللقطة حتى لا تبقى الشاشة بلا فواتير.
   await loadLiveInvoices();
+  if (!state.customerInvoicesReport) state.customerInvoicesReport = state.customerInvoicesBaseReport;
   try {
     state.poAmeenReport = dataStore.getPurchaseInvoicesAmeenReport
       ? await dataStore.getPurchaseInvoicesAmeenReport()
@@ -1348,17 +1354,27 @@ function refreshCustomerDetailPanelData() {
 // فوق لقطة التقرير (src/live-invoices.js): الأحدث يفوز، والنسخة الفورية لا تُقبل إلا
 // إن طابق مجموع أسطرها إجمالي الفاتورة في الأمين. عرض فقط — لا كتابة على أي جدول.
 // `state.customerInvoicesBaseReport` اللقطة كما وصلت، و`state.customerInvoicesReport`
-// الناتج المدموج الذي تقرؤه كل الشاشات. فشل القراءة الفورية يُبقي اللقطة كما هي.
+// الناتج المدموج الذي تقرؤه كل الشاشات. فشل القراءة الفورية يُبقي الدمج السابق كما هو.
+// مؤقّتا 10ث و60ث (ومعهما وصول لائحة الأسعار) يطلقان هذه الدالة معاً: رقم الجيل يتجاهل
+// نتيجة أقدم اكتملت بعد لقطة أحدث، فلا تُمسح فاتورة دخلت التقرير الجديد فقط.
 async function loadLiveInvoices() {
   const base = state.customerInvoicesBaseReport;
   const engine = window.ozkLiveInvoices;
-  if (!engine || !dataStore.listLiveAmeenInvoices) return false;
+  if (!base) return false;
+  const gen = (state.liveInvoicesLoadGen = (state.liveInvoicesLoadGen || 0) + 1);
+  if (!engine || !dataStore.listLiveAmeenInvoices) {
+    if (gen === state.liveInvoicesLoadGen && !state.customerInvoicesReport) {
+      state.customerInvoicesReport = base;
+    }
+    return false;
+  }
   let rows;
   try {
     rows = await dataStore.listLiveAmeenInvoices(engine.liveFetchSince(base, Date.now()));
   } catch {
     return false;
   }
+  if (gen !== state.liveInvoicesLoadGen || base !== state.customerInvoicesBaseReport) return false;
   const signature = rows.map((r) => `${r.bill_guid}:${r.source_seq}`).join("|");
   // مدخلات الدمج كلها في مفتاح الذاكرة: اللقطة والصفوف ولائحة الأسعار (دليل المواد
   // الاحتياطي) والأرصدة (أسماء المجموعات الجديدة). عند الدخول تُحمَّل الأسعار بعد
@@ -1366,15 +1382,23 @@ async function loadLiveInvoices() {
   const prices = state.approvedPriceItems;
   const balances = (state.customerBalanceReports && state.customerBalanceReports[0]) || null;
   if (base === state.liveInvoicesBase && signature === state.liveInvoicesSignature
-    && prices === state.liveInvoicesPrices && balances === state.liveInvoicesBalances) return false;
-  state.liveInvoicesBase = base;
-  state.liveInvoicesSignature = signature;
-  state.liveInvoicesPrices = prices;
-  state.liveInvoicesBalances = balances;
+    && prices === state.liveInvoicesPrices && balances === state.liveInvoicesBalances) {
+    if (state.liveInvoicesMerged && state.customerInvoicesReport !== state.liveInvoicesMerged) {
+      state.customerInvoicesReport = state.liveInvoicesMerged;
+      return true;
+    }
+    return false;
+  }
   const { report, stats } = engine.mergeLiveInvoices(base, rows, {
     priceItems: state.approvedPriceItems,
     balanceItems: latestCustomerBalanceItems()
   });
+  if (gen !== state.liveInvoicesLoadGen || base !== state.customerInvoicesBaseReport) return false;
+  state.liveInvoicesBase = base;
+  state.liveInvoicesSignature = signature;
+  state.liveInvoicesPrices = prices;
+  state.liveInvoicesBalances = balances;
+  state.liveInvoicesMerged = report;
   state.customerInvoicesReport = report;
   state.liveInvoicesStats = stats;
   return true;
