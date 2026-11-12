@@ -214,3 +214,14 @@ powershell -File app\cashier-reprint.ps1 -Mode Health          # فحص بلا �
 - **`bridgePinsInvoiceGuid`** (الافتراضي `false`): عند تفعيله بعد ترقية الجسر تمرّر الأداة GUID الفاتورة
   المحسومة (`-ExpectedInvoiceGuid`)، فيرفض الجسر إن صار الرقم لفاتورة أخرى بين الحسم والطباعة.
   الجسر الحي (`1efcdc33`) لا يعرف هذا الوسيط، فلا يُفعَّل قبل الترقية.
+
+## مسار الطباعة عبر تعريف Windows (`printTransport`) — تجهيز فقط
+
+- `"printTransport": "raw"` هو الافتراضي: ESC/POS مباشرة كما كان.
+- `"driver"` يسلّم صورة الإيصال نفسها بالبت لتعريف "Xprinter XP-80"، والتعريف يولّد أوامر الطابعة.
+- شروط `driver`:
+  - `mode=local`.
+  - `expectedRendererSha256` مضبوطة.
+  - رسّام يدعم المسار، وإلا `blocked`.
+- كل فحوص الورق والدقة والهوامش والقص تقع قبل إنشاء المهمة.
+- التفاصيل والاختبارات والتراجع: `docs/ai/topics/cashier-reprint-driver-path.md`.

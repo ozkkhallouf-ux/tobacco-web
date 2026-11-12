@@ -42,7 +42,11 @@ foreach ($path in $renderers) {
     $leaf = Split-Path -Leaf (Split-Path -Parent $path)
     Assert "[$leaf] الحِزمة الافتراضية 128 صفاً" ($source -match '(?m)^\$script:ReceiptBandRows = 128\s*$')
     Assert "[$leaf] مسار الإرسال يمر بالتقسيم" ($source -match 'ConvertTo-OzkBandedRaster \(\[OzkRawThermalPrinter\]::ToEscPosRaster\(\$bitmap, 190\)\) \$script:ReceiptBandRows')
-    Assert "[$leaf] لا ToEscPosRaster يُرسل بلا تقسيم" (([regex]::Matches($source, 'ToEscPosRaster\(\$bitmap')).Count -eq 1)
+    # نسخة أداة إعادة الطباعة لها مسار ثانٍ اختياري عبر تعريف Windows (لا RAW): الصورة نفسها تُسلَّم للتعريف.
+    $driverCall = '$jobId = Send-OzkReceiptViaDriver ([OzkRawThermalPrinter]::ToEscPosRaster($bitmap, 190)) $PrinterName'
+    $expectedCalls = 1; if ($source.Contains($driverCall)) { $expectedCalls = 2 }
+    Assert "[$leaf] لا ToEscPosRaster يُرسل RAW بلا تقسيم" (([regex]::Matches($source, 'ToEscPosRaster\(\$bitmap')).Count -eq $expectedCalls -and
+        ([regex]::Matches($source, 'ToEscPosRaster\(\$bitmap, 190\)\) \$script:ReceiptBandRows')).Count -eq 1)
 }
 Assert "الدالة متطابقة حرفياً في الملفات الثلاثة" (@($texts | Select-Object -Unique).Count -eq 1)
 . ([scriptblock]::Create($texts[0]))

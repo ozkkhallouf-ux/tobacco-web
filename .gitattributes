@@ -2,3 +2,5 @@ src/styles.css whitespace=cr-at-eol
 
 # مرجع اختبار التطابق البصري: بايتات الرسّام الحي حرفياً (sha256 f7806b56). لا تحويل لنهايات الأسطر.
 ozk-print-bridge/__golden__/*.psm1 -text
+tools/tests/fixtures/xprinter-driver-capture/*.bin binary
+tools/tests/fixtures/xprinter-driver-capture/*.prn binary

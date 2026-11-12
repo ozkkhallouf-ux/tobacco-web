@@ -423,6 +423,25 @@ jobs:
         shell: powershell
         run: .\tools\tests\Test-CashierReceiptBanding.ps1
 
+      # مسار إعادة الطباعة الاختياري عبر تعريف Windows (printTransport=driver): RAW لم يتغيّر سطراً، الإعداد
+      # والمتغيّر للعملية الفرعية وحدها، رسّام قديم ⇒ blocked، نتائج الفشل بلا إعادة إرسال، صفوف التعريف = صفوف
+      # RAW بالبت، StretchDIBits 1:1 لا يغيّر بتاً، ورفض الصفحة قبل إنشاء أي مهمة. بلا طباعة.
+      - name: Cashier reprint driver transport - RAW unchanged, pixel identity, pre-job refusals
+        shell: powershell
+        run: .\tools\tests\Test-CashierReprintDriverTransport.ps1
+
+      # صف الحماية لمسار التعريف: نموذج سلوك تعريف Xprinter يطابق التقاطين حقيقيين بالبايت، المقارِن يرفض كل
+      # نقص أو زيادة أو تحجيم أو قص (لا نجاح وهمي)، وصف الحبر وحده يحفظ أول صف من الشعار في 7/45/60 سطراً.
+      - name: Cashier reprint driver guard row - real captures, no-false-pass comparator, first logo row kept
+        shell: powershell
+        run: .\tools\tests\Test-CashierReprintDriverGuard.ps1
+
+      # تنظيف منفذ الالتقاط المؤقت: حراسة USB003 ومنفذ الكاشير وما خارج مجلد الالتقاط قبل أي حذف، لا حذف لمنفذ
+      # يستعمله طابور، محاولات محدودة مع انتظار، وكل خطأ يُعاد بلا إخفاء — بـSpooler وهمي، بلا طابعات.
+      - name: Cashier reprint capture cleanup - guarded, bounded and visible temporary port removal
+        shell: powershell
+        run: .\tools\tests\Test-CashierReprintCaptureCleanup.ps1
+
       # غلاف المهمة المجدولة لأرشفة Drive (غير مسجَّل): القفل والتزامن، المهلة وقتل الشجرة،
       # الوضع المحصور بـdry-run، ملف STOP، تنقيح السجل وتدويره — بعامل وهمي بلا أي خدمة حقيقية.
       - name: Drive archive - scheduled run wrapper test
