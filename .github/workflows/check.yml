@@ -410,6 +410,12 @@ jobs:
         shell: powershell
         run: .\tools\tests\Test-CashierReceiptVisualMatch.ps1 -ReportMainRenderer
 
+      # فواتير الكاشير الطويلة: الرسّام الحي يقصّ بصمت عند 2600 نقطة؛ المرشّح (live-renderer) يطابقه بكسلاً
+      # لما يقصر عن ذلك، ويرسم 30 و40 و60 سطراً كاملة بإجمالياتها وتذييلها، ويرفض ما يتجاوز الحد. بلا طباعة.
+      - name: Cashier receipt 80mm - long invoices (10/20/30/40/60 lines) without truncation
+        shell: powershell
+        run: .\tools\tests\Test-CashierReceiptLongInvoice.ps1
+
       # غلاف المهمة المجدولة لأرشفة Drive (غير مسجَّل): القفل والتزامن، المهلة وقتل الشجرة،
       # الوضع المحصور بـdry-run، ملف STOP، تنقيح السجل وتدويره — بعامل وهمي بلا أي خدمة حقيقية.
       - name: Drive archive - scheduled run wrapper test
