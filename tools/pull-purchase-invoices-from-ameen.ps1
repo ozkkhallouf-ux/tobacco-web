@@ -38,8 +38,8 @@
 #     يُحسَب آخر سعر ومتوسط السعر هنا مباشرة من أسطر الفواتير المسحوبة نفسها
 #     (bi000.UnitCostPrice إن وُجد، وإلا bi000.Price). هذا الأساس هو تكلفة/سعر
 #     "الوحدة الأساسية" للمادة (وليس سعر الوحدة المختارة بسطر الفاتورة bi.Unity) —
-#     لذلك العناوين بالواجهة صريحة "للوحدة الأساسية"، والإحصاء بمفتاح MatGUID
-#     (لا رقم/كود المادة) ويستبعد فواتير مرتجع المشتريات من المتوسط.
+#     لذلك تُحفظ القيم بالكروز، والواجهة تحوّلها للكرتونة عبر mt000.Unit2Fact.
+#     الإحصاء بمفتاح MatGUID (لا رقم/كود المادة) ويستبعد فواتير مرتجع المشتريات من المتوسط.
 #
 # التشغيل اليدوي:
 #   .\tools\pull-purchase-invoices-from-ameen.ps1 -Discover     # طباعة الأعمدة وعيّنة بدون رفع
@@ -153,12 +153,14 @@ try {
     $unit1Col = Pick $mtCols @("Unity") $null
     $unit2Col = Pick $mtCols @("Unit2") $null
     $unit3Col = Pick $mtCols @("Unit3") $null
+    $unit2FactCol = Pick $mtCols @("Unit2Fact") $null
     $unitCaseParts = New-Object System.Collections.Generic.List[string]
     if ($unit1Col) { $unitCaseParts.Add("WHEN 1 THEN LTRIM(RTRIM(COALESCE(m.[$unit1Col],'')))") }
     if ($unit2Col) { $unitCaseParts.Add("WHEN 2 THEN LTRIM(RTRIM(COALESCE(m.[$unit2Col],'')))") }
     if ($unit3Col) { $unitCaseParts.Add("WHEN 3 THEN LTRIM(RTRIM(COALESCE(m.[$unit3Col],'')))") }
     $unitSel = if ($unitCaseParts.Count -gt 0) { "(CASE bi.Unity $($unitCaseParts -join ' ') ELSE NULL END)" } else { "NULL" }
-    Write-Log "اكتشاف: وحدات المادة = $(if($unit1Col){$unit1Col}else{'—'})/$(if($unit2Col){$unit2Col}else{'—'})/$(if($unit3Col){$unit3Col}else{'—'}) | الاختيار حسب bi.Unity"
+    $unit2FactSel = if ($unit2FactCol) { "CAST(COALESCE(m.[$unit2FactCol],0) AS decimal(18,3))" } else { "CAST(0 AS decimal(18,3))" }
+    Write-Log "اكتشاف: وحدات المادة = $(if($unit1Col){$unit1Col}else{'—'})/$(if($unit2Col){$unit2Col}else{'—'})/$(if($unit3Col){$unit3Col}else{'—'}) | الاختيار حسب bi.Unity | معامل الكرتونة = $(if($unit2FactCol){$unit2FactCol}else{'—'})"
 
     # جدول العملات المرجعي (my000) — مؤكَّد من تقرير الاكتشاف: GUID + CurrencyISO
     $myCols = Get-Columns "my000"
@@ -182,6 +184,7 @@ SELECT TOP 15 $numSel AS bill_number, u.Date AS bill_date,
        $itemNumSel AS item_number,
        LTRIM(RTRIM(COALESCE(m.Name,''))) AS material,
        bi.Qty AS qty, bi.Unity AS unity, $unitSel AS unit_name,
+       $unit2FactSel AS unit2_factor,
        $priceSel AS price, $costSel AS unit_cost, $totalSel AS line_total,
        u.[$typeCol] AS type_guid, $currencyIsoSel AS currency_iso
 FROM bu000 u
@@ -200,9 +203,9 @@ ORDER BY u.Date DESC
         while ($rd.Read()) {
             $n++
             $retTag = if ([string]$rd["type_guid"] -eq $PURCHASE_RETURN_TYPE_GUID) { " [مرتجع مشتريات]" } else { "" }
-            Write-Host ("  [{0}] {1} | {2} | {3} — {4} | كمية {5} وحدة {6}({7}) × سعر {8} (تكلفة {9}) = {10} | عملة {11}{12}" -f `
+            Write-Host ("  [{0}] {1} | {2} | {3} — {4} | كمية {5} وحدة {6}({7}) × سعر {8} (تكلفة {9}) = {10} | معامل كرتونة {11} | عملة {12}{13}" -f `
                 $rd["bill_number"], ([datetime]$rd["bill_date"]).ToString("yyyy-MM-dd"), `
-                (([string]$rd["supplier"]) + " — مستودع: " + ([string]$rd["warehouse_name"])), $rd["item_number"], $rd["material"], $rd["qty"], $rd["unity"], $rd["unit_name"], $rd["price"], $rd["unit_cost"], $rd["line_total"], $rd["currency_iso"], $retTag)
+                (([string]$rd["supplier"]) + " — مستودع: " + ([string]$rd["warehouse_name"])), $rd["item_number"], $rd["material"], $rd["qty"], $rd["unity"], $rd["unit_name"], $rd["price"], $rd["unit_cost"], $rd["line_total"], $rd["unit2_factor"], $rd["currency_iso"], $retTag)
         }
         $rd.Close(); $conn.Close()
         Write-Host "الاكتشاف انتهى — $n سطر عيّنة. إذا الأسماء/القيم تبيّن صح، شغّل السكربت بدون -Discover."
@@ -229,6 +232,7 @@ SELECT CAST(u.GUID AS varchar(40)) AS bill_guid,
        LTRIM(RTRIM(COALESCE(m.Name,''))) AS material,
        CAST(COALESCE(bi.Qty,0) AS decimal(18,3)) AS qty,
        $unitSel AS unit1,
+       $unit2FactSel AS unit2_factor,
        CAST($priceSel AS decimal(18,3)) AS price,
        CAST($costSel AS decimal(18,3)) AS unit_cost,
        CAST($totalSel AS decimal(18,3)) AS line_total,
@@ -288,6 +292,7 @@ ORDER BY u.Date DESC, u.GUID
         $matGuid = [string]$r["mat_guid"]
         $unitCost = [double]$r["unit_cost"]
         $unitName = if ($r["unit1"] -is [DBNull] -or -not $r["unit1"]) { "غير معروفة" } else { [string]$r["unit1"] }
+        $unit2Factor = if ($r["unit2_factor"] -is [DBNull]) { 0.0 } else { [double]$r["unit2_factor"] }
         # إحصاء آخر تكلفة/متوسط تكلفة يُحسَب بمفتاح MatGUID (لا رقم/كود المادة)،
         # ويستبعد فواتير مرتجع المشتريات كي لا يشوّه المتوسط.
         if (-not $bills[$g].isReturn) {
@@ -303,6 +308,7 @@ ORDER BY u.Date DESC, u.GUID
             itemName   = [string]$r["material"]
             qty        = [double]$r["qty"]
             unit       = $unitName
+            unit2Factor = $unit2Factor
             price      = [double]$r["price"]
             unitCost   = $unitCost
             lineTotal  = [double]$r["line_total"]
@@ -312,10 +318,10 @@ ORDER BY u.Date DESC, u.GUID
 
     # --- تجميع الفواتير حسب المورد، وإرفاق آخر تكلفة/متوسط تكلفة محسوبَين من
     #     الأسطر المسحوبة نفسها (لا من mt000) مع وسم صريح لأساس الحساب ---
-    # ⚠️ الأساس هنا يبقى UnitCostPrice (تكلفة الوحدة الأساسية للمادة)، وليس سعر
-    # الوحدة المختارة بسطر الفاتورة (bi.Unity) — لذلك العنوان صريح "للوحدة الأساسية"
-    # في الواجهة، بغضّ النظر عن الوحدة المعروضة بعمود "الوحدة". الإحصاء بمفتاح
-    # MatGUID ويستبعد مرتجعات المشتريات (راجع حلقة القراءة أعلاه).
+    # ⚠️ الأساس المخزَّن يبقى UnitCostPrice (تكلفة الوحدة الأساسية/الكروز)، وليس سعر
+    # الوحدة المختارة بسطر الفاتورة (bi.Unity). الواجهة تحوّل العرض إلى كرتونة بضرب
+    # التكلفة وقسمة الكمية على unit2Factor (mt000.Unit2Fact) — بلا تخمين للمعامل.
+    # الإحصاء بمفتاح MatGUID ويستبعد مرتجعات المشتريات (راجع حلقة القراءة أعلاه).
     $priceBasis = if ($costCol) { "unit_cost_price_base_unit" } else { "price_raw_base_unit" }
     $bySupplier = @{}
     foreach ($g in $billOrder) {
@@ -332,6 +338,7 @@ ORDER BY u.Date DESC, u.GUID
                 itemName   = $it.itemName
                 qty        = $it.qty
                 unit       = $it.unit
+                unit2Factor = $it.unit2Factor
                 price      = $it.price
                 lineTotal  = $it.lineTotal
                 lastPrice  = $lastPrice

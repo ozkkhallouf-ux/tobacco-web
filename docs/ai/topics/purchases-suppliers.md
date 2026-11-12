@@ -1,10 +1,12 @@
 # تقرير موضوع المشتريات والموردين
 
-آخر تحديث: 2026-08-23
+آخر تحديث: 2026-09-16
 
 ## الحالة الحالية
 
 واجهة وحسابات وتقارير المشتريات موجودة. مسار كتابة فواتير المشتريات إلى الأمين ما زال تجهيزاً فقط وفق القرار المسجل في `AI_WORK_SYNC.md`، ولا يجوز تفعيله أو تشغيله فعلياً بلا إذن صريح.
+
+جدول فواتير مشتريات الأمين (قراءة فقط) يعرض الكمية وآخر/متوسط التكلفة **بالكرتونة**. القيم المخزَّنة في التقرير تبقى بالكروز (وحدة الأمين الأساسية): الكمية المعروضة = `qty ÷ unit2Factor`، والتكلفة المعروضة = `lastPrice/avgPrice × unit2Factor`. المعامل من `mt000.Unit2Fact` على سطر التقرير بعد المزامنة، أو من كتالوج الأسعار/الجرد بالمطابقة الوحيدة للرقم ثم الاسم. لا يُخمَّن معامل 50. تحت الكمية يظهر أصلها بالكروز (مثال الشاشة الحية: 2500 كروز → 50 كرتونة، ومتوسط 8.08$ → 404$).
 
 ## المصدر الموثوق
 
@@ -12,18 +14,19 @@
 
 ## نطاق الملفات
 
-`src/purchase-*.js`, `src/supplier-obligations-client.js`, `tools/pull-purchase-invoices-from-ameen.ps1`, `tools/push-supplier-obligations.ps1`, `tools/discover-ameen-purchase-schema.ps1`, `tools/sync-purchase-invoices-to-ameen.ps1`, `supabase/purchase-*.sql`.
+`src/purchase-*`, `src/app.js` (`poAmeenPanelHtml` / `poAmeenItemsRowsHtml`), `src/supplier-obligations-client.js`, `tools/pull-purchase-invoices-from-ameen.ps1`, `tools/push-supplier-obligations.ps1`, `tools/discover-ameen-purchase-schema.ps1`, `tools/sync-purchase-invoices-to-ameen.ps1`, `supabase/purchase-*.sql`.
 
 ## قيود ثابتة
 
 - لا كتابة فعلية للأمين ولا فك قفل سكربت الكتابة بلا موافقة صريحة.
 - العملة USD/SYP صريحة بلا تحويل ضمني.
 - فاتورة `synced` لا تُعدّل أو تُحذف كمسودة؛ تحتاج إجراء تصحيح موثق.
+- تحويل الكرتونة للعرض فقط؛ لا يُعاد كتابة التقرير ولا يُفترض معامل ثابت.
 
 ## فحوص إلزامية
 
-`npm.cmd run check` واختبارات حساب الشراء؛ أي تفعيل مستقبلي يبدأ باكتشاف قراءة فقط ثم Dry Run مصرح به ثم مقارنة مستقلة قبل الكتابة.
+`npm.cmd run check` واختبارات حساب الشراء (`poAmeenCartonDisplay` / `poAmeenResolveUnit2Factor` في `scripts/check.mjs`)؛ أي تفعيل مستقبلي يبدأ باكتشاف قراءة فقط ثم Dry Run مصرح به ثم مقارنة مستقلة قبل الكتابة.
 
 ## الخطوة التالية
 
-يبقى تفعيل الكتابة إلى الأمين متوقفاً حتى طلب صريح منفصل يحدد النطاق وطريقة التحقق والاسترجاع.
+يبقى تفعيل الكتابة إلى الأمين متوقفاً حتى طلب صريح منفصل يحدد النطاق وطريقة التحقق والاسترجاع. عرض الكرتونة على التقرير الحالي يعتمد مطابقة الكتالوج إلى أن تُعاد مزامنة `pull-purchase-invoices-from-ameen.ps1` على Windows فتحمل `unit2Factor` مع كل سطر.
