@@ -185,6 +185,10 @@ public static class OzkThermalPrinterQueue
 $script:PrinterBlockingStatusMask = 0x1 -bor 0x2 -bor 0x4 -bor 0x8 -bor 0x10 -bor 0x80 -bor 0x1000 -bor 0x100000 -bor 0x400000
 
 $script:ReceiptWidth = 576
+# كان اللوح ثابتاً 2600 نقطة فيُقصّ كل ما يُرسم تحته بصمت (فاتورة ~28 سطراً فأكثر تفقد إجماليها وتذييلها).
+# اللوح الآن بارتفاع هذا الحدّ، والصورة تُقصّ إلى ارتفاع المحتوى الفعلي كما كانت؛ الرسم نفسه لم يتغيّر.
+# 15000 نقطة ≈ 1.9 م ورق (~270 سطراً). محتوى أطول ⇒ رفض صريح، لا قصّ صامت.
+$script:ReceiptMaxCanvasHeight = 15000
 $script:ReceiptDpi = 203
 $script:CashierPrinterName = "XPRINTER XP-T80Q 80MM"
 $script:Invariant = [Globalization.CultureInfo]::InvariantCulture
@@ -293,7 +297,7 @@ function New-OzkReceiptBitmap {
     )
 
     if (-not (Test-Path -LiteralPath $LogoPath -PathType Leaf)) { throw "Receipt logo not found: $LogoPath" }
-    $canvasHeight = 2600
+    $canvasHeight = $script:ReceiptMaxCanvasHeight
     $bitmap = New-Object Drawing.Bitmap($script:ReceiptWidth, $canvasHeight, [Drawing.Imaging.PixelFormat]::Format24bppRgb)
     $bitmap.SetResolution($script:ReceiptDpi, $script:ReceiptDpi)
     $graphics = [Drawing.Graphics]::FromImage($bitmap)
@@ -434,6 +438,9 @@ function New-OzkReceiptBitmap {
         Draw-OzkText $graphics "◆ ─────  شكراً لتعاملكم معنا  ───── ◆" $footerFont 20 $y 536 50 "Center" $true
         $y += 64
 
+        if ([math]::Ceiling($y) -gt $canvasHeight) {
+            throw (New-Object InvalidOperationException(("Receipt layout needs {0} px which exceeds the {1} px safety limit; refusing to print a truncated receipt." -f [math]::Ceiling($y), $canvasHeight)))
+        }
         $finalHeight = [math]::Min($canvasHeight, [math]::Ceiling($y))
         $cropped = New-Object Drawing.Bitmap($script:ReceiptWidth, $finalHeight, [Drawing.Imaging.PixelFormat]::Format24bppRgb)
         $cropped.SetResolution($script:ReceiptDpi, $script:ReceiptDpi)

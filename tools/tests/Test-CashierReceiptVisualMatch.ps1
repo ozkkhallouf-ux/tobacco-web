@@ -63,7 +63,9 @@ $set = @(
     (New-MockReceipt "large-amounts" @((L "كرتونة ماستر" 150 121500), (L "كرتونة كينغ دوم" 40 73500)) @{ Discount = 70.0; NetTotal = 21165000.0 - 70.0 }),
     (New-MockReceipt "long-names" @((L "اسم مادة طويل جداً جداً يلتف على أكثر من سطر في عمود اسم المادة على الإيصال" 2.5 66500), (L "صنف قصير" 0.5 5000))),
     (New-MockReceipt "customer-balance" @((L "ماستر قصير أزرق" 1 98784)) @{ CustomerName = "زبون اختبار باسم طويل نسبياً"; BalanceFound = $true; PreviousBalance = 1250000.0; CurrentBalance = 1348784.0; Payment = 0.0 }),
-    (New-MockReceipt "thirty-lines" @(1..30 | ForEach-Object { L ("صنف رقم $_") ($_ % 4 + 1) (60000 + $_ * 1250) })),
+    # أطول إيصال يتسع داخل لوح الحي (2600 نقطة): المقارنة التامة صالحة هنا. ما يتجاوزه كان يُقصّ في الحي،
+    # وإصلاحه مُثبت في Test-CashierReceiptLongInvoice.ps1 (أول 2600 صف مطابق والباقي كامل).
+    (New-MockReceipt "twenty-five-lines" @(1..25 | ForEach-Object { L ("صنف رقم $_") ($_ % 4 + 1) (60000 + $_ * 1250) })),
     (New-MockReceipt "single-line" @((L "كينغ دوم سليم" 1 73500)))
 )
 
@@ -142,6 +144,7 @@ try {
     $unstable = @($set | Where-Object { $ref[$_.Id].PayloadSha -ne $refAgain[$_.Id].PayloadSha })
     foreach ($u in $unstable) { Write-Host ("DIAG حتمية [{0}]: {1}" -f $u.Id, (Get-EscPosDiff $u.Id "live" "live-again")) }
     Assert "الحتمية: المرجع يعطي بايتات الطابعة نفسها في تشغيلين" ($unstable.Count -eq 0)
+    Assert "النطاق: كل إيصالات المقارنة التامة أقصر من لوح الحي 2600 (لا قصّ في المرجع)" (@($set | Where-Object { [int]$ref[$_.Id].Height -ge 2600 }).Count -eq 0)
     $cand = Invoke-Render $Candidate "candidate"
     foreach ($r in $set) {
         $a = $ref[$r.Id]; $b = $cand[$r.Id]

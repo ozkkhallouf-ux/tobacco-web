@@ -20,6 +20,8 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $bridgeDir = Join-Path $repoRoot "ozk-print-bridge"
 $reference = Join-Path (Join-Path $bridgeDir "__golden__") "OzkReceiptRenderer.live-f7806b56.psm1"
 $candidate = Join-Path (Join-Path $bridgeDir "live-renderer") "OzkReceiptRenderer.psm1"
+# نسخة أداة إعادة الطباعة (CashierReprint\bridge على OZKUSER): الإصلاح نفسه ويجب أن ترسم بالبايت مثل المرشّح.
+$reprintCandidate = Join-Path $repoRoot "tools\cashier-reprint\static-bridge\ozk-print-bridge\OzkReceiptRenderer.psm1"
 $logo = Join-Path (Join-Path $bridgeDir "assets") "ozk-receipt-horse-logo.png"
 
 $script:pass = 0
@@ -79,8 +81,13 @@ function Sha([byte[]]$b, [int]$Offset = 0, [int]$Count = -1) {
 }
 $items = Get-Content -Raw -LiteralPath $Receipts -Encoding UTF8 | ConvertFrom-Json
 $rows = foreach ($r in $items) {
+    [GC]::Collect(); [GC]::WaitForPendingFinalizers()
+    $proc = [Diagnostics.Process]::GetCurrentProcess(); $proc.Refresh(); $wsBefore = $proc.WorkingSet64
+    $watch = [Diagnostics.Stopwatch]::StartNew()
     try { $bmp = New-OzkReceiptBitmap -Receipt $r -LogoPath $Logo }
     catch { [pscustomobject]@{ Id = $r.Id; Error = [string]$_.Exception.Message }; continue }
+    $watch.Stop(); $proc.Refresh()
+    $renderMs = $watch.ElapsedMilliseconds; $peakMb = [math]::Round($proc.PeakWorkingSet64 / 1MB, 1); $deltaMb = [math]::Round(($proc.WorkingSet64 - $wsBefore) / 1MB, 1)
     try {
         $rect = New-Object Drawing.Rectangle(0, 0, $bmp.Width, $bmp.Height)
         $data = $bmp.LockBits($rect, [Drawing.Imaging.ImageLockMode]::ReadOnly, [Drawing.Imaging.PixelFormat]::Format24bppRgb)
@@ -110,6 +117,7 @@ $rows = foreach ($r in $items) {
             TopSha = (Sha $raw 0 ($stride * $top)); TopRows = $top
             FooterSha = (Sha $raw ($stride * ($h - 150)) ($stride * 150))
             NetBox = $netBox; BandRows = $bandRows; CutOk = $cutOk
+            RenderMs = $renderMs; PeakWorkingSetMb = $peakMb; WorkingSetDeltaMb = $deltaMb; PayloadBytes = $payload.Length
         }
     } finally { $bmp.Dispose() }
 }
@@ -133,6 +141,11 @@ try {
     [void](Invoke-Render $reference "warmup")
     $ref = Invoke-Render $reference "live"
     $cand = Invoke-Render $candidate "fixed"
+    $reprint = Invoke-Render $reprintCandidate "fixed-reprint"
+    foreach ($r in $set) {
+        $x = $cand[[string]$r.Id]; $y = $reprint[[string]$r.Id]
+        Assert "[$($r.Id)] نسخة إعادة الطباعة = نسخة الطباعة الآلية (بكسلات وبايتات وحالة الرفض)" ([string]$x.PixelSha -eq [string]$y.PixelSha -and [string]$x.PayloadSha -eq [string]$y.PayloadSha -and [string]$x.Error -eq [string]$y.Error)
+    }
 
     foreach ($n in @(10, 20)) {
         $a = $ref["lines-$n"]; $b = $cand["lines-$n"]
@@ -154,6 +167,18 @@ try {
     }
     Assert "300 سطر: الحي يقصّ بصمت عند 2600" ([int]$ref["lines-300"].Height -eq 2600 -and -not $ref["lines-300"].Error)
     Assert "300 سطر: المرشّح يرفض صراحةً بدل القص" ([string]$cand["lines-300"].Error -match "refusing to print a truncated receipt")
+    # ── الذاكرة والزمن وحجم ما يُرسل للطابعة (نفس الجهاز، الحي مقابل المرشّح) ──
+    foreach ($n in $counts) {
+        $a = $ref["lines-$n"]; $b = $cand["lines-$n"]
+        Write-Host ("METRIC [{0} سطراً] live: {1} ms, ws+{2} MB, {3} bytes | fixed: {4} ms, ws+{5} MB, peak {6} MB, {7} bytes" -f $n, $a.RenderMs, $a.WorkingSetDeltaMb, $a.PayloadBytes, $b.RenderMs, $b.WorkingSetDeltaMb, $b.PeakWorkingSetMb, $b.PayloadBytes)
+    }
+    $worstPeak = (@($counts | ForEach-Object { [double]$cand["lines-$_"].PeakWorkingSetMb }) | Measure-Object -Maximum).Maximum
+    Assert "الذاكرة: ذروة عملية الرسم للمرشّح أقل من 400 MB (الفعلي $worstPeak MB)" ($worstPeak -lt 400)
+    Assert "الزمن: 60 سطراً تُرسم في أقل من 5 ثوانٍ (الفعلي $($cand['lines-60'].RenderMs) ms)" ([int]$cand["lines-60"].RenderMs -lt 5000)
+    Assert "الزمن: اللوح الأكبر لا يبطّئ الفاتورة القصيرة أكثر من 500 ms (10 أسطر: $($ref['lines-10'].RenderMs) → $($cand['lines-10'].RenderMs) ms)" ([int]$cand["lines-10"].RenderMs -le [int]$ref["lines-10"].RenderMs + 500)
+    $maxPayload = 10 + (15000 * 72) + ([math]::Ceiling(15000 / 512) * 8) + 4
+    Assert "الطابعة: 60 سطراً = $($cand['lines-60'].PayloadBytes) بايت = صفوف×72 + رؤوس الحِزَم" ([int]$cand["lines-60"].PayloadBytes -eq (10 + [int]$cand["lines-60"].Height * 72 + [math]::Ceiling([int]$cand["lines-60"].Height / 512) * 8 + 4))
+    Write-Host ("INFO أقصى حمولة ممكنة عند الحد 15000 صف: {0:N0} بايت ({1:N2} MB) بحِزَم 512 صفاً كما اليوم" -f $maxPayload, ($maxPayload / 1MB))
     Write-Host "PNG للمراجعة: $OutDir"
 } finally {
     if ($OutDir -notlike "$work*") { Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue }
