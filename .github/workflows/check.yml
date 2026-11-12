@@ -436,6 +436,12 @@ jobs:
         shell: powershell
         run: .\tools\tests\Test-CashierReprintDriverGuard.ps1
 
+      # تنظيف منفذ الالتقاط المؤقت: حراسة USB003 ومنفذ الكاشير وما خارج مجلد الالتقاط قبل أي حذف، لا حذف لمنفذ
+      # يستعمله طابور، محاولات محدودة مع انتظار، وكل خطأ يُعاد بلا إخفاء — بـSpooler وهمي، بلا طابعات.
+      - name: Cashier reprint capture cleanup - guarded, bounded and visible temporary port removal
+        shell: powershell
+        run: .\tools\tests\Test-CashierReprintCaptureCleanup.ps1
+
       # غلاف المهمة المجدولة لأرشفة Drive (غير مسجَّل): القفل والتزامن، المهلة وقتل الشجرة،
       # الوضع المحصور بـdry-run، ملف STOP، تنقيح السجل وتدويره — بعامل وهمي بلا أي خدمة حقيقية.
       - name: Drive archive - scheduled run wrapper test

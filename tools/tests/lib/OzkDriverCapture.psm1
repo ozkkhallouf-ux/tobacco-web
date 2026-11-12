@@ -118,4 +118,53 @@ function Compare-OzkDriverOutput($SourceRows, $DriverRows, [int]$BytesPerRow = 7
     return [pscustomobject]$r
 }
 
-Export-ModuleMember -Function Split-OzkRasterRows, Read-OzkDriverPrn, Get-OzkRowInk, Get-OzkInkSpan, Invoke-OzkXprinterDriverModel, Compare-OzkDriverOutput
+# ── تنظيف منفذ الالتقاط المؤقت ──────────────────────────────────────────────────
+# حذف المنفذ مباشرة بعد حذف الطابور قد يُرفض لأن Spooler لم يحرّره بعد ("port in use")، وكان
+# الخطأ يُخفى. هنا: حراسة قبل أي حذف، ثم محاولات محدودة، وتحقق من الاختفاء بعد كل حذف، وكل خطأ يُعاد.
+# الحراسة (أي خرق ⇒ رفض بلا أي محاولة حذف):
+#   - الاسم مسار ملف .prn داخل مجلد الالتقاط المحدد، لا يبدأ باسم منفذ فعلي (USB/LPT/COM/…).
+#   - ليس ضمن المنافذ المحمية (منفذ طابور الكاشير وUSB003 دائماً).
+#   - مراقبه Local Monitor.
+# قبل كل محاولة: المنفذ غير مستعمل من أي طابور؛ إن كان مستعملاً تُنتظر المهلة ولا يُحذف.
+# الاعتماديات قابلة للاستبدال كي تُختبر سيناريوهات التأخير والفشل بلا Spooler.
+function Remove-OzkCapturePort {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$PortName,
+        [Parameter(Mandatory = $true)][string]$CaptureRoot,
+        [string[]]$ProtectedPorts = @(),
+        [ValidateRange(1, 20)][int]$MaxAttempts = 6,
+        [ValidateRange(0, 60)][int]$DelaySeconds = 5,
+        [scriptblock]$GetPort = { param($n) Get-PrinterPort -Name $n -ErrorAction SilentlyContinue },
+        [scriptblock]$GetPortUsers = { param($n) @(Get-Printer | Where-Object PortName -eq $n | ForEach-Object Name) },
+        [scriptblock]$RemovePort = { param($n) Remove-PrinterPort -Name $n -ErrorAction Stop },
+        [scriptblock]$Sleep = { param($s) Start-Sleep -Seconds $s }
+    )
+    $result = [ordered]@{ Removed = $false; Refused = ""; Attempts = 0; Errors = New-Object System.Collections.Generic.List[string] }
+    $protected = @($ProtectedPorts + "USB003" | Where-Object { $_ } | ForEach-Object { $_.Trim() })
+    $root = [IO.Path]::GetFullPath($CaptureRoot.TrimEnd('\', '/')) + [IO.Path]::DirectorySeparatorChar
+    $full = ""
+    try { $full = [IO.Path]::GetFullPath($PortName) } catch { $full = "" }
+    if ($PortName -match '^(USB|LPT|COM|DOT4|WSD|IP_|TS|FILE:|PORTPROMPT|nul)') { $result.Refused = "port name looks physical or system: $PortName" }
+    elseif ($protected | Where-Object { $_ -ieq $PortName }) { $result.Refused = "port is protected (cashier queue): $PortName" }
+    elseif (-not $full -or -not $full.StartsWith($root, [StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetExtension($full) -ine ".prn") { $result.Refused = "port is not a .prn file inside the capture folder: $PortName" }
+    if ($result.Refused) { return [pscustomobject]$result }
+    $port = & $GetPort $PortName
+    if ($null -eq $port) { $result.Removed = $true; return [pscustomobject]$result }
+    if ([string]$port.PortMonitor -notmatch 'Local') { $result.Refused = "port monitor is '$($port.PortMonitor)', not Local Monitor"; return [pscustomobject]$result }
+    for ($i = 1; $i -le $MaxAttempts; $i++) {
+        $result.Attempts = $i
+        $users = @(& $GetPortUsers $PortName | Where-Object { $_ })
+        if ($users.Count -gt 0) {
+            $result.Errors.Add("attempt ${i}: still used by queue(s) $($users -join ', '); not removed")
+        } else {
+            try { & $RemovePort $PortName } catch { $result.Errors.Add("attempt ${i}: $($_.Exception.Message)") }
+            if ($null -eq (& $GetPort $PortName)) { $result.Removed = $true; break }
+            if ($result.Errors.Count -lt $i) { $result.Errors.Add("attempt ${i}: removal reported success but the port is still present") }
+        }
+        if ($i -lt $MaxAttempts) { & $Sleep $DelaySeconds }
+    }
+    return [pscustomobject]$result
+}
+
+Export-ModuleMember -Function Split-OzkRasterRows, Read-OzkDriverPrn, Get-OzkRowInk, Get-OzkInkSpan, Invoke-OzkXprinterDriverModel, Compare-OzkDriverOutput, Remove-OzkCapturePort

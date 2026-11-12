@@ -60,7 +60,7 @@ function Assert-Isolated {
     if (@(Get-Printer | Where-Object PortName -eq $capPort).Count -ne 1) { throw "STOP: another queue uses the capture port." }
     if ((Get-Printer -Name $cashier).PortName -ne "USB003") { throw "STOP: cashier queue port changed." }
 }
-$before = $null; $created = $false
+$before = $null; $created = $false; $portCreated = $false
 try {
     if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw "STOP: needs an elevated session to add a temporary queue." }
     if (-not (Get-PrinterDriver -Name $driverName -ErrorAction SilentlyContinue)) { throw "STOP: driver '$driverName' is not installed." }
@@ -69,6 +69,7 @@ try {
     if (Get-PrinterPort -Name $capPort -ErrorAction SilentlyContinue) { throw "STOP: port '$capPort' already exists." }
     $before = Get-CashierSnapshot
     Add-PrinterPort -Name $capPort
+    $portCreated = $true
     Add-Printer -Name $capName -DriverName $driverName -PortName $capPort
     $created = $true
     Set-PrintConfiguration -PrinterName $capName -PrintTicketXML (Get-PrintConfiguration -PrinterName $cashier).PrintTicketXML
@@ -140,11 +141,18 @@ try {
     if ($created) {
         $jobs = @(Get-PrintJob -PrinterName $capName -ErrorAction SilentlyContinue)
         if ($jobs.Count -eq 0) {
-            Remove-Printer -Name $capName -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 2
-            Remove-PrinterPort -Name $capPort -ErrorAction SilentlyContinue
-        } else { Write-Host "WARN الطابور المؤقت ما زال فيه $($jobs.Count) مهمة؛ لم يُحذف. احذفه يدوياً بعد فحصه." -ForegroundColor Yellow }
-        Assert "حُذف الطابور والمنفذ المؤقتان" (-not (Get-Printer -Name $capName -ErrorAction SilentlyContinue) -and -not (Get-PrinterPort -Name $capPort -ErrorAction SilentlyContinue))
+            $queueError = ""
+            try { Remove-Printer -Name $capName -ErrorAction Stop } catch { $queueError = [string]$_.Exception.Message }
+            Assert "حُذف الطابور المؤقت $queueError" (-not (Get-Printer -Name $capName -ErrorAction SilentlyContinue))
+        } else { Write-Host "WARN الطابور المؤقت ما زال فيه $($jobs.Count) مهمة؛ لم يُحذف ولا منفذه. احذفهما يدوياً بعد فحصه." -ForegroundColor Yellow }
+        Assert "لا مهام عالقة في الطابور المؤقت عند التنظيف ($($jobs.Count))" ($jobs.Count -eq 0)
+    }
+    if ($portCreated) {
+        # منفذ طابور الكاشير محمي دائماً مع USB003؛ المنفذ يُحذف فقط حين لا يستعمله أي طابور.
+        $cashierPort = [string](Get-Printer -Name $cashier -ErrorAction SilentlyContinue).PortName
+        $cleanup = Remove-OzkCapturePort -PortName $capPort -CaptureRoot $OutDir -ProtectedPorts @($cashierPort)
+        foreach ($e in $cleanup.Errors) { Write-Host "INFO تنظيف المنفذ: $e" }
+        Assert ("حُذف المنفذ المؤقت (محاولات {0}{1})" -f $cleanup.Attempts, $(if ($cleanup.Refused) { "، رُفض: $($cleanup.Refused)" } else { "" })) ($cleanup.Removed -and -not $cleanup.Refused -and -not (Get-PrinterPort -Name $capPort -ErrorAction SilentlyContinue))
     }
     if ($null -ne $before) {
         $after = Get-CashierSnapshot
