@@ -2,7 +2,7 @@
  * generate-price-lists.mjs
  * node scripts/generate-price-lists.mjs [--rate 14050] [--validity 30]
  */
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { createHash } from "node:crypto";
@@ -216,8 +216,48 @@ const isWazari = (item) => bulletinEngine.isWazariItem({ itemKey: item.key || it
 
 // الأصناف المخفية عن الزبائن (Migration 30) عبر نافذة عامة لا تكشف إلا item_key
 // لنفس أصناف available_price_sync_feed العامة. قبل تطبيق الهجرة (النافذة غير
-// موجودة) لا نخفي شيئاً — فشل القراءة لا يجوز أن يُخفي أصنافاً صامتاً، وأي
-// خطأ آخر يوقف التوليد: نشرة بإخفاء غير موثوق أسوأ من لا نشرة.
+// موجودة) لا نخفي شيئاً — هذه ليست حالة فشل، بل تأكيد أن الميزة غير مفعّلة بعد.
+//
+// فشل القراءة الفعلي (شبكة/خادم) مختلف تماماً: لا يجوز أبداً أن يُنتج نشرة تُظهر
+// كل الأصناف تلقائياً — فذلك قد يُعيد نشر صنف أخفاه المالك عمداً. البديل الآمن
+// هو آخر نسخة محفوظة من قراءة سابقة ناجحة (عبر actions/cache بين تشغيلات CI
+// المتتالية، راجع .github/workflows/generate-price-lists.yml وpages.yml)، بشرط
+// أن تكون صالحة البنية وأحدث من 14 يوماً. بلا نسخة صالحة: التوليد يتوقف هنا
+// برسالة صريحة — نشرة متوقفة أسلم من نشرة تُسرّب صنفاً مخفياً.
+const HIDDEN_ITEMS_CACHE_PATH = resolve(root, "scripts/.cache/bulletin-hidden-items.json");
+const HIDDEN_ITEMS_CACHE_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
+
+function readTrustedHiddenItemsCache() {
+  let raw;
+  try {
+    raw = readFileSync(HIDDEN_ITEMS_CACHE_PATH, "utf8");
+  } catch {
+    return null;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!parsed || !Array.isArray(parsed.rows)) return null;
+  const rowsValid = parsed.rows.every((row) => row && typeof row.item_key === "string" && row.item_key.trim());
+  if (!rowsValid) return null;
+  const savedAtMs = Date.parse(parsed.savedAt || "");
+  if (!Number.isFinite(savedAtMs)) return null;
+  if (Date.now() - savedAtMs > HIDDEN_ITEMS_CACHE_MAX_AGE_MS) return null;
+  return { rows: parsed.rows, savedAt: parsed.savedAt };
+}
+
+function writeTrustedHiddenItemsCache(rows) {
+  try {
+    mkdirSync(dirname(HIDDEN_ITEMS_CACHE_PATH), { recursive: true });
+    writeFileSync(HIDDEN_ITEMS_CACHE_PATH, JSON.stringify({ rows, savedAt: new Date().toISOString() }), "utf8");
+  } catch (error) {
+    console.warn(`تنبيه: تعذّر حفظ نسخة احتياطية من الأصناف المخفية (${error instanceof Error ? error.message : error}).`);
+  }
+}
+
 async function fetchHiddenItemKeys() {
   const res = await fetch(
     `${SUPABASE_URL}/rest/v1/bulletin_hidden_items_feed?select=item_key&limit=5000`,
@@ -236,13 +276,39 @@ async function fetchHiddenItemKeys() {
   if (res.status === 404 || /PGRST205|42P01/.test(body)) return { rows: [], available: false };
   throw new Error(`تعذّر قراءة الأصناف المخفية عن الزبائن (${res.status}): ${body}`);
 }
+
 const visibilityEngine = globalThis.ozkBulletinVisibility;
 if (!visibilityEngine) throw new Error("src/bulletin-visibility.js لم يعرّف ozkBulletinVisibility");
-const hiddenItems = await fetchHiddenItemKeys();
-if (!hiddenItems.available) {
-  console.warn("تنبيه: نافذة الأصناف المخفية غير مفعّلة بعد (Migration 30) — كل الأصناف تبقى ظاهرة للزبائن.");
+
+let hiddenRows;
+try {
+  const hiddenItems = await fetchHiddenItemKeys();
+  if (!hiddenItems.available) {
+    console.warn("تنبيه: نافذة الأصناف المخفية غير مفعّلة بعد (Migration 30) — كل الأصناف تبقى ظاهرة للزبائن.");
+    hiddenRows = [];
+  } else {
+    hiddenRows = hiddenItems.rows;
+    writeTrustedHiddenItemsCache(hiddenRows);
+  }
+} catch (error) {
+  const message = error instanceof Error ? error.message : String(error);
+  const cached = readTrustedHiddenItemsCache();
+  if (cached) {
+    hiddenRows = cached.rows;
+    console.warn(
+      `تنبيه للمالك: تعذّر قراءة إعدادات إخفاء الأصناف من Supabase (${message}). ` +
+      `استُخدمت آخر نسخة محفوظة بتاريخ ${cached.savedAt} (${cached.rows.length} صنفاً مخفياً) ` +
+      `بدل إظهار كل الأصناف تلقائياً. راجع الاتصال بقاعدة البيانات في أقرب فرصة.`
+    );
+  } else {
+    throw new Error(
+      `تعذّر توليد نشرة جديدة: فشلت قراءة إعدادات إخفاء الأصناف من Supabase (${message})، ` +
+      `ولا توجد نسخة محفوظة صالحة يُعتمد عليها (أحدث من ${HIDDEN_ITEMS_CACHE_MAX_AGE_MS / 86400000} يوماً). ` +
+      `تنبيه صريح للمالك: التوليد يتوقف هنا كي لا تُنشر نشرة تُظهر كل الأصناف تلقائياً — لا تأثير على المخزون أو المبيعات.`
+    );
+  }
 }
-const hiddenIndex = visibilityEngine.buildHiddenIndex(hiddenItems.rows);
+const hiddenIndex = visibilityEngine.buildHiddenIndex(hiddenRows);
 // صف النافذة لا يحمل GUID، فالمطابقة بالمفتاح item_key الحرفي بعد التطبيع — نفس أسلوب isWazari أعلاه.
 const isHiddenFromCustomers = (item) => visibilityEngine.isHiddenItem({ itemKey: item.key || item.name, name: item.name }, hiddenIndex);
 

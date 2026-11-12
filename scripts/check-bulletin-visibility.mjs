@@ -3,7 +3,9 @@
 //
 // ثابت: الحالة الافتراضية ظاهر؛ الإخفاء استثناء بالـGUID يحذفه الإظهار بدل قيمة
 //        متقابلة؛ القراءة والكتابة للمالك وحده (RLS)؛ المولّد يستبعد الأصناف
-//        المخفية قبل أي تفرّع وزاري/عام أو دولار/سوري.
+//        المخفية قبل أي تفرّع وزاري/عام أو دولار/سوري. فشل قراءة الإعدادات في
+//        المولّد لا يُظهر كل الأصناف تلقائياً: يُستخدم آخر نسخة محفوظة صالحة
+//        (actions/cache بين تشغيلات CI)، وبلا نسخة صالحة يتوقف التوليد كاملاً.
 // حيّ (Postgres محلي فقط): بنية Supabase مصغّرة ببيانات اصطناعية، ثم كل دور:
 //        anon، موظف، موظف جرد، حساب غريب، المالك — وسجل التدقيق والتراجع،
 //        وأن approved_price_items لا تتغيّر إطلاقاً.
@@ -24,6 +26,8 @@ const INDEX = read("index.html");
 const SW = read("public/service-worker.js");
 const MIGRATION = read("supabase/proposed/30-item-bulletin-visibility.sql");
 const ROLLBACK = read("supabase/proposed/30-item-bulletin-visibility-rollback.sql");
+const PAGES_WORKFLOW = read(".github/workflows/pages.yml");
+const GENERATE_WORKFLOW = read(".github/workflows/generate-price-lists.yml");
 // مطبّقة بالإصدار 20261112120000؛ نسخة migrations يجب أن تطابق proposed/30 حرفياً
 // كي لا يراها Supabase CLI هجرة مختلفة أو ناقصة.
 assert.equal(read("supabase/migrations/20261112120000_item_bulletin_visibility.sql"), MIGRATION,
@@ -75,8 +79,29 @@ assert.ok(pos("src/bulletin-visibility.js?v=tobacco-") > 0 &&
   "الوحدة تُحمَّل بعد التصنيف وقبل app.js وبمعامل النسخة");
 assert.match(SW, /"src\/bulletin-visibility\.js"/, "الوحدة في كاش التطبيق");
 
+// --- 2ب) فشل قراءة الإعدادات في المولّد: نسخة محفوظة موثوقة أو توقّف صريح، لا إظهار صامت --
+// الكتابة إلى النسخة المحفوظة تقع فقط في مسار القراءة الناجحة المؤكدة (available: true)،
+// لا في حالة "الهجرة غير مفعّلة بعد" (تلك ليست فشلاً، بل صفر قواعد إخفاء حقيقي).
+const availableBranchPos = GENERATOR.indexOf("hiddenRows = hiddenItems.rows;");
+const cacheWritePos = GENERATOR.indexOf("writeTrustedHiddenItemsCache(hiddenRows);");
+assert.ok(availableBranchPos > 0 && cacheWritePos > availableBranchPos, "الحفظ الاحتياطي يقع بعد تأكيد القراءة الناجحة فقط");
+assert.match(GENERATOR, /Date\.now\(\) - savedAtMs > HIDDEN_ITEMS_CACHE_MAX_AGE_MS/, "نسخة محفوظة أقدم من الحد الأقصى تُرفض كغير صالحة");
+assert.match(GENERATOR, /rowsValid = parsed\.rows\.every\(\(row\) => row && typeof row\.item_key === "string" && row\.item_key\.trim\(\)\)/, "فحص بنيوي لصلاحية النسخة المحفوظة قبل الاعتماد عليها");
+// عند الفشل: نسخة محفوظة صالحة تُستخدم بتنبيه صريح، وبدونها يتوقف التوليد كاملاً — لا مسار ثالث يُظهر كل الأصناف صامتاً.
+const catchBlock = /} catch \(error\) \{[\s\S]*?const cached = readTrustedHiddenItemsCache\(\);[\s\S]*?if \(cached\) \{[\s\S]*?hiddenRows = cached\.rows;[\s\S]*?\} else \{[\s\S]*?throw new Error\(/.exec(GENERATOR);
+assert.ok(catchBlock, "مسار الفشل: نسخة محفوظة إن وُجدت وصلحت، وإلا توقف صريح بالتوليد");
+assert.match(GENERATOR, /كي لا تُنشر نشرة تُظهر كل الأصناف تلقائياً/, "رسالة التوقف صريحة وتذكر منع الإظهار التلقائي");
+assert.match(GENERATOR, /لا تأثير على المخزون أو المبيعات/, "رسالة التوقف تنص أنه لا يؤثر على المخزون أو المبيعات");
+// النسخة المحفوظة تعبر بين تشغيلات CI المنفصلة عبر actions/cache بمفتاح مشترك، لا بالتزام Git.
+for (const workflow of [PAGES_WORKFLOW, GENERATE_WORKFLOW]) {
+  assert.match(workflow, /actions\/cache\/restore@v4/);
+  assert.match(workflow, /actions\/cache\/save@v4/);
+  assert.match(workflow, /path: scripts\/\.cache\/bulletin-hidden-items\.json/);
+  assert.match(workflow, /restore-keys:\s*\|\s*\n\s*bulletin-hidden-items-/, "استعادة بالبادئة تُرجع آخر نسخة محفوظة بصرف النظر عن رقم التشغيل");
+}
+
 // --- 3) الواجهة: المالك وحده يرى ويعدّل، وكتابة عبر RPC فقط ------------------------
-assert.match(APP, /function pricingVisibilityLine\(item\) \{\s*(?:\/\/.*\s*)*if \(!isOwner\(\)\) return "";/, "سطر الظهور للمالك وحده (القراءة مقيّدة بالـRLS أصلاً)");
+assert.match(APP, /function pricingVisibilityLine\(item\) \{\n(?:[ \t]*\/\/[^\n]*\n)*[ \t]*if \(!isOwner\(\)\) return "";/, "سطر الظهور للمالك وحده (القراءة مقيّدة بالـRLS أصلاً)");
 assert.match(APP, /const canEdit = Boolean\(guid\) && Boolean\(dataStore\.setItemBulletinVisibility\);/);
 assert.match(APP, /if \(!isOwner\(\)\) throw new Error\("تعديل ظهور الصنف للمالك فقط\."\);/, "saveBulletinVisibility يرفض غير المالك دفاعياً أيضاً");
 assert.match(CLIENT, /rpc\("set_item_bulletin_visibility"/);

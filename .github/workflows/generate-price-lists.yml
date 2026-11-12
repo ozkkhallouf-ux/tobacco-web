@@ -39,8 +39,25 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
+      # آخر نسخة ناجحة من إعدادات إخفاء الأصناف (Migration 30)، لاستخدامها إن
+      # فشلت قراءة Supabase وقت التوليد أدناه بدل إظهار كل الأصناف تلقائياً.
+      - name: Restore last known-good hidden-items cache
+        uses: actions/cache/restore@v4
+        with:
+          path: scripts/.cache/bulletin-hidden-items.json
+          key: bulletin-hidden-items-${{ github.run_id }}
+          restore-keys: |
+            bulletin-hidden-items-
+
       - name: Generate price list HTML
         run: node scripts/generate-price-lists.mjs
+
+      - name: Save last known-good hidden-items cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: scripts/.cache/bulletin-hidden-items.json
+          key: bulletin-hidden-items-${{ github.run_id }}
       - name: Detect bulletin changes
         id: bulletin_changes
         shell: bash
