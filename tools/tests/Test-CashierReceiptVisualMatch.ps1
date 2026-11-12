@@ -87,12 +87,30 @@ $rows = foreach ($r in $items) {
         $data = $bmp.LockBits($rect, [Drawing.Imaging.ImageLockMode]::ReadOnly, [Drawing.Imaging.PixelFormat]::Format24bppRgb)
         try { $raw = New-Object byte[] ([math]::Abs($data.Stride) * $bmp.Height); [Runtime.InteropServices.Marshal]::Copy($data.Scan0, $raw, 0, $raw.Length) } finally { $bmp.UnlockBits($data) }
         $payload = [OzkRawThermalPrinter]::ToEscPosRaster($bmp, 190)
+        [IO.File]::WriteAllBytes((Join-Path $Out ("{0}-{1}.escpos" -f $r.Id, $Tag)), $payload)
         $bmp.Save((Join-Path $Out ("{0}-{1}.png" -f $r.Id, $Tag)), [Drawing.Imaging.ImageFormat]::Png)
         [pscustomobject]@{ Id = $r.Id; Width = $bmp.Width; Height = $bmp.Height; PixelSha = (Sha $raw); PayloadSha = (Sha $payload); PayloadBytes = $payload.Length }
     } finally { $bmp.Dispose() }
 }
 [IO.File]::WriteAllText($Result, (@($rows) | ConvertTo-Json -Depth 3))
 '@, (New-Object Text.UTF8Encoding($true)))
+
+# تشخيص الفرق على مستوى ما يصل الطابعة (نقطة سوداء/بيضاء): عدد النقاط المختلفة وصفوفها الأولى والأخيرة.
+function Get-EscPosDiff([string]$IdA, [string]$TagA, [string]$TagB) {
+    $a = [IO.File]::ReadAllBytes((Join-Path $OutDir ("{0}-{1}.escpos" -f $IdA, $TagA)))
+    $b = [IO.File]::ReadAllBytes((Join-Path $OutDir ("{0}-{1}.escpos" -f $IdA, $TagB)))
+    if ($a.Length -ne $b.Length) { return "lengths differ ($($a.Length) vs $($b.Length))" }
+    $dots = 0; $firstRow = -1; $lastRow = -1
+    for ($i = 0; $i -lt $a.Length; $i++) {
+        $x = $a[$i] -bxor $b[$i]
+        if ($x -ne 0) {
+            while ($x -ne 0) { $dots += ($x -band 1); $x = $x -shr 1 }
+            $row = [int][math]::Floor($i / 72.0)
+            if ($firstRow -lt 0) { $firstRow = $row }; $lastRow = $row
+        }
+    }
+    return "differing dots=$dots, approx rows $firstRow..$lastRow (of 72-byte rows incl. band headers)"
+}
 
 function Invoke-Render([string]$Renderer, [string]$Tag) {
     $result = Join-Path $work "$Tag.json"
@@ -117,13 +135,16 @@ try {
     $ref = Invoke-Render $reference "live"
     $refAgain = Invoke-Render $reference "live-again"
     Assert "عدم الفراغ: كل إيصال له نتيجة رسم فعلية ($($set.Count))" ($ref.Count -eq $set.Count -and $refAgain.Count -eq $set.Count)
-    Assert "الحتمية: المرجع يعطي البكسلات نفسها في تشغيلين" (@($set | Where-Object { $ref[$_.Id].PixelSha -ne $refAgain[$_.Id].PixelSha }).Count -eq 0)
+    $unstable = @($set | Where-Object { $ref[$_.Id].PayloadSha -ne $refAgain[$_.Id].PayloadSha })
+    foreach ($u in $unstable) { Write-Host ("DIAG حتمية [{0}]: {1}" -f $u.Id, (Get-EscPosDiff $u.Id "live" "live-again")) }
+    Assert "الحتمية: المرجع يعطي بايتات الطابعة نفسها في تشغيلين" ($unstable.Count -eq 0)
     $cand = Invoke-Render $Candidate "candidate"
     foreach ($r in $set) {
         $a = $ref[$r.Id]; $b = $cand[$r.Id]
         Assert "تطابق [$($r.Id)]: الأبعاد $($a.Width)x$($a.Height)" ($a.Width -eq $b.Width -and $a.Height -eq $b.Height)
         Assert "تطابق [$($r.Id)]: البكسلات" ($a.PixelSha -eq $b.PixelSha)
         Assert "تطابق [$($r.Id)]: بايتات ESC/POS للطابعة" ($a.PayloadSha -eq $b.PayloadSha)
+        if ($a.PayloadSha -ne $b.PayloadSha) { Write-Host ("DIAG تطابق [{0}]: {1}" -f $r.Id, (Get-EscPosDiff $r.Id "live" "candidate")) }
     }
     if ($ReportMainRenderer) {
         $main = Invoke-Render (Join-Path $bridgeDir "OzkReceiptRenderer.psm1") "repo-main"
