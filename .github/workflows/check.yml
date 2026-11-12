@@ -430,6 +430,12 @@ jobs:
         shell: powershell
         run: .\tools\tests\Test-CashierReprintDriverTransport.ps1
 
+      # صف الحماية لمسار التعريف: نموذج سلوك تعريف Xprinter يطابق التقاطين حقيقيين بالبايت، المقارِن يرفض كل
+      # نقص أو زيادة أو تحجيم أو قص (لا نجاح وهمي)، وصف الحبر وحده يحفظ أول صف من الشعار في 7/45/60 سطراً.
+      - name: Cashier reprint driver guard row - real captures, no-false-pass comparator, first logo row kept
+        shell: powershell
+        run: .\tools\tests\Test-CashierReprintDriverGuard.ps1
+
       # غلاف المهمة المجدولة لأرشفة Drive (غير مسجَّل): القفل والتزامن، المهلة وقتل الشجرة،
       # الوضع المحصور بـdry-run، ملف STOP، تنقيح السجل وتدويره — بعامل وهمي بلا أي خدمة حقيقية.
       - name: Drive archive - scheduled run wrapper test

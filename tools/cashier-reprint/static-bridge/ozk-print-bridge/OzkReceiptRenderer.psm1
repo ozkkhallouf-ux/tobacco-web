@@ -264,6 +264,24 @@ public static class OzkDriverReceiptPrinter
     private const int HORZRES = 8, VERTRES = 10, LOGPIXELSX = 88, LOGPIXELSY = 90, PHYSICALOFFSETX = 112, PHYSICALOFFSETY = 113;
     private const uint SRCCOPY = 0x00CC0020, DIB_RGB_COLORS = 0;
 
+    // صف الحماية: تعريف Xprinter XP-80 يحذف الصفوف البيضاء أعلى الصفحة **ومعها أول صف فيه حبر**
+    // (نموذج يطابق ثلاث التقاطات حقيقية بالبايت، 2026-11-12). صف أبيض لا يغيّر شيئاً لأنه أبيض.
+    // لذلك يُسلَّم للتعريف صف حبر قصير (8 نقاط في أقصى اليسار) فوق الصورة يحذفه التعريف بدل أول
+    // صف من الشعار، وتصل الصورة الأصلية بعده بلا أي تغيير. التحقق الوحيد المقبول: الالتقاط إلى ملف
+    // (لا حبر زائد ولا نقطة مفقودة)؛ إن طُبع الصف فهو خط قصير يكشفه الاختبار قبل أي ورق.
+    public const int GuardNone = 0, GuardWhite = 1, GuardInk = 2;
+
+    public static byte[] WithGuardRow(byte[] raster, int bytesPerRow, int rows, int guard)
+    {
+        if (raster == null || bytesPerRow <= 0 || rows <= 0 || raster.Length != bytesPerRow * rows) throw new ArgumentException("Raster size does not match its rows.");
+        if (guard == GuardNone) return raster;
+        if (guard != GuardWhite && guard != GuardInk) throw new ArgumentException("Unknown guard row kind.");
+        byte[] delivered = new byte[raster.Length + bytesPerRow];
+        if (guard == GuardInk) delivered[0] = 0xFF;
+        Buffer.BlockCopy(raster, 0, delivered, bytesPerRow, raster.Length);
+        return delivered;
+    }
+
     // أقصى عمود حبر + 1 وأقصى صف حبر + 1 (بت 1 = أسود، الأعلى أولاً كما في GS v 0).
     public static int[] InkExtent(byte[] raster, int bytesPerRow, int rows)
     {
@@ -386,8 +404,16 @@ public static class OzkDriverReceiptPrinter
     // يعيد رقم المهمة. كل استثناء قبل StartDoc = لا مهمة؛ بعده الرسالة تحمل "after job".
     public static int Print(string printerName, byte[] raster, int bytesPerRow, int rows, string paperName, int expectedDpi, string documentName)
     {
+        return PrintWithGuard(printerName, raster, bytesPerRow, rows, paperName, expectedDpi, documentName, GuardInk);
+    }
+
+    // الإنتاج يستعمل GuardInk دائماً عبر Print؛ الأنواع الأخرى لاختبار الالتقاط إلى ملف وحده.
+    public static int PrintWithGuard(string printerName, byte[] source, int bytesPerRow, int sourceRows, string paperName, int expectedDpi, string documentName, int guard)
+    {
         int widthDots = bytesPerRow * 8;
         if (bytesPerRow % 4 != 0) throw new ArgumentException("Raster rows must be DWORD aligned.");
+        byte[] raster = WithGuardRow(source, bytesPerRow, sourceRows, guard);
+        int rows = raster.Length / bytesPerRow;
         int[] ink = InkExtent(raster, bytesPerRow, rows);
         IntPtr printer;
         if (!OpenPrinter(printerName, out printer, IntPtr.Zero)) throw new InvalidOperationException("OpenPrinter failed with Win32 error " + Marshal.GetLastWin32Error());

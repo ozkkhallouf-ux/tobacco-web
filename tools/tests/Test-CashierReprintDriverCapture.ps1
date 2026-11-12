@@ -5,7 +5,9 @@
 #   2) ينشئ منفذ ملف محلياً وطابوراً مؤقتاً غير مشترك وغير افتراضي بالتعريف نفسه وإعدادات الكاشير وBIDI مطفأ.
 #   3) قبل كل إرسال: الطابور المؤقت يشير إلى ملف الالتقاط وحده، لا USB ولا أي منفذ فعلي، وطابور الكاشير على USB003.
 #   4) يرسل إيصالات اصطناعية (7 و45 سطراً) عبر [OzkDriverReceiptPrinter]::Print — الدالة نفسها التي يستعملها
-#      مسار driver — إلى الطابور المؤقت، ثم يفك أوامر GS v 0 في الملف ويقارن البكسلات بصورة OZK.
+#      مسار driver، بصف الحماية — إلى الطابور المؤقت، ثم يفك أوامر GS v 0 ويقارن بالمقارِن المشترك
+#      (tools/tests/lib/OzkDriverCapture.psm1): محاذاة موثقة، صفر نقاط مفقودة أو زائدة، الارتفاع نفسه.
+#      أي فشل ⇒ توقف فوراً بلا إرسال التالي. بعدها حالة تشخيصية واحدة بصف أبيض (لا تدخل في الحكم).
 #   5) يحذف الطابور والمنفذ بعد التأكد من خلوهما، ويتحقق أن لقطة طابور الكاشير لم تتغيّر.
 # الملف يسجّل البايتات لا التوقيت: لا يثبت شيئاً عن سرعة الإرسال إلى الطابعة.
 #
@@ -25,6 +27,7 @@ $driverName = "Xprinter XP-80"
 $capName = "OZK-Capture-DriverPath (FILE)"
 $capPort = Join-Path $OutDir "capture.prn"
 
+Import-Module (Join-Path (Join-Path $PSScriptRoot "lib") "OzkDriverCapture.psm1") -Force -DisableNameChecking
 $script:pass = 0
 $script:fail = 0
 function Assert($Name, [bool]$Condition) {
@@ -57,24 +60,6 @@ function Assert-Isolated {
     if (@(Get-Printer | Where-Object PortName -eq $capPort).Count -ne 1) { throw "STOP: another queue uses the capture port." }
     if ((Get-Printer -Name $cashier).PortName -ne "USB003") { throw "STOP: cashier queue port changed." }
 }
-# أوامر الملف: يفك GS v 0 بالترتيب ويعدّ الباقي (لا يفسّرها ولا يفترض توقيتاً).
-function Read-Prn([byte[]]$B) {
-    $rows = New-Object System.Collections.Generic.List[byte[]]
-    $bands = New-Object System.Collections.Generic.List[int]
-    $other = @{}; $width = -1; $i = 0
-    while ($i -lt $B.Length) {
-        if ($B[$i] -eq 0x1D -and $i + 7 -lt $B.Length -and $B[$i + 1] -eq 0x76 -and $B[$i + 2] -eq 0x30) {
-            $w = [int]$B[$i + 4] + 256 * [int]$B[$i + 5]; $h = [int]$B[$i + 6] + 256 * [int]$B[$i + 7]
-            if ($width -lt 0) { $width = $w } elseif ($w -ne $width) { throw "PRN raster width changes: $width -> $w" }
-            for ($y = 0; $y -lt $h; $y++) { $r = New-Object byte[] $w; [Buffer]::BlockCopy($B, $i + 8 + $y * $w, $r, 0, $w); $rows.Add($r) }
-            $bands.Add($h); $i += 8 + $w * $h; continue
-        }
-        if ($B[$i] -eq 0x1B -or $B[$i] -eq 0x1D) { $k = "{0:X2} {1:X2}" -f $B[$i], $B[$i + 1]; $other[$k] = 1 + [int]$other[$k] }
-        $i++
-    }
-    return [pscustomobject]@{ Rows = $rows; Bands = $bands; Width = $width; Other = $other }
-}
-
 $before = $null; $created = $false
 try {
     if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw "STOP: needs an elevated session to add a temporary queue." }
@@ -105,50 +90,51 @@ try {
     }
     $warm = New-OzkReceiptBitmap -Receipt (New-Mock 3) -LogoPath $logo; $warm.Dispose()
     $paper = & $module { $script:ReceiptDriverPaperName }
-    foreach ($n in 7, 45) {
+    # الإنتاج (Print = صف حبر) أولاً؛ أي فشل يوقف الإرسال. ثم صف أبيض للتشخيص وحده.
+    $plan = @(
+        [pscustomobject]@{ Lines = 7; Guard = "ink"; Verdict = $true },
+        [pscustomobject]@{ Lines = 45; Guard = "ink"; Verdict = $true },
+        [pscustomobject]@{ Lines = 7; Guard = "white"; Verdict = $false })
+    foreach ($step in $plan) {
+        if ($script:fail -gt 0) { Write-Host "STOP فشل تحقق سابق؛ لا إرسال لما بعده." -ForegroundColor Red; break }
+        $n = $step.Lines; $tag = "$n سطراً، صف $($step.Guard)"
         $bmp = New-OzkReceiptBitmap -Receipt (New-Mock $n) -LogoPath $logo
         try { $payload = [OzkRawThermalPrinter]::ToEscPosRaster($bmp, 190) } finally { $bmp.Dispose() }
         $image = & $module { param($p) ConvertFrom-OzkEscPosRaster $p } $payload
-        $ink = [OzkDriverReceiptPrinter]::InkExtent($image.Raster, $image.BytesPerRow, $image.Rows)
         Assert-Isolated
         if (Test-Path -LiteralPath $capPort) { Remove-Item -LiteralPath $capPort -Force }
-        $jobId = [OzkDriverReceiptPrinter]::Print($capName, $image.Raster, $image.BytesPerRow, $image.Rows, $paper, 203, "OZK capture $n")
-        Assert "[$n سطراً] مسار التعريف أعاد رقم مهمة ($jobId)" ($jobId -gt 0)
+        if ($step.Guard -eq "ink") {
+            $jobId = [OzkDriverReceiptPrinter]::Print($capName, $image.Raster, $image.BytesPerRow, $image.Rows, $paper, 203, "OZK capture $n")
+        } else {
+            $jobId = [OzkDriverReceiptPrinter]::PrintWithGuard($capName, $image.Raster, $image.BytesPerRow, $image.Rows, $paper, 203, "OZK capture $n white", [OzkDriverReceiptPrinter]::GuardWhite)
+        }
         $deadline = (Get-Date).AddSeconds(120); $last = -1; $stable = $false
         do {
             Start-Sleep -Seconds 2
             $size = if (Test-Path -LiteralPath $capPort) { (Get-Item -LiteralPath $capPort).Length } else { -1 }
             $stable = ($size -gt 0 -and $size -eq $last -and @(Get-PrintJob -PrinterName $capName).Count -eq 0); $last = $size
         } until ($stable -or (Get-Date) -gt $deadline)
-        Assert "[$n سطراً] اكتمل الالتقاط إلى الملف ($size بايت)" $stable
-        if (-not $stable) { continue }
-        $prnPath = Join-Path $OutDir "syn-$n-driver.prn"
-        Move-Item -LiteralPath $capPort -Destination $prnPath -Force
-        [IO.File]::WriteAllBytes((Join-Path $OutDir "syn-$n-ozk-raster.bin"), $image.Raster)
-        $prn = Read-Prn ([IO.File]::ReadAllBytes($prnPath))
-        Assert "[$n سطراً] عرض صورة التعريف 72 بايتاً = 576 نقطة (لا تحجيم أفقي)" ($prn.Width -eq 72)
-        # محاذاة رأسية فقط (التعريف يقصّ الأبيض أعلى وأسفل)، ثم مقارنة كل صف من صفوف المصدر.
-        $src = New-Object System.Collections.Generic.List[string]
-        for ($y = 0; $y -lt $image.Rows; $y++) { $src.Add([BitConverter]::ToString($image.Raster, $y * 72, 72)) }
-        $drv = @($prn.Rows | ForEach-Object { [BitConverter]::ToString($_) })
-        $blank = [BitConverter]::ToString((New-Object byte[] 72))
-        $firstInk = 0; while ($firstInk -lt $src.Count -and $src[$firstInk] -eq $blank) { $firstInk++ }
-        $drvFirst = 0; while ($drvFirst -lt $drv.Count -and $drv[$drvFirst] -eq $blank) { $drvFirst++ }
-        $dy = $drvFirst - $firstInk
-        $diffRows = 0; $missingRows = 0
-        for ($y = 0; $y -lt $src.Count; $y++) {
-            $yy = $y + $dy
-            if ($yy -lt 0 -or $yy -ge $drv.Count) { if ($src[$y] -ne $blank) { $missingRows++ } }
-            elseif ($src[$y] -ne $drv[$yy]) { $diffRows++ }
+        $prnPath = Join-Path $OutDir ("syn-{0}-{1}-driver.prn" -f $n, $step.Guard)
+        if ($stable) { Move-Item -LiteralPath $capPort -Destination $prnPath -Force }
+        [IO.File]::WriteAllBytes((Join-Path $OutDir ("syn-{0}-{1}-source.bin" -f $n, $step.Guard)), $image.Raster)
+        if (-not $step.Verdict) {
+            if (-not $stable) { Write-Host "INFO [$tag] لم يكتمل الالتقاط التشخيصي"; continue }
+            $cmp = Compare-OzkDriverOutput (Split-OzkRasterRows $image.Raster) (Read-OzkDriverPrn ([IO.File]::ReadAllBytes($prnPath))).Rows
+            Write-Host ("INFO [{0}] تشخيص (خارج الحكم): Pass={1} مفقود={2} زائد={3} أفضل محاذاة: مفقود={4} أول صف مفقود={5}" -f $tag, $cmp.Pass, $cmp.MissingDots, $cmp.ExtraDots, $cmp.BestMissingDots, $cmp.BestFirstMissingRow)
+            continue
         }
-        $extraInk = 0
-        for ($yy = 0; $yy -lt $drv.Count; $yy++) { $y = $yy - $dy; if (($y -lt 0 -or $y -ge $src.Count) -and $drv[$yy] -ne $blank) { $extraInk++ } }
-        Assert "[$n سطراً] كل صفوف الحبر موجودة (لا قص للإجمالي أو التذييل): مفقود $missingRows" ($missingRows -eq 0 -and $ink[1] -gt 0)
-        Assert "[$n سطراً] مطابقة بالبكسل لصورة OZK: صفوف مختلفة $diffRows من $($src.Count)" ($diffRows -eq 0 -and $src.Count -gt 0)
-        Assert "[$n سطراً] لا حبر إضافي خارج الصورة (لا هوامش أو إطارات): $extraInk" ($extraInk -eq 0)
+        Assert "[$tag] مسار التعريف أعاد رقم مهمة ($jobId)" ($jobId -gt 0)
+        Assert "[$tag] اكتمل الالتقاط إلى الملف ($size بايت)" $stable
+        if (-not $stable) { continue }
+        $prn = Read-OzkDriverPrn ([IO.File]::ReadAllBytes($prnPath))
+        $cmp = Compare-OzkDriverOutput (Split-OzkRasterRows $image.Raster) $prn.Rows
+        Assert "[$tag] عرض صورة التعريف 72 بايتاً = 576 نقطة (لا تحجيم أفقي)" ($prn.Width -eq 72)
+        Assert "[$tag] كل نقاط المصدر موجودة بما فيها أول صف من الشعار: مفقود $($cmp.MissingDots) (أول حبر في المصدر $($cmp.SourceFirstInk))" ($cmp.MissingDots -eq 0 -and $cmp.SourceInk -gt 0)
+        Assert "[$tag] لا حبر زائد (صف الحماية لم يُطبع، ولا هوامش): زائد $($cmp.ExtraDots)" ($cmp.ExtraDots -eq 0)
+        Assert "[$tag] ارتفاع الحبر وعدد النقاط كما في المصدر ($($cmp.SourceInk) نقطة): $($cmp.Reason)" ($cmp.Pass)
         $bandSizes = @($prn.Bands | Group-Object | ForEach-Object { "$($_.Name)x$($_.Count)" }) -join ","
         $otherCmds = @($prn.Other.Keys | Sort-Object | ForEach-Object { "$_=$($prn.Other[$_])" }) -join " "
-        Write-Host ("INFO [{0} سطراً] حِزَم GS v 0: {1}؛ أوامر أخرى (عدّ فقط): {2}؛ إزاحة رأسية {3}" -f $n, $bandSizes, $otherCmds, $dy)
+        Write-Host ("INFO [{0}] حِزَم GS v 0: {1}؛ أوامر أخرى (عدّ فقط): {2}؛ المحاذاة الموثقة {3}؛ أفضل محاذاة {4}" -f $tag, $bandSizes, $otherCmds, $cmp.Dy, $cmp.BestDy)
     }
 } finally {
     if ($created) {
