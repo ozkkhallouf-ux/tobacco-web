@@ -158,6 +158,39 @@ try {
     $chainOk = $true
     foreach ($p in @($integrity2.Problems)) { if ($p -match "chain broken") { $chainOk = $false } }
     Assert "التزامن: 45 سطراً بسلسلة سليمة" ($integrity2.Events -eq 45 -and $chainOk)
+
+    # ── صلاحيات الإلحاق فقط (Windows) ──────────────────────────────────────
+    $isWindowsHost = ($env:OS -eq "Windows_NT")
+    if ($isWindowsHost) {
+        $aclRoot = Join-Path $tempRoot "acl"
+        $me = [Security.Principal.WindowsIdentity]::GetCurrent()
+        Set-OzkReceiptArchiveAcl -Root $aclRoot -WriterAccount $me.Name
+        $report = Get-OzkReceiptArchiveAclReport $aclRoot
+        $writerSid = $me.User.Value
+        $fileRule = @($report.Rules | Where-Object { $_.Sid -eq $writerSid -and $_.Propagation -match "InheritOnly" })
+        $folderRule = @($report.Rules | Where-Object { $_.Sid -eq $writerSid -and $_.Inheritance -eq "ContainerInherit" })
+        Assert "ACL: الوراثة مقطوعة" ($report.Protected)
+        $fv = [int64]$fileRule[0].RightsValue
+        Assert "ACL: ملفات الكاتب إلحاق وقراءة فقط (لا WriteData ولا Delete ولا تغيير صلاحيات)" ($fileRule.Count -eq 1 -and ($fv -band 0x4) -ne 0 -and ($fv -band 0x1) -ne 0 -and ($fv -band (0x2 -bor 0x10 -bor 0x40 -bor 0x100 -bor 0x10000 -bor 0x40000 -bor 0x80000)) -eq 0)
+        $dv = [int64]$folderRule[0].RightsValue
+        Assert "ACL: مجلدات الكاتب إنشاء بلا حذف" ($folderRule.Count -eq 1 -and ($dv -band 0x2) -ne 0 -and ($dv -band (0x40 -bor 0x10000 -bor 0x40000 -bor 0x80000)) -eq 0)
+        Assert "ACL: Users قراءة فقط" (@($report.Rules | Where-Object { $_.Sid -eq "S-1-5-32-545" -and $_.Rights -match "ReadAndExecute" -and $_.Rights -notmatch "Write|Modify|FullControl" }).Count -eq 1)
+        $c3 = New-OzkReceiptArchiveContent -PrintId ([guid]::NewGuid().ToString()) -Source "auto" -Header (New-Header) -Lines (New-Lines) -Receipt $receipt
+        $s3 = Save-OzkArchivedReceipt -Root $aclRoot -Content $c3
+        [void](Add-OzkReceiptArchiveEvent -Root $aclRoot -PrintId $s3.PrintId -Stage "submitted" -InvoiceGuid $c3.invoice.guid -InvoiceNumber 2992 -JobId 1)
+        Assert "ACL: الكاتب يحفظ ويُلحق تحت صلاحيات الإلحاق" ((Test-OzkReceiptArchiveIntegrity $aclRoot).Ok)
+        $principal = New-Object Security.Principal.WindowsPrincipal($me)
+        if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+            Write-Host "SKIP منع الكتابة فوق السجلات يُختبر بحساب غير مدير (الحالي مدير مرفوع الصلاحية يتجاوز أي ACL بالتصميم)"
+        } else {
+            Assert "ACL: الكتابة فوق نسخة إيصال مرفوضة" (Throws { [IO.File]::WriteAllBytes($s3.Path, [byte[]](1, 2, 3)) })
+            Assert "ACL: حذف نسخة إيصال مرفوض" (Throws { Remove-Item -LiteralPath $s3.Path -Force -ErrorAction Stop })
+            $ev = @(Get-ChildItem -LiteralPath $aclRoot -Filter "events-*.jsonl")[0].FullName
+            Assert "ACL: تفريغ سجل المراحل مرفوض" (Throws { [IO.File]::WriteAllText($ev, "") })
+        }
+    } else {
+        Write-Host "SKIP صلاحيات NTFS (تحتاج Windows)"
+    }
 } finally {
     Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 }

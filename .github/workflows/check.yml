@@ -398,6 +398,18 @@ jobs:
         shell: powershell
         run: .\tools\tests\Test-CashierReceiptBridgeIntegration.ps1
 
+      # سيناريوهات الأعطال بدوال الجسر الحقيقية: تعذّر كتابة الأرشيف، انقطاع قبل العلامة وبعدها وبعد التسليم،
+      # فشل قبل المهمة وبعدها، وإقلاعات متكررة — ورقة واحدة على الأكثر دائماً. طباعة وهمية.
+      - name: Cashier receipt archive - failure, power loss and restart scenarios test
+        shell: powershell
+        run: .\tools\tests\Test-CashierReceiptFailureScenarios.ps1
+
+      # تطابق تصميم 80mm بالبكسل وبايتات ESC/POS بين الرسّام الحي على OZKUSER (f7806b56) ورسّام
+      # أداة إعادة الطباعة، مع تقرير معلوماتي عن فرق رسّام المستودع الرئيسي. GDI+ بلا طابعة.
+      - name: Cashier receipt 80mm - pixel and ESC/POS match against the live OZKUSER renderer
+        shell: powershell
+        run: .\tools\tests\Test-CashierReceiptVisualMatch.ps1 -ReportMainRenderer
+
       # غلاف المهمة المجدولة لأرشفة Drive (غير مسجَّل): القفل والتزامن، المهلة وقتل الشجرة،
       # الوضع المحصور بـdry-run، ملف STOP، تنقيح السجل وتدويره — بعامل وهمي بلا أي خدمة حقيقية.
       - name: Drive archive - scheduled run wrapper test

@@ -131,7 +131,7 @@ try {
     $alerted = @{}
     $first = Select-CashierWatchAlerts $findings $alerted
     Assert "التكرار: كل الجديد مختار أول مرة" (@($first.Selected).Count -eq $findings.Count)
-    foreach ($item in $first.Selected) { $alerted[[string]$item.Finding.invoiceGuid] = [ordered]@{ hash = $item.Hash } }
+    foreach ($item in $first.Selected) { $alerted[(Get-CashierWatchAlertKey $item.Finding)] = [ordered]@{ hash = $item.Hash } }
     Assert "التكرار: لا شيء ثانيةً لنفس الحال" (@((Select-CashierWatchAlerts $findings $alerted).Selected).Count -eq 0)
     $current[$gEdit] = New-Current $gEdit 2980 @((New-SnapshotLine $ITEM_A "اوسكار سليم فضي" 6 5.3))
     $again = @(Get-CashierWatchFindings -Prints $prints -Current $current -LogEvidence $logEvidence -Neighbours $neighbours -WatchStartUtc $start)
@@ -142,6 +142,21 @@ try {
     $batch = Select-CashierWatchAlerts $many @{}
     Assert "التجميع: 10 في الرسالة والباقي للتالية" (@($batch.Selected).Count -eq 10 -and $batch.Remaining -eq 3)
     Assert "التجميع: الرسالة تذكر المؤجَّل" ((Format-CashierWatchAlert -Findings @($batch.Selected | ForEach-Object { $_.Finding }) -Zone $syria -Remaining $batch.Remaining) -match "و3 أخرى")
+
+    # ── لا تكرار عبر التشغيلات، ولا تاريخ بعد فقدان ملف الحالة ──────────────
+    $persistPath = Join-Path $tempRoot "persist\state.json"
+    $pState = New-CashierWatchState $start
+    foreach ($item in (Select-CashierWatchAlerts $findings $pState.alerted).Selected) { $pState.alerted[(Get-CashierWatchAlertKey $item.Finding)] = [ordered]@{ hash = $item.Hash; kind = $item.Finding.kind } }
+    Save-CashierWatchState $persistPath $pState
+    $reloadedState = (Read-CashierWatchState $persistPath ([datetime]::UtcNow)).State
+    Assert "تكرار: بعد إعادة تشغيل المراقب (حالة محفوظة) لا رسالة ثانية" (@((Select-CashierWatchAlerts $findings $reloadedState.alerted).Selected).Count -eq 0)
+    Remove-Item -LiteralPath $persistPath -Force
+    $fresh = Read-CashierWatchState $persistPath ([datetime]"2026-11-12T12:00:00Z")
+    Assert "تاريخ: فقدان ملف الحالة ⇒ بداية جديدة" ($fresh.Initialized)
+    $afterReset = @(Get-CashierWatchFindings -Prints $prints -Current $current -LogEvidence $logEvidence -Neighbours $neighbours -WatchStartUtc ([datetime]"2026-11-12T12:00:00Z"))
+    Assert "تاريخ: بعد البداية الجديدة لا تنبيه عن أي إيصال أقدم" ($afterReset.Count -eq 0)
+    Assert "تاريخ: ولا «نتيجة مجهولة» أقدم من البداية" (@(Get-CashierWatchUnknownOutcomes @(Get-OzkReceiptPrintSummaries $root) ([datetime]"2026-11-12T13:00:00Z") ([datetime]"2026-11-12T12:00:00Z")).Count -eq 0)
+    Assert "نتيجة مجهولة: الإيصال المُجهَّز الذي فشل قبل المهمة لا يُعدّ مجهولاً" (@(Get-CashierWatchUnknownOutcomes @(Get-OzkReceiptPrintSummaries $root) ([datetime]"2026-11-12T13:00:00Z") $start | Where-Object { $_.invoiceNumber -eq 2993 }).Count -eq 0)
 
     # ── دليل Windows (ليس ورقياً) ──────────────────────────────────────────
     $summary = [pscustomobject]@{ jobId = 63 }

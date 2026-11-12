@@ -332,15 +332,90 @@ function Get-OzkArchivedComparable($Content) {
         -Total $Content.invoice.total -TotalDiscount $Content.invoice.totalDiscount -TotalExtra $Content.invoice.totalExtra -Lines @($lines))
 }
 
+# ── صلاحيات الأرشيف (Windows فقط؛ خطوة تثبيت لا يستدعيها الجسر تلقائياً) ─────────
+# الكاتب (حساب الجسر) يستطيع: إنشاء ملفات ومجلدات جديدة، والإلحاق بالملفات، والقراءة.
+# لا يستطيع: الكتابة فوق محتوى قائم، ولا حذف أو إعادة تسمية أي ملف. القرّاء (Users، ومنهم
+# حساب خدمة إعادة الطباعة): قراءة فقط. locks\ وwatch\ وحدهما قابلان للتعديل للكاتب.
+# حدود الحماية: SYSTEM والمدراء بصلاحية مرفوعة (elevated) يستطيعون كل شيء، ومالك الملف يملك
+# WRITE_DAC ضمنياً فيستطيع تغيير الـACL عمداً. سلسلة البصمات تكشف التعديل الجزئي، أما إعادة
+# كتابة السلسلة كاملة بيد مدير فلا يكشفها إلا مرساة خارجية (بصمة رأس السلسلة خارج الجهاز).
+function Set-OzkReceiptArchiveAcl {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$WriterAccount,
+        [string]$ReaderSid = "S-1-5-32-545"
+    )
+    Initialize-OzkReceiptArchive $Root
+    [void](New-Item -ItemType Directory -Force -Path (Join-Path $Root "watch"))
+    $R = [Security.AccessControl.FileSystemRights]
+    $I = [Security.AccessControl.InheritanceFlags]
+    $P = [Security.AccessControl.PropagationFlags]
+    $allow = [Security.AccessControl.AccessControlType]::Allow
+    $writer = (New-Object Security.Principal.NTAccount($WriterAccount)).Translate([Security.Principal.SecurityIdentifier])
+    $system = New-Object Security.Principal.SecurityIdentifier("S-1-5-18")
+    $admins = New-Object Security.Principal.SecurityIdentifier("S-1-5-32-544")
+    $readers = New-Object Security.Principal.SecurityIdentifier($ReaderSid)
+    $both = $I::ContainerInherit -bor $I::ObjectInherit
+
+    $acl = New-Object Security.AccessControl.DirectorySecurity
+    $acl.SetAccessRuleProtection($true, $false)
+    $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($system, $R::FullControl, $both, $P::None, $allow)))
+    $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($admins, $R::FullControl, $both, $P::None, $allow)))
+    $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($readers, $R::ReadAndExecute, $both, $P::None, $allow)))
+    # المجلدات: قراءة + إنشاء ملف + إنشاء مجلد (CreateFiles/CreateDirectories)، بلا حذف.
+    $folderRights = $R::ReadAndExecute -bor $R::CreateFiles -bor $R::CreateDirectories
+    $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($writer, $folderRights, $I::ContainerInherit, $P::None, $allow)))
+    # الملفات: قراءة + إلحاق فقط. لا WriteData (كتابة فوق)، لا Delete، لا WriteAttributes.
+    $fileRights = $R::Read -bor $R::AppendData -bor $R::Synchronize
+    $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($writer, $fileRights, $I::ObjectInherit, $P::InheritOnly, $allow)))
+    Set-Acl -LiteralPath $Root -AclObject $acl
+
+    foreach ($name in @("locks", "watch")) {
+        $path = Join-Path $Root $name
+        $sub = Get-Acl -LiteralPath $path
+        $sub.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($writer, $R::Modify, $both, $P::None, $allow)))
+        Set-Acl -LiteralPath $path -AclObject $sub
+    }
+}
+
+# تقرير مقروء عن صلاحيات الأرشيف الفعلية — للمراجعة والاختبار، بلا تعديل.
+function Get-OzkReceiptArchiveAclReport([string]$Root) {
+    $acl = Get-Acl -LiteralPath $Root
+    return [pscustomobject]@{
+        Protected = $acl.AreAccessRulesProtected
+        Rules = @($acl.Access | ForEach-Object {
+            [pscustomobject]@{
+                Sid = $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+                Rights = [string]$_.FileSystemRights; RightsValue = [int64]$_.FileSystemRights; Inheritance = [string]$_.InheritanceFlags; Propagation = [string]$_.PropagationFlags
+                Type = [string]$_.AccessControlType; Inherited = $_.IsInherited
+            }
+        })
+    }
+}
+
 # ── تخزين وقفل وسلسلة ────────────────────────────────────────────────────────
 function Initialize-OzkReceiptArchive([string]$Root) {
     if ([string]::IsNullOrWhiteSpace($Root)) { throw "Archive root is required." }
     [void](New-Item -ItemType Directory -Force -Path $Root)
     [void](New-Item -ItemType Directory -Force -Path (Join-Path $Root "receipts"))
+    [void](New-Item -ItemType Directory -Force -Path (Join-Path $Root "locks"))
+}
+
+# ملف جديد يُفتح بحق الإلحاق وحده حيث يتاح (.NET Framework = Windows PowerShell 5.1): يعمل
+# تحت ACL الإلحاق فقط (Set-OzkReceiptArchiveAcl) الذي يمنع الكتابة فوق أي ملف أو حذفه.
+# لا ملف مؤقت ولا إعادة تسمية: الإعادة تحتاج حق حذف. كتابة جزئية عند انقطاع مفاجئ تُكشف
+# بالبصمة، ولا تُعدّ النسخة مؤرشفة إلا بسطر prepared الذي يُكتب بعدها.
+function Open-OzkAppendOnlyStream([string]$Path, [IO.FileMode]$Mode) {
+    $rights = [Security.AccessControl.FileSystemRights]::AppendData -bor [Security.AccessControl.FileSystemRights]::Synchronize
+    $ctor = [IO.FileStream].GetConstructor(@([string], [IO.FileMode], [Security.AccessControl.FileSystemRights], [IO.FileShare], [int], [IO.FileOptions]))
+    if ($null -ne $ctor) {
+        return $ctor.Invoke(@($Path, $Mode, $rights, [IO.FileShare]::Read, 4096, [IO.FileOptions]::WriteThrough))
+    }
+    return [IO.File]::Open($Path, $Mode, [IO.FileAccess]::Write, [IO.FileShare]::Read)
 }
 
 function Enter-OzkReceiptArchiveLock([string]$Root) {
-    $path = Join-Path $Root "archive.lock"
+    $path = Join-Path (Join-Path $Root "locks") "archive.lock"
     $deadline = [datetime]::UtcNow.AddMilliseconds($script:LockTimeoutMilliseconds)
     while ($true) {
         try {
@@ -394,7 +469,7 @@ function Add-OzkReceiptArchiveEventUnlocked([string]$Root, $Event, [datetime]$No
     $line = ConvertTo-OzkCanonicalJson $record
     $path = Join-Path $Root ("events-{0}.jsonl" -f $NowUtc.ToUniversalTime().ToString("yyyy-MM", $script:Invariant))
     $bytes = [Text.Encoding]::ASCII.GetBytes($line + "`n")
-    $stream = [IO.File]::Open($path, [IO.FileMode]::Append, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+    $stream = Open-OzkAppendOnlyStream $path ([IO.FileMode]::Append)
     try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
     return [pscustomobject]@{ Line = $line; Sha256 = (Get-OzkTextSha256 $line); Path = $path }
 }
@@ -424,9 +499,9 @@ function Save-OzkArchivedReceipt {
     $lock = Enter-OzkReceiptArchiveLock $Root
     try {
         if (Test-Path -LiteralPath $finalPath) { throw "Archived receipt already exists for printId $($Content.printId); refusing to overwrite." }
-        $temp = $finalPath + ".tmp-" + [guid]::NewGuid().ToString("N")
-        [IO.File]::WriteAllBytes($temp, [Text.Encoding]::ASCII.GetBytes($json))
-        [IO.File]::Move($temp, $finalPath)
+        $bytes = [Text.Encoding]::ASCII.GetBytes($json)
+        $stream = Open-OzkAppendOnlyStream $finalPath ([IO.FileMode]::CreateNew)
+        try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
         $event = Add-OzkReceiptArchiveEventUnlocked $Root ([ordered]@{
             stage = "prepared"
             printId = [string]$Content.printId
@@ -545,4 +620,4 @@ Export-ModuleMember -Function Get-OzkReceiptArchiveDefaultRoot, ConvertTo-OzkCan
     ConvertTo-OzkUtcText, ConvertTo-OzkInvoiceAmount, ConvertTo-OzkSelectedQuantity, New-OzkInvoiceComparable, Compare-OzkInvoiceComparable,
     New-OzkReceiptArchiveContent, Get-OzkArchivedComparable, Initialize-OzkReceiptArchive, Save-OzkArchivedReceipt, Add-OzkReceiptArchiveEvent,
     Get-OzkReceiptArchiveEvents, Get-OzkReceiptPrintSummaries, Test-OzkReceiptReachedSpooler, Get-OzkArchivedReceiptContent,
-    Test-OzkReceiptArchiveIntegrity
+    Test-OzkReceiptArchiveIntegrity, Set-OzkReceiptArchiveAcl, Get-OzkReceiptArchiveAclReport

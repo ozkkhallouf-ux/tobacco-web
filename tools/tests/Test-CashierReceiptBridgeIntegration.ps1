@@ -70,6 +70,11 @@ try {
     Assert "منع التكرار: لا إعادة طباعة لأي فاتورة spooled/baseline/duplicate_suppressed" $skipAll
     Assert "منع التكرار: فاتورة جديدة غير مرئية تُطبع" (-not (Should-SkipSeenInvoice $null $true))
 
+    # ── توافق Windows PowerShell 5.1: [short] غير معرّف فيه (يظهر في 6+ فقط)، فكان أول توقيع
+    #    استقرار لنص (GUID/اسم) يرمي «Unable to find type» ويُسقط الجسر بعد الترقية.
+    Assert "PS 5.1: لا أنواع PowerShell 6+ ([short]/[ushort]/[uint]/[ulong]) في الجسر" ($bridgeText -notmatch '\[(short|ushort|uint|ulong)\]')
+    Assert "PS 5.1: التوقيع القانوني يقبل نصاً وعدداً صحيحاً قصيراً" ((Format-CanonicalValue "af3031d6") -eq "af3031d6" -and (Format-CanonicalValue ([int16]7)) -eq "7")
+
     # ── ثبات الرأس والأسطر قبل الطباعة ────────────────────────────────────
     function New-Header { [pscustomobject]@{ InvoiceGuid = "af3031d6-6fe8-4dee-8359-cc3730b00568"; InvoiceNumber = 2992; TypeGuid = "cc1097b1-662d-4d80-8e4e-3b493249591c"
         InvoiceDate = "2026-11-12T00:00:00Z"; CreateDate = "2026-11-12T09:52:08Z"; LastUpdateDate = $null; CustomerName = ""; IsPosted = $true; RecordState = 0

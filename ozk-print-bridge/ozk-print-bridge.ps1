@@ -533,7 +533,7 @@ $script:InvariantCulture = [Globalization.CultureInfo]::InvariantCulture
 function Format-CanonicalValue($Value) {
     if ($null -eq $Value -or $Value -is [DBNull]) { return "" }
     if ($Value -is [double] -or $Value -is [decimal] -or $Value -is [single] -or
-        $Value -is [int] -or $Value -is [long] -or $Value -is [short]) {
+        $Value -is [int] -or $Value -is [long] -or $Value -is [int16]) {
         # "R" بثقافة ثابتة: لا فاصلة عشرية محلية ولا تقريب يخفي فرقاً حقيقياً.
         return ([double]$Value).ToString("R", $script:InvariantCulture)
     }

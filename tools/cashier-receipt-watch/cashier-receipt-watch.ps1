@@ -111,6 +111,7 @@ if ($prints.Count) {
     }
 }
 
+$findings = @($findings) + @(Get-CashierWatchUnknownOutcomes $summaries $nowUtc $watchStart)
 $selection = Select-CashierWatchAlerts $findings $state.alerted
 $message = $null
 if (@($selection.Selected).Count -or $integrityFailures.Count) {
@@ -129,7 +130,7 @@ if ($message -and -not $DryRun) {
         $sent = $true
     }
     foreach ($item in @($selection.Selected)) {
-        $state.alerted[[string]$item.Finding.invoiceGuid] = [ordered]@{ hash = $item.Hash; kind = $item.Finding.kind; number = [int]$item.Finding.invoiceNumber; at = $nowUtc.ToString("o") }
+        $state.alerted[(Get-CashierWatchAlertKey $item.Finding)] = [ordered]@{ hash = $item.Hash; kind = $item.Finding.kind; number = [int]$item.Finding.invoiceNumber; at = $nowUtc.ToString("o") }
     }
     foreach ($summary in $integrityFailures) { $state.alerted["integrity:" + $summary.printId] = [ordered]@{ hash = "integrity"; at = $nowUtc.ToString("o") } }
 }

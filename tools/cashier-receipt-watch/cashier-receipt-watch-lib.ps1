@@ -246,8 +246,15 @@ function Save-CashierWatchState([string]$Path, $State) {
     if (Test-Path -LiteralPath $Path) { [IO.File]::Replace($temp, $Path, [NullString]::Value) } else { [IO.File]::Move($temp, $Path) }
 }
 
+# مفتاح منع التكرار: الفاتورة بالـGUID، أما «النتيجة المجهولة» فلكل طباعة بعينها — كي لا
+# يتناوب حالان على الفاتورة نفسها فيُعاد إرسال كلٍّ منهما في كل تشغيل.
+function Get-CashierWatchAlertKey($Finding) {
+    if ($Finding.kind -eq "outcome_unknown") { return ("unknown:" + [string]$Finding.printId) }
+    return ([string]$Finding.invoiceGuid)
+}
+
 function Get-CashierWatchFindingHash($Finding) {
-    $basis = [ordered]@{ kind = $Finding.kind; changes = @($Finding.changes); reentryGuid = $(if ($Finding.reentry) { $Finding.reentry.guid } else { $null }); reusedBy = @($Finding.numberReusedBy | ForEach-Object { $_.guid }) }
+    $basis = [ordered]@{ kind = $Finding.kind; printId = $(if ($Finding.kind -eq "outcome_unknown") { [string]$Finding.printId } else { $null }); changes = @($Finding.changes); reentryGuid = $(if ($Finding.reentry) { $Finding.reentry.guid } else { $null }); reusedBy = @($Finding.numberReusedBy | ForEach-Object { $_.guid }) }
     return (Get-OzkTextSha256 (ConvertTo-OzkCanonicalJson $basis))
 }
 
@@ -324,6 +331,30 @@ function Get-CashierWatchFindings {
     return @($findings.ToArray() | Sort-Object printedAtUtc)
 }
 
+# إيصال جُهِّز وأُرشف ولم يُسجَّل له تسليم ولا فشل (انقطاع بين الأرشفة والطباعة، أو بعد
+# التسليم وقبل تسجيله). الجسر لا يعيد طباعته آلياً (علامة print_in_flight تمنع التكرار)،
+# فالنتيجة مجهولة ويحتاج إنسان أن يتحقق. لا يُبلَّغ إن طُبعت الفاتورة نفسها لاحقاً.
+function Get-CashierWatchUnknownOutcomes([object[]]$Summaries, [datetime]$NowUtc, [datetime]$WatchStartUtc, [int]$MinAgeMinutes = 10) {
+    $resolved = @{}
+    foreach ($s in @($Summaries)) {
+        $stages = @($s.stages)
+        if ((Test-OzkReceiptReachedSpooler $s) -or $stages -contains "submit_failed_no_job") {
+            $guid = ([string]$s.invoiceGuid).ToLowerInvariant()
+            $at = [datetime]::Parse([string]$s.preparedAtUtc, $script:WatchInvariant, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+            if (-not $resolved.ContainsKey($guid) -or $at -gt $resolved[$guid]) { $resolved[$guid] = $at }
+        }
+    }
+    return @(foreach ($s in @($Summaries)) {
+        if ((@($s.stages) -join ",") -ne "prepared") { continue }
+        $at = [datetime]::Parse([string]$s.preparedAtUtc, $script:WatchInvariant, [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+        if ($at -lt $WatchStartUtc.ToUniversalTime() -or ($NowUtc.ToUniversalTime() - $at).TotalMinutes -lt $MinAgeMinutes) { continue }
+        $guid = ([string]$s.invoiceGuid).ToLowerInvariant()
+        if ($resolved.ContainsKey($guid) -and $resolved[$guid] -gt $at) { continue }
+        [pscustomobject]@{ kind = "outcome_unknown"; invoiceGuid = $guid; invoiceNumber = [int]$s.invoiceNumber; printId = [string]$s.printId
+            printedAtUtc = $at.ToString("o", $script:WatchInvariant); printedNet = $s.printedNet; currencyIso = ""; changes = @(); reentry = $null; numberReusedBy = @(); deletionLogged = $false }
+    })
+}
+
 # ── رسالة التنبيه (بلا أسماء زبائن) ──────────────────────────────────────────
 function Format-CashierWatchAmount($Value) {
     return ([double]$Value).ToString("#,##0.##", $script:WatchInvariant)
@@ -375,6 +406,9 @@ function Format-CashierWatchAlert([object[]]$Findings, [TimeZoneInfo]$Zone = [Ti
             "deleted" {
                 $lines.Add("• #$($f.invoiceNumber) — طُبعت $when ثم حُذفت من الأمين (مثبت في سجل العمليات)، صافيها المطبوع $(Format-CashierWatchAmount $f.printedNet)$iso")
             }
+            "outcome_unknown" {
+                $lines.Add("• #$($f.invoiceNumber) — جُهّز إيصالها $when ولم يُسجَّل تسليمه لـWindows (انقطاع؟). لم تُعَد طباعته آلياً — تحقّق هل خرج الورق")
+            }
             "no_longer_cashier_posted" {
                 $lines.Add("• #$($f.invoiceNumber) — طُبعت $when ولم تعد فاتورة كاشير مرحّلة (إلغاء ترحيل أو تغيير نوع)")
             }
@@ -399,7 +433,7 @@ function Format-CashierWatchAlert([object[]]$Findings, [TimeZoneInfo]$Zone = [Ti
 function Select-CashierWatchAlerts([object[]]$Findings, [hashtable]$Alerted) {
     $fresh = @(foreach ($f in @($Findings)) {
         $hash = Get-CashierWatchFindingHash $f
-        $previous = $Alerted[[string]$f.invoiceGuid]
+        $previous = $Alerted[(Get-CashierWatchAlertKey $f)]
         $previousHash = $null
         if ($null -ne $previous) { if ($previous -is [string]) { $previousHash = $previous } else { $previousHash = [string]$previous.hash } }
         if ($previousHash -ne $hash) { [pscustomobject]@{ Finding = $f; Hash = $hash } }
