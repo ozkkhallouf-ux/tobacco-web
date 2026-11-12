@@ -4,6 +4,8 @@
 #   -Mode Print   -InvoiceNumber 1234 -InvoiceDate ... -RequestId <guid>   طلب طباعة نسخة واحدة
 #   -Mode Status  -RequestId <guid>                                    حالة طلب سابق، بلا طباعة
 #   -Mode Health                                                       فحص الإعداد والمسار، بلا طباعة
+#   -Mode History -InvoiceNumber 1234 [-PrintId <guid>]                النسخ المؤرشفة لهذا الرقم (قراءة فقط)، ومع
+#        -PrintId نصّ نسخة تاريخية موسومة «لا تمثّل الفاتورة الحالية» — للعرض فقط، بلا أي طباعة.
 #   -Mode Serve                                                        على جهاز الطابعة فقط: يُشغَّل كأمر
 #        مفروض لمفتاح ssh المقيَّد، ويقرأ الطلب من SSH_ORIGINAL_COMMAND بصيغة ضيقة.
 #        مع printDispatch=agent لا يطبع: يكتب تذكرة للعامل المحلي وينتظر نتيجتها.
@@ -14,12 +16,13 @@
 # الطلب عبر ssh إلى OZKUSER). لا يلمس جسر الطباعة التلقائية ولا state.json ولا مهمته.
 [CmdletBinding()]
 param(
-    [ValidateSet("Resolve", "Print", "Status", "Health", "Serve", "Agent")]
+    [ValidateSet("Resolve", "Print", "Status", "Health", "Serve", "Agent", "History")]
     [string]$Mode = "Health",
     [int]$InvoiceNumber = 0,
     [string]$InvoiceDate = "",
     [string]$RequestId = "",
     [string]$Root = "",
+    [string]$PrintId = "",
     [switch]$Once
 )
 
@@ -47,6 +50,9 @@ function Get-LocalResolveResult($Config, [string]$CashierRoot, [scriptblock]$Loo
         $last = Get-CashierLastReprint $CashierRoot $inv.InvoiceGuid
         if ($null -ne $last) { $result.LastReprintAt = [string]$last.at; $result.LastReprintFrom = [string]$last.requestedFrom }
         $result.NewInvoiceWarningSeconds = $Config.newInvoiceWarningSeconds
+        # ما طُبع سابقاً لهذه الفاتورة (بالـGUID) وهل تغيّرت بعده، ومن طُبع بالرقم نفسه لفاتورة أخرى.
+        try { $result.Archive = Get-CashierArchiveInsight $Config.receiptArchiveRoot $inv }
+        catch { $result.Archive = [pscustomobject]@{ Unavailable = $true } }
     }
     if ($resolved.Status -eq "ambiguous") { $result.Dates = @($resolved.Choices | ForEach-Object { $_.InvoiceDate }) }
     return [pscustomobject]$result
@@ -58,7 +64,7 @@ function Invoke-LocalPrint($Config, [string]$CashierRoot, [scriptblock]$Lookup, 
     $bridgeSql = { param($c) "" }
     if ($Config.bridgeSqlSource -eq "tool-secret") { $bridgeSql = { param($c) Get-CashierBridgeSqlConnectionString (Read-CashierSqlSecret $secretFile) }.GetNewClosure() }
     $result = Invoke-CashierReprint -Config $Config -Root $CashierRoot -Number $Number -Date $Date -RequestId $Id -RequestedFrom $From `
-        -Lookup $Lookup -BridgeSql $bridgeSql -Runner { param($c, $n, $d, $s) Invoke-CashierBridgeProcess $c $n $d $s }
+        -Lookup $Lookup -BridgeSql $bridgeSql -Runner { param($c, $n, $d, $s, $g) Invoke-CashierBridgeProcess $c $n $d $s $g }
     return [pscustomobject]@{ Status = $result.Status; Message = $result.Message; Confirmation = [string]$result.Details.confirmation }
 }
 
@@ -79,6 +85,34 @@ try {
         $connection = Open-CashierReadOnlyConnection (Read-CashierSqlSecret $secretPath)
         try { return (Invoke-CashierInvoiceLookup $connection $Number) }
         finally { $connection.Dispose() }
+    }
+
+    if ($Mode -eq "History") {
+        if ($config.mode -ne "local") { Out-Result ([pscustomobject]@{ Status = "not_supported"; Message = "النسخ المؤرشفة تُقرأ على جهاز الطابعة نفسه." }) 1 }
+        if ($InvoiceNumber -le 0) { Out-Result ([pscustomobject]@{ Status = "invalid_input"; Message = "أدخل رقم فاتورة صحيحاً." }) 1 }
+        $prints = @(Read-CashierArchivePrints $config.receiptArchiveRoot | Where-Object { $_.ReachedSpooler -and $_.InvoiceNumber -eq $InvoiceNumber })
+        $currentGuid = $null
+        try {
+            $resolvedNow = Resolve-CashierInvoice @(& $lookup $InvoiceNumber) $InvoiceNumber $InvoiceDate
+            if ($resolvedNow.Status -eq "ok") { $currentGuid = $resolvedNow.Invoice.InvoiceGuid }
+        } catch { $currentGuid = $null }
+        $items = @($prints | ForEach-Object {
+            [ordered]@{
+                PrintId = $_.PrintId; PrintedAt = [string]$_.PreparedAt; Source = $_.Source; PrintedNet = $_.PrintedNet; Stages = @($_.Stages)
+                InvoiceGuidSuffix = $_.InvoiceGuid.Substring($_.InvoiceGuid.Length - 8)
+                # «historical» دائماً: النسخة المؤرشفة سجلّ لما طُبع، لا الفاتورة الحالية — حتى لو كانت لنفس الـGUID.
+                Kind = "historical"
+                SameInvoiceAsCurrent = ($null -ne $currentGuid -and $_.InvoiceGuid -eq $currentGuid)
+            }
+        })
+        $out = [ordered]@{ Status = "ok"; InvoiceNumber = $InvoiceNumber; CurrentInvoiceResolved = ($null -ne $currentGuid); Prints = $items }
+        if ($PrintId) {
+            $chosen = @($prints | Where-Object { $_.PrintId -eq $PrintId.ToLowerInvariant() })
+            if ($chosen.Count -ne 1) { Out-Result ([pscustomobject]@{ Status = "not_found"; Message = "لا توجد نسخة مؤرشفة بهذا المعرّف لهذا الرقم." }) 1 }
+            try { $out.HistoricalText = Format-CashierHistoricalReceipt (Read-CashierArchivedReceipt $config.receiptArchiveRoot $chosen[0]) $chosen[0] }
+            catch { Out-Result ([pscustomobject]@{ Status = "archive_integrity_failed"; Message = [string]$_.Exception.Message }) 1 }
+        }
+        Out-Result ([pscustomobject]$out) 0
     }
 
     if ($Mode -eq "Serve") {

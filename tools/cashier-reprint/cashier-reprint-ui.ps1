@@ -161,6 +161,22 @@ $printButton.Add_Click({
             $lines.Add("")
             $lines.Add("أُعيدت طباعتها يدوياً من قبل (طلب من $($found.LastReprintFrom)): $($found.LastReprintAt)")
         }
+        # الأرشيف الثابت: الطباعة الآن من بيانات الأمين الحالية دائماً، لا من أي نسخة سابقة.
+        $archive = $found.Archive
+        if ($null -ne $archive -and -not $archive.Unavailable) {
+            if ($archive.ChangedSincePrint -eq $true) {
+                $lines.Add("")
+                $lines.Add("⚠️ هذه الفاتورة عُدّلت في الأمين بعد آخر طباعة ($($archive.LastPrintedAt)). الإيصال القديم لا يطابقها؛ ستُطبع نسختها الحالية.")
+            }
+            if ($archive.ArchiveIntegrityFailed) {
+                $lines.Add("")
+                $lines.Add("⚠️ آخر نسخة مؤرشفة لهذه الفاتورة فشلت فحص البصمة — راجع الأرشيف.")
+            }
+            if (@($archive.NumberReusedFrom).Count -gt 0) {
+                $lines.Add("")
+                $lines.Add("⚠️ الرقم $($inv.Number) طُبع سابقاً لفاتورة أخرى حُذفت أو تغيّرت ($(@($archive.NumberReusedFrom).Count) نسخة). ما سيُطبع الآن هو الفاتورة الحالية بهذا الرقم، لا الإيصال القديم.")
+            }
+        }
         $lines.Add("")
         $lines.Add("هل تريد طباعة نسخة على طابعة الكاشير في $($found.Host)؟")
         $answer = [Windows.Forms.MessageBox]::Show(($lines -join "`n"), "تأكيد الطباعة",

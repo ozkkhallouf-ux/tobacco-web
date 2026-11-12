@@ -199,3 +199,18 @@ powershell -File app\cashier-reprint.ps1 -Mode Health          # فحص بلا �
 
 `tools/tests/Test-CashierReprint.ps1` و`tools/tests/Test-CashierReprintAgent.ps1` (Windows PowerShell 5.1 في CI، وPowerShell 7 محلياً). بلا أمين
 ولا طابعة: صفوف مصطنعة وجسر وهمي.
+
+## الأرشيف الثابت والنسخ التاريخية (فرع `claude/cashier-receipt-archive`، غير منشور)
+
+- **نافذة التأكيد تقرأ أرشيف الإيصالات** الذي يكتبه الجسر (`receiptArchiveRoot`، والافتراضي
+  `C:\ProgramData\OZK-TOBACCO\ReceiptArchive`). القراءة فقط، بالـGUID، وتحذّر من ثلاث حالات:
+  - الفاتورة عُدّلت في الأمين بعد آخر طباعة: ستُطبع نسختها **الحالية** دائماً.
+  - الرقم نفسه طُبع سابقاً لفاتورة أخرى حُذفت (الأمين يعيد استخدام الأرقام).
+  - نسخة مؤرشفة فشلت فحص البصمة.
+- **`-Mode History -InvoiceNumber N [-PrintId X]`:**
+  - تعرض كل ما طُبع بهذا الرقم، موسوماً `historical`.
+  - مع `-PrintId` تعيد نصّاً موسوماً «نسخة تاريخية — لا تمثّل الفاتورة الحالية».
+  - للعرض فقط: لا مسار طباعة للنسخ التاريخية، وبلا اسم زبون.
+- **`bridgePinsInvoiceGuid`** (الافتراضي `false`): عند تفعيله بعد ترقية الجسر تمرّر الأداة GUID الفاتورة
+  المحسومة (`-ExpectedInvoiceGuid`)، فيرفض الجسر إن صار الرقم لفاتورة أخرى بين الحسم والطباعة.
+  الجسر الحي (`1efcdc33`) لا يعرف هذا الوسيط، فلا يُفعَّل قبل الترقية.

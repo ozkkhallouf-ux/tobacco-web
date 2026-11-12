@@ -380,6 +380,36 @@ jobs:
         shell: powershell
         run: .\tools\tests\Test-CashierReprintAgent.ps1
 
+      # أرشيف إيصالات الكاشير الثابت (ozk-print-bridge/OzkReceiptArchive.psm1): JSON قانوني ثابت البايتات،
+      # نسخة لا تُستبدل، مراحل التسليم دون استنتاج ورقي، سلسلة بصمات تكشف العبث، وكتّاب متزامنون. بيانات وهمية.
+      - name: Cashier receipt archive - immutable copy, stages and tamper evidence test
+        shell: powershell
+        run: .\tools\tests\Test-CashierReceiptArchive.ps1
+
+      # مراقب «الإيصال ≠ الفاتورة الحالية» (tools/cashier-receipt-watch): تعديل/حذف/إعادة إدخال/رقم معاد
+      # استخدامه، بلا تنبيه تاريخي، بلا تكرار، بلا أسماء زبائن، SELECT فقط. بلا أمين ولا تيليغرام.
+      - name: Cashier receipt watch - post-print edit/delete detection and alert test
+        shell: powershell
+        run: .\tools\tests\Test-CashierReceiptWatch.ps1
+
+      # دوال الجسر الحقيقية معزولة: state.json بشكل OZKUSER الحي، ثبات الرأس، الأسعار، تثبيت GUID، ترتيب
+      # الأرشيف قبل العلامة والتسليم، وقراءة أداة إعادة الطباعة للأرشيف والنسخة التاريخية. بلا SQL ولا طابعة.
+      - name: Cashier receipt archive - bridge integration and upgrade compatibility test
+        shell: powershell
+        run: .\tools\tests\Test-CashierReceiptBridgeIntegration.ps1
+
+      # سيناريوهات الأعطال بدوال الجسر الحقيقية: تعذّر كتابة الأرشيف، انقطاع قبل العلامة وبعدها وبعد التسليم،
+      # فشل قبل المهمة وبعدها، وإقلاعات متكررة — ورقة واحدة على الأكثر دائماً. طباعة وهمية.
+      - name: Cashier receipt archive - failure, power loss and restart scenarios test
+        shell: powershell
+        run: .\tools\tests\Test-CashierReceiptFailureScenarios.ps1
+
+      # تطابق تصميم 80mm بالبكسل وبايتات ESC/POS بين الرسّام الحي على OZKUSER (f7806b56) ورسّام
+      # أداة إعادة الطباعة، مع تقرير معلوماتي عن فرق رسّام المستودع الرئيسي. GDI+ بلا طابعة.
+      - name: Cashier receipt 80mm - pixel and ESC/POS match against the live OZKUSER renderer
+        shell: powershell
+        run: .\tools\tests\Test-CashierReceiptVisualMatch.ps1 -ReportMainRenderer
+
       # غلاف المهمة المجدولة لأرشفة Drive (غير مسجَّل): القفل والتزامن، المهلة وقتل الشجرة،
       # الوضع المحصور بـdry-run، ملف STOP، تنقيح السجل وتدويره — بعامل وهمي بلا أي خدمة حقيقية.
       - name: Drive archive - scheduled run wrapper test
