@@ -122,17 +122,19 @@ if (@($selection.Selected).Count -or $integrityFailures.Count) {
     }
 }
 
+# لا تُعلَّم الفاتورة «مُبلَّغاً عنها» إلا بعد قبول مؤكد للإشعار. سكربت الإرسال المشترك لا يفشل أبداً
+# (exit 0 حتى عند التخطي أو الخطأ)، فالدليل الوحيد سطره «TELEGRAM-NOTIFY OK». أي نتيجة أخرى ⇒ تبقى
+# الحالة كما هي فتُعاد المحاولة في التشغيل التالي. -NoTelegram تقييم فقط: لا إرسال ولا تعليم.
 $sent = $false
-if ($message -and -not $DryRun) {
-    if (-not $NoTelegram) {
-        $dedupe = "cashier-postprint-" + (Get-OzkTextSha256 (ConvertTo-OzkCanonicalJson @($selection.Selected | ForEach-Object { $_.Hash })))
-        & $TelegramScript -Message $message -EventType "cashier_receipt_changed" -DedupeKey $dedupe -DedupeMinutes 1440 | Out-Null
-        $sent = $true
+if ($message -and -not $DryRun -and -not $NoTelegram) {
+    $dedupe = Get-CashierWatchDedupeKey @($selection.Selected) @($integrityFailures)
+    $sent = Send-CashierWatchTelegram -Script $TelegramScript -Message $message -DedupeKey $dedupe
+    if ($sent) {
+        foreach ($item in @($selection.Selected)) {
+            $state.alerted[(Get-CashierWatchAlertKey $item.Finding)] = [ordered]@{ hash = $item.Hash; kind = $item.Finding.kind; number = [int]$item.Finding.invoiceNumber; at = $nowUtc.ToString("o") }
+        }
+        foreach ($summary in $integrityFailures) { $state.alerted["integrity:" + $summary.printId] = [ordered]@{ hash = "integrity"; at = $nowUtc.ToString("o") } }
     }
-    foreach ($item in @($selection.Selected)) {
-        $state.alerted[(Get-CashierWatchAlertKey $item.Finding)] = [ordered]@{ hash = $item.Hash; kind = $item.Finding.kind; number = [int]$item.Finding.invoiceNumber; at = $nowUtc.ToString("o") }
-    }
-    foreach ($summary in $integrityFailures) { $state.alerted["integrity:" + $summary.printId] = [ordered]@{ hash = "integrity"; at = $nowUtc.ToString("o") } }
 }
 if (-not $DryRun) { Save-CashierWatchState $StatePath $state }
 
@@ -140,5 +142,5 @@ if ($DryRun -and $message) { Write-Output $message }
 [pscustomobject]@{
     Status = "ok"; DryRun = [bool]$DryRun; Receipts = $summaries.Count; Compared = $prints.Count; Findings = @($findings).Count
     Alerted = @($selection.Selected).Count; Deferred = $selection.Remaining; IntegrityFailures = $integrityFailures.Count
-    SpoolerEvidenceAdded = $evidenceAdded; TelegramSent = $sent
+    SpoolerEvidenceAdded = $evidenceAdded; TelegramDelivered = $sent; RetryNextRun = [bool]($message -and -not $DryRun -and -not $NoTelegram -and -not $sent)
 } | ConvertTo-Json -Compress

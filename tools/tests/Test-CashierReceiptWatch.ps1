@@ -158,6 +158,31 @@ try {
     Assert "تاريخ: ولا «نتيجة مجهولة» أقدم من البداية" (@(Get-CashierWatchUnknownOutcomes @(Get-OzkReceiptPrintSummaries $root) ([datetime]"2026-11-12T13:00:00Z") ([datetime]"2026-11-12T12:00:00Z")).Count -eq 0)
     Assert "نتيجة مجهولة: الإيصال المُجهَّز الذي فشل قبل المهمة لا يُعدّ مجهولاً" (@(Get-CashierWatchUnknownOutcomes @(Get-OzkReceiptPrintSummaries $root) ([datetime]"2026-11-12T13:00:00Z") $start | Where-Object { $_.invoiceNumber -eq 2993 }).Count -eq 0)
 
+    # ── مراجعة Codex (P2): هوية الفاتورة في مفتاح منع التكرار، وعدم التعليم قبل قبول مؤكد ──
+    function New-Deleted([string]$Guid, [int]$Number) { [pscustomobject]@{ kind = "deleted"; invoiceGuid = $Guid; invoiceNumber = $Number; printId = "p"
+        printedAtUtc = "2026-11-12T09:00:00Z"; printedNet = 1000; currencyIso = "SYP"; changes = @(); reentry = $null; numberReusedBy = @(); deletionLogged = $true } }
+    $d1 = New-Deleted "a1000000-0000-0000-0000-000000000001" 4001
+    $d2 = New-Deleted "a2000000-0000-0000-0000-000000000002" 4002
+    Assert "تكرار: حذفان لفاتورتين مختلفتين ⇒ بصمتان مختلفتان" ((Get-CashierWatchFindingHash $d1) -ne (Get-CashierWatchFindingHash $d2))
+    $k1 = Get-CashierWatchDedupeKey @((Select-CashierWatchAlerts @($d1) @{}).Selected)
+    $k2 = Get-CashierWatchDedupeKey @((Select-CashierWatchAlerts @($d2) @{}).Selected)
+    Assert "تكرار: مفتاحا تيليغرام مختلفان لحذفين في تشغيلين" ($k1 -ne $k2)
+    Assert "تكرار: نفس الحال ⇒ نفس المفتاح (الخادم يكتم الإعادة الحقيقية فقط)" ($k1 -eq (Get-CashierWatchDedupeKey @((Select-CashierWatchAlerts @($d1) @{}).Selected)))
+    $fakeDir = Join-Path $tempRoot "fake-telegram"; [void](New-Item -ItemType Directory -Force -Path $fakeDir)
+    $okScript = Join-Path $fakeDir "ok.ps1"; $skipScript = Join-Path $fakeDir "skip.ps1"; $failScript = Join-Path $fakeDir "fail.ps1"; $throwScript = Join-Path $fakeDir "throw.ps1"
+    $sig = 'param([string]$Message, [string]$EventType, [string]$DedupeKey, [int]$DedupeMinutes)'
+    [IO.File]::WriteAllText($okScript, "$sig`nWrite-Host ""TELEGRAM-NOTIFY OK (`$EventType)""; exit 0")
+    [IO.File]::WriteAllText($skipScript, "$sig`nWrite-Host ""TELEGRAM-NOTIFY SKIPPED: no SUPABASE_SERVICE_KEY and no sync credentials""; exit 0")
+    [IO.File]::WriteAllText($failScript, "$sig`nWrite-Host ""TELEGRAM-NOTIFY FAILED: The remote name could not be resolved""; exit 0")
+    [IO.File]::WriteAllText($throwScript, "$sig`nthrow 'boom'")
+    Assert "إرسال: قبول مؤكد ⇒ true" (Send-CashierWatchTelegram $okScript "m" "k")
+    Assert "إرسال: تخطٍّ لغياب الاعتماد (exit 0) ⇒ false" (-not (Send-CashierWatchTelegram $skipScript "m" "k"))
+    Assert "إرسال: فشل شبكة (exit 0) ⇒ false" (-not (Send-CashierWatchTelegram $failScript "m" "k"))
+    Assert "إرسال: استثناء ⇒ false" (-not (Send-CashierWatchTelegram $throwScript "m" "k"))
+    $cliText = [IO.File]::ReadAllText((Join-Path $watchDir "cashier-receipt-watch.ps1"))
+    $sendAt = $cliText.IndexOf('$sent = Send-CashierWatchTelegram'); $guardAt = $cliText.IndexOf('if ($sent) {'); $markAt = $cliText.IndexOf('$state.alerted[(Get-CashierWatchAlertKey')
+    Assert "إرسال: التعليم في الحالة فقط داخل if (`$sent) بعد الإرسال" ($sendAt -ge 0 -and $guardAt -gt $sendAt -and $markAt -gt $guardAt -and ([regex]::Matches($cliText, '\$state\.alerted\[').Count -eq 2))
+
     # ── دليل Windows (ليس ورقياً) ──────────────────────────────────────────
     $summary = [pscustomobject]@{ jobId = 63 }
     $at = [datetime]"2026-11-12T09:52:11Z"

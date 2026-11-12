@@ -257,7 +257,8 @@ function Get-CashierWatchAlertKey($Finding) {
 }
 
 function Get-CashierWatchFindingHash($Finding) {
-    $basis = [ordered]@{ kind = $Finding.kind; printId = $(if ($Finding.kind -eq "outcome_unknown") { [string]$Finding.printId } else { $null }); changes = @($Finding.changes); reentryGuid = $(if ($Finding.reentry) { $Finding.reentry.guid } else { $null }); reusedBy = @($Finding.numberReusedBy | ForEach-Object { $_.guid }) }
+    # هوية الفاتورة جزء من البصمة: حذفان لفاتورتين مختلفتين بلا تغييرات لا يتطابقان أبداً.
+    $basis = [ordered]@{ invoiceGuid = ([string]$Finding.invoiceGuid).ToLowerInvariant(); invoiceNumber = [int]$Finding.invoiceNumber; kind = $Finding.kind; printId = $(if ($Finding.kind -eq "outcome_unknown") { [string]$Finding.printId } else { $null }); changes = @($Finding.changes); reentryGuid = $(if ($Finding.reentry) { $Finding.reentry.guid } else { $null }); reusedBy = @($Finding.numberReusedBy | ForEach-Object { $_.guid }) }
     return (Get-OzkTextSha256 (ConvertTo-OzkCanonicalJson $basis))
 }
 
@@ -443,4 +444,25 @@ function Select-CashierWatchAlerts([object[]]$Findings, [hashtable]$Alerted) {
     })
     $selected = @($fresh | Select-Object -First $script:WatchMaxAlertEntries)
     return [pscustomobject]@{ Selected = $selected; Remaining = [math]::Max(0, $fresh.Count - $selected.Count) }
+}
+
+# مفتاح منع التكرار في notify_telegram: من مفتاح كل فاتورة (GUID أو الطباعة) وبصمة حالها معاً، فلا
+# يتطابق تنبيهان مختلفان أبداً — وإلا كتم الخادم الثاني بينما يُعلَّم هنا مُبلَّغاً فيختفي للأبد.
+function Get-CashierWatchDedupeKey([object[]]$Selected, [object[]]$IntegrityFailures = @()) {
+    $parts = @($Selected | ForEach-Object { (Get-CashierWatchAlertKey $_.Finding) + "=" + $_.Hash }) +
+        @($IntegrityFailures | ForEach-Object { "integrity:" + [string]$_.printId })
+    [Array]::Sort($parts, [StringComparer]::Ordinal)
+    return ("cashier-postprint-" + (Get-OzkTextSha256 (ConvertTo-OzkCanonicalJson @($parts))))
+}
+
+# يرسل عبر tools\send-telegram-notification.ps1 ويعيد true فقط إن أكّد السكربت قبول الإشعار
+# («TELEGRAM-NOTIFY OK» على مجرى المعلومات). التخطي أو الخطأ أو أي استثناء ⇒ false.
+function Send-CashierWatchTelegram([string]$Script, [string]$Message, [string]$DedupeKey) {
+    try {
+        $output = (& $Script -Message $Message -EventType "cashier_receipt_changed" -DedupeKey $DedupeKey -DedupeMinutes 1440 6>&1 2>&1 | Out-String)
+        return ($output -match "TELEGRAM-NOTIFY OK")
+    } catch {
+        Write-Verbose ("Telegram send failed: " + $_.Exception.Message)
+        return $false
+    }
 }
