@@ -423,6 +423,13 @@ jobs:
         shell: powershell
         run: .\tools\tests\Test-CashierReceiptBanding.ps1
 
+      # مسار إعادة الطباعة الاختياري عبر تعريف Windows (printTransport=driver): RAW لم يتغيّر سطراً، الإعداد
+      # والمتغيّر للعملية الفرعية وحدها، رسّام قديم ⇒ blocked، نتائج الفشل بلا إعادة إرسال، صفوف التعريف = صفوف
+      # RAW بالبت، StretchDIBits 1:1 لا يغيّر بتاً، ورفض الصفحة قبل إنشاء أي مهمة. بلا طباعة.
+      - name: Cashier reprint driver transport - RAW unchanged, pixel identity, pre-job refusals
+        shell: powershell
+        run: .\tools\tests\Test-CashierReprintDriverTransport.ps1
+
       # غلاف المهمة المجدولة لأرشفة Drive (غير مسجَّل): القفل والتزامن، المهلة وقتل الشجرة،
       # الوضع المحصور بـdry-run، ملف STOP، تنقيح السجل وتدويره — بعامل وهمي بلا أي خدمة حقيقية.
       - name: Drive archive - scheduled run wrapper test

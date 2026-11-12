@@ -183,6 +183,11 @@ try {
             if ($config.bridgeSqlSource -eq "tool-secret" -and $checks.BridgeSql -ne "ok") { $healthy = $false }
             if ($config.enforceProtectedPaths -and $checks.ProtectedPaths -ne "ok") { $healthy = $false }
             if ($config.expectedRendererSha256 -ne "" -and $checks.Renderer -ne "ok") { $healthy = $false }
+            # مسار التسليم للطابعة: raw (ESC/POS مباشرة) أو driver (تعريف Windows)، ودعم الرسّام له.
+            $checks.PrintTransport = $config.printTransport
+            if ($config.printTransport -eq "driver") {
+                try { Assert-CashierRendererSupportsTransport $config; $checks.Transport = "ok" } catch { $checks.Transport = [string]$_.Exception.Message; $healthy = $false }
+            }
             $checks.PrintDispatch = $config.printDispatch
             if ($config.printDispatch -eq "agent") {
                 $age = Get-CashierAgentHeartbeatAge $Root
