@@ -18,7 +18,6 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const read = (p) => readFileSync(path.join(root, p), "utf8");
-const MODULE = read("src/bulletin-visibility.js");
 const APP = read("src/app.js");
 const CLIENT = read("src/supabase-client.js");
 const GENERATOR = read("scripts/generate-price-lists.mjs");
