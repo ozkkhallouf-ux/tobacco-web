@@ -82,6 +82,8 @@ function run(overrides) {
       HEAD_SHA: 'a'.repeat(40),
       ACTOR_TYPE: 'User',
       RUN_ATTEMPT: '1',
+      MODE: 'shadow',
+      ALLOWED_RUN_ID: '',
       MOCK_TODAY: '0',
       MOCK_SAME: '0',
       MOCK_LOG: '',
@@ -129,6 +131,13 @@ expect('C12 autorepair branch still blocked (loop guard)', { HEAD_BRANCH: 'autor
 // فحص ارتدادي: السقوف تبقى سليمة بعد إدراج التصنيف
 expect('C13 repairable category but daily cap reached -> blocked', { MOCK_LOG: 'tests failed', MOCK_TODAY: '4' }, 'false', 'test_failure');
 expect('C14 repairable category, under caps -> proceed', { MOCK_LOG: 'tests failed', MOCK_TODAY: '1', MOCK_SAME: '1' }, 'true', 'test_failure');
+
+// قفل اختبار Propose المؤقت (OZK_AUTOREPAIR_PROPOSE_TEST_RUN_ID) — خمس حالات صريحة
+expect('P1 propose + RUN_ID مطابق -> proceed (يستمر إلى التصنيف الطبيعي)', { MODE: 'propose', ALLOWED_RUN_ID: '123', MOCK_LOG: 'tests failed' }, 'true', 'test_failure');
+expect('P2 propose + RUN_ID غير مطابق -> blocked', { MODE: 'propose', ALLOWED_RUN_ID: '999', MOCK_LOG: 'tests failed' }, 'false', undefined);
+expect('P3 propose + ALLOWED_RUN_ID فارغ (غياب التسجيل) -> blocked (fail-closed)', { MODE: 'propose', ALLOWED_RUN_ID: '', MOCK_LOG: 'tests failed' }, 'false', undefined);
+expect('P4 propose + ALLOWED_RUN_ID غير صالح (ليس رقماً) -> blocked', { MODE: 'propose', ALLOWED_RUN_ID: 'abc', MOCK_LOG: 'tests failed' }, 'false', undefined);
+expect('P5 shadow غير متأثر بالقفل (حتى مع ALLOWED_RUN_ID مضبوطاً وغير مطابق) -> proceed كما كان', { MODE: 'shadow', ALLOWED_RUN_ID: '999', MOCK_LOG: 'tests failed' }, 'true', 'test_failure');
 
 console.log(`\n${pass}/${n} passed`);
 process.exit(pass === n ? 0 : 1);
