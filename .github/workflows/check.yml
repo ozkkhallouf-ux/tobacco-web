@@ -416,6 +416,13 @@ jobs:
         shell: powershell
         run: .\tools\tests\Test-CashierReceiptLongInvoice.ps1
 
+      # تقسيم صورة الإيصال إلى أوامر GS v 0 بحِزَم 128 صفاً بدل 512 (مخزن XP-T80Q ‏64 KB): رؤوس الأوامر وطولها،
+      # صفوف البيانات بالبايت، لا بايتات زائدة، الدالة متطابقة في الرسّامات الثلاثة، ونموذج طابعة لفقد البايتات
+      # والانقطاع، وإيصالات حقيقية من الرسّام المُصلَح. بلا طباعة.
+      - name: Cashier receipt ESC/POS banding - command structure, byte identity and loss model
+        shell: powershell
+        run: .\tools\tests\Test-CashierReceiptBanding.ps1
+
       # غلاف المهمة المجدولة لأرشفة Drive (غير مسجَّل): القفل والتزامن، المهلة وقتل الشجرة،
       # الوضع المحصور بـdry-run، ملف STOP، تنقيح السجل وتدويره — بعامل وهمي بلا أي خدمة حقيقية.
       - name: Drive archive - scheduled run wrapper test

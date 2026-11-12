@@ -8,13 +8,13 @@
 | المسار على OZKUSER | البصمة الحالية | الجديدة (من الـPR) | من يستعمله |
 |---|---|---|---|
 | `C:\Users\OZKKH\AppData\Local\OZK-TOBACCO\PrintBridge\ozk-print-bridge\OzkReceiptRenderer.psm1` | `f7806b56…` | `ozk-print-bridge/live-renderer/OzkReceiptRenderer.psm1` | الطباعة الآلية (`\OZK Print Bridge`) |
-| `C:\ProgramData\OZK\CashierReprint\bridge\ozk-print-bridge\OzkReceiptRenderer.psm1` | `7f6398ca…` | `tools/cashier-reprint/static-bridge/ozk-print-bridge/OzkReceiptRenderer.psm1` (`4df69fce…`) | إعادة الطباعة اليدوية والعامل |
+| `C:\ProgramData\OZK\CashierReprint\bridge\ozk-print-bridge\OzkReceiptRenderer.psm1` | `7f6398ca…` | `tools/cashier-reprint/static-bridge/ozk-print-bridge/OzkReceiptRenderer.psm1` (`b2865472…`) | إعادة الطباعة اليدوية والعامل |
 
 - **الطباعة الآلية:** الجسر الحي يستورد الرسّام بـ`Import-Module -Force` قبل كل طباعة. يُلتقط الملف الجديد في
   الفاتورة التالية بلا إعادة تشغيل. الجزء المكتوب بـC# (`OzkRawThermalPrinter`) لم يتغيّر، فالنوع المحمَّل
   في العملية يبقى صالحاً.
 - **إعادة الطباعة:** أداة إعادة الطباعة تثبّت بصمة رسّامها: `expectedRendererSha256` في
-  `C:\ProgramData\OZK\CashierReprint\config.json`. تُحدَّث إلى `4df69fce…` في الخطوة نفسها، وإلا رفضت
+  `C:\ProgramData\OZK\CashierReprint\config.json`. تُحدَّث إلى `b2865472…` في الخطوة نفسها، وإلا رفضت
   إعادة الطباعة كل طلب، وهذا فشل آمن.
 
 ## قبل النشر (قراءة فقط)
@@ -35,7 +35,7 @@
    - ملف بصمات.
 2. **نقل الملفين الجديدين:** إلى ملف مؤقت بجانب كل هدف، ثم التحقق من بصماتهما.
 3. **الاستبدال الذرّي:** `[IO.File]::Replace` لكل ملف، فلا يقرأ الجسر ملفاً نصف مكتوب.
-4. **تحديث `expectedRendererSha256`** في `config.json` لأداة إعادة الطباعة إلى `4df69fce…`.
+4. **تحديث `expectedRendererSha256`** في `config.json` لأداة إعادة الطباعة إلى `b2865472…`.
 5. **التحقق بلا طباعة:**
    - البصمتان على القرص كما يُتوقع.
    - فحص Health لأداة إعادة الطباعة = `ok` (بصمة الرسّام الجديدة معتمدة).
