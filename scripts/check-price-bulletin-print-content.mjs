@@ -425,9 +425,14 @@ for (const sc of [
 // القديمتين كانتا ستمرّان.
 {
   const { context, page, fontReady } = await bootApp(1440, 900);
-  const built = await page.evaluate(() => {
+  const built = await page.evaluate(async () => {
     const state = (0, eval)("state");
     state.syriaRateConfirmed = true;
+    // بلا هذا الانتظار: استدعاء buildBulletinDataset هنا مباشرة بلا المرور
+    // بـopenPricePreview قد يسبق اكتمال مرحلة الإقلاع غير المتزامنة التي تملأ
+    // state.publicBulletinHidden (سباق توقيت)، فتُفعَّل بوابة الأمان fail-safe
+    // وتُرجع نتيجة بلا `dataset` — نفس سبب فشل هذا الفحص على CI المجزّأ.
+    await window.loadPublicBulletinHidden();
     const ds = window.buildBulletinDataset(true, "dark").dataset;
     const plan = window.bulletinRenderPlan(ds);
     const rows = window.bulletinTemplateGroups(ds).flatMap((g) => g.items);
@@ -505,9 +510,11 @@ for (const sc of [
 // الاثنين. (المطابقة الآن تُبلّط مقاطع الرسم: ترتيب الحروف داخل المقطع مصون.)
 {
   const { context, page, fontReady } = await bootApp(1440, 900);
-  const built = await page.evaluate(() => {
+  const built = await page.evaluate(async () => {
     const state = (0, eval)("state");
     state.syriaRateConfirmed = true;
+    // راجع تعليق الانتظار المماثل أعلى هذا الملف — نفس سباق التوقيت.
+    await window.loadPublicBulletinHidden();
     const ds = window.buildBulletinDataset(true, "dark").dataset;
     const plan = window.bulletinRenderPlan(ds);
     const doc = new DOMParser().parseFromString(plan.markup, "text/html");
@@ -591,9 +598,11 @@ for (const sc of [
 // بأصلها الأفقي في مقطع ذرّي ترتيبه مصون، فيُرصد التبديل.
 {
   const { context, page, fontReady } = await bootApp(1440, 900);
-  const built = await page.evaluate(() => {
+  const built = await page.evaluate(async () => {
     const state = (0, eval)("state");
     state.syriaRateConfirmed = true;
+    // راجع تعليق الانتظار المماثل أعلى هذا الملف — نفس سباق التوقيت.
+    await window.loadPublicBulletinHidden();
     const ds = window.buildBulletinDataset(true, "dark").dataset;
     const plan = window.bulletinRenderPlan(ds);
     const doc = new DOMParser().parseFromString(plan.markup, "text/html");

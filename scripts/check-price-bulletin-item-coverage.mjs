@@ -131,6 +131,11 @@ for (const sc of [
   const got = await page.evaluate(async (sc) => {
     const state = (0, eval)("state");
     state.syriaRateConfirmed = true;
+    // بلا هذا الانتظار: استدعاء buildBulletinDataset هنا مباشرة بلا المرور
+    // بـopenPricePreview قد يسبق اكتمال مرحلة الإقلاع غير المتزامنة التي تملأ
+    // state.publicBulletinHidden (سباق توقيت)، فتُفعَّل بوابة الأمان fail-safe
+    // وتُرجع نتيجة بلا `dataset`.
+    await window.loadPublicBulletinHidden();
     const ds = window.buildBulletinDataset(sc.useSyria, sc.theme).dataset;
     const groups = window.bulletinTemplateGroups(ds);
     const plan = window.bulletinRenderPlan(ds);
