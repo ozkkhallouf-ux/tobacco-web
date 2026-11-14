@@ -54,6 +54,8 @@ function Read-CashierReprintConfig([string]$Path) {
         receiptArchiveRoot = ""
         # true فقط بعد ترقية الجسر إلى نسخة تقبل -ExpectedInvoiceGuid؛ الجسر القديم يرفض الوسيط المجهول.
         bridgePinsInvoiceGuid = $false
+        # طريقة تسليم الإيصال للطابعة: raw (الافتراضي، ESC/POS مباشرة كما كان) أو driver (عبر تعريف Windows).
+        printTransport = "raw"
     }
     foreach ($name in @("bridgeTimeoutSeconds", "recentReprintWarningSeconds", "newInvoiceWarningSeconds", "jobWatchSeconds", "remotePort", "remoteTimeoutSeconds",
             "agentPickupSeconds", "agentResultTimeoutSeconds", "agentHeartbeatMaxAgeSeconds")) {
@@ -98,6 +100,13 @@ function Read-CashierReprintConfig([string]$Path) {
         if ($config.agentResultTimeoutSeconds -lt ($config.agentPickupSeconds + $config.bridgeTimeoutSeconds + $config.jobWatchSeconds)) {
             throw "agentResultTimeoutSeconds يجب ألا يقل عن agentPickupSeconds + bridgeTimeoutSeconds + jobWatchSeconds."
         }
+    }
+    if ($null -ne $raw.PSObject.Properties["printTransport"]) { $config.printTransport = ([string]$raw.printTransport).Trim().ToLowerInvariant() }
+    if ($config.printTransport -ne "raw" -and $config.printTransport -ne "driver") { throw "الإعداد printTransport يجب أن يكون raw أو driver." }
+    if ($config.printTransport -eq "driver") {
+        if ($mode -ne "local") { throw "printTransport=driver يُضبط على جهاز الطابعة فقط (mode=local)." }
+        # بلا بصمة رسّام مثبّتة قد يُشغَّل رسّام قديم يتجاهل الطلب ويطبع RAW بصمت.
+        if ($config.expectedRendererSha256 -eq "") { throw "printTransport=driver يتطلب expectedRendererSha256 (رسّام مثبّت يدعم مسار التعريف)." }
     }
     if ($config.printerName -cne $script:CashierPrinterName) {
         throw "طابعة الكاشير الوحيدة المسموحة هي '$($script:CashierPrinterName)'."
@@ -440,6 +449,23 @@ function Assert-CashierRendererPinned($Config) {
     return $actual
 }
 
+# مسار التعريف يحتاج رسّاماً يقرأ OZK_RECEIPT_TRANSPORT؛ الرسّام القديم يتجاهله ويطبع RAW. الفحص قبل أي طباعة.
+$script:CashierTransportMarker = '$env:OZK_RECEIPT_TRANSPORT'
+function Assert-CashierRendererSupportsTransport($Config) {
+    if ($Config.printTransport -ne "driver") { return }
+    $path = Get-CashierRendererPath $Config
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "ملف رسم الإيصال للجسر غير موجود على هذا الجهاز: $path" }
+    if ([IO.File]::ReadAllText($path).IndexOf($script:CashierTransportMarker, [StringComparison]::Ordinal) -lt 0) {
+        throw "الإعداد printTransport=driver لكن رسّام الإيصال على هذا الجهاز لا يدعم الطباعة عبر التعريف. لن تُطبع أي فاتورة."
+    }
+}
+
+# ما نفّذه الجسر فعلاً: الرسّام يطبع سطر «OzkReceiptTransport: driver» بعد نجاح مسار التعريف وحده.
+function Get-CashierBridgeTransport([string]$Output) {
+    if ([regex]::IsMatch([string]$Output, '(?m)^\s*OzkReceiptTransport:\s*driver\b')) { return "driver" }
+    return "raw"
+}
+
 # ── الملفات التي تُنفَّذ: لا كتابة عليها لغير المدراء والنظام وصاحب التشغيل ────────
 # إن استطاع مستخدم عادي تعديل سكربت أو إعداد يشغّله حساب أعلى (المدير عبر ssh اليوم) فهذا
 # طريق رفع صلاحيات. الفحص يشمل البرنامج والإعداد والسرّ والجسر وملفات الكود بجانبه، ولا يشمل
@@ -514,6 +540,7 @@ function Assert-CashierProtectedPaths($Config, [string]$Root, [scriptblock]$GetA
 function Assert-CashierBridgeReady($Config, [string]$Root) {
     $hash = Assert-CashierBridgePinned $Config
     [void](Assert-CashierRendererPinned $Config)
+    Assert-CashierRendererSupportsTransport $Config
     if ($Config.enforceProtectedPaths) { Assert-CashierProtectedPaths $Config $Root }
     return $hash
 }
@@ -597,6 +624,8 @@ $script:CashierPreSpoolErrorPatterns = @(
     "Missing required environment variable", "refuses database", "requires a db_datareader", "refuses a SQL principal",
     "Printer queue not found", "Printer queue not ready", "OpenPrinter failed", "StartDocPrinter failed", "Cashier receipts are restricted",
     "Receipt logo not found", "must be exactly 576 dots", "requires -ConfirmPhysicalPrint",
+    "Receipt transport not recognised", "Driver paper not found", "DeviceCapabilities failed", "DocumentProperties failed",
+    "CreateDC failed", "Driver page refused", "StartDoc failed",
     "network-related", "Login failed", "Cannot open database", "Connection Timeout Expired", "server was not found",
     "transport-level error", "A connection was successfully established"
 )
@@ -645,6 +674,11 @@ function New-CashierBridgeStartInfo($Config, [int]$Number, [string]$Date, [strin
     $info.RedirectStandardOutput = $true
     $info.RedirectStandardError = $true
     if (-not [string]::IsNullOrEmpty($SqlConnectionString)) { $info.EnvironmentVariables["AMEEN_SQL_CONNECTION_STRING"] = $SqlConnectionString }
+    # مسار الطباعة للعملية الفرعية وحدها. raw ⇒ يُزال أي متغيّر موروث فيبقى الجسر على سلوكه السابق حرفياً.
+    $transport = "raw"
+    if ($Config.PSObject.Properties["printTransport"]) { $transport = [string]$Config.printTransport }
+    if ($transport -eq "driver") { $info.EnvironmentVariables["OZK_RECEIPT_TRANSPORT"] = "driver" }
+    elseif ($info.EnvironmentVariables.ContainsKey("OZK_RECEIPT_TRANSPORT")) { $info.EnvironmentVariables.Remove("OZK_RECEIPT_TRANSPORT") }
     return $info
 }
 
@@ -848,8 +882,13 @@ function Invoke-CashierReprint {
         $run = & $Runner $Config $Number $invoice.InvoiceDate $bridgeSqlText $invoice.InvoiceGuid
         $outcome = Get-CashierBridgeOutcome $run.ExitCode $run.Output $run.TimedOut
         $extra = @{ bridgeSha256 = $bridgeHash; exitCode = $run.ExitCode; reason = $outcome.Reason; printer = $script:CashierPrinterName }
+        $requestedTransport = "raw"
+        if ($Config.PSObject.Properties["printTransport"]) { $requestedTransport = [string]$Config.printTransport }
+        $extra.transport = $requestedTransport
         if ($outcome.Outcome -eq "printed") {
             $extra.jobId = $outcome.JobId
+            # المهمة أُرسلت فعلاً؛ لا إعادة إرسال مهما كان. عدم تطابق المسار يُسجَّل ويُعرض فقط.
+            if ($requestedTransport -eq "driver") { $extra.transportVerified = ((Get-CashierBridgeTransport $run.Output) -eq "driver") }
             $confirmation = [string](& $JobWatcher $Config $outcome.JobId)
             $extra.confirmation = $confirmation
             $head = "أُرسلت الفاتورة رقم $Number ($($invoice.InvoiceDate)) إلى طابعة الكاشير على $($env:COMPUTERNAME)."
@@ -858,6 +897,9 @@ function Invoke-CashierReprint {
                 "printer_error" { $tail = "لكن الطابعة أبلغت عن خطأ (ورق أو غطاء أو اتصال). افحصها قبل أي محاولة جديدة." }
                 "queued" { $tail = "ما زالت في طابور الطابعة؛ قد تتأخر. لا تُعد الطلب قبل فحص الطابعة." }
                 default { $tail = "تعذّر التحقق من طابور الطابعة؛ تأكد من خروج الورقة." }
+            }
+            if ($extra.ContainsKey("transportVerified") -and -not $extra.transportVerified) {
+                $tail += " تنبيه: لم يؤكّد الجسر أن الطباعة جرت عبر تعريف Windows كما هو مضبوط؛ راجع المسؤول."
             }
             return (Complete "sent" "$head $tail" $extra)
         }
