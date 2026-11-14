@@ -4256,6 +4256,13 @@ function prepareBulletinItems(useSyria = false, exchangeRate = Number(state.syri
   // الترشيح أولاً ثم الدمج: النشرة تُبنى من الأصناف المؤهَّلة وحدها.
   let items = customerPriceListItems(bulletinMode, { skipMerge: true });
 
+  // إخفاء المالك قبل أي تفرّع (وزاري/عام، دولار/سوري) — نفس الترتيب ونفس
+  // المصدر المشترك (src/bulletin-visibility.js) الذي يستعمله مولّد النشرات
+  // المستقل (scripts/generate-price-lists.mjs). بدون هذا، المعاينة والتصدير
+  // من داخل التطبيق كانا يُظهران الصنف المخفي رغم إخفائه عن المولّد (ملاحظة
+  // Codex P1 على PR #443). لا أثر على المخزون أو approved_price_items.
+  items = items.filter((item) => !isItemHidden(item));
+
   // الترشيح الكامل قبل الدمج في النشرتين، كترتيب المولّد حرفياً:
   // الجملة تستبعد ما دون وحدة ثانية كاملة، والسوري يستبعد ما لا سعر مفرق له.
   // بدون ترشيح السوري أولاً قد يُختار ممثّل بلا سعر مفرق فتسقط المجموعة كلها
