@@ -131,7 +131,18 @@ const { rowsMissingFromMarkup } = createMarkupRowReader(browser);
 async function bootApp(width, height) {
   const context = await browser.newContext({ viewport: { width, height }, bypassCSP: true, serviceWorkers: "block" });
   const page = await context.newPage();
-  await page.route("**://*.supabase.co/**", (route) => route.abort());
+  // نافذة bulletin_hidden_items_feed العامة وحدها تُجاب بنجاح (بلا أصناف مخفية) —
+  // هذا الفحص يختبر محتوى النشرة المطبوع لا منطق الإخفاء (له فحصه الخاص الناجح
+  // في check-bulletin-visibility-ui.mjs)، وبقية نداءات Supabase تبقى محجوبة.
+  // بلا هذا السطر: buildBulletinDataset يحجب النشرة فعلياً (fail-safe مقصود عند
+  // تعذّر قراءة الإخفاء بلا نسخة محلية صالحة) فيعيد نتيجة بلا `dataset`، فلا يفتح
+  // openPricePreview المعاينة إطلاقاً ويتجمّد الفحص بانتظار زر لن يظهر.
+  await page.route("**://*.supabase.co/**", (route) => {
+    if (route.request().url().includes("bulletin_hidden_items_feed")) {
+      return route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+    }
+    return route.abort();
+  });
   await page.goto(`${BASE}/index.html`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => typeof window.buildBulletinDataset === "function", null, { timeout: 20000 });
   await page.evaluate(({ items, prices }) => {

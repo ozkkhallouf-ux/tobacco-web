@@ -2374,7 +2374,7 @@ async function loadBulletinVisibility() {
 const PUBLIC_HIDDEN_CACHE_KEY = "ozk_public_bulletin_hidden_cache";
 const PUBLIC_HIDDEN_CACHE_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
 
-function readTrustedBulletinHiddenCache() {
+function readBulletinHiddenCache() {
   const parsed = readJson(PUBLIC_HIDDEN_CACHE_KEY, null);
   if (!parsed || !Array.isArray(parsed.rows)) return null;
   const rowsValid = parsed.rows.every((row) => row && typeof row.item_key === "string" && row.item_key.trim());
@@ -2385,7 +2385,7 @@ function readTrustedBulletinHiddenCache() {
   return { rows: parsed.rows, savedAt: parsed.savedAt };
 }
 
-function writeTrustedBulletinHiddenCache(rows) {
+function writeBulletinHiddenCache(rows) {
   writeJson(PUBLIC_HIDDEN_CACHE_KEY, { rows, savedAt: new Date().toISOString() });
 }
 
@@ -2412,9 +2412,9 @@ async function loadPublicBulletinHidden() {
     state.publicBulletinHidden = result.rows || [];
     state.publicBulletinHiddenStatus = "ok";
     state.publicBulletinHiddenError = null;
-    writeTrustedBulletinHiddenCache(state.publicBulletinHidden);
+    writeBulletinHiddenCache(state.publicBulletinHidden);
   } catch (error) {
-    const cached = readTrustedBulletinHiddenCache();
+    const cached = readBulletinHiddenCache();
     if (cached) {
       state.publicBulletinHidden = cached.rows;
       state.publicBulletinHiddenStatus = "degraded";
