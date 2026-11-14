@@ -354,6 +354,18 @@ const state = {
   bulletinClassifications: [],
   bulletinClassificationsStatus: "idle",
   bulletinClassificationsError: null,
+  // ظهور الأصناف في نشرة الأسعار (عام/مخفي) — src/bulletin-visibility.js
+  // الجدول الكامل (أسماء/أسباب)، مقيّد بالمالك عبر RLS — لشاشة الإدارة فقط.
+  bulletinVisibility: [],
+  bulletinVisibilityStatus: "idle",
+  bulletinVisibilityError: null,
+  // نافذة bulletin_hidden_items_feed العامة (item_key فقط) — هذا هو المصدر
+  // الذي تُفلتَر النشرة الفعلية (معاينة وتصدير) عليه، لأنه يُقرأ بلا شرط صلاحية
+  // أو جلسة، بعكس الجدول أعلاه. null تعني لم يُحمَّل بثقة بعد (يمنع التوليد).
+  publicBulletinHidden: null,
+  publicBulletinHiddenStatus: "idle",
+  publicBulletinHiddenError: null,
+  pricingVisibilityFilter: readJson("pricing-visibility-filter", "all"),
   showExchangeModal: false,
   pricePreview: null
 };
@@ -784,6 +796,10 @@ async function boot() {
       balances: loadCustomerBalanceReports,
       creditLimits: loadCustomerCreditLimits,
       prices: loadApprovedPriceItems,
+      // بلا شرط جلسة عمداً — بعكس بقية هذه المراحل: موظف غير مالك أو زائر
+      // مسجَّل يفتح معاينة/تصدير النشرة يحتاج هذه النسخة محمَّلة منذ الإقلاع
+      // (راجع prepareBulletinItems/loadPublicBulletinHidden).
+      publicHiddenItems: loadPublicBulletinHidden,
       profiles: loadCustomerProfiles,
       purchases: loadPurchaseInvoices,
       warehouses: async () => {
@@ -2302,6 +2318,7 @@ async function loadApprovedPriceItems() {
     state.approvedPriceError = safeErrorMessage(error);
   }
   await loadBulletinClassifications();
+  await loadBulletinVisibility();
   // لائحة الأسعار احتياط دليل المواد للفواتير الفورية: وصولها يعيد الدمج فوراً.
   await loadLiveInvoices();
 }
@@ -2324,6 +2341,93 @@ async function loadBulletinClassifications() {
     state.bulletinClassifications = [];
     state.bulletinClassificationsStatus = "error";
     state.bulletinClassificationsError = safeErrorMessage(error);
+  }
+}
+
+// ظهور الأصناف في نشرة الأسعار: فشل التحميل لا يُسقط الصفحة، ولا يُخفي شيئاً
+// صامتاً — كل الأصناف تبقى ظاهرة بصرياً هنا (الحالة الافتراضية) والسبب يظهر
+// في رسالة الخطأ. الإخفاء الفعلي عن الزبائن يحدث فقط في مولّد النشرات، الذي
+// يرتدّ بنفس المنطق (لا يُخفي شيئاً إن تعذّرت عليه القراءة).
+async function loadBulletinVisibility() {
+  if (!dataStore.listItemBulletinVisibility || (dataStore.isConfigured() && !state.session)) {
+    state.bulletinVisibility = [];
+    state.bulletinVisibilityStatus = "idle";
+    state.bulletinVisibilityError = null;
+    return;
+  }
+  try {
+    const result = await dataStore.listItemBulletinVisibility();
+    state.bulletinVisibility = result.rows || [];
+    state.bulletinVisibilityStatus = result.available === false ? "not_installed" : "ok";
+    state.bulletinVisibilityError = null;
+  } catch (error) {
+    state.bulletinVisibility = [];
+    state.bulletinVisibilityStatus = "error";
+    state.bulletinVisibilityError = safeErrorMessage(error);
+  }
+}
+
+// نسخة محلية موثوقة من نافذة bulletin_hidden_items_feed العامة — بنفس منطق
+// ذاكرة التخزين المؤقت لمولّد النشرات المستقل (scripts/generate-price-lists.mjs)
+// حرفياً: نجاح القراءة يُحدّث النسخة المحفوظة، وفشلها يرتدّ إليها إن كانت أحدث
+// من 14 يوماً، وغياب أي نسخة صالحة يمنع توليد نشرة جديدة كلياً (لا إظهار تلقائي).
+const PUBLIC_HIDDEN_CACHE_KEY = "ozk_public_bulletin_hidden_cache";
+const PUBLIC_HIDDEN_CACHE_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
+
+function readBulletinHiddenCache() {
+  const parsed = readJson(PUBLIC_HIDDEN_CACHE_KEY, null);
+  if (!parsed || !Array.isArray(parsed.rows)) return null;
+  const rowsValid = parsed.rows.every((row) => row && typeof row.item_key === "string" && row.item_key.trim());
+  if (!rowsValid) return null;
+  const savedAtMs = Date.parse(parsed.savedAt || "");
+  if (!Number.isFinite(savedAtMs)) return null;
+  if (Date.now() - savedAtMs > PUBLIC_HIDDEN_CACHE_MAX_AGE_MS) return null;
+  return { rows: parsed.rows, savedAt: parsed.savedAt };
+}
+
+function writeBulletinHiddenCache(rows) {
+  writeJson(PUBLIC_HIDDEN_CACHE_KEY, { rows, savedAt: new Date().toISOString() });
+}
+
+// الأصناف المخفية عن الزبائن فعلياً — من النافذة العامة بلا شرط جلسة، بعكس
+// state.bulletinVisibility أعلاه (مقيّد بالمالك، لشاشة الإدارة فقط). فشل القراءة
+// هنا لا يجوز أن يُظهر كل الأصناف تلقائياً: نرتدّ لآخر نسخة موثوقة، وبغيابها
+// نوقف توليد النشرة (state.publicBulletinHidden يبقى null) مع تنبيه صريح للمالك.
+async function loadPublicBulletinHidden() {
+  if (!dataStore.listPublicBulletinHiddenKeys) {
+    state.publicBulletinHidden = [];
+    state.publicBulletinHiddenStatus = "idle";
+    state.publicBulletinHiddenError = null;
+    return;
+  }
+  try {
+    const result = await dataStore.listPublicBulletinHiddenKeys();
+    if (result.available === false) {
+      // النافذة غير مفعّلة بعد (قبل تطبيق Migration 30) — لا أصناف مخفية، ظاهرة كلها كالعادة.
+      state.publicBulletinHidden = [];
+      state.publicBulletinHiddenStatus = "not_installed";
+      state.publicBulletinHiddenError = null;
+      return;
+    }
+    state.publicBulletinHidden = result.rows || [];
+    state.publicBulletinHiddenStatus = "ok";
+    state.publicBulletinHiddenError = null;
+    writeBulletinHiddenCache(state.publicBulletinHidden);
+  } catch (error) {
+    const cached = readBulletinHiddenCache();
+    if (cached) {
+      state.publicBulletinHidden = cached.rows;
+      state.publicBulletinHiddenStatus = "degraded";
+      state.publicBulletinHiddenError =
+        `تعذّر تحديث إعدادات إخفاء الأصناف؛ استُخدمت آخر نسخة موثوقة بتاريخ ${cached.savedAt} ` +
+        `(${cached.rows.length} صنفاً مخفياً). راجع الاتصال بقاعدة البيانات في أقرب فرصة.`;
+    } else {
+      // لا نسخة موثوقة على الإطلاق: يُمنع توليد نشرة جديدة كلياً كي لا تُسرّب صنفاً
+      // أخفاه المالك عمداً. prepareBulletinItems يتحقق من هذا الحقل ويرفض التوليد.
+      state.publicBulletinHidden = null;
+      state.publicBulletinHiddenStatus = "blocked";
+      state.publicBulletinHiddenError = safeErrorMessage(error);
+    }
   }
 }
 
@@ -3325,6 +3429,52 @@ function isWazariPriceItem(item) {
   return itemBulletinClassification(item).bulletin === "wazari";
 }
 
+// ظهور الأصناف في النشرة الموجهة للزبائن — مصدر واحد مشترك مع المولّد
+// (src/bulletin-visibility.js). الحالة الافتراضية: ظاهر. غياب الفهرس (الوحدة
+// لم تُحمَّل) لا يُعامَل كإخفاء — يعني فقط أن كل الأصناف تبقى ظاهرة.
+let _bulletinVisibilityIndexRef = null;
+let _bulletinVisibilityIndex = null;
+function bulletinVisibilityIndex() {
+  const engine = window.ozkBulletinVisibility;
+  if (!engine) return null;
+  if (_bulletinVisibilityIndex && _bulletinVisibilityIndexRef === state.bulletinVisibility) {
+    return _bulletinVisibilityIndex;
+  }
+  _bulletinVisibilityIndexRef = state.bulletinVisibility;
+  _bulletinVisibilityIndex = engine.buildHiddenIndex(state.bulletinVisibility || []);
+  return _bulletinVisibilityIndex;
+}
+
+function isItemHidden(item) {
+  const engine = window.ozkBulletinVisibility;
+  if (!engine) return false;
+  return engine.isHiddenItem(item, bulletinVisibilityIndex());
+}
+
+// فهرس الإخفاء الفعلي للزبائن — من النافذة العامة (state.publicBulletinHidden)
+// بلا شرط صلاحية مالك، بعكس bulletinVisibilityIndex أعلاه (للمالك وحده، لعدادات
+// شاشة الإدارة فقط). هذا هو المصدر الذي يستعمله prepareBulletinItems فعلياً،
+// وإلا يرى أي موظف غير مالك (أو زائر) فهرساً فارغاً صامتاً بسبب RLS فيظهر الصنف
+// المخفي في معاينته وتصديره رغم إخفائه عن مولّد النشرات المستقل.
+let _publicBulletinHiddenIndexRef = null;
+let _publicBulletinHiddenIndex = null;
+function publicBulletinHiddenIndex() {
+  const engine = window.ozkBulletinVisibility;
+  if (!engine) return null;
+  if (_publicBulletinHiddenIndex && _publicBulletinHiddenIndexRef === state.publicBulletinHidden) {
+    return _publicBulletinHiddenIndex;
+  }
+  _publicBulletinHiddenIndexRef = state.publicBulletinHidden;
+  _publicBulletinHiddenIndex = engine.buildHiddenIndex(state.publicBulletinHidden || []);
+  return _publicBulletinHiddenIndex;
+}
+
+function isHiddenFromCustomers(item) {
+  const engine = window.ozkBulletinVisibility;
+  if (!engine) return false;
+  return engine.isHiddenItem(item, publicBulletinHiddenIndex());
+}
+
 function hasFullSecondUnit(item) {
   const factor = itemUnit2Factor(item);
   return factor > 0 && itemQty(item) / factor >= 1;
@@ -4202,8 +4352,30 @@ function prepareBulletinItems(useSyria = false, exchangeRate = Number(state.syri
   // الوضع من نوع النشرة المصدَّرة لا من تبويب الصفحة: تصدير نشرة السوري
   // والصفحة على وضع الجملة كان يدمج بقرار الوضع الخاطئ.
   const bulletinMode = useSyria ? "mufrak" : "jumla";
+  // بوابة الأمان: state.publicBulletinHidden يساوي null حين تعذّرت قراءة
+  // الأصناف المخفية عن الزبائن ولا توجد نسخة محلية موثوقة يُركن إليها (راجع
+  // loadPublicBulletinHidden). التوليد يتوقف هنا كلياً بدل إظهار كل الأصناف
+  // تلقائياً — فقد يكون من بينها صنف أخفاه المالك عمداً. لا أثر على المخزون أو المبيعات.
+  if (state.publicBulletinHidden === null) {
+    return {
+      ok: false,
+      message:
+        "تعذّر تحديث إعدادات إخفاء الأصناف عن الزبائن ولا توجد نسخة موثوقة محفوظة. " +
+        "توليد النشرة متوقف مؤقتاً كي لا يُظهر صنفاً مخفياً عمداً — تحقق من الاتصال وحدّث الصفحة."
+    };
+  }
+
   // الترشيح أولاً ثم الدمج: النشرة تُبنى من الأصناف المؤهَّلة وحدها.
   let items = customerPriceListItems(bulletinMode, { skipMerge: true });
+
+  // إخفاء المالك قبل أي تفرّع (وزاري/عام، دولار/سوري) — نفس الترتيب ونفس
+  // المصدر المشترك (src/bulletin-visibility.js) الذي يستعمله مولّد النشرات
+  // المستقل (scripts/generate-price-lists.mjs). المصدر هنا عمداً النافذة
+  // العامة (isHiddenFromCustomers عبر state.publicBulletinHidden) لا الجدول
+  // المقيَّد بالمالك (isItemHidden) — وإلا يرى أي موظف غير مالك فهرساً فارغاً
+  // صامتاً بسبب RLS فيظهر له الصنف المخفي في معاينته وتصديره (ملاحظة Codex P1
+  // على PR #443، الجزء المتعلق بغير المالك). لا أثر على المخزون أو approved_price_items.
+  items = items.filter((item) => !isHiddenFromCustomers(item));
 
   // الترشيح الكامل قبل الدمج في النشرتين، كترتيب المولّد حرفياً:
   // الجملة تستبعد ما دون وحدة ثانية كاملة، والسوري يستبعد ما لا سعر مفرق له.
@@ -4275,6 +4447,10 @@ async function openPricePreview(useSyria = false, theme = state.bulletinPdfTheme
     return;
   }
   state.syriaRateConfirmed = false;
+  // تحديث فهرس الإخفاء العام قبل كل فتح معاينة — يضمن أن المعاينة والتصدير
+  // اللاحق (exportPricePreview، متزامن ولا يستطيع الانتظار بنفسه) يستعملان
+  // أحدث حالة متاحة بدل ما حُمِّل عند بدء التشغيل فقط.
+  await loadPublicBulletinHidden();
   // الترقيم يُقاس عند كل رسم للمعاينة، فلا نرسمها قبل أن يجهز الخط.
   await awaitBulletinFontReady();
   const built = buildBulletinDataset(useSyria, theme);
@@ -4633,6 +4809,28 @@ function generalPricingWorklistItems() {
       .filter(Boolean);
     return { ...item, sourceKeys: [...new Set([...item.sourceKeys, ...groupKeys])] };
   });
+}
+
+// فلتر العرض (الكل/الظاهرة/المخفية) داخل شاشة إدارة النشرة فقط — لا يغيّر قائمة
+// العمل نفسها ولا يستبعد صنفاً من المزامنة أو التعديل، فالصنف المخفي يبقى قابلاً
+// للإظهار دوماً من نفس الشاشة. الأصناف المدموجة بلا GUID واحد تُحسب «ظاهرة»
+// لأنه لا يوجد تحكم إخفاء فردي عليها (نفس ما تعرضه pricingVisibilityLine).
+function applyPricingVisibilityFilter(items, filter) {
+  if (filter !== "shown" && filter !== "hidden") return items;
+  return items.filter((item) => {
+    const merged = Array.isArray(item.sourceKeys) && item.sourceKeys.length > 0;
+    const hidden = merged ? false : isItemHidden(item);
+    return filter === "hidden" ? hidden : !hidden;
+  });
+}
+
+function pricingVisibilityCounts(items) {
+  let hidden = 0;
+  items.forEach((item) => {
+    const merged = Array.isArray(item.sourceKeys) && item.sourceKeys.length > 0;
+    if (!merged && isItemHidden(item)) hidden += 1;
+  });
+  return { hidden, shown: items.length - hidden, total: items.length };
 }
 
 function downloadDailyPricingWorklist() {
@@ -5991,6 +6189,7 @@ function pricingRow(item) {
       ${retailHint}
       <span>${escapeHtml(priced ? "الأسعار مستقلة — راجع الحقلين" : statusLabel(item.status))}</span>
       ${pricingBulletinLine(item)}
+      ${pricingVisibilityLine(item)}
       <form class="pricing-editor" data-form="pricing-item" data-item-key="${escapeHtml(item.key)}" data-source-keys="${escapeHtml(JSON.stringify(item.sourceKeys || []))}" data-item-name="${escapeHtml(item.name || "")}" data-stock-qty="${escapeHtml(qty)}" data-stock-status="${escapeHtml(item.status || "")}" data-unit1-name="${escapeHtml(unit1Name)}" data-unit2-name="${escapeHtml(unit2Name)}" data-unit2-factor="${escapeHtml(unit2Factor)}">
         <div class="pricing-editor-fields">
           <label>
@@ -6073,6 +6272,51 @@ async function saveBulletinClassification(form) {
     setNotice("success", `حُفظ تصنيف «${form.dataset.itemName || ""}». لا يتغيّر أي سعر.`);
   } catch (error) {
     setNotice("error", `تعذّر حفظ التصنيف: ${safeErrorMessage(error)}`);
+  }
+  render();
+}
+
+// سطر الظهور على بطاقة التسعير. الحالة يراها الجميع (كما سطر التصنيف)؛ زرّا
+// الإظهار/الإخفاء للمالك وحده — القاعدة ترفض أي محاولة من غيره (Migration 30).
+// الأصناف المدموجة (sourceKeys) بلا GUID واحد: بلا سطر ظهور، كسطر التصنيف تماماً.
+function pricingVisibilityLine(item) {
+  // القراءة مقيّدة بالمالك وحده على مستوى القاعدة (Migration 30): طاقم غير
+  // المالك يحصل على صفوف فارغة صامتة من RLS، فعرض حالة الظهور له كان سيُظهر
+  // "ظاهر للزبائن" خاطئاً لكل صنف. السطر كله للمالك وحده.
+  if (!isOwner()) return "";
+  const merged = Array.isArray(item.sourceKeys) && item.sourceKeys.length > 0;
+  if (merged) return "";
+  const hidden = isItemHidden(item);
+  const guid = normGuid(item.itemGuid);
+  const canEdit = Boolean(guid) && Boolean(dataStore.setItemBulletinVisibility);
+  const statusLine = `<small>النشرة: <b>${hidden ? "مخفي عن الزبائن" : "ظاهر للزبائن"}</b></small>`;
+  const buttons = canEdit
+    ? `<div class="bulletin-visibility-actions">
+        <button class="button mini-button" type="button" data-action="show-bulletin-item" data-item-guid="${escapeHtml(guid)}" data-item-key="${escapeHtml(item.key || "")}" data-item-name="${escapeHtml(item.name || "")}" ${hidden ? "" : "disabled"}>✓ إظهار</button>
+        <button class="button mini-button secondary" type="button" data-action="hide-bulletin-item" data-item-guid="${escapeHtml(guid)}" data-item-key="${escapeHtml(item.key || "")}" data-item-name="${escapeHtml(item.name || "")}" ${hidden ? "disabled" : ""}>✕ إخفاء</button>
+      </div>`
+    : "";
+  return `<div class="bulletin-visibility-line" data-hidden="${hidden ? "true" : "false"}">
+      ${statusLine}
+      ${buttons}
+    </div>`;
+}
+
+async function saveBulletinVisibility(button) {
+  const hidden = button.dataset.action === "hide-bulletin-item";
+  const itemName = button.dataset.itemName || "";
+  try {
+    if (!isOwner()) throw new Error("تعديل ظهور الصنف للمالك فقط.");
+    await dataStore.setItemBulletinVisibility({
+      itemGuid: button.dataset.itemGuid || "",
+      hidden,
+      itemKey: button.dataset.itemKey || "",
+      itemName
+    });
+    await loadBulletinVisibility();
+    setNotice("success", hidden ? `أُخفي «${itemName}» عن نشرة الزبائن. يبقى في المخزون والفواتير كما هو.` : `أُظهر «${itemName}» في نشرة الزبائن.`);
+  } catch (error) {
+    setNotice("error", `تعذّر تعديل الظهور: ${safeErrorMessage(error)}`);
   }
   render();
 }
@@ -6400,6 +6644,11 @@ function pricing() {
       : "";
   const generalCount = customerPriceListItems().length;
   const publishState = state.bulletinStatus?.type === "error" ? "تحتاج مراجعة" : "جاهزة للنشر";
+  // القراءة مقيّدة بالمالك وحده على مستوى القاعدة (Migration 30)؛ فلتر وعدادات
+  // الظهور يُعرضان ويُطبَّقان للمالك فقط، وإلا يرى الطاقم عدّاد "0 مخفي" خاطئاً
+  // لأن قراءتهم للجدول تُفلتَر صامتاً بالـRLS بلا أي صنف.
+  const visibilityCounts = isOwner() ? pricingVisibilityCounts(items) : null;
+  const visibleItems = isOwner() ? applyPricingVisibilityFilter(items, state.pricingVisibilityFilter) : items;
 
   return shell(`
     <section class="newsletter-hub">
@@ -6495,11 +6744,18 @@ function pricing() {
       </div>
       ${authHint}
       ${state.approvedPriceError ? `<p class="muted">تنبيه الأسعار: ${escapeHtml(state.approvedPriceError)}</p>` : ""}
+      ${isOwner() && state.bulletinVisibilityError ? `<p class="muted">تنبيه الظهور: ${escapeHtml(state.bulletinVisibilityError)} (تبقى كل الأصناف ظاهرة احتياطاً).</p>` : ""}
       <div class="currency-toggle" role="group">
         <button type="button" class="ctgl ${state.priceMode === "mufrak" ? "" : "active"}" data-mode="jumla">عرض أصناف نشرة الجملة</button>
         <button type="button" class="ctgl ${state.priceMode === "mufrak" ? "active" : ""}" data-mode="mufrak">عرض أصناف نشرة المفرق</button>
       </div>
       <p class="pricing-mode-help">اختيار العرض يغيّر الأصناف الظاهرة فقط. كل بطاقة تحفظ سعر الجملة وسعر المفرق كلّاً في حقله المستقل.</p>
+      ${visibilityCounts ? `<div class="currency-toggle" role="group" aria-label="فلتر ظهور الأصناف في نشرة الزبائن">
+        <button type="button" class="ctgl ${state.pricingVisibilityFilter === "all" ? "active" : ""}" data-visibility-filter="all">جميع الأصناف (${escapeHtml(visibilityCounts.total)})</button>
+        <button type="button" class="ctgl ${state.pricingVisibilityFilter === "shown" ? "active" : ""}" data-visibility-filter="shown">الأصناف الظاهرة (${escapeHtml(visibilityCounts.shown)})</button>
+        <button type="button" class="ctgl ${state.pricingVisibilityFilter === "hidden" ? "active" : ""}" data-visibility-filter="hidden">الأصناف المخفية (${escapeHtml(visibilityCounts.hidden)})</button>
+      </div>
+      <p class="pricing-mode-help">الإخفاء يخص نشرة الزبائن فقط (الموقع وPDF والطباعة والواتساب) — الصنف المخفي يبقى في المخزون والفواتير والتقارير دون أي تغيير بسعره أو كميته.</p>` : ""}
       <div class="inventory-controls">
         <label>
           البحث ضمن مواد النشرة
@@ -6507,7 +6763,7 @@ function pricing() {
         </label>
       </div>
       <div class="inventory-list inventory-list-dense pricing-list" data-pricing-results>
-        ${items.length ? groupedAccordion("pricing", items, { groupOf: (i) => i.groupName, rowOf: pricingRow, query: state.pricingSearch }) : `<p class="muted">${escapeHtml(emptyText)}</p>`}
+        ${visibleItems.length ? groupedAccordion("pricing", visibleItems, { groupOf: (i) => i.groupName, rowOf: pricingRow, query: state.pricingSearch }) : `<p class="muted">${escapeHtml(emptyText)}</p>`}
       </div>
       <details class="newsletter-tools">
         <summary>أدوات وتقارير إضافية</summary>
@@ -13358,8 +13614,21 @@ function bindBulletinClassificationForms(root = app) {
   });
 }
 
+// أزرار الإظهار/الإخفاء ليست نموذجاً — زر فوري بلا حقول، كأزرار refresh-ameen
+// المفردة؛ لا مُرسِل تفويض واحد في الملف، فنطابق نفس نمط الربط لكل صنف.
+function bindBulletinVisibilityButtons(root = app) {
+  root.querySelectorAll("[data-action='show-bulletin-item'], [data-action='hide-bulletin-item']").forEach((button) => {
+    if (button.dataset.bound === "true") return;
+    button.dataset.bound = "true";
+    button.addEventListener("click", (event) => {
+      saveBulletinVisibility(event.currentTarget);
+    });
+  });
+}
+
 function bindPricingForms(root = app) {
   bindBulletinClassificationForms(root);
+  bindBulletinVisibilityButtons(root);
   root.querySelectorAll("[data-form='pricing-item']").forEach((form) => {
     if (form.dataset.bound === "true") return;
     form.dataset.bound = "true";
@@ -13395,7 +13664,8 @@ function bindPricingForms(root = app) {
 
 // تحديث قائمة نتائج التسعير فقط (دون إعادة رسم الصفحة) حتى لا يضيع التركيز أثناء البحث
 function updatePricingResults() {
-  const items = generalPricingWorklistItems();
+  const base = generalPricingWorklistItems();
+  const items = isOwner() ? applyPricingVisibilityFilter(base, state.pricingVisibilityFilter) : base;
   const results = app.querySelector("[data-pricing-results]");
   if (!results) return;
   results.innerHTML = items.length
@@ -14601,6 +14871,15 @@ function render() {
     btn.addEventListener("click", () => {
       state.priceMode = btn.dataset.mode === "mufrak" ? "mufrak" : "jumla";
       writeJson("price-mode", state.priceMode);
+      render();
+    });
+  });
+
+  app.querySelectorAll("[data-visibility-filter]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const value = btn.dataset.visibilityFilter;
+      state.pricingVisibilityFilter = ["all", "shown", "hidden"].includes(value) ? value : "all";
+      writeJson("pricing-visibility-filter", state.pricingVisibilityFilter);
       render();
     });
   });

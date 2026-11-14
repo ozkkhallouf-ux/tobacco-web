@@ -131,7 +131,18 @@ const { rowsMissingFromMarkup } = createMarkupRowReader(browser);
 async function bootApp(width, height) {
   const context = await browser.newContext({ viewport: { width, height }, bypassCSP: true, serviceWorkers: "block" });
   const page = await context.newPage();
-  await page.route("**://*.supabase.co/**", (route) => route.abort());
+  // نافذة bulletin_hidden_items_feed العامة وحدها تُجاب بنجاح (بلا أصناف مخفية) —
+  // هذا الفحص يختبر محتوى النشرة المطبوع لا منطق الإخفاء (له فحصه الخاص الناجح
+  // في check-bulletin-visibility-ui.mjs)، وبقية نداءات Supabase تبقى محجوبة.
+  // بلا هذا السطر: buildBulletinDataset يحجب النشرة فعلياً (fail-safe مقصود عند
+  // تعذّر قراءة الإخفاء بلا نسخة محلية صالحة) فيعيد نتيجة بلا `dataset`، فلا يفتح
+  // openPricePreview المعاينة إطلاقاً ويتجمّد الفحص بانتظار زر لن يظهر.
+  await page.route("**://*.supabase.co/**", (route) => {
+    if (route.request().url().includes("bulletin_hidden_items_feed")) {
+      return route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+    }
+    return route.abort();
+  });
   await page.goto(`${BASE}/index.html`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => typeof window.buildBulletinDataset === "function", null, { timeout: 20000 });
   await page.evaluate(({ items, prices }) => {
@@ -414,9 +425,14 @@ for (const sc of [
 // القديمتين كانتا ستمرّان.
 {
   const { context, page, fontReady } = await bootApp(1440, 900);
-  const built = await page.evaluate(() => {
+  const built = await page.evaluate(async () => {
     const state = (0, eval)("state");
     state.syriaRateConfirmed = true;
+    // بلا هذا الانتظار: استدعاء buildBulletinDataset هنا مباشرة بلا المرور
+    // بـopenPricePreview قد يسبق اكتمال مرحلة الإقلاع غير المتزامنة التي تملأ
+    // state.publicBulletinHidden (سباق توقيت)، فتُفعَّل بوابة الأمان fail-safe
+    // وتُرجع نتيجة بلا `dataset` — نفس سبب فشل هذا الفحص على CI المجزّأ.
+    await window.loadPublicBulletinHidden();
     const ds = window.buildBulletinDataset(true, "dark").dataset;
     const plan = window.bulletinRenderPlan(ds);
     const rows = window.bulletinTemplateGroups(ds).flatMap((g) => g.items);
@@ -494,9 +510,11 @@ for (const sc of [
 // الاثنين. (المطابقة الآن تُبلّط مقاطع الرسم: ترتيب الحروف داخل المقطع مصون.)
 {
   const { context, page, fontReady } = await bootApp(1440, 900);
-  const built = await page.evaluate(() => {
+  const built = await page.evaluate(async () => {
     const state = (0, eval)("state");
     state.syriaRateConfirmed = true;
+    // راجع تعليق الانتظار المماثل أعلى هذا الملف — نفس سباق التوقيت.
+    await window.loadPublicBulletinHidden();
     const ds = window.buildBulletinDataset(true, "dark").dataset;
     const plan = window.bulletinRenderPlan(ds);
     const doc = new DOMParser().parseFromString(plan.markup, "text/html");
@@ -580,9 +598,11 @@ for (const sc of [
 // بأصلها الأفقي في مقطع ذرّي ترتيبه مصون، فيُرصد التبديل.
 {
   const { context, page, fontReady } = await bootApp(1440, 900);
-  const built = await page.evaluate(() => {
+  const built = await page.evaluate(async () => {
     const state = (0, eval)("state");
     state.syriaRateConfirmed = true;
+    // راجع تعليق الانتظار المماثل أعلى هذا الملف — نفس سباق التوقيت.
+    await window.loadPublicBulletinHidden();
     const ds = window.buildBulletinDataset(true, "dark").dataset;
     const plan = window.bulletinRenderPlan(ds);
     const doc = new DOMParser().parseFromString(plan.markup, "text/html");

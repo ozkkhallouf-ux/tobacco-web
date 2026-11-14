@@ -971,6 +971,62 @@
       return data;
     },
 
+    // ظهور الأصناف في نشرة الأسعار (عام/مخفي) — Migration 30. قراءة وكتابة للمالك
+    // وحده عبر set_item_bulletin_visibility مع سجل تدقيق في القاعدة.
+    // غياب الجدول (قبل تطبيق الهجرة) ليس فشلاً: available=false وكل الأصناف تبقى ظاهرة
+    // (الحالة الافتراضية)، فلا يُخفى شيء صامتاً عند فشل القراءة.
+    async listItemBulletinVisibility() {
+      if (!client) return { rows: [], available: false };
+      const session = await getSupabaseSession();
+      if (!session) return { rows: [], available: true };
+      const { data, error } = await client
+        .from("item_bulletin_visibility")
+        .select("item_guid, item_key, item_name, reason, updated_by_email, updated_at")
+        .limit(5000);
+      if (error) {
+        if (error.code === "42P01" || error.code === "PGRST205") return { rows: [], available: false };
+        throw new Error(translateDbError(error.message));
+      }
+      return { rows: data || [], available: true };
+    },
+
+    async setItemBulletinVisibility({ itemGuid, hidden, itemKey, itemName, reason }) {
+      if (!client) throw new Error("تعديل ظهور الصنف يحتاج الاتصال بقاعدة البيانات.");
+      await requireUser();
+      const guid = String(itemGuid || "").trim().replace(/^\{|\}$/g, "").toUpperCase();
+      const { data, error } = await client.rpc("set_item_bulletin_visibility", {
+        p_item_guid: guid,
+        p_hidden: Boolean(hidden),
+        p_item_key: String(itemKey || ""),
+        p_item_name: String(itemName || ""),
+        p_reason: String(reason || "")
+      });
+      if (error) {
+        if (error.code === "PGRST202" || error.code === "42883") {
+          throw new Error("ظهور الأصناف غير مفعّل بعد على قاعدة البيانات (Migration 30).");
+        }
+        throw new Error(translateDbError(error.message));
+      }
+      return data;
+    },
+
+    // نافذة bulletin_hidden_items_feed العامة (item_key فقط) — بلا شرط جلسة أو
+    // صلاحية مالك عمداً، لأنها المصدر الذي يُفلتَر عليه فعلياً ما يراه أي زائر
+    // أو موظف غير مالك في معاينة/تصدير النشرة (بعكس listItemBulletinVisibility
+    // أعلاه، المقيّد بـRLS للمالك وحده لشاشة الإدارة فقط).
+    async listPublicBulletinHiddenKeys() {
+      if (!client) return { rows: [], available: false };
+      const { data, error } = await client
+        .from("bulletin_hidden_items_feed")
+        .select("item_key")
+        .limit(5000);
+      if (error) {
+        if (error.code === "42P01" || error.code === "PGRST205") return { rows: [], available: false };
+        throw new Error(translateDbError(error.message));
+      }
+      return { rows: data || [], available: true };
+    },
+
     async getCustomerMovementsReport() {
       if (!client) {
         const local = readJson(INVENTORY_REPORTS_KEY, []).filter((report) => report.source === "ameen_customer_movements");

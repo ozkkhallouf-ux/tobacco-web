@@ -37,6 +37,8 @@ export const CHECKS = [
   'check-auto-confirm-removal.mjs',
   'check-bulletin-classification-ui.mjs',
   'check-bulletin-classification.mjs',
+  'check-bulletin-visibility-ui.mjs',
+  'check-bulletin-visibility.mjs',
   'check-business-audit-item-identity.mjs',
   'check-cashier-reprint.mjs',
   'check-checks-manifest.mjs',

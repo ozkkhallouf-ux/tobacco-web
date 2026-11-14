@@ -89,6 +89,9 @@ async function boot(vw, vh) {
     window.tobaccoData.listApprovedPriceItems = async () => prices;
     window.tobaccoData.getSyriaExchangeRate = async () => 14050;
     window.tobaccoData.setSyriaExchangeRate = async (v) => Number(v);
+    // بلا هذا: openPricePreview يستدعي النافذة العامة الحقيقية bulletin_hidden_items_feed
+    // عبر شبكة فعلية على Supabase الإنتاج — هذا الفحص يختبر تغطية الأصناف لا منطق الإخفاء.
+    window.tobaccoData.listPublicBulletinHiddenKeys = async () => ({ rows: [], available: true });
     state.inventoryReports = reports;
     state.approvedPriceItems = prices;
     state.syriaExchangeRate = 14050;
@@ -128,6 +131,11 @@ for (const sc of [
   const got = await page.evaluate(async (sc) => {
     const state = (0, eval)("state");
     state.syriaRateConfirmed = true;
+    // بلا هذا الانتظار: استدعاء buildBulletinDataset هنا مباشرة بلا المرور
+    // بـopenPricePreview قد يسبق اكتمال مرحلة الإقلاع غير المتزامنة التي تملأ
+    // state.publicBulletinHidden (سباق توقيت)، فتُفعَّل بوابة الأمان fail-safe
+    // وتُرجع نتيجة بلا `dataset`.
+    await window.loadPublicBulletinHidden();
     const ds = window.buildBulletinDataset(sc.useSyria, sc.theme).dataset;
     const groups = window.bulletinTemplateGroups(ds);
     const plan = window.bulletinRenderPlan(ds);
