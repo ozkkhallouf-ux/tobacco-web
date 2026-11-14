@@ -99,7 +99,18 @@ async function bootPage(context, { items, prices, rate }) {
   // الفحص وتنهار المعاينة إلى لوحة "لا توجد مواد" (زر إغلاق بلا زر تصدير).
   // كان هذا السباق يُكسب محلياً بأجزاء من الثانية ويسقط في CI الأبطأ. الفحص
   // يخصّ منطق الواجهة لا الشبكة، فنقطع Supabase وننتظر انتهاء boot فعلياً.
-  await page.route("**://*.supabase.co/**", (route) => route.abort());
+  // نافذة bulletin_hidden_items_feed العامة وحدها تُجاب بنجاح (بلا أصناف مخفية)
+  // — هذا الفحص يختبر سلامة بيانات النشرة المصدَّرة لا منطق الإخفاء (له فحصه
+  // الخاص الناجح في check-bulletin-visibility-ui.mjs)، وبقية نداءات Supabase
+  // تبقى محجوبة كما كانت. بلا هذا السطر: buildBulletinDataset يحجب النشرة
+  // فعلياً (fail-safe مقصود عند تعذّر قراءة الإخفاء بلا نسخة محلية صالحة)
+  // فيعيد نتيجة بلا `dataset`.
+  await page.route("**://*.supabase.co/**", (route) => {
+    if (route.request().url().includes("bulletin_hidden_items_feed")) {
+      return route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+    }
+    return route.abort();
+  });
   await page.goto(`${BASE}/index.html`, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => typeof window.buildBulletinDataset === "function", null, { timeout: 20000 });
   await page.waitForFunction(() => {
