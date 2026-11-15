@@ -59,9 +59,23 @@ assert.equal(V.isHiddenItem({ name: "صنف عشوائي" }, idxByKey), false);
 ["itemKey", "item_key", "key", "name", "itemName", "item_name"].forEach((field) => {
   assert.equal(V.isHiddenItem({ [field]: "صنف مخفي" }, idxByKey), true, `الحقل ${field} يُطابق بالمفتاح`);
 });
+// فجوة Codex P1 (2026-11-14): صنف حقيقي يحمل itemGuid من الأمين، لكن نافذة الزبائن
+// (bulletin_hidden_items_feed) لا تكشف إلا item_key فـbyGuid فيها فارغ دوماً. تمرير
+// الصنف كما هو (مع itemGuid) إلى isHiddenItem يطابق بالـGUID فقط فيتوقف دون تجربة
+// المفتاح، فيبقى الصنف ظاهراً خطأً. هذا هو العطل بحرفيته — إثبات أن isHiddenFromCustomers
+// يجب أن يجرّد الصنف من الـGUID قبل المطابقة مقابل هذه النافذة بالذات.
+assert.equal(V.isHiddenItem({ itemGuid: GUID_A, itemKey: "صنف مخفي" }, idxByKey), false,
+  "إثبات العطل: صنف بـGUID مقابل فهرس بالمفتاح فقط لا يُطابَق إن مُرِّر الصنف كاملاً");
+assert.equal(V.isHiddenItem({ itemKey: "صنف مخفي" }, idxByKey), true,
+  "الإصلاح: نفس الصنف مجرَّداً من الـGUID يُطابَق بالمفتاح كما يفعل isHiddenFromCustomers بعد الإصلاح");
 
 // --- 2) مصدر واحد: الموقع والمولّد لا يكرّران منطق الإخفاء -------------------------
 assert.match(APP, /function isItemHidden\(item\) \{\s*const engine = window\.ozkBulletinVisibility;\s*if \(!engine\) return false;\s*return engine\.isHiddenItem\(item, bulletinVisibilityIndex\(\)\);/);
+// isHiddenFromCustomers يجرّد الصنف من itemGuid قبل المطابقة مقابل النافذة العامة
+// (bulletin_hidden_items_feed، item_key فقط) — بلا هذا التجريد يُطابِق GUID فارغاً
+// دوماً لأي صنف حقيقي من الأمين، فيبقى الصنف المخفي ظاهراً (ملاحظة Codex P1).
+assert.match(APP, /function isHiddenFromCustomers\(item\) \{[\s\S]*?const key = item && \(item\.itemKey \?\? item\.item_key \?\? item\.key \?\? item\.name \?\? item\.itemName \?\? item\.item_name \?\? ""\);\s*return engine\.isHiddenItem\(\{ itemKey: key \}, publicBulletinHiddenIndex\(\)\);/,
+  "isHiddenFromCustomers يُطابِق بالمفتاح/الاسم فقط، لا بالـGUID، مقابل النافذة العامة");
 assert.match(GENERATOR, /import "\.\.\/src\/bulletin-visibility\.js";/);
 assert.match(GENERATOR, /visibilityEngine\.isHiddenItem\(\{ itemKey: item\.key \|\| item\.name, name: item\.name \}, hiddenIndex\)/);
 assert.match(GENERATOR, /bulletin_hidden_items_feed\?select=item_key&limit=5000/);

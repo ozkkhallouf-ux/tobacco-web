@@ -3472,7 +3472,14 @@ function publicBulletinHiddenIndex() {
 function isHiddenFromCustomers(item) {
   const engine = window.ozkBulletinVisibility;
   if (!engine) return false;
-  return engine.isHiddenItem(item, publicBulletinHiddenIndex());
+  // النافذة العامة (publicBulletinHiddenIndex) تُبنى من bulletin_hidden_items_feed
+  // التي تكشف item_key فقط بلا item_guid، فـbyGuid فيها فارغ دوماً. isHiddenItem
+  // يطابق بالـGUID أولاً إن توفّر في الصنف ويتوقف دون تجربة المفتاح — فتمرير الصنف
+  // كما هو (وفيه itemGuid من الأمين) يُسقِط المطابقة بالمفتاح صامتاً. مطابقة الأسماء
+  // تماماً كمولّد النشرات المستقل (scripts/generate-price-lists.mjs) بتجريد الصنف من
+  // GUID، فيبقى المفتاح/الاسم فقط ليطابق النافذة العامة فعلياً.
+  const key = item && (item.itemKey ?? item.item_key ?? item.key ?? item.name ?? item.itemName ?? item.item_name ?? "");
+  return engine.isHiddenItem({ itemKey: key }, publicBulletinHiddenIndex());
 }
 
 function hasFullSecondUnit(item) {
