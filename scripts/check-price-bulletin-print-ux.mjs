@@ -84,6 +84,9 @@ await page.evaluate(({ items, prices }) => {
   window.tobaccoData.listApprovedPriceItems = async () => prices;
   window.tobaccoData.getSyriaExchangeRate = async () => 14050;
   window.tobaccoData.setSyriaExchangeRate = async (v) => Number(v);
+  // بلا هذا: openPricePreview يستدعي النافذة العامة الحقيقية bulletin_hidden_items_feed
+  // عبر شبكة فعلية على Supabase الإنتاج — هذا الفحص يختبر واجهة المعاينة لا منطق الإخفاء.
+  window.tobaccoData.listPublicBulletinHiddenKeys = async () => ({ rows: [], available: true });
   state.inventoryReports = reports;
   state.approvedPriceItems = prices;
   state.syriaExchangeRate = 14050;

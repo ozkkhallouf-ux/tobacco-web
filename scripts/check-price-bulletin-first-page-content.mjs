@@ -108,7 +108,18 @@ const { rowsMissingFromMarkup } = createMarkupRowReader(browser);
 async function bootApp(width, height, { blockWebfont = false } = {}) {
   const context = await browser.newContext({ viewport: { width, height }, bypassCSP: true, serviceWorkers: "block" });
   const page = await context.newPage();
-  await page.route("**://*.supabase.co/**", (route) => route.abort());
+  // نافذة bulletin_hidden_items_feed العامة وحدها تُجاب بنجاح (بلا أصناف مخفية) —
+  // هذا الفحص يختبر محتوى الصفحة الأولى المطبوعة لا منطق الإخفاء (له فحصه الخاص
+  // الناجح في check-bulletin-visibility-ui.mjs)، وبقية نداءات Supabase تبقى محجوبة.
+  // بلا هذا السطر: buildBulletinDataset يحجب النشرة فعلياً (fail-safe مقصود عند
+  // تعذّر قراءة الإخفاء بلا نسخة محلية صالحة) فيعيد نتيجة بلا `dataset`، فلا يفتح
+  // openPricePreview المعاينة إطلاقاً ويتجمّد الفحص بانتظار زر لن يظهر.
+  await page.route("**://*.supabase.co/**", (route) => {
+    if (route.request().url().includes("bulletin_hidden_items_feed")) {
+      return route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+    }
+    return route.abort();
+  });
   // الخط الرسمي محلي (public/fonts/cairo — src/ozk-font.js): حجبه هو ما يبني سيناريو الاحتياطي.
   if (blockWebfont) await page.route(/\/public\/fonts\/cairo\/|fonts\.(googleapis|gstatic)\.com/, (route) => route.abort());
   await page.goto(`${BASE}/index.html`, { waitUntil: "domcontentloaded" });

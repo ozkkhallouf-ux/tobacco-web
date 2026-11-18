@@ -252,7 +252,17 @@ const context = await browser.newContext({ viewport: { width: 1440, height: 900 
 const page = await context.newPage();
 const pageErrors = [];
 page.on("pageerror", (e) => pageErrors.push(String(e.message)));
-await page.route("**://*.supabase.co/**", (route) => route.abort());
+// نافذة bulletin_hidden_items_feed العامة وحدها تُجاب بنجاح (بلا أصناف مخفية)
+// — هذا الفحص يختبر تسمية الملفات لا منطق الإخفاء (له فحصه الخاص الناجح في
+// check-bulletin-visibility-ui.mjs)، وبقية نداءات Supabase تبقى محجوبة كما كانت.
+// بلا هذا السطر: buildBulletinDataset يحجب النشرة فعلياً (fail-safe مقصود عند
+// تعذّر قراءة الإخفاء بلا نسخة محلية صالحة) فيعيد نتيجة بلا `dataset`.
+await page.route("**://*.supabase.co/**", (route) => {
+  if (route.request().url().includes("bulletin_hidden_items_feed")) {
+    return route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+  }
+  return route.abort();
+});
 await page.goto(`${BASE}/index.html`, { waitUntil: "domcontentloaded" });
 await page.waitForFunction(() => typeof window.buildBulletinDataset === "function", null, { timeout: 20000 });
 await page.waitForFunction(() => { try { return (0, eval)("state").loading === false; } catch { return false; } }, null, { timeout: 30000 });

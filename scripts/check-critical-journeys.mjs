@@ -225,6 +225,13 @@ async function openApp(page, { search = "", waitForBoot = true } = {}) {
   // التحكم فيخلط الحارس بين قطعٍ مقصود وخطأ حقيقي.
   await page.route("**", (route) => {
     if (route.request().url().startsWith(BASE)) return route.continue();
+    // نافذة bulletin_hidden_items_feed العامة وحدها تُجاب بنجاح (بلا أصناف مخفية):
+    // openPricePreview (رحلة "bulletin-preview" أدناه) يعتمدها، وبلا هذا الاستثناء
+    // تفشل القراءة بلا نسخة محلية فيحجب buildBulletinDataset النشرة كاملة (fail-safe
+    // مقصود) فتتجمّد الرحلة بانتظار معاينة لن تُفتح. بقية الشبكة الخارجية تبقى محجوبة.
+    if (route.request().url().includes("bulletin_hidden_items_feed")) {
+      return route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+    }
     return route.fulfill({
       status: 503,
       contentType: "application/json",
