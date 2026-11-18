@@ -593,6 +593,21 @@ assert(blockedText.includes("لم يُحتسب أي صنف فارغ صفراً")
 const openPlan = api.planSessionFinish([blank, saved], { blank: emptyQty, saved: { unit1Qty: "5", unit2Qty: "", damagedUnit1Qty: "", countState: "counted" } }, { now });
 assert(openPlan.blockers.length === 0 && openPlan.zeros.length === 1 && openPlan.zeros[0].id === "blank", "A truly empty uncounted line is the only finish-time zero.");
 
+// Self-correction (#288) left finish planning on uncounted rows only. A counted
+// own row with a queued offline save, an open edit, or a different draft must
+// block close — otherwise complete locks the old quantity and the correction dies.
+const ownCounted = { id: "own", countState: "counted", unit1Qty: 5, unit2Qty: 0, damagedUnit1Qty: 0, countedByMe: true, recountRequested: false, rowVersion: 3 };
+const matchingOwn = { unit1Qty: "5", unit2Qty: "0", damagedUnit1Qty: "0", countState: "counted" };
+const pendingOwn = api.planSessionFinish([ownCounted, blank], { own: matchingOwn, blank: emptyQty }, { now, pendingItemIds: ["own"] });
+assert(pendingOwn.blockers.some((row) => row.itemId === "own" && row.reason === "unsaved"), "A queued self-correction must block close.");
+assert(pendingOwn.zeros.length === 1 && pendingOwn.zeros[0].id === "blank", "Blocking a correction must not skip blank-to-zero planning for other rows.");
+const editingOwn = api.planSessionFinish([ownCounted], { own: matchingOwn }, { now, editingItemId: "own" });
+assert(editingOwn.blockers.some((row) => row.itemId === "own" && row.reason === "unsaved") && editingOwn.zeros.length === 0, "An open self-correction must block close even if the fields still match.");
+const dirtyOwn = api.planSessionFinish([ownCounted], { own: { unit1Qty: "50", unit2Qty: "0", damagedUnit1Qty: "0", countState: "counted" } }, { now });
+assert(dirtyOwn.blockers.some((row) => row.itemId === "own" && row.reason === "unsaved"), "A typed self-correction that was not saved must block close.");
+const otherDirty = api.planSessionFinish([{ id: "other", countState: "counted", unit1Qty: 9, unit2Qty: 0, damagedUnit1Qty: 0, countedByMe: false }], { other: { unit1Qty: "90", unit2Qty: "", damagedUnit1Qty: "", countState: "counted" } }, { now });
+assert(otherDirty.blockers.length === 0, "Another counter's saved row is not this device's unsaved correction.");
+
 // finishSession itself: a slow save must lock the row, a mid-loop claim or
 // already_counted must not be counted as this client's zero, and a lost
 // response must refresh the lines the server already stored.
@@ -847,6 +862,21 @@ function rowControlsLocked(html, id) {
   await pending;
   assert(completedId === "sess-finish", `Finish threw or skipped complete after Back cleared the session: ${completedId}`);
   assert(original.status === "completed", "The original session was not marked completed after Back during zeroing.");
+}
+
+{
+  const harness = finishHarness([{
+    id: "own", itemName: "صنف الموظف", countState: "counted", unit1Qty: 5, unit2Qty: 0,
+    damagedUnit1Qty: 0, countedByMe: true, rowVersion: 3
+  }]);
+  api.state.editingItemId = "own";
+  harness.inputs.get("own").unit1Qty.value = "50";
+  let completed = 0;
+  store.saveSmartInventoryItem = async () => { throw new Error("finish must not save during an open correction"); };
+  store.completeSmartInventorySession = async () => { completed += 1; return { ok: true, code: "completed" }; };
+  await api.finishSession(harness.root, counterUser);
+  assert(completed === 0 && api.state.session.status === "in_progress", "Finish closed the session while a self-correction was still open.");
+  assert(harness.hooks.notices.some((row) => row.type === "error" && row.text.includes("لم يُحفظ")), "Open self-correction close did not tell the counter to save first.");
 }
 
 if (failed) process.exit(1);
