@@ -221,6 +221,102 @@
     });
   }
 
+  function poAmeenPositiveFactor(value) {
+    const factor = Number(value);
+    return Number.isFinite(factor) && factor > 1 ? factor : 0;
+  }
+
+  function poAmeenCatalogCodes(row) {
+    if (!row) return [];
+    return [
+      row.itemNumber,
+      row.itemCode,
+      row.item_number,
+      row.item_code,
+      row.number
+    ].map((value) => String(value || "").trim()).filter(Boolean);
+  }
+
+  function poAmeenCatalogName(row) {
+    return poNormalizeSearchText((row && (row.itemName || row.name || row.item_name)) || "");
+  }
+
+  // معامل الكرتونة من سطر التقرير إن وُجد، وإلا من كتالوج بترقيم الأمين ثم
+  // بالاسم المطابق الوحيد. لا تخمين لمعامل 50 — غياب المعامل يُبقي العرض بالكروز.
+  function poAmeenResolveUnit2Factor(item, catalogs) {
+    const direct = poAmeenPositiveFactor(item && (item.unit2Factor ?? item.unit2_factor));
+    if (direct) return direct;
+    const list = Array.isArray(catalogs) ? catalogs : [];
+    const num = String((item && item.itemNumber) || "").trim();
+    const nameNorm = poNormalizeSearchText((item && item.itemName) || "");
+    const uniqueFactors = (rows) => {
+      const factors = [];
+      rows.forEach((row) => {
+        const factor = poAmeenPositiveFactor(row && (row.unit2Factor ?? row.unit2_factor));
+        if (factor && !factors.includes(factor)) factors.push(factor);
+      });
+      return factors;
+    };
+    if (num) {
+      const byNum = uniqueFactors(list.filter((row) => poAmeenCatalogCodes(row).includes(num)));
+      if (byNum.length === 1) return byNum[0];
+    }
+    if (nameNorm) {
+      const byName = uniqueFactors(list.filter((row) => poAmeenCatalogName(row) === nameNorm));
+      if (byName.length === 1) return byName[0];
+    }
+    return 1;
+  }
+
+  function poAmeenFormatQty(value) {
+    if (value == null || value === "") return "—";
+    const number = Number(value);
+    if (!Number.isFinite(number)) return "—";
+    const rounded = Math.round((number + Number.EPSILON) * 1000) / 1000;
+    return String(Object.is(rounded, -0) ? 0 : rounded);
+  }
+
+  function poAmeenFormatPrice(value) {
+    if (value == null || value === "") return "—";
+    const number = Number(value);
+    if (!Number.isFinite(number)) return "—";
+    return number.toFixed(2);
+  }
+
+  // كمية الأمين وتكلفة الوحدة الأساسية مخزَّنتان بالكروز. العرض المطلوب للكرتونة:
+  // الكمية ÷ المعامل، وآخر/متوسط التكلفة × المعامل. المعامل ≤ 1 يُبقي القيم كما وصلت.
+  function poAmeenCartonDisplay(item, unit2Factor, labels) {
+    const factor = poAmeenPositiveFactor(unit2Factor);
+    const qty = item && item.qty != null && item.qty !== "" ? Number(item.qty) : null;
+    const lastPrice = item && item.lastPrice != null && item.lastPrice !== "" ? Number(item.lastPrice) : null;
+    const avgPrice = item && item.avgPrice != null && item.avgPrice !== "" ? Number(item.avgPrice) : null;
+    const rawUnit = String((item && item.unit) || "").trim();
+    const unit1Name = String((labels && labels.unit1Name) || "كروز").trim() || "كروز";
+    const unit2Name = String((labels && labels.unit2Name) || "كرتونة").trim() || "كرتونة";
+    if (!factor) {
+      return {
+        converted: false,
+        qtyText: poAmeenFormatQty(qty),
+        qtyHint: "",
+        unit: rawUnit || "—",
+        lastPriceText: poAmeenFormatPrice(lastPrice),
+        avgPriceText: poAmeenFormatPrice(avgPrice)
+      };
+    }
+    const qtyCarton = qty != null && Number.isFinite(qty) ? qty / factor : null;
+    const lastCarton = lastPrice != null && Number.isFinite(lastPrice) ? lastPrice * factor : null;
+    const avgCarton = avgPrice != null && Number.isFinite(avgPrice) ? avgPrice * factor : null;
+    const unit = /كرتون/.test(rawUnit) ? rawUnit : unit2Name;
+    return {
+      converted: true,
+      qtyText: poAmeenFormatQty(qtyCarton),
+      qtyHint: qty != null && Number.isFinite(qty) ? `${poAmeenFormatQty(qty)} ${unit1Name}` : "",
+      unit,
+      lastPriceText: poAmeenFormatPrice(lastCarton),
+      avgPriceText: poAmeenFormatPrice(avgCarton)
+    };
+  }
+
   root.poCalc = {
     poToEnglishDigits,
     poNormalizeNumeric,
@@ -240,6 +336,8 @@
     poNormalizeSearchText,
     poAmeenSupplierMatches,
     poAmeenClampNavIndex,
-    poAmeenItemMatches
+    poAmeenItemMatches,
+    poAmeenResolveUnit2Factor,
+    poAmeenCartonDisplay
   };
 })(typeof window !== "undefined" ? window : globalThis);
