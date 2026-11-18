@@ -22,6 +22,8 @@
 //      أو مجموع لا يطابق، يُسقط النسخة الفورية كلها وتبقى نسخة التقرير كما هي.
 //   4) نفس شروط التقرير: فواتير بيع/مرتجع (1/3) باسم زبون، داخل نافذة التقرير.
 //   5) الهوية customer_guid (u.CustGUID = cu000.GUID، نفس معرّف التقرير).
+//   6) بلا لقطة تقرير لا يُختلق تقرير من الصفوف الفورية. الجدول الفوري طبقة فوق
+//      ameen_customer_invoices وليس بديلاً عنها — آخر 24 ساعة ليست كشف 60 يوماً.
 // ============================================================================
 (function () {
   "use strict";
@@ -196,6 +198,9 @@
     const rows = Array.isArray(liveRows) ? liveRows : [];
     const stats = { applied: 0, added: 0, replaced: 0, removed: 0, olderThanReport: 0, outOfWindow: 0, rejected: {} };
     if (!rows.length) return { report, stats };
+    // اللقطة شرط الدمج. بلاها كانت الصفوف الفورية + لائحة الأسعار تُنشئ تقريراً
+    // لآخر 24 ساعة بمظهر ameen_customer_invoices، فيختفي تاريخ الـ60 يوماً.
+    if (!report) return { report, stats };
 
     const syncedMs = timeMs(report?.summary?.syncedAt || report?.created_at);
     const cutoffMs = syncedMs === null ? null : syncedMs - REPORT_READ_MARGIN_MS;

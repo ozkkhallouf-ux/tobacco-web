@@ -201,6 +201,15 @@ test("بلا صفوف فورية يبقى التقرير نفس الكائن", (
   assert.equal(L.mergeLiveInvoices(base, []).report, base);
 });
 
+test("بلا لقطة تقرير لا يُختلق تقرير من الصفوف الفورية وحدها", () => {
+  // العطل: فشل تحميل ameen_customer_invoices مع وجود صفوف في ameen_invoices ولائحة
+  // أسعار (دليل المواد) كان يبني تقريراً لـ24 ساعة يبدو مكتملاً. الفوري فوق اللقطة فقط.
+  const row = liveRow(G(5), { total: 30, lines: [ln(ITEM_NEW, 20, 15, 2)] });
+  const { report, stats } = L.mergeLiveInvoices(null, [row], { priceItems });
+  assert.equal(report, null, "بدون لقطة يجب ألا يُختلق تقرير");
+  assert.equal(stats.applied, 0);
+});
+
 test("liveFetchSince = لقطة التقرير ناقص الهامش", () => {
   assert.equal(L.liveFetchSince(baseReport(), Date.parse("2026-10-31T16:00:00Z")), "2026-10-31T14:50:00.000Z");
   assert.equal(L.liveFetchSince(null, Date.parse("2026-10-31T16:00:00Z")), "2026-10-30T16:00:00.000Z");
@@ -221,6 +230,7 @@ test("الموقع يحمّل الوحدة قبل app.js ويخزّنها في �
   assert.ok(/state\.route === "sales" && state\.salesHistoryOpen/.test(poll.slice(0, 1500)), "شاشة «الفواتير السابقة» يجب أن تتحدّث فورياً");
   const loader = app.slice(app.indexOf("async function loadLiveInvoices()"), app.indexOf("// ===== هوية الزبون والفاتورة"));
   assert.ok(/prices === state\.liveInvoicesPrices/.test(loader), "تغيّر لائحة الأسعار يجب أن يُبطل ذاكرة الدمج");
+  assert.ok(/if\s*\(\s*!base\s*\)\s*return\s+false/.test(loader), "بلا لقطة تقرير لا تُجلب الصفوف الفورية ولا يُختلق تقرير");
   const pricesLoader = app.slice(app.indexOf("async function loadApprovedPriceItems()"));
   assert.ok(/await loadLiveInvoices\(\);\n\}/.test(pricesLoader.slice(0, 900)), "وصول لائحة الأسعار يعيد دمج الفواتير الفورية");
   const engine = readFileSync(new URL("../src/live-invoices.js", import.meta.url), "utf8");
