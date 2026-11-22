@@ -413,15 +413,20 @@ try {
         $src = Get-Content -LiteralPath $p -Raw -Encoding UTF8
         $code = ($src -split "`n" | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
         $leaf = Split-Path -Leaf $p
-        Assert-True ($code -notmatch '(?i)Remove-Item|\bdel\b|rmdir|Directory\]::Delete|Unregister-ScheduledTask|Set-ScheduledTask|Disable-ScheduledTask') ($leaf + ': لا Remove-Item ولا حذف مجلدات ولا تعديل مهام موجودة')
+        Assert-True ($code -notmatch '(?i)Remove-Item|\bdel\b|rmdir|Unregister-ScheduledTask|Set-ScheduledTask|Disable-ScheduledTask') ($leaf + ': لا Remove-Item ولا rmdir ولا تعديل مهام موجودة')
         $deletes = @([regex]::Matches($code, '\[System\.IO\.File\]::Delete')).Count
+        $dirDeletes = @([regex]::Matches($code, 'Directory\]::Delete')).Count
         if ($leaf -eq 'ozk-ameen-backup.ps1') {
             Assert-True ($deletes -eq 1) ($leaf + ': موضع حذف ملف واحد فقط (FileRemover)')
             $removerCalls = @([regex]::Matches($code, '& \$script:FileRemover')).Count
             $removeFn = [regex]::Match($code, '(?s)function Remove-OzkOwnRawFiles.*?\n}').Value
             Assert-True ($removerCalls -eq 1 -and $removeFn -match '& \$script:FileRemover') ($leaf + ': FileRemover يُستدعى من Remove-OzkOwnRawFiles وحدها')
+            Assert-True ($dirDeletes -eq 1 -and $code -match '\[System\.IO\.Directory\]::Delete\(\$Path, \$true\)') ($leaf + ': موضع حذف مجلد واحد فقط (DirRemover)')
+            $dirCalls = @([regex]::Matches($code, '& \$script:DirRemover')).Count
+            $oldRunsFn = [regex]::Match($code, '(?s)function Remove-OzkOldRuns.*?\n}').Value
+            Assert-True ($dirCalls -eq 1 -and $oldRunsFn -match '& \$script:DirRemover') ($leaf + ': DirRemover يُستدعى من Remove-OzkOldRuns وحدها')
         } else {
-            Assert-True ($deletes -eq 0) ($leaf + ': لا حذف ملفات إطلاقاً')
+            Assert-True ($deletes -eq 0 -and $dirDeletes -eq 0) ($leaf + ': لا حذف ملفات ولا مجلدات إطلاقاً')
         }
         Assert-True ($code -notmatch '(?i)Copy-Item[^\r\n]*-Force|Move-Item') ($leaf + ': لا Copy-Item -Force ولا Move-Item')
         Assert-True ($code -notmatch '(?i)RESTORE\s+DATABASE') ($leaf + ': لا RESTORE DATABASE')
@@ -537,6 +542,93 @@ try {
     Assert-True ((Test-Path -LiteralPath $good) -and (Test-Path -LiteralPath $outside)) 'رفض أي ملف ⇒ لا حذف لأي ملف'
     $fake2 = [pscustomobject]@{ runDir = $gd; stamp = 's1'; files = @([pscustomobject]@{ database = 'master'; file = 'master_s1.bak'; sha256 = 'x' }) }
     Assert-Throws { Remove-OzkOwnRawFiles $fake2 } 'قاعدة خارج القائمة مرفوضة'
+
+    Write-Host '== 21) الاحتفاظ -KeepLatest: معطّل افتراضياً، C: فقط، بعد نجاح كامل =='
+    function New-OldRun([string]$Root, [string]$Name, [switch]$NoManifest) {
+        $d = Join-Path (Join-Path $Root $Name.Substring(0, 4)) $Name
+        New-Item -ItemType Directory -Force -Path $d | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $d 'AmnDb002.zip'), 'OLD')
+        if (-not $NoManifest) { [System.IO.File]::WriteAllText((Join-Path $d 'manifest.json'), '{}') }
+        return $d
+    }
+
+    # (أ) الافتراضي ⇒ disabled ولا يُزال شيء
+    $t = New-TestRoots 'ret-default'
+    $o1 = New-OldRun $t.Local '2026-10-01_230000'
+    $r = Invoke-OzkAmeenBackup -Execute -NoSlack -LocalRoot $t.Local -ExternalRoot $t.External -StateDir $t.State -Now $fixedNow
+    Assert-True ($r.status -eq 'ok' -and $r.retention -eq 'disabled' -and (Test-Path -LiteralPath $o1)) 'الافتراضي: retention=disabled والنسخ القديمة باقية'
+
+    # (ب) KeepLatest=2 ⇒ يبقى الحالي + أحدث قديم، ويُزال الباقي؛ وما لا يطابق يُترك
+    $t = New-TestRoots 'ret-keep2'
+    $o1 = New-OldRun $t.Local '2026-10-01_230000'
+    $o2 = New-OldRun $t.Local '2026-10-05_230000'
+    $o3 = New-OldRun $t.Local '2026-10-10_230000'
+    $oPrevYear = New-OldRun $t.Local '2025-12-31_230000'
+    $noMan = New-OldRun $t.Local '2026-09-01_230000' -NoManifest
+    $odd = Join-Path (Join-Path $t.Local '2026') 'keep-me'; New-Item -ItemType Directory -Force -Path $odd | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $odd 'manifest.json'), '{}')
+    $stray = Join-Path $t.Local 'stray.txt'; [System.IO.File]::WriteAllText($stray, 'S')
+    # junction باسم مطابق يشير إلى مجلد خارج الجذر ⇒ لا يُتبع ولا يُحذف هدفه
+    $jTarget = Join-Path $base 'ret-junction-target'; New-Item -ItemType Directory -Force -Path $jTarget | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $jTarget 'manifest.json'), '{}')
+    $jLink = Join-Path (Join-Path $t.Local '2026') '2026-08-01_230000'
+    New-Item -ItemType Junction -Path $jLink -Target $jTarget | Out-Null
+    # تشغيل قديم فيه junction داخلي ⇒ يُترك كاملاً
+    $oNested = New-OldRun $t.Local '2026-07-01_230000'
+    $nTarget = Join-Path $base 'ret-nested-target'; New-Item -ItemType Directory -Force -Path $nTarget | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $nTarget 'precious.txt'), 'P')
+    New-Item -ItemType Junction -Path (Join-Path $oNested 'link') -Target $nTarget | Out-Null
+    $r = Invoke-OzkAmeenBackup -Execute -KeepLatest 2 -NoSlack -LocalRoot $t.Local -ExternalRoot $t.External -StateDir $t.State -Now $fixedNow
+    $rm = @($r.removedRuns)
+    Assert-True ($r.status -eq 'ok' -and $r.retention -eq 'done (3)' -and $rm.Count -eq 3) 'KeepLatest=2: retention=done (3)'
+    Assert-True ((Test-Path -LiteralPath $r.runDir) -and (Test-Path -LiteralPath $o3)) 'KeepLatest=2: الحالي وأحدث نسخة قديمة باقيان'
+    Assert-True (-not (Test-Path -LiteralPath $o1) -and -not (Test-Path -LiteralPath $o2) -and -not (Test-Path -LiteralPath $oPrevYear)) 'KeepLatest=2: الأقدم أُزيلت (ومنها سنة سابقة)'
+    Assert-True ((Test-Path -LiteralPath $noMan) -and (Test-Path -LiteralPath $odd) -and (Test-Path -LiteralPath $stray)) 'بلا manifest / اسم غير مطابق / ملف شارد ⇒ تُترك'
+    Assert-True ((Test-Path -LiteralPath $jLink) -and (Test-Path -LiteralPath (Join-Path $jTarget 'manifest.json'))) 'junction باسم مطابق ⇒ يُترك وهدفه سليم'
+    Assert-True ((Test-Path -LiteralPath $oNested) -and ([System.IO.File]::ReadAllText((Join-Path $nTarget 'precious.txt')) -eq 'P')) 'تشغيل فيه junction داخلي ⇒ يُترك وهدفه سليم'
+    Assert-True ((Test-Path -LiteralPath $r.externalDir) -and (Test-Path -LiteralPath (Join-Path $r.externalDir 'manifest.json'))) 'الخارجي لا يُلمس'
+    $st = Read-Status $t.State
+    Assert-True ($st.retention -eq 'done (3)') 'status.json يسجّل الاحتفاظ'
+    $msg = Format-OzkAlert $r
+    Assert-True ($msg -match 'الاحتفاظ: done \(3\)') 'التنبيه يذكر نتيجة الاحتفاظ'
+
+    # (ج) KeepLatest=1 ⇒ يبقى الحالي فقط
+    $t = New-TestRoots 'ret-keep1'
+    $o1 = New-OldRun $t.Local '2026-10-01_230000'
+    $o2 = New-OldRun $t.Local '2026-10-10_230000'
+    $r = Invoke-OzkAmeenBackup -Execute -KeepLatest 1 -NoSlack -LocalRoot $t.Local -ExternalRoot $t.External -StateDir $t.State -Now $fixedNow
+    Assert-True ($r.retention -eq 'done (2)' -and -not (Test-Path -LiteralPath $o1) -and -not (Test-Path -LiteralPath $o2) -and (Test-Path -LiteralPath $r.runDir)) 'KeepLatest=1: يبقى الحالي فقط'
+
+    # (د) بلا قرص خارجي ⇒ skipped ولا إزالة
+    $t = New-TestRoots 'ret-noext'
+    $o1 = New-OldRun $t.Local '2026-10-01_230000'
+    $r = Invoke-OzkAmeenBackup -Execute -KeepLatest 1 -NoSlack -LocalRoot $t.Local -StateDir $t.State -Now $fixedNow
+    Assert-True ($r.status -eq 'local-only' -and $r.retention -like 'skipped*' -and (Test-Path -LiteralPath $o1)) 'بلا خارجي ⇒ retention skipped والقديم باق'
+
+    # (هـ) فشل النسخ للخارجي ⇒ skipped ولا إزالة
+    $t = New-TestRoots 'ret-extfail'
+    $o1 = New-OldRun $t.Local '2026-10-01_230000'
+    $script:FileCopier = { param([string]$Source, [string]$Destination) throw 'mock: USB write error' }
+    $r = Invoke-OzkAmeenBackup -Execute -KeepLatest 1 -NoSlack -LocalRoot $t.Local -ExternalRoot $t.External -StateDir $t.State -Now $fixedNow
+    $script:FileCopier = $realCopier
+    Assert-True ($r.status -eq 'failed' -and $r.retention -like 'skipped*' -and (Test-Path -LiteralPath $o1)) 'فشل الخارجي ⇒ retention skipped والقديم باق'
+
+    # (و) فشل الحذف ⇒ retention failed والنسخة نفسها تبقى ok
+    $t = New-TestRoots 'ret-rmfail'
+    $o1 = New-OldRun $t.Local '2026-10-01_230000'
+    $realDirRemover = $script:DirRemover
+    try {
+        $script:DirRemover = { param([string]$Path) throw 'mock: access denied' }
+        $r = Invoke-OzkAmeenBackup -Execute -KeepLatest 1 -NoSlack -LocalRoot $t.Local -ExternalRoot $t.External -StateDir $t.State -Now $fixedNow
+    } finally { $script:DirRemover = $realDirRemover }
+    Assert-True ($r.status -eq 'ok' -and $r.retention -like 'failed*' -and $r.retention -match 'access denied' -and (Test-Path -LiteralPath $o1)) 'فشل الحذف ⇒ retention failed وstatus يبقى ok'
+
+    # (ز) قيمة سالبة مرفوضة، وDryRun يذكر الإعداد ولا يحذف
+    Assert-Throws { Invoke-OzkAmeenBackup -KeepLatest -1 -NoSlack -LocalRoot (Join-Path $base 'ret-neg') -StateDir (Join-Path $base 'ret-neg-s') -Now $fixedNow } 'KeepLatest سالب مرفوض'
+    $t = New-TestRoots 'ret-dry'
+    $o1 = New-OldRun $t.Local '2026-10-01_230000'
+    $dryOut = (Invoke-OzkAmeenBackup -KeepLatest 1 -NoSlack -LocalRoot $t.Local -ExternalRoot $t.External -StateDir $t.State -Now $fixedNow 6>&1 | Out-String)
+    Assert-True ($dryOut -match 'الاحتفاظ بآخر النسخ: مفعّل \(1\)' -and (Test-Path -LiteralPath $o1)) 'DryRun يذكر الاحتفاظ ولا يحذف'
 
     Write-Host '== 19) سكربت إعداد المهمة: DryRun افتراضي ولا تعديل لمهام موجودة =='
     . $registerPath
