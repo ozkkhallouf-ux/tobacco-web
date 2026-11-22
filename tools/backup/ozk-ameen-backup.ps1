@@ -28,7 +28,8 @@
 #   8) (اختياري، معطّل افتراضياً) الاحتفاظ بـ-KeepLatest N: بعد status=ok فقط
 #      (محلي وخارجي ok)، تُزال مجلدات التشغيل القديمة على C: تحت LocalRoot\yyyy\
 #      ويبقى آخر N تشغيلاً (منها التشغيل الحالي). لا يُلمس إلا مجلد اسمه
-#      yyyy-MM-dd_HHmmss وفيه manifest.json، وليس junction ولا يحوي junction.
+#      yyyy-MM-dd_HHmmss وفيه manifest.json، وليس junction ولا يحوي junction،
+#      وكل قواعده (من manifest) مشمولة بالتشغيل الحالي؛ وإلا يُحمى ويُترك.
 #      النسخ على القرص الخارجي لا تُلمس إطلاقاً.
 #
 # ما لا يفعله إطلاقاً:
@@ -430,7 +431,23 @@ function Remove-OzkOwnRawFiles($Result) {
 
 # ---------- الاحتفاظ: إزالة مجلدات التشغيل القديمة على C: فقط ----------
 
+# هل كل قواعد التشغيل القديم (من files[].database في manifest.json) مشمولة
+# بقواعد التشغيل الحالي؟ manifest غير مقروء، أو بلا قواعد، أو فيه قاعدة لا
+# يغطيها التشغيل الحالي ⇒ false، فيُحمى التشغيل القديم ولا يُزال.
+function Test-OzkRunCoveredBy([string]$RunDir, $CurrentDatabases) {
+    try {
+        $m = Get-Content -LiteralPath (Join-OzkPath $RunDir 'manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    } catch { return $false }
+    if ($null -eq $m) { return $false }
+    $dbs = @(@($m.files) | Where-Object { $_ -and $_.database } | ForEach-Object { [string]$_.database })
+    if ($dbs.Count -eq 0) { return $false }
+    $current = @($CurrentDatabases | ForEach-Object { [string]$_ })
+    foreach ($db in $dbs) { if ($current -notcontains $db) { return $false } }
+    return $true
+}
+
 # تبقي آخر KeepLatest تشغيلاً (منها التشغيل الحالي) تحت LocalRoot\yyyy\، وتزيل
+# الأقدم. لا يُزال تشغيل قديم فيه نسخة لقاعدة لا يشملها التشغيل الحالي.
 # الأقدم. المرشّح يجب أن يكون: مجلداً لا junction، اسمه yyyy-MM-dd_HHmmss، فيه
 # manifest.json، جدّه هو LocalRoot نفسه، ولا يحوي أي reparse point. غير ذلك يُترك.
 function Remove-OzkOldRuns($Result, [string]$LocalRoot, [int]$KeepLatest) {
@@ -463,6 +480,7 @@ function Remove-OzkOldRuns($Result, [string]$LocalRoot, [int]$KeepLatest) {
         $c = $sorted[$i]
         $nested = Get-ChildItem -LiteralPath $c.Full -Recurse -Force -Attributes ReparsePoint -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($nested) { continue }
+        if (-not (Test-OzkRunCoveredBy $c.Full $Result.databases)) { continue }
         & $script:DirRemover $c.Full
         [void]$removed.Add($c.Name)
     }

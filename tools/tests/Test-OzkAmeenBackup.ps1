@@ -544,11 +544,15 @@ try {
     Assert-Throws { Remove-OzkOwnRawFiles $fake2 } 'قاعدة خارج القائمة مرفوضة'
 
     Write-Host '== 21) الاحتفاظ -KeepLatest: معطّل افتراضياً، C: فقط، بعد نجاح كامل =='
-    function New-OldRun([string]$Root, [string]$Name, [switch]$NoManifest) {
+    function New-OldRun([string]$Root, [string]$Name, [switch]$NoManifest, [string[]]$Dbs = @('AmnDb002', 'AmnDb001', 'AmnConfig'), [string]$RawManifest) {
         $d = Join-Path (Join-Path $Root $Name.Substring(0, 4)) $Name
         New-Item -ItemType Directory -Force -Path $d | Out-Null
         [System.IO.File]::WriteAllText((Join-Path $d 'AmnDb002.zip'), 'OLD')
-        if (-not $NoManifest) { [System.IO.File]::WriteAllText((Join-Path $d 'manifest.json'), '{}') }
+        if (-not $NoManifest) {
+            if ($PSBoundParameters.ContainsKey('RawManifest')) { $json = $RawManifest }
+            else { $json = (@{ files = @($Dbs | ForEach-Object { @{ database = $_; file = "$_.zip" } }) } | ConvertTo-Json -Depth 5) }
+            [System.IO.File]::WriteAllText((Join-Path $d 'manifest.json'), $json)
+        }
         return $d
     }
 
@@ -598,6 +602,17 @@ try {
     $o2 = New-OldRun $t.Local '2026-10-10_230000'
     $r = Invoke-OzkAmeenBackup -Execute -KeepLatest 1 -NoSlack -LocalRoot $t.Local -ExternalRoot $t.External -StateDir $t.State -Now $fixedNow
     Assert-True ($r.retention -eq 'done (2)' -and -not (Test-Path -LiteralPath $o1) -and -not (Test-Path -LiteralPath $o2) -and (Test-Path -LiteralPath $r.runDir)) 'KeepLatest=1: يبقى الحالي فقط'
+
+    # (ج2) تشغيل جزئي (-Databases AmnDb002) لا يزيل نسخاً قديمة فيها قواعد لا يشملها
+    $t = New-TestRoots 'ret-partial'
+    $oFull = New-OldRun $t.Local '2026-10-01_230000'
+    $oSame = New-OldRun $t.Local '2026-10-02_230000' -Dbs @('AmnDb002')
+    $oBad = New-OldRun $t.Local '2026-10-03_230000' -RawManifest 'not json {'
+    $oEmpty = New-OldRun $t.Local '2026-10-04_230000' -RawManifest '{"files":[]}'
+    $r = Invoke-OzkAmeenBackup -Execute -Databases AmnDb002 -KeepLatest 1 -NoSlack -LocalRoot $t.Local -ExternalRoot $t.External -StateDir $t.State -Now $fixedNow
+    Assert-True ($r.status -eq 'ok' -and $r.retention -eq 'done (1)') 'تشغيل جزئي: retention=done (1)'
+    Assert-True ((Test-Path -LiteralPath $oFull) -and -not (Test-Path -LiteralPath $oSame)) 'تشغيل جزئي: نسخة فيها AmnDb001/AmnConfig محمية، والمشمولة تُزال'
+    Assert-True ((Test-Path -LiteralPath $oBad) -and (Test-Path -LiteralPath $oEmpty)) 'manifest تالف أو بلا قواعد ⇒ يُحمى'
 
     # (د) بلا قرص خارجي ⇒ skipped ولا إزالة
     $t = New-TestRoots 'ret-noext'
