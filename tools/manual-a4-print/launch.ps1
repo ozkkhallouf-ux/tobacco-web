@@ -34,6 +34,21 @@ try {
     try { $owned = $mutex.WaitOne(30000) } catch [Threading.AbandonedMutexException] { $owned = $true }
     try {
         if (-not $owned) { throw 'تشغيل آخر للأداة لم ينتهِ بعد. أعد المحاولة بعد لحظات.' }
+        # خادم شغّال لكن ملف مفتاح الجلسة مفقود (حُذف أو بدأ الخادم قبله): الخادم لا يعيد كتابة المفتاح
+        # بعد إقلاعه، فالانتظار عبث. نوقف هذا الخادم (نسخة هذه الأداة فقط) ونشغّل خادماً جديداً بمفتاح جديد.
+        if ((Test-Server $port) -and -not (Test-Path $KeyFile)) {
+            # المستهدَف: العملية المستمعة على منفذ الأداة، وبشرط أنها node.exe يشغّل server.js.
+            $ownerIds = @(Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue |
+                Select-Object -ExpandProperty OwningProcess -Unique)
+            foreach ($procId in $ownerIds) {
+                $p = Get-CimInstance Win32_Process -Filter "ProcessId=$procId" -ErrorAction SilentlyContinue
+                if ($p -and $p.Name -eq 'node.exe' -and $p.CommandLine -match 'server\.js') {
+                    Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+                }
+            }
+            $gone = (Get-Date).AddSeconds(10)
+            while ((Test-Server $port) -and (Get-Date) -lt $gone) { Start-Sleep -Milliseconds 300 }
+        }
         if (-not (Test-Server $port)) {
             # سرّ اتصال القراءة: DPAPI على مستوى الجهاز + ACL يقصر قراءته على المستخدم
             # والمدراء (set-sql-secret.ps1). بلا ملف ⇒ متغير البيئة الحالي.
