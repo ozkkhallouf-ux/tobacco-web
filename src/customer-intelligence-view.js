@@ -35,7 +35,8 @@
     includeSuppliers: false,
     columnsOpen: false,
     // اختيار الزبون من الجدول ينقل الشاشة إلى تفاصيله بعد الرسم.
-    revealDetail: false
+    revealDetail: false,
+    revealSmart: false
   };
 
   const escape = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[char]));
@@ -149,6 +150,7 @@
     { key: "trendPercent", label: "التغير %", title: "آخر 30 يوماً مقارنة بالثلاثين السابقة", type: "number", default: true, cell: (row) => trendCell(row) },
     { key: "currentBalance", label: "الرصيد", title: "الرصيد الحالي بذمة الزبون", type: "number", default: true, currency: (row) => creditCurrencyOf(row), cell: (row) => amountCell(row.balanceDisplay ?? row.currentBalance, creditCurrencyOf(row)) },
     { key: "creditLimitDisplay", label: "الحد المقترح", title: "الحد الائتماني المقترح (محرك v6)", type: "number", default: true, currency: (row) => row.creditCurrency || BASE, cell: (row) => proposedCell(row) },
+    { key: "smartLimit", label: "الحد الذكي", title: "الحد الذكي: من القدرة الفعلية على السداد، يتحدّث يومياً — اضغطه لتفاصيل الاحتساب (بالدولار)", type: "number", default: true, currency: () => BASE, cell: (row) => smartCell(row) },
     { key: "availableCredit", label: "المتاح", title: "المتاح قبل الوصول إلى الحد الفعّال", type: "number", default: true, currency: (row) => creditCurrencyOf(row), cell: (row) => amountCell(row.availableCredit, creditCurrencyOf(row)) },
     { key: "creditUsagePercent", label: "الاستخدام", title: "نسبة الرصيد من الحد الفعّال", type: "number", default: true, cell: (row) => usageCell(row) },
     { key: "overLimitAmount", label: "التجاوز", title: "المبلغ الزائد عن الحد الفعّال", type: "number", default: true, currency: (row) => creditCurrencyOf(row), cell: (row) => overCell(row) },
@@ -286,6 +288,7 @@
     if (key === "trendPercent") return row.purchaseTrend?.percent;
     if (key === "approvedLimit") return approvedLimitOf(row);
     if (key === "currentBalance") return row.balanceDisplay ?? row.currentBalance;
+    if (key === "smartLimit") return smartLimitOf(row);
     return row[key];
   }
 
@@ -452,6 +455,31 @@
     if (isNumber(row.creditLimitDisplay)) return amountCell(row.creditLimitDisplay, row.creditCurrency || BASE);
     const full = PROPOSED_STATUS_TEXT[row.creditStatus] || CREDIT_STATUS_TEXT[row.creditStatus] || "غير متاح";
     return statusCell(SHORT_STATUS_TEXT[row.creditStatus] || full, full, "muted");
+  }
+
+  // الحد الذكي بالدولار: رقم المحرك المقرَّب كما هو (صفر للمتعثّر وغير النشط)، أو null بلا رقم.
+  const smartLimitOf = (row) => (isNumber(row.smartCredit?.limit) ? row.smartCredit.limit : null);
+  const SMART_SHORT_TEXT = {
+    prepaid: "دفع مسبق",
+    insufficient: "غير كافٍ",
+    not_customer: "ليس زبوناً",
+    needs_review: "يحتاج مراجعة",
+    unavailable: "غير متاح"
+  };
+  const SMART_DIRECTION = { up: { mark: "▲", tone: "good", label: "ارتفع" }, down: { mark: "▼", tone: "bad", label: "انخفض" } };
+
+  // الخلية زرّ يفتح التفاصيل على قسم الحد الذكي (لوحة المفاتيح تصله بـTab).
+  function smartCell(row) {
+    const smart = row.smartCredit;
+    const id = escape(row.customerId);
+    if (!smart) return amountCell(null);
+    const limit = smartLimitOf(row);
+    const direction = SMART_DIRECTION[smart.change?.direction];
+    const arrow = direction ? ` <span class="ci-smart-dir ${direction.tone}" aria-label="${direction.label}">${direction.mark}</span>` : "";
+    const title = `الحد الذكي: ${smart.label || ""} — اضغط لتفاصيل الاحتساب`;
+    const content = limit !== null ? `${amountText(limit, BASE)}${arrow}` : escape(SMART_SHORT_TEXT[smart.status] || smart.label || "غير متاح");
+    const tone = limit !== null ? (smart.status === "delinquent" ? "bad" : "") : "muted";
+    return `<td class="ci-num ci-smart ${tone}"><button type="button" class="ci-smart-link" data-ci-smart="${id}" title="${escape(title)}">${content}</button></td>`;
   }
 
   // الاستخدام على الحد الفعّال: المعتمد يدوياً أولاً ثم المقترح الموثوق (قرار المالك 2026-10-25).
@@ -723,6 +751,60 @@
     return `<div class="ci-history"><h4>تاريخ الحد</h4>${lines.join("")}</div>`;
   }
 
+  // الحد الذكي: كل رقم من مخرج المحرك (smartCredit) — عرض فقط، بلا إعادة حساب.
+  const SMART_SMOOTHING_TEXT = {
+    no_history: "أول احتساب: لا لقطة سابقة للحد الذكي بعد.",
+    no_numeric_baseline: "اللقطة السابقة بلا حد ذكي رقمي: الحد المحسوب كما هو.",
+    within_bounds: "التغيير عن آخر لقطة ضمن حدود التنعيم اليومي.",
+    deadband: "التغيّر أقل من 5% عن آخر لقطة، فبقي الحد ثابتاً لمنع التذبذب.",
+    capped_increase: "الارتفاع محصور بـ +10% يومياً.",
+    capped_decrease: "الانخفاض محصور بـ −20% يومياً."
+  };
+  const SMART_EFFECT_TEXT = { up: "يرفع الحد", down: "يخفض الحد", neutral: "محايد" };
+
+  function smartWindowsTable(inputs) {
+    const windows = inputs?.windows;
+    if (!Array.isArray(windows) || !windows.length) return "";
+    const cells = (key) => windows.map((w) => `<td dir="ltr">${w.covered ? money(w[key], BASE) : "غير مغطى"}</td>`).join("");
+    return `<div class="ci-mini-wrap"><table class="ci-mini"><thead><tr><th>من الدفتر</th>${windows.map((w) => `<th>آخر ${w.days} يوماً</th>`).join("")}</tr></thead><tbody>
+        <tr><td>السحب (فواتير البيع)</td>${cells("draw")}</tr>
+        <tr><td>المرتجعات</td>${cells("returns")}</tr>
+        <tr><td>صافي السحب</td>${cells("net")}</tr>
+        <tr><td>الدفعات الحقيقية</td>${cells("payments")}</tr>
+      </tbody></table></div>`;
+  }
+
+  function smartFactorsTable(smart) {
+    if (!smart.factors?.length) return "";
+    const rows = smart.factors.map((factor) => `<tr><td>${escape(factor.label)}</td><td dir="ltr">${share(factor.score)}</td><td class="${factor.effect === "up" ? "good" : factor.effect === "down" ? "bad" : "muted"}">${escape(SMART_EFFECT_TEXT[factor.effect] || "")}</td></tr>`).join("");
+    return `<div class="ci-mini-wrap"><table class="ci-mini"><thead><tr><th>العامل</th><th>الدرجة</th><th>الأثر</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  }
+
+  function smartFormula(smart) {
+    const c = smart.components;
+    if (!c) return "";
+    return `<p class="ci-formula">الحد الذكي = القدرة الشهرية على السداد <bdi dir="ltr">${money(c.capacityMonthly, BASE)}</bdi> ÷ 30 × الأفق <bdi dir="ltr">${num(c.horizonDays, 1)}</bdi> يوماً × مضاعف السلوك <bdi dir="ltr">${num(c.multiplier, 3)}</bdi> × عامل المرتجعات <bdi dir="ltr">${num(c.returnsFactor, 2)}</bdi> × عامل التأخر <bdi dir="ltr">${num(c.overdueFactor, 2)}</bdi> = <bdi dir="ltr">${money(c.formula, BASE)}</bdi>، بسقف دفعاته الفعلية <bdi dir="ltr">${money(c.paymentCap, BASE)}</bdi> ⇒ <strong dir="ltr">${money(smart.limitRaw, BASE)}</strong> قبل التنعيم والتقريب.</p>
+        <p class="muted">القدرة الشهرية = الأقل بين متوسط الدفعات الشهري (<bdi dir="ltr">${money(c.paymentMonthly, BASE)}</bdi>) و1.25× متوسط صافي السحب الشهري (<bdi dir="ltr">${money(c.netDrawMonthly, BASE)}</bdi>)، مرجّحة على 30 و60 و90 يوماً. الأفق = الأسرع بين دورة السداد (${num(c.cycleDays, 1)} يوماً) ودوران الذمم (${num(c.dsoDays, 1)} يوماً)، محصوراً بحدود المحفظة${isNumber(c.horizonMeasuredDays) && c.horizonMeasuredDays > c.horizonDays + 0.05 ? `؛ وما زاد على وسيط المحفظة (${num(c.portfolioMedianDays, 1)} يوماً) يُكتسب بالسداد الكامل في موعده (${share(c.horizonEarnedShare)})، فصار ${num(c.horizonDays, 1)} بدل ${num(c.horizonMeasuredDays, 1)}` : ""}.</p>`;
+  }
+
+  function smartSection(row) {
+    const smart = row.smartCredit;
+    if (!smart) return "";
+    const limit = smartLimitOf(row);
+    const headline = limit !== null ? `<strong dir="ltr">${money(limit, BASE)}</strong> (${escape(smart.label)})` : `<strong>${escape(smart.label || "غير متاح")}</strong> — لا رقم بلا بيانات كافية`;
+    const lines = [`<p>الحد الذكي: ${headline}</p>`];
+    if (smart.change) lines.push(`<p class="ci-change ${smart.change.direction === "down" ? "bad" : smart.change.direction === "up" ? "good" : ""}">${escape(smart.change.text)}${smart.change.previousDate ? ` <span class="muted">(مقارنة بلقطة ${escape(smart.change.previousDate)})</span>` : ""}</p>`);
+    const updated = [`آخر تحديث: ${day(smart.updatedAt)}`];
+    if (smart.computedAt) updated.push(`احتُسب ${escape(String(smart.computedAt).slice(0, 16).replace("T", " "))} UTC`);
+    if (smart.dataAsOf) updated.push(`بيانات الدفتر حتى ${escape(String(smart.dataAsOf).slice(0, 16).replace("T", " "))} UTC`);
+    lines.push(`<p class="muted">${updated.join(" · ")} — يُعاد الاحتساب تلقائياً مع كل تحديث للبيانات.</p>`);
+    lines.push(smartWindowsTable(smart.inputs), smartFormula(smart), smartFactorsTable(smart));
+    if (smart.smoothing && SMART_SMOOTHING_TEXT[smart.smoothing.reason]) lines.push(`<p class="muted">التنعيم اليومي: ${escape(SMART_SMOOTHING_TEXT[smart.smoothing.reason])}</p>`);
+    if ((smart.notes || []).length) lines.push(`<ul class="ci-why">${smart.notes.map((note) => `<li>${escape(note)}</li>`).join("")}</ul>`);
+    lines.push(`<p class="muted ci-note">الحد الذكي للاسترشاد فقط: لا يغيّر الحد المقترح ولا الحد المعتمد، ولا يدخل الاستخدام أو المتاح أو التجاوز، ولا يُكتب إلى الأمين.</p>`);
+    return `<div class="ci-smart-detail" id="ci-smart-detail"><h4>الحد الذكي — كيف احتُسب؟</h4>${lines.join("")}</div>`;
+  }
+
   const LIMIT_STATUS_TEXT = { normal: "ضمن الحد", near_limit: "قريب من الحد", over_limit: "متجاوز للحد" };
 
   function creditFacts(row) {
@@ -730,6 +812,7 @@
     return [
       ["الرصيد الحالي", money(row.balanceDisplay ?? row.currentBalance, amountCurrency)],
       ["الحد المقترح", creditLimitText(row)],
+      ["الحد الذكي", isNumber(smartLimitOf(row)) ? money(smartLimitOf(row), BASE) : escape(row.smartCredit?.label || "—")],
       ["حالة الحد", escape(LIMIT_STATUS_TEXT[row.creditStatus] || CREDIT_STATUS_TEXT[row.creditStatus] || "—")],
       ["أساس الاستخدام والتجاوز", LIMIT_BASIS_TEXT[row.limitBasis] || "لا حد يُقاس عليه"],
       ["الحد الفعّال", row.effectiveLimit === 0 ? "صفر (بلا آجل)" : money(row.effectiveLimit, amountCurrency)],
@@ -789,6 +872,7 @@
         <ul class="ci-why">${row.explanation.map((line) => `<li>${escape(line)}</li>`).join("")}</ul>
         ${approvedSection(row)}
         ${proposalSection(row)}
+        ${smartSection(row)}
         ${historySection(row)}
         ${factGroups.map(([title, facts]) => `<h4>${escape(title)}</h4>${factList(facts)}`).join("")}
         <h4>أهم الأصناف (${escape(intel.window.previousStartDate)} → ${escape(intel.window.referenceDate)})</h4>
@@ -917,6 +1001,14 @@
       render();
     }));
 
+    // خلية الحد الذكي: تفتح التفاصيل على قسم احتسابه.
+    app.querySelectorAll("[data-ci-smart]").forEach((button) => button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      view.selectedId = button.dataset.ciSmart;
+      view.revealSmart = true;
+      render();
+    }));
+
     const picker = app.querySelector("[data-ci-columns]");
     if (picker) picker.addEventListener("toggle", () => { view.columnsOpen = picker.open; });
     app.querySelectorAll("[data-ci-column]").forEach((box) => box.addEventListener("change", () => {
@@ -930,7 +1022,10 @@
       render();
     });
 
-    if (view.revealDetail) {
+    if (view.revealSmart) {
+      view.revealSmart = false;
+      (app.querySelector("#ci-smart-detail") || app.querySelector(".ci-detail"))?.scrollIntoView({ block: "start", behavior: "smooth" });
+    } else if (view.revealDetail) {
       view.revealDetail = false;
       app.querySelector(".ci-detail")?.scrollIntoView({ block: "start", behavior: "smooth" });
     }

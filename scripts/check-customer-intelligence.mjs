@@ -2777,6 +2777,121 @@ if (!process.env.OZK_CI_TZ_CHILD) {
   assert.equal(at89(legacy92, 152).isSupplier, true);
   assert.equal(at89(legacy92, 153).isSupplier, true, "test 92: بلا v1 العلامة القديمة وحدها");
 
+  // 121–126) الحد الذكي (طلب المالك 2026-11-24): حد ثانٍ مستقل من القدرة الفعلية على السداد،
+  //          بجانب المقترح ولا يمسّه. كل الأرقام تركيبية.
+  const smartSale = (m) => tag(m, m.debit > 0 ? "sale" : "payment");
+  const smartList = [
+    { id: 201, name: "ذكي ملتزم", accountClass: "customer", movements: regular({ from: 89, every: 5, amount: 1000, lag: 5 }).map(smartSale) },
+    // يسحب مثل الملتزم ويدفع 60% فقط: القدرة على السداد أقل.
+    { id: 202, name: "ذكي يدفع جزئياً", accountClass: "customer", movements: regular({ from: 89, every: 5, amount: 1000, lag: 5 }).map((m) => (m.credit > 0 ? { ...m, credit: m.credit * 0.6 } : m)).map(smartSale) },
+    { id: 203, name: "ذكي بيانات قليلة", accountClass: "customer", movements: [debit(20, 300), pay(15, 300)].map(smartSale) },
+    { id: 204, name: "ذكي غير نشط", accountClass: "customer", movements: [debit(85, 500), pay(80, 500)].map(smartSale) },
+    { id: 205, name: "ذكي متعثّر", accountClass: "customer", movements: [...regular({ from: 89, to: 60, every: 5, amount: 800, lag: null }), debit(10, 200)].map(smartSale) },
+    // مرتجعات 30% من السحب.
+    { id: 206, name: "ذكي مرتجعات", accountClass: "customer", movements: regular({ from: 89, every: 5, amount: 1000, lag: 5 })
+      .flatMap((m) => (m.credit > 0 ? [smartSale({ ...m, credit: 700 }), tag({ ...m, credit: 300, billGuid: "ret" }, "return")] : [smartSale(m)])) }
+  ];
+  const sumIn = (rows, days, kinds, side) => rows.filter((m) => kinds.includes(m.lineKind) && (Date.UTC(2026, 8, 2) - Date.parse(`${m.date}T00:00:00Z`)) / 86400000 < days)
+    .reduce((sum, m) => sum + m[side], 0);
+  const rs = build89(smartList);
+  const good = at89(rs, 201).smartCredit;
+  const partial = at89(rs, 202).smartCredit;
+
+  // 121) الحساب: رقم بالدولار من القدرة والأفق والسلوك، والصيغة تطابق الرقم حرفياً، وبلا تكرار للدفعات.
+  assert.equal(good.status, "normal", "test 121: الملتزم يُحسب له حد ذكي");
+  assert.equal(good.currency, "USD");
+  const c121 = good.components;
+  assert.ok(Math.abs(c121.capacityMonthly / 30 * c121.horizonDays - c121.core) < 0.01, "test 121: الأساس = القدرة ÷ 30 × الأفق");
+  assert.ok(Math.abs(Math.min(c121.formula, c121.paymentCap) - good.limitRaw) < 0.01, "test 121: الصيغة تطابق الحد قبل التقريب");
+  assert.ok(Math.abs(c121.core * c121.multiplier * c121.returnsFactor * c121.overdueFactor - c121.formula) <= 0.001 * c121.formula + 0.01, "test 121: الصيغة = الأساس × المضاعف × المرتجعات × التأخر");
+  assert.equal(good.limit, engine.commercialRound(good.limitBase, "USD"), "test 121: تقريب تجاري للأسفل بالدولار");
+  assert.ok(c121.multiplier >= 0.5 && c121.multiplier <= 1.2, "test 121: المضاعف محصور");
+  assert.ok(c121.horizonDays <= rs.dataAvailability.creditCycle.capDays && c121.horizonDays >= rs.dataAvailability.creditCycle.floorDays, "test 121: الأفق بحدود المحفظة");
+  const rows121 = smartList[0].movements;
+  [30, 60, 90].forEach((days, index) => {
+    const w = good.inputs.windows[index];
+    assert.equal(w.days, days);
+    assert.equal(w.payments, sumIn(rows121, days, ["payment"], "credit"), `test 121: دفعات ${days} يوماً = مجموع الدفتر مرة واحدة`);
+    assert.equal(w.draw, sumIn(rows121, days, ["sale"], "debit"), `test 121: سحب ${days} يوماً = مجموع فواتير البيع مرة واحدة`);
+  });
+  assert.ok(good.updatedAt === rs.window.referenceDate && good.computedAt === rs.generatedAt, "test 121: تاريخ آخر تحديث = يوم المرجع ووقت الحساب");
+  assert.equal(good.factors.length, 6, "test 121: ستة عوامل مفسَّرة");
+  assert.ok(good.factors.every((f) => f.score >= 0 && f.score <= 1 && ["up", "down", "neutral"].includes(f.effect)));
+
+  // 122) القدرة لا الشراء: نفس السحب ودفعات أقل ⇒ حد ذكي أقل، والمرتجعات تخفّض.
+  assert.equal(partial.status, "normal");
+  assert.ok(partial.components.capacityMonthly < c121.capacityMonthly, "test 122: الدفعات الأقل تُنقص القدرة");
+  assert.ok(partial.limitRaw < good.limitRaw, "test 122: حد ذكي أقل لمن يدفع أقل بنفس المشتريات");
+  assert.ok(partial.scores.coverage < good.scores.coverage, "test 122: التغطية أدنى");
+  // البطء لا يكافأ: دين متراكم يطيل الدورة ودوران الذمم، لكن الأفق فوق وسيط المحفظة يُكتسب بالسداد.
+  assert.ok(partial.components.horizonMeasuredDays > good.components.horizonDays, "test 122: التركيبة تطيل الدورة المقيسة");
+  assert.ok(partial.components.horizonDays <= Math.max(good.components.horizonDays, partial.components.portfolioMedianDays) + 1e-9, "test 122: الأفق المكتسب لا يتجاوز الوسيط بلا سداد كامل");
+  const returns122 = at89(rs, 206).smartCredit;
+  assert.ok(returns122.components.returnsShare > 0.1 && returns122.components.returnsFactor < 1, "test 122: مرتجعات فوق 10% تخصم");
+
+  // 123) لا اختلاق: بيانات قليلة ⇒ بلا رقم؛ غير نشط ومتعثّر ⇒ صفر بالحالة نفسها للحد المقترح.
+  const few = at89(rs, 203).smartCredit;
+  assert.equal(few.status, "insufficient", "test 123: بيانات قليلة");
+  assert.equal(few.limit, null, "test 123: لا رقم ملفّق");
+  assert.ok(few.notes[0].includes("بيانات غير كافية"));
+  const idle123 = at89(rs, 204);
+  assert.equal(idle123.autoCredit.status, "inactive");
+  assert.equal(idle123.smartCredit.status, "inactive");
+  assert.equal(idle123.smartCredit.limit, 0, "test 123: غير النشط صفر");
+  const late123 = at89(rs, 205);
+  assert.equal(late123.autoCredit.status, "delinquent", "test 123: التركيبة متعثّرة في v6");
+  assert.equal(late123.smartCredit.status, "delinquent");
+  assert.equal(late123.smartCredit.limit, 0, "test 123: المتعثّر صفر فوراً");
+
+  // 124) لا يمسّ القائم: الحد المقترح والاستخدام والمتاح والتجاوز والمعتمد متطابقة مع تاريخ حد ذكي وبدونه.
+  const strip = (row) => JSON.stringify({ ...row, smartCredit: undefined, creditHistory: undefined });
+  const smartHist = (id, limitBase, extra = {}) => ({ customer_guid: gid(id), snapshot_date: d(1), auto_status: "normal", credit_status: "normal",
+    limit_base: null, credit_limit_display: null, credit_currency: "USD", risk_score: 0,
+    factors: { smart: { status: "normal", limit: engine.commercialRound(limitBase, "USD"), limitBase, scores: { ...good.scores, regularity: 0.1 }, capacityMonthly: c121.capacityMonthly, ...extra } } });
+  const withLimits = (h) => build89(smartList, { creditHistory: h, creditLimits: [{ customerGuid: gid(201), customerKey: "k201", customerName: "ذكي ملتزم", creditLimit: 777, updatedAt: "2026-09-01T10:00:00Z" }] });
+  // اللقطة نفسها بلا factors.smart: أثر تاريخ v6 واحد في الحالتين، فالفرق الوحيد الحد الذكي.
+  const plain124 = withLimits([{ ...smartHist(201, 1), factors: {} }]);
+  assert.ok(good.limitRaw > 920 * 1.1, "test 125: التركيبة فوق عتبة التقريب");
+  const hist124 = withLimits([smartHist(201, 920)]);
+  for (const id of [201, 202, 203, 204, 205, 206]) {
+    const a = at89(plain124, id); const b = at89(hist124, id);
+    assert.equal(strip(a), strip(b), `test 124: لا أثر للحد الذكي على بقية حقول السجل (${id})`);
+  }
+  const approved124 = at89(plain124, 201);
+  assert.equal(approved124.limitBasis, "approved", "test 124: الحد المعتمد يبقى أساس الاستخدام");
+  assert.equal(approved124.effectiveLimit, 777, "test 124: الحد المعتمد لم يتغيّر");
+  assert.notEqual(approved124.smartCredit.limit, 777);
+
+  // 125) التنعيم اليومي: +10%/−20% من آخر لقطة، ومنطقة ميتة 5%، وتفسير الزيادة أو التخفيض.
+  const up125 = at89(hist124, 201).smartCredit;
+  assert.equal(up125.smoothing.reason, "capped_increase", "test 125: قفزة صعود محصورة");
+  assert.ok(Math.abs(up125.limitBase - 920 * 1.1) < 1e-6, "test 125: +10% باليوم");
+  assert.equal(up125.limit, 1000, "test 125: 1,012 تُقرَّب تجارياً إلى 1,000");
+  assert.equal(up125.change.direction, "up");
+  assert.match(up125.change.text, /ارتفع الحد الذكي من .* إلى .* لأن تحسّن انتظام الدفعات/, "test 125: سبب الزيادة بالعامل وقيمتيه");
+  const down125 = at89(build89(smartList, { creditHistory: [smartHist(201, good.limitRaw * 3, { scores: { ...good.scores, coverage: 1, punctuality: 1 } })] }), 201).smartCredit;
+  assert.equal(down125.smoothing.reason, "capped_decrease");
+  assert.ok(Math.abs(down125.limitBase - good.limitRaw * 3 * 0.8) < 1e-6, "test 125: −20% باليوم");
+  assert.equal(down125.change.direction, "down");
+  const flat125 = at89(build89(smartList, { creditHistory: [smartHist(201, good.limitRaw * 1.03)] }), 201).smartCredit;
+  assert.equal(flat125.smoothing.reason, "deadband", "test 125: تغيّر < 5% لا يحرّك الحد");
+  assert.ok(Math.abs(flat125.limitBase - good.limitRaw * 1.03) < 1e-6);
+  const late125 = at89(build89(smartList, { creditHistory: [smartHist(205, 5000)] }), 205).smartCredit;
+  assert.equal(late125.limit, 0, "test 125: التعثّر يصفّر فوراً بلا تنعيم");
+  assert.equal(late125.change.direction, "down");
+
+  // 126) الحفظ اليومي: صف اللقطة يحمل factors.smart (بلا عمود جديد)، والحساب حتمي.
+  const snaps126 = engine.buildCreditSnapshots(rs);
+  const snap126 = snaps126.rows.find((row) => row.customer_guid === gid(201));
+  assert.ok(snap126 && snap126.factors.smart, "test 126: اللقطة تحفظ الحد الذكي");
+  assert.equal(snap126.factors.smart.limit, good.limit);
+  assert.equal(snap126.factors.smart.status, "normal");
+  assert.ok(!("smart_limit" in snap126), "test 126: لا عمود جديد في الجدول");
+  assert.equal(JSON.stringify(build89(smartList).customers.map((c) => c.smartCredit)), JSON.stringify(build89(smartList).customers.map((c) => c.smartCredit).map((x) => x)), "test 126: حتمي");
+  const stale126 = engine.build({ ...reports, now: new Date(NOW.getTime() + 3 * 3600000) });
+  assert.ok(stale126.customers.filter((c) => c.smartCredit).every((c) => c.smartCredit.limit === null || c.smartCredit.limit === undefined), "test 126: مصادر غير حديثة ⇒ لا رقم ذكي");
+  assert.ok(stale126.customers.some((c) => c.smartCredit?.status === "unavailable"));
+
   // 66) عدّادات الملخص؛ وتنبيه الحد يبقى مسودة داخلية: لا مسار تيليغرام في هذه المرحلة.
   assert.ok(rc.summary.delinquentCreditCount >= 2 && rc.summary.inactiveCreditCount >= 2 && rc.summary.lowDataCreditCount >= 1);
   assert.equal(rc.summary.nonCustomerCreditCount, 0, "test 66: لا «ليس زبوناً» بالسلوك");
@@ -3707,4 +3822,4 @@ const keyRow = (n) => keyResult.customers.find((row) => row.customerGuid === kGu
   assert.match(fn, /sameToken\(req\.headers\.get\("x-ozk-inactivity-alert-token"\)/, "test 118: الرمز شرط في التنبيه");
 }
 
-console.log(`ذكاء الزبائن: 120 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);
+console.log(`ذكاء الزبائن: 126 عقداً محسوماً — ${result.customers.length} سجل زبون، ${result.summary.vipCount} VIP، ${result.summary.decliningCount} متراجع، ${result.summary.inactiveCount} متوقف.`);

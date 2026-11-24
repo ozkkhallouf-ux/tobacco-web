@@ -45,6 +45,19 @@ await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 const ORIGIN = `http://127.0.0.1:${server.address().port}`;
 const browser = await chromium.launch();
 
+// حد ذكي اصطناعي بالشكل الذي يُخرجه المحرك (smartCredit) — أرقام وهمية لا بيانات إنتاج.
+const smartFixture = (extra = {}) => ({
+  status: "normal", label: "محسوب", limit: 1000, limitBase: 1000, limitRaw: 1040, currency: "USD",
+  notes: ["سقف القدرة مثال."], updatedAt: "2026-10-24", computedAt: "2026-10-24T09:00:00.000Z", dataAsOf: "2026-10-24T08:55:00.000Z",
+  inputs: { windows: [30, 60, 90].map((days) => ({ days, covered: true, draw: days * 40, returns: days, net: days * 39, payments: days * 38 })) },
+  components: { capacityMonthly: 1140, paymentMonthly: 1140, netDrawMonthly: 1170, horizonDays: 21, cycleDays: 21, dsoDays: 24, multiplier: 1.05, returnsFactor: 1, overdueFactor: 1, formula: 838, paymentCap: 3420 },
+  factors: [["regularity", "انتظام الدفعات", 0.8, "up"], ["punctuality", "الالتزام بمواعيد السداد", 0.3, "down"], ["coverage", "تغطية الدفعات للسحب", 0.5, "neutral"]]
+    .map(([key, label, score, effect]) => ({ key, label, score, effect })),
+  smoothing: { applied: false, reason: "within_bounds" },
+  change: null,
+  ...extra
+});
+
 // صف اصطناعي بكل ما تقرؤه الواجهة؛ الحالات الحدية تتجاوز ما يلزم فقط.
 const baseRow = (id, name, extra = {}) => ({
   customerId: id, customerName: name, customerKey: name.toLowerCase(), customerGuid: `guid-${id}`,
@@ -58,6 +71,7 @@ const baseRow = (id, name, extra = {}) => ({
   availableCredit: 1500, creditUsagePercent: 25, overLimitAmount: 0, creditStatus: "normal",
   limitBasis: "auto", effectiveLimit: 2000, approvedCredit: null, ameenCreditLimit: null,
   creditHistory: null, autoCredit: null, explanation: ["سطر تفسير"], topItems: [], topItemsIdentity: "item_guid",
+  smartCredit: null,
   ...extra
 });
 
@@ -65,7 +79,8 @@ const ROWS = [
   baseRow("a", "زبون معتمد قريب", {
     netSales30d: 5000, purchaseTrend: { percent: 12.5, state: "ok" }, currentBalance: 900, balanceDisplay: 900,
     limitBasis: "approved", effectiveLimit: 1000, availableCredit: 100, creditUsagePercent: 90, creditStatus: "near_limit", flags: ["near_credit_limit"],
-    approvedCredit: { limit: 1000, usagePercent: 90, availableCredit: 100, overLimitAmount: 0, proposedMinusApproved: 1000 }
+    approvedCredit: { limit: 1000, usagePercent: 90, availableCredit: 100, overLimitAmount: 0, proposedMinusApproved: 1000 },
+    smartCredit: smartFixture({ limit: 1500, change: { direction: "up", previousDate: "2026-10-23", previousLimit: 1250, text: "ارتفع الحد الذكي من 1,250$ إلى 1,500$ لأن تحسّن انتظام الدفعات (60% ← 80%)." } })
   }),
   baseRow("b", "زبون حد معتمد صفر", {
     netSales30d: 300, purchaseTrend: { percent: -40, state: "ok" }, currentBalance: 500, balanceDisplay: 500,
@@ -75,7 +90,8 @@ const ROWS = [
   baseRow("c", "زبون بيانات غير كافية", {
     netSales30d: 200, purchaseTrend: { percent: null, state: "new_activity" }, creditLimit: null, creditLimitDisplay: null,
     availableCredit: null, creditUsagePercent: null, overLimitAmount: null, creditStatus: "insufficient_data",
-    limitBasis: null, effectiveLimit: null, flags: ["credit_insufficient_data"]
+    limitBasis: null, effectiveLimit: null, flags: ["credit_insufficient_data"],
+    smartCredit: { status: "insufficient", label: "بيانات غير كافية", limit: null, limitBase: null, notes: ["بيانات غير كافية لحد ذكي موثوق: 1 فاتورة بيع فقط (المطلوب ≥ 4)."], factors: [], updatedAt: "2026-10-24", change: null }
   }),
   baseRow("d", "زبون رصيد دائن", {
     netSales30d: 150, purchaseTrend: { percent: 0, state: "ok" }, currentBalance: -250, balanceDisplay: -250,
@@ -89,7 +105,8 @@ const ROWS = [
   baseRow("f", "زبون أرقام كبيرة باسم طويل جداً لمركز تجاري في منطقة بعيدة", {
     netSales30d: 1234567, purchaseTrend: { percent: 250.4, state: "ok" }, currentBalance: 987654, balanceDisplay: 987654,
     creditLimit: 900000, creditLimitDisplay: 900000, effectiveLimit: 900000, availableCredit: 0, creditUsagePercent: 109.74,
-    overLimitAmount: 87654, creditStatus: "over_limit", flags: ["over_credit_limit"]
+    overLimitAmount: 87654, creditStatus: "over_limit", flags: ["over_credit_limit"],
+    smartCredit: smartFixture({ limit: 750000 })
   }),
   baseRow("g", "مورد مخفي", { isSupplier: true, flags: ["supplier_account"] })
 ];
@@ -104,7 +121,7 @@ const INTEL = {
   staleData: false
 };
 
-const DEFAULT_HEADERS = ["الزبون", "مبيعات 30 يوماً", "التغير %", "الرصيد", "الحد المقترح", "المتاح", "الاستخدام", "التجاوز"];
+const DEFAULT_HEADERS = ["الزبون", "مبيعات 30 يوماً", "التغير %", "الرصيد", "الحد المقترح", "الحد الذكي", "المتاح", "الاستخدام", "التجاوز"];
 
 async function open({ width = 1280, height = 800, owner = true, userId = "owner-1", storage = "ok", page: existing } = {}) {
   const page = existing || await browser.newPage({ viewport: { width, height } });
@@ -150,7 +167,7 @@ const rowCells = (page, name) => page.$$eval("tr.ci-row", (rows, wanted) => {
   return row ? Object.fromEntries([...row.children].map((cell, index) => [head[index], { text: cell.textContent.replace(/\s+/g, " ").trim(), cls: cell.className }])) : null;
 }, name);
 
-await test("العرض الافتراضي: ثمانية أعمدة بالترتيب المطلوب، بلا الحالة والتصنيف، والمورد مخفي", async () => {
+await test("العرض الافتراضي: تسعة أعمدة بالترتيب المطلوب (الحد الذكي بجانب المقترح)، بلا الحالة والتصنيف، والمورد مخفي", async () => {
   const { page, errors } = await open();
   assert.deepEqual(await headers(page), DEFAULT_HEADERS);
   const names = await rowNames(page);
@@ -315,7 +332,46 @@ await test("تخزين محجوب (تصفّح خاص): العرض الافترا
   await page.close();
 });
 
-await test("MacBook (1280px): الأعمدة الثمانية بلا تمرير أفقي ولا فيض للصفحة، والاسم الطويل يلتف كاملاً", async () => {
+await test("الحد الذكي: رقم بالدولار بجانب المقترح، حالة بلا رقم، فرز صعوداً ونزولاً، وتفاصيل الاحتساب بالضغط", async () => {
+  const { page, errors } = await open();
+  const head = await headers(page);
+  assert.equal(head.indexOf("الحد الذكي"), head.indexOf("الحد المقترح") + 1, "العمود ليس بجانب الحد المقترح");
+  const a = await rowCells(page, "زبون معتمد قريب");
+  assert.match(a["الحد الذكي"].text, /^1,500 ▲$/);
+  assert.equal(a["الحد المقترح"].text, "2,000", "الحد المقترح تغيّر");
+  assert.equal(a["الاستخدام"].text.replace(/\s+/g, ""), "90%معتمد", "الاستخدام تغيّر");
+  const c = await rowCells(page, "زبون بيانات غير كافية");
+  assert.equal(c["الحد الذكي"].text, "غير كافٍ");
+  const e = await rowCells(page, "زبون بالليرة");
+  assert.equal(e["الحد الذكي"].text, "—");
+
+  await page.click('[data-ci-sort="smartLimit"]');
+  let names = await rowNames(page);
+  assert.deepEqual(names.slice(0, 2), ["زبون أرقام كبيرة باسم طويل جداً لمركز تجاري في منطقة بعيدة", "زبون معتمد قريب"], "الفرز التنازلي");
+  await page.click('[data-ci-sort="smartLimit"]');
+  names = await rowNames(page);
+  assert.deepEqual(names.slice(0, 2), ["زبون معتمد قريب", "زبون أرقام كبيرة باسم طويل جداً لمركز تجاري في منطقة بعيدة"], "الفرز التصاعدي");
+  assert.ok(names.indexOf("زبون بيانات غير كافية") > 1, "صف بلا رقم تصدّر الفرز");
+
+  await page.click('[data-ci-smart="a"]');
+  const detail = await page.$eval("#ci-smart-detail", (section) => section.textContent.replace(/\s+/g, " "));
+  for (const part of ["الحد الذكي — كيف احتُسب؟", "1,500 USD", "ارتفع الحد الذكي من 1,250$ إلى 1,500$", "آخر تحديث: 2026-10-24", "الدفعات الحقيقية", "القدرة الشهرية على السداد", "انتظام الدفعات", "يرفع الحد", "يخفض الحد", "لا يغيّر الحد المقترح ولا الحد المعتمد"]) {
+    assert.ok(detail.includes(part), `تفاصيل الحد الذكي تنقصها «${part}»`);
+  }
+  await page.click('[data-ci-smart="c"]');
+  const insufficient = await page.$eval("#ci-smart-detail", (section) => section.textContent.replace(/\s+/g, " "));
+  assert.match(insufficient, /بيانات غير كافية — لا رقم بلا بيانات كافية/);
+
+  await page.click("[data-ci-columns] summary");
+  await page.uncheck('[data-ci-column="smartLimit"]');
+  assert.ok(!(await headers(page)).includes("الحد الذكي"), "العمود لا يُخفى من التخصيص");
+  await page.check('[data-ci-column="smartLimit"]');
+  assert.ok((await headers(page)).includes("الحد الذكي"));
+  assert.deepEqual(errors, []);
+  await page.close();
+});
+
+await test("MacBook (1280px): الأعمدة التسعة بلا تمرير أفقي ولا فيض للصفحة، والاسم الطويل يلتف كاملاً", async () => {
   const { page } = await open({ width: 1280, height: 800 });
   const layout = await page.evaluate(() => {
     const wrap = document.querySelector(".ci-table-wrap");
